@@ -1,0 +1,104 @@
+# axum-backend 配置文件模板
+#
+# 使用方法：
+# 1. 复制本文件为 config.toml：cp config/config.toml.example config/config.toml
+# 2. 修改下方占位符为真实值
+# 3. 生产环境建议通过环境变量注入敏感字段（环境变量优先级高于配置文件）：
+#    - DATABASE_URL：数据库连接串
+#    - REDIS_URL：Redis 连接串
+#    - JWT_SECRET：JWT 签名密钥（至少 32 字符）
+#    - JWT_EXPIRE_HOURS：JWT 过期小时数
+#    - SERVER_HOST：监听地址
+#    - SERVER_PORT：监听端口
+#
+# 注意：config.toml 已被 .gitignore 排除，不会进入版本控制。
+
+[server]
+host = "0.0.0.0"
+port = 8080
+# CORS 允许的 Origin 白名单（生产环境必须显式配置，不要使用 *）
+cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:80",
+]
+# 可信代理 IP 白名单（CIDR 或精确 IP）
+# 仅当直连客户端 IP 在此列表内时，才信任 X-Forwarded-For / X-Real-IP
+# 空列表表示不信任任何代理头，直接使用 TCP 对端 IP
+# 生产环境配置为反向代理的真实 IP，如 ["127.0.0.1", "10.0.0.0/8"]
+trusted_proxies = []
+# 是否启用 API 文档（Swagger UI / OpenAPI JSON）
+# 默认 false（生产 fail-closed），开发环境显式设为 true
+docs_enabled = true
+
+[database]
+# 生产环境通过环境变量 DATABASE_URL 注入，不要将真实密码写入配置文件
+# 支持以下三种数据库：
+#   MySQL:      mysql://user:password@host:3306/database
+#   PostgreSQL: postgres://user:password@host:5432/database
+#   SQLite:     sqlite://./data/yebot.db?mode=rwc
+url = "mysql://CHANGE_ME:CHANGE_ME@127.0.0.1:3306/yebot"
+max_connections = 10
+min_connections = 1
+connect_timeout = 10
+idle_timeout = 600
+
+[redis]
+# 生产环境通过环境变量 REDIS_URL 注入
+# 注意：当前使用 ConnectionManager（单连接多路复用），无需配置连接池大小
+url = "redis://CHANGE_ME@127.0.0.1:6379/0"
+
+[jwt]
+# 生产环境通过环境变量 JWT_SECRET 注入（至少 32 字符）
+# 启动时会校验：拒绝 CHANGE_ME 占位符和 < 32 字符的密钥
+secret = "CHANGE_ME_TO_A_STRONG_SECRET_KEY_AT_LEAST_32_CHARS"
+expire_hours = 24
+issuer = "yebot"
+
+[log]
+level = "info"
+# SQL 日志（生产环境建议关闭，避免泄露敏感信息）
+sql_logging = false
+
+[upload]
+# 头像存储目录（相对路径）
+avatar_dir = "uploads/avatar"
+# 头像访问 URL 前缀
+avatar_url_prefix = "/uploads/avatar"
+# 允许的头像扩展名白名单（小写，不含点）
+avatar_allowed_exts = ["jpg", "jpeg", "png", "gif"]
+# 头像最大字节数（默认 5MB）
+avatar_max_size = 5242880
+# 通用上传文件存储目录（相对路径）
+common_dir = "uploads/file"
+# 通用上传文件访问 URL 前缀
+common_url_prefix = "/uploads/file"
+# 通用上传允许的扩展名白名单（小写，不含点）
+common_allowed_exts = ["jpg", "jpeg", "png", "gif", "pdf", "doc", "docx", "xls", "xlsx", "txt", "zip"]
+# 通用上传最大字节数（默认 10MB）
+common_max_size = 10485760
+
+[ip_location]
+# MaxMindDB 离线数据库文件路径（相对路径）
+# 文件不存在时所有查询返回空字符串，不影响业务流程
+# 下载地址：https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+mmdb_path = "data/GeoLite2-City.mmdb"
+
+[mail]
+# 邮件 SMTP 配置（可选，未配置时邮件相关功能降级为仅 sys_notice 入库）
+# 启用前请配置真实 SMTP 服务器信息
+enabled = false
+# SMTP 服务器主机（如 smtp.qq.com、smtp.gmail.com、smtp.163.com）
+host = ""
+# SMTP 服务器端口（SSL 直连 465，STARTTLS 587）
+port = 465
+# SMTP 登录用户名（通常为发件邮箱地址）
+username = ""
+# SMTP 登录密码或授权码
+# 生产环境建议通过环境变量 MAIL_PASSWORD 注入，不要写入配置文件
+password = ""
+# 发件人邮箱地址（通常与 username 相同）
+from_email = ""
+# 发件人显示名称
+from_name = "yebot 系统"
+# 是否使用 STARTTLS（端口 587 时通常为 true，端口 465 SSL 直连时为 false）
+starttls = false

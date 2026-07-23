@@ -1,0 +1,264 @@
+// axum-backend/src/repository/sys_notice_read.rs
+//! sys_notice_read 数据访问层（通知公告已读记录表）
+//!
+//! 提供已读记录的插入、查询、未读数统计等功能。
+
+use chrono::NaiveDateTime;
+use sea_orm::*;
+use serde::Serialize;
+
+use crate::entity::sys_notice_read::{Column, Entity as SysNoticeRead, Model};
+use crate::repository::base::BaseRepository;
+
+/// 通知公告已读记录 Repository
+#[derive(Clone)]
+pub struct SysNoticeReadRepository {
+    base: BaseRepository<SysNoticeRead>,
+}
+
+/// 已读用户视图对象（联表查询结果）
+#[derive(Debug, Clone, FromQueryResult, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeReadUserVo {
+    pub read_id: i64,
+    pub notice_id: i64,
+    pub user_id: i64,
+    pub read_time: Option<NaiveDateTime>,
+    pub user_name: Option<String>,
+    pub nick_name: Option<String>,
+    pub dept_name: Option<String>,
+    pub phonenumber: Option<String>,
+}
+
+impl SysNoticeReadRepository {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self {
+            base: BaseRepository::new(db),
+        }
+    }
+
+    pub fn base(&self) -> &BaseRepository<SysNoticeRead> {
+        &self.base
+    }
+
+    /// 标记公告已读（原子化插入，已读则不重复插入）
+    ///
+    /// 使用数据库原生的冲突忽略语义（INSERT OR IGNORE / ON CONFLICT DO NOTHING），
+    /// 避免"先 SELECT 后 INSERT"的 TOCTOU 竞态。依赖 sys_notice_read 表的唯一约束 (notice_id, user_id)。
+    pub async fn mark_read(
+        &self,
+        notice_id: i64,
+        user_id: i64,
+    ) -> Result<(), DbErr> {
+        let now = chrono::Local::now().naive_local();
+        let db = self.base.db();
+        let backend = db.get_database_backend();
+
+        // 各数据库后端的冲突忽略语法不同，按 backend 选择原生 SQL
+        let sql = match backend {
+            DatabaseBackend::Sqlite => {
+                "INSERT OR IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES (?, ?, ?)"
+            }
+            DatabaseBackend::Postgres => {
+                "INSERT INTO sys_notice_read (notice_id, user_id, read_time) VALUES (?, ?, ?) ON CONFLICT (notice_id, user_id) DO NOTHING"
+            }
+            DatabaseBackend::MySql => {
+                "INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES (?, ?, ?)"
+            }
+        };
+
+        let values: Vec<Value> = vec![notice_id.into(), user_id.into(), now.into()];
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
+        db.execute(stmt).await?;
+        Ok(())
+    }
+
+    /// 批量标记公告已读（单条 SQL 多值插入，冲突忽略，替代循环 N 次）
+    ///
+    /// 使用数据库原生的冲突忽略语义（INSERT OR IGNORE / ON CONFLICT DO NOTHING / INSERT IGNORE），
+    /// 依赖 sys_notice_read 表的唯一约束 (notice_id, user_id)，避免 TOCTOU 竞态。
+    pub async fn mark_read_batch(
+        &self,
+        notice_ids: Vec<i64>,
+        user_id: i64,
+    ) -> Result<(), DbErr> {
+        if notice_ids.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Local::now().naive_local();
+        let db = self.base.db();
+        let backend = db.get_database_backend();
+
+        // 构建多值 VALUES 子句：每个 notice_id 一个 (?, ?, ?) 占位符组
+        let values_clause = notice_ids
+            .iter()
+            .map(|_| "(?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = match backend {
+            DatabaseBackend::Sqlite => {
+                format!("INSERT OR IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES {}", values_clause)
+            }
+            DatabaseBackend::Postgres => {
+                format!("INSERT INTO sys_notice_read (notice_id, user_id, read_time) VALUES {} ON CONFLICT (notice_id, user_id) DO NOTHING", values_clause)
+            }
+            DatabaseBackend::MySql => {
+                format!("INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES {}", values_clause)
+            }
+        };
+
+        let mut values: Vec<Value> = Vec::with_capacity(notice_ids.len() * 3);
+        for notice_id in &notice_ids {
+            values.push((*notice_id).into());
+            values.push(user_id.into());
+            values.push(now.into());
+        }
+
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
+        db.execute(stmt).await?;
+        Ok(())
+    }
+
+    /// 查询指定公告的已读用户列表（联表 sys_user + sys_dept）
+    ///
+    /// 支持 searchValue 模糊匹配登录名/用户名
+    ///
+    /// 安全说明：使用参数化查询（`?` 占位符 + Values），避免 SQL 注入风险。
+    /// SeaORM 的 Statement::from_sql_and_values 会自动处理各数据库后端的占位符差异。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_read_users_page(
+        &self,
+        offset: u64,
+        limit: u64,
+        notice_id: i64,
+        search_value: Option<&str>,
+    ) -> Result<(Vec<NoticeReadUserVo>, u64), DbErr> {
+        let db = self.base.db();
+        let backend = db.get_database_backend();
+
+        // 使用参数化查询构建 WHERE 子句，避免 SQL 注入
+        let mut where_clause = String::from("WHERE r.notice_id = ? ");
+        let mut values: Vec<Value> = vec![notice_id.into()];
+
+        if let Some(sv) = search_value
+            && !sv.trim().is_empty()
+        {
+            where_clause.push_str("AND (u.user_name LIKE ? OR u.nick_name LIKE ?) ");
+            let pattern = format!("%{}%", sv);
+            values.push(pattern.clone().into());
+            values.push(pattern.into());
+        }
+
+        // count 查询
+        let count_sql = format!(
+            "SELECT COUNT(*) AS count \
+             FROM sys_notice_read r \
+             LEFT JOIN sys_user u ON r.user_id = u.user_id \
+             LEFT JOIN sys_dept d ON u.dept_id = d.dept_id \
+             {}",
+            where_clause
+        );
+        let count_result = db.query_one(Statement::from_sql_and_values(
+            backend,
+            &count_sql,
+            values.clone(),
+        )).await?;
+        let total: u64 = count_result
+            .map(|row| u64::try_from(row.try_get::<i64>("", "count").unwrap_or(0)).unwrap_or(0))
+            .unwrap_or(0);
+
+        // 分页查询（LIMIT/OFFSET 也参数化）
+        let list_sql = format!(
+            "SELECT r.read_id, r.notice_id, r.user_id, r.read_time, \
+             u.user_name, u.nick_name, d.dept_name, u.phonenumber \
+             FROM sys_notice_read r \
+             LEFT JOIN sys_user u ON r.user_id = u.user_id \
+             LEFT JOIN sys_dept d ON u.dept_id = d.dept_id \
+             {} \
+             ORDER BY r.read_time DESC \
+             LIMIT ? OFFSET ?",
+            where_clause
+        );
+        // 追加分页参数到 values
+        let mut list_values = values;
+        list_values.push((limit as i64).into());
+        list_values.push((offset as i64).into());
+
+        let rows = NoticeReadUserVo::find_by_statement(Statement::from_sql_and_values(
+            backend,
+            &list_sql,
+            list_values,
+        ))
+        .all(db)
+        .await?;
+
+        Ok((rows, total))
+    }
+
+    /// 统计指定公告的已读用户数
+    pub async fn count_read_users(&self, notice_id: i64) -> Result<u64, DbErr> {
+        SysNoticeRead::find()
+            .filter(Column::NoticeId.eq(notice_id))
+            .count(self.base.db())
+            .await
+    }
+
+    /// 查询用户已读的公告 ID 集合
+    pub async fn find_read_notice_ids(&self, user_id: i64) -> Result<Vec<i64>, DbErr> {
+        let rows: Vec<Model> = SysNoticeRead::find()
+            .filter(Column::UserId.eq(user_id))
+            .all(self.base.db())
+            .await?;
+        Ok(rows.into_iter().map(|r| r.notice_id).collect())
+    }
+
+    /// 统计用户未读公告数（总数 - 已读数）
+    ///
+    /// 优化（DB-13）：原实现两次 COUNT 查询，合并为单次带子查询的查询，DB 往返减半。
+    ///
+    /// 安全（P0-10）：使用参数化占位符（Postgres 用 $1，其他用 ?）替代 format! 拼接，
+    /// 即使 user_id 来源不可信也不会产生 SQL 注入。
+    pub async fn count_unread(&self, user_id: i64) -> Result<u64, DbErr> {
+        use sea_orm::ConnectionTrait;
+        let backend = self.base.db().get_database_backend();
+        // 单次查询：公告总数（status='0'）减去该用户已读数
+        // 参数化：Postgres 使用 $1 占位符，Sqlite/MySQL 使用 ? 占位符
+        let sql = match backend {
+            DatabaseBackend::Postgres => {
+                "SELECT (SELECT COUNT(*) FROM sys_notice WHERE status = '0') - \
+                 (SELECT COUNT(*) FROM sys_notice_read WHERE user_id = $1) AS unread"
+            }
+            _ => {
+                "SELECT (SELECT COUNT(*) FROM sys_notice WHERE status = '0') - \
+                 (SELECT COUNT(*) FROM sys_notice_read WHERE user_id = ?) AS unread"
+            }
+        };
+        let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, [user_id.into()]);
+        let row = self.base.db().query_one(stmt).await?;
+        let unread: i64 = row
+            .and_then(|r| r.try_get_by_index::<i64>(0).ok())
+            .unwrap_or(0);
+        Ok(u64::try_from(unread.max(0)).unwrap_or(0))
+    }
+
+    /// 删除指定公告的所有已读记录（公告删除时级联清理）
+    pub async fn delete_by_notice_ids(&self, notice_ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
+        SysNoticeRead::delete_many()
+            .filter(Column::NoticeId.is_in(notice_ids))
+            .exec(self.base.db())
+            .await
+    }
+
+    /// 删除指定公告的所有已读记录（使用指定连接，用于事务内调用）
+    pub async fn delete_by_notice_ids_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        notice_ids: Vec<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        SysNoticeRead::delete_many()
+            .filter(Column::NoticeId.is_in(notice_ids))
+            .exec(conn)
+            .await
+    }
+}

@@ -1,0 +1,473 @@
+//! 缓存监控 Handler（Axum 原生实现）
+//!
+//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! - GET    /monitor/cache                                    获取 Redis 缓存概览
+//! - GET    /monitor/cache/getNames                           获取缓存键名列表
+//! - GET    /monitor/cache/getKeys/{cacheName}                获取指定缓存的键列表
+//! - GET    /monitor/cache/getValue/{cacheName}/{cacheKey}    获取缓存值
+//! - DELETE /monitor/cache/clearCacheName/{cacheName}         清除指定名称的缓存
+//! - DELETE /monitor/cache/clearCacheKey/{cacheKey}           清除指定键的缓存
+//! - DELETE /monitor/cache/clearCacheAll                      清除所有缓存
+//!
+//! 直接操作 Redis，使用 redis::cmd 执行原生命令。
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use serde::Serialize;
+use utoipa::ToSchema;
+
+use crate::common::{AjaxResult, AppError};
+use crate::state::AppState;
+
+// ==================== 缓存前缀白名单 ====================
+
+/// 允许查询/清理的缓存前缀白名单
+const ALLOWED_CACHE_PREFIXES: &[&str] = &[
+    "dict:",
+    "sys_config:",
+    "captcha:",
+    "login_fail:",
+    "login_ip:",
+    "blacklist:",
+    "online:",
+];
+
+/// 校验缓存前缀是否在白名单内，防止通配符滥用或误删关键键
+fn validate_cache_prefix(prefix: &str) -> Result<(), AppError> {
+    // 拒绝包含通配符的输入
+    if prefix.contains('*') || prefix.contains('?') || prefix.contains('[') {
+        return Err(AppError::bad_request("缓存名称不允许包含通配符"));
+    }
+    // 检查白名单
+    if !ALLOWED_CACHE_PREFIXES.iter().any(|p| prefix.starts_with(p)) {
+        return Err(AppError::bad_request(&format!(
+            "不允许操作缓存前缀: {}，仅支持: {:?}",
+            prefix, ALLOWED_CACHE_PREFIXES
+        )));
+    }
+    Ok(())
+}
+
+// ==================== 响应结构体 ====================
+
+/// Redis 缓存概览（对齐前端 cache 对象结构）
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheOverview {
+    /// Redis INFO 解析后的键值对
+    pub info: HashMap<String, String>,
+    /// 当前数据库键数量
+    pub db_size: i64,
+    /// 命令统计（用于前端饼图）
+    pub command_stats: Vec<CommandStat>,
+}
+
+/// 命令统计项（对齐前端 echarts 饼图数据 { name, value }）
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandStat {
+    pub name: String,
+    pub value: String,
+}
+
+/// 缓存条目（对齐前端 SysCache）
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SysCache {
+    /// 缓存名称（前缀）
+    pub cache_name: String,
+    /// 缓存键名
+    pub cache_key: String,
+    /// 缓存内容
+    pub cache_value: String,
+    /// 备注
+    pub remark: String,
+}
+
+// ==================== Handler 实现 ====================
+
+/// GET /monitor/cache
+/// 获取 Redis 缓存概览信息（info + dbSize + commandStats）
+#[utoipa::path(
+    get,
+    path = "/monitor/cache",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<CacheOverview>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn get_cache(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<CacheOverview>, AppError> {
+    let mut redis = state.redis.clone();
+
+    // 1. 获取 Redis INFO 全量信息
+    let info_text: String = redis::cmd("INFO")
+        .query_async(&mut redis)
+        .await
+        .map_err(|e| {
+            tracing::error!("执行 Redis INFO 失败: {}", e);
+            AppError::internal("获取缓存信息失败")
+        })?;
+    let info = parse_redis_info(&info_text);
+
+    // 2. 获取当前数据库键数量
+    let db_size: i64 = redis::cmd("DBSIZE")
+        .query_async(&mut redis)
+        .await
+        .map_err(|e| {
+            tracing::error!("执行 Redis DBSIZE 失败: {}", e);
+            AppError::internal("获取键数量失败")
+        })?;
+
+    // 3. 获取命令统计
+    let cmd_text: String = redis::cmd("INFO")
+        .arg("commandstats")
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("Redis INFO commandstats 查询失败: {}", e);
+            String::new()
+        });
+    let command_stats = parse_command_stats(&cmd_text);
+
+    Ok(AjaxResult::success(CacheOverview {
+        info,
+        db_size,
+        command_stats,
+    }))
+}
+
+/// GET /monitor/cache/getNames
+/// 获取缓存键名列表（按前缀分组）
+#[utoipa::path(
+    get,
+    path = "/monitor/cache/getNames",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<SysCache>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn get_names(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<Vec<SysCache>>, AppError> {
+    let mut redis = state.redis.clone();
+
+    // 获取全部键，按前缀（冒号前的部分）分组
+    let keys: Vec<String> = scan_keys(&mut redis, "*").await?;
+
+    // 按前缀分组统计
+    let mut groups: HashMap<String, usize> = HashMap::new();
+    for key in &keys {
+        let prefix = if let Some(idx) = key.find(':') {
+            &key[..=idx] // 包含冒号
+        } else {
+            key.as_str()
+        };
+        *groups.entry(prefix.to_string()).or_insert(0) += 1;
+    }
+
+    let list: Vec<SysCache> = groups
+        .into_iter()
+        .map(|(name, count)| SysCache {
+            cache_name: name,
+            cache_key: String::new(),
+            cache_value: String::new(),
+            remark: format!("{} 个键", count),
+        })
+        .collect();
+
+    Ok(AjaxResult::success(list))
+}
+
+/// GET /monitor/cache/getKeys/{cacheName}
+/// 获取指定缓存前缀的键列表
+#[utoipa::path(
+    get,
+    path = "/monitor/cache/getKeys/{cacheName}",
+    params(
+        ("cacheName" = String, Path, description = "缓存名称（前缀）")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<String>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn get_keys(
+    State(state): State<Arc<AppState>>,
+    Path(cache_name): Path<String>,
+) -> Result<AjaxResult<Vec<String>>, AppError> {
+    // 校验缓存前缀白名单
+    validate_cache_prefix(&cache_name)?;
+    let mut redis = state.redis.clone();
+    let pattern = format!("{}*", cache_name);
+
+    let keys: Vec<String> = scan_keys(&mut redis, &pattern).await?;
+
+    Ok(AjaxResult::success(keys))
+}
+
+/// GET /monitor/cache/getValue/{cacheName}/{cacheKey}
+/// 获取指定键的缓存值
+#[utoipa::path(
+    get,
+    path = "/monitor/cache/getValue/{cacheName}/{cacheKey}",
+    params(
+        ("cacheName" = String, Path, description = "缓存名称（前缀）"),
+        ("cacheKey" = String, Path, description = "缓存键名")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<SysCache>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn get_value(
+    State(state): State<Arc<AppState>>,
+    Path((cache_name, cache_key)): Path<(String, String)>,
+) -> Result<AjaxResult<SysCache>, AppError> {
+    // 校验缓存前缀白名单
+    validate_cache_prefix(&cache_name)?;
+    // 去除两端空白，防止绕过前缀校验
+    let cache_key = cache_key.trim().to_string();
+    // 校验 cache_key 必须以 cache_name 开头，防止 IDOR
+    // （如 cache_name="dict:" 时传 cache_key="blacklist:xxx" 读取任意键）
+    if !cache_key.starts_with(&cache_name) {
+        return Err(AppError::bad_request(&format!(
+            "缓存键必须以 {} 开头",
+            cache_name
+        )));
+    }
+    let mut redis = state.redis.clone();
+
+    // 查询键的类型，非 string 类型不支持预览
+    let key_type: String = redis::cmd("TYPE")
+        .arg(&cache_key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("Redis TYPE 查询失败: {}", e);
+            "unknown".to_string()
+        });
+
+    let cache_value = if key_type == "string" {
+        redis::cmd("GET")
+            .arg(&cache_key)
+            .query_async::<Option<String>>(&mut redis)
+            .await
+            .map_err(|e| {
+                tracing::error!("Redis GET 查询失败: {}", e);
+                AppError::internal("查询缓存值失败")
+            })?
+            .unwrap_or_default()
+    } else {
+        format!("[{} 类型缓存，不支持预览]", key_type)
+    };
+
+    Ok(AjaxResult::success(SysCache {
+        cache_name,
+        cache_key,
+        cache_value,
+        remark: String::new(),
+    }))
+}
+
+/// DELETE /monitor/cache/clearCacheName/{cacheName}
+/// 清除指定名称（前缀）的所有缓存
+#[utoipa::path(
+    delete,
+    path = "/monitor/cache/clearCacheName/{cacheName}",
+    params(
+        ("cacheName" = String, Path, description = "缓存名称（前缀）")
+    ),
+    responses(
+        (status = 200, description = "清除成功", body = AjaxResult<serde_json::Value>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn clear_cache_name(
+    State(state): State<Arc<AppState>>,
+    Path(cache_name): Path<String>,
+) -> Result<AjaxResult<()>, AppError> {
+    // 校验缓存前缀白名单
+    validate_cache_prefix(&cache_name)?;
+    let mut redis = state.redis.clone();
+    let pattern = format!("{}*", cache_name);
+
+    // 查询匹配的键
+    let keys: Vec<String> = scan_keys(&mut redis, &pattern).await?;
+
+    if keys.is_empty() {
+        return Ok(AjaxResult::success_msg("无匹配缓存"));
+    }
+
+    // 批量删除
+    let count = delete_keys(&mut redis, &keys).await?;
+    Ok(AjaxResult::success_msg(&format!("清除成功，共删除 {} 个键", count)))
+}
+
+/// DELETE /monitor/cache/clearCacheKey/{cacheKey}
+/// 清除指定键的缓存
+#[utoipa::path(
+    delete,
+    path = "/monitor/cache/clearCacheKey/{cacheKey}",
+    params(
+        ("cacheKey" = String, Path, description = "缓存键名")
+    ),
+    responses(
+        (status = 200, description = "清除成功", body = AjaxResult<serde_json::Value>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn clear_cache_key(
+    State(state): State<Arc<AppState>>,
+    Path(cache_key): Path<String>,
+) -> Result<AjaxResult<()>, AppError> {
+    // 校验缓存键前缀白名单，防止误删关键键
+    validate_cache_prefix(&cache_key)?;
+    let mut redis = state.redis.clone();
+
+    let deleted: i64 = redis::cmd("DEL")
+        .arg(&cache_key)
+        .query_async(&mut redis)
+        .await
+        .map_err(|e| {
+            tracing::error!("执行 Redis DEL {} 失败: {}", cache_key, e);
+            AppError::internal("清除缓存键失败")
+        })?;
+
+    if deleted == 0 {
+        return Ok(AjaxResult::success_msg("缓存键不存在"));
+    }
+    Ok(AjaxResult::success_msg("清除成功"))
+}
+
+/// DELETE /monitor/cache/clearCacheAll
+/// 清除所有缓存（已禁用 FLUSHDB，防止误清 blacklist/online/login_fail 等业务键）
+///
+/// 安全说明：FLUSHDB 会清空整个 Redis 数据库，包括 blacklist、online_tokens、
+/// login_fail、captcha 等业务关键键，导致已注销 token 失效、在线用户管理失效、
+/// 登录限流失效等严重问题。此端点已改为返回 403 禁止访问。
+/// 如需批量清理，请使用 clearCacheName 按白名单前缀逐类清理。
+#[utoipa::path(
+    delete,
+    path = "/monitor/cache/clearCacheAll",
+    responses(
+        (status = 403, description = "该端点已禁用，FLUSHDB 会误清业务键"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn clear_cache_all(
+    State(_state): State<Arc<AppState>>,
+) -> Result<AjaxResult<()>, AppError> {
+    Err(AppError::new(403, "该端点已禁用：FLUSHDB 会误清 blacklist/online/login_fail 等业务键，请使用 clearCacheName 按前缀清理"))
+}
+
+// ==================== 辅助函数 ====================
+
+/// 使用 SCAN 游标迭代匹配键（避免 KEYS 阻塞 Redis）
+///
+/// P1-19：将可见性改为 pub，供 monitor_online_handler 复用（SCAN online:* 获取在线会话列表）。
+/// 保留在 monitor_cache_handler 模块内，避免在 utils 层引入对 AppError 的依赖。
+pub async fn scan_keys(
+    redis: &mut redis::aio::ConnectionManager,
+    pattern: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut keys = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(100)
+            .query_async(redis)
+            .await
+            .map_err(|e| {
+                tracing::error!("执行 Redis SCAN 失败: {}", e);
+                AppError::internal("扫描缓存键失败")
+            })?;
+        keys.extend(batch);
+        if next_cursor == 0 {
+            break;
+        }
+        cursor = next_cursor;
+    }
+    Ok(keys)
+}
+
+/// 解析 Redis INFO 输出为键值对 Map
+///
+/// INFO 输出格式：每行 `key:value`，以 `#` 开头为分组注释，空行跳过。
+fn parse_redis_info(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    map
+}
+
+/// 解析 Redis INFO commandstats 输出为命令统计列表
+///
+/// 输出格式：`cmdstat_<命令>:calls=N,usec=...`，提取命令名和调用次数。
+fn parse_command_stats(text: &str) -> Vec<CommandStat> {
+    let mut stats = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // 格式：cmdstat_get:calls=100,usec=500,...
+        if let Some((key, rest)) = line.split_once(':')
+            && let Some(name) = key.strip_prefix("cmdstat_")
+        {
+            // 从 calls=N 中提取 N
+            let calls = rest
+                .split(',')
+                .next()
+                .and_then(|s| s.strip_prefix("calls="))
+                .unwrap_or("0");
+            stats.push(CommandStat {
+                name: name.to_string(),
+                value: calls.to_string(),
+            });
+        }
+    }
+    stats
+}
+
+/// 批量删除 Redis 键，返回删除数量
+async fn delete_keys(
+    redis: &mut redis::aio::ConnectionManager,
+    keys: &[String],
+) -> Result<i64, AppError> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let mut cmd = redis::cmd("DEL");
+    for k in keys {
+        cmd.arg(k);
+    }
+    let count: i64 = cmd
+        .query_async(redis)
+        .await
+        .map_err(|e| {
+            tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
+            AppError::internal("批量删除缓存键失败")
+        })?;
+    Ok(count)
+}

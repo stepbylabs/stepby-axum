@@ -1,0 +1,20 @@
+# clippy 配置（P2-15）
+# 项目使用 Rust 1.96.0 + edition 2024，配置保守阈值避免大量警告
+
+# 类型复杂度（默认 250，项目有复杂泛型）
+type-complexity-threshold = 300
+
+# 函数参数数量（默认 7，项目有部分 handler 函数参数较多）
+too-many-arguments-threshold = 10
+
+# 圈复杂度（默认 25，login 已拆分但仍较高）
+cognitive-complexity-threshold = 30
+
+# 枚举变体大小（默认 200）
+enum-variant-size-threshold = 200
+
+# 单文件行数（不强制，仅提示）
+# single-exit-line 不设置
+
+# 允许的 clippy 组（在 lib.rs/handler 中按需 allow）
+# 避免 mutable_key_type / module_inception 等误报

@@ -1,0 +1,25 @@
+/target
+/frontend-dist
+*.db
+*.rdb
+verify-embedded/
+
+# 敏感配置
+config/config.toml
+config/config.toml.prod
+.env
+
+# 数据
+data/*.db
+data/*.py
+data/*.json
+data/screenshots/
+
+# 日志
+logs/
+backend*.log
+backend.err
+*.sql
+
+# 上传
+uploads/

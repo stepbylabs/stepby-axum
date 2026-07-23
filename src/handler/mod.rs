@@ -1,0 +1,30 @@
+// axum-backend/src/handler/mod.rs
+
+pub mod auth_handler;
+pub mod common_handler;
+pub mod health;
+pub mod ip_location_handler;
+pub mod monitor_cache_handler;
+pub mod monitor_online_handler;
+pub mod monitor_server_handler;
+pub mod sys_backup_handler;
+pub mod sys_config_handler;
+pub mod sys_dept_handler;
+pub mod sys_dict_handler;
+pub mod sys_job_handler;
+pub mod sys_job_log_handler;
+pub mod sys_logininfor_handler;
+pub mod sys_menu_handler;
+pub mod sys_notice_handler;
+pub mod sys_oper_log_handler;
+pub mod sys_post_handler;
+pub mod sys_rate_limit_handler;
+pub mod sys_role_handler;
+pub mod sys_task_handler;
+pub mod sys_user_handler;
+pub mod tool_gen_handler;
+pub mod ws_handler;
+pub mod totp_handler;
+pub mod file_handler;
+
+pub use health::{health, metrics};

@@ -1,0 +1,212 @@
+//! 登录日志 Handler（Axum 原生实现）
+//!
+//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! - GET    /monitor/logininfor/list            分页查询登录日志
+//! - DELETE /monitor/logininfor/{infoIds}       批量删除登录日志
+//! - GET    /monitor/logininfor/unlock/{userName} 解锁用户（清除登录失败日志）
+//! - DELETE /monitor/logininfor/clean           清空登录日志
+//! - POST   /monitor/logininfor/export          导出登录日志列表
+
+use std::sync::Arc;
+use axum::extract::{Form, Path, Query, State};
+use axum::response::Response;
+
+use crate::common::excel::{export_to_excel, ExcelColumn};
+use crate::common::constants::SUPER_ADMIN_USER_ID;
+use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::entity::sys_logininfor::Model as SysLogininforModel;
+use crate::service::sys_logininfor_service::{LoginDailyStat, LogininforQueryDto};
+use crate::state::AppState;
+use crate::utils::parse_id_list;
+
+/// GET /monitor/logininfor/list
+/// 分页查询登录日志
+#[utoipa::path(
+    get,
+    path = "/monitor/logininfor/list",
+    params(LogininforQueryDto),
+    responses(
+        (status = 200, description = "查询成功", body = TableDataInfo<SysLogininforModel>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-logininfor"
+)]
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LogininforQueryDto>,
+) -> Result<TableDataInfo<SysLogininforModel>, AppError> {
+    let (rows, total) = state.logininfor_service.get_logininfor_page(query).await?;
+    Ok(TableDataInfo::new(total, rows))
+}
+
+/// DELETE /monitor/logininfor/{infoIds}
+/// 批量删除登录日志（infoIds 为逗号分隔的 ID 字符串）
+#[utoipa::path(
+    delete,
+    path = "/monitor/logininfor/{infoIds}",
+    params(
+        ("infoIds" = String, Path, description = "登录日志 ID 列表（逗号分隔）")
+    ),
+    responses(
+        (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "日志 ID 不合法"),
+    ),
+    tag = "monitor-logininfor"
+)]
+pub async fn remove(
+    State(state): State<Arc<AppState>>,
+    Path(info_ids): Path<String>,
+) -> Result<AjaxResult<()>, AppError> {
+    let ids: Vec<i64> = parse_id_list::<i64>(&info_ids);
+
+    if ids.is_empty() {
+        return Err(AppError::bad_request("日志 ID 不合法"));
+    }
+
+    state.logininfor_service.delete_logininfors(ids).await?;
+    Ok(AjaxResult::success_msg("删除成功"))
+}
+
+/// POST /monitor/logininfor/unlock/{userName}
+/// 解锁用户（删除该用户的登录失败日志）
+#[utoipa::path(
+    post,
+    path = "/monitor/logininfor/unlock/{userName}",
+    params(
+        ("userName" = String, Path, description = "用户名")
+    ),
+    responses(
+        (status = 200, description = "解锁成功", body = AjaxResult<serde_json::Value>),
+        (status = 404, description = "用户不存在"),
+    ),
+    tag = "monitor-logininfor"
+)]
+pub async fn unlock(
+    State(state): State<Arc<AppState>>,
+    Path(user_name): Path<String>,
+) -> Result<AjaxResult<()>, AppError> {
+    // 超管保护（P0-R81-006）：禁止解锁超级管理员账号（M-2 + M-3 Major：使用常量替代硬编码）
+    // 防止通过解锁接口重置超管的登录失败计数
+    if let Ok(Some(user)) = state.user_service.get_user_by_username(&user_name).await
+        && user.user_id == SUPER_ADMIN_USER_ID
+    {
+        return Err(AppError::new(
+            403,
+            "不允许解锁超级管理员账号",
+        ));
+    }
+
+    state.logininfor_service.unlock_user(&user_name).await?;
+    // 同步重置 Redis 中的登录失败计数，否则用户仍会被锁定（auth_service 使用 login_fail:{username}）
+    let fail_key = format!("login_fail:{}", user_name);
+    let mut redis = state.redis.clone();
+    let del_result: Result<(), _> = redis::cmd("DEL")
+        .arg(&fail_key)
+        .query_async(&mut redis)
+        .await;
+    if let Err(e) = del_result {
+        tracing::warn!("重置 Redis 登录失败计数失败 (user={}): {}", user_name, e);
+    }
+    Ok(AjaxResult::success_msg("解锁成功"))
+}
+
+/// DELETE /monitor/logininfor/clean
+/// 清空全部登录日志
+#[utoipa::path(
+    delete,
+    path = "/monitor/logininfor/clean",
+    responses(
+        (status = 200, description = "清空成功", body = AjaxResult<serde_json::Value>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-logininfor"
+)]
+pub async fn clean(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<()>, AppError> {
+    state.logininfor_service.clean_logininfors().await?;
+    Ok(AjaxResult::success_msg("清空成功"))
+}
+
+/// POST /monitor/logininfor/export
+/// 导出登录日志列表为 Excel
+///
+/// 前端 download() 发送 application/x-www-form-urlencoded，使用 Form 提取器
+#[utoipa::path(
+    post,
+    path = "/monitor/logininfor/export",
+    params(LogininforQueryDto),
+    responses(
+        (status = 200, description = "导出成功", content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-logininfor"
+)]
+pub async fn export(
+    State(state): State<Arc<AppState>>,
+    Form(query): Form<LogininforQueryDto>,
+) -> Result<Response, AppError> {
+    let rows = state.logininfor_service.export_logininfors(query).await?;
+
+    let columns = [
+        ExcelColumn { header: "日志编号", getter: |r: &SysLogininforModel| r.info_id.to_string().into() },
+        ExcelColumn { header: "用户名称", getter: |r: &SysLogininforModel| r.user_name.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "IP地址", getter: |r: &SysLogininforModel| r.ipaddr.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "登录地点", getter: |r: &SysLogininforModel| r.login_location.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "浏览器", getter: |r: &SysLogininforModel| r.browser.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "操作系统", getter: |r: &SysLogininforModel| r.os.clone().unwrap_or_default().into() },
+        ExcelColumn {
+            header: "状态",
+            getter: |r: &SysLogininforModel| {
+                r.status
+                    .as_deref()
+                    .map(|s| if s == "0" { "成功".to_string() } else { "失败".to_string() })
+                    .unwrap_or_default()
+                    .into()
+            }
+        },
+        ExcelColumn { header: "操作信息", getter: |r: &SysLogininforModel| r.msg.clone().unwrap_or_default().into() },
+        ExcelColumn {
+            header: "登录时间",
+            getter: |r: &SysLogininforModel| {
+                r.login_time
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_default()
+                    .into()
+            }
+        },
+    ];
+
+    export_to_excel("登录日志", "logininfor", &columns, &rows)
+}
+
+/// GET /monitor/logininfor/stats?days=7
+/// 登录统计：最近 N 天每天成功/失败次数（首页仪表盘用）
+///
+/// days 参数范围 1-90，默认 7 天
+#[utoipa::path(
+    get,
+    path = "/monitor/logininfor/stats",
+    params(
+        ("days" = Option<i64>, Query, description = "统计天数（1-90，默认 7）")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<LoginDailyStat>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-logininfor"
+)]
+pub async fn stats(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<StatsQuery>,
+) -> Result<AjaxResult<Vec<LoginDailyStat>>, AppError> {
+    let days = params.days.unwrap_or(7).clamp(1, 90);
+    let data = state.logininfor_service.daily_stats(days).await?;
+    Ok(AjaxResult::success(data))
+}
+
+/// 统计查询参数
+#[derive(Debug, Clone, serde::Deserialize, utoipa::IntoParams)]
+pub struct StatsQuery {
+    pub days: Option<i64>,
+}

@@ -1,0 +1,36 @@
+# Rust 构建产物
+target/
+
+# 环境变量与配置（生产通过环境变量注入）
+.env
+.env.*
+config/config.toml
+
+# 数据目录（运行时生成）
+data/
+uploads/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+.fleet/
+.trae/
+*.iml
+
+# 文档（无需进镜像）
+docs/
+*.md
+
+# CI
+.github/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 测试截图
+data/screenshots*/

@@ -1,0 +1,162 @@
+[package]
+name = "axum-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Web 框架
+axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
+
+# ORM
+sea-orm = { version = "1.1", features = [
+    "runtime-tokio-rustls",
+    "sqlx-mysql",
+    "sqlx-postgres",
+    "sqlx-sqlite",
+    "macros",
+    "with-chrono",
+] }
+
+# 异步 trait 宏（SeaORM ActiveModelBehavior 需要）
+async-trait = "0.1"
+
+# 异步运行时
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "time"] }
+
+# JWT
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+
+# 中间件
+tower = "0.5"
+tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip", "fs", "timeout"] }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# 日志文件按日轮转（P0-67 未修复项）
+tracing-appender = "0.2"
+
+# 时间
+chrono = { version = "0.4", features = ["serde"] }
+
+# 工具
+uuid = { version = "1", features = ["v4"] }
+toml = "1"
+argon2 = "0.5"
+md-5 = "0.10"
+sha2 = "0.10"
+
+# 错误处理
+anyhow = "1"
+# thiserror：为自定义错误类型自动派生 std::error::Error 和 Display
+thiserror = "2"
+
+# 校验
+validator = { version = "0.20", features = ["derive"] }
+# garde：作为 validator 的补充，提供更友好的校验派生宏
+garde = { version = "0.22", features = ["full"] }
+
+# Redis
+redis = { version = "1.3", features = ["tokio-comp", "connection-manager"] }
+
+# 验证码
+captcha = "1.0"
+
+# 环境变量
+dotenvy = "0.15"
+
+# 异步 Future 工具（事务闭包 boxed()）
+futures = "0.3"
+
+# 正则表达式（validator regex 校验手机号）
+regex = "1"
+
+# 定时任务调度
+# tokio-cron-scheduler 内部依赖 croner，项目直接使用 croner 做 cron 表达式验证和下次执行时间计算，
+# 避免引入额外的 cron crate 造成两个 cron 解析库共存
+tokio-cron-scheduler = "0.15"
+croner = "3"
+
+# Excel 导出
+rust_xlsxwriter = "0.96"
+
+# 系统监控（CPU/内存/磁盘信息采集）
+sysinfo = "0.39"
+
+# TypeScript 类型自动生成（通过 #[derive(TS)] 导出 .ts 文件）
+ts-rs = { version = "12", features = ["chrono-impl", "no-serde-warnings"] }
+
+# OpenAPI 文档自动生成（utoipa）
+# 注：不使用 utoipa-swagger-ui（其 build.rs 需从 GitHub 下载资源），
+# 改为通过 CDN 加载 Swagger UI 前端资源，由 docs.rs 提供 HTML 页面
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+
+# IP 归属地查询（基于 MaxMindDB 离线数据库）
+maxminddb = "0.29"
+
+# 原子可替换引用（用于 mmdb 热加载）
+arc-swap = "1"
+
+# HTTP 客户端（用于下载 mmdb 文件）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# tar.gz 解压（解压 MaxMind 下载包）
+flate2 = "1"
+tar = "0.4"
+
+# AES-256-GCM 加密（用于 License Key 加密存储）
+aes-gcm = "0.10"
+
+# 随机数生成（AES-GCM nonce 生成）
+rand = "0.8"
+
+# 模板引擎（代码生成模块使用）
+tera = "2"
+
+# ZIP 压缩（代码生成模块生成代码包下载）
+zip = "2.2"
+
+# TOTP 多因子认证
+# - qr：启用二维码生成（get_qr_png / get_qr）
+# - gen_secret：启用 Secret::generate_secret()（CSPRNG 生成 160bit secret）
+# - otpauth：启用 otpauth:// URL 生成（get_url），qr feature 已传递依赖
+totp-rs = { version = "5", features = ["qr", "gen_secret", "otpauth"] }
+
+# Base32 解码（TOTP secret 编码）
+base32 = "0.5"
+
+# Base64 编解码（TOTP QR 码 Data URL）
+base64 = "0.22"
+
+# 邮件发送（SMTP）
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# 前端静态资源嵌入（编译时将 yebot-ui/dist 嵌入到二进制，发布单可执行文件）
+# 通过 #[derive(RustEmbed)] 派生 Embed trait，运行时通过 EmbeddedAssets::get(path) 读取
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+# MIME 类型推断（rust-embed 的 mime-guess feature 已传递依赖，此处显式声明便于直接使用）
+mime_guess = "2"
+
+[workspace]
+members = ["migration"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# 性能基准测试（R6-BE-ENG-21）
+# 运行方式：cargo bench
+# 当前为占位示例（std-only），未来如需更精确测量可引入 criterion：
+#   [dev-dependencies]
+#   criterion = { version = "0.5", features = ["html_reports"] }
+# 然后将下方 harness 改为 true（criterion 自带 harness）
+[[bench]]
+name = "example"
+harness = false
