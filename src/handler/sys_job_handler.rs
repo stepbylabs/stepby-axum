@@ -1,0 +1,219 @@
+// axum-backend/src/handler/sys_job_handler.rs
+//! 定时任务管理 Handler（Axum 原生实现）
+//!
+//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! - GET    /monitor/job/list           分页查询任务
+//! - GET    /monitor/job/{jobId}        查询任务详情
+//! - POST   /monitor/job                新增任务
+//! - PUT    /monitor/job                修改任务
+//! - DELETE /monitor/job/{jobIds}       批量删除任务
+//! - PUT    /monitor/job/changeStatus   切换任务状态
+//! - PUT    /monitor/job/run            手动执行一次
+//! - POST   /monitor/job/export         导出任务列表
+
+use std::sync::Arc;
+use axum::extract::{Form, Path, Query, State};
+use axum::response::Response;
+
+use crate::common::excel::{export_to_excel, ExcelColumn};
+use crate::common::ValidatedJson;
+use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::middleware::Operator;
+use crate::service::sys_job_service::{
+    JobAddDto, JobEditDto, JobQueryDto, JobRunDto, JobStatusDto, JobVo,
+};
+use crate::state::AppState;
+use crate::utils::parse_id_list;
+
+/// GET /monitor/job/list
+/// 分页查询任务
+#[utoipa::path(
+    get,
+    path = "/monitor/job/list",
+    params(JobQueryDto),
+    responses(
+        (status = 200, description = "查询成功", body = TableDataInfo<JobVo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<JobQueryDto>,
+) -> Result<TableDataInfo<JobVo>, AppError> {
+    let (rows, total) = state.job_service.get_job_page(query).await?;
+    Ok(TableDataInfo::new(total, rows))
+}
+
+/// GET /monitor/job/{jobId}
+/// 查询任务详情
+#[utoipa::path(
+    get,
+    path = "/monitor/job/{jobId}",
+    params(
+        ("jobId" = i64, Path, description = "任务 ID")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<JobVo>),
+        (status = 404, description = "任务不存在"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn get_info_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<i64>,
+) -> Result<AjaxResult<JobVo>, AppError> {
+    let vo = state.job_service.get_job_by_id(job_id).await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// POST /monitor/job
+/// 新增任务
+#[utoipa::path(
+    post,
+    path = "/monitor/job",
+    request_body = JobAddDto,
+    responses(
+        (status = 200, description = "新增成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误或 cron 表达式不合法"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn add(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    ValidatedJson(dto): ValidatedJson<JobAddDto>,
+) -> Result<AjaxResult<()>, AppError> {
+    state.job_service.add_job(dto, operator.username()).await?;
+    Ok(AjaxResult::success_msg("新增成功"))
+}
+
+/// PUT /monitor/job
+/// 修改任务
+#[utoipa::path(
+    put,
+    path = "/monitor/job",
+    request_body = JobEditDto,
+    responses(
+        (status = 200, description = "修改成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+        (status = 404, description = "任务不存在"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn edit(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    ValidatedJson(dto): ValidatedJson<JobEditDto>,
+) -> Result<AjaxResult<()>, AppError> {
+    state
+        .job_service
+        .edit_job(dto, operator.username())
+        .await?;
+    Ok(AjaxResult::success_msg("修改成功"))
+}
+
+/// DELETE /monitor/job/{jobIds}
+/// 批量删除任务（jobIds 为逗号分隔的 ID 字符串）
+#[utoipa::path(
+    delete,
+    path = "/monitor/job/{jobIds}",
+    params(
+        ("jobIds" = String, Path, description = "任务 ID 列表（逗号分隔）")
+    ),
+    responses(
+        (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "任务 ID 不合法"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn remove(
+    State(state): State<Arc<AppState>>,
+    Path(job_ids): Path<String>,
+) -> Result<AjaxResult<()>, AppError> {
+    let ids: Vec<i64> = parse_id_list::<i64>(&job_ids);
+
+    if ids.is_empty() {
+        return Err(AppError::bad_request("任务 ID 不合法"));
+    }
+
+    state.job_service.delete_jobs(ids).await?;
+    Ok(AjaxResult::success_msg("删除成功"))
+}
+
+/// PUT /monitor/job/changeStatus
+/// 切换任务状态
+#[utoipa::path(
+    put,
+    path = "/monitor/job/changeStatus",
+    request_body = JobStatusDto,
+    responses(
+        (status = 200, description = "状态修改成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn change_status(
+    State(state): State<Arc<AppState>>,
+    ValidatedJson(dto): ValidatedJson<JobStatusDto>,
+) -> Result<AjaxResult<()>, AppError> {
+    state.job_service.change_status(dto).await?;
+    Ok(AjaxResult::success_msg("状态修改成功"))
+}
+
+/// PUT /monitor/job/run
+/// 手动执行一次
+#[utoipa::path(
+    put,
+    path = "/monitor/job/run",
+    request_body = JobRunDto,
+    responses(
+        (status = 200, description = "执行成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+        (status = 404, description = "任务不存在"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn run(
+    State(state): State<Arc<AppState>>,
+    ValidatedJson(dto): ValidatedJson<JobRunDto>,
+) -> Result<AjaxResult<()>, AppError> {
+    state.job_service.run_job_once(dto).await?;
+    Ok(AjaxResult::success_msg("执行成功"))
+}
+
+/// POST /monitor/job/export
+/// 导出任务列表为 Excel（返回二进制 xlsx 流，对齐前端 proxy.download 的 blob 期望）
+///
+/// 前端 download() 发送 application/x-www-form-urlencoded，使用 Form 提取器
+#[utoipa::path(
+    post,
+    path = "/monitor/job/export",
+    params(JobQueryDto),
+    responses(
+        (status = 200, description = "导出成功", content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-job"
+)]
+pub async fn export(
+    State(state): State<Arc<AppState>>,
+    Form(query): Form<JobQueryDto>,
+) -> Result<Response, AppError> {
+    let rows = state.job_service.export_jobs(query).await?;
+
+    let columns = [
+        ExcelColumn { header: "任务编号", getter: |r: &JobVo| r.job.job_id.to_string().into() },
+        ExcelColumn { header: "任务名称", getter: |r: &JobVo| r.job.job_name.clone().into() },
+        ExcelColumn { header: "任务组名", getter: |r: &JobVo| r.job.job_group.clone().into() },
+        ExcelColumn { header: "调用目标字符串", getter: |r: &JobVo| r.job.invoke_target.clone().into() },
+        ExcelColumn { header: "cron表达式", getter: |r: &JobVo| r.job.cron_expression.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "错误策略", getter: |r: &JobVo| r.job.misfire_policy.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "并发执行", getter: |r: &JobVo| r.job.concurrent.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "状态", getter: |r: &JobVo| r.job.status.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "下次执行时间", getter: |r: &JobVo| r.next_valid_time.clone().unwrap_or_default().into() },
+        ExcelColumn { header: "备注", getter: |r: &JobVo| r.job.remark.clone().unwrap_or_default().into() },
+    ];
+
+    export_to_excel("定时任务", "job", &columns, &rows)
+}

@@ -1,0 +1,92 @@
+# axum-backend 开发环境数据库容器
+# 用途：本地测试 PostgreSQL 和 MySQL 数据库
+#
+# 启动方式：
+#   docker compose up -d                    # 启动 postgres + mysql
+#   docker compose up -d postgres           # 仅启动 postgres
+#   docker compose up -d mysql              # 仅启动 mysql
+#   docker compose down                     # 停止并移除容器
+#   docker compose down -v                  # 停止并删除数据卷
+#
+# 连接信息：
+#   PostgreSQL: postgres://yebot:yebot123@127.0.0.1:5432/yebot
+#   MySQL:      mysql://yebot:yebot123@127.0.0.1:3306/yebot
+#
+# 测试步骤：
+#   1. 修改 .env 中 DATABASE_URL 指向目标数据库
+#   2. 运行 migration: cargo run -p migration
+#   3. 启动后端: cargo run
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: yebot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: yebot
+      POSTGRES_PASSWORD: yebot123
+      POSTGRES_DB: yebot
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - yebot_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yebot -d yebot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - yebot_net
+
+  mysql:
+    image: mysql:8.0
+    container_name: yebot-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: yebot
+      MYSQL_USER: yebot
+      MYSQL_PASSWORD: yebot123
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - yebot_mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - yebot_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: yebot-redis
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:6379:6379"
+    # 持久化：AOF（appendonly）+ RDB 快照，防止重启丢失 token 黑名单/登录限流计数
+    command: redis-server --appendonly yes --save 900 1 --save 300 10
+    volumes:
+      - yebot_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - yebot_net
+
+volumes:
+  yebot_pg_data:
+  yebot_mysql_data:
+  yebot_redis_data:
+
+networks:
+  yebot_net:
+    driver: bridge

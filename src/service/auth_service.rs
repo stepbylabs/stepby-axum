@@ -1,0 +1,1454 @@
+//! 认证服务层（Auth Service）
+//!
+//! 职责：
+//! - 登录认证（验证码校验 + 密码校验 + JWT 签发 + 登录日志）
+//! - 登出（token 加入 Redis 黑名单，fail-closed）
+//! - 验证码生成与 Redis 存储
+//! - 获取用户信息（user + roles + permissions）
+//! - 获取路由树（菜单转路由）
+//! - 登录安全：失败次数限制 + IP 限流 + GETDEL 原子化验证码
+//! - 密码升级：登录时检测旧 MD5 哈希，自动升级为 Argon2
+//!
+//! 约束：
+//! - 不依赖任何 Web 框架类型（axum / tower / tower-http）
+//! - 错误统一使用 ServiceError
+//! - Service 层返回 Vo（不含 code/msg），Handler 层负责包装为 Result
+
+use sea_orm::Set;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use validator::Validate;
+
+use crate::common::constants::SECS_PER_HOUR;
+use crate::common::error::ServiceError;
+use crate::config::JwtConfig;
+use crate::entity::sys_logininfor;
+use crate::entity::sys_menu::Model as SysMenuModel;
+use crate::entity::sys_user::Model as SysUserModel;
+use crate::jwt::JwtUtils;
+use crate::repository::sys_config::SysConfigRepository;
+use crate::repository::sys_logininfor::SysLogininforRepository;
+use crate::service::sys_menu_service::SysMenuService;
+use crate::service::sys_role_service::SysRoleService;
+use crate::service::sys_user_service::{SysUserService, UserAddDto};
+use crate::utils::captcha::generate_captcha;
+use crate::utils::ip_location::IpLocator;
+use crate::utils::password::{
+    encrypt_password, validate_password_complexity, verify_password_with_upgrade_hint,
+    PasswordVerifyResult,
+};
+
+/// 登录失败次数上限（每用户，5 分钟窗口）
+const MAX_LOGIN_FAIL_COUNT: i64 = 5;
+/// 登录失败计数 TTL（秒，5 分钟）
+const LOGIN_FAIL_TTL: i64 = 300;
+/// 同 IP 登录尝试上限（1 分钟窗口）
+const MAX_LOGIN_IP_COUNT: i64 = 10;
+/// IP 限流计数 TTL（秒，1 分钟）
+const LOGIN_IP_TTL: i64 = 60;
+
+/// Redis 限流原子化脚本（INCR + EXPIRE 原子执行，防止计数永不过期）
+///
+/// - 首次 INCR 时设置 TTL，确保计数窗口一定会过期
+/// - 通过 Lua 脚本保证原子性，避免 INCR 与 EXPIRE 分离导致计数永驻
+const RATE_LIMIT_SCRIPT: &str = r#"
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"#;
+
+// ==================== DTO / Vo 定义 ====================
+
+/// 校验验证码会话 UUID 格式（ERR-29 防注入）
+///
+/// 安全说明：uuid 用于拼接 Redis key `captcha:{uuid}:{ip}`，
+/// 若不校验格式，攻击者可注入换行符或特殊字符构造恶意 key。
+///
+/// 规则：
+/// - 空字符串允许通过（验证码开关关闭时前端回传空 uuid）
+/// - 非空字符串必须为合法 UUID 格式（由 uuid::Uuid::parse_str 校验）
+fn validate_captcha_uuid_format(uuid: &str) -> Result<(), validator::ValidationError> {
+    if !uuid.is_empty() && uuid::Uuid::parse_str(uuid).is_err() {
+        return Err(validator::ValidationError::new("验证码 UUID 格式无效"));
+    }
+    Ok(())
+}
+
+/// 登录请求 DTO（对齐前端 login 函数参数）
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginDto {
+    #[validate(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
+    pub username: String,
+    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    pub password: String,
+    /// 验证码
+    pub code: String,
+    /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入）
+    #[validate(custom(function = "validate_captcha_uuid_format"))]
+    pub uuid: String,
+}
+
+/// 注册请求 DTO（对齐前端 register 函数参数）
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterDto {
+    #[validate(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
+    pub username: String,
+    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    pub password: String,
+    /// 验证码
+    pub code: String,
+    /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入）
+    #[validate(custom(function = "validate_captcha_uuid_format"))]
+    pub uuid: String,
+}
+
+/// 锁屏解锁请求 DTO（对齐前端 unlockScreen 函数参数）
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockScreenDto {
+    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    pub password: String,
+}
+
+/// 登录响应 Vo（Service 层返回，Handler 包装为 LoginResult）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginVo {
+    pub token: String,
+}
+
+/// 验证码响应 Vo（Service 层返回，Handler 包装为 CaptchaResult）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptchaVo {
+    /// 验证码开关（从 sys_config.sys.account.captchaEnabled 读取）
+    pub captcha_enabled: bool,
+    /// 验证码图片 Base64（不含 data:image/png;base64, 前缀；开关关闭时为空）
+    pub img: String,
+    /// 验证码会话 UUID（登录时回传；开关关闭时为空）
+    pub uuid: String,
+}
+
+/// 用户信息响应 Vo（Service 层返回，Handler 包装为 GetInfoResult）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetInfoVo {
+    /// 用户信息（password 字段已清空为 None）
+    pub user: SysUserModel,
+    /// 角色 key 列表（超管为 ["admin"]）
+    pub roles: Vec<String>,
+    /// 权限标识列表（超管为 ["*:*:*"]）
+    pub permissions: Vec<String>,
+    /// 密码加密类型（对齐前端 pwdChrtype）
+    pub pwd_chrtype: Option<String>,
+    /// 是否初始密码未修改（对齐前端 isDefaultModifyPwd）
+    pub is_default_modify_pwd: bool,
+    /// 密码是否已过期（对齐前端 isPasswordExpired）
+    pub is_password_expired: bool,
+}
+
+/// 路由节点 Vo（对齐前端 RouterVo）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterVo {
+    pub name: String,
+    pub path: String,
+    pub hidden: bool,
+    pub redirect: Option<String>,
+    pub component: String,
+    pub always_show: Option<bool>,
+    pub meta: MetaVo,
+    pub query: Option<String>,
+    pub children: Option<Vec<RouterVo>>,
+}
+
+/// 路由 meta 信息（对齐前端 MetaVo）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaVo {
+    pub title: String,
+    pub icon: String,
+    pub no_cache: bool,
+    pub link: Option<String>,
+}
+
+/// 登录流程共享上下文（减少子方法参数数量）
+///
+/// 封装登录流程中多个子方法共享的字符串参数（username, login_ip, login_location, browser, os），
+/// 避免 check_rate_limit / verify_captcha / verify_user_credentials / finalize_login / write_login_log
+/// 等方法各自接收 5 个 &str 参数（clippy too_many_arguments）。
+pub struct LoginContext<'a> {
+    pub username: &'a str,
+    pub login_ip: &'a str,
+    pub login_location: &'a str,
+    pub browser: &'a str,
+    pub os: &'a str,
+}
+
+// ==================== Service 实现 ====================
+
+/// 认证服务（不依赖任何 Web 类型）
+///
+/// 持有 5 个 Service/Repository：
+/// - user_service: 用户查询（登录认证、getInfo、密码升级）
+/// - role_service: 角色 key 查询（getInfo）
+/// - menu_service: 菜单树/权限查询（getInfo、getRouters）
+/// - logininfor_repo: 登录日志写入
+/// - config_repo: 参数配置查询（验证码开关等）
+pub struct AuthService {
+    user_service: SysUserService,
+    role_service: SysRoleService,
+    menu_service: SysMenuService,
+    logininfor_repo: SysLogininforRepository,
+    config_repo: SysConfigRepository,
+}
+
+impl AuthService {
+    /// 构造 AuthService（依赖注入：复用 state 层已实例化的 Service / Repository）
+    ///
+    /// 修复 P0-R81-014：原本在内部重复实例化 user_service / role_service / menu_service，
+    /// 导致与 AppState 中的同名实例各自独立（15 个重复 Repository 实例）。
+    /// 现由调用方传入已实例化的 Service，确保单实例共享。
+    pub fn new(
+        user_service: SysUserService,
+        role_service: SysRoleService,
+        menu_service: SysMenuService,
+        logininfor_repo: SysLogininforRepository,
+        config_repo: SysConfigRepository,
+    ) -> Self {
+        Self {
+            user_service,
+            role_service,
+            menu_service,
+            logininfor_repo,
+            config_repo,
+        }
+    }
+
+    /// 读取验证码开关（sys_config.sys.account.captchaEnabled）
+    ///
+    /// 返回规则：
+    /// - 配置不存在或读取失败：默认 true（安全失败，偏向开启验证码）
+    /// - 配置值为 "false"（不区分大小写）：返回 false
+    /// - 其他值：返回 true
+    async fn is_captcha_enabled(&self) -> bool {
+        match self.config_repo.find_by_config_key("sys.account.captchaEnabled").await {
+            Ok(Some(model)) => {
+                let val = model.config_value.unwrap_or_default();
+                !val.eq_ignore_ascii_case("false")
+            }
+            _ => true,
+        }
+    }
+
+    /// 读取注册开关（sys_config.sys.account.registerUser）
+    ///
+    /// 返回规则（P0-R12-001）：
+    /// - 配置不存在或读取失败：默认 false（安全失败：配置缺失时禁止注册）
+    /// - 配置值为 "true"（不区分大小写）：返回 true
+    /// - 其他值：返回 false
+    async fn is_register_enabled(&self) -> bool {
+        match self.config_repo.find_by_config_key("sys.account.registerUser").await {
+            Ok(Some(model)) => {
+                let val = model.config_value.unwrap_or_default();
+                val.eq_ignore_ascii_case("true")
+            }
+            _ => false,
+        }
+    }
+
+    /// 生成验证码并存入 Redis（绑定客户端 IP）
+    ///
+    /// 流程：
+    /// 1. 读取 sys_config.sys.account.captchaEnabled 开关
+    /// 2. 若开关关闭：返回 captcha_enabled=false，不生成图片（前端隐藏验证码输入框）
+    /// 3. 若开关开启：
+    ///    a. 调用 utils::captcha::generate_captcha() 生成验证码
+    ///    b. Redis 写入 captcha:{uuid}:{ip} → 小写验证码，TTL 300s
+    ///    c. 返回 CaptchaVo { captcha_enabled: true, img, uuid }
+    ///
+    /// 安全说明：验证码 key 绑定客户端 IP，防止跨 IP 重放（验证时同样校验 IP）。
+    pub async fn generate_captcha(
+        &self,
+        redis: &mut redis::aio::ConnectionManager,
+        ip: &str,
+    ) -> Result<CaptchaVo, ServiceError> {
+        // 1. 读取验证码开关
+        let captcha_enabled = self.is_captcha_enabled().await;
+        if !captcha_enabled {
+            return Ok(CaptchaVo {
+                captcha_enabled: false,
+                img: String::new(),
+                uuid: String::new(),
+            });
+        }
+
+        // 2. 生成验证码
+        // 验证码图片生成是 CPU 密集型同步操作，用 spawn_blocking 包裹避免阻塞 Tokio runtime（P0-32）
+        let captcha = tokio::task::spawn_blocking(generate_captcha)
+            .await
+            .map_err(|e| {
+                tracing::error!("验证码生成 spawn_blocking 失败: {}", e);
+                ServiceError::internal("验证码生成失败，请稍后再试")
+            })?;
+
+        // 3. 存入 Redis，TTL 300s（5 分钟）
+        //    key 绑定 IP：captcha:{uuid}:{ip}，防止验证码跨 IP 重放
+        let captcha_key = format!("captcha:{}:{}", captcha.uuid, ip);
+        redis::cmd("SETEX")
+            .arg(&captcha_key)
+            .arg(300i64)
+            .arg(captcha.code.to_lowercase())
+            .query_async::<()>(redis)
+            .await?;
+
+        Ok(CaptchaVo {
+            captcha_enabled: true,
+            img: captcha.img_base64,
+            uuid: captcha.uuid,
+        })
+    }
+
+    /// 登录认证全流程
+    ///
+    /// 流程：
+    /// 1. 参数校验
+    /// 2. IP 限流校验（同 IP 1 分钟内 ≤10 次）
+    /// 3. 用户失败次数校验（同用户 5 分钟内 ≤5 次）
+    /// 4. 验证码校验（GETDEL 原子化，防重放攻击）
+    /// 5. 用户查询 + 状态校验（del_flag / status）+ 密码校验
+    /// 6. 密码升级（MD5 → Argon2，best-effort）
+    /// 7. JWT 签发 + 登录日志（成功）+ 在线映射 + 更新登录信息 + 清除失败计数
+    ///
+    /// 修复 P0-R81-013：原 login() 长达 211 行、圈复杂度 20+，拆分为 6 个职责单一的私有子方法，
+    /// 主函数仅负责参数校验、UA 解析、IP 归属地查询与流程编排。
+    ///
+    /// 安全说明：密码错误时返回"用户不存在/密码错误"，避免枚举攻击。
+    /// 登录业务错误统一返回 code=500（对齐 ruoyi-vue3-ts 前端约定）。
+    pub async fn login(
+        &self,
+        dto: LoginDto,
+        login_ip: &str,
+        user_agent: &str,
+        redis: &mut redis::aio::ConnectionManager,
+        jwt_config: &JwtConfig,
+        ip_locator: &IpLocator,
+    ) -> Result<LoginVo, ServiceError> {
+        dto.validate()?;
+
+        let browser = parse_browser(user_agent);
+        let os = parse_os(user_agent);
+        // 查询 IP 归属地（mmdb 文件不存在或查询失败时返回空字符串）
+        let login_location = ip_locator.locate(login_ip);
+
+        let ctx = LoginContext {
+            username: &dto.username,
+            login_ip,
+            login_location: &login_location,
+            browser: &browser,
+            os: &os,
+        };
+
+        // 1. IP 限流校验
+        self.check_rate_limit(redis, &ctx).await?;
+
+        // 2. 用户失败次数校验
+        self.check_fail_count(redis, &ctx).await?;
+
+        // 3. 验证码校验（GETDEL 原子化，防重放攻击）
+        self.verify_captcha(redis, &ctx, &dto.uuid, &dto.code)
+            .await?;
+
+        // 4. 用户查询 + 状态校验 + 密码校验（返回 verify_result 以避免重复 Argon2 verify）
+        let (user, verify_result) = self
+            .verify_user_credentials(&ctx, &dto.password, redis)
+            .await?;
+
+        // 5. 密码升级（MD5 → Argon2，best-effort）
+        self.upgrade_password_if_needed(&user, &dto.password, verify_result)
+            .await?;
+
+        // 6. JWT 签发 + 登录日志（成功）+ 在线映射 + 更新登录信息 + 清除失败计数
+        self.finalize_login(&user, redis, jwt_config, &ctx).await
+    }
+
+    /// IP 限流校验（同 IP 1 分钟内 ≤10 次）
+    ///
+    /// 使用 Lua 脚本原子化 INCR + EXPIRE，防止计数永不过期。
+    /// 超限时写入登录日志（status=1，msg="IP 请求频率超限"）并返回错误。
+    async fn check_rate_limit(
+        &self,
+        redis: &mut redis::aio::ConnectionManager,
+        ctx: &LoginContext<'_>,
+    ) -> Result<(), ServiceError> {
+        let ip_key = format!("login_ip:{}", ctx.login_ip);
+        let ip_count: i64 = redis::Script::new(RATE_LIMIT_SCRIPT)
+            .key(&ip_key)
+            .arg(LOGIN_IP_TTL)
+            .invoke_async(redis)
+            .await
+            .map_err(|e| {
+                tracing::error!("Redis IP 限流计数失败（fail-closed）: {}", e);
+                ServiceError::new(503, "认证服务暂时不可用，请稍后再试")
+            })?;
+        if ip_count > MAX_LOGIN_IP_COUNT {
+            self.write_login_log(ctx, "1", "IP 请求频率超限")
+                .await?;
+            return Err(ServiceError::new(429, "访问频率过高，请稍后再试"));
+        }
+        Ok(())
+    }
+
+    /// 用户失败次数校验（同用户 5 分钟内 ≤5 次）
+    ///
+    /// 超限时写入登录日志（status=1，msg="密码错误次数过多"）并返回错误。
+    async fn check_fail_count(
+        &self,
+        redis: &mut redis::aio::ConnectionManager,
+        ctx: &LoginContext<'_>,
+    ) -> Result<(), ServiceError> {
+        let fail_key = format!("login_fail:{}", ctx.username);
+        let fail_count: Option<i64> = redis::cmd("GET")
+            .arg(&fail_key)
+            .query_async(redis)
+            .await
+            .map_err(|e| {
+                tracing::error!("Redis 登录失败计数查询失败（fail-closed）: {}", e);
+                ServiceError::new(503, "认证服务暂时不可用，请稍后再试")
+            })?;
+        if let Some(count) = fail_count
+            && count >= MAX_LOGIN_FAIL_COUNT
+        {
+            self.write_login_log(ctx, "1", "密码错误次数过多")
+                .await?;
+            return Err(ServiceError::new(429, "密码错误次数过多，请 5 分钟后再试"));
+        }
+        Ok(())
+    }
+
+    /// 验证码校验（GETDEL 原子化，防重放攻击）
+    ///
+    /// 若 sys.account.captchaEnabled=false，则跳过验证码校验。
+    /// captcha key 绑定 IP：captcha:{uuid}:{ip}，防止跨 IP 重放。
+    /// 失败时写入登录日志并返回错误。
+    async fn verify_captcha(
+        &self,
+        redis: &mut redis::aio::ConnectionManager,
+        ctx: &LoginContext<'_>,
+        uuid: &str,
+        code: &str,
+    ) -> Result<(), ServiceError> {
+        if self.is_captcha_enabled().await {
+            let captcha_key = format!("captcha:{}:{}", uuid, ctx.login_ip);
+            let stored_code: Option<String> = redis::cmd("GETDEL")
+                .arg(&captcha_key)
+                .query_async(redis)
+                .await
+                .ok()
+                .flatten();
+
+            let stored = match stored_code {
+                Some(c) => c,
+                None => {
+                    self.write_login_log(ctx, "1", "验证码错误").await?;
+                    return Err(ServiceError::bad_request("验证码已过期或不存在"));
+                }
+            };
+
+            if stored.to_lowercase() != code.to_lowercase() {
+                self.write_login_log(ctx, "1", "验证码错误").await?;
+                return Err(ServiceError::bad_request("验证码错误"));
+            }
+        }
+        Ok(())
+    }
+
+    /// 用户查询 + 状态校验 + 密码校验
+    ///
+    /// 流程：
+    /// 1. 用户查询（不存在则记录失败次数 + 写日志 + 返回错误）
+    /// 2. 状态校验（del_flag / status）
+    /// 3. 密码校验（支持 MD5→Argon2 自动升级提示；不匹配则记录失败次数 + 写日志 + 返回错误）
+    ///
+    /// 返回 (user, verify_result)：verify_result 携带 needs_upgrade 标志，供 upgrade_password_if_needed 复用，
+    /// 避免重复执行 Argon2 verify（每次约 50ms）。
+    ///
+    /// 安全说明：密码错误时返回"用户不存在/密码错误"，避免枚举攻击。
+    async fn verify_user_credentials(
+        &self,
+        ctx: &LoginContext<'_>,
+        password: &str,
+        redis: &mut redis::aio::ConnectionManager,
+    ) -> Result<(SysUserModel, PasswordVerifyResult), ServiceError> {
+        // 1. 用户查询
+        let user = match self.user_service.get_user_by_username(ctx.username).await? {
+            Some(u) => u,
+            None => {
+                self.record_login_failure(ctx.username, redis).await?;
+                self.write_login_log(ctx, "1", "用户不存在/密码错误")
+                    .await?;
+                return Err(ServiceError::unauthorized("用户不存在/密码错误"));
+            }
+        };
+
+        // 2. 用户状态校验
+        if user.del_flag.as_deref() == Some("2") {
+            self.write_login_log(ctx, "1", "账号已删除").await?;
+            return Err(ServiceError::unauthorized("账号已删除，请联系管理员"));
+        }
+        if user.status.as_deref() == Some("1") {
+            self.write_login_log(ctx, "1", "账号已停用").await?;
+            return Err(ServiceError::unauthorized("账号已停用，请联系管理员"));
+        }
+
+        // 3. 密码校验（支持 MD5→Argon2 自动升级）
+        // Argon2 verify 是 CPU 密集型同步操作，用 spawn_blocking 包裹避免阻塞 Tokio runtime（P0-31）
+        let stored_password = user.password.as_deref().unwrap_or("").to_string();
+        let password_for_verify = password.to_string();
+        let verify_result = tokio::task::spawn_blocking(move || {
+            verify_password_with_upgrade_hint(&password_for_verify, &stored_password)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("密码验证 spawn_blocking 失败: {}", e);
+            ServiceError::internal("密码验证失败，请稍后再试")
+        })?;
+        if !verify_result.is_valid {
+            self.record_login_failure(ctx.username, redis).await?;
+            self.write_login_log(ctx, "1", "用户不存在/密码错误")
+                .await?;
+            return Err(ServiceError::unauthorized("用户不存在/密码错误"));
+        }
+
+        Ok((user, verify_result))
+    }
+
+    /// 密码升级（MD5 → Argon2，best-effort）
+    ///
+    /// 若 verify_result.needs_upgrade 为 true（旧 MD5 哈希），重新用 Argon2 加密并存储。
+    /// 失败不阻断登录（仅记录警告日志）。
+    /// Argon2 hash 是 CPU 密集型同步操作，用 spawn_blocking 包裹（P0-31）。
+    ///
+    /// 注：verify_result 由 verify_user_credentials 返回，避免在此处重复执行 Argon2 verify。
+    async fn upgrade_password_if_needed(
+        &self,
+        user: &SysUserModel,
+        password: &str,
+        verify_result: PasswordVerifyResult,
+    ) -> Result<(), ServiceError> {
+        if !verify_result.needs_upgrade {
+            return Ok(());
+        }
+
+        // Argon2 hash 是 CPU 密集型同步操作，用 spawn_blocking 包裹（P0-31）
+        let password_for_hash = password.to_string();
+        let hash_result = tokio::task::spawn_blocking(move || encrypt_password(&password_for_hash))
+            .await
+            .map_err(|e| {
+                tracing::error!("密码加密 spawn_blocking 失败: {}", e);
+                ServiceError::internal("密码加密失败")
+            })?;
+        match hash_result {
+            Ok(new_hash) => {
+                if let Err(e) = self.user_service.upgrade_password_hash(user.user_id, &new_hash).await {
+                    tracing::warn!("用户 {} 密码哈希升级失败（不阻断登录）: {}", user.user_id, e);
+                } else {
+                    tracing::info!("用户 {} 密码哈希已从 MD5 升级为 Argon2", user.user_id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("用户 {} 密码哈希升级失败（加密失败，不阻断登录）: {}", user.user_id, e);
+            }
+        }
+        Ok(())
+    }
+
+    /// JWT 签发 + 登录日志（成功）+ 在线用户映射 + 更新登录信息 + 清除失败计数
+    ///
+    /// 流程：
+    /// 1. JWT 签发
+    /// 2. 写入登录成功日志并获取 info_id
+    /// 3. 存储 `online:{token_hash}` → `OnlineSession` JSON 到 Redis（用于在线用户列表 + 强退）
+    /// 4. 更新 login_ip / login_date（失败不阻断登录）
+    /// 5. 清除登录失败计数
+    ///
+    /// P1-19 方案 B：online key 由 `online:{info_id}` 改为 `online:{token_hash}`，
+    /// value 由裸 token 改为 JSON（含 user_id/username/ip/login_time/browser/os/jti）。
+    /// 解决旧方案两个 Bug：
+    /// - logout 未 DEL online key，用户登出后仍显示在线 30 分钟
+    /// - 30 分钟硬窗口与 JWT 24h 有效期不一致
+    async fn finalize_login(
+        &self,
+        user: &SysUserModel,
+        redis: &mut redis::aio::ConnectionManager,
+        jwt_config: &JwtConfig,
+        ctx: &LoginContext<'_>,
+    ) -> Result<LoginVo, ServiceError> {
+        // 1. JWT 签发
+        let user_id = user.user_id.to_string();
+        let token = JwtUtils::generate_token(&user_id, ctx.username, jwt_config)?;
+
+        // 2. 登录日志写入（成功），并获取 info_id
+        //    info_id 仍保留用于登录日志关联，但不再作为 online key
+        let _info_id = self
+            .write_login_log(ctx, "0", "登录成功")
+            .await?;
+
+        // 3. 存储 `online:{token_hash}` → `OnlineSession` JSON，用于在线用户列表与强退
+        //    - key 用 token_hash（与 blacklist:{token_hash} 对齐，强退时同一 key 命名空间）
+        //    - value 改为 JSON（含 user_id/username/ip/login_time/browser/os/jti），
+        //      list 接口可直接 SCAN + MGET 解析，无需查 sys_logininfor 表
+        //    - TTL = jwt_config.expire_hours * SECS_PER_HOUR（与 JWT 过期时间对齐，避免硬编码 7200）
+        //    - SETEX 失败不阻断登录（best-effort）：online key 不影响鉴权，仅影响在线列表展示
+        let token_hash = crate::utils::crypto::token_hash(&token);
+        let online_key = format!("online:{}", token_hash);
+        let online_ttl = jwt_config.expire_hours * SECS_PER_HOUR;
+        // 获取 jti：刚签发的 token，verify 必然成功（exp = now + expire_hours，不会立即过期）
+        let claims = JwtUtils::verify_token(&token, jwt_config)?;
+        // 查询用户部门名称（失败时填空字符串，不阻断登录）
+        // 复用 user_service 的 dept 查询能力，避免 AuthService 直接依赖 SysDeptRepository
+        let dept_name = self
+            .user_service
+            .get_dept_name_by_user_id(user.user_id)
+            .await
+            .unwrap_or_default();
+        let session = crate::utils::crypto::OnlineSession {
+            user_id: user.user_id,
+            username: ctx.username.to_string(),
+            ip: ctx.login_ip.to_string(),
+            login_time: chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+            browser: ctx.browser.to_string(),
+            os: ctx.os.to_string(),
+            jti: claims.jti,
+            dept_name,
+        };
+        let session_json = serde_json::to_string(&session)?;
+        let _: () = redis::cmd("SETEX")
+            .arg(&online_key)
+            .arg(online_ttl)
+            .arg(&session_json)
+            .query_async(redis)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "写入 online:{} 失败（不阻断登录，仅影响在线列表展示）: {}",
+                    token_hash,
+                    e
+                );
+            });
+
+        // 3.5 同用户同 IP+Browser 旧会话清理（P1-ONLINE-DEDUP）
+        //   问题：原实现每次登录都创建新的 online:{token_hash} key，TTL=JWT 有效期，
+        //   同一用户在相同浏览器重复登录会产生多个会话记录，污染在线用户列表。
+        //   测试中 admin 反复登录导致列表显示 10 条 admin 记录，明显不合理。
+        //
+        //   方案：维护 `user_sessions:{user_id}:{ip}:{browser}` → 最新 token_hash
+        //   - 同 IP+Browser 视为同一设备/浏览器会话，新登录替代旧会话
+        //   - 不同 IP 或不同 Browser 视为多设备登录，互不影响（保留多设备共存能力）
+        //   - 旧会话的 online key 立即删除，从在线列表消失；JWT 自身仍有效（不强制踢出）
+        //     （如果立即让 JWT 失效需写黑名单，会破坏用户在旧标签页的会话，故仅清理展示）
+        //
+        //   失败处理：best-effort，不阻断登录
+        let normalized_browser = ctx.browser.to_lowercase().replace(' ', "");
+        let user_session_key = format!(
+            "user_sessions:{}:{}:{}",
+            user.user_id, ctx.login_ip, normalized_browser
+        );
+        // GET 旧 token_hash（如有）
+        let old_token_hash_opt: Option<String> = redis::cmd("GET")
+            .arg(&user_session_key)
+            .query_async(redis)
+            .await
+            .unwrap_or(None);
+        if let Some(old_token_hash) = old_token_hash_opt
+            && old_token_hash != token_hash
+        {
+            let old_online_key = format!("online:{}", old_token_hash);
+            let _: () = redis::cmd("DEL")
+                .arg(&old_online_key)
+                .query_async(redis)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "清理同用户同浏览器旧会话 online:{} 失败（不阻断登录）: {}",
+                        old_token_hash,
+                        e
+                    );
+                });
+            tracing::info!(
+                "用户 {} 在相同浏览器(IP={})重复登录，已清理旧会话 {}",
+                ctx.username,
+                ctx.login_ip,
+                old_token_hash
+            );
+        }
+        // SET 新 token_hash 到 user_session_key（TTL 与 online key 对齐）
+        let _: () = redis::cmd("SETEX")
+            .arg(&user_session_key)
+            .arg(online_ttl)
+            .arg(&token_hash)
+            .query_async(redis)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "写入 {} 失败（不阻断登录，仅影响旧会话去重）: {}",
+                    user_session_key,
+                    e
+                );
+            });
+
+        // 4. 更新 login_ip / login_date（失败不阻断登录）
+        if let Err(e) = self.user_service.update_login_info(user.user_id, ctx.login_ip).await {
+            tracing::warn!("更新用户登录信息失败（不阻断登录）: {}", e);
+        }
+
+        // 5. 清除登录失败计数
+        let fail_key = format!("login_fail:{}", ctx.username);
+        let _: () = redis::cmd("DEL")
+            .arg(&fail_key)
+            .query_async(redis)
+            .await
+            .unwrap_or(());
+
+        Ok(LoginVo { token })
+    }
+
+    /// 登出：token 加入 Redis 黑名单 + 删除 online 会话映射（fail-closed：黑名单写入失败返回错误）
+    ///
+    /// 流程：
+    /// 1. 验证 token 获取 claims（计算剩余 TTL）
+    /// 2. 计算剩余有效期 = exp - now
+    /// 3. 若剩余 > 0：Redis SETEX blacklist:{token_hash} "1" EX {剩余秒数}（fail-closed）
+    /// 4. DEL online:{token_hash}（best-effort：失败仅记日志，因 online key 会自然过期）
+    ///
+    /// P1-19 方案 B：新增步骤 4，修复旧方案 logout 未 DEL online key 的 Bug
+    /// （旧方案用户登出后仍显示在线 30 分钟）。
+    pub async fn logout(
+        &self,
+        token: &str,
+        redis: &mut redis::aio::ConnectionManager,
+        jwt_config: &JwtConfig,
+    ) -> Result<(), ServiceError> {
+        // 验证 token 获取 claims（计算剩余 TTL）
+        let claims = JwtUtils::verify_token(token, jwt_config)?;
+
+        // 计算剩余有效期
+        // R5-TYPE-13：使用 try_from 替代 `as usize`，避免 32 位系统回绕
+        let now = usize::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+        let remaining = claims.exp.saturating_sub(now);
+
+        // token_hash：blacklist key 与 online key 共用同一哈希命名空间
+        let token_hash = crate::utils::crypto::token_hash(token);
+
+        // 若 token 仍有效，写入黑名单（fail-closed：失败返回错误）
+        // 使用 token 的 SHA-256 哈希作为 key，节省 Redis 内存
+        if remaining > 0 {
+            let blacklist_key = format!("blacklist:{}", token_hash);
+            redis::cmd("SETEX")
+                .arg(&blacklist_key)
+                .arg(remaining)
+                .arg("1")
+                .query_async::<()>(redis)
+                .await
+                .map_err(|e| {
+                    tracing::error!("登出黑名单写入失败（fail-closed）: {}", e);
+                    ServiceError::internal("登出处理失败，请重试")
+                })?;
+        }
+
+        // DEL online:{token_hash}（best-effort：失败不阻断 logout）
+        //   修复 P1-19 Bug：旧方案 logout 仅写黑名单未 DEL online key，
+        //   导致用户登出后仍显示在线 30 分钟。online key 会自然过期，DEL 失败仅影响展示及时性。
+        let online_key = format!("online:{}", token_hash);
+        let _: () = redis::cmd("DEL")
+            .arg(&online_key)
+            .query_async(redis)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "DEL online:{} 失败（不阻断 logout，key 会自然过期）: {}",
+                    token_hash,
+                    e
+                );
+            });
+
+        // 清理 user_sessions 索引（best-effort）
+        //   该 key 由 finalize_login 写入，用于同用户同浏览器重复登录时清理旧会话。
+        //   logout 时不一定能精确知道原 IP/Browser（claims 中无此信息），故尝试删除所有匹配 user_sessions:{user_id}:* 的 key。
+        //   失败不阻断 logout。
+        let user_session_pattern = format!("user_sessions:{}:*", claims.sub);
+        if let Ok(keys) = crate::handler::monitor_cache_handler::scan_keys(redis, &user_session_pattern).await
+            && !keys.is_empty()
+        {
+            // 批量 DEL（pipeline 单次往返，替代循环 N 次 DEL）
+            let mut pipe = redis::pipe();
+            for k in &keys {
+                pipe.cmd("DEL").arg(k);
+            }
+            if let Err(e) = pipe.query_async::<Vec<i64>>(redis).await {
+                tracing::warn!("批量 DEL user_sessions 失败（不阻断 logout）: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 获取用户信息（user + roles + permissions）
+    ///
+    /// 注意：get_user_by_id 返回 UserVo { user, role_ids }，需提取 .user 字段。
+    /// password 字段必须清空为 None，避免泄露密文。
+    pub async fn get_info(&self, user_id: i64) -> Result<GetInfoVo, ServiceError> {
+        let vo = self.user_service.get_user_by_id(user_id).await?;
+        let mut user = vo.user;
+        // 清空密码，避免泄露密文（双重保险，entity 已 #[serde(skip_serializing)]）
+        user.password = None;
+
+        let roles = self.role_service.get_role_keys_by_user_id(user_id).await?;
+        let permissions = self.menu_service.get_permissions_by_user_id(user_id).await?;
+
+        // 密码安全策略字段
+        // pwd_chrtype：密码加密类型（当前固定为 "argon2"）
+        let pwd_chrtype = Some("argon2".to_string());
+        // is_default_modify_pwd：是否仍使用初始密码
+        // user_type "00"=正常用户（非初始密码标识），不应作为初始密码判断依据
+        // 当前无 pwd_update_time 字段，默认为 false（admin 密码已修改过）
+        let is_default_modify_pwd = false;
+        // is_password_expired：密码是否过期（当前无密码过期策略，固定为 false）
+        let is_password_expired = false;
+
+        Ok(GetInfoVo {
+            user,
+            roles,
+            permissions,
+            pwd_chrtype,
+            is_default_modify_pwd,
+            is_password_expired,
+        })
+    }
+
+    /// 获取用户路由树
+    ///
+    /// 流程：
+    /// 1. 查询用户菜单树（menu_service 已过滤 F 类型 + 组装树形结构）
+    /// 2. 递归转换为 RouterVo（menu_to_router）
+    pub async fn get_routers(&self, user_id: i64) -> Result<Vec<RouterVo>, ServiceError> {
+        let menu_tree = self.menu_service.get_menu_tree_by_user_id(user_id).await?;
+        let routers: Vec<RouterVo> = menu_tree.iter().map(|m| menu_to_router(m, "")).collect();
+        Ok(routers)
+    }
+
+    /// 用户注册（公开接口，免鉴权）
+    ///
+    /// 流程：
+    /// 1. 参数校验
+    /// 2. 验证码校验（GETDEL 原子化，防重放攻击；开关关闭时跳过）
+    /// 3. 用户名查重
+    /// 4. Argon2 加密密码
+    /// 5. 创建用户（默认昵称同用户名，状态正常，不分配角色/部门）
+    /// 6. 返回成功
+    ///
+    /// 安全说明：注册成功后不自动登录，前端引导用户去登录页。
+    pub async fn register(
+        &self,
+        dto: RegisterDto,
+        ip: &str,
+        redis: &mut redis::aio::ConnectionManager,
+    ) -> Result<(), ServiceError> {
+        dto.validate()?;
+
+        // R19-1.3：密码复杂度校验（注册入口拦截弱口令）
+        validate_password_complexity(&dto.password).map_err(|e| ServiceError::bad_request(&e))?;
+
+        // 0. 注册开关校验（P0-R12-001）
+        //    sys.account.registerUser 默认 false（安全失败：配置缺失时禁止注册）
+        //    管理员需显式在 sys_config 中将 registerUser 设为 true 才开放注册
+        //    状态码：403 Forbidden（业务策略禁止，非系统错误）
+        if !self.is_register_enabled().await {
+            return Err(ServiceError::forbidden("当前系统未开放注册，请联系管理员"));
+        }
+
+        // 1. 验证码校验（GETDEL 原子化，防重放攻击）
+        //    若 sys.account.captchaEnabled=false，则跳过验证码校验
+        //    captcha key 绑定 IP：captcha:{uuid}:{ip}，防止跨 IP 重放
+        //    状态码：400 Bad Request（客户端输入问题，非系统错误）
+        if self.is_captcha_enabled().await {
+            let captcha_key = format!("captcha:{}:{}", dto.uuid, ip);
+            let stored_code: Option<String> = redis::cmd("GETDEL")
+                .arg(&captcha_key)
+                .query_async(redis)
+                .await
+                .ok()
+                .flatten();
+
+            let stored = match stored_code {
+                Some(c) => c,
+                None => return Err(ServiceError::bad_request("验证码已过期或不存在")),
+            };
+
+            if stored.to_lowercase() != dto.code.to_lowercase() {
+                return Err(ServiceError::bad_request("验证码错误"));
+            }
+        }
+
+        // 2. 用户名查重
+        //    状态码：400 Bad Request（客户端输入冲突，非系统错误）
+        let existing = self.user_service.get_user_by_username(&dto.username).await?;
+        if existing.is_some() {
+            return Err(ServiceError::bad_request("用户名已存在"));
+        }
+
+        // 3. 创建用户（复用 user_service.add_user，昵称默认同用户名）
+        let add_dto = UserAddDto {
+            dept_id: None,
+            user_name: dto.username.clone(),
+            nick_name: dto.username,
+            email: None,
+            phonenumber: None,
+            sex: None,
+            password: dto.password,
+            status: Some("0".to_string()),
+            role_ids: None,
+            post_ids: None,
+            remark: None,
+        };
+        self.user_service.add_user(add_dto, "register").await?;
+
+        Ok(())
+    }
+
+    /// 锁屏解锁（需登录态，校验当前用户密码）
+    ///
+    /// 流程：
+    /// 1. 参数校验
+    /// 2. 查询用户
+    /// 3. Argon2 校验密码（spawn_blocking 避免阻塞 Tokio runtime，P0-31）
+    /// 4. 匹配成功返回 Ok(())，失败返回密码错误
+    pub async fn unlock_screen(
+        &self,
+        user_id: i64,
+        dto: UnlockScreenDto,
+    ) -> Result<(), ServiceError> {
+        dto.validate()?;
+
+        let vo = self.user_service.get_user_by_id(user_id).await?;
+        let user = vo.user;
+
+        // Argon2 verify 是 CPU 密集型同步操作，用 spawn_blocking 包裹（P0-31）
+        let stored_password = user.password.as_deref().unwrap_or("").to_string();
+        let password_for_verify = dto.password;
+        let verify_result = tokio::task::spawn_blocking(move || {
+            verify_password_with_upgrade_hint(&password_for_verify, &stored_password)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("密码验证 spawn_blocking 失败: {}", e);
+            ServiceError::internal("密码验证失败，请稍后再试")
+        })?;
+        if !verify_result.is_valid {
+            return Err(ServiceError::unauthorized("密码错误"));
+        }
+
+        Ok(())
+    }
+
+    // ==================== 内部辅助方法 ====================
+
+    /// 记录登录失败次数（Lua 脚本原子化 INCR + EXPIRE，防止计数永不过期）
+    async fn record_login_failure(
+        &self,
+        username: &str,
+        redis: &mut redis::aio::ConnectionManager,
+    ) -> Result<(), ServiceError> {
+        let fail_key = format!("login_fail:{}", username);
+        let _: i64 = redis::Script::new(RATE_LIMIT_SCRIPT)
+            .key(&fail_key)
+            .arg(LOGIN_FAIL_TTL)
+            .invoke_async(redis)
+            .await
+            .map_err(|e| {
+                tracing::error!("Redis 登录失败计数更新失败（fail-closed）: {}", e);
+                ServiceError::new(503, "认证服务暂时不可用，请稍后再试")
+            })?;
+        Ok(())
+    }
+
+    /// 写入登录日志
+    ///
+    /// 参数：
+    /// - status: "0" 成功 / "1" 失败
+    /// - msg: 日志消息
+    /// - browser / os: 从 User-Agent 解析
+    /// - login_location: IP 归属地（由 IpLocator 查询得到）
+    async fn write_login_log(
+        &self,
+        ctx: &LoginContext<'_>,
+        status: &str,
+        msg: &str,
+    ) -> Result<i64, ServiceError> {
+        let now = chrono::Local::now().naive_local();
+        let mut am = sys_logininfor::ActiveModel {
+            ..Default::default()
+        };
+        am.user_name = Set(Some(ctx.username.to_string()));
+        am.ipaddr = Set(Some(ctx.login_ip.to_string()));
+        am.login_location = Set(if ctx.login_location.is_empty() {
+            None
+        } else {
+            Some(ctx.login_location.to_string())
+        });
+        am.browser = Set(Some(ctx.browser.to_string()));
+        am.os = Set(Some(ctx.os.to_string()));
+        am.status = Set(Some(status.to_string()));
+        am.msg = Set(Some(msg.to_string()));
+        am.login_time = Set(Some(now));
+        let model = self.logininfor_repo.insert(am).await?;
+        Ok(model.info_id)
+    }
+}
+
+// ==================== 辅助函数 ====================
+
+/// 从 User-Agent 简单提取浏览器名称
+///
+/// 注意：Edge 判断必须在 Chrome 之前（Edge UA 含 "Chrome" 字符串）。
+/// 现代 Edge（Chromium 内核）UA 使用 "Edg/"，旧版 Edge 使用 "Edge/"，
+/// 统一用 "Edg" 子串匹配覆盖两者。
+fn parse_browser(ua: &str) -> String {
+    if ua.contains("Edg") {
+        "Edge".to_string()
+    } else if ua.contains("Chrome") {
+        "Chrome".to_string()
+    } else if ua.contains("Firefox") {
+        "Firefox".to_string()
+    } else if ua.contains("Safari") {
+        "Safari".to_string()
+    } else {
+        "Unknown".to_string()
+    }
+}
+
+/// 从 User-Agent 简单提取操作系统名称
+///
+/// 注意：iPhone/iPad UA 含 "Mac OS" 字符串，iOS 判断必须在 macOS 之前。
+fn parse_os(ua: &str) -> String {
+    if ua.contains("Windows") {
+        "Windows".to_string()
+    } else if ua.contains("iPhone") || ua.contains("iPad") {
+        "iOS".to_string()
+    } else if ua.contains("Android") {
+        "Android".to_string()
+    } else if ua.contains("Mac OS") {
+        "macOS".to_string()
+    } else if ua.contains("Linux") {
+        "Linux".to_string()
+    } else {
+        "Unknown".to_string()
+    }
+}
+
+/// 将 SysMenuModel 转换为 RouterVo（递归转换子节点）
+///
+/// 转换规则（对齐 ref-salvo-admin / ruoyi-vue3-ts）：
+/// - name: 优先 route_name，其次 path；子路由添加父路径前缀确保全局唯一
+/// - path: 顶级目录（parent_id==0 且 type=="M"）加 `/` 前缀；其他原样
+/// - hidden: status == "1"（禁用状态隐藏）
+/// - redirect: is_frame==1 && type=="M" → "noRedirect"；否则 None
+/// - component: None/空 → 顶级 "Layout" / 子级目录 "ParentView"；否则原样
+/// - alwaysShow: visible=="0" && type!="C" && is_frame==1 → Some(true)
+/// - meta.title: menu_name
+/// - meta.icon: icon（默认空字符串）
+/// - meta.noCache: is_cache == 1
+/// - meta.link: is_frame == 0（外链）→ Some(path)
+/// - children: 递归转换，过滤 F 类型，空则 None
+///
+/// name 唯一性：Vue Router 要求路由 name 全局唯一，后注册的同名路由会覆盖先注册的。
+/// 之前 `/dashboard`(name=dashboard) 和 `/system/dashboard`(name=dashboard) 冲突，
+/// 导致 `/dashboard` 路由被覆盖，其子路由全部 404。
+/// 修复：子路由 name 添加父路径前缀，如 `system-dashboard`、`dashboard-workbench`。
+fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
+    let menu_type = menu.menu_type.as_deref().unwrap_or("C");
+    let is_frame = menu.is_frame.as_deref().unwrap_or("1");
+    let is_cache = menu.is_cache.as_deref().unwrap_or("0");
+    let visible = menu.visible.as_deref().unwrap_or("0");
+    let status = menu.status.as_deref().unwrap_or("0");
+    let parent_id = menu.parent_id.unwrap_or(0);
+
+    // path 转换：顶级菜单（parent_id==0）一律加 / 前缀
+    // 原因：Vue Router 要求顶层路由 path 必须以 "/" 开头，否则抛出
+    // "Route paths should start with a '/': "xxx" should be "/xxx""
+    // 修复前仅 type=="M" 加前缀，导致顶级 type=="C" 菜单（如数据看板 dashboard）缺斜杠
+    // 例外：外链（is_frame=="0"）的 path 是完整 URL，不加前缀
+    let path = if parent_id == 0 && is_frame != "0" {
+        let raw = menu.path.as_deref().unwrap_or("");
+        if raw.starts_with('/') || raw.starts_with("http") {
+            raw.to_string()
+        } else {
+            format!("/{}", raw)
+        }
+    } else {
+        menu.path.clone().unwrap_or_default()
+    };
+
+    // component 转换
+    let component = match menu.component.as_deref() {
+        None | Some("") => {
+            if parent_id == 0 && menu_type == "M" {
+                "Layout".to_string()
+            } else if parent_id != 0 && menu_type == "M" {
+                "ParentView".to_string()
+            } else {
+                String::new()
+            }
+        }
+        Some(c) => c.to_string(),
+    };
+
+    // redirect 转换
+    let redirect = if is_frame == "1" && menu_type == "M" {
+        Some("noRedirect".to_string())
+    } else {
+        None
+    };
+
+    // alwaysShow 转换
+    let always_show = if visible == "0" && menu_type != "C" && is_frame == "1" {
+        Some(true)
+    } else {
+        None
+    };
+
+    // meta 转换
+    let meta = MetaVo {
+        title: menu.menu_name.clone(),
+        icon: menu.icon.clone().unwrap_or_default(),
+        no_cache: is_cache == "1",
+        link: if is_frame == "0" {
+            menu.path.clone()
+        } else {
+            None
+        },
+    };
+
+    // name 生成：优先 route_name，其次 path
+    // 子路由添加父路径前缀确保全局唯一（避免 Vue Router name 冲突覆盖）
+    let base_name = menu
+        .route_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| menu.path.clone())
+        .unwrap_or_default();
+    let name = if parent_path.is_empty() {
+        base_name.clone()
+    } else {
+        format!("{}-{}", parent_path, base_name)
+    };
+
+    // 用 name 作为子路由的 parent_path 传参
+    // 这样嵌套层级越深，name 前缀越长，确保唯一
+    let child_parent_path = name.clone();
+
+    // children 递归转换（过滤 F 类型，防御性二次过滤）
+    let children = if let Some(ref kids) = menu.children {
+        let router_kids: Vec<RouterVo> = kids
+            .iter()
+            .filter(|k| k.menu_type.as_deref() != Some("F"))
+            .map(|k| menu_to_router(k, &child_parent_path))
+            .collect();
+        if router_kids.is_empty() {
+            None
+        } else {
+            Some(router_kids)
+        }
+    } else {
+        None
+    };
+
+    RouterVo {
+        name,
+        path,
+        hidden: status == "1",
+        redirect,
+        component,
+        always_show,
+        meta,
+        query: menu.query.clone(),
+        children,
+    }
+}
+
+// ==================== 单元测试 ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::sys_menu::Model as SysMenuModel;
+
+    /// 构造测试用菜单模型
+    #[allow(clippy::too_many_arguments)]
+    fn make_menu(
+        menu_id: i64,
+        parent_id: i64,
+        menu_type: &str,
+        path: &str,
+        component: Option<&str>,
+        is_frame: &str,
+        is_cache: &str,
+        status: &str,
+        visible: &str,
+        route_name: Option<&str>,
+    ) -> SysMenuModel {
+        SysMenuModel {
+            menu_id,
+            menu_name: format!("菜单{}", menu_id),
+            parent_id: Some(parent_id),
+            order_num: Some(0),
+            path: Some(path.to_string()),
+            component: component.map(|s| s.to_string()),
+            query: None,
+            route_name: route_name.map(|s| s.to_string()),
+            is_frame: Some(is_frame.to_string()),
+            is_cache: Some(is_cache.to_string()),
+            menu_type: Some(menu_type.to_string()),
+            visible: Some(visible.to_string()),
+            status: Some(status.to_string()),
+            perms: None,
+            icon: Some("test-icon".to_string()),
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+            remark: None,
+            del_flag: Some("0".to_string()),
+            children: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_browser_chrome() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+        assert_eq!(parse_browser(ua), "Chrome");
+    }
+
+    #[test]
+    fn test_parse_browser_edge_priority() {
+        // Edge UA 含 "Chrome" 字符串，Edge 判断必须优先
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0";
+        assert_eq!(parse_browser(ua), "Edge");
+    }
+
+    #[test]
+    fn test_parse_browser_firefox() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0";
+        assert_eq!(parse_browser(ua), "Firefox");
+    }
+
+    #[test]
+    fn test_parse_browser_safari() {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+        assert_eq!(parse_browser(ua), "Safari");
+    }
+
+    #[test]
+    fn test_parse_browser_unknown() {
+        let ua = "SomeUnknownBrowser/1.0";
+        assert_eq!(parse_browser(ua), "Unknown");
+    }
+
+    #[test]
+    fn test_parse_os_windows() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+        assert_eq!(parse_os(ua), "Windows");
+    }
+
+    #[test]
+    fn test_parse_os_macos() {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
+        assert_eq!(parse_os(ua), "macOS");
+    }
+
+    #[test]
+    fn test_parse_os_android() {
+        let ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7)";
+        assert_eq!(parse_os(ua), "Android");
+    }
+
+    #[test]
+    fn test_parse_os_ios() {
+        let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)";
+        assert_eq!(parse_os(ua), "iOS");
+    }
+
+    #[test]
+    fn test_parse_os_linux() {
+        let ua = "Mozilla/5.0 (X11; Linux x86_64)";
+        assert_eq!(parse_os(ua), "Linux");
+    }
+
+    #[test]
+    fn test_menu_to_router_top_directory() {
+        // 顶级目录：parent_id=0, type=M
+        let menu = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
+        let router = menu_to_router(&menu, "");
+
+        assert_eq!(router.path, "/system"); // 顶级目录 path 加 / 前缀
+        assert_eq!(router.component, "Layout"); // 顶级目录 component 默认 Layout
+        assert_eq!(router.redirect, Some("noRedirect".to_string())); // M + is_frame=1
+        assert!(!router.hidden); // status=0
+        assert_eq!(router.always_show, Some(true)); // visible=0 && M && is_frame=1
+        assert!(!router.meta.no_cache); // is_cache=0
+        assert_eq!(router.meta.link, None); // is_frame=1 不是外链
+        assert_eq!(router.name, "system"); // 无 route_name，用 path
+    }
+
+    #[test]
+    fn test_menu_to_router_top_directory_with_route_name() {
+        // name 优先使用 route_name
+        let menu = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", Some("sys"));
+        let router = menu_to_router(&menu, "");
+        assert_eq!(router.name, "sys"); // route_name 优先
+    }
+
+    #[test]
+    fn test_menu_to_router_sub_directory() {
+        // 子级目录：parent_id!=0, type=M
+        let menu = make_menu(2, 1, "M", "config", None, "1", "0", "0", "0", None);
+        let router = menu_to_router(&menu, "");
+
+        assert_eq!(router.path, "config"); // 非顶级目录不加 / 前缀
+        assert_eq!(router.component, "ParentView"); // 子级目录默认 ParentView
+    }
+
+    #[test]
+    fn test_menu_to_router_menu_type_c() {
+        // 菜单类型 C：保留 component
+        let menu = make_menu(
+            3,
+            1,
+            "C",
+            "user",
+            Some("system/user/index"),
+            "1",
+            "0",
+            "0",
+            "0",
+            None,
+        );
+        let router = menu_to_router(&menu, "");
+
+        assert_eq!(router.component, "system/user/index"); // 原样保留
+        assert_eq!(router.redirect, None); // 非 M 类型无 redirect
+        assert_eq!(router.always_show, None); // C 类型无 alwaysShow
+    }
+
+    #[test]
+    fn test_menu_to_router_external_link() {
+        // 外链：is_frame=0
+        let menu = make_menu(4, 0, "C", "https://example.com", None, "0", "0", "0", "0", None);
+        let router = menu_to_router(&menu, "");
+
+        assert_eq!(
+            router.meta.link,
+            Some("https://example.com".to_string())
+        ); // is_frame=0 → link
+        assert_eq!(router.redirect, None); // is_frame=0 不满足 is_frame==1
+        // 外链 path 不加 / 前缀（path 是完整 URL）
+        assert_eq!(router.path, "https://example.com");
+    }
+
+    #[test]
+    fn test_menu_to_router_top_level_c_menu_has_slash_prefix() {
+        // 顶级 C 类型菜单（如数据看板）：path 应加 / 前缀
+        // 修复前：仅 type=="M" 加前缀，导致顶级 C 菜单 path="dashboard" 缺斜杠
+        // Vue Router 抛出 "Route paths should start with a "/": "dashboard" should be "/dashboard""
+        let menu = make_menu(
+            132, 0, "C", "dashboard",
+            Some("dashboard/index"), "1", "0", "0", "0", None,
+        );
+        let router = menu_to_router(&menu, "");
+        assert_eq!(router.path, "/dashboard"); // 顶级 C 菜单也需 / 前缀
+        assert_eq!(router.component, "dashboard/index"); // component 原样保留
+    }
+
+    #[test]
+    fn test_menu_to_router_hidden_status() {
+        // status=1 → hidden=true
+        let menu = make_menu(5, 0, "M", "hidden-dir", None, "1", "0", "1", "0", None);
+        let router = menu_to_router(&menu, "");
+        assert!(router.hidden);
+    }
+
+    #[test]
+    fn test_menu_to_router_no_cache() {
+        // is_cache=1 → no_cache=true
+        let menu = make_menu(6, 0, "M", "cached-dir", None, "1", "1", "0", "0", None);
+        let router = menu_to_router(&menu, "");
+        assert!(router.meta.no_cache);
+    }
+
+    #[test]
+    fn test_menu_to_router_with_children() {
+        // 带子菜单的顶级目录
+        let child = make_menu(
+            8,
+            7,
+            "C",
+            "user",
+            Some("system/user/index"),
+            "1",
+            "0",
+            "0",
+            "0",
+            None,
+        );
+        let mut parent = make_menu(7, 0, "M", "system", None, "1", "0", "0", "0", None);
+        parent.children = Some(vec![child]);
+
+        let router = menu_to_router(&parent, "");
+        assert!(router.children.is_some());
+        let children = router.children.unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "system-user"); // 子路由 name 添加父路径前缀
+    }
+
+    #[test]
+    fn test_menu_to_router_filter_button_children() {
+        // 子菜单含 F 类型（按钮），应被过滤
+        let button = make_menu(9, 7, "F", "btn", None, "1", "0", "0", "0", None);
+        let menu_c = make_menu(
+            10,
+            7,
+            "C",
+            "role",
+            Some("system/role/index"),
+            "1",
+            "0",
+            "0",
+            "0",
+            None,
+        );
+        let mut parent = make_menu(7, 0, "M", "system", None, "1", "0", "0", "0", None);
+        parent.children = Some(vec![button, menu_c]);
+
+        let router = menu_to_router(&parent, "");
+        let children = router.children.unwrap();
+        assert_eq!(children.len(), 1); // F 被过滤，只剩 C
+        assert_eq!(children[0].name, "system-role"); // 子路由 name 添加父路径前缀
+    }
+
+    #[test]
+    fn test_menu_to_router_empty_children_returns_none() {
+        // 子菜单全为 F 类型 → children 为 None
+        let button = make_menu(11, 7, "F", "btn", None, "1", "0", "0", "0", None);
+        let mut parent = make_menu(7, 0, "M", "system", None, "1", "0", "0", "0", None);
+        parent.children = Some(vec![button]);
+
+        let router = menu_to_router(&parent, "");
+        assert!(router.children.is_none()); // 全过滤后为 None
+    }
+}

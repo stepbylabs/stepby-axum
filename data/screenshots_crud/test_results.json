@@ -1,0 +1,331 @@
+{
+  "total": 54,
+  "passed": 54,
+  "failed": 0,
+  "details": [
+    {
+      "page": "用户管理",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，9 行"
+    },
+    {
+      "page": "用户管理",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 9 行 → 搜索后 1 行"
+    },
+    {
+      "page": "用户管理",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 4 字段，成功消息出现"
+    },
+    {
+      "page": "用户管理",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "用户管理",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 10→9"
+    },
+    {
+      "page": "角色管理",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，9 行"
+    },
+    {
+      "page": "角色管理",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 9 行 → 搜索后 0 行"
+    },
+    {
+      "page": "角色管理",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 3 字段，成功消息出现"
+    },
+    {
+      "page": "角色管理",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "角色管理",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 10→10"
+    },
+    {
+      "page": "菜单管理",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，90 行"
+    },
+    {
+      "page": "菜单管理",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 90 行 → 搜索后 3 行"
+    },
+    {
+      "page": "菜单管理",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 3 字段，成功消息出现"
+    },
+    {
+      "page": "菜单管理",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "菜单管理",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 91→91"
+    },
+    {
+      "page": "部门管理",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，15 行"
+    },
+    {
+      "page": "部门管理",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 15 行 → 搜索后 0 行"
+    },
+    {
+      "page": "部门管理",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 2 字段，成功消息出现"
+    },
+    {
+      "page": "部门管理",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "部门管理",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 16→16"
+    },
+    {
+      "page": "岗位管理",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，10 行"
+    },
+    {
+      "page": "岗位管理",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 10 行 → 搜索后 1 行"
+    },
+    {
+      "page": "岗位管理",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 3 字段，成功消息出现"
+    },
+    {
+      "page": "岗位管理",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "岗位管理",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 10→10"
+    },
+    {
+      "page": "字典管理",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，10 行"
+    },
+    {
+      "page": "字典管理",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 10 行 → 搜索后 0 行"
+    },
+    {
+      "page": "字典管理",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 2 字段，成功消息出现"
+    },
+    {
+      "page": "字典管理",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "字典管理",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 10→10"
+    },
+    {
+      "page": "参数设置",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，6 行"
+    },
+    {
+      "page": "参数设置",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 6 行 → 搜索后 0 行"
+    },
+    {
+      "page": "参数设置",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 3 字段，成功消息出现"
+    },
+    {
+      "page": "参数设置",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "参数设置",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 7→6"
+    },
+    {
+      "page": "通知公告",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，1 行"
+    },
+    {
+      "page": "通知公告",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 1 行 → 搜索后 0 行"
+    },
+    {
+      "page": "通知公告",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 1 字段，成功消息出现"
+    },
+    {
+      "page": "通知公告",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "通知公告",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 2→1"
+    },
+    {
+      "page": "定时任务",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功，1 行"
+    },
+    {
+      "page": "定时任务",
+      "action": "查询",
+      "success": true,
+      "detail": "搜索前 1 行 → 搜索后 0 行"
+    },
+    {
+      "page": "定时任务",
+      "action": "新建",
+      "success": true,
+      "detail": "已填充 3 字段，成功消息出现"
+    },
+    {
+      "page": "定时任务",
+      "action": "修改",
+      "success": true,
+      "detail": "已修改 1 字段，成功消息出现"
+    },
+    {
+      "page": "定时任务",
+      "action": "删除",
+      "success": true,
+      "detail": "DELETE 200，行数 2→1"
+    },
+    {
+      "page": "在线用户",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "调度日志",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "操作日志",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "登录日志",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "缓存监控",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "服务监控",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "个人中心",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "表单构建",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    },
+    {
+      "page": "系统接口",
+      "action": "页面加载",
+      "success": true,
+      "detail": "加载成功"
+    }
+  ]
+}

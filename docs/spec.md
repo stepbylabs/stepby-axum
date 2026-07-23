@@ -1,0 +1,988 @@
+# 工程脚手架与基础框架 规范文档（spec.md）
+
+> **阶段：** 第一阶段「工程脚手架与基础框架」
+> **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
+> **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
+> **参考优先级：** 接口契约对齐 ref-salvo-admin / ruoyi-vue3-ts ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+
+---
+
+## 1. 概述与目标
+
+### 1.1 本阶段目标
+
+在 `axum-backend/` 目录下搭建可编译、可运行、可联调的工程脚手架，完成以下基础能力：
+
+1. 完整分层目录结构（handler / service / repository / entity / common / config / migration / middleware）
+2. Cargo.toml 核心依赖清单（稳定版本号）
+3. 通用能力：统一响应结构体、全局错误类型、配置管理、数据库连接池、Redis 连接池、日志体系、JWT、中间件、密码工具、验证码工具、树工具
+4. 应用入口 `main.rs` 通过 initialize 模块完成初始化编排并启动 HTTP 服务
+5. migration 独立子 crate，含 sea-orm-migration 初始化与首个空迁移骨架
+6. 健康检查接口 `/health` 可验证服务运行
+
+### 1.2 非目标（本阶段不实现）
+
+- 具体业务模块 CRUD（用户/角色/菜单/部门/字典/岗位等）
+- 定时任务、数据权限、操作日志落库
+- 前端联调（留待第二阶段业务接口实现后）
+
+### 1.3 架构原则
+
+| 原则 | 说明 |
+|------|------|
+| Workspace + 单应用 crate | 根 crate 为应用主体，`migration/` 为独立子 crate（对齐 ref-soybean-admin 的 workspace 理念） |
+| 严格分层 | Handler → Service → Repository，单向依赖，禁止反向 |
+| SeaORM 唯一 ORM | 全程使用 SeaORM，禁止混用其他 ORM |
+| 配置外置 | 通过 `config/config.toml` 加载配置，支持 `RUST_LOG` 环境变量覆盖 |
+| 接口契约第一 | 响应结构、字段命名、状态码 100% 对齐 ruoyi-vue3-ts |
+| initialize 编排 | 初始化流程集中在 `initialize` 模块（对齐 ref-soybean-admin 的 `server/initialize`） |
+
+### 1.4 ref-soybean-admin 架构对照
+
+| ref-soybean-admin 设计 | axum-backend 对应实现 | 借鉴要点 |
+|--------------------------|------------------------|----------|
+| `server/core/web/res.rs` Res\<T\> | `src/common/response.rs` AjaxResult\<T\> + TableDataInfo\<T\> | 统一响应结构 + IntoResponse 实现 |
+| `server/core/web/error.rs` AppError | `src/common/error.rs` AppError | 错误类型 + From 转换 + IntoResponse |
+| `server/core/web/page.rs` PageRequest | `src/common/page.rs` PageDomain | 分页参数（字段名对齐前端 pageNum/pageSize） |
+| `server/core/web/jwt.rs` JwtUtils | `src/jwt/claims.rs` JwtUtils | JWT 生成/验证，Claims 结构 |
+| `server/middleware/jwt.rs` | `src/middleware/auth.rs` auth_middleware | from_fn_with_state 中间件模式 |
+| `server/global/global.rs` 全局状态 | `src/state.rs` AppState | 改用 Axum State 注入（非全局静态） |
+| `server/initialize/` 初始化编排 | `src/initialize/mod.rs` | 集中编排 DB/Redis/日志/路由初始化 |
+| `server/config/` 配置加载 | `src/config/settings.rs` | 简化为 toml 单文件加载 |
+| `server/model/entities/` | `src/entity/` | SeaORM 实体（本阶段占位） |
+| `server/service/` | `src/service/` | 业务逻辑层（本阶段占位） |
+| `server/api/` | `src/handler/` | Handler 层 |
+| `server/router/` | `src/router/` | 路由聚合 |
+
+**关键差异（有意为之）：**
+- 不使用 `OnceCell`/`Lazy` 全局静态存储 DB 连接，改用 `State<Arc<AppState>>` 注入（Axum 官方推荐，更易测试）
+- 不引入 Casbin（本阶段不需要复杂 RBAC，JWT Claims 足够）
+- 不引入 MongoDB/S3（不在本项目范围）
+- 配置加载简化为 toml 单文件 + `RUST_LOG` 覆盖（不使用 config crate 的多源合并，降低复杂度）
+
+---
+
+## 2. 技术栈与稳定版本号
+
+### 2.1 核心依赖清单（主 crate `axum-backend`）
+
+| 依赖 | 版本 | features | 用途 |
+|------|------|----------|------|
+| **axum** | `0.8` | `macros` | Web 框架 |
+| axum-extra | `0.12` | `typed-header` | Authorization Bearer typed header |
+| **sea-orm** | `1.1` | `runtime-tokio-rustls, sqlx-mysql, macros, with-chrono, debug-print` | ORM |
+| **tokio** | `1` | `rt-multi-thread, macros, signal` | 异步运行时 |
+| **jsonwebtoken** | `10` | - | JWT 生成与验证 |
+| tower | `0.5` | - | 中间件基础 |
+| tower-http | `0.7` | `cors, trace, compression-gzip` | HTTP 中间件 |
+| serde | `1` | `derive` | 序列化框架 |
+| serde_json | `1` | - | JSON 处理 |
+| tracing | `0.1` | - | 分布式追踪 |
+| tracing-subscriber | `0.3` | `env-filter, fmt` | 日志订阅者 |
+| chrono | `0.4` | `serde` | 时间处理 |
+| uuid | `1` | `v4` | UUID 生成（请求 ID / 验证码 key） |
+| anyhow | `1` | - | 通用错误处理 |
+| toml | `0.8` | - | 配置文件解析 |
+| redis | `1.3` | `tokio-comp` | Redis 客户端（token/captcha 缓存） |
+| md-5 | `0.11` | - | 密码加盐 MD5（对齐 ref-salvo-admin） |
+| validator | `0.20` | `derive` | 参数校验 |
+| captcha | `1.0` | - | 验证码图片生成 |
+
+> **依赖精简说明：**
+> - 移除 `base64`：captcha 1.0 的 `as_base64()` 直接返回 Base64 字符串，无需手动编码
+> - 移除 `once_cell`：采用 Axum `State<Arc<AppState>>` 注入，无需全局静态延迟初始化
+> - 移除 `thiserror`：`AppError` 手写实现（更灵活控制 `IntoResponse`），未用 derive 宏
+> - 移除 `rand`：验证码 RNG 由 captcha crate 内部管理，主 crate 无直接调用
+
+### 2.2 migration 子 crate 依赖
+
+| 依赖 | 版本 | features | 用途 |
+|------|------|----------|------|
+| sea-orm-migration | `1.1` | `runtime-tokio-rustls, sqlx-mysql` | 数据库迁移 |
+| tokio | `1` | `rt-multi-thread, macros` | 异步运行时 |
+
+### 2.3 版本选型依据
+
+- **Axum 0.8**（最新稳定 0.8.9）：`from_fn_with_state` 中间件、`IntoResponse` trait、TypeSafe 路由稳定。
+- **SeaORM 1.1**（最新稳定 1.1.20）：`DeriveEntityModel`/`DeriveActiveModel`/`paginate` API 成熟，1.0 为重要里程碑版本，API 向下兼容 0.12 的核心用法。
+- **jsonwebtoken 10**（最新稳定 10.4.0）：`EncodingKey`/`DecodingKey`/`Validation` API 稳定，10.x 新增 `CryptoProvider` trait 与 `crypto` 模块，核心 `encode`/`decode` 用法不变。
+- **tower-http 0.7**（最新稳定 0.7.0）：与 axum 0.8 兼容的 `TraceLayer`/`CorsLayer`/`CompressionLayer`。
+- **redis 1.3**（最新稳定 1.3.0）：1.0 为里程碑版本，`ConnectionManager` API 保持兼容，`tokio-comp` feature 启用 tokio 运行时支持。
+- **captcha 1.0**（最新稳定 1.0.0）：API 完全重写，新增 `generate(Difficulty)` 便捷函数、`view(width, height)` 尺寸参数、`as_png()` 返回 `Option<Vec<u8>>`，`Noise::new(strength)` 需要强度参数。
+- **axum-extra 0.12**（最新稳定 0.12.6）：匹配 axum 0.8，`TypedHeader` extractor API 保持兼容。
+- **md-5 0.11**（最新稳定 0.11.0）：`Md5`/`Digest` trait API 兼容 0.10。
+- **validator 0.20**（最新稳定 0.20.0）：`derive` 宏 API 兼容。
+
+---
+
+## 3. 完整目录结构设计
+
+```
+axum-backend/
+├── Cargo.toml                      # 主 crate 依赖清单 + [workspace] 声明
+├── config/
+│   └── config.toml                 # 运行配置文件
+├── .gitignore
+├── docs/
+│   ├── spec.md                     # 本文档
+│   ├── tasks.md                    # 任务分解
+│   └── checklist.md                # 校验清单
+│
+├── src/                            # ===== 主应用 crate =====
+│   ├── main.rs                     # 应用入口：调用 initialize 并启动 axum server
+│   ├── lib.rs                      # 库入口：re-export 所有公开模块
+│   │
+│   ├── config/                     # 【配置管理】
+│   │   ├── mod.rs
+│   │   └── settings.rs             # Settings 结构体 + from_file 加载
+│   │
+│   ├── common/                     # 【通用能力】
+│   │   ├── mod.rs
+│   │   ├── response.rs             # AjaxResult / TableDataInfo（对齐前端）
+│   │   ├── error.rs                # AppError + IntoResponse + From 转换
+│   │   ├── page.rs                 # PageDomain 分页参数
+│   │   └── constants.rs            # 系统常量（状态码、默认值）
+│   │
+│   ├── db/                         # 【数据连接】
+│   │   ├── mod.rs
+│   │   ├── pool.rs                 # SeaORM DatabaseConnection 初始化
+│   │   └── redis.rs                # Redis 连接池初始化
+│   │
+│   ├── entity/                     # 【SeaORM 实体层】
+│   │   └── mod.rs                  # 实体模块导出（本阶段占位）
+│   │
+│   ├── repository/                 # 【数据访问层】
+│   │   └── mod.rs                  # Repository 模块导出（本阶段占位）
+│   │
+│   ├── service/                    # 【业务逻辑层】
+│   │   └── mod.rs                  # Service 模块导出（本阶段占位）
+│   │
+│   ├── handler/                    # 【HTTP Handler 层】
+│   │   ├── mod.rs
+│   │   └── health.rs               # 健康检查 /health
+│   │
+│   ├── middleware/                 # 【中间件】
+│   │   ├── mod.rs
+│   │   ├── auth.rs                 # JWT 鉴权中间件（from_fn_with_state）
+│   │   └── request_id.rs           # 请求 ID 注入中间件
+│   │
+│   ├── router/                     # 【路由定义】
+│   │   ├── mod.rs                  # 路由聚合 + 全局中间件叠加
+│   │   └── public.rs               # 公开路由（/health）
+│   │
+│   ├── jwt/                        # 【JWT 工具】
+│   │   ├── mod.rs
+│   │   └── claims.rs               # Claims + JwtUtils
+│   │
+│   ├── initialize/                 # 【初始化编排】（对齐 ref-soybean-admin）
+│   │   └── mod.rs                  # 集中编排：日志/配置/DB/Redis/路由
+│   │
+│   ├── utils/                      # 【通用工具】
+│   │   ├── mod.rs
+│   │   ├── password.rs             # 密码加盐 MD5（对齐 ref-salvo-admin）
+│   │   ├── captcha.rs              # 验证码生成（base64 + uuid）
+│   │   └── tree.rs                 # 通用树构建工具
+│   │
+│   ├── state.rs                    # AppState 共享状态
+│   └── logger.rs                   # 日志体系初始化
+│
+└── migration/                      # ===== migration 子 crate =====
+    ├── Cargo.toml                  # sea-orm-migration 依赖
+    └── src/
+        ├── lib.rs                  # MigratorTrait 实现
+        ├── main.rs                 # 迁移命令行入口
+        └── m20250711_000001_init.rs  # 首个空迁移骨架
+```
+
+### 3.1 各层职责
+
+| 层级 | 目录 | 职责 | 禁止事项 |
+|------|------|------|----------|
+| Handler | `src/handler/` | 参数解析、调用 Service、结果封装为 `AjaxResult`/`TableDataInfo` | 禁止含业务逻辑 |
+| Service | `src/service/` | 全部业务逻辑、事务控制、参数校验 | 禁止依赖 Web 类型 |
+| Repository | `src/repository/` | 数据库查询封装，仅与 SeaORM 交互 | 禁止含业务逻辑 |
+| Entity | `src/entity/` | SeaORM 实体定义（Model/ActiveModel/Column/Relation） | 禁止含查询逻辑 |
+| Common | `src/common/` | 响应结构体、错误类型、分页参数、常量 | 无业务语义 |
+| Config | `src/config/` | 配置结构体定义与加载 | 无副作用 |
+| Migration | `migration/` | 数据库 schema 迁移（独立子 crate） | 禁止含业务逻辑 |
+| Middleware | `src/middleware/` | JWT 鉴权、请求 ID 等横切关注 | 禁止含业务逻辑 |
+| Initialize | `src/initialize/` | 初始化编排（日志/DB/Redis/路由） | 仅在启动时调用 |
+| Utils | `src/utils/` | 密码、验证码、树构建等纯函数工具 | 无状态、无副作用 |
+
+### 3.2 依赖方向
+
+```
+main.rs
+  └── initialize ──→ router ──→ handler ──→ service ──→ repository ──→ entity
+                       │            │            │            │
+                       │            └────────────┴────────────┴──→ common
+                       │
+                       └──→ middleware ──→ jwt ──→ common
+                       │
+                       └──→ state ──→ db, config
+                       │
+                       └──→ utils（无依赖，纯函数）
+
+migration（独立子 crate，不依赖主 crate）
+  └──→ sea-orm-migration
+```
+
+**单向依赖规则：** handler → service → repository → entity，任何反向依赖视为违规。
+
+---
+
+## 4. 通用能力设计
+
+### 4.1 统一响应结构体（对齐 ruoyi-vue3-ts）
+
+> **契约来源：** `ruoyi-vue3-ts/src/types/api/common.ts` + `ruoyi-vue3-ts/src/utils/request.ts`
+
+#### 4.1.1 普通响应 `AjaxResult<T>`
+
+```rust
+/// 普通接口响应（对齐前端 AjaxResult）
+/// JSON: { "code": 200, "msg": "操作成功", "data": <T> }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AjaxResult<T> {
+    pub code: i32,
+    pub msg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<T>,
+}
+```
+
+构造方法：
+- `AjaxResult::success(data)` → `{ code: 200, msg: "操作成功", data: Some(data) }`
+- `AjaxResult::success_msg(msg)` → `{ code: 200, msg, data: None }`
+- `AjaxResult::error(code, msg)` → `{ code, msg, data: None }`
+
+#### 4.1.2 分页响应 `TableDataInfo<T>`
+
+```rust
+/// 分页接口响应（对齐前端 TableDataInfo）
+/// JSON: { "code": 200, "msg": "查询成功", "total": 100, "rows": [...] }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableDataInfo<T> {
+    pub code: i32,
+    pub msg: String,
+    pub total: u64,
+    pub rows: Vec<T>,
+}
+```
+
+构造方法：
+- `TableDataInfo::new(total, rows)` → `{ code: 200, msg: "查询成功", total, rows }`
+
+#### 4.1.3 IntoResponse 实现
+
+`AjaxResult<T>` 和 `TableDataInfo<T>` 均直接实现 `IntoResponse` trait，handler 无需手动包 `Json`：
+
+```rust
+impl<T: Serialize> IntoResponse for AjaxResult<T> {
+    fn into_response(self) -> Response {
+        (StatusCode::OK, Json(self)).into_response()
+    }
+}
+```
+
+**handler 返回类型简化对照：**
+
+| 方式 | 返回类型 | 说明 |
+|------|----------|------|
+| ❌ 旧方式 | `Result<Json<AjaxResult<T>>, AppError>` | 需手动包 Json |
+| ✅ 新方式 | `Result<AjaxResult<T>, AppError>` | 直接返回，IntoResponse 自动序列化 |
+
+> **关键：** HTTP 状态码统一 200，业务错误由 body.code 表达。`AppError` 的 `IntoResponse` 也遵循此约定。
+
+#### 4.1.4 状态码约定（前端 request.ts 拦截器行为）
+
+| code | 含义 | 前端行为 |
+|------|------|----------|
+| `200` | 成功 | `resolve(res.data)`，业务层拿到整个响应体 |
+| `401` | 未认证/会话过期 | 弹重新登录框，登出跳转 |
+| `500` | 服务端错误 | `ElMessage.error(msg)` |
+| `601` | 警告类错误 | `ElMessage.warning(msg)` |
+| 其它非 200 | 通用错误 | `ElNotification.error({ title: msg })` |
+
+> **关键：** HTTP 状态码统一返回 200，业务错误通过 body 中的 `code` 表达。`code` 必须是 `i32`。
+
+### 4.2 全局错误类型
+
+```rust
+#[derive(Debug)]
+pub struct AppError {
+    pub code: i32,
+    pub message: String,
+}
+
+impl AppError {
+    pub fn new(code: i32, message: impl Into<String>) -> Self { ... }
+    pub fn unauthorized(msg: &str) -> Self { Self::new(401, msg) }
+    pub fn bad_request(msg: &str) -> Self { Self::new(400, msg) }
+    pub fn not_found(msg: &str) -> Self { Self::new(404, msg) }
+    pub fn internal(msg: &str) -> Self { Self::new(500, msg) }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(&self) -> Response {
+        // HTTP 状态码始终 200，业务错误由 body.code 表达
+        let body = Json(AjaxResult::<()>::error(self.code, &self.message));
+        (StatusCode::OK, body).into_response()
+    }
+}
+```
+
+错误转换实现（`From` trait）完整对照表：
+
+| 源错误 | 映射 code | 说明 |
+|--------|-----------|------|
+| `sea_orm::DbErr::RecordNotFound` | 404 | 记录不存在 |
+| `sea_orm::DbErr::RecordNotUpdated` | 404 | 记录未更新 |
+| `sea_orm::DbErr::ConnectionAcquire` | 503 | 连接池获取失败 |
+| `sea_orm::DbErr::TryIntoErr` | 400 | 类型转换错误 |
+| `sea_orm::DbErr::AttrNotSet` | 400 | 属性未设置 |
+| `sea_orm::DbErr` (其它) | 500 | 数据库通用错误 |
+| `jsonwebtoken::errors::Error` | 401 | JWT 验证失败 |
+| `serde_json::Error` | 500 | 序列化错误 |
+| `std::io::Error` | 500 | IO 错误 |
+| `redis::RedisError` (AuthenticationFailed) | 401 | Redis 认证失败 |
+| `redis::RedisError` (其它) | 500 | Redis 通用错误 |
+| `anyhow::Error` | 500 | 通用错误兜底 |
+
+### 4.3 配置管理
+
+#### 4.3.1 配置结构体
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+pub struct Settings {
+    pub server: ServerConfig,
+    pub database: DatabaseConfig,
+    pub redis: RedisConfig,
+    pub jwt: JwtConfig,
+    pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    pub host: String,        // "0.0.0.0"
+    pub port: u16,           // 8080
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseConfig {
+    pub url: String,
+    pub max_connections: u32,
+    pub min_connections: u32,
+    pub connect_timeout: u64,
+    pub idle_timeout: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RedisConfig {
+    pub url: String,              // "redis://127.0.0.1:6379/"
+    pub max_connections: u32,     // 连接池大小
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JwtConfig {
+    pub secret: String,
+    pub expire_hours: i64,        // 对齐 ref-salvo-admin 的 6 小时
+    pub issuer: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LogConfig {
+    pub level: String,            // "info" / "debug"
+    pub sql_logging: bool,
+}
+```
+
+#### 4.3.2 配置文件 `config/config.toml`
+
+```toml
+# ⚠️ 生产环境请务必修改 database.url 和 jwt.secret
+# 此文件含敏感信息，生产环境建议加入 .gitignore
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[database]
+url = "mysql://root:password@127.0.0.1:3306/ry-vue"
+max_connections = 100
+min_connections = 5
+connect_timeout = 8
+idle_timeout = 8
+
+[redis]
+url = "redis://127.0.0.1:6379/"
+max_connections = 10
+
+[jwt]
+secret = "axum-backend-secret-key-change-in-production"
+expire_hours = 6
+issuer = "axum-backend"
+
+[log]
+level = "info"
+sql_logging = true
+```
+
+#### 4.3.3 加载方式
+
+```rust
+impl Settings {
+    pub fn from_file(path: &str) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let settings: Settings = toml::from_str(&content)?;
+        Ok(settings)
+    }
+}
+```
+
+配置加载后存入 `AppState`，通过 Axum `State` 注入。日志级别支持 `RUST_LOG` 环境变量覆盖。
+
+### 4.4 数据库连接池
+
+```rust
+pub async fn init_database(config: &DatabaseConfig) -> anyhow::Result<DatabaseConnection> {
+    let mut opt = ConnectOptions::new(&config.url);
+    opt.max_connections(config.max_connections)
+       .min_connections(config.min_connections)
+       .connect_timeout(Duration::from_secs(config.connect_timeout))
+       .idle_timeout(Duration::from_secs(config.idle_timeout))
+       .sqlx_logging(config.sql_logging);
+    let db = Database::connect(opt).await?;
+    Ok(db)
+}
+```
+
+**设计要点：**
+- 使用 `ConnectOptions` 精细控制连接池参数（对齐 ref-axum-admin 的 `db.rs`）
+- 连接池实例存入 `AppState`，通过 `State<Arc<AppState>>` 注入
+- 不使用 `OnceCell` 全局静态（对齐 ref-soybean-admin 的 State 注入理念）
+
+### 4.5 Redis 连接池
+
+```rust
+use redis::aio::ConnectionManager;
+
+pub async fn init_redis(config: &RedisConfig) -> anyhow::Result<ConnectionManager> {
+    let client = redis::Client::open(&config.url)?;
+    let mut conn = ConnectionManager::new(client).await?;
+    // 测试连接
+    let pong: String = redis::cmd("PING").query_async(&mut conn).await?;
+    tracing::info!("Redis 连接成功: {} (PING -> {})", config.url, pong);
+    Ok(conn)
+}
+```
+
+**设计要点：**
+- 使用 `ConnectionManager`（自动重连，clone 成本低，内部 Arc 共享）
+- 初始化时执行 PING 验证连通性
+- `ConnectionManager` 实现了 `Clone`，可直接存入 `AppState` 并在 handler 间 clone
+- 注意：`query_async` 接收 `&mut ConnectionManager`，无需 `conn.clone()`
+
+**用途（本阶段预留，业务阶段启用）：**
+- 验证码存储（`uuid -> code`，TTL 5 分钟）
+- 登录 token 管理（`token -> user_id`，TTL 与 JWT 一致）
+- 字典缓存
+
+### 4.6 日志体系
+
+```rust
+pub fn init_logger(log_config: &LogConfig) {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&log_config.level));
+
+    let fmt_layer = fmt::layer()
+        .with_target(true)
+        .with_ansi(true)
+        .with_file(true)
+        .with_line_number(true);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .init();
+}
+```
+
+**设计要点：**
+- 基于 `tracing` + `tracing-subscriber`，与 Axum 的 `TraceLayer` 无缝集成
+- 支持 `RUST_LOG` 环境变量覆盖配置文件级别
+- SQL 日志由 `LogConfig.sql_logging` 控制（传递给 SeaORM `ConnectOptions`）
+- 请求级追踪通过 `tower-http` 的 `TraceLayer` 实现
+
+### 4.7 JWT 设计
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: String,        // 用户 ID
+    pub username: String,   // 用户名
+    pub exp: usize,         // 过期时间戳（秒）
+    pub iat: usize,         // 签发时间戳（秒）
+    pub iss: String,        // 签发者
+}
+
+pub struct JwtUtils;
+
+impl JwtUtils {
+    pub fn generate_token(user_id: &str, username: &str, config: &JwtConfig) -> anyhow::Result<String> {
+        // HS 算法，密钥从 JwtConfig.secret
+        let now = chrono::Utc::now();
+        let exp = now + chrono::Duration::hours(config.expire_hours);
+        let claims = Claims { sub: user_id.to_string(), username: username.to_string(),
+                              exp: exp.timestamp() as usize, iat: now.timestamp() as usize,
+                              iss: config.issuer.clone() };
+        encode(&Header::default(), &claims, &EncodingKey::from_secret(config.secret.as_bytes()))?
+    }
+
+    pub fn verify_token(token: &str, config: &JwtConfig) -> anyhow::Result<Claims> {
+        let mut validation = Validation::default();
+        validation.set_issuer(&[&config.issuer]);
+        let token_data = decode::<Claims>(token, &DecodingKey::from_secret(config.secret.as_bytes()), &validation)?;
+        Ok(token_data.claims)
+    }
+}
+```
+
+### 4.8 中间件设计
+
+#### 4.8.1 请求 ID 中间件
+
+```rust
+pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    req.extensions_mut().insert(RequestId(request_id.clone()));
+    let mut response = next.run(req).await;
+    response.headers_mut().insert("X-Request-Id", request_id.parse().unwrap());
+    response
+}
+```
+
+#### 4.8.2 JWT 鉴权中间件
+
+```rust
+use axum::extract::Request;
+use axum::http::header::AUTHORIZATION;
+use axum::middleware::Next;
+use axum::response::Response;
+
+/// JWT 鉴权中间件（from_fn_with_state 模式）
+/// 手动提取 Authorization header，缺失时返回 401（对齐前端 request.ts 拦截器）
+pub async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    // 手动提取 Authorization header（缺失返回 401，而非 400）
+    let auth_header = req.headers().get(&AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| AppError::unauthorized("请求未携带 token，请重新登录"))?;
+
+    // 解析 Bearer token（格式：Bearer <token>）
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| AppError::unauthorized("token 格式错误，应为 Bearer <token>"))?;
+
+    // 验证 token 并注入 Claims
+    let claims = JwtUtils::verify_token(token, &state.config.jwt)?;
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}
+```
+
+**挂载方式（在 router/mod.rs 中）：**
+
+```rust
+// 受保护路由通过 from_fn_with_state 挂载中间件
+use axum::middleware::from_fn_with_state;
+Router::new()
+    .route("/system/user/list", get(handler::list_users))
+    .layer(from_fn_with_state(state.clone(), auth_middleware))
+```
+
+> **关键设计：**
+> - 手动提取 header 而非用 `TypedHeader` extractor 参数，确保 token 缺失时返回 401（对齐前端拦截器），而非 axum 默认的 400
+> - 使用 `strip_prefix("Bearer ")` 解析 token，不依赖 `axum-extra` 的 `TypedHeader` extractor
+> - 免鉴权路由（`/health`、`/login`、`/captchaImage`）不挂载此中间件
+
+### 4.9 AppState 共享状态
+
+```rust
+#[derive(Clone)]
+pub struct AppState {
+    pub db: DatabaseConnection,
+    pub redis: redis::aio::ConnectionManager,
+    pub config: Arc<Settings>,
+}
+```
+
+### 4.10 密码工具（对齐 ref-salvo-admin）
+
+```rust
+use md5::{Digest, Md5};
+use crate::common::constants::constants::PASSWORD_SALT;
+
+/// 密码加盐 MD5（盐值 "yebot_admin"，不兼容 ref-salvo-admin 旧密码）
+pub fn encrypt_password(password: &str) -> String {
+    let salted = format!("{}{}", password, PASSWORD_SALT);
+    let mut hasher = Md5::new();
+    hasher.update(salted.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+pub fn verify_password(password: &str, hashed: &str) -> bool {
+    encrypt_password(password) == hashed
+}
+```
+
+> **说明：** 使用 `Md5::new()` + `Digest` trait API（md-5 0.11 推荐写法），盐值常量 `PASSWORD_SALT = "yebot_admin"` 定义在 `common/constants.rs`。
+
+### 4.11 验证码工具
+
+```rust
+use captcha::Captcha;
+use captcha::filters::Noise;
+use uuid::Uuid;
+
+/// 验证码结果
+pub struct CaptchaResult {
+    pub uuid: String,       // 验证码 key（存 Redis）
+    pub img_base64: String, // Base64 图片（不含 data:image/png;base64, 前缀）
+    pub code: String,       // 验证码明文（存 Redis 用于校验）
+}
+
+/// 生成 4 位字母数字验证码（使用 captcha 1.0 API）
+/// captcha 1.0 关键变化：
+/// - add_chars(n) 返回 &mut Self（不再返回 String）
+/// - view(w, h) 需要指定宽高
+/// - as_base64() 直接返回 Option<String>（无需手动 base64 编码）
+/// - chars_as_string() 获取验证码明文
+/// - Noise::new(strength) 需要强度参数
+pub fn generate_captcha() -> CaptchaResult {
+    let mut captcha = Captcha::new();
+    captcha.set_chars(&"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".chars().collect::<Vec<_>>());
+    captcha.add_chars(4);
+    captcha.apply_filter(Noise::new(0.3));
+    captcha.view(220, 120);
+
+    let code = captcha.chars_as_string();
+    let img_base64 = captcha.as_base64().unwrap_or_default();
+    let uuid = Uuid::new_v4().to_string();
+
+    CaptchaResult { uuid, img_base64, code }
+}
+```
+
+### 4.12 树构建工具
+
+```rust
+/// 通用树节点 trait（对齐 ref-soybean-admin 的 tree_util）
+pub trait TreeNode {
+    fn id(&self) -> i64;
+    fn parent_id(&self) -> i64;
+    fn children_mut(&mut self) -> &mut Option<Vec<Self>> where Self: Sized;
+}
+
+/// 将扁平列表构建为树结构
+/// root_parent_id 为根节点的 parent_id（通常为 0）
+pub fn build_tree<T: TreeNode + Clone>(list: &[T], root_parent_id: i64) -> Vec<T> {
+    let mut roots: Vec<T> = list.iter()
+        .filter(|n| n.parent_id() == root_parent_id)
+        .cloned()
+        .collect();
+    for root in &mut roots {
+        build_children(root, list);
+    }
+    roots
+}
+
+fn build_children<T: TreeNode + Clone>(node: &mut T, list: &[T]) {
+    let node_id = node.id();
+    let children: Vec<T> = list.iter()
+        .filter(|n| n.parent_id() == node_id)
+        .cloned()
+        .collect();
+    if children.is_empty() {
+        return;
+    }
+    // 先挂载 children，再递归处理每个 child
+    if let Some(kids) = node.children_mut() {
+        *kids = Some(children);
+    }
+    if let Some(kids) = node.children_mut() {
+        if let Some(ref mut children) = kids {
+            for kid in children.iter_mut() {
+                build_children(kid, list);
+            }
+        }
+    }
+}
+```
+
+### 4.13 initialize 初始化编排（对齐 ref-soybean-admin）
+
+```rust
+/// 初始化编排模块（对齐 ref-soybean-admin 的 server/initialize）
+pub struct AppInitializer;
+
+impl AppInitializer {
+    /// 执行完整初始化流程，返回 AppState
+    pub async fn run(config_path: &str) -> anyhow::Result<Arc<AppState>> {
+        // 1. 加载配置
+        let settings = Arc::new(Settings::from_file(config_path)?);
+
+        // 2. 初始化日志
+        logger::init_logger(&settings.log);
+
+        // 3. 初始化数据库
+        let db = db::init_database(&settings.database).await?;
+
+        // 4. 初始化 Redis
+        let redis = db::init_redis(&settings.redis).await?;
+
+        // 5. 构建 AppState
+        Ok(Arc::new(AppState { db, redis, config: settings }))
+    }
+}
+```
+
+### 4.14 系统常量
+
+```rust
+/// 业务状态码常量（对齐 ruoyi-vue3-ts 前端约定）
+pub mod constants {
+    pub const SUCCESS: i32 = 200;
+    pub const UNAUTHORIZED: i32 = 401;
+    pub const BAD_REQUEST: i32 = 400;
+    pub const NOT_FOUND: i32 = 404;
+    pub const INTERNAL_ERROR: i32 = 500;
+    pub const WARNING: i32 = 601;
+
+    /// 状态字段：正常
+    pub const STATUS_NORMAL: &str = "0";
+    /// 状态字段：停用
+    pub const STATUS_DISABLED: &str = "1";
+
+    /// 超级管理员角色 key
+    pub const SUPER_ADMIN_ROLE: &str = "admin";
+    /// 超级管理员权限标识
+    pub const ALL_PERMISSIONS: &str = "*:*:*";
+}
+```
+
+### 4.15 .gitignore 设计
+
+```gitignore
+# Rust 编译产物
+/target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 环境配置（含敏感信息，按需取消注释）
+# config/config.toml
+```
+
+> **安全提示：** `config/config.toml` 含数据库密码和 JWT 密钥。生产环境建议：
+> 1. 将 `config/config.toml` 加入 `.gitignore`（取消注释）
+> 2. 提供 `config/config.toml.example` 模板文件供新开发者参考
+> 3. 生产环境通过环境变量覆盖敏感配置（本阶段暂不实现，留待后续扩展）
+
+---
+
+## 5. migration 子 crate 设计
+
+### 5.1 Cargo.toml
+
+```toml
+[package]
+name = "migration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-mysql"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+### 5.2 Migrator 结构
+
+```rust
+// migration/src/lib.rs
+pub use sea_orm_migration::prelude::*;
+
+mod m20250711_000001_init;
+
+pub struct Migrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(m20250711_000001_init::Migration)]
+    }
+}
+```
+
+### 5.3 首个迁移骨架
+
+```rust
+// migration/src/m20250711_000001_init.rs
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // 本阶段为空骨架，业务阶段在此创建 sys_user 等表
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
+    }
+}
+```
+
+### 5.4 迁移命令行入口
+
+```rust
+// migration/src/main.rs
+use sea_orm_migration::prelude::*;
+use migration::Migrator;
+
+#[tokio::main]
+async fn main() {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "mysql://root:password@127.0.0.1:3306/ry-vue".to_string());
+    let db = Database::connect(&url).await.expect("数据库连接失败");
+    Migrator::up(&db, None).await.expect("迁移执行失败");
+    println!("迁移完成");
+}
+```
+
+> **注意：** 使用 `#[tokio::main]`（与主 crate 一致），migration/Cargo.toml 已声明 tokio 依赖。sea-orm-migration 的 `prelude::*` 已包含 `Database`。
+
+---
+
+## 6. 接口契约对齐说明（与 ruoyi-vue3-ts）
+
+### 6.1 响应格式
+
+| 接口类型 | 响应结构 | 示例 |
+|----------|----------|------|
+| 普通接口 | `{ code, msg, data? }` | `{ "code": 200, "msg": "操作成功", "data": {...} }` |
+| 分页接口 | `{ code, msg, total, rows }` | `{ "code": 200, "msg": "查询成功", "total": 100, "rows": [...] }` |
+
+### 6.2 字段命名规范
+
+- 序列化一律 **camelCase**：`#[serde(rename_all = "camelCase")]` 或逐字段 rename
+- 主键命名：`userId` / `deptId` / `roleId` / `postId` / `menuId` / `dictId`
+- 特殊字段：`phonenumber`（全小写，非 phoneNumber）
+- 状态字段：`status` 取值 `'0'`（正常）/ `'1'`（停用），字符串类型
+- 时间字段：`createTime` / `updateTime`，字符串格式 `"yyyy-MM-dd HH:mm:ss"`
+
+### 6.3 Token 契约
+
+- 请求头：`Authorization: Bearer <token>`
+- 登录响应：`token` 字段位于顶层（与 `code`/`msg` 同级），非 `data.token`
+- 标记 `isToken: false` 的接口后端不强制要求 token
+
+### 6.4 分页参数
+
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| `pageNum` | number | 页码，1-based |
+| `pageSize` | number | 每页条数 |
+| `orderByColumn` | string | 排序字段（可选） |
+| `isAsc` | string | `asc` / `desc`（可选） |
+| `params[beginTime]` | string | 起始时间（嵌套展开） |
+| `params[endTime]` | string | 结束时间（嵌套展开） |
+
+### 6.5 服务端口
+
+- 后端监听 **8080** 端口（对齐 ruoyi-vue3-ts 的 vite proxy）
+- 路由无全局前缀（`/login`、`/system/user/list` 直接生效）
+
+---
+
+## 7. 规则遵守声明
+
+### 7.1 全局规则遵守
+
+| 规则条目 | 本阶段遵守方式 |
+|----------|----------------|
+| 纯 Axum 0.8 + SeaORM 1.1 | Cargo.toml 仅声明指定版本，无 salvo/rbatis |
+| 禁止复制参考项目源码 | 所有代码用 Axum + SeaORM 原生方式实现 |
+| 单一 ORM | 仅使用 SeaORM，无其他 ORM |
+| 单向分层 | handler → service → repository → entity，禁止反向 |
+| 接口契约对齐 | 响应结构、字段命名、状态码 100% 对齐 ruoyi-vue3-ts |
+| 仅修改 axum-backend | 所有文件均在 axum-backend/ 内创建 |
+
+### 7.2 参考优先级执行
+
+| 优先级 | 参考项目 | 本阶段应用场景 |
+|--------|----------|----------------|
+| 第一 | ref-salvo-admin / ruoyi-vue3-ts | 响应结构体字段名、状态码、Token 契约（密码盐值已改为 "yebot_admin"） |
+| 第二 | ref-soybean-admin | 分层架构、State 注入、initialize 编排、错误 IntoResponse、中间件 from_fn |
+| 第三 | ref-axum-admin | SeaORM ConnectOptions 配置、paginate 分页查询模式 |
+| 第四 | ref-salvo-admin | 验证码接口设计（密码盐值已改为 "yebot_admin"） |
+
+---
+
+## 8. 交付物清单
+
+| 文件 | 职责 |
+|------|------|
+| `Cargo.toml` | 主 crate 依赖清单 + workspace 声明 |
+| `config/config.toml` | 运行配置文件 |
+| `src/main.rs` | 应用入口 |
+| `src/lib.rs` | 库入口，re-export 模块 |
+| `src/config/settings.rs` | 配置结构体与加载 |
+| `src/common/response.rs` | AjaxResult / TableDataInfo |
+| `src/common/error.rs` | AppError + IntoResponse |
+| `src/common/page.rs` | PageDomain |
+| `src/common/constants.rs` | 系统常量 |
+| `src/db/pool.rs` | 数据库连接池 |
+| `src/db/redis.rs` | Redis 连接池 |
+| `src/jwt/claims.rs` | Claims + JwtUtils |
+| `src/middleware/auth.rs` | JWT 鉴权中间件 |
+| `src/middleware/request_id.rs` | 请求 ID 中间件 |
+| `src/initialize/mod.rs` | 初始化编排 |
+| `src/utils/password.rs` | 密码加盐 MD5 |
+| `src/utils/captcha.rs` | 验证码生成 |
+| `src/utils/tree.rs` | 树构建工具 |
+| `src/state.rs` | AppState |
+| `src/logger.rs` | 日志初始化 |
+| `src/handler/health.rs` | 健康检查 |
+| `src/router/mod.rs` | 路由聚合 |
+| `src/router/public.rs` | 公开路由 |
+| `migration/Cargo.toml` | migration 子 crate 依赖 |
+| `migration/src/lib.rs` | Migrator |
+| `migration/src/main.rs` | 迁移入口 |
+| `migration/src/m20250711_000001_init.rs` | 首个迁移骨架 |
+
+---
+
+✅ 自查结果：
+- 无 salvo/rbatis 依赖引入 ✓
+- 响应结构体字段（code/msg/data/rows/total）100% 对齐 ruoyi-vue3-ts ✓
+- 分层依赖单向（handler → service → repository → entity）✓
+- 通用能力完整：响应/错误/配置/DB/Redis/日志/JWT/中间件/密码/验证码/树/initialize/常量 ✓
+- migration 独立子 crate 已纳入设计 ✓
+- ref-soybean-admin 架构对照明确（initialize 编排、State 注入、错误转换）✓
+- 版本号符合用户指定（Axum 0.8、SeaORM 1.1，全部升级到最新稳定版）✓
+- 无违规点，无风险点 ✓

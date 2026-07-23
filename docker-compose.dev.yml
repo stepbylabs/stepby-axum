@@ -1,0 +1,79 @@
+# axum-backend 开发环境编排（R6-BE-ENG-18）
+#
+# 用途：
+#   一键启动完整的开发环境，包含后端应用服务 + 数据库（PostgreSQL/MySQL/Redis）。
+#   后端容器使用 Dockerfile.dev 构建，挂载本地源码，支持 cargo-watch 热重载。
+#
+# 与 docker-compose.yml 的关系：
+#   本文件通过 `include` 复用 docker-compose.yml 中定义的 postgres/mysql/redis 服务，
+#   额外添加 app 服务，避免数据库配置重复维护。
+#
+# 启动方式：
+#   docker compose -f docker-compose.dev.yml up           # 前台启动
+#   docker compose -f docker-compose.dev.yml up -d         # 后台启动
+#   docker compose -f docker-compose.dev.yml up app        # 仅启动 app 及其依赖
+#   docker compose -f docker-compose.dev.yml logs -f app   # 查看 app 日志
+#   docker compose -f docker-compose.dev.yml down          # 停止并移除容器
+#
+# 说明：
+# - app 容器内 /app 挂载到当前宿主目录，源码改动立即生效
+# - target 目录单独挂载到 yebot_target 卷，跨容器复用编译缓存
+# - cargo registry 单独挂载到 yebot_cargo_cache 卷，避免重复下载依赖
+# - JWT_SECRET 仅用于开发，生产环境必须使用强密钥并从环境变量注入
+
+include:
+  - docker-compose.yml
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: yebot-backend-dev
+    restart: unless-stopped
+    volumes:
+      # 挂载源码，支持热重载
+      - .:/app
+      # 隔离 target 目录避免宿主与容器编译产物冲突
+      - yebot_target:/app/target
+      # cargo registry 缓存
+      - yebot_cargo_cache:/usr/local/cargo/registry
+    ports:
+      - "8080:8080"
+    environment:
+      # 数据库连接（指向 compose 内的 postgres 服务）
+      DATABASE_URL: postgres://yebot:yebot123@postgres:5432/yebot
+      # Redis 连接
+      REDIS_URL: redis://redis:6379/0
+      # JWT 配置（仅开发环境）
+      JWT_SECRET: dev-only-secret-key-not-for-production-use-32chars
+      JWT_EXPIRE_HOURS: 24
+      # 服务器配置
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      # 日志级别（开发环境更详细）
+      RUST_LOG: info,axum_backend=debug
+      RUST_BACKTRACE: 1
+      TZ: Asia/Shanghai
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - yebot_net
+    # 健康检查：app 启动后约 10 秒可访问
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  yebot_target:
+  yebot_cargo_cache:
+
+networks:
+  yebot_net:
+    driver: bridge

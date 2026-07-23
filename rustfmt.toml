@@ -1,0 +1,21 @@
+# rustfmt 配置（P2-15）
+# 项目使用 Rust 1.96.0 + edition 2024，配置锁定代码风格
+
+# 基础配置
+edition = "2024"
+max_width = 100
+
+# 导入排序（stable 特性）
+reorder_imports = true
+group_imports = "StdExternalCrate"
+
+# 注释和文档
+normalize_comments = true
+wrap_comments = false
+
+# 结构体和枚举
+use_field_init_shorthand = true
+
+# 控制流
+condense_wildcard_suffixes = true
+fn_args_layout = "Tall"

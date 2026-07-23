@@ -1,0 +1,19 @@
+# axum-backend/migration/Cargo.toml
+
+[package]
+name = "migration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# 数据库迁移（版本与主 crate 的 sea-orm 1.1 对齐）
+sea-orm-migration = { version = "1.1", features = [
+    "runtime-tokio-rustls",
+    "sqlx-mysql",
+    "sqlx-postgres",
+    "sqlx-sqlite",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+chrono = "0.4"
+dotenvy = "0.15"

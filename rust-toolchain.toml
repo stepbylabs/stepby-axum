@@ -1,0 +1,9 @@
+# 固定 Rust 工具链为 stable channel（memory 约束：stable 1.96.0）
+# 项目所有开发者和 CI 必须使用 stable channel 以确保一致性
+# 当前 stable channel 对应 1.96.0（与 Dockerfile 中 rust:1.96-bookworm 一致）
+# 注：若希望进一步锁定到具体 patch 版本，可改为 channel = "1.96.0"
+#     但需确保内部镜像源已同步该版本，否则 rustup 无法下载
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "default"

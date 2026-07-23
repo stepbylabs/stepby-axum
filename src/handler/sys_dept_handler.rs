@@ -1,0 +1,205 @@
+// axum-backend/src/handler/sys_dept_handler.rs
+//! 部门模块 Handler（Axum 原生实现）
+//!
+//! 接口路径与返回格式对齐 ref-salvo-admin / ruoyi-vue3-ts：
+//! - GET    /system/dept/list                  部门列表（扁平，前端组装树）
+//! - GET    /system/dept/list/exclude/{deptId} 排除指定节点的部门列表（修改父部门选择用）
+//! - GET    /system/dept/treeselect            部门下拉树（返回 TreeSelect 格式）
+//! - GET    /system/dept/{deptId}              查询部门详情
+//! - POST   /system/dept                       新增部门
+//! - PUT    /system/dept                       修改部门
+//! - DELETE /system/dept/{deptId}              删除部门
+
+use std::sync::Arc;
+use axum::extract::{Path, Query, State};
+use axum::Json;
+
+use crate::common::{AjaxResult, AppError, TreeSelectVo};
+use crate::entity::sys_dept::Model as SysDeptModel;
+use crate::middleware::Operator;
+use crate::service::sys_dept_service::{DeptAddDto, DeptEditDto, DeptQueryDto, DeptSortDto};
+use crate::state::AppState;
+
+// ==================== Handler 实现 ====================
+
+/// GET /system/dept/list
+/// 部门列表（扁平，前端自行组装树）
+#[utoipa::path(
+    get,
+    path = "/system/dept/list",
+    params(DeptQueryDto),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<SysDeptModel>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(query): Query<DeptQueryDto>,
+) -> Result<AjaxResult<Vec<SysDeptModel>>, AppError> {
+    // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
+    let operator_user_id: Option<i64> = operator
+        .user_id()
+        .parse::<i64>()
+        .ok();
+    let list = state
+        .dept_service
+        .list_depts(query, operator_user_id)
+        .await?;
+    Ok(AjaxResult::success(list))
+}
+
+/// PUT /system/dept/updateSort
+/// 保存部门排序（对齐前端 DeptSortParams：deptIds/orderNums 逗号分隔字符串）
+#[utoipa::path(
+    put,
+    path = "/system/dept/updateSort",
+    request_body = DeptSortDto,
+    responses(
+        (status = 200, description = "排序成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn update_sort(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Json(dto): Json<DeptSortDto>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    state
+        .dept_service
+        .update_dept_sort(dto, operator.username())
+        .await?;
+    Ok(AjaxResult::success_msg("排序成功"))
+}
+
+/// GET /system/dept/list/exclude/{deptId}
+/// 排除指定节点及其子部门的部门列表（修改部门时选择父部门用）
+#[utoipa::path(
+    get,
+    path = "/system/dept/list/exclude/{deptId}",
+    params(
+        ("deptId" = i64, Path, description = "部门 ID")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<SysDeptModel>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn list_exclude(
+    State(state): State<Arc<AppState>>,
+    Path(dept_id): Path<i64>,
+) -> Result<AjaxResult<Vec<SysDeptModel>>, AppError> {
+    let list = state.dept_service.list_exclude(dept_id).await?;
+    Ok(AjaxResult::success(list))
+}
+
+/// GET /system/dept/treeselect
+/// 部门下拉树（对齐前端 treeselect，返回 AjaxResult<TreeSelect[]>）
+///
+/// 返回 TreeSelect 格式 `{ id, label, disabled, children }`，非完整 SysDeptModel。
+#[utoipa::path(
+    get,
+    path = "/system/dept/treeselect",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<TreeSelectVo>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn treeselect(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<Vec<TreeSelectVo>>, AppError> {
+    let tree = state.dept_service.build_dept_tree_select().await?;
+    Ok(AjaxResult::success(tree))
+}
+
+/// GET /system/dept/{deptId}
+/// 查询部门详情
+#[utoipa::path(
+    get,
+    path = "/system/dept/{deptId}",
+    params(
+        ("deptId" = i64, Path, description = "部门 ID")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<SysDeptModel>),
+        (status = 404, description = "部门不存在"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn get_info(
+    State(state): State<Arc<AppState>>,
+    Path(dept_id): Path<i64>,
+) -> Result<AjaxResult<SysDeptModel>, AppError> {
+    let dept = state.dept_service.get_dept_by_id(dept_id).await?;
+    Ok(AjaxResult::success(dept))
+}
+
+/// POST /system/dept
+/// 新增部门
+#[utoipa::path(
+    post,
+    path = "/system/dept",
+    request_body = DeptAddDto,
+    responses(
+        (status = 200, description = "新增成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误或部门名称重复"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn add(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Json(dto): Json<DeptAddDto>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    let dept = state.dept_service.add_dept(dto, operator.username()).await?;
+    Ok(AjaxResult::success_msg(&format!("新增部门 {} 成功", dept.dept_name)))
+}
+
+/// PUT /system/dept
+/// 修改部门
+#[utoipa::path(
+    put,
+    path = "/system/dept",
+    request_body = DeptEditDto,
+    responses(
+        (status = 200, description = "修改成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+        (status = 404, description = "部门不存在"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn edit(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Json(dto): Json<DeptEditDto>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    state.dept_service.edit_dept(dto, operator.username()).await?;
+    Ok(AjaxResult::success_msg("修改成功"))
+}
+
+/// DELETE /system/dept/{deptId}
+/// 删除部门
+#[utoipa::path(
+    delete,
+    path = "/system/dept/{deptId}",
+    params(
+        ("deptId" = i64, Path, description = "部门 ID")
+    ),
+    responses(
+        (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "存在子部门不允许删除"),
+    ),
+    tag = "system-dept"
+)]
+pub async fn remove(
+    State(state): State<Arc<AppState>>,
+    Path(dept_id): Path<i64>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    state.dept_service.delete_dept(dept_id).await?;
+    Ok(AjaxResult::success_msg("删除成功"))
+}
