@@ -76,6 +76,12 @@ pub async fn permission_middleware(
 
     // 5. 超管短路
     if permissions.iter().any(|p| p == "*:*:*") {
+        tracing::debug!(
+            user_id,
+            method = %method,
+            path = ?matched_path,
+            "超管访问放行"
+        );
         return Ok(next.run(req).await);
     }
 
@@ -83,6 +89,13 @@ pub async fn permission_middleware(
     if permissions.iter().any(|p| p == required_perm) {
         Ok(next.run(req).await)
     } else {
+        tracing::warn!(
+            user_id,
+            method = %method,
+            path = ?matched_path,
+            required_perm,
+            "权限拒绝：用户缺少所需权限"
+        );
         Err(AppError::new(403, "没有权限访问该资源"))
     }
 }
@@ -270,6 +283,8 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         // ===== 审计日志大屏 =====
         // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐
         ("GET", "/monitor/operlog/stats") => Some("monitor:audit:list"),
+        // 合规报告与审计大屏共享 monitor:audit:list 权限
+        ("GET", "/monitor/operlog/compliance-report") => Some("monitor:audit:list"),
 
         // ===== IP 归属地库管理 =====
         // 菜单 menu_id=121 (IP 库管理) 在系统监控目录下，perms=monitor:iplocation:list

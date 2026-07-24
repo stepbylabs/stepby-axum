@@ -184,10 +184,13 @@ async fn db_is_connected(db: &sea_orm::DatabaseConnection) -> bool {
 }
 
 /// 采集当前进程的常驻内存与虚拟内存（字节）
+///
+/// 仅刷新当前进程而非 System::new_all()，避免遍历系统所有进程的开销
 fn process_memory() -> (u64, u64) {
-    let mut sys = sysinfo::System::new_all();
-    sys.refresh_memory();
+    use sysinfo::{ProcessesToUpdate, System};
+    let mut sys = System::new();
     let pid = sysinfo::get_current_pid().unwrap_or(sysinfo::Pid::from(0usize));
+    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     if let Some(proc) = sys.process(pid) {
         (proc.memory(), proc.virtual_memory())
     } else {

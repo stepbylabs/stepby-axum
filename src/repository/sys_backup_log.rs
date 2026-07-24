@@ -73,6 +73,14 @@ impl SysBackupLogRepository {
             .await
     }
 
+    /// 按 ID 批量查询（避免 N+1 查询）
+    pub async fn find_by_ids(&self, ids: &[i64]) -> Result<Vec<Model>, DbErr> {
+        SysBackupLog::find()
+            .filter(Column::BackupId.is_in(ids.iter().copied()))
+            .all(self.base.db())
+            .await
+    }
+
     /// 插入一条记录
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

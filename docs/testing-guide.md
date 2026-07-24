@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.1.0 | 更新日期：2026-07-12
+> 版本：v0.2.0 | 更新日期：2026-07-24
 
 ## 目录
 
@@ -49,7 +49,7 @@
 ```
 
 当前测试统计：
-- **单元测试**：34 个（全部通过）
+- **单元测试**：119 个（全部通过）
 - **ts-rs 导出测试**：19 个
 - **集成测试**：依赖外部服务（MySQL/Redis），需手动执行
 
@@ -115,7 +115,7 @@ cargo test
 
 期望输出：
 ```
-running 34 tests
+running 119 tests
 test utils::ip_location::tests::test_is_private_ip_v4 ... ok
 test utils::ip_location::tests::test_is_not_private_ip_v4 ... ok
 test utils::ip_location::tests::test_is_private_ip_v6 ... ok
@@ -124,8 +124,10 @@ test utils::ip_location::tests::test_locate_with_real_mmdb ... ok
 test utils::password::tests::test_encrypt_and_verify_argon2 ... ok
 test utils::password::tests::test_verify_empty_hash ... ok
 test utils::password::tests::test_verify_legacy_md5 ... ok
-...（共 34 个测试）
-test result: ok. 34 passed; 0 failed; 0 ignored
+test utils::password::tests::test_password_complexity_valid ... ok
+test utils::password::tests::test_password_complexity_weak_blacklist ... ok
+...（共 119 个测试）
+test result: ok. 119 passed; 0 failed; 0 ignored
 ```
 
 ### 3.2 运行指定模块测试
@@ -167,14 +169,24 @@ cargo tarpaulin --out Html
 
 | 模块 | 测试数 | 说明 |
 |------|--------|------|
-| `utils::password` | 3 | Argon2 加密验证、空哈希验证、MD5 旧哈希识别 |
-| `utils::ip_location` | 5 | 内网 IP 判断（v4/v6）、公网 IP 判断、mmdb 缺失降级、真实 mmdb 查询 |
-| `service::auth_service` | 12 | 菜单转路由（各种 menu_type/visible/is_frame 组合） |
+| `utils::password` | 8 | Argon2 加密验证、空哈希验证、MD5 旧哈希识别、密码复杂度校验、弱口令黑名单、强度评分 |
+| `utils::ip_location` | 6 | 内网 IP 判断（v4/v6）、公网 IP 判断、mmdb 缺失降级、真实 mmdb 查询 |
+| `utils::ip` | 4 | 可信代理 XFF 提取、CIDR 匹配、untrusted peer 忽略 |
+| `utils::sanitize` | 5 | oper_log 响应体脱敏（token/password/phone/email 等 10 字段掩码） |
+| `utils::crypto` | 5 | 加密/解密工具 |
+| `utils::captcha` | 2 | 验证码生成 |
+| `utils::xdb_reader` | 6 | ip2region xdb 离线库读取 |
+| `service::auth_service` | 21 | 菜单转路由（各种 menu_type/visible/is_frame 组合）、登录限流、验证码校验 |
 | `service::sys_job_service` | 3 | cron 表达式解析、任务状态切换 |
-| `scheduler` | 2 | 调度器添加/移除任务 |
+| `service::ip_location_service` | 3 | IP 归属地服务降级 |
+| `middleware::oper_log` | 21 | 操作日志脱敏、UTF-8 安全截断（safe_truncate）、模块推断 |
+| `middleware::rate_limit` | 3 | 限流中间件 |
+| `middleware::idempotency` | 4 | 幂等性中间件 |
+| `middleware::security_headers` | 4 | 安全响应头校验 |
+| `scheduler::registry` | 3 | 调度器任务注册/移除 |
 | ts-rs export_bindings | 19 | 13 个 entity + 6 个 Vo 的 TypeScript 导出 |
-| 其他 | 9 | datetime 序列化等 |
-| **合计** | **34** | |
+| 其他 | 2 | datetime 序列化等 |
+| **合计** | **119** | |
 
 ---
 
@@ -817,6 +829,18 @@ chmod +x .git/hooks/pre-commit
 | SEC-005 | 文件上传伪造 | 400 | P0 |
 | SEC-006 | CORS 跨域 | 非白名单域拒绝 | P1 |
 | SEC-007 | 生产环境关闭 Swagger | 404 | P1 |
+
+### 10.9 N+1 查询优化（v2.6 第125轮）
+
+> 后端批量操作接口原先在循环内逐条查询数据库（典型 N+1），已改为单次批量查询。相关仓库方法：`find_by_ids` / `find_by_names` / `find_columns_by_table_ids`。
+
+| 编号 | 测试场景 | 优化前 | 优化后 | 优先级 |
+|------|---------|--------|--------|--------|
+| NPLUS-001 | `gen_table_service.delete_tables` 批量删除 | 循环 `find_by_id` N 次查询 | 单次 `find_by_ids` 批量查询 | P2 |
+| NPLUS-002 | `gen_table_service.batch_gen_code` 批量生成代码 | 循环按表名查 + 循环查列 | `find_by_names` + `find_columns_by_table_ids` 各 1 次 | P2 |
+| NPLUS-003 | `sys_rate_limit_service.remove` 批量删除 | 循环 `find_by_id` N 次查询 | 单次 `find_by_ids` 批量查询 | P2 |
+
+**验证方式**：开启 SQL 日志（`RUST_LOG=sqlx=trace` 或 SeaORM `stmt` 层），执行批量删除/生成操作，确认 SELECT 语句数量由 O(N) 降为 O(1)。
 
 ---
 

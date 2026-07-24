@@ -247,22 +247,27 @@ impl IpLocationService {
 
     /// 查询当前 IP 库状态
     pub async fn get_status(&self) -> anyhow::Result<IpLocationStatus> {
-        let mmdb_path = &self.config.ip_location.mmdb_path;
-        let xdb_path = &self.config.ip_location.xdb_path;
+        let mmdb_path = self.config.ip_location.mmdb_path.clone();
+        let xdb_path = self.config.ip_location.xdb_path.clone();
 
-        let (_mmdb_file_exists, mmdb_size, mmdb_modified) = file_info(mmdb_path);
-        let (_xdb_file_exists, xdb_size, xdb_modified) = file_info(xdb_path);
+        // 使用 spawn_blocking 包装同步 metadata 调用
+        let mmdb_path_clone = mmdb_path.clone();
+        let (_mmdb_exists, mmdb_size, mmdb_modified) =
+            tokio::task::spawn_blocking(move || file_info(&mmdb_path_clone)).await?;
+        let xdb_path_clone = xdb_path.clone();
+        let (_xdb_exists, xdb_size, xdb_modified) =
+            tokio::task::spawn_blocking(move || file_info(&xdb_path_clone)).await?;
 
         let cfg = self.read_config().await.unwrap_or_default();
 
         Ok(IpLocationStatus {
             mmdb_loaded: self.ip_locator.is_loaded(),
-            mmdb_path: mmdb_path.clone(),
+            mmdb_path,
             mmdb_size,
             mmdb_modified,
             xdb_enabled: self.config.ip_location.xdb_enabled,
             xdb_loaded: self.ip_locator.is_xdb_loaded(),
-            xdb_path: xdb_path.clone(),
+            xdb_path,
             xdb_size,
             xdb_modified,
             auto_update_cron: self.config.ip_location.auto_update_cron.clone(),
@@ -273,9 +278,16 @@ impl IpLocationService {
     }
 
     /// 热加载 xdb 文件（用于后台管理触发 ip2region 库更新）
+    ///
+    /// xdb 文件通常数 MB，`XdbReader::from_file` 内部使用 `std::fs::read` 同步读取整文件，
+    /// 在 async 上下文中直接调用会阻塞 Tokio worker。通过 `spawn_blocking` 将同步 IO 转移到
+    /// 阻塞线程池执行。
     pub async fn reload_xdb(&self) -> anyhow::Result<()> {
         let xdb_path = self.config.ip_location.xdb_path.clone();
-        self.ip_locator.reload_xdb(&xdb_path)?;
+        let ip_locator = self.ip_locator.clone();
+        tokio::task::spawn_blocking(move || ip_locator.reload_xdb(&xdb_path))
+            .await
+            .map_err(|e| anyhow::anyhow!("热加载 xdb 任务 join 失败: {}", e))??;
         Ok(())
     }
 
@@ -298,8 +310,9 @@ impl IpLocationService {
 
         tracing::info!("开始更新 IP 库，更新源: {}", source);
 
-        let mmdb_path = &self.config.ip_location.mmdb_path;
-        let old_size = file_info(mmdb_path).1;
+        let mmdb_path = self.config.ip_location.mmdb_path.clone();
+        let mmdb_path_for_info = mmdb_path.clone();
+        let old_size = tokio::task::spawn_blocking(move || file_info(&mmdb_path_for_info).1).await?;
 
         // 根据更新源选择下载方式
         let (new_mmdb_bytes, sha256_hex) = match source {
@@ -329,16 +342,16 @@ impl IpLocationService {
 
         // 备份旧文件（如果存在）
         let backup_path = format!("{}.bak", mmdb_path);
-        if Path::new(mmdb_path).exists() {
-            tokio::fs::rename(mmdb_path, &backup_path).await
+        if Path::new(&mmdb_path).exists() {
+            tokio::fs::rename(&mmdb_path, &backup_path).await
                 .map_err(|e| anyhow::anyhow!("备份旧 mmdb 文件失败: {}", e))?;
         }
 
         // 原子替换：rename 临时文件 → 正式文件
-        if let Err(e) = tokio::fs::rename(&temp_path, mmdb_path).await {
+        if let Err(e) = tokio::fs::rename(&temp_path, &mmdb_path).await {
             // 替换失败，尝试恢复备份
             if Path::new(&backup_path).exists() {
-                if let Err(restore_err) = tokio::fs::rename(&backup_path, mmdb_path).await {
+                if let Err(restore_err) = tokio::fs::rename(&backup_path, &mmdb_path).await {
                     tracing::error!(backup = %backup_path, target = %mmdb_path, error = %restore_err, "恢复 mmdb 备份失败（原文件可能已丢失）");
                 }
             }
@@ -353,7 +366,7 @@ impl IpLocationService {
         }
 
         // 热加载
-        if let Err(e) = self.ip_locator.reload(mmdb_path) {
+        if let Err(e) = self.ip_locator.reload(&mmdb_path) {
             tracing::error!("热加载 mmdb 失败（文件已更新，下次重启生效）: {}", e);
             // 不返回错误，因为文件已成功更新
         }

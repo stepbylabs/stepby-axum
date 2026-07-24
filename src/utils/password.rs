@@ -13,7 +13,8 @@
 //!
 //! R19-1.3 密码复杂度策略：
 //! `validate_password_complexity` 在新增/重置/修改密码时强制校验，
-//! 要求密码至少包含字母与数字两种字符类型，防止纯数字/纯字母弱口令。
+//! 要求密码至少包含字母与数字两种字符类型，防止纯数字/纯字母弱口令，
+//! 并拦截 Top 常见弱口令字典（如 123456、admin123、password 等）。
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -23,20 +24,40 @@ use argon2::{
 /// 旧密码方案的固定盐值（仅用于验证旧 MD5 哈希，不用于新密码）
 const LEGACY_SALT: &str = "yebot_admin";
 
+/// Top 常见弱口令黑名单（来源：Have I Been Pwned / SecLists 公开统计）
+///
+/// 注：默认管理员初始凭据 `admin123` 也列入黑名单，强制用户首次登录修改密码。
+/// 数据库种子密码哈希直接写入，不经过 `validate_password_complexity`，故不影响初始化。
+const WEAK_PASSWORDS: &[&str] = &[
+    "123456", "12345678", "123456789", "1234567890", "1234567", "12345",
+    "password", "password1", "password123", "passwd", "passw0rd",
+    "admin", "admin123", "admin@123", "administrator", "root", "toor", "superuser",
+    "qwerty", "qwerty123", "qwertyuiop",
+    "abc123", "abcdef", "abc123456",
+    "letmein", "welcome", "welcome1", "welcome123",
+    "monkey", "dragon", "master", "shadow", "sunshine", "trustno1",
+    "login", "princess", "football", "baseball", "soccer",
+    "iloveyou", "starwars", "whatever", "cheese",
+    "000000", "111111", "666666", "888888", "999999",
+    "1q2w3e4r", "1qaz2wsx", "qazwsx",
+    "test", "test123", "test1234", "guest", "guest123",
+    "user", "user123", "default",
+];
+
 /// 密码复杂度校验（R19-1.3）
 ///
-/// 策略（兼容默认 admin/admin123，且能拦截纯数字/纯字母等弱口令）：
-/// - 长度 5-20（由 DTO 的 `#[validate(length(...))]` 保证，此处不重复校验）
+/// 策略：
 /// - 必须包含至少 1 个字母（a-z 或 A-Z）
 /// - 必须包含至少 1 个数字（0-9）
+/// - 不得命中常见弱口令黑名单（大小写不敏感）
+/// - 长度范围由 DTO 的 `#[validate(length(...))]` 保证
 ///
 /// 返回 `Ok(())` 表示通过；返回 `Err(String)` 含可向用户展示的错误描述。
 ///
 /// 设计权衡：
-/// - 未强制要求大写字母 + 特殊字符，避免与默认管理员口令 `admin123` 冲突
-///   （项目记忆约束：登录凭据必须为 admin/admin123）
-/// - 如需更严格策略，可在 sys_config 中扩展配置项，此处仅提供基线校验
-/// - 校验在最入口处（Service 层 validate 之后）执行，确保所有密码写入路径统一覆盖
+/// - 未强制要求大写字母 + 特殊字符，避免与旧用户口令冲突过度
+/// - 弱口令黑名单覆盖 Top 50+ 常见弱密码，有效阻止撞库攻击
+/// - 默认管理员 `admin123` 凭据在数据库种子阶段直接写入哈希，无需通过本函数
 pub fn validate_password_complexity(password: &str) -> Result<(), String> {
     let has_letter = password.chars().any(|c| c.is_ascii_alphabetic());
     let has_digit = password.chars().any(|c| c.is_ascii_digit());
@@ -47,7 +68,53 @@ pub fn validate_password_complexity(password: &str) -> Result<(), String> {
     if !has_digit {
         return Err("密码必须包含至少 1 个数字".to_string());
     }
+
+    // 弱口令黑名单检查（大小写不敏感）
+    let lower = password.to_lowercase();
+    if WEAK_PASSWORDS.iter().any(|w| *w == lower || *w == password) {
+        return Err("密码过于常见，请使用更复杂的口令".to_string());
+    }
+
     Ok(())
+}
+
+/// 密码强度评分（0-4，供前端 UX 反馈使用）
+///
+/// 评分规则：
+/// - 长度 ≥8 +1，≥12 再 +1
+/// - 字符种类：小写/大写/数字/特殊 四类中 2 类 +1，3 类以上 +1
+///
+/// 评分含义：
+/// - 0-1: 弱（建议修改）
+/// - 2: 一般
+/// - 3: 较强
+/// - 4: 强
+pub fn password_strength_score(password: &str) -> u8 {
+    let mut score: u8 = 0;
+
+    if password.len() >= 8 {
+        score += 1;
+    }
+    if password.len() >= 12 {
+        score += 1;
+    }
+
+    let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
+    let has_digit = password.chars().any(|c| c.is_ascii_digit());
+    let has_special = password.chars().any(|c| !c.is_ascii_alphanumeric());
+    let variety: u8 = [has_lower, has_upper, has_digit, has_special]
+        .iter()
+        .filter(|b| **b)
+        .count() as u8;
+    if variety >= 2 {
+        score += 1;
+    }
+    if variety >= 3 {
+        score += 1;
+    }
+
+    score.min(4)
 }
 
 /// 加密密码（Argon2id + 随机盐）
@@ -166,12 +233,12 @@ mod tests {
 
     #[test]
     fn test_password_complexity_valid() {
-        // 字母 + 数字（兼容默认 admin123）
-        assert!(validate_password_complexity("admin123").is_ok());
+        // 字母 + 数字 + 不在黑名单
+        assert!(validate_password_complexity("yebot2026").is_ok());
         // 含大写字母 + 数字
-        assert!(validate_password_complexity("Admin123").is_ok());
+        assert!(validate_password_complexity("Yebot2026").is_ok());
         // 含特殊字符 + 字母 + 数字
-        assert!(validate_password_complexity("Admin@123").is_ok());
+        assert!(validate_password_complexity("Yebot@2026").is_ok());
     }
 
     #[test]
@@ -186,5 +253,30 @@ mod tests {
         // 纯字母：缺数字
         let err = validate_password_complexity("abcdefg").unwrap_err();
         assert!(err.contains("数字"));
+    }
+
+    #[test]
+    fn test_password_complexity_weak_blacklist() {
+        // admin123 现在被黑名单拦截（数据库种子直接写入哈希，不通过此函数）
+        let err = validate_password_complexity("admin123").unwrap_err();
+        assert!(err.contains("常见"));
+        let err = validate_password_complexity("Admin123").unwrap_err();
+        assert!(err.contains("常见"));
+        let err = validate_password_complexity("password").unwrap_err();
+        // password 没有数字，会先报"必须包含数字"
+        assert!(err.contains("数字"));
+        let err = validate_password_complexity("password1").unwrap_err();
+        assert!(err.contains("常见"));
+    }
+
+    #[test]
+    fn test_password_strength_score() {
+        assert_eq!(password_strength_score(""), 0);
+        assert_eq!(password_strength_score("abc"), 0);
+        assert_eq!(password_strength_score("abcdefgh"), 1); // 长度>=8
+        assert_eq!(password_strength_score("abcdefg1"), 2); // 长度>=8 + 2类
+        assert_eq!(password_strength_score("Abcdefg1"), 3); // 长度>=8 + 3类
+        assert_eq!(password_strength_score("Abcdefg1@"), 3); // 长度>=8(9字符) + 4类=3（饱和前2分）
+        assert_eq!(password_strength_score("Abcdefghijk1@"), 4); // 长度>=12(13字符) + 4类 = 4
     }
 }

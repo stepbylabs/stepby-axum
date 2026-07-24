@@ -211,18 +211,12 @@ impl SysMenuService {
                 let operator = operator.clone();
                 async move {
                     for (menu_id, order_num) in menu_ids.iter().zip(order_nums.iter()) {
-                        // 通过 Repository 查询菜单是否存在（事务上下文）
-                        let existing = menu_repo.base().find_by_id_conn(txn, *menu_id).await?;
-                        let Some(menu) = existing else {
-                            // 跳过不存在的菜单 ID（前端可能传了已删除的 ID）
-                            continue;
-                        };
-                        let mut am: SysMenuActiveModel = menu.into();
-                        am.order_num = Set(Some(*order_num));
-                        am.update_by = Set(Some(operator.clone()));
-                        am.update_time = Set(Some(now));
-                        // 通过 Repository 更新（事务上下文）
-                        menu_repo.base().update_conn(txn, am).await?;
+                        // 直接 UPDATE order_num：未匹配到记录时 affected_rows=0，
+                        // 等价于原 find_by_id 后 continue 的 silent skip 行为（前端可能传了已删除的 ID），
+                        // 同时避免"先查完整实体再保存全行"的两轮 DB 往返。
+                        menu_repo
+                            .update_sort_conn(txn, *menu_id, *order_num, &operator, now)
+                            .await?;
                     }
                     Ok(())
                 }

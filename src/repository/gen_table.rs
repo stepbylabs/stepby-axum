@@ -102,6 +102,28 @@ impl GenTableRepository {
             .await
     }
 
+    /// 按 table_id 列表批量查询代码生成业务表（单次查询替代 N 次 find_by_id）
+    pub async fn find_by_ids(&self, table_ids: Vec<i64>) -> Result<Vec<GenTableModel>, DbErr> {
+        if table_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        GenTable::find()
+            .filter(GenTableColumn::TableId.is_in(table_ids))
+            .all(self.base.db())
+            .await
+    }
+
+    /// 按 table_name 列表批量查询代码生成业务表（单次查询替代 N 次 find_by_name）
+    pub async fn find_by_names(&self, table_names: Vec<String>) -> Result<Vec<GenTableModel>, DbErr> {
+        if table_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        GenTable::find()
+            .filter(GenTableColumn::TableName.is_in(table_names))
+            .all(self.base.db())
+            .await
+    }
+
     /// 新增代码生成业务表
     pub async fn insert(&self, model: GenTableActiveModel) -> Result<GenTableModel, DbErr> {
         self.base.insert(model).await
@@ -121,9 +143,12 @@ impl GenTableRepository {
     }
 
     /// 查询所有代码生成业务表（用于详情页 tables 下拉）
+    ///
+    /// 限制 500 条避免无界增长，超过时下拉应改为远程搜索
     pub async fn find_all(&self) -> Result<Vec<GenTableModel>, DbErr> {
         GenTable::find()
             .order_by_desc(GenTableColumn::TableId)
+            .limit(500)
             .all(self.base.db())
             .await
     }
@@ -338,6 +363,24 @@ impl GenTableRepository {
     pub async fn find_columns_by_table_id(&self, table_id: i64) -> Result<Vec<GenTableColumnModel>, DbErr> {
         GenTableColumnEntity::find()
             .filter(GenColumn::TableId.eq(table_id))
+            .order_by_asc(GenColumn::Sort)
+            .all(self.base.db())
+            .await
+    }
+
+    /// 按 table_id 列表批量查询所有列（单次查询替代 N 次 find_columns_by_table_id）
+    ///
+    /// 结果按 table_id 升序、sort 升序排列，调用方按 table_id 分组即可保持每表内列的顺序。
+    pub async fn find_columns_by_table_ids(
+        &self,
+        table_ids: Vec<i64>,
+    ) -> Result<Vec<GenTableColumnModel>, DbErr> {
+        if table_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        GenTableColumnEntity::find()
+            .filter(GenColumn::TableId.is_in(table_ids))
+            .order_by_asc(GenColumn::TableId)
             .order_by_asc(GenColumn::Sort)
             .all(self.base.db())
             .await

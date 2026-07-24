@@ -156,6 +156,8 @@ fn parse_db_conn_info(url: &str) -> Result<(String, String, String, String, Stri
 }
 
 /// 获取备份目录绝对路径（不存在则创建）
+///
+/// 注：此函数执行同步 IO，调用方需在 spawn_blocking 中使用
 fn ensure_backup_dir() -> Result<PathBuf, ServiceError> {
     let dir = PathBuf::from(BACKUP_DIR);
     if !dir.exists() {
@@ -165,10 +167,17 @@ fn ensure_backup_dir() -> Result<PathBuf, ServiceError> {
     Ok(dir)
 }
 
+/// 异步版本：在 spawn_blocking 中执行 ensure_backup_dir
+async fn ensure_backup_dir_async() -> Result<PathBuf, ServiceError> {
+    tokio::task::spawn_blocking(ensure_backup_dir)
+        .await
+        .map_err(|e| ServiceError::internal(&format!("创建备份目录任务 join 失败: {}", e)))?
+}
+
 /// 校验备份文件路径必须位于备份目录内（防路径穿越）
 ///
 /// 使用 canonicalize 二次校验规范化后路径仍以备份目录开头
-fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> {
+async fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> {
     if file_name.is_empty()
         || file_name.contains('/')
         || file_name.contains('\\')
@@ -177,7 +186,7 @@ fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> {
     {
         return Err(ServiceError::bad_request("非法的备份文件名"));
     }
-    let dir = ensure_backup_dir()?;
+    let dir = ensure_backup_dir_async().await?;
     let file_path = dir.join(file_name);
     Ok(file_path)
 }
@@ -220,7 +229,7 @@ impl SysBackupService {
             DbKind::Sqlite => "db",
         };
         let file_name = format!("{}_{}.{}", ts, uuid_str, ext);
-        let file_path = validate_backup_path(&file_name)?;
+        let file_path = validate_backup_path(&file_name).await?;
         let file_path_str = file_path.to_string_lossy().to_string();
 
         let now = chrono::Local::now().naive_local();
@@ -244,9 +253,13 @@ impl SysBackupService {
             .run_backup_process(kind, &db_url, &file_path)
             .await;
 
-        let file_size = match std::fs::metadata(&file_path) {
-            Ok(m) => m.len() as i64,
-            Err(_) => 0,
+        // 异步获取文件大小，避免阻塞 worker
+        let file_size = {
+            let fp = file_path.clone();
+            match tokio::task::spawn_blocking(move || std::fs::metadata(fp)).await {
+                Ok(Ok(m)) => m.len() as i64,
+                _ => 0,
+            }
         };
 
         let (status, error_msg) = match result {
@@ -308,7 +321,12 @@ impl SysBackupService {
                     err
                 )));
             }
-            std::fs::write(file_path, &output.stdout)
+            // 使用 spawn_blocking 包装同步 fs::write，避免阻塞 Tokio worker
+            let file_path_owned = file_path.to_path_buf();
+            let stdout = output.stdout;
+            tokio::task::spawn_blocking(move || std::fs::write(&file_path_owned, &stdout))
+                .await
+                .map_err(|e| ServiceError::internal(&format!("写入任务 join 失败: {}", e)))?
                 .map_err(|e| ServiceError::internal(&format!("写入备份文件失败: {}", e)))?;
             return Ok(());
         }
@@ -400,8 +418,12 @@ impl SysBackupService {
             .and_then(|n| n.to_str())
             .ok_or_else(|| ServiceError::bad_request("备份文件名不合法"))?
             .to_string();
-        let file_path = validate_backup_path(&base_name)?;
-        if !file_path.exists() {
+        let file_path = validate_backup_path(&base_name).await?;
+        let file_path_clone = file_path.clone();
+        let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
+            .await
+            .map_err(|e| ServiceError::internal(&format!("文件存在性检查任务 join 失败: {}", e)))?;
+        if !exists {
             return Err(ServiceError::not_found("备份文件不存在"));
         }
 
@@ -549,30 +571,44 @@ impl SysBackupService {
             .ok_or_else(|| ServiceError::not_found("备份记录不存在"))
     }
 
-    /// 批量删除备份日志（同步删除文件）
+    /// 批量删除备份日志（批量查询 + 异步删除文件，避免 N+1 与阻塞 IO）
     pub async fn delete_backups(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
-        // 删除文件
-        for id in &ids {
-            if let Ok(log) = self.get_backup_by_id(*id).await {
-                // 仅删除 manual/auto 类型文件，restore 类型不删文件
-                if (log.backup_type == "manual" || log.backup_type == "auto")
-                    && !log.file_path.is_empty()
-                {
-                    let path = PathBuf::from(&log.file_path);
-                    // 二次校验路径在备份目录内
-                    if let Ok(canonical) = path.canonicalize() {
-                        let backup_dir = PathBuf::from(BACKUP_DIR);
-                        if let Ok(dir_canonical) = backup_dir.canonicalize() {
-                            if canonical.starts_with(&dir_canonical) {
-                                if let Err(e) = std::fs::remove_file(&canonical) {
-                                    tracing::warn!("删除备份文件失败 {}: {}", path.display(), e);
-                                }
-                            }
+        // 批量查询所有备份记录（避免循环内 N+1 查询）
+        let logs = self.backup_repo.find_by_ids(&ids).await?;
+
+        // 收集需要删除的文件路径（仅 manual/auto 类型，restore 类型不删文件）
+        let backup_dir = PathBuf::from(BACKUP_DIR);
+        let dir_canonical = backup_dir.canonicalize().ok();
+        let mut paths_to_delete: Vec<PathBuf> = Vec::new();
+        for log in &logs {
+            if (log.backup_type == "manual" || log.backup_type == "auto")
+                && !log.file_path.is_empty()
+            {
+                let path = PathBuf::from(&log.file_path);
+                // 二次校验路径在备份目录内
+                if let Ok(canonical) = path.canonicalize() {
+                    if let Some(ref dir_canonical) = dir_canonical {
+                        if canonical.starts_with(dir_canonical) {
+                            paths_to_delete.push(canonical);
                         }
                     }
                 }
             }
         }
+
+        // 在 spawn_blocking 中批量删除文件，避免阻塞 Tokio worker
+        if !paths_to_delete.is_empty() {
+            tokio::task::spawn_blocking(move || {
+                for path in &paths_to_delete {
+                    if let Err(e) = std::fs::remove_file(path) {
+                        tracing::warn!("删除备份文件失败 {}: {}", path.display(), e);
+                    }
+                }
+            })
+            .await
+            .map_err(|e| ServiceError::internal(&format!("删除备份文件任务失败: {}", e)))?;
+        }
+
         self.backup_repo.delete_by_ids(ids).await?;
         Ok(())
     }
@@ -588,8 +624,12 @@ impl SysBackupService {
             .and_then(|n| n.to_str())
             .ok_or_else(|| ServiceError::bad_request("备份文件名不合法"))?
             .to_string();
-        let file_path = validate_backup_path(&base_name)?;
-        if !file_path.exists() {
+        let file_path = validate_backup_path(&base_name).await?;
+        let file_path_clone = file_path.clone();
+        let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
+            .await
+            .map_err(|e| ServiceError::internal(&format!("文件存在性检查任务 join 失败: {}", e)))?;
+        if !exists {
             return Err(ServiceError::not_found("备份文件不存在"));
         }
         let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {

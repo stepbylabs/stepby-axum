@@ -3,7 +3,7 @@
 //! 提供 `write_upload_file` 公共函数，消除 handler 层多处重复的
 //! `spawn_blocking + create_dir_all + write` 模板代码。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// 解析上传文件根目录为绝对路径
 ///
@@ -193,10 +193,4 @@ pub async fn write_upload_file(
 /// - `ext`: 文件扩展名（小写，不含点）
 pub fn gen_uuid_filename(ext: &str) -> String {
     format!("{}.{}", uuid::Uuid::new_v4(), ext)
-}
-
-/// 检查路径是否安全（不含 `..` 或绝对路径组件）
-pub fn is_safe_upload_path(path: &Path) -> bool {
-    !path.components()
-        .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir))
 }

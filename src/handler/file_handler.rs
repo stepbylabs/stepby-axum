@@ -87,67 +87,71 @@ pub async fn list(
     let upload_dir = std::path::Path::new(&upload_cfg.common_dir);
     let mut files: Vec<FileInfo> = Vec::new();
 
-    if upload_dir.exists() {
-        let entries = tokio::task::spawn_blocking({
-            let dir = upload_dir.to_path_buf();
-            move || -> std::io::Result<Vec<std::fs::DirEntry>> {
-                let mut result = Vec::new();
-                for entry in std::fs::read_dir(&dir)? {
-                    if let Ok(e) = entry {
-                        result.push(e);
-                    }
-                }
-                Ok(result)
+    // 目录存在性检查 + 读取目录条目 + 获取每个文件的 metadata 全部在 spawn_blocking 中完成，
+    // 避免 async 上下文中逐文件调用 `std::fs::DirEntry::metadata()` 阻塞 Tokio worker。
+    let entries: Vec<(String, u64, i64)> = tokio::task::spawn_blocking({
+        let dir = upload_dir.to_path_buf();
+        move || -> std::io::Result<Vec<(String, u64, i64)>> {
+            if !dir.exists() {
+                return Ok(Vec::new());
             }
-        })
-        .await
-        .map_err(|e| AppError::internal(&format!("读取目录失败: {}", e)))?
-        .map_err(|e| AppError::internal(&format!("读取目录失败: {}", e)))?;
-
-        for entry in entries {
-            if let Ok(meta) = entry.metadata() {
-                if !meta.is_file() { continue; }
+            let mut result = Vec::new();
+            for entry in std::fs::read_dir(&dir)? {
+                let Ok(entry) = entry else { continue };
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_file() {
+                    continue;
+                }
                 let name = entry.file_name().to_string_lossy().to_string();
-                let ext = std::path::Path::new(&name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-
-                // 筛选：文件名前缀
-                if let Some(prefix) = &params.file_name {
-                    if !prefix.is_empty() && !name.contains(prefix) {
-                        continue;
-                    }
-                }
-                // 筛选：扩展名
-                if let Some(target_ext) = &params.ext {
-                    if !target_ext.is_empty() && ext != target_ext.to_lowercase() {
-                        continue;
-                    }
-                }
-
                 let size = meta.len();
-                let url = format!("{}/{}", upload_cfg.common_url_prefix, name);
-                let modified = meta.modified()
+                let modified = meta
+                    .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| {
-                        chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + d)
-                            .format("%Y-%m-%d %H:%M:%S").to_string()
-                    })
-                    .unwrap_or_default();
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                result.push((name, size, modified));
+            }
+            Ok(result)
+        }
+    })
+    .await
+    .map_err(|e| AppError::internal(&format!("读取目录任务失败: {}", e)))?
+    .map_err(|e| AppError::internal(&format!("读取目录失败: {}", e)))?;
 
-                files.push(FileInfo {
-                    file_name: name.clone(),
-                    file_size: size,
-                    file_size_str: format_file_size(size),
-                    ext,
-                    url,
-                    last_modified: modified,
-                });
+    for (name, size, modified_secs) in entries {
+        let ext = std::path::Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        // 筛选：文件名前缀
+        if let Some(prefix) = &params.file_name {
+            if !prefix.is_empty() && !name.contains(prefix) {
+                continue;
             }
         }
+        // 筛选：扩展名
+        if let Some(target_ext) = &params.ext {
+            if !target_ext.is_empty() && ext != target_ext.to_lowercase() {
+                continue;
+            }
+        }
+
+        let url = format!("{}/{}", upload_cfg.common_url_prefix, name);
+        let modified = chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_secs as u64))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        files.push(FileInfo {
+            file_name: name.clone(),
+            file_size: size,
+            file_size_str: format_file_size(size),
+            ext,
+            url,
+            last_modified: modified,
+        });
     }
 
     // 按修改时间倒序
