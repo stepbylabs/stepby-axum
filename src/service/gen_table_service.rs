@@ -19,7 +19,7 @@ use sea_orm::sea_query::{Alias, ColumnDef, Index, Table};
 use serde::{Deserialize, Serialize};
 use tera::{Kwargs, State, Tera, TeraResult, Value};
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
@@ -72,24 +72,42 @@ pub struct DbTableQueryDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GenTableEditDto {
+    #[garde(skip)]
     pub table_id: i64,
+    #[garde(skip)]
     pub table_name: String,
+    #[garde(skip)]
     pub table_comment: Option<String>,
+    #[garde(skip)]
     pub class_name: Option<String>,
+    #[garde(skip)]
     pub function_name: Option<String>,
+    #[garde(skip)]
     pub function_author: Option<String>,
+    #[garde(skip)]
     pub tpl_category: Option<String>,
+    #[garde(skip)]
     pub tpl_web_type: Option<String>,
+    #[garde(skip)]
     pub package_name: Option<String>,
+    #[garde(skip)]
     pub module_name: Option<String>,
+    #[garde(skip)]
     pub business_name: Option<String>,
+    #[garde(skip)]
     pub gen_type: Option<String>,
+    #[garde(skip)]
     pub gen_path: Option<String>,
+    #[garde(skip)]
     pub options: Option<String>,
+    #[garde(skip)]
     pub remark: Option<String>,
+    #[garde(skip)]
     pub sub_table_name: Option<String>,
+    #[garde(skip)]
     pub sub_table_fk_name: Option<String>,
     /// 列信息（修改时一起提交）
+    #[garde(skip)]
     pub columns: Option<Vec<GenTableColumnEditDto>>,
 }
 
@@ -97,22 +115,39 @@ pub struct GenTableEditDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GenTableColumnEditDto {
+    #[garde(skip)]
     pub column_id: Option<i64>,
+    #[garde(skip)]
     pub column_name: Option<String>,
+    #[garde(skip)]
     pub column_comment: Option<String>,
+    #[garde(skip)]
     pub column_type: Option<String>,
+    #[garde(skip)]
     pub java_type: Option<String>,
+    #[garde(skip)]
     pub java_field: Option<String>,
+    #[garde(skip)]
     pub is_pk: Option<String>,
+    #[garde(skip)]
     pub is_increment: Option<String>,
+    #[garde(skip)]
     pub is_required: Option<String>,
+    #[garde(skip)]
     pub is_insert: Option<String>,
+    #[garde(skip)]
     pub is_edit: Option<String>,
+    #[garde(skip)]
     pub is_list: Option<String>,
+    #[garde(skip)]
     pub is_query: Option<String>,
+    #[garde(skip)]
     pub query_type: Option<String>,
+    #[garde(skip)]
     pub html_type: Option<String>,
+    #[garde(skip)]
     pub dict_type: Option<String>,
+    #[garde(skip)]
     pub sort: Option<i32>,
 }
 
@@ -186,31 +221,38 @@ impl ColumnDataType {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTableColumnDto {
     /// 列名（必填，白名单：字母/数字/下划线，长度 1-64）
-    #[validate(length(min = 1, max = 64, message = "列名长度必须在1-64之间"))]
+    #[garde(length(min = 1, max = 64))]
     pub column_name: String,
     /// 列类型（必填）
+    #[garde(skip)]
     pub data_type: ColumnDataType,
     /// 长度（VARCHAR/CHAR 必填，DECIMAL 必填表示精度）
-    #[validate(range(min = 1, max = 65535, message = "长度必须在1-65535之间"))]
+    #[garde(range(min = 1, max = 65535))]
     pub length: Option<u32>,
     /// 小数位（仅 DECIMAL，必须 < length）
-    #[validate(range(min = 0, max = 30, message = "小数位必须在0-30之间"))]
+    #[garde(range(min = 0, max = 30))]
     pub precision: Option<u32>,
     /// 是否主键
     #[serde(default)]
+    #[garde(skip)]
     pub is_primary_key: bool,
     /// 是否自增（仅整数类型，且必须为主键）
     #[serde(default)]
+    #[garde(skip)]
     pub is_auto_increment: bool,
     /// 是否非空
     #[serde(default)]
+    #[garde(skip)]
     pub is_not_null: bool,
     /// 是否唯一
     #[serde(default)]
+    #[garde(skip)]
     pub is_unique: bool,
     /// 默认值（字符串形式，由后端按类型校验）
+    #[garde(skip)]
     pub default_value: Option<String>,
     /// 列注释
+    #[garde(skip)]
     pub column_comment: Option<String>,
 }
 
@@ -222,15 +264,17 @@ pub struct CreateTableColumnDto {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTableDto {
     /// 表名（必填，白名单：字母/数字/下划线，长度 1-64，必须以字母开头）
-    #[validate(length(min = 1, max = 64, message = "表名长度必须在1-64之间"))]
+    #[garde(length(min = 1, max = 64))]
     pub table_name: String,
     /// 表注释
+    #[garde(skip)]
     pub table_comment: Option<String>,
     /// 列定义列表（至少 1 列）
-    #[validate(length(min = 1, message = "至少需要定义1列"))]
+    #[garde(length(min = 1))]
     pub columns: Vec<CreateTableColumnDto>,
     /// 是否同时导入到 gen_table（代码生成业务表）
     #[serde(default = "default_import_to_gen")]
+    #[garde(skip)]
     pub import_to_gen: bool,
 }
 
@@ -261,7 +305,7 @@ pub type PreviewCodeVo = HashMap<String, String>;
 /// 解析时间字符串
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&format!("{}: {s}", crate::tr!("error.gen.time_format"))))
 }
 
 /// 将数据库列类型映射为 Rust 类型
@@ -411,13 +455,13 @@ fn apply_default_value(
     match data_type {
         ColumnDataType::Int | ColumnDataType::Bigint | ColumnDataType::Smallint | ColumnDataType::Tinyint => {
             default.parse::<i64>().map_err(|_| {
-                ServiceError::bad_request(&format!("整数类型默认值 {} 不是有效数字", default))
+                ServiceError::bad_request(&format!("{}: {default}", crate::tr!("error.gen.int_default")))
             })?;
             col_def.default(default.to_string());
         }
         ColumnDataType::Decimal | ColumnDataType::Double => {
             default.parse::<f64>().map_err(|_| {
-                ServiceError::bad_request(&format!("小数类型默认值 {} 不是有效数字", default))
+                ServiceError::bad_request(&format!("{}: {default}", crate::tr!("error.gen.decimal_default")))
             })?;
             col_def.default(default.to_string());
         }
@@ -531,7 +575,7 @@ impl GenTableService {
             .repo
             .find_by_id(table_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("代码生成业务表不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.table_not_found")))?;
         let rows = self.repo.find_columns_by_table_id(table_id).await?;
         let tables = self.repo.find_all().await?;
         Ok(GenTableInfoVo { info, rows, tables })
@@ -743,7 +787,7 @@ impl GenTableService {
         // 1. 校验表名（白名单：字母开头 + 字母/数字/下划线）
         validate_identifier(&dto.table_name, "表名")?;
         if !dto.table_name.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
-            return Err(ServiceError::bad_request("表名必须以字母开头"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.gen.table_name_start")));
         }
 
         // 2. 查重：检查表是否已存在
@@ -881,7 +925,7 @@ impl GenTableService {
 
         // 执行 DDL
         db.execute(backend.build(&create_stmt)).await
-            .map_err(|e| ServiceError::internal(&format!("建表失败: {}", e)))?;
+            .map_err(|e| ServiceError::internal(&format!("{}: {e}", crate::tr!("error.gen.create_table_failed"))))?;
 
         // 7. 可选：导入到 gen_table
         let mut table_id = None;
@@ -923,7 +967,7 @@ impl GenTableService {
             .repo
             .find_by_id(dto.table_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("代码生成业务表不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.table_not_found")))?;
 
         let now = chrono::Local::now().naive_local();
         let mut am: GenTableActiveModel = existing.into();
@@ -996,7 +1040,7 @@ impl GenTableService {
                 existing.iter().map(|t| t.table_id).collect();
             for id in &table_ids {
                 if !existing_ids.contains(id) {
-                    return Err(ServiceError::not_found(&format!("表 ID {} 不存在", id)));
+                    return Err(ServiceError::not_found(&format!("{}: {id}", crate::tr!("error.gen.table_id_not_found"))));
                 }
             }
         }
@@ -1018,11 +1062,11 @@ impl GenTableService {
             .repo
             .find_by_name(table_name)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&format!("表 {} 未导入", table_name)))?;
+            .ok_or_else(|| ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_not_imported"))))?;
 
         let columns: Vec<DbColumnInfo> = self.repo.find_db_columns(table_name).await?;
         if columns.is_empty() {
-            return Err(ServiceError::not_found(&format!("表 {} 不存在或没有字段", table_name)));
+            return Err(ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_no_columns"))));
         }
 
         let now = chrono::Local::now().naive_local();
@@ -1079,7 +1123,7 @@ impl GenTableService {
             .repo
             .find_by_id(table_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("代码生成业务表不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.table_not_found")))?;
         let columns = self.repo.find_columns_by_table_id(table_id).await?;
 
         Self::render_templates(&info, &columns)
@@ -1091,7 +1135,7 @@ impl GenTableService {
             .repo
             .find_by_name(table_name)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&format!("表 {} 未导入", table_name)))?;
+            .ok_or_else(|| ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_not_imported"))))?;
         let columns = self.repo.find_columns_by_table_id(table.table_id).await?;
 
         let files = Self::render_templates(&table, &columns)?;
@@ -1152,7 +1196,7 @@ impl GenTableService {
 
             for table_name in table_names {
                 let table = table_by_name.get(table_name.as_str()).ok_or_else(|| {
-                    ServiceError::not_found(&format!("表 {} 未导入", table_name))
+                    ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_not_imported")))
                 })?;
                 let columns = columns_by_table.get(&table.table_id).cloned().unwrap_or_default();
                 let files = Self::render_templates(table, &columns)?;
@@ -1178,36 +1222,6 @@ impl GenTableService {
         }
 
         Ok(buf)
-    }
-
-    /// 执行建表 SQL（用于 createTable 接口）
-    ///
-    /// 安全说明：
-    /// - 仅允许以 `CREATE TABLE` 开头的 SQL（大小写不敏感）
-    /// - 防止误执行 DROP/UPDATE/DELETE 等危险语句
-    ///
-    /// P0-1 未完全修复项：createTable 接口已禁用（SQL 注入风险），
-    /// 请通过 migration 管理表结构。保留此方法仅为兼容性，不应再被调用。
-    #[deprecated(note = "createTable 接口已禁用（SQL 注入风险），请通过 migration 管理表结构")]
-    #[allow(deprecated)] // 内部调用 repository 的同名 deprecated 方法，此处允许
-    pub async fn execute_create_sql(&self, sql: &str) -> Result<(), ServiceError> {
-        let trimmed = sql.trim_start();
-        let upper = trimmed.to_uppercase();
-        if !upper.starts_with("CREATE TABLE") {
-            return Err(ServiceError::bad_request(
-                "仅允许执行 CREATE TABLE 语句",
-            ));
-        }
-        // 禁止包含分号后的额外语句（基础防注入）
-        // 允许末尾单个分号，但不允许中间分号
-        let body = trimmed.trim_end_matches(';').trim();
-        if body.contains(';') {
-            return Err(ServiceError::bad_request(
-                "SQL 语句不允许包含分号（禁止多语句执行）",
-            ));
-        }
-        self.repo.execute_create_sql(body).await?;
-        Ok(())
     }
 
     /// 渲染所有模板
@@ -1436,7 +1450,7 @@ const SERVICE_TEMPLATE: &str = r#"//! {{ table.tableName }} 模块 Service 层
 
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::entity::{{ table.tableName }}::{ActiveModel, Model};
@@ -1487,14 +1501,17 @@ impl {{ table.className }}Service {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct {{ table.className }}AddDto {
-{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
+{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}    #[garde(skip)]
+    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
 {% endif %}{% endfor %}}
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct {{ table.className }}EditDto {
+    #[garde(skip)]
     pub {{ pk_column.javaField }}: i64,
-{% for col in columns %}{% if col.isEdit == "1" %}    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
+{% for col in columns %}{% if col.isEdit == "1" %}    #[garde(skip)]
+    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
 {% endif %}{% endfor %}}
 "#;
 
@@ -1503,9 +1520,8 @@ const HANDLER_TEMPLATE: &str = r#"//! {{ table.tableName }} 模块 Handler
 
 use std::sync::Arc;
 use axum::extract::{Path, State};
-use axum::Json;
 
-use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::common::{AjaxResult, AppError, TableDataInfo, ValidatedJson};
 use crate::middleware::Operator;
 use crate::service::{{ table.tableName }}_service::{{ table.className }}Service;
 use crate::state::AppState;
@@ -1520,19 +1536,20 @@ pub async fn get_info(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -
     Ok(AjaxResult::success(model))
 }
 
-pub async fn add(State(state): State<Arc<AppState>>, operator: Operator, Json(dto): Json<crate::service::{{ table.tableName }}_service::{{ table.className }}AddDto>) -> Result<AjaxResult<()>, AppError> {
+pub async fn add(State(state): State<Arc<AppState>>, operator: Operator, ValidatedJson(dto): ValidatedJson<crate::service::{{ table.tableName }}_service::{{ table.className }}AddDto>) -> Result<AjaxResult<()>, AppError> {
     state.{{ table.tableName | camel_case }}_service.create(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("新增成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
-pub async fn edit(State(state): State<Arc<AppState>>, operator: Operator, Json(dto): Json<crate::service::{{ table.tableName }}_service::{{ table.className }}EditDto>) -> Result<AjaxResult<()>, AppError> {
+pub async fn edit(State(state): State<Arc<AppState>>, operator: Operator, ValidatedJson(dto): ValidatedJson<crate::service::{{ table.tableName }}_service::{{ table.className }}EditDto>) -> Result<AjaxResult<()>, AppError> {
     state.{{ table.tableName | camel_case }}_service.update(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Result<AjaxResult<()>, AppError> {
     state.{{ table.tableName | camel_case }}_service.delete(id).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
+}
 }
 "#;
 

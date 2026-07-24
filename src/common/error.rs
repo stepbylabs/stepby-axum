@@ -72,15 +72,15 @@ impl From<sea_orm::DbErr> for ServiceError {
     fn from(err: sea_orm::DbErr) -> Self {
         match &err {
             sea_orm::DbErr::RecordNotFound(_) | sea_orm::DbErr::RecordNotUpdated => {
-                ServiceError::not_found("数据不存在")
+                ServiceError::not_found(&crate::tr!("error.common.not_found"))
             }
             sea_orm::DbErr::ConnectionAcquire(_) => {
                 tracing::error!("数据库连接获取失败: {}", err);
-                ServiceError::new(503, "数据库连接获取失败")
+                ServiceError::new(503, &crate::tr!("error.common.db_acquire"))
             }
             sea_orm::DbErr::TryIntoErr { .. } | sea_orm::DbErr::AttrNotSet(_) => {
                 tracing::error!("数据转换错误: {}", err);
-                ServiceError::bad_request("数据格式不正确")
+                ServiceError::bad_request(&crate::tr!("error.common.bad_format"))
             }
             _ => {
                 // 检测唯一约束冲突（P0-R17-001）
@@ -94,10 +94,10 @@ impl From<sea_orm::DbErr> for ServiceError {
                     || err_str.contains("duplicate key")
                 {
                     tracing::warn!("唯一约束冲突: {}", err);
-                    ServiceError::bad_request("数据重复，请检查唯一字段")
+                    ServiceError::bad_request(&crate::tr!("error.common.duplicate"))
                 } else {
                     tracing::error!("数据库错误: {}", err);
-                    ServiceError::internal("数据库操作失败，请联系管理员")
+                    ServiceError::internal(&crate::tr!("error.common.db_failed"))
                 }
             }
         }
@@ -111,29 +111,28 @@ impl From<sea_orm::TransactionError<sea_orm::DbErr>> for ServiceError {
             sea_orm::TransactionError::Transaction(db_err) => ServiceError::from(db_err),
             other => {
                 tracing::error!("事务错误: {}", other);
-                ServiceError::internal("数据库事务失败，请联系管理员")
+                ServiceError::internal(&crate::tr!("error.common.tx_failed"))
             }
         }
     }
 }
 
-/// validator 参数校验错误转换
-impl From<validator::ValidationErrors> for ServiceError {
-    fn from(err: validator::ValidationErrors) -> Self {
-        let msg = err
-            .field_errors()
+/// garde 参数校验错误转换（T-01：validator → garde）
+///
+/// Report 迭代产出 (字段路径, 错误消息)，消息语言由
+/// `common::i18n::validate` 按请求 locale 经 `with_i18n` 决定。
+impl From<garde::Report> for ServiceError {
+    fn from(report: garde::Report) -> Self {
+        let msg = report
             .iter()
-            .flat_map(|(field, errors)| {
-                errors.iter().map(move |e| {
-                    e.message
-                        .as_ref()
-                        .map(|m| m.to_string())
-                        .unwrap_or_else(|| format!("字段 {} 校验失败", field))
-                })
-            })
+            .map(|(path, err)| format!("{path}: {err}"))
             .collect::<Vec<_>>()
             .join("; ");
-        ServiceError::bad_request(if msg.is_empty() { "参数校验失败" } else { &msg })
+        if msg.is_empty() {
+            ServiceError::bad_request(&crate::tr!("error.common.validate_failed"))
+        } else {
+            ServiceError::bad_request(&msg)
+        }
     }
 }
 
@@ -144,23 +143,23 @@ impl From<crate::jwt::JwtError> for ServiceError {
         match err {
             JwtError::Expired => {
                 tracing::info!("JWT 验证失败: token 已过期");
-                ServiceError::unauthorized("会话已过期，请重新登录")
+                ServiceError::unauthorized(&crate::tr!("error.common.session_expired"))
             }
             JwtError::InvalidSignature => {
                 tracing::warn!("JWT 验证失败: 签名无效（token 可能被篡改）");
-                ServiceError::unauthorized("无效的会话，请重新登录")
+                ServiceError::unauthorized(&crate::tr!("error.common.session_invalid"))
             }
             JwtError::Malformed => {
                 tracing::info!("JWT 验证失败: token 格式错误");
-                ServiceError::unauthorized("无效的会话，请重新登录")
+                ServiceError::unauthorized(&crate::tr!("error.common.session_invalid"))
             }
             JwtError::InvalidClaims => {
                 tracing::info!("JWT 验证失败: claims 校验不通过");
-                ServiceError::unauthorized("无效的会话，请重新登录")
+                ServiceError::unauthorized(&crate::tr!("error.common.session_invalid"))
             }
             JwtError::GenerateFailed => {
                 tracing::error!("JWT 签发失败");
-                ServiceError::internal("token 生成失败")
+                ServiceError::internal(&crate::tr!("error.common.token_failed"))
             }
         }
     }
@@ -170,7 +169,7 @@ impl From<crate::jwt::JwtError> for ServiceError {
 impl From<serde_json::Error> for ServiceError {
     fn from(err: serde_json::Error) -> Self {
         tracing::error!("JSON 序列化错误: {}", err);
-        ServiceError::internal("数据处理失败")
+        ServiceError::internal(&crate::tr!("error.common.process_failed"))
     }
 }
 
@@ -178,7 +177,7 @@ impl From<serde_json::Error> for ServiceError {
 impl From<argon2::password_hash::Error> for ServiceError {
     fn from(err: argon2::password_hash::Error) -> Self {
         tracing::error!("密码加密失败: {}", err);
-        ServiceError::internal("密码加密失败")
+        ServiceError::internal(&crate::tr!("error.common.password_encrypt_failed"))
     }
 }
 
@@ -186,7 +185,7 @@ impl From<argon2::password_hash::Error> for ServiceError {
 impl From<std::io::Error> for ServiceError {
     fn from(err: std::io::Error) -> Self {
         tracing::error!("IO 错误: {}", err);
-        ServiceError::internal("系统 IO 错误")
+        ServiceError::internal(&crate::tr!("error.common.io_error"))
     }
 }
 
@@ -196,9 +195,9 @@ impl From<redis::RedisError> for ServiceError {
         tracing::error!("Redis 错误: {}", err);
         match err.kind() {
             redis::ErrorKind::AuthenticationFailed => {
-                ServiceError::unauthorized("缓存认证失败")
+                ServiceError::unauthorized(&crate::tr!("error.common.cache_auth_failed"))
             }
-            _ => ServiceError::internal("缓存服务异常，请联系管理员"),
+            _ => ServiceError::internal(&crate::tr!("error.common.cache_failed")),
         }
     }
 }
@@ -207,7 +206,7 @@ impl From<redis::RedisError> for ServiceError {
 impl From<anyhow::Error> for ServiceError {
     fn from(err: anyhow::Error) -> Self {
         tracing::error!("内部错误: {}", err);
-        ServiceError::internal("系统内部错误，请联系管理员")
+        ServiceError::internal(&crate::tr!("error.common.internal"))
     }
 }
 
@@ -303,10 +302,10 @@ impl From<sea_orm::TransactionError<sea_orm::DbErr>> for AppError {
     }
 }
 
-/// 兼容：ValidationErrors → AppError
-impl From<validator::ValidationErrors> for AppError {
-    fn from(err: validator::ValidationErrors) -> Self {
-        AppError::from(ServiceError::from(err))
+/// 兼容：garde Report → AppError
+impl From<garde::Report> for AppError {
+    fn from(report: garde::Report) -> Self {
+        AppError::from(ServiceError::from(report))
     }
 }
 

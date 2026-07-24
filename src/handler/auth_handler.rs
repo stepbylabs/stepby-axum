@@ -150,7 +150,7 @@ pub async fn register(
     let ip = extract_client_ip(&headers, peer_addr.ip(), &state.config.server.trusted_proxies);
     let mut redis = state.redis.clone();
     state.auth_service.register(dto, &ip, &mut redis).await?;
-    Ok(AjaxResult::success_msg("注册成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.register")))
 }
 
 /// POST /logout
@@ -184,7 +184,7 @@ pub async fn logout(
         .logout(token, &mut redis, &state.config.jwt)
         .await?;
 
-    Ok(AjaxResult::success_msg("退出成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.logout")))
 }
 
 /// GET /getInfo
@@ -251,7 +251,7 @@ pub async fn unlock_screen(
         .parse()
         .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
     state.auth_service.unlock_screen(user_id, dto).await?;
-    Ok(AjaxResult::success_msg("解锁成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.unlock")))
 }
 
 // 注：extract_client_ip / is_trusted_proxy / ip_in_cidr 已迁移至 utils/ip.rs（P1-17）

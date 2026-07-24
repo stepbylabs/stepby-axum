@@ -13,7 +13,7 @@ use chrono::NaiveDateTime;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
@@ -58,13 +58,15 @@ impl From<&ConfigQueryDto> for PageDomain {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigAddDto {
-    #[validate(length(min = 1, max = 100, message = "参数名称不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub config_name: Option<String>,
-    #[validate(length(min = 1, max = 100, message = "参数键名不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub config_key: String,
+    #[garde(skip)]
     pub config_value: Option<String>,
+    #[garde(skip)]
     pub config_type: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -72,14 +74,17 @@ pub struct ConfigAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigEditDto {
+    #[garde(skip)]
     pub config_id: i64,
-    #[validate(length(min = 1, max = 100, message = "参数名称不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub config_name: Option<String>,
-    #[validate(length(min = 1, max = 100, message = "参数键名不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub config_key: String,
+    #[garde(skip)]
     pub config_value: Option<String>,
+    #[garde(skip)]
     pub config_type: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -155,7 +160,9 @@ impl SysConfigService {
 
     /// 按 config_key 查询参数值（前端读取配置用）
     ///
-    /// 返回 config_value 字符串；若配置不存在返回 not_found
+    /// 返回 config_value 字符串；若配置不存在返回 not_found。
+    /// 安全：密钥类配置（key 含 secret/password/passwd/token/key/私钥/口令 等）返回值脱敏为 `***`，
+    /// 避免通过 /system/config/configKey/{key} 接口泄露敏感明文（SEC-信息泄露面）。
     pub async fn get_config_by_key(
         &self,
         config_key: &str,
@@ -165,7 +172,28 @@ impl SysConfigService {
             .find_by_config_key(config_key)
             .await?
             .ok_or_else(|| ServiceError::not_found("参数配置不存在"))?;
-        Ok(model.config_value.unwrap_or_default())
+        let value = model.config_value.unwrap_or_default();
+        if Self::is_sensitive_key(config_key) {
+            Ok("***".to_string())
+        } else {
+            Ok(value)
+        }
+    }
+
+    /// 判断配置键是否可能为敏感密钥类（用于 configKey 查询脱敏）
+    fn is_sensitive_key(key: &str) -> bool {
+        let lower = key.to_ascii_lowercase();
+        lower.contains("secret")
+            || lower.contains("password")
+            || lower.contains("passwd")
+            || lower.contains("token")
+            || lower.contains("apikey")
+            || lower.contains("api_key")
+            || lower.contains("privatekey")
+            || lower.contains("private_key")
+            || lower.contains("凭据")
+            || lower.contains("密钥")
+            || lower.contains("口令")
     }
 
     /// 新增参数配置
@@ -176,7 +204,7 @@ impl SysConfigService {
         dto: ConfigAddDto,
         operator: &str,
     ) -> Result<SysConfigModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // config_key 唯一性校验
         let existing = self.config_repo.find_by_config_key(&dto.config_key).await?;
@@ -210,7 +238,7 @@ impl SysConfigService {
         dto: ConfigEditDto,
         operator: &str,
     ) -> Result<SysConfigModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self.get_config_by_id(dto.config_id).await?;
 

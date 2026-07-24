@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
 
-use crate::common::excel::{export_to_excel, ExcelColumn};
+use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_job_log::Model as SysJobLogModel;
 use crate::service::sys_job_service::JobLogQueryDto;
@@ -63,7 +63,7 @@ pub async fn remove(
     }
 
     state.job_service.delete_job_logs(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// DELETE /monitor/jobLog/clean
@@ -81,7 +81,7 @@ pub async fn clean(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.job_service.clean_job_logs().await?;
-    Ok(AjaxResult::success_msg("清空成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.clear")))
 }
 
 /// POST /monitor/jobLog/export
@@ -105,23 +105,24 @@ pub async fn export(
     let rows = state.job_service.export_job_logs(query).await?;
 
     let columns = [
-        ExcelColumn { header: "日志编号", getter: |r: &SysJobLogModel| r.job_log_id.to_string().into() },
-        ExcelColumn { header: "任务名称", getter: |r: &SysJobLogModel| r.job_name.clone().into() },
-        ExcelColumn { header: "任务组名", getter: |r: &SysJobLogModel| r.job_group.clone().into() },
-        ExcelColumn { header: "调用目标字符串", getter: |r: &SysJobLogModel| r.invoke_target.clone().into() },
-        ExcelColumn { header: "日志信息", getter: |r: &SysJobLogModel| r.job_message.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "执行状态", getter: |r: &SysJobLogModel| r.status.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "异常信息", getter: |r: &SysJobLogModel| r.exception_info.clone().unwrap_or_default().into() },
+        ExcelColumn { key: "operId", header: ("日志编号", "Log ID"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_log_id.to_string().into()) },
+        ExcelColumn { key: "jobName", header: ("任务名称", "Job Name"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_name.clone().into()) },
+        ExcelColumn { key: "jobGroup", header: ("任务组名", "Job Group"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_group.clone().into()) },
+        ExcelColumn { key: "invokeTarget", header: ("调用目标字符串", "Invoke Target"), getter: |r: &SysJobLogModel| CellValue::Text(r.invoke_target.clone().into()) },
+        ExcelColumn { key: "jobMessage", header: ("日志信息", "Message"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_message.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "execStatus", header: ("执行状态", "Status"), getter: |r: &SysJobLogModel| CellValue::Text(r.status.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "exceptionInfo", header: ("异常信息", "Exception"), getter: |r: &SysJobLogModel| CellValue::Text(r.exception_info.clone().unwrap_or_default().into()) },
         ExcelColumn {
-            header: "执行时间",
-            getter: |r: &SysJobLogModel| {
+            key: "execTime",
+            header: ("执行时间", "Execute Time"),
+            getter: |r: &SysJobLogModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
+            })
         },
     ];
 
-    export_to_excel("调度日志", "job_log", &columns, &rows)
+    export_to_excel("调度日志", "job_log", &columns, &rows).await
 }

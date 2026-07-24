@@ -42,6 +42,7 @@ use crate::docs;
 use crate::embedded_assets;
 use crate::middleware::auth_middleware;
 use crate::middleware::idempotency_middleware;
+use crate::middleware::locale_middleware;
 use crate::middleware::oper_log_middleware;
 use crate::middleware::permission_middleware;
 use crate::middleware::rate_limit_middleware;
@@ -185,7 +186,23 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     let app = app.with_state(state);
 
     // 叠加全局中间件（顺序：后添加的先执行）
-    app.layer(CompressionLayer::new())
+    // T-02：压缩谓词修正——xlsx/zip 等已是压缩格式，跳过二次 gzip（默认谓词仅豁免 gRPC/image/SSE/<32B）
+    // 需引入 Predicate trait 才能调用 .and() 组合谓词
+    use tower_http::compression::predicate::Predicate;
+    let compression_predicate = tower_http::compression::predicate::SizeAbove::new(1024)
+        .and(tower_http::compression::predicate::NotForContentType::GRPC)
+        .and(tower_http::compression::predicate::NotForContentType::IMAGES)
+        .and(tower_http::compression::predicate::NotForContentType::SSE)
+        .and(tower_http::compression::predicate::NotForContentType::const_new(
+            "application/vnd.openxmlformats",
+        ))
+        .and(tower_http::compression::predicate::NotForContentType::const_new(
+            "application/zip",
+        ))
+        .and(tower_http::compression::predicate::NotForContentType::const_new(
+            "application/octet-stream",
+        ));
+    app.layer(CompressionLayer::new().compress_when(compression_predicate))
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -194,6 +211,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // 改用 TimeoutLayer 实现请求级超时；生产环境建议同时在 Nginx 层配置 client_header_timeout）
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(REQUEST_TIMEOUT_SECS)))
         .layer(axum::middleware::from_fn(request_id_middleware))
+        // locale 中间件（T-05）：Accept-Language → 协商 → task-local 注入（包裹全部内层，handler/AppError 均可读）
+        .layer(axum::middleware::from_fn(locale_middleware))
         // 安全响应头中间件（最外层，确保所有响应都带安全头）
         .layer(axum::middleware::from_fn(security_headers))
 }

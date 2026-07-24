@@ -15,7 +15,7 @@ use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
@@ -62,15 +62,16 @@ impl From<&RateLimitQueryDto> for PageDomain {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitAddDto {
-    #[validate(length(min = 1, max = 200, message = "路由前缀不能为空且不超过200字符"))]
+    #[garde(length(min = 1, max = 200))]
     pub route_pattern: String,
-    #[validate(range(min = 1, max = 10000, message = "桶容量范围为 1-10000"))]
+    #[garde(range(min = 1, max = 10000))]
     pub capacity: i32,
-    #[validate(range(min = 0.1, max = 1000.0, message = "补充速率范围为 0.1-1000"))]
+    #[garde(range(min = 0.1, max = 1000.0))]
     pub refill_per_second: f64,
     #[serde(default = "default_true")]
+    #[garde(skip)]
     pub enabled: bool,
-    #[validate(length(max = 500, message = "描述长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub description: Option<String>,
 }
 
@@ -78,15 +79,17 @@ pub struct RateLimitAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitEditDto {
+    #[garde(skip)]
     pub id: i64,
-    #[validate(length(min = 1, max = 200, message = "路由前缀不能为空且不超过200字符"))]
+    #[garde(length(min = 1, max = 200))]
     pub route_pattern: String,
-    #[validate(range(min = 1, max = 10000, message = "桶容量范围为 1-10000"))]
+    #[garde(range(min = 1, max = 10000))]
     pub capacity: i32,
-    #[validate(range(min = 0.1, max = 1000.0, message = "补充速率范围为 0.1-1000"))]
+    #[garde(range(min = 0.1, max = 1000.0))]
     pub refill_per_second: f64,
+    #[garde(skip)]
     pub enabled: bool,
-    #[validate(length(max = 500, message = "描述长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub description: Option<String>,
 }
 
@@ -208,7 +211,7 @@ impl SysRateLimitService {
         dto: RateLimitAddDto,
         operator: &str,
     ) -> Result<SysRateLimitModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // route_pattern 唯一性校验
         let existing = self
@@ -247,7 +250,7 @@ impl SysRateLimitService {
         dto: RateLimitEditDto,
         operator: &str,
     ) -> Result<SysRateLimitModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self.get_by_id(dto.id).await?;
 

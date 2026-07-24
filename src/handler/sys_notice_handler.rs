@@ -90,7 +90,7 @@ pub async fn add(
         .notice_service
         .add_notice(dto, operator.username(), Some(&state))
         .await?;
-    Ok(AjaxResult::success_msg("新增成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
 /// PUT /system/notice
@@ -115,7 +115,7 @@ pub async fn edit(
         .notice_service
         .edit_notice(dto, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/notice/{noticeIds}
@@ -150,7 +150,7 @@ pub async fn remove(
     }
 
     state.notice_service.delete_notice(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// 顶部公告响应 VO
@@ -195,7 +195,7 @@ pub async fn mark_read(
         .notice_service
         .mark_read(params.notice_id, user_id)
         .await?;
-    Ok(AjaxResult::success_msg("操作成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
 /// POST /system/notice/markReadAll
@@ -210,7 +210,7 @@ pub async fn mark_read_all(
         .notice_service
         .mark_read_all(&params.ids, user_id)
         .await?;
-    Ok(AjaxResult::success_msg("操作成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
 /// 标记已读请求参数

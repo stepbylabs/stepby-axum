@@ -1,0 +1,97 @@
+# en-US messages
+# Mirrors zh-CN.yml keys. Fallback chain: en-US -> zh-CN.
+
+error:
+  common:
+    not_found: Data not found
+    db_acquire: Failed to acquire database connection
+    bad_format: Invalid data format
+    duplicate: Duplicate data, please check unique fields
+    db_failed: Database operation failed, please contact the administrator
+    tx_failed: Database transaction failed, please contact the administrator
+    session_expired: Session expired, please log in again
+    session_invalid: Invalid session, please log in again
+    token_failed: Failed to generate token
+    process_failed: Data processing failed
+    password_encrypt_failed: Password encryption failed
+    io_error: System IO error
+    cache_auth_failed: Cache authentication failed
+    cache_failed: Cache service unavailable, please contact the administrator
+    internal: Internal system error, please contact the administrator
+    validate_failed: Parameter validation failed
+    parse_failed: Failed to parse request parameters
+  auth:
+    captcha_expired: Captcha expired or does not exist
+    captcha_wrong: Incorrect captcha
+    captcha_gen_failed: Captcha generation failed, please try again later
+    login_failed: Incorrect username or password
+    account_deleted: Account deleted, please contact the administrator
+    account_disabled: Account disabled, please contact the administrator
+    account_locked: Account locked, please try again later
+    register_exists: Username already exists
+    register_disabled: Registration is not enabled, please contact the administrator
+    old_password_wrong: Incorrect old password
+    unauthorized: Unauthorized, please log in first
+    forbidden: Access denied
+    auth_unavailable: Authentication service temporarily unavailable, please try again later
+    rate_limited: Too many requests, please try again later
+    password_locked: Too many failed password attempts, please try again in 5 minutes
+    password_verify_failed: Password verification failed, please try again later
+    logout_failed: Logout processing failed, please try again
+    totp_required: Two-factor verification required
+    totp_invalid: Incorrect verification code
+  user:
+    not_found: User does not exist
+    name_duplicate: Username cannot be duplicated
+    admin_disable_forbidden: Cannot disable the super administrator
+    admin_role_forbidden: Cannot modify the super administrator's role bindings
+    admin_post_forbidden: Cannot modify the super administrator's post bindings
+    admin_delete_forbidden: Cannot delete the super administrator
+    admin_pwd_forbidden: Cannot modify the super administrator's password
+    same_password: The new password cannot be the same as the old one
+    password_missing: User password field is missing
+  post:
+    not_found: Post does not exist
+    code_exists: Post code already exists
+  task:
+    not_found: Task does not exist
+  gen:
+    time_format: Invalid time format
+    int_default: Integer default value is not a valid number
+    decimal_default: Decimal default value is not a valid number
+    table_not_found: Code generation business table does not exist
+    table_name_start: Table name must start with a letter
+    create_table_failed: Failed to create table
+    table_id_not_found: Table ID does not exist
+    table_not_imported: Table not imported
+    table_no_columns: Table does not exist or has no columns
+
+msg:
+  success:
+    default: Operation succeeded
+    add: Added successfully
+    edit: Updated successfully
+    delete: Deleted successfully
+    clear: Cleared successfully
+    unlock: Unlocked successfully
+    register: Registered successfully
+    logout: Logged out successfully
+    sort: Sorted successfully
+    restore: Restored successfully
+    force_logout: Force logged out successfully
+    reset: Reset successfully
+    refresh: Refreshed successfully
+    status_change: Status updated successfully
+    execute: Executed successfully
+    save: Saved successfully
+    reload: Hot-reloaded successfully
+    password_reset: Password reset successfully
+    password_change: Password changed successfully
+    assign_role: Roles assigned successfully
+    cancel_auth: Authorization revoked successfully
+    auth: Authorized successfully
+    import: Imported successfully
+    sync: Synced successfully
+  cache:
+    no_match: No matching cache
+    key_not_found: Cache key does not exist

@@ -46,8 +46,13 @@ services:
       JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-6}
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8080
+      # 可选：跨域白名单（逗号分隔），未设置时由反向代理处理 CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       TZ: Asia/Shanghai
       RUST_LOG: info
+    volumes:
+      # 上传文件持久化（头像/附件），重建容器后不丢失
+      - yebot_prod_uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -127,6 +132,7 @@ services:
 volumes:
   yebot_prod_pg_data:
   yebot_prod_redis_data:
+  yebot_prod_uploads:
 
 networks:
   yebot_prod_net:

@@ -11,7 +11,7 @@ use futures::future::FutureExt;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
@@ -60,17 +60,20 @@ impl From<&NoticeQueryDto> for PageDomain {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeAddDto {
-    #[validate(length(min = 1, max = 50, message = "公告标题不能为空且不超过50字符"))]
+    #[garde(length(min = 1, max = 50))]
     pub notice_title: String,
     /// 公告类型（1=通知 2=公告）
-    #[validate(length(min = 1, max = 1, message = "公告类型不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub notice_type: String,
+    #[garde(skip)]
     pub notice_content: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
     /// 是否同时通过邮件通知所有启用状态的用户（true 时调用 MailerService 批量发送）
     #[serde(default)]
+    #[garde(skip)]
     pub notify_email: bool,
 }
 
@@ -78,15 +81,18 @@ pub struct NoticeAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeEditDto {
+    #[garde(skip)]
     pub notice_id: i64,
-    #[validate(length(min = 1, max = 50, message = "公告标题不能为空且不超过50字符"))]
+    #[garde(length(min = 1, max = 50))]
     pub notice_title: String,
     /// 公告类型（1=通知 2=公告）
-    #[validate(length(min = 1, max = 1, message = "公告类型不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub notice_type: String,
+    #[garde(skip)]
     pub notice_content: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -222,7 +228,7 @@ impl SysNoticeService {
         operator: &str,
         state: Option<&AppState>,
     ) -> Result<SysNoticeModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let now = chrono::Local::now().naive_local();
         // 净化 notice_content：移除危险标签和事件属性（P0-R19-002）
@@ -293,7 +299,9 @@ impl SysNoticeService {
             content = html_escape(content.unwrap_or(""))
         );
 
-        let subject = format!("【yebot 通知】{}", title);
+        // P3：邮件主题前缀按请求 locale 双语（notice 发送在请求作用域内）
+        let subject_prefix = crate::common::i18n::pick("【yebot 通知】", "[yebot Notice] ");
+        let subject = format!("{}{}", subject_prefix, title);
         match state.mailer_service.send_batch(&emails, &subject, &body).await {
             Ok(result) => {
                 tracing::info!(
@@ -338,7 +346,7 @@ impl SysNoticeService {
         dto: NoticeEditDto,
         operator: &str,
     ) -> Result<SysNoticeModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self.get_notice_by_id(dto.notice_id).await?;
 

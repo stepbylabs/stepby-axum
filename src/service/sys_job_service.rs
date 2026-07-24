@@ -12,7 +12,7 @@ use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
 use crate::common::error::ServiceError;
@@ -52,18 +52,21 @@ impl From<&JobQueryDto> for PageDomain {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobAddDto {
-    #[validate(length(min = 1, max = 64, message = "任务名称不能为空且不超过64字符"))]
+    #[garde(length(min = 1, max = 64))]
     pub job_name: String,
-    #[validate(length(max = 64, message = "任务组名不超过64字符"))]
+    #[garde(length(max = 64))]
     pub job_group: String,
-    #[validate(length(min = 1, max = 500, message = "调用目标不能为空且不超过500字符"))]
+    #[garde(length(min = 1, max = 500))]
     pub invoke_target: String,
-    #[validate(length(min = 1, max = 255, message = "cron表达式不能为空且不超过255字符"))]
+    #[garde(length(min = 1, max = 255))]
     pub cron_expression: String,
+    #[garde(skip)]
     pub misfire_policy: Option<String>,
+    #[garde(skip)]
     pub concurrent: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注不超过500字符"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -71,19 +74,23 @@ pub struct JobAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobEditDto {
+    #[garde(skip)]
     pub job_id: i64,
-    #[validate(length(min = 1, max = 64, message = "任务名称不能为空且不超过64字符"))]
+    #[garde(length(min = 1, max = 64))]
     pub job_name: String,
-    #[validate(length(max = 64, message = "任务组名不超过64字符"))]
+    #[garde(length(max = 64))]
     pub job_group: String,
-    #[validate(length(min = 1, max = 500, message = "调用目标不能为空且不超过500字符"))]
+    #[garde(length(min = 1, max = 500))]
     pub invoke_target: String,
-    #[validate(length(min = 1, max = 255, message = "cron表达式不能为空且不超过255字符"))]
+    #[garde(length(min = 1, max = 255))]
     pub cron_expression: String,
+    #[garde(skip)]
     pub misfire_policy: Option<String>,
+    #[garde(skip)]
     pub concurrent: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注不超过500字符"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -91,8 +98,9 @@ pub struct JobEditDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatusDto {
+    #[garde(skip)]
     pub job_id: i64,
-    #[validate(length(min = 1, max = 1, message = "状态值不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub status: String,
 }
 
@@ -100,8 +108,9 @@ pub struct JobStatusDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobRunDto {
+    #[garde(skip)]
     pub job_id: i64,
-    #[validate(length(max = 64, message = "任务组名不超过64字符"))]
+    #[garde(length(max = 64))]
     pub job_group: String,
 }
 
@@ -138,7 +147,7 @@ impl From<&JobLogQueryDto> for PageDomain {
 // ==================== VO ====================
 
 /// 任务响应 VO（在 SysJobModel 基础上增加 nextValidTime 计算字段）
-#[derive(Debug, Serialize, TS, ToSchema)]
+#[derive(Debug, Clone, Serialize, TS, ToSchema)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, rename_all = "camelCase")]
 pub struct JobVo {
@@ -232,7 +241,7 @@ impl SysJobService {
             .job_repo
             .find_active_by_id(job_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
         Ok(JobVo::from_model(job))
     }
 
@@ -248,7 +257,7 @@ impl SysJobService {
         dto: JobAddDto,
         operator: &str,
     ) -> Result<SysJobModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
@@ -301,13 +310,13 @@ impl SysJobService {
         dto: JobEditDto,
         operator: &str,
     ) -> Result<SysJobModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self
             .job_repo
             .find_active_by_id(dto.job_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
@@ -389,7 +398,7 @@ impl SysJobService {
                 sea_orm::TransactionError::Transaction(se) => se,
                 sea_orm::TransactionError::Connection(db_err) => {
                     tracing::error!("任务删除事务连接错误: {}", db_err);
-                    ServiceError::internal("数据库事务失败，请联系管理员")
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
                 }
             })?;
 
@@ -408,13 +417,13 @@ impl SysJobService {
     /// 0→1: remove_job
     /// 1→0: add_job
     pub async fn change_status(&self, dto: JobStatusDto) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self
             .job_repo
             .find_active_by_id(dto.job_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         let old_status = existing.status.as_deref().unwrap_or("1").to_string();
 
@@ -445,13 +454,13 @@ impl SysJobService {
     /// 3. 验证 job_group 一致
     /// 4. scheduler.run_once
     pub async fn run_job_once(&self, dto: JobRunDto) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let job = self
             .job_repo
             .find_active_by_id(dto.job_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         // 验证 job_group 一致
         if job.job_group != dto.job_group {

@@ -1,8 +1,7 @@
-# 固定 Rust 工具链为 stable channel（memory 约束：stable 1.96.0）
-# 项目所有开发者和 CI 必须使用 stable channel 以确保一致性
-# 当前 stable channel 对应 1.96.0（与 Dockerfile 中 rust:1.96-bookworm 一致）
-# 注：若希望进一步锁定到具体 patch 版本，可改为 channel = "1.96.0"
-#     但需确保内部镜像源已同步该版本，否则 rustup 无法下载
+# Rust 工具链策略：跟随 stable channel，最低要求 >= 1.96（Dockerfile 基础镜像版本）
+# - Cargo.toml edition = "2024" 需 Rust >= 1.85；let-chains 稳定语法需 >= 1.88
+# - 不钉死具体 patch 版本：国内 rustup 镜像（如 aliyun）可能未同步指定版本导致 404 无法构建
+# - 允许使用高于 1.96 的版本（如本地 1.97.x），向后兼容由 stable channel 保证
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]

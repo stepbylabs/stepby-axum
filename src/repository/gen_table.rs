@@ -346,19 +346,6 @@ impl GenTableRepository {
 
     // ============ gen_table_column 操作 ============
 
-    /// 执行建表 SQL（用于 createTable 接口）
-    ///
-    /// 安全说明：
-    /// - 仅允许执行 CREATE TABLE 语句
-    /// - 通过 `execute_unprepared` 执行原始 SQL
-    ///
-    /// P0-1 未完全修复项：createTable 接口已禁用，请通过 migration 管理表结构。
-    #[deprecated(note = "createTable 接口已禁用，请通过 migration 管理表结构")]
-    pub async fn execute_create_sql(&self, sql: &str) -> Result<ExecResult, DbErr> {
-        let db = self.base.db();
-        db.execute_unprepared(sql).await
-    }
-
     /// 按 table_id 查询所有列
     pub async fn find_columns_by_table_id(&self, table_id: i64) -> Result<Vec<GenTableColumnModel>, DbErr> {
         GenTableColumnEntity::find()

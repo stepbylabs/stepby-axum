@@ -1,5 +1,5 @@
 # ===== 构建阶段 =====
-# INFRA-001：升级到 rust:1.96-bookworm，对齐 rust-toolchain.toml 的 stable channel（1.96.0）
+# INFRA-001：rust-toolchain.toml 跟随 stable channel（最低 1.96，允许更高版本）；镜像钉具体版本保证构建可复现，可按需升级
 # 原 rust:1.81 不支持 edition 2024（需 1.85+）和 let-chains 稳定语法（需 1.88+）
 FROM rust:1.96-bookworm AS builder
 WORKDIR /app
@@ -24,8 +24,11 @@ RUN mkdir -p src migration/src && \
 # 覆盖 dummy src，触发仅源码层的增量编译
 COPY . .
 
-# 编译 release 版本（构建整个 workspace，产出 axum-backend 与 migration 两个二进制）
+# 编译 release 版本（默认只构建根包 axum-backend；migration 是独立工具二进制，
+# 不是 axum-backend 的依赖，cargo build 不会自动构建它，需显式指定 -p migration）
 RUN cargo build --release
+# 显式构建 migration 独立二进制（用于数据库迁移），否则 target/release/migration 不会产出
+RUN cargo build --release -p migration
 
 # ===== 运行阶段 =====
 FROM debian:bookworm-slim

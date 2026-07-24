@@ -17,6 +17,7 @@ pub use m20260722_000003_sys_rate_limit::Migration as M20260722SysRateLimit;
 pub use m20260723_000001_add_backup_restore_perm::Migration as M20260723AddBackupRestorePerm;
 pub use m20260724_000001_ip_location_menus::Migration as M20260724IpLocationMenus;
 pub use m20260725_000001_add_mylogin_about_menus::Migration as M20260725AddMyloginAboutMenus;
+pub use m20260725_000002_add_menu_i18n_key::Migration as M20260725AddMenuI18nKey;
 pub use m20260726_000001_add_notice_center_session_menus::Migration as M20260726AddNoticeCenterSessionMenus;
 pub use m20260727_000001_add_workbench_shortcuts_help_menus::Migration as M20260727AddWorkbenchShortcutsHelpMenus;
 pub use m20260728_000001_add_changelog_menu::Migration as M20260728AddChangelogMenu;
@@ -24,6 +25,8 @@ pub use m20260729_000001_fix_menu_icons_and_dashboard::Migration as M20260729Fix
 pub use m20260730_000001_remove_duplicate_health_file_menus::Migration as M20260730RemoveDuplicateHealthFileMenus;
 pub use m20260731_000001_fix_menu_order_and_icons::Migration as M20260731FixMenuOrderAndIcons;
 pub use m20260801_000001_remove_druid_menu::Migration as M20260801RemoveDruidMenu;
+pub use m20260801_000002_register_dashboard_menu::Migration as M20260801RegisterDashboardMenu;
+pub use m20260801_000003_fix_missing_menu_i18n_key::Migration as M20260801FixMissingMenuI18nKey;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -40,6 +43,7 @@ mod m20260722_000003_sys_rate_limit;
 mod m20260723_000001_add_backup_restore_perm;
 mod m20260724_000001_ip_location_menus;
 mod m20260725_000001_add_mylogin_about_menus;
+mod m20260725_000002_add_menu_i18n_key;
 mod m20260726_000001_add_notice_center_session_menus;
 mod m20260727_000001_add_workbench_shortcuts_help_menus;
 mod m20260728_000001_add_changelog_menu;
@@ -47,6 +51,8 @@ mod m20260729_000001_fix_menu_icons_and_dashboard;
 mod m20260730_000001_remove_duplicate_health_file_menus;
 mod m20260731_000001_fix_menu_order_and_icons;
 mod m20260801_000001_remove_druid_menu;
+mod m20260801_000002_register_dashboard_menu;
+mod m20260801_000003_fix_missing_menu_i18n_key;
 
 use sea_orm_migration::prelude::*;
 
@@ -72,6 +78,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260723AddBackupRestorePerm),
             Box::new(M20260724IpLocationMenus),
             Box::new(M20260725AddMyloginAboutMenus),
+            Box::new(M20260725AddMenuI18nKey),
             Box::new(M20260726AddNoticeCenterSessionMenus),
             Box::new(M20260727AddWorkbenchShortcutsHelpMenus),
             Box::new(M20260728AddChangelogMenu),
@@ -80,6 +87,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260731FixMenuOrderAndIcons),
             Box::new(M20260801RemoveDruidMenu),
             Box::new(M20260801RegisterDashboardMenu),
+            Box::new(M20260801FixMissingMenuI18nKey),
         ]
     }
 }

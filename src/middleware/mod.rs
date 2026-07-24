@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod idempotency;
+pub mod locale;
 pub mod oper_log;
 pub mod permission;
 pub mod rate_limit;
@@ -11,6 +12,7 @@ pub mod spa_fallback;
 
 pub use auth::{auth_middleware, Operator};
 pub use idempotency::idempotency_middleware;
+pub use locale::{locale_middleware, negotiate};
 pub use oper_log::oper_log_middleware;
 pub use permission::permission_middleware;
 pub use rate_limit::{rate_limit_middleware, RateLimiter, RateLimitConfig};

@@ -58,7 +58,18 @@ impl SysOperLogRepository {
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOperLog::find();
         if let Some(t) = title {
-            query = query.filter(Column::Title.like(format!("%{}%", like_escape(t))));
+            // T-11：title 新数据存 i18n key（module.*），旧数据为中文。
+            // 搜索时同时匹配中文原文（LIKE）与对应的 key（精确），保证新旧均可搜到。
+            let keys = crate::common::i18n::module_keys_matching(t);
+            if keys.is_empty() {
+                query = query.filter(Column::Title.like(format!("%{}%", like_escape(t))));
+            } else {
+                query = query.filter(
+                    Condition::any()
+                        .add(Column::Title.like(format!("%{}%", like_escape(t))))
+                        .add(Column::Title.is_in(keys)),
+                );
+            }
         }
         if let Some(bt) = business_type {
             query = query.filter(Column::BusinessType.eq(bt));

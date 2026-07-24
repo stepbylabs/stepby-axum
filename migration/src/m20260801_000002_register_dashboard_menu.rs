@@ -16,6 +16,7 @@
 //! 若 menuId 已被占用，使用 SELECT MAX(menu_id)+1 动态获取。
 
 use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::Statement;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -50,10 +51,10 @@ impl MigrationTrait for Migration {
             .map(|row| row.try_get_by_index::<i64>(0).unwrap_or(2043))
             .unwrap_or(2043);
 
-        // 3. 插入菜单
+        // 3. 插入菜单（含 i18n_key='menu.dashboard'，确保语言切换时菜单名能正确翻译）
         conn.execute(Statement::from_sql_and_values(
             manager.get_database_backend(),
-            "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES ($1, '数据看板', 1, 0, 'dashboard', 'dashboard/index', '', '', '1', '0', 'C', '0', '0', 'monitor:dashboard:list', 'chart', 'admin', datetime('now'), '系统数据看板（用户/角色/登录/操作统计）', '0')",
+            "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES ($1, '数据看板', 1, 0, 'dashboard', 'dashboard/index', '', '', '1', '0', 'C', '0', '0', 'monitor:dashboard:list', 'chart', 'admin', datetime('now'), '系统数据看板（用户/角色/登录/操作统计）', '0', 'menu.dashboard')",
             [next_id.into()],
         ))
         .await?;

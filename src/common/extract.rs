@@ -2,20 +2,22 @@
 //!
 //! 当前提供：
 //! - [`ValidatedJson`]：自动校验的 JSON 提取器（P1-24）
+//!
+//! T-01：校验框架由 validator 迁移为 garde，
+//! 校验经 `common::i18n::validate` 按请求 locale 生成错误消息。
 
 use axum::extract::FromRequest;
 use axum::extract::Request;
 use axum::Json;
 use serde::de::DeserializeOwned;
-use validator::Validate;
 
+use crate::common::i18n;
 use crate::common::AppError;
 
 /// 自动校验的 JSON 提取器（P1-24）
 ///
-/// 在解析 JSON 后自动调用 `T::validate()`，校验失败返回 400。
-/// 替代 handler 层 `Json(dto): Json<T>` + 手动 `dto.validate()?` 的样板代码，
-/// 消除 19 处重复的 validate 调用。
+/// 在解析 JSON 后自动调用 garde 校验，校验失败返回 400。
+/// 替代 handler 层 `Json(dto): Json<T>` + 手动校验的样板代码。
 ///
 /// # 示例
 /// ```ignore
@@ -32,7 +34,7 @@ pub struct ValidatedJson<T>(pub T);
 
 impl<T, S> FromRequest<S> for ValidatedJson<T>
 where
-    T: DeserializeOwned + Validate,
+    T: DeserializeOwned + garde::Validate<Context = ()>,
     S: Send + Sync,
 {
     type Rejection = AppError;
@@ -40,10 +42,8 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let Json(value) = Json::<T>::from_request(req, state)
             .await
-            .map_err(|e| AppError::bad_request(&format!("请求参数解析失败: {e}")))?;
-        value
-            .validate()
-            .map_err(|e| AppError::bad_request(&format!("请求参数校验失败: {e}")))?;
+            .map_err(|e| AppError::bad_request(&format!("{}: {e}", crate::tr!("error.common.parse_failed"))))?;
+        i18n::validate(&value).map_err(AppError::from)?;
         Ok(ValidatedJson(value))
     }
 }

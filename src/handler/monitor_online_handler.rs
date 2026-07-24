@@ -281,7 +281,7 @@ pub async fn force_logout(
         .await
         .map_err(|e| {
             tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
-            AppError::new(503, "认证服务暂时不可用，请稍后再试")
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
 
     let session_json = match session_json {
@@ -316,7 +316,7 @@ pub async fn force_logout(
         .await
         .map_err(|e| {
             tracing::error!("Lua 强退脚本执行失败（fail-closed）: {}", e);
-            AppError::new(503, "认证服务暂时不可用，请稍后再试")
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
 
     // 广播 forceLogout 事件，通知被强退用户的客户端跳转登录页
@@ -331,5 +331,5 @@ pub async fn force_logout(
         }),
     );
 
-    Ok(AjaxResult::success_msg("强退成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.force_logout")))
 }

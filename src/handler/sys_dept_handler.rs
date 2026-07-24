@@ -72,7 +72,7 @@ pub async fn update_sort(
         .dept_service
         .update_dept_sort(dto, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("排序成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.sort")))
 }
 
 /// GET /system/dept/list/exclude/{deptId}
@@ -179,7 +179,7 @@ pub async fn edit(
     Json(dto): Json<DeptEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.dept_service.edit_dept(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/dept/{deptId}
@@ -201,5 +201,5 @@ pub async fn remove(
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.dept_service.delete_dept(dept_id).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
