@@ -13,7 +13,12 @@ config/config.toml.prod
 data/*.db
 data/*.py
 data/*.json
+data/__pycache__/
 data/screenshots/
+data/screenshots_*/
+data/gen_test_output/
+data/GeoLite2-*.mmdb
+data/*.mmdb
 
 # 日志
 logs/

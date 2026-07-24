@@ -565,8 +565,8 @@ impl GenTableService {
             )));
         }
 
-        // 3. 读取表注释
-        let db_tables = self.repo.find_db_tables(0, i32::MAX as u64, Some(table_name), None).await?;
+        // 3. 读取表注释（仅需 1 条匹配）
+        let db_tables = self.repo.find_db_tables(0, 1, Some(table_name), None).await?;
         let table_comment = db_tables
             .0
             .iter()
@@ -986,10 +986,18 @@ impl GenTableService {
 
     /// 批量删除代码生成业务表（级联清理列记录）
     pub async fn delete_tables(&self, table_ids: Vec<i64>) -> Result<(), ServiceError> {
-        // 校验存在
-        for id in &table_ids {
-            if self.repo.find_by_id(*id).await?.is_none() {
-                return Err(ServiceError::not_found(&format!("表 ID {} 不存在", id)));
+        if table_ids.is_empty() {
+            return Ok(());
+        }
+        // 批量校验存在性（单次查询替代 N 次 find_by_id）
+        let existing = self.repo.find_by_ids(table_ids.clone()).await?;
+        if existing.len() != table_ids.len() {
+            let existing_ids: std::collections::HashSet<i64> =
+                existing.iter().map(|t| t.table_id).collect();
+            for id in &table_ids {
+                if !existing_ids.contains(id) {
+                    return Err(ServiceError::not_found(&format!("表 ID {} 不存在", id)));
+                }
             }
         }
         // 级联清理列
@@ -1120,6 +1128,22 @@ impl GenTableService {
     ///
     /// 注意：调用方需做表名白名单校验和数量上限控制（已在 handler 层完成）。
     pub async fn batch_gen_code(&self, table_names: &[String]) -> Result<Vec<u8>, ServiceError> {
+        if table_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 批量查询表与列（消除 N+1：原实现每表 2 次 DB 查询，现降为 2 次总查询）
+        let tables = self.repo.find_by_names(table_names.to_vec()).await?;
+        // 按 table_name 建立索引以便按入参顺序查找（保持原循环顺序）
+        let table_by_name: HashMap<&str, &GenTableModel> =
+            tables.iter().map(|t| (t.table_name.as_str(), t)).collect();
+        let table_ids: Vec<i64> = tables.iter().map(|t| t.table_id).collect();
+        let all_columns = self.repo.find_columns_by_table_ids(table_ids).await?;
+        // 按 table_id 分组列（查询已按 table_id、sort 升序，分组后每表内列顺序保持不变）
+        let mut columns_by_table: HashMap<i64, Vec<GenTableColumnModel>> = HashMap::new();
+        for col in all_columns {
+            columns_by_table.entry(col.table_id).or_default().push(col);
+        }
+
         let mut buf = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
@@ -1127,15 +1151,11 @@ impl GenTableService {
                 zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
             for table_name in table_names {
-                let table = self
-                    .repo
-                    .find_by_name(table_name)
-                    .await?
-                    .ok_or_else(|| {
-                        ServiceError::not_found(&format!("表 {} 未导入", table_name))
-                    })?;
-                let columns = self.repo.find_columns_by_table_id(table.table_id).await?;
-                let files = Self::render_templates(&table, &columns)?;
+                let table = table_by_name.get(table_name.as_str()).ok_or_else(|| {
+                    ServiceError::not_found(&format!("表 {} 未导入", table_name))
+                })?;
+                let columns = columns_by_table.get(&table.table_id).cloned().unwrap_or_default();
+                let files = Self::render_templates(table, &columns)?;
 
                 // 表名子目录前缀（已在 handler 层做白名单校验，仅含字母/数字/下划线，无路径穿越风险）
                 let prefix = sanitize_path_component(table_name)?;

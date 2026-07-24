@@ -281,18 +281,18 @@ impl SysRateLimitService {
 
     /// 批量删除限流配置（物理删除）
     pub async fn remove(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
-        // 先查询要删除的 route_pattern（用于缓存失效）
-        let mut patterns_to_invalidate = Vec::new();
-        for id in &ids {
-            if let Some(model) = self.rate_limit_repo.find_by_id(*id).await? {
-                patterns_to_invalidate.push(model.route_pattern);
-            }
+        if ids.is_empty() {
+            return Ok(());
         }
+        // 批量查询要删除的记录（单次查询替代 N 次 find_by_id）
+        let models = self.rate_limit_repo.find_by_ids(ids.clone()).await?;
 
         self.rate_limit_repo.delete_by_ids(ids).await?;
 
-        for pattern in &patterns_to_invalidate {
-            self.invalidate_cache(pattern).await;
+        // 失效缓存：invalidate_cache 实际调用 invalidate_all_cache（扫描全量 key），
+        // 原实现按 pattern 循环调用会触发 N 次 SCAN，这里降为单次全量失效。
+        if !models.is_empty() {
+            self.invalidate_all_cache().await;
         }
         Ok(())
     }

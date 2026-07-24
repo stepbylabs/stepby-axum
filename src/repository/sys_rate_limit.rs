@@ -42,6 +42,17 @@ impl SysRateLimitRepository {
         SysRateLimit::find_by_id(id).one(self.base.db()).await
     }
 
+    /// 按 id 列表批量查询限流配置（单次查询替代 N 次 find_by_id）
+    pub async fn find_by_ids(&self, ids: Vec<i64>) -> Result<Vec<Model>, DbErr> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysRateLimit::find()
+            .filter(Column::Id.is_in(ids))
+            .all(self.base.db())
+            .await
+    }
+
     /// 按 route_pattern 精确查询（唯一约束，用于查重和中间件按路由取配置）
     pub async fn find_by_route_pattern(
         &self,

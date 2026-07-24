@@ -7,6 +7,7 @@
 //! - 按父菜单查询
 //! - 软删除过滤（del_flag = '0'）
 
+use chrono::NaiveDateTime;
 use sea_orm::*;
 use sea_orm::sea_query::Expr;
 
@@ -110,6 +111,27 @@ impl SysMenuRepository {
             .col_expr(Column::DelFlag, Expr::value("2"))
             .filter(Column::MenuId.eq(menu_id))
             .exec(self.base.db())
+            .await
+    }
+
+    /// 直接更新菜单排序字段（避免 find_by_id + update 两轮 DB 往返）
+    ///
+    /// 仅更新 order_num / update_by / update_time 三个字段，通过 WHERE menu_id 过滤。
+    /// 若记录不存在则 affected_rows=0，由调用方按需处理（如 silent skip）。
+    pub async fn update_sort_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        menu_id: i64,
+        order_num: i32,
+        update_by: &str,
+        update_time: NaiveDateTime,
+    ) -> Result<UpdateResult, DbErr> {
+        SysMenu::update_many()
+            .col_expr(Column::OrderNum, Expr::value(order_num))
+            .col_expr(Column::UpdateBy, Expr::value(update_by))
+            .col_expr(Column::UpdateTime, Expr::value(update_time))
+            .filter(Column::MenuId.eq(menu_id))
+            .exec(conn)
             .await
     }
 

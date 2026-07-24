@@ -261,16 +261,12 @@ impl SysDeptService {
                 let operator = operator.clone();
                 async move {
                     for (dept_id, order_num) in dept_ids.iter().zip(order_nums.iter()) {
-                        // 通过 Repository 查询部门是否存在（事务上下文）
-                        let existing = dept_repo.base().find_by_id_conn(txn, *dept_id).await?;
-                        let Some(dept) = existing else {
-                            continue;
-                        };
-                        let mut am: SysDeptActiveModel = dept.into();
-                        am.order_num = Set(Some(*order_num));
-                        am.update_by = Set(Some(operator.clone()));
-                        am.update_time = Set(Some(now));
-                        dept_repo.base().update_conn(txn, am).await?;
+                        // 直接 UPDATE order_num：未匹配到记录时 affected_rows=0，
+                        // 等价于原 find_by_id 后 continue 的 silent skip 行为，
+                        // 同时避免"先查完整实体再保存全行"的两轮 DB 往返。
+                        dept_repo
+                            .update_sort_conn(txn, *dept_id, *order_num, &operator, now)
+                            .await?;
                     }
                     Ok(())
                 }
