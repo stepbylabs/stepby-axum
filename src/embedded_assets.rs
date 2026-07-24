@@ -166,13 +166,6 @@ fn build_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     response.body(body).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// 列出嵌入的所有文件（仅用于调试，生产环境可关闭）
-#[cfg(not(debug_assertions))]
-#[allow(dead_code)]
-pub fn list_embedded_files() -> Vec<String> {
-    EmbeddedAssets::iter().map(|s| s.to_string()).collect()
-}
-
 // ============================================================================
 // 开发模式实现：从文件系统服务（ServeDir 风格，使用 tokio::fs 异步读取）
 // ============================================================================

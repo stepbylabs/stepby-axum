@@ -5,9 +5,6 @@
 //! - 删除前预检 sys_user_post 关联（有关联则拒绝删除）
 //! - 不依赖任何 Web 框架类型（axum / tower / tower-http）
 //! - 数据访问通过 Repository 层委托
-//!
-//! garde 示例：
-//! - 模块底部 `TestGardeDto` 为 garde 派生校验宏示例（项目统一使用 garde）。
 
 use futures::future::FutureExt;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
@@ -292,30 +289,4 @@ impl SysPostService {
             .await?;
         Ok(rows)
     }
-}
-
-// ==================== garde 校验示例 ====================
-
-/// garde 校验示例 DTO
-///
-/// 用于演示 garde crate 的派生校验宏用法（T-01 起项目统一使用 garde）。
-/// - garde 使用 `#[garde(...)]` 属性，语法统一
-/// - garde 原生支持 Option 字段校验（自动跳过 None）
-/// - 校验统一经 `crate::common::i18n::validate` 调用，错误消息按请求 locale 生成
-///
-/// 使用示例：
-/// ```ignore
-/// let dto: TestGardeDto = serde_json::from_str(json)?;
-/// crate::common::i18n::validate(&dto)?;
-/// ```
-#[derive(Debug, Deserialize, garde::Validate)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct TestGardeDto {
-    /// 名称：长度 2-50
-    #[garde(length(min = 2, max = 50))]
-    pub name: String,
-    /// 邮箱：可选，提供时必须为合法邮箱格式
-    #[garde(email)]
-    pub email: Option<String>,
 }

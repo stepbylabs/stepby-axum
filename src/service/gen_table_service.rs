@@ -1638,15 +1638,42 @@ const INDEX_VUE_TEMPLATE: &str = r#"<template>
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- 新增/修改对话框 -->
+    <el-dialog :title="dialog.title" v-model="dialog.visible" width="min(90%, 600px)" destroy-on-close>
+      <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
+{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}        <el-form-item label="{{ col.columnComment }}" prop="{{ col.javaField | camel_case }}">
+          <el-input v-model="form.{{ col.javaField | camel_case }}" placeholder="请输入{{ col.columnComment }}" />
+        </el-form-item>
+{% endif %}{% endfor %}      </el-form>
+      <template #footer>
+        <el-button @click="dialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="submitLoading" @click="handleSubmit">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { list, get{{ table.className }}, add{{ table.className }}, update{{ table.className }}, del{{ table.className }} } from '@/api/{{ table.moduleName }}/{{ table.tableName }}'
+import { ref, reactive, onMounted } from 'vue'
+import { ElMessage, type FormInstance } from 'element-plus'
+import { list, add{{ table.className }}, update{{ table.className }}, del{{ table.className }} } from '@/api/{{ table.moduleName }}/{{ table.tableName }}'
 
 const loading = ref(false)
-const list = ref([])
+const list = ref<any[]>([])
+const submitLoading = ref(false)
+const formRef = ref<FormInstance>()
+
+const dialog = reactive({
+  visible: false,
+  title: '',
+  isEdit: false
+})
+
+const form = reactive<Record<string, any>>({})
+const rules: Record<string, any> = {
+{% for col in columns %}{% if col.isRequired == "1" and (col.isInsert == "1" or col.isEdit == "1") %}  {{ col.javaField | camel_case }}: [{ required: true, message: '请输入{{ col.columnComment }}', trigger: 'blur' }],
+{% endif %}{% endfor %}}
 
 async function getList() {
   loading.value = true
@@ -1658,16 +1685,47 @@ async function getList() {
   }
 }
 
+function resetForm() {
+{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}  form.{{ col.javaField | camel_case }} = undefined
+{% endif %}{% endfor %}  formRef.value?.resetFields()
+}
+
 function handleAdd() {
-  // TODO: 打开新增对话框
+  resetForm()
+  dialog.title = '新增{{ table.functionName }}'
+  dialog.isEdit = false
+  dialog.visible = true
 }
 
 function handleEdit(row: any) {
-  // TODO: 打开编辑对话框
+  resetForm()
+  Object.assign(form, row)
+  dialog.title = '修改{{ table.functionName }}'
+  dialog.isEdit = true
+  dialog.visible = true
+}
+
+async function handleSubmit() {
+  await formRef.value?.validate()
+  submitLoading.value = true
+  try {
+    if (dialog.isEdit) {
+      await update{{ table.className }}(form)
+      ElMessage.success('修改成功')
+    } else {
+      await add{{ table.className }}(form)
+      ElMessage.success('新增成功')
+    }
+    dialog.visible = false
+    getList()
+  } finally {
+    submitLoading.value = false
+  }
 }
 
 async function handleDelete(row: any) {
   await del{{ table.className }}(row.{{ pk_column.javaField | camel_case }})
+  ElMessage.success('删除成功')
   getList()
 }
 

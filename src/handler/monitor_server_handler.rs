@@ -65,7 +65,6 @@ pub struct MemInfo {
 /// 运行时信息（对齐前端 JVM 字段，单位：M）
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct JvmInfo {
     pub total: f64,
     pub used: f64,
@@ -105,7 +104,6 @@ pub struct SysInfo {
 /// 磁盘信息
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct SysFileInfo {
     /// 盘符路径
     pub dir_name: String,
