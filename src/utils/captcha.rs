@@ -61,7 +61,10 @@ pub fn generate_captcha() -> CaptchaResult {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         while chars.len() < target_len {
-            chars.push(charset.chars().nth(rng.gen_range(0..charset.len())).unwrap());
+            // charset 均为 ASCII 字符，as_bytes() 索引安全且比 chars().nth() 高效
+            let bytes = charset.as_bytes();
+            let idx = rng.gen_range(0..bytes.len());
+            chars.push(char::from(bytes[idx]));
         }
         chars.into_iter().collect()
     } else {

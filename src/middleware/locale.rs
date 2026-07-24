@@ -47,12 +47,8 @@ pub fn negotiate(accept: &str) -> String {
 
     for (tag, _q) in &entries {
         // 精确匹配
-        if SUPPORTED_LOCALES.iter().any(|s| s.to_lowercase() == *tag) {
-            return SUPPORTED_LOCALES
-                .iter()
-                .find(|s| s.to_lowercase() == *tag)
-                .unwrap()
-                .to_string();
+        if let Some(matched) = SUPPORTED_LOCALES.iter().find(|s| s.to_lowercase() == *tag) {
+            return matched.to_string();
         }
         // 前缀回退
         if tag.starts_with("zh") {

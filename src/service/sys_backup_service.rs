@@ -196,15 +196,13 @@ async fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> 
 /// 数据备份/恢复 Service
 pub struct SysBackupService {
     backup_repo: SysBackupLogRepository,
-    db: DatabaseConnection,
     config: std::sync::Arc<Settings>,
 }
 
 impl SysBackupService {
     pub fn new(db: DatabaseConnection, config: std::sync::Arc<Settings>) -> Self {
         Self {
-            backup_repo: SysBackupLogRepository::new(db.clone()),
-            db,
+            backup_repo: SysBackupLogRepository::new(db),
             config,
         }
     }
@@ -358,7 +356,11 @@ impl SysBackupService {
                     .arg("--result-file").arg(&file_path_str);
                 c
             }
-            DbKind::Sqlite => unreachable!("SQLite 已在上方处理"),
+            DbKind::Sqlite => {
+                return Err(ServiceError::internal(
+                    "SQLite 备份应在上文处理，不应到达此分支（请检查代码逻辑）",
+                ));
+            }
         };
 
         cmd.stdout(std::process::Stdio::null())
@@ -643,11 +645,5 @@ impl SysBackupService {
         .map_err(|e| ServiceError::internal(&format!("读取文件任务失败: {}", e)))?
         .map_err(|e| ServiceError::internal(&format!("读取备份文件失败: {}", e)))?;
         Ok((bytes, log.file_name))
-    }
-
-    /// 获取数据库连接引用（用于 handler 复用）
-    #[allow(dead_code)]
-    pub fn db(&self) -> &DatabaseConnection {
-        &self.db
     }
 }

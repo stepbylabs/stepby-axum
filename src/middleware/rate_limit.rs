@@ -24,7 +24,7 @@
 // 如需扩展覆盖范围，在 router/mod.rs 中通过 from_fn_with_state 挂载到目标路由分组。
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -128,16 +128,6 @@ impl RateLimiter {
 /// 全局限流器单例
 static RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(RateLimiter::new);
 
-/// 默认限流配置（可按需调整）
-///
-/// P0-11 后中间件改为 fail-closed，不再回退到此默认值；
-/// 保留作为文档参考与其他调用方（如非 HTTP 场景 acquire）的默认参数。
-#[allow(dead_code)]
-const DEFAULT_CONFIG: RateLimitConfig = RateLimitConfig {
-    capacity: 100,
-    refill_per_second: 10.0,
-};
-
 /// 全局限流中间件
 ///
 /// 流程：
@@ -182,14 +172,6 @@ pub async fn rate_limit_middleware(
         )
             .into_response()
     }
-}
-
-/// 主动消费令牌（用于非 HTTP 场景的限流，如登录接口内部调用）
-///
-/// 返回 true 表示放行。
-#[allow(dead_code)]
-pub fn acquire(ip: IpAddr, config: RateLimitConfig) -> bool {
-    RATE_LIMITER.try_acquire(&ip.to_string(), config)
 }
 
 #[cfg(test)]
