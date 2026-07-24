@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
 
-use crate::common::excel::{export_to_excel, ExcelColumn};
+use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::common::ValidatedJson;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_rate_limit::Model as SysRateLimitModel;
@@ -86,7 +86,7 @@ pub async fn add(
         .rate_limit_service
         .add(dto, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("新增成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
 /// PUT /system/rateLimit
@@ -111,7 +111,7 @@ pub async fn edit(
         .rate_limit_service
         .edit(dto, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/rateLimit/{ids}
@@ -139,7 +139,7 @@ pub async fn remove(
     }
 
     state.rate_limit_service.remove(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// POST /system/rateLimit/export
@@ -163,40 +163,19 @@ pub async fn export(
     let rows = state.rate_limit_service.export(query).await?;
 
     let columns = [
-        ExcelColumn {
-            header: "ID",
-            getter: |r: &SysRateLimitModel| r.id.to_string().into(),
-        },
-        ExcelColumn {
-            header: "路由前缀",
-            getter: |r: &SysRateLimitModel| r.route_pattern.clone().into(),
-        },
-        ExcelColumn {
-            header: "桶容量",
-            getter: |r: &SysRateLimitModel| r.capacity.to_string().into(),
-        },
-        ExcelColumn {
-            header: "补充速率(每秒)",
-            getter: |r: &SysRateLimitModel| r.refill_per_second.to_string().into(),
-        },
-        ExcelColumn {
-            header: "是否启用",
-            getter: |r: &SysRateLimitModel| if r.enabled { "是".to_string() } else { "否".to_string() }.into(),
-        },
-        ExcelColumn {
-            header: "描述",
-            getter: |r: &SysRateLimitModel| r.description.clone().unwrap_or_default().into(),
-        },
-        ExcelColumn {
-            header: "创建时间",
-            getter: |r: &SysRateLimitModel| {
+        ExcelColumn { key: "id", header: ("ID", "ID"), getter: |r: &SysRateLimitModel| CellValue::Text(r.id.to_string().into()) },
+        ExcelColumn { key: "routePrefix", header: ("路由前缀", "Route Prefix"), getter: |r: &SysRateLimitModel| CellValue::Text(r.route_pattern.clone().into()) },
+        ExcelColumn { key: "bucketCapacity", header: ("桶容量", "Bucket Capacity"), getter: |r: &SysRateLimitModel| CellValue::Text(r.capacity.to_string().into()) },
+        ExcelColumn { key: "refillRate", header: ("补充速率(每秒)", "Refill Rate (per sec)"), getter: |r: &SysRateLimitModel| CellValue::Text(r.refill_per_second.to_string().into()) },
+        ExcelColumn { key: "enabled", header: ("是否启用", "Enabled"), getter: |r: &SysRateLimitModel| CellValue::Text(if r.enabled { "是".to_string() } else { "否".to_string() }.into()) },
+        ExcelColumn { key: "description", header: ("描述", "Description"), getter: |r: &SysRateLimitModel| CellValue::Text(r.description.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysRateLimitModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            },
-        },
+            }) },
     ];
 
-    export_to_excel("限流配置", "rate_limit", &columns, &rows)
+    export_to_excel("限流配置", "rate_limit", &columns, &rows).await
 }

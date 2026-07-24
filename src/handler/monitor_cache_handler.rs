@@ -304,7 +304,7 @@ pub async fn clear_cache_name(
     let keys: Vec<String> = scan_keys(&mut redis, &pattern).await?;
 
     if keys.is_empty() {
-        return Ok(AjaxResult::success_msg("无匹配缓存"));
+        return Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.no_match")));
     }
 
     // 批量删除
@@ -344,9 +344,9 @@ pub async fn clear_cache_key(
         })?;
 
     if deleted == 0 {
-        return Ok(AjaxResult::success_msg("缓存键不存在"));
+        return Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.key_not_found")));
     }
-    Ok(AjaxResult::success_msg("清除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.clear")))
 }
 
 /// DELETE /monitor/cache/clearCacheAll

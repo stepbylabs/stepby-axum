@@ -19,7 +19,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::{AjaxResult, AppError, ValidatedJson};
 use crate::middleware::Operator;
@@ -36,25 +36,27 @@ use crate::state::AppState;
 #[serde(rename_all = "camelCase")]
 pub struct SaveConfigDto {
     /// 更新源：maxmind / p3terx
-    #[validate(length(max = 20, message = "更新源长度不能超过 20"))]
+    #[garde(length(max = 20))]
     pub update_source: String,
     /// MaxMind Account ID（空字符串表示清空 / 不配置）
     ///
     /// 注：前端不展示已存储的原值，仅在用户输入新值时提交。
     /// 若用户希望保留原值，应先 GET /config 获取（但 GET 仅返回是否已配置），
     /// 故前端实际策略：表单显示空输入框，提交时若为空则保留原值（由 service 层实现）。
-    #[validate(length(max = 100, message = "Account ID 长度不能超过 100"))]
+    #[garde(length(max = 100))]
     pub maxmind_account_id: String,
     /// MaxMind License Key（同上）
-    #[validate(length(max = 200, message = "License Key 长度不能超过 200"))]
+    #[garde(length(max = 200))]
     pub maxmind_license_key: String,
     /// 是否启用定时自动更新
+    #[garde(skip)]
     pub auto_update_enabled: bool,
     /// 是否清空已存储的 Account ID / License Key
     ///
     /// true：清空（适合从 maxmind 切换到 p3terx 时）
     /// false：保留（若对应字段为空字符串，则不修改原值）
     #[serde(default)]
+    #[garde(skip)]
     pub clear_credentials: bool,
 }
 
@@ -192,7 +194,7 @@ pub async fn save_config(
         dto.auto_update_enabled
     );
 
-    Ok(AjaxResult::success_msg("保存成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.save")))
 }
 
 /// POST /system/ipLocation/update
@@ -250,7 +252,7 @@ pub async fn reload(
 ) -> Result<AjaxResult<()>, AppError> {
     tracing::info!("IP 库热加载触发：operator={}", operator.username());
     state.ip_location_service.reload().await?;
-    Ok(AjaxResult::success_msg("热加载成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.reload")))
 }
 
 /// POST /system/ipLocation/reloadXdb
@@ -270,7 +272,7 @@ pub async fn reload_xdb(
 ) -> Result<AjaxResult<()>, AppError> {
     tracing::info!("ip2region xdb 热加载触发：operator={}", operator.username());
     state.ip_location_service.reload_xdb().await?;
-    Ok(AjaxResult::success_msg("xdb 热加载成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.reload")))
 }
 
 /// 用于 update_now 接口的 query 参数提取

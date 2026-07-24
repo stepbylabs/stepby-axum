@@ -4,7 +4,7 @@
 //! - 部门 CRUD、ancestors 祖先链维护、树形结构组装
 //! - 不依赖任何 Web 框架类型（axum / tower / tower-http）
 //! - 多表操作使用 SeaORM 事务保证一致性
-//! - 参数校验使用 validator crate
+//! - 参数校验使用 garde crate（经 common::i18n::validate 统一入口）
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
@@ -14,7 +14,7 @@ use sea_orm::{
 };
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::constants::SUPER_ADMIN_USER_ID;
@@ -45,20 +45,20 @@ pub struct DeptQueryDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeptAddDto {
-    #[validate(range(min = 0, message = "父部门 ID 不能为负数"))]
+    #[garde(range(min = 0))]
     pub parent_id: Option<i64>,
-    #[validate(length(min = 2, max = 30, message = "部门名称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub dept_name: String,
-    #[validate(range(min = 0, max = 999, message = "显示顺序必须在0-999之间"))]
+    #[garde(range(min = 0, max = 999))]
     pub order_num: Option<i32>,
-    #[validate(length(min = 1, max = 20, message = "负责人长度必须在1-20之间"))]
+    #[garde(length(min = 1, max = 20))]
     pub leader: Option<String>,
-    #[validate(length(min = 1, max = 11, message = "联系电话长度必须在1-11之间"))]
+    #[garde(length(min = 1, max = 11))]
     pub phone: Option<String>,
-    #[validate(length(max = 50, message = "邮箱长度不能超过50"))]
-    #[validate(email(message = "邮箱格式不正确"))]
+    #[garde(length(max = 50))]
+    #[garde(email)]
     pub email: Option<String>,
-    #[validate(length(min = 1, max = 1, message = "状态值不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub status: Option<String>,
 }
 
@@ -66,21 +66,22 @@ pub struct DeptAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeptEditDto {
+    #[garde(skip)]
     pub dept_id: i64,
-    #[validate(range(min = 0, message = "父部门 ID 不能为负数"))]
+    #[garde(range(min = 0))]
     pub parent_id: Option<i64>,
-    #[validate(length(min = 2, max = 30, message = "部门名称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub dept_name: Option<String>,
-    #[validate(range(min = 0, max = 999, message = "显示顺序必须在0-999之间"))]
+    #[garde(range(min = 0, max = 999))]
     pub order_num: Option<i32>,
-    #[validate(length(min = 1, max = 20, message = "负责人长度必须在1-20之间"))]
+    #[garde(length(min = 1, max = 20))]
     pub leader: Option<String>,
-    #[validate(length(min = 1, max = 11, message = "联系电话长度必须在1-11之间"))]
+    #[garde(length(min = 1, max = 11))]
     pub phone: Option<String>,
-    #[validate(length(max = 50, message = "邮箱长度不能超过50"))]
-    #[validate(email(message = "邮箱格式不正确"))]
+    #[garde(length(max = 50))]
+    #[garde(email)]
     pub email: Option<String>,
-    #[validate(length(min = 1, max = 1, message = "状态值不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub status: Option<String>,
 }
 
@@ -88,9 +89,9 @@ pub struct DeptEditDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeptSortDto {
-    #[validate(length(min = 1, message = "deptIds 不能为空"))]
+    #[garde(length(min = 1))]
     pub dept_ids: String,
-    #[validate(length(min = 1, message = "orderNums 不能为空"))]
+    #[garde(length(min = 1))]
     pub order_nums: String,
 }
 
@@ -236,7 +237,7 @@ impl SysDeptService {
         dto: DeptSortDto,
         operator: &str,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 解析逗号分隔的 dept_ids 和 order_nums
         let dept_ids: Vec<i64> = parse_id_list::<i64>(&dto.dept_ids);
@@ -323,7 +324,7 @@ impl SysDeptService {
         dto: DeptAddDto,
         operator: &str,
     ) -> Result<SysDeptModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let parent_id = dto.parent_id.unwrap_or(0);
         // 计算祖先链
@@ -376,7 +377,7 @@ impl SysDeptService {
         dto: DeptEditDto,
         operator: &str,
     ) -> Result<SysDeptModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 查询现有部门
         let existing = self

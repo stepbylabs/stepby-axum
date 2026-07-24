@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
 
-use crate::common::excel::{export_to_excel, ExcelColumn};
+use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::common::constants::SUPER_ADMIN_USER_ID;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_logininfor::Model as SysLogininforModel;
@@ -64,7 +64,7 @@ pub async fn remove(
     }
 
     state.logininfor_service.delete_logininfors(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// POST /monitor/logininfor/unlock/{userName}
@@ -107,7 +107,7 @@ pub async fn unlock(
     if let Err(e) = del_result {
         tracing::warn!("重置 Redis 登录失败计数失败 (user={}): {}", user_name, e);
     }
-    Ok(AjaxResult::success_msg("解锁成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.unlock")))
 }
 
 /// DELETE /monitor/logininfor/clean
@@ -125,7 +125,7 @@ pub async fn clean(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.logininfor_service.clean_logininfors().await?;
-    Ok(AjaxResult::success_msg("清空成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.clear")))
 }
 
 /// POST /monitor/logininfor/export
@@ -149,35 +149,29 @@ pub async fn export(
     let rows = state.logininfor_service.export_logininfors(query).await?;
 
     let columns = [
-        ExcelColumn { header: "日志编号", getter: |r: &SysLogininforModel| r.info_id.to_string().into() },
-        ExcelColumn { header: "用户名称", getter: |r: &SysLogininforModel| r.user_name.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "IP地址", getter: |r: &SysLogininforModel| r.ipaddr.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "登录地点", getter: |r: &SysLogininforModel| r.login_location.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "浏览器", getter: |r: &SysLogininforModel| r.browser.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "操作系统", getter: |r: &SysLogininforModel| r.os.clone().unwrap_or_default().into() },
-        ExcelColumn {
-            header: "状态",
-            getter: |r: &SysLogininforModel| {
+        ExcelColumn { key: "operId", header: ("日志编号", "Log ID"), getter: |r: &SysLogininforModel| CellValue::Text(r.info_id.to_string().into()) },
+        ExcelColumn { key: "userName", header: ("用户名称", "Username"), getter: |r: &SysLogininforModel| CellValue::Text(r.user_name.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "ipaddr", header: ("IP地址", "IP Address"), getter: |r: &SysLogininforModel| CellValue::Text(r.ipaddr.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "loginLocation", header: ("登录地点", "Login Location"), getter: |r: &SysLogininforModel| CellValue::Text(r.login_location.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "browser", header: ("浏览器", "Browser"), getter: |r: &SysLogininforModel| CellValue::Text(r.browser.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "os", header: ("操作系统", "OS"), getter: |r: &SysLogininforModel| CellValue::Text(r.os.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysLogininforModel| CellValue::Text({
                 r.status
                     .as_deref()
                     .map(|s| if s == "0" { "成功".to_string() } else { "失败".to_string() })
                     .unwrap_or_default()
                     .into()
-            }
-        },
-        ExcelColumn { header: "操作信息", getter: |r: &SysLogininforModel| r.msg.clone().unwrap_or_default().into() },
-        ExcelColumn {
-            header: "登录时间",
-            getter: |r: &SysLogininforModel| {
+            }) },
+        ExcelColumn { key: "msg", header: ("操作信息", "Message"), getter: |r: &SysLogininforModel| CellValue::Text(r.msg.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "loginTime", header: ("登录时间", "Login Time"), getter: |r: &SysLogininforModel| CellValue::Text({
                 r.login_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
-        },
+            }) },
     ];
 
-    export_to_excel("登录日志", "logininfor", &columns, &rows)
+    export_to_excel("登录日志", "logininfor", &columns, &rows).await
 }
 
 /// GET /monitor/logininfor/stats?days=7

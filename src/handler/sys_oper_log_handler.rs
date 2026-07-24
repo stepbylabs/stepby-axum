@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
 
-use crate::common::excel::{export_to_excel_with_fields, ExcelColumn};
+use crate::common::excel::{export_to_excel_with_fields, CellValue, ExcelColumn};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_oper_log::Model as SysOperLogModel;
 use crate::service::sys_oper_log_service::{AuditStatsVo, ComplianceReportVo, OperLogQueryDto};
@@ -62,7 +62,7 @@ pub async fn remove(
     }
 
     state.oper_log_service.delete_oper_logs(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// 操作日志清理保留最近 N 天（仅删除早于该天数的日志，保证审计合规）
@@ -136,7 +136,7 @@ pub async fn export(
         // 字段选择导出场景才走任务进度（普通全量导出走原有同步路径）
         let dto = crate::service::sys_task_service::TaskCreateDto {
             task_type: "operlog_export".to_string(),
-            task_name: "操作日志导出".to_string(),
+            task_name: crate::common::i18n::pick("操作日志导出", "Operation log export").to_string(),
             total: 100,
         };
         let task = state
@@ -160,28 +160,25 @@ pub async fn export(
     }
 
     let columns = [
-        ExcelColumn { header: "日志编号", getter: |r: &SysOperLogModel| r.oper_id.to_string().into() },
-        ExcelColumn { header: "模块标题", getter: |r: &SysOperLogModel| r.title.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "业务类型", getter: |r: &SysOperLogModel| r.business_type.map(|b| b.to_string()).unwrap_or_default().into() },
-        ExcelColumn { header: "请求方式", getter: |r: &SysOperLogModel| r.request_method.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "操作人员", getter: |r: &SysOperLogModel| r.oper_name.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "请求URL", getter: |r: &SysOperLogModel| r.oper_url.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "主机地址", getter: |r: &SysOperLogModel| r.oper_ip.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "操作状态", getter: |r: &SysOperLogModel| r.status.as_deref().map(|s| if s == "0" { "正常".to_string() } else { "异常".to_string() }).unwrap_or_default().into() },
-        ExcelColumn { header: "错误消息", getter: |r: &SysOperLogModel| r.error_msg.clone().unwrap_or_default().into() },
-        ExcelColumn {
-            header: "操作时间",
-            getter: |r: &SysOperLogModel| {
+        ExcelColumn { key: "operId", header: ("日志编号", "Log ID"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_id.to_string().into()) },
+        ExcelColumn { key: "title", header: ("模块标题", "Module Title"), getter: |r: &SysOperLogModel| CellValue::Text(crate::common::i18n::module_title(r.title.as_deref().unwrap_or_default()).into_owned().into()) },
+        ExcelColumn { key: "businessType", header: ("业务类型", "Business Type"), getter: |r: &SysOperLogModel| CellValue::Text(r.business_type.map(|b| b.to_string()).unwrap_or_default().into()) },
+        ExcelColumn { key: "requestMethod", header: ("请求方式", "Request Method"), getter: |r: &SysOperLogModel| CellValue::Text(r.request_method.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "operName", header: ("操作人员", "Operator"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_name.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "operUrl", header: ("请求URL", "Request URL"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_url.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "operIp", header: ("主机地址", "Host Address"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_ip.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "status", header: ("操作状态", "Status"), getter: |r: &SysOperLogModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { "正常".to_string() } else { "异常".to_string() }).unwrap_or_default().into()) },
+        ExcelColumn { key: "errorMsg", header: ("错误消息", "Error Message"), getter: |r: &SysOperLogModel| CellValue::Text(r.error_msg.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "operTime", header: ("操作时间", "Operation Time"), getter: |r: &SysOperLogModel| CellValue::Text({
                 r.oper_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
-        },
-        ExcelColumn { header: "消耗时间(ms)", getter: |r: &SysOperLogModel| r.cost_time.map(|c| c.to_string()).unwrap_or_default().into() },
+            }) },
+        ExcelColumn { key: "costTime", header: ("消耗时间(ms)", "Cost Time (ms)"), getter: |r: &SysOperLogModel| CellValue::Text(r.cost_time.map(|c| c.to_string()).unwrap_or_default().into()) },
     ];
 
-    export_to_excel_with_fields("操作日志", "oper_log", &columns, &rows, fields.as_deref())
+    export_to_excel_with_fields("操作日志", "oper_log", &columns, &rows, fields.as_deref(), false).await
 }
 
 /// 操作日志导出 DTO（在原查询参数基础上增加 fields 字段选择）

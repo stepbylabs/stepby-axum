@@ -313,48 +313,154 @@ fn default_jwt_audience() -> String {
 impl Settings {
     /// 从 toml 配置文件加载，随后用环境变量覆盖敏感字段
     /// 环境变量优先级：DATABASE_URL > REDIS_URL > JWT_SECRET > SERVER_HOST > SERVER_PORT > config.toml
+    ///
+    /// 配置文件查找链：`path` → 同目录 `config.toml.prod` → 仅环境变量模式。
+    /// 这样容器镜像只需注入环境变量（DATABASE_URL/REDIS_URL/JWT_SECRET/...）即可启动，
+    /// 无需挂载 `config/config.toml`（该文件已被 .dockerignore 排除，否则会导致启动崩溃）。
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("读取配置文件 {} 失败: {}", path, e))?;
-        let mut settings: Settings = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("解析配置文件失败: {}", e))?;
+        let candidates = [path, "config/config.toml.prod"];
+        for (idx, cand) in candidates.iter().enumerate() {
+            match std::fs::read_to_string(cand) {
+                Ok(content) => {
+                    let mut settings: Settings = toml::from_str(&content)
+                        .map_err(|e| anyhow::anyhow!("解析配置文件 {} 失败: {}", cand, e))?;
+                    settings.apply_env_overrides();
+                    settings.validate_secrets()?;
+                    if idx != 0 {
+                        tracing::warn!(
+                            "配置文件 {} 不存在，已回退使用 {}",
+                            path,
+                            cand
+                        );
+                    }
+                    return Ok(settings);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(anyhow::anyhow!("读取配置文件 {} 失败: {}", cand, e));
+                }
+            }
+        }
 
-        // 环境变量覆盖敏感字段（.env 已由 dotenvy::dotenv() 加载到环境）
+        // 配置文件全部缺失：回退到仅环境变量模式（容器/无配置文件部署场景）
+        tracing::warn!(
+            "未找到任何配置文件（{} / config/config.toml.prod），回退到仅环境变量模式",
+            path
+        );
+        Self::from_env_only()
+    }
+
+    /// 用环境变量覆盖可注入字段（敏感配置与部署相关参数）
+    ///
+    /// 覆盖项：DATABASE_URL / REDIS_URL / JWT_SECRET / JWT_EXPIRE_HOURS /
+    /// SERVER_HOST / SERVER_PORT / CORS_ORIGINS（可选，逗号分隔）/
+    /// MAIL_PASSWORD / CONFIG_ENC_KEY
+    fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("DATABASE_URL") {
-            settings.database.url = v;
+            self.database.url = v;
         }
         if let Ok(v) = std::env::var("REDIS_URL") {
-            settings.redis.url = v;
+            self.redis.url = v;
         }
         if let Ok(v) = std::env::var("JWT_SECRET") {
-            settings.jwt.secret = v;
+            self.jwt.secret = v;
         }
         if let Ok(v) = std::env::var("JWT_EXPIRE_HOURS")
             && let Ok(hours) = v.parse::<i64>()
         {
-            settings.jwt.expire_hours = hours;
+            self.jwt.expire_hours = hours;
         }
         if let Ok(v) = std::env::var("SERVER_HOST") {
-            settings.server.host = v;
+            self.server.host = v;
         }
         if let Ok(v) = std::env::var("SERVER_PORT")
             && let Ok(port) = v.parse::<u16>()
         {
-            settings.server.port = port;
+            self.server.port = port;
+        }
+        if let Ok(v) = std::env::var("CORS_ORIGINS") {
+            let origins: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !origins.is_empty() {
+                self.server.cors_origins = origins;
+            }
         }
         // 邮件 SMTP 密码通过环境变量注入（避免明文写入配置文件）
         if let Ok(v) = std::env::var("MAIL_PASSWORD") {
-            settings.mail.password = v;
+            self.mail.password = v;
         }
         // 配置加密主密钥（用于 sys_config 表中敏感字段 AES-256-GCM 加解密）
         // 启用 IP 库管理功能时必须配置，否则 License Key 加密功能失效
         if let Ok(v) = std::env::var("CONFIG_ENC_KEY") {
-            settings.config_enc_key = v;
+            self.config_enc_key = v;
         }
+    }
 
-        // 启动安全校验：拒绝默认占位密钥（生产环境强制环境变量注入）
+    /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
+    ///
+    /// 必需环境变量：DATABASE_URL、REDIS_URL、JWT_SECRET、SERVER_HOST、SERVER_PORT
+    /// 可选环境变量：JWT_EXPIRE_HOURS（默认 24）、CORS_ORIGINS（逗号分隔）、
+    ///                MAIL_PASSWORD、CONFIG_ENC_KEY、RUST_LOG（默认 info）
+    /// 其余字段使用与结构体一致的内置默认值。
+    fn from_env_only() -> anyhow::Result<Self> {
+        let database_url = std::env::var("DATABASE_URL")
+            .map_err(|_| anyhow::anyhow!("环境变量 DATABASE_URL 未设置（容器部署需通过 -e/compose 注入）"))?;
+        let redis_url = std::env::var("REDIS_URL")
+            .map_err(|_| anyhow::anyhow!("环境变量 REDIS_URL 未设置"))?;
+        let jwt_secret = std::env::var("JWT_SECRET")
+            .map_err(|_| anyhow::anyhow!("环境变量 JWT_SECRET 未设置"))?;
+        let server_host = std::env::var("SERVER_HOST")
+            .map_err(|_| anyhow::anyhow!("环境变量 SERVER_HOST 未设置"))?;
+        let server_port = std::env::var("SERVER_PORT")
+            .map_err(|_| anyhow::anyhow!("环境变量 SERVER_PORT 未设置"))?
+            .parse::<u16>()
+            .map_err(|e| anyhow::anyhow!("SERVER_PORT 解析失败: {}", e))?;
+        let jwt_expire_hours = std::env::var("JWT_EXPIRE_HOURS")
+            .unwrap_or_else(|_| "24".to_string())
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("JWT_EXPIRE_HOURS 解析失败: {}", e))?;
+
+        let mut settings = Settings {
+            server: ServerConfig {
+                host: server_host,
+                port: server_port,
+                cors_origins: vec![],
+                trusted_proxies: vec![],
+                docs_enabled: false,
+            },
+            database: DatabaseConfig {
+                url: database_url,
+                max_connections: 20,
+                min_connections: 5,
+                connect_timeout: 8,
+                idle_timeout: 600,
+                max_lifetime_secs: 1800,
+                acquire_timeout_secs: 10,
+            },
+            redis: RedisConfig { url: redis_url },
+            jwt: JwtConfig {
+                secret: jwt_secret,
+                expire_hours: jwt_expire_hours,
+                issuer: "yebot".to_string(),
+                audience: "yebot".to_string(),
+            },
+            log: LogConfig {
+                level: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+                sql_logging: false,
+                file_path: "logs".to_string(),
+                json_stdout: true,
+            },
+            upload: UploadConfig::default(),
+            ip_location: IpLocationConfig::default(),
+            mail: MailConfig::default(),
+            config_enc_key: std::env::var("CONFIG_ENC_KEY").unwrap_or_default(),
+        };
+
+        settings.apply_env_overrides();
         settings.validate_secrets()?;
-
         Ok(settings)
     }
 

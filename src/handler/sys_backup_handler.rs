@@ -110,7 +110,7 @@ pub async fn restore(
         .backup_service
         .restore_backup(backup_id, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("恢复成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.restore")))
 }
 
 /// GET /system/backup/download/{backupId}
@@ -179,5 +179,5 @@ pub async fn remove(
     }
 
     state.backup_service.delete_backups(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

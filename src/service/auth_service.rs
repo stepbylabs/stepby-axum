@@ -17,7 +17,7 @@
 use sea_orm::Set;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::constants::SECS_PER_HOUR;
 use crate::common::error::ServiceError;
@@ -69,9 +69,12 @@ return current
 /// 规则：
 /// - 空字符串允许通过（验证码开关关闭时前端回传空 uuid）
 /// - 非空字符串必须为合法 UUID 格式（由 uuid::Uuid::parse_str 校验）
-fn validate_captcha_uuid_format(uuid: &str) -> Result<(), validator::ValidationError> {
+fn validate_captcha_uuid_format(uuid: &str, _ctx: &()) -> garde::Result {
     if !uuid.is_empty() && uuid::Uuid::parse_str(uuid).is_err() {
-        return Err(validator::ValidationError::new("验证码 UUID 格式无效"));
+        return Err(garde::Error::new(crate::common::i18n::pick(
+            "验证码 UUID 格式无效",
+            "Invalid captcha UUID format",
+        )));
     }
     Ok(())
 }
@@ -80,14 +83,15 @@ fn validate_captcha_uuid_format(uuid: &str) -> Result<(), validator::ValidationE
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginDto {
-    #[validate(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub username: String,
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub password: String,
     /// 验证码
+    #[garde(skip)]
     pub code: String,
     /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入）
-    #[validate(custom(function = "validate_captcha_uuid_format"))]
+    #[garde(custom(validate_captcha_uuid_format))]
     pub uuid: String,
 }
 
@@ -95,14 +99,15 @@ pub struct LoginDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterDto {
-    #[validate(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub username: String,
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub password: String,
     /// 验证码
+    #[garde(skip)]
     pub code: String,
     /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入）
-    #[validate(custom(function = "validate_captcha_uuid_format"))]
+    #[garde(custom(validate_captcha_uuid_format))]
     pub uuid: String,
 }
 
@@ -110,7 +115,7 @@ pub struct RegisterDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct UnlockScreenDto {
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub password: String,
 }
 
@@ -174,6 +179,8 @@ pub struct MetaVo {
     pub icon: String,
     pub no_cache: bool,
     pub link: Option<String>,
+    /// i18n 翻译 key（可选）：前端优先用 t(i18nKey) 翻译，回退到 title 原文
+    pub i18n_key: Option<String>,
 }
 
 /// 登录流程共享上下文（减少子方法参数数量）
@@ -293,7 +300,7 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("验证码生成 spawn_blocking 失败: {}", e);
-                ServiceError::internal("验证码生成失败，请稍后再试")
+                ServiceError::internal(&crate::tr!("error.auth.captcha_gen_failed"))
             })?;
 
         // 3. 存入 Redis，TTL 300s（5 分钟）
@@ -338,7 +345,7 @@ impl AuthService {
         jwt_config: &JwtConfig,
         ip_locator: &IpLocator,
     ) -> Result<LoginVo, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let browser = parse_browser(user_agent);
         let os = parse_os(user_agent);
@@ -393,12 +400,12 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("Redis IP 限流计数失败（fail-closed）: {}", e);
-                ServiceError::new(503, "认证服务暂时不可用，请稍后再试")
+                ServiceError::new(503, &crate::tr!("error.auth.auth_unavailable"))
             })?;
         if ip_count > MAX_LOGIN_IP_COUNT {
             self.write_login_log(ctx, "1", "IP 请求频率超限")
                 .await?;
-            return Err(ServiceError::new(429, "访问频率过高，请稍后再试"));
+            return Err(ServiceError::new(429, &crate::tr!("error.auth.rate_limited")));
         }
         Ok(())
     }
@@ -418,14 +425,14 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("Redis 登录失败计数查询失败（fail-closed）: {}", e);
-                ServiceError::new(503, "认证服务暂时不可用，请稍后再试")
+                ServiceError::new(503, &crate::tr!("error.auth.auth_unavailable"))
             })?;
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
             self.write_login_log(ctx, "1", "密码错误次数过多")
                 .await?;
-            return Err(ServiceError::new(429, "密码错误次数过多，请 5 分钟后再试"));
+            return Err(ServiceError::new(429, &crate::tr!("error.auth.password_locked")));
         }
         Ok(())
     }
@@ -455,13 +462,13 @@ impl AuthService {
                 Some(c) => c,
                 None => {
                     self.write_login_log(ctx, "1", "验证码错误").await?;
-                    return Err(ServiceError::bad_request("验证码已过期或不存在"));
+                    return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_expired")));
                 }
             };
 
             if stored.to_lowercase() != code.to_lowercase() {
                 self.write_login_log(ctx, "1", "验证码错误").await?;
-                return Err(ServiceError::bad_request("验证码错误"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_wrong")));
             }
         }
         Ok(())
@@ -491,18 +498,18 @@ impl AuthService {
                 self.record_login_failure(ctx.username, redis).await?;
                 self.write_login_log(ctx, "1", "用户不存在/密码错误")
                     .await?;
-                return Err(ServiceError::unauthorized("用户不存在/密码错误"));
+                return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
             }
         };
 
         // 2. 用户状态校验
         if user.del_flag.as_deref() == Some("2") {
             self.write_login_log(ctx, "1", "账号已删除").await?;
-            return Err(ServiceError::unauthorized("账号已删除，请联系管理员"));
+            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.account_deleted")));
         }
         if user.status.as_deref() == Some("1") {
             self.write_login_log(ctx, "1", "账号已停用").await?;
-            return Err(ServiceError::unauthorized("账号已停用，请联系管理员"));
+            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.account_disabled")));
         }
 
         // 3. 密码校验（支持 MD5→Argon2 自动升级）
@@ -515,13 +522,13 @@ impl AuthService {
         .await
         .map_err(|e| {
             tracing::error!("密码验证 spawn_blocking 失败: {}", e);
-            ServiceError::internal("密码验证失败，请稍后再试")
+            ServiceError::internal(&crate::tr!("error.auth.password_verify_failed"))
         })?;
         if !verify_result.is_valid {
             self.record_login_failure(ctx.username, redis).await?;
             self.write_login_log(ctx, "1", "用户不存在/密码错误")
                 .await?;
-            return Err(ServiceError::unauthorized("用户不存在/密码错误"));
+            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
         }
 
         Ok((user, verify_result))
@@ -550,7 +557,7 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("密码加密 spawn_blocking 失败: {}", e);
-                ServiceError::internal("密码加密失败")
+                ServiceError::internal(&crate::tr!("error.common.password_encrypt_failed"))
             })?;
         match hash_result {
             Ok(new_hash) => {
@@ -758,7 +765,7 @@ impl AuthService {
                 .await
                 .map_err(|e| {
                     tracing::error!("登出黑名单写入失败（fail-closed）: {}", e);
-                    ServiceError::internal("登出处理失败，请重试")
+                    ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
                 })?;
         }
 
@@ -860,7 +867,7 @@ impl AuthService {
         ip: &str,
         redis: &mut redis::aio::ConnectionManager,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // R19-1.3：密码复杂度校验（注册入口拦截弱口令）
         validate_password_complexity(&dto.password).map_err(|e| ServiceError::bad_request(&e))?;
@@ -870,7 +877,7 @@ impl AuthService {
         //    管理员需显式在 sys_config 中将 registerUser 设为 true 才开放注册
         //    状态码：403 Forbidden（业务策略禁止，非系统错误）
         if !self.is_register_enabled().await {
-            return Err(ServiceError::forbidden("当前系统未开放注册，请联系管理员"));
+            return Err(ServiceError::forbidden(&crate::tr!("error.auth.register_disabled")));
         }
 
         // 1. 验证码校验（GETDEL 原子化，防重放攻击）
@@ -888,11 +895,11 @@ impl AuthService {
 
             let stored = match stored_code {
                 Some(c) => c,
-                None => return Err(ServiceError::bad_request("验证码已过期或不存在")),
+                None => return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_expired"))),
             };
 
             if stored.to_lowercase() != dto.code.to_lowercase() {
-                return Err(ServiceError::bad_request("验证码错误"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_wrong")));
             }
         }
 
@@ -900,7 +907,7 @@ impl AuthService {
         //    状态码：400 Bad Request（客户端输入冲突，非系统错误）
         let existing = self.user_service.get_user_by_username(&dto.username).await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request("用户名已存在"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.auth.register_exists")));
         }
 
         // 3. 创建用户（复用 user_service.add_user，昵称默认同用户名）
@@ -934,7 +941,7 @@ impl AuthService {
         user_id: i64,
         dto: UnlockScreenDto,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let vo = self.user_service.get_user_by_id(user_id).await?;
         let user = vo.user;
@@ -948,10 +955,10 @@ impl AuthService {
         .await
         .map_err(|e| {
             tracing::error!("密码验证 spawn_blocking 失败: {}", e);
-            ServiceError::internal("密码验证失败，请稍后再试")
+            ServiceError::internal(&crate::tr!("error.auth.password_verify_failed"))
         })?;
         if !verify_result.is_valid {
-            return Err(ServiceError::unauthorized("密码错误"));
+            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
         }
 
         Ok(())
@@ -973,7 +980,7 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("Redis 登录失败计数更新失败（fail-closed）: {}", e);
-                ServiceError::new(503, "认证服务暂时不可用，请稍后再试")
+                ServiceError::new(503, &crate::tr!("error.auth.auth_unavailable"))
             })?;
         Ok(())
     }
@@ -1133,6 +1140,7 @@ fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
         } else {
             None
         },
+        i18n_key: menu.i18n_key.clone(),
     };
 
     // name 生成：优先 route_name，其次 path
@@ -1218,6 +1226,7 @@ mod tests {
             visible: Some(visible.to_string()),
             status: Some(status.to_string()),
             perms: None,
+            i18n_key: None,
             icon: Some("test-icon".to_string()),
             create_by: None,
             create_time: None,

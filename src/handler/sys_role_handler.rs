@@ -22,11 +22,11 @@ use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::ValidatedJson;
-use crate::common::{excel::{export_to_excel, ExcelColumn}, AjaxResult, AppError, TableDataInfo, TreeSelectVo};
+use crate::common::{excel::{export_to_excel, CellValue, ExcelColumn}, AjaxResult, AppError, TableDataInfo, TreeSelectVo};
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::Model as SysUserModel;
 use crate::middleware::Operator;
@@ -43,8 +43,9 @@ use crate::utils::parse_id_list;
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleStatusDto {
+    #[garde(skip)]
     pub role_id: i64,
-    #[validate(length(min = 1, max = 1, message = "状态值不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub status: String,
 }
 
@@ -100,24 +101,21 @@ pub async fn export(
     let rows = state.role_service.export_roles(query).await?;
 
     let columns = [
-        ExcelColumn { header: "角色编号", getter: |r: &SysRoleModel| r.role_id.to_string().into() },
-        ExcelColumn { header: "角色名称", getter: |r: &SysRoleModel| r.role_name.clone().into() },
-        ExcelColumn { header: "权限字符", getter: |r: &SysRoleModel| r.role_key.clone().into() },
-        ExcelColumn { header: "显示顺序", getter: |r: &SysRoleModel| r.role_sort.to_string().into() },
-        ExcelColumn { header: "状态", getter: |r: &SysRoleModel| if r.status == "0" { "正常".to_string() } else { "停用".to_string() }.into() },
-        ExcelColumn {
-            header: "创建时间",
-            getter: |r: &SysRoleModel| {
+        ExcelColumn { key: "roleId", header: ("角色编号", "Role ID"), getter: |r: &SysRoleModel| CellValue::Text(r.role_id.to_string().into()) },
+        ExcelColumn { key: "roleName", header: ("角色名称", "Role Name"), getter: |r: &SysRoleModel| CellValue::Text(r.role_name.clone().into()) },
+        ExcelColumn { key: "roleKey", header: ("权限字符", "Permission Key"), getter: |r: &SysRoleModel| CellValue::Text(r.role_key.clone().into()) },
+        ExcelColumn { key: "roleSort", header: ("显示顺序", "Sort"), getter: |r: &SysRoleModel| CellValue::Text(r.role_sort.to_string().into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysRoleModel| CellValue::Text(if r.status == "0" { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysRoleModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
-        },
-        ExcelColumn { header: "备注", getter: |r: &SysRoleModel| r.remark.clone().unwrap_or_default().into() },
+            }) },
+        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysRoleModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
     ];
 
-    export_to_excel("角色数据", "role", &columns, &rows)
+    export_to_excel("角色数据", "role", &columns, &rows).await
 }
 
 /// GET /system/role/{id}
@@ -182,7 +180,7 @@ pub async fn edit(
     Json(dto): Json<RoleEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.role_service.edit_role(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/role/{ids}
@@ -219,7 +217,7 @@ pub async fn remove(
 
     // R8-API-008：调用批量原子事务方法，保证部分失败时回滚
     state.role_service.delete_roles(role_ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// PUT /system/role/changeStatus
@@ -243,7 +241,7 @@ pub async fn change_status(
         .role_service
         .update_role_status(dto.role_id, &dto.status, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// PUT /system/role/dataScope
@@ -268,7 +266,7 @@ pub async fn data_scope(
         .role_service
         .update_data_scope(dto, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// GET /system/role/authUser/allocatedList
@@ -298,7 +296,7 @@ pub async fn auth_user_cancel(
     Json(dto): Json<CancelAuthUserDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.role_service.cancel_auth_user(dto).await?;
-    Ok(AjaxResult::success_msg("取消授权成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.cancel_auth")))
 }
 
 /// PUT /system/role/authUser/cancelAll
@@ -308,7 +306,7 @@ pub async fn auth_user_cancel_all(
     Query(dto): Query<AuthUserSelectDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.role_service.cancel_all_auth_users(dto).await?;
-    Ok(AjaxResult::success_msg("取消授权成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.cancel_auth")))
 }
 
 /// PUT /system/role/authUser/selectAll
@@ -318,7 +316,7 @@ pub async fn auth_user_select_all(
     Query(dto): Query<AuthUserSelectDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.role_service.select_all_auth_users(dto).await?;
-    Ok(AjaxResult::success_msg("授权成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.auth")))
 }
 
 /// GET /system/role/deptTree/{roleId}

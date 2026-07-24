@@ -141,7 +141,7 @@ impl SysTaskService {
             .task_repo
             .find_by_id(task_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         let total = total.unwrap_or(existing.total);
         let progress = if total > 0 {
@@ -188,7 +188,7 @@ impl SysTaskService {
             .task_repo
             .find_by_id(task_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         let final_current = existing.total;
         let now = chrono::Local::now().naive_local();
@@ -229,7 +229,7 @@ impl SysTaskService {
             .task_repo
             .find_by_id(task_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         let now = chrono::Local::now().naive_local();
         let mut am: SysTaskActiveModel = existing.into();
@@ -294,7 +294,7 @@ impl SysTaskService {
         self.task_repo
             .find_by_id(task_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("任务不存在"))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))
     }
 
     /// 批量删除任务

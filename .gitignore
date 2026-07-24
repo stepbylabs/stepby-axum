@@ -19,6 +19,8 @@ data/screenshots_*/
 data/gen_test_output/
 data/GeoLite2-*.mmdb
 data/*.mmdb
+data/*.xdb
+*.xdb
 
 # 日志
 logs/

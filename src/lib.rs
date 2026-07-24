@@ -2,6 +2,10 @@
 //! axum-backend 库入口
 //! 声明全部 14 个模块，供 main.rs 与测试调用
 
+// T-05：编译期嵌入 locales/*.yml，默认回退 zh-CN。
+// 之后任意位置可用 `rust_i18n::t!("error.common.not_found", locale = &loc)`。
+rust_i18n::i18n!("locales", fallback = "zh-CN");
+
 // ========== 配置管理 ==========
 pub mod config;
 

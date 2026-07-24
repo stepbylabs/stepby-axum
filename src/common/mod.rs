@@ -5,6 +5,7 @@ pub mod datetime;
 pub mod error;
 pub mod excel;
 pub mod extract;
+pub mod i18n;
 pub mod page;
 pub mod response;
 pub mod upload;

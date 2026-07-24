@@ -99,7 +99,7 @@ pub async fn oper_log_middleware(
 
     let oper_url = req.uri().path().to_string();
     let title = infer_module_title(&matched_path);
-    let business_type = infer_business_type(method.clone());
+    let business_type = infer_business_type(method.clone(), &matched_path);
     let start = Instant::now();
 
     // 查询 IP 归属地（mmdb 文件不存在或查询失败时返回空字符串）
@@ -179,7 +179,28 @@ pub async fn oper_log_middleware(
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
 
-    let (json_result_raw, response) = if resp_content_length > MAX_BODY_BYTES {
+    // T-03：二进制响应（xlsx 导出、文件下载等）跳过缓冲与文本脱敏，
+    // 避免乱码入库与无谓的内存/CPU 消耗，仅记录类型与大小占位符
+    let resp_content_type = resp_parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let is_textual = resp_content_type.is_empty()
+        || resp_content_type.contains("json")
+        || resp_content_type.starts_with("text/")
+        || resp_content_type.starts_with("application/x-www-form-urlencoded");
+
+    let (json_result_raw, response) = if !is_textual {
+        let json_result_raw = if resp_content_length > 0 {
+            format!("[binary: {}, {} bytes, skipped]", resp_content_type, resp_content_length)
+        } else {
+            format!("[binary: {}, skipped]", resp_content_type)
+        };
+        let response = Response::from_parts(resp_parts, resp_body);
+        (json_result_raw, response)
+    } else if resp_content_length > MAX_BODY_BYTES {
         // 超大响应体：直接透传，不缓冲
         tracing::debug!(
             len = resp_content_length,
@@ -515,51 +536,71 @@ fn sanitize_param(s: String) -> String {
 }
 
 /// 根据路由路径推断业务模块标题（用于日志分类）
+///
+/// T-11：返回稳定 i18n key（`module.*`），新数据存 key；旧中文数据由展示层
+/// `common::i18n::module_title` 回退原样显示。
 fn infer_module_title(path: &str) -> String {
-    // profile 路由需在 /system/user 之前匹配，避免被误分类为"用户管理"
+    // profile 路由需在 /system/user 之前匹配，避免被误分类为 module.user
     if path.starts_with("/system/user/profile") {
-        "个人中心".to_string()
+        "module.profile".to_string()
     } else if path.starts_with("/system/user") {
-        "用户管理".to_string()
+        "module.user".to_string()
     } else if path.starts_with("/system/role") {
-        "角色管理".to_string()
+        "module.role".to_string()
     } else if path.starts_with("/system/menu") {
-        "菜单管理".to_string()
+        "module.menu".to_string()
     } else if path.starts_with("/system/dict") {
-        "字典管理".to_string()
+        "module.dict".to_string()
     } else if path.starts_with("/system/dept") {
-        "部门管理".to_string()
+        "module.dept".to_string()
     } else if path.starts_with("/system/post") {
-        "岗位管理".to_string()
+        "module.post".to_string()
     } else if path.starts_with("/system/config") {
-        "参数设置".to_string()
+        "module.config".to_string()
     } else if path.starts_with("/system/notice") {
-        "通知公告".to_string()
+        "module.notice".to_string()
     } else if path.starts_with("/monitor/job") {
-        "定时任务".to_string()
+        "module.job".to_string()
     } else if path.starts_with("/monitor/operlog") {
-        "操作日志".to_string()
+        "module.operlog".to_string()
     } else if path.starts_with("/monitor/logininfor") {
-        "登录日志".to_string()
+        "module.logininfor".to_string()
     } else if path.starts_with("/monitor/online") {
-        "在线用户".to_string()
+        "module.online".to_string()
     } else if path.starts_with("/tool/gen") {
-        "代码生成".to_string()
+        "module.gen".to_string()
     } else if path.starts_with("/common/") {
-        "通用接口".to_string()
+        "module.common".to_string()
     } else {
-        "其他".to_string()
+        "module.other".to_string()
     }
 }
 
-/// 根据 HTTP 方法推断业务类型
+/// 根据 HTTP 方法 + 路由路径推断业务类型
 ///
-/// 对齐 ruoyi-vue3-ts 前端 BusinessType 枚举：
-/// - 1=新增（POST）
-/// - 2=修改（PUT）
-/// - 3=删除（DELETE）
-/// - 0=其他
-fn infer_business_type(method: Method) -> i32 {
+/// 对齐 ruoyi-vue3-ts 前端 BusinessType 枚举与 sys_oper_type 字典：
+/// - 0=其他 1=新增（POST）2=修改（PUT）3=删除（DELETE）
+/// - 5=导出（*/export）6=导入（*/import*）
+/// - 7=强退（DELETE /monitor/online/*）8=生成代码（POST /tool/gen/*）9=清空（*/clean）
+///
+/// T-04：此前仅按 HTTP 方法映射，导出接口（POST）被误记为"新增"。
+fn infer_business_type(method: Method, path: &str) -> i32 {
+    // 路径优先：特殊业务类型（注意 /import 需先于 /tool/gen 判断）
+    if path.ends_with("/export") {
+        return 5;
+    }
+    if path.contains("/import") {
+        return 6;
+    }
+    if path.ends_with("/clean") {
+        return 9;
+    }
+    if path.starts_with("/monitor/online/") && method == Method::DELETE {
+        return 7;
+    }
+    if path.starts_with("/tool/gen") && method == Method::POST {
+        return 8;
+    }
     match method {
         Method::POST => 1,
         Method::PUT => 2,

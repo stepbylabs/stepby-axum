@@ -4,18 +4,16 @@
 //! - 用户 CRUD、密码加密校验、用户角色分配、状态启停
 //! - 不依赖任何 Web 框架类型（axum / tower / tower-http）
 //! - 多表操作使用 SeaORM 事务保证一致性
-//! - 参数校验使用 validator crate
+//! - 参数校验使用 garde crate（经 common::i18n::validate 统一入口）
 //! - 数据访问通过 Repository 层委托
 
 use chrono::NaiveDateTime;
 use futures::future::FutureExt;
-use regex::Regex;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
-use std::sync::LazyLock;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::constants::SUPER_ADMIN_USER_ID;
 use crate::common::error::ServiceError;
@@ -43,9 +41,6 @@ use crate::utils::password::{
 // 部门树组装函数抽取至 service/mod.rs，避免与 sys_role_service 重复
 use super::build_dept_tree_select;
 
-/// 手机号正则（11 位数字，1 开头）
-static PHONE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^1[3-9]\d{9}$").expect("手机号正则编译失败"));
 
 // ==================== DTO 定义 ====================
 
@@ -53,23 +48,28 @@ static PHONE_REGEX: LazyLock<Regex> =
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserAddDto {
+    #[garde(skip)]
     pub dept_id: Option<i64>,
-    #[validate(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub user_name: String,
-    #[validate(length(min = 2, max = 30, message = "昵称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub nick_name: String,
-    #[validate(email(message = "邮箱格式不正确"))]
+    #[garde(email)]
     pub email: Option<String>,
-    #[validate(regex(path = "PHONE_REGEX", message = "手机号格式不正确"))]
+    #[garde(pattern(r"^1[3-9]\d{9}$"))]
     pub phonenumber: Option<String>,
+    #[garde(skip)]
     pub sex: Option<String>,
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub password: String,
+    #[garde(skip)]
     pub status: Option<String>,
+    #[garde(skip)]
     pub role_ids: Option<Vec<i64>>,
     /// 岗位 ID 列表（None 不绑定，Some(vec![]) 清空）
+    #[garde(skip)]
     pub post_ids: Option<Vec<i64>>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -77,21 +77,27 @@ pub struct UserAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserEditDto {
+    #[garde(skip)]
     pub user_id: i64,
+    #[garde(skip)]
     pub dept_id: Option<i64>,
-    #[validate(length(min = 2, max = 30, message = "昵称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub nick_name: Option<String>,
-    #[validate(email(message = "邮箱格式不正确"))]
+    #[garde(email)]
     pub email: Option<String>,
-    #[validate(regex(path = "PHONE_REGEX", message = "手机号格式不正确"))]
+    #[garde(pattern(r"^1[3-9]\d{9}$"))]
     pub phonenumber: Option<String>,
+    #[garde(skip)]
     pub sex: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
     /// None 不修改角色绑定，Some(vec![]) 清空角色绑定
+    #[garde(skip)]
     pub role_ids: Option<Vec<i64>>,
     /// None 不修改岗位绑定，Some(vec![]) 清空岗位绑定
+    #[garde(skip)]
     pub post_ids: Option<Vec<i64>>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -99,8 +105,9 @@ pub struct UserEditDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct UserPwdResetDto {
+    #[garde(skip)]
     pub user_id: i64,
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub password: String,
 }
 
@@ -108,9 +115,9 @@ pub struct UserPwdResetDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct UserPwdUpdateDto {
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub old_password: String,
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub new_password: String,
 }
 
@@ -121,12 +128,13 @@ pub struct UserPwdUpdateDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileUpdateDto {
-    #[validate(length(min = 2, max = 30, message = "昵称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub nick_name: Option<String>,
-    #[validate(email(message = "邮箱格式不正确"))]
+    #[garde(email)]
     pub email: Option<String>,
-    #[validate(regex(path = "PHONE_REGEX", message = "手机号格式不正确"))]
+    #[garde(pattern(r"^1[3-9]\d{9}$"))]
     pub phonenumber: Option<String>,
+    #[garde(skip)]
     pub sex: Option<String>,
 }
 
@@ -541,10 +549,10 @@ impl SysUserService {
     /// 查询用户详情（含 role_ids）
     pub async fn get_user_by_id(&self, user_id: i64) -> Result<UserVo, ServiceError> {
         let user = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
 
         if user.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         let role_ids = self.get_role_ids_by_user_id(user_id).await?;
@@ -565,9 +573,9 @@ impl SysUserService {
     /// 返回用户信息 + roleGroup（角色名称逗号拼接）+ postGroup（岗位名称逗号拼接）
     pub async fn get_profile(&self, user_id: i64) -> Result<ProfileVo, ServiceError> {
         let user = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if user.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         // 查询用户角色列表（通过 Repository），拼接 roleGroup
@@ -603,12 +611,12 @@ impl SysUserService {
         user_id: i64,
         dto: ProfileUpdateDto,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         let now = chrono::Local::now().naive_local();
@@ -647,9 +655,9 @@ impl SysUserService {
             None => (None, vec![], vec![]),
             Some(uid) => {
                 let user_model = self.user_repo.base().find_by_id(uid).await?
-                    .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+                    .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
                 if user_model.del_flag.as_deref() == Some("2") {
-                    return Err(ServiceError::not_found("用户不存在"));
+                    return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
                 }
                 let rids = self.get_role_ids_by_user_id(uid).await?;
                 let pids = self.get_post_ids_by_user_id(uid).await?;
@@ -672,7 +680,7 @@ impl SysUserService {
         dto: UserAddDto,
         operator: &str,
     ) -> Result<SysUserModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // R19-1.3：密码复杂度校验（拦截纯数字/纯字母等弱口令）
         validate_password_complexity(&dto.password).map_err(|e| ServiceError::bad_request(&e))?;
@@ -680,7 +688,7 @@ impl SysUserService {
         // 用户名查重（含已软删除的，避免恢复后冲突）
         let exists = self.user_repo.find_by_user_name(&dto.user_name).await?;
         if exists.is_some() {
-            return Err(ServiceError::bad_request("用户名不能重复"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.user.name_duplicate")));
         }
 
         // Argon2 hash 是 CPU 密集型同步操作，用 spawn_blocking 包裹避免阻塞 Tokio runtime（P0-31）
@@ -689,7 +697,7 @@ impl SysUserService {
             .await
             .map_err(|e| {
                 tracing::error!("密码加密 spawn_blocking 失败: {}", e);
-                ServiceError::internal("密码加密失败")
+                ServiceError::internal(&crate::tr!("error.common.password_encrypt_failed"))
             })??;
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
@@ -771,13 +779,13 @@ impl SysUserService {
         operator: &str,
         operator_user_id: i64,
     ) -> Result<SysUserModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 查询用户是否存在
         let existing = self.user_repo.base().find_by_id(dto.user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         // 超管保护：user_id==1 不允许停用、不允许修改角色绑定
@@ -785,13 +793,13 @@ impl SysUserService {
             if let Some(ref status) = dto.status
                 && status == "1"
             {
-                return Err(ServiceError::bad_request("不允许停用超级管理员"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_disable_forbidden")));
             }
             if dto.role_ids.is_some() {
-                return Err(ServiceError::bad_request("不允许修改超级管理员的角色绑定"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_role_forbidden")));
             }
             if dto.post_ids.is_some() {
-                return Err(ServiceError::bad_request("不允许修改超级管理员的岗位绑定"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_post_forbidden")));
             }
         }
 
@@ -899,13 +907,13 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 超管保护
         if user_id == SUPER_ADMIN_USER_ID {
-            return Err(ServiceError::bad_request("不允许删除超级管理员"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_delete_forbidden")));
         }
 
         let existing = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         // 垂直越权校验（REGRESS-002）
@@ -961,7 +969,7 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 预校验：超管保护（事务外快速失败，避免无效事务开销）
         if user_ids.contains(&SUPER_ADMIN_USER_ID) {
-            return Err(ServiceError::bad_request("不允许删除超级管理员"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_delete_forbidden")));
         }
 
         // 单个 ID 直接走 delete_user（保持原有事务行为，避免嵌套事务开销）
@@ -1029,20 +1037,20 @@ impl SysUserService {
         _operator: &str,
         operator_user_id: i64,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // R19-1.3：密码复杂度校验（拦截纯数字/纯字母等弱口令）
         validate_password_complexity(&dto.password).map_err(|e| ServiceError::bad_request(&e))?;
 
         // 超管保护：禁止重置超级管理员密码
         if dto.user_id == SUPER_ADMIN_USER_ID {
-            return Err(ServiceError::bad_request("不允许修改超级管理员密码"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_pwd_forbidden")));
         }
 
         let existing = self.user_repo.base().find_by_id(dto.user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         // 垂直越权校验（REGRESS-002）
@@ -1055,7 +1063,7 @@ impl SysUserService {
             .await
             .map_err(|e| {
                 tracing::error!("密码加密 spawn_blocking 失败: {}", e);
-                ServiceError::internal("密码加密失败")
+                ServiceError::internal(&crate::tr!("error.common.password_encrypt_failed"))
             })??;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(hashed));
@@ -1070,20 +1078,20 @@ impl SysUserService {
         user_id: i64,
         dto: UserPwdUpdateDto,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // R19-1.3：密码复杂度校验（拦截纯数字/纯字母等弱口令）
         validate_password_complexity(&dto.new_password).map_err(|e| ServiceError::bad_request(&e))?;
 
         // 新旧密码不能相同
         if dto.old_password == dto.new_password {
-            return Err(ServiceError::bad_request("新密码不能与旧密码相同"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.user.same_password")));
         }
 
         let existing = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         // 校验旧密码（支持 MD5→Argon2 自动升级）
@@ -1091,7 +1099,7 @@ impl SysUserService {
         let old_hashed = existing
             .password
             .as_deref()
-            .ok_or_else(|| ServiceError::internal("用户密码字段缺失"))?
+            .ok_or_else(|| ServiceError::internal(&crate::tr!("error.user.password_missing")))?
             .to_string();
         let old_password_for_verify = dto.old_password.clone();
         let verify_result = tokio::task::spawn_blocking(move || {
@@ -1100,10 +1108,10 @@ impl SysUserService {
         .await
         .map_err(|e| {
             tracing::error!("密码验证 spawn_blocking 失败: {}", e);
-            ServiceError::internal("密码验证失败，请稍后再试")
+            ServiceError::internal(&crate::tr!("error.auth.password_verify_failed"))
         })?;
         if !verify_result.is_valid {
-            return Err(ServiceError::bad_request("旧密码不正确"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.auth.old_password_wrong")));
         }
 
         // Argon2 hash 是 CPU 密集型同步操作，用 spawn_blocking 包裹（P0-31）
@@ -1112,7 +1120,7 @@ impl SysUserService {
             .await
             .map_err(|e| {
                 tracing::error!("密码加密 spawn_blocking 失败: {}", e);
-                ServiceError::internal("密码加密失败")
+                ServiceError::internal(&crate::tr!("error.common.password_encrypt_failed"))
             })??;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(hashed));
@@ -1135,13 +1143,13 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 超管保护
         if user_id == SUPER_ADMIN_USER_ID && status == "1" {
-            return Err(ServiceError::bad_request("不允许停用超级管理员"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_disable_forbidden")));
         }
 
         let existing = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         // 垂直越权校验（REGRESS-002）
@@ -1171,7 +1179,7 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 超管保护：禁止修改超级管理员角色绑定
         if user_id == SUPER_ADMIN_USER_ID {
-            return Err(ServiceError::bad_request("不允许修改超级管理员角色绑定"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_role_forbidden")));
         }
 
         // 垂直越权校验（P0-R81-005 / REGRESS-002）
@@ -1179,9 +1187,9 @@ impl SysUserService {
             .await?;
 
         let existing = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         let user_role_repo = self.user_role_repo.clone();
@@ -1246,7 +1254,7 @@ impl SysUserService {
         new_hashed: &str,
     ) -> Result<(), ServiceError> {
         let existing = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(new_hashed.to_string()));
         self.user_repo.update(am).await?;
@@ -1262,7 +1270,7 @@ impl SysUserService {
         avatar_path: &str,
     ) -> Result<(), ServiceError> {
         let existing = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         let mut am: SysUserActiveModel = existing.into();
         am.avatar = Set(Some(avatar_path.to_string()));
         self.user_repo.update(am).await?;
@@ -1285,7 +1293,7 @@ impl SysUserService {
         user_id: i64,
     ) -> Result<String, ServiceError> {
         let user = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         let Some(dept_id) = user.dept_id else {
             return Ok(String::new());
         };
@@ -1304,9 +1312,9 @@ impl SysUserService {
         user_id: i64,
     ) -> Result<UserAuthRoleVo, ServiceError> {
         let user = self.user_repo.base().find_by_id(user_id).await?
-            .ok_or_else(|| ServiceError::not_found("用户不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if user.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("用户不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
         // 查询全部未删除角色（通过 Repository，前端根据 user.roleIds 自行标记已勾选）

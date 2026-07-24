@@ -4,7 +4,7 @@
 //! - 角色 CRUD、角色菜单绑定、数据权限配置、级联删除校验
 //! - 不依赖任何 Web 框架类型（axum / tower / tower-http）
 //! - 多表操作使用 SeaORM 事务保证一致性
-//! - 参数校验使用 validator crate
+//! - 参数校验使用 garde crate（经 common::i18n::validate 统一入口）
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
@@ -12,7 +12,7 @@ use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::constants::{SUPER_ADMIN_ROLE_ID, SUPER_ADMIN_USER_ID};
 use crate::common::error::ServiceError;
@@ -42,20 +42,24 @@ use super::build_dept_tree_select;
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleAddDto {
-    #[validate(length(min = 2, max = 30, message = "角色名称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub role_name: String,
-    #[validate(length(min = 2, max = 100, message = "角色权限字符串长度必须在2-100之间"))]
+    #[garde(length(min = 2, max = 100))]
     pub role_key: String,
-    #[validate(range(min = 0, max = 999, message = "显示顺序必须在0-999之间"))]
+    #[garde(range(min = 0, max = 999))]
     pub role_sort: i32,
+    #[garde(skip)]
     pub data_scope: Option<String>,
+    #[garde(skip)]
     pub menu_check_strictly: Option<bool>,
+    #[garde(skip)]
     pub dept_check_strictly: Option<bool>,
-    #[validate(length(min = 1, max = 1, message = "状态值不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub status: String,
     /// 菜单 ID 列表（None 不绑定，Some(vec![]) 清空）
+    #[garde(skip)]
     pub menu_ids: Option<Vec<i64>>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -63,20 +67,26 @@ pub struct RoleAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleEditDto {
+    #[garde(skip)]
     pub role_id: i64,
-    #[validate(length(min = 2, max = 30, message = "角色名称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30))]
     pub role_name: Option<String>,
-    #[validate(length(min = 2, max = 100, message = "角色权限字符串长度必须在2-100之间"))]
+    #[garde(length(min = 2, max = 100))]
     pub role_key: Option<String>,
-    #[validate(range(min = 0, max = 999, message = "显示顺序必须在0-999之间"))]
+    #[garde(range(min = 0, max = 999))]
     pub role_sort: Option<i32>,
+    #[garde(skip)]
     pub data_scope: Option<String>,
+    #[garde(skip)]
     pub menu_check_strictly: Option<bool>,
+    #[garde(skip)]
     pub dept_check_strictly: Option<bool>,
+    #[garde(skip)]
     pub status: Option<String>,
     /// None 不修改菜单绑定，Some(vec![]) 清空
+    #[garde(skip)]
     pub menu_ids: Option<Vec<i64>>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -119,13 +129,16 @@ pub struct RoleVo {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DataScopeDto {
+    #[garde(skip)]
     pub role_id: i64,
     /// 数据范围（1全部 2自定义 3本部门 4本部门及以下 5仅本人）
-    #[validate(length(min = 1, max = 1, message = "数据范围值不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub data_scope: String,
     /// 自定义数据权限时勾选的部门 ID 列表（data_scope=2 时使用）
     #[serde(default)]
+    #[garde(skip)]
     pub dept_ids: Vec<i64>,
+    #[garde(skip)]
     pub dept_check_strictly: Option<bool>,
 }
 
@@ -338,7 +351,7 @@ impl SysRoleService {
         dto: RoleAddDto,
         operator: &str,
     ) -> Result<SysRoleModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // role_key 查重
         let exists = self.role_repo.find_by_role_key(&dto.role_key).await?;
@@ -403,7 +416,7 @@ impl SysRoleService {
         dto: RoleEditDto,
         operator: &str,
     ) -> Result<SysRoleModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 查询角色是否存在
         let existing = self.role_repo.base().find_by_id(dto.role_id).await?
@@ -731,7 +744,7 @@ impl SysRoleService {
         dto: DataScopeDto,
         operator: &str,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 超管保护
         if dto.role_id == SUPER_ADMIN_ROLE_ID {

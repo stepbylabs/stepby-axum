@@ -56,9 +56,12 @@ anyhow = "1"
 thiserror = "2"
 
 # 校验
-validator = { version = "0.20", features = ["derive"] }
-# garde：作为 validator 的补充，提供更友好的校验派生宏
-garde = { version = "0.22", features = ["full"] }
+# garde：统一校验框架（T-01 迁移后 validator 已移除）。
+# 0.23 起内置 garde::i18n 模块（I18n trait + with_i18n），用于校验错误消息本地化。
+garde = { version = "0.23", features = ["full"] }
+
+# 国际化（T-05）：编译期嵌入 locales/*.yml，t! 宏按请求 locale 翻译文案
+rust-i18n = "3"
 
 # Redis
 redis = { version = "1.3", features = ["tokio-comp", "connection-manager"] }
@@ -72,7 +75,7 @@ dotenvy = "0.15"
 # 异步 Future 工具（事务闭包 boxed()）
 futures = "0.3"
 
-# 正则表达式（validator regex 校验手机号）
+# 正则表达式（手机号格式校验、XSS 净化模式）
 regex = "1"
 
 # 定时任务调度
@@ -81,8 +84,8 @@ regex = "1"
 tokio-cron-scheduler = "0.15"
 croner = "3"
 
-# Excel 导出
-rust_xlsxwriter = "0.96"
+# Excel 导出（T-10：启用 constant_memory 流式模式，大数据量内存 O(1)）
+rust_xlsxwriter = { version = "0.96", features = ["constant_memory"] }
 
 # 系统监控（CPU/内存/磁盘信息采集）
 sysinfo = "0.39"

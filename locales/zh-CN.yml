@@ -1,0 +1,97 @@
+# zh-CN 文案（默认语言）
+# key 规范：error.common.*（通用错误）/ error.{module}.*（业务错误）/ msg.success.*（操作成功）
+
+error:
+  common:
+    not_found: 数据不存在
+    db_acquire: 数据库连接获取失败
+    bad_format: 数据格式不正确
+    duplicate: 数据重复，请检查唯一字段
+    db_failed: 数据库操作失败，请联系管理员
+    tx_failed: 数据库事务失败，请联系管理员
+    session_expired: 会话已过期，请重新登录
+    session_invalid: 无效的会话，请重新登录
+    token_failed: token 生成失败
+    process_failed: 数据处理失败
+    password_encrypt_failed: 密码加密失败
+    io_error: 系统 IO 错误
+    cache_auth_failed: 缓存认证失败
+    cache_failed: 缓存服务异常，请联系管理员
+    internal: 系统内部错误，请联系管理员
+    validate_failed: 参数校验失败
+    parse_failed: 请求参数解析失败
+  auth:
+    captcha_expired: 验证码已过期或不存在
+    captcha_wrong: 验证码错误
+    captcha_gen_failed: 验证码生成失败，请稍后再试
+    login_failed: 用户名或密码错误
+    account_deleted: 账号已删除，请联系管理员
+    account_disabled: 账号已停用，请联系管理员
+    account_locked: 账号已被锁定，请稍后再试
+    register_exists: 用户名已存在
+    register_disabled: 当前系统未开放注册，请联系管理员
+    old_password_wrong: 原密码错误
+    unauthorized: 未认证，请先登录
+    forbidden: 无权限访问
+    auth_unavailable: 认证服务暂时不可用，请稍后再试
+    rate_limited: 访问频率过高，请稍后再试
+    password_locked: 密码错误次数过多，请 5 分钟后再试
+    password_verify_failed: 密码验证失败，请稍后再试
+    logout_failed: 登出处理失败，请重试
+    totp_required: 需要二次验证
+    totp_invalid: 动态口令错误
+  user:
+    not_found: 用户不存在
+    name_duplicate: 用户名不能重复
+    admin_disable_forbidden: 不允许停用超级管理员
+    admin_role_forbidden: 不允许修改超级管理员的角色绑定
+    admin_post_forbidden: 不允许修改超级管理员的岗位绑定
+    admin_delete_forbidden: 不允许删除超级管理员
+    admin_pwd_forbidden: 不允许修改超级管理员密码
+    same_password: 新密码不能与旧密码相同
+    password_missing: 用户密码字段缺失
+  post:
+    not_found: 岗位不存在
+    code_exists: 岗位编码已存在
+  task:
+    not_found: 任务不存在
+  gen:
+    time_format: 时间格式不正确
+    int_default: 整数类型默认值不是有效数字
+    decimal_default: 小数类型默认值不是有效数字
+    table_not_found: 代码生成业务表不存在
+    table_name_start: 表名必须以字母开头
+    create_table_failed: 建表失败
+    table_id_not_found: 表 ID 不存在
+    table_not_imported: 表未导入
+    table_no_columns: 表不存在或没有字段
+
+msg:
+  success:
+    default: 操作成功
+    add: 新增成功
+    edit: 修改成功
+    delete: 删除成功
+    clear: 清空成功
+    unlock: 解锁成功
+    register: 注册成功
+    logout: 退出成功
+    sort: 排序成功
+    restore: 恢复成功
+    force_logout: 强退成功
+    reset: 重置成功
+    refresh: 刷新成功
+    status_change: 状态修改成功
+    execute: 执行成功
+    save: 保存成功
+    reload: 热加载成功
+    password_reset: 密码重置成功
+    password_change: 密码修改成功
+    assign_role: 分配角色成功
+    cancel_auth: 取消授权成功
+    auth: 授权成功
+    import: 导入成功
+    sync: 同步成功
+  cache:
+    no_match: 无匹配缓存
+    key_not_found: 缓存键不存在

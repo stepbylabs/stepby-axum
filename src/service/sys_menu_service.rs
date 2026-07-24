@@ -4,7 +4,7 @@
 //! - 菜单 CRUD、树形结构递归组装、权限标识校验
 //! - 不依赖任何 Web 框架类型（axum / tower / tower-http）
 //! - 多表操作使用 SeaORM 事务保证一致性
-//! - 参数校验使用 validator crate
+//! - 参数校验使用 garde crate（经 common::i18n::validate 统一入口）
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
@@ -14,7 +14,7 @@ use sea_orm::{
 };
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::{like_escape, TreeSelectVo};
@@ -33,30 +33,38 @@ use crate::utils::tree::build_tree;
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MenuAddDto {
+    #[garde(skip)]
     pub parent_id: Option<i64>,
-    #[validate(length(min = 2, max = 50, message = "菜单名称长度必须在2-50之间"))]
+    #[garde(length(min = 2, max = 50))]
     pub menu_name: String,
-    #[validate(range(min = 0, max = 999, message = "显示顺序必须在0-999之间"))]
+    #[garde(range(min = 0, max = 999))]
     pub order_num: Option<i32>,
-    #[validate(length(max = 200, message = "路由地址长度不能超过200"))]
+    #[garde(length(max = 200))]
     pub path: Option<String>,
-    #[validate(length(max = 255, message = "组件路径长度不能超过255"))]
+    #[garde(length(max = 255))]
     pub component: Option<String>,
-    #[validate(length(max = 255, message = "路由参数长度不能超过255"))]
+    #[garde(length(max = 255))]
     pub query: Option<String>,
-    #[validate(length(max = 50, message = "路由名称长度不能超过50"))]
+    #[garde(length(max = 50))]
     pub route_name: Option<String>,
+    #[garde(skip)]
     pub is_frame: Option<String>,
+    #[garde(skip)]
     pub is_cache: Option<String>,
-    #[validate(length(min = 1, max = 1, message = "菜单类型不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub menu_type: String,
+    #[garde(skip)]
     pub visible: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 100, message = "权限标识长度不能超过100"))]
+    #[garde(length(max = 100))]
     pub perms: Option<String>,
-    #[validate(length(max = 100, message = "图标长度不能超过100"))]
+    #[garde(length(max = 100))]
     pub icon: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    /// i18n 翻译 key（可选）：前端按此 key 翻译菜单标题，留空则回退到 menu_name 原文
+    #[garde(length(max = 100))]
+    pub i18n_key: Option<String>,
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -64,31 +72,40 @@ pub struct MenuAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MenuEditDto {
+    #[garde(skip)]
     pub menu_id: i64,
-    #[validate(range(min = 0, message = "父菜单 ID 不能为负数"))]
+    #[garde(range(min = 0))]
     pub parent_id: Option<i64>,
-    #[validate(length(min = 2, max = 50, message = "菜单名称长度必须在2-50之间"))]
+    #[garde(length(min = 2, max = 50))]
     pub menu_name: Option<String>,
-    #[validate(range(min = 0, max = 999, message = "显示顺序必须在0-999之间"))]
+    #[garde(range(min = 0, max = 999))]
     pub order_num: Option<i32>,
-    #[validate(length(max = 200, message = "路由地址长度不能超过200"))]
+    #[garde(length(max = 200))]
     pub path: Option<String>,
-    #[validate(length(max = 255, message = "组件路径长度不能超过255"))]
+    #[garde(length(max = 255))]
     pub component: Option<String>,
-    #[validate(length(max = 255, message = "路由参数长度不能超过255"))]
+    #[garde(length(max = 255))]
     pub query: Option<String>,
-    #[validate(length(max = 50, message = "路由名称长度不能超过50"))]
+    #[garde(length(max = 50))]
     pub route_name: Option<String>,
+    #[garde(skip)]
     pub is_frame: Option<String>,
+    #[garde(skip)]
     pub is_cache: Option<String>,
+    #[garde(skip)]
     pub menu_type: Option<String>,
+    #[garde(skip)]
     pub visible: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 100, message = "权限标识长度不能超过100"))]
+    #[garde(length(max = 100))]
     pub perms: Option<String>,
-    #[validate(length(max = 100, message = "图标长度不能超过100"))]
+    #[garde(length(max = 100))]
     pub icon: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    /// i18n 翻译 key（可选）
+    #[garde(length(max = 100))]
+    pub i18n_key: Option<String>,
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -107,9 +124,9 @@ pub struct MenuQueryDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MenuSortDto {
-    #[validate(length(min = 1, message = "menuIds 不能为空"))]
+    #[garde(length(min = 1))]
     pub menu_ids: String,
-    #[validate(length(min = 1, message = "orderNums 不能为空"))]
+    #[garde(length(min = 1))]
     pub order_nums: String,
 }
 
@@ -186,7 +203,7 @@ impl SysMenuService {
         dto: MenuSortDto,
         operator: &str,
     ) -> Result<(), ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 解析逗号分隔的 menu_ids 和 order_nums
         let menu_ids: Vec<i64> = parse_id_list::<i64>(&dto.menu_ids);
@@ -243,7 +260,7 @@ impl SysMenuService {
         dto: MenuAddDto,
         operator: &str,
     ) -> Result<SysMenuModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // parent_id 校验：若非 0，查询父菜单是否存在
         let parent_id = dto.parent_id.unwrap_or(0);
@@ -296,6 +313,7 @@ impl SysMenuService {
         am.status = Set(dto.status.clone().or_else(|| Some("0".to_string())));
         am.perms = Set(perms_val);
         am.icon = Set(dto.icon.clone());
+        am.i18n_key = Set(dto.i18n_key.clone());
         am.create_by = Set(Some(operator.to_string()));
         am.create_time = Set(Some(now));
         am.update_by = Set(Some(operator.to_string()));
@@ -313,7 +331,7 @@ impl SysMenuService {
         dto: MenuEditDto,
         operator: &str,
     ) -> Result<SysMenuModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 查询菜单是否存在
         let existing = self.menu_repo.base().find_by_id(dto.menu_id).await?
@@ -404,6 +422,9 @@ impl SysMenuService {
         am.perms = Set(perms_val);
         if let Some(ref icon) = dto.icon {
             am.icon = Set(Some(icon.clone()));
+        }
+        if let Some(ref i18n_key) = dto.i18n_key {
+            am.i18n_key = Set(Some(i18n_key.clone()));
         }
         if let Some(ref remark) = dto.remark {
             am.remark = Set(Some(remark.clone()));

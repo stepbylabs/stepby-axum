@@ -83,5 +83,5 @@ pub async fn remove(
     }
 
     state.task_service.delete_tasks(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

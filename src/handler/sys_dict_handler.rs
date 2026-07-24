@@ -20,7 +20,7 @@ use axum::response::Response;
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::ValidatedJson;
-use crate::common::{excel::{export_to_excel, ExcelColumn}, AjaxResult, AppError, TableDataInfo};
+use crate::common::{excel::{export_to_excel, CellValue, ExcelColumn}, AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_dict_data::Model as SysDictDataModel;
 use crate::entity::sys_dict_type::Model as SysDictTypeModel;
 use crate::middleware::Operator;
@@ -89,7 +89,7 @@ pub async fn dict_type_refresh_cache(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.dict_service.refresh_all_dict_cache().await?;
-    Ok(AjaxResult::success_msg("刷新成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.refresh")))
 }
 
 /// POST /system/dict/type/export
@@ -113,23 +113,20 @@ pub async fn dict_type_export(
     let rows = state.dict_service.export_dict_types(query).await?;
 
     let columns = [
-        ExcelColumn { header: "字典主键", getter: |r: &SysDictTypeModel| r.dict_id.to_string().into() },
-        ExcelColumn { header: "字典名称", getter: |r: &SysDictTypeModel| r.dict_name.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "字典类型", getter: |r: &SysDictTypeModel| r.dict_type.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "状态", getter: |r: &SysDictTypeModel| if r.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into() },
-        ExcelColumn {
-            header: "创建时间",
-            getter: |r: &SysDictTypeModel| {
+        ExcelColumn { key: "dictId", header: ("字典主键", "Dict ID"), getter: |r: &SysDictTypeModel| CellValue::Text(r.dict_id.to_string().into()) },
+        ExcelColumn { key: "dictName", header: ("字典名称", "Dict Name"), getter: |r: &SysDictTypeModel| CellValue::Text(r.dict_name.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "dictType", header: ("字典类型", "Dict Type"), getter: |r: &SysDictTypeModel| CellValue::Text(r.dict_type.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysDictTypeModel| CellValue::Text(if r.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysDictTypeModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
-        },
-        ExcelColumn { header: "备注", getter: |r: &SysDictTypeModel| r.remark.clone().unwrap_or_default().into() },
+            }) },
+        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysDictTypeModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
     ];
 
-    export_to_excel("字典类型", "dict_type", &columns, &rows)
+    export_to_excel("字典类型", "dict_type", &columns, &rows).await
 }
 
 /// GET /system/dict/type/{dictId}
@@ -172,7 +169,7 @@ pub async fn dict_type_add(
     ValidatedJson(dto): ValidatedJson<DictTypeAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.dict_service.add_dict_type(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("新增成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
 /// PUT /system/dict/type
@@ -194,7 +191,7 @@ pub async fn dict_type_edit(
     ValidatedJson(dto): ValidatedJson<DictTypeEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.dict_service.edit_dict_type(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/dict/type/{dictIds}
@@ -229,7 +226,7 @@ pub async fn dict_type_remove(
     }
 
     state.dict_service.delete_dict_types(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 // ==================== 字典数据 Handler ====================
@@ -316,7 +313,7 @@ pub async fn dict_data_add(
     ValidatedJson(dto): ValidatedJson<DictDataAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.dict_service.add_dict_data(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("新增成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
 /// PUT /system/dict/data
@@ -338,7 +335,7 @@ pub async fn dict_data_edit(
     ValidatedJson(dto): ValidatedJson<DictDataEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.dict_service.edit_dict_data(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/dict/data/{dictCodes}
@@ -373,7 +370,7 @@ pub async fn dict_data_remove(
     }
 
     state.dict_service.delete_dict_data(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// POST /system/dict/data/export
@@ -385,22 +382,19 @@ pub async fn dict_data_export(
     let rows = state.dict_service.export_dict_data(query).await?;
 
     let columns = [
-        ExcelColumn { header: "字典编码", getter: |r: &SysDictDataModel| r.dict_code.to_string().into() },
-        ExcelColumn { header: "字典标签", getter: |r: &SysDictDataModel| r.dict_label.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "字典键值", getter: |r: &SysDictDataModel| r.dict_value.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "字典排序", getter: |r: &SysDictDataModel| r.dict_sort.unwrap_or(0).to_string().into() },
-        ExcelColumn { header: "状态", getter: |r: &SysDictDataModel| if r.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into() },
-        ExcelColumn { header: "备注", getter: |r: &SysDictDataModel| r.remark.clone().unwrap_or_default().into() },
-        ExcelColumn {
-            header: "创建时间",
-            getter: |r: &SysDictDataModel| {
+        ExcelColumn { key: "dictCode", header: ("字典编码", "Dict Code"), getter: |r: &SysDictDataModel| CellValue::Text(r.dict_code.to_string().into()) },
+        ExcelColumn { key: "dictLabel", header: ("字典标签", "Dict Label"), getter: |r: &SysDictDataModel| CellValue::Text(r.dict_label.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "dictValue", header: ("字典键值", "Dict Value"), getter: |r: &SysDictDataModel| CellValue::Text(r.dict_value.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "dictSort", header: ("字典排序", "Sort"), getter: |r: &SysDictDataModel| CellValue::Text(r.dict_sort.unwrap_or(0).to_string().into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysDictDataModel| CellValue::Text(if r.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysDictDataModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysDictDataModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
-        },
+            }) },
     ];
 
-    export_to_excel("字典数据", "dict_data", &columns, &rows)
+    export_to_excel("字典数据", "dict_data", &columns, &rows).await
 }

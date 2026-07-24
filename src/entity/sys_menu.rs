@@ -35,6 +35,9 @@ pub struct Model {
     pub visible: Option<String>,
     pub status: Option<String>,
     pub perms: Option<String>,
+    /// i18n 翻译 key（可选），用于前端按当前 locale 翻译菜单标题。
+    /// 内置菜单由 migration 填充（如 "menu.user"）；自定义菜单留空，前端回退到 menu_name 原文。
+    pub i18n_key: Option<String>,
     pub icon: Option<String>,
     pub create_by: Option<String>,
     #[serde(

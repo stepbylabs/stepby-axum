@@ -14,7 +14,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
-use crate::common::excel::{export_to_excel, ExcelColumn};
+use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::common::ValidatedJson;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_post::Model as SysPostModel;
@@ -101,7 +101,7 @@ pub async fn add(
     ValidatedJson(dto): ValidatedJson<PostAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.post_service.add_post(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("新增成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
 /// PUT /system/post
@@ -123,7 +123,7 @@ pub async fn edit(
     ValidatedJson(dto): ValidatedJson<PostEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.post_service.edit_post(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/post/{postIds}
@@ -158,7 +158,7 @@ pub async fn remove(
     }
 
     state.post_service.delete_posts(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// POST /system/post/export
@@ -182,22 +182,19 @@ pub async fn export(
     let rows = state.post_service.export_posts(query).await?;
 
     let columns = [
-        ExcelColumn { header: "岗位编号", getter: |r: &SysPostModel| r.post_id.to_string().into() },
-        ExcelColumn { header: "岗位编码", getter: |r: &SysPostModel| r.post_code.clone().into() },
-        ExcelColumn { header: "岗位名称", getter: |r: &SysPostModel| r.post_name.clone().into() },
-        ExcelColumn { header: "岗位排序", getter: |r: &SysPostModel| r.post_sort.to_string().into() },
-        ExcelColumn { header: "状态", getter: |r: &SysPostModel| r.status.as_deref().map(|s| if s == "0" { "正常".to_string() } else { "停用".to_string() }).unwrap_or_default().into() },
-        ExcelColumn {
-            header: "创建时间",
-            getter: |r: &SysPostModel| {
+        ExcelColumn { key: "postId", header: ("岗位编号", "Post ID"), getter: |r: &SysPostModel| CellValue::Text(r.post_id.to_string().into()) },
+        ExcelColumn { key: "postCode", header: ("岗位编码", "Post Code"), getter: |r: &SysPostModel| CellValue::Text(r.post_code.clone().into()) },
+        ExcelColumn { key: "postName", header: ("岗位名称", "Post Name"), getter: |r: &SysPostModel| CellValue::Text(r.post_name.clone().into()) },
+        ExcelColumn { key: "postSort", header: ("岗位排序", "Sort"), getter: |r: &SysPostModel| CellValue::Text(r.post_sort.to_string().into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysPostModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { "正常".to_string() } else { "停用".to_string() }).unwrap_or_default().into()) },
+        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysPostModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
-        },
-        ExcelColumn { header: "备注", getter: |r: &SysPostModel| r.remark.clone().unwrap_or_default().into() },
+            }) },
+        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysPostModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
     ];
 
-    export_to_excel("岗位数据", "post", &columns, &rows)
+    export_to_excel("岗位数据", "post", &columns, &rows).await
 }

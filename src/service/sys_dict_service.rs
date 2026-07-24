@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
@@ -77,12 +77,13 @@ impl From<&DictTypeQueryDto> for PageDomain {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DictTypeAddDto {
-    #[validate(length(min = 1, max = 100, message = "字典名称不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_name: String,
-    #[validate(length(min = 1, max = 100, message = "字典类型不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_type: String,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -90,13 +91,15 @@ pub struct DictTypeAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DictTypeEditDto {
+    #[garde(skip)]
     pub dict_id: i64,
-    #[validate(length(min = 1, max = 100, message = "字典名称不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_name: String,
-    #[validate(length(min = 1, max = 100, message = "字典类型不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_type: String,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -130,21 +133,26 @@ impl From<&DictDataQueryDto> for PageDomain {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DictDataAddDto {
-    #[validate(range(min = 0, message = "字典排序不能为负数"))]
+    #[garde(range(min = 0))]
     pub dict_sort: Option<i32>,
-    #[validate(length(min = 1, max = 100, message = "字典标签不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_label: String,
     /// 英文标签（国际化）
+    #[garde(skip)]
     pub dict_label_en: Option<String>,
-    #[validate(length(min = 1, max = 100, message = "字典键值不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_value: String,
-    #[validate(length(min = 1, max = 100, message = "字典类型不能为空"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_type: String,
+    #[garde(skip)]
     pub css_class: Option<String>,
+    #[garde(skip)]
     pub list_class: Option<String>,
+    #[garde(skip)]
     pub is_default: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -152,22 +160,28 @@ pub struct DictDataAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DictDataEditDto {
+    #[garde(skip)]
     pub dict_code: i64,
-    #[validate(range(min = 0, message = "字典排序不能为负数"))]
+    #[garde(range(min = 0))]
     pub dict_sort: Option<i32>,
-    #[validate(length(min = 1, max = 100, message = "字典标签不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_label: String,
     /// 英文标签（国际化）
+    #[garde(skip)]
     pub dict_label_en: Option<String>,
-    #[validate(length(min = 1, max = 100, message = "字典键值不能为空且不超过100字符"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_value: String,
-    #[validate(length(min = 1, max = 100, message = "字典类型不能为空"))]
+    #[garde(length(min = 1, max = 100))]
     pub dict_type: String,
+    #[garde(skip)]
     pub css_class: Option<String>,
+    #[garde(skip)]
     pub list_class: Option<String>,
+    #[garde(skip)]
     pub is_default: Option<String>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -350,7 +364,7 @@ impl SysDictService {
         dto: DictTypeAddDto,
         operator: &str,
     ) -> Result<SysDictTypeModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // dict_type 唯一性校验
         let existing = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
@@ -392,7 +406,7 @@ impl SysDictService {
         dto: DictTypeEditDto,
         operator: &str,
     ) -> Result<SysDictTypeModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self.get_dict_type_by_id(dto.dict_id).await?;
 
@@ -669,7 +683,7 @@ impl SysDictService {
         dto: DictDataAddDto,
         operator: &str,
     ) -> Result<SysDictDataModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // 校验 dict_type 在 sys_dict_type 中存在
         let dict_type_exists = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
@@ -712,7 +726,7 @@ impl SysDictService {
         dto: DictDataEditDto,
         operator: &str,
     ) -> Result<SysDictDataModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self.get_dict_data_by_id(dto.dict_code).await?;
         // 记录旧 dict_type（dict_type 可能变更，需同时失效新旧缓存）

@@ -29,7 +29,6 @@ use crate::service::gen_table_service::{
 };
 use crate::state::AppState;
 use crate::utils::parse_id_list;
-use validator::Validate;
 
 /// GET /tool/gen/list
 /// 分页查询代码生成业务表
@@ -78,7 +77,7 @@ pub async fn import_table(
             .import_table(table_name, operator.username())
             .await?;
     }
-    Ok(AjaxResult::success_msg("导入成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.import")))
 }
 
 /// 导入表请求参数
@@ -104,7 +103,7 @@ pub async fn create_table(
     operator: Operator,
     Json(dto): Json<CreateTableDto>,
 ) -> Result<AjaxResult<CreateTableResultVo>, AppError> {
-    dto.validate().map_err(|e| AppError::bad_request(&format!("参数校验失败: {}", e)))?;
+    crate::common::i18n::validate(&dto)?;
     let result = state.gen_table_service.create_table_structured(dto, operator.username()).await?;
     Ok(AjaxResult::success(result))
 }
@@ -124,7 +123,7 @@ pub async fn update_table(
     Json(dto): Json<GenTableEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.gen_table_service.update_table(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /tool/gen/{tableIds}
@@ -138,7 +137,7 @@ pub async fn delete_table(
         return Err(AppError::bad_request("表 ID 不合法"));
     }
     state.gen_table_service.delete_tables(ids).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// 预览代码响应包装
@@ -233,7 +232,7 @@ pub async fn synch_db(
         .gen_table_service
         .synch_db(&table_name, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("同步成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.sync")))
 }
 
 /// 批量生成代码请求参数

@@ -158,7 +158,7 @@ pub async fn edit(
     Json(dto): Json<MenuEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.menu_service.edit_menu(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// PUT /system/menu/updateSort
@@ -182,7 +182,7 @@ pub async fn update_sort(
         .menu_service
         .update_menu_sort(dto, operator.username())
         .await?;
-    Ok(AjaxResult::success_msg("排序成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.sort")))
 }
 
 /// DELETE /system/menu/{id}
@@ -204,7 +204,7 @@ pub async fn remove(
     Path(menu_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state.menu_service.delete_menu(menu_id).await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 // ==================== 顶层响应类型 ====================

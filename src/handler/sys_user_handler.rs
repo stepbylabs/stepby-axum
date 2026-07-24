@@ -24,12 +24,12 @@ use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::ValidatedJson;
 use crate::common::{AjaxResult, AppError, TableDataInfo, TreeSelectVo};
 use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SECS_PER_HOUR};
-use crate::common::excel::{export_to_excel, ExcelColumn};
+use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::Model as SysUserModel;
@@ -47,8 +47,9 @@ use crate::utils::parse_id_list;
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeStatusDto {
+    #[garde(skip)]
     pub user_id: i64,
-    #[validate(length(min = 1, max = 1, message = "状态值不合法"))]
+    #[garde(length(min = 1, max = 1))]
     pub status: String,
 }
 
@@ -57,9 +58,10 @@ pub struct ChangeStatusDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct AssignAuthRoleDto {
-    #[validate(range(min = 1, message = "用户 ID 不合法"))]
+    #[garde(range(min = 1))]
     pub user_id: i64,
     /// 逗号分隔的角色 ID 字符串（对齐前端 params.roleIds）
+    #[garde(skip)]
     pub role_ids: String,
 }
 
@@ -67,9 +69,9 @@ pub struct AssignAuthRoleDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfilePwdDto {
-    #[validate(length(min = 5, max = 20, message = "原密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub old_password: String,
-    #[validate(length(min = 5, max = 20, message = "新密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20))]
     pub new_password: String,
 }
 
@@ -115,25 +117,22 @@ pub async fn export(
     let rows = state.user_service.export_users(query).await?;
 
     let columns = [
-        ExcelColumn { header: "用户编号", getter: |r: &UserVo| r.user.user_id.to_string().into() },
-        ExcelColumn { header: "登录名称", getter: |r: &UserVo| r.user.user_name.clone().into() },
-        ExcelColumn { header: "用户姓名", getter: |r: &UserVo| r.user.nick_name.clone().into() },
-        ExcelColumn { header: "部门", getter: |r: &UserVo| r.user.dept_id.map(|d| d.to_string()).unwrap_or_default().into() },
-        ExcelColumn { header: "手机号码", getter: |r: &UserVo| r.user.phonenumber.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "邮箱", getter: |r: &UserVo| r.user.email.clone().unwrap_or_default().into() },
-        ExcelColumn { header: "状态", getter: |r: &UserVo| if r.user.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into() },
-        ExcelColumn {
-            header: "创建时间",
-            getter: |r: &UserVo| {
+        ExcelColumn { key: "userId", header: ("用户编号", "User ID"), getter: |r: &UserVo| CellValue::Text(r.user.user_id.to_string().into()) },
+        ExcelColumn { key: "loginName", header: ("登录名称", "Login Name"), getter: |r: &UserVo| CellValue::Text(r.user.user_name.clone().into()) },
+        ExcelColumn { key: "nickName", header: ("用户姓名", "Nickname"), getter: |r: &UserVo| CellValue::Text(r.user.nick_name.clone().into()) },
+        ExcelColumn { key: "dept.deptName", header: ("部门", "Department"), getter: |r: &UserVo| CellValue::Text(r.dept.as_ref().map(|d| d.dept_name.clone()).unwrap_or_default().into()) },
+        ExcelColumn { key: "phonenumber", header: ("手机号码", "Phone"), getter: |r: &UserVo| CellValue::Text(r.user.phonenumber.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "email", header: ("邮箱", "Email"), getter: |r: &UserVo| CellValue::Text(r.user.email.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &UserVo| CellValue::Text(if r.user.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &UserVo| CellValue::Text({
                 r.user.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_default()
                     .into()
-            }
-        },
+            }) },
     ];
 
-    export_to_excel("用户数据", "user", &columns, &rows)
+    export_to_excel("用户数据", "user", &columns, &rows).await
 }
 
 /// GET /system/user/{id}
@@ -221,7 +220,7 @@ pub async fn edit(
         .user_service
         .edit_user(dto, operator.username(), operator_user_id)
         .await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// DELETE /system/user/{ids}
@@ -271,7 +270,7 @@ pub async fn remove(
         .user_service
         .delete_users(user_ids, operator_user_id)
         .await?;
-    Ok(AjaxResult::success_msg("删除成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
 /// PUT /system/user/changeStatus
@@ -294,7 +293,7 @@ pub async fn change_status(
             operator_user_id,
         )
         .await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// PUT /system/user/resetPwd
@@ -333,7 +332,7 @@ pub async fn reset_pwd(
             AppError::internal("密码重置成功，但旧 token 失效标记写入失败")
         })?;
 
-    Ok(AjaxResult::success_msg("密码重置成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_reset")))
 }
 
 /// PUT /system/user/profile/updatePwd
@@ -376,7 +375,7 @@ pub async fn update_profile_pwd(
             AppError::internal("密码修改成功，但旧 token 失效标记写入失败")
         })?;
 
-    Ok(AjaxResult::success_msg("密码修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_change")))
 }
 
 /// GET /system/user/profile
@@ -416,7 +415,7 @@ pub async fn update_profile(
         .parse()
         .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
     state.user_service.update_profile(user_id, dto).await?;
-    Ok(AjaxResult::success_msg("修改成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
 /// GET /system/user/
@@ -446,7 +445,7 @@ pub async fn auth_role(
     operator: Operator,
     Query(dto): Query<AssignAuthRoleDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    dto.validate()?;
+    crate::common::i18n::validate(&dto)?;
     // 垂直越权校验（P0-R81-005）：传入 operator_user_id 进行角色层级校验
     let operator_user_id: i64 = operator
         .user_id()
@@ -462,7 +461,7 @@ pub async fn auth_role(
         .user_service
         .assign_user_roles(dto.user_id, role_ids, operator_user_id)
         .await?;
-    Ok(AjaxResult::success_msg("分配角色成功"))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.assign_role")))
 }
 
 /// GET /system/user/deptTree

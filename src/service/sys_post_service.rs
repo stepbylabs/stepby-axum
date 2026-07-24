@@ -7,13 +7,13 @@
 //! - 数据访问通过 Repository 层委托
 //!
 //! garde 示例：
-//! - 模块底部 `TestGardeDto` 使用 garde crate 派生校验宏，作为 validator 的补充示例。
+//! - 模块底部 `TestGardeDto` 为 garde 派生校验宏示例（项目统一使用 garde）。
 
 use futures::future::FutureExt;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use validator::Validate;
+use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
@@ -57,14 +57,15 @@ impl From<&PostQueryDto> for PageDomain {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PostAddDto {
-    #[validate(length(min = 1, max = 64, message = "岗位编码不能为空且不超过64字符"))]
+    #[garde(length(min = 1, max = 64))]
     pub post_code: String,
-    #[validate(length(min = 1, max = 50, message = "岗位名称不能为空且不超过50字符"))]
+    #[garde(length(min = 1, max = 50))]
     pub post_name: String,
-    #[validate(range(min = 0, message = "显示顺序不能为负数"))]
+    #[garde(range(min = 0))]
     pub post_sort: Option<i32>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -72,15 +73,17 @@ pub struct PostAddDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PostEditDto {
+    #[garde(skip)]
     pub post_id: i64,
-    #[validate(length(min = 1, max = 64, message = "岗位编码不能为空且不超过64字符"))]
+    #[garde(length(min = 1, max = 64))]
     pub post_code: String,
-    #[validate(length(min = 1, max = 50, message = "岗位名称不能为空且不超过50字符"))]
+    #[garde(length(min = 1, max = 50))]
     pub post_name: String,
-    #[validate(range(min = 0, message = "显示顺序不能为负数"))]
+    #[garde(range(min = 0))]
     pub post_sort: Option<i32>,
+    #[garde(skip)]
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注长度不能超过500"))]
+    #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
 
@@ -145,7 +148,7 @@ impl SysPostService {
             .post_repo
             .find_active_by_id(post_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("岗位不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.post.not_found")))?;
         Ok(model)
     }
 
@@ -157,12 +160,12 @@ impl SysPostService {
         dto: PostAddDto,
         operator: &str,
     ) -> Result<SysPostModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         // post_code 唯一性校验
         let existing = self.post_repo.find_by_post_code(&dto.post_code).await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request("岗位编码已存在"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.post.code_exists")));
         }
 
         let now = chrono::Local::now().naive_local();
@@ -194,7 +197,7 @@ impl SysPostService {
         dto: PostEditDto,
         operator: &str,
     ) -> Result<SysPostModel, ServiceError> {
-        dto.validate()?;
+        crate::common::i18n::validate(&dto)?;
 
         let existing = self.get_post_by_id(dto.post_id).await?;
 
@@ -203,7 +206,7 @@ impl SysPostService {
         if dto.post_code != old_post_code {
             let conflict = self.post_repo.find_by_post_code(&dto.post_code).await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request("岗位编码已存在"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.post.code_exists")));
             }
         }
 
@@ -253,7 +256,7 @@ impl SysPostService {
                         let existing = post_repo
                             .find_active_by_id_conn(txn, *post_id)
                             .await?
-                            .ok_or_else(|| ServiceError::not_found("岗位不存在"))?;
+                            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.post.not_found")))?;
                         let renamed = format!("{}_deleted_{}", existing.post_code, post_id);
                         post_repo
                             .soft_delete_with_rename_conn(txn, *post_id, renamed)
@@ -268,7 +271,7 @@ impl SysPostService {
                 sea_orm::TransactionError::Transaction(se) => se,
                 sea_orm::TransactionError::Connection(db_err) => {
                     tracing::error!("岗位删除事务连接错误: {}", db_err);
-                    ServiceError::internal("数据库事务失败，请联系管理员")
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
                 }
             })?;
         Ok(())
@@ -295,16 +298,15 @@ impl SysPostService {
 
 /// garde 校验示例 DTO
 ///
-/// 用于演示 garde crate 的派生校验宏用法，作为 validator 的补充。
-/// 与 validator 的差异：
-/// - garde 使用 `#[garde(...)]` 属性，语法更统一
+/// 用于演示 garde crate 的派生校验宏用法（T-01 起项目统一使用 garde）。
+/// - garde 使用 `#[garde(...)]` 属性，语法统一
 /// - garde 原生支持 Option 字段校验（自动跳过 None）
-/// - garde 的 `Validate` trait 与 validator 的 `Validate` trait 不冲突
+/// - 校验统一经 `crate::common::i18n::validate` 调用，错误消息按请求 locale 生成
 ///
 /// 使用示例：
 /// ```ignore
 /// let dto: TestGardeDto = serde_json::from_str(json)?;
-/// dto.validate(&())?;
+/// crate::common::i18n::validate(&dto)?;
 /// ```
 #[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "camelCase")]
