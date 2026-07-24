@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use futures::stream::{self, StreamExt};
 use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
@@ -189,8 +190,8 @@ impl MailerService {
 
     /// 批量发送邮件
     ///
-    /// 逐封发送以避免 SMTP 服务器单连接配额限制，单封失败不影响其他收件人。
-    /// 返回 MailBatchResult 包含成功/失败统计。
+    /// 并行发送以提升吞吐（并发度 5，避免触发 SMTP 服务器并发连接限制），
+    /// 单封失败不影响其他收件人。返回 MailBatchResult 包含成功/失败统计。
     pub async fn send_batch(
         &self,
         to_emails: &[String],
@@ -208,15 +209,32 @@ impl MailerService {
         }
 
         let total = to_emails.len() as u32;
+
+        // 并行发送：buffer_unordered(5) 限制并发度为 5，避免 SMTP 服务器并发连接限制
+        // 每个 future 持有独立的 MailerService 克隆（transporter 内部为 Arc，克隆廉价）
+        let results: Vec<(String, Result<(), ServiceError>)> = stream::iter(to_emails.iter().cloned())
+            .map(|email| {
+                let svc = self.clone();
+                let subject = subject.to_string();
+                let html_body = html_body.to_string();
+                async move {
+                    let res = svc.send(&email, &subject, &html_body).await;
+                    (email, res)
+                }
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await;
+
         let mut success = 0u32;
         let mut failed_emails = Vec::new();
-
-        for email in to_emails {
-            if let Err(e) = self.send(email, subject, html_body).await {
-                tracing::warn!("批量发送邮件失败 to={}: {}", email, e);
-                failed_emails.push(email.clone());
-            } else {
-                success += 1;
+        for (email, res) in results {
+            match res {
+                Ok(()) => success += 1,
+                Err(e) => {
+                    tracing::warn!("批量发送邮件失败 to={}: {}", email, e);
+                    failed_emails.push(email);
+                }
             }
         }
 

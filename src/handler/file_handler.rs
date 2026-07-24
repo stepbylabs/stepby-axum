@@ -226,7 +226,7 @@ pub async fn upload(
     // 生成 UUID 文件名
     let new_filename = crate::common::gen_uuid_filename(ext);
     // 解析上传目录为绝对路径，确保与 ServeDir 服务路径一致
-    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir);
+    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir).await;
     let file_path = common_dir.join(&new_filename);
 
     let size = crate::common::write_upload_file(file_path, &common_dir.to_string_lossy(), &bytes).await?;
