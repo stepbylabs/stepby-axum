@@ -576,32 +576,36 @@ impl SysBackupService {
         // 批量查询所有备份记录（避免循环内 N+1 查询）
         let logs = self.backup_repo.find_by_ids(&ids).await?;
 
-        // 收集需要删除的文件路径（仅 manual/auto 类型，restore 类型不删文件）
-        let backup_dir = PathBuf::from(BACKUP_DIR);
-        let dir_canonical = backup_dir.canonicalize().ok();
-        let mut paths_to_delete: Vec<PathBuf> = Vec::new();
+        // 收集需要删除的原始文件路径（仅 manual/auto 类型，restore 类型不删文件）
+        let mut raw_paths: Vec<PathBuf> = Vec::new();
         for log in &logs {
             if (log.backup_type == "manual" || log.backup_type == "auto")
                 && !log.file_path.is_empty()
             {
-                let path = PathBuf::from(&log.file_path);
-                // 二次校验路径在备份目录内
-                if let Ok(canonical) = path.canonicalize() {
-                    if let Some(ref dir_canonical) = dir_canonical {
-                        if canonical.starts_with(dir_canonical) {
-                            paths_to_delete.push(canonical);
-                        }
-                    }
-                }
+                raw_paths.push(PathBuf::from(&log.file_path));
             }
         }
 
-        // 在 spawn_blocking 中批量删除文件，避免阻塞 Tokio worker
-        if !paths_to_delete.is_empty() {
+        // 在 spawn_blocking 中完成 canonicalize + 路径校验 + 删除，
+        // 避免 canonicalize 同步 IO 阻塞 Tokio worker
+        if !raw_paths.is_empty() {
+            let backup_dir = PathBuf::from(BACKUP_DIR);
             tokio::task::spawn_blocking(move || {
-                for path in &paths_to_delete {
-                    if let Err(e) = std::fs::remove_file(path) {
-                        tracing::warn!("删除备份文件失败 {}: {}", path.display(), e);
+                let dir_canonical = backup_dir.canonicalize().ok();
+                for path in &raw_paths {
+                    // 二次校验路径在备份目录内（canonicalize 在阻塞线程中执行）
+                    if let Ok(canonical) = path.canonicalize() {
+                        if let Some(ref dir_canonical) = dir_canonical {
+                            if canonical.starts_with(dir_canonical) {
+                                if let Err(e) = std::fs::remove_file(&canonical) {
+                                    tracing::warn!(
+                                        "删除备份文件失败 {}: {}",
+                                        canonical.display(),
+                                        e
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             })

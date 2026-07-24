@@ -881,31 +881,53 @@ async fn execute_with_logging(
             // 首次 sleep 一个完整间隔，避免刚获取锁就立即续期
             tokio::time::sleep(Duration::from_secs(LOCK_RENEW_INTERVAL_SECS)).await;
             loop {
-                let mut conn = redis_clone.clone();
-                let renewed = renew_lock(
-                    &mut conn,
-                    &lock_key_clone,
-                    &lock_value_clone,
-                    LOCK_TTL_SECS,
-                )
+                // catch_unwind 捕获单次续期迭代内的 panic，避免 panic 终止续期任务
+                // 导致分布式锁无人续期而过期（参考 add_job/run_once 的 catch_unwind 写法）。
+                // 注意：catch_unwind 放在 loop 体内每次迭代捕获，而非包裹整个 loop，
+                // 这样 panic 后可主动 break 停止续期，避免吞掉 panic 继续空转。
+                let result = AssertUnwindSafe(async {
+                    let mut conn = redis_clone.clone();
+                    renew_lock(
+                        &mut conn,
+                        &lock_key_clone,
+                        &lock_value_clone,
+                        LOCK_TTL_SECS,
+                    )
+                    .await
+                })
+                .catch_unwind()
                 .await;
-                if renewed {
-                    tracing::trace!(
-                        "任务 {} 的分布式锁续期成功 (job_id={})",
-                        job_name_clone,
-                        job_id
-                    );
-                    // 继续下一轮续期
-                    tokio::time::sleep(Duration::from_secs(LOCK_RENEW_INTERVAL_SECS)).await;
-                } else {
-                    tracing::warn!(
-                        "任务 {} 的分布式锁续期失败，锁可能已被其他实例获取 (job_id={})。\
-                         另一实例可能正在重复执行此任务，需运维介入排查",
-                        job_name_clone,
-                        job_id
-                    );
-                    // 锁已丢失，停止续期（继续重试也只会失败）
-                    break;
+
+                match result {
+                    Ok(true) => {
+                        tracing::trace!(
+                            "任务 {} 的分布式锁续期成功 (job_id={})",
+                            job_name_clone,
+                            job_id
+                        );
+                        // 继续下一轮续期
+                        tokio::time::sleep(Duration::from_secs(LOCK_RENEW_INTERVAL_SECS)).await;
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            "任务 {} 的分布式锁续期失败，锁可能已被其他实例获取 (job_id={})。\
+                             另一实例可能正在重复执行此任务，需运维介入排查",
+                            job_name_clone,
+                            job_id
+                        );
+                        // 锁已丢失，停止续期（继续重试也只会失败）
+                        break;
+                    }
+                    Err(panic_err) => {
+                        tracing::error!(
+                            "分布式锁续期任务 panic: job_id={}, job_name={}, panic={:?}",
+                            job_id,
+                            job_name_clone,
+                            panic_err
+                        );
+                        // panic 后无法确定锁状态，停止续期
+                        break;
+                    }
                 }
             }
         })

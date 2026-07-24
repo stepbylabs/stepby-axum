@@ -504,7 +504,7 @@ pub async fn download(
 
     let upload_cfg = &state.config.upload;
     // 解析上传目录为绝对路径，确保与 ServeDir 服务路径一致
-    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir);
+    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir).await;
     let file_path = common_dir.join(file_name);
 
     // 读取文件内容（同步 IO 放到 spawn_blocking）
@@ -577,9 +577,9 @@ pub async fn download_resource(
 
     // 规范化路径二次校验：canonicalize 后必须仍以 uploads/ 开头
     let path = std::path::Path::new(resource);
-    let canonical = path.canonicalize().map_err(|_| {
-        AppError::not_found("资源不存在")
-    })?;
+    let canonical = tokio::fs::canonicalize(path)
+        .await
+        .map_err(|_| AppError::not_found("资源不存在"))?;
     let canonical_str = canonical.to_string_lossy();
     // 跨平台兼容：Windows 下 canonicalize 返回 `\\?\D:\...\uploads\...`
     if !canonical_str.replace('\\', "/").contains("uploads/") {

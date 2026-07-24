@@ -573,7 +573,7 @@ pub async fn avatar_upload(
     // 生成唯一文件名
     let filename = crate::common::gen_uuid_filename(&ext);
     // 解析上传目录为绝对路径，确保与 ServeDir 服务路径一致
-    let avatar_dir = crate::common::resolve_upload_dir(&upload_cfg.avatar_dir);
+    let avatar_dir = crate::common::resolve_upload_dir(&upload_cfg.avatar_dir).await;
     let file_path = avatar_dir.join(&filename);
 
     // 写入文件系统（公共函数封装了 spawn_blocking + create_dir_all + write）

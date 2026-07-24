@@ -81,7 +81,10 @@ pub fn resolve_upload_root(upload_config: &crate::config::UploadConfig) -> PathB
 /// # 返回
 /// - 绝对路径：直接返回
 /// - 相对路径：使用与 `resolve_upload_root` 相同的候选逻辑解析
-pub fn resolve_upload_dir(dir: &str) -> PathBuf {
+///
+/// 注：`std::env::current_dir` / `current_exe` 为进程级查询（无 async 等价物且极快），
+/// 文件系统 IO（exists / create_dir_all）使用 `tokio::fs` 异步执行，避免阻塞 worker。
+pub async fn resolve_upload_dir(dir: &str) -> PathBuf {
     let dir_path = PathBuf::from(dir);
 
     // 绝对路径直接返回
@@ -121,16 +124,16 @@ pub fn resolve_upload_dir(dir: &str) -> PathBuf {
         }
     }
 
-    // 返回第一个存在的候选目录 + 子目录
+    // 返回第一个存在的候选目录 + 子目录（异步 exists 检查，避免阻塞 worker）
     for candidate in &candidates {
-        if candidate.exists() {
+        if tokio::fs::metadata(candidate).await.is_ok() {
             return candidate.join(&subdir);
         }
     }
 
     // 兜底：创建 CWD + root 并返回 CWD + root + subdir
     if let Some(fallback) = candidates.first() {
-        std::fs::create_dir_all(fallback).ok();
+        tokio::fs::create_dir_all(fallback).await.ok();
         return fallback.join(&subdir);
     }
     dir_path
