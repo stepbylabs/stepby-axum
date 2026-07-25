@@ -1625,19 +1625,21 @@ const INDEX_VUE_TEMPLATE: &str = r#"<template>
   <div class="app-container">
     <el-row :gutter="20" class="mb8">
       <el-col :span="1.5">
-        <el-button type="primary" plain icon="Plus" @click="handleAdd">新增</el-button>
+        <el-button type="primary" plain icon="Plus" class="transition-all duration-200 hover:scale-105" @click="handleAdd">新增</el-button>
       </el-col>
     </el-row>
 
-    <el-table v-loading="loading" :data="list">
+    <Transition name="fade" mode="out-in">
+      <el-table v-loading="loading" :data="list" :row-key="(row) => row.{{ pk_column.javaField | camel_case }}">
 {% for col in columns %}{% if col.isList == "1" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.javaField | camel_case }}" />
 {% endif %}{% endfor %}      <el-table-column label="操作" width="180">
         <template #default="scope">
-          <el-button type="primary" link icon="Edit" @click="handleEdit(scope.row)">修改</el-button>
-          <el-button type="danger" link icon="Delete" @click="handleDelete(scope.row)">删除</el-button>
+          <el-button type="primary" link icon="Edit" class="transition-all duration-200 hover:scale-105" @click="handleEdit(scope.row)">修改</el-button>
+          <el-button type="danger" link icon="Delete" class="transition-all duration-200 hover:scale-105" @click="handleDelete(scope.row)">删除</el-button>
         </template>
       </el-table-column>
-    </el-table>
+      </el-table>
+    </Transition>
 
     <!-- 新增/修改对话框 -->
     <el-dialog :title="dialog.title" v-model="dialog.visible" width="min(90%, 600px)" destroy-on-close>
