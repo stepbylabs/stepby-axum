@@ -27,6 +27,9 @@ pub use m20260731_000001_fix_menu_order_and_icons::Migration as M20260731FixMenu
 pub use m20260801_000001_remove_druid_menu::Migration as M20260801RemoveDruidMenu;
 pub use m20260801_000002_register_dashboard_menu::Migration as M20260801RegisterDashboardMenu;
 pub use m20260801_000003_fix_missing_menu_i18n_key::Migration as M20260801FixMissingMenuI18nKey;
+pub use m20260802_000001_merge_server_to_health::Migration as M20260802MergeServerToHealth;
+pub use m20260802_000002_merge_cache_list_to_cache::Migration as M20260802MergeCacheListToCache;
+pub use m20260802_000003_merge_session_login_menus::Migration as M20260802MergeSessionLoginMenus;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -53,6 +56,9 @@ mod m20260731_000001_fix_menu_order_and_icons;
 mod m20260801_000001_remove_druid_menu;
 mod m20260801_000002_register_dashboard_menu;
 mod m20260801_000003_fix_missing_menu_i18n_key;
+mod m20260802_000001_merge_server_to_health;
+mod m20260802_000002_merge_cache_list_to_cache;
+mod m20260802_000003_merge_session_login_menus;
 
 use sea_orm_migration::prelude::*;
 
@@ -88,6 +94,9 @@ impl MigratorTrait for Migrator {
             Box::new(M20260801RemoveDruidMenu),
             Box::new(M20260801RegisterDashboardMenu),
             Box::new(M20260801FixMissingMenuI18nKey),
+            Box::new(M20260802MergeServerToHealth),
+            Box::new(M20260802MergeCacheListToCache),
+            Box::new(M20260802MergeSessionLoginMenus),
         ]
     }
 }
