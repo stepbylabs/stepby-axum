@@ -26,8 +26,8 @@ use crate::entity::sys_logininfor;
 use crate::entity::sys_menu::Model as SysMenuModel;
 use crate::entity::sys_user::Model as SysUserModel;
 use crate::jwt::JwtUtils;
-use crate::repository::sys_config::SysConfigRepository;
 use crate::repository::sys_logininfor::SysLogininforRepository;
+use crate::service::sys_config_service::SysConfigService;
 use crate::service::sys_menu_service::SysMenuService;
 use crate::service::sys_role_service::SysRoleService;
 use crate::service::sys_user_service::{SysUserService, UserAddDto};
@@ -43,7 +43,10 @@ const MAX_LOGIN_FAIL_COUNT: i64 = 5;
 /// 登录失败计数 TTL（秒，5 分钟）
 const LOGIN_FAIL_TTL: i64 = 300;
 /// 同 IP 登录尝试上限（1 分钟窗口）
-const MAX_LOGIN_IP_COUNT: i64 = 10;
+///
+/// L-4：从 10 提升至 20，避免企业 NAT/校园网出口 IP 共享场景下正常用户被误限流。
+/// 单 IP 仍受令牌桶中间件 + Redis 失败计数双重约束，提升上限不会显著放宽暴力破解防护。
+const MAX_LOGIN_IP_COUNT: i64 = 20;
 /// IP 限流计数 TTL（秒，1 分钟）
 const LOGIN_IP_TTL: i64 = 60;
 
@@ -205,13 +208,13 @@ pub struct LoginContext<'a> {
 /// - role_service: 角色 key 查询（getInfo）
 /// - menu_service: 菜单树/权限查询（getInfo、getRouters）
 /// - logininfor_repo: 登录日志写入
-/// - config_repo: 参数配置查询（验证码开关等）
+/// - config_service: 参数配置查询（验证码开关等，H-4 走 Redis cache-aside 缓存）
 pub struct AuthService {
     user_service: SysUserService,
     role_service: SysRoleService,
     menu_service: SysMenuService,
     logininfor_repo: SysLogininforRepository,
-    config_repo: SysConfigRepository,
+    config_service: SysConfigService,
 }
 
 impl AuthService {
@@ -225,45 +228,43 @@ impl AuthService {
         role_service: SysRoleService,
         menu_service: SysMenuService,
         logininfor_repo: SysLogininforRepository,
-        config_repo: SysConfigRepository,
+        config_service: SysConfigService,
     ) -> Self {
         Self {
             user_service,
             role_service,
             menu_service,
             logininfor_repo,
-            config_repo,
+            config_service,
         }
     }
 
     /// 读取验证码开关（sys_config.sys.account.captchaEnabled）
+    ///
+    /// H-4：通过 SysConfigService 的 Redis cache-aside 缓存读取，减少登录流程 DB 查询。
     ///
     /// 返回规则：
     /// - 配置不存在或读取失败：默认 true（安全失败，偏向开启验证码）
     /// - 配置值为 "false"（不区分大小写）：返回 false
     /// - 其他值：返回 true
     async fn is_captcha_enabled(&self) -> bool {
-        match self.config_repo.find_by_config_key("sys.account.captchaEnabled").await {
-            Ok(Some(model)) => {
-                let val = model.config_value.unwrap_or_default();
-                !val.eq_ignore_ascii_case("false")
-            }
+        match self.config_service.get_config_value_by_key_cached("sys.account.captchaEnabled").await {
+            Ok(Some(val)) => !val.eq_ignore_ascii_case("false"),
             _ => true,
         }
     }
 
     /// 读取注册开关（sys_config.sys.account.registerUser）
     ///
+    /// H-4：通过 SysConfigService 的 Redis cache-aside 缓存读取，减少注册流程 DB 查询。
+    ///
     /// 返回规则（P0-R12-001）：
     /// - 配置不存在或读取失败：默认 false（安全失败：配置缺失时禁止注册）
     /// - 配置值为 "true"（不区分大小写）：返回 true
     /// - 其他值：返回 false
     async fn is_register_enabled(&self) -> bool {
-        match self.config_repo.find_by_config_key("sys.account.registerUser").await {
-            Ok(Some(model)) => {
-                let val = model.config_value.unwrap_or_default();
-                val.eq_ignore_ascii_case("true")
-            }
+        match self.config_service.get_config_value_by_key_cached("sys.account.registerUser").await {
+            Ok(Some(val)) => val.eq_ignore_ascii_case("true"),
             _ => false,
         }
     }
@@ -360,15 +361,20 @@ impl AuthService {
             os: &os,
         };
 
-        // 1. IP 限流校验
-        self.check_rate_limit(redis, &ctx).await?;
-
-        // 2. 用户失败次数校验
-        self.check_fail_count(redis, &ctx).await?;
-
-        // 3. 验证码校验（GETDEL 原子化，防重放攻击）
+        // L-2：调整执行顺序为 captcha → rate_limit → fail_count → verify。
+        // 原顺序（rate_limit → fail_count → captcha → verify）存在两个问题：
+        // 1. 验证码放在限流之后，攻击者可消耗 IP 限流额度后才被验证码拦截，浪费限流配额
+        // 2. 验证码 GETDEL 是幂等消耗操作，应在更早阶段拦截明显错误的请求
+        // 新顺序：先验证码（无 Redis 计数副作用），再限流（IP/用户计数），最后密码校验
+        // 1. 验证码校验（GETDEL 原子化，防重放攻击）
         self.verify_captcha(redis, &ctx, &dto.uuid, &dto.code)
             .await?;
+
+        // 2. IP 限流校验
+        self.check_rate_limit(redis, &ctx).await?;
+
+        // 3. 用户失败次数校验
+        self.check_fail_count(redis, &ctx).await?;
 
         // 4. 用户查询 + 状态校验 + 密码校验（返回 verify_result 以避免重复 Argon2 verify）
         let (user, verify_result) = self
@@ -403,7 +409,7 @@ impl AuthService {
                 ServiceError::new(503, &crate::tr!("error.auth.auth_unavailable"))
             })?;
         if ip_count > MAX_LOGIN_IP_COUNT {
-            self.write_login_log(ctx, "1", "IP 请求频率超限")
+            self.write_login_log(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"))
                 .await?;
             return Err(ServiceError::new(429, &crate::tr!("error.auth.rate_limited")));
         }
@@ -430,7 +436,7 @@ impl AuthService {
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
-            self.write_login_log(ctx, "1", "密码错误次数过多")
+            self.write_login_log(ctx, "1", &crate::tr!("log.auth.password_locked"))
                 .await?;
             return Err(ServiceError::new(429, &crate::tr!("error.auth.password_locked")));
         }
@@ -442,6 +448,10 @@ impl AuthService {
     /// 若 sys.account.captchaEnabled=false，则跳过验证码校验。
     /// captcha key 绑定 IP：captcha:{uuid}:{ip}，防止跨 IP 重放。
     /// 失败时写入登录日志并返回错误。
+    ///
+    /// M-6：区分 Redis 错误（fail-closed 返回 503）和 key 不存在（返回 captcha_expired）。
+    /// 原实现用 `.ok().flatten()` 静默吞掉 Redis 错误，导致 Redis 故障时所有验证码均被
+    /// 判定为"已过期"，既掩盖了基础设施故障，又误伤了正常用户。
     async fn verify_captcha(
         &self,
         redis: &mut redis::aio::ConnectionManager,
@@ -451,23 +461,34 @@ impl AuthService {
     ) -> Result<(), ServiceError> {
         if self.is_captcha_enabled().await {
             let captcha_key = format!("captcha:{}:{}", uuid, ctx.login_ip);
-            let stored_code: Option<String> = redis::cmd("GETDEL")
+            // M-6：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
+            let stored_code: Option<String> = match redis::cmd("GETDEL")
                 .arg(&captcha_key)
                 .query_async(redis)
                 .await
-                .ok()
-                .flatten();
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
+                    return Err(ServiceError::new(
+                        503,
+                        &crate::tr!("error.auth.auth_unavailable"),
+                    ));
+                }
+            };
 
             let stored = match stored_code {
                 Some(c) => c,
                 None => {
-                    self.write_login_log(ctx, "1", "验证码错误").await?;
+                    self.write_login_log(ctx, "1", &crate::tr!("log.auth.captcha_expired"))
+                        .await?;
                     return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_expired")));
                 }
             };
 
             if stored.to_lowercase() != code.to_lowercase() {
-                self.write_login_log(ctx, "1", "验证码错误").await?;
+                self.write_login_log(ctx, "1", &crate::tr!("log.auth.captcha_wrong"))
+                    .await?;
                 return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_wrong")));
             }
         }
@@ -477,39 +498,44 @@ impl AuthService {
     /// 用户查询 + 状态校验 + 密码校验
     ///
     /// 流程：
-    /// 1. 用户查询（不存在则记录失败次数 + 写日志 + 返回错误）
-    /// 2. 状态校验（del_flag / status）
+    /// 1. 用户查询（不存在则写日志 + 返回错误；H-2：Repository 已过滤 del_flag，无需重复判断）
+    /// 2. status 校验（账号停用）
     /// 3. 密码校验（支持 MD5→Argon2 自动升级提示；不匹配则记录失败次数 + 写日志 + 返回错误）
     ///
     /// 返回 (user, verify_result)：verify_result 携带 needs_upgrade 标志，供 upgrade_password_if_needed 复用，
     /// 避免重复执行 Argon2 verify（每次约 50ms）。
     ///
     /// 安全说明：密码错误时返回"用户不存在/密码错误"，避免枚举攻击。
+    ///
+    /// H-2：Repository 层 `find_active_by_user_name` 已过滤 del_flag='0'，故删除原
+    /// `del_flag == "2"` 检查。已删除用户会以 None 返回，与"用户不存在"走同一分支。
+    ///
+    /// L-1：用户不存在时不再调用 `record_login_failure`。原实现对任意用户名均计数，
+    /// 攻击者可枚举不存在用户名将真实用户失败计数顶满导致其被锁；同时不存在的用户
+    /// 也无对应密码，本就不会通过密码校验，无需计数。
     async fn verify_user_credentials(
         &self,
         ctx: &LoginContext<'_>,
         password: &str,
         redis: &mut redis::aio::ConnectionManager,
     ) -> Result<(SysUserModel, PasswordVerifyResult), ServiceError> {
-        // 1. 用户查询
-        let user = match self.user_service.get_user_by_username(ctx.username).await? {
+        // 1. 用户查询（H-2：Repository 已过滤 del_flag='0'，已删除用户以 None 返回）
+        let user = match self.user_service.get_active_user_by_username(ctx.username).await? {
             Some(u) => u,
             None => {
-                self.record_login_failure(ctx.username, redis).await?;
-                self.write_login_log(ctx, "1", "用户不存在/密码错误")
+                // L-1：用户不存在时不计数（避免无效用户名污染失败计数导致真实用户被锁）
+                self.write_login_log(ctx, "1", &crate::tr!("log.auth.login_failed"))
                     .await?;
                 return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
             }
         };
 
-        // 2. 用户状态校验
-        if user.del_flag.as_deref() == Some("2") {
-            self.write_login_log(ctx, "1", "账号已删除").await?;
-            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.account_deleted")));
-        }
+        // 2. 用户状态校验（H-2：del_flag 已在 Repository 过滤，此处仅校验 status）
+        // C-1：账号停用统一返回 login_failed，避免攻击者通过差异错误消息枚举有效用户名。
+        // 细分原因仅写入 sys_logininfor 日志（不返回客户端），供管理员审计。
         if user.status.as_deref() == Some("1") {
-            self.write_login_log(ctx, "1", "账号已停用").await?;
-            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.account_disabled")));
+            self.write_login_log(ctx, "1", &crate::tr!("log.auth.account_disabled")).await?;
+            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
         }
 
         // 3. 密码校验（支持 MD5→Argon2 自动升级）
@@ -526,7 +552,7 @@ impl AuthService {
         })?;
         if !verify_result.is_valid {
             self.record_login_failure(ctx.username, redis).await?;
-            self.write_login_log(ctx, "1", "用户不存在/密码错误")
+            self.write_login_log(ctx, "1", &crate::tr!("log.auth.login_failed"))
                 .await?;
             return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
         }
@@ -595,14 +621,15 @@ impl AuthService {
         jwt_config: &JwtConfig,
         ctx: &LoginContext<'_>,
     ) -> Result<LoginVo, ServiceError> {
-        // 1. JWT 签发
+        // 1. JWT 签发（M-7：generate_token 同时返回 claims，避免后续重复 verify）
         let user_id = user.user_id.to_string();
-        let token = JwtUtils::generate_token(&user_id, ctx.username, jwt_config)?;
+        let (token, claims) = JwtUtils::generate_token(&user_id, ctx.username, jwt_config)?;
 
         // 2. 登录日志写入（成功），并获取 info_id
         //    info_id 仍保留用于登录日志关联，但不再作为 online key
+        //    H-3：日志消息改用 tr!("log.auth.login_success") 支持多语言
         let _info_id = self
-            .write_login_log(ctx, "0", "登录成功")
+            .write_login_log(ctx, "0", &crate::tr!("log.auth.login_success"))
             .await?;
 
         // 3. 存储 `online:{token_hash}` → `OnlineSession` JSON，用于在线用户列表与强退
@@ -614,8 +641,7 @@ impl AuthService {
         let token_hash = crate::utils::crypto::token_hash(&token);
         let online_key = format!("online:{}", token_hash);
         let online_ttl = jwt_config.expire_hours * SECS_PER_HOUR;
-        // 获取 jti：刚签发的 token，verify 必然成功（exp = now + expire_hours，不会立即过期）
-        let claims = JwtUtils::verify_token(&token, jwt_config)?;
+        // M-7：claims 已由 generate_token 返回，无需 verify_token 重新解码
         // 查询用户部门名称（失败时填空字符串，不阻断登录）
         // 复用 user_service 的 dept 查询能力，避免 AuthService 直接依赖 SysDeptRepository
         let dept_name = self
@@ -636,19 +662,6 @@ impl AuthService {
             dept_name,
         };
         let session_json = serde_json::to_string(&session)?;
-        let _: () = redis::cmd("SETEX")
-            .arg(&online_key)
-            .arg(online_ttl)
-            .arg(&session_json)
-            .query_async(redis)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "写入 online:{} 失败（不阻断登录，仅影响在线列表展示）: {}",
-                    token_hash,
-                    e
-                );
-            });
 
         // 3.5 同用户同 IP+Browser 旧会话清理（P1-ONLINE-DEDUP）
         //   问题：原实现每次登录都创建新的 online:{token_hash} key，TTL=JWT 有效期，
@@ -667,61 +680,68 @@ impl AuthService {
             "user_sessions:{}:{}:{}",
             user.user_id, ctx.login_ip, normalized_browser
         );
-        // GET 旧 token_hash（如有）
+
+        // M-5：将原 5 次独立 Redis 往返（SETEX online / GET user_sessions / DEL old_online
+        //   / SETEX user_sessions / DEL login_fail）合并为 2 次：
+        //   1) 单独 GET user_sessions（需要结果判断是否 DEL 旧 online key）
+        //   2) pipeline 批量执行 4 个写操作（SETEX online / 条件 DEL old_online / SETEX
+        //      user_sessions / DEL login_fail），单次网络往返
+        // GET 旧 token_hash（如有）——单独执行，因后续 pipeline 中条件 DEL 依赖其结果
         let old_token_hash_opt: Option<String> = redis::cmd("GET")
             .arg(&user_session_key)
             .query_async(redis)
             .await
             .unwrap_or(None);
-        if let Some(old_token_hash) = old_token_hash_opt
-            && old_token_hash != token_hash
+        let need_del_old = match old_token_hash_opt.as_ref() {
+            Some(old) if old != &token_hash => {
+                tracing::info!(
+                    "用户 {} 在相同浏览器(IP={})重复登录，将清理旧会话 {}",
+                    ctx.username,
+                    ctx.login_ip,
+                    old
+                );
+                true
+            }
+            _ => false,
+        };
+        let old_online_key = old_token_hash_opt
+            .as_ref()
+            .filter(|old| *old != &token_hash)
+            .map(|old| format!("online:{}", old));
+
+        // 构造 pipeline：4 个写操作合并为单次网络往返
+        let mut pipe = redis::pipe();
+        // (a) SETEX online:{token_hash} session_json (TTL=online_ttl)
+        pipe.cmd("SETEX")
+            .arg(&online_key)
+            .arg(online_ttl)
+            .arg(&session_json);
+        // (b) 若旧 token_hash 存在且与新不同，DEL 旧 online key
+        if need_del_old
+            && let Some(ref old_key) = old_online_key
         {
-            let old_online_key = format!("online:{}", old_token_hash);
-            let _: () = redis::cmd("DEL")
-                .arg(&old_online_key)
-                .query_async(redis)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "清理同用户同浏览器旧会话 online:{} 失败（不阻断登录）: {}",
-                        old_token_hash,
-                        e
-                    );
-                });
-            tracing::info!(
-                "用户 {} 在相同浏览器(IP={})重复登录，已清理旧会话 {}",
-                ctx.username,
-                ctx.login_ip,
-                old_token_hash
-            );
+            pipe.cmd("DEL").arg(old_key);
         }
-        // SET 新 token_hash 到 user_session_key（TTL 与 online key 对齐）
-        let _: () = redis::cmd("SETEX")
+        // (c) SETEX user_sessions:{...} token_hash (TTL=online_ttl)
+        pipe.cmd("SETEX")
             .arg(&user_session_key)
             .arg(online_ttl)
-            .arg(&token_hash)
-            .query_async(redis)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "写入 {} 失败（不阻断登录，仅影响旧会话去重）: {}",
-                    user_session_key,
-                    e
-                );
-            });
+            .arg(&token_hash);
+        // (d) DEL login_fail:{username}（清除失败计数）
+        let fail_key = format!("login_fail:{}", ctx.username);
+        pipe.cmd("DEL").arg(&fail_key);
+        // pipeline 整体执行（best-effort：任一命令失败仅记日志，不阻断登录）
+        if let Err(e) = pipe.query_async::<Vec<i64>>(redis).await {
+            tracing::warn!(
+                "finalize_login pipeline 部分失败（不阻断登录，仅影响在线列表/会话去重/失败计数）: {}",
+                e
+            );
+        }
 
         // 4. 更新 login_ip / login_date（失败不阻断登录）
         if let Err(e) = self.user_service.update_login_info(user.user_id, ctx.login_ip).await {
             tracing::warn!("更新用户登录信息失败（不阻断登录）: {}", e);
         }
-
-        // 5. 清除登录失败计数
-        let fail_key = format!("login_fail:{}", ctx.username);
-        let _: () = redis::cmd("DEL")
-            .arg(&fail_key)
-            .query_async(redis)
-            .await
-            .unwrap_or(());
 
         Ok(LoginVo { token })
     }
@@ -789,8 +809,11 @@ impl AuthService {
         //   该 key 由 finalize_login 写入，用于同用户同浏览器重复登录时清理旧会话。
         //   logout 时不一定能精确知道原 IP/Browser（claims 中无此信息），故尝试删除所有匹配 user_sessions:{user_id}:* 的 key。
         //   失败不阻断 logout。
+        //
+        //   H-1：scan_keys 改用 utils::redis::scan_keys（返回 ServiceError），
+        //   避免原实现中 Service 反向调用 Handler 层（架构违规）。
         let user_session_pattern = format!("user_sessions:{}:*", claims.sub);
-        if let Ok(keys) = crate::handler::monitor_cache_handler::scan_keys(redis, &user_session_pattern).await
+        if let Ok(keys) = crate::utils::redis::scan_keys(redis, &user_session_pattern).await
             && !keys.is_empty()
         {
             // 批量 DEL（pipeline 单次往返，替代循环 N 次 DEL）
@@ -1026,6 +1049,11 @@ impl AuthService {
 /// 注意：Edge 判断必须在 Chrome 之前（Edge UA 含 "Chrome" 字符串）。
 /// 现代 Edge（Chromium 内核）UA 使用 "Edg/"，旧版 Edge 使用 "Edge/"，
 /// 统一用 "Edg" 子串匹配覆盖两者。
+///
+/// L-5 已知限制（低优先级，保留现状）：
+/// - 仅做子串匹配，无法识别版本号、引擎分支、移动端浏览器（如 Chrome Mobile / Samsung Internet / Opera）
+/// - UA 伪装场景下结果不准确（curl/Postman 自定义 UA 会被归类为 Unknown 或误判）
+/// - 仅用于登录日志展示，不影响鉴权安全；如需精确解析请引入 `ua-parser` 等专门 crate
 fn parse_browser(ua: &str) -> String {
     if ua.contains("Edg") {
         "Edge".to_string()
@@ -1043,6 +1071,11 @@ fn parse_browser(ua: &str) -> String {
 /// 从 User-Agent 简单提取操作系统名称
 ///
 /// 注意：iPhone/iPad UA 含 "Mac OS" 字符串，iOS 判断必须在 macOS 之前。
+///
+/// L-5 已知限制（低优先级，保留现状）：
+/// - 无法区分 Windows 10 / 11、macOS 各版本、Android 各版本
+/// - 无法识别 HarmonyOS、ChromeOS、各类 Linux 发行版
+/// - 仅用于登录日志展示，不影响鉴权安全
 fn parse_os(ua: &str) -> String {
     if ua.contains("Windows") {
         "Windows".to_string()

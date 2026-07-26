@@ -2,7 +2,7 @@
 
 > **阶段：** 第一阶段「工程脚手架与基础框架」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
-> **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
+> **规则基线：** 项目规则基线见根目录 `README.md` 与 `SECURITY.md`；Trae IDE 规则文件 `axum-backend/.trae/rules/project-rules.md`（IDE 内自动加载，非项目文档）
 > **参考优先级：** 接口契约对齐 ref-salvo-admin / ruoyi-vue3-ts ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
 
 ---
@@ -66,33 +66,45 @@
 
 ### 2.1 核心依赖清单（主 crate `axum-backend`）
 
+> **edition：** 主 crate `Cargo.toml` 使用 `edition = "2024"`（需 Rust 1.85+，支持 let-chains 等稳定语法）。
+
 | 依赖 | 版本 | features | 用途 |
 |------|------|----------|------|
-| **axum** | `0.8` | `macros` | Web 框架 |
+| **axum** | `0.8` | `macros, multipart, ws` | Web 框架 |
 | axum-extra | `0.12` | `typed-header` | Authorization Bearer typed header |
-| **sea-orm** | `1.1` | `runtime-tokio-rustls, sqlx-mysql, macros, with-chrono, debug-print` | ORM |
-| **tokio** | `1` | `rt-multi-thread, macros, signal` | 异步运行时 |
-| **jsonwebtoken** | `10` | - | JWT 生成与验证 |
+| **sea-orm** | `1.1` | `runtime-tokio-rustls, sqlx-mysql, sqlx-postgres, sqlx-sqlite, macros, with-chrono` | ORM（多数据库支持） |
+| **tokio** | `1` | `rt-multi-thread, macros, signal, process, io-util, time` | 异步运行时 |
+| **jsonwebtoken** | `10` | `rust_crypto` | JWT 生成与验证 |
 | tower | `0.5` | - | 中间件基础 |
-| tower-http | `0.7` | `cors, trace, compression-gzip` | HTTP 中间件 |
+| tower-http | `0.7` | `cors, trace, compression-gzip, fs, timeout` | HTTP 中间件 |
 | serde | `1` | `derive` | 序列化框架 |
 | serde_json | `1` | - | JSON 处理 |
 | tracing | `0.1` | - | 分布式追踪 |
-| tracing-subscriber | `0.3` | `env-filter, fmt` | 日志订阅者 |
+| tracing-subscriber | `0.3` | `env-filter, fmt, json` | 日志订阅者 |
+| tracing-appender | `0.2` | - | 日志文件按日轮转 |
 | chrono | `0.4` | `serde` | 时间处理 |
 | uuid | `1` | `v4` | UUID 生成（请求 ID / 验证码 key） |
 | anyhow | `1` | - | 通用错误处理 |
-| toml | `0.8` | - | 配置文件解析 |
-| redis | `1.3` | `tokio-comp` | Redis 客户端（token/captcha 缓存） |
-| md-5 | `0.11` | - | 密码加盐 MD5（对齐 ref-salvo-admin） |
-| validator | `0.20` | `derive` | 参数校验 |
+| thiserror | `2` | - | 自定义错误类型派生 `std::error::Error` / `Display` |
+| toml | `1` | - | 配置文件解析 |
+| redis | `1.3` | `tokio-comp, connection-manager` | Redis 客户端（token/captcha 缓存） |
+| **argon2** | `0.5` | - | 密码哈希主算法（Argon2id + 随机盐） |
+| md-5 | `0.10` | - | 旧密码哈希验证 fallback（兼容历史数据，不用于新密码） |
+| sha2 | `0.10` | - | SHA-256 摘要（校验和等用途） |
+| **garde** | `0.23` | `full` | 参数校验（T-01 迁移后替代 validator，0.23 起内置 i18n 模块） |
 | captcha | `1.0` | - | 验证码图片生成 |
+| rust-i18n | `3` | - | 国际化（编译期嵌入 locales/*.yml，T-05） |
+| dotenvy | `0.15` | - | `.env` 环境变量加载 |
+| async-trait | `0.1` | - | 异步 trait 宏（SeaORM ActiveModelBehavior） |
+| futures | `0.3` | - | 异步 Future 工具（事务闭包 boxed()） |
+| regex | `1` | - | 正则表达式（手机号格式校验、XSS 净化） |
 
-> **依赖精简说明：**
-> - 移除 `base64`：captcha 1.0 的 `as_base64()` 直接返回 Base64 字符串，无需手动编码
-> - 移除 `once_cell`：采用 Axum `State<Arc<AppState>>` 注入，无需全局静态延迟初始化
-> - 移除 `thiserror`：`AppError` 手写实现（更灵活控制 `IntoResponse`），未用 derive 宏
-> - 移除 `rand`：验证码 RNG 由 captcha crate 内部管理，主 crate 无直接调用
+> **依赖演进说明：**
+> - `validator 0.20` 已于 T-01 迁移至 `garde 0.23`（garde 0.23 起内置 `garde::i18n` 模块用于校验错误消息本地化）
+> - `thiserror` 已重新引入（版本 `2`），用于自定义错误类型自动派生 `std::error::Error` 和 `Display`，原"移除 thiserror"的说明作废
+> - `md-5` 版本由 0.11 校正为 0.10（与 Cargo.toml 实际版本一致），仅保留作为旧哈希验证 fallback
+> - `toml` 版本由 0.8 升至 1
+> - 完整依赖清单（含 tokio-cron-scheduler/utoipa/maxminddb/lettre/rust-embed/totp-rs 等业务模块依赖）见 `axum-backend/Cargo.toml`
 
 ### 2.2 migration 子 crate 依赖
 
@@ -110,8 +122,9 @@
 - **redis 1.3**（最新稳定 1.3.0）：1.0 为里程碑版本，`ConnectionManager` API 保持兼容，`tokio-comp` feature 启用 tokio 运行时支持。
 - **captcha 1.0**（最新稳定 1.0.0）：API 完全重写，新增 `generate(Difficulty)` 便捷函数、`view(width, height)` 尺寸参数、`as_png()` 返回 `Option<Vec<u8>>`，`Noise::new(strength)` 需要强度参数。
 - **axum-extra 0.12**（最新稳定 0.12.6）：匹配 axum 0.8，`TypedHeader` extractor API 保持兼容。
-- **md-5 0.11**（最新稳定 0.11.0）：`Md5`/`Digest` trait API 兼容 0.10。
-- **validator 0.20**（最新稳定 0.20.0）：`derive` 宏 API 兼容。
+- **argon2 0.5**：密码哈希主算法（Argon2id），`Argon2::default()` + `SaltString::generate(&mut OsRng)` 生成带随机盐的 PHC 字符串。
+- **md-5 0.10**：`Md5`/`Digest` trait API，仅保留作为旧哈希验证 fallback（兼容历史数据，不用于新密码加密）。
+- **garde 0.23**（T-01 迁移后替代 validator 0.20）：`#[garde(...)]` 派生宏 API，0.23 起内置 `garde::i18n` 模块用于校验错误消息本地化。
 
 ---
 
@@ -179,7 +192,7 @@ axum-backend/
 │   │
 │   ├── utils/                      # 【通用工具】
 │   │   ├── mod.rs
-│   │   ├── password.rs             # 密码加盐 MD5（对齐 ref-salvo-admin）
+│   │   ├── password.rs             # 密码哈希（Argon2id + 旧 MD5 兼容验证）
 │   │   ├── captcha.rs              # 验证码生成（base64 + uuid）
 │   │   └── tree.rs                 # 通用树构建工具
 │   │
@@ -387,7 +400,7 @@ pub struct RedisConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct JwtConfig {
     pub secret: String,
-    pub expire_hours: i64,        // 对齐 ref-salvo-admin 的 6 小时
+    pub expire_hours: i64,        // yebot 默认 24 小时
     pub issuer: String,
 }
 
@@ -421,7 +434,7 @@ max_connections = 10
 
 [jwt]
 secret = "axum-backend-secret-key-change-in-production"
-expire_hours = 6
+expire_hours = 24
 issuer = "axum-backend"
 
 [log]
@@ -621,26 +634,99 @@ pub struct AppState {
 }
 ```
 
-### 4.10 密码工具（对齐 ref-salvo-admin）
+### 4.10 密码工具（Argon2id + 旧 MD5 兼容验证）
+
+> **安全约束（与 `SECURITY.md` 一致）：** 密码使用 Argon2id 加盐哈希存储，禁用明文/可逆加密；MD5 仅作为旧哈希验证 fallback，用于兼容历史数据，新密码一律走 Argon2id。
+
+#### 4.10.1 算法选型
+
+| 算法 | 用途 | 说明 |
+|------|------|------|
+| **Argon2id** | 主算法（新密码加密与验证） | 2024 年密码哈希竞赛推荐，抗 GPU/ASIC 暴力破解；每用户独立随机盐（`SaltString::generate(&mut OsRng)`） |
+| MD5 + 固定盐值 | 旧哈希验证 fallback（仅兼容历史数据） | 旧哈希格式为 32 位 hex（MD5 摘要），盐值常量 `LEGACY_SALT = "yebot_admin"`；不用于新密码加密 |
+
+> **关键约束：** 旧 MD5 仅保留 `verify_legacy_md5` 一处使用点，禁止用于 `encrypt_password`。验证旧 MD5 哈希成功后，调用方应通过 `verify_password_with_upgrade_hint` 返回的 `needs_upgrade` 提示，将密码重新用 Argon2id 加密并落库，完成渐进式升级。
+
+#### 4.10.2 encrypt_password（Argon2id + 随机盐）
 
 ```rust
-use md5::{Digest, Md5};
-use crate::common::constants::constants::PASSWORD_SALT;
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2,
+};
 
-/// 密码加盐 MD5（盐值 "yebot_admin"，不兼容 ref-salvo-admin 旧密码）
-pub fn encrypt_password(password: &str) -> String {
-    let salted = format!("{}{}", password, PASSWORD_SALT);
-    let mut hasher = Md5::new();
-    hasher.update(salted.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-pub fn verify_password(password: &str, hashed: &str) -> bool {
-    encrypt_password(password) == hashed
+/// 加密密码（Argon2id + 随机盐）
+///
+/// 返回 Result 而非静默吞错，避免哈希失败时存入空密码。
+/// 输出为 Argon2 标准编码字符串（以 `$argon2` 开头），含算法参数、盐值与哈希值。
+pub fn encrypt_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(password.as_bytes(), &salt)?;
+    Ok(hash.to_string())
 }
 ```
 
-> **说明：** 使用 `Md5::new()` + `Digest` trait API（md-5 0.11 推荐写法），盐值常量 `PASSWORD_SALT = "yebot_admin"` 定义在 `common/constants.rs`。
+#### 4.10.3 verify_password（自动识别哈希格式）
+
+```rust
+use argon2::{PasswordHash, PasswordVerifier, Argon2};
+
+/// 密码验证结果（含是否需要升级哈希的提示）
+pub struct PasswordVerifyResult {
+    pub is_valid: bool,
+    /// 若为 true，表示密码正确但使用的是旧 MD5 哈希，调用方应重新加密并存储
+    pub needs_upgrade: bool,
+}
+
+/// 验证密码并返回是否需要升级哈希
+///
+/// 验证流程：
+/// 1. 若 hashed 以 `$argon2` 开头 → 用 Argon2 验证（needs_upgrade = false）
+/// 2. 否则 → 用旧 MD5 + 固定盐值验证，验证成功则 needs_upgrade = true
+pub fn verify_password_with_upgrade_hint(password: &str, hashed: &str) -> PasswordVerifyResult {
+    if hashed.is_empty() {
+        return PasswordVerifyResult { is_valid: false, needs_upgrade: false };
+    }
+    if hashed.starts_with("$argon2") {
+        if let Ok(parsed) = PasswordHash::new(hashed) {
+            let is_valid = Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok();
+            return PasswordVerifyResult { is_valid, needs_upgrade: false };
+        }
+        return PasswordVerifyResult { is_valid: false, needs_upgrade: false };
+    }
+    // 旧格式：MD5 + 固定盐值
+    let is_valid = verify_legacy_md5(password, hashed);
+    PasswordVerifyResult { is_valid, needs_upgrade: is_valid }
+}
+
+/// 便捷包装：仅返回是否验证通过
+pub fn verify_password(password: &str, hashed: &str) -> bool {
+    verify_password_with_upgrade_hint(password, hashed).is_valid
+}
+
+/// 旧 MD5 + 固定盐值验证（仅用于兼容已存在的旧密码数据）
+fn verify_legacy_md5(password: &str, hashed: &str) -> bool {
+    use md5::{Digest, Md5};
+    let salted = format!("{}{}", password, LEGACY_SALT);
+    let mut hasher = Md5::new();
+    hasher.update(salted.as_bytes());
+    let computed: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+    computed == hashed
+}
+```
+
+#### 4.10.4 密码复杂度策略（R19-1.3）
+
+`validate_password_complexity` 在新增/重置/修改密码时强制校验：
+- 必须包含至少 1 个字母（a-z 或 A-Z）
+- 必须包含至少 1 个数字（0-9）
+- 不得命中 Top 常见弱口令黑名单（`WEAK_PASSWORDS`，大小写不敏感，覆盖 admin123/password/123456 等 50+ 常见弱密码）
+- 长度范围由 DTO 的 `#[garde(length(...))]` 保证
+
+> **说明：** 数据库种子密码哈希直接写入（不经过 `validate_password_complexity`），故默认管理员 `admin123` 凭据初始化不受影响，但首次登录后应强制改密。`password_strength_score` 提供 0-4 评分供前端 UX 反馈。
 
 ### 4.11 验证码工具
 
@@ -804,6 +890,8 @@ Thumbs.db
 
 ## 5. migration 子 crate 设计
 
+> ⚠️ **本文档为第一阶段规格，仅描述首迁移骨架。** 后续迁移见 `migration/src/lib.rs` 注册表（截至 2026-07-26 共 29 个迁移，涵盖索引/字段调整/菜单/备份日志/任务/限流/i18n/IP 归属地等）。新增迁移请直接编辑 `migration/src/lib.rs` 的 `Migrator::migrations()` 注册表。
+
 ### 5.1 Cargo.toml
 
 ```toml
@@ -962,7 +1050,7 @@ async fn main() {
 | `src/middleware/auth.rs` | JWT 鉴权中间件 |
 | `src/middleware/request_id.rs` | 请求 ID 中间件 |
 | `src/initialize/mod.rs` | 初始化编排 |
-| `src/utils/password.rs` | 密码加盐 MD5 |
+| `src/utils/password.rs` | 密码哈希（Argon2id + 旧 MD5 兼容验证） |
 | `src/utils/captcha.rs` | 验证码生成 |
 | `src/utils/tree.rs` | 树构建工具 |
 | `src/state.rs` | AppState |

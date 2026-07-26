@@ -61,10 +61,16 @@ pub fn pick<'a>(zh: &'a str, en: &'a str) -> &'a str {
 /// 用法：`tr!("error.common.not_found")` —— 返回 String。
 /// key 必须是字符串字面量（rust-i18n t! 宏要求，便于编译期提取/嵌入）。
 /// locale 取当前请求 locale（task-local，无则回退 zh-CN）。
+///
+/// L-3：扩展支持插值参数 `tr!("msg.hello", name = "Alice")`，
+/// 转发给 `rust_i18n::t!` 的 named args 语法，对应 YAML 中 `{{name}}` 占位符。
 #[macro_export]
 macro_rules! tr {
     ($key:literal) => {
         rust_i18n::t!($key, locale = $crate::common::i18n::current_locale()).to_string()
+    };
+    ($key:literal, $($k:ident = $v:expr),+ $(,)?) => {
+        rust_i18n::t!($key, locale = $crate::common::i18n::current_locale(), $($k = $v),+).to_string()
     };
 }
 
@@ -110,6 +116,12 @@ pub const MODULE_TITLES: &[(&str, &str, &str)] = &[
 ];
 
 /// 按 key 翻译模块标题；查无回退 key 原文（兼容旧中文数据）
+///
+/// L-6 说明：fallback 分支返回 `Cow::Owned(key.to_string())`，生命周期上看似与
+/// 函数签名 `Cow<'static, str>` 冲突（Owned 持有新分配的 String），但实际上
+/// `Cow::Owned` 的变体本身允许持有任意生命周期的数据，`'static` 约束的是
+/// `Cow::Borrowed` 分支所借用的 `'static` 字面量。两条分支类型统一为
+/// `Cow<'static, str>`，调用方拿到的 Cow 可向下传递或转 `String`，逻辑正确。
 pub fn module_title(key: &str) -> Cow<'static, str> {
     MODULE_TITLES
         .iter()

@@ -9,7 +9,9 @@
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 //! 但依赖 middleware::rate_limit::RateLimitConfig（仅数据结构，无循环依赖）
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
@@ -32,6 +34,12 @@ const RATE_LIMIT_CACHE_PREFIX: &str = "rate_limit:config:";
 const RATE_LIMIT_CACHE_TTL: i64 = 300;
 /// 全局默认 route_pattern
 const GLOBAL_DEFAULT_PATTERN: &str = "*";
+/// M-2：进程内缓存 TTL（秒）
+///
+/// 限流中间件每个请求都会调用 get_config_for_route，若每次都走 Redis GET 会引入
+/// 网络往返开销。进程内缓存以短 TTL（10s）缓存最近配置，命中时直接返回，避免 Redis 往返。
+/// 10s 窗口足以平滑突发请求，配置变更后最长 10s 生效（invalidate 时立即清空）。
+const LOCAL_CACHE_TTL_SECS: u64 = 10;
 
 // ==================== DTO ====================
 
@@ -105,9 +113,14 @@ fn default_true() -> bool {
 /// 数据访问通过 Repository 层委托：
 /// - rate_limit_repo: sys_rate_limit 表 CRUD
 /// - redis: Redis 连接管理器，用于限流配置缓存（cache-aside 模式）
+///
+/// M-2：增加进程内短 TTL 缓存（local_cache），减少限流中间件每请求一次的 Redis 往返。
+/// 缓存层次：local_cache (10s) → Redis (300s) → DB。配置变更时 invalidate 同时清空 local_cache。
 pub struct SysRateLimitService {
     rate_limit_repo: SysRateLimitRepository,
     redis: ConnectionManager,
+    /// M-2：进程内缓存（route → (config, fetched_at)），短 TTL 减少 Redis 往返
+    local_cache: Mutex<HashMap<String, (RateLimitConfig, Instant)>>,
 }
 
 impl SysRateLimitService {
@@ -115,6 +128,7 @@ impl SysRateLimitService {
         Self {
             rate_limit_repo: SysRateLimitRepository::new(db),
             redis,
+            local_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -128,7 +142,13 @@ impl SysRateLimitService {
     /// 缓存以输入 route 为 key，单个 route_pattern 的变更可能影响多个缓存条目
     /// （例如修改 "*" 全局默认会影响所有未精确匹配的 route 缓存），
     /// 因此采用 SCAN + DEL 批量清除所有相关键。
+    ///
+    /// M-2：同时清空进程内 local_cache，确保配置变更后立即生效（最长延迟 0s）。
     async fn invalidate_all_cache(&self) {
+        // M-2：先清空进程内缓存（同步、立即生效）
+        if let Ok(mut cache) = self.local_cache.lock() {
+            cache.clear();
+        }
         let mut conn = self.redis.clone();
         let pattern = format!("{}*", RATE_LIMIT_CACHE_PREFIX);
         let mut cursor: u64 = 0;
@@ -302,10 +322,12 @@ impl SysRateLimitService {
 
     /// 获取指定路由的限流配置（中间件调用）
     ///
+    /// M-2 缓存层次：local_cache (10s) → Redis (300s) → DB
     /// 流程：
+    /// 0. M-2：先查进程内 local_cache（短 TTL 10s），命中则直接返回，避免 Redis 往返
     /// 1. 从 Redis 缓存读取（key: rate_limit:config:{route}）
     /// 2. 缓存未命中则查 DB：先精确匹配 route_pattern=route，未命中则用 "*" 全局默认
-    /// 3. 将结果缓存到 Redis（TTL 300 秒）
+    /// 3. 将结果缓存到 Redis（TTL 300 秒）+ local_cache（TTL 10s）
     /// 4. 缓存或 DB 查询失败时返回默认值 (capacity=100, refill_per_second=10.0)
     ///
     /// 注意：本方法不会返回错误（中间件无法处理错误），任何异常都降级到默认配置。
@@ -315,6 +337,18 @@ impl SysRateLimitService {
         route: &str,
     ) -> Result<RateLimitConfig, ServiceError> {
         let key = Self::cache_key(route);
+
+        // 0. M-2：先查进程内 local_cache（短 TTL，命中则直接返回，避免 Redis 往返）
+        //    限流中间件每个请求都调用本方法，local_cache 命中可显著降低 Redis 压力。
+        //    Mutex 中毒时恢复 Guard 而非 panic（P0-New-3）。
+        let now = Instant::now();
+        if let Ok(cache) = self.local_cache.lock() {
+            if let Some((cfg, fetched_at)) = cache.get(route)
+                && now.duration_since(*fetched_at) <= Duration::from_secs(LOCAL_CACHE_TTL_SECS)
+            {
+                return Ok(*cfg);
+            }
+        }
 
         // 1. 尝试从 Redis 读取（R8-CONC-013：包裹 3s 超时，防止 Redis 挂起导致请求阻塞）
         let mut conn = self.redis.clone();
@@ -330,7 +364,12 @@ impl SysRateLimitService {
         if let Some(val) = cached
             && let Ok(cached_config) = serde_json::from_str::<RateLimitConfigCached>(&val)
         {
-            return Ok(cached_config.into());
+            let cfg: RateLimitConfig = cached_config.into();
+            // M-2：回填 local_cache（best-effort）
+            if let Ok(mut cache) = self.local_cache.lock() {
+                cache.insert(route.to_string(), (cfg, Instant::now()));
+            }
+            return Ok(cfg);
         }
         // 反序列化失败或缓存未命中，继续查 DB（缓存损坏时后续会覆盖）
 
@@ -376,6 +415,11 @@ impl SysRateLimitService {
                 Ok(Err(e)) => tracing::warn!("缓存限流配置到 Redis 失败 (key={}): {}", key, e),
                 Err(e) => tracing::warn!("缓存限流配置到 Redis 超时 (key={}): {}", key, e),
             }
+        }
+
+        // M-2：回填 local_cache（best-effort，即使 Redis 写入失败也回填本地，下次请求仍可命中）
+        if let Ok(mut cache) = self.local_cache.lock() {
+            cache.insert(route.to_string(), (config, Instant::now()));
         }
 
         Ok(config)

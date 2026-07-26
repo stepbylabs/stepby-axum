@@ -95,3 +95,16 @@ msg:
   cache:
     no_match: 无匹配缓存
     key_not_found: 缓存键不存在
+
+# H-3：登录日志审计消息（write_login_log 用，区分细分原因用于审计；
+# 对外返回给用户的错误消息统一用 error.auth.* 系列，避免用户名枚举）
+log:
+  auth:
+    ip_rate_limited: IP 请求频率超限
+    password_locked: 密码错误次数过多
+    captcha_wrong: 验证码错误
+    captcha_expired: 验证码已过期
+    login_failed: 用户不存在/密码错误
+    account_deleted: 账号已删除
+    account_disabled: 账号已停用
+    login_success: 登录成功
