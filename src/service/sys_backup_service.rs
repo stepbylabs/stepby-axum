@@ -81,7 +81,7 @@ pub struct BackupCreateVo {
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 /// 根据数据库 URL 判断数据库类型
@@ -105,9 +105,9 @@ fn parse_db_kind(url: &str) -> Result<DbKind, ServiceError> {
     } else if url.starts_with("sqlite://") || url.starts_with("sqlite:") {
         Ok(DbKind::Sqlite)
     } else {
-        Err(ServiceError::bad_request(&format!(
-            "不支持的数据库类型: {}",
-            url.split("://").next().unwrap_or("")
+        Err(ServiceError::bad_request(&crate::tr!(
+            "error.backup.unsupported_db_type",
+            url = url.split("://").next().unwrap_or("")
         )))
     }
 }
@@ -134,7 +134,7 @@ fn parse_db_conn_info(url: &str) -> Result<(String, String, String, String, Stri
     let no_scheme = url
         .split("://")
         .nth(1)
-        .ok_or_else(|| ServiceError::bad_request("数据库 URL 格式不正确"))?;
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.backup.db_url_invalid")))?;
     // 拆分 user:password 和 host:port/database
     let (auth_host, db) = match no_scheme.rsplit_once('/') {
         Some((x, y)) => (x, y.to_string()),
@@ -162,7 +162,7 @@ fn ensure_backup_dir() -> Result<PathBuf, ServiceError> {
     let dir = PathBuf::from(BACKUP_DIR);
     if !dir.exists() {
         std::fs::create_dir_all(&dir)
-            .map_err(|e| ServiceError::internal(&format!("创建备份目录失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.mkdir_failed")))?;
     }
     Ok(dir)
 }
@@ -171,7 +171,7 @@ fn ensure_backup_dir() -> Result<PathBuf, ServiceError> {
 async fn ensure_backup_dir_async() -> Result<PathBuf, ServiceError> {
     tokio::task::spawn_blocking(ensure_backup_dir)
         .await
-        .map_err(|e| ServiceError::internal(&format!("创建备份目录任务 join 失败: {}", e)))?
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.mkdir_task_join_failed")))?
 }
 
 /// 校验备份文件路径必须位于备份目录内（防路径穿越）
@@ -184,7 +184,7 @@ async fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> 
         || file_name.contains("..")
         || file_name.contains('\0')
     {
-        return Err(ServiceError::bad_request("非法的备份文件名"));
+        return Err(ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid")));
     }
     let dir = ensure_backup_dir_async().await?;
     let file_path = dir.join(file_name);
@@ -280,7 +280,7 @@ impl SysBackupService {
                 updated
                     .error_msg
                     .as_deref()
-                    .unwrap_or("数据库备份失败"),
+                    .unwrap_or(&crate::tr!("error.backup.db_backup_failed")),
             ));
         }
 
@@ -311,12 +311,12 @@ impl SysBackupService {
                 .stderr(std::process::Stdio::piped())
                 .output()
                 .await
-                .map_err(|e| ServiceError::internal(&format!("sqlite3 调用失败: {}", e)))?;
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.sqlite3_failed")))?;
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr).to_string();
-                return Err(ServiceError::internal(&format!(
-                    "sqlite3 备份失败: {}",
-                    err
+                return Err(ServiceError::internal(&crate::tr!(
+                    "error.backup.sqlite3_backup_failed",
+                    err = err
                 )));
             }
             // 使用 spawn_blocking 包装同步 fs::write，避免阻塞 Tokio worker
@@ -324,8 +324,8 @@ impl SysBackupService {
             let stdout = output.stdout;
             tokio::task::spawn_blocking(move || std::fs::write(&file_path_owned, &stdout))
                 .await
-                .map_err(|e| ServiceError::internal(&format!("写入任务 join 失败: {}", e)))?
-                .map_err(|e| ServiceError::internal(&format!("写入备份文件失败: {}", e)))?;
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.write_task_join_failed")))?
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.write_failed")))?;
             return Ok(());
         }
 
@@ -358,7 +358,7 @@ impl SysBackupService {
             }
             DbKind::Sqlite => {
                 return Err(ServiceError::internal(
-                    "SQLite 备份应在上文处理，不应到达此分支（请检查代码逻辑）",
+                    &crate::tr!("error.backup.sqlite3_branch_unreachable"),
                 ));
             }
         };
@@ -369,23 +369,23 @@ impl SysBackupService {
         // 5 分钟超时
         let child = cmd
             .spawn()
-            .map_err(|e| ServiceError::internal(&format!("启动备份进程失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.process_start_failed")))?;
 
         let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())
             .await
             .map_err(|_| {
-                ServiceError::internal(&format!(
-                    "备份进程超时（{} 秒）",
-                    BACKUP_TIMEOUT_SECS
+                ServiceError::internal(&crate::tr!(
+                    "error.backup.process_timeout",
+                    secs = BACKUP_TIMEOUT_SECS
                 ))
             })?
-            .map_err(|e| ServiceError::internal(&format!("备份进程执行失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.process_exec_failed")))?;
 
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(ServiceError::internal(&format!(
-                "备份进程返回非零状态: {}",
-                err
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.backup.process_nonzero_exit",
+                err = err
             )));
         }
         Ok(())
@@ -408,25 +408,25 @@ impl SysBackupService {
             .backup_repo
             .find_by_id(backup_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("备份记录不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.backup.record_not_found")))?;
 
         if log.status != "success" {
-            return Err(ServiceError::bad_request("仅可恢复成功的备份"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.backup.restore_status_invalid")));
         }
 
         // 校验文件路径穿越（取 basename 重新拼接）
         let base_name = std::path::Path::new(&log.file_name)
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| ServiceError::bad_request("备份文件名不合法"))?
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid_restore")))?
             .to_string();
         let file_path = validate_backup_path(&base_name).await?;
         let file_path_clone = file_path.clone();
         let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
             .await
-            .map_err(|e| ServiceError::internal(&format!("文件存在性检查任务 join 失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed")))?;
         if !exists {
-            return Err(ServiceError::not_found("备份文件不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.backup.file_not_found")));
         }
 
         let db_url = self.config.database.url.clone();
@@ -460,7 +460,7 @@ impl SysBackupService {
 
         if status == "failed" {
             return Err(ServiceError::internal(
-                error_msg.as_deref().unwrap_or("数据库恢复失败"),
+                error_msg.as_deref().unwrap_or(&crate::tr!("error.backup.db_restore_failed")),
             ));
         }
         Ok(())
@@ -511,23 +511,23 @@ impl SysBackupService {
 
         let child = cmd
             .spawn()
-            .map_err(|e| ServiceError::internal(&format!("启动恢复进程失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed")))?;
 
         let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())
             .await
             .map_err(|_| {
-                ServiceError::internal(&format!(
-                    "恢复进程超时（{} 秒）",
-                    BACKUP_TIMEOUT_SECS
+                ServiceError::internal(&crate::tr!(
+                    "error.backup.restore_process_timeout",
+                    secs = BACKUP_TIMEOUT_SECS
                 ))
             })?
-            .map_err(|e| ServiceError::internal(&format!("恢复进程执行失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))?;
 
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(ServiceError::internal(&format!(
-                "恢复进程返回非零状态: {}",
-                err
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.backup.restore_process_nonzero_exit",
+                err = err
             )));
         }
         Ok(())
@@ -570,7 +570,7 @@ impl SysBackupService {
         self.backup_repo
             .find_by_id(backup_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("备份记录不存在"))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.backup.record_not_found")))
     }
 
     /// 批量删除备份日志（批量查询 + 异步删除文件，避免 N+1 与阻塞 IO）
@@ -612,7 +612,7 @@ impl SysBackupService {
                 }
             })
             .await
-            .map_err(|e| ServiceError::internal(&format!("删除备份文件任务失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.delete_file_task_failed")))?;
         }
 
         self.backup_repo.delete_by_ids(ids).await?;
@@ -623,27 +623,27 @@ impl SysBackupService {
     pub async fn read_backup_file(&self, backup_id: i64) -> Result<(Vec<u8>, String), ServiceError> {
         let log = self.get_backup_by_id(backup_id).await?;
         if log.status != "success" {
-            return Err(ServiceError::bad_request("仅可下载成功的备份"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.backup.download_status_invalid")));
         }
         let base_name = std::path::Path::new(&log.file_name)
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| ServiceError::bad_request("备份文件名不合法"))?
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid_restore")))?
             .to_string();
         let file_path = validate_backup_path(&base_name).await?;
         let file_path_clone = file_path.clone();
         let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
             .await
-            .map_err(|e| ServiceError::internal(&format!("文件存在性检查任务 join 失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed")))?;
         if !exists {
-            return Err(ServiceError::not_found("备份文件不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.backup.file_not_found")));
         }
         let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
             std::fs::read(&file_path)
         })
         .await
-        .map_err(|e| ServiceError::internal(&format!("读取文件任务失败: {}", e)))?
-        .map_err(|e| ServiceError::internal(&format!("读取备份文件失败: {}", e)))?;
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_file_task_failed")))?
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed")))?;
         Ok((bytes, log.file_name))
     }
 }

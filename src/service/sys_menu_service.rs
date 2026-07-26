@@ -210,11 +210,11 @@ impl SysMenuService {
         let order_nums: Vec<i32> = parse_id_list::<i32>(&dto.order_nums);
 
         if menu_ids.is_empty() || order_nums.is_empty() {
-            return Err(ServiceError::bad_request("menuIds/orderNums 解析后为空"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.menu.ids_empty")));
         }
         if menu_ids.len() != order_nums.len() {
             return Err(ServiceError::bad_request(
-                "menuIds 与 orderNums 数量不一致",
+                &crate::tr!("error.menu.ids_count_mismatch"),
             ));
         }
 
@@ -247,9 +247,9 @@ impl SysMenuService {
     /// 查询菜单详情
     pub async fn get_menu_by_id(&self, menu_id: i64) -> Result<SysMenuModel, ServiceError> {
         let menu = self.menu_repo.base().find_by_id(menu_id).await?
-            .ok_or_else(|| ServiceError::not_found("菜单不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.menu.not_found")))?;
         if menu.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("菜单不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
         }
         Ok(menu)
     }
@@ -266,9 +266,9 @@ impl SysMenuService {
         let parent_id = dto.parent_id.unwrap_or(0);
         if parent_id != 0 {
             let parent = self.menu_repo.base().find_by_id(parent_id).await?
-                .ok_or_else(|| ServiceError::bad_request("父菜单不存在"))?;
+                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.menu.parent_not_found")))?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request("父菜单已删除"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.menu.parent_deleted")));
             }
         }
 
@@ -283,7 +283,7 @@ impl SysMenuService {
                 .filter(MenuColumn::DelFlag.eq("0"));
             let dup = self.menu_repo.base().find_one(select).await?;
             if dup.is_some() {
-                return Err(ServiceError::bad_request("权限标识已存在"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.menu.perm_exists")));
             }
         }
 
@@ -335,28 +335,28 @@ impl SysMenuService {
 
         // 查询菜单是否存在
         let existing = self.menu_repo.base().find_by_id(dto.menu_id).await?
-            .ok_or_else(|| ServiceError::not_found("菜单不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.menu.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("菜单不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
         }
 
         // parent_id 校验
         let parent_id = dto.parent_id.unwrap_or(existing.parent_id.unwrap_or(0));
         if parent_id == dto.menu_id {
-            return Err(ServiceError::bad_request("上级菜单不能选择自己"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.menu.parent_self_forbidden")));
         }
         if parent_id != 0 {
             // 校验新父菜单存在
             let parent = self.menu_repo.base().find_by_id(parent_id).await?
-                .ok_or_else(|| ServiceError::bad_request("父菜单不存在"))?;
+                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.menu.parent_not_found")))?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request("父菜单已删除"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.menu.parent_deleted")));
             }
 
             // 防环校验：新 parent_id 不能是当前菜单的后代节点
             if self.is_descendant(dto.menu_id, parent_id).await? {
                 return Err(ServiceError::bad_request(
-                    "上级菜单不能选择自己的子菜单，否则会形成环路",
+                    &crate::tr!("error.menu.parent_self_forbidden"),
                 ));
             }
         }
@@ -372,7 +372,7 @@ impl SysMenuService {
                 .filter(MenuColumn::MenuId.ne(dto.menu_id));
             let dup = self.menu_repo.base().find_one(select).await?;
             if dup.is_some() {
-                return Err(ServiceError::bad_request("权限标识已存在"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.menu.perm_exists")));
             }
         }
 
@@ -439,9 +439,9 @@ impl SysMenuService {
     /// 删除菜单（事务：子菜单校验 + 菜单分配校验 + 软删除 + 清理 sys_role_menu）
     pub async fn delete_menu(&self, menu_id: i64) -> Result<(), ServiceError> {
         let existing = self.menu_repo.base().find_by_id(menu_id).await?
-            .ok_or_else(|| ServiceError::not_found("菜单不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.menu.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("菜单不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
         }
 
         // 子菜单校验（通过 Repository find_one）
@@ -450,13 +450,13 @@ impl SysMenuService {
             .filter(MenuColumn::DelFlag.eq("0"));
         let child_count = self.menu_repo.base().find_many(child_select).await?.len() as u64;
         if child_count > 0 {
-            return Err(ServiceError::bad_request("存在子菜单，不允许删除"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.menu.has_children")));
         }
 
         // 菜单分配校验（通过 Repository）
         let role_count = self.role_menu_repo.count_by_menu_id(menu_id).await?;
         if role_count > 0 {
-            return Err(ServiceError::bad_request("菜单已分配给角色，不允许删除"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.menu.assigned_to_role")));
         }
 
         let menu_repo = self.menu_repo.clone();
@@ -581,7 +581,7 @@ impl SysMenuService {
             // 查询 current 的 parent_id
             let menu = self.menu_repo.base().find_by_id(current).await?
                 .ok_or_else(|| {
-                    ServiceError::not_found(&format!("菜单 ID={} 不存在", current))
+                    ServiceError::not_found(&crate::tr!("error.menu.id_not_found", id = current))
                 })?;
             let next = menu.parent_id.unwrap_or(0);
             if next == current {
@@ -592,7 +592,7 @@ impl SysMenuService {
         }
         // 超过 100 层仍未回到根，视为异常
         // 状态码：400 Bad Request（客户端提交了循环引用的 parentId）
-        Err(ServiceError::bad_request("菜单层级过深，防环校验失败"))
+        Err(ServiceError::bad_request(&crate::tr!("error.menu.level_too_deep")))
     }
 }
 

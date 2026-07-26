@@ -222,7 +222,7 @@ impl SysRateLimitService {
         self.rate_limit_repo
             .find_by_id(id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("限流配置不存在"))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.rate_limit.not_found")))
     }
 
     /// 新增限流配置
@@ -241,7 +241,7 @@ impl SysRateLimitService {
             .find_by_route_pattern(&dto.route_pattern)
             .await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request("路由前缀已存在"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.rate_limit.pattern_exists")));
         }
 
         let route_pattern_for_cache = dto.route_pattern.clone();

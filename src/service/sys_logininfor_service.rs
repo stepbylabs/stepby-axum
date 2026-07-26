@@ -248,5 +248,5 @@ pub struct LoginDailyStat {
 /// 解析时间字符串（`%Y-%m-%d`），失败返回 `ServiceError::bad_request`
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }

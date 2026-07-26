@@ -65,12 +65,12 @@ impl std::error::Error for SchedulerError {}
 impl From<SchedulerError> for crate::common::error::ServiceError {
     fn from(err: SchedulerError) -> Self {
         match err {
-            SchedulerError::InvalidCron(msg) => {
-                crate::common::error::ServiceError::bad_request(&format!("cron 表达式非法: {}", msg))
+            SchedulerError::InvalidCron(_msg) => {
+                crate::common::error::ServiceError::bad_request(&crate::tr!("error.job.cron_invalid"))
             }
             SchedulerError::SchedulerInternal(msg) => {
                 tracing::error!("调度器内部错误: {}", msg);
-                crate::common::error::ServiceError::internal("调度器操作失败，请联系管理员")
+                crate::common::error::ServiceError::internal(&crate::tr!("error.scheduler.operation_failed"))
             }
         }
     }

@@ -178,14 +178,9 @@ pub async fn write_upload_file(
         Ok(())
     })
     .await
-    .map_err(|e| crate::common::error::AppError::internal(&format!("文件写入任务失败: {}", e)))?
-    .map_err(|e| {
-        crate::common::error::AppError::internal(&format!(
-            "写入上传文件失败 (path={}, dir={}): {}",
-            file_path.display(),
-            upload_dir,
-            e
-        ))
+    .map_err(|_| crate::common::error::AppError::internal(&crate::tr!("error.upload.write_task_failed")))?
+    .map_err(|_| {
+        crate::common::error::AppError::internal(&crate::tr!("error.upload.write_failed"))
     })?;
     Ok(size)
 }

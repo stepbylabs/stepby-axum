@@ -48,7 +48,7 @@ impl std::str::FromStr for UpdateSource {
         match s.to_lowercase().as_str() {
             "maxmind" => Ok(UpdateSource::Maxmind),
             "p3terx" => Ok(UpdateSource::P3terx),
-            _ => Err(format!("未知的更新源类型: {}", s)),
+            _ => Err(crate::tr!("error.ip_location.unknown_source_type", s = s)),
         }
     }
 }

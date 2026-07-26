@@ -244,11 +244,11 @@ impl SysDeptService {
         let order_nums: Vec<i32> = parse_id_list::<i32>(&dto.order_nums);
 
         if dept_ids.is_empty() || order_nums.is_empty() {
-            return Err(ServiceError::bad_request("deptIds/orderNums 解析后为空"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.dept.ids_empty")));
         }
         if dept_ids.len() != order_nums.len() {
             return Err(ServiceError::bad_request(
-                "deptIds 与 orderNums 数量不一致",
+                &crate::tr!("error.dept.ids_count_mismatch"),
             ));
         }
 
@@ -307,9 +307,9 @@ impl SysDeptService {
             .base()
             .find_by_id(dept_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("部门不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dept.not_found")))?;
         if dept.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("部门不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
         }
         Ok(dept)
     }
@@ -336,9 +336,9 @@ impl SysDeptService {
                 .base()
                 .find_by_id(parent_id)
                 .await?
-                .ok_or_else(|| ServiceError::bad_request("父部门不存在"))?;
+                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.dept.parent_not_found")))?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request("父部门已删除"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.dept.parent_deleted")));
             }
             format!(
                 "{},{}",
@@ -385,15 +385,15 @@ impl SysDeptService {
             .base()
             .find_by_id(dto.dept_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("部门不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dept.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("部门不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
         }
 
         // parent_id 校验
         let parent_id = dto.parent_id.unwrap_or(existing.parent_id.unwrap_or(0));
         if parent_id == dto.dept_id {
-            return Err(ServiceError::bad_request("上级部门不能选择自己"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.dept.parent_self_forbidden")));
         }
 
         // 计算新祖先链 + 校验父部门存在 + 防环
@@ -405,14 +405,14 @@ impl SysDeptService {
                 .base()
                 .find_by_id(parent_id)
                 .await?
-                .ok_or_else(|| ServiceError::bad_request("父部门不存在"))?;
+                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.dept.parent_not_found")))?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request("父部门已删除"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.dept.parent_deleted")));
             }
             // 防环校验：新 parent_id 不能是当前部门的后代节点
             if self.is_descendant(dto.dept_id, parent_id).await? {
                 return Err(ServiceError::bad_request(
-                    "上级部门不能选择自己的子部门，否则会形成环路",
+                    &crate::tr!("error.dept.parent_self_forbidden"),
                 ));
             }
             format!(
@@ -510,9 +510,9 @@ impl SysDeptService {
             .base()
             .find_by_id(dept_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("部门不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dept.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
-            return Err(ServiceError::not_found("部门不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
         }
 
         // 子部门校验
@@ -521,13 +521,13 @@ impl SysDeptService {
             .filter(DeptColumn::DelFlag.eq("0"));
         let child_count = self.dept_repo.base().find_many(child_select).await?.len() as u64;
         if child_count > 0 {
-            return Err(ServiceError::bad_request("存在子部门，不允许删除"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.dept.has_children")));
         }
 
         // 角色关联校验
         let role_count = self.role_dept_repo.find_by_dept_id(dept_id).await?.len() as u64;
         if role_count > 0 {
-            return Err(ServiceError::bad_request("部门已分配给角色，不允许删除"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.dept.assigned_to_role")));
         }
 
         // 软删除（del_flag = '2'）
@@ -604,7 +604,7 @@ impl SysDeptService {
                 .find_by_id(current)
                 .await?
                 .ok_or_else(|| {
-                    ServiceError::not_found(&format!("部门 ID={} 不存在", current))
+                    ServiceError::not_found(&crate::tr!("error.dept.id_not_found", id = current))
                 })?;
             let next = dept.parent_id.unwrap_or(0);
             if next == current {
@@ -615,7 +615,7 @@ impl SysDeptService {
         }
         // 超过 100 层仍未回到根，视为异常
         // 状态码：400 Bad Request（客户端提交了循环引用的 parentId）
-        Err(ServiceError::bad_request("部门层级过深，防环校验失败"))
+        Err(ServiceError::bad_request(&crate::tr!("error.dept.level_too_deep")))
     }
 }
 

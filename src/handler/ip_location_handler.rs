@@ -147,7 +147,7 @@ pub async fn save_config(
     // 校验 update_source 合法性
     let source = dto.update_source.to_lowercase();
     if source != "maxmind" && source != "p3terx" {
-        return Err(AppError::bad_request("更新源必须为 maxmind 或 p3terx"));
+        return Err(AppError::bad_request(&crate::tr!("error.ip_location.source_invalid")));
     }
 
     // 读取现有配置，以决定是"保留原值"还是"覆盖"
@@ -173,7 +173,7 @@ pub async fn save_config(
     // 切换到 maxmind 时必须有凭据
     if source == "maxmind" && (final_account_id.is_empty() || final_license_key.is_empty()) {
         return Err(AppError::bad_request(
-            "切换到 maxmind 源需配置 Account ID 和 License Key",
+            &crate::tr!("error.ip_location.maxmind_credentials_required"),
         ));
     }
 

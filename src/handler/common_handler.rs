@@ -381,7 +381,7 @@ pub async fn upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(&format!("解析 multipart 失败: {}", e)))?
+        .map_err(|e| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e)))?
     {
         if field.name() == Some("file") {
             if let Some(filename) = field.file_name()
@@ -395,37 +395,37 @@ pub async fn upload(
             let bytes = field
                 .bytes()
                 .await
-                .map_err(|e| AppError::bad_request(&format!("读取文件内容失败: {}", e)))?;
+                .map_err(|e| AppError::bad_request(&crate::tr!("error.file.read_failed", e = e)))?;
             file_bytes = Some(bytes.to_vec());
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| AppError::bad_request("未找到 file 字段"))?;
+    let bytes = file_bytes.ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_file")))?;
     if bytes.is_empty() {
-        return Err(AppError::bad_request("上传文件为空"));
+        return Err(AppError::bad_request(&crate::tr!("error.common_handler.file_empty")));
     }
 
     // 文件大小限制
     if bytes.len() > upload_cfg.common_max_size {
-        return Err(AppError::bad_request(&format!(
-            "文件大小不能超过 {}MB",
-            upload_cfg.common_max_size / 1024 / 1024
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.file.too_large",
+            max = upload_cfg.common_max_size / 1024 / 1024
         )));
     }
 
     // 扩展名校验：必须提供且在白名单内
     let declared_ext = file_ext
         .as_deref()
-        .ok_or_else(|| AppError::bad_request("无法识别文件扩展名"))?;
+        .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.file_ext_unknown")))?;
     let allowed: &[&str] = &upload_cfg
         .common_allowed_exts
         .iter()
         .map(|s| s.as_str())
         .collect::<Vec<_>>();
     if !allowed.contains(&declared_ext) {
-        return Err(AppError::bad_request(&format!(
-            "不支持的文件类型: {}",
-            declared_ext
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.file.unsupported_type",
+            ext = declared_ext
         )));
     }
 
@@ -434,7 +434,7 @@ pub async fn upload(
     let image_exts: &[&str] = &["jpg", "jpeg", "png", "gif"];
     let final_ext = if image_exts.contains(&declared_ext) {
         let detected = detect_image_ext(&bytes).ok_or_else(|| {
-            AppError::bad_request("无法识别的图片格式，仅支持 jpg/jpeg/png/gif")
+            AppError::bad_request(&crate::tr!("error.common_handler.image_format_unknown"))
         })?;
         // 声明扩展名与 magic bytes 不一致时以 magic bytes 为准（防伪造）
         if normalize_ext(declared_ext) != normalize_ext(&detected) {
@@ -499,7 +499,7 @@ pub async fn download(
         || file_name.contains("..")
         || file_name.contains('\0')
     {
-        return Err(AppError::bad_request("非法的文件名"));
+        return Err(AppError::bad_request(&crate::tr!("error.common_handler.filename_invalid")));
     }
 
     let upload_cfg = &state.config.upload;
@@ -521,13 +521,13 @@ pub async fn download(
         std::fs::read(&file_path_clone).map(Some)
     })
     .await
-    .map_err(|e| AppError::internal(&format!("文件读取任务失败: {}", e)))?
-    .map_err(|e| AppError::internal(&format!("读取文件失败: {}", e)))?;
+    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_task_failed")))?
+    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_failed")))?;
 
     let bytes = match content {
         Some(b) => b,
         None => {
-            return Err(AppError::not_found("文件不存在"));
+            return Err(AppError::not_found(&crate::tr!("error.common_handler.file_not_found")));
         }
     };
 
@@ -572,18 +572,18 @@ pub async fn download_resource(
         || resource.contains('\\')
         || resource.contains('\0')
     {
-        return Err(AppError::bad_request("非法的资源路径"));
+        return Err(AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid")));
     }
 
     // 规范化路径二次校验：canonicalize 后必须仍以 uploads/ 开头
     let path = std::path::Path::new(resource);
     let canonical = tokio::fs::canonicalize(path)
         .await
-        .map_err(|_| AppError::not_found("资源不存在"))?;
+        .map_err(|_| AppError::not_found(&crate::tr!("error.common_handler.resource_not_found")))?;
     let canonical_str = canonical.to_string_lossy();
     // 跨平台兼容：Windows 下 canonicalize 返回 `\\?\D:\...\uploads\...`
     if !canonical_str.replace('\\', "/").contains("uploads/") {
-        return Err(AppError::bad_request("非法的资源路径"));
+        return Err(AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid")));
     }
 
     // 读取文件内容
@@ -595,13 +595,13 @@ pub async fn download_resource(
         std::fs::read(&path_clone).map(Some)
     })
     .await
-    .map_err(|e| AppError::internal(&format!("文件读取任务失败: {}", e)))?
-    .map_err(|e| AppError::internal(&format!("读取文件失败: {}", e)))?;
+    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_task_failed")))?
+    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_failed")))?;
 
     let bytes = match content {
         Some(b) => b,
         None => {
-            return Err(AppError::not_found("资源不存在"));
+            return Err(AppError::not_found(&crate::tr!("error.common_handler.resource_not_found")));
         }
     };
 

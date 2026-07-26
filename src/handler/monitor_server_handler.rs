@@ -231,7 +231,7 @@ pub async fn get_server(
     .await
     .map_err(|e| {
         tracing::error!("spawn_blocking sysinfo 查询失败: {}", e);
-        AppError::internal("服务器信息采集失败")
+        AppError::internal(&crate::tr!("error.server.info_fetch_failed"))
     })?;
 
     Ok(AjaxResult::success(server_info))

@@ -158,7 +158,7 @@ pub async fn add(
     Json(dto): Json<RoleAddDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let role = state.role_service.add_role(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&format!("新增角色 {} 成功", role.role_name)))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_role", name = role.role_name)))
 }
 
 /// PUT /system/role
@@ -205,13 +205,13 @@ pub async fn remove(
     let role_ids: Vec<i64> = parse_id_list::<i64>(&ids);
 
     if role_ids.is_empty() {
-        return Err(AppError::bad_request("角色 ID 不能为空"));
+        return Err(AppError::bad_request(&crate::tr!("error.role.id_empty")));
     }
 
     if role_ids.len() > MAX_BATCH_DELETE_SIZE {
-        return Err(AppError::bad_request(&format!(
-            "批量操作数量不能超过{}",
-            MAX_BATCH_DELETE_SIZE
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
         )));
     }
 

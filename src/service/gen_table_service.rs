@@ -365,18 +365,21 @@ fn table_name_to_class_name(table_name: &str) -> String {
 /// 防止 SQL 注入和数据库关键字冲突
 fn validate_identifier(name: &str, field_name: &str) -> Result<(), ServiceError> {
     if name.is_empty() || name.len() > 64 {
-        return Err(ServiceError::bad_request(&format!(
-            "{} 长度必须在1-64之间", field_name
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.gen.field_length_invalid",
+            field = field_name
         )));
     }
     if !name.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
-        return Err(ServiceError::bad_request(&format!(
-            "{} 必须以字母或下划线开头", field_name
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.gen.field_start_invalid",
+            field = field_name
         )));
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(ServiceError::bad_request(&format!(
-            "{} 只能包含字母、数字、下划线", field_name
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.gen.field_char_invalid",
+            field = field_name
         )));
     }
     Ok(())
@@ -468,8 +471,9 @@ fn apply_default_value(
         ColumnDataType::Boolean => {
             let normalized = default.to_lowercase();
             if !["true", "false", "0", "1"].contains(&normalized.as_str()) {
-                return Err(ServiceError::bad_request(&format!(
-                    "布尔类型默认值 {} 必须是 true/false/0/1", default
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.gen.bool_default_invalid",
+                    value = default
                 )));
             }
             col_def.default(normalized);
@@ -594,18 +598,18 @@ impl GenTableService {
     ) -> Result<GenTableModel, ServiceError> {
         // 1. 查重
         if self.repo.find_by_name(table_name).await?.is_some() {
-            return Err(ServiceError::bad_request(&format!(
-                "表 {} 已导入，请勿重复导入",
-                table_name
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.gen.table_already_imported",
+                name = table_name
             )));
         }
 
         // 2. 读取表元数据
         let columns = self.repo.find_db_columns(table_name).await?;
         if columns.is_empty() {
-            return Err(ServiceError::not_found(&format!(
-                "表 {} 不存在或没有字段",
-                table_name
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.gen.table_no_columns_or_not_exist",
+                name = table_name
             )));
         }
 
@@ -792,15 +796,15 @@ impl GenTableService {
 
         // 2. 查重：检查表是否已存在
         if self.repo.find_by_name(&dto.table_name).await?.is_some() {
-            return Err(ServiceError::bad_request(&format!(
-                "表 {} 已存在于 gen_table，请勿重复创建",
-                dto.table_name
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.gen.table_already_in_gen",
+                name = &dto.table_name
             )));
         }
         if self.is_db_table_exists(&dto.table_name).await? {
-            return Err(ServiceError::bad_request(&format!(
-                "表 {} 已存在于数据库，请勿重复创建",
-                dto.table_name
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.gen.table_already_in_db",
+                name = &dto.table_name
             )));
         }
 
@@ -809,44 +813,48 @@ impl GenTableService {
         for col in &dto.columns {
             validate_identifier(&col.column_name, "列名")?;
             if !col_names.insert(col.column_name.as_str()) {
-                return Err(ServiceError::bad_request(&format!(
-                    "列名 {} 重复",
-                    col.column_name
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.gen.column_name_duplicate",
+                    name = &col.column_name
                 )));
             }
             // 类型与长度/精度一致性校验
             if col.data_type.needs_length() && col.length.is_none() {
-                return Err(ServiceError::bad_request(&format!(
-                    "列 {} 的类型 {:?} 需要指定长度",
-                    col.column_name, col.data_type
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.gen.column_type_length_required",
+                    name = &col.column_name,
+                    ty = format!("{:?}", col.data_type)
                 )));
             }
             if col.data_type.needs_precision() && col.precision.is_none() {
-                return Err(ServiceError::bad_request(&format!(
-                    "列 {} 的类型 Decimal 需要指定小数位",
-                    col.column_name
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.gen.column_decimal_scale_required",
+                    name = &col.column_name
                 )));
             }
             if let (Some(len), Some(prec)) = (col.length, col.precision)
                 && prec >= len
             {
-                return Err(ServiceError::bad_request(&format!(
-                    "列 {} 的小数位 {} 必须小于长度 {}",
-                    col.column_name, prec, len
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.gen.column_decimal_scale_invalid",
+                    name = &col.column_name,
+                    scale = prec,
+                    length = len
                 )));
             }
             // 自增必须为主键且为整数类型
             if col.is_auto_increment {
                 if !col.is_primary_key {
-                    return Err(ServiceError::bad_request(&format!(
-                        "列 {} 设置自增但未设置主键",
-                        col.column_name
+                    return Err(ServiceError::bad_request(&crate::tr!(
+                        "error.gen.column_auto_inc_no_pk",
+                        name = &col.column_name
                     )));
                 }
                 if !matches!(col.data_type, ColumnDataType::Int | ColumnDataType::Bigint) {
-                    return Err(ServiceError::bad_request(&format!(
-                        "列 {} 设置自增但类型 {:?} 不是整数类型",
-                        col.column_name, col.data_type
+                    return Err(ServiceError::bad_request(&crate::tr!(
+                        "error.gen.column_auto_inc_not_int",
+                        name = &col.column_name,
+                        ty = format!("{:?}", col.data_type)
                     )));
                 }
             }
@@ -1148,16 +1156,16 @@ impl GenTableService {
                 zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
             for (path, content) in &files {
-                zip.start_file(path, options).map_err(|e| {
-                    ServiceError::internal(&format!("ZIP 写入失败: {}", e))
+                zip.start_file(path, options).map_err(|_| {
+                    ServiceError::internal(&crate::tr!("error.gen.zip_write_failed"))
                 })?;
                 use std::io::Write;
-                zip.write_all(content.as_bytes()).map_err(|e| {
-                    ServiceError::internal(&format!("ZIP 写入失败: {}", e))
+                zip.write_all(content.as_bytes()).map_err(|_| {
+                    ServiceError::internal(&crate::tr!("error.gen.zip_write_failed"))
                 })?;
             }
-            zip.finish().map_err(|e| {
-                ServiceError::internal(&format!("ZIP 完成失败: {}", e))
+            zip.finish().map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.gen.zip_finish_failed"))
             })?;
         }
 
@@ -1206,18 +1214,18 @@ impl GenTableService {
                 for (path, content) in &files {
                     // 在原路径前加 `{table_name}/` 前缀，避免多表文件名冲突
                     let prefixed_path = format!("{}/{}", prefix, path);
-                    zip.start_file(&prefixed_path, options).map_err(|e| {
-                        ServiceError::internal(&format!("ZIP 写入失败: {}", e))
+                    zip.start_file(&prefixed_path, options).map_err(|_| {
+                        ServiceError::internal(&crate::tr!("error.gen.zip_write_failed"))
                     })?;
                     use std::io::Write;
-                    zip.write_all(content.as_bytes()).map_err(|e| {
-                        ServiceError::internal(&format!("ZIP 写入失败: {}", e))
+                    zip.write_all(content.as_bytes()).map_err(|_| {
+                        ServiceError::internal(&crate::tr!("error.gen.zip_write_failed"))
                     })?;
                 }
             }
 
-            zip.finish().map_err(|e| {
-                ServiceError::internal(&format!("ZIP 完成失败: {}", e))
+            zip.finish().map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.gen.zip_finish_failed"))
             })?;
         }
 
@@ -1250,7 +1258,7 @@ impl GenTableService {
             ("index.vue", INDEX_VUE_TEMPLATE),
             ("migration.sql", MIGRATION_SQL_TEMPLATE),
         ])
-        .map_err(|e| ServiceError::internal(&format!("Tera 模板加载失败: {}", e)))?;
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.gen.template_load_failed")))?;
 
         // 构建上下文
         let mut ctx = tera::Context::new();
@@ -1296,9 +1304,9 @@ impl GenTableService {
                 let full_msg = format!("{}", e);
                 let source_msg = e.source().map(|s| format!("{}", s)).unwrap_or_default();
                 let detail = if source_msg.is_empty() {
-                    format!("模板渲染失败 ({}): {}", tpl_name, full_msg)
+                    crate::tr!("error.gen.template_render_failed", name = tpl_name, msg = full_msg)
                 } else {
-                    format!("模板渲染失败 ({}): {} -> {}", tpl_name, full_msg, source_msg)
+                    crate::tr!("error.gen.template_render_failed", name = tpl_name, msg = format!("{} -> {}", full_msg, source_msg))
                 };
                 tracing::error!("代码生成模板渲染失败: {}", detail);
                 ServiceError::internal(&detail)
@@ -1323,12 +1331,12 @@ fn sanitize_path_component(name: &str) -> Result<String, ServiceError> {
         return Ok(String::new());
     }
     if name.contains('\0') {
-        return Err(ServiceError::bad_request("路径组件包含非法空字符"));
+        return Err(ServiceError::bad_request(&crate::tr!("error.gen.path_empty_component")));
     }
     if name.contains("..") || name.contains('/') || name.contains('\\') {
-        return Err(ServiceError::bad_request(&format!(
-            "路径组件包含非法字符（不允许 .. / \\）：{}",
-            name
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.gen.path_component_invalid",
+            name = name
         )));
     }
     Ok(name.to_string())
@@ -1470,7 +1478,7 @@ impl {{ table.className }}Service {
     }
 
     pub async fn get_by_id(&self, id: i64) -> Result<Model, ServiceError> {
-        self.repo.find_by_id(id).await?.ok_or_else(|| ServiceError::not_found("记录不存在"))
+        self.repo.find_by_id(id).await?.ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.record_not_found")))
     }
 
     pub async fn create(&self, dto: {{ table.className }}AddDto, operator: &str) -> Result<Model, ServiceError> {

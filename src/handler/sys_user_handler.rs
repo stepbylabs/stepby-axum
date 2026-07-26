@@ -191,7 +191,7 @@ pub async fn add(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let user = state.user_service.add_user(dto, operator.username()).await?;
     // 对齐前端：新增返回提示消息
-    Ok(AjaxResult::success_msg(&format!("新增用户 {} 成功", user.user_name)))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_user", name = user.user_name)))
 }
 
 /// PUT /system/user
@@ -215,7 +215,7 @@ pub async fn edit(
     let operator_user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     state
         .user_service
         .edit_user(dto, operator.username(), operator_user_id)
@@ -249,18 +249,18 @@ pub async fn remove(
     let operator_user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
     // R8-API-002：解析逗号分隔的 ID 列表
     let user_ids: Vec<i64> = parse_id_list::<i64>(&ids);
     if user_ids.is_empty() {
-        return Err(AppError::bad_request("用户 ID 不能为空"));
+        return Err(AppError::bad_request(&crate::tr!("error.user.id_empty")));
     }
     // R8-API-005：批量上限校验
     if user_ids.len() > MAX_BATCH_DELETE_SIZE {
-        return Err(AppError::bad_request(&format!(
-            "批量操作数量不能超过{}",
-            MAX_BATCH_DELETE_SIZE
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
         )));
     }
 
@@ -283,7 +283,7 @@ pub async fn change_status(
     let operator_user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     state
         .user_service
         .update_user_status(
@@ -308,7 +308,7 @@ pub async fn reset_pwd(
     let operator_user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     state
         .user_service
         .reset_user_pwd(dto, operator.username(), operator_user_id)
@@ -329,7 +329,7 @@ pub async fn reset_pwd(
         .await
         .map_err(|e| {
             tracing::error!("写入 pwd_changed 标记失败（fail-closed）: {}", e);
-            AppError::internal("密码重置成功，但旧 token 失效标记写入失败")
+            AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
         })?;
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_reset")))
@@ -347,7 +347,7 @@ pub async fn update_profile_pwd(
     let user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     let pwd_dto = UserPwdUpdateDto {
         old_password: dto.old_password,
         new_password: dto.new_password,
@@ -372,7 +372,7 @@ pub async fn update_profile_pwd(
         .await
         .map_err(|e| {
             tracing::error!("写入 pwd_changed 标记失败（fail-closed）: {}", e);
-            AppError::internal("密码修改成功，但旧 token 失效标记写入失败")
+            AppError::internal(&crate::tr!("error.user.pwd_change_token_invalidate_failed"))
         })?;
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_change")))
@@ -390,7 +390,7 @@ pub async fn get_profile(
     let user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     let vo = state.user_service.get_profile(user_id).await?;
     Ok(ProfileResult {
         code: 200,
@@ -413,7 +413,7 @@ pub async fn update_profile(
     let user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     state.user_service.update_profile(user_id, dto).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -450,7 +450,7 @@ pub async fn auth_role(
     let operator_user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     // role_ids 是逗号分隔字符串，解析为 Vec<i64>
     let role_ids: Vec<i64> = if dto.role_ids.is_empty() {
         vec![]
@@ -507,7 +507,7 @@ pub async fn avatar_upload(
     let user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("操作人用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
     // 从 multipart 中提取 avatarfile 字段
     let mut file_bytes: Option<Vec<u8>> = None;
@@ -515,7 +515,7 @@ pub async fn avatar_upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(&format!("解析 multipart 失败: {}", e)))?
+        .map_err(|e| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e)))?
     {
         if field.name() == Some("avatarfile") {
             // 从文件名推断扩展名（前端 vue-cropper 默认输出 blob，无 filename，默认 png）
@@ -529,28 +529,28 @@ pub async fn avatar_upload(
             let bytes = field
                 .bytes()
                 .await
-                .map_err(|e| AppError::bad_request(&format!("读取文件内容失败: {}", e)))?;
+                .map_err(|e| AppError::bad_request(&crate::tr!("error.file.read_failed", e = e)))?;
             file_bytes = Some(bytes.to_vec());
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| AppError::bad_request("未找到 avatarfile 字段"))?;
+    let bytes = file_bytes.ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_avatar")))?;
     if bytes.is_empty() {
-        return Err(AppError::bad_request("上传文件为空"));
+        return Err(AppError::bad_request(&crate::tr!("error.common_handler.file_empty")));
     }
 
     // 限制头像大小（从配置读取，默认 5MB）
     let upload_cfg = &state.config.upload;
     if bytes.len() > upload_cfg.avatar_max_size {
-        return Err(AppError::bad_request(&format!(
-            "头像大小不能超过 {}MB",
-            upload_cfg.avatar_max_size / 1024 / 1024
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.file.too_large",
+            max = upload_cfg.avatar_max_size / 1024 / 1024
         )));
     }
 
     // MIME magic bytes 校验：通过文件头识别真实类型，防止伪造扩展名
     let detected_ext = detect_image_ext(&bytes)
-        .ok_or_else(|| AppError::bad_request("无法识别的图片格式，仅支持 jpg/jpeg/png/gif"))?;
+        .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.image_format_unknown")))?;
 
     // 扩展名白名单校验：前端传入的扩展名必须与 magic bytes 识别结果一致，且在白名单内
     let allowed: &[&str] = &["jpg", "jpeg", "png", "gif"];

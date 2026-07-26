@@ -89,7 +89,7 @@ where
         build_xlsx(&sheet_name, &columns_owned, &rows_owned, fields_owned.as_deref(), locale_zh)
     })
     .await
-    .map_err(|e| AppError::internal(&format!("Excel 构建任务失败: {e}")))??;
+    .map_err(|_| AppError::internal(&crate::tr!("error.excel.build_task_failed")))??;
 
     // 构建响应
     let content_disposition = format!("attachment; filename={}.xlsx", filename);
@@ -143,7 +143,7 @@ where
     };
 
     if selected_indices.is_empty() {
-        return Err(AppError::bad_request("导出字段列表为空或无匹配字段"));
+        return Err(AppError::bad_request(&crate::tr!("error.excel.fields_empty")));
     }
 
     // constant_memory：行数超阈值时启用流式写盘，内存 O(1)（需 rust_xlsxwriter feature）
@@ -155,7 +155,7 @@ where
     };
     let worksheet = worksheet
         .set_name(sheet_name)
-        .map_err(|e| AppError::internal(&format!("创建工作表失败: {}", e)))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.excel.sheet_create_failed")))?;
 
     let header_format = Format::new().set_bold();
     let datetime_format = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
@@ -166,7 +166,7 @@ where
         let header_text = if locale_zh { col.header.0 } else { col.header.1 };
         worksheet
             .write_string_with_format(0, out_col as u16, header_text, &header_format)
-            .map_err(|e| AppError::internal(&format!("写入表头失败: {}", e)))?;
+            .map_err(|_| AppError::internal(&crate::tr!("error.excel.header_write_failed")))?;
     }
 
     // 数据行
@@ -180,18 +180,18 @@ where
                 CellValue::Text(cow) => {
                     worksheet
                         .write_string(target_row, target_col, cow.as_ref())
-                        .map_err(|e| AppError::internal(&format!("写入数据失败: {}", e)))?;
+                        .map_err(|_| AppError::internal(&crate::tr!("error.excel.data_write_failed")))?;
                 }
                 CellValue::Number(n) => {
                     worksheet
                         .write_number(target_row, target_col, n)
-                        .map_err(|e| AppError::internal(&format!("写入数据失败: {}", e)))?;
+                        .map_err(|_| AppError::internal(&crate::tr!("error.excel.data_write_failed")))?;
                 }
                 CellValue::DateTime(dt) => {
                     let s = dt.format("%Y-%m-%d %H:%M:%S").to_string();
                     worksheet
                         .write_string_with_format(target_row, target_col, &s, &datetime_format)
-                        .map_err(|e| AppError::internal(&format!("写入数据失败: {}", e)))?;
+                        .map_err(|_| AppError::internal(&crate::tr!("error.excel.data_write_failed")))?;
                 }
             }
         }
@@ -199,7 +199,7 @@ where
 
     workbook
         .save_to_buffer()
-        .map_err(|e| AppError::internal(&format!("生成 Excel 失败: {}", e)))
+        .map_err(|_| AppError::internal(&crate::tr!("error.excel.generate_failed")))
 }
 
 #[cfg(test)]

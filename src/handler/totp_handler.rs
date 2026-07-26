@@ -74,8 +74,8 @@ pub async fn setup(
 ) -> Result<AjaxResult<TotpSetupResponse>, AppError> {
     // 生成随机 secret
     let secret = Secret::generate_secret();
-    let secret_bytes = secret.to_bytes().map_err(|e| {
-        AppError::internal(&format!("生成 secret 失败: {}", e))
+    let secret_bytes = secret.to_bytes().map_err(|_| {
+        AppError::internal(&crate::tr!("error.totp.secret_gen_failed"))
     })?;
 
     // 构建 TOTP 对象
@@ -87,7 +87,7 @@ pub async fn setup(
         secret_bytes.clone(),
         Some(TOTP_ISSUER.to_string()),
         "yebot-user".to_string(),
-    ).map_err(|e| AppError::internal(&format!("构建 TOTP 失败: {}", e)))?;
+    ).map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     // 生成 otpauth URL（totp-rs v5.7+ get_url() 不再接受参数，
     // issuer/account_name 已在 TOTP::new 时绑定）
@@ -95,8 +95,8 @@ pub async fn setup(
 
     // 生成 QR 码（PNG bytes → base64 Data URL）
     // 直接复用 totp-rs 提供的 get_qr_png()，避免直接依赖 qrcodegen_image / image
-    let png_bytes = totp.get_qr_png().map_err(|e| {
-        AppError::internal(&format!("生成 QR 码失败: {}", e))
+    let png_bytes = totp.get_qr_png().map_err(|_| {
+        AppError::internal(&crate::tr!("error.totp.qr_gen_failed"))
     })?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
     let qr_code = format!("data:image/png;base64,{}", b64);
@@ -124,12 +124,12 @@ pub async fn verify(
     Json(req): Json<TotpVerifyRequest>,
 ) -> Result<AjaxResult<()>, AppError> {
     let user_id: i64 = operator.user_id().parse()
-        .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
     // 解码 Base32 secret
     let secret = Secret::Encoded(req.secret.clone());
     let secret_bytes = secret.to_bytes().map_err(|_| {
-        AppError::bad_request("无效的 TOTP secret")
+        AppError::bad_request(&crate::tr!("error.totp.secret_invalid"))
     })?;
 
     // 构建 TOTP 并验证
@@ -141,11 +141,11 @@ pub async fn verify(
         secret_bytes.clone(),
         Some(TOTP_ISSUER.to_string()),
         "yebot-user".to_string(),
-    ).map_err(|e| AppError::internal(&format!("构建 TOTP 失败: {}", e)))?;
+    ).map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     // 验证 code（允许 ±1 步长窗口）
     if !totp.check_current(&req.code).unwrap_or(false) {
-        return Err(AppError::bad_request("验证码错误或已过期"));
+        return Err(AppError::bad_request(&crate::tr!("error.totp.code_invalid")));
     }
 
     // 将 secret 存入 Redis（启用 TOTP）
@@ -156,7 +156,7 @@ pub async fn verify(
         .arg(&req.secret)
         .query_async::<String>(&mut conn)
         .await
-        .map_err(|e| AppError::internal(&format!("写入 Redis 失败: {}", e)))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_write_failed")))?;
 
     tracing::info!(user_id = user_id, "用户启用 TOTP 多因子认证");
 
@@ -170,7 +170,7 @@ pub async fn status(
     operator: Operator,
 ) -> Result<AjaxResult<TotpStatusResponse>, AppError> {
     let user_id: i64 = operator.user_id().parse()
-        .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
     let redis_key = format!("totp:enabled:{}", user_id);
     let mut conn = state.redis.clone();
@@ -193,20 +193,20 @@ pub async fn disable(
     Json(req): Json<TotpDisableRequest>,
 ) -> Result<AjaxResult<()>, AppError> {
     let user_id: i64 = operator.user_id().parse()
-        .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
     // 1. 验证密码（从数据库查询用户密码并校验）
     use argon2::{Argon2, PasswordHash, PasswordVerifier};
     let user_vo = state.user_service.get_user_by_id(user_id).await
-        .map_err(|e| AppError::internal(&format!("查询用户失败: {}", e)))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_query_failed")))?;
     let user = user_vo.user;
 
     let password_hash = user.password.as_deref().unwrap_or("");
     let parsed_hash = PasswordHash::new(password_hash).map_err(|_| {
-        AppError::internal("密码哈希格式错误")
+        AppError::internal(&crate::tr!("error.totp.password_hash_invalid"))
     })?;
     Argon2::default().verify_password(req.password.as_bytes(), &parsed_hash)
-        .map_err(|_| AppError::bad_request("密码错误"))?;
+        .map_err(|_| AppError::bad_request(&crate::tr!("error.totp.password_wrong")))?;
 
     // 2. 验证 TOTP code
     let redis_key = format!("totp:enabled:{}", user_id);
@@ -215,11 +215,11 @@ pub async fn disable(
         .arg(&redis_key)
         .query_async(&mut conn)
         .await
-        .map_err(|_| AppError::not_found("TOTP 未启用"))?;
+        .map_err(|_| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
 
     let secret = Secret::Encoded(secret_str);
     let secret_bytes = secret.to_bytes().map_err(|_| {
-        AppError::internal("TOTP secret 解码失败")
+        AppError::internal(&crate::tr!("error.totp.secret_decode_failed"))
     })?;
     let totp = TOTP::new(
         Algorithm::SHA1,
@@ -229,10 +229,10 @@ pub async fn disable(
         secret_bytes.clone(),
         Some(TOTP_ISSUER.to_string()),
         "yebot-user".to_string(),
-    ).map_err(|e| AppError::internal(&format!("构建 TOTP 失败: {}", e)))?;
+    ).map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     if !totp.check_current(&req.code).unwrap_or(false) {
-        return Err(AppError::bad_request("验证码错误或已过期"));
+        return Err(AppError::bad_request(&crate::tr!("error.totp.code_invalid")));
     }
 
     // 3. 从 Redis 删除 secret
@@ -240,7 +240,7 @@ pub async fn disable(
         .arg(&redis_key)
         .query_async::<i64>(&mut conn)
         .await
-        .map_err(|e| AppError::internal(&format!("删除 Redis 失败: {}", e)))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_delete_failed")))?;
 
     tracing::info!(user_id = user_id, "用户关闭 TOTP 多因子认证");
 

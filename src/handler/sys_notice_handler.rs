@@ -139,13 +139,13 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&notice_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request("通知公告 ID 不合法"));
+        return Err(AppError::bad_request(&crate::tr!("error.notice.id_invalid")));
     }
 
     if ids.len() > MAX_BATCH_DELETE_SIZE {
-        return Err(AppError::bad_request(&format!(
-            "批量操作数量不能超过{}",
-            MAX_BATCH_DELETE_SIZE
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
         )));
     }
 
