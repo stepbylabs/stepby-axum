@@ -109,6 +109,7 @@ error:
 msg:
   success:
     default: Operation succeeded
+    query: Query succeeded
     add: Added successfully
     edit: Updated successfully
     delete: Deleted successfully
