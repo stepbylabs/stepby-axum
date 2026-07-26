@@ -74,10 +74,7 @@ return current
 /// - 非空字符串必须为合法 UUID 格式（由 uuid::Uuid::parse_str 校验）
 fn validate_captcha_uuid_format(uuid: &str, _ctx: &()) -> garde::Result {
     if !uuid.is_empty() && uuid::Uuid::parse_str(uuid).is_err() {
-        return Err(garde::Error::new(crate::common::i18n::pick(
-            "验证码 UUID 格式无效",
-            "Invalid captcha UUID format",
-        )));
+        return Err(garde::Error::new(crate::tr!("error.auth.captcha_uuid_invalid")));
     }
     Ok(())
 }

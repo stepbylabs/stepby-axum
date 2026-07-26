@@ -190,7 +190,7 @@ pub struct DictDataEditDto {
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 // ==================== Service 实现 ====================
@@ -352,7 +352,7 @@ impl SysDictService {
             .dict_type_repo
             .find_active_by_id(dict_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("字典类型不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dict.type_not_found")))?;
         Ok(model)
     }
 
@@ -369,7 +369,7 @@ impl SysDictService {
         // dict_type 唯一性校验
         let existing = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request("字典类型已存在"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_exists")));
         }
 
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效
@@ -416,7 +416,7 @@ impl SysDictService {
         if dict_type_changed {
             let conflict = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request("字典类型已存在"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_exists")));
             }
         }
 
@@ -475,7 +475,7 @@ impl SysDictService {
         // 批量查询（单次 SELECT 替代 N 次），并校验全部存在
         let models = self.dict_type_repo.find_active_by_ids(&dict_ids).await?;
         if models.len() != dict_ids.len() {
-            return Err(ServiceError::not_found("字典类型不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.dict.type_not_found")));
         }
         // 保持按 dict_ids 输入顺序构建 (dict_id, dict_type)，便于事务内重命名
         let mut dict_types: Vec<(i64, String)> = Vec::with_capacity(dict_ids.len());
@@ -673,7 +673,7 @@ impl SysDictService {
             .dict_data_repo
             .find_active_by_id(dict_code)
             .await?
-            .ok_or_else(|| ServiceError::not_found("字典数据不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dict.data_not_found")))?;
         Ok(model)
     }
 
@@ -688,7 +688,7 @@ impl SysDictService {
         // 校验 dict_type 在 sys_dict_type 中存在
         let dict_type_exists = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
         if dict_type_exists.is_none() {
-            return Err(ServiceError::bad_request("字典类型不存在"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_not_found")));
         }
 
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效

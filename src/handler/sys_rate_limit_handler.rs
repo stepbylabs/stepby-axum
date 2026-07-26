@@ -135,7 +135,7 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request("参数 ID 不合法"));
+        return Err(AppError::bad_request(&crate::tr!("error.rate_limit.id_invalid")));
     }
 
     state.rate_limit_service.remove(ids).await?;

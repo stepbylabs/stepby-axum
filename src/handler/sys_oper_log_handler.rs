@@ -58,7 +58,7 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&oper_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request("日志 ID 不合法"));
+        return Err(AppError::bad_request(&crate::tr!("error.oper_log.id_invalid")));
     }
 
     state.oper_log_service.delete_oper_logs(ids).await?;
@@ -155,7 +155,7 @@ pub async fn export(
     if let Some(tid) = task_id {
         let _ = state
             .task_service
-            .complete_task(tid, Some(format!("导出 {} 条", rows.len())), &state)
+            .complete_task(tid, Some(crate::tr!("msg.export.progress", count = rows.len())), &state)
             .await;
     }
 

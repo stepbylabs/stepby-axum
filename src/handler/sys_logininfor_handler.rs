@@ -60,7 +60,7 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&info_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request("日志 ID 不合法"));
+        return Err(AppError::bad_request(&crate::tr!("error.login_log.id_invalid")));
     }
 
     state.logininfor_service.delete_logininfors(ids).await?;
@@ -92,7 +92,7 @@ pub async fn unlock(
     {
         return Err(AppError::new(
             403,
-            "不允许解锁超级管理员账号",
+            &crate::tr!("error.login_log.admin_unlock_forbidden"),
         ));
     }
 

@@ -69,7 +69,7 @@ pub async fn import_table(
 ) -> Result<AjaxResult<()>, AppError> {
     let table_names: Vec<&str> = params.tables.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
     if table_names.is_empty() {
-        return Err(AppError::bad_request("请选择要导入的表"));
+        return Err(AppError::bad_request(&crate::tr!("error.gen.table_select_required")));
     }
     for table_name in table_names {
         state
@@ -134,7 +134,7 @@ pub async fn delete_table(
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&table_ids);
     if ids.is_empty() {
-        return Err(AppError::bad_request("表 ID 不合法"));
+        return Err(AppError::bad_request(&crate::tr!("error.gen.table_id_invalid")));
     }
     state.gen_table_service.delete_tables(ids).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
@@ -173,7 +173,7 @@ fn validate_table_name(table_name: &str) -> Result<(), AppError> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Err(AppError::bad_request("非法的表名"));
+        return Err(AppError::bad_request(&crate::tr!("error.gen.table_name_invalid")));
     }
     Ok(())
 }
@@ -273,15 +273,15 @@ pub async fn batch_gen_code(
         .collect();
 
     if table_names.is_empty() {
-        return Err(AppError::bad_request("请选择要生成的表"));
+        return Err(AppError::bad_request(&crate::tr!("error.gen.table_select_for_gen_required")));
     }
 
     // 限制单次最多 20 张表（防内存爆炸）
     const MAX_BATCH_TABLES: usize = 20;
     if table_names.len() > MAX_BATCH_TABLES {
-        return Err(AppError::bad_request(&format!(
-            "单次最多生成 {} 张表的代码",
-            MAX_BATCH_TABLES
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.gen.batch_tables_exceeded",
+            max = MAX_BATCH_TABLES
         )));
     }
 

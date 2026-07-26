@@ -131,7 +131,7 @@ pub struct NoticeMarkReadAllDto {
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 /// HTML 特殊字符转义（用于邮件正文安全渲染）
@@ -213,7 +213,7 @@ impl SysNoticeService {
             .notice_repo
             .find_active_by_id(notice_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("通知公告不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.notice.not_found")))?;
         Ok(model)
     }
 
@@ -330,7 +330,7 @@ impl SysNoticeService {
             .filter(UserColumn::Email.ne(""))
             .all(db)
             .await
-            .map_err(|e| ServiceError::internal(&format!("查询用户邮箱失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed")))?;
         let emails: Vec<String> = users
             .into_iter()
             .filter_map(|u| {
@@ -374,7 +374,7 @@ impl SysNoticeService {
         }
         let existing = self.notice_repo.find_by_ids(&notice_ids).await?;
         if existing.len() != notice_ids.len() {
-            return Err(ServiceError::not_found("通知公告不存在"));
+            return Err(ServiceError::not_found(&crate::tr!("error.notice.not_found")));
         }
         // 事务保证：通知删除与已读记录级联清理原子化（P0-76）
         let notice_repo = self.notice_repo.clone();
@@ -419,7 +419,7 @@ impl SysNoticeService {
     ) -> Result<(), ServiceError> {
         let notice_ids: Vec<i64> = parse_id_list::<i64>(ids);
         if notice_ids.is_empty() {
-            return Err(ServiceError::bad_request("公告 ID 不合法"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.notice.id_invalid")));
         }
         self.read_repo.mark_read_batch(notice_ids, user_id).await?;
         Ok(())

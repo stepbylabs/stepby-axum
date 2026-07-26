@@ -157,7 +157,7 @@ pub async fn add(
     Json(dto): Json<DeptAddDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let dept = state.dept_service.add_dept(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&format!("新增部门 {} 成功", dept.dept_name)))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_dept", name = dept.dept_name)))
 }
 
 /// PUT /system/dept

@@ -68,7 +68,7 @@ pub struct TaskCreateDto {
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 // ==================== Service 实现 ====================

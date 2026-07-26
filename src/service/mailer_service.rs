@@ -143,7 +143,7 @@ impl MailerService {
         let email = self
             .from_email
             .parse()
-            .map_err(|e| ServiceError::internal(&format!("发件人邮箱地址无效: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.mail.from_invalid")))?;
         Ok(Mailbox::new(Some(self.from_name.clone()), email))
     }
 
@@ -162,7 +162,7 @@ impl MailerService {
 
         let to_mailbox: lettre::Address = to_email
             .parse()
-            .map_err(|e| ServiceError::bad_request(&format!("收件人邮箱地址无效: {}", e)))?;
+            .map_err(|_| ServiceError::bad_request(&crate::tr!("error.mail.to_invalid")))?;
 
         let from_mailbox = self.from_mailbox()?;
 
@@ -172,17 +172,17 @@ impl MailerService {
             .subject(subject)
             .header(html_content_type())
             .body(html_body.to_string())
-            .map_err(|e| ServiceError::internal(&format!("构建邮件失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.mail.build_failed")))?;
 
         let transporter = self
             .transporter
             .as_ref()
-            .ok_or_else(|| ServiceError::internal("SMTP 客户端未初始化"))?;
+            .ok_or_else(|| ServiceError::internal(&crate::tr!("error.mail.smtp_not_initialized")))?;
 
         transporter
             .send(email)
             .await
-            .map_err(|e| ServiceError::internal(&format!("邮件发送失败: {}", e)))?;
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.mail.send_failed")))?;
 
         tracing::info!("邮件发送成功: to={}, subject={}", to_email, subject);
         Ok(())

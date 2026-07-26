@@ -20,6 +20,8 @@ error:
     internal: 系统内部错误，请联系管理员
     validate_failed: 参数校验失败
     parse_failed: 请求参数解析失败
+    time_format_invalid: "时间格式不正确: {{s}}"
+    batch_size_exceeded: "批量操作数量不能超过{{max}}"
   auth:
     captcha_expired: 验证码已过期或不存在
     captcha_wrong: 验证码错误
@@ -52,6 +54,7 @@ error:
     token_invalid: token 格式错误，应为 Bearer <token>
     token_revoked: 会话已注销，请重新登录
     user_id_parse_failed: 用户 ID 解析失败
+    captcha_uuid_invalid: 验证码 UUID 格式无效
   file:
     delete_failed: 删除文件失败
     delete_task_failed: 删除任务失败
@@ -60,8 +63,8 @@ error:
     invalid_name: 非法的文件名
     list_failed: 读取目录失败
     list_task_failed: 读取目录任务失败
-    multipart_parse_failed: 解析 multipart 失败
-    read_failed: 读取文件内容失败
+    multipart_parse_failed: "解析 multipart 失败: {{e}}"
+    read_failed: "读取文件内容失败: {{e}}"
     too_large: "文件大小不能超过 {{max}}MB"
     unknown_ext: 无法识别文件扩展名
     unsupported_type: "不支持的文件类型: {{ext}}"
@@ -80,12 +83,41 @@ error:
     same_password: 新密码不能与旧密码相同
     password_missing: 用户密码字段缺失
     higher_role_forbidden: 不允许操作比自己更高优先级的角色
+    operator_id_parse_failed: 操作人用户 ID 解析失败
+    id_empty: 用户 ID 不能为空
+    pwd_reset_token_invalidate_failed: 密码重置成功，但旧 token 失效标记写入失败
+    pwd_change_token_invalidate_failed: 密码修改成功，但旧 token 失效标记写入失败
   config:
     not_found: 参数配置不存在
     key_exists: 参数键名已存在
+    id_invalid: 参数 ID 不合法
+  dept:
+    not_found: 部门不存在
+    parent_not_found: 父部门不存在
+    parent_deleted: 父部门已删除
+    parent_self_forbidden: 上级部门不能选择自己
+    has_children: 存在子部门，不允许删除
+    assigned_to_role: 部门已分配给角色，不允许删除
+    ids_empty: deptIds/orderNums 解析后为空
+    level_too_deep: 部门层级过深，防环校验失败
+    id_not_found: "部门 ID={{id}} 不存在"
+    ids_count_mismatch: deptIds 与 orderNums 数量不一致
+  menu:
+    not_found: 菜单不存在
+    parent_not_found: 父菜单不存在
+    parent_deleted: 父菜单已删除
+    perm_exists: 权限标识已存在
+    parent_self_forbidden: 上级菜单不能选择自己
+    has_children: 存在子菜单，不允许删除
+    assigned_to_role: 菜单已分配给角色，不允许删除
+    ids_empty: menuIds/orderNums 解析后为空
+    level_too_deep: 菜单层级过深，防环校验失败
+    id_not_found: "菜单 ID={{id}} 不存在"
+    ids_count_mismatch: menuIds 与 orderNums 数量不一致
   rate_limit:
     not_found: 限流配置不存在
     pattern_exists: 路由前缀已存在
+    id_invalid: 参数 ID 不合法
   monitor:
     session_not_found: 会话不存在或已过期
     session_invalid: 会话数据异常
@@ -93,8 +125,11 @@ error:
   post:
     not_found: 岗位不存在
     code_exists: 岗位编码已存在
+    id_invalid: 岗位 ID 不合法
+    assigned_to_user: "岗位 {{id}} 已分配给用户，不能删除"
   task:
     not_found: 任务不存在
+    id_invalid: 任务 ID 不合法
   gen:
     time_format: 时间格式不正确
     int_default: 整数类型默认值不是有效数字
@@ -105,6 +140,157 @@ error:
     table_id_not_found: 表 ID 不存在
     table_not_imported: 表未导入
     table_no_columns: 表不存在或没有字段
+    table_select_required: 请选择要导入的表
+    table_id_invalid: 表 ID 不合法
+    table_name_invalid: 非法的表名
+    table_select_for_gen_required: 请选择要生成的表
+    zip_write_failed: ZIP 写入失败
+    zip_finish_failed: ZIP 完成失败
+    template_load_failed: Tera 模板加载失败
+    path_empty_component: 路径组件包含非法空字符
+    record_not_found: 记录不存在
+    field_length_invalid: "{{field}} 长度必须在1-64之间"
+    field_start_invalid: "{{field}} 必须以字母或下划线开头"
+    field_char_invalid: "{{field}} 只能包含字母、数字、下划线"
+    bool_default_invalid: "布尔类型默认值 {{value}} 必须是 true/false/0/1"
+    table_already_imported: "表 {{name}} 已导入，请勿重复导入"
+    table_no_columns_or_not_exist: "表 {{name}} 不存在或没有字段"
+    table_already_in_gen: "表 {{name}} 已存在于 gen_table，请勿重复创建"
+    table_already_in_db: "表 {{name}} 已存在于数据库，请勿重复创建"
+    column_name_duplicate: "列名 {{name}} 重复"
+    column_type_length_required: "列 {{name}} 的类型 {{ty}} 需要指定长度"
+    column_decimal_scale_required: "列 {{name}} 的类型 Decimal 需要指定小数位"
+    column_decimal_scale_invalid: "列 {{name}} 的小数位 {{scale}} 必须小于长度 {{length}}"
+    column_auto_inc_no_pk: "列 {{name}} 设置自增但未设置主键"
+    column_auto_inc_not_int: "列 {{name}} 设置自增但类型 {{ty}} 不是整数类型"
+    template_render_failed: "模板渲染失败 ({{name}}): {{msg}}"
+    path_component_invalid: "路径组件包含非法字符（不允许 .. / \\）：{{name}}"
+    batch_tables_exceeded: "单次最多生成 {{max}} 张表的代码"
+  common_handler:
+    field_not_found_file: 未找到 file 字段
+    field_not_found_avatar: 未找到 avatarfile 字段
+    file_empty: 上传文件为空
+    file_ext_unknown: 无法识别文件扩展名
+    image_format_unknown: 无法识别的图片格式，仅支持 jpg/jpeg/png/gif
+    filename_invalid: 非法的文件名
+    resource_path_invalid: 非法的资源路径
+    file_not_found: 文件不存在
+    resource_not_found: 资源不存在
+  excel:
+    fields_empty: 导出字段列表为空或无匹配字段
+    build_task_failed: Excel 构建任务失败
+    sheet_create_failed: 创建工作表失败
+    header_write_failed: 写入表头失败
+    data_write_failed: 写入数据失败
+    generate_failed: 生成 Excel 失败
+  ip_location:
+    source_invalid: 更新源必须为 maxmind 或 p3terx
+    unknown_source_type: "未知的更新源类型: {{s}}"
+    maxmind_credentials_required: 切换到 maxmind 源需配置 Account ID 和 License Key
+  cache:
+    name_wildcard_forbidden: 缓存名称不允许包含通配符
+    info_fetch_failed: 获取缓存信息失败
+    key_count_failed: 获取键数量失败
+    value_query_failed: 查询缓存值失败
+    key_clear_failed: 清除缓存键失败
+    key_scan_failed: 扫描缓存键失败
+    key_batch_delete_failed: 批量删除缓存键失败
+    flushdb_disabled: 该端点已禁用：FLUSHDB 会误清 blacklist/online/login_fail 等业务键，请使用 clearCacheName 按前缀清理
+    prefix_not_allowed: "不允许操作缓存前缀: {{prefix}}，仅支持: {{allowed}}"
+    key_prefix_required: "缓存键必须以 {{name}} 开头"
+  backup:
+    id_invalid: 备份 ID 不合法
+    db_url_invalid: 数据库 URL 格式不正确
+    mkdir_failed: 创建备份目录失败
+    mkdir_task_join_failed: 创建备份目录任务 join 失败
+    filename_invalid: 非法的备份文件名
+    sqlite3_failed: sqlite3 调用失败
+    write_task_join_failed: 写入任务 join 失败
+    write_failed: 写入备份文件失败
+    process_start_failed: 启动备份进程失败
+    process_exec_failed: 备份进程执行失败
+    record_not_found: 备份记录不存在
+    restore_status_invalid: 仅可恢复成功的备份
+    filename_invalid_restore: 备份文件名不合法
+    file_exist_check_join_failed: 文件存在性检查任务 join 失败
+    file_not_found: 备份文件不存在
+    restore_process_start_failed: 启动恢复进程失败
+    restore_process_exec_failed: 恢复进程执行失败
+    delete_file_task_failed: 删除备份文件任务失败
+    download_status_invalid: 仅可下载成功的备份
+    read_file_task_failed: 读取文件任务失败
+    read_backup_file_failed: 读取备份文件失败
+    unsupported_db_type: "不支持的数据库类型: {{url}}"
+    db_backup_failed: 数据库备份失败
+    process_timeout: "备份进程超时（{{secs}} 秒）"
+    process_nonzero_exit: "备份进程返回非零状态: {{err}}"
+    db_restore_failed: 数据库恢复失败
+    restore_process_timeout: "恢复进程超时（{{secs}} 秒）"
+    restore_process_nonzero_exit: "恢复进程返回非零状态: {{err}}"
+    sqlite3_backup_failed: "sqlite3 备份失败: {{err}}"
+    sqlite3_branch_unreachable: SQLite 备份应在上文处理，不应到达此分支（请检查代码逻辑）
+  server:
+    info_fetch_failed: 服务器信息采集失败
+  dict:
+    type_not_found: 字典类型不存在
+    type_exists: 字典类型已存在
+    data_not_found: 字典数据不存在
+    id_invalid: 字典 ID 不合法
+    data_id_invalid: 字典数据 ID 不合法
+  job:
+    cron_invalid: cron 表达式非法
+    name_exists: 任务名称已存在
+    group_mismatch: 任务组名不匹配
+    id_invalid: 任务 ID 不合法
+  scheduler:
+    operation_failed: 调度器操作失败，请联系管理员
+  oper_log:
+    id_invalid: 日志 ID 不合法
+  login_log:
+    id_invalid: 日志 ID 不合法
+    admin_unlock_forbidden: 不允许解锁超级管理员账号
+  mail:
+    from_invalid: 发件人邮箱地址无效
+    to_invalid: 收件人邮箱地址无效
+    build_failed: 构建邮件失败
+    smtp_not_initialized: SMTP 客户端未初始化
+    send_failed: 邮件发送失败
+  notice:
+    not_found: 通知公告不存在
+    id_invalid: 通知公告 ID 不合法
+    user_email_query_failed: 查询用户邮箱失败
+  role:
+    not_found: 角色不存在
+    perm_key_exists: 角色权限字符不能重复
+    admin_perm_key_forbidden: 不允许修改超级管理员角色的权限字符
+    admin_delete_forbidden: 不允许删除超级管理员角色
+    admin_disable_forbidden: 不允许停用超级管理员角色
+    admin_data_scope_forbidden: 不允许修改超级管理员角色的数据权限
+    user_id_empty: 用户 ID 不能为空
+    id_empty: 角色 ID 不能为空
+    assigned_to_user: "角色 {{id}} 已分配给用户，不允许删除"
+    not_found_by_id: "角色 {{id}} 不存在"
+  job_log:
+    id_invalid: 日志 ID 不合法
+  totp:
+    user_id_parse_failed: 用户 ID 解析失败
+    not_enabled: TOTP 未启用
+    secret_invalid: 无效的 TOTP secret
+    code_invalid: 验证码错误或已过期
+    password_hash_invalid: 密码哈希格式错误
+    password_wrong: 密码错误
+    secret_decode_failed: TOTP secret 解码失败
+    secret_gen_failed: 生成 secret 失败
+    totp_build_failed: 构建 TOTP 失败
+    qr_gen_failed: 生成 QR 码失败
+    redis_write_failed: 写入 Redis 失败
+    user_query_failed: 查询用户失败
+    redis_delete_failed: 删除 Redis 失败
+  upload:
+    write_task_failed: 文件写入任务失败
+    write_failed: 写入上传文件失败
+    file_read_task_failed: 文件读取任务失败
+    file_read_failed: 读取文件失败
 
 msg:
   success:
@@ -133,9 +319,16 @@ msg:
     auth: 授权成功
     import: 导入成功
     sync: 同步成功
+    add_user: "新增用户 {{name}} 成功"
+    add_role: "新增角色 {{name}} 成功"
+    add_dept: "新增部门 {{name}} 成功"
+    add_menu: "新增菜单 {{name}} 成功"
   cache:
     no_match: 无匹配缓存
     key_not_found: 缓存键不存在
+    cleared: "清除成功，共删除 {{count}} 个键"
+  export:
+    progress: "导出 {{count}} 条"
 
 # H-3：登录日志审计消息（write_login_log 用，区分细分原因用于审计；
 # 对外返回给用户的错误消息统一用 error.auth.* 系列，避免用户名枚举）

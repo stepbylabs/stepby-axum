@@ -134,7 +134,7 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&job_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request("任务 ID 不合法"));
+        return Err(AppError::bad_request(&crate::tr!("error.job.id_invalid")));
     }
 
     state.job_service.delete_jobs(ids).await?;

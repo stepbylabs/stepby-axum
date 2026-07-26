@@ -261,7 +261,7 @@ impl SysJobService {
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
-            return Err(ServiceError::bad_request("cron 表达式非法"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.job.cron_invalid")));
         }
 
         // 查重
@@ -270,7 +270,7 @@ impl SysJobService {
             .find_by_name_and_group(&dto.job_name, &dto.job_group)
             .await?
         {
-            return Err(ServiceError::bad_request("任务名称已存在"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.job.name_exists")));
         }
 
         let status = dto.status.unwrap_or_else(|| "0".to_string());
@@ -320,7 +320,7 @@ impl SysJobService {
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
-            return Err(ServiceError::bad_request("cron 表达式非法"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.job.cron_invalid")));
         }
 
         let old_status = existing.status.as_deref().unwrap_or("0").to_string();
@@ -464,7 +464,7 @@ impl SysJobService {
 
         // 验证 job_group 一致
         if job.job_group != dto.job_group {
-            return Err(ServiceError::bad_request("任务组名不匹配"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.job.group_mismatch")));
         }
 
         self.scheduler.run_once(&job).await?;

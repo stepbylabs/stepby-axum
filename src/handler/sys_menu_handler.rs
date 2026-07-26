@@ -136,7 +136,7 @@ pub async fn add(
     Json(dto): Json<MenuAddDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let menu = state.menu_service.add_menu(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&format!("新增菜单 {} 成功", menu.menu_name)))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_menu", name = menu.menu_name)))
 }
 
 /// PUT /system/menu

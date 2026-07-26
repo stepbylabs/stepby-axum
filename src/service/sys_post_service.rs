@@ -244,9 +244,9 @@ impl SysPostService {
                             .find_by_post_id_conn(txn, *post_id)
                             .await?;
                         if !relations.is_empty() {
-                            return Err(ServiceError::bad_request(&format!(
-                                "岗位 {} 已分配给用户，不能删除",
-                                post_id
+                            return Err(ServiceError::bad_request(&crate::tr!(
+                                "error.post.assigned_to_user",
+                                id = post_id
                             )));
                         }
                         // 校验岗位存在且未删除，并记录 post_code 用于重命名（事务内预查询）

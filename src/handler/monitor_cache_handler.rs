@@ -38,13 +38,14 @@ const ALLOWED_CACHE_PREFIXES: &[&str] = &[
 fn validate_cache_prefix(prefix: &str) -> Result<(), AppError> {
     // 拒绝包含通配符的输入
     if prefix.contains('*') || prefix.contains('?') || prefix.contains('[') {
-        return Err(AppError::bad_request("缓存名称不允许包含通配符"));
+        return Err(AppError::bad_request(&crate::tr!("error.cache.name_wildcard_forbidden")));
     }
     // 检查白名单
     if !ALLOWED_CACHE_PREFIXES.iter().any(|p| prefix.starts_with(p)) {
-        return Err(AppError::bad_request(&format!(
-            "不允许操作缓存前缀: {}，仅支持: {:?}",
-            prefix, ALLOWED_CACHE_PREFIXES
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.cache.prefix_not_allowed",
+            prefix = prefix,
+            allowed = format!("{:?}", ALLOWED_CACHE_PREFIXES)
         )));
     }
     Ok(())
@@ -110,7 +111,7 @@ pub async fn get_cache(
         .await
         .map_err(|e| {
             tracing::error!("执行 Redis INFO 失败: {}", e);
-            AppError::internal("获取缓存信息失败")
+            AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
         })?;
     let info = parse_redis_info(&info_text);
 
@@ -120,7 +121,7 @@ pub async fn get_cache(
         .await
         .map_err(|e| {
             tracing::error!("执行 Redis DBSIZE 失败: {}", e);
-            AppError::internal("获取键数量失败")
+            AppError::internal(&crate::tr!("error.cache.key_count_failed"))
         })?;
 
     // 3. 获取命令统计
@@ -238,9 +239,9 @@ pub async fn get_value(
     // 校验 cache_key 必须以 cache_name 开头，防止 IDOR
     // （如 cache_name="dict:" 时传 cache_key="blacklist:xxx" 读取任意键）
     if !cache_key.starts_with(&cache_name) {
-        return Err(AppError::bad_request(&format!(
-            "缓存键必须以 {} 开头",
-            cache_name
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.cache.key_prefix_required",
+            name = cache_name
         )));
     }
     let mut redis = state.redis.clone();
@@ -262,7 +263,7 @@ pub async fn get_value(
             .await
             .map_err(|e| {
                 tracing::error!("Redis GET 查询失败: {}", e);
-                AppError::internal("查询缓存值失败")
+                AppError::internal(&crate::tr!("error.cache.value_query_failed"))
             })?
             .unwrap_or_default()
     } else {
@@ -309,7 +310,7 @@ pub async fn clear_cache_name(
 
     // 批量删除
     let count = delete_keys(&mut redis, &keys).await?;
-    Ok(AjaxResult::success_msg(&format!("清除成功，共删除 {} 个键", count)))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.cleared", count = count)))
 }
 
 /// DELETE /monitor/cache/clearCacheKey/{cacheKey}
@@ -340,7 +341,7 @@ pub async fn clear_cache_key(
         .await
         .map_err(|e| {
             tracing::error!("执行 Redis DEL {} 失败: {}", cache_key, e);
-            AppError::internal("清除缓存键失败")
+            AppError::internal(&crate::tr!("error.cache.key_clear_failed"))
         })?;
 
     if deleted == 0 {
@@ -367,7 +368,7 @@ pub async fn clear_cache_key(
 pub async fn clear_cache_all(
     State(_state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<()>, AppError> {
-    Err(AppError::new(403, "该端点已禁用：FLUSHDB 会误清 blacklist/online/login_fail 等业务键，请使用 clearCacheName 按前缀清理"))
+    Err(AppError::new(403, &crate::tr!("error.cache.flushdb_disabled")))
 }
 
 // ==================== 辅助函数 ====================
@@ -393,7 +394,7 @@ pub async fn scan_keys(
             .await
             .map_err(|e| {
                 tracing::error!("执行 Redis SCAN 失败: {}", e);
-                AppError::internal("扫描缓存键失败")
+                AppError::internal(&crate::tr!("error.cache.key_scan_failed"))
             })?;
         keys.extend(batch);
         if next_cursor == 0 {
@@ -467,7 +468,7 @@ async fn delete_keys(
         .await
         .map_err(|e| {
             tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
-            AppError::internal("批量删除缓存键失败")
+            AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
         })?;
     Ok(count)
 }

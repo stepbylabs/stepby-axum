@@ -153,7 +153,7 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&config_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request("参数 ID 不合法"));
+        return Err(AppError::bad_request(&crate::tr!("error.config.id_invalid")));
     }
 
     state.config_service.delete_configs(ids).await?;

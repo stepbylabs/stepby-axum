@@ -20,6 +20,8 @@ error:
     internal: Internal system error, please contact the administrator
     validate_failed: Parameter validation failed
     parse_failed: Failed to parse request parameters
+    time_format_invalid: "Invalid time format: {{s}}"
+    batch_size_exceeded: "Batch operation size cannot exceed {{max}}"
   auth:
     captcha_expired: Captcha expired or does not exist
     captcha_wrong: Incorrect captcha
@@ -52,6 +54,7 @@ error:
     token_invalid: Invalid token format, expected Bearer <token>
     token_revoked: Session has been revoked, please log in again
     user_id_parse_failed: Failed to parse user ID
+    captcha_uuid_invalid: Invalid captcha UUID format
   file:
     delete_failed: Failed to delete file
     delete_task_failed: Delete task failed
@@ -60,8 +63,8 @@ error:
     invalid_name: Invalid file name
     list_failed: Failed to read directory
     list_task_failed: Read directory task failed
-    multipart_parse_failed: Failed to parse multipart
-    read_failed: Failed to read file content
+    multipart_parse_failed: "Failed to parse multipart: {{e}}"
+    read_failed: "Failed to read file content: {{e}}"
     too_large: "File size cannot exceed {{max}}MB"
     unknown_ext: Cannot recognize file extension
     unsupported_type: "Unsupported file type: {{ext}}"
@@ -80,12 +83,41 @@ error:
     same_password: The new password cannot be the same as the old one
     password_missing: User password field is missing
     higher_role_forbidden: Cannot operate on users with higher priority roles
+    operator_id_parse_failed: Operator user ID parse failed
+    id_empty: User ID cannot be empty
+    pwd_reset_token_invalidate_failed: Password reset succeeded, but old token invalidation marking failed
+    pwd_change_token_invalidate_failed: Password changed, but old token invalidation marking failed
   config:
     not_found: Configuration not found
     key_exists: Configuration key already exists
+    id_invalid: Invalid config ID
+  dept:
+    not_found: Department does not exist
+    parent_not_found: Parent department does not exist
+    parent_deleted: Parent department has been deleted
+    parent_self_forbidden: Parent department cannot be itself
+    has_children: Has child departments, cannot delete
+    assigned_to_role: Department is assigned to roles, cannot delete
+    ids_empty: deptIds/orderNums is empty after parsing
+    level_too_deep: Department hierarchy too deep, cycle check failed
+    id_not_found: "Department ID={{id}} does not exist"
+    ids_count_mismatch: deptIds and orderNums count mismatch
+  menu:
+    not_found: Menu does not exist
+    parent_not_found: Parent menu does not exist
+    parent_deleted: Parent menu has been deleted
+    perm_exists: Permission key already exists
+    parent_self_forbidden: Parent menu cannot be itself
+    has_children: Has child menus, cannot delete
+    assigned_to_role: Menu is assigned to roles, cannot delete
+    ids_empty: menuIds/orderNums is empty after parsing
+    level_too_deep: Menu hierarchy too deep, cycle check failed
+    id_not_found: "Menu ID={{id}} does not exist"
+    ids_count_mismatch: menuIds and orderNums count mismatch
   rate_limit:
     not_found: Rate limit configuration not found
     pattern_exists: Route pattern already exists
+    id_invalid: Invalid config ID
   monitor:
     session_not_found: Session does not exist or has expired
     session_invalid: Session data invalid
@@ -93,8 +125,11 @@ error:
   post:
     not_found: Post does not exist
     code_exists: Post code already exists
+    id_invalid: Invalid post ID
+    assigned_to_user: "Post {{id}} is assigned to users, cannot delete"
   task:
     not_found: Task does not exist
+    id_invalid: Invalid task ID
   gen:
     time_format: Invalid time format
     int_default: Integer default value is not a valid number
@@ -105,6 +140,157 @@ error:
     table_id_not_found: Table ID does not exist
     table_not_imported: Table not imported
     table_no_columns: Table does not exist or has no columns
+    table_select_required: Please select tables to import
+    table_id_invalid: Invalid table ID
+    table_name_invalid: Invalid table name
+    table_select_for_gen_required: Please select tables to generate
+    zip_write_failed: ZIP write failed
+    zip_finish_failed: ZIP finish failed
+    template_load_failed: Tera template load failed
+    path_empty_component: Path component contains invalid empty string
+    record_not_found: Record does not exist
+    field_length_invalid: "{{field}} length must be between 1-64"
+    field_start_invalid: "{{field}} must start with letter or underscore"
+    field_char_invalid: "{{field}} can only contain letters, digits, underscores"
+    bool_default_invalid: "Boolean default value {{value}} must be true/false/0/1"
+    table_already_imported: "Table {{name}} already imported, do not import again"
+    table_no_columns_or_not_exist: "Table {{name}} does not exist or has no columns"
+    table_already_in_gen: "Table {{name}} already exists in gen_table, do not create again"
+    table_already_in_db: "Table {{name}} already exists in database, do not create again"
+    column_name_duplicate: "Column name {{name}} duplicated"
+    column_type_length_required: "Column {{name}} type {{ty}} requires length"
+    column_decimal_scale_required: "Column {{name}} type Decimal requires scale"
+    column_decimal_scale_invalid: "Column {{name}} scale {{scale}} must be less than length {{length}}"
+    column_auto_inc_no_pk: "Column {{name}} set auto increment but no primary key"
+    column_auto_inc_not_int: "Column {{name}} set auto increment but type {{ty}} is not integer"
+    template_render_failed: "Template render failed ({{name}}): {{msg}}"
+    path_component_invalid: "Path component contains invalid characters (.. / \\ not allowed): {{name}}"
+    batch_tables_exceeded: "At most {{max}} tables can be generated at once"
+  common_handler:
+    field_not_found_file: file field not found
+    field_not_found_avatar: avatarfile field not found
+    file_empty: Uploaded file is empty
+    file_ext_unknown: Cannot recognize file extension
+    image_format_unknown: Unrecognized image format, only jpg/jpeg/png/gif supported
+    filename_invalid: Invalid file name
+    resource_path_invalid: Invalid resource path
+    file_not_found: File does not exist
+    resource_not_found: Resource does not exist
+  excel:
+    fields_empty: Export field list is empty or no matching fields
+    build_task_failed: Excel build task failed
+    sheet_create_failed: Failed to create worksheet
+    header_write_failed: Failed to write header
+    data_write_failed: Failed to write data
+    generate_failed: Failed to generate Excel
+  ip_location:
+    source_invalid: Update source must be maxmind or p3terx
+    unknown_source_type: "Unknown update source type: {{s}}"
+    maxmind_credentials_required: Switching to maxmind source requires Account ID and License Key
+  cache:
+    name_wildcard_forbidden: Cache name cannot contain wildcards
+    info_fetch_failed: Failed to fetch cache info
+    key_count_failed: Failed to get key count
+    value_query_failed: Failed to query cache value
+    key_clear_failed: Failed to clear cache key
+    key_scan_failed: Failed to scan cache keys
+    key_batch_delete_failed: Failed to batch delete cache keys
+    flushdb_disabled: "This endpoint is disabled: FLUSHDB would clear business keys such as blacklist/online/login_fail. Use clearCacheName to clear by prefix"
+    prefix_not_allowed: "Cache prefix not allowed: {{prefix}}, supported: {{allowed}}"
+    key_prefix_required: "Cache key must start with {{name}}"
+  backup:
+    id_invalid: Invalid backup ID
+    db_url_invalid: Database URL format is invalid
+    mkdir_failed: Failed to create backup directory
+    mkdir_task_join_failed: Create backup directory task join failed
+    filename_invalid: Invalid backup file name
+    sqlite3_failed: sqlite3 invocation failed
+    write_task_join_failed: Write task join failed
+    write_failed: Failed to write backup file
+    process_start_failed: Failed to start backup process
+    process_exec_failed: Backup process execution failed
+    record_not_found: Backup record does not exist
+    restore_status_invalid: Only successful backups can be restored
+    filename_invalid_restore: Backup file name is invalid
+    file_exist_check_join_failed: File existence check task join failed
+    file_not_found: Backup file does not exist
+    restore_process_start_failed: Failed to start restore process
+    restore_process_exec_failed: Restore process execution failed
+    delete_file_task_failed: Delete backup file task failed
+    download_status_invalid: Only successful backups can be downloaded
+    read_file_task_failed: Read file task failed
+    read_backup_file_failed: Failed to read backup file
+    unsupported_db_type: "Unsupported database type: {{url}}"
+    db_backup_failed: Database backup failed
+    process_timeout: "Backup process timed out ({{secs}} seconds)"
+    process_nonzero_exit: "Backup process returned non-zero status: {{err}}"
+    db_restore_failed: Database restore failed
+    restore_process_timeout: "Restore process timed out ({{secs}} seconds)"
+    restore_process_nonzero_exit: "Restore process returned non-zero status: {{err}}"
+    sqlite3_backup_failed: "sqlite3 backup failed: {{err}}"
+    sqlite3_branch_unreachable: SQLite backup should be handled above; this branch is unreachable (please check code logic)
+  server:
+    info_fetch_failed: Server info collection failed
+  dict:
+    type_not_found: Dict type does not exist
+    type_exists: Dict type already exists
+    data_not_found: Dict data does not exist
+    id_invalid: Invalid dict ID
+    data_id_invalid: Invalid dict data ID
+  job:
+    cron_invalid: Invalid cron expression
+    name_exists: Job name already exists
+    group_mismatch: Job group name mismatch
+    id_invalid: Invalid job ID
+  scheduler:
+    operation_failed: Scheduler operation failed, please contact the administrator
+  oper_log:
+    id_invalid: Invalid log ID
+  login_log:
+    id_invalid: Invalid log ID
+    admin_unlock_forbidden: Cannot unlock the super administrator account
+  mail:
+    from_invalid: Invalid sender email address
+    to_invalid: Invalid recipient email address
+    build_failed: Failed to build email
+    smtp_not_initialized: SMTP client not initialized
+    send_failed: Failed to send email
+  notice:
+    not_found: Notice does not exist
+    id_invalid: Invalid notice ID
+    user_email_query_failed: Failed to query user email
+  role:
+    not_found: Role does not exist
+    perm_key_exists: Role permission key cannot be duplicated
+    admin_perm_key_forbidden: Cannot modify super admin role permission key
+    admin_delete_forbidden: Cannot delete super admin role
+    admin_disable_forbidden: Cannot disable super admin role
+    admin_data_scope_forbidden: Cannot modify super admin role data scope
+    user_id_empty: User ID cannot be empty
+    id_empty: Role ID cannot be empty
+    assigned_to_user: "Role {{id}} is assigned to users, cannot delete"
+    not_found_by_id: "Role {{id}} does not exist"
+  job_log:
+    id_invalid: Invalid log ID
+  totp:
+    user_id_parse_failed: Failed to parse user ID
+    not_enabled: TOTP is not enabled
+    secret_invalid: Invalid TOTP secret
+    code_invalid: Verification code is incorrect or expired
+    password_hash_invalid: Password hash format error
+    password_wrong: Password is incorrect
+    secret_decode_failed: TOTP secret decoding failed
+    secret_gen_failed: Failed to generate secret
+    totp_build_failed: Failed to build TOTP
+    qr_gen_failed: Failed to generate QR code
+    redis_write_failed: Failed to write to Redis
+    user_query_failed: Failed to query user
+    redis_delete_failed: Failed to delete from Redis
+  upload:
+    write_task_failed: File write task failed
+    write_failed: Failed to write uploaded file
+    file_read_task_failed: File read task failed
+    file_read_failed: Failed to read file
 
 msg:
   success:
@@ -133,9 +319,16 @@ msg:
     auth: Authorized successfully
     import: Imported successfully
     sync: Synced successfully
+    add_user: "Added user {{name}} successfully"
+    add_role: "Added role {{name}} successfully"
+    add_dept: "Added department {{name}} successfully"
+    add_menu: "Added menu {{name}} successfully"
   cache:
     no_match: No matching cache
     key_not_found: Cache key does not exist
+    cleared: "Cleared successfully, deleted {{count}} keys"
+  export:
+    progress: "Exported {{count}} rows"
 
 # H-3: Login log audit messages (used by write_login_log for granular audit reasons;
 # user-facing error messages use error.auth.* to avoid username enumeration)
