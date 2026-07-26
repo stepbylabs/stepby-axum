@@ -328,7 +328,13 @@ fn format_duration(secs: u64) -> String {
     let days = secs as i64 / SECS_PER_DAY;
     let hours = (secs as i64 % SECS_PER_DAY) / SECS_PER_HOUR;
     let minutes = (secs as i64 % SECS_PER_HOUR) / SECS_PER_MIN;
-    format!("{}天{}小时{}分钟", days, hours, minutes)
+    crate::tr!(
+        "error.monitor_server.duration_format",
+        days = days,
+        hours = hours,
+        minutes = minutes
+    )
+    .to_string()
 }
 
 /// 保留一位小数

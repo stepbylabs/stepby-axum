@@ -164,9 +164,9 @@ impl IpLocator {
     /// - "内网IP"（内网 IP）
     /// - ""（查询失败或字段缺失）
     pub fn locate(&self, ip: &str) -> String {
-        // 内网 IP 直接返回 "内网IP"
+        // 内网 IP 直接返回 i18n 文案
         if is_private_ip(ip) {
-            return "内网IP".to_string();
+            return crate::tr!("error.ip_location.private_ip").to_string();
         }
 
         // 1. 优先查 xdb（国内精度更高，仅支持 IPv4）

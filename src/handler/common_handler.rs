@@ -461,7 +461,7 @@ pub async fn upload(
 
     Ok(CommonUploadResult {
         code: 200,
-        msg: "上传成功".to_string(),
+        msg: crate::tr!("error.common_handler.upload_success").to_string(),
         url: url.clone(),
         file_name: url,
         new_file_name: new_filename,

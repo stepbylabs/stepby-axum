@@ -118,6 +118,8 @@ error:
     not_found: 限流配置不存在
     pattern_exists: 路由前缀已存在
     id_invalid: 参数 ID 不合法
+    service_unavailable: 服务暂时不可用
+    too_many_requests: 请求过于频繁，请稍后再试
   monitor:
     session_not_found: 会话不存在或已过期
     session_invalid: 会话数据异常
@@ -143,6 +145,7 @@ error:
     table_select_required: 请选择要导入的表
     table_id_invalid: 表 ID 不合法
     table_name_invalid: 非法的表名
+    invalid_table_name_with_value: "非法表名: {{name}}"
     table_select_for_gen_required: 请选择要生成的表
     zip_write_failed: ZIP 写入失败
     zip_finish_failed: ZIP 完成失败
@@ -176,17 +179,7 @@ error:
     resource_path_invalid: 非法的资源路径
     file_not_found: 文件不存在
     resource_not_found: 资源不存在
-  excel:
-    fields_empty: 导出字段列表为空或无匹配字段
-    build_task_failed: Excel 构建任务失败
-    sheet_create_failed: 创建工作表失败
-    header_write_failed: 写入表头失败
-    data_write_failed: 写入数据失败
-    generate_failed: 生成 Excel 失败
-  ip_location:
-    source_invalid: 更新源必须为 maxmind 或 p3terx
-    unknown_source_type: "未知的更新源类型: {{s}}"
-    maxmind_credentials_required: 切换到 maxmind 源需配置 Account ID 和 License Key
+    upload_success: 上传成功
   cache:
     name_wildcard_forbidden: 缓存名称不允许包含通配符
     info_fetch_failed: 获取缓存信息失败
@@ -198,6 +191,22 @@ error:
     flushdb_disabled: 该端点已禁用：FLUSHDB 会误清 blacklist/online/login_fail 等业务键，请使用 clearCacheName 按前缀清理
     prefix_not_allowed: "不允许操作缓存前缀: {{prefix}}，仅支持: {{allowed}}"
     key_prefix_required: "缓存键必须以 {{name}} 开头"
+    key_count_remark: "{{count}} 个键"
+    type_not_previewable: "[{{type}} 类型缓存，不支持预览]"
+  monitor_server:
+    duration_format: "{{days}}天{{hours}}小时{{minutes}}分钟"
+  excel:
+    fields_empty: 导出字段列表为空或无匹配字段
+    build_task_failed: Excel 构建任务失败
+    sheet_create_failed: 创建工作表失败
+    header_write_failed: 写入表头失败
+    data_write_failed: 写入数据失败
+    generate_failed: 生成 Excel 失败
+  ip_location:
+    source_invalid: 更新源必须为 maxmind 或 p3terx
+    unknown_source_type: "未知的更新源类型: {{s}}"
+    maxmind_credentials_required: 切换到 maxmind 源需配置 Account ID 和 License Key
+    private_ip: 内网IP
   backup:
     id_invalid: 备份 ID 不合法
     db_url_invalid: 数据库 URL 格式不正确
@@ -246,6 +255,7 @@ error:
     operation_failed: 调度器操作失败，请联系管理员
   oper_log:
     id_invalid: 日志 ID 不合法
+    anonymous: 匿名
   login_log:
     id_invalid: 日志 ID 不合法
     admin_unlock_forbidden: 不允许解锁超级管理员账号

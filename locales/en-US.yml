@@ -176,6 +176,7 @@ error:
     resource_path_invalid: Invalid resource path
     file_not_found: File does not exist
     resource_not_found: Resource does not exist
+    upload_success: Upload successful
   excel:
     fields_empty: Export field list is empty or no matching fields
     build_task_failed: Excel build task failed
@@ -187,6 +188,7 @@ error:
     source_invalid: Update source must be maxmind or p3terx
     unknown_source_type: "Unknown update source type: {{s}}"
     maxmind_credentials_required: Switching to maxmind source requires Account ID and License Key
+    private_ip: Private IP
   cache:
     name_wildcard_forbidden: Cache name cannot contain wildcards
     info_fetch_failed: Failed to fetch cache info
@@ -198,6 +200,10 @@ error:
     flushdb_disabled: "This endpoint is disabled: FLUSHDB would clear business keys such as blacklist/online/login_fail. Use clearCacheName to clear by prefix"
     prefix_not_allowed: "Cache prefix not allowed: {{prefix}}, supported: {{allowed}}"
     key_prefix_required: "Cache key must start with {{name}}"
+    key_count_remark: "{{count}} keys"
+    type_not_previewable: "[{{type}} type cache, preview not supported]"
+  monitor_server:
+    duration_format: "{{days}}d {{hours}}h {{minutes}}m"
   backup:
     id_invalid: Invalid backup ID
     db_url_invalid: Database URL format is invalid
@@ -246,6 +252,7 @@ error:
     operation_failed: Scheduler operation failed, please contact the administrator
   oper_log:
     id_invalid: Invalid log ID
+    anonymous: Anonymous
   login_log:
     id_invalid: Invalid log ID
     admin_unlock_forbidden: Cannot unlock the super administrator account
