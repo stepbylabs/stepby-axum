@@ -25,7 +25,7 @@
 |------|------|------|------|
 | JWT 签发/验证 | `src/jwt/claims.rs` | ✅ 已实现 | `JwtUtils::generate_token` / `verify_token`，Claims 含 sub/username/exp/iat/iss |
 | JWT 鉴权中间件 | `src/middleware/auth.rs` | ✅ 已实现 | `auth_middleware`（from_fn_with_state 模式）+ `Operator` 提取器 |
-| 密码加密校验 | `src/utils/password.rs` | ✅ 已实现 | MD5 + 盐值 "yebot_admin"，`encrypt_password` / `verify_password` |
+| 密码加密校验 | `src/utils/password.rs` | ✅ 已实现 | Argon2id + 随机盐（旧 MD5 仅 fallback），`encrypt_password` / `verify_password` |
 | 验证码生成 | `src/utils/captcha.rs` | ✅ 已实现 | `generate_captcha() -> CaptchaResult { uuid, img_base64, code }` |
 | Redis 连接池 | `src/db/redis.rs` | ✅ 已实现 | `ConnectionManager`（自动重连），存入 `AppState.redis` |
 | 用户 Service | `src/service/sys_user_service.rs` | ✅ 已实现 | `get_user_by_username`（不过滤 del_flag） |
@@ -267,12 +267,12 @@ impl IntoResponse for CaptchaResult {
 **请求体（对齐前端 `login` 函数参数）：**
 
 ```rust
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Garde)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginDto {
-    #[validate(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
     pub username: String,
-    #[validate(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
+    #[garde(length(min = 5, max = 20, message = "密码长度必须在5-20之间"))]
     pub password: String,
     /// 验证码
     pub code: String,
@@ -308,7 +308,7 @@ pub struct LoginVo {
 **业务逻辑（完整流程）：**
 
 ```
-1. 参数校验（validator）
+1. 参数校验（garde）
 2. 验证码校验：
    a. Redis GET captcha:{uuid}
    b. 不存在 → 写登录日志（status=1, msg="验证码错误"）→ 返回 500 "验证码错误"
@@ -826,7 +826,7 @@ Service 方法调用：service.method(dto, operator.username())
 - JWT：`jsonwebtoken = "10"`
 - Redis：`redis = "1.3"`（含 `connection-manager`）
 - 验证码：`captcha = "1.0"`
-- 密码：`md-5 = "0.11"`
+- 密码：`md-5 = "0.10"`（旧 MD5 fallback）+ `argon2 = "0.5"`（主算法）
 
 ---
 
@@ -884,7 +884,7 @@ Service 方法调用：service.method(dto, operator.username())
 | token 存储 | Redis（key=token, value=user_id） | JWT 自包含，仅黑名单存 Redis |
 | token 有效期 | JWT exp=6h, Redis TTL=1h（不一致） | JWT exp = Redis TTL = config.expire_hours |
 | 登录日志 | 未实现 | 写入 `sys_logininfor` 表 |
-| 验证码 | 5 位字符，小写存储 | 4 位字符（排除易混淆），小写存储 |
+| 验证码 | 5 位字符，小写存储 | 5 位字符（排除易混淆），小写存储 |
 | getInfo 权限 | 普通用户疑似 bug（拿到全权限） | 正确按角色过滤 |
 | 路由树构建 | `func::router_arr_to_tree2`（O(n²)） | `build_tree`（O(n)）+ `menu_to_router` |
 | 用户信息注入 | `depot.insert("userId", user_id)` | `req.extensions_mut().insert(Claims)` |

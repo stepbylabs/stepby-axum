@@ -198,7 +198,7 @@ impl AuthService {
 
 **DTO/Vo 定义（同文件内，Service 层返回类型）：**
 
-- `LoginDto`（登录请求，含 validator 注解）
+- `LoginDto`（登录请求，含 garde 注解）
 - `LoginVo`（登录响应数据，仅 token 字段）
 - `CaptchaVo`（验证码响应数据：captcha_enabled/img/uuid）
 - `GetInfoVo`（用户信息响应数据：user/roles/permissions）
@@ -217,7 +217,7 @@ impl AuthService {
 - [ ] 结构体持有 5 个 Service/Repository + db（含 user_repo）
 - [ ] 5 个方法签名完整
 - [ ] DTO 使用 `#[serde(rename_all = "camelCase")]`
-- [ ] DTO 使用 `#[derive(Validate)]` + validator 注解
+- [ ] DTO 使用 `#[derive(Validate)]` + garde 注解
 - [ ] Service 不依赖 axum / tower 任何 Web 类型
 - [ ] login 方法含 user_agent 参数
 - [ ] get_info 方法从 UserVo 提取 .user 字段

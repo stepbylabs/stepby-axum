@@ -148,7 +148,7 @@ impl SysLogininforRepository {
     /// 统计最近 N 天每天的登录成功/失败次数
     /// 返回 Vec<(date_string, success_count, fail_count)>，按日期升序
     ///
-    /// M-4 TODO：当前为 N+1 查询（每天 2 次 COUNT，共 2*N 次 DB 往返）。
+    /// M-4 / M-6 TODO：当前为 N+1 查询（每天 2 次 COUNT，共 2*N 次 DB 往返）。
     /// 理想实现是单条 `GROUP BY DATE(login_time)` 聚合查询，用 SeaORM
     /// `select_only() + column_as(Expr::col(Column::LoginTime), "d") + group_by(...)`。
     /// 但项目同时支持 MySQL / PostgreSQL / SQLite，三者的日期截断函数不同：
@@ -157,7 +157,7 @@ impl SysLogininforRepository {
     /// - SQLite: `DATE(login_time)`
     /// sea_query 的 `Expr::col(...)` 未提供跨 DB 的日期截断抽象，
     /// 强行用 `custom_expr` 会破坏多 DB 兼容。故暂保留 N+1 实现，
-    /// 待后续按部署 DB 分别实现或引入 `sea-query` 的 `Func` 抽象后优化。
+    /// 后续优化方向：按 DB 分别实现 GROUP BY 聚合，或缓存结果。
     /// N 通常 ≤ 30，2*N 次 COUNT 在索引 (status, login_time) 下性能可接受。
     pub async fn daily_stats(&self, days: i64) -> Result<Vec<(String, i64, i64)>, DbErr> {
         use chrono::{Duration, Local};

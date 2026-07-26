@@ -188,6 +188,9 @@ pub async fn list(
         });
     }
 
+    // M-4：按 login_time 倒序排序，确保最新登录的用户排在前面（与 ify-admin 前端期望一致）
+    online_list.sort_by(|a, b| b.login_time.cmp(&a.login_time));
+
     // C-03：在线用户为动态数据（非持久化），采用客户端分页模式
     let total = online_list.len() as u64;
     Ok(TableDataInfo::new(total, online_list))
@@ -286,22 +289,26 @@ pub async fn force_logout(
 
     let session_json = match session_json {
         Some(s) => s,
-        None => return Err(AppError::not_found("会话不存在或已过期")),
+        None => return Err(AppError::not_found(&crate::tr!("error.monitor.session_not_found"))),
     };
 
     let session: OnlineSession = serde_json::from_str(&session_json).map_err(|e| {
         tracing::error!("解析 OnlineSession JSON 失败: {}", e);
-        AppError::internal("会话数据异常")
+        AppError::internal(&crate::tr!("error.monitor.session_invalid"))
     })?;
 
     // 2. 超管保护（P0-R81-006）：禁止强退超级管理员
     if session.user_id == SUPER_ADMIN_USER_ID {
-        return Err(AppError::new(403, "不允许强退超级管理员会话"));
+        return Err(AppError::new(403, crate::tr!("error.monitor.admin_force_logout_forbidden")));
     }
 
     // 3. Lua 原子化 SETEX blacklist + DEL online（落实 memory 第 68 行约束）
     //    KEYS[1] = blacklist:{token_hash}, KEYS[2] = online:{token_hash}
     //    ARGV[1] = jwt_config.expire_hours * SECS_PER_HOUR（保守上界，黑名单 TTL ≥ token 剩余有效期）
+    //    TODO(H-2): 精确 TTL 需 OnlineSession 存储 exp 字段（记录 token 实际过期时间），
+    //    当前用 JWT 最大有效期作为保守上界，黑名单条目会在 expire_hours 后自动过期。
+    //    精确化改动需同步修改 OnlineSession 结构、登录中间件写入逻辑与 force_logout 读取逻辑，
+    //    改动较大，暂保留现状。
     let blacklist_ttl = state
         .config
         .jwt

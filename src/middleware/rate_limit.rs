@@ -166,6 +166,8 @@ pub async fn rate_limit_middleware(
     if RATE_LIMITER.try_acquire(&ip, config) {
         next.run(req).await
     } else {
+        // TODO(L-2)：429 响应未包含 Retry-After 头。补全需 RATE_LIMITER 暴露该 IP 的
+        // 令牌桶剩余恢复时间（next_refill_at - now），改动较大，暂保留现状。
         (
             StatusCode::TOO_MANY_REQUESTS,
             "请求过于频繁，请稍后再试",

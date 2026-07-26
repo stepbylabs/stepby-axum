@@ -146,7 +146,9 @@ impl SysRateLimitService {
     /// M-2：同时清空进程内 local_cache，确保配置变更后立即生效（最长延迟 0s）。
     async fn invalidate_all_cache(&self) {
         // M-2：先清空进程内缓存（同步、立即生效）
-        if let Ok(mut cache) = self.local_cache.lock() {
+        // H-1：Mutex 中毒时恢复 Guard 而非忽略（避免中毒后缓存永久失效）
+        {
+            let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.clear();
         }
         let mut conn = self.redis.clone();
@@ -282,7 +284,7 @@ impl SysRateLimitService {
                 .find_by_route_pattern(&dto.route_pattern)
                 .await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request("路由前缀已存在"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.rate_limit.pattern_exists")));
             }
         }
 
@@ -340,9 +342,11 @@ impl SysRateLimitService {
 
         // 0. M-2：先查进程内 local_cache（短 TTL，命中则直接返回，避免 Redis 往返）
         //    限流中间件每个请求都调用本方法，local_cache 命中可显著降低 Redis 压力。
-        //    Mutex 中毒时恢复 Guard 而非 panic（P0-New-3）。
+        //    H-1：Mutex 中毒时恢复 Guard 而非忽略（避免中毒后 local_cache 永久失效）。
+        //    用块作用域限定 MutexGuard 生命周期，确保其在 await 点前 drop（future 满足 Send）。
         let now = Instant::now();
-        if let Ok(cache) = self.local_cache.lock() {
+        {
+            let cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((cfg, fetched_at)) = cache.get(route)
                 && now.duration_since(*fetched_at) <= Duration::from_secs(LOCAL_CACHE_TTL_SECS)
             {
@@ -366,7 +370,9 @@ impl SysRateLimitService {
         {
             let cfg: RateLimitConfig = cached_config.into();
             // M-2：回填 local_cache（best-effort）
-            if let Ok(mut cache) = self.local_cache.lock() {
+            // H-1：Mutex 中毒时恢复 Guard，块作用域确保 await 前 drop
+            {
+                let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
                 cache.insert(route.to_string(), (cfg, Instant::now()));
             }
             return Ok(cfg);
@@ -418,7 +424,9 @@ impl SysRateLimitService {
         }
 
         // M-2：回填 local_cache（best-effort，即使 Redis 写入失败也回填本地，下次请求仍可命中）
-        if let Ok(mut cache) = self.local_cache.lock() {
+        // H-1：Mutex 中毒时恢复 Guard，块作用域确保无跨 await 持有
+        {
+            let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.insert(route.to_string(), (config, Instant::now()));
         }
 

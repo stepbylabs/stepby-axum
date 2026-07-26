@@ -59,12 +59,12 @@
 
 ## 3. 参数校验验收
 
-### 3.1 validator 注解
+### 3.1 garde 注解
 
 - [ ] 所有 AddDto/EditDto 派生 `Validate`
 - [ ] 字符串长度校验（user_name 2-30, role_key 2-100 等）
-- [ ] 邮箱格式校验（`#[validate(email)]`）
-- [ ] 手机号正则校验（`#[validate(regex)]`）
+- [ ] 邮箱格式校验（`#[garde(email)]`）
+- [ ] 手机号正则校验（`#[garde(regex)]`）
 - [ ] 数值范围校验（role_sort 0-999）
 - [ ] Service 方法入口调用 `dto.validate()?`
 

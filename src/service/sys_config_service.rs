@@ -102,7 +102,7 @@ pub struct ConfigEditDto {
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&format!("{}: {}", crate::tr!("error.gen.time_format"), s)))
 }
 
 // ==================== Service 实现 ====================
@@ -132,7 +132,7 @@ impl SysConfigService {
     /// - key: `config:{config_key}`
     /// - TTL: 300 秒（5 分钟）
     /// - 命中：直接返回缓存的 config_value
-    /// - 未命中：查 DB，缓存结果（仅缓存 Some 值，None 不缓存以避免 sentinel 复杂化）
+    /// - 未命中：查 DB，缓存结果（仅缓存 Some 值；None 不缓存会导致缓存穿透，后续按需补充 sentinel）
     /// - Redis 错误：fail-open 降级到 DB（配置查询非安全敏感场景，可用性优先）
     ///
     /// 返回 `Option<String>`：
@@ -165,7 +165,7 @@ impl SysConfigService {
         let model = self.config_repo.find_by_config_key(config_key).await?;
         let value = model.and_then(|m| m.config_value);
 
-        // 3. 缓存结果（best-effort，仅缓存 Some 值；None 不缓存避免缓存穿透需 sentinel）
+        // 3. 缓存结果（best-effort，仅缓存 Some 值；None 不缓存会导致缓存穿透，后续按需补充 sentinel）
         if let Some(ref v) = value {
             let _ = tokio::time::timeout(
                 Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
@@ -236,7 +236,7 @@ impl SysConfigService {
             .config_repo
             .find_by_id(config_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found("参数配置不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.config.not_found")))?;
         Ok(model)
     }
 
@@ -253,7 +253,7 @@ impl SysConfigService {
             .config_repo
             .find_by_config_key(config_key)
             .await?
-            .ok_or_else(|| ServiceError::not_found("参数配置不存在"))?;
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.config.not_found")))?;
         let value = model.config_value.unwrap_or_default();
         if Self::is_sensitive_key(config_key) {
             Ok("***".to_string())
@@ -291,7 +291,7 @@ impl SysConfigService {
         // config_key 唯一性校验
         let existing = self.config_repo.find_by_config_key(&dto.config_key).await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request("参数键名已存在"));
+            return Err(ServiceError::bad_request(&crate::tr!("error.config.key_exists")));
         }
 
         let now = chrono::Local::now().naive_local();
@@ -331,7 +331,7 @@ impl SysConfigService {
         if dto.config_key != old_key {
             let conflict = self.config_repo.find_by_config_key(&dto.config_key).await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request("参数键名已存在"));
+                return Err(ServiceError::bad_request(&crate::tr!("error.config.key_exists")));
             }
         }
 

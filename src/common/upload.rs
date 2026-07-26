@@ -197,3 +197,38 @@ pub async fn write_upload_file(
 pub fn gen_uuid_filename(ext: &str) -> String {
     format!("{}.{}", uuid::Uuid::new_v4(), ext)
 }
+
+/// 校验文件 magic bytes 是否匹配预期 MIME 类型
+///
+/// 基于文件扩展名检查前几个字节，防止伪造扩展名上传可执行文件等危险内容。
+/// 不引入新 crate 依赖，仅做前缀字节匹配。
+///
+/// 支持的扩展名与 magic bytes：
+/// - jpg/jpeg: `FF D8 FF`
+/// - png: `89 50 4E 47 0D 0A 1A 0A`
+/// - gif: `47 49 46 38` (GIF8)
+/// - pdf: `25 50 44 46` (%PDF)
+/// - doc: `D0 CF 11 E0 A1 B1 1A E1`
+/// - docx/xlsx/pptx/zip: `50 4B 03 04` (PK..)
+/// - txt: 不校验（无 magic bytes）
+///
+/// # 参数
+/// - `bytes`: 文件内容前若干字节（至少包含 magic bytes 长度）
+/// - `ext`: 文件扩展名（小写，不含点）
+///
+/// # 返回
+/// - true: magic bytes 匹配，或扩展名无需校验（如 txt）
+/// - false: magic bytes 不匹配（疑似伪造扩展名）
+pub fn validate_magic_bytes(bytes: &[u8], ext: &str) -> bool {
+    let magic: &[u8] = match ext {
+        "jpg" | "jpeg" => &[0xFF, 0xD8, 0xFF],
+        "png" => &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+        "gif" => &[0x47, 0x49, 0x46, 0x38],
+        "pdf" => &[0x25, 0x50, 0x44, 0x46],
+        "doc" => &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
+        "docx" | "xlsx" | "pptx" | "zip" => &[0x50, 0x4B, 0x03, 0x04],
+        // txt 及其他未列出扩展名：不校验 magic bytes
+        _ => return true,
+    };
+    bytes.starts_with(magic)
+}

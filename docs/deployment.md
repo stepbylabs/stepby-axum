@@ -165,7 +165,7 @@ Release 构建启用了以下优化（见 `Cargo.toml` `[profile.release]`）：
 # 设置数据库连接串
 export DATABASE_URL="mysql://yebot:your_password@127.0.0.1:3306/yebot"
 
-# 执行迁移（创建 15 张系统表 + 索引 + 初始数据）
+# 执行迁移（创建 17 张系统表 + 索引 + 初始数据）
 cd migration
 cargo run
 cd ..
@@ -312,7 +312,7 @@ curl -L -o data/GeoLite2-City.mmdb \
 
 ### 6.3 更新
 
-建议每月更新一次 mmdb 文件以获取最新的 IP 归属数据。可直接覆盖 `data/GeoLite2-City.mmdb`，无需重启服务（IpLocator 在每次查询时读取内存中的 Reader，更新需重启）。
+建议每月更新一次 mmdb 文件以获取最新的 IP 归属数据。可直接覆盖 `data/GeoLite2-City.mmdb`，更新后需重启服务生效（IpLocator 在每次查询时读取内存中的 Reader，覆盖文件后需重启才能加载新数据）。
 
 > 更新 mmdb 文件后需重启服务才能生效。
 
@@ -452,7 +452,7 @@ trusted_proxies = ["127.0.0.1"]
 ### 9.1 Dockerfile
 
 ```dockerfile
-FROM rust:1.80-slim AS builder
+FROM rust:1.96-slim AS builder
 
 WORKDIR /app
 COPY . .
@@ -475,7 +475,6 @@ CMD ["./axum-backend"]
 ### 9.2 docker-compose.yml
 
 ```yaml
-version: '3.8'
 
 services:
   backend:

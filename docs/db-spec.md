@@ -193,7 +193,7 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 | 7 | `phonenumber` | varchar(11) | NULL | '' | 手机号码 |
 | 8 | `sex` | char(1) | NULL | '0' | 用户性别（0男 1女 2未知） |
 | 9 | `avatar` | varchar(100) | NULL | '' | 头像地址 |
-| 10 | `password` | varchar(100) | NULL | '' | 密码（MD5 加盐） |
+| 10 | `password` | varchar(100) | NULL | '' | 密码（Argon2id 哈希，旧数据可能为 MD5 格式） |
 | 11 | `status` | char(1) | NULL | '0' | 帐号状态（0正常 1停用） |
 | 12 | `del_flag` | char(1) | NULL | '0' | 删除标志（0存在 2删除） |
 | 13 | `login_ip` | varchar(128) | NULL | '' | 最后登录IP |

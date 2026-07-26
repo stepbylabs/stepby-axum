@@ -32,12 +32,12 @@ pub async fn auth_middleware(
         .headers()
         .get(&AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::unauthorized("请求未携带 token，请重新登录"))?;
+        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_missing")))?;
 
     // 2. 解析 Bearer token
     let token = auth_header
         .strip_prefix("Bearer ")
-        .ok_or_else(|| AppError::unauthorized("token 格式错误，应为 Bearer <token>"))?;
+        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_invalid")))?;
 
     // 3. JWT 签名验证 + exp 过期校验
     //    verify_token 返回 Result<Claims, JwtError>，通过 From<JwtError> for AppError 自动转为 401
@@ -66,10 +66,10 @@ pub async fn auth_middleware(
                 error = %e,
                 "Redis 黑名单查询失败（fail-closed 拒绝请求）"
             );
-            AppError::new(503, "认证服务暂时不可用，请稍后再试")
+            AppError::new(503, &crate::tr!("error.auth.auth_unavailable"))
         })?;
     if is_blacklisted.is_some() {
-        return Err(AppError::unauthorized("会话已注销，请重新登录"));
+        return Err(AppError::unauthorized(&crate::tr!("error.auth.token_revoked")));
     }
 
     // 5. 改密后旧 token 失效校验（P0-R81-007）
@@ -87,12 +87,12 @@ pub async fn auth_middleware(
                 error = %e,
                 "Redis pwd_changed 查询失败（fail-closed 拒绝请求）"
             );
-            AppError::new(503, "认证服务暂时不可用，请稍后再试")
+            AppError::new(503, &crate::tr!("error.auth.auth_unavailable"))
         })?;
     if let Some(changed_at) = pwd_changed
         && changed_at > i64::try_from(claims.iat).unwrap_or(0)
     {
-        return Err(AppError::unauthorized("密码已修改，请重新登录"));
+        return Err(AppError::unauthorized(&crate::tr!("error.auth.password_changed")));
     }
 
     // 6. 注入 Claims 到 request extensions，供下游 handler/中间件使用
@@ -122,7 +122,7 @@ where
             .get::<Claims>()
             .cloned()
             .map(Operator)
-            .ok_or_else(|| AppError::unauthorized("无法获取登录信息，请重新登录"))
+            .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))
     }
 }
 

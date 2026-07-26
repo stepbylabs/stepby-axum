@@ -116,8 +116,8 @@ pub async fn list(
         }
     })
     .await
-    .map_err(|e| AppError::internal(&format!("读取目录任务失败: {}", e)))?
-    .map_err(|e| AppError::internal(&format!("读取目录失败: {}", e)))?;
+    .map_err(|_| AppError::internal(&crate::tr!("error.file.list_task_failed")))?
+    .map_err(|_| AppError::internal(&crate::tr!("error.file.list_failed")))?;
 
     for (name, size, modified_secs) in entries {
         let ext = std::path::Path::new(&name)
@@ -182,7 +182,7 @@ pub async fn upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(&format!("解析 multipart 失败: {}", e)))?
+        .map_err(|_| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed")))?
     {
         if field.name() == Some("file") {
             if let Some(filename) = field.file_name()
@@ -196,31 +196,36 @@ pub async fn upload(
             let bytes = field
                 .bytes()
                 .await
-                .map_err(|e| AppError::bad_request(&format!("读取文件内容失败: {}", e)))?;
+                .map_err(|_| AppError::bad_request(&crate::tr!("error.file.read_failed")))?;
             file_bytes = Some(bytes.to_vec());
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| AppError::bad_request("未找到 file 字段"))?;
+    let bytes = file_bytes.ok_or_else(|| AppError::bad_request(&crate::tr!("error.file.field_not_found")))?;
     if bytes.is_empty() {
-        return Err(AppError::bad_request("上传文件为空"));
+        return Err(AppError::bad_request(&crate::tr!("error.file.empty")));
     }
 
     // 文件大小限制
     if bytes.len() > upload_cfg.common_max_size {
-        return Err(AppError::bad_request(&format!(
-            "文件大小不能超过 {}MB",
-            upload_cfg.common_max_size / 1024 / 1024
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.file.too_large",
+            max = upload_cfg.common_max_size / 1024 / 1024
         )));
     }
 
     // 扩展名白名单校验
     let ext = file_ext
         .as_deref()
-        .ok_or_else(|| AppError::bad_request("无法识别文件扩展名"))?;
+        .ok_or_else(|| AppError::bad_request(&crate::tr!("error.file.unknown_ext")))?;
     let allowed: Vec<&str> = upload_cfg.common_allowed_exts.iter().map(|s| s.as_str()).collect();
     if !allowed.contains(&ext) {
-        return Err(AppError::bad_request(&format!("不支持的文件类型: {}", ext)));
+        return Err(AppError::bad_request(&crate::tr!("error.file.unsupported_type", ext = ext)));
+    }
+
+    // MIME magic bytes 校验（防止伪造扩展名上传可执行文件等危险内容）
+    if !crate::common::upload::validate_magic_bytes(&bytes, ext) {
+        return Err(AppError::bad_request(&crate::tr!("error.file.unsupported_type", ext = ext)));
     }
 
     // 生成 UUID 文件名
@@ -262,7 +267,7 @@ pub async fn delete(
         || file_name.contains("..")
         || file_name.contains('\0')
     {
-        return Err(AppError::bad_request("非法的文件名"));
+        return Err(AppError::bad_request(&crate::tr!("error.file.invalid_name")));
     }
 
     let upload_cfg = &state.config.upload;
@@ -276,10 +281,10 @@ pub async fn delete(
         Ok(())
     })
     .await
-    .map_err(|e| AppError::internal(&format!("删除任务失败: {}", e)))?;
+    .map_err(|_| AppError::internal(&crate::tr!("error.file.delete_task_failed")))?;
 
-    if let Err(e) = result {
-        return Err(AppError::internal(&format!("删除文件失败: {}", e)));
+    if result.is_err() {
+        return Err(AppError::internal(&crate::tr!("error.file.delete_failed")));
     }
 
     tracing::info!(file_name = %file_name, "文件已删除");
