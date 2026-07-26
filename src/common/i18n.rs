@@ -234,7 +234,6 @@ impl I18n for ZhCn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use garde::Validate;
 
     #[derive(garde::Validate)]
     struct DemoDto {
