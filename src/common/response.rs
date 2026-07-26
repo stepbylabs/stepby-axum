@@ -26,7 +26,7 @@ impl<T> AjaxResult<T> {
     pub fn success(data: T) -> Self {
         Self {
             code: 200,
-            msg: "操作成功".to_string(),
+            msg: crate::tr!("msg.success.default"),
             data: Some(data),
         }
     }
@@ -93,7 +93,7 @@ impl<T> TableDataInfo<T> {
     pub fn new(total: u64, rows: Vec<T>) -> Self {
         Self {
             code: 200,
-            msg: "查询成功".to_string(),
+            msg: crate::tr!("msg.success.query"),
             total,
             rows,
         }

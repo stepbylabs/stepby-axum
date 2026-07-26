@@ -109,6 +109,7 @@ error:
 msg:
   success:
     default: 操作成功
+    query: 查询成功
     add: 新增成功
     edit: 修改成功
     delete: 删除成功
