@@ -9,7 +9,10 @@
 //!
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
+use std::time::Duration;
+
 use chrono::NaiveDateTime;
+use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
@@ -17,10 +20,16 @@ use garde::Validate;
 
 use crate::common::error::ServiceError;
 use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_config::{
     ActiveModel as SysConfigActiveModel, Model as SysConfigModel,
 };
 use crate::repository::sys_config::SysConfigRepository;
+
+/// 配置缓存 key 前缀（H-4：cache-aside）
+const CONFIG_CACHE_PREFIX: &str = "config:";
+/// 配置缓存 TTL（秒，5 分钟，H-4）
+const CONFIG_CACHE_TTL: i64 = 300;
 
 // ==================== DTO ====================
 
@@ -99,15 +108,88 @@ fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
 // ==================== Service 实现 ====================
 
 /// 参数配置模块 Service
+///
+/// H-4：持有 Redis ConnectionManager 用于 cache-aside 缓存配置值，
+/// 减少登录/注册流程对 sys_config 表的频繁查询（每次登录原本 2 次 DB 查询：
+/// captchaEnabled + registerUser）。
+#[derive(Clone)]
 pub struct SysConfigService {
     config_repo: SysConfigRepository,
+    redis: ConnectionManager,
 }
 
 impl SysConfigService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
         Self {
             config_repo: SysConfigRepository::new(db),
+            redis,
         }
+    }
+
+    /// H-4：按 config_key 查询参数值，带 Redis cache-aside 缓存
+    ///
+    /// 缓存策略：
+    /// - key: `config:{config_key}`
+    /// - TTL: 300 秒（5 分钟）
+    /// - 命中：直接返回缓存的 config_value
+    /// - 未命中：查 DB，缓存结果（仅缓存 Some 值，None 不缓存以避免 sentinel 复杂化）
+    /// - Redis 错误：fail-open 降级到 DB（配置查询非安全敏感场景，可用性优先）
+    ///
+    /// 返回 `Option<String>`：
+    /// - Some(value): 配置存在
+    /// - None: 配置不存在或 DB 错误（调用方按业务默认值处理）
+    ///
+    /// 调用方：AuthService::is_captcha_enabled / is_register_enabled
+    pub async fn get_config_value_by_key_cached(
+        &self,
+        config_key: &str,
+    ) -> Result<Option<String>, ServiceError> {
+        let cache_key = format!("{}{}", CONFIG_CACHE_PREFIX, config_key);
+        let mut conn = self.redis.clone();
+
+        // 1. 尝试从 Redis 缓存读取（fail-open：超时/错误降级到 DB）
+        let cached: Option<String> = tokio::time::timeout(
+            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+            redis::cmd("GET").arg(&cache_key).query_async(&mut conn),
+        )
+        .await
+        .ok()                  // 超时 → None（降级到 DB）
+        .and_then(|r| r.ok())  // Redis 错误 → None
+        .flatten();            // Option<Option<String>> → Option<String>
+
+        if let Some(val) = cached {
+            return Ok(Some(val));
+        }
+
+        // 2. 缓存未命中 → 查 DB
+        let model = self.config_repo.find_by_config_key(config_key).await?;
+        let value = model.and_then(|m| m.config_value);
+
+        // 3. 缓存结果（best-effort，仅缓存 Some 值；None 不缓存避免缓存穿透需 sentinel）
+        if let Some(ref v) = value {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+                redis::cmd("SETEX")
+                    .arg(&cache_key)
+                    .arg(CONFIG_CACHE_TTL)
+                    .arg(v)
+                    .query_async::<()>(&mut conn),
+            )
+            .await;
+        }
+
+        Ok(value)
+    }
+
+    /// H-4：失效指定 config_key 的缓存（修改/删除配置时调用）
+    async fn invalidate_config_cache(&self, config_key: &str) {
+        let cache_key = format!("{}{}", CONFIG_CACHE_PREFIX, config_key);
+        let mut conn = self.redis.clone();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+            redis::cmd("DEL").arg(&cache_key).query_async::<()>(&mut conn),
+        )
+        .await;
     }
 
     /// 分页查询参数配置
@@ -227,6 +309,8 @@ impl SysConfigService {
         };
 
         let model = self.config_repo.insert(am).await?;
+        // H-4：新增配置后失效该 key 的缓存（best-effort）
+        self.invalidate_config_cache(&model.config_key).await;
         Ok(model)
     }
 
@@ -254,7 +338,7 @@ impl SysConfigService {
         let now = chrono::Local::now().naive_local();
         let mut am: SysConfigActiveModel = existing.into();
         am.config_name = Set(dto.config_name);
-        am.config_key = Set(dto.config_key);
+        am.config_key = Set(dto.config_key.clone());
         am.config_value = Set(dto.config_value);
         am.config_type = Set(dto.config_type);
         am.update_by = Set(Some(operator.to_string()));
@@ -262,19 +346,50 @@ impl SysConfigService {
         am.remark = Set(dto.remark);
 
         let model = self.config_repo.update(am).await?;
+        // H-4：修改配置后失效缓存。若 config_key 变更，old_key 和 new_key 都需失效
+        // （old_key 缓存的旧值已过时，new_key 可能存在 None 占位缓存）
+        self.invalidate_config_cache(&old_key).await;
+        self.invalidate_config_cache(&model.config_key).await;
         Ok(model)
     }
 
     /// 批量删除参数配置（物理删除，config 表无 del_flag）
     pub async fn delete_configs(&self, config_ids: Vec<i64>) -> Result<(), ServiceError> {
+        if config_ids.is_empty() {
+            return Ok(());
+        }
+        // H-4：删除前先查询 config_key（单次批量查询，避免 N+1），用于失效缓存
+        let models = self.config_repo.find_by_ids(config_ids.clone()).await?;
         self.config_repo.delete_by_ids(config_ids).await?;
+        for m in models {
+            self.invalidate_config_cache(&m.config_key).await;
+        }
         Ok(())
     }
 
     /// 刷新缓存
     ///
-    /// 当前后端参数查询直接走 DB，无 Redis 缓存层，此接口直接返回成功。
+    /// H-4：扫描并清除所有 `config:*` 缓存键。best-effort，Redis 错误仅记日志不影响业务。
     pub async fn refresh_cache(&self) -> Result<(), ServiceError> {
+        let mut conn = self.redis.clone();
+        let pattern = format!("{}*", CONFIG_CACHE_PREFIX);
+        let keys = match crate::utils::redis::scan_keys(&mut conn, &pattern).await {
+            Ok(ks) => ks,
+            Err(e) => {
+                tracing::warn!("刷新配置缓存时扫描键失败: {}", e);
+                return Ok(());
+            }
+        };
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut pipe = redis::pipe();
+        for key in &keys {
+            pipe.cmd("DEL").arg(key);
+        }
+        if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
+            tracing::warn!("刷新配置缓存时批量删除失败: {}", e);
+        }
         Ok(())
     }
 

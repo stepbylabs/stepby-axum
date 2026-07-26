@@ -8,9 +8,17 @@
 // - 补充速率（refill_per_second）：每秒匀速补充令牌
 // - 内存态（Mutex<HashMap>），单实例有效；多实例部署请改用 Redis 实现
 //
-// ⚠️ 警告：本限流器为内存态（Mutex<HashMap>），仅适用单实例部署。
-// 多实例部署时，业务接口限流将按实例独立计数，可能被绕过。
-// 多实例场景请改用 Redis 滑动窗口实现（参考 auth_service.rs 的 RATE_LIMIT_SCRIPT）。
+// M-1 双重限流说明：本中间件与 auth_service.rs 内的 Redis 限流（RATE_LIMIT_SCRIPT）
+// 同时生效，构成两层防护：
+// - 本中间件（内存令牌桶）：粗粒度防护，单实例下快速拦截突发流量，无 Redis 往返开销
+// - auth_service Redis 限流：精确计数（同 IP 1 分钟 ≤20 次登录尝试），多实例兼容
+// 两者职责不同，不冲突：本中间件按桶容量+补充速率平滑限流，Redis 版按窗口计数硬性拦截。
+// 维护者修改任一层时需注意保持另一层语义不变。
+//
+// M-8 多实例限制：本限流器为内存态（Mutex<HashMap>），仅支持单实例部署。
+// 多实例部署时，各实例独立计数，攻击者可通过轮询不同实例绕过限流。
+// 多实例场景请迁移到 Redis 实现（参考 auth_service.rs 的 RATE_LIMIT_SCRIPT Lua 脚本），
+// 或在反向代理层（Nginx/Ingress）做限流。
 //
 // 用法：
 //   use axum::middleware::from_fn;
@@ -112,17 +120,9 @@ impl RateLimiter {
         }
     }
 
-    /// 清理长时间未访问的桶（防止内存无界增长）（P0-5 改进）
-    ///
-    /// 遍历所有桶，移除 `last_refill` 超过 `max_idle_secs` 未访问的桶。
-    /// 可在后台任务中定期调用，或由 `try_acquire` 的惰性清理触发。
-    pub fn cleanup(&self, max_idle_secs: u64) {
-        let now = Instant::now();
-        let threshold = Duration::from_secs(max_idle_secs);
-        // Mutex 中毒时恢复 Guard 而非 panic，遵循项目约定（P0-New-3）
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) <= threshold);
-    }
+    // M-3：原 cleanup() 方法已删除（dead code）。
+    // 惰性清理已在 try_acquire 中实现：HashMap 大小超过 CLEANUP_THRESHOLD 时，
+    // 清理超过 MAX_IDLE_SECS 未访问的桶，无需外部调用 cleanup()。
 }
 
 /// 全局限流器单例

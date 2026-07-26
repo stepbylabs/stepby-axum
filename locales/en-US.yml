@@ -95,3 +95,16 @@ msg:
   cache:
     no_match: No matching cache
     key_not_found: Cache key does not exist
+
+# H-3: Login log audit messages (used by write_login_log for granular audit reasons;
+# user-facing error messages use error.auth.* to avoid username enumeration)
+log:
+  auth:
+    ip_rate_limited: IP request rate limited
+    password_locked: Too many failed password attempts
+    captcha_wrong: Incorrect captcha
+    captcha_expired: Captcha expired
+    login_failed: User does not exist or password incorrect
+    account_deleted: Account deleted
+    account_disabled: Account disabled
+    login_success: Login successful

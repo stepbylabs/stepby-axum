@@ -1234,6 +1234,19 @@ impl SysUserService {
         Ok(user)
     }
 
+    /// 登录认证用：按用户名查询未删除用户（del_flag = '0'）
+    ///
+    /// H-2：登录流程使用此方法，Repository 层已过滤 del_flag='0'，
+    /// 调用方无需再判断 `del_flag == "2"`，避免冗余检查。
+    /// 返回 None 包含两种语义：用户不存在 / 用户已软删除（统一对外返回"用户名或密码错误"）。
+    pub async fn get_active_user_by_username(
+        &self,
+        user_name: &str,
+    ) -> Result<Option<SysUserModel>, ServiceError> {
+        let user = self.user_repo.find_active_by_user_name(user_name).await?;
+        Ok(user)
+    }
+
     /// 更新登录信息（login_ip / login_date）
     pub async fn update_login_info(
         &self,

@@ -46,6 +46,17 @@ impl SysConfigRepository {
             .await
     }
 
+    /// 按 config_id 批量查询（H-4：删除前查询 config_key 用于缓存失效，避免 N+1）
+    pub async fn find_by_ids(&self, ids: Vec<i64>) -> Result<Vec<Model>, DbErr> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysConfig::find()
+            .filter(Column::ConfigId.is_in(ids))
+            .all(self.base.db())
+            .await
+    }
+
     /// 多条件分页查询（config_name 模糊，config_key 模糊，config_type 精确，时间范围）
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(

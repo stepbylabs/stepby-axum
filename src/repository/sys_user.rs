@@ -33,10 +33,27 @@ impl SysUserRepository {
         &self.base
     }
 
-    /// 按用户名查询（登录认证用）
+    /// 按用户名查询（不过滤 del_flag）
+    ///
+    /// 调用方：
+    /// - 用户名查重（add_user / register）：需包含已软删除用户名以防恢复后冲突
+    /// - 解锁登录失败计数（unlock）：需要识别超管身份（超管不会被软删除）
     pub async fn find_by_user_name(&self, user_name: &str) -> Result<Option<Model>, DbErr> {
         SysUser::find()
             .filter(Column::UserName.eq(user_name))
+            .one(self.base.db())
+            .await
+    }
+
+    /// 按用户名查询未删除用户（del_flag = '0'），登录认证用
+    ///
+    /// H-2：登录认证场景需在 Repository 层过滤 del_flag，与 find_active_all 保持一致。
+    /// 调用方（AuthService::verify_user_credentials）不再需要在 Service 层重复判断
+    /// `del_flag == "2"`，避免遗漏过滤导致已删除用户进入密码校验流程。
+    pub async fn find_active_by_user_name(&self, user_name: &str) -> Result<Option<Model>, DbErr> {
+        SysUser::find()
+            .filter(Column::UserName.eq(user_name))
+            .filter(Column::DelFlag.eq("0"))
             .one(self.base.db())
             .await
     }

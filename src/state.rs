@@ -6,7 +6,6 @@ use sea_orm::DatabaseConnection;
 use tokio::sync::broadcast;
 use crate::config::Settings;
 use crate::handler::ws_handler::WsMessage;
-use crate::repository::sys_config::SysConfigRepository;
 use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::scheduler::JobScheduler;
 use crate::service::{AuthService, GenTableService, IpLocationService, MailerService, SysBackupService, SysConfigService, SysDeptService, SysDictService, SysJobService, SysLogininforService, SysMenuService, SysNoticeService, SysOperLogService, SysPostService, SysRateLimitService, SysRoleService, SysTaskService, SysUserService};
@@ -92,17 +91,21 @@ impl AppState {
         let role_service = SysRoleService::new(db.clone());
         let menu_service = SysMenuService::new(db.clone());
 
-        // AuthService 复用上述 Service 实例 + 单独实例化 logininfor_repo / config_repo
+        // H-4：config_service 提前实例化（持有 Redis 用于 cache-aside 缓存），
+        // clone 一份注入 AuthService，使登录/注册流程的验证码开关、注册开关查询走 Redis 缓存，
+        // 减少每次登录 2 次 DB 查询（captchaEnabled + registerUser）。
+        let config_service = SysConfigService::new(db.clone(), redis.clone());
+
+        // AuthService 复用上述 Service 实例 + 单独实例化 logininfor_repo
         // REGRESS-007 说明：P0-R81-014 已消除 15 个重复 Repository。
-        // 剩余 2 个（logininfor_repo / config_repo）是 AuthService 直接调用 Repository 层方法
-        // （find_by_config_key / insert），对应 Service 层未暴露等价方法。
+        // 剩余 1 个 logininfor_repo 是 AuthService 直接调用 Repository 层 insert 方法，
         // Repository 实例仅持有 Arc<DatabaseConnection>，开销极低，保持当前设计。
         let auth_service = AuthService::new(
             user_service.clone(),
             role_service.clone(),
             menu_service.clone(),
             SysLogininforRepository::new(db.clone()),
-            SysConfigRepository::new(db.clone()),
+            config_service.clone(),
         );
 
         Self {
@@ -114,7 +117,7 @@ impl AppState {
             auth_service,
             job_service: SysJobService::new(db.clone(), job_scheduler.clone()),
             dict_service: SysDictService::new(db.clone(), redis.clone()),
-            config_service: SysConfigService::new(db.clone()),
+            config_service,
             post_service: SysPostService::new(db.clone()),
             oper_log_service: SysOperLogService::new(db.clone()),
             rate_limit_service: SysRateLimitService::new(db.clone(), redis.clone()),
