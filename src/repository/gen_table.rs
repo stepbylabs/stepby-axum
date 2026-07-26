@@ -298,7 +298,10 @@ impl GenTableRepository {
             DatabaseBackend::Sqlite => {
                 // PRAGMA 不支持参数绑定，校验 table_name 为合法标识符防止注入
                 if !is_valid_identifier(table_name) {
-                    return Err(DbErr::Custom(format!("非法表名: {}", table_name)));
+                    return Err(DbErr::Custom(crate::tr!(
+                        "error.gen.invalid_table_name_with_value",
+                        name = table_name
+                    )));
                 }
                 let sql = format!("PRAGMA table_info('{}')", table_name);
                 // PRAGMA table_info 返回：cid, name, type, notnull, dflt_value, pk

@@ -40,6 +40,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 
 use crate::utils::ip::extract_client_ip;
 use crate::state::AppState;
@@ -159,7 +160,14 @@ pub async fn rate_limit_middleware(
         Ok(c) => c,
         Err(e) => {
             tracing::error!("限流配置查询失败（fail-closed）: {}", e);
-            return (StatusCode::SERVICE_UNAVAILABLE, "服务暂时不可用").into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "code": 503,
+                    "msg": crate::tr!("error.rate_limit.service_unavailable")
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -170,7 +178,10 @@ pub async fn rate_limit_middleware(
         // 令牌桶剩余恢复时间（next_refill_at - now），改动较大，暂保留现状。
         (
             StatusCode::TOO_MANY_REQUESTS,
-            "请求过于频繁，请稍后再试",
+            Json(serde_json::json!({
+                "code": 429,
+                "msg": crate::tr!("error.rate_limit.too_many_requests")
+            })),
         )
             .into_response()
     }

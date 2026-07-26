@@ -178,7 +178,7 @@ pub async fn get_names(
             cache_name: name,
             cache_key: String::new(),
             cache_value: String::new(),
-            remark: format!("{} 个键", count),
+            remark: crate::tr!("error.cache.key_count_remark", count = count).to_string(),
         })
         .collect();
 
@@ -267,7 +267,7 @@ pub async fn get_value(
             })?
             .unwrap_or_default()
     } else {
-        format!("[{} 类型缓存，不支持预览]", key_type)
+        crate::tr!("error.cache.type_not_previewable", r#type = key_type).to_string()
     };
 
     Ok(AjaxResult::success(SysCache {

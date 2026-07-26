@@ -86,7 +86,7 @@ pub async fn oper_log_middleware(
         .extensions()
         .get::<crate::jwt::Claims>()
         .map(|c| (c.username.clone(), 1i32, c.sub.clone()))
-        .unwrap_or_else(|| ("匿名".to_string(), 0, String::new()));
+        .unwrap_or_else(|| (crate::tr!("error.oper_log.anonymous").to_string(), 0, String::new()));
 
     // 提取客户端真实 IP（含可信代理白名单 + XFF 链校验）
     let peer_ip = req
