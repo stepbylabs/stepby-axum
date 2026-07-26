@@ -32,7 +32,7 @@
 **交付物：**
 1. Cargo.toml 添加依赖：
    - `futures = "0.3"`（事务闭包 `boxed()`）
-   - `regex = "1"`（validator regex 校验）
+   - `regex = "1"`（garde regex 校验）
    - `once_cell = "1"`（全局正则常量）
 2. `constants.rs` 中 `PASSWORD_SALT` 改为 `"yebot_admin"`
 3. `password.rs` 注释更新
@@ -73,12 +73,12 @@
 
 **要求：**
 - 所有 DTO 添加 `#[serde(rename_all = "camelCase")]` 对齐前端
-- 使用 `validator` crate 注解校验规则
+- 使用 `garde` crate 注解校验规则
 - DTO 字段类型使用 `Option<T>` 表示可空
 
 **验收：**
 - [ ] 所有 DTO 定义完成
-- [ ] validator 注解正确
+- [ ] garde 注解正确
 - [ ] serde 驼峰映射注解添加
 
 ---
@@ -283,7 +283,7 @@ pub use sys_menu_service::SysMenuService;
 **测试用例：**
 - [ ] 密码加密验证（已有 `utils::password` 测试，扩展覆盖）
 - [ ] 树形组装测试（构造扁平列表 → 验证树结构）
-- [ ] DTO 校验测试（validator 注解触发）
+- [ ] DTO 校验测试（garde 注解触发）
 - [ ] 超管保护逻辑测试
 
 **验收：**

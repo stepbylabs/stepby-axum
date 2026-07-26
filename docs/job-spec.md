@@ -119,7 +119,7 @@ impl JobVo {
 
 /// 解析 cron 表达式，返回下次执行时间的 ISO 8601 字符串
 fn calc_next_valid_time(cron_str: &str) -> Option<String> {
-    use cron::Schedule;
+    use croner::Schedule;
     use std::str::FromStr;
     match Schedule::from_str(cron_str) {
         Ok(schedule) => {
@@ -146,59 +146,59 @@ pub struct JobQueryDto {
 }
 
 // ===== 新增任务 DTO =====
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Garde)]
 #[serde(rename_all = "camelCase")]
 pub struct JobAddDto {
-    #[validate(length(min = 1, max = 64, message = "任务名称不能为空且不超过64字符"))]
+    #[garde(length(min = 1, max = 64, message = "任务名称不能为空且不超过64字符"))]
     pub job_name: String,
-    #[validate(length(max = 64, message = "任务组名不超过64字符"))]
+    #[garde(length(max = 64, message = "任务组名不超过64字符"))]
     pub job_group: String,
-    #[validate(length(min = 1, max = 500, message = "调用目标不能为空且不超过500字符"))]
+    #[garde(length(min = 1, max = 500, message = "调用目标不能为空且不超过500字符"))]
     pub invoke_target: String,
-    #[validate(length(min = 1, max = 255, message = "cron表达式不能为空且不超过255字符"))]
+    #[garde(length(min = 1, max = 255, message = "cron表达式不能为空且不超过255字符"))]
     pub cron_expression: String,
     pub misfire_policy: Option<String>,  // 默认 "3"
     pub concurrent: Option<String>,      // 默认 "1"
     pub status: Option<String>,          // 默认 "0"
-    #[validate(length(max = 500, message = "备注不超过500字符"))]
+    #[garde(length(max = 500, message = "备注不超过500字符"))]
     pub remark: Option<String>,
 }
 
 // ===== 修改任务 DTO =====
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Garde)]
 #[serde(rename_all = "camelCase")]
 pub struct JobEditDto {
     pub job_id: i64,
-    #[validate(length(min = 1, max = 64, message = "任务名称不能为空且不超过64字符"))]
+    #[garde(length(min = 1, max = 64, message = "任务名称不能为空且不超过64字符"))]
     pub job_name: String,
-    #[validate(length(max = 64, message = "任务组名不超过64字符"))]
+    #[garde(length(max = 64, message = "任务组名不超过64字符"))]
     pub job_group: String,
-    #[validate(length(min = 1, max = 500, message = "调用目标不能为空且不超过500字符"))]
+    #[garde(length(min = 1, max = 500, message = "调用目标不能为空且不超过500字符"))]
     pub invoke_target: String,
-    #[validate(length(min = 1, max = 255, message = "cron表达式不能为空且不超过255字符"))]
+    #[garde(length(min = 1, max = 255, message = "cron表达式不能为空且不超过255字符"))]
     pub cron_expression: String,
     pub misfire_policy: Option<String>,
     pub concurrent: Option<String>,
     pub status: Option<String>,
-    #[validate(length(max = 500, message = "备注不超过500字符"))]
+    #[garde(length(max = 500, message = "备注不超过500字符"))]
     pub remark: Option<String>,
 }
 
 // ===== 状态切换 DTO =====
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Garde)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatusDto {
     pub job_id: i64,
-    #[validate(length(min = 1, max = 1, message = "状态值不合法"))]
+    #[garde(length(min = 1, max = 1, message = "状态值不合法"))]
     pub status: String,  // "0"=正常运行 "1"=暂停
 }
 
 // ===== 立即执行 DTO =====
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Garde)]
 #[serde(rename_all = "camelCase")]
 pub struct JobRunDto {
     pub job_id: i64,
-    #[validate(length(max = 64, message = "任务组名不超过64字符"))]
+    #[garde(length(max = 64, message = "任务组名不超过64字符"))]
     pub job_group: String,
 }
 
@@ -285,8 +285,6 @@ pub enum SchedulerError {
     InvalidCron(String),
     /// 调度器内部错误（add/remove/start 失败）
     SchedulerInternal(String),
-    /// 任务未找到（调度器中不存在指定 job_id）
-    JobNotFound(i64),
 }
 
 impl std::fmt::Display for SchedulerError {
@@ -294,7 +292,6 @@ impl std::fmt::Display for SchedulerError {
         match self {
             SchedulerError::InvalidCron(msg) => write!(f, "cron 表达式非法: {}", msg),
             SchedulerError::SchedulerInternal(msg) => write!(f, "调度器内部错误: {}", msg),
-            SchedulerError::JobNotFound(id) => write!(f, "调度器中未找到任务 job_id={}", id),
         }
     }
 }
@@ -312,11 +309,6 @@ impl From<SchedulerError> for crate::common::error::ServiceError {
                 tracing::error!("调度器内部错误: {}", msg);
                 crate::common::error::ServiceError::internal("调度器操作失败，请联系管理员")
             }
-            SchedulerError::JobNotFound(id) => {
-                tracing::warn!("调度器中未找到任务 job_id={}", id);
-                // 静默成功（幂等移除）：任务可能已从调度器自然过期
-                crate::common::error::ServiceError::new(200, "ok".to_string())
-            }
         }
     }
 }
@@ -332,6 +324,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use tokio_cron_scheduler::{JobScheduler as TokioScheduler, Job};
 use sea_orm::DatabaseConnection;
+use redis::aio::ConnectionManager;
 use crate::entity::sys_job::Model as SysJobModel;
 use crate::repository::{SysJobRepository, SysJobLogRepository};
 
@@ -339,17 +332,25 @@ use crate::repository::{SysJobRepository, SysJobLogRepository};
 pub struct JobScheduler {
     scheduler: Arc<TokioScheduler>,
     db: DatabaseConnection,
+    /// Redis 连接管理器，用于分布式锁（多实例部署时防止任务重复执行）
+    redis: ConnectionManager,
     /// 运行中任务的 UUID 映射（job_id -> scheduler 内部 job guid）
     /// 用于启停/更新时精确移除
     running_jobs: RwLock<HashMap<i64, uuid::Uuid>>,
     /// 正在执行中的任务标记（job_id -> true）
     /// 用于 concurrent='1' 时禁止并发执行
-    executing_jobs: RwLock<HashMap<i64, bool>>,
+    /// 使用 std::sync::Mutex 以支持 ExecutingFlagGuard 的同步 Drop
+    /// （锁持有时间极短，不跨 await，符合异步上下文使用约束）
+    executing_jobs: Arc<std::sync::Mutex<HashMap<i64, bool>>>,
 }
 
 impl JobScheduler {
     /// 创建并启动调度器
-    pub async fn new(db: DatabaseConnection) -> Result<Self, SchedulerError>;
+    pub async fn new(
+        db: DatabaseConnection,
+        redis: ConnectionManager,
+        ip_location_service: crate::service::IpLocationService,
+    ) -> Result<Self, SchedulerError>;
 
     /// 从数据库加载所有 status='0' 的任务并注册
     pub async fn load_from_db(&self) -> Result<(), SchedulerError>;
@@ -700,7 +701,7 @@ async fn execute_inner(invoke_target: &str) -> Result<String, String> {
 
 | 文件路径 | 修改内容 |
 |----------|----------|
-| `Cargo.toml` | 新增 `tokio-cron-scheduler = "0.14"` + `cron = "0.15"` 依赖 |
+| `Cargo.toml` | 新增 `tokio-cron-scheduler = "0.15"` + `croner = "3"` 依赖 |
 | `src/lib.rs` | 新增 `pub mod scheduler;` |
 | `src/service/mod.rs` | 新增 `pub mod sys_job_service;` + re-export `SysJobService` |
 | `src/handler/mod.rs` | 新增 `pub mod sys_job_handler;` + `pub mod sys_job_log_handler;` |
@@ -789,7 +790,7 @@ async fn execute_inner(invoke_target: &str) -> Result<String, String> {
 
 ### 10.3 cron crate 选型
 
-- `tokio-cron-scheduler` 内部依赖 `cron` crate 做 cron 表达式解析
-- 额外在 `Cargo.toml` 显式声明 `cron = "0.15"` 用于：
+- `tokio-cron-scheduler` 内部依赖 `croner` crate 做 cron 表达式解析
+- 额外在 `Cargo.toml` 显式声明 `croner = "3"` 用于：
   - `calc_next_valid_time()` 计算 nextValidTime 返回前端
   - Service 层新增/修改任务时校验 cron 合法性（在写入 DB 前拦截）

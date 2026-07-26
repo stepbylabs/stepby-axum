@@ -16,6 +16,9 @@
 //! 要求密码至少包含字母与数字两种字符类型，防止纯数字/纯字母弱口令，
 //! 并拦截 Top 常见弱口令字典（如 123456、admin123、password 等）。
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -28,21 +31,28 @@ const LEGACY_SALT: &str = "yebot_admin";
 ///
 /// 注：默认管理员初始凭据 `admin123` 也列入黑名单，强制用户首次登录修改密码。
 /// 数据库种子密码哈希直接写入，不经过 `validate_password_complexity`，故不影响初始化。
-const WEAK_PASSWORDS: &[&str] = &[
-    "123456", "12345678", "123456789", "1234567890", "1234567", "12345",
-    "password", "password1", "password123", "passwd", "passw0rd",
-    "admin", "admin123", "admin@123", "administrator", "root", "toor", "superuser",
-    "qwerty", "qwerty123", "qwertyuiop",
-    "abc123", "abcdef", "abc123456",
-    "letmein", "welcome", "welcome1", "welcome123",
-    "monkey", "dragon", "master", "shadow", "sunshine", "trustno1",
-    "login", "princess", "football", "baseball", "soccer",
-    "iloveyou", "starwars", "whatever", "cheese",
-    "000000", "111111", "666666", "888888", "999999",
-    "1q2w3e4r", "1qaz2wsx", "qazwsx",
-    "test", "test123", "test1234", "guest", "guest123",
-    "user", "user123", "default",
-];
+///
+/// M-7：使用 `LazyLock<HashSet<&str>>` 替代切片线性搜索，将 O(n) 检查降为 O(1)。
+static WEAK_PASSWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
+    [
+        "123456", "12345678", "123456789", "1234567890", "1234567", "12345",
+        "password", "password1", "password123", "passwd", "passw0rd",
+        "admin", "admin123", "admin@123", "administrator", "root", "toor", "superuser",
+        "qwerty", "qwerty123", "qwertyuiop",
+        "abc123", "abcdef", "abc123456",
+        "letmein", "welcome", "welcome1", "welcome123",
+        "monkey", "dragon", "master", "shadow", "sunshine", "trustno1",
+        "login", "princess", "football", "baseball", "soccer",
+        "iloveyou", "starwars", "whatever", "cheese",
+        "000000", "111111", "666666", "888888", "999999",
+        "1q2w3e4r", "1qaz2wsx", "qazwsx",
+        "test", "test123", "test1234", "guest", "guest123",
+        "user", "user123", "default",
+    ]
+    .iter()
+    .copied()
+    .collect()
+});
 
 /// 密码复杂度校验（R19-1.3）
 ///
@@ -63,16 +73,16 @@ pub fn validate_password_complexity(password: &str) -> Result<(), String> {
     let has_digit = password.chars().any(|c| c.is_ascii_digit());
 
     if !has_letter {
-        return Err("密码必须包含至少 1 个字母".to_string());
+        return Err(crate::tr!("error.password.complexity_letter"));
     }
     if !has_digit {
-        return Err("密码必须包含至少 1 个数字".to_string());
+        return Err(crate::tr!("error.password.complexity_digit"));
     }
 
     // 弱口令黑名单检查（大小写不敏感）
     let lower = password.to_lowercase();
-    if WEAK_PASSWORDS.iter().any(|w| *w == lower || *w == password) {
-        return Err("密码过于常见，请使用更复杂的口令".to_string());
+    if WEAK_PASSWORDS.contains(&lower.as_str()) || WEAK_PASSWORDS.contains(password) {
+        return Err(crate::tr!("error.password.complexity_common"));
     }
 
     Ok(())

@@ -93,7 +93,7 @@ pub async fn captcha(
     let vo: CaptchaVo = state.auth_service.generate_captcha(&mut redis, &ip).await?;
     Ok(CaptchaResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         captcha_enabled: vo.captcha_enabled,
         img: vo.img,
         uuid: vo.uuid,
@@ -133,7 +133,7 @@ pub async fn login(
 
     Ok(LoginResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         token: vo.token,
     })
 }
@@ -172,11 +172,11 @@ pub async fn logout(
     let auth_header = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::unauthorized("请求未携带 token，请重新登录"))?;
+        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_missing")))?;
 
     let token = auth_header
         .strip_prefix("Bearer ")
-        .ok_or_else(|| AppError::unauthorized("token 格式错误，应为 Bearer <token>"))?;
+        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_invalid")))?;
 
     let mut redis = state.redis.clone();
     state
@@ -205,7 +205,7 @@ pub async fn get_info(
     let user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))?;
 
     let vo: GetInfoVo = state.auth_service.get_info(user_id).await?;
 
@@ -214,7 +214,7 @@ pub async fn get_info(
 
     Ok(GetInfoResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         user: user_value,
         roles: vo.roles,
         permissions: vo.permissions,
@@ -233,7 +233,7 @@ pub async fn get_routers(
     let user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))?;
 
     let routers: Vec<RouterVo> = state.auth_service.get_routers(user_id).await?;
     Ok(AjaxResult::success(routers))
@@ -249,7 +249,7 @@ pub async fn unlock_screen(
     let user_id: i64 = operator
         .user_id()
         .parse()
-        .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))?;
     state.auth_service.unlock_screen(user_id, dto).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.unlock")))
 }

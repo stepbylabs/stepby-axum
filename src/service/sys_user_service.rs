@@ -230,7 +230,7 @@ pub struct UserFormVo {
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("时间格式不正确: {}", s)))
+        .map_err(|_| ServiceError::bad_request(&format!("{}: {}", crate::tr!("error.gen.time_format"), s)))
 }
 
 // ==================== Service 实现 ====================
@@ -302,7 +302,7 @@ impl SysUserService {
         {
             return Err(ServiceError::new(
                 403,
-                "不允许操作比自己更高优先级的角色",
+                &crate::tr!("error.user.higher_role_forbidden"),
             ));
         }
         Ok(())
@@ -617,6 +617,28 @@ impl SysUserService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+        }
+
+        // L-5：若所有提交值与现有值完全相同，跳过无意义的 UPDATE（减少 DB 写入与 binlog 噪声）
+        //      None 字段视为"不修改"，不参与比较；仅当所有提交字段都等于现值时短路返回。
+        let nick_same = dto
+            .nick_name
+            .as_deref()
+            .map_or(true, |v| existing.nick_name == v);
+        let email_same = dto
+            .email
+            .as_deref()
+            .map_or(true, |v| existing.email.as_deref() == Some(v));
+        let phone_same = dto
+            .phonenumber
+            .as_deref()
+            .map_or(true, |v| existing.phonenumber.as_deref() == Some(v));
+        let sex_same = dto
+            .sex
+            .as_deref()
+            .map_or(true, |v| existing.sex.as_deref() == Some(v));
+        if nick_same && email_same && phone_same && sex_same {
+            return Ok(());
         }
 
         let now = chrono::Local::now().naive_local();
@@ -977,6 +999,14 @@ impl SysUserService {
             return self.delete_user(user_ids[0], operator_user_id).await;
         }
 
+        // C-2：批量垂直越权校验（事务前统一执行，全部通过后才进入事务）
+        //      与 delete_user 的 check_vertical_auth_by_user_id 行为一致，
+        //      避免 handler 层 for 循环调用 delete_user 时漏校验的安全漏洞。
+        for target_user_id in &user_ids {
+            self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
+                .await?;
+        }
+
         // 批量删除：单个事务包装所有操作
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
@@ -988,19 +1018,13 @@ impl SysUserService {
                     for user_id in user_ids {
                         // 1. 查询用户存在性（事务内，防止 TOCTOU）
                         let existing = user_repo.base().find_by_id_conn(txn, user_id).await?
-                            .ok_or_else(|| sea_orm::DbErr::Custom(format!("用户 {} 不存在", user_id)))?;
+                            .ok_or_else(|| sea_orm::DbErr::Custom(format!("{}: {}", crate::tr!("error.user.not_found"), user_id)))?;
                         if existing.del_flag.as_deref() == Some("2") {
-                            return Err(sea_orm::DbErr::Custom(format!("用户 {} 不存在", user_id)));
+                            return Err(sea_orm::DbErr::Custom(format!("{}: {}", crate::tr!("error.user.not_found"), user_id)));
                         }
 
-                        // 2. 垂直越权校验（事务内，复用现有逻辑）
-                        // 注意：check_vertical_auth_by_user_id 是 async 且依赖 &self，
-                        // 无法在闭包内调用 self 方法。这里改为内联实现核心逻辑：
-                        // 查询目标用户的最高角色 sort，与 operator 的最高角色 sort 比较。
-                        // 为简化实现，复用 delete_user 的 check 方法（事务外预校验）。
-                        // 实际批量场景下 operator 应具有足够权限（如超管或系统管理员），
-                        // 详细的垂直越权校验由前端权限菜单 + 后端 permission_middleware 保障。
-                        // 此处仅保证超管不被删除（上面已校验）。
+                        // 2. 垂直越权校验已在事务前完成（见上方 C-2 修复），
+                        //    事务内不再重复校验，依赖 sys_user_role 的外键约束保证一致性。
 
                         // 3. 释放唯一字段值（避免软删除后唯一索引冲突）
                         let deleted_user_name = format!("{}_deleted_{}", existing.user_name, user_id);

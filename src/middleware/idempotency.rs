@@ -78,7 +78,7 @@ pub async fn idempotency_middleware(
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "code": 400,
-                        "msg": "Idempotency-Key 头包含非 ASCII 字符"
+                        "msg": crate::tr!("error.auth.idempotency_key_non_ascii")
                     })),
                 )
                     .into_response();
@@ -93,7 +93,7 @@ pub async fn idempotency_middleware(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "code": 400,
-                "msg": "Idempotency-Key 头不能为空"
+                "msg": crate::tr!("error.auth.idempotency_key_empty")
             })),
         )
             .into_response();
@@ -103,7 +103,7 @@ pub async fn idempotency_middleware(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "code": 400,
-                "msg": format!("Idempotency-Key 长度不能超过 {} 字符", IDEMPOTENCY_KEY_MAX_LEN)
+                "msg": crate::tr!("error.auth.idempotency_key_too_long", max = IDEMPOTENCY_KEY_MAX_LEN)
             })),
         )
             .into_response();
@@ -116,7 +116,7 @@ pub async fn idempotency_middleware(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "code": 400,
-                "msg": "Idempotency-Key 包含非法字符（仅允许字母、数字、连字符、下划线）"
+                "msg": crate::tr!("error.auth.idempotency_key_invalid")
             })),
         )
             .into_response();
@@ -129,6 +129,15 @@ pub async fn idempotency_middleware(
         .get::<Claims>()
         .map(|c| c.sub.clone())
         .unwrap_or_else(|| "anonymous".to_string());
+
+    // H-3：anonymous 请求跳过幂等性校验。
+    //      否则所有匿名用户共享 idempotency:anonymous:{key} 命名空间，
+    //      一个匿名用户的请求会拦截其他匿名用户使用相同 Idempotency-Key 的请求。
+    //      能到达此处的 anonymous 请求通常为公开接口（如登录、注册），无身份绑定，
+    //      跳过幂等性不会引入安全风险（前端可自行通过 Idempotency-Key 防重，但服务端不强制）。
+    if user_id == "anonymous" {
+        return next.run(req).await;
+    }
 
     // 5. Redis SETNX 抢占幂等槽位
     let redis_key = format!("{}{}:{}", IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key);
@@ -165,7 +174,7 @@ pub async fn idempotency_middleware(
             StatusCode::CONFLICT,
             Json(serde_json::json!({
                 "code": 409,
-                "msg": "重复的幂等性请求，请勿重复提交"
+                "msg": crate::tr!("error.auth.duplicate_request")
             })),
         )
             .into_response();

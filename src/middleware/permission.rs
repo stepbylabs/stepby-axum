@@ -42,7 +42,7 @@ pub async fn permission_middleware(
         .extensions()
         .get::<Claims>()
         .cloned()
-        .ok_or_else(|| AppError::unauthorized("无法获取登录信息，请重新登录"))?;
+        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))?;
 
     // 2. 获取匹配的路由路径和 HTTP 方法
     let method = req.method().clone();
@@ -67,7 +67,7 @@ pub async fn permission_middleware(
     let user_id: i64 = claims
         .sub
         .parse()
-        .map_err(|_| AppError::internal("用户 ID 解析失败"))?;
+        .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))?;
 
     let permissions = state
         .menu_service
@@ -96,7 +96,7 @@ pub async fn permission_middleware(
             required_perm,
             "权限拒绝：用户缺少所需权限"
         );
-        Err(AppError::new(403, "没有权限访问该资源"))
+        Err(AppError::new(403, &crate::tr!("error.auth.permission_denied")))
     }
 }
 

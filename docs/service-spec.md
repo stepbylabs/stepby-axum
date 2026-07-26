@@ -15,9 +15,9 @@
 
 1. **Service 层完全独立**：不依赖 axum / tower / tower-http 任何 Web 框架类型
 2. **事务控制**：核心多表操作使用 SeaORM `TransactionTrait` 真事务（修正 ref-salvo-admin 的事务形同虚设缺陷）
-3. **参数校验**：使用 `validator` crate 对 DTO 进行结构化校验
+3. **参数校验**：使用 `garde` crate 对 DTO 进行结构化校验
 4. **业务规则**：补齐 ref-salvo-admin 缺失的查重、级联清理、超管保护等业务规则
-5. **密码安全**：复用已有 `utils::password` 模块（MD5 + 盐值 "yebot_admin"，不兼容 ref-salvo-admin 旧数据）
+5. **密码安全**：复用已有 `utils::password` 模块（Argon2id 为主算法，"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 验证 fallback，不兼容 ref-salvo-admin 旧数据）
 6. **树形组装**：复用已有 `utils::tree::build_tree` 工具函数，规避 ref-salvo-admin 的 O(n²) 递归 clone 问题
 
 ### 1.2 模块清单
@@ -89,19 +89,19 @@ pub async fn add_user(&self, dto: UserAddDto, operator: &str) -> Result<SysUserM
 
 ### 2.3 参数校验策略
 
-**采用 `validator` crate（已在 Cargo.toml 声明）**，在 DTO 结构体上使用 `#[validate]` 注解：
+**采用 `garde` crate（已在 Cargo.toml 声明）**，在 DTO 结构体上使用 `#[garde]` 注解：
 
 ```rust
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct UserAddDto {
-    #[validate(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30, message = "用户名长度必须在2-30之间"))]
     pub user_name: String,
-    #[validate(length(min = 2, max = 30, message = "昵称长度必须在2-30之间"))]
+    #[garde(length(min = 2, max = 30, message = "昵称长度必须在2-30之间"))]
     pub nick_name: String,
-    #[validate(email(message = "邮箱格式不正确")))]
+    #[garde(email(message = "邮箱格式不正确")))]
     pub email: Option<String>,
-    #[validate(regex(path = "PHONE_REGEX", message = "手机号格式不正确"))]
+    #[garde(regex(path = "PHONE_REGEX", message = "手机号格式不正确"))]
     pub phonenumber: Option<String>,
     // ...
 }
@@ -120,7 +120,7 @@ Service 方法入口处统一调用 `dto.validate()?` 进行校验，校验失�
 | 个人中心改密 | `encrypt_password(新明文)` 后入库 | `verify_password(旧明文, 旧密文)` 比对 |
 | 登录校验 | — | `verify_password(输入明文, 库中密文)` 比对 |
 
-> **盐值说明：** 本项目使用盐值 `"yebot_admin"`（非 ref-salvo-admin 的 `"salvo_admin"`），初始数据密码均为 `admin123`。数据库密码与 ref-salvo-admin **不兼容**，新部署需使用新盐值生成的密码。
+> **盐值说明：** 本项目密码算法为 Argon2id（每用户独立随机盐），"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 哈希的验证 fallback（升级前已存在的用户密码）。初始数据密码均为 `admin123`。数据库密码与 ref-salvo-admin **不兼容**，新部署需使用 Argon2id 生成的密码。
 
 ### 2.5 软删除策略
 
@@ -205,14 +205,14 @@ Handler 调用 Service 时传入 operator 参数
 # 异步 Future 工具（事务闭包 boxed()）
 futures = "0.3"
 
-# 正则表达式（validator regex 校验手机号）
+# 正则表达式（garde regex 校验手机号）
 regex = "1"
 
 # once_cell（定义全局正则常量）
 once_cell = "1"
 ```
 
-> **说明：** `validator` 的 `regex` 校验需要 `regex` crate，且需用 `once_cell` 定义编译期正则常量。
+> **说明：** `garde` 的 `regex` 校验需要 `regex` crate，且需用 `once_cell` 定义编译期正则常量。
 
 ---
 
@@ -802,7 +802,7 @@ pub async fn add_user(&self, dto: UserAddDto, operator: &str) -> Result<SysUserM
 
 | 错误类型 | AppError 构造 | 使用场景 |
 |---------|--------------|---------|
-| 参数校验失败 | `AppError::bad_request(msg)` | validator 校验失败、业务规则校验失败 |
+| 参数校验失败 | `AppError::bad_request(msg)` | garde 校验失败、业务规则校验失败 |
 | 资源不存在 | `AppError::not_found(msg)` | 查询的记录不存在 |
 | 未认证 | `AppError::unauthorized(msg)` | 登录校验失败 |
 | 数据库错误 | `From<DbErr>` 自动转换 | SeaORM 操作失败 |
@@ -841,7 +841,7 @@ src/service/dto/                # DTO 定义（可选独立目录）
 | ORM | rbatis + html_sql | SeaORM 原生 |
 | 事务 | `GLOBAL_DB.acquire_begin()`（形同虚设） | `TransactionTrait::transaction()`（真事务） |
 | 密码 | MD5 + "salvo_admin" | MD5 + "yebot_admin"（不兼容旧数据） |
-| 参数校验 | 零散 if 判断 | validator crate 结构化校验 |
+| 参数校验 | 零散 if 判断 | garde crate 结构化校验 |
 | 用户名查重 | 有 | 有 |
 | role_key 查重 | 无 | 有 |
 | perms 查重 | 无 | 有 |

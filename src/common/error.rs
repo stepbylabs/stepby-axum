@@ -88,6 +88,9 @@ impl From<sea_orm::DbErr> for ServiceError {
                 //   PostgreSQL: "duplicate key value violates unique constraint"
                 //   MySQL: "Duplicate entry 'xxx' for key"
                 //   SQLite: "UNIQUE constraint failed"
+                //
+                // TODO(M-3): 升级 SeaORM 后改用结构化错误变体（如 `DbErr::UniqueViolation`），
+                //   避免依赖字符串匹配导致的误判/漏判风险。SeaORM 1.1 暂无结构化变体。
                 let err_str = err.to_string().to_lowercase();
                 if err_str.contains("unique constraint")
                     || err_str.contains("duplicate entry")

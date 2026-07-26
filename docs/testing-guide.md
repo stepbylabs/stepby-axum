@@ -49,7 +49,7 @@
 ```
 
 当前测试统计：
-- **单元测试**：119 个（全部通过）
+- **单元测试**：约 120 个（实际数量随开发迭代变化，以 `cargo test` 输出为准）
 - **ts-rs 导出测试**：19 个
 - **集成测试**：依赖外部服务（MySQL/Redis），需手动执行
 
@@ -65,7 +65,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
 # 验证
-rustc --version  # 1.75+
+rustc --version  # 1.96+
 cargo --version
 ```
 
@@ -96,6 +96,18 @@ JWT_SECRET=test_secret_at_least_32_characters_long!!
 EOF
 ```
 
+PowerShell 等价命令：
+
+```powershell
+# PowerShell 等价命令
+@"
+DATABASE_URL=sqlite://./data/yebot.db?mode=rwc
+REDIS_URL=redis://127.0.0.1:6379
+JWT_SECRET=change_me_in_production
+RUST_LOG=info
+"@ | Set-Content -Path .env -Encoding UTF8
+```
+
 ### 2.4 数据库初始化
 
 ```bash
@@ -115,7 +127,7 @@ cargo test
 
 期望输出：
 ```
-running 119 tests
+running N tests（N 为当前测试数）
 test utils::ip_location::tests::test_is_private_ip_v4 ... ok
 test utils::ip_location::tests::test_is_not_private_ip_v4 ... ok
 test utils::ip_location::tests::test_is_private_ip_v6 ... ok
@@ -126,8 +138,8 @@ test utils::password::tests::test_verify_empty_hash ... ok
 test utils::password::tests::test_verify_legacy_md5 ... ok
 test utils::password::tests::test_password_complexity_valid ... ok
 test utils::password::tests::test_password_complexity_weak_blacklist ... ok
-...（共 119 个测试）
-test result: ok. 119 passed; 0 failed; 0 ignored
+...（共 N 个测试，N 为当前测试数）
+test result: ok. N passed; 0 failed; 0 ignored（N 为当前测试数）
 ```
 
 ### 3.2 运行指定模块测试
@@ -186,7 +198,7 @@ cargo tarpaulin --out Html
 | `scheduler::registry` | 3 | 调度器任务注册/移除 |
 | ts-rs export_bindings | 19 | 13 个 entity + 6 个 Vo 的 TypeScript 导出 |
 | 其他 | 2 | datetime 序列化等 |
-| **合计** | **119** | |
+| **合计** | **N**（以 `cargo test` 输出为准） | |
 
 ---
 
@@ -290,7 +302,7 @@ cd migration && cargo run && cd ..
 验证：
 ```bash
 mysql -u yebot -p yebot -e "SHOW TABLES;"
-# 期望输出 17 张表（15 张业务表 + seaql_migrations）
+# 期望输出 18 张表（17 张业务表 + seaql_migrations）
 ```
 
 ---
@@ -537,7 +549,7 @@ curl -X DELETE http://localhost:8080/system/user/1 \
 
 ```bash
 # 连续 5 次错误密码登录
-for i in $(seq 1 6); do
+for i in $(seq 1 5); do
   curl -X POST http://localhost:8080/login \
     -H "Content-Type: application/json" \
     -d '{"username":"admin","password":"wrong","code":"x","uuid":"x"}'

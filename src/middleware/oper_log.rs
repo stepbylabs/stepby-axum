@@ -589,7 +589,8 @@ fn infer_business_type(method: Method, path: &str) -> i32 {
     if path.ends_with("/export") {
         return 5;
     }
-    if path.contains("/import") {
+    // M-5：用 ends_with + /import/ 双重匹配，避免误命中 /import_log 等无关路径
+    if path.ends_with("/import") || path.contains("/import/") {
         return 6;
     }
     if path.ends_with("/clean") {

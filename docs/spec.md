@@ -66,7 +66,7 @@
 
 ### 2.1 核心依赖清单（主 crate `axum-backend`）
 
-> **edition：** 主 crate `Cargo.toml` 使用 `edition = "2024"`（需 Rust 1.85+，支持 let-chains 等稳定语法）。
+> **edition：** 主 crate `Cargo.toml` 使用 `edition = "2024"`（需 Rust 1.96+，支持 let-chains 等稳定语法）。
 
 | 依赖 | 版本 | features | 用途 |
 |------|------|----------|------|
@@ -752,8 +752,20 @@ pub struct CaptchaResult {
 pub fn generate_captcha() -> CaptchaResult {
     let mut captcha = Captcha::new();
     captcha.set_chars(&"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".chars().collect::<Vec<_>>());
-    captcha.add_chars(4);
-    captcha.apply_filter(Noise::new(0.3));
+
+    // 5 位验证码（循环 add_char 直到达到 5 位，修复 captcha 1.0 字体跳过 bug）
+    let target_len = 5usize;
+    let mut retries = 0;
+    while captcha.chars_as_string().len() < target_len && retries < 20 {
+        captcha.add_char();
+        retries += 1;
+    }
+
+    // 多重滤镜叠加：Noise(0.5) + Wave 扭曲 + Dots 干扰点
+    captcha.apply_filter(Noise::new(0.5));
+    captcha.apply_filter(Wave::new(2.0, 8.0).horizontal());
+    captcha.apply_filter(Wave::new(3.0, 6.0).vertical());
+    captcha.apply_filter(Dots::new(5).min_radius(2).max_radius(4));
     captcha.view(220, 120);
 
     let code = captcha.chars_as_string();
@@ -890,7 +902,7 @@ Thumbs.db
 
 ## 5. migration 子 crate 设计
 
-> ⚠️ **本文档为第一阶段规格，仅描述首迁移骨架。** 后续迁移见 `migration/src/lib.rs` 注册表（截至 2026-07-26 共 29 个迁移，涵盖索引/字段调整/菜单/备份日志/任务/限流/i18n/IP 归属地等）。新增迁移请直接编辑 `migration/src/lib.rs` 的 `Migrator::migrations()` 注册表。
+> ⚠️ **本文档为第一阶段规格，仅描述首迁移骨架。** 后续迁移见 `migration/src/lib.rs` 注册表（截至 2026-08-02 共 29 个迁移，涵盖索引/字段调整/菜单/备份日志/任务/限流/i18n/IP 归属地等）。新增迁移请直接编辑 `migration/src/lib.rs` 的 `Migrator::migrations()` 注册表。
 
 ### 5.1 Cargo.toml
 
@@ -1024,10 +1036,10 @@ async fn main() {
 
 | 优先级 | 参考项目 | 本阶段应用场景 |
 |--------|----------|----------------|
-| 第一 | ref-salvo-admin / ruoyi-vue3-ts | 响应结构体字段名、状态码、Token 契约（密码盐值已改为 "yebot_admin"） |
+| 第一 | ref-salvo-admin / ruoyi-vue3-ts | 响应结构体字段名、状态码、Token 契约（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "yebot_admin"） |
 | 第二 | ref-soybean-admin | 分层架构、State 注入、initialize 编排、错误 IntoResponse、中间件 from_fn |
 | 第三 | ref-axum-admin | SeaORM ConnectOptions 配置、paginate 分页查询模式 |
-| 第四 | ref-salvo-admin | 验证码接口设计（密码盐值已改为 "yebot_admin"） |
+| 第四 | ref-salvo-admin | 验证码接口设计（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "yebot_admin"） |
 
 ---
 

@@ -50,7 +50,7 @@
 - [ ] `axum-backend/config/config.toml` 存在
 - [ ] `axum-backend/.gitignore` 存在（忽略 `/target`）
 - [ ] `axum-backend/src/main.rs` 存在
-- [ ] `axum-backend/src/lib.rs` 存在（声明全部 14 个模块）
+- [ ] `axum-backend/src/lib.rs` 存在（声明全部 17 个模块）
 - [ ] `axum-backend/src/config/mod.rs` 存在
 - [ ] `axum-backend/src/config/settings.rs` 存在
 - [ ] `axum-backend/src/common/mod.rs` 存在
@@ -113,14 +113,14 @@
 - [ ] `chrono = "0.4"`（features 含 `serde`）
 - [ ] `uuid = "1"`（features 含 `v4`）
 - [ ] `redis = "1.3"`（features 含 `tokio-comp`）
-- [ ] `md-5 = "0.11"`
+- [ ] `md-5 = "0.10"`
 - [ ] `captcha = "1.0"`
 - [ ] `anyhow = "1"`
-- [ ] `toml = "0.8"`
-- [ ] `validator = "0.20"`（features 含 `derive`）
+- [ ] `toml = "1"`
+- [ ] `garde = "0.23"`（features 含 `full`）
 - [ ] `[workspace]` 段含 `members = ["migration"]`
 
-> **已移除依赖说明：** `base64`（captcha 1.0 内置）、`once_cell`（用 State 注入）、`thiserror`（AppError 手写）、`rand`（captcha 内部管理 RNG）—— 若 Cargo.toml 中仍存在这些依赖视为冗余。
+> **依赖说明：** `thiserror`（自定义错误类型派生）、`base64`（TOTP QR 码编码）、`rand`（AES-GCM nonce 生成）已重新引入并有实际用途；`once_cell` 已移除（用 State 注入）。
 
 ### 3.2 migration 子 crate 依赖
 
@@ -177,7 +177,7 @@
 - [ ] `constants` 模块含 `SUCCESS`/`BAD_REQUEST`/`UNAUTHORIZED`/`NOT_FOUND`/`INTERNAL_ERROR`/`WARNING`
 - [ ] 含 `STATUS_NORMAL`（"0"）/ `STATUS_DISABLED`（"1"）
 - [ ] 含 `SUPER_ADMIN_ROLE`（"admin"）/ `ALL_PERMISSIONS`（"*:*:*"）
-- [ ] 含 `PASSWORD_SALT`（"yebot_admin"）
+- [ ] 含 `password.rs` 中 `LEGACY_SALT` 常量（"yebot_admin"，仅旧 MD5 验证用）
 
 ### 4.5 配置管理
 
@@ -221,20 +221,20 @@
 
 ### 4.10 密码工具
 
-- [ ] `encrypt_password()` 使用 MD5 + 盐值（"yebot_admin"）
+- [ ] `encrypt_password()` 使用 Argon2id + 随机盐（旧 MD5 仅作 fallback 验证）
 - [ ] `verify_password()` 比对加密结果
 - [ ] 单元测试 `test_encrypt_and_verify` 通过
-- [ ] 盐值常量从 `constants::PASSWORD_SALT` 引用（非硬编码）
+- [ ] 旧 MD5 盐值常量 `LEGACY_SALT`（"yebot_admin"）仅用于旧密码验证（非新密码加密）
 
 ### 4.11 验证码工具
 
 - [ ] `generate_captcha()` 返回 `CaptchaResult`（含 `uuid`、`img_base64`、`code`）
 - [ ] 验证码字符集排除易混淆字符（`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`）
-- [ ] 验证码长度 4 位
+- [ ] 验证码长度 5 位
 - [ ] 图片输出为 Base64 编码
 - [ ] uuid 使用 `Uuid::new_v4()`
-- [ ] 使用 captcha 1.0 API：`set_chars` 设置字符集、`add_chars(4)` 添加字符
-- [ ] `apply_filter(Noise::new(0.3))` 使用强度参数（非 0.0.9 的无参 Noise）
+- [ ] 使用 captcha 1.0 API：`set_chars` 设置字符集、`add_char()` 循环添加至 5 位
+- [ ] `apply_filter(Noise::new(0.5))` 使用强度参数（非 0.0.9 的无参 Noise）
 - [ ] `view(220, 120)` 指定宽高尺寸
 - [ ] `chars_as_string()` 获取验证码明文
 - [ ] `as_base64()` 直接返回 Base64 字符串（无需手动 base64 编码）
@@ -304,8 +304,8 @@
 
 ### 6.4 密码兼容性
 
-- [ ] 密码加盐方式为 `password + "yebot_admin"` 后 MD5
-- [ ] 初始数据密码使用新盐值生成（不兼容 ref-salvo-admin 旧密码）
+- [ ] 密码算法为 Argon2id + 随机盐（旧 MD5 仅作 fallback 验证）
+- [ ] 初始数据密码使用 Argon2id 生成（不兼容 ref-salvo-admin 旧密码）
 
 ---
 
@@ -398,7 +398,7 @@
 - Redis 连接池（ConnectionManager）：✓
 - 日志体系（tracing-subscriber）：✓
 - JWT 工具（Claims + JwtUtils）：✓
-- 密码工具（MD5 + 盐值 "yebot_admin"）：✓
+- 密码工具（Argon2id + 随机盐，旧 MD5 仅 fallback）：✓
 - 验证码工具（captcha + base64）：✓
 - 树构建工具（TreeNode + build_tree）：✓
 - 中间件（request_id + auth）：✓
@@ -415,7 +415,7 @@ migration 子 crate：
 - 响应字段名（code/msg/data/rows/total）：✓
 - 状态码（200/401/500）：✓
 - 服务端口（8080）：✓
-- 密码加盐兼容 ref-salvo-admin：✓
+- 密码算法 Argon2id（不兼容 ref-salvo-admin 旧密码）：✓
 
 编译运行：
 - cargo build 成功：✓

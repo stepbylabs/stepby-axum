@@ -40,6 +40,35 @@ error:
     logout_failed: 登出处理失败，请重试
     totp_required: 需要二次验证
     totp_invalid: 动态口令错误
+    token_missing: 请求未携带 token，请重新登录
+    duplicate_request: 重复的幂等性请求，请勿重复提交
+    idempotency_key_empty: Idempotency-Key 头不能为空
+    idempotency_key_invalid: Idempotency-Key 包含非法字符，仅允许字母、数字、连字符和下划线
+    idempotency_key_non_ascii: Idempotency-Key 头包含非 ASCII 字符
+    idempotency_key_too_long: "Idempotency-Key 长度不能超过 {{max}} 字符"
+    login_info_missing: 无法获取登录信息，请重新登录
+    password_changed: 密码已修改，请重新登录
+    permission_denied: 没有权限访问该资源
+    token_invalid: token 格式错误，应为 Bearer <token>
+    token_revoked: 会话已注销，请重新登录
+    user_id_parse_failed: 用户 ID 解析失败
+  file:
+    delete_failed: 删除文件失败
+    delete_task_failed: 删除任务失败
+    empty: 上传文件为空
+    field_not_found: 未找到 file 字段
+    invalid_name: 非法的文件名
+    list_failed: 读取目录失败
+    list_task_failed: 读取目录任务失败
+    multipart_parse_failed: 解析 multipart 失败
+    read_failed: 读取文件内容失败
+    too_large: "文件大小不能超过 {{max}}MB"
+    unknown_ext: 无法识别文件扩展名
+    unsupported_type: "不支持的文件类型: {{ext}}"
+  password:
+    complexity_common: 密码过于常见，请使用更复杂的口令
+    complexity_digit: 密码必须包含至少 1 个数字
+    complexity_letter: 密码必须包含至少 1 个字母
   user:
     not_found: 用户不存在
     name_duplicate: 用户名不能重复
@@ -50,6 +79,17 @@ error:
     admin_pwd_forbidden: 不允许修改超级管理员密码
     same_password: 新密码不能与旧密码相同
     password_missing: 用户密码字段缺失
+    higher_role_forbidden: 不允许操作比自己更高优先级的角色
+  config:
+    not_found: 参数配置不存在
+    key_exists: 参数键名已存在
+  rate_limit:
+    not_found: 限流配置不存在
+    pattern_exists: 路由前缀已存在
+  monitor:
+    session_not_found: 会话不存在或已过期
+    session_invalid: 会话数据异常
+    admin_force_logout_forbidden: 不允许强退超级管理员会话
   post:
     not_found: 岗位不存在
     code_exists: 岗位编码已存在

@@ -40,6 +40,35 @@ error:
     logout_failed: Logout processing failed, please try again
     totp_required: Two-factor verification required
     totp_invalid: Incorrect verification code
+    token_missing: Request missing token, please log in again
+    duplicate_request: Duplicate idempotent request, please do not resubmit
+    idempotency_key_empty: Idempotency-Key header cannot be empty
+    idempotency_key_invalid: Idempotency-Key contains invalid characters, only letters, digits, hyphens, and underscores are allowed
+    idempotency_key_non_ascii: Idempotency-Key header contains non-ASCII characters
+    idempotency_key_too_long: "Idempotency-Key length cannot exceed {{max}} characters"
+    login_info_missing: Cannot retrieve login info, please log in again
+    password_changed: Password has been changed, please log in again
+    permission_denied: No permission to access this resource
+    token_invalid: Invalid token format, expected Bearer <token>
+    token_revoked: Session has been revoked, please log in again
+    user_id_parse_failed: Failed to parse user ID
+  file:
+    delete_failed: Failed to delete file
+    delete_task_failed: Delete task failed
+    empty: Uploaded file is empty
+    field_not_found: file field not found
+    invalid_name: Invalid file name
+    list_failed: Failed to read directory
+    list_task_failed: Read directory task failed
+    multipart_parse_failed: Failed to parse multipart
+    read_failed: Failed to read file content
+    too_large: "File size cannot exceed {{max}}MB"
+    unknown_ext: Cannot recognize file extension
+    unsupported_type: "Unsupported file type: {{ext}}"
+  password:
+    complexity_common: Password is too common, please use a more complex password
+    complexity_digit: Password must contain at least 1 digit
+    complexity_letter: Password must contain at least 1 letter
   user:
     not_found: User does not exist
     name_duplicate: Username cannot be duplicated
@@ -50,6 +79,17 @@ error:
     admin_pwd_forbidden: Cannot modify the super administrator's password
     same_password: The new password cannot be the same as the old one
     password_missing: User password field is missing
+    higher_role_forbidden: Cannot operate on users with higher priority roles
+  config:
+    not_found: Configuration not found
+    key_exists: Configuration key already exists
+  rate_limit:
+    not_found: Rate limit configuration not found
+    pattern_exists: Route pattern already exists
+  monitor:
+    session_not_found: Session does not exist or has expired
+    session_invalid: Session data invalid
+    admin_force_logout_forbidden: Cannot force logout the super administrator
   post:
     not_found: Post does not exist
     code_exists: Post code already exists

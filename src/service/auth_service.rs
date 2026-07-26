@@ -909,16 +909,30 @@ impl AuthService {
         //    状态码：400 Bad Request（客户端输入问题，非系统错误）
         if self.is_captcha_enabled().await {
             let captcha_key = format!("captcha:{}:{}", dto.uuid, ip);
-            let stored_code: Option<String> = redis::cmd("GETDEL")
+            // C-1：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
+            //      与 verify_captcha（464-478 行）保持一致，避免静默吞错掩盖基础设施故障。
+            let stored_code: Option<String> = match redis::cmd("GETDEL")
                 .arg(&captcha_key)
                 .query_async(redis)
                 .await
-                .ok()
-                .flatten();
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
+                    return Err(ServiceError::new(
+                        503,
+                        &crate::tr!("error.auth.auth_unavailable"),
+                    ));
+                }
+            };
 
             let stored = match stored_code {
                 Some(c) => c,
-                None => return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_expired"))),
+                None => {
+                    return Err(ServiceError::bad_request(
+                        &crate::tr!("error.auth.captcha_expired"),
+                    ))
+                }
             };
 
             if stored.to_lowercase() != dto.code.to_lowercase() {

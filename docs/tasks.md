@@ -1,5 +1,7 @@
 # 工程脚手架与基础框架 任务分解（tasks.md）
 
+> ⚠️ **本文档为初始任务记录，最新依赖以 `spec.md` / `Cargo.toml` 为准。**
+
 > **阶段：** 第一阶段「工程脚手架与基础框架」
 > **对应规范：** `docs/spec.md`
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`
@@ -57,7 +59,7 @@
 [package]
 name = "axum-backend"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 # Web 框架
@@ -97,13 +99,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # 工具
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
-md-5 = "0.11"
+md-5 = "0.10"
 
 # 错误处理
 anyhow = "1"
 
 # 校验
-validator = { version = "0.20", features = ["derive"] }
+garde = { version = "0.23", features = ["derive"] }
 
 # Redis
 redis = { version = "1.3", features = ["tokio-comp"] }
@@ -1541,7 +1543,7 @@ git commit -m "feat: 添加应用入口 main.rs（通过 AppInitializer 编排�
 [package]
 name = "migration"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-mysql"] }
