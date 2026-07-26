@@ -11,6 +11,8 @@ config/config.toml.prod
 
 # 数据
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/*.py
 data/*.json
 data/__pycache__/
