@@ -900,7 +900,7 @@ Thumbs.db
 
 ## 5. migration 子 crate 设计
 
-> ⚠️ **本文档为第一阶段规格，仅描述首迁移骨架。** 后续迁移见 `migration/src/lib.rs` 注册表（截至 2026-08-02 共 29 个迁移，涵盖索引/字段调整/菜单/备份日志/任务/限流/i18n/IP 归属地等）。新增迁移请直接编辑 `migration/src/lib.rs` 的 `Migrator::migrations()` 注册表。
+> ⚠️ **本文档为第一阶段规格，仅描述首迁移骨架。** 后续迁移见 `migration/src/lib.rs` 注册表（截至 2026-08-04 共 31 个迁移，涵盖索引/字段调整/菜单/备份日志/任务/限流/i18n/IP 归属地/备份权限收紧/IP 库菜单父级修复等）。新增迁移请直接编辑 `migration/src/lib.rs` 的 `Migrator::migrations()` 注册表。
 
 ### 5.1 Cargo.toml
 

@@ -98,10 +98,10 @@ pub async fn serve_embedded(req: Request) -> Response {
     let clean_path = path.trim_start_matches('/');
 
     // 优先尝试请求的路径
-    if !clean_path.is_empty() {
-        if let Some(file) = EmbeddedAssets::get(clean_path) {
-            return build_response(clean_path, file);
-        }
+    if !clean_path.is_empty()
+        && let Some(file) = EmbeddedAssets::get(clean_path)
+    {
+        return build_response(clean_path, file);
     }
 
     // SPA fallback：未匹配的路径返回 index.html（前端路由处理）
