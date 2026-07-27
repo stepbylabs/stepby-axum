@@ -27,6 +27,7 @@ data/*.xdb
 # 日志
 logs/
 backend*.log
+build-*.log
 backend.err
 *.sql
 

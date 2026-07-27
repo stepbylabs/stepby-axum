@@ -858,6 +858,45 @@ chmod +x .git/hooks/pre-commit
 
 **验证方式**：开启 SQL 日志（`RUST_LOG=sqlx=trace` 或 SeaORM `stmt` 层），执行批量删除/生成操作，确认 SELECT 语句数量由 O(N) 降为 O(1)。
 
+### 10.10 E2E 端到端测试套件（45 项功能）
+
+> 测试脚本：`tests/main.mjs`（Playwright 驱动，覆盖前端 + 后端 + 嵌入式模式）
+
+#### 运行方式
+
+```powershell
+# PowerShell 环境变量设置
+$env:YEBOT_TEST_USER='admin'
+$env:YEBOT_TEST_PASS='admin123'
+
+# 全量测试（45 项功能）
+node tests/main.mjs
+
+# 单项测试（如 feature 44）
+node tests/main.mjs --feature=44
+
+# 无头模式
+node tests/main.mjs --headless
+```
+
+#### 关键测试项说明
+
+| 功能 | 测试内容 | 验证方式 |
+|------|---------|---------|
+| 17 | 备份写权限收紧（ry 角色） | 恢复按钮隐藏 + API 403 |
+| 18 | IP 库管理只读权限（ry 角色） | 写按钮隐藏 + GET 200 / PUT·POST 403 |
+| 31 | 备份恢复权限 system:backup:edit | ry 调用 POST /system/backup 返回 403 |
+| 37 | U1 Dashboard 跳转操作日志路由 | 验证跳转到 `/system/log/operlog` |
+| 43 | operlog title i18n 本地化 | `formatModuleTitle` 剥离 `module.` 前缀后 `te()` 回退 |
+| 44 | 提交按钮 `:loading` 绑定 | 源码检查 `submitLoading` ref + `finally` 重置模式 |
+
+#### 测试脚本注意事项
+
+- **PowerShell heredoc 限制**：PowerShell 不支持 `<<EOF` 语法，`git commit` 多行消息应使用 `-F 文件` 或单行 `-m`
+- **并行测试**：`--feature=N` 可并行运行多项，但 7+ 浏览器并行可能导致 DOM 交互测试（如 feature 44 对话框打开）超时
+- **源码检查优先**：UI 交互测试（对话框打开/按钮点击）受 tree-sidebar 布局遮挡、API 响应延迟等因素影响，源码检查（`page.evaluate` + `fetch(script.src)`）更可靠
+- **嵌入式前端**：测试默认使用 `http://localhost:8080`（嵌入式模式），需确保 `frontend-dist` 已同步最新构建
+
 ---
 
 ## 附录：常用测试命令速查
