@@ -338,10 +338,10 @@ fn is_write_method(method: Method) -> bool {
 fn extract_record_id(oper_url: &str, body: Option<&[u8]>) -> Option<i64> {
     // 策略 1：从 URL 路径末段解析数字 ID
     let path_segments: Vec<&str> = oper_url.split('/').collect();
-    if let Some(last_seg) = path_segments.last() {
-        if let Ok(id) = last_seg.parse::<i64>() {
-            return Some(id);
-        }
+    if let Some(last_seg) = path_segments.last()
+        && let Ok(id) = last_seg.parse::<i64>()
+    {
+        return Some(id);
     }
 
     // 策略 2：从请求体 JSON 提取 ID
@@ -571,6 +571,9 @@ fn infer_module_title(path: &str) -> String {
         "module.gen".to_string()
     } else if path.starts_with("/common/") {
         "module.common".to_string()
+    } else if path == "/logout" || path == "/login" || path == "/register" || path == "/unlockscreen" {
+        // 认证相关路由（登出/登录/注册/锁屏解锁）归类为 module.auth
+        "module.auth".to_string()
     } else {
         "module.other".to_string()
     }
@@ -601,6 +604,14 @@ fn infer_business_type(method: Method, path: &str) -> i32 {
     }
     if path.starts_with("/tool/gen") && method == Method::POST {
         return 8;
+    }
+    // 登出操作：不是新增，归类为"其他"（0）
+    if path == "/logout" {
+        return 0;
+    }
+    // 解锁用户操作：不是新增，归类为"其他"（0）
+    if path.starts_with("/monitor/logininfor/unlock/") {
+        return 0;
     }
     match method {
         Method::POST => 1,

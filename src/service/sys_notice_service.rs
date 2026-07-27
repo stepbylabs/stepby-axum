@@ -249,11 +249,11 @@ impl SysNoticeService {
         let model = self.notice_repo.insert(am).await?;
 
         // 邮件通知（可选）：仅在调用方传入 AppState 且 dto.notify_email=true 时发送
-        if dto.notify_email {
-            if let Some(st) = state {
-                self.send_notice_email(st, &dto.notice_title, safe_content.as_deref())
-                    .await;
-            }
+        if dto.notify_email
+            && let Some(st) = state
+        {
+            self.send_notice_email(st, &dto.notice_title, safe_content.as_deref())
+                .await;
         }
 
         Ok(model)

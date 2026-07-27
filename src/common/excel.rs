@@ -74,7 +74,9 @@ where
     T: Clone + Send + Sync + 'static,
 {
     // locale 在异步上下文读取（task-local 在 spawn 逃逸后失效），捕获后传入阻塞任务
-    let locale_zh = i18n::is_zh();
+    // C-i18n：捕获 locale 字符串而非 bool，在 build_xlsx 内通过 LOCALE.scope 注入，
+    // 使 getter 内的 crate::tr! 能正确按当前 locale 返回对应语言（修复英文用户导出 Excel 状态值显示中文的问题）
+    let locale = i18n::current_locale().to_string();
     // N5 启发式截断探测：行数触及 EXPORT_MAX_ROWS 上限几乎必然意味着被 limit 截断
     // （自然恰等于上限的概率极低）；与调用方显式 truncated 取或
     let auto_truncated = rows.len() as u64 >= EXPORT_MAX_ROWS;
@@ -86,7 +88,7 @@ where
     let filename = filename.to_string();
 
     let xlsx_data = tokio::task::spawn_blocking(move || {
-        build_xlsx(&sheet_name, &columns_owned, &rows_owned, fields_owned.as_deref(), locale_zh)
+        build_xlsx(&sheet_name, &columns_owned, &rows_owned, fields_owned.as_deref(), locale)
     })
     .await
     .map_err(|_| AppError::internal(&crate::tr!("error.excel.build_task_failed")))??;
@@ -116,12 +118,30 @@ where
 }
 
 /// 同步构建 xlsx 字节（在 spawn_blocking 内执行）
+///
+/// C-i18n：通过 [`i18n::with_locale_sync`] 注入 thread-local locale，
+/// 使 getter 内的 `crate::tr!` 能正确按当前 locale 返回对应语言。
+/// 修复英文用户导出 Excel 时状态值显示中文的问题（task-local 在 spawn_blocking 内不自动传播）。
 fn build_xlsx<T>(
     sheet_name: &str,
     columns: &[ExcelColumn<T>],
     rows: &[T],
     fields: Option<&[String]>,
-    locale_zh: bool,
+    locale: String,
+) -> Result<Vec<u8>, AppError>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    i18n::with_locale_sync(&locale, || {
+        build_xlsx_inner(sheet_name, columns, rows, fields)
+    })
+}
+
+fn build_xlsx_inner<T>(
+    sheet_name: &str,
+    columns: &[ExcelColumn<T>],
+    rows: &[T],
+    fields: Option<&[String]>,
 ) -> Result<Vec<u8>, AppError>
 where
     T: Clone + Send + Sync + 'static,
@@ -160,7 +180,8 @@ where
     let header_format = Format::new().set_bold();
     let datetime_format = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
 
-    // 表头（按 locale 解析）
+    // 表头（按 locale 解析；is_zh() 现在能正确工作，因为 LOCALE.scope 已注入）
+    let locale_zh = i18n::is_zh();
     for (out_col, &col_idx) in selected_indices.iter().enumerate() {
         let col = &columns[col_idx];
         let header_text = if locale_zh { col.header.0 } else { col.header.1 };

@@ -111,7 +111,7 @@ impl SysTaskService {
         let model = self.task_repo.insert(am).await?;
 
         // WS 广播任务创建
-        let _ = crate::handler::ws_handler::broadcast(
+        crate::handler::ws_handler::broadcast(
             state,
             "taskProgress",
             serde_json::json!({
@@ -161,7 +161,7 @@ impl SysTaskService {
         let model = self.task_repo.update(am).await?;
 
         // WS 广播进度更新
-        let _ = crate::handler::ws_handler::broadcast(
+        crate::handler::ws_handler::broadcast(
             state,
             "taskProgress",
             serde_json::json!({
@@ -201,7 +201,7 @@ impl SysTaskService {
 
         let model = self.task_repo.update(am).await?;
 
-        let _ = crate::handler::ws_handler::broadcast(
+        crate::handler::ws_handler::broadcast(
             state,
             "taskProgress",
             serde_json::json!({
@@ -239,7 +239,7 @@ impl SysTaskService {
 
         let model = self.task_repo.update(am).await?;
 
-        let _ = crate::handler::ws_handler::broadcast(
+        crate::handler::ws_handler::broadcast(
             state,
             "taskProgress",
             serde_json::json!({

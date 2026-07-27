@@ -105,7 +105,7 @@ pub async fn export(
         ExcelColumn { key: "roleName", header: ("角色名称", "Role Name"), getter: |r: &SysRoleModel| CellValue::Text(r.role_name.clone().into()) },
         ExcelColumn { key: "roleKey", header: ("权限字符", "Permission Key"), getter: |r: &SysRoleModel| CellValue::Text(r.role_key.clone().into()) },
         ExcelColumn { key: "roleSort", header: ("显示顺序", "Sort"), getter: |r: &SysRoleModel| CellValue::Text(r.role_sort.to_string().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysRoleModel| CellValue::Text(if r.status == "0" { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysRoleModel| CellValue::Text(if r.status == "0" { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
         ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysRoleModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -343,7 +343,7 @@ pub async fn dept_tree_select(
     let vo = state.role_service.get_dept_tree(role_id).await?;
     Ok(RoleDeptTreeResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         checked_keys: vo.checked_keys,
         depts: vo.depts,
     })

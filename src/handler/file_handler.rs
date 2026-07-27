@@ -127,16 +127,18 @@ pub async fn list(
             .to_lowercase();
 
         // 筛选：文件名前缀
-        if let Some(prefix) = &params.file_name {
-            if !prefix.is_empty() && !name.contains(prefix) {
-                continue;
-            }
+        if let Some(prefix) = &params.file_name
+            && !prefix.is_empty()
+            && !name.contains(prefix)
+        {
+            continue;
         }
         // 筛选：扩展名
-        if let Some(target_ext) = &params.ext {
-            if !target_ext.is_empty() && ext != target_ext.to_lowercase() {
-                continue;
-            }
+        if let Some(target_ext) = &params.ext
+            && !target_ext.is_empty()
+            && ext != target_ext.to_lowercase()
+        {
+            continue;
         }
 
         let url = format!("{}/{}", upload_cfg.common_url_prefix, name);

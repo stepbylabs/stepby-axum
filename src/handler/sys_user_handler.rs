@@ -123,7 +123,7 @@ pub async fn export(
         ExcelColumn { key: "dept.deptName", header: ("部门", "Department"), getter: |r: &UserVo| CellValue::Text(r.dept.as_ref().map(|d| d.dept_name.clone()).unwrap_or_default().into()) },
         ExcelColumn { key: "phonenumber", header: ("手机号码", "Phone"), getter: |r: &UserVo| CellValue::Text(r.user.phonenumber.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "email", header: ("邮箱", "Email"), getter: |r: &UserVo| CellValue::Text(r.user.email.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &UserVo| CellValue::Text(if r.user.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &UserVo| CellValue::Text(if r.user.status.as_deref() == Some("0") { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
         ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &UserVo| CellValue::Text({
                 r.user.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -394,7 +394,7 @@ pub async fn get_profile(
     let vo = state.user_service.get_profile(user_id).await?;
     Ok(ProfileResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         data: vo.user,
         role_group: vo.role_group,
         post_group: vo.post_group,
@@ -429,7 +429,7 @@ pub async fn get_roles_for_user_form(
     let vo = state.user_service.get_user_form_data(None).await?;
     Ok(UserFormResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         data: vo.data,
         role_ids: vo.role_ids,
         post_ids: vo.post_ids,

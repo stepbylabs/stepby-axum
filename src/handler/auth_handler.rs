@@ -140,16 +140,92 @@ pub async fn login(
 
 /// POST /register
 /// 用户注册（公开接口，免鉴权）
+///
+/// 审计链路（P1-AUDIT-01）：register 位于 public_auth_routes，不经过 oper_log_middleware，
+/// 需手动记录 oper_log，确保注册事件可审计（用户名、IP、归属地、成功/失败状态）。
+/// - title: module.auth（与 oper_log_middleware::infer_module_title 对齐）
+/// - business_type: 1（新增，POST 创建用户）
+/// - operator_type: 0（匿名注册，非后台用户操作）
+/// - 失败时仍记录（status=1），便于追踪注册刷接口/暴力注册行为
 pub async fn register(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(dto): Json<RegisterDto>,
 ) -> Result<AjaxResult<()>, AppError> {
+    let start = std::time::Instant::now();
     // 提取客户端 IP，用于验证码绑定校验（与生成时一致）
     let ip = extract_client_ip(&headers, peer_addr.ip(), &state.config.server.trusted_proxies);
+    let oper_location = state.ip_locator.locate(&ip);
+
+    // 执行注册，捕获结果用于审计日志（成功/失败均记录）
+    let username = dto.username.clone();
     let mut redis = state.redis.clone();
-    state.auth_service.register(dto, &ip, &mut redis).await?;
+    let result = state.auth_service.register(dto, &ip, &mut redis).await;
+
+    let cost_time = start.elapsed().as_millis() as i64;
+    let (status, error_msg, json_result) = match &result {
+        Ok(_) => (
+            "0".to_string(),
+            String::new(),
+            crate::tr!("msg.success.register").to_string(),
+        ),
+        Err(e) => (
+            "1".to_string(),
+            e.to_string(),
+            String::new(),
+        ),
+    };
+
+    // 异步写入 oper_log，不阻断响应（与 oper_log_middleware spawn 模式一致）
+    // 使用 AssertUnwindSafe + catch_unwind 防 panic 击溃 worker
+    let oper_log_service = state.oper_log_service.clone();
+    let oper_name = username.clone();
+    tokio::spawn(async move {
+        use std::panic::AssertUnwindSafe;
+        use futures::FutureExt;
+
+        let record = crate::service::sys_oper_log_service::OperLogRecord {
+            title: "module.auth".to_string(),
+            business_type: 1, // 新增
+            method: "/register".to_string(),
+            request_method: "POST".to_string(),
+            operator_type: 0, // 匿名注册
+            oper_name,
+            dept_name: String::new(),
+            oper_url: "/register".to_string(),
+            oper_ip: ip.to_string(),
+            oper_location,
+            // 不记录密码等敏感字段，仅记录用户名（脱敏）
+            oper_param: format!("{{\"username\":\"{}\"}}", username),
+            oper_before: String::new(),
+            json_result,
+            status,
+            error_msg,
+            cost_time,
+        };
+
+        let res = AssertUnwindSafe(async {
+            // 超时保护（与 oper_log_middleware::OPER_LOG_TIMEOUT 一致）
+            if let Err(_elapsed) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                oper_log_service.record_oper_log(record),
+            )
+            .await
+            {
+                tracing::warn!("register oper_log 写入超时，已放弃本次日志记录");
+            }
+        })
+        .catch_unwind()
+        .await;
+
+        if let Err(panic_err) = res {
+            tracing::error!("register oper_log spawn 内发生 panic: {:?}", panic_err);
+        }
+    });
+
+    // 传播原结果给客户端（保持原有错误码与消息不变）
+    result?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.register")))
 }
 

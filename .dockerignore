@@ -34,3 +34,14 @@ Thumbs.db
 
 # 测试截图
 data/screenshots*/
+
+# Node 相关（防止意外 npm install 污染构建上下文）
+node_modules/
+tests/
+test-screenshots/
+*.log
+
+# Docker 自身
+Dockerfile*
+docker-compose*.yml
+.dockerignore

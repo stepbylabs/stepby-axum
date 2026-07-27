@@ -186,7 +186,7 @@ pub async fn export(
         ExcelColumn { key: "postCode", header: ("岗位编码", "Post Code"), getter: |r: &SysPostModel| CellValue::Text(r.post_code.clone().into()) },
         ExcelColumn { key: "postName", header: ("岗位名称", "Post Name"), getter: |r: &SysPostModel| CellValue::Text(r.post_name.clone().into()) },
         ExcelColumn { key: "postSort", header: ("岗位排序", "Sort"), getter: |r: &SysPostModel| CellValue::Text(r.post_sort.to_string().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysPostModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { "正常".to_string() } else { "停用".to_string() }).unwrap_or_default().into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysPostModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }).unwrap_or_default().into()) },
         ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysPostModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())

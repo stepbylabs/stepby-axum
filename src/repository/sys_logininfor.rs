@@ -155,6 +155,7 @@ impl SysLogininforRepository {
     /// - MySQL: `DATE(login_time)`
     /// - PostgreSQL: `DATE_TRUNC('day', login_time)` 或 `login_time::date`
     /// - SQLite: `DATE(login_time)`
+    ///
     /// sea_query 的 `Expr::col(...)` 未提供跨 DB 的日期截断抽象，
     /// 强行用 `custom_expr` 会破坏多 DB 兼容。故暂保留 N+1 实现，
     /// 后续优化方向：按 DB 分别实现 GROUP BY 聚合，或缓存结果。

@@ -92,7 +92,7 @@ pub async fn unlock(
     {
         return Err(AppError::new(
             403,
-            &crate::tr!("error.login_log.admin_unlock_forbidden"),
+            crate::tr!("error.login_log.admin_unlock_forbidden"),
         ));
     }
 

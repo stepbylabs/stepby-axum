@@ -403,12 +403,12 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("Redis IP 限流计数失败（fail-closed）: {}", e);
-                ServiceError::new(503, &crate::tr!("error.auth.auth_unavailable"))
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
         if ip_count > MAX_LOGIN_IP_COUNT {
             self.write_login_log(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"))
                 .await?;
-            return Err(ServiceError::new(429, &crate::tr!("error.auth.rate_limited")));
+            return Err(ServiceError::new(429, crate::tr!("error.auth.rate_limited")));
         }
         Ok(())
     }
@@ -428,14 +428,14 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("Redis 登录失败计数查询失败（fail-closed）: {}", e);
-                ServiceError::new(503, &crate::tr!("error.auth.auth_unavailable"))
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
             self.write_login_log(ctx, "1", &crate::tr!("log.auth.password_locked"))
                 .await?;
-            return Err(ServiceError::new(429, &crate::tr!("error.auth.password_locked")));
+            return Err(ServiceError::new(429, crate::tr!("error.auth.password_locked")));
         }
         Ok(())
     }
@@ -469,7 +469,7 @@ impl AuthService {
                     tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
                     return Err(ServiceError::new(
                         503,
-                        &crate::tr!("error.auth.auth_unavailable"),
+                        crate::tr!("error.auth.auth_unavailable"),
                     ));
                 }
             };
@@ -918,7 +918,7 @@ impl AuthService {
                     tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
                     return Err(ServiceError::new(
                         503,
-                        &crate::tr!("error.auth.auth_unavailable"),
+                        crate::tr!("error.auth.auth_unavailable"),
                     ));
                 }
             };
@@ -1014,7 +1014,7 @@ impl AuthService {
             .await
             .map_err(|e| {
                 tracing::error!("Redis 登录失败计数更新失败（fail-closed）: {}", e);
-                ServiceError::new(503, &crate::tr!("error.auth.auth_unavailable"))
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
         Ok(())
     }

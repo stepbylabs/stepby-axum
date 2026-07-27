@@ -27,8 +27,7 @@ use crate::config::Settings;
 /// `ContentType::parse` 在常量字符串上理论恒成功，但解析失败会 panic。
 /// 改为 `unwrap_or` 兜底，避免任何意外场景下 panic 中断服务。
 fn html_content_type() -> ContentType {
-    ContentType::parse("text/html; charset=utf-8")
-        .unwrap_or_else(|_| ContentType::TEXT_HTML)
+    ContentType::parse("text/html; charset=utf-8").unwrap_or(ContentType::TEXT_HTML)
 }
 
 /// 邮件发送结果统计（批量发送时返回）
@@ -139,6 +138,9 @@ impl MailerService {
     }
 
     /// 解析发件人 Mailbox
+    ///
+    /// 注：方法名以 `from_` 开头但需要读取 self 配置，故保留 self 借用，不遵循 `From` trait 命名约定。
+    #[allow(clippy::wrong_self_convention)]
     fn from_mailbox(&self) -> Result<Mailbox, ServiceError> {
         let email = self
             .from_email

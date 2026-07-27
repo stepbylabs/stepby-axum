@@ -368,7 +368,7 @@ pub async fn clear_cache_key(
 pub async fn clear_cache_all(
     State(_state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<()>, AppError> {
-    Err(AppError::new(403, &crate::tr!("error.cache.flushdb_disabled")))
+    Err(AppError::new(403, crate::tr!("error.cache.flushdb_disabled")))
 }
 
 // ==================== 辅助函数 ====================

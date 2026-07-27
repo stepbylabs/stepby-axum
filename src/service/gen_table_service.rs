@@ -1048,7 +1048,7 @@ impl GenTableService {
                 existing.iter().map(|t| t.table_id).collect();
             for id in &table_ids {
                 if !existing_ids.contains(id) {
-                    return Err(ServiceError::not_found(&format!("{}: {id}", crate::tr!("error.gen.table_id_not_found"))));
+                    return Err(ServiceError::not_found(&crate::tr!("error.gen.table_id_not_found", id = id)));
                 }
             }
         }
@@ -1204,7 +1204,7 @@ impl GenTableService {
 
             for table_name in table_names {
                 let table = table_by_name.get(table_name.as_str()).ok_or_else(|| {
-                    ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_not_imported")))
+                    ServiceError::not_found(&crate::tr!("error.gen.table_not_imported", name = table_name))
                 })?;
                 let columns = columns_by_table.get(&table.table_id).cloned().unwrap_or_default();
                 let files = Self::render_templates(table, &columns)?;

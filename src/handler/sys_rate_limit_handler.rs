@@ -167,7 +167,7 @@ pub async fn export(
         ExcelColumn { key: "routePrefix", header: ("路由前缀", "Route Prefix"), getter: |r: &SysRateLimitModel| CellValue::Text(r.route_pattern.clone().into()) },
         ExcelColumn { key: "bucketCapacity", header: ("桶容量", "Bucket Capacity"), getter: |r: &SysRateLimitModel| CellValue::Text(r.capacity.to_string().into()) },
         ExcelColumn { key: "refillRate", header: ("补充速率(每秒)", "Refill Rate (per sec)"), getter: |r: &SysRateLimitModel| CellValue::Text(r.refill_per_second.to_string().into()) },
-        ExcelColumn { key: "enabled", header: ("是否启用", "Enabled"), getter: |r: &SysRateLimitModel| CellValue::Text(if r.enabled { "是".to_string() } else { "否".to_string() }.into()) },
+        ExcelColumn { key: "enabled", header: ("是否启用", "Enabled"), getter: |r: &SysRateLimitModel| CellValue::Text(if r.enabled { crate::tr!("common.yes") } else { crate::tr!("common.no") }.into()) },
         ExcelColumn { key: "description", header: ("描述", "Description"), getter: |r: &SysRateLimitModel| CellValue::Text(r.description.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysRateLimitModel| CellValue::Text({
                 r.create_time

@@ -2,7 +2,7 @@
 //!
 //! 设计要点：
 //! - TOTP secret 存储在 Redis（key: totp:enabled:{user_id}），加密方式：AES-256-GCM
-//! - 简化版：直接使用 SHA256 + Base32 编码作为 secret（生产环境建议使用 AES-GCM）
+//! - 使用 CONFIG_ENC_KEY 作为主密钥，通过 crate::utils::crypto::encrypt_config_value 加密
 //! - 集成 totp-rs crate 生成和验证 TOTP 6 位代码
 //! - 流程：setup（生成 secret + QR）→ verify（验证 code 启用）→ disable（关闭）
 
@@ -148,12 +148,22 @@ pub async fn verify(
         return Err(AppError::bad_request(&crate::tr!("error.totp.code_invalid")));
     }
 
-    // 将 secret 存入 Redis（启用 TOTP）
+    // C2-3 安全修复：使用 AES-256-GCM 加密 TOTP secret 后存入 Redis
+    // 原实现直接存储明文 secret，若 Redis 被入侵或快照泄露，攻击者可获取 TOTP secret 绕过 MFA
+    let master_key = &state.config.config_enc_key;
+    if master_key.is_empty() {
+        tracing::error!("CONFIG_ENC_KEY 未配置，无法加密 TOTP secret（fail-closed 拒绝）");
+        return Err(AppError::internal(&crate::tr!("error.totp.enc_key_missing")));
+    }
+    let encrypted_secret = crate::utils::crypto::encrypt_config_value(&req.secret, master_key)
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.encrypt_failed")))?;
+
+    // 将加密后的 secret 存入 Redis（启用 TOTP）
     let redis_key = format!("totp:enabled:{}", user_id);
     let mut conn = state.redis.clone();
     redis::cmd("SET")
         .arg(&redis_key)
-        .arg(&req.secret)
+        .arg(&encrypted_secret)
         .query_async::<String>(&mut conn)
         .await
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_write_failed")))?;
@@ -211,11 +221,21 @@ pub async fn disable(
     // 2. 验证 TOTP code
     let redis_key = format!("totp:enabled:{}", user_id);
     let mut conn = state.redis.clone();
-    let secret_str: String = redis::cmd("GET")
+    let encrypted_secret: String = redis::cmd("GET")
         .arg(&redis_key)
         .query_async(&mut conn)
         .await
         .map_err(|_| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
+
+    // C2-3 安全修复：解密从 Redis 读取的 TOTP secret
+    let master_key = &state.config.config_enc_key;
+    if master_key.is_empty() {
+        tracing::error!("CONFIG_ENC_KEY 未配置，无法解密 TOTP secret（fail-closed 拒绝）");
+        return Err(AppError::internal(&crate::tr!("error.totp.enc_key_missing")));
+    }
+    // decrypt_config_value 兼容明文（不带 enc: 前缀直接返回），支持旧数据平滑迁移
+    let secret_str = crate::utils::crypto::decrypt_config_value(&encrypted_secret, master_key)
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.decrypt_failed")))?;
 
     let secret = Secret::Encoded(secret_str);
     let secret_bytes = secret.to_bytes().map_err(|_| {

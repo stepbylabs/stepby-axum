@@ -350,19 +350,19 @@ impl IpLocationService {
         // 原子替换：rename 临时文件 → 正式文件
         if let Err(e) = tokio::fs::rename(&temp_path, &mmdb_path).await {
             // 替换失败，尝试恢复备份
-            if Path::new(&backup_path).exists() {
-                if let Err(restore_err) = tokio::fs::rename(&backup_path, &mmdb_path).await {
-                    tracing::error!(backup = %backup_path, target = %mmdb_path, error = %restore_err, "恢复 mmdb 备份失败（原文件可能已丢失）");
-                }
+            if Path::new(&backup_path).exists()
+                && let Err(restore_err) = tokio::fs::rename(&backup_path, &mmdb_path).await
+            {
+                tracing::error!(backup = %backup_path, target = %mmdb_path, error = %restore_err, "恢复 mmdb 备份失败（原文件可能已丢失）");
             }
             anyhow::bail!("替换 mmdb 文件失败: {}", e);
         }
 
         // 删除备份（更新成功）
-        if Path::new(&backup_path).exists() {
-            if let Err(e) = tokio::fs::remove_file(&backup_path).await {
-                tracing::warn!(path = %backup_path, error = %e, "清理 mmdb 备份文件失败（不影响主流程）");
-            }
+        if Path::new(&backup_path).exists()
+            && let Err(e) = tokio::fs::remove_file(&backup_path).await
+        {
+            tracing::warn!(path = %backup_path, error = %e, "清理 mmdb 备份文件失败（不影响主流程）");
         }
 
         // 热加载

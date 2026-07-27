@@ -74,6 +74,7 @@ error:
     complexity_letter: 密码必须包含至少 1 个字母
   user:
     not_found: 用户不存在
+    not_found_by_id: "用户 ID={{id}} 不存在"
     name_duplicate: 用户名不能重复
     admin_disable_forbidden: 不允许停用超级管理员
     admin_role_forbidden: 不允许修改超级管理员的角色绑定
@@ -135,13 +136,16 @@ error:
   gen:
     time_format: 时间格式不正确
     int_default: 整数类型默认值不是有效数字
+    int_default_invalid: "整数类型默认值 {{value}} 不是有效数字"
     decimal_default: 小数类型默认值不是有效数字
+    decimal_default_invalid: "小数类型默认值 {{value}} 不是有效数字"
     table_not_found: 代码生成业务表不存在
     table_name_start: 表名必须以字母开头
     create_table_failed: 建表失败
-    table_id_not_found: 表 ID 不存在
-    table_not_imported: 表未导入
-    table_no_columns: 表不存在或没有字段
+    create_table_failed_with_err: "建表失败: {{err}}"
+    table_id_not_found: "表 ID={{id}} 不存在"
+    table_not_imported: "表 {{name}} 未导入"
+    table_no_columns: "表 {{name}} 不存在或没有字段"
     table_select_required: 请选择要导入的表
     table_id_invalid: 表 ID 不合法
     table_name_invalid: 非法的表名
@@ -296,6 +300,9 @@ error:
     redis_write_failed: 写入 Redis 失败
     user_query_failed: 查询用户失败
     redis_delete_failed: 删除 Redis 失败
+    enc_key_missing: 加密密钥未配置（CONFIG_ENC_KEY），无法加解密 TOTP secret
+    encrypt_failed: TOTP secret 加密失败
+    decrypt_failed: TOTP secret 解密失败
   upload:
     write_task_failed: 文件写入任务失败
     write_failed: 写入上传文件失败
@@ -339,6 +346,18 @@ msg:
     cleared: "清除成功，共删除 {{count}} 个键"
   export:
     progress: "导出 {{count}} 条"
+  scheduler:
+    job_failed: "任务执行失败: {{err}}"
+    job_duration: "{{msg}} (耗时 {{ms}}ms)"
+    invoke_target_not_found: "未找到调用目标: {{target}}"
+    job_timeout: "任务执行超时（>{{secs}}s）"
+    ryNoParams_success: ryNoParams 示例任务执行成功（无业务逻辑，仅演示调度器调用）
+    ryParams_success: "ryParams 示例任务执行成功，参数: {{param}}（无业务逻辑，仅演示参数传递）"
+    ryMultipleParams_success: ryMultipleParams 示例任务执行成功（无业务逻辑，仅演示多参数传递）
+    cleanup_oper_log: "清理操作日志 {{count}} 条"
+    cleanup_oper_log_failed: "清理操作日志失败: {{err}}"
+    cleanup_login_log: "清理登录日志 {{count}} 条"
+    cleanup_login_log_failed: "清理登录日志失败: {{err}}"
 
 # H-3：登录日志审计消息（write_login_log 用，区分细分原因用于审计；
 # 对外返回给用户的错误消息统一用 error.auth.* 系列，避免用户名枚举）
@@ -352,3 +371,34 @@ log:
     account_deleted: 账号已删除
     account_disabled: 账号已停用
     login_success: 登录成功
+
+# 通用状态文案（Excel 导出、状态展示等场景使用）
+common:
+  status:
+    normal: 正常
+    disabled: 停用
+    anomaly: 异常
+    success: 成功
+    failed: 失败
+  yes: 是
+  no: 否
+
+# Excel 导出工作表名（sheet 标签页名称，用户下载后可见）
+excel:
+  sheet:
+    config: 参数配置
+    user: 用户数据
+    role: 角色数据
+    dict_type: 字典类型
+    dict_data: 字典数据
+    post: 岗位数据
+    logininfor: 登录日志
+    job: 定时任务
+    job_log: 调度日志
+    rate_limit: 限流配置
+
+# 系统通知标题/内容（scheduler 触发的告警通知，前端通知中心可见）
+notice:
+  login_anomaly:
+    title: "登录异常告警 - IP {{ip}}"
+    content: "最近 {{minutes}} 分钟内 IP {{ip}} 失败登录 {{count}} 次，疑似撞库攻击，请及时关注。"

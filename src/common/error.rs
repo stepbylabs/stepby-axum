@@ -76,7 +76,7 @@ impl From<sea_orm::DbErr> for ServiceError {
             }
             sea_orm::DbErr::ConnectionAcquire(_) => {
                 tracing::error!("数据库连接获取失败: {}", err);
-                ServiceError::new(503, &crate::tr!("error.common.db_acquire"))
+                ServiceError::new(503, crate::tr!("error.common.db_acquire"))
             }
             sea_orm::DbErr::TryIntoErr { .. } | sea_orm::DbErr::AttrNotSet(_) => {
                 tracing::error!("数据转换错误: {}", err);

@@ -230,7 +230,7 @@ pub struct UserFormVo {
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("{}: {}", crate::tr!("error.gen.time_format"), s)))
+        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 // ==================== Service 实现 ====================
@@ -302,7 +302,7 @@ impl SysUserService {
         {
             return Err(ServiceError::new(
                 403,
-                &crate::tr!("error.user.higher_role_forbidden"),
+                crate::tr!("error.user.higher_role_forbidden"),
             ));
         }
         Ok(())
@@ -624,19 +624,19 @@ impl SysUserService {
         let nick_same = dto
             .nick_name
             .as_deref()
-            .map_or(true, |v| existing.nick_name == v);
+            .is_none_or(|v| existing.nick_name == v);
         let email_same = dto
             .email
             .as_deref()
-            .map_or(true, |v| existing.email.as_deref() == Some(v));
+            .is_none_or(|v| existing.email.as_deref() == Some(v));
         let phone_same = dto
             .phonenumber
             .as_deref()
-            .map_or(true, |v| existing.phonenumber.as_deref() == Some(v));
+            .is_none_or(|v| existing.phonenumber.as_deref() == Some(v));
         let sex_same = dto
             .sex
             .as_deref()
-            .map_or(true, |v| existing.sex.as_deref() == Some(v));
+            .is_none_or(|v| existing.sex.as_deref() == Some(v));
         if nick_same && email_same && phone_same && sex_same {
             return Ok(());
         }

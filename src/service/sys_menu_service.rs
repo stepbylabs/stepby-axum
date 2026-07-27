@@ -562,15 +562,33 @@ impl SysMenuService {
 
     /// 防环校验：判断 candidate_parent_id 是否是 menu_id 的后代节点
     ///
-    /// 算法：从 candidate_parent_id 向上遍历祖先链，
-    /// 若在祖先链中遇到 menu_id，说明 candidate_parent_id 是 menu_id 的后代，形成环。
+    /// N+1 优化：菜单表数据量小（通常 < 500 条），一次性加载全部菜单到内存，
+    /// 构建 parent_id → menu_id 映射后在内存中遍历祖先链，
+    /// 复杂度从 O(N) 次 DB 查询降为 O(1) DB + O(depth) 内存遍历。
     async fn is_descendant(
         &self,
         menu_id: i64,
         candidate_parent_id: i64,
     ) -> Result<bool, ServiceError> {
+        if candidate_parent_id == 0 {
+            return Ok(false);
+        }
+        if candidate_parent_id == menu_id {
+            return Ok(true);
+        }
+        // 一次性加载全部菜单（数据量小），构建 id → parent_id 映射
+        let all_menus = self.menu_repo.find_active_all().await?;
+        let parent_map: std::collections::HashMap<i64, i64> = all_menus
+            .iter()
+            .map(|m| {
+                let id = m.menu_id;
+                let parent = m.parent_id.unwrap_or(0);
+                (id, parent)
+            })
+            .collect();
+
+        // 在内存中遍历祖先链
         let mut current = candidate_parent_id;
-        // 防御性上限：菜单层级通常不超过 10 层，这里给 100 层兜底
         for _ in 0..100 {
             if current == 0 {
                 return Ok(false);
@@ -578,21 +596,24 @@ impl SysMenuService {
             if current == menu_id {
                 return Ok(true);
             }
-            // 查询 current 的 parent_id
-            let menu = self.menu_repo.base().find_by_id(current).await?
-                .ok_or_else(|| {
-                    ServiceError::not_found(&crate::tr!("error.menu.id_not_found", id = current))
-                })?;
-            let next = menu.parent_id.unwrap_or(0);
-            if next == current {
-                // 异常数据自环，退出避免死循环
-                return Ok(false);
+            match parent_map.get(&current) {
+                Some(&next) => {
+                    if next == current {
+                        // 异常数据自环，退出避免死循环
+                        return Ok(false);
+                    }
+                    current = next;
+                }
+                None => {
+                    // current 不在菜单表中（数据不一致），退出
+                    return Ok(false);
+                }
             }
-            current = next;
         }
         // 超过 100 层仍未回到根，视为异常
-        // 状态码：400 Bad Request（客户端提交了循环引用的 parentId）
-        Err(ServiceError::bad_request(&crate::tr!("error.menu.level_too_deep")))
+        Err(ServiceError::bad_request(&crate::tr!(
+            "error.menu.level_too_deep"
+        )))
     }
 }
 

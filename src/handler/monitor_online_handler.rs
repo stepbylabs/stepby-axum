@@ -189,7 +189,7 @@ pub async fn list(
     }
 
     // M-4：按 login_time 倒序排序，确保最新登录的用户排在前面（与 ify-admin 前端期望一致）
-    online_list.sort_by(|a, b| b.login_time.cmp(&a.login_time));
+    online_list.sort_by_key(|item| std::cmp::Reverse(item.login_time));
 
     // C-03：在线用户为动态数据（非持久化），采用客户端分页模式
     let total = online_list.len() as u64;
@@ -328,7 +328,7 @@ pub async fn force_logout(
 
     // 广播 forceLogout 事件，通知被强退用户的客户端跳转登录页
     // 失败不阻断主流程（强退已成功，仅 WS 推送失败）
-    let _ = crate::handler::ws_handler::broadcast(
+    crate::handler::ws_handler::broadcast(
         &state,
         "forceLogout",
         serde_json::json!({

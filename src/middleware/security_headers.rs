@@ -41,7 +41,7 @@ fn is_hashed_static_asset(uri: &Uri) -> bool {
         && (name.ends_with(".js") || name.ends_with(".css") || name.ends_with(".woff2") || name.ends_with(".woff") || name.ends_with(".ttf"))
     {
         // 验证文件名包含 hash 段（中划线 + 8 位以上字母数字）
-        let has_hash = name.split('-').last().map(|s| {
+        let has_hash = name.split('-').next_back().map(|s| {
             s.trim_end_matches(".js").trim_end_matches(".css")
                 .trim_end_matches(".woff2").trim_end_matches(".woff").trim_end_matches(".ttf")
                 .len() >= 6

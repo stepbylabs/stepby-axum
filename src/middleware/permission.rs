@@ -96,7 +96,7 @@ pub async fn permission_middleware(
             required_perm,
             "权限拒绝：用户缺少所需权限"
         );
-        Err(AppError::new(403, &crate::tr!("error.auth.permission_denied")))
+        Err(AppError::new(403, crate::tr!("error.auth.permission_denied")))
     }
 }
 
@@ -230,13 +230,15 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("GET", "/monitor/logininfor/list") => Some("monitor:logininfor:list"),
         ("GET", "/monitor/logininfor/stats") => Some("monitor:logininfor:list"),
         ("DELETE", "/monitor/logininfor/{infoIds}") => Some("monitor:logininfor:remove"),
-        ("GET", "/monitor/logininfor/unlock/{userName}") => Some("monitor:logininfor:unlock"),
+        // 路由定义见 sys_logininfor_router.rs：实际方法为 POST（解锁操作有副作用，GET 不规范）
+        ("POST", "/monitor/logininfor/unlock/{userName}") => Some("monitor:logininfor:unlock"),
         ("DELETE", "/monitor/logininfor/clean") => Some("monitor:logininfor:remove"),
         ("POST", "/monitor/logininfor/export") => Some("monitor:logininfor:export"),
 
         // ===== 在线用户 =====
+        // 路由定义见 monitor_online_router.rs：参数名为 {tokenHash}（P1-19 改造后从 tokenId 改为 tokenHash）
         ("GET", "/monitor/online/list") => Some("monitor:online:list"),
-        ("DELETE", "/monitor/online/{tokenId}") => Some("monitor:online:forceLogout"),
+        ("DELETE", "/monitor/online/{tokenHash}") => Some("monitor:online:forceLogout"),
 
         // ===== 缓存监控 =====
         ("GET", "/monitor/cache") => Some("monitor:cache:list"),

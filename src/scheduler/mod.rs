@@ -982,12 +982,12 @@ async fn execute_inner(
     invoke_target: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let func = registry::get_task(invoke_target)
-        .ok_or_else(|| format!("未找到调用目标: {}", invoke_target))?;
+        .ok_or_else(|| crate::tr!("msg.scheduler.invoke_target_not_found", target = invoke_target))?;
 
     // REGRESS-008：使用常量 TASK_TIMEOUT_SECS，与 LOCK_TTL_SECS 保持联动
     tokio::time::timeout(Duration::from_secs(TASK_TIMEOUT_SECS), func())
         .await
-        .map_err(|_| format!("任务执行超时（>{}s）", TASK_TIMEOUT_SECS))?
+        .map_err(|_| crate::tr!("msg.scheduler.job_timeout", secs = TASK_TIMEOUT_SECS))?
 }
 
 /// 注册内置任务函数
@@ -1006,7 +1006,7 @@ fn register_builtin_tasks(db: DatabaseConnection) {
         Arc::new(|| {
             Box::pin(async {
                 tracing::info!("ryTask.ryNoParams 示例任务触发（无参数）");
-                Ok("ryNoParams 示例任务执行成功（无业务逻辑，仅演示调度器调用）".to_string())
+                Ok(crate::tr!("msg.scheduler.ryNoParams_success"))
             })
         }),
     );

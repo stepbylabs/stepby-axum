@@ -143,7 +143,7 @@ impl XdbReader {
         }
 
         let index_bytes = end_index_ptr - start_index_ptr;
-        if index_bytes % XDB_INDEX_ENTRY_SIZE != 0 {
+        if !index_bytes.is_multiple_of(XDB_INDEX_ENTRY_SIZE) {
             tracing::warn!(
                 "xdb 文件 {} 索引区长度 {} 不是 {} 的倍数",
                 path, index_bytes, XDB_INDEX_ENTRY_SIZE

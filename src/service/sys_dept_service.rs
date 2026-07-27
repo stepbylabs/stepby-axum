@@ -581,41 +581,42 @@ impl SysDeptService {
 
     /// 防环校验：判断 candidate_parent_id 是否是 dept_id 的后代节点
     ///
-    /// 算法：从 candidate_parent_id 向上遍历祖先链，
-    /// 若在祖先链中遇到 dept_id，说明 candidate_parent_id 是 dept_id 的后代，形成环。
+    /// N+1 优化：利用 sys_dept.ancestors 字段（CSV 格式 "0,100,101"），
+    /// 一次查询 candidate_parent_id 的记录，检查其 ancestors 是否包含 dept_id。
+    /// 若包含，则 candidate_parent_id 是 dept_id 的后代，形成环。
+    /// 复杂度从 O(N) 次 DB 查询降为 O(1)。
     async fn is_descendant(
         &self,
         dept_id: i64,
         candidate_parent_id: i64,
     ) -> Result<bool, ServiceError> {
-        let mut current = candidate_parent_id;
-        // 防御性上限：部门层级通常不超过 10 层，这里给 100 层兜底
-        for _ in 0..100 {
-            if current == 0 {
-                return Ok(false);
-            }
-            if current == dept_id {
-                return Ok(true);
-            }
-            // 查询 current 的 parent_id
-            let dept = self
-                .dept_repo
-                .base()
-                .find_by_id(current)
-                .await?
-                .ok_or_else(|| {
-                    ServiceError::not_found(&crate::tr!("error.dept.id_not_found", id = current))
-                })?;
-            let next = dept.parent_id.unwrap_or(0);
-            if next == current {
-                // 异常数据自环，退出避免死循环
-                return Ok(false);
-            }
-            current = next;
+        if candidate_parent_id == 0 {
+            return Ok(false);
         }
-        // 超过 100 层仍未回到根，视为异常
-        // 状态码：400 Bad Request（客户端提交了循环引用的 parentId）
-        Err(ServiceError::bad_request(&crate::tr!("error.dept.level_too_deep")))
+        if candidate_parent_id == dept_id {
+            return Ok(true);
+        }
+        // O(1) 查询：读取 candidate_parent_id 的 ancestors 字段
+        let dept = self
+            .dept_repo
+            .base()
+            .find_by_id(candidate_parent_id)
+            .await?
+            .ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!(
+                    "error.dept.id_not_found",
+                    id = candidate_parent_id
+                ))
+            })?;
+        // ancestors 字段包含 candidate_parent_id 的所有祖先 ID
+        // 若 dept_id 在其中，说明 candidate_parent_id 是 dept_id 的后代
+        if let Some(ref ancestors) = dept.ancestors
+            && ancestor_contains(ancestors, dept_id)
+        {
+            return Ok(true);
+        }
+        // ancestors 不包含 dept_id，或者 ancestors 为空（根节点）
+        Ok(false)
     }
 }
 
