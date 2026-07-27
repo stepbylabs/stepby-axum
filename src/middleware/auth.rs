@@ -66,7 +66,7 @@ pub async fn auth_middleware(
                 error = %e,
                 "Redis 黑名单查询失败（fail-closed 拒绝请求）"
             );
-            AppError::new(503, &crate::tr!("error.auth.auth_unavailable"))
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
     if is_blacklisted.is_some() {
         return Err(AppError::unauthorized(&crate::tr!("error.auth.token_revoked")));
@@ -87,7 +87,7 @@ pub async fn auth_middleware(
                 error = %e,
                 "Redis pwd_changed 查询失败（fail-closed 拒绝请求）"
             );
-            AppError::new(503, &crate::tr!("error.auth.auth_unavailable"))
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
     if let Some(changed_at) = pwd_changed
         && changed_at > i64::try_from(claims.iat).unwrap_or(0)

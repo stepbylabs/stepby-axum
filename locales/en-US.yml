@@ -74,6 +74,7 @@ error:
     complexity_letter: Password must contain at least 1 letter
   user:
     not_found: User does not exist
+    not_found_by_id: "User ID={{id}} does not exist"
     name_duplicate: Username cannot be duplicated
     admin_disable_forbidden: Cannot disable the super administrator
     admin_role_forbidden: Cannot modify the super administrator's role bindings
@@ -133,13 +134,16 @@ error:
   gen:
     time_format: Invalid time format
     int_default: Integer default value is not a valid number
+    int_default_invalid: "Integer default value {{value}} is not a valid number"
     decimal_default: Decimal default value is not a valid number
+    decimal_default_invalid: "Decimal default value {{value}} is not a valid number"
     table_not_found: Code generation business table does not exist
     table_name_start: Table name must start with a letter
     create_table_failed: Failed to create table
-    table_id_not_found: Table ID does not exist
-    table_not_imported: Table not imported
-    table_no_columns: Table does not exist or has no columns
+    create_table_failed_with_err: "Failed to create table: {{err}}"
+    table_id_not_found: "Table ID={{id}} does not exist"
+    table_not_imported: "Table {{name}} not imported"
+    table_no_columns: "Table {{name}} does not exist or has no columns"
     table_select_required: Please select tables to import
     table_id_invalid: Invalid table ID
     table_name_invalid: Invalid table name
@@ -293,6 +297,9 @@ error:
     redis_write_failed: Failed to write to Redis
     user_query_failed: Failed to query user
     redis_delete_failed: Failed to delete from Redis
+    enc_key_missing: Encryption key not configured (CONFIG_ENC_KEY), cannot encrypt/decrypt TOTP secret
+    encrypt_failed: Failed to encrypt TOTP secret
+    decrypt_failed: Failed to decrypt TOTP secret
   upload:
     write_task_failed: File write task failed
     write_failed: Failed to write uploaded file
@@ -336,6 +343,18 @@ msg:
     cleared: "Cleared successfully, deleted {{count}} keys"
   export:
     progress: "Exported {{count}} rows"
+  scheduler:
+    job_failed: "Task execution failed: {{err}}"
+    job_duration: "{{msg}} (elapsed {{ms}}ms)"
+    invoke_target_not_found: "Invoke target not found: {{target}}"
+    job_timeout: "Task execution timeout (>{{secs}}s)"
+    ryNoParams_success: ryNoParams sample task executed successfully (no business logic, demo only)
+    ryParams_success: "ryParams sample task executed successfully, param: {{param}} (no business logic, param demo)"
+    ryMultipleParams_success: ryMultipleParams sample task executed successfully (no business logic, multi-param demo)
+    cleanup_oper_log: "Cleaned {{count}} operation log(s)"
+    cleanup_oper_log_failed: "Failed to clean operation logs: {{err}}"
+    cleanup_login_log: "Cleaned {{count}} login log(s)"
+    cleanup_login_log_failed: "Failed to clean login logs: {{err}}"
 
 # H-3: Login log audit messages (used by write_login_log for granular audit reasons;
 # user-facing error messages use error.auth.* to avoid username enumeration)
@@ -349,3 +368,34 @@ log:
     account_deleted: Account deleted
     account_disabled: Account disabled
     login_success: Login successful
+
+# Common status text (used in Excel exports, status display, etc.)
+common:
+  status:
+    normal: Normal
+    disabled: Disabled
+    anomaly: Anomaly
+    success: Success
+    failed: Failed
+  yes: "Yes"
+  no: "No"
+
+# Excel export worksheet names (visible to users after download)
+excel:
+  sheet:
+    config: Configuration
+    user: User Data
+    role: Role Data
+    dict_type: Dict Type
+    dict_data: Dict Data
+    post: Post Data
+    logininfor: Login Log
+    job: Scheduled Tasks
+    job_log: Job Log
+    rate_limit: Rate Limit
+
+# System notice title/content (triggered by scheduler, visible in notification center)
+notice:
+  login_anomaly:
+    title: "Login Anomaly Alert - IP {{ip}}"
+    content: "IP {{ip}} failed login {{count}} times within the last {{minutes}} minutes, suspected credential stuffing attack, please investigate."

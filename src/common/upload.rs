@@ -99,7 +99,7 @@ pub async fn resolve_upload_dir(dir: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("uploads"));
     let subdir = dir_path
         .file_name()
-        .map(|n| PathBuf::from(n))
+        .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(""));
 
     let mut candidates: Vec<PathBuf> = Vec::new();

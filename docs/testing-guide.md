@@ -284,7 +284,7 @@ cargo check
 cargo clippy --all-targets
 ```
 
-期望：无错误，仅有 1 个预存在警告（`write_login_log` 参数过多）。
+期望：无错误，无项目代码警告（仅可能存在第三方依赖 `error2` 的 future-incompat 提醒，与项目代码无关）。
 
 ### 5.2 Release 构建测试
 
@@ -302,7 +302,11 @@ cd migration && cargo run && cd ..
 验证：
 ```bash
 mysql -u yebot -p yebot -e "SHOW TABLES;"
-# 期望输出 18 张表（17 张业务表 + seaql_migrations）
+# 期望输出 24 张表（23 张业务表 + seaql_migrations）
+# 业务表：sys_config, sys_dept, sys_dict_data, sys_dict_type, sys_job, sys_job_log,
+#         sys_logininfor, sys_menu, sys_notice, sys_notice_read, sys_oper_log, sys_post,
+#         sys_rate_limit, sys_role, sys_role_dept, sys_role_menu, sys_task, sys_user,
+#         sys_user_post, sys_user_role, gen_table, gen_table_column, sys_backup_log
 ```
 
 ---

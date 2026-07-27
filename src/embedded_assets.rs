@@ -141,9 +141,7 @@ fn build_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     // 但前端构建产物中的 .ts 文件是 TypeScript 编译后的 JavaScript 模块（Vite 的 worker 格式），
     // 必须返回 application/javascript 才能被浏览器作为模块脚本加载。
     let guessed = mime_guess::from_path(path).first_or_octet_stream();
-    let mime_str: &str = if path.to_lowercase().ends_with(".ts") {
-        "application/javascript"
-    } else if path.to_lowercase().ends_with(".mjs") {
+    let mime_str: &str = if path.to_lowercase().ends_with(".ts") || path.to_lowercase().ends_with(".mjs") {
         "application/javascript"
     } else {
         guessed.as_ref()
@@ -197,10 +195,10 @@ async fn serve_from_fs(req: Request) -> Response {
     if !clean_path.is_empty() {
         let file_path = format!("frontend-dist/{}", clean_path);
         // 安全检查：防止路径穿越（如 ../../../etc/passwd）
-        if is_safe_path(&file_path) {
-            if let Ok(content) = tokio::fs::read(&file_path).await {
-                return build_fs_response(&file_path, content);
-            }
+        if is_safe_path(&file_path)
+            && let Ok(content) = tokio::fs::read(&file_path).await
+        {
+            return build_fs_response(&file_path, content);
         }
     }
 
@@ -224,9 +222,7 @@ async fn serve_from_fs(req: Request) -> Response {
 fn build_fs_response(path: &str, content: Vec<u8>) -> Response {
     // MIME 类型推断（与生产模式保持一致）
     let guessed = mime_guess::from_path(path).first_or_octet_stream();
-    let mime_str: &str = if path.to_lowercase().ends_with(".ts") {
-        "application/javascript"
-    } else if path.to_lowercase().ends_with(".mjs") {
+    let mime_str: &str = if path.to_lowercase().ends_with(".ts") || path.to_lowercase().ends_with(".mjs") {
         "application/javascript"
     } else {
         guessed.as_ref()

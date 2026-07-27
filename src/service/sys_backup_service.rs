@@ -475,6 +475,11 @@ impl SysBackupService {
     ) -> Result<(), ServiceError> {
         let file_path_str = file_path.to_string_lossy().to_string();
 
+        // MySQL 单独处理：需要通过 stdin 喂入 SQL 文件内容（避免 shell 重定向带来的命令注入）
+        if kind == DbKind::Mysql {
+            return self.run_mysql_restore(db_url, file_path).await;
+        }
+
         let mut cmd = match kind {
             DbKind::Postgres => {
                 let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
@@ -487,17 +492,7 @@ impl SysBackupService {
                 c.env("PGPASSWORD", pass);
                 c
             }
-            DbKind::Mysql => {
-                let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
-                // mysql 通过 shell 重定向读取文件（mysql CLI 不支持直接读文件参数）
-                let shell_cmd = format!(
-                    "mysql --host={} --port={} --user={} --password={} {} < \"{}\"",
-                    host, port, user, pass, db, file_path_str
-                );
-                let mut c = Command::new("sh");
-                c.arg("-c").arg(&shell_cmd);
-                c
-            }
+            DbKind::Mysql => unreachable!("MySQL 走 run_mysql_restore 分支"),
             DbKind::Sqlite => {
                 let db_file = parse_sqlite_file_path(db_url)?;
                 let mut c = Command::new("sqlite3");
@@ -512,6 +507,74 @@ impl SysBackupService {
         let child = cmd
             .spawn()
             .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed")))?;
+
+        let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())
+            .await
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!(
+                    "error.backup.restore_process_timeout",
+                    secs = BACKUP_TIMEOUT_SECS
+                ))
+            })?
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))?;
+
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.backup.restore_process_nonzero_exit",
+                err = err
+            )));
+        }
+        Ok(())
+    }
+
+    /// MySQL 恢复子进程：通过 stdin 管道喂入 SQL 文件内容
+    ///
+    /// 安全设计（修复 C-1 命令注入）：
+    /// - 不使用 `sh -c "mysql ... < file"` 拼接 shell 命令
+    /// - 直接 `Command::new("mysql")` + 参数化传参，完全绕过 shell
+    /// - SQL 文件内容通过 stdin pipe 传入，等价于 `< file` 重定向但无注入风险
+    /// - 使用 tokio::io::AsyncWriteExt 异步写入 stdin，避免阻塞 worker
+    async fn run_mysql_restore(
+        &self,
+        db_url: &str,
+        file_path: &Path,
+    ) -> Result<(), ServiceError> {
+        use tokio::io::AsyncWriteExt;
+
+        let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
+
+        // 在 spawn_blocking 中读取文件内容（同步 IO 不阻塞 worker）
+        let fp = file_path.to_path_buf();
+        let sql_bytes = tokio::task::spawn_blocking(move || std::fs::read(&fp))
+            .await
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_file_task_failed")))?
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed")))?;
+
+        let mut cmd = Command::new("mysql");
+        cmd.arg("--host").arg(&host)
+            .arg("--port").arg(&port)
+            .arg("--user").arg(&user)
+            .arg(format!("--password={}", pass))
+            .arg(&db)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed")))?;
+
+        // 取出 stdin 并异步写入 SQL 内容
+        if let Some(mut stdin) = child.stdin.take() {
+            // 大文件分块写入，避免一次性占用过多内存
+            for chunk in sql_bytes.chunks(64 * 1024) {
+                stdin.write_all(chunk).await
+                    .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))?;
+            }
+            // 显式关闭 stdin，通知 mysql 子进程输入结束
+            let _ = stdin.shutdown().await;
+        }
 
         let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())
             .await
@@ -596,18 +659,16 @@ impl SysBackupService {
                 let dir_canonical = backup_dir.canonicalize().ok();
                 for path in &raw_paths {
                     // 二次校验路径在备份目录内（canonicalize 在阻塞线程中执行）
-                    if let Ok(canonical) = path.canonicalize() {
-                        if let Some(ref dir_canonical) = dir_canonical {
-                            if canonical.starts_with(dir_canonical) {
-                                if let Err(e) = std::fs::remove_file(&canonical) {
-                                    tracing::warn!(
-                                        "删除备份文件失败 {}: {}",
-                                        canonical.display(),
-                                        e
-                                    );
-                                }
-                            }
-                        }
+                    if let Ok(canonical) = path.canonicalize()
+                        && let Some(ref dir_canonical) = dir_canonical
+                        && canonical.starts_with(dir_canonical)
+                        && let Err(e) = std::fs::remove_file(&canonical)
+                    {
+                        tracing::warn!(
+                            "删除备份文件失败 {}: {}",
+                            canonical.display(),
+                            e
+                        );
                     }
                 }
             })

@@ -167,7 +167,7 @@ pub async fn export(
         ExcelColumn { key: "operName", header: ("操作人员", "Operator"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_name.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "operUrl", header: ("请求URL", "Request URL"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_url.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "operIp", header: ("主机地址", "Host Address"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_ip.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "status", header: ("操作状态", "Status"), getter: |r: &SysOperLogModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { "正常".to_string() } else { "异常".to_string() }).unwrap_or_default().into()) },
+        ExcelColumn { key: "status", header: ("操作状态", "Status"), getter: |r: &SysOperLogModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { crate::tr!("common.status.normal") } else { crate::tr!("common.status.anomaly") }).unwrap_or_default().into()) },
         ExcelColumn { key: "errorMsg", header: ("错误消息", "Error Message"), getter: |r: &SysOperLogModel| CellValue::Text(r.error_msg.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "operTime", header: ("操作时间", "Operation Time"), getter: |r: &SysOperLogModel| CellValue::Text({
                 r.oper_time
@@ -228,7 +228,7 @@ pub async fn stats(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<AjaxResult<AuditStatsVo>, AppError> {
-    let days = params.days.unwrap_or(30).max(1).min(365);
+    let days = params.days.unwrap_or(30).clamp(1, 365);
     let vo = state.oper_log_service.get_audit_stats(days).await?;
     Ok(AjaxResult::success(vo))
 }
@@ -261,7 +261,7 @@ pub async fn compliance_report(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<AjaxResult<ComplianceReportVo>, AppError> {
-    let days = params.days.unwrap_or(30).max(1).min(365);
+    let days = params.days.unwrap_or(30).clamp(1, 365);
     let vo = state
         .oper_log_service
         .get_compliance_report(days)

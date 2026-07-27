@@ -101,7 +101,7 @@ impl SysDictTypeRepository {
             return Ok(Vec::new());
         }
         SysDictType::find()
-            .filter(Column::DictId.is_in(dict_ids.iter().copied().collect::<Vec<i64>>()))
+            .filter(Column::DictId.is_in(dict_ids.to_vec()))
             .filter(Column::DelFlag.eq("0"))
             .all(self.base.db())
             .await

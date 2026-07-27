@@ -112,7 +112,7 @@ impl SysDictDataRepository {
             return Ok(Vec::new());
         }
         SysDictData::find()
-            .filter(Column::DictCode.is_in(dict_codes.iter().copied().collect::<Vec<i64>>()))
+            .filter(Column::DictCode.is_in(dict_codes.to_vec()))
             .filter(Column::DelFlag.eq("0"))
             .all(self.base.db())
             .await

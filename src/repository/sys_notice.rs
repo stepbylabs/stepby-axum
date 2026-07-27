@@ -44,7 +44,7 @@ impl SysNoticeRepository {
             return Ok(Vec::new());
         }
         SysNotice::find()
-            .filter(Column::NoticeId.is_in(notice_ids.iter().copied().collect::<Vec<i64>>()))
+            .filter(Column::NoticeId.is_in(notice_ids.to_vec()))
             .all(self.base.db())
             .await
     }

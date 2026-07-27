@@ -160,7 +160,7 @@ pub async fn preview(
     let data = state.gen_table_service.preview(table_id).await?;
     Ok(PreviewResponse {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         data,
     })
 }

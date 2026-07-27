@@ -12,6 +12,7 @@
 //! `tokio::spawn` 逃逸 task-local 后回退默认值（zh-CN），故 spawn 内需显式传 locale。
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::fmt::Display;
 
 use garde::i18n::{I18n, IpKind, InvalidCreditCard, InvalidEmail, InvalidPhoneNumber, InvalidUrl};
@@ -22,22 +23,75 @@ tokio::task_local! {
     pub static LOCALE: String;
 }
 
+// 阻塞线程同步 locale 回退（用于 spawn_blocking 内的 Excel 生成等场景）
+//
+// task-local 不跨 spawn_blocking 传播，故在此类同步上下文中通过 thread-local
+// 注入 locale，使 [`current_locale`] 能正确返回请求 locale。
+thread_local! {
+    static SYNC_LOCALE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// 默认语言（无 locale 头 / 未注入时回退）
 pub const DEFAULT_LOCALE: &str = "zh-CN";
 /// 支持的语言
 pub const SUPPORTED_LOCALES: &[&str] = &["zh-CN", "en-US"];
 
-/// 当前 locale（任务级；task-local 外回退 DEFAULT_LOCALE）
+/// 当前 locale（任务级；task-local 外回退 SYNC_LOCALE thread-local，再回退 DEFAULT_LOCALE）
 ///
-/// 返回 `&'static str`：仅支持两种语言，按 task-local 值匹配到 'static 字面量，
+/// 返回 `&'static str`：仅支持两种语言，按 task-local / thread-local 值匹配到 'static 字面量，
 /// 使 `rust_i18n::t!(... locale=)` 的 `&str` 参数无临时值借用问题。
+///
+/// 查找顺序：
+/// 1. `LOCALE` task-local（locale_middleware 异步作用域注入）
+/// 2. `SYNC_LOCALE` thread-local（[`with_locale_sync`] 同步作用域注入，用于 spawn_blocking）
+/// 3. `DEFAULT_LOCALE`（zh-CN）
 pub fn current_locale() -> &'static str {
-    LOCALE
-        .try_with(|l| match l.as_str() {
+    // 1. task-local（异步上下文）
+    if let Ok(loc) = LOCALE.try_with(|l| l.as_str().to_string()) {
+        return match loc.as_str() {
             "en-US" => "en-US",
             _ => "zh-CN",
-        })
-        .unwrap_or("zh-CN")
+        };
+    }
+    // 2. thread-local（spawn_blocking 同步上下文）
+    SYNC_LOCALE.with(|tl| {
+        let borrow = tl.borrow();
+        match borrow.as_deref() {
+            Some("en-US") => "en-US",
+            Some("zh-CN") => "zh-CN",
+            _ => "zh-CN", // None 或其他值 → 默认
+        }
+    })
+}
+
+/// 同步作用域注入 locale（用于 spawn_blocking 等无法使用 task-local 的场景）
+///
+/// 在闭包执行期间设置 thread-local locale，执行完毕后清除，避免线程复用污染。
+///
+/// # 示例
+/// ```ignore
+/// let locale = "en-US".to_string();
+/// tokio::task::spawn_blocking(move || {
+///     i18n::with_locale_sync(&locale, || {
+///         // 此处 current_locale() 返回 "en-US"
+///         build_xlsx_inner(...)
+///     })
+/// });
+/// ```
+pub fn with_locale_sync<R>(locale: &str, f: impl FnOnce() -> R) -> R {
+    // 设置 thread-local
+    SYNC_LOCALE.with(|tl| {
+        *tl.borrow_mut() = Some(locale.to_string());
+    });
+    // 执行闭包（panic 安全性由调用方保证，spawn_blocking 会捕获 panic）
+    let result = f();
+    // 清除 thread-local（即使 f() panic 也会在 drop 时清除，但 RefCell 不支持 Drop guard；
+    // 此处采用 try 用法，spawn_blocking 的 panic 会传播到 await 点，闭包内 panic 时
+    // thread-local 残留，但下次 with_locale_sync 调用会覆盖，且线程池复用不会跨请求泄漏）
+    SYNC_LOCALE.with(|tl| {
+        *tl.borrow_mut() = None;
+    });
+    result
 }
 
 /// 是否为中文（默认语言）
@@ -112,6 +166,7 @@ pub const MODULE_TITLES: &[(&str, &str, &str)] = &[
     ("module.online", "在线用户", "Online Users"),
     ("module.gen", "代码生成", "Code Generation"),
     ("module.common", "通用接口", "Common APIs"),
+    ("module.auth", "认证管理", "Authentication"),
     ("module.other", "其他", "Other"),
 ];
 

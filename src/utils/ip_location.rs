@@ -170,12 +170,12 @@ impl IpLocator {
         }
 
         // 1. 优先查 xdb（国内精度更高，仅支持 IPv4）
-        if let Some(xdb_guard) = self.xdb_reader.load().as_ref() {
-            if let Some(region) = xdb_guard.lookup_ipv4(ip) {
-                let location = region.to_chinese_location();
-                if !location.is_empty() {
-                    return location;
-                }
+        if let Some(xdb_guard) = self.xdb_reader.load().as_ref()
+            && let Some(region) = xdb_guard.lookup_ipv4(ip)
+        {
+            let location = region.to_chinese_location();
+            if !location.is_empty() {
+                return location;
             }
             // xdb 未命中或解析为空，回退到 mmdb
         }

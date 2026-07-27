@@ -90,7 +90,7 @@ pub async fn role_menu_treeselect(
     let menus = state.menu_service.get_menu_tree_select().await?;
     Ok(RoleMenuTreeResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         checked_keys: role_vo.menu_ids,
         menus,
     })
