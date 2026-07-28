@@ -136,6 +136,9 @@ pub struct CaptchaVo {
     pub img: String,
     /// 验证码会话 UUID（登录时回传；开关关闭时为空）
     pub uuid: String,
+    /// 注册开关（从 sys_config.sys.account.registerUser 读取）
+    /// 前端据此控制"立即注册"链接显示，避免探测 /register 触发 403 控制台错误
+    pub register_enabled: bool,
 }
 
 /// 用户信息响应 Vo（Service 层返回，Handler 包装为 GetInfoResult）
@@ -284,11 +287,15 @@ impl AuthService {
     ) -> Result<CaptchaVo, ServiceError> {
         // 1. 读取验证码开关
         let captcha_enabled = self.is_captcha_enabled().await;
+        // 同时读取注册开关，前端据此控制"立即注册"链接显示，
+        // 避免前端探测 /register 触发 403 控制台错误（P0 优化）
+        let register_enabled = self.is_register_enabled().await;
         if !captcha_enabled {
             return Ok(CaptchaVo {
                 captcha_enabled: false,
                 img: String::new(),
                 uuid: String::new(),
+                register_enabled,
             });
         }
 
@@ -315,6 +322,7 @@ impl AuthService {
             captcha_enabled: true,
             img: captcha.img_base64,
             uuid: captcha.uuid,
+            register_enabled,
         })
     }
 

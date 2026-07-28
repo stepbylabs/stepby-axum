@@ -897,6 +897,86 @@ node tests/main.mjs --headless
 - **源码检查优先**：UI 交互测试（对话框打开/按钮点击）受 tree-sidebar 布局遮挡、API 响应延迟等因素影响，源码检查（`page.evaluate` + `fetch(script.src)`）更可靠
 - **嵌入式前端**：测试默认使用 `http://localhost:8080`（嵌入式模式），需确保 `frontend-dist` 已同步最新构建
 
+### 10.11 深度 E2E 测试套件（166 项，12 模块）
+
+> 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
+
+#### 运行方式
+
+```powershell
+# PowerShell 环境变量设置
+$env:YEBOT_TEST_USER='admin'
+$env:YEBOT_TEST_PASS='admin123'
+$env:YEBOT_BASE_URL='http://localhost:8080'
+
+# 全量深度测试（166 项，12 模块）
+node tests/deep-e2e.mjs --headless
+
+# 单模块测试（如模块 9：权限隔离）
+node tests/deep-e2e.mjs --headless --feature=9
+
+# 有头模式（可视化调试，默认）
+node tests/deep-e2e.mjs
+```
+
+#### 12 个测试模块说明
+
+| 模块 | 名称 | 测试项数 | 覆盖内容 |
+|------|------|---------|---------|
+| M1 | 系统管理页面深度测试 | ~15 | 用户/角色/菜单/部门/岗位/字典/参数/通知/日志 CRUD、搜索表单、表格列、对话框 |
+| M2 | 监控页面深度测试 | ~12 | 在线用户/缓存/服务器/缓存监控/登录日志/操作日志/审计大屏/IP 库管理 |
+| M3 | 系统工具页面深度测试 | ~12 | 表单构建器（三栏布局）、代码生成器、接口文档（Swagger iframe） |
+| M4 | 帮助中心页面深度测试 | ~8 | 关于系统、更新日志（时间线）、快捷键中心、帮助中心 |
+| M5 | Dashboard 和工作台深度测试 | ~10 | 数据看板（统计卡片/图表/快捷入口）、个人工作台、首页 |
+| M6 | 个人中心深度测试 | ~6 | 基本资料 Tab、修改密码表单、TOTP Tab |
+| M7 | 带参数路由页面测试 | ~12 | 代码生成编辑（tableId）、定时任务日志（jobId）、用户分配角色（userId）、角色分配用户（roleId） |
+| M8 | 错误页面和特殊页面测试 | ~14 | 401/403/404/500/网络错误/隐私政策/锁屏页 |
+| M9 | 权限隔离深度测试（ry 用户） | ~9 | 菜单加载、参数设置/字典管理新增按钮隐藏、在线用户/登录日志访问、写操作 API 403 |
+| M10 | i18n 完整性深度扫描 | ~3 | 切换英文、中文残留扫描（0 处）、控制台错误 |
+| M11 | 暗色模式深度测试 | ~5 | 切换暗色模式、系统管理/监控页面无硬编码白色背景 |
+| M12 | CRUD 操作深度测试 | ~10 | 岗位/字典/参数/通知 新增对话框表单字段验证 |
+
+#### 关键测试技术
+
+- **Tour 遮罩处理**：登录后通过 `localStorage.setItem('yebot-layout-tour', 'completed')` 禁用新手引导，已显示的遮罩通过 Escape 键关闭
+- **三阶段点击策略**：`clickButton` 函数依次尝试普通点击 → force click → evaluate 触发 click，绕过 Tour 遮罩和遮挡元素
+- **403/401 错误过滤**：通过 `page.on('response')` 追踪 403/401 响应 URL，过滤 `/register` 探测和权限隔离测试产生的预期错误
+- **嵌入式模式适配**：M9 写操作权限测试通过 `basePaths = ['', '/dev-api']` 依次尝试，适配嵌入式模式（同源）和开发模式（/dev-api 代理）
+- **控制台错误过滤**：过滤 favicon、manifest、chrome-extension、rbicon.woff2、CSP 字体加载等无害错误
+
+#### 测试前置条件
+
+1. 后端启动在 `http://localhost:8080`（release 构建嵌入式模式）
+2. `frontend-dist/` 已同步最新前端构建（`pnpm run build:embedded` + robocopy 同步）
+3. `admin/admin123` 和 `ry/admin123` 账号可用
+4. 数据库已初始化（含定时任务 jobId=1、代码生成 tableId=4、角色 roleId=144）
+
+#### 测试报告
+
+测试完成后生成 JSON 详细报告：`tests/deep-e2e-report.json`
+
+```json
+{
+  "total": 166,
+  "passed": 166,
+  "failed": 0,
+  "passRate": "100.0%",
+  "results": [
+    { "module": 1, "name": "用户管理页面加载", "passed": true, "detail": "" }
+  ]
+}
+```
+
+#### 已修复的测试问题（v0.2.1）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 验证码图片 `data:image/gif;base64,undefined` | 后端 `captchaEnabled=false` 时 `res.img` 为空，前端未校验直接拼接 | `login.vue` 和 `register.vue` 的 `getCode()` 增加 `res.img` 非空校验 |
+| 嵌入式模式登录失败 | 误用 `build:prod`（`VITE_APP_BASE_API='/prod-api'`）构建嵌入式前端 | 改用 `build:embedded`（`VITE_APP_BASE_API=''`）同源访问 |
+| M9 写操作权限测试 status=200 | 测试使用 `/dev-api/system/user`，嵌入式模式下 404 | 依次尝试 `''` 和 `'/dev-api'` 两个 base path |
+| Tour 遮罩拦截按钮点击 | `yebot-tour-mask` overlay 覆盖全屏 | 登录后设置 localStorage + Escape 键关闭 + 三阶段点击策略 |
+| `/register` 探测产生 403 | 前端 `checkRegisterEnabled()` 单独探测 `/register` | 从 `/captchaImage` 响应读取 `registerEnabled` 字段 |
+
 ---
 
 ## 附录：常用测试命令速查
