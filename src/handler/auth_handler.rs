@@ -39,6 +39,8 @@ pub struct CaptchaResult {
     pub captcha_enabled: bool,
     pub img: String,
     pub uuid: String,
+    /// 注册开关（前端据此控制"立即注册"链接显示）
+    pub register_enabled: bool,
 }
 
 /// 登录响应体（token 在顶层，对齐前端 LoginInfoResult extends AjaxResult）
@@ -97,6 +99,7 @@ pub async fn captcha(
         captcha_enabled: vo.captcha_enabled,
         img: vo.img,
         uuid: vo.uuid,
+        register_enabled: vo.register_enabled,
     })
 }
 
