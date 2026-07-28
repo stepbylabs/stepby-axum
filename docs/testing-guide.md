@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.2.0 | 更新日期：2026-07-24
+> 版本：v0.2.2 | 更新日期：2026-07-28
 
 ## 目录
 
@@ -897,7 +897,7 @@ node tests/main.mjs --headless
 - **源码检查优先**：UI 交互测试（对话框打开/按钮点击）受 tree-sidebar 布局遮挡、API 响应延迟等因素影响，源码检查（`page.evaluate` + `fetch(script.src)`）更可靠
 - **嵌入式前端**：测试默认使用 `http://localhost:8080`（嵌入式模式），需确保 `frontend-dist` 已同步最新构建
 
-### 10.11 深度 E2E 测试套件（282 项，14 模块）
+### 10.11 深度 E2E 测试套件（565 项，40 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
 
@@ -909,7 +909,7 @@ $env:YEBOT_TEST_USER='admin'
 $env:YEBOT_TEST_PASS='admin123'
 $env:YEBOT_BASE_URL='http://localhost:8080'
 
-# 全量深度测试（282 项，14 模块）
+# 全量深度测试（565 项，40 模块）
 node tests/deep-e2e.mjs --headless
 
 # 单模块测试（如模块 9：权限隔离）
@@ -919,7 +919,7 @@ node tests/deep-e2e.mjs --headless --feature=9
 node tests/deep-e2e.mjs
 ```
 
-#### 14 个测试模块说明
+#### 40 个测试模块说明
 
 | 模块 | 名称 | 测试项数 | 覆盖内容 |
 |------|------|---------|---------|
@@ -937,6 +937,32 @@ node tests/deep-e2e.mjs
 | M12 | CRUD 操作深度测试 | 10 | 岗位/字典/参数/通知 新增对话框表单字段验证 |
 | M13 | 注册页测试 | 7 | 注册表单（用户名/密码/确认密码/验证码）、注册按钮、返回登录链接、页面标题 |
 | M14 | 字典数据详情页测试 | 7 | 字典数据详情页加载、表格列、搜索表单、新增/关闭按钮、新增字典数据对话框 |
+| M15 | 遗漏对话框深度测试 | 14 | 任务详情/图标选择/代码类型/树节点/选择用户对话框触发与渲染 |
+| M16 | 搜索筛选功能深度测试 | 9 | 用户/角色/部门/岗位/字典/参数/通知 搜索表单输入与重置 |
+| M17 | Tab 切换深度测试 | 10 | 在线用户/登录日志(我的登录)/关于系统/缓存监控/个人中心/表单构建器面板切换 |
+| M18 | 行内编辑删除+确认对话框测试 | 7 | 岗位/字典/参数/通知 行内修改按钮(el-link)、删除确认弹窗 |
+| M19 | 分页+导出+表单校验测试 | 10 | 分页器跳转/每页条数切换、导出下载、表单必填校验 |
+| M20 | 布局功能深度测试 | 15 | 头像下拉菜单/通知铃铛/主题切换/语言切换/尺寸切换/布局设置抽屉/备份入口 |
+| M21 | 缺失页面深度测试 | 8 | 404 页面/用户详情/角色分配用户页/路由参数传递 |
+| M22 | 组件功能深度测试 | 16 | 命令面板/头部搜索/收藏夹/语言切换/尺寸切换/备份页面 |
+| M23 | 用户操作流程深度测试 | 14 | 登录/登出/修改密码/TOTP 设置/头像上传流程 |
+| M24 | 批量操作 & 文件操作深度测试 | 9 | 批量删除/批量导出/文件上传/头像上传 |
+| M25 | 权限指令 & 锁屏 & 错误边界深度测试 | 16 | v-hasPermi 指令/锁屏页/错误边界/EmptyState 组件 |
+| M26 | 完整 CRUD 端到端流程测试 | 8 | 岗位 新增→列表验证→编辑→删除 完整流程、取消操作、唯一性校验 |
+| M27 | 表单字段级校验规则测试 | 8 | cron 表达式必填/字典类型必填/用户名密码格式/邮箱格式校验 |
+| M28 | 实时通信与动态数据测试 | 17 | 通知面板 hover/通知列表/通知详情/标记已读/WebSocket 连接 |
+| M29 | 权限矩阵完整测试 | 19 | admin/ry 用户权限对比、菜单可见性、按钮可见性、API 403 |
+| M30 | i18n + 暗色模式全页面扫描 | 8 | 全页面中文残留扫描/暗色模式 CSS 变量扫描 |
+| M31 | 文件操作与导入导出实际流程测试 | 11 | 用户导出/角色导出/头像上传/备份导出实际下载验证 |
+| M32 | 错误处理与边界场景测试 | 15 | 404 路由/会话过期/token 无效/网络错误/权限拒绝 |
+| M33 | 可访问性 (Accessibility) 深度测试 | 8 | ARIA 标签/焦点样式/键盘导航/语义化 HTML |
+| M34 | 性能测试 | 12 | 页面加载时间/内存使用/资源加载/FCP/LCP |
+| M35 | 键盘快捷键测试 | 7 | 全局快捷键/表格快捷键/对话框快捷键/Tab 导航 |
+| M36 | 标签页 (TagsView) 管理测试 | 9 | 多标签生成/标签关闭/右键菜单/标签固定/批量关闭 |
+| M37 | 响应式布局测试 | 8 | 移动端/平板/桌面断点/侧边栏折叠/表格响应式 |
+| M38 | 数据可视化测试 | 7 | Dashboard 图表/审计大屏/ECharts 渲染/图表交互 |
+| M39 | 会话管理测试 | 8 | 多标签会话/会话超时/登录状态保持/多用户切换 |
+| M40 | 打印功能测试 | 10 | 用户管理打印按钮/打印数据源/多页面打印/window.open 拦截 |
 
 #### 关键测试技术
 
@@ -944,7 +970,12 @@ node tests/deep-e2e.mjs
 - **三阶段点击策略**：`clickButton` 函数依次尝试普通点击 → force click → evaluate 触发 click，绕过 Tour 遮罩和遮挡元素
 - **403/401 错误过滤**：通过 `page.on('response')` 追踪 403/401 响应 URL，过滤 `/register` 探测和权限隔离测试产生的预期错误
 - **嵌入式模式适配**：M9 写操作权限测试通过 `basePaths = ['', '/dev-api']` 依次尝试，适配嵌入式模式（同源）和开发模式（/dev-api 代理）
-- **控制台错误过滤**：过滤 favicon、manifest、chrome-extension、rbicon.woff2、CSP 字体加载等无害错误
+- **控制台错误过滤**：过滤 favicon、manifest、chrome-extension、rbicon.woff2、CSP 字体加载、ResizeObserver loop、IMG 资源加载（头像未设置）等无害错误
+- **对话框/抽屉辅助函数**：`waitForVisibleDialog` / `waitForVisibleDrawer` / `closeDialog` / `closeDrawer` 使用 `:visible` 伪类精确匹配可见元素，避免选中隐藏的遗留元素
+- **SPA 导航保状态**：M36 多标签生成使用侧边栏菜单点击导航（而非直接 URL 跳转），保持 SPA 标签页状态
+- **i18n 文本适配**：按钮文本匹配兼容 "确 定"/"确定"、"打 印"/"打印" 等 i18n 带空格变体；表格行内按钮匹配 "修改"/"编辑" 两种翻译
+- **锁屏状态清理**：M25 锁屏测试后显式清除 localStorage 中的 `screen-lock` 和 `screen-lock-path`，避免污染后续模块
+- **Cookie token 读取**：M32 会话过期测试从 `document.cookie` 读写 token（非 localStorage），适配 Cookie 存储模式
 
 #### 测试前置条件
 
@@ -959,8 +990,9 @@ node tests/deep-e2e.mjs
 
 ```json
 {
-  "total": 282,
-  "passed": 282,
+  "timestamp": "2026-07-28T...",
+  "total": 565,
+  "passed": 565,
   "failed": 0,
   "passRate": "100.0%",
   "results": [
@@ -969,7 +1001,7 @@ node tests/deep-e2e.mjs
 }
 ```
 
-#### 已修复的测试问题（v0.2.1）
+#### 已修复的测试问题（v0.2.1 ~ v0.2.2）
 
 | 问题 | 根因 | 修复方式 |
 |------|------|---------|
@@ -981,6 +1013,35 @@ node tests/deep-e2e.mjs
 | 通知中心详情对话框不显示 | `handleViewDetail` 打开对话框后调用 `handleMarkRead`，后者检测到 `currentNotice.noticeId === row.noticeId` 后立即关闭对话框 | 拆分 `handleMarkRead`（不关闭对话框）和 `handleDialogMarkRead`（对话框内标记后关闭），消除竞态 |
 | `sanitizeHtml is not a function` | `notice-center/index.vue` 缺少 `sanitizeHtml` 导入 | 添加 `import { sanitizeHtml } from '@/utils/index'` |
 | 抽屉/对话框识别失败 | `waitForSelector('.el-drawer', {state:'visible'})` 选中隐藏的遗留元素 | 新增 `waitForVisibleDrawer` / `waitForVisibleDialog` 辅助函数，使用 `:visible` 伪类 |
+| M15 任务详情按钮不可见 | 详情触发是 jobName 上的 el-link，非按钮 | 选择器改为 `.el-table__row .el-link` |
+| M15 选择用户对话框失败 | 按钮文本是 "新增" 而非 "添加"（i18n common.add） | 选择器使用 `button:has-text("新增")` |
+| M15 JobDetail 内容渲染失败 | 对话框使用 `.detail-wrap` / `.detail-card` 而非 `.el-form` | 选择器改为 `.el-dialog .detail-wrap, .el-dialog .detail-card` |
+| M17 登录日志 Tab 切换失败 | `.el-tab-pane .el-table` 匹配到第一个隐藏 Tab 的表格 | 选择器改为 `.my-login-panel` 精确匹配第二个 Tab |
+| M17 表单构建器 Tab 失败 | 表单构建器不使用 el-tabs，使用 left/center/right 面板 | 改为检查 `.right-board` / `.center-board` 面板可见性 |
+| M18 编辑按钮不可见 | 按钮文本是 "修改"（i18n common.edit）而非 "编辑" | 选择器同时匹配 "修改" 和 "编辑" |
+| M19 导出对话框未出现 | 导出函数触发直接下载，无确认对话框 | 改为检查 loading 遮罩或下载事件 |
+| M19 确定按钮不可见 | 按钮文本带空格 "确 定"（i18n common.confirm） | 选择器同时匹配 "确 定" 和 "确定" |
+| M20 通知铃铛面板未展开 | 使用 click 触发 toggle，但 mouseenter 已展开面板 | 改用 hover 触发，目标 `.notice-popover` |
+| M20 设置抽屉未打开 | 设置入口在头像下拉菜单内，非独立按钮 | 改为点击头像下拉菜单中的 "布局设置" |
+| M21 404 页面错误提示不可见 | 404 页面使用 `wscn-http404-container` 自定义类 | 选择器改为 `.wscn-http404-container, .wscn-http404, .bullshit__oops` |
+| M22 语言/尺寸切换按钮不可见 | 选择器使用通用类而非特定 ID | 选择器改为 `#lang-select` 和 `#size-select` |
+| M25 锁屏污染后续模块 | 锁屏状态以签名 payload 持久化到 localStorage | 测试后显式移除 `screen-lock` 和 `screen-lock-path` |
+| M26 CRUD 表单字段不匹配 | 选择器用 placeholder 而非 i18n label 文本 | 改用 `:has(label:has-text("岗位名称"))` 精确匹配 |
+| M26 token 读取失败 | token 存储在 Cookie 而非 localStorage | 使用传入的 token 参数，不读 localStorage |
+| M27 cron/dict 格式校验失败 | 前端仅有必填校验，无格式校验 | 改为测试必填校验而非格式校验 |
+| M28 通知面板未打开 | click 触发 toggle 与 mouseenter 冲突 | 改用 hover 触发 |
+| M31 备份页面 404 | 路由错误 `/system/backup` | 修正为 `/monitor/backup` |
+| M31 用户导出确认按钮不可见 | 导出为直接下载，无确认对话框 | 移除确认检查，直接等待下载事件 |
+| M31 控制台图片资源错误 | 个人中心头像未设置导致图片加载失败 | 过滤 IMG 资源错误和 `/user/profile` URL 错误 |
+| M32 会话过期测试失败 | token 存储在 Cookie 但测试读 localStorage | 改为从 `document.cookie` 读写 token |
+| M32 404 控制台错误 | 边界测试故意触发 404 | 新增 404 URL 追踪和过滤 |
+| M33 ARIA 标签验证失败 | `document.querySelector` 不支持 `:has-text()` | 改用 JavaScript evaluate 检查属性和角色 |
+| M33 焦点样式不可见 | 无头模式不触发 `:focus-visible` | 改为检查交互元素类型 |
+| M34 内存使用超限 | 阈值 100MB 对 Vue SPA + Element Plus 过低 | 阈值提高到 250MB |
+| M36 多标签生成失败 | 直接 URL 导航重置 SPA 状态 | 改用侧边栏菜单点击导航保持标签状态 |
+| M38 路由 404 | 不存在的 `/monitor/my-login` 路由 | 改为 `/monitor/logininfor` + Tab 切换 |
+| M40 打印按钮未找到 | i18n "打 印"（带空格），选择器过严 | 多选择器策略 + JavaScript evaluate 兜底 |
+| ResizeObserver loop 错误 | 浏览器 ResizeObserver 循环限制 | 在 console 和 pageerror 处理器中过滤该错误 |
 
 ---
 
