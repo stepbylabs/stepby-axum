@@ -897,7 +897,7 @@ node tests/main.mjs --headless
 - **源码检查优先**：UI 交互测试（对话框打开/按钮点击）受 tree-sidebar 布局遮挡、API 响应延迟等因素影响，源码检查（`page.evaluate` + `fetch(script.src)`）更可靠
 - **嵌入式前端**：测试默认使用 `http://localhost:8080`（嵌入式模式），需确保 `frontend-dist` 已同步最新构建
 
-### 10.11 深度 E2E 测试套件（166 项，12 模块）
+### 10.11 深度 E2E 测试套件（282 项，14 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
 
@@ -909,7 +909,7 @@ $env:YEBOT_TEST_USER='admin'
 $env:YEBOT_TEST_PASS='admin123'
 $env:YEBOT_BASE_URL='http://localhost:8080'
 
-# 全量深度测试（166 项，12 模块）
+# 全量深度测试（282 项，14 模块）
 node tests/deep-e2e.mjs --headless
 
 # 单模块测试（如模块 9：权限隔离）
@@ -919,22 +919,24 @@ node tests/deep-e2e.mjs --headless --feature=9
 node tests/deep-e2e.mjs
 ```
 
-#### 12 个测试模块说明
+#### 14 个测试模块说明
 
 | 模块 | 名称 | 测试项数 | 覆盖内容 |
 |------|------|---------|---------|
-| M1 | 系统管理页面深度测试 | ~15 | 用户/角色/菜单/部门/岗位/字典/参数/通知/日志 CRUD、搜索表单、表格列、对话框 |
-| M2 | 监控页面深度测试 | ~12 | 在线用户/缓存/服务器/缓存监控/登录日志/操作日志/审计大屏/IP 库管理 |
-| M3 | 系统工具页面深度测试 | ~12 | 表单构建器（三栏布局）、代码生成器、接口文档（Swagger iframe） |
-| M4 | 帮助中心页面深度测试 | ~8 | 关于系统、更新日志（时间线）、快捷键中心、帮助中心 |
-| M5 | Dashboard 和工作台深度测试 | ~10 | 数据看板（统计卡片/图表/快捷入口）、个人工作台、首页 |
-| M6 | 个人中心深度测试 | ~6 | 基本资料 Tab、修改密码表单、TOTP Tab |
-| M7 | 带参数路由页面测试 | ~12 | 代码生成编辑（tableId）、定时任务日志（jobId）、用户分配角色（userId）、角色分配用户（roleId） |
-| M8 | 错误页面和特殊页面测试 | ~14 | 401/403/404/500/网络错误/隐私政策/锁屏页 |
-| M9 | 权限隔离深度测试（ry 用户） | ~9 | 菜单加载、参数设置/字典管理新增按钮隐藏、在线用户/登录日志访问、写操作 API 403 |
-| M10 | i18n 完整性深度扫描 | ~3 | 切换英文、中文残留扫描（0 处）、控制台错误 |
-| M11 | 暗色模式深度测试 | ~5 | 切换暗色模式、系统管理/监控页面无硬编码白色背景 |
-| M12 | CRUD 操作深度测试 | ~10 | 岗位/字典/参数/通知 新增对话框表单字段验证 |
+| M1 | 系统管理页面深度测试 | 73 | 用户/角色/菜单/部门/岗位/字典/参数/通知中心/通知公告/日志 CRUD、搜索表单、表格列、对话框、详情抽屉 |
+| M2 | 监控页面深度测试 | 52 | 在线用户/缓存管理/服务器监控/缓存监控/登录日志/操作日志/审计大屏/IP 库管理/备份管理 |
+| M3 | 系统工具页面深度测试 | 23 | 表单构建器（三栏布局）、代码生成器（导入/创建/预览对话框）、接口文档（Swagger iframe） |
+| M4 | 帮助中心页面深度测试 | 25 | 关于系统（版本/依赖/技术栈）、更新日志（时间线）、快捷键中心、帮助中心（FAQ/联系） |
+| M5 | Dashboard 和工作台深度测试 | 27 | 数据看板（统计卡片/图表/快捷入口/查看全部跳转）、个人工作台、首页 |
+| M6 | 个人中心深度测试 | 8 | 基本资料 Tab、修改密码表单、TOTP Tab |
+| M7 | 带参数路由页面测试 | 13 | 代码生成编辑（tableId）、定时任务日志（jobId）、用户分配角色（userId）、角色分配用户（roleId） |
+| M8 | 错误页面和特殊页面测试 | 20 | 401/403/404/500/网络错误/隐私政策/锁屏页 |
+| M9 | 权限隔离深度测试（ry 用户） | 9 | 菜单加载、参数设置/字典管理新增按钮隐藏、在线用户/登录日志访问、写操作 API 403 |
+| M10 | i18n 完整性深度扫描 | 3 | 切换英文、中文残留扫描（0 处）、控制台错误 |
+| M11 | 暗色模式深度测试 | 5 | 切换暗色模式、系统管理/监控页面无硬编码白色背景 |
+| M12 | CRUD 操作深度测试 | 10 | 岗位/字典/参数/通知 新增对话框表单字段验证 |
+| M13 | 注册页测试 | 7 | 注册表单（用户名/密码/确认密码/验证码）、注册按钮、返回登录链接、页面标题 |
+| M14 | 字典数据详情页测试 | 7 | 字典数据详情页加载、表格列、搜索表单、新增/关闭按钮、新增字典数据对话框 |
 
 #### 关键测试技术
 
@@ -957,8 +959,8 @@ node tests/deep-e2e.mjs
 
 ```json
 {
-  "total": 166,
-  "passed": 166,
+  "total": 282,
+  "passed": 282,
   "failed": 0,
   "passRate": "100.0%",
   "results": [
@@ -976,6 +978,9 @@ node tests/deep-e2e.mjs
 | M9 写操作权限测试 status=200 | 测试使用 `/dev-api/system/user`，嵌入式模式下 404 | 依次尝试 `''` 和 `'/dev-api'` 两个 base path |
 | Tour 遮罩拦截按钮点击 | `yebot-tour-mask` overlay 覆盖全屏 | 登录后设置 localStorage + Escape 键关闭 + 三阶段点击策略 |
 | `/register` 探测产生 403 | 前端 `checkRegisterEnabled()` 单独探测 `/register` | 从 `/captchaImage` 响应读取 `registerEnabled` 字段 |
+| 通知中心详情对话框不显示 | `handleViewDetail` 打开对话框后调用 `handleMarkRead`，后者检测到 `currentNotice.noticeId === row.noticeId` 后立即关闭对话框 | 拆分 `handleMarkRead`（不关闭对话框）和 `handleDialogMarkRead`（对话框内标记后关闭），消除竞态 |
+| `sanitizeHtml is not a function` | `notice-center/index.vue` 缺少 `sanitizeHtml` 导入 | 添加 `import { sanitizeHtml } from '@/utils/index'` |
+| 抽屉/对话框识别失败 | `waitForSelector('.el-drawer', {state:'visible'})` 选中隐藏的遗留元素 | 新增 `waitForVisibleDrawer` / `waitForVisibleDialog` 辅助函数，使用 `:visible` 伪类 |
 
 ---
 
