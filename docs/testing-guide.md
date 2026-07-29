@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.2.5 | 更新日期：2026-07-29
+> 版本：v0.2.6 | 更新日期：2026-07-30
 
 ## 目录
 
@@ -900,7 +900,7 @@ node tests/main.mjs --headless
 ### 10.11 深度 E2E 测试套件（75 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
-> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.2.5）
+> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.2.6，2026-07-30 验证）
 
 #### 运行方式
 
@@ -1055,9 +1055,9 @@ node tests/deep-e2e.mjs
 
 ```json
 {
-  "timestamp": "2026-07-28T...",
-  "total": 696,
-  "passed": 696,
+  "timestamp": "2026-07-30T...",
+  "total": 939,
+  "passed": 939,
   "failed": 0,
   "passRate": "100.0%",
   "results": [
@@ -1120,6 +1120,23 @@ node tests/deep-e2e.mjs
 | M1 /system/rateLimit 404 | 限流配置菜单 parent_id=2（监控），路由为 `/monitor/rateLimit` | 路由从 `/system/rateLimit` 改为 `/monitor/rateLimit` |
 | M53 任务进度操作人筛选失败 | i18n task.search.operator 文本为"操作者"（zh）/"Operator"（en） | 选择器改为 `:has-text("操作者"), :has-text("Operator")` 双语匹配 |
 | 备份/任务/限流菜单 parent_id 不一致 | 之前手动修改 DB 未形式化 | 新增 `m20260805_000001_fix_backup_task_ratelimit_menu_parent` 迁移，将 menu_id 118/119/121 的 parent_id 从 1 改为 2 |
+
+#### v0.2.6 业务流程与链路优化（2026-07-30）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 菜单 CRUD 后下拉树缓存未失效 | `menu/index.vue` 的 `submitForm`/`handleDelete` 未调用 `refreshMenuTreeselect()` | 在更新/删除成功回调中调用 `refreshMenuTreeselect()` 失效缓存 |
+| 部门 CRUD 后下拉树缓存未失效 | `dept/index.vue` 的 `submitForm`/`handleDelete` 未调用 `refreshDeptTreeSelect()` | 在更新/删除成功回调中调用 `refreshDeptTreeSelect()` 失效缓存 |
+| 修改密码后旧 token 仍有 1500ms 可用窗口 | `resetPwd.vue` 改密成功后延迟登出，期间用户可继续操作 | 加全屏 `ElLoading.service({ lock: true })` 遮罩，登出完成后关闭 |
+| HTML 消息体 XSS 防护不可靠 | `utils/sanitize.rs` 使用手写正则过滤，易被属性大小写/编码绕过 | 引入 `ammonia` crate，白名单标签+属性+链接 rel=noopener noreferrer |
+| `/common/upload` 缺权限校验 | `permission.rs` 未映射上传端点权限标识 | 新增 `("POST", "/common/upload") => Some("system:file:add")` 映射 |
+| `/dashboard/*` 缺权限校验 | `permission.rs` 未映射仪表盘端点权限标识 | 新增 `("GET", "/dashboard/stats")` / `("GET", "/dashboard/user-stats")` 映射到 `monitor:server:list` |
+| 数据库 URL 解析 panic | `db_type.rs::from_url` 遇到未知 scheme 时 `panic!` | 改为返回 `Result<DbType, DbTypeError>`，`pool.rs` 调用方转为 `AppError` |
+| 429 响应缺 Retry-After 头 | `rate_limit.rs` 限流响应未按 RFC 6585/7231 携带 Retry-After | 新增 `try_acquire_with_retry_after` 计算恢复秒数，写入 `Retry-After` 头 |
+| 备份恢复 MySQL 分支 `unreachable!()` | `sys_backup_service.rs` MySQL 恢复路径用 `unreachable!()` 可能 panic | 替换为 `return Err(ServiceError::internal(...))` 正常错误返回 |
+| 字典数据路由 name 冲突 | `router/index.ts` 字典数据路由 name="Data" 过于宽泛 | 改为 `name: 'SystemDictData'` 遵循父子前缀命名约定 |
+| TOTP 组件直连 request 未用 API 模块 | `totp.vue` 直接 `import request` 调用，绕过 `api/system/totp` 封装 | 改为 `import { setupTotp, ... } from '@/api/system/totp'`，移除死代码表单项 |
+| rateLimit `handleUpdate` 未处理 reject | `rateLimit/index.vue` 的 `handleUpdate` Promise 链无 `.catch()` | 添加 `.catch(() => {})` 避免未处理 Promise 拒绝 |
 
 ---
 

@@ -297,6 +297,17 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/system/ipLocation/reload") => Some("monitor:iplocation:edit"),
         ("POST", "/system/ipLocation/reloadXdb") => Some("monitor:iplocation:edit"),
 
+        // ===== 通用文件上传/下载 =====
+        // /common/upload 已有 system:file:add 权限对齐文件管理模块，避免任意登录用户可上传
+        ("POST", "/common/upload") => Some("system:file:add"),
+        // 通用下载仅需登录（无敏感数据，但需登录态校验），不设细粒度权限
+        // /common/download 和 /common/download/resource 不在此表
+
+        // ===== 仪表盘统计 =====
+        // 含操作日志聚合统计，需监控查看权限，避免任意登录用户获取全局统计
+        ("GET", "/dashboard/stats") => Some("monitor:server:list"),
+        ("GET", "/dashboard/user-stats") => Some("monitor:server:list"),
+
         _ => None,
     }
 }

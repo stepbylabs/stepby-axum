@@ -78,6 +78,9 @@ futures = "0.3"
 # 正则表达式（手机号格式校验、XSS 净化模式）
 regex = "1"
 
+# HTML 白名单净化（通知公告内容入库前过滤 XSS，替代手写正则方案）
+ammonia = "4"
+
 # 定时任务调度
 # tokio-cron-scheduler 内部依赖 croner，项目直接使用 croner 做 cron 表达式验证和下次执行时间计算，
 # 避免引入额外的 cron crate 造成两个 cron 解析库共存

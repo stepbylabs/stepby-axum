@@ -89,6 +89,14 @@ impl RateLimiter {
     /// 返回 true 表示放行，false 表示限流。
     /// 内部按时间差补充令牌（懒补充模式）。
     pub fn try_acquire(&self, key: &str, config: RateLimitConfig) -> bool {
+        self.try_acquire_with_retry_after(key, config).0
+    }
+
+    /// 尝试消费 1 个令牌，并返回 429 时的建议 Retry-After 秒数
+    ///
+    /// 返回 (是否放行, Retry-After 秒数)。
+    /// Retry-After 仅在限流时有意义，放行时为 0。
+    pub fn try_acquire_with_retry_after(&self, key: &str, config: RateLimitConfig) -> (bool, u64) {
         let now = Instant::now();
         // Mutex 中毒时恢复 Guard 而非 panic，遵循项目约定（P0-New-3）
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
@@ -115,9 +123,20 @@ impl RateLimiter {
 
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
-            true
+            (true, 0)
         } else {
-            false
+            // 计算恢复所需秒数：还需补充 (1.0 - tokens) 个令牌
+            // 时间 = 令牌数 / 补充速率
+            let retry_after = if config.refill_per_second > 0.0 {
+                let needed = 1.0 - bucket.tokens;
+                let secs = needed / config.refill_per_second;
+                // 向上取整，最少 1 秒
+                (secs.ceil() as u64).max(1)
+            } else {
+                // 补充速率为 0 时，给一个默认值
+                60
+            };
+            (false, retry_after)
         }
     }
 
@@ -171,19 +190,25 @@ pub async fn rate_limit_middleware(
         }
     };
 
-    if RATE_LIMITER.try_acquire(&ip, config) {
+    let (allowed, retry_after) = RATE_LIMITER.try_acquire_with_retry_after(&ip, config);
+    if allowed {
         next.run(req).await
     } else {
-        // TODO(L-2)：429 响应未包含 Retry-After 头。补全需 RATE_LIMITER 暴露该 IP 的
-        // 令牌桶剩余恢复时间（next_refill_at - now），改动较大，暂保留现状。
-        (
+        // 429 响应包含 Retry-After 头（RFC 6585 / RFC 7231），告知客户端何时可重试
+        let mut resp = (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
                 "code": 429,
                 "msg": crate::tr!("error.rate_limit.too_many_requests")
             })),
         )
-            .into_response()
+            .into_response();
+        let headers = resp.headers_mut();
+        // Retry-After 头：以秒为单位，告知客户端需等待多久才能再次发送请求
+        if let Ok(val) = axum::http::HeaderValue::from_str(&retry_after.to_string()) {
+            headers.insert(axum::http::header::RETRY_AFTER, val);
+        }
+        resp
     }
 }
 
