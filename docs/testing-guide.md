@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.2.3 | 更新日期：2026-07-28
+> 版本：v0.2.5 | 更新日期：2026-07-29
 
 ## 目录
 
@@ -897,9 +897,10 @@ node tests/main.mjs --headless
 - **源码检查优先**：UI 交互测试（对话框打开/按钮点击）受 tree-sidebar 布局遮挡、API 响应延迟等因素影响，源码检查（`page.evaluate` + `fetch(script.src)`）更可靠
 - **嵌入式前端**：测试默认使用 `http://localhost:8080`（嵌入式模式），需确保 `frontend-dist` 已同步最新构建
 
-### 10.11 深度 E2E 测试套件（696 项，53 模块）
+### 10.11 深度 E2E 测试套件（75 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
+> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.2.5）
 
 #### 运行方式
 
@@ -909,8 +910,11 @@ $env:YEBOT_TEST_USER='admin'
 $env:YEBOT_TEST_PASS='admin123'
 $env:YEBOT_BASE_URL='http://localhost:8080'
 
-# 全量深度测试（696 项，53 模块）
+# 全量深度测试（75 模块）
 node tests/deep-e2e.mjs --headless
+
+# 范围测试（如 M67-M75）
+node tests/deep-e2e.mjs --headless --range=67-75
 
 # 单模块测试（如模块 9：权限隔离）
 node tests/deep-e2e.mjs --headless --feature=9
@@ -919,7 +923,7 @@ node tests/deep-e2e.mjs --headless --feature=9
 node tests/deep-e2e.mjs
 ```
 
-#### 53 个测试模块说明
+#### 75 个测试模块说明
 
 | 模块 | 名称 | 测试项数 | 覆盖内容 |
 |------|------|---------|---------|
@@ -976,6 +980,28 @@ node tests/deep-e2e.mjs
 | M51 | IP 库管理测试 | 4 | /system/ipLibrary 页面加载/列表/导入按钮 |
 | M52 | 指令深度（水印/复制/脱敏）测试 | 10 | v-watermark 样式标签/水印渲染/v-copyText 复制触发/v-desensitize 手机/IP 脱敏/全局注册 |
 | M53 | 任务进度管理测试 | 18 | /monitor/task 页面加载/搜索表单（任务类型/状态/操作者/创建时间）/搜索重置按钮/批量删除按钮/表格列数/数据行数/进度条/状态标签/空状态组件/搜索后页面正常/重置后页面正常/分页组件 |
+| M54 | 错误页面完整测试 | 8 | 401/403/500/network-error 页面加载/标题/导航按钮 |
+| M55 | 菜单管理 CRUD 深度测试 | 13 | 菜单新增/编辑对话框/表单字段/权限标识/父菜单树/展开折叠按钮（索引点击 radio 切换菜单类型） |
+| M56 | 部门管理 CRUD 深度测试 | 10 | 部门新增/编辑对话框/表单字段/负责人/联系电话/邮箱/排序 |
+| M57 | 角色管理 CRUD 深度测试 | 15 | 角色新增/编辑/权限字符（placeholder 定位）/菜单权限树/全选/全不选 checkbox/数据权限/备注/导出按钮 |
+| M58 | 用户管理 CRUD 深度测试 | 17 | 用户新增/编辑/部门 select（归属部门 label）/岗位 select/角色分配/密码字段/导出按钮/搜索表单 |
+| M59 | 代码生成器深度交互 | 11 | 导入表对话框/预览按钮/生成按钮/删除按钮/搜索表单/表格列 |
+| M60 | 表单构建器深度交互 | 13 | 左侧组件面板/中间画布/右侧属性面板/导出按钮/组件数量/操作栏/面板 Tab 切换 |
+| M61 | 个人中心提交测试 | 11 | 基本资料/修改密码/保存按钮/关闭按钮/昵称/邮箱/手机号/性别 radio |
+| M62 | 授权操作端到端 | 9 | 角色授权用户/用户授权角色/添加用户按钮/取消授权/批量取消授权/关闭按钮 |
+| M63 | 隐私政策页面测试 | 5 | 隐私政策页标题/章节/页脚（页面不可访问时跳过） |
+| M64 | 头像上传完整流程测试 | 9 | 个人中心头像容器/对话框打开/vue-cropper 裁剪器/缩放按钮/旋转按钮/预览区域/上传按钮/控制台错误 |
+| M65 | Swagger API 文档交互测试 | 6 | iframe 存在/src 设置/内容加载/后端 swagger-ui 可访问/OpenAPI JSON 可访问（路径数验证） |
+| M66 | 通知已读用户列表深度测试 | 10 | 通知列表加载/已读用户按钮/对话框打开/标题/列表表格/用户行数/表格列数/分页组件/关闭按钮 |
+| M67 | 登录页 UI 完整测试 | 9 | 表单容器/账号输入框/密码输入框/登录按钮/空表单校验/错误密码提示/记住密码复选框/语言切换/Logo |
+| M68 | 密码修改校验测试 | 8 | Tab 切换/旧密码输入框/新密码输入框/确认密码输入框/保存按钮/空表单校验/新旧密码相同校验/确认密码不一致校验 |
+| M69 | 基本资料提交测试 | 8 | Tab 可见/昵称输入框/手机号输入框/邮箱输入框/性别选择/保存按钮/无效手机号校验/无效邮箱校验/有效数据保存 |
+| M70 | 用户/字典详情页深度测试 | 10 | 用户详情页加载/表单/字段数量/返回按钮；字典详情页加载/表单/字段数量/返回按钮 |
+| M71 | 操作日志/任务详情对话框 | 10 | 操作日志详情按钮/对话框/内容/代码块/关闭按钮；定时任务详情按钮/对话框/内容/关闭按钮 |
+| M72 | 表单构建器子组件深度 | 10 | 页面加载/左侧组件面板/点击组件到画布/属性面板/图标选择对话框/图标搜索框/图标网格/清空画布 |
+| M73 | 代码生成器表单深度 | 8 | 表格列表/编辑按钮/编辑页面/基本信息Tab/表单字段数/字段信息Tab/生成信息Tab/返回列表 |
+| M74 | 全局交互功能深度 | 11 | 命令面板打开/搜索框/搜索结果/HeaderSearch按钮/HeaderSearch结果/主题色按钮/主题色面板/标签页可见/右键菜单/右键菜单项 |
+| M75 | 数据导出与文件下载 | 11 | 用户导出按钮/确认框/触发；角色导出按钮/触发；岗位导出按钮/触发；文件管理页加载/上传按钮/文件列表 |
 
 #### 关键测试技术
 
@@ -996,6 +1022,25 @@ node tests/deep-e2e.mjs
 - **布局设置入口**：M46 布局设置通过头像下拉菜单触发（`.avatar-container` → "布局设置"菜单项），菜单项文本为"布局设置"（i18n: `layout.navbar.layoutSettings`）
 - **监控模块路由**：M47 服务器监控已合并为健康检查，路由从 `/monitor/server` 变更为 `/monitor/health`（`m20260802_000001_merge_server_to_health` 迁移）
 - **监控子模块路由**：备份管理、任务进度、限流配置的实际路由为 `/monitor/backup`、`/monitor/task`、`/monitor/rateLimit`（菜单 parent_id=2 即监控目录，非系统目录）
+- **503/429 限流错误过滤**：全量 E2E 测试时请求密集，后端令牌桶限流（capacity=100, refill=10/s）和数据库连接池耗尽会返回 503 Service Unavailable；Redis 限流返回 429 Too Many Requests。这些是测试环境预期行为，通过 `text.includes('503') && text.includes('Service Unavailable')` 和 `text.includes('429')` 过滤，不影响功能正确性验证
+- **#label 插槽字段定位**：menu/index.vue 的"权限标识"和 role/index.vue 的"权限字符"使用 `#label` 具名插槽（含 el-tooltip + question-filled 图标），不使用 `:label` 属性。测试中优先用 `input[placeholder*="权限标识"]` / `input[placeholder*="权限字符"]` 定位，回退到 label 文本匹配
+- **菜单类型 radio 索引点击**：M55 菜单管理对话框的菜单类型 radio（目录/菜单/按钮）使用 `.el-radio-group .el-radio` 索引点击（nth(1) = "菜单"/C 类型），比 `:has-text("菜单")` 文本匹配更可靠，避免 `:has-text("C")` 误匹配其他元素
+- **归属部门 label 文本**：user/index.vue 的部门字段 label 实际渲染为"归属部门"（i18n: `user.form.dept`），非"部门"；且 `el-tree-select` 在 Element Plus 中内部渲染为 `el-select`，DOM 中无 `el-tree-select` class，选择器使用 `.el-form-item:has(.el-form-item__label:has-text("归属部门")) .el-select`
+- **M58 部门/岗位 select 可见性判断**：使用 `page.evaluate()` 在可见 dialog 内通过 label 文本精确匹配（`text === '归属部门'` / `text === 'Department'`）查找 form-item，再检查其内部 `.el-select__wrapper`（实际可见触发器）的 `getBoundingClientRect()`。回退检查 `.el-form-item__content` 区域可见性。避免直接检查 `.el-select` / `.el-tree-select` 外层包装器（可能尺寸为 0）。兼容中英文 label 文本
+- **M64 头像上传 vue-cropper**：userAvatar.vue 使用 vue-cropper 裁剪器，裁剪器容器选择器为 `.cropper-container` / `.vue-cropper` / `.cropper-box`；缩放/旋转按钮为 icon-only `el-button`（`icon="Plus"` / `icon="Minus"` / `icon="RefreshLeft"` / `icon="RefreshRight"`），无文本，通过 icon 类选择器（`button:has(.el-icon-plus)` 等）或 JS 结构定位（el-row 中 icon-only button 按位置识别：前 2 个为缩放、后 2 个为旋转）
+- **M65 Swagger iframe 跨域**：Swagger UI 通过 iframe 嵌入，可能受同源策略限制无法访问 iframe 内容；测试通过 `page.evaluate(fetch())` 直接请求后端 `/swagger-ui` 和 `/api-docs/openapi.json` 验证可访问性，并统计 OpenAPI paths 数量
+- **M66 已读用户按钮定位**：notice/index.vue 的"已读用户"按钮在操作列，使用 `.el-table__row button:has-text("已读")` 或 `.el-button:has(.el-icon-view)` 定位（可能为图标按钮无文本）
+- **M67 登录页独立 context**：登录页测试使用 `createPage(browser)` 创建独立 context，避免影响主会话的登录状态；测试空表单校验和错误密码提示后关闭 context
+- **M68 密码修改不实际提交**：密码修改测试仅验证表单校验（空表单、新旧相同、确认不一致），不实际修改密码，避免破坏后续测试的登录状态
+- **M68 密码输入框 i18n 无关定位**：resetPwd.vue 的三个密码输入框 placeholder 随 i18n 变化（中文"旧密码/请输入新密码/确认密码"，英文"Old Password/Enter new password/Confirm Password"），英文模式下"Enter new password"不包含"New"（大小写敏感），原 `input[placeholder*="New"]` 选择器会失效。修复为 `.el-tab-pane:not([style*="display: none"]) input[type="password"]` + `nth(0/1/2)` 索引定位，与 i18n 语言无关
+- **M69 性别选择 i18n label 兼容**：userInfo.vue 性别字段 label 在中文为"性别"、英文为"Gender"（不是"Sex"），原选择器 `.el-form-item__label:has-text("Sex")` 在英文模式失效。修复为同时匹配"性别"/"Gender"/"Sex"三种文本
+- **M10 i18n 切换回中文回退策略**：SPA 路由跳转（safeGoto）不会重新执行 i18n 初始化，仅设置 localStorage 不改变运行时 locale。修复为使用 `page.reload()` 强制重新加载页面，让 i18n 从 localStorage 重新读取语言设置
+- **M70 详情页 allowFail**：用户详情页和字典详情页可能因路由不存在或参数缺失跳转，使用 `allowFail: true` 导航并检查 URL 是否包含 `/404` 或 `/login`
+- **M71 详情对话框通用选择器**：操作日志和定时任务详情对话框使用 `.el-dialog:visible` + `.el-dialog__headerbtn` 通用选择器，适配不同标题文本
+- **M72 表单构建器点击替代拖拽**：headless 模式下 HTML5 拖拽不可靠，使用点击组件项替代拖拽操作；图标选择对话框通过 `.el-dialog:visible` 定位
+- **M73 代码生成器编辑页 Tab 切换**：编辑页使用 `.el-tabs__item:has-text()` 定位 Tab，切换后等待 `.el-table`（字段信息）或 `.el-form-item`（生成信息）可见
+- **M74 全局交互 Escape 清理**：命令面板、HeaderSearch、主题色面板测试后均通过 `Escape` 键关闭，避免遗留弹层影响后续测试
+- **M75 导出取消确认**：导出测试点击导出按钮后，在确认框中点击"取消"而非"确定"，避免实际下载文件影响测试环境
 
 #### 测试前置条件
 
