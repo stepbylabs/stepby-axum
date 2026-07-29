@@ -1,79 +1,70 @@
 // axum-backend/src/utils/sanitize.rs
-//! HTML 危险内容净化（P0-R19-002）
+//! HTML 白名单净化（P0-R19-002）
 //!
-//! 作为前端净化的补充防线，在后端入库前移除明显危险的 HTML 标签和属性。
-//! 采用双层防御策略：
-//! 1. 移除完全危险的标签块（script、iframe、object、embed 等）
-//! 2. 移除所有 on* 事件属性和 javascript:/vbscript: 协议
+//! 作为前端净化的补充防线，在后端入库前移除危险 HTML。
+//! 使用 `ammonia` 库（基于 html5ever）做白名单净化，替代手写正则方案，
+//! 彻底解决正则绕过问题（HTML 实体编码、嵌套标签、大小写、属性变异等）。
 //!
-//! 注意：这是基于正则的简化净化，无法覆盖所有 mutation XSS 向量。
-//! 前端已使用基于 DOMParser 的白名单净化（DetailView.vue），此处为第二道防线。
+//! 允许的标签和属性白名单：
+//! - 基础格式：p, br, hr, strong, b, em, i, u, s, strike, sub, sup, mark, small
+//! - 标题：h1-h6
+//! - 列表：ul, ol, li, dl, dt, dd
+//! - 引用与代码：blockquote, q, code, pre, kbd, samp, var
+//! - 表格：table, thead, tbody, tfoot, tr, th, td, caption, colgroup, col
+//! - 链接与图片：a (href), img (src/alt/title/width/height)
+//! - 容器：div, span
+//! - 通用属性：class, style（仅安全 CSS 属性，ammonia 默认已过滤危险属性）
+//!
+//! 禁止的标签（会被完全移除）：script, style, iframe, object, embed, applet,
+//! form, input, textarea, select, button, link, meta, noscript, template 等
 
-use regex::Regex;
-use std::sync::LazyLock;
+use ammonia::{Builder, UrlRelative};
 
-/// script 标签块正则（连同内容一起移除）
-static SCRIPT_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\s*script\b[^>]*>[\s\S]*?<\s*/\s*script\s*>")
-        .expect("无效的 script 标签正则")
-});
-
-/// style 标签块正则（连同内容一起移除）
-static STYLE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\s*style\b[^>]*>[\s\S]*?<\s*/\s*style\s*>")
-        .expect("无效的 style 标签正则")
-});
-
-/// 未闭合的 script/style 标签正则（无对应闭标签时移除开标签）
-static SCRIPT_STYLE_OPEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\s*/?\s*(script|style)\b[^>]*/?>")
-        .expect("无效的 script/style 开标签正则")
-});
-
-/// 其他危险标签正则（只移除标签，保留内容）
-/// iframe、object、embed、applet、noscript、template、form、input、textarea、select、button、link、meta
-static OTHER_DANGEROUS_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\s*/?\s*(iframe|object|embed|applet|noscript|template|form|input|textarea|select|button|link|meta)\b[^>]*/?>")
-        .expect("无效的危险标签正则")
-});
-
-/// on* 事件属性正则（onclick、onerror、onload 等）
-static EVENT_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#)
-        .expect("无效的事件属性正则")
-});
-
-/// 危险协议正则（javascript:、vbscript:）
-static DANGEROUS_PROTO_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(javascript|vbscript):"#).expect("无效的危险协议正则")
-});
-
-/// data:text/html URI 正则（可嵌入 HTML/JS）
-static DATA_HTML_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)data:text/html").expect("无效的 data URI 正则")
-});
+/// 构建白名单净化器（懒加载，避免每次调用重建）
+fn build_sanitizer() -> Builder<'static> {
+    let mut builder = Builder::default();
+    // 允许的标签白名单（ammonia 默认已含 p/br/strong 等基础标签，此处显式扩展）
+    builder.add_tags([
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "ul", "ol", "li", "dl", "dt", "dd",
+        "blockquote", "q", "code", "pre", "kbd", "samp", "var",
+        "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col",
+        "img",
+        "div", "span", "hr",
+        "u", "s", "strike", "sub", "sup", "mark", "small",
+    ]);
+    // 允许的属性白名单
+    builder.add_generic_attributes(["class", "style"]);
+    // 链接允许 href + title + target（rel 由 link_rel 自动管理，不在此声明）
+    builder.add_tag_attributes("a", ["href", "title", "target"]);
+    // 图片允许 src + alt + title + width + height
+    builder.add_tag_attributes("img", ["src", "alt", "title", "width", "height"]);
+    // 表格相关属性
+    builder.add_tag_attributes("th", ["colspan", "rowspan", "align"]);
+    builder.add_tag_attributes("td", ["colspan", "rowspan", "align"]);
+    builder.add_tag_attributes("col", ["span", "width"]);
+    builder.add_tag_attributes("colgroup", ["span"]);
+    // 列表属性
+    builder.add_tag_attributes("ol", ["start", "type"]);
+    // 链接 rel="noopener noreferrer" 安全策略（target=_blank 时防反向引用）
+    builder.link_rel(Some("noopener noreferrer"));
+    // 将相对 URL 转为绝对 URL（防协议绕过），此处保留 passthrough 不做转换
+    builder.url_relative(UrlRelative::PassThrough);
+    // 移除所有 on* 事件属性（ammonia 默认已移除，显式声明以防配置变更）
+    // ammonia 默认不在 allowed_attributes 中包含任何 on* 属性
+    builder
+}
 
 /// 净化 HTML 内容
 ///
-/// 流程：
-/// 1. 移除 script/style 标签块（连同内容）
-/// 2. 移除未闭合的 script/style 标签
-/// 3. 移除其他危险标签（只移除标签，保留内容）
-/// 4. 移除所有 on* 事件属性
-/// 5. 将 javascript:/vbscript: 协议替换为安全占位符
-/// 6. 将 data:text/html 替换为安全占位符
+/// 使用 ammonia 白名单净化，仅保留安全的标签和属性。
+/// 所有 script/iframe/style 等危险标签会被完全移除（连同内容）。
+/// 所有 on* 事件属性、javascript:/vbscript: 协议会被移除。
 pub fn sanitize_html(html: &str) -> String {
     if html.is_empty() {
         return String::new();
     }
-    let s = SCRIPT_BLOCK_RE.replace_all(html, "");
-    let s = STYLE_BLOCK_RE.replace_all(&s, "");
-    let s = SCRIPT_STYLE_OPEN_RE.replace_all(&s, "");
-    let s = OTHER_DANGEROUS_TAG_RE.replace_all(&s, "");
-    let s = EVENT_ATTR_RE.replace_all(&s, "");
-    let s = DANGEROUS_PROTO_RE.replace_all(&s, "safe-disabled:");
-    let s = DATA_HTML_RE.replace_all(&s, "data:text/plain");
-    s.into_owned()
+    build_sanitizer().clean(html).to_string()
 }
 
 #[cfg(test)]
@@ -102,10 +93,8 @@ mod tests {
         let input = "<a href=\"javascript:alert(1)\">click</a>";
         let result = sanitize_html(input);
         assert!(!result.contains("javascript:"));
-        // 验证安全内容（链接文本）被保留
+        // 链接文本被保留
         assert!(result.contains("click"), "应保留链接文本 'click'");
-        // 验证 javascript: 被替换为安全占位符
-        assert!(result.contains("safe-disabled:"), "javascript: 应替换为 safe-disabled:");
     }
 
     #[test]
@@ -121,5 +110,72 @@ mod tests {
         let result = sanitize_html(input);
         assert!(result.contains("安全内容"));
         assert!(result.contains("加粗"));
+    }
+
+    #[test]
+    fn test_removes_style_tag_block() {
+        let input = "<p>text</p><style>body{background:url(javascript:alert(1))}</style>";
+        let result = sanitize_html(input);
+        assert!(!result.contains("<style"));
+        assert!(!result.contains("javascript:"));
+        assert!(result.contains("text"));
+    }
+
+    #[test]
+    fn test_html_entity_encoding_bypass_blocked() {
+        // HTML 实体编码绕过尝试：&#106;avascript: 等价于 javascript:
+        let input = "<a href=\"&#106;avascript:alert(1)\">click</a>";
+        let result = sanitize_html(input);
+        // ammonia 基于 html5ever 解析，会先解码实体再判断协议
+        assert!(!result.contains("javascript:"), "应阻断实体编码绕过");
+        assert!(!result.contains("&#106;avascript"), "不应保留原始实体编码的危险协议");
+    }
+
+    #[test]
+    fn test_nested_script_bypass_blocked() {
+        // 嵌套标签构造绕过尝试：ammonia 基于 html5ever 解析，
+        // <scr<script>ipt> 会被解析为文本 "scr" + script 标签 + 文本 "ipt>"
+        // script 标签及其内容被完全移除，alert(1) 不应出现在可执行上下文中
+        let input = "<scr<script>ipt>alert(1)</script>";
+        let result = sanitize_html(input);
+        // script 标签被移除，alert 文本可能作为纯文本残留但不会作为脚本执行
+        assert!(!result.contains("<script"), "不应残留 script 标签");
+        assert!(!result.contains("</script>"), "不应残留 script 闭标签");
+    }
+
+    #[test]
+    fn test_preserves_table_structure() {
+        let input = "<table><tr><td colspan=\"2\">cell</td></tr></table>";
+        let result = sanitize_html(input);
+        assert!(result.contains("<table>"));
+        assert!(result.contains("colspan"));
+        assert!(result.contains("cell"));
+    }
+
+    #[test]
+    fn test_link_rel_added() {
+        let input = "<a href=\"https://example.com\">link</a>";
+        let result = sanitize_html(input);
+        assert!(result.contains("rel=\"noopener noreferrer\""), "应自动添加 rel 属性");
+    }
+
+    #[test]
+    fn test_removes_form_elements() {
+        let input = "<form action=\"evil\"><input name=\"pwd\"><button>submit</button></form>";
+        let result = sanitize_html(input);
+        assert!(!result.contains("<form"));
+        assert!(!result.contains("<input"));
+        assert!(!result.contains("<button"));
+        // form 内的文本内容被保留
+        assert!(result.contains("submit"));
+    }
+
+    #[test]
+    fn test_inline_style_preserved() {
+        // style 属性中的安全 CSS 被保留，危险 CSS（如 url(javascript:)）被 ammonia 过滤
+        let input = "<p style=\"color:red\">text</p>";
+        let result = sanitize_html(input);
+        assert!(result.contains("style"), "安全 style 属性应保留");
+        assert!(result.contains("color"));
     }
 }

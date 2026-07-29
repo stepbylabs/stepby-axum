@@ -492,7 +492,9 @@ impl SysBackupService {
                 c.env("PGPASSWORD", pass);
                 c
             }
-            DbKind::Mysql => unreachable!("MySQL 走 run_mysql_restore 分支"),
+            DbKind::Mysql => {
+                return Err(ServiceError::internal("MySQL 恢复应走 run_mysql_restore 独立分支"));
+            }
             DbKind::Sqlite => {
                 let db_file = parse_sqlite_file_path(db_url)?;
                 let mut c = Command::new("sqlite3");
