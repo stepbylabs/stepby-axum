@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.2.2 | 更新日期：2026-07-28
+> 版本：v0.2.3 | 更新日期：2026-07-28
 
 ## 目录
 
@@ -897,7 +897,7 @@ node tests/main.mjs --headless
 - **源码检查优先**：UI 交互测试（对话框打开/按钮点击）受 tree-sidebar 布局遮挡、API 响应延迟等因素影响，源码检查（`page.evaluate` + `fetch(script.src)`）更可靠
 - **嵌入式前端**：测试默认使用 `http://localhost:8080`（嵌入式模式），需确保 `frontend-dist` 已同步最新构建
 
-### 10.11 深度 E2E 测试套件（565 项，40 模块）
+### 10.11 深度 E2E 测试套件（696 项，53 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
 
@@ -909,7 +909,7 @@ $env:YEBOT_TEST_USER='admin'
 $env:YEBOT_TEST_PASS='admin123'
 $env:YEBOT_BASE_URL='http://localhost:8080'
 
-# 全量深度测试（565 项，40 模块）
+# 全量深度测试（696 项，53 模块）
 node tests/deep-e2e.mjs --headless
 
 # 单模块测试（如模块 9：权限隔离）
@@ -919,7 +919,7 @@ node tests/deep-e2e.mjs --headless --feature=9
 node tests/deep-e2e.mjs
 ```
 
-#### 40 个测试模块说明
+#### 53 个测试模块说明
 
 | 模块 | 名称 | 测试项数 | 覆盖内容 |
 |------|------|---------|---------|
@@ -963,6 +963,19 @@ node tests/deep-e2e.mjs
 | M38 | 数据可视化测试 | 7 | Dashboard 图表/审计大屏/ECharts 渲染/图表交互 |
 | M39 | 会话管理测试 | 8 | 多标签会话/会话超时/登录状态保持/多用户切换 |
 | M40 | 打印功能测试 | 10 | 用户管理打印按钮/打印数据源/多页面打印/window.open 拦截 |
+| M41 | 锁屏解锁完整流程测试 | 12 | 头像下拉触发锁屏/锁屏页面渲染/密码输入框/错误密码不解锁/正确密码解锁/解锁后页面恢复 |
+| M42 | TOTP 设置/禁用完整流程测试 | 14 | 个人中心 MFA Tab/TOTP 卡片渲染/状态检测/生成密钥/二维码/验证码输入/复制密钥/错误验证码/禁用表单切换 |
+| M43 | 通知中心完整流程测试 | 10 | 通知铃铛(#header-notice)/面板展开/Tab 分类/列表渲染/更多链接/通知公告页表格/新增按钮 |
+| M44 | 备份管理测试 | 6 | /monitor/backup 页面加载/创建备份按钮/备份列表/恢复按钮/下载按钮 |
+| M45 | 缓存管理测试 | 6 | /monitor/cache 页面加载/键列表/统计信息/清空按钮/刷新按钮 |
+| M46 | 用户偏好设置测试 | 12 | 个人中心基本资料 Tab/表单字段/头像组件(左侧卡片)/布局设置抽屉/主题切换/侧边栏样式 |
+| M47 | 监控模块完整测试 | 14 | 在线用户(强退)/定时任务(状态切换/执行一次)/健康检查(CPU/内存/磁盘)/缓存监控 |
+| M48 | 限流管理测试 | 6 | /monitor/rateLimit 页面加载/规则列表/新增按钮/维度选择/状态切换 |
+| M49 | 代码生成器测试 | 6 | /tool/gen 页面加载/表列表/导入表/生成按钮/预览按钮 |
+| M50 | 表单构建器测试 | 7 | /tool/build 页面加载/左侧组件面板/中间画布/右侧属性面板/组件数量/操作栏 |
+| M51 | IP 库管理测试 | 4 | /system/ipLibrary 页面加载/列表/导入按钮 |
+| M52 | 指令深度（水印/复制/脱敏）测试 | 10 | v-watermark 样式标签/水印渲染/v-copyText 复制触发/v-desensitize 手机/IP 脱敏/全局注册 |
+| M53 | 任务进度管理测试 | 18 | /monitor/task 页面加载/搜索表单（任务类型/状态/操作者/创建时间）/搜索重置按钮/批量删除按钮/表格列数/数据行数/进度条/状态标签/空状态组件/搜索后页面正常/重置后页面正常/分页组件 |
 
 #### 关键测试技术
 
@@ -976,6 +989,13 @@ node tests/deep-e2e.mjs
 - **i18n 文本适配**：按钮文本匹配兼容 "确 定"/"确定"、"打 印"/"打印" 等 i18n 带空格变体；表格行内按钮匹配 "修改"/"编辑" 两种翻译
 - **锁屏状态清理**：M25 锁屏测试后显式清除 localStorage 中的 `screen-lock` 和 `screen-lock-path`，避免污染后续模块
 - **Cookie token 读取**：M32 会话过期测试从 `document.cookie` 读写 token（非 localStorage），适配 Cookie 存储模式
+- **锁屏 401 过滤**：M41 锁屏测试有意使用错误密码解锁，`/unlockscreen` 端点返回 401，通过 `unauthorizedUrls` 过滤器匹配 `/unlockscreen` URL 过滤该预期错误
+- **TOTP 禁用表单两阶段切换**：M42 TOTP 禁用表单是条件渲染（`.disable-form`），需先点击 `.enabled-state` 中文本为"未启用"的危险按钮（`profile.totp.disabled` i18n key）才能展开禁用表单
+- **通知铃铛选择器**：M43 通知铃铛的实际选择器为 `#header-notice` 或 `.notice-trigger`（非 `.notice-bell`），图标为 `svg-icon[icon-class="bell"]`，移动端（<992px）整个右侧菜单隐藏
+- **个人中心 Tab 文本**：M46 个人中心 Tab 文本为"基本资料"（i18n: `profile.basicInfo`），不是"基本信息"；没有独立头像 Tab，头像组件在左侧卡片常驻
+- **布局设置入口**：M46 布局设置通过头像下拉菜单触发（`.avatar-container` → "布局设置"菜单项），菜单项文本为"布局设置"（i18n: `layout.navbar.layoutSettings`）
+- **监控模块路由**：M47 服务器监控已合并为健康检查，路由从 `/monitor/server` 变更为 `/monitor/health`（`m20260802_000001_merge_server_to_health` 迁移）
+- **监控子模块路由**：备份管理、任务进度、限流配置的实际路由为 `/monitor/backup`、`/monitor/task`、`/monitor/rateLimit`（菜单 parent_id=2 即监控目录，非系统目录）
 
 #### 测试前置条件
 
@@ -991,8 +1011,8 @@ node tests/deep-e2e.mjs
 ```json
 {
   "timestamp": "2026-07-28T...",
-  "total": 565,
-  "passed": 565,
+  "total": 696,
+  "passed": 696,
   "failed": 0,
   "passRate": "100.0%",
   "results": [
@@ -1001,7 +1021,7 @@ node tests/deep-e2e.mjs
 }
 ```
 
-#### 已修复的测试问题（v0.2.1 ~ v0.2.2）
+#### 已修复的测试问题（v0.2.1 ~ v0.2.3）
 
 | 问题 | 根因 | 修复方式 |
 |------|------|---------|
@@ -1042,6 +1062,19 @@ node tests/deep-e2e.mjs
 | M38 路由 404 | 不存在的 `/monitor/my-login` 路由 | 改为 `/monitor/logininfor` + Tab 切换 |
 | M40 打印按钮未找到 | i18n "打 印"（带空格），选择器过严 | 多选择器策略 + JavaScript evaluate 兜底 |
 | ResizeObserver loop 错误 | 浏览器 ResizeObserver 循环限制 | 在 console 和 pageerror 处理器中过滤该错误 |
+| M41 锁屏 401 控制台错误 | 错误密码解锁调用 `/unlockscreen` 返回 401（预期行为） | 401 过滤器添加 `/unlockscreen` URL 匹配 |
+| M42 TOTP 禁用表单不可见 | 禁用表单是条件渲染，需先点击 `.enabled-state` 中的切换按钮 | 先点击 `.enabled-state button.el-button--danger` 展开禁用表单 |
+| M43 通知铃铛不可见 | 选择器用 `.notice-bell`，实际类名为 `#header-notice` / `.notice-trigger` | 改用 `#header-notice, .notice-trigger` 选择器 |
+| M43 通知公告新增按钮不可见 | 选择器未限定 `.app-container` 范围 | 改用 `.app-container button:has-text("新增")` 精确匹配 |
+| M46 基本信息 Tab 不可见 | Tab 文本是"基本资料"（i18n: profile.basicInfo），非"基本信息" | 选择器改为 `:has-text("基本资料")` |
+| M46 头像 Tab 不可见 | 没有独立头像 Tab，头像在左侧卡片常驻 | 改为检查 `.user-avatar` / `.box-card .el-upload` 组件可见性 |
+| M46 布局设置抽屉不可见 | 下拉菜单项文本是"布局设置"，非泛化的"布局"/"设置" | 选择器改为 `:has-text("布局设置")` 精确匹配 |
+| M47 /monitor/server 404 | 服务器监控已合并为健康检查（`m20260802_000001` 迁移） | 路由改为 `/monitor/health` |
+| M1/M31 /system/backup 404 | 备份管理菜单 parent_id=2（监控），路由为 `/monitor/backup` | 路由从 `/system/backup` 改为 `/monitor/backup` |
+| M1 /system/task 404 | 任务进度菜单 parent_id=2（监控），路由为 `/monitor/task` | 路由从 `/system/task` 改为 `/monitor/task` |
+| M1 /system/rateLimit 404 | 限流配置菜单 parent_id=2（监控），路由为 `/monitor/rateLimit` | 路由从 `/system/rateLimit` 改为 `/monitor/rateLimit` |
+| M53 任务进度操作人筛选失败 | i18n task.search.operator 文本为"操作者"（zh）/"Operator"（en） | 选择器改为 `:has-text("操作者"), :has-text("Operator")` 双语匹配 |
+| 备份/任务/限流菜单 parent_id 不一致 | 之前手动修改 DB 未形式化 | 新增 `m20260805_000001_fix_backup_task_ratelimit_menu_parent` 迁移，将 menu_id 118/119/121 的 parent_id 从 1 改为 2 |
 
 ---
 

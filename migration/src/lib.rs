@@ -33,6 +33,7 @@ pub use m20260802_000003_merge_session_login_menus::Migration as M20260802MergeS
 pub use m20260802_000004_add_missing_button_perms::Migration as M20260802AddMissingButtonPerms;
 pub use m20260803_000001_restrict_backup_write_perms::Migration as M20260803RestrictBackupWritePerms;
 pub use m20260804_000001_fix_ip_location_menu_parent::Migration as M20260804FixIpLocationMenuParent;
+pub use m20260805_000001_fix_backup_task_ratelimit_menu_parent::Migration as M20260805FixBackupTaskRatelimitMenuParent;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -65,6 +66,7 @@ mod m20260802_000003_merge_session_login_menus;
 mod m20260802_000004_add_missing_button_perms;
 mod m20260803_000001_restrict_backup_write_perms;
 mod m20260804_000001_fix_ip_location_menu_parent;
+mod m20260805_000001_fix_backup_task_ratelimit_menu_parent;
 
 use sea_orm_migration::prelude::*;
 
@@ -106,6 +108,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260802AddMissingButtonPerms),
             Box::new(M20260803RestrictBackupWritePerms),
             Box::new(M20260804FixIpLocationMenuParent),
+            Box::new(M20260805FixBackupTaskRatelimitMenuParent),
         ]
     }
 }
