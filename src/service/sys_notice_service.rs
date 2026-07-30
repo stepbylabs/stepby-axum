@@ -24,6 +24,27 @@ use crate::utils::parse_id_list;
 use crate::utils::sanitize_html;
 use crate::state::AppState;
 
+/// P3 修复: 通知公告枚举值白名单校验
+/// notice_type: "1"=通知, "2"=公告
+/// status: "0"=正常, "1"=关闭（可选字段，None 时跳过）
+fn validate_notice_enum(notice_type: &str, status: Option<&str>) -> Result<(), ServiceError> {
+    if notice_type != "1" && notice_type != "2" {
+        return Err(ServiceError::bad_request(&format!(
+            "notice_type 必须为 1(通知) 或 2(公告)，当前值: {}",
+            notice_type
+        )));
+    }
+    if let Some(s) = status {
+        if s != "0" && s != "1" {
+            return Err(ServiceError::bad_request(&format!(
+                "status 必须为 0(正常) 或 1(关闭)，当前值: {}",
+                s
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ==================== DTO ====================
 
 /// 通知公告分页查询 DTO
@@ -229,6 +250,8 @@ impl SysNoticeService {
         state: Option<&AppState>,
     ) -> Result<SysNoticeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        // P3 修复: 枚举值白名单校验，防止脏数据
+        validate_notice_enum(&dto.notice_type, dto.status.as_deref())?;
 
         let now = chrono::Local::now().naive_local();
         // 净化 notice_content：移除危险标签和事件属性（P0-R19-002）
@@ -347,6 +370,8 @@ impl SysNoticeService {
         operator: &str,
     ) -> Result<SysNoticeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        // P3 修复: 枚举值白名单校验，防止脏数据
+        validate_notice_enum(&dto.notice_type, dto.status.as_deref())?;
 
         let existing = self.get_notice_by_id(dto.notice_id).await?;
 

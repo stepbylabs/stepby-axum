@@ -22,6 +22,42 @@ use crate::repository::sys_job::SysJobRepository;
 use crate::repository::sys_job_log::SysJobLogRepository;
 use crate::scheduler::JobScheduler;
 
+/// P3 修复: 定时任务枚举值白名单校验
+/// misfire_policy: "1"=立即执行, "2"=执行一次, "3"=放弃执行（可选，默认 "3"）
+/// concurrent: "0"=允许, "1"=禁止（可选，默认 "1"）
+/// status: "0"=正常, "1"=暂停（可选）
+fn validate_job_enum(
+    misfire_policy: Option<&str>,
+    concurrent: Option<&str>,
+    status: Option<&str>,
+) -> Result<(), ServiceError> {
+    if let Some(m) = misfire_policy {
+        if m != "1" && m != "2" && m != "3" {
+            return Err(ServiceError::bad_request(&format!(
+                "misfire_policy 必须为 1/2/3，当前值: {}",
+                m
+            )));
+        }
+    }
+    if let Some(c) = concurrent {
+        if c != "0" && c != "1" {
+            return Err(ServiceError::bad_request(&format!(
+                "concurrent 必须为 0(允许) 或 1(禁止)，当前值: {}",
+                c
+            )));
+        }
+    }
+    if let Some(s) = status {
+        if s != "0" && s != "1" {
+            return Err(ServiceError::bad_request(&format!(
+                "status 必须为 0(正常) 或 1(暂停)，当前值: {}",
+                s
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ==================== DTO ====================
 
 /// 任务查询 DTO
@@ -258,6 +294,8 @@ impl SysJobService {
         operator: &str,
     ) -> Result<SysJobModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        // P3 修复: 枚举值白名单校验
+        validate_job_enum(dto.misfire_policy.as_deref(), dto.concurrent.as_deref(), dto.status.as_deref())?;
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
@@ -311,6 +349,8 @@ impl SysJobService {
         operator: &str,
     ) -> Result<SysJobModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        // P3 修复: 枚举值白名单校验
+        validate_job_enum(dto.misfire_policy.as_deref(), dto.concurrent.as_deref(), dto.status.as_deref())?;
 
         let existing = self
             .job_repo

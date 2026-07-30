@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.2.9 | 更新日期：2026-07-30
+> 版本：v0.3.0 | 更新日期：2026-07-30
 
 ## 目录
 
@@ -901,7 +901,7 @@ node tests/main.mjs --headless
 ### 10.11 深度 E2E 测试套件（75 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
-> 当前统计：75 模块 / 951 测试项 / 通过率 100%（v0.2.9，2026-07-30 验证）
+> 当前统计：75 模块 / 951 测试项 / 通过率 100%（v0.3.0，2026-07-30 验证）
 > 架构：入口脚本 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
 
 #### 运行方式
@@ -1215,6 +1215,23 @@ tests/
 | ws_handler JWT sub 解析失败回退 user_id=0 | unwrap_or(0) 可能导致越权/计数错乱 | 改为返回 401 拒绝连接 |
 | 调试脚本硬编码弱密码（14个 .mjs + 文档） | debug-*.mjs 直接写死 admin/admin123 | 改为从 test-config.mjs 导入 TEST_USER/TEST_PASS；文档示例改用占位符 |
 | notice-center/index.vue 参数隐式 any（3处） | shallowRef 数组方法回调参数缺类型注解 | 添加 (n: SysNotice) 显式类型注解 |
+
+#### v0.3.0 安全加固与深层修复（2026-07-30，第五轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 数据权限过滤 fail-open（P1 安全漏洞） | 6 处 handler 的 JWT sub 解析用 .ok() 容错，解析失败返回 None 导致跳过数据权限过滤 | 改为 fail-closed：解析失败返回 401 拒绝访问（role/user/dept 的 list+export 共 6 处） |
+| v-copyText 指令事件监听器泄漏 | 缺少 unmounted 钩子，元素卸载时 click 监听器未清理 | 添加 unmounted 钩子调用 $destroyCopy 清理 |
+| useCrudTable getList 竞态条件 | 无请求取消机制，快速翻页/搜索时旧响应覆盖新数据 | 引入 listRequestId 版本号守卫，丢弃过期响应 |
+| useCrudTable handleUpdate 竞态条件 | 快速点击不同行编辑按钮时旧请求覆盖新表单 | 引入 updateRequestId 版本号守卫 |
+| health/index.vue 定时器未清理 + 竞态 | toggleAutoRefresh 未先清旧定时器；setInterval 不等待回调完成 | 先 clearTimeout 再创建；改用递归 setTimeout 确保串行 |
+| notification.ts 硬编码中文比较 | msg.data.message === 'WebSocket 连接成功' 与 locale 耦合 | 移除硬编码兜底，仅依赖 i18n key 比较 |
+| AnnouncementBanner 严重级别判断仅中文 | 正则只匹配紧急/重要/警告，英文 locale 下全部降级为 info | 补充英文关键词 urgent/important/warning/critical |
+| pdf.ts printElement 无错误保护 | setTimeout 中 printWindow.print() 无 try/catch | 包裹 try/catch + 检查 printWindow.closed |
+| TagsView Promise 链缺少 .catch() | 6 个 .then() 链无 .catch()，可能产生 unhandledrejection | 补充 .catch() 错误处理 |
+| scheduler 登录异常检测 fail-silent | Redis 错误被 .unwrap_or(None) 误认为"已去重"，跳过告警 | 区分 Redis 错误与 key 已存在，故障时仍创建告警 |
+| 通知公告枚举值未校验 | notice_type/status 仅校验长度，可接受任意字符串 | 添加 validate_notice_enum 白名单校验（"1"/"2", "0"/"1"） |
+| 定时任务枚举值未校验 | misfire_policy/concurrent/status 使用 #[garde(skip)] | 添加 validate_job_enum 白名单校验（"1"/"2"/"3", "0"/"1", "0"/"1"） |
 
 ---
 
