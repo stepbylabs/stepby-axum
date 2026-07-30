@@ -129,7 +129,7 @@ pub async fn export(
         ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysRoleModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
     ];
 
-    export_to_excel("角色数据", "role", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.role"), "role", &columns, &rows).await
 }
 
 /// GET /system/role/{id}

@@ -1268,6 +1268,22 @@ tests/
 | 3 处 handler 硬编码 "操作成功" | sys_user_handler 3 处返回硬编码中文字符串 | 替换为 `tr!("msg.success.default")` i18n key |
 | delete_upload_file 函数缺失 | 无通用文件删除工具函数 | 新增 spawn_blocking 封装，NotFound 视为成功，re-export 到 crate::common |
 
+#### v0.3.3 i18n 标准化与性能优化（2026-07-30，第九~十轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 11 个 export handler Excel 状态值输出原始代码 | sys_job/sys_job_log/sys_oper_log 等导出列直接输出 "0"/"1" 状态码而非翻译文本 | 统一使用 `crate::tr!("common.status.*")` / `crate::tr!("common.job.*")` 翻译 |
+| 9 个 export handler Sheet 名硬编码中文 | "用户数据"/"角色数据"/"字典类型" 等直接硬编码 | 新增 `excel.sheet.*` i18n keys，统一使用 `tr!("excel.sheet.*")` |
+| sys_config_handler 导出 isBuiltIn 硬编码"是"/"否" | match 分支直接返回中文 | 替换为 `tr!("common.yes")` / `tr!("common.no")` |
+| sys_oper_log_handler task_name 使用 i18n::pick | 不符合 tr! 宏规范 | 新增 `msg.export.oper_log_task` key，使用 `tr!` 宏 |
+| sys_dept_service update_children N+1 查询 | 先 SELECT 后循环 UPDATE，N 个后代 = N+1 次 DB 交互 | 改为单条 `UPDATE ... REPLACE()` SQL，性能 O(N) → O(1) |
+| sys_job_service add_job 调度器失败产生孤儿记录 | scheduler.add_job 失败直接返回错误，DB 已插入但未回滚 | 改为容错策略：失败仅 warn，DB 为 source of truth，重启后恢复 |
+| sys_backup_service 3 处子进程泄漏 | 备份/恢复子进程未设置 kill_on_drop，超时或错误路径下进程成为孤儿 | 所有 Command 添加 `.kill_on_drop(true)`，确保 drop 时终止子进程 |
+| editTable.vue 提交按钮无 loading | 用户可重复点击导致重复提交 | 新增 submitLoading ref，绑定 :loading，.finally() 重置 |
+| menu/dept handleSaveSort 按钮无 loading | 排序保存期间可重复点击 | useTreeTableSort 新增 sortLoading ref 并返回，组件绑定 :loading |
+| tab.ts refreshPage/closePage 缺少 .catch() | Promise rejection 未捕获 | 添加 .catch() 错误日志兜底 |
+| sys_dept_service 未使用的 FromQueryResult 导入 | 重构后遗留 | 移除未使用导入消除 warning |
+
 ---
 
 ## 附录：常用测试命令速查

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use base64::Engine;
+use garde::Validate;
 use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Secret, TOTP};
 use utoipa::ToSchema;
@@ -34,21 +35,25 @@ pub struct TotpSetupResponse {
     pub qr_code: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TotpVerifyRequest {
     /// 用户输入的 6 位 TOTP 验证码
+    #[garde(length(min = 6, max = 6))]
     pub code: String,
     /// setup 阶段返回的 secret
+    #[garde(length(min = 1, max = 128))]
     pub secret: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TotpDisableRequest {
     /// 用户密码（确认身份）
+    #[garde(length(min = 1, max = 64))]
     pub password: String,
     /// 6 位 TOTP 验证码（防止会话被劫后关闭 TOTP）
+    #[garde(length(min = 6, max = 6))]
     pub code: String,
 }
 
@@ -123,6 +128,7 @@ pub async fn verify(
     operator: Operator,
     Json(req): Json<TotpVerifyRequest>,
 ) -> Result<AjaxResult<()>, AppError> {
+    crate::common::i18n::validate(&req)?;
     let user_id: i64 = operator.user_id().parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
@@ -207,6 +213,7 @@ pub async fn disable(
     operator: Operator,
     Json(req): Json<TotpDisableRequest>,
 ) -> Result<AjaxResult<()>, AppError> {
+    crate::common::i18n::validate(&req)?;
     let user_id: i64 = operator.user_id().parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 

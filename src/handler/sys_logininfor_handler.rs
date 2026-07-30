@@ -158,7 +158,7 @@ pub async fn export(
         ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysLogininforModel| CellValue::Text({
                 r.status
                     .as_deref()
-                    .map(|s| if s == "0" { "成功".to_string() } else { "失败".to_string() })
+                    .map(|s| if s == "0" { crate::tr!("common.status.success") } else { crate::tr!("common.status.failed") })
                     .unwrap_or_default()
                     .into()
             }) },
@@ -171,7 +171,7 @@ pub async fn export(
             }) },
     ];
 
-    export_to_excel("登录日志", "logininfor", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.logininfor"), "logininfor", &columns, &rows).await
 }
 
 /// GET /monitor/logininfor/stats?days=7

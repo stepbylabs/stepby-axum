@@ -206,8 +206,8 @@ pub async fn export(
         ExcelColumn { key: "configKey", header: ("参数键名", "Config Key"), getter: |r: &SysConfigModel| CellValue::Text(r.config_key.clone().into()) },
         ExcelColumn { key: "configValue", header: ("参数键值", "Config Value"), getter: |r: &SysConfigModel| CellValue::Text(r.config_value.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "isBuiltIn", header: ("系统内置", "Built-in"), getter: |r: &SysConfigModel| CellValue::Text(match r.config_type.as_deref() {
-                Some("Y") => "是".to_string(),
-                Some("N") => "否".to_string(),
+                Some("Y") => crate::tr!("common.yes"),
+                Some("N") => crate::tr!("common.no"),
                 _ => String::new(),
             }.into()) },
         ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysConfigModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
@@ -219,5 +219,5 @@ pub async fn export(
             }) },
     ];
 
-    export_to_excel("参数配置", "config", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.config"), "config", &columns, &rows).await
 }

@@ -110,7 +110,7 @@ pub async fn export(
         ExcelColumn { key: "jobGroup", header: ("任务组名", "Job Group"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_group.clone().into()) },
         ExcelColumn { key: "invokeTarget", header: ("调用目标字符串", "Invoke Target"), getter: |r: &SysJobLogModel| CellValue::Text(r.invoke_target.clone().into()) },
         ExcelColumn { key: "jobMessage", header: ("日志信息", "Message"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_message.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "execStatus", header: ("执行状态", "Status"), getter: |r: &SysJobLogModel| CellValue::Text(r.status.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "execStatus", header: ("执行状态", "Status"), getter: |r: &SysJobLogModel| CellValue::Text(if r.status.as_deref() == Some("0") { crate::tr!("common.status.success") } else { crate::tr!("common.status.failed") }.into()) },
         ExcelColumn { key: "exceptionInfo", header: ("异常信息", "Exception"), getter: |r: &SysJobLogModel| CellValue::Text(r.exception_info.clone().unwrap_or_default().into()) },
         ExcelColumn {
             key: "execTime",
@@ -124,5 +124,5 @@ pub async fn export(
         },
     ];
 
-    export_to_excel("调度日志", "job_log", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.job_log"), "job_log", &columns, &rows).await
 }

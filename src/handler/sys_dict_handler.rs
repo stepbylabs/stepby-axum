@@ -116,7 +116,7 @@ pub async fn dict_type_export(
         ExcelColumn { key: "dictId", header: ("字典主键", "Dict ID"), getter: |r: &SysDictTypeModel| CellValue::Text(r.dict_id.to_string().into()) },
         ExcelColumn { key: "dictName", header: ("字典名称", "Dict Name"), getter: |r: &SysDictTypeModel| CellValue::Text(r.dict_name.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "dictType", header: ("字典类型", "Dict Type"), getter: |r: &SysDictTypeModel| CellValue::Text(r.dict_type.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysDictTypeModel| CellValue::Text(if r.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysDictTypeModel| CellValue::Text(if r.status.as_deref() == Some("0") { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
         ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysDictTypeModel| CellValue::Text({
                 r.create_time
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -126,7 +126,7 @@ pub async fn dict_type_export(
         ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysDictTypeModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
     ];
 
-    export_to_excel("字典类型", "dict_type", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.dict_type"), "dict_type", &columns, &rows).await
 }
 
 /// GET /system/dict/type/{dictId}
@@ -386,7 +386,7 @@ pub async fn dict_data_export(
         ExcelColumn { key: "dictLabel", header: ("字典标签", "Dict Label"), getter: |r: &SysDictDataModel| CellValue::Text(r.dict_label.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "dictValue", header: ("字典键值", "Dict Value"), getter: |r: &SysDictDataModel| CellValue::Text(r.dict_value.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "dictSort", header: ("字典排序", "Sort"), getter: |r: &SysDictDataModel| CellValue::Text(r.dict_sort.unwrap_or(0).to_string().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysDictDataModel| CellValue::Text(if r.status.as_deref() == Some("0") { "正常".to_string() } else { "停用".to_string() }.into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysDictDataModel| CellValue::Text(if r.status.as_deref() == Some("0") { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
         ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysDictDataModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysDictDataModel| CellValue::Text({
                 r.create_time

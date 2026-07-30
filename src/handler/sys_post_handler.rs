@@ -196,5 +196,5 @@ pub async fn export(
         ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysPostModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
     ];
 
-    export_to_excel("岗位数据", "post", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.post"), "post", &columns, &rows).await
 }
