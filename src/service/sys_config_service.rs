@@ -361,8 +361,17 @@ impl SysConfigService {
         // H-4：删除前先查询 config_key（单次批量查询，避免 N+1），用于失效缓存
         let models = self.config_repo.find_by_ids(config_ids.clone()).await?;
         self.config_repo.delete_by_ids(config_ids).await?;
-        for m in models {
-            self.invalidate_config_cache(&m.config_key).await;
+        // P2 优化: 批量失效 Redis 缓存使用 pipeline，避免循环单条 DEL 的 N 次 RTT
+        // 与 refresh_cache() 方法保持一致
+        if !models.is_empty() {
+            let mut conn = self.redis.clone();
+            let mut pipe = redis::pipe();
+            for m in &models {
+                pipe.cmd("DEL").arg(format!("{}{}", CONFIG_CACHE_PREFIX, m.config_key));
+            }
+            if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
+                tracing::warn!("批量失效配置缓存失败: {}", e);
+            }
         }
         Ok(())
     }

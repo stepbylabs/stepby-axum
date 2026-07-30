@@ -901,7 +901,7 @@ node tests/main.mjs --headless
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
 > 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.2.7，2026-07-30 验证）
-> 架构：薄壳入口 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
+> 架构：入口脚本 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
 
 #### 运行方式
 
@@ -936,7 +936,7 @@ node tests/deep-e2e.mjs
 |------|------|------|
 | `--headless` | 无头模式（CI 环境） | `--headless` |
 | `--feature=N` | 仅运行指定模块 | `--feature=9` |
-| `--module N` | 同 `--feature`（空格分隔） | `--module 9` |
+| `--module N` | 空格分隔指定模块ID | `--module 9` |
 | `--range=N-M` | 模块范围过滤 | `--range=67-75` |
 | `--domain=a,b` | 按业务域过滤 | `--domain=system,monitor` |
 | `--except=N,M` | 排除指定模块 | `--except=13,29` |
@@ -946,7 +946,7 @@ node tests/deep-e2e.mjs
 | 域 | 说明 | 模块 |
 |----|------|------|
 | `system` | 系统管理 | M1, M12, M14, M23, M43, M51, M55-M58, M62, M66, M70 |
-| `monitor` | 系统监控 | M2, M44-M48, M53, M71 |
+| `monitor` | 系统监控 | M2, M44-M45, M47-M48, M53, M71 |
 | `tool` | 系统工具 | M3, M49-M50, M59-M60, M65, M72-M73 |
 | `auth` | 认证授权 | M9, M13, M29, M39, M41, M67 |
 | `profile` | 个人中心 | M4, M6, M42, M46, M61, M64, M68-M69 |
@@ -959,12 +959,12 @@ node tests/deep-e2e.mjs
 
 ```
 tests/
-├── deep-e2e.mjs              # 薄壳入口：定义 testModule1-75 + 调用 runMain()
+├── deep-e2e.mjs              # 入口脚本：定义 testModule1-75 + 调用 runMain()
 ├── e2e/
 │   ├── lib/                  # 共享库（第一阶段）
-│   │   ├── config.mjs        # CONFIG + CLI 参数解析 + shouldRunModule
-│   │   ├── result.mjs        # results/record/writeReport/getExitCode
-│   │   └── index.mjs         # 统一 re-export
+│   │   ├── config.mjs        # CONFIG + CLI 参数解析 + shouldRunModule（已抽取，待第三阶段集成启用）
+│   │   ├── result.mjs        # results/record/writeReport/getExitCode（已抽取，待第三阶段集成启用）
+│   │   └── index.mjs         # 统一 re-export（已抽取，待第三阶段集成启用）
 │   └── run/                  # 注册表与运行器（第二阶段）
 │       ├── registry.mjs      # 75 模块元数据 + bindModules() + filterByDomain()
 │       └── runner.mjs        # 主入口逻辑（浏览器→登录→执行→报告）

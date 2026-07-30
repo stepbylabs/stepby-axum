@@ -14,8 +14,9 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 
 use chrono::NaiveDateTime;
-use sea_orm::{DatabaseConnection, ConnectionTrait, Set};
+use sea_orm::{DatabaseConnection, ConnectionTrait, Set, TransactionTrait};
 use sea_orm::sea_query::{Alias, ColumnDef, Index, Table};
+use futures::future::FutureExt;
 use serde::{Deserialize, Serialize};
 use tera::{Kwargs, State, Tera, TeraResult, Value};
 use utoipa::{IntoParams, ToSchema};
@@ -1030,7 +1031,24 @@ impl GenTableService {
                 };
                 column_ams.push(column_am);
             }
-            self.repo.update_columns(dto.table_id, column_ams).await?;
+            // P1 修复: 先删后插需在事务中执行，避免删除成功但插入失败时列记录全部丢失
+            let repo = self.repo.clone();
+            let table_id = dto.table_id;
+            self.repo.base().db().transaction::<_, (), ServiceError>(|txn| {
+                let column_ams_inner = column_ams.clone();
+                async move {
+                    repo.update_columns_conn(txn, table_id, column_ams_inner).await?;
+                    Ok(())
+                }.boxed()
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!("编辑表事务连接错误: {}", db_err);
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
         }
 
         Ok(model)
@@ -1052,10 +1070,26 @@ impl GenTableService {
                 }
             }
         }
-        // 级联清理列
-        self.repo.delete_columns_by_table_ids(table_ids.clone()).await?;
-        // 删除表
-        self.repo.delete_by_ids(table_ids).await?;
+        // P1 修复: 级联删除需在事务中执行，避免列删除成功但表删除失败时产生孤儿数据
+        let repo = self.repo.clone();
+        self.repo.base().db().transaction::<_, (), ServiceError>(|txn| {
+            let table_ids_inner = table_ids.clone();
+            async move {
+                // 级联清理列
+                repo.delete_columns_by_table_ids_conn(txn, table_ids_inner.clone()).await?;
+                // 删除表
+                repo.delete_by_ids_conn(txn, table_ids_inner).await?;
+                Ok(())
+            }.boxed()
+        })
+        .await
+        .map_err(|e| match e {
+            sea_orm::TransactionError::Transaction(se) => se,
+            sea_orm::TransactionError::Connection(db_err) => {
+                tracing::error!("代码生成表删除事务连接错误: {}", db_err);
+                ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+            }
+        })?;
         Ok(())
     }
 
@@ -1119,7 +1153,24 @@ impl GenTableService {
             };
             column_ams.push(column_am);
         }
-        self.repo.update_columns(table.table_id, column_ams).await?;
+        // P1 修复: 先删后插需在事务中执行，避免删除成功但插入失败时列记录全部丢失
+        let repo = self.repo.clone();
+        let table_id = table.table_id;
+        self.repo.base().db().transaction::<_, (), ServiceError>(|txn| {
+            let column_ams_inner = column_ams.clone();
+            async move {
+                repo.update_columns_conn(txn, table_id, column_ams_inner).await?;
+                Ok(())
+            }.boxed()
+        })
+        .await
+        .map_err(|e| match e {
+            sea_orm::TransactionError::Transaction(se) => se,
+            sea_orm::TransactionError::Connection(db_err) => {
+                tracing::error!("同步数据库事务连接错误: {}", db_err);
+                ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+            }
+        })?;
         Ok(())
     }
 

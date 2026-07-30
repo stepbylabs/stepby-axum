@@ -412,6 +412,72 @@ impl GenTableRepository {
         self.delete_columns_by_table_id(table_id).await?;
         self.insert_columns(columns).await
     }
+
+    // ---- 事务版本方法（P1 修复：gen_table_service 删除/同步需事务保证一致性） ----
+
+    /// 批量新增列（事务版本）
+    pub async fn insert_columns_conn(
+        &self,
+        txn: &DatabaseTransaction,
+        columns: Vec<GenTableColumnActiveModel>,
+    ) -> Result<(), DbErr> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+        GenTableColumnEntity::insert_many(columns)
+            .exec(txn)
+            .await?;
+        Ok(())
+    }
+
+    /// 按 table_id 删除所有列（事务版本）
+    pub async fn delete_columns_by_table_id_conn(
+        &self,
+        txn: &DatabaseTransaction,
+        table_id: i64,
+    ) -> Result<DeleteResult, DbErr> {
+        GenTableColumnEntity::delete_many()
+            .filter(GenColumn::TableId.eq(table_id))
+            .exec(txn)
+            .await
+    }
+
+    /// 按 table_id 列表删除所有列（事务版本）
+    pub async fn delete_columns_by_table_ids_conn(
+        &self,
+        txn: &DatabaseTransaction,
+        table_ids: Vec<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        GenTableColumnEntity::delete_many()
+            .filter(GenColumn::TableId.is_in(table_ids))
+            .exec(txn)
+            .await
+    }
+
+    /// 按 table_id 批量删除表记录（事务版本）
+    pub async fn delete_by_ids_conn(
+        &self,
+        txn: &DatabaseTransaction,
+        table_ids: Vec<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        GenTable::delete_many()
+            .filter(GenTableColumn::TableId.is_in(table_ids))
+            .exec(txn)
+            .await
+    }
+
+    /// 按 table_id 更新列（先删后插）— 事务版本
+    ///
+    /// P1 修复: 将先删后插包裹在事务中，避免删除成功但插入失败时列记录全部丢失
+    pub async fn update_columns_conn(
+        &self,
+        txn: &DatabaseTransaction,
+        table_id: i64,
+        columns: Vec<GenTableColumnActiveModel>,
+    ) -> Result<(), DbErr> {
+        self.delete_columns_by_table_id_conn(txn, table_id).await?;
+        self.insert_columns_conn(txn, columns).await
+    }
 }
 
 /// 校验字符串是否为合法 SQL 标识符（仅字母、数字、下划线，且不以数字开头）
