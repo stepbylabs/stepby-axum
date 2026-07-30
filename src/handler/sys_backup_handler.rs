@@ -110,7 +110,58 @@ pub async fn restore(
         .backup_service
         .restore_backup(backup_id, operator.username())
         .await?;
+
+    // 恢复成功后清理 Redis 业务缓存，避免缓存与恢复后的数据库数据不一致
+    // 清理范围：字典缓存(dict:*)、系统配置缓存(config:*)、限流配置缓存(rate_limit:config:*)
+    // 不清理：blacklist/online/pwd_changed/captcha 等会话/安全相关 key（清理会导致用户登出）
+    clear_business_caches(&state).await;
+
+    // P0-H2 修复：同时清理限流服务的进程内 local_cache（10s TTL）
+    // clear_business_caches 只清理 Redis 中的 rate_limit:config:*，但 SysRateLimitService
+    // 还有进程内 local_cache，恢复后 ≤10s 内仍使用旧配置，多实例部署时影响面放大。
+    state.rate_limit_service.invalidate_all_cache().await;
+
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.restore")))
+}
+
+/// 清理业务相关 Redis 缓存（恢复备份后调用）
+async fn clear_business_caches(state: &Arc<AppState>) {
+    let patterns = ["dict:*", "config:*", "rate_limit:config:*"];
+    let mut redis = state.redis.clone();
+    for pattern in &patterns {
+        // 使用 SCAN 迭代匹配的 key 并批量删除（比 KEYS 更安全，不阻塞 Redis）
+        let mut cursor: u64 = 0;
+        loop {
+            let result: (u64, Vec<String>) = match redis::cmd("SCAN")
+                .arg(&cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100i64)
+                .query_async(&mut redis)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, pattern = %pattern, "缓存清理 SCAN 失败，跳过");
+                    break;
+                }
+            };
+            let (next_cursor, keys) = result;
+            if !keys.is_empty() {
+                let mut pipe = redis::pipe();
+                for key in &keys {
+                    pipe.cmd("DEL").arg(key);
+                }
+                let _: redis::RedisResult<()> = pipe.query_async(&mut redis).await;
+                tracing::info!(pattern = %pattern, count = keys.len(), "已清理缓存 key");
+            }
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+    }
 }
 
 /// GET /system/backup/download/{backupId}

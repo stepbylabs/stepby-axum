@@ -285,11 +285,13 @@ impl JobScheduler {
                     }
 
                     let dto = crate::service::sys_notice_service::NoticeAddDto {
-                        notice_title: format!("登录异常告警 - IP {}", ip),
+                        notice_title: crate::tr!("notice.login_anomaly.title", ip = ip),
                         notice_type: "1".to_string(),
-                        notice_content: Some(format!(
-                            "最近 {} 分钟内 IP {} 失败登录 {} 次，疑似撞库攻击，请及时关注。",
-                            WINDOW_MINUTES, ip, count
+                        notice_content: Some(crate::tr!(
+                            "notice.login_anomaly.content",
+                            minutes = WINDOW_MINUTES,
+                            ip = ip,
+                            count = count
                         )),
                         status: Some("0".to_string()),
                         remark: Some(format!("auto-detected;ip={};count={}", ip, count)),

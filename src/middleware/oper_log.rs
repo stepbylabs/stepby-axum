@@ -97,7 +97,13 @@ pub async fn oper_log_middleware(
     let headers: HeaderMap = req.headers().clone();
     let oper_ip = extract_client_ip(&headers, peer_ip, &state.config.server.trusted_proxies);
 
-    let oper_url = req.uri().path().to_string();
+    // P0-M2 修复：记录 path + query string，确保角色授权等通过 query 传参的操作可审计
+    // 原 `req.uri().path()` 丢弃 query，导致 cancelAll/selectAll 等接口的 oper_param 为空
+    let oper_url = req
+        .uri()
+        .path_and_query()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
     let title = infer_module_title(&matched_path);
     let business_type = infer_business_type(method.clone(), &matched_path);
     let start = Instant::now();
@@ -363,6 +369,10 @@ fn extract_record_id(oper_url: &str, body: Option<&[u8]>) -> Option<i64> {
         "configId"
     } else if oper_url.starts_with("/system/notice") {
         "noticeId"
+    } else if oper_url.starts_with("/system/dict/type") {
+        "dictId"
+    } else if oper_url.starts_with("/system/dict/data") {
+        "dictCode"
     } else if oper_url.starts_with("/system/rateLimit") {
         "id"
     } else {
@@ -451,6 +461,27 @@ async fn capture_before_snapshot(
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())
+    } else if oper_url.starts_with("/system/dict/type") {
+        state
+            .dict_service
+            .get_dict_type_by_id(id)
+            .await
+            .ok()
+            .map(|m| serde_json::to_value(&m).unwrap_or_default())
+    } else if oper_url.starts_with("/system/dict/data") {
+        state
+            .dict_service
+            .get_dict_data_by_id(id)
+            .await
+            .ok()
+            .map(|m| serde_json::to_value(&m).unwrap_or_default())
+    } else if oper_url.starts_with("/monitor/job") {
+        state
+            .job_service
+            .get_job_by_id(id)
+            .await
+            .ok()
+            .map(|vo| serde_json::to_value(&vo).unwrap_or_default())
     } else {
         None
     };
@@ -539,7 +570,9 @@ fn sanitize_param(s: String) -> String {
 ///
 /// T-11：返回稳定 i18n key（`module.*`），新数据存 key；旧中文数据由展示层
 /// `common::i18n::module_title` 回退原样显示。
-fn infer_module_title(path: &str) -> String {
+///
+/// M-1：改为 pub(crate) 以便 permission_middleware 在权限拒绝时复用同一映射。
+pub(crate) fn infer_module_title(path: &str) -> String {
     // profile 路由需在 /system/user 之前匹配，避免被误分类为 module.user
     if path.starts_with("/system/user/profile") {
         "module.profile".to_string()
@@ -559,6 +592,12 @@ fn infer_module_title(path: &str) -> String {
         "module.config".to_string()
     } else if path.starts_with("/system/notice") {
         "module.notice".to_string()
+    } else if path.starts_with("/system/backup") {
+        "module.backup".to_string()
+    } else if path.starts_with("/system/task") {
+        "module.task".to_string()
+    } else if path.starts_with("/system/rateLimit") {
+        "module.rateLimit".to_string()
     } else if path.starts_with("/monitor/job") {
         "module.job".to_string()
     } else if path.starts_with("/monitor/operlog") {
@@ -567,6 +606,12 @@ fn infer_module_title(path: &str) -> String {
         "module.logininfor".to_string()
     } else if path.starts_with("/monitor/online") {
         "module.online".to_string()
+    } else if path.starts_with("/monitor/cache") {
+        "module.cache".to_string()
+    } else if path.starts_with("/monitor/server") {
+        "module.server".to_string()
+    } else if path.starts_with("/monitor/audit-dashboard") {
+        "module.auditDashboard".to_string()
     } else if path.starts_with("/tool/gen") {
         "module.gen".to_string()
     } else if path.starts_with("/common/") {

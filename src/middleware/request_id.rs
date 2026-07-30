@@ -17,11 +17,14 @@ pub struct RequestId(pub String);
 /// 便于通过日志关联同一请求的所有处理步骤。
 pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     // 优先复用入站 X-Request-Id（用于多服务链路追踪）
+    // 校验长度（≤128）和字符集（字母/数字/连字符），防止日志注入和响应头注入
     let request_id = req
         .headers()
         .get("X-Request-Id")
         .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty()
+            && s.len() <= 128
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     req.extensions_mut().insert(RequestId(request_id.clone()));

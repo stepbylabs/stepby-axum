@@ -99,6 +99,7 @@ error:
     parent_self_forbidden: 上级部门不能选择自己
     has_children: 存在子部门，不允许删除
     assigned_to_role: 部门已分配给角色，不允许删除
+    has_users: 部门下存在用户，不允许删除
     ids_empty: deptIds/orderNums 解析后为空
     level_too_deep: 部门层级过深，防环校验失败
     id_not_found: "部门 ID={{id}} 不存在"
@@ -376,6 +377,7 @@ log:
     account_deleted: 账号已删除
     account_disabled: 账号已停用
     login_success: 登录成功
+    permission_denied: "权限拒绝：缺少所需权限 {{perm}}"
 
 # 通用状态文案（Excel 导出、状态展示等场景使用）
 common:
@@ -415,6 +417,8 @@ notice:
   login_anomaly:
     title: "登录异常告警 - IP {{ip}}"
     content: "最近 {{minutes}} 分钟内 IP {{ip}} 失败登录 {{count}} 次，疑似撞库攻击，请及时关注。"
+  email:
+    footer: "此邮件由 yebot 系统自动发送，请勿直接回复。"
 
 # WebSocket 系统消息（连接成功提示等）
 websocket:

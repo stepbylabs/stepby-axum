@@ -316,10 +316,11 @@ impl SysNoticeService {
                 <h2 style=\"color: #409EFF; border-bottom: 2px solid #409EFF; padding-bottom: 10px;\">{title}</h2>
                 <div style=\"margin: 20px 0;\">{content}</div>
                 <hr style=\"border: none; border-top: 1px solid #ddd; margin: 20px 0;\"/>
-                <p style=\"color: #999; font-size: 12px;\">此邮件由 yebot 系统自动发送，请勿直接回复。</p>
+                <p style=\"color: #999; font-size: 12px;\">{footer}</p>
             </div>",
             title = html_escape(title),
-            content = html_escape(content.unwrap_or(""))
+            content = html_escape(content.unwrap_or("")),
+            footer = crate::tr!("notice.email.footer")
         );
 
         // P3：邮件主题前缀按请求 locale 双语（notice 发送在请求作用域内）

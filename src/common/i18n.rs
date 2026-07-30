@@ -167,6 +167,12 @@ pub const MODULE_TITLES: &[(&str, &str, &str)] = &[
     ("module.gen", "代码生成", "Code Generation"),
     ("module.common", "通用接口", "Common APIs"),
     ("module.auth", "认证管理", "Authentication"),
+    ("module.backup", "数据备份", "Data Backup"),
+    ("module.task", "任务管理", "Task Management"),
+    ("module.rateLimit", "限流配置", "Rate Limit"),
+    ("module.cache", "缓存监控", "Cache Monitor"),
+    ("module.server", "服务器监控", "Server Monitor"),
+    ("module.auditDashboard", "审计仪表盘", "Audit Dashboard"),
     ("module.other", "其他", "Other"),
 ];
 

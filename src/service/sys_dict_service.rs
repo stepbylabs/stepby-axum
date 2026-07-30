@@ -499,7 +499,16 @@ impl SysDictService {
                 async move {
                     for (dict_id, dict_type) in &dict_types {
                         // 软删除字典类型并重命名 dict_type（REGRESS-003）
-                        let renamed = format!("{}_deleted_{}", dict_type, dict_id);
+                        // P0-H1 修复：dict_type 列为 VARCHAR(100)，重命名后缀可能超长导致 UPDATE 失败
+                        // 截断原始 dict_type 到安全长度，确保 {truncated}_deleted_{dict_id} ≤ 100
+                        let suffix = format!("_deleted_{}", dict_id);
+                        let max_original_len = 100usize.saturating_sub(suffix.len());
+                        let truncated_original = if dict_type.len() > max_original_len {
+                            &dict_type[..max_original_len]
+                        } else {
+                            dict_type.as_str()
+                        };
+                        let renamed = format!("{}{}", truncated_original, suffix);
                         dict_type_repo
                             .soft_delete_with_rename_conn(txn, *dict_id, renamed)
                             .await?;
@@ -704,7 +713,7 @@ impl SysDictService {
             css_class: Set(dto.css_class),
             list_class: Set(dto.list_class),
             is_default: Set(dto.is_default.or(Some("N".to_string()))),
-            status: Set(dto.status),
+            status: Set(dto.status.or(Some("0".to_string()))),
             create_by: Set(Some(operator.to_string())),
             create_time: Set(Some(now)),
             update_by: Set(Some(operator.to_string())),
@@ -731,6 +740,14 @@ impl SysDictService {
         let existing = self.get_dict_data_by_id(dto.dict_code).await?;
         // 记录旧 dict_type（dict_type 可能变更，需同时失效新旧缓存）
         let old_dict_type = existing.dict_type.clone().unwrap_or_default();
+
+        // 校验新 dict_type 在 sys_dict_type 中存在（与 add_dict_data 一致）
+        if dto.dict_type != old_dict_type {
+            let dict_type_exists = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
+            if dict_type_exists.is_none() {
+                return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_not_found")));
+            }
+        }
 
         let now = chrono::Local::now().naive_local();
         let mut am: SysDictDataActiveModel = existing.into();

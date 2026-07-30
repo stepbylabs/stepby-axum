@@ -9,19 +9,33 @@
 //! - 超管短路：权限列表含 `*:*:*` 时放行
 //! - 权限匹配：用户权限列表包含目标权限标识时放行，否则 403
 //!
+//! M-1：权限拒绝事件写入 sys_oper_log 审计日志（best-effort，不阻断 403 响应）。
+//! 原方案 permission_middleware 拒绝时仅 tracing::warn，oper_log_middleware 因挂在
+//! permission 之后而无法记录，导致权限越权尝试无审计痕迹。现拒绝时直接 spawn 写入。
+//!
 //! 实现方式：
 //! - 使用 route_layer 挂载（路由匹配后执行，可访问 MatchedPath）
 //! - 权限映射集中在 get_required_perm 函数中维护
 
+use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::extract::{MatchedPath, Request, State};
+use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use futures::FutureExt;
 
 use crate::common::AppError;
 use crate::jwt::Claims;
+use crate::middleware::oper_log::infer_module_title;
+use crate::service::sys_oper_log_service::OperLogRecord;
 use crate::state::AppState;
+use crate::utils::ip::extract_client_ip;
+
+/// 审计日志异步写入的超时上限（与 oper_log_middleware 对齐，R6-RUST-13）
+const PERMISSION_AUDIT_LOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 权限校验中间件
 ///
@@ -96,8 +110,120 @@ pub async fn permission_middleware(
             required_perm,
             "权限拒绝：用户缺少所需权限"
         );
+
+        // M-1：权限拒绝写入审计日志（best-effort，不阻断 403 响应）
+        // 原 oper_log_middleware 挂在 permission 之后，拒绝时无法记录，导致越权尝试无审计痕迹。
+        // 现在 permission_middleware 内直接 spawn 写入 sys_oper_log。
+        spawn_permission_denied_audit(
+            &state,
+            &claims,
+            &method,
+            matched_path.as_deref().unwrap_or(""),
+            required_perm,
+            &req,
+        );
+
         Err(AppError::new(403, crate::tr!("error.auth.permission_denied")))
     }
+}
+
+/// 异步写入权限拒绝审计日志（best-effort，不阻断 403 响应）
+///
+/// 与 oper_log_middleware 写入路径对齐：
+/// - 使用 AssertUnwindSafe + catch_unwind 防 panic 击溃 worker
+/// - tokio::time::timeout 5s 保护，避免日志写入卡死导致 spawn 任务累积
+/// - 部门名称在 spawn 内查询（与 oper_log_middleware 一致）
+fn spawn_permission_denied_audit(
+    state: &Arc<AppState>,
+    claims: &Claims,
+    method: &axum::http::Method,
+    matched_path: &str,
+    required_perm: &str,
+    req: &Request,
+) {
+    // 提取客户端真实 IP（含可信代理白名单 + XFF 链校验）
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+        .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let headers = req.headers().clone();
+    let oper_ip = extract_client_ip(&headers, peer_ip, &state.config.server.trusted_proxies);
+    let oper_location = state.ip_locator.locate(&oper_ip);
+
+    // 构造审计日志记录（business_type=0 其他，status=1 失败）
+    let title = infer_module_title(matched_path);
+    let oper_url = req
+        .uri()
+        .path_and_query()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let error_msg = crate::tr!("log.auth.permission_denied", perm = required_perm);
+
+    let record = OperLogRecord {
+        title,
+        business_type: 0, // 0=其他（权限拒绝非业务写操作）
+        method: matched_path.to_string(),
+        request_method: method.to_string(),
+        operator_type: 1, // 1=后台用户
+        oper_name: claims.username.clone(),
+        dept_name: String::new(), // spawn 内查询后填入
+        oper_url,
+        oper_ip,
+        oper_location,
+        oper_param: String::new(), // permission_middleware 不读请求体
+        oper_before: String::new(),
+        json_result: String::new(),
+        status: "1".to_string(), // 1=失败
+        error_msg,
+        cost_time: 0, // 权限拒绝未执行业务，耗时无意义
+    };
+
+    let oper_log_service = state.oper_log_service.clone();
+    let dept_service = state.dept_service.clone();
+    let user_id_str = claims.sub.clone();
+    tokio::spawn(async move {
+        let result = AssertUnwindSafe(async {
+            if let Err(_elapsed) = tokio::time::timeout(PERMISSION_AUDIT_LOG_TIMEOUT, async {
+                // 查询操作人部门名称（通过 user_id → dept_id → dept_name）
+                let dept_name = if !user_id_str.is_empty() {
+                    match user_id_str.parse::<i64>() {
+                        Ok(uid) => match dept_service.get_dept_name_by_user_id(uid).await {
+                            Ok(name) => name,
+                            Err(e) => {
+                                tracing::warn!(
+                                    user_id = uid,
+                                    error = %e,
+                                    "查询操作人部门名称失败（权限拒绝审计日志）"
+                                );
+                                String::new()
+                            }
+                        },
+                        Err(_) => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+
+                let mut record = record;
+                record.dept_name = dept_name;
+                oper_log_service.record_oper_log(record).await;
+            })
+            .await
+            {
+                tracing::warn!(
+                    timeout_secs = PERMISSION_AUDIT_LOG_TIMEOUT.as_secs(),
+                    "权限拒绝审计日志写入超时，已放弃本次记录"
+                );
+            }
+        })
+        .catch_unwind()
+        .await;
+
+        if let Err(panic_err) = result {
+            tracing::error!("权限拒绝审计日志 spawn 内发生 panic: {:?}", panic_err);
+        }
+    });
 }
 
 /// 路由权限映射表
@@ -111,6 +237,8 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         // ===== 用户管理 =====
         ("GET", "/system/user/list") => Some("system:user:list"),
         ("GET", "/system/user/{id}") => Some("system:user:query"),
+        ("GET", "/system/user/") => Some("system:user:query"),
+        ("GET", "/system/user/authRole/{userId}") => Some("system:user:query"),
         ("POST", "/system/user") => Some("system:user:add"),
         ("PUT", "/system/user") => Some("system:user:edit"),
         ("PUT", "/system/user/changeStatus") => Some("system:user:edit"),

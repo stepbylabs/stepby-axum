@@ -50,13 +50,16 @@ pub async fn auth_middleware(
         .map(|r| r.0.clone())
         .unwrap_or_default();
 
-    // 4. Redis 黑名单校验（登出的 token 加入黑名单）
+    // 4+5. Redis 黑名单 + 改密校验（合并为单次 Pipeline，减少 RTT）
     //    fail-closed 策略：Redis 异常时拒绝请求，避免已登出 token 继续访问
-    //    使用 token 的 SHA-256 哈希作为 key，节省 Redis 内存
+    //    使用 token 的 SHA-256 哈希作为 blacklist key，节省 Redis 内存
     let blacklist_key = format!("blacklist:{}", crate::utils::crypto::token_hash(token));
+    let pwd_changed_key = format!("pwd_changed:{}", claims.sub);
     let mut redis = state.redis.clone();
-    let is_blacklisted: Option<String> = redis::cmd("GET")
-        .arg(&blacklist_key)
+    // Pipeline：一次 RTT 同时查询 blacklist 和 pwd_changed
+    let (is_blacklisted, pwd_changed): (Option<String>, Option<i64>) = redis::pipe()
+        .cmd("GET").arg(&blacklist_key)
+        .cmd("GET").arg(&pwd_changed_key)
         .query_async(&mut redis)
         .await
         .map_err(|e| {
@@ -64,7 +67,7 @@ pub async fn auth_middleware(
                 request_id = %request_id,
                 user_id = %claims.sub,
                 error = %e,
-                "Redis 黑名单查询失败（fail-closed 拒绝请求）"
+                "Redis 黑名单/pwd_changed 查询失败（fail-closed 拒绝请求）"
             );
             AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
@@ -72,23 +75,7 @@ pub async fn auth_middleware(
         return Err(AppError::unauthorized(&crate::tr!("error.auth.token_revoked")));
     }
 
-    // 5. 改密后旧 token 失效校验（P0-R81-007）
-    //    若用户在 token 签发后修改过密码，Redis 中会有 pwd_changed:{user_id} = 改密时间戳
-    //    若该时间戳 > token.iat，拒绝访问（fail-closed：Redis 异常时拒绝请求）
-    let pwd_changed_key = format!("pwd_changed:{}", claims.sub);
-    let pwd_changed: Option<i64> = redis::cmd("GET")
-        .arg(&pwd_changed_key)
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                request_id = %request_id,
-                user_id = %claims.sub,
-                error = %e,
-                "Redis pwd_changed 查询失败（fail-closed 拒绝请求）"
-            );
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    // 改密后旧 token 失效校验（P0-R81-007）
     if let Some(changed_at) = pwd_changed
         && changed_at > i64::try_from(claims.iat).unwrap_or(0)
     {

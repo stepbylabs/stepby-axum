@@ -614,6 +614,12 @@ impl GenTableService {
             )));
         }
 
+        // 2.1 校验表名和所有列名符合 Rust 标识符规范（防止生成无法编译的代码）
+        validate_identifier(table_name, "table_name")?;
+        for col in &columns {
+            validate_identifier(&col.column_name, "column_name")?;
+        }
+
         // 3. 读取表注释（仅需 1 条匹配）
         let db_tables = self.repo.find_db_tables(0, 1, Some(table_name), None).await?;
         let table_comment = db_tables
@@ -1670,7 +1676,6 @@ pub async fn edit(State(state): State<Arc<AppState>>, operator: Operator, Valida
 pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Result<AjaxResult<()>, AppError> {
     state.{{ table.tableName | camel_case }}_service.delete(id).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
-}
 }
 "#;
 
