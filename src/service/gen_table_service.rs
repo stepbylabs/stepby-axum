@@ -113,7 +113,7 @@ pub struct GenTableEditDto {
 }
 
 /// 修改代码生成列 DTO
-#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GenTableColumnEditDto {
     #[garde(skip)]
@@ -649,53 +649,86 @@ impl GenTableService {
             sub_table_fk_name: Set(None),
             ..Default::default()
         };
-        let table_model = self.repo.insert(table_am).await?;
+        // 5. 预构造列 ActiveModel 的闭包（table_id 待表插入后填充）
+        // P1 修复: 闭包以 move 捕获 owned 值（columns/operator_str/now），
+        // 避免事务 async 块捕获引用导致 'static 生命周期冲突
+        let operator_str = operator.to_string();
+        let build_column_ams = move |table_id: i64| -> Vec<GenTableColumnActiveModel> {
+            columns
+                .into_iter()
+                .enumerate()
+                .map(|(idx, col)| {
+                    let rust_type = column_type_to_rust_type(&col.column_type);
+                    let rust_field = column_name_to_rust_field(&col.column_name);
+                    let is_pk = if col.column_key == "PRI" { "1" } else { "0" };
+                    let is_increment = if col.extra.contains("auto_increment") { "1" } else { "0" };
+                    let is_required = if col.is_nullable == "NO" && is_pk == "0" { "1" } else { "0" };
+                    let html_type = infer_html_type(&col.column_type, &col.column_name);
 
-        // 5. 创建 gen_table_column 记录
-        let mut column_ams: Vec<GenTableColumnActiveModel> = Vec::new();
-        for (idx, col) in columns.iter().enumerate() {
-            let rust_type = column_type_to_rust_type(&col.column_type);
-            let rust_field = column_name_to_rust_field(&col.column_name);
-            let is_pk = if col.column_key == "PRI" { "1" } else { "0" };
-            let is_increment = if col.extra.contains("auto_increment") { "1" } else { "0" };
-            let is_required = if col.is_nullable == "NO" && is_pk == "0" { "1" } else { "0" };
-            let html_type = infer_html_type(&col.column_type, &col.column_name);
+                    // 默认：主键不参与插入/编辑/查询；其他字段都参与
+                    let (is_insert, is_edit, is_list, is_query) = if is_pk == "1" {
+                        ("0", "0", "0", "0")
+                    } else {
+                        ("1", "1", "1", "0")
+                    };
 
-            // 默认：主键不参与插入/编辑/查询；其他字段都参与
-            let (is_insert, is_edit, is_list, is_query) = if is_pk == "1" {
-                ("0", "0", "0", "0")
-            } else {
-                ("1", "1", "1", "0")
-            };
-
-            let column_am = GenTableColumnActiveModel {
-                table_id: Set(table_model.table_id),
-                column_name: Set(Some(col.column_name.clone())),
-                column_comment: Set(Some(col.column_comment.clone())),
-                column_type: Set(Some(col.column_type.clone())),
-                java_type: Set(Some(rust_type)),
-                java_field: Set(Some(rust_field)),
-                is_pk: Set(Some(is_pk.to_string())),
-                is_increment: Set(Some(is_increment.to_string())),
-                is_required: Set(Some(is_required.to_string())),
-                is_insert: Set(Some(is_insert.to_string())),
-                is_edit: Set(Some(is_edit.to_string())),
-                is_list: Set(Some(is_list.to_string())),
-                is_query: Set(Some(is_query.to_string())),
-                query_type: Set(Some("EQ".to_string())),
-                html_type: Set(Some(html_type)),
-                dict_type: Set(Some(String::new())),
-                // R5-TYPE-14：使用 try_from 替代 `as i32`，避免列数超过 i32::MAX 时溢出
-                sort: Set(Some(i32::try_from(idx).map(|n| n + 1).unwrap_or(i32::MAX))),
-                create_by: Set(Some(operator.to_string())),
-                create_time: Set(Some(now)),
-                update_by: Set(Some(operator.to_string())),
-                update_time: Set(Some(now)),
-                ..Default::default()
-            };
-            column_ams.push(column_am);
-        }
-        self.repo.insert_columns(column_ams).await?;
+                    GenTableColumnActiveModel {
+                        table_id: Set(table_id),
+                        column_name: Set(Some(col.column_name)),
+                        column_comment: Set(Some(col.column_comment)),
+                        column_type: Set(Some(col.column_type)),
+                        java_type: Set(Some(rust_type)),
+                        java_field: Set(Some(rust_field)),
+                        is_pk: Set(Some(is_pk.to_string())),
+                        is_increment: Set(Some(is_increment.to_string())),
+                        is_required: Set(Some(is_required.to_string())),
+                        is_insert: Set(Some(is_insert.to_string())),
+                        is_edit: Set(Some(is_edit.to_string())),
+                        is_list: Set(Some(is_list.to_string())),
+                        is_query: Set(Some(is_query.to_string())),
+                        query_type: Set(Some("EQ".to_string())),
+                        html_type: Set(Some(html_type)),
+                        dict_type: Set(Some(String::new())),
+                        // R5-TYPE-14：使用 try_from 替代 `as i32`，避免列数超过 i32::MAX 时溢出
+                        sort: Set(Some(i32::try_from(idx).map(|n| n + 1).unwrap_or(i32::MAX))),
+                        create_by: Set(Some(operator_str.clone())),
+                        create_time: Set(Some(now)),
+                        update_by: Set(Some(operator_str.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    }
+                })
+                .collect()
+        };
+        // P1 修复: 表记录 + 列记录在同一事务中插入，列插入失败时回滚表记录，避免孤儿 gen_table
+        let repo = self.repo.clone();
+        let table_am_inner = table_am.clone();
+        let table_model = self
+            .repo
+            .base()
+            .db()
+            .transaction::<_, GenTableModel, ServiceError>(|txn| {
+                let repo = repo.clone();
+                async move {
+                    // 在事务内插入表，获取 table_id
+                    let table_model = repo.base().insert_conn(txn, table_am_inner).await?;
+                    // 用 table_id 构造列并插入
+                    let column_ams = build_column_ams(table_model.table_id);
+                    if !column_ams.is_empty() {
+                        repo.insert_columns_conn(txn, column_ams).await?;
+                    }
+                    Ok(table_model)
+                }
+                .boxed()
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!(error = %db_err, table_name = %table_name, "import_table 事务连接错误");
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
 
         Ok(table_model)
     }
@@ -732,40 +765,65 @@ impl GenTableService {
             sub_table_fk_name: Set(dto.sub_table_fk_name),
             ..Default::default()
         };
-        let model = self.repo.insert(am).await?;
-
-        // 如果有列信息，一起创建
-        if let Some(columns) = dto.columns {
-            let mut column_ams: Vec<GenTableColumnActiveModel> = Vec::new();
-            for col in columns {
-                let column_am = GenTableColumnActiveModel {
-                    table_id: Set(model.table_id),
-                    column_name: Set(col.column_name),
-                    column_comment: Set(col.column_comment),
-                    column_type: Set(col.column_type),
-                    java_type: Set(col.java_type),
-                    java_field: Set(col.java_field),
-                    is_pk: Set(col.is_pk),
-                    is_increment: Set(col.is_increment),
-                    is_required: Set(col.is_required),
-                    is_insert: Set(col.is_insert),
-                    is_edit: Set(col.is_edit),
-                    is_list: Set(col.is_list),
-                    is_query: Set(col.is_query),
-                    query_type: Set(col.query_type.or(Some("EQ".to_string()))),
-                    html_type: Set(col.html_type),
-                    dict_type: Set(col.dict_type.or(Some(String::new()))),
-                    sort: Set(col.sort),
-                    create_by: Set(Some(operator.to_string())),
-                    create_time: Set(Some(now)),
-                    update_by: Set(Some(operator.to_string())),
-                    update_time: Set(Some(now)),
-                    ..Default::default()
-                };
-                column_ams.push(column_am);
-            }
-            self.repo.insert_columns(column_ams).await?;
-        }
+        // P1 修复: 表记录 + 列记录在同一事务中插入，列插入失败时回滚表记录，避免孤儿 gen_table
+        let repo = self.repo.clone();
+        let columns_opt = dto.columns;
+        let am_inner = am.clone();
+        let operator_str = operator.to_string();
+        let model = self
+            .repo
+            .base()
+            .db()
+            .transaction::<_, GenTableModel, ServiceError>(|txn| {
+                let repo = repo.clone();
+                let columns_inner = columns_opt.clone();
+                let operator_owned = operator_str.clone();
+                async move {
+                    let model = repo.base().insert_conn(txn, am_inner).await?;
+                    if let Some(columns) = columns_inner {
+                        let column_ams: Vec<GenTableColumnActiveModel> = columns
+                            .into_iter()
+                            .map(|col| GenTableColumnActiveModel {
+                                table_id: Set(model.table_id),
+                                column_name: Set(col.column_name),
+                                column_comment: Set(col.column_comment),
+                                column_type: Set(col.column_type),
+                                java_type: Set(col.java_type),
+                                java_field: Set(col.java_field),
+                                is_pk: Set(col.is_pk),
+                                is_increment: Set(col.is_increment),
+                                is_required: Set(col.is_required),
+                                is_insert: Set(col.is_insert),
+                                is_edit: Set(col.is_edit),
+                                is_list: Set(col.is_list),
+                                is_query: Set(col.is_query),
+                                query_type: Set(col.query_type.or(Some("EQ".to_string()))),
+                                html_type: Set(col.html_type),
+                                dict_type: Set(col.dict_type.or(Some(String::new()))),
+                                sort: Set(col.sort),
+                                create_by: Set(Some(operator_owned.clone())),
+                                create_time: Set(Some(now)),
+                                update_by: Set(Some(operator_owned.clone())),
+                                update_time: Set(Some(now)),
+                                ..Default::default()
+                            })
+                            .collect();
+                        if !column_ams.is_empty() {
+                            repo.insert_columns_conn(txn, column_ams).await?;
+                        }
+                    }
+                    Ok(model)
+                }
+                .boxed()
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!(error = %db_err, "create_table 事务连接错误");
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
 
         Ok(model)
     }

@@ -1368,13 +1368,15 @@ impl SysUserService {
         &self,
         user_id: i64,
         avatar_path: &str,
-    ) -> Result<(), ServiceError> {
+    ) -> Result<Option<String>, ServiceError> {
         let existing = self.user_repo.base().find_by_id(user_id).await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
+        // P2 修复: 保存旧 avatar 路径，供 handler 删除旧文件，避免文件系统泄漏
+        let old_avatar = existing.avatar.clone();
         let mut am: SysUserActiveModel = existing.into();
         am.avatar = Set(Some(avatar_path.to_string()));
         self.user_repo.update(am).await?;
-        Ok(())
+        Ok(old_avatar)
     }
 
     /// 查询部门下拉树（全部未删除部门，组装为 TreeSelect 格式）

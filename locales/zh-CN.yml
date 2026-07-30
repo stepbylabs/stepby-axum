@@ -309,6 +309,8 @@ error:
     write_failed: 写入上传文件失败
     file_read_task_failed: 文件读取任务失败
     file_read_failed: 读取文件失败
+    delete_task_failed: 文件删除任务失败
+    delete_failed: 删除文件失败
 
 msg:
   success:

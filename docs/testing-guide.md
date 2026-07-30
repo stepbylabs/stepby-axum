@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.1 | 更新日期：2026-07-30
+> 版本：v0.3.2 | 更新日期：2026-07-30
 
 ## 目录
 
@@ -901,7 +901,7 @@ node tests/main.mjs --headless
 ### 10.11 深度 E2E 测试套件（75 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
-> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.3.1，2026-07-30 验证）
+> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.3.2，2026-07-30 验证）
 > 架构：入口脚本 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
 
 #### 运行方式
@@ -1256,6 +1256,17 @@ tests/
 | config.toml.prod 缺少通用上传配置 | 缺 `common_allowed_exts` / `common_max_size` 字段 | 补齐字段，与 config.toml.example 保持一致 |
 | testing-guide.md 测试项数量矛盾 | 第 904 行写 951，第 1108 行 JSON 示例写 939 | 统一为 939 |
 | testing-guide.md 谎报 CONFIG 已同步 | 表格声称"config.mjs 与 test-config.mjs 同步"，实际默认值仍不同（8080 vs 5173） | 修正为如实描述：环境变量回退已增加，但默认值差异仍存，e2e/lib/config.mjs 为死代码 |
+
+#### v0.3.2 事务安全与资源泄漏修复（2026-07-30，第七轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| gen_table import_table 无事务 | 表记录与列记录分两步插入，列插入失败时产生无列的孤儿 gen_table 记录 | 将表插入+列插入包裹在同一 SeaORM 事务中，列插入失败时自动回滚表记录 |
+| gen_table create_table 无事务 | 同 import_table 问题，表插入后列插入失败产生孤儿记录 | 同 import_table 修复方式，事务包裹表+列插入 |
+| GenTableColumnEditDto 未派生 Clone | create_table 事务闭包需 clone columns_opt，DTO 缺少 Clone 派生 | 添加 Clone 到 derive 列表 |
+| avatar 更新旧文件未清理 | update_avatar 仅更新 DB 字段，旧头像文件永久驻留磁盘 | service 返回旧 avatar 路径，handler 调用 delete_upload_file best-effort 删除 |
+| 3 处 handler 硬编码 "操作成功" | sys_user_handler 3 处返回硬编码中文字符串 | 替换为 `tr!("msg.success.default")` i18n key |
+| delete_upload_file 函数缺失 | 无通用文件删除工具函数 | 新增 spawn_blocking 封装，NotFound 视为成功，re-export 到 crate::common |
 
 ---
 

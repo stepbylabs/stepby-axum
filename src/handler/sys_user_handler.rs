@@ -180,7 +180,7 @@ pub async fn get_info_by_id(
     let vo = state.user_service.get_user_form_data(Some(user_id)).await?;
     Ok(UserFormResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         data: vo.data,
         role_ids: vo.role_ids,
         post_ids: vo.post_ids,
@@ -561,7 +561,7 @@ pub async fn auth_role_get(
     let vo: UserAuthRoleVo = state.user_service.get_auth_role(user_id).await?;
     Ok(AuthRoleResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         user: vo.user,
         roles: vo.roles,
     })
@@ -657,15 +657,33 @@ pub async fn avatar_upload(
     // 可访问的 URL 路径（前端通过 VITE_APP_BASE_API + imgUrl 访问）
     let img_url = format!("{}/{}", upload_cfg.avatar_url_prefix, filename);
 
-    // 更新用户 avatar 字段
-    state
+    // 更新用户 avatar 字段，并获取旧 avatar 路径用于文件清理
+    let old_avatar = state
         .user_service
         .update_avatar(user_id, &img_url)
         .await?;
 
+    // P2 修复: 删除旧头像文件（best-effort，失败仅记录日志，不影响上传流程）
+    if let Some(old_url) = old_avatar
+        && let Some(old_filename) = old_url.rsplit('/').next()
+        && !old_filename.is_empty()
+        && old_filename != filename
+    {
+        let old_file_path = avatar_dir.join(old_filename);
+        let old_path_str = old_file_path.to_string_lossy().to_string();
+        let result = crate::common::delete_upload_file(&old_path_str).await;
+        if let Err(e) = &result {
+            tracing::warn!(
+                error = %e,
+                old_path = %old_path_str,
+                "删除旧头像文件失败（best-effort，不影响业务）"
+            );
+        }
+    }
+
     Ok(AvatarUploadResult {
         code: 200,
-        msg: "操作成功".to_string(),
+        msg: crate::tr!("msg.success.default"),
         img_url,
     })
 }
