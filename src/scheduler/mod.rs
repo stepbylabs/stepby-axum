@@ -257,17 +257,25 @@ impl JobScheduler {
                 for (ip, count) in anomaly_ips {
                     let dedup_key = format!("login_anomaly:{}", ip);
                     // SETNX 去重：30 分钟内同一 IP 不重复创建告警
-                    let acquired: Option<String> = redis::cmd("SET")
+                    // P3 修复: 区分 Redis 错误与 key 已存在，Redis 故障时仍创建告警（宁可重复也不漏报）
+                    let acquired = match redis::cmd("SET")
                         .arg(&dedup_key)
                         .arg("1")
                         .arg("NX")
                         .arg("EX")
                         .arg(DEDUP_TTL_SECS)
-                        .query_async(&mut redis)
+                        .query_async::<Option<String>>(&mut redis)
                         .await
-                        .unwrap_or(None);
+                    {
+                        Ok(Some(_)) => true,   // 成功获取去重锁
+                        Ok(None) => false,      // key 已存在，跳过
+                        Err(e) => {
+                            tracing::warn!("login_anomaly_detector: Redis 去重查询失败，仍创建告警: {}", e);
+                            true  // Redis 故障时仍创建告警（fail-open for alerting）
+                        }
+                    };
 
-                    if acquired.is_none() {
+                    if !acquired {
                         tracing::debug!(
                             "login_anomaly_detector: IP {} 在 {} 分钟内已告警，跳过",
                             ip,

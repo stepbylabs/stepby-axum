@@ -95,13 +95,17 @@ pub async fn list(
     Query(query): Query<UserQueryDto>,
 ) -> Result<TableDataInfo<UserVo>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
-    let operator_user_id: Option<i64> = operator
+    // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
+    let operator_user_id: i64 = operator
         .user_id()
         .parse::<i64>()
-        .ok();
+        .map_err(|_| {
+            tracing::warn!(sub = %operator.user_id(), "用户列表: JWT sub 解析失败，拒绝访问");
+            AppError::unauthorized("认证信息异常")
+        })?;
     let (rows, total) = state
         .user_service
-        .get_user_page(query, operator_user_id)
+        .get_user_page(query, Some(operator_user_id))
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -116,13 +120,17 @@ pub async fn export(
     operator: Operator,
     Form(query): Form<UserQueryDto>,
 ) -> Result<Response, AppError> {
-    let operator_user_id: Option<i64> = operator
+    // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问
+    let operator_user_id: i64 = operator
         .user_id()
         .parse::<i64>()
-        .ok();
+        .map_err(|_| {
+            tracing::warn!(sub = %operator.user_id(), "用户导出: JWT sub 解析失败，拒绝访问");
+            AppError::unauthorized("认证信息异常")
+        })?;
     let rows = state
         .user_service
-        .export_users(query, operator_user_id)
+        .export_users(query, Some(operator_user_id))
         .await?;
 
     let columns = [

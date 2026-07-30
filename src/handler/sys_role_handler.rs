@@ -69,13 +69,17 @@ pub async fn list(
     Query(query): Query<RoleQueryDto>,
 ) -> Result<TableDataInfo<SysRoleModel>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
-    let operator_user_id: Option<i64> = operator
+    // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
+    let operator_user_id: i64 = operator
         .user_id()
         .parse::<i64>()
-        .ok();
+        .map_err(|_| {
+            tracing::warn!(sub = %operator.user_id(), "角色列表: JWT sub 解析失败，拒绝访问");
+            AppError::unauthorized("认证信息异常")
+        })?;
     let (rows, total) = state
         .role_service
-        .get_role_page(query, operator_user_id)
+        .get_role_page(query, Some(operator_user_id))
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -100,11 +104,15 @@ pub async fn export(
     Form(query): Form<RoleQueryDto>,
 ) -> Result<Response, AppError> {
     // 数据权限（P0-R81-004）：导出需应用与 list 相同的 data_scope 过滤，防止越权导出
-    let operator_user_id: Option<i64> = operator
+    // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问
+    let operator_user_id: i64 = operator
         .user_id()
         .parse::<i64>()
-        .ok();
-    let rows = state.role_service.export_roles(query, operator_user_id).await?;
+        .map_err(|_| {
+            tracing::warn!(sub = %operator.user_id(), "角色导出: JWT sub 解析失败，拒绝访问");
+            AppError::unauthorized("认证信息异常")
+        })?;
+    let rows = state.role_service.export_roles(query, Some(operator_user_id)).await?;
 
     let columns = [
         ExcelColumn { key: "roleId", header: ("角色编号", "Role ID"), getter: |r: &SysRoleModel| CellValue::Text(r.role_id.to_string().into()) },

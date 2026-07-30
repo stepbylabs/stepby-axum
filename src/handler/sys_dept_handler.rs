@@ -40,13 +40,17 @@ pub async fn list(
     Query(query): Query<DeptQueryDto>,
 ) -> Result<AjaxResult<Vec<SysDeptModel>>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
-    let operator_user_id: Option<i64> = operator
+    // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
+    let operator_user_id: i64 = operator
         .user_id()
         .parse::<i64>()
-        .ok();
+        .map_err(|_| {
+            tracing::warn!(sub = %operator.user_id(), "部门列表: JWT sub 解析失败，拒绝访问");
+            AppError::unauthorized("认证信息异常")
+        })?;
     let list = state
         .dept_service
-        .list_depts(query, operator_user_id)
+        .list_depts(query, Some(operator_user_id))
         .await?;
     Ok(AjaxResult::success(list))
 }
