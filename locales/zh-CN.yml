@@ -301,6 +301,7 @@ error:
     redis_write_failed: 写入 Redis 失败
     user_query_failed: 查询用户失败
     redis_delete_failed: 删除 Redis 失败
+    status_check_failed: TOTP 状态检查服务暂不可用，请稍后重试
     enc_key_missing: 加密密钥未配置（CONFIG_ENC_KEY），无法加解密 TOTP secret
     encrypt_failed: TOTP secret 加密失败
     decrypt_failed: TOTP secret 解密失败

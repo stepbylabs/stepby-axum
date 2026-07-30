@@ -300,6 +300,7 @@ error:
     redis_write_failed: Failed to write to Redis
     user_query_failed: Failed to query user
     redis_delete_failed: Failed to delete from Redis
+    status_check_failed: TOTP status check service is temporarily unavailable, please try again later
     enc_key_missing: Encryption key not configured (CONFIG_ENC_KEY), cannot encrypt/decrypt TOTP secret
     encrypt_failed: Failed to encrypt TOTP secret
     decrypt_failed: Failed to decrypt TOTP secret

@@ -184,11 +184,16 @@ pub async fn status(
 
     let redis_key = format!("totp:enabled:{}", user_id);
     let mut conn = state.redis.clone();
+    // P2 修复: 原 unwrap_or(false) 为 fail-open，Redis 故障时误报 TOTP 未启用，
+    // 可能导致前端跳过 MFA 验证流程。改为 fail-closed：Redis 故障时返回 503。
     let exists: bool = redis::cmd("EXISTS")
         .arg(&redis_key)
         .query_async(&mut conn)
         .await
-        .unwrap_or(false);
+        .map_err(|e| {
+            tracing::error!(error = %e, user_id = user_id, "TOTP status: Redis EXISTS 失败，fail-closed 返回 503");
+            AppError::new(503, crate::tr!("error.totp.status_check_failed"))
+        })?;
 
     Ok(AjaxResult::success(TotpStatusResponse {
         enabled: exists,

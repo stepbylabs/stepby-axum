@@ -130,25 +130,26 @@ async fn incr_ws_conn_count(state: &AppState, user_id: i64) -> Result<u32, axum:
 }
 
 /// 减少用户 WS 连接计数（best-effort：失败仅记日志）
+///
+/// P2 修复: 原实现 DECR + GET + 条件 DEL 共 3 次 RTT 且非原子，并发关闭时存在竞态
+/// （DECR 后 GET 可能读到对方 DECR 后的值，误判 count<=0 而 DEL key）。
+/// 改用 Lua 脚本原子化执行 DECR → 判断 ≤0 → DEL，单次 RTT 且无竞态。
 async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
     let key = format!("ws_conn:{}", user_id);
     let mut conn = state.redis.clone();
-    let _: redis::RedisResult<u32> = redis::cmd("DECR")
+    let script = r#"
+        local v = redis.call('DECR', KEYS[1])
+        if v <= 0 then
+            redis.call('DEL', KEYS[1])
+        end
+        return v
+    "#;
+    let _: redis::RedisResult<i64> = redis::cmd("EVAL")
+        .arg(script)
+        .arg(1) // number of keys
         .arg(&key)
         .query_async(&mut conn)
         .await;
-    // DECR 后若 ≤ 0，清理 key 避免负数累积
-    let count: i64 = redis::cmd("GET")
-        .arg(&key)
-        .query_async(&mut conn)
-        .await
-        .unwrap_or(0);
-    if count <= 0 {
-        let _: redis::RedisResult<()> = redis::cmd("DEL")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await;
-    }
 }
 
 /// RAII 守卫：确保 WebSocket 连接计数在任何情况下（包括 Future 被取消/drop）都能 DECR

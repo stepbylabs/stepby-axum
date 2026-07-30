@@ -167,28 +167,68 @@ impl SysOperLogRepository {
     /// 按日聚合最近 N 天操作量（审计大屏用）
     ///
     /// 返回 Vec<(date_string, success_count, fail_count)>，按日期升序
+    ///
+    /// P1 优化: 原实现循环 N 天每天执行 2 次 COUNT（2N 次 RTT），
+    /// 改为单次 GROUP BY DATE(oper_time) 聚合查询，再在 Rust 侧补齐无操作日期为零值。
     pub async fn stats_daily(&self, days: i64) -> Result<Vec<(String, i64, i64)>, DbErr> {
         use chrono::{Duration, Local};
+        use std::collections::HashMap;
+
         let today = Local::now().date_naive();
         let start_date = today - Duration::days(days - 1);
-        let mut result = Vec::new();
+        let begin_time = start_date.and_time(MIDNIGHT);
+
+        // 单次聚合查询：按日期分组统计成功/失败数
+        let db = self.base.db();
+        let backend = db.get_database_backend();
+
+        let (sql, values) = match backend {
+            DatabaseBackend::Sqlite => (
+                "SELECT strftime('%Y-%m-%d', oper_time) AS d, \
+                 SUM(CASE WHEN status='0' THEN 1 ELSE 0 END) AS success, \
+                 SUM(CASE WHEN status='1' THEN 1 ELSE 0 END) AS fail \
+                 FROM sys_oper_log WHERE oper_time >= ? \
+                 GROUP BY d ORDER BY d ASC",
+                vec![begin_time.into()],
+            ),
+            DatabaseBackend::Postgres => (
+                "SELECT TO_CHAR(oper_time, 'YYYY-MM-DD') AS d, \
+                 SUM(CASE WHEN status='0' THEN 1 ELSE 0 END) AS success, \
+                 SUM(CASE WHEN status='1' THEN 1 ELSE 0 END) AS fail \
+                 FROM sys_oper_log WHERE oper_time >= $1 \
+                 GROUP BY d ORDER BY d ASC",
+                vec![begin_time.into()],
+            ),
+            DatabaseBackend::MySql => (
+                "SELECT DATE_FORMAT(oper_time, '%Y-%m-%d') AS d, \
+                 SUM(CASE WHEN status='0' THEN 1 ELSE 0 END) AS success, \
+                 SUM(CASE WHEN status='1' THEN 1 ELSE 0 END) AS fail \
+                 FROM sys_oper_log WHERE oper_time >= ? \
+                 GROUP BY d ORDER BY d ASC",
+                vec![begin_time.into()],
+            ),
+        };
+
+        let rows = db
+            .query_all(Statement::from_sql_and_values(backend, sql, values))
+            .await?;
+
+        // 构建日期→计数映射
+        let mut counts: HashMap<String, (i64, i64)> = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let d: String = row.try_get("", "d")?;
+            let success: i64 = row.try_get("", "success").unwrap_or(0);
+            let fail: i64 = row.try_get("", "fail").unwrap_or(0);
+            counts.insert(d, (success, fail));
+        }
+
+        // 补齐无操作日期为零值，保持日期连续
+        let mut result = Vec::with_capacity(days as usize);
         for i in 0..days {
             let date = start_date + Duration::days(i);
-            let begin = date.and_time(MIDNIGHT);
-            let end = (date + Duration::days(1)).and_time(MIDNIGHT);
-            let success = SysOperLog::find()
-                .filter(Column::Status.eq("0"))
-                .filter(Column::OperTime.gte(begin))
-                .filter(Column::OperTime.lt(end))
-                .count(self.base.db())
-                .await? as i64;
-            let fail = SysOperLog::find()
-                .filter(Column::Status.eq("1"))
-                .filter(Column::OperTime.gte(begin))
-                .filter(Column::OperTime.lt(end))
-                .count(self.base.db())
-                .await? as i64;
-            result.push((date.format("%Y-%m-%d").to_string(), success, fail));
+            let date_str = date.format("%Y-%m-%d").to_string();
+            let (success, fail) = counts.get(&date_str).copied().unwrap_or((0, 0));
+            result.push((date_str, success, fail));
         }
         Ok(result)
     }
