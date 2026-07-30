@@ -364,7 +364,8 @@ impl SysBackupService {
         };
 
         cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
 
         // 5 分钟超时
         let child = cmd
@@ -505,7 +506,8 @@ impl SysBackupService {
         };
 
         cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
 
         let child = cmd
             .spawn()
@@ -562,7 +564,8 @@ impl SysBackupService {
             .arg(&db)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
 
         let mut child = cmd
             .spawn()

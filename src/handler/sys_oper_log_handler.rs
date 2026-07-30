@@ -136,7 +136,7 @@ pub async fn export(
         // 字段选择导出场景才走任务进度（普通全量导出走原有同步路径）
         let dto = crate::service::sys_task_service::TaskCreateDto {
             task_type: "operlog_export".to_string(),
-            task_name: crate::common::i18n::pick("操作日志导出", "Operation log export").to_string(),
+            task_name: crate::tr!("msg.export.oper_log_task"),
             total: 100,
         };
         let task = state
@@ -178,7 +178,7 @@ pub async fn export(
         ExcelColumn { key: "costTime", header: ("消耗时间(ms)", "Cost Time (ms)"), getter: |r: &SysOperLogModel| CellValue::Text(r.cost_time.map(|c| c.to_string()).unwrap_or_default().into()) },
     ];
 
-    export_to_excel_with_fields("操作日志", "oper_log", &columns, &rows, fields.as_deref(), false).await
+    export_to_excel_with_fields(&crate::tr!("excel.sheet.oper_log"), "oper_log", &columns, &rows, fields.as_deref(), false).await
 }
 
 /// 操作日志导出 DTO（在原查询参数基础上增加 fields 字段选择）

@@ -9,7 +9,7 @@
 
 use futures::future::FutureExt;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
     QueryFilter, Set, Statement, TransactionTrait,
 };
 use serde::Deserialize;
@@ -637,50 +637,40 @@ fn ancestor_contains(ancestors: &str, id: i64) -> bool {
 /// 找出所有 ancestors 中包含 dept_id 的后代部门，
 /// 将其 ancestors 中的 old_ancestors 前缀替换为 new_ancestors。
 ///
-/// DB-25：原实现加载全表后内存过滤 ancestors CSV，改为 SQL 层 LIKE 过滤，
-/// 仅查询实际需要更新的后代部门，减少数据传输和内存开销。
+/// DB-25：使用单条 SQL 批量更新后代部门的 ancestors，消除 N+1 查询。
+///
+/// 原实现先 SELECT 后循环 UPDATE（N 个后代 = N+1 次 DB 交互），
+/// 现改为单条 UPDATE ... REPLACE() 完成，性能从 O(N) 降为 O(1)。
 ///
 /// 多数据库兼容：
-/// - MySQL：使用 CONCAT 拼接前后逗号（MySQL 默认 `||` 是逻辑 OR）
-/// - PostgreSQL / SQLite：使用 `||` 字符串连接符（标准 SQL）
+/// - MySQL：使用 CONCAT 拼接前后逗号 + REPLACE 函数
+/// - PostgreSQL / SQLite：使用 `||` 字符串连接符 + REPLACE 函数
 ///
 /// 通过在 ancestors 前后加逗号后 LIKE `%,dept_id,%`，确保精确匹配 ID
 /// （避免 "1" 误匹配 "100"、"11" 等）。
 async fn update_children_ancestors_conn<C: ConnectionTrait>(
     conn: &C,
-    dept_repo: &SysDeptRepository,
+    _dept_repo: &SysDeptRepository,
     dept_id: i64,
     old_ancestors: &str,
     new_ancestors: &str,
 ) -> Result<(), sea_orm::DbErr> {
     let backend = conn.get_database_backend();
     let pattern = format!("%,{},%", dept_id);
-    // 占位符差异：MySQL 使用 `?`，PostgreSQL/SQLite 使用 `$N`
+    // 单条 UPDATE + REPLACE 批量替换 ancestors 中的 old → new
     let sql = match backend {
-        DatabaseBackend::MySql => r#"SELECT * FROM sys_dept
+        DatabaseBackend::MySql => r#"UPDATE sys_dept
+            SET ancestors = REPLACE(ancestors, ?, ?)
             WHERE del_flag = '0' AND dept_id <> ? AND CONCAT(',', ancestors, ',') LIKE ?"#,
-        _ => r#"SELECT * FROM sys_dept
-            WHERE del_flag = '0' AND dept_id <> $1 AND (',' || ancestors || ',') LIKE $2"#,
+        _ => r#"UPDATE sys_dept
+            SET ancestors = REPLACE(ancestors, $1, $2)
+            WHERE del_flag = '0' AND dept_id <> $3 AND (',' || ancestors || ',') LIKE $4"#,
     };
     let stmt = Statement::from_sql_and_values(
         backend,
         sql,
-        [dept_id.into(), pattern.into()],
+        [old_ancestors.into(), new_ancestors.into(), dept_id.into(), pattern.into()],
     );
-    let descendants = SysDeptModel::find_by_statement(stmt).all(conn).await?;
-
-    for child in descendants {
-        let Some(ref child_ancestors) = child.ancestors else {
-            continue;
-        };
-        // 替换 old_ancestors 前缀为 new_ancestors
-        let new_child_ancestors = child_ancestors.replace(old_ancestors, new_ancestors);
-        if new_child_ancestors == *child_ancestors {
-            continue;
-        }
-        let mut am: SysDeptActiveModel = child.into();
-        am.ancestors = Set(Some(new_child_ancestors));
-        dept_repo.base().update_conn(conn, am).await?;
-    }
+    conn.execute(stmt).await?;
     Ok(())
 }

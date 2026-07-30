@@ -350,6 +350,7 @@ msg:
     cleared: "清除成功，共删除 {{count}} 个键"
   export:
     progress: "导出 {{count}} 条"
+    oper_log_task: "操作日志导出"
   scheduler:
     job_failed: "任务执行失败: {{err}}"
     job_duration: "{{msg}} (耗时 {{ms}}ms)"
@@ -386,6 +387,13 @@ common:
     failed: 失败
   yes: 是
   no: 否
+  job:
+    misfire_default: 默认策略
+    misfire_immediate: 立即执行
+    misfire_once: 执行一次
+    misfire_give_up: 放弃执行
+    concurrent_allow: 允许
+    concurrent_forbid: 禁止
 
 # Excel 导出工作表名（sheet 标签页名称，用户下载后可见）
 excel:
@@ -395,6 +403,7 @@ excel:
     role: 角色数据
     dict_type: 字典类型
     dict_data: 字典数据
+    oper_log: 操作日志
     post: 岗位数据
     logininfor: 登录日志
     job: 定时任务

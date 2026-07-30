@@ -177,5 +177,5 @@ pub async fn export(
             }) },
     ];
 
-    export_to_excel("限流配置", "rate_limit", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.rate_limit"), "rate_limit", &columns, &rows).await
 }

@@ -328,9 +328,16 @@ impl SysJobService {
 
         let job = self.job_repo.insert(model).await?;
 
-        // status='0' 时注册到调度器
+        // status='0' 时注册到调度器（容错：失败仅 warn，不阻断 DB 已提交的插入）
+        // 与 edit_job/delete_jobs/change_status 保持一致：DB 为 source of truth，重启后调度器从 DB 恢复
         if status == "0" {
-            self.scheduler.add_job(&job).await?;
+            if let Err(e) = self.scheduler.add_job(&job).await {
+                tracing::warn!(
+                    job_id = job.job_id,
+                    error = %e,
+                    "add_job: 调度器 add_job 失败，DB 已插入，重启后调度器从 DB 恢复"
+                );
+            }
         }
 
         Ok(job)

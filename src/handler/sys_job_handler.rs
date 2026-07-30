@@ -208,12 +208,22 @@ pub async fn export(
         ExcelColumn { key: "jobGroup", header: ("任务组名", "Job Group"), getter: |r: &JobVo| CellValue::Text(r.job.job_group.clone().into()) },
         ExcelColumn { key: "invokeTarget", header: ("调用目标字符串", "Invoke Target"), getter: |r: &JobVo| CellValue::Text(r.job.invoke_target.clone().into()) },
         ExcelColumn { key: "cronExpression", header: ("cron表达式", "Cron Expression"), getter: |r: &JobVo| CellValue::Text(r.job.cron_expression.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "misfirePolicy", header: ("错误策略", "Misfire Policy"), getter: |r: &JobVo| CellValue::Text(r.job.misfire_policy.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "concurrent", header: ("并发执行", "Concurrent"), getter: |r: &JobVo| CellValue::Text(r.job.concurrent.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &JobVo| CellValue::Text(r.job.status.clone().unwrap_or_default().into()) },
+        ExcelColumn { key: "misfirePolicy", header: ("错误策略", "Misfire Policy"), getter: |r: &JobVo| CellValue::Text(match r.job.misfire_policy.as_deref() {
+                Some("0") => crate::tr!("common.job.misfire_default"),
+                Some("1") => crate::tr!("common.job.misfire_immediate"),
+                Some("2") => crate::tr!("common.job.misfire_once"),
+                Some("3") => crate::tr!("common.job.misfire_give_up"),
+                _ => String::new(),
+            }.into()) },
+        ExcelColumn { key: "concurrent", header: ("并发执行", "Concurrent"), getter: |r: &JobVo| CellValue::Text(match r.job.concurrent.as_deref() {
+                Some("0") => crate::tr!("common.job.concurrent_allow"),
+                Some("1") => crate::tr!("common.job.concurrent_forbid"),
+                _ => String::new(),
+            }.into()) },
+        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &JobVo| CellValue::Text(if r.job.status.as_deref() == Some("0") { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
         ExcelColumn { key: "nextValidTime", header: ("下次执行时间", "Next Run Time"), getter: |r: &JobVo| CellValue::Text(r.next_valid_time.clone().unwrap_or_default().into()) },
         ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &JobVo| CellValue::Text(r.job.remark.clone().unwrap_or_default().into()) },
     ];
 
-    export_to_excel("定时任务", "job", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.job"), "job", &columns, &rows).await
 }

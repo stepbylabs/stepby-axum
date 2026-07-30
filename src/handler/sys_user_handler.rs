@@ -149,7 +149,7 @@ pub async fn export(
             }) },
     ];
 
-    export_to_excel("用户数据", "user", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.user"), "user", &columns, &rows).await
 }
 
 /// GET /system/user/{id}
