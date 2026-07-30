@@ -14,7 +14,7 @@ pub use error::{AppError, ServiceError};
 pub use extract::ValidatedJson;
 pub use page::PageDomain;
 pub use response::{AjaxResult, TableDataInfo, TreeSelectVo};
-pub use upload::{gen_uuid_filename, resolve_upload_dir, resolve_upload_root, write_upload_file};
+pub use upload::{delete_upload_file, gen_uuid_filename, resolve_upload_dir, resolve_upload_root, write_upload_file};
 
 /// 为实现了 `Serialize` 的类型自动实现 `IntoResponse`，
 /// 返回 `(StatusCode::OK, Json(self))`（P1-13）。

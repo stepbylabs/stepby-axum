@@ -343,6 +343,9 @@ impl SysJobService {
     /// 3. 校验 cron 合法性
     /// 4. UPDATE
     /// 5. 若 status='0' 调用 scheduler.update_job（若 status='1' 且原 status='0' 调用 scheduler.remove_job）
+    ///
+    /// P1 修复: 调度器同步失败时仅记录 warn 不阻断，DB 为 source of truth，
+    /// 重启后调度器从 DB 加载正确状态。与 delete_jobs/change_status 保持一致的容错策略。
     pub async fn edit_job(
         &self,
         dto: JobEditDto,
@@ -380,15 +383,29 @@ impl SysJobService {
             ..Default::default()
         };
 
+        // DB 更新是主操作，必须成功
         let job = self.job_repo.update(model).await?;
 
-        // 同步调度器
+        // 同步调度器（容错：失败仅 warn，不阻断 DB 已提交的修改）
+        // 与 delete_jobs/change_status 保持一致：DB 为 source of truth，重启后调度器从 DB 恢复
         if new_status == "0" {
             // 新状态为运行 → 更新调度器（remove + add）
-            self.scheduler.update_job(&job).await?;
+            if let Err(e) = self.scheduler.update_job(&job).await {
+                tracing::warn!(
+                    job_id = job.job_id,
+                    error = %e,
+                    "edit_job: 调度器 update_job 失败，DB 已更新，重启后调度器从 DB 恢复"
+                );
+            }
         } else if old_status == "0" {
             // 旧状态为运行，新状态为暂停 → 移除调度器
-            self.scheduler.remove_job(job.job_id).await?;
+            if let Err(e) = self.scheduler.remove_job(job.job_id).await {
+                tracing::warn!(
+                    job_id = job.job_id,
+                    error = %e,
+                    "edit_job: 调度器 remove_job 失败，DB 已更新为暂停，重启后生效"
+                );
+            }
         }
 
         Ok(job)
@@ -456,6 +473,9 @@ impl SysJobService {
     ///
     /// 0→1: remove_job
     /// 1→0: add_job
+    ///
+    /// P1 修复: 调度器同步失败时仅记录 warn 不阻断，DB 为 source of truth，
+    /// 重启后调度器从 DB 加载正确状态。与 delete_jobs 保持一致的容错策略。
     pub async fn change_status(&self, dto: JobStatusDto) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -473,15 +493,29 @@ impl SysJobService {
             ..Default::default()
         };
 
-        self.job_repo.update(model).await?;
+        // DB 更新是主操作，必须成功
+        let updated = self.job_repo.update(model).await?;
 
-        // 同步调度器
+        // 同步调度器（容错：失败仅 warn，不阻断 DB 已提交的状态变更）
+        // 与 delete_jobs 保持一致：DB 为 source of truth，重启后调度器从 DB 恢复
         if old_status == "0" && dto.status == "1" {
             // 运行 → 暂停
-            self.scheduler.remove_job(dto.job_id).await?;
+            if let Err(e) = self.scheduler.remove_job(dto.job_id).await {
+                tracing::warn!(
+                    job_id = dto.job_id,
+                    error = %e,
+                    "change_status: 调度器 remove_job 失败，DB 已更新为暂停，重启后生效"
+                );
+            }
         } else if old_status == "1" && dto.status == "0" {
-            // 暂停 → 运行
-            self.scheduler.add_job(&existing).await?;
+            // 暂停 → 运行（P1 修复: 使用更新后的 model 而非 existing，确保字段最新）
+            if let Err(e) = self.scheduler.add_job(&updated).await {
+                tracing::warn!(
+                    job_id = dto.job_id,
+                    error = %e,
+                    "change_status: 调度器 add_job 失败，DB 已更新为运行，重启后生效"
+                );
+            }
         }
 
         Ok(())

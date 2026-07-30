@@ -184,7 +184,30 @@ pub async fn idempotency_middleware(
     //    注意：不缓存响应结果（简化实现）。如需缓存，可在 next.run(req).await 后
     //    将响应体存入 Redis，重复请求时直接返回缓存响应。
     //    当前实现仅做"拦截重复请求"，符合防重复提交的核心目标。
-    next.run(req).await
+    //
+    //    P1 修复：请求失败（4xx/5xx）时释放幂等槽位，允许客户端使用相同 key 重试。
+    //    幂等性的核心目标是"允许客户端安全重试"，若失败请求仍占用槽位 24 小时，
+    //    客户端无法重试失败操作（如参数校验失败、权限不足、内部错误），违背语义。
+    //    仅对成功响应（2xx）保留槽位，防止真正的重复提交。
+    let response = next.run(req).await;
+    let status = response.status();
+    if !status.is_success() {
+        // 失败响应释放槽位，允许客户端重试
+        // best-effort：DEL 失败不影响响应返回，槽位会在 TTL 后自动过期
+        if let Err(e) = redis::cmd("DEL")
+            .arg(&redis_key)
+            .query_async::<()>(&mut redis)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                redis_key = %redis_key,
+                status = %status.as_u16(),
+                "幂等槽位 DEL 失败，槽位将在 TTL 后自动过期"
+            );
+        }
+    }
+    response
 }
 
 #[cfg(test)]

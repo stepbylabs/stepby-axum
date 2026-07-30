@@ -308,6 +308,8 @@ error:
     write_failed: Failed to write uploaded file
     file_read_task_failed: File read task failed
     file_read_failed: Failed to read file
+    delete_task_failed: File delete task failed
+    delete_failed: Failed to delete file
 
 msg:
   success:

@@ -193,6 +193,32 @@ pub fn gen_uuid_filename(ext: &str) -> String {
     format!("{}.{}", uuid::Uuid::new_v4(), ext)
 }
 
+/// 删除上传文件（best-effort，文件不存在视为成功）
+///
+/// 用于头像更新时清理旧文件、附件删除时清理本地文件等场景。
+/// 使用 `spawn_blocking` 避免阻塞异步运行时。
+///
+/// # 安全
+/// - 调用方需确保 `file_path` 已通过 `resolve_upload_dir` 解析为受控目录下的绝对路径，
+///   禁止直接传入用户可控的相对路径，防止路径穿越。
+/// - 仅删除文件（不递归删除目录）。
+pub async fn delete_upload_file(file_path: &str) -> Result<(), crate::common::error::AppError> {
+    let path = file_path.to_string();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    })
+    .await
+    .map_err(|_| crate::common::error::AppError::internal(&crate::tr!("error.upload.delete_task_failed")))?
+    .map_err(|_| {
+        crate::common::error::AppError::internal(&crate::tr!("error.upload.delete_failed"))
+    })?;
+    Ok(())
+}
+
 /// 校验文件 magic bytes 是否匹配预期 MIME 类型
 ///
 /// 基于文件扩展名检查前几个字节，防止伪造扩展名上传可执行文件等危险内容。
