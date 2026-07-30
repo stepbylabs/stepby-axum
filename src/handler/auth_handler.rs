@@ -200,7 +200,8 @@ pub async fn register(
             oper_ip: ip.to_string(),
             oper_location,
             // 不记录密码等敏感字段，仅记录用户名（脱敏）
-            oper_param: format!("{{\"username\":\"{}\"}}", username),
+            // P1-5 修复：改用 serde_json::json! 避免手拼 JSON 导致的注入风险
+            oper_param: serde_json::json!({ "username": username }).to_string(),
             oper_before: String::new(),
             json_result,
             status,

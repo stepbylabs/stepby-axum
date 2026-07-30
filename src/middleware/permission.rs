@@ -195,8 +195,11 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("GET", "/system/notice/readUsers/list") => Some("system:notice:list"),
         ("GET", "/system/notice/{noticeId}") => Some("system:notice:query"),
         ("POST", "/system/notice") => Some("system:notice:add"),
+        // markRead / markReadAll / markAllUnreadRead：标记本人已读为自助操作，仅需登录认证
+        // 权限粒度由前端 v-hasPermi 控制按钮可见性，后端不做 RBAC 校验
         ("POST", "/system/notice/markRead") => None,
         ("POST", "/system/notice/markReadAll") => None,
+        ("POST", "/system/notice/markAllUnreadRead") => None,
         ("PUT", "/system/notice") => Some("system:notice:edit"),
         ("DELETE", "/system/notice/{noticeIds}") => Some("system:notice:remove"),
 
@@ -262,7 +265,11 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("DELETE", "/tool/gen/{tableIds}") => Some("tool:gen:remove"),
         ("GET", "/tool/gen/preview/{tableId}") => Some("tool:gen:preview"),
         ("GET", "/tool/gen/genCode/{tableName}") => Some("tool:gen:code"),
-        ("GET", "/tool/gen/synchDb/{tableName}") => Some("tool:gen:edit"),
+        // P0-4 修复：synchDb 路由实际注册为 POST（见 tool_gen_router.rs:37），
+        // 原映射为 GET 导致权限校验被绕过（get_required_perm 返回 None）
+        ("POST", "/tool/gen/synchDb/{tableName}") => Some("tool:gen:edit"),
+        // P1-6 修复：batchGenCode 批量生成代码未映射权限，任意登录用户可调用
+        ("GET", "/tool/gen/batchGenCode") => Some("tool:gen:code"),
 
         // ===== 文件管理 =====
         ("GET", "/system/file/list") => Some("system:file:list"),
@@ -281,6 +288,16 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("GET", "/system/task/list") => Some("system:task:list"),
         ("GET", "/system/task/{taskId}") => Some("system:task:query"),
         ("DELETE", "/system/task/{taskIds}") => Some("system:task:remove"),
+
+        // ===== API 限流配置 =====
+        // P0-3 修复：原完全缺失权限映射，任意登录用户可增删改限流规则，
+        // 可禁用登录接口限流导致暴力破解。权限标识对齐 sys_menu 表 rateLimit 菜单 perms 字段。
+        ("GET", "/system/rateLimit/list") => Some("system:rateLimit:list"),
+        ("GET", "/system/rateLimit/{id}") => Some("system:rateLimit:query"),
+        ("POST", "/system/rateLimit") => Some("system:rateLimit:add"),
+        ("PUT", "/system/rateLimit") => Some("system:rateLimit:edit"),
+        ("DELETE", "/system/rateLimit/{id}") => Some("system:rateLimit:remove"),
+        ("POST", "/system/rateLimit/export") => Some("system:rateLimit:export"),
 
         // ===== 审计日志大屏 =====
         // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐

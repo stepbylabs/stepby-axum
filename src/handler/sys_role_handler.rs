@@ -96,9 +96,15 @@ pub async fn list(
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<RoleQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.role_service.export_roles(query).await?;
+    // 数据权限（P0-R81-004）：导出需应用与 list 相同的 data_scope 过滤，防止越权导出
+    let operator_user_id: Option<i64> = operator
+        .user_id()
+        .parse::<i64>()
+        .ok();
+    let rows = state.role_service.export_roles(query, operator_user_id).await?;
 
     let columns = [
         ExcelColumn { key: "roleId", header: ("角色编号", "Role ID"), getter: |r: &SysRoleModel| CellValue::Text(r.role_id.to_string().into()) },

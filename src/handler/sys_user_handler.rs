@@ -110,11 +110,20 @@ pub async fn list(
 /// 导出用户列表为 Excel
 ///
 /// 前端 download() 发送 application/x-www-form-urlencoded，使用 Form 提取器
+/// P0-1 修复：增加 Operator 参数，应用数据权限过滤，防止越权导出
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<UserQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.user_service.export_users(query).await?;
+    let operator_user_id: Option<i64> = operator
+        .user_id()
+        .parse::<i64>()
+        .ok();
+    let rows = state
+        .user_service
+        .export_users(query, operator_user_id)
+        .await?;
 
     let columns = [
         ExcelColumn { key: "userId", header: ("用户编号", "User ID"), getter: |r: &UserVo| CellValue::Text(r.user.user_id.to_string().into()) },
@@ -266,10 +275,39 @@ pub async fn remove(
 
     // 单个 ID 走原路径（保持现有垂直越权校验语义）
     // 批量 ID 调用新增的 delete_users 事务方法（原子性保证）
+    let deleted_user_ids = user_ids.clone();
     state
         .user_service
         .delete_users(user_ids, operator_user_id)
         .await?;
+
+    // P0-5 修复：用户删除后失效其活动会话
+    // 写入 pwd_changed:{user_id} 标记，使被删除用户已签发的 JWT 在 auth 中间件被拒绝
+    // （auth.rs 检查 pwd_changed > token.iat 则返回 401）
+    // TTL 与 JWT 最大有效期对齐，fail-closed：写入失败返回错误，避免旧 token 继续可用
+    let now = chrono::Utc::now().timestamp();
+    let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
+    let mut redis = state.redis.clone();
+    for uid in &deleted_user_ids {
+        let pwd_changed_key = format!("pwd_changed:{}", uid);
+        if let Err(e) = redis::cmd("SETEX")
+            .arg(&pwd_changed_key)
+            .arg(pwd_ttl)
+            .arg(now)
+            .query_async::<()>(&mut redis)
+            .await
+        {
+            tracing::error!(
+                user_id = uid,
+                error = %e,
+                "删除用户后写入 pwd_changed 标记失败（fail-closed）"
+            );
+            return Err(AppError::internal(
+                &crate::tr!("error.user.pwd_reset_token_invalidate_failed"),
+            ));
+        }
+    }
+
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -293,6 +331,33 @@ pub async fn change_status(
             operator_user_id,
         )
         .await?;
+
+    // P0-5 补充：停用用户时失效其活动会话（写入 pwd_changed 标记使旧 token 被拒绝）
+    // 复用 pwd_changed 机制：停用后旧 token 立即失效，用户重新启用后需重新登录（安全行为）
+    // 启用时不需要清除标记（旧 token 已过期或用户需重新登录是合理的）
+    if dto.status == "1" {
+        let now = chrono::Utc::now().timestamp();
+        let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
+        let pwd_changed_key = format!("pwd_changed:{}", dto.user_id);
+        let mut redis = state.redis.clone();
+        if let Err(e) = redis::cmd("SETEX")
+            .arg(&pwd_changed_key)
+            .arg(pwd_ttl)
+            .arg(now)
+            .query_async::<()>(&mut redis)
+            .await
+        {
+            tracing::error!(
+                user_id = dto.user_id,
+                error = %e,
+                "停用用户后写入 pwd_changed 标记失败（fail-closed）"
+            );
+            return Err(AppError::internal(
+                &crate::tr!("error.user.pwd_reset_token_invalidate_failed"),
+            ));
+        }
+    }
+
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
