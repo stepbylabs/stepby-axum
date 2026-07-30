@@ -425,6 +425,21 @@ impl SysNoticeService {
         Ok(())
     }
 
+    /// 标记用户所有未读公告为已读（"全部已读"功能）
+    ///
+    /// 与 mark_read_all 的区别：
+    /// - mark_read_all 需要传入具体 notice IDs，前端只能拿到当前页的 ID
+    /// - mark_all_unread_read 服务端查询所有未读并标记，确保跨页未读也被清除
+    ///
+    /// 返回标记的条数（用于响应消息展示）
+    pub async fn mark_all_unread_read(
+        &self,
+        user_id: i64,
+    ) -> Result<u64, ServiceError> {
+        let count = self.read_repo.mark_all_unread_read(user_id).await?;
+        Ok(count)
+    }
+
     /// 查询公告已读用户列表（分页）
     pub async fn get_read_users_page(
         &self,

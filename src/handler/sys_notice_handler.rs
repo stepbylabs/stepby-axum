@@ -213,6 +213,23 @@ pub async fn mark_read_all(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
+/// POST /system/notice/markAllUnreadRead
+/// 标记当前用户所有未读公告为已读（"全部已读"功能，跨页生效）
+///
+/// 与 markReadAll 的区别：markReadAll 需要前端传入具体 notice IDs，
+/// 前端分页时只能拿到当前页的 ID；本接口服务端查询所有未读并标记，确保跨页未读也被清除。
+pub async fn mark_all_unread_read(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<u64>, AppError> {
+    let user_id: i64 = operator.user_id().parse().unwrap_or(0);
+    let count = state
+        .notice_service
+        .mark_all_unread_read(user_id)
+        .await?;
+    Ok(AjaxResult::success(count))
+}
+
 /// 标记已读请求参数
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

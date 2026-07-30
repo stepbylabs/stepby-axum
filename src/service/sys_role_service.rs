@@ -310,16 +310,49 @@ impl SysRoleService {
     }
 
     /// 导出角色列表（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
-    pub async fn export_roles(&self, query: RoleQueryDto) -> Result<Vec<SysRoleModel>, ServiceError> {
-        // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS）
+    pub async fn export_roles(
+        &self,
+        query: RoleQueryDto,
+        operator_user_id: Option<i64>,
+    ) -> Result<Vec<SysRoleModel>, ServiceError> {
+        // P0-2 修复：导出接口需应用与 list 相同的数据权限过滤，防止越权导出
+        let mut scope_role_ids: Option<Vec<i64>> = None;
+
+        if let Some(op_uid) = operator_user_id {
+            if op_uid != SUPER_ADMIN_USER_ID {
+                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
+                let min_scope = op_roles
+                    .iter()
+                    .filter_map(|r| r.data_scope.as_deref())
+                    .filter_map(|s| s.parse::<i32>().ok())
+                    .min();
+
+                if let Some(scope) = min_scope {
+                    match scope {
+                        1 => { /* 全部数据：不追加过滤 */ }
+                        2..=5 | _ => {
+                            // 角色无 dept_id，data_scope 2/3/4/5 降级为"仅本人"
+                            let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+                            scope_role_ids = Some(ids);
+                        }
+                    }
+                } else {
+                    let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+                    scope_role_ids = Some(ids);
+                }
+            }
+        }
+
+        // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS + 数据权限过滤）
         let (rows, _) = self
             .role_repo
-            .find_page_filtered(
+            .find_page_with_data_scope(
                 0,
                 crate::common::page::EXPORT_MAX_ROWS,
                 query.role_name.as_deref(),
                 query.role_key.as_deref(),
                 query.status.as_deref(),
+                scope_role_ids.as_deref(),
                 None,
                 None,
             )

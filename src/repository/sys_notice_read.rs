@@ -250,6 +250,60 @@ impl SysNoticeReadRepository {
             .await
     }
 
+    /// 标记用户所有未读公告为已读（"全部已读"功能）
+    ///
+    /// 实现策略：先查询所有状态正常的公告 ID（status='0'），再查询用户已读的公告 ID，
+    /// 计算 diff 后批量 INSERT OR IGNORE。比"全量 INSERT OR IGNORE"更高效：
+    /// - 仅插入未读记录，避免对已读记录做无效 INSERT
+    /// - 已读数量可能很大（历史累积），但未读通常远小于已读
+    ///
+    /// 安全：使用参数化查询，user_id 来源可信（Operator 提取），无注入风险。
+    pub async fn mark_all_unread_read(
+        &self,
+        user_id: i64,
+    ) -> Result<u64, DbErr> {
+        use crate::entity::sys_notice::{Entity as SysNotice, Column as NoticeColumn};
+        use sea_orm::QuerySelect;
+
+        // 1. 查询所有状态正常的公告 ID
+        let all_notice_ids: Vec<i64> = SysNotice::find()
+            .filter(NoticeColumn::Status.eq("0"))
+            .select_only()
+            .column(NoticeColumn::NoticeId)
+            .into_tuple::<i64>()
+            .all(self.base.db())
+            .await?;
+
+        if all_notice_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // 2. 查询用户已读的公告 ID
+        let read_notice_ids: Vec<i64> = SysNoticeRead::find()
+            .filter(Column::UserId.eq(user_id))
+            .select_only()
+            .column(Column::NoticeId)
+            .into_tuple::<i64>()
+            .all(self.base.db())
+            .await?;
+
+        // 3. 计算未读公告 ID
+        let read_set: std::collections::HashSet<i64> = read_notice_ids.into_iter().collect();
+        let unread_ids: Vec<i64> = all_notice_ids
+            .into_iter()
+            .filter(|id| !read_set.contains(id))
+            .collect();
+
+        if unread_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let marked_count = unread_ids.len() as u64;
+        // 4. 批量插入未读记录（依赖唯一约束 + 冲突忽略）
+        self.mark_read_batch(unread_ids, user_id).await?;
+        Ok(marked_count)
+    }
+
     /// 删除指定公告的所有已读记录（使用指定连接，用于事务内调用）
     pub async fn delete_by_notice_ids_conn<C: ConnectionTrait>(
         &self,
