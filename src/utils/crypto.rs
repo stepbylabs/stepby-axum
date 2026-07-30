@@ -172,6 +172,48 @@ mod crypto_tests {
         assert!(!is_encrypted("plain"));
         assert!(!is_encrypted(""));
     }
+
+    // M-3：OnlineSession exp 字段序列化/反序列化兼容性测试
+
+    #[test]
+    fn test_online_session_exp_serialization() {
+        // 新会话：exp > 0（JWT 实际过期时间戳）
+        let session = OnlineSession {
+            user_id: 1,
+            username: "admin".to_string(),
+            ip: "127.0.0.1".to_string(),
+            login_time: "2026-07-31 12:00:00".to_string(),
+            browser: "Chrome".to_string(),
+            os: "Windows".to_string(),
+            jti: "test-jti".to_string(),
+            dept_name: "研发部".to_string(),
+            exp: 1800000000,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"exp\":1800000000"));
+        // 反序列化回来 exp 保持一致
+        let deserialized: OnlineSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.exp, 1800000000);
+    }
+
+    #[test]
+    fn test_online_session_legacy_json_without_exp() {
+        // 旧 JSON（v2.13 前，无 exp 字段）反序列化时 exp 应默认为 0
+        let legacy_json = r#"{
+            "user_id": 2,
+            "username": "ry",
+            "ip": "192.168.1.1",
+            "login_time": "2026-07-30 10:00:00",
+            "browser": "Firefox",
+            "os": "Linux",
+            "jti": "old-jti",
+            "dept_name": "测试部"
+        }"#;
+        let session: OnlineSession = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(session.exp, 0, "旧 JSON 反序列化时 exp 应默认为 0");
+        assert_eq!(session.username, "ry");
+        assert_eq!(session.dept_name, "测试部");
+    }
 }
 
 /// 在线会话信息（P1-19 方案 B：存储于 Redis `online:{token_hash}`）
@@ -204,4 +246,8 @@ pub struct OnlineSession {
     /// 部门名称（v2.9 新增，旧 JSON 反序列化时默认空字符串）
     #[serde(default)]
     pub dept_name: String,
+    /// JWT 过期时间戳（UTC 秒，v2.13 新增用于 force_logout 精确计算黑名单 TTL）
+    /// 旧 JSON 反序列化时默认 0，force_logout 时回退到 jwt.expire_hours 保守上界
+    #[serde(default)]
+    pub exp: i64,
 }

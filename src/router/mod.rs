@@ -224,11 +224,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 /// - allow_credentials: true（支持 Cookie 传递）
 /// - allow_origin: 从 config.toml 的 server.cors_origins 读取
 fn build_cors_layer(server_config: &ServerConfig) -> CorsLayer {
+    // 过滤通配符 "*"：allow_credentials(true) 与 allow_origin: * 不兼容
+    // 若运维误配置 "*"，浏览器会拒绝所有带凭据的跨域请求
     let origins: Vec<HeaderValue> = server_config
         .cors_origins
         .iter()
+        .filter(|o| o.as_str() != "*")
         .filter_map(|o| o.parse().ok())
         .collect();
+    if origins.is_empty() {
+        tracing::warn!("CORS origins 为空或仅含通配符，CORS 将拒绝所有跨域请求");
+    }
 
     CorsLayer::new()
         .allow_methods([

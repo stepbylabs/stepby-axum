@@ -915,10 +915,27 @@ impl SysRoleService {
     }
 
     /// 取消单个用户授权（删除 sys_user_role 中 user_id+role_id 记录）
+    ///
+    /// 安全校验（P0-C2）：
+    /// - 超管角色保护：禁止操作 SUPER_ADMIN_ROLE_ID 的授权
+    /// - 超管用户保护：禁止取消 SUPER_ADMIN_USER_ID 的超管角色绑定
+    /// - 垂直越权校验：operator 不得对高于自身角色的用户执行取消授权
     pub async fn cancel_auth_user(
         &self,
         dto: CancelAuthUserDto,
+        operator_user_id: i64,
     ) -> Result<(), ServiceError> {
+        // 超管角色保护：禁止操作超管角色的授权绑定
+        if dto.role_id == SUPER_ADMIN_ROLE_ID {
+            return Err(ServiceError::bad_request(
+                &crate::tr!("error.user.admin_role_forbidden"),
+            ));
+        }
+
+        // 垂直越权校验：operator 不得对持有更高优先级角色的用户执行取消授权
+        self.check_vertical_auth_by_user_id(operator_user_id, dto.user_id)
+            .await?;
+
         self.user_role_repo
             .delete_by_user_and_role(dto.user_id, dto.role_id)
             .await?;
@@ -928,13 +945,31 @@ impl SysRoleService {
     /// 批量取消用户授权（取消多个用户对某角色的授权）
     ///
     /// 前端通过 URL query 传递 roleId + userIds（逗号分隔）
+    ///
+    /// 安全校验（P0-C3）：
+    /// - 超管角色保护：禁止操作 SUPER_ADMIN_ROLE_ID 的授权
+    /// - 垂直越权校验：operator 不得对高于自身角色的用户执行取消授权
     pub async fn cancel_all_auth_users(
         &self,
         dto: AuthUserSelectDto,
+        operator_user_id: i64,
     ) -> Result<(), ServiceError> {
+        // 超管角色保护
+        if dto.role_id == SUPER_ADMIN_ROLE_ID {
+            return Err(ServiceError::bad_request(
+                &crate::tr!("error.user.admin_role_forbidden"),
+            ));
+        }
+
         let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids);
         if user_ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!("error.role.user_id_empty")));
+        }
+
+        // 垂直越权校验：批量检查每个目标用户
+        for target_user_id in &user_ids {
+            self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
+                .await?;
         }
 
         self.user_role_repo
@@ -946,13 +981,31 @@ impl SysRoleService {
     /// 批量授权用户选择（为多个用户分配指定角色）
     ///
     /// 前端通过 URL query 传递 roleId + userIds（逗号分隔）
+    ///
+    /// 安全校验（P0-C1）：
+    /// - 超管角色保护：禁止将 SUPER_ADMIN_ROLE_ID 分配给任何用户
+    /// - 垂直越权校验：operator 不得对高于自身角色的用户执行授权
     pub async fn select_all_auth_users(
         &self,
         dto: AuthUserSelectDto,
+        operator_user_id: i64,
     ) -> Result<(), ServiceError> {
+        // 超管角色保护：禁止分配超管角色
+        if dto.role_id == SUPER_ADMIN_ROLE_ID {
+            return Err(ServiceError::bad_request(
+                &crate::tr!("error.user.admin_role_forbidden"),
+            ));
+        }
+
         let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids);
         if user_ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!("error.role.user_id_empty")));
+        }
+
+        // 垂直越权校验：批量检查每个目标用户
+        for target_user_id in &user_ids {
+            self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
+                .await?;
         }
 
         // 先查已存在的关联，避免重复插入（通过 Repository）
@@ -982,6 +1035,36 @@ impl SysRoleService {
             })
             .collect();
         self.user_role_repo.insert_many(models).await?;
+        Ok(())
+    }
+
+    /// 垂直越权校验：基于目标用户当前绑定的角色
+    ///
+    /// 复用 SysUserService.check_vertical_auth_by_user_id 的语义：
+    /// - 超管（user_id==1）豁免
+    /// - 其他 operator：取目标用户角色中最小 role_sort，若小于 operator 最小 role_sort 则拒绝
+    async fn check_vertical_auth_by_user_id(
+        &self,
+        operator_user_id: i64,
+        target_user_id: i64,
+    ) -> Result<(), ServiceError> {
+        if operator_user_id == SUPER_ADMIN_USER_ID {
+            return Ok(());
+        }
+        let op_roles = self.role_repo.find_by_user_id(operator_user_id).await?;
+        let op_min_sort = op_roles.iter().map(|r| r.role_sort).min();
+
+        let target_roles = self.role_repo.find_by_user_id(target_user_id).await?;
+        let target_min_sort = target_roles.iter().map(|r| r.role_sort).min();
+
+        if let (Some(target_min), Some(op_min)) = (target_min_sort, op_min_sort)
+            && target_min < op_min
+        {
+            return Err(ServiceError::new(
+                403,
+                crate::tr!("error.user.higher_role_forbidden"),
+            ));
+        }
         Ok(())
     }
 

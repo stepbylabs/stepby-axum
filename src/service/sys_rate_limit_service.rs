@@ -144,7 +144,7 @@ impl SysRateLimitService {
     /// 因此采用 SCAN + DEL 批量清除所有相关键。
     ///
     /// M-2：同时清空进程内 local_cache，确保配置变更后立即生效（最长延迟 0s）。
-    async fn invalidate_all_cache(&self) {
+    pub async fn invalidate_all_cache(&self) {
         // M-2：先清空进程内缓存（同步、立即生效）
         // H-1：Mutex 中毒时恢复 Guard 而非忽略（避免中毒后缓存永久失效）
         {

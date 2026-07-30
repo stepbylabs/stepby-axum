@@ -333,7 +333,36 @@ pub async fn change_status(
         .user_id()
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
-    state
+
+    // P0-C1 修复：停用用户时先写 Redis pwd_changed 标记，再更新 DB；DB 失败则回滚 Redis 标记
+    // 复用 pwd_changed 机制：停用后旧 token 立即失效，用户重新启用后需重新登录（安全行为）
+    // 启用时不需要写标记（旧 token 已过期或用户需重新登录是合理的）
+    let needs_pwd_changed = dto.status == "1";
+    let pwd_changed_key = format!("pwd_changed:{}", dto.user_id);
+    let now = chrono::Utc::now().timestamp();
+    let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
+    let mut redis = state.redis.clone();
+
+    // 步骤1：停用时先写 Redis pwd_changed（fail-closed：写入失败则拒绝停用）
+    if needs_pwd_changed {
+        redis::cmd("SETEX")
+            .arg(&pwd_changed_key)
+            .arg(pwd_ttl)
+            .arg(now)
+            .query_async::<()>(&mut redis)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    user_id = dto.user_id,
+                    error = %e,
+                    "停用用户前预写 pwd_changed 标记失败（fail-closed 拒绝停用）"
+                );
+                AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
+            })?;
+    }
+
+    // 步骤2：更新 DB 用户状态
+    let db_result = state
         .user_service
         .update_user_status(
             dto.user_id,
@@ -341,32 +370,17 @@ pub async fn change_status(
             operator.username(),
             operator_user_id,
         )
-        .await?;
+        .await;
 
-    // P0-5 补充：停用用户时失效其活动会话（写入 pwd_changed 标记使旧 token 被拒绝）
-    // 复用 pwd_changed 机制：停用后旧 token 立即失效，用户重新启用后需重新登录（安全行为）
-    // 启用时不需要清除标记（旧 token 已过期或用户需重新登录是合理的）
-    if dto.status == "1" {
-        let now = chrono::Utc::now().timestamp();
-        let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
-        let pwd_changed_key = format!("pwd_changed:{}", dto.user_id);
-        let mut redis = state.redis.clone();
-        if let Err(e) = redis::cmd("SETEX")
-            .arg(&pwd_changed_key)
-            .arg(pwd_ttl)
-            .arg(now)
-            .query_async::<()>(&mut redis)
-            .await
-        {
-            tracing::error!(
-                user_id = dto.user_id,
-                error = %e,
-                "停用用户后写入 pwd_changed 标记失败（fail-closed）"
-            );
-            return Err(AppError::internal(
-                &crate::tr!("error.user.pwd_reset_token_invalidate_failed"),
-            ));
+    // 步骤3：DB 失败则回滚 Redis 标记
+    if let Err(e) = db_result {
+        if needs_pwd_changed {
+            let _ = redis::cmd("DEL")
+                .arg(&pwd_changed_key)
+                .query_async::<()>(&mut redis)
+                .await;
         }
+        return Err(e.into());
     }
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
@@ -385,18 +399,15 @@ pub async fn reset_pwd(
         .user_id()
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
-    state
-        .user_service
-        .reset_user_pwd(dto, operator.username(), operator_user_id)
-        .await?;
 
-    // P0-R81-007：改密后写入 pwd_changed:{user_id} 标记，使改密前签发的旧 token 失效
-    // TTL 与 JWT 最大有效期对齐：expire_hours * SECS_PER_HOUR 秒（修复 REGRESS-001：原硬编码 7200s < JWT 24h，2h 后旧 token 可重用）
-    // fail-closed：写入失败返回错误，避免旧 token 继续可用
+    // P0-C1 修复：先写 Redis pwd_changed 标记，再更新 DB；DB 失败则回滚 Redis 标记
+    // TTL 与 JWT 最大有效期对齐：expire_hours * SECS_PER_HOUR 秒
     let pwd_changed_key = format!("pwd_changed:{}", user_id);
     let now = chrono::Utc::now().timestamp();
     let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
     let mut redis = state.redis.clone();
+
+    // 步骤1：先写 Redis pwd_changed（fail-closed：写入失败则拒绝重置）
     redis::cmd("SETEX")
         .arg(&pwd_changed_key)
         .arg(pwd_ttl)
@@ -404,9 +415,28 @@ pub async fn reset_pwd(
         .query_async::<()>(&mut redis)
         .await
         .map_err(|e| {
-            tracing::error!("写入 pwd_changed 标记失败（fail-closed）: {}", e);
+            tracing::error!(
+                user_id,
+                error = %e,
+                "重置密码前预写 pwd_changed 标记失败（fail-closed 拒绝重置）"
+            );
             AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
         })?;
+
+    // 步骤2：更新 DB 密码
+    let db_result = state
+        .user_service
+        .reset_user_pwd(dto, operator.username(), operator_user_id)
+        .await;
+
+    // 步骤3：DB 失败则回滚 Redis 标记
+    if let Err(e) = db_result {
+        let _ = redis::cmd("DEL")
+            .arg(&pwd_changed_key)
+            .query_async::<()>(&mut redis)
+            .await;
+        return Err(e.into());
+    }
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_reset")))
 }
@@ -428,18 +458,15 @@ pub async fn update_profile_pwd(
         old_password: dto.old_password,
         new_password: dto.new_password,
     };
-    state
-        .user_service
-        .update_user_password(user_id, pwd_dto)
-        .await?;
 
-    // P0-R81-007：改密后写入 pwd_changed:{user_id} 标记，使改密前签发的旧 token 失效
-    // TTL 与 JWT 最大有效期对齐：expire_hours * SECS_PER_HOUR 秒（修复 REGRESS-001：原硬编码 7200s < JWT 24h）
-    // fail-closed：写入失败返回错误，避免旧 token 继续可用
+    // P0-C1 修复：先写 Redis pwd_changed 标记，再更新 DB；DB 失败则回滚 Redis 标记
+    // 这样即使 Redis 写入失败，DB 也不会被更新（fail-closed）；DB 成功则标记一定存在
     let pwd_changed_key = format!("pwd_changed:{}", user_id);
     let now = chrono::Utc::now().timestamp();
     let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
     let mut redis = state.redis.clone();
+
+    // 步骤1：先写 Redis pwd_changed（fail-closed：写入失败则拒绝改密）
     redis::cmd("SETEX")
         .arg(&pwd_changed_key)
         .arg(pwd_ttl)
@@ -447,9 +474,28 @@ pub async fn update_profile_pwd(
         .query_async::<()>(&mut redis)
         .await
         .map_err(|e| {
-            tracing::error!("写入 pwd_changed 标记失败（fail-closed）: {}", e);
+            tracing::error!(
+                user_id,
+                error = %e,
+                "改密前预写 pwd_changed 标记失败（fail-closed 拒绝改密）"
+            );
             AppError::internal(&crate::tr!("error.user.pwd_change_token_invalidate_failed"))
         })?;
+
+    // 步骤2：更新 DB 密码
+    let db_result = state
+        .user_service
+        .update_user_password(user_id, pwd_dto)
+        .await;
+
+    // 步骤3：DB 失败则回滚 Redis 标记（避免误登出用户）
+    if let Err(e) = db_result {
+        let _ = redis::cmd("DEL")
+            .arg(&pwd_changed_key)
+            .query_async::<()>(&mut redis)
+            .await;
+        return Err(e.into());
+    }
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_change")))
 }
@@ -556,9 +602,17 @@ pub async fn dept_tree_select(
 /// 故使用自定义 AuthRoleResult 而非 AjaxResult<UserAuthRoleVo>。
 pub async fn auth_role_get(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(user_id): Path<i64>,
 ) -> Result<AuthRoleResult, AppError> {
-    let vo: UserAuthRoleVo = state.user_service.get_auth_role(user_id).await?;
+    let operator_user_id: i64 = operator
+        .user_id()
+        .parse()
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
+    let vo: UserAuthRoleVo = state
+        .user_service
+        .get_auth_role(user_id, operator_user_id)
+        .await?;
     Ok(AuthRoleResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),

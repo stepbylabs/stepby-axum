@@ -9,7 +9,7 @@
 
 use chrono::NaiveDateTime;
 use futures::future::FutureExt;
-use sea_orm::{DatabaseConnection, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait};
 use serde::Deserialize;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
@@ -27,6 +27,7 @@ use crate::entity::sys_user::{
 };
 use crate::entity::sys_user_role::ActiveModel as SysUserRoleActiveModel;
 use crate::entity::sys_user_post::ActiveModel as SysUserPostActiveModel;
+use crate::entity::sys_notice_read::{Column as NoticeReadColumn, Entity as SysNoticeRead};
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_post::SysPostRepository;
 use crate::repository::sys_role::SysRoleRepository;
@@ -1026,6 +1027,12 @@ impl SysUserService {
 
                     // 3. 物理删除 sys_user_post 关联（SEC-005：补全孤儿记录清理）
                     user_post_repo.delete_by_user_id_conn(txn, user_id).await?;
+
+                    // 4. 物理删除 sys_notice_read 关联（清理已读记录，避免已读列表显示已删除用户）
+                    SysNoticeRead::delete_many()
+                        .filter(NoticeReadColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
                     Ok(())
                 }
                 .boxed()
@@ -1258,6 +1265,7 @@ impl SysUserService {
     /// 安全校验（P0-R81-005）：垂直越权防护
     /// - 超管（user_id==1）豁免
     /// - 其他 operator：校验待分配角色是否比 operator 自己角色更高（REGRESS-002：复用通用辅助方法）
+    /// - 同时校验目标用户当前角色是否比 operator 更高（P0-H3：防止降级高权限用户）
     pub async fn assign_user_roles(
         &self,
         user_id: i64,
@@ -1269,8 +1277,12 @@ impl SysUserService {
             return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_role_forbidden")));
         }
 
-        // 垂直越权校验（P0-R81-005 / REGRESS-002）
+        // 垂直越权校验（P0-R81-005 / REGRESS-002）：待分配角色不得高于 operator
         self.check_vertical_auth_by_role_ids(operator_user_id, &role_ids)
+            .await?;
+
+        // 垂直越权校验（P0-H3）：目标用户当前角色不得高于 operator，防止降级高权限用户
+        self.check_vertical_auth_by_user_id(operator_user_id, user_id)
             .await?;
 
         let existing = self.user_repo.base().find_by_id(user_id).await?
@@ -1412,7 +1424,19 @@ impl SysUserService {
     pub async fn get_auth_role(
         &self,
         user_id: i64,
+        operator_user_id: i64,
     ) -> Result<UserAuthRoleVo, ServiceError> {
+        // 超管用户保护：禁止查看超管用户的授权信息（防止信息收集）
+        if user_id == SUPER_ADMIN_USER_ID && operator_user_id != SUPER_ADMIN_USER_ID {
+            return Err(ServiceError::bad_request(
+                &crate::tr!("error.user.admin_role_forbidden"),
+            ));
+        }
+
+        // 垂直越权校验：operator 不得查看比自己更高优先级用户的授权信息
+        self.check_vertical_auth_by_user_id(operator_user_id, user_id)
+            .await?;
+
         let user = self.user_repo.base().find_by_id(user_id).await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if user.del_flag.as_deref() == Some("2") {

@@ -560,7 +560,7 @@ pub async fn download(
     tag = "common"
 )]
 pub async fn download_resource(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(params): Query<DownloadResourceParams>,
 ) -> Result<Response, AppError> {
     let resource = params.resource.trim();
@@ -575,14 +575,24 @@ pub async fn download_resource(
         return Err(AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid")));
     }
 
-    // 规范化路径二次校验：canonicalize 后必须仍以 uploads/ 开头
+    // 规范化路径二次校验：canonicalize 后必须位于 upload_root 内
     let path = std::path::Path::new(resource);
     let canonical = tokio::fs::canonicalize(path)
         .await
         .map_err(|_| AppError::not_found(&crate::tr!("error.common_handler.resource_not_found")))?;
-    let canonical_str = canonical.to_string_lossy();
-    // 跨平台兼容：Windows 下 canonicalize 返回 `\\?\D:\...\uploads\...`
-    if !canonical_str.replace('\\', "/").contains("uploads/") {
+
+    // 解析 upload_root 并 canonicalize，确保资源路径不会逃逸出上传目录
+    let upload_root = crate::common::resolve_upload_root(&state.config.upload);
+    let upload_root_canonical = tokio::fs::canonicalize(&upload_root)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, upload_root = %upload_root.display(), "上传根目录 canonicalize 失败");
+            AppError::internal(&crate::tr!("error.common_handler.resource_path_invalid"))
+        })?;
+    // 跨平台兼容：统一用正斜杠比较前缀
+    let canonical_norm = canonical.to_string_lossy().replace('\\', "/");
+    let upload_root_norm = upload_root_canonical.to_string_lossy().replace('\\', "/");
+    if !canonical_norm.starts_with(&upload_root_norm) {
         return Err(AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid")));
     }
 

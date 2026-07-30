@@ -396,5 +396,5 @@ pub async fn dict_data_export(
             }) },
     ];
 
-    export_to_excel("字典数据", "dict_data", &columns, &rows).await
+    export_to_excel(&crate::tr!("excel.sheet.dict_data"), "dict_data", &columns, &rows).await
 }

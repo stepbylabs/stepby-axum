@@ -307,9 +307,17 @@ pub async fn unallocated_user_list(
 /// 取消单个用户授权
 pub async fn auth_user_cancel(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Json(dto): Json<CancelAuthUserDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.role_service.cancel_auth_user(dto).await?;
+    let operator_user_id: i64 = operator
+        .user_id()
+        .parse()
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
+    state
+        .role_service
+        .cancel_auth_user(dto, operator_user_id)
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.cancel_auth")))
 }
 
@@ -317,9 +325,17 @@ pub async fn auth_user_cancel(
 /// 批量取消用户授权（通过 URL query 传递 roleId + userIds）
 pub async fn auth_user_cancel_all(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(dto): Query<AuthUserSelectDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.role_service.cancel_all_auth_users(dto).await?;
+    let operator_user_id: i64 = operator
+        .user_id()
+        .parse()
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
+    state
+        .role_service
+        .cancel_all_auth_users(dto, operator_user_id)
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.cancel_auth")))
 }
 
@@ -327,9 +343,17 @@ pub async fn auth_user_cancel_all(
 /// 批量授权用户选择（通过 URL query 传递 roleId + userIds）
 pub async fn auth_user_select_all(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(dto): Query<AuthUserSelectDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.role_service.select_all_auth_users(dto).await?;
+    let operator_user_id: i64 = operator
+        .user_id()
+        .parse()
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
+    state
+        .role_service
+        .select_all_auth_users(dto, operator_user_id)
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.auth")))
 }
 

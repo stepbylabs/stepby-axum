@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.2 | 更新日期：2026-07-30
+> 版本：v0.3.4 | 更新日期：2026-07-31
 
 ## 目录
 
@@ -1283,6 +1283,13 @@ tests/
 | menu/dept handleSaveSort 按钮无 loading | 排序保存期间可重复点击 | useTreeTableSort 新增 sortLoading ref 并返回，组件绑定 :loading |
 | tab.ts refreshPage/closePage 缺少 .catch() | Promise rejection 未捕获 | 添加 .catch() 错误日志兜底 |
 | sys_dept_service 未使用的 FromQueryResult 导入 | 重构后遗留 | 移除未使用导入消除 warning |
+
+#### v0.3.4 认证精确化与权限审计（2026-07-31，第十轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| force_logout 黑名单 TTL 过度保守 | `monitor_online_handler.rs` 用 `jwt.expire_hours * SECS_PER_HOUR` 作为黑名单 TTL（保守上界），用户登录 1 小时后被强退，黑名单仍保留 24 小时（多 23 小时内存浪费） | `OnlineSession` 新增 `exp` 字段（i64，UTC 秒），登录时由 `claims.exp` 写入；force_logout 用 `session.exp - now` 计算精确剩余 TTL；旧 JSON（exp=0）回退到 `jwt.expire_hours` 上界 |
+| 权限拒绝事件无审计痕迹 | `oper_log_middleware` 挂在 `permission_middleware` 之后，权限拒绝时直接返回 403，oper_log 无法记录，导致越权尝试无审计日志 | `permission_middleware` 内新增 `spawn_permission_denied_audit` 函数，权限拒绝时直接 spawn 写入 `sys_oper_log`（best-effort，不阻断 403 响应）；新增 `log.auth.permission_denied` i18n key（支持 `{{perm}}` 占位符）；`infer_module_title` 改为 pub(crate) 以便复用 |
 
 ---
 

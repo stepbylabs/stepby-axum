@@ -22,6 +22,10 @@ use crate::common::{like_escape, TreeSelectVo};
 use crate::entity::sys_dept::{
     ActiveModel as SysDeptActiveModel, Column as DeptColumn, Entity as SysDept, Model as SysDeptModel,
 };
+use crate::entity::sys_role_dept::{
+    Column as RoleDeptColumn, Entity as SysRoleDept,
+};
+use crate::entity::sys_user::{Column as UserColumn, Entity as SysUser};
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_role::SysRoleRepository;
 use crate::repository::sys_role_dept::SysRoleDeptRepository;
@@ -499,11 +503,15 @@ impl SysDeptService {
         Ok(updated)
     }
 
-    /// 删除部门（校验子部门 + 角色关联，软删除）
+    /// 删除部门（事务：TOCTOU 防护 + 级联校验 + 软删除）
     ///
-    /// 删除前置校验：
+    /// P0-H4 TOCTOU 修复：所有校验和软删除放入单个事务，避免事务外预检查后
+    /// 被其他事务插入新关联（如新用户绑定此部门）导致数据不一致。
+    ///
+    /// 删除前置校验（事务内）：
     /// 1. 无子部门（del_flag = '0' 的直接子部门）
     /// 2. 无角色关联（sys_role_dept 中无关联记录）
+    /// 3. 无用户关联（sys_user.dept_id 指向此部门的未删除用户）
     pub async fn delete_dept(&self, dept_id: i64) -> Result<(), ServiceError> {
         let existing = self
             .dept_repo
@@ -515,24 +523,69 @@ impl SysDeptService {
             return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
         }
 
-        // 子部门校验
-        let child_select = SysDept::find()
-            .filter(DeptColumn::ParentId.eq(dept_id))
-            .filter(DeptColumn::DelFlag.eq("0"));
-        let child_count = self.dept_repo.base().find_many(child_select).await?.len() as u64;
-        if child_count > 0 {
-            return Err(ServiceError::bad_request(&crate::tr!("error.dept.has_children")));
-        }
+        let dept_repo = self.dept_repo.clone();
+        let user_repo = self.user_repo.clone();
+        // P0-H4 TOCTOU 修复：将所有校验和软删除放入事务内
+        let txn_result = self
+            .db()
+            .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                let dept_repo = dept_repo.clone();
+                let user_repo = user_repo.clone();
+                async move {
+                    // 1. 事务内重新检查子部门
+                    let child_select = SysDept::find()
+                        .filter(DeptColumn::ParentId.eq(dept_id))
+                        .filter(DeptColumn::DelFlag.eq("0"));
+                    let child_count = dept_repo.base().find_many_conn(txn, child_select).await?.len() as u64;
+                    if child_count > 0 {
+                        return Err(sea_orm::DbErr::Custom(
+                            crate::tr!("error.dept.has_children"),
+                        ));
+                    }
 
-        // 角色关联校验
-        let role_count = self.role_dept_repo.find_by_dept_id(dept_id).await?.len() as u64;
-        if role_count > 0 {
-            return Err(ServiceError::bad_request(&crate::tr!("error.dept.assigned_to_role")));
-        }
+                    // 2. 事务内重新检查角色关联
+                    let role_count = SysRoleDept::find()
+                        .filter(RoleDeptColumn::DeptId.eq(dept_id))
+                        .all(txn)
+                        .await?
+                        .len() as u64;
+                    if role_count > 0 {
+                        return Err(sea_orm::DbErr::Custom(
+                            crate::tr!("error.dept.assigned_to_role"),
+                        ));
+                    }
 
-        // 软删除（del_flag = '2'）
-        self.dept_repo.soft_delete(dept_id).await?;
-        Ok(())
+                    // 3. 事务内重新检查用户关联
+                    let user_select = SysUser::find()
+                        .filter(UserColumn::DeptId.eq(dept_id))
+                        .filter(UserColumn::DelFlag.eq("0"));
+                    let user_count = user_repo.base().find_many_conn(txn, user_select).await?.len() as u64;
+                    if user_count > 0 {
+                        return Err(sea_orm::DbErr::Custom(
+                            crate::tr!("error.dept.has_users"),
+                        ));
+                    }
+
+                    // 4. 软删除（del_flag = '2'）
+                    let mut am: SysDeptActiveModel = existing.into();
+                    am.del_flag = Set(Some("2".to_string()));
+                    dept_repo.base().update_conn(txn, am).await?;
+
+                    Ok(())
+                }
+                .boxed()
+            })
+            .await;
+
+        match txn_result {
+            Ok(()) => Ok(()),
+            // TOCTOU 检查的业务错误：映射为 400 bad_request
+            Err(sea_orm::TransactionError::Transaction(sea_orm::DbErr::Custom(msg))) => {
+                Err(ServiceError::bad_request(&msg))
+            }
+            // 其他数据库/事务错误：走通用转换
+            Err(e) => Err(ServiceError::from(e)),
+        }
     }
 
     /// 部门下拉树（TreeSelect 格式，对齐前端 treeselect 接口）

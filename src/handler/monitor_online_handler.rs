@@ -32,7 +32,7 @@ use crate::utils::crypto::OnlineSession;
 ///
 /// KEYS[1] = `blacklist:{token_hash}`
 /// KEYS[2] = `online:{token_hash}`
-/// ARGV[1] = 黑名单 TTL（秒，保守上界 = jwt_config.expire_hours * SECS_PER_HOUR）
+/// ARGV[1] = 黑名单 TTL（秒，M-3：精确剩余有效期 = session.exp - now，回退到 jwt.expire_hours 上界）
 ///
 /// 使用 Lua 保证原子性，避免 SETEX 与 DEL 分离导致：
 /// - 强退后 online key 仍存在（用户出现在在线列表）
@@ -250,11 +250,11 @@ async fn fallback_to_logininfor(
 /// 3. Lua 原子化 SETEX `blacklist:{token_hash}` + DEL `online:{token_hash}`
 /// 4. fail-closed：Redis 故障返回 503
 ///
-/// Lua 脚本 TTL 说明：
-/// ARGV[1] = `jwt_config.expire_hours * SECS_PER_HOUR`（保守上界）。
-/// OnlineSession 不存储 JWT exp，故使用 JWT 最大有效期作为黑名单 TTL。
-/// 这保证黑名单 TTL ≥ token 实际剩余有效期（token 最多还有 expire_hours 过期），
-/// 过度保守的黑名单条目会在 expire_hours 后自动过期，内存开销可接受。
+/// Lua 脚本 TTL 说明（M-3 精确化）：
+/// ARGV[1] = `max(session.exp - now, 1)`（精确剩余有效期，秒）。
+/// OnlineSession.exp 由登录流程从 JWT claims.exp 写入（UTC 秒）。
+/// 旧 JSON（v2.13 前，exp 默认 0）回退到 `jwt_config.expire_hours * SECS_PER_HOUR` 保守上界。
+/// 黑名单条目与 token 同时过期，避免旧方案中"登录 1 小时被强退 → 黑名单仍留 24 小时"的内存浪费。
 #[utoipa::path(
     delete,
     path = "/monitor/online/{tokenHash}",
@@ -304,17 +304,27 @@ pub async fn force_logout(
 
     // 3. Lua 原子化 SETEX blacklist + DEL online（落实 memory 第 68 行约束）
     //    KEYS[1] = blacklist:{token_hash}, KEYS[2] = online:{token_hash}
-    //    ARGV[1] = jwt_config.expire_hours * SECS_PER_HOUR（保守上界，黑名单 TTL ≥ token 剩余有效期）
-    //    TODO(H-2): 精确 TTL 需 OnlineSession 存储 exp 字段（记录 token 实际过期时间），
-    //    当前用 JWT 最大有效期作为保守上界，黑名单条目会在 expire_hours 后自动过期。
-    //    精确化改动需同步修改 OnlineSession 结构、登录中间件写入逻辑与 force_logout 读取逻辑，
-    //    改动较大，暂保留现状。
-    let blacklist_ttl = state
+    //    ARGV[1] = 黑名单 TTL（秒）
+    //
+    //    M-3：精确 TTL 计算（使用 OnlineSession.exp 实际剩余有效期）
+    //    - 新会话（exp > 0）：TTL = max(exp - now, 1)，黑名单条目与 token 同时过期
+    //    - 旧会话（exp == 0，兼容 v2.13 前遗留的 online JSON）：回退到 jwt.expire_hours 保守上界
+    //    旧方案用 jwt.expire_hours * SECS_PER_HOUR 作为黑名单 TTL（保守上界），
+    //    导致用户登录 1 小时后被强退，黑名单仍保留 24 小时（多 23 小时内存浪费）。
+    let now_secs = chrono::Utc::now().timestamp();
+    let precise_ttl = session.exp.checked_sub(now_secs).unwrap_or(0).max(0);
+    let fallback_ttl = state
         .config
         .jwt
         .expire_hours
         .saturating_mul(SECS_PER_HOUR)
         .max(1);
+    // exp == 0 表示旧 JSON（无 exp 字段），用 fallback；否则用精确值（至少 1 秒保证写入）
+    let blacklist_ttl = if session.exp > 0 {
+        precise_ttl.max(1)
+    } else {
+        fallback_ttl
+    };
     let _: i64 = redis::Script::new(FORCE_LOGOUT_SCRIPT)
         .key(&blacklist_key)
         .key(&online_key)

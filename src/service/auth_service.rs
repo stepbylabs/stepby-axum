@@ -414,8 +414,8 @@ impl AuthService {
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
         if ip_count > MAX_LOGIN_IP_COUNT {
-            self.write_login_log(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"))
-                .await?;
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"))
+                .await;
             return Err(ServiceError::new(429, crate::tr!("error.auth.rate_limited")));
         }
         Ok(())
@@ -441,8 +441,8 @@ impl AuthService {
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
-            self.write_login_log(ctx, "1", &crate::tr!("log.auth.password_locked"))
-                .await?;
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.password_locked"))
+                .await;
             return Err(ServiceError::new(429, crate::tr!("error.auth.password_locked")));
         }
         Ok(())
@@ -485,15 +485,15 @@ impl AuthService {
             let stored = match stored_code {
                 Some(c) => c,
                 None => {
-                    self.write_login_log(ctx, "1", &crate::tr!("log.auth.captcha_expired"))
-                        .await?;
+                    self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.captcha_expired"))
+                        .await;
                     return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_expired")));
                 }
             };
 
             if stored.to_lowercase() != code.to_lowercase() {
-                self.write_login_log(ctx, "1", &crate::tr!("log.auth.captcha_wrong"))
-                    .await?;
+                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.captcha_wrong"))
+                    .await;
                 return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_wrong")));
             }
         }
@@ -529,8 +529,8 @@ impl AuthService {
             Some(u) => u,
             None => {
                 // L-1：用户不存在时不计数（避免无效用户名污染失败计数导致真实用户被锁）
-                self.write_login_log(ctx, "1", &crate::tr!("log.auth.login_failed"))
-                    .await?;
+                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"))
+                    .await;
                 return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
             }
         };
@@ -539,7 +539,8 @@ impl AuthService {
         // C-1：账号停用统一返回 login_failed，避免攻击者通过差异错误消息枚举有效用户名。
         // 细分原因仅写入 sys_logininfor 日志（不返回客户端），供管理员审计。
         if user.status.as_deref() == Some("1") {
-            self.write_login_log(ctx, "1", &crate::tr!("log.auth.account_disabled")).await?;
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.account_disabled"))
+                .await;
             return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
         }
 
@@ -557,8 +558,8 @@ impl AuthService {
         })?;
         if !verify_result.is_valid {
             self.record_login_failure(ctx.username, redis).await?;
-            self.write_login_log(ctx, "1", &crate::tr!("log.auth.login_failed"))
-                .await?;
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"))
+                .await;
             return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
         }
 
@@ -630,12 +631,12 @@ impl AuthService {
         let user_id = user.user_id.to_string();
         let (token, claims) = JwtUtils::generate_token(&user_id, ctx.username, jwt_config)?;
 
-        // 2. 登录日志写入（成功），并获取 info_id
+        // 2. 登录日志写入（成功，best-effort）
+        //    H-1/H-2 修复：日志写入失败不应阻断登录响应，仅记录警告日志
         //    info_id 仍保留用于登录日志关联，但不再作为 online key
         //    H-3：日志消息改用 tr!("log.auth.login_success") 支持多语言
-        let _info_id = self
-            .write_login_log(ctx, "0", &crate::tr!("log.auth.login_success"))
-            .await?;
+        self.write_login_log_best_effort(ctx, "0", &crate::tr!("log.auth.login_success"))
+            .await;
 
         // 3. 存储 `online:{token_hash}` → `OnlineSession` JSON，用于在线用户列表与强退
         //    - key 用 token_hash（与 blacklist:{token_hash} 对齐，强退时同一 key 命名空间）
@@ -654,6 +655,10 @@ impl AuthService {
             .get_dept_name_by_user_id(user.user_id)
             .await
             .unwrap_or_default();
+        // M-3：记录 JWT exp（UTC 秒）用于 force_logout 精确计算黑名单 TTL
+        //   旧方案用 jwt.expire_hours * SECS_PER_HOUR 作为黑名单 TTL（保守上界），
+        //   导致用户登录 1 小时后被强退，黑名单仍保留 24 小时（多 23 小时内存浪费）。
+        //   现写入 claims.exp（token 实际过期时间戳），force_logout 时用 exp - now 计算精确剩余 TTL。
         let session = crate::utils::crypto::OnlineSession {
             user_id: user.user_id,
             username: ctx.username.to_string(),
@@ -665,6 +670,7 @@ impl AuthService {
             os: ctx.os.to_string(),
             jti: claims.jti,
             dept_name,
+            exp: claims.exp as i64,
         };
         let session_json = serde_json::to_string(&session)?;
 
@@ -810,26 +816,15 @@ impl AuthService {
                 );
             });
 
-        // 清理 user_sessions 索引（best-effort）
-        //   该 key 由 finalize_login 写入，用于同用户同浏览器重复登录时清理旧会话。
-        //   logout 时不一定能精确知道原 IP/Browser（claims 中无此信息），故尝试删除所有匹配 user_sessions:{user_id}:* 的 key。
-        //   失败不阻断 logout。
+        // 清理 user_sessions 索引（H-3 修复：不再批量删除所有 user_sessions:{user_id}:* ）
+        //   原实现 SCAN + 批量 DEL 会误删其他设备（不同 IP/Browser）的索引，导致其他设备
+        //   下次登录时 finalize_login GET 不到旧 token_hash，无法清理旧 online key，产生孤儿会话。
+        //   修复方案：完全不删 user_sessions 索引，让它自然过期（TTL 与 online 一致）。
+        //   下次同浏览器登录时，finalize_login 会用新 token_hash 覆盖旧索引，并 DEL 旧 online key。
+        //   不同浏览器的索引互不干扰，自然过期即可。
         //
-        //   H-1：scan_keys 改用 utils::redis::scan_keys（返回 ServiceError），
-        //   避免原实现中 Service 反向调用 Handler 层（架构违规）。
-        let user_session_pattern = format!("user_sessions:{}:*", claims.sub);
-        if let Ok(keys) = crate::utils::redis::scan_keys(redis, &user_session_pattern).await
-            && !keys.is_empty()
-        {
-            // 批量 DEL（pipeline 单次往返，替代循环 N 次 DEL）
-            let mut pipe = redis::pipe();
-            for k in &keys {
-                pipe.cmd("DEL").arg(k);
-            }
-            if let Err(e) = pipe.query_async::<Vec<i64>>(redis).await {
-                tracing::warn!("批量 DEL user_sessions 失败（不阻断 logout）: {}", e);
-            }
-        }
+        //   如果未来需要精确删除当前会话的索引，可在 OnlineSession 中存储 ip/browser，
+        //   logout 时从 online:{token_hash} 读取 session，构造精确 key 后 DEL。
 
         Ok(())
     }
@@ -1058,6 +1053,26 @@ impl AuthService {
         am.login_time = Set(Some(now));
         let model = self.logininfor_repo.insert(am).await?;
         Ok(model.info_id)
+    }
+
+    /// best-effort 版本的 write_login_log：失败仅记录警告日志，不传播错误
+    ///
+    /// 用于认证失败路径：日志写入失败不应掩盖原始的认证错误（如 401），
+    /// 用户应看到 401 而非 500。同时避免同步 DB 写入阻塞响应（H-2）。
+    async fn write_login_log_best_effort(
+        &self,
+        ctx: &LoginContext<'_>,
+        status: &str,
+        msg: &str,
+    ) {
+        if let Err(e) = self.write_login_log(ctx, status, msg).await {
+            tracing::warn!(
+                username = ctx.username,
+                status,
+                error = %e,
+                "登录日志写入失败（best-effort，不影响认证结果）"
+            );
+        }
     }
 }
 

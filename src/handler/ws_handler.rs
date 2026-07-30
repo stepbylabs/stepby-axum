@@ -110,22 +110,26 @@ async fn is_token_blacklisted(state: &AppState, token: &str) -> Result<bool, axu
 async fn incr_ws_conn_count(state: &AppState, user_id: i64) -> Result<u32, axum::http::StatusCode> {
     let key = format!("ws_conn:{}", user_id);
     let mut conn = state.redis.clone();
-    let count: u32 = redis::cmd("INCR")
+    // 使用 Lua 脚本原子化 INCR + EXPIRE，避免进程崩溃后 key 无 TTL 永久存在
+    // 仅在首次 INCR（v==1）时设置 EXPIRE，避免每次续期
+    let script = r#"
+        local v = redis.call('INCR', KEYS[1])
+        if v == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[1])
+        end
+        return v
+    "#;
+    let count: u32 = redis::cmd("EVAL")
+        .arg(script)
+        .arg(1) // number of keys
         .arg(&key)
+        .arg(86400i64) // 24h TTL
         .query_async(&mut conn)
         .await
         .map_err(|e| {
             tracing::error!(user_id = user_id, error = %e, "WebSocket 连接计数 INCR 失败（fail-closed 拒绝连接）");
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         })?;
-    // 设置过期时间（防泄漏：用户异常断开未触发 DECR 时，计数最终归零）
-    // 过期时间 = JWT 有效期 + 缓冲，这里用 24 小时
-    let _: () = redis::cmd("EXPIRE")
-        .arg(&key)
-        .arg(86400i64) // 24h
-        .query_async(&mut conn)
-        .await
-        .unwrap_or(());
     Ok(count)
 }
 
