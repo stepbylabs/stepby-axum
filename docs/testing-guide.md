@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.2.8 | 更新日期：2026-07-30
+> 版本：v0.2.9 | 更新日期：2026-07-30
 
 ## 目录
 
@@ -357,11 +357,12 @@ curl http://localhost:8080/captchaImage
 
 ```bash
 # 需要从验证码图片中识别出验证码字符
+# 请替换 <username> 和 <password> 为实际测试账号
 curl -X POST http://localhost:8080/login \
   -H "Content-Type: application/json" \
   -d '{
-    "username": "admin",
-    "password": "admin123",
+    "username": "<username>",
+    "password": "<password>",
     "code": "<验证码>",
     "uuid": "<上一步的 uuid>"
   }'
@@ -646,7 +647,7 @@ wrk -t4 -c100 -d30s http://localhost:8080/health
 # 先获取 token
 TOKEN=$(curl -s -X POST http://localhost:8080/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123","code":"...","uuid":"..."}' \
+  -d '{"username":"<username>","password":"<password>","code":"...","uuid":"..."}' \
   | jq -r '.token')
 
 wrk -t4 -c100 -d30s \
@@ -865,9 +866,9 @@ chmod +x .git/hooks/pre-commit
 #### 运行方式
 
 ```powershell
-# PowerShell 环境变量设置
-$env:YEBOT_TEST_USER='admin'
-$env:YEBOT_TEST_PASS='admin123'
+# PowerShell 环境变量设置（请替换为实际测试账号）
+$env:YEBOT_TEST_USER='<your-test-username>'
+$env:YEBOT_TEST_PASS='<your-test-password>'
 
 # 全量测试（45 项功能）
 node tests/main.mjs
@@ -900,15 +901,15 @@ node tests/main.mjs --headless
 ### 10.11 深度 E2E 测试套件（75 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
-> 当前统计：75 模块 / 951 测试项 / 通过率 100%（v0.2.8，2026-07-30 验证）
+> 当前统计：75 模块 / 951 测试项 / 通过率 100%（v0.2.9，2026-07-30 验证）
 > 架构：入口脚本 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
 
 #### 运行方式
 
 ```powershell
-# PowerShell 环境变量设置
-$env:YEBOT_TEST_USER='admin'
-$env:YEBOT_TEST_PASS='admin123'
+# PowerShell 环境变量设置（请替换为实际测试账号）
+$env:YEBOT_TEST_USER='<your-test-username>'
+$env:YEBOT_TEST_PASS='<your-test-password>'
 $env:YEBOT_BASE_URL='http://localhost:8080'
 
 # 全量深度测试（75 模块）
@@ -1094,7 +1095,7 @@ tests/
 
 1. 后端启动在 `http://localhost:8080`（release 构建嵌入式模式）
 2. `frontend-dist/` 已同步最新前端构建（`pnpm run build:embedded` + robocopy 同步）
-3. `admin/admin123` 和 `ry/admin123` 账号可用
+3. 测试账号已创建（通过 `YEBOT_TEST_USER` / `YEBOT_TEST_PASS` 环境变量配置）
 4. 数据库已初始化（含定时任务 jobId=1、代码生成 tableId=4、角色 roleId=144）
 
 #### 测试报告
@@ -1197,6 +1198,23 @@ tests/
 | 失败项错误信息不足 | 无 stack/screenshot 信息 | record 函数失败时自动捕获 stack（前15行），runner 模块异常时自动截图 |
 | 三套 CONFIG 定义不同步 | config.mjs 硬编码弱密码 admin123、frontendUrl 默认值不一致 | config.mjs 与 test-config.mjs 同步，去掉硬编码弱密码；debug-add-buttons.mjs 改为从 test-config.mjs 导入 |
 | 前端 console 硬编码中文（74处） | 开发者日志使用中文不利于国际化检索 | 34 个文件的 74 处 console.log/error/warn 中文替换为英文 |
+
+#### v0.2.9 深层隐患修复（2026-07-30，第四轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| lock.vue 粒子动画 resize 监听器累积泄漏 | visibilitychange 恢复时调用 initParticles 未先移除旧监听器 | initParticles 开头先 removeEventListener + cancelAnimationFrame |
+| notice store refreshTopNotices 竞态条件 | loading=true 时直接 return，后调用者拿不到最新数据 | 引入 refreshPromise 实现 promise reuse，并发调用共享同一 Promise |
+| notice store export default 命名错误 | 导出 useNotice（未定义）而非 useNoticeStore | 修正为 export default useNoticeStore |
+| ExportDialog handleConfirm setTimeout 未跟踪 | 组件卸载后定时器仍执行 | 引入 closeTimer 句柄，handleClose + onBeforeUnmount 清理 |
+| Navbar toggleTheme 锁释放定时器未跟踪 | 700ms 定时器在卸载后仍修改全局状态 | 引入 themeLockTimer，onBeforeUnmount 清理并重置 __themeTransitionInProgress |
+| shortcuts/help kbd v-for 用 index 作 key | 键位列表用索引作 key，搜索过滤时可能渲染错乱 | 改用键名字符串 k 作为 key |
+| useAutoRefresh setInterval 不等待回调完成 | 慢回调堆积导致并发执行与状态竞争 | 改为递归 setTimeout + stopped 标志，确保前一次完成后才调度下一次 |
+| useSessionTimeout handleLogout setTimeout 未跟踪 | 卸载后仍可能触发 location.href 跳转 | 引入 logoutRedirectTimer，onBeforeUnmount 清理 |
+| WebSocket Future 取消时连接计数泄漏 | handle_ws 末尾的 DECR 在 Future 被 drop 时不执行 | 引入 WsConnGuard RAII 守卫，Drop 中 spawn DECR 任务 |
+| ws_handler JWT sub 解析失败回退 user_id=0 | unwrap_or(0) 可能导致越权/计数错乱 | 改为返回 401 拒绝连接 |
+| 调试脚本硬编码弱密码（14个 .mjs + 文档） | debug-*.mjs 直接写死 admin/admin123 | 改为从 test-config.mjs 导入 TEST_USER/TEST_PASS；文档示例改用占位符 |
+| notice-center/index.vue 参数隐式 any（3处） | shallowRef 数组方法回调参数缺类型注解 | 添加 (n: SysNotice) 显式类型注解 |
 
 ---
 

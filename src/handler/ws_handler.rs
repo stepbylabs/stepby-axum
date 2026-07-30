@@ -151,6 +151,45 @@ async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
     }
 }
 
+/// RAII 守卫：确保 WebSocket 连接计数在任何情况下（包括 Future 被取消/drop）都能 DECR
+///
+/// P2 修复：原实现在 handle_ws 末尾调用 decr_ws_conn_count，但当 Future 被外部
+/// 取消（drop）时，await 点之后的代码不会执行，导致连接计数泄漏。使用 RAII 模式
+/// 在 Drop 中 spawn 异步任务执行 DECR，确保计数最终归零。
+struct WsConnGuard {
+    state: Arc<AppState>,
+    user_id: i64,
+    armed: bool,
+}
+
+impl WsConnGuard {
+    fn new(state: Arc<AppState>, user_id: i64) -> Self {
+        Self {
+            state,
+            user_id,
+            armed: true,
+        }
+    }
+
+    /// 主动解除（正常关闭时调用，避免 Drop 中重复 DECR）
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WsConnGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let state = self.state.clone();
+            let user_id = self.user_id;
+            // Drop 不能 await，spawn 异步任务执行 DECR
+            tokio::spawn(async move {
+                decr_ws_conn_count(&state, user_id).await;
+            });
+        }
+    }
+}
+
 /// GET /ws 或 /ws?token=xxx
 /// WebSocket 升级握手
 ///
@@ -182,7 +221,11 @@ pub async fn ws_handler(
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
 
-    let user_id: i64 = claims.sub.parse().unwrap_or(0);
+    // P2 修复: JWT sub 解析失败时拒绝连接，而非回退 user_id=0（可能导致越权/计数错乱）
+    let user_id: i64 = claims.sub.parse().map_err(|_| {
+        warn!(sub = %claims.sub, "WebSocket 拒绝连接：JWT sub 不是有效数字");
+        axum::http::StatusCode::UNAUTHORIZED
+    })?;
     let user_name = claims.username.clone();
 
     // C7-2：连接数限制（每用户最多 MAX_WS_CONN_PER_USER 个并发连接）
@@ -220,6 +263,9 @@ pub async fn ws_handler(
 /// - C7-4 Close 帧：断开前发送 Close 帧，符合 RFC 6455
 /// - 连接计数：函数退出时自动 DECR（使用 RAII 模式确保执行）
 async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_name: String) {
+    // P2 修复: RAII 守卫确保连接计数在任何退出路径（包括 Future 被 drop）都能 DECR
+    let mut conn_guard = WsConnGuard::new(state.clone(), user_id);
+
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.ws_broadcast.subscribe();
 
@@ -299,6 +345,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
     let _ = sender.send(Message::Close(None)).await;
 
     // C7-2：减少连接计数（best-effort）
+    // P2 修复: 先 disarm 守卫，再手动 DECR，避免 Drop 中重复 spawn
+    conn_guard.disarm();
     decr_ws_conn_count(&state, user_id).await;
 
     info!(user_id = user_id, "WebSocket 连接关闭");
