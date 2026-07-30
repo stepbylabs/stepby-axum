@@ -182,14 +182,32 @@ impl SysConfigService {
     }
 
     /// H-4：失效指定 config_key 的缓存（修改/删除配置时调用）
+    /// P2 修复: DEL 失败或超时时记录 warn 日志，便于排查脏读风险
     async fn invalidate_config_cache(&self, config_key: &str) {
         let cache_key = format!("{}{}", CONFIG_CACHE_PREFIX, config_key);
         let mut conn = self.redis.clone();
-        let _ = tokio::time::timeout(
+        let result = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
             redis::cmd("DEL").arg(&cache_key).query_async::<()>(&mut conn),
         )
         .await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    config_key = %config_key,
+                    error = %e,
+                    "配置缓存 DEL 失败，可能产生脏读直至 TTL 过期"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    config_key = %config_key,
+                    "配置缓存 DEL 超时（{}s），可能产生脏读直至 TTL 过期",
+                    REDIS_CMD_TIMEOUT_SECS
+                );
+            }
+        }
     }
 
     /// 分页查询参数配置

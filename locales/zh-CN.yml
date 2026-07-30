@@ -242,6 +242,7 @@ error:
     restore_process_nonzero_exit: "恢复进程返回非零状态: {{err}}"
     sqlite3_backup_failed: "sqlite3 备份失败: {{err}}"
     sqlite3_branch_unreachable: SQLite 备份应在上文处理，不应到达此分支（请检查代码逻辑）
+    mysql_restore_branch_unreachable: MySQL 恢复应走 run_mysql_restore 独立分支（请检查代码逻辑）
   server:
     info_fetch_failed: 服务器信息采集失败
   dict:
@@ -402,3 +403,7 @@ notice:
   login_anomaly:
     title: "登录异常告警 - IP {{ip}}"
     content: "最近 {{minutes}} 分钟内 IP {{ip}} 失败登录 {{count}} 次，疑似撞库攻击，请及时关注。"
+
+# WebSocket 系统消息（连接成功提示等）
+websocket:
+  connected: WebSocket 连接成功

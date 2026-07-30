@@ -101,7 +101,7 @@ pub async fn list(
         .parse::<i64>()
         .map_err(|_| {
             tracing::warn!(sub = %operator.user_id(), "用户列表: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized("认证信息异常")
+            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
         })?;
     let (rows, total) = state
         .user_service
@@ -126,7 +126,7 @@ pub async fn export(
         .parse::<i64>()
         .map_err(|_| {
             tracing::warn!(sub = %operator.user_id(), "用户导出: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized("认证信息异常")
+            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
         })?;
     let rows = state
         .user_service
@@ -293,22 +293,25 @@ pub async fn remove(
     // 写入 pwd_changed:{user_id} 标记，使被删除用户已签发的 JWT 在 auth 中间件被拒绝
     // （auth.rs 检查 pwd_changed > token.iat 则返回 401）
     // TTL 与 JWT 最大有效期对齐，fail-closed：写入失败返回错误，避免旧 token 继续可用
+    // P3 优化: 使用 Redis pipeline 批量 SETEX，减少 N 次 RTT 为 1 次
     let now = chrono::Utc::now().timestamp();
     let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
     let mut redis = state.redis.clone();
-    for uid in &deleted_user_ids {
-        let pwd_changed_key = format!("pwd_changed:{}", uid);
-        if let Err(e) = redis::cmd("SETEX")
-            .arg(&pwd_changed_key)
-            .arg(pwd_ttl)
-            .arg(now)
-            .query_async::<()>(&mut redis)
-            .await
-        {
+    if !deleted_user_ids.is_empty() {
+        let mut pipe = redis::pipe();
+        for uid in &deleted_user_ids {
+            let pwd_changed_key = format!("pwd_changed:{}", uid);
+            pipe.cmd("SETEX")
+                .arg(&pwd_changed_key)
+                .arg(pwd_ttl)
+                .arg(now)
+                .ignore();
+        }
+        if let Err(e) = pipe.query_async::<()>(&mut redis).await {
             tracing::error!(
-                user_id = uid,
+                user_ids = ?deleted_user_ids,
                 error = %e,
-                "删除用户后写入 pwd_changed 标记失败（fail-closed）"
+                "删除用户后批量写入 pwd_changed 标记失败（fail-closed）"
             );
             return Err(AppError::internal(
                 &crate::tr!("error.user.pwd_reset_token_invalidate_failed"),

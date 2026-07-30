@@ -75,7 +75,7 @@ pub async fn list(
         .parse::<i64>()
         .map_err(|_| {
             tracing::warn!(sub = %operator.user_id(), "角色列表: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized("认证信息异常")
+            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
         })?;
     let (rows, total) = state
         .role_service
@@ -110,7 +110,7 @@ pub async fn export(
         .parse::<i64>()
         .map_err(|_| {
             tracing::warn!(sub = %operator.user_id(), "角色导出: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized("认证信息异常")
+            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
         })?;
     let rows = state.role_service.export_roles(query, Some(operator_user_id)).await?;
 
