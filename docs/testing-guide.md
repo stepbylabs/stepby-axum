@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.2.7 | 更新日期：2026-07-30
+> 版本：v0.2.8 | 更新日期：2026-07-30
 
 ## 目录
 
@@ -900,7 +900,7 @@ node tests/main.mjs --headless
 ### 10.11 深度 E2E 测试套件（75 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
-> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.2.7，2026-07-30 验证）
+> 当前统计：75 模块 / 951 测试项 / 通过率 100%（v0.2.8，2026-07-30 验证）
 > 架构：入口脚本 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
 
 #### 运行方式
@@ -1185,6 +1185,18 @@ tests/
 | 字典数据路由 name 冲突 | `router/index.ts` 字典数据路由 name="Data" 过于宽泛 | 改为 `name: 'SystemDictData'` 遵循父子前缀命名约定 |
 | TOTP 组件直连 request 未用 API 模块 | `totp.vue` 直接 `import request` 调用，绕过 `api/system/totp` 封装 | 改为 `import { setupTotp, ... } from '@/api/system/totp'`，移除死代码表单项 |
 | rateLimit `handleUpdate` 未处理 reject | `rateLimit/index.vue` 的 `handleUpdate` Promise 链无 `.catch()` | 添加 `.catch(() => {})` 避免未处理 Promise 拒绝 |
+
+#### v0.2.8 测试覆盖增强（2026-07-30）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 通知中心"全部已读"功能无测试覆盖 | 仅验证按钮可见性，未测试实际功能链路 | 新增完整链路测试：确认对话框/API调用/成功提示/未读数清零/禁用态 |
+| 文件上传 magic bytes 校验未测试 | 仅上传 .txt 正常文件，未测试伪造扩展名场景 | 新增负向测试：上传伪 .jpg 文件验证后端拒绝/错误提示/列表未增加 |
+| 代码生成器 synchDb/delTable/genCode 未测试 | 仅验证按钮可见性，未测试实际功能 | 新增同步数据库API调用/生成代码下载触发/删除表确认对话框+取消后列表不变测试 |
+| 测试报告结构不完整 | 缺少 elapsedMs/modules/environment 字段 | runner.mjs/result.mjs 添加总耗时/模块分组统计/运行环境信息 |
+| 失败项错误信息不足 | 无 stack/screenshot 信息 | record 函数失败时自动捕获 stack（前15行），runner 模块异常时自动截图 |
+| 三套 CONFIG 定义不同步 | config.mjs 硬编码弱密码 admin123、frontendUrl 默认值不一致 | config.mjs 与 test-config.mjs 同步，去掉硬编码弱密码；debug-add-buttons.mjs 改为从 test-config.mjs 导入 |
+| 前端 console 硬编码中文（74处） | 开发者日志使用中文不利于国际化检索 | 34 个文件的 74 处 console.log/error/warn 中文替换为英文 |
 
 ---
 
