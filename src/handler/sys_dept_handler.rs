@@ -41,12 +41,13 @@ pub async fn list(
 ) -> Result<AjaxResult<Vec<SysDeptModel>>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
+    // P2 修复: 错误消息改用 i18n key，避免硬编码中文
     let operator_user_id: i64 = operator
         .user_id()
         .parse::<i64>()
         .map_err(|_| {
             tracing::warn!(sub = %operator.user_id(), "部门列表: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized("认证信息异常")
+            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
         })?;
     let list = state
         .dept_service

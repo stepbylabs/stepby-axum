@@ -933,8 +933,12 @@ impl GenTableService {
         tracing::info!("结构化建表 SQL: {}", sql);
 
         // 执行 DDL
+        // P2 修复: 错误详情写日志，对外仅返回通用文案，避免泄露 DB schema 细节
         db.execute(backend.build(&create_stmt)).await
-            .map_err(|e| ServiceError::internal(&format!("{}: {e}", crate::tr!("error.gen.create_table_failed"))))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, table = %dto.table_name, "建表执行失败");
+                ServiceError::internal(&crate::tr!("error.gen.create_table_failed"))
+            })?;
 
         // 7. 可选：导入到 gen_table
         let mut table_id = None;

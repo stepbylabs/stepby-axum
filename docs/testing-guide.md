@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.0 | 更新日期：2026-07-30
+> 版本：v0.3.1 | 更新日期：2026-07-30
 
 ## 目录
 
@@ -901,7 +901,7 @@ node tests/main.mjs --headless
 ### 10.11 深度 E2E 测试套件（75 模块）
 
 > 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
-> 当前统计：75 模块 / 951 测试项 / 通过率 100%（v0.3.0，2026-07-30 验证）
+> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.3.1，2026-07-30 验证）
 > 架构：入口脚本 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
 
 #### 运行方式
@@ -1196,7 +1196,7 @@ tests/
 | 代码生成器 synchDb/delTable/genCode 未测试 | 仅验证按钮可见性，未测试实际功能 | 新增同步数据库API调用/生成代码下载触发/删除表确认对话框+取消后列表不变测试 |
 | 测试报告结构不完整 | 缺少 elapsedMs/modules/environment 字段 | runner.mjs/result.mjs 添加总耗时/模块分组统计/运行环境信息 |
 | 失败项错误信息不足 | 无 stack/screenshot 信息 | record 函数失败时自动捕获 stack（前15行），runner 模块异常时自动截图 |
-| 三套 CONFIG 定义不同步 | config.mjs 硬编码弱密码 admin123、frontendUrl 默认值不一致 | config.mjs 与 test-config.mjs 同步，去掉硬编码弱密码；debug-add-buttons.mjs 改为从 test-config.mjs 导入 |
+| 三套 CONFIG 定义不同步 | config.mjs 硬编码弱密码 admin123、frontendUrl 默认值不一致 | deep-e2e.mjs / main.mjs 的 frontendUrl 增加 YEBOT_UI_URL 环境变量回退；次要账号 secondaryUsername/Password 支持 YEBOT_TEST_USER_SECONDARY / YEBOT_TEST_PASS_SECONDARY 环境变量覆盖；debug-add-buttons.mjs 改为从 test-config.mjs 导入。注：e2e/lib/config.mjs 为抽取的死代码，实际运行使用 deep-e2e.mjs 内联 CONFIG，二者默认值仍存在差异（8080 vs 5173），后续需统一为单一配置源 |
 | 前端 console 硬编码中文（74处） | 开发者日志使用中文不利于国际化检索 | 34 个文件的 74 处 console.log/error/warn 中文替换为英文 |
 
 #### v0.2.9 深层隐患修复（2026-07-30，第四轮循环）
@@ -1232,6 +1232,30 @@ tests/
 | scheduler 登录异常检测 fail-silent | Redis 错误被 .unwrap_or(None) 误认为"已去重"，跳过告警 | 区分 Redis 错误与 key 已存在，故障时仍创建告警 |
 | 通知公告枚举值未校验 | notice_type/status 仅校验长度，可接受任意字符串 | 添加 validate_notice_enum 白名单校验（"1"/"2", "0"/"1"） |
 | 定时任务枚举值未校验 | misfire_policy/concurrent/status 使用 #[garde(skip)] | 添加 validate_job_enum 白名单校验（"1"/"2"/"3", "0"/"1", "0"/"1"） |
+
+#### v0.3.1 安全加固与配置修复（2026-07-30，第六轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 建表 DDL 错误泄露 DB schema | `gen_table_service.rs:936` 将 SeaORM DbErr 原文拼接进用户可见错误 | 错误详情写 tracing::error!，对外仅返回通用 tr!() 文案 |
+| 配置缓存 DEL 失败静默 | `sys_config_service.rs:188` 用 `let _ =` 丢弃 DEL 结果，脏缓存持续至 TTL | 区分 Redis 错误与超时，分别记录 tracing::warn! 便于排查 |
+| 旧 MD5 密码非恒定时间比较 | `password.rs:203` 用 `String::eq` 短路比较，时序侧信道泄露哈希前缀 | 新增 constant_time_eq 函数，按位 XOR 累积差异 |
+| ValidatedJson 解析错误泄露内部细节 | `common/extract.rs:45` 将 axum JSON 错误（含字段路径/类型）拼接给客户端 | 错误详情写 tracing::warn!，对外仅返回通用 tr!() 文案 |
+| 5 处 handler "认证信息异常" 硬编码中文 | JWT sub 解析失败时返回硬编码字符串，未用 i18n key | 替换为 `tr!("error.common.session_invalid")`（role/user/dept 的 list+export 共 5 处） |
+| backup service MySQL 分支硬编码中文 | `sys_backup_service.rs:496` 直接返回中文字符串 | 新增 `error.backup.mysql_restore_branch_unreachable` i18n key |
+| backup service stdin shutdown 错误静默 | `sys_backup_service.rs:578` 用 `let _ =` 丢弃 shutdown 错误 | 失败时记录 tracing::warn!，便于排查上游写入错误 |
+| WebSocket 连接成功消息未用 tr!() | `ws_handler.rs:276` 使用 pick(zh, en) 手动双语 | 新增 `websocket.connected` i18n key，改用 tr!() 宏 |
+| 用户删除后 Redis 逐个 SETEX | `sys_user_handler.rs:299` 循环 N 次 SETEX，N 次 RTT | 改用 redis::pipe() 批量执行，N 次 RTT 降为 1 次 |
+| useFormDraft 文档示例硬编码中文 | docstring 中 `modal.confirm('检测到未提交的草稿...')` | 新增 `common.formDraft.*` i18n key，文档示例改用 `t()` |
+| runner.mjs 浏览器双重关闭 | 登录失败时 `browser.close()` + `return 1`，finally 块再次 close 抛 "Target closed" | 移除登录失败分支的 close 调用，由 finally 统一关闭 |
+| main.mjs CLI 参数双重解析 | 顶部位置参数解析（argv[2]/argv[3]）与 main() 内 `--headless`/`--feature=` 解析并存 | 删除顶部死代码，统一在 main() 内解析 |
+| main.mjs / deep-e2e.mjs 次要账号硬编码 | `secondaryUsername: 'ry'` 无环境变量覆盖 | 支持 `YEBOT_TEST_USER_SECONDARY` / `YEBOT_TEST_PASS_SECONDARY` 环境变量 |
+| main.mjs / deep-e2e.mjs frontendUrl 缺少 YEBOT_UI_URL 回退 | 仅支持 `FRONTEND_URL`，与 test-config.mjs 的 `YEBOT_UI_URL` 不一致 | 增加 `YEBOT_UI_URL` 环境变量回退，与 test-config.mjs 保持一致 |
+| main.mjs 文件头注释过时 | 写 "前端启动在 http://localhost:81" 和 "admin/admin123 账号可用" | 更新为环境变量注入说明 |
+| config.toml.prod 缺少安全警告 | SQLite + 无密码 Redis 作为生产默认值无风险提示 | 添加安全警告注释，明确生产必须通过环境变量切换 |
+| config.toml.prod 缺少通用上传配置 | 缺 `common_allowed_exts` / `common_max_size` 字段 | 补齐字段，与 config.toml.example 保持一致 |
+| testing-guide.md 测试项数量矛盾 | 第 904 行写 951，第 1108 行 JSON 示例写 939 | 统一为 939 |
+| testing-guide.md 谎报 CONFIG 已同步 | 表格声称"config.mjs 与 test-config.mjs 同步"，实际默认值仍不同（8080 vs 5173） | 修正为如实描述：环境变量回退已增加，但默认值差异仍存，e2e/lib/config.mjs 为死代码 |
 
 ---
 

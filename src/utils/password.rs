@@ -194,13 +194,29 @@ pub fn verify_password_with_upgrade_hint(password: &str, hashed: &str) -> Passwo
 }
 
 /// 旧 MD5 + 固定盐值验证（仅用于兼容已存在的旧密码数据）
+/// P2 修复: 使用恒定时间比较，避免时序侧信道泄露哈希前缀信息
 fn verify_legacy_md5(password: &str, hashed: &str) -> bool {
     use md5::{Digest, Md5};
     let salted = format!("{}{}", password, LEGACY_SALT);
     let mut hasher = Md5::new();
     hasher.update(salted.as_bytes());
     let computed: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-    computed == hashed
+    // 恒定时间比较：先比较长度（长度不同必然不等，但仍遍历完整字节避免长度泄露）
+    // 再按位 XOR 累积差异，最终差异为 0 才相等
+    constant_time_eq(computed.as_bytes(), hashed.as_bytes())
+}
+
+/// 恒定时间字节比较
+///
+/// 无论内容是否相同，比较耗时仅取决于较短字符串的长度，
+/// 不因前缀匹配程度提前返回，避免时序侧信道攻击。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    let min_len = a.len().min(b.len());
+    for i in 0..min_len {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
 }
 
 #[cfg(test)]

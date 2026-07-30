@@ -493,7 +493,8 @@ impl SysBackupService {
                 c
             }
             DbKind::Mysql => {
-                return Err(ServiceError::internal("MySQL 恢复应走 run_mysql_restore 独立分支"));
+                // P3 修复: 使用 i18n key 替代硬编码中文
+                return Err(ServiceError::internal(&crate::tr!("error.backup.mysql_restore_branch_unreachable")));
             }
             DbKind::Sqlite => {
                 let db_file = parse_sqlite_file_path(db_url)?;
@@ -575,7 +576,10 @@ impl SysBackupService {
                     .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))?;
             }
             // 显式关闭 stdin，通知 mysql 子进程输入结束
-            let _ = stdin.shutdown().await;
+            // P3 修复: shutdown 失败记录 warn 日志，便于排查上游写入错误
+            if let Err(e) = stdin.shutdown().await {
+                tracing::warn!(error = %e, "MySQL 恢复: stdin shutdown 失败（可能子进程已退出）");
+            }
         }
 
         let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())

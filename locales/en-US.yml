@@ -239,6 +239,7 @@ error:
     restore_process_nonzero_exit: "Restore process returned non-zero status: {{err}}"
     sqlite3_backup_failed: "sqlite3 backup failed: {{err}}"
     sqlite3_branch_unreachable: SQLite backup should be handled above; this branch is unreachable (please check code logic)
+    mysql_restore_branch_unreachable: MySQL restore should go through run_mysql_restore branch (please check code logic)
   server:
     info_fetch_failed: Server info collection failed
   dict:
@@ -270,6 +271,8 @@ error:
     not_found: Notice does not exist
     id_invalid: Invalid notice ID
     user_email_query_failed: Failed to query user email
+  websocket:
+    connected: WebSocket connected
   role:
     not_found: Role does not exist
     perm_key_exists: Role permission key cannot be duplicated
@@ -399,3 +402,7 @@ notice:
   login_anomaly:
     title: "Login Anomaly Alert - IP {{ip}}"
     content: "IP {{ip}} failed login {{count}} times within the last {{minutes}} minutes, suspected credential stuffing attack, please investigate."
+
+# WebSocket system messages (connection success prompt, etc.)
+websocket:
+  connected: WebSocket connected

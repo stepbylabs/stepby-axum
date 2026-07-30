@@ -269,11 +269,11 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.ws_broadcast.subscribe();
 
-    // 发送连接成功消息（P3：按请求 locale 双语，WS upgrade 在 locale 中间件作用域内）
+    // 发送连接成功消息（P3 修复: 改用 tr!() 宏，遵循项目 i18n 规范）
     let welcome = WsMessage::new(
         "system",
         serde_json::json!({
-            "message": crate::common::i18n::pick("WebSocket 连接成功", "WebSocket connected"),
+            "message": crate::tr!("websocket.connected"),
             "userId": user_id,
             "userName": user_name
         }),
