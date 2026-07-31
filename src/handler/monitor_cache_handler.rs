@@ -45,7 +45,7 @@ fn validate_cache_prefix(prefix: &str) -> Result<(), AppError> {
         return Err(AppError::bad_request(&crate::tr!(
             "error.cache.prefix_not_allowed",
             prefix = prefix,
-            allowed = format!("{:?}", ALLOWED_CACHE_PREFIXES)
+            allowed = ALLOWED_CACHE_PREFIXES.join(", ")
         )));
     }
     Ok(())

@@ -456,3 +456,141 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::get_required_perm;
+
+    // ===== 用户管理权限映射 =====
+    #[test]
+    fn test_user_list_perm() {
+        assert_eq!(get_required_perm("GET", "/system/user/list"), Some("system:user:list"));
+    }
+
+    #[test]
+    fn test_user_add_perm() {
+        assert_eq!(get_required_perm("POST", "/system/user"), Some("system:user:add"));
+    }
+
+    #[test]
+    fn test_user_edit_perm() {
+        assert_eq!(get_required_perm("PUT", "/system/user"), Some("system:user:edit"));
+    }
+
+    #[test]
+    fn test_user_reset_pwd_perm() {
+        assert_eq!(get_required_perm("PUT", "/system/user/resetPwd"), Some("system:user:resetPwd"));
+    }
+
+    #[test]
+    fn test_user_delete_perm() {
+        assert_eq!(get_required_perm("DELETE", "/system/user/{id}"), Some("system:user:remove"));
+    }
+
+    #[test]
+    fn test_user_export_perm() {
+        assert_eq!(get_required_perm("POST", "/system/user/export"), Some("system:user:export"));
+    }
+
+    // ===== 仅需登录的路由（返回 None） =====
+    #[test]
+    fn test_profile_route_no_perm() {
+        // profile 路由仅需登录，不在权限表中
+        assert_eq!(get_required_perm("GET", "/system/user/profile"), None);
+        assert_eq!(get_required_perm("PUT", "/system/user/profile"), None);
+    }
+
+    #[test]
+    fn test_treeselect_no_perm() {
+        assert_eq!(get_required_perm("GET", "/system/dept/treeselect"), None);
+    }
+
+    // ===== 角色管理权限映射 =====
+    #[test]
+    fn test_role_list_perm() {
+        assert_eq!(get_required_perm("GET", "/system/role/list"), Some("system:role:list"));
+    }
+
+    #[test]
+    fn test_role_add_perm() {
+        assert_eq!(get_required_perm("POST", "/system/role"), Some("system:role:add"));
+    }
+
+    // ===== 监控模块权限映射 =====
+    #[test]
+    fn test_online_force_logout_perm() {
+        assert_eq!(get_required_perm("DELETE", "/monitor/online/{tokenHash}"), Some("monitor:online:forceLogout"));
+    }
+
+    #[test]
+    fn test_cache_clear_perm() {
+        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheAll"), Some("monitor:cache:clear"));
+    }
+
+    #[test]
+    fn test_operlog_list_perm() {
+        assert_eq!(get_required_perm("GET", "/monitor/operlog/list"), Some("monitor:operlog:list"));
+    }
+
+    // ===== 安全关键路由权限映射 =====
+    #[test]
+    fn test_rate_limit_add_perm() {
+        // P0-3 修复：限流配置必须有权限校验
+        assert_eq!(get_required_perm("POST", "/system/rateLimit"), Some("system:rateLimit:add"));
+    }
+
+    #[test]
+    fn test_backup_restore_perm() {
+        assert_eq!(get_required_perm("POST", "/system/backup/restore/{backupId}"), Some("system:backup:edit"));
+    }
+
+    #[test]
+    fn test_ip_location_update_perm() {
+        assert_eq!(get_required_perm("POST", "/system/ipLocation/update"), Some("monitor:iplocation:edit"));
+    }
+
+    #[test]
+    fn test_gen_synchdb_perm() {
+        // P0-4 修复：synchDb 必须为 POST 且有权限校验
+        assert_eq!(get_required_perm("POST", "/tool/gen/synchDb/{tableName}"), Some("tool:gen:edit"));
+        // GET 请求应返回 None（防止方法混淆绕过）
+        assert_eq!(get_required_perm("GET", "/tool/gen/synchDb/{tableName}"), None);
+    }
+
+    #[test]
+    fn test_config_configkey_perm() {
+        // P0-R81-003: configKey 路由必须有权限校验
+        assert_eq!(get_required_perm("GET", "/system/config/configKey/{configKey}"), Some("system:config:query"));
+    }
+
+    // ===== 未匹配路由返回 None =====
+    #[test]
+    fn test_unknown_route_no_perm() {
+        assert_eq!(get_required_perm("GET", "/unknown/path"), None);
+        assert_eq!(get_required_perm("POST", "/unknown"), None);
+    }
+
+    #[test]
+    fn test_wrong_method_no_perm() {
+        // DELETE /system/user/list 不在表中（list 仅 GET）
+        assert_eq!(get_required_perm("DELETE", "/system/user/list"), None);
+    }
+
+    // ===== 通用上传权限 =====
+    #[test]
+    fn test_common_upload_perm() {
+        assert_eq!(get_required_perm("POST", "/common/upload"), Some("system:file:add"));
+    }
+
+    // ===== 仪表盘统计权限 =====
+    #[test]
+    fn test_dashboard_stats_perm() {
+        assert_eq!(get_required_perm("GET", "/dashboard/stats"), Some("monitor:server:list"));
+    }
+
+    // ===== 审计大屏权限 =====
+    #[test]
+    fn test_audit_stats_perm() {
+        assert_eq!(get_required_perm("GET", "/monitor/operlog/stats"), Some("monitor:audit:list"));
+    }
+}

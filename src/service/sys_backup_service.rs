@@ -187,7 +187,11 @@ async fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> 
         return Err(ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid")));
     }
     let dir = ensure_backup_dir_async().await?;
-    let file_path = dir.join(file_name);
+    // Defense-in-depth: canonicalize the directory to resolve any symlinks
+    let canonical_dir = tokio::fs::canonicalize(&dir)
+        .await
+        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid")))?;
+    let file_path = canonical_dir.join(file_name);
     Ok(file_path)
 }
 
