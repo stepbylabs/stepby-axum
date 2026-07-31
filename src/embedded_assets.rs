@@ -155,7 +155,7 @@ fn build_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     // 带哈希的静态资源设置长期不可变缓存；index.html 不缓存
     if path != "index.html" && (path.starts_with("static/") || path.starts_with("assets/")) {
         response = response
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+            .header(header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_IMMUTABLE_SECS));
     } else {
         response = response
             .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache, no-store, must-revalidate"));

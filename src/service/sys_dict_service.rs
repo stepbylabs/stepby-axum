@@ -627,50 +627,68 @@ impl SysDictService {
                 .clone()
         };
 
-        // 持有 inflight 锁期间查 DB + 写缓存
-        let _guard = inflight_lock.lock().await;
+        // 持有 inflight 锁期间查 DB + 写缓存（用 async 块收集结果，避免 early return 跳过清理）
+        let result: Result<Vec<SysDictDataModel>, ServiceError> = async {
+            let _guard = inflight_lock.lock().await;
 
-        // double-check：持有锁后再次查缓存，可能已被前一个持锁请求填充
-        let cached: Option<String> = redis::cmd("GET")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await
-            .ok()
-            .flatten();
-        if let Some(json_str) = cached {
-            if json_str == DICT_NULL_MARKER {
-                return Ok(Vec::new());
+            // double-check：持有锁后再次查缓存，可能已被前一个持锁请求填充
+            let cached: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .ok()
+                .flatten();
+            if let Some(json_str) = cached {
+                if json_str == DICT_NULL_MARKER {
+                    return Ok(Vec::new());
+                }
+                if let Ok(rows) = serde_json::from_str::<Vec<SysDictDataModel>>(&json_str) {
+                    return Ok(rows);
+                }
             }
-            if let Ok(rows) = serde_json::from_str::<Vec<SysDictDataModel>>(&json_str) {
-                return Ok(rows);
-            }
-        }
 
-        // 3. 查询 DB
-        let rows = self.dict_data_repo.find_active_by_dict_type(dict_type).await?;
+            // 3. 查询 DB
+            let rows = self.dict_data_repo.find_active_by_dict_type(dict_type).await?;
 
-        // 4. 写入 Redis（best-effort，失败仅记日志）
-        // 空结果写入空值标记（防穿透），非空结果写入完整 JSON
-        let cache_value = if rows.is_empty() {
-            DICT_NULL_MARKER.to_string()
-        } else {
-            serde_json::to_string(&rows).unwrap_or_else(|e| {
-                tracing::warn!("序列化字典数据失败，跳过缓存写入: {}", e);
+            // 4. 写入 Redis（best-effort，失败仅记日志）
+            // 空结果写入空值标记（防穿透），非空结果写入完整 JSON
+            let cache_value = if rows.is_empty() {
                 DICT_NULL_MARKER.to_string()
-            })
-        };
-        let ttl = if rows.is_empty() { DICT_NULL_TTL } else { DICT_CACHE_TTL };
-        if let Err(e) = redis::cmd("SETEX")
-            .arg(&key)
-            .arg(ttl)
-            .arg(cache_value)
-            .query_async::<()>(&mut conn)
-            .await
+            } else {
+                serde_json::to_string(&rows).unwrap_or_else(|e| {
+                    tracing::warn!("序列化字典数据失败，跳过缓存写入: {}", e);
+                    DICT_NULL_MARKER.to_string()
+                })
+            };
+            let ttl = if rows.is_empty() { DICT_NULL_TTL } else { DICT_CACHE_TTL };
+            if let Err(e) = redis::cmd("SETEX")
+                .arg(&key)
+                .arg(ttl)
+                .arg(cache_value)
+                .query_async::<()>(&mut conn)
+                .await
+            {
+                tracing::warn!("写入字典缓存 {} 失败: {}", key, e);
+            }
+
+            Ok(rows)
+        }
+        .await;
+
+        // R-1 修复：singleflight 完成后清理 inflight 条目，防止 HashMap 无限增长
+        // 安全性：先 drop 本地 Arc 克隆，若 HashMap 中 strong_count == 1 说明仅 HashMap 持有引用，
+        // 无其他请求在等待锁，可安全移除；若 strong_count > 1，说明有并发请求正在等待此锁，保留条目
+        drop(inflight_lock);
         {
-            tracing::warn!("写入字典缓存 {} 失败: {}", key, e);
+            let mut map = self.inflight.lock().await;
+            if let Some(arc) = map.get(dict_type)
+                && Arc::strong_count(arc) == 1
+            {
+                map.remove(dict_type);
+            }
         }
 
-        Ok(rows)
+        result
     }
 
     /// 根据 dict_code 查询字典数据详情

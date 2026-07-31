@@ -48,7 +48,7 @@ pub fn generate_captcha() -> CaptchaResult {
     captcha.apply_filter(Wave::new(2.0, 8.0).horizontal());
     captcha.apply_filter(Wave::new(3.0, 6.0).vertical());
     captcha.apply_filter(Dots::new(5).min_radius(2).max_radius(4));
-    captcha.view(220, 120);
+    captcha.view(crate::common::constants::CAPTCHA_IMG_WIDTH, crate::common::constants::CAPTCHA_IMG_HEIGHT);
 
     let code = captcha.chars_as_string();
     let img_base64 = captcha.as_base64().unwrap_or_default();
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn test_captcha_code_length() {
         // 验证修复后验证码长度始终为 5
-        for _ in 0..100 {
+        for _ in 0..crate::common::constants::CAPTCHA_NOISE_DOTS {
             let result = generate_captcha();
             assert_eq!(
                 result.code.len(),

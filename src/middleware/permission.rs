@@ -378,7 +378,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("GET", "/monitor/cache/getValue/{cacheName}/{cacheKey}") => Some("monitor:cache:query"),
         ("DELETE", "/monitor/cache/clearCacheName/{cacheName}") => Some("monitor:cache:clear"),
         ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}") => Some("monitor:cache:clear"),
-        ("DELETE", "/monitor/cache/clearCacheAll") => Some("monitor:cache:clear"),
+        // clearCacheAll 端点已从路由中移除（FLUSHDB 会误清业务键），权限映射随之删除
 
         // ===== 服务器监控 =====
         ("GET", "/monitor/server") => Some("monitor:server:list"),
@@ -524,7 +524,9 @@ mod tests {
 
     #[test]
     fn test_cache_clear_perm() {
-        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheAll"), Some("monitor:cache:clear"));
+        // clearCacheAll 端点已移除，验证 clearCacheName/clearCacheKey 权限映射
+        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheName/{cacheName}"), Some("monitor:cache:clear"));
+        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"), Some("monitor:cache:clear"));
     }
 
     #[test]

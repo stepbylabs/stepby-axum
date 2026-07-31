@@ -87,9 +87,10 @@ impl AppState {
         let (ws_broadcast, _) = broadcast::channel::<WsMessage>(256);
 
         // 先实例化 user/role/menu service，再 clone 一份注入 AuthService（共享底层 Repository 实例）
-        let user_service = SysUserService::new(db.clone());
-        let role_service = SysRoleService::new(db.clone());
-        let menu_service = SysMenuService::new(db.clone());
+        // 三个 Service 均持有 Redis 连接管理器，用于权限缓存（cache-aside + 失效）
+        let user_service = SysUserService::new(db.clone(), redis.clone());
+        let role_service = SysRoleService::new(db.clone(), redis.clone());
+        let menu_service = SysMenuService::new(db.clone(), redis.clone());
 
         // H-4：config_service 提前实例化（持有 Redis 用于 cache-aside 缓存），
         // clone 一份注入 AuthService，使登录/注册流程的验证码开关、注册开关查询走 Redis 缓存，

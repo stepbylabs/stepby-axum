@@ -41,6 +41,11 @@ const GLOBAL_DEFAULT_PATTERN: &str = "*";
 /// 10s 窗口足以平滑突发请求，配置变更后最长 10s 生效（invalidate 时立即清空）。
 const LOCAL_CACHE_TTL_SECS: u64 = 10;
 
+/// R-2：进程内缓存最大条目数，超过时触发惰性清理（移除已过期条目）
+///
+/// route_pattern 集合通常有界（与 API 路由数量相当），此上限用于防御异常场景下的内存增长。
+const LOCAL_CACHE_MAX_ENTRIES: usize = 1024;
+
 // ==================== DTO ====================
 
 /// 限流配置分页查询 DTO
@@ -192,6 +197,20 @@ impl SysRateLimitService {
     /// 因此实际采用扫描清除所有 rate_limit:config:* 键的方式。
     pub async fn invalidate_cache(&self, _route_pattern: &str) {
         self.invalidate_all_cache().await;
+    }
+
+    /// R-2：惰性清理进程内缓存（移除已过期条目，防止内存无限增长）
+    ///
+    /// 在 local_cache 条目数超过 LOCAL_CACHE_MAX_ENTRIES 时触发，移除所有已过 TTL 的条目。
+    /// 采用 `retain` 保留未过期条目，O(n) 遍历。H-1：Mutex 中毒时恢复 Guard。
+    fn cleanup_local_cache(&self) {
+        let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() <= LOCAL_CACHE_MAX_ENTRIES {
+            return;
+        }
+        let now = Instant::now();
+        let ttl = Duration::from_secs(LOCAL_CACHE_TTL_SECS);
+        cache.retain(|_, (_, fetched_at)| now.duration_since(*fetched_at) <= ttl);
     }
 
     /// 分页查询限流配置
@@ -375,6 +394,8 @@ impl SysRateLimitService {
                 let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
                 cache.insert(route.to_string(), (cfg, Instant::now()));
             }
+            // R-2：惰性清理已过期的 local_cache 条目
+            self.cleanup_local_cache();
             return Ok(cfg);
         }
         // 反序列化失败或缓存未命中，继续查 DB（缓存损坏时后续会覆盖）
@@ -429,6 +450,8 @@ impl SysRateLimitService {
             let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.insert(route.to_string(), (config, Instant::now()));
         }
+        // R-2：惰性清理已过期的 local_cache 条目
+        self.cleanup_local_cache();
 
         Ok(config)
     }

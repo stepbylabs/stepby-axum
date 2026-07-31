@@ -174,7 +174,7 @@ impl JobScheduler {
                 let logininfor_service =
                     crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
 
-                const RETENTION_DAYS: i64 = 90;
+                const RETENTION_DAYS: i64 = crate::common::constants::LOG_RETENTION_DAYS;
 
                 match oper_log_service.cleanup_old_logs(RETENTION_DAYS).await {
                     Ok(affected) => {
@@ -231,9 +231,9 @@ impl JobScheduler {
                     crate::service::sys_notice_service::SysNoticeService::new(db.clone());
 
                 // 查询最近 5 分钟的失败登录，按 IP 分组，count >= 5 视为异常
-                const WINDOW_MINUTES: i64 = 5;
-                const FAIL_THRESHOLD: i64 = 5;
-                const DEDUP_TTL_SECS: u64 = 30 * 60; // 30 分钟
+                const WINDOW_MINUTES: i64 = crate::common::constants::LOGIN_ANOMALY_WINDOW_MINS;
+                const FAIL_THRESHOLD: i64 = crate::common::constants::CREDENTIAL_STUFFING_THRESHOLD;
+                const DEDUP_TTL_SECS: u64 = (crate::common::constants::CREDENTIAL_STUFFING_DEDUP_MINS as u64) * 60; // 30 分钟
 
                 let since = chrono::Local::now().naive_local()
                     - chrono::Duration::minutes(WINDOW_MINUTES);
@@ -366,7 +366,7 @@ impl JobScheduler {
 
                     // Redis 分布式锁（fail-closed：Redis 故障时跳过执行，避免多实例并发下载）
                     const MMDB_LOCK_KEY: &str = "lock:scheduler:mmdb_auto_update";
-                    const MMDB_LOCK_TTL_SECS: u64 = 30 * 60; // 30 分钟
+                    const MMDB_LOCK_TTL_SECS: u64 = crate::common::constants::MMDB_LOCK_TTL_SECS; // 30 分钟
                     let lock_value = uuid::Uuid::new_v4().to_string();
 
                     let lock_result: Option<String> = redis::cmd("SET")
@@ -1061,7 +1061,7 @@ fn register_builtin_tasks(db: DatabaseConnection) {
                 let logininfor_service =
                     crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
 
-                const RETENTION_DAYS: i64 = 90;
+                const RETENTION_DAYS: i64 = crate::common::constants::LOG_RETENTION_DAYS;
                 let mut messages = Vec::new();
 
                 match oper_log_service.cleanup_old_logs(RETENTION_DAYS).await {
