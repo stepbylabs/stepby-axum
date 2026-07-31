@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.5 | 更新日期：2026-07-31
+> 版本：v0.3.6 | 更新日期：2026-07-31
 
 ## 目录
 
@@ -1306,6 +1306,17 @@ tests/
 | PDF 导出失败无错误提示 | `operlog/index.vue` 的 `handlePrintPdf` 无 catch 处理 | 新增 try/catch，catch 中 `modal.msgError`，新增 `operlog.tip.pdfExportFail` i18n key |
 | tab.ts catch 参数隐式 any | `plugins/tab.ts` 两处 `.catch((e) =>` 参数未显式标注类型 | 改为 `(e: unknown)` 显式标注 |
 | settings.ts 类型不匹配 | `store/modules/settings.ts` 的 `ALLOWED_SETTING_KEYS.has(key)` 中 `key` 为 `string` 但 Set 类型为 `keyof SettingsState` | 添加 `key as keyof SettingsState` 类型断言 |
+
+#### v0.3.6 安全加固 + 可访问性 + 权限测试覆盖（2026-07-31，第十四轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 缓存前缀白名单信息泄漏 | `monitor_cache_handler.rs` 用 `format!("{:?}", ALLOWED_CACHE_PREFIXES)` 将内部 Redis key 命名规则暴露给客户端 | 改用 `.join(", ")` 输出可读列表而非 Debug 格式 |
+| 备份路径校验缺少 canonicalize 防御 | `sys_backup_service.rs` 的 `validate_backup_path` 注释声称使用 canonicalize 但实际未调用，symlink 攻击风险 | 新增 `tokio::fs::canonicalize(&dir)` 规范化备份目录，解析 symlink 后再 join 文件名 |
+| 登录/注册表单缺少无障碍标签 | `login.vue` 和 `register.vue` 的 `el-input` 仅有 placeholder，屏幕阅读器无法识别字段用途 | 所有输入框添加 `:aria-label` 绑定对应 i18n key |
+| 密码可见性切换按钮缺少 aria-label | `login.vue` 的 View/Hide 图标按钮无文字无 `aria-label` | 添加 `:aria-label` 和 `role="button"` `tabindex="0"`，新增 `login.showPassword`/`login.hidePassword` i18n key |
+| Crontab 表头缺少 scope 属性 | `Crontab/index.vue` 的 `<th>` 元素无 `scope="col"`，屏幕阅读器无法关联表头与数据 | 添加 `scope="col"` 属性 |
+| 权限中间件零测试覆盖 | `permission.rs` 的 `get_required_perm` 函数（安全核心路由权限映射）无单元测试 | 新增 23 个测试覆盖：用户/角色/监控/安全关键路由权限映射、仅需登录路由返回 None、未匹配路由返回 None、HTTP 方法混淆防护（synchDb GET vs POST） |
 
 ---
 
