@@ -272,6 +272,8 @@ error:
     not_found: Notice does not exist
     id_invalid: Invalid notice ID
     user_email_query_failed: Failed to query user email
+    notice_type_invalid: "notice_type must be 1 (notice) or 2 (announcement), current value: {{value}}"
+    status_invalid: "status must be 0 (normal) or 1 (closed), current value: {{value}}"
   websocket:
     connected: WebSocket connected
   role:

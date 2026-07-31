@@ -275,6 +275,8 @@ error:
     not_found: 通知公告不存在
     id_invalid: 通知公告 ID 不合法
     user_email_query_failed: 查询用户邮箱失败
+    notice_type_invalid: "notice_type 必须为 1(通知) 或 2(公告)，当前值: {{value}}"
+    status_invalid: "status 必须为 0(正常) 或 1(关闭)，当前值: {{value}}"
   role:
     not_found: 角色不存在
     perm_key_exists: 角色权限字符不能重复
