@@ -1,9 +1,12 @@
 // axum-backend/src/config/settings.rs
 
+use std::fmt;
 use serde::Deserialize;
 
 /// 全局配置根结构体
-#[derive(Debug, Clone, Deserialize)]
+///
+/// 注意：不 derive(Debug)，改用手动实现以脱敏 config_enc_key
+#[derive(Clone, Deserialize)]
 pub struct Settings {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
@@ -26,6 +29,23 @@ pub struct Settings {
     pub config_enc_key: String,
 }
 
+/// 手动实现 Debug 以脱敏 config_enc_key
+impl fmt::Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Settings")
+            .field("server", &self.server)
+            .field("database", &self.database)
+            .field("redis", &self.redis)
+            .field("jwt", &self.jwt)
+            .field("log", &self.log)
+            .field("upload", &self.upload)
+            .field("ip_location", &self.ip_location)
+            .field("mail", &self.mail)
+            .field("config_enc_key", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
@@ -44,7 +64,7 @@ pub struct ServerConfig {
     pub docs_enabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: String,
     pub max_connections: u32,
@@ -63,6 +83,21 @@ pub struct DatabaseConfig {
     pub acquire_timeout_secs: u64,
 }
 
+/// 手动实现 Debug 以脱敏 url（含数据库密码）
+impl fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatabaseConfig")
+            .field("url", &"<redacted>")
+            .field("max_connections", &self.max_connections)
+            .field("min_connections", &self.min_connections)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("max_lifetime_secs", &self.max_lifetime_secs)
+            .field("acquire_timeout_secs", &self.acquire_timeout_secs)
+            .finish()
+    }
+}
+
 fn default_db_max_lifetime_secs() -> u64 {
     1800
 }
@@ -71,12 +106,21 @@ fn default_db_acquire_timeout_secs() -> u64 {
     10
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct RedisConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// 手动实现 Debug 以脱敏 url（含 Redis 密码）
+impl fmt::Debug for RedisConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedisConfig")
+            .field("url", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 pub struct JwtConfig {
     pub secret: String,
     pub expire_hours: i64,
@@ -85,6 +129,18 @@ pub struct JwtConfig {
     /// 默认 "yebot"，生产环境应通过配置显式指定
     #[serde(default = "default_jwt_audience")]
     pub audience: String,
+}
+
+/// 手动实现 Debug 以脱敏 secret
+impl fmt::Debug for JwtConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JwtConfig")
+            .field("secret", &"<redacted>")
+            .field("expire_hours", &self.expire_hours)
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -246,7 +302,7 @@ fn default_mmdb_update_cron() -> String {
 ///
 /// 未配置（enabled=false）时邮件功能优雅降级为仅 sys_notice 入库，不发送实际邮件。
 /// 生产环境建议通过环境变量 MAIL_PASSWORD 注入 SMTP 密码，避免明文写入配置文件。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct MailConfig {
     /// 是否启用 SMTP 邮件发送（false 时所有邮件操作降级为仅记录 sys_notice）
     #[serde(default)]
@@ -272,6 +328,22 @@ pub struct MailConfig {
     /// 是否使用 STARTTLS（端口 587 时通常为 true，端口 465 SSL 直连时为 false）
     #[serde(default = "default_mail_starttls")]
     pub starttls: bool,
+}
+
+/// 手动实现 Debug 以脱敏 password
+impl fmt::Debug for MailConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MailConfig")
+            .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("from_email", &self.from_email)
+            .field("from_name", &self.from_name)
+            .field("starttls", &self.starttls)
+            .finish()
+    }
 }
 
 impl Default for MailConfig {
@@ -486,5 +558,133 @@ impl Settings {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证 Settings Debug 输出不泄漏 config_enc_key
+    #[test]
+    fn test_settings_debug_redacts_config_enc_key() {
+        let settings = Settings {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+                cors_origins: vec![],
+                trusted_proxies: vec![],
+                docs_enabled: false,
+            },
+            database: DatabaseConfig {
+                url: "postgres://user:supersecret@host:5432/db".to_string(),
+                max_connections: 10,
+                min_connections: 1,
+                connect_timeout: 8,
+                idle_timeout: 600,
+                max_lifetime_secs: 1800,
+                acquire_timeout_secs: 10,
+            },
+            redis: RedisConfig {
+                url: "redis://:redispass@host:6379".to_string(),
+            },
+            jwt: JwtConfig {
+                secret: "a-very-long-jwt-secret-key-for-testing-32+chars".to_string(),
+                expire_hours: 24,
+                issuer: "yebot".to_string(),
+                audience: "yebot".to_string(),
+            },
+            log: LogConfig {
+                level: "info".to_string(),
+                sql_logging: false,
+                file_path: "logs".to_string(),
+                json_stdout: false,
+            },
+            upload: UploadConfig::default(),
+            ip_location: IpLocationConfig::default(),
+            mail: MailConfig {
+                enabled: true,
+                host: "smtp.example.com".to_string(),
+                port: 465,
+                username: "user@example.com".to_string(),
+                password: "smtp_password_123".to_string(),
+                from_email: "noreply@example.com".to_string(),
+                from_name: "Test".to_string(),
+                starttls: false,
+            },
+            config_enc_key: "encryption-key-should-not-leak".to_string(),
+        };
+
+        let debug_str = format!("{:?}", settings);
+
+        // 敏感字段不应出现在 Debug 输出中
+        assert!(!debug_str.contains("supersecret"), "database URL password leaked");
+        assert!(!debug_str.contains("redispass"), "Redis URL password leaked");
+        assert!(!debug_str.contains("a-very-long-jwt-secret"), "JWT secret leaked");
+        assert!(!debug_str.contains("smtp_password_123"), "Mail password leaked");
+        assert!(!debug_str.contains("encryption-key-should-not-leak"), "config_enc_key leaked");
+
+        // 脱敏标记应存在
+        assert!(debug_str.contains("<redacted>"), "Redacted marker missing");
+    }
+
+    /// 验证 DatabaseConfig Debug 不泄漏 url
+    #[test]
+    fn test_database_config_debug_redacts_url() {
+        let db_config = DatabaseConfig {
+            url: "mysql://root:password123@localhost:3306/yebot".to_string(),
+            max_connections: 20,
+            min_connections: 5,
+            connect_timeout: 8,
+            idle_timeout: 600,
+            max_lifetime_secs: 1800,
+            acquire_timeout_secs: 10,
+        };
+        let debug_str = format!("{:?}", db_config);
+        assert!(!debug_str.contains("password123"), "Database URL password leaked in Debug");
+        assert!(debug_str.contains("<redacted>"));
+    }
+
+    /// 验证 JwtConfig Debug 不泄漏 secret
+    #[test]
+    fn test_jwt_config_debug_redacts_secret() {
+        let jwt_config = JwtConfig {
+            secret: "my-super-secret-jwt-key-1234567890123456".to_string(),
+            expire_hours: 24,
+            issuer: "yebot".to_string(),
+            audience: "yebot".to_string(),
+        };
+        let debug_str = format!("{:?}", jwt_config);
+        assert!(!debug_str.contains("my-super-secret-jwt-key"), "JWT secret leaked in Debug");
+        assert!(debug_str.contains("<redacted>"));
+    }
+
+    /// 验证 MailConfig Debug 不泄漏 password
+    #[test]
+    fn test_mail_config_debug_redacts_password() {
+        let mail_config = MailConfig {
+            enabled: true,
+            host: "smtp.qq.com".to_string(),
+            port: 465,
+            username: "test@qq.com".to_string(),
+            password: "qq_auth_code_secret".to_string(),
+            from_email: "test@qq.com".to_string(),
+            from_name: "Test".to_string(),
+            starttls: false,
+        };
+        let debug_str = format!("{:?}", mail_config);
+        assert!(!debug_str.contains("qq_auth_code_secret"), "Mail password leaked in Debug");
+        assert!(debug_str.contains("<redacted>"));
+    }
+
+    /// 验证 RedisConfig Debug 不泄漏 url
+    #[test]
+    fn test_redis_config_debug_redacts_url() {
+        let redis_config = RedisConfig {
+            url: "redis://:mypassword@localhost:6379/0".to_string(),
+        };
+        let debug_str = format!("{:?}", redis_config);
+        assert!(!debug_str.contains("mypassword"), "Redis URL password leaked in Debug");
+        assert!(debug_str.contains("<redacted>"));
     }
 }

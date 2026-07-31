@@ -564,7 +564,8 @@ impl SysBackupService {
         cmd.arg("--host").arg(&host)
             .arg("--port").arg(&port)
             .arg("--user").arg(&user)
-            .arg(format!("--password={}", pass))
+            // 安全：通过 MYSQL_PWD 环境变量传递密码，避免通过命令行参数泄漏到进程列表
+            .env("MYSQL_PWD", &pass)
             .arg(&db)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())

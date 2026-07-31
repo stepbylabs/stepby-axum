@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.6 | 更新日期：2026-07-31
+> 版本：v0.3.7 | 更新日期：2026-07-31
 
 ## 目录
 
@@ -1317,6 +1317,24 @@ tests/
 | 密码可见性切换按钮缺少 aria-label | `login.vue` 的 View/Hide 图标按钮无文字无 `aria-label` | 添加 `:aria-label` 和 `role="button"` `tabindex="0"`，新增 `login.showPassword`/`login.hidePassword` i18n key |
 | Crontab 表头缺少 scope 属性 | `Crontab/index.vue` 的 `<th>` 元素无 `scope="col"`，屏幕阅读器无法关联表头与数据 | 添加 `scope="col"` 属性 |
 | 权限中间件零测试覆盖 | `permission.rs` 的 `get_required_perm` 函数（安全核心路由权限映射）无单元测试 | 新增 23 个测试覆盖：用户/角色/监控/安全关键路由权限映射、仅需登录路由返回 None、未匹配路由返回 None、HTTP 方法混淆防护（synchDb GET vs POST） |
+
+#### v0.3.7 密码泄漏防护 + Debug 脱敏（2026-07-31，第十五轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| MySQL 备份/恢复密码泄漏到进程列表 | `sys_backup_service.rs` 使用 `--password=` 命令行参数传递密码，通过 `ps`/`tasklist` 可见 | mysqldump 和 mysql 均改用 `MYSQL_PWD` 环境变量传递密码，不在命令行暴露 |
+| Settings Debug 输出泄漏敏感配置 | `Settings` 及嵌套 `DatabaseConfig`/`RedisConfig`/`JwtConfig`/`MailConfig` 使用 `derive(Debug)`，`format!("{:?}", settings)` 会输出数据库连接串密码、Redis 密码、JWT 密钥、SMTP 密码、配置加密密钥 | 为 5 个结构体实现手动 `fmt::Debug`，敏感字段（url/secret/password/config_enc_key）输出为 `<redacted>` |
+| sys_user::Model Debug 泄漏密码哈希 | `sys_user::Model` 使用 `derive(Debug)`，日志中的 `format!("{:?}", user)` 会暴露 Argon2id 哈希 | 移除 `derive(Debug)`，实现手动 `fmt::Debug`，password 字段输出为 `<redacted>`，新增 6 个单元测试验证脱敏效果 |
+
+**新增测试（6 个）**：
+- `config::settings::tests::test_settings_debug_redacts_config_enc_key` — 验证 Settings 整体 Debug 不泄漏 5 类敏感字段
+- `config::settings::tests::test_database_config_debug_redacts_url` — 验证 DatabaseConfig Debug 不泄漏 URL 中的密码
+- `config::settings::tests::test_jwt_config_debug_redacts_secret` — 验证 JwtConfig Debug 不泄漏 secret
+- `config::settings::tests::test_mail_config_debug_redacts_password` — 验证 MailConfig Debug 不泄漏 SMTP 密码
+- `config::settings::tests::test_redis_config_debug_redacts_url` — 验证 RedisConfig Debug 不泄漏 URL 中的密码
+- `entity::sys_user::tests::test_user_model_debug_redacts_password` — 验证 sys_user::Model Debug 不泄漏 Argon2id 哈希
+
+**测试统计**：177 单元测试通过（+6），0 失败
 
 ---
 
