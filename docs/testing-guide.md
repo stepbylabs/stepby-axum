@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.9 | 更新日期：2026-07-31
+> 版本：v0.4.0 | 更新日期：2026-07-31
 
 ## 目录
 
@@ -1373,6 +1373,25 @@ tests/
 - 前端：`file.ts`、`role/index.vue`、46 个文件（console DEV 守卫）
 
 **测试统计**：177 单元测试通过，0 失败；前端 vue-tsc 类型检查通过
+
+#### v0.4.0 i18n 硬编码修复 + console 守卫补全 + 测试环境修复（2026-07-31，第十三至十五轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 文件批量删除部分成功消息硬编码 | `file/index.vue` 的 `handleBatchDelete` 使用模板字符串拼接中文 `${successCount}/${results.length} 删除成功，${failCount} 个失败` | 改用 `t('file.tip.batchDeletePartial', { success, total, fail })` i18n key，新增 zh-CN/en-US 翻译 |
+| PDF 导出操作列匹配在英文环境失效 | `pdf.ts` 硬编码 `text === '操作'` 判断操作列，英文环境列头为 "Operation" 导致漏判 | 改用 `i18n.global.t('common.column.operation')` 动态匹配当前语言列头 |
+| PDF 打印预览标题硬编码 | `pdf.ts` 的 `printElement` 默认参数 `title = '打印预览'` | 改用 `i18n.global.t('pdf.printPreview')`，新增 `pdf.printPreview` i18n key |
+| WebSocket 关闭原因含中文 | `websocket.ts` 的 `disconnect()` 传递中文 `'用户主动断开'` 作为 close reason | 改用协议级英文标识 `'client_disconnect'` |
+| 三处 useExport 调用缺少成功提示 | `rateLimit/index.vue`、`logininfor/index.vue`、`dict/data.vue` 的 `useExport` 未传 `successKey`，导出成功无用户反馈 | 补充 `{ successKey: 'common.exportSuccess' }` 参数 |
+| request.ts 4 处 console 未加 DEV 守卫 | 请求拦截器错误（line 143/166）、响应拦截器错误（line 248）、下载解析错误（line 381）在生产环境输出到控制台 | 全部包裹 `if (import.meta.env.DEV)` 守卫 |
+| download.ts 1 处 console.error 未加 DEV 守卫 | `plugins/download.ts` line 114 的错误解析日志在生产环境输出 | 包裹 `if (import.meta.env.DEV)` 守卫 |
+| zh-CN/en-US i18n 键不对齐 | `noticeCenter.markAllReadSuccessCount` 仅存在于 zh-CN，en-US 缺失导致英文环境 `t()` 返回 undefined | 补充 en-US 翻译 `'Marked {count} notices as read'` |
+| vitest localStorage 环境不可用 | jsdom 在特定 Node.js 版本下 localStorage.getItem 不是函数，导致 `yebot.test.ts` 整个文件 49 个用例无法执行 | 新增 `src/test/setup.ts` setupFiles，提供 localStorage/sessionStorage mock 兜底 |
+
+**涉及文件**：
+- 前端：`file/index.vue`、`pdf.ts`、`websocket.ts`、`request.ts`、`download.ts`、`rateLimit/index.vue`、`logininfor/index.vue`、`dict/data.vue`、`i18n/locales/zh-CN.ts`、`i18n/locales/en-US.ts`、`i18n/locales/i18n.test.ts`、`vitest.config.ts`、`test/setup.ts`
+
+**测试统计**：177 后端单元测试通过，0 失败；194 前端单元测试通过（+49，修复 localStorage 环境后解锁 yebot.test.ts），0 失败
 
 ---
 

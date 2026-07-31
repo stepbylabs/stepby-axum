@@ -14,12 +14,15 @@
 //! - 错误统一使用 ServiceError
 //! - Service 层返回 Vo（不含 code/msg），Handler 层负责包装为 Result
 
+use std::time::Duration;
+
 use sea_orm::Set;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use garde::Validate;
 
 use crate::common::constants::SECS_PER_HOUR;
+use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::common::error::ServiceError;
 use crate::config::JwtConfig;
 use crate::entity::sys_logininfor;
@@ -308,12 +311,20 @@ impl AuthService {
         // 3. 存入 Redis，TTL 300s（5 分钟）
         //    key 绑定 IP：captcha:{uuid}:{ip}，防止验证码跨 IP 重放
         let captcha_key = format!("captcha:{}:{}", captcha.uuid, ip);
-        redis::cmd("SETEX")
-            .arg(&captcha_key)
-            .arg(300i64)
-            .arg(captcha.code.to_lowercase())
-            .query_async::<()>(redis)
-            .await?;
+        // R11：命令级超时（fail-closed：超时则验证码未存储，用户无法登录）
+        tokio::time::timeout(
+            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+            redis::cmd("SETEX")
+                .arg(&captcha_key)
+                .arg(300i64)
+                .arg(captcha.code.to_lowercase())
+                .query_async::<()>(redis),
+        )
+        .await
+        .map_err(|_| {
+            tracing::error!("Redis SETEX 验证码超时（fail-closed）");
+            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })??;
 
         Ok(CaptchaVo {
             captcha_enabled: true,
@@ -427,14 +438,22 @@ impl AuthService {
         ctx: &LoginContext<'_>,
     ) -> Result<(), ServiceError> {
         let fail_key = format!("login_fail:{}", ctx.username);
-        let fail_count: Option<i64> = redis::cmd("GET")
-            .arg(&fail_key)
-            .query_async(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("Redis 登录失败计数查询失败（fail-closed）: {}", e);
-                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-            })?;
+        // R11：命令级超时（fail-closed 503）
+        let fail_count: Option<i64> = tokio::time::timeout(
+            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+            redis::cmd("GET")
+                .arg(&fail_key)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| {
+            tracing::error!("Redis 登录失败计数查询超时（fail-closed）");
+            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?
+        .map_err(|e| {
+            tracing::error!("Redis 登录失败计数查询失败（fail-closed）: {}", e);
+            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
@@ -464,14 +483,25 @@ impl AuthService {
         if self.is_captcha_enabled().await {
             let captcha_key = format!("captcha:{}:{}", uuid, ctx.login_ip);
             // M-6：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
-            let stored_code: Option<String> = match redis::cmd("GETDEL")
-                .arg(&captcha_key)
-                .query_async(redis)
-                .await
+            // R11：命令级超时（fail-closed 503）
+            let stored_code: Option<String> = match tokio::time::timeout(
+                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+                redis::cmd("GETDEL")
+                    .arg(&captcha_key)
+                    .query_async(redis),
+            )
+            .await
             {
-                Ok(v) => v,
-                Err(e) => {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
                     tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
+                    return Err(ServiceError::new(
+                        503,
+                        crate::tr!("error.auth.auth_unavailable"),
+                    ));
+                }
+                Err(_) => {
+                    tracing::error!("Redis GETDEL 验证码超时（fail-closed）");
                     return Err(ServiceError::new(
                         503,
                         crate::tr!("error.auth.auth_unavailable"),
@@ -667,7 +697,8 @@ impl AuthService {
             os: ctx.os.to_string(),
             jti: claims.jti,
             dept_name,
-            exp: claims.exp as i64,
+            // R11：防 usize→i64 溢出（与 jwt/claims.rs:106 的 try_from 防御保持一致）
+            exp: i64::try_from(claims.exp).unwrap_or(0),
         };
         let session_json = serde_json::to_string(&session)?;
 
@@ -738,12 +769,26 @@ impl AuthService {
         // (d) DEL login_fail:{username}（清除失败计数）
         let fail_key = format!("login_fail:{}", ctx.username);
         pipe.cmd("DEL").arg(&fail_key);
-        // pipeline 整体执行（best-effort：任一命令失败仅记日志，不阻断登录）
-        if let Err(e) = pipe.query_async::<Vec<i64>>(redis).await {
-            tracing::warn!(
-                "finalize_login pipeline 部分失败（不阻断登录，仅影响在线列表/会话去重/失败计数）: {}",
-                e
-            );
+        // pipeline 整体执行（best-effort：超时/任一命令失败仅记日志，不阻断登录）
+        // R11：命令级超时
+        match tokio::time::timeout(
+            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+            pipe.query_async::<Vec<i64>>(redis),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "finalize_login pipeline 部分失败（不阻断登录，仅影响在线列表/会话去重/失败计数）: {}",
+                    e
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "finalize_login pipeline 超时（不阻断登录，仅影响在线列表/会话去重/失败计数）"
+                );
+            }
         }
 
         // 4. 更新 login_ip / login_date（失败不阻断登录）
@@ -785,16 +830,24 @@ impl AuthService {
         // 使用 token 的 SHA-256 哈希作为 key，节省 Redis 内存
         if remaining > 0 {
             let blacklist_key = format!("blacklist:{}", token_hash);
-            redis::cmd("SETEX")
-                .arg(&blacklist_key)
-                .arg(remaining)
-                .arg("1")
-                .query_async::<()>(redis)
-                .await
-                .map_err(|e| {
-                    tracing::error!("登出黑名单写入失败（fail-closed）: {}", e);
-                    ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
-                })?;
+            // R11：命令级超时（fail-closed：超时则黑名单未写入，拒绝 logout 以避免 token 仍可用）
+            tokio::time::timeout(
+                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+                redis::cmd("SETEX")
+                    .arg(&blacklist_key)
+                    .arg(remaining)
+                    .arg("1")
+                    .query_async::<()>(redis),
+            )
+            .await
+            .map_err(|_| {
+                tracing::error!("登出黑名单写入超时（fail-closed）");
+                ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
+            })?
+            .map_err(|e| {
+                tracing::error!("登出黑名单写入失败（fail-closed）: {}", e);
+                ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
+            })?;
         }
 
         // DEL online:{token_hash}（best-effort：失败不阻断 logout）
@@ -909,14 +962,25 @@ impl AuthService {
             let captcha_key = format!("captcha:{}:{}", dto.uuid, ip);
             // C-1：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
             //      与 verify_captcha（464-478 行）保持一致，避免静默吞错掩盖基础设施故障。
-            let stored_code: Option<String> = match redis::cmd("GETDEL")
-                .arg(&captcha_key)
-                .query_async(redis)
-                .await
+            // R11：命令级超时（fail-closed 503）
+            let stored_code: Option<String> = match tokio::time::timeout(
+                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+                redis::cmd("GETDEL")
+                    .arg(&captcha_key)
+                    .query_async(redis),
+            )
+            .await
             {
-                Ok(v) => v,
-                Err(e) => {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
                     tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
+                    return Err(ServiceError::new(
+                        503,
+                        crate::tr!("error.auth.auth_unavailable"),
+                    ));
+                }
+                Err(_) => {
+                    tracing::error!("Redis GETDEL 验证码超时（fail-closed）");
                     return Err(ServiceError::new(
                         503,
                         crate::tr!("error.auth.auth_unavailable"),
@@ -1008,15 +1072,23 @@ impl AuthService {
         redis: &mut redis::aio::ConnectionManager,
     ) -> Result<(), ServiceError> {
         let fail_key = format!("login_fail:{}", username);
-        let _: i64 = redis::Script::new(RATE_LIMIT_SCRIPT)
-            .key(&fail_key)
-            .arg(LOGIN_FAIL_TTL)
-            .invoke_async(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("Redis 登录失败计数更新失败（fail-closed）: {}", e);
-                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-            })?;
+        // R11：命令级超时（fail-closed 503）
+        let _: i64 = tokio::time::timeout(
+            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+            redis::Script::new(RATE_LIMIT_SCRIPT)
+                .key(&fail_key)
+                .arg(LOGIN_FAIL_TTL)
+                .invoke_async(redis),
+        )
+        .await
+        .map_err(|_| {
+            tracing::error!("Redis 登录失败计数更新超时（fail-closed）");
+            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?
+        .map_err(|e| {
+            tracing::error!("Redis 登录失败计数更新失败（fail-closed）: {}", e);
+            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
         Ok(())
     }
 

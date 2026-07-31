@@ -418,7 +418,7 @@ impl SysRateLimitService {
 
         let config = match model {
             Some(m) => RateLimitConfig {
-                capacity: m.capacity.max(0) as u32,
+                capacity: u32::try_from(m.capacity.max(0)).unwrap_or(u32::MAX),
                 refill_per_second: m.refill_per_second,
             },
             None => RateLimitConfig::default(),

@@ -80,7 +80,9 @@ pub async fn list(
     Query(params): Query<FileListQuery>,
 ) -> Result<AjaxResult<FileListResponse>, AppError> {
     let upload_cfg = &state.config.upload;
-    let page_num = params.page_num.max(1);
+    // 安全（R10）：page_num 设上界 10000，防止 (page_num-1)*page_size 在 u64 乘法时溢出
+    // 导致 debug panic / release 回绕后返回错误切片范围
+    let page_num = params.page_num.clamp(1, 10_000);
     let page_size = params.page_size.clamp(1, 100);
 
     // 读取 uploads 目录下所有文件
@@ -108,7 +110,7 @@ pub async fn list(
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
+                    .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
                     .unwrap_or(0);
                 result.push((name, size, modified));
             }

@@ -237,15 +237,20 @@ impl SysOperLogRepository {
     ///
     /// 返回 (total, success, fail)
     pub async fn stats_summary(&self) -> Result<(i64, i64, i64), DbErr> {
-        let total = SysOperLog::find().count(self.base.db()).await? as i64;
+        let total = SysOperLog::find()
+            .count(self.base.db())
+            .await
+            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
         let success = SysOperLog::find()
             .filter(Column::Status.eq("0"))
             .count(self.base.db())
-            .await? as i64;
+            .await
+            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
         let fail = SysOperLog::find()
             .filter(Column::Status.eq("1"))
             .count(self.base.db())
-            .await? as i64;
+            .await
+            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
         Ok((total, success, fail))
     }
 

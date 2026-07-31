@@ -1,6 +1,7 @@
 // axum-backend/src/middleware/auth.rs
 
 use std::sync::Arc;
+use std::time::Duration;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -57,20 +58,32 @@ pub async fn auth_middleware(
     let pwd_changed_key = format!("pwd_changed:{}", claims.sub);
     let mut redis = state.redis.clone();
     // Pipeline：一次 RTT 同时查询 blacklist 和 pwd_changed
-    let (is_blacklisted, pwd_changed): (Option<String>, Option<i64>) = redis::pipe()
-        .cmd("GET").arg(&blacklist_key)
-        .cmd("GET").arg(&pwd_changed_key)
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                request_id = %request_id,
-                user_id = %claims.sub,
-                error = %e,
-                "Redis 黑名单/pwd_changed 查询失败（fail-closed 拒绝请求）"
-            );
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    // R11：命令级超时（REDIS_CMD_TIMEOUT_SECS=3s），fail-closed：超时返回 503 拒绝请求
+    let (is_blacklisted, pwd_changed): (Option<String>, Option<i64>) = tokio::time::timeout(
+        Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
+        redis::pipe()
+            .cmd("GET").arg(&blacklist_key)
+            .cmd("GET").arg(&pwd_changed_key)
+            .query_async(&mut redis),
+    )
+    .await
+    .map_err(|_| {
+        tracing::error!(
+            request_id = %request_id,
+            user_id = %claims.sub,
+            "Redis 黑名单/pwd_changed 查询超时（fail-closed 拒绝请求）"
+        );
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?
+    .map_err(|e| {
+        tracing::error!(
+            request_id = %request_id,
+            user_id = %claims.sub,
+            error = %e,
+            "Redis 黑名单/pwd_changed 查询失败（fail-closed 拒绝请求）"
+        );
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?;
     if is_blacklisted.is_some() {
         return Err(AppError::unauthorized(&crate::tr!("error.auth.token_revoked")));
     }

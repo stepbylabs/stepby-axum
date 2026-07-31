@@ -99,6 +99,18 @@ impl SysRoleMenuRepository {
             .await
     }
 
+    /// 统计某菜单关联的角色数（事务上下文，菜单删除 TOCTOU 校验用）
+    pub async fn count_by_menu_id_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        menu_id: i64,
+    ) -> Result<u64, DbErr> {
+        SysRoleMenu::find()
+            .filter(Column::MenuId.eq(menu_id))
+            .count(conn)
+            .await
+    }
+
     /// 批量插入关联（使用指定连接，用于事务内调用）
     pub async fn insert_many_conn<C: ConnectionTrait>(
         &self,

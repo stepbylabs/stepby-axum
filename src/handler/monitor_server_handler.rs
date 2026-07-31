@@ -317,7 +317,9 @@ fn get_local_ip() -> String {
 /// 格式化 epoch 时间戳为可读字符串
 fn format_epoch(epoch: u64) -> String {
     use chrono::TimeZone;
-    match chrono::Local.timestamp_opt(epoch as i64, 0) {
+    // R11：防 u64→i64 溢出（epoch > i64::MAX 时回绕为负数导致时间错误）
+    let epoch_i64 = i64::try_from(epoch).unwrap_or(i64::MAX);
+    match chrono::Local.timestamp_opt(epoch_i64, 0) {
         chrono::LocalResult::Single(t) => t.format("%Y-%m-%d %H:%M:%S").to_string(),
         _ => String::new(),
     }
@@ -325,9 +327,11 @@ fn format_epoch(epoch: u64) -> String {
 
 /// 格式化秒数时长为 "X天X小时X分钟"
 fn format_duration(secs: u64) -> String {
-    let days = secs as i64 / SECS_PER_DAY;
-    let hours = (secs as i64 % SECS_PER_DAY) / SECS_PER_HOUR;
-    let minutes = (secs as i64 % SECS_PER_HOUR) / SECS_PER_MIN;
+    // R11：防 u64→i64 溢出
+    let secs = i64::try_from(secs).unwrap_or(i64::MAX);
+    let days = secs / SECS_PER_DAY;
+    let hours = (secs % SECS_PER_DAY) / SECS_PER_HOUR;
+    let minutes = (secs % SECS_PER_HOUR) / SECS_PER_MIN;
     crate::tr!(
         "error.monitor_server.duration_format",
         days = days,

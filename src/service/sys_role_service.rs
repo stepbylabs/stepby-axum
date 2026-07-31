@@ -911,6 +911,8 @@ impl SysRoleService {
                 .boxed()
             })
             .await?;
+        // R12：data_scope 变更影响绑定该角色的用户的数据权限，需失效权限缓存
+        self.invalidate_all_perm_cache().await;
 
         Ok(())
     }
