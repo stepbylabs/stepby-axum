@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.4 | 更新日期：2026-07-31
+> 版本：v0.3.5 | 更新日期：2026-07-31
 
 ## 目录
 
@@ -1290,6 +1290,22 @@ tests/
 |------|------|---------|
 | force_logout 黑名单 TTL 过度保守 | `monitor_online_handler.rs` 用 `jwt.expire_hours * SECS_PER_HOUR` 作为黑名单 TTL（保守上界），用户登录 1 小时后被强退，黑名单仍保留 24 小时（多 23 小时内存浪费） | `OnlineSession` 新增 `exp` 字段（i64，UTC 秒），登录时由 `claims.exp` 写入；force_logout 用 `session.exp - now` 计算精确剩余 TTL；旧 JSON（exp=0）回退到 `jwt.expire_hours` 上界 |
 | 权限拒绝事件无审计痕迹 | `oper_log_middleware` 挂在 `permission_middleware` 之后，权限拒绝时直接返回 403，oper_log 无法记录，导致越权尝试无审计日志 | `permission_middleware` 内新增 `spawn_permission_denied_audit` 函数，权限拒绝时直接 spawn 写入 `sys_oper_log`（best-effort，不阻断 403 响应）；新增 `log.auth.permission_denied` i18n key（支持 `{{perm}}` 占位符）；`infer_module_title` 改为 pub(crate) 以便复用 |
+
+#### v0.3.5 i18n 标准化与加载状态补全（2026-07-31，第十二至十三轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 通知公告校验错误硬编码中文 | `sys_notice_service.rs` 的 `validate_notice_enum` 用 `format!` 返回中文错误信息 | 改用 `tr!()` 宏，新增 `error.notice.notice_type_invalid` 和 `error.notice.status_invalid` i18n key（zh-CN + en-US） |
+| IP 库更新成功消息硬编码中文 | `ip_location_service.rs` 的 `UpdateResult.message` 用 `format!("IP 库更新成功…")` | 改用 `tr!("msg.success.ip_location_update")`，新增对应 i18n key |
+| IP 库更新错误消息硬编码中文 | `ip_location_service.rs` 中 7 处 `anyhow::bail!` 和 7 处 `anyhow::anyhow!` 使用中文 | 全部转换为英文（操作诊断信息，locale 中性） |
+| 调度器 Display 实现硬编码中文 | `scheduler/mod.rs` 的 `SchedulerError` Display impl 使用中文 | 转换为英文（Display 仅用于日志/调试，API 层已用 `tr!` 转换） |
+| 邮件发件人默认名称中文 | `settings.rs` 的 `default_mail_from_name` 返回 `"yebot 系统"` | 改为 `"yebot System"`（locale 中性默认值） |
+| MySessionPanel 强退按钮无 loading 状态 | `MySessionPanel.vue` 的 `handleForceLogout` 按钮缺少 `:loading` 绑定，可重复点击发送重复请求 | 新增 `logoutTokenId` ref 跟踪当前操作的 tokenId，按钮绑定 `:loading`，finally 中重置 |
+| 操作日志清空/PDF 按钮无 loading 状态 | `operlog/index.vue` 的 `handleClean` 和 `handlePrintPdf` 缺少 loading 绑定 | 新增 `cleanLoading` / `printLoading` ref，按钮绑定 `:loading`，Promise 链和 try/finally 中管理状态 |
+| 调度日志清空按钮无 loading 状态 | `job/log.vue` 的 `handleClean` 缺少 loading 绑定 | 新增 `cleanLoading` ref，按钮绑定 `:loading`，Promise 链 finally 中重置 |
+| PDF 导出失败无错误提示 | `operlog/index.vue` 的 `handlePrintPdf` 无 catch 处理 | 新增 try/catch，catch 中 `modal.msgError`，新增 `operlog.tip.pdfExportFail` i18n key |
+| tab.ts catch 参数隐式 any | `plugins/tab.ts` 两处 `.catch((e) =>` 参数未显式标注类型 | 改为 `(e: unknown)` 显式标注 |
+| settings.ts 类型不匹配 | `store/modules/settings.ts` 的 `ALLOWED_SETTING_KEYS.has(key)` 中 `key` 为 `string` 但 Set 类型为 `keyof SettingsState` | 添加 `key as keyof SettingsState` 类型断言 |
 
 ---
 

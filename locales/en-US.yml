@@ -346,6 +346,7 @@ msg:
     add_role: "Added role {{name}} successfully"
     add_dept: "Added department {{name}} successfully"
     add_menu: "Added menu {{name}} successfully"
+    ip_location_update: "IP database updated successfully (source: {{source}}, size: {{size}} bytes)"
   cache:
     no_match: No matching cache
     key_not_found: Cache key does not exist

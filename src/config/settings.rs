@@ -294,7 +294,7 @@ fn default_mail_port() -> u16 {
 }
 
 fn default_mail_from_name() -> String {
-    "yebot 系统".to_string()
+    "yebot System".to_string()
 }
 
 fn default_mail_starttls() -> bool {

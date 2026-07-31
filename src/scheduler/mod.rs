@@ -53,8 +53,8 @@ pub enum SchedulerError {
 impl std::fmt::Display for SchedulerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SchedulerError::InvalidCron(msg) => write!(f, "cron 表达式非法: {}", msg),
-            SchedulerError::SchedulerInternal(msg) => write!(f, "调度器内部错误: {}", msg),
+            SchedulerError::InvalidCron(msg) => write!(f, "invalid cron expression: {}", msg),
+            SchedulerError::SchedulerInternal(msg) => write!(f, "scheduler internal error: {}", msg),
         }
     }
 }

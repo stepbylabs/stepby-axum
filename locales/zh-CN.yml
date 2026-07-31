@@ -347,6 +347,7 @@ msg:
     add_role: "新增角色 {{name}} 成功"
     add_dept: "新增部门 {{name}} 成功"
     add_menu: "新增菜单 {{name}} 成功"
+    ip_location_update: "IP 库更新成功（源: {{source}}，大小: {{size}} bytes）"
   cache:
     no_match: 无匹配缓存
     key_not_found: 缓存键不存在
