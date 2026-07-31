@@ -133,7 +133,7 @@ async fn clear_business_caches(state: &Arc<AppState>) {
         let mut cursor: u64 = 0;
         loop {
             let result: (u64, Vec<String>) = match redis::cmd("SCAN")
-                .arg(&cursor)
+                .arg(cursor)
                 .arg("MATCH")
                 .arg(pattern)
                 .arg("COUNT")

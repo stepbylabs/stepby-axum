@@ -33,12 +33,12 @@ fn validate_notice_enum(notice_type: &str, status: Option<&str>) -> Result<(), S
             &crate::tr!("error.notice.notice_type_invalid", value = notice_type),
         ));
     }
-    if let Some(s) = status {
-        if s != "0" && s != "1" {
-            return Err(ServiceError::bad_request(
-                &crate::tr!("error.notice.status_invalid", value = s),
-            ));
-        }
+    if let Some(s) = status
+        && s != "0" && s != "1"
+    {
+        return Err(ServiceError::bad_request(
+            &crate::tr!("error.notice.status_invalid", value = s),
+        ));
     }
     Ok(())
 }

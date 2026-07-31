@@ -31,29 +31,29 @@ fn validate_job_enum(
     concurrent: Option<&str>,
     status: Option<&str>,
 ) -> Result<(), ServiceError> {
-    if let Some(m) = misfire_policy {
-        if m != "1" && m != "2" && m != "3" {
-            return Err(ServiceError::bad_request(&format!(
-                "misfire_policy 必须为 1/2/3，当前值: {}",
-                m
-            )));
-        }
+    if let Some(m) = misfire_policy
+        && m != "1" && m != "2" && m != "3"
+    {
+        return Err(ServiceError::bad_request(&format!(
+            "misfire_policy 必须为 1/2/3，当前值: {}",
+            m
+        )));
     }
-    if let Some(c) = concurrent {
-        if c != "0" && c != "1" {
-            return Err(ServiceError::bad_request(&format!(
-                "concurrent 必须为 0(允许) 或 1(禁止)，当前值: {}",
-                c
-            )));
-        }
+    if let Some(c) = concurrent
+        && c != "0" && c != "1"
+    {
+        return Err(ServiceError::bad_request(&format!(
+            "concurrent 必须为 0(允许) 或 1(禁止)，当前值: {}",
+            c
+        )));
     }
-    if let Some(s) = status {
-        if s != "0" && s != "1" {
-            return Err(ServiceError::bad_request(&format!(
-                "status 必须为 0(正常) 或 1(暂停)，当前值: {}",
-                s
-            )));
-        }
+    if let Some(s) = status
+        && s != "0" && s != "1"
+    {
+        return Err(ServiceError::bad_request(&format!(
+            "status 必须为 0(正常) 或 1(暂停)，当前值: {}",
+            s
+        )));
     }
     Ok(())
 }
@@ -330,14 +330,14 @@ impl SysJobService {
 
         // status='0' 时注册到调度器（容错：失败仅 warn，不阻断 DB 已提交的插入）
         // 与 edit_job/delete_jobs/change_status 保持一致：DB 为 source of truth，重启后调度器从 DB 恢复
-        if status == "0" {
-            if let Err(e) = self.scheduler.add_job(&job).await {
-                tracing::warn!(
-                    job_id = job.job_id,
-                    error = %e,
-                    "add_job: 调度器 add_job 失败，DB 已插入，重启后调度器从 DB 恢复"
-                );
-            }
+        if status == "0"
+            && let Err(e) = self.scheduler.add_job(&job).await
+        {
+            tracing::warn!(
+                job_id = job.job_id,
+                error = %e,
+                "add_job: 调度器 add_job 失败，DB 已插入，重启后调度器从 DB 恢复"
+            );
         }
 
         Ok(job)

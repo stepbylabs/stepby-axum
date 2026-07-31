@@ -376,28 +376,33 @@ impl SysRoleService {
         // P0-2 修复：导出接口需应用与 list 相同的数据权限过滤，防止越权导出
         let mut scope_role_ids: Option<Vec<i64>> = None;
 
-        if let Some(op_uid) = operator_user_id {
-            if op_uid != SUPER_ADMIN_USER_ID {
-                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-                let min_scope = op_roles
-                    .iter()
-                    .filter_map(|r| r.data_scope.as_deref())
-                    .filter_map(|s| s.parse::<i32>().ok())
-                    .min();
+        if let Some(op_uid) = operator_user_id
+            && op_uid != SUPER_ADMIN_USER_ID
+        {
+            let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
+            let min_scope = op_roles
+                .iter()
+                .filter_map(|r| r.data_scope.as_deref())
+                .filter_map(|s| s.parse::<i32>().ok())
+                .min();
 
-                if let Some(scope) = min_scope {
-                    match scope {
-                        1 => { /* 全部数据：不追加过滤 */ }
-                        2..=5 | _ => {
-                            // 角色无 dept_id，data_scope 2/3/4/5 降级为"仅本人"
-                            let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                            scope_role_ids = Some(ids);
-                        }
+            if let Some(scope) = min_scope {
+                match scope {
+                    1 => { /* 全部数据：不追加过滤 */ }
+                    2..=5 => {
+                        // 角色无 dept_id，data_scope 2/3/4/5 降级为"仅本人"
+                        let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+                        scope_role_ids = Some(ids);
                     }
-                } else {
-                    let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                    scope_role_ids = Some(ids);
+                    _ => {
+                        // 兜底：未知 data_scope，降级为"仅本人"
+                        let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+                        scope_role_ids = Some(ids);
+                    }
                 }
+            } else {
+                let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+                scope_role_ids = Some(ids);
             }
         }
 
