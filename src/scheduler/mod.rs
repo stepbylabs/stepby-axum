@@ -112,12 +112,12 @@ impl JobScheduler {
     ) -> Result<Self, SchedulerError> {
         let scheduler = TokioScheduler::new()
             .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("创建调度器失败: {}", e)))?;
+            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create scheduler: {}", e)))?;
 
         scheduler
             .start()
             .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("启动调度器失败: {}", e)))?;
+            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to start scheduler: {}", e)))?;
 
         // 注册内置任务函数（含日志保留期清理任务）
         register_builtin_tasks(db.clone());
@@ -207,12 +207,12 @@ impl JobScheduler {
                 }
             })
         })
-        .map_err(|e| SchedulerError::SchedulerInternal(format!("创建日志清理任务失败: {}", e)))?;
+        .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create log cleanup task: {}", e)))?;
 
         scheduler
             .add(cleanup_job)
             .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("添加日志清理任务失败: {}", e)))?;
+            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to add log cleanup task: {}", e)))?;
 
         tracing::info!("内置定时任务注册成功: cleanup_expired_logs (cron: '0 0 3 * * *', 保留 90 天)");
 
@@ -317,10 +317,10 @@ impl JobScheduler {
                 }
             })
         })
-        .map_err(|e| SchedulerError::SchedulerInternal(format!("创建登录异常检测任务失败: {}", e)))?;
+        .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create login anomaly detection task: {}", e)))?;
 
         scheduler.add(anomaly_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("添加登录异常检测任务失败: {}", e))
+            SchedulerError::SchedulerInternal(format!("Failed to add login anomaly detection task: {}", e))
         })?;
 
         tracing::info!(
@@ -454,7 +454,7 @@ impl JobScheduler {
         let jobs = job_repo
             .find_by_status("0")
             .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("加载任务失败: {}", e)))?;
+            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e)))?;
 
         for job in jobs {
             match self.add_job(&job).await {
@@ -536,14 +536,14 @@ impl JobScheduler {
                 }
             })
         })
-        .map_err(|e| SchedulerError::InvalidCron(format!("cron 解析失败: {}", e)))?;
+        .map_err(|e| SchedulerError::InvalidCron(format!("Cron expression parse error: {}", e)))?;
 
         let guid = sched_job.guid();
 
         self.scheduler
             .add(sched_job)
             .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("添加任务失败: {}", e)))?;
+            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to add job: {}", e)))?;
 
         // 记录 uuid 到 running_jobs
         {
@@ -566,7 +566,7 @@ impl JobScheduler {
             self.scheduler
                 .remove(&guid)
                 .await
-                .map_err(|e| SchedulerError::SchedulerInternal(format!("移除任务失败: {}", e)))?;
+                .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to remove job: {}", e)))?;
             tracing::info!("任务移除成功: job_id={}, guid={}", job_id, guid);
         } else {
             tracing::warn!("任务移除跳过：调度器中不存在 job_id={}", job_id);
@@ -635,7 +635,7 @@ impl JobScheduler {
         sched
             .shutdown()
             .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("调度器关闭失败: {}", e)))?;
+            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to shutdown scheduler: {}", e)))?;
         tracing::info!("调度器已关闭");
         Ok(())
     }
@@ -663,7 +663,7 @@ fn validate_cron(cron_str: &str) -> Result<(), SchedulerError> {
     // 触发一次 next_occurrence 计算以尽早暴露无效模式（如 2月30日）
     use chrono::Utc;
     cron.find_next_occurrence(&Utc::now(), false)
-        .map_err(|e| SchedulerError::InvalidCron(format!("无法计算下次执行时间: {}", e)))?;
+        .map_err(|e| SchedulerError::InvalidCron(format!("Failed to calculate next execution time: {}", e)))?;
     Ok(())
 }
 
@@ -946,7 +946,7 @@ async fn execute_with_logging(
     // 执行任务（捕获 panic，避免 panic 跨 spawn 边界传播）
     let (status, message, exception_info) = match execute_inner(&job.invoke_target).await {
         Ok(msg) => ("0", msg, String::new()),
-        Err(e) => ("1", format!("任务执行失败: {}", e), e.to_string()),
+        Err(e) => ("1", format!("Job execution failed: {}", e), e.to_string()),
     };
 
     // 主任务完成（成功/失败/超时），取消续期任务
@@ -967,7 +967,7 @@ async fn execute_with_logging(
         job_name: Set(job.job_name.clone()),
         job_group: Set(job.job_group.clone()),
         invoke_target: Set(job.invoke_target.clone()),
-        job_message: Set(Some(format!("{} (耗时 {}ms)", message, elapsed))),
+        job_message: Set(Some(format!("{} (elapsed {}ms)", message, elapsed))),
         status: Set(Some(status.to_string())),
         exception_info: if exception_info.is_empty() {
             Set(None)
@@ -1066,12 +1066,12 @@ fn register_builtin_tasks(db: DatabaseConnection) {
 
                 match oper_log_service.cleanup_old_logs(RETENTION_DAYS).await {
                     Ok(affected) => {
-                        let msg = format!("清理操作日志 {} 条", affected);
+                        let msg = format!("Cleaned {} oper_log records", affected);
                         tracing::info!("{}", msg);
                         messages.push(msg);
                     }
                     Err(e) => {
-                        let msg = format!("清理操作日志失败: {}", e);
+                        let msg = format!("Failed to clean oper_log: {}", e);
                         tracing::error!("{}", msg);
                         return Err(msg.into());
                     }
@@ -1079,12 +1079,12 @@ fn register_builtin_tasks(db: DatabaseConnection) {
 
                 match logininfor_service.cleanup_old_logs(RETENTION_DAYS).await {
                     Ok(affected) => {
-                        let msg = format!("清理登录日志 {} 条", affected);
+                        let msg = format!("Cleaned {} logininfor records", affected);
                         tracing::info!("{}", msg);
                         messages.push(msg);
                     }
                     Err(e) => {
-                        let msg = format!("清理登录日志失败: {}", e);
+                        let msg = format!("Failed to clean logininfor: {}", e);
                         tracing::error!("{}", msg);
                         return Err(msg.into());
                     }
