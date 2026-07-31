@@ -29,17 +29,15 @@ use crate::state::AppState;
 /// status: "0"=正常, "1"=关闭（可选字段，None 时跳过）
 fn validate_notice_enum(notice_type: &str, status: Option<&str>) -> Result<(), ServiceError> {
     if notice_type != "1" && notice_type != "2" {
-        return Err(ServiceError::bad_request(&format!(
-            "notice_type 必须为 1(通知) 或 2(公告)，当前值: {}",
-            notice_type
-        )));
+        return Err(ServiceError::bad_request(
+            &crate::tr!("error.notice.notice_type_invalid", value = notice_type),
+        ));
     }
     if let Some(s) = status {
         if s != "0" && s != "1" {
-            return Err(ServiceError::bad_request(&format!(
-                "status 必须为 0(正常) 或 1(关闭)，当前值: {}",
-                s
-            )));
+            return Err(ServiceError::bad_request(
+                &crate::tr!("error.notice.status_invalid", value = s),
+            ));
         }
     }
     Ok(())
