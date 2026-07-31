@@ -318,7 +318,7 @@ impl IpLocationService {
         let (new_mmdb_bytes, sha256_hex) = match source {
             UpdateSource::Maxmind => {
                 if cfg.maxmind_account_id.is_empty() || cfg.maxmind_license_key.is_empty() {
-                    anyhow::bail!("MaxMind 更新源需要配置 Account ID 和 License Key");
+                    anyhow::bail!("MaxMind update source requires Account ID and License Key to be configured");
                 }
                 self.download_from_maxmind(&cfg.maxmind_account_id, &cfg.maxmind_license_key).await?
             }
@@ -330,21 +330,21 @@ impl IpLocationService {
         // 验证 mmdb 文件有效性（尝试在内存中打开）
         let temp_path = format!("{}.tmp", mmdb_path);
         tokio::fs::write(&temp_path, &new_mmdb_bytes).await
-            .map_err(|e| anyhow::anyhow!("写入临时文件 {} 失败: {}", temp_path, e))?;
+            .map_err(|e| anyhow::anyhow!("failed to write temp file {}: {}", temp_path, e))?;
 
         // 验证 mmdb 文件可被 maxminddb 打开
         if let Err(e) = maxminddb::Reader::open_readfile(&temp_path) {
             if let Err(cleanup_err) = tokio::fs::remove_file(&temp_path).await {
                 tracing::warn!(path = %temp_path, error = %cleanup_err, "清理无效 mmdb 临时文件失败");
             }
-            anyhow::bail!("下载的 mmdb 文件无效（无法打开）: {}", e);
+            anyhow::bail!("downloaded mmdb file is invalid (cannot open): {}", e);
         }
 
         // 备份旧文件（如果存在）
         let backup_path = format!("{}.bak", mmdb_path);
         if Path::new(&mmdb_path).exists() {
             tokio::fs::rename(&mmdb_path, &backup_path).await
-                .map_err(|e| anyhow::anyhow!("备份旧 mmdb 文件失败: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("failed to backup old mmdb file: {}", e))?;
         }
 
         // 原子替换：rename 临时文件 → 正式文件
@@ -355,7 +355,7 @@ impl IpLocationService {
             {
                 tracing::error!(backup = %backup_path, target = %mmdb_path, error = %restore_err, "恢复 mmdb 备份失败（原文件可能已丢失）");
             }
-            anyhow::bail!("替换 mmdb 文件失败: {}", e);
+            anyhow::bail!("failed to replace mmdb file: {}", e);
         }
 
         // 删除备份（更新成功）
@@ -381,7 +381,7 @@ impl IpLocationService {
             new_size,
             new_sha256: sha256_hex,
             old_size,
-            message: format!("IP 库更新成功（源: {}，大小: {} bytes）", source, new_size),
+            message: crate::tr!("msg.success.ip_location_update", source = source.to_string(), size = new_size),
             timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         };
 
@@ -400,17 +400,17 @@ impl IpLocationService {
             .build()?;
 
         let response = client.get(P3TERX_URL).send().await
-            .map_err(|e| anyhow::anyhow!("P3TERX 下载请求失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("P3TERX download request failed: {}", e))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("P3TERX 下载失败，HTTP 状态码: {}", response.status());
+            anyhow::bail!("P3TERX download failed, HTTP status: {}", response.status());
         }
 
         let bytes = response.bytes().await
-            .map_err(|e| anyhow::anyhow!("读取 P3TERX 响应体失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to read P3TERX response body: {}", e))?;
 
         if bytes.len() < 1024 * 1024 {
-            anyhow::bail!("P3TERX 下载文件过小 ({} bytes)，可能下载失败", bytes.len());
+            anyhow::bail!("P3TERX downloaded file too small ({} bytes), download may have failed", bytes.len());
         }
 
         let sha256 = calculate_sha256(&bytes);
@@ -437,20 +437,20 @@ impl IpLocationService {
             .basic_auth(account_id, Some(license_key))
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("MaxMind 下载请求失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("MaxMind download request failed: {}", e))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("MaxMind 下载失败，HTTP 状态码: {}，响应: {}", status, body);
+            anyhow::bail!("MaxMind download failed, HTTP status: {}, response: {}", status, body);
         }
 
         let bytes = response.bytes().await
-            .map_err(|e| anyhow::anyhow!("读取 MaxMind 响应体失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to read MaxMind response body: {}", e))?;
 
         // 解压 tar.gz 并提取 .mmdb 文件
         let mmdb_bytes = extract_mmdb_from_tar_gz(&bytes)
-            .map_err(|e| anyhow::anyhow!("解压 tar.gz 失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to extract tar.gz: {}", e))?;
 
         let sha256 = calculate_sha256(&mmdb_bytes);
         tracing::info!("MaxMind 下载并解压完成: {} bytes, SHA256={}", mmdb_bytes.len(), sha256);
@@ -556,7 +556,7 @@ fn extract_mmdb_from_tar_gz(tar_gz_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         }
     }
 
-    anyhow::bail!("tar.gz 中未找到 .mmdb 文件")
+    anyhow::bail!(".mmdb file not found in tar.gz archive")
 }
 
 /// 获取文件信息（存在性、大小、修改时间）
