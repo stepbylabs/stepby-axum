@@ -324,8 +324,9 @@ mod tests {
         let locator = IpLocator::new("data/GeoLite2-City.mmdb");
         if locator.is_loaded() {
             let result = locator.locate("8.8.8.8");
-            assert!(!result.is_empty(), "Google DNS 8.8.8.8 应能查询到归属地");
-            println!("8.8.8.8 归属地: {}", result);
+            assert!(!result.is_empty(), "Google DNS 8.8.8.8 should resolve to a location");
+            // 使用 dbg! 替代 println!，仅在 --nocapture 时输出
+            dbg!("8.8.8.8 location:", &result);
         }
         // 内网 IP 无论文件是否存在都返回 "内网IP"
         assert_eq!(locator.locate("127.0.0.1"), "内网IP");

@@ -296,7 +296,9 @@ impl GenTableRepository {
 
         match backend {
             DatabaseBackend::Sqlite => {
-                // PRAGMA 不支持参数绑定，校验 table_name 为合法标识符防止注入
+                // SAFETY: SQLite PRAGMA 不支持参数绑定，必须通过 format! 拼接。
+                // 通过 is_valid_identifier 校验 table_name 仅含 [a-zA-Z0-9_] 且不以数字开头，
+                // 确保无法构造注入 payload。修改此校验逻辑前请务必评估注入风险。
                 if !is_valid_identifier(table_name) {
                     return Err(DbErr::Custom(crate::tr!(
                         "error.gen.invalid_table_name_with_value",
