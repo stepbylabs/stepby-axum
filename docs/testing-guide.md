@@ -1,6 +1,6 @@
 # axum-backend 测试指引文档
 
-> 版本：v0.3.7 | 更新日期：2026-07-31
+> 版本：v0.3.9 | 更新日期：2026-07-31
 
 ## 目录
 
@@ -1335,6 +1335,44 @@ tests/
 - `entity::sys_user::tests::test_user_model_debug_redacts_password` — 验证 sys_user::Model Debug 不泄漏 Argon2id 哈希
 
 **测试统计**：177 单元测试通过（+6），0 失败
+
+#### v0.3.8 安全加固 + i18n 标准化 + 前端健壮性（2026-07-31，第十六至十九轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 幂等中间件 Redis 故障 fail-open | `idempotency.rs` Redis SETNX 错误时放行请求，可能导致重复提交 | 改为 fail-closed 返回 503，与 auth_middleware 保持一致 |
+| 下载错误 console.error 泄漏响应体 | `download.ts` 和 `request.ts` 的 catch 块直接 `console.error(r)` 输出原始错误对象，生产环境可能暴露 HTTP 响应体 | 改用 `import.meta.env.DEV` 守卫 + 仅输出 `error.message`，生产环境不输出 |
+| request 拦截器 console.warn 泄漏 URL | `request.ts` 3 处 `console.warn` 输出请求 URL/方法/状态码，生产环境暴露 API 端点结构 | 全部用 `import.meta.env.DEV` 守卫，生产构建自动移除 |
+| 代码生成编辑页提交按钮缺少 loading | `editTable.vue` 的提交按钮未绑定 `:loading`，可重复点击导致重复提交 | 绑定已有的 `submitLoading` ref |
+| 调度器 18 条错误消息硬编码中文 | `scheduler/mod.rs` 的 `SchedulerError::SchedulerInternal(format!(...))` 全部为中文 | 统一转换为英文，与基础设施层约定一致 |
+| gen_table PRAGMA format! 缺少安全注释 | `gen_table.rs` 的 SQLite PRAGMA 拼接虽有 `is_valid_identifier` 校验但无显著安全注释 | 添加 `// SAFETY:` 注释说明注入防护机制和修改风险 |
+| 测试代码 println! 污染输出 | `ip_location.rs` 测试用 `println!` 输出 IP 归属地查询结果 | 改用 `dbg!`，仅在 `--nocapture` 时输出 |
+| 前端 19 处 .then() 缺少 .catch() | 6 个视图文件的 Promise 链未处理 rejection，导致 unhandled promise rejection | 统一添加 `.catch(() => {})`，错误显示由 request.ts 全局拦截器处理 |
+
+**涉及文件**：
+- 后端：`idempotency.rs`、`scheduler/mod.rs`、`gen_table.rs`、`embedded_assets.rs`、`ip_location.rs`
+- 前端：`download.ts`、`request.ts`、`editTable.vue`、`user/index.vue`、`role/index.vue`、`dept/index.vue`、`dict/data.vue`、`menu/index.vue`、`rateLimit/index.vue`
+
+**测试统计**：177 单元测试通过，0 失败；前端 vue-tsc 类型检查通过
+
+#### v0.3.9 内存泄漏修复 + 权限缓存 + 前端 console 守卫 + 常量化（2026-07-31，第二十至二十五轮循环）
+
+| 问题 | 根因 | 修复方式 |
+|------|------|---------|
+| 字典 singleflight inflight HashMap 永不清理 | `sys_dict_service.rs` 的 `inflight` HashMap 每次 singleflight 添加条目但从不移除，导致内存缓慢增长 | singleflight 完成后检查 `Arc::strong_count`，仅 HashMap 持有时移除条目 |
+| 限流 local_cache HashMap 无主动清理 | `sys_rate_limit_service.rs` 的 `local_cache` 仅在读取时校验 TTL，从不主动移除过期条目 | 添加惰性清理：条目数超过 1024 时 `retain` 移除已过期条目 |
+| 文件上传 Content-Type 手动设置导致 boundary 丢失 | `file.ts` 的 `uploadFile` 手动设置 `Content-Type: multipart/form-data`，缺少 boundary 参数 | 移除手动 Content-Type，由浏览器自动设置（对齐 `user.ts` 的 `uploadAvatar`） |
+| 角色修改 handleUpdate 无 try/catch | `role/index.vue` 的 `handleUpdate` 中 `await Promise.all(...)` 未包裹 try/catch，API 失败导致 unhandled rejection | 添加 try/catch，错误由 request.ts 全局拦截器处理 |
+| 权限映射表保留已移除端点的死代码 | `permission.rs` 中 `("DELETE", "/monitor/cache/clearCacheAll")` 映射存在但路由已移除 | 删除死代码映射，更新测试用例 |
+| 前端 85 处 console.error/warn 未加 DEV 守卫 | 46 个文件的 `console.error`/`console.warn` 在生产环境输出到浏览器控制台，可能泄漏 URL、错误详情 | 全部包裹 `if (import.meta.env.DEV)` 守卫，生产构建自动移除 |
+| 后端 15 处 magic number 硬编码 | 日志保留天数 90、密码长度 8/12、验证码尺寸 220x120、文件大小 5MB/10MB、缓存 max-age 等散落各文件 | 提取 14 组常量到 `constants.rs`，9 个文件引用常量替代硬编码 |
+| 权限查询无缓存每次请求查 DB | `permission_middleware` 每个受保护请求调用 `get_permissions_by_user_id` 查 3 次 DB，getInfo 查 8 次 DB | 添加 Redis 缓存层（`perm:user:{user_id}`，TTL 300s），singleflight 防击穿，空值标记防穿透，角色/菜单/用户变更时主动失效 |
+
+**涉及文件**：
+- 后端：`sys_dict_service.rs`、`sys_rate_limit_service.rs`、`sys_menu_service.rs`、`sys_role_service.rs`、`sys_user_service.rs`、`permission.rs`、`constants.rs`、`settings.rs`、`docs.rs`、`embedded_assets.rs`、`gen_table.rs`、`sys_logininfor_service.rs`、`ip_location_service.rs`、`captcha.rs`、`password.rs`、`scheduler/mod.rs`、`state.rs`
+- 前端：`file.ts`、`role/index.vue`、46 个文件（console DEV 守卫）
+
+**测试统计**：177 单元测试通过，0 失败；前端 vue-tsc 类型检查通过
 
 ---
 

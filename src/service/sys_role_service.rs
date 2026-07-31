@@ -8,6 +8,7 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use ts_rs::TS;
@@ -193,6 +194,9 @@ pub struct RoleDeptTreeVo {
 
 // ==================== Service 实现 ====================
 
+/// 权限缓存 key 前缀（与 sys_menu_service 保持一致）
+const PERM_CACHE_PREFIX: &str = "perm:user:";
+
 /// 角色模块 Service
 ///
 /// 数据访问通过 Repository 层委托：
@@ -201,6 +205,7 @@ pub struct RoleDeptTreeVo {
 /// - role_dept_repo: sys_role_dept 关联表 CRUD（数据权限）
 /// - user_role_repo: sys_user_role 关联表 CRUD（级联清理 + 授权用户管理）
 /// - dept_repo: sys_dept 表查询（部门树）
+/// - redis: Redis 连接管理器，用于权限缓存失效
 /// - 事务通过 role_repo.base().db() 获取连接
 #[derive(Clone)]
 pub struct SysRoleService {
@@ -210,10 +215,12 @@ pub struct SysRoleService {
     user_role_repo: SysUserRoleRepository,
     user_repo: SysUserRepository,
     dept_repo: SysDeptRepository,
+    /// Redis 连接管理器（权限缓存失效）
+    redis: ConnectionManager,
 }
 
 impl SysRoleService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
         Self {
             role_repo: SysRoleRepository::new(db.clone()),
             role_menu_repo: SysRoleMenuRepository::new(db.clone()),
@@ -221,12 +228,63 @@ impl SysRoleService {
             user_role_repo: SysUserRoleRepository::new(db.clone()),
             user_repo: SysUserRepository::new(db.clone()),
             dept_repo: SysDeptRepository::new(db),
+            redis,
         }
     }
 
     /// 获取数据库连接引用（用于事务）
     fn db(&self) -> &DatabaseConnection {
         self.role_repo.base().db()
+    }
+
+    // ==================== 权限缓存失效 ====================
+
+    /// 失效指定用户的权限缓存（best-effort，失败仅记日志不阻断业务）
+    pub async fn invalidate_perm_cache(&self, user_id: i64) {
+        let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
+        let mut conn = self.redis.clone();
+        if let Err(e) = redis::cmd("DEL")
+            .arg(&key)
+            .query_async::<()>(&mut conn)
+            .await
+        {
+            tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
+        }
+    }
+
+    /// 失效所有用户权限缓存（角色变更时，best-effort）
+    ///
+    /// 使用 SCAN 遍历所有 perm:user:* 键并批量删除，避免 KEYS 命令阻塞 Redis。
+    pub async fn invalidate_all_perm_cache(&self) {
+        let mut conn = self.redis.clone();
+        let pattern = format!("{}*", PERM_CACHE_PREFIX);
+        let mut cursor: u64 = 0;
+        loop {
+            let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await;
+            match scan_result {
+                Ok((next_cursor, keys)) => {
+                    if !keys.is_empty() {
+                        let mut pipe = redis::pipe();
+                        for key in &keys {
+                            pipe.cmd("DEL").arg(key);
+                        }
+                        let _ = pipe.query_async::<Vec<i64>>(&mut conn).await;
+                    }
+                    if next_cursor == 0 {
+                        break;
+                    }
+                    cursor = next_cursor;
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     /// 分页查询角色（仅未删除）
@@ -539,6 +597,8 @@ impl SysRoleService {
                 .boxed()
             })
             .await?;
+        // 角色变更影响绑定该角色的用户权限，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
 
         Ok(result)
     }
@@ -601,7 +661,11 @@ impl SysRoleService {
             .await;
 
         match txn_result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // 角色删除影响绑定该角色的用户权限，全量失效权限缓存
+                self.invalidate_all_perm_cache().await;
+                Ok(())
+            }
             // TOCTOU 检查的业务错误：映射为 400 bad_request
             Err(sea_orm::TransactionError::Transaction(sea_orm::DbErr::Custom(msg))) => {
                 Err(ServiceError::bad_request(&msg))
@@ -677,7 +741,11 @@ impl SysRoleService {
             .await;
 
         match txn_result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // 角色批量删除影响绑定这些角色的用户权限，全量失效权限缓存
+                self.invalidate_all_perm_cache().await;
+                Ok(())
+            }
             Err(sea_orm::TransactionError::Transaction(sea_orm::DbErr::Custom(msg))) => {
                 Err(ServiceError::bad_request(&msg))
             }
@@ -709,6 +777,8 @@ impl SysRoleService {
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         self.role_repo.update(am).await?;
+        // 角色状态变更影响绑定该角色的用户权限，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
 
         Ok(())
     }
@@ -748,6 +818,8 @@ impl SysRoleService {
                 .boxed()
             })
             .await?;
+        // 角色菜单分配变更影响绑定该角色的用户权限，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
 
         Ok(())
     }
@@ -939,6 +1011,8 @@ impl SysRoleService {
         self.user_role_repo
             .delete_by_user_and_role(dto.user_id, dto.role_id)
             .await?;
+        // 用户角色绑定变更，失效该用户的权限缓存
+        self.invalidate_perm_cache(dto.user_id).await;
         Ok(())
     }
 
@@ -975,6 +1049,8 @@ impl SysRoleService {
         self.user_role_repo
             .delete_by_role_and_users(dto.role_id, user_ids)
             .await?;
+        // 批量用户角色绑定变更，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
         Ok(())
     }
 
@@ -1035,6 +1111,8 @@ impl SysRoleService {
             })
             .collect();
         self.user_role_repo.insert_many(models).await?;
+        // 批量用户角色绑定变更，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
         Ok(())
     }
 

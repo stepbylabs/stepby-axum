@@ -226,7 +226,7 @@ impl SysLogininforService {
             - chrono::Duration::minutes(30);
         let rows = self
             .logininfor_repo
-            .find_online(since, ipaddr, user_name, 500)
+            .find_online(since, ipaddr, user_name, crate::common::constants::DROPDOWN_MAX_ROWS)
             .await?;
         Ok(rows)
     }

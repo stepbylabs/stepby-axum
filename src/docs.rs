@@ -301,7 +301,7 @@ pub async fn openapi_json() -> impl IntoResponse {
     (
         [
             (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
-            (header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=300")),
+            (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
         ],
         json.clone(),
     )
@@ -334,7 +334,7 @@ pub async fn swagger_assets(axum::extract::Path(filename): axum::extract::Path<S
                 [
                     (header::CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static("application/octet-stream"))),
                     // 静态资源 immutable 缓存（文件名含版本号，更新时路径变化）
-                    (header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable")),
+                    (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_IMMUTABLE_SECS)),
                 ],
                 file.data,
             )

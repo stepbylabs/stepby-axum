@@ -219,7 +219,7 @@ fn default_avatar_allowed_exts() -> Vec<String> {
 }
 
 fn default_avatar_max_size() -> usize {
-    5 * 1024 * 1024
+    crate::common::constants::AVATAR_MAX_SIZE
 }
 
 fn default_common_dir() -> String {
@@ -247,7 +247,7 @@ fn default_common_allowed_exts() -> Vec<String> {
 }
 
 fn default_common_max_size() -> usize {
-    10 * 1024 * 1024
+    crate::common::constants::UPLOAD_MAX_SIZE
 }
 
 /// IP 归属地查询配置

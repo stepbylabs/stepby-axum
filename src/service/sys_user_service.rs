@@ -9,6 +9,7 @@
 
 use chrono::NaiveDateTime;
 use futures::future::FutureExt;
+use redis::aio::ConnectionManager;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait};
 use serde::Deserialize;
 use ts_rs::TS;
@@ -236,6 +237,9 @@ fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
 
 // ==================== Service 实现 ====================
 
+/// 权限缓存 key 前缀（与 sys_menu_service 保持一致）
+const PERM_CACHE_PREFIX: &str = "perm:user:";
+
 /// 用户模块 Service
 ///
 /// 数据访问通过 Repository 层委托：
@@ -245,6 +249,7 @@ fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
 /// - dept_repo: sys_dept 表查询（部门树）
 /// - post_repo: sys_post 表查询（岗位下拉）
 /// - role_repo: sys_role 表查询（角色下拉）
+/// - redis: Redis 连接管理器，用于权限缓存失效
 /// - 事务通过 user_repo.base().db() 获取连接
 #[derive(Clone)]
 pub struct SysUserService {
@@ -255,10 +260,12 @@ pub struct SysUserService {
     post_repo: SysPostRepository,
     role_repo: SysRoleRepository,
     role_dept_repo: SysRoleDeptRepository,
+    /// Redis 连接管理器（权限缓存失效）
+    redis: ConnectionManager,
 }
 
 impl SysUserService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
         Self {
             user_repo: SysUserRepository::new(db.clone()),
             user_role_repo: SysUserRoleRepository::new(db.clone()),
@@ -267,12 +274,28 @@ impl SysUserService {
             post_repo: SysPostRepository::new(db.clone()),
             role_repo: SysRoleRepository::new(db.clone()),
             role_dept_repo: SysRoleDeptRepository::new(db),
+            redis,
         }
     }
 
     /// 获取数据库连接引用（用于事务）
     fn db(&self) -> &DatabaseConnection {
         self.user_repo.base().db()
+    }
+
+    // ==================== 权限缓存失效 ====================
+
+    /// 失效指定用户的权限缓存（best-effort，失败仅记日志不阻断业务）
+    pub async fn invalidate_perm_cache(&self, user_id: i64) {
+        let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
+        let mut conn = self.redis.clone();
+        if let Err(e) = redis::cmd("DEL")
+            .arg(&key)
+            .query_async::<()>(&mut conn)
+            .await
+        {
+            tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
+        }
     }
 
     /// 垂直越权校验：基于 operator 拥有的角色与目标角色集合的层级关系（P0-R81-005 / REGRESS-002）
@@ -977,6 +1000,10 @@ impl SysUserService {
                 .boxed()
             })
             .await?;
+        // 用户角色绑定变更时，失效该用户的权限缓存
+        if dto.role_ids.is_some() {
+            self.invalidate_perm_cache(dto.user_id).await;
+        }
 
         Ok(result)
     }
@@ -1038,6 +1065,8 @@ impl SysUserService {
                 .boxed()
             })
             .await?;
+        // 用户删除后失效其权限缓存（清理缓存条目）
+        self.invalidate_perm_cache(user_id).await;
 
         Ok(())
     }
@@ -1314,6 +1343,8 @@ impl SysUserService {
                 .boxed()
             })
             .await?;
+        // 用户角色绑定变更，失效该用户的权限缓存
+        self.invalidate_perm_cache(user_id).await;
 
         Ok(())
     }

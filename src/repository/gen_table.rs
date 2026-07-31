@@ -148,7 +148,7 @@ impl GenTableRepository {
     pub async fn find_all(&self) -> Result<Vec<GenTableModel>, DbErr> {
         GenTable::find()
             .order_by_desc(GenTableColumn::TableId)
-            .limit(500)
+            .limit(crate::common::constants::DROPDOWN_MAX_ROWS)
             .all(self.base.db())
             .await
     }

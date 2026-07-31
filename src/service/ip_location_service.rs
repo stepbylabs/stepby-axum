@@ -409,7 +409,7 @@ impl IpLocationService {
         let bytes = response.bytes().await
             .map_err(|e| anyhow::anyhow!("failed to read P3TERX response body: {}", e))?;
 
-        if bytes.len() < 1024 * 1024 {
+        if bytes.len() < crate::common::constants::MMDB_MIN_FILE_SIZE {
             anyhow::bail!("P3TERX downloaded file too small ({} bytes), download may have failed", bytes.len());
         }
 

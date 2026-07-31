@@ -102,10 +102,10 @@ pub fn validate_password_complexity(password: &str) -> Result<(), String> {
 pub fn password_strength_score(password: &str) -> u8 {
     let mut score: u8 = 0;
 
-    if password.len() >= 8 {
+    if password.len() >= crate::common::constants::PASSWORD_LEN_MIN {
         score += 1;
     }
-    if password.len() >= 12 {
+    if password.len() >= crate::common::constants::PASSWORD_LEN_STRONG {
         score += 1;
     }
 

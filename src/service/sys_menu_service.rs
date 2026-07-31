@@ -8,11 +8,15 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use redis::aio::ConnectionManager;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
     Set, TransactionTrait,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use utoipa::{IntoParams, ToSchema};
 use garde::Validate;
 
@@ -26,6 +30,14 @@ use crate::repository::sys_role::SysRoleRepository;
 use crate::repository::sys_role_menu::SysRoleMenuRepository;
 use crate::utils::parse_id_list;
 use crate::utils::tree::build_tree;
+
+/// 权限缓存 key 前缀（格式：perm:user:{user_id}）
+const PERM_CACHE_PREFIX: &str = "perm:user:";
+/// 权限缓存 TTL（秒，5 分钟，较短以保证权限变更及时生效）
+const PERM_CACHE_TTL: i64 = 300;
+/// 空值缓存标记（防穿透：用户无角色时缓存此标记，避免反复打 DB）
+const PERM_NULL_MARKER: &str = "__NULL__";
+const PERM_NULL_TTL: i64 = 60;
 
 // ==================== DTO 定义 ====================
 
@@ -132,32 +144,100 @@ pub struct MenuSortDto {
 
 // ==================== Service 实现 ====================
 
+/// 权限缓存值（序列化为 JSON 存储）
+///
+/// 缓存格式：`{"roles": ["admin"], "permissions": ["*:*:*"]}`
+/// 同时缓存 role_keys 和 permissions，便于未来扩展（如角色级权限校验）。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PermCacheValue {
+    roles: Vec<String>,
+    permissions: Vec<String>,
+}
+
 /// 菜单模块 Service
 ///
 /// 数据访问通过 Repository 层委托：
 /// - menu_repo: sys_menu 表 CRUD + 按用户/角色查询菜单
 /// - role_menu_repo: sys_role_menu 关联表 CRUD（删除校验 + 级联清理）
 /// - role_repo: sys_role 表查询（超管判断）
+/// - redis: Redis 连接管理器，用于权限缓存（cache-aside 模式）
+/// - inflight: singleflight 锁表，防缓存击穿
 /// - 事务通过 menu_repo.base().db() 获取连接
 #[derive(Clone)]
 pub struct SysMenuService {
     menu_repo: SysMenuRepository,
     role_menu_repo: SysRoleMenuRepository,
     role_repo: SysRoleRepository,
+    /// Redis 连接管理器（权限缓存）
+    redis: ConnectionManager,
+    /// singleflight 防击穿：同 user_id 的并发查询只允许一个查 DB
+    inflight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl SysMenuService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
         Self {
             menu_repo: SysMenuRepository::new(db.clone()),
             role_menu_repo: SysRoleMenuRepository::new(db.clone()),
             role_repo: SysRoleRepository::new(db),
+            redis,
+            inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// 获取数据库连接引用（用于事务和复杂查询）
     fn db(&self) -> &DatabaseConnection {
         self.menu_repo.base().db()
+    }
+
+    // ==================== 缓存辅助方法 ====================
+
+    /// 失效指定用户的权限缓存（best-effort，失败仅记日志不阻断业务）
+    pub async fn invalidate_perm_cache(&self, user_id: i64) {
+        let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
+        let mut conn = self.redis.clone();
+        if let Err(e) = redis::cmd("DEL")
+            .arg(&key)
+            .query_async::<()>(&mut conn)
+            .await
+        {
+            tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
+        }
+    }
+
+    /// 失效所有用户权限缓存（菜单变更时，best-effort）
+    ///
+    /// 使用 SCAN 遍历所有 perm:user:* 键并批量删除，避免 KEYS 命令阻塞 Redis。
+    pub async fn invalidate_all_perm_cache(&self) {
+        let mut conn = self.redis.clone();
+        let pattern = format!("{}*", PERM_CACHE_PREFIX);
+        let mut cursor: u64 = 0;
+        loop {
+            let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await;
+            match scan_result {
+                Ok((next_cursor, keys)) => {
+                    if !keys.is_empty() {
+                        let mut pipe = redis::pipe();
+                        for key in &keys {
+                            pipe.cmd("DEL").arg(key);
+                        }
+                        let _ = pipe.query_async::<Vec<i64>>(&mut conn).await;
+                    }
+                    if next_cursor == 0 {
+                        break;
+                    }
+                    cursor = next_cursor;
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     /// 菜单列表（扁平，可加 menu_name/status 过滤）
@@ -322,6 +402,8 @@ impl SysMenuService {
         am.del_flag = Set(Some("0".to_string()));
 
         let new_menu = self.menu_repo.insert(am).await?;
+        // 菜单变更影响所有用户权限，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
         Ok(new_menu)
     }
 
@@ -433,6 +515,8 @@ impl SysMenuService {
         am.update_time = Set(Some(now));
 
         let updated = self.menu_repo.update(am).await?;
+        // 菜单变更影响所有用户权限，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
         Ok(updated)
     }
 
@@ -476,6 +560,8 @@ impl SysMenuService {
                 .boxed()
             })
             .await?;
+        // 菜单变更影响所有用户权限，全量失效权限缓存
+        self.invalidate_all_perm_cache().await;
 
         Ok(())
     }
@@ -526,36 +612,144 @@ impl SysMenuService {
     }
 
     /// 查询用户权限标识列表（超管返回 ["*:*:*"]）
+    ///
+    /// 采用 cache-aside 模式：先查 Redis（key=perm:user:{user_id}），命中则直接返回；
+    /// 未命中则查 DB，结果序列化后写入 Redis（TTL 5 分钟）。
+    /// 缓存读写失败不阻断业务（best-effort），降级为直接查 DB。
+    ///
+    /// 防护策略（与字典缓存一致）：
+    /// - 穿透防护：用户无角色时缓存空值标记（TTL 60s），避免反复打 DB
+    /// - 击穿防护：热点 key 失效瞬间通过 singleflight 串行化 DB 查询
     pub async fn get_permissions_by_user_id(
         &self,
         user_id: i64,
     ) -> Result<Vec<String>, ServiceError> {
-        // 先查用户角色（通过 Repository）
-        let roles = self.role_repo.find_by_user_id(user_id).await?;
+        let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
+        let mut conn = self.redis.clone();
 
-        if roles.is_empty() {
-            return Ok(vec![]);
+        // 1. 尝试从 Redis 读取缓存
+        let cached: Option<String> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .ok()
+            .flatten();
+
+        if let Some(json_str) = cached {
+            // 空值标记：用户无角色，返回空列表（防穿透）
+            if json_str == PERM_NULL_MARKER {
+                return Ok(vec![]);
+            }
+            match serde_json::from_str::<PermCacheValue>(&json_str) {
+                Ok(val) => return Ok(val.permissions),
+                Err(e) => {
+                    // 缓存数据损坏，记日志并回退到 DB
+                    tracing::warn!("权限缓存 {} 反序列化失败，回退查 DB: {}", key, e);
+                }
+            }
         }
 
-        let is_admin = roles.iter().any(|r| r.role_key == "admin");
+        // 2. 缓存未命中或损坏，通过 singleflight 串行化 DB 查询（防击穿）
+        let inflight_key = user_id.to_string();
+        let inflight_lock = {
+            let mut map = self.inflight.lock().await;
+            map.entry(inflight_key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
 
-        if is_admin {
-            // 超管返回通配权限
-            return Ok(vec!["*:*:*".to_string()]);
+        // 持有 inflight 锁期间查 DB + 写缓存
+        let result: Result<Vec<String>, ServiceError> = async {
+            let _guard = inflight_lock.lock().await;
+
+            // double-check：持有锁后再次查缓存，可能已被前一个持锁请求填充
+            let cached: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .ok()
+                .flatten();
+            if let Some(json_str) = cached {
+                if json_str == PERM_NULL_MARKER {
+                    return Ok(vec![]);
+                }
+                if let Ok(val) = serde_json::from_str::<PermCacheValue>(&json_str) {
+                    return Ok(val.permissions);
+                }
+            }
+
+            // 3. 查询 DB：先查用户角色（通过 Repository）
+            let roles = self.role_repo.find_by_user_id(user_id).await?;
+
+            if roles.is_empty() {
+                // 写入空值标记（防穿透）
+                if let Err(e) = redis::cmd("SETEX")
+                    .arg(&key)
+                    .arg(PERM_NULL_TTL)
+                    .arg(PERM_NULL_MARKER)
+                    .query_async::<()>(&mut conn)
+                    .await
+                {
+                    tracing::warn!("写入权限空值缓存 {} 失败: {}", key, e);
+                }
+                return Ok(vec![]);
+            }
+
+            let role_keys: Vec<String> = roles.iter().map(|r| r.role_key.clone()).collect();
+            let is_admin = role_keys.iter().any(|k| k == "admin");
+
+            let permissions = if is_admin {
+                // 超管返回通配权限
+                vec!["*:*:*".to_string()]
+            } else {
+                // 非超管：通过 Repository 查询用户菜单，提取 perms
+                let menus = self.menu_repo.find_by_user_id(user_id).await?;
+                let mut perms: Vec<String> = menus
+                    .into_iter()
+                    .filter_map(|m| m.perms)
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                // 去重
+                perms.sort();
+                perms.dedup();
+                perms
+            };
+
+            // 4. 写入 Redis（best-effort，失败仅记日志）
+            let cache_value = PermCacheValue {
+                roles: role_keys,
+                permissions: permissions.clone(),
+            };
+            let json = serde_json::to_string(&cache_value).unwrap_or_else(|e| {
+                tracing::warn!("序列化权限缓存失败，跳过缓存写入: {}", e);
+                PERM_NULL_MARKER.to_string()
+            });
+            if let Err(e) = redis::cmd("SETEX")
+                .arg(&key)
+                .arg(PERM_CACHE_TTL)
+                .arg(json)
+                .query_async::<()>(&mut conn)
+                .await
+            {
+                tracing::warn!("写入权限缓存 {} 失败: {}", key, e);
+            }
+
+            Ok(permissions)
+        }
+        .await;
+
+        // 清理 inflight 条目，防止 HashMap 无限增长（与字典缓存一致）
+        drop(inflight_lock);
+        {
+            let mut map = self.inflight.lock().await;
+            if let Some(arc) = map.get(&inflight_key)
+                && Arc::strong_count(arc) == 1
+            {
+                map.remove(&inflight_key);
+            }
         }
 
-        // 非超管：通过 Repository 查询用户菜单，提取 perms
-        let menus = self.menu_repo.find_by_user_id(user_id).await?;
-
-        let mut perms: Vec<String> = menus
-            .into_iter()
-            .filter_map(|m| m.perms)
-            .filter(|p| !p.is_empty())
-            .collect();
-        // 去重
-        perms.sort();
-        perms.dedup();
-        Ok(perms)
+        result
     }
 
     // ==================== 内部辅助方法 ====================
