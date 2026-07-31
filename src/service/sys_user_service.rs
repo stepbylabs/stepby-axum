@@ -531,56 +531,56 @@ impl SysUserService {
         let mut scope_dept_ids: Option<Vec<i64>> = None;
         let mut scope_user_id: Option<i64> = None;
 
-        if let Some(op_uid) = operator_user_id {
-            if op_uid != SUPER_ADMIN_USER_ID {
-                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-                let min_scope = op_roles
-                    .iter()
-                    .filter_map(|r| r.data_scope.as_deref())
-                    .filter_map(|s| s.parse::<i32>().ok())
-                    .min();
+        if let Some(op_uid) = operator_user_id
+            && op_uid != SUPER_ADMIN_USER_ID
+        {
+            let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
+            let min_scope = op_roles
+                .iter()
+                .filter_map(|r| r.data_scope.as_deref())
+                .filter_map(|s| s.parse::<i32>().ok())
+                .min();
 
-                if let Some(scope) = min_scope {
-                    match scope {
-                        1 => { /* 全部数据：不追加过滤 */ }
-                        2 => {
-                            let role_ids: Vec<i64> = op_roles
-                                .iter()
-                                .filter(|r| r.data_scope.as_deref() == Some("2"))
-                                .map(|r| r.role_id)
-                                .collect();
-                            let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
-                            scope_dept_ids = Some(rids.into_iter().map(|rd| rd.dept_id).collect());
-                        }
-                        3 => {
-                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                            if let Some(u) = op_user {
-                                if let Some(did) = u.dept_id {
-                                    scope_dept_ids = Some(vec![did]);
-                                } else {
-                                    scope_dept_ids = Some(vec![]);
-                                }
+            if let Some(scope) = min_scope {
+                match scope {
+                    1 => { /* 全部数据：不追加过滤 */ }
+                    2 => {
+                        let role_ids: Vec<i64> = op_roles
+                            .iter()
+                            .filter(|r| r.data_scope.as_deref() == Some("2"))
+                            .map(|r| r.role_id)
+                            .collect();
+                        let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
+                        scope_dept_ids = Some(rids.into_iter().map(|rd| rd.dept_id).collect());
+                    }
+                    3 => {
+                        let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+                        if let Some(u) = op_user {
+                            if let Some(did) = u.dept_id {
+                                scope_dept_ids = Some(vec![did]);
                             } else {
                                 scope_dept_ids = Some(vec![]);
                             }
-                        }
-                        4 => {
-                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                            let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
-                            let descendant_ids =
-                                self.dept_repo.find_descendant_ids(op_dept_id).await?;
-                            scope_dept_ids = Some(descendant_ids);
-                        }
-                        5 => {
-                            scope_user_id = Some(op_uid);
-                        }
-                        _ => {
-                            scope_user_id = Some(op_uid);
+                        } else {
+                            scope_dept_ids = Some(vec![]);
                         }
                     }
-                } else {
-                    scope_user_id = Some(op_uid);
+                    4 => {
+                        let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+                        let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
+                        let descendant_ids =
+                            self.dept_repo.find_descendant_ids(op_dept_id).await?;
+                        scope_dept_ids = Some(descendant_ids);
+                    }
+                    5 => {
+                        scope_user_id = Some(op_uid);
+                    }
+                    _ => {
+                        scope_user_id = Some(op_uid);
+                    }
                 }
+            } else {
+                scope_user_id = Some(op_uid);
             }
         }
 
