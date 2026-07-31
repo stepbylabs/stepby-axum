@@ -247,6 +247,9 @@ fn build_fs_response(path: &str, content: Vec<u8>) -> Response {
 }
 
 /// 路径安全检查（防止路径穿越攻击）
+///
+/// 注意：此函数仅用于开发模式（#[cfg(debug_assertions)]）。
+/// 生产环境使用 axum::serve_dir 或反向代理提供静态资源，不经过此函数。
 #[cfg(debug_assertions)]
 fn is_safe_path(path: &str) -> bool {
     use std::path::Path;
