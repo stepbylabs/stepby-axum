@@ -155,16 +155,22 @@ pub async fn idempotency_middleware(
         Ok(Some(_)) => true,  // SET NX 成功，首次请求
         Ok(None) => false,    // key 已存在，重复请求
         Err(e) => {
-            // Redis 故障：fail-open 放行
-            // 因 auth_middleware 已 fail-closed（Redis 故障时返回 503 阻断请求），
-            // 能到达此中间件说明 Redis 可用，此分支理论上不会触发。
-            // 但仍保留 fail-open 作为防御性处理，避免中间件耦合 Redis 可用性假设。
-            tracing::warn!(
+            // Redis 故障：fail-closed 拒绝请求（与 auth_middleware 保持一致）
+            // 防御性设计：即使 auth 中间件已保证 Redis 可用，仍不应在 Redis 故障时
+            // 放行写操作（可能导致重复提交），返回 503 让客户端重试。
+            tracing::error!(
                 error = %e,
                 redis_key = %redis_key,
-                "Redis 幂等性校验失败，fail-open 放行请求（auth 中间件应已保证 Redis 可用）"
+                "Redis 幂等性校验失败（fail-closed 拒绝请求）"
             );
-            true
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "code": 503,
+                    "msg": crate::tr!("error.auth.auth_unavailable")
+                })),
+            )
+                .into_response();
         }
     };
 
