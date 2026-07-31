@@ -103,7 +103,6 @@ impl AppState {
         // Repository 实例仅持有 Arc<DatabaseConnection>，开销极低，保持当前设计。
         let auth_service = AuthService::new(
             user_service.clone(),
-            role_service.clone(),
             menu_service.clone(),
             SysLogininforRepository::new(db.clone()),
             config_service.clone(),

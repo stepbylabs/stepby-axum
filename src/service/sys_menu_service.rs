@@ -624,6 +624,22 @@ impl SysMenuService {
         &self,
         user_id: i64,
     ) -> Result<Vec<String>, ServiceError> {
+        let (_, permissions) = self.get_roles_and_permissions_by_user_id(user_id).await?;
+        Ok(permissions)
+    }
+
+    /// 合并查询用户角色 + 权限标识（缓存命中时 0 次 DB）
+    ///
+    /// 返回 (role_keys, permissions)：
+    /// - role_keys: 用户角色 key 列表（如 ["admin", "common"]）
+    /// - permissions: 权限标识列表（超管返回 ["*:*:*"]）
+    ///
+    /// 合并到单个缓存值避免 getInfo 中分别查询 role_keys 和 permissions 导致的冗余 DB 往返
+    /// （原 getInfo 8 次 DB → 缓存命中时 3 次 DB + 1 次 Redis GET）
+    pub async fn get_roles_and_permissions_by_user_id(
+        &self,
+        user_id: i64,
+    ) -> Result<(Vec<String>, Vec<String>), ServiceError> {
         let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
         let mut conn = self.redis.clone();
 
@@ -638,10 +654,10 @@ impl SysMenuService {
         if let Some(json_str) = cached {
             // 空值标记：用户无角色，返回空列表（防穿透）
             if json_str == PERM_NULL_MARKER {
-                return Ok(vec![]);
+                return Ok((vec![], vec![]));
             }
             match serde_json::from_str::<PermCacheValue>(&json_str) {
-                Ok(val) => return Ok(val.permissions),
+                Ok(val) => return Ok((val.roles, val.permissions)),
                 Err(e) => {
                     // 缓存数据损坏，记日志并回退到 DB
                     tracing::warn!("权限缓存 {} 反序列化失败，回退查 DB: {}", key, e);
@@ -659,7 +675,7 @@ impl SysMenuService {
         };
 
         // 持有 inflight 锁期间查 DB + 写缓存
-        let result: Result<Vec<String>, ServiceError> = async {
+        let result: Result<(Vec<String>, Vec<String>), ServiceError> = async {
             let _guard = inflight_lock.lock().await;
 
             // double-check：持有锁后再次查缓存，可能已被前一个持锁请求填充
@@ -671,10 +687,10 @@ impl SysMenuService {
                 .flatten();
             if let Some(json_str) = cached {
                 if json_str == PERM_NULL_MARKER {
-                    return Ok(vec![]);
+                    return Ok((vec![], vec![]));
                 }
                 if let Ok(val) = serde_json::from_str::<PermCacheValue>(&json_str) {
-                    return Ok(val.permissions);
+                    return Ok((val.roles, val.permissions));
                 }
             }
 
@@ -692,7 +708,7 @@ impl SysMenuService {
                 {
                     tracing::warn!("写入权限空值缓存 {} 失败: {}", key, e);
                 }
-                return Ok(vec![]);
+                return Ok((vec![], vec![]));
             }
 
             let role_keys: Vec<String> = roles.iter().map(|r| r.role_key.clone()).collect();
@@ -717,7 +733,7 @@ impl SysMenuService {
 
             // 4. 写入 Redis（best-effort，失败仅记日志）
             let cache_value = PermCacheValue {
-                roles: role_keys,
+                roles: role_keys.clone(),
                 permissions: permissions.clone(),
             };
             let json = serde_json::to_string(&cache_value).unwrap_or_else(|e| {
@@ -734,7 +750,7 @@ impl SysMenuService {
                 tracing::warn!("写入权限缓存 {} 失败: {}", key, e);
             }
 
-            Ok(permissions)
+            Ok((role_keys, permissions))
         }
         .await;
 

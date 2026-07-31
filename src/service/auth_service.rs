@@ -29,7 +29,6 @@ use crate::jwt::JwtUtils;
 use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::service::sys_config_service::SysConfigService;
 use crate::service::sys_menu_service::SysMenuService;
-use crate::service::sys_role_service::SysRoleService;
 use crate::service::sys_user_service::{SysUserService, UserAddDto};
 use crate::utils::captcha::generate_captcha;
 use crate::utils::ip_location::IpLocator;
@@ -203,15 +202,13 @@ pub struct LoginContext<'a> {
 
 /// 认证服务（不依赖任何 Web 类型）
 ///
-/// 持有 5 个 Service/Repository：
+/// 持有 4 个 Service/Repository：
 /// - user_service: 用户查询（登录认证、getInfo、密码升级）
-/// - role_service: 角色 key 查询（getInfo）
-/// - menu_service: 菜单树/权限查询（getInfo、getRouters）
+/// - menu_service: 菜单树/权限查询（getInfo、getRouters，含角色+权限合并缓存）
 /// - logininfor_repo: 登录日志写入
 /// - config_service: 参数配置查询（验证码开关等，H-4 走 Redis cache-aside 缓存）
 pub struct AuthService {
     user_service: SysUserService,
-    role_service: SysRoleService,
     menu_service: SysMenuService,
     logininfor_repo: SysLogininforRepository,
     config_service: SysConfigService,
@@ -223,16 +220,16 @@ impl AuthService {
     /// 修复 P0-R81-014：原本在内部重复实例化 user_service / role_service / menu_service，
     /// 导致与 AppState 中的同名实例各自独立（15 个重复 Repository 实例）。
     /// 现由调用方传入已实例化的 Service，确保单实例共享。
+    ///
+    /// 优化：role_service 已移除，角色查询合并到 menu_service.get_roles_and_permissions_by_user_id
     pub fn new(
         user_service: SysUserService,
-        role_service: SysRoleService,
         menu_service: SysMenuService,
         logininfor_repo: SysLogininforRepository,
         config_service: SysConfigService,
     ) -> Self {
         Self {
             user_service,
-            role_service,
             menu_service,
             logininfor_repo,
             config_service,
@@ -831,16 +828,17 @@ impl AuthService {
 
     /// 获取用户信息（user + roles + permissions）
     ///
-    /// 注意：get_user_by_id 返回 UserVo { user, role_ids }，需提取 .user 字段。
-    /// password 字段必须清空为 None，避免泄露密文。
+    /// 优化：合并查询角色+权限（缓存命中时 0 次 DB），避免分别调用
+    /// get_role_keys_by_user_id 和 get_permissions_by_user_id 导致的冗余 DB 往返
+    /// （原 8 次 DB → 缓存命中时 3 次 DB + 1 次 Redis GET）
     pub async fn get_info(&self, user_id: i64) -> Result<GetInfoVo, ServiceError> {
         let vo = self.user_service.get_user_by_id(user_id).await?;
         let mut user = vo.user;
         // 清空密码，避免泄露密文（双重保险，entity 已 #[serde(skip_serializing)]）
         user.password = None;
 
-        let roles = self.role_service.get_role_keys_by_user_id(user_id).await?;
-        let permissions = self.menu_service.get_permissions_by_user_id(user_id).await?;
+        // 合并查询角色+权限（缓存命中时 0 次 DB，消除 4 次冗余 DB 查询）
+        let (roles, permissions) = self.menu_service.get_roles_and_permissions_by_user_id(user_id).await?;
 
         // 密码安全策略字段
         // pwd_chrtype：密码加密类型（当前固定为 "argon2"）
