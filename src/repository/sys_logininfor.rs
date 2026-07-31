@@ -174,13 +174,15 @@ impl SysLogininforRepository {
                 .filter(Column::LoginTime.gte(begin))
                 .filter(Column::LoginTime.lt(end))
                 .count(self.base.db())
-                .await? as i64;
+                .await
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
             let fail = SysLogininfor::find()
                 .filter(Column::Status.eq("1"))
                 .filter(Column::LoginTime.gte(begin))
                 .filter(Column::LoginTime.lt(end))
                 .count(self.base.db())
-                .await? as i64;
+                .await
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
             result.push((date.format("%Y-%m-%d").to_string(), success, fail));
         }
         Ok(result)
@@ -233,6 +235,6 @@ impl SysLogininforRepository {
             .into_tuple::<(String,)>()
             .all(self.base.db())
             .await?;
-        Ok(rows.len() as i64)
+        Ok(i64::try_from(rows.len()).unwrap_or(i64::MAX))
     }
 }

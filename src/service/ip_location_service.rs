@@ -567,7 +567,7 @@ fn file_info(path: &str) -> (bool, u64, i64) {
             let modified = meta.modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
+                .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
                 .unwrap_or(0);
             (true, size, modified)
         }

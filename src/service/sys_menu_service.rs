@@ -528,38 +528,55 @@ impl SysMenuService {
             return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
         }
 
-        // 子菜单校验（通过 Repository find_one）
-        let child_select = SysMenu::find()
-            .filter(MenuColumn::ParentId.eq(menu_id))
-            .filter(MenuColumn::DelFlag.eq("0"));
-        let child_count = self.menu_repo.base().find_many(child_select).await?.len() as u64;
-        if child_count > 0 {
-            return Err(ServiceError::bad_request(&crate::tr!("error.menu.has_children")));
-        }
-
-        // 菜单分配校验（通过 Repository）
-        let role_count = self.role_menu_repo.count_by_menu_id(menu_id).await?;
-        if role_count > 0 {
-            return Err(ServiceError::bad_request(&crate::tr!("error.menu.assigned_to_role")));
-        }
-
         let menu_repo = self.menu_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
-        self.db()
+        // R12 TOCTOU 修复：将子菜单和角色分配校验移入事务内（与 delete_role/delete_dept 一致）
+        let txn_result = self
+            .db()
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                let menu_repo = menu_repo.clone();
+                let role_menu_repo = role_menu_repo.clone();
                 async move {
-                    // 1. 软删除 sys_menu（通过 Repository 事务上下文）
+                    // 1. 事务内重新检查子菜单
+                    let child_select = SysMenu::find()
+                        .filter(MenuColumn::ParentId.eq(menu_id))
+                        .filter(MenuColumn::DelFlag.eq("0"));
+                    let child_count = menu_repo.base().find_many_conn(txn, child_select).await?.len() as u64;
+                    if child_count > 0 {
+                        return Err(sea_orm::DbErr::Custom(
+                            crate::tr!("error.menu.has_children"),
+                        ));
+                    }
+
+                    // 2. 事务内重新检查角色分配
+                    let role_count = role_menu_repo.count_by_menu_id_conn(txn, menu_id).await?;
+                    if role_count > 0 {
+                        return Err(sea_orm::DbErr::Custom(
+                            crate::tr!("error.menu.assigned_to_role"),
+                        ));
+                    }
+
+                    // 3. 软删除 sys_menu（通过 Repository 事务上下文）
                     let mut am: SysMenuActiveModel = existing.into();
                     am.del_flag = Set(Some("2".to_string()));
                     menu_repo.base().update_conn(txn, am).await?;
 
-                    // 2. 物理删除 sys_role_menu 关联（冗余保护，正常应已被校验拦截；通过 Repository 事务上下文）
+                    // 4. 物理删除 sys_role_menu 关联（冗余保护，正常应已被校验拦截）
                     role_menu_repo.delete_by_menu_id_conn(txn, menu_id).await?;
                     Ok(())
                 }
                 .boxed()
             })
-            .await?;
+            .await;
+
+        match txn_result {
+            Ok(()) => {}
+            // TOCTOU 检查的业务错误：映射为 400 bad_request
+            Err(sea_orm::TransactionError::Transaction(sea_orm::DbErr::Custom(msg))) => {
+                return Err(ServiceError::bad_request(&msg));
+            }
+            Err(e) => return Err(ServiceError::from(e)),
+        }
         // 菜单变更影响所有用户权限，全量失效权限缓存
         self.invalidate_all_perm_cache().await;
 

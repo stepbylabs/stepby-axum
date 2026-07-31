@@ -110,7 +110,8 @@ pub async fn dashboard_stats(
                 .filter(UserCol::DelFlag.ne("2"))
                 .count(db)
                 .await
-                .unwrap_or(0) as i64
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
+                .unwrap_or(0)
         },
         // 角色总数（del_flag != '2'）
         async {
@@ -118,7 +119,8 @@ pub async fn dashboard_stats(
                 .filter(RoleCol::DelFlag.ne("2"))
                 .count(db)
                 .await
-                .unwrap_or(0) as i64
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
+                .unwrap_or(0)
         },
         // 启用角色数（status='0' 且 del_flag != '2'）
         async {
@@ -127,7 +129,8 @@ pub async fn dashboard_stats(
                 .filter(RoleCol::DelFlag.ne("2"))
                 .count(db)
                 .await
-                .unwrap_or(0) as i64
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
+                .unwrap_or(0)
         },
         // 今日登录统计：复用 logininfor_service.daily_stats(1)，返回 [LoginDailyStat { date, success, fail }]
         async {
@@ -263,7 +266,8 @@ pub async fn user_stats(
                 .filter(UserCol::DelFlag.ne("2"))
                 .count(db)
                 .await
-                .unwrap_or(0) as i64
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
+                .unwrap_or(0)
         },
         async {
             sys_user::Entity::find()
@@ -271,7 +275,8 @@ pub async fn user_stats(
                 .filter(UserCol::CreateTime.gte(week_begin))
                 .count(db)
                 .await
-                .unwrap_or(0) as i64
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
+                .unwrap_or(0)
         },
         async {
             sys_user::Entity::find()
@@ -279,7 +284,8 @@ pub async fn user_stats(
                 .filter(UserCol::Status.eq("0"))
                 .count(db)
                 .await
-                .unwrap_or(0) as i64
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
+                .unwrap_or(0)
         },
         async {
             sys_user::Entity::find()
@@ -287,7 +293,8 @@ pub async fn user_stats(
                 .filter(UserCol::Status.eq("1"))
                 .count(db)
                 .await
-                .unwrap_or(0) as i64
+                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
+                .unwrap_or(0)
         },
         async {
             sys_user::Entity::find()
