@@ -50,7 +50,8 @@ impl SysTaskRepository {
             query = query.filter(Column::Status.eq(st));
         }
         if let Some(op) = operator {
-            query = query.filter(Column::Operator.like(format!("%{}%", op)));
+            // 安全：调用 like_escape 转义 %/_ 通配符，防止用户输入 % 匹配全表
+            query = query.filter(Column::Operator.like(format!("%{}%", crate::common::like_escape(op))));
         }
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));

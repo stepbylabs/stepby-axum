@@ -145,7 +145,8 @@ impl SysNoticeReadRepository {
             && !sv.trim().is_empty()
         {
             where_clause.push_str("AND (u.user_name LIKE ? OR u.nick_name LIKE ?) ");
-            let pattern = format!("%{}%", sv);
+            // 安全：调用 like_escape 转义 %/_ 通配符，防止用户输入 % 匹配全表（信息枚举/性能损耗）
+            let pattern = format!("%{}%", crate::common::like_escape(sv));
             values.push(pattern.clone().into());
             values.push(pattern.into());
         }
