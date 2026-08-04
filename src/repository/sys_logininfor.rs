@@ -148,42 +148,42 @@ impl SysLogininforRepository {
     /// 统计最近 N 天每天的登录成功/失败次数
     /// 返回 Vec<(date_string, success_count, fail_count)>，按日期升序
     ///
-    /// M-4 / M-6 TODO：当前为 N+1 查询（每天 2 次 COUNT，共 2*N 次 DB 往返）。
-    /// 理想实现是单条 `GROUP BY DATE(login_time)` 聚合查询，用 SeaORM
-    /// `select_only() + column_as(Expr::col(Column::LoginTime), "d") + group_by(...)`。
-    /// 但项目同时支持 MySQL / PostgreSQL / SQLite，三者的日期截断函数不同：
-    /// - MySQL: `DATE(login_time)`
-    /// - PostgreSQL: `DATE_TRUNC('day', login_time)` 或 `login_time::date`
-    /// - SQLite: `DATE(login_time)`
-    ///
-    /// sea_query 的 `Expr::col(...)` 未提供跨 DB 的日期截断抽象，
-    /// 强行用 `custom_expr` 会破坏多 DB 兼容。故暂保留 N+1 实现，
-    /// 后续优化方向：按 DB 分别实现 GROUP BY 聚合，或缓存结果。
-    /// N 通常 ≤ 30，2*N 次 COUNT 在索引 (status, login_time) 下性能可接受。
+    /// C6（批次3）：将原先的 N+1 循环查询（每天 2 次 COUNT，共 2*N 次 DB 往返）
+    /// 改为单条 `GROUP BY DATE(login_time)` 聚合查询，用 `COUNT(CASE WHEN ...)`
+    /// 一次性得到每天的 success/fail 计数。SQLite / MySQL / PostgreSQL 均支持
+    /// `DATE(login_time)` 取日期部分（返回 `YYYY-MM-DD`，与输出格式一致），
+    /// 故无需按 backend 分支。输出仍补齐为完整 N 天序列（无数据的日期以 0 填充），
+    /// 保持前端 dashboard 契约不变。
     pub async fn daily_stats(&self, days: i64) -> Result<Vec<(String, i64, i64)>, DbErr> {
         use chrono::{Duration, Local};
+        use std::collections::HashMap;
+
+        let backend = self.base.db().get_database_backend();
+        let sql = "SELECT DATE(login_time) AS d, \
+                   COUNT(CASE WHEN status = '0' THEN 1 END) AS success, \
+                   COUNT(CASE WHEN status = '1' THEN 1 END) AS fail \
+                   FROM sys_logininfor \
+                   GROUP BY DATE(login_time) \
+                   ORDER BY d ASC";
+        let stmt = Statement::from_sql_and_values(backend, sql, vec![]);
+        let rows = self.base.db().query_all(stmt).await?;
+
+        let mut map: HashMap<String, (i64, i64)> = HashMap::new();
+        for row in rows {
+            let d: String = row.try_get("", "d").unwrap_or_default();
+            let success: i64 = row.try_get("", "success").unwrap_or(0);
+            let fail: i64 = row.try_get("", "fail").unwrap_or(0);
+            map.insert(d, (success, fail));
+        }
+
         let today = Local::now().date_naive();
         let start_date = today - Duration::days(days - 1);
         let mut result = Vec::new();
         for i in 0..days {
             let date = start_date + Duration::days(i);
-            let begin = date.and_time(MIDNIGHT);
-            let end = (date + Duration::days(1)).and_time(MIDNIGHT);
-            let success = SysLogininfor::find()
-                .filter(Column::Status.eq("0"))
-                .filter(Column::LoginTime.gte(begin))
-                .filter(Column::LoginTime.lt(end))
-                .count(self.base.db())
-                .await
-                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
-            let fail = SysLogininfor::find()
-                .filter(Column::Status.eq("1"))
-                .filter(Column::LoginTime.gte(begin))
-                .filter(Column::LoginTime.lt(end))
-                .count(self.base.db())
-                .await
-                .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
-            result.push((date.format("%Y-%m-%d").to_string(), success, fail));
+            let key = date.format("%Y-%m-%d").to_string();
+            let (success, fail) = map.get(&key).copied().unwrap_or((0, 0));
+            result.push((key, success, fail));
         }
         Ok(result)
     }
@@ -223,18 +223,21 @@ impl SysLogininforRepository {
     /// 用于 dashboard stats 接口的 todayAnomalyIps 字段。
     pub async fn count_today_failed_ips(&self) -> Result<i64, DbErr> {
         use chrono::Local;
+        use sea_orm::sea_query::Expr;
+
         let today = Local::now().date_naive();
         let begin = today.and_time(MIDNIGHT);
-        let rows: Vec<(String,)> = SysLogininfor::find()
+        // C6（批次3）：原实现用 `.all()` 拉全量 IP 再 `.len()` 计数（N 次传输）。
+        // 改为单条 `COUNT(DISTINCT ipaddr)` 聚合，直接返回不重复 IP 数，避免拉全表。
+        let row: Option<(i64,)> = SysLogininfor::find()
             .filter(Column::Status.eq("1"))
             .filter(Column::LoginTime.gte(begin))
             .filter(Column::Ipaddr.is_not_null())
             .select_only()
-            .column(Column::Ipaddr)
-            .group_by(Column::Ipaddr)
-            .into_tuple::<(String,)>()
-            .all(self.base.db())
+            .column_as(Expr::cust("COUNT(DISTINCT ipaddr)"), "c")
+            .into_tuple::<(i64,)>()
+            .one(self.base.db())
             .await?;
-        Ok(i64::try_from(rows.len()).unwrap_or(i64::MAX))
+        Ok(row.map(|r| r.0).unwrap_or(0))
     }
 }

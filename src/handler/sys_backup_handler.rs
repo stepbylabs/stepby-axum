@@ -17,6 +17,7 @@ use crate::entity::sys_backup_log::Model as SysBackupLogModel;
 use crate::middleware::Operator;
 use crate::service::sys_backup_service::{BackupLogQueryDto, BackupCreateVo};
 use crate::state::AppState;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 use axum::http::{header, HeaderValue, StatusCode};
 
@@ -227,6 +228,12 @@ pub async fn remove(
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.backup.id_invalid")));
+    }
+    if ids.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
     }
 
     state.backup_service.delete_backups(ids).await?;

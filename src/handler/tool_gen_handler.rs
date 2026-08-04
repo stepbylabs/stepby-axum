@@ -108,13 +108,6 @@ pub async fn create_table(
     Ok(AjaxResult::success(result))
 }
 
-/// 创建表请求参数（已废弃，保留用于 Query 反序列化兼容）
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateTableParams {
-    pub sql: Option<String>,
-}
-
 /// PUT /tool/gen
 /// 修改代码生成配置
 pub async fn update_table(

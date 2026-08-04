@@ -76,6 +76,7 @@ error:
     not_found: User does not exist
     not_found_by_id: "User ID={{id}} does not exist"
     name_duplicate: Username cannot be duplicated
+    phone_invalid: Invalid phone number format (please check the country/region code)
     admin_disable_forbidden: Cannot disable the super administrator
     admin_role_forbidden: Cannot modify the super administrator's role bindings
     admin_post_forbidden: Cannot modify the super administrator's post bindings

@@ -78,6 +78,10 @@ futures = "0.3"
 # 正则表达式（手机号格式校验、XSS 净化模式）
 regex = "1"
 
+# 手机号多地区化（方案 D，G18）：google-libphonenumber Rust 移植，按国家/地区校验手机号
+# 已在 Cargo.lock 中作为传递依赖存在（0.3.10），此处显式声明为直接依赖，无需联网拉取。
+phonenumber = "0.3"
+
 # HTML 白名单净化（通知公告内容入库前过滤 XSS，替代手写正则方案）
 ammonia = "4"
 

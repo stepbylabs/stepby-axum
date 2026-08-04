@@ -107,16 +107,18 @@ pub async fn security_headers(
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
         );
     } else {
-        // CSP：限制资源加载来源，主要保护 Swagger UI 页面
+        // CSP：非 Swagger 路径（即前端 SPA 业务页）。
+        // 前端为 Vite 构建产物，脚本/样式均为带 hash 的外链资源，无需 'unsafe-inline'；
+        // 收紧为仅同源，降低 XSS 注入外部资源的风险（Swagger 路径仍保留 inline 以兼容其内联脚本）。
         // - default-src 'self'：仅允许同源资源
-        // - script-src 'self' 'unsafe-inline'：Swagger UI 需要内联脚本
-        // - style-src 'self' 'unsafe-inline'：Swagger UI 需要内联样式
-        // - img-src 'self' data:：允许 data URI 图片
+        // - script-src 'self'：仅允许同源外链脚本（构建产物）
+        // - style-src 'self' 'unsafe-inline'：保留 inline 以兼容 Element Plus 动态样式（低风险）
+        // - img-src 'self' data:：允许 data URI 图片（头像裁剪等场景）
         // - connect-src 'self'：仅允许同源 API 请求
         insert_if_absent(
             headers,
             "content-security-policy",
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
         );
     }
     // Cache-Control：根据资源类型区分缓存策略

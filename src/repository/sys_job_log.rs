@@ -7,6 +7,7 @@
 
 use sea_orm::*;
 
+use crate::common::like_escape;
 use crate::entity::sys_job_log::{ActiveModel, Column, Entity as SysJobLog, Model};
 use crate::repository::base::BaseRepository;
 
@@ -72,7 +73,7 @@ impl SysJobLogRepository {
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysJobLog::find();
         if let Some(name) = job_name {
-            query = query.filter(Column::JobName.contains(name));
+            query = query.filter(Column::JobName.like(format!("%{}%", like_escape(name))));
         }
         if let Some(group) = job_group {
             query = query.filter(Column::JobGroup.eq(group));
@@ -80,14 +81,16 @@ impl SysJobLogRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
-        if let Some(begin) = begin_time
-            && let Ok(dt) = begin.parse::<chrono::NaiveDateTime>()
-        {
+        if let Some(begin) = begin_time {
+            let dt = begin
+                .parse::<chrono::NaiveDateTime>()
+                .map_err(|_| DbErr::Custom("无效的时间格式".into()))?;
             query = query.filter(Column::CreateTime.gte(dt));
         }
-        if let Some(end) = end_time
-            && let Ok(dt) = end.parse::<chrono::NaiveDateTime>()
-        {
+        if let Some(end) = end_time {
+            let dt = end
+                .parse::<chrono::NaiveDateTime>()
+                .map_err(|_| DbErr::Custom("无效的时间格式".into()))?;
             query = query.filter(Column::CreateTime.lte(dt));
         }
 

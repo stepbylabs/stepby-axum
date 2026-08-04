@@ -27,6 +27,7 @@ use utoipa::ToSchema;
 use garde::Validate;
 
 use crate::common::ValidatedJson;
+use crate::common::image::{detect_image_ext, normalize_ext};
 use crate::common::{AjaxResult, AppError, TableDataInfo, TreeSelectVo};
 use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SECS_PER_HOUR};
 use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
@@ -742,37 +743,7 @@ pub async fn avatar_upload(
     })
 }
 
-/// 通过文件头 magic bytes 识别图片真实格式
-///
-/// 返回标准化扩展名（小写）：
-/// - JPEG: FF D8 FF
-/// - PNG: 89 50 4E 47 0D 0A 1A 0A
-/// - GIF: 47 49 46 38 (37/39)
-fn detect_image_ext(bytes: &[u8]) -> Option<String> {
-    // 每次切片前单独校验长度，避免越界 panic（P0-New-1）
-    // JPEG: FF D8 FF
-    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
-        return Some("jpg".to_string());
-    }
-    // PNG: 89 50 4E 47 0D 0A 1A 0A（需 8 字节）
-    if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
-        return Some("png".to_string());
-    }
-    // GIF: 47 49 46 38 (37/39)（需 5 字节）
-    if bytes.len() >= 5 && bytes[0..4] == [0x47, 0x49, 0x46, 0x38] && (bytes[4] == 0x37 || bytes[4] == 0x39) {
-        return Some("gif".to_string());
-    }
-    None
-}
-
-/// 标准化扩展名（jpeg → jpg）
-fn normalize_ext(ext: &str) -> String {
-    let lower = ext.to_lowercase();
-    match lower.as_str() {
-        "jpeg" => "jpg".to_string(),
-        _ => lower,
-    }
-}
+// detect_image_ext / normalize_ext 已抽到 crate::common::image（C13），此处不再重复定义。
 
 // ==================== 顶层响应类型 ====================
 

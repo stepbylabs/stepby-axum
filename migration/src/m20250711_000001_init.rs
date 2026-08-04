@@ -164,6 +164,7 @@ async fn create_sys_user(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                 .col(ColumnDef::new(Alias::new("user_type")).string_len(2).default("00"))
                 .col(ColumnDef::new(Alias::new("email")).string_len(50).default(""))
                 .col(ColumnDef::new(Alias::new("phonenumber")).string_len(11).default(""))
+                .col(ColumnDef::new(Alias::new("country_code")).string_len(8).null())
                 .col(ColumnDef::new(Alias::new("sex")).char().default("0"))
                 .col(ColumnDef::new(Alias::new("avatar")).string_len(100).default(""))
                 .col(ColumnDef::new(Alias::new("password")).string_len(255).default(""))

@@ -668,6 +668,10 @@ fn infer_business_type(method: Method, path: &str) -> i32 {
 
 // ==================== 响应体脱敏（P0-33） ====================
 
+/// 响应体脱敏失败（非 JSON / 序列化失败）时使用的脱敏占位串。
+/// 绝不回写原始响应体——原始体可能含 token/手机号/身份证等敏感数据（B5）。
+const REDACTED_BODY: &str = "<response body unavailable or contains sensitive data>";
+
 /// 脱敏响应体中的敏感字段（token/phone/idCard/password 等）
 ///
 /// 解析 JSON 后递归处理，遇到敏感 key 时替换 value：
@@ -682,10 +686,12 @@ fn sanitize_response_body(body: &str) -> String {
     }
     let mut value: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => return body.to_string(),
+        // B5：解析失败绝不留原始 body（可能含 token/手机号），返回脱敏占位
+        Err(_) => return REDACTED_BODY.to_string(),
     };
     sanitize_value(&mut value);
-    serde_json::to_string(&value).unwrap_or_else(|_| body.to_string())
+    // B5：序列化失败同样返回脱敏占位，绝不回写原始 body
+    serde_json::to_string(&value).unwrap_or_else(|_| REDACTED_BODY.to_string())
 }
 
 /// 递归脱敏 JSON 值
@@ -864,8 +870,21 @@ mod tests {
 
     #[test]
     fn test_sanitize_response_body_non_json() {
+        // B5：非 JSON 解析失败时不得回写原始响应体，必须返回脱敏占位
         let body = "plain text response";
-        assert_eq!(sanitize_response_body(body), "plain text response");
+        let result = sanitize_response_body(body);
+        assert_eq!(result, REDACTED_BODY);
+        assert!(!result.contains("plain text response"));
+    }
+
+    #[test]
+    fn test_sanitize_response_body_invalid_json_with_sensitive_phone() {
+        // B5：含敏感字段（phone）的非法 JSON，解析失败分支必须脱敏，
+        // 不得泄露手机号明文，且返回占位串。
+        let body = "{\"phone\":\"13812345678\""; // 缺少闭合括号，非法 JSON
+        let result = sanitize_response_body(body);
+        assert!(!result.contains("13812345678"), "不应泄露手机号明文");
+        assert!(result.contains(REDACTED_BODY), "应返回脱敏占位串");
     }
 
     #[test]

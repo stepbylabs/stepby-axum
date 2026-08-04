@@ -16,6 +16,7 @@ use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_job_log::Model as SysJobLogModel;
 use crate::service::sys_job_service::JobLogQueryDto;
 use crate::state::AppState;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /monitor/jobLog/list
@@ -60,6 +61,12 @@ pub async fn remove(
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.job_log.id_invalid")));
+    }
+    if ids.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
     }
 
     state.job_service.delete_job_logs(ids).await?;

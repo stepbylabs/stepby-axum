@@ -56,6 +56,14 @@ where
     }
 
     /// 分页查询（返回记录列表和总数）
+    ///
+    /// 注意：本泛型方法当前无调用方（各实体均使用各自 repository 的
+    /// `find_page_filtered` / `find_active_page` 等自带排序的分页方法，见仓库内
+    /// grep `.find_page(` 无命中）。因此未在此添加 `ORDER BY` 兜底——
+    /// 泛型实体 `E` 无法直接定位主键列进行排序（`PrimaryKeyToColumn` 在泛型约束下
+    /// 难以应用到 `order_by_asc`），且强行加注释之外的实现会引入不必要的复杂度。
+    /// 保留为通用工具方法，标记为 dead_code 以避免未使用告警。
+    #[allow(dead_code)]
     pub async fn find_page(&self, offset: u64, limit: u64) -> Result<(Vec<E::Model>, u64), DbErr> {
         let total = E::find().paginate(&self.db, 1).num_items().await?;
         let rows = E::find()

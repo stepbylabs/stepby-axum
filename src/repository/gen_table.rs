@@ -178,7 +178,8 @@ impl GenTableRepository {
 
         // 构建参数化查询（P0: 防止 SQL 注入，原手动转义 replace('\'',"''") + format! 拼接存在风险）
         // LIKE 模式通过参数值传入，使用 like_escape 转义 % 和 \，并附加 ESCAPE '\\' 子句确保跨库一致。
-        let (sql, count_sql, data_values, count_values): (String, String, Vec<Value>, Vec<Value>) = match backend {
+        let (sql, _count_sql, data_values, _count_values): (String, String, Vec<Value>, Vec<Value>) =
+            match backend {
             DatabaseBackend::Sqlite => {
                 let base_where = "type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'AUTHS_%'";
                 let mut where_clause = base_where.to_string();
@@ -274,14 +275,10 @@ impl GenTableRepository {
             .filter(|r| !imported.contains(&r.table_name))
             .collect();
 
-        // count 查询（也需过滤）
-        let total_result = db.query_one(Statement::from_sql_and_values(backend, &count_sql, count_values)).await?;
-        let total_all: u64 = total_result
-            .map(|row| u64::try_from(row.try_get::<i64>("", "count").unwrap_or(0)).unwrap_or(0))
-            .unwrap_or(0);
-        // 估算过滤后总数（精确值需要单独查询，这里用近似值）
-        let imported_count = imported.len() as u64;
-        let total = total_all.saturating_sub(imported_count);
+        // 精确总数：filtered 是已按 `imported` 集合内存过滤后的结果，
+        // 其长度即为过滤后剩余的可导入表数量（C7：原 `total_all - imported_count`
+        // 估算在分页偏移下不准确，现直接使用真实过滤结果长度）。
+        let total = filtered.len() as u64;
 
         Ok((filtered, total))
     }
