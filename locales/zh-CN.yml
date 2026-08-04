@@ -76,6 +76,7 @@ error:
     not_found: 用户不存在
     not_found_by_id: "用户 ID={{id}} 不存在"
     name_duplicate: 用户名不能重复
+    phone_invalid: 手机号格式不正确（请检查国家/地区代码）
     admin_disable_forbidden: 不允许停用超级管理员
     admin_role_forbidden: 不允许修改超级管理员的角色绑定
     admin_post_forbidden: 不允许修改超级管理员的岗位绑定

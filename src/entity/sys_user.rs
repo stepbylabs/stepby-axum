@@ -27,6 +27,9 @@ pub struct Model {
     pub user_type: Option<String>,
     pub email: Option<String>,
     pub phonenumber: Option<String>,
+    /// 手机号国家/地区代码（ISO 3166-1 alpha-2，如 CN/HK/US）。
+    /// 方案 D（G18）手机号多地区化：None 视为回退 CN。
+    pub country_code: Option<String>,
     pub sex: Option<String>,
     pub avatar: Option<String>,
     #[serde(skip_serializing)]
@@ -69,6 +72,7 @@ impl fmt::Debug for Model {
             .field("user_type", &self.user_type)
             .field("email", &self.email)
             .field("phonenumber", &self.phonenumber)
+            .field("country_code", &self.country_code)
             .field("sex", &self.sex)
             .field("avatar", &self.avatar)
             .field("password", &"<redacted>")
@@ -119,6 +123,7 @@ mod tests {
             user_type: Some("00".to_string()),
             email: Some("admin@example.com".to_string()),
             phonenumber: Some("13800138000".to_string()),
+            country_code: None,
             sex: Some("0".to_string()),
             avatar: Some("/avatar/admin.png".to_string()),
             password: Some("$argon2id$v=19$m=65536,t=3,p=4$abc123hash".to_string()),

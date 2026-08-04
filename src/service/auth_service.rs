@@ -1016,6 +1016,7 @@ impl AuthService {
             nick_name: dto.username,
             email: None,
             phonenumber: None,
+            country_code: None,
             sex: None,
             password: dto.password,
             status: Some("0".to_string()),

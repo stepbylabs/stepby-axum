@@ -23,6 +23,7 @@ use crate::service::sys_job_service::{
     JobAddDto, JobEditDto, JobQueryDto, JobRunDto, JobStatusDto, JobVo,
 };
 use crate::state::AppState;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /monitor/job/list
@@ -135,6 +136,12 @@ pub async fn remove(
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.job.id_invalid")));
+    }
+    if ids.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
     }
 
     state.job_service.delete_jobs(ids).await?;

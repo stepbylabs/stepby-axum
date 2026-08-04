@@ -118,7 +118,27 @@ static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 ///
 /// 注：sea-orm 1.1 未公开底层 sqlx Pool 的 size()/num_idle() API，
 /// 故连接池容量统计暂不可用。未来 sea-orm 暴露 pool 访问接口后可扩展。
-pub async fn metrics(State(state): State<Arc<AppState>>) -> String {
+pub async fn metrics(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<String, AppError> {
+    // 可选指标鉴权（向后兼容）：
+    // 仅当设置环境变量 YEBOT_METRICS_TOKEN 时才要求 `Authorization: Bearer <token>`；
+    // 未设置时保持原有匿名可访问行为（便于本地 curl / Prometheus 无配置拉取）。
+    // 生产环境建议设置该变量，或在反向代理层限制 /metrics 来源 IP。
+    if let Ok(expected) = std::env::var("YEBOT_METRICS_TOKEN") {
+        if !expected.is_empty() {
+            let ok = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == format!("Bearer {}", expected))
+                .unwrap_or(false);
+            if !ok {
+                return Err(AppError::unauthorized("metrics token required"));
+            }
+        }
+    }
+
     let start = START_TIME.get_or_init(Instant::now);
     let uptime = start.elapsed().as_secs();
     let (rss, vms) = process_memory();
@@ -165,7 +185,7 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> String {
         db_backend_name, if db_connected { 1 } else { 0 }
     ));
 
-    s
+    Ok(s)
 }
 
 /// 获取数据库后端类型名称

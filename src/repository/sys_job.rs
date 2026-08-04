@@ -9,6 +9,7 @@
 use sea_orm::*;
 use sea_orm::sea_query::Expr;
 
+use crate::common::like_escape;
 use crate::entity::sys_job::{ActiveModel, Column, Entity as SysJob, Model};
 use crate::repository::base::BaseRepository;
 
@@ -113,7 +114,7 @@ impl SysJobRepository {
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysJob::find().filter(Column::DelFlag.eq("0"));
         if let Some(name) = job_name {
-            query = query.filter(Column::JobName.contains(name));
+            query = query.filter(Column::JobName.like(format!("%{}%", like_escape(name))));
         }
         if let Some(group) = job_group {
             query = query.filter(Column::JobGroup.eq(group));

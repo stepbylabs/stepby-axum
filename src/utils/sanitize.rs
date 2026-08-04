@@ -18,7 +18,13 @@
 //! 禁止的标签（会被完全移除）：script, style, iframe, object, embed, applet,
 //! form, input, textarea, select, button, link, meta, noscript, template 等
 
+use std::sync::LazyLock;
+
 use ammonia::{Builder, UrlRelative};
+
+/// 模块级缓存的净化器（B9）：Builder 配置较重，仅构建一次，避免每次
+/// `sanitize_html` 调用时重建。CSS 危险值由 ammonia 默认过滤，无需改动净化逻辑。
+static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(build_sanitizer);
 
 /// 构建白名单净化器（懒加载，避免每次调用重建）
 fn build_sanitizer() -> Builder<'static> {
@@ -64,7 +70,8 @@ pub fn sanitize_html(html: &str) -> String {
     if html.is_empty() {
         return String::new();
     }
-    build_sanitizer().clean(html).to_string()
+    // B9：使用缓存的静态 Builder，不再每次调用重建
+    SANITIZER.clean(html).to_string()
 }
 
 #[cfg(test)]

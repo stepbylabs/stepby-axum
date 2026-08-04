@@ -12,6 +12,8 @@ use futures::future::FutureExt;
 use redis::aio::ConnectionManager;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait};
 use serde::Deserialize;
+use std::sync::LazyLock;
+use regex::Regex;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
 use garde::Validate;
@@ -58,8 +60,12 @@ pub struct UserAddDto {
     pub nick_name: String,
     #[garde(email)]
     pub email: Option<String>,
-    #[garde(pattern(r"^1[3-9]\d{9}$"))]
+    // 手机号校验改为按地区（方案 D，G18）：移除固定中国号段正则，改由 validate_phone_by_region 统一校验
+    #[garde(skip)]
     pub phonenumber: Option<String>,
+    /// 手机号国家/地区代码（ISO 3166-1 alpha-2，如 CN/HK/US）。None 回退 CN。
+    #[garde(skip)]
+    pub country_code: Option<String>,
     #[garde(skip)]
     pub sex: Option<String>,
     #[garde(length(min = 5, max = 20))]
@@ -87,8 +93,11 @@ pub struct UserEditDto {
     pub nick_name: Option<String>,
     #[garde(email)]
     pub email: Option<String>,
-    #[garde(pattern(r"^1[3-9]\d{9}$"))]
+    #[garde(skip)]
     pub phonenumber: Option<String>,
+    /// 手机号国家/地区代码（ISO 3166-1 alpha-2，如 CN/HK/US）。None 回退 CN。
+    #[garde(skip)]
+    pub country_code: Option<String>,
     #[garde(skip)]
     pub sex: Option<String>,
     #[garde(skip)]
@@ -134,10 +143,76 @@ pub struct ProfileUpdateDto {
     pub nick_name: Option<String>,
     #[garde(email)]
     pub email: Option<String>,
-    #[garde(pattern(r"^1[3-9]\d{9}$"))]
+    // 手机号校验改为按地区（方案 D，G18）
+    #[garde(skip)]
     pub phonenumber: Option<String>,
+    /// 手机号国家/地区代码（ISO 3166-1 alpha-2，如 CN/HK/US）。None 回退 CN。
+    #[garde(skip)]
+    pub country_code: Option<String>,
     #[garde(skip)]
     pub sex: Option<String>,
+}
+
+/// 常见国家/地区手机号正则分流表（方案 D 回退用，覆盖 phonenumber crate 解析失败或地区未识别的场景）
+///
+/// 仅作为 phonenumber crate 的兜底，保证真实可用：
+/// - CN：中国大陆 1[3-9] 开头 11 位
+/// - HK：中国香港 5-9 开头 8 位
+/// - US：美国/加拿大 10 位数字
+/// - MO：中国澳门 6 开头 8 位
+/// - TW：中国台湾 09 开头 10 位
+/// - GB：英国 1-9 开头 10 位（不含国际前缀）
+/// - JP：日本 070/080/090 开头 11 位
+static REGION_PHONE_PATTERNS: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
+    vec![
+        ("CN", r"^1[3-9]\d{9}$"),
+        ("HK", r"^([5-9]\d{7})$"),
+        ("US", r"^\d{10}$"),
+        ("MO", r"^6\d{7}$"),
+        ("TW", r"^09\d{8}$"),
+        ("GB", r"^[1-9]\d{9}$"),
+        ("JP", r"^0[789]0\d{8}$"),
+    ]
+});
+
+/// 按国家/地区校验手机号（方案 D，G18：多地区化）
+///
+/// - `phone` 为 None 时不校验（允许留空）
+/// - `country` 为 None 时回退 CN
+///
+/// 优先使用 `phonenumber` crate（google-libphonenumber Rust 移植），
+/// 当 crate 解析失败或地区未识别时，回退到上方正则分流表，保证真实可用。
+pub fn validate_phone_by_region(
+    phone: &Option<String>,
+    country: &Option<String>,
+) -> Result<(), ServiceError> {
+    let Some(phone) = phone else { return Ok(()); };
+    let country = country.as_deref().unwrap_or("CN").to_uppercase();
+    if !is_valid_phone(phone, &country) {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.user.phone_invalid"
+        )));
+    }
+    Ok(())
+}
+
+/// 单个手机号是否对给定地区合法（phonenumber crate 优先，正则表兜底）
+fn is_valid_phone(phone: &str, country: &str) -> bool {
+    // 1) 优先 phonenumber crate（google-libphonenumber）
+    if let Ok(region) = country.parse::<phonenumber::country::Id>() {
+        if let Ok(num) = phonenumber::parse(Some(region), phone) {
+            return num.is_valid();
+        }
+    }
+    // 2) 回退正则分流表（覆盖常见地区，crate 解析失败或地区未识别时仍可用）
+    for (cc, pat) in REGION_PHONE_PATTERNS.iter() {
+        if *cc == country {
+            if let Ok(re) = Regex::new(pat) {
+                return re.is_match(phone);
+            }
+        }
+    }
+    false
 }
 
 /// 用户分页查询 DTO
@@ -385,76 +460,8 @@ impl SysUserService {
             _ => None,
         };
 
-        // 数据权限过滤参数（None = 不追加过滤）
-        let mut scope_dept_ids: Option<Vec<i64>> = None;
-        let mut scope_user_id: Option<i64> = None;
-
-        if let Some(op_uid) = operator_user_id {
-            // 超管短路
-            if op_uid != SUPER_ADMIN_USER_ID {
-                // 查询 operator 的角色，取最小 data_scope（最宽松）
-                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-                let min_scope = op_roles
-                    .iter()
-                    .filter_map(|r| r.data_scope.as_deref())
-                    .filter_map(|s| s.parse::<i32>().ok())
-                    .min();
-
-                if let Some(scope) = min_scope {
-                    match scope {
-                        1 => {
-                            // 全部数据：不追加过滤
-                        }
-                        2 => {
-                            // 自定义：聚合 operator 所有角色的 sys_role_dept 部门
-                            // P0-R81-004 暂缓项：N+1 改批量查询，单次 SQL 完成
-                            let role_ids: Vec<i64> = op_roles
-                                .iter()
-                                .filter(|r| r.data_scope.as_deref() == Some("2"))
-                                .map(|r| r.role_id)
-                                .collect();
-                            let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
-                            scope_dept_ids =
-                                Some(rids.into_iter().map(|rd| rd.dept_id).collect());
-                        }
-                        3 => {
-                            // 本部门：filter by operator.dept_id
-                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                            if let Some(u) = op_user {
-                                if let Some(did) = u.dept_id {
-                                    scope_dept_ids = Some(vec![did]);
-                                } else {
-                                    // 无部门 → 不可见任何用户
-                                    scope_dept_ids = Some(vec![]);
-                                }
-                            } else {
-                                scope_dept_ids = Some(vec![]);
-                            }
-                        }
-                        4 => {
-                            // 本部门及以下：operator.dept_id + 所有后代部门
-                            // P0-R81-004 暂缓项：递归 CTE 替代全表扫描 + 内存过滤 ancestors CSV
-                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                            let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
-                            let descendant_ids =
-                                self.dept_repo.find_descendant_ids(op_dept_id).await?;
-                            scope_dept_ids = Some(descendant_ids);
-                        }
-                        5 => {
-                            // 仅本人
-                            scope_user_id = Some(op_uid);
-                        }
-                        _ => {
-                            // 未知 data_scope 值，安全失败：限定为本人
-                            scope_user_id = Some(op_uid);
-                        }
-                    }
-                } else {
-                    // operator 无角色或 data_scope 缺失：安全失败，仅本人
-                    scope_user_id = Some(op_uid);
-                }
-            }
-        }
+        // 数据权限过滤参数（C10：抽取到 resolve_data_scope，保持行为一致）
+        let (scope_dept_ids, scope_user_id) = self.resolve_data_scope(operator_user_id).await?;
 
         let scope_dept_ref = scope_dept_ids.as_deref();
         let (rows, total) = self
@@ -506,6 +513,91 @@ impl SysUserService {
         Ok((vos, total))
     }
 
+    /// 解析数据权限过滤参数（C10：从 get_user_page / export_users 抽出的公共方法）
+    ///
+    /// 返回 `(scope_dept_ids, scope_user_id)`：
+    /// - `scope_dept_ids`：按部门过滤的部门 ID 集合（None = 不过滤）
+    /// - `scope_user_id`：仅本人过滤（Some(uid)；None = 不过滤）
+    ///
+    /// 规则与两个调用方完全一致：
+    /// - 超管（user_id==1）短路，直接返回 (None, None)（全部数据）
+    /// - 取 operator 所有角色中 data_scope 值最小者（最宽松）生效
+    /// - 无角色 / data_scope 缺失 / 未知值：安全失败，限定为本人
+    async fn resolve_data_scope(
+        &self,
+        op_uid: Option<i64>,
+    ) -> Result<(Option<Vec<i64>>, Option<i64>), ServiceError> {
+        let mut scope_dept_ids: Option<Vec<i64>> = None;
+        let mut scope_user_id: Option<i64> = None;
+
+        if let Some(op_uid) = op_uid {
+            // 超管短路
+            if op_uid != SUPER_ADMIN_USER_ID {
+                // 查询 operator 的角色，取最小 data_scope（最宽松）
+                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
+                let min_scope = op_roles
+                    .iter()
+                    .filter_map(|r| r.data_scope.as_deref())
+                    .filter_map(|s| s.parse::<i32>().ok())
+                    .min();
+
+                if let Some(scope) = min_scope {
+                    match scope {
+                        1 => {
+                            // 全部数据：不追加过滤
+                        }
+                        2 => {
+                            // 自定义：聚合 operator 所有角色的 sys_role_dept 部门
+                            let role_ids: Vec<i64> = op_roles
+                                .iter()
+                                .filter(|r| r.data_scope.as_deref() == Some("2"))
+                                .map(|r| r.role_id)
+                                .collect();
+                            let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
+                            scope_dept_ids =
+                                Some(rids.into_iter().map(|rd| rd.dept_id).collect());
+                        }
+                        3 => {
+                            // 本部门：filter by operator.dept_id
+                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+                            if let Some(u) = op_user {
+                                if let Some(did) = u.dept_id {
+                                    scope_dept_ids = Some(vec![did]);
+                                } else {
+                                    // 无部门 → 不可见任何用户
+                                    scope_dept_ids = Some(vec![]);
+                                }
+                            } else {
+                                scope_dept_ids = Some(vec![]);
+                            }
+                        }
+                        4 => {
+                            // 本部门及以下：operator.dept_id + 所有后代部门
+                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+                            let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
+                            let descendant_ids =
+                                self.dept_repo.find_descendant_ids(op_dept_id).await?;
+                            scope_dept_ids = Some(descendant_ids);
+                        }
+                        5 => {
+                            // 仅本人
+                            scope_user_id = Some(op_uid);
+                        }
+                        _ => {
+                            // 未知 data_scope 值，安全失败：限定为本人
+                            scope_user_id = Some(op_uid);
+                        }
+                    }
+                } else {
+                    // operator 无角色或 data_scope 缺失：安全失败，仅本人
+                    scope_user_id = Some(op_uid);
+                }
+            }
+        }
+
+        Ok((scope_dept_ids, scope_user_id))
+    }
+
     /// 导出用户列表（受 EXPORT_MAX_ROWS 限制，绕过 PageDomain 的 100 行截断）
     ///
     /// 与 `get_user_page` 的差异：使用 EXPORT_MAX_ROWS 作为 limit，
@@ -528,61 +620,8 @@ impl SysUserService {
         };
 
         // P0-1 修复：导出接口需应用与 list 相同的数据权限过滤，防止越权导出
-        let mut scope_dept_ids: Option<Vec<i64>> = None;
-        let mut scope_user_id: Option<i64> = None;
-
-        if let Some(op_uid) = operator_user_id
-            && op_uid != SUPER_ADMIN_USER_ID
-        {
-            let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-            let min_scope = op_roles
-                .iter()
-                .filter_map(|r| r.data_scope.as_deref())
-                .filter_map(|s| s.parse::<i32>().ok())
-                .min();
-
-            if let Some(scope) = min_scope {
-                match scope {
-                    1 => { /* 全部数据：不追加过滤 */ }
-                    2 => {
-                        let role_ids: Vec<i64> = op_roles
-                            .iter()
-                            .filter(|r| r.data_scope.as_deref() == Some("2"))
-                            .map(|r| r.role_id)
-                            .collect();
-                        let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
-                        scope_dept_ids = Some(rids.into_iter().map(|rd| rd.dept_id).collect());
-                    }
-                    3 => {
-                        let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                        if let Some(u) = op_user {
-                            if let Some(did) = u.dept_id {
-                                scope_dept_ids = Some(vec![did]);
-                            } else {
-                                scope_dept_ids = Some(vec![]);
-                            }
-                        } else {
-                            scope_dept_ids = Some(vec![]);
-                        }
-                    }
-                    4 => {
-                        let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                        let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
-                        let descendant_ids =
-                            self.dept_repo.find_descendant_ids(op_dept_id).await?;
-                        scope_dept_ids = Some(descendant_ids);
-                    }
-                    5 => {
-                        scope_user_id = Some(op_uid);
-                    }
-                    _ => {
-                        scope_user_id = Some(op_uid);
-                    }
-                }
-            } else {
-                scope_user_id = Some(op_uid);
-            }
-        }
+        //（C10：抽取到 resolve_data_scope，保持行为一致）
+        let (scope_dept_ids, scope_user_id) = self.resolve_data_scope(operator_user_id).await?;
 
         // 1. 通过 Repository 多条件查询用户列表（受 EXPORT_MAX_ROWS 限制 + 数据权限过滤）
         let (rows, _) = self
@@ -700,6 +739,9 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
+        // G18：按国家/地区校验手机号（方案 D 多地区化）
+        validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
+
         let existing = self.user_repo.base().find_by_id(user_id).await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
@@ -720,11 +762,15 @@ impl SysUserService {
             .phonenumber
             .as_deref()
             .is_none_or(|v| existing.phonenumber.as_deref() == Some(v));
+        let country_same = dto
+            .country_code
+            .as_deref()
+            .is_none_or(|v| existing.country_code.as_deref() == Some(v));
         let sex_same = dto
             .sex
             .as_deref()
             .is_none_or(|v| existing.sex.as_deref() == Some(v));
-        if nick_same && email_same && phone_same && sex_same {
+        if nick_same && email_same && phone_same && country_same && sex_same {
             return Ok(());
         }
 
@@ -738,6 +784,9 @@ impl SysUserService {
         }
         if let Some(ref phone) = dto.phonenumber {
             am.phonenumber = Set(Some(phone.clone()));
+        }
+        if let Some(ref cc) = dto.country_code {
+            am.country_code = Set(Some(cc.clone()));
         }
         if let Some(ref sex) = dto.sex {
             am.sex = Set(Some(sex.clone()));
@@ -791,6 +840,9 @@ impl SysUserService {
     ) -> Result<SysUserModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
+        // G18：按国家/地区校验手机号（方案 D 多地区化）
+        validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
+
         // R19-1.3：密码复杂度校验（拦截纯数字/纯字母等弱口令）
         validate_password_complexity(&dto.password).map_err(|e| ServiceError::bad_request(&e))?;
 
@@ -823,6 +875,7 @@ impl SysUserService {
                 user_am.nick_name = Set(dto.nick_name.clone());
                 user_am.email = Set(dto.email.clone());
                 user_am.phonenumber = Set(dto.phonenumber.clone());
+                user_am.country_code = Set(dto.country_code.clone());
                 user_am.sex = Set(dto.sex.clone());
                 user_am.password = Set(Some(hashed.clone()));
                 user_am.status = Set(dto.status.clone().or_else(|| Some("0".to_string())));
@@ -890,6 +943,9 @@ impl SysUserService {
     ) -> Result<SysUserModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
+        // G18：按国家/地区校验手机号（方案 D 多地区化）
+        validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
+
         // 查询用户是否存在
         let existing = self.user_repo.base().find_by_id(dto.user_id).await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
@@ -941,6 +997,9 @@ impl SysUserService {
                 }
                 if let Some(ref phone) = dto.phonenumber {
                     am.phonenumber = Set(Some(phone.clone()));
+                }
+                if let Some(ref cc) = dto.country_code {
+                    am.country_code = Set(Some(cc.clone()));
                 }
                 if let Some(ref sex) = dto.sex {
                     am.sex = Set(Some(sex.clone()));

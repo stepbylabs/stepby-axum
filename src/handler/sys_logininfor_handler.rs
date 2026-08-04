@@ -12,7 +12,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
 
 use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
-use crate::common::constants::SUPER_ADMIN_USER_ID;
+use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SUPER_ADMIN_USER_ID};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_logininfor::Model as SysLogininforModel;
 use crate::service::sys_logininfor_service::{LoginDailyStat, LogininforQueryDto};
@@ -61,6 +61,12 @@ pub async fn remove(
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.login_log.id_invalid")));
+    }
+    if ids.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
     }
 
     state.logininfor_service.delete_logininfors(ids).await?;

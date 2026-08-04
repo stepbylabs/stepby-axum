@@ -1,6 +1,7 @@
 // axum-backend/src/initialize/mod.rs
 
 use std::sync::Arc;
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use crate::config::Settings;
 use crate::db;
 use crate::logger;
@@ -25,6 +26,11 @@ impl AppInitializer {
 
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
+
+        // 3.1 G18：幂等确保 sys_user 含 country_code 列（存量库向后兼容，加列后才不会因实体新字段查询报错）
+        ensure_user_country_code_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_user.country_code 列失败: {}", e))?;
 
         // 4. 初始化 Redis
         let redis = db::init_redis(&settings.redis).await?;
@@ -71,4 +77,95 @@ impl AppInitializer {
         tracing::info!("=== axum-backend 初始化完成 ===");
         Ok(state)
     }
+}
+
+/// 幂等确保 `sys_user` 表含 `country_code` 列（方案 D，G18：手机号多地区化向后兼容）
+///
+/// 实体新增 `country_code` 字段后，存量 SQLite / Postgres / MySQL 数据库若无该列，
+/// 查询会因缺列报错。启动初始化时按当前数据库方言检测列是否存在：
+/// - 表不存在则跳过（由 migration 负责建表，下次启动再补列）
+/// - 列不存在则执行 `ALTER TABLE sys_user ADD COLUMN country_code VARCHAR(8)`
+async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // 1) 表是否存在（避免对尚未建表的空库误执行 ALTER）
+    let table_exists = match backend {
+        DatabaseBackend::Sqlite => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='sys_user'",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::Postgres => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.tables WHERE table_name='sys_user' AND table_schema=current_schema()",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::MySql => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.tables WHERE table_name='sys_user' AND table_schema=DATABASE()",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+    };
+
+    if !table_exists {
+        tracing::info!("sys_user 表尚未创建，跳过 country_code 列检查（由 migration 负责建表）");
+        return Ok(());
+    }
+
+    // 2) 列是否存在
+    let has_column = match backend {
+        DatabaseBackend::Sqlite => {
+            let rows = db
+                .query_all(Statement::from_string(backend, "PRAGMA table_info(sys_user)"))
+                .await?;
+            rows.iter().any(|row| {
+                row.try_get::<String>("", "name")
+                    .map(|n| n.eq_ignore_ascii_case("country_code"))
+                    .unwrap_or(false)
+            })
+        }
+        DatabaseBackend::Postgres => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.columns WHERE table_name='sys_user' AND column_name='country_code' AND table_schema=current_schema() LIMIT 1",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::MySql => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.columns WHERE table_name='sys_user' AND column_name='country_code' AND table_schema=DATABASE() LIMIT 1",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+    };
+
+    if !has_column {
+        tracing::info!("sys_user 缺少 country_code 列，执行幂等 ALTER 添加");
+        db.execute(Statement::from_string(
+            backend,
+            "ALTER TABLE sys_user ADD COLUMN country_code VARCHAR(8)",
+        ))
+        .await?;
+    } else {
+        tracing::info!("sys_user.country_code 列已存在，无需 ALTER");
+    }
+
+    Ok(())
 }

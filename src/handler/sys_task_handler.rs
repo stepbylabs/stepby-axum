@@ -14,6 +14,7 @@ use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_task::Model as SysTaskModel;
 use crate::service::sys_task_service::TaskQueryDto;
 use crate::state::AppState;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /system/task/list
@@ -80,6 +81,12 @@ pub async fn remove(
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.task.id_invalid")));
+    }
+    if ids.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
     }
 
     state.task_service.delete_tasks(ids).await?;

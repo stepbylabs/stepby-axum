@@ -15,6 +15,7 @@ use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_oper_log::Model as SysOperLogModel;
 use crate::service::sys_oper_log_service::{AuditStatsVo, ComplianceReportVo, OperLogQueryDto};
 use crate::state::AppState;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /monitor/operlog/list
@@ -59,6 +60,12 @@ pub async fn remove(
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.oper_log.id_invalid")));
+    }
+    if ids.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
     }
 
     state.oper_log_service.delete_oper_logs(ids).await?;

@@ -23,6 +23,7 @@ use crate::service::sys_config_service::{
     ConfigAddDto, ConfigEditDto, ConfigQueryDto,
 };
 use crate::state::AppState;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /system/config/list
@@ -154,6 +155,12 @@ pub async fn remove(
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.config.id_invalid")));
+    }
+    if ids.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
     }
 
     state.config_service.delete_configs(ids).await?;
