@@ -18,6 +18,15 @@ use crate::config::RedisConfig;
 /// 此常量作为调用方包裹超时的统一参数，避免各处硬编码。
 pub(crate) const REDIS_CMD_TIMEOUT_SECS: u64 = 3;
 
+/// Redis 连接建立超时（秒）。
+///
+/// R8-CONC-013 补充：命令级超时（`REDIS_CMD_TIMEOUT_SECS`）只覆盖已建连后的
+/// `query_async`；而 `ConnectionManager::new()` 在初始 TCP/TLS 握手阶段无内置超时，
+/// 当 `REDIS_URL` 指向不可达地址时可能长时间挂起（曾导致 `cargo test` 在无 Redis 环境
+/// 下静默卡死）。此处对连接建立本身加超时护栏，fail-closed：超时即返回错误，
+/// 由调用方降级，绝不让调用线程无限阻塞。
+pub(crate) const REDIS_CONN_TIMEOUT_SECS: u64 = 5;
+
 /// 初始化 Redis 连接池（ConnectionManager，自动重连）
 ///
 /// 安全：连接失败时详情写 tracing 日志，对外返回通用文案，
@@ -31,10 +40,27 @@ pub async fn init_redis(config: &RedisConfig) -> anyhow::Result<ConnectionManage
         anyhow::anyhow!("Redis 配置错误，请检查 REDIS_URL")
     })?;
 
-    let mut conn = ConnectionManager::new(client).await.map_err(|e| {
-        tracing::error!("Redis 连接失败: {}", e);
-        anyhow::anyhow!("Redis 连接失败，请检查 REDIS_URL 配置与网络")
-    })?;
+    // 连接建立阶段超时护栏（R8-CONC-013 补充）：不可达地址最多等待 REDIS_CONN_TIMEOUT_SECS 秒，
+    // 超时即返回错误，避免调用线程无限挂起。
+    let mut conn = match tokio::time::timeout(
+        Duration::from_secs(REDIS_CONN_TIMEOUT_SECS),
+        ConnectionManager::new(client),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            tracing::error!("Redis 连接失败: {}", e);
+            return Err(anyhow::anyhow!("Redis 连接失败，请检查 REDIS_URL 配置与网络"));
+        }
+        Err(_) => {
+            tracing::error!(
+                "Redis 连接建立超时（>{}s），请检查 REDIS_URL 配置与网络",
+                REDIS_CONN_TIMEOUT_SECS
+            );
+            return Err(anyhow::anyhow!("Redis 连接超时，请检查 REDIS_URL 配置与网络"));
+        }
+    };
 
     // 测试连接（用 tokio::time::timeout 包裹，R8-CONC-013：防止 PING 挂起）
     let pong: String = tokio::time::timeout(
