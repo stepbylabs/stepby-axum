@@ -126,16 +126,14 @@ pub async fn metrics(
     // 仅当设置环境变量 YEBOT_METRICS_TOKEN 时才要求 `Authorization: Bearer <token>`；
     // 未设置时保持原有匿名可访问行为（便于本地 curl / Prometheus 无配置拉取）。
     // 生产环境建议设置该变量，或在反向代理层限制 /metrics 来源 IP。
-    if let Ok(expected) = std::env::var("YEBOT_METRICS_TOKEN") {
-        if !expected.is_empty() {
-            let ok = headers
-                .get(axum::http::header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v == format!("Bearer {}", expected))
-                .unwrap_or(false);
-            if !ok {
-                return Err(AppError::unauthorized("metrics token required"));
-            }
+    if let Ok(expected) = std::env::var("YEBOT_METRICS_TOKEN") && !expected.is_empty() {
+        let ok = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == format!("Bearer {}", expected))
+            .unwrap_or(false);
+        if !ok {
+            return Err(AppError::unauthorized("metrics token required"));
         }
     }
 

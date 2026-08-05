@@ -199,17 +199,15 @@ pub fn validate_phone_by_region(
 /// 单个手机号是否对给定地区合法（phonenumber crate 优先，正则表兜底）
 fn is_valid_phone(phone: &str, country: &str) -> bool {
     // 1) 优先 phonenumber crate（google-libphonenumber）
-    if let Ok(region) = country.parse::<phonenumber::country::Id>() {
-        if let Ok(num) = phonenumber::parse(Some(region), phone) {
-            return num.is_valid();
-        }
+    if let Ok(region) = country.parse::<phonenumber::country::Id>()
+        && let Ok(num) = phonenumber::parse(Some(region), phone)
+    {
+        return num.is_valid();
     }
     // 2) 回退正则分流表（覆盖常见地区，crate 解析失败或地区未识别时仍可用）
     for (cc, pat) in REGION_PHONE_PATTERNS.iter() {
-        if *cc == country {
-            if let Ok(re) = Regex::new(pat) {
-                return re.is_match(phone);
-            }
+        if *cc == country && let Ok(re) = Regex::new(pat) {
+            return re.is_match(phone);
         }
     }
     false
