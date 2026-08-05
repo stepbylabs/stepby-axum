@@ -101,8 +101,8 @@ pub struct ConfigEditDto {
 
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
+    crate::common::datetime::parse_local_date_to_utc_naive(s)
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 // ==================== Service 实现 ====================
@@ -312,7 +312,7 @@ impl SysConfigService {
             return Err(ServiceError::bad_request(&crate::tr!("error.config.key_exists")));
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = SysConfigActiveModel {
             config_name: Set(dto.config_name),
             config_key: Set(dto.config_key),
@@ -353,7 +353,7 @@ impl SysConfigService {
             }
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysConfigActiveModel = existing.into();
         am.config_name = Set(dto.config_name);
         am.config_key = Set(dto.config_key.clone());

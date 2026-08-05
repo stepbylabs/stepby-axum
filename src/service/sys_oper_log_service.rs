@@ -183,7 +183,7 @@ impl SysOperLogService {
     /// 现仅删除 `days` 天前的日志，默认 30 天。
     /// 配合 handler 层 tracing::warn! 记录操作者信息。
     pub async fn clean_oper_logs(&self, days: i64) -> Result<u64, ServiceError> {
-        let cutoff = chrono::Local::now().naive_local()
+        let cutoff = crate::common::datetime::now_naive()
             - chrono::Duration::days(days);
         let result = self.oper_log_repo.delete_older_than(cutoff).await?;
         Ok(result.rows_affected)
@@ -203,7 +203,7 @@ impl SysOperLogService {
     /// 供定时任务 cleanup_expired_logs 调用（P0-R81-019）。
     /// 默认保留 90 天，避免操作日志无限增长导致生产崩溃。
     pub async fn cleanup_old_logs(&self, days: i64) -> Result<u64, ServiceError> {
-        let cutoff = chrono::Local::now().naive_local()
+        let cutoff = crate::common::datetime::now_naive()
             - chrono::Duration::days(days);
         let result = self.oper_log_repo.delete_older_than(cutoff).await?;
         Ok(result.rows_affected)
@@ -350,7 +350,7 @@ impl SysOperLogService {
     /// 修复 P0-R81-011：spawn 写入无重试，进程崩溃或 DB 临时不可用时日志丢失。
     /// 现在包装为重试函数：最多 3 次尝试，间隔 100ms，3 次都失败则 tracing::error!。
     pub async fn record_oper_log(&self, record: OperLogRecord) {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = SysOperLogActiveModel {
             title: Set(Some(record.title)),
             business_type: Set(Some(record.business_type)),

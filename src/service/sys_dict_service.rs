@@ -189,8 +189,8 @@ pub struct DictDataEditDto {
 
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
+    crate::common::datetime::parse_local_date_to_utc_naive(s)
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 // ==================== Service 实现 ====================
@@ -375,7 +375,7 @@ impl SysDictService {
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效
         let dict_type_for_cache = dto.dict_type.clone();
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = SysDictTypeActiveModel {
             dict_name: Set(Some(dto.dict_name)),
             dict_type: Set(Some(dto.dict_type)),
@@ -420,7 +420,7 @@ impl SysDictService {
             }
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysDictTypeActiveModel = existing.into();
         am.dict_name = Set(Some(dto.dict_name));
         am.dict_type = Set(Some(dto.dict_type.clone()));
@@ -721,7 +721,7 @@ impl SysDictService {
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效
         let dict_type_for_cache = dto.dict_type.clone();
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = SysDictDataActiveModel {
             dict_sort: Set(dto.dict_sort),
             dict_label: Set(Some(dto.dict_label)),
@@ -767,7 +767,7 @@ impl SysDictService {
             }
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysDictDataActiveModel = existing.into();
         am.dict_sort = Set(dto.dict_sort);
         am.dict_label = Set(Some(dto.dict_label));

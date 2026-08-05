@@ -305,8 +305,8 @@ pub type PreviewCodeVo = HashMap<String, String>;
 
 /// 解析时间字符串
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&format!("{}: {s}", crate::tr!("error.gen.time_format"))))
+    crate::common::datetime::parse_local_date_to_utc_naive(s)
+        .ok_or_else(|| ServiceError::bad_request(&format!("{}: {s}", crate::tr!("error.gen.time_format"))))
 }
 
 /// 将数据库列类型映射为 Rust 类型
@@ -631,7 +631,7 @@ impl GenTableService {
 
         // 4. 创建 gen_table 记录
         let class_name = table_name_to_class_name(table_name);
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let table_am = GenTableActiveModel {
             table_name: Set(table_name.to_string()),
             table_comment: Set(if table_comment.is_empty() { None } else { Some(table_comment) }),
@@ -747,7 +747,7 @@ impl GenTableService {
         dto: GenTableEditDto,
         operator: &str,
     ) -> Result<GenTableModel, ServiceError> {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = GenTableActiveModel {
             table_name: Set(dto.table_name),
             table_comment: Set(dto.table_comment),
@@ -1046,7 +1046,7 @@ impl GenTableService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.table_not_found")))?;
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: GenTableActiveModel = existing.into();
         am.table_name = Set(dto.table_name);
         am.table_comment = Set(dto.table_comment);
@@ -1179,7 +1179,7 @@ impl GenTableService {
             return Err(ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_no_columns"))));
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut column_ams: Vec<GenTableColumnActiveModel> = Vec::new();
         for (idx, col) in columns.iter().enumerate() {
             let rust_type = column_type_to_rust_type(&col.column_type);
@@ -1601,7 +1601,7 @@ impl {{ table.className }}Service {
     }
 
     pub async fn create(&self, dto: {{ table.className }}AddDto, operator: &str) -> Result<Model, ServiceError> {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am = ActiveModel { ..Default::default() };
 {% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
 {% endif %}{% endfor %}        am.create_by = Set(Some(operator.to_string()));
@@ -1611,7 +1611,7 @@ impl {{ table.className }}Service {
 
     pub async fn update(&self, dto: {{ table.className }}EditDto, operator: &str) -> Result<Model, ServiceError> {
         let existing = self.get_by_id(dto.{{ pk_column.javaField }}).await?;
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: ActiveModel = existing.into();
 {% for col in columns %}{% if col.isEdit == "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
 {% endif %}{% endfor %}        am.update_by = Set(Some(operator.to_string()));

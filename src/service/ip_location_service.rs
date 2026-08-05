@@ -504,7 +504,7 @@ impl IpLocationService {
         if let Some(model) = existing {
             let mut active: sys_config::ActiveModel = model.into();
             active.config_value = Set(Some(value.to_string()));
-            active.update_time = Set(Some(chrono::Local::now().naive_local()));
+            active.update_time = Set(Some(crate::common::datetime::now_naive()));
             active.update(&self.db).await
                 .map_err(|e| anyhow::anyhow!("更新 sys_config 失败: {}", e))?;
         } else {
@@ -514,7 +514,7 @@ impl IpLocationService {
                 config_value: Set(Some(value.to_string())),
                 config_type: Set(Some("Y".to_string())),
                 create_by: Set(Some("admin".to_string())),
-                create_time: Set(Some(chrono::Local::now().naive_local())),
+                create_time: Set(Some(crate::common::datetime::now_naive())),
                 remark: Set(Some("IP 库管理配置".to_string())),
                 ..Default::default()
             };

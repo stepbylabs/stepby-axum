@@ -16,7 +16,7 @@ use std::sync::Arc;
 use axum::extract::{Multipart, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use chrono::{Duration, Local};
+use chrono::Duration;
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -253,7 +253,7 @@ pub async fn user_stats(
     use sys_user::Column as UserCol;
 
     let db = &state.db;
-    let now = Local::now().date_naive();
+    let now = crate::common::datetime::today_utc();
     let week_ago = now - Duration::days(7);
     let month_ago = now - Duration::days(29); // 最近 30 天（含今天）
 

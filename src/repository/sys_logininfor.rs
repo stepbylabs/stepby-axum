@@ -155,7 +155,7 @@ impl SysLogininforRepository {
     /// 故无需按 backend 分支。输出仍补齐为完整 N 天序列（无数据的日期以 0 填充），
     /// 保持前端 dashboard 契约不变。
     pub async fn daily_stats(&self, days: i64) -> Result<Vec<(String, i64, i64)>, DbErr> {
-        use chrono::{Duration, Local};
+        use chrono::Duration;
         use std::collections::HashMap;
 
         let backend = self.base.db().get_database_backend();
@@ -176,7 +176,7 @@ impl SysLogininforRepository {
             map.insert(d, (success, fail));
         }
 
-        let today = Local::now().date_naive();
+        let today = crate::common::datetime::today_utc();
         let start_date = today - Duration::days(days - 1);
         let mut result = Vec::new();
         for i in 0..days {
@@ -222,10 +222,9 @@ impl SysLogininforRepository {
     ///
     /// 用于 dashboard stats 接口的 todayAnomalyIps 字段。
     pub async fn count_today_failed_ips(&self) -> Result<i64, DbErr> {
-        use chrono::Local;
         use sea_orm::sea_query::Expr;
 
-        let today = Local::now().date_naive();
+        let today = crate::common::datetime::today_utc();
         let begin = today.and_time(MIDNIGHT);
         // C6（批次3）：原实现用 `.all()` 拉全量 IP 再 `.len()` 计数（N 次传输）。
         // 改为单条 `COUNT(DISTINCT ipaddr)` 聚合，直接返回不重复 IP 数，避免拉全表。

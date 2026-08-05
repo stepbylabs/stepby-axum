@@ -149,8 +149,8 @@ pub struct NoticeMarkReadAllDto {
 
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
+    crate::common::datetime::parse_local_date_to_utc_naive(s)
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 /// HTML 特殊字符转义（用于邮件正文安全渲染）
@@ -251,7 +251,7 @@ impl SysNoticeService {
         // P3 修复: 枚举值白名单校验，防止脏数据
         validate_notice_enum(&dto.notice_type, dto.status.as_deref())?;
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         // 净化 notice_content：移除危险标签和事件属性（P0-R19-002）
         let safe_content = dto.notice_content.clone().map(|c| sanitize_html(&c));
         let am = SysNoticeActiveModel {
@@ -374,7 +374,7 @@ impl SysNoticeService {
 
         let existing = self.get_notice_by_id(dto.notice_id).await?;
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         // 净化 notice_content：移除危险标签和事件属性（P0-R19-002）
         let safe_content = dto.notice_content.map(|c| sanitize_html(&c));
         let mut am: SysNoticeActiveModel = existing.into();

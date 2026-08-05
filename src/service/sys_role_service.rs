@@ -460,7 +460,7 @@ impl SysRoleService {
         let result = self
             .db()
             .transaction::<_, SysRoleModel, sea_orm::DbErr>(|txn| {
-                let now = chrono::Local::now().naive_local();
+                let now = crate::common::datetime::now_naive();
                 let mut am = SysRoleActiveModel {
                     ..Default::default()
                 };
@@ -546,7 +546,7 @@ impl SysRoleService {
         let result = self
             .db()
             .transaction::<_, SysRoleModel, sea_orm::DbErr>(|txn| {
-                let now = chrono::Local::now().naive_local();
+                let now = crate::common::datetime::now_naive();
                 let mut am: SysRoleActiveModel = existing.into();
                 if let Some(ref name) = dto.role_name {
                     am.role_name = Set(name.clone());
@@ -776,7 +776,7 @@ impl SysRoleService {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysRoleActiveModel = existing.into();
         am.status = Set(status.to_string());
         am.update_by = Set(Some(operator.to_string()));
@@ -867,7 +867,7 @@ impl SysRoleService {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let data_scope = dto.data_scope.clone();
         let dept_ids = dto.dept_ids.clone();
         let role_id = dto.role_id;

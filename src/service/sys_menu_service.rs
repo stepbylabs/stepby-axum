@@ -298,7 +298,7 @@ impl SysMenuService {
             ));
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let operator = operator.to_string();
         let menu_repo = self.menu_repo.clone();
         self.db()
@@ -375,7 +375,7 @@ impl SysMenuService {
             dto.path.clone(),
         );
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am = SysMenuActiveModel {
             ..Default::default()
         };
@@ -471,7 +471,7 @@ impl SysMenuService {
             dto.path.clone().or(existing.path.clone()),
         );
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysMenuActiveModel = existing.into();
         am.parent_id = Set(Some(parent_id));
         if let Some(ref name) = dto.menu_name {

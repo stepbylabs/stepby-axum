@@ -81,7 +81,7 @@ impl SysUserRepository {
         user_id: i64,
         login_ip: &str,
     ) -> Result<UpdateResult, DbErr> {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         SysUser::update_many()
             .col_expr(Column::LoginIp, Expr::value(login_ip))
             .col_expr(Column::LoginDate, Expr::value(now))

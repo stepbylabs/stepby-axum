@@ -256,7 +256,7 @@ impl SysDeptService {
             ));
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let operator = operator.to_string();
         let dept_repo = self.dept_repo.clone();
         self.db()
@@ -351,7 +351,7 @@ impl SysDeptService {
             )
         };
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am = SysDeptActiveModel {
             ..Default::default()
         };
@@ -429,7 +429,7 @@ impl SysDeptService {
         let old_ancestors = existing.ancestors.clone().unwrap_or_else(|| "0".to_string());
         let ancestors_changed = new_ancestors != old_ancestors;
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let dept_id = dto.dept_id;
         let dept_repo = self.dept_repo.clone();
 

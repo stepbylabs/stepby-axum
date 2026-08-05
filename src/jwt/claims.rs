@@ -85,7 +85,7 @@ impl JwtUtils {
     ///
     /// 时间策略说明（P0-R11-001 审查结论）：
     /// JWT 标准要求 exp/iat 使用 UTC 时间戳（RFC 7519），此处使用 Utc::now() 是正确的。
-    /// 数据库时间字段（create_time/update_time）使用 Local::now().naive_local() 用于本地显示。
+    /// 数据库时间字段（create_time/update_time）使用 crate::common::datetime::now_naive() 用于本地显示。
     /// 两者用途不同，不会混用。部署时需确保容器时区正确（TZ=Asia/Shanghai）。
     ///
     /// M-7：返回 `(token, Claims)` 而非仅 `token`，调用方可直接使用 Claims（如 jti），

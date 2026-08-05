@@ -224,7 +224,7 @@ async fn fallback_to_logininfor(
             login_time: r
                 .login_time
                 .map(|dt| {
-                    // sys_logininfor.login_time 由 chrono::Local::now().naive_local() 写入（北京时间），
+                    // sys_logininfor.login_time 由 crate::common::datetime::now_naive() 写入（北京时间），
                     // 必须用 and_local_timezone(Local) 解析，否则 and_utc() 会让时间戳偏移 +8 小时
                     dt.and_local_timezone(chrono::Local)
                         .single()

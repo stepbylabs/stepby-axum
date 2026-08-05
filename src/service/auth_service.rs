@@ -1106,7 +1106,7 @@ impl AuthService {
         status: &str,
         msg: &str,
     ) -> Result<i64, ServiceError> {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am = sys_logininfor::ActiveModel {
             ..Default::default()
         };

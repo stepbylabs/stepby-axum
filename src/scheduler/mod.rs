@@ -235,7 +235,7 @@ impl JobScheduler {
                 const FAIL_THRESHOLD: i64 = crate::common::constants::CREDENTIAL_STUFFING_THRESHOLD;
                 const DEDUP_TTL_SECS: u64 = (crate::common::constants::CREDENTIAL_STUFFING_DEDUP_MINS as u64) * 60; // 30 分钟
 
-                let since = chrono::Local::now().naive_local()
+                let since = crate::common::datetime::now_naive()
                     - chrono::Duration::minutes(WINDOW_MINUTES);
 
                 let anomaly_ips = match logininfor_service
@@ -984,7 +984,7 @@ async fn execute_with_logging(
         } else {
             Set(Some(exception_info))
         },
-        create_time: Set(Some(chrono::Local::now().naive_local())),
+        create_time: Set(Some(crate::common::datetime::now_naive())),
         ..Default::default()
     };
     if let Err(e) = log_repo.insert(log_am).await {
