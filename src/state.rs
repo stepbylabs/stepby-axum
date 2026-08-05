@@ -67,6 +67,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// 薄封装：向所有 WebSocket 客户端广播消息
+    ///
+    /// C9：原本 service / handler 层需直接调用 `crate::handler::ws_handler::broadcast(state, ...)`，
+    /// 反向依赖 handler 层。这里在 AppState 上提供同名方法，业务层改为 `state.broadcast(...)`，
+    /// 仅 1 处新增 + 调用点收敛，避免 service 层对 handler 层的硬依赖。
+    pub fn broadcast(&self, msg_type: &str, data: serde_json::Value) {
+        crate::handler::ws_handler::broadcast(self, msg_type, data);
+    }
+
     /// 构建 AppState 时初始化全部 Service
     ///
     /// 保持同步函数签名，调度器在 AppInitializer::run 中提前异步创建后传入

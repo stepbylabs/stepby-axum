@@ -557,6 +557,16 @@ impl Settings {
                 self.jwt.secret.len()
             );
         }
+        // B8：CONFIG_ENC_KEY 用于派生 AES-256-GCM 密钥（crypto.rs 以 SHA256(master_key) 作 KDF）。
+        // 若显式配置但熵不足（<32 字符），派生出的密钥可被离线暴力枚举，故强制长度下限。
+        // 空值（未配置）保持宽容：系统以明文 fail-open 存储（见 ip_location_service），不在此拦截，
+        // 以免破坏依赖空密钥的开发/测试环境。
+        if !self.config_enc_key.is_empty() && self.config_enc_key.len() < 32 {
+            anyhow::bail!(
+                "CONFIG_ENC_KEY 长度不足 32 字符（当前 {} 字符），低熵密钥无法保证 AES-256-GCM 安全，请使用 ≥32 随机字符",
+                self.config_enc_key.len()
+            );
+        }
         Ok(())
     }
 }
