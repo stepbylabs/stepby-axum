@@ -946,7 +946,17 @@ async fn execute_with_logging(
     // 执行任务（捕获 panic，避免 panic 跨 spawn 边界传播）
     let (status, message, exception_info) = match execute_inner(&job.invoke_target).await {
         Ok(msg) => ("0", msg, String::new()),
-        Err(e) => ("1", format!("Job execution failed: {}", e), e.to_string()),
+        Err(e) => {
+            // B11：业务执行失败需在 tracing 日志层可见。DB 层 sys_job_log 已记录失败，
+            // 但此前缺 tracing::error!，导致日志/告警系统（通常只监控 error 级）无法感知业务失败。
+            tracing::error!(
+                "任务执行业务失败: job_id={}, job_name={}, error={:?}",
+                job.job_id,
+                job.job_name,
+                e
+            );
+            ("1", format!("Job execution failed: {}", e), e.to_string())
+        }
     };
 
     // 主任务完成（成功/失败/超时），取消续期任务

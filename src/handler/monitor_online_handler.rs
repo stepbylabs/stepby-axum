@@ -338,8 +338,7 @@ pub async fn force_logout(
 
     // 广播 forceLogout 事件，通知被强退用户的客户端跳转登录页
     // 失败不阻断主流程（强退已成功，仅 WS 推送失败）
-    crate::handler::ws_handler::broadcast(
-        &state,
+    state.broadcast(
         "forceLogout",
         serde_json::json!({
             "tokenHash": token_hash,
