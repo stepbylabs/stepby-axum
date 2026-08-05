@@ -13,7 +13,9 @@ use axum::response::Response;
 use crate::common::excel::{export_to_excel_with_fields, CellValue, ExcelColumn};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_oper_log::Model as SysOperLogModel;
-use crate::service::sys_oper_log_service::{AuditStatsVo, ComplianceReportVo, OperLogQueryDto};
+use crate::service::sys_oper_log_service::{
+    AuditStatsVo, ComplianceReportVo, OperLogQueryDto, OperLogTypeStatsVo,
+};
 use crate::state::AppState;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
@@ -237,6 +239,27 @@ pub async fn stats(
 ) -> Result<AjaxResult<AuditStatsVo>, AppError> {
     let days = params.days.unwrap_or(30).clamp(1, 365);
     let vo = state.oper_log_service.get_audit_stats(days).await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// GET /monitor/operlog/stats-by-type
+/// 操作日志业务类型分布（仪表盘饼图专用聚合接口，G5）
+///
+/// 替代前端拉取 pageSize=1000 全量明细后在客户端分组的低效做法，
+/// 改为后端 GROUP BY business_type 一次性返回 insert/update/delete/other 四桶计数。
+#[utoipa::path(
+    get,
+    path = "/monitor/operlog/stats-by-type",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<OperLogTypeStatsVo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-operlog"
+)]
+pub async fn stats_by_type(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<OperLogTypeStatsVo>, AppError> {
+    let vo = state.oper_log_service.oper_log_type_stats().await?;
     Ok(AjaxResult::success(vo))
 }
 

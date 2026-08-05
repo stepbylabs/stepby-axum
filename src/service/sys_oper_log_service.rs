@@ -221,6 +221,30 @@ impl SysOperLogService {
             .collect())
     }
 
+    /// 操作日志业务类型分布（仪表盘饼图专用聚合接口，G5）
+    ///
+    /// 直接基于库内全量 GROUP BY business_type 聚合，替代前端拉取 pageSize=1000
+    /// 全量明细后再在客户端分组的低效做法。
+    /// 业务类型编码对齐 ruoyi：1=新增(insert) 2=修改(update) 3=删除(delete) 0/其他=其他(other)。
+    pub async fn oper_log_type_stats(&self) -> Result<OperLogTypeStatsVo, ServiceError> {
+        let rows = self.oper_log_repo.stats_by_business_type().await?;
+        let mut vo = OperLogTypeStatsVo {
+            insert: 0,
+            update: 0,
+            delete: 0,
+            other: 0,
+        };
+        for (bt, cnt) in rows {
+            match bt.unwrap_or(0) {
+                1 => vo.insert += cnt,
+                2 => vo.update += cnt,
+                3 => vo.delete += cnt,
+                _ => vo.other += cnt,
+            }
+        }
+        Ok(vo)
+    }
+
     /// 审计大屏统计：操作人 Top N
     pub async fn stats_top_operators(&self, limit: u64) -> Result<Vec<AuditOperatorStat>, ServiceError> {
         let rows = self.oper_log_repo.stats_top_operators(limit).await?;
@@ -410,6 +434,18 @@ pub struct AuditSummary {
 pub struct AuditBusinessTypeStat {
     pub business_type: i32,
     pub count: i64,
+}
+
+/// 操作日志业务类型分布（仪表盘饼图用，G5）
+///
+/// 直接返回 insert/update/delete/other 四桶计数，避免前端拉取全量明细再分组。
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OperLogTypeStatsVo {
+    pub insert: i64,
+    pub update: i64,
+    pub delete: i64,
+    pub other: i64,
 }
 
 /// 操作人统计项

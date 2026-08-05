@@ -15,6 +15,7 @@ pub fn oper_log_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/monitor/operlog/list", get(sys_oper_log_handler::list))
         .route("/monitor/operlog/stats", get(sys_oper_log_handler::stats))
+        .route("/monitor/operlog/stats-by-type", get(sys_oper_log_handler::stats_by_type))
         .route("/monitor/operlog/compliance-report", get(sys_oper_log_handler::compliance_report))
         .route("/monitor/operlog/{operIds}", delete(sys_oper_log_handler::remove))
         .route("/monitor/operlog/clean", delete(sys_oper_log_handler::clean))
