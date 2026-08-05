@@ -27,6 +27,16 @@ pub struct Settings {
     /// 启用 IP 库管理（License Key 加密存储）时必须配置，否则相关功能降级。
     #[serde(default)]
     pub config_enc_key: String,
+    /// 权限未映射路由的默认处置策略（权限 fail-open 加固，B3）
+    ///
+    /// - false（默认，开发/兼容）：未登记权限映射且不在"仅登录白名单"的路由**放行**
+    ///   （保持 ruoyi 原有行为，零破坏性）。
+    /// - true（生产推荐）：此类路由**拒绝（403）**并审计，实现 fail-closed，
+    ///   防止新增路由漏登记权限导致越权。
+    /// 注意：permission_middleware 仅作用于 protected 路由子树的 route_layer，
+    /// 公开路由（/login /health /ws /swagger-ui / 等）不受影响。
+    #[serde(default)]
+    pub permission_deny_by_default: bool,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -42,6 +52,7 @@ impl fmt::Debug for Settings {
             .field("ip_location", &self.ip_location)
             .field("mail", &self.mail)
             .field("config_enc_key", &"<redacted>")
+            .field("permission_deny_by_default", &self.permission_deny_by_default)
             .finish()
     }
 }
@@ -469,6 +480,13 @@ impl Settings {
         if let Ok(v) = std::env::var("CONFIG_ENC_KEY") {
             self.config_enc_key = v;
         }
+        // 权限 fail-open 加固开关（B3）：未映射路由是否默认拒绝
+        // PERMISSION_DENY_BY_DEFAULT=true 时，受保护路由中未登记权限映射且不在"仅登录白名单"的
+        // 路径将被拒绝（403），实现 fail-closed，防止新增路由漏登记权限导致越权。
+        // 缺省不设置则保持 false（fail-open 放行，兼容 ruoyi 原行为，零破坏性）。
+        if let Ok(v) = std::env::var("PERMISSION_DENY_BY_DEFAULT") {
+            self.permission_deny_by_default = v == "true" || v == "1";
+        }
     }
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
@@ -529,6 +547,7 @@ impl Settings {
             ip_location: IpLocationConfig::default(),
             mail: MailConfig::default(),
             config_enc_key: std::env::var("CONFIG_ENC_KEY").unwrap_or_default(),
+            permission_deny_by_default: false,
         };
 
         settings.apply_env_overrides();
@@ -623,6 +642,7 @@ mod tests {
                 starttls: false,
             },
             config_enc_key: "encryption-key-should-not-leak".to_string(),
+            permission_deny_by_default: false,
         };
 
         let debug_str = format!("{:?}", settings);

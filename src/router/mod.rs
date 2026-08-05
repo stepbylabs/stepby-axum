@@ -114,6 +114,16 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // 安全性：仅返回 SPA HTML，不返回 API 数据；Sec-Fetch-Mode 浏览器自动设置无法伪造。
         .layer(axum::middleware::from_fn(spa_fallback_middleware));
 
+    // B3：权限 fail-closed 模式告警
+    // 开启 permission_deny_by_default 后，受保护路由中未登记权限映射且不在仅登录白名单的
+    // 接口将返回 403。启动时明确告警，提醒运维确认 LOGIN_ONLY 白名单（permission.rs）完整，
+    // 否则合法仅登录接口（下拉树、个人资料、标记已读等）会被误拦截。
+    if state.config.permission_deny_by_default {
+        tracing::warn!(
+            "权限 fail-closed 模式已启用（permission_deny_by_default=true）：未登记权限映射且不在仅登录白名单的受保护路由将返回 403。请确认 middleware/permission.rs 的 is_login_only_path 白名单完整，否则合法仅登录接口会被拦截。"
+        );
+    }
+
     // CORS 配置（从配置文件读取 Origin 白名单）
     let cors = build_cors_layer(&state.config.server);
 

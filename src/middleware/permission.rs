@@ -74,7 +74,44 @@ pub async fn permission_middleware(
 
     let required_perm = match required_perm {
         Some(p) => p,
-        None => return Ok(next.run(req).await),
+        None => {
+            // 未登记权限映射的路由：依据 deny_by_default 策略处置
+            match matched_path.as_deref() {
+                Some(path) if state.config.permission_deny_by_default => {
+                    if is_login_only_path(method.as_str(), path) {
+                        // 合法"仅登录"路由（下拉树、个人资料、标记已读、登录态接口等）放行
+                        tracing::debug!(
+                            user_id = claims.sub,
+                            method = %method,
+                            path,
+                            "仅登录路由放行（deny_by_default 模式）"
+                        );
+                        return Ok(next.run(req).await);
+                    }
+                    // 受保护路由未登记权限映射且不在仅登录白名单：拒绝（403）+ 审计
+                    // 防止新增路由漏登记权限导致越权（fail-closed）。
+                    tracing::warn!(
+                        user_id = claims.sub,
+                        method = %method,
+                        path,
+                        "权限拒绝（deny_by_default）：受保护路由未登记权限映射，不在仅登录白名单"
+                    );
+                    spawn_permission_denied_audit(
+                        &state,
+                        &claims,
+                        &method,
+                        path,
+                        "<unmapped>",
+                        &req,
+                    );
+                    return Err(AppError::new(403, crate::tr!("error.auth.permission_denied")));
+                }
+                _ => {
+                    // 默认 fail-open：放行（保持 ruoyi 原行为，零破坏性）
+                    return Ok(next.run(req).await);
+                }
+            }
+        }
     };
 
     // 4. 解析 user_id，查询用户权限标识列表
@@ -457,9 +494,49 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
     }
 }
 
+/// 仅登录白名单（deny_by_default 模式下用于区分"合法仅登录路由"与"漏登记权限映射"）
+///
+/// 这些路由在 `get_required_perm` 中返回 `None`（仅需登录认证，无细粒度 RBAC 权限），
+/// 属于 ruoyi 既有设计：下拉树、个人中心、标记已读、登录态相关接口等。
+///
+/// 当 `permission_deny_by_default=true`（生产 fail-closed）时，未登记权限映射的受保护路由
+/// 默认拒绝（403），仅本表所列"明确仅登录"路由放行，防止新增路由漏登记权限导致越权。
+///
+/// 维护约定：若某路由确为"仅登录"（无需 RBAC），必须同时在此登记，
+/// 否则开启 `deny_by_default` 后该接口会被误拦截（403）。
+fn is_login_only_path(method: &str, path: &str) -> bool {
+    matches!(
+        (method, path),
+        // ===== 登录态相关（protected_auth_routes，需 auth 无需 RBAC）=====
+        ("POST", "/logout")
+            | ("GET", "/getInfo")
+            | ("GET", "/getRouters")
+            | ("POST", "/unlockscreen")
+        // ===== 通用下载（仅登录）=====
+            | ("GET", "/common/download")
+            | ("GET", "/common/download/resource")
+        // ===== 个人中心（仅本人操作，仅需登录）=====
+            | ("GET", "/system/user/profile")
+            | ("PUT", "/system/user/profile")
+            | ("PUT", "/system/user/profile/updatePwd")
+            | ("POST", "/system/user/profile/avatar")
+            | ("GET", "/system/user/deptTree")
+        // ===== 下拉树 / 选项（仅登录）=====
+            | ("GET", "/system/role/deptTree/{roleId}")
+            | ("GET", "/system/menu/treeselect")
+            | ("GET", "/system/menu/roleMenuTreeselect")
+            | ("GET", "/system/dept/treeselect")
+            | ("GET", "/system/post/optionselect")
+        // ===== 公告标记已读（自助，仅登录）=====
+            | ("POST", "/system/notice/markRead")
+            | ("POST", "/system/notice/markReadAll")
+            | ("POST", "/system/notice/markAllUnreadRead")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::get_required_perm;
+    use super::{get_required_perm, is_login_only_path};
 
     // ===== 用户管理权限映射 =====
     #[test]
@@ -594,5 +671,49 @@ mod tests {
     #[test]
     fn test_audit_stats_perm() {
         assert_eq!(get_required_perm("GET", "/monitor/operlog/stats"), Some("monitor:audit:list"));
+    }
+
+    // ===== deny_by_default 仅登录白名单 =====
+    #[test]
+    fn test_login_only_paths_recognized() {
+        // 登录态相关（protected_auth_routes）
+        assert!(is_login_only_path("POST", "/logout"));
+        assert!(is_login_only_path("GET", "/getInfo"));
+        assert!(is_login_only_path("GET", "/getRouters"));
+        assert!(is_login_only_path("POST", "/unlockscreen"));
+        // 通用下载
+        assert!(is_login_only_path("GET", "/common/download"));
+        assert!(is_login_only_path("GET", "/common/download/resource"));
+        // 个人中心
+        assert!(is_login_only_path("GET", "/system/user/profile"));
+        assert!(is_login_only_path("PUT", "/system/user/profile"));
+        assert!(is_login_only_path("PUT", "/system/user/profile/updatePwd"));
+        assert!(is_login_only_path("POST", "/system/user/profile/avatar"));
+        assert!(is_login_only_path("GET", "/system/user/deptTree"));
+        // 下拉树 / 选项
+        assert!(is_login_only_path("GET", "/system/role/deptTree/{roleId}"));
+        assert!(is_login_only_path("GET", "/system/menu/treeselect"));
+        assert!(is_login_only_path("GET", "/system/menu/roleMenuTreeselect"));
+        assert!(is_login_only_path("GET", "/system/dept/treeselect"));
+        assert!(is_login_only_path("GET", "/system/post/optionselect"));
+        // 公告标记已读
+        assert!(is_login_only_path("POST", "/system/notice/markRead"));
+        assert!(is_login_only_path("POST", "/system/notice/markReadAll"));
+        assert!(is_login_only_path("POST", "/system/notice/markAllUnreadRead"));
+    }
+
+    #[test]
+    fn test_login_only_paths_reject_wrong_method() {
+        // 方法不匹配不应误判为仅登录（如 GET /logout 不存在）
+        assert!(!is_login_only_path("GET", "/logout"));
+        assert!(!is_login_only_path("POST", "/getInfo"));
+    }
+
+    #[test]
+    fn test_login_only_paths_reject_unmapped() {
+        // 未登记权限映射且不在白名单的路由（如新增漏登记路由）应被判定为非仅登录
+        assert!(!is_login_only_path("GET", "/unknown/path"));
+        assert!(!is_login_only_path("POST", "/system/user"));
+        assert!(!is_login_only_path("GET", "/system/user/list"));
     }
 }
