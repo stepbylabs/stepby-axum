@@ -161,7 +161,7 @@ impl SysLogininforService {
     /// 供定时任务 cleanup_expired_logs 调用（P0-R81-019）。
     /// 默认保留 90 天，避免登录日志无限增长导致生产崩溃。
     pub async fn cleanup_old_logs(&self, days: i64) -> Result<u64, ServiceError> {
-        let cutoff = chrono::Local::now().naive_local()
+        let cutoff = crate::common::datetime::now_naive()
             - chrono::Duration::days(days);
         let result = self.logininfor_repo.delete_older_than(cutoff).await?;
         Ok(result.rows_affected)
@@ -222,7 +222,7 @@ impl SysLogininforService {
         ipaddr: Option<&str>,
         user_name: Option<&str>,
     ) -> Result<Vec<SysLogininforModel>, ServiceError> {
-        let since = chrono::Local::now().naive_local()
+        let since = crate::common::datetime::now_naive()
             - chrono::Duration::minutes(30);
         let rows = self
             .logininfor_repo
@@ -247,6 +247,6 @@ pub struct LoginDailyStat {
 
 /// 解析时间字符串（`%Y-%m-%d`），失败返回 `ServiceError::bad_request`
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
+    crate::common::datetime::parse_local_date_to_utc_naive(s)
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }

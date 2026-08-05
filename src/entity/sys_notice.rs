@@ -55,7 +55,7 @@ impl ActiveModelBehavior for ActiveModel {
     where
         C: ConnectionTrait,
     {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         if insert {
             self.create_time = Set(Some(now));
         }

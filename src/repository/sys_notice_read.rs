@@ -50,7 +50,7 @@ impl SysNoticeReadRepository {
         notice_id: i64,
         user_id: i64,
     ) -> Result<(), DbErr> {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let db = self.base.db();
         let backend = db.get_database_backend();
 
@@ -85,7 +85,7 @@ impl SysNoticeReadRepository {
         if notice_ids.is_empty() {
             return Ok(());
         }
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let db = self.base.db();
         let backend = db.get_database_backend();
 

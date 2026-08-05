@@ -165,7 +165,7 @@ impl SysPostService {
             return Err(ServiceError::bad_request(&crate::tr!("error.post.code_exists")));
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = SysPostActiveModel {
             post_code: Set(dto.post_code),
             post_name: Set(dto.post_name),
@@ -207,7 +207,7 @@ impl SysPostService {
             }
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysPostActiveModel = existing.into();
         am.post_code = Set(dto.post_code);
         am.post_name = Set(dto.post_name);

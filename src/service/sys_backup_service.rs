@@ -80,8 +80,8 @@ pub struct BackupCreateVo {
 
 /// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
 fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
+    crate::common::datetime::parse_local_date_to_utc_naive(s)
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 /// 根据数据库 URL 判断数据库类型
@@ -234,7 +234,7 @@ impl SysBackupService {
         let file_path = validate_backup_path(&file_name).await?;
         let file_path_str = file_path.to_string_lossy().to_string();
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         // 预创建一条 pending 日志（status=failed 占位，执行成功后更新为 success）
         let pending_am = SysBackupLogActiveModel {
             file_name: Set(file_name.clone()),
@@ -440,7 +440,7 @@ impl SysBackupService {
             .run_restore_process(kind, &db_url, &file_path)
             .await;
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let (status, error_msg) = match result {
             Ok(()) => ("success".to_string(), None),
             Err(e) => {

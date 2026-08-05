@@ -774,7 +774,7 @@ impl SysUserService {
             return Ok(());
         }
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysUserActiveModel = existing.into();
         if let Some(ref nick) = dto.nick_name {
             am.nick_name = Set(nick.clone());
@@ -866,7 +866,7 @@ impl SysUserService {
         let result = self
             .db()
             .transaction::<_, SysUserModel, sea_orm::DbErr>(|txn| {
-                let now = chrono::Local::now().naive_local();
+                let now = crate::common::datetime::now_naive();
                 let mut user_am = SysUserActiveModel {
                     ..Default::default()
                 };
@@ -984,7 +984,7 @@ impl SysUserService {
         let result = self
             .db()
             .transaction::<_, SysUserModel, sea_orm::DbErr>(|txn| {
-                let now = chrono::Local::now().naive_local();
+                let now = crate::common::datetime::now_naive();
                 let mut am: SysUserActiveModel = existing.into();
                 if let Some(dept_id) = dto.dept_id {
                     am.dept_id = Set(Some(dept_id));
@@ -1338,7 +1338,7 @@ impl SysUserService {
         self.check_vertical_auth_by_user_id(operator_user_id, user_id)
             .await?;
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysUserActiveModel = existing.into();
         am.status = Set(Some(status.to_string()));
         am.update_by = Set(Some(operator.to_string()));

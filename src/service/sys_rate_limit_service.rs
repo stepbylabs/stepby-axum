@@ -264,7 +264,7 @@ impl SysRateLimitService {
         }
 
         let route_pattern_for_cache = dto.route_pattern.clone();
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = SysRateLimitActiveModel {
             route_pattern: Set(dto.route_pattern),
             capacity: Set(dto.capacity),
@@ -308,7 +308,7 @@ impl SysRateLimitService {
         }
 
         let route_pattern_for_cache = dto.route_pattern.clone();
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysRateLimitActiveModel = existing.into();
         am.route_pattern = Set(dto.route_pattern);
         am.capacity = Set(dto.capacity);

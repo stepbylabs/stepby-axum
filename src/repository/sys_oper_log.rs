@@ -171,10 +171,10 @@ impl SysOperLogRepository {
     /// P1 优化: 原实现循环 N 天每天执行 2 次 COUNT（2N 次 RTT），
     /// 改为单次 GROUP BY DATE(oper_time) 聚合查询，再在 Rust 侧补齐无操作日期为零值。
     pub async fn stats_daily(&self, days: i64) -> Result<Vec<(String, i64, i64)>, DbErr> {
-        use chrono::{Duration, Local};
+        use chrono::Duration;
         use std::collections::HashMap;
 
-        let today = Local::now().date_naive();
+        let today = crate::common::datetime::today_utc();
         let start_date = today - Duration::days(days - 1);
         let begin_time = start_date.and_time(MIDNIGHT);
 

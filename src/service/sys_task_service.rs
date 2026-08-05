@@ -94,7 +94,7 @@ impl SysTaskService {
         operator: &str,
         state: &AppState,
     ) -> Result<SysTaskModel, ServiceError> {
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let am = SysTaskActiveModel {
             task_type: Set(dto.task_type),
             task_name: Set(dto.task_name),
@@ -149,7 +149,7 @@ impl SysTaskService {
             existing.progress
         };
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysTaskActiveModel = existing.into();
         am.status = Set("running".to_string());
         am.progress = Set(progress);
@@ -189,7 +189,7 @@ impl SysTaskService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         let final_current = existing.total;
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysTaskActiveModel = existing.into();
         am.status = Set("success".to_string());
         am.progress = Set(100);
@@ -228,7 +228,7 @@ impl SysTaskService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
-        let now = chrono::Local::now().naive_local();
+        let now = crate::common::datetime::now_naive();
         let mut am: SysTaskActiveModel = existing.into();
         am.status = Set("failed".to_string());
         am.result_msg = Set(Some(error_msg));
