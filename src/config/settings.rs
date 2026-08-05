@@ -561,12 +561,25 @@ impl Settings {
     /// 若 jwt.secret 或 database.url 包含占位符（CHANGE_ME），
     /// 启动时直接报错拒绝，防止生产环境使用不安全配置。
     fn validate_secrets(&self) -> anyhow::Result<()> {
-        if self.jwt.secret.contains("CHANGE_ME") {
+        // B10：显式拒绝弱/占位密钥（大小写不敏感 deny-list），覆盖 CHANGE_ME（旧逻辑）、
+        // 测试前缀 yebot_local_test_*、example/password/test_ 等常见弱密钥模式。
+        // 使用 deny-list 而非激进熵评分，避免误杀合法开发密钥（向后兼容）。
+        let weak_patterns: &[&str] = &[
+            "changeme",
+            "change_me",
+            "test_",
+            "yebot_local_test_",
+            "example",
+            "password",
+        ];
+        let secret_lower = self.jwt.secret.to_lowercase();
+        if weak_patterns.iter().any(|p| secret_lower.contains(p)) {
             anyhow::bail!(
-                "jwt.secret 不能使用默认占位符，请通过环境变量 JWT_SECRET 设置真实密钥（至少 32 字符）"
+                "jwt.secret 不能使用弱/占位密钥（命中禁止模式），请通过环境变量 JWT_SECRET 设置真实强密钥（至少 32 字符）"
             );
         }
-        if self.database.url.contains("CHANGE_ME") {
+        let db_lower = self.database.url.to_lowercase();
+        if db_lower.contains("changeme") || db_lower.contains("change_me") {
             anyhow::bail!(
                 "database.url 不能使用默认占位符，请通过环境变量 DATABASE_URL 设置真实数据库连接"
             );
@@ -594,6 +607,46 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 构造一个通过校验的基准 Settings（jwt.secret 为合法强密钥），供测试复用
+    fn make_test_settings() -> Settings {
+        Settings {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+                cors_origins: vec![],
+                trusted_proxies: vec![],
+                docs_enabled: false,
+            },
+            database: DatabaseConfig {
+                url: "postgres://user:pass@host:5432/db".to_string(),
+                max_connections: 10,
+                min_connections: 1,
+                connect_timeout: 8,
+                idle_timeout: 600,
+                max_lifetime_secs: 1800,
+                acquire_timeout_secs: 10,
+            },
+            redis: RedisConfig { url: "redis://localhost:6379".to_string() },
+            jwt: JwtConfig {
+                secret: "placeholder-strong-secret-0123456789abcdef".to_string(),
+                expire_hours: 24,
+                issuer: "yebot".to_string(),
+                audience: "yebot".to_string(),
+            },
+            log: LogConfig {
+                level: "info".to_string(),
+                sql_logging: false,
+                file_path: "logs".to_string(),
+                json_stdout: false,
+            },
+            upload: UploadConfig::default(),
+            ip_location: IpLocationConfig::default(),
+            mail: MailConfig::default(),
+            config_enc_key: String::new(),
+            permission_deny_by_default: false,
+        }
+    }
 
     /// 验证 Settings Debug 输出不泄漏 config_enc_key
     #[test]
@@ -717,5 +770,34 @@ mod tests {
         let debug_str = format!("{:?}", redis_config);
         assert!(!debug_str.contains("mypassword"), "Redis URL password leaked in Debug");
         assert!(debug_str.contains("<redacted>"));
+    }
+
+    /// B10：validate_secrets 应拒绝弱/占位密钥，放行合法强密钥（deny-list 向后兼容）
+    #[test]
+    fn test_validate_secrets_rejects_weak_keys() {
+        // 合法强密钥应通过
+        let mut s = make_test_settings();
+        s.jwt.secret = "a-valid-strong-jwt-secret-key-0123456789abcdef".to_string();
+        assert!(s.validate_secrets().is_ok(), "合法强密钥应被接受");
+
+        // 测试前缀 yebot_local_test_* 应被拒
+        let mut s2 = make_test_settings();
+        s2.jwt.secret = "yebot_local_test_abc1234567890123456789".to_string();
+        assert!(s2.validate_secrets().is_err(), "测试前缀密钥应被拒绝");
+
+        // CHANGE_ME 占位（大小写不敏感）应被拒
+        let mut s3 = make_test_settings();
+        s3.jwt.secret = "CHANGE_ME_please_set_a_real_strong_secret_xx".to_string();
+        assert!(s3.validate_secrets().is_err(), "CHANGE_ME 占位密钥应被拒绝");
+
+        // password 弱模式应被拒
+        let mut s4 = make_test_settings();
+        s4.jwt.secret = "password_12345678901234567890123456789".to_string();
+        assert!(s4.validate_secrets().is_err(), "password 弱模式应被拒绝");
+
+        // example 弱模式应被拒
+        let mut s5 = make_test_settings();
+        s5.jwt.secret = "example_secret_key_012345678901234567890".to_string();
+        assert!(s5.validate_secrets().is_err(), "example 弱模式应被拒绝");
     }
 }

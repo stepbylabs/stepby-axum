@@ -83,20 +83,14 @@ impl From<sea_orm::DbErr> for ServiceError {
                 ServiceError::bad_request(&crate::tr!("error.common.bad_format"))
             }
             _ => {
-                // 检测唯一约束冲突（P0-R17-001）
-                // 不同数据库的错误消息不同：
-                //   PostgreSQL: "duplicate key value violates unique constraint"
-                //   MySQL: "Duplicate entry 'xxx' for key"
-                //   SQLite: "UNIQUE constraint failed"
-                //
-                // TODO(M-3): 升级 SeaORM 后改用结构化错误变体（如 `DbErr::UniqueViolation`），
-                //   避免依赖字符串匹配导致的误判/漏判风险。SeaORM 1.1 暂无结构化变体。
-                let err_str = err.to_string().to_lowercase();
-                if err_str.contains("unique constraint")
-                    || err_str.contains("duplicate entry")
-                    || err_str.contains("duplicate key")
-                {
-                    tracing::warn!("唯一约束冲突: {}", err);
+                // 检测唯一约束冲突（P0-R17-001 / B6）
+                // 优先使用 SeaORM 1.1 结构化的 `sql_err()` API，覆盖
+                // PostgreSQL(23505) / MySQL(1062,1169,1586,1022) / SQLite(1555,2067)，
+                // 直接按数据库错误码分派，比纯字符串匹配稳健，且能拿到约束信息。
+                // （原 TODO(M-3) 已随 SeaORM 1.1 落地——`sql_err()` 内部即按错误码判定，
+                //  无需再依赖易误判/漏判的字符串匹配。）
+                if let Some(sea_orm::SqlErr::UniqueConstraintViolation(msg)) = err.sql_err() {
+                    tracing::warn!("唯一约束冲突: {}", msg);
                     ServiceError::bad_request(&crate::tr!("error.common.duplicate"))
                 } else {
                     tracing::error!("数据库错误: {}", err);
