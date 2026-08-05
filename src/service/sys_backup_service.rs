@@ -352,12 +352,16 @@ impl SysBackupService {
                 c.arg("--host").arg(&host)
                     .arg("--port").arg(&port)
                     .arg("--user").arg(&user)
-                    .arg(format!("--password={}", pass))
                     .arg("--single-transaction")
                     .arg("--routines")
                     .arg("--triggers")
                     .arg(&db)
                     .arg("--result-file").arg(&file_path_str);
+                // B7：将密码经 MYSQL_PWD 环境变量传递，避免明文出现在进程命令行
+                // （`ps` / `/proc` 可见，属中危泄漏）。与下方 restore 分支及 Postgres
+                // 的 PGPASSWORD 同构。MySQL 8.0 客户端会打印一条
+                // "using password in environment variable" 提示，无害。
+                c.env("MYSQL_PWD", pass);
                 c
             }
             DbKind::Sqlite => {
