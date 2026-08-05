@@ -33,6 +33,7 @@ pub struct Settings {
     ///   （保持 ruoyi 原有行为，零破坏性）。
     /// - true（生产推荐）：此类路由**拒绝（403）**并审计，实现 fail-closed，
     ///   防止新增路由漏登记权限导致越权。
+    ///
     /// 注意：permission_middleware 仅作用于 protected 路由子树的 route_layer，
     /// 公开路由（/login /health /ws /swagger-ui / 等）不受影响。
     #[serde(default)]
