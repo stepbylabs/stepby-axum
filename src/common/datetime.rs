@@ -2,7 +2,7 @@
 //!
 //! ## 时区契约（C4/C5 UTC 迁移）
 //! 全项目持久化时间戳统一以 **UTC** 语义写入（`now_naive()`）并存储于无时区 `NaiveDateTime`
-//! 列；序列化到前端时输出 **ISO 8601（`T` 分隔，如 `2026-01-01T00:00:00`）**，前端据此按 UTC 解析
+//! 列；序列化到前端时输出 **ISO 8601（`T` 分隔，如 `2026-01-01T00:00:00`）**，前端/所有 JSON 消费者据此按 UTC 解析
 //! 并展示为用户本地时间。空格分隔串仅用于"显示型本地字符串"（如文件名、会话登录时间、报告元数据），
 //! 前端按本地解释，不参与存储时间戳比较。
 //!
@@ -21,7 +21,7 @@ use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde::{Deserialize, Deserializer, Serializer};
 
 const DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
-/// 序列化（输出到前端）采用 ISO 8601 `T` 分隔，前端按 UTC 解析。
+/// 序列化（输出到前端）采用 RFC3339（带 `Z`），前端按 UTC 解析。
 const DATETIME_ISO: &str = "%Y-%m-%dT%H:%M:%S";
 
 /// 当前 UTC 时刻的 `NaiveDateTime`（语义为 UTC，不含时区信息）。
@@ -57,25 +57,28 @@ pub fn parse_local_date_to_utc_naive(s: &str) -> Option<NaiveDateTime> {
     Some(dt_local.with_timezone(&Utc).naive_local())
 }
 
-/// 序列化 NaiveDateTime 为 ISO 8601 `2026-01-01T00:00:00`（UTC 语义，前端按 UTC 解析）
+/// 序列化 NaiveDateTime 为 RFC3339 `2026-01-01T00:00:00Z`（UTC 语义，补 Z 使所有 JSON 消费者按 UTC 解析）
 pub fn serialize<S>(dt: &NaiveDateTime, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&dt.format(DATETIME_ISO).to_string())
+    serializer.serialize_str(&format!("{}Z", dt.format(DATETIME_ISO)))
 }
 
-/// 反序列化，兼容空格分隔和 T 分隔两种格式
+/// 反序列化，兼容 RFC3339（含 Z/偏移）与空格/T 分隔格式
 pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    // 优先尝试空格分隔格式
+    // 优先 RFC3339（含 Z 或偏移），按 UTC 语义还原
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
+        return Ok(dt.naive_utc());
+    }
+    // 回退到无时区格式（空格 / T 分隔），保持向后兼容
     if let Ok(dt) = NaiveDateTime::parse_from_str(&s, DATETIME_FORMAT) {
         return Ok(dt);
     }
-    // 回退到 ISO 8601 格式（T 分隔）
     NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S").map_err(serde::de::Error::custom)
 }
 
@@ -100,6 +103,10 @@ where
         None => Ok(None),
         Some(ref s) if s.is_empty() => Ok(None),
         Some(s) => {
+            // 与 deserialize 一致：优先 RFC3339，回退空格/T 分隔
+            if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
+                return Ok(Some(dt.naive_utc()));
+            }
             if let Ok(dt) = NaiveDateTime::parse_from_str(&s, DATETIME_FORMAT) {
                 return Ok(Some(dt));
             }

@@ -94,7 +94,9 @@ where
     .map_err(|_| AppError::internal(&crate::tr!("error.excel.build_task_failed")))??;
 
     // 构建响应
-    let content_disposition = format!("attachment; filename={}.xlsx", filename);
+    // P1 修复：文件名经 CRLF/控制字符清洗并按 RFC 5987 编码非 ASCII 文件名，
+    // 防止响应头注入与中文文件名下载乱码（原实现未清洗，且非 ASCII 文件名经 HeaderValue::from_str 静默降级）。
+    let content_disposition = build_content_disposition(&filename);
     let mut response = Response::new(xlsx_data.into());
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
@@ -221,6 +223,59 @@ where
     workbook
         .save_to_buffer()
         .map_err(|_| AppError::internal(&crate::tr!("error.excel.generate_failed")))
+}
+
+/// 清洗文件名，防止响应头注入
+///
+/// 移除 CRLF、NUL 与控制字符（防头注入），移除引号/反斜杠（防破坏 Content-Disposition 引号结构），
+/// 消除首尾空白。清洗后仍为空时调用方应提供 ASCII 兜底名。
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n' | '\0' | '"' | '\\'))
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect();
+    cleaned.trim().to_string()
+}
+
+/// RFC 5987 百分号编码（UTF-8 字节）
+///
+/// 仅保留 attr-char 字符集（ALPHA / DIGIT / !#$&+-.^_|~），其余字节按 UTF-8 逐字节 `%XX` 编码，
+/// 使非 ASCII 文件名可在 Content-Disposition 的 `filename*` 中安全传输。
+fn rfc5987_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.'
+            | b'^' | b'_' | b'`' | b'|' | b'~' => out.push(*b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// 构造 Content-Disposition 响应头（P1 修复，防头注入 + 中文文件名）
+///
+/// - 先清洗文件名（CRLF/控制字符/引号）
+/// - ASCII 文件名：直接 `filename="..."`（带引号，允许空格）
+/// - 含非 ASCII：提供 `filename="export.xlsx"` 兜底 + `filename*=UTF-8''<编码>` 真实名，
+///   浏览器优先使用 `filename*`（RFC 5987）。
+fn build_content_disposition(filename: &str) -> String {
+    let safe = sanitize_filename(filename);
+    if safe.is_empty() {
+        return "attachment; filename=\"export.xlsx\"".to_string();
+    }
+    if safe.is_ascii() {
+        format!("attachment; filename=\"{}\"", safe)
+    } else {
+        format!(
+            "attachment; filename=\"export.xlsx\"; filename*=UTF-8''{}",
+            rfc5987_encode(&safe)
+        )
+    }
 }
 
 #[cfg(test)]

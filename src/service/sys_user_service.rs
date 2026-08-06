@@ -391,6 +391,15 @@ impl SysUserService {
         let op_roles = self.role_repo.find_by_user_id(operator_user_id).await?;
         let op_min_sort = op_roles.iter().map(|r| r.role_sort).min();
 
+        // 垂直越权 safe-fail（P1）：operator 自身无任何角色时，不允许分配/管理任何角色
+        // （target 非空），防止无角色操作者越权提权。仅清空角色（target 为空）时允许。
+        if op_min_sort.is_none() && !target_role_ids.is_empty() {
+            return Err(ServiceError::new(
+                403,
+                crate::tr!("error.user.higher_role_forbidden"),
+            ));
+        }
+
         let target_roles = self.role_repo.find_by_ids(target_role_ids).await?;
         let target_min_sort = target_roles.iter().map(|r| r.role_sort).min();
 
