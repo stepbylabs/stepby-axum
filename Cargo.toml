@@ -124,6 +124,11 @@ aes-gcm = "0.10"
 # 随机数生成（AES-GCM nonce 生成）
 rand = "0.8"
 
+# 密钥派生（P1）：PBKDF2-HMAC-SHA256，用于敏感配置加密的加盐 KDF（替代无盐 SHA256）
+# 使用 pbkdf2 的泛型 pbkdf2::<Hmac<Sha256>> 函数，无需启用 simple 特性
+pbkdf2 = "0.12"
+hmac = "0.12"
+
 # 模板引擎（代码生成模块使用）
 tera = "2"
 

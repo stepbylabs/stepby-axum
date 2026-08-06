@@ -171,7 +171,7 @@ pub async fn list_top(
     operator: Operator,
 ) -> Result<NoticeTopVo, AppError> {
     let rows = state.notice_service.get_notice_top().await?;
-    let user_id: i64 = operator.user_id().parse().unwrap_or(0);
+    let user_id: i64 = parse_operator_id(&operator)?;
     let unread_count = state
         .notice_service
         .count_unread(user_id)
@@ -190,7 +190,7 @@ pub async fn mark_read(
     operator: Operator,
     Query(params): Query<NoticeMarkReadParams>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let user_id: i64 = operator.user_id().parse().unwrap_or(0);
+    let user_id: i64 = parse_operator_id(&operator)?;
     state
         .notice_service
         .mark_read(params.notice_id, user_id)
@@ -205,7 +205,7 @@ pub async fn mark_read_all(
     operator: Operator,
     Query(params): Query<NoticeMarkReadAllParams>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let user_id: i64 = operator.user_id().parse().unwrap_or(0);
+    let user_id: i64 = parse_operator_id(&operator)?;
     state
         .notice_service
         .mark_read_all(&params.ids, user_id)
@@ -222,7 +222,7 @@ pub async fn mark_all_unread_read(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<u64>, AppError> {
-    let user_id: i64 = operator.user_id().parse().unwrap_or(0);
+    let user_id: i64 = parse_operator_id(&operator)?;
     let count = state
         .notice_service
         .mark_all_unread_read(user_id)
@@ -255,4 +255,15 @@ pub async fn list_read_users(
         .get_read_users_page(query)
         .await?;
     Ok(TableDataInfo::new(total, rows))
+}
+
+/// 从 Operator 解析 user_id（fail-closed）
+///
+/// P1 修复：解析失败返回错误而非静默回退 0，
+/// 避免 user_id 解析异常时以 0 身份误标记/查询他人已读记录。
+fn parse_operator_id(operator: &Operator) -> Result<i64, AppError> {
+    operator
+        .user_id()
+        .parse::<i64>()
+        .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))
 }

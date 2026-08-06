@@ -16,11 +16,27 @@ pub fn token_hash(token: &str) -> String {
 
 // ==================== AES-256-GCM 加解密（用于敏感配置加密存储） ====================
 
-/// 加密值前缀，用于在 sys_config.config_value 中标识该值为加密存储
+/// 加密值前缀（v1，无盐 SHA256 派生），用于标识该值为加密存储
+///
+/// v1 为历史格式，仅用于解密既有数据，新加密统一使用 [`ENCRYPTED_PREFIX_V2`]。
 pub const ENCRYPTED_PREFIX: &str = "enc:";
+
+/// 加密值前缀（v2，PBKDF2-HMAC-SHA256 + 随机盐派生）
+///
+/// 格式：`enc2:<base64(salt[16] || nonce[12] || ciphertext)>`
+pub const ENCRYPTED_PREFIX_V2: &str = "enc2:";
 
 /// AES-256-GCM nonce 长度（12 字节，标准推荐值）
 const NONCE_LEN: usize = 12;
+
+/// v2 KDF 盐长度（16 字节）
+const SALT_LEN: usize = 16;
+
+/// v2 PBKDF2 迭代次数（HMAC-SHA256）
+///
+/// 主密钥已强制 ≥32 字符（settings::validate_secrets），高熵前提下 5 万次迭代
+/// 即可对低熵场景提供充足防御，同时保持每次解密延迟在可接受范围（数十毫秒）。
+const PBKDF2_ITERATIONS: u32 = 50_000;
 
 /// 从主密钥（任意长度字符串）派生 32 字节 AES-256 密钥
 ///
@@ -35,88 +51,145 @@ fn derive_aes_key(master_key: &str) -> [u8; 32] {
     key
 }
 
-/// 加密敏感配置值
+/// v2 密钥派生：PBKDF2-HMAC-SHA256（带随机盐 + 工作因子）
 ///
-/// 使用 AES-256-GCM 加密，输出格式：`enc:base64(nonce || ciphertext || tag)`
+/// 替代 v1 的无盐 SHA256（无盐 → 相同主密钥派生结果恒定，且无法抵御低熵密钥离线爆破）。
+/// v2 将随机盐与 nonce 一并写入密文信封，派生结果对每个明文/每次加密都不同。
+///
+/// 使用 `pbkdf2` crate 的泛型 `pbkdf2::<Hmac<Sha256>>` 函数（无需启用 `simple` 特性），
+/// 输出 32 字节即 AES-256 密钥。
+fn derive_aes_key_v2(master_key: &str, salt: &[u8]) -> [u8; 32] {
+    use hmac::Hmac;
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut key = [0u8; 32];
+    pbkdf2::pbkdf2::<HmacSha256>(master_key.as_bytes(), salt, PBKDF2_ITERATIONS, &mut key)
+        .expect("PBKDF2 密钥派生失败");
+    key
+}
+
+/// 加密敏感配置值（v2 信封）
+///
+/// 使用 AES-256-GCM 加密，输出格式：`enc2:<base64(salt[16] || nonce[12] || ciphertext)>`
+///
+/// 其中 `salt` 为随机 16 字节，参与 PBKDF2-HMAC-SHA256 密钥派生；`nonce` 为随机 12 字节。
+/// 每次加密的 salt/nonce 均独立随机，因此即使相同明文 + 相同主密钥，密文也互不相同，
+/// 可抵御针对低熵主密钥的离线字典爆破（v1 无盐，相同密钥派生结果恒定，存在此风险）。
+///
+/// 历史 v1 数据（`enc:` 前缀）仍可被 [`decrypt_config_value`] 解密，但新加密统一使用 v2。
 ///
 /// # 参数
 /// - `plaintext`：明文
 /// - `master_key`：主密钥（任意长度，建议 ≥32 字符）
 ///
 /// # 返回
-/// 加密后的字符串（带 `enc:` 前缀），失败返回 anyhow::Error
+/// 加密后的字符串（带 `enc2:` 前缀），失败返回 anyhow::Error
 pub fn encrypt_config_value(plaintext: &str, master_key: &str) -> anyhow::Result<String> {
-    let key = derive_aes_key(master_key);
-    let cipher = Aes256Gcm::new(&key.into());
-
-    // 生成随机 12 字节 nonce
+    // 生成随机盐与 nonce
+    let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
     use rand::RngCore;
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let mut rng = rand::thread_rng();
+    rng.fill_bytes(&mut salt);
+    rng.fill_bytes(&mut nonce_bytes);
     // P3-7：aes-gcm 0.10 的 Nonce::from_slice 内部调用 generic_array::GenericArray::from_slice，
     // 该 API 在 generic-array 0.14.7+ 被标记为 deprecated。Nonce::from_slice 仍是 aes-gcm 推荐用法，
     // 升级到 aes-gcm 新 major 版本前用 #[allow(deprecated)] 抑制上游警告。
     #[allow(deprecated)]
     let nonce = Nonce::from_slice(&nonce_bytes);
 
+    let key = derive_aes_key_v2(master_key, &salt);
+    let cipher = Aes256Gcm::new(&key.into());
+
     // 加密（AES-GCM 自动附加认证标签 tag）
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_bytes())
         .map_err(|e| anyhow::anyhow!("AES-GCM 加密失败: {}", e))?;
 
-    // 拼接 nonce + ciphertext（含 tag），Base64 编码
-    let mut combined = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    // 拼接 salt + nonce + ciphertext（含 tag），Base64 编码
+    let mut combined = Vec::with_capacity(SALT_LEN + NONCE_LEN + ciphertext.len());
+    combined.extend_from_slice(&salt);
     combined.extend_from_slice(&nonce_bytes);
     combined.extend_from_slice(&ciphertext);
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&combined);
-    Ok(format!("{}{}", ENCRYPTED_PREFIX, b64))
+    Ok(format!("{}{}", ENCRYPTED_PREFIX_V2, b64))
 }
 
 /// 解密敏感配置值
 ///
-/// 输入应为 `encrypt_config_value` 的输出（带 `enc:` 前缀）。
-/// 若输入不包含前缀，则视为明文直接返回（兼容旧数据）。
+/// 输入前缀决定解析方式：
+/// - `enc2:`：v2 信封（`salt[16] || nonce[12] || ciphertext`），使用 PBKDF2 派生的密钥解密
+/// - `enc:`：v1 信封（`nonce[12] || ciphertext`），使用无盐 SHA256 派生的密钥解密（历史数据兼容）
+/// - 无前缀：视为明文直接返回（兼容未加密的旧数据）
 ///
 /// # 参数
-/// - `stored_value`：存储的值（可能带 `enc:` 前缀，也可能为明文）
+/// - `stored_value`：存储的值（可能带 `enc2:` / `enc:` 前缀，也可能为明文）
 /// - `master_key`：主密钥
 ///
 /// # 返回
 /// 解密后的明文，失败返回 anyhow::Error
 pub fn decrypt_config_value(stored_value: &str, master_key: &str) -> anyhow::Result<String> {
-    // 不带前缀视为明文，直接返回（兼容性）
-    if !stored_value.starts_with(ENCRYPTED_PREFIX) {
+    // 不带任何加密前缀视为明文，直接返回（兼容性）
+    if !stored_value.starts_with(ENCRYPTED_PREFIX) && !stored_value.starts_with(ENCRYPTED_PREFIX_V2)
+    {
         return Ok(stored_value.to_string());
     }
 
-    let b64 = &stored_value[ENCRYPTED_PREFIX.len()..];
-    let combined = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| anyhow::anyhow!("Base64 解码失败: {}", e))?;
+    // v2 信封（enc2:）：salt[16] || nonce[12] || ciphertext
+    if let Some(b64) = stored_value.strip_prefix(ENCRYPTED_PREFIX_V2) {
+        let combined = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| anyhow::anyhow!("Base64 解码失败: {}", e))?;
+        if combined.len() < SALT_LEN + NONCE_LEN {
+            anyhow::bail!("加密数据长度不足，无法提取 salt/nonce");
+        }
+        let (salt, rest) = combined.split_at(SALT_LEN);
+        let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+        // P3-7：Nonce::from_slice 上游 deprecation 警告，待 aes-gcm 新版本解决
+        #[allow(deprecated)]
+        let nonce = Nonce::from_slice(nonce_bytes);
 
-    if combined.len() < NONCE_LEN {
-        anyhow::bail!("加密数据长度不足，无法提取 nonce");
+        let key = derive_aes_key_v2(master_key, salt);
+        let cipher = Aes256Gcm::new(&key.into());
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| anyhow::anyhow!("AES-GCM 解密失败（密钥错误或数据损坏）: {}", e))?;
+
+        return String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("解密后非 UTF-8: {}", e));
     }
 
-    let (nonce_bytes, ciphertext) = combined.split_at(NONCE_LEN);
-    // P3-7：同上，Nonce::from_slice 上游 deprecation 警告，待 aes-gcm 新版本解决
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(nonce_bytes);
+    // v1 信封（enc:，历史数据兼容）：nonce[12] || ciphertext
+    if let Some(b64) = stored_value.strip_prefix(ENCRYPTED_PREFIX) {
+        let combined = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| anyhow::anyhow!("Base64 解码失败: {}", e))?;
+        if combined.len() < NONCE_LEN {
+            anyhow::bail!("加密数据长度不足，无法提取 nonce");
+        }
+        let (nonce_bytes, ciphertext) = combined.split_at(NONCE_LEN);
+        // P3-7：同上，Nonce::from_slice 上游 deprecation 警告
+        #[allow(deprecated)]
+        let nonce = Nonce::from_slice(nonce_bytes);
 
-    let key = derive_aes_key(master_key);
-    let cipher = Aes256Gcm::new(&key.into());
+        let key = derive_aes_key(master_key);
+        let cipher = Aes256Gcm::new(&key.into());
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| anyhow::anyhow!("AES-GCM 解密失败（密钥错误或数据损坏）: {}", e))?;
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| anyhow::anyhow!("AES-GCM 解密失败（密钥错误或数据损坏）: {}", e))?;
 
-    String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("解密后非 UTF-8: {}", e))
+        return String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("解密后非 UTF-8: {}", e));
+    }
+
+    // 前缀不匹配（理论上不可达，前面已排除非加密前缀）
+    anyhow::bail!("未知的加密前缀")
 }
 
-/// 判断存储值是否为加密格式（带 `enc:` 前缀）
+/// 判断存储值是否为加密格式（带 `enc:` 或 `enc2:` 前缀）
 pub fn is_encrypted(stored_value: &str) -> bool {
-    stored_value.starts_with(ENCRYPTED_PREFIX)
+    stored_value.starts_with(ENCRYPTED_PREFIX) || stored_value.starts_with(ENCRYPTED_PREFIX_V2)
 }
 
 #[cfg(test)]
@@ -124,14 +197,67 @@ mod crypto_tests {
     use super::*;
 
     #[test]
-    fn test_encrypt_decrypt_roundtrip() {
+    fn test_encrypt_decrypt_roundtrip_v2() {
         let master_key = "test-master-key-for-aes-256-gcm-encryption";
         let plaintext = "my-secret-license-key-ABC123";
         let encrypted = encrypt_config_value(plaintext, master_key).unwrap();
-        assert!(encrypted.starts_with(ENCRYPTED_PREFIX));
+        // 新加密统一使用 v2 信封
+        assert!(encrypted.starts_with(ENCRYPTED_PREFIX_V2));
         assert_ne!(encrypted, plaintext);
         let decrypted = decrypt_config_value(&encrypted, master_key).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    /// 构造一个 v1 信封（enc:），用于验证 decrypt_config_value 的向后兼容路径
+    fn encrypt_v1(plaintext: &str, master_key: &str) -> String {
+        use rand::RngCore;
+        let key = derive_aes_key(master_key);
+        let cipher = Aes256Gcm::new(&key.into());
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        #[allow(deprecated)]
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes()).unwrap();
+        let mut combined = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        combined.extend_from_slice(&nonce_bytes);
+        combined.extend_from_slice(&ciphertext);
+        format!(
+            "{}{}",
+            ENCRYPTED_PREFIX,
+            base64::engine::general_purpose::STANDARD.encode(&combined)
+        )
+    }
+
+    #[test]
+    fn test_v1_legacy_decrypt_compat() {
+        // 历史 v1 数据（enc: 前缀，无盐 SHA256 派生）必须仍可被解密
+        let master_key = "test-master-key-for-aes-256-gcm-encryption";
+        let plaintext = "legacy-secret-value-XYZ";
+        let v1 = encrypt_v1(plaintext, master_key);
+        assert!(v1.starts_with(ENCRYPTED_PREFIX));
+        assert!(!v1.starts_with(ENCRYPTED_PREFIX_V2));
+        let decrypted = decrypt_config_value(&v1, master_key).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_v2_and_v1_distinct_prefixes() {
+        let master_key = "test-master-key-for-aes-256-gcm-encryption";
+        let v1 = encrypt_v1("same-plain", master_key);
+        let v2 = encrypt_config_value("same-plain", master_key).unwrap();
+        assert_ne!(v1, v2);
+        assert!(v1.starts_with(ENCRYPTED_PREFIX));
+        assert!(v2.starts_with(ENCRYPTED_PREFIX_V2));
+        assert_eq!(decrypt_config_value(&v1, master_key).unwrap(), "same-plain");
+        assert_eq!(decrypt_config_value(&v2, master_key).unwrap(), "same-plain");
+    }
+
+    #[test]
+    fn test_is_encrypted_v2() {
+        assert!(is_encrypted("enc:abc123"));
+        assert!(is_encrypted("enc2:abc123"));
+        assert!(!is_encrypted("plain"));
+        assert!(!is_encrypted(""));
     }
 
     #[test]

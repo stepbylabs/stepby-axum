@@ -15,7 +15,7 @@ use std::error::Error as StdError;
 
 use chrono::NaiveDateTime;
 use sea_orm::{DatabaseConnection, ConnectionTrait, Set, TransactionTrait};
-use sea_orm::sea_query::{Alias, ColumnDef, Index, Table};
+use sea_orm::sea_query::{Alias, ColumnDef, Index, Table, TableCreateStatement};
 use futures::future::FutureExt;
 use serde::{Deserialize, Serialize};
 use tera::{Kwargs, State, Tera, TeraResult, Value};
@@ -749,6 +749,78 @@ impl GenTableService {
     /// 5. 通过 ConnectionTrait::execute 执行 DDL
     /// 6. 可选：导入到 gen_table + gen_table_column（复用 import_table 逻辑）
     ///
+    /// 构造结构化建表语句（sea-query 声明式，跨库方言无关）
+    ///
+    /// 抽离自 `create_table_structured` 以便单测覆盖主键约束生成逻辑。
+    /// - 单列主键：在列定义上显式 `PRIMARY KEY`（原 bug：sea-query 不会因 is_primary_key 自动加约束，导致生成表缺失主键）
+    /// - 复合主键：循环后以复合索引统一声明 `PRIMARY KEY`
+    fn build_create_table_sql(
+        dto: &CreateTableDto,
+    ) -> Result<TableCreateStatement, ServiceError> {
+        let mut create_stmt = Table::create()
+            .table(Alias::new(&dto.table_name))
+            .if_not_exists()
+            .to_owned();
+
+        // 预计算主键列（用于区分单列/复合主键的约束声明）
+        let pk_cols: Vec<&str> = dto.columns.iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| c.column_name.as_str())
+            .collect();
+
+        for col in &dto.columns {
+            let mut col_def = ColumnDef::new(Alias::new(&col.column_name));
+            apply_data_type(&mut col_def, &col.data_type, col.length, col.precision);
+
+            // 约束
+            if col.is_primary_key {
+                if pk_cols.len() == 1 {
+                    // 单列主键：在列定义上显式声明 PRIMARY KEY
+                    col_def.primary_key();
+                } else {
+                    // 复合主键：列仍需 NOT NULL，PK 约束在循环后统一以复合索引声明
+                    col_def.not_null();
+                }
+            } else if col.is_not_null {
+                col_def.not_null();
+            }
+            if col.is_auto_increment {
+                col_def.auto_increment();
+            }
+            if col.is_unique && !col.is_primary_key {
+                col_def.unique_key();
+            }
+            if let Some(ref default) = col.default_value
+                && !default.is_empty()
+            {
+                apply_default_value(&mut col_def, &col.data_type, default)?;
+            }
+            if let Some(ref comment) = col.column_comment
+                && !comment.is_empty()
+            {
+                col_def.comment(comment.clone());
+            }
+            create_stmt.col(&mut col_def);
+        }
+
+        if pk_cols.len() > 1 {
+            let pk_name = format!("pk_{}", dto.table_name);
+            let mut pk_index = Index::create().name(&pk_name).to_owned();
+            for col_name in &pk_cols {
+                pk_index.col(Alias::new(*col_name));
+            }
+            create_stmt.primary_key(&mut pk_index);
+        }
+
+        if let Some(ref comment) = dto.table_comment
+            && !comment.is_empty()
+        {
+            create_stmt.comment(comment.clone());
+        }
+
+        Ok(create_stmt)
+    }
+
     /// 安全保证：
     /// - 不接收任何原始 SQL，完全消除 SQL 注入
     /// - 表名/列名通过白名单正则校验，禁止特殊字符
@@ -836,67 +908,11 @@ impl GenTableService {
             tracing::warn!("表 {} 未定义主键", dto.table_name);
         }
 
-        // 5. 构造 sea-query TableCreateStatement
-        let mut create_stmt = Table::create()
-            .table(Alias::new(&dto.table_name))
-            .if_not_exists()
-            .to_owned();
-
-        for col in &dto.columns {
-            let mut col_def = ColumnDef::new(Alias::new(&col.column_name));
-            // 类型映射
-            apply_data_type(&mut col_def, &col.data_type, col.length, col.precision);
-
-            // 约束
-            if col.is_not_null || col.is_primary_key {
-                col_def.not_null();
-            }
-            if col.is_auto_increment {
-                col_def.auto_increment();
-            }
-            if col.is_unique && !col.is_primary_key {
-                col_def.unique_key();
-            }
-            // 默认值
-            if let Some(ref default) = col.default_value
-                && !default.is_empty()
-            {
-                apply_default_value(&mut col_def, &col.data_type, default)?;
-            }
-            // 注释（sea-query 的 comment 方法支持三库）
-            if let Some(ref comment) = col.column_comment
-                && !comment.is_empty()
-            {
-                col_def.comment(comment.clone());
-            }
-            create_stmt.col(&mut col_def);
-        }
-
-        // 主键约束（若有多列主键或需显式声明）
-        let pk_cols: Vec<&str> = dto.columns.iter()
-            .filter(|c| c.is_primary_key)
-            .map(|c| c.column_name.as_str())
-            .collect();
-        if pk_cols.len() > 1 {
-            // 多列主键用复合主键
-            let pk_name = format!("pk_{}", dto.table_name);
-            let mut pk_index = Index::create().name(&pk_name).to_owned();
-            for col_name in &pk_cols {
-                pk_index.col(Alias::new(*col_name));
-            }
-            create_stmt.primary_key(&mut pk_index);
-        }
-
-        // 表注释
-        if let Some(ref comment) = dto.table_comment
-            && !comment.is_empty()
-        {
-            create_stmt.comment(comment.clone());
-        }
-
-        // 6. 根据当前数据库方言生成 SQL 并执行
+        // 5+6. 构造 sea-query 建表语句并按当前数据库方言生成 SQL
+        // 语句构造逻辑抽离至 build_create_table_sql（便于单测覆盖主键约束生成，见 gen_table_sql_tests）
         let db = self.repo.base().db();
         let backend = db.get_database_backend();
+        let create_stmt = Self::build_create_table_sql(&dto)?;
         let sql = backend.build(&create_stmt).to_string();
 
         tracing::info!("结构化建表 SQL: {}", sql);
@@ -1778,3 +1794,77 @@ CREATE TABLE IF NOT EXISTS {{ table.tableName }} (
 
 {% endfor %});
 "#;
+
+#[cfg(test)]
+mod gen_table_sql_tests {
+    use super::*;
+    use sea_orm::DatabaseBackend;
+
+    fn mk_col(name: &str, pk: bool, not_null: bool, auto_inc: bool, unique: bool) -> CreateTableColumnDto {
+        CreateTableColumnDto {
+            column_name: name.to_string(),
+            data_type: ColumnDataType::Bigint,
+            length: None,
+            precision: None,
+            is_primary_key: pk,
+            is_auto_increment: auto_inc,
+            is_not_null: not_null,
+            is_unique: unique,
+            default_value: None,
+            column_comment: None,
+        }
+    }
+
+    fn mk_dto(columns: Vec<CreateTableColumnDto>) -> CreateTableDto {
+        CreateTableDto {
+            table_name: "demo_tbl".to_string(),
+            table_comment: None,
+            columns,
+            import_to_gen: false,
+        }
+    }
+
+    #[test]
+    fn test_single_pk_generates_primary_key() {
+        // 单列主键必须生成 PRIMARY KEY 约束（修复：原实现仅 NOT NULL 导致生成表缺失 PK）
+        let dto = mk_dto(vec![
+            mk_col("id", true, true, true, false),
+            mk_col("name", false, true, false, false),
+        ]);
+        let stmt = GenTableService::build_create_table_sql(&dto).unwrap();
+        let sql = DatabaseBackend::Sqlite.build(&stmt).to_string();
+        assert!(
+            sql.to_uppercase().contains("PRIMARY KEY"),
+            "单列主键应生成 PRIMARY KEY，实际 SQL: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_composite_pk_generates_primary_key() {
+        let dto = mk_dto(vec![
+            mk_col("tenant_id", true, true, false, false),
+            mk_col("id", true, true, false, false),
+            mk_col("val", false, true, false, false),
+        ]);
+        let stmt = GenTableService::build_create_table_sql(&dto).unwrap();
+        let sql = DatabaseBackend::Sqlite.build(&stmt).to_string();
+        assert!(
+            sql.to_uppercase().contains("PRIMARY KEY"),
+            "复合主键应生成 PRIMARY KEY，实际 SQL: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_no_pk_has_no_primary_key() {
+        let dto = mk_dto(vec![mk_col("id", false, true, false, false)]);
+        let stmt = GenTableService::build_create_table_sql(&dto).unwrap();
+        let sql = DatabaseBackend::Sqlite.build(&stmt).to_string();
+        assert!(
+            !sql.to_uppercase().contains("PRIMARY KEY"),
+            "无主键不应生成 PRIMARY KEY，实际 SQL: {}",
+            sql
+        );
+    }
+}

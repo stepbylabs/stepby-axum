@@ -46,7 +46,9 @@ pub const EXPORT_MAX_ROWS: u64 = 50000;
 impl PageDomain {
     /// 计算 offset（0-based）
     pub fn offset(&self) -> u64 {
-        self.page_num.saturating_sub(1) * self.page_size
+        // 使用已封顶的 limit()（page_size.min(MAX_PAGE_SIZE)），并对乘法做 saturating，
+        // 防止超大 page_size/page_num 触发 u64 整数溢出（release 回绕 / debug panic，构成 DoS 面）
+        self.page_num.saturating_sub(1).saturating_mul(self.limit())
     }
 
     /// 获取 limit（即 page_size，已限制上限）
