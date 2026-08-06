@@ -80,11 +80,11 @@ impl SysLogininforService {
         let limit = page.limit();
 
         let begin_time = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end_time = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 
@@ -112,11 +112,11 @@ impl SysLogininforService {
         query: LogininforQueryDto,
     ) -> Result<Vec<SysLogininforModel>, ServiceError> {
         let begin_time = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end_time = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 
@@ -243,10 +243,4 @@ pub struct LoginDailyStat {
     pub success: i64,
     /// 失败登录次数
     pub fail: i64,
-}
-
-/// 解析时间字符串（`%Y-%m-%d`），失败返回 `ServiceError::bad_request`
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    crate::common::datetime::parse_local_date_to_utc_naive(s)
-        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }

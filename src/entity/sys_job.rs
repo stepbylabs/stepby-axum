@@ -45,18 +45,4 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
-#[async_trait::async_trait]
-impl ActiveModelBehavior for ActiveModel {
-    /// 保存前自动维护 create_time / update_time
-    async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
-    where
-        C: ConnectionTrait,
-    {
-        let now = crate::common::datetime::now_naive();
-        if insert {
-            self.create_time = Set(Some(now));
-        }
-        self.update_time = Set(Some(now));
-        Ok(self)
-    }
-}
+crate::impl_timestamped_active_model!();

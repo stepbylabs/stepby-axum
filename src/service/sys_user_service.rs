@@ -7,7 +7,6 @@
 //! - 参数校验使用 garde crate（经 common::i18n::validate 统一入口）
 //! - 数据访问通过 Repository 层委托
 
-use chrono::NaiveDateTime;
 use futures::future::FutureExt;
 use redis::aio::ConnectionManager;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait};
@@ -302,12 +301,6 @@ pub struct UserFormVo {
 
 // ==================== 辅助函数 ====================
 
-/// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
-}
-
 // ==================== Service 实现 ====================
 
 /// 权限缓存 key 前缀（与 sys_menu_service 保持一致）
@@ -459,11 +452,11 @@ impl SysUserService {
         let limit = page.limit();
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 
@@ -542,11 +535,7 @@ impl SysUserService {
             if op_uid != SUPER_ADMIN_USER_ID {
                 // 查询 operator 的角色，取最小 data_scope（最宽松）
                 let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-                let min_scope = op_roles
-                    .iter()
-                    .filter_map(|r| r.data_scope.as_deref())
-                    .filter_map(|s| s.parse::<i32>().ok())
-                    .min();
+                let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
 
                 if let Some(scope) = min_scope {
                     match scope {
@@ -618,11 +607,11 @@ impl SysUserService {
         let limit = crate::common::page::EXPORT_MAX_ROWS;
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 

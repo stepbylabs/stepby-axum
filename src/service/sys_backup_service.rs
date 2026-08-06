@@ -13,7 +13,6 @@
 //! - 恢复操作前校验文件路径穿越，必须位于备份目录内
 //! - 备份目录通过路径规范化（canonicalize）二次校验
 
-use chrono::NaiveDateTime;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -77,12 +76,6 @@ pub struct BackupCreateVo {
 }
 
 // ==================== 辅助函数 ====================
-
-/// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    crate::common::datetime::parse_local_date_to_utc_naive(s)
-        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
-}
 
 /// 根据数据库 URL 判断数据库类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,11 +617,11 @@ impl SysBackupService {
         let limit = page.limit();
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 

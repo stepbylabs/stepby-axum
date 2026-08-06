@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
-use chrono::NaiveDateTime;
 use sea_orm::{DatabaseConnection, ConnectionTrait, Set, TransactionTrait};
 use sea_orm::sea_query::{Alias, ColumnDef, Index, Table, TableCreateStatement};
 use futures::future::FutureExt;
@@ -303,12 +302,6 @@ pub type PreviewCodeVo = HashMap<String, String>;
 
 // ==================== 辅助函数 ====================
 
-/// 解析时间字符串
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    crate::common::datetime::parse_local_date_to_utc_naive(s)
-        .ok_or_else(|| ServiceError::bad_request(&format!("{}: {s}", crate::tr!("error.gen.time_format"))))
-}
-
 /// 将数据库列类型映射为 Rust 类型
 ///
 /// 参考 sea-orm 的类型映射规则
@@ -532,11 +525,11 @@ impl GenTableService {
         let limit = page.limit();
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
 
