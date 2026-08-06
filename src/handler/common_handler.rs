@@ -21,10 +21,10 @@ use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::common::image::{detect_image_ext, normalize_ext};
+
 use crate::common::{AjaxResult, AppError};
 use crate::entity::{sys_oper_log, sys_role, sys_user};
-use crate::handler::monitor_cache_handler::scan_keys;
+use crate::utils::redis::scan_keys;
 use crate::state::AppState;
 
 // ==================== DTO ====================
@@ -165,7 +165,7 @@ pub async fn dashboard_stats(
 
     // 在线用户数：Redis SCAN online:*（与 monitor_online_handler 一致）
     // Redis 故障时降级为 0（不阻塞 dashboard）
-    let online_count = scan_keys(&mut state.redis.clone(), "online:*")
+    let online_count = scan_keys(&mut state.redis.clone(), "online:*", 5000)
         .await
         .map(|keys| keys.len() as i64)
         .unwrap_or(0);
@@ -383,97 +383,44 @@ pub async fn upload(
     let upload_cfg = &state.config.upload;
 
     // 从 multipart 中提取 file 字段（前端约定字段名为 file）
+    // P0-3 OOM 修复：流式限长读取（chunk 边读边限长），不再 field.bytes() 整读内存
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut original_filename: Option<String> = None;
     let mut file_ext: Option<String> = None;
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e)))?
     {
         if field.name() == Some("file") {
-            if let Some(filename) = field.file_name()
-                && let Some(ext) = std::path::Path::new(filename)
-                    .extension()
-                    .and_then(|e| e.to_str())
-            {
-                file_ext = Some(ext.to_lowercase());
-            }
-            original_filename = field.file_name().map(|s| s.to_string());
-            let bytes = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::bad_request(&crate::tr!("error.file.read_failed", e = e)))?;
-            file_bytes = Some(bytes.to_vec());
+            let (bytes, ext, original) =
+                crate::common::upload::read_field_limited(&mut field, upload_cfg.common_max_size)
+                    .await?;
+            file_ext = ext;
+            original_filename = original;
+            file_bytes = Some(bytes);
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_file")))?;
-    if bytes.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.common_handler.file_empty")));
-    }
-
-    // 文件大小限制
-    if bytes.len() > upload_cfg.common_max_size {
-        return Err(AppError::bad_request(&crate::tr!(
-            "error.file.too_large",
-            max = upload_cfg.common_max_size / 1024 / 1024
-        )));
-    }
-
-    // 扩展名校验：必须提供且在白名单内
-    let declared_ext = file_ext
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.file_ext_unknown")))?;
-    let allowed: &[&str] = &upload_cfg
-        .common_allowed_exts
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>();
-    if !allowed.contains(&declared_ext) {
-        return Err(AppError::bad_request(&crate::tr!(
-            "error.file.unsupported_type",
-            ext = declared_ext
-        )));
-    }
-
-    // magic bytes 校验：图片类型必须通过，其他类型跳过 magic bytes 校验
-    // （仅做扩展名白名单 + 大小校验，因为非图片类型的 magic bytes 校验库依赖较重）
-    let image_exts: &[&str] = &["jpg", "jpeg", "png", "gif"];
-    let final_ext = if image_exts.contains(&declared_ext) {
-        let detected = detect_image_ext(&bytes).ok_or_else(|| {
-            AppError::bad_request(&crate::tr!("error.common_handler.image_format_unknown"))
-        })?;
-        // 声明扩展名与 magic bytes 不一致时以 magic bytes 为准（防伪造）
-        if normalize_ext(declared_ext) != normalize_ext(&detected) {
-            tracing::warn!(
-                declared = %declared_ext,
-                detected = %detected,
-                "图片扩展名与实际类型不一致，以 magic bytes 为准"
-            );
-        }
-        detected
-    } else {
-        declared_ext.to_string()
-    };
-
-    // 生成唯一文件名（禁止使用前端原文件名，防路径穿越）
-    let new_filename = crate::common::gen_uuid_filename(&final_ext);
-    let file_path = std::path::Path::new(&upload_cfg.common_dir).join(&new_filename);
-
-    // 写入文件系统（spawn_blocking + create_dir_all + write 已封装在公共函数中）
-    crate::common::write_upload_file(file_path, &upload_cfg.common_dir, &bytes).await?;
-
-    // 可访问 URL 路径（前端通过 VITE_APP_BASE_API + url 访问）
-    let url = format!("{}/{}", upload_cfg.common_url_prefix, new_filename);
+    // P0-3：统一校验 + 保存（扩展名白名单、危险类型拒绝、magic bytes、UUID 文件名、写盘）
+    let saved = crate::common::upload::save_upload_bytes(
+        file_bytes
+            .as_deref()
+            .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_file")))?,
+        file_ext.as_deref(),
+        original_filename.as_deref(),
+        upload_cfg,
+        crate::common::upload::UploadKind::Common,
+    )
+    .await?;
 
     Ok(CommonUploadResult {
         code: 200,
         msg: crate::tr!("error.common_handler.upload_success").to_string(),
-        url: url.clone(),
-        file_name: url,
-        new_file_name: new_filename,
-        original_filename: original_filename.unwrap_or_default(),
+        url: saved.url.clone(),
+        file_name: saved.url,
+        new_file_name: saved.new_filename,
+        original_filename: saved.original_filename.unwrap_or_default(),
     })
 }
 

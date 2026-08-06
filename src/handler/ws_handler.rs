@@ -19,6 +19,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::state::AppState;
@@ -272,7 +273,15 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
     let mut conn_guard = WsConnGuard::new(state.clone(), user_id);
 
     let (mut sender, mut receiver) = socket.split();
+    // 全局广播订阅（公开消息：公告、通知等）
     let mut rx = state.ws_broadcast.subscribe();
+    // 用户定向消息通道（P0-2 越权广播修复）：forceLogout / taskProgress 等
+    // 含用户身份/会话信息的消息经此通道仅投递到目标用户，杜绝跨用户泄漏。
+    let (user_tx, mut user_rx) = mpsc::unbounded_channel::<WsMessage>();
+    // 注册到定向投递注册表（clone 一份进注册表，本地保留原件用于关闭时注销）
+    state.register_ws_user(user_id, user_tx.clone());
+    // RAII：确保任何退出路径（包括 Future 被 drop/panic）都能从注册表注销，避免悬挂发送端
+    let _user_channel_guard = WsUserChannelGuard::new(state.clone(), user_id, user_tx.clone());
 
     // 发送连接成功消息（P3 修复: 改用 tr!() 宏，遵循项目 i18n 规范）
     let welcome = WsMessage::new(
@@ -300,8 +309,15 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
 
     loop {
         tokio::select! {
-            // 接收全局广播消息并转发给客户端
+            // 接收全局广播消息并转发给客户端（公开消息）
             Ok(msg) = rx.recv() => {
+                let text = msg.to_json();
+                if sender.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            // 接收用户定向消息并转发给客户端（P0-2：forceLogout / taskProgress 等）
+            Some(msg) = user_rx.recv() => {
                 let text = msg.to_json();
                 if sender.send(Message::Text(text.into())).await.is_err() {
                     break;
@@ -355,6 +371,28 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
     decr_ws_conn_count(&state, user_id).await;
 
     info!(user_id = user_id, "WebSocket 连接关闭");
+}
+
+/// RAII 守卫：确保 WebSocket 用户定向通道在任何退出路径都能从注册表注销
+///
+/// 与 WsConnGuard 同理：Future 被外部取消（drop）时，await 点之后的代码不会执行，
+/// 若仅靠 handle_ws 末尾手动注销，会留下悬挂的 mpsc 发送端导致定向消息堆积。
+struct WsUserChannelGuard {
+    state: Arc<AppState>,
+    user_id: i64,
+    tx: mpsc::UnboundedSender<WsMessage>,
+}
+
+impl WsUserChannelGuard {
+    fn new(state: Arc<AppState>, user_id: i64, tx: mpsc::UnboundedSender<WsMessage>) -> Self {
+        Self { state, user_id, tx }
+    }
+}
+
+impl Drop for WsUserChannelGuard {
+    fn drop(&mut self) {
+        self.state.unregister_ws_user(self.user_id, &self.tx);
+    }
 }
 
 /// 向所有连接的客户端广播消息（供其他模块调用）

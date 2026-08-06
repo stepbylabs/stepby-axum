@@ -575,10 +575,36 @@ impl JobScheduler {
         Ok(())
     }
 
-    /// 更新任务（先移除再添加）
+    /// 更新任务（P1 修复：先添加新任务成功后再移除旧任务，避免 add 失败时任务静默丢失）
+    ///
+    /// 原实现先 remove_job 再 add_job：若新 cron 表达式非法导致 add 失败，
+    /// 任务已从调度器移除且 running_jobs 已删，任务**静默丢失**（用户感知为"任务莫名不再执行"）。
+    /// 现改为先 add（成功后才动旧任务），失败时旧任务保持原样。
     pub async fn update_job(&self, job: &SysJobModel) -> Result<(), SchedulerError> {
-        self.remove_job(job.job_id).await?;
+        // 记录旧任务 guid（add_job 会用新 guid 覆盖 running_jobs[job_id]，需提前取出）
+        let old_guid = {
+            let running = self.running_jobs.read().await;
+            running.get(&job.job_id).copied()
+        };
+
+        // 先添加新任务：失败则旧任务原样保留（不丢失）
         self.add_job(job).await?;
+
+        // 再移除旧任务（guid 不同才需要 remove；remove 失败仅告警——新任务已注册，功能可用，
+        // 重复注册由调度器幂等/手动触发兜底，风险低于任务丢失）
+        if let Some(old_guid) = old_guid
+            && self.running_jobs.read().await.get(&job.job_id).copied() != Some(old_guid)
+        {
+            if let Err(e) = self.scheduler.remove(&old_guid).await {
+                tracing::warn!(
+                    "更新任务后移除旧调度失败 job_id={}, guid={}: {}（新任务已注册，可接受）",
+                    job.job_id,
+                    old_guid,
+                    e
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -729,6 +755,76 @@ impl Drop for ExecutingFlagGuard {
             let mut map = self.flags.lock().unwrap_or_else(|e| e.into_inner());
             map.remove(&self.job_id);
         }
+    }
+}
+
+/// 主任务生命周期 RAII 守卫（P0-5 分布式锁泄漏修复）
+///
+/// 背景：任务函数 panic 时（execute_inner 未捕获前），`renew_handle.abort()` 与
+/// `release_lock()` 均不会执行 → 续期任务继续每 30s 用 Lua 无限续锁，分布式锁被本实例
+/// 永久持有，该 job 此后永远不会再执行（直到进程重启）。
+///
+/// 本守卫保证无论正常返回、业务失败还是 panic/unwind（Drop），续期任务都会被 abort，
+/// 分布式锁都会被释放（Drop 中 spawn 异步执行 CAS 释放，避免误删其他实例的锁）。
+struct JobLockGuard {
+    /// 续期任务句柄（Drop 中 abort，防止无限续锁）
+    renew_handle: Option<tokio::task::JoinHandle<()>>,
+    redis: ConnectionManager,
+    lock_key: String,
+    lock_value: String,
+    /// 是否已释放（防重复 abort/release）
+    armed: bool,
+}
+
+impl JobLockGuard {
+    fn new(
+        renew_handle: tokio::task::JoinHandle<()>,
+        redis: ConnectionManager,
+        lock_key: String,
+        lock_value: String,
+    ) -> Self {
+        Self {
+            renew_handle: Some(renew_handle),
+            redis,
+            lock_key,
+            lock_value,
+            armed: true,
+        }
+    }
+
+    /// 正常路径收尾：abort 续期任务 + 等待 CAS 释放锁（保持与旧逻辑一致的显式释放）
+    async fn finish(&mut self) {
+        if let Some(h) = self.renew_handle.take() {
+            h.abort();
+        }
+        if self.armed {
+            self.armed = false;
+            let mut conn = self.redis.clone();
+            release_lock(&mut conn, &self.lock_key, &self.lock_value).await;
+        }
+    }
+
+    /// 同步 abort 续期任务（Drop 兜底用；release 因 async 走 spawn）
+    fn abort_and_spawn_release(&mut self) {
+        if let Some(h) = self.renew_handle.take() {
+            h.abort();
+        }
+        if self.armed {
+            self.armed = false;
+            let mut conn = self.redis.clone();
+            let k = self.lock_key.clone();
+            let v = self.lock_value.clone();
+            tokio::spawn(async move {
+                release_lock(&mut conn, &k, &v).await;
+            });
+        }
+    }
+}
+
+impl Drop for JobLockGuard {
+    fn drop(&mut self) {
+        // panic/unwind 路径兜底：abort 续期 + 异步释放锁，杜绝锁永久持有
+        self.abort_and_spawn_release();
     }
 }
 
@@ -943,10 +1039,19 @@ async fn execute_with_logging(
         })
     };
 
+    // P0-5：RAII 守卫接管续期任务句柄与锁释放——任何退出路径（含 panic/Drop）都会
+    // abort 续期任务并释放分布式锁，杜绝"任务 panic → 续期任务无限续锁 → job 永久禁用"。
+    let mut lock_guard = JobLockGuard::new(renew_handle, redis.clone(), lock_key.clone(), lock_value.clone());
+
     // 执行任务（捕获 panic，避免 panic 跨 spawn 边界传播）
-    let (status, message, exception_info) = match execute_inner(&job.invoke_target).await {
-        Ok(msg) => ("0", msg, String::new()),
-        Err(e) => {
+    // P0-5 加固：catch_unwind 包裹，任务函数 panic 转为业务失败而非中断主流程，
+    // 确保后续 finish()（abort 续期 + 释放锁）一定执行。
+    let (status, message, exception_info) = match AssertUnwindSafe(execute_inner(&job.invoke_target))
+        .catch_unwind()
+        .await
+    {
+        Ok(Ok(msg)) => ("0", msg, String::new()),
+        Ok(Err(e)) => {
             // B11：业务执行失败需在 tracing 日志层可见。DB 层 sys_job_log 已记录失败，
             // 但此前缺 tracing::error!，导致日志/告警系统（通常只监控 error 级）无法感知业务失败。
             tracing::error!(
@@ -957,19 +1062,29 @@ async fn execute_with_logging(
             );
             ("1", format!("Job execution failed: {}", e), e.to_string())
         }
+        Err(panic_err) => {
+            // 任务函数 panic：记录并视为失败（P0-5：不让 panic 中断主流程导致锁泄漏）
+            tracing::error!(
+                "任务函数 panic: job_id={}, job_name={}, panic={:?}",
+                job.job_id,
+                job.job_name,
+                panic_err
+            );
+            (
+                "1",
+                format!("Job execution panicked: {:?}", panic_err),
+                format!("{:?}", panic_err),
+            )
+        }
     };
-
-    // 主任务完成（成功/失败/超时），取消续期任务
-    renew_handle.abort();
 
     let elapsed = start.elapsed().as_millis();
 
     // 正常路径显式释放标记
     guard.disarm();
 
-    // 释放分布式锁
-    // P0-6/30 改进：使用 CAS 释放，避免误删其他实例持有的锁
-    release_lock(redis, &lock_key, &lock_value).await;
+    // 正常路径收尾：abort 续期任务 + CAS 释放分布式锁（panic 路径由 lock_guard 的 Drop 兜底）
+    lock_guard.finish().await;
 
     // 写日志（失败不影响主流程）
     let log_repo = SysJobLogRepository::new(db.clone());

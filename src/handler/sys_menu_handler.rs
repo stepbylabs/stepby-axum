@@ -84,9 +84,12 @@ pub async fn treeselect(
 )]
 pub async fn role_menu_treeselect(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(role_id): Path<i64>,
 ) -> Result<RoleMenuTreeResult, AppError> {
-    let role_vo = state.role_service.get_role_by_id(role_id).await?;
+    // P0-6：传入 operator_user_id 校验角色在数据范围内（与 role get_info 一致）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let role_vo = state.role_service.get_role_by_id(role_id, operator_user_id).await?;
     let menus = state.menu_service.get_menu_tree_select().await?;
     Ok(RoleMenuTreeResult {
         code: 200,

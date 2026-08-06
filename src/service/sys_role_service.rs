@@ -306,43 +306,11 @@ impl SysRoleService {
         let offset = page.offset();
         let limit = page.limit();
 
-        // 数据权限过滤参数
+        // 数据权限过滤参数（P0-6 统一入口）
         let mut scope_role_ids: Option<Vec<i64>> = None;
 
         if let Some(op_uid) = operator_user_id {
-            // 超管短路（REGRESS-011：使用常量 SUPER_ADMIN_USER_ID 替代硬编码 1）
-            if op_uid != SUPER_ADMIN_USER_ID {
-                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-                let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
-
-                if let Some(scope) = min_scope {
-                    match scope {
-                        1 => {
-                            // 全部数据：不追加过滤
-                        }
-                        2..=4 => {
-                            // REGRESS-004：角色无 dept_id，data_scope 2/3/4 降级为"仅本人"
-                            // 安全失败：普通管理员只能看到自己绑定的角色，避免越权查看所有角色
-                            let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                            scope_role_ids = Some(ids);
-                        }
-                        5 => {
-                            // 仅本人：仅返回 operator 已绑定的角色
-                            let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                            scope_role_ids = Some(ids);
-                        }
-                        _ => {
-                            // 未知 data_scope：安全失败，仅本人角色
-                            let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                            scope_role_ids = Some(ids);
-                        }
-                    }
-                } else {
-                    // operator 无角色或 data_scope 缺失：安全失败，仅本人角色（可能为空）
-                    let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                    scope_role_ids = Some(ids);
-                }
-            }
+            scope_role_ids = self.resolve_scope_role_ids(op_uid).await?;
         }
 
         let scope_ref = scope_role_ids.as_deref();
@@ -369,34 +337,11 @@ impl SysRoleService {
         query: RoleQueryDto,
         operator_user_id: Option<i64>,
     ) -> Result<Vec<SysRoleModel>, ServiceError> {
-        // P0-2 修复：导出接口需应用与 list 相同的数据权限过滤，防止越权导出
-        let mut scope_role_ids: Option<Vec<i64>> = None;
-
-        if let Some(op_uid) = operator_user_id
-            && op_uid != SUPER_ADMIN_USER_ID
-        {
-            let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-            let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
-
-            if let Some(scope) = min_scope {
-                match scope {
-                    1 => { /* 全部数据：不追加过滤 */ }
-                    2..=5 => {
-                        // 角色无 dept_id，data_scope 2/3/4/5 降级为"仅本人"
-                        let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                        scope_role_ids = Some(ids);
-                    }
-                    _ => {
-                        // 兜底：未知 data_scope，降级为"仅本人"
-                        let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                        scope_role_ids = Some(ids);
-                    }
-                }
-            } else {
-                let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
-                scope_role_ids = Some(ids);
-            }
-        }
+        // P0-2 修复：导出接口需应用与 list 相同的数据权限过滤，防止越权导出（P0-6 统一入口）
+        let scope_role_ids: Option<Vec<i64>> = match operator_user_id {
+            Some(uid) => self.resolve_scope_role_ids(uid).await?,
+            None => None,
+        };
 
         // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS + 数据权限过滤）
         let (rows, _) = self
@@ -415,12 +360,53 @@ impl SysRoleService {
         Ok(rows)
     }
 
+    /// 计算操作人的数据范围角色 ID 集合（P0-6 统一入口）
+    ///
+    /// 供 get_role_page / export_roles / get_role_by_id 等所有角色查询端点复用，
+    /// 杜绝"list 有过滤、旁路端点裸奔"的 data_scope 不一致越权。
+    ///
+    /// - 超管（user_id==1）或 data_scope=1（全部）：返回 `None`（不过滤）
+    /// - 其他（角色无 dept_id，data_scope 2/3/4/5 降级为"仅本人"）：返回 `Some(ids)`，
+    ///   即 operator 已绑定的角色 ID 集合（可能为空）
+    async fn resolve_scope_role_ids(
+        &self,
+        operator_user_id: i64,
+    ) -> Result<Option<Vec<i64>>, ServiceError> {
+        // 超管短路
+        if operator_user_id == SUPER_ADMIN_USER_ID {
+            return Ok(None);
+        }
+        let op_roles = self.role_repo.find_by_user_id(operator_user_id).await?;
+        let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
+        let ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+        match min_scope {
+            Some(1) => Ok(None), // 全部数据：不追加过滤
+            _ => Ok(Some(ids)),  // 2/3/4/5/未知/缺失：安全失败，仅本人角色
+        }
+    }
+
     /// 查询角色详情（含 menu_ids）
-    pub async fn get_role_by_id(&self, role_id: i64) -> Result<RoleVo, ServiceError> {
+    ///
+    /// P0-6：`operator_user_id` 传入时校验角色在数据范围内（不在则 404，避免暴露存在性）。
+    pub async fn get_role_by_id(
+        &self,
+        role_id: i64,
+        operator_user_id: Option<i64>,
+    ) -> Result<RoleVo, ServiceError> {
         let role = self.role_repo.base().find_by_id(role_id).await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if role.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+        }
+
+        // P0-6 数据范围校验
+        if let Some(uid) = operator_user_id {
+            let scope_ids = self.resolve_scope_role_ids(uid).await?;
+            if let Some(ref ids) = scope_ids
+                && !ids.contains(&role_id)
+            {
+                return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+            }
         }
 
         let menu_ids = self.get_menu_ids_by_role_id(role_id).await?;
@@ -918,10 +904,14 @@ impl SysRoleService {
     pub async fn get_allocated_users(
         &self,
         query: AuthUserQueryDto,
+        operator_user_id: Option<i64>,
     ) -> Result<(Vec<SysUserModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+
+        // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
+        let (scope_dept_ids, scope_user_id) = self.resolve_user_data_scope(operator_user_id).await?;
 
         // 先查角色关联的 user_id 列表（通过 Repository）
         let user_ids: Vec<i64> = self
@@ -936,7 +926,7 @@ impl SysRoleService {
             return Ok((vec![], 0));
         }
 
-        // 通过 Repository 分页查询 user_id 集合内的用户
+        // 通过 Repository 分页查询 user_id 集合内的用户（P0-6：含数据范围过滤）
         let (rows, total) = self
             .user_repo
             .find_page_in_ids(
@@ -945,6 +935,8 @@ impl SysRoleService {
                 user_ids,
                 query.user_name.as_deref(),
                 query.phonenumber.as_deref(),
+                scope_dept_ids.as_deref(),
+                scope_user_id,
             )
             .await?;
         Ok((rows, total))
@@ -957,10 +949,14 @@ impl SysRoleService {
     pub async fn get_unallocated_users(
         &self,
         query: AuthUserQueryDto,
+        operator_user_id: Option<i64>,
     ) -> Result<(Vec<SysUserModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+
+        // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
+        let (scope_dept_ids, scope_user_id) = self.resolve_user_data_scope(operator_user_id).await?;
 
         // 先查角色已关联的 user_id 列表（通过 Repository）
         let allocated_ids: Vec<i64> = self
@@ -971,7 +967,7 @@ impl SysRoleService {
             .map(|ur| ur.user_id)
             .collect();
 
-        // 通过 Repository 分页查询不在 user_id 集合内的用户
+        // 通过 Repository 分页查询不在 user_id 集合内的用户（P0-6：含数据范围过滤）
         let (rows, total) = self
             .user_repo
             .find_page_not_in_ids(
@@ -980,9 +976,74 @@ impl SysRoleService {
                 allocated_ids,
                 query.user_name.as_deref(),
                 query.phonenumber.as_deref(),
+                scope_dept_ids.as_deref(),
+                scope_user_id,
             )
             .await?;
         Ok((rows, total))
+    }
+
+    /// 计算操作人的用户数据范围（P0-6，与 sys_user_service::resolve_data_scope 语义一致）
+    ///
+    /// 返回 `(scope_dept_ids, scope_user_id)`：None = 不过滤；仅本人 = scope_user_id。
+    /// - 超管（user_id==1）短路，返回 (None, None)（全部数据）
+    /// - data_scope=1 全部；2 自定义部门；3 本部门；4 本部门及以下；5 仅本人
+    /// - 无角色 / data_scope 缺失 / 未知值：安全失败，限定为本人
+    async fn resolve_user_data_scope(
+        &self,
+        op_uid: Option<i64>,
+    ) -> Result<(Option<Vec<i64>>, Option<i64>), ServiceError> {
+        let mut scope_dept_ids: Option<Vec<i64>> = None;
+        let mut scope_user_id: Option<i64> = None;
+
+        if let Some(op_uid) = op_uid {
+            // 超管短路
+            if op_uid != SUPER_ADMIN_USER_ID {
+                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
+                let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
+
+                if let Some(scope) = min_scope {
+                    match scope {
+                        1 => {}
+                        2 => {
+                            let role_ids: Vec<i64> = op_roles
+                                .iter()
+                                .filter(|r| r.data_scope.as_deref() == Some("2"))
+                                .map(|r| r.role_id)
+                                .collect();
+                            let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
+                            scope_dept_ids = Some(rids.into_iter().map(|rd| rd.dept_id).collect());
+                        }
+                        3 => {
+                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+                            scope_dept_ids = Some(
+                                op_user
+                                    .and_then(|u| u.dept_id)
+                                    .map(|d| vec![d])
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        4 => {
+                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+                            let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
+                            scope_dept_ids = Some(self.dept_repo.find_descendant_ids(op_dept_id).await?);
+                        }
+                        5 => {
+                            scope_user_id = Some(op_uid);
+                        }
+                        _ => {
+                            // 未知 data_scope 值，安全失败：限定为本人
+                            scope_user_id = Some(op_uid);
+                        }
+                    }
+                } else {
+                    // operator 无角色或 data_scope 缺失：安全失败，仅本人
+                    scope_user_id = Some(op_uid);
+                }
+            }
+        }
+
+        Ok((scope_dept_ids, scope_user_id))
     }
 
     /// 取消单个用户授权（删除 sys_user_role 中 user_id+role_id 记录）

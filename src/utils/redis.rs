@@ -29,6 +29,7 @@ use crate::common::error::ServiceError;
 pub async fn scan_keys(
     redis: &mut redis::aio::ConnectionManager,
     pattern: &str,
+    max_results: usize,
 ) -> Result<Vec<String>, ServiceError> {
     let mut keys = Vec::new();
     let mut cursor: u64 = 0;
@@ -46,6 +47,16 @@ pub async fn scan_keys(
                 ServiceError::internal(&crate::tr!("error.common.cache_failed"))
             })?;
         keys.extend(batch);
+        // P2：结果上限保护（防 `*` 等 pattern 匹配海量 key 导致内存 OOM）
+        if keys.len() >= max_results {
+            tracing::warn!(
+                "scan_keys 达到上限 {}（pattern={}），提前停止扫描",
+                max_results,
+                pattern
+            );
+            keys.truncate(max_results);
+            break;
+        }
         if next_cursor == 0 {
             break;
         }

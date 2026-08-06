@@ -8,6 +8,7 @@
 //! - 通过 WS 广播 taskProgress 事件，前端浮层组件实时显示
 
 use sea_orm::{DatabaseConnection, Set};
+use garde::Validate;
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
@@ -50,16 +51,26 @@ impl From<&TaskQueryDto> for PageDomain {
 }
 
 /// 任务创建 DTO
-#[derive(Debug, Deserialize, ToSchema)]
+///
+/// P1：补齐 garde 校验（此前 task_type/task_name 无长度上限、total 无范围），
+/// 任意字符串可直接入库。
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCreateDto {
     /// 任务类型（export/import/backup/other）
+    #[garde(length(min = 1, max = 20))]
     pub task_type: String,
     /// 任务名称
+    #[garde(length(min = 1, max = 200))]
     pub task_name: String,
     /// 任务总量（默认 0）
     #[serde(default)]
+    #[garde(range(min = 0, max = 1_000_000_000))]
     pub total: i64,
+    /// 操作人 user_id（P0-2：taskProgress 定向推送目标；None 表示系统任务，不推送 WS）
+    #[serde(default)]
+    #[garde(skip)]
+    pub operator_id: Option<i64>,
 }
 
 // ==================== 辅助函数 ====================
@@ -87,6 +98,8 @@ impl SysTaskService {
         operator: &str,
         state: &AppState,
     ) -> Result<SysTaskModel, ServiceError> {
+        // P1：参数校验（task_type/task_name 长度、total 范围）
+        crate::common::i18n::validate(&dto)?;
         let now = crate::common::datetime::now_naive();
         let am = SysTaskActiveModel {
             task_type: Set(dto.task_type),
@@ -97,25 +110,16 @@ impl SysTaskService {
             current: Set(0),
             result_msg: Set(None),
             operator: Set(Some(operator.to_string())),
+            operator_id: Set(dto.operator_id),
             create_time: Set(Some(now)),
             update_time: Set(Some(now)),
             ..Default::default()
         };
         let model = self.task_repo.insert(am).await?;
 
-        // WS 广播任务创建
-        state.broadcast(
-            "taskProgress",
-            serde_json::json!({
-                "taskId": model.task_id,
-                "taskType": model.task_type,
-                "taskName": model.task_name,
-                "status": model.status,
-                "progress": model.progress,
-                "total": model.total,
-                "current": model.current
-            }),
-        );
+        // P0-2 越权广播修复：taskProgress 定向推送给任务创建者（operator_id），
+        // 不再全局广播避免跨用户信息泄漏；operator_id 为 None（系统任务）时不推送 WS。
+        Self::push_task_progress(state, &model);
         Ok(model)
     }
 
@@ -152,19 +156,8 @@ impl SysTaskService {
 
         let model = self.task_repo.update(am).await?;
 
-        // WS 广播进度更新
-        state.broadcast(
-            "taskProgress",
-            serde_json::json!({
-                "taskId": model.task_id,
-                "taskType": model.task_type,
-                "taskName": model.task_name,
-                "status": model.status,
-                "progress": model.progress,
-                "total": model.total,
-                "current": model.current
-            }),
-        );
+        // P0-2：定向推送给任务创建者
+        Self::push_task_progress(state, &model);
         Ok(model)
     }
 
@@ -192,19 +185,8 @@ impl SysTaskService {
 
         let model = self.task_repo.update(am).await?;
 
-        state.broadcast(
-            "taskProgress",
-            serde_json::json!({
-                "taskId": model.task_id,
-                "taskType": model.task_type,
-                "taskName": model.task_name,
-                "status": model.status,
-                "progress": model.progress,
-                "total": model.total,
-                "current": model.current,
-                "resultMsg": model.result_msg
-            }),
-        );
+        // P0-2：定向推送给任务创建者（含结果消息）
+        Self::push_task_progress(state, &model);
         Ok(model)
     }
 
@@ -229,20 +211,32 @@ impl SysTaskService {
 
         let model = self.task_repo.update(am).await?;
 
-        state.broadcast(
-            "taskProgress",
-            serde_json::json!({
-                "taskId": model.task_id,
-                "taskType": model.task_type,
-                "taskName": model.task_name,
-                "status": model.status,
-                "progress": model.progress,
-                "total": model.total,
-                "current": model.current,
-                "resultMsg": model.result_msg
-            }),
-        );
+        // P0-2：定向推送给任务创建者（含失败原因）
+        Self::push_task_progress(state, &model);
         Ok(model)
+    }
+
+    /// 定向推送 taskProgress 到任务创建者（P0-2 越权广播修复）
+    ///
+    /// operator_id 为 None（系统任务/历史数据无归属用户）时不推送 WS，
+    /// 任务进度仍可通过任务中心分页查询获取，不产生跨用户信息泄漏。
+    fn push_task_progress(state: &AppState, model: &SysTaskModel) {
+        if let Some(operator_id) = model.operator_id {
+            state.broadcast_to_user(
+                operator_id,
+                "taskProgress",
+                serde_json::json!({
+                    "taskId": model.task_id,
+                    "taskType": model.task_type,
+                    "taskName": model.task_name,
+                    "status": model.status,
+                    "progress": model.progress,
+                    "total": model.total,
+                    "current": model.current,
+                    "resultMsg": model.result_msg
+                }),
+            );
+        }
     }
 
     /// 分页查询任务

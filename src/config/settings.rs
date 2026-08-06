@@ -452,7 +452,13 @@ impl Settings {
         if let Ok(v) = std::env::var("JWT_EXPIRE_HOURS")
             && let Ok(hours) = v.parse::<i64>()
         {
-            self.jwt.expire_hours = hours;
+            if hours > 0 {
+                self.jwt.expire_hours = hours;
+            } else {
+                // P2：拒绝 0/负值（会导致 token 立即过期或签发异常），回退默认 24h
+                tracing::warn!("JWT_EXPIRE_HOURS={hours} 无效（必须 > 0），回退默认 24 小时");
+                self.jwt.expire_hours = 24;
+            }
         }
         if let Ok(v) = std::env::var("SERVER_HOST") {
             self.server.host = v;
@@ -548,7 +554,7 @@ impl Settings {
             ip_location: IpLocationConfig::default(),
             mail: MailConfig::default(),
             config_enc_key: std::env::var("CONFIG_ENC_KEY").unwrap_or_default(),
-            permission_deny_by_default: false,
+            permission_deny_by_default: true,
         };
 
         settings.apply_env_overrides();
@@ -644,7 +650,7 @@ mod tests {
             ip_location: IpLocationConfig::default(),
             mail: MailConfig::default(),
             config_enc_key: String::new(),
-            permission_deny_by_default: false,
+            permission_deny_by_default: true,
         }
     }
 
@@ -696,7 +702,7 @@ mod tests {
                 starttls: false,
             },
             config_enc_key: "encryption-key-should-not-leak".to_string(),
-            permission_deny_by_default: false,
+            permission_deny_by_default: true,
         };
 
         let debug_str = format!("{:?}", settings);

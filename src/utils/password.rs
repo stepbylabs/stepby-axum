@@ -210,11 +210,20 @@ fn verify_legacy_md5(password: &str, hashed: &str) -> bool {
 ///
 /// 无论内容是否相同，比较耗时仅取决于较短字符串的长度，
 /// 不因前缀匹配程度提前返回，避免时序侧信道攻击。
+///
+/// P2 修复：原实现 `(a.len() ^ b.len()) as u8` 将长度差截断到 8 位，
+/// 当长度差为 256 的倍数时（如 32 字节 vs 288 字节）diff 初始为 0，
+/// 理论上长度不同但前缀相同的两串会被判等。现改为 usize 累积差异，
+/// 并遍历两侧全部字节（长度差计入 diff），彻底消除该缺陷。
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff: u8 = (a.len() ^ b.len()) as u8;
-    let min_len = a.len().min(b.len());
-    for i in 0..min_len {
-        diff |= a[i] ^ b[i];
+    let mut diff: usize = a.len() ^ b.len();
+    // 遍历较长一侧的全部字节：多出部分与 0 异或，确保耗时与较长长度一致，
+    // 且长度差完整计入 diff（usize 不会截断）
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= (x ^ y) as usize;
     }
     diff == 0
 }

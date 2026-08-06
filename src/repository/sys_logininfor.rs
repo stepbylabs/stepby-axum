@@ -159,13 +159,17 @@ impl SysLogininforRepository {
         use std::collections::HashMap;
 
         let backend = self.base.db().get_database_backend();
+        // P1 修复：增加时间下界过滤，避免登录日志无界增长导致全表 GROUP BY 线性劣化
+        // （与 sys_oper_log::stats_daily 的带时间过滤实现保持一致）
+        let today = crate::common::datetime::today_utc();
+        let start_date = today - Duration::days(days - 1);
         let sql = "SELECT DATE(login_time) AS d, \
                    COUNT(CASE WHEN status = '0' THEN 1 END) AS success, \
                    COUNT(CASE WHEN status = '1' THEN 1 END) AS fail \
-                   FROM sys_logininfor \
+                   FROM sys_logininfor WHERE login_time >= ? \
                    GROUP BY DATE(login_time) \
                    ORDER BY d ASC";
-        let stmt = Statement::from_sql_and_values(backend, sql, vec![]);
+        let stmt = Statement::from_sql_and_values(backend, sql, [start_date.into()]);
         let rows = self.base.db().query_all(stmt).await?;
 
         let mut map: HashMap<String, (i64, i64)> = HashMap::new();
@@ -176,8 +180,6 @@ impl SysLogininforRepository {
             map.insert(d, (success, fail));
         }
 
-        let today = crate::common::datetime::today_utc();
-        let start_date = today - Duration::days(days - 1);
         let mut result = Vec::new();
         for i in 0..days {
             let date = start_date + Duration::days(i);

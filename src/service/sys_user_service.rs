@@ -798,7 +798,15 @@ impl SysUserService {
     ///
     /// 返回用户信息 + 用户已绑定角色/岗位 ID + 全部角色/岗位列表（下拉选择用）。
     /// 用于新增/编辑用户表单回显。
-    pub async fn get_user_form_data(&self, user_id: Option<i64>) -> Result<UserFormVo, ServiceError> {
+    /// 用户表单数据（新增/编辑共用）
+    ///
+    /// P0-6：`operator_user_id` 传入且目标用户存在时，校验目标用户是否在操作人数据范围内，
+    /// 不在则返回 404（防止低权限管理员越权读取他人 PII；此前与 list 的数据范围不一致）。
+    pub async fn get_user_form_data(
+        &self,
+        user_id: Option<i64>,
+        operator_user_id: Option<i64>,
+    ) -> Result<UserFormVo, ServiceError> {
         // 查询全部可用角色（通过 Repository）
         let all_roles: Vec<SysRoleModel> = self.role_repo.find_active_all().await?;
         // 查询全部可用岗位
@@ -812,6 +820,22 @@ impl SysUserService {
                     .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
                 if user_model.del_flag.as_deref() == Some("2") {
                     return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+                }
+                // P0-6 数据范围校验（超管短路由 resolve_data_scope 处理）
+                if let Some(op_uid) = operator_user_id {
+                    let (scope_dept_ids, scope_user_id) = self.resolve_data_scope(Some(op_uid)).await?;
+                    let visible = match (scope_dept_ids, scope_user_id) {
+                        (None, None) => true,                                  // 全部数据
+                        (Some(_), Some(scope_uid)) => uid == scope_uid,        // 仅本人
+                        (Some(dept_ids), None) => match user_model.dept_id {
+                            Some(did) => dept_ids.contains(&did),
+                            None => false,
+                        },
+                        (None, Some(scope_uid)) => uid == scope_uid,           // 仅本人
+                    };
+                    if !visible {
+                        return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+                    }
                 }
                 let rids = self.get_role_ids_by_user_id(uid).await?;
                 let pids = self.get_post_ids_by_user_id(uid).await?;

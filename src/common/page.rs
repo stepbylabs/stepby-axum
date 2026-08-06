@@ -48,7 +48,10 @@ impl PageDomain {
     pub fn offset(&self) -> u64 {
         // 使用已封顶的 limit()（page_size.min(MAX_PAGE_SIZE)），并对乘法做 saturating，
         // 防止超大 page_size/page_num 触发 u64 整数溢出（release 回绕 / debug panic，构成 DoS 面）
-        self.page_num.saturating_sub(1).saturating_mul(self.limit())
+        // P2：page_num=0 防御性归一到第 1 页（原 saturating_sub 得 0，与第 1 页 offset 相同，
+        // 前端误传 0 会重复返回第一页，语义不明确）
+        let page_num = if self.page_num == 0 { 1 } else { self.page_num };
+        page_num.saturating_sub(1).saturating_mul(self.limit())
     }
 
     /// 获取 limit（即 page_size，已限制上限）

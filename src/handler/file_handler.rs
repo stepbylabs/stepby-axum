@@ -173,7 +173,7 @@ pub async fn list(
 }
 
 /// POST /system/file/upload
-/// 文件上传（复用 common_upload 的安全策略）
+/// 文件上传（复用 common_upload 的安全策略，P0-3 统一走 save_upload_bytes）
 pub async fn upload(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
@@ -183,77 +183,46 @@ pub async fn upload(
     let mut original_filename: Option<String> = None;
     let mut file_ext: Option<String> = None;
 
-    while let Some(field) = multipart
+    // P0-3 OOM 修复：流式限长读取，不再整读内存后校验大小
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|_| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed")))?
     {
         if field.name() == Some("file") {
-            if let Some(filename) = field.file_name()
-                && let Some(ext) = std::path::Path::new(filename)
-                    .extension()
-                    .and_then(|e| e.to_str())
-            {
-                file_ext = Some(ext.to_lowercase());
-            }
-            original_filename = field.file_name().map(|s| s.to_string());
-            let bytes = field
-                .bytes()
-                .await
-                .map_err(|_| AppError::bad_request(&crate::tr!("error.file.read_failed")))?;
-            file_bytes = Some(bytes.to_vec());
+            let (bytes, ext, original) =
+                crate::common::upload::read_field_limited(&mut field, upload_cfg.common_max_size)
+                    .await?;
+            file_ext = ext;
+            original_filename = original;
+            file_bytes = Some(bytes);
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| AppError::bad_request(&crate::tr!("error.file.field_not_found")))?;
-    if bytes.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.file.empty")));
-    }
-
-    // 文件大小限制
-    if bytes.len() > upload_cfg.common_max_size {
-        return Err(AppError::bad_request(&crate::tr!(
-            "error.file.too_large",
-            max = upload_cfg.common_max_size / 1024 / 1024
-        )));
-    }
-
-    // 扩展名白名单校验
-    let ext = file_ext
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request(&crate::tr!("error.file.unknown_ext")))?;
-    let allowed: Vec<&str> = upload_cfg.common_allowed_exts.iter().map(|s| s.as_str()).collect();
-    if !allowed.contains(&ext) {
-        return Err(AppError::bad_request(&crate::tr!("error.file.unsupported_type", ext = ext)));
-    }
-
-    // MIME magic bytes 校验（防止伪造扩展名上传可执行文件等危险内容）
-    if !crate::common::upload::validate_magic_bytes(&bytes, ext) {
-        return Err(AppError::bad_request(&crate::tr!("error.file.unsupported_type", ext = ext)));
-    }
-
-    // 生成 UUID 文件名
-    let new_filename = crate::common::gen_uuid_filename(ext);
-    // 解析上传目录为绝对路径，确保与 ServeDir 服务路径一致
-    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir).await;
-    let file_path = common_dir.join(&new_filename);
-
-    let size = crate::common::write_upload_file(file_path, &common_dir.to_string_lossy(), &bytes).await?;
-
-    let url = format!("{}/{}", upload_cfg.common_url_prefix, new_filename);
+    // P0-3：统一校验 + 保存（扩展名白名单、危险类型拒绝、magic bytes 严格化、UUID 文件名、写盘）
+    let saved = crate::common::upload::save_upload_bytes(
+        file_bytes
+            .as_deref()
+            .ok_or_else(|| AppError::bad_request(&crate::tr!("error.file.field_not_found")))?,
+        file_ext.as_deref(),
+        original_filename.as_deref(),
+        upload_cfg,
+        crate::common::upload::UploadKind::Common,
+    )
+    .await?;
 
     tracing::info!(
-        original = ?original_filename,
-        new = %new_filename,
-        size = size,
+        original = ?saved.original_filename,
+        new = %saved.new_filename,
+        size = saved.size,
         "文件上传成功"
     );
 
     Ok(AjaxResult::success(FileUploadResponse {
-        url,
-        file_name: new_filename,
-        file_size: size,
-        ext: ext.to_string(),
+        url: saved.url,
+        file_name: saved.new_filename,
+        file_size: saved.size,
+        ext: saved.ext,
     }))
 }
 
@@ -275,21 +244,13 @@ pub async fn delete(
     }
 
     let upload_cfg = &state.config.upload;
-    let file_path = std::path::Path::new(&upload_cfg.common_dir).join(file_name);
+    // P0-3：解析受控根目录并传入 delete_upload_file 做前缀强制校验（防任意文件删除）
+    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir).await;
+    let file_path = common_dir.join(file_name);
+    let root_str = common_dir.to_string_lossy().to_string();
+    let path_str = file_path.to_string_lossy().to_string();
 
-    let path_clone = file_path.clone();
-    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        if path_clone.exists() {
-            std::fs::remove_file(&path_clone)?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|_| AppError::internal(&crate::tr!("error.file.delete_task_failed")))?;
-
-    if result.is_err() {
-        return Err(AppError::internal(&crate::tr!("error.file.delete_failed")));
-    }
+    crate::common::upload::delete_upload_file(&path_str, &root_str).await?;
 
     tracing::info!(file_name = %file_name, "文件已删除");
 

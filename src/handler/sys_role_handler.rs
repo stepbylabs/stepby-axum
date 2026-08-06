@@ -148,9 +148,12 @@ pub async fn export(
 )]
 pub async fn get_info_by_id(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(role_id): Path<i64>,
 ) -> Result<AjaxResult<RoleVo>, AppError> {
-    let vo = state.role_service.get_role_by_id(role_id).await?;
+    // P0-6：传入 operator_user_id 校验角色在数据范围内（此前可读取任意角色详情含 menu_ids）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let vo = state.role_service.get_role_by_id(role_id, operator_user_id).await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -287,9 +290,12 @@ pub async fn data_scope(
 /// 查询角色已授权用户列表
 pub async fn allocated_user_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<AuthUserQueryDto>,
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
-    let (rows, total) = state.role_service.get_allocated_users(query).await?;
+    // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部已授权用户）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let (rows, total) = state.role_service.get_allocated_users(query, operator_user_id).await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -297,9 +303,12 @@ pub async fn allocated_user_list(
 /// 查询角色未授权用户列表
 pub async fn unallocated_user_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<AuthUserQueryDto>,
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
-    let (rows, total) = state.role_service.get_unallocated_users(query).await?;
+    // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部用户）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let (rows, total) = state.role_service.get_unallocated_users(query, operator_user_id).await?;
     Ok(TableDataInfo::new(total, rows))
 }
 

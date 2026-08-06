@@ -17,18 +17,31 @@ pub trait TreeNode {
 
 /// 将扁平列表构建为树结构
 /// root_parent_id 为根节点的 parent_id（通常为 0）
+///
+/// P1：递归加深度上限（MAX_TREE_DEPTH），防止脏数据成环（parent_id 循环）
+/// 导致无限递归栈溢出（8MB 栈也扛不住深层递归）。
 pub fn build_tree<T: TreeNode + Clone>(list: &[T], root_parent_id: T::Id) -> Vec<T> {
     let mut roots: Vec<T> = list.iter()
         .filter(|n| n.parent_id() == root_parent_id)
         .cloned()
         .collect();
     for root in &mut roots {
-        build_children(root, list);
+        build_children(root, list, 0);
     }
     roots
 }
 
-fn build_children<T: TreeNode + Clone>(node: &mut T, list: &[T]) {
+/// 树最大深度（超过即判定存在循环引用/异常数据，停止递归）
+pub const MAX_TREE_DEPTH: usize = 30;
+
+fn build_children<T: TreeNode + Clone>(node: &mut T, list: &[T], depth: usize) {
+    if depth >= MAX_TREE_DEPTH {
+        tracing::warn!(
+            "树构建达到最大深度 {}（可能存在 parent_id 循环引用），停止递归",
+            MAX_TREE_DEPTH
+        );
+        return;
+    }
     let node_id = node.id();
     let children: Vec<T> = list.iter()
         .filter(|n| n.parent_id() == node_id)
@@ -45,7 +58,7 @@ fn build_children<T: TreeNode + Clone>(node: &mut T, list: &[T]) {
     // 递归处理每个 child
     if let Some(kids) = node.children_mut() {
         for kid in kids.iter_mut() {
-            build_children(kid, list);
+            build_children(kid, list, depth + 1);
         }
     }
 }

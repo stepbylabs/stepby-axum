@@ -178,12 +178,25 @@ impl GenTableRepository {
 
         // 构建参数化查询（P0: 防止 SQL 注入，原手动转义 replace('\'',"''") + format! 拼接存在风险）
         // LIKE 模式通过参数值传入，使用 like_escape 转义 % 和 \，并附加 ESCAPE '\\' 子句确保跨库一致。
-        let (sql, _count_sql, data_values, _count_values): (String, String, Vec<Value>, Vec<Value>) =
+        // P0-9 修复：排除已导入表的 NOT IN 条件下沉到 SQL（参数化），
+        // 使 DB 层分页与 COUNT 均在过滤后执行，修复"先 DB 分页再内存过滤导致
+        // total 恒 ≤ pageSize 且跨页漏表/重复"的缺陷。
+        let (sql, count_sql, data_values, count_values): (String, String, Vec<Value>, Vec<Value>) =
             match backend {
             DatabaseBackend::Sqlite => {
-                let base_where = "type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'AUTHS_%'";
-                let mut where_clause = base_where.to_string();
+                let mut base_where = "type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'AUTHS_%'".to_string();
+                // SQLite _cf_ 通配符误用修复：`_cf_%` 中 `_` 是单字符通配符，会误排除 xcfX 等表；
+                // 意图为字面前缀 `_cf_`，改用 ESCAPE 转义（P1）
+                base_where = base_where.replace("name NOT LIKE '_cf_%'", "name NOT LIKE '\\_cf\\_%' ESCAPE '\\'");
+                let mut where_clause = base_where;
                 let mut vals: Vec<Value> = Vec::new();
+                if !imported.is_empty() {
+                    // 排除已导入表（参数化 NOT IN）
+                    where_clause.push_str(" AND name NOT IN (");
+                    where_clause.push_str(&vec!["?"; imported.len()].join(","));
+                    where_clause.push(')');
+                    vals.extend(imported.iter().cloned().map(Value::from));
+                }
                 if let Some(name) = table_name {
                     where_clause.push_str(" AND name LIKE ? ESCAPE '\\'");
                     vals.push(format!("%{}%", like_escape(name)).into());
@@ -206,10 +219,20 @@ impl GenTableRepository {
                 (sql, count_sql, data_vals, vals)
             }
             DatabaseBackend::Postgres => {
-                let base_where = "table_schema='public' AND table_type='BASE TABLE'";
-                let mut where_clause = base_where.to_string();
+                let mut where_clause = "table_schema='public' AND table_type='BASE TABLE'".to_string();
                 let mut vals: Vec<Value> = Vec::new();
                 let mut idx = 1usize;
+                if !imported.is_empty() {
+                    let placeholders: Vec<String> = (0..imported.len())
+                        .map(|i| format!("${}", idx + i))
+                        .collect();
+                    where_clause.push_str(&format!(
+                        " AND table_name NOT IN ({})",
+                        placeholders.join(",")
+                    ));
+                    vals.extend(imported.iter().cloned().map(Value::from));
+                    idx += imported.len();
+                }
                 if let Some(name) = table_name {
                     where_clause.push_str(&format!(" AND table_name LIKE ${} ESCAPE '\\'", idx));
                     vals.push(format!("%{}%", like_escape(name)).into());
@@ -238,9 +261,14 @@ impl GenTableRepository {
                 (sql, count_sql, data_vals, vals)
             }
             DatabaseBackend::MySql => {
-                let base_where = "table_schema = DATABASE() AND table_type = 'BASE TABLE'";
-                let mut where_clause = base_where.to_string();
+                let mut where_clause = "table_schema = DATABASE() AND table_type = 'BASE TABLE'".to_string();
                 let mut vals: Vec<Value> = Vec::new();
+                if !imported.is_empty() {
+                    where_clause.push_str(" AND table_name NOT IN (");
+                    where_clause.push_str(&vec!["?"; imported.len()].join(","));
+                    where_clause.push(')');
+                    vals.extend(imported.iter().cloned().map(Value::from));
+                }
                 if let Some(name) = table_name {
                     where_clause.push_str(" AND table_name LIKE ? ESCAPE '\\'");
                     vals.push(format!("%{}%", like_escape(name)).into());
@@ -269,18 +297,14 @@ impl GenTableRepository {
             .all(db)
             .await?;
 
-        // 过滤掉已导入的表
-        let filtered: Vec<DbTableInfo> = rows
-            .into_iter()
-            .filter(|r| !imported.contains(&r.table_name))
-            .collect();
+        // 精确总数：COUNT 查询（已排除已导入表，P0-9 修复：不再用当前页内存过滤行数充当 total）
+        let total: i64 = db
+            .query_one(Statement::from_sql_and_values(backend, &count_sql, count_values))
+            .await?
+            .and_then(|row| row.try_get("", "count").ok())
+            .unwrap_or(0);
 
-        // 精确总数：filtered 是已按 `imported` 集合内存过滤后的结果，
-        // 其长度即为过滤后剩余的可导入表数量（C7：原 `total_all - imported_count`
-        // 估算在分页偏移下不准确，现直接使用真实过滤结果长度）。
-        let total = filtered.len() as u64;
-
-        Ok((filtered, total))
+        Ok((rows, total.max(0) as u64))
     }
 
     /// 查询指定表的列元数据（用于导入表时生成 gen_table_column 记录）

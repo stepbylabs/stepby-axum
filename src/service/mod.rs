@@ -63,12 +63,19 @@ pub fn build_dept_tree_select(list: &[SysDeptModel], root_parent_id: i64) -> Vec
         .map(dept_model_to_tree_select)
         .collect();
     for root in &mut roots {
-        build_dept_tree_children(root, list);
+        build_dept_tree_children(root, list, 0);
     }
     roots
 }
 
-pub fn build_dept_tree_children(node: &mut TreeSelectVo, list: &[SysDeptModel]) {
+/// 部门树最大深度（P1：防脏数据 parent_id 成环导致无限递归栈溢出）
+const MAX_DEPT_TREE_DEPTH: usize = 30;
+
+pub fn build_dept_tree_children(node: &mut TreeSelectVo, list: &[SysDeptModel], depth: usize) {
+    if depth >= MAX_DEPT_TREE_DEPTH {
+        tracing::warn!("部门树构建达到最大深度 {}（可能存在 parent_id 循环引用），停止递归", MAX_DEPT_TREE_DEPTH);
+        return;
+    }
     let node_id = node.id;
     let children: Vec<TreeSelectVo> = list
         .iter()
@@ -80,7 +87,7 @@ pub fn build_dept_tree_children(node: &mut TreeSelectVo, list: &[SysDeptModel]) 
     }
     node.children = children;
     for kid in &mut node.children {
-        build_dept_tree_children(kid, list);
+        build_dept_tree_children(kid, list, depth + 1);
     }
 }
 

@@ -27,7 +27,7 @@ use utoipa::ToSchema;
 use garde::Validate;
 
 use crate::common::ValidatedJson;
-use crate::common::image::{detect_image_ext, normalize_ext};
+
 use crate::common::{AjaxResult, AppError, TableDataInfo, TreeSelectVo};
 use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SECS_PER_HOUR};
 use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
@@ -176,9 +176,12 @@ pub async fn export(
 )]
 pub async fn get_info_by_id(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(user_id): Path<i64>,
 ) -> Result<UserFormResult, AppError> {
-    let vo = state.user_service.get_user_form_data(Some(user_id)).await?;
+    // P0-6：传入 operator_user_id 校验目标用户在数据范围内（此前可越权读取他人 PII）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let vo = state.user_service.get_user_form_data(Some(user_id), operator_user_id).await?;
     Ok(UserFormResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),
@@ -549,7 +552,8 @@ pub async fn update_profile(
 pub async fn get_roles_for_user_form(
     State(state): State<Arc<AppState>>,
 ) -> Result<UserFormResult, AppError> {
-    let vo = state.user_service.get_user_form_data(None).await?;
+    // 新增表单场景（None）：不校验目标用户（无目标），roles/posts 下拉保持全量
+    let vo = state.user_service.get_user_form_data(None, None).await?;
     Ok(UserFormResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),
@@ -640,77 +644,37 @@ pub async fn avatar_upload(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
-    // 从 multipart 中提取 avatarfile 字段
+    // 从 multipart 中提取 avatarfile 字段（P0-3：流式限长读取，不再整读内存）
+    let upload_cfg = &state.config.upload;
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_ext: Option<String> = None;
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e)))?
     {
         if field.name() == Some("avatarfile") {
-            // 从文件名推断扩展名（前端 vue-cropper 默认输出 blob，无 filename，默认 png）
-            if let Some(filename) = field.file_name()
-                && let Some(ext) = std::path::Path::new(filename)
-                    .extension()
-                    .and_then(|e| e.to_str())
-            {
-                file_ext = Some(ext.to_lowercase());
-            }
-            let bytes = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::bad_request(&crate::tr!("error.file.read_failed", e = e)))?;
-            file_bytes = Some(bytes.to_vec());
+            let (bytes, ext, _original) =
+                crate::common::upload::read_field_limited(&mut field, upload_cfg.avatar_max_size)
+                    .await?;
+            file_ext = ext;
+            file_bytes = Some(bytes);
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_avatar")))?;
-    if bytes.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.common_handler.file_empty")));
-    }
-
-    // 限制头像大小（从配置读取，默认 5MB）
-    let upload_cfg = &state.config.upload;
-    if bytes.len() > upload_cfg.avatar_max_size {
-        return Err(AppError::bad_request(&crate::tr!(
-            "error.file.too_large",
-            max = upload_cfg.avatar_max_size / 1024 / 1024
-        )));
-    }
-
-    // MIME magic bytes 校验：通过文件头识别真实类型，防止伪造扩展名
-    let detected_ext = detect_image_ext(&bytes)
-        .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.image_format_unknown")))?;
-
-    // 扩展名白名单校验：前端传入的扩展名必须与 magic bytes 识别结果一致，且在白名单内
-    let allowed: &[&str] = &["jpg", "jpeg", "png", "gif"];
-    let ext = match &file_ext {
-        Some(e) if allowed.contains(&e.as_str()) => {
-            // 前端扩展名与 magic bytes 不一致时，以 magic bytes 为准（防止伪造）
-            if normalize_ext(e) != normalize_ext(&detected_ext) {
-                tracing::warn!(
-                    "头像扩展名与实际类型不一致: 声明={}, 实际={}",
-                    e,
-                    detected_ext
-                );
-            }
-            detected_ext
-        }
-        _ => detected_ext,
-    };
-
-    // 生成唯一文件名
-    let filename = crate::common::gen_uuid_filename(&ext);
-    // 解析上传目录为绝对路径，确保与 ServeDir 服务路径一致
-    let avatar_dir = crate::common::resolve_upload_dir(&upload_cfg.avatar_dir).await;
-    let file_path = avatar_dir.join(&filename);
-
-    // 写入文件系统（公共函数封装了 spawn_blocking + create_dir_all + write）
-    crate::common::write_upload_file(file_path, &avatar_dir.to_string_lossy(), &bytes).await?;
-
-    // 可访问的 URL 路径（前端通过 VITE_APP_BASE_API + imgUrl 访问）
-    let img_url = format!("{}/{}", upload_cfg.avatar_url_prefix, filename);
+    // P0-3：统一校验 + 保存（头像白名单、危险类型拒绝、magic bytes 以实际类型为准、UUID 文件名、写盘）
+    let saved = crate::common::upload::save_upload_bytes(
+        file_bytes
+            .as_deref()
+            .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_avatar")))?,
+        file_ext.as_deref(),
+        None,
+        upload_cfg,
+        crate::common::upload::UploadKind::Avatar,
+    )
+    .await?;
+    let img_url = saved.url;
+    let filename = saved.new_filename;
 
     // 更新用户 avatar 字段，并获取旧 avatar 路径用于文件清理
     let old_avatar = state
@@ -718,15 +682,17 @@ pub async fn avatar_upload(
         .update_avatar(user_id, &img_url)
         .await?;
 
-    // P2 修复: 删除旧头像文件（best-effort，失败仅记录日志，不影响上传流程）
+    // P2 修复: 删除旧头像文件（best-effort，失败仅记录日志，不影响上传流程；P0-3：带根目录前缀校验）
     if let Some(old_url) = old_avatar
         && let Some(old_filename) = old_url.rsplit('/').next()
         && !old_filename.is_empty()
         && old_filename != filename
     {
+        let avatar_dir = crate::common::resolve_upload_dir(&upload_cfg.avatar_dir).await;
         let old_file_path = avatar_dir.join(old_filename);
         let old_path_str = old_file_path.to_string_lossy().to_string();
-        let result = crate::common::delete_upload_file(&old_path_str).await;
+        let root_str = avatar_dir.to_string_lossy().to_string();
+        let result = crate::common::upload::delete_upload_file(&old_path_str, &root_str).await;
         if let Err(e) = &result {
             tracing::warn!(
                 error = %e,

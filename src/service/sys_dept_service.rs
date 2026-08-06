@@ -158,75 +158,87 @@ impl SysDeptService {
             select = select.filter(DeptColumn::Status.eq(status));
         }
 
-        // 数据权限过滤（P0-R81-004）
+        // 数据权限过滤（P0-R81-004 / P0-6 统一入口）
         if let Some(op_uid) = operator_user_id {
-            // 超管短路
-            if op_uid != SUPER_ADMIN_USER_ID {
-                let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-                let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
-
-                let scope_dept_ids: Option<Vec<i64>> = if let Some(scope) = min_scope {
-                    match scope {
-                        1 => None, // 全部数据：不追加过滤
-                        2 => {
-                            // 自定义：聚合 operator 所有角色的 sys_role_dept 部门
-                            // P0-R81-004 暂缓项：N+1 改批量查询，单次 SQL 完成
-                            let role_ids: Vec<i64> = op_roles
-                                .iter()
-                                .filter(|r| r.data_scope.as_deref() == Some("2"))
-                                .map(|r| r.role_id)
-                                .collect();
-                            let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
-                            Some(rids.into_iter().map(|rd| rd.dept_id).collect())
-                        }
-                        3 | 5 => {
-                            // 本部门 / 仅本人：部门无 user_id 概念，两者均限定为 operator.dept_id
-                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                            op_user
-                                .and_then(|u| u.dept_id)
-                                .map(|d| vec![d])
-                                .or_else(|| Some(vec![]))
-                        }
-                        4 => {
-                            // 本部门及以下：operator.dept_id + 所有后代部门
-                            // P0-R81-004 暂缓项：递归 CTE 替代全表扫描 + 内存过滤 ancestors CSV
-                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                            let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
-                            Some(self.dept_repo.find_descendant_ids(op_dept_id).await?)
-                        }
-                        _ => {
-                            // 未知 data_scope 值，安全失败：限定为 operator.dept_id
-                            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                            op_user
-                                .and_then(|u| u.dept_id)
-                                .map(|d| vec![d])
-                                .or_else(|| Some(vec![]))
-                        }
-                    }
-                } else {
-                    // operator 无角色或 data_scope 缺失：安全失败，限定为 operator.dept_id
-                    let op_user = self.user_repo.base().find_by_id(op_uid).await?;
-                    op_user
-                        .and_then(|u| u.dept_id)
-                        .map(|d| vec![d])
-                        .or_else(|| Some(vec![]))
-                };
-
-                match scope_dept_ids {
-                    Some(ids) if ids.is_empty() => {
-                        // 空集合：无可见部门，返回空结果（用永假条件）
-                        select = select.filter(DeptColumn::DeptId.eq(-1_i64));
-                    }
-                    Some(ids) => {
-                        select = select.filter(DeptColumn::DeptId.is_in(ids));
-                    }
-                    None => {}
+            let scope_dept_ids = self.resolve_scope_dept_ids(op_uid).await?;
+            match scope_dept_ids {
+                Some(ids) if ids.is_empty() => {
+                    // 空集合：无可见部门，返回空结果（用永假条件）
+                    select = select.filter(DeptColumn::DeptId.eq(-1_i64));
                 }
+                Some(ids) => {
+                    select = select.filter(DeptColumn::DeptId.is_in(ids));
+                }
+                None => {}
             }
         }
 
         let list = self.dept_repo.base().find_many(select).await?;
         Ok(list)
+    }
+
+    /// 计算操作人的数据范围部门 ID 集合（P0-6 统一入口）
+    ///
+    /// 供 list / list_exclude / treeselect / get_info 等所有部门查询端点复用，
+    /// 杜绝"list 有过滤、旁路端点裸奔"的 data_scope 不一致越权。
+    ///
+    /// - 超管（user_id==1）或 data_scope=1（全部）：返回 `None`（不过滤）
+    /// - 其他：返回 `Some(ids)`，ids 为空表示无可见部门
+    async fn resolve_scope_dept_ids(
+        &self,
+        operator_user_id: i64,
+    ) -> Result<Option<Vec<i64>>, ServiceError> {
+        // 超管短路
+        if operator_user_id == SUPER_ADMIN_USER_ID {
+            return Ok(None);
+        }
+
+        let op_roles = self.role_repo.find_by_user_id(operator_user_id).await?;
+        let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
+
+        let scope_dept_ids: Option<Vec<i64>> = if let Some(scope) = min_scope {
+            match scope {
+                1 => None, // 全部数据：不追加过滤
+                2 => {
+                    // 自定义：聚合 operator 所有角色的 sys_role_dept 部门
+                    let role_ids: Vec<i64> = op_roles
+                        .iter()
+                        .filter(|r| r.data_scope.as_deref() == Some("2"))
+                        .map(|r| r.role_id)
+                        .collect();
+                    let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
+                    Some(rids.into_iter().map(|rd| rd.dept_id).collect())
+                }
+                3 | 5 => {
+                    // 本部门 / 仅本人：部门无 user_id 概念，两者均限定为 operator.dept_id
+                    Some(self.read_op_dept(operator_user_id).await?)
+                }
+                4 => {
+                    // 本部门及以下：operator.dept_id + 所有后代部门
+                    let op_user = self.user_repo.base().find_by_id(operator_user_id).await?;
+                    let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
+                    Some(self.dept_repo.find_descendant_ids(op_dept_id).await?)
+                }
+                _ => {
+                    // 未知 data_scope 值，安全失败：限定为 operator.dept_id
+                    Some(self.read_op_dept(operator_user_id).await?)
+                }
+            }
+        } else {
+            // operator 无角色或 data_scope 缺失：安全失败，限定为 operator.dept_id
+            Some(self.read_op_dept(operator_user_id).await?)
+        };
+        Ok(scope_dept_ids)
+    }
+
+    /// 读取操作人所属部门 ID（None → 空集合，安全失败）
+    async fn read_op_dept(&self, operator_user_id: i64) -> Result<Vec<i64>, ServiceError> {
+        self.user_repo
+            .base()
+            .find_by_id(operator_user_id)
+            .await
+            .map(|u| u.and_then(|u| u.dept_id).map(|d| vec![d]).unwrap_or_default())
+            .map_err(ServiceError::from)
     }
 
     /// 保存部门排序（批量更新 order_num）
@@ -280,13 +292,30 @@ impl SysDeptService {
 
     /// 排除指定节点及其子部门的部门列表（修改部门时选择父部门用）
     ///
-    /// 排除 dept_id 本身 + 其所有后代（ancestors 中包含 dept_id 的部门）
-    pub async fn list_exclude(&self, dept_id: i64) -> Result<Vec<SysDeptModel>, ServiceError> {
+    /// 排除 dept_id 本身 + 其所有后代（ancestors 中包含 dept_id 的部门）。
+    /// P0-6：`operator_user_id` 传入时先应用 data_scope 过滤（超管/全部数据不限制），
+    /// 防止低权限管理员通过本端点枚举全部部门结构（此前与 list 的数据范围不一致）。
+    pub async fn list_exclude(
+        &self,
+        dept_id: i64,
+        operator_user_id: Option<i64>,
+    ) -> Result<Vec<SysDeptModel>, ServiceError> {
+        // 数据范围过滤后的可见部门
+        let visible_ids: Option<Vec<i64>> = match operator_user_id {
+            Some(uid) => self.resolve_scope_dept_ids(uid).await?,
+            None => None, // 无操作人上下文（如内部调用）：不过滤，保持原行为
+        };
         let all = self.dept_repo.find_active_all().await?;
         // 收集要排除的 ID：dept_id 本身 + 后代部门
         let result: Vec<SysDeptModel> = all
             .into_iter()
             .filter(|d| {
+                // data_scope 限制：不在可见集合内的部门直接过滤（visible_ids 为 None 表示全部可见）
+                if let Some(ref ids) = visible_ids
+                    && !ids.contains(&d.dept_id)
+                {
+                    return false;
+                }
                 if d.dept_id == dept_id {
                     return false;
                 }
@@ -301,7 +330,14 @@ impl SysDeptService {
     }
 
     /// 部门详情
-    pub async fn get_dept_by_id(&self, dept_id: i64) -> Result<SysDeptModel, ServiceError> {
+    ///
+    /// P0-6：`operator_user_id` 传入时校验部门是否在数据范围内，不在则视为不存在
+    /// （返回 404 而非 403，避免暴露部门存在性）。
+    pub async fn get_dept_by_id(
+        &self,
+        dept_id: i64,
+        operator_user_id: Option<i64>,
+    ) -> Result<SysDeptModel, ServiceError> {
         let dept = self
             .dept_repo
             .base()
@@ -310,6 +346,17 @@ impl SysDeptService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dept.not_found")))?;
         if dept.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
+        }
+        // 数据范围校验（P0-6）
+        if let Some(uid) = operator_user_id
+            && uid != SUPER_ADMIN_USER_ID
+        {
+            let scope_ids = self.resolve_scope_dept_ids(uid).await?;
+            if let Some(ref ids) = scope_ids
+                && !ids.contains(&dept_id)
+            {
+                return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
+            }
         }
         Ok(dept)
     }
@@ -588,8 +635,18 @@ impl SysDeptService {
     ///
     /// 返回 `{ id, label, disabled, children }` 结构，用于下拉选择场景。
     /// disabled = status != "0"（停用状态禁用选择）。
-    pub async fn build_dept_tree_select(&self) -> Result<Vec<TreeSelectVo>, ServiceError> {
-        let list = self.dept_repo.find_active_all().await?;
+    /// P0-6：`operator_user_id` 传入时先应用 data_scope 过滤，防止旁路枚举全部部门。
+    pub async fn build_dept_tree_select(
+        &self,
+        operator_user_id: Option<i64>,
+    ) -> Result<Vec<TreeSelectVo>, ServiceError> {
+        let list = match operator_user_id {
+            Some(uid) => {
+                // 复用 list_depts 的数据范围过滤（空 query）
+                self.list_depts(DeptQueryDto::default(), Some(uid)).await?
+            }
+            None => self.dept_repo.find_active_all().await?,
+        };
         let tree = build_dept_tree_select(&list, 0);
         Ok(tree)
     }

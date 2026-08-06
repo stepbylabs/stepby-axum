@@ -206,6 +206,13 @@ pub async fn mark_read_all(
     Query(params): Query<NoticeMarkReadAllParams>,
 ) -> Result<AjaxResult<()>, AppError> {
     let user_id: i64 = parse_operator_id(&operator)?;
+    // P1 修复：ids 条数上限（防恶意构造超长 ID 列表引发大查询）
+    if !params.ids.trim().is_empty() && parse_id_list::<i64>(&params.ids).len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
+    }
     state
         .notice_service
         .mark_read_all(&params.ids, user_id)

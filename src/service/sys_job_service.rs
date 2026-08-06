@@ -566,8 +566,15 @@ impl SysJobService {
                 query.job_name.as_deref(),
                 query.job_group.as_deref(),
                 query.status.as_deref(),
-                query.begin_time.as_deref(),
-                query.end_time.as_deref(),
+                // P1：时间解析统一走 parse_query_date（本地日→UTC），与全项目一致
+                match query.begin_time.as_deref() {
+                    Some(v) if !v.is_empty() => Some(crate::common::datetime::parse_query_date(v)?),
+                    _ => None,
+                },
+                match query.end_time.as_deref() {
+                    Some(v) if !v.is_empty() => Some(crate::common::datetime::parse_query_date(v)?),
+                    _ => None,
+                },
             )
             .await?;
 
@@ -616,8 +623,15 @@ impl SysJobService {
                 query.job_name.as_deref(),
                 query.job_group.as_deref(),
                 query.status.as_deref(),
-                query.begin_time.as_deref(),
-                query.end_time.as_deref(),
+                // P1：时间解析统一走 parse_query_date（本地日→UTC）
+                match query.begin_time.as_deref() {
+                    Some(v) if !v.is_empty() => Some(crate::common::datetime::parse_query_date(v)?),
+                    _ => None,
+                },
+                match query.end_time.as_deref() {
+                    Some(v) if !v.is_empty() => Some(crate::common::datetime::parse_query_date(v)?),
+                    _ => None,
+                },
             )
             .await?;
 

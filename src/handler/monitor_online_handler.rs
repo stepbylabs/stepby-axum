@@ -22,7 +22,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::constants::{SECS_PER_HOUR, SUPER_ADMIN_USER_ID};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
-use crate::handler::monitor_cache_handler::scan_keys;
+use crate::utils::redis::scan_keys;
 use crate::state::AppState;
 use crate::utils::crypto::OnlineSession;
 
@@ -106,7 +106,7 @@ pub async fn list(
     let mut redis = state.redis.clone();
 
     // 1. SCAN online:* 获取所有在线会话 key（复用 monitor_cache_handler::scan_keys）
-    let keys = match scan_keys(&mut redis, "online:*").await {
+    let keys = match scan_keys(&mut redis, "online:*", 5000).await {
         Ok(k) => k,
         Err(e) => {
             tracing::warn!("Redis SCAN online:* 失败，降级到 sys_logininfor 查询: {}", e);
@@ -336,9 +336,12 @@ pub async fn force_logout(
             AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
 
-    // 广播 forceLogout 事件，通知被强退用户的客户端跳转登录页
-    // 失败不阻断主流程（强退已成功，仅 WS 推送失败）
-    state.broadcast(
+    // 定向推送 forceLogout 事件，仅通知被强退用户的客户端跳转登录页
+    // P0-2 越权广播修复：原实现走全局广播，所有在线客户端（含无权限用户）都会收到
+    // 他人被强退及其 tokenHash/userId/userName，造成跨用户会话/身份信息泄漏。
+    // 现改为按用户定向投递，仅目标用户的连接收到；失败不阻断主流程（强退已成功，仅 WS 推送失败）。
+    state.broadcast_to_user(
+        session.user_id,
         "forceLogout",
         serde_json::json!({
             "tokenHash": token_hash,

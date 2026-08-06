@@ -124,6 +124,24 @@ where
 /// C-i18n：通过 [`i18n::with_locale_sync`] 注入 thread-local locale，
 /// 使 getter 内的 `crate::tr!` 能正确按当前 locale 返回对应语言。
 /// 修复英文用户导出 Excel 时状态值显示中文的问题（task-local 在 spawn_blocking 内不自动传播）。
+/// 净化 Excel sheet 名称（P2）：长度 ≤ 31，替换非法字符 `[]:*?/\`（XLSX 规范限制），
+/// 避免超长/非法 sheet 名导致构建失败返回 500
+fn sanitize_sheet_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if "[]:*?/\\".contains(c) { '_' } else { c })
+        .collect();
+    let mut result = cleaned;
+    if result.chars().count() > 31 {
+        let truncated: String = result.chars().take(31).collect();
+        result = truncated;
+    }
+    if result.trim().is_empty() {
+        result = "Sheet1".to_string();
+    }
+    result
+}
+
 fn build_xlsx<T>(
     sheet_name: &str,
     columns: &[ExcelColumn<T>],
@@ -176,7 +194,7 @@ where
         workbook.add_worksheet()
     };
     let worksheet = worksheet
-        .set_name(sheet_name)
+        .set_name(sanitize_sheet_name(sheet_name))
         .map_err(|_| AppError::internal(&crate::tr!("error.excel.sheet_create_failed")))?;
 
     let header_format = Format::new().set_bold();

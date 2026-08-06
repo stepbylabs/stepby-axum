@@ -7,6 +7,7 @@
 
 use sea_orm::*;
 
+use chrono::NaiveDateTime;
 use crate::common::like_escape;
 use crate::entity::sys_job_log::{ActiveModel, Column, Entity as SysJobLog, Model};
 use crate::repository::base::BaseRepository;
@@ -68,8 +69,8 @@ impl SysJobLogRepository {
         job_name: Option<&str>,
         job_group: Option<&str>,
         status: Option<&str>,
-        begin_time: Option<&str>,
-        end_time: Option<&str>,
+        begin_time: Option<NaiveDateTime>,
+        end_time: Option<NaiveDateTime>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysJobLog::find();
         if let Some(name) = job_name {
@@ -81,17 +82,13 @@ impl SysJobLogRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
+        // P1：时间解析上移 service（parse_query_date 统一"本地日→UTC"换算），
+        // repository 只收 NaiveDateTime，避免时区边界错位与 DbErr::Custom 中文泄漏
         if let Some(begin) = begin_time {
-            let dt = begin
-                .parse::<chrono::NaiveDateTime>()
-                .map_err(|_| DbErr::Custom("无效的时间格式".into()))?;
-            query = query.filter(Column::CreateTime.gte(dt));
+            query = query.filter(Column::CreateTime.gte(begin));
         }
         if let Some(end) = end_time {
-            let dt = end
-                .parse::<chrono::NaiveDateTime>()
-                .map_err(|_| DbErr::Custom("无效的时间格式".into()))?;
-            query = query.filter(Column::CreateTime.lte(dt));
+            query = query.filter(Column::CreateTime.lte(end));
         }
 
         let total = query.clone().count(self.base.db()).await?;

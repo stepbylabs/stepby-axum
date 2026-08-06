@@ -20,6 +20,7 @@ use utoipa::ToSchema;
 
 use crate::common::{AjaxResult, AppError};
 use crate::state::AppState;
+use crate::utils::redis::scan_keys;
 
 // ==================== 缓存前缀白名单 ====================
 
@@ -159,7 +160,7 @@ pub async fn get_names(
     let mut redis = state.redis.clone();
 
     // 获取全部键，按前缀（冒号前的部分）分组
-    let keys: Vec<String> = scan_keys(&mut redis, "*").await?;
+    let keys: Vec<String> = scan_keys(&mut redis, "*", 5000).await?;
 
     // 按前缀分组统计
     let mut groups: HashMap<String, usize> = HashMap::new();
@@ -208,7 +209,7 @@ pub async fn get_keys(
     let mut redis = state.redis.clone();
     let pattern = format!("{}*", cache_name);
 
-    let keys: Vec<String> = scan_keys(&mut redis, &pattern).await?;
+    let keys: Vec<String> = scan_keys(&mut redis, &pattern, 5000).await?;
 
     Ok(AjaxResult::success(keys))
 }
@@ -302,7 +303,7 @@ pub async fn clear_cache_name(
     let pattern = format!("{}*", cache_name);
 
     // 查询匹配的键
-    let keys: Vec<String> = scan_keys(&mut redis, &pattern).await?;
+    let keys: Vec<String> = scan_keys(&mut redis, &pattern, 5000).await?;
 
     if keys.is_empty() {
         return Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.no_match")));
@@ -373,37 +374,8 @@ pub async fn clear_cache_all(
 
 // ==================== 辅助函数 ====================
 
-/// 使用 SCAN 游标迭代匹配键（避免 KEYS 阻塞 Redis）
-///
-/// P1-19：将可见性改为 pub，供 monitor_online_handler 复用（SCAN online:* 获取在线会话列表）。
-/// 保留在 monitor_cache_handler 模块内，避免在 utils 层引入对 AppError 的依赖。
-pub async fn scan_keys(
-    redis: &mut redis::aio::ConnectionManager,
-    pattern: &str,
-) -> Result<Vec<String>, AppError> {
-    let mut keys = Vec::new();
-    let mut cursor: u64 = 0;
-    loop {
-        let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(100)
-            .query_async(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("执行 Redis SCAN 失败: {}", e);
-                AppError::internal(&crate::tr!("error.cache.key_scan_failed"))
-            })?;
-        keys.extend(batch);
-        if next_cursor == 0 {
-            break;
-        }
-        cursor = next_cursor;
-    }
-    Ok(keys)
-}
+// scan_keys 统一使用 crate::utils::redis::scan_keys（P2：带 max_results 上限，
+// 防 `*` 等 pattern 匹配海量 key 导致 OOM）；原模块内本地实现已移除。
 
 /// 解析 Redis INFO 输出为键值对 Map
 ///

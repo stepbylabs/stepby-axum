@@ -27,6 +27,9 @@ use crate::repository::sys_config::SysConfigRepository;
 
 /// 配置缓存 key 前缀（H-4：cache-aside）
 const CONFIG_CACHE_PREFIX: &str = "config:";
+
+/// 缓存穿透防护：None 值的 sentinel（P2 修复：原实现不缓存 None，恶意请求不存在的 key 每次穿透 DB）
+const CONFIG_NULL_MARKER: &str = "__NULL__";
 /// 配置缓存 TTL（秒，5 分钟，H-4）
 const CONFIG_CACHE_TTL: i64 = 300;
 
@@ -151,6 +154,10 @@ impl SysConfigService {
         .flatten();            // Option<Option<String>> → Option<String>
 
         if let Some(val) = cached {
+            // P2：识别 None sentinel，避免缓存穿透
+            if val == CONFIG_NULL_MARKER {
+                return Ok(None);
+            }
             return Ok(Some(val));
         }
 
@@ -158,18 +165,19 @@ impl SysConfigService {
         let model = self.config_repo.find_by_config_key(config_key).await?;
         let value = model.and_then(|m| m.config_value);
 
-        // 3. 缓存结果（best-effort，仅缓存 Some 值；None 不缓存会导致缓存穿透，后续按需补充 sentinel）
-        if let Some(ref v) = value {
-            let _ = tokio::time::timeout(
-                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-                redis::cmd("SETEX")
-                    .arg(&cache_key)
-                    .arg(CONFIG_CACHE_TTL)
-                    .arg(v)
-                    .query_async::<()>(&mut conn),
-            )
-            .await;
-        }
+        // 3. 缓存结果（best-effort）：Some 值按正常 TTL 缓存；
+        //    None 缓存 sentinel（P2：60s 短 TTL，既防穿透又避免长期陈旧）
+        let cache_ttl = if value.is_some() { CONFIG_CACHE_TTL } else { 60i64 };
+        let cache_value = value.clone().unwrap_or_else(|| CONFIG_NULL_MARKER.to_string());
+        let _ = tokio::time::timeout(
+            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+            redis::cmd("SETEX")
+                .arg(&cache_key)
+                .arg(cache_ttl)
+                .arg(&cache_value)
+                .query_async::<()>(&mut conn),
+        )
+        .await;
 
         Ok(value)
     }
@@ -393,7 +401,7 @@ impl SysConfigService {
     pub async fn refresh_cache(&self) -> Result<(), ServiceError> {
         let mut conn = self.redis.clone();
         let pattern = format!("{}*", CONFIG_CACHE_PREFIX);
-        let keys = match crate::utils::redis::scan_keys(&mut conn, &pattern).await {
+        let keys = match crate::utils::redis::scan_keys(&mut conn, &pattern, 5000).await {
             Ok(ks) => ks,
             Err(e) => {
                 tracing::warn!("刷新配置缓存时扫描键失败: {}", e);
