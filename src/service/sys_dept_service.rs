@@ -163,11 +163,7 @@ impl SysDeptService {
             // 超管短路
             if op_uid != SUPER_ADMIN_USER_ID {
                 let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
-                let min_scope = op_roles
-                    .iter()
-                    .filter_map(|r| r.data_scope.as_deref())
-                    .filter_map(|s| s.parse::<i32>().ok())
-                    .min();
+                let min_scope = crate::common::data_scope::min_data_scope(&op_roles);
 
                 let scope_dept_ids: Option<Vec<i64>> = if let Some(scope) = min_scope {
                     match scope {

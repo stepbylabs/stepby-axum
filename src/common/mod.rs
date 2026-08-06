@@ -1,6 +1,7 @@
 // axum-backend/src/common/mod.rs
 
 pub mod constants;
+pub mod data_scope;
 pub mod datetime;
 pub mod error;
 pub mod excel;

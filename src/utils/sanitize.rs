@@ -74,6 +74,21 @@ pub fn sanitize_html(html: &str) -> String {
     SANITIZER.clean(html).to_string()
 }
 
+/// HTML 特殊字符转义（用于邮件正文等"纯文本 → HTML"的安全渲染）。
+///
+/// 与 [`sanitize_html`]（白名单净化**不可信** HTML）不同：本函数对**可信文本**做最小转义，
+/// 把 `& < > " '` 转义为实体，并把换行 `\n` 渲染为 `<br/>`，避免文本中的特殊字符破坏 HTML 结构。
+///
+/// 收敛自 `sys_notice_service::html_escape`（P2 去重），统一为公共工具。
+pub fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+        .replace('\n', "<br/>")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +199,22 @@ mod tests {
         let result = sanitize_html(input);
         assert!(result.contains("style"), "安全 style 属性应保留");
         assert!(result.contains("color"));
+    }
+
+    #[test]
+    fn test_html_escape_basic() {
+        assert_eq!(html_escape("<b>&'\"</b>"), "&lt;b&gt;&amp;&#39;&quot;&lt;/b&gt;");
+    }
+
+    #[test]
+    fn test_html_escape_newline_to_br() {
+        assert_eq!(html_escape("a\nb"), "a<br/>b");
+    }
+
+    #[test]
+    fn test_html_escape_idempotent_on_escaped() {
+        // 已转义的实体不会被二次转义（&amp; 不会被变成 &amp;amp;）
+        let input = "&lt;script&gt;";
+        assert_eq!(html_escape(input), "&amp;lt;script&amp;gt;");
     }
 }

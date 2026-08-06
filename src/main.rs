@@ -53,6 +53,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // 启动 HTTP 服务
     // BUILD_TIMESTAMP / GIT_HASH / GIT_DIRTY 由 build.rs 注入，便于日志溯源构建版本
+    let listener = TcpListener::bind(&addr).await?;
+
+    // 启动日志在 bind 成功之后输出（反映"端口已真正开始监听"，而非仅准备就绪）
     tracing::info!(
         "服务启动于 http://{} (build_ts={}, git={}{})",
         addr,
@@ -61,7 +64,6 @@ async fn async_main() -> anyhow::Result<()> {
         env!("GIT_DIRTY"),
     );
 
-    let listener = TcpListener::bind(&addr).await?;
     // Slowloris 防护说明：
     // axum 0.8 重构后 Serve 不再暴露 http1_header_read_timeout / tcp_nodelay 方法，
     // 改为在 router 层通过 tower_http::timeout::TimeoutLayer 设置请求级超时（见 build_app），

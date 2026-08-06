@@ -11,7 +11,6 @@
 
 use std::time::Duration;
 
-use chrono::NaiveDateTime;
 use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
@@ -98,12 +97,6 @@ pub struct ConfigEditDto {
 }
 
 // ==================== 辅助函数 ====================
-
-/// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    crate::common::datetime::parse_local_date_to_utc_naive(s)
-        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
-}
 
 // ==================== Service 实现 ====================
 
@@ -222,11 +215,11 @@ impl SysConfigService {
         let limit = page.limit();
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 
@@ -428,11 +421,11 @@ impl SysConfigService {
         query: ConfigQueryDto,
     ) -> Result<Vec<SysConfigModel>, ServiceError> {
         let begin = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 

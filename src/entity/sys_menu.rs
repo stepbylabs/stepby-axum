@@ -65,20 +65,7 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
-#[async_trait::async_trait]
-impl ActiveModelBehavior for ActiveModel {
-    async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
-    where
-        C: ConnectionTrait,
-    {
-        let now = crate::common::datetime::now_naive();
-        if insert {
-            self.create_time = Set(Some(now));
-        }
-        self.update_time = Set(Some(now));
-        Ok(self)
-    }
-}
+crate::impl_timestamped_active_model!();
 
 /// 为 SysMenuModel 实现 TreeNode trait，支持 build_tree 组装树形结构
 impl TreeNode for Model {

@@ -7,7 +7,6 @@
 //! - 数据访问通过 Repository 层委托
 //! - 多表操作（字典类型变更级联、字典类型删除级联）使用事务保证一致性
 
-use chrono::NaiveDateTime;
 use futures::future::FutureExt;
 use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
@@ -187,12 +186,6 @@ pub struct DictDataEditDto {
 
 // ==================== 辅助函数 ====================
 
-/// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    crate::common::datetime::parse_local_date_to_utc_naive(s)
-        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
-}
-
 // ==================== Service 实现 ====================
 
 /// 字典模块 Service（字典类型 + 字典数据）
@@ -285,11 +278,11 @@ impl SysDictService {
         let limit = page.limit();
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
 
@@ -314,11 +307,11 @@ impl SysDictService {
         let limit = crate::common::page::EXPORT_MAX_ROWS;
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
 

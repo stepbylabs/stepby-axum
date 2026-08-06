@@ -15,3 +15,14 @@ pub use super::sys_role::{ActiveModel as SysRoleActiveModel, Column as SysRoleCo
 pub use super::sys_role_menu::{ActiveModel as SysRoleMenuActiveModel, Column as SysRoleMenuColumn, Entity as SysRoleMenu, Model as SysRoleMenuModel};
 pub use super::sys_user::{ActiveModel as SysUserActiveModel, Column as SysUserColumn, Entity as SysUser, Model as SysUserModel};
 pub use super::sys_user_role::{ActiveModel as SysUserRoleActiveModel, Column as SysUserRoleColumn, Entity as SysUserRole, Model as SysUserRoleModel};
+// 补全其余实体模块的公共类型重导出（P3：prelude 完整性）
+pub use super::gen_table::{ActiveModel as GenTableActiveModel, Column as GenTableColumn, Entity as GenTable, Model as GenTableModel};
+pub use super::gen_table_column::{ActiveModel as GenTableColumnActiveModel, Column as GenTableColumnColumn, Entity as GenTableColumnEntity, Model as GenTableColumnModel};
+pub use super::sys_backup_log::{ActiveModel as SysBackupLogActiveModel, Column as SysBackupLogColumn, Entity as SysBackupLog, Model as SysBackupLogModel};
+pub use super::sys_dept::{ActiveModel as SysDeptActiveModel, Column as SysDeptColumn, Entity as SysDept, Model as SysDeptModel};
+pub use super::sys_notice_read::{ActiveModel as SysNoticeReadActiveModel, Column as SysNoticeReadColumn, Entity as SysNoticeRead, Model as SysNoticeReadModel};
+pub use super::sys_post::{ActiveModel as SysPostActiveModel, Column as SysPostColumn, Entity as SysPost, Model as SysPostModel};
+pub use super::sys_rate_limit::{ActiveModel as SysRateLimitActiveModel, Column as SysRateLimitColumn, Entity as SysRateLimit, Model as SysRateLimitModel};
+pub use super::sys_role_dept::{ActiveModel as SysRoleDeptActiveModel, Column as SysRoleDeptColumn, Entity as SysRoleDept, Model as SysRoleDeptModel};
+pub use super::sys_task::{ActiveModel as SysTaskActiveModel, Column as SysTaskColumn, Entity as SysTask, Model as SysTaskModel};
+pub use super::sys_user_post::{ActiveModel as SysUserPostActiveModel, Column as SysUserPostColumn, Entity as SysUserPost, Model as SysUserPostModel};

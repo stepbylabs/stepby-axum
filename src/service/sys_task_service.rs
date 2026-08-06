@@ -7,7 +7,6 @@
 //! - 任务分页查询 / 详情 / 批量删除
 //! - 通过 WS 广播 taskProgress 事件，前端浮层组件实时显示
 
-use chrono::NaiveDateTime;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
@@ -64,12 +63,6 @@ pub struct TaskCreateDto {
 }
 
 // ==================== 辅助函数 ====================
-
-/// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
-}
 
 // ==================== Service 实现 ====================
 
@@ -262,11 +255,11 @@ impl SysTaskService {
         let limit = page.limit();
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(parse_time(s)?),
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
 

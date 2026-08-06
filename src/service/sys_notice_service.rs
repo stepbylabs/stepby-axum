@@ -6,7 +6,6 @@
 //! - 不依赖任何 Web 框架类型（axum / tower / tower-http）
 //! - 数据访问通过 Repository 层委托
 
-use chrono::NaiveDateTime;
 use futures::future::FutureExt;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
@@ -147,21 +146,7 @@ pub struct NoticeMarkReadAllDto {
 
 // ==================== 辅助函数 ====================
 
-/// 解析时间字符串（%Y-%m-%d 格式），失败返回 ServiceError
-fn parse_time(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    crate::common::datetime::parse_local_date_to_utc_naive(s)
-        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
-}
-
-/// HTML 特殊字符转义（用于邮件正文安全渲染）
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-        .replace('\n', "<br/>")
-}
+// HTML 转义收敛到 `crate::utils::sanitize::html_escape`（见下方调用点），避免重复实现。
 
 // ==================== Service 实现 ====================
 
@@ -200,11 +185,11 @@ impl SysNoticeService {
         let limit = page.limit();
 
         let begin = match query.begin_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
         let end = match query.end_time.as_deref() {
-            Some(s) => Some(parse_time(s)?),
+            Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
 
@@ -316,8 +301,8 @@ impl SysNoticeService {
                 <hr style=\"border: none; border-top: 1px solid #ddd; margin: 20px 0;\"/>
                 <p style=\"color: #999; font-size: 12px;\">{footer}</p>
             </div>",
-            title = html_escape(title),
-            content = html_escape(content.unwrap_or("")),
+            title = crate::utils::sanitize::html_escape(title),
+            content = crate::utils::sanitize::html_escape(content.unwrap_or("")),
             footer = crate::tr!("notice.email.footer")
         );
 

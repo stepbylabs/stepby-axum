@@ -230,14 +230,16 @@ impl IpLocator {
     }
 }
 
-/// 判断 IP 是否为内网地址
+/// 判断 IP 是否为内网/保留地址（不应作为公网客户端真实 IP 处理）
 ///
-/// 覆盖范围：
-/// - 10.0.0.0/8
-/// - 172.16.0.0/12（172.16.x ~ 172.31.x）
-/// - 192.168.0.0/16
+/// 覆盖范围（RFC 1918 / RFC 6598 / RFC 4193 / 特殊用途）：
+/// - 10.0.0.0/8（私有）
+/// - 172.16.0.0/12（私有，172.16.x ~ 172.31.x）
+/// - 192.168.0.0/16（私有）
+/// - 100.64.0.0/10（CGNAT，运营商级 NAT，RFC 6598）
+/// - 169.254.0.0/16（链路本地 APIPA）
 /// - 127.0.0.0/8（回环）
-/// - IPv6 回环 ::1 / IPv6 链路本地 fe80::/10
+/// - IPv6 回环 ::1 / 链路本地 fe80::/10 / 唯一本地 fc00::/7（ULA, RFC 4193）
 fn is_private_ip(ip: &str) -> bool {
     let addr: IpAddr = match ip.parse() {
         Ok(a) => a,
@@ -258,6 +260,14 @@ fn is_private_ip(ip: &str) -> bool {
             if octets[0] == 192 && octets[1] == 168 {
                 return true;
             }
+            // 100.64.0.0/10（CGNAT, RFC 6598）
+            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                return true;
+            }
+            // 169.254.0.0/16（链路本地 APIPA）
+            if octets[0] == 169 && octets[1] == 254 {
+                return true;
+            }
             // 127.0.0.0/8
             if octets[0] == 127 {
                 return true;
@@ -272,6 +282,10 @@ fn is_private_ip(ip: &str) -> bool {
             // fe80::/10 链路本地
             let segments = v6.segments();
             if (segments[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // fc00::/7 唯一本地地址（ULA, RFC 4193）
+            if (segments[0] & 0xfe00) == 0xfc00 {
                 return true;
             }
             false
@@ -291,6 +305,13 @@ mod tests {
         assert!(is_private_ip("172.31.255.255"));
         assert!(is_private_ip("192.168.1.1"));
         assert!(is_private_ip("127.0.0.1"));
+        // CGNAT 100.64.0.0/10（RFC 6598）
+        assert!(is_private_ip("100.64.0.1"));
+        assert!(is_private_ip("100.127.255.255"));
+        assert!(!is_private_ip("100.63.0.1"));
+        // 链路本地 APIPA 169.254.0.0/16
+        assert!(is_private_ip("169.254.0.1"));
+        assert!(!is_private_ip("169.253.0.1"));
     }
 
     #[test]
@@ -306,6 +327,10 @@ mod tests {
     fn test_is_private_ip_v6() {
         assert!(is_private_ip("::1"));
         assert!(is_private_ip("fe80::1"));
+        // IPv6 唯一本地地址（ULA）fc00::/7
+        assert!(is_private_ip("fc00::1"));
+        assert!(is_private_ip("fd00::1"));
+        assert!(!is_private_ip("2001:db8::1"));
     }
 
     #[test]

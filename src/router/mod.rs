@@ -63,7 +63,8 @@ const REQUEST_TIMEOUT_SECS: u64 = 120;
 /// - public_routes：免鉴权（/health、/captchaImage、/login）
 /// - protected：需 auth_middleware + permission_middleware（/logout、/getInfo、/getRouters、/system/*）
 /// - 静态资源：/uploads/*（头像等用户上传文件，免鉴权由前端 baseURL 拼接访问）
-/// - 全局中间件：request_id（最外层）→ Trace → Cors → Compression（最内层）
+/// - 全局中间件（由外到内执行顺序，与下方 app.layer 链一致）：
+///   security_headers → locale → request_id → Timeout → Trace → Cors → DefaultBodyLimit → Compression（最内层）
 pub fn build_app(state: Arc<AppState>) -> Router {
     // 受鉴权保护的业务路由
     let protected = Router::new()

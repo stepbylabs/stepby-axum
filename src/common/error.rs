@@ -285,61 +285,35 @@ impl From<ServiceError> for AppError {
     }
 }
 
-/// 兼容：SeaORM DbErr → AppError（经 ServiceError 中转）
-impl From<sea_orm::DbErr> for AppError {
-    fn from(err: sea_orm::DbErr) -> Self {
-        AppError::from(ServiceError::from(err))
-    }
+/// 批量生成 `impl From<$T> for AppError`：统一经 `ServiceError` 中转。
+///
+/// `AppError` 的 `From` 实现均为纯委托（`AppError::from(ServiceError::from(e))`），
+/// 抽成宏消除 8+ 处重复样板，并保证新增错误类型时不会漏写 `AppError` 侧转换。
+///
+/// 注：`ServiceError` 侧各自的 `From` 实现含脱敏/错误码/日志等定制逻辑，无法批量化，
+/// 仍保持手写；本宏仅收敛 `AppError` 这一层机械委托。
+macro_rules! impl_app_error_from {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl From<$t> for AppError {
+                fn from(err: $t) -> Self {
+                    AppError::from(ServiceError::from(err))
+                }
+            }
+        )*
+    };
 }
 
-/// 兼容：TransactionError → AppError
-impl From<sea_orm::TransactionError<sea_orm::DbErr>> for AppError {
-    fn from(err: sea_orm::TransactionError<sea_orm::DbErr>) -> Self {
-        AppError::from(ServiceError::from(err))
-    }
-}
-
-/// 兼容：garde Report → AppError
-impl From<garde::Report> for AppError {
-    fn from(report: garde::Report) -> Self {
-        AppError::from(ServiceError::from(report))
-    }
-}
-
-/// 兼容：serde_json::Error → AppError
-impl From<serde_json::Error> for AppError {
-    fn from(err: serde_json::Error) -> Self {
-        AppError::from(ServiceError::from(err))
-    }
-}
-
-/// 兼容：RedisError → AppError
-impl From<redis::RedisError> for AppError {
-    fn from(err: redis::RedisError) -> Self {
-        AppError::from(ServiceError::from(err))
-    }
-}
-
-/// 兼容：JwtError → AppError（中间件 ? 操作符使用）
-impl From<crate::jwt::JwtError> for AppError {
-    fn from(err: crate::jwt::JwtError) -> Self {
-        AppError::from(ServiceError::from(err))
-    }
-}
-
-/// 兼容：Argon2 密码哈希错误 → AppError
-impl From<argon2::password_hash::Error> for AppError {
-    fn from(err: argon2::password_hash::Error) -> Self {
-        AppError::from(ServiceError::from(err))
-    }
-}
-
-/// 兼容：anyhow::Error → AppError
-impl From<anyhow::Error> for AppError {
-    fn from(err: anyhow::Error) -> Self {
-        AppError::from(ServiceError::from(err))
-    }
-}
+impl_app_error_from!(
+    sea_orm::DbErr,
+    sea_orm::TransactionError<sea_orm::DbErr>,
+    garde::Report,
+    serde_json::Error,
+    redis::RedisError,
+    crate::jwt::JwtError,
+    argon2::password_hash::Error,
+    anyhow::Error,
+);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {

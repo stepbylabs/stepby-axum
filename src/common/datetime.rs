@@ -20,6 +20,8 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde::{Deserialize, Deserializer, Serializer};
 
+use crate::common::error::ServiceError;
+
 const DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 /// 序列化（输出到前端）采用 RFC3339（带 `Z`），前端按 UTC 解析。
 const DATETIME_ISO: &str = "%Y-%m-%dT%H:%M:%S";
@@ -55,6 +57,20 @@ pub fn parse_local_date_to_utc_naive(s: &str) -> Option<NaiveDateTime> {
     let local_dt = d.and_time(NaiveTime::MIN);
     let dt_local: DateTime<Local> = local_dt.and_local_timezone(Local).single()?;
     Some(dt_local.with_timezone(&Utc).naive_local())
+}
+
+/// 解析日期查询参数（前端回传的 `%Y-%m-%d` 本地日）为对应的 UTC `NaiveDateTime`。
+///
+/// 统一各 Service 的 `begin_time` / `end_time` 时间范围过滤解析入口：
+/// - 复用 [`parse_local_date_to_utc_naive`] 做"本地日 → UTC 瞬间"换算，
+///   使过滤边界与库内 UTC 存储时间戳一致（修复此前部分 service 用裸
+///   `NaiveDateTime::parse_from_str` 导致非 UTC 时区下边界错位的问题）。
+/// - 解析失败返回 `400` `error.common.time_format_invalid`。
+///
+/// 各 Service 的私有 `parse_time` 应统一委托本函数，消除重复样板（见 P2 收敛）。
+pub fn parse_query_date(s: &str) -> Result<NaiveDateTime, ServiceError> {
+    parse_local_date_to_utc_naive(s)
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
 }
 
 /// 序列化 NaiveDateTime 为 RFC3339 `2026-01-01T00:00:00Z`（UTC 语义，补 Z 使所有 JSON 消费者按 UTC 解析）
@@ -114,5 +130,95 @@ where
                 .map(Some)
                 .map_err(serde::de::Error::custom)
         }
+    }
+}
+
+/// 生成 Entity 的 `ActiveModelBehavior::before_save` 实现：
+/// 插入时维护 `create_time`，每次更新维护 `update_time`（统一 UTC 语义）。
+///
+/// 消除各 entity 中重复的 11 份时间戳样板（P2 去重）。
+///
+/// 用法：在 `#[async_trait::async_trait] impl ActiveModelBehavior for ActiveModel { ... }`
+/// 体内调用 `crate::impl_timestamped_before_save!();` 即可。`DbErr` / `ConnectionTrait` /
+/// `Set` 在调用方模块作用域内即可（entity 文件已 `use sea_orm::*` 或等价导入）。
+/// 为 Entity 的 `ActiveModel` 生成完整的 `ActiveModelBehavior` 实现，
+/// 在 `before_save` 中统一维护 `create_time` / `update_time`（UTC 语义）。
+///
+/// 消除各 entity 中重复的 11 份时间戳样板（P2 去重）。
+///
+/// 用法：在 entity 文件中（Relation 定义之后）直接写
+/// `crate::impl_timestamped_active_model!();`
+/// 宏会生成如下等价代码（整个 impl 块由宏产出，避免宏调用嵌套在
+/// `#[async_trait]` impl 块内与 proc-macro 的交互问题）：
+///
+/// ```ignore
+/// #[async_trait::async_trait]
+/// impl ActiveModelBehavior for ActiveModel {
+///     async fn before_save<C>(self, _db: &C, insert: bool) -> Result<Self, DbErr>
+///     where C: ConnectionTrait {
+///         let now = crate::common::datetime::now_naive();
+///         let mut this = self;
+///         if insert { this.create_time = Set(Some(now)); }
+///         this.update_time = Set(Some(now));
+///         Ok(this)
+///     }
+/// }
+/// ```
+///
+/// 调用方需已 `use sea_orm::Set;`（entity 文件通常 `use sea_orm::entity::prelude::*`
+/// 已包含 `Set`）。
+#[macro_export]
+macro_rules! impl_timestamped_active_model {
+    () => {
+        #[async_trait::async_trait]
+        impl sea_orm::entity::prelude::ActiveModelBehavior for ActiveModel {
+            async fn before_save<C>(
+                self,
+                _db: &C,
+                insert: bool,
+            ) -> ::core::result::Result<Self, sea_orm::entity::prelude::DbErr>
+            where
+                C: sea_orm::entity::prelude::ConnectionTrait,
+            {
+                let now = $crate::common::datetime::now_naive();
+                let mut this = self;
+                if insert {
+                    this.create_time = Set(Some(now));
+                }
+                this.update_time = Set(Some(now));
+                ::core::result::Result::Ok(this)
+            }
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_query_date_valid() {
+        // 合法日期应成功解析为某个 UTC NaiveDateTime（具体值依赖服务器时区，仅验证 Ok）
+        assert!(parse_query_date("2026-08-05").is_ok());
+    }
+
+    #[test]
+    fn test_parse_query_date_invalid() {
+        // 非法格式应返回 400 错误（与 timezone 无关，确定性断言）
+        let err = parse_query_date("2026-13-40");
+        assert!(err.is_err());
+        let err = err.unwrap_err();
+        assert_eq!(err.code, 400);
+    }
+
+    #[test]
+    fn test_parse_local_date_to_utc_naive_invalid_none() {
+        assert!(parse_local_date_to_utc_naive("not-a-date").is_none());
+        assert!(parse_local_date_to_utc_naive("2026-02-30").is_none());
+    }
+
+    #[test]
+    fn test_parse_local_date_to_utc_naive_valid_some() {
+        assert!(parse_local_date_to_utc_naive("2026-08-05").is_some());
     }
 }
