@@ -213,6 +213,8 @@ error:
     unknown_source_type: "未知的更新源类型: {{s}}"
     maxmind_credentials_required: 切换到 maxmind 源需配置 Account ID 和 License Key
     private_ip: 内网IP
+    update_unavailable: IP 库更新服务暂不可用，请稍后再试
+    update_in_progress: IP 库更新任务正在进行中，请稍后再试
   backup:
     id_invalid: 备份 ID 不合法
     db_url_invalid: 数据库 URL 格式不正确
@@ -226,6 +228,9 @@ error:
     process_exec_failed: 备份进程执行失败
     record_not_found: 备份记录不存在
     restore_status_invalid: 仅可恢复成功的备份
+    too_frequent: 备份操作过于频繁，请稍后再试
+    restore_in_progress: 已有恢复任务正在进行中，请稍后再试
+    service_unavailable: 备份服务暂不可用，请稍后再试
     filename_invalid_restore: 备份文件名不合法
     file_exist_check_join_failed: 文件存在性检查任务 join 失败
     file_not_found: 备份文件不存在
@@ -309,6 +314,10 @@ error:
     enc_key_missing: 加密密钥未配置（CONFIG_ENC_KEY），无法加解密 TOTP secret
     encrypt_failed: TOTP secret 加密失败
     decrypt_failed: TOTP secret 解密失败
+    login_required: 请提供 TOTP 动态验证码完成二次验证
+    login_locked: TOTP 验证失败次数过多，请 10 分钟后再试
+    already_enabled: 您已启用 TOTP，如需更换请先关闭后再重新绑定
+    pending_expired: 绑定会话已过期，请重新获取二维码后重试
   upload:
     write_task_failed: 文件写入任务失败
     write_failed: 写入上传文件失败
@@ -382,6 +391,8 @@ log:
     account_disabled: 账号已停用
     login_success: 登录成功
     permission_denied: "权限拒绝：缺少所需权限 {{perm}}"
+    totp_failed: TOTP 动态验证码错误
+    totp_locked: TOTP 验证失败次数过多，已临时锁定
 
 # 通用状态文案（Excel 导出、状态展示等场景使用）
 common:

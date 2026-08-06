@@ -69,7 +69,12 @@ where
     ///
     /// DB-22：MySQL 不支持 RETURNING 子句，按 backend 分支处理：
     /// - PostgreSQL / SQLite：使用 `exec_with_returning`（原生 RETURNING）
-    /// - MySQL：先 `exec` 再 `find_by_id` 回查
+    /// - MySQL：先 `exec`，再按主键性质分支（P0-7 修复）：
+    ///   - 单列自增主键：`find_by_id(last_insert_id)` 回查（正确）
+    ///   - 复合主键/非自增表（sys_role_menu / sys_role_dept / sys_user_post /
+    ///     sys_user_role 等）：last_insert_id 恒为 0，回查必失败。此类表在
+    ///     service 层一律使用 `insert_many_conn` 或各关联表专用批量方法，
+    ///     本方法对它们返回明确错误指引，避免误用后得到误导性的 RecordNotFound。
     pub async fn insert(&self, model: E::ActiveModel) -> Result<E::Model, DbErr>
     where
         E::Model: IntoActiveModel<E::ActiveModel>,
@@ -78,12 +83,21 @@ where
         match backend {
             DatabaseBackend::MySql => {
                 let res = E::insert(model).exec(&self.db).await?;
-                E::find_by_id(res.last_insert_id)
-                    .one(&self.db)
-                    .await?
-                    .ok_or_else(|| {
-                        DbErr::RecordNotFound("Failed to find inserted item".to_owned())
-                    })
+                if <E::PrimaryKey as PrimaryKeyTrait>::auto_increment() {
+                    E::find_by_id(res.last_insert_id)
+                        .one(&self.db)
+                        .await?
+                        .ok_or_else(|| {
+                            DbErr::RecordNotFound("Failed to find inserted item".to_owned())
+                        })
+                } else {
+                    tracing::warn!(
+                        "BaseRepository::insert 不适用于 MySQL 复合主键/非自增表，请使用 insert_many_conn 或专用批量方法"
+                    );
+                    Err(DbErr::RecordNotFound(
+                        "复合主键/非自增表在 MySQL 下请使用 insert_many_conn 或专用插入方法".to_owned(),
+                    ))
+                }
             }
             _ => E::insert(model).exec_with_returning(&self.db).await,
         }
@@ -147,7 +161,7 @@ where
     ///
     /// DB-22：MySQL 不支持 RETURNING 子句，按 backend 分支处理：
     /// - PostgreSQL / SQLite：使用 `exec_with_returning`（原生 RETURNING）
-    /// - MySQL：先 `exec` 再 `find_by_id` 回查
+    /// - MySQL：单列自增回查 last_insert_id；复合主键/非自增表返回明确错误指引（P0-7）
     pub async fn insert_conn<C>(
         &self,
         conn: &C,
@@ -161,12 +175,21 @@ where
         match backend {
             DatabaseBackend::MySql => {
                 let res = E::insert(model).exec(conn).await?;
-                E::find_by_id(res.last_insert_id)
-                    .one(conn)
-                    .await?
-                    .ok_or_else(|| {
-                        DbErr::RecordNotFound("Failed to find inserted item".to_owned())
-                    })
+                if <E::PrimaryKey as PrimaryKeyTrait>::auto_increment() {
+                    E::find_by_id(res.last_insert_id)
+                        .one(conn)
+                        .await?
+                        .ok_or_else(|| {
+                            DbErr::RecordNotFound("Failed to find inserted item".to_owned())
+                        })
+                } else {
+                    tracing::warn!(
+                        "BaseRepository::insert_conn 不适用于 MySQL 复合主键/非自增表，请使用 insert_many_conn 或专用批量方法"
+                    );
+                    Err(DbErr::RecordNotFound(
+                        "复合主键/非自增表在 MySQL 下请使用 insert_many_conn 或专用插入方法".to_owned(),
+                    ))
+                }
             }
             _ => E::insert(model).exec_with_returning(conn).await,
         }

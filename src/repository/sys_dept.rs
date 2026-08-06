@@ -48,20 +48,22 @@ impl SysDeptRepository {
     /// 占位符差异：MySQL 使用 `?`，PostgreSQL/SQLite 使用 `$1`。
     pub async fn find_descendant_ids(&self, dept_id: i64) -> Result<Vec<i64>, DbErr> {
         let backend = self.base.db().get_database_backend();
+        // P1：CTE 增加 depth 列与深度上限（30 层），防止 sys_dept.parent_id 脏数据成环时
+        // PostgreSQL 无限递归拖垮 DB（SQLite/MySQL 有内置上限，PG 无）
         let sql = match backend {
             DatabaseBackend::MySql => r#"WITH RECURSIVE dept_tree AS (
-                SELECT dept_id FROM sys_dept WHERE dept_id = ? AND del_flag = '0'
+                SELECT dept_id, 0 AS depth FROM sys_dept WHERE dept_id = ? AND del_flag = '0'
                 UNION ALL
-                SELECT d.dept_id FROM sys_dept d
+                SELECT d.dept_id, t.depth + 1 FROM sys_dept d
                 INNER JOIN dept_tree t ON d.parent_id = t.dept_id
-                WHERE d.del_flag = '0'
+                WHERE d.del_flag = '0' AND t.depth < 30
             ) SELECT dept_id FROM dept_tree"#,
             _ => r#"WITH RECURSIVE dept_tree AS (
-                SELECT dept_id FROM sys_dept WHERE dept_id = $1 AND del_flag = '0'
+                SELECT dept_id, 0 AS depth FROM sys_dept WHERE dept_id = $1 AND del_flag = '0'
                 UNION ALL
-                SELECT d.dept_id FROM sys_dept d
+                SELECT d.dept_id, t.depth + 1 FROM sys_dept d
                 INNER JOIN dept_tree t ON d.parent_id = t.dept_id
-                WHERE d.del_flag = '0'
+                WHERE d.del_flag = '0' AND t.depth < 30
             ) SELECT dept_id FROM dept_tree"#,
         };
         let stmt = Statement::from_sql_and_values(backend, sql, [dept_id.into()]);

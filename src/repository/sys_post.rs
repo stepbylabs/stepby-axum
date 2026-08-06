@@ -149,6 +149,8 @@ impl SysPostRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
+        // P1：稳定排序，防翻页重复/漏行
+        query = query.order_by_asc(Column::PostId);
 
         let total = query.clone().count(self.base.db()).await?;
         let rows = query

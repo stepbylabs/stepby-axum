@@ -80,6 +80,25 @@ pub async fn create(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<BackupCreateVo>, AppError> {
+    // P1 修复：手动备份限流（60s 最小间隔），防反复触发耗尽磁盘空间
+    let lock_key = format!("backup:create:{}", operator.user_id());
+    let mut conn = state.redis.clone();
+    let acquired: bool = redis::cmd("SET")
+        .arg(&lock_key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(60i64)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "备份限流锁写入失败（fail-closed 拒绝）");
+            AppError::new(503, crate::tr!("error.backup.service_unavailable"))
+        })?;
+    if !acquired {
+        return Err(AppError::bad_request(&crate::tr!("error.backup.too_frequent")));
+    }
+
     let vo = state.backup_service.create_backup(operator.username()).await?;
     Ok(AjaxResult::success(vo))
 }
@@ -107,10 +126,42 @@ pub async fn restore(
     operator: Operator,
     Path(backup_id): Path<i64>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state
+    // P1 修复：恢复为高危操作，加 Redis 互斥锁（10 分钟 TTL 防卡死），
+    // 防止两个并发 restore 互相覆盖（此前无并发控制）
+    let restore_lock_key = "backup:restore:lock";
+    let lock_value = uuid::Uuid::new_v4().to_string();
+    let mut redis = state.redis.clone();
+    let acquired: bool = redis::cmd("SET")
+        .arg(restore_lock_key)
+        .arg(&lock_value)
+        .arg("NX")
+        .arg("EX")
+        .arg(600i64)
+        .query_async(&mut redis)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "恢复互斥锁写入失败（fail-closed 拒绝）");
+            AppError::new(503, crate::tr!("error.backup.service_unavailable"))
+        })?;
+    if !acquired {
+        return Err(AppError::bad_request(&crate::tr!("error.backup.restore_in_progress")));
+    }
+
+    let result = state
         .backup_service
         .restore_backup(backup_id, operator.username())
-        .await?;
+        .await;
+
+    // 释放锁（CAS：仅当 value 匹配时删除，避免误删其他恢复任务的锁）
+    let _: i64 = redis::cmd("EVAL")
+        .arg(r#"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"#)
+        .arg(1)
+        .arg(restore_lock_key)
+        .arg(&lock_value)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or(0);
+    result?;
 
     // 恢复成功后清理 Redis 业务缓存，避免缓存与恢复后的数据库数据不一致
     // 清理范围：字典缓存(dict:*)、系统配置缓存(config:*)、限流配置缓存(rate_limit:config:*)

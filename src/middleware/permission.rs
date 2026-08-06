@@ -292,7 +292,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("PUT", "/system/role") => Some("system:role:edit"),
         ("PUT", "/system/role/changeStatus") => Some("system:role:edit"),
         ("PUT", "/system/role/dataScope") => Some("system:role:edit"),
-        ("DELETE", "/system/role/{ids}") => Some("system:role:remove"),
+        ("DELETE", "/system/role/{id}") => Some("system:role:remove"),
         ("POST", "/system/role/export") => Some("system:role:export"),
         // authUser 系列接口：授权用户管理，使用 system:role:edit
         ("GET", "/system/role/authUser/allocatedList") => Some("system:role:list"),
@@ -328,7 +328,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("PUT", "/monitor/job") => Some("monitor:job:edit"),
         ("PUT", "/monitor/job/changeStatus") => Some("monitor:job:changeStatus"),
         ("PUT", "/monitor/job/run") => Some("monitor:job:changeStatus"),
-        ("DELETE", "/monitor/job/{jobIds}") => Some("monitor:job:remove"),
+        ("DELETE", "/monitor/job/{jobId}") => Some("monitor:job:remove"),
         ("POST", "/monitor/job/export") => Some("monitor:job:export"),
 
         // ===== 定时任务日志 =====
@@ -345,13 +345,13 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("PUT", "/system/dict/type") => Some("system:dict:edit"),
         ("DELETE", "/system/dict/type/refreshCache") => Some("system:dict:remove"),
         ("POST", "/system/dict/type/export") => Some("system:dict:export"),
-        ("DELETE", "/system/dict/type/{dictIds}") => Some("system:dict:remove"),
+        ("DELETE", "/system/dict/type/{dictId}") => Some("system:dict:remove"),
         ("GET", "/system/dict/data/list") => Some("system:dict:list"),
         ("GET", "/system/dict/data/type/{dictType}") => Some("system:dict:query"),
         ("GET", "/system/dict/data/{dictCode}") => Some("system:dict:query"),
         ("POST", "/system/dict/data") => Some("system:dict:add"),
         ("PUT", "/system/dict/data") => Some("system:dict:edit"),
-        ("DELETE", "/system/dict/data/{dictCodes}") => Some("system:dict:remove"),
+        ("DELETE", "/system/dict/data/{dictCode}") => Some("system:dict:remove"),
         ("POST", "/system/dict/data/export") => Some("system:dict:export"),
 
         // ===== 通知公告 =====
@@ -366,7 +366,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/system/notice/markReadAll") => None,
         ("POST", "/system/notice/markAllUnreadRead") => None,
         ("PUT", "/system/notice") => Some("system:notice:edit"),
-        ("DELETE", "/system/notice/{noticeIds}") => Some("system:notice:remove"),
+        ("DELETE", "/system/notice/{noticeId}") => Some("system:notice:remove"),
 
         // ===== 参数配置 =====
         ("GET", "/system/config/list") => Some("system:config:list"),
@@ -376,7 +376,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/system/config") => Some("system:config:add"),
         ("PUT", "/system/config") => Some("system:config:edit"),
         ("DELETE", "/system/config/refreshCache") => Some("system:config:remove"),
-        ("DELETE", "/system/config/{configIds}") => Some("system:config:remove"),
+        ("DELETE", "/system/config/{configId}") => Some("system:config:remove"),
         ("POST", "/system/config/export") => Some("system:config:export"),
 
         // ===== 岗位管理 =====
@@ -384,7 +384,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("GET", "/system/post/{postId}") => Some("system:post:query"),
         ("POST", "/system/post") => Some("system:post:add"),
         ("PUT", "/system/post") => Some("system:post:edit"),
-        ("DELETE", "/system/post/{postIds}") => Some("system:post:remove"),
+        ("DELETE", "/system/post/{postId}") => Some("system:post:remove"),
         ("POST", "/system/post/export") => Some("system:post:export"),
         // optionselect：仅需登录，不在此表
 
@@ -413,8 +413,9 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("GET", "/monitor/cache/getNames") => Some("monitor:cache:list"),
         ("GET", "/monitor/cache/getKeys/{cacheName}") => Some("monitor:cache:list"),
         ("GET", "/monitor/cache/getValue/{cacheName}/{cacheKey}") => Some("monitor:cache:query"),
-        ("DELETE", "/monitor/cache/clearCacheName/{cacheName}") => Some("monitor:cache:clear"),
-        ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}") => Some("monitor:cache:clear"),
+        // 缓存清除权限与 sys_menu 按钮种子 3022/3023 对齐（monitor:cache:clearName / clearKey）
+        ("DELETE", "/monitor/cache/clearCacheName/{cacheName}") => Some("monitor:cache:clearName"),
+        ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}") => Some("monitor:cache:clearKey"),
         // clearCacheAll 端点已从路由中移除（FLUSHDB 会误清业务键），权限映射随之删除
 
         // ===== 服务器监控 =====
@@ -427,7 +428,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/tool/gen/importTable") => Some("tool:gen:import"),
         ("POST", "/tool/gen/createTable") => Some("tool:gen:edit"),
         ("PUT", "/tool/gen") => Some("tool:gen:edit"),
-        ("DELETE", "/tool/gen/{tableIds}") => Some("tool:gen:remove"),
+        ("DELETE", "/tool/gen/{tableId}") => Some("tool:gen:remove"),
         ("GET", "/tool/gen/preview/{tableId}") => Some("tool:gen:preview"),
         ("GET", "/tool/gen/genCode/{tableName}") => Some("tool:gen:code"),
         // P0-4 修复：synchDb 路由实际注册为 POST（见 tool_gen_router.rs:37），
@@ -447,12 +448,12 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/system/backup") => Some("system:backup:add"),
         ("POST", "/system/backup/restore/{backupId}") => Some("system:backup:edit"),
         ("GET", "/system/backup/download/{backupId}") => Some("system:backup:query"),
-        ("DELETE", "/system/backup/{backupIds}") => Some("system:backup:remove"),
+        ("DELETE", "/system/backup/{backupId}") => Some("system:backup:remove"),
 
         // ===== 任务进度中心 =====
         ("GET", "/system/task/list") => Some("system:task:list"),
         ("GET", "/system/task/{taskId}") => Some("system:task:query"),
-        ("DELETE", "/system/task/{taskIds}") => Some("system:task:remove"),
+        ("DELETE", "/system/task/{taskId}") => Some("system:task:remove"),
 
         // ===== API 限流配置 =====
         // P0-3 修复：原完全缺失权限映射，任意登录用户可增删改限流规则，
@@ -469,6 +470,8 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("GET", "/monitor/operlog/stats") => Some("monitor:audit:list"),
         // 合规报告与审计大屏共享 monitor:audit:list 权限
         ("GET", "/monitor/operlog/compliance-report") => Some("monitor:audit:list"),
+        // 操作日志类型统计（dashboard 首页图表专用聚合接口，与 /dashboard/stats 一致使用监控查看权限）
+        ("GET", "/monitor/operlog/stats-by-type") => Some("monitor:server:list"),
 
         // ===== IP 归属地库管理 =====
         // 菜单 menu_id=121 (IP 库管理) 在系统监控目录下，perms=monitor:iplocation:list
@@ -524,9 +527,14 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
         // ===== 下拉树 / 选项（仅登录）=====
             | ("GET", "/system/role/deptTree/{roleId}")
             | ("GET", "/system/menu/treeselect")
-            | ("GET", "/system/menu/roleMenuTreeselect")
+            | ("GET", "/system/menu/roleMenuTreeselect/{roleId}")
             | ("GET", "/system/dept/treeselect")
             | ("GET", "/system/post/optionselect")
+        // ===== TOTP 多因子认证（个人自助操作，仅登录）=====
+            | ("POST", "/system/user/totp/setup")
+            | ("POST", "/system/user/totp/verify")
+            | ("GET", "/system/user/totp/status")
+            | ("POST", "/system/user/totp/disable")
         // ===== 公告标记已读（自助，仅登录）=====
             | ("POST", "/system/notice/markRead")
             | ("POST", "/system/notice/markReadAll")
@@ -601,9 +609,9 @@ mod tests {
 
     #[test]
     fn test_cache_clear_perm() {
-        // clearCacheAll 端点已移除，验证 clearCacheName/clearCacheKey 权限映射
-        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheName/{cacheName}"), Some("monitor:cache:clear"));
-        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"), Some("monitor:cache:clear"));
+        // clearCacheAll 端点已移除；清除权限与 sys_menu 按钮种子 3022/3023 对齐（P0-10）
+        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheName/{cacheName}"), Some("monitor:cache:clearName"));
+        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"), Some("monitor:cache:clearKey"));
     }
 
     #[test]
@@ -693,7 +701,7 @@ mod tests {
         // 下拉树 / 选项
         assert!(is_login_only_path("GET", "/system/role/deptTree/{roleId}"));
         assert!(is_login_only_path("GET", "/system/menu/treeselect"));
-        assert!(is_login_only_path("GET", "/system/menu/roleMenuTreeselect"));
+        assert!(is_login_only_path("GET", "/system/menu/roleMenuTreeselect/{roleId}"));
         assert!(is_login_only_path("GET", "/system/dept/treeselect"));
         assert!(is_login_only_path("GET", "/system/post/optionselect"));
         // 公告标记已读
@@ -715,5 +723,258 @@ mod tests {
         assert!(!is_login_only_path("GET", "/unknown/path"));
         assert!(!is_login_only_path("POST", "/system/user"));
         assert!(!is_login_only_path("GET", "/system/user/list"));
+    }
+
+    #[test]
+    fn test_totp_routes_login_only() {
+        // TOTP 为个人自助操作，仅需登录（deny_by_default=true 时也不应被 403 误伤）
+        assert!(is_login_only_path("POST", "/system/user/totp/setup"));
+        assert!(is_login_only_path("POST", "/system/user/totp/verify"));
+        assert!(is_login_only_path("GET", "/system/user/totp/status"));
+        assert!(is_login_only_path("POST", "/system/user/totp/disable"));
+    }
+
+    #[test]
+    fn test_stats_by_type_perm_mapped() {
+        // dashboard 首页操作日志类型统计需监控查看权限（P0-1 补充映射，此前 fail-open 裸奔）
+        assert_eq!(
+            get_required_perm("GET", "/monitor/operlog/stats-by-type"),
+            Some("monitor:server:list")
+        );
+    }
+
+    /// 受保护路由全量覆盖断言（P0-1 防回归）
+    ///
+    /// 清单与 src/router/*.rs 中注册的受保护路由逐一对应（方法 + MatchedPath 模板）。
+    /// 断言：每个受保护路由要么有权限映射（get_required_perm 返回 Some），
+    /// 要么显式登记为"仅登录"（is_login_only_path 为 true）。
+    /// 该测试保证 permission_deny_by_default=true（fail-closed）不会误伤任何已登记路由，
+    /// 同时防止新增路由漏登记权限导致 fail-open 越权。
+    #[test]
+    fn test_all_protected_routes_covered() {
+        // (method, path) —— 与 router/mod.rs protected 子树各 router 注册保持一致
+        const PROTECTED_ROUTES: &[(&str, &str)] = &[
+            // auth_router::protected_auth_routes（仅登录）
+            ("POST", "/logout"),
+            ("GET", "/getInfo"),
+            ("GET", "/getRouters"),
+            ("POST", "/unlockscreen"),
+            // common_router
+            ("POST", "/common/upload"),
+            ("GET", "/common/download"),
+            ("GET", "/common/download/resource"),
+            // dashboard
+            ("GET", "/dashboard/stats"),
+            ("GET", "/dashboard/user-stats"),
+            // sys_user_router
+            ("GET", "/system/user/list"),
+            ("GET", "/system/user/{id}"),
+            ("GET", "/system/user/"),
+            ("GET", "/system/user/authRole/{userId}"),
+            ("POST", "/system/user"),
+            ("PUT", "/system/user"),
+            ("PUT", "/system/user/changeStatus"),
+            ("PUT", "/system/user/resetPwd"),
+            ("PUT", "/system/user/authRole"),
+            ("DELETE", "/system/user/{id}"),
+            ("POST", "/system/user/export"),
+            ("GET", "/system/user/profile"),
+            ("PUT", "/system/user/profile"),
+            ("PUT", "/system/user/profile/updatePwd"),
+            ("POST", "/system/user/profile/avatar"),
+            ("GET", "/system/user/deptTree"),
+            // totp_router（仅登录）
+            ("POST", "/system/user/totp/setup"),
+            ("POST", "/system/user/totp/verify"),
+            ("GET", "/system/user/totp/status"),
+            ("POST", "/system/user/totp/disable"),
+            // sys_role_router
+            ("GET", "/system/role/list"),
+            ("GET", "/system/role/{id}"),
+            ("POST", "/system/role"),
+            ("PUT", "/system/role"),
+            ("PUT", "/system/role/changeStatus"),
+            ("PUT", "/system/role/dataScope"),
+            ("DELETE", "/system/role/{id}"),
+            ("POST", "/system/role/export"),
+            ("GET", "/system/role/authUser/allocatedList"),
+            ("GET", "/system/role/authUser/unallocatedList"),
+            ("PUT", "/system/role/authUser/cancel"),
+            ("PUT", "/system/role/authUser/cancelAll"),
+            ("PUT", "/system/role/authUser/selectAll"),
+            ("GET", "/system/role/deptTree/{roleId}"),
+            // sys_menu_router
+            ("GET", "/system/menu/list"),
+            ("GET", "/system/menu/{id}"),
+            ("POST", "/system/menu"),
+            ("PUT", "/system/menu"),
+            ("PUT", "/system/menu/updateSort"),
+            ("DELETE", "/system/menu/{id}"),
+            ("GET", "/system/menu/treeselect"),
+            ("GET", "/system/menu/roleMenuTreeselect/{roleId}"),
+            // sys_notice_router
+            ("GET", "/system/notice/list"),
+            ("GET", "/system/notice/listTop"),
+            ("GET", "/system/notice/readUsers/list"),
+            ("GET", "/system/notice/{noticeId}"),
+            ("POST", "/system/notice"),
+            ("PUT", "/system/notice"),
+            ("DELETE", "/system/notice/{noticeId}"),
+            ("POST", "/system/notice/markRead"),
+            ("POST", "/system/notice/markReadAll"),
+            ("POST", "/system/notice/markAllUnreadRead"),
+            // sys_dept_router
+            ("GET", "/system/dept/list"),
+            ("GET", "/system/dept/list/exclude/{deptId}"),
+            ("GET", "/system/dept/{deptId}"),
+            ("POST", "/system/dept"),
+            ("PUT", "/system/dept"),
+            ("PUT", "/system/dept/updateSort"),
+            ("DELETE", "/system/dept/{deptId}"),
+            ("GET", "/system/dept/treeselect"),
+            // sys_job_router
+            ("GET", "/monitor/job/list"),
+            ("GET", "/monitor/job/{jobId}"),
+            ("POST", "/monitor/job"),
+            ("PUT", "/monitor/job"),
+            ("PUT", "/monitor/job/changeStatus"),
+            ("PUT", "/monitor/job/run"),
+            ("DELETE", "/monitor/job/{jobId}"),
+            ("POST", "/monitor/job/export"),
+            // sys_job_log_router
+            ("GET", "/monitor/jobLog/list"),
+            ("DELETE", "/monitor/jobLog/{jobLogIds}"),
+            ("DELETE", "/monitor/jobLog/clean"),
+            ("POST", "/monitor/jobLog/export"),
+            // sys_dict_router
+            ("GET", "/system/dict/type/list"),
+            ("GET", "/system/dict/type/optionselect"),
+            ("GET", "/system/dict/type/{dictId}"),
+            ("POST", "/system/dict/type"),
+            ("PUT", "/system/dict/type"),
+            ("DELETE", "/system/dict/type/{dictId}"),
+            ("DELETE", "/system/dict/type/refreshCache"),
+            ("POST", "/system/dict/type/export"),
+            ("GET", "/system/dict/data/list"),
+            ("GET", "/system/dict/data/type/{dictType}"),
+            ("GET", "/system/dict/data/{dictCode}"),
+            ("POST", "/system/dict/data"),
+            ("PUT", "/system/dict/data"),
+            ("DELETE", "/system/dict/data/{dictCode}"),
+            ("POST", "/system/dict/data/export"),
+            // sys_config_router
+            ("GET", "/system/config/list"),
+            ("GET", "/system/config/{configId}"),
+            ("GET", "/system/config/configKey/{configKey}"),
+            ("POST", "/system/config"),
+            ("PUT", "/system/config"),
+            ("DELETE", "/system/config/{configId}"),
+            ("DELETE", "/system/config/refreshCache"),
+            ("POST", "/system/config/export"),
+            // sys_post_router
+            ("GET", "/system/post/list"),
+            ("GET", "/system/post/{postId}"),
+            ("POST", "/system/post"),
+            ("PUT", "/system/post"),
+            ("DELETE", "/system/post/{postId}"),
+            ("POST", "/system/post/export"),
+            ("GET", "/system/post/optionselect"),
+            // sys_rate_limit_router
+            ("GET", "/system/rateLimit/list"),
+            ("GET", "/system/rateLimit/{id}"),
+            ("POST", "/system/rateLimit"),
+            ("PUT", "/system/rateLimit"),
+            ("DELETE", "/system/rateLimit/{id}"),
+            ("POST", "/system/rateLimit/export"),
+            // sys_oper_log_router
+            ("GET", "/monitor/operlog/list"),
+            ("DELETE", "/monitor/operlog/{operIds}"),
+            ("DELETE", "/monitor/operlog/clean"),
+            ("POST", "/monitor/operlog/export"),
+            ("GET", "/monitor/operlog/stats"),
+            ("GET", "/monitor/operlog/compliance-report"),
+            ("GET", "/monitor/operlog/stats-by-type"),
+            // sys_logininfor_router
+            ("GET", "/monitor/logininfor/list"),
+            ("GET", "/monitor/logininfor/stats"),
+            ("DELETE", "/monitor/logininfor/{infoIds}"),
+            ("POST", "/monitor/logininfor/unlock/{userName}"),
+            ("DELETE", "/monitor/logininfor/clean"),
+            ("POST", "/monitor/logininfor/export"),
+            // monitor_online_router
+            ("GET", "/monitor/online/list"),
+            ("DELETE", "/monitor/online/{tokenHash}"),
+            // monitor_cache_router
+            ("GET", "/monitor/cache"),
+            ("GET", "/monitor/cache/getNames"),
+            ("GET", "/monitor/cache/getKeys/{cacheName}"),
+            ("GET", "/monitor/cache/getValue/{cacheName}/{cacheKey}"),
+            ("DELETE", "/monitor/cache/clearCacheName/{cacheName}"),
+            ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"),
+            // monitor_server_router
+            ("GET", "/monitor/server"),
+            // sys_backup_router
+            ("GET", "/system/backup/list"),
+            ("GET", "/system/backup/{backupId}"),
+            ("POST", "/system/backup"),
+            ("POST", "/system/backup/restore/{backupId}"),
+            ("GET", "/system/backup/download/{backupId}"),
+            ("DELETE", "/system/backup/{backupId}"),
+            // sys_task_router
+            ("GET", "/system/task/list"),
+            ("GET", "/system/task/{taskId}"),
+            ("DELETE", "/system/task/{taskId}"),
+            // ip_location_router
+            ("GET", "/system/ipLocation/status"),
+            ("GET", "/system/ipLocation/config"),
+            ("PUT", "/system/ipLocation/config"),
+            ("POST", "/system/ipLocation/update"),
+            ("POST", "/system/ipLocation/reload"),
+            ("POST", "/system/ipLocation/reloadXdb"),
+            // tool_gen_router
+            ("GET", "/tool/gen/list"),
+            ("GET", "/tool/gen/db/list"),
+            ("GET", "/tool/gen/{tableId}"),
+            ("POST", "/tool/gen/importTable"),
+            ("POST", "/tool/gen/createTable"),
+            ("PUT", "/tool/gen"),
+            ("DELETE", "/tool/gen/{tableId}"),
+            ("GET", "/tool/gen/preview/{tableId}"),
+            ("GET", "/tool/gen/genCode/{tableName}"),
+            ("POST", "/tool/gen/synchDb/{tableName}"),
+            ("GET", "/tool/gen/batchGenCode"),
+            // file_router
+            ("GET", "/system/file/list"),
+            ("POST", "/system/file/upload"),
+            ("DELETE", "/system/file/delete"),
+        ];
+
+        let mut uncovered: Vec<(&str, &str)> = Vec::new();
+        for &(method, path) in PROTECTED_ROUTES {
+            if get_required_perm(method, path).is_none() && !is_login_only_path(method, path) {
+                uncovered.push((method, path));
+            }
+        }
+        assert!(
+            uncovered.is_empty(),
+            "以下受保护路由未登记权限映射且不在仅登录白名单（deny_by_default=true 下会被 403 误伤，fail-open 下存在越权风险）: {:?}",
+            uncovered
+        );
+    }
+
+    #[test]
+    fn test_delete_param_names_match_router() {
+        // P0-1 回归：10 个 DELETE 接口的路径参数名必须与 router 注册一致（MatchedPath 精确匹配），
+        // 否则 get_required_perm 返回 None，fail-open 下仅需登录即可删除。
+        assert_eq!(get_required_perm("DELETE", "/system/role/{id}"), Some("system:role:remove"));
+        assert_eq!(get_required_perm("DELETE", "/monitor/job/{jobId}"), Some("monitor:job:remove"));
+        assert_eq!(get_required_perm("DELETE", "/system/dict/type/{dictId}"), Some("system:dict:remove"));
+        assert_eq!(get_required_perm("DELETE", "/system/dict/data/{dictCode}"), Some("system:dict:remove"));
+        assert_eq!(get_required_perm("DELETE", "/system/notice/{noticeId}"), Some("system:notice:remove"));
+        assert_eq!(get_required_perm("DELETE", "/system/config/{configId}"), Some("system:config:remove"));
+        assert_eq!(get_required_perm("DELETE", "/system/post/{postId}"), Some("system:post:remove"));
+        assert_eq!(get_required_perm("DELETE", "/tool/gen/{tableId}"), Some("tool:gen:remove"));
+        assert_eq!(get_required_perm("DELETE", "/system/backup/{backupId}"), Some("system:backup:remove"));
+        assert_eq!(get_required_perm("DELETE", "/system/task/{taskId}"), Some("system:task:remove"));
     }
 }

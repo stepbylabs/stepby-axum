@@ -71,6 +71,10 @@ pub async fn import_table(
     if table_names.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.gen.table_select_required")));
     }
+    // P1 修复：与同文件 gen_code/synch_db 一致，逐个白名单校验表名（防 CRLF/引号/路径穿越注入）
+    for table_name in &table_names {
+        validate_table_name(table_name)?;
+    }
     for table_name in table_names {
         state
             .gen_table_service
@@ -128,6 +132,13 @@ pub async fn delete_table(
     let ids: Vec<i64> = parse_id_list::<i64>(&table_ids);
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.gen.table_id_invalid")));
+    }
+    // P1 修复：批量删除上限（与其他删除端点一致，防批量删除风暴）
+    if ids.len() > crate::common::constants::MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = crate::common::constants::MAX_BATCH_DELETE_SIZE
+        )));
     }
     state.gen_table_service.delete_tables(ids).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))

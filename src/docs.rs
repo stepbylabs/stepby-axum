@@ -284,6 +284,8 @@ pub struct ApiDoc;
 /// `ApiDoc::openapi()` 需要遍历所有 #[derive(OpenApi)] 标注的 handlers/schemas，
 /// 生成完整的 OpenAPI 3.0 规范，开销较大（~10ms）。使用 OnceLock 缓存避免重复计算。
 static OPENAPI_JSON_CACHE: OnceLock<String> = OnceLock::new();
+/// OpenAPI 序列化失败标记（P2：失败不缓存，避免持续返回 500 内容；下次请求重试）
+static OPENAPI_SERIALIZE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// GET /api-docs/openapi.json
 /// 返回 OpenAPI 3.0 JSON 规范
@@ -293,18 +295,48 @@ static OPENAPI_JSON_CACHE: OnceLock<String> = OnceLock::new();
 ///
 /// 性能优化：使用 OnceLock 缓存序列化结果，避免每次请求都重新生成 + 序列化。
 pub async fn openapi_json() -> impl IntoResponse {
-    let json = OPENAPI_JSON_CACHE.get_or_init(|| {
-        serde_json::to_string(&ApiDoc::openapi())
-            .unwrap_or_else(|_| "{\"error\":\"Failed to serialize OpenAPI\"}".to_string())
-    });
-    // 克隆 String 转为 Vec<u8> 以构建响应（OnceLock 持有引用，需克隆数据）
-    (
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
-            (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
-        ],
-        json.clone(),
-    )
+    // P2 修复：序列化失败时置失败标记且不缓存结果；已缓存过则直接复用，
+    // 失败路径下次请求重试（OnceLock 无法回滚，用 AtomicBool 标记 + 请求级兜底）
+    if !OPENAPI_SERIALIZE_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        let json = OPENAPI_JSON_CACHE.get_or_init(|| {
+            match serde_json::to_string(&ApiDoc::openapi()) {
+                Ok(json) => json,
+                Err(e) => {
+                    tracing::error!("OpenAPI 序列化失败（不缓存错误结果，后续请求将重试）: {}", e);
+                    OPENAPI_SERIALIZE_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+                    "{\"error\":\"Failed to serialize OpenAPI\"}".to_string()
+                }
+            }
+        });
+        // 克隆 String 转为 Vec<u8> 以构建响应（OnceLock 持有引用，需克隆数据）
+        return (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
+            ],
+            json.clone(),
+        );
+    }
+    // 上次序列化失败：本次重试生成（不再返回缓存错误串）
+    match serde_json::to_string(&ApiDoc::openapi()) {
+        Ok(json) => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
+            ],
+            json,
+        ),
+        Err(e) => {
+            tracing::error!("OpenAPI 序列化重试失败: {}", e);
+            (
+                [
+                    (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                    (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
+                ],
+                "{\"error\":\"Failed to serialize OpenAPI\"}".to_string(),
+            )
+        }
+    }
 }
 
 /// GET /swagger-ui

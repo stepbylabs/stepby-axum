@@ -130,10 +130,15 @@ pub fn encrypt_config_value(plaintext: &str, master_key: &str) -> anyhow::Result
 /// # 返回
 /// 解密后的明文，失败返回 anyhow::Error
 pub fn decrypt_config_value(stored_value: &str, master_key: &str) -> anyhow::Result<String> {
-    // 不带任何加密前缀视为明文，直接返回（兼容性）
+    // 不带任何加密前缀视为明文（兼容旧数据）
     if !stored_value.starts_with(ENCRYPTED_PREFIX) && !stored_value.starts_with(ENCRYPTED_PREFIX_V2)
     {
-        return Ok(stored_value.to_string());
+        // P2 收口（fail-closed）：仅当系统未配置加密密钥时允许明文路径（旧数据兼容）；
+        // 密钥已配置时无前缀值视为存储异常（敏感项未加密/被篡改），拒绝返回
+        if master_key.is_empty() {
+            return Ok(stored_value.to_string());
+        }
+        anyhow::bail!("敏感值未加密存储（缺少 enc:/enc2: 前缀），拒绝解密");
     }
 
     // v2 信封（enc2:）：salt[16] || nonce[12] || ciphertext
@@ -262,11 +267,17 @@ mod crypto_tests {
 
     #[test]
     fn test_decrypt_plaintext_compatibility() {
-        // 不带前缀的明文应直接返回（兼容旧数据）
-        let master_key = "any-key";
+        // 未配置密钥时，不带前缀的明文直接返回（兼容旧数据）
         let plaintext = "plain-value";
-        let result = decrypt_config_value(plaintext, master_key).unwrap();
+        let result = decrypt_config_value(plaintext, "").unwrap();
         assert_eq!(result, plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_plaintext_fail_closed_when_key_configured() {
+        // P2：密钥已配置时，无前缀敏感值必须拒绝（fail-closed），防止明文绕过加密存储
+        let result = decrypt_config_value("plain-value", "any-key");
+        assert!(result.is_err(), "密钥已配置时明文路径应被拒绝");
     }
 
     #[test]

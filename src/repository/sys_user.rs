@@ -126,6 +126,8 @@ impl SysUserRepository {
         if let Some(did) = dept_id {
             query = query.filter(Column::DeptId.eq(did));
         }
+        // P1：稳定排序，防翻页重复/漏行
+        query = query.order_by_asc(Column::UserId);
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
         }
@@ -190,6 +192,8 @@ impl SysUserRepository {
         if let Some(uid) = scope_user_id {
             query = query.filter(Column::UserId.eq(uid));
         }
+        // P1：稳定排序，防翻页重复/漏行
+        query = query.order_by_asc(Column::UserId);
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
         }
@@ -207,6 +211,10 @@ impl SysUserRepository {
     }
 
     /// 分页查询指定 user_id 集合内的用户（角色已授权用户列表，支持 user_name/phonenumber 模糊）
+    ///
+    /// P0-6：`scope_dept_ids` / `scope_user_id` 为操作人数据范围过滤（None=不过滤），
+    /// 防止低权限管理员通过本端点枚举全部用户；同时补 order_by 稳定分页（P1）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn find_page_in_ids(
         &self,
         offset: u64,
@@ -214,15 +222,29 @@ impl SysUserRepository {
         user_ids: Vec<i64>,
         user_name: Option<&str>,
         phonenumber: Option<&str>,
+        scope_dept_ids: Option<&[i64]>,
+        scope_user_id: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find()
             .filter(Column::DelFlag.eq("0"))
-            .filter(Column::UserId.is_in(user_ids));
+            .filter(Column::UserId.is_in(user_ids))
+            .order_by_asc(Column::UserId);
         if let Some(name) = user_name {
             query = query.filter(Column::UserName.like(format!("%{}%", like_escape(name))));
         }
         if let Some(phone) = phonenumber {
             query = query.filter(Column::Phonenumber.like(format!("%{}%", like_escape(phone))));
+        }
+        // 数据范围过滤（P0-6）
+        if let Some(scope_uid) = scope_user_id {
+            query = query.filter(Column::UserId.eq(scope_uid));
+        }
+        if let Some(ids) = scope_dept_ids {
+            if ids.is_empty() {
+                query = query.filter(Column::UserId.eq(-1_i64)); // 永假：无可见部门
+            } else {
+                query = query.filter(Column::DeptId.is_in(ids.iter().copied()));
+            }
         }
 
         let total = query.clone().count(self.base.db()).await?;
@@ -235,6 +257,10 @@ impl SysUserRepository {
     }
 
     /// 分页查询不在指定 user_id 集合内的用户（角色未授权用户列表，支持 user_name/phonenumber 模糊）
+    ///
+    /// P0-6：`scope_dept_ids` / `scope_user_id` 为操作人数据范围过滤（None=不过滤）；
+    /// 补 order_by 稳定分页（P1）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn find_page_not_in_ids(
         &self,
         offset: u64,
@@ -242,8 +268,12 @@ impl SysUserRepository {
         exclude_ids: Vec<i64>,
         user_name: Option<&str>,
         phonenumber: Option<&str>,
+        scope_dept_ids: Option<&[i64]>,
+        scope_user_id: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
-        let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
+        let mut query = SysUser::find()
+            .filter(Column::DelFlag.eq("0"))
+            .order_by_asc(Column::UserId);
         if !exclude_ids.is_empty() {
             query = query.filter(Column::UserId.is_not_in(exclude_ids));
         }
@@ -252,6 +282,17 @@ impl SysUserRepository {
         }
         if let Some(phone) = phonenumber {
             query = query.filter(Column::Phonenumber.like(format!("%{}%", like_escape(phone))));
+        }
+        // 数据范围过滤（P0-6）
+        if let Some(scope_uid) = scope_user_id {
+            query = query.filter(Column::UserId.eq(scope_uid));
+        }
+        if let Some(ids) = scope_dept_ids {
+            if ids.is_empty() {
+                query = query.filter(Column::UserId.eq(-1_i64)); // 永假：无可见部门
+            } else {
+                query = query.filter(Column::DeptId.is_in(ids.iter().copied()));
+            }
         }
 
         let total = query.clone().count(self.base.db()).await?;

@@ -422,7 +422,7 @@ async fn capture_before_snapshot(
     } else if oper_url.starts_with("/system/role") {
         state
             .role_service
-            .get_role_by_id(id)
+            .get_role_by_id(id, None) // 内部快照提取：无操作人上下文，不过滤
             .await
             .ok()
             .map(|vo| serde_json::to_value(&vo).unwrap_or_default())
@@ -436,7 +436,7 @@ async fn capture_before_snapshot(
     } else if oper_url.starts_with("/system/dept") {
         state
             .dept_service
-            .get_dept_by_id(id)
+            .get_dept_by_id(id, None) // 内部快照提取：无操作人上下文，不过滤
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())

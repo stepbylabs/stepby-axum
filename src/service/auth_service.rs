@@ -14,17 +14,19 @@
 //! - 错误统一使用 ServiceError
 //! - Service 层返回 Vo（不含 code/msg），Handler 层负责包装为 Result
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use sea_orm::Set;
 use serde::{Deserialize, Serialize};
+use totp_rs::{Algorithm, Secret, TOTP};
 use utoipa::ToSchema;
 use garde::Validate;
 
 use crate::common::constants::SECS_PER_HOUR;
 use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::common::error::ServiceError;
-use crate::config::JwtConfig;
+use crate::config::{JwtConfig, Settings};
 use crate::entity::sys_logininfor;
 use crate::entity::sys_menu::Model as SysMenuModel;
 use crate::entity::sys_user::Model as SysUserModel;
@@ -95,6 +97,10 @@ pub struct LoginDto {
     /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入）
     #[garde(custom(validate_captcha_uuid_format))]
     pub uuid: String,
+    /// TOTP 多因子验证码（可选，仅已启用 TOTP 的用户登录时必填，P0-4 登录链路集成）
+    #[serde(default)]
+    #[garde(skip)]
+    pub totp_code: Option<String>,
 }
 
 /// 注册请求 DTO（对齐前端 register 函数参数）
@@ -215,6 +221,8 @@ pub struct AuthService {
     menu_service: SysMenuService,
     logininfor_repo: SysLogininforRepository,
     config_service: SysConfigService,
+    /// 全局配置（P0-4：TOTP secret 加解密需要 config_enc_key）
+    config: Arc<Settings>,
 }
 
 impl AuthService {
@@ -230,12 +238,14 @@ impl AuthService {
         menu_service: SysMenuService,
         logininfor_repo: SysLogininforRepository,
         config_service: SysConfigService,
+        config: Arc<Settings>,
     ) -> Self {
         Self {
             user_service,
             menu_service,
             logininfor_repo,
             config_service,
+            config,
         }
     }
 
@@ -398,8 +408,120 @@ impl AuthService {
         self.upgrade_password_if_needed(&user, &dto.password, verify_result)
             .await?;
 
+        // 5.5 TOTP 多因子校验（P0-4 登录链路集成）
+        // 用户启用 TOTP 后必须提供有效验证码；未提供/错误返回业务码 1003，
+        // 前端据此进入 TOTP 输入步骤二次提交。
+        self.verify_totp_if_enabled(redis, &ctx, &user, dto.totp_code.as_deref())
+            .await?;
+
         // 6. JWT 签发 + 登录日志（成功）+ 在线映射 + 更新登录信息 + 清除失败计数
         self.finalize_login(&user, redis, jwt_config, &ctx).await
+    }
+
+    /// TOTP 多因子校验（P0-4 登录链路集成）
+    ///
+    /// 登录时若用户已启用 TOTP（Redis key `totp:enabled:{user_id}` 存在），
+    /// 必须提供有效验证码，否则返回业务码 1003（不签发 token）：
+    /// - 未提供验证码 → 1003 "需要 TOTP 验证码"（前端展示 TOTP 输入步骤）
+    /// - 验证码错误 → 1003 "验证码错误"（前端停留在 TOTP 步骤）
+    /// - 验证码正确 → 放行并清除该用户名下的 TOTP 登录失败计数
+    ///
+    /// 防暴力：TOTP 验证码错误计入 `totp:login_fail:{username}`（10 分钟内 ≥5 次锁定）。
+    async fn verify_totp_if_enabled(
+        &self,
+        redis: &mut redis::aio::ConnectionManager,
+        ctx: &LoginContext<'_>,
+        user: &SysUserModel,
+        totp_code: Option<&str>,
+    ) -> Result<(), ServiceError> {
+        let redis_key = format!("totp:enabled:{}", user.user_id);
+        let encrypted: Option<String> = redis::cmd("GET")
+            .arg(&redis_key)
+            .query_async(redis)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, user_id = user.user_id, "TOTP 状态查询失败（fail-closed 503）");
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+            })?;
+
+        let Some(encrypted) = encrypted else {
+            // 未启用 TOTP：直接放行
+            return Ok(());
+        };
+
+        // 已启用 TOTP：先做失败限流检查（防暴力枚举验证码）
+        const MAX_TOTP_FAIL: i64 = 5;
+        const TOTP_FAIL_TTL: i64 = 600;
+        let fail_key = format!("totp:login_fail:{}", ctx.username);
+        let fail_count: Option<i64> = redis::cmd("GET")
+            .arg(&fail_key)
+            .query_async(redis)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "TOTP 失败计数查询失败（fail-closed 503）");
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+            })?;
+        if let Some(count) = fail_count
+            && count >= MAX_TOTP_FAIL
+        {
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.totp_locked"))
+                .await;
+            return Err(ServiceError::new(1003, crate::tr!("error.totp.login_locked")));
+        }
+
+        let code = totp_code.unwrap_or("");
+        if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(ServiceError::new(1003, crate::tr!("error.totp.login_required")));
+        }
+
+        // 解密已绑定的 TOTP secret 并校验验证码
+        let master_key = &self.config.config_enc_key;
+        if master_key.is_empty() {
+            tracing::error!("CONFIG_ENC_KEY 未配置，无法解密 TOTP secret（fail-closed 拒绝登录）");
+            return Err(ServiceError::new(503, crate::tr!("error.totp.enc_key_missing")));
+        }
+        let secret_str = crate::utils::crypto::decrypt_config_value(&encrypted, master_key)
+            .map_err(|e| {
+                tracing::error!(error = %e, user_id = user.user_id, "TOTP secret 解密失败");
+                ServiceError::new(500, crate::tr!("error.totp.decrypt_failed"))
+            })?;
+        let secret_bytes = Secret::Encoded(secret_str).to_bytes().map_err(|_| {
+            ServiceError::new(500, crate::tr!("error.totp.secret_decode_failed"))
+        })?;
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("Yebot".to_string()),
+            "yebot-user".to_string(),
+        )
+        .map_err(|_| ServiceError::new(500, crate::tr!("error.totp.totp_build_failed")))?;
+
+        if !totp.check_current(code).unwrap_or(false) {
+            // 验证码错误：计数 + 写登录日志（fail 提示，不区分具体原因）
+            let _: i64 = redis::Script::new(RATE_LIMIT_SCRIPT)
+                .key(&fail_key)
+                .arg(TOTP_FAIL_TTL)
+                .invoke_async(redis)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "TOTP 失败计数写入失败");
+                    ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+                })?;
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.totp_failed"))
+                .await;
+            return Err(ServiceError::new(1003, crate::tr!("error.totp.code_invalid")));
+        }
+
+        // 验证通过：清除失败计数
+        let _: i64 = redis::cmd("DEL")
+            .arg(&fail_key)
+            .query_async(redis)
+            .await
+            .unwrap_or(0);
+        Ok(())
     }
 
     /// IP 限流校验（同 IP 1 分钟内 ≤10 次）

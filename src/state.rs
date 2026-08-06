@@ -1,9 +1,10 @@
 // axum-backend/src/state.rs
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use redis::aio::ConnectionManager;
 use sea_orm::DatabaseConnection;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use crate::config::Settings;
 use crate::handler::ws_handler::WsMessage;
 use crate::repository::sys_logininfor::SysLogininforRepository;
@@ -64,6 +65,16 @@ pub struct AppState {
     pub ip_location_service: IpLocationService,
     /// WebSocket 全局广播通道（实时通知推送）
     pub ws_broadcast: broadcast::Sender<WsMessage>,
+    /// WebSocket 按用户定向通道注册表（user_id → 该用户全部活跃连接的发送端）
+    ///
+    /// 安全设计（P0-2 越权广播修复）：`forceLogout`、`taskProgress` 等含他人会话/身份
+    /// 信息的消息不再经全局广播推送给所有在线客户端，而是通过本注册表**定向**投递到
+    /// 目标用户的连接。全局广播（`broadcast`）仅保留给公告等公开消息。
+    ///
+    /// 注意：本注册表为进程内内存结构，仅覆盖当前实例的连接；多实例部署时定向消息
+    /// 只投递到本实例内的目标用户连接（与限流/调度器一致的单实例语义），跨实例扩展
+    /// 可后续改为 Redis Pub/Sub。
+    pub ws_users: RwLock<HashMap<i64, Vec<mpsc::UnboundedSender<WsMessage>>>>,
 }
 
 impl AppState {
@@ -72,8 +83,55 @@ impl AppState {
     /// C9：原本 service / handler 层需直接调用 `crate::handler::ws_handler::broadcast(state, ...)`，
     /// 反向依赖 handler 层。这里在 AppState 上提供同名方法，业务层改为 `state.broadcast(...)`，
     /// 仅 1 处新增 + 调用点收敛，避免 service 层对 handler 层的硬依赖。
+    ///
+    /// 仅用于公开消息（系统公告、通知等）。含用户身份/会话信息的消息必须使用
+    /// `broadcast_to_user` 定向投递，防止越权信息泄漏（P0-2）。
     pub fn broadcast(&self, msg_type: &str, data: serde_json::Value) {
         crate::handler::ws_handler::broadcast(self, msg_type, data);
+    }
+
+    /// 注册一个用户的 WebSocket 连接发送端（连接建立时调用）
+    pub fn register_ws_user(&self, user_id: i64, tx: mpsc::UnboundedSender<WsMessage>) {
+        let mut users = self
+            .ws_users
+            .write()
+            .expect("ws_users RwLock poisoned（register_ws_user）");
+        users.entry(user_id).or_default().push(tx);
+    }
+
+    /// 注销一个用户的 WebSocket 连接发送端（连接关闭时调用）
+    pub fn unregister_ws_user(&self, user_id: i64, tx: &mpsc::UnboundedSender<WsMessage>) {
+        let mut users = self
+            .ws_users
+            .write()
+            .expect("ws_users RwLock poisoned（unregister_ws_user）");
+        if let Some(conns) = users.get_mut(&user_id) {
+            conns.retain(|t| !t.same_channel(tx));
+            if conns.is_empty() {
+                users.remove(&user_id);
+            }
+        }
+    }
+
+    /// 定向推送消息到指定用户的全部活跃 WebSocket 连接（P0-2）
+    ///
+    /// 与全局广播不同，仅目标用户的连接收到；用户不在线时静默丢弃。
+    /// 用于 forceLogout（含 tokenHash/userId/userName）与 taskProgress 等
+    /// 仅与特定用户相关的消息，杜绝跨用户信息泄漏。
+    pub fn broadcast_to_user(&self, user_id: i64, msg_type: &str, data: serde_json::Value) {
+        let msg = WsMessage::new(msg_type, data);
+        let users = self
+            .ws_users
+            .read()
+            .expect("ws_users RwLock poisoned（broadcast_to_user）");
+        if let Some(conns) = users.get(&user_id) {
+            for tx in conns {
+                // 对端已关闭时 send 返回 Err，忽略（连接关闭时会走 unregister 清理）
+                if tx.send(msg.clone()).is_err() {
+                    tracing::debug!(user_id, "WebSocket 定向投递失败（连接已关闭）");
+                }
+            }
+        }
     }
 
     /// 构建 AppState 时初始化全部 Service
@@ -115,6 +173,7 @@ impl AppState {
             menu_service.clone(),
             SysLogininforRepository::new(db.clone()),
             config_service.clone(),
+            config.clone(), // P0-4：TOTP secret 加解密需要 config_enc_key
         );
 
         Self {
@@ -142,6 +201,7 @@ impl AppState {
             ip_locator,
             ip_location_service,
             ws_broadcast,
+            ws_users: RwLock::new(HashMap::new()),
         }
     }
 }

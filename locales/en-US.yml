@@ -195,6 +195,8 @@ error:
     unknown_source_type: "Unknown update source type: {{s}}"
     maxmind_credentials_required: Switching to maxmind source requires Account ID and License Key
     private_ip: Private IP
+    update_unavailable: IP database update service temporarily unavailable, please try again later
+    update_in_progress: An IP database update task is already in progress, please try again later
   cache:
     name_wildcard_forbidden: Cache name cannot contain wildcards
     info_fetch_failed: Failed to fetch cache info
@@ -223,6 +225,9 @@ error:
     process_exec_failed: Backup process execution failed
     record_not_found: Backup record does not exist
     restore_status_invalid: Only successful backups can be restored
+    too_frequent: Backup operation too frequent, please try again later
+    restore_in_progress: A restore task is already in progress, please try again later
+    service_unavailable: Backup service temporarily unavailable, please try again later
     filename_invalid_restore: Backup file name is invalid
     file_exist_check_join_failed: File existence check task join failed
     file_not_found: Backup file does not exist
@@ -308,6 +313,10 @@ error:
     enc_key_missing: Encryption key not configured (CONFIG_ENC_KEY), cannot encrypt/decrypt TOTP secret
     encrypt_failed: Failed to encrypt TOTP secret
     decrypt_failed: Failed to decrypt TOTP secret
+    login_required: Please provide the TOTP verification code to complete two-factor authentication
+    login_locked: Too many failed TOTP attempts, please try again in 10 minutes
+    already_enabled: TOTP is already enabled. Please disable it first before re-binding
+    pending_expired: The binding session has expired. Please re-fetch the QR code and try again
   upload:
     write_task_failed: File write task failed
     write_failed: Failed to write uploaded file
@@ -381,6 +390,8 @@ log:
     account_disabled: Account disabled
     login_success: Login successful
     permission_denied: "Permission denied: missing required permission {{perm}}"
+    totp_failed: Incorrect TOTP verification code
+    totp_locked: Too many failed TOTP attempts, temporarily locked
 
 # Common status text (used in Excel exports, status display, etc.)
 common:

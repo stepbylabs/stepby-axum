@@ -17,6 +17,7 @@ use crate::service::sys_oper_log_service::{
     AuditStatsVo, ComplianceReportVo, OperLogQueryDto, OperLogTypeStatsVo,
 };
 use crate::state::AppState;
+use crate::middleware::Operator;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
@@ -120,6 +121,8 @@ pub async fn clean(
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    // P0-2：提取操作人，用于 taskProgress 定向推送（此前 operator 写死 "system" 且广播全局）
+    operator: Operator,
     Form(dto): Form<OperLogExportDto>,
 ) -> Result<Response, AppError> {
     // 解析可选 fields（逗号分隔）
@@ -131,7 +134,8 @@ pub async fn export(
 
     let query = OperLogQueryDto {
         page_num: dto.page_num,
-        page_size: dto.page_size,
+        // P1 修复：导出 page_size 上限 clamp（防超大值一次性查询海量行到内存）
+        page_size: dto.page_size.clamp(1, crate::common::page::EXPORT_MAX_ROWS as u64),
         title: dto.title,
         business_type: dto.business_type,
         oper_name: dto.oper_name,
@@ -140,13 +144,15 @@ pub async fn export(
         end_time: dto.end_time,
     };
 
-    // 长任务进度跟踪：行数较大时创建 sys_task 记录
+    // 长任务进度跟踪：行数较大时创建 sys_task 记录（P0-2：记录操作人 user_id 用于定向推送）
+    let operator_id = operator.user_id().parse::<i64>().ok();
     let task_id = if fields.is_some() {
         // 字段选择导出场景才走任务进度（普通全量导出走原有同步路径）
         let dto = crate::service::sys_task_service::TaskCreateDto {
             task_type: "operlog_export".to_string(),
             task_name: crate::tr!("msg.export.oper_log_task"),
             total: 100,
+            operator_id,
         };
         let task = state
             .task_service

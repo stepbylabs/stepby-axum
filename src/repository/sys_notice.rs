@@ -71,6 +71,8 @@ impl SysNoticeRepository {
         if let Some(cb) = create_by {
             query = query.filter(Column::CreateBy.eq(cb));
         }
+        // P1：稳定排序，防翻页重复/漏行
+        query = query.order_by_asc(Column::NoticeId);
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
         }

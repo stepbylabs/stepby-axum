@@ -31,8 +31,10 @@ pub struct Model {
     pub current: i64,
     /// 结果消息
     pub result_msg: Option<String>,
-    /// 操作人
+    /// 操作人（展示用）
     pub operator: Option<String>,
+    /// 操作人 user_id（P0-2：taskProgress 定向推送目标，None 表示系统任务/无归属用户，不推送 WS）
+    pub operator_id: Option<i64>,
     #[serde(
         serialize_with = "datetime::serialize_opt",
         deserialize_with = "datetime::deserialize_opt"

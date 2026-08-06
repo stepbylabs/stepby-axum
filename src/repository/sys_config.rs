@@ -69,7 +69,8 @@ impl SysConfigRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
-        let query = Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time);
+        let query = Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
+            .order_by_asc(Column::ConfigId); // P1：稳定排序，防翻页重复/漏行
 
         let total = query.clone().count(self.base.db()).await?;
         let rows = query

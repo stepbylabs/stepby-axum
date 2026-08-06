@@ -96,9 +96,12 @@ pub async fn update_sort(
 )]
 pub async fn list_exclude(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<Vec<SysDeptModel>>, AppError> {
-    let list = state.dept_service.list_exclude(dept_id).await?;
+    // P0-6：传入 operator_user_id 应用 data_scope 过滤（此前未过滤可枚举全部部门）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let list = state.dept_service.list_exclude(dept_id, operator_user_id).await?;
     Ok(AjaxResult::success(list))
 }
 
@@ -117,8 +120,11 @@ pub async fn list_exclude(
 )]
 pub async fn treeselect(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<Vec<TreeSelectVo>>, AppError> {
-    let tree = state.dept_service.build_dept_tree_select().await?;
+    // P0-6：传入 operator_user_id 应用 data_scope 过滤（此前未过滤可枚举全部部门树）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let tree = state.dept_service.build_dept_tree_select(operator_user_id).await?;
     Ok(AjaxResult::success(tree))
 }
 
@@ -138,9 +144,12 @@ pub async fn treeselect(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<SysDeptModel>, AppError> {
-    let dept = state.dept_service.get_dept_by_id(dept_id).await?;
+    // P0-6：传入 operator_user_id 校验部门在数据范围内（不在则 404）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let dept = state.dept_service.get_dept_by_id(dept_id, operator_user_id).await?;
     Ok(AjaxResult::success(dept))
 }
 

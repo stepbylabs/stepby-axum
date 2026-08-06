@@ -129,6 +129,8 @@ impl SysDictTypeRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
+        // P1：稳定排序，防翻页重复/漏行
+        query = query.order_by_asc(Column::DictId);
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
         }
