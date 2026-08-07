@@ -73,3 +73,6 @@ pub const AVATAR_MAX_SIZE: usize = 5 * 1024 * 1024;
 
 /// 通用文件上传最大大小（字节，10MB）
 pub const UPLOAD_MAX_SIZE: usize = 10 * 1024 * 1024;
+
+/// 邮件 SMTP 发送超时（P1：防止 SMTP 无响应时无限挂起拖住请求）
+pub const MAIL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
