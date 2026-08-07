@@ -181,10 +181,18 @@ impl MailerService {
             .as_ref()
             .ok_or_else(|| ServiceError::internal(&crate::tr!("error.mail.smtp_not_initialized")))?;
 
-        transporter
-            .send(email)
-            .await
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.mail.send_failed")))?;
+        // P1 修复：SMTP 发送加 10s 超时保护。原实现直接 await，SMTP 服务器
+        // 无响应/网络黑洞时会无限挂起，拖住调用方请求（如公告创建链路）。
+        tokio::time::timeout(
+            crate::common::constants::MAIL_SEND_TIMEOUT,
+            transporter.send(email),
+        )
+        .await
+        .map_err(|_| {
+            tracing::warn!("邮件发送超时（>10s）: to={}, subject={}", to_email, subject);
+            ServiceError::internal(&crate::tr!("error.mail.send_timeout"))
+        })?
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.mail.send_failed")))?;
 
         tracing::info!("邮件发送成功: to={}, subject={}", to_email, subject);
         Ok(())
