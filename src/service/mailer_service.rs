@@ -288,3 +288,105 @@ impl Clone for MailerService {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构建一个禁用状态的 MailerService（不实际发送）
+    fn disabled_service() -> MailerService {
+        MailerService {
+            transporter: None,
+            from_email: "noreply@example.com".to_string(),
+            from_name: "Yebot".to_string(),
+            enabled: false,
+        }
+    }
+
+    /// 构建一个「启用但指向黑洞地址」的 MailerService，用于触发发送超时
+    ///
+    /// 10.255.255.1 属 RFC6890 保留私网，本机不可达 → TCP SYN 被黑洞 →
+    /// 连接挂起直至 MAIL_SEND_TIMEOUT（10s），用于验证 P1 超时保护（不挂死调用方）。
+    fn unreachable_service() -> MailerService {
+        let transporter = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous("10.255.255.1")
+            .port(25)
+            .build();
+        MailerService {
+            transporter: Some(transporter),
+            from_email: "noreply@example.com".to_string(),
+            from_name: "Yebot".to_string(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn test_disabled_service_is_not_enabled() {
+        assert!(!disabled_service().is_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_send_disabled_is_noop_ok() {
+        // 禁用状态下 send 必须成功返回（不实际发送、不报错、不 panic）
+        let svc = disabled_service();
+        let res = svc.send("user@example.com", "主题", "<p>内容</p>").await;
+        assert!(
+            res.is_ok(),
+            "禁用邮件下 send 必须返回 Ok，实际: {:?}",
+            res.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_batch_disabled_returns_zeros() {
+        let svc = disabled_service();
+        let res = svc
+            .send_batch(
+                &["a@example.com".to_string(), "b@example.com".to_string()],
+                "主题",
+                "<p>内容</p>",
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.total, 2);
+        assert_eq!(res.success, 0);
+        assert_eq!(res.failed, 0);
+        assert!(res.failed_emails.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_send_text_disabled_is_noop_ok() {
+        let svc = disabled_service();
+        let res = svc.send_text("user@example.com", "主题", "纯文本\n第二行").await;
+        assert!(res.is_ok(), "禁用邮件下 send_text 必须返回 Ok");
+    }
+
+    #[tokio::test]
+    async fn test_send_invalid_to_email_returns_bad_request() {
+        // 启用状态下非法收件人地址必须在发送前返回 400（不触发网络）
+        let svc = unreachable_service();
+        let res = svc.send("not-an-email", "主题", "<p>内容</p>").await;
+        assert!(res.is_err(), "非法收件人地址必须返回 Err");
+        assert_eq!(res.unwrap_err().code, 400, "地址解析失败应返回 400");
+    }
+
+    #[tokio::test]
+    async fn test_send_unreachable_smtp_times_out() {
+        // P1 修复核心：慢/不可达 SMTP 必须在 MAIL_SEND_TIMEOUT 内返回 Err，而非无限挂起
+        let svc = unreachable_service();
+        assert!(svc.is_enabled(), "启用状态 is_enabled 必须为 true");
+        let start = std::time::Instant::now();
+        let res = svc.send("user@example.com", "主题", "<p>内容</p>").await;
+        let elapsed = start.elapsed();
+        assert!(
+            res.is_err(),
+            "不可达 SMTP 必须返回 Err（超时保护），实际: {:?}",
+            res.ok()
+        );
+        // 不得超出超时上限过多（10s + 3s 余量），证明没有无限挂起
+        assert!(
+            elapsed < std::time::Duration::from_secs(13),
+            "send 应在超时后快速返回，实际耗时 {:?}",
+            elapsed
+        );
+    }
+}

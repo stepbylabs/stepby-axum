@@ -175,3 +175,9 @@ strip = true
 [[bench]]
 name = "example"
 harness = false
+
+[dev-dependencies]
+# 集成测试需要直接驱动 migration crate 的 Migrator 建表 + 种子数据
+migration = { path = "migration" }
+# 用于引入 MigratorTrait（调用 Migrator::up），仅测试使用
+sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }

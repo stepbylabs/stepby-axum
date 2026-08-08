@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -23,22 +24,34 @@ use crate::state::AppState;
 ///
 /// 白名单通过路由结构实现：公开路由（/health, /login, /captchaImage）不挂载此中间件，
 /// 受保护路由通过 .layer(from_fn_with_state(state, auth_middleware)) 挂载。
+
+/// 从请求头提取 Bearer token（纯函数，便于脱离 AppState 单测）
+///
+/// 安全关键决策点（P0 鉴权第一/二关）：
+/// - 缺失 Authorization header → 401（token_missing）
+/// - 非 `Bearer ` 前缀格式 → 401（token_invalid）
+///
+/// 抽成纯函数后，中间件与单元测试均可复用，且不依赖 Redis / DB 即可验证「无 token 拒绝」。
+pub fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
+    let auth_header = headers
+        .get(&AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_missing")))?;
+
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_invalid")))?;
+
+    Ok(token)
+}
+
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // 1. 提取 Authorization header
-    let auth_header = req
-        .headers()
-        .get(&AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_missing")))?;
-
-    // 2. 解析 Bearer token
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_invalid")))?;
+    // 1+2. 提取 Bearer token（纯函数，见 extract_bearer_token）
+    let token = extract_bearer_token(req.headers())?;
 
     // 3. JWT 签名验证 + exp 过期校验
     //    verify_token 返回 Result<Claims, JwtError>，通过 From<JwtError> for AppError 自动转为 401
@@ -135,5 +148,92 @@ impl Operator {
     /// 获取操作人用户 ID
     pub fn user_id(&self) -> &str {
         &self.0.sub
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn test_extract_bearer_token_missing_header() {
+        let headers = HeaderMap::new();
+        let err = extract_bearer_token(&headers).unwrap_err();
+        assert_eq!(
+            err.code, 401,
+            "缺失 Authorization header 必须返回 401（token_missing）"
+        );
+    }
+
+    #[test]
+    fn test_extract_bearer_token_non_bearer_prefix() {
+        let mut headers = HeaderMap::new();
+        // 形如 Basic / 无 Bearer 前缀 → 401（token_invalid）
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Basic abcdef123456"),
+        );
+        let err = extract_bearer_token(&headers).unwrap_err();
+        assert_eq!(
+            err.code, 401,
+            "非 Bearer 前缀必须返回 401（token_invalid）"
+        );
+    }
+
+    #[test]
+    fn test_extract_bearer_token_empty_bearer() {
+        // "Bearer " 后无 token：strip_prefix 成功但 remainder 为空 → 返回 Ok("")
+        // 注意：空 token 不会在此阶段被拒，但会在后续 verify_token（解码失败）处返回 401，
+        // 整体请求仍被拒绝。此处仅断言前缀解析阶段的纯行为。
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer "));
+        assert_eq!(extract_bearer_token(&headers).unwrap(), "");
+    }
+
+    #[test]
+    fn test_extract_bearer_token_ok() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"),
+        );
+        assert_eq!(
+            extract_bearer_token(&headers).unwrap(),
+            "eyJhbGciOiJIUzI1NiJ9.payload.sig"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_operator_rejects_when_claims_absent() {
+        // 未经过 auth_middleware（extensions 中没有 Claims）→ Operator 提取必须 401
+        let req = axum::http::Request::builder().body(()).unwrap();
+        let (mut parts, _body) = req.into_parts();
+        let err = Operator::from_request_parts(&mut parts, &())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, 401,
+            "缺少 Claims 时 Operator 提取必须返回 401（login_info_missing）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_operator_extracts_claims() {
+        let req = axum::http::Request::builder().body(()).unwrap();
+        let (mut parts, _body) = req.into_parts();
+        let claims = Claims {
+            sub: "42".to_string(),
+            username: "alice".to_string(),
+            exp: 0,
+            iat: 0,
+            iss: "yebot".to_string(),
+            aud: "yebot".to_string(),
+            jti: "jti-1".to_string(),
+        };
+        parts.extensions.insert(claims);
+        let operator = Operator::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(operator.user_id(), "42");
+        assert_eq!(operator.username(), "alice");
     }
 }

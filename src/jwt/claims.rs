@@ -136,3 +136,163 @@ impl JwtUtils {
         Ok(token_data.claims)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    /// 构造一份通过校验的基准 JwtConfig（secret 为合法强密钥），供测试复用
+    fn test_jwt_config() -> JwtConfig {
+        JwtConfig {
+            secret: "placeholder-strong-secret-0123456789abcdef".to_string(),
+            expire_hours: 24,
+            issuer: "yebot".to_string(),
+            audience: "yebot".to_string(),
+        }
+    }
+
+    /// 用给定 Claims 直接编码一个 token（绕过 generate_token，便于构造异常场景）
+    fn encode_claims(claims: &Claims, secret: &str) -> String {
+        let mut header = Header::new(Algorithm::HS256);
+        header.typ = Some("JWT".to_string());
+        encode(
+            &header,
+            claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("test encode must succeed")
+    }
+
+    #[test]
+    fn test_generate_and_verify_roundtrip() {
+        let cfg = test_jwt_config();
+        let (token, claims) = JwtUtils::generate_token("1", "admin", &cfg)
+            .expect("generate_token must succeed");
+
+        let verified = JwtUtils::verify_token(&token, &cfg).expect("verify must succeed");
+
+        assert_eq!(verified.sub, "1");
+        assert_eq!(verified.username, "admin");
+        assert_eq!(verified.iss, "yebot");
+        assert_eq!(verified.aud, "yebot");
+        assert_eq!(verified.jti, claims.jti, "jti 应原样往返");
+        assert!(verified.exp > verified.iat, "exp 应晚于 iat");
+        // 默认 24h 有效期，exp 应大约在 now+24h 附近（容差 1 分钟）
+        let now = Utc::now().timestamp() as usize;
+        assert!(
+            verified.exp >= now + 23 * 3600 && verified.exp <= now + 25 * 3600,
+            "exp 应在 24h 附近，实际 exp={}, now={}",
+            verified.exp,
+            now
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_expired_token() {
+        let cfg = test_jwt_config();
+        let now = Utc::now();
+        let claims = Claims {
+            sub: "1".to_string(),
+            username: "admin".to_string(),
+            exp: (now - chrono::Duration::hours(1)).timestamp() as usize,
+            iat: (now - chrono::Duration::hours(2)).timestamp() as usize,
+            iss: cfg.issuer.clone(),
+            aud: cfg.audience.clone(),
+            jti: "test-jti".to_string(),
+        };
+        let token = encode_claims(&claims, &cfg.secret);
+
+        let err = JwtUtils::verify_token(&token, &cfg).unwrap_err();
+        assert!(
+            matches!(err, JwtError::Expired),
+            "过期令牌应返回 Expired，实际得到: {err}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_tampered_signature() {
+        let cfg = test_jwt_config();
+        let (token, _) = JwtUtils::generate_token("1", "admin", &cfg)
+            .expect("generate_token must succeed");
+
+        // 篡改签名段最后一个字符（保持长度，确保是签名校验失败而非格式错误）
+        let mut parts: Vec<String> = token.split('.').map(|s| s.to_string()).collect();
+        assert_eq!(parts.len(), 3, "JWT 应为三段结构");
+        let last = parts[2].clone();
+        let new_last = if last.ends_with('A') {
+            format!("{}B", &last[..last.len() - 1])
+        } else {
+            format!("{}A", &last[..last.len() - 1])
+        };
+        parts[2] = new_last;
+        let bad_token = parts.join(".");
+
+        let err = JwtUtils::verify_token(&bad_token, &cfg).unwrap_err();
+        assert!(
+            matches!(err, JwtError::InvalidSignature),
+            "篡改签名应返回 InvalidSignature，实际得到: {err}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_wrong_issuer() {
+        let cfg = test_jwt_config();
+        let now = Utc::now();
+        let claims = Claims {
+            sub: "1".to_string(),
+            username: "admin".to_string(),
+            exp: (now + chrono::Duration::hours(1)).timestamp() as usize,
+            iat: now.timestamp() as usize,
+            iss: "evil-issuer".to_string(), // 错误的签发者
+            aud: cfg.audience.clone(),
+            jti: "test-jti".to_string(),
+        };
+        let token = encode_claims(&claims, &cfg.secret);
+
+        let err = JwtUtils::verify_token(&token, &cfg).unwrap_err();
+        assert!(
+            matches!(err, JwtError::InvalidClaims),
+            "iss 不符应返回 InvalidClaims，实际得到: {err}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_wrong_audience() {
+        let cfg = test_jwt_config();
+        let now = Utc::now();
+        let claims = Claims {
+            sub: "1".to_string(),
+            username: "admin".to_string(),
+            exp: (now + chrono::Duration::hours(1)).timestamp() as usize,
+            iat: now.timestamp() as usize,
+            iss: cfg.issuer.clone(),
+            aud: "wrong-audience".to_string(), // 错误的受众
+            jti: "test-jti".to_string(),
+        };
+        let token = encode_claims(&claims, &cfg.secret);
+
+        let err = JwtUtils::verify_token(&token, &cfg).unwrap_err();
+        assert!(
+            matches!(err, JwtError::InvalidClaims),
+            "aud 不符应返回 InvalidClaims，实际得到: {err}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_wrong_secret() {
+        let cfg = test_jwt_config();
+        let (token, _) = JwtUtils::generate_token("1", "admin", &cfg)
+            .expect("generate_token must succeed");
+
+        // 用不同密钥校验 → 签名不匹配
+        let mut wrong_cfg = cfg.clone();
+        wrong_cfg.secret = "a-totally-different-secret-key-0123456789".to_string();
+
+        let err = JwtUtils::verify_token(&token, &wrong_cfg).unwrap_err();
+        assert!(
+            matches!(err, JwtError::InvalidSignature),
+            "错误密钥应返回 InvalidSignature，实际得到: {err}"
+        );
+    }
+}
