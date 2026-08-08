@@ -265,4 +265,37 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(limiter.try_acquire("1.1.1.1", config));
     }
+
+    #[test]
+    fn test_try_acquire_with_retry_after_reports_wait_seconds() {
+        // 容量 1、慢补充（0.5/s）：用尽后下一次应被拒，并返回合理的 Retry-After
+        let limiter = RateLimiter::new();
+        let config = RateLimitConfig {
+            capacity: 1,
+            refill_per_second: 0.5,
+        };
+        let (allowed, retry_after) = limiter.try_acquire_with_retry_after("9.9.9.9", config);
+        assert!(allowed, "首次请求应放行");
+        assert_eq!(retry_after, 0);
+
+        let (allowed2, retry_after2) = limiter.try_acquire_with_retry_after("9.9.9.9", config);
+        assert!(!allowed2, "桶空后必须拒绝");
+        // 还需补充 1.0 个令牌 / 0.5 每秒 = 2 秒（向上取整，至少 1 秒）
+        assert_eq!(retry_after2, 2, "Retry-After 应反映恢复所需秒数");
+    }
+
+    #[test]
+    fn test_try_acquire_with_retry_after_zero_refill_defaults_to_60() {
+        // 补充速率为 0 时无法恢复，应给出默认 60s（而非除零 panic）
+        let limiter = RateLimiter::new();
+        let config = RateLimitConfig {
+            capacity: 1,
+            refill_per_second: 0.0,
+        };
+        let (allowed, _) = limiter.try_acquire_with_retry_after("8.8.8.8", config);
+        assert!(allowed);
+        let (denied, retry_after) = limiter.try_acquire_with_retry_after("8.8.8.8", config);
+        assert!(!denied);
+        assert_eq!(retry_after, 60, "补充速率为 0 时应回退到默认 60s");
+    }
 }

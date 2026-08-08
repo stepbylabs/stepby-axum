@@ -56,3 +56,8 @@ pub mod scheduler;
 
 // ========== 前端静态资源嵌入 ==========
 pub mod embedded_assets;
+
+// ========== 集成测试（login → getInfo 冒烟）==========
+// 仅在 `cargo test` 下编译；复用 crate 内部 pub 项构造隔离的 AppState。
+#[cfg(test)]
+mod integration_tests;
