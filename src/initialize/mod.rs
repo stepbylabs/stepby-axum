@@ -32,6 +32,14 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_user.country_code 列失败: {}", e))?;
 
+        // 3.2 P0-2：幂等确保 sys_task 含 operator_id 列（存量库向后兼容）
+        // 背景：m20260806_000002_add_task_operator_id 迁移负责全新库建表时带该列，
+        // 但 AppInitializer 启动不跑 Migrator::up（避免对已有种子数据的存量库重跑 seed 导致主键冲突），
+        // 故存量库需在此幂等补列，否则 /system/task/list 会因缺列报 500。
+        ensure_task_operator_id_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_task.operator_id 列失败: {}", e))?;
+
         // 4. 初始化 Redis
         let redis = db::init_redis(&settings.redis).await?;
 
@@ -165,6 +173,97 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
         .await?;
     } else {
         tracing::info!("sys_user.country_code 列已存在，无需 ALTER");
+    }
+
+    Ok(())
+}
+
+/// 幂等确保 `sys_task` 表含 `operator_id` 列（P0-2：taskProgress 定向推送目标 user_id）
+///
+/// 与 G18 `ensure_user_country_code_column` 同源方案：实体新增 `operator_id` 字段后，
+/// 存量库若无该列，`/system/task/list` 等查询会因缺列报 500。启动初始化时按当前数据库方言
+/// 检测列是否存在并幂等补列。m20260806_000002_add_task_operator_id 迁移负责全新库建表时带该列；
+/// 此处兜底存量库（AppInitializer 启动不跑 Migrator::up，避免对已有种子数据重跑 seed 导致主键冲突）。
+async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // 1) 表是否存在（避免对尚未建表的空库误执行 ALTER）
+    let table_exists = match backend {
+        DatabaseBackend::Sqlite => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='sys_task'",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::Postgres => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.tables WHERE table_name='sys_task' AND table_schema=current_schema()",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::MySql => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.tables WHERE table_name='sys_task' AND table_schema=DATABASE()",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+    };
+
+    if !table_exists {
+        tracing::info!("sys_task 表尚未创建，跳过 operator_id 列检查（由 migration 负责建表）");
+        return Ok(());
+    }
+
+    // 2) 列是否存在
+    let has_column = match backend {
+        DatabaseBackend::Sqlite => {
+            let rows = db
+                .query_all(Statement::from_string(backend, "PRAGMA table_info(sys_task)"))
+                .await?;
+            rows.iter().any(|row| {
+                row.try_get::<String>("", "name")
+                    .map(|n| n.eq_ignore_ascii_case("operator_id"))
+                    .unwrap_or(false)
+            })
+        }
+        DatabaseBackend::Postgres => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.columns WHERE table_name='sys_task' AND column_name='operator_id' AND table_schema=current_schema() LIMIT 1",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::MySql => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.columns WHERE table_name='sys_task' AND column_name='operator_id' AND table_schema=DATABASE() LIMIT 1",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+    };
+
+    if !has_column {
+        tracing::info!("sys_task 缺少 operator_id 列，执行幂等 ALTER 添加");
+        db.execute(Statement::from_string(
+            backend,
+            "ALTER TABLE sys_task ADD COLUMN operator_id BIGINT",
+        ))
+        .await?;
+    } else {
+        tracing::info!("sys_task.operator_id 列已存在，无需 ALTER");
     }
 
     Ok(())
