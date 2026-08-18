@@ -3,7 +3,7 @@
 > **阶段：** 第四阶段「Axum 原生鉴权体系实现」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **参考优先级：** 接口契约对齐 ref-salvo-admin ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -54,19 +54,19 @@
 
 ### 1.4 非目标（本阶段不实现）
 
-- 用户注册接口（`/register`）—— 前端参考框架有此接口但非核心流程
+- 用户注册接口（`/register`）—— 前端规范中有此接口但非核心流程
 - 锁屏解锁接口（`/unlockscreen`）—— 前端锁屏功能
 - 初始密码/密码过期提示（`isDefaultModifyPwd` / `isPasswordExpired`）—— 非核心鉴权
-- token 刷新机制（refresh_token）—— ref-salvo-admin 无此机制，保持一致
-- Casbin 复杂 RBAC —— ref-soybean-admin 的 Casbin 方案过重，本阶段用 perms 标识做轻量权限拦截
+- token 刷新机制（refresh_token）—— 本设计不含此机制，保持一致
+- Casbin 复杂 RBAC —— Casbin 方案偏重，本阶段用 perms 标识做轻量权限拦截
 
 ---
 
 ## 2. 设计原则与决策
 
-### 2.1 与 ref-salvo-admin 的关键差异（修正项）
+### 2.1 关键实现差异（修正项）
 
-| ref-salvo-admin 实现 | axum-backend 改进方案 | 修正理由 |
+| 旧框架实现 | axum-backend 改进方案 | 修正理由 |
 |----------------------|----------------------|----------|
 | JWT 中间件**只查 Redis 不验 JWT 签名** | JWT 签名验证 + Redis 黑名单双重校验 | JWT 签名验证保证 token 不可伪造；Redis 黑名单支持主动登出 |
 | JWT exp=6h 但 Redis TTL=1h，实际有效期 1h | JWT exp 与 Redis TTL 一致（均为配置的 `expire_hours`） | 消除不一致，避免「token 看似有效实则失效」的困惑 |
@@ -76,9 +76,9 @@
 | 验证码存 Redis value 为小写 | 验证码存 Redis value 为小写，校验时大小写不敏感 | 对齐前端（用户可能输入大写），`to_lowercase` 比对 |
 | `getRouters` 菜单转路由树用 `func::router_arr_to_tree2` | 复用已实现的 `build_tree` + 新增 `menu_to_router` 转换函数 | 统一树构建工具，避免重复递归逻辑 |
 
-### 2.2 与 ref-soybean-admin 的架构借鉴
+### 2.2 架构设计借鉴
 
-| ref-soybean-admin 设计 | axum-backend 对应实现 | 借鉴要点 |
+| 设计点 | axum-backend 对应实现 | 要点 |
 |------------------------|----------------------|----------|
 | `from_fn` + 闭包捕获参数 | `from_fn_with_state(state, auth_middleware)` | Axum 原生中间件模式（非手写 Tower Layer） |
 | Extensions 作为中间件间通信通道 | `req.extensions_mut().insert(Claims)` | JWT 中间件写入 Claims，权限中间件读取 |
@@ -150,7 +150,7 @@
 | **验证码** | `captcha:{uuid}` | 小写验证码字符串 | 300s（5 分钟） | `GET /captchaImage` | `POST /login` 校验后 DEL |
 | **token 黑名单** | `blacklist:{token}` | `"1"` | JWT 剩余有效期（秒） | `POST /logout` | TTL 自然过期 |
 
-> **设计决策：** ref-salvo-admin 将 token 本身存 Redis 作为"存在性校验"，但这意味着每次请求都要查 Redis。本方案改为 JWT 自包含验证（无需 Redis），仅登出时写黑名单。黑名单 TTL 设为 JWT 剩余有效期，过期后自动清理。
+> **设计决策：** 早期方案将 token 本身存 Redis 作为"存在性校验"，但这意味着每次请求都要查 Redis。本方案改为 JWT 自包含验证（无需 Redis），仅登出时写黑名单。黑名单 TTL 设为 JWT 剩余有效期，过期后自动清理。
 
 ### 2.6 权限校验中间件设计
 
@@ -177,12 +177,12 @@ pub struct RequirePerm(pub &'static str);
 
 ### 2.7 菜单转路由树设计（getRouters 接口）
 
-ref-salvo-admin 的 `router_arr_to_tree2` 将 `SysMenu` 转换为前端 `RouterVo` 结构。本方案拆分为两步：
+菜单转路由树将 `SysMenu` 转换为前端 `RouterVo` 结构，拆分为两步：
 
 1. **树形组装**：复用已实现的 `build_tree(&menus, 0)`（`SysMenuModel` 已实现 `TreeNode` trait）
 2. **菜单转路由**：新增 `menu_to_router(menu: &SysMenuModel) -> RouterVo` 转换函数
 
-**转换规则（对齐 ref-salvo-admin）：**
+**转换规则：**
 
 | RouterVo 字段 | 来源 / 转换规则 |
 |---------------|----------------|
@@ -873,9 +873,9 @@ Service 方法调用：service.method(dto, operator.username())
 
 ---
 
-## 9. 与 ref-salvo-admin 差异对照表
+## 9. 关键实现差异对照表
 
-| 维度 | ref-salvo-admin | axum-backend |
+| 维度 | 旧框架方案 | axum-backend |
 |------|----------------|--------------|
 | Web 框架 | Salvo | Axum 0.8 |
 | ORM | rbatis | SeaORM 1.1 |

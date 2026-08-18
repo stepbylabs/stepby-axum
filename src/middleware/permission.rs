@@ -421,6 +421,11 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         // ===== 服务器监控 =====
         ("GET", "/monitor/server") => Some("monitor:server:list"),
 
+        // ===== 实时日志监控 =====
+        // 菜单 menu_id=135 (实时日志) 在系统监控目录下，perms=monitor:log:list
+        ("GET", "/monitor/log/files") => Some("monitor:log:list"),
+        ("GET", "/monitor/log/tail") => Some("monitor:log:list"),
+
         // ===== 代码生成 =====
         ("GET", "/tool/gen/list") => Some("tool:gen:list"),
         ("GET", "/tool/gen/db/list") => Some("tool:gen:list"),
@@ -913,6 +918,9 @@ mod tests {
             ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"),
             // monitor_server_router
             ("GET", "/monitor/server"),
+            // monitor_log_router
+            ("GET", "/monitor/log/files"),
+            ("GET", "/monitor/log/tail"),
             // sys_backup_router
             ("GET", "/system/backup/list"),
             ("GET", "/system/backup/{backupId}"),

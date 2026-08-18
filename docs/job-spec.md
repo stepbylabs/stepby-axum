@@ -62,7 +62,7 @@
 | sys_job_log | status='0' | 执行成功 | |
 | sys_job_log | status='1' | 执行失败 | |
 
-> **注意**：ref-axum-admin 的 status 语义（0=暂停 1=运行）与前端**相反**，axum-backend 遵循前端语义，不照搬 ref-axum-admin。
+> **注意**：旧实现的 status 语义（0=暂停 1=运行）与前端**相反**，axum-backend 遵循前端语义，不照搬旧实现。
 
 ---
 
@@ -725,7 +725,7 @@ async fn execute_inner(invoke_target: &str) -> Result<String, String> {
 
 ## 八、内置任务函数
 
-服务启动时自动注册以下内置任务（对齐 ref-salvo-admin 初始数据）：
+服务启动时自动注册以下内置任务（对齐内置初始数据）：
 
 | invoke_target | 功能 | 默认 cron | 说明 |
 |---------------|------|-----------|------|
@@ -780,7 +780,7 @@ async fn execute_inner(invoke_target: &str) -> Result<String, String> {
 | 全局状态 | 支持 Arc 共享 | 依赖全局 Lazy |
 | cron 解析 | 内置 | 内置 |
 
-**决策**：选用 `tokio-cron-scheduler`，符合全局规则"调度内核独立实现，不复用任何参考项目的调度器"的要求，且与 axum-backend 现有 tokio 生态无缝集成。
+**决策**：选用 `tokio-cron-scheduler`，符合全局规则"调度内核独立实现"的要求，且与 axum-backend 现有 tokio 生态无缝集成。
 
 ### 10.2 调度器实例管理
 

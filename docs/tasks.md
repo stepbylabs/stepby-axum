@@ -901,7 +901,7 @@ git commit -m "feat: 添加 JWT 工具 Claims 与 token 生成/验证"
 use md5::{Digest, Md5};
 use crate::common::constants::constants::PASSWORD_SALT;
 
-/// 密码加盐 MD5（盐值 "yebot_admin"，不兼容 ref-salvo-admin 旧密码）
+/// 密码加盐 MD5（盐值 "yebot_admin"，不兼容旧密码）
 pub fn encrypt_password(password: &str) -> String {
     let salted = format!("{}{}", password, PASSWORD_SALT);
     let mut hasher = Md5::new();
@@ -954,7 +954,7 @@ Expected: 1 passed（若已临时集成到 lib.rs）
 ```bash
 cd axum-backend
 git add src/utils/mod.rs src/utils/password.rs
-git commit -m "feat: 添加密码加盐 MD5 工具（对齐 ref-salvo-admin）"
+git commit -m "feat: 添加密码加盐 MD5 工具"
 ```
 
 ---
@@ -1028,7 +1028,7 @@ git commit -m "feat: 添加验证码生成工具（base64 + uuid）"
 ```rust
 // axum-backend/src/utils/tree.rs
 
-/// 通用树节点 trait（对齐 ref-soybean-admin 的 tree_util）
+/// 通用树节点 trait（按既有设计实现）
 pub trait TreeNode {
     /// 节点 ID
     fn id(&self) -> i64;
@@ -1370,7 +1370,7 @@ use crate::db;
 use crate::logger;
 use crate::state::AppState;
 
-/// 初始化编排模块（对齐 ref-soybean-admin 的 server/initialize）
+/// 初始化编排模块
 pub struct AppInitializer;
 
 impl AppInitializer {
@@ -1408,7 +1408,7 @@ impl AppInitializer {
 ```bash
 cd axum-backend
 git add src/initialize/
-git commit -m "feat: 添加 initialize 初始化编排模块（对齐 ref-soybean-admin）"
+git commit -m "feat: 添加 initialize 初始化编排模块"
 ```
 
 ---
@@ -1708,4 +1708,4 @@ git commit -m "feat: 完成第一阶段工程脚手架与基础框架"
 - [x] 配置外置（config/config.toml），支持 RUST_LOG 环境变量覆盖
 - [x] migration 独立子 crate，含 sea-orm-migration 骨架
 - [x] 通用能力完整：响应/错误/配置/DB/Redis/日志/JWT/中间件/密码/验证码/树/initialize/常量
-- [x] ref-soybean-admin 架构对照：initialize 编排、State 注入、错误转换
+- [x] 核心模块设计对照：initialize 编排、State 注入、错误转换

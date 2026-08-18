@@ -17,8 +17,8 @@
 - [ ] 实体定义 **无 `#[handler]` 宏** 使用
 - [ ] 实体定义 **无 Depot 容器** 使用
 - [ ] **单一 ORM**：全程使用 SeaORM `#[derive(DeriveEntityModel)]`，无其他 ORM
-- [ ] **未直接复制** ref-axum-admin 的 codegen 显式展开风格（使用宏写法）
-- [ ] **未修改**任何 `ref-` 前缀的参考项目源码
+- [ ] **未直接复制** codegen 显式展开风格（使用 SeaORM 宏写法）
+- [ ] **未修改**任何外部 `ref-` 源码
 - [ ] migration 子 crate **独立于主 crate**（不依赖 axum-backend）
 
 ### 1.2 分层依赖校验
@@ -303,7 +303,7 @@
 
 ---
 
-## 7. 与 ref-salvo-admin 差异校验
+## 7. 与基础结构差异校验
 
 ### 7.1 新增字段
 
@@ -317,9 +317,9 @@
 
 - [ ] sys_job 主键从复合主键 `(job_id, job_name, job_group)` 改为单主键 `job_id`
 - [ ] sys_job 新增唯一索引 `uk_sys_job_name_group (job_name, job_group)`
-- [ ] sys_dict_data.dict_sort 类型为 `i32`（非 ref-axum-admin 的 `i8`）
+- [ ] sys_dict_data.dict_sort 类型为 `i32`（非旧实现的 `i8`）
 
-### 7.3 新增索引（ref-salvo-admin 未定义）
+### 7.3 新增索引（基础结构未定义）
 
 - [ ] sys_user: `uk_sys_user_name` + `idx_sys_user_dept`
 - [ ] sys_role: `uk_sys_role_key`
@@ -330,10 +330,10 @@
 
 ### 7.4 兼容性保证
 
-- [ ] 所有表名与 ref-salvo-admin 完全一致
-- [ ] 所有核心字段名与 ref-salvo-admin 完全一致
-- [ ] 可直接导入 ref-salvo-admin 的 `ry_20230223.sql` 数据（新增字段有默认值，向后兼容）
-- [ ] admin 用户密码 `bfb6b8dd9b268e241c82a257e235e550`（`admin123` + `yebot_admin` 盐值 MD5，不兼容 ref-salvo-admin 旧密码）
+- [ ] 所有表名与既有结构完全一致
+- [ ] 所有核心字段名与既有结构完全一致
+- [ ] 可直接导入既有 `ry_20230223.sql` 数据（新增字段有默认值，向后兼容）
+- [ ] admin 用户密码 `bfb6b8dd9b268e241c82a257e235e550`（`admin123` + `yebot_admin` 盐值 MD5，不兼容旧密码）
 
 ---
 
@@ -410,8 +410,8 @@
 - 无 salvo/rbatis 依赖：✓
 - 单一 ORM（SeaORM）：✓
 - Entity 层无 Web 类型：✓
-- 未复制 ref-axum-admin codegen 风格（使用宏写法）：✓
-- 未修改 ref- 项目：✓
+- 未复制 codegen 风格（使用宏写法）：✓
+- 未修改任何外部源码：✓
 
 实体文件完整性：
 - 11 个实体文件全部存在：✓
@@ -451,7 +451,7 @@
 - sys_logininfor 字段对齐（ipaddr 特例）：✓
 - sys_job / sys_job_log 字段对齐：✓
 
-与 ref-salvo-admin 差异：
+与基础结构差异：
 - sys_menu 新增 route_name + del_flag：✓
 - sys_dict_type / sys_dict_data 新增 del_flag：✓
 - sys_job 新增 del_flag + 主键改为单主键 + 唯一索引：✓

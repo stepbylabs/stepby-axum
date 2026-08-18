@@ -278,6 +278,13 @@ error:
     smtp_not_initialized: SMTP 客户端未初始化
     send_failed: 邮件发送失败
     send_timeout: 邮件发送超时（SMTP 无响应）
+  log:
+    list_task_failed: 日志文件列表任务执行失败
+    list_failed: 读取日志文件列表失败
+    invalid_name: 无效的日志文件名
+    tail_task_failed: 日志读取任务执行失败
+    file_not_found: 指定的日志文件不存在
+    tail_failed: 读取日志文件失败
   notice:
     not_found: 通知公告不存在
     id_invalid: 通知公告 ID 不合法

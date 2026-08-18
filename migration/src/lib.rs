@@ -37,6 +37,7 @@ pub use m20260805_000001_fix_backup_task_ratelimit_menu_parent::Migration as M20
 // 修复预先存在的问题：m20260806_000001_add_log_time_indexes 已创建但漏注册，索引从未生效
 pub use m20260806_000001_add_log_time_indexes::Migration as M20260806AddLogTimeIndexes;
 pub use m20260806_000002_add_task_operator_id::Migration as M20260806AddTaskOperatorId;
+pub use m20260818_000001_add_log_monitor_menu::Migration as M20260818AddLogMonitorMenu;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -72,6 +73,7 @@ mod m20260804_000001_fix_ip_location_menu_parent;
 mod m20260805_000001_fix_backup_task_ratelimit_menu_parent;
 mod m20260806_000001_add_log_time_indexes;
 mod m20260806_000002_add_task_operator_id;
+mod m20260818_000001_add_log_monitor_menu;
 
 use sea_orm_migration::prelude::*;
 
@@ -116,6 +118,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260805FixBackupTaskRatelimitMenuParent),
             Box::new(M20260806AddLogTimeIndexes),
             Box::new(M20260806AddTaskOperatorId),
+            Box::new(M20260818AddLogMonitorMenu),
         ]
     }
 }

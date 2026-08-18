@@ -18,11 +18,11 @@
 - [ ] 源码中 **无 Depot 容器** 使用
 - [ ] 源码中 **无 Salvo 专属 Request/Response** 使用
 - [ ] 源码中 **无 rbatis 注解式查询** 使用
-- [ ] **未直接复制**参考项目源码（所有逻辑用 Axum + SeaORM 原生方式实现）
+- [ ] **未直接复制**外部源码（所有逻辑用 Axum + SeaORM 原生方式实现）
 - [ ] **单一 ORM**：全程使用 SeaORM，无其他 ORM（diesel/sqlx 直接调用等）
 - [ ] Service 层 **无 Axum/Web 类型**（搜索 `axum::http`、`axum::extract`、`axum::Json` 在 service/ 下无结果）
 - [ ] Repository 层 **无 Web 类型**（同上）
-- [ ] **未修改**任何 `ref-` 前缀的参考项目源码
+- [ ] **未修改**任何外部项目或框架的源码
 
 ### 1.2 分层依赖校验
 
@@ -305,7 +305,7 @@
 ### 6.4 密码兼容性
 
 - [ ] 密码算法为 Argon2id + 随机盐（旧 MD5 仅作 fallback 验证）
-- [ ] 初始数据密码使用 Argon2id 生成（不兼容 ref-salvo-admin 旧密码）
+- [ ] 初始数据密码使用 Argon2id 生成（不兼容旧密码）
 
 ---
 
@@ -356,10 +356,10 @@
 
 ## 8. 文档校验
 
-- [ ] `docs/spec.md` 存在且内容完整（含目录结构、依赖清单、通用能力设计、migration 设计、ref-soybean-admin 架构对照）
+- [ ] `docs/spec.md` 存在且内容完整（含目录结构、依赖清单、通用能力设计、migration 设计、核心模块设计对照）
 - [ ] `docs/tasks.md` 存在且任务分解完整（23 个任务，每个含完整代码块）
 - [ ] `docs/checklist.md` 存在（本文件）
-- [ ] spec.md 含 ref-soybean-admin 架构对照表
+- [ ] spec.md 含核心模块设计对照表
 - [ ] tasks.md 每个任务包含完整代码块（无占位符、无 TBD/TODO）
 - [ ] 文档中无 "TBD" / "待补充" 等占位标记
 
@@ -415,7 +415,7 @@ migration 子 crate：
 - 响应字段名（code/msg/data/rows/total）：✓
 - 状态码（200/401/500）：✓
 - 服务端口（8080）：✓
-- 密码算法 Argon2id（不兼容 ref-salvo-admin 旧密码）：✓
+- 密码算法 Argon2id（不兼容旧密码）：✓
 
 编译运行：
 - cargo build 成功：✓

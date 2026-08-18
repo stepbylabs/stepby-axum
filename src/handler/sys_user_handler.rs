@@ -1,7 +1,7 @@
 // axum-backend/src/handler/sys_user_handler.rs
 //! 用户模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 ref-salvo-admin：
+//! 接口路径与返回格式对齐 yebot-ui 前端调用规范：
 //! - GET    /system/user/list                       分页查询用户
 //! - POST   /system/user                            新增用户
 //! - PUT    /system/user                            修改用户
@@ -55,7 +55,7 @@ pub struct ChangeStatusDto {
 }
 
 /// 分配用户角色请求体（对齐前端 PUT /system/user/authRole?userId=&roleIds=）
-/// ref-salvo-admin 此接口走 Query，这里同样走 Query 以保持兼容
+/// 本接口字段走 Query，这里同样走 Query 以保持兼容
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct AssignAuthRoleDto {

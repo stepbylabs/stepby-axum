@@ -5,6 +5,7 @@ pub mod common_handler;
 pub mod health;
 pub mod ip_location_handler;
 pub mod monitor_cache_handler;
+pub mod monitor_log_handler;
 pub mod monitor_online_handler;
 pub mod monitor_server_handler;
 pub mod sys_backup_handler;

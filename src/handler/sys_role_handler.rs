@@ -1,7 +1,7 @@
 // axum-backend/src/handler/sys_role_handler.rs
 //! 角色模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 ref-salvo-admin：
+//! 接口路径与返回格式对齐 yebot-ui 前端调用规范：
 //! - GET    /system/role/list                       分页查询角色
 //! - POST   /system/role                            新增角色
 //! - PUT    /system/role                            修改角色
@@ -201,7 +201,7 @@ pub async fn edit(
 }
 
 /// DELETE /system/role/{ids}
-/// 删除角色（支持批量逗号分隔，对齐 ref-salvo-admin 的 String Path）
+/// 删除角色（支持批量逗号分隔的 String Path）
 #[utoipa::path(
     delete,
     path = "/system/role/{ids}",

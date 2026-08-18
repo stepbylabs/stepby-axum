@@ -4,6 +4,7 @@ pub mod auth_router;
 pub mod common_router;
 pub mod ip_location_router;
 pub mod monitor_cache_router;
+pub mod monitor_log_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
 pub mod public;
@@ -84,6 +85,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(monitor_online_router::online_routes())
         .merge(monitor_cache_router::cache_routes())
         .merge(monitor_server_router::server_routes())
+        .merge(monitor_log_router::log_routes())
         .merge(sys_backup_router::backup_routes())
         .merge(ip_location_router::ip_location_routes())
         .merge(sys_task_router::task_routes())

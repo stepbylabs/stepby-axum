@@ -164,7 +164,7 @@
 - [ ] `src/handler/mod.rs` 新增 `pub mod sys_job_handler;` + `pub mod sys_job_log_handler;`
 - [ ] `src/router/mod.rs` 新增 `pub mod sys_job_router;` + merge 到 protected
 
-## 状态语义验证（关键，不照搬 ref-axum-admin）
+## 状态语义验证（关键，不照搬旧实现）
 
 - [ ] `sys_job.status='0'` → 调度运行中（与前端 active-value="0" 一致）
 - [ ] `sys_job.status='1'` → 调度暂停（与前端 inactive-value="1" 一致）

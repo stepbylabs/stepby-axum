@@ -268,7 +268,7 @@
 - [ ] token 过期返回 401
 - [ ] 黑名单命中返回 401
 - [ ] 权限不足返回 403
-- [ ] 验证码错误返回 500（对齐 ref-salvo-admin 约定）
+- [ ] 验证码错误返回 500（按既有约定）
 - [ ] 用户不存在/密码错误返回 500（防枚举攻击）
 - [ ] 账号停用/删除返回 500
 - [ ] DbErr 自动转换为 AppError
@@ -344,9 +344,9 @@
 
 ---
 
-## 16. 与 ref-salvo-admin 缺陷修复对照
+## 16. 关键缺陷修复对照
 
-| ref-salvo-admin 缺陷 | axum-backend 修复 | 验收 |
+| 旧实现缺陷 | axum-backend 修复 | 验收 |
 |---------------------|-------------------|------|
 | JWT 中间件只查 Redis 不验 JWT 签名 | JWT 签名验证 + Redis 黑名单双重校验 | [ ] |
 | JWT exp=6h 但 Redis TTL=1h | JWT exp 与 Redis TTL 一致（均为 expire_hours） | [ ] |

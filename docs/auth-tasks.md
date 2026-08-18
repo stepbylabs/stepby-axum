@@ -301,7 +301,7 @@ fn parse_os(ua: &str) -> String {
 
 **交付物：** `menu_to_router` 递归转换函数
 
-**转换规则（对齐 ref-salvo-admin）：**
+**转换规则：**
 
 | RouterVo 字段 | 转换规则 |
 |---------------|----------|
@@ -672,7 +672,7 @@ pub mod auth_router;  // 新增
 - [ ] 用户信息中 password 字段不返回（或为空）
 - [ ] roles 超管为 ["admin"]，普通用户为实际角色 key 列表
 - [ ] permissions 超管为 ["*:*:*"]，普通用户为实际权限标识列表
-- [ ] 所有响应 code=200 表示成功（对齐本项目前端，非 ref-salvo-admin 的 code=0）
+- [ ] 所有响应 code=200 表示成功（对齐本项目前端，非旧框架的 code=0）
 - [ ] 错误响应 code=500，msg 为错误信息
 
 **验收：**
