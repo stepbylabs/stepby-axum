@@ -3,7 +3,7 @@
 > **阶段：** 第三阶段「用户/角色/菜单 Service 层业务实现」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **参考优先级：** 接口契约对齐 ref-salvo-admin / ruoyi-vue3-ts ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+> **参考优先级：** 接口契约对齐 ref-salvo-admin ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
 
 ---
 
@@ -134,7 +134,7 @@ Service 方法入口处统一调用 `dto.validate()?` 进行校验，校验失�
 
 ### 2.6 超管保护策略
 
-**硬编码保护规则**（对齐 ruoyi-vue-ts 前端约定）：
+**硬编码保护规则**（对齐本项目前端约定）：
 
 | 保护对象 | 判定条件 | 保护规则 |
 |---------|---------|---------|

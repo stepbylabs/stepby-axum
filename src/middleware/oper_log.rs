@@ -626,7 +626,7 @@ pub(crate) fn infer_module_title(path: &str) -> String {
 
 /// 根据 HTTP 方法 + 路由路径推断业务类型
 ///
-/// 对齐 ruoyi-vue3-ts 前端 BusinessType 枚举与 sys_oper_type 字典：
+/// 对齐前端调用约定的 BusinessType 枚举与 sys_oper_type 字典：
 /// - 0=其他 1=新增（POST）2=修改（PUT）3=删除（DELETE）
 /// - 5=导出（*/export）6=导入（*/import*）
 /// - 7=强退（DELETE /monitor/online/*）8=生成代码（POST /tool/gen/*）9=清空（*/clean）

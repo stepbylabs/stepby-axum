@@ -218,7 +218,7 @@ impl SysOperLogService {
     ///
     /// 直接基于库内全量 GROUP BY business_type 聚合，替代前端拉取 pageSize=1000
     /// 全量明细后再在客户端分组的低效做法。
-    /// 业务类型编码对齐 ruoyi：1=新增(insert) 2=修改(update) 3=删除(delete) 0/其他=其他(other)。
+    /// 业务类型编码对齐既有约定：1=新增(insert) 2=修改(update) 3=删除(delete) 0/其他=其他(other)。
     pub async fn oper_log_type_stats(&self) -> Result<OperLogTypeStatsVo, ServiceError> {
         let rows = self.oper_log_repo.stats_by_business_type().await?;
         let mut vo = OperLogTypeStatsVo {

@@ -1,9 +1,9 @@
 //! 第六次迁移：隐藏 Druid 监控菜单（menu_id=111）
 //!
 //! 背景：
-//!   Druid 是阿里巴巴 Java 数据库连接池监控工具，RuoYi Java 框架默认集成。
+//!   Druid 是阿里巴巴 Java 数据库连接池监控工具，当前 Java 系后台框架普遍集成。
 //!   yebot 后端基于 Rust + Axum + SeaORM，从未集成 Druid，但 migration m20250711
-//!   原样拷贝了 RuoYi 的 sys_menu 种子数据，导致 menu_id=111（数据监控/druid）
+//!   原样拷贝了参考 admin 项目的 sys_menu 种子数据，导致 menu_id=111（数据监控/druid）
 //!   在前端动态菜单中显示，点击后进入占位页 `views/monitor/druid/index.vue`，
 //!   该页面 `<script setup>` 为空，仅显示 "Druid 未配置" 提示。
 //!
@@ -30,7 +30,7 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // 三库统一的 UPDATE 语句（无方言差异）
-        // visible='1' 表示隐藏菜单（RuoYi 约定：0=显示, 1=隐藏）
+        // visible='1' 表示隐藏菜单（约定：0=显示, 1=隐藏）
         manager
             .get_connection()
             .execute_unprepared(

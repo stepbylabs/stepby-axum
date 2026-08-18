@@ -268,7 +268,7 @@
 - [ ] token 过期返回 401
 - [ ] 黑名单命中返回 401
 - [ ] 权限不足返回 403
-- [ ] 验证码错误返回 500（对齐 ref-salvo-admin / ruoyi-vue3-ts 约定）
+- [ ] 验证码错误返回 500（对齐 ref-salvo-admin 约定）
 - [ ] 用户不存在/密码错误返回 500（防枚举攻击）
 - [ ] 账号停用/删除返回 500
 - [ ] DbErr 自动转换为 AppError
@@ -359,7 +359,7 @@
 | `depot.get::<i32>("userId")` | `Operator` 提取器（`FromRequestParts`） | [ ] |
 | `redis::del(token)` 登出 | `redis::set(blacklist:{token}, EX ttl)` | [ ] |
 | 密码盐值 `"salvo_admin"` | `"yebot_admin"` | [ ] |
-| 响应码 code=0 成功 | code=200 成功（对齐 ruoyi-vue3-ts） | [ ] |
+| 响应码 code=0 成功 | code=200 成功（对齐本项目前端） | [ ] |
 | 验证码 5 位 | 验证码 4 位（排除易混淆字符） | [ ] |
 
 ---

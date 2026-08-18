@@ -1,7 +1,7 @@
 //! 清理无效菜单：彻底删除 menu_id=111（数据监控/druid）
 //!
 //! 背景：
-//!   - menu_id=111 是 RuoYi 遗留的 Java Druid 监控菜单，component=monitor/druid/index
+//!   - menu_id=111 是遗留的 Java Druid 监控菜单，component=monitor/druid/index
 //!   - 前端 views/monitor/druid/ 目录已在 m20260720_000001_hide_druid_menu 中删除
 //!   - 之前只做了 visible='1' 隐藏，但数据库记录和 sys_role_menu 关联仍残留
 //!   - 用户点击仍会触发 loadView 兜底警告（组件不存在）

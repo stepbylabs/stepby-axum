@@ -3,7 +3,7 @@
 > **阶段：** 第四阶段「Axum 原生鉴权体系实现」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **参考优先级：** 接口契约对齐 ref-salvo-admin / ruoyi-vue3-ts ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+> **参考优先级：** 接口契约对齐 ref-salvo-admin ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
 
 ---
 
@@ -17,7 +17,7 @@
 2. **权限校验中间件**：基于后端返回的权限标识做接口级权限拦截
 3. **登录接口**：签发 token、返回用户信息与权限菜单
 4. **状态管理**：用 State 注入全局认证服务
-5. **接口 100% 对齐 ruoyi-vue3-ts 前端规范**：`/login`、`/logout`、`/captchaImage`、`/getInfo`、`/getRouters` 五个端点
+5. **接口 100% 对齐本项目前端规范**：`/login`、`/logout`、`/captchaImage`、`/getInfo`、`/getRouters` 五个端点
 
 ### 1.2 已有基础设施盘点
 
@@ -54,7 +54,7 @@
 
 ### 1.4 非目标（本阶段不实现）
 
-- 用户注册接口（`/register`）—— ruoyi-vue3-ts 有此接口但非核心流程
+- 用户注册接口（`/register`）—— 前端参考框架有此接口但非核心流程
 - 锁屏解锁接口（`/unlockscreen`）—— 前端锁屏功能
 - 初始密码/密码过期提示（`isDefaultModifyPwd` / `isPasswordExpired`）—— 非核心鉴权
 - token 刷新机制（refresh_token）—— ref-salvo-admin 无此机制，保持一致
@@ -70,7 +70,7 @@
 |----------------------|----------------------|----------|
 | JWT 中间件**只查 Redis 不验 JWT 签名** | JWT 签名验证 + Redis 黑名单双重校验 | JWT 签名验证保证 token 不可伪造；Redis 黑名单支持主动登出 |
 | JWT exp=6h 但 Redis TTL=1h，实际有效期 1h | JWT exp 与 Redis TTL 一致（均为配置的 `expire_hours`） | 消除不一致，避免「token 看似有效实则失效」的困惑 |
-| 登录日志**未实现** | 登录成功/失败均写 `sys_logininfor` 表 | 对齐若依原版功能，安全审计需要 |
+| 登录日志**未实现** | 登录成功/失败均写 `sys_logininfor` 表 | 对齐既有设计功能，安全审计需要 |
 | `getInfo` 普通用户权限疑似 bug（传 `true` 跳过 WHERE） | 复用已实现的 `get_permissions_by_user_id`（正确按角色过滤） | 修复权限越权漏洞 |
 | token 存 Redis（key=token, value=user_id） | token 不存 Redis（JWT 自包含）；仅登出时写黑名单 | 减少 Redis 读写，JWT 自包含验证更轻量 |
 | 验证码存 Redis value 为小写 | 验证码存 Redis value 为小写，校验时大小写不敏感 | 对齐前端（用户可能输入大写），`to_lowercase` 比对 |
@@ -182,7 +182,7 @@ ref-salvo-admin 的 `router_arr_to_tree2` 将 `SysMenu` 转换为前端 `RouterV
 1. **树形组装**：复用已实现的 `build_tree(&menus, 0)`（`SysMenuModel` 已实现 `TreeNode` trait）
 2. **菜单转路由**：新增 `menu_to_router(menu: &SysMenuModel) -> RouterVo` 转换函数
 
-**转换规则（对齐 ref-salvo-admin / ruoyi-vue3-ts）：**
+**转换规则（对齐 ref-salvo-admin）：**
 
 | RouterVo 字段 | 来源 / 转换规则 |
 |---------------|----------------|
@@ -380,7 +380,7 @@ impl IntoResponse for GetInfoResult {
 {
   "code": 200,
   "msg": "操作成功",
-  "user": { "userId": 1, "userName": "admin", "nickName": "若依管理员", "password": null, ... },
+  "user": { "userId": 1, "userName": "admin", "nickName": "演示管理员", "password": null, ... },
   "roles": ["admin"],
   "permissions": ["*:*:*"]
 }
@@ -891,4 +891,4 @@ Service 方法调用：service.method(dto, operator.username())
 | 提取器 | `depot.get::<i32>("userId")` | `Operator`（实现 `FromRequestParts`） |
 | 登出 | `redis::del(token)` | `redis::set(blacklist:{token}, EX ttl)` |
 | 密码盐值 | `"salvo_admin"` | `"yebot_admin"` |
-| 响应码 | code=0 成功 | code=200 成功（对齐 ruoyi-vue3-ts） |
+| 响应码 | code=0 成功 | code=200 成功（对齐本项目前端） |

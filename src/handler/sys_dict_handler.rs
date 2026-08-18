@@ -1,6 +1,6 @@
 //! 字典模块 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /system/dict/type/list            分页查询字典类型
 //! - GET    /system/dict/type/optionselect    查询全部字典类型（下拉用）
 //! - GET    /system/dict/type/{dictId}        查询字典类型详情

@@ -1,7 +1,7 @@
 // axum-backend/src/handler/sys_menu_handler.rs
 //! 菜单模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 ref-salvo-admin / ruoyi-vue3-ts：
+//! 接口路径与返回格式对齐 ref-salvo-admin：
 //! - GET    /system/menu/list                        菜单列表（扁平）
 //! - POST   /system/menu                             新增菜单
 //! - PUT    /system/menu                             修改菜单

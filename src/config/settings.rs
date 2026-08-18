@@ -30,7 +30,7 @@ pub struct Settings {
     /// 权限未映射路由的默认处置策略（权限 fail-open 加固，B3）
     ///
     /// - false（默认，开发/兼容）：未登记权限映射且不在"仅登录白名单"的路由**放行**
-    ///   （保持 ruoyi 原有行为，零破坏性）。
+    ///   （保持现有默认行为，零破坏性）。
     /// - true（生产推荐）：此类路由**拒绝（403）**并审计，实现 fail-closed，
     ///   防止新增路由漏登记权限导致越权。
     ///
@@ -490,7 +490,7 @@ impl Settings {
         // 权限 fail-open 加固开关（B3）：未映射路由是否默认拒绝
         // PERMISSION_DENY_BY_DEFAULT=true 时，受保护路由中未登记权限映射且不在"仅登录白名单"的
         // 路径将被拒绝（403），实现 fail-closed，防止新增路由漏登记权限导致越权。
-        // 缺省不设置则保持 false（fail-open 放行，兼容 ruoyi 原行为，零破坏性）。
+        // 缺省不设置则保持 false（fail-open 放行，兼容现有默认行为，零破坏性）。
         if let Ok(v) = std::env::var("PERMISSION_DENY_BY_DEFAULT") {
             self.permission_deny_by_default = v == "true" || v == "1";
         }

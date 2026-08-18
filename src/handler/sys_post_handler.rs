@@ -1,6 +1,6 @@
 //! 岗位模块 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /system/post/list            分页查询岗位
 //! - GET    /system/post/optionselect    查询全部岗位（下拉用）
 //! - GET    /system/post/{postId}        查询岗位详情

@@ -1,6 +1,6 @@
 //! 通用模块 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - POST /common/upload             通用文件上传（multipart/form-data，字段名 file）
 //! - GET  /common/download           通用文件下载（按服务器文件名）
 //! - GET  /common/download/resource  通用资源下载（按相对资源路径）

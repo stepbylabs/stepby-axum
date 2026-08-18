@@ -589,7 +589,7 @@ impl SysMenuService {
 
     /// 查询用户菜单树（超管短路 + 过滤按钮类型/隐藏/停用）
     ///
-    /// 过滤规则（与 RuoYi Java 原版 selectMenuTreeByUserId 一致）：
+    /// 过滤规则（selectMenuTreeByUserId）：
     /// - menu_type != 'F'：按钮类型不进路由树
     /// - visible == '0'：隐藏菜单（visible='1'）不进入 getRouters 返回
     ///   * hidden 路由（如 profile / user-auth/role / dict-data / job-log / gen-edit）

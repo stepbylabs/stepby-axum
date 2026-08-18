@@ -1,7 +1,7 @@
 // axum-backend/src/handler/sys_role_handler.rs
 //! 角色模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 ref-salvo-admin / ruoyi-vue3-ts：
+//! 接口路径与返回格式对齐 ref-salvo-admin：
 //! - GET    /system/role/list                       分页查询角色
 //! - POST   /system/role                            新增角色
 //! - PUT    /system/role                            修改角色

@@ -1,6 +1,6 @@
 //! 缓存监控 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /monitor/cache                                    获取 Redis 缓存概览
 //! - GET    /monitor/cache/getNames                           获取缓存键名列表
 //! - GET    /monitor/cache/getKeys/{cacheName}                获取指定缓存的键列表

@@ -1,6 +1,6 @@
 //! 认证模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 ref-salvo-admin / ruoyi-vue3-ts：
+//! 接口路径与返回格式对齐 ref-salvo-admin：
 //! - GET  /captchaImage  生成验证码（字段在顶层）
 //! - POST /login         登录（token 在顶层）
 //! - POST /logout        登出（标准 AjaxResult）

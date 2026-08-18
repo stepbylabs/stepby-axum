@@ -107,7 +107,7 @@ pub async fn permission_middleware(
                     return Err(AppError::new(403, crate::tr!("error.auth.permission_denied")));
                 }
                 _ => {
-                    // 默认 fail-open：放行（保持 ruoyi 原行为，零破坏性）
+                    // 默认 fail-open：放行（保持现有默认行为，零破坏性）
                     return Ok(next.run(req).await);
                 }
             }
@@ -268,7 +268,7 @@ fn spawn_permission_denied_audit(
 /// 根据 HTTP 方法和匹配路径返回所需权限标识。
 /// 不在此表中的路由视为仅需登录，不需细粒度权限。
 ///
-/// 权限标识对齐 ruoyi-vue3-ts 前端菜单表的 perms 字段。
+/// 权限标识对齐前端菜单表的 perms 字段。
 fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
     match (method, path) {
         // ===== 用户管理 =====
@@ -500,7 +500,7 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
 /// 仅登录白名单（deny_by_default 模式下用于区分"合法仅登录路由"与"漏登记权限映射"）
 ///
 /// 这些路由在 `get_required_perm` 中返回 `None`（仅需登录认证，无细粒度 RBAC 权限），
-/// 属于 ruoyi 既有设计：下拉树、个人中心、标记已读、登录态相关接口等。
+/// 属于既有设计：下拉树、个人中心、标记已读、登录态相关接口等。
 ///
 /// 当 `permission_deny_by_default=true`（生产 fail-closed）时，未登记权限映射的受保护路由
 /// 默认拒绝（403），仅本表所列"明确仅登录"路由放行，防止新增路由漏登记权限导致越权。

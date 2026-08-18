@@ -1,6 +1,6 @@
 //! 服务器监控 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET /monitor/server — 获取服务器信息（CPU、内存、JVM/运行时、磁盘、系统信息）
 //!
 //! 使用 sysinfo crate 采集 CPU/内存/磁盘信息，

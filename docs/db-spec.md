@@ -3,7 +3,7 @@
 > **阶段：** 第二阶段「系统核心数据库表结构设计」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **参考优先级：** 接口契约对齐 ref-salvo-admin / ruoyi-vue3-ts ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+> **参考优先级：** 接口契约对齐 ref-salvo-admin ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
 
 ---
 
@@ -18,7 +18,7 @@
 3. **创建/更新时间自动维护**（通过 SeaORM `ActiveModelBehavior` trait）
 4. **SeaORM 实体层**完整实现（`src/entity/` 下 11 个实体文件）
 5. **数据库迁移脚本**（填充 `m20250711_000001_init.rs` 建表 + 索引 + 初始数据）
-6. 字段 **100% 覆盖** ruoyi-vue3-ts 前端 TypeScript 类型定义
+6. 字段 **100% 覆盖**本项目前端 TypeScript 类型定义
 
 ### 1.2 表清单
 
@@ -36,7 +36,7 @@
 | 配套 | `sys_job` | 定时任务调度表 | 单主键 `job_id` | ✓ del_flag |
 | 配套 | `sys_job_log` | 定时任务调度日志表 | 单主键 `job_log_id` | ✗ |
 
-> **表名说明：** 登录日志表使用 `sys_logininfor`（非 `sys_login_log`），对齐 ref-salvo-admin SQL 脚本与 ruoyi-vue3-ts 前端 `SysLogininfor` 类型定义。
+> **表名说明：** 登录日志表使用 `sys_logininfor`（非 `sys_login_log`），对齐 ref-salvo-admin SQL 脚本与本项目前端 `SysLogininfor` 类型定义。
 
 ### 1.3 非目标（本阶段不实现）
 
@@ -53,9 +53,9 @@
 
 | 维度 | 规范 | 示例 | 说明 |
 |------|------|------|------|
-| 表名 | snake_case，`sys_` 前缀 | `sys_user` | 对齐 ref-salvo-admin / ruoyi 原版 |
+| 表名 | snake_case，`sys_` 前缀 | `sys_user` | 对齐 ref-salvo-admin / 原版设计 |
 | 列名 | snake_case | `user_id`、`create_time` | 对齐 ref-salvo-admin SQL |
-| 主键名 | `<表名缩写>_id` 或语义化 | `user_id`、`dict_code` | 对齐 ruoyi 惯例 |
+| 主键名 | `<表名缩写>_id` 或语义化 | `user_id`、`dict_code` | 对齐既有惯例 |
 | 索引名 | `idx_<表名>_<列缩写>` | `idx_sys_oper_log_bt` | 对齐 ref-salvo-admin |
 | 唯一索引 | `uk_<表名>_<列缩写>` | `uk_sys_user_name` | 本项目统一命名 |
 | 外键 | 不使用外键约束 | - | 对齐 ref-salvo-admin / ref-axum-admin，关联靠应用层维护 |
@@ -94,7 +94,7 @@
 - 删除层：`update set del_flag = '2'` 实现软删除
 - 不在 SeaORM 实体层做全局过滤（避免复杂度），由 Repository 层显式处理
 
-> **与 ref-axum-admin 的差异：** ref-axum-admin 使用 `deleted_at: Option<DateTime>` 实现软删除，本项目使用 `del_flag char(1)` 对齐 ref-salvo-admin，保证与 ruoyi 数据库兼容。
+> **与 ref-axum-admin 的差异：** ref-axum-admin 使用 `deleted_at: Option<DateTime>` 实现软删除，本项目使用 `del_flag char(1)` 对齐 ref-salvo-admin，保证与参考后台框架数据库兼容。
 
 ### 2.4 时间自动维护设计决策
 
@@ -126,7 +126,7 @@ impl ActiveModelBehavior for ActiveModel {
 
 ### 2.5 审计字段设计
 
-所有业务表统一包含审计字段（对齐 ref-salvo-admin / ruoyi 原版）：
+所有业务表统一包含审计字段（对齐 ref-salvo-admin / 原版设计）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -288,7 +288,7 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 - 普通索引：`idx_sys_menu_parent (parent_id)` —— 按父节点查询子菜单优化
 
 **与 ref-salvo-admin 的差异：**
-- **新增 `route_name` 字段**：ruoyi-vue3-ts 前端 `SysMenu` 类型含 `routeName` 字段，ref-salvo-admin SQL 未定义，本项目补充以对齐前端
+- **新增 `route_name` 字段**：本项目前端 `SysMenu` 类型含 `routeName` 字段，ref-salvo-admin SQL 未定义，本项目补充以对齐前端
 - **新增 `del_flag` 字段**：ref-salvo-admin 的 sys_menu 无软删除，本项目统一软删除设计
 
 **前端字段对齐说明：**
@@ -739,7 +739,7 @@ impl ActiveModelBehavior for ActiveModel {}
 
 ```sql
 INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, create_by, create_time, remark)
-VALUES (1, 100, 'admin', '若依管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', 'admin', NOW(), '管理员');
+VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', 'admin', NOW(), '管理员');
 ```
 
 > **密码说明：** `admin123` + `yebot_admin` 盐值后 MD5 = `bfb6b8dd9b268e241c82a257e235e550`。盐值已从 `"salvo_admin"` 改为 `"yebot_admin"`，不兼容 ref-salvo-admin 旧密码。
@@ -891,8 +891,7 @@ sys_user::Entity::find()
 - 主库脚本：`ref-salvo-admin/sql/ry_20230223.sql`（只读，禁止修改）
 - Quartz 表脚本：`ref-salvo-admin/sql/quartz.sql`（本阶段不使用）
 
-## 附录 B：ruoyi-vue3-ts 类型定义文件位置
-
-- 基础类型：`ruoyi-vue3-ts/src/types/api/common.ts`（只读）
-- 系统模块：`ruoyi-vue3-ts/src/types/api/system/*.ts`（只读）
-- 监控模块：`ruoyi-vue3-ts/src/types/api/monitor/*.ts`（只读）
+## 附录 B：本项目前端类型定义文件位置
+- 基础类型：`types/api/common.ts`（只读）
+- 系统模块：`types/api/system/*.ts`（只读）
+- 监控模块：`types/api/monitor/*.ts`（只读）

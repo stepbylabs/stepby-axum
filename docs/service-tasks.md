@@ -294,9 +294,9 @@ pub use sys_menu_service::SysMenuService;
 ### T09 前端接口契约对齐自查
 
 **检查项：**
-- [ ] 用户模块返回字段对齐 `ruoyi-vue3-ts/src/types/api/system/user.ts`
-- [ ] 角色模块返回字段对齐 `ruoyi-vue3-ts/src/types/api/system/role.ts`
-- [ ] 菜单模块返回字段对齐 `ruoyi-vue3-ts/src/types/api/system/menu.ts`
+- [ ] 用户模块返回字段对齐前端类型定义（`types/api/system/user.ts`）
+- [ ] 角色模块返回字段对齐前端类型定义（`types/api/system/role.ts`）
+- [ ] 菜单模块返回字段对齐前端类型定义（`types/api/system/menu.ts`）
 - [ ] 分页响应对齐 `TableDataInfo`
 - [ ] 普通响应对齐 `AjaxResult`（Service 层不返回 AjaxResult，由 Handler 包装）
 - [ ] DTO 字段驼峰映射对齐

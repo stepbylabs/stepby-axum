@@ -3,7 +3,7 @@
 > **阶段：** 第一阶段「工程脚手架与基础框架」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** 项目规则基线见根目录 `README.md` 与 `SECURITY.md`；Trae IDE 规则文件 `axum-backend/.trae/rules/project-rules.md`（IDE 内自动加载，非项目文档）
-> **参考优先级：** 接口契约对齐 ref-salvo-admin / ruoyi-vue3-ts ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+> **参考优先级：** 接口契约对齐 ref-salvo-admin ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
 
 ---
 
@@ -32,7 +32,7 @@
 | 严格分层 | Handler → Service → Repository，单向依赖，禁止反向 |
 | SeaORM 唯一 ORM | 全程使用 SeaORM，禁止混用其他 ORM |
 | 配置外置 | 通过 `config/config.toml` 加载配置，支持 `RUST_LOG` 环境变量覆盖 |
-| 接口契约第一 | 响应结构、字段命名、状态码 100% 对齐 ruoyi-vue3-ts |
+| 接口契约第一 | 响应结构、字段命名、状态码 100% 对齐本项目前端 |
 | initialize 编排 | 初始化流程集中在 `initialize` 模块（对齐 ref-soybean-admin 的 `server/initialize`） |
 
 ### 1.4 ref-soybean-admin 架构对照
@@ -244,9 +244,9 @@ migration（独立子 crate，不依赖主 crate）
 
 ## 4. 通用能力设计
 
-### 4.1 统一响应结构体（对齐 ruoyi-vue3-ts）
+### 4.1 统一响应结构体（对齐本项目前端）
 
-> **契约来源：** `ruoyi-vue3-ts/src/types/api/common.ts` + `ruoyi-vue3-ts/src/utils/request.ts`
+> **契约来源：** 前端类型定义 `types/api/common.ts` + `utils/request.ts`
 
 #### 4.1.1 普通响应 `AjaxResult<T>`
 
@@ -850,7 +850,7 @@ impl AppInitializer {
 ### 4.14 系统常量
 
 ```rust
-/// 业务状态码常量（对齐 ruoyi-vue3-ts 前端约定）
+/// 业务状态码常量（对齐本项目前端约定）
 pub mod constants {
     pub const SUCCESS: i32 = 200;
     pub const UNAUTHORIZED: i32 = 401;
@@ -976,7 +976,7 @@ async fn main() {
 
 ---
 
-## 6. 接口契约对齐说明（与 ruoyi-vue3-ts）
+## 6. 接口契约对齐说明（与本项目前端）
 
 ### 6.1 响应格式
 
@@ -1012,7 +1012,7 @@ async fn main() {
 
 ### 6.5 服务端口
 
-- 后端监听 **8080** 端口（对齐 ruoyi-vue3-ts 的 vite proxy）
+- 后端监听 **8080** 端口（对齐本项目前端的 vite proxy）
 - 路由无全局前缀（`/login`、`/system/user/list` 直接生效）
 
 ---
@@ -1027,14 +1027,14 @@ async fn main() {
 | 禁止复制参考项目源码 | 所有代码用 Axum + SeaORM 原生方式实现 |
 | 单一 ORM | 仅使用 SeaORM，无其他 ORM |
 | 单向分层 | handler → service → repository → entity，禁止反向 |
-| 接口契约对齐 | 响应结构、字段命名、状态码 100% 对齐 ruoyi-vue3-ts |
+| 接口契约对齐 | 响应结构、字段命名、状态码 100% 对齐本项目前端 |
 | 仅修改 axum-backend | 所有文件均在 axum-backend/ 内创建 |
 
 ### 7.2 参考优先级执行
 
 | 优先级 | 参考项目 | 本阶段应用场景 |
 |--------|----------|----------------|
-| 第一 | ref-salvo-admin / ruoyi-vue3-ts | 响应结构体字段名、状态码、Token 契约（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "yebot_admin"） |
+| 第一 | ref-salvo-admin | 响应结构体字段名、状态码、Token 契约（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "yebot_admin"） |
 | 第二 | ref-soybean-admin | 分层架构、State 注入、initialize 编排、错误 IntoResponse、中间件 from_fn |
 | 第三 | ref-axum-admin | SeaORM ConnectOptions 配置、paginate 分页查询模式 |
 | 第四 | ref-salvo-admin | 验证码接口设计（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "yebot_admin"） |
@@ -1077,7 +1077,7 @@ async fn main() {
 
 ✅ 自查结果：
 - 无 salvo/rbatis 依赖引入 ✓
-- 响应结构体字段（code/msg/data/rows/total）100% 对齐 ruoyi-vue3-ts ✓
+- 响应结构体字段（code/msg/data/rows/total）100% 对齐本项目前端 ✓
 - 分层依赖单向（handler → service → repository → entity）✓
 - 通用能力完整：响应/错误/配置/DB/Redis/日志/JWT/中间件/密码/验证码/树/initialize/常量 ✓
 - migration 独立子 crate 已纳入设计 ✓

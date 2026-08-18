@@ -2,7 +2,7 @@
 
 ## 一、需求概述
 
-基于全局规则（纯 Axum + SeaORM），使用 `tokio-cron-scheduler` 独立实现定时任务调度内核，接口 100% 对齐 ruoyi-vue3-ts 前端 `/monitor/job` 和 `/monitor/jobLog` 契约。
+基于全局规则（纯 Axum + SeaORM），使用 `tokio-cron-scheduler` 独立实现定时任务调度内核，接口 100% 对齐本项目前端 `/monitor/job` 和 `/monitor/jobLog` 契约。
 
 ### 核心能力
 
@@ -66,7 +66,7 @@
 
 ---
 
-## 三、接口契约（对齐 ruoyi-vue3-ts 前端）
+## 三、接口契约（对齐本项目前端）
 
 ### 3.1 任务管理接口 `/monitor/job`
 
