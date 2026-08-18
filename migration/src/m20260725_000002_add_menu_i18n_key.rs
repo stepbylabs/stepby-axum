@@ -35,10 +35,8 @@ impl MigrationTrait for Migration {
 
         // ========== 1. 添加 i18n_key 列（三库统一语法） ==========
         // SQLite/Postgres/MySQL 均支持 ALTER TABLE ADD COLUMN
-        conn.execute_unprepared(
-            "ALTER TABLE sys_menu ADD COLUMN i18n_key VARCHAR(100) NULL",
-        )
-        .await?;
+        conn.execute_unprepared("ALTER TABLE sys_menu ADD COLUMN i18n_key VARCHAR(100) NULL")
+            .await?;
 
         // ========== 2. 填充内置菜单 i18n_key ==========
         // 仅 M（目录）和 C（菜单）类型需要 i18n_key，F（按钮）类型不进入路由树
@@ -115,10 +113,8 @@ impl MigrationTrait for Migration {
             DatabaseBackend::Sqlite => {
                 // SQLite: 重建表方案
                 // 1. 重命名旧表
-                conn.execute_unprepared(
-                    "ALTER TABLE sys_menu RENAME TO sys_menu_old_i18n",
-                )
-                .await?;
+                conn.execute_unprepared("ALTER TABLE sys_menu RENAME TO sys_menu_old_i18n")
+                    .await?;
 
                 // 2. 创建新表（无 i18n_key 列）— 复制原始 schema
                 conn.execute_unprepared(

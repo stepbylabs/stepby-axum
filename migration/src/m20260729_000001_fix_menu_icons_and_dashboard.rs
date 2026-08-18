@@ -34,7 +34,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 /// 当前时间表达式（跨数据库兼容）
@@ -216,9 +219,7 @@ impl MigrationTrait for Migration {
         // ========== 7. 清理 menu_id=111(druid) 的 sys_role_menu 残留关联 ==========
         manager
             .get_connection()
-            .execute_unprepared(
-                "DELETE FROM sys_role_menu WHERE menu_id = 111",
-            )
+            .execute_unprepared("DELETE FROM sys_role_menu WHERE menu_id = 111")
             .await?;
 
         // ========== 8. 削减 common 角色(role_id=2) 过高权限 ==========
@@ -236,15 +237,15 @@ impl MigrationTrait for Migration {
         // 保留：查询/新增/修改/导出 类权限（普通运维操作）
         // 注意：超管通过 *:*:* 通配符不受影响
         let remove_perms = [
-            1003, 1006, 1010, 1015, 1019, 1028, 1033, 1044, 1047, 1048,
-            1052, 1202, 1204, 1208, 1209, 1211, 1213,
+            1003, 1006, 1010, 1015, 1019, 1028, 1033, 1044, 1047, 1048, 1052, 1202, 1204, 1208,
+            1209, 1211, 1213,
         ];
         for menu_id in remove_perms {
-            let sql = format!("DELETE FROM sys_role_menu WHERE role_id = 2 AND menu_id = {}", menu_id);
-            manager
-                .get_connection()
-                .execute_unprepared(&sql)
-                .await?;
+            let sql = format!(
+                "DELETE FROM sys_role_menu WHERE role_id = 2 AND menu_id = {}",
+                menu_id
+            );
+            manager.get_connection().execute_unprepared(&sql).await?;
         }
 
         Ok(())
@@ -265,58 +266,62 @@ impl MigrationTrait for Migration {
             (130, "dashboard"),
         ];
         for (menu_id, icon) in rollback_icons {
-            let sql = format!("UPDATE sys_menu SET icon = '{}' WHERE menu_id = {}", icon, menu_id);
-            manager
-                .get_connection()
-                .execute_unprepared(&sql)
-                .await?;
+            let sql = format!(
+                "UPDATE sys_menu SET icon = '{}' WHERE menu_id = {}",
+                icon, menu_id
+            );
+            manager.get_connection().execute_unprepared(&sql).await?;
         }
 
         // 回滚 order_num
         manager
             .get_connection()
-            .execute_unprepared(
-                "UPDATE sys_menu SET order_num = 10 WHERE menu_id = 125",
-            )
+            .execute_unprepared("UPDATE sys_menu SET order_num = 10 WHERE menu_id = 125")
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
-                "UPDATE sys_menu SET order_num = 0 WHERE menu_id = 127",
-            )
+            .execute_unprepared("UPDATE sys_menu SET order_num = 0 WHERE menu_id = 127")
             .await?;
 
         // 删除新增的 dashboard/health/file 菜单及关联
         for menu_id in [132, 133, 134] {
             let sql = format!("DELETE FROM sys_role_menu WHERE menu_id = {}", menu_id);
-            manager
-                .get_connection()
-                .execute_unprepared(&sql)
-                .await?;
+            manager.get_connection().execute_unprepared(&sql).await?;
             let sql = format!("DELETE FROM sys_menu WHERE menu_id = {}", menu_id);
-            manager
-                .get_connection()
-                .execute_unprepared(&sql)
-                .await?;
+            manager.get_connection().execute_unprepared(&sql).await?;
         }
 
         // 恢复 druid 关联（虽然已隐藏但保留数据一致性）
         let now = now_expr(manager);
-        let restore_druid = format!(
-            "sys_role_menu (role_id, menu_id) VALUES (2, 111)"
-        );
+        let restore_druid = "sys_role_menu (role_id, menu_id) VALUES (2, 111)".to_string();
         let _ = now; // druid 关联无需时间戳
         execute_idempotent_insert(manager, &restore_druid).await?;
 
         // 恢复 common 角色被削减的权限
         let restore_perms = [
-            (2, 1003), (2, 1006), (2, 1010), (2, 1015), (2, 1019),
-            (2, 1028), (2, 1033), (2, 1044), (2, 1047), (2, 1048),
-            (2, 1052), (2, 1202), (2, 1204), (2, 1208), (2, 1209),
-            (2, 1211), (2, 1213),
+            (2, 1003),
+            (2, 1006),
+            (2, 1010),
+            (2, 1015),
+            (2, 1019),
+            (2, 1028),
+            (2, 1033),
+            (2, 1044),
+            (2, 1047),
+            (2, 1048),
+            (2, 1052),
+            (2, 1202),
+            (2, 1204),
+            (2, 1208),
+            (2, 1209),
+            (2, 1211),
+            (2, 1213),
         ];
         for (role_id, menu_id) in restore_perms {
-            let sql = format!("sys_role_menu (role_id, menu_id) VALUES ({}, {})", role_id, menu_id);
+            let sql = format!(
+                "sys_role_menu (role_id, menu_id) VALUES ({}, {})",
+                role_id, menu_id
+            );
             execute_idempotent_insert(manager, &sql).await?;
         }
 

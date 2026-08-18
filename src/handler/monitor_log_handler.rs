@@ -31,7 +31,11 @@ const MAX_TAIL_LINES: u64 = 2000;
 /// 日志文件名白名单（tracing_appender::rolling::daily("app.log") 按日轮转格式：app.log.YYYY-MM-DD）
 fn is_valid_log_file_name(name: &str) -> bool {
     let trimmed = name.trim();
-    if trimmed.len() != name.len() || name.contains('/') || name.contains('\\') || name.contains("..") {
+    if trimmed.len() != name.len()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
         return false;
     }
     // 固定前缀 "app.log."，其后必须恰好是 YYYY-MM-DD（三段、长度 4-2-2、纯数字）
@@ -42,7 +46,9 @@ fn is_valid_log_file_name(name: &str) -> bool {
     let mid = &name[prefix.len()..];
     let parts: Vec<&str> = mid.split('-').collect();
     parts.len() == 3
-        && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
         && parts[0].len() == 4
         && parts[1].len() == 2
         && parts[2].len() == 2
@@ -211,7 +217,10 @@ pub async fn tail(
 
     let level_filter = params.level.unwrap_or_default().to_uppercase();
     let keyword = params.keyword.unwrap_or_default();
-    let lines_req = params.lines.unwrap_or(DEFAULT_TAIL_LINES).min(MAX_TAIL_LINES);
+    let lines_req = params
+        .lines
+        .unwrap_or(DEFAULT_TAIL_LINES)
+        .min(MAX_TAIL_LINES);
 
     let log_dir = resolve_log_root(&state.config.log.file_path);
 
@@ -231,7 +240,10 @@ pub async fn tail(
                 ));
             }
             if !path.exists() || !path.is_file() {
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "not found",
+                ));
             }
             let size = std::fs::metadata(&path)?.len();
 
@@ -267,7 +279,11 @@ pub async fn tail(
                 matched.push((level, line.trim_end().to_string()));
             }
 
-            let take = if lines_req == 0 { matched.len() } else { (lines_req as usize).min(matched.len()) };
+            let take = if lines_req == 0 {
+                matched.len()
+            } else {
+                (lines_req as usize).min(matched.len())
+            };
             let start = matched.len().saturating_sub(take);
             let rows: Vec<LogLine> = matched[start..]
                 .iter()
@@ -339,9 +355,18 @@ mod tests {
 
     #[test]
     fn test_extract_level() {
-        assert_eq!(extract_level("2026-08-18T10:00:00.123Z  INFO handler: ok"), "INFO");
-        assert_eq!(extract_level("2026-08-18T10:00:00.123Z  ERROR handler: bad"), "ERROR");
-        assert_eq!(extract_level("2026-08-18T10:00:00.123Z  WARN handler: w"), "WARN");
+        assert_eq!(
+            extract_level("2026-08-18T10:00:00.123Z  INFO handler: ok"),
+            "INFO"
+        );
+        assert_eq!(
+            extract_level("2026-08-18T10:00:00.123Z  ERROR handler: bad"),
+            "ERROR"
+        );
+        assert_eq!(
+            extract_level("2026-08-18T10:00:00.123Z  WARN handler: w"),
+            "WARN"
+        );
         assert_eq!(extract_level("some non-standard line"), "INFO");
     }
 

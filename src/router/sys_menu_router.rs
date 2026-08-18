@@ -1,9 +1,9 @@
 // axum-backend/src/router/sys_menu_router.rs
 //! 菜单模块路由注册
 
-use std::sync::Arc;
 use axum::Router;
-use axum::routing::{get, post, put, delete};
+use axum::routing::{delete, get, post, put};
+use std::sync::Arc;
 
 use crate::handler::sys_menu_handler;
 use crate::state::AppState;
@@ -20,7 +20,10 @@ pub fn menu_routes() -> Router<Arc<AppState>> {
         // PUT /system/menu 修改菜单
         .route("/system/menu", put(sys_menu_handler::edit))
         // PUT /system/menu/updateSort 保存菜单排序
-        .route("/system/menu/updateSort", put(sys_menu_handler::update_sort))
+        .route(
+            "/system/menu/updateSort",
+            put(sys_menu_handler::update_sort),
+        )
         // DELETE /system/menu/{id} 删除菜单
         .route("/system/menu/{id}", delete(sys_menu_handler::remove))
         // GET /system/menu/{id} 查询菜单详情

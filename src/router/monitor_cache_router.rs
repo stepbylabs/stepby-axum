@@ -3,6 +3,8 @@
 //! 路由结构：
 //! - /monitor/cache                                    — GET    获取缓存概览
 //! - /monitor/cache/getNames                           — GET    获取缓存名称列表
+//! - /monitor/cache/hotKeys                            — GET    获取热 key（大内存键）提示
+//! - /monitor/cache/prefixStats                        — GET    获取缓存前缀内存统计
 //! - /monitor/cache/getKeys/{cacheName}                — GET    获取指定缓存的键列表
 //! - /monitor/cache/getValue/{cacheName}/{cacheKey}    — GET    获取缓存值
 //! - /monitor/cache/clearCacheName/{cacheName}         — DELETE 清除指定名称的缓存
@@ -26,6 +28,14 @@ pub fn cache_routes() -> Router<Arc<AppState>> {
         .route(
             "/monitor/cache/getNames",
             get(monitor_cache_handler::get_names),
+        )
+        .route(
+            "/monitor/cache/hotKeys",
+            get(monitor_cache_handler::get_hot_keys),
+        )
+        .route(
+            "/monitor/cache/prefixStats",
+            get(monitor_cache_handler::get_prefix_stats),
         )
         .route(
             "/monitor/cache/getKeys/{cacheName}",

@@ -1,8 +1,8 @@
 //! 文件管理路由
 
-use std::sync::Arc;
 use axum::Router;
-use axum::routing::{get, post, delete};
+use axum::routing::{delete, get, post};
+use std::sync::Arc;
 
 use crate::handler::file_handler;
 use crate::state::AppState;

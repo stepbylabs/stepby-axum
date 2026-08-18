@@ -14,7 +14,7 @@ use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_logininfor::Model as SysLogininforModel;
 use crate::repository::sys_logininfor::SysLogininforRepository;
 
@@ -136,10 +136,7 @@ impl SysLogininforService {
     }
 
     /// 批量删除登录日志（物理删除）
-    pub async fn delete_logininfors(
-        &self,
-        info_ids: Vec<i64>,
-    ) -> Result<(), ServiceError> {
+    pub async fn delete_logininfors(&self, info_ids: Vec<i64>) -> Result<(), ServiceError> {
         self.logininfor_repo.delete_by_ids(info_ids).await?;
         Ok(())
     }
@@ -161,8 +158,7 @@ impl SysLogininforService {
     /// 供定时任务 cleanup_expired_logs 调用（P0-R81-019）。
     /// 默认保留 90 天，避免登录日志无限增长导致生产崩溃。
     pub async fn cleanup_old_logs(&self, days: i64) -> Result<u64, ServiceError> {
-        let cutoff = crate::common::datetime::now_naive()
-            - chrono::Duration::days(days);
+        let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
         let result = self.logininfor_repo.delete_older_than(cutoff).await?;
         Ok(result.rows_affected)
     }
@@ -222,11 +218,15 @@ impl SysLogininforService {
         ipaddr: Option<&str>,
         user_name: Option<&str>,
     ) -> Result<Vec<SysLogininforModel>, ServiceError> {
-        let since = crate::common::datetime::now_naive()
-            - chrono::Duration::minutes(30);
+        let since = crate::common::datetime::now_naive() - chrono::Duration::minutes(30);
         let rows = self
             .logininfor_repo
-            .find_online(since, ipaddr, user_name, crate::common::constants::DROPDOWN_MAX_ROWS)
+            .find_online(
+                since,
+                ipaddr,
+                user_name,
+                crate::common::constants::DROPDOWN_MAX_ROWS,
+            )
             .await?;
         Ok(rows)
     }

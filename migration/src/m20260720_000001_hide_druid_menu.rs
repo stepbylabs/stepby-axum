@@ -33,9 +33,7 @@ impl MigrationTrait for Migration {
         // visible='1' 表示隐藏菜单（约定：0=显示, 1=隐藏）
         manager
             .get_connection()
-            .execute_unprepared(
-                "UPDATE sys_menu SET visible = '1' WHERE menu_id = 111",
-            )
+            .execute_unprepared("UPDATE sys_menu SET visible = '1' WHERE menu_id = 111")
             .await?;
         Ok(())
     }
@@ -44,9 +42,7 @@ impl MigrationTrait for Migration {
         // 回滚：恢复 visible='0'（显示）
         manager
             .get_connection()
-            .execute_unprepared(
-                "UPDATE sys_menu SET visible = '0' WHERE menu_id = 111",
-            )
+            .execute_unprepared("UPDATE sys_menu SET visible = '0' WHERE menu_id = 111")
             .await?;
         Ok(())
     }

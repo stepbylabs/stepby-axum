@@ -37,17 +37,13 @@ impl MigrationTrait for Migration {
             sea_orm_migration::sea_orm::DatabaseBackend::Postgres => {
                 manager
                     .get_connection()
-                    .execute_unprepared(
-                        "ALTER TABLE sys_oper_log ADD COLUMN oper_before TEXT",
-                    )
+                    .execute_unprepared("ALTER TABLE sys_oper_log ADD COLUMN oper_before TEXT")
                     .await?;
             }
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {
                 manager
                     .get_connection()
-                    .execute_unprepared(
-                        "ALTER TABLE sys_oper_log ADD COLUMN oper_before TEXT",
-                    )
+                    .execute_unprepared("ALTER TABLE sys_oper_log ADD COLUMN oper_before TEXT")
                     .await?;
             }
         }
@@ -61,9 +57,7 @@ impl MigrationTrait for Migration {
             | sea_orm_migration::sea_orm::DatabaseBackend::Postgres => {
                 manager
                     .get_connection()
-                    .execute_unprepared(
-                        "ALTER TABLE sys_oper_log DROP COLUMN oper_before",
-                    )
+                    .execute_unprepared("ALTER TABLE sys_oper_log DROP COLUMN oper_before")
                     .await?;
             }
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {

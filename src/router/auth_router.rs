@@ -25,9 +25,9 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
-use axum::Router;
 
 use crate::embedded_assets;
 use crate::handler::auth_handler;

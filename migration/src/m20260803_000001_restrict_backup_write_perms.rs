@@ -50,10 +50,16 @@ impl MigrationTrait for Migration {
                     format!("INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, {}) ON CONFLICT DO NOTHING", menu_id)
                 }
                 sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {
-                    format!("INSERT OR IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, {})", menu_id)
+                    format!(
+                        "INSERT OR IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, {})",
+                        menu_id
+                    )
                 }
                 _ => {
-                    format!("INSERT IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, {})", menu_id)
+                    format!(
+                        "INSERT IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, {})",
+                        menu_id
+                    )
                 }
             };
             manager

@@ -16,11 +16,9 @@ use crate::config::UploadConfig;
 /// 这些类型经 `/uploads/*` 静态托管后可能被浏览器按 HTML/SVG 执行，构成存储型 XSS
 /// （SVG 可内嵌脚本，HTML 可直接渲染），或为服务端可执行脚本（php/jsp 等）。
 const DANGEROUS_EXTS: &[&str] = &[
-    "html", "htm", "shtml", "svg", "xml", "xhtml",
-    "js", "mjs", "cjs",
-    "php", "php3", "php4", "php5", "phtml",
-    "jsp", "jspx", "asp", "aspx", "asax", "ashx", "asmx",
-    "exe", "com", "bat", "cmd", "sh", "ps1", "hta", "asis", "pl", "py",
+    "html", "htm", "shtml", "svg", "xml", "xhtml", "js", "mjs", "cjs", "php", "php3", "php4",
+    "php5", "phtml", "jsp", "jspx", "asp", "aspx", "asax", "ashx", "asmx", "exe", "com", "bat",
+    "cmd", "sh", "ps1", "hta", "asis", "pl", "py",
 ];
 
 /// 上传类型（决定白名单/大小/目录/URL 前缀）
@@ -238,7 +236,9 @@ pub async fn write_upload_file(
         Ok(())
     })
     .await
-    .map_err(|_| crate::common::error::AppError::internal(&crate::tr!("error.upload.write_task_failed")))?
+    .map_err(|_| {
+        crate::common::error::AppError::internal(&crate::tr!("error.upload.write_task_failed"))
+    })?
     .map_err(|_| {
         crate::common::error::AppError::internal(&crate::tr!("error.upload.write_failed"))
     })?;
@@ -256,11 +256,10 @@ pub async fn write_upload_file(
 /// 扩展名构成的路径穿越/覆盖。
 pub fn gen_uuid_filename(ext: &str) -> Result<String, AppError> {
     let ext = ext.to_lowercase();
-    if ext.is_empty()
-        || ext.len() > 10
-        || !ext.chars().all(|c| c.is_ascii_alphanumeric())
-    {
-        return Err(AppError::bad_request(&crate::tr!("error.file.invalid_name")));
+    if ext.is_empty() || ext.len() > 10 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.file.invalid_name"
+        )));
     }
     Ok(format!("{}.{}", uuid::Uuid::new_v4(), ext))
 }
@@ -311,7 +310,9 @@ pub async fn delete_upload_file(
         Ok(())
     })
     .await
-    .map_err(|_| crate::common::error::AppError::internal(&crate::tr!("error.upload.delete_task_failed")))?
+    .map_err(|_| {
+        crate::common::error::AppError::internal(&crate::tr!("error.upload.delete_task_failed"))
+    })?
     .map_err(|_| {
         crate::common::error::AppError::internal(&crate::tr!("error.upload.delete_failed"))
     })?;
@@ -427,6 +428,7 @@ pub async fn read_field_limited(
 /// 5. 生成 UUID 文件名（ext 净化）
 /// 6. spawn_blocking 写盘
 pub async fn save_upload_bytes(
+    storage: &dyn crate::storage::StorageBackend,
     bytes: &[u8],
     declared_ext: Option<&str>,
     original_filename: Option<&str>,
@@ -434,7 +436,9 @@ pub async fn save_upload_bytes(
     kind: UploadKind,
 ) -> Result<UploadedFile, AppError> {
     if bytes.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.common_handler.file_empty")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common_handler.file_empty"
+        )));
     }
     let (allowed_exts, max_size, dir, url_prefix) = kind.config(upload_cfg);
 
@@ -458,7 +462,10 @@ pub async fn save_upload_bytes(
             ext = declared_ext
         )));
     }
-    if !allowed_exts.iter().any(|a| a.eq_ignore_ascii_case(&declared_ext)) {
+    if !allowed_exts
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(&declared_ext))
+    {
         return Err(AppError::bad_request(&crate::tr!(
             "error.file.unsupported_type",
             ext = declared_ext
@@ -468,9 +475,11 @@ pub async fn save_upload_bytes(
     // magic bytes 校验：图片类以实际识别结果为准（防伪造扩展名），其余走严格映射
     let image_exts: &[&str] = &["jpg", "jpeg", "png", "gif"];
     let ext = if image_exts.contains(&declared_ext.as_str()) {
-        let detected = crate::common::image::detect_image_ext(bytes)
-            .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.image_format_unknown")))?;
-        if crate::common::image::normalize_ext(&declared_ext) != crate::common::image::normalize_ext(&detected)
+        let detected = crate::common::image::detect_image_ext(bytes).ok_or_else(|| {
+            AppError::bad_request(&crate::tr!("error.common_handler.image_format_unknown"))
+        })?;
+        if crate::common::image::normalize_ext(&declared_ext)
+            != crate::common::image::normalize_ext(&detected)
         {
             tracing::warn!(
                 declared = %declared_ext,
@@ -492,15 +501,14 @@ pub async fn save_upload_bytes(
 
     // 生成唯一文件名（ext 已在函数内净化）
     let new_filename = gen_uuid_filename(&ext)?;
-    let upload_dir = resolve_upload_dir(dir).await;
-    let file_path = upload_dir.join(&new_filename);
-    let size = write_upload_file(file_path, &upload_dir.to_string_lossy(), bytes).await?;
 
-    let url = format!("{}/{}", url_prefix, new_filename);
+    // 保存到当前存储后端（local 写本地磁盘 / s3 上传对象），URL 由后端返回
+    let url = storage.save(dir, &new_filename, url_prefix, bytes).await?;
+
     Ok(UploadedFile {
         new_filename,
         url,
-        size,
+        size: bytes.len() as u64,
         ext,
         original_filename: original_filename.map(|s| s.to_string()),
     })

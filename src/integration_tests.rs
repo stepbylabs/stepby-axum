@@ -84,7 +84,9 @@ async fn build_isolated_state() -> Arc<AppState> {
     let db = init_database(&settings.database, false)
         .await
         .expect("初始化测试数据库失败");
-    Migrator::up(&db, None).await.expect("运行迁移建表 + 种子数据失败");
+    Migrator::up(&db, None)
+        .await
+        .expect("运行迁移建表 + 种子数据失败");
 
     // 3. 初始化 Redis，清空隔离 DB，并关闭验证码开关
     let redis = init_redis(&settings.redis)
@@ -112,20 +114,28 @@ async fn build_isolated_state() -> Arc<AppState> {
     let ip_location_service =
         IpLocationService::new(db.clone(), settings.clone(), ip_locator.clone());
     let job_scheduler = Arc::new(
-        JobScheduler::new(db.clone(), redis.clone(), ip_location_service.clone())
-            .await
-            .expect("创建调度器失败"),
+        JobScheduler::new(
+            db.clone(),
+            redis.clone(),
+            ip_location_service.clone(),
+            settings.clone(),
+        )
+        .await
+        .expect("创建调度器失败"),
     );
-    let state = Arc::new(AppState::new(
+    // 构建文件存储后端（F1：按 upload.backend 切换 local/s3，测试默认 local）
+    let storage: Arc<dyn crate::storage::StorageBackend> =
+        crate::storage::new_backend(&settings.upload).expect("构建存储后端失败");
+
+    Arc::new(AppState::new(
         db,
         redis,
         settings,
         job_scheduler,
         ip_locator,
         ip_location_service,
-    ));
-
-    state
+        storage,
+    ))
 }
 
 /// 构造一个带 ConnectInfo 的 POST /login 请求（login handler 需要 peer addr）。
@@ -161,11 +171,7 @@ async fn test_login_then_getinfo_smoke() {
         .oneshot(login_request(&login_body))
         .await
         .expect("login 请求执行失败");
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "登录应返回 HTTP 200"
-    );
+    assert_eq!(resp.status(), StatusCode::OK, "登录应返回 HTTP 200");
 
     let body = to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -200,8 +206,7 @@ async fn test_login_then_getinfo_smoke() {
     let body2 = to_bytes(resp2.into_body(), usize::MAX)
         .await
         .expect("读取 getInfo 响应体失败");
-    let v2: serde_json::Value =
-        serde_json::from_slice(&body2).expect("getInfo 响应 JSON 解析失败");
+    let v2: serde_json::Value = serde_json::from_slice(&body2).expect("getInfo 响应 JSON 解析失败");
     assert_eq!(v2["code"], 200, "getInfo 业务码应为 200，实际: {:?}", v2);
     assert_eq!(
         v2["user"]["userName"].as_str(),

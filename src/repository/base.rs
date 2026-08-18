@@ -8,8 +8,8 @@
 //! - `_conn` 系列方法接受 `impl ConnectionTrait`，支持事务上下文
 //!   使 Service 层在事务闭包内仍可通过 Repository 访问数据库
 
-use sea_orm::*;
 use sea_orm::PaginatorTrait;
+use sea_orm::*;
 use std::marker::PhantomData;
 
 /// 通用 Repository 基类，封装常见的数据库 CRUD 操作
@@ -95,7 +95,8 @@ where
                         "BaseRepository::insert 不适用于 MySQL 复合主键/非自增表，请使用 insert_many_conn 或专用批量方法"
                     );
                     Err(DbErr::RecordNotFound(
-                        "复合主键/非自增表在 MySQL 下请使用 insert_many_conn 或专用插入方法".to_owned(),
+                        "复合主键/非自增表在 MySQL 下请使用 insert_many_conn 或专用插入方法"
+                            .to_owned(),
                     ))
                 }
             }
@@ -127,11 +128,7 @@ where
     // 方法为实例方法（`&self`）以复用具体 Repository 的调用路径，但内部不使用 `self.db`。
 
     /// 按主键查询单条记录（使用指定连接）
-    pub async fn find_by_id_conn<C, V>(
-        &self,
-        conn: &C,
-        id: V,
-    ) -> Result<Option<E::Model>, DbErr>
+    pub async fn find_by_id_conn<C, V>(&self, conn: &C, id: V) -> Result<Option<E::Model>, DbErr>
     where
         C: ConnectionTrait,
         V: Into<<E::PrimaryKey as PrimaryKeyTrait>::ValueType>,
@@ -162,11 +159,7 @@ where
     /// DB-22：MySQL 不支持 RETURNING 子句，按 backend 分支处理：
     /// - PostgreSQL / SQLite：使用 `exec_with_returning`（原生 RETURNING）
     /// - MySQL：单列自增回查 last_insert_id；复合主键/非自增表返回明确错误指引（P0-7）
-    pub async fn insert_conn<C>(
-        &self,
-        conn: &C,
-        model: E::ActiveModel,
-    ) -> Result<E::Model, DbErr>
+    pub async fn insert_conn<C>(&self, conn: &C, model: E::ActiveModel) -> Result<E::Model, DbErr>
     where
         C: ConnectionTrait,
         E::Model: IntoActiveModel<E::ActiveModel>,
@@ -187,7 +180,8 @@ where
                         "BaseRepository::insert_conn 不适用于 MySQL 复合主键/非自增表，请使用 insert_many_conn 或专用批量方法"
                     );
                     Err(DbErr::RecordNotFound(
-                        "复合主键/非自增表在 MySQL 下请使用 insert_many_conn 或专用插入方法".to_owned(),
+                        "复合主键/非自增表在 MySQL 下请使用 insert_many_conn 或专用插入方法"
+                            .to_owned(),
                     ))
                 }
             }
@@ -211,11 +205,7 @@ where
     }
 
     /// 更新一条记录（使用指定连接，返回更新后的 Model）
-    pub async fn update_conn<C>(
-        &self,
-        conn: &C,
-        model: E::ActiveModel,
-    ) -> Result<E::Model, DbErr>
+    pub async fn update_conn<C>(&self, conn: &C, model: E::ActiveModel) -> Result<E::Model, DbErr>
     where
         C: ConnectionTrait,
         E::ActiveModel: ActiveModelTrait<Entity = E> + Send,

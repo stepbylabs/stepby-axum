@@ -38,9 +38,7 @@ impl SysOperLogRepository {
 
     /// 按 oper_id 查询单条操作日志
     pub async fn find_by_id(&self, oper_id: i64) -> Result<Option<Model>, DbErr> {
-        SysOperLog::find_by_id(oper_id)
-            .one(self.base.db())
-            .await
+        SysOperLog::find_by_id(oper_id).one(self.base.db()).await
     }
 
     /// 多条件分页查询（title 模糊，business_type 精确，oper_name 模糊，status 精确，时间范围，按 oper_time 倒序）
@@ -123,9 +121,7 @@ impl SysOperLogRepository {
 
     /// 清空操作日志（物理删除全部）
     pub async fn clean_all(&self) -> Result<DeleteResult, DbErr> {
-        SysOperLog::delete_many()
-            .exec(self.base.db())
-            .await
+        SysOperLog::delete_many().exec(self.base.db()).await
     }
 
     /// 按业务类型聚合统计（审计大屏用）
@@ -264,5 +260,100 @@ impl SysOperLogRepository {
             .limit(limit)
             .all(self.base.db())
             .await
+    }
+
+    /// 按操作模块（title）聚合 Top N（审计大屏用）
+    ///
+    /// 返回 Vec<(module_name, count)>，按 count 降序，限制 N 条。
+    /// title 可能为 NULL（旧数据）或 i18n key（module.*），这里按原文分组，
+    /// 展示层统一走 module_title() 翻译。
+    pub async fn stats_top_modules(&self, limit: u64) -> Result<Vec<(String, i64)>, DbErr> {
+        use sea_orm::sea_query::Expr;
+        let rows: Vec<(String, i64)> = SysOperLog::find()
+            .filter(Column::Title.is_not_null())
+            .select_only()
+            .column(Column::Title)
+            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .group_by(Column::Title)
+            .order_by_desc(Expr::col(Column::OperId).count())
+            .limit(limit)
+            .into_tuple::<(String, i64)>()
+            .all(self.base.db())
+            .await?;
+        Ok(rows)
+    }
+
+    /// 统计最近 `window_minutes` 分钟内的操作总数与失败数
+    ///
+    /// 用于异常操作告警：失败率 = fail / total。
+    pub async fn failure_stats_in_window(&self, window_minutes: i64) -> Result<(i64, i64), DbErr> {
+        let begin =
+            crate::common::datetime::now_naive() - chrono::Duration::minutes(window_minutes);
+        let total = SysOperLog::find()
+            .filter(Column::OperTime.gte(begin))
+            .count(self.base.db())
+            .await
+            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
+        let fail = SysOperLog::find()
+            .filter(Column::Status.eq("1"))
+            .filter(Column::OperTime.gte(begin))
+            .count(self.base.db())
+            .await
+            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
+        Ok((total, fail))
+    }
+
+    /// 统计最近 `window_minutes` 分钟内失败操作次数 >= `min_count` 的操作人（Burst）
+    ///
+    /// 用于异常操作告警：同一账号在窗口内连续失败过多，疑似异常/被攻击。
+    pub async fn failure_burst_operators(
+        &self,
+        window_minutes: i64,
+        min_count: i64,
+    ) -> Result<Vec<(String, i64)>, DbErr> {
+        use sea_orm::sea_query::{Expr, ExprTrait};
+        let begin =
+            crate::common::datetime::now_naive() - chrono::Duration::minutes(window_minutes);
+        let rows: Vec<(String, i64)> = SysOperLog::find()
+            .filter(Column::Status.eq("1"))
+            .filter(Column::OperTime.gte(begin))
+            .filter(Column::OperName.is_not_null())
+            .select_only()
+            .column(Column::OperName)
+            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .group_by(Column::OperName)
+            .having(Expr::col(Column::OperId).count().gte(min_count))
+            .order_by_desc(Expr::col(Column::OperId).count())
+            .into_tuple::<(String, i64)>()
+            .all(self.base.db())
+            .await?;
+        Ok(rows)
+    }
+
+    /// 统计最近 `window_minutes` 分钟内失败操作次数 >= `min_count` 的模块（Burst）
+    ///
+    /// 用于异常操作告警：某模块在窗口内连续/大量失败，疑似接口故障或越权尝试。
+    pub async fn failure_burst_modules(
+        &self,
+        window_minutes: i64,
+        min_count: i64,
+    ) -> Result<Vec<(String, i64)>, DbErr> {
+        use sea_orm::sea_query::{Expr, ExprTrait};
+        let begin =
+            crate::common::datetime::now_naive() - chrono::Duration::minutes(window_minutes);
+        let rows: Vec<(String, i64)> = SysOperLog::find()
+            .filter(Column::Status.eq("1"))
+            .filter(Column::OperTime.gte(begin))
+            .filter(Column::Title.is_not_null())
+            .select_only()
+            .column(Column::Title)
+            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .group_by(Column::Title)
+            .having(Expr::col(Column::OperId).count().gte(min_count))
+            .order_by_desc(Expr::col(Column::OperId).count())
+            .into_tuple::<(String, i64)>()
+            .all(self.base.db())
+            .await?;
+        Ok(rows)
     }
 }

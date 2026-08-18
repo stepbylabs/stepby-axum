@@ -16,23 +16,26 @@
 //! - PUT    /system/role/authUser/selectAll         批量授权用户选择
 //! - GET    /system/role/deptTree/{roleId}          查询角色部门树
 
-use std::sync::Arc;
+use axum::Json;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
-use axum::Json;
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use garde::Validate;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use utoipa::ToSchema;
 
-use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::ValidatedJson;
-use crate::common::{excel::{export_to_excel, CellValue, ExcelColumn}, AjaxResult, AppError, TableDataInfo, TreeSelectVo};
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
+use crate::common::{
+    AjaxResult, AppError, TableDataInfo, TreeSelectVo,
+    excel::{CellValue, ExcelColumn, export_to_excel},
+};
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::Model as SysUserModel;
 use crate::middleware::Operator;
 use crate::service::sys_role_service::{
-    AuthUserQueryDto, AuthUserSelectDto, CancelAuthUserDto, DataScopeDto, RoleAddDto,
-    RoleEditDto, RoleQueryDto, RoleVo,
+    AuthUserQueryDto, AuthUserSelectDto, CancelAuthUserDto, DataScopeDto, RoleAddDto, RoleEditDto,
+    RoleQueryDto, RoleVo,
 };
 use crate::state::AppState;
 use crate::utils::parse_id_list;
@@ -70,13 +73,10 @@ pub async fn list(
 ) -> Result<TableDataInfo<SysRoleModel>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
-    let operator_user_id: i64 = operator
-        .user_id()
-        .parse::<i64>()
-        .map_err(|_| {
-            tracing::warn!(sub = %operator.user_id(), "角色列表: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-        })?;
+    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
+        tracing::warn!(sub = %operator.user_id(), "角色列表: JWT sub 解析失败，拒绝访问");
+        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
+    })?;
     let (rows, total) = state
         .role_service
         .get_role_page(query, Some(operator_user_id))
@@ -105,28 +105,67 @@ pub async fn export(
 ) -> Result<Response, AppError> {
     // 数据权限（P0-R81-004）：导出需应用与 list 相同的 data_scope 过滤，防止越权导出
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问
-    let operator_user_id: i64 = operator
-        .user_id()
-        .parse::<i64>()
-        .map_err(|_| {
-            tracing::warn!(sub = %operator.user_id(), "角色导出: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-        })?;
-    let rows = state.role_service.export_roles(query, Some(operator_user_id)).await?;
+    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
+        tracing::warn!(sub = %operator.user_id(), "角色导出: JWT sub 解析失败，拒绝访问");
+        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
+    })?;
+    let rows = state
+        .role_service
+        .export_roles(query, Some(operator_user_id))
+        .await?;
 
     let columns = [
-        ExcelColumn { key: "roleId", header: ("角色编号", "Role ID"), getter: |r: &SysRoleModel| CellValue::Text(r.role_id.to_string().into()) },
-        ExcelColumn { key: "roleName", header: ("角色名称", "Role Name"), getter: |r: &SysRoleModel| CellValue::Text(r.role_name.clone().into()) },
-        ExcelColumn { key: "roleKey", header: ("权限字符", "Permission Key"), getter: |r: &SysRoleModel| CellValue::Text(r.role_key.clone().into()) },
-        ExcelColumn { key: "roleSort", header: ("显示顺序", "Sort"), getter: |r: &SysRoleModel| CellValue::Text(r.role_sort.to_string().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysRoleModel| CellValue::Text(if r.status == "0" { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
-        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysRoleModel| CellValue::Text({
-                r.create_time
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default()
-                    .into()
-            }) },
-        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysRoleModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
+        ExcelColumn {
+            key: "roleId",
+            header: ("角色编号", "Role ID"),
+            getter: |r: &SysRoleModel| CellValue::Text(r.role_id.to_string().into()),
+        },
+        ExcelColumn {
+            key: "roleName",
+            header: ("角色名称", "Role Name"),
+            getter: |r: &SysRoleModel| CellValue::Text(r.role_name.clone().into()),
+        },
+        ExcelColumn {
+            key: "roleKey",
+            header: ("权限字符", "Permission Key"),
+            getter: |r: &SysRoleModel| CellValue::Text(r.role_key.clone().into()),
+        },
+        ExcelColumn {
+            key: "roleSort",
+            header: ("显示顺序", "Sort"),
+            getter: |r: &SysRoleModel| CellValue::Text(r.role_sort.to_string().into()),
+        },
+        ExcelColumn {
+            key: "status",
+            header: ("状态", "Status"),
+            getter: |r: &SysRoleModel| {
+                CellValue::Text(
+                    if r.status == "0" {
+                        crate::tr!("common.status.normal")
+                    } else {
+                        crate::tr!("common.status.disabled")
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "createTime",
+            header: ("创建时间", "Create Time"),
+            getter: |r: &SysRoleModel| {
+                CellValue::Text({
+                    r.create_time
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default()
+                        .into()
+                })
+            },
+        },
+        ExcelColumn {
+            key: "remark",
+            header: ("备注", "Remark"),
+            getter: |r: &SysRoleModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()),
+        },
     ];
 
     export_to_excel(&crate::tr!("excel.sheet.role"), "role", &columns, &rows).await
@@ -153,7 +192,10 @@ pub async fn get_info_by_id(
 ) -> Result<AjaxResult<RoleVo>, AppError> {
     // P0-6：传入 operator_user_id 校验角色在数据范围内（此前可读取任意角色详情含 menu_ids）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let vo = state.role_service.get_role_by_id(role_id, operator_user_id).await?;
+    let vo = state
+        .role_service
+        .get_role_by_id(role_id, operator_user_id)
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -174,8 +216,14 @@ pub async fn add(
     operator: Operator,
     Json(dto): Json<RoleAddDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let role = state.role_service.add_role(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_role", name = role.role_name)))
+    let role = state
+        .role_service
+        .add_role(dto, operator.username())
+        .await?;
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.add_role",
+        name = role.role_name
+    )))
 }
 
 /// PUT /system/role
@@ -196,7 +244,10 @@ pub async fn edit(
     operator: Operator,
     Json(dto): Json<RoleEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.role_service.edit_role(dto, operator.username()).await?;
+    state
+        .role_service
+        .edit_role(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -295,7 +346,10 @@ pub async fn allocated_user_list(
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
     // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部已授权用户）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let (rows, total) = state.role_service.get_allocated_users(query, operator_user_id).await?;
+    let (rows, total) = state
+        .role_service
+        .get_allocated_users(query, operator_user_id)
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -308,7 +362,10 @@ pub async fn unallocated_user_list(
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
     // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部用户）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let (rows, total) = state.role_service.get_unallocated_users(query, operator_user_id).await?;
+    let (rows, total) = state
+        .role_service
+        .get_unallocated_users(query, operator_user_id)
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -327,7 +384,9 @@ pub async fn auth_user_cancel(
         .role_service
         .cancel_auth_user(dto, operator_user_id)
         .await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.cancel_auth")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.cancel_auth"
+    )))
 }
 
 /// PUT /system/role/authUser/cancelAll
@@ -345,7 +404,9 @@ pub async fn auth_user_cancel_all(
         .role_service
         .cancel_all_auth_users(dto, operator_user_id)
         .await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.cancel_auth")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.cancel_auth"
+    )))
 }
 
 /// PUT /system/role/authUser/selectAll

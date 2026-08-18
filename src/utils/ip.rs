@@ -31,10 +31,7 @@ pub fn extract_client_ip(
     }
 
     // 直连客户端是可信代理：从 X-Forwarded-For 链中提取真实客户端 IP
-    if let Some(xff) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         // XFF 格式: "client, proxy1, proxy2" — 从右向左跳过可信代理，取第一个不可信 IP
         let ips: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
         for ip_str in ips.iter().rev() {
@@ -171,10 +168,7 @@ mod tests {
     #[test]
     fn test_untrusted_peer_ignored_xff() {
         let mut headers = make_headers();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.5"),
-        );
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.5"));
         let peer = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         let trusted = vec!["10.0.0.0/8".to_string()];
         // peer 不在可信代理白名单，直接返回 peer_ip

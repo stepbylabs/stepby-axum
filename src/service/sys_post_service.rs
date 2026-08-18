@@ -7,13 +7,13 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use garde::Validate;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_post::{ActiveModel as SysPostActiveModel, Model as SysPostModel};
 use crate::repository::sys_post::SysPostRepository;
 use crate::repository::sys_user_post::SysUserPostRepository;
@@ -162,7 +162,9 @@ impl SysPostService {
         // post_code 唯一性校验
         let existing = self.post_repo.find_by_post_code(&dto.post_code).await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.post.code_exists")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.post.code_exists"
+            )));
         }
 
         let now = crate::common::datetime::now_naive();
@@ -203,7 +205,9 @@ impl SysPostService {
         if dto.post_code != old_post_code {
             let conflict = self.post_repo.find_by_post_code(&dto.post_code).await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.post.code_exists")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.post.code_exists"
+                )));
             }
         }
 
@@ -240,9 +244,7 @@ impl SysPostService {
                 async move {
                     for post_id in &post_ids_inner {
                         // 预检：岗位是否已分配给用户（事务内查询，消除 TOCTOU 竞态）
-                        let relations = user_post_repo
-                            .find_by_post_id_conn(txn, *post_id)
-                            .await?;
+                        let relations = user_post_repo.find_by_post_id_conn(txn, *post_id).await?;
                         if !relations.is_empty() {
                             return Err(ServiceError::bad_request(&crate::tr!(
                                 "error.post.assigned_to_user",
@@ -253,7 +255,9 @@ impl SysPostService {
                         let existing = post_repo
                             .find_active_by_id_conn(txn, *post_id)
                             .await?
-                            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.post.not_found")))?;
+                            .ok_or_else(|| {
+                                ServiceError::not_found(&crate::tr!("error.post.not_found"))
+                            })?;
                         let renamed = format!("{}_deleted_{}", existing.post_code, post_id);
                         post_repo
                             .soft_delete_with_rename_conn(txn, *post_id, renamed)
@@ -275,7 +279,10 @@ impl SysPostService {
     }
 
     /// 导出岗位列表（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
-    pub async fn export_posts(&self, query: PostQueryDto) -> Result<Vec<SysPostModel>, ServiceError> {
+    pub async fn export_posts(
+        &self,
+        query: PostQueryDto,
+    ) -> Result<Vec<SysPostModel>, ServiceError> {
         // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS）
         let (rows, _) = self
             .post_repo

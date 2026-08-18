@@ -10,9 +10,9 @@
 //! - PUT    /system/dept                       修改部门
 //! - DELETE /system/dept/{deptId}              删除部门
 
-use std::sync::Arc;
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
+use std::sync::Arc;
 
 use crate::common::{AjaxResult, AppError, TreeSelectVo};
 use crate::entity::sys_dept::Model as SysDeptModel;
@@ -42,13 +42,10 @@ pub async fn list(
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
     // P2 修复: 错误消息改用 i18n key，避免硬编码中文
-    let operator_user_id: i64 = operator
-        .user_id()
-        .parse::<i64>()
-        .map_err(|_| {
-            tracing::warn!(sub = %operator.user_id(), "部门列表: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-        })?;
+    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
+        tracing::warn!(sub = %operator.user_id(), "部门列表: JWT sub 解析失败，拒绝访问");
+        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
+    })?;
     let list = state
         .dept_service
         .list_depts(query, Some(operator_user_id))
@@ -101,7 +98,10 @@ pub async fn list_exclude(
 ) -> Result<AjaxResult<Vec<SysDeptModel>>, AppError> {
     // P0-6：传入 operator_user_id 应用 data_scope 过滤（此前未过滤可枚举全部部门）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let list = state.dept_service.list_exclude(dept_id, operator_user_id).await?;
+    let list = state
+        .dept_service
+        .list_exclude(dept_id, operator_user_id)
+        .await?;
     Ok(AjaxResult::success(list))
 }
 
@@ -124,7 +124,10 @@ pub async fn treeselect(
 ) -> Result<AjaxResult<Vec<TreeSelectVo>>, AppError> {
     // P0-6：传入 operator_user_id 应用 data_scope 过滤（此前未过滤可枚举全部部门树）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let tree = state.dept_service.build_dept_tree_select(operator_user_id).await?;
+    let tree = state
+        .dept_service
+        .build_dept_tree_select(operator_user_id)
+        .await?;
     Ok(AjaxResult::success(tree))
 }
 
@@ -149,7 +152,10 @@ pub async fn get_info(
 ) -> Result<AjaxResult<SysDeptModel>, AppError> {
     // P0-6：传入 operator_user_id 校验部门在数据范围内（不在则 404）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let dept = state.dept_service.get_dept_by_id(dept_id, operator_user_id).await?;
+    let dept = state
+        .dept_service
+        .get_dept_by_id(dept_id, operator_user_id)
+        .await?;
     Ok(AjaxResult::success(dept))
 }
 
@@ -170,8 +176,14 @@ pub async fn add(
     operator: Operator,
     Json(dto): Json<DeptAddDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let dept = state.dept_service.add_dept(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_dept", name = dept.dept_name)))
+    let dept = state
+        .dept_service
+        .add_dept(dto, operator.username())
+        .await?;
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.add_dept",
+        name = dept.dept_name
+    )))
 }
 
 /// PUT /system/dept
@@ -192,7 +204,10 @@ pub async fn edit(
     operator: Operator,
     Json(dto): Json<DeptEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.dept_service.edit_dept(dto, operator.username()).await?;
+    state
+        .dept_service
+        .edit_dept(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 

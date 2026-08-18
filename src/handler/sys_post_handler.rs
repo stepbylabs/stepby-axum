@@ -9,13 +9,13 @@
 //! - DELETE /system/post/{postIds}       批量删除岗位
 //! - POST   /system/post/export          导出岗位列表
 
-use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
+use std::sync::Arc;
 
-use crate::common::constants::MAX_BATCH_DELETE_SIZE;
-use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::common::ValidatedJson;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
+use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::middleware::Operator;
@@ -100,7 +100,10 @@ pub async fn add(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<PostAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.post_service.add_post(dto, operator.username()).await?;
+    state
+        .post_service
+        .add_post(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
@@ -122,7 +125,10 @@ pub async fn edit(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<PostEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.post_service.edit_post(dto, operator.username()).await?;
+    state
+        .post_service
+        .edit_post(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -182,18 +188,62 @@ pub async fn export(
     let rows = state.post_service.export_posts(query).await?;
 
     let columns = [
-        ExcelColumn { key: "postId", header: ("岗位编号", "Post ID"), getter: |r: &SysPostModel| CellValue::Text(r.post_id.to_string().into()) },
-        ExcelColumn { key: "postCode", header: ("岗位编码", "Post Code"), getter: |r: &SysPostModel| CellValue::Text(r.post_code.clone().into()) },
-        ExcelColumn { key: "postName", header: ("岗位名称", "Post Name"), getter: |r: &SysPostModel| CellValue::Text(r.post_name.clone().into()) },
-        ExcelColumn { key: "postSort", header: ("岗位排序", "Sort"), getter: |r: &SysPostModel| CellValue::Text(r.post_sort.to_string().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &SysPostModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }).unwrap_or_default().into()) },
-        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysPostModel| CellValue::Text({
-                r.create_time
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default()
-                    .into()
-            }) },
-        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysPostModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
+        ExcelColumn {
+            key: "postId",
+            header: ("岗位编号", "Post ID"),
+            getter: |r: &SysPostModel| CellValue::Text(r.post_id.to_string().into()),
+        },
+        ExcelColumn {
+            key: "postCode",
+            header: ("岗位编码", "Post Code"),
+            getter: |r: &SysPostModel| CellValue::Text(r.post_code.clone().into()),
+        },
+        ExcelColumn {
+            key: "postName",
+            header: ("岗位名称", "Post Name"),
+            getter: |r: &SysPostModel| CellValue::Text(r.post_name.clone().into()),
+        },
+        ExcelColumn {
+            key: "postSort",
+            header: ("岗位排序", "Sort"),
+            getter: |r: &SysPostModel| CellValue::Text(r.post_sort.to_string().into()),
+        },
+        ExcelColumn {
+            key: "status",
+            header: ("状态", "Status"),
+            getter: |r: &SysPostModel| {
+                CellValue::Text(
+                    r.status
+                        .as_deref()
+                        .map(|s| {
+                            if s == "0" {
+                                crate::tr!("common.status.normal")
+                            } else {
+                                crate::tr!("common.status.disabled")
+                            }
+                        })
+                        .unwrap_or_default()
+                        .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "createTime",
+            header: ("创建时间", "Create Time"),
+            getter: |r: &SysPostModel| {
+                CellValue::Text({
+                    r.create_time
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default()
+                        .into()
+                })
+            },
+        },
+        ExcelColumn {
+            key: "remark",
+            header: ("备注", "Remark"),
+            getter: |r: &SysPostModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()),
+        },
     ];
 
     export_to_excel(&crate::tr!("excel.sheet.post"), "post", &columns, &rows).await

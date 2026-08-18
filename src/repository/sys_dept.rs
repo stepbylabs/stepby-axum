@@ -7,8 +7,8 @@
 //! - 查询全部未删除部门（树形结构组装用）
 
 use chrono::NaiveDateTime;
-use sea_orm::*;
 use sea_orm::sea_query::Expr;
+use sea_orm::*;
 
 use crate::common::like_escape;
 use crate::entity::sys_dept::{ActiveModel, Column, Entity as SysDept, Model};
@@ -51,20 +51,24 @@ impl SysDeptRepository {
         // P1：CTE 增加 depth 列与深度上限（30 层），防止 sys_dept.parent_id 脏数据成环时
         // PostgreSQL 无限递归拖垮 DB（SQLite/MySQL 有内置上限，PG 无）
         let sql = match backend {
-            DatabaseBackend::MySql => r#"WITH RECURSIVE dept_tree AS (
+            DatabaseBackend::MySql => {
+                r#"WITH RECURSIVE dept_tree AS (
                 SELECT dept_id, 0 AS depth FROM sys_dept WHERE dept_id = ? AND del_flag = '0'
                 UNION ALL
                 SELECT d.dept_id, t.depth + 1 FROM sys_dept d
                 INNER JOIN dept_tree t ON d.parent_id = t.dept_id
                 WHERE d.del_flag = '0' AND t.depth < 30
-            ) SELECT dept_id FROM dept_tree"#,
-            _ => r#"WITH RECURSIVE dept_tree AS (
+            ) SELECT dept_id FROM dept_tree"#
+            }
+            _ => {
+                r#"WITH RECURSIVE dept_tree AS (
                 SELECT dept_id, 0 AS depth FROM sys_dept WHERE dept_id = $1 AND del_flag = '0'
                 UNION ALL
                 SELECT d.dept_id, t.depth + 1 FROM sys_dept d
                 INNER JOIN dept_tree t ON d.parent_id = t.dept_id
                 WHERE d.del_flag = '0' AND t.depth < 30
-            ) SELECT dept_id FROM dept_tree"#,
+            ) SELECT dept_id FROM dept_tree"#
+            }
         };
         let stmt = Statement::from_sql_and_values(backend, sql, [dept_id.into()]);
         let rows = self.base.db().query_all(stmt).await?;

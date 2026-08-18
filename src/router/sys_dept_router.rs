@@ -10,9 +10,9 @@
 //! - PUT    /system/dept                       system:dept:edit
 //! - DELETE /system/dept/{deptId}              system:dept:remove
 
-use std::sync::Arc;
 use axum::Router;
 use axum::routing::{delete, get, post, put};
+use std::sync::Arc;
 
 use crate::handler::sys_dept_handler;
 use crate::state::AppState;
@@ -34,7 +34,10 @@ pub fn dept_routes() -> Router<Arc<AppState>> {
         // PUT /system/dept 修改部门
         .route("/system/dept", put(sys_dept_handler::edit))
         // PUT /system/dept/updateSort 保存部门排序
-        .route("/system/dept/updateSort", put(sys_dept_handler::update_sort))
+        .route(
+            "/system/dept/updateSort",
+            put(sys_dept_handler::update_sort),
+        )
         // DELETE /system/dept/{deptId} 删除部门
         .route("/system/dept/{deptId}", delete(sys_dept_handler::remove))
         // GET /system/dept/{deptId} 查询部门详情

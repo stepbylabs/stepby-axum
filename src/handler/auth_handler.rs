@@ -13,9 +13,9 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
-use axum::Json;
 use serde::Serialize;
 use std::net::SocketAddr;
 use utoipa::ToSchema;
@@ -90,7 +90,11 @@ pub async fn captcha(
     headers: HeaderMap,
 ) -> Result<CaptchaResult, AppError> {
     // 提取客户端 IP，用于验证码绑定（防止跨 IP 重放）
-    let ip = extract_client_ip(&headers, peer_addr.ip(), &state.config.server.trusted_proxies);
+    let ip = extract_client_ip(
+        &headers,
+        peer_addr.ip(),
+        &state.config.server.trusted_proxies,
+    );
     let mut redis = state.redis.clone();
     let vo: CaptchaVo = state.auth_service.generate_captcha(&mut redis, &ip).await?;
     Ok(CaptchaResult {
@@ -122,7 +126,11 @@ pub async fn login(
     headers: HeaderMap,
     Json(dto): Json<LoginDto>,
 ) -> Result<LoginResult, AppError> {
-    let login_ip = extract_client_ip(&headers, peer_addr.ip(), &state.config.server.trusted_proxies);
+    let login_ip = extract_client_ip(
+        &headers,
+        peer_addr.ip(),
+        &state.config.server.trusted_proxies,
+    );
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
@@ -131,7 +139,14 @@ pub async fn login(
     let mut redis = state.redis.clone();
     let vo: LoginVo = state
         .auth_service
-        .login(dto, &login_ip, user_agent, &mut redis, &state.config.jwt, &state.ip_locator)
+        .login(
+            dto,
+            &login_ip,
+            user_agent,
+            &mut redis,
+            &state.config.jwt,
+            &state.ip_locator,
+        )
         .await?;
 
     Ok(LoginResult {
@@ -158,7 +173,11 @@ pub async fn register(
 ) -> Result<AjaxResult<()>, AppError> {
     let start = std::time::Instant::now();
     // 提取客户端 IP，用于验证码绑定校验（与生成时一致）
-    let ip = extract_client_ip(&headers, peer_addr.ip(), &state.config.server.trusted_proxies);
+    let ip = extract_client_ip(
+        &headers,
+        peer_addr.ip(),
+        &state.config.server.trusted_proxies,
+    );
     let oper_location = state.ip_locator.locate(&ip);
 
     // 执行注册，捕获结果用于审计日志（成功/失败均记录）
@@ -173,11 +192,7 @@ pub async fn register(
             String::new(),
             crate::tr!("msg.success.register").to_string(),
         ),
-        Err(e) => (
-            "1".to_string(),
-            e.to_string(),
-            String::new(),
-        ),
+        Err(e) => ("1".to_string(), e.to_string(), String::new()),
     };
 
     // 异步写入 oper_log，不阻断响应（与 oper_log_middleware spawn 模式一致）
@@ -185,8 +200,8 @@ pub async fn register(
     let oper_log_service = state.oper_log_service.clone();
     let oper_name = username.clone();
     tokio::spawn(async move {
-        use std::panic::AssertUnwindSafe;
         use futures::FutureExt;
+        use std::panic::AssertUnwindSafe;
 
         let record = crate::service::sys_oper_log_service::OperLogRecord {
             title: "module.auth".to_string(),

@@ -1,8 +1,8 @@
 //! sys_job 实体定义（定时任务调度表）
 
 use chrono::NaiveDateTime;
-use sea_orm::entity::prelude::*;
 use sea_orm::Set;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;

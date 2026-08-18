@@ -6,8 +6,8 @@
 //! - 按状态查询
 //! - 按岗位编码查询（查重）
 
-use sea_orm::*;
 use sea_orm::sea_query::Expr;
+use sea_orm::*;
 
 use crate::common::like_escape;
 use crate::entity::sys_post::{ActiveModel, Column, Entity as SysPost, Model};

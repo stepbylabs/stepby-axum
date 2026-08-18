@@ -8,20 +8,18 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use garde::Validate;
 use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
+use crate::common::TreeSelectVo;
 use crate::common::constants::{SUPER_ADMIN_ROLE_ID, SUPER_ADMIN_USER_ID};
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
-use crate::common::TreeSelectVo;
-use crate::entity::sys_role::{
-    ActiveModel as SysRoleActiveModel, Model as SysRoleModel,
-};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::entity::sys_role::{ActiveModel as SysRoleActiveModel, Model as SysRoleModel};
 use crate::entity::sys_role_dept::ActiveModel as SysRoleDeptActiveModel;
 use crate::entity::sys_role_menu::ActiveModel as SysRoleMenuActiveModel;
 use crate::entity::sys_user::Model as SysUserModel;
@@ -393,7 +391,11 @@ impl SysRoleService {
         role_id: i64,
         operator_user_id: Option<i64>,
     ) -> Result<RoleVo, ServiceError> {
-        let role = self.role_repo.base().find_by_id(role_id).await?
+        let role = self
+            .role_repo
+            .base()
+            .find_by_id(role_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if role.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
@@ -430,7 +432,9 @@ impl SysRoleService {
         // role_key 查重
         let exists = self.role_repo.find_by_role_key(&dto.role_key).await?;
         if exists.is_some() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.perm_key_exists")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.perm_key_exists"
+            )));
         }
 
         let role_repo = self.role_repo.clone();
@@ -493,7 +497,11 @@ impl SysRoleService {
         crate::common::i18n::validate(&dto)?;
 
         // 查询角色是否存在
-        let existing = self.role_repo.base().find_by_id(dto.role_id).await?
+        let existing = self
+            .role_repo
+            .base()
+            .find_by_id(dto.role_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
@@ -504,7 +512,9 @@ impl SysRoleService {
             && let Some(ref new_key) = dto.role_key
             && *new_key != existing.role_key
         {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.admin_perm_key_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.admin_perm_key_forbidden"
+            )));
         }
 
         // role_key 查重：若 role_key 变更，校验新 role_key 是否已被其他角色占用（通过 Repository）
@@ -515,7 +525,9 @@ impl SysRoleService {
             if let Some(d) = &dup
                 && d.role_id != dto.role_id
             {
-                return Err(ServiceError::bad_request(&crate::tr!("error.role.perm_key_exists")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.role.perm_key_exists"
+                )));
             }
         }
 
@@ -593,10 +605,16 @@ impl SysRoleService {
     pub async fn delete_role(&self, role_id: i64) -> Result<(), ServiceError> {
         // 超管保护
         if role_id == SUPER_ADMIN_ROLE_ID {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.admin_delete_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.admin_delete_forbidden"
+            )));
         }
 
-        let existing = self.role_repo.base().find_by_id(role_id).await?
+        let existing = self
+            .role_repo
+            .base()
+            .find_by_id(role_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
@@ -617,13 +635,12 @@ impl SysRoleService {
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 async move {
                     // 0. TOCTOU 防护：事务内重新检查用户关联（原检查在事务外，存在竞态）
-                    let user_count = user_role_repo
-                        .count_by_role_id_conn(txn, role_id)
-                        .await?;
+                    let user_count = user_role_repo.count_by_role_id_conn(txn, role_id).await?;
                     if user_count > 0 {
-                        return Err(sea_orm::DbErr::Custom(
-                            crate::tr!("error.role.assigned_to_user", id = role_id),
-                        ));
+                        return Err(sea_orm::DbErr::Custom(crate::tr!(
+                            "error.role.assigned_to_user",
+                            id = role_id
+                        )));
                     }
 
                     // 1. 软删除 sys_role（通过 Repository）
@@ -670,7 +687,9 @@ impl SysRoleService {
     pub async fn delete_roles(&self, role_ids: Vec<i64>) -> Result<(), ServiceError> {
         // 预校验：超管保护（事务外快速失败）
         if role_ids.contains(&SUPER_ADMIN_ROLE_ID) {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.admin_delete_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.admin_delete_forbidden"
+            )));
         }
 
         // 单个 ID 直接走 delete_role（保持原有事务行为）
@@ -684,22 +703,35 @@ impl SysRoleService {
         let user_role_repo = self.user_role_repo.clone();
         let db = self.db().clone();
 
-        let txn_result = db.transaction::<_, (), sea_orm::DbErr>(|txn| {
+        let txn_result = db
+            .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 async move {
                     for role_id in role_ids {
                         // 1. 查询角色存在性（事务内，防止 TOCTOU）
-                        let existing = role_repo.base().find_by_id_conn(txn, role_id).await?
-                            .ok_or_else(|| sea_orm::DbErr::Custom(crate::tr!("error.role.not_found_by_id", id = role_id)))?;
+                        let existing = role_repo
+                            .base()
+                            .find_by_id_conn(txn, role_id)
+                            .await?
+                            .ok_or_else(|| {
+                                sea_orm::DbErr::Custom(crate::tr!(
+                                    "error.role.not_found_by_id",
+                                    id = role_id
+                                ))
+                            })?;
                         if existing.del_flag.as_deref() == Some("2") {
-                            return Err(sea_orm::DbErr::Custom(crate::tr!("error.role.not_found_by_id", id = role_id)));
+                            return Err(sea_orm::DbErr::Custom(crate::tr!(
+                                "error.role.not_found_by_id",
+                                id = role_id
+                            )));
                         }
 
                         // 2. TOCTOU 防护：事务内重新检查用户关联
                         let user_count = user_role_repo.count_by_role_id_conn(txn, role_id).await?;
                         if user_count > 0 {
-                            return Err(sea_orm::DbErr::Custom(
-                                crate::tr!("error.role.assigned_to_user", id = role_id),
-                            ));
+                            return Err(sea_orm::DbErr::Custom(crate::tr!(
+                                "error.role.assigned_to_user",
+                                id = role_id
+                            )));
                         }
 
                         // 3. 释放唯一字段值（避免软删除后唯一索引冲突）
@@ -745,10 +777,16 @@ impl SysRoleService {
     ) -> Result<(), ServiceError> {
         // 超管保护：SUPER_ADMIN_ROLE_ID 不允许停用
         if role_id == SUPER_ADMIN_ROLE_ID && status == "1" {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.admin_disable_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.admin_disable_forbidden"
+            )));
         }
 
-        let existing = self.role_repo.base().find_by_id(role_id).await?
+        let existing = self
+            .role_repo
+            .base()
+            .find_by_id(role_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
@@ -772,7 +810,11 @@ impl SysRoleService {
         role_id: i64,
         menu_ids: Vec<i64>,
     ) -> Result<(), ServiceError> {
-        let existing = self.role_repo.base().find_by_id(role_id).await?
+        let existing = self
+            .role_repo
+            .base()
+            .find_by_id(role_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
@@ -808,13 +850,19 @@ impl SysRoleService {
     }
 
     /// 查询用户角色列表（登录后获取角色列表注入 JWT）
-    pub async fn get_roles_by_user_id(&self, user_id: i64) -> Result<Vec<SysRoleModel>, ServiceError> {
+    pub async fn get_roles_by_user_id(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<SysRoleModel>, ServiceError> {
         let roles = self.role_repo.find_by_user_id(user_id).await?;
         Ok(roles)
     }
 
     /// 查询用户角色 key 列表（权限校验用）
-    pub async fn get_role_keys_by_user_id(&self, user_id: i64) -> Result<Vec<String>, ServiceError> {
+    pub async fn get_role_keys_by_user_id(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<String>, ServiceError> {
         let roles = self.get_roles_by_user_id(user_id).await?;
         let keys: Vec<String> = roles.into_iter().map(|r| r.role_key).collect();
         Ok(keys)
@@ -836,10 +884,16 @@ impl SysRoleService {
 
         // 超管保护
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.admin_data_scope_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.admin_data_scope_forbidden"
+            )));
         }
 
-        let existing = self.role_repo.base().find_by_id(dto.role_id).await?
+        let existing = self
+            .role_repo
+            .base()
+            .find_by_id(dto.role_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
@@ -911,7 +965,8 @@ impl SysRoleService {
         let limit = page.limit();
 
         // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
-        let (scope_dept_ids, scope_user_id) = self.resolve_user_data_scope(operator_user_id).await?;
+        let (scope_dept_ids, scope_user_id) =
+            self.resolve_user_data_scope(operator_user_id).await?;
 
         // 先查角色关联的 user_id 列表（通过 Repository）
         let user_ids: Vec<i64> = self
@@ -956,7 +1011,8 @@ impl SysRoleService {
         let limit = page.limit();
 
         // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
-        let (scope_dept_ids, scope_user_id) = self.resolve_user_data_scope(operator_user_id).await?;
+        let (scope_dept_ids, scope_user_id) =
+            self.resolve_user_data_scope(operator_user_id).await?;
 
         // 先查角色已关联的 user_id 列表（通过 Repository）
         let allocated_ids: Vec<i64> = self
@@ -1026,7 +1082,8 @@ impl SysRoleService {
                         4 => {
                             let op_user = self.user_repo.base().find_by_id(op_uid).await?;
                             let op_dept_id = op_user.and_then(|u| u.dept_id).unwrap_or(0);
-                            scope_dept_ids = Some(self.dept_repo.find_descendant_ids(op_dept_id).await?);
+                            scope_dept_ids =
+                                Some(self.dept_repo.find_descendant_ids(op_dept_id).await?);
                         }
                         5 => {
                             scope_user_id = Some(op_uid);
@@ -1059,9 +1116,9 @@ impl SysRoleService {
     ) -> Result<(), ServiceError> {
         // 超管角色保护：禁止操作超管角色的授权绑定
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
-            return Err(ServiceError::bad_request(
-                &crate::tr!("error.user.admin_role_forbidden"),
-            ));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_role_forbidden"
+            )));
         }
 
         // 垂直越权校验：operator 不得对持有更高优先级角色的用户执行取消授权
@@ -1090,14 +1147,16 @@ impl SysRoleService {
     ) -> Result<(), ServiceError> {
         // 超管角色保护
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
-            return Err(ServiceError::bad_request(
-                &crate::tr!("error.user.admin_role_forbidden"),
-            ));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_role_forbidden"
+            )));
         }
 
         let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids);
         if user_ids.is_empty() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.user_id_empty")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.user_id_empty"
+            )));
         }
 
         // 垂直越权校验：批量检查每个目标用户
@@ -1128,14 +1187,16 @@ impl SysRoleService {
     ) -> Result<(), ServiceError> {
         // 超管角色保护：禁止分配超管角色
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
-            return Err(ServiceError::bad_request(
-                &crate::tr!("error.user.admin_role_forbidden"),
-            ));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_role_forbidden"
+            )));
         }
 
         let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids);
         if user_ids.is_empty() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.role.user_id_empty")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.user_id_empty"
+            )));
         }
 
         // 垂直越权校验：批量检查每个目标用户

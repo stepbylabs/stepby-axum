@@ -32,7 +32,11 @@ pub struct CaptchaResult {
 /// 避免无限循环（理论上 32 字符集中全部不被字体支持才会触发）。
 pub fn generate_captcha() -> CaptchaResult {
     let mut captcha = Captcha::new();
-    captcha.set_chars(&"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".chars().collect::<Vec<_>>());
+    captcha.set_chars(
+        &"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+            .chars()
+            .collect::<Vec<_>>(),
+    );
 
     // 修复 captcha 1.0 bug：add_chars(5) 可能因字体不支持某些字符而少于 5 位
     // 循环添加直到达到 5 位，最多重试 20 次避免无限循环
@@ -48,7 +52,10 @@ pub fn generate_captcha() -> CaptchaResult {
     captcha.apply_filter(Wave::new(2.0, 8.0).horizontal());
     captcha.apply_filter(Wave::new(3.0, 6.0).vertical());
     captcha.apply_filter(Dots::new(5).min_radius(2).max_radius(4));
-    captcha.view(crate::common::constants::CAPTCHA_IMG_WIDTH, crate::common::constants::CAPTCHA_IMG_HEIGHT);
+    captcha.view(
+        crate::common::constants::CAPTCHA_IMG_WIDTH,
+        crate::common::constants::CAPTCHA_IMG_HEIGHT,
+    );
 
     let code = captcha.chars_as_string();
     let img_base64 = captcha.as_base64().unwrap_or_default();

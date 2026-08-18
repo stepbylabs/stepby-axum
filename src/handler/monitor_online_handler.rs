@@ -22,9 +22,9 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::constants::{SECS_PER_HOUR, SUPER_ADMIN_USER_ID};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
-use crate::utils::redis::scan_keys;
 use crate::state::AppState;
 use crate::utils::crypto::OnlineSession;
+use crate::utils::redis::scan_keys;
 
 // ==================== 常量 ====================
 
@@ -109,7 +109,10 @@ pub async fn list(
     let keys = match scan_keys(&mut redis, "online:*", 5000).await {
         Ok(k) => k,
         Err(e) => {
-            tracing::warn!("Redis SCAN online:* 失败，降级到 sys_logininfor 查询: {}", e);
+            tracing::warn!(
+                "Redis SCAN online:* 失败，降级到 sys_logininfor 查询: {}",
+                e
+            );
             return fallback_to_logininfor(&state, &query).await;
         }
     };
@@ -119,17 +122,14 @@ pub async fn list(
     }
 
     // 2. MGET 批量获取所有 online JSON（单次 pipeline，遵循 memory 第 57 行约束）
-    let values: Vec<Option<String>> = match redis::cmd("MGET")
-        .arg(&keys)
-        .query_async(&mut redis)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("Redis MGET online 失败，降级到 sys_logininfor 查询: {}", e);
-            return fallback_to_logininfor(&state, &query).await;
-        }
-    };
+    let values: Vec<Option<String>> =
+        match redis::cmd("MGET").arg(&keys).query_async(&mut redis).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Redis MGET online 失败，降级到 sys_logininfor 查询: {}", e);
+                return fallback_to_logininfor(&state, &query).await;
+            }
+        };
 
     // 3. 解析 JSON 为 OnlineSession，构建 SysUserOnline 列表
     let mut online_list: Vec<SysUserOnline> = Vec::new();
@@ -289,7 +289,11 @@ pub async fn force_logout(
 
     let session_json = match session_json {
         Some(s) => s,
-        None => return Err(AppError::not_found(&crate::tr!("error.monitor.session_not_found"))),
+        None => {
+            return Err(AppError::not_found(&crate::tr!(
+                "error.monitor.session_not_found"
+            )));
+        }
     };
 
     let session: OnlineSession = serde_json::from_str(&session_json).map_err(|e| {
@@ -299,7 +303,10 @@ pub async fn force_logout(
 
     // 2. 超管保护（P0-R81-006）：禁止强退超级管理员
     if session.user_id == SUPER_ADMIN_USER_ID {
-        return Err(AppError::new(403, crate::tr!("error.monitor.admin_force_logout_forbidden")));
+        return Err(AppError::new(
+            403,
+            crate::tr!("error.monitor.admin_force_logout_forbidden"),
+        ));
     }
 
     // 3. Lua 原子化 SETEX blacklist + DEL online（落实 memory 第 68 行约束）
@@ -350,5 +357,7 @@ pub async fn force_logout(
         }),
     );
 
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.force_logout")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.force_logout"
+    )))
 }

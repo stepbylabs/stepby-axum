@@ -94,6 +94,9 @@ croner = "3"
 # Excel 导出（T-10：启用 constant_memory 流式模式，大数据量内存 O(1)）
 rust_xlsxwriter = { version = "0.96", features = ["constant_memory"] }
 
+# Excel 导入解析（B3：用户批量导入，读取 xlsx 工作表）
+calamine = "0.26"
+
 # 系统监控（CPU/内存/磁盘信息采集）
 sysinfo = "0.39"
 
@@ -111,8 +114,14 @@ maxminddb = "0.29"
 # 原子可替换引用（用于 mmdb 热加载）
 arc-swap = "1"
 
-# HTTP 客户端（用于下载 mmdb 文件）
+# HTTP 客户端（用于下载 mmdb 文件、S3/MinIO 对象存储 SigV4 请求）
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# URL 解析（S3/MinIO endpoint 的 host/authority 提取）
+url = "2"
+
+# XML 解析（S3 ListObjectsV2 响应）
+quick-xml = { version = "0.37", features = ["serialize"] }
 
 # tar.gz 解压（解压 MaxMind 下载包）
 flate2 = "1"

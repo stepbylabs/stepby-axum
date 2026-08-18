@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
-use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
+use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -78,9 +78,7 @@ impl MailerService {
         }
 
         if mail_cfg.host.is_empty() || mail_cfg.from_email.is_empty() {
-            tracing::warn!(
-                "邮件功能已启用但 host 或 from_email 为空，邮件发送将降级为禁用状态"
-            );
+            tracing::warn!("邮件功能已启用但 host 或 from_email 为空，邮件发送将降级为禁用状态");
             return Self {
                 transporter: None,
                 from_email: mail_cfg.from_email.clone(),
@@ -156,7 +154,12 @@ impl MailerService {
     /// - `html_body`：HTML 邮件正文
     ///
     /// 配置未启用时直接返回 Ok(())，不实际发送。
-    pub async fn send(&self, to_email: &str, subject: &str, html_body: &str) -> Result<(), ServiceError> {
+    pub async fn send(
+        &self,
+        to_email: &str,
+        subject: &str,
+        html_body: &str,
+    ) -> Result<(), ServiceError> {
         if !self.is_enabled() {
             tracing::debug!("邮件功能未启用，跳过发送给 {}", to_email);
             return Ok(());
@@ -176,10 +179,9 @@ impl MailerService {
             .body(html_body.to_string())
             .map_err(|_| ServiceError::internal(&crate::tr!("error.mail.build_failed")))?;
 
-        let transporter = self
-            .transporter
-            .as_ref()
-            .ok_or_else(|| ServiceError::internal(&crate::tr!("error.mail.smtp_not_initialized")))?;
+        let transporter = self.transporter.as_ref().ok_or_else(|| {
+            ServiceError::internal(&crate::tr!("error.mail.smtp_not_initialized"))
+        })?;
 
         // P1 修复：SMTP 发送加 10s 超时保护。原实现直接 await，SMTP 服务器
         // 无响应/网络黑洞时会无限挂起，拖住调用方请求（如公告创建链路）。
@@ -222,19 +224,20 @@ impl MailerService {
 
         // 并行发送：buffer_unordered(5) 限制并发度为 5，避免 SMTP 服务器并发连接限制
         // 每个 future 持有独立的 MailerService 克隆（transporter 内部为 Arc，克隆廉价）
-        let results: Vec<(String, Result<(), ServiceError>)> = stream::iter(to_emails.iter().cloned())
-            .map(|email| {
-                let svc = self.clone();
-                let subject = subject.to_string();
-                let html_body = html_body.to_string();
-                async move {
-                    let res = svc.send(&email, &subject, &html_body).await;
-                    (email, res)
-                }
-            })
-            .buffer_unordered(5)
-            .collect()
-            .await;
+        let results: Vec<(String, Result<(), ServiceError>)> =
+            stream::iter(to_emails.iter().cloned())
+                .map(|email| {
+                    let svc = self.clone();
+                    let subject = subject.to_string();
+                    let html_body = html_body.to_string();
+                    async move {
+                        let res = svc.send(&email, &subject, &html_body).await;
+                        (email, res)
+                    }
+                })
+                .buffer_unordered(5)
+                .collect()
+                .await;
 
         let mut success = 0u32;
         let mut failed_emails = Vec::new();
@@ -265,14 +268,22 @@ impl MailerService {
     }
 
     /// 发送纯文本邮件（HTML 转义后发送）
-    pub async fn send_text(&self, to_email: &str, subject: &str, text: &str) -> Result<(), ServiceError> {
+    pub async fn send_text(
+        &self,
+        to_email: &str,
+        subject: &str,
+        text: &str,
+    ) -> Result<(), ServiceError> {
         // 简单转义 HTML 特殊字符
         let escaped = text
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('\n', "<br/>");
-        let html = format!("<div style=\"font-family: Arial, sans-serif; line-height: 1.6;\">{}</div>", escaped);
+        let html = format!(
+            "<div style=\"font-family: Arial, sans-serif; line-height: 1.6;\">{}</div>",
+            escaped
+        );
         self.send(to_email, subject, &html).await
     }
 }
@@ -356,7 +367,9 @@ mod tests {
     #[tokio::test]
     async fn test_send_text_disabled_is_noop_ok() {
         let svc = disabled_service();
-        let res = svc.send_text("user@example.com", "主题", "纯文本\n第二行").await;
+        let res = svc
+            .send_text("user@example.com", "主题", "纯文本\n第二行")
+            .await;
         assert!(res.is_ok(), "禁用邮件下 send_text 必须返回 Ok");
     }
 

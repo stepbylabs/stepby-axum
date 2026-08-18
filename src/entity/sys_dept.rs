@@ -1,8 +1,8 @@
 //! sys_dept 实体定义（部门信息表，树形结构）
 
 use chrono::NaiveDateTime;
-use sea_orm::entity::prelude::*;
 use sea_orm::Set;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;

@@ -73,18 +73,30 @@ mod tests {
 
     #[test]
     fn test_mysql_url() {
-        assert_eq!(DbType::from_url("mysql://user:pass@localhost:3306/db").unwrap(), DbType::Mysql);
+        assert_eq!(
+            DbType::from_url("mysql://user:pass@localhost:3306/db").unwrap(),
+            DbType::Mysql
+        );
     }
 
     #[test]
     fn test_postgres_url() {
-        assert_eq!(DbType::from_url("postgres://user:pass@localhost:5432/db").unwrap(), DbType::Postgres);
-        assert_eq!(DbType::from_url("postgresql://user:pass@localhost:5432/db").unwrap(), DbType::Postgres);
+        assert_eq!(
+            DbType::from_url("postgres://user:pass@localhost:5432/db").unwrap(),
+            DbType::Postgres
+        );
+        assert_eq!(
+            DbType::from_url("postgresql://user:pass@localhost:5432/db").unwrap(),
+            DbType::Postgres
+        );
     }
 
     #[test]
     fn test_sqlite_url() {
-        assert_eq!(DbType::from_url("sqlite://./data/yebot.db?mode=rwc").unwrap(), DbType::Sqlite);
+        assert_eq!(
+            DbType::from_url("sqlite://./data/yebot.db?mode=rwc").unwrap(),
+            DbType::Sqlite
+        );
     }
 
     #[test]

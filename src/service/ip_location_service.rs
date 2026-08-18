@@ -139,11 +139,13 @@ pub const CONFIG_KEY_MAXMIND_LICENSE_KEY: &str = "ip_location.maxmind_license_ke
 pub const CONFIG_KEY_AUTO_UPDATE_ENABLED: &str = "ip_location.auto_update_enabled";
 
 /// P3TERX 镜像下载 URL（直接提供 .mmdb 文件，无需解压）
-const P3TERX_URL: &str = "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb";
+const P3TERX_URL: &str =
+    "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb";
 
 /// MaxMind 官方下载 URL 模板（tar.gz 格式，需解压）
 /// 实际请求使用 HTTP Basic Auth：username=account_id, password=license_key
-const MAXMIND_URL: &str = "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz";
+const MAXMIND_URL: &str =
+    "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz";
 
 /// IP 归属地库管理服务
 #[derive(Clone)]
@@ -174,9 +176,15 @@ impl IpLocationService {
         let master_key = &self.config.config_enc_key;
 
         let source = self.read_config_value(CONFIG_KEY_UPDATE_SOURCE).await?;
-        let account_id_enc = self.read_config_value(CONFIG_KEY_MAXMIND_ACCOUNT_ID).await?;
-        let license_key_enc = self.read_config_value(CONFIG_KEY_MAXMIND_LICENSE_KEY).await?;
-        let auto_update = self.read_config_value(CONFIG_KEY_AUTO_UPDATE_ENABLED).await?;
+        let account_id_enc = self
+            .read_config_value(CONFIG_KEY_MAXMIND_ACCOUNT_ID)
+            .await?;
+        let license_key_enc = self
+            .read_config_value(CONFIG_KEY_MAXMIND_LICENSE_KEY)
+            .await?;
+        let auto_update = self
+            .read_config_value(CONFIG_KEY_AUTO_UPDATE_ENABLED)
+            .await?;
 
         let account_id = if account_id_enc.is_empty() {
             String::new()
@@ -237,10 +245,26 @@ impl IpLocationService {
             encrypt_config_value(license_key, master_key)?
         };
 
-        self.upsert_config_value(CONFIG_KEY_UPDATE_SOURCE, source, "IP 库更新源").await?;
-        self.upsert_config_value(CONFIG_KEY_MAXMIND_ACCOUNT_ID, &account_id_stored, "MaxMind Account ID（加密）").await?;
-        self.upsert_config_value(CONFIG_KEY_MAXMIND_LICENSE_KEY, &license_key_stored, "MaxMind License Key（加密）").await?;
-        self.upsert_config_value(CONFIG_KEY_AUTO_UPDATE_ENABLED, if auto_update { "true" } else { "false" }, "是否启用自动更新").await?;
+        self.upsert_config_value(CONFIG_KEY_UPDATE_SOURCE, source, "IP 库更新源")
+            .await?;
+        self.upsert_config_value(
+            CONFIG_KEY_MAXMIND_ACCOUNT_ID,
+            &account_id_stored,
+            "MaxMind Account ID（加密）",
+        )
+        .await?;
+        self.upsert_config_value(
+            CONFIG_KEY_MAXMIND_LICENSE_KEY,
+            &license_key_stored,
+            "MaxMind License Key（加密）",
+        )
+        .await?;
+        self.upsert_config_value(
+            CONFIG_KEY_AUTO_UPDATE_ENABLED,
+            if auto_update { "true" } else { "false" },
+            "是否启用自动更新",
+        )
+        .await?;
 
         Ok(())
     }
@@ -312,24 +336,27 @@ impl IpLocationService {
 
         let mmdb_path = self.config.ip_location.mmdb_path.clone();
         let mmdb_path_for_info = mmdb_path.clone();
-        let old_size = tokio::task::spawn_blocking(move || file_info(&mmdb_path_for_info).1).await?;
+        let old_size =
+            tokio::task::spawn_blocking(move || file_info(&mmdb_path_for_info).1).await?;
 
         // 根据更新源选择下载方式
         let (new_mmdb_bytes, sha256_hex) = match source {
             UpdateSource::Maxmind => {
                 if cfg.maxmind_account_id.is_empty() || cfg.maxmind_license_key.is_empty() {
-                    anyhow::bail!("MaxMind update source requires Account ID and License Key to be configured");
+                    anyhow::bail!(
+                        "MaxMind update source requires Account ID and License Key to be configured"
+                    );
                 }
-                self.download_from_maxmind(&cfg.maxmind_account_id, &cfg.maxmind_license_key).await?
+                self.download_from_maxmind(&cfg.maxmind_account_id, &cfg.maxmind_license_key)
+                    .await?
             }
-            UpdateSource::P3terx => {
-                self.download_from_p3terx().await?
-            }
+            UpdateSource::P3terx => self.download_from_p3terx().await?,
         };
 
         // 验证 mmdb 文件有效性（尝试在内存中打开）
         let temp_path = format!("{}.tmp", mmdb_path);
-        tokio::fs::write(&temp_path, &new_mmdb_bytes).await
+        tokio::fs::write(&temp_path, &new_mmdb_bytes)
+            .await
             .map_err(|e| anyhow::anyhow!("failed to write temp file {}: {}", temp_path, e))?;
 
         // 验证 mmdb 文件可被 maxminddb 打开
@@ -343,7 +370,8 @@ impl IpLocationService {
         // 备份旧文件（如果存在）
         let backup_path = format!("{}.bak", mmdb_path);
         if Path::new(&mmdb_path).exists() {
-            tokio::fs::rename(&mmdb_path, &backup_path).await
+            tokio::fs::rename(&mmdb_path, &backup_path)
+                .await
                 .map_err(|e| anyhow::anyhow!("failed to backup old mmdb file: {}", e))?;
         }
 
@@ -381,11 +409,20 @@ impl IpLocationService {
             new_size,
             new_sha256: sha256_hex,
             old_size,
-            message: crate::tr!("msg.success.ip_location_update", source = source.to_string(), size = new_size),
+            message: crate::tr!(
+                "msg.success.ip_location_update",
+                source = source.to_string(),
+                size = new_size
+            ),
             timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         };
 
-        tracing::info!("IP 库更新成功: source={}, size={}B, elapsed={:.2}s", source, new_size, elapsed);
+        tracing::info!(
+            "IP 库更新成功: source={}, size={}B, elapsed={:.2}s",
+            source,
+            new_size,
+            elapsed
+        );
 
         Ok(result)
     }
@@ -399,18 +436,26 @@ impl IpLocationService {
             .user_agent("yebot-backend/0.1")
             .build()?;
 
-        let response = client.get(P3TERX_URL).send().await
+        let response = client
+            .get(P3TERX_URL)
+            .send()
+            .await
             .map_err(|e| anyhow::anyhow!("P3TERX download request failed: {}", e))?;
 
         if !response.status().is_success() {
             anyhow::bail!("P3TERX download failed, HTTP status: {}", response.status());
         }
 
-        let bytes = response.bytes().await
+        let bytes = response
+            .bytes()
+            .await
             .map_err(|e| anyhow::anyhow!("failed to read P3TERX response body: {}", e))?;
 
         if bytes.len() < crate::common::constants::MMDB_MIN_FILE_SIZE {
-            anyhow::bail!("P3TERX downloaded file too small ({} bytes), download may have failed", bytes.len());
+            anyhow::bail!(
+                "P3TERX downloaded file too small ({} bytes), download may have failed",
+                bytes.len()
+            );
         }
 
         let sha256 = calculate_sha256(&bytes);
@@ -425,7 +470,10 @@ impl IpLocationService {
         account_id: &str,
         license_key: &str,
     ) -> anyhow::Result<(Vec<u8>, String)> {
-        tracing::info!("从 MaxMind 官方下载 mmdb 文件（Account ID: {}）", account_id);
+        tracing::info!(
+            "从 MaxMind 官方下载 mmdb 文件（Account ID: {}）",
+            account_id
+        );
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -442,10 +490,16 @@ impl IpLocationService {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("MaxMind download failed, HTTP status: {}, response: {}", status, body);
+            anyhow::bail!(
+                "MaxMind download failed, HTTP status: {}, response: {}",
+                status,
+                body
+            );
         }
 
-        let bytes = response.bytes().await
+        let bytes = response
+            .bytes()
+            .await
             .map_err(|e| anyhow::anyhow!("failed to read MaxMind response body: {}", e))?;
 
         // 解压 tar.gz 并提取 .mmdb 文件
@@ -453,7 +507,11 @@ impl IpLocationService {
             .map_err(|e| anyhow::anyhow!("failed to extract tar.gz: {}", e))?;
 
         let sha256 = calculate_sha256(&mmdb_bytes);
-        tracing::info!("MaxMind 下载并解压完成: {} bytes, SHA256={}", mmdb_bytes.len(), sha256);
+        tracing::info!(
+            "MaxMind 下载并解压完成: {} bytes, SHA256={}",
+            mmdb_bytes.len(),
+            sha256
+        );
 
         Ok((mmdb_bytes, sha256))
     }
@@ -468,10 +526,10 @@ impl IpLocationService {
     // ==================== sys_config 表 CRUD 辅助方法 ====================
 
     async fn read_config_value(&self, key: &str) -> anyhow::Result<String> {
-        use sea_orm::EntityTrait;
-        use sea_orm::ColumnTrait;
-        use sea_orm::QueryFilter;
         use crate::entity::sys_config;
+        use sea_orm::ColumnTrait;
+        use sea_orm::EntityTrait;
+        use sea_orm::QueryFilter;
 
         let result = sys_config::Entity::find()
             .filter(sys_config::Column::ConfigKey.eq(key))
@@ -479,21 +537,18 @@ impl IpLocationService {
             .await
             .map_err(|e| anyhow::anyhow!("查询 sys_config 失败: {}", e))?;
 
-        Ok(result.map(|m| m.config_value.unwrap_or_default()).unwrap_or_default())
+        Ok(result
+            .map(|m| m.config_value.unwrap_or_default())
+            .unwrap_or_default())
     }
 
-    async fn upsert_config_value(
-        &self,
-        key: &str,
-        value: &str,
-        name: &str,
-    ) -> anyhow::Result<()> {
-        use sea_orm::ActiveModelTrait;
-        use sea_orm::EntityTrait;
-        use sea_orm::ColumnTrait;
-        use sea_orm::QueryFilter;
-        use sea_orm::ActiveValue::Set;
+    async fn upsert_config_value(&self, key: &str, value: &str, name: &str) -> anyhow::Result<()> {
         use crate::entity::sys_config;
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+        use sea_orm::ColumnTrait;
+        use sea_orm::EntityTrait;
+        use sea_orm::QueryFilter;
 
         let existing = sys_config::Entity::find()
             .filter(sys_config::Column::ConfigKey.eq(key))
@@ -505,7 +560,9 @@ impl IpLocationService {
             let mut active: sys_config::ActiveModel = model.into();
             active.config_value = Set(Some(value.to_string()));
             active.update_time = Set(Some(crate::common::datetime::now_naive()));
-            active.update(&self.db).await
+            active
+                .update(&self.db)
+                .await
                 .map_err(|e| anyhow::anyhow!("更新 sys_config 失败: {}", e))?;
         } else {
             let active = sys_config::ActiveModel {
@@ -518,7 +575,9 @@ impl IpLocationService {
                 remark: Set(Some("IP 库管理配置".to_string())),
                 ..Default::default()
             };
-            active.insert(&self.db).await
+            active
+                .insert(&self.db)
+                .await
                 .map_err(|e| anyhow::anyhow!("插入 sys_config 失败: {}", e))?;
         }
 
@@ -564,7 +623,8 @@ fn file_info(path: &str) -> (bool, u64, i64) {
     match std::fs::metadata(path) {
         Ok(meta) => {
             let size = meta.len();
-            let modified = meta.modified()
+            let modified = meta
+                .modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
@@ -583,7 +643,10 @@ mod tests {
     fn test_calculate_sha256() {
         let bytes = b"hello world";
         let hash = calculate_sha256(bytes);
-        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]

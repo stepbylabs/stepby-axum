@@ -19,8 +19,8 @@
 //! 通过 `embedded_assets::serve_spa()` 统一入口自动切换。
 
 use axum::extract::Request;
-use axum::http::header::{ACCEPT, AUTHORIZATION};
 use axum::http::HeaderName;
+use axum::http::header::{ACCEPT, AUTHORIZATION};
 use axum::middleware::Next;
 use axum::response::Response;
 

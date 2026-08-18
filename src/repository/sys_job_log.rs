@@ -7,10 +7,10 @@
 
 use sea_orm::*;
 
-use chrono::NaiveDateTime;
 use crate::common::like_escape;
 use crate::entity::sys_job_log::{ActiveModel, Column, Entity as SysJobLog, Model};
 use crate::repository::base::BaseRepository;
+use chrono::NaiveDateTime;
 
 /// 定时任务日志 Repository
 pub struct SysJobLogRepository {
@@ -116,8 +116,6 @@ impl SysJobLogRepository {
 
     /// 清空任务日志（物理删除全部）
     pub async fn clean_all(&self) -> Result<DeleteResult, DbErr> {
-        SysJobLog::delete_many()
-            .exec(self.base.db())
-            .await
+        SysJobLog::delete_many().exec(self.base.db()).await
     }
 }

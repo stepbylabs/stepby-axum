@@ -11,11 +11,11 @@
 //!   `std::error::Error` 和 `std::fmt::Display`，避免手写 impl。
 //! - 保留原有的 struct 结构（code + message），所有构造方法与 From impl 保持兼容。
 
+use crate::common::response::AjaxResult;
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use thiserror::Error;
-use crate::common::response::AjaxResult;
 
 // ==================== Service 层错误（不依赖 Web 框架） ====================
 

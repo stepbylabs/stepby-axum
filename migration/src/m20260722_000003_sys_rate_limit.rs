@@ -33,7 +33,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 /// 当前时间表达式（跨数据库兼容）
@@ -80,7 +83,8 @@ impl MigrationTrait for Migration {
                 create_time         DATETIME,
                 update_by           VARCHAR(64),
                 update_time         DATETIME
-            )"#.to_string()
+            )"#
+            .to_string()
         } else if is_postgres(manager) {
             r#"CREATE TABLE IF NOT EXISTS sys_rate_limit (
                 id                  BIGSERIAL PRIMARY KEY,
@@ -93,7 +97,8 @@ impl MigrationTrait for Migration {
                 create_time         TIMESTAMP,
                 update_by           VARCHAR(64),
                 update_time         TIMESTAMP
-            )"#.to_string()
+            )"#
+            .to_string()
         } else {
             r#"CREATE TABLE IF NOT EXISTS sys_rate_limit (
                 id                  BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -106,7 +111,8 @@ impl MigrationTrait for Migration {
                 create_time         DATETIME,
                 update_by           VARCHAR(64),
                 update_time         DATETIME
-            )"#.to_string()
+            )"#
+            .to_string()
         };
 
         manager.get_connection().execute_unprepared(&sql).await?;
@@ -154,10 +160,9 @@ impl MigrationTrait for Migration {
         execute_idempotent_insert(manager, &buttons_sql).await?;
 
         // 为普通角色 role_id=2 关联新增的 6 个菜单（超管通过 *:*:* 通配符访问，无需显式关联）
-        let role_menu_sql = format!(
-            "sys_role_menu (role_id, menu_id) VALUES \
+        let role_menu_sql = "sys_role_menu (role_id, menu_id) VALUES \
             (2, 121), (2, 1206), (2, 1207), (2, 1208), (2, 1209), (2, 1210)"
-        );
+            .to_string();
         execute_idempotent_insert(manager, &role_menu_sql).await?;
 
         Ok(())

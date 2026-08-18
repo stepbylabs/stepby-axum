@@ -12,9 +12,12 @@
 //! - 截断时设置 `X-Export-Truncated` 响应头（N5）
 
 use std::borrow::Cow;
+use std::io::Cursor;
 
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
+use calamine::Reader;
+use calamine::Xlsx;
 use rust_xlsxwriter::{Format, Workbook};
 
 use crate::common::error::AppError;
@@ -44,6 +47,83 @@ pub struct ExcelColumn<T> {
 
 /// 超过此行数启用 constant_memory 流式模式（写临时文件，内存 O(1)）
 const CONSTANT_MEMORY_THRESHOLD: usize = 5000;
+
+// ==================== 导入（B3） ====================
+
+/// 导入模板列：双语表头 + 示例值 + 列宽
+pub struct ImportColumn {
+    pub header: (&'static str, &'static str),
+    pub sample: &'static str,
+    pub width: f64,
+}
+
+/// 生成导入模板 xlsx（第 1 行为表头，第 2 行为示例数据行），返回 xlsx 字节
+pub fn build_import_template_bytes(
+    sheet_name: &str,
+    columns: &[ImportColumn],
+    locale_zh: bool,
+) -> Result<Vec<u8>, AppError> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook
+        .add_worksheet()
+        .set_name(sanitize_sheet_name(sheet_name))
+        .map_err(|_| AppError::internal(&crate::tr!("error.excel.sheet_create_failed")))?;
+    let header_format = Format::new().set_bold();
+    for (i, c) in columns.iter().enumerate() {
+        let label = if locale_zh { c.header.0 } else { c.header.1 };
+        worksheet
+            .write_string_with_format(0, i as u16, label, &header_format)
+            .map_err(|_| AppError::internal(&crate::tr!("error.excel.header_write_failed")))?;
+        worksheet
+            .write_string(1, i as u16, c.sample)
+            .map_err(|_| AppError::internal(&crate::tr!("error.excel.data_write_failed")))?;
+        let _ = worksheet.set_column_width(i as u16, c.width);
+    }
+    workbook
+        .save_to_buffer()
+        .map_err(|_| AppError::internal(&crate::tr!("error.excel.generate_failed")))
+}
+
+/// 将 calamine 单元格值转为字符串（空单元格视为空串；数字按无小数输出）
+fn import_cell_to_string(d: &calamine::Data) -> String {
+    use calamine::Data as Cd;
+    match d {
+        Cd::String(s) => s.clone(),
+        Cd::Int(i) => i.to_string(),
+        Cd::Float(f) => {
+            if f.fract() == 0.0 && f.abs() < 1e15 {
+                format!("{:.0}", f)
+            } else {
+                f.to_string()
+            }
+        }
+        Cd::Bool(b) => b.to_string(),
+        Cd::DateTime(_) | Cd::DateTimeIso(_) | Cd::DurationIso(_) | Cd::Error(_) | Cd::Empty => {
+            String::new()
+        }
+    }
+}
+
+/// 读取 xlsx 字节，返回首个工作表的行矩阵（每行是字符串化后的单元格列表）
+///
+/// - 仅支持 `.xlsx`（OLE/宏/旧版 xls 不做支持，前端已限制扩展名）
+/// - 空数据返回空 Vec；首行为表头（调用方自行跳过/校验）
+pub fn read_xlsx_rows(bytes: &[u8]) -> Result<Vec<Vec<String>>, AppError> {
+    let mut workbook = Xlsx::new(Cursor::new(bytes)).map_err(|e| {
+        AppError::bad_request(&crate::tr!("error.excel.import_parse_failed", e = e))
+    })?;
+    let sheet_name = workbook.sheet_names().first().cloned().unwrap_or_default();
+    if sheet_name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let range = workbook.worksheet_range(&sheet_name).map_err(|e| {
+        AppError::bad_request(&crate::tr!("error.excel.import_parse_failed", e = e))
+    })?;
+    Ok(range
+        .rows()
+        .map(|r| r.iter().map(import_cell_to_string).collect::<Vec<_>>())
+        .collect())
+}
 
 /// 通用 Excel 导出（全字段）
 pub async fn export_to_excel<T>(
@@ -88,7 +168,13 @@ where
     let filename = filename.to_string();
 
     let xlsx_data = tokio::task::spawn_blocking(move || {
-        build_xlsx(&sheet_name, &columns_owned, &rows_owned, fields_owned.as_deref(), locale)
+        build_xlsx(
+            &sheet_name,
+            &columns_owned,
+            &rows_owned,
+            fields_owned.as_deref(),
+            locale,
+        )
     })
     .await
     .map_err(|_| AppError::internal(&crate::tr!("error.excel.build_task_failed")))??;
@@ -183,7 +269,9 @@ where
     };
 
     if selected_indices.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.excel.fields_empty")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.excel.fields_empty"
+        )));
     }
 
     // constant_memory：行数超阈值时启用流式写盘，内存 O(1)（需 rust_xlsxwriter feature）
@@ -204,7 +292,11 @@ where
     let locale_zh = i18n::is_zh();
     for (out_col, &col_idx) in selected_indices.iter().enumerate() {
         let col = &columns[col_idx];
-        let header_text = if locale_zh { col.header.0 } else { col.header.1 };
+        let header_text = if locale_zh {
+            col.header.0
+        } else {
+            col.header.1
+        };
         worksheet
             .write_string_with_format(0, out_col as u16, header_text, &header_format)
             .map_err(|_| AppError::internal(&crate::tr!("error.excel.header_write_failed")))?;
@@ -221,18 +313,24 @@ where
                 CellValue::Text(cow) => {
                     worksheet
                         .write_string(target_row, target_col, cow.as_ref())
-                        .map_err(|_| AppError::internal(&crate::tr!("error.excel.data_write_failed")))?;
+                        .map_err(|_| {
+                            AppError::internal(&crate::tr!("error.excel.data_write_failed"))
+                        })?;
                 }
                 CellValue::Number(n) => {
                     worksheet
                         .write_number(target_row, target_col, n)
-                        .map_err(|_| AppError::internal(&crate::tr!("error.excel.data_write_failed")))?;
+                        .map_err(|_| {
+                            AppError::internal(&crate::tr!("error.excel.data_write_failed"))
+                        })?;
                 }
                 CellValue::DateTime(dt) => {
                     let s = dt.format("%Y-%m-%d %H:%M:%S").to_string();
                     worksheet
                         .write_string_with_format(target_row, target_col, &s, &datetime_format)
-                        .map_err(|_| AppError::internal(&crate::tr!("error.excel.data_write_failed")))?;
+                        .map_err(|_| {
+                            AppError::internal(&crate::tr!("error.excel.data_write_failed"))
+                        })?;
                 }
             }
         }
@@ -267,8 +365,18 @@ fn rfc5987_encode(s: &str) -> String {
             b'A'..=b'Z'
             | b'a'..=b'z'
             | b'0'..=b'9'
-            | b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.'
-            | b'^' | b'_' | b'`' | b'|' | b'~' => out.push(*b as char),
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'&'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~' => out.push(*b as char),
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }

@@ -8,14 +8,14 @@
 use std::sync::Arc;
 
 use futures::future::FutureExt;
+use garde::Validate;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
 use crate::common::error::ServiceError;
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_job::{self, Model as SysJobModel};
 use crate::entity::sys_job_log::Model as SysJobLogModel;
 use crate::repository::sys_job::SysJobRepository;
@@ -32,7 +32,9 @@ fn validate_job_enum(
     status: Option<&str>,
 ) -> Result<(), ServiceError> {
     if let Some(m) = misfire_policy
-        && m != "1" && m != "2" && m != "3"
+        && m != "1"
+        && m != "2"
+        && m != "3"
     {
         return Err(ServiceError::bad_request(&format!(
             "misfire_policy 必须为 1/2/3，当前值: {}",
@@ -40,7 +42,8 @@ fn validate_job_enum(
         )));
     }
     if let Some(c) = concurrent
-        && c != "0" && c != "1"
+        && c != "0"
+        && c != "1"
     {
         return Err(ServiceError::bad_request(&format!(
             "concurrent 必须为 0(允许) 或 1(禁止)，当前值: {}",
@@ -48,7 +51,8 @@ fn validate_job_enum(
         )));
     }
     if let Some(s) = status
-        && s != "0" && s != "1"
+        && s != "0"
+        && s != "1"
     {
         return Err(ServiceError::bad_request(&format!(
             "status 必须为 0(正常) 或 1(暂停)，当前值: {}",
@@ -295,11 +299,17 @@ impl SysJobService {
     ) -> Result<SysJobModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         // P3 修复: 枚举值白名单校验
-        validate_job_enum(dto.misfire_policy.as_deref(), dto.concurrent.as_deref(), dto.status.as_deref())?;
+        validate_job_enum(
+            dto.misfire_policy.as_deref(),
+            dto.concurrent.as_deref(),
+            dto.status.as_deref(),
+        )?;
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.job.cron_invalid")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.job.cron_invalid"
+            )));
         }
 
         // 查重
@@ -308,7 +318,9 @@ impl SysJobService {
             .find_by_name_and_group(&dto.job_name, &dto.job_group)
             .await?
         {
-            return Err(ServiceError::bad_request(&crate::tr!("error.job.name_exists")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.job.name_exists"
+            )));
         }
 
         let status = dto.status.unwrap_or_else(|| "0".to_string());
@@ -360,7 +372,11 @@ impl SysJobService {
     ) -> Result<SysJobModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         // P3 修复: 枚举值白名单校验
-        validate_job_enum(dto.misfire_policy.as_deref(), dto.concurrent.as_deref(), dto.status.as_deref())?;
+        validate_job_enum(
+            dto.misfire_policy.as_deref(),
+            dto.concurrent.as_deref(),
+            dto.status.as_deref(),
+        )?;
 
         let existing = self
             .job_repo
@@ -370,7 +386,9 @@ impl SysJobService {
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.job.cron_invalid")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.job.cron_invalid"
+            )));
         }
 
         let old_status = existing.status.as_deref().unwrap_or("0").to_string();
@@ -545,7 +563,9 @@ impl SysJobService {
 
         // 验证 job_group 一致
         if job.job_group != dto.job_group {
-            return Err(ServiceError::bad_request(&crate::tr!("error.job.group_mismatch")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.job.group_mismatch"
+            )));
         }
 
         self.scheduler.run_once(&job).await?;
@@ -660,12 +680,19 @@ mod tests {
         // 标准 5 段 cron（cron crate 默认 5 段：分 时 日 月 周）
         let result = calc_next_valid_time("0 * * * * *");
         // 验证有效 cron 表达式应返回 Some（避免 if let 静默通过 None）
-        assert!(result.is_some(), "有效 cron 表达式 '0 * * * * *' 应返回 Some");
+        assert!(
+            result.is_some(),
+            "有效 cron 表达式 '0 * * * * *' 应返回 Some"
+        );
         // 6 段 cron（含秒）或 5 段 cron，只要能解析就返回 Some
         if let Some(time) = result {
             assert!(time.contains(":"));
             // 时间格式应为 "YYYY-MM-DD HH:MM:SS"
-            assert_eq!(time.len(), 19, "时间格式应为 YYYY-MM-DD HH:MM:SS（19 字符）");
+            assert_eq!(
+                time.len(),
+                19,
+                "时间格式应为 YYYY-MM-DD HH:MM:SS（19 字符）"
+            );
         }
     }
 

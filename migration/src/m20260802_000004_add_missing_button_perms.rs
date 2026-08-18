@@ -72,7 +72,13 @@ async fn insert_button_perm(
         .execute(Statement::from_sql_and_values(
             backend,
             &sql,
-            [menu_id.into(), menu_name.into(), parent_id.into(), order_num.into(), perms.into()],
+            [
+                menu_id.into(),
+                menu_name.into(),
+                parent_id.into(),
+                order_num.into(),
+                perms.into(),
+            ],
         ))
         .await?;
     Ok(())
@@ -90,14 +96,13 @@ async fn insert_role_menu_idempotent(
 ) -> Result<(), DbErr> {
     let backend = manager.get_database_backend();
     let sql = if is_postgres(manager) {
-        format!(
-            "INSERT INTO sys_role_menu (role_id, menu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
-        )
+        "INSERT INTO sys_role_menu (role_id, menu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+            .to_string()
     } else if is_sqlite(manager) {
-        format!("INSERT OR IGNORE INTO sys_role_menu (role_id, menu_id) VALUES ($1, $2)")
+        "INSERT OR IGNORE INTO sys_role_menu (role_id, menu_id) VALUES ($1, $2)".to_string()
     } else {
         // MySQL
-        format!("INSERT IGNORE INTO sys_role_menu (role_id, menu_id) VALUES ($1, $2)")
+        "INSERT IGNORE INTO sys_role_menu (role_id, menu_id) VALUES ($1, $2)".to_string()
     };
     manager
         .get_connection()
@@ -120,8 +125,18 @@ impl MigrationTrait for Migration {
         let notice_center_perms = [
             (3001i64, "通知查询", "system:notice:center:query", 1i64),
             (3002, "通知标记已读", "system:notice:center:markRead", 2),
-            (3003, "通知批量标记已读", "system:notice:center:markBatchRead", 3),
-            (3004, "通知全部标记已读", "system:notice:center:markAllRead", 4),
+            (
+                3003,
+                "通知批量标记已读",
+                "system:notice:center:markBatchRead",
+                3,
+            ),
+            (
+                3004,
+                "通知全部标记已读",
+                "system:notice:center:markAllRead",
+                4,
+            ),
         ];
         for (id, name, perms, order) in notice_center_perms {
             insert_button_perm(manager, id, name, 125, order, perms).await?;
@@ -169,7 +184,10 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let ids = [3001, 3002, 3003, 3004, 3011, 3012, 3013, 3014, 3015, 3021, 3022, 3023, 3031, 3032, 3033];
+        let ids = [
+            3001, 3002, 3003, 3004, 3011, 3012, 3013, 3014, 3015, 3021, 3022, 3023, 3031, 3032,
+            3033,
+        ];
         for id in ids {
             manager
                 .get_connection()

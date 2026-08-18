@@ -29,7 +29,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 /// 获取当前时间 SQL 表达式（数据库兼容）
@@ -157,24 +160,74 @@ async fn create_sys_user(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_user"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("user_id")).big_integer().not_null().auto_increment().primary_key())
+                .col(
+                    ColumnDef::new(Alias::new("user_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
                 .col(ColumnDef::new(Alias::new("dept_id")).big_integer().null())
-                .col(ColumnDef::new(Alias::new("user_name")).string_len(30).not_null())
-                .col(ColumnDef::new(Alias::new("nick_name")).string_len(30).not_null())
-                .col(ColumnDef::new(Alias::new("user_type")).string_len(2).default("00"))
-                .col(ColumnDef::new(Alias::new("email")).string_len(50).default(""))
-                .col(ColumnDef::new(Alias::new("phonenumber")).string_len(11).default(""))
-                .col(ColumnDef::new(Alias::new("country_code")).string_len(8).null())
+                .col(
+                    ColumnDef::new(Alias::new("user_name"))
+                        .string_len(30)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("nick_name"))
+                        .string_len(30)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("user_type"))
+                        .string_len(2)
+                        .default("00"),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("email"))
+                        .string_len(50)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("phonenumber"))
+                        .string_len(11)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("country_code"))
+                        .string_len(8)
+                        .null(),
+                )
                 .col(ColumnDef::new(Alias::new("sex")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("avatar")).string_len(100).default(""))
-                .col(ColumnDef::new(Alias::new("password")).string_len(255).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("avatar"))
+                        .string_len(100)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("password"))
+                        .string_len(255)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("login_ip")).string_len(128).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("login_ip"))
+                        .string_len(128)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("login_date")).date_time().null())
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .col(ColumnDef::new(Alias::new("remark")).string_len(500).null())
                 .to_owned(),
@@ -216,18 +269,48 @@ async fn create_sys_role(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_role"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("role_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("role_name")).string_len(30).not_null())
-                .col(ColumnDef::new(Alias::new("role_key")).string_len(100).not_null())
+                .col(
+                    ColumnDef::new(Alias::new("role_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("role_name"))
+                        .string_len(30)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("role_key"))
+                        .string_len(100)
+                        .not_null(),
+                )
                 .col(ColumnDef::new(Alias::new("role_sort")).integer().not_null())
                 .col(ColumnDef::new(Alias::new("data_scope")).char().default("1"))
-                .col(ColumnDef::new(Alias::new("menu_check_strictly")).boolean().default(true))
-                .col(ColumnDef::new(Alias::new("dept_check_strictly")).boolean().default(true))
+                .col(
+                    ColumnDef::new(Alias::new("menu_check_strictly"))
+                        .boolean()
+                        .default(true),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dept_check_strictly"))
+                        .boolean()
+                        .default(true),
+                )
                 .col(ColumnDef::new(Alias::new("status")).char().not_null())
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .col(ColumnDef::new(Alias::new("remark")).string_len(500).null())
                 .to_owned(),
@@ -256,26 +339,68 @@ async fn create_sys_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_menu"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("menu_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("menu_name")).string_len(50).not_null())
-                .col(ColumnDef::new(Alias::new("parent_id")).big_integer().default(0))
+                .col(
+                    ColumnDef::new(Alias::new("menu_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("menu_name"))
+                        .string_len(50)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("parent_id"))
+                        .big_integer()
+                        .default(0),
+                )
                 .col(ColumnDef::new(Alias::new("order_num")).integer().default(0))
-                .col(ColumnDef::new(Alias::new("path")).string_len(200).default(""))
-                .col(ColumnDef::new(Alias::new("component")).string_len(255).null())
+                .col(
+                    ColumnDef::new(Alias::new("path"))
+                        .string_len(200)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("component"))
+                        .string_len(255)
+                        .null(),
+                )
                 .col(ColumnDef::new(Alias::new("query")).string_len(255).null())
-                .col(ColumnDef::new(Alias::new("route_name")).string_len(50).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("route_name"))
+                        .string_len(50)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("is_frame")).char().default("1"))
                 .col(ColumnDef::new(Alias::new("is_cache")).char().default("0"))
                 .col(ColumnDef::new(Alias::new("menu_type")).char().default(""))
                 .col(ColumnDef::new(Alias::new("visible")).char().default("0"))
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
                 .col(ColumnDef::new(Alias::new("perms")).string_len(100).null())
-                .col(ColumnDef::new(Alias::new("icon")).string_len(100).default("#"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("icon"))
+                        .string_len(100)
+                        .default("#"),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("remark")).string_len(500).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("remark"))
+                        .string_len(500)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
                 .to_owned(),
         )
@@ -302,9 +427,21 @@ async fn create_sys_user_role(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
             Table::create()
                 .table(Alias::new("sys_user_role"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("user_id")).big_integer().not_null())
-                .col(ColumnDef::new(Alias::new("role_id")).big_integer().not_null())
-                .primary_key(Index::create().col(Alias::new("user_id")).col(Alias::new("role_id")))
+                .col(
+                    ColumnDef::new(Alias::new("user_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("role_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(Alias::new("user_id"))
+                        .col(Alias::new("role_id")),
+                )
                 .to_owned(),
         )
         .await?;
@@ -330,9 +467,21 @@ async fn create_sys_role_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
             Table::create()
                 .table(Alias::new("sys_role_menu"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("role_id")).big_integer().not_null())
-                .col(ColumnDef::new(Alias::new("menu_id")).big_integer().not_null())
-                .primary_key(Index::create().col(Alias::new("role_id")).col(Alias::new("menu_id")))
+                .col(
+                    ColumnDef::new(Alias::new("role_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("menu_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(Alias::new("role_id"))
+                        .col(Alias::new("menu_id")),
+                )
                 .to_owned(),
         )
         .await?;
@@ -358,13 +507,35 @@ async fn create_sys_dict_type(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
             Table::create()
                 .table(Alias::new("sys_dict_type"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("dict_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("dict_name")).string_len(100).default(""))
-                .col(ColumnDef::new(Alias::new("dict_type")).string_len(100).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("dict_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dict_name"))
+                        .string_len(100)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dict_type"))
+                        .string_len(100)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .col(ColumnDef::new(Alias::new("remark")).string_len(500).null())
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
@@ -394,18 +565,52 @@ async fn create_sys_dict_data(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
             Table::create()
                 .table(Alias::new("sys_dict_data"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("dict_code")).big_integer().not_null().auto_increment().primary_key())
+                .col(
+                    ColumnDef::new(Alias::new("dict_code"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
                 .col(ColumnDef::new(Alias::new("dict_sort")).integer().default(0))
-                .col(ColumnDef::new(Alias::new("dict_label")).string_len(100).default(""))
-                .col(ColumnDef::new(Alias::new("dict_value")).string_len(100).default(""))
-                .col(ColumnDef::new(Alias::new("dict_type")).string_len(100).default(""))
-                .col(ColumnDef::new(Alias::new("css_class")).string_len(100).null())
-                .col(ColumnDef::new(Alias::new("list_class")).string_len(100).null())
+                .col(
+                    ColumnDef::new(Alias::new("dict_label"))
+                        .string_len(100)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dict_value"))
+                        .string_len(100)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dict_type"))
+                        .string_len(100)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("css_class"))
+                        .string_len(100)
+                        .null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("list_class"))
+                        .string_len(100)
+                        .null(),
+                )
                 .col(ColumnDef::new(Alias::new("is_default")).char().default("N"))
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .col(ColumnDef::new(Alias::new("remark")).string_len(500).null())
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
@@ -434,23 +639,85 @@ async fn create_sys_oper_log(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_oper_log"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("oper_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("title")).string_len(50).default(""))
-                .col(ColumnDef::new(Alias::new("business_type")).integer().default(0))
-                .col(ColumnDef::new(Alias::new("method")).string_len(100).default(""))
-                .col(ColumnDef::new(Alias::new("request_method")).string_len(10).default(""))
-                .col(ColumnDef::new(Alias::new("operator_type")).integer().default(0))
-                .col(ColumnDef::new(Alias::new("oper_name")).string_len(50).default(""))
-                .col(ColumnDef::new(Alias::new("dept_name")).string_len(50).default(""))
-                .col(ColumnDef::new(Alias::new("oper_url")).string_len(255).default(""))
-                .col(ColumnDef::new(Alias::new("oper_ip")).string_len(128).default(""))
-                .col(ColumnDef::new(Alias::new("oper_location")).string_len(255).default(""))
-                .col(ColumnDef::new(Alias::new("oper_param")).string_len(2000).default(""))
-                .col(ColumnDef::new(Alias::new("json_result")).string_len(2000).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("oper_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("title"))
+                        .string_len(50)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("business_type"))
+                        .integer()
+                        .default(0),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("method"))
+                        .string_len(100)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("request_method"))
+                        .string_len(10)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("operator_type"))
+                        .integer()
+                        .default(0),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("oper_name"))
+                        .string_len(50)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dept_name"))
+                        .string_len(50)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("oper_url"))
+                        .string_len(255)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("oper_ip"))
+                        .string_len(128)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("oper_location"))
+                        .string_len(255)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("oper_param"))
+                        .string_len(2000)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("json_result"))
+                        .string_len(2000)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("error_msg")).string_len(2000).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("error_msg"))
+                        .string_len(2000)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("oper_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("cost_time")).big_integer().default(0))
+                .col(
+                    ColumnDef::new(Alias::new("cost_time"))
+                        .big_integer()
+                        .default(0),
+                )
                 .to_owned(),
         )
         .await?;
@@ -483,14 +750,40 @@ async fn create_sys_logininfor(manager: &SchemaManager<'_>) -> Result<(), DbErr>
             Table::create()
                 .table(Alias::new("sys_logininfor"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("info_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("user_name")).string_len(50).default(""))
-                .col(ColumnDef::new(Alias::new("ipaddr")).string_len(128).default(""))
-                .col(ColumnDef::new(Alias::new("login_location")).string_len(255).default(""))
-                .col(ColumnDef::new(Alias::new("browser")).string_len(50).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("info_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("user_name"))
+                        .string_len(50)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("ipaddr"))
+                        .string_len(128)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("login_location"))
+                        .string_len(255)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("browser"))
+                        .string_len(50)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("os")).string_len(50).default(""))
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("msg")).string_len(255).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("msg"))
+                        .string_len(255)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("login_time")).date_time().null())
                 .to_owned(),
         )
@@ -523,19 +816,59 @@ async fn create_sys_job(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_job"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("job_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("job_name")).string_len(64).not_null().default(""))
-                .col(ColumnDef::new(Alias::new("job_group")).string_len(64).not_null().default("DEFAULT"))
-                .col(ColumnDef::new(Alias::new("invoke_target")).string_len(500).not_null())
-                .col(ColumnDef::new(Alias::new("cron_expression")).string_len(255).default(""))
-                .col(ColumnDef::new(Alias::new("misfire_policy")).string_len(20).default("3"))
+                .col(
+                    ColumnDef::new(Alias::new("job_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("job_name"))
+                        .string_len(64)
+                        .not_null()
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("job_group"))
+                        .string_len(64)
+                        .not_null()
+                        .default("DEFAULT"),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("invoke_target"))
+                        .string_len(500)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("cron_expression"))
+                        .string_len(255)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("misfire_policy"))
+                        .string_len(20)
+                        .default("3"),
+                )
                 .col(ColumnDef::new(Alias::new("concurrent")).char().default("1"))
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("remark")).string_len(500).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("remark"))
+                        .string_len(500)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
                 .to_owned(),
         )
@@ -565,13 +898,39 @@ async fn create_sys_job_log(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_job_log"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("job_log_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("job_name")).string_len(64).not_null())
-                .col(ColumnDef::new(Alias::new("job_group")).string_len(64).not_null())
-                .col(ColumnDef::new(Alias::new("invoke_target")).string_len(500).not_null())
-                .col(ColumnDef::new(Alias::new("job_message")).string_len(500).null())
+                .col(
+                    ColumnDef::new(Alias::new("job_log_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("job_name"))
+                        .string_len(64)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("job_group"))
+                        .string_len(64)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("invoke_target"))
+                        .string_len(500)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("job_message"))
+                        .string_len(500)
+                        .null(),
+                )
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("exception_info")).string_len(2000).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("exception_info"))
+                        .string_len(2000)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
                 .to_owned(),
         )
@@ -604,19 +963,45 @@ async fn create_sys_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_dept"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("dept_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("parent_id")).big_integer().default(0))
-                .col(ColumnDef::new(Alias::new("ancestors")).string_len(50).default(""))
-                .col(ColumnDef::new(Alias::new("dept_name")).string_len(30).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("dept_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("parent_id"))
+                        .big_integer()
+                        .default(0),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("ancestors"))
+                        .string_len(50)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dept_name"))
+                        .string_len(30)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("order_num")).integer().default(0))
                 .col(ColumnDef::new(Alias::new("leader")).string_len(20).null())
                 .col(ColumnDef::new(Alias::new("phone")).string_len(11).null())
                 .col(ColumnDef::new(Alias::new("email")).string_len(50).null())
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .to_owned(),
         )
@@ -632,15 +1017,37 @@ async fn create_sys_post(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_post"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("post_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("post_code")).string_len(64).not_null())
-                .col(ColumnDef::new(Alias::new("post_name")).string_len(50).not_null())
+                .col(
+                    ColumnDef::new(Alias::new("post_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("post_code"))
+                        .string_len(64)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("post_name"))
+                        .string_len(50)
+                        .not_null(),
+                )
                 .col(ColumnDef::new(Alias::new("post_sort")).integer().not_null())
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
                 .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .col(ColumnDef::new(Alias::new("remark")).string_len(500).null())
                 .to_owned(),
@@ -670,9 +1077,21 @@ async fn create_sys_user_post(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
             Table::create()
                 .table(Alias::new("sys_user_post"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("user_id")).big_integer().not_null())
-                .col(ColumnDef::new(Alias::new("post_id")).big_integer().not_null())
-                .primary_key(Index::create().col(Alias::new("user_id")).col(Alias::new("post_id")))
+                .col(
+                    ColumnDef::new(Alias::new("user_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("post_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(Alias::new("user_id"))
+                        .col(Alias::new("post_id")),
+                )
                 .to_owned(),
         )
         .await?;
@@ -698,9 +1117,21 @@ async fn create_sys_role_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
             Table::create()
                 .table(Alias::new("sys_role_dept"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("role_id")).big_integer().not_null())
-                .col(ColumnDef::new(Alias::new("dept_id")).big_integer().not_null())
-                .primary_key(Index::create().col(Alias::new("role_id")).col(Alias::new("dept_id")))
+                .col(
+                    ColumnDef::new(Alias::new("role_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("dept_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(Alias::new("role_id"))
+                        .col(Alias::new("dept_id")),
+                )
                 .to_owned(),
         )
         .await?;
@@ -902,15 +1333,21 @@ async fn insert_sys_user_role(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
 /// 插入 sys_role_menu 初始数据（普通角色 role_id=2 关联全部菜单）
 async fn insert_sys_role_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let menu_ids = [
-        1, 2, 3, 4, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114,
-        115, 116, 117, 500, 501, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-        1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-        1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037,
-        1038, 1039, 1040, 1041, 1042, 1043, 1044, 1045, 1046, 1047, 1048, 1049, 1050, 1051,
-        1052, 1053, 1054, 1055, 1056, 1057, 1058, 1059, 1060,
+        1, 2, 3, 4, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+        116, 117, 500, 501, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
+        1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026,
+        1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037, 1038, 1039, 1040, 1041,
+        1042, 1043, 1044, 1045, 1046, 1047, 1048, 1049, 1050, 1051, 1052, 1053, 1054, 1055, 1056,
+        1057, 1058, 1059, 1060,
     ];
-    let values: Vec<String> = menu_ids.iter().map(|&mid| format!("(2, {})", mid)).collect();
-    let sql = format!("sys_role_menu (role_id, menu_id) VALUES {}", values.join(", "));
+    let values: Vec<String> = menu_ids
+        .iter()
+        .map(|&mid| format!("(2, {})", mid))
+        .collect();
+    let sql = format!(
+        "sys_role_menu (role_id, menu_id) VALUES {}",
+        values.join(", ")
+    );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
 }
@@ -1024,14 +1461,44 @@ async fn create_sys_config(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_config"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("config_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("config_name")).string_len(100).default(""))
-                .col(ColumnDef::new(Alias::new("config_key")).string_len(100).not_null())
-                .col(ColumnDef::new(Alias::new("config_value")).string_len(255).default(""))
-                .col(ColumnDef::new(Alias::new("config_type")).char().default("N"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("config_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("config_name"))
+                        .string_len(100)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("config_key"))
+                        .string_len(100)
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("config_value"))
+                        .string_len(255)
+                        .default(""),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("config_type"))
+                        .char()
+                        .default("N"),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .col(ColumnDef::new(Alias::new("remark")).string_len(500).null())
                 .to_owned(),
@@ -1078,14 +1545,32 @@ async fn create_sys_notice(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             Table::create()
                 .table(Alias::new("sys_notice"))
                 .if_not_exists()
-                .col(ColumnDef::new(Alias::new("notice_id")).big_integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new(Alias::new("notice_title")).string_len(50).not_null())
+                .col(
+                    ColumnDef::new(Alias::new("notice_id"))
+                        .big_integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("notice_title"))
+                        .string_len(50)
+                        .not_null(),
+                )
                 .col(ColumnDef::new(Alias::new("notice_type")).char().not_null())
                 .col(ColumnDef::new(Alias::new("notice_content")).text().null())
                 .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("create_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("create_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(ColumnDef::new(Alias::new("update_by")).string_len(64).default(""))
+                .col(
+                    ColumnDef::new(Alias::new("update_by"))
+                        .string_len(64)
+                        .default(""),
+                )
                 .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
                 .col(ColumnDef::new(Alias::new("remark")).string_len(255).null())
                 .to_owned(),

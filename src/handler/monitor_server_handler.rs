@@ -261,10 +261,7 @@ fn build_jvm_info(sys: &System) -> JvmInfo {
     };
 
     // 启动时间与运行时长
-    let start_time_epoch = sys
-        .process(pid)
-        .map(|p| p.start_time())
-        .unwrap_or(0);
+    let start_time_epoch = sys.process(pid).map(|p| p.start_time()).unwrap_or(0);
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

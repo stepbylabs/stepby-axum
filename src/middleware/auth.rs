@@ -1,17 +1,17 @@
 // axum-backend/src/middleware/auth.rs
 
-use std::sync::Arc;
-use std::time::Duration;
-use axum::extract::{FromRequestParts, Request, State};
-use axum::http::header::AUTHORIZATION;
-use axum::http::HeaderMap;
-use axum::http::request::Parts;
-use axum::middleware::Next;
-use axum::response::Response;
 use crate::common::AppError;
 use crate::jwt::{Claims, JwtUtils};
 use crate::middleware::request_id::RequestId;
 use crate::state::AppState;
+use axum::extract::{FromRequestParts, Request, State};
+use axum::http::HeaderMap;
+use axum::http::header::AUTHORIZATION;
+use axum::http::request::Parts;
+use axum::middleware::Next;
+use axum::response::Response;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// JWT 鉴权中间件（from_fn_with_state 模式，纯 Axum 原生 Tower Layer）
 ///
@@ -24,14 +24,6 @@ use crate::state::AppState;
 ///
 /// 白名单通过路由结构实现：公开路由（/health, /login, /captchaImage）不挂载此中间件，
 /// 受保护路由通过 .layer(from_fn_with_state(state, auth_middleware)) 挂载。
-
-/// 从请求头提取 Bearer token（纯函数，便于脱离 AppState 单测）
-///
-/// 安全关键决策点（P0 鉴权第一/二关）：
-/// - 缺失 Authorization header → 401（token_missing）
-/// - 非 `Bearer ` 前缀格式 → 401（token_invalid）
-///
-/// 抽成纯函数后，中间件与单元测试均可复用，且不依赖 Redis / DB 即可验证「无 token 拒绝」。
 pub fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
     let auth_header = headers
         .get(&AUTHORIZATION)
@@ -75,8 +67,10 @@ pub async fn auth_middleware(
     let (is_blacklisted, pwd_changed): (Option<String>, Option<i64>) = tokio::time::timeout(
         Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
         redis::pipe()
-            .cmd("GET").arg(&blacklist_key)
-            .cmd("GET").arg(&pwd_changed_key)
+            .cmd("GET")
+            .arg(&blacklist_key)
+            .cmd("GET")
+            .arg(&pwd_changed_key)
             .query_async(&mut redis),
     )
     .await
@@ -98,14 +92,18 @@ pub async fn auth_middleware(
         AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
     })?;
     if is_blacklisted.is_some() {
-        return Err(AppError::unauthorized(&crate::tr!("error.auth.token_revoked")));
+        return Err(AppError::unauthorized(&crate::tr!(
+            "error.auth.token_revoked"
+        )));
     }
 
     // 改密后旧 token 失效校验（P0-R81-007）
     if let Some(changed_at) = pwd_changed
         && changed_at > i64::try_from(claims.iat).unwrap_or(0)
     {
-        return Err(AppError::unauthorized(&crate::tr!("error.auth.password_changed")));
+        return Err(AppError::unauthorized(&crate::tr!(
+            "error.auth.password_changed"
+        )));
     }
 
     // 6. 注入 Claims 到 request extensions，供下游 handler/中间件使用
@@ -175,10 +173,7 @@ mod tests {
             HeaderValue::from_static("Basic abcdef123456"),
         );
         let err = extract_bearer_token(&headers).unwrap_err();
-        assert_eq!(
-            err.code, 401,
-            "非 Bearer 前缀必须返回 401（token_invalid）"
-        );
+        assert_eq!(err.code, 401, "非 Bearer 前缀必须返回 401（token_invalid）");
     }
 
     #[test]

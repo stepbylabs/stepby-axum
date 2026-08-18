@@ -38,14 +38,26 @@ fn is_hashed_static_asset(uri: &Uri) -> bool {
     // 匹配 [8位以上hash].js 或 [8位以上hash].css（vite 构建产物格式）
     // 例：/static/js/index-C4xhYXkT.js、/static/css/index-abc123.css
     if let Some(name) = path.rsplit('/').next()
-        && (name.ends_with(".js") || name.ends_with(".css") || name.ends_with(".woff2") || name.ends_with(".woff") || name.ends_with(".ttf"))
+        && (name.ends_with(".js")
+            || name.ends_with(".css")
+            || name.ends_with(".woff2")
+            || name.ends_with(".woff")
+            || name.ends_with(".ttf"))
     {
         // 验证文件名包含 hash 段（中划线 + 8 位以上字母数字）
-        let has_hash = name.split('-').next_back().map(|s| {
-            s.trim_end_matches(".js").trim_end_matches(".css")
-                .trim_end_matches(".woff2").trim_end_matches(".woff").trim_end_matches(".ttf")
-                .len() >= 6
-        }).unwrap_or(false);
+        let has_hash = name
+            .split('-')
+            .next_back()
+            .map(|s| {
+                s.trim_end_matches(".js")
+                    .trim_end_matches(".css")
+                    .trim_end_matches(".woff2")
+                    .trim_end_matches(".woff")
+                    .trim_end_matches(".ttf")
+                    .len()
+                    >= 6
+            })
+            .unwrap_or(false);
         return has_hash;
     }
     false
@@ -83,11 +95,7 @@ pub async fn security_headers(
         "referrer-policy",
         "strict-origin-when-cross-origin",
     );
-    insert_if_absent(
-        headers,
-        "x-permitted-cross-domain-policies",
-        "none",
-    );
+    insert_if_absent(headers, "x-permitted-cross-domain-policies", "none");
     // REGRESS-005：补全 HSTS / CSP / Cache-Control
     // HSTS：max-age=31536000（1年）+ includeSubDomains
     // 开发环境 HTTP 下浏览器自动忽略此头，生产环境 HTTPS 下强制加密连接
@@ -125,9 +133,17 @@ pub async fn security_headers(
     // - 带 hash 的静态资源（/static/js/xxx-[hash].js）：长期缓存（1年 immutable），因 hash 变化即新文件
     // - API 响应、HTML、uploads：禁止缓存，防止敏感数据（token/用户信息）通过缓存泄漏
     if is_static {
-        insert_if_absent(headers, "cache-control", "public, max-age=31536000, immutable");
+        insert_if_absent(
+            headers,
+            "cache-control",
+            "public, max-age=31536000, immutable",
+        );
     } else {
-        insert_if_absent(headers, "cache-control", "no-store, no-cache, must-revalidate, private");
+        insert_if_absent(
+            headers,
+            "cache-control",
+            "no-store, no-cache, must-revalidate, private",
+        );
     }
     // Permissions-Policy：禁用浏览器敏感能力（摄像头/麦克风/地理位置/支付），
     // 防止恶意脚本或第三方嵌入内容调用这些 API（P0-7 改进）
@@ -153,10 +169,10 @@ fn insert_if_absent(headers: &mut HeaderMap<HeaderValue>, name: &'static str, va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
 
     fn test_router() -> Router {
@@ -174,17 +190,27 @@ mod tests {
     async fn test_swagger_path_uses_sameorigin() {
         let app = test_router();
         let res = app
-            .oneshot(Request::builder().uri("/swagger-ui").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/swagger-ui")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(
-            res.headers().get("x-frame-options").unwrap(),
-            "SAMEORIGIN"
-        );
+        assert_eq!(res.headers().get("x-frame-options").unwrap(), "SAMEORIGIN");
         // CSP 应使用严格同源策略（本地自托管资源，不再需要 unpkg.com 白名单）
-        let csp = res.headers().get("content-security-policy").unwrap().to_str().unwrap();
-        assert!(!csp.contains("unpkg.com"), "CSP should not allow unpkg.com (resources are self-hosted)");
+        let csp = res
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !csp.contains("unpkg.com"),
+            "CSP should not allow unpkg.com (resources are self-hosted)"
+        );
         assert!(csp.contains("'self'"), "CSP should allow self for swagger");
     }
 
@@ -192,7 +218,12 @@ mod tests {
     async fn test_swagger_index_path_uses_sameorigin() {
         let app = test_router();
         let res = app
-            .oneshot(Request::builder().uri("/swagger-ui/index.html").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/swagger-ui/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.headers().get("x-frame-options").unwrap(), "SAMEORIGIN");
@@ -207,8 +238,16 @@ mod tests {
             .unwrap();
         assert_eq!(res.headers().get("x-frame-options").unwrap(), "DENY");
         // CSP 不应包含 unpkg.com
-        let csp = res.headers().get("content-security-policy").unwrap().to_str().unwrap();
-        assert!(!csp.contains("unpkg.com"), "CSP should not allow unpkg.com for non-swagger paths");
+        let csp = res
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !csp.contains("unpkg.com"),
+            "CSP should not allow unpkg.com for non-swagger paths"
+        );
     }
 
     #[test]

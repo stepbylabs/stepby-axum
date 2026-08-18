@@ -1,12 +1,12 @@
 // axum-backend/src/router/public.rs
 
-use std::sync::Arc;
-use axum::Router;
-use axum::routing::get;
 use crate::handler;
 use crate::handler::ws_handler;
 use crate::router::auth_router;
 use crate::state::AppState;
+use axum::Router;
+use axum::routing::get;
+use std::sync::Arc;
 
 /// 构建公开路由（免鉴权）
 /// 含：/health、/metrics、/captchaImage、/login、/ws（WebSocket，query 参数鉴权）

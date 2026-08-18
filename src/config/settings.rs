@@ -1,7 +1,7 @@
 // axum-backend/src/config/settings.rs
 
-use std::fmt;
 use serde::Deserialize;
+use std::fmt;
 
 /// 全局配置根结构体
 ///
@@ -53,7 +53,10 @@ impl fmt::Debug for Settings {
             .field("ip_location", &self.ip_location)
             .field("mail", &self.mail)
             .field("config_enc_key", &"<redacted>")
-            .field("permission_deny_by_default", &self.permission_deny_by_default)
+            .field(
+                "permission_deny_by_default",
+                &self.permission_deny_by_default,
+            )
             .finish()
     }
 }
@@ -196,6 +199,17 @@ pub struct UploadConfig {
     /// 通用上传最大字节数
     #[serde(default = "default_common_max_size")]
     pub common_max_size: usize,
+    /// 存储后端类型（`local` 或 `s3`），默认 local（F1）
+    ///
+    /// - `local`：本地文件系统（现有默认行为，配合 `/uploads/*` 静态托管）
+    /// - `s3`：S3 兼容对象存储（MinIO / AWS S3 / 阿里云 OSS / 腾讯 COS），
+    ///   文件保存到 `s3.bucket` 的 `uploads/...` 前缀下，并通过 `s3.public_endpoint`
+    ///   生成可访问 URL（前端无需任何改动）
+    #[serde(default = "default_upload_backend")]
+    pub backend: String,
+    /// S3 兼容对象存储配置（backend=s3 时使用）
+    #[serde(default)]
+    pub s3: S3StorageConfig,
 }
 
 impl Default for UploadConfig {
@@ -209,12 +223,87 @@ impl Default for UploadConfig {
             common_url_prefix: default_common_url_prefix(),
             common_allowed_exts: default_common_allowed_exts(),
             common_max_size: default_common_max_size(),
+            backend: default_upload_backend(),
+            s3: S3StorageConfig::default(),
         }
     }
 }
 
 fn default_avatar_dir() -> String {
     "uploads/avatar".to_string()
+}
+
+/// S3 兼容对象存储配置（F1）
+///
+/// 支持 MinIO / AWS S3 / 阿里云 OSS / 腾讯 COS 等一切 S3 兼容端点。
+/// 存储时对象 key 使用 `uploads/{dir}/{uuid}.{ext}` 前缀，路径风格（path-style）统一，
+/// 便于从 `public_endpoint` 直接返回可访问 URL。
+#[derive(Clone, Deserialize)]
+pub struct S3StorageConfig {
+    /// 访问密钥 ID（AK）
+    #[serde(default)]
+    pub access_key: String,
+    /// 访问密钥 Secret（SK，生产环境建议通过 S3_SECRET_KEY 环境变量注入）
+    #[serde(default)]
+    pub secret_key: String,
+    /// S3 端点（如 `https://minio.example.com:9000` 或 `https://s3.cn-north-1.amazonaws.com.cn`）
+    #[serde(default)]
+    pub endpoint: String,
+    /// 区域（如 `us-east-1`、`cn-north-1`）
+    #[serde(default = "default_s3_region")]
+    pub region: String,
+    /// 桶名（Bucket）
+    #[serde(default)]
+    pub bucket: String,
+    /// 是否使用路径风格寻址（MinIO / 阿里云 OSS / 腾讯 COS 均为 true；
+    /// 默认 true。AWS S3 虚拟主机风格请保持 true 并将 endpoint 设为 `https://s3.{region}.amazonaws.com`）
+    #[serde(default = "default_s3_path_style")]
+    pub path_style: bool,
+    /// 对象访问公开 URL 前缀（用于前端拼接访问地址，如 `https://cdn.example.com`）。
+    /// 为空时回退使用 `endpoint`。
+    #[serde(default)]
+    pub public_endpoint: String,
+}
+
+/// 手动实现 Debug 以脱敏 secret_key
+impl fmt::Debug for S3StorageConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3StorageConfig")
+            .field("access_key", &self.access_key)
+            .field("secret_key", &"<redacted>")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("path_style", &self.path_style)
+            .field("public_endpoint", &self.public_endpoint)
+            .finish()
+    }
+}
+
+impl Default for S3StorageConfig {
+    fn default() -> Self {
+        Self {
+            access_key: String::new(),
+            secret_key: String::new(),
+            endpoint: String::new(),
+            region: default_s3_region(),
+            bucket: String::new(),
+            path_style: default_s3_path_style(),
+            public_endpoint: String::new(),
+        }
+    }
+}
+
+fn default_upload_backend() -> String {
+    "local".to_string()
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".to_string()
+}
+
+fn default_s3_path_style() -> bool {
+    true
 }
 
 /// 日志文件输出目录默认值（P0-67 未修复项）
@@ -227,7 +316,12 @@ fn default_avatar_url_prefix() -> String {
 }
 
 fn default_avatar_allowed_exts() -> Vec<String> {
-    vec!["jpg".to_string(), "jpeg".to_string(), "png".to_string(), "gif".to_string()]
+    vec![
+        "jpg".to_string(),
+        "jpeg".to_string(),
+        "png".to_string(),
+        "gif".to_string(),
+    ]
 }
 
 fn default_avatar_max_size() -> usize {
@@ -411,11 +505,7 @@ impl Settings {
                     settings.apply_env_overrides();
                     settings.validate_secrets()?;
                     if idx != 0 {
-                        tracing::warn!(
-                            "配置文件 {} 不存在，已回退使用 {}",
-                            path,
-                            cand
-                        );
+                        tracing::warn!("配置文件 {} 不存在，已回退使用 {}", path, cand);
                     }
                     return Ok(settings);
                 }
@@ -494,6 +584,29 @@ impl Settings {
         if let Ok(v) = std::env::var("PERMISSION_DENY_BY_DEFAULT") {
             self.permission_deny_by_default = v == "true" || v == "1";
         }
+        // 存储后端类型（F1）：UPLOAD_BACKEND=local|s3
+        if let Ok(v) = std::env::var("UPLOAD_BACKEND") {
+            self.upload.backend = v;
+        }
+        // S3 兼容对象存储敏感字段通过环境变量注入（避免明文写入配置文件）
+        if let Ok(v) = std::env::var("S3_ACCESS_KEY") {
+            self.upload.s3.access_key = v;
+        }
+        if let Ok(v) = std::env::var("S3_SECRET_KEY") {
+            self.upload.s3.secret_key = v;
+        }
+        if let Ok(v) = std::env::var("S3_ENDPOINT") {
+            self.upload.s3.endpoint = v;
+        }
+        if let Ok(v) = std::env::var("S3_REGION") {
+            self.upload.s3.region = v;
+        }
+        if let Ok(v) = std::env::var("S3_BUCKET") {
+            self.upload.s3.bucket = v;
+        }
+        if let Ok(v) = std::env::var("S3_PUBLIC_ENDPOINT") {
+            self.upload.s3.public_endpoint = v;
+        }
     }
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
@@ -503,10 +616,11 @@ impl Settings {
     ///                MAIL_PASSWORD、CONFIG_ENC_KEY、RUST_LOG（默认 info）
     /// 其余字段使用与结构体一致的内置默认值。
     fn from_env_only() -> anyhow::Result<Self> {
-        let database_url = std::env::var("DATABASE_URL")
-            .map_err(|_| anyhow::anyhow!("环境变量 DATABASE_URL 未设置（容器部署需通过 -e/compose 注入）"))?;
-        let redis_url = std::env::var("REDIS_URL")
-            .map_err(|_| anyhow::anyhow!("环境变量 REDIS_URL 未设置"))?;
+        let database_url = std::env::var("DATABASE_URL").map_err(|_| {
+            anyhow::anyhow!("环境变量 DATABASE_URL 未设置（容器部署需通过 -e/compose 注入）")
+        })?;
+        let redis_url =
+            std::env::var("REDIS_URL").map_err(|_| anyhow::anyhow!("环境变量 REDIS_URL 未设置"))?;
         let jwt_secret = std::env::var("JWT_SECRET")
             .map_err(|_| anyhow::anyhow!("环境变量 JWT_SECRET 未设置"))?;
         let server_host = std::env::var("SERVER_HOST")
@@ -633,7 +747,9 @@ mod tests {
                 max_lifetime_secs: 1800,
                 acquire_timeout_secs: 10,
             },
-            redis: RedisConfig { url: "redis://localhost:6379".to_string() },
+            redis: RedisConfig {
+                url: "redis://localhost:6379".to_string(),
+            },
             jwt: JwtConfig {
                 secret: "placeholder-strong-secret-0123456789abcdef".to_string(),
                 expire_hours: 24,
@@ -708,11 +824,26 @@ mod tests {
         let debug_str = format!("{:?}", settings);
 
         // 敏感字段不应出现在 Debug 输出中
-        assert!(!debug_str.contains("supersecret"), "database URL password leaked");
-        assert!(!debug_str.contains("redispass"), "Redis URL password leaked");
-        assert!(!debug_str.contains("a-very-long-jwt-secret"), "JWT secret leaked");
-        assert!(!debug_str.contains("smtp_password_123"), "Mail password leaked");
-        assert!(!debug_str.contains("encryption-key-should-not-leak"), "config_enc_key leaked");
+        assert!(
+            !debug_str.contains("supersecret"),
+            "database URL password leaked"
+        );
+        assert!(
+            !debug_str.contains("redispass"),
+            "Redis URL password leaked"
+        );
+        assert!(
+            !debug_str.contains("a-very-long-jwt-secret"),
+            "JWT secret leaked"
+        );
+        assert!(
+            !debug_str.contains("smtp_password_123"),
+            "Mail password leaked"
+        );
+        assert!(
+            !debug_str.contains("encryption-key-should-not-leak"),
+            "config_enc_key leaked"
+        );
 
         // 脱敏标记应存在
         assert!(debug_str.contains("<redacted>"), "Redacted marker missing");
@@ -731,7 +862,10 @@ mod tests {
             acquire_timeout_secs: 10,
         };
         let debug_str = format!("{:?}", db_config);
-        assert!(!debug_str.contains("password123"), "Database URL password leaked in Debug");
+        assert!(
+            !debug_str.contains("password123"),
+            "Database URL password leaked in Debug"
+        );
         assert!(debug_str.contains("<redacted>"));
     }
 
@@ -745,7 +879,10 @@ mod tests {
             audience: "yebot".to_string(),
         };
         let debug_str = format!("{:?}", jwt_config);
-        assert!(!debug_str.contains("my-super-secret-jwt-key"), "JWT secret leaked in Debug");
+        assert!(
+            !debug_str.contains("my-super-secret-jwt-key"),
+            "JWT secret leaked in Debug"
+        );
         assert!(debug_str.contains("<redacted>"));
     }
 
@@ -763,7 +900,10 @@ mod tests {
             starttls: false,
         };
         let debug_str = format!("{:?}", mail_config);
-        assert!(!debug_str.contains("qq_auth_code_secret"), "Mail password leaked in Debug");
+        assert!(
+            !debug_str.contains("qq_auth_code_secret"),
+            "Mail password leaked in Debug"
+        );
         assert!(debug_str.contains("<redacted>"));
     }
 
@@ -774,7 +914,10 @@ mod tests {
             url: "redis://:mypassword@localhost:6379/0".to_string(),
         };
         let debug_str = format!("{:?}", redis_config);
-        assert!(!debug_str.contains("mypassword"), "Redis URL password leaked in Debug");
+        assert!(
+            !debug_str.contains("mypassword"),
+            "Redis URL password leaked in Debug"
+        );
         assert!(debug_str.contains("<redacted>"));
     }
 

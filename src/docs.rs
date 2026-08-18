@@ -8,7 +8,7 @@
 //! - OpenAPI JSON: `/api-docs/openapi.json`
 //! - Swagger UI 静态资源: `/swagger-ui-static/*`（本地自托管，无 CDN 依赖）
 
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
 use std::sync::OnceLock;
@@ -44,6 +44,8 @@ struct SwaggerAssets;
         crate::handler::sys_user_handler::add,
         crate::handler::sys_user_handler::edit,
         crate::handler::sys_user_handler::remove,
+        crate::handler::sys_user_handler::import_template,
+        crate::handler::sys_user_handler::import_data,
         // ==================== 角色管理 ====================
         crate::handler::sys_role_handler::list,
         crate::handler::sys_role_handler::get_info_by_id,
@@ -136,6 +138,8 @@ struct SwaggerAssets;
         crate::handler::sys_oper_log_handler::clean,
         crate::handler::sys_oper_log_handler::export,
         crate::handler::sys_oper_log_handler::stats,
+        crate::handler::sys_oper_log_handler::stats_by_type,
+        crate::handler::sys_oper_log_handler::alarm_status,
         crate::handler::sys_oper_log_handler::compliance_report,
         // ==================== 缓存监控 ====================
         crate::handler::monitor_cache_handler::get_cache,
@@ -285,7 +289,8 @@ pub struct ApiDoc;
 /// 生成完整的 OpenAPI 3.0 规范，开销较大（~10ms）。使用 OnceLock 缓存避免重复计算。
 static OPENAPI_JSON_CACHE: OnceLock<String> = OnceLock::new();
 /// OpenAPI 序列化失败标记（P2：失败不缓存，避免持续返回 500 内容；下次请求重试）
-static OPENAPI_SERIALIZE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static OPENAPI_SERIALIZE_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// GET /api-docs/openapi.json
 /// 返回 OpenAPI 3.0 JSON 规范
@@ -298,21 +303,29 @@ pub async fn openapi_json() -> impl IntoResponse {
     // P2 修复：序列化失败时置失败标记且不缓存结果；已缓存过则直接复用，
     // 失败路径下次请求重试（OnceLock 无法回滚，用 AtomicBool 标记 + 请求级兜底）
     if !OPENAPI_SERIALIZE_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
-        let json = OPENAPI_JSON_CACHE.get_or_init(|| {
-            match serde_json::to_string(&ApiDoc::openapi()) {
+        let json =
+            OPENAPI_JSON_CACHE.get_or_init(|| match serde_json::to_string(&ApiDoc::openapi()) {
                 Ok(json) => json,
                 Err(e) => {
-                    tracing::error!("OpenAPI 序列化失败（不缓存错误结果，后续请求将重试）: {}", e);
+                    tracing::error!(
+                        "OpenAPI 序列化失败（不缓存错误结果，后续请求将重试）: {}",
+                        e
+                    );
                     OPENAPI_SERIALIZE_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
                     "{\"error\":\"Failed to serialize OpenAPI\"}".to_string()
                 }
-            }
-        });
+            });
         // 克隆 String 转为 Vec<u8> 以构建响应（OnceLock 持有引用，需克隆数据）
         return (
             [
-                (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
-                (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                ),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS),
+                ),
             ],
             json.clone(),
         );
@@ -321,8 +334,14 @@ pub async fn openapi_json() -> impl IntoResponse {
     match serde_json::to_string(&ApiDoc::openapi()) {
         Ok(json) => (
             [
-                (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
-                (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                ),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS),
+                ),
             ],
             json,
         ),
@@ -330,8 +349,14 @@ pub async fn openapi_json() -> impl IntoResponse {
             tracing::error!("OpenAPI 序列化重试失败: {}", e);
             (
                 [
-                    (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
-                    (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS)),
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    ),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static(crate::common::constants::CACHE_SWAGGER_SECS),
+                    ),
                 ],
                 "{\"error\":\"Failed to serialize OpenAPI\"}".to_string(),
             )
@@ -349,7 +374,9 @@ pub async fn swagger_ui() -> Html<&'static str> {
 /// 服务 Swagger UI 静态资源（CSS/JS），从 rust-embed 嵌入资源读取
 ///
 /// 路径参数 `filename` 应为 `swagger-ui.css`、`swagger-ui-bundle.js` 等
-pub async fn swagger_assets(axum::extract::Path(filename): axum::extract::Path<String>) -> Response {
+pub async fn swagger_assets(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Response {
     // 安全校验：拒绝路径穿越攻击（如 ../../../etc/passwd）
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return (StatusCode::BAD_REQUEST, "Invalid filename").into_response();
@@ -364,9 +391,16 @@ pub async fn swagger_assets(axum::extract::Path(filename): axum::extract::Path<S
             (
                 StatusCode::OK,
                 [
-                    (header::CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static("application/octet-stream"))),
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_str(&mime)
+                            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+                    ),
                     // 静态资源 immutable 缓存（文件名含版本号，更新时路径变化）
-                    (header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_IMMUTABLE_SECS)),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static(crate::common::constants::CACHE_IMMUTABLE_SECS),
+                    ),
                 ],
                 file.data,
             )

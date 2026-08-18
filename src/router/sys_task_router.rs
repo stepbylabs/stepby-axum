@@ -3,9 +3,9 @@
 //! 路由结构：
 //! - /system/task/* — 任务进度（3 个接口）
 
-use std::sync::Arc;
 use axum::Router;
 use axum::routing::get;
+use std::sync::Arc;
 
 use crate::handler::sys_task_handler;
 use crate::state::AppState;
@@ -14,5 +14,8 @@ use crate::state::AppState;
 pub fn task_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/system/task/list", get(sys_task_handler::list))
-        .route("/system/task/{taskId}", get(sys_task_handler::get_info).delete(sys_task_handler::remove))
+        .route(
+            "/system/task/{taskId}",
+            get(sys_task_handler::get_info).delete(sys_task_handler::remove),
+        )
 }

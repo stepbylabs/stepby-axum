@@ -25,19 +25,13 @@ impl MigrationTrait for Migration {
         // 删除 sys_role_menu 中 menu_id=2011/2012 的关联
         for menu_id in [2011, 2012] {
             let sql = format!("DELETE FROM sys_role_menu WHERE menu_id = {}", menu_id);
-            manager
-                .get_connection()
-                .execute_unprepared(&sql)
-                .await?;
+            manager.get_connection().execute_unprepared(&sql).await?;
         }
 
         // 删除 sys_menu 中 menu_id=2011/2012 的记录
         for menu_id in [2011, 2012] {
             let sql = format!("DELETE FROM sys_menu WHERE menu_id = {}", menu_id);
-            manager
-                .get_connection()
-                .execute_unprepared(&sql)
-                .await?;
+            manager.get_connection().execute_unprepared(&sql).await?;
         }
 
         Ok(())

@@ -69,8 +69,9 @@ pub fn parse_local_date_to_utc_naive(s: &str) -> Option<NaiveDateTime> {
 ///
 /// 各 Service 的私有 `parse_time` 应统一委托本函数，消除重复样板（见 P2 收敛）。
 pub fn parse_query_date(s: &str) -> Result<NaiveDateTime, ServiceError> {
-    parse_local_date_to_utc_naive(s)
-        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s)))
+    parse_local_date_to_utc_naive(s).ok_or_else(|| {
+        ServiceError::bad_request(&crate::tr!("error.common.time_format_invalid", s = s))
+    })
 }
 
 /// 序列化 NaiveDateTime 为 RFC3339 `2026-01-01T00:00:00Z`（UTC 语义，补 Z 使所有 JSON 消费者按 UTC 解析）

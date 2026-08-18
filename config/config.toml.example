@@ -60,6 +60,9 @@ level = "info"
 sql_logging = false
 
 [upload]
+# 存储后端类型（F1）：local（本地文件系统，默认） | s3（S3 兼容对象存储 MinIO/AWS/OSS/COS）
+# 切换 s3 后，前端无需改动，URL 由后端返回对象存储公开地址
+backend = "local"
 # 头像存储目录（相对路径）
 avatar_dir = "uploads/avatar"
 # 头像访问 URL 前缀
@@ -76,6 +79,19 @@ common_url_prefix = "/uploads/file"
 common_allowed_exts = ["jpg", "jpeg", "png", "gif", "pdf", "doc", "docx", "xls", "xlsx", "txt", "zip"]
 # 通用上传最大字节数（默认 10MB）
 common_max_size = 10485760
+
+# S3 兼容对象存储配置（backend = "s3" 时使用；敏感字段支持环境变量注入）
+# access_key / secret_key 可通过 `--env UPLOAD__S3__ACCESS_KEY=...` 或环境变量注入，避免入库配置文件
+[upload.s3]
+access_key = "minioadmin"
+secret_key = "minioadmin"
+endpoint = "http://127.0.0.1:9000"
+region = "us-east-1"
+bucket = "yebot"
+# 是否路径风格寻址（MinIO / 自建对象存储必须 true；AWS S3 可 false）
+path_style = true
+# 对外公开访问 URL 前缀（可为 CDN/网关，缺省回退 endpoint；留空则自动使用 endpoint）
+public_endpoint = "http://127.0.0.1:9000"
 
 [ip_location]
 # MaxMindDB 离线数据库文件路径（相对路径）

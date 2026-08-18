@@ -13,18 +13,20 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
-use sea_orm::{DatabaseConnection, ConnectionTrait, Set, TransactionTrait};
-use sea_orm::sea_query::{Alias, ColumnDef, Index, Table, TableCreateStatement};
 use futures::future::FutureExt;
+use garde::Validate;
+use sea_orm::sea_query::{Alias, ColumnDef, Index, Table, TableCreateStatement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use tera::{Kwargs, State, Tera, TeraResult, Value};
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::gen_table::{ActiveModel as GenTableActiveModel, Model as GenTableModel};
-use crate::entity::gen_table_column::{ActiveModel as GenTableColumnActiveModel, Model as GenTableColumnModel};
+use crate::entity::gen_table_column::{
+    ActiveModel as GenTableColumnActiveModel, Model as GenTableColumnModel,
+};
 use crate::repository::gen_table::{DbColumnInfo, GenTableRepository};
 
 // ==================== DTO ====================
@@ -319,7 +321,11 @@ fn column_type_to_rust_type(column_type: &str) -> String {
         "f64".to_string()
     } else if ct.contains("BOOL") {
         "bool".to_string()
-    } else if ct.contains("DATE") || ct.contains("TIME") || ct.contains("DATETIME") || ct.contains("TIMESTAMP") {
+    } else if ct.contains("DATE")
+        || ct.contains("TIME")
+        || ct.contains("DATETIME")
+        || ct.contains("TIMESTAMP")
+    {
         "Option<chrono::NaiveDateTime>".to_string()
     } else {
         // 默认 String 类型（VARCHAR/TEXT/CHAR 等）
@@ -330,7 +336,10 @@ fn column_type_to_rust_type(column_type: &str) -> String {
 /// 将数据库列名（snake_case）转换为 Rust 字段名（保持 snake_case）
 /// 若列名是数据库关键字则添加 raw_ 前缀
 fn column_name_to_rust_field(column_name: &str) -> String {
-    let reserved = ["type", "ref", "match", "mod", "move", "as", "fn", "if", "in", "let", "pub", "use", "where", "self", "super", "crate", "extern"];
+    let reserved = [
+        "type", "ref", "match", "mod", "move", "as", "fn", "if", "in", "let", "pub", "use",
+        "where", "self", "super", "crate", "extern",
+    ];
     let name = column_name.to_lowercase();
     if reserved.contains(&name.as_str()) {
         format!("raw_{}", name)
@@ -364,7 +373,12 @@ fn validate_identifier(name: &str, field_name: &str) -> Result<(), ServiceError>
             field = field_name
         )));
     }
-    if !name.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+    if !name
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphabetic() || c == '_')
+        .unwrap_or(false)
+    {
         return Err(ServiceError::bad_request(&crate::tr!(
             "error.gen.field_start_invalid",
             field = field_name
@@ -450,15 +464,24 @@ fn apply_default_value(
     default: &str,
 ) -> Result<(), ServiceError> {
     match data_type {
-        ColumnDataType::Int | ColumnDataType::Bigint | ColumnDataType::Smallint | ColumnDataType::Tinyint => {
+        ColumnDataType::Int
+        | ColumnDataType::Bigint
+        | ColumnDataType::Smallint
+        | ColumnDataType::Tinyint => {
             default.parse::<i64>().map_err(|_| {
-                ServiceError::bad_request(&format!("{}: {default}", crate::tr!("error.gen.int_default")))
+                ServiceError::bad_request(&format!(
+                    "{}: {default}",
+                    crate::tr!("error.gen.int_default")
+                ))
             })?;
             col_def.default(default.to_string());
         }
         ColumnDataType::Decimal | ColumnDataType::Double => {
             default.parse::<f64>().map_err(|_| {
-                ServiceError::bad_request(&format!("{}: {default}", crate::tr!("error.gen.decimal_default")))
+                ServiceError::bad_request(&format!(
+                    "{}: {default}",
+                    crate::tr!("error.gen.decimal_default")
+                ))
             })?;
             col_def.default(default.to_string());
         }
@@ -562,7 +585,12 @@ impl GenTableService {
         let limit = page.limit();
         let (rows, total) = self
             .repo
-            .find_db_tables(offset, limit, query.table_name.as_deref(), query.table_comment.as_deref())
+            .find_db_tables(
+                offset,
+                limit,
+                query.table_name.as_deref(),
+                query.table_comment.as_deref(),
+            )
             .await?;
         Ok((rows, total))
     }
@@ -614,7 +642,10 @@ impl GenTableService {
         }
 
         // 3. 读取表注释（仅需 1 条匹配）
-        let db_tables = self.repo.find_db_tables(0, 1, Some(table_name), None).await?;
+        let db_tables = self
+            .repo
+            .find_db_tables(0, 1, Some(table_name), None)
+            .await?;
         let table_comment = db_tables
             .0
             .iter()
@@ -627,7 +658,11 @@ impl GenTableService {
         let now = crate::common::datetime::now_naive();
         let table_am = GenTableActiveModel {
             table_name: Set(table_name.to_string()),
-            table_comment: Set(if table_comment.is_empty() { None } else { Some(table_comment) }),
+            table_comment: Set(if table_comment.is_empty() {
+                None
+            } else {
+                Some(table_comment)
+            }),
             class_name: Set(Some(class_name.clone())),
             tpl_category: Set(Some("crud".to_string())),
             tpl_web_type: Set(Some("element-plus".to_string())),
@@ -660,8 +695,16 @@ impl GenTableService {
                     let rust_type = column_type_to_rust_type(&col.column_type);
                     let rust_field = column_name_to_rust_field(&col.column_name);
                     let is_pk = if col.column_key == "PRI" { "1" } else { "0" };
-                    let is_increment = if col.extra.contains("auto_increment") { "1" } else { "0" };
-                    let is_required = if col.is_nullable == "NO" && is_pk == "0" { "1" } else { "0" };
+                    let is_increment = if col.extra.contains("auto_increment") {
+                        "1"
+                    } else {
+                        "0"
+                    };
+                    let is_required = if col.is_nullable == "NO" && is_pk == "0" {
+                        "1"
+                    } else {
+                        "0"
+                    };
                     let html_type = infer_html_type(&col.column_type, &col.column_name);
 
                     // 默认：主键不参与插入/编辑/查询；其他字段都参与
@@ -747,16 +790,16 @@ impl GenTableService {
     /// 抽离自 `create_table_structured` 以便单测覆盖主键约束生成逻辑。
     /// - 单列主键：在列定义上显式 `PRIMARY KEY`（原 bug：sea-query 不会因 is_primary_key 自动加约束，导致生成表缺失主键）
     /// - 复合主键：循环后以复合索引统一声明 `PRIMARY KEY`
-    fn build_create_table_sql(
-        dto: &CreateTableDto,
-    ) -> Result<TableCreateStatement, ServiceError> {
+    fn build_create_table_sql(dto: &CreateTableDto) -> Result<TableCreateStatement, ServiceError> {
         let mut create_stmt = Table::create()
             .table(Alias::new(&dto.table_name))
             .if_not_exists()
             .to_owned();
 
         // 预计算主键列（用于区分单列/复合主键的约束声明）
-        let pk_cols: Vec<&str> = dto.columns.iter()
+        let pk_cols: Vec<&str> = dto
+            .columns
+            .iter()
             .filter(|c| c.is_primary_key)
             .map(|c| c.column_name.as_str())
             .collect();
@@ -825,8 +868,16 @@ impl GenTableService {
     ) -> Result<CreateTableResultVo, ServiceError> {
         // 1. 校验表名（白名单：字母开头 + 字母/数字/下划线）
         validate_identifier(&dto.table_name, "表名")?;
-        if !dto.table_name.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
-            return Err(ServiceError::bad_request(&crate::tr!("error.gen.table_name_start")));
+        if !dto
+            .table_name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+        {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.gen.table_name_start"
+            )));
         }
 
         // 2. 查重：检查表是否已存在
@@ -912,11 +963,10 @@ impl GenTableService {
 
         // 执行 DDL
         // P2 修复: 错误详情写日志，对外仅返回通用文案，避免泄露 DB schema 细节
-        db.execute(backend.build(&create_stmt)).await
-            .map_err(|e| {
-                tracing::error!(error = %e, table = %dto.table_name, "建表执行失败");
-                ServiceError::internal(&crate::tr!("error.gen.create_table_failed"))
-            })?;
+        db.execute(backend.build(&create_stmt)).await.map_err(|e| {
+            tracing::error!(error = %e, table = %dto.table_name, "建表执行失败");
+            ServiceError::internal(&crate::tr!("error.gen.create_table_failed"))
+        })?;
 
         // 7. 可选：导入到 gen_table
         let mut table_id = None;
@@ -944,7 +994,10 @@ impl GenTableService {
 
     /// 检查表是否已存在于数据库（通过元数据查询）
     async fn is_db_table_exists(&self, table_name: &str) -> Result<bool, ServiceError> {
-        let (rows, _) = self.repo.find_db_tables(0, 1, Some(table_name), None).await?;
+        let (rows, _) = self
+            .repo
+            .find_db_tables(0, 1, Some(table_name), None)
+            .await?;
         Ok(rows.iter().any(|t| t.table_name == table_name))
     }
 
@@ -1016,21 +1069,26 @@ impl GenTableService {
             // P1 修复: 先删后插需在事务中执行，避免删除成功但插入失败时列记录全部丢失
             let repo = self.repo.clone();
             let table_id = dto.table_id;
-            self.repo.base().db().transaction::<_, (), ServiceError>(|txn| {
-                let column_ams_inner = column_ams.clone();
-                async move {
-                    repo.update_columns_conn(txn, table_id, column_ams_inner).await?;
-                    Ok(())
-                }.boxed()
-            })
-            .await
-            .map_err(|e| match e {
-                sea_orm::TransactionError::Transaction(se) => se,
-                sea_orm::TransactionError::Connection(db_err) => {
-                    tracing::error!("编辑表事务连接错误: {}", db_err);
-                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
-                }
-            })?;
+            self.repo
+                .base()
+                .db()
+                .transaction::<_, (), ServiceError>(|txn| {
+                    let column_ams_inner = column_ams.clone();
+                    async move {
+                        repo.update_columns_conn(txn, table_id, column_ams_inner)
+                            .await?;
+                        Ok(())
+                    }
+                    .boxed()
+                })
+                .await
+                .map_err(|e| match e {
+                    sea_orm::TransactionError::Transaction(se) => se,
+                    sea_orm::TransactionError::Connection(db_err) => {
+                        tracing::error!("编辑表事务连接错误: {}", db_err);
+                        ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                    }
+                })?;
         }
 
         Ok(model)
@@ -1048,30 +1106,38 @@ impl GenTableService {
                 existing.iter().map(|t| t.table_id).collect();
             for id in &table_ids {
                 if !existing_ids.contains(id) {
-                    return Err(ServiceError::not_found(&crate::tr!("error.gen.table_id_not_found", id = id)));
+                    return Err(ServiceError::not_found(&crate::tr!(
+                        "error.gen.table_id_not_found",
+                        id = id
+                    )));
                 }
             }
         }
         // P1 修复: 级联删除需在事务中执行，避免列删除成功但表删除失败时产生孤儿数据
         let repo = self.repo.clone();
-        self.repo.base().db().transaction::<_, (), ServiceError>(|txn| {
-            let table_ids_inner = table_ids.clone();
-            async move {
-                // 级联清理列
-                repo.delete_columns_by_table_ids_conn(txn, table_ids_inner.clone()).await?;
-                // 删除表
-                repo.delete_by_ids_conn(txn, table_ids_inner).await?;
-                Ok(())
-            }.boxed()
-        })
-        .await
-        .map_err(|e| match e {
-            sea_orm::TransactionError::Transaction(se) => se,
-            sea_orm::TransactionError::Connection(db_err) => {
-                tracing::error!("代码生成表删除事务连接错误: {}", db_err);
-                ServiceError::internal(&crate::tr!("error.common.tx_failed"))
-            }
-        })?;
+        self.repo
+            .base()
+            .db()
+            .transaction::<_, (), ServiceError>(|txn| {
+                let table_ids_inner = table_ids.clone();
+                async move {
+                    // 级联清理列
+                    repo.delete_columns_by_table_ids_conn(txn, table_ids_inner.clone())
+                        .await?;
+                    // 删除表
+                    repo.delete_by_ids_conn(txn, table_ids_inner).await?;
+                    Ok(())
+                }
+                .boxed()
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!("代码生成表删除事务连接错误: {}", db_err);
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
         Ok(())
     }
 
@@ -1082,15 +1148,19 @@ impl GenTableService {
     /// 2. 删除旧的 gen_table_column 记录
     /// 3. 重新生成 gen_table_column 记录
     pub async fn synch_db(&self, table_name: &str, operator: &str) -> Result<(), ServiceError> {
-        let table = self
-            .repo
-            .find_by_name(table_name)
-            .await?
-            .ok_or_else(|| ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_not_imported"))))?;
+        let table = self.repo.find_by_name(table_name).await?.ok_or_else(|| {
+            ServiceError::not_found(&format!(
+                "{}: {table_name}",
+                crate::tr!("error.gen.table_not_imported")
+            ))
+        })?;
 
         let columns: Vec<DbColumnInfo> = self.repo.find_db_columns(table_name).await?;
         if columns.is_empty() {
-            return Err(ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_no_columns"))));
+            return Err(ServiceError::not_found(&format!(
+                "{}: {table_name}",
+                crate::tr!("error.gen.table_no_columns")
+            )));
         }
 
         let now = crate::common::datetime::now_naive();
@@ -1099,8 +1169,16 @@ impl GenTableService {
             let rust_type = column_type_to_rust_type(&col.column_type);
             let rust_field = column_name_to_rust_field(&col.column_name);
             let is_pk = if col.column_key == "PRI" { "1" } else { "0" };
-            let is_increment = if col.extra.contains("auto_increment") { "1" } else { "0" };
-            let is_required = if col.is_nullable == "NO" && is_pk == "0" { "1" } else { "0" };
+            let is_increment = if col.extra.contains("auto_increment") {
+                "1"
+            } else {
+                "0"
+            };
+            let is_required = if col.is_nullable == "NO" && is_pk == "0" {
+                "1"
+            } else {
+                "0"
+            };
             let html_type = infer_html_type(&col.column_type, &col.column_name);
             let (is_insert, is_edit, is_list, is_query) = if is_pk == "1" {
                 ("0", "0", "0", "0")
@@ -1138,21 +1216,26 @@ impl GenTableService {
         // P1 修复: 先删后插需在事务中执行，避免删除成功但插入失败时列记录全部丢失
         let repo = self.repo.clone();
         let table_id = table.table_id;
-        self.repo.base().db().transaction::<_, (), ServiceError>(|txn| {
-            let column_ams_inner = column_ams.clone();
-            async move {
-                repo.update_columns_conn(txn, table_id, column_ams_inner).await?;
-                Ok(())
-            }.boxed()
-        })
-        .await
-        .map_err(|e| match e {
-            sea_orm::TransactionError::Transaction(se) => se,
-            sea_orm::TransactionError::Connection(db_err) => {
-                tracing::error!("同步数据库事务连接错误: {}", db_err);
-                ServiceError::internal(&crate::tr!("error.common.tx_failed"))
-            }
-        })?;
+        self.repo
+            .base()
+            .db()
+            .transaction::<_, (), ServiceError>(|txn| {
+                let column_ams_inner = column_ams.clone();
+                async move {
+                    repo.update_columns_conn(txn, table_id, column_ams_inner)
+                        .await?;
+                    Ok(())
+                }
+                .boxed()
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!("同步数据库事务连接错误: {}", db_err);
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
         Ok(())
     }
 
@@ -1172,11 +1255,12 @@ impl GenTableService {
 
     /// 生成代码（返回 ZIP 文件字节流）
     pub async fn gen_code(&self, table_name: &str) -> Result<Vec<u8>, ServiceError> {
-        let table = self
-            .repo
-            .find_by_name(table_name)
-            .await?
-            .ok_or_else(|| ServiceError::not_found(&format!("{}: {table_name}", crate::tr!("error.gen.table_not_imported"))))?;
+        let table = self.repo.find_by_name(table_name).await?.ok_or_else(|| {
+            ServiceError::not_found(&format!(
+                "{}: {table_name}",
+                crate::tr!("error.gen.table_not_imported")
+            ))
+        })?;
         let columns = self.repo.find_columns_by_table_id(table.table_id).await?;
 
         let files = Self::render_templates(&table, &columns)?;
@@ -1185,8 +1269,8 @@ impl GenTableService {
         let mut buf = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let options =
-                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
 
             for (path, content) in &files {
                 zip.start_file(path, options).map_err(|_| {
@@ -1197,9 +1281,8 @@ impl GenTableService {
                     ServiceError::internal(&crate::tr!("error.gen.zip_write_failed"))
                 })?;
             }
-            zip.finish().map_err(|_| {
-                ServiceError::internal(&crate::tr!("error.gen.zip_finish_failed"))
-            })?;
+            zip.finish()
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.gen.zip_finish_failed")))?;
         }
 
         Ok(buf)
@@ -1232,14 +1315,20 @@ impl GenTableService {
         let mut buf = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let options =
-                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
 
             for table_name in table_names {
                 let table = table_by_name.get(table_name.as_str()).ok_or_else(|| {
-                    ServiceError::not_found(&crate::tr!("error.gen.table_not_imported", name = table_name))
+                    ServiceError::not_found(&crate::tr!(
+                        "error.gen.table_not_imported",
+                        name = table_name
+                    ))
                 })?;
-                let columns = columns_by_table.get(&table.table_id).cloned().unwrap_or_default();
+                let columns = columns_by_table
+                    .get(&table.table_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let files = Self::render_templates(table, &columns)?;
 
                 // 表名子目录前缀（已在 handler 层做白名单校验，仅含字母/数字/下划线，无路径穿越风险）
@@ -1257,9 +1346,8 @@ impl GenTableService {
                 }
             }
 
-            zip.finish().map_err(|_| {
-                ServiceError::internal(&crate::tr!("error.gen.zip_finish_failed"))
-            })?;
+            zip.finish()
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.gen.zip_finish_failed")))?;
         }
 
         Ok(buf)
@@ -1320,14 +1408,49 @@ impl GenTableService {
 
         // 生成文件名映射（使用净化后的路径组件）
         let templates: Vec<(&str, &str, String)> = vec![
-            ("entity.rs", "entity.rs", format!("src/entity/{}.rs", table_name_safe)),
-            ("repository.rs", "repository.rs", format!("src/repository/{}.rs", table_name_safe)),
-            ("service.rs", "service.rs", format!("src/service/{}_service.rs", table_name_safe)),
-            ("handler.rs", "handler.rs", format!("src/handler/{}_handler.rs", table_name_safe)),
-            ("router.rs", "router.rs", format!("src/router/{}_router.rs", table_name_safe)),
-            ("api.ts", "api.ts", format!("src/api/{}/{}.ts", module_name_safe, table_name_safe)),
-            ("index.vue", "index.vue", format!("src/views/{}/{}/index.vue", module_name_safe, table_name_safe)),
-            ("migration.sql", "migration.sql", format!("migration/{}.sql", table_name_safe)),
+            (
+                "entity.rs",
+                "entity.rs",
+                format!("src/entity/{}.rs", table_name_safe),
+            ),
+            (
+                "repository.rs",
+                "repository.rs",
+                format!("src/repository/{}.rs", table_name_safe),
+            ),
+            (
+                "service.rs",
+                "service.rs",
+                format!("src/service/{}_service.rs", table_name_safe),
+            ),
+            (
+                "handler.rs",
+                "handler.rs",
+                format!("src/handler/{}_handler.rs", table_name_safe),
+            ),
+            (
+                "router.rs",
+                "router.rs",
+                format!("src/router/{}_router.rs", table_name_safe),
+            ),
+            (
+                "api.ts",
+                "api.ts",
+                format!("src/api/{}/{}.ts", module_name_safe, table_name_safe),
+            ),
+            (
+                "index.vue",
+                "index.vue",
+                format!(
+                    "src/views/{}/{}/index.vue",
+                    module_name_safe, table_name_safe
+                ),
+            ),
+            (
+                "migration.sql",
+                "migration.sql",
+                format!("migration/{}.sql", table_name_safe),
+            ),
         ];
 
         let mut result: HashMap<String, String> = HashMap::new();
@@ -1337,9 +1460,17 @@ impl GenTableService {
                 let full_msg = format!("{}", e);
                 let source_msg = e.source().map(|s| format!("{}", s)).unwrap_or_default();
                 let detail = if source_msg.is_empty() {
-                    crate::tr!("error.gen.template_render_failed", name = tpl_name, msg = full_msg)
+                    crate::tr!(
+                        "error.gen.template_render_failed",
+                        name = tpl_name,
+                        msg = full_msg
+                    )
                 } else {
-                    crate::tr!("error.gen.template_render_failed", name = tpl_name, msg = format!("{} -> {}", full_msg, source_msg))
+                    crate::tr!(
+                        "error.gen.template_render_failed",
+                        name = tpl_name,
+                        msg = format!("{} -> {}", full_msg, source_msg)
+                    )
                 };
                 tracing::error!("代码生成模板渲染失败: {}", detail);
                 ServiceError::internal(&detail)
@@ -1364,7 +1495,9 @@ fn sanitize_path_component(name: &str) -> Result<String, ServiceError> {
         return Ok(String::new());
     }
     if name.contains('\0') {
-        return Err(ServiceError::bad_request(&crate::tr!("error.gen.path_empty_component")));
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.gen.path_empty_component"
+        )));
     }
     if name.contains("..") || name.contains('/') || name.contains('\\') {
         return Err(ServiceError::bad_request(&crate::tr!(
@@ -1793,7 +1926,13 @@ mod gen_table_sql_tests {
     use super::*;
     use sea_orm::DatabaseBackend;
 
-    fn mk_col(name: &str, pk: bool, not_null: bool, auto_inc: bool, unique: bool) -> CreateTableColumnDto {
+    fn mk_col(
+        name: &str,
+        pk: bool,
+        not_null: bool,
+        auto_inc: bool,
+        unique: bool,
+    ) -> CreateTableColumnDto {
         CreateTableColumnDto {
             column_name: name.to_string(),
             data_type: ColumnDataType::Bigint,

@@ -2,9 +2,9 @@
 
 use std::sync::OnceLock;
 
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, EnvFilter, prelude::*};
 use crate::config::LogConfig;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// 全局保活 WorkerGuard（P0-67 未修复项）
 ///
@@ -23,29 +23,30 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 ///   文件层使用 non_blocking writer 提升性能，WorkerGuard 通过 OnceLock 全局保活
 ///   文件层始终使用纯文本格式（grep 友好）
 pub fn init_logger(log_config: &LogConfig) {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&log_config.level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_config.level));
 
     // stdout 层（容器环境需要，保留）
     // P2-9：生产环境可配置 json_stdout = true 使用 JSON 结构化格式
-    let stdout_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = if log_config.json_stdout {
-        Box::new(
-            fmt::layer()
-                .json()
-                .with_target(true)
-                .with_ansi(false) // JSON 输出关闭 ANSI 颜色
-                .with_file(true)
-                .with_line_number(true),
-        )
-    } else {
-        Box::new(
-            fmt::layer()
-                .with_target(true)
-                .with_ansi(true)
-                .with_file(true)
-                .with_line_number(true),
-        )
-    };
+    let stdout_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> =
+        if log_config.json_stdout {
+            Box::new(
+                fmt::layer()
+                    .json()
+                    .with_target(true)
+                    .with_ansi(false) // JSON 输出关闭 ANSI 颜色
+                    .with_file(true)
+                    .with_line_number(true),
+            )
+        } else {
+            Box::new(
+                fmt::layer()
+                    .with_target(true)
+                    .with_ansi(true)
+                    .with_file(true)
+                    .with_line_number(true),
+            )
+        };
 
     // 文件层：按日轮转
     // tracing_appender::rolling::daily 在目录下生成 `app.YYYY-MM-DD.log` 文件

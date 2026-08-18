@@ -8,8 +8,8 @@
 //! - 软删除过滤（del_flag = '0'）
 
 use chrono::NaiveDateTime;
-use sea_orm::*;
 use sea_orm::sea_query::Expr;
+use sea_orm::*;
 
 use crate::entity::sys_menu::{ActiveModel, Column, Entity as SysMenu, Model};
 use crate::entity::sys_role_menu::{Column as RoleMenuColumn, Entity as SysRoleMenu};
@@ -90,16 +90,20 @@ impl SysMenuRepository {
         let backend = db.get_database_backend();
         // 占位符差异：MySQL 使用 `?`，PostgreSQL/SQLite 使用 `$1`（SQLite 同时兼容两者）
         let sql = match backend {
-            DatabaseBackend::MySql => r#"SELECT DISTINCT m.* FROM sys_menu m
+            DatabaseBackend::MySql => {
+                r#"SELECT DISTINCT m.* FROM sys_menu m
                 INNER JOIN sys_role_menu rm ON m.menu_id = rm.menu_id
                 INNER JOIN sys_user_role ur ON rm.role_id = ur.role_id
                 WHERE ur.user_id = ? AND m.del_flag = '0'
-                ORDER BY m.order_num ASC, m.menu_id ASC"#,
-            _ => r#"SELECT DISTINCT m.* FROM sys_menu m
+                ORDER BY m.order_num ASC, m.menu_id ASC"#
+            }
+            _ => {
+                r#"SELECT DISTINCT m.* FROM sys_menu m
                 INNER JOIN sys_role_menu rm ON m.menu_id = rm.menu_id
                 INNER JOIN sys_user_role ur ON rm.role_id = ur.role_id
                 WHERE ur.user_id = $1 AND m.del_flag = '0'
-                ORDER BY m.order_num ASC, m.menu_id ASC"#,
+                ORDER BY m.order_num ASC, m.menu_id ASC"#
+            }
         };
         let stmt = Statement::from_sql_and_values(backend, sql, [user_id.into()]);
         Model::find_by_statement(stmt).all(db).await

@@ -6,8 +6,8 @@ pub mod datetime;
 pub mod error;
 pub mod excel;
 pub mod extract;
-pub mod image;
 pub mod i18n;
+pub mod image;
 pub mod page;
 pub mod response;
 pub mod upload;
@@ -16,7 +16,10 @@ pub use error::{AppError, ServiceError};
 pub use extract::ValidatedJson;
 pub use page::PageDomain;
 pub use response::{AjaxResult, TableDataInfo, TreeSelectVo};
-pub use upload::{delete_upload_file, gen_uuid_filename, resolve_upload_dir, resolve_upload_root, write_upload_file};
+pub use upload::{
+    delete_upload_file, gen_uuid_filename, resolve_upload_dir, resolve_upload_root,
+    write_upload_file,
+};
 
 /// 为实现了 `Serialize` 的类型自动实现 `IntoResponse`，
 /// 返回 `(StatusCode::OK, Json(self))`（P1-13）。
@@ -59,7 +62,5 @@ macro_rules! impl_into_response {
 ///   这是 SeaORM `.like()` 不支持 ESCAPE 子句的已知限制；
 ///   生产环境使用 PostgreSQL/MySQL 不受影响，SQLite 仅用于本地开发
 pub fn like_escape(input: &str) -> String {
-    input
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
+    input.replace('\\', "\\\\").replace('%', "\\%")
 }

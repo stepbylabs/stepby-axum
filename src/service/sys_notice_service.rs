@@ -7,37 +7,38 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use garde::Validate;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
-use crate::entity::sys_notice::{
-    ActiveModel as SysNoticeActiveModel, Model as SysNoticeModel,
-};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::entity::sys_notice::{ActiveModel as SysNoticeActiveModel, Model as SysNoticeModel};
 use crate::repository::sys_notice::SysNoticeRepository;
 use crate::repository::sys_notice_read::{NoticeReadUserVo, SysNoticeReadRepository};
+use crate::state::AppState;
 use crate::utils::parse_id_list;
 use crate::utils::sanitize_html;
-use crate::state::AppState;
 
 /// P3 修复: 通知公告枚举值白名单校验
 /// notice_type: "1"=通知, "2"=公告
 /// status: "0"=正常, "1"=关闭（可选字段，None 时跳过）
 fn validate_notice_enum(notice_type: &str, status: Option<&str>) -> Result<(), ServiceError> {
     if notice_type != "1" && notice_type != "2" {
-        return Err(ServiceError::bad_request(
-            &crate::tr!("error.notice.notice_type_invalid", value = notice_type),
-        ));
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.notice.notice_type_invalid",
+            value = notice_type
+        )));
     }
     if let Some(s) = status
-        && s != "0" && s != "1"
+        && s != "0"
+        && s != "1"
     {
-        return Err(ServiceError::bad_request(
-            &crate::tr!("error.notice.status_invalid", value = s),
-        ));
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.notice.status_invalid",
+            value = s
+        )));
     }
     Ok(())
 }
@@ -209,10 +210,7 @@ impl SysNoticeService {
     }
 
     /// 根据 notice_id 查询通知公告详情
-    pub async fn get_notice_by_id(
-        &self,
-        notice_id: i64,
-    ) -> Result<SysNoticeModel, ServiceError> {
+    pub async fn get_notice_by_id(&self, notice_id: i64) -> Result<SysNoticeModel, ServiceError> {
         let model = self
             .notice_repo
             .find_active_by_id(notice_id)
@@ -269,12 +267,7 @@ impl SysNoticeService {
     ///
     /// 查询所有 status='0' 且 email 非空的用户邮箱，调用 MailerService 批量发送。
     /// 失败仅记录 tracing::warn!，不阻断主流程。
-    async fn send_notice_email(
-        &self,
-        state: &AppState,
-        title: &str,
-        content: Option<&str>,
-    ) {
+    async fn send_notice_email(&self, state: &AppState, title: &str, content: Option<&str>) {
         if !state.mailer_service.is_enabled() {
             tracing::debug!("邮件功能未启用，跳过通知公告邮件发送: {}", title);
             return;
@@ -309,7 +302,11 @@ impl SysNoticeService {
         // P3：邮件主题前缀按请求 locale 双语（notice 发送在请求作用域内）
         let subject_prefix = crate::common::i18n::pick("【yebot 通知】", "[yebot Notice] ");
         let subject = format!("{}{}", subject_prefix, title);
-        match state.mailer_service.send_batch(&emails, &subject, &body).await {
+        match state
+            .mailer_service
+            .send_batch(&emails, &subject, &body)
+            .await
+        {
             Ok(result) => {
                 tracing::info!(
                     "通知公告邮件发送完成: title={}, total={}, success={}, failed={}",
@@ -326,9 +323,12 @@ impl SysNoticeService {
     }
 
     /// 查询所有启用状态用户的邮箱（status='0' 且 email 非空）
-    async fn find_active_user_emails(&self, _state: &AppState) -> Result<Vec<String>, ServiceError> {
-        use sea_orm::*;
+    async fn find_active_user_emails(
+        &self,
+        _state: &AppState,
+    ) -> Result<Vec<String>, ServiceError> {
         use crate::entity::sys_user::{self, Column as UserColumn};
+        use sea_orm::*;
         let db = self.db();
         let users = sys_user::Entity::find()
             .filter(UserColumn::Status.eq("0"))
@@ -337,12 +337,12 @@ impl SysNoticeService {
             .filter(UserColumn::Email.ne(""))
             .all(db)
             .await
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed")))?;
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed"))
+            })?;
         let emails: Vec<String> = users
             .into_iter()
-            .filter_map(|u| {
-                u.email.filter(|e| !e.is_empty())
-            })
+            .filter_map(|u| u.email.filter(|e| !e.is_empty()))
             .collect();
         Ok(emails)
     }
@@ -383,7 +383,9 @@ impl SysNoticeService {
         }
         let existing = self.notice_repo.find_by_ids(&notice_ids).await?;
         if existing.len() != notice_ids.len() {
-            return Err(ServiceError::not_found(&crate::tr!("error.notice.not_found")));
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.notice.not_found"
+            )));
         }
         // 事务保证：通知删除与已读记录级联清理原子化（P0-76）
         let notice_repo = self.notice_repo.clone();
@@ -392,8 +394,12 @@ impl SysNoticeService {
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 let notice_ids_inner = notice_ids.clone();
                 async move {
-                    notice_repo.delete_by_ids_conn(txn, notice_ids_inner.clone()).await?;
-                    read_repo.delete_by_notice_ids_conn(txn, notice_ids_inner).await?;
+                    notice_repo
+                        .delete_by_ids_conn(txn, notice_ids_inner.clone())
+                        .await?;
+                    read_repo
+                        .delete_by_notice_ids_conn(txn, notice_ids_inner)
+                        .await?;
                     Ok(())
                 }
                 .boxed()
@@ -411,24 +417,18 @@ impl SysNoticeService {
     }
 
     /// 标记公告已读
-    pub async fn mark_read(
-        &self,
-        notice_id: i64,
-        user_id: i64,
-    ) -> Result<(), ServiceError> {
+    pub async fn mark_read(&self, notice_id: i64, user_id: i64) -> Result<(), ServiceError> {
         self.read_repo.mark_read(notice_id, user_id).await?;
         Ok(())
     }
 
     /// 批量标记公告已读
-    pub async fn mark_read_all(
-        &self,
-        ids: &str,
-        user_id: i64,
-    ) -> Result<(), ServiceError> {
+    pub async fn mark_read_all(&self, ids: &str, user_id: i64) -> Result<(), ServiceError> {
         let notice_ids: Vec<i64> = parse_id_list::<i64>(ids);
         if notice_ids.is_empty() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.notice.id_invalid")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.notice.id_invalid"
+            )));
         }
         self.read_repo.mark_read_batch(notice_ids, user_id).await?;
         Ok(())
@@ -441,10 +441,7 @@ impl SysNoticeService {
     /// - mark_all_unread_read 服务端查询所有未读并标记，确保跨页未读也被清除
     ///
     /// 返回标记的条数（用于响应消息展示）
-    pub async fn mark_all_unread_read(
-        &self,
-        user_id: i64,
-    ) -> Result<u64, ServiceError> {
+    pub async fn mark_all_unread_read(&self, user_id: i64) -> Result<u64, ServiceError> {
         let count = self.read_repo.mark_all_unread_read(user_id).await?;
         Ok(count)
     }
@@ -464,7 +461,12 @@ impl SysNoticeService {
         let limit = page.limit();
         let (rows, total) = self
             .read_repo
-            .find_read_users_page(offset, limit, query.notice_id, query.search_value.as_deref())
+            .find_read_users_page(
+                offset,
+                limit,
+                query.notice_id,
+                query.search_value.as_deref(),
+            )
             .await?;
         Ok((rows, total))
     }

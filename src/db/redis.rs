@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use redis::aio::ConnectionManager;
 use crate::config::RedisConfig;
+use redis::aio::ConnectionManager;
 
 /// Redis 命令读/写超时（秒）。
 ///
@@ -51,14 +51,18 @@ pub async fn init_redis(config: &RedisConfig) -> anyhow::Result<ConnectionManage
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
             tracing::error!("Redis 连接失败: {}", e);
-            return Err(anyhow::anyhow!("Redis 连接失败，请检查 REDIS_URL 配置与网络"));
+            return Err(anyhow::anyhow!(
+                "Redis 连接失败，请检查 REDIS_URL 配置与网络"
+            ));
         }
         Err(_) => {
             tracing::error!(
                 "Redis 连接建立超时（>{}s），请检查 REDIS_URL 配置与网络",
                 REDIS_CONN_TIMEOUT_SECS
             );
-            return Err(anyhow::anyhow!("Redis 连接超时，请检查 REDIS_URL 配置与网络"));
+            return Err(anyhow::anyhow!(
+                "Redis 连接超时，请检查 REDIS_URL 配置与网络"
+            ));
         }
     };
 

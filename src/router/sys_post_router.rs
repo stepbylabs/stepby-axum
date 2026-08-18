@@ -9,9 +9,9 @@
 //! - /system/post/{postId}        GET    查询岗位详情
 //! - /system/post/{postIds}       DELETE 批量删除岗位
 
-use std::sync::Arc;
 use axum::Router;
 use axum::routing::{delete, get, post, put};
+use std::sync::Arc;
 
 use crate::handler::sys_post_handler;
 use crate::state::AppState;
@@ -22,7 +22,10 @@ pub fn post_routes() -> Router<Arc<AppState>> {
         // GET /system/post/list 分页查询岗位
         .route("/system/post/list", get(sys_post_handler::list))
         // GET /system/post/optionselect 查询全部岗位（下拉用，仅需登录）
-        .route("/system/post/optionselect", get(sys_post_handler::optionselect))
+        .route(
+            "/system/post/optionselect",
+            get(sys_post_handler::optionselect),
+        )
         // POST /system/post/export 导出岗位列表
         .route("/system/post/export", post(sys_post_handler::export))
         // POST /system/post 新增岗位

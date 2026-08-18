@@ -1,8 +1,8 @@
 //! TOTP 多因子认证路由
 
-use std::sync::Arc;
 use axum::Router;
 use axum::routing::{get, post};
+use std::sync::Arc;
 
 use crate::handler::totp_handler;
 use crate::state::AppState;

@@ -28,7 +28,7 @@
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 // ============================================================================
@@ -141,27 +141,36 @@ fn build_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     // 但前端构建产物中的 .ts 文件是 TypeScript 编译后的 JavaScript 模块（Vite 的 worker 格式），
     // 必须返回 application/javascript 才能被浏览器作为模块脚本加载。
     let guessed = mime_guess::from_path(path).first_or_octet_stream();
-    let mime_str: &str = if path.to_lowercase().ends_with(".ts") || path.to_lowercase().ends_with(".mjs") {
-        "application/javascript"
-    } else {
-        guessed.as_ref()
-    };
+    let mime_str: &str =
+        if path.to_lowercase().ends_with(".ts") || path.to_lowercase().ends_with(".mjs") {
+            "application/javascript"
+        } else {
+            guessed.as_ref()
+        };
 
     let body = Body::from(file.data.into_owned());
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_str(mime_str).unwrap_or(HeaderValue::from_static("application/octet-stream")));
+    let mut response = Response::builder().status(StatusCode::OK).header(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime_str)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
 
     // 带哈希的静态资源设置长期不可变缓存；index.html 不缓存
     if path != "index.html" && (path.starts_with("static/") || path.starts_with("assets/")) {
-        response = response
-            .header(header::CACHE_CONTROL, HeaderValue::from_static(crate::common::constants::CACHE_IMMUTABLE_SECS));
+        response = response.header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(crate::common::constants::CACHE_IMMUTABLE_SECS),
+        );
     } else {
-        response = response
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache, no-store, must-revalidate"));
+        response = response.header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        );
     }
 
-    response.body(body).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    response
+        .body(body)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 // ============================================================================
@@ -222,16 +231,19 @@ async fn serve_from_fs(req: Request) -> Response {
 fn build_fs_response(path: &str, content: Vec<u8>) -> Response {
     // MIME 类型推断（与生产模式保持一致）
     let guessed = mime_guess::from_path(path).first_or_octet_stream();
-    let mime_str: &str = if path.to_lowercase().ends_with(".ts") || path.to_lowercase().ends_with(".mjs") {
-        "application/javascript"
-    } else {
-        guessed.as_ref()
-    };
+    let mime_str: &str =
+        if path.to_lowercase().ends_with(".ts") || path.to_lowercase().ends_with(".mjs") {
+            "application/javascript"
+        } else {
+            guessed.as_ref()
+        };
 
     let body = Body::from(content);
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_str(mime_str).unwrap_or(HeaderValue::from_static("application/octet-stream")));
+    let mut response = Response::builder().status(StatusCode::OK).header(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime_str)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
 
     // 开发模式：所有资源均不缓存，便于调试时及时看到修改
     let cache_control = if path != "index.html"
@@ -241,9 +253,14 @@ fn build_fs_response(path: &str, content: Vec<u8>) -> Response {
     } else {
         "no-cache, no-store, must-revalidate"
     };
-    response = response.header(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    response = response.header(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
 
-    response.body(body).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    response
+        .body(body)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// 路径安全检查（防止路径穿越攻击）
@@ -256,7 +273,10 @@ fn is_safe_path(path: &str) -> bool {
     let p = Path::new(path);
     // 检查路径组件中是否包含 .. 或绝对路径
     !p.components().any(|c| {
-        matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir)
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
     })
 }
 
@@ -270,10 +290,9 @@ fn is_safe_path(path: &str) -> bool {
 fn is_static_asset(path: &str) -> bool {
     let lower = path.to_lowercase();
     [
-        ".js", ".mjs", ".css", ".map", ".json", ".xml", ".txt",
-        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
-        ".woff", ".woff2", ".ttf", ".eot", ".otf",
-        ".mp4", ".mp3", ".webm", ".pdf", ".zip",
+        ".js", ".mjs", ".css", ".map", ".json", ".xml", ".txt", ".png", ".jpg", ".jpeg", ".gif",
+        ".svg", ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".mp4", ".mp3",
+        ".webm", ".pdf", ".zip",
     ]
     .iter()
     .any(|ext| lower.ends_with(ext))

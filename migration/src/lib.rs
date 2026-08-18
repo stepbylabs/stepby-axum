@@ -38,6 +38,8 @@ pub use m20260805_000001_fix_backup_task_ratelimit_menu_parent::Migration as M20
 pub use m20260806_000001_add_log_time_indexes::Migration as M20260806AddLogTimeIndexes;
 pub use m20260806_000002_add_task_operator_id::Migration as M20260806AddTaskOperatorId;
 pub use m20260818_000001_add_log_monitor_menu::Migration as M20260818AddLogMonitorMenu;
+pub use m20260818_000002_msg_module::Migration as M20260818MsgModule;
+pub use m20260818_000003_audit_alarm_config::Migration as M20260818AuditAlarmConfig;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -74,6 +76,8 @@ mod m20260805_000001_fix_backup_task_ratelimit_menu_parent;
 mod m20260806_000001_add_log_time_indexes;
 mod m20260806_000002_add_task_operator_id;
 mod m20260818_000001_add_log_monitor_menu;
+mod m20260818_000002_msg_module;
+mod m20260818_000003_audit_alarm_config;
 
 use sea_orm_migration::prelude::*;
 
@@ -119,6 +123,8 @@ impl MigratorTrait for Migrator {
             Box::new(M20260806AddLogTimeIndexes),
             Box::new(M20260806AddTaskOperatorId),
             Box::new(M20260818AddLogMonitorMenu),
+            Box::new(M20260818MsgModule),
+            Box::new(M20260818AuditAlarmConfig),
         ]
     }
 }
