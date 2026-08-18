@@ -6,7 +6,7 @@
 //! - 全局广播通道：AppState 中的 `ws_broadcast` 维护所有活跃连接
 //! - 消息类型：notice(通知公告)、operLog(操作日志)、system(系统消息)
 //! - 心跳机制：服务端每 30s 发送 ping，客户端回复 pong；90s 无响应则断开（C7-1）
-//! - 连接限制：每用户最多 5 个并发 WS 连接，防止 DoS（C7-2）
+//! - 连接限制：每用户最多 20 个并发 WS 连接，防止 DoS（C7-2）
 //! - 黑名单校验：JWT 验证后检查 Redis 黑名单，已登出 token 拒绝连接（C7-3）
 //! - Close 帧：断开前发送 Close 帧，符合 RFC 6455 规范（C7-4）
 
@@ -26,7 +26,13 @@ use crate::state::AppState;
 use crate::jwt::JwtUtils;
 
 /// 每用户最大并发 WebSocket 连接数
-const MAX_WS_CONN_PER_USER: u32 = 5;
+///
+/// 设计权衡（P4 修复：5 → 20）：
+/// - 5 过小：真实用户打开 6+ 标签页后实时通知即失效，且 E2E 多次登录/登出时
+///   若某连接因网络抖动未及时 DECR，计数易被陈旧值顶到上限，导致后续握手全部 429。
+/// - 20 足够容纳常规多标签页使用，同时仍可防止单用户（如被盗 token）建立海量连接。
+/// - 配合 ws_conn:* 启动时重置（reset_ws_conn_counts），杜绝陈旧计数长期残留。
+const MAX_WS_CONN_PER_USER: u32 = 20;
 
 /// 心跳间隔（秒）
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -155,6 +161,40 @@ async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
         .arg(&key)
         .query_async(&mut conn)
         .await;
+}
+
+/// 重置所有用户的 WebSocket 连接计数（服务启动时调用）
+///
+/// 问题（P4 修复）：`ws_conn:{user_id}` 计数器在以下场景会残留陈旧值：
+/// - 服务重启：重启前建立的连接全部消失，但 DECR 的 spawn 任务在 runtime 关闭时可能未执行；
+/// - 进程异常退出（kill -9 / panic）：RAII Drop 中的 spawn DECR 永远无法运行；
+/// - 网络闪断：服务端需等心跳超时（90s）才 DECR，期间新连接可能顶到上限。
+///
+/// 陈旧计数会导致该用户后续所有 WS 握手返回 429（"超过每用户最大连接数"），
+/// 使实时通知静默失效——这是 E2E 中反复出现的 `ws://.../ws ... 429` 控制台错误根因。
+///
+/// 服务启动时所有历史连接必然已失效，重置计数是安全且正确的做法：
+/// SCAN 匹配 `ws_conn:*` 后 DEL（复用 utils::redis::scan_keys 的 SCAN 游标实现，
+/// 避免 KEYS 阻塞 Redis）。失败仅记日志不阻断启动（计数留待 24h TTL 自然过期）。
+pub async fn reset_ws_conn_counts(state: &AppState) {
+    let keys = match crate::utils::redis::scan_keys(&mut state.redis.clone(), "ws_conn:*", 10000).await
+    {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::warn!("WebSocket 连接计数重置失败（SCAN 异常，忽略）: {}", e);
+            return;
+        }
+    };
+    if keys.is_empty() {
+        return;
+    }
+    let mut conn = state.redis.clone();
+    for key in &keys {
+        if let Err(e) = redis::cmd("DEL").arg(key).query_async::<i64>(&mut conn).await {
+            tracing::warn!("WebSocket 连接计数重置失败（DEL {}）: {}", key, e);
+        }
+    }
+    tracing::info!("已重置 {} 个 WebSocket 连接计数（服务启动）", keys.len());
 }
 
 /// RAII 守卫：确保 WebSocket 连接计数在任何情况下（包括 Future 被取消/drop）都能 DECR
