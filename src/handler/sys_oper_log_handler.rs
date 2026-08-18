@@ -6,19 +6,19 @@
 //! - DELETE /monitor/operlog/clean         清空操作日志
 //! - POST   /monitor/operlog/export        导出操作日志列表
 
-use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
+use std::sync::Arc;
 
-use crate::common::excel::{export_to_excel_with_fields, CellValue, ExcelColumn};
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
+use crate::common::excel::{CellValue, ExcelColumn, export_to_excel_with_fields};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_oper_log::Model as SysOperLogModel;
+use crate::middleware::Operator;
 use crate::service::sys_oper_log_service::{
-    AuditStatsVo, ComplianceReportVo, OperLogQueryDto, OperLogTypeStatsVo,
+    AlarmStatusVo, AuditStatsVo, ComplianceReportVo, OperLogQueryDto, OperLogTypeStatsVo,
 };
 use crate::state::AppState;
-use crate::middleware::Operator;
-use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /monitor/operlog/list
@@ -62,7 +62,9 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&oper_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.oper_log.id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.oper_log.id_invalid"
+        )));
     }
     if ids.len() > MAX_BATCH_DELETE_SIZE {
         return Err(AppError::bad_request(&crate::tr!(
@@ -102,7 +104,9 @@ pub async fn clean(
         days
     );
     let affected = state.oper_log_service.clean_oper_logs(days).await?;
-    Ok(AjaxResult::success(serde_json::json!({ "affected": affected })))
+    Ok(AjaxResult::success(
+        serde_json::json!({ "affected": affected }),
+    ))
 }
 
 /// POST /monitor/operlog/export
@@ -126,16 +130,21 @@ pub async fn export(
     Form(dto): Form<OperLogExportDto>,
 ) -> Result<Response, AppError> {
     // 解析可选 fields（逗号分隔）
-    let fields: Option<Vec<String>> = dto
-        .fields
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect::<Vec<_>>());
+    let fields: Option<Vec<String>> =
+        dto.fields
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                s.split(',')
+                    .map(|f| f.trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect::<Vec<_>>()
+            });
 
     let query = OperLogQueryDto {
         page_num: dto.page_num,
         // P1 修复：导出 page_size 上限 clamp（防超大值一次性查询海量行到内存）
-        page_size: dto.page_size.clamp(1, crate::common::page::EXPORT_MAX_ROWS as u64),
+        page_size: dto.page_size.clamp(1, crate::common::page::EXPORT_MAX_ROWS),
         title: dto.title,
         business_type: dto.business_type,
         oper_name: dto.oper_name,
@@ -170,30 +179,132 @@ pub async fn export(
     if let Some(tid) = task_id {
         let _ = state
             .task_service
-            .complete_task(tid, Some(crate::tr!("msg.export.progress", count = rows.len())), &state)
+            .complete_task(
+                tid,
+                Some(crate::tr!("msg.export.progress", count = rows.len())),
+                &state,
+            )
             .await;
     }
 
     let columns = [
-        ExcelColumn { key: "operId", header: ("日志编号", "Log ID"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_id.to_string().into()) },
-        ExcelColumn { key: "title", header: ("模块标题", "Module Title"), getter: |r: &SysOperLogModel| CellValue::Text(crate::common::i18n::module_title(r.title.as_deref().unwrap_or_default()).into_owned().into()) },
-        ExcelColumn { key: "businessType", header: ("业务类型", "Business Type"), getter: |r: &SysOperLogModel| CellValue::Text(r.business_type.map(|b| b.to_string()).unwrap_or_default().into()) },
-        ExcelColumn { key: "requestMethod", header: ("请求方式", "Request Method"), getter: |r: &SysOperLogModel| CellValue::Text(r.request_method.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "operName", header: ("操作人员", "Operator"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_name.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "operUrl", header: ("请求URL", "Request URL"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_url.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "operIp", header: ("主机地址", "Host Address"), getter: |r: &SysOperLogModel| CellValue::Text(r.oper_ip.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "status", header: ("操作状态", "Status"), getter: |r: &SysOperLogModel| CellValue::Text(r.status.as_deref().map(|s| if s == "0" { crate::tr!("common.status.normal") } else { crate::tr!("common.status.anomaly") }).unwrap_or_default().into()) },
-        ExcelColumn { key: "errorMsg", header: ("错误消息", "Error Message"), getter: |r: &SysOperLogModel| CellValue::Text(r.error_msg.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "operTime", header: ("操作时间", "Operation Time"), getter: |r: &SysOperLogModel| CellValue::Text({
-                r.oper_time
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default()
-                    .into()
-            }) },
-        ExcelColumn { key: "costTime", header: ("消耗时间(ms)", "Cost Time (ms)"), getter: |r: &SysOperLogModel| CellValue::Text(r.cost_time.map(|c| c.to_string()).unwrap_or_default().into()) },
+        ExcelColumn {
+            key: "operId",
+            header: ("日志编号", "Log ID"),
+            getter: |r: &SysOperLogModel| CellValue::Text(r.oper_id.to_string().into()),
+        },
+        ExcelColumn {
+            key: "title",
+            header: ("模块标题", "Module Title"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(
+                    crate::common::i18n::module_title(r.title.as_deref().unwrap_or_default())
+                        .into_owned()
+                        .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "businessType",
+            header: ("业务类型", "Business Type"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(
+                    r.business_type
+                        .map(|b| b.to_string())
+                        .unwrap_or_default()
+                        .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "requestMethod",
+            header: ("请求方式", "Request Method"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(r.request_method.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "operName",
+            header: ("操作人员", "Operator"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(r.oper_name.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "operUrl",
+            header: ("请求URL", "Request URL"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(r.oper_url.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "operIp",
+            header: ("主机地址", "Host Address"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(r.oper_ip.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "status",
+            header: ("操作状态", "Status"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(
+                    r.status
+                        .as_deref()
+                        .map(|s| {
+                            if s == "0" {
+                                crate::tr!("common.status.normal")
+                            } else {
+                                crate::tr!("common.status.anomaly")
+                            }
+                        })
+                        .unwrap_or_default()
+                        .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "errorMsg",
+            header: ("错误消息", "Error Message"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(r.error_msg.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "operTime",
+            header: ("操作时间", "Operation Time"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text({
+                    r.oper_time
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default()
+                        .into()
+                })
+            },
+        },
+        ExcelColumn {
+            key: "costTime",
+            header: ("消耗时间(ms)", "Cost Time (ms)"),
+            getter: |r: &SysOperLogModel| {
+                CellValue::Text(
+                    r.cost_time
+                        .map(|c| c.to_string())
+                        .unwrap_or_default()
+                        .into(),
+                )
+            },
+        },
     ];
 
-    export_to_excel_with_fields(&crate::tr!("excel.sheet.oper_log"), "oper_log", &columns, &rows, fields.as_deref(), false).await
+    export_to_excel_with_fields(
+        &crate::tr!("excel.sheet.oper_log"),
+        "oper_log",
+        &columns,
+        &rows,
+        fields.as_deref(),
+        false,
+    )
+    .await
 }
 
 /// 操作日志导出 DTO（在原查询参数基础上增加 fields 字段选择）
@@ -298,9 +409,87 @@ pub async fn compliance_report(
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<AjaxResult<ComplianceReportVo>, AppError> {
     let days = params.days.unwrap_or(30).clamp(1, 365);
+    let vo = state.oper_log_service.get_compliance_report(days).await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// 异常操作告警查询参数
+///
+/// 阈值优先级：显式参数 > 系统配置(sys_config) > 内置默认值。
+/// 系统配置键：
+/// - sys.audit.alarm.window_minutes      窗口分钟数（默认 5）
+/// - sys.audit.alarm.fail_threshold      同一对象失败次数阈值（默认 5）
+/// - sys.audit.alarm.fail_rate_threshold 失败率百分比阈值（默认 30）
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmStatusQuery {
+    /// 时间窗口（分钟，1-1440）
+    pub window_minutes: Option<i64>,
+    /// 失败次数阈值
+    pub fail_threshold: Option<i64>,
+    /// 失败率（百分比）阈值
+    pub fail_rate_threshold: Option<i64>,
+}
+
+/// GET /monitor/operlog/alarm-status
+/// 异常操作告警状态检测（失败率 + 操作人/模块失败 Burst）
+#[utoipa::path(
+    get,
+    path = "/monitor/operlog/alarm-status",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<AlarmStatusVo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-operlog"
+)]
+pub async fn alarm_status(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AlarmStatusQuery>,
+) -> Result<AjaxResult<AlarmStatusVo>, AppError> {
+    // 读系统配置（带默认值），返回失效时回退默认
+    let window_minutes = match params.window_minutes {
+        Some(v) => v.clamp(1, 1440),
+        None => {
+            let v = state
+                .config_service
+                .get_config_value_by_key_cached("sys.audit.alarm.window_minutes")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.trim().parse::<i64>().ok());
+            v.unwrap_or(5).clamp(1, 1440)
+        }
+    };
+    let fail_threshold = match params.fail_threshold {
+        Some(v) => v.max(1),
+        None => {
+            let v = state
+                .config_service
+                .get_config_value_by_key_cached("sys.audit.alarm.fail_threshold")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.trim().parse::<i64>().ok());
+            v.unwrap_or(5).max(1)
+        }
+    };
+    let fail_rate_threshold = match params.fail_rate_threshold {
+        Some(v) => v.clamp(0, 100),
+        None => {
+            let v = state
+                .config_service
+                .get_config_value_by_key_cached("sys.audit.alarm.fail_rate_threshold")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.trim().parse::<i64>().ok());
+            v.unwrap_or(30).clamp(0, 100)
+        }
+    };
+
     let vo = state
         .oper_log_service
-        .get_compliance_report(days)
+        .get_alarm_status(window_minutes, fail_threshold, fail_rate_threshold)
         .await?;
     Ok(AjaxResult::success(vo))
 }

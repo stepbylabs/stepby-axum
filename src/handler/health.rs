@@ -1,12 +1,12 @@
 // axum-backend/src/handler/health.rs
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use axum::extract::State;
-use serde::Serialize;
-use tokio::sync::RwLock;
 use crate::common::{AjaxResult, AppError};
 use crate::state::AppState;
+use axum::extract::State;
+use serde::Serialize;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 /// 健康检查缓存 TTL（R6-PERF-23：避免高频探针打爆 DB/Redis）
 const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -43,7 +43,9 @@ pub struct HealthStatus {
 /// R6-PERF-23：增加 5 秒 TTL 缓存，防止 K8s/Consul 高频探针（每秒 N 次）
 /// 直接打爆 DB ping 和 Redis PING。缓存过期前所有请求直接返回上次结果，
 /// 牺牲最多 5 秒状态延迟换取后端依赖保护。
-pub async fn health(State(state): State<Arc<AppState>>) -> Result<AjaxResult<HealthStatus>, AppError> {
+pub async fn health(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<HealthStatus>, AppError> {
     // 先查缓存：未过期则直接返回
     {
         let cache = health_cache().read().await;
@@ -126,7 +128,9 @@ pub async fn metrics(
     // 仅当设置环境变量 YEBOT_METRICS_TOKEN 时才要求 `Authorization: Bearer <token>`；
     // 未设置时保持原有匿名可访问行为（便于本地 curl / Prometheus 无配置拉取）。
     // 生产环境建议设置该变量，或在反向代理层限制 /metrics 来源 IP。
-    if let Ok(expected) = std::env::var("YEBOT_METRICS_TOKEN") && !expected.is_empty() {
+    if let Ok(expected) = std::env::var("YEBOT_METRICS_TOKEN")
+        && !expected.is_empty()
+    {
         let ok = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -151,16 +155,10 @@ pub async fn metrics(
     // 进程内存
     s.push_str("# HELP yebot_process_resident_memory_bytes 进程常驻内存（字节）\n");
     s.push_str("# TYPE yebot_process_resident_memory_bytes gauge\n");
-    s.push_str(&format!(
-        "yebot_process_resident_memory_bytes {}\n",
-        rss
-    ));
+    s.push_str(&format!("yebot_process_resident_memory_bytes {}\n", rss));
     s.push_str("# HELP yebot_process_virtual_memory_bytes 进程虚拟内存（字节）\n");
     s.push_str("# TYPE yebot_process_virtual_memory_bytes gauge\n");
-    s.push_str(&format!(
-        "yebot_process_virtual_memory_bytes {}\n",
-        vms
-    ));
+    s.push_str(&format!("yebot_process_virtual_memory_bytes {}\n", vms));
     // 进程信息
     s.push_str("# HELP yebot_process_info 进程信息（version=后端版本）\n");
     s.push_str("# TYPE yebot_process_info gauge\n");
@@ -180,7 +178,8 @@ pub async fn metrics(
     s.push_str("# TYPE yebot_db_connected gauge\n");
     s.push_str(&format!(
         "yebot_db_connected{{backend=\"{}\"}} {}\n",
-        db_backend_name, if db_connected { 1 } else { 0 }
+        db_backend_name,
+        if db_connected { 1 } else { 0 }
     ));
 
     Ok(s)

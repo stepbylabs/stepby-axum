@@ -12,9 +12,9 @@
 //! 注意：静态路由（list、configKey、refreshCache、export）需在动态路由 {configId} 之前注册，
 //! axum 0.8 优先匹配静态段。
 
-use std::sync::Arc;
 use axum::Router;
 use axum::routing::{delete, get, post, put};
+use std::sync::Arc;
 
 use crate::handler::sys_config_handler;
 use crate::state::AppState;
@@ -24,13 +24,25 @@ pub fn config_routes() -> Router<Arc<AppState>> {
     Router::new()
         // 静态路由优先注册
         .route("/system/config/list", get(sys_config_handler::list))
-        .route("/system/config/configKey/{configKey}", get(sys_config_handler::get_config_by_key))
-        .route("/system/config/refreshCache", delete(sys_config_handler::refresh_cache))
+        .route(
+            "/system/config/configKey/{configKey}",
+            get(sys_config_handler::get_config_by_key),
+        )
+        .route(
+            "/system/config/refreshCache",
+            delete(sys_config_handler::refresh_cache),
+        )
         .route("/system/config/export", post(sys_config_handler::export))
         // 集合资源
         .route("/system/config", post(sys_config_handler::add))
         .route("/system/config", put(sys_config_handler::edit))
         // 动态路由最后注册
-        .route("/system/config/{configId}", get(sys_config_handler::get_info))
-        .route("/system/config/{configId}", delete(sys_config_handler::remove))
+        .route(
+            "/system/config/{configId}",
+            get(sys_config_handler::get_info),
+        )
+        .route(
+            "/system/config/{configId}",
+            delete(sys_config_handler::remove),
+        )
 }

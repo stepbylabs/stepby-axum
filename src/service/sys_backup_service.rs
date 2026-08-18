@@ -21,9 +21,11 @@ use tokio::process::Command;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::config::Settings;
-use crate::entity::sys_backup_log::{ActiveModel as SysBackupLogActiveModel, Model as SysBackupLogModel};
+use crate::entity::sys_backup_log::{
+    ActiveModel as SysBackupLogActiveModel, Model as SysBackupLogModel,
+};
 use crate::repository::sys_backup_log::SysBackupLogRepository;
 
 // ==================== 常量 ====================
@@ -177,7 +179,9 @@ async fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> 
         || file_name.contains("..")
         || file_name.contains('\0')
     {
-        return Err(ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid")));
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.backup.filename_invalid"
+        )));
     }
     let dir = ensure_backup_dir_async().await?;
     // Defense-in-depth: canonicalize the directory to resolve any symlinks
@@ -244,9 +248,7 @@ impl SysBackupService {
         let backup_id = log_model.backup_id;
 
         // 执行备份子进程
-        let result = self
-            .run_backup_process(kind, &db_url, &file_path)
-            .await;
+        let result = self.run_backup_process(kind, &db_url, &file_path).await;
 
         // 异步获取文件大小，避免阻塞 worker
         let file_size = {
@@ -321,7 +323,9 @@ impl SysBackupService {
             let stdout = output.stdout;
             tokio::task::spawn_blocking(move || std::fs::write(&file_path_owned, &stdout))
                 .await
-                .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.write_task_join_failed")))?
+                .map_err(|_| {
+                    ServiceError::internal(&crate::tr!("error.backup.write_task_join_failed"))
+                })?
                 .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.write_failed")))?;
             return Ok(());
         }
@@ -331,25 +335,34 @@ impl SysBackupService {
             DbKind::Postgres => {
                 let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
                 let mut c = Command::new("pg_dump");
-                c.arg("--host").arg(&host)
-                    .arg("--port").arg(&port)
-                    .arg("--username").arg(&user)
-                    .arg("--dbname").arg(&db)
-                    .arg("--file").arg(&file_path_str);
+                c.arg("--host")
+                    .arg(&host)
+                    .arg("--port")
+                    .arg(&port)
+                    .arg("--username")
+                    .arg(&user)
+                    .arg("--dbname")
+                    .arg(&db)
+                    .arg("--file")
+                    .arg(&file_path_str);
                 c.env("PGPASSWORD", pass);
                 c
             }
             DbKind::Mysql => {
                 let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
                 let mut c = Command::new("mysqldump");
-                c.arg("--host").arg(&host)
-                    .arg("--port").arg(&port)
-                    .arg("--user").arg(&user)
+                c.arg("--host")
+                    .arg(&host)
+                    .arg("--port")
+                    .arg(&port)
+                    .arg("--user")
+                    .arg(&user)
                     .arg("--single-transaction")
                     .arg("--routines")
                     .arg("--triggers")
                     .arg(&db)
-                    .arg("--result-file").arg(&file_path_str);
+                    .arg("--result-file")
+                    .arg(&file_path_str);
                 // B7：将密码经 MYSQL_PWD 环境变量传递，避免明文出现在进程命令行
                 // （`ps` / `/proc` 可见，属中危泄漏）。与下方 restore 分支及 Postgres
                 // 的 PGPASSWORD 同构。MySQL 8.0 客户端会打印一条
@@ -358,9 +371,9 @@ impl SysBackupService {
                 c
             }
             DbKind::Sqlite => {
-                return Err(ServiceError::internal(
-                    &crate::tr!("error.backup.sqlite3_branch_unreachable"),
-                ));
+                return Err(ServiceError::internal(&crate::tr!(
+                    "error.backup.sqlite3_branch_unreachable"
+                )));
             }
         };
 
@@ -369,19 +382,22 @@ impl SysBackupService {
             .kill_on_drop(true);
 
         // 5 分钟超时
-        let child = cmd
-            .spawn()
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.process_start_failed")))?;
+        let child = cmd.spawn().map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.process_start_failed"))
+        })?;
 
-        let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())
-            .await
-            .map_err(|_| {
-                ServiceError::internal(&crate::tr!(
-                    "error.backup.process_timeout",
-                    secs = BACKUP_TIMEOUT_SECS
-                ))
-            })?
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.process_exec_failed")))?;
+        let output = tokio::time::timeout(
+            Duration::from_secs(BACKUP_TIMEOUT_SECS),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| {
+            ServiceError::internal(&crate::tr!(
+                "error.backup.process_timeout",
+                secs = BACKUP_TIMEOUT_SECS
+            ))
+        })?
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.process_exec_failed")))?;
 
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr).to_string();
@@ -401,11 +417,7 @@ impl SysBackupService {
     /// 3. 调用对应工具子进程（psql/mysql/sqlite3 .read）
     /// 4. 5 分钟超时保护
     /// 5. 记录恢复日志（backup_type=restore）
-    pub async fn restore_backup(
-        &self,
-        backup_id: i64,
-        operator: &str,
-    ) -> Result<(), ServiceError> {
+    pub async fn restore_backup(&self, backup_id: i64, operator: &str) -> Result<(), ServiceError> {
         let log = self
             .backup_repo
             .find_by_id(backup_id)
@@ -413,29 +425,35 @@ impl SysBackupService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.backup.record_not_found")))?;
 
         if log.status != "success" {
-            return Err(ServiceError::bad_request(&crate::tr!("error.backup.restore_status_invalid")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.backup.restore_status_invalid"
+            )));
         }
 
         // 校验文件路径穿越（取 basename 重新拼接）
         let base_name = std::path::Path::new(&log.file_name)
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid_restore")))?
+            .ok_or_else(|| {
+                ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid_restore"))
+            })?
             .to_string();
         let file_path = validate_backup_path(&base_name).await?;
         let file_path_clone = file_path.clone();
         let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
             .await
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed")))?;
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed"))
+            })?;
         if !exists {
-            return Err(ServiceError::not_found(&crate::tr!("error.backup.file_not_found")));
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.backup.file_not_found"
+            )));
         }
 
         let db_url = self.config.database.url.clone();
         let kind = parse_db_kind(&db_url)?;
-        let result = self
-            .run_restore_process(kind, &db_url, &file_path)
-            .await;
+        let result = self.run_restore_process(kind, &db_url, &file_path).await;
 
         let now = crate::common::datetime::now_naive();
         let (status, error_msg) = match result {
@@ -462,7 +480,9 @@ impl SysBackupService {
 
         if status == "failed" {
             return Err(ServiceError::internal(
-                error_msg.as_deref().unwrap_or(&crate::tr!("error.backup.db_restore_failed")),
+                error_msg
+                    .as_deref()
+                    .unwrap_or(&crate::tr!("error.backup.db_restore_failed")),
             ));
         }
         Ok(())
@@ -486,17 +506,24 @@ impl SysBackupService {
             DbKind::Postgres => {
                 let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
                 let mut c = Command::new("psql");
-                c.arg("--host").arg(&host)
-                    .arg("--port").arg(&port)
-                    .arg("--username").arg(&user)
-                    .arg("--dbname").arg(&db)
-                    .arg("--file").arg(&file_path_str);
+                c.arg("--host")
+                    .arg(&host)
+                    .arg("--port")
+                    .arg(&port)
+                    .arg("--username")
+                    .arg(&user)
+                    .arg("--dbname")
+                    .arg(&db)
+                    .arg("--file")
+                    .arg(&file_path_str);
                 c.env("PGPASSWORD", pass);
                 c
             }
             DbKind::Mysql => {
                 // P3 修复: 使用 i18n key 替代硬编码中文
-                return Err(ServiceError::internal(&crate::tr!("error.backup.mysql_restore_branch_unreachable")));
+                return Err(ServiceError::internal(&crate::tr!(
+                    "error.backup.mysql_restore_branch_unreachable"
+                )));
             }
             DbKind::Sqlite => {
                 let db_file = parse_sqlite_file_path(db_url)?;
@@ -510,19 +537,24 @@ impl SysBackupService {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd
-            .spawn()
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed")))?;
+        let child = cmd.spawn().map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed"))
+        })?;
 
-        let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())
-            .await
-            .map_err(|_| {
-                ServiceError::internal(&crate::tr!(
-                    "error.backup.restore_process_timeout",
-                    secs = BACKUP_TIMEOUT_SECS
-                ))
-            })?
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))?;
+        let output = tokio::time::timeout(
+            Duration::from_secs(BACKUP_TIMEOUT_SECS),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| {
+            ServiceError::internal(&crate::tr!(
+                "error.backup.restore_process_timeout",
+                secs = BACKUP_TIMEOUT_SECS
+            ))
+        })?
+        .map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed"))
+        })?;
 
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr).to_string();
@@ -541,11 +573,7 @@ impl SysBackupService {
     /// - 直接 `Command::new("mysql")` + 参数化传参，完全绕过 shell
     /// - SQL 文件内容通过 stdin pipe 传入，等价于 `< file` 重定向但无注入风险
     /// - 使用 tokio::io::AsyncWriteExt 异步写入 stdin，避免阻塞 worker
-    async fn run_mysql_restore(
-        &self,
-        db_url: &str,
-        file_path: &Path,
-    ) -> Result<(), ServiceError> {
+    async fn run_mysql_restore(&self, db_url: &str, file_path: &Path) -> Result<(), ServiceError> {
         use tokio::io::AsyncWriteExt;
 
         let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
@@ -555,12 +583,17 @@ impl SysBackupService {
         let sql_bytes = tokio::task::spawn_blocking(move || std::fs::read(&fp))
             .await
             .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_file_task_failed")))?
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed")))?;
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed"))
+            })?;
 
         let mut cmd = Command::new("mysql");
-        cmd.arg("--host").arg(&host)
-            .arg("--port").arg(&port)
-            .arg("--user").arg(&user)
+        cmd.arg("--host")
+            .arg(&host)
+            .arg("--port")
+            .arg(&port)
+            .arg("--user")
+            .arg(&user)
             // 安全：通过 MYSQL_PWD 环境变量传递密码，避免通过命令行参数泄漏到进程列表
             .env("MYSQL_PWD", &pass)
             .arg(&db)
@@ -569,16 +602,17 @@ impl SysBackupService {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed")))?;
+        let mut child = cmd.spawn().map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed"))
+        })?;
 
         // 取出 stdin 并异步写入 SQL 内容
         if let Some(mut stdin) = child.stdin.take() {
             // 大文件分块写入，避免一次性占用过多内存
             for chunk in sql_bytes.chunks(64 * 1024) {
-                stdin.write_all(chunk).await
-                    .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))?;
+                stdin.write_all(chunk).await.map_err(|_| {
+                    ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed"))
+                })?;
             }
             // 显式关闭 stdin，通知 mysql 子进程输入结束
             // P3 修复: shutdown 失败记录 warn 日志，便于排查上游写入错误
@@ -587,15 +621,20 @@ impl SysBackupService {
             }
         }
 
-        let output = tokio::time::timeout(Duration::from_secs(BACKUP_TIMEOUT_SECS), child.wait_with_output())
-            .await
-            .map_err(|_| {
-                ServiceError::internal(&crate::tr!(
-                    "error.backup.restore_process_timeout",
-                    secs = BACKUP_TIMEOUT_SECS
-                ))
-            })?
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))?;
+        let output = tokio::time::timeout(
+            Duration::from_secs(BACKUP_TIMEOUT_SECS),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| {
+            ServiceError::internal(&crate::tr!(
+                "error.backup.restore_process_timeout",
+                secs = BACKUP_TIMEOUT_SECS
+            ))
+        })?
+        .map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed"))
+        })?;
 
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr).to_string();
@@ -640,7 +679,10 @@ impl SysBackupService {
     }
 
     /// 查询备份日志详情
-    pub async fn get_backup_by_id(&self, backup_id: i64) -> Result<SysBackupLogModel, ServiceError> {
+    pub async fn get_backup_by_id(
+        &self,
+        backup_id: i64,
+    ) -> Result<SysBackupLogModel, ServiceError> {
         self.backup_repo
             .find_by_id(backup_id)
             .await?
@@ -675,16 +717,14 @@ impl SysBackupService {
                         && canonical.starts_with(dir_canonical)
                         && let Err(e) = std::fs::remove_file(&canonical)
                     {
-                        tracing::warn!(
-                            "删除备份文件失败 {}: {}",
-                            canonical.display(),
-                            e
-                        );
+                        tracing::warn!("删除备份文件失败 {}: {}", canonical.display(), e);
                     }
                 }
             })
             .await
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.delete_file_task_failed")))?;
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.backup.delete_file_task_failed"))
+            })?;
         }
 
         self.backup_repo.delete_by_ids(ids).await?;
@@ -692,23 +732,34 @@ impl SysBackupService {
     }
 
     /// 读取备份文件二进制内容（供 handler 下载）
-    pub async fn read_backup_file(&self, backup_id: i64) -> Result<(Vec<u8>, String), ServiceError> {
+    pub async fn read_backup_file(
+        &self,
+        backup_id: i64,
+    ) -> Result<(Vec<u8>, String), ServiceError> {
         let log = self.get_backup_by_id(backup_id).await?;
         if log.status != "success" {
-            return Err(ServiceError::bad_request(&crate::tr!("error.backup.download_status_invalid")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.backup.download_status_invalid"
+            )));
         }
         let base_name = std::path::Path::new(&log.file_name)
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid_restore")))?
+            .ok_or_else(|| {
+                ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid_restore"))
+            })?
             .to_string();
         let file_path = validate_backup_path(&base_name).await?;
         let file_path_clone = file_path.clone();
         let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
             .await
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed")))?;
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed"))
+            })?;
         if !exists {
-            return Err(ServiceError::not_found(&crate::tr!("error.backup.file_not_found")));
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.backup.file_not_found"
+            )));
         }
         let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
             std::fs::read(&file_path)

@@ -31,13 +31,46 @@ fn build_sanitizer() -> Builder<'static> {
     let mut builder = Builder::default();
     // 允许的标签白名单（ammonia 默认已含 p/br/strong 等基础标签，此处显式扩展）
     builder.add_tags([
-        "h1", "h2", "h3", "h4", "h5", "h6",
-        "ul", "ol", "li", "dl", "dt", "dd",
-        "blockquote", "q", "code", "pre", "kbd", "samp", "var",
-        "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "ul",
+        "ol",
+        "li",
+        "dl",
+        "dt",
+        "dd",
+        "blockquote",
+        "q",
+        "code",
+        "pre",
+        "kbd",
+        "samp",
+        "var",
+        "table",
+        "thead",
+        "tbody",
+        "tfoot",
+        "tr",
+        "th",
+        "td",
+        "caption",
+        "colgroup",
+        "col",
         "img",
-        "div", "span", "hr",
-        "u", "s", "strike", "sub", "sup", "mark", "small",
+        "div",
+        "span",
+        "hr",
+        "u",
+        "s",
+        "strike",
+        "sub",
+        "sup",
+        "mark",
+        "small",
     ]);
     // 允许的属性白名单
     builder.add_generic_attributes(["class", "style"]);
@@ -150,7 +183,10 @@ mod tests {
         let result = sanitize_html(input);
         // ammonia 基于 html5ever 解析，会先解码实体再判断协议
         assert!(!result.contains("javascript:"), "应阻断实体编码绕过");
-        assert!(!result.contains("&#106;avascript"), "不应保留原始实体编码的危险协议");
+        assert!(
+            !result.contains("&#106;avascript"),
+            "不应保留原始实体编码的危险协议"
+        );
     }
 
     #[test]
@@ -178,7 +214,10 @@ mod tests {
     fn test_link_rel_added() {
         let input = "<a href=\"https://example.com\">link</a>";
         let result = sanitize_html(input);
-        assert!(result.contains("rel=\"noopener noreferrer\""), "应自动添加 rel 属性");
+        assert!(
+            result.contains("rel=\"noopener noreferrer\""),
+            "应自动添加 rel 属性"
+        );
     }
 
     #[test]
@@ -203,7 +242,10 @@ mod tests {
 
     #[test]
     fn test_html_escape_basic() {
-        assert_eq!(html_escape("<b>&'\"</b>"), "&lt;b&gt;&amp;&#39;&quot;&lt;/b&gt;");
+        assert_eq!(
+            html_escape("<b>&'\"</b>"),
+            "&lt;b&gt;&amp;&#39;&quot;&lt;/b&gt;"
+        );
     }
 
     #[test]

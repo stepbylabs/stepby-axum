@@ -1,7 +1,5 @@
 // axum-backend/src/initialize/mod.rs
 
-use std::sync::Arc;
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use crate::config::Settings;
 use crate::db;
 use crate::logger;
@@ -9,6 +7,8 @@ use crate::scheduler::JobScheduler;
 use crate::service::IpLocationService;
 use crate::state::AppState;
 use crate::utils::ip_location::IpLocator;
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use std::sync::Arc;
 
 /// 初始化编排模块
 pub struct AppInitializer;
@@ -52,27 +52,37 @@ impl AppInitializer {
             &settings.ip_location.xdb_path,
             settings.ip_location.xdb_enabled,
         ));
-        let ip_location_service = IpLocationService::new(
-            db.clone(),
-            settings.clone(),
-            ip_locator.clone(),
-        );
+        let ip_location_service =
+            IpLocationService::new(db.clone(), settings.clone(), ip_locator.clone());
 
         // 6. 创建调度器并加载任务（注入 ip_location_service 以支持 mmdb_auto_update 内置任务）
         tracing::info!("=== 初始化定时任务调度器 ===");
         let job_scheduler = Arc::new(
-            JobScheduler::new(db.clone(), redis.clone(), ip_location_service.clone()).await?,
+            JobScheduler::new(
+                db.clone(),
+                redis.clone(),
+                ip_location_service.clone(),
+                settings.clone(),
+            )
+            .await?,
         );
         // 创建临时 Service 用于 load_from_db（需要 Repository）
-        let temp_job_service = crate::service::SysJobService::new(
-            db.clone(),
-            job_scheduler.clone(),
-        );
-        if let Err(e) = job_scheduler.load_from_db(temp_job_service.job_repo()).await {
+        let temp_job_service =
+            crate::service::SysJobService::new(db.clone(), job_scheduler.clone());
+        if let Err(e) = job_scheduler
+            .load_from_db(temp_job_service.job_repo())
+            .await
+        {
             tracing::warn!("定时任务加载失败（不阻断启动）: {}", e);
         }
 
-        // 7. 构建 AppState（传入 scheduler + ip_locator + ip_location_service）
+        // 7. 构建文件存储后端（F1：local / s3，按 upload.backend 切换）
+        let storage: Arc<dyn crate::storage::StorageBackend> =
+            crate::storage::new_backend(&settings.upload)
+                .map_err(|e| anyhow::anyhow!("存储后端初始化失败: {}", e.message))?;
+        tracing::info!("存储后端已启用: {}", storage.kind());
+
+        // 8. 构建 AppState（传入 scheduler + ip_locator + ip_location_service + storage）
         let state = Arc::new(AppState::new(
             db,
             redis,
@@ -80,6 +90,7 @@ impl AppInitializer {
             job_scheduler,
             ip_locator,
             ip_location_service,
+            storage,
         ));
 
         tracing::info!("=== axum-backend 初始化完成 ===");
@@ -136,7 +147,10 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
     let has_column = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(backend, "PRAGMA table_info(sys_user)"))
+                .query_all(Statement::from_string(
+                    backend,
+                    "PRAGMA table_info(sys_user)",
+                ))
                 .await?;
             rows.iter().any(|row| {
                 row.try_get::<String>("", "name")
@@ -227,7 +241,10 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
     let has_column = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(backend, "PRAGMA table_info(sys_task)"))
+                .query_all(Statement::from_string(
+                    backend,
+                    "PRAGMA table_info(sys_task)",
+                ))
                 .await?;
             rows.iter().any(|row| {
                 row.try_get::<String>("", "name")

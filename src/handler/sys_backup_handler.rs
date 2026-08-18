@@ -8,18 +8,18 @@
 //! - GET    /system/backup/download/{id}   下载备份文件
 //! - DELETE /system/backup/{backupIds}     批量删除备份日志及文件
 
-use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
+use std::sync::Arc;
 
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_backup_log::Model as SysBackupLogModel;
 use crate::middleware::Operator;
-use crate::service::sys_backup_service::{BackupLogQueryDto, BackupCreateVo};
+use crate::service::sys_backup_service::{BackupCreateVo, BackupLogQueryDto};
 use crate::state::AppState;
-use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 
 /// GET /system/backup/list
 /// 分页查询备份日志
@@ -96,10 +96,15 @@ pub async fn create(
             AppError::new(503, crate::tr!("error.backup.service_unavailable"))
         })?;
     if !acquired {
-        return Err(AppError::bad_request(&crate::tr!("error.backup.too_frequent")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.backup.too_frequent"
+        )));
     }
 
-    let vo = state.backup_service.create_backup(operator.username()).await?;
+    let vo = state
+        .backup_service
+        .create_backup(operator.username())
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -144,7 +149,9 @@ pub async fn restore(
             AppError::new(503, crate::tr!("error.backup.service_unavailable"))
         })?;
     if !acquired {
-        return Err(AppError::bad_request(&crate::tr!("error.backup.restore_in_progress")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.backup.restore_in_progress"
+        )));
     }
 
     let result = state
@@ -237,10 +244,7 @@ pub async fn download(
 ) -> Result<Response, AppError> {
     let (bytes, file_name) = state.backup_service.read_backup_file(backup_id).await?;
 
-    let content_disposition = format!(
-        "attachment; filename=\"{}\"",
-        file_name.replace('"', "")
-    );
+    let content_disposition = format!("attachment; filename=\"{}\"", file_name.replace('"', ""));
 
     let mut response = Response::new(bytes.into());
     *response.status_mut() = StatusCode::OK;
@@ -278,7 +282,9 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&backup_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.backup.id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.backup.id_invalid"
+        )));
     }
     if ids.len() > MAX_BATCH_DELETE_SIZE {
         return Err(AppError::bad_request(&crate::tr!(

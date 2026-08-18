@@ -12,12 +12,12 @@
 //!
 //! 与 request_id_middleware 同款 `from_fn` 风格。
 
-use axum::http::{header, HeaderValue};
+use axum::extract::Request;
+use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::extract::Request;
 
-use crate::common::i18n::{DEFAULT_LOCALE, SUPPORTED_LOCALES, LOCALE};
+use crate::common::i18n::{DEFAULT_LOCALE, LOCALE, SUPPORTED_LOCALES};
 
 /// 解析 Accept-Language 头并协商出支持的语言
 pub fn negotiate(accept: &str) -> String {

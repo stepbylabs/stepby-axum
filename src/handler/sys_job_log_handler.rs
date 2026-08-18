@@ -7,16 +7,16 @@
 //! - DELETE /monitor/jobLog/clean          清空任务日志
 //! - POST   /monitor/jobLog/export         导出任务日志列表
 
-use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
+use std::sync::Arc;
 
-use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
+use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_job_log::Model as SysJobLogModel;
 use crate::service::sys_job_service::JobLogQueryDto;
 use crate::state::AppState;
-use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /monitor/jobLog/list
@@ -60,7 +60,9 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&job_log_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.job_log.id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.job_log.id_invalid"
+        )));
     }
     if ids.len() > MAX_BATCH_DELETE_SIZE {
         return Err(AppError::bad_request(&crate::tr!(
@@ -84,9 +86,7 @@ pub async fn remove(
     ),
     tag = "monitor-joblog"
 )]
-pub async fn clean(
-    State(state): State<Arc<AppState>>,
-) -> Result<AjaxResult<()>, AppError> {
+pub async fn clean(State(state): State<Arc<AppState>>) -> Result<AjaxResult<()>, AppError> {
     state.job_service.clean_job_logs().await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.clear")))
 }
@@ -112,24 +112,73 @@ pub async fn export(
     let rows = state.job_service.export_job_logs(query).await?;
 
     let columns = [
-        ExcelColumn { key: "operId", header: ("日志编号", "Log ID"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_log_id.to_string().into()) },
-        ExcelColumn { key: "jobName", header: ("任务名称", "Job Name"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_name.clone().into()) },
-        ExcelColumn { key: "jobGroup", header: ("任务组名", "Job Group"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_group.clone().into()) },
-        ExcelColumn { key: "invokeTarget", header: ("调用目标字符串", "Invoke Target"), getter: |r: &SysJobLogModel| CellValue::Text(r.invoke_target.clone().into()) },
-        ExcelColumn { key: "jobMessage", header: ("日志信息", "Message"), getter: |r: &SysJobLogModel| CellValue::Text(r.job_message.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "execStatus", header: ("执行状态", "Status"), getter: |r: &SysJobLogModel| CellValue::Text(if r.status.as_deref() == Some("0") { crate::tr!("common.status.success") } else { crate::tr!("common.status.failed") }.into()) },
-        ExcelColumn { key: "exceptionInfo", header: ("异常信息", "Exception"), getter: |r: &SysJobLogModel| CellValue::Text(r.exception_info.clone().unwrap_or_default().into()) },
+        ExcelColumn {
+            key: "operId",
+            header: ("日志编号", "Log ID"),
+            getter: |r: &SysJobLogModel| CellValue::Text(r.job_log_id.to_string().into()),
+        },
+        ExcelColumn {
+            key: "jobName",
+            header: ("任务名称", "Job Name"),
+            getter: |r: &SysJobLogModel| CellValue::Text(r.job_name.clone().into()),
+        },
+        ExcelColumn {
+            key: "jobGroup",
+            header: ("任务组名", "Job Group"),
+            getter: |r: &SysJobLogModel| CellValue::Text(r.job_group.clone().into()),
+        },
+        ExcelColumn {
+            key: "invokeTarget",
+            header: ("调用目标字符串", "Invoke Target"),
+            getter: |r: &SysJobLogModel| CellValue::Text(r.invoke_target.clone().into()),
+        },
+        ExcelColumn {
+            key: "jobMessage",
+            header: ("日志信息", "Message"),
+            getter: |r: &SysJobLogModel| {
+                CellValue::Text(r.job_message.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "execStatus",
+            header: ("执行状态", "Status"),
+            getter: |r: &SysJobLogModel| {
+                CellValue::Text(
+                    if r.status.as_deref() == Some("0") {
+                        crate::tr!("common.status.success")
+                    } else {
+                        crate::tr!("common.status.failed")
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "exceptionInfo",
+            header: ("异常信息", "Exception"),
+            getter: |r: &SysJobLogModel| {
+                CellValue::Text(r.exception_info.clone().unwrap_or_default().into())
+            },
+        },
         ExcelColumn {
             key: "execTime",
             header: ("执行时间", "Execute Time"),
-            getter: |r: &SysJobLogModel| CellValue::Text({
-                r.create_time
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default()
-                    .into()
-            })
+            getter: |r: &SysJobLogModel| {
+                CellValue::Text({
+                    r.create_time
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default()
+                        .into()
+                })
+            },
         },
     ];
 
-    export_to_excel(&crate::tr!("excel.sheet.job_log"), "job_log", &columns, &rows).await
+    export_to_excel(
+        &crate::tr!("excel.sheet.job_log"),
+        "job_log",
+        &columns,
+        &rows,
+    )
+    .await
 }

@@ -13,8 +13,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
-use axum::extract::ws::{WebSocket, Message};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::state::AppState;
 use crate::jwt::JwtUtils;
+use crate::state::AppState;
 
 /// 每用户最大并发 WebSocket 连接数
 ///
@@ -95,7 +95,10 @@ fn extract_token_from_protocol(headers: &HeaderMap) -> Option<String> {
 /// 检查 token 是否在 Redis 黑名单中（fail-closed：Redis 异常时拒绝连接）
 ///
 /// 复用 auth_middleware 的黑名单机制：登出时将 token_hash 加入 `blacklist:{token_hash}` key
-async fn is_token_blacklisted(state: &AppState, token: &str) -> Result<bool, axum::http::StatusCode> {
+async fn is_token_blacklisted(
+    state: &AppState,
+    token: &str,
+) -> Result<bool, axum::http::StatusCode> {
     let token_hash = crate::utils::crypto::token_hash(token);
     let blacklist_key = format!("blacklist:{}", token_hash);
     let mut conn = state.redis.clone();
@@ -177,20 +180,24 @@ async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
 /// SCAN 匹配 `ws_conn:*` 后 DEL（复用 utils::redis::scan_keys 的 SCAN 游标实现，
 /// 避免 KEYS 阻塞 Redis）。失败仅记日志不阻断启动（计数留待 24h TTL 自然过期）。
 pub async fn reset_ws_conn_counts(state: &AppState) {
-    let keys = match crate::utils::redis::scan_keys(&mut state.redis.clone(), "ws_conn:*", 10000).await
-    {
-        Ok(keys) => keys,
-        Err(e) => {
-            tracing::warn!("WebSocket 连接计数重置失败（SCAN 异常，忽略）: {}", e);
-            return;
-        }
-    };
+    let keys =
+        match crate::utils::redis::scan_keys(&mut state.redis.clone(), "ws_conn:*", 10000).await {
+            Ok(keys) => keys,
+            Err(e) => {
+                tracing::warn!("WebSocket 连接计数重置失败（SCAN 异常，忽略）: {}", e);
+                return;
+            }
+        };
     if keys.is_empty() {
         return;
     }
     let mut conn = state.redis.clone();
     for key in &keys {
-        if let Err(e) = redis::cmd("DEL").arg(key).query_async::<i64>(&mut conn).await {
+        if let Err(e) = redis::cmd("DEL")
+            .arg(key)
+            .query_async::<i64>(&mut conn)
+            .await
+        {
             tracing::warn!("WebSocket 连接计数重置失败（DEL {}）: {}", key, e);
         }
     }
@@ -279,7 +286,11 @@ pub async fn ws_handler(
     if conn_count > MAX_WS_CONN_PER_USER {
         // 超限：回滚 INCR 并拒绝连接
         decr_ws_conn_count(&state, user_id).await;
-        warn!(user_id = user_id, count = conn_count, "WebSocket 拒绝连接：超过每用户最大连接数");
+        warn!(
+            user_id = user_id,
+            count = conn_count,
+            "WebSocket 拒绝连接：超过每用户最大连接数"
+        );
         return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
 

@@ -11,19 +11,19 @@
 //! - PUT    /monitor/job/run            手动执行一次
 //! - POST   /monitor/job/export         导出任务列表
 
-use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
+use std::sync::Arc;
 
-use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::common::ValidatedJson;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
+use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
 use crate::service::sys_job_service::{
     JobAddDto, JobEditDto, JobQueryDto, JobRunDto, JobStatusDto, JobVo,
 };
 use crate::state::AppState;
-use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /monitor/job/list
@@ -107,10 +107,7 @@ pub async fn edit(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<JobEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state
-        .job_service
-        .edit_job(dto, operator.username())
-        .await?;
+    state.job_service.edit_job(dto, operator.username()).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -165,7 +162,9 @@ pub async fn change_status(
     ValidatedJson(dto): ValidatedJson<JobStatusDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     state.job_service.change_status(dto).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.status_change")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.status_change"
+    )))
 }
 
 /// PUT /monitor/job/run
@@ -210,26 +209,89 @@ pub async fn export(
     let rows = state.job_service.export_jobs(query).await?;
 
     let columns = [
-        ExcelColumn { key: "jobId", header: ("任务编号", "Job ID"), getter: |r: &JobVo| CellValue::Text(r.job.job_id.to_string().into()) },
-        ExcelColumn { key: "jobName", header: ("任务名称", "Job Name"), getter: |r: &JobVo| CellValue::Text(r.job.job_name.clone().into()) },
-        ExcelColumn { key: "jobGroup", header: ("任务组名", "Job Group"), getter: |r: &JobVo| CellValue::Text(r.job.job_group.clone().into()) },
-        ExcelColumn { key: "invokeTarget", header: ("调用目标字符串", "Invoke Target"), getter: |r: &JobVo| CellValue::Text(r.job.invoke_target.clone().into()) },
-        ExcelColumn { key: "cronExpression", header: ("cron表达式", "Cron Expression"), getter: |r: &JobVo| CellValue::Text(r.job.cron_expression.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "misfirePolicy", header: ("错误策略", "Misfire Policy"), getter: |r: &JobVo| CellValue::Text(match r.job.misfire_policy.as_deref() {
-                Some("0") => crate::tr!("common.job.misfire_default"),
-                Some("1") => crate::tr!("common.job.misfire_immediate"),
-                Some("2") => crate::tr!("common.job.misfire_once"),
-                Some("3") => crate::tr!("common.job.misfire_give_up"),
-                _ => String::new(),
-            }.into()) },
-        ExcelColumn { key: "concurrent", header: ("并发执行", "Concurrent"), getter: |r: &JobVo| CellValue::Text(match r.job.concurrent.as_deref() {
-                Some("0") => crate::tr!("common.job.concurrent_allow"),
-                Some("1") => crate::tr!("common.job.concurrent_forbid"),
-                _ => String::new(),
-            }.into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &JobVo| CellValue::Text(if r.job.status.as_deref() == Some("0") { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
-        ExcelColumn { key: "nextValidTime", header: ("下次执行时间", "Next Run Time"), getter: |r: &JobVo| CellValue::Text(r.next_valid_time.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &JobVo| CellValue::Text(r.job.remark.clone().unwrap_or_default().into()) },
+        ExcelColumn {
+            key: "jobId",
+            header: ("任务编号", "Job ID"),
+            getter: |r: &JobVo| CellValue::Text(r.job.job_id.to_string().into()),
+        },
+        ExcelColumn {
+            key: "jobName",
+            header: ("任务名称", "Job Name"),
+            getter: |r: &JobVo| CellValue::Text(r.job.job_name.clone().into()),
+        },
+        ExcelColumn {
+            key: "jobGroup",
+            header: ("任务组名", "Job Group"),
+            getter: |r: &JobVo| CellValue::Text(r.job.job_group.clone().into()),
+        },
+        ExcelColumn {
+            key: "invokeTarget",
+            header: ("调用目标字符串", "Invoke Target"),
+            getter: |r: &JobVo| CellValue::Text(r.job.invoke_target.clone().into()),
+        },
+        ExcelColumn {
+            key: "cronExpression",
+            header: ("cron表达式", "Cron Expression"),
+            getter: |r: &JobVo| {
+                CellValue::Text(r.job.cron_expression.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "misfirePolicy",
+            header: ("错误策略", "Misfire Policy"),
+            getter: |r: &JobVo| {
+                CellValue::Text(
+                    match r.job.misfire_policy.as_deref() {
+                        Some("0") => crate::tr!("common.job.misfire_default"),
+                        Some("1") => crate::tr!("common.job.misfire_immediate"),
+                        Some("2") => crate::tr!("common.job.misfire_once"),
+                        Some("3") => crate::tr!("common.job.misfire_give_up"),
+                        _ => String::new(),
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "concurrent",
+            header: ("并发执行", "Concurrent"),
+            getter: |r: &JobVo| {
+                CellValue::Text(
+                    match r.job.concurrent.as_deref() {
+                        Some("0") => crate::tr!("common.job.concurrent_allow"),
+                        Some("1") => crate::tr!("common.job.concurrent_forbid"),
+                        _ => String::new(),
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "status",
+            header: ("状态", "Status"),
+            getter: |r: &JobVo| {
+                CellValue::Text(
+                    if r.job.status.as_deref() == Some("0") {
+                        crate::tr!("common.status.normal")
+                    } else {
+                        crate::tr!("common.status.disabled")
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "nextValidTime",
+            header: ("下次执行时间", "Next Run Time"),
+            getter: |r: &JobVo| {
+                CellValue::Text(r.next_valid_time.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "remark",
+            header: ("备注", "Remark"),
+            getter: |r: &JobVo| CellValue::Text(r.job.remark.clone().unwrap_or_default().into()),
+        },
     ];
 
     export_to_excel(&crate::tr!("excel.sheet.job"), "job", &columns, &rows).await

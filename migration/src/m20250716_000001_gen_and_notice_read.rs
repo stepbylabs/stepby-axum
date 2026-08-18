@@ -19,7 +19,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 impl sea_orm_migration::MigrationName for Migration {
@@ -83,7 +86,8 @@ async fn create_gen_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             update_by         VARCHAR(64)  DEFAULT '',
             update_time       DATETIME,
             remark            VARCHAR(500)
-        )"#.to_string()
+        )"#
+        .to_string()
     } else if is_postgres(manager) {
         r#"CREATE TABLE IF NOT EXISTS gen_table (
             table_id          BIGSERIAL PRIMARY KEY,
@@ -107,7 +111,8 @@ async fn create_gen_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             update_by         VARCHAR(64)  DEFAULT '',
             update_time       TIMESTAMP,
             remark            VARCHAR(500)
-        )"#.to_string()
+        )"#
+        .to_string()
     } else {
         // MySQL
         r#"CREATE TABLE IF NOT EXISTS gen_table (
@@ -132,7 +137,8 @@ async fn create_gen_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             update_by         VARCHAR(64)  DEFAULT '',
             update_time       DATETIME,
             remark            VARCHAR(500)
-        )"#.to_string()
+        )"#
+        .to_string()
     };
 
     manager.get_connection().execute_unprepared(&sql).await?;
@@ -175,7 +181,8 @@ async fn create_gen_table_column(manager: &SchemaManager<'_>) -> Result<(), DbEr
             create_time    DATETIME,
             update_by      VARCHAR(64) DEFAULT '',
             update_time    DATETIME
-        )"#.to_string()
+        )"#
+        .to_string()
     } else if is_postgres(manager) {
         r#"CREATE TABLE IF NOT EXISTS gen_table_column (
             column_id      BIGSERIAL PRIMARY KEY,
@@ -200,7 +207,8 @@ async fn create_gen_table_column(manager: &SchemaManager<'_>) -> Result<(), DbEr
             create_time    TIMESTAMP,
             update_by      VARCHAR(64) DEFAULT '',
             update_time    TIMESTAMP
-        )"#.to_string()
+        )"#
+        .to_string()
     } else {
         r#"CREATE TABLE IF NOT EXISTS gen_table_column (
             column_id      BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -225,7 +233,8 @@ async fn create_gen_table_column(manager: &SchemaManager<'_>) -> Result<(), DbEr
             create_time    DATETIME,
             update_by      VARCHAR(64) DEFAULT '',
             update_time    DATETIME
-        )"#.to_string()
+        )"#
+        .to_string()
     };
 
     manager.get_connection().execute_unprepared(&sql).await?;
@@ -251,7 +260,8 @@ async fn create_sys_notice_read(manager: &SchemaManager<'_>) -> Result<(), DbErr
             user_id    INTEGER NOT NULL,
             read_time  DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(notice_id, user_id)
-        )"#.to_string()
+        )"#
+        .to_string()
     } else if is_postgres(manager) {
         r#"CREATE TABLE IF NOT EXISTS sys_notice_read (
             read_id    BIGSERIAL PRIMARY KEY,
@@ -259,7 +269,8 @@ async fn create_sys_notice_read(manager: &SchemaManager<'_>) -> Result<(), DbErr
             user_id    BIGINT NOT NULL,
             read_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(notice_id, user_id)
-        )"#.to_string()
+        )"#
+        .to_string()
     } else {
         r#"CREATE TABLE IF NOT EXISTS sys_notice_read (
             read_id    BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -267,7 +278,8 @@ async fn create_sys_notice_read(manager: &SchemaManager<'_>) -> Result<(), DbErr
             user_id    BIGINT NOT NULL,
             read_time  DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(notice_id, user_id)
-        )"#.to_string()
+        )"#
+        .to_string()
     };
 
     manager.get_connection().execute_unprepared(&sql).await?;

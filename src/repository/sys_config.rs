@@ -33,9 +33,7 @@ impl SysConfigRepository {
 
     /// 按 config_id 查询单条参数配置
     pub async fn find_by_id(&self, config_id: i64) -> Result<Option<Model>, DbErr> {
-        SysConfig::find_by_id(config_id)
-            .one(self.base.db())
-            .await
+        SysConfig::find_by_id(config_id).one(self.base.db()).await
     }
 
     /// 按 config_key 查询（唯一约束，用于查重和按 key 取值）
@@ -69,8 +67,9 @@ impl SysConfigRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
-        let query = Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
-            .order_by_asc(Column::ConfigId); // P1：稳定排序，防翻页重复/漏行
+        let query =
+            Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
+                .order_by_asc(Column::ConfigId); // P1：稳定排序，防翻页重复/漏行
 
         let total = query.clone().count(self.base.db()).await?;
         let rows = query
@@ -91,11 +90,9 @@ impl SysConfigRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
     ) -> Result<Vec<Model>, DbErr> {
-        let query = Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time);
-        query
-            .limit(EXPORT_MAX_ROWS)
-            .all(self.base.db())
-            .await
+        let query =
+            Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time);
+        query.limit(EXPORT_MAX_ROWS).all(self.base.db()).await
     }
 
     /// 构建多条件查询（分页与全量查询共用）

@@ -57,6 +57,9 @@ pub mod scheduler;
 // ========== 前端静态资源嵌入 ==========
 pub mod embedded_assets;
 
+// ========== 文件存储抽象（F1：本地 / MinIO-S3）==========
+pub mod storage;
+
 // ========== 集成测试（login → getInfo 冒烟）==========
 // 仅在 `cargo test` 下编译；复用 crate 内部 pub 项构造隔离的 AppState。
 #[cfg(test)]

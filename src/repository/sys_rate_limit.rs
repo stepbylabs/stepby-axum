@@ -54,10 +54,7 @@ impl SysRateLimitRepository {
     }
 
     /// 按 route_pattern 精确查询（唯一约束，用于查重和中间件按路由取配置）
-    pub async fn find_by_route_pattern(
-        &self,
-        route_pattern: &str,
-    ) -> Result<Option<Model>, DbErr> {
+    pub async fn find_by_route_pattern(&self, route_pattern: &str) -> Result<Option<Model>, DbErr> {
         SysRateLimit::find()
             .filter(Column::RoutePattern.eq(route_pattern))
             .one(self.base.db())

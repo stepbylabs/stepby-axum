@@ -76,18 +76,29 @@ async fn async_main() -> anyhow::Result<()> {
     // 改为在 router 层通过 tower_http::timeout::TimeoutLayer 设置请求级超时（见 build_app），
     // 防止慢速请求耗尽连接池。生产环境建议同时在反向代理（Nginx）层配置
     // client_header_timeout / client_body_timeout 实现纵深防御。
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     tracing::info!("HTTP 服务已停止，正在关闭调度器...");
 
     // 优雅关闭调度器（P0-R81-020）
     // 使用 GRACEFUL_SHUTDOWN_TIMEOUT_SECS 超时保护，避免 shutdown 流程卡死导致进程无法退出
-    match tokio::time::timeout(Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS), job_scheduler.shutdown()).await {
+    match tokio::time::timeout(
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+        job_scheduler.shutdown(),
+    )
+    .await
+    {
         Ok(Ok(_)) => tracing::info!("调度器已正常关闭"),
         Ok(Err(e)) => tracing::warn!("调度器关闭失败（不阻断退出）: {}", e),
-        Err(_) => tracing::warn!("调度器关闭超时（>{}s），强制退出", GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+        Err(_) => tracing::warn!(
+            "调度器关闭超时（>{}s），强制退出",
+            GRACEFUL_SHUTDOWN_TIMEOUT_SECS
+        ),
     }
 
     tracing::info!("服务已优雅关闭");

@@ -28,7 +28,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 /// 当前时间表达式（跨数据库兼容）
@@ -87,12 +90,11 @@ impl MigrationTrait for Migration {
         execute_idempotent_insert(manager, &buttons_sql).await?;
 
         // 为普通角色 role_id=2 关联新增的 9 个菜单（超管通过 *:*:* 通配符访问，无需显式关联）
-        let role_menu_sql = format!(
-            "sys_role_menu (role_id, menu_id) VALUES \
+        let role_menu_sql = "sys_role_menu (role_id, menu_id) VALUES \
             (2, 118), (2, 119), (2, 120), \
             (2, 1200), (2, 1201), (2, 1202), \
             (2, 1203), (2, 1204), (2, 1205)"
-        );
+            .to_string();
         execute_idempotent_insert(manager, &role_menu_sql).await?;
 
         Ok(())

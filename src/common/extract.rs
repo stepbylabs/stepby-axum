@@ -6,13 +6,13 @@
 //! T-01：校验框架由 validator 迁移为 garde，
 //! 校验经 `common::i18n::validate` 按请求 locale 生成错误消息。
 
+use axum::Json;
 use axum::extract::FromRequest;
 use axum::extract::Request;
-use axum::Json;
 use serde::de::DeserializeOwned;
 
-use crate::common::i18n;
 use crate::common::AppError;
+use crate::common::i18n;
 
 /// 自动校验的 JSON 提取器（P1-24）
 ///
@@ -40,13 +40,11 @@ where
     type Rejection = AppError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(value) = Json::<T>::from_request(req, state)
-            .await
-            .map_err(|e| {
-                // P3 修复: JSON 解析错误可能包含字段路径/类型等内部细节，仅写日志
-                tracing::warn!(error = %e, "JSON 请求体解析失败");
-                AppError::bad_request(&crate::tr!("error.common.parse_failed"))
-            })?;
+        let Json(value) = Json::<T>::from_request(req, state).await.map_err(|e| {
+            // P3 修复: JSON 解析错误可能包含字段路径/类型等内部细节，仅写日志
+            tracing::warn!(error = %e, "JSON 请求体解析失败");
+            AppError::bad_request(&crate::tr!("error.common.parse_failed"))
+        })?;
         i18n::validate(&value).map_err(AppError::from)?;
         Ok(ValidatedJson(value))
     }

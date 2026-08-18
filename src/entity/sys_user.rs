@@ -3,8 +3,8 @@
 use std::fmt;
 
 use chrono::NaiveDateTime;
-use sea_orm::entity::prelude::*;
 use sea_orm::Set;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;
@@ -143,7 +143,13 @@ mod tests {
         );
 
         // 非敏感字段应正常输出
-        assert!(debug_str.contains("admin"), "Non-sensitive username should be visible");
-        assert!(debug_str.contains("Administrator"), "Non-sensitive nick_name should be visible");
+        assert!(
+            debug_str.contains("admin"),
+            "Non-sensitive username should be visible"
+        );
+        assert!(
+            debug_str.contains("Administrator"),
+            "Non-sensitive nick_name should be visible"
+        );
     }
 }

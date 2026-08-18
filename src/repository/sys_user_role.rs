@@ -89,7 +89,10 @@ impl SysUserRoleRepository {
     }
 
     /// 批量插入关联
-    pub async fn insert_many(&self, models: Vec<ActiveModel>) -> Result<InsertResult<ActiveModel>, DbErr> {
+    pub async fn insert_many(
+        &self,
+        models: Vec<ActiveModel>,
+    ) -> Result<InsertResult<ActiveModel>, DbErr> {
         SysUserRole::insert_many(models).exec(self.base.db()).await
     }
 

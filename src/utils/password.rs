@@ -20,8 +20,8 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 
 /// 旧密码方案的固定盐值（仅用于验证旧 MD5 哈希，不用于新密码）
@@ -35,19 +35,65 @@ const LEGACY_SALT: &str = "yebot_admin";
 /// M-7：使用 `LazyLock<HashSet<&str>>` 替代切片线性搜索，将 O(n) 检查降为 O(1)。
 static WEAK_PASSWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
     [
-        "123456", "12345678", "123456789", "1234567890", "1234567", "12345",
-        "password", "password1", "password123", "passwd", "passw0rd",
-        "admin", "admin123", "admin@123", "administrator", "root", "toor", "superuser",
-        "qwerty", "qwerty123", "qwertyuiop",
-        "abc123", "abcdef", "abc123456",
-        "letmein", "welcome", "welcome1", "welcome123",
-        "monkey", "dragon", "master", "shadow", "sunshine", "trustno1",
-        "login", "princess", "football", "baseball", "soccer",
-        "iloveyou", "starwars", "whatever", "cheese",
-        "000000", "111111", "666666", "888888", "999999",
-        "1q2w3e4r", "1qaz2wsx", "qazwsx",
-        "test", "test123", "test1234", "guest", "guest123",
-        "user", "user123", "default",
+        "123456",
+        "12345678",
+        "123456789",
+        "1234567890",
+        "1234567",
+        "12345",
+        "password",
+        "password1",
+        "password123",
+        "passwd",
+        "passw0rd",
+        "admin",
+        "admin123",
+        "admin@123",
+        "administrator",
+        "root",
+        "toor",
+        "superuser",
+        "qwerty",
+        "qwerty123",
+        "qwertyuiop",
+        "abc123",
+        "abcdef",
+        "abc123456",
+        "letmein",
+        "welcome",
+        "welcome1",
+        "welcome123",
+        "monkey",
+        "dragon",
+        "master",
+        "shadow",
+        "sunshine",
+        "trustno1",
+        "login",
+        "princess",
+        "football",
+        "baseball",
+        "soccer",
+        "iloveyou",
+        "starwars",
+        "whatever",
+        "cheese",
+        "000000",
+        "111111",
+        "666666",
+        "888888",
+        "999999",
+        "1q2w3e4r",
+        "1qaz2wsx",
+        "qazwsx",
+        "test",
+        "test123",
+        "test1234",
+        "guest",
+        "guest123",
+        "user",
+        "user123",
+        "default",
     ]
     .iter()
     .copied()
@@ -200,7 +246,11 @@ fn verify_legacy_md5(password: &str, hashed: &str) -> bool {
     let salted = format!("{}{}", password, LEGACY_SALT);
     let mut hasher = Md5::new();
     hasher.update(salted.as_bytes());
-    let computed: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+    let computed: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
     // 恒定时间比较：先比较长度（长度不同必然不等，但仍遍历完整字节避免长度泄露）
     // 再按位 XOR 累积差异，最终差异为 0 才相等
     constant_time_eq(computed.as_bytes(), hashed.as_bytes())
@@ -250,7 +300,11 @@ mod tests {
         use md5::{Digest, Md5};
         let mut hasher = Md5::new();
         hasher.update(salted.as_bytes());
-        let legacy_hashed: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        let legacy_hashed: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
 
         // 验证旧哈希能通过
         assert!(verify_password(password, &legacy_hashed));

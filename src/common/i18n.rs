@@ -15,8 +15,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::Display;
 
-use garde::i18n::{I18n, IpKind, InvalidCreditCard, InvalidEmail, InvalidPhoneNumber, InvalidUrl};
 use garde::Report;
+use garde::i18n::{I18n, InvalidCreditCard, InvalidEmail, InvalidPhoneNumber, InvalidUrl, IpKind};
 
 tokio::task_local! {
     /// 当前请求的语言（locale_middleware 按作用域注入）
@@ -103,11 +103,7 @@ pub fn is_zh() -> bool {
 ///
 /// 用于自定义校验函数等不便走 garde I18n / rust-i18n 的 colocated 场景。
 pub fn pick<'a>(zh: &'a str, en: &'a str) -> &'a str {
-    if is_zh() {
-        zh
-    } else {
-        en
-    }
+    if is_zh() { zh } else { en }
 }
 
 /// 业务文案翻译：rust-i18n 按**当前 locale** 查找固定 key（T-07）
@@ -201,9 +197,7 @@ pub fn module_keys_matching(text: &str) -> Vec<&'static str> {
     let lower = text.to_lowercase();
     MODULE_TITLES
         .iter()
-        .filter(|(_, zh, en)| {
-            zh.contains(text) || en.to_lowercase().contains(&lower)
-        })
+        .filter(|(_, zh, en)| zh.contains(text) || en.to_lowercase().contains(&lower))
         .map(|(k, _, _)| *k)
         .collect()
 }
@@ -325,8 +319,14 @@ mod tests {
         let report = validate(&dto).unwrap_err();
         let msgs: Vec<String> = report.iter().map(|(p, e)| format!("{p}: {e}")).collect();
         let joined = msgs.join("; ");
-        assert!(joined.contains("长度不能少于 2"), "应包含长度下限中文消息: {joined}");
-        assert!(joined.contains("数值不能大于 100"), "应包含范围上限中文消息: {joined}");
+        assert!(
+            joined.contains("长度不能少于 2"),
+            "应包含长度下限中文消息: {joined}"
+        );
+        assert!(
+            joined.contains("数值不能大于 100"),
+            "应包含范围上限中文消息: {joined}"
+        );
         assert!(joined.contains("name"), "应包含字段路径: {joined}");
     }
 
@@ -364,7 +364,10 @@ mod tests {
         // "user" 命中 "User Management"(user) 与 "Online Users"(online，子串)
         let keys = module_keys_matching("USER");
         assert!(keys.contains(&"module.user"), "应匹配 user: {keys:?}");
-        assert!(keys.contains(&"module.online"), "应匹配 online users: {keys:?}");
+        assert!(
+            keys.contains(&"module.online"),
+            "应匹配 online users: {keys:?}"
+        );
     }
 
     #[test]

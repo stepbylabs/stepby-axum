@@ -11,8 +11,14 @@ use sea_orm::*;
 use serde::Serialize;
 
 use crate::common::like_escape;
-use crate::entity::gen_table::{ActiveModel as GenTableActiveModel, Column as GenTableColumn, Entity as GenTable, Model as GenTableModel};
-use crate::entity::gen_table_column::{ActiveModel as GenTableColumnActiveModel, Column as GenColumn, Entity as GenTableColumnEntity, Model as GenTableColumnModel};
+use crate::entity::gen_table::{
+    ActiveModel as GenTableActiveModel, Column as GenTableColumn, Entity as GenTable,
+    Model as GenTableModel,
+};
+use crate::entity::gen_table_column::{
+    ActiveModel as GenTableColumnActiveModel, Column as GenColumn, Entity as GenTableColumnEntity,
+    Model as GenTableColumnModel,
+};
 use crate::repository::base::BaseRepository;
 
 /// 数据库表元数据视图（用于导入表时读取数据库现有表结构）
@@ -64,10 +70,12 @@ impl GenTableRepository {
     ) -> Result<(Vec<GenTableModel>, u64), DbErr> {
         let mut query = GenTable::find();
         if let Some(name) = table_name {
-            query = query.filter(GenTableColumn::TableName.like(format!("%{}%", like_escape(name))));
+            query =
+                query.filter(GenTableColumn::TableName.like(format!("%{}%", like_escape(name))));
         }
         if let Some(comment) = table_comment {
-            query = query.filter(GenTableColumn::TableComment.like(format!("%{}%", like_escape(comment))));
+            query = query
+                .filter(GenTableColumn::TableComment.like(format!("%{}%", like_escape(comment))));
         }
         if let Some(begin) = begin_time {
             query = query.filter(GenTableColumn::CreateTime.gte(begin));
@@ -114,7 +122,10 @@ impl GenTableRepository {
     }
 
     /// 按 table_name 列表批量查询代码生成业务表（单次查询替代 N 次 find_by_name）
-    pub async fn find_by_names(&self, table_names: Vec<String>) -> Result<Vec<GenTableModel>, DbErr> {
+    pub async fn find_by_names(
+        &self,
+        table_names: Vec<String>,
+    ) -> Result<Vec<GenTableModel>, DbErr> {
         if table_names.is_empty() {
             return Ok(Vec::new());
         }
@@ -183,123 +194,139 @@ impl GenTableRepository {
         // total 恒 ≤ pageSize 且跨页漏表/重复"的缺陷。
         let (sql, count_sql, data_values, count_values): (String, String, Vec<Value>, Vec<Value>) =
             match backend {
-            DatabaseBackend::Sqlite => {
-                let mut base_where = "type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'AUTHS_%'".to_string();
-                // SQLite _cf_ 通配符误用修复：`_cf_%` 中 `_` 是单字符通配符，会误排除 xcfX 等表；
-                // 意图为字面前缀 `_cf_`，改用 ESCAPE 转义（P1）
-                base_where = base_where.replace("name NOT LIKE '_cf_%'", "name NOT LIKE '\\_cf\\_%' ESCAPE '\\'");
-                let mut where_clause = base_where;
-                let mut vals: Vec<Value> = Vec::new();
-                if !imported.is_empty() {
-                    // 排除已导入表（参数化 NOT IN）
-                    where_clause.push_str(" AND name NOT IN (");
-                    where_clause.push_str(&vec!["?"; imported.len()].join(","));
-                    where_clause.push(')');
-                    vals.extend(imported.iter().cloned().map(Value::from));
+                DatabaseBackend::Sqlite => {
+                    let mut base_where = "type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'AUTHS_%'".to_string();
+                    // SQLite _cf_ 通配符误用修复：`_cf_%` 中 `_` 是单字符通配符，会误排除 xcfX 等表；
+                    // 意图为字面前缀 `_cf_`，改用 ESCAPE 转义（P1）
+                    base_where = base_where.replace(
+                        "name NOT LIKE '_cf_%'",
+                        "name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
+                    );
+                    let mut where_clause = base_where;
+                    let mut vals: Vec<Value> = Vec::new();
+                    if !imported.is_empty() {
+                        // 排除已导入表（参数化 NOT IN）
+                        where_clause.push_str(" AND name NOT IN (");
+                        where_clause.push_str(&vec!["?"; imported.len()].join(","));
+                        where_clause.push(')');
+                        vals.extend(imported.iter().cloned().map(Value::from));
+                    }
+                    if let Some(name) = table_name {
+                        where_clause.push_str(" AND name LIKE ? ESCAPE '\\'");
+                        vals.push(format!("%{}%", like_escape(name)).into());
+                    }
+                    if let Some(comment) = table_comment {
+                        where_clause.push_str(" AND sql LIKE ? ESCAPE '\\'");
+                        vals.push(format!("%{}%", like_escape(comment)).into());
+                    }
+                    let mut data_vals = vals.clone();
+                    data_vals.push((limit as i64).into());
+                    data_vals.push((offset as i64).into());
+                    let sql = format!(
+                        "SELECT name AS table_name, '' AS table_comment FROM sqlite_master WHERE {} ORDER BY name LIMIT ? OFFSET ?",
+                        where_clause
+                    );
+                    let count_sql = format!(
+                        "SELECT COUNT(*) AS count FROM sqlite_master WHERE {}",
+                        where_clause
+                    );
+                    (sql, count_sql, data_vals, vals)
                 }
-                if let Some(name) = table_name {
-                    where_clause.push_str(" AND name LIKE ? ESCAPE '\\'");
-                    vals.push(format!("%{}%", like_escape(name)).into());
-                }
-                if let Some(comment) = table_comment {
-                    where_clause.push_str(" AND sql LIKE ? ESCAPE '\\'");
-                    vals.push(format!("%{}%", like_escape(comment)).into());
-                }
-                let mut data_vals = vals.clone();
-                data_vals.push((limit as i64).into());
-                data_vals.push((offset as i64).into());
-                let sql = format!(
-                    "SELECT name AS table_name, '' AS table_comment FROM sqlite_master WHERE {} ORDER BY name LIMIT ? OFFSET ?",
-                    where_clause
-                );
-                let count_sql = format!(
-                    "SELECT COUNT(*) AS count FROM sqlite_master WHERE {}",
-                    where_clause
-                );
-                (sql, count_sql, data_vals, vals)
-            }
-            DatabaseBackend::Postgres => {
-                let mut where_clause = "table_schema='public' AND table_type='BASE TABLE'".to_string();
-                let mut vals: Vec<Value> = Vec::new();
-                let mut idx = 1usize;
-                if !imported.is_empty() {
-                    let placeholders: Vec<String> = (0..imported.len())
-                        .map(|i| format!("${}", idx + i))
-                        .collect();
-                    where_clause.push_str(&format!(
-                        " AND table_name NOT IN ({})",
-                        placeholders.join(",")
-                    ));
-                    vals.extend(imported.iter().cloned().map(Value::from));
-                    idx += imported.len();
-                }
-                if let Some(name) = table_name {
-                    where_clause.push_str(&format!(" AND table_name LIKE ${} ESCAPE '\\'", idx));
-                    vals.push(format!("%{}%", like_escape(name)).into());
-                    idx += 1;
-                }
-                if let Some(comment) = table_comment {
-                    where_clause.push_str(&format!(
+                DatabaseBackend::Postgres => {
+                    let mut where_clause =
+                        "table_schema='public' AND table_type='BASE TABLE'".to_string();
+                    let mut vals: Vec<Value> = Vec::new();
+                    let mut idx = 1usize;
+                    if !imported.is_empty() {
+                        let placeholders: Vec<String> = (0..imported.len())
+                            .map(|i| format!("${}", idx + i))
+                            .collect();
+                        where_clause.push_str(&format!(
+                            " AND table_name NOT IN ({})",
+                            placeholders.join(",")
+                        ));
+                        vals.extend(imported.iter().cloned().map(Value::from));
+                        idx += imported.len();
+                    }
+                    if let Some(name) = table_name {
+                        where_clause
+                            .push_str(&format!(" AND table_name LIKE ${} ESCAPE '\\'", idx));
+                        vals.push(format!("%{}%", like_escape(name)).into());
+                        idx += 1;
+                    }
+                    if let Some(comment) = table_comment {
+                        where_clause.push_str(&format!(
                         " AND obj_description((quote_ident(table_schema)||'.'||quote_ident(table_name))::regclass, 'pg_class') LIKE ${} ESCAPE '\\'",
                         idx
                     ));
-                    vals.push(format!("%{}%", like_escape(comment)).into());
-                    idx += 1;
-                }
-                let mut data_vals = vals.clone();
-                data_vals.push((limit as i64).into());
-                data_vals.push((offset as i64).into());
-                let sql = format!(
-                    "SELECT table_name, COALESCE(obj_description((quote_ident(table_schema)||'.'||quote_ident(table_name))::regclass, 'pg_class'), '') AS table_comment \
+                        vals.push(format!("%{}%", like_escape(comment)).into());
+                        idx += 1;
+                    }
+                    let mut data_vals = vals.clone();
+                    data_vals.push((limit as i64).into());
+                    data_vals.push((offset as i64).into());
+                    let sql = format!(
+                        "SELECT table_name, COALESCE(obj_description((quote_ident(table_schema)||'.'||quote_ident(table_name))::regclass, 'pg_class'), '') AS table_comment \
                      FROM information_schema.tables WHERE {} ORDER BY table_name LIMIT ${} OFFSET ${}",
-                    where_clause, idx, idx + 1
-                );
-                let count_sql = format!(
-                    "SELECT COUNT(*) AS count FROM information_schema.tables WHERE {}",
-                    where_clause
-                );
-                (sql, count_sql, data_vals, vals)
-            }
-            DatabaseBackend::MySql => {
-                let mut where_clause = "table_schema = DATABASE() AND table_type = 'BASE TABLE'".to_string();
-                let mut vals: Vec<Value> = Vec::new();
-                if !imported.is_empty() {
-                    where_clause.push_str(" AND table_name NOT IN (");
-                    where_clause.push_str(&vec!["?"; imported.len()].join(","));
-                    where_clause.push(')');
-                    vals.extend(imported.iter().cloned().map(Value::from));
+                        where_clause,
+                        idx,
+                        idx + 1
+                    );
+                    let count_sql = format!(
+                        "SELECT COUNT(*) AS count FROM information_schema.tables WHERE {}",
+                        where_clause
+                    );
+                    (sql, count_sql, data_vals, vals)
                 }
-                if let Some(name) = table_name {
-                    where_clause.push_str(" AND table_name LIKE ? ESCAPE '\\'");
-                    vals.push(format!("%{}%", like_escape(name)).into());
-                }
-                if let Some(comment) = table_comment {
-                    where_clause.push_str(" AND table_comment LIKE ? ESCAPE '\\'");
-                    vals.push(format!("%{}%", like_escape(comment)).into());
-                }
-                let mut data_vals = vals.clone();
-                data_vals.push((limit as i64).into());
-                data_vals.push((offset as i64).into());
-                let sql = format!(
-                    "SELECT table_name, IFNULL(table_comment, '') AS table_comment \
+                DatabaseBackend::MySql => {
+                    let mut where_clause =
+                        "table_schema = DATABASE() AND table_type = 'BASE TABLE'".to_string();
+                    let mut vals: Vec<Value> = Vec::new();
+                    if !imported.is_empty() {
+                        where_clause.push_str(" AND table_name NOT IN (");
+                        where_clause.push_str(&vec!["?"; imported.len()].join(","));
+                        where_clause.push(')');
+                        vals.extend(imported.iter().cloned().map(Value::from));
+                    }
+                    if let Some(name) = table_name {
+                        where_clause.push_str(" AND table_name LIKE ? ESCAPE '\\'");
+                        vals.push(format!("%{}%", like_escape(name)).into());
+                    }
+                    if let Some(comment) = table_comment {
+                        where_clause.push_str(" AND table_comment LIKE ? ESCAPE '\\'");
+                        vals.push(format!("%{}%", like_escape(comment)).into());
+                    }
+                    let mut data_vals = vals.clone();
+                    data_vals.push((limit as i64).into());
+                    data_vals.push((offset as i64).into());
+                    let sql = format!(
+                        "SELECT table_name, IFNULL(table_comment, '') AS table_comment \
                      FROM information_schema.tables WHERE {} ORDER BY table_name LIMIT ? OFFSET ?",
-                    where_clause
-                );
-                let count_sql = format!(
-                    "SELECT COUNT(*) AS count FROM information_schema.tables WHERE {}",
-                    where_clause
-                );
-                (sql, count_sql, data_vals, vals)
-            }
-        };
+                        where_clause
+                    );
+                    let count_sql = format!(
+                        "SELECT COUNT(*) AS count FROM information_schema.tables WHERE {}",
+                        where_clause
+                    );
+                    (sql, count_sql, data_vals, vals)
+                }
+            };
 
-        let rows = DbTableInfo::find_by_statement(Statement::from_sql_and_values(backend, &sql, data_values))
-            .all(db)
-            .await?;
+        let rows = DbTableInfo::find_by_statement(Statement::from_sql_and_values(
+            backend,
+            &sql,
+            data_values,
+        ))
+        .all(db)
+        .await?;
 
         // 精确总数：COUNT 查询（已排除已导入表，P0-9 修复：不再用当前页内存过滤行数充当 total）
         let total: i64 = db
-            .query_one(Statement::from_sql_and_values(backend, &count_sql, count_values))
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                &count_sql,
+                count_values,
+            ))
             .await?
             .and_then(|row| row.try_get("", "count").ok())
             .unwrap_or(0);
@@ -328,7 +355,9 @@ impl GenTableRepository {
                 }
                 let sql = format!("PRAGMA table_info('{}')", table_name);
                 // PRAGMA table_info 返回：cid, name, type, notnull, dflt_value, pk
-                let raw_rows = db.query_all(Statement::from_sql_and_values(backend, &sql, vec![])).await?;
+                let raw_rows = db
+                    .query_all(Statement::from_sql_and_values(backend, &sql, vec![]))
+                    .await?;
                 let mut result = Vec::new();
                 for row in raw_rows {
                     let name: String = row.try_get("", "name")?;
@@ -355,17 +384,25 @@ impl GenTableRepository {
                      CASE WHEN column_default LIKE 'nextval%' THEN 'auto_increment' ELSE '' END AS extra, \
                      ordinal_position::bigint \
                      FROM information_schema.columns WHERE table_name=$1 AND table_schema='public' ORDER BY ordinal_position";
-                DbColumnInfo::find_by_statement(Statement::from_sql_and_values(backend, sql, vec![table_name.into()]))
-                    .all(db)
-                    .await
+                DbColumnInfo::find_by_statement(Statement::from_sql_and_values(
+                    backend,
+                    sql,
+                    vec![table_name.into()],
+                ))
+                .all(db)
+                .await
             }
             DatabaseBackend::MySql => {
                 let sql = "SELECT column_name, column_type, IFNULL(column_comment, '') AS column_comment, \
                      is_nullable, column_key, extra, ordinal_position \
                      FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ordinal_position";
-                DbColumnInfo::find_by_statement(Statement::from_sql_and_values(backend, sql, vec![table_name.into()]))
-                    .all(db)
-                    .await
+                DbColumnInfo::find_by_statement(Statement::from_sql_and_values(
+                    backend,
+                    sql,
+                    vec![table_name.into()],
+                ))
+                .all(db)
+                .await
             }
         }
     }
@@ -373,7 +410,10 @@ impl GenTableRepository {
     // ============ gen_table_column 操作 ============
 
     /// 按 table_id 查询所有列
-    pub async fn find_columns_by_table_id(&self, table_id: i64) -> Result<Vec<GenTableColumnModel>, DbErr> {
+    pub async fn find_columns_by_table_id(
+        &self,
+        table_id: i64,
+    ) -> Result<Vec<GenTableColumnModel>, DbErr> {
         GenTableColumnEntity::find()
             .filter(GenColumn::TableId.eq(table_id))
             .order_by_asc(GenColumn::Sort)
@@ -400,7 +440,10 @@ impl GenTableRepository {
     }
 
     /// 批量新增列（单次 INSERT，替代循环 N 次）
-    pub async fn insert_columns(&self, columns: Vec<GenTableColumnActiveModel>) -> Result<(), DbErr> {
+    pub async fn insert_columns(
+        &self,
+        columns: Vec<GenTableColumnActiveModel>,
+    ) -> Result<(), DbErr> {
         if columns.is_empty() {
             return Ok(());
         }
@@ -419,7 +462,10 @@ impl GenTableRepository {
     }
 
     /// 按 table_id 列表删除所有列（删除表时级联清理）
-    pub async fn delete_columns_by_table_ids(&self, table_ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
+    pub async fn delete_columns_by_table_ids(
+        &self,
+        table_ids: Vec<i64>,
+    ) -> Result<DeleteResult, DbErr> {
         GenTableColumnEntity::delete_many()
             .filter(GenColumn::TableId.is_in(table_ids))
             .exec(self.base.db())
@@ -447,9 +493,7 @@ impl GenTableRepository {
         if columns.is_empty() {
             return Ok(());
         }
-        GenTableColumnEntity::insert_many(columns)
-            .exec(txn)
-            .await?;
+        GenTableColumnEntity::insert_many(columns).exec(txn).await?;
         Ok(())
     }
 

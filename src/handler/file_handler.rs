@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Query, State};
 use axum::Json;
+use axum::extract::{Multipart, Query, State};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -33,8 +33,12 @@ pub struct FileListQuery {
     pub page_size: u64,
 }
 
-fn default_page() -> u64 { 1 }
-fn default_size() -> u64 { 20 }
+fn default_page() -> u64 {
+    1
+}
+fn default_size() -> u64 {
+    20
+}
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -85,44 +89,15 @@ pub async fn list(
     let page_num = params.page_num.clamp(1, 10_000);
     let page_size = params.page_size.clamp(1, 100);
 
-    // 读取 uploads 目录下所有文件
-    let upload_dir = std::path::Path::new(&upload_cfg.common_dir);
+    // 统一走存储后端列举（local 读目录 / s3 ListObjectsV2），URL 由后端生成
+    let objects = state
+        .storage
+        .list(&upload_cfg.common_dir, &upload_cfg.common_url_prefix)
+        .await?;
+
     let mut files: Vec<FileInfo> = Vec::new();
-
-    // 目录存在性检查 + 读取目录条目 + 获取每个文件的 metadata 全部在 spawn_blocking 中完成，
-    // 避免 async 上下文中逐文件调用 `std::fs::DirEntry::metadata()` 阻塞 Tokio worker。
-    let entries: Vec<(String, u64, i64)> = tokio::task::spawn_blocking({
-        let dir = upload_dir.to_path_buf();
-        move || -> std::io::Result<Vec<(String, u64, i64)>> {
-            if !dir.exists() {
-                return Ok(Vec::new());
-            }
-            let mut result = Vec::new();
-            for entry in std::fs::read_dir(&dir)? {
-                let Ok(entry) = entry else { continue };
-                let Ok(meta) = entry.metadata() else { continue };
-                if !meta.is_file() {
-                    continue;
-                }
-                let name = entry.file_name().to_string_lossy().to_string();
-                let size = meta.len();
-                let modified = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-                    .unwrap_or(0);
-                result.push((name, size, modified));
-            }
-            Ok(result)
-        }
-    })
-    .await
-    .map_err(|_| AppError::internal(&crate::tr!("error.file.list_task_failed")))?
-    .map_err(|_| AppError::internal(&crate::tr!("error.file.list_failed")))?;
-
-    for (name, size, modified_secs) in entries {
-        let ext = std::path::Path::new(&name)
+    for obj in objects {
+        let ext = std::path::Path::new(&obj.name)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
@@ -131,7 +106,7 @@ pub async fn list(
         // 筛选：文件名前缀
         if let Some(prefix) = &params.file_name
             && !prefix.is_empty()
-            && !name.contains(prefix)
+            && !obj.name.contains(prefix)
         {
             continue;
         }
@@ -143,17 +118,18 @@ pub async fn list(
             continue;
         }
 
-        let url = format!("{}/{}", upload_cfg.common_url_prefix, name);
-        let modified = chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_secs as u64))
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
+        let modified = chrono::DateTime::<chrono::Local>::from(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(obj.modified_secs as u64),
+        )
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
 
         files.push(FileInfo {
-            file_name: name.clone(),
-            file_size: size,
-            file_size_str: format_file_size(size),
+            file_name: obj.name.clone(),
+            file_size: obj.size,
+            file_size_str: format_file_size(obj.size),
             ext,
-            url,
+            url: obj.url,
             last_modified: modified,
         });
     }
@@ -201,6 +177,7 @@ pub async fn upload(
 
     // P0-3：统一校验 + 保存（扩展名白名单、危险类型拒绝、magic bytes 严格化、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
+        state.storage.as_ref(),
         file_bytes
             .as_deref()
             .ok_or_else(|| AppError::bad_request(&crate::tr!("error.file.field_not_found")))?,
@@ -240,17 +217,17 @@ pub async fn delete(
         || file_name.contains("..")
         || file_name.contains('\0')
     {
-        return Err(AppError::bad_request(&crate::tr!("error.file.invalid_name")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.file.invalid_name"
+        )));
     }
 
     let upload_cfg = &state.config.upload;
-    // P0-3：解析受控根目录并传入 delete_upload_file 做前缀强制校验（防任意文件删除）
-    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir).await;
-    let file_path = common_dir.join(file_name);
-    let root_str = common_dir.to_string_lossy().to_string();
-    let path_str = file_path.to_string_lossy().to_string();
-
-    crate::common::upload::delete_upload_file(&path_str, &root_str).await?;
+    // 统一走存储后端删除（local 本地删盘带根目录前缀校验 / s3 DeleteObject，幂等）
+    state
+        .storage
+        .delete(&upload_cfg.common_dir, file_name)
+        .await?;
 
     tracing::info!(file_name = %file_name, "文件已删除");
 
@@ -262,7 +239,9 @@ pub async fn delete(
 /// 格式化文件大小（人类可读）
 fn format_file_size(size: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    if size == 0 { return "0 B".to_string(); }
+    if size == 0 {
+        return "0 B".to_string();
+    }
     let mut s = size as f64;
     let mut i = 0;
     while s >= 1024.0 && i < UNITS.len() - 1 {

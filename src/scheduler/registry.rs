@@ -11,8 +11,8 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{LazyLock, RwLock};
 use std::sync::Arc;
+use std::sync::{LazyLock, RwLock};
 
 use futures::future::BoxFuture;
 
@@ -23,11 +23,8 @@ use futures::future::BoxFuture;
 ///
 /// - `Ok(msg)` — 执行成功，msg 为执行信息（写入 job_message）
 /// - `Err(err)` — 执行失败，err 为类型化错误（`to_string()` 后写入 exception_info）
-pub type TaskFn = Arc<
-    dyn Fn() -> BoxFuture<'static, Result<String, Box<dyn Error + Send + Sync>>>
-        + Send
-        + Sync,
->;
+pub type TaskFn =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<String, Box<dyn Error + Send + Sync>>> + Send + Sync>;
 
 /// 全局任务注册表（invoke_target 字符串 → 任务函数）
 static TASK_REGISTRY: LazyLock<RwLock<HashMap<String, TaskFn>>> =
@@ -42,9 +39,7 @@ static TASK_REGISTRY: LazyLock<RwLock<HashMap<String, TaskFn>>> =
 ///
 /// 容错：锁中毒时（持有锁的线程曾 panic）通过 `into_inner` 恢复守卫，避免 panic 扩散。
 pub fn register_task(invoke_target: &str, func: TaskFn) {
-    let mut registry = TASK_REGISTRY
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut registry = TASK_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     registry.insert(invoke_target.to_string(), func);
 }
 
@@ -54,9 +49,7 @@ pub fn register_task(invoke_target: &str, func: TaskFn) {
 ///
 /// 容错：锁中毒时恢复守卫，保证查询不因其他线程的 panic 而失败。
 pub fn get_task(invoke_target: &str) -> Option<TaskFn> {
-    let registry = TASK_REGISTRY
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let registry = TASK_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
     registry.get(invoke_target).cloned()
 }
 
@@ -66,9 +59,7 @@ pub fn get_task(invoke_target: &str) -> Option<TaskFn> {
 ///
 /// 容错：锁中毒时恢复守卫，返回当前已注册内容。
 pub fn list_registered_tasks() -> Vec<String> {
-    let registry = TASK_REGISTRY
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let registry = TASK_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
     registry.keys().cloned().collect()
 }
 
@@ -81,9 +72,7 @@ mod tests {
     /// 测试注册后能查到任务函数
     #[tokio::test]
     async fn test_register_and_get_task() {
-        let func: TaskFn = Arc::new(|| {
-            Box::pin(async { Ok("test ok".to_string()) })
-        });
+        let func: TaskFn = Arc::new(|| Box::pin(async { Ok("test ok".to_string()) }));
         register_task("testTask.simple", func);
 
         let retrieved = get_task("testTask.simple");

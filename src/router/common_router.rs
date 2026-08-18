@@ -22,7 +22,10 @@ pub fn common_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/common/upload", post(common_handler::upload))
         .route("/common/download", get(common_handler::download))
-        .route("/common/download/resource", get(common_handler::download_resource))
+        .route(
+            "/common/download/resource",
+            get(common_handler::download_resource),
+        )
         .route("/dashboard/stats", get(common_handler::dashboard_stats))
         .route("/dashboard/user-stats", get(common_handler::user_stats))
 }

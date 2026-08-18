@@ -11,18 +11,16 @@
 
 use std::time::Duration;
 
+use garde::Validate;
 use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
-use crate::entity::sys_config::{
-    ActiveModel as SysConfigActiveModel, Model as SysConfigModel,
-};
+use crate::entity::sys_config::{ActiveModel as SysConfigActiveModel, Model as SysConfigModel};
 use crate::repository::sys_config::SysConfigRepository;
 
 /// 配置缓存 key 前缀（H-4：cache-aside）
@@ -149,9 +147,9 @@ impl SysConfigService {
             redis::cmd("GET").arg(&cache_key).query_async(&mut conn),
         )
         .await
-        .ok()                  // 超时 → None（降级到 DB）
-        .and_then(|r| r.ok())  // Redis 错误 → None
-        .flatten();            // Option<Option<String>> → Option<String>
+        .ok() // 超时 → None（降级到 DB）
+        .and_then(|r| r.ok()) // Redis 错误 → None
+        .flatten(); // Option<Option<String>> → Option<String>
 
         if let Some(val) = cached {
             // P2：识别 None sentinel，避免缓存穿透
@@ -167,8 +165,14 @@ impl SysConfigService {
 
         // 3. 缓存结果（best-effort）：Some 值按正常 TTL 缓存；
         //    None 缓存 sentinel（P2：60s 短 TTL，既防穿透又避免长期陈旧）
-        let cache_ttl = if value.is_some() { CONFIG_CACHE_TTL } else { 60i64 };
-        let cache_value = value.clone().unwrap_or_else(|| CONFIG_NULL_MARKER.to_string());
+        let cache_ttl = if value.is_some() {
+            CONFIG_CACHE_TTL
+        } else {
+            60i64
+        };
+        let cache_value = value
+            .clone()
+            .unwrap_or_else(|| CONFIG_NULL_MARKER.to_string());
         let _ = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
             redis::cmd("SETEX")
@@ -189,7 +193,9 @@ impl SysConfigService {
         let mut conn = self.redis.clone();
         let result = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("DEL").arg(&cache_key).query_async::<()>(&mut conn),
+            redis::cmd("DEL")
+                .arg(&cache_key)
+                .query_async::<()>(&mut conn),
         )
         .await;
         match result {
@@ -247,10 +253,7 @@ impl SysConfigService {
     }
 
     /// 根据 config_id 查询参数配置详情
-    pub async fn get_config_by_id(
-        &self,
-        config_id: i64,
-    ) -> Result<SysConfigModel, ServiceError> {
+    pub async fn get_config_by_id(&self, config_id: i64) -> Result<SysConfigModel, ServiceError> {
         let model = self
             .config_repo
             .find_by_id(config_id)
@@ -264,10 +267,7 @@ impl SysConfigService {
     /// 返回 config_value 字符串；若配置不存在返回 not_found。
     /// 安全：密钥类配置（key 含 secret/password/passwd/token/key/私钥/口令 等）返回值脱敏为 `***`，
     /// 避免通过 /system/config/configKey/{key} 接口泄露敏感明文（SEC-信息泄露面）。
-    pub async fn get_config_by_key(
-        &self,
-        config_key: &str,
-    ) -> Result<String, ServiceError> {
+    pub async fn get_config_by_key(&self, config_key: &str) -> Result<String, ServiceError> {
         let model = self
             .config_repo
             .find_by_config_key(config_key)
@@ -310,7 +310,9 @@ impl SysConfigService {
         // config_key 唯一性校验
         let existing = self.config_repo.find_by_config_key(&dto.config_key).await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.config.key_exists")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.config.key_exists"
+            )));
         }
 
         let now = crate::common::datetime::now_naive();
@@ -350,7 +352,9 @@ impl SysConfigService {
         if dto.config_key != old_key {
             let conflict = self.config_repo.find_by_config_key(&dto.config_key).await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.config.key_exists")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.config.key_exists"
+                )));
             }
         }
 
@@ -386,7 +390,8 @@ impl SysConfigService {
             let mut conn = self.redis.clone();
             let mut pipe = redis::pipe();
             for m in &models {
-                pipe.cmd("DEL").arg(format!("{}{}", CONFIG_CACHE_PREFIX, m.config_key));
+                pipe.cmd("DEL")
+                    .arg(format!("{}{}", CONFIG_CACHE_PREFIX, m.config_key));
             }
             if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
                 tracing::warn!("批量失效配置缓存失败: {}", e);

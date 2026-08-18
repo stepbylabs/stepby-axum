@@ -8,28 +8,26 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use garde::Validate;
 use redis::aio::ConnectionManager;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait};
-use serde::Deserialize;
-use std::sync::LazyLock;
 use regex::Regex;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait};
+use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
+use crate::common::TreeSelectVo;
 use crate::common::constants::SUPER_ADMIN_USER_ID;
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
-use crate::common::TreeSelectVo;
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_dept::Model as SysDeptModel;
+use crate::entity::sys_notice_read::{Column as NoticeReadColumn, Entity as SysNoticeRead};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
-use crate::entity::sys_user::{
-    ActiveModel as SysUserActiveModel, Model as SysUserModel,
-};
-use crate::entity::sys_user_role::ActiveModel as SysUserRoleActiveModel;
+use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Model as SysUserModel};
 use crate::entity::sys_user_post::ActiveModel as SysUserPostActiveModel;
-use crate::entity::sys_notice_read::{Column as NoticeReadColumn, Entity as SysNoticeRead};
+use crate::entity::sys_user_role::ActiveModel as SysUserRoleActiveModel;
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_post::SysPostRepository;
 use crate::repository::sys_role::SysRoleRepository;
@@ -43,7 +41,6 @@ use crate::utils::password::{
 
 // 部门树组装函数抽取至 service/mod.rs，避免与 sys_role_service 重复
 use super::build_dept_tree_select;
-
 
 // ==================== DTO 定义 ====================
 
@@ -109,6 +106,41 @@ pub struct UserEditDto {
     pub post_ids: Option<Vec<i64>>,
     #[garde(length(max = 500))]
     pub remark: Option<String>,
+}
+
+// ==================== 批量导入（B3） ====================
+
+/// 导入用户行（模板列：登录名称* / 用户姓名* / 部门名称 / 手机号码 / 邮箱 / 性别 / 状态）
+#[derive(Debug, Clone)]
+pub struct ImportUserRow {
+    pub row_num: u32,
+    pub login_name: String,
+    pub nick_name: String,
+    pub dept_name: Option<String>,
+    pub phonenumber: Option<String>,
+    pub email: Option<String>,
+    /// 性别：男→0 / 女→1 / 空→2（未知）
+    pub sex: Option<String>,
+    /// 状态：正常→0 / 停用→1，默认 0
+    pub status: String,
+}
+
+/// 导入结果项（回显前端：行号 + 错误信息）
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportErrorItem {
+    pub row_num: u32,
+    pub error: String,
+}
+
+/// 导入结果 VO
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResultVo {
+    /// 本次导入新增/更新的用户数
+    pub success: u32,
+    /// 校验失败、被跳过的行
+    pub error_list: Vec<ImportErrorItem>,
 }
 
 /// 管理员重置密码 DTO
@@ -185,7 +217,9 @@ pub fn validate_phone_by_region(
     phone: &Option<String>,
     country: &Option<String>,
 ) -> Result<(), ServiceError> {
-    let Some(phone) = phone else { return Ok(()); };
+    let Some(phone) = phone else {
+        return Ok(());
+    };
     let country = country.as_deref().unwrap_or("CN").to_uppercase();
     if !is_valid_phone(phone, &country) {
         return Err(ServiceError::bad_request(&crate::tr!(
@@ -205,11 +239,104 @@ fn is_valid_phone(phone: &str, country: &str) -> bool {
     }
     // 2) 回退正则分流表（覆盖常见地区，crate 解析失败或地区未识别时仍可用）
     for (cc, pat) in REGION_PHONE_PATTERNS.iter() {
-        if *cc == country && let Ok(re) = Regex::new(pat) {
+        if *cc == country
+            && let Ok(re) = Regex::new(pat)
+        {
             return re.is_match(phone);
         }
     }
     false
+}
+
+// ==================== 批量导入纯函数（B3，可独立单测） ====================
+
+/// 导入列位置（与模板列顺序一致）
+const COL_LOGIN: usize = 0;
+const COL_NICK: usize = 1;
+const COL_DEPT: usize = 2;
+const COL_PHONE: usize = 3;
+const COL_EMAIL: usize = 4;
+const COL_SEX: usize = 5;
+const COL_STATUS: usize = 6;
+
+fn cell_str(row: &[String], idx: usize) -> Option<String> {
+    row.get(idx)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 解析 xlsx 行矩阵为导入行对象（第 1 行为表头，跳过；空行跳过）
+pub fn parse_import_rows(rows: &[Vec<String>]) -> Vec<ImportUserRow> {
+    if rows.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(1) {
+        if row.iter().all(|c| c.trim().is_empty()) {
+            continue;
+        }
+        let sex = match cell_str(row, COL_SEX).as_deref() {
+            Some("男") | Some("0") => Some("0".to_string()),
+            Some("女") | Some("1") => Some("1".to_string()),
+            _ => Some("2".to_string()),
+        };
+        let status = match cell_str(row, COL_STATUS).as_deref() {
+            Some("停用") | Some("1") => "1".to_string(),
+            _ => "0".to_string(),
+        };
+        out.push(ImportUserRow {
+            row_num: (i + 1) as u32,
+            login_name: cell_str(row, COL_LOGIN).unwrap_or_default(),
+            nick_name: cell_str(row, COL_NICK).unwrap_or_default(),
+            dept_name: cell_str(row, COL_DEPT),
+            phonenumber: cell_str(row, COL_PHONE).map(|e| e.trim().to_string().trim().to_string()),
+            email: cell_str(row, COL_EMAIL),
+            sex,
+            status,
+        });
+    }
+    out
+}
+
+/// 结构级校验（纯函数，不触库）；返回 Err(错误文案) 表示该行不通过
+pub fn validate_import_row(row: &ImportUserRow) -> Result<(), String> {
+    let login = row.login_name.trim();
+    if login.is_empty() {
+        return Err(crate::tr!("error.user.import_login_required").to_string());
+    }
+    if login.len() < 2 || login.len() > 30 {
+        return Err(crate::tr!("error.user.import_login_length").to_string());
+    }
+    let login_re = Regex::new(r"^[a-zA-Z0-9_]+$").expect("登录名正则编译失败");
+    if !login_re.is_match(login) {
+        return Err(crate::tr!("error.user.import_login_format").to_string());
+    }
+    if row.nick_name.trim().is_empty() {
+        return Err(crate::tr!("error.user.import_nick_required").to_string());
+    }
+    if let Some(p) = row.phonenumber.as_deref().filter(|p| !p.trim().is_empty())
+        && let Err(e) = validate_phone_by_region(&Some(p.to_string()), &None)
+    {
+        return Err(e.message);
+    }
+    if let Some(e) = row.email.as_deref().filter(|e| !e.trim().is_empty())
+        && !is_valid_email(e.trim())
+    {
+        return Err(crate::tr!("error.user.email_invalid").to_string());
+    }
+    Ok(())
+}
+
+/// 简单邮箱格式校验（与 garde email 规则一致的宽松校验）
+fn is_valid_email(s: &str) -> bool {
+    let at = s.find('@');
+    let Some(at) = at else { return false };
+    if at == 0 || at == s.len() - 1 {
+        return false;
+    }
+    let local = &s[..at];
+    let domain = &s[at + 1..];
+    !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
 }
 
 /// 用户分页查询 DTO
@@ -501,14 +628,13 @@ impl SysUserService {
         // 4. 在内存中组装 UserVo
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
-            let role_ids = role_ids_map
-                .get(&user.user_id)
-                .cloned()
-                .unwrap_or_default();
-            let dept = user
-                .dept_id
-                .and_then(|did| dept_map.get(&did).cloned());
-            vos.push(UserVo { user, role_ids, dept });
+            let role_ids = role_ids_map.get(&user.user_id).cloned().unwrap_or_default();
+            let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
+            vos.push(UserVo {
+                user,
+                role_ids,
+                dept,
+            });
         }
         Ok((vos, total))
     }
@@ -550,8 +676,7 @@ impl SysUserService {
                                 .map(|r| r.role_id)
                                 .collect();
                             let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
-                            scope_dept_ids =
-                                Some(rids.into_iter().map(|rd| rd.dept_id).collect());
+                            scope_dept_ids = Some(rids.into_iter().map(|rd| rd.dept_id).collect());
                         }
                         3 => {
                             // 本部门：filter by operator.dept_id
@@ -656,21 +781,24 @@ impl SysUserService {
         // 3. 组装 UserVo
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
-            let role_ids = role_ids_map
-                .get(&user.user_id)
-                .cloned()
-                .unwrap_or_default();
-            let dept = user
-                .dept_id
-                .and_then(|did| dept_map.get(&did).cloned());
-            vos.push(UserVo { user, role_ids, dept });
+            let role_ids = role_ids_map.get(&user.user_id).cloned().unwrap_or_default();
+            let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
+            vos.push(UserVo {
+                user,
+                role_ids,
+                dept,
+            });
         }
         Ok(vos)
     }
 
     /// 查询用户详情（含 role_ids）
     pub async fn get_user_by_id(&self, user_id: i64) -> Result<UserVo, ServiceError> {
-        let user = self.user_repo.base().find_by_id(user_id).await?
+        let user = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
 
         if user.del_flag.as_deref() == Some("2") {
@@ -680,21 +808,35 @@ impl SysUserService {
         let role_ids = self.get_role_ids_by_user_id(user_id).await?;
         // 查询部门信息
         let dept = if let Some(dept_id) = user.dept_id {
-            self.dept_repo.base().find_by_id(dept_id).await.map_err(|e| {
-                tracing::warn!("查询用户部门信息失败（不阻断主流程）: {}", e);
-                e
-            }).ok().flatten()
+            self.dept_repo
+                .base()
+                .find_by_id(dept_id)
+                .await
+                .map_err(|e| {
+                    tracing::warn!("查询用户部门信息失败（不阻断主流程）: {}", e);
+                    e
+                })
+                .ok()
+                .flatten()
         } else {
             None
         };
-        Ok(UserVo { user, role_ids, dept })
+        Ok(UserVo {
+            user,
+            role_ids,
+            dept,
+        })
     }
 
     /// 查询个人信息（对齐前端 GET /system/user/profile）
     ///
     /// 返回用户信息 + roleGroup（角色名称逗号拼接）+ postGroup（岗位名称逗号拼接）
     pub async fn get_profile(&self, user_id: i64) -> Result<ProfileVo, ServiceError> {
-        let user = self.user_repo.base().find_by_id(user_id).await?
+        let user = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if user.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -738,7 +880,11 @@ impl SysUserService {
         // G18：按国家/地区校验手机号（方案 D 多地区化）
         validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
 
-        let existing = self.user_repo.base().find_by_id(user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -816,22 +962,27 @@ impl SysUserService {
         let (user, role_ids, post_ids) = match user_id {
             None => (None, vec![], vec![]),
             Some(uid) => {
-                let user_model = self.user_repo.base().find_by_id(uid).await?
+                let user_model = self
+                    .user_repo
+                    .base()
+                    .find_by_id(uid)
+                    .await?
                     .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
                 if user_model.del_flag.as_deref() == Some("2") {
                     return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
                 }
                 // P0-6 数据范围校验（超管短路由 resolve_data_scope 处理）
                 if let Some(op_uid) = operator_user_id {
-                    let (scope_dept_ids, scope_user_id) = self.resolve_data_scope(Some(op_uid)).await?;
+                    let (scope_dept_ids, scope_user_id) =
+                        self.resolve_data_scope(Some(op_uid)).await?;
                     let visible = match (scope_dept_ids, scope_user_id) {
-                        (None, None) => true,                                  // 全部数据
-                        (Some(_), Some(scope_uid)) => uid == scope_uid,        // 仅本人
+                        (None, None) => true,                           // 全部数据
+                        (Some(_), Some(scope_uid)) => uid == scope_uid, // 仅本人
                         (Some(dept_ids), None) => match user_model.dept_id {
                             Some(did) => dept_ids.contains(&did),
                             None => false,
                         },
-                        (None, Some(scope_uid)) => uid == scope_uid,           // 仅本人
+                        (None, Some(scope_uid)) => uid == scope_uid, // 仅本人
                     };
                     if !visible {
                         return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -869,7 +1020,9 @@ impl SysUserService {
         // 用户名查重（含已软删除的，避免恢复后冲突）
         let exists = self.user_repo.find_by_user_name(&dto.user_name).await?;
         if exists.is_some() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.user.name_duplicate")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.name_duplicate"
+            )));
         }
 
         // Argon2 hash 是 CPU 密集型同步操作，用 spawn_blocking 包裹避免阻塞 Tokio runtime（P0-31）
@@ -967,7 +1120,11 @@ impl SysUserService {
         validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
 
         // 查询用户是否存在
-        let existing = self.user_repo.base().find_by_id(dto.user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(dto.user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -978,13 +1135,19 @@ impl SysUserService {
             if let Some(ref status) = dto.status
                 && status == "1"
             {
-                return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_disable_forbidden")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.user.admin_disable_forbidden"
+                )));
             }
             if dto.role_ids.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_role_forbidden")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.user.admin_role_forbidden"
+                )));
             }
             if dto.post_ids.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_post_forbidden")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.user.admin_post_forbidden"
+                )));
             }
         }
 
@@ -1099,10 +1262,16 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 超管保护
         if user_id == SUPER_ADMIN_USER_ID {
-            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_delete_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_delete_forbidden"
+            )));
         }
 
-        let existing = self.user_repo.base().find_by_id(user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -1169,7 +1338,9 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 预校验：超管保护（事务外快速失败，避免无效事务开销）
         if user_ids.contains(&SUPER_ADMIN_USER_ID) {
-            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_delete_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_delete_forbidden"
+            )));
         }
 
         // 单个 ID 直接走 delete_user（保持原有事务行为，避免嵌套事务开销）
@@ -1192,38 +1363,51 @@ impl SysUserService {
         let db = self.db().clone();
 
         db.transaction::<_, (), sea_orm::DbErr>(|txn| {
-                async move {
-                    for user_id in user_ids {
-                        // 1. 查询用户存在性（事务内，防止 TOCTOU）
-                        let existing = user_repo.base().find_by_id_conn(txn, user_id).await?
-                            .ok_or_else(|| sea_orm::DbErr::Custom(format!("{}: {}", crate::tr!("error.user.not_found"), user_id)))?;
-                        if existing.del_flag.as_deref() == Some("2") {
-                            return Err(sea_orm::DbErr::Custom(format!("{}: {}", crate::tr!("error.user.not_found"), user_id)));
-                        }
-
-                        // 2. 垂直越权校验已在事务前完成（见上方 C-2 修复），
-                        //    事务内不再重复校验，依赖 sys_user_role 的外键约束保证一致性。
-
-                        // 3. 释放唯一字段值（避免软删除后唯一索引冲突）
-                        let deleted_user_name = format!("{}_deleted_{}", existing.user_name, user_id);
-
-                        // 4. 软删除 sys_user
-                        let mut am: SysUserActiveModel = existing.into();
-                        am.del_flag = Set(Some("2".to_string()));
-                        am.user_name = Set(deleted_user_name);
-                        user_repo.base().update_conn(txn, am).await?;
-
-                        // 5. 物理删除 sys_user_role 关联
-                        user_role_repo.delete_by_user_id_conn(txn, user_id).await?;
-
-                        // 6. 物理删除 sys_user_post 关联（SEC-005：补全孤儿记录清理）
-                        user_post_repo.delete_by_user_id_conn(txn, user_id).await?;
+            async move {
+                for user_id in user_ids {
+                    // 1. 查询用户存在性（事务内，防止 TOCTOU）
+                    let existing = user_repo
+                        .base()
+                        .find_by_id_conn(txn, user_id)
+                        .await?
+                        .ok_or_else(|| {
+                            sea_orm::DbErr::Custom(format!(
+                                "{}: {}",
+                                crate::tr!("error.user.not_found"),
+                                user_id
+                            ))
+                        })?;
+                    if existing.del_flag.as_deref() == Some("2") {
+                        return Err(sea_orm::DbErr::Custom(format!(
+                            "{}: {}",
+                            crate::tr!("error.user.not_found"),
+                            user_id
+                        )));
                     }
-                    Ok(())
+
+                    // 2. 垂直越权校验已在事务前完成（见上方 C-2 修复），
+                    //    事务内不再重复校验，依赖 sys_user_role 的外键约束保证一致性。
+
+                    // 3. 释放唯一字段值（避免软删除后唯一索引冲突）
+                    let deleted_user_name = format!("{}_deleted_{}", existing.user_name, user_id);
+
+                    // 4. 软删除 sys_user
+                    let mut am: SysUserActiveModel = existing.into();
+                    am.del_flag = Set(Some("2".to_string()));
+                    am.user_name = Set(deleted_user_name);
+                    user_repo.base().update_conn(txn, am).await?;
+
+                    // 5. 物理删除 sys_user_role 关联
+                    user_role_repo.delete_by_user_id_conn(txn, user_id).await?;
+
+                    // 6. 物理删除 sys_user_post 关联（SEC-005：补全孤儿记录清理）
+                    user_post_repo.delete_by_user_id_conn(txn, user_id).await?;
                 }
-                .boxed()
-            })
-            .await?;
+                Ok(())
+            }
+            .boxed()
+        })
+        .await?;
 
         Ok(())
     }
@@ -1246,10 +1430,16 @@ impl SysUserService {
 
         // 超管保护：禁止重置超级管理员密码
         if dto.user_id == SUPER_ADMIN_USER_ID {
-            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_pwd_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_pwd_forbidden"
+            )));
         }
 
-        let existing = self.user_repo.base().find_by_id(dto.user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(dto.user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -1283,14 +1473,21 @@ impl SysUserService {
         crate::common::i18n::validate(&dto)?;
 
         // R19-1.3：密码复杂度校验（拦截纯数字/纯字母等弱口令）
-        validate_password_complexity(&dto.new_password).map_err(|e| ServiceError::bad_request(&e))?;
+        validate_password_complexity(&dto.new_password)
+            .map_err(|e| ServiceError::bad_request(&e))?;
 
         // 新旧密码不能相同
         if dto.old_password == dto.new_password {
-            return Err(ServiceError::bad_request(&crate::tr!("error.user.same_password")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.same_password"
+            )));
         }
 
-        let existing = self.user_repo.base().find_by_id(user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -1313,7 +1510,9 @@ impl SysUserService {
             ServiceError::internal(&crate::tr!("error.auth.password_verify_failed"))
         })?;
         if !verify_result.is_valid {
-            return Err(ServiceError::bad_request(&crate::tr!("error.auth.old_password_wrong")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.auth.old_password_wrong"
+            )));
         }
 
         // Argon2 hash 是 CPU 密集型同步操作，用 spawn_blocking 包裹（P0-31）
@@ -1345,10 +1544,16 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 超管保护
         if user_id == SUPER_ADMIN_USER_ID && status == "1" {
-            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_disable_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_disable_forbidden"
+            )));
         }
 
-        let existing = self.user_repo.base().find_by_id(user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -1382,7 +1587,9 @@ impl SysUserService {
     ) -> Result<(), ServiceError> {
         // 超管保护：禁止修改超级管理员角色绑定
         if user_id == SUPER_ADMIN_USER_ID {
-            return Err(ServiceError::bad_request(&crate::tr!("error.user.admin_role_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_role_forbidden"
+            )));
         }
 
         // 垂直越权校验（P0-R81-005 / REGRESS-002）：待分配角色不得高于 operator
@@ -1393,7 +1600,11 @@ impl SysUserService {
         self.check_vertical_auth_by_user_id(operator_user_id, user_id)
             .await?;
 
-        let existing = self.user_repo.base().find_by_id(user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -1475,7 +1686,11 @@ impl SysUserService {
         user_id: i64,
         new_hashed: &str,
     ) -> Result<(), ServiceError> {
-        let existing = self.user_repo.base().find_by_id(user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(new_hashed.to_string()));
@@ -1491,7 +1706,11 @@ impl SysUserService {
         user_id: i64,
         avatar_path: &str,
     ) -> Result<Option<String>, ServiceError> {
-        let existing = self.user_repo.base().find_by_id(user_id).await?
+        let existing = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         // P2 修复: 保存旧 avatar 路径，供 handler 删除旧文件，避免文件系统泄漏
         let old_avatar = existing.avatar.clone();
@@ -1512,11 +1731,12 @@ impl SysUserService {
     ///
     /// 流程：sys_user.dept_id → sys_dept.dept_name
     /// 用户或部门不存在/已删除时返回空字符串（不阻断登录流程）
-    pub async fn get_dept_name_by_user_id(
-        &self,
-        user_id: i64,
-    ) -> Result<String, ServiceError> {
-        let user = self.user_repo.base().find_by_id(user_id).await?
+    pub async fn get_dept_name_by_user_id(&self, user_id: i64) -> Result<String, ServiceError> {
+        let user = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         let Some(dept_id) = user.dept_id else {
             return Ok(String::new());
@@ -1538,16 +1758,20 @@ impl SysUserService {
     ) -> Result<UserAuthRoleVo, ServiceError> {
         // 超管用户保护：禁止查看超管用户的授权信息（防止信息收集）
         if user_id == SUPER_ADMIN_USER_ID && operator_user_id != SUPER_ADMIN_USER_ID {
-            return Err(ServiceError::bad_request(
-                &crate::tr!("error.user.admin_role_forbidden"),
-            ));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_role_forbidden"
+            )));
         }
 
         // 垂直越权校验：operator 不得查看比自己更高优先级用户的授权信息
         self.check_vertical_auth_by_user_id(operator_user_id, user_id)
             .await?;
 
-        let user = self.user_repo.base().find_by_id(user_id).await?
+        let user = self
+            .user_repo
+            .base()
+            .find_by_id(user_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if user.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
@@ -1564,6 +1788,227 @@ impl SysUserService {
 
     // ==================== 内部辅助方法 ====================
 
+    /// 批量导入用户（B3）
+    ///
+    /// 流程：解析 xlsx → 逐行结构校验（纯函数）→ 唯一性 / 部门存在性校验
+    /// → 事务内批量写入。任一行失败不中断整批，仅将该行计入 error_list 回显前端。
+    pub async fn import_users(
+        &self,
+        xlsx_bytes: Vec<u8>,
+        update_support: bool,
+        operator: &str,
+        default_password: &str,
+    ) -> Result<ImportResultVo, ServiceError> {
+        use crate::common::excel::read_xlsx_rows;
+        use std::collections::{HashMap, HashSet};
+
+        let raw_rows =
+            read_xlsx_rows(&xlsx_bytes).map_err(|e| ServiceError::bad_request(&e.message))?;
+        let parsed = parse_import_rows(&raw_rows);
+
+        let mut error_list: Vec<ImportErrorItem> = Vec::new();
+        let mut valid_rows: Vec<ImportUserRow> = Vec::new();
+
+        // 阶段 1：结构校验（纯函数，不触库）
+        for row in parsed {
+            if let Err(e) = validate_import_row(&row) {
+                error_list.push(ImportErrorItem {
+                    row_num: row.row_num,
+                    error: e,
+                });
+            } else {
+                valid_rows.push(row);
+            }
+        }
+        if valid_rows.is_empty() {
+            return Ok(ImportResultVo {
+                success: 0,
+                error_list,
+            });
+        }
+
+        // 阶段 2：批量收集需要查询的部门名 / 登录名，一次性读取减少 RTT
+        let dept_names: HashSet<String> = valid_rows
+            .iter()
+            .filter_map(|r| r.dept_name.as_deref().map(str::trim))
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let login_names: HashSet<String> = valid_rows
+            .iter()
+            .map(|r| r.login_name.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // 部门名(trim) → dept_id（仅取未删除且精确同名）
+        let mut dept_map: HashMap<String, i64> = HashMap::new();
+        for name in &dept_names {
+            if let Some(dept) = self
+                .dept_repo
+                .find_by_name_like(name)
+                .await?
+                .into_iter()
+                .find(|d| d.dept_name.trim() == name.trim() && d.del_flag.as_deref() != Some("2"))
+            {
+                dept_map.insert(name.clone(), dept.dept_id);
+            }
+        }
+
+        // 登录名 → 是否已存在（复用既有的"含软删除"查询，避免恢复后冲突）
+        let mut existing_users: HashMap<String, SysUserModel> = HashMap::new();
+        for name in &login_names {
+            if let Some(u) = self.user_repo.find_active_by_user_name(name).await? {
+                existing_users.insert(u.user_name.clone(), u);
+            }
+        }
+
+        // 阶段 3：逐行做唯一性/部门/状态解析，生成待插入 DTO 或累积错误
+        // update_support=true 时，已存在的用户走更新（仅更新资料字段，不重置密码/角色）
+        #[derive(Clone)]
+        struct PendingInsert {
+            dept_id: Option<i64>,
+            user_name: String,
+            nick_name: String,
+            phonenumber: Option<String>,
+            email: Option<String>,
+            sex: Option<String>,
+            status: String,
+        }
+        let mut to_insert: Vec<PendingInsert> = Vec::new();
+        let mut to_update: Vec<(i64, PendingInsert)> = Vec::new();
+        let mut seen_login: HashSet<String> = HashSet::new();
+
+        for row in valid_rows {
+            let login = row.login_name.trim().to_string();
+            // 批内重复登录名：仅保留首行，其余报错
+            if !seen_login.insert(login.clone()) {
+                error_list.push(ImportErrorItem {
+                    row_num: row.row_num,
+                    error: crate::tr!("error.user.import_duplicate_in_file"),
+                });
+                continue;
+            }
+            let dept_id = match row
+                .dept_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(name) => match dept_map.get(name) {
+                    Some(id) => Some(*id),
+                    None => {
+                        error_list.push(ImportErrorItem {
+                            row_num: row.row_num,
+                            error: crate::tr!("error.user.import_dept_not_found", name = name),
+                        });
+                        continue;
+                    }
+                },
+                None => None,
+            };
+
+            let pending = PendingInsert {
+                dept_id,
+                user_name: login.clone(),
+                nick_name: row.nick_name.trim().to_string(),
+                phonenumber: row
+                    .phonenumber
+                    .as_deref()
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty()),
+                email: row
+                    .email
+                    .as_deref()
+                    .map(|e| e.trim().to_string())
+                    .filter(|e| !e.is_empty()),
+                sex: row.sex,
+                status: row.status,
+            };
+
+            if let Some(existing) = existing_users.get(&login) {
+                if update_support {
+                    to_update.push((existing.user_id, pending));
+                } else {
+                    error_list.push(ImportErrorItem {
+                        row_num: row.row_num,
+                        error: crate::tr!("error.user.name_duplicate"),
+                    });
+                }
+            } else {
+                to_insert.push(pending);
+            }
+        }
+
+        // 阶段 4：事务内批量写入（插入新用户 + 更新已存在用户资料）
+        // 密码 hash 为 CPU 密集型同步操作，先行一次阿甘 hash 经 spawn_blocking 完成，
+        // 结果在事务内复用（所有新用户共享同一初始密码 hash），避免阻塞 Tokio worker。
+        let password_for_hash = default_password.to_string();
+        let hashed = tokio::task::spawn_blocking(move || encrypt_password(&password_for_hash))
+            .await
+            .map_err(|e| {
+                tracing::error!("密码加密 spawn_blocking 失败: {}", e);
+                ServiceError::internal(&crate::tr!("error.common.password_encrypt_failed"))
+            })??;
+        let inserted_count = {
+            let user_repo = self.user_repo.clone();
+            let now = crate::common::datetime::now_naive();
+            let created_by = operator.to_string();
+            self.db()
+                .transaction::<_, i64, sea_orm::DbErr>(|txn| {
+                    let mut count = 0i64;
+                    let to_insert = to_insert.clone();
+                    let mut to_update = to_update.clone();
+                    let hashed = hashed.clone();
+                    async move {
+                        for p in to_insert {
+                            let am = SysUserActiveModel {
+                                dept_id: Set(p.dept_id),
+                                user_name: Set(p.user_name),
+                                nick_name: Set(p.nick_name),
+                                phonenumber: Set(p.phonenumber),
+                                email: Set(p.email),
+                                sex: Set(p.sex),
+                                password: Set(Some(hashed.clone())),
+                                status: Set(Some(p.status)),
+                                del_flag: Set(Some("0".to_string())),
+                                create_by: Set(Some(created_by.clone())),
+                                create_time: Set(Some(now)),
+                                update_by: Set(Some(created_by.clone())),
+                                update_time: Set(Some(now)),
+                                ..Default::default()
+                            };
+                            user_repo.base().insert_conn(txn, am).await?;
+                            count += 1;
+                        }
+                        for (user_id, p) in to_update.drain(..) {
+                            let am = SysUserActiveModel {
+                                user_id: Set(user_id),
+                                dept_id: Set(p.dept_id),
+                                nick_name: Set(p.nick_name),
+                                phonenumber: Set(p.phonenumber),
+                                email: Set(p.email),
+                                sex: Set(p.sex),
+                                status: Set(Some(p.status)),
+                                update_by: Set(Some(created_by.clone())),
+                                update_time: Set(Some(now)),
+                                ..Default::default()
+                            };
+                            user_repo.base().update_conn(txn, am).await?;
+                            count += 1;
+                        }
+                        Ok(count)
+                    }
+                    .boxed()
+                })
+                .await?
+        };
+
+        Ok(ImportResultVo {
+            success: inserted_count as u32,
+            error_list,
+        })
+    }
+
     /// 查询用户的角色 ID 列表
     async fn get_role_ids_by_user_id(&self, user_id: i64) -> Result<Vec<i64>, ServiceError> {
         let user_roles = self.user_role_repo.find_by_user_id(user_id).await?;
@@ -1576,5 +2021,123 @@ impl SysUserService {
         let user_posts = self.user_post_repo.find_by_user_id(user_id).await?;
         let post_ids: Vec<i64> = user_posts.into_iter().map(|up| up.post_id).collect();
         Ok(post_ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(
+        login: &str,
+        nick: &str,
+        dept: &str,
+        phone: &str,
+        email: &str,
+        sex: &str,
+        status: &str,
+    ) -> ImportUserRow {
+        ImportUserRow {
+            row_num: 1,
+            login_name: login.to_string(),
+            nick_name: nick.to_string(),
+            dept_name: (!dept.is_empty()).then(|| dept.to_string()),
+            phonenumber: (!phone.is_empty()).then(|| phone.to_string()),
+            email: (!email.is_empty()).then(|| email.to_string()),
+            sex: Some(sex.to_string()),
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_import_rows_skips_header_and_blanks() {
+        let rows = vec![
+            vec!["登录名称".to_string(), "用户姓名".to_string()],
+            vec!["zhangsan".to_string(), "张三".to_string()],
+            vec!["".to_string(), "".to_string()], // 空行应跳过
+            vec!["lisi".to_string(), "李四".to_string()],
+        ];
+        let parsed = parse_import_rows(&rows);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].login_name, "zhangsan");
+        // row_num 为物理行号（含表头行）：表头=1，张三=2，跳过空行，李四=4
+        assert_eq!(parsed[1].row_num, 4);
+    }
+
+    #[test]
+    fn parse_import_rows_maps_sex_and_status() {
+        let rows = vec![
+            vec![
+                "登录名称".to_string(),
+                "用户姓名".to_string(),
+                "部门".to_string(),
+                "手机".to_string(),
+                "邮箱".to_string(),
+                "性别".to_string(),
+                "状态".to_string(),
+            ],
+            vec![
+                "a".to_string(),
+                "A".to_string(),
+                "研发部".to_string(),
+                "13800138000".to_string(),
+                "a@x.com".to_string(),
+                "男".to_string(),
+                "停用".to_string(),
+            ],
+            vec![
+                "b".to_string(),
+                "B".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "0".to_string(),
+                "1".to_string(),
+            ],
+        ];
+        let parsed = parse_import_rows(&rows);
+        assert_eq!(parsed[0].sex.as_deref(), Some("0"));
+        assert_eq!(parsed[0].status, "1");
+        assert_eq!(parsed[0].dept_name.as_deref(), Some("研发部"));
+        // 数字 "0" / "1" 同样被识别
+        assert_eq!(parsed[1].sex.as_deref(), Some("0"));
+        assert_eq!(parsed[1].status, "1");
+        assert_eq!(parsed[1].dept_name, None);
+    }
+
+    #[test]
+    fn validate_import_row_rejects_bad_login_and_missing_nick() {
+        let cases: &[(&str, &str)] = &[
+            ("", "张三"),        // 空登录名
+            ("a", "张三"),       // 过短
+            ("合法_名", "张三"), // 含非法字符（中文/点）
+        ];
+        for (login, nick) in cases {
+            let r = row(login, nick, "", "", "", "", "");
+            assert!(validate_import_row(&r).is_err(), "应拒绝 login={login}");
+        }
+        // 缺昵称
+        let r = row("zhangsan", "", "", "", "", "", "");
+        assert!(validate_import_row(&r).is_err());
+    }
+
+    #[test]
+    fn validate_import_row_accepts_valid_and_rejects_bad_phone_email() {
+        let ok = row(
+            "zhangsan",
+            "张三",
+            "研发部",
+            "13800138000",
+            "a@example.com",
+            "男",
+            "0",
+        );
+        assert!(validate_import_row(&ok).is_ok());
+
+        let bad_phone = row("lisi", "李四", "", "not-a-phone", "", "", "0");
+        assert!(validate_import_row(&bad_phone).is_err());
+
+        let bad_email = row("wangwu", "王五", "", "", "not-an-email", "", "0");
+        assert!(validate_import_row(&bad_email).is_err());
     }
 }

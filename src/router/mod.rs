@@ -2,6 +2,7 @@
 
 pub mod auth_router;
 pub mod common_router;
+pub mod file_router;
 pub mod ip_location_router;
 pub mod monitor_cache_router;
 pub mod monitor_log_router;
@@ -15,6 +16,7 @@ pub mod sys_dict_router;
 pub mod sys_job_router;
 pub mod sys_logininfor_router;
 pub mod sys_menu_router;
+pub mod sys_msg_router;
 pub mod sys_notice_router;
 pub mod sys_oper_log_router;
 pub mod sys_post_router;
@@ -24,20 +26,7 @@ pub mod sys_task_router;
 pub mod sys_user_router;
 pub mod tool_gen_router;
 pub mod totp_router;
-pub mod file_router;
 
-use std::sync::Arc;
-use std::time::Duration;
-use axum::Router;
-use axum::extract::DefaultBodyLimit;
-use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
-use axum::middleware::from_fn_with_state;
-use axum::routing::get;
-use tower_http::compression::CompressionLayer;
-use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::services::ServeDir;
-use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
 use crate::config::settings::ServerConfig;
 use crate::docs;
 use crate::embedded_assets;
@@ -51,6 +40,18 @@ use crate::middleware::request_id_middleware;
 use crate::middleware::security_headers;
 use crate::middleware::spa_fallback_middleware;
 use crate::state::AppState;
+use axum::Router;
+use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use axum::middleware::from_fn_with_state;
+use axum::routing::get;
+use std::sync::Arc;
+use std::time::Duration;
+use tower_http::compression::CompressionLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
+use tower_http::timeout::TimeoutLayer;
+use tower_http::trace::TraceLayer;
 
 /// 全局默认请求体大小上限（10MB，对齐 oper_log 中间件 BODY_READ_LIMIT）
 const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
@@ -74,6 +75,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_role_router::role_routes())
         .merge(sys_menu_router::menu_routes())
         .merge(sys_notice_router::notice_routes())
+        .merge(sys_msg_router::msg_routes())
         .merge(sys_dept_router::dept_routes())
         .merge(sys_job_router::job_routes())
         .merge(sys_dict_router::dict_routes())
@@ -171,14 +173,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             .route("/api-docs/openapi.json", get(docs::openapi_json));
     }
 
-    // 静态资源服务：头像等用户上传文件
+    // 静态资源服务：头像等用户上传文件（仅本地后端，F1）
     // /uploads/avatar/xxx.png → <upload_root>/avatar/xxx.png
     // 必须在 SPA fallback 之前注册
     // 修复：将相对路径解析为绝对路径，基于可执行文件所在目录，避免依赖进程 CWD
     // 解析逻辑已移至 common::upload::resolve_upload_root，与 handler 层共享，确保保存与服务路径一致
-    let upload_root = crate::common::resolve_upload_root(&state.config.upload);
-    tracing::info!("静态资源服务目录: {}", upload_root.display());
-    app = app.nest_service("/uploads", ServeDir::new(upload_root));
+    // F1：仅 storage.supports_static()（local）挂载本地目录；s3 后端文件由对象存储公开 URL 访问
+    if state.storage.supports_static() {
+        let upload_root = crate::common::resolve_upload_root(&state.config.upload);
+        tracing::info!("静态资源服务目录: {}", upload_root.display());
+        app = app.nest_service("/uploads", ServeDir::new(upload_root));
+    }
 
     // 根路径 handler：返回前端 index.html
     if embedded_mode {
@@ -197,7 +202,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // 因此仅靠 route_layer 无法解决 SPA fallback 问题，必须显式配置 method_not_allowed_fallback。
         app = app.method_not_allowed_fallback(embedded_assets::serve_spa);
         if cfg!(debug_assertions) {
-            tracing::info!("前端开发模式已启用：从 frontend-dist/ 目录读取静态资源（ServeDir 风格）");
+            tracing::info!(
+                "前端开发模式已启用：从 frontend-dist/ 目录读取静态资源（ServeDir 风格）"
+            );
         } else {
             tracing::info!("前端嵌入模式已启用：单可执行文件部署（前端资源已编译进二进制）");
         }
@@ -224,15 +231,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .and(tower_http::compression::predicate::NotForContentType::GRPC)
         .and(tower_http::compression::predicate::NotForContentType::IMAGES)
         .and(tower_http::compression::predicate::NotForContentType::SSE)
-        .and(tower_http::compression::predicate::NotForContentType::const_new(
-            "application/vnd.openxmlformats",
-        ))
-        .and(tower_http::compression::predicate::NotForContentType::const_new(
-            "application/zip",
-        ))
-        .and(tower_http::compression::predicate::NotForContentType::const_new(
-            "application/octet-stream",
-        ));
+        .and(
+            tower_http::compression::predicate::NotForContentType::const_new(
+                "application/vnd.openxmlformats",
+            ),
+        )
+        .and(tower_http::compression::predicate::NotForContentType::const_new("application/zip"))
+        .and(
+            tower_http::compression::predicate::NotForContentType::const_new(
+                "application/octet-stream",
+            ),
+        );
     app.layer(CompressionLayer::new().compress_when(compression_predicate))
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
         .layer(cors)
@@ -240,7 +249,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // Slowloris / 慢速请求防护：限制单个请求处理总时长（REQUEST_TIMEOUT_SECS），
         // 超时则中断连接，防止慢速攻击耗尽连接池（axum 0.8 Serve 不支持 http1_header_read_timeout，
         // 改用 TimeoutLayer 实现请求级超时；生产环境建议同时在 Nginx 层配置 client_header_timeout）
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(REQUEST_TIMEOUT_SECS)))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+        ))
         .layer(axum::middleware::from_fn(request_id_middleware))
         // locale 中间件（T-05）：Accept-Language → 协商 → task-local 注入（包裹全部内层，handler/AppError 均可读）
         .layer(axum::middleware::from_fn(locale_middleware))

@@ -3,10 +3,10 @@
 //!
 //! 修改内容：
 //! 1. P2-30: sys_job.cron_expression  VARCHAR(255) → VARCHAR(64)
-//!           cron 表达式实际长度不会超过 64 字符，原 255 过宽，收缩以规范 schema。
+//!    cron 表达式实际长度不会超过 64 字符，原 255 过宽，收缩以规范 schema。
 //! 2. P2-31: sys_dept.ancestors       VARCHAR(50)  → VARCHAR(500)
-//!           部门树层级较深时 ancestors 路径（如 0,100,200,300,...）可能超过 50 字符，
-//!           扩展到 500 以容纳更深层级。
+//!    部门树层级较深时 ancestors 路径（如 0,100,200,300,...）可能超过 50 字符，
+//!    扩展到 500 以容纳更深层级。
 //!
 //! 数据库兼容性说明：
 //! - PostgreSQL：使用 `ALTER TABLE ... ALTER COLUMN ... TYPE VARCHAR(n)`，

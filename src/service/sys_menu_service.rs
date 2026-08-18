@@ -8,22 +8,22 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use garde::Validate;
 use redis::aio::ConnectionManager;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
 use crate::common::error::ServiceError;
-use crate::common::{like_escape, TreeSelectVo};
+use crate::common::{TreeSelectVo, like_escape};
 use crate::entity::sys_menu::{
-    ActiveModel as SysMenuActiveModel, Column as MenuColumn, Entity as SysMenu, Model as SysMenuModel,
+    ActiveModel as SysMenuActiveModel, Column as MenuColumn, Entity as SysMenu,
+    Model as SysMenuModel,
 };
 use crate::repository::sys_menu::SysMenuRepository;
 use crate::repository::sys_role::SysRoleRepository;
@@ -243,7 +243,10 @@ impl SysMenuService {
     /// 菜单列表（扁平，可加 menu_name/status 过滤）
     ///
     /// 用途：菜单管理表格展示（前端自行组装树）
-    pub async fn get_menu_list(&self, query: MenuQueryDto) -> Result<Vec<SysMenuModel>, ServiceError> {
+    pub async fn get_menu_list(
+        &self,
+        query: MenuQueryDto,
+    ) -> Result<Vec<SysMenuModel>, ServiceError> {
         let mut select = SysMenu::find().filter(MenuColumn::DelFlag.eq("0"));
         if let Some(ref name) = query.menu_name {
             select = select.filter(MenuColumn::MenuName.like(format!("%{}%", like_escape(name))));
@@ -294,12 +297,14 @@ impl SysMenuService {
         let order_nums: Vec<i32> = parse_id_list::<i32>(&dto.order_nums);
 
         if menu_ids.is_empty() || order_nums.is_empty() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.menu.ids_empty")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.menu.ids_empty"
+            )));
         }
         if menu_ids.len() != order_nums.len() {
-            return Err(ServiceError::bad_request(
-                &crate::tr!("error.menu.ids_count_mismatch"),
-            ));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.menu.ids_count_mismatch"
+            )));
         }
 
         let now = crate::common::datetime::now_naive();
@@ -330,7 +335,11 @@ impl SysMenuService {
 
     /// 查询菜单详情
     pub async fn get_menu_by_id(&self, menu_id: i64) -> Result<SysMenuModel, ServiceError> {
-        let menu = self.menu_repo.base().find_by_id(menu_id).await?
+        let menu = self
+            .menu_repo
+            .base()
+            .find_by_id(menu_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.menu.not_found")))?;
         if menu.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
@@ -349,10 +358,18 @@ impl SysMenuService {
         // parent_id 校验：若非 0，查询父菜单是否存在
         let parent_id = dto.parent_id.unwrap_or(0);
         if parent_id != 0 {
-            let parent = self.menu_repo.base().find_by_id(parent_id).await?
-                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.menu.parent_not_found")))?;
+            let parent = self
+                .menu_repo
+                .base()
+                .find_by_id(parent_id)
+                .await?
+                .ok_or_else(|| {
+                    ServiceError::bad_request(&crate::tr!("error.menu.parent_not_found"))
+                })?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request(&crate::tr!("error.menu.parent_deleted")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.menu.parent_deleted"
+                )));
             }
         }
 
@@ -367,7 +384,9 @@ impl SysMenuService {
                 .filter(MenuColumn::DelFlag.eq("0"));
             let dup = self.menu_repo.base().find_one(select).await?;
             if dup.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.menu.perm_exists")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.menu.perm_exists"
+                )));
             }
         }
 
@@ -420,7 +439,11 @@ impl SysMenuService {
         crate::common::i18n::validate(&dto)?;
 
         // 查询菜单是否存在
-        let existing = self.menu_repo.base().find_by_id(dto.menu_id).await?
+        let existing = self
+            .menu_repo
+            .base()
+            .find_by_id(dto.menu_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.menu.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
@@ -429,21 +452,31 @@ impl SysMenuService {
         // parent_id 校验
         let parent_id = dto.parent_id.unwrap_or(existing.parent_id.unwrap_or(0));
         if parent_id == dto.menu_id {
-            return Err(ServiceError::bad_request(&crate::tr!("error.menu.parent_self_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.menu.parent_self_forbidden"
+            )));
         }
         if parent_id != 0 {
             // 校验新父菜单存在
-            let parent = self.menu_repo.base().find_by_id(parent_id).await?
-                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.menu.parent_not_found")))?;
+            let parent = self
+                .menu_repo
+                .base()
+                .find_by_id(parent_id)
+                .await?
+                .ok_or_else(|| {
+                    ServiceError::bad_request(&crate::tr!("error.menu.parent_not_found"))
+                })?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request(&crate::tr!("error.menu.parent_deleted")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.menu.parent_deleted"
+                )));
             }
 
             // 防环校验：新 parent_id 不能是当前菜单的后代节点
             if self.is_descendant(dto.menu_id, parent_id).await? {
-                return Err(ServiceError::bad_request(
-                    &crate::tr!("error.menu.parent_self_forbidden"),
-                ));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.menu.parent_self_forbidden"
+                )));
             }
         }
 
@@ -458,7 +491,9 @@ impl SysMenuService {
                 .filter(MenuColumn::MenuId.ne(dto.menu_id));
             let dup = self.menu_repo.base().find_one(select).await?;
             if dup.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.menu.perm_exists")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.menu.perm_exists"
+                )));
             }
         }
 
@@ -526,7 +561,11 @@ impl SysMenuService {
 
     /// 删除菜单（事务：子菜单校验 + 菜单分配校验 + 软删除 + 清理 sys_role_menu）
     pub async fn delete_menu(&self, menu_id: i64) -> Result<(), ServiceError> {
-        let existing = self.menu_repo.base().find_by_id(menu_id).await?
+        let existing = self
+            .menu_repo
+            .base()
+            .find_by_id(menu_id)
+            .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.menu.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
@@ -545,19 +584,23 @@ impl SysMenuService {
                     let child_select = SysMenu::find()
                         .filter(MenuColumn::ParentId.eq(menu_id))
                         .filter(MenuColumn::DelFlag.eq("0"));
-                    let child_count = menu_repo.base().find_many_conn(txn, child_select).await?.len() as u64;
+                    let child_count = menu_repo
+                        .base()
+                        .find_many_conn(txn, child_select)
+                        .await?
+                        .len() as u64;
                     if child_count > 0 {
-                        return Err(sea_orm::DbErr::Custom(
-                            crate::tr!("error.menu.has_children"),
-                        ));
+                        return Err(sea_orm::DbErr::Custom(crate::tr!(
+                            "error.menu.has_children"
+                        )));
                     }
 
                     // 2. 事务内重新检查角色分配
                     let role_count = role_menu_repo.count_by_menu_id_conn(txn, menu_id).await?;
                     if role_count > 0 {
-                        return Err(sea_orm::DbErr::Custom(
-                            crate::tr!("error.menu.assigned_to_role"),
-                        ));
+                        return Err(sea_orm::DbErr::Custom(crate::tr!(
+                            "error.menu.assigned_to_role"
+                        )));
                     }
 
                     // 3. 软删除 sys_menu（通过 Repository 事务上下文）
@@ -887,7 +930,10 @@ const MAX_MENU_TREE_DEPTH: usize = 30;
 
 fn build_menu_tree_children(node: &mut TreeSelectVo, list: &[SysMenuModel], depth: usize) {
     if depth >= MAX_MENU_TREE_DEPTH {
-        tracing::warn!("菜单树构建达到最大深度 {}（可能存在 parent_id 循环引用），停止递归", MAX_MENU_TREE_DEPTH);
+        tracing::warn!(
+            "菜单树构建达到最大深度 {}（可能存在 parent_id 循环引用），停止递归",
+            MAX_MENU_TREE_DEPTH
+        );
         return;
     }
     let node_id = node.id;

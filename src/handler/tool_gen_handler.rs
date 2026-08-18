@@ -14,18 +14,17 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Serialize;
 
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
 use crate::repository::gen_table::DbTableInfo;
 use crate::service::gen_table_service::{
-    CreateTableDto, CreateTableResultVo,
-    DbTableQueryDto, GenTableEditDto, GenTableInfoVo, GenTableQueryDto,
-    PreviewCodeVo,
+    CreateTableDto, CreateTableResultVo, DbTableQueryDto, GenTableEditDto, GenTableInfoVo,
+    GenTableQueryDto, PreviewCodeVo,
 };
 use crate::state::AppState;
 use crate::utils::parse_id_list;
@@ -67,9 +66,16 @@ pub async fn import_table(
     operator: Operator,
     Query(params): Query<ImportTableParams>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let table_names: Vec<&str> = params.tables.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let table_names: Vec<&str> = params
+        .tables
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if table_names.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.gen.table_select_required")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.gen.table_select_required"
+        )));
     }
     // P1 修复：与同文件 gen_code/synch_db 一致，逐个白名单校验表名（防 CRLF/引号/路径穿越注入）
     for table_name in &table_names {
@@ -108,7 +114,10 @@ pub async fn create_table(
     Json(dto): Json<CreateTableDto>,
 ) -> Result<AjaxResult<CreateTableResultVo>, AppError> {
     crate::common::i18n::validate(&dto)?;
-    let result = state.gen_table_service.create_table_structured(dto, operator.username()).await?;
+    let result = state
+        .gen_table_service
+        .create_table_structured(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success(result))
 }
 
@@ -119,7 +128,10 @@ pub async fn update_table(
     operator: Operator,
     Json(dto): Json<GenTableEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.gen_table_service.update_table(dto, operator.username()).await?;
+    state
+        .gen_table_service
+        .update_table(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -131,7 +143,9 @@ pub async fn delete_table(
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&table_ids);
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.gen.table_id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.gen.table_id_invalid"
+        )));
     }
     // P1 修复：批量删除上限（与其他删除端点一致，防批量删除风暴）
     if ids.len() > crate::common::constants::MAX_BATCH_DELETE_SIZE {
@@ -177,7 +191,9 @@ fn validate_table_name(table_name: &str) -> Result<(), AppError> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Err(AppError::bad_request(&crate::tr!("error.gen.table_name_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.gen.table_name_invalid"
+        )));
     }
     Ok(())
 }
@@ -277,7 +293,9 @@ pub async fn batch_gen_code(
         .collect();
 
     if table_names.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.gen.table_select_for_gen_required")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.gen.table_select_for_gen_required"
+        )));
     }
 
     // 限制单次最多 20 张表（防内存爆炸）
@@ -294,10 +312,7 @@ pub async fn batch_gen_code(
         validate_table_name(name)?;
     }
 
-    let zip_bytes = state
-        .gen_table_service
-        .batch_gen_code(&table_names)
-        .await?;
+    let zip_bytes = state.gen_table_service.batch_gen_code(&table_names).await?;
 
     // 返回 ZIP 文件响应
     let mut headers = axum::http::HeaderMap::new();

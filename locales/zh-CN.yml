@@ -68,6 +68,14 @@ error:
     too_large: "文件大小不能超过 {{max}}MB"
     unknown_ext: 无法识别文件扩展名
     unsupported_type: "不支持的文件类型: {{ext}}"
+  storage:
+    unsupported_backend: "不支持的存储后端: {{backend}}（支持 local / s3）"
+    s3_missing_config: "S3 存储缺少必需配置（access_key/secret_key/endpoint/bucket）"
+    s3_invalid_endpoint: "S3 端点格式无效"
+    s3_client_build_failed: "S3 客户端初始化失败"
+    s3_request_failed: "S3 请求失败，请检查对象存储可用性"
+    s3_status: "S3 返回错误状态 {{status}}: {{detail}}"
+    s3_list_failed: "S3 对象列举失败"
   password:
     complexity_common: 密码过于常见，请使用更复杂的口令
     complexity_digit: 密码必须包含至少 1 个数字
@@ -87,6 +95,13 @@ error:
     higher_role_forbidden: 不允许操作比自己更高优先级的角色
     operator_id_parse_failed: 操作人用户 ID 解析失败
     id_empty: 用户 ID 不能为空
+    email_invalid: 邮箱格式不正确
+    import_login_required: 登录名称不能为空
+    import_login_length: 登录名称长度需为 2-30 个字符
+    import_login_format: 登录名称仅允许字母、数字、下划线
+    import_nick_required: 用户姓名不能为空
+    import_dept_not_found: "部门「{{name}}」不存在"
+    import_duplicate_in_file: 与文件中其它行登录名称重复
     pwd_reset_token_invalidate_failed: 密码重置成功，但旧 token 失效标记写入失败
     pwd_change_token_invalidate_failed: 密码修改成功，但旧 token 失效标记写入失败
   config:
@@ -199,6 +214,7 @@ error:
     key_prefix_required: "缓存键必须以 {{name}} 开头"
     key_count_remark: "{{count}} 个键"
     type_not_previewable: "[{{type}} 类型缓存，不支持预览]"
+    memory_usage_failed: 扫描缓存键内存占用失败
   monitor_server:
     duration_format: "{{days}}天{{hours}}小时{{minutes}}分钟"
   excel:
@@ -208,6 +224,7 @@ error:
     header_write_failed: 写入表头失败
     data_write_failed: 写入数据失败
     generate_failed: 生成 Excel 失败
+    import_parse_failed: 解析 Excel 文件失败：{{e}}，请使用下载的模板填写，勿改动表头
   ip_location:
     source_invalid: 更新源必须为 maxmind 或 p3terx
     unknown_source_type: "未知的更新源类型: {{s}}"
@@ -352,6 +369,7 @@ msg:
     refresh: 刷新成功
     status_change: 状态修改成功
     execute: 执行成功
+    user_import: 成功导入 {{n}} 个用户
     save: 保存成功
     reload: 热加载成功
     password_reset: 密码重置成功
@@ -366,6 +384,7 @@ msg:
     add_dept: "新增部门 {{name}} 成功"
     add_menu: "新增菜单 {{name}} 成功"
     ip_location_update: "IP 库更新成功（源: {{source}}，大小: {{size}} bytes）"
+    test: 测试通过
   cache:
     no_match: 无匹配缓存
     key_not_found: 缓存键不存在
@@ -422,9 +441,11 @@ common:
 
 # Excel 导出工作表名（sheet 标签页名称，用户下载后可见）
 excel:
+  tip_import_xlsx: 仅支持 .xlsx 格式文件
   sheet:
     config: 参数配置
     user: 用户数据
+    user_import: 用户导入
     role: 角色数据
     dict_type: 字典类型
     dict_data: 字典数据

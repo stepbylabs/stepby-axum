@@ -45,11 +45,7 @@ impl SysNoticeReadRepository {
     ///
     /// 使用数据库原生的冲突忽略语义（INSERT OR IGNORE / ON CONFLICT DO NOTHING），
     /// 避免"先 SELECT 后 INSERT"的 TOCTOU 竞态。依赖 sys_notice_read 表的唯一约束 (notice_id, user_id)。
-    pub async fn mark_read(
-        &self,
-        notice_id: i64,
-        user_id: i64,
-    ) -> Result<(), DbErr> {
+    pub async fn mark_read(&self, notice_id: i64, user_id: i64) -> Result<(), DbErr> {
         let now = crate::common::datetime::now_naive();
         let db = self.base.db();
         let backend = db.get_database_backend();
@@ -77,11 +73,7 @@ impl SysNoticeReadRepository {
     ///
     /// 使用数据库原生的冲突忽略语义（INSERT OR IGNORE / ON CONFLICT DO NOTHING / INSERT IGNORE），
     /// 依赖 sys_notice_read 表的唯一约束 (notice_id, user_id)，避免 TOCTOU 竞态。
-    pub async fn mark_read_batch(
-        &self,
-        notice_ids: Vec<i64>,
-        user_id: i64,
-    ) -> Result<(), DbErr> {
+    pub async fn mark_read_batch(&self, notice_ids: Vec<i64>, user_id: i64) -> Result<(), DbErr> {
         if notice_ids.is_empty() {
             return Ok(());
         }
@@ -98,13 +90,22 @@ impl SysNoticeReadRepository {
 
         let sql = match backend {
             DatabaseBackend::Sqlite => {
-                format!("INSERT OR IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES {}", values_clause)
+                format!(
+                    "INSERT OR IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES {}",
+                    values_clause
+                )
             }
             DatabaseBackend::Postgres => {
-                format!("INSERT INTO sys_notice_read (notice_id, user_id, read_time) VALUES {} ON CONFLICT (notice_id, user_id) DO NOTHING", values_clause)
+                format!(
+                    "INSERT INTO sys_notice_read (notice_id, user_id, read_time) VALUES {} ON CONFLICT (notice_id, user_id) DO NOTHING",
+                    values_clause
+                )
             }
             DatabaseBackend::MySql => {
-                format!("INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES {}", values_clause)
+                format!(
+                    "INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time) VALUES {}",
+                    values_clause
+                )
             }
         };
 
@@ -160,11 +161,13 @@ impl SysNoticeReadRepository {
              {}",
             where_clause
         );
-        let count_result = db.query_one(Statement::from_sql_and_values(
-            backend,
-            &count_sql,
-            values.clone(),
-        )).await?;
+        let count_result = db
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                &count_sql,
+                values.clone(),
+            ))
+            .await?;
         let total: u64 = count_result
             .map(|row| u64::try_from(row.try_get::<i64>("", "count").unwrap_or(0)).unwrap_or(0))
             .unwrap_or(0);
@@ -259,11 +262,8 @@ impl SysNoticeReadRepository {
     /// - 已读数量可能很大（历史累积），但未读通常远小于已读
     ///
     /// 安全：使用参数化查询，user_id 来源可信（Operator 提取），无注入风险。
-    pub async fn mark_all_unread_read(
-        &self,
-        user_id: i64,
-    ) -> Result<u64, DbErr> {
-        use crate::entity::sys_notice::{Entity as SysNotice, Column as NoticeColumn};
+    pub async fn mark_all_unread_read(&self, user_id: i64) -> Result<u64, DbErr> {
+        use crate::entity::sys_notice::{Column as NoticeColumn, Entity as SysNotice};
         use sea_orm::QuerySelect;
 
         // 1. 查询所有状态正常的公告 ID

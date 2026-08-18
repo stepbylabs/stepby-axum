@@ -13,14 +13,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use garde::Validate;
 use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_rate_limit::{
     ActiveModel as SysRateLimitActiveModel, Model as SysRateLimitModel,
@@ -226,12 +226,7 @@ impl SysRateLimitService {
 
         let (rows, total) = self
             .rate_limit_repo
-            .find_page_filtered(
-                offset,
-                limit,
-                query.route_pattern.as_deref(),
-                query.enabled,
-            )
+            .find_page_filtered(offset, limit, query.route_pattern.as_deref(), query.enabled)
             .await?;
         Ok((rows, total))
     }
@@ -260,7 +255,9 @@ impl SysRateLimitService {
             .find_by_route_pattern(&dto.route_pattern)
             .await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.rate_limit.pattern_exists")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.rate_limit.pattern_exists"
+            )));
         }
 
         let route_pattern_for_cache = dto.route_pattern.clone();
@@ -303,7 +300,9 @@ impl SysRateLimitService {
                 .find_by_route_pattern(&dto.route_pattern)
                 .await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.rate_limit.pattern_exists")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.rate_limit.pattern_exists"
+                )));
             }
         }
 
@@ -353,10 +352,7 @@ impl SysRateLimitService {
     ///
     /// 注意：本方法不会返回错误（中间件无法处理错误），任何异常都降级到默认配置。
     /// 中间件调用方应使用 `unwrap_or_default()` 或 `.unwrap_or(RateLimitConfig::default())`。
-    pub async fn get_config_for_route(
-        &self,
-        route: &str,
-    ) -> Result<RateLimitConfig, ServiceError> {
+    pub async fn get_config_for_route(&self, route: &str) -> Result<RateLimitConfig, ServiceError> {
         let key = Self::cache_key(route);
 
         // 0. M-2：先查进程内 local_cache（短 TTL，命中则直接返回，避免 Redis 往返）
@@ -380,9 +376,9 @@ impl SysRateLimitService {
             redis::cmd("GET").arg(&key).query_async(&mut conn),
         )
         .await
-        .ok()                  // 超时 → None（缓存未命中，降级到 DB）
-        .and_then(|r| r.ok())  // Redis 错误 → None
-        .flatten();            // Option<Option<String>> → Option<String>
+        .ok() // 超时 → None（缓存未命中，降级到 DB）
+        .and_then(|r| r.ok()) // Redis 错误 → None
+        .flatten(); // Option<Option<String>> → Option<String>
 
         if let Some(val) = cached
             && let Ok(cached_config) = serde_json::from_str::<RateLimitConfigCached>(&val)

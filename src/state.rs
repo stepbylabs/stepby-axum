@@ -1,16 +1,21 @@
 // axum-backend/src/state.rs
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use redis::aio::ConnectionManager;
-use sea_orm::DatabaseConnection;
-use tokio::sync::{broadcast, mpsc};
 use crate::config::Settings;
 use crate::handler::ws_handler::WsMessage;
 use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::scheduler::JobScheduler;
-use crate::service::{AuthService, GenTableService, IpLocationService, MailerService, SysBackupService, SysConfigService, SysDeptService, SysDictService, SysJobService, SysLogininforService, SysMenuService, SysNoticeService, SysOperLogService, SysPostService, SysRateLimitService, SysRoleService, SysTaskService, SysUserService};
+use crate::service::{
+    AuthService, GenTableService, IpLocationService, MailerService, SysBackupService,
+    SysConfigService, SysDeptService, SysDictService, SysJobService, SysLogininforService,
+    SysMenuService, SysMsgService, SysNoticeService, SysOperLogService, SysPostService,
+    SysRateLimitService, SysRoleService, SysTaskService, SysUserService,
+};
 use crate::utils::ip_location::IpLocator;
+use redis::aio::ConnectionManager;
+use sea_orm::DatabaseConnection;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use tokio::sync::{broadcast, mpsc};
 
 /// 应用全局共享状态
 /// 通过 Axum State<Arc<AppState>> 注入到所有 handler
@@ -54,6 +59,8 @@ pub struct AppState {
     pub backup_service: SysBackupService,
     /// 任务进度 Service
     pub task_service: SysTaskService,
+    /// 消息渠道与模板管理 Service
+    pub msg_service: SysMsgService,
     /// 邮件发送 Service（未启用时降级为 no-op）
     pub mailer_service: MailerService,
     /// 定时任务调度器
@@ -63,6 +70,8 @@ pub struct AppState {
     pub ip_locator: Arc<IpLocator>,
     /// IP 库管理 Service（下载/解压/校验/热加载/配置加解密）
     pub ip_location_service: IpLocationService,
+    /// 文件存储后端（F1：local / s3，按 `upload.backend` 配置切换）
+    pub storage: Arc<dyn crate::storage::StorageBackend>,
     /// WebSocket 全局广播通道（实时通知推送）
     pub ws_broadcast: broadcast::Sender<WsMessage>,
     /// WebSocket 按用户定向通道注册表（user_id → 该用户全部活跃连接的发送端）
@@ -149,6 +158,7 @@ impl AppState {
         job_scheduler: Arc<JobScheduler>,
         ip_locator: Arc<IpLocator>,
         ip_location_service: IpLocationService,
+        storage: Arc<dyn crate::storage::StorageBackend>,
     ) -> Self {
         // WebSocket 广播通道（容量 256，超出后旧消息被丢弃；客户端按需订阅）
         let (ws_broadcast, _) = broadcast::channel::<WsMessage>(256);
@@ -193,6 +203,7 @@ impl AppState {
             gen_table_service: GenTableService::new(db.clone()),
             backup_service: SysBackupService::new(db.clone(), config.clone()),
             task_service: SysTaskService::new(db.clone()),
+            msg_service: SysMsgService::new(db.clone(), config.clone()),
             mailer_service: MailerService::new(config.clone()),
             job_scheduler,
             db,
@@ -200,6 +211,7 @@ impl AppState {
             config,
             ip_locator,
             ip_location_service,
+            storage,
             ws_broadcast,
             ws_users: RwLock::new(HashMap::new()),
         }

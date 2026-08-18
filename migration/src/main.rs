@@ -2,9 +2,9 @@
 //! migration 命令行入口
 //! 从 DATABASE_URL 环境变量读取连接串，执行迁移
 
+use migration::Migrator;
 use sea_orm_migration::sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
-use migration::Migrator;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

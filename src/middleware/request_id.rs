@@ -22,9 +22,11 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
         .headers()
         .get("X-Request-Id")
         .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty()
-            && s.len() <= 128
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     req.extensions_mut().insert(RequestId(request_id.clone()));

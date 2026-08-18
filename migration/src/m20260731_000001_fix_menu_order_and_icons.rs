@@ -29,6 +29,7 @@
 //! - /index（首页）：默认落地页，显示登录统计+系统介绍，affix 标签页，不在侧边栏
 //! - /workbench/index（工作台首页）：个人工作区，快捷入口/待办/任务
 //! - /dashboard（数据看板）：统计仪表盘，图表/趋势/指标
+//!
 //! 三者功能不重叠，保留各自入口
 
 use sea_orm_migration::prelude::*;
@@ -80,22 +81,30 @@ impl MigrationTrait for Migration {
         // 120 审计大屏 chart→eye-open（审计=监察语义，eye-open.svg 已存在）
         manager
             .get_connection()
-            .execute_unprepared("UPDATE sys_menu SET icon = 'eye-open' WHERE menu_id = 120 AND icon = 'chart'")
+            .execute_unprepared(
+                "UPDATE sys_menu SET icon = 'eye-open' WHERE menu_id = 120 AND icon = 'chart'",
+            )
             .await?;
         // 126 会话管理 online→people（会话=用户群语义，people.svg 已存在）
         manager
             .get_connection()
-            .execute_unprepared("UPDATE sys_menu SET icon = 'people' WHERE menu_id = 126 AND icon = 'online'")
+            .execute_unprepared(
+                "UPDATE sys_menu SET icon = 'people' WHERE menu_id = 126 AND icon = 'online'",
+            )
             .await?;
         // 130 工作台首页 component→tab（工作台=标签页语义，tab.svg 已存在）
         manager
             .get_connection()
-            .execute_unprepared("UPDATE sys_menu SET icon = 'tab' WHERE menu_id = 130 AND icon = 'component'")
+            .execute_unprepared(
+                "UPDATE sys_menu SET icon = 'tab' WHERE menu_id = 130 AND icon = 'component'",
+            )
             .await?;
         // 133 健康检查 monitor→bug（健康检查=诊断语义，bug.svg 已存在）
         manager
             .get_connection()
-            .execute_unprepared("UPDATE sys_menu SET icon = 'bug' WHERE menu_id = 133 AND icon = 'monitor'")
+            .execute_unprepared(
+                "UPDATE sys_menu SET icon = 'bug' WHERE menu_id = 133 AND icon = 'monitor'",
+            )
             .await?;
 
         Ok(())

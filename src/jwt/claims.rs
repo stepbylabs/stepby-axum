@@ -1,10 +1,10 @@
 // axum-backend/src/jwt/claims.rs
 
+use crate::config::JwtConfig;
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use crate::config::JwtConfig;
 
 /// JWT Claims
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn test_generate_and_verify_roundtrip() {
         let cfg = test_jwt_config();
-        let (token, claims) = JwtUtils::generate_token("1", "admin", &cfg)
-            .expect("generate_token must succeed");
+        let (token, claims) =
+            JwtUtils::generate_token("1", "admin", &cfg).expect("generate_token must succeed");
 
         let verified = JwtUtils::verify_token(&token, &cfg).expect("verify must succeed");
 
@@ -213,8 +213,8 @@ mod tests {
     #[test]
     fn test_verify_rejects_tampered_signature() {
         let cfg = test_jwt_config();
-        let (token, _) = JwtUtils::generate_token("1", "admin", &cfg)
-            .expect("generate_token must succeed");
+        let (token, _) =
+            JwtUtils::generate_token("1", "admin", &cfg).expect("generate_token must succeed");
 
         // 篡改签名段最后一个字符（保持长度，确保是签名校验失败而非格式错误）
         let mut parts: Vec<String> = token.split('.').map(|s| s.to_string()).collect();
@@ -282,8 +282,8 @@ mod tests {
     #[test]
     fn test_verify_rejects_wrong_secret() {
         let cfg = test_jwt_config();
-        let (token, _) = JwtUtils::generate_token("1", "admin", &cfg)
-            .expect("generate_token must succeed");
+        let (token, _) =
+            JwtUtils::generate_token("1", "admin", &cfg).expect("generate_token must succeed");
 
         // 用不同密钥校验 → 签名不匹配
         let mut wrong_cfg = cfg.clone();

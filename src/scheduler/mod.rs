@@ -33,7 +33,10 @@ const TASK_TIMEOUT_SECS: u64 = 60;
 const LOCK_TTL_SECS: u64 = TASK_TIMEOUT_SECS * 3 / 2;
 /// 锁续期间隔（秒），取 TASK_TIMEOUT_SECS / 2，确保任务执行过半时触发续期
 const LOCK_RENEW_INTERVAL_SECS: u64 = TASK_TIMEOUT_SECS / 2;
+/// 消息发送失败单批次重试上限（防止单次重试耗时过长）
+const MESSAGE_RETRY_BATCH: u64 = 100;
 
+use crate::config::Settings;
 use crate::entity::sys_job::Model as SysJobModel;
 use crate::entity::sys_job_log;
 use crate::repository::sys_job::SysJobRepository;
@@ -54,7 +57,9 @@ impl std::fmt::Display for SchedulerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SchedulerError::InvalidCron(msg) => write!(f, "invalid cron expression: {}", msg),
-            SchedulerError::SchedulerInternal(msg) => write!(f, "scheduler internal error: {}", msg),
+            SchedulerError::SchedulerInternal(msg) => {
+                write!(f, "scheduler internal error: {}", msg)
+            }
         }
     }
 }
@@ -65,12 +70,14 @@ impl std::error::Error for SchedulerError {}
 impl From<SchedulerError> for crate::common::error::ServiceError {
     fn from(err: SchedulerError) -> Self {
         match err {
-            SchedulerError::InvalidCron(_msg) => {
-                crate::common::error::ServiceError::bad_request(&crate::tr!("error.job.cron_invalid"))
-            }
+            SchedulerError::InvalidCron(_msg) => crate::common::error::ServiceError::bad_request(
+                &crate::tr!("error.job.cron_invalid"),
+            ),
             SchedulerError::SchedulerInternal(msg) => {
                 tracing::error!("调度器内部错误: {}", msg);
-                crate::common::error::ServiceError::internal(&crate::tr!("error.scheduler.operation_failed"))
+                crate::common::error::ServiceError::internal(&crate::tr!(
+                    "error.scheduler.operation_failed"
+                ))
             }
         }
     }
@@ -109,15 +116,15 @@ impl JobScheduler {
         db: DatabaseConnection,
         redis: ConnectionManager,
         ip_location_service: crate::service::IpLocationService,
+        config: Arc<Settings>,
     ) -> Result<Self, SchedulerError> {
-        let scheduler = TokioScheduler::new()
-            .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create scheduler: {}", e)))?;
+        let scheduler = TokioScheduler::new().await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to create scheduler: {}", e))
+        })?;
 
-        scheduler
-            .start()
-            .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to start scheduler: {}", e)))?;
+        scheduler.start().await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to start scheduler: {}", e))
+        })?;
 
         // 注册内置任务函数（含日志保留期清理任务）
         register_builtin_tasks(db.clone());
@@ -128,6 +135,7 @@ impl JobScheduler {
             db.clone(),
             redis.clone(),
             ip_location_service,
+            config,
         )
         .await
         {
@@ -154,10 +162,14 @@ impl JobScheduler {
         db: DatabaseConnection,
         redis: ConnectionManager,
         ip_location_service: crate::service::IpLocationService,
+        config: Arc<Settings>,
     ) -> Result<(), SchedulerError> {
         // 先 clone 出登录异常检测任务所需的 db/redis，避免被 cleanup_job 闭包 move 后无法使用
         let anomaly_db = db.clone();
         let anomaly_redis = redis.clone();
+        // 消息重试任务也需在 cleanup_job move 前 clone（db 非 Copy）
+        let msg_retry_db = db.clone();
+        let msg_retry_config = config.clone();
 
         // 日志保留期清理任务：每日凌晨 3:00 执行（cron: "0 0 3 * * *"）
         // 删除 90 天前的操作日志和登录日志，避免日志表无限增长导致生产崩溃
@@ -180,14 +192,12 @@ impl JobScheduler {
                     Ok(affected) => {
                         tracing::info!(
                             "cleanup_expired_logs: 清理操作日志 {} 条（保留 {} 天）",
-                            affected, RETENTION_DAYS
+                            affected,
+                            RETENTION_DAYS
                         );
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "cleanup_expired_logs: 清理操作日志失败: {}",
-                            e
-                        );
+                        tracing::error!("cleanup_expired_logs: 清理操作日志失败: {}", e);
                     }
                 }
 
@@ -195,26 +205,27 @@ impl JobScheduler {
                     Ok(affected) => {
                         tracing::info!(
                             "cleanup_expired_logs: 清理登录日志 {} 条（保留 {} 天）",
-                            affected, RETENTION_DAYS
+                            affected,
+                            RETENTION_DAYS
                         );
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "cleanup_expired_logs: 清理登录日志失败: {}",
-                            e
-                        );
+                        tracing::error!("cleanup_expired_logs: 清理登录日志失败: {}", e);
                     }
                 }
             })
         })
-        .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create log cleanup task: {}", e)))?;
+        .map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to create log cleanup task: {}", e))
+        })?;
 
-        scheduler
-            .add(cleanup_job)
-            .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to add log cleanup task: {}", e)))?;
+        scheduler.add(cleanup_job).await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to add log cleanup task: {}", e))
+        })?;
 
-        tracing::info!("内置定时任务注册成功: cleanup_expired_logs (cron: '0 0 3 * * *', 保留 90 天)");
+        tracing::info!(
+            "内置定时任务注册成功: cleanup_expired_logs (cron: '0 0 3 * * *', 保留 90 天)"
+        );
 
         // 登录异常检测任务：每 5 分钟执行（cron: "0 */5 * * * *"）
         // 扫描最近 5 分钟 sys_logininfor 失败记录，按 IP 分组，count>=5 视为撞库攻击
@@ -223,7 +234,9 @@ impl JobScheduler {
             let db = anomaly_db.clone();
             let mut redis = anomaly_redis.clone();
             Box::pin(async move {
-                tracing::debug!("内置任务 login_anomaly_detector 开始执行：扫描最近 5 分钟登录失败记录");
+                tracing::debug!(
+                    "内置任务 login_anomaly_detector 开始执行：扫描最近 5 分钟登录失败记录"
+                );
 
                 let logininfor_service =
                     crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
@@ -233,7 +246,8 @@ impl JobScheduler {
                 // 查询最近 5 分钟的失败登录，按 IP 分组，count >= 5 视为异常
                 const WINDOW_MINUTES: i64 = crate::common::constants::LOGIN_ANOMALY_WINDOW_MINS;
                 const FAIL_THRESHOLD: i64 = crate::common::constants::CREDENTIAL_STUFFING_THRESHOLD;
-                const DEDUP_TTL_SECS: u64 = (crate::common::constants::CREDENTIAL_STUFFING_DEDUP_MINS as u64) * 60; // 30 分钟
+                const DEDUP_TTL_SECS: u64 =
+                    (crate::common::constants::CREDENTIAL_STUFFING_DEDUP_MINS as u64) * 60; // 30 分钟
 
                 let since = crate::common::datetime::now_naive()
                     - chrono::Duration::minutes(WINDOW_MINUTES);
@@ -250,7 +264,10 @@ impl JobScheduler {
                 };
 
                 if anomaly_ips.is_empty() {
-                    tracing::debug!("login_anomaly_detector: 最近 {} 分钟无异常 IP", WINDOW_MINUTES);
+                    tracing::debug!(
+                        "login_anomaly_detector: 最近 {} 分钟无异常 IP",
+                        WINDOW_MINUTES
+                    );
                     return;
                 }
 
@@ -267,11 +284,14 @@ impl JobScheduler {
                         .query_async::<Option<String>>(&mut redis)
                         .await
                     {
-                        Ok(Some(_)) => true,   // 成功获取去重锁
-                        Ok(None) => false,      // key 已存在，跳过
+                        Ok(Some(_)) => true, // 成功获取去重锁
+                        Ok(None) => false,   // key 已存在，跳过
                         Err(e) => {
-                            tracing::warn!("login_anomaly_detector: Redis 去重查询失败，仍创建告警: {}", e);
-                            true  // Redis 故障时仍创建告警（fail-open for alerting）
+                            tracing::warn!(
+                                "login_anomaly_detector: Redis 去重查询失败，仍创建告警: {}",
+                                e
+                            );
+                            true // Redis 故障时仍创建告警（fail-open for alerting）
                         }
                     };
 
@@ -298,7 +318,10 @@ impl JobScheduler {
                         notify_email: false,
                     };
 
-                    match notice_service.add_notice(dto, "system/scheduler", None).await {
+                    match notice_service
+                        .add_notice(dto, "system/scheduler", None)
+                        .await
+                    {
                         Ok(_) => {
                             tracing::warn!(
                                 "login_anomaly_detector: 已为 IP {} 创建告警通知（失败 {} 次）",
@@ -317,14 +340,65 @@ impl JobScheduler {
                 }
             })
         })
-        .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create login anomaly detection task: {}", e)))?;
+        .map_err(|e| {
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to create login anomaly detection task: {}",
+                e
+            ))
+        })?;
 
         scheduler.add(anomaly_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to add login anomaly detection task: {}", e))
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to add login anomaly detection task: {}",
+                e
+            ))
         })?;
 
         tracing::info!(
             "内置定时任务注册成功: login_anomaly_detector (cron: '0 */5 * * * *', 阈值 5 次/5 分钟)"
+        );
+
+        // 消息发送失败重试任务：每分钟重试一批待重试消息（status='2' 且 retry_count<max_retry_count）
+        // cron: "0 */1 * * * *"（秒=0，分钟=每 1 分钟）
+        // 通过 SysMsgService::retry_pending 兜底投递失败的消息；重试耗尽置为失败由 service 内部处理。
+        // 失败不阻断调度器和其他任务。
+        let msg_retry_job = Job::new_async("0 */1 * * * *", move |_uuid, _l| {
+            let db = msg_retry_db.clone();
+            let config = msg_retry_config.clone();
+            Box::pin(async move {
+                tracing::debug!("内置任务 msg_send_retry 开始执行：重试待重试消息批次");
+
+                let msg_service = crate::service::sys_msg_service::SysMsgService::new(db, config);
+
+                match msg_service.retry_pending(MESSAGE_RETRY_BATCH).await {
+                    Ok(n) => {
+                        if n > 0 {
+                            tracing::info!("msg_send_retry: 本次重试完成 {} 条待重试消息", n);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("msg_send_retry: 重试待重试消息失败: {}", e);
+                    }
+                }
+            })
+        })
+        .map_err(|e| {
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to create message send retry task: {}",
+                e
+            ))
+        })?;
+
+        scheduler.add(msg_retry_job).await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to add message send retry task: {}",
+                e
+            ))
+        })?;
+
+        tracing::info!(
+            "内置定时任务注册成功: msg_send_retry (cron: '0 */1 * * * *', 单批次上限 {} 条)",
+            MESSAGE_RETRY_BATCH
         );
 
         // IP 库自动更新任务：按 config.ip_location.auto_update_cron 定时更新 mmdb 文件
@@ -360,7 +434,9 @@ impl JobScheduler {
                         }
                     };
                     if !cfg.auto_update_enabled {
-                        tracing::debug!("mmdb_auto_update: auto_update_enabled=false，跳过本次执行");
+                        tracing::debug!(
+                            "mmdb_auto_update: auto_update_enabled=false，跳过本次执行"
+                        );
                         return;
                     }
 
@@ -380,7 +456,9 @@ impl JobScheduler {
                         .unwrap_or(None);
 
                     if lock_result.is_none() {
-                        tracing::info!("mmdb_auto_update: 其他实例正在执行 IP 库更新，跳过本次调度");
+                        tracing::info!(
+                            "mmdb_auto_update: 其他实例正在执行 IP 库更新，跳过本次调度"
+                        );
                         return;
                     }
 
@@ -447,14 +525,10 @@ impl JobScheduler {
     ///
     /// - 单个任务加载失败不阻断其他任务
     /// - misfire_policy='1'/'2' 的任务补执行一次
-    pub async fn load_from_db(
-        &self,
-        job_repo: &SysJobRepository,
-    ) -> Result<(), SchedulerError> {
-        let jobs = job_repo
-            .find_by_status("0")
-            .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e)))?;
+    pub async fn load_from_db(&self, job_repo: &SysJobRepository) -> Result<(), SchedulerError> {
+        let jobs = job_repo.find_by_status("0").await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e))
+        })?;
 
         for job in jobs {
             match self.add_job(&job).await {
@@ -522,9 +596,10 @@ impl JobScheduler {
                 // catch_unwind 捕获 async fn 内部的 panic，防止 panic 影响调度器运行时
                 // 注意：std::panic::catch_unwind 无法捕获 async fn poll 时的 panic，
                 // 必须使用 futures::FutureExt::catch_unwind 对 Future 本身进行捕获
-                let result = AssertUnwindSafe(execute_with_logging(&db, &mut redis, &executing_jobs, &job))
-                    .catch_unwind()
-                    .await;
+                let result =
+                    AssertUnwindSafe(execute_with_logging(&db, &mut redis, &executing_jobs, &job))
+                        .catch_unwind()
+                        .await;
 
                 if let Err(panic_err) = result {
                     tracing::error!(
@@ -563,10 +638,9 @@ impl JobScheduler {
         };
 
         if let Some(guid) = guid {
-            self.scheduler
-                .remove(&guid)
-                .await
-                .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to remove job: {}", e)))?;
+            self.scheduler.remove(&guid).await.map_err(|e| {
+                SchedulerError::SchedulerInternal(format!("Failed to remove job: {}", e))
+            })?;
             tracing::info!("任务移除成功: job_id={}, guid={}", job_id, guid);
         } else {
             tracing::warn!("任务移除跳过：调度器中不存在 job_id={}", job_id);
@@ -594,15 +668,14 @@ impl JobScheduler {
         // 重复注册由调度器幂等/手动触发兜底，风险低于任务丢失）
         if let Some(old_guid) = old_guid
             && self.running_jobs.read().await.get(&job.job_id).copied() != Some(old_guid)
+            && let Err(e) = self.scheduler.remove(&old_guid).await
         {
-            if let Err(e) = self.scheduler.remove(&old_guid).await {
-                tracing::warn!(
-                    "更新任务后移除旧调度失败 job_id={}, guid={}: {}（新任务已注册，可接受）",
-                    job.job_id,
-                    old_guid,
-                    e
-                );
-            }
+            tracing::warn!(
+                "更新任务后移除旧调度失败 job_id={}, guid={}: {}（新任务已注册，可接受）",
+                job.job_id,
+                old_guid,
+                e
+            );
         }
 
         Ok(())
@@ -622,9 +695,14 @@ impl JobScheduler {
             // catch_unwind 捕获 async fn 内部的 panic，防止 panic 跨 spawn 边界传播
             // 注意：std::panic::catch_unwind 无法捕获 async fn poll 时的 panic，
             // 必须使用 futures::FutureExt::catch_unwind 对 Future 本身进行捕获
-            let result = AssertUnwindSafe(execute_with_logging(&db, &mut redis, &executing_jobs, &job_clone))
-                .catch_unwind()
-                .await;
+            let result = AssertUnwindSafe(execute_with_logging(
+                &db,
+                &mut redis,
+                &executing_jobs,
+                &job_clone,
+            ))
+            .catch_unwind()
+            .await;
 
             if let Err(panic_err) = result {
                 tracing::error!(
@@ -658,10 +736,9 @@ impl JobScheduler {
         // 由于内部 scheduler 字段为 Arc<RwLock<Scheduler>>，克隆后调用 shutdown
         // 仍会影响原始实例的调度循环。
         let mut sched = (*self.scheduler).clone();
-        sched
-            .shutdown()
-            .await
-            .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to shutdown scheduler: {}", e)))?;
+        sched.shutdown().await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to shutdown scheduler: {}", e))
+        })?;
         tracing::info!("调度器已关闭");
         Ok(())
     }
@@ -688,8 +765,9 @@ fn validate_cron(cron_str: &str) -> Result<(), SchedulerError> {
         .map_err(|e| SchedulerError::InvalidCron(format!("{}", e)))?;
     // 触发一次 next_occurrence 计算以尽早暴露无效模式（如 2月30日）
     use chrono::Utc;
-    cron.find_next_occurrence(&Utc::now(), false)
-        .map_err(|e| SchedulerError::InvalidCron(format!("Failed to calculate next execution time: {}", e)))?;
+    cron.find_next_occurrence(&Utc::now(), false).map_err(|e| {
+        SchedulerError::InvalidCron(format!("Failed to calculate next execution time: {}", e))
+    })?;
     Ok(())
 }
 
@@ -936,10 +1014,7 @@ async fn execute_with_logging(
     };
 
     if lock_acquired.is_none() {
-        tracing::debug!(
-            "任务 {} 被其他实例持有分布式锁，跳过本次执行",
-            job.job_name
-        );
+        tracing::debug!("任务 {} 被其他实例持有分布式锁，跳过本次执行", job.job_name);
         return;
     }
 
@@ -954,10 +1029,7 @@ async fn execute_with_logging(
     ) {
         Some(g) => g,
         None => {
-            tracing::debug!(
-                "任务 {} 禁止并发，跳过本次执行",
-                job.job_name
-            );
+            tracing::debug!("任务 {} 禁止并发，跳过本次执行", job.job_name);
             // 释放分布式锁（本实例并发跳过，允许其他实例或其他周期执行）
             // P0-6/30 改进：使用 CAS 释放，避免误删其他实例持有的锁
             release_lock(redis, &lock_key, &lock_value).await;
@@ -993,13 +1065,7 @@ async fn execute_with_logging(
                 // 这样 panic 后可主动 break 停止续期，避免吞掉 panic 继续空转。
                 let result = AssertUnwindSafe(async {
                     let mut conn = redis_clone.clone();
-                    renew_lock(
-                        &mut conn,
-                        &lock_key_clone,
-                        &lock_value_clone,
-                        LOCK_TTL_SECS,
-                    )
-                    .await
+                    renew_lock(&mut conn, &lock_key_clone, &lock_value_clone, LOCK_TTL_SECS).await
                 })
                 .catch_unwind()
                 .await;
@@ -1041,42 +1107,48 @@ async fn execute_with_logging(
 
     // P0-5：RAII 守卫接管续期任务句柄与锁释放——任何退出路径（含 panic/Drop）都会
     // abort 续期任务并释放分布式锁，杜绝"任务 panic → 续期任务无限续锁 → job 永久禁用"。
-    let mut lock_guard = JobLockGuard::new(renew_handle, redis.clone(), lock_key.clone(), lock_value.clone());
+    let mut lock_guard = JobLockGuard::new(
+        renew_handle,
+        redis.clone(),
+        lock_key.clone(),
+        lock_value.clone(),
+    );
 
     // 执行任务（捕获 panic，避免 panic 跨 spawn 边界传播）
     // P0-5 加固：catch_unwind 包裹，任务函数 panic 转为业务失败而非中断主流程，
     // 确保后续 finish()（abort 续期 + 释放锁）一定执行。
-    let (status, message, exception_info) = match AssertUnwindSafe(execute_inner(&job.invoke_target))
-        .catch_unwind()
-        .await
-    {
-        Ok(Ok(msg)) => ("0", msg, String::new()),
-        Ok(Err(e)) => {
-            // B11：业务执行失败需在 tracing 日志层可见。DB 层 sys_job_log 已记录失败，
-            // 但此前缺 tracing::error!，导致日志/告警系统（通常只监控 error 级）无法感知业务失败。
-            tracing::error!(
-                "任务执行业务失败: job_id={}, job_name={}, error={:?}",
-                job.job_id,
-                job.job_name,
-                e
-            );
-            ("1", format!("Job execution failed: {}", e), e.to_string())
-        }
-        Err(panic_err) => {
-            // 任务函数 panic：记录并视为失败（P0-5：不让 panic 中断主流程导致锁泄漏）
-            tracing::error!(
-                "任务函数 panic: job_id={}, job_name={}, panic={:?}",
-                job.job_id,
-                job.job_name,
-                panic_err
-            );
-            (
-                "1",
-                format!("Job execution panicked: {:?}", panic_err),
-                format!("{:?}", panic_err),
-            )
-        }
-    };
+    let (status, message, exception_info) =
+        match AssertUnwindSafe(execute_inner(&job.invoke_target))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(msg)) => ("0", msg, String::new()),
+            Ok(Err(e)) => {
+                // B11：业务执行失败需在 tracing 日志层可见。DB 层 sys_job_log 已记录失败，
+                // 但此前缺 tracing::error!，导致日志/告警系统（通常只监控 error 级）无法感知业务失败。
+                tracing::error!(
+                    "任务执行业务失败: job_id={}, job_name={}, error={:?}",
+                    job.job_id,
+                    job.job_name,
+                    e
+                );
+                ("1", format!("Job execution failed: {}", e), e.to_string())
+            }
+            Err(panic_err) => {
+                // 任务函数 panic：记录并视为失败（P0-5：不让 panic 中断主流程导致锁泄漏）
+                tracing::error!(
+                    "任务函数 panic: job_id={}, job_name={}, panic={:?}",
+                    job.job_id,
+                    job.job_name,
+                    panic_err
+                );
+                (
+                    "1",
+                    format!("Job execution panicked: {:?}", panic_err),
+                    format!("{:?}", panic_err),
+                )
+            }
+        };
 
     let elapsed = start.elapsed().as_millis();
 
@@ -1116,8 +1188,12 @@ async fn execute_with_logging(
 async fn execute_inner(
     invoke_target: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let func = registry::get_task(invoke_target)
-        .ok_or_else(|| crate::tr!("msg.scheduler.invoke_target_not_found", target = invoke_target))?;
+    let func = registry::get_task(invoke_target).ok_or_else(|| {
+        crate::tr!(
+            "msg.scheduler.invoke_target_not_found",
+            target = invoke_target
+        )
+    })?;
 
     // REGRESS-008：使用常量 TASK_TIMEOUT_SECS，与 LOCK_TTL_SECS 保持联动
     tokio::time::timeout(Duration::from_secs(TASK_TIMEOUT_SECS), func())
@@ -1220,8 +1296,5 @@ fn register_builtin_tasks(db: DatabaseConnection) {
         }),
     );
 
-    tracing::info!(
-        "内置任务注册完成: {:?}",
-        registry::list_registered_tasks()
-    );
+    tracing::info!("内置任务注册完成: {:?}", registry::list_registered_tasks());
 }

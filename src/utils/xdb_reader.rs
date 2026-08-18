@@ -56,9 +56,7 @@ impl XdbRegion {
     /// 从 "国家|区域|省份|城市|ISP" 格式字符串解析
     pub fn parse(s: &str) -> Self {
         let parts: Vec<&str> = s.split('|').collect();
-        let get = |i: usize| -> String {
-            parts.get(i).map(|s| s.to_string()).unwrap_or_default()
-        };
+        let get = |i: usize| -> String { parts.get(i).map(|s| s.to_string()).unwrap_or_default() };
         Self {
             country: get(0),
             region: get(1),
@@ -126,18 +124,20 @@ impl XdbReader {
         }
 
         // 解析 header：start_index_ptr 在偏移 4，end_index_ptr 在偏移 8（big endian u32）
-        let start_index_ptr = u32::from_be_bytes([
-            data[4], data[5], data[6], data[7],
-        ]) as usize;
-        let end_index_ptr = u32::from_be_bytes([
-            data[8], data[9], data[10], data[11],
-        ]) as usize;
+        let start_index_ptr = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        let end_index_ptr = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
 
         // 边界校验
-        if start_index_ptr >= data.len() || end_index_ptr > data.len() || start_index_ptr >= end_index_ptr {
+        if start_index_ptr >= data.len()
+            || end_index_ptr > data.len()
+            || start_index_ptr >= end_index_ptr
+        {
             tracing::warn!(
                 "xdb 文件 {} header 指针无效：start={}, end={}, file_size={}",
-                path, start_index_ptr, end_index_ptr, data.len()
+                path,
+                start_index_ptr,
+                end_index_ptr,
+                data.len()
             );
             return None;
         }
@@ -146,7 +146,9 @@ impl XdbReader {
         if !index_bytes.is_multiple_of(XDB_INDEX_ENTRY_SIZE) {
             tracing::warn!(
                 "xdb 文件 {} 索引区长度 {} 不是 {} 的倍数",
-                path, index_bytes, XDB_INDEX_ENTRY_SIZE
+                path,
+                index_bytes,
+                XDB_INDEX_ENTRY_SIZE
             );
             return None;
         }
@@ -155,7 +157,11 @@ impl XdbReader {
 
         tracing::info!(
             "xdb 文件加载成功：path={}, size={}B, index_count={}, data_region=[{}, {}]",
-            path, data.len(), index_count, end_index_ptr, data.len()
+            path,
+            data.len(),
+            index_count,
+            end_index_ptr,
+            data.len()
         );
 
         Some(Self {
@@ -223,7 +229,10 @@ impl XdbReader {
                 if data_offset + data_len > self.data.len() || data_len == 0 {
                     tracing::debug!(
                         "xdb 查询命中但数据指针越界：ip={}, data_offset={}, data_len={}, file_size={}",
-                        ip, data_offset, data_len, self.data.len()
+                        ip,
+                        data_offset,
+                        data_len,
+                        self.data.len()
                     );
                     return None;
                 }

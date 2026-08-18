@@ -21,11 +21,10 @@ use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-
 use crate::common::{AjaxResult, AppError};
 use crate::entity::{sys_oper_log, sys_role, sys_user};
-use crate::utils::redis::scan_keys;
 use crate::state::AppState;
+use crate::utils::redis::scan_keys;
 
 // ==================== DTO ====================
 
@@ -97,9 +96,9 @@ crate::impl_into_response!(CommonUploadResult);
 pub async fn dashboard_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<DashboardStatsVo>, AppError> {
-    use sys_user::Column as UserCol;
-    use sys_role::Column as RoleCol;
     use sys_oper_log::Column as OperCol;
+    use sys_role::Column as RoleCol;
+    use sys_user::Column as UserCol;
 
     let db = &state.db;
 
@@ -321,7 +320,10 @@ pub async fn user_stats(
         let date = month_ago + Duration::days(i);
         let date_str = date.format("%Y-%m-%d").to_string();
         let count = trend_map.get(&date_str).copied().unwrap_or(0);
-        create_trend.push(UserCreateTrendItem { date: date_str, count });
+        create_trend.push(UserCreateTrendItem {
+            date: date_str,
+            count,
+        });
     }
 
     Ok(AjaxResult::success(UserStatsVo {
@@ -387,11 +389,9 @@ pub async fn upload(
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut original_filename: Option<String> = None;
     let mut file_ext: Option<String> = None;
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e)))?
-    {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e))
+    })? {
         if field.name() == Some("file") {
             let (bytes, ext, original) =
                 crate::common::upload::read_field_limited(&mut field, upload_cfg.common_max_size)
@@ -404,9 +404,10 @@ pub async fn upload(
 
     // P0-3：统一校验 + 保存（扩展名白名单、危险类型拒绝、magic bytes、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
-        file_bytes
-            .as_deref()
-            .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_file")))?,
+        state.storage.as_ref(),
+        file_bytes.as_deref().ok_or_else(|| {
+            AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_file"))
+        })?,
         file_ext.as_deref(),
         original_filename.as_deref(),
         upload_cfg,
@@ -454,47 +455,28 @@ pub async fn download(
         || file_name.contains("..")
         || file_name.contains('\0')
     {
-        return Err(AppError::bad_request(&crate::tr!("error.common_handler.filename_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common_handler.filename_invalid"
+        )));
     }
 
     let upload_cfg = &state.config.upload;
-    // 解析上传目录为绝对路径，确保与 ServeDir 服务路径一致
-    let common_dir = crate::common::resolve_upload_dir(&upload_cfg.common_dir).await;
-    let file_path = common_dir.join(file_name);
+    // 统一走存储后端读取（local 读盘 / s3 下载对象），文件不存在由后端返回 None
+    let bytes = state
+        .storage
+        .read(&upload_cfg.common_dir, file_name)
+        .await?
+        .ok_or_else(|| AppError::not_found(&crate::tr!("error.common_handler.file_not_found")))?;
 
-    // 读取文件内容（同步 IO 放到 spawn_blocking）
-    let file_path_clone = file_path.clone();
-    let file_name_str = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(file_name)
-        .to_string();
-    let content = tokio::task::spawn_blocking(move || -> std::io::Result<Option<Vec<u8>>> {
-        if !file_path_clone.exists() {
-            return Ok(None);
-        }
-        std::fs::read(&file_path_clone).map(Some)
-    })
-    .await
-    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_task_failed")))?
-    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_failed")))?;
-
-    let bytes = match content {
-        Some(b) => b,
-        None => {
-            return Err(AppError::not_found(&crate::tr!("error.common_handler.file_not_found")));
-        }
-    };
-
-    // delete=true 时下载后删除原文件
+    // delete=true 时下载后删除原文件（后端删除幂等：不存在视为成功）
     if params.delete {
-        let path_to_remove = file_path.clone();
-        if let Err(e) = tokio::fs::remove_file(&path_to_remove).await {
-            tracing::warn!(error = %e, path = ?path_to_remove, "下载后删除文件失败");
-        }
+        state
+            .storage
+            .delete(&upload_cfg.common_dir, file_name)
+            .await?;
     }
 
-    Ok(build_download_response(&bytes, &file_name_str))
+    Ok(build_download_response(&bytes, file_name))
 }
 
 /// GET /common/download/resource
@@ -503,7 +485,8 @@ pub async fn download(
 /// 安全要点（更严格）：
 /// - resource 必须以 `uploads/` 开头
 /// - 禁止 `..`、`\\`
-/// - 用 `Path::canonicalize` 二次校验：规范化后路径必须仍以 `uploads/` 开头
+/// - 按「目录 + 文件名」拆分后交存储后端二次路径穿越校验（本地基于目录解析 + key 拼接，
+///   等价于原 canonicalize 的 upload_root 边界约束）
 #[utoipa::path(
     get,
     path = "/common/download/resource",
@@ -520,64 +503,34 @@ pub async fn download_resource(
 ) -> Result<Response, AppError> {
     let resource = params.resource.trim();
 
-    // 基础校验：必须以 uploads/ 开头，禁止 .. 和反斜杠
+    // 基础校验：必须以 uploads/ 开头，禁止 .. 与 \；路径安全在存储后端内再次校验
     if resource.is_empty()
         || !resource.starts_with("uploads/")
         || resource.contains("..")
         || resource.contains('\\')
         || resource.contains('\0')
     {
-        return Err(AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common_handler.resource_path_invalid"
+        )));
     }
 
-    // 规范化路径二次校验：canonicalize 后必须位于 upload_root 内
-    let path = std::path::Path::new(resource);
-    let canonical = tokio::fs::canonicalize(path)
-        .await
-        .map_err(|_| AppError::not_found(&crate::tr!("error.common_handler.resource_not_found")))?;
-
-    // 解析 upload_root 并 canonicalize，确保资源路径不会逃逸出上传目录
-    let upload_root = crate::common::resolve_upload_root(&state.config.upload);
-    let upload_root_canonical = tokio::fs::canonicalize(&upload_root)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, upload_root = %upload_root.display(), "上传根目录 canonicalize 失败");
-            AppError::internal(&crate::tr!("error.common_handler.resource_path_invalid"))
-        })?;
-    // 跨平台兼容：统一用正斜杠比较前缀
-    let canonical_norm = canonical.to_string_lossy().replace('\\', "/");
-    let upload_root_norm = upload_root_canonical.to_string_lossy().replace('\\', "/");
-    if !canonical_norm.starts_with(&upload_root_norm) {
-        return Err(AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid")));
-    }
-
-    // 读取文件内容
-    let path_clone = canonical.clone();
-    let content = tokio::task::spawn_blocking(move || -> std::io::Result<Option<Vec<u8>>> {
-        if !path_clone.is_file() {
-            return Ok(None);
-        }
-        std::fs::read(&path_clone).map(Some)
-    })
-    .await
-    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_task_failed")))?
-    .map_err(|_| AppError::internal(&crate::tr!("error.upload.file_read_failed")))?;
-
-    let bytes = match content {
-        Some(b) => b,
-        None => {
-            return Err(AppError::not_found(&crate::tr!("error.common_handler.resource_not_found")));
+    // 将资源路径拆分为「存储目录 + 文件名」（如 uploads/file/xxx.pdf → uploads/file | xxx.pdf），
+    // 统一走存储后端读取（local 读盘 / s3 下载对象）。后端对 key 做路径穿越校验，
+    // 且本地实现基于目录解析 + key 拼接，等价于原先的 upload_root 边界约束。
+    let (dir, key) = match resource.rsplit_once('/') {
+        Some((d, k)) if !d.is_empty() && !k.is_empty() => (d.to_string(), k.to_string()),
+        _ => {
+            return Err(AppError::bad_request(&crate::tr!(
+                "error.common_handler.resource_path_invalid"
+            )));
         }
     };
+    let bytes = state.storage.read(&dir, &key).await?.ok_or_else(|| {
+        AppError::not_found(&crate::tr!("error.common_handler.resource_not_found"))
+    })?;
 
-    // download-filename 取 basename
-    let basename = canonical
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("download")
-        .to_string();
-
-    Ok(build_download_response(&bytes, &basename))
+    Ok(build_download_response(&bytes, &key))
 }
 
 // ==================== 辅助函数 ====================
@@ -598,12 +551,7 @@ fn build_download_response(bytes: &[u8], file_name: &str) -> Response {
         headers.insert(HeaderName::from_static("download-filename"), val);
     }
 
-    (
-        axum::http::StatusCode::OK,
-        headers,
-        bytes.to_vec(),
-    )
-        .into_response()
+    (axum::http::StatusCode::OK, headers, bytes.to_vec()).into_response()
 }
 
 /// URL 编码（百分号编码），用于 download-filename 响应头

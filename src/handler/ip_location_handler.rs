@@ -17,15 +17,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use garde::Validate;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use garde::Validate;
 
 use crate::common::{AjaxResult, AppError, ValidatedJson};
 use crate::middleware::Operator;
-use crate::service::ip_location_service::{
-    IpLocationConfig, IpLocationStatus, UpdateResult,
-};
+use crate::service::ip_location_service::{IpLocationConfig, IpLocationStatus, UpdateResult};
 use crate::state::AppState;
 
 /// 保存 IP 库管理配置的请求 DTO
@@ -147,7 +145,9 @@ pub async fn save_config(
     // 校验 update_source 合法性
     let source = dto.update_source.to_lowercase();
     if source != "maxmind" && source != "p3terx" {
-        return Err(AppError::bad_request(&crate::tr!("error.ip_location.source_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.ip_location.source_invalid"
+        )));
     }
 
     // 读取现有配置，以决定是"保留原值"还是"覆盖"
@@ -172,9 +172,9 @@ pub async fn save_config(
 
     // 切换到 maxmind 时必须有凭据
     if source == "maxmind" && (final_account_id.is_empty() || final_license_key.is_empty()) {
-        return Err(AppError::bad_request(
-            &crate::tr!("error.ip_location.maxmind_credentials_required"),
-        ));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.ip_location.maxmind_credentials_required"
+        )));
     }
 
     state
@@ -245,7 +245,9 @@ pub async fn update_now(
             AppError::new(503, crate::tr!("error.ip_location.update_unavailable"))
         })?;
     if !acquired {
-        return Err(AppError::bad_request(&crate::tr!("error.ip_location.update_in_progress")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.ip_location.update_in_progress"
+        )));
     }
 
     let result = state

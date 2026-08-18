@@ -33,7 +33,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 /// 当前时间表达式（跨数据库兼容）
@@ -91,17 +94,13 @@ impl MigrationTrait for Migration {
         // 删除 role_menu 关联
         manager
             .get_connection()
-            .execute_unprepared(
-                "DELETE FROM sys_role_menu WHERE menu_id = 131",
-            )
+            .execute_unprepared("DELETE FROM sys_role_menu WHERE menu_id = 131")
             .await?;
 
         // 删除菜单
         manager
             .get_connection()
-            .execute_unprepared(
-                "DELETE FROM sys_menu WHERE menu_id = 131",
-            )
+            .execute_unprepared("DELETE FROM sys_menu WHERE menu_id = 131")
             .await?;
 
         Ok(())

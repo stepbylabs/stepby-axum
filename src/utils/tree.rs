@@ -12,7 +12,9 @@ pub trait TreeNode {
     /// 父节点 ID
     fn parent_id(&self) -> Self::Id;
     /// 可变子节点列表
-    fn children_mut(&mut self) -> &mut Option<Vec<Self>> where Self: Sized;
+    fn children_mut(&mut self) -> &mut Option<Vec<Self>>
+    where
+        Self: Sized;
 }
 
 /// 将扁平列表构建为树结构
@@ -21,7 +23,8 @@ pub trait TreeNode {
 /// P1：递归加深度上限（MAX_TREE_DEPTH），防止脏数据成环（parent_id 循环）
 /// 导致无限递归栈溢出（8MB 栈也扛不住深层递归）。
 pub fn build_tree<T: TreeNode + Clone>(list: &[T], root_parent_id: T::Id) -> Vec<T> {
-    let mut roots: Vec<T> = list.iter()
+    let mut roots: Vec<T> = list
+        .iter()
         .filter(|n| n.parent_id() == root_parent_id)
         .cloned()
         .collect();
@@ -43,7 +46,8 @@ fn build_children<T: TreeNode + Clone>(node: &mut T, list: &[T], depth: usize) {
         return;
     }
     let node_id = node.id();
-    let children: Vec<T> = list.iter()
+    let children: Vec<T> = list
+        .iter()
         .filter(|n| n.parent_id() == node_id)
         .cloned()
         .collect();

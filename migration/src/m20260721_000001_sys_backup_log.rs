@@ -27,7 +27,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 impl sea_orm_migration::MigrationName for Migration {
@@ -50,7 +53,8 @@ impl MigrationTrait for Migration {
                 error_msg    VARCHAR(1000),
                 create_by    VARCHAR(64),
                 create_time  DATETIME
-            )"#.to_string()
+            )"#
+            .to_string()
         } else if is_postgres(manager) {
             r#"CREATE TABLE IF NOT EXISTS sys_backup_log (
                 backup_id    BIGSERIAL PRIMARY KEY,
@@ -62,7 +66,8 @@ impl MigrationTrait for Migration {
                 error_msg    VARCHAR(1000),
                 create_by    VARCHAR(64),
                 create_time  TIMESTAMP
-            )"#.to_string()
+            )"#
+            .to_string()
         } else {
             r#"CREATE TABLE IF NOT EXISTS sys_backup_log (
                 backup_id    BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -74,7 +79,8 @@ impl MigrationTrait for Migration {
                 error_msg    VARCHAR(1000),
                 create_by    VARCHAR(64),
                 create_time  DATETIME
-            )"#.to_string()
+            )"#
+            .to_string()
         };
 
         manager.get_connection().execute_unprepared(&sql).await?;

@@ -10,12 +10,12 @@ pub mod request_id;
 pub mod security_headers;
 pub mod spa_fallback;
 
-pub use auth::{auth_middleware, Operator};
+pub use auth::{Operator, auth_middleware};
 pub use idempotency::idempotency_middleware;
 pub use locale::{locale_middleware, negotiate};
 pub use oper_log::oper_log_middleware;
 pub use permission::permission_middleware;
-pub use rate_limit::{rate_limit_middleware, RateLimiter, RateLimitConfig};
-pub use request_id::{request_id_middleware, RequestId};
+pub use rate_limit::{RateLimitConfig, RateLimiter, rate_limit_middleware};
+pub use request_id::{RequestId, request_id_middleware};
 pub use security_headers::security_headers;
 pub use spa_fallback::spa_fallback_middleware;

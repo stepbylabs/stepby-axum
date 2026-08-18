@@ -14,10 +14,8 @@ use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
-use crate::entity::sys_oper_log::{
-    ActiveModel as SysOperLogActiveModel, Model as SysOperLogModel,
-};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::entity::sys_oper_log::{ActiveModel as SysOperLogActiveModel, Model as SysOperLogModel};
 use crate::repository::sys_oper_log::SysOperLogRepository;
 
 // ==================== DTO ====================
@@ -162,10 +160,7 @@ impl SysOperLogService {
     }
 
     /// 批量删除操作日志（物理删除）
-    pub async fn delete_oper_logs(
-        &self,
-        oper_ids: Vec<i64>,
-    ) -> Result<(), ServiceError> {
+    pub async fn delete_oper_logs(&self, oper_ids: Vec<i64>) -> Result<(), ServiceError> {
         self.oper_log_repo.delete_by_ids(oper_ids).await?;
         Ok(())
     }
@@ -176,8 +171,7 @@ impl SysOperLogService {
     /// 现仅删除 `days` 天前的日志，默认 30 天。
     /// 配合 handler 层 tracing::warn! 记录操作者信息。
     pub async fn clean_oper_logs(&self, days: i64) -> Result<u64, ServiceError> {
-        let cutoff = crate::common::datetime::now_naive()
-            - chrono::Duration::days(days);
+        let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
         let result = self.oper_log_repo.delete_older_than(cutoff).await?;
         Ok(result.rows_affected)
     }
@@ -196,8 +190,7 @@ impl SysOperLogService {
     /// 供定时任务 cleanup_expired_logs 调用（P0-R81-019）。
     /// 默认保留 90 天，避免操作日志无限增长导致生产崩溃。
     pub async fn cleanup_old_logs(&self, days: i64) -> Result<u64, ServiceError> {
-        let cutoff = crate::common::datetime::now_naive()
-            - chrono::Duration::days(days);
+        let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
         let result = self.oper_log_repo.delete_older_than(cutoff).await?;
         Ok(result.rows_affected)
     }
@@ -239,7 +232,10 @@ impl SysOperLogService {
     }
 
     /// 审计大屏统计：操作人 Top N
-    pub async fn stats_top_operators(&self, limit: u64) -> Result<Vec<AuditOperatorStat>, ServiceError> {
+    pub async fn stats_top_operators(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<AuditOperatorStat>, ServiceError> {
         let rows = self.oper_log_repo.stats_top_operators(limit).await?;
         Ok(rows
             .into_iter()
@@ -248,6 +244,87 @@ impl SysOperLogService {
                 count: cnt,
             })
             .collect())
+    }
+
+    /// 审计大屏统计：操作模块（title）Top N
+    ///
+    /// title 可能是中文原文或 i18n key（module.*），这里统一经 module_title() 翻译后返回，
+    /// 保证前端展示为可读模块名。
+    pub async fn stats_top_modules(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<AuditModuleStat>, ServiceError> {
+        let rows = self.oper_log_repo.stats_top_modules(limit).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, cnt)| AuditModuleStat {
+                module_name: crate::common::i18n::module_title(&name).into_owned(),
+                count: cnt,
+            })
+            .collect())
+    }
+
+    /// 异常操作告警状态检测
+    ///
+    /// 在一个时间窗口内，检测：
+    /// - 失败率是否超过 `fail_rate_threshold`（百分比）
+    /// - 是否有操作人失败 Burst >= `fail_threshold`
+    /// - 是否有模块失败 Burst >= `fail_threshold`
+    ///
+    /// 任一命中即 `alert_triggered = true`，供前端展示告警横幅。
+    pub async fn get_alarm_status(
+        &self,
+        window_minutes: i64,
+        fail_threshold: i64,
+        fail_rate_threshold: i64,
+    ) -> Result<AlarmStatusVo, ServiceError> {
+        let (total, fail) = self
+            .oper_log_repo
+            .failure_stats_in_window(window_minutes)
+            .await?;
+        let fail_rate = if total > 0 {
+            (fail as f64) / (total as f64) * 100.0
+        } else {
+            0.0
+        };
+        let fail_rate_alarm = fail_rate >= fail_rate_threshold as f64;
+
+        let operator_bursts: Vec<AlarmItem> = self
+            .oper_log_repo
+            .failure_burst_operators(window_minutes, fail_threshold)
+            .await?
+            .into_iter()
+            .map(|(name, cnt)| AlarmItem { name, count: cnt })
+            .collect();
+
+        let module_bursts: Vec<AlarmItem> = self
+            .oper_log_repo
+            .failure_burst_modules(window_minutes, fail_threshold)
+            .await?
+            .into_iter()
+            .map(|(name, cnt)| AlarmItem {
+                name: crate::common::i18n::module_title(&name).into_owned(),
+                count: cnt,
+            })
+            .collect();
+
+        let alert_triggered =
+            fail_rate_alarm || !operator_bursts.is_empty() || !module_bursts.is_empty();
+
+        Ok(AlarmStatusVo {
+            config: AlarmConfig {
+                window_minutes,
+                fail_threshold,
+                fail_rate_threshold,
+            },
+            total_in_window: total,
+            fail_in_window: fail,
+            fail_rate: (fail_rate * 100.0).round() / 100.0,
+            fail_rate_alarm,
+            operator_bursts,
+            module_bursts,
+            alert_triggered,
+        })
     }
 
     /// 审计大屏统计：最近 N 天每日成功/失败
@@ -266,7 +343,11 @@ impl SysOperLogService {
     /// 审计大屏统计：汇总数据
     pub async fn stats_summary(&self) -> Result<AuditSummary, ServiceError> {
         let (total, success, fail) = self.oper_log_repo.stats_summary().await?;
-        Ok(AuditSummary { total, success, fail })
+        Ok(AuditSummary {
+            total,
+            success,
+            fail,
+        })
     }
 
     /// 综合审计统计（一次性返回所有大屏数据）
@@ -274,11 +355,13 @@ impl SysOperLogService {
         let summary = self.stats_summary().await?;
         let business_types = self.stats_by_business_type().await?;
         let top_operators = self.stats_top_operators(10).await?;
+        let top_modules = self.stats_top_modules(10).await?;
         let daily = self.stats_daily(days).await?;
         Ok(AuditStatsVo {
             summary,
             business_types,
             top_operators,
+            top_modules,
             daily,
         })
     }
@@ -299,6 +382,7 @@ impl SysOperLogService {
         let summary = self.stats_summary().await?;
         let business_types = self.stats_by_business_type().await?;
         let top_operators = self.stats_top_operators(10).await?;
+        let top_modules = self.stats_top_modules(10).await?;
         let daily = self.stats_daily(days).await?;
         let anomaly_models = self.oper_log_repo.find_recent_anomalies(50).await?;
         let anomalies = anomaly_models
@@ -327,6 +411,7 @@ impl SysOperLogService {
             summary,
             business_types,
             top_operators,
+            top_modules,
             daily,
             anomalies,
             generated_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -384,14 +469,19 @@ impl SysOperLogService {
                     if attempt < MAX_ATTEMPTS {
                         tracing::warn!(
                             "操作日志写入失败（第 {}/{} 次），{}ms 后重试: {}",
-                            attempt, MAX_ATTEMPTS, RETRY_INTERVAL_MS, e
+                            attempt,
+                            MAX_ATTEMPTS,
+                            RETRY_INTERVAL_MS,
+                            e
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS))
+                            .await;
                     } else {
                         // 3 次都失败，记录错误日志（无法再恢复）
                         tracing::error!(
                             "操作日志写入失败（已重试 {} 次，放弃）: {}",
-                            MAX_ATTEMPTS, e
+                            MAX_ATTEMPTS,
+                            e
                         );
                     }
                 }
@@ -409,6 +499,7 @@ pub struct AuditStatsVo {
     pub summary: AuditSummary,
     pub business_types: Vec<AuditBusinessTypeStat>,
     pub top_operators: Vec<AuditOperatorStat>,
+    pub top_modules: Vec<AuditModuleStat>,
     pub daily: Vec<AuditDailyStat>,
 }
 
@@ -449,6 +540,60 @@ pub struct AuditOperatorStat {
     pub count: i64,
 }
 
+/// 操作模块统计项
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditModuleStat {
+    pub module_name: String,
+    pub count: i64,
+}
+
+/// 异常操作告警状态响应
+///
+/// 为一个时间窗口内的操作失败行为做聚合告警判定，供审计大屏展示告警横幅。
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmStatusVo {
+    /// 告警判定使用的阈值配置（取自参数，回退系统配置默认值）
+    pub config: AlarmConfig,
+    /// 窗口内操作总数
+    pub total_in_window: i64,
+    /// 窗口内失败操作数
+    pub fail_in_window: i64,
+    /// 窗口内失败率（百分比，保留两位小数）
+    pub fail_rate: f64,
+    /// 失败率是否超过阈值
+    pub fail_rate_alarm: bool,
+    /// 失败 Burst 的操作人（次数 >= fail_threshold）
+    pub operator_bursts: Vec<AlarmItem>,
+    /// 失败 Burst 的模块（次数 >= fail_threshold）
+    pub module_bursts: Vec<AlarmItem>,
+    /// 是否触发告警（失败率超阈值或存在任一 Burst）
+    pub alert_triggered: bool,
+}
+
+/// 告警判定阈值配置
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmConfig {
+    /// 时间窗口（分钟）
+    pub window_minutes: i64,
+    /// 同一对象失败次数阈值
+    pub fail_threshold: i64,
+    /// 失败率（百分比）阈值
+    pub fail_rate_threshold: i64,
+}
+
+/// 告警聚合项（操作人 / 模块失败 Burst）
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmItem {
+    /// 对象名（操作人 / 模块名）
+    pub name: String,
+    /// 窗口内失败次数
+    pub count: i64,
+}
+
 /// 每日统计项
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -467,6 +612,7 @@ pub struct ComplianceReportVo {
     pub summary: AuditSummary,
     pub business_types: Vec<AuditBusinessTypeStat>,
     pub top_operators: Vec<AuditOperatorStat>,
+    pub top_modules: Vec<AuditModuleStat>,
     pub daily: Vec<AuditDailyStat>,
     /// 异常事件列表（失败的写操作，最近 50 条）
     pub anomalies: Vec<OperLogAnomaly>,

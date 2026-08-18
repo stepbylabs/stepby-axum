@@ -8,6 +8,7 @@
 //! - 多表操作（字典类型变更级联、字典类型删除级联）使用事务保证一致性
 
 use futures::future::FutureExt;
+use garde::Validate;
 use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
@@ -15,10 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
 use crate::common::error::ServiceError;
-use crate::common::page::{default_page_num, default_page_size, PageDomain};
+use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_dict_data::{
     ActiveModel as SysDictDataActiveModel, Model as SysDictDataModel,
 };
@@ -256,7 +256,11 @@ impl SysDictService {
             pipe.cmd("DEL").arg(Self::cache_key(dt));
         }
         if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
-            tracing::warn!("批量失效字典缓存失败（{} 个 dict_type）: {}", dict_types.len(), e);
+            tracing::warn!(
+                "批量失效字典缓存失败（{} 个 dict_type）: {}",
+                dict_types.len(),
+                e
+            );
             // 回退到逐个 DEL，保证尽可能多的缓存被清除
             for dt in dict_types {
                 self.invalidate_cache(dt).await;
@@ -302,7 +306,10 @@ impl SysDictService {
     }
 
     /// 导出字典类型列表（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
-    pub async fn export_dict_types(&self, query: DictTypeQueryDto) -> Result<Vec<SysDictTypeModel>, ServiceError> {
+    pub async fn export_dict_types(
+        &self,
+        query: DictTypeQueryDto,
+    ) -> Result<Vec<SysDictTypeModel>, ServiceError> {
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
 
@@ -360,9 +367,14 @@ impl SysDictService {
         crate::common::i18n::validate(&dto)?;
 
         // dict_type 唯一性校验
-        let existing = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
+        let existing = self
+            .dict_type_repo
+            .find_by_dict_type(&dto.dict_type)
+            .await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_exists")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.dict.type_exists"
+            )));
         }
 
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效
@@ -407,9 +419,14 @@ impl SysDictService {
         let old_dict_type = existing.dict_type.clone().unwrap_or_default();
         let dict_type_changed = dto.dict_type != old_dict_type;
         if dict_type_changed {
-            let conflict = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
+            let conflict = self
+                .dict_type_repo
+                .find_by_dict_type(&dto.dict_type)
+                .await?;
             if conflict.is_some() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_exists")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.dict.type_exists"
+                )));
             }
         }
 
@@ -460,15 +477,14 @@ impl SysDictService {
     ///
     /// REGRESS-003：软删除时重命名 dict_type 为 `{original}_deleted_{dict_id}`，
     /// 释放 uk_sys_dict_type 唯一索引，避免无法重新创建同名字典类型。
-    pub async fn delete_dict_types(
-        &self,
-        dict_ids: Vec<i64>,
-    ) -> Result<(), ServiceError> {
+    pub async fn delete_dict_types(&self, dict_ids: Vec<i64>) -> Result<(), ServiceError> {
         // 预查询所有 dict_type 字符串（事务外查询，事务内仅写）
         // 批量查询（单次 SELECT 替代 N 次），并校验全部存在
         let models = self.dict_type_repo.find_active_by_ids(&dict_ids).await?;
         if models.len() != dict_ids.len() {
-            return Err(ServiceError::not_found(&crate::tr!("error.dict.type_not_found")));
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.dict.type_not_found"
+            )));
         }
         // 保持按 dict_ids 输入顺序构建 (dict_id, dict_type)，便于事务内重命名
         let mut dict_types: Vec<(i64, String)> = Vec::with_capacity(dict_ids.len());
@@ -520,10 +536,7 @@ impl SysDictService {
             })
             .await?;
         // 删除字典类型后失效所有相关 dict_type 缓存
-        let to_invalidate: Vec<String> = dict_types
-            .iter()
-            .map(|(_, dt)| dt.clone())
-            .collect();
+        let to_invalidate: Vec<String> = dict_types.iter().map(|(_, dt)| dt.clone()).collect();
         self.invalidate_caches(&to_invalidate).await;
         Ok(())
     }
@@ -645,7 +658,10 @@ impl SysDictService {
             }
 
             // 3. 查询 DB
-            let rows = self.dict_data_repo.find_active_by_dict_type(dict_type).await?;
+            let rows = self
+                .dict_data_repo
+                .find_active_by_dict_type(dict_type)
+                .await?;
 
             // 4. 写入 Redis（best-effort，失败仅记日志）
             // 空结果写入空值标记（防穿透），非空结果写入完整 JSON
@@ -657,7 +673,11 @@ impl SysDictService {
                     DICT_NULL_MARKER.to_string()
                 })
             };
-            let ttl = if rows.is_empty() { DICT_NULL_TTL } else { DICT_CACHE_TTL };
+            let ttl = if rows.is_empty() {
+                DICT_NULL_TTL
+            } else {
+                DICT_CACHE_TTL
+            };
             if let Err(e) = redis::cmd("SETEX")
                 .arg(&key)
                 .arg(ttl)
@@ -710,9 +730,14 @@ impl SysDictService {
         crate::common::i18n::validate(&dto)?;
 
         // 校验 dict_type 在 sys_dict_type 中存在
-        let dict_type_exists = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
+        let dict_type_exists = self
+            .dict_type_repo
+            .find_by_dict_type(&dto.dict_type)
+            .await?;
         if dict_type_exists.is_none() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_not_found")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.dict.type_not_found"
+            )));
         }
 
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效
@@ -758,9 +783,14 @@ impl SysDictService {
 
         // 校验新 dict_type 在 sys_dict_type 中存在（与 add_dict_data 一致）
         if dto.dict_type != old_dict_type {
-            let dict_type_exists = self.dict_type_repo.find_by_dict_type(&dto.dict_type).await?;
+            let dict_type_exists = self
+                .dict_type_repo
+                .find_by_dict_type(&dto.dict_type)
+                .await?;
             if dict_type_exists.is_none() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.dict.type_not_found")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.dict.type_not_found"
+                )));
             }
         }
 
@@ -790,19 +820,14 @@ impl SysDictService {
     }
 
     /// 批量删除字典数据（软删除）
-    pub async fn delete_dict_data(
-        &self,
-        dict_codes: Vec<i64>,
-    ) -> Result<(), ServiceError> {
+    pub async fn delete_dict_data(&self, dict_codes: Vec<i64>) -> Result<(), ServiceError> {
         if dict_codes.is_empty() {
             return Ok(());
         }
         // 批量查询所有记录的 dict_type，用于删除后失效缓存（单次 SELECT 替代 N 次）
         let models = self.dict_data_repo.find_active_by_ids(&dict_codes).await?;
-        let affected_types: Vec<String> = models
-            .iter()
-            .filter_map(|m| m.dict_type.clone())
-            .collect();
+        let affected_types: Vec<String> =
+            models.iter().filter_map(|m| m.dict_type.clone()).collect();
         // 批量软删除（单次 UPDATE 替代 N 次）
         self.dict_data_repo.soft_delete_many(dict_codes).await?;
         // 失效所有受影响的 dict_type 缓存

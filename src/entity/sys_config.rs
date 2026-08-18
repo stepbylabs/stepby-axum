@@ -4,8 +4,8 @@
 //! config_type: "Y"=内置, "N"=非内置
 
 use chrono::NaiveDateTime;
-use sea_orm::entity::prelude::*;
 use sea_orm::Set;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;

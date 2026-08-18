@@ -13,6 +13,5 @@ use crate::state::AppState;
 
 /// 服务器监控路由
 pub fn server_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/monitor/server", get(monitor_server_handler::get_server))
+    Router::new().route("/monitor/server", get(monitor_server_handler::get_server))
 }

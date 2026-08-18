@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use base64::Engine;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
@@ -101,9 +101,9 @@ pub async fn setup(
 
     // 生成随机 secret
     let secret = Secret::generate_secret();
-    let secret_bytes = secret.to_bytes().map_err(|_| {
-        AppError::internal(&crate::tr!("error.totp.secret_gen_failed"))
-    })?;
+    let secret_bytes = secret
+        .to_bytes()
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.secret_gen_failed")))?;
 
     // 构建 TOTP 对象
     let totp = TOTP::new(
@@ -114,7 +114,8 @@ pub async fn setup(
         secret_bytes.clone(),
         Some(TOTP_ISSUER.to_string()),
         "yebot-user".to_string(),
-    ).map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
+    )
+    .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     // 生成 otpauth URL（totp-rs v5.7+ get_url() 不再接受参数，
     // issuer/account_name 已在 TOTP::new 时绑定）
@@ -122,9 +123,9 @@ pub async fn setup(
 
     // 生成 QR 码（PNG bytes → base64 Data URL）
     // 直接复用 totp-rs 提供的 get_qr_png()，避免直接依赖 qrcodegen_image / image
-    let png_bytes = totp.get_qr_png().map_err(|_| {
-        AppError::internal(&crate::tr!("error.totp.qr_gen_failed"))
-    })?;
+    let png_bytes = totp
+        .get_qr_png()
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.qr_gen_failed")))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
     let qr_code = format!("data:image/png;base64,{}", b64);
 
@@ -135,7 +136,9 @@ pub async fn setup(
     let master_key = &state.config.config_enc_key;
     if master_key.is_empty() {
         tracing::error!("CONFIG_ENC_KEY 未配置，无法缓存 TOTP secret（fail-closed 拒绝）");
-        return Err(AppError::internal(&crate::tr!("error.totp.enc_key_missing")));
+        return Err(AppError::internal(&crate::tr!(
+            "error.totp.enc_key_missing"
+        )));
     }
     let encrypted_secret = crate::utils::crypto::encrypt_config_value(&secret_str, master_key)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.encrypt_failed")))?;
@@ -172,7 +175,9 @@ pub async fn verify(
     Json(req): Json<TotpVerifyRequest>,
 ) -> Result<AjaxResult<()>, AppError> {
     crate::common::i18n::validate(&req)?;
-    let user_id: i64 = operator.user_id().parse()
+    let user_id: i64 = operator
+        .user_id()
+        .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
     let mut conn = state.redis.clone();
@@ -190,7 +195,9 @@ pub async fn verify(
     if let Some(count) = fail_count
         && count >= MAX_TOTP_VERIFY_FAIL
     {
-        return Err(AppError::bad_request(&crate::tr!("error.totp.login_locked")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.totp.login_locked"
+        )));
     }
 
     // 2. 已启用检查：已启用用户必须走 disable 后再重新绑定，防止 MFA 被接管
@@ -204,7 +211,9 @@ pub async fn verify(
             AppError::new(503, crate::tr!("error.totp.status_check_failed"))
         })?;
     if enabled {
-        return Err(AppError::bad_request(&crate::tr!("error.totp.already_enabled")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.totp.already_enabled"
+        )));
     }
 
     // 3. 读取 pending secret（setup 时服务端生成并加密缓存）
@@ -217,22 +226,23 @@ pub async fn verify(
             tracing::error!(error = %e, user_id = user_id, "TOTP pending 查询失败（fail-closed）");
             AppError::new(503, crate::tr!("error.totp.status_check_failed"))
         })?;
-    let encrypted = encrypted.ok_or_else(|| {
-        AppError::bad_request(&crate::tr!("error.totp.pending_expired"))
-    })?;
+    let encrypted = encrypted
+        .ok_or_else(|| AppError::bad_request(&crate::tr!("error.totp.pending_expired")))?;
 
     let master_key = &state.config.config_enc_key;
     if master_key.is_empty() {
         tracing::error!("CONFIG_ENC_KEY 未配置，无法解密 TOTP secret（fail-closed 拒绝）");
-        return Err(AppError::internal(&crate::tr!("error.totp.enc_key_missing")));
+        return Err(AppError::internal(&crate::tr!(
+            "error.totp.enc_key_missing"
+        )));
     }
     let secret_str = crate::utils::crypto::decrypt_config_value(&encrypted, master_key)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.decrypt_failed")))?;
 
     // 4. 用 pending secret 校验验证码（不再信任客户端自报 secret）
-    let secret_bytes = Secret::Encoded(secret_str.clone()).to_bytes().map_err(|_| {
-        AppError::bad_request(&crate::tr!("error.totp.secret_invalid"))
-    })?;
+    let secret_bytes = Secret::Encoded(secret_str.clone())
+        .to_bytes()
+        .map_err(|_| AppError::bad_request(&crate::tr!("error.totp.secret_invalid")))?;
     let totp = TOTP::new(
         Algorithm::SHA1,
         6,
@@ -241,7 +251,8 @@ pub async fn verify(
         secret_bytes,
         Some(TOTP_ISSUER.to_string()),
         "yebot-user".to_string(),
-    ).map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
+    )
+    .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     if !totp.check_current(&req.code).unwrap_or(false) {
         // 失败计数
@@ -251,7 +262,9 @@ pub async fn verify(
             .invoke_async(&mut conn)
             .await
             .unwrap_or(0);
-        return Err(AppError::bad_request(&crate::tr!("error.totp.code_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.totp.code_invalid"
+        )));
     }
 
     // 5. 删除 pending，加密写入 enabled（启用 TOTP）
@@ -280,7 +293,9 @@ pub async fn status(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<TotpStatusResponse>, AppError> {
-    let user_id: i64 = operator.user_id().parse()
+    let user_id: i64 = operator
+        .user_id()
+        .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
     let redis_key = format!("totp:enabled:{}", user_id);
@@ -296,9 +311,7 @@ pub async fn status(
             AppError::new(503, crate::tr!("error.totp.status_check_failed"))
         })?;
 
-    Ok(AjaxResult::success(TotpStatusResponse {
-        enabled: exists,
-    }))
+    Ok(AjaxResult::success(TotpStatusResponse { enabled: exists }))
 }
 
 /// POST /system/user/totp/disable
@@ -309,7 +322,9 @@ pub async fn disable(
     Json(req): Json<TotpDisableRequest>,
 ) -> Result<AjaxResult<()>, AppError> {
     crate::common::i18n::validate(&req)?;
-    let user_id: i64 = operator.user_id().parse()
+    let user_id: i64 = operator
+        .user_id()
+        .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
     let mut conn = state.redis.clone();
@@ -327,23 +342,29 @@ pub async fn disable(
     if let Some(count) = fail_count
         && count >= MAX_TOTP_VERIFY_FAIL
     {
-        return Err(AppError::bad_request(&crate::tr!("error.totp.login_locked")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.totp.login_locked"
+        )));
     }
 
     // 1. 验证密码（从数据库查询用户密码并校验）
     use argon2::{Argon2, PasswordHash, PasswordVerifier};
-    let user_vo = state.user_service.get_user_by_id(user_id).await
+    let user_vo = state
+        .user_service
+        .get_user_by_id(user_id)
+        .await
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_query_failed")))?;
     let user = user_vo.user;
 
     // P0-4 修复：密码为空时直接返回"密码错误"（原实现 PasswordHash::new("") 返回 500）
     let password_hash = user.password.as_deref().unwrap_or("");
     if password_hash.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.totp.password_wrong")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.totp.password_wrong"
+        )));
     }
-    let parsed_hash = PasswordHash::new(password_hash).map_err(|_| {
-        AppError::internal(&crate::tr!("error.totp.password_hash_invalid"))
-    })?;
+    let parsed_hash = PasswordHash::new(password_hash)
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.password_hash_invalid")))?;
     if Argon2::default()
         .verify_password(req.password.as_bytes(), &parsed_hash)
         .is_err()
@@ -354,7 +375,9 @@ pub async fn disable(
             .invoke_async(&mut conn)
             .await
             .unwrap_or(0);
-        return Err(AppError::bad_request(&crate::tr!("error.totp.password_wrong")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.totp.password_wrong"
+        )));
     }
 
     // 2. 验证 TOTP code
@@ -370,16 +393,18 @@ pub async fn disable(
     let master_key = &state.config.config_enc_key;
     if master_key.is_empty() {
         tracing::error!("CONFIG_ENC_KEY 未配置，无法解密 TOTP secret（fail-closed 拒绝）");
-        return Err(AppError::internal(&crate::tr!("error.totp.enc_key_missing")));
+        return Err(AppError::internal(&crate::tr!(
+            "error.totp.enc_key_missing"
+        )));
     }
     // decrypt_config_value 兼容明文（不带 enc: 前缀直接返回），支持旧数据平滑迁移
     let secret_str = crate::utils::crypto::decrypt_config_value(&encrypted_secret, master_key)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.decrypt_failed")))?;
 
     let secret = Secret::Encoded(secret_str);
-    let secret_bytes = secret.to_bytes().map_err(|_| {
-        AppError::internal(&crate::tr!("error.totp.secret_decode_failed"))
-    })?;
+    let secret_bytes = secret
+        .to_bytes()
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.secret_decode_failed")))?;
     let totp = TOTP::new(
         Algorithm::SHA1,
         6,
@@ -388,7 +413,8 @@ pub async fn disable(
         secret_bytes.clone(),
         Some(TOTP_ISSUER.to_string()),
         "yebot-user".to_string(),
-    ).map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
+    )
+    .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     if !totp.check_current(&req.code).unwrap_or(false) {
         // P0-4：失败计数（防暴力枚举）
@@ -398,7 +424,9 @@ pub async fn disable(
             .invoke_async(&mut conn)
             .await
             .unwrap_or(0);
-        return Err(AppError::bad_request(&crate::tr!("error.totp.code_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.totp.code_invalid"
+        )));
     }
 
     // 3. 从 Redis 删除 secret

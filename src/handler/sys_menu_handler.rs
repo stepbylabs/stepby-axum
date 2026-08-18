@@ -11,10 +11,10 @@
 //! - GET    /system/menu/treeselect                  菜单下拉树（返回 TreeSelect 格式）
 //! - GET    /system/menu/roleMenuTreeselect/{roleId} 角色菜单下拉树（menus/checkedKeys 在顶层）
 
-use std::sync::Arc;
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::Serialize;
+use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::common::{AjaxResult, AppError, TreeSelectVo};
@@ -89,7 +89,10 @@ pub async fn role_menu_treeselect(
 ) -> Result<RoleMenuTreeResult, AppError> {
     // P0-6：传入 operator_user_id 校验角色在数据范围内（与 role get_info 一致）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let role_vo = state.role_service.get_role_by_id(role_id, operator_user_id).await?;
+    let role_vo = state
+        .role_service
+        .get_role_by_id(role_id, operator_user_id)
+        .await?;
     let menus = state.menu_service.get_menu_tree_select().await?;
     Ok(RoleMenuTreeResult {
         code: 200,
@@ -138,8 +141,14 @@ pub async fn add(
     operator: Operator,
     Json(dto): Json<MenuAddDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let menu = state.menu_service.add_menu(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_menu", name = menu.menu_name)))
+    let menu = state
+        .menu_service
+        .add_menu(dto, operator.username())
+        .await?;
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.add_menu",
+        name = menu.menu_name
+    )))
 }
 
 /// PUT /system/menu
@@ -160,7 +169,10 @@ pub async fn edit(
     operator: Operator,
     Json(dto): Json<MenuEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.menu_service.edit_menu(dto, operator.username()).await?;
+    state
+        .menu_service
+        .edit_menu(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 

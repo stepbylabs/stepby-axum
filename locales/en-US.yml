@@ -68,6 +68,14 @@ error:
     too_large: "File size cannot exceed {{max}}MB"
     unknown_ext: Cannot recognize file extension
     unsupported_type: "Unsupported file type: {{ext}}"
+  storage:
+    unsupported_backend: "Unsupported storage backend: {{backend}} (supported: local / s3)"
+    s3_missing_config: "S3 storage missing required config (access_key/secret_key/endpoint/bucket)"
+    s3_invalid_endpoint: "Invalid S3 endpoint"
+    s3_client_build_failed: "Failed to initialize S3 client"
+    s3_request_failed: "S3 request failed, check object storage availability"
+    s3_status: "S3 returned status {{status}}: {{detail}}"
+    s3_list_failed: "Failed to list S3 objects"
   password:
     complexity_common: Password is too common, please use a more complex password
     complexity_digit: Password must contain at least 1 digit
@@ -87,6 +95,13 @@ error:
     higher_role_forbidden: Cannot operate on users with higher priority roles
     operator_id_parse_failed: Operator user ID parse failed
     id_empty: User ID cannot be empty
+    email_invalid: Invalid email format
+    import_login_required: Login name is required
+    import_login_length: Login name must be 2-30 characters long
+    import_login_format: Login name only allows letters, digits, and underscores
+    import_nick_required: Nickname is required
+    import_dept_not_found: "Department \"{{name}}\" does not exist"
+    import_duplicate_in_file: Duplicate login name within the file
     pwd_reset_token_invalidate_failed: Password reset succeeded, but old token invalidation marking failed
     pwd_change_token_invalidate_failed: Password changed, but old token invalidation marking failed
   config:
@@ -190,6 +205,7 @@ error:
     header_write_failed: Failed to write header
     data_write_failed: Failed to write data
     generate_failed: Failed to generate Excel
+    import_parse_failed: "Failed to parse Excel file: {{e}}. Please fill in the downloaded template and keep the header row unchanged"
   ip_location:
     source_invalid: Update source must be maxmind or p3terx
     unknown_source_type: "Unknown update source type: {{s}}"
@@ -210,6 +226,7 @@ error:
     key_prefix_required: "Cache key must start with {{name}}"
     key_count_remark: "{{count}} keys"
     type_not_previewable: "[{{type}} type cache, preview not supported]"
+    memory_usage_failed: Failed to scan cache key memory usage
   monitor_server:
     duration_format: "{{days}}d {{hours}}h {{minutes}}m"
   backup:
@@ -282,6 +299,21 @@ error:
     tail_task_failed: Log read task failed
     file_not_found: The specified log file does not exist
     tail_failed: Failed to read log file
+  msg:
+    channel_not_found: Message channel does not exist
+    channel_disabled: Message channel is disabled and cannot be used
+    channel_code_duplicate: Message channel code already exists
+    channel_type_invalid: "Invalid message channel type: {{channel_type}} (supported: email/sms/site)"
+    channel_in_use: "Message channel \"{{channel_name}}\" is referenced by message templates and cannot be deleted"
+    channel_id_invalid: Invalid message channel ID
+    config_json_invalid: Invalid channel configuration JSON
+    mail_disabled: Email service is not enabled, cannot send email
+    template_not_found: Message template does not exist
+    template_disabled: Message template is disabled and cannot be used
+    template_code_duplicate: Message template code already exists
+    template_id_invalid: Invalid message template ID
+    log_not_found: Send log does not exist
+    log_id_invalid: Invalid send log ID
   notice:
     not_found: Notice does not exist
     id_invalid: Invalid notice ID
@@ -351,6 +383,7 @@ msg:
     refresh: Refreshed successfully
     status_change: Status updated successfully
     execute: Executed successfully
+    user_import: Successfully imported {{n}} users
     save: Saved successfully
     reload: Hot-reloaded successfully
     password_reset: Password reset successfully
@@ -365,6 +398,7 @@ msg:
     add_dept: "Added department {{name}} successfully"
     add_menu: "Added menu {{name}} successfully"
     ip_location_update: "IP database updated successfully (source: {{source}}, size: {{size}} bytes)"
+  test: Connection test passed
   cache:
     no_match: No matching cache
     key_not_found: Cache key does not exist
@@ -421,6 +455,7 @@ common:
 
 # Excel export worksheet names (visible to users after download)
 excel:
+  tip_import_xlsx: Only .xlsx files are supported
   sheet:
     config: Configuration
     user: User Data

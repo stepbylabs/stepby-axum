@@ -36,14 +36,14 @@ use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::Json;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
-use crate::utils::ip::extract_client_ip;
 use crate::state::AppState;
+use crate::utils::ip::extract_client_ip;
 
 /// 令牌桶配置
 #[derive(Clone, Copy, Debug)]
@@ -175,7 +175,11 @@ pub async fn rate_limit_middleware(
     // 安全（P0-11）：fail-closed，Redis/DB 故障时返回 503 而非静默降级到 DEFAULT_CONFIG，
     // 避免限流配置丢失导致限流被绕过。
     let oper_url = req.uri().path().to_string();
-    let config = match state.rate_limit_service.get_config_for_route(&oper_url).await {
+    let config = match state
+        .rate_limit_service
+        .get_config_for_route(&oper_url)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("限流配置查询失败（fail-closed）: {}", e);

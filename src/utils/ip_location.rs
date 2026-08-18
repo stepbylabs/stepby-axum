@@ -80,7 +80,11 @@ impl IpLocator {
         let reader = match Reader::open_readfile(mmdb_path) {
             Ok(r) => Some(Arc::new(r)),
             Err(e) => {
-                tracing::warn!("加载 mmdb 文件 {} 失败，IP 归属地查询将返回空: {}", mmdb_path, e);
+                tracing::warn!(
+                    "加载 mmdb 文件 {} 失败，IP 归属地查询将返回空: {}",
+                    mmdb_path,
+                    e
+                );
                 None
             }
         };
@@ -349,7 +353,10 @@ mod tests {
         let locator = IpLocator::new("data/GeoLite2-City.mmdb");
         if locator.is_loaded() {
             let result = locator.locate("8.8.8.8");
-            assert!(!result.is_empty(), "Google DNS 8.8.8.8 should resolve to a location");
+            assert!(
+                !result.is_empty(),
+                "Google DNS 8.8.8.8 should resolve to a location"
+            );
             // 使用 dbg! 替代 println!，仅在 --nocapture 时输出
             dbg!("8.8.8.8 location:", &result);
         }

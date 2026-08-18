@@ -96,7 +96,7 @@ impl MigrationTrait for Migration {
         let now = now_expr(manager);
         conn.execute(Statement::from_sql_and_values(
             backend,
-            &format!(
+            format!(
                 "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES ($1, '数据看板', 1, 0, 'dashboard', 'dashboard/index', '', '', '1', '0', 'C', '0', '0', 'monitor:dashboard:list', 'chart', 'admin', {}, '系统数据看板（用户/角色/登录/操作统计）', '0', 'menu.dashboard')",
                 now
             ),
@@ -106,9 +106,8 @@ impl MigrationTrait for Migration {
 
         // 4. 为 role_id=2（普通角色）分配该菜单权限（幂等）
         let role_menu_sql = if is_postgres(manager) {
-            format!(
-                "INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, $1) ON CONFLICT DO NOTHING"
-            )
+            "INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, $1) ON CONFLICT DO NOTHING"
+                .to_string()
         } else {
             format!(
                 "{} sys_role_menu (role_id, menu_id) VALUES (2, $1)",

@@ -104,7 +104,10 @@ pub async fn permission_middleware(
                         "<unmapped>",
                         &req,
                     );
-                    return Err(AppError::new(403, crate::tr!("error.auth.permission_denied")));
+                    return Err(AppError::new(
+                        403,
+                        crate::tr!("error.auth.permission_denied"),
+                    ));
                 }
                 _ => {
                     // 默认 fail-open：放行（保持现有默认行为，零破坏性）
@@ -160,7 +163,10 @@ pub async fn permission_middleware(
             &req,
         );
 
-        Err(AppError::new(403, crate::tr!("error.auth.permission_denied")))
+        Err(AppError::new(
+            403,
+            crate::tr!("error.auth.permission_denied"),
+        ))
     }
 }
 
@@ -283,6 +289,8 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("PUT", "/system/user/authRole") => Some("system:user:edit"),
         ("DELETE", "/system/user/{id}") => Some("system:user:remove"),
         ("POST", "/system/user/export") => Some("system:user:export"),
+        ("POST", "/system/user/importTemplate") => Some("system:user:import"),
+        ("POST", "/system/user/importData") => Some("system:user:import"),
         // profile / 个人改密 / 角色下拉：仅需登录，不在此表
 
         // ===== 角色管理 =====
@@ -411,6 +419,9 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         // ===== 缓存监控 =====
         ("GET", "/monitor/cache") => Some("monitor:cache:list"),
         ("GET", "/monitor/cache/getNames") => Some("monitor:cache:list"),
+        // hotKeys / prefixStats 与 getNames 同权（内存统计属只读监控，绑定列表查看权限）
+        ("GET", "/monitor/cache/hotKeys") => Some("monitor:cache:list"),
+        ("GET", "/monitor/cache/prefixStats") => Some("monitor:cache:list"),
         ("GET", "/monitor/cache/getKeys/{cacheName}") => Some("monitor:cache:list"),
         ("GET", "/monitor/cache/getValue/{cacheName}/{cacheKey}") => Some("monitor:cache:query"),
         // 缓存清除权限与 sys_menu 按钮种子 3022/3023 对齐（monitor:cache:clearName / clearKey）
@@ -470,11 +481,35 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("DELETE", "/system/rateLimit/{id}") => Some("system:rateLimit:remove"),
         ("POST", "/system/rateLimit/export") => Some("system:rateLimit:export"),
 
+        // ===== 消息渠道与模板管理 =====
+        // 权限标识对齐 sys_menu 迁移种子（140 目录 / 141 渠道 / 142 模板 / 143 记录 及按钮 3101-3123，见 m20260818_000002_msg_module）
+        ("GET", "/system/msg/channel/list") => Some("system:msg:channel:list"),
+        ("GET", "/system/msg/channel/{channelId}") => Some("system:msg:channel:query"),
+        ("POST", "/system/msg/channel") => Some("system:msg:channel:add"),
+        ("PUT", "/system/msg/channel") => Some("system:msg:channel:edit"),
+        ("DELETE", "/system/msg/channel/{channelId}") => Some("system:msg:channel:remove"),
+        ("POST", "/system/msg/channel/test/{channelId}") => Some("system:msg:channel:test"),
+        ("GET", "/system/msg/template/list") => Some("system:msg:template:list"),
+        ("GET", "/system/msg/template/{templateId}") => Some("system:msg:template:query"),
+        ("POST", "/system/msg/template") => Some("system:msg:template:add"),
+        ("PUT", "/system/msg/template") => Some("system:msg:template:edit"),
+        ("DELETE", "/system/msg/template/{templateId}") => Some("system:msg:template:remove"),
+        ("GET", "/system/msg/log/list") => Some("system:msg:log:list"),
+        ("DELETE", "/system/msg/log/{logIds}") => Some("system:msg:log:remove"),
+        ("DELETE", "/system/msg/log/clean") => Some("system:msg:log:clean"),
+        // 直接发送 / 重试 / 标记重试 / 批量重试均为"消息发出"类操作，统一对齐 log:retry 按钮权限（3123）
+        ("POST", "/system/msg/send") => Some("system:msg:log:retry"),
+        ("POST", "/system/msg/log/retry/{logIds}") => Some("system:msg:log:retry"),
+        ("POST", "/system/msg/log/retryPending/{batch}") => Some("system:msg:log:retry"),
+        ("POST", "/system/msg/log/markPending/{logIds}") => Some("system:msg:log:retry"),
+
         // ===== 审计日志大屏 =====
         // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐
         ("GET", "/monitor/operlog/stats") => Some("monitor:audit:list"),
         // 合规报告与审计大屏共享 monitor:audit:list 权限
         ("GET", "/monitor/operlog/compliance-report") => Some("monitor:audit:list"),
+        // 异常操作告警状态检测，与审计大屏共享监控查看权限
+        ("GET", "/monitor/operlog/alarm-status") => Some("monitor:audit:list"),
         // 操作日志类型统计（dashboard 首页图表专用聚合接口，与 /dashboard/stats 一致使用监控查看权限）
         ("GET", "/monitor/operlog/stats-by-type") => Some("monitor:server:list"),
 
@@ -554,32 +589,50 @@ mod tests {
     // ===== 用户管理权限映射 =====
     #[test]
     fn test_user_list_perm() {
-        assert_eq!(get_required_perm("GET", "/system/user/list"), Some("system:user:list"));
+        assert_eq!(
+            get_required_perm("GET", "/system/user/list"),
+            Some("system:user:list")
+        );
     }
 
     #[test]
     fn test_user_add_perm() {
-        assert_eq!(get_required_perm("POST", "/system/user"), Some("system:user:add"));
+        assert_eq!(
+            get_required_perm("POST", "/system/user"),
+            Some("system:user:add")
+        );
     }
 
     #[test]
     fn test_user_edit_perm() {
-        assert_eq!(get_required_perm("PUT", "/system/user"), Some("system:user:edit"));
+        assert_eq!(
+            get_required_perm("PUT", "/system/user"),
+            Some("system:user:edit")
+        );
     }
 
     #[test]
     fn test_user_reset_pwd_perm() {
-        assert_eq!(get_required_perm("PUT", "/system/user/resetPwd"), Some("system:user:resetPwd"));
+        assert_eq!(
+            get_required_perm("PUT", "/system/user/resetPwd"),
+            Some("system:user:resetPwd")
+        );
     }
 
     #[test]
     fn test_user_delete_perm() {
-        assert_eq!(get_required_perm("DELETE", "/system/user/{id}"), Some("system:user:remove"));
+        assert_eq!(
+            get_required_perm("DELETE", "/system/user/{id}"),
+            Some("system:user:remove")
+        );
     }
 
     #[test]
     fn test_user_export_perm() {
-        assert_eq!(get_required_perm("POST", "/system/user/export"), Some("system:user:export"));
+        assert_eq!(
+            get_required_perm("POST", "/system/user/export"),
+            Some("system:user:export")
+        );
     }
 
     // ===== 仅需登录的路由（返回 None） =====
@@ -598,61 +651,120 @@ mod tests {
     // ===== 角色管理权限映射 =====
     #[test]
     fn test_role_list_perm() {
-        assert_eq!(get_required_perm("GET", "/system/role/list"), Some("system:role:list"));
+        assert_eq!(
+            get_required_perm("GET", "/system/role/list"),
+            Some("system:role:list")
+        );
     }
 
     #[test]
     fn test_role_add_perm() {
-        assert_eq!(get_required_perm("POST", "/system/role"), Some("system:role:add"));
+        assert_eq!(
+            get_required_perm("POST", "/system/role"),
+            Some("system:role:add")
+        );
     }
 
     // ===== 监控模块权限映射 =====
     #[test]
     fn test_online_force_logout_perm() {
-        assert_eq!(get_required_perm("DELETE", "/monitor/online/{tokenHash}"), Some("monitor:online:forceLogout"));
+        assert_eq!(
+            get_required_perm("DELETE", "/monitor/online/{tokenHash}"),
+            Some("monitor:online:forceLogout")
+        );
     }
 
     #[test]
     fn test_cache_clear_perm() {
         // clearCacheAll 端点已移除；清除权限与 sys_menu 按钮种子 3022/3023 对齐（P0-10）
-        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheName/{cacheName}"), Some("monitor:cache:clearName"));
-        assert_eq!(get_required_perm("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"), Some("monitor:cache:clearKey"));
+        assert_eq!(
+            get_required_perm("DELETE", "/monitor/cache/clearCacheName/{cacheName}"),
+            Some("monitor:cache:clearName")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"),
+            Some("monitor:cache:clearKey")
+        );
+    }
+
+    #[test]
+    fn test_cache_stats_perm() {
+        // hotKeys / prefixStats 为只读监控统计，与 getNames 同权 monitor:cache:list
+        assert_eq!(
+            get_required_perm("GET", "/monitor/cache/getNames"),
+            Some("monitor:cache:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/monitor/cache/hotKeys"),
+            Some("monitor:cache:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/monitor/cache/prefixStats"),
+            Some("monitor:cache:list")
+        );
+        // 方法混淆不应命中（POST 不应获取热 key）
+        assert_eq!(get_required_perm("POST", "/monitor/cache/hotKeys"), None);
+        assert_eq!(
+            get_required_perm("DELETE", "/monitor/cache/prefixStats"),
+            None
+        );
     }
 
     #[test]
     fn test_operlog_list_perm() {
-        assert_eq!(get_required_perm("GET", "/monitor/operlog/list"), Some("monitor:operlog:list"));
+        assert_eq!(
+            get_required_perm("GET", "/monitor/operlog/list"),
+            Some("monitor:operlog:list")
+        );
     }
 
     // ===== 安全关键路由权限映射 =====
     #[test]
     fn test_rate_limit_add_perm() {
         // P0-3 修复：限流配置必须有权限校验
-        assert_eq!(get_required_perm("POST", "/system/rateLimit"), Some("system:rateLimit:add"));
+        assert_eq!(
+            get_required_perm("POST", "/system/rateLimit"),
+            Some("system:rateLimit:add")
+        );
     }
 
     #[test]
     fn test_backup_restore_perm() {
-        assert_eq!(get_required_perm("POST", "/system/backup/restore/{backupId}"), Some("system:backup:edit"));
+        assert_eq!(
+            get_required_perm("POST", "/system/backup/restore/{backupId}"),
+            Some("system:backup:edit")
+        );
     }
 
     #[test]
     fn test_ip_location_update_perm() {
-        assert_eq!(get_required_perm("POST", "/system/ipLocation/update"), Some("monitor:iplocation:edit"));
+        assert_eq!(
+            get_required_perm("POST", "/system/ipLocation/update"),
+            Some("monitor:iplocation:edit")
+        );
     }
 
     #[test]
     fn test_gen_synchdb_perm() {
         // P0-4 修复：synchDb 必须为 POST 且有权限校验
-        assert_eq!(get_required_perm("POST", "/tool/gen/synchDb/{tableName}"), Some("tool:gen:edit"));
+        assert_eq!(
+            get_required_perm("POST", "/tool/gen/synchDb/{tableName}"),
+            Some("tool:gen:edit")
+        );
         // GET 请求应返回 None（防止方法混淆绕过）
-        assert_eq!(get_required_perm("GET", "/tool/gen/synchDb/{tableName}"), None);
+        assert_eq!(
+            get_required_perm("GET", "/tool/gen/synchDb/{tableName}"),
+            None
+        );
     }
 
     #[test]
     fn test_config_configkey_perm() {
         // P0-R81-003: configKey 路由必须有权限校验
-        assert_eq!(get_required_perm("GET", "/system/config/configKey/{configKey}"), Some("system:config:query"));
+        assert_eq!(
+            get_required_perm("GET", "/system/config/configKey/{configKey}"),
+            Some("system:config:query")
+        );
     }
 
     // ===== 未匹配路由返回 None =====
@@ -671,19 +783,36 @@ mod tests {
     // ===== 通用上传权限 =====
     #[test]
     fn test_common_upload_perm() {
-        assert_eq!(get_required_perm("POST", "/common/upload"), Some("system:file:add"));
+        assert_eq!(
+            get_required_perm("POST", "/common/upload"),
+            Some("system:file:add")
+        );
     }
 
     // ===== 仪表盘统计权限 =====
     #[test]
     fn test_dashboard_stats_perm() {
-        assert_eq!(get_required_perm("GET", "/dashboard/stats"), Some("monitor:server:list"));
+        assert_eq!(
+            get_required_perm("GET", "/dashboard/stats"),
+            Some("monitor:server:list")
+        );
     }
 
     // ===== 审计大屏权限 =====
     #[test]
     fn test_audit_stats_perm() {
-        assert_eq!(get_required_perm("GET", "/monitor/operlog/stats"), Some("monitor:audit:list"));
+        assert_eq!(
+            get_required_perm("GET", "/monitor/operlog/stats"),
+            Some("monitor:audit:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/monitor/operlog/alarm-status"),
+            Some("monitor:audit:list")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/monitor/operlog/alarm-status"),
+            None
+        );
     }
 
     // ===== deny_by_default 仅登录白名单 =====
@@ -706,13 +835,19 @@ mod tests {
         // 下拉树 / 选项
         assert!(is_login_only_path("GET", "/system/role/deptTree/{roleId}"));
         assert!(is_login_only_path("GET", "/system/menu/treeselect"));
-        assert!(is_login_only_path("GET", "/system/menu/roleMenuTreeselect/{roleId}"));
+        assert!(is_login_only_path(
+            "GET",
+            "/system/menu/roleMenuTreeselect/{roleId}"
+        ));
         assert!(is_login_only_path("GET", "/system/dept/treeselect"));
         assert!(is_login_only_path("GET", "/system/post/optionselect"));
         // 公告标记已读
         assert!(is_login_only_path("POST", "/system/notice/markRead"));
         assert!(is_login_only_path("POST", "/system/notice/markReadAll"));
-        assert!(is_login_only_path("POST", "/system/notice/markAllUnreadRead"));
+        assert!(is_login_only_path(
+            "POST",
+            "/system/notice/markAllUnreadRead"
+        ));
     }
 
     #[test]
@@ -898,6 +1033,7 @@ mod tests {
             ("POST", "/monitor/operlog/export"),
             ("GET", "/monitor/operlog/stats"),
             ("GET", "/monitor/operlog/compliance-report"),
+            ("GET", "/monitor/operlog/alarm-status"),
             ("GET", "/monitor/operlog/stats-by-type"),
             // sys_logininfor_router
             ("GET", "/monitor/logininfor/list"),
@@ -912,6 +1048,8 @@ mod tests {
             // monitor_cache_router
             ("GET", "/monitor/cache"),
             ("GET", "/monitor/cache/getNames"),
+            ("GET", "/monitor/cache/hotKeys"),
+            ("GET", "/monitor/cache/prefixStats"),
             ("GET", "/monitor/cache/getKeys/{cacheName}"),
             ("GET", "/monitor/cache/getValue/{cacheName}/{cacheKey}"),
             ("DELETE", "/monitor/cache/clearCacheName/{cacheName}"),
@@ -955,6 +1093,25 @@ mod tests {
             ("GET", "/system/file/list"),
             ("POST", "/system/file/upload"),
             ("DELETE", "/system/file/delete"),
+            // sys_msg_router
+            ("GET", "/system/msg/channel/list"),
+            ("GET", "/system/msg/channel/{channelId}"),
+            ("POST", "/system/msg/channel"),
+            ("PUT", "/system/msg/channel"),
+            ("DELETE", "/system/msg/channel/{channelId}"),
+            ("POST", "/system/msg/channel/test/{channelId}"),
+            ("GET", "/system/msg/template/list"),
+            ("GET", "/system/msg/template/{templateId}"),
+            ("POST", "/system/msg/template"),
+            ("PUT", "/system/msg/template"),
+            ("DELETE", "/system/msg/template/{templateId}"),
+            ("GET", "/system/msg/log/list"),
+            ("DELETE", "/system/msg/log/{logIds}"),
+            ("DELETE", "/system/msg/log/clean"),
+            ("POST", "/system/msg/send"),
+            ("POST", "/system/msg/log/retry/{logIds}"),
+            ("POST", "/system/msg/log/retryPending/{batch}"),
+            ("POST", "/system/msg/log/markPending/{logIds}"),
         ];
 
         let mut uncovered: Vec<(&str, &str)> = Vec::new();
@@ -974,15 +1131,143 @@ mod tests {
     fn test_delete_param_names_match_router() {
         // P0-1 回归：10 个 DELETE 接口的路径参数名必须与 router 注册一致（MatchedPath 精确匹配），
         // 否则 get_required_perm 返回 None，fail-open 下仅需登录即可删除。
-        assert_eq!(get_required_perm("DELETE", "/system/role/{id}"), Some("system:role:remove"));
-        assert_eq!(get_required_perm("DELETE", "/monitor/job/{jobId}"), Some("monitor:job:remove"));
-        assert_eq!(get_required_perm("DELETE", "/system/dict/type/{dictId}"), Some("system:dict:remove"));
-        assert_eq!(get_required_perm("DELETE", "/system/dict/data/{dictCode}"), Some("system:dict:remove"));
-        assert_eq!(get_required_perm("DELETE", "/system/notice/{noticeId}"), Some("system:notice:remove"));
-        assert_eq!(get_required_perm("DELETE", "/system/config/{configId}"), Some("system:config:remove"));
-        assert_eq!(get_required_perm("DELETE", "/system/post/{postId}"), Some("system:post:remove"));
-        assert_eq!(get_required_perm("DELETE", "/tool/gen/{tableId}"), Some("tool:gen:remove"));
-        assert_eq!(get_required_perm("DELETE", "/system/backup/{backupId}"), Some("system:backup:remove"));
-        assert_eq!(get_required_perm("DELETE", "/system/task/{taskId}"), Some("system:task:remove"));
+        assert_eq!(
+            get_required_perm("DELETE", "/system/role/{id}"),
+            Some("system:role:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/monitor/job/{jobId}"),
+            Some("monitor:job:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/dict/type/{dictId}"),
+            Some("system:dict:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/dict/data/{dictCode}"),
+            Some("system:dict:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/notice/{noticeId}"),
+            Some("system:notice:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/config/{configId}"),
+            Some("system:config:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/post/{postId}"),
+            Some("system:post:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/tool/gen/{tableId}"),
+            Some("tool:gen:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/backup/{backupId}"),
+            Some("system:backup:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/task/{taskId}"),
+            Some("system:task:remove")
+        );
+    }
+
+    // ===== 消息渠道与模板管理权限映射 =====
+    #[test]
+    fn test_msg_channel_perms() {
+        assert_eq!(
+            get_required_perm("GET", "/system/msg/channel/list"),
+            Some("system:msg:channel:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/system/msg/channel/{channelId}"),
+            Some("system:msg:channel:query")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/msg/channel"),
+            Some("system:msg:channel:add")
+        );
+        assert_eq!(
+            get_required_perm("PUT", "/system/msg/channel"),
+            Some("system:msg:channel:edit")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/msg/channel/{channelId}"),
+            Some("system:msg:channel:remove")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/msg/channel/test/{channelId}"),
+            Some("system:msg:channel:test")
+        );
+    }
+
+    #[test]
+    fn test_msg_template_perms() {
+        assert_eq!(
+            get_required_perm("GET", "/system/msg/template/list"),
+            Some("system:msg:template:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/system/msg/template/{templateId}"),
+            Some("system:msg:template:query")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/msg/template"),
+            Some("system:msg:template:add")
+        );
+        assert_eq!(
+            get_required_perm("PUT", "/system/msg/template"),
+            Some("system:msg:template:edit")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/msg/template/{templateId}"),
+            Some("system:msg:template:remove")
+        );
+    }
+
+    #[test]
+    fn test_msg_log_perms() {
+        assert_eq!(
+            get_required_perm("GET", "/system/msg/log/list"),
+            Some("system:msg:log:list")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/msg/log/{logIds}"),
+            Some("system:msg:log:remove")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/msg/log/clean"),
+            Some("system:msg:log:clean")
+        );
+        // 发送 / 重试 / 标记重试 / 批量重试对齐 log:retry 按钮权限
+        assert_eq!(
+            get_required_perm("POST", "/system/msg/send"),
+            Some("system:msg:log:retry")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/msg/log/retry/{logIds}"),
+            Some("system:msg:log:retry")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/msg/log/retryPending/{batch}"),
+            Some("system:msg:log:retry")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/msg/log/markPending/{logIds}"),
+            Some("system:msg:log:retry")
+        );
+    }
+
+    #[test]
+    fn test_msg_wrong_method_no_perm() {
+        // 方法混淆不应命中（如 DELETE channel/list、GET channel 新增），防绕过
+        assert_eq!(
+            get_required_perm("DELETE", "/system/msg/channel/list"),
+            None
+        );
+        assert_eq!(get_required_perm("POST", "/system/msg/channel/list"), None);
+        assert_eq!(get_required_perm("GET", "/system/msg/log/clean"), None);
+        assert_eq!(get_required_perm("GET", "/system/msg/send"), None);
     }
 }

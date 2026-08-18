@@ -29,13 +29,34 @@ pub fn gen_routes() -> Router<Arc<AppState>> {
         // 静态路由优先注册
         .route("/tool/gen/list", get(tool_gen_handler::list))
         .route("/tool/gen/db/list", get(tool_gen_handler::db_list))
-        .route("/tool/gen/importTable", post(tool_gen_handler::import_table))
-        .route("/tool/gen/createTable", post(tool_gen_handler::create_table))
-        .route("/tool/gen/batchGenCode", get(tool_gen_handler::batch_gen_code))
-        .route("/tool/gen/preview/{tableId}", get(tool_gen_handler::preview))
-        .route("/tool/gen/genCode/{tableName}", get(tool_gen_handler::gen_code))
-        .route("/tool/gen/synchDb/{tableName}", post(tool_gen_handler::synch_db))
+        .route(
+            "/tool/gen/importTable",
+            post(tool_gen_handler::import_table),
+        )
+        .route(
+            "/tool/gen/createTable",
+            post(tool_gen_handler::create_table),
+        )
+        .route(
+            "/tool/gen/batchGenCode",
+            get(tool_gen_handler::batch_gen_code),
+        )
+        .route(
+            "/tool/gen/preview/{tableId}",
+            get(tool_gen_handler::preview),
+        )
+        .route(
+            "/tool/gen/genCode/{tableName}",
+            get(tool_gen_handler::gen_code),
+        )
+        .route(
+            "/tool/gen/synchDb/{tableName}",
+            post(tool_gen_handler::synch_db),
+        )
         // 动态路由：GET 查询详情 + DELETE 删除共用同一路径模式
-        .route("/tool/gen/{tableId}", get(tool_gen_handler::get_table).delete(tool_gen_handler::delete_table))
+        .route(
+            "/tool/gen/{tableId}",
+            get(tool_gen_handler::get_table).delete(tool_gen_handler::delete_table),
+        )
         .route("/tool/gen", put(tool_gen_handler::update_table))
 }

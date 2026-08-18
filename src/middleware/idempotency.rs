@@ -23,11 +23,11 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 use crate::jwt::Claims;
 use crate::state::AppState;
@@ -140,7 +140,10 @@ pub async fn idempotency_middleware(
     }
 
     // 5. Redis SETNX 抢占幂等槽位
-    let redis_key = format!("{}{}:{}", IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key);
+    let redis_key = format!(
+        "{}{}:{}",
+        IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key
+    );
     let mut redis = state.redis.clone();
     let set_result: Result<Option<String>, _> = redis::cmd("SET")
         .arg(&redis_key)
@@ -152,8 +155,8 @@ pub async fn idempotency_middleware(
         .await;
 
     let acquired = match set_result {
-        Ok(Some(_)) => true,  // SET NX 成功，首次请求
-        Ok(None) => false,    // key 已存在，重复请求
+        Ok(Some(_)) => true, // SET NX 成功，首次请求
+        Ok(None) => false,   // key 已存在，重复请求
         Err(e) => {
             // Redis 故障：fail-closed 拒绝请求（与 auth_middleware 保持一致）
             // 防御性设计：即使 auth 中间件已保证 Redis 可用，仍不应在 Redis 故障时
@@ -224,24 +227,36 @@ mod tests {
     fn test_key_allowed_chars_valid() {
         // 标准 UUID v4
         let key = "550e8400-e29b-41d4-a716-446655440000";
-        assert!(key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)));
+        assert!(
+            key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
     }
 
     #[test]
     fn test_key_allowed_chars_custom() {
         // 自定义 key
         let key = "order_create_20260718_001";
-        assert!(key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)));
+        assert!(
+            key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
     }
 
     #[test]
     fn test_key_allowed_chars_invalid() {
         // 包含空格
         let key = "550e8400 e29b";
-        assert!(!key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)));
+        assert!(
+            !key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
         // 包含特殊字符
         let key = "order@create!";
-        assert!(!key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)));
+        assert!(
+            !key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
     }
 
     #[test]

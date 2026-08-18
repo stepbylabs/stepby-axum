@@ -22,6 +22,7 @@ pub mod sys_dict_service;
 pub mod sys_job_service;
 pub mod sys_logininfor_service;
 pub mod sys_menu_service;
+pub mod sys_msg_service;
 pub mod sys_notice_service;
 pub mod sys_oper_log_service;
 pub mod sys_post_service;
@@ -41,6 +42,7 @@ pub use sys_dict_service::SysDictService;
 pub use sys_job_service::SysJobService;
 pub use sys_logininfor_service::SysLogininforService;
 pub use sys_menu_service::SysMenuService;
+pub use sys_msg_service::SysMsgService;
 pub use sys_notice_service::SysNoticeService;
 pub use sys_oper_log_service::SysOperLogService;
 pub use sys_post_service::SysPostService;
@@ -73,7 +75,10 @@ const MAX_DEPT_TREE_DEPTH: usize = 30;
 
 pub fn build_dept_tree_children(node: &mut TreeSelectVo, list: &[SysDeptModel], depth: usize) {
     if depth >= MAX_DEPT_TREE_DEPTH {
-        tracing::warn!("部门树构建达到最大深度 {}（可能存在 parent_id 循环引用），停止递归", MAX_DEPT_TREE_DEPTH);
+        tracing::warn!(
+            "部门树构建达到最大深度 {}（可能存在 parent_id 循环引用），停止递归",
+            MAX_DEPT_TREE_DEPTH
+        );
         return;
     }
     let node_id = node.id;

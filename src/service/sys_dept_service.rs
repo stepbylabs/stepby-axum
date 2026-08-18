@@ -8,23 +8,22 @@
 //! - 数据访问通过 Repository 层委托
 
 use futures::future::FutureExt;
+use garde::Validate;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
-    QueryFilter, Set, Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
+    Set, Statement, TransactionTrait,
 };
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
-use garde::Validate;
 
-use crate::common::error::ServiceError;
 use crate::common::constants::SUPER_ADMIN_USER_ID;
-use crate::common::{like_escape, TreeSelectVo};
+use crate::common::error::ServiceError;
+use crate::common::{TreeSelectVo, like_escape};
 use crate::entity::sys_dept::{
-    ActiveModel as SysDeptActiveModel, Column as DeptColumn, Entity as SysDept, Model as SysDeptModel,
+    ActiveModel as SysDeptActiveModel, Column as DeptColumn, Entity as SysDept,
+    Model as SysDeptModel,
 };
-use crate::entity::sys_role_dept::{
-    Column as RoleDeptColumn, Entity as SysRoleDept,
-};
+use crate::entity::sys_role_dept::{Column as RoleDeptColumn, Entity as SysRoleDept};
 use crate::entity::sys_user::{Column as UserColumn, Entity as SysUser};
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_role::SysRoleRepository;
@@ -237,7 +236,11 @@ impl SysDeptService {
             .base()
             .find_by_id(operator_user_id)
             .await
-            .map(|u| u.and_then(|u| u.dept_id).map(|d| vec![d]).unwrap_or_default())
+            .map(|u| {
+                u.and_then(|u| u.dept_id)
+                    .map(|d| vec![d])
+                    .unwrap_or_default()
+            })
             .map_err(ServiceError::from)
     }
 
@@ -256,12 +259,14 @@ impl SysDeptService {
         let order_nums: Vec<i32> = parse_id_list::<i32>(&dto.order_nums);
 
         if dept_ids.is_empty() || order_nums.is_empty() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.dept.ids_empty")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.dept.ids_empty"
+            )));
         }
         if dept_ids.len() != order_nums.len() {
-            return Err(ServiceError::bad_request(
-                &crate::tr!("error.dept.ids_count_mismatch"),
-            ));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.dept.ids_count_mismatch"
+            )));
         }
 
         let now = crate::common::datetime::now_naive();
@@ -383,9 +388,13 @@ impl SysDeptService {
                 .base()
                 .find_by_id(parent_id)
                 .await?
-                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.dept.parent_not_found")))?;
+                .ok_or_else(|| {
+                    ServiceError::bad_request(&crate::tr!("error.dept.parent_not_found"))
+                })?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request(&crate::tr!("error.dept.parent_deleted")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.dept.parent_deleted"
+                )));
             }
             format!(
                 "{},{}",
@@ -440,7 +449,9 @@ impl SysDeptService {
         // parent_id 校验
         let parent_id = dto.parent_id.unwrap_or(existing.parent_id.unwrap_or(0));
         if parent_id == dto.dept_id {
-            return Err(ServiceError::bad_request(&crate::tr!("error.dept.parent_self_forbidden")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.dept.parent_self_forbidden"
+            )));
         }
 
         // 计算新祖先链 + 校验父部门存在 + 防环
@@ -452,15 +463,19 @@ impl SysDeptService {
                 .base()
                 .find_by_id(parent_id)
                 .await?
-                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.dept.parent_not_found")))?;
+                .ok_or_else(|| {
+                    ServiceError::bad_request(&crate::tr!("error.dept.parent_not_found"))
+                })?;
             if parent.del_flag.as_deref() == Some("2") {
-                return Err(ServiceError::bad_request(&crate::tr!("error.dept.parent_deleted")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.dept.parent_deleted"
+                )));
             }
             // 防环校验：新 parent_id 不能是当前部门的后代节点
             if self.is_descendant(dto.dept_id, parent_id).await? {
-                return Err(ServiceError::bad_request(
-                    &crate::tr!("error.dept.parent_self_forbidden"),
-                ));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.dept.parent_self_forbidden"
+                )));
             }
             format!(
                 "{},{}",
@@ -469,7 +484,10 @@ impl SysDeptService {
             )
         };
 
-        let old_ancestors = existing.ancestors.clone().unwrap_or_else(|| "0".to_string());
+        let old_ancestors = existing
+            .ancestors
+            .clone()
+            .unwrap_or_else(|| "0".to_string());
         let ancestors_changed = new_ancestors != old_ancestors;
 
         let now = crate::common::datetime::now_naive();
@@ -579,11 +597,15 @@ impl SysDeptService {
                     let child_select = SysDept::find()
                         .filter(DeptColumn::ParentId.eq(dept_id))
                         .filter(DeptColumn::DelFlag.eq("0"));
-                    let child_count = dept_repo.base().find_many_conn(txn, child_select).await?.len() as u64;
+                    let child_count = dept_repo
+                        .base()
+                        .find_many_conn(txn, child_select)
+                        .await?
+                        .len() as u64;
                     if child_count > 0 {
-                        return Err(sea_orm::DbErr::Custom(
-                            crate::tr!("error.dept.has_children"),
-                        ));
+                        return Err(sea_orm::DbErr::Custom(crate::tr!(
+                            "error.dept.has_children"
+                        )));
                     }
 
                     // 2. 事务内重新检查角色关联
@@ -593,20 +615,22 @@ impl SysDeptService {
                         .await?
                         .len() as u64;
                     if role_count > 0 {
-                        return Err(sea_orm::DbErr::Custom(
-                            crate::tr!("error.dept.assigned_to_role"),
-                        ));
+                        return Err(sea_orm::DbErr::Custom(crate::tr!(
+                            "error.dept.assigned_to_role"
+                        )));
                     }
 
                     // 3. 事务内重新检查用户关联
                     let user_select = SysUser::find()
                         .filter(UserColumn::DeptId.eq(dept_id))
                         .filter(UserColumn::DelFlag.eq("0"));
-                    let user_count = user_repo.base().find_many_conn(txn, user_select).await?.len() as u64;
+                    let user_count = user_repo
+                        .base()
+                        .find_many_conn(txn, user_select)
+                        .await?
+                        .len() as u64;
                     if user_count > 0 {
-                        return Err(sea_orm::DbErr::Custom(
-                            crate::tr!("error.dept.has_users"),
-                        ));
+                        return Err(sea_orm::DbErr::Custom(crate::tr!("error.dept.has_users")));
                     }
 
                     // 4. 软删除（del_flag = '2'）
@@ -655,10 +679,7 @@ impl SysDeptService {
     ///
     /// 流程：sys_user.dept_id → sys_dept.dept_name
     /// 用户或部门不存在时返回空字符串（不阻断日志写入）
-    pub async fn get_dept_name_by_user_id(
-        &self,
-        user_id: i64,
-    ) -> Result<String, ServiceError> {
+    pub async fn get_dept_name_by_user_id(&self, user_id: i64) -> Result<String, ServiceError> {
         use crate::entity::sys_user::Entity as SysUser;
 
         // 1. 查询用户的 dept_id
@@ -676,9 +697,7 @@ impl SysDeptService {
         // 2. 查询部门名称
         let dept = self.dept_repo.base().find_by_id(dept_id).await?;
         match dept {
-            Some(d) if d.del_flag.as_deref() != Some("2") => {
-                Ok(d.dept_name)
-            }
+            Some(d) if d.del_flag.as_deref() != Some("2") => Ok(d.dept_name),
             _ => Ok(String::new()),
         }
     }
@@ -765,17 +784,26 @@ async fn update_children_ancestors_conn<C: ConnectionTrait>(
     let pattern = format!("%,{},%", dept_id);
     // 单条 UPDATE + REPLACE 批量替换 ancestors 中的 old → new
     let sql = match backend {
-        DatabaseBackend::MySql => r#"UPDATE sys_dept
+        DatabaseBackend::MySql => {
+            r#"UPDATE sys_dept
             SET ancestors = REPLACE(ancestors, ?, ?)
-            WHERE del_flag = '0' AND dept_id <> ? AND CONCAT(',', ancestors, ',') LIKE ?"#,
-        _ => r#"UPDATE sys_dept
+            WHERE del_flag = '0' AND dept_id <> ? AND CONCAT(',', ancestors, ',') LIKE ?"#
+        }
+        _ => {
+            r#"UPDATE sys_dept
             SET ancestors = REPLACE(ancestors, $1, $2)
-            WHERE del_flag = '0' AND dept_id <> $3 AND (',' || ancestors || ',') LIKE $4"#,
+            WHERE del_flag = '0' AND dept_id <> $3 AND (',' || ancestors || ',') LIKE $4"#
+        }
     };
     let stmt = Statement::from_sql_and_values(
         backend,
         sql,
-        [old_ancestors.into(), new_ancestors.into(), dept_id.into(), pattern.into()],
+        [
+            old_ancestors.into(),
+            new_ancestors.into(),
+            dept_id.into(),
+            pattern.into(),
+        ],
     );
     conn.execute(stmt).await?;
     Ok(())

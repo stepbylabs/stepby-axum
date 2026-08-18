@@ -18,29 +18,35 @@
 //! - GET    /system/user/authRole/{userId}          查询授权角色（user/roles 在顶层）
 //! - GET    /system/user/deptTree                   部门下拉树
 
-use std::sync::Arc;
-use axum::extract::{Form, Multipart, Path, Query, State};
-use axum::response::Response;
 use axum::Json;
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use axum::extract::{Form, Multipart, Path, Query, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::Response;
 use garde::Validate;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::common::ValidatedJson;
 
-use crate::common::{AjaxResult, AppError, TableDataInfo, TreeSelectVo};
 use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SECS_PER_HOUR};
-use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
+use crate::common::excel::{
+    CellValue, ExcelColumn, ImportColumn, build_import_template_bytes, export_to_excel,
+};
+use crate::common::{AjaxResult, AppError, TableDataInfo, TreeSelectVo};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::Model as SysUserModel;
 use crate::middleware::Operator;
 use crate::service::sys_user_service::{
-    ProfileUpdateDto, UserAddDto, UserAuthRoleVo, UserEditDto, UserPwdResetDto,
+    ImportResultVo, ProfileUpdateDto, UserAddDto, UserAuthRoleVo, UserEditDto, UserPwdResetDto,
     UserPwdUpdateDto, UserQueryDto, UserVo,
 };
 use crate::state::AppState;
 use crate::utils::parse_id_list;
+
+/// 导入文件大小上限（5 MB，足够承载数百行用户数据）
+const MAX_IMPORT_SIZE: usize = 5 * 1024 * 1024;
 
 // ==================== 辅助 DTO ====================
 
@@ -97,13 +103,10 @@ pub async fn list(
 ) -> Result<TableDataInfo<UserVo>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
-    let operator_user_id: i64 = operator
-        .user_id()
-        .parse::<i64>()
-        .map_err(|_| {
-            tracing::warn!(sub = %operator.user_id(), "用户列表: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-        })?;
+    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
+        tracing::warn!(sub = %operator.user_id(), "用户列表: JWT sub 解析失败，拒绝访问");
+        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
+    })?;
     let (rows, total) = state
         .user_service
         .get_user_page(query, Some(operator_user_id))
@@ -122,35 +125,236 @@ pub async fn export(
     Form(query): Form<UserQueryDto>,
 ) -> Result<Response, AppError> {
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问
-    let operator_user_id: i64 = operator
-        .user_id()
-        .parse::<i64>()
-        .map_err(|_| {
-            tracing::warn!(sub = %operator.user_id(), "用户导出: JWT sub 解析失败，拒绝访问");
-            AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-        })?;
+    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
+        tracing::warn!(sub = %operator.user_id(), "用户导出: JWT sub 解析失败，拒绝访问");
+        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
+    })?;
     let rows = state
         .user_service
         .export_users(query, Some(operator_user_id))
         .await?;
 
     let columns = [
-        ExcelColumn { key: "userId", header: ("用户编号", "User ID"), getter: |r: &UserVo| CellValue::Text(r.user.user_id.to_string().into()) },
-        ExcelColumn { key: "loginName", header: ("登录名称", "Login Name"), getter: |r: &UserVo| CellValue::Text(r.user.user_name.clone().into()) },
-        ExcelColumn { key: "nickName", header: ("用户姓名", "Nickname"), getter: |r: &UserVo| CellValue::Text(r.user.nick_name.clone().into()) },
-        ExcelColumn { key: "dept.deptName", header: ("部门", "Department"), getter: |r: &UserVo| CellValue::Text(r.dept.as_ref().map(|d| d.dept_name.clone()).unwrap_or_default().into()) },
-        ExcelColumn { key: "phonenumber", header: ("手机号码", "Phone"), getter: |r: &UserVo| CellValue::Text(r.user.phonenumber.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "email", header: ("邮箱", "Email"), getter: |r: &UserVo| CellValue::Text(r.user.email.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "status", header: ("状态", "Status"), getter: |r: &UserVo| CellValue::Text(if r.user.status.as_deref() == Some("0") { crate::tr!("common.status.normal") } else { crate::tr!("common.status.disabled") }.into()) },
-        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &UserVo| CellValue::Text({
-                r.user.create_time
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default()
-                    .into()
-            }) },
+        ExcelColumn {
+            key: "userId",
+            header: ("用户编号", "User ID"),
+            getter: |r: &UserVo| CellValue::Text(r.user.user_id.to_string().into()),
+        },
+        ExcelColumn {
+            key: "loginName",
+            header: ("登录名称", "Login Name"),
+            getter: |r: &UserVo| CellValue::Text(r.user.user_name.clone().into()),
+        },
+        ExcelColumn {
+            key: "nickName",
+            header: ("用户姓名", "Nickname"),
+            getter: |r: &UserVo| CellValue::Text(r.user.nick_name.clone().into()),
+        },
+        ExcelColumn {
+            key: "dept.deptName",
+            header: ("部门", "Department"),
+            getter: |r: &UserVo| {
+                CellValue::Text(
+                    r.dept
+                        .as_ref()
+                        .map(|d| d.dept_name.clone())
+                        .unwrap_or_default()
+                        .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "phonenumber",
+            header: ("手机号码", "Phone"),
+            getter: |r: &UserVo| {
+                CellValue::Text(r.user.phonenumber.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "email",
+            header: ("邮箱", "Email"),
+            getter: |r: &UserVo| CellValue::Text(r.user.email.clone().unwrap_or_default().into()),
+        },
+        ExcelColumn {
+            key: "status",
+            header: ("状态", "Status"),
+            getter: |r: &UserVo| {
+                CellValue::Text(
+                    if r.user.status.as_deref() == Some("0") {
+                        crate::tr!("common.status.normal")
+                    } else {
+                        crate::tr!("common.status.disabled")
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "createTime",
+            header: ("创建时间", "Create Time"),
+            getter: |r: &UserVo| {
+                CellValue::Text({
+                    r.user
+                        .create_time
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default()
+                        .into()
+                })
+            },
+        },
     ];
 
     export_to_excel(&crate::tr!("excel.sheet.user"), "user", &columns, &rows).await
+}
+
+/// 导入查询参数（对齐前端 ElUpload ?updateSupport=0|1）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportQuery {
+    /// 1=已存在用户则更新资料；0=已存在则报错跳过
+    #[serde(default)]
+    pub update_support: u8,
+}
+
+/// POST /system/user/importTemplate
+/// 下载用户导入模板 xlsx（表头 + 示例行）
+///
+/// 模板列：登录名称* / 用户姓名* / 部门名称 / 手机号码 / 邮箱 / 性别 / 状态
+#[utoipa::path(
+    post,
+    path = "/system/user/importTemplate",
+    responses(
+        (status = 200, description = "导入模板 xlsx", content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-user"
+)]
+pub async fn import_template(State(state): State<Arc<AppState>>) -> Result<Response, AppError> {
+    let locale_zh = crate::common::i18n::is_zh();
+    let columns = [
+        ImportColumn {
+            header: ("登录名称", "Login Name"),
+            sample: "zhangsan",
+            width: 18.0,
+        },
+        ImportColumn {
+            header: ("用户姓名", "Nickname"),
+            sample: "张三",
+            width: 14.0,
+        },
+        ImportColumn {
+            header: ("部门名称", "Department"),
+            sample: "研发部",
+            width: 16.0,
+        },
+        ImportColumn {
+            header: ("手机号码", "Phone"),
+            sample: "13800138000",
+            width: 18.0,
+        },
+        ImportColumn {
+            header: ("邮箱", "Email"),
+            sample: "zhangsan@example.com",
+            width: 26.0,
+        },
+        ImportColumn {
+            header: ("性别", "Gender"),
+            sample: "男",
+            width: 10.0,
+        },
+        ImportColumn {
+            header: ("状态", "Status"),
+            sample: "正常",
+            width: 10.0,
+        },
+    ];
+    let bytes =
+        build_import_template_bytes(&crate::tr!("excel.sheet.user_import"), &columns, locale_zh)?;
+    let _ = state;
+    let mut response = Response::new(bytes.into());
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=user_import_template.xlsx"),
+    );
+    Ok(response)
+}
+
+/// POST /system/user/importData
+/// 上传 xlsx 批量导入用户（multipart 字段名 file）
+///
+/// 逐行校验，失败行不中断整批；返回成功数 + 错误行回显。
+#[utoipa::path(
+    post,
+    path = "/system/user/importData",
+    responses(
+        (status = 200, description = "导入结果（成功数 + 错误回显）", body = AjaxResult<ImportResultVo>),
+        (status = 400, description = "文件缺失/格式错误"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-user"
+)]
+pub async fn import_data(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(query): Query<ImportQuery>,
+    mut multipart: Multipart,
+) -> Result<AjaxResult<ImportResultVo>, AppError> {
+    // 从 multipart 提取 file 字段并限定长度读取
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut file_name: Option<String> = None;
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e))
+    })? {
+        if field.name() == Some("file") {
+            let (bytes, _, original) =
+                crate::common::upload::read_field_limited(&mut field, MAX_IMPORT_SIZE).await?;
+            file_name = original;
+            file_bytes = Some(bytes);
+        }
+    }
+    let bytes = file_bytes.ok_or_else(|| {
+        AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_file"))
+    })?;
+    // 仅允许 xlsx（前端 accept 已限制，后端二次校验）
+    if let Some(name) = file_name.as_deref()
+        && !name.to_lowercase().ends_with(".xlsx")
+    {
+        return Err(AppError::bad_request(&crate::tr!("excel.tip_import_xlsx")));
+    }
+
+    // 默认初始密码（读系统配置，读取失败回退与迁移种子一致）
+    let default_password = state
+        .config_service
+        .get_config_value_by_key_cached("sys.user.initPassword")
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "123456".to_string());
+
+    let result = state
+        .user_service
+        .import_users(
+            bytes,
+            query.update_support == 1,
+            operator.username(),
+            &default_password,
+        )
+        .await?;
+
+    let msg = crate::tr!("msg.success.user_import", n = result.success);
+    Ok(AjaxResult {
+        code: 200,
+        msg,
+        data: Some(result),
+    })
 }
 
 /// GET /system/user/{id}
@@ -181,7 +385,10 @@ pub async fn get_info_by_id(
 ) -> Result<UserFormResult, AppError> {
     // P0-6：传入 operator_user_id 校验目标用户在数据范围内（此前可越权读取他人 PII）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
-    let vo = state.user_service.get_user_form_data(Some(user_id), operator_user_id).await?;
+    let vo = state
+        .user_service
+        .get_user_form_data(Some(user_id), operator_user_id)
+        .await?;
     Ok(UserFormResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),
@@ -210,9 +417,15 @@ pub async fn add(
     operator: Operator,
     Json(dto): Json<UserAddDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let user = state.user_service.add_user(dto, operator.username()).await?;
+    let user = state
+        .user_service
+        .add_user(dto, operator.username())
+        .await?;
     // 对齐前端：新增返回提示消息
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add_user", name = user.user_name)))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.add_user",
+        name = user.user_name
+    )))
 }
 
 /// PUT /system/user
@@ -317,9 +530,9 @@ pub async fn remove(
                 error = %e,
                 "删除用户后批量写入 pwd_changed 标记失败（fail-closed）"
             );
-            return Err(AppError::internal(
-                &crate::tr!("error.user.pwd_reset_token_invalidate_failed"),
-            ));
+            return Err(AppError::internal(&crate::tr!(
+                "error.user.pwd_reset_token_invalidate_failed"
+            )));
         }
     }
 
@@ -442,7 +655,9 @@ pub async fn reset_pwd(
         return Err(e.into());
     }
 
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_reset")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.password_reset"
+    )))
 }
 
 /// PUT /system/user/profile/updatePwd
@@ -501,7 +716,9 @@ pub async fn update_profile_pwd(
         return Err(e.into());
     }
 
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.password_change")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.password_change"
+    )))
 }
 
 /// GET /system/user/profile
@@ -588,7 +805,9 @@ pub async fn auth_role(
         .user_service
         .assign_user_roles(dto.user_id, role_ids, operator_user_id)
         .await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.assign_role")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.assign_role"
+    )))
 }
 
 /// GET /system/user/deptTree
@@ -648,11 +867,9 @@ pub async fn avatar_upload(
     let upload_cfg = &state.config.upload;
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_ext: Option<String> = None;
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e)))?
-    {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e))
+    })? {
         if field.name() == Some("avatarfile") {
             let (bytes, ext, _original) =
                 crate::common::upload::read_field_limited(&mut field, upload_cfg.avatar_max_size)
@@ -664,9 +881,10 @@ pub async fn avatar_upload(
 
     // P0-3：统一校验 + 保存（头像白名单、危险类型拒绝、magic bytes 以实际类型为准、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
-        file_bytes
-            .as_deref()
-            .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_avatar")))?,
+        state.storage.as_ref(),
+        file_bytes.as_deref().ok_or_else(|| {
+            AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_avatar"))
+        })?,
         file_ext.as_deref(),
         None,
         upload_cfg,
@@ -677,26 +895,22 @@ pub async fn avatar_upload(
     let filename = saved.new_filename;
 
     // 更新用户 avatar 字段，并获取旧 avatar 路径用于文件清理
-    let old_avatar = state
-        .user_service
-        .update_avatar(user_id, &img_url)
-        .await?;
+    let old_avatar = state.user_service.update_avatar(user_id, &img_url).await?;
 
-    // P2 修复: 删除旧头像文件（best-effort，失败仅记录日志，不影响上传流程；P0-3：带根目录前缀校验）
+    // P2 修复: 删除旧头像文件（best-effort，失败仅记录日志，不影响上传流程；F1：统一走存储后端，含路径校验）
     if let Some(old_url) = old_avatar
         && let Some(old_filename) = old_url.rsplit('/').next()
         && !old_filename.is_empty()
         && old_filename != filename
     {
-        let avatar_dir = crate::common::resolve_upload_dir(&upload_cfg.avatar_dir).await;
-        let old_file_path = avatar_dir.join(old_filename);
-        let old_path_str = old_file_path.to_string_lossy().to_string();
-        let root_str = avatar_dir.to_string_lossy().to_string();
-        let result = crate::common::upload::delete_upload_file(&old_path_str, &root_str).await;
+        let result = state
+            .storage
+            .delete(&upload_cfg.avatar_dir, old_filename)
+            .await;
         if let Err(e) = &result {
             tracing::warn!(
                 error = %e,
-                old_path = %old_path_str,
+                old_filename = %old_filename,
                 "删除旧头像文件失败（best-effort，不影响业务）"
             );
         }
@@ -767,4 +981,9 @@ pub struct AvatarUploadResult {
     pub img_url: String,
 }
 
-crate::impl_into_response!(ProfileResult, UserFormResult, AuthRoleResult, AvatarUploadResult);
+crate::impl_into_response!(
+    ProfileResult,
+    UserFormResult,
+    AuthRoleResult,
+    AvatarUploadResult
+);

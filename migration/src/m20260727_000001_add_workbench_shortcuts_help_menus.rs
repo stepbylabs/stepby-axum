@@ -45,7 +45,10 @@ fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
 /// 判断当前数据库是否为 PostgreSQL
 fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     let backend = manager.get_connection().get_database_backend();
-    matches!(backend, sea_orm_migration::sea_orm::DatabaseBackend::Postgres)
+    matches!(
+        backend,
+        sea_orm_migration::sea_orm::DatabaseBackend::Postgres
+    )
 }
 
 /// 当前时间表达式（跨数据库兼容）
@@ -124,7 +127,8 @@ impl MigrationTrait for Migration {
         execute_idempotent_insert(manager, &help_sql).await?;
 
         // 5. 为普通角色 role_id=2 关联新菜单（让普通用户也能访问）
-        let role_menu_sql = "sys_role_menu (role_id, menu_id) VALUES (2, 127), (2, 128), (2, 129), (2, 130)";
+        let role_menu_sql =
+            "sys_role_menu (role_id, menu_id) VALUES (2, 127), (2, 128), (2, 129), (2, 130)";
         execute_idempotent_insert(manager, role_menu_sql).await?;
 
         Ok(())
@@ -134,17 +138,13 @@ impl MigrationTrait for Migration {
         // 删除 role_menu 关联
         manager
             .get_connection()
-            .execute_unprepared(
-                "DELETE FROM sys_role_menu WHERE menu_id IN (127, 128, 129, 130)",
-            )
+            .execute_unprepared("DELETE FROM sys_role_menu WHERE menu_id IN (127, 128, 129, 130)")
             .await?;
 
         // 删除菜单
         manager
             .get_connection()
-            .execute_unprepared(
-                "DELETE FROM sys_menu WHERE menu_id IN (127, 128, 129, 130)",
-            )
+            .execute_unprepared("DELETE FROM sys_menu WHERE menu_id IN (127, 128, 129, 130)")
             .await?;
 
         Ok(())

@@ -20,16 +20,16 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::{HeaderMap, Method};
 use axum::middleware::Next;
 use axum::response::Response;
 use futures::FutureExt;
 
-use crate::utils::ip::extract_client_ip;
 use crate::service::sys_oper_log_service::OperLogRecord;
 use crate::state::AppState;
+use crate::utils::ip::extract_client_ip;
 
 /// 日志记录的请求体/响应体阈值（超出则记录截断警告）
 /// 原 64KB 过小，正常请求体（如富文本通知、菜单配置）会被静默丢弃，导致日志缺失且转发空体。
@@ -86,7 +86,13 @@ pub async fn oper_log_middleware(
         .extensions()
         .get::<crate::jwt::Claims>()
         .map(|c| (c.username.clone(), 1i32, c.sub.clone()))
-        .unwrap_or_else(|| (crate::tr!("error.oper_log.anonymous").to_string(), 0, String::new()));
+        .unwrap_or_else(|| {
+            (
+                crate::tr!("error.oper_log.anonymous").to_string(),
+                0,
+                String::new(),
+            )
+        });
 
     // 提取客户端真实 IP（含可信代理白名单 + XFF 链校验）
     let peer_ip = req
@@ -200,7 +206,10 @@ pub async fn oper_log_middleware(
 
     let (json_result_raw, response) = if !is_textual {
         let json_result_raw = if resp_content_length > 0 {
-            format!("[binary: {}, {} bytes, skipped]", resp_content_type, resp_content_length)
+            format!(
+                "[binary: {}, {} bytes, skipped]",
+                resp_content_type, resp_content_length
+            )
         } else {
             format!("[binary: {}, skipped]", resp_content_type)
         };
@@ -213,7 +222,10 @@ pub async fn oper_log_middleware(
             threshold = MAX_BODY_BYTES,
             "响应体超过日志阈值，跳过缓冲直接透传"
         );
-        let json_result_raw = format!("[response too large: {} bytes, skipped]", resp_content_length);
+        let json_result_raw = format!(
+            "[response too large: {} bytes, skipped]",
+            resp_content_length
+        );
         let response = Response::from_parts(resp_parts, resp_body);
         (json_result_raw, response)
     } else {
@@ -379,9 +391,11 @@ fn extract_record_id(oper_url: &str, body: Option<&[u8]>) -> Option<i64> {
         return None;
     };
 
-    json.get(field_name)
-        .and_then(|v| v.as_i64())
-        .or_else(|| json.get(field_name).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+    json.get(field_name).and_then(|v| v.as_i64()).or_else(|| {
+        json.get(field_name)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+    })
 }
 
 /// 捕获变更前数据快照（仅对 PUT/DELETE 请求）
@@ -547,10 +561,7 @@ fn sanitize_param(s: String) -> String {
     ];
     for field in sensitive_fields {
         // 匹配 "field":"value" 模式
-        let patterns = [
-            format!("\"{}\":\"", field),
-            format!("\"{}\": \"", field),
-        ];
+        let patterns = [format!("\"{}\":\"", field), format!("\"{}\": \"", field)];
         for pat in &patterns {
             if let Some(idx) = result.find(pat) {
                 let value_start = idx + pat.len();
@@ -616,7 +627,11 @@ pub(crate) fn infer_module_title(path: &str) -> String {
         "module.gen".to_string()
     } else if path.starts_with("/common/") {
         "module.common".to_string()
-    } else if path == "/logout" || path == "/login" || path == "/register" || path == "/unlockscreen" {
+    } else if path == "/logout"
+        || path == "/login"
+        || path == "/register"
+        || path == "/unlockscreen"
+    {
         // 认证相关路由（登出/登录/注册/锁屏解锁）归类为 module.auth
         "module.auth".to_string()
     } else {

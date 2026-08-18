@@ -10,20 +10,18 @@
 //! - DELETE /system/config/refreshCache         刷新缓存
 //! - POST   /system/config/export               导出参数配置
 
-use std::sync::Arc;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::Response;
+use std::sync::Arc;
 
-use crate::common::excel::{export_to_excel, CellValue, ExcelColumn};
 use crate::common::ValidatedJson;
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
+use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_config::Model as SysConfigModel;
 use crate::middleware::Operator;
-use crate::service::sys_config_service::{
-    ConfigAddDto, ConfigEditDto, ConfigQueryDto,
-};
+use crate::service::sys_config_service::{ConfigAddDto, ConfigEditDto, ConfigQueryDto};
 use crate::state::AppState;
-use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::utils::parse_id_list;
 
 /// GET /system/config/list
@@ -107,7 +105,10 @@ pub async fn add(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<ConfigAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.config_service.add_config(dto, operator.username()).await?;
+    state
+        .config_service
+        .add_config(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
@@ -129,7 +130,10 @@ pub async fn edit(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<ConfigEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.config_service.edit_config(dto, operator.username()).await?;
+    state
+        .config_service
+        .edit_config(dto, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -154,7 +158,9 @@ pub async fn remove(
     let ids: Vec<i64> = parse_id_list::<i64>(&config_ids);
 
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.config.id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.config.id_invalid"
+        )));
     }
     if ids.len() > MAX_BATCH_DELETE_SIZE {
         return Err(AppError::bad_request(&crate::tr!(
@@ -180,9 +186,7 @@ pub async fn remove(
     ),
     tag = "system-config"
 )]
-pub async fn refresh_cache(
-    State(state): State<Arc<AppState>>,
-) -> Result<AjaxResult<()>, AppError> {
+pub async fn refresh_cache(State(state): State<Arc<AppState>>) -> Result<AjaxResult<()>, AppError> {
     state.config_service.refresh_cache().await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.refresh")))
 }
@@ -208,22 +212,63 @@ pub async fn export(
     let rows = state.config_service.export_configs(query).await?;
 
     let columns = [
-        ExcelColumn { key: "configId", header: ("参数主键", "Config ID"), getter: |r: &SysConfigModel| CellValue::Text(r.config_id.to_string().into()) },
-        ExcelColumn { key: "configName", header: ("参数名称", "Config Name"), getter: |r: &SysConfigModel| CellValue::Text(r.config_name.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "configKey", header: ("参数键名", "Config Key"), getter: |r: &SysConfigModel| CellValue::Text(r.config_key.clone().into()) },
-        ExcelColumn { key: "configValue", header: ("参数键值", "Config Value"), getter: |r: &SysConfigModel| CellValue::Text(r.config_value.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "isBuiltIn", header: ("系统内置", "Built-in"), getter: |r: &SysConfigModel| CellValue::Text(match r.config_type.as_deref() {
-                Some("Y") => crate::tr!("common.yes"),
-                Some("N") => crate::tr!("common.no"),
-                _ => String::new(),
-            }.into()) },
-        ExcelColumn { key: "remark", header: ("备注", "Remark"), getter: |r: &SysConfigModel| CellValue::Text(r.remark.clone().unwrap_or_default().into()) },
-        ExcelColumn { key: "createTime", header: ("创建时间", "Create Time"), getter: |r: &SysConfigModel| CellValue::Text({
-                r.create_time
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default()
-                    .into()
-            }) },
+        ExcelColumn {
+            key: "configId",
+            header: ("参数主键", "Config ID"),
+            getter: |r: &SysConfigModel| CellValue::Text(r.config_id.to_string().into()),
+        },
+        ExcelColumn {
+            key: "configName",
+            header: ("参数名称", "Config Name"),
+            getter: |r: &SysConfigModel| {
+                CellValue::Text(r.config_name.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "configKey",
+            header: ("参数键名", "Config Key"),
+            getter: |r: &SysConfigModel| CellValue::Text(r.config_key.clone().into()),
+        },
+        ExcelColumn {
+            key: "configValue",
+            header: ("参数键值", "Config Value"),
+            getter: |r: &SysConfigModel| {
+                CellValue::Text(r.config_value.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "isBuiltIn",
+            header: ("系统内置", "Built-in"),
+            getter: |r: &SysConfigModel| {
+                CellValue::Text(
+                    match r.config_type.as_deref() {
+                        Some("Y") => crate::tr!("common.yes"),
+                        Some("N") => crate::tr!("common.no"),
+                        _ => String::new(),
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "remark",
+            header: ("备注", "Remark"),
+            getter: |r: &SysConfigModel| {
+                CellValue::Text(r.remark.clone().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "createTime",
+            header: ("创建时间", "Create Time"),
+            getter: |r: &SysConfigModel| {
+                CellValue::Text({
+                    r.create_time
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default()
+                        .into()
+                })
+            },
+        },
     ];
 
     export_to_excel(&crate::tr!("excel.sheet.config"), "config", &columns, &rows).await

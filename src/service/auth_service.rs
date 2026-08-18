@@ -17,16 +17,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use garde::Validate;
 use sea_orm::Set;
 use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Secret, TOTP};
 use utoipa::ToSchema;
-use garde::Validate;
 
 use crate::common::constants::SECS_PER_HOUR;
-use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::common::error::ServiceError;
 use crate::config::{JwtConfig, Settings};
+use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_logininfor;
 use crate::entity::sys_menu::Model as SysMenuModel;
 use crate::entity::sys_user::Model as SysUserModel;
@@ -38,8 +38,8 @@ use crate::service::sys_user_service::{SysUserService, UserAddDto};
 use crate::utils::captcha::generate_captcha;
 use crate::utils::ip_location::IpLocator;
 use crate::utils::password::{
-    encrypt_password, validate_password_complexity, verify_password_with_upgrade_hint,
-    PasswordVerifyResult,
+    PasswordVerifyResult, encrypt_password, validate_password_complexity,
+    verify_password_with_upgrade_hint,
 };
 
 /// 登录失败次数上限（每用户，5 分钟窗口）
@@ -78,7 +78,9 @@ return current
 /// - 非空字符串必须为合法 UUID 格式（由 uuid::Uuid::parse_str 校验）
 fn validate_captcha_uuid_format(uuid: &str, _ctx: &()) -> garde::Result {
     if !uuid.is_empty() && uuid::Uuid::parse_str(uuid).is_err() {
-        return Err(garde::Error::new(crate::tr!("error.auth.captcha_uuid_invalid")));
+        return Err(garde::Error::new(crate::tr!(
+            "error.auth.captcha_uuid_invalid"
+        )));
     }
     Ok(())
 }
@@ -258,7 +260,11 @@ impl AuthService {
     /// - 配置值为 "false"（不区分大小写）：返回 false
     /// - 其他值：返回 true
     async fn is_captcha_enabled(&self) -> bool {
-        match self.config_service.get_config_value_by_key_cached("sys.account.captchaEnabled").await {
+        match self
+            .config_service
+            .get_config_value_by_key_cached("sys.account.captchaEnabled")
+            .await
+        {
             Ok(Some(val)) => !val.eq_ignore_ascii_case("false"),
             _ => true,
         }
@@ -273,7 +279,11 @@ impl AuthService {
     /// - 配置值为 "true"（不区分大小写）：返回 true
     /// - 其他值：返回 false
     async fn is_register_enabled(&self) -> bool {
-        match self.config_service.get_config_value_by_key_cached("sys.account.registerUser").await {
+        match self
+            .config_service
+            .get_config_value_by_key_cached("sys.account.registerUser")
+            .await
+        {
             Ok(Some(val)) => val.eq_ignore_ascii_case("true"),
             _ => false,
         }
@@ -466,28 +476,37 @@ impl AuthService {
         {
             self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.totp_locked"))
                 .await;
-            return Err(ServiceError::new(1003, crate::tr!("error.totp.login_locked")));
+            return Err(ServiceError::new(
+                1003,
+                crate::tr!("error.totp.login_locked"),
+            ));
         }
 
         let code = totp_code.unwrap_or("");
         if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(ServiceError::new(1003, crate::tr!("error.totp.login_required")));
+            return Err(ServiceError::new(
+                1003,
+                crate::tr!("error.totp.login_required"),
+            ));
         }
 
         // 解密已绑定的 TOTP secret 并校验验证码
         let master_key = &self.config.config_enc_key;
         if master_key.is_empty() {
             tracing::error!("CONFIG_ENC_KEY 未配置，无法解密 TOTP secret（fail-closed 拒绝登录）");
-            return Err(ServiceError::new(503, crate::tr!("error.totp.enc_key_missing")));
+            return Err(ServiceError::new(
+                503,
+                crate::tr!("error.totp.enc_key_missing"),
+            ));
         }
         let secret_str = crate::utils::crypto::decrypt_config_value(&encrypted, master_key)
             .map_err(|e| {
                 tracing::error!(error = %e, user_id = user.user_id, "TOTP secret 解密失败");
                 ServiceError::new(500, crate::tr!("error.totp.decrypt_failed"))
             })?;
-        let secret_bytes = Secret::Encoded(secret_str).to_bytes().map_err(|_| {
-            ServiceError::new(500, crate::tr!("error.totp.secret_decode_failed"))
-        })?;
+        let secret_bytes = Secret::Encoded(secret_str)
+            .to_bytes()
+            .map_err(|_| ServiceError::new(500, crate::tr!("error.totp.secret_decode_failed")))?;
         let totp = TOTP::new(
             Algorithm::SHA1,
             6,
@@ -512,7 +531,10 @@ impl AuthService {
                 })?;
             self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.totp_failed"))
                 .await;
-            return Err(ServiceError::new(1003, crate::tr!("error.totp.code_invalid")));
+            return Err(ServiceError::new(
+                1003,
+                crate::tr!("error.totp.code_invalid"),
+            ));
         }
 
         // 验证通过：清除失败计数
@@ -546,7 +568,10 @@ impl AuthService {
         if ip_count > MAX_LOGIN_IP_COUNT {
             self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"))
                 .await;
-            return Err(ServiceError::new(429, crate::tr!("error.auth.rate_limited")));
+            return Err(ServiceError::new(
+                429,
+                crate::tr!("error.auth.rate_limited"),
+            ));
         }
         Ok(())
     }
@@ -563,9 +588,7 @@ impl AuthService {
         // R11：命令级超时（fail-closed 503）
         let fail_count: Option<i64> = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET")
-                .arg(&fail_key)
-                .query_async(redis),
+            redis::cmd("GET").arg(&fail_key).query_async(redis),
         )
         .await
         .map_err(|_| {
@@ -581,7 +604,10 @@ impl AuthService {
         {
             self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.password_locked"))
                 .await;
-            return Err(ServiceError::new(429, crate::tr!("error.auth.password_locked")));
+            return Err(ServiceError::new(
+                429,
+                crate::tr!("error.auth.password_locked"),
+            ));
         }
         Ok(())
     }
@@ -608,9 +634,7 @@ impl AuthService {
             // R11：命令级超时（fail-closed 503）
             let stored_code: Option<String> = match tokio::time::timeout(
                 Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-                redis::cmd("GETDEL")
-                    .arg(&captcha_key)
-                    .query_async(redis),
+                redis::cmd("GETDEL").arg(&captcha_key).query_async(redis),
             )
             .await
             {
@@ -634,16 +658,24 @@ impl AuthService {
             let stored = match stored_code {
                 Some(c) => c,
                 None => {
-                    self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.captcha_expired"))
-                        .await;
-                    return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_expired")));
+                    self.write_login_log_best_effort(
+                        ctx,
+                        "1",
+                        &crate::tr!("log.auth.captcha_expired"),
+                    )
+                    .await;
+                    return Err(ServiceError::bad_request(&crate::tr!(
+                        "error.auth.captcha_expired"
+                    )));
                 }
             };
 
             if stored.to_lowercase() != code.to_lowercase() {
                 self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.captcha_wrong"))
                     .await;
-                return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_wrong")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.auth.captcha_wrong"
+                )));
             }
         }
         Ok(())
@@ -674,13 +706,19 @@ impl AuthService {
         redis: &mut redis::aio::ConnectionManager,
     ) -> Result<(SysUserModel, PasswordVerifyResult), ServiceError> {
         // 1. 用户查询（H-2：Repository 已过滤 del_flag='0'，已删除用户以 None 返回）
-        let user = match self.user_service.get_active_user_by_username(ctx.username).await? {
+        let user = match self
+            .user_service
+            .get_active_user_by_username(ctx.username)
+            .await?
+        {
             Some(u) => u,
             None => {
                 // L-1：用户不存在时不计数（避免无效用户名污染失败计数导致真实用户被锁）
                 self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"))
                     .await;
-                return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
+                return Err(ServiceError::unauthorized(&crate::tr!(
+                    "error.auth.login_failed"
+                )));
             }
         };
 
@@ -690,7 +728,9 @@ impl AuthService {
         if user.status.as_deref() == Some("1") {
             self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.account_disabled"))
                 .await;
-            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
+            return Err(ServiceError::unauthorized(&crate::tr!(
+                "error.auth.login_failed"
+            )));
         }
 
         // 3. 密码校验（支持 MD5→Argon2 自动升级）
@@ -709,7 +749,9 @@ impl AuthService {
             self.record_login_failure(ctx.username, redis).await?;
             self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"))
                 .await;
-            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
+            return Err(ServiceError::unauthorized(&crate::tr!(
+                "error.auth.login_failed"
+            )));
         }
 
         Ok((user, verify_result))
@@ -742,14 +784,26 @@ impl AuthService {
             })?;
         match hash_result {
             Ok(new_hash) => {
-                if let Err(e) = self.user_service.upgrade_password_hash(user.user_id, &new_hash).await {
-                    tracing::warn!("用户 {} 密码哈希升级失败（不阻断登录）: {}", user.user_id, e);
+                if let Err(e) = self
+                    .user_service
+                    .upgrade_password_hash(user.user_id, &new_hash)
+                    .await
+                {
+                    tracing::warn!(
+                        "用户 {} 密码哈希升级失败（不阻断登录）: {}",
+                        user.user_id,
+                        e
+                    );
                 } else {
                     tracing::info!("用户 {} 密码哈希已从 MD5 升级为 Argon2", user.user_id);
                 }
             }
             Err(e) => {
-                tracing::warn!("用户 {} 密码哈希升级失败（加密失败，不阻断登录）: {}", user.user_id, e);
+                tracing::warn!(
+                    "用户 {} 密码哈希升级失败（加密失败，不阻断登录）: {}",
+                    user.user_id,
+                    e
+                );
             }
         }
         Ok(())
@@ -812,9 +866,7 @@ impl AuthService {
             user_id: user.user_id,
             username: ctx.username.to_string(),
             ip: ctx.login_ip.to_string(),
-            login_time: chrono::Local::now()
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string(),
+            login_time: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             browser: ctx.browser.to_string(),
             os: ctx.os.to_string(),
             jti: claims.jti,
@@ -878,9 +930,7 @@ impl AuthService {
             .arg(online_ttl)
             .arg(&session_json);
         // (b) 若旧 token_hash 存在且与新不同，DEL 旧 online key
-        if need_del_old
-            && let Some(ref old_key) = old_online_key
-        {
+        if need_del_old && let Some(ref old_key) = old_online_key {
             pipe.cmd("DEL").arg(old_key);
         }
         // (c) SETEX user_sessions:{...} token_hash (TTL=online_ttl)
@@ -914,7 +964,11 @@ impl AuthService {
         }
 
         // 4. 更新 login_ip / login_date（失败不阻断登录）
-        if let Err(e) = self.user_service.update_login_info(user.user_id, ctx.login_ip).await {
+        if let Err(e) = self
+            .user_service
+            .update_login_info(user.user_id, ctx.login_ip)
+            .await
+        {
             tracing::warn!("更新用户登录信息失败（不阻断登录）: {}", e);
         }
 
@@ -1013,7 +1067,10 @@ impl AuthService {
         user.password = None;
 
         // 合并查询角色+权限（缓存命中时 0 次 DB，消除 4 次冗余 DB 查询）
-        let (roles, permissions) = self.menu_service.get_roles_and_permissions_by_user_id(user_id).await?;
+        let (roles, permissions) = self
+            .menu_service
+            .get_roles_and_permissions_by_user_id(user_id)
+            .await?;
 
         // 密码安全策略字段
         // pwd_chrtype：密码加密类型（当前固定为 "argon2"）
@@ -1073,7 +1130,9 @@ impl AuthService {
         //    管理员需显式在 sys_config 中将 registerUser 设为 true 才开放注册
         //    状态码：403 Forbidden（业务策略禁止，非系统错误）
         if !self.is_register_enabled().await {
-            return Err(ServiceError::forbidden(&crate::tr!("error.auth.register_disabled")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.auth.register_disabled"
+            )));
         }
 
         // 1. 验证码校验（GETDEL 原子化，防重放攻击）
@@ -1087,9 +1146,7 @@ impl AuthService {
             // R11：命令级超时（fail-closed 503）
             let stored_code: Option<String> = match tokio::time::timeout(
                 Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-                redis::cmd("GETDEL")
-                    .arg(&captcha_key)
-                    .query_async(redis),
+                redis::cmd("GETDEL").arg(&captcha_key).query_async(redis),
             )
             .await
             {
@@ -1113,22 +1170,29 @@ impl AuthService {
             let stored = match stored_code {
                 Some(c) => c,
                 None => {
-                    return Err(ServiceError::bad_request(
-                        &crate::tr!("error.auth.captcha_expired"),
-                    ))
+                    return Err(ServiceError::bad_request(&crate::tr!(
+                        "error.auth.captcha_expired"
+                    )));
                 }
             };
 
             if stored.to_lowercase() != dto.code.to_lowercase() {
-                return Err(ServiceError::bad_request(&crate::tr!("error.auth.captcha_wrong")));
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.auth.captcha_wrong"
+                )));
             }
         }
 
         // 2. 用户名查重
         //    状态码：400 Bad Request（客户端输入冲突，非系统错误）
-        let existing = self.user_service.get_user_by_username(&dto.username).await?;
+        let existing = self
+            .user_service
+            .get_user_by_username(&dto.username)
+            .await?;
         if existing.is_some() {
-            return Err(ServiceError::bad_request(&crate::tr!("error.auth.register_exists")));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.auth.register_exists"
+            )));
         }
 
         // 3. 创建用户（复用 user_service.add_user，昵称默认同用户名）
@@ -1180,7 +1244,9 @@ impl AuthService {
             ServiceError::internal(&crate::tr!("error.auth.password_verify_failed"))
         })?;
         if !verify_result.is_valid {
-            return Err(ServiceError::unauthorized(&crate::tr!("error.auth.login_failed")));
+            return Err(ServiceError::unauthorized(&crate::tr!(
+                "error.auth.login_failed"
+            )));
         }
 
         Ok(())
@@ -1252,12 +1318,7 @@ impl AuthService {
     ///
     /// 用于认证失败路径：日志写入失败不应掩盖原始的认证错误（如 401），
     /// 用户应看到 401 而非 500。同时避免同步 DB 写入阻塞响应（H-2）。
-    async fn write_login_log_best_effort(
-        &self,
-        ctx: &LoginContext<'_>,
-        status: &str,
-        msg: &str,
-    ) {
+    async fn write_login_log_best_effort(&self, ctx: &LoginContext<'_>, status: &str, msg: &str) {
         if let Err(e) = self.write_login_log(ctx, status, msg).await {
             tracing::warn!(
                 username = ctx.username,
@@ -1618,13 +1679,21 @@ mod tests {
     #[test]
     fn test_menu_to_router_external_link() {
         // 外链：is_frame=0
-        let menu = make_menu(4, 0, "C", "https://example.com", None, "0", "0", "0", "0", None);
+        let menu = make_menu(
+            4,
+            0,
+            "C",
+            "https://example.com",
+            None,
+            "0",
+            "0",
+            "0",
+            "0",
+            None,
+        );
         let router = menu_to_router(&menu, "");
 
-        assert_eq!(
-            router.meta.link,
-            Some("https://example.com".to_string())
-        ); // is_frame=0 → link
+        assert_eq!(router.meta.link, Some("https://example.com".to_string())); // is_frame=0 → link
         assert_eq!(router.redirect, None); // is_frame=0 不满足 is_frame==1
         // 外链 path 不加 / 前缀（path 是完整 URL）
         assert_eq!(router.path, "https://example.com");
@@ -1636,8 +1705,16 @@ mod tests {
         // 修复前：仅 type=="M" 加前缀，导致顶级 C 菜单 path="dashboard" 缺斜杠
         // Vue Router 抛出 "Route paths should start with a "/": "dashboard" should be "/dashboard""
         let menu = make_menu(
-            132, 0, "C", "dashboard",
-            Some("dashboard/index"), "1", "0", "0", "0", None,
+            132,
+            0,
+            "C",
+            "dashboard",
+            Some("dashboard/index"),
+            "1",
+            "0",
+            "0",
+            "0",
+            None,
         );
         let router = menu_to_router(&menu, "");
         assert_eq!(router.path, "/dashboard"); // 顶级 C 菜单也需 / 前缀

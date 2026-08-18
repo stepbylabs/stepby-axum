@@ -140,9 +140,7 @@ impl SysLogininforRepository {
 
     /// 清空登录日志（物理删除全部）
     pub async fn clean_all(&self) -> Result<DeleteResult, DbErr> {
-        SysLogininfor::delete_many()
-            .exec(self.base.db())
-            .await
+        SysLogininfor::delete_many().exec(self.base.db()).await
     }
 
     /// 统计最近 N 天每天的登录成功/失败次数

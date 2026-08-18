@@ -69,9 +69,7 @@ impl MigrationTrait for Migration {
         // 回滚：恢复 parent_id=1（系统管理目录）
         manager
             .get_connection()
-            .execute_unprepared(
-                "UPDATE sys_menu SET parent_id = 1 WHERE menu_id = 122",
-            )
+            .execute_unprepared("UPDATE sys_menu SET parent_id = 1 WHERE menu_id = 122")
             .await?;
 
         // 回滚 perms 前缀

@@ -1,21 +1,23 @@
 // axum-backend/src/db/pool.rs
 
-use std::time::Duration;
-use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use crate::config::DatabaseConfig;
 use crate::db::db_type::DbType;
+use sea_orm::{ConnectOptions, Database, DatabaseConnection};
+use std::time::Duration;
 
 /// 初始化数据库连接池
 /// sql_logging 从 LogConfig 传入（避免 DatabaseConfig 与 LogConfig 耦合）
 ///
 /// 安全：连接失败时详情写 tracing 日志，对外返回通用文案，
 /// 避免连接串（可能含密码）经 anyhow 传播到 stderr。
-pub async fn init_database(config: &DatabaseConfig, sql_logging: bool) -> anyhow::Result<DatabaseConnection> {
-    let db_type = DbType::from_url(&config.url)
-        .map_err(|e| {
-            tracing::error!("数据库 URL 解析失败: {}", e);
-            anyhow::anyhow!("{}", e)
-        })?;
+pub async fn init_database(
+    config: &DatabaseConfig,
+    sql_logging: bool,
+) -> anyhow::Result<DatabaseConnection> {
+    let db_type = DbType::from_url(&config.url).map_err(|e| {
+        tracing::error!("数据库 URL 解析失败: {}", e);
+        anyhow::anyhow!("{}", e)
+    })?;
     tracing::info!("数据库类型: {}", db_type.name());
 
     let mut opt = ConnectOptions::new(&config.url);

@@ -3,11 +3,13 @@
 //! 接口路径对齐前端调用规范：
 //! - GET    /monitor/cache                                    获取 Redis 缓存概览
 //! - GET    /monitor/cache/getNames                           获取缓存键名列表
+//! - GET    /monitor/cache/hotKeys                            获取热 key（大内存键）提示
+//! - GET    /monitor/cache/prefixStats                        获取缓存前缀内存统计
 //! - GET    /monitor/cache/getKeys/{cacheName}                获取指定缓存的键列表
 //! - GET    /monitor/cache/getValue/{cacheName}/{cacheKey}    获取缓存值
 //! - DELETE /monitor/cache/clearCacheName/{cacheName}         清除指定名称的缓存
 //! - DELETE /monitor/cache/clearCacheKey/{cacheKey}           清除指定键的缓存
-//! - DELETE /monitor/cache/clearCacheAll                      清除所有缓存
+//! - DELETE /monitor/cache/clearCacheAll                      清除所有缓存（已禁用）
 //!
 //! 直接操作 Redis，使用 redis::cmd 执行原生命令。
 
@@ -39,7 +41,9 @@ const ALLOWED_CACHE_PREFIXES: &[&str] = &[
 fn validate_cache_prefix(prefix: &str) -> Result<(), AppError> {
     // 拒绝包含通配符的输入
     if prefix.contains('*') || prefix.contains('?') || prefix.contains('[') {
-        return Err(AppError::bad_request(&crate::tr!("error.cache.name_wildcard_forbidden")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.cache.name_wildcard_forbidden"
+        )));
     }
     // 检查白名单
     if !ALLOWED_CACHE_PREFIXES.iter().any(|p| prefix.starts_with(p)) {
@@ -86,6 +90,30 @@ pub struct SysCache {
     pub cache_value: String,
     /// 备注
     pub remark: String,
+}
+
+/// 热 key 项（大内存键提示）
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HotKey {
+    /// 键名
+    pub key: String,
+    /// 键类型（string/list/hash/set/zset 等，经 TYPE 命令标注）
+    pub key_type: String,
+    /// 内存占用（字节），来自 MEMORY USAGE 真实数值
+    pub memory_bytes: i64,
+}
+
+/// 缓存前缀内存统计项
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CachePrefixStat {
+    /// 缓存前缀（冒号前含冒号）
+    pub cache_name: String,
+    /// 键数量
+    pub key_count: usize,
+    /// 内存占用（字节），逐键 MEMORY USAGE 累加
+    pub memory_bytes: i64,
 }
 
 // ==================== Handler 实现 ====================
@@ -182,6 +210,98 @@ pub async fn get_names(
             remark: crate::tr!("error.cache.key_count_remark", count = count).to_string(),
         })
         .collect();
+
+    Ok(AjaxResult::success(list))
+}
+
+/// GET /monitor/cache/hotKeys
+/// 获取热 key（大内存键）提示，按内存占用降序取 top N（最多 20）
+#[utoipa::path(
+    get,
+    path = "/monitor/cache/hotKeys",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<HotKey>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn get_hot_keys(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<Vec<HotKey>>, AppError> {
+    let mut redis = state.redis.clone();
+
+    let keys: Vec<String> = scan_keys(&mut redis, "*", 5000).await?;
+    let stats = compute_key_memory(&mut redis, &keys).await?;
+
+    // 过滤掉已过期/空内存（None）的键，按内存字节降序排序，取 top 20
+    let mut ranked: Vec<(String, i64)> = stats
+        .into_iter()
+        .filter_map(|(key, mem)| mem.map(|m| (key, m)))
+        .collect();
+    ranked.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
+    ranked.truncate(20);
+
+    let mut list = Vec::with_capacity(ranked.len());
+    for (key, memory_bytes) in ranked {
+        // 非 string 键用 TYPE 标注类型（MEMORY USAGE 对任意类型键均返回字节数）
+        let key_type: String = redis::cmd("TYPE")
+            .arg(&key)
+            .query_async(&mut redis)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis TYPE 查询失败: {}", e);
+                "unknown".to_string()
+            });
+        list.push(HotKey {
+            key,
+            key_type,
+            memory_bytes,
+        });
+    }
+
+    Ok(AjaxResult::success(list))
+}
+
+/// GET /monitor/cache/prefixStats
+/// 获取缓存前缀内存统计（按前缀分组，逐键 MEMORY USAGE 累加）
+#[utoipa::path(
+    get,
+    path = "/monitor/cache/prefixStats",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<CachePrefixStat>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-cache"
+)]
+pub async fn get_prefix_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<Vec<CachePrefixStat>>, AppError> {
+    let mut redis = state.redis.clone();
+
+    let keys: Vec<String> = scan_keys(&mut redis, "*", 5000).await?;
+    let stats = compute_key_memory(&mut redis, &keys).await?;
+
+    // 按前缀分组累加内存/计数
+    let mut groups: HashMap<String, (usize, i64)> = HashMap::new();
+    for (key, mem) in stats {
+        let prefix = key_prefix(&key);
+        let entry = groups.entry(prefix).or_insert((0, 0));
+        entry.0 += 1;
+        if let Some(m) = mem {
+            entry.1 += m;
+        }
+    }
+
+    let mut list: Vec<CachePrefixStat> = groups
+        .into_iter()
+        .map(|(cache_name, (key_count, memory_bytes))| CachePrefixStat {
+            cache_name,
+            key_count,
+            memory_bytes,
+        })
+        .collect();
+    // 按内存占用降序，供前端展示各前缀内存占比
+    list.sort_by_key(|a| std::cmp::Reverse(a.memory_bytes));
 
     Ok(AjaxResult::success(list))
 }
@@ -311,7 +431,10 @@ pub async fn clear_cache_name(
 
     // 批量删除
     let count = delete_keys(&mut redis, &keys).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.cleared", count = count)))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.cache.cleared",
+        count = count
+    )))
 }
 
 /// DELETE /monitor/cache/clearCacheKey/{cacheKey}
@@ -346,7 +469,9 @@ pub async fn clear_cache_key(
         })?;
 
     if deleted == 0 {
-        return Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.key_not_found")));
+        return Ok(AjaxResult::success_msg(&crate::tr!(
+            "msg.cache.key_not_found"
+        )));
     }
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.clear")))
 }
@@ -369,7 +494,10 @@ pub async fn clear_cache_key(
 pub async fn clear_cache_all(
     State(_state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<()>, AppError> {
-    Err(AppError::new(403, crate::tr!("error.cache.flushdb_disabled")))
+    Err(AppError::new(
+        403,
+        crate::tr!("error.cache.flushdb_disabled"),
+    ))
 }
 
 // ==================== 辅助函数 ====================
@@ -423,6 +551,39 @@ fn parse_command_stats(text: &str) -> Vec<CommandStat> {
     stats
 }
 
+/// 提取键前缀（冒号前含冒号；无冒号则整键）
+///
+/// 与 get_names 分组逻辑一致的独立封装，供 prefixStats 使用。
+fn key_prefix(key: &str) -> String {
+    if let Some(idx) = key.find(':') {
+        key[..=idx].to_string()
+    } else {
+        key.to_string()
+    }
+}
+
+/// 批量查询各键内存占用（MEMORY USAGE，字节），key 不存在时返回 None
+///
+/// 使用 pipeline 批量下发，减少 N 次 RTT。空列表直接返回空结果（避免空 pipeline 报错）。
+/// 单个键内存超限/删除等导致 MEMORY USAGE 返回空视为 None，不阻断整体统计。
+async fn compute_key_memory(
+    redis: &mut redis::aio::ConnectionManager,
+    keys: &[String],
+) -> Result<Vec<(String, Option<i64>)>, AppError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pipe = redis::pipe();
+    for k in keys {
+        pipe.cmd("MEMORY").arg("USAGE").arg(k);
+    }
+    let vals: Vec<Option<i64>> = pipe.query_async(redis).await.map_err(|e| {
+        tracing::error!("执行 Redis MEMORY USAGE 批量查询失败: {}", e);
+        AppError::internal(&crate::tr!("error.cache.memory_usage_failed"))
+    })?;
+    Ok(keys.iter().cloned().zip(vals).collect())
+}
+
 /// 批量删除 Redis 键，返回删除数量
 async fn delete_keys(
     redis: &mut redis::aio::ConnectionManager,
@@ -435,12 +596,9 @@ async fn delete_keys(
     for k in keys {
         cmd.arg(k);
     }
-    let count: i64 = cmd
-        .query_async(redis)
-        .await
-        .map_err(|e| {
-            tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
-            AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
-        })?;
+    let count: i64 = cmd.query_async(redis).await.map_err(|e| {
+        tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
+        AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
+    })?;
     Ok(count)
 }

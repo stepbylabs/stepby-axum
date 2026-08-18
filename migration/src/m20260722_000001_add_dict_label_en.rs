@@ -62,9 +62,7 @@ impl MigrationTrait for Migration {
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {
                 manager
                     .get_connection()
-                    .execute_unprepared(
-                        "ALTER TABLE sys_dict_data ADD COLUMN dict_label_en TEXT",
-                    )
+                    .execute_unprepared("ALTER TABLE sys_dict_data ADD COLUMN dict_label_en TEXT")
                     .await?;
             }
         }
@@ -85,16 +83,12 @@ impl MigrationTrait for Migration {
             | sea_orm_migration::sea_orm::DatabaseBackend::Postgres => {
                 manager
                     .get_connection()
-                    .execute_unprepared(
-                        "ALTER TABLE sys_dict_data DROP COLUMN dict_label_en",
-                    )
+                    .execute_unprepared("ALTER TABLE sys_dict_data DROP COLUMN dict_label_en")
                     .await?;
             }
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {
                 // SQLite 旧版本不支持 DROP COLUMN，跳过
-                eprintln!(
-                    "[migration][warn] m20260722_000001: SQLite 不支持 DROP COLUMN，跳过"
-                );
+                eprintln!("[migration][warn] m20260722_000001: SQLite 不支持 DROP COLUMN，跳过");
             }
         }
         Ok(())
