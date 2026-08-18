@@ -2,7 +2,7 @@
 //! 定时任务调度内核
 //!
 //! 设计要点：
-//! - 基于 `tokio-cron-scheduler` 独立实现，不复用任何参考项目的调度器
+//! - 基于 `tokio-cron-scheduler` 独立实现，不依赖外部框架的调度器
 //! - 调度内核与 Web 层完全解耦，仅依赖 `sea-orm` + `tokio` + `tokio-cron-scheduler` + `tracing`
 //! - 通过 `Arc<JobScheduler>` 注入 AppState，不使用全局 Lazy
 //! - 任务执行异常捕获写日志，不影响调度器和其他任务
@@ -1127,7 +1127,7 @@ async fn execute_inner(
 
 /// 注册内置任务函数
 ///
-/// 对齐 ref-salvo-admin 初始数据，invoke_target 完整字符串作为 key。
+/// 对齐内置初始数据，invoke_target 完整字符串作为 key。
 /// 同时注册日志保留期清理任务 cleanup_expired_logs（P0-R81-019）。
 ///
 /// 注意：cleanup_expired_logs 任务函数本身只执行清理逻辑，

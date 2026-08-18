@@ -3,7 +3,7 @@
 > **阶段：** 第三阶段「用户/角色/菜单 Service 层业务实现」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **参考优先级：** 接口契约对齐 ref-salvo-admin ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -14,11 +14,11 @@
 基于第二阶段已完成的数据库表结构、Entity 实体层、Repository 数据访问层，设计并实现用户、角色、菜单三大核心模块的 Service 业务逻辑层，完成以下交付：
 
 1. **Service 层完全独立**：不依赖 axum / tower / tower-http 任何 Web 框架类型
-2. **事务控制**：核心多表操作使用 SeaORM `TransactionTrait` 真事务（修正 ref-salvo-admin 的事务形同虚设缺陷）
+2. **事务控制**：核心多表操作使用 SeaORM `TransactionTrait` 真事务（修正旧实现事务形同虚设的缺陷）
 3. **参数校验**：使用 `garde` crate 对 DTO 进行结构化校验
-4. **业务规则**：补齐 ref-salvo-admin 缺失的查重、级联清理、超管保护等业务规则
-5. **密码安全**：复用已有 `utils::password` 模块（Argon2id 为主算法，"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 验证 fallback，不兼容 ref-salvo-admin 旧数据）
-6. **树形组装**：复用已有 `utils::tree::build_tree` 工具函数，规避 ref-salvo-admin 的 O(n²) 递归 clone 问题
+4. **业务规则**：补齐查重、级联清理、超管保护等业务规则
+5. **密码安全**：复用已有 `utils::password` 模块（Argon2id 为主算法，"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 验证 fallback，不兼容旧数据）
+6. **树形组装**：复用已有 `utils::tree::build_tree` 工具函数，规避 O(n²) 递归 clone 问题
 
 ### 1.2 模块清单
 
@@ -54,9 +54,9 @@ Entity（实体层，已完成）
 
 ### 2.2 事务控制策略
 
-**采用 SeaORM 原生 `TransactionTrait`**，修正 ref-salvo-admin 的三大事务缺陷：
+**采用 SeaORM 原生 `TransactionTrait`**，修正旧实现的三大事务缺陷：
 
-| ref-salvo-admin 缺陷 | 本项目修正方案 |
+| 旧实现缺陷 | 本项目修正方案 |
 |---------------------|--------------|
 | 事务内操作用 `GLOBAL_DB.clone()` 而非 `tx` | 所有事务内操作绑定到 `txn` 连接 |
 | `commit()` 后紧接着 `rollback()` | 使用 `db.transaction(|txn| async { ... }.into_future()).await` 自动提交/回滚 |
@@ -120,7 +120,7 @@ Service 方法入口处统一调用 `dto.validate()?` 进行校验，校验失�
 | 个人中心改密 | `encrypt_password(新明文)` 后入库 | `verify_password(旧明文, 旧密文)` 比对 |
 | 登录校验 | — | `verify_password(输入明文, 库中密文)` 比对 |
 
-> **盐值说明：** 本项目密码算法为 Argon2id（每用户独立随机盐），"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 哈希的验证 fallback（升级前已存在的用户密码）。初始数据密码均为 `admin123`。数据库密码与 ref-salvo-admin **不兼容**，新部署需使用 Argon2id 生成的密码。
+> **盐值说明：** 本项目密码算法为 Argon2id（每用户独立随机盐），"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 哈希的验证 fallback（升级前已存在的用户密码）。初始数据密码均为 `admin123`。数据库密码与旧数据**不兼容**，新部署需使用 Argon2id 生成的密码。
 
 ### 2.5 软删除策略
 
@@ -350,7 +350,7 @@ once_cell = "1"
 
 **业务规则：**
 - 软删除用户，保留数据
-- 级联清理 sys_user_role（修正 ref-salvo-admin 未清理的缺陷）
+- 级联清理 sys_user_role（修正旧实现未清理的缺陷）
 
 #### 3.2.6 reset_user_pwd（管理员重置密码）
 
@@ -498,7 +498,7 @@ once_cell = "1"
 
 **业务规则：**
 - role_key 唯一（权限标识不能重复）
-- 新增角色 data_scope 默认 "1"（修正 ref-salvo-admin 硬编码 "2"）
+- 新增角色 data_scope 默认 "1"（修正旧实现硬编码 "2"）
 
 #### 4.2.5 edit_role（修改角色）
 
@@ -533,8 +533,8 @@ once_cell = "1"
 
 **业务规则：**
 - 禁止删除超管角色
-- 禁止删除已分配用户的角色（修正 ref-salvo-admin 无校验的缺陷）
-- 级联清理 sys_role_menu 和 sys_user_role（修正 ref-salvo-admin 仅清理 role_menu 的缺陷）
+- 禁止删除已分配用户的角色（修正旧实现无校验的缺陷）
+- 级联清理 sys_role_menu 和 sys_user_role（修正旧实现仅清理 role_menu 的缺陷）
 
 #### 4.2.7 update_role_status（启停角色）
 
@@ -669,7 +669,7 @@ once_cell = "1"
 7. 返回新菜单 Model
 
 **业务规则：**
-- 权限标识 perms 唯一（修正 ref-salvo-admin 无校验的缺陷）
+- 权限标识 perms 唯一（修正旧实现无校验的缺陷）
 - 父菜单必须存在（parent_id=0 除外）
 - menu_type 决定字段填充规则
 
@@ -719,8 +719,8 @@ fn is_descendant(menu_id: i64, candidate_parent_id: i64) -> bool:
 5. 返回 `()`
 
 **业务规则：**
-- 禁止删除有子菜单的菜单（修正 ref-salvo-admin 无校验的缺陷）
-- 禁止删除已分配角色的菜单（修正 ref-salvo-admin 无校验的缺陷）
+- 禁止删除有子菜单的菜单（修正旧实现无校验的缺陷）
+- 禁止删除已分配角色的菜单（修正旧实现无校验的缺陷）
 - 软删除菜单，级联清理 sys_role_menu
 
 #### 5.2.7 get_menu_tree_by_user_id（查询用户菜单树）
@@ -834,9 +834,9 @@ src/service/dto/                # DTO 定义（可选独立目录）
 
 ---
 
-## 9. 与 ref-salvo-admin 的差异对照
+## 9. 关键实现差异对照
 
-| 维度 | ref-salvo-admin | 本项目 |
+| 维度 | 旧实现 | 本项目 |
 |------|----------------|--------|
 | ORM | rbatis + html_sql | SeaORM 原生 |
 | 事务 | `GLOBAL_DB.acquire_begin()`（形同虚设） | `TransactionTrait::transaction()`（真事务） |

@@ -275,6 +275,13 @@ error:
     smtp_not_initialized: SMTP client not initialized
     send_failed: Failed to send email
     send_timeout: Email send timed out (SMTP unresponsive)
+  log:
+    list_task_failed: Log file listing task failed
+    list_failed: Failed to read log file list
+    invalid_name: Invalid log file name
+    tail_task_failed: Log read task failed
+    file_not_found: The specified log file does not exist
+    tail_failed: Failed to read log file
   notice:
     not_found: Notice does not exist
     id_invalid: Invalid notice ID

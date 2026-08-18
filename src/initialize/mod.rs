@@ -10,7 +10,7 @@ use crate::service::IpLocationService;
 use crate::state::AppState;
 use crate::utils::ip_location::IpLocator;
 
-/// 初始化编排模块（对齐 ref-soybean-admin 的 server/initialize）
+/// 初始化编排模块
 pub struct AppInitializer;
 
 impl AppInitializer {

@@ -1,6 +1,6 @@
 // axum-backend/src/utils/tree.rs
 
-/// 通用树节点 trait（对齐 ref-soybean-admin 的 tree_util）
+/// 通用树节点 trait（通用树工具）
 ///
 /// R5-TYPE-15：新增关联类型 `Id`，避免将节点 ID 硬编码为 `i64`，
 /// 允许实现者按需选择 `i64`/`u64`/`String` 等 ID 类型。

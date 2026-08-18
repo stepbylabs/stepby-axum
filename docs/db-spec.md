@@ -3,7 +3,7 @@
 > **阶段：** 第二阶段「系统核心数据库表结构设计」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **参考优先级：** 接口契约对齐 ref-salvo-admin ＞ 架构规范参考 ref-soybean-admin ＞ 同栈细节参考 ref-axum-admin
+> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -36,7 +36,7 @@
 | 配套 | `sys_job` | 定时任务调度表 | 单主键 `job_id` | ✓ del_flag |
 | 配套 | `sys_job_log` | 定时任务调度日志表 | 单主键 `job_log_id` | ✗ |
 
-> **表名说明：** 登录日志表使用 `sys_logininfor`（非 `sys_login_log`），对齐 ref-salvo-admin SQL 脚本与本项目前端 `SysLogininfor` 类型定义。
+> **表名说明：** 登录日志表使用 `sys_logininfor`（非 `sys_login_log`），对齐本项目前端 `SysLogininfor` 类型定义与既有 SQL 脚本。
 
 ### 1.3 非目标（本阶段不实现）
 
@@ -53,12 +53,12 @@
 
 | 维度 | 规范 | 示例 | 说明 |
 |------|------|------|------|
-| 表名 | snake_case，`sys_` 前缀 | `sys_user` | 对齐 ref-salvo-admin / 原版设计 |
-| 列名 | snake_case | `user_id`、`create_time` | 对齐 ref-salvo-admin SQL |
+| 表名 | snake_case，`sys_` 前缀 | `sys_user` | 对齐既有设计 |
+| 列名 | snake_case | `user_id`、`create_time` | 对齐既有 SQL 脚本 |
 | 主键名 | `<表名缩写>_id` 或语义化 | `user_id`、`dict_code` | 对齐既有惯例 |
-| 索引名 | `idx_<表名>_<列缩写>` | `idx_sys_oper_log_bt` | 对齐 ref-salvo-admin |
+| 索引名 | `idx_<表名>_<列缩写>` | `idx_sys_oper_log_bt` | 对齐既有设计 |
 | 唯一索引 | `uk_<表名>_<列缩写>` | `uk_sys_user_name` | 本项目统一命名 |
-| 外键 | 不使用外键约束 | - | 对齐 ref-salvo-admin / ref-axum-admin，关联靠应用层维护 |
+| 外键 | 不使用外键约束 | - | 对齐既有设计，关联靠应用层维护 |
 
 > **前端字段对齐：** 前端 TypeScript 使用 camelCase（`userId`、`createTime`），后端数据库使用 snake_case（`user_id`、`create_time`），通过 SeaORM 实体的 `#[serde(rename_all = "camelCase")]` 自动转换。
 
@@ -78,7 +78,7 @@
 
 ### 2.3 软删除设计决策
 
-**决策：** 对齐 ref-salvo-admin，使用 `del_flag char(1) DEFAULT '0'` 字段实现软删除。
+**决策：** 使用 `del_flag char(1) DEFAULT '0'` 字段实现软删除。
 
 | 取值 | 含义 | 说明 |
 |------|------|------|
@@ -94,7 +94,7 @@
 - 删除层：`update set del_flag = '2'` 实现软删除
 - 不在 SeaORM 实体层做全局过滤（避免复杂度），由 Repository 层显式处理
 
-> **与 ref-axum-admin 的差异：** ref-axum-admin 使用 `deleted_at: Option<DateTime>` 实现软删除，本项目使用 `del_flag char(1)` 对齐 ref-salvo-admin，保证与参考后台框架数据库兼容。
+> **软删除实现说明：** 常见做法使用 `deleted_at: Option<DateTime>` 实现软删除，本项目改用 `del_flag char(1)` 字段，保持与既有数据库结构兼容。
 
 ### 2.4 时间自动维护设计决策
 
@@ -126,7 +126,7 @@ impl ActiveModelBehavior for ActiveModel {
 
 ### 2.5 审计字段设计
 
-所有业务表统一包含审计字段（对齐 ref-salvo-admin / 原版设计）：
+所有业务表统一包含审计字段（按既有设计）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -180,7 +180,7 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 **用途：** 存储系统用户账号信息
 **主键：** `user_id bigint AUTO_INCREMENT`
 **软删除：** `del_flag`
-**自增起始值：** 100（对齐 ref-salvo-admin，预留 1-99 为系统内置用户）
+**自增起始值：** 100（预留 1-99 为系统内置用户）
 
 | 序号 | 字段名 | 类型 | 可空 | 默认值 | 注释 |
 |------|--------|------|------|--------|------|
@@ -212,7 +212,7 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 **前端字段对齐说明：**
 - `userId` → `user_id`、`nickName` → `nick_name`、`phonenumber` 保持原样（前端也是全小写）
 - 前端 `SysUser` 的 `dept`（SysDept 对象）、`roles`（SysRole[]）、`roleIds`、`postIds` 为关联查询字段，不对应数据库列
-- 前端 `SysUser` 不显式包含 `del_flag`、`login_ip`、`login_date`、`user_type`，但后端保留以兼容 ref-salvo-admin 数据库
+- 前端 `SysUser` 不显式包含 `del_flag`、`login_ip`、`login_date`、`user_type`，但后端保留以兼容既有数据库结构
 
 ---
 
@@ -287,9 +287,9 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 - 主键：`PRIMARY KEY (menu_id)`
 - 普通索引：`idx_sys_menu_parent (parent_id)` —— 按父节点查询子菜单优化
 
-**与 ref-salvo-admin 的差异：**
-- **新增 `route_name` 字段**：本项目前端 `SysMenu` 类型含 `routeName` 字段，ref-salvo-admin SQL 未定义，本项目补充以对齐前端
-- **新增 `del_flag` 字段**：ref-salvo-admin 的 sys_menu 无软删除，本项目统一软删除设计
+**新增/调整字段：**
+- **新增 `route_name` 字段**：本项目前端 `SysMenu` 类型含 `routeName` 字段，本项目补充以对齐前端
+- **新增 `del_flag` 字段**：sys_menu 此前无软删除，本项目统一软删除设计
 
 **前端字段对齐说明：**
 - `menuId` → `menu_id`、`parentId` → `parent_id`、`orderNum` → `order_num`
@@ -357,8 +357,8 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 - 主键：`PRIMARY KEY (dict_id)`
 - 唯一索引：`uk_sys_dict_type (dict_type)` —— 字典类型唯一
 
-**与 ref-salvo-admin 的差异：**
-- **新增 `del_flag` 字段**：ref-salvo-admin 的 sys_dict_type 无软删除，本项目统一软删除设计
+**新增/调整字段：**
+- **新增 `del_flag` 字段**：sys_dict_type 此前无软删除，本项目统一软删除设计
 
 ---
 
@@ -391,9 +391,9 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 - 主键：`PRIMARY KEY (dict_code)`
 - 普通索引：`idx_sys_dict_data_type (dict_type)` —— 按字典类型查询数据项优化
 
-**与 ref-salvo-admin 的差异：**
+**新增/调整字段：**
 - **新增 `del_flag` 字段**：统一软删除设计
-- **`dict_sort` 类型对齐**：ref-salvo-admin SQL 为 `int(4)`，Rust 实体用 `i32`（ref-axum-admin 曾误用 `i8`，本项目修正）
+- **`dict_sort` 类型对齐**：SQL 为 `int(4)`，Rust 实体用 `i32`（曾误用 `i8`，本项目已修正）
 
 **前端字段对齐说明：**
 - `dictCode` → `dict_code`、`dictLabel` → `dict_label`、`dictValue` → `dict_value`
@@ -477,7 +477,7 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 ### 4.10 sys_job（定时任务调度表）
 
 **用途：** 存储定时任务调度配置
-**主键：** `job_id bigint AUTO_INCREMENT`（改为单主键，ref-salvo-admin 为复合主键）
+**主键：** `job_id bigint AUTO_INCREMENT`（单主键）
 **软删除：** `del_flag`
 **自增起始值：** 100
 
@@ -502,8 +502,8 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 - 主键：`PRIMARY KEY (job_id)`
 - 唯一索引：`uk_sys_job_name_group (job_name, job_group)` —— 任务名称在组内唯一
 
-**与 ref-salvo-admin 的差异（重要）：**
-- **主键改为单主键**：ref-salvo-admin 使用复合主键 `(job_id, job_name, job_group)`，本项目改为单主键 `job_id` + 唯一索引 `(job_name, job_group)`，原因：
+**主键设计（重要）：**
+- **主键改为单主键**：本项目使用单主键 `job_id` + 唯一索引 `(job_name, job_group)`，原因：
   1. 前端 `SysJob.jobId` 为 `number` 类型，期望单主键
   2. SeaORM 单主键更易维护（复合主键在 SeaORM 中需用元组类型，操作复杂）
   3. 唯一索引保证 `(job_name, job_group)` 唯一性
@@ -592,13 +592,13 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 
 ### 6.1 实体写法选择
 
-**决策：** 使用 `#[derive(DeriveEntityModel)]` 宏写法（SeaORM 官方推荐），不使用 ref-axum-admin 的 codegen 显式展开风格。
+**决策：** 使用 `#[derive(DeriveEntityModel)]` 宏写法（SeaORM 官方推荐）。
 
 **原因：**
 1. 代码更简洁，一行注解替代 5 段式定义
 2. SeaORM 官方文档主推写法
 3. 第一阶段 Cargo.toml 已启用 `macros` feature
-4. ref-soybean-admin（架构规范参考）使用宏写法
+4. 宏写法是主流生态的普遍做法
 
 ### 6.2 实体文件组织
 
@@ -742,7 +742,7 @@ INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, user_type, email, 
 VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', 'admin', NOW(), '管理员');
 ```
 
-> **密码说明：** `admin123` + `yebot_admin` 盐值后 MD5 = `bfb6b8dd9b268e241c82a257e235e550`。盐值已从 `"salvo_admin"` 改为 `"yebot_admin"`，不兼容 ref-salvo-admin 旧密码。
+> **密码说明：** `admin123` + `yebot_admin` 盐值后 MD5 = `bfb6b8dd9b268e241c82a257e235e550`。盐值已从 `"salvo_admin"` 改为 `"yebot_admin"`，不兼容旧密码。
 
 ### 7.3 admin 角色初始数据
 
@@ -768,11 +768,11 @@ VALUES (1, '超级管理员', 'admin', 1, '1', 1, 1, '0', '0', 'admin', NOW(), '
 
 ---
 
-## 8. 与 ref-salvo-admin 的差异说明
+## 8. 结构差异说明
 
 ### 8.1 结构性差异
 
-| 差异点 | ref-salvo-admin | 本项目 | 原因 |
+| 差异点 | 基础结构 | 本项目 | 原因 |
 |--------|-----------------|--------|------|
 | sys_menu.route_name | 无 | 有 | 对齐前端 `routeName` 字段 |
 | sys_menu.del_flag | 无 | 有 | 统一软删除设计 |
@@ -789,14 +789,14 @@ VALUES (1, '超级管理员', 'admin', 1, '1', 1, 1, '0', '0', 'admin', NOW(), '
 
 ### 8.2 字段类型差异
 
-| 字段 | ref-salvo-admin | 本项目 | 原因 |
+| 字段 | 基础结构 | 本项目 | 原因 |
 |------|-----------------|--------|------|
-| sys_dict_data.dict_sort | int(4) | int | Rust 用 `i32`（ref-axum-admin 误用 `i8`，本项目修正） |
+| sys_dict_data.dict_sort | int(4) | int | Rust 用 `i32`（曾误用 `i8`，本项目已修正） |
 | sys_oper_log.status | int(1) | int(1) | 保持一致，Rust 用 `i32`，handler 层做 string 转换 |
 
 ### 8.3 兼容性保证
 
-- **数据库兼容**：所有表名、核心字段名与 ref-salvo-admin 完全一致，可直接导入 ref-salvo-admin 的 `ry_20230223.sql` 数据
+- **数据库兼容**：所有表名、核心字段名保持既有结构，可直接导入既有 `ry_20230223.sql` 数据
 - **前端兼容**：所有前端字段通过 DTO 层 camelCase 转换对齐
 - **新增字段向后兼容**：`route_name`、`del_flag` 新增字段均有默认值，不影响现有数据
 
@@ -847,7 +847,7 @@ sys_job_log (依赖 sys_job 逻辑关联)
 **决策：** 本阶段实体内 `Relation` 枚举留空（`enum Relation {}`），不在实体层定义静态关联。
 
 **原因：**
-1. 对齐 ref-axum-admin 的做法（关联在服务层动态构建）
+1. 关联在服务层动态构建（与既有模块保持一致）
 2. 避免 SeaORM Relation 的复杂性
 3. 本阶段仅定义表结构，不实现业务查询
 
@@ -886,10 +886,10 @@ sys_user::Entity::find()
 
 ---
 
-## 附录 A：ref-salvo-admin SQL 文件位置
+## 附录 A：SQL 脚本位置
 
-- 主库脚本：`ref-salvo-admin/sql/ry_20230223.sql`（只读，禁止修改）
-- Quartz 表脚本：`ref-salvo-admin/sql/quartz.sql`（本阶段不使用）
+- 主库脚本：`sql/ry_20230223.sql`（只读，禁止修改）
+- Quartz 表脚本：`sql/quartz.sql`（本阶段不使用）
 
 ## 附录 B：本项目前端类型定义文件位置
 - 基础类型：`types/api/common.ts`（只读）

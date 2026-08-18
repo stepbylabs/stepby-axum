@@ -721,7 +721,7 @@ async fn create_sys_role_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
 
 // ========== 自增起始值设置 ==========
 
-/// 设置自增起始值（对齐 ref-salvo-admin，预留低 ID 为系统内置数据）
+/// 设置自增起始值（预留低 ID 为系统内置数据）
 ///
 /// SQLite 不支持 ALTER TABLE ... AUTO_INCREMENT 语法，
 /// 通过更新 sqlite_sequence 表实现相同效果。

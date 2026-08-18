@@ -414,7 +414,7 @@ pub enum Relation {}
 impl ActiveModelBehavior for ActiveModel {}
 ```
 
-> **注意：** `ipaddr` 字段保持全小写（对齐前端 `SysLogininfor.ipaddr` 与 ref-salvo-admin SQL），不要写成 `ip_addr` 或 `ipAddr`。
+> **注意：** `ipaddr` 字段保持全小写（对齐前端 `SysLogininfor.ipaddr` 与既有 SQL 脚本），不要写成 `ip_addr` 或 `ipAddr`。
 
 ---
 
