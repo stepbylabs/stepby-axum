@@ -1,6 +1,6 @@
 //! 在线用户监控 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /monitor/online/list            分页查询在线用户
 //! - DELETE /monitor/online/{tokenHash}     强退用户
 //!

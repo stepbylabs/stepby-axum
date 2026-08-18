@@ -1,6 +1,6 @@
 //! 登录日志 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /monitor/logininfor/list            分页查询登录日志
 //! - DELETE /monitor/logininfor/{infoIds}       批量删除登录日志
 //! - GET    /monitor/logininfor/unlock/{userName} 解锁用户（清除登录失败日志）

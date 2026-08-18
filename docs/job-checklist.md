@@ -14,8 +14,8 @@
 
 ## 表结构验收
 
-- [ ] `sys_job` 表字段与 ruoyi-vue3-ts 前端 `SysJob` 接口 100% 对齐
-- [ ] `sys_job_log` 表字段与 ruoyi-vue3-ts 前端 `SysJobLog` 接口 100% 对齐
+- [ ] `sys_job` 表字段与本项目前端 `SysJob` 接口 100% 对齐
+- [ ] `sys_job_log` 表字段与本项目前端 `SysJobLog` 接口 100% 对齐
 - [ ] `sys_job.status`：0=正常(运行) 1=暂停（与前端 el-switch 一致）
 - [ ] `sys_job_log.status`：0=成功 1=失败
 - [ ] `sys_job` 唯一索引 `uk_sys_job_name_group(job_name, job_group)` 存在

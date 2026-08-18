@@ -359,7 +359,7 @@ impl AuthService {
     /// 主函数仅负责参数校验、UA 解析、IP 归属地查询与流程编排。
     ///
     /// 安全说明：密码错误时返回"用户不存在/密码错误"，避免枚举攻击。
-    /// 登录业务错误统一返回 code=500（对齐 ruoyi-vue3-ts 前端约定）。
+    /// 登录业务错误统一返回 code=500（对齐前端调用约定）。
     pub async fn login(
         &self,
         dto: LoginDto,
@@ -1321,7 +1321,7 @@ fn parse_os(ua: &str) -> String {
 
 /// 将 SysMenuModel 转换为 RouterVo（递归转换子节点）
 ///
-/// 转换规则（对齐 ref-salvo-admin / ruoyi-vue3-ts）：
+/// 转换规则（对齐 ref-salvo-admin）：
 /// - name: 优先 route_name，其次 path；子路由添加父路径前缀确保全局唯一
 /// - path: 顶级目录（parent_id==0 且 type=="M"）加 `/` 前缀；其他原样
 /// - hidden: status == "1"（禁用状态隐藏）

@@ -1162,7 +1162,7 @@ async fn init_data(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // 1. 插入 admin 用户（密码: admin123 + yebot_admin 盐值 MD5）
     db.execute_unprepared(
         r#"INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, create_by, create_time, remark)
-           VALUES (1, 100, 'admin', '若依管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', 'admin', NOW(), '管理员')"#,
+           VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', 'admin', NOW(), '管理员')"#,
     ).await?;
 
     // 2. 插入 admin 角色
@@ -1284,7 +1284,7 @@ cargo test
 1. **全局规则合规性**：无 salvo/rbatis、单一 ORM、分层单向依赖
 2. **实体文件完整性**：11 个实体文件全部存在
 3. **迁移文件完整性**：建表 + 索引 + 初始数据
-4. **字段对齐**：100% 覆盖 ruoyi-vue3-ts 前端字段
+4. **字段对齐**：100% 覆盖本项目前端字段
 5. **编译通过**：主 crate + migration 子 crate 零 error
 6. **测试通过**：含时间自动维护的单元测试
 

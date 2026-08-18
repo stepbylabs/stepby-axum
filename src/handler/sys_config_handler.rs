@@ -1,6 +1,6 @@
 //! 参数配置 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /system/config/list                 分页查询参数配置
 //! - GET    /system/config/configKey/{configKey} 按 key 查询参数值（需 system:config:query 权限，P0-R81-003）
 //! - GET    /system/config/{configId}           查询参数配置详情

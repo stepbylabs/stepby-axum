@@ -630,7 +630,7 @@ impl Default for PageDomain {
 ```rust
 // axum-backend/src/common/constants.rs
 
-/// 业务状态码常量（对齐 ruoyi-vue3-ts 前端约定）
+/// 业务状态码常量（对齐本项目前端约定）
 pub mod constants {
     pub const SUCCESS: i32 = 200;
     pub const BAD_REQUEST: i32 = 400;
@@ -1701,7 +1701,7 @@ git commit -m "feat: 完成第一阶段工程脚手架与基础框架"
 - [x] 所有任务文件路径明确，均在 `axum-backend/` 内
 - [x] 每个任务包含完整代码块，无占位符
 - [x] 依赖方向单向：handler → service → repository → entity
-- [x] 响应结构体字段对齐 ruoyi-vue3-ts（code/msg/data/rows/total）
+- [x] 响应结构体字段对齐本项目前端（code/msg/data/rows/total）
 - [x] 错误处理 HTTP 状态码统一 200，业务错误由 body.code 表达
 - [x] 无 salvo/rbatis 依赖
 - [x] 版本号符合用户指定（Axum 0.8、SeaORM 1.1，全部升级到最新稳定版）

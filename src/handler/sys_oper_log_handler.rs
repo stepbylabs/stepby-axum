@@ -1,6 +1,6 @@
 //! 操作日志 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /monitor/operlog/list          分页查询操作日志
 //! - DELETE /monitor/operlog/{operIds}     批量删除操作日志
 //! - DELETE /monitor/operlog/clean         清空操作日志

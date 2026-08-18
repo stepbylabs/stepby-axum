@@ -1,6 +1,6 @@
 //! 代码生成模块 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /tool/gen/list            分页查询代码生成业务表
 //! - GET    /tool/gen/db/list         查询数据库表列表（导入用）
 //! - GET    /tool/gen/{tableId}       查询代码生成业务表详情

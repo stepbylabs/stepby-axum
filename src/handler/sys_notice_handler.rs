@@ -1,6 +1,6 @@
 //! 通知公告模块 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 ruoyi-vue3-ts 前端：
+//! 接口路径对齐前端调用规范：
 //! - GET    /system/notice/list            分页查询通知公告
 //! - GET    /system/notice/listTop         首页顶部公告列表（带未读数）
 //! - GET    /system/notice/{noticeId}      查询通知公告详情

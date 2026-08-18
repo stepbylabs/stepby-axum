@@ -3,13 +3,13 @@
 //!
 //! 背景：
 //! - 对比前 10 开源后台管理项目（vue-element-admin、vue-pure-admin、vben-admin、
-//!   naive-ui-admin、RuoYi-Vue、RuoYi-Vue-Pro、JeecgBoot、ant-design-pro、
+//!   naive-ui-admin、JeecgBoot、ant-design-pro、
 //!   Vuestic Admin、AdminLTE）后筛选出的缺失功能
 //! - 复用现有 API（/getInfo、/system/notice/listTop、/monitor/online/list、
 //!   /monitor/logininfor/list、收藏夹、最近访问），无新增后端接口
 //! - "个人工作台" 个性化 Dashboard（参考 vue-pure-admin、vben-admin 的 workbench）
 //! - "快捷键中心" 把 ? 弹窗升级为正式菜单页面（参考 Linear、Notion）
-//! - "帮助中心" 集中静态帮助文档（参考 RuoYi-Vue、JeecgBoot）
+//! - "帮助中心" 集中静态帮助文档（参考 JeecgBoot）
 //!
 //! menu_id 规划：
 //! - 127 个人工作台（M 类型目录，parent_id=0 顶级菜单，order_num=0 排在最前）
@@ -27,7 +27,7 @@
 //! 超管通过 *:*:* 通配符访问，无需显式关联。
 //!
 //! 设计说明：
-//! - 个人工作台采用 M+C 两层结构（而非顶级 C），以符合 RuoYi 路由约定：
+//! - 个人工作台采用 M+C 两层结构（而非顶级 C），以符合路由约定：
 //!   顶级菜单必须为 Layout 容器，实际页面作为子路由渲染。
 //!   若顶级 C 菜单直接使用 component=workbench/index，会导致路由无 Layout 包裹，
 //!   进而触发前端路由守卫 catch 块 → 自动登出（P0 级回归缺陷）。
