@@ -11,7 +11,7 @@ use futures::future::FutureExt;
 use redis::aio::ConnectionManager;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    Set, TransactionTrait,
+    QueryOrder, Set, TransactionTrait,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -251,6 +251,10 @@ impl SysMenuService {
         if let Some(ref status) = query.status {
             select = select.filter(MenuColumn::Status.eq(status));
         }
+        // 按 order_num 升序、menu_id 升序排序，确保菜单管理页顺序与下拉树一致
+        select = select
+            .order_by_asc(MenuColumn::OrderNum)
+            .order_by_asc(MenuColumn::MenuId);
         // 通过 Repository find_many 执行查询
         let list = self.menu_repo.base().find_many(select).await?;
         Ok(list)

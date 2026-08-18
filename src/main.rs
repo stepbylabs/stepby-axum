@@ -39,6 +39,13 @@ async fn async_main() -> anyhow::Result<()> {
     // 初始化编排：加载配置 -> 日志 -> DB -> Redis -> AppState
     let state = AppInitializer::run("config/config.toml").await?;
 
+    // 重置 WebSocket 连接计数（P4 修复）：
+    // 服务启动时所有历史 WS 连接必然已失效，但 Redis 中 ws_conn:{user_id} 计数可能残留陈旧值
+    // （DECR 的 spawn 任务在 runtime 关闭时未执行 / 进程异常退出 / 网络闪断未及时 DECR），
+    // 陈旧计数会让该用户后续所有 WS 握手返回 429，实时通知静默失效。
+    // 必须在路由构建前清理，使新连接从零计数开始。
+    axum_backend::handler::ws_handler::reset_ws_conn_counts(&state).await;
+
     // 提取监听地址（在 state 被路由消费前取出）
     let host = state.config.server.host.clone();
     let port = state.config.server.port;

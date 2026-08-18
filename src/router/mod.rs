@@ -134,9 +134,27 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     // 通过 embedded_assets::is_embedded_mode() 检测（基于 cfg(debug_assertions) + 环境变量覆盖）
     let embedded_mode = embedded_assets::is_embedded_mode();
 
+    // 组装 API 路由（公开 + 受保护），并设置显式 JSON 404 fallback。
+    // 该 fallback 会随 Router::nest 一起嵌套到各前缀下，使未匹配的 API 路径返回
+    // JSON 404（而非落入 SPA fallback 返回 HTML，避免前端把 HTML 当 JSON 解析报错）。
+    let api = public::public_routes(state.clone())
+        .merge(protected)
+        .fallback(api_not_found);
+
+    // 根路径挂载 API 路由，并在各前端 baseURL 前缀下重复挂载：
+    // 生产构建 baseURL=/prod-api、开发 /dev-api、预发 /stage-api（见 yebot-ui/.env.*）。
+    // 「后端嵌入前端」同源部署（embedded_assets）时浏览器直达后端，需命中带前缀的 API 路径。
+    //
+    // 为何用 Router::nest 而非 URI 改写中间件：
+    // axum 0.8 中 Router::layer 的中间件在「路由匹配之后」才执行，URI 改写无法影响已完成的
+    // 路径匹配（曾实现 middleware/api_prefix.rs，经验证无效已移除）。Router::nest 将前缀直接
+    // 注册进路由表，并在进入子路由器前用 StripPrefix 剥离前缀，因此 handler 与中间件看到的
+    // 请求路径与根路径完全一致（oper_log/rate_limit/权限匹配均不受影响）。
     let mut app = Router::new()
-        .merge(public::public_routes(state.clone()))
-        .merge(protected);
+        .merge(api.clone())
+        .nest("/prod-api", api.clone())
+        .nest("/dev-api", api.clone())
+        .nest("/stage-api", api.clone());
 
     // Swagger UI 与 OpenAPI JSON（免鉴权，供开发调试用）
     // 必须在 fallback 之前注册，否则会被 SPA fallback 吞掉
@@ -226,6 +244,21 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn(locale_middleware))
         // 安全响应头中间件（最外层，确保所有响应都带安全头）
         .layer(axum::middleware::from_fn(security_headers))
+}
+
+/// API 未匹配路径的统一 JSON 404 响应
+///
+/// 作为嵌套挂载的前缀路由（/prod-api、/dev-api、/stage-api）的 fallback：
+/// 未匹配的 API 请求返回 JSON 错误，而非落入 SPA fallback 返回 HTML，
+/// 避免前端响应拦截器把 HTML 当 JSON 解析而报错。
+async fn api_not_found() -> impl axum::response::IntoResponse {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({
+            "code": 404,
+            "msg": "请求的资源不存在"
+        })),
+    )
 }
 
 /// 构建 CORS 层（从配置读取 Origin 白名单）

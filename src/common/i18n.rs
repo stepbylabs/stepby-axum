@@ -159,7 +159,7 @@ pub const MODULE_TITLES: &[(&str, &str, &str)] = &[
     ("module.dept", "部门管理", "Dept Management"),
     ("module.post", "岗位管理", "Post Management"),
     ("module.config", "参数设置", "Parameter Settings"),
-    ("module.notice", "通知公告", "Notice"),
+    ("module.notice", "公告管理", "Announcements"),
     ("module.job", "定时任务", "Scheduled Tasks"),
     ("module.operlog", "操作日志", "Operation Log"),
     ("module.logininfor", "登录日志", "Login Log"),
