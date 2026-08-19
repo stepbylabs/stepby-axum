@@ -195,6 +195,7 @@ cargo tarpaulin --out Html
 | `middleware::rate_limit` | 3 | 限流中间件 |
 | `middleware::idempotency` | 4 | 幂等性中间件 |
 | `middleware::security_headers` | 4 | 安全响应头校验 |
+| `service::gen_table_service` | 3+ | 主键生成（单/复合/无主键）、外置模板渲染 `test_render_templates_externalized`（Tera 加载 `templates/gen/*.tera` 渲染 8 类产物） |
 | `scheduler::registry` | 3 | 调度器任务注册/移除 |
 | ts-rs export_bindings | 19 | 13 个 entity + 6 个 Vo 的 TypeScript 导出 |
 | 其他 | 2 | datetime 序列化等 |
@@ -1389,9 +1390,10 @@ tests/
 | vitest localStorage 环境不可用 | jsdom 在特定 Node.js 版本下 localStorage.getItem 不是函数，导致 `yebot.test.ts` 整个文件 49 个用例无法执行 | 新增 `src/test/setup.ts` setupFiles，提供 localStorage/sessionStorage mock 兜底 |
 
 **涉及文件**：
-- 前端：`file/index.vue`、`pdf.ts`、`websocket.ts`、`request.ts`、`download.ts`、`rateLimit/index.vue`、`logininfor/index.vue`、`dict/data.vue`、`i18n/locales/zh-CN.ts`、`i18n/locales/en-US.ts`、`i18n/locales/i18n.test.ts`、`vitest.config.ts`、`test/setup.ts`
+- 后端：`gen_table_service.rs`（`import_tables` 单事务批量导入 + `preview` 统一 `AjaxResult<PreviewCodeVo>` + `templates/gen/*.tera` 外置模板渲染）、`tool_gen_handler.rs`
+- 前端：`file/index.vue`、`pdf.ts`、`websocket.ts`、`request.ts`、`download.ts`、`rateLimit/index.vue`、`logininfor/index.vue`、`dict/data.vue`、`i18n/locales/zh-CN/`、`i18n/locales/en-US/`（模块化目录，聚合于各 `index.ts`）、`i18n/locales/i18n.test.ts`、`vitest.config.ts`、`test/setup.ts`
 
-**测试统计**：177 后端单元测试通过，0 失败；194 前端单元测试通过（+49，修复 localStorage 环境后解锁 yebot.test.ts），0 失败
+**测试统计**：363 后端单元测试通过（含模板渲染测试），0 失败；236 前端单元测试通过（含 i18n 41），0 失败
 
 ---
 

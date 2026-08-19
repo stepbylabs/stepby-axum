@@ -1,0 +1,23 @@
+//! {{ table.tableName }} 实体定义
+//!
+//! {{ table.tableComment | default(value="") }}
+
+use chrono::NaiveDateTime;
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use crate::common::datetime;
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[sea_orm(table_name = "{{ table.tableName }}")]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+{% for col in columns %}    {% if col.isPk == "1" %}#[sea_orm(primary_key)]
+    {% endif %}pub {{ col.javaField }}: {% if col.isPk != "1" and col.isRequired != "1" %}Option<{% endif %}{{ col.javaType }}{% if col.isPk != "1" and col.isRequired != "1" %}>{% endif %},
+{% endfor %}}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+
+#[async_trait::async_trait]
+impl ActiveModelBehavior for ActiveModel {}

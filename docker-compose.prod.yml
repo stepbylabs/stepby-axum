@@ -1,8 +1,9 @@
-# axum-backend 生产环境编排（R6-BE-ENG-19）
+# axum-backend 生产环境编排（后端独立 + 共享数据库）
 #
 # 用途：
-#   生产环境部署编排，包含后端应用服务 + PostgreSQL + Redis。
-#   使用生产 Dockerfile（多阶段构建、release 优化、非 root 用户）。
+#   后端独立部署编排：仅包含后端应用服务，数据库（postgres/redis）通过
+#   `include` 复用 deploy/docker-compose.db.yml（单一来源，避免重复定义漂移）。
+#   全栈部署（前端 + 后端 + 迁移）请使用 deploy/docker-compose.prod.yml。
 #
 # 部署方式：
 #   1. 准备环境变量（敏感字段从环境变量注入，不要写入文件）：
@@ -10,6 +11,7 @@
 #      export REDIS_URL=redis://redis:6379/0
 #      export JWT_SECRET=<至少 32 字符的强随机密钥>
 #      export JWT_EXPIRE_HOURS=6
+#      export POSTGRES_PASSWORD=<数据库密码>
 #
 #   2. 启动：
 #      docker compose -f docker-compose.prod.yml up -d
@@ -27,6 +29,12 @@
 # - 默认仅暴露 app 服务的 8080 端口到宿主机，数据库端口不对外暴露
 # - 数据库密码 / JWT 密钥必须从环境变量注入，本文件中仅为占位符
 # - 建议在反向代理（Nginx/Caddy）层配置 TLS 终止和 rate limiting
+#
+# 说明：postgres/redis 服务定义在 deploy/docker-compose.db.yml，
+#       与全栈编排共享同一份定义，保证版本与配置一致。
+
+include:
+  - ../deploy/docker-compose.db.yml
 
 services:
   app:
@@ -48,6 +56,22 @@ services:
       SERVER_PORT: 8080
       # 可选：跨域白名单（逗号分隔），未设置时由反向代理处理 CORS
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # 存储后端：local | s3
+      UPLOAD_BACKEND: ${UPLOAD_BACKEND:-local}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-}
+      # 配置加密主密钥（>=32 字符）
+      CONFIG_ENC_KEY: ${CONFIG_ENC_KEY:-}
+      # 邮件 SMTP 密码（可选）
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      # 权限 fail-closed（生产推荐 true）
+      PERMISSION_DENY_BY_DEFAULT: ${PERMISSION_DENY_BY_DEFAULT:-true}
+      # 监控指标鉴权 token
+      YEBOT_METRICS_TOKEN: ${YEBOT_METRICS_TOKEN:-}
       TZ: Asia/Shanghai
       RUST_LOG: info
     volumes:
@@ -76,64 +100,5 @@ services:
           cpus: '0.5'
           memory: 256M
 
-  postgres:
-    image: postgres:17-alpine
-    container_name: yebot-postgres-prod
-    restart: always
-    environment:
-      # 生产环境密码必须从环境变量注入
-      POSTGRES_USER: ${POSTGRES_USER:-yebot}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
-      POSTGRES_DB: ${POSTGRES_DB:-yebot}
-      TZ: Asia/Shanghai
-    # 生产环境数据库端口不对外暴露，仅通过 compose 网络访问
-    expose:
-      - "5432"
-    volumes:
-      - yebot_prod_pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yebot} -d ${POSTGRES_DB:-yebot}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - yebot_prod_net
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-
-  redis:
-    image: redis:7-alpine
-    container_name: yebot-redis-prod
-    restart: always
-    environment:
-      TZ: Asia/Shanghai
-    expose:
-      - "6379"
-    # 持久化：AOF + RDB 双重保障，防止重启丢失 token 黑名单/限流计数
-    command: redis-server --appendonly yes --save 900 1 --save 300 10 --maxmemory 256mb --maxmemory-policy allkeys-lru
-    volumes:
-      - yebot_prod_redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - yebot_prod_net
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
-
 volumes:
-  yebot_prod_pg_data:
-  yebot_prod_redis_data:
   yebot_prod_uploads:
-
-networks:
-  yebot_prod_net:
-    driver: bridge

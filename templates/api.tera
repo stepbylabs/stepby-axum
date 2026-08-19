@@ -1,0 +1,44 @@
+import request from '@/utils/request'
+
+// 查询{{ table.functionName }}列表
+export function list(query: any) {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/list',
+    method: 'get',
+    params: query
+  })
+}
+
+// 查询{{ table.functionName }}详细
+export function get{{ table.className }}(id: number) {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/' + id,
+    method: 'get'
+  })
+}
+
+// 新增{{ table.functionName }}
+export function add{{ table.className }}(data: any) {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}',
+    method: 'post',
+    data
+  })
+}
+
+// 修改{{ table.functionName }}
+export function update{{ table.className }}(data: any) {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}',
+    method: 'put',
+    data
+  })
+}
+
+// 删除{{ table.functionName }}
+export function del{{ table.className }}(id: number) {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/' + id,
+    method: 'delete'
+  })
+}

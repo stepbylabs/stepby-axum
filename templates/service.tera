@@ -1,0 +1,67 @@
+//! {{ table.tableName }} 模块 Service 层
+
+use sea_orm::{DatabaseConnection, Set};
+use serde::Deserialize;
+use garde::Validate;
+
+use crate::common::error::ServiceError;
+use crate::entity::{{ table.tableName }}::{ActiveModel, Model};
+use crate::repository::{{ table.tableName }}::{{ table.className }}Repository;
+
+pub struct {{ table.className }}Service {
+    repo: {{ table.className }}Repository,
+}
+
+impl {{ table.className }}Service {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { repo: {{ table.className }}Repository::new(db) }
+    }
+
+    pub async fn get_all(&self) -> Result<Vec<Model>, ServiceError> {
+        Ok(self.repo.find_all().await?)
+    }
+
+    pub async fn get_by_id(&self, id: i64) -> Result<Model, ServiceError> {
+        self.repo.find_by_id(id).await?.ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.record_not_found")))
+    }
+
+    pub async fn create(&self, dto: {{ table.className }}AddDto, operator: &str) -> Result<Model, ServiceError> {
+        let now = crate::common::datetime::now_naive();
+        let mut am = ActiveModel { ..Default::default() };
+{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
+{% endif %}{% endfor %}        am.create_by = Set(Some(operator.to_string()));
+        am.create_time = Set(Some(now));
+        Ok(self.repo.insert(am).await?)
+    }
+
+    pub async fn update(&self, dto: {{ table.className }}EditDto, operator: &str) -> Result<Model, ServiceError> {
+        let existing = self.get_by_id(dto.{{ pk_column.javaField }}).await?;
+        let now = crate::common::datetime::now_naive();
+        let mut am: ActiveModel = existing.into();
+{% for col in columns %}{% if col.isEdit == "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
+{% endif %}{% endfor %}        am.update_by = Set(Some(operator.to_string()));
+        am.update_time = Set(Some(now));
+        Ok(self.repo.update(am).await?)
+    }
+
+    pub async fn delete(&self, id: i64) -> Result<(), ServiceError> {
+        self.repo.delete_by_id(id).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct {{ table.className }}AddDto {
+{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}    #[garde(skip)]
+    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
+{% endif %}{% endfor %}}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct {{ table.className }}EditDto {
+    #[garde(skip)]
+    pub {{ pk_column.javaField }}: i64,
+{% for col in columns %}{% if col.isEdit == "1" %}    #[garde(skip)]
+    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
+{% endif %}{% endfor %}}

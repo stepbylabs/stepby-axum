@@ -302,6 +302,15 @@ pub struct CreateTableResultVo {
 /// 预览代码响应（文件名 → 代码内容）
 pub type PreviewCodeVo = HashMap<String, String>;
 
+/// 单张表导入的准备数据（校验 + 只读元数据已就绪，待事务内写入）
+///
+/// `build_column_ams` 为 move 闭包：以 owned 值捕获列信息/操作人/时间，
+/// 在表记录插入拿到 table_id 后再构造列 ActiveModel，避免生命周期冲突。
+struct ImportPrepared {
+    table_am: GenTableActiveModel,
+    build_column_ams: Box<dyn FnOnce(i64) -> Vec<GenTableColumnActiveModel> + Send>,
+}
+
 // ==================== 辅助函数 ====================
 
 /// 将数据库列类型映射为 Rust 类型
@@ -607,10 +616,10 @@ impl GenTableService {
         Ok(GenTableInfoVo { info, rows, tables })
     }
 
-    /// 导入表
+    /// 导入单张表（兼容单表入口，复用批量导入的原子事务）
     ///
     /// 流程：
-    /// 1. 根据 table_name 从数据库元数据读取表结构
+    /// 1. 根据 table_name 从数据库元数据读取表结构（查重校验 + 标识符校验）
     /// 2. 创建 gen_table 记录（默认配置）
     /// 3. 为每个字段创建 gen_table_column 记录（自动推断类型、显示类型等）
     pub async fn import_table(
@@ -618,6 +627,77 @@ impl GenTableService {
         table_name: &str,
         operator: &str,
     ) -> Result<GenTableModel, ServiceError> {
+        let mut models = self.import_tables(&[table_name], operator).await?;
+        // import_tables 保证成功时每张表均有记录；单表必有 1 条
+        Ok(models.pop().unwrap())
+    }
+
+    /// 批量导入表（单事务原子：任一张表失败则整体回滚）
+    ///
+    /// 相比逐个调用 `import_table`，本方法将所有表的查重校验、表结构读取、
+    /// 记录写入收敛到一个数据库事务内，保证"全部成功或全部失败"，
+    /// 避免部分导入造成的数据不一致（如残留无列的 gen_table 记录）。
+    ///
+    /// 实现要点：
+    /// 1. 准备阶段（`prepare_import`）：查重 + 标识符校验 + 只读元数据读取，不落库；
+    ///    任一张表校验失败则整体中止，避免部分写入后再回滚。
+    /// 2. 写入阶段：单个事务内逐表插入 gen_table + gen_table_column。
+    pub async fn import_tables(
+        &self,
+        table_names: &[&str],
+        operator: &str,
+    ) -> Result<Vec<GenTableModel>, ServiceError> {
+        // 1. 准备阶段：校验 + 查重 + 读取元数据（不落库）
+        let mut prepared: Vec<ImportPrepared> = Vec::with_capacity(table_names.len());
+        for table_name in table_names {
+            prepared.push(self.prepare_import(table_name, operator).await?);
+        }
+
+        // 2. 单事务写入：所有表 + 所有列（失败整体回滚）
+        let repo = self.repo.clone();
+        let models = self
+            .repo
+            .base()
+            .db()
+            .transaction::<_, Vec<GenTableModel>, ServiceError>(|txn| {
+                let repo = repo.clone();
+                async move {
+                    let mut inserted = Vec::with_capacity(prepared.len());
+                    for item in prepared {
+                        // 在事务内插入表，获取 table_id
+                        let table_model = repo.base().insert_conn(txn, item.table_am).await?;
+                        // 用 table_id 构造列并插入
+                        let column_ams = (item.build_column_ams)(table_model.table_id);
+                        if !column_ams.is_empty() {
+                            repo.insert_columns_conn(txn, column_ams).await?;
+                        }
+                        inserted.push(table_model);
+                    }
+                    Ok(inserted)
+                }
+                .boxed()
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!(error = %db_err, "import_tables 事务连接错误");
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
+
+        Ok(models)
+    }
+
+    /// 准备单张表导入数据（查重校验 + 只读元数据，不落库）
+    ///
+    /// 该函数在事务开启前执行，只做校验与元数据读取；
+    /// 返回的 [`ImportPrepared`] 携带可落库的 ActiveModel 与列构造闭包。
+    async fn prepare_import(
+        &self,
+        table_name: &str,
+        operator: &str,
+    ) -> Result<ImportPrepared, ServiceError> {
         // 1. 查重
         if self.repo.find_by_name(table_name).await?.is_some() {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -742,37 +822,11 @@ impl GenTableService {
                 })
                 .collect()
         };
-        // P1 修复: 表记录 + 列记录在同一事务中插入，列插入失败时回滚表记录，避免孤儿 gen_table
-        let repo = self.repo.clone();
-        let table_am_inner = table_am.clone();
-        let table_model = self
-            .repo
-            .base()
-            .db()
-            .transaction::<_, GenTableModel, ServiceError>(|txn| {
-                let repo = repo.clone();
-                async move {
-                    // 在事务内插入表，获取 table_id
-                    let table_model = repo.base().insert_conn(txn, table_am_inner).await?;
-                    // 用 table_id 构造列并插入
-                    let column_ams = build_column_ams(table_model.table_id);
-                    if !column_ams.is_empty() {
-                        repo.insert_columns_conn(txn, column_ams).await?;
-                    }
-                    Ok(table_model)
-                }
-                .boxed()
-            })
-            .await
-            .map_err(|e| match e {
-                sea_orm::TransactionError::Transaction(se) => se,
-                sea_orm::TransactionError::Connection(db_err) => {
-                    tracing::error!(error = %db_err, table_name = %table_name, "import_table 事务连接错误");
-                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
-                }
-            })?;
 
-        Ok(table_model)
+        Ok(ImportPrepared {
+            table_am,
+            build_column_ams: Box::new(build_column_ams),
+        })
     }
 
     /// 结构化建表（方案 A：消除 SQL 注入）
@@ -1549,377 +1603,28 @@ fn pascal_case_transform(s: &str) -> String {
         .collect()
 }
 
-// ==================== Tera 模板（内嵌） ====================
+// ==================== Tera 模板（外置 templates/ 目录） ====================
+
+// 模板内容外置于 `templates/` 目录，通过 include_str! 在编译期嵌入，
+// 避免 gen_table_service.rs 体积过大，同时便于独立编辑与版本管理。
+// 各模板与 gen_code / preview 流程一一对应，修改模板后无需改动服务代码。
 
 /// Entity 模板
-const ENTITY_TEMPLATE: &str = r#"//! {{ table.tableName }} 实体定义
-//!
-//! {{ table.tableComment | default(value="") }}
-
-use chrono::NaiveDateTime;
-use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
-
-use crate::common::datetime;
-
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "{{ table.tableName }}")]
-#[serde(rename_all = "camelCase")]
-pub struct Model {
-{% for col in columns %}    {% if col.isPk == "1" %}#[sea_orm(primary_key)]
-    {% endif %}pub {{ col.javaField }}: {% if col.isPk != "1" and col.isRequired != "1" %}Option<{% endif %}{{ col.javaType }}{% if col.isPk != "1" and col.isRequired != "1" %}>{% endif %},
-{% endfor %}}
-
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
-
-#[async_trait::async_trait]
-impl ActiveModelBehavior for ActiveModel {}
-"#;
-
+const ENTITY_TEMPLATE: &str = include_str!("../../templates/entity.tera");
 /// Repository 模板
-const REPOSITORY_TEMPLATE: &str = r#"//! {{ table.tableName }} 数据访问层
-
-use sea_orm::*;
-
-use crate::entity::{{ table.tableName }}::{ActiveModel, Column, Entity as {{ table.className }}, Model};
-use crate::repository::base::BaseRepository;
-
-#[derive(Clone)]
-pub struct {{ table.className }}Repository {
-    base: BaseRepository<{{ table.className }}>,
-}
-
-impl {{ table.className }}Repository {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { base: BaseRepository::new(db) }
-    }
-
-    pub fn base(&self) -> &BaseRepository<{{ table.className }}> { &self.base }
-
-    pub async fn find_by_id(&self, id: i64) -> Result<Option<Model>, DbErr> {
-        {{ table.className }}::find().filter(Column::{{ pk_column.javaField | pascal_case }}.eq(id)).one(self.base.db()).await
-    }
-
-    pub async fn find_all(&self) -> Result<Vec<Model>, DbErr> {
-        {{ table.className }}::find().all(self.base.db()).await
-    }
-
-    pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
-        self.base.insert(model).await
-    }
-
-    pub async fn update(&self, model: ActiveModel) -> Result<Model, DbErr> {
-        self.base.update(model).await
-    }
-
-    pub async fn delete_by_id(&self, id: i64) -> Result<DeleteResult, DbErr> {
-        {{ table.className }}::delete_many().filter(Column::{{ pk_column.javaField | pascal_case }}.eq(id)).exec(self.base.db()).await
-    }
-}
-"#;
-
+const REPOSITORY_TEMPLATE: &str = include_str!("../../templates/repository.tera");
 /// Service 模板
-const SERVICE_TEMPLATE: &str = r#"//! {{ table.tableName }} 模块 Service 层
-
-use sea_orm::{DatabaseConnection, Set};
-use serde::Deserialize;
-use garde::Validate;
-
-use crate::common::error::ServiceError;
-use crate::entity::{{ table.tableName }}::{ActiveModel, Model};
-use crate::repository::{{ table.tableName }}::{{ table.className }}Repository;
-
-pub struct {{ table.className }}Service {
-    repo: {{ table.className }}Repository,
-}
-
-impl {{ table.className }}Service {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { repo: {{ table.className }}Repository::new(db) }
-    }
-
-    pub async fn get_all(&self) -> Result<Vec<Model>, ServiceError> {
-        Ok(self.repo.find_all().await?)
-    }
-
-    pub async fn get_by_id(&self, id: i64) -> Result<Model, ServiceError> {
-        self.repo.find_by_id(id).await?.ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.record_not_found")))
-    }
-
-    pub async fn create(&self, dto: {{ table.className }}AddDto, operator: &str) -> Result<Model, ServiceError> {
-        let now = crate::common::datetime::now_naive();
-        let mut am = ActiveModel { ..Default::default() };
-{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
-{% endif %}{% endfor %}        am.create_by = Set(Some(operator.to_string()));
-        am.create_time = Set(Some(now));
-        Ok(self.repo.insert(am).await?)
-    }
-
-    pub async fn update(&self, dto: {{ table.className }}EditDto, operator: &str) -> Result<Model, ServiceError> {
-        let existing = self.get_by_id(dto.{{ pk_column.javaField }}).await?;
-        let now = crate::common::datetime::now_naive();
-        let mut am: ActiveModel = existing.into();
-{% for col in columns %}{% if col.isEdit == "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
-{% endif %}{% endfor %}        am.update_by = Set(Some(operator.to_string()));
-        am.update_time = Set(Some(now));
-        Ok(self.repo.update(am).await?)
-    }
-
-    pub async fn delete(&self, id: i64) -> Result<(), ServiceError> {
-        self.repo.delete_by_id(id).await?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize, Validate)]
-#[serde(rename_all = "camelCase")]
-pub struct {{ table.className }}AddDto {
-{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}    #[garde(skip)]
-    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
-{% endif %}{% endfor %}}
-
-#[derive(Debug, Deserialize, Validate)]
-#[serde(rename_all = "camelCase")]
-pub struct {{ table.className }}EditDto {
-    #[garde(skip)]
-    pub {{ pk_column.javaField }}: i64,
-{% for col in columns %}{% if col.isEdit == "1" %}    #[garde(skip)]
-    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
-{% endif %}{% endfor %}}
-"#;
-
+const SERVICE_TEMPLATE: &str = include_str!("../../templates/service.tera");
 /// Handler 模板
-const HANDLER_TEMPLATE: &str = r#"//! {{ table.tableName }} 模块 Handler
-
-use std::sync::Arc;
-use axum::extract::{Path, State};
-
-use crate::common::{AjaxResult, AppError, TableDataInfo, ValidatedJson};
-use crate::middleware::Operator;
-use crate::service::{{ table.tableName }}_service::{{ table.className }}Service;
-use crate::state::AppState;
-
-pub async fn list(State(state): State<Arc<AppState>>) -> Result<TableDataInfo<crate::entity::{{ table.tableName }}::Model>, AppError> {
-    let rows = state.{{ table.tableName | camel_case }}_service.get_all().await?;
-    Ok(TableDataInfo::new(rows.len() as u64, rows))
-}
-
-pub async fn get_info(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Result<AjaxResult<crate::entity::{{ table.tableName }}::Model>, AppError> {
-    let model = state.{{ table.tableName | camel_case }}_service.get_by_id(id).await?;
-    Ok(AjaxResult::success(model))
-}
-
-pub async fn add(State(state): State<Arc<AppState>>, operator: Operator, ValidatedJson(dto): ValidatedJson<crate::service::{{ table.tableName }}_service::{{ table.className }}AddDto>) -> Result<AjaxResult<()>, AppError> {
-    state.{{ table.tableName | camel_case }}_service.create(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
-}
-
-pub async fn edit(State(state): State<Arc<AppState>>, operator: Operator, ValidatedJson(dto): ValidatedJson<crate::service::{{ table.tableName }}_service::{{ table.className }}EditDto>) -> Result<AjaxResult<()>, AppError> {
-    state.{{ table.tableName | camel_case }}_service.update(dto, operator.username()).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
-}
-
-pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Result<AjaxResult<()>, AppError> {
-    state.{{ table.tableName | camel_case }}_service.delete(id).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
-}
-"#;
-
+const HANDLER_TEMPLATE: &str = include_str!("../../templates/handler.tera");
 /// Router 模板
-const ROUTER_TEMPLATE: &str = r#"//! {{ table.tableName }} 模块路由
-
-use std::sync::Arc;
-use axum::Router;
-use axum::routing::{get, post, put, delete};
-
-use crate::handler::{{ table.tableName }}_handler;
-use crate::state::AppState;
-
-pub fn {{ table.tableName | camel_case }}_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/{{ table.moduleName }}/{{ table.tableName }}/list", get({{ table.tableName }}_handler::list))
-        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", get({{ table.tableName }}_handler::get_info))
-        .route("/{{ table.moduleName }}/{{ table.tableName }}", post({{ table.tableName }}_handler::add))
-        .route("/{{ table.moduleName }}/{{ table.tableName }}", put({{ table.tableName }}_handler::edit))
-        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", delete({{ table.tableName }}_handler::remove))
-}
-"#;
-
-/// 前端 API TypeScript 模板
-const API_TS_TEMPLATE: &str = r#"import request from '@/utils/request'
-
-// 查询{{ table.functionName }}列表
-export function list(query: any) {
-  return request({
-    url: '/{{ table.moduleName }}/{{ table.tableName }}/list',
-    method: 'get',
-    params: query
-  })
-}
-
-// 查询{{ table.functionName }}详细
-export function get{{ table.className }}(id: number) {
-  return request({
-    url: '/{{ table.moduleName }}/{{ table.tableName }}/' + id,
-    method: 'get'
-  })
-}
-
-// 新增{{ table.functionName }}
-export function add{{ table.className }}(data: any) {
-  return request({
-    url: '/{{ table.moduleName }}/{{ table.tableName }}',
-    method: 'post',
-    data
-  })
-}
-
-// 修改{{ table.functionName }}
-export function update{{ table.className }}(data: any) {
-  return request({
-    url: '/{{ table.moduleName }}/{{ table.tableName }}',
-    method: 'put',
-    data
-  })
-}
-
-// 删除{{ table.functionName }}
-export function del{{ table.className }}(id: number) {
-  return request({
-    url: '/{{ table.moduleName }}/{{ table.tableName }}/' + id,
-    method: 'delete'
-  })
-}
-"#;
-
-/// 前端 Vue 列表页模板
-const INDEX_VUE_TEMPLATE: &str = r#"<template>
-  <div class="app-container">
-    <el-row :gutter="20" class="mb8">
-      <el-col :span="1.5">
-        <el-button type="primary" plain icon="Plus" class="transition-all duration-200 hover:scale-105" @click="handleAdd">新增</el-button>
-      </el-col>
-    </el-row>
-
-    <Transition name="fade" mode="out-in">
-      <el-table v-loading="loading" :data="list" :row-key="(row) => row.{{ pk_column.javaField | camel_case }}">
-{% for col in columns %}{% if col.isList == "1" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.javaField | camel_case }}" />
-{% endif %}{% endfor %}      <el-table-column label="操作" width="180">
-        <template #default="scope">
-          <el-button type="primary" link icon="Edit" class="transition-all duration-200 hover:scale-105" @click="handleEdit(scope.row)">修改</el-button>
-          <el-button type="danger" link icon="Delete" class="transition-all duration-200 hover:scale-105" @click="handleDelete(scope.row)">删除</el-button>
-        </template>
-      </el-table-column>
-      </el-table>
-    </Transition>
-
-    <!-- 新增/修改对话框 -->
-    <el-dialog :title="dialog.title" v-model="dialog.visible" width="min(90%, 600px)" destroy-on-close>
-      <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
-{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}        <el-form-item label="{{ col.columnComment }}" prop="{{ col.javaField | camel_case }}">
-          <el-input v-model="form.{{ col.javaField | camel_case }}" placeholder="请输入{{ col.columnComment }}" />
-        </el-form-item>
-{% endif %}{% endfor %}      </el-form>
-      <template #footer>
-        <el-button @click="dialog.visible = false">取消</el-button>
-        <el-button type="primary" :loading="submitLoading" @click="handleSubmit">确定</el-button>
-      </template>
-    </el-dialog>
-  </div>
-</template>
-
-<script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
-import { ElMessage, type FormInstance } from 'element-plus'
-import { list, add{{ table.className }}, update{{ table.className }}, del{{ table.className }} } from '@/api/{{ table.moduleName }}/{{ table.tableName }}'
-
-const loading = ref(false)
-const list = ref<any[]>([])
-const submitLoading = ref(false)
-const formRef = ref<FormInstance>()
-
-const dialog = reactive({
-  visible: false,
-  title: '',
-  isEdit: false
-})
-
-const form = reactive<Record<string, any>>({})
-const rules: Record<string, any> = {
-{% for col in columns %}{% if col.isRequired == "1" and (col.isInsert == "1" or col.isEdit == "1") %}  {{ col.javaField | camel_case }}: [{ required: true, message: '请输入{{ col.columnComment }}', trigger: 'blur' }],
-{% endif %}{% endfor %}}
-
-async function getList() {
-  loading.value = true
-  try {
-    const res = await list({})
-    list.value = res.rows || res.data || []
-  } finally {
-    loading.value = false
-  }
-}
-
-function resetForm() {
-{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}  form.{{ col.javaField | camel_case }} = undefined
-{% endif %}{% endfor %}  formRef.value?.resetFields()
-}
-
-function handleAdd() {
-  resetForm()
-  dialog.title = '新增{{ table.functionName }}'
-  dialog.isEdit = false
-  dialog.visible = true
-}
-
-function handleEdit(row: any) {
-  resetForm()
-  Object.assign(form, row)
-  dialog.title = '修改{{ table.functionName }}'
-  dialog.isEdit = true
-  dialog.visible = true
-}
-
-async function handleSubmit() {
-  await formRef.value?.validate()
-  submitLoading.value = true
-  try {
-    if (dialog.isEdit) {
-      await update{{ table.className }}(form)
-      ElMessage.success('修改成功')
-    } else {
-      await add{{ table.className }}(form)
-      ElMessage.success('新增成功')
-    }
-    dialog.visible = false
-    getList()
-  } finally {
-    submitLoading.value = false
-  }
-}
-
-async function handleDelete(row: any) {
-  await del{{ table.className }}(row.{{ pk_column.javaField | camel_case }})
-  ElMessage.success('删除成功')
-  getList()
-}
-
-onMounted(() => {
-  getList()
-})
-</script>
-"#;
-
+const ROUTER_TEMPLATE: &str = include_str!("../../templates/router.tera");
+/// 前端 API 模板（TypeScript）
+const API_TS_TEMPLATE: &str = include_str!("../../templates/api.tera");
+/// 前端页面模板（Vue）
+const INDEX_VUE_TEMPLATE: &str = include_str!("../../templates/index.tera");
 /// SQL 迁移脚本模板
-const MIGRATION_SQL_TEMPLATE: &str = r#"-- {{ table.functionName }} 表结构（仅供参考，实际表结构由数据库元数据导入）
--- 表名: {{ table.tableName }}
--- 描述: {{ table.tableComment | default(value="") }}
-
-CREATE TABLE IF NOT EXISTS {{ table.tableName }} (
-{% for col in columns %}    {{ col.columnName }} {{ col.columnType }}{% if col.isRequired == "1" %} NOT NULL{% endif %}{% if col.isPk == "1" %} PRIMARY KEY{% endif %}{% if col.isIncrement == "1" %} AUTOINCREMENT{% endif %}{% if not loop.last %},{% endif %}
-
-{% endfor %});
-"#;
+const MIGRATION_SQL_TEMPLATE: &str = include_str!("../../templates/migration.tera");
 
 #[cfg(test)]
 mod gen_table_sql_tests {
@@ -1998,5 +1703,126 @@ mod gen_table_sql_tests {
             "无主键不应生成 PRIMARY KEY，实际 SQL: {}",
             sql
         );
+    }
+}
+
+// ==================== 模板渲染测试（验证外置 templates/ 目录） ====================
+
+/// 验证模板外置后 `include_str!` 嵌入的模板仍能正常渲染完整流程，
+/// 保证 gen_code / preview 链路（8 个模板 → ZIP/预览）不受重构影响。
+#[cfg(test)]
+mod gen_table_template_tests {
+    use super::*;
+
+    fn mk_table() -> GenTableModel {
+        GenTableModel {
+            table_id: 1,
+            table_name: "sys_user".to_string(),
+            table_comment: Some("用户表".to_string()),
+            sub_table_name: None,
+            sub_table_fk_name: None,
+            class_name: Some("SysUser".to_string()),
+            tpl_category: Some("crud".to_string()),
+            tpl_web_type: Some("element-plus".to_string()),
+            package_name: Some("yebot".to_string()),
+            module_name: Some("system".to_string()),
+            business_name: Some("user".to_string()),
+            function_name: Some("用户管理".to_string()),
+            function_author: Some("yebot".to_string()),
+            gen_type: Some("0".to_string()),
+            gen_path: Some("/".to_string()),
+            options: None,
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+            remark: None,
+        }
+    }
+
+    fn mk_column() -> GenTableColumnModel {
+        GenTableColumnModel {
+            column_id: 1,
+            table_id: 1,
+            column_name: Some("user_id".to_string()),
+            column_comment: Some("用户ID".to_string()),
+            column_type: Some("BIGINT".to_string()),
+            java_type: Some("i64".to_string()),
+            java_field: Some("user_id".to_string()),
+            is_pk: Some("1".to_string()),
+            is_increment: Some("1".to_string()),
+            is_required: Some("1".to_string()),
+            is_insert: Some("0".to_string()),
+            is_edit: Some("0".to_string()),
+            is_list: Some("0".to_string()),
+            is_query: Some("0".to_string()),
+            query_type: Some("EQ".to_string()),
+            html_type: Some("input".to_string()),
+            dict_type: Some(String::new()),
+            sort: Some(1),
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+        }
+    }
+
+    #[test]
+    fn test_render_templates_externalized() {
+        let table = mk_table();
+        let columns = vec![mk_column()];
+        let files = GenTableService::render_templates(&table, &columns).unwrap();
+
+        // 8 个模板均应渲染成功
+        assert_eq!(files.len(), 8, "应渲染 8 个文件，实际 {}", files.len());
+
+        // entity.rs：包含实体结构体与表名注解
+        let entity = files
+            .get("src/entity/sys_user.rs")
+            .expect("缺少 entity.rs 文件");
+        assert!(entity.contains("pub struct Model"), "entity 缺少结构体");
+        assert!(entity.contains("#[sea_orm(table_name = \"sys_user\")]"));
+
+        // repository.rs：包含 Repository 与类名
+        let repo = files
+            .get("src/repository/sys_user.rs")
+            .expect("缺少 repository.rs 文件");
+        assert!(repo.contains("SysUserRepository"));
+
+        // service.rs：包含 Service 结构
+        let service = files
+            .get("src/service/sys_user_service.rs")
+            .expect("缺少 service.rs 文件");
+        assert!(service.contains("SysUserService"));
+
+        // handler.rs：包含 Handler 函数
+        let handler = files
+            .get("src/handler/sys_user_handler.rs")
+            .expect("缺少 handler.rs 文件");
+        assert!(handler.contains("pub async fn list"));
+
+        // router.rs：包含路由注册
+        let router = files
+            .get("src/router/sys_user_router.rs")
+            .expect("缺少 router.rs 文件");
+        assert!(router.contains("Router"));
+
+        // api.ts：包含 request 引用
+        let api = files
+            .get("src/api/system/sys_user.ts")
+            .expect("缺少 api.ts 文件");
+        assert!(api.contains("from '@/utils/request'"));
+
+        // index.vue：包含 template 标签
+        let vue = files
+            .get("src/views/system/sys_user/index.vue")
+            .expect("缺少 index.vue 文件");
+        assert!(vue.contains("<template>"));
+
+        // migration.sql：包含 CREATE TABLE
+        let sql = files
+            .get("migration/sys_user.sql")
+            .expect("缺少 migration.sql 文件");
+        assert!(sql.to_uppercase().contains("CREATE TABLE"));
     }
 }
