@@ -432,6 +432,19 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         // ===== 服务器监控 =====
         ("GET", "/monitor/server") => Some("monitor:server:list"),
 
+        // ===== 可观测性监控（慢请求 / 错误聚合 / Redis 指标）=====
+        // 慢请求面板（列表 + 聚合 + 清空）共用一个查看权限，运算符粒度与面板按钮一致。
+        // 注意：MatchedPath 模板中连字符 "-" 原样保留（axum 不做 shell 转义）。
+        ("GET", "/monitor/slow-sql/list") => Some("monitor:slowSql:list"),
+        ("GET", "/monitor/slow-sql/stats") => Some("monitor:slowSql:list"),
+        ("DELETE", "/monitor/slow-sql/clear") => Some("monitor:slowSql:list"),
+        // 错误聚合面板（列表 + 统计 + 清空）共用查看权限
+        ("GET", "/monitor/error-log/list") => Some("monitor:errorLog:list"),
+        ("GET", "/monitor/error-log/stats") => Some("monitor:errorLog:list"),
+        ("DELETE", "/monitor/error-log/clear") => Some("monitor:errorLog:list"),
+        // Redis 运行指标：与缓存监控同权（monitor:cache:list），复用缓存菜单入口
+        ("GET", "/monitor/redis/stats") => Some("monitor:cache:list"),
+
         // ===== 实时日志监控 =====
         // 菜单 menu_id=135 (实时日志) 在系统监控目录下，perms=monitor:log:list
         ("GET", "/monitor/log/files") => Some("monitor:log:list"),
@@ -452,6 +465,11 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/tool/gen/synchDb/{tableName}") => Some("tool:gen:edit"),
         // P1-6 修复：batchGenCode 批量生成代码未映射权限，任意登录用户可调用
         ("GET", "/tool/gen/batchGenCode") => Some("tool:gen:code"),
+
+        // ===== 在线 HTTP 调试器 =====
+        // 权限对齐 sys_menu 迁移种子（tool/http-debugger/index 页面，perms=tool:httpDebug:list，
+        // 见 m20260819_000002_http_debugger_menu）。执行与查看同权，避免开发/运维自行加按钮。
+        ("POST", "/tool/http-debug/execute") => Some("tool:httpDebug:list"),
 
         // ===== 文件管理 =====
         ("GET", "/system/file/list") => Some("system:file:list"),
@@ -502,6 +520,40 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/system/msg/log/retry/{logIds}") => Some("system:msg:log:retry"),
         ("POST", "/system/msg/log/retryPending/{batch}") => Some("system:msg:log:retry"),
         ("POST", "/system/msg/log/markPending/{logIds}") => Some("system:msg:log:retry"),
+
+        // ===== 第三方登录 / OAuth2 / OIDC =====
+        // 权限对齐 sys_menu 迁移种子（145 目录 / 146 页面 perms=system:oauth:provider:list，
+        // 按钮 3261-3264 分别为 add/edit/remove/toggle，见 m20260819_000001_oauth_module）
+        ("GET", "/system/oauth/provider/list") => Some("system:oauth:provider:list"),
+        // 详情查询与列表查看同权（无独立 query 按钮，页面以 list 为准）
+        ("GET", "/system/oauth/provider/{providerId}") => Some("system:oauth:provider:list"),
+        ("POST", "/system/oauth/provider") => Some("system:oauth:provider:add"),
+        ("PUT", "/system/oauth/provider") => Some("system:oauth:provider:edit"),
+        ("DELETE", "/system/oauth/provider/{providerIds}") => Some("system:oauth:provider:remove"),
+        ("PUT", "/system/oauth/provider/{providerId}/status") => {
+            Some("system:oauth:provider:toggle")
+        }
+
+        // ===== 报表中心 + 定时订阅推送 =====
+        // 权限标识与 sys_menu 迁移种子（m20260819_000003_report_module）对齐：
+        // 报表定义 system:report:list/query/add/edit/remove/status/preview
+        // 报表订阅 system:report:sub:list/query/add/edit/remove/status/run
+        ("GET", "/system/report/list") => Some("system:report:list"),
+        // 详情与列表查看同权（无独立 query 按钮，页面以 list 为准）
+        ("GET", "/system/report/{reportId}") => Some("system:report:list"),
+        ("POST", "/system/report") => Some("system:report:add"),
+        ("PUT", "/system/report") => Some("system:report:edit"),
+        ("DELETE", "/system/report/{reportId}") => Some("system:report:remove"),
+        ("PUT", "/system/report/{reportId}/status") => Some("system:report:status"),
+        ("POST", "/system/report/{reportId}/preview") => Some("system:report:preview"),
+        ("GET", "/system/report/sub/list") => Some("system:report:sub:list"),
+        // 订阅详情与列表同权
+        ("GET", "/system/report/sub/{subId}") => Some("system:report:sub:list"),
+        ("POST", "/system/report/sub") => Some("system:report:sub:add"),
+        ("PUT", "/system/report/sub") => Some("system:report:sub:edit"),
+        ("DELETE", "/system/report/sub/{subId}") => Some("system:report:sub:remove"),
+        ("PUT", "/system/report/sub/{subId}/status") => Some("system:report:sub:status"),
+        ("POST", "/system/report/sub/{subId}/run") => Some("system:report:sub:run"),
 
         // ===== 审计日志大屏 =====
         // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐
@@ -564,6 +616,9 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("PUT", "/system/user/profile/updatePwd")
             | ("POST", "/system/user/profile/avatar")
             | ("GET", "/system/user/deptTree")
+        // ===== 个人消息偏好 / 免打扰（仅本人操作，仅需登录）=====
+            | ("GET", "/system/profile/pref")
+            | ("PUT", "/system/profile/pref")
         // ===== 下拉树 / 选项（仅登录）=====
             | ("GET", "/system/role/deptTree/{roleId}")
             | ("GET", "/system/menu/treeselect")
@@ -579,6 +634,10 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("POST", "/system/notice/markRead")
             | ("POST", "/system/notice/markReadAll")
             | ("POST", "/system/notice/markAllUnreadRead")
+        // ===== 第三方登录绑定（自助管理本人绑定，仅登录）=====
+            | ("GET", "/oauth2/my-bindings")
+            | ("POST", "/oauth2/bind")
+            | ("DELETE", "/oauth2/unbind")
     )
 }
 
@@ -716,6 +775,42 @@ mod tests {
             get_required_perm("GET", "/monitor/operlog/list"),
             Some("monitor:operlog:list")
         );
+    }
+
+    // ===== 可观测性监控权限映射 =====
+    #[test]
+    fn test_observability_perms() {
+        assert_eq!(
+            get_required_perm("GET", "/monitor/slow-sql/list"),
+            Some("monitor:slowSql:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/monitor/slow-sql/stats"),
+            Some("monitor:slowSql:list")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/monitor/slow-sql/clear"),
+            Some("monitor:slowSql:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/monitor/error-log/list"),
+            Some("monitor:errorLog:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/monitor/error-log/stats"),
+            Some("monitor:errorLog:list")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/monitor/error-log/clear"),
+            Some("monitor:errorLog:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/monitor/redis/stats"),
+            Some("monitor:cache:list")
+        );
+        // 方法混淆不应命中（GET clear、DELETE list 均不匹配）
+        assert_eq!(get_required_perm("GET", "/monitor/slow-sql/clear"), None);
+        assert_eq!(get_required_perm("DELETE", "/monitor/error-log/list"), None);
     }
 
     // ===== 安全关键路由权限映射 =====
@@ -872,6 +967,14 @@ mod tests {
         assert!(is_login_only_path("POST", "/system/user/totp/verify"));
         assert!(is_login_only_path("GET", "/system/user/totp/status"));
         assert!(is_login_only_path("POST", "/system/user/totp/disable"));
+    }
+
+    #[test]
+    fn test_pref_routes_login_only() {
+        // 个人消息偏好 / 免打扰为本人自助操作，仅需登录
+        assert!(is_login_only_path("GET", "/system/profile/pref"));
+        assert!(is_login_only_path("PUT", "/system/profile/pref"));
+        assert!(!is_login_only_path("POST", "/system/profile/pref"));
     }
 
     #[test]
@@ -1059,6 +1162,14 @@ mod tests {
             // monitor_log_router
             ("GET", "/monitor/log/files"),
             ("GET", "/monitor/log/tail"),
+            // monitor_observability_router
+            ("GET", "/monitor/slow-sql/list"),
+            ("GET", "/monitor/slow-sql/stats"),
+            ("DELETE", "/monitor/slow-sql/clear"),
+            ("GET", "/monitor/error-log/list"),
+            ("GET", "/monitor/error-log/stats"),
+            ("DELETE", "/monitor/error-log/clear"),
+            ("GET", "/monitor/redis/stats"),
             // sys_backup_router
             ("GET", "/system/backup/list"),
             ("GET", "/system/backup/{backupId}"),
@@ -1112,6 +1223,21 @@ mod tests {
             ("POST", "/system/msg/log/retry/{logIds}"),
             ("POST", "/system/msg/log/retryPending/{batch}"),
             ("POST", "/system/msg/log/markPending/{logIds}"),
+            // sys_report_router
+            ("GET", "/system/report/list"),
+            ("GET", "/system/report/{reportId}"),
+            ("POST", "/system/report"),
+            ("PUT", "/system/report"),
+            ("DELETE", "/system/report/{reportId}"),
+            ("PUT", "/system/report/{reportId}/status"),
+            ("POST", "/system/report/{reportId}/preview"),
+            ("GET", "/system/report/sub/list"),
+            ("GET", "/system/report/sub/{subId}"),
+            ("POST", "/system/report/sub"),
+            ("PUT", "/system/report/sub"),
+            ("DELETE", "/system/report/sub/{subId}"),
+            ("PUT", "/system/report/sub/{subId}/status"),
+            ("POST", "/system/report/sub/{subId}/run"),
         ];
 
         let mut uncovered: Vec<(&str, &str)> = Vec::new();

@@ -2,13 +2,15 @@
 
 use crate::config::Settings;
 use crate::handler::ws_handler::WsMessage;
+use crate::observability::Observability;
 use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::scheduler::JobScheduler;
 use crate::service::{
     AuthService, GenTableService, IpLocationService, MailerService, SysBackupService,
-    SysConfigService, SysDeptService, SysDictService, SysJobService, SysLogininforService,
-    SysMenuService, SysMsgService, SysNoticeService, SysOperLogService, SysPostService,
-    SysRateLimitService, SysRoleService, SysTaskService, SysUserService,
+    SysConfigService, SysDeptService, SysDictService, SysHttpDebugService, SysJobService,
+    SysLogininforService, SysMenuService, SysMsgService, SysNoticeService, SysOauthService,
+    SysOperLogService, SysPostService, SysRateLimitService, SysReportService, SysRoleService,
+    SysTaskService, SysUserPrefService, SysUserService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -29,6 +31,8 @@ pub struct AppState {
     pub config: Arc<Settings>,
     /// 用户模块 Service
     pub user_service: SysUserService,
+    /// 用户消息偏好 / 免打扰 Service
+    pub user_pref_service: SysUserPrefService,
     /// 角色模块 Service
     pub role_service: SysRoleService,
     /// 菜单模块 Service
@@ -61,6 +65,12 @@ pub struct AppState {
     pub task_service: SysTaskService,
     /// 消息渠道与模板管理 Service
     pub msg_service: SysMsgService,
+    /// 第三方登录（OAuth2/OIDC/SSO）Service
+    pub oauth_service: SysOauthService,
+    /// 在线 HTTP 调试器 Service（服务端转发 + SSRF 防护）
+    pub http_debug_service: SysHttpDebugService,
+    /// 报表中心 + 定时订阅推送 Service
+    pub report_service: SysReportService,
     /// 邮件发送 Service（未启用时降级为 no-op）
     pub mailer_service: MailerService,
     /// 定时任务调度器
@@ -84,6 +94,11 @@ pub struct AppState {
     /// 只投递到本实例内的目标用户连接（与限流/调度器一致的单实例语义），跨实例扩展
     /// 可后续改为 Redis Pub/Sub。
     pub ws_users: RwLock<HashMap<i64, Vec<mpsc::UnboundedSender<WsMessage>>>>,
+    /// 应用可观测性句柄（慢请求缓冲 / 错误聚合总线 / Prometheus 指标）
+    ///
+    /// 由 `observability::Observability::global()` 提供（进程级全局共享），
+    /// 与 `/monitor/slow-sql/*`、`/monitor/error-log/*` handler 及 `/metrics` 输出共享同一底层实例。
+    pub observability: Arc<Observability>,
 }
 
 impl AppState {
@@ -186,8 +201,19 @@ impl AppState {
             config.clone(), // P0-4：TOTP secret 加解密需要 config_enc_key
         );
 
+        // 全局可观测性句柄：按配置文件注入慢请求阈值 / 缓冲容量（进程内生效）
+        // 注意：Observability 为进程级全局单例，这里仅做一次配置；重复初始化以最后一次为准。
+        let observability = Observability::global();
+        observability
+            .slow
+            .configure(config.monitor.slow_request_ms, config.monitor.slow_capacity);
+        observability
+            .error_log
+            .set_capacity(config.monitor.error_capacity);
+
         Self {
-            user_service,
+            user_service: user_service.clone(),
+            user_pref_service: SysUserPrefService::new(db.clone()),
             role_service,
             menu_service,
             notice_service: SysNoticeService::new(db.clone()),
@@ -204,6 +230,9 @@ impl AppState {
             backup_service: SysBackupService::new(db.clone(), config.clone()),
             task_service: SysTaskService::new(db.clone()),
             msg_service: SysMsgService::new(db.clone(), config.clone()),
+            oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
+            http_debug_service: SysHttpDebugService::default(),
+            report_service: SysReportService::new(db.clone(), config.clone()),
             mailer_service: MailerService::new(config.clone()),
             job_scheduler,
             db,
@@ -214,6 +243,7 @@ impl AppState {
             storage,
             ws_broadcast,
             ws_users: RwLock::new(HashMap::new()),
+            observability,
         }
     }
 }

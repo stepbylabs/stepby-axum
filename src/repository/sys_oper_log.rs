@@ -42,6 +42,9 @@ impl SysOperLogRepository {
     }
 
     /// 多条件分页查询（title 模糊，business_type 精确，oper_name 模糊，status 精确，时间范围，按 oper_time 倒序）
+    ///
+    /// `last_id`：游标（keyset 深分页）参数。携带时按 `oper_id < last_id` 过滤 + `oper_id DESC`
+    /// 排序，适用于深翻页（避免 OFFSET 线性扫描）；为 `None` 时沿用 `offset/limit` 分页路径。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -53,6 +56,7 @@ impl SysOperLogRepository {
         status: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        last_id: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOperLog::find();
         if let Some(t) = title {
@@ -85,13 +89,24 @@ impl SysOperLogRepository {
             query = query.filter(Column::OperTime.lte(end));
         }
 
+        // 过滤条件已齐备，统计总数（与分页模式无关，过滤后计数保持一致）
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_desc(Column::OperTime)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+
+        // P1：keyset 深分页（PK < last_id）+ PK DESC；否则走原 OFFSET 深翻页路径
+        let rows = if last_id.is_some() {
+            crate::common::page::apply_keyset_filter(query, last_id, |id| Column::OperId.lt(id))
+                .order_by_desc(Column::OperId)
+                .limit(limit)
+                .all(self.base.db())
+                .await?
+        } else {
+            query
+                .order_by_desc(Column::OperTime)
+                .offset(offset)
+                .limit(limit)
+                .all(self.base.db())
+                .await?
+        };
         Ok((rows, total))
     }
 
@@ -355,5 +370,180 @@ impl SysOperLogRepository {
             .all(self.base.db())
             .await?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::datetime;
+    use chrono::{Duration, NaiveDateTime};
+
+    /// 构造一条指定 id/标题/状态/时间的操作日志（其余列取默认）。
+    fn log_row(id: i64, title: &str, status: &str, t: NaiveDateTime) -> ActiveModel {
+        ActiveModel {
+            oper_id: Set(id),
+            title: Set(Some(title.to_string())),
+            status: Set(Some(status.to_string())),
+            oper_time: Set(Some(t)),
+            ..Default::default()
+        }
+    }
+
+    async fn insert_7(db: &DatabaseConnection) -> SysOperLogRepository {
+        let repo = SysOperLogRepository::new(db.clone());
+        let base = datetime::now_naive();
+        // 按 id 递增同时 oper_time 递增插入（使 OFFSET(按 time) 与 keyset(按 id) 顺序对齐）
+        for i in 1..=7 {
+            let title = if i % 2 == 0 { "更新" } else { "查询" };
+            let status = if i == 6 { "1" } else { "0" };
+            let t = base + Duration::minutes(i);
+            let am = log_row(i, title, status, t);
+            repo.insert(am).await.unwrap();
+        }
+        repo
+    }
+
+    #[tokio::test]
+    async fn keyset_returns_strictly_decreasing_pages_no_duplicates() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        let size = 3u64;
+
+        let (p0, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(p0.len(), 3);
+        let mut cursor = p0.last().unwrap().oper_id;
+
+        let (p1, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(p1.len(), 3);
+        // 严格递减
+        assert!(
+            p0.iter()
+                .zip(p0.iter().skip(1))
+                .all(|(a, b)| a.oper_id > b.oper_id)
+        );
+        assert!(
+            p1.iter()
+                .zip(p1.iter().skip(1))
+                .all(|(a, b)| a.oper_id > b.oper_id)
+        );
+        // 无重复
+        let mut all: Vec<i64> = p0.iter().chain(&p1).map(|m| m.oper_id).collect();
+        all.sort_unstable();
+        assert_eq!(
+            all.len(),
+            all.iter().collect::<std::collections::HashSet<_>>().len()
+        );
+
+        cursor = p1.last().unwrap().oper_id;
+        let (p2, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(p2.len(), 1);
+        let (p3, _) = repo
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(p2[0].oper_id),
+            )
+            .await
+            .unwrap();
+        assert!(p3.is_empty(), "游标耗尽后应返回空页");
+    }
+
+    #[tokio::test]
+    async fn keyset_works_alongside_existing_filters() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        // 过滤 status='0'（i==6 被排除），keyset 仍应只命中过滤后的行
+        let (first, total) = repo
+            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(total, 6);
+        let cursor = first.last().unwrap().oper_id;
+        let (next, _) = repo
+            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, Some(cursor))
+            .await
+            .unwrap();
+        assert!(next.iter().all(|m| m.status.as_deref() == Some("0")));
+    }
+
+    #[tokio::test]
+    async fn keyset_equals_offset_for_small_datasets() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        let size = 3u64;
+
+        // OFFSET 分页
+        let (o0, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let (o1, _) = repo
+            .find_page_filtered(3, size, None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let (o2, _) = repo
+            .find_page_filtered(6, size, None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // keyset 连续翻页
+        let (k0, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let (k1, _) = repo
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(k0.last().unwrap().oper_id),
+            )
+            .await
+            .unwrap();
+        let (k2, _) = repo
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(k1.last().unwrap().oper_id),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(o0, k0, "keyset 首页与 OFFSET 首页一致");
+        assert_eq!(o1, k1, "keyset 第二页与 OFFSET 第二页一致");
+        assert_eq!(o2, k2, "keyset 最后一页与 OFFSET 末页一致");
     }
 }

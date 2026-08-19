@@ -1,5 +1,7 @@
 // axum-backend/src/common/page.rs
 
+use sea_orm::sea_query::SimpleExpr;
+use sea_orm::{EntityTrait, QueryFilter, Select};
 use serde::Deserialize;
 use utoipa::ToSchema;
 
@@ -114,5 +116,132 @@ impl Default for PageDomain {
             order_by_column: None,
             is_asc: None,
         }
+    }
+}
+
+/// 游标（keyset / 深分页）参数。
+///
+/// 深分页用于避免高基数列表（操作日志 / 登录日志 / 用户）在深 OFFSET 下的线性扫描。
+/// 当携带 `last_id`（上一页最后一条主键）时，服务端改为 `PK < last_id` 过滤 +
+/// `PK DESC` 排序 + `LIMIT page_size`，返回严格递减、无重复的下一页；不携带 `last_id`
+/// 时完全走原有 `page_num/page_size` OFFSET 路径，与前端既有契约保持向后兼容。
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PageCursor {
+    /// 上一页最后一条主键。存在即启用 keyset 深分页。
+    pub last_id: Option<i64>,
+
+    /// 每页条数（默认 10，上限 [`MAX_PAGE_SIZE`]）。
+    #[serde(default = "default_page_size")]
+    pub page_size: u64,
+}
+
+impl Default for PageCursor {
+    fn default() -> Self {
+        Self {
+            last_id: None,
+            page_size: default_page_size(),
+        }
+    }
+}
+
+impl PageCursor {
+    /// 是否启用 keyset 深分页（携带 last_id）。
+    pub fn enabled(&self) -> bool {
+        self.last_id.is_some()
+    }
+
+    /// 每页条数（已封顶）。
+    pub fn limit(&self) -> u64 {
+        self.page_size.min(MAX_PAGE_SIZE)
+    }
+}
+
+/// 将 keyset（游标）过滤应用到列表查询的共享辅助。
+///
+/// 当 `last_id` 存在时对 `query` 追加参数化条件 `PK < last_id`；值为绑定参数，
+/// 绝不被拼接为裸 SQL。`pk_lt` 由调用方提供，把主键值映射为 `SimpleExpr`
+/// （如 `|id: i64| Column::OperId.lt(id)`）。`last_id` 为 `None` 时原样返回
+/// `query`，由调用方已有的 offset/order 路径继续生效，完全向后兼容。
+///
+/// 排序（`PK DESC`）与 `LIMIT` 仍由调用方按各自主键列设置，本函数仅统一「过滤」这一
+/// 桩，使跨实体（oper_log / logininfor / user）复用同一套 keyset 语义。
+pub fn apply_keyset_filter<E>(
+    mut query: Select<E>,
+    last_id: Option<i64>,
+    pk_lt: impl FnOnce(i64) -> SimpleExpr,
+) -> Select<E>
+where
+    E: EntityTrait,
+{
+    if let Some(id) = last_id {
+        query = query.filter(pk_lt(id));
+    }
+    query
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_cursor_defaults_are_sane() {
+        let c = PageCursor::default();
+        assert_eq!(c.page_size, default_page_size());
+        assert!(!c.enabled());
+        assert_eq!(c.limit(), default_page_size());
+    }
+
+    #[test]
+    fn page_cursor_clamps_page_size() {
+        let c = PageCursor {
+            page_size: MAX_PAGE_SIZE + 1,
+            ..PageCursor::default()
+        };
+        assert_eq!(c.limit(), MAX_PAGE_SIZE);
+
+        let c = PageCursor {
+            last_id: Some(42),
+            ..PageCursor::default()
+        };
+        assert!(c.enabled());
+        assert_eq!(c.limit(), default_page_size());
+    }
+
+    #[test]
+    fn keyset_filter_appends_pk_lt_condition() {
+        use sea_orm::ColumnTrait;
+        use sea_orm::DatabaseBackend;
+        use sea_orm::QueryTrait;
+
+        // 用 sys_user 实体构造一个真实 Select，验证 pk_lt 被参数化追加（而非拼裸 SQL）。
+        let base = crate::entity::sys_user::Entity::find();
+        let q = apply_keyset_filter(base, Some(100i64), |id: i64| {
+            crate::entity::sys_user::Column::UserId.lt(id)
+        });
+        // pk < last_id 被应用（value 由 Sqlite 后端绑定为参数，而非内联明文）
+        let debug_sql = format!("{:?}", q.build(DatabaseBackend::Sqlite));
+        assert!(
+            debug_sql.contains("user_id") && debug_sql.contains('<'),
+            "keyset 过滤应作用于 user_id 且使用占位符，实际 SQL: {debug_sql}"
+        );
+    }
+
+    #[test]
+    fn keyset_filter_passes_through_when_no_last_id() {
+        use sea_orm::ColumnTrait;
+        use sea_orm::DatabaseBackend;
+        use sea_orm::QueryTrait;
+
+        let base = crate::entity::sys_user::Entity::find();
+        let q = apply_keyset_filter(base, None, |id: i64| {
+            crate::entity::sys_user::Column::UserId.lt(id)
+        });
+        // 未携带 last_id 时不应附加任何 WHERE 条件
+        let debug_sql = format!("{:?}", q.build(DatabaseBackend::Sqlite));
+        assert!(
+            !debug_sql.to_ascii_lowercase().contains("where"),
+            "无 last_id 时不应追加 keyset 过滤，实际 SQL: {debug_sql}"
+        );
     }
 }

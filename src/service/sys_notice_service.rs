@@ -15,8 +15,11 @@ use utoipa::{IntoParams, ToSchema};
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_notice::{ActiveModel as SysNoticeActiveModel, Model as SysNoticeModel};
+use crate::entity::sys_user_pref::Model as PrefModel;
 use crate::repository::sys_notice::SysNoticeRepository;
 use crate::repository::sys_notice_read::{NoticeReadUserVo, SysNoticeReadRepository};
+use crate::repository::sys_user_pref::SysUserPrefRepository;
+use crate::service::sys_user_pref_service::{PrefChannel, allows_delivery, now_hm_str};
 use crate::state::AppState;
 use crate::utils::parse_id_list;
 use crate::utils::sanitize_html;
@@ -159,13 +162,15 @@ pub struct NoticeMarkReadAllDto {
 pub struct SysNoticeService {
     notice_repo: SysNoticeRepository,
     read_repo: SysNoticeReadRepository,
+    pref_repo: SysUserPrefRepository,
 }
 
 impl SysNoticeService {
     pub fn new(db: DatabaseConnection) -> Self {
         Self {
             notice_repo: SysNoticeRepository::new(db.clone()),
-            read_repo: SysNoticeReadRepository::new(db),
+            read_repo: SysNoticeReadRepository::new(db.clone()),
+            pref_repo: SysUserPrefRepository::new(db),
         }
     }
 
@@ -273,8 +278,8 @@ impl SysNoticeService {
             return;
         }
 
-        // 查询所有启用状态用户的邮箱
-        let emails = match self.find_active_user_emails(state).await {
+        // 查询所有启用状态用户邮箱，并按个人偏好/免打扰过滤（email_notify 且 announce_notify，且不在免打扰窗口）
+        let pairs = match self.find_active_user_email_pairs(state).await {
             Ok(list) if !list.is_empty() => list,
             Ok(_) => {
                 tracing::info!("无启用状态用户邮箱，跳过邮件发送: {}", title);
@@ -285,6 +290,36 @@ impl SysNoticeService {
                 return;
             }
         };
+
+        // 批量读取用户偏好，过滤出允许接收公告邮件的用户
+        let user_ids: Vec<i64> = pairs.iter().map(|(uid, _)| *uid).collect();
+        let prefs = match self.pref_repo.find_by_user_ids(&user_ids).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("查询用户消息偏好失败，采用全部投递: {}", e);
+                return;
+            }
+        };
+        let mut pref_map = std::collections::HashMap::<i64, &PrefModel>::new();
+        for p in &prefs {
+            pref_map.insert(p.user_id, p);
+        }
+        let now_hm = now_hm_str();
+        let emails: Vec<String> = pairs
+            .into_iter()
+            .filter(|(uid, _)| {
+                match pref_map.get(uid) {
+                    // 无偏好记录 → 默认允许（与缺省行为一致）
+                    None => true,
+                    Some(p) => allows_delivery(PrefChannel::Email, p, &now_hm),
+                }
+            })
+            .map(|(_, email)| email)
+            .collect();
+        if emails.is_empty() {
+            tracing::info!("无满足消息偏好/免打扰的用户，跳过邮件发送: {}", title);
+            return;
+        }
 
         // 构建邮件正文
         let body = format!(
@@ -322,11 +357,13 @@ impl SysNoticeService {
         }
     }
 
-    /// 查询所有启用状态用户的邮箱（status='0' 且 email 非空）
-    async fn find_active_user_emails(
+    /// 查询所有启用状态用户的 (user_id, email)（status='0' 且 email 非空）
+    ///
+    /// 返回二元组以支持按用户偏好/免打扰过滤（enforcement）。
+    async fn find_active_user_email_pairs(
         &self,
         _state: &AppState,
-    ) -> Result<Vec<String>, ServiceError> {
+    ) -> Result<Vec<(i64, String)>, ServiceError> {
         use crate::entity::sys_user::{self, Column as UserColumn};
         use sea_orm::*;
         let db = self.db();
@@ -340,11 +377,14 @@ impl SysNoticeService {
             .map_err(|_| {
                 ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed"))
             })?;
-        let emails: Vec<String> = users
+        let pairs: Vec<(i64, String)> = users
             .into_iter()
-            .filter_map(|u| u.email.filter(|e| !e.is_empty()))
+            .filter_map(|u| {
+                let email = u.email.filter(|e| !e.is_empty())?;
+                Some((u.user_id, email))
+            })
             .collect();
-        Ok(emails)
+        Ok(pairs)
     }
 
     /// 修改通知公告

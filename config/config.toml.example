@@ -54,7 +54,24 @@ secret = "CHANGE_ME_TO_A_STRONG_SECRET_KEY_AT_LEAST_32_CHARS"
 expire_hours = 24
 issuer = "yebot"
 
+[monitor]
+# 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
+# 生产环境通过环境变量 MONITOR_METRICS_TOKEN 注入，避免明文写入配置文件
+#
+# /metrics 端点 Bearer token：留空表示匿名可访问（便于本地 curl / 无配置拉取）
+# 配置后 Prometheus 需在 scrape job 中设置 `Authorization: Bearer <token>`。
+# 生产环境建议配置，或在反向代理层限制 /metrics 来源 IP。
+metrics_token = ""
+# 慢请求阈值（毫秒），超过即进入 /monitor/slow-sql 缓冲
+slow_request_ms = 300
+# 慢请求缓冲容量（保留最近 N 条）
+slow_capacity = 200
+# 错误聚合缓冲容量（保留最近 N 条 ERROR 日志）
+error_capacity = 500
+
 [log]
+# 日志级别（枚举）：trace | debug | info | warn | error（默认 info）
+# 也可通过环境变量 RUST_LOG 覆盖（如 RUST_LOG=debug）
 level = "info"
 # SQL 日志（生产环境建议关闭，避免泄露敏感信息）
 sql_logging = false

@@ -40,7 +40,9 @@ use crate::entity::sys_msg_template::{
 use crate::repository::sys_msg_channel::SysMsgChannelRepository;
 use crate::repository::sys_msg_send_log::SysMsgSendLogRepository;
 use crate::repository::sys_msg_template::SysMsgTemplateRepository;
+use crate::repository::sys_user_pref::SysUserPrefRepository;
 use crate::service::MailerService;
+use crate::service::sys_user_pref_service::{PrefChannel, allows_delivery, now_hm_str};
 use crate::utils::parse_id_list;
 
 /// 渠道类型白名单（与实体/迁移保持一致）
@@ -279,6 +281,8 @@ pub struct SysMsgService {
     send_log_repo: SysMsgSendLogRepository,
     /// 邮件发送 Service（email 渠道实际投递用）
     mailer: MailerService,
+    /// 用户消息偏好 Repository（site 站内信需尊重用户的站内信开关与免打扰）
+    pref_repo: SysUserPrefRepository,
 }
 
 impl SysMsgService {
@@ -286,8 +290,9 @@ impl SysMsgService {
         Self {
             channel_repo: SysMsgChannelRepository::new(db.clone()),
             template_repo: SysMsgTemplateRepository::new(db.clone()),
-            send_log_repo: SysMsgSendLogRepository::new(db),
+            send_log_repo: SysMsgSendLogRepository::new(db.clone()),
             mailer: MailerService::new(config),
+            pref_repo: SysUserPrefRepository::new(db),
         }
     }
 
@@ -679,6 +684,17 @@ impl SysMsgService {
                 Ok(())
             }
             "site" => {
+                // 站内信投递尊重目标用户消息偏好（站内信开关 sysmsg_notify + 免打扰窗口）：
+                // 用户 opt-out 或处于免打扰时间窗内则跳过投递（to_addr 约定为目标用户 id）。
+                let Ok(user_id) = to_addr.trim().parse::<i64>() else {
+                    return Ok(());
+                };
+                if let Ok(Some(pref)) = self.pref_repo.find_by_user_id(user_id).await
+                    && !allows_delivery(PrefChannel::Sysmsg, &pref, &now_hm_str())
+                {
+                    tracing::info!("站内信被用户消息偏好/免打扰拦截: to={}", to_addr);
+                    return Ok(());
+                }
                 tracing::info!("消息渠道 site 站内信投递（系统内记录）: to={}", to_addr);
                 Ok(())
             }

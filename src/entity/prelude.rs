@@ -95,6 +95,14 @@ pub use super::sys_rate_limit::{
     ActiveModel as SysRateLimitActiveModel, Column as SysRateLimitColumn, Entity as SysRateLimit,
     Model as SysRateLimitModel,
 };
+pub use super::sys_report::{
+    ActiveModel as SysReportActiveModel, Column as SysReportColumn, Entity as SysReport,
+    Model as SysReportModel,
+};
+pub use super::sys_report_sub::{
+    ActiveModel as SysReportSubActiveModel, Column as SysReportSubColumn, Entity as SysReportSub,
+    Model as SysReportSubModel,
+};
 pub use super::sys_role_dept::{
     ActiveModel as SysRoleDeptActiveModel, Column as SysRoleDeptColumn, Entity as SysRoleDept,
     Model as SysRoleDeptModel,

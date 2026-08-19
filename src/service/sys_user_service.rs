@@ -19,6 +19,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::TreeSelectVo;
 use crate::common::constants::SUPER_ADMIN_USER_ID;
+use crate::common::custom_scope::{self, CustomCondition};
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_dept::Model as SysDeptModel;
@@ -357,6 +358,9 @@ pub struct UserQueryDto {
     /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
+    /// 游标（keyset 深分页）：上一页最后一条 user_id。存在时启用深分页（PK < last_id），
+    /// 不存在时沿用 pageNum/pageSize 的 OFFSET 分页，向后兼容。
+    pub last_id: Option<i64>,
 }
 
 impl From<&UserQueryDto> for PageDomain {
@@ -588,9 +592,11 @@ impl SysUserService {
         };
 
         // 数据权限过滤参数（C10：抽取到 resolve_data_scope，保持行为一致）
-        let (scope_dept_ids, scope_user_id) = self.resolve_data_scope(operator_user_id).await?;
+        let (scope_dept_ids, scope_user_id, custom_conds) =
+            self.resolve_data_scope(operator_user_id).await?;
 
         let scope_dept_ref = scope_dept_ids.as_deref();
+        let custom_ref = custom_conds.as_deref();
         let (rows, total) = self
             .user_repo
             .find_page_with_data_scope(
@@ -602,8 +608,10 @@ impl SysUserService {
                 query.dept_id,
                 scope_dept_ref,
                 scope_user_id,
+                custom_ref,
                 begin,
                 end,
+                query.last_id,
             )
             .await?;
 
@@ -641,20 +649,23 @@ impl SysUserService {
 
     /// 解析数据权限过滤参数（C10：从 get_user_page / export_users 抽出的公共方法）
     ///
-    /// 返回 `(scope_dept_ids, scope_user_id)`：
+    /// 返回 `(scope_dept_ids, scope_user_id, custom_conds)`：
     /// - `scope_dept_ids`：按部门过滤的部门 ID 集合（None = 不过滤）
     /// - `scope_user_id`：仅本人过滤（Some(uid)；None = 不过滤）
+    /// - `custom_conds`：data_scope=2（自定义）角色带来的 `custom_sql` 白名单条件
+    ///   （None = 无；此项与 dept_ids 是「与」关系：自定义模式仍先按部门限定，再叠加字段过滤）
     ///
     /// 规则与两个调用方完全一致：
-    /// - 超管（user_id==1）短路，直接返回 (None, None)（全部数据）
+    /// - 超管（user_id==1）短路，直接返回 (None, None, None)（全部数据）
     /// - 取 operator 所有角色中 data_scope 值最小者（最宽松）生效
     /// - 无角色 / data_scope 缺失 / 未知值：安全失败，限定为本人
     async fn resolve_data_scope(
         &self,
         op_uid: Option<i64>,
-    ) -> Result<(Option<Vec<i64>>, Option<i64>), ServiceError> {
+    ) -> Result<(Option<Vec<i64>>, Option<i64>, Option<Vec<CustomCondition>>), ServiceError> {
         let mut scope_dept_ids: Option<Vec<i64>> = None;
         let mut scope_user_id: Option<i64> = None;
+        let mut custom_conds: Option<Vec<CustomCondition>> = None;
 
         if let Some(op_uid) = op_uid {
             // 超管短路
@@ -677,6 +688,8 @@ impl SysUserService {
                                 .collect();
                             let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
                             scope_dept_ids = Some(rids.into_iter().map(|rd| rd.dept_id).collect());
+                            // 自定义模式下额外附加 custom_sql 白名单条件（fail-closed）
+                            custom_conds = custom_scope::derive_user_custom_conditions(&op_roles);
                         }
                         3 => {
                             // 本部门：filter by operator.dept_id
@@ -716,7 +729,7 @@ impl SysUserService {
             }
         }
 
-        Ok((scope_dept_ids, scope_user_id))
+        Ok((scope_dept_ids, scope_user_id, custom_conds))
     }
 
     /// 导出用户列表（受 EXPORT_MAX_ROWS 限制，绕过 PageDomain 的 100 行截断）
@@ -742,7 +755,8 @@ impl SysUserService {
 
         // P0-1 修复：导出接口需应用与 list 相同的数据权限过滤，防止越权导出
         //（C10：抽取到 resolve_data_scope，保持行为一致）
-        let (scope_dept_ids, scope_user_id) = self.resolve_data_scope(operator_user_id).await?;
+        let (scope_dept_ids, scope_user_id, custom_conds) =
+            self.resolve_data_scope(operator_user_id).await?;
 
         // 1. 通过 Repository 多条件查询用户列表（受 EXPORT_MAX_ROWS 限制 + 数据权限过滤）
         let (rows, _) = self
@@ -756,8 +770,10 @@ impl SysUserService {
                 query.dept_id,
                 scope_dept_ids.as_deref(),
                 scope_user_id,
+                custom_conds.as_deref(),
                 begin,
                 end,
+                None, // 导出固定走 OFFSET 全量路径，不走 keyset
             )
             .await?;
 
@@ -973,7 +989,7 @@ impl SysUserService {
                 }
                 // P0-6 数据范围校验（超管短路由 resolve_data_scope 处理）
                 if let Some(op_uid) = operator_user_id {
-                    let (scope_dept_ids, scope_user_id) =
+                    let (scope_dept_ids, scope_user_id, _custom) =
                         self.resolve_data_scope(Some(op_uid)).await?;
                     let visible = match (scope_dept_ids, scope_user_id) {
                         (None, None) => true,                           // 全部数据
@@ -1664,6 +1680,17 @@ impl SysUserService {
         user_name: &str,
     ) -> Result<Option<SysUserModel>, ServiceError> {
         let user = self.user_repo.find_active_by_user_name(user_name).await?;
+        Ok(user)
+    }
+
+    /// 按用户 ID 查询未删除用户（del_flag = '0'），OAuth 绑定校验用
+    ///
+    /// 返回 None 包含两种语义：用户不存在 / 用户已软删除。
+    pub async fn get_active_user_by_username_by_id(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<SysUserModel>, ServiceError> {
+        let user = self.user_repo.find_active_by_user_id(user_id).await?;
         Ok(user)
     }
 

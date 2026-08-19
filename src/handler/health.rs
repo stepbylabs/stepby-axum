@@ -125,16 +125,15 @@ pub async fn metrics(
     headers: axum::http::HeaderMap,
 ) -> Result<String, AppError> {
     // 可选指标鉴权（向后兼容）：
-    // 仅当设置环境变量 YEBOT_METRICS_TOKEN 时才要求 `Authorization: Bearer <token>`；
-    // 未设置时保持原有匿名可访问行为（便于本地 curl / Prometheus 无配置拉取）。
-    // 生产环境建议设置该变量，或在反向代理层限制 /metrics 来源 IP。
-    if let Ok(expected) = std::env::var("YEBOT_METRICS_TOKEN")
-        && !expected.is_empty()
-    {
+    // 仅当配置 monitor.metrics_token（或环境变量 MONITOR_METRICS_TOKEN）非空时才要求
+    // `Authorization: Bearer <token>`；未配置时保持匿名可访问（便于本地 curl / Prometheus 无配置拉取）。
+    // 生产环境建议配置该 token，或在反向代理层限制 /metrics 来源 IP。
+    let expected_token = &state.config.monitor.metrics_token;
+    if !expected_token.is_empty() {
         let ok = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .map(|v| v == format!("Bearer {}", expected))
+            .map(|v| v == format!("Bearer {}", expected_token))
             .unwrap_or(false);
         if !ok {
             return Err(AppError::unauthorized("metrics token required"));
@@ -182,7 +181,76 @@ pub async fn metrics(
         if db_connected { 1 } else { 0 }
     ));
 
+    // 业务 HTTP 指标（request counter + duration histogram，由 monitoring_middleware 写入）
+    s.push_str(&state.observability.metrics.render_prometheus());
+
+    // Redis 运行指标（INFO 精简为 gauge，best-effort：失败则不输出该组指标）
+    s.push_str(&collect_redis_prometheus(&state).await);
+
     Ok(s)
+}
+
+/// Redis 运行指标 → Prometheus gauge（best-effort，失败返回空串不影响整体输出）
+async fn collect_redis_prometheus(state: &Arc<AppState>) -> String {
+    let mut conn = state.redis.clone();
+    let info_text: String = match redis::cmd("INFO").query_async(&mut conn).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "/metrics 采集 Redis INFO 失败，跳过 Redis 指标");
+            return String::new();
+        }
+    };
+    let mut map = std::collections::HashMap::new();
+    for line in info_text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    let num = |k: &str| map.get(k).and_then(|v| v.parse::<f64>().ok());
+
+    let mut s = String::new();
+    // 仅在取值成功时输出对应 gauge，保证单行格式正确。
+    if let Some(v) = num("uptime_in_seconds") {
+        s.push_str(&format!("yebot_redis_uptime_seconds {}\n", format_gauge(v)));
+    }
+    if let Some(v) = num("connected_clients") {
+        s.push_str(&format!("yebot_redis_connected_clients {}\n", v));
+    }
+    if let Some(v) = num("used_memory") {
+        s.push_str(&format!("yebot_redis_used_memory_bytes {}\n", v));
+    }
+    if let Some(v) = num("used_memory_peak") {
+        s.push_str(&format!("yebot_redis_used_memory_peak_bytes {}\n", v));
+    }
+    if let Some(v) = num("keyspace_hits") {
+        s.push_str(&format!("yebot_redis_keyspace_hits {}\n", v));
+    }
+    if let Some(v) = num("keyspace_misses") {
+        s.push_str(&format!("yebot_redis_keyspace_misses {}\n", v));
+    }
+    if let Some(v) = num("total_commands_processed") {
+        s.push_str(&format!("yebot_redis_commands_processed {}\n", v));
+    }
+    if let Some(v) = num("total_net_input_bytes") {
+        s.push_str(&format!("yebot_redis_net_input_bytes {}\n", v));
+    }
+    if let Some(v) = num("total_net_output_bytes") {
+        s.push_str(&format!("yebot_redis_net_output_bytes {}\n", v));
+    }
+    s
+}
+
+/// 格式化 gauge 数值（整数打印不带小数点）
+fn format_gauge(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
 }
 
 /// 获取数据库后端类型名称

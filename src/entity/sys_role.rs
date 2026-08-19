@@ -22,6 +22,9 @@ pub struct Model {
     pub role_key: String,
     pub role_sort: i32,
     pub data_scope: Option<String>,
+    /// 自定义部门 SQL 过滤片段（data_scope="2" 时可选）。仅存原始字符串，
+    /// 运行时由 common::custom_scope 白名单解析为参数化条件，绝不拼接裸 SQL。
+    pub custom_sql: Option<String>,
     pub menu_check_strictly: Option<bool>,
     pub dept_check_strictly: Option<bool>,
     pub status: String,

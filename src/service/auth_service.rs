@@ -1215,6 +1215,51 @@ impl AuthService {
         Ok(())
     }
 
+    /// OAuth/SSO 登录完成（第三方已校验身份后，直接为该本地账号签发会话）
+    ///
+    /// 复用密码登录的 `finalize_login`：JWT 签发 + 登录日志（成功）+ 在线用户映射 +
+    /// 同 IP+浏览器旧会话清理 + 清除失败计数，保证第三方登录与会话链路行为一致。
+    /// `username` 为已通过 OAuth 身份校验的本地账号登录名。
+    pub async fn oauth_finalize_login(
+        &self,
+        username: &str,
+        login_ip: &str,
+        user_agent: &str,
+        redis: &mut redis::aio::ConnectionManager,
+        jwt_config: &JwtConfig,
+        ip_locator: &IpLocator,
+    ) -> Result<LoginVo, ServiceError> {
+        // 重新按用户名取活跃用户（沿用 Repository 已过滤 del_flag='0' 的语义）
+        let user = self
+            .user_service
+            .get_active_user_by_username(username)
+            .await?
+            .ok_or_else(|| {
+                ServiceError::unauthorized(&crate::tr!("error.oauth.local_user_not_found"))
+            })?;
+        // 账号停用统一拒绝（与密码登录 C-1 一致，不暴露细分原因）
+        if user.status.as_deref() == Some("1") {
+            return Err(ServiceError::unauthorized(&crate::tr!(
+                "error.oauth.local_user_not_found"
+            )));
+        }
+
+        let browser = parse_browser(user_agent);
+        let os = parse_os(user_agent);
+        // IP 归属地查询（mmdb 文件不存在或查询失败时返回空字符串）
+        let login_location = ip_locator.locate(login_ip);
+        let ctx = LoginContext {
+            username: &user.user_name,
+            login_ip,
+            login_location: &login_location,
+            browser: &browser,
+            os: &os,
+        };
+        // 复用 finalize_login（JWT 签发 + 登录成功日志 + 在线映射 + 旧会话清理），
+        // 正常路径仅一条登录日志，避免重复写入。
+        self.finalize_login(&user, redis, jwt_config, &ctx).await
+    }
+
     /// 锁屏解锁（需登录态，校验当前用户密码）
     ///
     /// 流程：

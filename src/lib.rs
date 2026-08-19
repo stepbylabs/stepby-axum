@@ -51,6 +51,9 @@ pub mod state;
 // ========== 日志体系 ==========
 pub mod logger;
 
+// ========== 可观测性（慢请求/错误聚合/Prometheus 指标）==========
+pub mod observability;
+
 // ========== 定时任务调度内核 ==========
 pub mod scheduler;
 

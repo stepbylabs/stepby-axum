@@ -38,6 +38,9 @@ pub struct OperLogQueryDto {
     /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
+    /// 游标（keyset 深分页）：上一页最后一条 oper_id。存在时启用深分页（PK < last_id），
+    /// 不存在时沿用 pageNum/pageSize 的 OFFSET 分页，向后兼容。
+    pub last_id: Option<i64>,
 }
 
 impl From<&OperLogQueryDto> for PageDomain {
@@ -121,6 +124,7 @@ impl SysOperLogService {
                 query.status.as_deref(),
                 begin,
                 end,
+                query.last_id,
             )
             .await?;
         Ok((rows, total))
@@ -154,6 +158,7 @@ impl SysOperLogService {
                 query.status.as_deref(),
                 begin,
                 end,
+                None, // 导出固定走 OFFSET 全量路径，不走 keyset
             )
             .await?;
         Ok(rows)

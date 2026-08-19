@@ -170,6 +170,10 @@ impl JobScheduler {
         // 消息重试任务也需在 cleanup_job move 前 clone（db 非 Copy）
         let msg_retry_db = db.clone();
         let msg_retry_config = config.clone();
+        // 报表订阅推送任务同样需在 cleanup_job / msg_retry_job move 前 clone
+        // （db / config 均非 Copy，闭包 move 后原变量不可再使用）
+        let report_db = db.clone();
+        let report_config = config.clone();
 
         // 日志保留期清理任务：每日凌晨 3:00 执行（cron: "0 0 3 * * *"）
         // 删除 90 天前的操作日志和登录日志，避免日志表无限增长导致生产崩溃
@@ -399,6 +403,49 @@ impl JobScheduler {
         tracing::info!(
             "内置定时任务注册成功: msg_send_retry (cron: '0 */1 * * * *', 单批次上限 {} 条)",
             MESSAGE_RETRY_BATCH
+        );
+
+        // 报表订阅推送任务：每分钟扫描一次到期的启用订阅（cron: "0 */1 * * * *"）并推送。
+        // 通过 SysReportService::run_due_subscriptions 按各订阅自身的 cron 到期待执行，
+        // 邮件经 MailerService、站内信写入 sys_msg_send_log，均复用既有投递语义。
+        // 失败仅日志告警，不阻断调度器和其他任务。
+        let report_sub_job = Job::new_async("0 */1 * * * *", move |_uuid, _l| {
+            let db = report_db.clone();
+            let config = report_config.clone();
+            Box::pin(async move {
+                tracing::debug!("内置任务 report_sub_due 开始执行：扫描到期的报表订阅");
+
+                let report_service =
+                    crate::service::sys_report_service::SysReportService::new(db, config);
+
+                match report_service.run_due_subscriptions().await {
+                    Ok(n) => {
+                        if n > 0 {
+                            tracing::info!("report_sub_due: 本次共推送 {} 个到期的报表订阅", n);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("report_sub_due: 扫描推送报表订阅失败: {}", e);
+                    }
+                }
+            })
+        })
+        .map_err(|e| {
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to create report subscription push task: {}",
+                e
+            ))
+        })?;
+
+        scheduler.add(report_sub_job).await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to add report subscription push task: {}",
+                e
+            ))
+        })?;
+
+        tracing::info!(
+            "内置定时任务注册成功: report_sub_due (cron: '0 */1 * * * *', 按订阅自身 cron 到期推送)"
         );
 
         // IP 库自动更新任务：按 config.ip_location.auto_update_cron 定时更新 mmdb 文件

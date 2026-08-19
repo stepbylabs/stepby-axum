@@ -33,3 +33,8 @@ backend.err
 
 # 上传
 uploads/
+
+# 调试/临时产物
+probe_tmp/
+build_out.txt
+fmt_after.txt
