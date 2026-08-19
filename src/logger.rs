@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 
 use crate::config::LogConfig;
+use crate::observability::error_log::ErrorCaptureLayer;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -70,6 +71,9 @@ pub fn init_logger(log_config: &LogConfig) {
         .with(env_filter)
         .with(stdout_layer)
         .with(file_layer)
+        // ErrorCaptureLayer：采集 ERROR 级别日志事件到进程内错误总线（供 /monitor/error-log/* 查询）。
+        // 需 registry 提供 LookupSpan，以读取当前 request span 上的 request_id/path 进行关联。
+        .with(ErrorCaptureLayer::new())
         .init();
 
     tracing::info!(

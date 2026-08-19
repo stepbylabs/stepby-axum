@@ -39,6 +39,9 @@ impl SysLogininforRepository {
     }
 
     /// 多条件分页查询（ipaddr 模糊，user_name 模糊，status 精确，时间范围，按 login_time 倒序）
+    ///
+    /// `last_id`：游标（keyset 深分页）参数。携带时按 `info_id < last_id` 过滤 + `info_id DESC`
+    /// 排序，适用于深翻页（避免 OFFSET 线性扫描）；为 `None` 时沿用 `offset/limit` 分页路径。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -49,6 +52,7 @@ impl SysLogininforRepository {
         status: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        last_id: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysLogininfor::find();
         if let Some(ip) = ipaddr {
@@ -67,13 +71,24 @@ impl SysLogininforRepository {
             query = query.filter(Column::LoginTime.lte(end));
         }
 
+        // 过滤条件已齐备，统计总数（与分页模式无关，过滤后计数保持一致）
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_desc(Column::LoginTime)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+
+        // P1：keyset 深分页（PK < last_id）+ PK DESC；否则走原 OFFSET 深翻页路径
+        let rows = if last_id.is_some() {
+            crate::common::page::apply_keyset_filter(query, last_id, |id| Column::InfoId.lt(id))
+                .order_by_desc(Column::InfoId)
+                .limit(limit)
+                .all(self.base.db())
+                .await?
+        } else {
+            query
+                .order_by_desc(Column::LoginTime)
+                .offset(offset)
+                .limit(limit)
+                .all(self.base.db())
+                .await?
+        };
         Ok((rows, total))
     }
 
@@ -238,5 +253,167 @@ impl SysLogininforRepository {
             .one(self.base.db())
             .await?;
         Ok(row.map(|r| r.0).unwrap_or(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::datetime;
+    use chrono::{Duration, NaiveDateTime};
+
+    fn login_row(
+        id: i64,
+        user_name: &str,
+        ipaddr: &str,
+        status: &str,
+        t: NaiveDateTime,
+    ) -> ActiveModel {
+        ActiveModel {
+            info_id: Set(id),
+            user_name: Set(Some(user_name.to_string())),
+            ipaddr: Set(Some(ipaddr.to_string())),
+            status: Set(Some(status.to_string())),
+            login_time: Set(Some(t)),
+            ..Default::default()
+        }
+    }
+
+    async fn insert_7(db: &DatabaseConnection) -> SysLogininforRepository {
+        let repo = SysLogininforRepository::new(db.clone());
+        let base = datetime::now_naive();
+        for i in 1..=7 {
+            let status = if i == 6 { "1" } else { "0" };
+            let t = base + Duration::minutes(i);
+            let am = login_row(i, &format!("u{i}"), "127.0.0.1", status, t);
+            repo.insert(am).await.unwrap();
+        }
+        repo
+    }
+
+    #[tokio::test]
+    async fn keyset_returns_strictly_decreasing_pages_no_duplicates() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        let size = 3u64;
+
+        let (p0, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(p0.len(), 3);
+        assert!(
+            p0.iter()
+                .zip(p0.iter().skip(1))
+                .all(|(a, b)| a.info_id > b.info_id)
+        );
+
+        let cursor = p0.last().unwrap().info_id;
+        let (p1, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(p1.len(), 3);
+        assert!(
+            p1.iter()
+                .zip(p1.iter().skip(1))
+                .all(|(a, b)| a.info_id > b.info_id)
+        );
+
+        let mut seen: Vec<i64> = p0.iter().chain(&p1).map(|m| m.info_id).collect();
+        seen.sort_unstable();
+        let uniq: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(seen.len(), uniq.len(), "跨页不应出现重复记录");
+
+        let cursor = p1.last().unwrap().info_id;
+        let (p2, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(p2.len(), 1);
+        let (p3, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, Some(p2[0].info_id))
+            .await
+            .unwrap();
+        assert!(p3.is_empty(), "游标耗尽后应返回空页");
+    }
+
+    #[tokio::test]
+    async fn keyset_works_alongside_existing_filters() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        // 过滤 status='0'（i==6 被排除）
+        let (first, total) = repo
+            .find_page_filtered(0, 10, None, None, Some("0"), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(total, 6);
+        let cursor = first.last().unwrap().info_id;
+        let (next, _) = repo
+            .find_page_filtered(0, 10, None, None, Some("0"), None, None, Some(cursor))
+            .await
+            .unwrap();
+        assert!(next.iter().all(|m| m.status.as_deref() == Some("0")));
+    }
+
+    #[tokio::test]
+    async fn keyset_equals_offset_for_small_datasets() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        let size = 3u64;
+
+        let (o0, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let (o1, _) = repo
+            .find_page_filtered(3, size, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let (o2, _) = repo
+            .find_page_filtered(6, size, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let (k0, _) = repo
+            .find_page_filtered(0, size, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let (k1, _) = repo
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(k0.last().unwrap().info_id),
+            )
+            .await
+            .unwrap();
+        let (k2, _) = repo
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(k1.last().unwrap().info_id),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(o0, k0);
+        assert_eq!(o1, k1);
+        assert_eq!(o2, k2);
     }
 }

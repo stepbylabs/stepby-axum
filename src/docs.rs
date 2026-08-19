@@ -160,6 +160,21 @@ struct SwaggerAssets;
         crate::handler::common_handler::download_resource,
         // ==================== 代码生成（补充） ====================
         crate::handler::tool_gen_handler::batch_gen_code,
+        // ==================== 报表中心 + 定时订阅推送 ====================
+        crate::handler::sys_report_handler::report_list,
+        crate::handler::sys_report_handler::report_info,
+        crate::handler::sys_report_handler::report_add,
+        crate::handler::sys_report_handler::report_edit,
+        crate::handler::sys_report_handler::report_remove,
+        crate::handler::sys_report_handler::report_status,
+        crate::handler::sys_report_handler::report_preview,
+        crate::handler::sys_report_handler::sub_list,
+        crate::handler::sys_report_handler::sub_info,
+        crate::handler::sys_report_handler::sub_add,
+        crate::handler::sys_report_handler::sub_edit,
+        crate::handler::sys_report_handler::sub_remove,
+        crate::handler::sys_report_handler::sub_status,
+        crate::handler::sys_report_handler::sub_run,
     ),
     components(
         schemas(

@@ -38,6 +38,9 @@ pub struct Settings {
     /// 公开路由（/login /health /ws /swagger-ui / 等）不受影响。
     #[serde(default)]
     pub permission_deny_by_default: bool,
+    /// 可观测性监控配置（慢请求阈值 / 缓冲容量 / Prometheus 指标 token）
+    #[serde(default)]
+    pub monitor: MonitorConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -57,8 +60,64 @@ impl fmt::Debug for Settings {
                 "permission_deny_by_default",
                 &self.permission_deny_by_default,
             )
+            .field("monitor", &self.monitor)
             .finish()
     }
+}
+
+/// 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
+#[derive(Clone, Deserialize)]
+pub struct MonitorConfig {
+    /// /metrics 端点 Bearer token（脱敏）。
+    ///
+    /// 留空表示 /metrics 匿名可访问（本地 curl / 无鉴权抓取）。
+    /// 生产环境强烈建议设置（可通过 MONITOR_METRICS_TOKEN 环境变量注入）。
+    #[serde(default)]
+    pub metrics_token: String,
+    /// 慢请求阈值（毫秒），超过才记录到慢请求缓冲（默认 300ms）
+    #[serde(default = "default_slow_request_ms")]
+    pub slow_request_ms: u64,
+    /// 慢请求缓冲容量（默认 200）
+    #[serde(default = "default_slow_capacity")]
+    pub slow_capacity: usize,
+    /// 错误聚合缓冲容量（默认 500）
+    #[serde(default = "default_error_capacity")]
+    pub error_capacity: usize,
+}
+
+/// 手动实现 Debug 以脱敏 metrics_token
+impl fmt::Debug for MonitorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MonitorConfig")
+            .field("metrics_token", &"<redacted>")
+            .field("slow_request_ms", &self.slow_request_ms)
+            .field("slow_capacity", &self.slow_capacity)
+            .field("error_capacity", &self.error_capacity)
+            .finish()
+    }
+}
+
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            metrics_token: String::new(),
+            slow_request_ms: default_slow_request_ms(),
+            slow_capacity: default_slow_capacity(),
+            error_capacity: default_error_capacity(),
+        }
+    }
+}
+
+fn default_slow_request_ms() -> u64 {
+    300
+}
+
+fn default_slow_capacity() -> usize {
+    200
+}
+
+fn default_error_capacity() -> usize {
+    500
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -607,6 +666,10 @@ impl Settings {
         if let Ok(v) = std::env::var("S3_PUBLIC_ENDPOINT") {
             self.upload.s3.public_endpoint = v;
         }
+        // 可观测性监控配置（Prometheus 指标 token 脱敏注入，避免明文写入配置文件）
+        if let Ok(v) = std::env::var("MONITOR_METRICS_TOKEN") {
+            self.monitor.metrics_token = v;
+        }
     }
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
@@ -668,6 +731,7 @@ impl Settings {
             ip_location: IpLocationConfig::default(),
             mail: MailConfig::default(),
             config_enc_key: std::env::var("CONFIG_ENC_KEY").unwrap_or_default(),
+            monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
         };
 
@@ -766,6 +830,7 @@ mod tests {
             ip_location: IpLocationConfig::default(),
             mail: MailConfig::default(),
             config_enc_key: String::new(),
+            monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
         }
     }
@@ -818,6 +883,7 @@ mod tests {
                 starttls: false,
             },
             config_enc_key: "encryption-key-should-not-leak".to_string(),
+            monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
         };
 

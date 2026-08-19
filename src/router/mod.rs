@@ -6,6 +6,7 @@ pub mod file_router;
 pub mod ip_location_router;
 pub mod monitor_cache_router;
 pub mod monitor_log_router;
+pub mod monitor_observability_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
 pub mod public;
@@ -13,16 +14,20 @@ pub mod sys_backup_router;
 pub mod sys_config_router;
 pub mod sys_dept_router;
 pub mod sys_dict_router;
+pub mod sys_http_debug_router;
 pub mod sys_job_router;
 pub mod sys_logininfor_router;
 pub mod sys_menu_router;
 pub mod sys_msg_router;
 pub mod sys_notice_router;
+pub mod sys_oauth_router;
 pub mod sys_oper_log_router;
 pub mod sys_post_router;
 pub mod sys_rate_limit_router;
+pub mod sys_report_router;
 pub mod sys_role_router;
 pub mod sys_task_router;
+pub mod sys_user_pref_router;
 pub mod sys_user_router;
 pub mod tool_gen_router;
 pub mod totp_router;
@@ -39,6 +44,7 @@ use crate::middleware::rate_limit_middleware;
 use crate::middleware::request_id_middleware;
 use crate::middleware::security_headers;
 use crate::middleware::spa_fallback_middleware;
+use crate::observability::monitoring_middleware;
 use crate::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -72,13 +78,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(auth_router::protected_auth_routes())
         .merge(sys_user_router::user_routes())
+        .merge(sys_user_pref_router::user_pref_routes())
         .merge(sys_role_router::role_routes())
         .merge(sys_menu_router::menu_routes())
-        .merge(sys_notice_router::notice_routes())
         .merge(sys_msg_router::msg_routes())
+        .merge(sys_oauth_router::oauth_routes())
+        .merge(sys_notice_router::notice_routes())
+        .merge(sys_report_router::report_routes())
         .merge(sys_dept_router::dept_routes())
         .merge(sys_job_router::job_routes())
         .merge(sys_dict_router::dict_routes())
+        .merge(sys_http_debug_router::http_debug_routes())
         .merge(sys_config_router::config_routes())
         .merge(sys_post_router::post_routes())
         .merge(sys_rate_limit_router::rate_limit_routes())
@@ -88,6 +98,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(monitor_cache_router::cache_routes())
         .merge(monitor_server_router::server_routes())
         .merge(monitor_log_router::log_routes())
+        .merge(monitor_observability_router::observability_routes())
         .merge(sys_backup_router::backup_routes())
         .merge(ip_location_router::ip_location_routes())
         .merge(sys_task_router::task_routes())
@@ -253,6 +264,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
         ))
+        // 可观测性监控中间件（metrics + 慢请求）：
+        // 置于 request_id 之内、Timeout 之外，既能在 request span 作用域内测量，
+        // 又能覆盖到真实处理耗时（含 Timeout 以内的全部中间件 + handler）。
+        // 注意：位于全局 layer，故 /health、/metrics 等公开端点同样被统计。
+        .layer(axum::middleware::from_fn(monitoring_middleware))
         .layer(axum::middleware::from_fn(request_id_middleware))
         // locale 中间件（T-05）：Accept-Language → 协商 → task-local 注入（包裹全部内层，handler/AppError 均可读）
         .layer(axum::middleware::from_fn(locale_middleware))

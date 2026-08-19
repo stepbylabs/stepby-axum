@@ -212,20 +212,26 @@ mod tests {
 
     #[test]
     fn test_verify_rejects_tampered_signature() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
         let cfg = test_jwt_config();
         let (token, _) =
             JwtUtils::generate_token("1", "admin", &cfg).expect("generate_token must succeed");
 
-        // 篡改签名段最后一个字符（保持长度，确保是签名校验失败而非格式错误）
+        // 篡改签名：先 base64url 解码 → 翻转一个字节 → 重新编码。
+        // 不做"末尾字符翻转"是因为 HS256 签名为 32 字节 → base64url 为 43 字符（无填充），
+        // 其末位携带 2 个留空位，翻转末字符可能触发解码失败而落到 Malformed，造成该测试
+        // 依赖运行时间产生随机签名时而时好时坏（flaky）。解码→翻转→重编码可保证得到
+        // 长度合法但内容确定错误的签名，稳定返回 InvalidSignature。
         let mut parts: Vec<String> = token.split('.').map(|s| s.to_string()).collect();
         assert_eq!(parts.len(), 3, "JWT 应为三段结构");
-        let last = parts[2].clone();
-        let new_last = if last.ends_with('A') {
-            format!("{}B", &last[..last.len() - 1])
-        } else {
-            format!("{}A", &last[..last.len() - 1])
-        };
-        parts[2] = new_last;
+        let mut sig = URL_SAFE_NO_PAD
+            .decode(parts[2].as_str())
+            .expect("合法签名应可 base64url 解码");
+        assert!(!sig.is_empty(), "签名不应为空");
+        sig[0] ^= 0xFF; // 确定性翻转首个字节
+        parts[2] = URL_SAFE_NO_PAD.encode(&sig);
         let bad_token = parts.join(".");
 
         let err = JwtUtils::verify_token(&bad_token, &cfg).unwrap_err();

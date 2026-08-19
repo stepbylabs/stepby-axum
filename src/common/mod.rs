@@ -1,6 +1,7 @@
 // axum-backend/src/common/mod.rs
 
 pub mod constants;
+pub mod custom_scope;
 pub mod data_scope;
 pub mod datetime;
 pub mod error;
@@ -10,6 +11,7 @@ pub mod i18n;
 pub mod image;
 pub mod page;
 pub mod response;
+pub mod ssrf;
 pub mod upload;
 
 pub use error::{AppError, ServiceError};

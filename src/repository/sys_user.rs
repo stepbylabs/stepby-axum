@@ -8,12 +8,60 @@
 //! - 按部门查询
 
 use chrono::NaiveDateTime;
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Expr, SimpleExpr};
 use sea_orm::*;
 
+use crate::common::custom_scope::{self, CustomCondition, Op};
 use crate::common::like_escape;
 use crate::entity::sys_user::{ActiveModel, Column, Entity as SysUser, Model};
 use crate::repository::base::BaseRepository;
+
+/// 把自定义数据权限条件映射为 `sys_user` 行的参数化 `SimpleExpr`。
+///
+/// 列名白名单 + 参数化值重建（`Column::X.eq(v)`），绝不拼接裸 SQL。
+/// 未知列 / 类型不匹配（如对整型列做 LIKE）一律返回 `None` 丢弃该条件。
+fn map_user_custom_scope(c: &CustomCondition) -> Option<SimpleExpr> {
+    use sea_orm::ColumnTrait;
+    macro_rules! str_col {
+        ($col:ident, $val:expr) => {{
+            let v = $val.as_str()?;
+            Some(match c.op {
+                Op::Eq => Column::$col.eq(v),
+                Op::Ne => Column::$col.ne(v),
+                Op::Gt => Column::$col.gt(v),
+                Op::Gte => Column::$col.gte(v),
+                Op::Lt => Column::$col.lt(v),
+                Op::Lte => Column::$col.lte(v),
+                Op::Like => Column::$col.like(v),
+            })
+        }};
+    }
+    macro_rules! int_col {
+        ($col:ident, $val:expr) => {{
+            let v = $val.as_i64()?;
+            Some(match c.op {
+                Op::Like => return None, // LIKE 仅对文本列有意义
+                Op::Eq => Column::$col.eq(v),
+                Op::Ne => Column::$col.ne(v),
+                Op::Gt => Column::$col.gt(v),
+                Op::Gte => Column::$col.gte(v),
+                Op::Lt => Column::$col.lt(v),
+                Op::Lte => Column::$col.lte(v),
+            })
+        }};
+    }
+    match c.column.as_str() {
+        "user_id" => int_col!(UserId, &c.value),
+        "dept_id" => int_col!(DeptId, &c.value),
+        "user_name" => str_col!(UserName, &c.value),
+        "nick_name" => str_col!(NickName, &c.value),
+        "phonenumber" => str_col!(Phonenumber, &c.value),
+        "email" => str_col!(Email, &c.value),
+        "status" => str_col!(Status, &c.value),
+        "sex" => str_col!(Sex, &c.value),
+        _ => None,
+    }
+}
 
 /// 用户 Repository
 #[derive(Clone)]
@@ -54,6 +102,26 @@ impl SysUserRepository {
         SysUser::find()
             .filter(Column::UserName.eq(user_name))
             .filter(Column::DelFlag.eq("0"))
+            .one(self.base.db())
+            .await
+    }
+
+    /// 按用户 ID 查询未删除用户（del_flag = '0'），OAuth 绑定校验用
+    pub async fn find_active_by_user_id(&self, user_id: i64) -> Result<Option<Model>, DbErr> {
+        SysUser::find()
+            .filter(Column::UserId.eq(user_id))
+            .filter(Column::DelFlag.eq("0"))
+            .one(self.base.db())
+            .await
+    }
+
+    /// 按邮箱查询用户（含软删除），OAuth 自动创建前邮箱冲突检查用
+    ///
+    /// 包含 del_flag='2' 用户：写入 sys_oauth_user 前需避免邮箱被软删除账号占用，
+    /// 导致后续恢复/补录冲突。
+    pub async fn find_by_email(&self, email: &str) -> Result<Option<Model>, DbErr> {
+        SysUser::find()
+            .filter(Column::Email.eq(email))
             .one(self.base.db())
             .await
     }
@@ -152,6 +220,12 @@ impl SysUserRepository {
     ///   - Some(空): 不可见任何部门 → 返回空结果
     ///   - Some(非空): 限定 dept_id IN 集合
     /// - scope_user_id: Some 时限定 user_id = 此值（用于 data_scope=5 仅本人）
+    /// - custom_conds: 自定义数据权限（data_scope=2）的白名单字段条件（参数化，防注入）
+    ///   与前面 dept/user 过滤是「与」关系。
+    ///
+    /// `last_id`：游标（keyset 深分页）参数。携带时按 `user_id < last_id` 过滤 +
+    /// `user_id DESC` 排序，适用于深翻页（避免 OFFSET 线性扫描）；为 `None` 时沿用
+    /// `offset/limit` 分页路径。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_with_data_scope(
         &self,
@@ -163,8 +237,10 @@ impl SysUserRepository {
         dept_id: Option<i64>,
         scope_dept_ids: Option<&[i64]>,
         scope_user_id: Option<i64>,
+        custom_conds: Option<&[CustomCondition]>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        last_id: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
         if let Some(name) = user_name {
@@ -192,8 +268,12 @@ impl SysUserRepository {
         if let Some(uid) = scope_user_id {
             query = query.filter(Column::UserId.eq(uid));
         }
-        // P1：稳定排序，防翻页重复/漏行
-        query = query.order_by_asc(Column::UserId);
+        // 自定义数据权限（data_scope=2）的字段条件：白名单 + 参数化重建，防注入
+        if let Some(conds) = custom_conds
+            && let Some(cond) = custom_scope::build_filter(conds, map_user_custom_scope)
+        {
+            query = query.filter(cond);
+        }
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
         }
@@ -201,12 +281,26 @@ impl SysUserRepository {
             query = query.filter(Column::CreateTime.lte(end));
         }
 
+        // 过滤条件已齐备，统计总数（与分页模式无关，过滤后计数保持一致）
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+
+        // P1：keyset 深分页（PK < last_id）+ PK DESC；否则走原 OFFSET 深翻页路径。
+        // 注意 keyset 模式排序方向与默认相反（倒序），二者各自返回一致、无重复的分页。
+        let rows = if last_id.is_some() {
+            crate::common::page::apply_keyset_filter(query, last_id, |id| Column::UserId.lt(id))
+                .order_by_desc(Column::UserId)
+                .limit(limit)
+                .all(self.base.db())
+                .await?
+        } else {
+            // P1：稳定排序，防翻页重复/漏行
+            query
+                .order_by_asc(Column::UserId)
+                .offset(offset)
+                .limit(limit)
+                .all(self.base.db())
+                .await?
+        };
         Ok((rows, total))
     }
 
@@ -302,5 +396,198 @@ impl SysUserRepository {
             .all(self.base.db())
             .await?;
         Ok((rows, total))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::Set;
+
+    /// 构造一条用户（id/dept/状态，其余列取默认）。
+    fn user_row(id: i64, dept_id: i64, status: &str) -> ActiveModel {
+        ActiveModel {
+            user_id: Set(id),
+            dept_id: Set(Some(dept_id)),
+            user_name: Set(format!("user{id}")),
+            nick_name: Set(format!("用户{id}")),
+            status: Set(Some(status.to_string())),
+            del_flag: Set(Some("0".to_string())),
+            ..Default::default()
+        }
+    }
+
+    /// 插入 7 个未删除用户：dept 分段（含可过滤目标），i=6 状态为 1（其余成功）。
+    /// user_id 从 101 起（迁移已预置 user_id=1 的 admin，避免主键冲突）。
+    async fn insert_7(db: &DatabaseConnection) -> SysUserRepository {
+        let repo = SysUserRepository::new(db.clone());
+        let depts = [100, 100, 200, 200, 100, 100, 100];
+        for i in 1..=7 {
+            let status = if i == 6 { "1" } else { "0" };
+            repo.base()
+                .insert(user_row(100 + i, depts[(i - 1) as usize], status))
+                .await
+                .unwrap();
+        }
+        repo
+    }
+
+    #[tokio::test]
+    async fn keyset_returns_strictly_decreasing_pages_no_duplicates() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        let size = 3u64;
+
+        // 全程 keyset 连续翻页：首页用极大游标触发 keyset 分支，避免混入 OFFSET 升序页。
+        let mut cursor = Some(i64::MAX);
+        let mut collected: Vec<i64> = Vec::new();
+        let mut pages = 0u32;
+        loop {
+            let (page, _) = repo
+                .find_page_with_data_scope(
+                    0, size, None, None, None, None, None, None, None, None, None, cursor,
+                )
+                .await
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(
+                page.windows(2).all(|w| w[0].user_id > w[1].user_id),
+                "keyset 页内应按 user_id 严格递减"
+            );
+            pages += 1;
+            cursor = Some(page.last().unwrap().user_id);
+            collected.extend(page.iter().map(|m| m.user_id));
+        }
+        assert!(pages >= 3, "应产生多页 keyset 结果");
+
+        // 跨页无重复：收集到的 id 数 == 去重后数；耗尽后最后一页为空（上方循环已保证）。
+        let uniq: std::collections::HashSet<i64> = collected.iter().copied().collect();
+        assert_eq!(collected.len(), uniq.len(), "keyset 分页不应出现重复");
+    }
+
+    #[tokio::test]
+    async fn keyset_works_alongside_data_scope_and_custom_conds() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+
+        // 自定义数据权限（data_scope=2）：custom_sql "status = '0' AND dept_id = 100"
+        let conds = custom_scope::parse_custom_sql(
+            "status = '0' AND dept_id = 100",
+            custom_scope::USER_CUSTOM_COLUMNS,
+        )
+        .unwrap();
+
+        // 计算过滤后应命中的集合（分页方式无关），作为预期
+        let (expected_rows, expected_total) = repo
+            .find_page_with_data_scope(
+                0,
+                1000,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&conds),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(expected_total >= 4, "自定义数据权限过滤应命中至少 4 条");
+        assert!(
+            expected_rows
+                .iter()
+                .all(|u| u.status.as_deref() == Some("0") && u.dept_id == Some(100))
+        );
+
+        // keyset 连续翻页应完整覆盖过滤后的行，且全部满足条件、无重复
+        let mut cursor = Some(i64::MAX);
+        let mut collected: Vec<i64> = Vec::new();
+        loop {
+            let (page, _) = repo
+                .find_page_with_data_scope(
+                    0,
+                    2,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&conds),
+                    None,
+                    None,
+                    cursor,
+                )
+                .await
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(
+                page.iter()
+                    .all(|u| u.status.as_deref() == Some("0") && u.dept_id == Some(100))
+            );
+            cursor = Some(page.last().unwrap().user_id);
+            collected.extend(page.iter().map(|m| m.user_id));
+        }
+        let uniq: std::collections::HashSet<i64> = collected.iter().copied().collect();
+        assert_eq!(
+            collected.len(),
+            uniq.len(),
+            "过滤 + keyset 组合不应出现重复"
+        );
+        let expected_ids: std::collections::HashSet<i64> =
+            expected_rows.iter().map(|u| u.user_id).collect();
+        assert_eq!(uniq, expected_ids, "keyset 应命中全部过滤行");
+    }
+
+    #[tokio::test]
+    async fn keyset_covers_same_rows_as_offset_for_small_datasets() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = insert_7(&db).await;
+        let size = 3u64;
+
+        // OFFSET 全量（大 limit，无过滤）作为基准集合
+        let (offset_all, _) = repo
+            .find_page_with_data_scope(
+                0, 1000, None, None, None, None, None, None, None, None, None, None,
+            )
+            .await
+            .unwrap();
+        let offset_ids: std::collections::HashSet<i64> =
+            offset_all.iter().map(|u| u.user_id).collect();
+
+        // keyset 从极大游标连续翻页到耗尽
+        let mut got: Vec<i64> = Vec::new();
+        let mut cursor = Some(i64::MAX);
+        loop {
+            let (page, _) = repo
+                .find_page_with_data_scope(
+                    0, size, None, None, None, None, None, None, None, None, None, cursor,
+                )
+                .await
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            got.extend(page.iter().map(|m| m.user_id));
+            cursor = Some(page.last().unwrap().user_id);
+        }
+        let keyset_ids: std::collections::HashSet<i64> = got.into_iter().collect();
+        assert_eq!(
+            offset_ids, keyset_ids,
+            "keyset 与 OFFSET 对小数据集应覆盖相同行集合"
+        );
     }
 }

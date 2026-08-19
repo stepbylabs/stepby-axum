@@ -55,6 +55,28 @@ error:
     token_revoked: Session has been revoked, please log in again
     user_id_parse_failed: Failed to parse user ID
     captcha_uuid_invalid: Invalid captcha UUID format
+  oauth:
+    provider_not_found: Login provider not found
+    provider_code_exists: Provider code already exists
+    provider_disabled: This login method is disabled
+    code_missing: Missing authorization code (code)
+    state_invalid: Authorization state is invalid or expired, please retry login
+    token_exchange_failed: Failed to exchange code for token, please try again
+    userinfo_failed: Failed to fetch third-party user info
+    userinfo_missing_id: Third-party provider returned no user identifier
+    no_binding: This third-party account is not bound to any local account
+    auto_create_disabled: Local account auto-creation is not enabled, please log in and bind
+    auto_create_failed: Failed to auto-create local account, contact administrator
+    bind_taken: This third-party account is already bound to another local account
+    email_conflict: Third-party email already exists as local account, please log in with local account to bind
+    username_occupied: "Generated local username {{name}} is taken, cannot auto-create"
+    provider_id_invalid: Invalid provider ID
+    handoff_invalid: Binding credential is invalid or expired, please retry third-party login
+    password_wrong: Local account password verification failed
+    unbind_self_last: "Unbind rejected: only one account source (local/third-party) remains for this account"
+    unknown_error: Third-party login failed, please try again
+    local_user_not_found: Local account does not exist or is disabled
+    failure_title: Third-party login failed
   file:
     delete_failed: Failed to delete file
     delete_task_failed: Delete task failed
@@ -320,6 +342,9 @@ error:
     user_email_query_failed: Failed to query user email
     notice_type_invalid: "notice_type must be 1 (notice) or 2 (announcement), current value: {{value}}"
     status_invalid: "status must be 0 (normal) or 1 (closed), current value: {{value}}"
+  pref:
+    value_invalid: "Message preference field {{field}} is invalid (must be '0' or '1')"
+    time_invalid: "Do-not-disturb field {{field}} has invalid time format (expected HH:MM): {{value}}"
   websocket:
     connected: WebSocket connected
   role:
@@ -398,7 +423,10 @@ msg:
     add_dept: "Added department {{name}} successfully"
     add_menu: "Added menu {{name}} successfully"
     ip_location_update: "IP database updated successfully (source: {{source}}, size: {{size}} bytes)"
-  test: Connection test passed
+    test: Connection test passed
+    oauth_login: Third-party login successful
+    oauth_bind: Bound successfully
+    oauth_unbind: Unbound successfully
   cache:
     no_match: No matching cache
     key_not_found: Cache key does not exist
@@ -434,6 +462,11 @@ log:
     permission_denied: "Permission denied: missing required permission {{perm}}"
     totp_failed: Incorrect TOTP verification code
     totp_locked: Too many failed TOTP attempts, temporarily locked
+  oauth:
+    login_success: "Third-party login successful ({{provider}})"
+    login_failed: "Third-party login failed ({{provider}})"
+    bind_success: "Third-party account bound successfully ({{provider}})"
+    unbind_success: "Unbound successfully ({{provider}})"
 
 # Common status text (used in Excel exports, status display, etc.)
 common:

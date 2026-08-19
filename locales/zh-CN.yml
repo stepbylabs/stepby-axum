@@ -55,6 +55,28 @@ error:
     token_revoked: 会话已注销，请重新登录
     user_id_parse_failed: 用户 ID 解析失败
     captcha_uuid_invalid: 验证码 UUID 格式无效
+  oauth:
+    provider_not_found: 登录提供商不存在
+    provider_code_exists: 提供商编码已存在
+    provider_disabled: 该登录方式已停用
+    code_missing: 缺少授权码 (code)
+    state_invalid: 授权状态无效或已过期，请重新发起登录
+    token_exchange_failed: 授权码换取令牌失败，请稍后再试
+    userinfo_failed: 获取第三方用户信息失败
+    userinfo_missing_id: 第三方未返回用户唯一标识
+    no_binding: 该第三方账号尚未绑定本地账号
+    auto_create_disabled: 未配置自动创建账号，请先用本地账号登录后绑定
+    auto_create_failed: 自动创建本地账号失败，请联系管理员
+    bind_taken: 该第三方账号已绑定其他本地账号
+    email_conflict: 第三方邮箱已存在本地账号，请改用本地账号登录后绑定
+    username_occupied: "生成本地用户名 {{name}} 已被占用，无法自动创建"
+    provider_id_invalid: 提供商 ID 无效
+    handoff_invalid: 关联凭据无效或已过期，请重新发起第三方登录
+    password_wrong: 本地账号密码校验失败
+    unbind_self_last: 已解绑，当前仅剩一个账号来源（本地/第三方），不可再解绑
+    unknown_error: 第三方登录处理失败，请稍后再试
+    local_user_not_found: 本地账号不存在或已停用
+    failure_title: 第三方登录失败
   file:
     delete_failed: 删除文件失败
     delete_task_failed: 删除任务失败
@@ -282,6 +304,21 @@ error:
     id_invalid: 任务 ID 不合法
   scheduler:
     operation_failed: 调度器操作失败，请联系管理员
+  report:
+    id_empty: 报表 ID 不能为空
+    not_found: 报表不存在
+    code_duplicate: "报表编码「{{code}}」已存在"
+    type_invalid: "报表类型不合法，仅支持 login_stats / user_stats / msg_stats / custom，当前值: {{value}}"
+    config_json_invalid: 报表配置 config 必须是合法 JSON
+    delete_sub_failed: 删除报表的关联订阅失败
+  report_sub:
+    id_empty: 订阅 ID 不能为空
+    not_found: 订阅不存在
+    report_not_found: 关联报表不存在
+    cron_invalid: cron 表达式非法（须为 6 字段，含秒）
+    push_channel_none: 至少开启一种推送渠道（邮件或站内信）
+    email_invalid: 收件邮箱格式不正确
+    user_ids_invalid: 目标用户 ID 不合法
   oper_log:
     id_invalid: 日志 ID 不合法
     anonymous: 匿名
@@ -308,6 +345,9 @@ error:
     user_email_query_failed: 查询用户邮箱失败
     notice_type_invalid: "notice_type 必须为 1(通知) 或 2(公告)，当前值: {{value}}"
     status_invalid: "status 必须为 0(正常) 或 1(关闭)，当前值: {{value}}"
+  pref:
+    value_invalid: "消息偏好字段 {{field}} 取值非法（须为 0 或 1）"
+    time_invalid: "免打扰时间字段 {{field}} 格式非法（须为 HH:MM），当前值: {{value}}"
   role:
     not_found: 角色不存在
     perm_key_exists: 角色权限字符不能重复
@@ -385,6 +425,11 @@ msg:
     add_menu: "新增菜单 {{name}} 成功"
     ip_location_update: "IP 库更新成功（源: {{source}}，大小: {{size}} bytes）"
     test: 测试通过
+    oauth_login: 第三方登录成功
+    oauth_bind: 绑定成功
+    oauth_unbind: 解绑成功
+  report:
+    push_title: 报表推送
   cache:
     no_match: 无匹配缓存
     key_not_found: 缓存键不存在
@@ -420,6 +465,11 @@ log:
     permission_denied: "权限拒绝：缺少所需权限 {{perm}}"
     totp_failed: TOTP 动态验证码错误
     totp_locked: TOTP 验证失败次数过多，已临时锁定
+  oauth:
+    login_success: "第三方登录成功（{{provider}}）"
+    login_failed: "第三方登录失败（{{provider}}）"
+    bind_success: "第三方账号绑定成功（{{provider}}）"
+    unbind_success: "解绑成功（{{provider}}）"
 
 # 通用状态文案（Excel 导出、状态展示等场景使用）
 common:

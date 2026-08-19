@@ -42,6 +42,7 @@ mod tests {
             role_key: format!("key-{id}"),
             role_sort: 0,
             data_scope: scope.map(|s| s.to_owned()),
+            custom_sql: None,
             menu_check_strictly: None,
             dept_check_strictly: None,
             status: "0".to_owned(),
