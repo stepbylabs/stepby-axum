@@ -516,7 +516,11 @@ fn parse_redis_info(text: &str) -> HashMap<String, String> {
             continue;
         }
         if let Some((k, v)) = line.split_once(':') {
-            map.insert(k.trim().to_string(), v.trim().to_string());
+            let k = k.trim();
+            // 跳过空键（如 `:value` 行），避免无意义的占位键
+            if !k.is_empty() {
+                map.insert(k.to_string(), v.trim().to_string());
+            }
         }
     }
     map
@@ -601,4 +605,82 @@ async fn delete_keys(
         AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
     })?;
     Ok(count)
+}
+
+// ==================== 单元测试 ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_redis_info_parses_key_value_lines() {
+        let text = "# Server\r\nredis_version:7.2.0\n\nuptime_in_seconds:123\n";
+        let map = parse_redis_info(text);
+        assert_eq!(map.get("redis_version").map(String::as_str), Some("7.2.0"));
+        assert_eq!(
+            map.get("uptime_in_seconds").map(String::as_str),
+            Some("123")
+        );
+        // 分组注释与空行不进入结果
+        assert!(!map.contains_key("# Server"));
+    }
+
+    #[test]
+    fn parse_redis_info_skips_malformed_lines() {
+        let text = "no-colon-line\nfoo:bar\n:empty-key\n";
+        let map = parse_redis_info(text);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("foo").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn parse_command_stats_extracts_calls() {
+        let text = "# Commandstats\r\ncmdstat_get:calls=1000,usec=20000,usec_per_call=20.00\r\ncmdstat_set:calls=500\r\n";
+        let stats = parse_command_stats(text);
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].name, "get");
+        assert_eq!(stats[0].value, "1000");
+        assert_eq!(stats[1].name, "set");
+        assert_eq!(stats[1].value, "500");
+    }
+
+    #[test]
+    fn parse_command_stats_ignores_non_cmdstat_lines() {
+        let text = "# Server\nredis_version:7.2.0\ncmdstat_get:calls=42\n";
+        let stats = parse_command_stats(text);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].name, "get");
+        assert_eq!(stats[0].value, "42");
+    }
+
+    #[test]
+    fn key_prefix_keeps_colon_and_falls_back_to_whole_key() {
+        assert_eq!(key_prefix("dict:user:1"), "dict:");
+        assert_eq!(key_prefix("login_fail:admin"), "login_fail:");
+        assert_eq!(key_prefix("no-namespace-key"), "no-namespace-key");
+    }
+
+    #[test]
+    fn validate_cache_prefix_allows_whitelisted_prefix() {
+        assert!(validate_cache_prefix("dict:user").is_ok());
+        assert!(validate_cache_prefix("sys_config:site_name").is_ok());
+        assert!(validate_cache_prefix("online:").is_ok());
+    }
+
+    #[test]
+    fn validate_cache_prefix_rejects_wildcards() {
+        assert!(validate_cache_prefix("dict:*").is_err());
+        assert!(validate_cache_prefix("dict:user?").is_err());
+        assert!(validate_cache_prefix("dict:[abc]").is_err());
+    }
+
+    #[test]
+    fn validate_cache_prefix_rejects_non_whitelisted_prefix() {
+        // 非白名单前缀，防误删关键业务键
+        assert!(validate_cache_prefix("session:").is_err());
+        assert!(validate_cache_prefix("user:token:1").is_err());
+        // 空串既不在白名单前缀内，也会被拒
+        assert!(validate_cache_prefix("").is_err());
+    }
 }
