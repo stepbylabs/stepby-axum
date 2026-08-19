@@ -4,12 +4,13 @@
 //! - GET    /tool/gen/list            分页查询代码生成业务表
 //! - GET    /tool/gen/db/list         查询数据库表列表（导入用）
 //! - GET    /tool/gen/{tableId}       查询代码生成业务表详情
-//! - POST   /tool/gen/importTable     导入表
+//! - POST   /tool/gen/importTable     批量导入表（单事务原子）
 //! - POST   /tool/gen/createTable     创建表
 //! - PUT    /tool/gen                 修改代码生成配置
 //! - DELETE /tool/gen/{tableIds}      批量删除代码生成业务表
 //! - GET    /tool/gen/preview/{tableId}  预览生成代码
 //! - GET    /tool/gen/genCode/{tableName} 生成代码（ZIP 下载）
+//! - GET    /tool/gen/batchGenCode    批量生成代码（ZIP 下载）
 //! - GET    /tool/gen/synchDb/{tableName}  同步数据库
 
 use std::sync::Arc;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
 
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
@@ -81,12 +81,11 @@ pub async fn import_table(
     for table_name in &table_names {
         validate_table_name(table_name)?;
     }
-    for table_name in table_names {
-        state
-            .gen_table_service
-            .import_table(table_name, operator.username())
-            .await?;
-    }
+    // 批量导入下沉到 Service，内部以单事务保证原子性（任一张表失败则整体回滚）
+    state
+        .gen_table_service
+        .import_tables(&table_names, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.import")))
 }
 
@@ -158,29 +157,14 @@ pub async fn delete_table(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
-/// 预览代码响应包装
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreviewResponse {
-    pub code: i32,
-    pub msg: String,
-    pub data: PreviewCodeVo,
-}
-
-crate::impl_into_response!(PreviewResponse);
-
 /// GET /tool/gen/preview/{tableId}
 /// 预览生成代码
 pub async fn preview(
     State(state): State<Arc<AppState>>,
     Path(table_id): Path<i64>,
-) -> Result<PreviewResponse, AppError> {
+) -> Result<AjaxResult<PreviewCodeVo>, AppError> {
     let data = state.gen_table_service.preview(table_id).await?;
-    Ok(PreviewResponse {
-        code: 200,
-        msg: crate::tr!("msg.success.default"),
-        data,
-    })
+    Ok(AjaxResult::success(data))
 }
 
 /// 校验表名仅含字母、数字、下划线，长度 1-64（SEC-004：防 CRLF / 引号 / 路径穿越注入）

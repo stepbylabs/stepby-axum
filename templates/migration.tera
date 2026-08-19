@@ -1,0 +1,8 @@
+-- {{ table.functionName }} 表结构（仅供参考，实际表结构由数据库元数据导入）
+-- 表名: {{ table.tableName }}
+-- 描述: {{ table.tableComment | default(value="") }}
+
+CREATE TABLE IF NOT EXISTS {{ table.tableName }} (
+{% for col in columns %}    {{ col.columnName }} {{ col.columnType }}{% if col.isRequired == "1" %} NOT NULL{% endif %}{% if col.isPk == "1" %} PRIMARY KEY{% endif %}{% if col.isIncrement == "1" %} AUTOINCREMENT{% endif %}{% if not loop.last %},{% endif %}
+
+{% endfor %});

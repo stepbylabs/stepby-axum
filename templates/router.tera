@@ -1,0 +1,17 @@
+//! {{ table.tableName }} 模块路由
+
+use std::sync::Arc;
+use axum::Router;
+use axum::routing::{get, post, put, delete};
+
+use crate::handler::{{ table.tableName }}_handler;
+use crate::state::AppState;
+
+pub fn {{ table.tableName | camel_case }}_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/{{ table.moduleName }}/{{ table.tableName }}/list", get({{ table.tableName }}_handler::list))
+        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", get({{ table.tableName }}_handler::get_info))
+        .route("/{{ table.moduleName }}/{{ table.tableName }}", post({{ table.tableName }}_handler::add))
+        .route("/{{ table.moduleName }}/{{ table.tableName }}", put({{ table.tableName }}_handler::edit))
+        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", delete({{ table.tableName }}_handler::remove))
+}
