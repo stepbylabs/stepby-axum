@@ -287,12 +287,7 @@ impl SysOperLogService {
             .oper_log_repo
             .failure_stats_in_window(window_minutes)
             .await?;
-        let fail_rate = if total > 0 {
-            (fail as f64) / (total as f64) * 100.0
-        } else {
-            0.0
-        };
-        let fail_rate_alarm = fail_rate >= fail_rate_threshold as f64;
+        let (fail_rate, fail_rate_alarm) = eval_fail_rate(total, fail, fail_rate_threshold);
 
         let operator_bursts: Vec<AlarmItem> = self
             .oper_log_repo
@@ -640,4 +635,68 @@ pub struct OperLogAnomaly {
     pub oper_ip: String,
     pub error_msg: String,
     pub oper_time: String,
+}
+
+/// 计算时间窗口内失败率（百分比，保留两位小数）并判定是否触发失败率告警
+///
+/// - `total == 0` 视为失败率 0，不触发告警（避免除零）
+/// - 告警判定基于原始失败率（未取整），避免取整导致阈值跨界误判；
+///   返回的展示失败率则保留两位小数，供审计大屏显示。
+pub(crate) fn eval_fail_rate(total: i64, fail: i64, threshold: i64) -> (f64, bool) {
+    let raw = if total > 0 {
+        (fail as f64) / (total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let rounded = (raw * 100.0).round() / 100.0;
+    (rounded, raw >= threshold as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eval_fail_rate;
+
+    #[test]
+    fn eval_fail_rate_zero_total_is_zero_no_alarm() {
+        let (rate, alarm) = eval_fail_rate(0, 0, 10);
+        assert_eq!(rate, 0.0);
+        assert!(!alarm);
+    }
+
+    #[test]
+    fn eval_fail_rate_below_threshold_no_alarm() {
+        let (rate, alarm) = eval_fail_rate(1000, 50, 10);
+        assert_eq!(rate, 5.0);
+        assert!(!alarm);
+    }
+
+    #[test]
+    fn eval_fail_rate_exactly_threshold_alarms() {
+        let (rate, alarm) = eval_fail_rate(100, 10, 10);
+        assert_eq!(rate, 10.0);
+        assert!(alarm);
+    }
+
+    #[test]
+    fn eval_fail_rate_exceeds_threshold_alarms() {
+        let (rate, alarm) = eval_fail_rate(100, 33, 10);
+        assert_eq!(rate, 33.0);
+        assert!(alarm);
+    }
+
+    #[test]
+    fn eval_fail_rate_rounds_to_two_decimals() {
+        let (rate, alarm) = eval_fail_rate(3, 1, 25); // 1/3 ≈ 33.333…%
+        assert_eq!(rate, 33.33);
+        // 原始率 33.33… >= 25，触发告警
+        assert!(alarm);
+    }
+
+    #[test]
+    fn eval_fail_rate_rounding_edge_crossing() {
+        // 阈值 25，原失败率 24.999…%（如 749/3000）不告警；取整后仍为 25.00
+        let (rate, alarm) = eval_fail_rate(3000, 749, 25);
+        assert_eq!(rate, 24.97);
+        assert!(!alarm);
+    }
 }
