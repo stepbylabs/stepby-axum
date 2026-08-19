@@ -301,6 +301,21 @@ error:
     id_invalid: Invalid job ID
   scheduler:
     operation_failed: Scheduler operation failed, please contact the administrator
+  report:
+    id_empty: Report ID must not be empty
+    not_found: Report does not exist
+    code_duplicate: "Report code「{{code}}」already exists"
+    type_invalid: "Invalid report type, only login_stats / user_stats / msg_stats / custom are supported, current value: {{value}}"
+    config_json_invalid: Report config must be a valid JSON
+    delete_sub_failed: Failed to delete subscriptions of the report
+  report_sub:
+    id_empty: Subscription ID must not be empty
+    not_found: Subscription does not exist
+    report_not_found: Referenced report does not exist
+    cron_invalid: Invalid cron expression (must be 6 fields, including seconds)
+    push_channel_none: At least one push channel must be enabled (email or site message)
+    email_invalid: Invalid recipient email format
+    user_ids_invalid: Invalid target user IDs
   oper_log:
     id_invalid: Invalid log ID
     anonymous: Anonymous
@@ -427,6 +442,8 @@ msg:
     oauth_login: Third-party login successful
     oauth_bind: Bound successfully
     oauth_unbind: Unbound successfully
+  report:
+    push_title: Report push
   cache:
     no_match: No matching cache
     key_not_found: Cache key does not exist
