@@ -831,8 +831,18 @@ impl AuthService {
         ctx: &LoginContext<'_>,
     ) -> Result<LoginVo, ServiceError> {
         // 1. JWT 签发（M-7：generate_token 同时返回 claims，避免后续重复 verify）
+        //    P0-R81-007：读取当前密码版本号 pwd_ver:{user_id}（无则 0）写入 claim，
+        //    auth 中间件据此判定 token 是否在密码变更前签发（旧 token 立即失效）。
+        //    读取失败视为 0（fail-open，仅影响旧 token 失效判断；Redis 不可用时中间件会 fail-closed 拒绝）。
         let user_id = user.user_id.to_string();
-        let (token, claims) = JwtUtils::generate_token(&user_id, ctx.username, jwt_config)?;
+        let pwd_ver_key = format!("pwd_ver:{}", user_id);
+        let pwd_ver: Option<u64> = redis::cmd("GET")
+            .arg(&pwd_ver_key)
+            .query_async(redis)
+            .await
+            .unwrap_or(None);
+        let (token, claims) =
+            JwtUtils::generate_token(&user_id, ctx.username, jwt_config, pwd_ver.unwrap_or(0))?;
 
         // 2. 登录日志写入（成功，best-effort）
         //    H-1/H-2 修复：日志写入失败不应阻断登录响应，仅记录警告日志
@@ -945,7 +955,10 @@ impl AuthService {
         // R11：命令级超时
         match tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            pipe.query_async::<Vec<i64>>(redis),
+            // pipeline 混有 SETEX（返回 Status "OK"）与 DEL（返回整数），
+            // 结果类型不一致，不能用 Vec<i64>（会报 "not convertible to numeric"），
+            // 用 () 忽略全部返回值（本 pipeline 为 best-effort 写操作）。
+            pipe.query_async::<()>(redis),
         )
         .await
         {

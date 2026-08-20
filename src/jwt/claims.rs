@@ -23,6 +23,14 @@ pub struct Claims {
     pub aud: String,
     /// JWT 唯一 ID（防止同用户同秒生成的 token 完全相同，导致黑名单冲突）
     pub jti: String,
+    /// 密码版本号（P0-R81-007 改进：取代秒级时间戳标记）
+    ///
+    /// - 改密/重置密码/停用/删除用户时对 `pwd_ver:{user_id}` 计数器 INCR；
+    /// - 登录时读取当前版本号写入 claim；
+    /// - auth 中间件比较 Redis 当前版本 > claim 版本则拒绝（旧 token 立即失效）。
+    /// - `#[serde(default)]` 兼容旧 token（未携带该 claim 视为版本 0，存量用户未改密前版本同为 0，可平滑过渡）。
+    #[serde(default)]
+    pub pwd_ver: u64,
 }
 
 /// JWT 错误类型（类型化，替代原 anyhow::Result）
@@ -95,6 +103,7 @@ impl JwtUtils {
         user_id: &str,
         username: &str,
         config: &JwtConfig,
+        pwd_ver: u64,
     ) -> Result<(String, Claims), JwtError> {
         let now = Utc::now();
         let exp = now + chrono::Duration::hours(config.expire_hours);
@@ -108,6 +117,7 @@ impl JwtUtils {
             iss: config.issuer.clone(),
             aud: config.audience.clone(),
             jti: uuid::Uuid::new_v4().to_string(),
+            pwd_ver,
         };
         // SEC-008：显式指定 Algorithm::HS256，不依赖 Header::default()（默认 HS256 但显式更安全）
         let mut header = Header::new(Algorithm::HS256);
@@ -168,7 +178,7 @@ mod tests {
     fn test_generate_and_verify_roundtrip() {
         let cfg = test_jwt_config();
         let (token, claims) =
-            JwtUtils::generate_token("1", "admin", &cfg).expect("generate_token must succeed");
+            JwtUtils::generate_token("1", "admin", &cfg, 0).expect("generate_token must succeed");
 
         let verified = JwtUtils::verify_token(&token, &cfg).expect("verify must succeed");
 
@@ -200,6 +210,7 @@ mod tests {
             iss: cfg.issuer.clone(),
             aud: cfg.audience.clone(),
             jti: "test-jti".to_string(),
+            pwd_ver: 0,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
@@ -217,7 +228,7 @@ mod tests {
 
         let cfg = test_jwt_config();
         let (token, _) =
-            JwtUtils::generate_token("1", "admin", &cfg).expect("generate_token must succeed");
+            JwtUtils::generate_token("1", "admin", &cfg, 0).expect("generate_token must succeed");
 
         // 篡改签名：先 base64url 解码 → 翻转一个字节 → 重新编码。
         // 不做"末尾字符翻转"是因为 HS256 签名为 32 字节 → base64url 为 43 字符（无填充），
@@ -253,6 +264,7 @@ mod tests {
             iss: "evil-issuer".to_string(), // 错误的签发者
             aud: cfg.audience.clone(),
             jti: "test-jti".to_string(),
+            pwd_ver: 0,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
@@ -275,6 +287,7 @@ mod tests {
             iss: cfg.issuer.clone(),
             aud: "wrong-audience".to_string(), // 错误的受众
             jti: "test-jti".to_string(),
+            pwd_ver: 0,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
@@ -289,7 +302,7 @@ mod tests {
     fn test_verify_rejects_wrong_secret() {
         let cfg = test_jwt_config();
         let (token, _) =
-            JwtUtils::generate_token("1", "admin", &cfg).expect("generate_token must succeed");
+            JwtUtils::generate_token("1", "admin", &cfg, 0).expect("generate_token must succeed");
 
         // 用不同密钥校验 → 签名不匹配
         let mut wrong_cfg = cfg.clone();

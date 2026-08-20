@@ -56,21 +56,23 @@ pub async fn auth_middleware(
         .map(|r| r.0.clone())
         .unwrap_or_default();
 
-    // 4+5. Redis 黑名单 + 改密校验（合并为单次 Pipeline，减少 RTT）
+    // 4+5. Redis 黑名单 + 密码版本号校验（合并为单次 Pipeline，减少 RTT）
     //    fail-closed 策略：Redis 异常时拒绝请求，避免已登出 token 继续访问
     //    使用 token 的 SHA-256 哈希作为 blacklist key，节省 Redis 内存
     let blacklist_key = format!("blacklist:{}", crate::utils::crypto::token_hash(token));
-    let pwd_changed_key = format!("pwd_changed:{}", claims.sub);
+    // P0-R81-007 密码版本号：改密/重置/停用/删除时对 pwd_ver:{user_id} INCR，
+    // 登录时写入 claim；若 Redis 当前版本 > claim 版本，说明 token 签发后发生过密码变更 → 拒绝。
+    let pwd_ver_key = format!("pwd_ver:{}", claims.sub);
     let mut redis = state.redis.clone();
-    // Pipeline：一次 RTT 同时查询 blacklist 和 pwd_changed
+    // Pipeline：一次 RTT 同时查询 blacklist 和 pwd_ver
     // R11：命令级超时（REDIS_CMD_TIMEOUT_SECS=3s），fail-closed：超时返回 503 拒绝请求
-    let (is_blacklisted, pwd_changed): (Option<String>, Option<i64>) = tokio::time::timeout(
+    let (is_blacklisted, pwd_ver): (Option<String>, Option<u64>) = tokio::time::timeout(
         Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
         redis::pipe()
             .cmd("GET")
             .arg(&blacklist_key)
             .cmd("GET")
-            .arg(&pwd_changed_key)
+            .arg(&pwd_ver_key)
             .query_async(&mut redis),
     )
     .await
@@ -78,7 +80,7 @@ pub async fn auth_middleware(
         tracing::error!(
             request_id = %request_id,
             user_id = %claims.sub,
-            "Redis 黑名单/pwd_changed 查询超时（fail-closed 拒绝请求）"
+            "Redis 黑名单/pwd_ver 查询超时（fail-closed 拒绝请求）"
         );
         AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
     })?
@@ -87,7 +89,7 @@ pub async fn auth_middleware(
             request_id = %request_id,
             user_id = %claims.sub,
             error = %e,
-            "Redis 黑名单/pwd_changed 查询失败（fail-closed 拒绝请求）"
+            "Redis 黑名单/pwd_ver 查询失败（fail-closed 拒绝请求）"
         );
         AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
     })?;
@@ -97,9 +99,11 @@ pub async fn auth_middleware(
         )));
     }
 
-    // 改密后旧 token 失效校验（P0-R81-007）
-    if let Some(changed_at) = pwd_changed
-        && changed_at > i64::try_from(claims.iat).unwrap_or(0)
+    // 改密后旧 token 失效校验（P0-R81-007 版本号机制）
+    // 版本号单调递增，无秒级时间戳同秒竞态：即使登录与改密发生在同一秒，版本号也已 +1，
+    // 旧 token（版本较低）立即失效；改密后新登录的 token 携带最新版本号，不受影响。
+    if let Some(current_ver) = pwd_ver
+        && current_ver > claims.pwd_ver
     {
         return Err(AppError::unauthorized(&crate::tr!(
             "error.auth.password_changed"
@@ -225,6 +229,7 @@ mod tests {
             iss: "yebot".to_string(),
             aud: "yebot".to_string(),
             jti: "jti-1".to_string(),
+            pwd_ver: 0,
         };
         parts.extensions.insert(claims);
         let operator = Operator::from_request_parts(&mut parts, &()).await.unwrap();
