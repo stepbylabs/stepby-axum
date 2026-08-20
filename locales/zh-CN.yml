@@ -1,4 +1,4 @@
-# zh-CN 文案（默认语言）
+﻿# zh-CN 文案（默认语言）
 # key 规范：error.common.*（通用错误）/ error.{module}.*（业务错误）/ msg.success.*（操作成功）
 
 error:
@@ -20,8 +20,8 @@ error:
     internal: 系统内部错误，请联系管理员
     validate_failed: 参数校验失败
     parse_failed: 请求参数解析失败
-    time_format_invalid: "时间格式不正确: {{s}}"
-    batch_size_exceeded: "批量操作数量不能超过{{max}}"
+    time_format_invalid: "时间格式不正确: %{s}"
+    batch_size_exceeded: "批量操作数量不能超过%{max}"
   auth:
     captcha_expired: 验证码已过期或不存在
     captcha_wrong: 验证码错误
@@ -47,7 +47,7 @@ error:
     idempotency_key_empty: Idempotency-Key 头不能为空
     idempotency_key_invalid: Idempotency-Key 包含非法字符，仅允许字母、数字、连字符和下划线
     idempotency_key_non_ascii: Idempotency-Key 头包含非 ASCII 字符
-    idempotency_key_too_long: "Idempotency-Key 长度不能超过 {{max}} 字符"
+    idempotency_key_too_long: "Idempotency-Key 长度不能超过 %{max} 字符"
     login_info_missing: 无法获取登录信息，请重新登录
     password_changed: 密码已修改，请重新登录
     permission_denied: 没有权限访问该资源
@@ -69,7 +69,7 @@ error:
     auto_create_failed: 自动创建本地账号失败，请联系管理员
     bind_taken: 该第三方账号已绑定其他本地账号
     email_conflict: 第三方邮箱已存在本地账号，请改用本地账号登录后绑定
-    username_occupied: "生成本地用户名 {{name}} 已被占用，无法自动创建"
+    username_occupied: "生成本地用户名 %{name} 已被占用，无法自动创建"
     provider_id_invalid: 提供商 ID 无效
     handoff_invalid: 关联凭据无效或已过期，请重新发起第三方登录
     password_wrong: 本地账号密码校验失败
@@ -85,18 +85,18 @@ error:
     invalid_name: 非法的文件名
     list_failed: 读取目录失败
     list_task_failed: 读取目录任务失败
-    multipart_parse_failed: "解析 multipart 失败: {{e}}"
-    read_failed: "读取文件内容失败: {{e}}"
-    too_large: "文件大小不能超过 {{max}}MB"
+    multipart_parse_failed: "解析 multipart 失败: %{e}"
+    read_failed: "读取文件内容失败: %{e}"
+    too_large: "文件大小不能超过 %{max}MB"
     unknown_ext: 无法识别文件扩展名
-    unsupported_type: "不支持的文件类型: {{ext}}"
+    unsupported_type: "不支持的文件类型: %{ext}"
   storage:
-    unsupported_backend: "不支持的存储后端: {{backend}}（支持 local / s3）"
+    unsupported_backend: "不支持的存储后端: %{backend}（支持 local / s3）"
     s3_missing_config: "S3 存储缺少必需配置（access_key/secret_key/endpoint/bucket）"
     s3_invalid_endpoint: "S3 端点格式无效"
     s3_client_build_failed: "S3 客户端初始化失败"
     s3_request_failed: "S3 请求失败，请检查对象存储可用性"
-    s3_status: "S3 返回错误状态 {{status}}: {{detail}}"
+    s3_status: "S3 返回错误状态 %{status}: %{detail}"
     s3_list_failed: "S3 对象列举失败"
   password:
     complexity_common: 密码过于常见，请使用更复杂的口令
@@ -104,7 +104,7 @@ error:
     complexity_letter: 密码必须包含至少 1 个字母
   user:
     not_found: 用户不存在
-    not_found_by_id: "用户 ID={{id}} 不存在"
+    not_found_by_id: "用户 ID=%{id} 不存在"
     name_duplicate: 用户名不能重复
     phone_invalid: 手机号格式不正确（请检查国家/地区代码）
     admin_disable_forbidden: 不允许停用超级管理员
@@ -122,7 +122,7 @@ error:
     import_login_length: 登录名称长度需为 2-30 个字符
     import_login_format: 登录名称仅允许字母、数字、下划线
     import_nick_required: 用户姓名不能为空
-    import_dept_not_found: "部门「{{name}}」不存在"
+    import_dept_not_found: "部门「%{name}」不存在"
     import_duplicate_in_file: 与文件中其它行登录名称重复
     pwd_reset_token_invalidate_failed: 密码重置成功，但旧 token 失效标记写入失败
     pwd_change_token_invalidate_failed: 密码修改成功，但旧 token 失效标记写入失败
@@ -140,7 +140,7 @@ error:
     has_users: 部门下存在用户，不允许删除
     ids_empty: deptIds/orderNums 解析后为空
     level_too_deep: 部门层级过深，防环校验失败
-    id_not_found: "部门 ID={{id}} 不存在"
+    id_not_found: "部门 ID=%{id} 不存在"
     ids_count_mismatch: deptIds 与 orderNums 数量不一致
   menu:
     not_found: 菜单不存在
@@ -152,7 +152,7 @@ error:
     assigned_to_role: 菜单已分配给角色，不允许删除
     ids_empty: menuIds/orderNums 解析后为空
     level_too_deep: 菜单层级过深，防环校验失败
-    id_not_found: "菜单 ID={{id}} 不存在"
+    id_not_found: "菜单 ID=%{id} 不存在"
     ids_count_mismatch: menuIds 与 orderNums 数量不一致
   rate_limit:
     not_found: 限流配置不存在
@@ -168,50 +168,50 @@ error:
     not_found: 岗位不存在
     code_exists: 岗位编码已存在
     id_invalid: 岗位 ID 不合法
-    assigned_to_user: "岗位 {{id}} 已分配给用户，不能删除"
+    assigned_to_user: "岗位 %{id} 已分配给用户，不能删除"
   task:
     not_found: 任务不存在
     id_invalid: 任务 ID 不合法
   gen:
     time_format: 时间格式不正确
     int_default: 整数类型默认值不是有效数字
-    int_default_invalid: "整数类型默认值 {{value}} 不是有效数字"
+    int_default_invalid: "整数类型默认值 %{value} 不是有效数字"
     decimal_default: 小数类型默认值不是有效数字
-    decimal_default_invalid: "小数类型默认值 {{value}} 不是有效数字"
+    decimal_default_invalid: "小数类型默认值 %{value} 不是有效数字"
     table_not_found: 代码生成业务表不存在
     table_name_start: 表名必须以字母开头
     create_table_failed: 建表失败
-    create_table_failed_with_err: "建表失败: {{err}}"
-    table_id_not_found: "表 ID={{id}} 不存在"
-    table_not_imported: "表 {{name}} 未导入"
-    table_no_columns: "表 {{name}} 不存在或没有字段"
+    create_table_failed_with_err: "建表失败: %{err}"
+    table_id_not_found: "表 ID=%{id} 不存在"
+    table_not_imported: "表 %{name} 未导入"
+    table_no_columns: "表 %{name} 不存在或没有字段"
     table_select_required: 请选择要导入的表
     table_id_invalid: 表 ID 不合法
     table_name_invalid: 非法的表名
-    invalid_table_name_with_value: "非法表名: {{name}}"
+    invalid_table_name_with_value: "非法表名: %{name}"
     table_select_for_gen_required: 请选择要生成的表
     zip_write_failed: ZIP 写入失败
     zip_finish_failed: ZIP 完成失败
     template_load_failed: Tera 模板加载失败
     path_empty_component: 路径组件包含非法空字符
     record_not_found: 记录不存在
-    field_length_invalid: "{{field}} 长度必须在1-64之间"
-    field_start_invalid: "{{field}} 必须以字母或下划线开头"
-    field_char_invalid: "{{field}} 只能包含字母、数字、下划线"
-    bool_default_invalid: "布尔类型默认值 {{value}} 必须是 true/false/0/1"
-    table_already_imported: "表 {{name}} 已导入，请勿重复导入"
-    table_no_columns_or_not_exist: "表 {{name}} 不存在或没有字段"
-    table_already_in_gen: "表 {{name}} 已存在于 gen_table，请勿重复创建"
-    table_already_in_db: "表 {{name}} 已存在于数据库，请勿重复创建"
-    column_name_duplicate: "列名 {{name}} 重复"
-    column_type_length_required: "列 {{name}} 的类型 {{ty}} 需要指定长度"
-    column_decimal_scale_required: "列 {{name}} 的类型 Decimal 需要指定小数位"
-    column_decimal_scale_invalid: "列 {{name}} 的小数位 {{scale}} 必须小于长度 {{length}}"
-    column_auto_inc_no_pk: "列 {{name}} 设置自增但未设置主键"
-    column_auto_inc_not_int: "列 {{name}} 设置自增但类型 {{ty}} 不是整数类型"
-    template_render_failed: "模板渲染失败 ({{name}}): {{msg}}"
-    path_component_invalid: "路径组件包含非法字符（不允许 .. / \\）：{{name}}"
-    batch_tables_exceeded: "单次最多生成 {{max}} 张表的代码"
+    field_length_invalid: "%{field} 长度必须在1-64之间"
+    field_start_invalid: "%{field} 必须以字母或下划线开头"
+    field_char_invalid: "%{field} 只能包含字母、数字、下划线"
+    bool_default_invalid: "布尔类型默认值 %{value} 必须是 true/false/0/1"
+    table_already_imported: "表 %{name} 已导入，请勿重复导入"
+    table_no_columns_or_not_exist: "表 %{name} 不存在或没有字段"
+    table_already_in_gen: "表 %{name} 已存在于 gen_table，请勿重复创建"
+    table_already_in_db: "表 %{name} 已存在于数据库，请勿重复创建"
+    column_name_duplicate: "列名 %{name} 重复"
+    column_type_length_required: "列 %{name} 的类型 %{ty} 需要指定长度"
+    column_decimal_scale_required: "列 %{name} 的类型 Decimal 需要指定小数位"
+    column_decimal_scale_invalid: "列 %{name} 的小数位 %{scale} 必须小于长度 %{length}"
+    column_auto_inc_no_pk: "列 %{name} 设置自增但未设置主键"
+    column_auto_inc_not_int: "列 %{name} 设置自增但类型 %{ty} 不是整数类型"
+    template_render_failed: "模板渲染失败 (%{name}): %{msg}"
+    path_component_invalid: "路径组件包含非法字符（不允许 .. / \\）：%{name}"
+    batch_tables_exceeded: "单次最多生成 %{max} 张表的代码"
   common_handler:
     field_not_found_file: 未找到 file 字段
     field_not_found_avatar: 未找到 avatarfile 字段
@@ -232,13 +232,13 @@ error:
     key_scan_failed: 扫描缓存键失败
     key_batch_delete_failed: 批量删除缓存键失败
     flushdb_disabled: 该端点已禁用：FLUSHDB 会误清 blacklist/online/login_fail 等业务键，请使用 clearCacheName 按前缀清理
-    prefix_not_allowed: "不允许操作缓存前缀: {{prefix}}，仅支持: {{allowed}}"
-    key_prefix_required: "缓存键必须以 {{name}} 开头"
-    key_count_remark: "{{count}} 个键"
-    type_not_previewable: "[{{type}} 类型缓存，不支持预览]"
+    prefix_not_allowed: "不允许操作缓存前缀: %{prefix}，仅支持: %{allowed}"
+    key_prefix_required: "缓存键必须以 %{name} 开头"
+    key_count_remark: "%{count} 个键"
+    type_not_previewable: "[%{type} 类型缓存，不支持预览]"
     memory_usage_failed: 扫描缓存键内存占用失败
   monitor_server:
-    duration_format: "{{days}}天{{hours}}小时{{minutes}}分钟"
+    duration_format: "%{days}天%{hours}小时%{minutes}分钟"
   excel:
     fields_empty: 导出字段列表为空或无匹配字段
     build_task_failed: Excel 构建任务失败
@@ -246,10 +246,10 @@ error:
     header_write_failed: 写入表头失败
     data_write_failed: 写入数据失败
     generate_failed: 生成 Excel 失败
-    import_parse_failed: 解析 Excel 文件失败：{{e}}，请使用下载的模板填写，勿改动表头
+    import_parse_failed: 解析 Excel 文件失败：%{e}，请使用下载的模板填写，勿改动表头
   ip_location:
     source_invalid: 更新源必须为 maxmind 或 p3terx
-    unknown_source_type: "未知的更新源类型: {{s}}"
+    unknown_source_type: "未知的更新源类型: %{s}"
     maxmind_credentials_required: 切换到 maxmind 源需配置 Account ID 和 License Key
     private_ip: 内网IP
     update_unavailable: IP 库更新服务暂不可用，请稍后再试
@@ -279,14 +279,14 @@ error:
     download_status_invalid: 仅可下载成功的备份
     read_file_task_failed: 读取文件任务失败
     read_backup_file_failed: 读取备份文件失败
-    unsupported_db_type: "不支持的数据库类型: {{url}}"
+    unsupported_db_type: "不支持的数据库类型: %{url}"
     db_backup_failed: 数据库备份失败
-    process_timeout: "备份进程超时（{{secs}} 秒）"
-    process_nonzero_exit: "备份进程返回非零状态: {{err}}"
+    process_timeout: "备份进程超时（%{secs} 秒）"
+    process_nonzero_exit: "备份进程返回非零状态: %{err}"
     db_restore_failed: 数据库恢复失败
-    restore_process_timeout: "恢复进程超时（{{secs}} 秒）"
-    restore_process_nonzero_exit: "恢复进程返回非零状态: {{err}}"
-    sqlite3_backup_failed: "sqlite3 备份失败: {{err}}"
+    restore_process_timeout: "恢复进程超时（%{secs} 秒）"
+    restore_process_nonzero_exit: "恢复进程返回非零状态: %{err}"
+    sqlite3_backup_failed: "sqlite3 备份失败: %{err}"
     sqlite3_branch_unreachable: SQLite 备份应在上文处理，不应到达此分支（请检查代码逻辑）
     mysql_restore_branch_unreachable: MySQL 恢复应走 run_mysql_restore 独立分支（请检查代码逻辑）
   server:
@@ -307,8 +307,8 @@ error:
   report:
     id_empty: 报表 ID 不能为空
     not_found: 报表不存在
-    code_duplicate: "报表编码「{{code}}」已存在"
-    type_invalid: "报表类型不合法，仅支持 login_stats / user_stats / msg_stats / custom，当前值: {{value}}"
+    code_duplicate: "报表编码「%{code}」已存在"
+    type_invalid: "报表类型不合法，仅支持 login_stats / user_stats / msg_stats / custom，当前值: %{value}"
     config_json_invalid: 报表配置 config 必须是合法 JSON
     delete_sub_failed: 删除报表的关联订阅失败
   report_sub:
@@ -343,11 +343,11 @@ error:
     not_found: 通知公告不存在
     id_invalid: 通知公告 ID 不合法
     user_email_query_failed: 查询用户邮箱失败
-    notice_type_invalid: "notice_type 必须为 1(通知) 或 2(公告)，当前值: {{value}}"
-    status_invalid: "status 必须为 0(正常) 或 1(关闭)，当前值: {{value}}"
+    notice_type_invalid: "notice_type 必须为 1(通知) 或 2(公告)，当前值: %{value}"
+    status_invalid: "status 必须为 0(正常) 或 1(关闭)，当前值: %{value}"
   pref:
-    value_invalid: "消息偏好字段 {{field}} 取值非法（须为 0 或 1）"
-    time_invalid: "免打扰时间字段 {{field}} 格式非法（须为 HH:MM），当前值: {{value}}"
+    value_invalid: "消息偏好字段 %{field} 取值非法（须为 0 或 1）"
+    time_invalid: "免打扰时间字段 %{field} 格式非法（须为 HH:MM），当前值: %{value}"
   role:
     not_found: 角色不存在
     perm_key_exists: 角色权限字符不能重复
@@ -357,8 +357,8 @@ error:
     admin_data_scope_forbidden: 不允许修改超级管理员角色的数据权限
     user_id_empty: 用户 ID 不能为空
     id_empty: 角色 ID 不能为空
-    assigned_to_user: "角色 {{id}} 已分配给用户，不允许删除"
-    not_found_by_id: "角色 {{id}} 不存在"
+    assigned_to_user: "角色 %{id} 已分配给用户，不允许删除"
+    not_found_by_id: "角色 %{id} 不存在"
   job_log:
     id_invalid: 日志 ID 不合法
   totp:
@@ -409,7 +409,7 @@ msg:
     refresh: 刷新成功
     status_change: 状态修改成功
     execute: 执行成功
-    user_import: 成功导入 {{n}} 个用户
+    user_import: 成功导入 %{n} 个用户
     save: 保存成功
     reload: 热加载成功
     password_reset: 密码重置成功
@@ -419,11 +419,11 @@ msg:
     auth: 授权成功
     import: 导入成功
     sync: 同步成功
-    add_user: "新增用户 {{name}} 成功"
-    add_role: "新增角色 {{name}} 成功"
-    add_dept: "新增部门 {{name}} 成功"
-    add_menu: "新增菜单 {{name}} 成功"
-    ip_location_update: "IP 库更新成功（源: {{source}}，大小: {{size}} bytes）"
+    add_user: "新增用户 %{name} 成功"
+    add_role: "新增角色 %{name} 成功"
+    add_dept: "新增部门 %{name} 成功"
+    add_menu: "新增菜单 %{name} 成功"
+    ip_location_update: "IP 库更新成功（源: %{source}，大小: %{size} bytes）"
     test: 测试通过
     oauth_login: 第三方登录成功
     oauth_bind: 绑定成功
@@ -433,22 +433,22 @@ msg:
   cache:
     no_match: 无匹配缓存
     key_not_found: 缓存键不存在
-    cleared: "清除成功，共删除 {{count}} 个键"
+    cleared: "清除成功，共删除 %{count} 个键"
   export:
-    progress: "导出 {{count}} 条"
+    progress: "导出 %{count} 条"
     oper_log_task: "操作日志导出"
   scheduler:
-    job_failed: "任务执行失败: {{err}}"
-    job_duration: "{{msg}} (耗时 {{ms}}ms)"
-    invoke_target_not_found: "未找到调用目标: {{target}}"
-    job_timeout: "任务执行超时（>{{secs}}s）"
+    job_failed: "任务执行失败: %{err}"
+    job_duration: "%{msg} (耗时 %{ms}ms)"
+    invoke_target_not_found: "未找到调用目标: %{target}"
+    job_timeout: "任务执行超时（>%{secs}s）"
     ryNoParams_success: ryNoParams 示例任务执行成功（无业务逻辑，仅演示调度器调用）
-    ryParams_success: "ryParams 示例任务执行成功，参数: {{param}}（无业务逻辑，仅演示参数传递）"
+    ryParams_success: "ryParams 示例任务执行成功，参数: %{param}（无业务逻辑，仅演示参数传递）"
     ryMultipleParams_success: ryMultipleParams 示例任务执行成功（无业务逻辑，仅演示多参数传递）
-    cleanup_oper_log: "清理操作日志 {{count}} 条"
-    cleanup_oper_log_failed: "清理操作日志失败: {{err}}"
-    cleanup_login_log: "清理登录日志 {{count}} 条"
-    cleanup_login_log_failed: "清理登录日志失败: {{err}}"
+    cleanup_oper_log: "清理操作日志 %{count} 条"
+    cleanup_oper_log_failed: "清理操作日志失败: %{err}"
+    cleanup_login_log: "清理登录日志 %{count} 条"
+    cleanup_login_log_failed: "清理登录日志失败: %{err}"
 
 # H-3：登录日志审计消息（write_login_log 用，区分细分原因用于审计；
 # 对外返回给用户的错误消息统一用 error.auth.* 系列，避免用户名枚举）
@@ -462,14 +462,14 @@ log:
     account_deleted: 账号已删除
     account_disabled: 账号已停用
     login_success: 登录成功
-    permission_denied: "权限拒绝：缺少所需权限 {{perm}}"
+    permission_denied: "权限拒绝：缺少所需权限 %{perm}"
     totp_failed: TOTP 动态验证码错误
     totp_locked: TOTP 验证失败次数过多，已临时锁定
   oauth:
-    login_success: "第三方登录成功（{{provider}}）"
-    login_failed: "第三方登录失败（{{provider}}）"
-    bind_success: "第三方账号绑定成功（{{provider}}）"
-    unbind_success: "解绑成功（{{provider}}）"
+    login_success: "第三方登录成功（%{provider}）"
+    login_failed: "第三方登录失败（%{provider}）"
+    bind_success: "第三方账号绑定成功（%{provider}）"
+    unbind_success: "解绑成功（%{provider}）"
 
 # 通用状态文案（Excel 导出、状态展示等场景使用）
 common:
@@ -509,8 +509,8 @@ excel:
 # 系统通知标题/内容（scheduler 触发的告警通知，前端通知中心可见）
 notice:
   login_anomaly:
-    title: "登录异常告警 - IP {{ip}}"
-    content: "最近 {{minutes}} 分钟内 IP {{ip}} 失败登录 {{count}} 次，疑似撞库攻击，请及时关注。"
+    title: "登录异常告警 - IP %{ip}"
+    content: "最近 %{minutes} 分钟内 IP %{ip} 失败登录 %{count} 次，疑似撞库攻击，请及时关注。"
   email:
     footer: "此邮件由 yebot 系统自动发送，请勿直接回复。"
 

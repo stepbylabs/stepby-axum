@@ -266,4 +266,67 @@ mod tests {
         let key_too_long = "a".repeat(IDEMPOTENCY_KEY_MAX_LEN + 1);
         assert!(key_too_long.len() > IDEMPOTENCY_KEY_MAX_LEN);
     }
+
+    #[test]
+    fn test_key_max_length_key_passes_charset() {
+        // 恰好 128 字符且全部为合法字符时应通过字符集校验
+        let key = "k".repeat(IDEMPOTENCY_KEY_MAX_LEN);
+        assert!(key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)));
+    }
+
+    #[test]
+    fn test_key_empty_is_invalid_by_length_check() {
+        // 空 key：长度校验分支（is_empty）应命中
+        let key = "";
+        assert!(key.is_empty());
+        assert!(key.len() <= IDEMPOTENCY_KEY_MAX_LEN);
+    }
+
+    #[test]
+    fn test_key_whitespace_rejected_by_charset() {
+        // 含空白字符（空格/制表符/换行）的 key 应被字符集校验拒绝
+        for key in ["a b", "a\tb", "a\nb", " a"] {
+            assert!(
+                !key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)),
+                "含空白的 key 应被拒绝: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_key_non_ascii_rejected_by_charset() {
+        // 非 ASCII（中文/emoji/全角符号）应被字符集校验拒绝
+        for key in ["订单-001", "a🔒b", "ａｂｃ", "aé"] {
+            assert!(
+                !key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)),
+                "非 ASCII 的 key 应被拒绝: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_key_underscore_and_dash_are_allowed() {
+        // 字符集明确允许连字符与下划线
+        for key in ["order_create_001", "order-create-001", "a_b-c-d"] {
+            assert!(key.chars().all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)));
+        }
+    }
+
+    #[test]
+    fn test_redis_key_uses_user_scope_and_prefix() {
+        // 校验 Redis key 作用域格式：idempotency:{user_id}:{key}（纯拼接逻辑）
+        let user_id = "user_42";
+        let idempotency_key = "550e8400-e29b-41d4-a716-446655440000";
+        let redis_key = format!("{}{}:{}", IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key);
+        assert_eq!(
+            redis_key,
+            "idempotency:user_42:550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn test_ttl_is_24h() {
+        // TTL 常量：24 小时覆盖客户端重试窗口
+        assert_eq!(IDEMPOTENCY_TTL_SECS, 24 * 60 * 60);
+    }
 }

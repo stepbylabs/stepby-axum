@@ -426,6 +426,9 @@ impl StorageBackend for S3Backend {
 /// 供测试使用的确定性 URI 编码断言
 #[cfg(test)]
 mod tests {
+    // 覆盖意图：S3 后端纯逻辑测试——URI 编码、authority 提取、对象 key 组装、
+    // content-type 自动推断、key 安全校验、配置缺失检查。不涉及实际网络请求。
+
     use super::*;
 
     #[test]
@@ -465,5 +468,120 @@ mod tests {
         cfg.secret_key = "sk".into();
         cfg.endpoint = "".into(); // endpoint 缺失
         assert!(S3Backend::try_new(&cfg).is_err());
+
+        let mut cfg = S3StorageConfig::default();
+        cfg.access_key = "".into(); // access_key 缺失
+        cfg.secret_key = "sk".into();
+        cfg.endpoint = "http://localhost:9000".into();
+        assert!(S3Backend::try_new(&cfg).is_err());
+
+        let mut cfg = S3StorageConfig::default();
+        cfg.access_key = "ak".into();
+        cfg.secret_key = "".into(); // secret_key 缺失
+        cfg.endpoint = "http://localhost:9000".into();
+        assert!(S3Backend::try_new(&cfg).is_err());
+
+        let mut cfg = S3StorageConfig::default();
+        cfg.access_key = "ak".into();
+        cfg.secret_key = "sk".into();
+        cfg.endpoint = "http://localhost:9000".into();
+        cfg.bucket = "".into(); // bucket 缺失
+        assert!(S3Backend::try_new(&cfg).is_err());
+    }
+
+    #[test]
+    fn content_type_for_detects_common_extensions() {
+        assert_eq!(content_type_for("photo.jpg"), Some("image/jpeg"));
+        assert_eq!(content_type_for("photo.jpeg"), Some("image/jpeg"));
+        assert_eq!(content_type_for("icon.png"), Some("image/png"));
+        assert_eq!(content_type_for("anim.gif"), Some("image/gif"));
+        assert_eq!(content_type_for("doc.pdf"), Some("application/pdf"));
+        assert_eq!(content_type_for("readme.txt"), Some("text/plain"));
+        assert_eq!(content_type_for("data.zip"), Some("application/zip"));
+        assert_eq!(content_type_for("doc.doc"), Some("application/msword"));
+        assert_eq!(content_type_for("doc.docx"), Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
+        assert_eq!(content_type_for("sheet.xls"), Some("application/vnd.ms-excel"));
+        assert_eq!(content_type_for("sheet.xlsx"), Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+        assert_eq!(content_type_for("unknown.bin"), Some("application/octet-stream"));
+        assert_eq!(content_type_for("noext"), Some("application/octet-stream"));
+    }
+
+    #[test]
+    fn object_key_assembly() {
+        let cfg = S3StorageConfig {
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            endpoint: "http://localhost:9000".into(),
+            bucket: "yebot".into(),
+            ..Default::default()
+        };
+        let backend = S3Backend::try_new(&cfg).expect("完整配置应成功");
+
+        // dir 为空 → key 直接是文件名
+        assert_eq!(backend.object_key("", "abc.png"), "abc.png");
+        // dir 有前后斜杠 → 修剪后拼接
+        assert_eq!(backend.object_key("/uploads/file/", "abc.png"), "uploads/file/abc.png");
+        // 正常 dir
+        assert_eq!(backend.object_key("uploads/file", "abc.png"), "uploads/file/abc.png");
+    }
+
+    #[test]
+    fn object_uri_includes_bucket() {
+        let cfg = S3StorageConfig {
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            endpoint: "http://localhost:9000".into(),
+            bucket: "my-bucket".into(),
+            ..Default::default()
+        };
+        let backend = S3Backend::try_new(&cfg).expect("完整配置应成功");
+
+        assert_eq!(backend.object_uri("object.png"), "/my-bucket/object.png");
+        assert_eq!(backend.object_uri("uploads/object.png"), "/my-bucket/uploads/object.png");
+    }
+
+    #[test]
+    fn object_url_uses_public_base() {
+        let cfg = S3StorageConfig {
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            endpoint: "http://minio:9000".into(),
+            bucket: "bucket".into(),
+            public_endpoint: "https://cdn.example.com".into(),
+            ..Default::default()
+        };
+        let backend = S3Backend::try_new(&cfg).expect("完整配置应成功");
+
+        assert_eq!(backend.object_url("key.png"), "https://cdn.example.com/bucket/key.png");
+    }
+
+    #[test]
+    fn object_url_falls_back_to_endpoint_when_public_empty() {
+        let cfg = S3StorageConfig {
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            endpoint: "http://minio:9000".into(),
+            bucket: "bucket".into(),
+            public_endpoint: String::new(), // public_endpoint 为空
+            ..Default::default()
+        };
+        let backend = S3Backend::try_new(&cfg).expect("完整配置应成功");
+
+        assert_eq!(backend.object_url("key.png"), "http://minio:9000/bucket/key.png");
+    }
+
+    #[test]
+    fn s3_debug_redacts_secret() {
+        let cfg = S3StorageConfig {
+            access_key: "AKIAEXAMPLE".into(),
+            secret_key: "secret123456".into(),
+            endpoint: "http://localhost:9000".into(),
+            bucket: "bucket".into(),
+            ..Default::default()
+        };
+        // Debug 实现脱敏 secret_key → "<redacted>"
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("secret_key: \"<redacted>\""));
+        assert!(debug.contains("access_key: \"AKIAEXAMPLE\"")); // access_key 不脱敏
     }
 }

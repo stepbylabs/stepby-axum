@@ -214,3 +214,196 @@ where
         model.update(conn).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::sys_job::{self, ActiveModel as SysJobActiveModel, Entity as SysJob};
+
+    // 覆盖意图：
+    // - 基础 CRUD（find_all / find_by_id / count / insert / update / delete_by_id）
+    // - 自定义查询（find_many / find_one）
+    // - _conn 系列（insert_conn / find_by_id_conn / find_many_conn / find_one_conn /
+    //   insert_many_conn / update_conn）
+    // - 事务上下文（begin/commit 可见性 + rollback 回滚）
+    // 使用 test_support::migrated_db() 创建隔离 SQLite，避免外部依赖。
+
+    fn make_job(name: &str) -> SysJobActiveModel {
+        SysJobActiveModel {
+            job_name: Set(name.to_string()),
+            job_group: Set("DEFAULT".to_string()),
+            invoke_target: Set("unitTest.base".to_string()),
+            cron_expression: Set(Some("0 0 3 * * *".to_string())),
+            misfire_policy: Set(Some("3".to_string())),
+            concurrent: Set(Some("1".to_string())),
+            status: Set(Some("0".to_string())),
+            create_by: Set(None),
+            create_time: Set(None),
+            update_by: Set(None),
+            update_time: Set(None),
+            remark: Set(None),
+            del_flag: Set(Some("0".to_string())),
+            job_id: NotSet,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_crud_roundtrip() {
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let repo = BaseRepository::<SysJob>::new(db.clone());
+
+        // 迁移种子数据默认 3 条系统任务
+        assert_eq!(repo.count().await.unwrap(), 3);
+        assert_eq!(repo.find_all().await.unwrap().len(), 3);
+
+        // insert：返回完整 Model，自增主键已填充
+        let model = repo.insert(make_job("t1")).await.unwrap();
+        assert!(model.job_id > 0);
+        assert_eq!(model.job_name, "t1");
+        assert_eq!(model.del_flag.as_deref(), Some("0"));
+        // 实体无 before_save 自动时间戳钩子，插入时 create_time/update_time 保持 None
+        assert!(model.create_time.is_none());
+        assert!(model.update_time.is_none());
+
+        assert_eq!(repo.count().await.unwrap(), 4);
+
+        // find_by_id：命中与未命中
+        let found = repo.find_by_id(model.job_id).await.unwrap().unwrap();
+        assert_eq!(found.job_name, "t1");
+        assert!(repo.find_by_id(999999999).await.unwrap().is_none());
+
+        // find_all 返回 4 条（3 种子 + 1 新增）
+        assert_eq!(repo.find_all().await.unwrap().len(), 4);
+
+        // update：修改字段后回读
+        let mut am = found.into_active_model();
+        am.job_name = Set("t1-updated".to_string());
+        let updated = repo.update(am).await.unwrap();
+        assert_eq!(updated.job_name, "t1-updated");
+        assert_eq!(
+            repo.find_by_id(model.job_id).await.unwrap().unwrap().job_name,
+            "t1-updated"
+        );
+
+        // delete_by_id：物理删除，恢复种子数量
+        let res = repo.delete_by_id(model.job_id).await.unwrap();
+        assert_eq!(res.rows_affected, 1);
+        assert_eq!(repo.count().await.unwrap(), 3);
+        assert!(repo.find_by_id(model.job_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_many_and_find_one() {
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let repo = BaseRepository::<SysJob>::new(db.clone());
+        repo.insert(make_job("alpha")).await.unwrap();
+        repo.insert(make_job("beta")).await.unwrap();
+        repo.insert(make_job("gamma")).await.unwrap();
+
+        // 条件查询多条（仅 alpha 含 "ph"）
+        let sel = SysJob::find().filter(sys_job::Column::JobName.like("%ph%"));
+        let rows = repo.find_many(sel.clone()).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].job_name, "alpha");
+
+        // 查询单条
+        let one = repo.find_one(sel).await.unwrap().unwrap();
+        assert_eq!(one.job_name, "alpha");
+
+        // 宽泛匹配（alpha/beta/gamma 均含 'a'）
+        let all = repo
+            .find_many(SysJob::find().filter(sys_job::Column::JobName.like("%a%")))
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3);
+
+        // 空结果
+        let none = SysJob::find().filter(sys_job::Column::JobName.eq("zzz"));
+        assert!(repo.find_one(none).await.unwrap().is_none());
+        assert!(
+            repo.find_many(SysJob::find().filter(sys_job::Column::JobName.eq("zzz")))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conn_variants_with_database_connection() {
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let repo = BaseRepository::<SysJob>::new(db.clone());
+
+        // insert_conn
+        let model = repo.insert_conn(&db, make_job("conn-a")).await.unwrap();
+        assert!(model.job_id > 0);
+
+        // find_by_id_conn
+        let found = repo.find_by_id_conn(&db, model.job_id).await.unwrap().unwrap();
+        assert_eq!(found.job_name, "conn-a");
+
+        // find_many_conn / find_one_conn
+        let sel = SysJob::find().filter(sys_job::Column::JobId.eq(model.job_id));
+        assert_eq!(repo.find_many_conn(&db, sel.clone()).await.unwrap().len(), 1);
+        assert!(repo.find_one_conn(&db, sel).await.unwrap().is_some());
+
+        // insert_many_conn
+        let res = repo
+            .insert_many_conn(
+                &db,
+                vec![make_job("conn-b"), make_job("conn-c")],
+            )
+            .await
+            .unwrap();
+        // 批量插入后 last_insert_id 为最后一行 id（种子占用 1-3，sqlite 序列设为 100，
+        // 实际下一个自增为 101：conn-a=101, conn-b=102, conn-c=103）
+        assert_eq!(res.last_insert_id, 103);
+        // 总条数 = 3 种子 + 3 新增
+        assert_eq!(repo.count().await.unwrap(), 6);
+
+        // update_conn
+        let mut am = found.into_active_model();
+        am.job_name = Set("conn-a-updated".to_string());
+        let updated = repo.update_conn(&db, am).await.unwrap();
+        assert_eq!(updated.job_name, "conn-a-updated");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_commit_persists_changes() {
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let repo = BaseRepository::<SysJob>::new(db.clone());
+
+        let tx = db.begin().await.unwrap();
+        let model = repo.insert_conn(&tx, make_job("tx-commit")).await.unwrap();
+        // 事务内可见
+        assert!(repo.find_by_id_conn(&tx, model.job_id).await.unwrap().is_some());
+        tx.commit().await.unwrap();
+
+        // 提交后通过连接池可见
+        let found = repo.find_by_id(model.job_id).await.unwrap().unwrap();
+        assert_eq!(found.job_name, "tx-commit");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_rollback_discards_changes() {
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let repo = BaseRepository::<SysJob>::new(db.clone());
+
+        let tx = db.begin().await.unwrap();
+        let model = repo.insert_conn(&tx, make_job("tx-rollback")).await.unwrap();
+        assert!(repo.find_by_id_conn(&tx, model.job_id).await.unwrap().is_some());
+        tx.rollback().await.unwrap();
+
+        // 回滚后连接池不可见，数量恢复种子 3 条
+        assert!(repo.find_by_id(model.job_id).await.unwrap().is_none());
+        assert_eq!(repo.count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_find_by_id_unknown_id_returns_none() {
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let repo = BaseRepository::<SysJob>::new(db.clone());
+        // 种子占用 1-3，999999999 必然不存在
+        assert!(repo.find_by_id(999999999).await.unwrap().is_none());
+        assert!(repo.find_by_id_conn(&db, 999999999).await.unwrap().is_none());
+    }
+}

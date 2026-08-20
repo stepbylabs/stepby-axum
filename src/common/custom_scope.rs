@@ -464,4 +464,149 @@ mod tests {
         ];
         assert!(derive_user_custom_conditions(&roles).is_none());
     }
+
+    // ---------- Value::as_i64 / as_str ----------
+
+    #[test]
+    fn value_as_i64_only_for_int() {
+        assert_eq!(Value::Int(42).as_i64(), Some(42));
+        assert_eq!(Value::Int(-7).as_i64(), Some(-7));
+        assert_eq!(Value::Str("42".to_string()).as_i64(), None);
+    }
+
+    #[test]
+    fn value_as_str_only_for_string() {
+        assert_eq!(Value::Str("abc".to_string()).as_str(), Some("abc"));
+        assert_eq!(Value::Str(String::new()).as_str(), Some(""));
+        assert_eq!(Value::Int(1).as_str(), None);
+    }
+
+    // ---------- split_and_fragments 引号内 AND 不误切 ----------
+
+    #[test]
+    fn split_keeps_and_inside_string_literal() {
+        let parts = split_and_fragments("user_name = 'Rock AND Roll' AND status = '0'");
+        assert_eq!(
+            parts,
+            vec![
+                "user_name = 'Rock AND Roll'".to_string(),
+                "status = '0'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_handles_escaped_quote_inside_string() {
+        let parts = split_and_fragments("user_name = 'O''Brien' AND status = '0'");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "user_name = 'O''Brien'");
+        assert_eq!(parts[1], "status = '0'");
+    }
+
+    #[test]
+    fn parse_custom_sql_and_inside_string_is_preserved() {
+        let conds = parse_custom_sql(
+            "user_name = 'Rock AND Roll' AND status = '0'",
+            USER_CUSTOM_COLUMNS,
+        )
+        .unwrap();
+        assert_eq!(conds.len(), 2);
+        assert_eq!(conds[0].column, "user_name");
+        assert_eq!(conds[0].value, Value::Str("Rock AND Roll".to_string()));
+        assert_eq!(conds[1].column, "status");
+        assert_eq!(conds[1].value, Value::Str("0".to_string()));
+    }
+
+    // ---------- 运算符与字面量更多分支 ----------
+
+    #[test]
+    fn parses_like_op_and_wildcard_value() {
+        let conds = parse_custom_sql("user_name LIKE 'admin%'", USER_CUSTOM_COLUMNS).unwrap();
+        assert_eq!(conds[0].op, Op::Like);
+        assert_eq!(conds[0].value, Value::Str("admin%".to_string()));
+    }
+
+    #[test]
+    fn parses_comparison_operators() {
+        let conds = parse_custom_sql(
+            "dept_id > 100 AND dept_id < 200 AND dept_id >= 150 AND dept_id <= 160 AND dept_id != 0",
+            USER_CUSTOM_COLUMNS,
+        )
+        .unwrap();
+        assert_eq!(conds.len(), 5);
+        assert_eq!(conds[0].op, Op::Gt);
+        assert_eq!(conds[1].op, Op::Lt);
+        assert_eq!(conds[2].op, Op::Gte);
+        assert_eq!(conds[3].op, Op::Lte);
+        assert_eq!(conds[4].op, Op::Ne);
+        assert_eq!(conds[0].value, Value::Int(100));
+        assert_eq!(conds[1].value, Value::Int(200));
+    }
+
+    #[test]
+    fn parses_negative_integer_value() {
+        let conds = parse_custom_sql("dept_id = -5", USER_CUSTOM_COLUMNS).unwrap();
+        assert_eq!(conds[0].value, Value::Int(-5));
+    }
+
+    #[test]
+    fn rejects_trailing_and() {
+        // "status = '0' AND"（AND 后无内容）不符合文法 → Err
+        assert!(parse_custom_sql("status = '0' AND", USER_CUSTOM_COLUMNS).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_op_text() {
+        // 非法运算符写法（如用 "==" 或 "eq"）→ Err
+        assert!(parse_custom_sql("dept_id == 100", USER_CUSTOM_COLUMNS).is_err());
+        assert!(parse_custom_sql("dept_id eq 100", USER_CUSTOM_COLUMNS).is_err());
+    }
+
+    // ---------- derive 更多分支 ----------
+
+    #[test]
+    fn derive_skips_role_without_custom_scope_value() {
+        // data_scope 为 None 的角色跳过
+        assert!(derive_user_custom_conditions(&[role(1, None, Some("status = '0'"))]).is_none());
+    }
+
+    #[test]
+    fn derive_continues_when_custom_sql_is_none() {
+        // data_scope=2 但 custom_sql 为 None → 继续，最终 None
+        assert!(derive_user_custom_conditions(&[role(1, Some("2"), None)]).is_none());
+    }
+
+    #[test]
+    fn derive_continues_when_custom_sql_is_blank() {
+        // data_scope=2 但 custom_sql 为空白（解析为空）→ 继续，最终 None
+        assert!(derive_user_custom_conditions(&[role(1, Some("2"), Some("   "))]).is_none());
+    }
+
+    #[test]
+    fn derive_picks_first_valid_custom_role() {
+        // 第一个 data_scope != 2，第二个 data_scope=2 且合法 → 采用第二个
+        let roles = vec![
+            role(1, Some("1"), None),
+            role(2, Some("2"), Some("status = '0'")),
+        ];
+        let conds = derive_user_custom_conditions(&roles).unwrap();
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].column, "status");
+    }
+
+    // ---------- build_filter 部分可解析 ----------
+
+    #[test]
+    fn build_filter_appends_when_some_resolvable() {
+        use sea_orm::ColumnTrait;
+        let conds = parse_custom_sql("status = '0' AND dept_id >= 100", USER_CUSTOM_COLUMNS).unwrap();
+        // 仅 status 可解析，dept_id 被丢弃 → 仍应组装出 Some 条件
+        let mapped = build_filter(&conds, |c| match c.column.as_str() {
+            "status" => {
+                Some(crate::entity::sys_user::Column::Status.eq(c.value.as_str().unwrap_or("")))
+            }
+            _ => None,
+        });
+        assert!(mapped.is_some());
+    }
 }

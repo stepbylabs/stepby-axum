@@ -362,3 +362,237 @@ impl IntoResponse for AppError {
         (http_status, body).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! 覆盖意图：错误类型两层的构造函数与 Display、各 From 转换（sea_orm / garde /
+    //! JWT / serde_json / redis / anyhow / io / argon2）、ServiceError→AppError 委托、
+    //! IntoResponse 的 HTTP 状态码映射（含未知业务码回退 200）与错误链 source 记录。
+
+    use super::*;
+
+    // ---------- 构造函数与 Display ----------
+
+    #[test]
+    fn service_error_constructors_and_display() {
+        let e = ServiceError::new(418, "teapot");
+        assert_eq!((e.code, e.message.as_str()), (418, "teapot"));
+        assert_eq!(
+            format!("{e}"),
+            "ServiceError(code=418, message=teapot)"
+        );
+        assert_eq!(ServiceError::unauthorized("u").code, 401);
+        assert_eq!(ServiceError::bad_request("b").code, 400);
+        assert_eq!(ServiceError::not_found("n").code, 404);
+        assert_eq!(ServiceError::forbidden("f").code, 403);
+        assert_eq!(ServiceError::internal("i").code, 500);
+    }
+
+    #[test]
+    fn app_error_constructors_source_and_display() {
+        let e = AppError::new(418, "teapot");
+        assert_eq!((e.code, e.message.as_str()), (418, "teapot"));
+        assert!(e.source.is_none());
+        assert_eq!(format!("{e}"), "AppError(code=418, message=teapot)");
+
+        // with_source 链式附加根因
+        let inner = std::io::Error::other("root cause");
+        let with = AppError::new(500, "wrap").with_source(inner);
+        assert_eq!(with.code, 500);
+        assert!(with.source.is_some());
+
+        assert_eq!(AppError::unauthorized("u").code, 401);
+        assert_eq!(AppError::bad_request("b").code, 400);
+        assert_eq!(AppError::not_found("n").code, 404);
+        assert_eq!(AppError::forbidden("f").code, 403);
+        assert_eq!(AppError::internal("i").code, 500);
+    }
+
+    // ---------- From 转换 ----------
+
+    #[test]
+    fn from_seaorm_dberr_maps_codes() {
+        // 未找到 → 404
+        let e: ServiceError = sea_orm::DbErr::RecordNotFound("id".into()).into();
+        assert_eq!(e.code, 404);
+        let e: ServiceError = sea_orm::DbErr::RecordNotUpdated.into();
+        assert_eq!(e.code, 404);
+        // 连接获取失败 → 503
+        let e: ServiceError =
+            sea_orm::DbErr::ConnectionAcquire(sea_orm::error::ConnAcquireErr::Timeout).into();
+        assert_eq!(e.code, 503);
+        // 类型转换 / 属性未设置 → 400
+        let e: ServiceError = sea_orm::DbErr::TryIntoErr {
+            from: "u64",
+            into: "u8",
+            source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "conv")),
+        }
+        .into();
+        assert_eq!(e.code, 400);
+        let e: ServiceError = sea_orm::DbErr::AttrNotSet("name".into()).into();
+        assert_eq!(e.code, 400);
+        // 其它（普通执行错误）→ 500
+        let e: ServiceError =
+            sea_orm::DbErr::Exec(sea_orm::RuntimeErr::Internal("boom".into())).into();
+        assert_eq!(e.code, 500);
+    }
+
+    #[test]
+    fn from_seaorm_transaction_error() {
+        // Transaction 内层 DbErr 委托转换（RecordNotFound → 404）
+        let e: ServiceError = sea_orm::TransactionError::Transaction(
+            sea_orm::DbErr::RecordNotFound("id".into()),
+        )
+        .into();
+        assert_eq!(e.code, 404);
+        // 其它（Connection）→ 500 tx_failed
+        let e: ServiceError = sea_orm::TransactionError::Connection(sea_orm::DbErr::Exec(
+            sea_orm::RuntimeErr::Internal("conn".into()),
+        ))
+        .into();
+        assert_eq!(e.code, 500);
+    }
+
+    #[test]
+    fn from_garde_report_joins_messages() {
+        // 非空 report：以 "; " 拼接 path: error
+        let mut report = garde::Report::new();
+        report.append(
+            garde::Path::new("name"),
+            garde::Error::new("长度不能少于 2"),
+        );
+        report.append(
+            garde::Path::new("age"),
+            garde::Error::new("数值不能大于 100"),
+        );
+        let e: ServiceError = report.into();
+        assert_eq!(e.code, 400);
+        assert_eq!(e.message, "name: 长度不能少于 2; age: 数值不能大于 100");
+
+        // 空 report → 400 validate_failed
+        let e: ServiceError = garde::Report::new().into();
+        assert_eq!(e.code, 400);
+        assert_eq!(e.message, crate::tr!("error.common.validate_failed"));
+    }
+
+    #[test]
+    fn from_jwt_error_maps_codes() {
+        use crate::jwt::JwtError;
+        assert_eq!(ServiceError::from(JwtError::Expired).code, 401);
+        assert_eq!(ServiceError::from(JwtError::InvalidSignature).code, 401);
+        assert_eq!(ServiceError::from(JwtError::Malformed).code, 401);
+        assert_eq!(ServiceError::from(JwtError::InvalidClaims).code, 401);
+        assert_eq!(ServiceError::from(JwtError::GenerateFailed).code, 500);
+    }
+
+    #[test]
+    fn from_serde_json_error_is_internal() {
+        let err = serde_json::from_str::<i32>("not a number").unwrap_err();
+        let e: ServiceError = err.into();
+        assert_eq!(e.code, 500);
+        assert_eq!(e.message, crate::tr!("error.common.process_failed"));
+    }
+
+    #[test]
+    fn from_redis_error_distinguishes_auth() {
+        // 认证失败 → 401
+        let e: ServiceError =
+            redis::RedisError::from((redis::ErrorKind::AuthenticationFailed, "auth failed")).into();
+        assert_eq!(e.code, 401);
+        assert_eq!(e.message, crate::tr!("error.common.cache_auth_failed"));
+        // 其它 → 500
+        let e: ServiceError =
+            redis::RedisError::from((redis::ErrorKind::Io, "io")).into();
+        assert_eq!(e.code, 500);
+        assert_eq!(e.message, crate::tr!("error.common.cache_failed"));
+    }
+
+    #[test]
+    fn from_anyhow_io_argon2_are_internal() {
+        let e: ServiceError = anyhow::anyhow!("boom").into();
+        assert_eq!(e.code, 500);
+        assert_eq!(e.message, crate::tr!("error.common.internal"));
+
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let e: ServiceError = io.into();
+        assert_eq!(e.code, 500);
+        assert_eq!(e.message, crate::tr!("error.common.io_error"));
+
+        let e: ServiceError = argon2::password_hash::Error::Password.into();
+        assert_eq!(e.code, 500);
+        assert_eq!(
+            e.message,
+            crate::tr!("error.common.password_encrypt_failed")
+        );
+    }
+
+    #[test]
+    fn app_error_from_service_error_copies_fields() {
+        let se = ServiceError::new(403, "forbidden");
+        let ae: AppError = se.into();
+        assert_eq!((ae.code, ae.message.as_str()), (403, "forbidden"));
+        assert!(ae.source.is_none());
+    }
+
+    #[test]
+    fn app_error_from_other_errors_delegates() {
+        // 宏生成的委托路径：AppError::from(DbErr) == AppError::from(ServiceError::from(db_err))
+        let ae: AppError = sea_orm::DbErr::RecordNotFound("x".into()).into();
+        assert_eq!(ae.code, 404);
+        assert_eq!(ae.message, crate::tr!("error.common.not_found"));
+
+        let ae: AppError = crate::jwt::JwtError::GenerateFailed.into();
+        assert_eq!(ae.code, 500);
+    }
+
+    // ---------- IntoResponse 状态码映射 ----------
+
+    fn status_for(code: i32) -> StatusCode {
+        AppError::new(code, "m").into_response().status()
+    }
+
+    #[test]
+    fn into_response_maps_known_codes() {
+        assert_eq!(status_for(400), StatusCode::BAD_REQUEST);
+        assert_eq!(status_for(401), StatusCode::UNAUTHORIZED);
+        assert_eq!(status_for(403), StatusCode::FORBIDDEN);
+        assert_eq!(status_for(404), StatusCode::NOT_FOUND);
+        assert_eq!(status_for(409), StatusCode::CONFLICT);
+        assert_eq!(status_for(422), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(status_for(429), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(status_for(500), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status_for(503), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn into_response_falls_back_to_200_for_unknown_codes() {
+        // 200 / 自定义业务码 / 600 → 200 OK（保留 body.code 兼容前端）
+        assert_eq!(status_for(200), StatusCode::OK);
+        assert_eq!(status_for(600), StatusCode::OK);
+        assert_eq!(status_for(-1), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn into_response_body_carries_code_and_message() {
+        let err = AppError::new(400, "参数错误");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("读取响应体失败");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("响应体应为 JSON");
+        assert_eq!(json["code"], 400);
+        assert_eq!(json["msg"], "参数错误");
+        assert!(json["data"].is_null());
+    }
+
+    #[test]
+    fn into_response_with_source_records_log_but_returns_same_body() {
+        // source 存在时不应影响响应结构（仅写 tracing 日志）
+        let err = AppError::new(500, "内部错误")
+            .with_source(std::io::Error::other("root"));
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
