@@ -122,7 +122,7 @@ pub struct ProviderVo {
     pub provider_name: String,
     pub provider_type: String,
     pub client_id: String,
-    #[serde(skip)] // 出参永不含 client_secret
+    // 出参一律脱敏为空串（字段保留以维持出参 schema 稳定，禁止回填真实凭据）
     pub client_secret: String,
     pub authorize_url: String,
     pub token_url: String,
@@ -1374,10 +1374,10 @@ mod tests {
             update_time: None,
         };
         let vo = ProviderVo::from_model(&m);
-        // serde 层面 client_secret 被 #[serde(skip)]；VO 字段本身置空
+        // 出参 client_secret 置空（字段保留，schema 稳定）
         assert!(vo.client_secret.is_empty());
         let json = serde_json::to_value(&vo).unwrap();
-        assert!(json.get("clientSecret").is_none());
+        assert_eq!(json["clientSecret"], "", "client_secret 出参应为空串");
     }
 
     #[test]

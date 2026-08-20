@@ -376,4 +376,128 @@ mod tests {
         assert_eq!(current_locale(), "zh-CN");
         assert!(is_zh());
     }
+
+    // ---------- 以下为补充覆盖：task-local / sync 注入 / tr! / ZhCn 文案 ----------
+
+    #[tokio::test]
+    async fn current_locale_uses_task_local() {
+        // task-local 注入 en-US → 作用域内 current_locale 返回 en-US 且非中文
+        let got = LOCALE
+            .scope("en-US".to_string(), async {
+                assert!(!is_zh(), "作用域内应已切换为英文");
+                current_locale()
+            })
+            .await;
+        assert_eq!(got, "en-US");
+    }
+
+    #[tokio::test]
+    async fn current_locale_falls_back_for_unknown_task_local() {
+        // task-local 注入未知语言（fr-FR）→ 回退 zh-CN
+        let got = LOCALE.scope("fr-FR".to_string(), async { current_locale() }).await;
+        assert_eq!(got, "zh-CN");
+    }
+
+    #[test]
+    fn with_locale_sync_sets_and_clears() {
+        // 默认 zh-CN
+        assert_eq!(current_locale(), "zh-CN");
+        // 注入 en-US 生效
+        let r = with_locale_sync("en-US", || {
+            assert_eq!(current_locale(), "en-US");
+            assert!(!is_zh());
+            assert_eq!(pick("中文", "English"), "English");
+            "done"
+        });
+        assert_eq!(r, "done");
+        // 闭包结束后 thread-local 被清除，回退默认
+        assert_eq!(current_locale(), "zh-CN");
+        assert!(is_zh());
+        assert_eq!(pick("中文", "English"), "中文");
+    }
+
+    #[test]
+    fn tr_macro_translates_with_interpolation() {
+        // 无插值：取到非空翻译
+        let msg = crate::tr!("error.common.not_found");
+        assert!(!msg.is_empty());
+        // 插值：{{max}} 被替换
+        let too_large = crate::tr!("error.file.too_large", max = 10);
+        assert!(too_large.contains("10"), "实际: {too_large}");
+        assert!(too_large.contains("MB"), "实际: {too_large}");
+    }
+
+    #[test]
+    fn module_titles_keys_are_unique_and_nonempty() {
+        let mut seen = std::collections::HashSet::new();
+        for (k, zh, en) in MODULE_TITLES {
+            assert!(!k.is_empty());
+            assert!(!zh.is_empty());
+            assert!(!en.is_empty());
+            assert!(seen.insert(*k), "模块 key 重复: {k}");
+        }
+    }
+
+    #[test]
+    fn zhcn_i18n_messages() {
+        use garde::i18n::{InvalidEmail, InvalidUrl, IpKind};
+        let zh = ZhCn;
+        assert_eq!(zh.length_lower_than(2), "长度不能少于 2");
+        assert_eq!(zh.length_greater_than(5), "长度不能超过 5");
+        assert_eq!(zh.range_lower_than(&1), "数值不能小于 1");
+        assert_eq!(zh.range_greater_than(&100), "数值不能大于 100");
+        assert_eq!(zh.email_invalid(InvalidEmail::Empty), "邮箱不能为空");
+        assert_eq!(
+            zh.email_invalid(InvalidEmail::MissingAt),
+            "邮箱缺少 @ 符号"
+        );
+        assert_eq!(
+            zh.email_invalid(InvalidEmail::UserLengthExceeded),
+            "邮箱用户名部分过长"
+        );
+        assert_eq!(zh.email_invalid(InvalidEmail::InvalidUser), "邮箱用户名含非法字符");
+        assert_eq!(
+            zh.email_invalid(InvalidEmail::DomainLengthExceeded),
+            "邮箱域名过长"
+        );
+        assert_eq!(zh.email_invalid(InvalidEmail::InvalidDomain), "邮箱域名含非法字符");
+        assert_eq!(zh.url_invalid(InvalidUrl::EmptyHost), "URL 缺少主机名");
+        assert_eq!(zh.url_invalid(InvalidUrl::InvalidPort), "URL 端口号无效");
+        assert_eq!(
+            zh.url_invalid(InvalidUrl::RelativeUrlWithoutBase),
+            "相对 URL 缺少基础地址"
+        );
+        assert_eq!(zh.pattern_no_match(&"x"), "格式不正确");
+        assert_eq!(zh.contains_missing(&"A"), "必须包含 A");
+        assert_eq!(zh.prefix_missing(&"A"), "必须以 A 开头");
+        assert_eq!(zh.suffix_missing(&"A"), "必须以 A 结尾");
+        assert_eq!(zh.required_not_set(), "不能为空");
+        assert_eq!(zh.ascii_invalid(), "仅允许 ASCII 字符");
+        assert_eq!(zh.alphanumeric_invalid(), "仅允许字母和数字");
+        assert_eq!(zh.matches_field_mismatch(&"pwd"), "与字段 pwd 不一致");
+        assert_eq!(zh.ip_invalid(IpKind::V4), "IPv4 地址格式不正确");
+        assert_eq!(zh.ip_invalid(IpKind::V6), "IPv6 地址格式不正确");
+        assert_eq!(
+            zh.phone_number_invalid(garde::i18n::InvalidPhoneNumber::Invalid),
+            "手机号格式不正确"
+        );
+        assert_eq!(
+            zh.credit_card_invalid(garde::i18n::InvalidCreditCard::InvalidFormat),
+            "银行卡号格式不正确"
+        );
+    }
+
+    #[test]
+    fn validate_en_locale_uses_english_messages() {
+        // en-US 注入下 validate 走默认英文文案（非中文）
+        let dto = DemoDto {
+            name: "a".to_string(),
+            age: 200,
+        };
+        let err = with_locale_sync("en-US", || validate(&dto)).unwrap_err();
+        let joined: Vec<String> = err.iter().map(|(p, e)| format!("{p}: {e}")).collect();
+        let joined = joined.join("; ");
+        assert!(!joined.contains("长度不能少于"), "不应含中文: {joined}");
+        assert!(joined.contains("lower than"), "应含英文长度消息: {joined}");
+    }
 }

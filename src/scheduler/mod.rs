@@ -1345,3 +1345,523 @@ fn register_builtin_tasks(db: DatabaseConnection) {
 
     tracing::info!("内置任务注册完成: {:?}", registry::list_registered_tasks());
 }
+
+// ==================== 单元测试 ====================
+//
+// 覆盖意图：
+// - validate_cron / SchedulerError / ExecutingFlagGuard / JobLockGuard / register_builtin_tasks /
+//   execute_inner 均为纯逻辑，不依赖外部 DB/Redis，逐分支覆盖。
+// - 涉及分布式锁 / 任务日志写入的 execute_with_logging 与 JobScheduler 生命周期测试，
+//   通过容错连接本地 Redis（127.0.0.1:6379/15）实现：Redis 不可用时直接 return 跳过，
+//   避免 CI 无 Redis 时挂掉。测试统一使用 Redis DB 15，job_id 使用高位段（1001+ / 9000+），
+//   与集成测试使用的真实 job_id 1~3 及种子数据不冲突。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::error::ServiceError;
+    use crate::config::Settings;
+    use crate::entity::sys_job::ActiveModel as SysJobActiveModel;
+    use crate::repository::sys_job::SysJobRepository;
+    use crate::repository::sys_job_log::SysJobLogRepository;
+    use crate::service::IpLocationService;
+    use crate::utils::ip_location::IpLocator;
+    use sea_orm::NotSet;
+
+    /// 构造一个测试用 sys_job Model（concurrent='1'、misfire_policy='3'）
+    fn job(id: i64, name: &str, cron: &str, invoke: &str) -> SysJobModel {
+        SysJobModel {
+            job_id: id,
+            job_name: name.to_string(),
+            job_group: "DEFAULT".to_string(),
+            invoke_target: invoke.to_string(),
+            cron_expression: Some(cron.to_string()),
+            misfire_policy: Some("3".to_string()),
+            concurrent: Some("1".to_string()),
+            status: Some("0".to_string()),
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+            remark: None,
+            del_flag: Some("0".to_string()),
+        }
+    }
+
+    /// 容错连接本地 Redis（DB 15）：不可用返回 None（测试直接跳过）
+    async fn try_redis() -> Option<ConnectionManager> {
+        let client = redis::Client::open("redis://127.0.0.1:6379/15").ok()?;
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            redis::aio::ConnectionManager::new(client),
+        )
+        .await
+        {
+            Ok(Ok(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// 加载配置（先注入合法 JWT 密钥，规避 validate_secrets 拒绝占位密钥）
+    fn load_settings() -> Settings {
+        unsafe {
+            std::env::set_var(
+                "JWT_SECRET",
+                "a-very-long-jwt-secret-key-for-testing-32+chars",
+            );
+        }
+        let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let path = format!("{}/config/config.toml", dir);
+        Settings::from_file(&path).expect("加载 config/config.toml 失败（请确认文件存在）")
+    }
+
+    /// 构建完整 JobScheduler（容错 Redis；Redis 不可用返回 None）
+    async fn build_scheduler() -> Option<Arc<JobScheduler>> {
+        let redis = try_redis().await?;
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let settings = Arc::new(load_settings());
+        let ip_locator = Arc::new(IpLocator::new_with_xdb(
+            &settings.ip_location.mmdb_path,
+            &settings.ip_location.xdb_path,
+            settings.ip_location.xdb_enabled,
+        ));
+        let ip_location_service =
+            IpLocationService::new(db.clone(), settings.clone(), ip_locator.clone());
+        let scheduler = Arc::new(
+            JobScheduler::new(db.clone(), redis, ip_location_service, settings)
+                .await
+                .unwrap(),
+        );
+        Some(scheduler)
+    }
+
+    // ---------- validate_cron ----------
+
+    #[test]
+    fn test_validate_cron_valid_6_field() {
+        assert!(validate_cron("0 0 3 * * *").is_ok());
+        assert!(validate_cron("0 */5 * * * *").is_ok());
+        assert!(validate_cron("0 0 4 * * 2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_cron_rejects_garbage() {
+        assert!(matches!(
+            validate_cron(""),
+            Err(SchedulerError::InvalidCron(_))
+        ));
+        assert!(matches!(
+            validate_cron("not-a-cron"),
+            Err(SchedulerError::InvalidCron(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_cron_rejects_5_field() {
+        // tokio-cron-scheduler 0.15 强制要求 6 字段（含秒），5 字段应被提前拒绝
+        assert!(matches!(
+            validate_cron("0 3 * * *"),
+            Err(SchedulerError::InvalidCron(_))
+        ));
+    }
+
+    // ---------- SchedulerError ----------
+
+    #[test]
+    fn test_scheduler_error_display() {
+        assert_eq!(
+            SchedulerError::InvalidCron("bad".to_string()).to_string(),
+            "invalid cron expression: bad"
+        );
+        assert_eq!(
+            SchedulerError::SchedulerInternal("oops".to_string()).to_string(),
+            "scheduler internal error: oops"
+        );
+    }
+
+    #[test]
+    fn test_scheduler_error_into_service_error() {
+        let e: ServiceError = SchedulerError::InvalidCron("bad".to_string()).into();
+        assert_eq!(e.code, 400);
+        let e: ServiceError = SchedulerError::SchedulerInternal("oops".to_string()).into();
+        assert_eq!(e.code, 500);
+    }
+
+    // ---------- ExecutingFlagGuard ----------
+
+    #[test]
+    fn test_executing_flag_guard_acquire_and_drop() {
+        let flags = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        {
+            let guard = ExecutingFlagGuard::try_acquire(flags.clone(), 1, true).unwrap();
+            assert_eq!(flags.lock().unwrap().get(&1), Some(&true));
+            // 并发禁止时再次获取返回 None
+            assert!(ExecutingFlagGuard::try_acquire(flags.clone(), 1, true).is_none());
+            drop(guard);
+        }
+        // Drop 应清除标记
+        assert!(!flags.lock().unwrap().contains_key(&1));
+    }
+
+    #[test]
+    fn test_executing_flag_guard_enforce_false_allows_reentry() {
+        let flags = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let _g1 = ExecutingFlagGuard::try_acquire(flags.clone(), 7, true).unwrap();
+        // concurrent != '1' 时允许覆盖执行（enforce_concurrent=false）
+        assert!(ExecutingFlagGuard::try_acquire(flags.clone(), 7, false).is_some());
+    }
+
+    #[test]
+    fn test_executing_flag_guard_disarm_is_idempotent() {
+        let flags = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut guard = ExecutingFlagGuard::try_acquire(flags.clone(), 5, true).unwrap();
+        guard.disarm();
+        assert!(!flags.lock().unwrap().contains_key(&5));
+        // 二次 disarm / drop 不应 panic 或重复清除
+        guard.disarm();
+        drop(guard);
+        assert!(!flags.lock().unwrap().contains_key(&5));
+    }
+
+    // ---------- register_builtin_tasks ----------
+
+    #[tokio::test]
+    async fn test_register_builtin_tasks_registers_expected_targets() {
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        register_builtin_tasks(db);
+        let targets = registry::list_registered_tasks();
+        for expected in [
+            "ryTask.ryNoParams",
+            "ryTask.ryParams('ry')",
+            "ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100)",
+            "cleanup_expired_logs",
+        ] {
+            assert!(
+                targets.iter().any(|t| t == expected),
+                "内置任务未注册: {expected}"
+            );
+        }
+    }
+
+    // ---------- execute_inner ----------
+
+    #[tokio::test]
+    async fn test_execute_inner_unknown_target_errors() {
+        let err = execute_inner("unitTest.no.such.task").await.unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_inner_registered_task_returns_ok() {
+        let target = "unitTest.scheduler.quick";
+        registry::register_task(
+            target,
+            Arc::new(|| Box::pin(async { Ok("done-ok".to_string()) })),
+        );
+        let msg = execute_inner(target).await.unwrap();
+        assert_eq!(msg, "done-ok");
+    }
+
+    // ---------- JobLockGuard（容错 Redis） ----------
+
+    #[tokio::test]
+    async fn test_job_lock_guard_finish_releases_lock() {
+        let Some(mut redis) = try_redis().await else { return; };
+        let key = "lock:scheduler:unit-lockguard-finish";
+        let value = "token-abc";
+        // 普通 SET 预置锁（覆盖历史残留，保证前置条件确定）
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        let mut guard =
+            JobLockGuard::new(handle, redis.clone(), key.to_string(), value.to_string());
+        guard.finish().await;
+        drop(guard);
+        let v: Option<String> = redis::cmd("GET").arg(key).query_async(&mut redis).await.unwrap();
+        assert!(v.is_none(), "finish() 应通过 CAS 释放锁");
+    }
+
+    #[tokio::test]
+    async fn test_job_lock_guard_drop_releases_lock_async() {
+        let Some(mut redis) = try_redis().await else { return; };
+        let key = "lock:scheduler:unit-lockguard-drop";
+        let value = "token-def";
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        let guard = JobLockGuard::new(handle, redis.clone(), key.to_string(), value.to_string());
+        drop(guard); // Drop 兜底：abort 续期 + spawn 异步释放锁
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let v: Option<String> = redis::cmd("GET").arg(key).query_async(&mut redis).await.unwrap();
+        assert!(v.is_none(), "Drop 应触发异步释放锁");
+    }
+
+    // ---------- execute_with_logging（容错 Redis + 临时 SQLite） ----------
+
+    #[tokio::test]
+    async fn test_execute_with_logging_success_writes_log() {
+        let Some(mut redis) = try_redis().await else { return; };
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let target = "unitTest.scheduler.success";
+        registry::register_task(
+            target,
+            Arc::new(|| Box::pin(async { Ok("all-good".to_string()) })),
+        );
+        // 清理历史残留锁，避免跨测试运行遗留的锁导致本次跳过
+        let _: () = redis::cmd("DEL")
+            .arg("lock:scheduler:9001")
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let job = job(9001, "unit-success", "0 0 3 * * *", target);
+        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        let log_repo = SysJobLogRepository::new(db.clone());
+        let logs = log_repo.find_by_job_name("unit-success").await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status.as_deref(), Some("0"));
+        assert!(
+            logs[0].job_message.as_deref().unwrap().contains("all-good"),
+            "job_message 应包含任务返回消息"
+        );
+        assert!(
+            !executing_jobs.lock().unwrap().contains_key(&9001),
+            "执行标记应被清除"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_logging_business_failure_writes_error_log() {
+        let Some(mut redis) = try_redis().await else { return; };
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let target = "unitTest.scheduler.fail";
+        registry::register_task(
+            target,
+            Arc::new(|| {
+                Box::pin(async {
+                    Err::<String, Box<dyn std::error::Error + Send + Sync>>("boom".into())
+                })
+            }),
+        );
+        let _: () = redis::cmd("DEL")
+            .arg("lock:scheduler:9002")
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let job = job(9002, "unit-fail", "0 0 3 * * *", target);
+        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        let log_repo = SysJobLogRepository::new(db.clone());
+        let logs = log_repo.find_by_job_name("unit-fail").await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status.as_deref(), Some("1"));
+        assert!(logs[0].exception_info.as_deref().unwrap().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_logging_panic_writes_error_log() {
+        let Some(mut redis) = try_redis().await else { return; };
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let target = "unitTest.scheduler.panic";
+        let f: registry::TaskFn = Arc::new(|| {
+            Box::pin(async {
+                panic!("intentional test panic in scheduler unit test");
+            })
+        });
+        registry::register_task(target, f);
+        let _: () = redis::cmd("DEL")
+            .arg("lock:scheduler:9003")
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let job = job(9003, "unit-panic", "0 0 3 * * *", target);
+        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        let log_repo = SysJobLogRepository::new(db.clone());
+        let logs = log_repo.find_by_job_name("unit-panic").await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status.as_deref(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_logging_skips_when_lock_held() {
+        let Some(mut redis) = try_redis().await else { return; };
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        // 预置其他实例持有的锁 → execute_with_logging 的 SETNX 应失败并跳过执行
+        let lock_key = format!("lock:scheduler:{}", 9004);
+        let _: Option<String> = redis::cmd("SET")
+            .arg(&lock_key)
+            .arg("foreign-token")
+            .arg("NX")
+            .arg("EX")
+            .arg(90)
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let job = job(9004, "unit-skiplock", "0 0 3 * * *", "unitTest.scheduler.never");
+        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        let log_repo = SysJobLogRepository::new(db.clone());
+        let logs = log_repo.find_by_job_name("unit-skiplock").await.unwrap();
+        assert!(logs.is_empty(), "锁被占用时应跳过执行，不写日志");
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_logging_skips_concurrent_overlap() {
+        let Some(mut redis) = try_redis().await else { return; };
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let job_id = 9005i64;
+        // 清理历史残留锁，保证本次能获取锁以走到并发检查分支
+        let _: () = redis::cmd("DEL")
+            .arg(format!("lock:scheduler:{}", job_id))
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        executing_jobs.lock().unwrap().insert(job_id, true); // 模拟已有任务在执行
+        let job = job(job_id, "unit-skipconcurrent", "0 0 3 * * *", "unitTest.scheduler.never");
+        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        let log_repo = SysJobLogRepository::new(db.clone());
+        let logs = log_repo.find_by_job_name("unit-skipconcurrent").await.unwrap();
+        assert!(logs.is_empty(), "并发禁止时应跳过执行，不写日志");
+        // 并发跳过会释放已获取的分布式锁
+        let lock_key = format!("lock:scheduler:{}", job_id);
+        let v: Option<String> = redis::cmd("GET")
+            .arg(&lock_key)
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        assert!(v.is_none(), "并发跳过时应释放已获取的分布式锁");
+    }
+
+    // ---------- JobScheduler 生命周期（容错 Redis） ----------
+
+    #[tokio::test]
+    async fn test_scheduler_add_and_remove_job() {
+        let Some(scheduler) = build_scheduler().await else { return; };
+        let j = job(1001, "unit-add", "0 0 3 * * *", "unitTest.scheduler.add");
+        let guid = scheduler.add_job(&j).await.unwrap();
+        assert_eq!(
+            scheduler.running_jobs.read().await.get(&1001).copied(),
+            Some(guid)
+        );
+        scheduler.remove_job(1001).await.unwrap();
+        assert!(scheduler.running_jobs.read().await.get(&1001).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_add_invalid_cron_errors() {
+        let Some(scheduler) = build_scheduler().await else { return; };
+        // 空 cron
+        let j = job(1002, "unit-badcron-empty", "", "unitTest.scheduler.add");
+        assert!(matches!(
+            scheduler.add_job(&j).await,
+            Err(SchedulerError::InvalidCron(_))
+        ));
+        // 非法 cron 语法
+        let j = job(1003, "unit-badcron-syntax", "not-a-cron", "unitTest.scheduler.add");
+        assert!(matches!(
+            scheduler.add_job(&j).await,
+            Err(SchedulerError::InvalidCron(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_remove_nonexistent_is_ok() {
+        let Some(scheduler) = build_scheduler().await else { return; };
+        // 移除不存在的任务应幂等成功（仅告警）
+        assert!(scheduler.remove_job(999999).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_update_job_replaces_guid() {
+        let Some(scheduler) = build_scheduler().await else { return; };
+        let j = job(1004, "unit-update", "0 0 3 * * *", "unitTest.scheduler.add");
+        let g1 = scheduler.add_job(&j).await.unwrap();
+        let j2 = job(1004, "unit-update", "0 0 4 * * *", "unitTest.scheduler.add");
+        scheduler.update_job(&j2).await.unwrap();
+        let g2 = scheduler.running_jobs.read().await.get(&1004).copied();
+        assert!(g2.is_some());
+        assert_ne!(g1, g2.unwrap(), "更新后应使用新 guid");
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_run_once_executes_and_logs() {
+        let Some(scheduler) = build_scheduler().await else { return; };
+        let db = scheduler.db.clone();
+        let target = "unitTest.scheduler.once";
+        registry::register_task(
+            target,
+            Arc::new(|| Box::pin(async { Ok("once-done".to_string()) })),
+        );
+        // 清理历史残留锁，避免 run_once 内部获取锁失败跳过执行
+        let mut redis = scheduler.redis.clone();
+        let _: () = redis::cmd("DEL")
+            .arg("lock:scheduler:1005")
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let j = job(1005, "unit-once", "0 0 3 * * *", target);
+        scheduler.run_once(&j).await.unwrap();
+        // run_once 内部 spawn 执行，等待其完成并写入日志
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let log_repo = SysJobLogRepository::new(db.clone());
+        let logs = log_repo.find_by_job_name("unit-once").await.unwrap();
+        assert_eq!(logs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_load_from_db_registers_jobs() {
+        let Some(scheduler) = build_scheduler().await else { return; };
+        let db = scheduler.db.clone();
+        let target = "unitTest.scheduler.load";
+        registry::register_task(
+            target,
+            Arc::new(|| Box::pin(async { Ok("load-done".to_string()) })),
+        );
+        let am = SysJobActiveModel {
+            job_name: Set("unit-load".to_string()),
+            job_group: Set("DEFAULT".to_string()),
+            invoke_target: Set(target.to_string()),
+            cron_expression: Set(Some("0 0 3 * * *".to_string())),
+            misfire_policy: Set(Some("3".to_string())),
+            concurrent: Set(Some("1".to_string())),
+            status: Set(Some("0".to_string())),
+            create_by: Set(None),
+            create_time: Set(None),
+            update_by: Set(None),
+            update_time: Set(None),
+            remark: Set(None),
+            del_flag: Set(Some("0".to_string())),
+            job_id: NotSet,
+        };
+        let repo = SysJobRepository::new(db.clone());
+        repo.insert(am).await.unwrap();
+        scheduler.load_from_db(&repo).await.unwrap();
+        assert!(
+            scheduler.running_jobs.read().await.values().next().is_some(),
+            "load_from_db 应注册数据库中的启用任务"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_shutdown_ok() {
+        let Some(scheduler) = build_scheduler().await else { return; };
+        assert!(scheduler.shutdown().await.is_ok());
+    }
+}

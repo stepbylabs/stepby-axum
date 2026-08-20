@@ -16,10 +16,32 @@
 //! 若 Redis 不可用，`init_redis` 会在超时后返回错误，测试将以清晰信息失败。
 
 mod auth;
+mod common_handler;
+mod file_common;
+mod ip_location;
+mod monitor;
+mod monitor_extra;
+mod sys_backup;
 mod sys_config_dict;
+mod sys_http_debug;
+mod sys_job;
+mod sys_logininfor;
 mod sys_menu_dept;
+mod sys_misc_extra;
+mod sys_msg;
+mod sys_notice;
+mod sys_oauth;
+mod sys_oper_log;
+mod sys_post;
+mod sys_rate_limit;
+mod sys_report;
 mod sys_role;
+mod sys_task;
 mod sys_user;
+mod sys_user_extra;
+mod sys_user_pref;
+mod tool_gen;
+mod totp;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};

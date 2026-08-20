@@ -50,6 +50,7 @@ impl UploadKind {
 }
 
 /// 上传成功后的文件信息（统一由 `save_upload_bytes` 返回）
+#[derive(Debug)]
 pub struct UploadedFile {
     /// 服务端生成的唯一文件名（如 `a1b2c3d4.png`）
     pub new_filename: String,
@@ -512,4 +513,435 @@ pub async fn save_upload_bytes(
         ext,
         original_filename: original_filename.map(|s| s.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! 覆盖意图：上传链路各纯函数与错误分支——`UploadKind` 配置选择、
+    //! `gen_uuid_filename` 扩展名净化、`validate_magic_bytes` / `looks_like_markup_or_script`
+    //! 的各类 magic 匹配、`resolve_upload_root` / `resolve_upload_dir` 的绝对路径直返、
+    //! `write_upload_file` / `delete_upload_file` 的临时目录读写与路径边界校验、
+    //! `read_field_limited` 的 multipart 流式限长，以及 `save_upload_bytes` 的全部分支
+    //! （空文件 / 超限 / 缺扩展名 / 危险扩展名 / 白名单外 / magic 不匹配 / 图片按实际类型）。
+
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    use crate::storage::StorageBackend;
+
+    const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    const JPG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
+    const PDF_MAGIC: &[u8] = b"%PDF-1.7";
+    const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    const ZIP_MAGIC: &[u8] = &[0x50, 0x4B, 0x03, 0x04];
+
+    // ---------- UploadKind 配置选择 ----------
+
+    #[test]
+    fn upload_kind_selects_common_config() {
+        let cfg = UploadConfig::default();
+        let (exts, max, dir, prefix) = UploadKind::Common.config(&cfg);
+        assert_eq!(exts, &cfg.common_allowed_exts);
+        assert_eq!(max, cfg.common_max_size);
+        assert_eq!(dir, &cfg.common_dir);
+        assert_eq!(prefix, &cfg.common_url_prefix);
+    }
+
+    #[test]
+    fn upload_kind_selects_avatar_config() {
+        let cfg = UploadConfig::default();
+        let (exts, max, dir, prefix) = UploadKind::Avatar.config(&cfg);
+        assert_eq!(exts, &cfg.avatar_allowed_exts);
+        assert_eq!(max, cfg.avatar_max_size);
+        assert_eq!(dir, &cfg.avatar_dir);
+        assert_eq!(prefix, &cfg.avatar_url_prefix);
+    }
+
+    // ---------- gen_uuid_filename ----------
+
+    #[test]
+    fn gen_uuid_filename_ok_and_lowercases() {
+        let name = gen_uuid_filename("PNG").expect("合法扩展名应成功");
+        assert!(name.ends_with(".png"), "实际: {name}");
+        let uuid_part = name.trim_end_matches(".png");
+        assert!(uuid::Uuid::parse_str(uuid_part).is_ok(), "应为 UUID: {name}");
+    }
+
+    #[test]
+    fn gen_uuid_filename_rejects_bad_ext() {
+        assert!(gen_uuid_filename("").is_err()); // 空
+        assert!(gen_uuid_filename("a".repeat(11).as_str()).is_err()); // 超 10 位
+        assert!(gen_uuid_filename("a/b").is_err()); // 含路径分隔符
+        assert!(gen_uuid_filename("..").is_err()); // 穿越
+        assert!(gen_uuid_filename("a b").is_err()); // 含空格
+        assert!(gen_uuid_filename("中文").is_err()); // 非 ASCII
+    }
+
+    // ---------- validate_magic_bytes / looks_like_markup_or_script ----------
+
+    #[test]
+    fn magic_bytes_match_per_extension() {
+        assert!(validate_magic_bytes(JPG_MAGIC, "jpg"));
+        assert!(validate_magic_bytes(JPG_MAGIC, "jpeg"));
+        assert!(validate_magic_bytes(PNG_MAGIC, "png"));
+        assert!(validate_magic_bytes(b"GIF89a...", "gif"));
+        assert!(validate_magic_bytes(b"GIF87a...", "gif"));
+        assert!(validate_magic_bytes(PDF_MAGIC, "pdf"));
+        assert!(validate_magic_bytes(OLE_MAGIC, "doc"));
+        assert!(validate_magic_bytes(OLE_MAGIC, "xls"));
+        assert!(validate_magic_bytes(ZIP_MAGIC, "docx"));
+        assert!(validate_magic_bytes(ZIP_MAGIC, "xlsx"));
+        assert!(validate_magic_bytes(ZIP_MAGIC, "pptx"));
+        assert!(validate_magic_bytes(ZIP_MAGIC, "zip"));
+        // txt：纯文本放行
+        assert!(validate_magic_bytes(b"hello plain text", "txt"));
+    }
+
+    #[test]
+    fn magic_bytes_reject_mismatch_and_unknown() {
+        // 内容与扩展名不匹配
+        assert!(!validate_magic_bytes(b"not a jpeg", "jpg"));
+        assert!(!validate_magic_bytes(PNG_MAGIC, "jpg"));
+        assert!(!validate_magic_bytes(b"not pdf", "pdf"));
+        // 未知扩展名 fail-closed
+        assert!(!validate_magic_bytes(b"anything", "xyz"));
+        assert!(!validate_magic_bytes(b"anything", ""));
+        // txt 伪装成标记内容 → 拒绝
+        assert!(!validate_magic_bytes(b"<html>hi</html>", "txt"));
+        assert!(!validate_magic_bytes(b"<script>alert(1)</script>", "txt"));
+    }
+
+    #[test]
+    fn looks_like_markup_or_script_prefixes() {
+        // 各标记前缀均应判为“伪装文本”
+        assert!(looks_like_markup_or_script(b"<html>"));
+        assert!(looks_like_markup_or_script(b"<!DOCTYPE html>"));
+        assert!(looks_like_markup_or_script(b"<!-- comment -->"));
+        assert!(looks_like_markup_or_script(b"<script>"));
+        assert!(looks_like_markup_or_script(b"<?xml version=\"1.0\"?>"));
+        assert!(looks_like_markup_or_script(b"<svg>"));
+        assert!(looks_like_markup_or_script(b"<iframe>"));
+        assert!(looks_like_markup_or_script(b"<object>"));
+        assert!(looks_like_markup_or_script(b"<embed>"));
+        // 大小写不敏感 + 前导空白/BOM
+        assert!(looks_like_markup_or_script(b"  <HTML>"));
+        assert!(looks_like_markup_or_script(b"\xEF\xBB\xBF<html>"));
+        // 普通文本放行
+        assert!(!looks_like_markup_or_script(b"hello world"));
+        assert!(!looks_like_markup_or_script(b"< not a tag"));
+    }
+
+    // ---------- resolve_upload_root / resolve_upload_dir ----------
+
+    #[test]
+    fn resolve_upload_root_absolute_path_passes_through() {
+        // 绝对 avatar_dir：取父目录后 is_absolute 直接返回，不触碰文件系统
+        let cfg = UploadConfig {
+            avatar_dir: if cfg!(windows) {
+                r"C:\yebot\uploads\avatar".to_string()
+            } else {
+                "/srv/yebot/uploads/avatar".to_string()
+            },
+            ..Default::default()
+        };
+        let root = resolve_upload_root(&cfg);
+        assert!(root.is_absolute(), "应返回绝对路径: {root:?}");
+        let expected = std::path::Path::new(&cfg.avatar_dir)
+            .parent()
+            .expect("有父目录");
+        assert_eq!(root, expected);
+    }
+
+    #[tokio::test]
+    async fn resolve_upload_dir_absolute_path_passes_through() {
+        let dir = if cfg!(windows) {
+            r"C:\yebot\uploads\file"
+        } else {
+            "/srv/yebot/uploads/file"
+        };
+        let resolved = resolve_upload_dir(dir).await;
+        assert_eq!(resolved, std::path::PathBuf::from(dir));
+    }
+
+    // ---------- write_upload_file ----------
+
+    #[tokio::test]
+    async fn write_upload_file_writes_bytes_and_creates_dirs() {
+        let root = temp_root();
+        let dir = root.join("nested/deeper");
+        let path = dir.join("a.txt");
+        let size = write_upload_file(path.clone(), &dir.to_string_lossy(), b"hello")
+            .await
+            .expect("写入失败");
+        assert_eq!(size, 5);
+        assert_eq!(std::fs::read(&path).expect("应存在"), b"hello");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---------- delete_upload_file ----------
+
+    #[tokio::test]
+    async fn delete_upload_file_deletes_and_is_idempotent() {
+        let root = temp_root();
+        let file = root.join("victim.txt");
+        std::fs::write(&file, b"x").expect("写文件失败");
+        delete_upload_file(&file.to_string_lossy(), &root.to_string_lossy())
+            .await
+            .expect("删除失败");
+        assert!(!file.exists());
+        // 不存在视为成功（幂等）
+        delete_upload_file(&file.to_string_lossy(), &root.to_string_lossy())
+            .await
+            .expect("重复删除应幂等");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn delete_upload_file_rejects_path_outside_root() {
+        let root_a = temp_root();
+        let root_b = temp_root();
+        let victim = root_b.join("secret.txt");
+        std::fs::write(&victim, b"x").expect("写文件失败");
+        // root_a 下删除 root_b 的文件 → 越界拒绝
+        let err = delete_upload_file(&victim.to_string_lossy(), &root_a.to_string_lossy())
+            .await
+            .expect_err("越界删除应失败");
+        assert_eq!(err.code, 500); // internal（脱敏）
+        assert!(victim.exists(), "越界删除不应生效");
+        std::fs::remove_dir_all(&root_a).ok();
+        std::fs::remove_dir_all(&root_b).ok();
+    }
+
+    #[tokio::test]
+    async fn delete_upload_file_missing_root_is_error() {
+        let root = temp_root().join("does_not_exist");
+        let err = delete_upload_file(
+            &root.join("f.txt").to_string_lossy(),
+            &root.to_string_lossy(),
+        )
+        .await
+        .expect_err("根目录不存在应报错");
+        assert_eq!(err.code, 500);
+    }
+
+    // ---------- read_field_limited（multipart 流式限长） ----------
+
+    /// 解析 multipart body 并读取第一个字段（完全异步，不嵌套 block_on）
+    async fn read_first_field(
+        body: &str,
+        boundary: &str,
+        max_size: usize,
+    ) -> Result<(Vec<u8>, Option<String>, Option<String>), AppError> {
+        use axum::body::Body;
+        use axum::extract::FromRequest;
+        use axum::extract::multipart::Multipart;
+        use axum::http::Request;
+        let req = Request::builder()
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body.to_string()))
+            .expect("构造 multipart 请求失败");
+        let mut mp = Multipart::from_request(req, &())
+            .await
+            .expect("解析 multipart 失败");
+        let mut field = mp
+            .next_field()
+            .await
+            .expect("读取字段失败")
+            .expect("应存在字段");
+        read_field_limited(&mut field, max_size).await
+    }
+
+    #[tokio::test]
+    async fn read_field_limited_captures_bytes_ext_and_name() {
+        let boundary = "XBOUND";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"report.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
+        );
+        let (bytes, ext, name) = read_first_field(&body, boundary, 1024)
+            .await
+            .expect("读取成功");
+        assert_eq!(bytes, b"hello world");
+        assert_eq!(ext.as_deref(), Some("txt"));
+        assert_eq!(name.as_deref(), Some("report.txt"));
+    }
+
+    #[tokio::test]
+    async fn read_field_limited_rejects_oversize() {
+        let boundary = "XBOUND";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.bin\"\r\n\r\n{}\r\n--{boundary}--\r\n",
+            "x".repeat(100)
+        );
+        let err = read_first_field(&body, boundary, 10)
+            .await
+            .expect_err("超限应失败");
+        assert_eq!(err.code, 400);
+        assert!(err.message.contains("MB"), "实际: {}", err.message);
+    }
+
+    // ---------- save_upload_bytes（mock 后端） ----------
+
+    /// 记录保存调用（dir, key, bytes）
+    type SaveCalls = Vec<(String, String, Vec<u8>)>;
+
+    /// 记录保存调用（dir, key, bytes）的内存 mock 后端
+    struct MockBackend(Arc<Mutex<SaveCalls>>);
+
+    #[async_trait]
+    impl StorageBackend for MockBackend {
+        fn kind(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn save(
+            &self,
+            dir: &str,
+            key: &str,
+            _url_prefix: &str,
+            bytes: &[u8],
+        ) -> Result<String, AppError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((dir.to_string(), key.to_string(), bytes.to_vec()));
+            Ok(format!("mock://{dir}/{key}"))
+        }
+
+        async fn read(&self, _dir: &str, _key: &str) -> Result<Option<Vec<u8>>, AppError> {
+            Ok(None)
+        }
+
+        async fn delete(&self, _dir: &str, _key: &str) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn list(
+            &self,
+            _dir: &str,
+            _url_prefix: &str,
+        ) -> Result<Vec<crate::storage::StorageObject>, AppError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_rejects_empty() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        let err = save_upload_bytes(&backend, b"", Some("png"), None, &cfg, UploadKind::Common)
+            .await
+            .expect_err("空文件应失败");
+        assert_eq!(err.code, 400);
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_rejects_too_large() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        // common_max_size 默认 10MB，给 11MB 数据（不实际分配，用重复小向量）
+        let big: Vec<u8> = vec![0u8; cfg.common_max_size + 1];
+        let err = save_upload_bytes(&backend, &big, Some("png"), None, &cfg, UploadKind::Common)
+            .await
+            .expect_err("超限应失败");
+        assert_eq!(err.code, 400);
+        assert!(err.message.contains("MB"));
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_rejects_missing_ext() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        let err = save_upload_bytes(&backend, b"data", None, None, &cfg, UploadKind::Common)
+            .await
+            .expect_err("缺扩展名应失败");
+        assert_eq!(err.code, 400);
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_rejects_dangerous_ext() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        // 即使 html 不在白名单也会被 DANGEROUS_EXTS 强制拒绝
+        let err = save_upload_bytes(&backend, b"<html></html>", Some("html"), None, &cfg, UploadKind::Common)
+            .await
+            .expect_err("危险扩展名应失败");
+        assert_eq!(err.code, 400);
+        assert!(err.message.contains("html"));
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_rejects_ext_not_in_whitelist() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        let err = save_upload_bytes(&backend, b"data", Some("xyz"), None, &cfg, UploadKind::Common)
+            .await
+            .expect_err("白名单外应失败");
+        assert_eq!(err.code, 400);
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_rejects_magic_mismatch_for_non_image() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        // 声明 pdf 但内容是纯文本 → magic 校验失败
+        let err = save_upload_bytes(&backend, b"not a pdf at all", Some("pdf"), None, &cfg, UploadKind::Common)
+            .await
+            .expect_err("magic 不匹配应失败");
+        assert_eq!(err.code, 400);
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_image_uses_detected_real_type() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        // 声明 jpg 但字节为 PNG → 以 magic 识别结果 png 为准保存
+        let file = save_upload_bytes(&backend, PNG_MAGIC, Some("jpg"), Some("photo.jpg"), &cfg, UploadKind::Common)
+            .await
+            .expect("应按实际类型保存");
+        assert_eq!(file.ext, "png");
+        assert!(file.new_filename.ends_with(".png"));
+        assert_eq!(file.size, PNG_MAGIC.len() as u64);
+        assert_eq!(file.original_filename.as_deref(), Some("photo.jpg"));
+        assert_eq!(file.url, format!("mock://{}/{}", cfg.common_dir, file.new_filename));
+        // 后端收到 key = 生成的 UUID 文件名
+        let calls = backend.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, cfg.common_dir);
+        assert_eq!(calls[0].1, file.new_filename);
+        assert_eq!(calls[0].2, PNG_MAGIC);
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_image_matches_declared() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        let file = save_upload_bytes(&backend, JPG_MAGIC, Some("jpeg"), None, &cfg, UploadKind::Common)
+            .await
+            .expect("JPEG 应成功");
+        assert_eq!(file.ext, "jpg"); // jpeg 归一为 jpg
+        assert!(file.new_filename.ends_with(".jpg"));
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_non_image_success() {
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let cfg = UploadConfig::default();
+        let file = save_upload_bytes(&backend, b"hello world", Some("txt"), None, &cfg, UploadKind::Common)
+            .await
+            .expect("txt 应成功");
+        assert_eq!(file.ext, "txt");
+        assert!(file.new_filename.ends_with(".txt"));
+    }
+
+    // ---------- 测试辅助 ----------
+
+    fn temp_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("yebot_upload_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("创建临时目录失败");
+        root
+    }
 }

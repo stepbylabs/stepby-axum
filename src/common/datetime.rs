@@ -222,4 +222,124 @@ mod tests {
     fn test_parse_local_date_to_utc_naive_valid_some() {
         assert!(parse_local_date_to_utc_naive("2026-08-05").is_some());
     }
+
+    // ---------- 以下为补充覆盖：now/today、序列化、反序列化全分支 ----------
+
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
+        NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(y, mo, d).expect("合法日期"),
+            NaiveTime::from_hms_opt(h, mi, s).expect("合法时间"),
+        )
+    }
+
+    #[test]
+    fn now_naive_is_close_to_utc_now() {
+        // now_naive 语义为 UTC：与 Utc::now().naive_local() 相差应 < 5 秒
+        let before = Utc::now().naive_local();
+        let now = now_naive();
+        let after = Utc::now().naive_local();
+        assert!(now >= before && now <= after, "now_naive 应落在查询区间内");
+    }
+
+    #[test]
+    fn today_utc_matches_utc_date() {
+        let expected = Utc::now().date_naive();
+        assert_eq!(today_utc(), expected);
+    }
+
+    #[test]
+    fn serialize_outputs_rfc3339_with_z() {
+        let dt = dt(2026, 1, 2, 3, 4, 5);
+        // 直接调用 serialize（经 serde_json::Serializer）
+        let out = serde_json::to_string(&SerializeProbe(dt)).expect("序列化失败");
+        assert_eq!(out, r#""2026-01-02T03:04:05Z""#);
+    }
+
+    /// 包装类型：复用 datetime::serialize 走完整 serde_json 路径
+    #[derive(serde::Serialize)]
+    struct SerializeProbe(#[serde(serialize_with = "serialize")] NaiveDateTime);
+
+    #[test]
+    fn deserialize_accepts_various_formats() {
+        use serde_json::Value;
+        let cases = [
+            r#""2026-01-02T03:04:05Z""#,
+            r#""2026-01-02T03:04:05+00:00""#,
+            r#""2026-01-02 03:04:05""#,
+            r#""2026-01-02T03:04:05""#,
+        ];
+        for c in cases {
+            let v: Value = serde_json::from_str(c).unwrap();
+            let deser: NaiveDateTime = deserialize(&v).expect("应解析成功");
+            assert_eq!(deser, dt(2026, 1, 2, 3, 4, 5), "输入: {c}");
+        }
+    }
+
+    #[test]
+    fn deserialize_applies_utc_offset() {
+        use serde_json::Value;
+        // +08:00 → naive_utc 为 2026-01-02 03:04:05（本地 11:04:05 前移 8 小时）
+        let v: Value = serde_json::from_str(r#""2026-01-02T11:04:05+08:00""#).unwrap();
+        let deser: NaiveDateTime = deserialize(&v).expect("带偏移应解析成功");
+        assert_eq!(deser, dt(2026, 1, 2, 3, 4, 5));
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid() {
+        use serde_json::Value;
+        let v: Value = serde_json::from_str(r#""not-a-date""#).unwrap();
+        assert!(deserialize(&v).is_err());
+    }
+
+    #[test]
+    fn serialize_opt_none_is_null_and_some_serializes() {
+        #[derive(serde::Serialize)]
+        struct OptProbe(#[serde(serialize_with = "serialize_opt")] Option<NaiveDateTime>);
+        let none = serde_json::to_string(&OptProbe(None)).unwrap();
+        assert_eq!(none, r#"null"#);
+        let some = serde_json::to_string(&OptProbe(Some(dt(2026, 1, 2, 3, 4, 5)))).unwrap();
+        assert_eq!(some, r#""2026-01-02T03:04:05Z""#);
+    }
+
+    #[test]
+    fn deserialize_opt_handles_null_empty_and_valid() {
+        use serde_json::Value;
+        // null → None
+        let v: Value = serde_json::json!(null);
+        assert_eq!(deserialize_opt(&v).unwrap(), None);
+        // 空串 → None
+        let v: Value = serde_json::json!("");
+        assert_eq!(deserialize_opt(&v).unwrap(), None);
+        // RFC3339 → Some
+        let v: Value = serde_json::json!("2026-01-02T03:04:05Z");
+        assert_eq!(
+            deserialize_opt(&v).unwrap(),
+            Some(dt(2026, 1, 2, 3, 4, 5))
+        );
+        // 空格分隔 → Some
+        let v: Value = serde_json::json!("2026-01-02 03:04:05");
+        assert_eq!(
+            deserialize_opt(&v).unwrap(),
+            Some(dt(2026, 1, 2, 3, 4, 5))
+        );
+        // T 分隔 → Some
+        let v: Value = serde_json::json!("2026-01-02T03:04:05");
+        assert_eq!(
+            deserialize_opt(&v).unwrap(),
+            Some(dt(2026, 1, 2, 3, 4, 5))
+        );
+        // 非法 → Err
+        let v: Value = serde_json::json!("garbage");
+        assert!(deserialize_opt(&v).is_err());
+    }
+
+    #[test]
+    fn deserialize_opt_applies_utc_offset() {
+        use serde_json::Value;
+        let v: Value = serde_json::json!("2026-01-02T11:04:05+08:00");
+        assert_eq!(
+            deserialize_opt(&v).unwrap(),
+            Some(dt(2026, 1, 2, 3, 4, 5))
+        );
+    }
 }

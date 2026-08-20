@@ -140,6 +140,9 @@ impl StorageBackend for LocalBackend {
 
 #[cfg(test)]
 mod tests {
+    //! 覆盖意图：本地后端的 save/read/list/delete 全流程回环、key 安全校验（穿越/分隔符/NUL
+    //! 拒绝）、缺失目录 list 为空、kind/supports_static 标识，以及 `valid_key` 纯函数分支。
+
     use super::*;
 
     /// 创建一次性临时根目录（避免污染仓库 uploads/）。
@@ -243,5 +246,32 @@ mod tests {
                 .is_empty()
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---------- 补充覆盖：valid_key 纯函数 / kind / supports_static ----------
+
+    #[test]
+    fn valid_key_rejects_unsafe_keys() {
+        // 合法 key
+        assert!(valid_key("abc.png"));
+        assert!(valid_key("a-b_c.d"));
+        // 空 key
+        assert!(!valid_key(""));
+        // 路径分隔符 / 反斜杠
+        assert!(!valid_key("a/b.png"));
+        assert!(!valid_key("a\\b.png"));
+        // 穿越
+        assert!(!valid_key(".."));
+        assert!(!valid_key("../evil.png"));
+        assert!(!valid_key("a/../b.png"));
+        // NUL
+        assert!(!valid_key("a\0b.png"));
+    }
+
+    #[test]
+    fn local_backend_kind_and_static_support() {
+        let backend = LocalBackend;
+        assert_eq!(backend.kind(), "local");
+        assert!(backend.supports_static());
     }
 }

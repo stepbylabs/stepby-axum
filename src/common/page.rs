@@ -244,4 +244,151 @@ mod tests {
             "无 last_id 时不应追加 keyset 过滤，实际 SQL: {debug_sql}"
         );
     }
+
+    // ---------- 以下为补充覆盖：PageDomain 反序列化 / offset / limit / 排序字段白名单 ----------
+
+    #[test]
+    fn page_domain_defaults() {
+        let d = PageDomain::default();
+        assert_eq!(d.page_num, 1);
+        assert_eq!(d.page_size, 10);
+        assert_eq!(d.order_by_column, None);
+        assert_eq!(d.is_asc, None);
+        assert_eq!(default_page_num(), 1);
+        assert_eq!(default_page_size(), 10);
+    }
+
+    #[test]
+    fn page_domain_deserializes_camel_case_query() {
+        // 前端 ?pageNum=2&pageSize=20&orderByColumn=createTime&isAsc=desc
+        let s = r#"{"pageNum":2,"pageSize":20,"orderByColumn":"createTime","isAsc":"desc"}"#;
+        let d: PageDomain = serde_json::from_str(s).expect("应反序列化成功");
+        assert_eq!(d.page_num, 2);
+        assert_eq!(d.page_size, 20);
+        assert_eq!(d.order_by_column.as_deref(), Some("createTime"));
+        assert_eq!(d.is_asc.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn page_domain_missing_fields_use_defaults() {
+        // 缺省字段回退默认值
+        let d: PageDomain = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(d.page_num, 1);
+        assert_eq!(d.page_size, 10);
+        assert_eq!(d.order_by_column, None);
+        assert_eq!(d.is_asc, None);
+    }
+
+    #[test]
+    fn page_domain_offset_semantics() {
+        // page_num=0 防御性归一到第 1 页（offset 0）
+        let d = PageDomain {
+            page_num: 0,
+            page_size: 10,
+            ..PageDomain::default()
+        };
+        assert_eq!(d.offset(), 0);
+        // 第 1 页 offset 0
+        let d = PageDomain {
+            page_num: 1,
+            page_size: 10,
+            ..PageDomain::default()
+        };
+        assert_eq!(d.offset(), 0);
+        // 第 3 页 offset 20
+        let d = PageDomain {
+            page_num: 3,
+            page_size: 10,
+            ..PageDomain::default()
+        };
+        assert_eq!(d.offset(), 20);
+    }
+
+    #[test]
+    fn page_domain_offset_saturates_on_overflow() {
+        // page_num/page_size 极大 → saturating_mul 不 panic，返回 u64::MAX
+        let d = PageDomain {
+            page_num: u64::MAX,
+            page_size: u64::MAX,
+            ..PageDomain::default()
+        };
+        // limit 先封顶 100，(MAX-1)*100 saturating
+        assert_eq!(d.offset(), u64::MAX.saturating_sub(1).saturating_mul(100));
+    }
+
+    #[test]
+    fn page_domain_limit_clamps_to_max() {
+        let d = PageDomain {
+            page_size: 50,
+            ..PageDomain::default()
+        };
+        assert_eq!(d.limit(), 50);
+        let d = PageDomain {
+            page_size: MAX_PAGE_SIZE + 1,
+            ..PageDomain::default()
+        };
+        assert_eq!(d.limit(), MAX_PAGE_SIZE);
+        let d = PageDomain {
+            page_size: 0,
+            ..PageDomain::default()
+        };
+        assert_eq!(d.limit(), 0);
+    }
+
+    #[test]
+    fn order_by_column_validation() {
+        // 合法：字母开头 + 字母数字下划线，长度 ≤ 64
+        assert!(PageDomain::is_valid_order_by_column("createTime"));
+        assert!(PageDomain::is_valid_order_by_column("_order"));
+        assert!(PageDomain::is_valid_order_by_column("a"));
+        assert!(PageDomain::is_valid_order_by_column("col_1"));
+        let long_ok = "a".repeat(64);
+        assert!(PageDomain::is_valid_order_by_column(&long_ok));
+        // 非法
+        assert!(!PageDomain::is_valid_order_by_column(""));
+        let long_bad = "a".repeat(65);
+        assert!(!PageDomain::is_valid_order_by_column(&long_bad));
+        assert!(!PageDomain::is_valid_order_by_column("1abc")); // 数字开头
+        assert!(!PageDomain::is_valid_order_by_column("-abc")); // 符号开头
+        assert!(!PageDomain::is_valid_order_by_column("a b")); // 含空格
+        assert!(!PageDomain::is_valid_order_by_column("a;drop")); // 含分号
+        assert!(!PageDomain::is_valid_order_by_column("a,b")); // 含逗号
+        assert!(!PageDomain::is_valid_order_by_column("a\"b")); // 含引号
+        assert!(!PageDomain::is_valid_order_by_column("中文列")); // 非 ASCII
+    }
+
+    #[test]
+    fn is_asc_validation_case_insensitive() {
+        assert!(PageDomain::is_valid_is_asc("asc"));
+        assert!(PageDomain::is_valid_is_asc("DESC"));
+        assert!(PageDomain::is_valid_is_asc("Ascending"));
+        assert!(PageDomain::is_valid_is_asc("descending"));
+        assert!(!PageDomain::is_valid_is_asc(""));
+        assert!(!PageDomain::is_valid_is_asc("desc asc"));
+        assert!(!PageDomain::is_valid_is_asc("random"));
+        assert!(!PageDomain::is_valid_is_asc("asc;drop"));
+    }
+
+    #[test]
+    fn sanitize_order_fields_drops_invalid_keeps_valid() {
+        // 非法排序字段 → 置 None
+        let mut d = PageDomain {
+            order_by_column: Some("a;drop".into()),
+            is_asc: Some("evil".into()),
+            ..PageDomain::default()
+        };
+        d.sanitize_order_fields();
+        assert_eq!(d.order_by_column, None);
+        assert_eq!(d.is_asc, None);
+
+        // 合法值保留
+        let mut d = PageDomain {
+            order_by_column: Some("createTime".into()),
+            is_asc: Some("desc".into()),
+            ..PageDomain::default()
+        };
+        d.sanitize_order_fields();
+        assert_eq!(d.order_by_column.as_deref(), Some("createTime"));
+        assert_eq!(d.is_asc.as_deref(), Some("desc"));
+    }
 }

@@ -131,23 +131,25 @@ pub fn validate_url(url: &str) -> Result<url::Url, String> {
         return Err(format!("仅允许 http/https 协议，收到 {}", parsed.scheme()));
     }
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "URL 缺少主机名".to_string())?;
-    if host.trim().is_empty() {
-        return Err("URL 缺少主机名".to_string());
-    }
-
-    // IP 字面量：直接判断
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
-            return Err(format!("禁止访问内网/保留地址 {host}"));
+    // 主机名判定：优先使用 Host 枚举（IPv6 字面量不含方括号），
+    // 避免 host_str() 对 IPv6 返回 "[::1]" 导致 IP 解析失败而绕过阻断。
+    match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => {
+            if is_blocked_ipv4(v4) {
+                return Err(format!("禁止访问内网/保留地址 {v4}"));
+            }
         }
-    } else {
-        // 域名：保留后缀拦截
-        if is_blocked_hostname(host) {
-            return Err(format!("禁止访问保留域名后缀 {host}"));
+        Some(url::Host::Ipv6(v6)) => {
+            if is_blocked_ipv6(v6) {
+                return Err(format!("禁止访问内网/保留地址 {v6}"));
+            }
         }
+        Some(url::Host::Domain(domain)) => {
+            if is_blocked_hostname(domain) {
+                return Err(format!("禁止访问保留域名后缀 {domain}"));
+            }
+        }
+        None => return Err("URL 缺少主机名".to_string()),
     }
 
     Ok(parsed)
@@ -241,5 +243,79 @@ mod tests {
         // 规范化为 host="path" 的合法域名，故缺主机名用例需用真正无 authority 的形式。
         assert!(validate_url("http://").is_err());
         assert!(validate_url("https://:443").is_err());
+    }
+
+    // ---------- 补充覆盖：补齐各阻断地址段分支 / 主机名后缀 / validate_url 边界 ----------
+
+    #[test]
+    fn blocked_ipv4_remaining_ranges() {
+        // 192.0.0.0/24（IETF 协议分配）
+        assert!(is_blocked_ipv4("192.0.0.1".parse().unwrap()));
+        // 198.18.0.0/15（基准测试）
+        assert!(is_blocked_ipv4("198.18.0.1".parse().unwrap()));
+        assert!(is_blocked_ipv4("198.19.255.255".parse().unwrap()));
+        // 198.51.100.0/24（TEST-NET-2）
+        assert!(is_blocked_ipv4("198.51.100.7".parse().unwrap()));
+        // 203.0.113.0/24（TEST-NET-3）
+        assert!(is_blocked_ipv4("203.0.113.9".parse().unwrap()));
+        // 224.0.0.0/4 组播
+        assert!(is_blocked_ipv4("224.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ipv4("239.255.255.255".parse().unwrap()));
+        // 240.0.0.0/4 保留
+        assert!(is_blocked_ipv4("240.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ipv4("255.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocked_ipv6_remaining_ranges() {
+        // ff00::/8 组播（当前用例只覆盖到 fc00/fe80/2001:db8）
+        assert!(is_blocked_ipv6("ff02::1".parse().unwrap()));
+        assert!(is_blocked_ipv6("ff01::1".parse().unwrap()));
+        // IPv4 映射的**公开**地址不应被误判（仅当底层 v4 命中阻断段时才拦截）
+        assert!(!is_blocked_ip("::ffff:8.8.8.8".parse().unwrap()));
+        // 未映射的普通 V6 环回：走 is_blocked_ip 的 V6 分支
+        assert!(is_blocked_ip("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocked_hostname_remaining_suffixes() {
+        // 其余保留后缀
+        assert!(is_blocked_hostname("host.localdomain"));
+        assert!(is_blocked_hostname("nas.lan"));
+        assert!(is_blocked_hostname("printer.home.arpa"));
+        assert!(is_blocked_hostname("intranet.test"));
+        assert!(is_blocked_hostname("docs.example"));
+        // 精确匹配 + 大小写不敏感 + 结尾点剥离
+        assert!(is_blocked_hostname("LOCALHOST"));
+        assert!(is_blocked_hostname("localhost."));
+        assert!(is_blocked_hostname("SVC.LOCAL"));
+        // 非保留正常域名仍放行
+        assert!(!is_blocked_hostname("www.qq.com"));
+        assert!(!is_blocked_hostname("a.internal-x.com")); // 仅子串不算后缀
+    }
+
+    #[test]
+    fn validate_url_remaining_branches() {
+        // 公开 IP + 端口 + 路径 → 放行
+        assert!(validate_url("http://8.8.8.8:8080/health?x=1").is_ok());
+        // 阻断段内 IP 字面量 → 拒绝
+        assert!(validate_url("http://192.0.0.1").is_err());
+        assert!(validate_url("http://198.18.0.1").is_err());
+        assert!(validate_url("http://198.51.100.1").is_err());
+        assert!(validate_url("http://203.0.113.1").is_err());
+        assert!(validate_url("http://224.0.0.1").is_err());
+        assert!(validate_url("http://240.0.0.1").is_err());
+        // IPv6 字面量：公开放行 / 环回拒绝
+        assert!(validate_url("http://[2606:4700:4700::1111]").is_ok());
+        assert!(validate_url("http://[::1]").is_err());
+        assert!(validate_url("http://[fe80::1]").is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_host_resolution_blocks_localhost() {
+        // localhost 解析到环回（127.0.0.1 / ::1）应被拒绝；即使个别环境解析失败
+        // （返回 Err "DNS 解析失败"）结果同样为 Err，故本断言在任何环境下均稳定。
+        let res = validate_host_resolution("localhost", 80).await;
+        assert!(res.is_err(), "localhost 应命中环回拦截，实际 Ok: {res:?}");
     }
 }

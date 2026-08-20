@@ -1,4 +1,4 @@
-# en-US messages
+﻿# en-US messages
 # Mirrors zh-CN.yml keys. Fallback chain: en-US -> zh-CN.
 
 error:
@@ -20,8 +20,8 @@ error:
     internal: Internal system error, please contact the administrator
     validate_failed: Parameter validation failed
     parse_failed: Failed to parse request parameters
-    time_format_invalid: "Invalid time format: {{s}}"
-    batch_size_exceeded: "Batch operation size cannot exceed {{max}}"
+    time_format_invalid: "Invalid time format: %{s}"
+    batch_size_exceeded: "Batch operation size cannot exceed %{max}"
   auth:
     captcha_expired: Captcha expired or does not exist
     captcha_wrong: Incorrect captcha
@@ -47,7 +47,7 @@ error:
     idempotency_key_empty: Idempotency-Key header cannot be empty
     idempotency_key_invalid: Idempotency-Key contains invalid characters, only letters, digits, hyphens, and underscores are allowed
     idempotency_key_non_ascii: Idempotency-Key header contains non-ASCII characters
-    idempotency_key_too_long: "Idempotency-Key length cannot exceed {{max}} characters"
+    idempotency_key_too_long: "Idempotency-Key length cannot exceed %{max} characters"
     login_info_missing: Cannot retrieve login info, please log in again
     password_changed: Password has been changed, please log in again
     permission_denied: No permission to access this resource
@@ -69,7 +69,7 @@ error:
     auto_create_failed: Failed to auto-create local account, contact administrator
     bind_taken: This third-party account is already bound to another local account
     email_conflict: Third-party email already exists as local account, please log in with local account to bind
-    username_occupied: "Generated local username {{name}} is taken, cannot auto-create"
+    username_occupied: "Generated local username %{name} is taken, cannot auto-create"
     provider_id_invalid: Invalid provider ID
     handoff_invalid: Binding credential is invalid or expired, please retry third-party login
     password_wrong: Local account password verification failed
@@ -85,18 +85,18 @@ error:
     invalid_name: Invalid file name
     list_failed: Failed to read directory
     list_task_failed: Read directory task failed
-    multipart_parse_failed: "Failed to parse multipart: {{e}}"
-    read_failed: "Failed to read file content: {{e}}"
-    too_large: "File size cannot exceed {{max}}MB"
+    multipart_parse_failed: "Failed to parse multipart: %{e}"
+    read_failed: "Failed to read file content: %{e}"
+    too_large: "File size cannot exceed %{max}MB"
     unknown_ext: Cannot recognize file extension
-    unsupported_type: "Unsupported file type: {{ext}}"
+    unsupported_type: "Unsupported file type: %{ext}"
   storage:
-    unsupported_backend: "Unsupported storage backend: {{backend}} (supported: local / s3)"
+    unsupported_backend: "Unsupported storage backend: %{backend} (supported: local / s3)"
     s3_missing_config: "S3 storage missing required config (access_key/secret_key/endpoint/bucket)"
     s3_invalid_endpoint: "Invalid S3 endpoint"
     s3_client_build_failed: "Failed to initialize S3 client"
     s3_request_failed: "S3 request failed, check object storage availability"
-    s3_status: "S3 returned status {{status}}: {{detail}}"
+    s3_status: "S3 returned status %{status}: %{detail}"
     s3_list_failed: "Failed to list S3 objects"
   password:
     complexity_common: Password is too common, please use a more complex password
@@ -104,7 +104,7 @@ error:
     complexity_letter: Password must contain at least 1 letter
   user:
     not_found: User does not exist
-    not_found_by_id: "User ID={{id}} does not exist"
+    not_found_by_id: "User ID=%{id} does not exist"
     name_duplicate: Username cannot be duplicated
     phone_invalid: Invalid phone number format (please check the country/region code)
     admin_disable_forbidden: Cannot disable the super administrator
@@ -122,7 +122,7 @@ error:
     import_login_length: Login name must be 2-30 characters long
     import_login_format: Login name only allows letters, digits, and underscores
     import_nick_required: Nickname is required
-    import_dept_not_found: "Department \"{{name}}\" does not exist"
+    import_dept_not_found: "Department \"%{name}\" does not exist"
     import_duplicate_in_file: Duplicate login name within the file
     pwd_reset_token_invalidate_failed: Password reset succeeded, but old token invalidation marking failed
     pwd_change_token_invalidate_failed: Password changed, but old token invalidation marking failed
@@ -140,7 +140,7 @@ error:
     has_users: Department has users, cannot delete
     ids_empty: deptIds/orderNums is empty after parsing
     level_too_deep: Department hierarchy too deep, cycle check failed
-    id_not_found: "Department ID={{id}} does not exist"
+    id_not_found: "Department ID=%{id} does not exist"
     ids_count_mismatch: deptIds and orderNums count mismatch
   menu:
     not_found: Menu does not exist
@@ -152,7 +152,7 @@ error:
     assigned_to_role: Menu is assigned to roles, cannot delete
     ids_empty: menuIds/orderNums is empty after parsing
     level_too_deep: Menu hierarchy too deep, cycle check failed
-    id_not_found: "Menu ID={{id}} does not exist"
+    id_not_found: "Menu ID=%{id} does not exist"
     ids_count_mismatch: menuIds and orderNums count mismatch
   rate_limit:
     not_found: Rate limit configuration not found
@@ -166,23 +166,23 @@ error:
     not_found: Post does not exist
     code_exists: Post code already exists
     id_invalid: Invalid post ID
-    assigned_to_user: "Post {{id}} is assigned to users, cannot delete"
+    assigned_to_user: "Post %{id} is assigned to users, cannot delete"
   task:
     not_found: Task does not exist
     id_invalid: Invalid task ID
   gen:
     time_format: Invalid time format
     int_default: Integer default value is not a valid number
-    int_default_invalid: "Integer default value {{value}} is not a valid number"
+    int_default_invalid: "Integer default value %{value} is not a valid number"
     decimal_default: Decimal default value is not a valid number
-    decimal_default_invalid: "Decimal default value {{value}} is not a valid number"
+    decimal_default_invalid: "Decimal default value %{value} is not a valid number"
     table_not_found: Code generation business table does not exist
     table_name_start: Table name must start with a letter
     create_table_failed: Failed to create table
-    create_table_failed_with_err: "Failed to create table: {{err}}"
-    table_id_not_found: "Table ID={{id}} does not exist"
-    table_not_imported: "Table {{name}} not imported"
-    table_no_columns: "Table {{name}} does not exist or has no columns"
+    create_table_failed_with_err: "Failed to create table: %{err}"
+    table_id_not_found: "Table ID=%{id} does not exist"
+    table_not_imported: "Table %{name} not imported"
+    table_no_columns: "Table %{name} does not exist or has no columns"
     table_select_required: Please select tables to import
     table_id_invalid: Invalid table ID
     table_name_invalid: Invalid table name
@@ -192,23 +192,23 @@ error:
     template_load_failed: Tera template load failed
     path_empty_component: Path component contains invalid empty string
     record_not_found: Record does not exist
-    field_length_invalid: "{{field}} length must be between 1-64"
-    field_start_invalid: "{{field}} must start with letter or underscore"
-    field_char_invalid: "{{field}} can only contain letters, digits, underscores"
-    bool_default_invalid: "Boolean default value {{value}} must be true/false/0/1"
-    table_already_imported: "Table {{name}} already imported, do not import again"
-    table_no_columns_or_not_exist: "Table {{name}} does not exist or has no columns"
-    table_already_in_gen: "Table {{name}} already exists in gen_table, do not create again"
-    table_already_in_db: "Table {{name}} already exists in database, do not create again"
-    column_name_duplicate: "Column name {{name}} duplicated"
-    column_type_length_required: "Column {{name}} type {{ty}} requires length"
-    column_decimal_scale_required: "Column {{name}} type Decimal requires scale"
-    column_decimal_scale_invalid: "Column {{name}} scale {{scale}} must be less than length {{length}}"
-    column_auto_inc_no_pk: "Column {{name}} set auto increment but no primary key"
-    column_auto_inc_not_int: "Column {{name}} set auto increment but type {{ty}} is not integer"
-    template_render_failed: "Template render failed ({{name}}): {{msg}}"
-    path_component_invalid: "Path component contains invalid characters (.. / \\ not allowed): {{name}}"
-    batch_tables_exceeded: "At most {{max}} tables can be generated at once"
+    field_length_invalid: "%{field} length must be between 1-64"
+    field_start_invalid: "%{field} must start with letter or underscore"
+    field_char_invalid: "%{field} can only contain letters, digits, underscores"
+    bool_default_invalid: "Boolean default value %{value} must be true/false/0/1"
+    table_already_imported: "Table %{name} already imported, do not import again"
+    table_no_columns_or_not_exist: "Table %{name} does not exist or has no columns"
+    table_already_in_gen: "Table %{name} already exists in gen_table, do not create again"
+    table_already_in_db: "Table %{name} already exists in database, do not create again"
+    column_name_duplicate: "Column name %{name} duplicated"
+    column_type_length_required: "Column %{name} type %{ty} requires length"
+    column_decimal_scale_required: "Column %{name} type Decimal requires scale"
+    column_decimal_scale_invalid: "Column %{name} scale %{scale} must be less than length %{length}"
+    column_auto_inc_no_pk: "Column %{name} set auto increment but no primary key"
+    column_auto_inc_not_int: "Column %{name} set auto increment but type %{ty} is not integer"
+    template_render_failed: "Template render failed (%{name}): %{msg}"
+    path_component_invalid: "Path component contains invalid characters (.. / \\ not allowed): %{name}"
+    batch_tables_exceeded: "At most %{max} tables can be generated at once"
   common_handler:
     field_not_found_file: file field not found
     field_not_found_avatar: avatarfile field not found
@@ -227,10 +227,10 @@ error:
     header_write_failed: Failed to write header
     data_write_failed: Failed to write data
     generate_failed: Failed to generate Excel
-    import_parse_failed: "Failed to parse Excel file: {{e}}. Please fill in the downloaded template and keep the header row unchanged"
+    import_parse_failed: "Failed to parse Excel file: %{e}. Please fill in the downloaded template and keep the header row unchanged"
   ip_location:
     source_invalid: Update source must be maxmind or p3terx
-    unknown_source_type: "Unknown update source type: {{s}}"
+    unknown_source_type: "Unknown update source type: %{s}"
     maxmind_credentials_required: Switching to maxmind source requires Account ID and License Key
     private_ip: Private IP
     update_unavailable: IP database update service temporarily unavailable, please try again later
@@ -244,13 +244,13 @@ error:
     key_scan_failed: Failed to scan cache keys
     key_batch_delete_failed: Failed to batch delete cache keys
     flushdb_disabled: "This endpoint is disabled: FLUSHDB would clear business keys such as blacklist/online/login_fail. Use clearCacheName to clear by prefix"
-    prefix_not_allowed: "Cache prefix not allowed: {{prefix}}, supported: {{allowed}}"
-    key_prefix_required: "Cache key must start with {{name}}"
-    key_count_remark: "{{count}} keys"
-    type_not_previewable: "[{{type}} type cache, preview not supported]"
+    prefix_not_allowed: "Cache prefix not allowed: %{prefix}, supported: %{allowed}"
+    key_prefix_required: "Cache key must start with %{name}"
+    key_count_remark: "%{count} keys"
+    type_not_previewable: "[%{type} type cache, preview not supported]"
     memory_usage_failed: Failed to scan cache key memory usage
   monitor_server:
-    duration_format: "{{days}}d {{hours}}h {{minutes}}m"
+    duration_format: "%{days}d %{hours}h %{minutes}m"
   backup:
     id_invalid: Invalid backup ID
     db_url_invalid: Database URL format is invalid
@@ -276,14 +276,14 @@ error:
     download_status_invalid: Only successful backups can be downloaded
     read_file_task_failed: Read file task failed
     read_backup_file_failed: Failed to read backup file
-    unsupported_db_type: "Unsupported database type: {{url}}"
+    unsupported_db_type: "Unsupported database type: %{url}"
     db_backup_failed: Database backup failed
-    process_timeout: "Backup process timed out ({{secs}} seconds)"
-    process_nonzero_exit: "Backup process returned non-zero status: {{err}}"
+    process_timeout: "Backup process timed out (%{secs} seconds)"
+    process_nonzero_exit: "Backup process returned non-zero status: %{err}"
     db_restore_failed: Database restore failed
-    restore_process_timeout: "Restore process timed out ({{secs}} seconds)"
-    restore_process_nonzero_exit: "Restore process returned non-zero status: {{err}}"
-    sqlite3_backup_failed: "sqlite3 backup failed: {{err}}"
+    restore_process_timeout: "Restore process timed out (%{secs} seconds)"
+    restore_process_nonzero_exit: "Restore process returned non-zero status: %{err}"
+    sqlite3_backup_failed: "sqlite3 backup failed: %{err}"
     sqlite3_branch_unreachable: SQLite backup should be handled above; this branch is unreachable (please check code logic)
     mysql_restore_branch_unreachable: MySQL restore should go through run_mysql_restore branch (please check code logic)
   server:
@@ -304,8 +304,8 @@ error:
   report:
     id_empty: Report ID must not be empty
     not_found: Report does not exist
-    code_duplicate: "Report code「{{code}}」already exists"
-    type_invalid: "Invalid report type, only login_stats / user_stats / msg_stats / custom are supported, current value: {{value}}"
+    code_duplicate: "Report code「%{code}」already exists"
+    type_invalid: "Invalid report type, only login_stats / user_stats / msg_stats / custom are supported, current value: %{value}"
     config_json_invalid: Report config must be a valid JSON
     delete_sub_failed: Failed to delete subscriptions of the report
   report_sub:
@@ -340,8 +340,8 @@ error:
     channel_not_found: Message channel does not exist
     channel_disabled: Message channel is disabled and cannot be used
     channel_code_duplicate: Message channel code already exists
-    channel_type_invalid: "Invalid message channel type: {{channel_type}} (supported: email/sms/site)"
-    channel_in_use: "Message channel \"{{channel_name}}\" is referenced by message templates and cannot be deleted"
+    channel_type_invalid: "Invalid message channel type: %{channel_type} (supported: email/sms/site)"
+    channel_in_use: "Message channel \"%{channel_name}\" is referenced by message templates and cannot be deleted"
     channel_id_invalid: Invalid message channel ID
     config_json_invalid: Invalid channel configuration JSON
     mail_disabled: Email service is not enabled, cannot send email
@@ -355,11 +355,11 @@ error:
     not_found: Notice does not exist
     id_invalid: Invalid notice ID
     user_email_query_failed: Failed to query user email
-    notice_type_invalid: "notice_type must be 1 (notice) or 2 (announcement), current value: {{value}}"
-    status_invalid: "status must be 0 (normal) or 1 (closed), current value: {{value}}"
+    notice_type_invalid: "notice_type must be 1 (notice) or 2 (announcement), current value: %{value}"
+    status_invalid: "status must be 0 (normal) or 1 (closed), current value: %{value}"
   pref:
-    value_invalid: "Message preference field {{field}} is invalid (must be '0' or '1')"
-    time_invalid: "Do-not-disturb field {{field}} has invalid time format (expected HH:MM): {{value}}"
+    value_invalid: "Message preference field %{field} is invalid (must be '0' or '1')"
+    time_invalid: "Do-not-disturb field %{field} has invalid time format (expected HH:MM): %{value}"
   websocket:
     connected: WebSocket connected
   role:
@@ -371,8 +371,8 @@ error:
     admin_data_scope_forbidden: Cannot modify super admin role data scope
     user_id_empty: User ID cannot be empty
     id_empty: Role ID cannot be empty
-    assigned_to_user: "Role {{id}} is assigned to users, cannot delete"
-    not_found_by_id: "Role {{id}} does not exist"
+    assigned_to_user: "Role %{id} is assigned to users, cannot delete"
+    not_found_by_id: "Role %{id} does not exist"
   job_log:
     id_invalid: Invalid log ID
   totp:
@@ -423,7 +423,7 @@ msg:
     refresh: Refreshed successfully
     status_change: Status updated successfully
     execute: Executed successfully
-    user_import: Successfully imported {{n}} users
+    user_import: Successfully imported %{n} users
     save: Saved successfully
     reload: Hot-reloaded successfully
     password_reset: Password reset successfully
@@ -433,11 +433,11 @@ msg:
     auth: Authorized successfully
     import: Imported successfully
     sync: Synced successfully
-    add_user: "Added user {{name}} successfully"
-    add_role: "Added role {{name}} successfully"
-    add_dept: "Added department {{name}} successfully"
-    add_menu: "Added menu {{name}} successfully"
-    ip_location_update: "IP database updated successfully (source: {{source}}, size: {{size}} bytes)"
+    add_user: "Added user %{name} successfully"
+    add_role: "Added role %{name} successfully"
+    add_dept: "Added department %{name} successfully"
+    add_menu: "Added menu %{name} successfully"
+    ip_location_update: "IP database updated successfully (source: %{source}, size: %{size} bytes)"
     test: Connection test passed
     oauth_login: Third-party login successful
     oauth_bind: Bound successfully
@@ -447,22 +447,22 @@ msg:
   cache:
     no_match: No matching cache
     key_not_found: Cache key does not exist
-    cleared: "Cleared successfully, deleted {{count}} keys"
+    cleared: "Cleared successfully, deleted %{count} keys"
   export:
-    progress: "Exported {{count}} rows"
+    progress: "Exported %{count} rows"
     oper_log_task: "Operation log export"
   scheduler:
-    job_failed: "Task execution failed: {{err}}"
-    job_duration: "{{msg}} (elapsed {{ms}}ms)"
-    invoke_target_not_found: "Invoke target not found: {{target}}"
-    job_timeout: "Task execution timeout (>{{secs}}s)"
+    job_failed: "Task execution failed: %{err}"
+    job_duration: "%{msg} (elapsed %{ms}ms)"
+    invoke_target_not_found: "Invoke target not found: %{target}"
+    job_timeout: "Task execution timeout (>%{secs}s)"
     ryNoParams_success: ryNoParams sample task executed successfully (no business logic, demo only)
-    ryParams_success: "ryParams sample task executed successfully, param: {{param}} (no business logic, param demo)"
+    ryParams_success: "ryParams sample task executed successfully, param: %{param} (no business logic, param demo)"
     ryMultipleParams_success: ryMultipleParams sample task executed successfully (no business logic, multi-param demo)
-    cleanup_oper_log: "Cleaned {{count}} operation log(s)"
-    cleanup_oper_log_failed: "Failed to clean operation logs: {{err}}"
-    cleanup_login_log: "Cleaned {{count}} login log(s)"
-    cleanup_login_log_failed: "Failed to clean login logs: {{err}}"
+    cleanup_oper_log: "Cleaned %{count} operation log(s)"
+    cleanup_oper_log_failed: "Failed to clean operation logs: %{err}"
+    cleanup_login_log: "Cleaned %{count} login log(s)"
+    cleanup_login_log_failed: "Failed to clean login logs: %{err}"
 
 # H-3: Login log audit messages (used by write_login_log for granular audit reasons;
 # user-facing error messages use error.auth.* to avoid username enumeration)
@@ -476,14 +476,14 @@ log:
     account_deleted: Account deleted
     account_disabled: Account disabled
     login_success: Login successful
-    permission_denied: "Permission denied: missing required permission {{perm}}"
+    permission_denied: "Permission denied: missing required permission %{perm}"
     totp_failed: Incorrect TOTP verification code
     totp_locked: Too many failed TOTP attempts, temporarily locked
   oauth:
-    login_success: "Third-party login successful ({{provider}})"
-    login_failed: "Third-party login failed ({{provider}})"
-    bind_success: "Third-party account bound successfully ({{provider}})"
-    unbind_success: "Unbound successfully ({{provider}})"
+    login_success: "Third-party login successful (%{provider})"
+    login_failed: "Third-party login failed (%{provider})"
+    bind_success: "Third-party account bound successfully (%{provider})"
+    unbind_success: "Unbound successfully (%{provider})"
 
 # Common status text (used in Excel exports, status display, etc.)
 common:
@@ -522,8 +522,8 @@ excel:
 # System notice title/content (triggered by scheduler, visible in notification center)
 notice:
   login_anomaly:
-    title: "Login Anomaly Alert - IP {{ip}}"
-    content: "IP {{ip}} failed login {{count}} times within the last {{minutes}} minutes, suspected credential stuffing attack, please investigate."
+    title: "Login Anomaly Alert - IP %{ip}"
+    content: "IP %{ip} failed login %{count} times within the last %{minutes} minutes, suspected credential stuffing attack, please investigate."
   email:
     footer: "This email is automatically sent by the yebot system. Please do not reply."
 

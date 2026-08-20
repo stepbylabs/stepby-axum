@@ -85,3 +85,147 @@ pub async fn spa_fallback_middleware(req: Request, next: Next) -> Response {
     // 非浏览器导航请求（API、静态资源等）走正常流程
     next.run(req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    // 覆盖意图：
+    // - is_browser_navigation 纯函数逐分支覆盖（Sec-Fetch-Mode / Accept 兜底 / 组合判定）
+    // - 中间件全流程：带 Authorization 放行、API JSON 请求放行、浏览器导航返回 SPA HTML
+
+    fn req_with(headers: &[(&str, &str)]) -> Request<Body> {
+        let mut b = Request::builder().uri("/monitor/cache");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    // ---------- is_browser_navigation 纯函数 ----------
+
+    #[test]
+    fn test_browser_navigation_sec_fetch_navigate() {
+        assert!(is_browser_navigation(&req_with(&[("sec-fetch-mode", "navigate")])));
+    }
+
+    #[test]
+    fn test_browser_navigation_sec_fetch_navigate_case_insensitive() {
+        assert!(is_browser_navigation(&req_with(&[("sec-fetch-mode", "NAVIGATE")])));
+    }
+
+    #[test]
+    fn test_browser_navigation_accept_html_fallback() {
+        // 无 Sec-Fetch-Mode 时，Accept: text/html 作为兜底
+        assert!(is_browser_navigation(&req_with(&[("accept", "text/html,application/xhtml+xml")])));
+    }
+
+    #[test]
+    fn test_not_browser_navigation_accept_json() {
+        // API 请求：Accept 含 application/json → 非导航
+        assert!(!is_browser_navigation(&req_with(&[("accept", "application/json")])));
+    }
+
+    #[test]
+    fn test_not_browser_navigation_accept_html_and_json() {
+        // 同时含 text/html 与 application/json → 非导航（可能是 XHR 兜底）
+        assert!(!is_browser_navigation(&req_with(&[(
+            "accept",
+            "text/html,application/json",
+        )])));
+    }
+
+    #[test]
+    fn test_not_browser_navigation_no_headers() {
+        assert!(!is_browser_navigation(&req_with(&[])));
+    }
+
+    #[test]
+    fn test_not_browser_navigation_sec_fetch_cors() {
+        // fetch/XHR 通常携带 sec-fetch-mode: cors
+        assert!(!is_browser_navigation(&req_with(&[("sec-fetch-mode", "cors")])));
+    }
+
+    #[test]
+    fn test_browser_navigation_sec_fetch_navigate_overrides_accept_json() {
+        // 即便 Accept 是 JSON，只要 Sec-Fetch-Mode: navigate 仍是导航
+        assert!(is_browser_navigation(&req_with(&[
+            ("sec-fetch-mode", "navigate"),
+            ("accept", "application/json"),
+        ])));
+    }
+
+    // ---------- 中间件全流程 ----------
+
+    fn app() -> Router {
+        async fn handler() -> &'static str {
+            "api-ok"
+        }
+        Router::new()
+            .route("/monitor/cache", get(handler))
+            .layer(axum::middleware::from_fn(spa_fallback_middleware))
+    }
+
+    async fn body_text(res: Response) -> String {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_authorization_request_passes_through() {
+        // 已携带 Authorization 的请求（已登录 API/SPA 资源请求）直接放行
+        let req = req_with(&[("authorization", "Bearer token-abc")]);
+        let res = app().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_text(res).await, "api-ok");
+    }
+
+    #[tokio::test]
+    async fn test_api_json_request_passes_through() {
+        // 非浏览器导航的 API 请求（Accept: application/json）直接放行
+        let req = req_with(&[("accept", "application/json")]);
+        let res = app().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_text(res).await, "api-ok");
+    }
+
+    #[tokio::test]
+    async fn test_browser_navigation_returns_spa_html() {
+        // 浏览器导航（Sec-Fetch-Mode: navigate）且未携带 token → 返回 SPA HTML（前端路由接管）
+        let req = req_with(&[("sec-fetch-mode", "navigate")]);
+        let res = app().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            ct.contains("text/html"),
+            "浏览器导航应返回 SPA HTML，实际 content-type: {ct}"
+        );
+        // 不应返回 API handler 的响应体
+        let body = body_text(res).await;
+        assert_ne!(body, "api-ok");
+    }
+
+    #[tokio::test]
+    async fn test_browser_navigation_accept_html_returns_spa_html() {
+        // 老浏览器兜底：无 Sec-Fetch-Mode 但 Accept: text/html → 返回 SPA HTML
+        let req = req_with(&[("accept", "text/html")]);
+        let res = app().oneshot(req).await.unwrap();
+        let ct = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(ct.contains("text/html"), "Accept: text/html 应返回 SPA HTML");
+    }
+}

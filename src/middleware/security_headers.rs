@@ -259,4 +259,118 @@ mod tests {
         assert!(!is_swagger_path(&parse("/swagger-ui/foo"))); // 子路径不匹配
         assert!(!is_swagger_path(&parse("/api-docs/openapi.json"))); // OpenAPI JSON 不需要 iframe
     }
+
+    // ---------- is_hashed_static_asset ----------
+
+    #[test]
+    fn test_is_hashed_static_asset_true_for_hashed_js_css_fonts() {
+        let parse = |s: &str| s.parse::<Uri>().unwrap();
+        assert!(is_hashed_static_asset(&parse("/static/js/index-C4xhYXkT.js")));
+        assert!(is_hashed_static_asset(&parse("/static/css/index-abc123.css")));
+        assert!(is_hashed_static_asset(&parse("/static/ttf/codicon-ngg6Pgfi.ttf")));
+        assert!(is_hashed_static_asset(&parse("/static/fonts/font-Dx9g7Kq2.woff2")));
+        assert!(is_hashed_static_asset(&parse("/static/fonts/icon-wJ4Pq8zA.woff")));
+    }
+
+    #[test]
+    fn test_is_hashed_static_asset_false_without_hash_segment() {
+        let parse = |s: &str| s.parse::<Uri>().unwrap();
+        // 无 hash 段或 hash 过短 → false
+        assert!(!is_hashed_static_asset(&parse("/static/js/app.js")));
+        assert!(!is_hashed_static_asset(&parse("/static/js/short-ab.js"))); // hash 仅 2 位
+        assert!(!is_hashed_static_asset(&parse("/static/css/index.css")));
+    }
+
+    #[test]
+    fn test_is_hashed_static_asset_false_for_other_extensions_and_paths() {
+        let parse = |s: &str| s.parse::<Uri>().unwrap();
+        // 非 /static/ 前缀或非白名单扩展名 → false
+        assert!(!is_hashed_static_asset(&parse("/api/data")));
+        assert!(!is_hashed_static_asset(&parse("/static")));
+        assert!(!is_hashed_static_asset(&parse("/static/")));
+        assert!(!is_hashed_static_asset(&parse("/static/img/logo-C4xhYXkT.png")));
+        assert!(!is_hashed_static_asset(&parse("/static/js/index-C4xhYXkT.js.map")));
+    }
+
+    // ---------- insert_if_absent ----------
+
+    #[test]
+    fn test_insert_if_absent_inserts_when_missing() {
+        let mut headers = HeaderMap::new();
+        insert_if_absent(&mut headers, "x-content-type-options", "nosniff");
+        assert_eq!(
+            headers.get("x-content-type-options").unwrap().to_str().unwrap(),
+            "nosniff"
+        );
+    }
+
+    #[test]
+    fn test_insert_if_absent_does_not_overwrite_existing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-content-type-options",
+            HeaderValue::from_static("custom-value"),
+        );
+        insert_if_absent(&mut headers, "x-content-type-options", "nosniff");
+        assert_eq!(
+            headers.get("x-content-type-options").unwrap().to_str().unwrap(),
+            "custom-value",
+            "已存在的同名头不应被覆盖"
+        );
+    }
+
+    #[test]
+    fn test_insert_if_absent_multiple_headers() {
+        let mut headers = HeaderMap::new();
+        insert_if_absent(&mut headers, "a", "1");
+        insert_if_absent(&mut headers, "b", "2");
+        insert_if_absent(&mut headers, "a", "3"); // a 已存在，不应覆盖
+        assert_eq!(headers.get("a").unwrap().to_str().unwrap(), "1");
+        assert_eq!(headers.get("b").unwrap().to_str().unwrap(), "2");
+    }
+
+    // ---------- 中间件：静态资源缓存策略 ----------
+
+    #[tokio::test]
+    async fn test_static_asset_gets_immutable_cache_control() {
+        let app = test_router();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/static/js/index-C4xhYXkT.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cc = res
+            .headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            cc.contains("immutable"),
+            "带 hash 静态资源应长期缓存，实际 cache-control: {cc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_static_api_gets_no_store_cache_control() {
+        let app = test_router();
+        let res = app
+            .oneshot(Request::builder().uri("/api").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let cc = res
+            .headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            cc.contains("no-store"),
+            "API 响应禁止缓存，实际 cache-control: {cc}"
+        );
+    }
 }

@@ -129,6 +129,8 @@ pub struct ReportEditDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportStatusDto {
+    /// 报表 ID（由路径参数注入，请求体可省略）
+    #[serde(default)]
     #[garde(skip)]
     pub report_id: i64,
     /// 状态（0=启用 1=停用）
@@ -230,6 +232,8 @@ pub struct SubEditDto {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubStatusDto {
+    /// 订阅 ID（由路径参数注入，请求体可省略）
+    #[serde(default)]
     #[garde(skip)]
     pub sub_id: i64,
     /// 状态（0=启用 1=停用）

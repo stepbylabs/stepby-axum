@@ -123,4 +123,65 @@ mod tests {
         // 无 task-local 时 current_locale 回退默认
         assert_eq!(current_locale(), "zh-CN");
     }
+
+    // ---------- 边缘用例：大小写 / 非法 q / 空白 / 特殊标记 ----------
+
+    #[test]
+    fn test_negotiate_case_insensitive() {
+        // 大写语言标签经 to_lowercase 归一化后精确匹配
+        assert_eq!(negotiate("ZH-CN"), "zh-CN");
+        assert_eq!(negotiate("EN-US"), "en-US");
+        assert_eq!(negotiate("Zh-Tw"), "zh-CN"); // zh-* 前缀回退
+    }
+
+    #[test]
+    fn test_negotiate_malformed_q_defaults_to_1() {
+        // q 值非数字时回退 1.0（unwrap_or(1.0) 分支）
+        assert_eq!(negotiate("en-US;q=abc"), "en-US");
+        assert_eq!(negotiate("zh-CN;q="), "zh-CN");
+    }
+
+    #[test]
+    fn test_negotiate_q_zero_still_matched() {
+        // q=0 也不跳过（实现仅按 q 降序排序，不排除 0 值条目）
+        assert_eq!(negotiate("en-US;q=0"), "en-US");
+    }
+
+    #[test]
+    fn test_negotiate_whitespace_tolerance() {
+        // 逗号/分号周围空白应被容忍（trim 处理）
+        assert_eq!(negotiate(" zh-CN , en-US "), "zh-CN");
+        assert_eq!(negotiate("en-US; q=0.5"), "en-US");
+        assert_eq!(negotiate("  en  ; q = 0.4 "), "en-US");
+    }
+
+    #[test]
+    fn test_negotiate_wildcard_and_empty_parts() {
+        // * 通配符不支持 → 默认；空分段（连续逗号）被过滤
+        assert_eq!(negotiate("*"), "zh-CN");
+        assert_eq!(negotiate(",,,en-US,,,"), "en-US");
+        assert_eq!(negotiate("  ,  , "), "zh-CN");
+    }
+
+    #[test]
+    fn test_negotiate_prefix_fallback_respects_q_order() {
+        // 多个同前缀语言按 q 值选最优先者；前缀回退在精确匹配失败后生效
+        assert_eq!(negotiate("zh-TW;q=0.9,zh-HK;q=0.8"), "zh-CN");
+        // en 前缀回退在 zh 之后时才选中（顺序无关，q 决定优先级）
+        assert_eq!(negotiate("en-GB;q=0.9,zh-CN;q=0.8"), "en-US");
+    }
+
+    #[test]
+    fn test_negotiate_supported_locale_with_q_value() {
+        // 精确匹配不受 q 值影响（只要排在第一位）
+        assert_eq!(negotiate("en-US;q=0.7,zh-CN;q=0.6"), "en-US");
+        assert_eq!(negotiate("zh-CN;q=0.6,en-US;q=0.7"), "en-US");
+    }
+
+    #[test]
+    fn test_negotiate_mixed_unsupported_and_prefix() {
+        // 不支持的标签跳过，前缀回退在后续标签生效
+        assert_eq!(negotiate("fr-FR;q=0.9,zh;q=0.5"), "zh-CN");
+        assert_eq!(negotiate("ja-JP;q=0.9,en;q=0.5"), "en-US");
+    }
 }
