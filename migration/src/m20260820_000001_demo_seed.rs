@@ -69,7 +69,7 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // 仅显式开启演示种子（SEED_DEMO=1）时写入，生产安全
-        if std::env::var("SEED_DEMO").map(|v| v == "1").unwrap_or(false) == false {
+        if !std::env::var("SEED_DEMO").map(|v| v == "1").unwrap_or(false) {
             eprintln!("SEED_DEMO 未开启，跳过演示种子数据");
             return Ok(());
         }

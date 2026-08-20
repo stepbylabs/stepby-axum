@@ -23,7 +23,7 @@ use utoipa::ToSchema;
 use crate::common::{AjaxResult, AppError};
 use crate::middleware::Operator;
 use crate::service::auth_service::{
-    CaptchaVo, GetInfoVo, LoginDto, LoginVo, RegisterDto, RouterVo, UnlockScreenDto,
+    CaptchaVo, GetInfoVo, LoginDto, RegisterDto, RouterVo, UnlockScreenDto,
 };
 use crate::state::AppState;
 use crate::utils::ip::extract_client_ip;
@@ -137,7 +137,8 @@ pub async fn login(
         .unwrap_or("");
 
     let mut redis = state.redis.clone();
-    let vo: LoginVo = state
+    let username = dto.username.clone();
+    let vo = state
         .auth_service
         .login(
             dto,
@@ -147,8 +148,35 @@ pub async fn login(
             &state.config.jwt,
             &state.ip_locator,
         )
-        .await?;
+        .await;
 
+    // WebHook 事件分发（G5）：登录成功 / 失败均异步通知订阅方，失败含原因供外部风控。
+    // 仅借用 vo 而非消费，随后以 `?` 按值传播错误，避免对非 Clone 的 AppError 做 clone。
+    match &vo {
+        Ok(_) => {
+            state.web_hook_service.dispatch_event(
+                crate::service::sys_web_hook_service::EVENT_LOGIN_SUCCESS,
+                serde_json::json!({
+                    "username": username,
+                    "ip": login_ip,
+                    "time": crate::common::datetime::now_naive().to_string(),
+                }),
+            );
+        }
+        Err(err) => {
+            state.web_hook_service.dispatch_event(
+                crate::service::sys_web_hook_service::EVENT_LOGIN_FAILURE,
+                serde_json::json!({
+                    "username": username,
+                    "ip": login_ip,
+                    "reason": err.to_string(),
+                    "time": crate::common::datetime::now_naive().to_string(),
+                }),
+            );
+        }
+    }
+
+    let vo = vo?;
     Ok(LoginResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),

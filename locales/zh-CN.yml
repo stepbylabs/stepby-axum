@@ -319,6 +319,14 @@ error:
     push_channel_none: 至少开启一种推送渠道（邮件或站内信）
     email_invalid: 收件邮箱格式不正确
     user_ids_invalid: 目标用户 ID 不合法
+  web_hook:
+    id_invalid: 回调 ID 不合法
+    not_found: 回调配置不存在
+    log_not_found: 推送记录不存在
+    url_invalid: 回调地址不合法（仅允许 http/https，且 SSRF 校验未通过）
+    event_invalid: 订阅事件类型不合法
+    name_empty: 回调名称不能为空
+    event_empty: 至少订阅一个事件类型
   oper_log:
     id_invalid: 日志 ID 不合法
     anonymous: 匿名
@@ -479,6 +487,8 @@ common:
     anomaly: 异常
     success: 成功
     failed: 失败
+  enabled: 启用
+  disabled: 停用
   yes: 是
   no: 否
   job:
@@ -505,6 +515,8 @@ excel:
     job: 定时任务
     job_log: 调度日志
     rate_limit: 限流配置
+    web_hook: 回调配置
+    web_hook_log: 推送记录
 
 # 系统通知标题/内容（scheduler 触发的告警通知，前端通知中心可见）
 notice:

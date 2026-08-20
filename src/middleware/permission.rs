@@ -555,6 +555,29 @@ fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
         ("PUT", "/system/report/sub/{subId}/status") => Some("system:report:sub:status"),
         ("POST", "/system/report/sub/{subId}/run") => Some("system:report:sub:run"),
 
+        // ===== WebHook 事件订阅 =====
+        // 权限标识与 sys_menu 迁移种子（m20260820_000002_web_hook_module）对齐：
+        // 回调配置 system:webHook:list/query/add/edit/remove/status/test
+        // 推送记录 system:webHook:log:list/query/remove/clean/retry
+        ("GET", "/monitor/webHook/list") => Some("system:webHook:list"),
+        // 导出与回调查询同权（无独立导出按钮，复用 3531 query）
+        ("POST", "/monitor/webHook/export") => Some("system:webHook:query"),
+        ("PUT", "/monitor/webHook/{id}/status") => Some("system:webHook:status"),
+        ("POST", "/monitor/webHook/{id}/test") => Some("system:webHook:test"),
+        // 详情与列表查看同权（无独立 query 按钮，页面以 list 为准）
+        ("GET", "/monitor/webHook/{id}") => Some("system:webHook:list"),
+        ("DELETE", "/monitor/webHook/{id}") => Some("system:webHook:remove"),
+        ("POST", "/monitor/webHook") => Some("system:webHook:add"),
+        ("PUT", "/monitor/webHook") => Some("system:webHook:edit"),
+        ("GET", "/monitor/webHook/log/list") => Some("system:webHook:log:list"),
+        // 推送记录导出与记录查询同权
+        ("POST", "/monitor/webHook/log/export") => Some("system:webHook:log:query"),
+        ("DELETE", "/monitor/webHook/log/clean") => Some("system:webHook:log:clean"),
+        ("POST", "/monitor/webHook/log/{ids}/retry") => Some("system:webHook:log:retry"),
+        // 记录详情与列表同权
+        ("GET", "/monitor/webHook/log/{id}") => Some("system:webHook:log:list"),
+        ("DELETE", "/monitor/webHook/log/{id}") => Some("system:webHook:log:remove"),
+
         // ===== 审计日志大屏 =====
         // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐
         ("GET", "/monitor/operlog/stats") => Some("monitor:audit:list"),
@@ -1238,6 +1261,21 @@ mod tests {
             ("DELETE", "/system/report/sub/{subId}"),
             ("PUT", "/system/report/sub/{subId}/status"),
             ("POST", "/system/report/sub/{subId}/run"),
+            // sys_web_hook_router
+            ("GET", "/monitor/webHook/list"),
+            ("POST", "/monitor/webHook/export"),
+            ("PUT", "/monitor/webHook/{id}/status"),
+            ("POST", "/monitor/webHook/{id}/test"),
+            ("GET", "/monitor/webHook/{id}"),
+            ("DELETE", "/monitor/webHook/{id}"),
+            ("POST", "/monitor/webHook"),
+            ("PUT", "/monitor/webHook"),
+            ("GET", "/monitor/webHook/log/list"),
+            ("POST", "/monitor/webHook/log/export"),
+            ("DELETE", "/monitor/webHook/log/clean"),
+            ("POST", "/monitor/webHook/log/{ids}/retry"),
+            ("GET", "/monitor/webHook/log/{id}"),
+            ("DELETE", "/monitor/webHook/log/{id}"),
         ];
 
         let mut uncovered: Vec<(&str, &str)> = Vec::new();

@@ -29,6 +29,7 @@ pub mod sys_role_router;
 pub mod sys_task_router;
 pub mod sys_user_pref_router;
 pub mod sys_user_router;
+pub mod sys_web_hook_router;
 pub mod tool_gen_router;
 pub mod totp_router;
 
@@ -85,6 +86,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_oauth_router::oauth_routes())
         .merge(sys_notice_router::notice_routes())
         .merge(sys_report_router::report_routes())
+        .merge(sys_web_hook_router::web_hook_routes())
         .merge(sys_dept_router::dept_routes())
         .merge(sys_job_router::job_routes())
         .merge(sys_dict_router::dict_routes())

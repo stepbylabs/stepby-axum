@@ -39,3 +39,5 @@ pub mod sys_user;
 pub mod sys_user_post;
 pub mod sys_user_pref;
 pub mod sys_user_role;
+pub mod sys_web_hook;
+pub mod sys_web_hook_log;

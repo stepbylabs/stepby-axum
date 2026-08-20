@@ -316,6 +316,14 @@ error:
     push_channel_none: At least one push channel must be enabled (email or site message)
     email_invalid: Invalid recipient email format
     user_ids_invalid: Invalid target user IDs
+  web_hook:
+    id_invalid: Invalid webhook ID
+    not_found: Webhook configuration does not exist
+    log_not_found: Delivery log does not exist
+    url_invalid: Invalid callback URL (only http/https allowed, SSRF check not passed)
+    event_invalid: Invalid subscribed event type
+    name_empty: Webhook name must not be empty
+    event_empty: Subscribe to at least one event type
   oper_log:
     id_invalid: Invalid log ID
     anonymous: Anonymous
@@ -493,6 +501,8 @@ common:
     anomaly: Anomaly
     success: Success
     failed: Failed
+  enabled: Enabled
+  disabled: Disabled
   yes: "Yes"
   no: "No"
   job:
@@ -518,6 +528,8 @@ excel:
     job: Scheduled Tasks
     job_log: Job Log
     rate_limit: Rate Limit
+    web_hook: WebHooks
+    web_hook_log: Delivery Logs
 
 # System notice title/content (triggered by scheduler, visible in notification center)
 notice:

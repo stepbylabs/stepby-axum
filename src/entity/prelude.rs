@@ -115,3 +115,11 @@ pub use super::sys_user_post::{
     ActiveModel as SysUserPostActiveModel, Column as SysUserPostColumn, Entity as SysUserPost,
     Model as SysUserPostModel,
 };
+pub use super::sys_web_hook::{
+    ActiveModel as SysWebHookActiveModel, Column as SysWebHookColumn, Entity as SysWebHook,
+    Model as SysWebHookModel,
+};
+pub use super::sys_web_hook_log::{
+    ActiveModel as SysWebHookLogActiveModel, Column as SysWebHookLogColumn,
+    Entity as SysWebHookLog, Model as SysWebHookLogModel,
+};
