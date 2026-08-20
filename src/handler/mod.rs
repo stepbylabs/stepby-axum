@@ -30,6 +30,7 @@ pub mod sys_role_handler;
 pub mod sys_task_handler;
 pub mod sys_user_handler;
 pub mod sys_user_pref_handler;
+pub mod sys_web_hook_handler;
 pub mod tool_gen_handler;
 pub mod totp_handler;
 pub mod ws_handler;

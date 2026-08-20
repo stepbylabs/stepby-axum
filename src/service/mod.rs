@@ -34,6 +34,7 @@ pub mod sys_role_service;
 pub mod sys_task_service;
 pub mod sys_user_pref_service;
 pub mod sys_user_service;
+pub mod sys_web_hook_service;
 
 pub use auth_service::AuthService;
 pub use gen_table_service::GenTableService;
@@ -58,6 +59,7 @@ pub use sys_role_service::SysRoleService;
 pub use sys_task_service::SysTaskService;
 pub use sys_user_pref_service::SysUserPrefService;
 pub use sys_user_service::SysUserService;
+pub use sys_web_hook_service::SysWebHookService;
 
 use crate::common::TreeSelectVo;
 use crate::entity::sys_dept::Model as SysDeptModel;

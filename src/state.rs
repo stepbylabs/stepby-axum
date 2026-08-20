@@ -10,7 +10,7 @@ use crate::service::{
     SysConfigService, SysDeptService, SysDictService, SysHttpDebugService, SysJobService,
     SysLogininforService, SysMenuService, SysMsgService, SysNoticeService, SysOauthService,
     SysOperLogService, SysPostService, SysRateLimitService, SysReportService, SysRoleService,
-    SysTaskService, SysUserPrefService, SysUserService,
+    SysTaskService, SysUserPrefService, SysUserService, SysWebHookService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -71,6 +71,8 @@ pub struct AppState {
     pub http_debug_service: SysHttpDebugService,
     /// 报表中心 + 定时订阅推送 Service
     pub report_service: SysReportService,
+    /// WebHook 事件订阅 Service（出站回调配置 + 投递记录 + 事件分发）
+    pub web_hook_service: SysWebHookService,
     /// 邮件发送 Service（未启用时降级为 no-op）
     pub mailer_service: MailerService,
     /// 定时任务调度器
@@ -233,6 +235,7 @@ impl AppState {
             oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
+            web_hook_service: SysWebHookService::new(db.clone()),
             mailer_service: MailerService::new(config.clone()),
             job_scheduler,
             db,

@@ -169,6 +169,7 @@ pub const MODULE_TITLES: &[(&str, &str, &str)] = &[
     ("module.cache", "缓存监控", "Cache Monitor"),
     ("module.server", "服务器监控", "Server Monitor"),
     ("module.auditDashboard", "审计仪表盘", "Audit Dashboard"),
+    ("module.webHook", "WebHook 订阅", "WebHook Subscription"),
     ("module.other", "其他", "Other"),
 ];
 
@@ -343,6 +344,8 @@ mod tests {
     fn test_module_title_lookup() {
         assert_eq!(module_title("module.user"), "用户管理");
         assert_eq!(module_title("module.other"), "其他");
+        // G5 WebHook 模块操作日志标题
+        assert_eq!(module_title("module.webHook"), "WebHook 订阅");
     }
 
     #[test]

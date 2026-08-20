@@ -609,6 +609,8 @@ pub(crate) fn infer_module_title(path: &str) -> String {
         "module.task".to_string()
     } else if path.starts_with("/system/rateLimit") {
         "module.rateLimit".to_string()
+    } else if path.starts_with("/monitor/webHook") {
+        "module.webHook".to_string()
     } else if path.starts_with("/monitor/job") {
         "module.job".to_string()
     } else if path.starts_with("/monitor/operlog") {
@@ -1001,5 +1003,61 @@ mod tests {
         // max_bytes=0 时应返回空字符串 + 截断标记
         let result = safe_truncate("abc", 0);
         assert_eq!(result, "...(truncated)");
+    }
+
+    // ==================== G6 审计增强：WebHook 留痕 + 敏感操作分类 ====================
+
+    #[test]
+    fn test_infer_module_title_webhook() {
+        // WebHook 回调配置 / 推送日志均归类为 module.webHook
+        assert_eq!(infer_module_title("/monitor/webHook/list"), "module.webHook");
+        assert_eq!(infer_module_title("/monitor/webHook"), "module.webHook");
+        assert_eq!(infer_module_title("/monitor/webHook/export"), "module.webHook");
+        assert_eq!(infer_module_title("/monitor/webHook/{id}"), "module.webHook");
+        assert_eq!(infer_module_title("/monitor/webHook/log/list"), "module.webHook");
+        assert_eq!(infer_module_title("/monitor/webHook/log/{id}"), "module.webHook");
+        // 不干扰相邻模块
+        assert_eq!(infer_module_title("/monitor/job"), "module.job");
+        assert_eq!(infer_module_title("/monitor/operlog"), "module.operlog");
+    }
+
+    #[test]
+    fn test_infer_business_type_webhook_operations() {
+        // 导出（写出推送记录/回调配置）归类为导出=5
+        assert_eq!(
+            infer_business_type(Method::POST, "/monitor/webHook/export"),
+            5
+        );
+        assert_eq!(
+            infer_business_type(Method::POST, "/monitor/webHook/log/export"),
+            5
+        );
+        // 清空推送记录归类为清空=9
+        assert_eq!(
+            infer_business_type(Method::DELETE, "/monitor/webHook/log/clean"),
+            9
+        );
+        // 重试属于写操作（POST），无特殊类型匹配 → 按方法=新增=1
+        assert_eq!(
+            infer_business_type(Method::POST, "/monitor/webHook/log/{ids}/retry"),
+            1
+        );
+        // 启停回调是修改 → PUT=2
+        assert_eq!(
+            infer_business_type(Method::PUT, "/monitor/webHook/{id}/status"),
+            2
+        );
+    }
+
+    #[test]
+    fn test_is_write_method_webhook() {
+        // 写操作需被 oper_log 记录以实现敏感操作留痕
+        assert!(is_write_method(Method::POST));
+        assert!(is_write_method(Method::PUT));
+        assert!(is_write_method(Method::DELETE));
+        // 查询类 GET 不记录（避免噪声）
+        assert!(!is_write_method(Method::GET));
+        assert!(!is_write_method(Method::HEAD));
+        assert!(!is_write_method(Method::OPTIONS));
     }
 }

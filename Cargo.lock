@@ -339,6 +339,7 @@ dependencies = [
  "flate2",
  "futures",
  "garde",
+ "hex",
  "hmac",
  "jsonwebtoken",
  "lettre",
