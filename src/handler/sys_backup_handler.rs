@@ -172,7 +172,7 @@ pub async fn restore(
 
     // 恢复成功后清理 Redis 业务缓存，避免缓存与恢复后的数据库数据不一致
     // 清理范围：字典缓存(dict:*)、系统配置缓存(config:*)、限流配置缓存(rate_limit:config:*)
-    // 不清理：blacklist/online/pwd_changed/captcha 等会话/安全相关 key（清理会导致用户登出）
+    // 不清理：blacklist/online/pwd_ver/captcha 等会话/安全相关 key（清理会导致用户登出）
     clear_business_caches(&state).await;
 
     // P0-H2 修复：同时清理限流服务的进程内 local_cache（10s TTL）

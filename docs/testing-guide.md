@@ -49,9 +49,10 @@
 ```
 
 当前测试统计：
-- **单元测试**：约 120 个（实际数量随开发迭代变化，以 `cargo test` 输出为准）
+- **单元测试**：约 380 个（单元 + 集成合计，实际数量随开发迭代变化，以 `cargo test` 输出为准）
 - **ts-rs 导出测试**：19 个
-- **集成测试**：依赖外部服务（MySQL/Redis），需手动执行
+- **自动化集成测试**（`src/integration_tests/`）：user / role / config / dict / menu / dept 等关键路由链路，使用独立临时 SQLite 文件 + 独占 Redis DB 索引（`1..=15`）+ 独立 peer IP，`cargo test` 可直接并行运行（需本机 Redis 可达，见 2.2）；无需 MySQL。
+- **手工 API 测试**：依赖外部服务（MySQL/Redis），按本文档第 6 章手动执行
 
 ---
 

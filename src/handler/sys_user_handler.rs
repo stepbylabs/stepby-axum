@@ -29,7 +29,7 @@ use utoipa::ToSchema;
 
 use crate::common::ValidatedJson;
 
-use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SECS_PER_HOUR};
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::excel::{
     CellValue, ExcelColumn, ImportColumn, build_import_template_bytes, export_to_excel,
 };
@@ -507,28 +507,22 @@ pub async fn remove(
         .await?;
 
     // P0-5 修复：用户删除后失效其活动会话
-    // 写入 pwd_changed:{user_id} 标记，使被删除用户已签发的 JWT 在 auth 中间件被拒绝
-    // （auth.rs 检查 pwd_changed > token.iat 则返回 401）
-    // TTL 与 JWT 最大有效期对齐，fail-closed：写入失败返回错误，避免旧 token 继续可用
-    // P3 优化: 使用 Redis pipeline 批量 SETEX，减少 N 次 RTT 为 1 次
-    let now = chrono::Utc::now().timestamp();
-    let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
+    // P0-R81-007 版本号机制：对 pwd_ver:{user_id} INCR，使被删除用户已签发的 JWT 在 auth 中间件被拒绝
+    // （auth.rs 检查 Redis 当前版本 > claim.pwd_ver 则返回 401）。
+    // 版本号单调递增，无需 TTL；fail-closed：写入失败返回错误，避免旧 token 继续可用
+    // P3 优化: 使用 Redis pipeline 批量 INCR，减少 N 次 RTT 为 1 次
     let mut redis = state.redis.clone();
     if !deleted_user_ids.is_empty() {
         let mut pipe = redis::pipe();
         for uid in &deleted_user_ids {
-            let pwd_changed_key = format!("pwd_changed:{}", uid);
-            pipe.cmd("SETEX")
-                .arg(&pwd_changed_key)
-                .arg(pwd_ttl)
-                .arg(now)
-                .ignore();
+            let pwd_ver_key = format!("pwd_ver:{}", uid);
+            pipe.cmd("INCR").arg(&pwd_ver_key).ignore();
         }
         if let Err(e) = pipe.query_async::<()>(&mut redis).await {
             tracing::error!(
                 user_ids = ?deleted_user_ids,
                 error = %e,
-                "删除用户后批量写入 pwd_changed 标记失败（fail-closed）"
+                "删除用户后批量递增 pwd_ver 标记失败（fail-closed）"
             );
             return Err(AppError::internal(&crate::tr!(
                 "error.user.pwd_reset_token_invalidate_failed"
@@ -551,28 +545,24 @@ pub async fn change_status(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
-    // P0-C1 修复：停用用户时先写 Redis pwd_changed 标记，再更新 DB；DB 失败则回滚 Redis 标记
-    // 复用 pwd_changed 机制：停用后旧 token 立即失效，用户重新启用后需重新登录（安全行为）
-    // 启用时不需要写标记（旧 token 已过期或用户需重新登录是合理的）
+    // P0-C1 修复：停用用户时先对 Redis pwd_ver:{user_id} INCR，再更新 DB；DB 失败则 DECR 回滚
+    // P0-R81-007 版本号机制：停用后旧 token 立即失效，用户重新启用后需重新登录（安全行为）
+    // 启用时不需要递增（旧 token 已过期或用户需重新登录是合理的）
     let needs_pwd_changed = dto.status == "1";
-    let pwd_changed_key = format!("pwd_changed:{}", dto.user_id);
-    let now = chrono::Utc::now().timestamp();
-    let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
+    let pwd_ver_key = format!("pwd_ver:{}", dto.user_id);
     let mut redis = state.redis.clone();
 
-    // 步骤1：停用时先写 Redis pwd_changed（fail-closed：写入失败则拒绝停用）
+    // 步骤1：停用时先 INCR pwd_ver（fail-closed：写入失败则拒绝停用）
     if needs_pwd_changed {
-        redis::cmd("SETEX")
-            .arg(&pwd_changed_key)
-            .arg(pwd_ttl)
-            .arg(now)
+        redis::cmd("INCR")
+            .arg(&pwd_ver_key)
             .query_async::<()>(&mut redis)
             .await
             .map_err(|e| {
                 tracing::error!(
                     user_id = dto.user_id,
                     error = %e,
-                    "停用用户前预写 pwd_changed 标记失败（fail-closed 拒绝停用）"
+                    "停用用户前预增 pwd_ver 标记失败（fail-closed 拒绝停用）"
                 );
                 AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
             })?;
@@ -589,11 +579,11 @@ pub async fn change_status(
         )
         .await;
 
-    // 步骤3：DB 失败则回滚 Redis 标记
+    // 步骤3：DB 失败则 DECR 回滚 Redis 标记
     if let Err(e) = db_result {
         if needs_pwd_changed {
-            let _ = redis::cmd("DEL")
-                .arg(&pwd_changed_key)
+            let _ = redis::cmd("DECR")
+                .arg(&pwd_ver_key)
                 .query_async::<()>(&mut redis)
                 .await;
         }
@@ -610,32 +600,28 @@ pub async fn reset_pwd(
     operator: Operator,
     Json(dto): Json<UserPwdResetDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    // P0-R81-007：捕获 user_id 用于改密后写入 pwd_changed 标记
+    // P0-R81-007：捕获 user_id 用于改密后递增 pwd_ver 标记
     let user_id = dto.user_id;
     let operator_user_id: i64 = operator
         .user_id()
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
-    // P0-C1 修复：先写 Redis pwd_changed 标记，再更新 DB；DB 失败则回滚 Redis 标记
-    // TTL 与 JWT 最大有效期对齐：expire_hours * SECS_PER_HOUR 秒
-    let pwd_changed_key = format!("pwd_changed:{}", user_id);
-    let now = chrono::Utc::now().timestamp();
-    let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
+    // P0-C1 修复：先对 Redis pwd_ver:{user_id} INCR，再更新 DB；DB 失败则 DECR 回滚
+    // 版本号单调递增，无需 TTL（auth 中间件据此使旧 token 立即失效）
+    let pwd_ver_key = format!("pwd_ver:{}", user_id);
     let mut redis = state.redis.clone();
 
-    // 步骤1：先写 Redis pwd_changed（fail-closed：写入失败则拒绝重置）
-    redis::cmd("SETEX")
-        .arg(&pwd_changed_key)
-        .arg(pwd_ttl)
-        .arg(now)
+    // 步骤1：先 INCR pwd_ver（fail-closed：写入失败则拒绝重置）
+    redis::cmd("INCR")
+        .arg(&pwd_ver_key)
         .query_async::<()>(&mut redis)
         .await
         .map_err(|e| {
             tracing::error!(
                 user_id,
                 error = %e,
-                "重置密码前预写 pwd_changed 标记失败（fail-closed 拒绝重置）"
+                "重置密码前预增 pwd_ver 标记失败（fail-closed 拒绝重置）"
             );
             AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
         })?;
@@ -646,10 +632,10 @@ pub async fn reset_pwd(
         .reset_user_pwd(dto, operator.username(), operator_user_id)
         .await;
 
-    // 步骤3：DB 失败则回滚 Redis 标记
+    // 步骤3：DB 失败则 DECR 回滚 Redis 标记
     if let Err(e) = db_result {
-        let _ = redis::cmd("DEL")
-            .arg(&pwd_changed_key)
+        let _ = redis::cmd("DECR")
+            .arg(&pwd_ver_key)
             .query_async::<()>(&mut redis)
             .await;
         return Err(e.into());
@@ -678,25 +664,21 @@ pub async fn update_profile_pwd(
         new_password: dto.new_password,
     };
 
-    // P0-C1 修复：先写 Redis pwd_changed 标记，再更新 DB；DB 失败则回滚 Redis 标记
-    // 这样即使 Redis 写入失败，DB 也不会被更新（fail-closed）；DB 成功则标记一定存在
-    let pwd_changed_key = format!("pwd_changed:{}", user_id);
-    let now = chrono::Utc::now().timestamp();
-    let pwd_ttl = state.config.jwt.expire_hours * SECS_PER_HOUR;
+    // P0-C1 修复：先对 Redis pwd_ver:{user_id} INCR，再更新 DB；DB 失败则 DECR 回滚
+    // 这样即使 Redis 写入失败，DB 也不会被更新（fail-closed）；DB 成功则版本号一定已递增
+    let pwd_ver_key = format!("pwd_ver:{}", user_id);
     let mut redis = state.redis.clone();
 
-    // 步骤1：先写 Redis pwd_changed（fail-closed：写入失败则拒绝改密）
-    redis::cmd("SETEX")
-        .arg(&pwd_changed_key)
-        .arg(pwd_ttl)
-        .arg(now)
+    // 步骤1：先 INCR pwd_ver（fail-closed：写入失败则拒绝改密）
+    redis::cmd("INCR")
+        .arg(&pwd_ver_key)
         .query_async::<()>(&mut redis)
         .await
         .map_err(|e| {
             tracing::error!(
                 user_id,
                 error = %e,
-                "改密前预写 pwd_changed 标记失败（fail-closed 拒绝改密）"
+                "改密前预增 pwd_ver 标记失败（fail-closed 拒绝改密）"
             );
             AppError::internal(&crate::tr!("error.user.pwd_change_token_invalidate_failed"))
         })?;
@@ -707,10 +689,10 @@ pub async fn update_profile_pwd(
         .update_user_password(user_id, pwd_dto)
         .await;
 
-    // 步骤3：DB 失败则回滚 Redis 标记（避免误登出用户）
+    // 步骤3：DB 失败则 DECR 回滚 Redis 标记（避免误登出用户）
     if let Err(e) = db_result {
-        let _ = redis::cmd("DEL")
-            .arg(&pwd_changed_key)
+        let _ = redis::cmd("DECR")
+            .arg(&pwd_ver_key)
             .query_async::<()>(&mut redis)
             .await;
         return Err(e.into());
