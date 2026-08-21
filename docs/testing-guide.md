@@ -838,6 +838,17 @@ chmod +x .git/hooks/pre-commit
 | LOG-003 | 清空操作日志 | 200 | P2 |
 | LOG-004 | 解锁用户 | 200 | P2 |
 | LOG-005 | 写操作自动记录日志 | sys_oper_log 有新记录 | P1 |
+| LOG-006 | 按时间范围清理操作日志（M2） | 200 + affected | P2 |
+| LOG-007 | 按时间范围清理登录日志（M2） | 200 + affected | P2 |
+| LOG-008 | 日志清理未授权（M2，无角色用户） | 403 | P2 |
+| LOG-009 | 操作日志/登录日志导出 Excel（M2） | 200 + xlsx 二进制 | P2 |
+
+> **M2（2026-08 实现）**：`sys_oper_log` / `sys_logininfor` 的「批量清理与导出」落地——
+> `DELETE /monitor/{operlog,logininfor}/clean` 新增 `beginTime`/`endTime`（兼容前端
+> `params[beginTime]`/`params[endTime]`）按时间范围清理；导出接口契约不变。
+> 定时归档任务 `cleanup_expired_logs`（每日 3:00）的保留天数改为可配置
+> （`Settings.sys_log.retention_days`，默认 90，可经 `LOG_RETENTION_DAYS` 环境变量覆盖）。
+> 集成测试见 `src/integration_tests/sys_log_clean_export.rs`（4 项，清理成功/403、导出 xlsx）。
 
 ### 10.8 安全测试
 
