@@ -375,7 +375,15 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
                 }
             }
             // 接收客户端消息（ping/pong/业务消息）
-            Some(Ok(msg)) = receiver.next() => {
+            // P4 修复: 原 `Some(Ok(msg))` 模式无法匹配客户端断连（receiver.next() 返回
+            // None/TCP EOF）或协议错误（Some(Err)），导致服务端循环一直空转直至心跳超时，
+            // 连接计数与广播订阅得不到及时释放。改为绑定完整 Option 结果，任何终止态都 break。
+            msg = receiver.next() => {
+                // None（客户端关闭 TCP）或 Some(Err)（协议错误）→ 连接终结，立即关闭
+                let msg = match msg {
+                    Some(Ok(m)) => m,
+                    _ => break,
+                };
                 last_msg_time = tokio::time::Instant::now(); // 更新最后活跃时间
                 match msg {
                     Message::Text(text) => {

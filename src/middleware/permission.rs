@@ -269,347 +269,369 @@ fn spawn_permission_denied_audit(
     });
 }
 
-/// 路由权限映射表
+/// 路由权限映射表（method, path, perm 三元组）。
 ///
+/// 每个条目表示：访问 `method + path` 路由时需要 `perm` 权限。
+/// 与前端 sys_menu 表的 perms 字段逐一对齐；不在表中的路由视为仅需登录。
+///
+/// 采用 const 表存储，作为权限映射的单一数据源：
+/// - `get_required_perm` 在表内线性查找返回所需权限；
+/// - `all_required_perm_keys` 汇总全部权限标识，供集成测试与 sys_menu.perms 比对，
+///   实现「后端所需权限 ⊆ 菜单可授予权限」契约，杜绝权限键漂移。
+#[rustfmt::skip]
+const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
+    // ===== 用户管理 =====
+    ("GET", "/system/user/list", "system:user:list"),
+    ("GET", "/system/user/{id}", "system:user:query"),
+    ("GET", "/system/user/", "system:user:query"),
+    ("GET", "/system/user/authRole/{userId}", "system:user:query"),
+    ("POST", "/system/user", "system:user:add"),
+    ("PUT", "/system/user", "system:user:edit"),
+    ("PUT", "/system/user/changeStatus", "system:user:edit"),
+    ("PUT", "/system/user/resetPwd", "system:user:resetPwd"),
+    ("PUT", "/system/user/authRole", "system:user:edit"),
+    ("DELETE", "/system/user/{id}", "system:user:remove"),
+    ("POST", "/system/user/export", "system:user:export"),
+    ("POST", "/system/user/importTemplate", "system:user:import"),
+    ("POST", "/system/user/importData", "system:user:import"),
+    // profile / 个人改密 / 角色下拉：仅需登录，不在此表
+
+    // ===== 角色管理 =====
+    ("GET", "/system/role/list", "system:role:list"),
+    ("GET", "/system/role/{id}", "system:role:query"),
+    ("POST", "/system/role", "system:role:add"),
+    ("PUT", "/system/role", "system:role:edit"),
+    ("PUT", "/system/role/changeStatus", "system:role:edit"),
+    ("PUT", "/system/role/dataScope", "system:role:edit"),
+    ("DELETE", "/system/role/{id}", "system:role:remove"),
+    ("POST", "/system/role/export", "system:role:export"),
+    // authUser 系列接口：授权用户管理，使用 system:role:edit
+    ("GET", "/system/role/authUser/allocatedList", "system:role:list"),
+    ("GET", "/system/role/authUser/unallocatedList", "system:role:list"),
+    ("PUT", "/system/role/authUser/cancel", "system:role:edit"),
+    ("PUT", "/system/role/authUser/cancelAll", "system:role:edit"),
+    ("PUT", "/system/role/authUser/selectAll", "system:role:edit"),
+    // deptTree：仅需登录，不在此表
+
+    // ===== 菜单管理 =====
+    ("GET", "/system/menu/list", "system:menu:list"),
+    ("GET", "/system/menu/{id}", "system:menu:query"),
+    ("POST", "/system/menu", "system:menu:add"),
+    ("PUT", "/system/menu", "system:menu:edit"),
+    ("PUT", "/system/menu/updateSort", "system:menu:edit"),
+    ("DELETE", "/system/menu/{id}", "system:menu:remove"),
+    // treeselect / roleMenuTreeselect：仅需登录，不在此表
+
+    // ===== 部门管理 =====
+    ("GET", "/system/dept/list", "system:dept:list"),
+    ("GET", "/system/dept/list/exclude/{deptId}", "system:dept:list"),
+    ("GET", "/system/dept/{deptId}", "system:dept:query"),
+    ("POST", "/system/dept", "system:dept:add"),
+    ("PUT", "/system/dept", "system:dept:edit"),
+    ("PUT", "/system/dept/updateSort", "system:dept:edit"),
+    ("DELETE", "/system/dept/{deptId}", "system:dept:remove"),
+    // treeselect：仅需登录，不在此表
+
+    // ===== 定时任务管理 =====
+    ("GET", "/monitor/job/list", "monitor:job:list"),
+    ("GET", "/monitor/job/{jobId}", "monitor:job:query"),
+    ("POST", "/monitor/job", "monitor:job:add"),
+    ("PUT", "/monitor/job", "monitor:job:edit"),
+    ("PUT", "/monitor/job/changeStatus", "monitor:job:changeStatus"),
+    ("PUT", "/monitor/job/run", "monitor:job:changeStatus"),
+    ("DELETE", "/monitor/job/{jobId}", "monitor:job:remove"),
+    ("POST", "/monitor/job/export", "monitor:job:export"),
+
+    // ===== 定时任务日志 =====
+    ("GET", "/monitor/jobLog/list", "monitor:job:list"),
+    ("DELETE", "/monitor/jobLog/{jobLogIds}", "monitor:job:remove"),
+    ("DELETE", "/monitor/jobLog/clean", "monitor:job:remove"),
+    ("POST", "/monitor/jobLog/export", "monitor:job:export"),
+
+    // ===== 字典管理 =====
+    ("GET", "/system/dict/type/list", "system:dict:list"),
+    ("GET", "/system/dict/type/optionselect", "system:dict:query"),
+    ("GET", "/system/dict/type/{dictId}", "system:dict:query"),
+    ("POST", "/system/dict/type", "system:dict:add"),
+    ("PUT", "/system/dict/type", "system:dict:edit"),
+    ("DELETE", "/system/dict/type/refreshCache", "system:dict:remove"),
+    ("POST", "/system/dict/type/export", "system:dict:export"),
+    ("DELETE", "/system/dict/type/{dictId}", "system:dict:remove"),
+    ("GET", "/system/dict/data/list", "system:dict:list"),
+    ("GET", "/system/dict/data/type/{dictType}", "system:dict:query"),
+    ("GET", "/system/dict/data/{dictCode}", "system:dict:query"),
+    ("POST", "/system/dict/data", "system:dict:add"),
+    ("PUT", "/system/dict/data", "system:dict:edit"),
+    ("DELETE", "/system/dict/data/{dictCode}", "system:dict:remove"),
+    ("POST", "/system/dict/data/export", "system:dict:export"),
+
+    // ===== 通知公告 =====
+    ("GET", "/system/notice/list", "system:notice:list"),
+    ("GET", "/system/notice/listTop", "system:notice:list"),
+    ("GET", "/system/notice/readUsers/list", "system:notice:list"),
+    ("GET", "/system/notice/{noticeId}", "system:notice:query"),
+    ("POST", "/system/notice", "system:notice:add"),
+    // markRead / markReadAll / markAllUnreadRead：标记本人已读为自助操作，仅需登录认证
+    // 权限粒度由前端 v-hasPermi 控制按钮可见性，后端不做 RBAC 校验
+    ("PUT", "/system/notice", "system:notice:edit"),
+    ("DELETE", "/system/notice/{noticeId}", "system:notice:remove"),
+
+    // ===== 参数配置 =====
+    ("GET", "/system/config/list", "system:config:list"),
+    ("GET", "/system/config/{configId}", "system:config:query"),
+    // /system/config/configKey/{configKey} 需 system:config:query 权限，防止任意已登录用户读取敏感配置（P0-R81-003）
+    ("GET", "/system/config/configKey/{configKey}", "system:config:query"),
+    ("POST", "/system/config", "system:config:add"),
+    ("PUT", "/system/config", "system:config:edit"),
+    ("DELETE", "/system/config/refreshCache", "system:config:remove"),
+    ("DELETE", "/system/config/{configId}", "system:config:remove"),
+    ("POST", "/system/config/export", "system:config:export"),
+
+    // ===== 岗位管理 =====
+    ("GET", "/system/post/list", "system:post:list"),
+    ("GET", "/system/post/{postId}", "system:post:query"),
+    ("POST", "/system/post", "system:post:add"),
+    ("PUT", "/system/post", "system:post:edit"),
+    ("DELETE", "/system/post/{postId}", "system:post:remove"),
+    ("POST", "/system/post/export", "system:post:export"),
+    // optionselect：仅需登录，不在此表
+
+    // ===== 操作日志 =====
+    ("GET", "/monitor/operlog/list", "monitor:operlog:list"),
+    ("DELETE", "/monitor/operlog/{operIds}", "monitor:operlog:remove"),
+    ("DELETE", "/monitor/operlog/clean", "monitor:operlog:remove"),
+    ("POST", "/monitor/operlog/export", "monitor:operlog:export"),
+
+    // ===== 登录日志 =====
+    ("GET", "/monitor/logininfor/list", "monitor:logininfor:list"),
+    ("GET", "/monitor/logininfor/stats", "monitor:logininfor:list"),
+    ("DELETE", "/monitor/logininfor/{infoIds}", "monitor:logininfor:remove"),
+    // 路由定义见 sys_logininfor_router.rs：实际方法为 POST（解锁操作有副作用，GET 不规范）
+    ("POST", "/monitor/logininfor/unlock/{userName}", "monitor:logininfor:unlock"),
+    ("DELETE", "/monitor/logininfor/clean", "monitor:logininfor:remove"),
+    ("POST", "/monitor/logininfor/export", "monitor:logininfor:export"),
+
+    // ===== 在线用户 =====
+    // 路由定义见 monitor_online_router.rs：参数名为 {tokenHash}（P1-19 改造后从 tokenId 改为 tokenHash）
+    ("GET", "/monitor/online/list", "monitor:online:list"),
+    ("DELETE", "/monitor/online/{tokenHash}", "monitor:online:forceLogout"),
+
+    // ===== 缓存监控 =====
+    ("GET", "/monitor/cache", "monitor:cache:list"),
+    ("GET", "/monitor/cache/getNames", "monitor:cache:list"),
+    // hotKeys / prefixStats 与 getNames 同权（内存统计属只读监控，绑定列表查看权限）
+    ("GET", "/monitor/cache/hotKeys", "monitor:cache:list"),
+    ("GET", "/monitor/cache/prefixStats", "monitor:cache:list"),
+    ("GET", "/monitor/cache/getKeys/{cacheName}", "monitor:cache:list"),
+    ("GET", "/monitor/cache/getValue/{cacheName}/{cacheKey}", "monitor:cache:query"),
+    // 缓存清除权限与 sys_menu 按钮种子 3022/3023 对齐（monitor:cache:clearName / clearKey）
+    ("DELETE", "/monitor/cache/clearCacheName/{cacheName}", "monitor:cache:clearName"),
+    ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}", "monitor:cache:clearKey"),
+    // clearCacheAll 端点已从路由中移除（FLUSHDB 会误清业务键），权限映射随之删除
+
+    // ===== 服务器监控 =====
+    // 服务监控菜单(m112)已并入健康检查(m133)，该 API 由健康检查页面调用，权限对齐 monitor:health:list
+    ("GET", "/monitor/server", "monitor:health:list"),
+
+    // ===== 可观测性监控（慢请求 / 错误聚合 / Redis 指标）=====
+    // 慢请求面板（列表 + 聚合 + 清空）共用一个查看权限，运算符粒度与面板按钮一致。
+    // 注意：MatchedPath 模板中连字符 "-" 原样保留（axum 不做 shell 转义）。
+    ("GET", "/monitor/slow-sql/list", "monitor:slowSql:list"),
+    ("GET", "/monitor/slow-sql/stats", "monitor:slowSql:list"),
+    ("DELETE", "/monitor/slow-sql/clear", "monitor:slowSql:list"),
+    // 错误聚合面板（列表 + 统计 + 清空）与慢请求同属"运行监控"单一面板，
+    // 共用查看权限 monitor:slowSql:list（m20260819_000006 观察面板 perms）
+    ("GET", "/monitor/error-log/list", "monitor:slowSql:list"),
+    ("GET", "/monitor/error-log/stats", "monitor:slowSql:list"),
+    ("DELETE", "/monitor/error-log/clear", "monitor:slowSql:list"),
+    // Redis 运行指标：与缓存监控同权（monitor:cache:list），复用缓存菜单入口
+    ("GET", "/monitor/redis/stats", "monitor:cache:list"),
+
+    // ===== 实时日志监控 =====
+    // 菜单 menu_id=135 (实时日志) 在系统监控目录下，perms=monitor:log:list
+    ("GET", "/monitor/log/files", "monitor:log:list"),
+    ("GET", "/monitor/log/tail", "monitor:log:list"),
+
+    // ===== 代码生成 =====
+    ("GET", "/tool/gen/list", "tool:gen:list"),
+    ("GET", "/tool/gen/db/list", "tool:gen:list"),
+    ("GET", "/tool/gen/{tableId}", "tool:gen:query"),
+    ("POST", "/tool/gen/importTable", "tool:gen:import"),
+    ("POST", "/tool/gen/createTable", "tool:gen:edit"),
+    ("PUT", "/tool/gen", "tool:gen:edit"),
+    ("DELETE", "/tool/gen/{tableId}", "tool:gen:remove"),
+    ("GET", "/tool/gen/preview/{tableId}", "tool:gen:preview"),
+    ("GET", "/tool/gen/genCode/{tableName}", "tool:gen:code"),
+    // P0-4 修复：synchDb 路由实际注册为 POST（见 tool_gen_router.rs:37），
+    // 原映射为 GET 导致权限校验被绕过（get_required_perm 返回 None）
+    ("POST", "/tool/gen/synchDb/{tableName}", "tool:gen:edit"),
+    // P1-6 修复：batchGenCode 批量生成代码未映射权限，任意登录用户可调用
+    ("GET", "/tool/gen/batchGenCode", "tool:gen:code"),
+
+    // ===== 在线 HTTP 调试器 =====
+    // 权限对齐 sys_menu 迁移种子（tool/http-debugger/index 页面，perms=tool:httpDebug:list，
+    // 见 m20260819_000002_http_debugger_menu）。执行与查看同权，避免开发/运维自行加按钮。
+    ("POST", "/tool/http-debug/execute", "tool:httpDebug:list"),
+
+    // ===== 文件管理 =====
+    ("GET", "/system/file/list", "system:file:list"),
+    // 上传权限对齐 sys_menu 按钮种子 3012（system:file:upload，见 m20260802_000004），
+    // 此前用 system:file:add 但菜单只有 upload，导致该权限永远无法被角色授予
+    ("POST", "/system/file/upload", "system:file:upload"),
+    ("DELETE", "/system/file/delete", "system:file:remove"),
+
+    // ===== 数据备份恢复 =====
+    ("GET", "/system/backup/list", "system:backup:list"),
+    ("GET", "/system/backup/{backupId}", "system:backup:query"),
+    ("POST", "/system/backup", "system:backup:add"),
+    ("POST", "/system/backup/restore/{backupId}", "system:backup:edit"),
+    ("GET", "/system/backup/download/{backupId}", "system:backup:query"),
+    ("DELETE", "/system/backup/{backupId}", "system:backup:remove"),
+
+    // ===== 任务进度中心 =====
+    ("GET", "/system/task/list", "system:task:list"),
+    ("GET", "/system/task/{taskId}", "system:task:query"),
+    ("DELETE", "/system/task/{taskId}", "system:task:remove"),
+
+    // ===== API 限流配置 =====
+    // P0-3 修复：原完全缺失权限映射，任意登录用户可增删改限流规则，
+    // 可禁用登录接口限流导致暴力破解。权限标识对齐 sys_menu 表 rateLimit 菜单 perms 字段。
+    ("GET", "/system/rateLimit/list", "system:rateLimit:list"),
+    ("GET", "/system/rateLimit/{id}", "system:rateLimit:query"),
+    ("POST", "/system/rateLimit", "system:rateLimit:add"),
+    ("PUT", "/system/rateLimit", "system:rateLimit:edit"),
+    ("DELETE", "/system/rateLimit/{id}", "system:rateLimit:remove"),
+    ("POST", "/system/rateLimit/export", "system:rateLimit:export"),
+
+    // ===== 消息渠道与模板管理 =====
+    // 权限标识对齐 sys_menu 迁移种子（140 目录 / 141 渠道 / 142 模板 / 143 记录 及按钮 3101-3123，见 m20260818_000002_msg_module）
+    ("GET", "/system/msg/channel/list", "system:msg:channel:list"),
+    // 渠道详情与列表同权（msg 菜单仅注册 add/edit/remove/test，无独立 query 按钮）
+    ("GET", "/system/msg/channel/{channelId}", "system:msg:channel:list"),
+    ("POST", "/system/msg/channel", "system:msg:channel:add"),
+    ("PUT", "/system/msg/channel", "system:msg:channel:edit"),
+    ("DELETE", "/system/msg/channel/{channelId}", "system:msg:channel:remove"),
+    ("POST", "/system/msg/channel/test/{channelId}", "system:msg:channel:test"),
+    ("GET", "/system/msg/template/list", "system:msg:template:list"),
+    // 模板详情与列表同权（msg 菜单仅注册 add/edit/remove，无独立 query 按钮）
+    ("GET", "/system/msg/template/{templateId}", "system:msg:template:list"),
+    ("POST", "/system/msg/template", "system:msg:template:add"),
+    ("PUT", "/system/msg/template", "system:msg:template:edit"),
+    ("DELETE", "/system/msg/template/{templateId}", "system:msg:template:remove"),
+    ("GET", "/system/msg/log/list", "system:msg:log:list"),
+    ("DELETE", "/system/msg/log/{logIds}", "system:msg:log:remove"),
+    ("DELETE", "/system/msg/log/clean", "system:msg:log:clean"),
+    // 直接发送 / 重试 / 标记重试 / 批量重试均为"消息发出"类操作，统一对齐 log:retry 按钮权限（3123）
+    ("POST", "/system/msg/send", "system:msg:log:retry"),
+    ("POST", "/system/msg/log/retry/{logIds}", "system:msg:log:retry"),
+    ("POST", "/system/msg/log/retryPending/{batch}", "system:msg:log:retry"),
+    ("POST", "/system/msg/log/markPending/{logIds}", "system:msg:log:retry"),
+
+    // ===== 第三方登录 / OAuth2 / OIDC =====
+    // 权限对齐 sys_menu 迁移种子（145 目录 / 146 页面 perms=system:oauth:provider:list，
+    // 按钮 3261-3264 分别为 add/edit/remove/toggle，见 m20260819_000001_oauth_module）
+    ("GET", "/system/oauth/provider/list", "system:oauth:provider:list"),
+    // 详情查询与列表查看同权（无独立 query 按钮，页面以 list 为准）
+    ("GET", "/system/oauth/provider/{providerId}", "system:oauth:provider:list"),
+    ("POST", "/system/oauth/provider", "system:oauth:provider:add"),
+    ("PUT", "/system/oauth/provider", "system:oauth:provider:edit"),
+    ("DELETE", "/system/oauth/provider/{providerIds}", "system:oauth:provider:remove"),
+    ("PUT", "/system/oauth/provider/{providerId}/status", "system:oauth:provider:toggle"),
+
+    // ===== 报表中心 + 定时订阅推送 =====
+    // 权限标识与 sys_menu 迁移种子（m20260819_000003_report_module）对齐：
+    // 报表定义 system:report:list/query/add/edit/remove/status/preview
+    // 报表订阅 system:report:sub:list/query/add/edit/remove/status/run
+    ("GET", "/system/report/list", "system:report:list"),
+    // 详情与列表查看同权（无独立 query 按钮，页面以 list 为准）
+    ("GET", "/system/report/{reportId}", "system:report:list"),
+    ("POST", "/system/report", "system:report:add"),
+    ("PUT", "/system/report", "system:report:edit"),
+    ("DELETE", "/system/report/{reportId}", "system:report:remove"),
+    ("PUT", "/system/report/{reportId}/status", "system:report:status"),
+    ("POST", "/system/report/{reportId}/preview", "system:report:preview"),
+    ("GET", "/system/report/sub/list", "system:report:sub:list"),
+    // 订阅详情与列表同权
+    ("GET", "/system/report/sub/{subId}", "system:report:sub:list"),
+    ("POST", "/system/report/sub", "system:report:sub:add"),
+    ("PUT", "/system/report/sub", "system:report:sub:edit"),
+    ("DELETE", "/system/report/sub/{subId}", "system:report:sub:remove"),
+    ("PUT", "/system/report/sub/{subId}/status", "system:report:sub:status"),
+    ("POST", "/system/report/sub/{subId}/run", "system:report:sub:run"),
+
+    // ===== WebHook 事件订阅 =====
+    // 权限标识与 sys_menu 迁移种子（m20260820_000002_web_hook_module）对齐：
+    // 回调配置 system:webHook:list/query/add/edit/remove/status/test
+    // 推送记录 system:webHook:log:list/query/remove/clean/retry
+    ("GET", "/monitor/webHook/list", "system:webHook:list"),
+    // 导出与回调查询同权（无独立导出按钮，复用 3531 query）
+    ("POST", "/monitor/webHook/export", "system:webHook:query"),
+    ("PUT", "/monitor/webHook/{id}/status", "system:webHook:status"),
+    ("POST", "/monitor/webHook/{id}/test", "system:webHook:test"),
+    // 详情与列表查看同权（无独立 query 按钮，页面以 list 为准）
+    ("GET", "/monitor/webHook/{id}", "system:webHook:list"),
+    ("DELETE", "/monitor/webHook/{id}", "system:webHook:remove"),
+    ("POST", "/monitor/webHook", "system:webHook:add"),
+    ("PUT", "/monitor/webHook", "system:webHook:edit"),
+    ("GET", "/monitor/webHook/log/list", "system:webHook:log:list"),
+    // 推送记录导出与记录查询同权
+    ("POST", "/monitor/webHook/log/export", "system:webHook:log:query"),
+    ("DELETE", "/monitor/webHook/log/clean", "system:webHook:log:clean"),
+    ("POST", "/monitor/webHook/log/{ids}/retry", "system:webHook:log:retry"),
+    // 记录详情与列表同权
+    ("GET", "/monitor/webHook/log/{id}", "system:webHook:log:list"),
+    ("DELETE", "/monitor/webHook/log/{id}", "system:webHook:log:remove"),
+
+    // ===== 审计日志大屏 =====
+    // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐
+    ("GET", "/monitor/operlog/stats", "monitor:audit:list"),
+    // 合规报告与审计大屏共享 monitor:audit:list 权限
+    ("GET", "/monitor/operlog/compliance-report", "monitor:audit:list"),
+    // 异常操作告警状态检测，与审计大屏共享监控查看权限
+    ("GET", "/monitor/operlog/alarm-status", "monitor:audit:list"),
+    // 操作日志类型统计（dashboard 首页图表专用聚合接口，与 /dashboard/stats 一致使用看板查看权限）
+    ("GET", "/monitor/operlog/stats-by-type", "monitor:dashboard:list"),
+
+    // ===== IP 归属地库管理 =====
+    // 菜单 menu_id=121 (IP 库管理) 在系统监控目录下，perms=monitor:iplocation:list
+    ("GET", "/system/ipLocation/status", "monitor:iplocation:list"),
+    ("GET", "/system/ipLocation/config", "monitor:iplocation:list"),
+    ("PUT", "/system/ipLocation/config", "monitor:iplocation:edit"),
+    ("POST", "/system/ipLocation/update", "monitor:iplocation:edit"),
+    ("POST", "/system/ipLocation/reload", "monitor:iplocation:edit"),
+    ("POST", "/system/ipLocation/reloadXdb", "monitor:iplocation:edit"),
+
+    // ===== 通用文件上传/下载 =====
+    // /common/upload 权限对齐文件管理按钮 system:file:upload（种子 3012），避免任意登录用户可上传
+    ("POST", "/common/upload", "system:file:upload"),
+    // 通用下载仅需登录（无敏感数据，但需登录态校验），不设细粒度权限
+    // /common/download 和 /common/download/resource 不在此表
+
+    // ===== 仪表盘统计 =====
+    // 数据看板为所有登录用户默认首页，权限对齐看板菜单 perms=monitor:dashboard:list（m132）
+    // 此前误用已删除的 monitor:server:list，导致非超管用户看板统计全部 403
+    ("GET", "/dashboard/stats", "monitor:dashboard:list"),
+    ("GET", "/dashboard/user-stats", "monitor:dashboard:list"),
+];
+
 /// 根据 HTTP 方法和匹配路径返回所需权限标识。
 /// 不在此表中的路由视为仅需登录，不需细粒度权限。
 ///
 /// 权限标识对齐前端菜单表的 perms 字段。
 fn get_required_perm(method: &str, path: &str) -> Option<&'static str> {
-    match (method, path) {
-        // ===== 用户管理 =====
-        ("GET", "/system/user/list") => Some("system:user:list"),
-        ("GET", "/system/user/{id}") => Some("system:user:query"),
-        ("GET", "/system/user/") => Some("system:user:query"),
-        ("GET", "/system/user/authRole/{userId}") => Some("system:user:query"),
-        ("POST", "/system/user") => Some("system:user:add"),
-        ("PUT", "/system/user") => Some("system:user:edit"),
-        ("PUT", "/system/user/changeStatus") => Some("system:user:edit"),
-        ("PUT", "/system/user/resetPwd") => Some("system:user:resetPwd"),
-        ("PUT", "/system/user/authRole") => Some("system:user:edit"),
-        ("DELETE", "/system/user/{id}") => Some("system:user:remove"),
-        ("POST", "/system/user/export") => Some("system:user:export"),
-        ("POST", "/system/user/importTemplate") => Some("system:user:import"),
-        ("POST", "/system/user/importData") => Some("system:user:import"),
-        // profile / 个人改密 / 角色下拉：仅需登录，不在此表
+    PERM_ROUTE_TABLE
+        .iter()
+        .find_map(|(m, p, perm)| (*m == method && *p == path).then_some(*perm))
+}
 
-        // ===== 角色管理 =====
-        ("GET", "/system/role/list") => Some("system:role:list"),
-        ("GET", "/system/role/{id}") => Some("system:role:query"),
-        ("POST", "/system/role") => Some("system:role:add"),
-        ("PUT", "/system/role") => Some("system:role:edit"),
-        ("PUT", "/system/role/changeStatus") => Some("system:role:edit"),
-        ("PUT", "/system/role/dataScope") => Some("system:role:edit"),
-        ("DELETE", "/system/role/{id}") => Some("system:role:remove"),
-        ("POST", "/system/role/export") => Some("system:role:export"),
-        // authUser 系列接口：授权用户管理，使用 system:role:edit
-        ("GET", "/system/role/authUser/allocatedList") => Some("system:role:list"),
-        ("GET", "/system/role/authUser/unallocatedList") => Some("system:role:list"),
-        ("PUT", "/system/role/authUser/cancel") => Some("system:role:edit"),
-        ("PUT", "/system/role/authUser/cancelAll") => Some("system:role:edit"),
-        ("PUT", "/system/role/authUser/selectAll") => Some("system:role:edit"),
-        // deptTree：仅需登录，不在此表
-
-        // ===== 菜单管理 =====
-        ("GET", "/system/menu/list") => Some("system:menu:list"),
-        ("GET", "/system/menu/{id}") => Some("system:menu:query"),
-        ("POST", "/system/menu") => Some("system:menu:add"),
-        ("PUT", "/system/menu") => Some("system:menu:edit"),
-        ("PUT", "/system/menu/updateSort") => Some("system:menu:edit"),
-        ("DELETE", "/system/menu/{id}") => Some("system:menu:remove"),
-        // treeselect / roleMenuTreeselect：仅需登录，不在此表
-
-        // ===== 部门管理 =====
-        ("GET", "/system/dept/list") => Some("system:dept:list"),
-        ("GET", "/system/dept/list/exclude/{deptId}") => Some("system:dept:list"),
-        ("GET", "/system/dept/{deptId}") => Some("system:dept:query"),
-        ("POST", "/system/dept") => Some("system:dept:add"),
-        ("PUT", "/system/dept") => Some("system:dept:edit"),
-        ("PUT", "/system/dept/updateSort") => Some("system:dept:edit"),
-        ("DELETE", "/system/dept/{deptId}") => Some("system:dept:remove"),
-        // treeselect：仅需登录，不在此表
-
-        // ===== 定时任务管理 =====
-        ("GET", "/monitor/job/list") => Some("monitor:job:list"),
-        ("GET", "/monitor/job/{jobId}") => Some("monitor:job:query"),
-        ("POST", "/monitor/job") => Some("monitor:job:add"),
-        ("PUT", "/monitor/job") => Some("monitor:job:edit"),
-        ("PUT", "/monitor/job/changeStatus") => Some("monitor:job:changeStatus"),
-        ("PUT", "/monitor/job/run") => Some("monitor:job:changeStatus"),
-        ("DELETE", "/monitor/job/{jobId}") => Some("monitor:job:remove"),
-        ("POST", "/monitor/job/export") => Some("monitor:job:export"),
-
-        // ===== 定时任务日志 =====
-        ("GET", "/monitor/jobLog/list") => Some("monitor:job:list"),
-        ("DELETE", "/monitor/jobLog/{jobLogIds}") => Some("monitor:job:remove"),
-        ("DELETE", "/monitor/jobLog/clean") => Some("monitor:job:remove"),
-        ("POST", "/monitor/jobLog/export") => Some("monitor:job:export"),
-
-        // ===== 字典管理 =====
-        ("GET", "/system/dict/type/list") => Some("system:dict:list"),
-        ("GET", "/system/dict/type/optionselect") => Some("system:dict:query"),
-        ("GET", "/system/dict/type/{dictId}") => Some("system:dict:query"),
-        ("POST", "/system/dict/type") => Some("system:dict:add"),
-        ("PUT", "/system/dict/type") => Some("system:dict:edit"),
-        ("DELETE", "/system/dict/type/refreshCache") => Some("system:dict:remove"),
-        ("POST", "/system/dict/type/export") => Some("system:dict:export"),
-        ("DELETE", "/system/dict/type/{dictId}") => Some("system:dict:remove"),
-        ("GET", "/system/dict/data/list") => Some("system:dict:list"),
-        ("GET", "/system/dict/data/type/{dictType}") => Some("system:dict:query"),
-        ("GET", "/system/dict/data/{dictCode}") => Some("system:dict:query"),
-        ("POST", "/system/dict/data") => Some("system:dict:add"),
-        ("PUT", "/system/dict/data") => Some("system:dict:edit"),
-        ("DELETE", "/system/dict/data/{dictCode}") => Some("system:dict:remove"),
-        ("POST", "/system/dict/data/export") => Some("system:dict:export"),
-
-        // ===== 通知公告 =====
-        ("GET", "/system/notice/list") => Some("system:notice:list"),
-        ("GET", "/system/notice/listTop") => Some("system:notice:list"),
-        ("GET", "/system/notice/readUsers/list") => Some("system:notice:list"),
-        ("GET", "/system/notice/{noticeId}") => Some("system:notice:query"),
-        ("POST", "/system/notice") => Some("system:notice:add"),
-        // markRead / markReadAll / markAllUnreadRead：标记本人已读为自助操作，仅需登录认证
-        // 权限粒度由前端 v-hasPermi 控制按钮可见性，后端不做 RBAC 校验
-        ("POST", "/system/notice/markRead") => None,
-        ("POST", "/system/notice/markReadAll") => None,
-        ("POST", "/system/notice/markAllUnreadRead") => None,
-        ("PUT", "/system/notice") => Some("system:notice:edit"),
-        ("DELETE", "/system/notice/{noticeId}") => Some("system:notice:remove"),
-
-        // ===== 参数配置 =====
-        ("GET", "/system/config/list") => Some("system:config:list"),
-        ("GET", "/system/config/{configId}") => Some("system:config:query"),
-        // /system/config/configKey/{configKey} 需 system:config:query 权限，防止任意已登录用户读取敏感配置（P0-R81-003）
-        ("GET", "/system/config/configKey/{configKey}") => Some("system:config:query"),
-        ("POST", "/system/config") => Some("system:config:add"),
-        ("PUT", "/system/config") => Some("system:config:edit"),
-        ("DELETE", "/system/config/refreshCache") => Some("system:config:remove"),
-        ("DELETE", "/system/config/{configId}") => Some("system:config:remove"),
-        ("POST", "/system/config/export") => Some("system:config:export"),
-
-        // ===== 岗位管理 =====
-        ("GET", "/system/post/list") => Some("system:post:list"),
-        ("GET", "/system/post/{postId}") => Some("system:post:query"),
-        ("POST", "/system/post") => Some("system:post:add"),
-        ("PUT", "/system/post") => Some("system:post:edit"),
-        ("DELETE", "/system/post/{postId}") => Some("system:post:remove"),
-        ("POST", "/system/post/export") => Some("system:post:export"),
-        // optionselect：仅需登录，不在此表
-
-        // ===== 操作日志 =====
-        ("GET", "/monitor/operlog/list") => Some("monitor:operlog:list"),
-        ("DELETE", "/monitor/operlog/{operIds}") => Some("monitor:operlog:remove"),
-        ("DELETE", "/monitor/operlog/clean") => Some("monitor:operlog:remove"),
-        ("POST", "/monitor/operlog/export") => Some("monitor:operlog:export"),
-
-        // ===== 登录日志 =====
-        ("GET", "/monitor/logininfor/list") => Some("monitor:logininfor:list"),
-        ("GET", "/monitor/logininfor/stats") => Some("monitor:logininfor:list"),
-        ("DELETE", "/monitor/logininfor/{infoIds}") => Some("monitor:logininfor:remove"),
-        // 路由定义见 sys_logininfor_router.rs：实际方法为 POST（解锁操作有副作用，GET 不规范）
-        ("POST", "/monitor/logininfor/unlock/{userName}") => Some("monitor:logininfor:unlock"),
-        ("DELETE", "/monitor/logininfor/clean") => Some("monitor:logininfor:remove"),
-        ("POST", "/monitor/logininfor/export") => Some("monitor:logininfor:export"),
-
-        // ===== 在线用户 =====
-        // 路由定义见 monitor_online_router.rs：参数名为 {tokenHash}（P1-19 改造后从 tokenId 改为 tokenHash）
-        ("GET", "/monitor/online/list") => Some("monitor:online:list"),
-        ("DELETE", "/monitor/online/{tokenHash}") => Some("monitor:online:forceLogout"),
-
-        // ===== 缓存监控 =====
-        ("GET", "/monitor/cache") => Some("monitor:cache:list"),
-        ("GET", "/monitor/cache/getNames") => Some("monitor:cache:list"),
-        // hotKeys / prefixStats 与 getNames 同权（内存统计属只读监控，绑定列表查看权限）
-        ("GET", "/monitor/cache/hotKeys") => Some("monitor:cache:list"),
-        ("GET", "/monitor/cache/prefixStats") => Some("monitor:cache:list"),
-        ("GET", "/monitor/cache/getKeys/{cacheName}") => Some("monitor:cache:list"),
-        ("GET", "/monitor/cache/getValue/{cacheName}/{cacheKey}") => Some("monitor:cache:query"),
-        // 缓存清除权限与 sys_menu 按钮种子 3022/3023 对齐（monitor:cache:clearName / clearKey）
-        ("DELETE", "/monitor/cache/clearCacheName/{cacheName}") => Some("monitor:cache:clearName"),
-        ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}") => Some("monitor:cache:clearKey"),
-        // clearCacheAll 端点已从路由中移除（FLUSHDB 会误清业务键），权限映射随之删除
-
-        // ===== 服务器监控 =====
-        ("GET", "/monitor/server") => Some("monitor:server:list"),
-
-        // ===== 可观测性监控（慢请求 / 错误聚合 / Redis 指标）=====
-        // 慢请求面板（列表 + 聚合 + 清空）共用一个查看权限，运算符粒度与面板按钮一致。
-        // 注意：MatchedPath 模板中连字符 "-" 原样保留（axum 不做 shell 转义）。
-        ("GET", "/monitor/slow-sql/list") => Some("monitor:slowSql:list"),
-        ("GET", "/monitor/slow-sql/stats") => Some("monitor:slowSql:list"),
-        ("DELETE", "/monitor/slow-sql/clear") => Some("monitor:slowSql:list"),
-        // 错误聚合面板（列表 + 统计 + 清空）共用查看权限
-        ("GET", "/monitor/error-log/list") => Some("monitor:errorLog:list"),
-        ("GET", "/monitor/error-log/stats") => Some("monitor:errorLog:list"),
-        ("DELETE", "/monitor/error-log/clear") => Some("monitor:errorLog:list"),
-        // Redis 运行指标：与缓存监控同权（monitor:cache:list），复用缓存菜单入口
-        ("GET", "/monitor/redis/stats") => Some("monitor:cache:list"),
-
-        // ===== 实时日志监控 =====
-        // 菜单 menu_id=135 (实时日志) 在系统监控目录下，perms=monitor:log:list
-        ("GET", "/monitor/log/files") => Some("monitor:log:list"),
-        ("GET", "/monitor/log/tail") => Some("monitor:log:list"),
-
-        // ===== 代码生成 =====
-        ("GET", "/tool/gen/list") => Some("tool:gen:list"),
-        ("GET", "/tool/gen/db/list") => Some("tool:gen:list"),
-        ("GET", "/tool/gen/{tableId}") => Some("tool:gen:query"),
-        ("POST", "/tool/gen/importTable") => Some("tool:gen:import"),
-        ("POST", "/tool/gen/createTable") => Some("tool:gen:edit"),
-        ("PUT", "/tool/gen") => Some("tool:gen:edit"),
-        ("DELETE", "/tool/gen/{tableId}") => Some("tool:gen:remove"),
-        ("GET", "/tool/gen/preview/{tableId}") => Some("tool:gen:preview"),
-        ("GET", "/tool/gen/genCode/{tableName}") => Some("tool:gen:code"),
-        // P0-4 修复：synchDb 路由实际注册为 POST（见 tool_gen_router.rs:37），
-        // 原映射为 GET 导致权限校验被绕过（get_required_perm 返回 None）
-        ("POST", "/tool/gen/synchDb/{tableName}") => Some("tool:gen:edit"),
-        // P1-6 修复：batchGenCode 批量生成代码未映射权限，任意登录用户可调用
-        ("GET", "/tool/gen/batchGenCode") => Some("tool:gen:code"),
-
-        // ===== 在线 HTTP 调试器 =====
-        // 权限对齐 sys_menu 迁移种子（tool/http-debugger/index 页面，perms=tool:httpDebug:list，
-        // 见 m20260819_000002_http_debugger_menu）。执行与查看同权，避免开发/运维自行加按钮。
-        ("POST", "/tool/http-debug/execute") => Some("tool:httpDebug:list"),
-
-        // ===== 文件管理 =====
-        ("GET", "/system/file/list") => Some("system:file:list"),
-        ("POST", "/system/file/upload") => Some("system:file:add"),
-        ("DELETE", "/system/file/delete") => Some("system:file:remove"),
-
-        // ===== 数据备份恢复 =====
-        ("GET", "/system/backup/list") => Some("system:backup:list"),
-        ("GET", "/system/backup/{backupId}") => Some("system:backup:query"),
-        ("POST", "/system/backup") => Some("system:backup:add"),
-        ("POST", "/system/backup/restore/{backupId}") => Some("system:backup:edit"),
-        ("GET", "/system/backup/download/{backupId}") => Some("system:backup:query"),
-        ("DELETE", "/system/backup/{backupId}") => Some("system:backup:remove"),
-
-        // ===== 任务进度中心 =====
-        ("GET", "/system/task/list") => Some("system:task:list"),
-        ("GET", "/system/task/{taskId}") => Some("system:task:query"),
-        ("DELETE", "/system/task/{taskId}") => Some("system:task:remove"),
-
-        // ===== API 限流配置 =====
-        // P0-3 修复：原完全缺失权限映射，任意登录用户可增删改限流规则，
-        // 可禁用登录接口限流导致暴力破解。权限标识对齐 sys_menu 表 rateLimit 菜单 perms 字段。
-        ("GET", "/system/rateLimit/list") => Some("system:rateLimit:list"),
-        ("GET", "/system/rateLimit/{id}") => Some("system:rateLimit:query"),
-        ("POST", "/system/rateLimit") => Some("system:rateLimit:add"),
-        ("PUT", "/system/rateLimit") => Some("system:rateLimit:edit"),
-        ("DELETE", "/system/rateLimit/{id}") => Some("system:rateLimit:remove"),
-        ("POST", "/system/rateLimit/export") => Some("system:rateLimit:export"),
-
-        // ===== 消息渠道与模板管理 =====
-        // 权限标识对齐 sys_menu 迁移种子（140 目录 / 141 渠道 / 142 模板 / 143 记录 及按钮 3101-3123，见 m20260818_000002_msg_module）
-        ("GET", "/system/msg/channel/list") => Some("system:msg:channel:list"),
-        ("GET", "/system/msg/channel/{channelId}") => Some("system:msg:channel:query"),
-        ("POST", "/system/msg/channel") => Some("system:msg:channel:add"),
-        ("PUT", "/system/msg/channel") => Some("system:msg:channel:edit"),
-        ("DELETE", "/system/msg/channel/{channelId}") => Some("system:msg:channel:remove"),
-        ("POST", "/system/msg/channel/test/{channelId}") => Some("system:msg:channel:test"),
-        ("GET", "/system/msg/template/list") => Some("system:msg:template:list"),
-        ("GET", "/system/msg/template/{templateId}") => Some("system:msg:template:query"),
-        ("POST", "/system/msg/template") => Some("system:msg:template:add"),
-        ("PUT", "/system/msg/template") => Some("system:msg:template:edit"),
-        ("DELETE", "/system/msg/template/{templateId}") => Some("system:msg:template:remove"),
-        ("GET", "/system/msg/log/list") => Some("system:msg:log:list"),
-        ("DELETE", "/system/msg/log/{logIds}") => Some("system:msg:log:remove"),
-        ("DELETE", "/system/msg/log/clean") => Some("system:msg:log:clean"),
-        // 直接发送 / 重试 / 标记重试 / 批量重试均为"消息发出"类操作，统一对齐 log:retry 按钮权限（3123）
-        ("POST", "/system/msg/send") => Some("system:msg:log:retry"),
-        ("POST", "/system/msg/log/retry/{logIds}") => Some("system:msg:log:retry"),
-        ("POST", "/system/msg/log/retryPending/{batch}") => Some("system:msg:log:retry"),
-        ("POST", "/system/msg/log/markPending/{logIds}") => Some("system:msg:log:retry"),
-
-        // ===== 第三方登录 / OAuth2 / OIDC =====
-        // 权限对齐 sys_menu 迁移种子（145 目录 / 146 页面 perms=system:oauth:provider:list，
-        // 按钮 3261-3264 分别为 add/edit/remove/toggle，见 m20260819_000001_oauth_module）
-        ("GET", "/system/oauth/provider/list") => Some("system:oauth:provider:list"),
-        // 详情查询与列表查看同权（无独立 query 按钮，页面以 list 为准）
-        ("GET", "/system/oauth/provider/{providerId}") => Some("system:oauth:provider:list"),
-        ("POST", "/system/oauth/provider") => Some("system:oauth:provider:add"),
-        ("PUT", "/system/oauth/provider") => Some("system:oauth:provider:edit"),
-        ("DELETE", "/system/oauth/provider/{providerIds}") => Some("system:oauth:provider:remove"),
-        ("PUT", "/system/oauth/provider/{providerId}/status") => {
-            Some("system:oauth:provider:toggle")
-        }
-
-        // ===== 报表中心 + 定时订阅推送 =====
-        // 权限标识与 sys_menu 迁移种子（m20260819_000003_report_module）对齐：
-        // 报表定义 system:report:list/query/add/edit/remove/status/preview
-        // 报表订阅 system:report:sub:list/query/add/edit/remove/status/run
-        ("GET", "/system/report/list") => Some("system:report:list"),
-        // 详情与列表查看同权（无独立 query 按钮，页面以 list 为准）
-        ("GET", "/system/report/{reportId}") => Some("system:report:list"),
-        ("POST", "/system/report") => Some("system:report:add"),
-        ("PUT", "/system/report") => Some("system:report:edit"),
-        ("DELETE", "/system/report/{reportId}") => Some("system:report:remove"),
-        ("PUT", "/system/report/{reportId}/status") => Some("system:report:status"),
-        ("POST", "/system/report/{reportId}/preview") => Some("system:report:preview"),
-        ("GET", "/system/report/sub/list") => Some("system:report:sub:list"),
-        // 订阅详情与列表同权
-        ("GET", "/system/report/sub/{subId}") => Some("system:report:sub:list"),
-        ("POST", "/system/report/sub") => Some("system:report:sub:add"),
-        ("PUT", "/system/report/sub") => Some("system:report:sub:edit"),
-        ("DELETE", "/system/report/sub/{subId}") => Some("system:report:sub:remove"),
-        ("PUT", "/system/report/sub/{subId}/status") => Some("system:report:sub:status"),
-        ("POST", "/system/report/sub/{subId}/run") => Some("system:report:sub:run"),
-
-        // ===== WebHook 事件订阅 =====
-        // 权限标识与 sys_menu 迁移种子（m20260820_000002_web_hook_module）对齐：
-        // 回调配置 system:webHook:list/query/add/edit/remove/status/test
-        // 推送记录 system:webHook:log:list/query/remove/clean/retry
-        ("GET", "/monitor/webHook/list") => Some("system:webHook:list"),
-        // 导出与回调查询同权（无独立导出按钮，复用 3531 query）
-        ("POST", "/monitor/webHook/export") => Some("system:webHook:query"),
-        ("PUT", "/monitor/webHook/{id}/status") => Some("system:webHook:status"),
-        ("POST", "/monitor/webHook/{id}/test") => Some("system:webHook:test"),
-        // 详情与列表查看同权（无独立 query 按钮，页面以 list 为准）
-        ("GET", "/monitor/webHook/{id}") => Some("system:webHook:list"),
-        ("DELETE", "/monitor/webHook/{id}") => Some("system:webHook:remove"),
-        ("POST", "/monitor/webHook") => Some("system:webHook:add"),
-        ("PUT", "/monitor/webHook") => Some("system:webHook:edit"),
-        ("GET", "/monitor/webHook/log/list") => Some("system:webHook:log:list"),
-        // 推送记录导出与记录查询同权
-        ("POST", "/monitor/webHook/log/export") => Some("system:webHook:log:query"),
-        ("DELETE", "/monitor/webHook/log/clean") => Some("system:webHook:log:clean"),
-        ("POST", "/monitor/webHook/log/{ids}/retry") => Some("system:webHook:log:retry"),
-        // 记录详情与列表同权
-        ("GET", "/monitor/webHook/log/{id}") => Some("system:webHook:log:list"),
-        ("DELETE", "/monitor/webHook/log/{id}") => Some("system:webHook:log:remove"),
-
-        // ===== 审计日志大屏 =====
-        // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐
-        ("GET", "/monitor/operlog/stats") => Some("monitor:audit:list"),
-        // 合规报告与审计大屏共享 monitor:audit:list 权限
-        ("GET", "/monitor/operlog/compliance-report") => Some("monitor:audit:list"),
-        // 异常操作告警状态检测，与审计大屏共享监控查看权限
-        ("GET", "/monitor/operlog/alarm-status") => Some("monitor:audit:list"),
-        // 操作日志类型统计（dashboard 首页图表专用聚合接口，与 /dashboard/stats 一致使用监控查看权限）
-        ("GET", "/monitor/operlog/stats-by-type") => Some("monitor:server:list"),
-
-        // ===== IP 归属地库管理 =====
-        // 菜单 menu_id=121 (IP 库管理) 在系统监控目录下，perms=monitor:iplocation:list
-        ("GET", "/system/ipLocation/status") => Some("monitor:iplocation:list"),
-        ("GET", "/system/ipLocation/config") => Some("monitor:iplocation:list"),
-        ("PUT", "/system/ipLocation/config") => Some("monitor:iplocation:edit"),
-        ("POST", "/system/ipLocation/update") => Some("monitor:iplocation:edit"),
-        ("POST", "/system/ipLocation/reload") => Some("monitor:iplocation:edit"),
-        ("POST", "/system/ipLocation/reloadXdb") => Some("monitor:iplocation:edit"),
-
-        // ===== 通用文件上传/下载 =====
-        // /common/upload 已有 system:file:add 权限对齐文件管理模块，避免任意登录用户可上传
-        ("POST", "/common/upload") => Some("system:file:add"),
-        // 通用下载仅需登录（无敏感数据，但需登录态校验），不设细粒度权限
-        // /common/download 和 /common/download/resource 不在此表
-
-        // ===== 仪表盘统计 =====
-        // 含操作日志聚合统计，需监控查看权限，避免任意登录用户获取全局统计
-        ("GET", "/dashboard/stats") => Some("monitor:server:list"),
-        ("GET", "/dashboard/user-stats") => Some("monitor:server:list"),
-
-        _ => None,
-    }
+/// 返回路由权限映射表中出现的全部权限标识（去重、排序），供契约测试与 sys_menu.perms 比对。
+///
+/// 这是权限契约测试（integration_tests/menu_perm_contract.rs）的单一数据源：
+/// 断言「后端所需权限订阅 ⊆ sys_menu.perms」，确保每个受保护能力都能被菜单/角色授予。
+/// 仅测试构建使用（integration_tests 挂在 `#[cfg(test)]`），避免正常构建 dead_code 告警。
+#[cfg(test)]
+pub(crate) fn all_required_perm_keys() -> std::collections::BTreeSet<&'static str> {
+    PERM_ROUTE_TABLE.iter().map(|(_, _, perm)| *perm).collect()
 }
 
 /// 仅登录白名单（deny_by_default 模式下用于区分"合法仅登录路由"与"漏登记权限映射"）
@@ -817,15 +839,15 @@ mod tests {
         );
         assert_eq!(
             get_required_perm("GET", "/monitor/error-log/list"),
-            Some("monitor:errorLog:list")
+            Some("monitor:slowSql:list")
         );
         assert_eq!(
             get_required_perm("GET", "/monitor/error-log/stats"),
-            Some("monitor:errorLog:list")
+            Some("monitor:slowSql:list")
         );
         assert_eq!(
             get_required_perm("DELETE", "/monitor/error-log/clear"),
-            Some("monitor:errorLog:list")
+            Some("monitor:slowSql:list")
         );
         assert_eq!(
             get_required_perm("GET", "/monitor/redis/stats"),
@@ -834,6 +856,11 @@ mod tests {
         // 方法混淆不应命中（GET clear、DELETE list 均不匹配）
         assert_eq!(get_required_perm("GET", "/monitor/slow-sql/clear"), None);
         assert_eq!(get_required_perm("DELETE", "/monitor/error-log/list"), None);
+        // 服务器监控已并入健康检查，权限对齐 monitor:health:list
+        assert_eq!(
+            get_required_perm("GET", "/monitor/server"),
+            Some("monitor:health:list")
+        );
     }
 
     // ===== 安全关键路由权限映射 =====
@@ -903,7 +930,11 @@ mod tests {
     fn test_common_upload_perm() {
         assert_eq!(
             get_required_perm("POST", "/common/upload"),
-            Some("system:file:add")
+            Some("system:file:upload")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/file/upload"),
+            Some("system:file:upload")
         );
     }
 
@@ -912,7 +943,11 @@ mod tests {
     fn test_dashboard_stats_perm() {
         assert_eq!(
             get_required_perm("GET", "/dashboard/stats"),
-            Some("monitor:server:list")
+            Some("monitor:dashboard:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/dashboard/user-stats"),
+            Some("monitor:dashboard:list")
         );
     }
 
@@ -1002,10 +1037,10 @@ mod tests {
 
     #[test]
     fn test_stats_by_type_perm_mapped() {
-        // dashboard 首页操作日志类型统计需监控查看权限（P0-1 补充映射，此前 fail-open 裸奔）
+        // dashboard 首页操作日志类型统计需看板查看权限（P0-1 补充映射，此前 fail-open 裸奔）
         assert_eq!(
             get_required_perm("GET", "/monitor/operlog/stats-by-type"),
-            Some("monitor:server:list")
+            Some("monitor:dashboard:list")
         );
     }
 
@@ -1346,7 +1381,7 @@ mod tests {
         );
         assert_eq!(
             get_required_perm("GET", "/system/msg/channel/{channelId}"),
-            Some("system:msg:channel:query")
+            Some("system:msg:channel:list")
         );
         assert_eq!(
             get_required_perm("POST", "/system/msg/channel"),
@@ -1374,7 +1409,7 @@ mod tests {
         );
         assert_eq!(
             get_required_perm("GET", "/system/msg/template/{templateId}"),
-            Some("system:msg:template:query")
+            Some("system:msg:template:list")
         );
         assert_eq!(
             get_required_perm("POST", "/system/msg/template"),

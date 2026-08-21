@@ -49,9 +49,11 @@
 ```
 
 当前测试统计：
-- **单元测试**：约 380 个（单元 + 集成合计，实际数量随开发迭代变化，以 `cargo test` 输出为准）
+- **单元测试**：约 660 个单元测试 + 集成测试（实际数量随开发迭代变化，以 `cargo test` 输出为准）
 - **ts-rs 导出测试**：19 个
 - **自动化集成测试**（`src/integration_tests/`）：user / role / config / dict / menu / dept 等关键路由链路，使用独立临时 SQLite 文件 + 独占 Redis DB 索引（`1..=15`）+ 独立 peer IP，`cargo test` 可直接并行运行（需本机 Redis 可达，见 2.2）；无需 MySQL。
+  - `ws.rs`：WebSocket 端到端测试（鉴权头/子协议、广播、连接上限、心跳 ping/pong、断连计数释放）；
+  - `menu_perm_contract.rs`：菜单 ↔ 后端路由权限 key 契约一致性（后端所需权限 ⊆ sys_menu.perms），杜绝权限键漂移。
 - **手工 API 测试**：依赖外部服务（MySQL/Redis），按本文档第 6 章手动执行
 
 ---
@@ -1180,8 +1182,8 @@ tests/
 | 部门 CRUD 后下拉树缓存未失效 | `dept/index.vue` 的 `submitForm`/`handleDelete` 未调用 `refreshDeptTreeSelect()` | 在更新/删除成功回调中调用 `refreshDeptTreeSelect()` 失效缓存 |
 | 修改密码后旧 token 仍有 1500ms 可用窗口 | `resetPwd.vue` 改密成功后延迟登出，期间用户可继续操作 | 加全屏 `ElLoading.service({ lock: true })` 遮罩，登出完成后关闭 |
 | HTML 消息体 XSS 防护不可靠 | `utils/sanitize.rs` 使用手写正则过滤，易被属性大小写/编码绕过 | 引入 `ammonia` crate，白名单标签+属性+链接 rel=noopener noreferrer |
-| `/common/upload` 缺权限校验 | `permission.rs` 未映射上传端点权限标识 | 新增 `("POST", "/common/upload") => Some("system:file:add")` 映射 |
-| `/dashboard/*` 缺权限校验 | `permission.rs` 未映射仪表盘端点权限标识 | 新增 `("GET", "/dashboard/stats")` / `("GET", "/dashboard/user-stats")` 映射到 `monitor:server:list` |
+| `/common/upload` 缺权限校验 | `permission.rs` 未映射上传端点权限标识 | 新增 `("POST", "/common/upload") => Some("system:file:upload")` 映射（对齐菜单按钮种子 3012） |
+| `/dashboard/*` 缺权限校验 | `permission.rs` 未映射仪表盘端点权限标识 | 新增 `("GET", "/dashboard/stats")` / `("GET", "/dashboard/user-stats")` 映射到 `monitor:dashboard:list`（看板菜单 m132 perms） |
 | 数据库 URL 解析 panic | `db_type.rs::from_url` 遇到未知 scheme 时 `panic!` | 改为返回 `Result<DbType, DbTypeError>`，`pool.rs` 调用方转为 `AppError` |
 | 429 响应缺 Retry-After 头 | `rate_limit.rs` 限流响应未按 RFC 6585/7231 携带 Retry-After | 新增 `try_acquire_with_retry_after` 计算恢复秒数，写入 `Retry-After` 头 |
 | 备份恢复 MySQL 分支 `unreachable!()` | `sys_backup_service.rs` MySQL 恢复路径用 `unreachable!()` 可能 panic | 替换为 `return Err(ServiceError::internal(...))` 正常错误返回 |
