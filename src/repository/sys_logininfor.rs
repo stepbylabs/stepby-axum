@@ -148,6 +148,25 @@ impl SysLogininforRepository {
             .await
     }
 
+    /// 按时间范围删除登录日志（物理删除 [begin, end] 区间内日志，边界含端点）
+    ///
+    /// `begin` / `end` 均可为空：为空表示该侧不设边界（例如仅清理早于 `end` 的日志）。
+    /// 供登录日志「按时间范围清理」接口（`DELETE /monitor/logininfor/clean?params[beginTime]=&params[endTime]=`）使用。
+    pub async fn delete_by_time_range(
+        &self,
+        begin: Option<NaiveDateTime>,
+        end: Option<NaiveDateTime>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysLogininfor::delete_many();
+        if let Some(b) = begin {
+            query = query.filter(Column::LoginTime.gte(b));
+        }
+        if let Some(e) = end {
+            query = query.filter(Column::LoginTime.lte(e));
+        }
+        query.exec(self.base.db()).await
+    }
+
     /// 插入登录日志
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

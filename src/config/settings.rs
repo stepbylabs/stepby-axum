@@ -41,6 +41,9 @@ pub struct Settings {
     /// 可观测性监控配置（慢请求阈值 / 缓冲容量 / Prometheus 指标 token）
     #[serde(default)]
     pub monitor: MonitorConfig,
+    /// 系统日志保留策略配置（操作日志 / 登录日志的定期归档清理）
+    #[serde(default)]
+    pub sys_log: SysLogConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -61,8 +64,42 @@ impl fmt::Debug for Settings {
                 &self.permission_deny_by_default,
             )
             .field("monitor", &self.monitor)
+            .field("sys_log", &self.sys_log)
             .finish()
     }
+}
+
+/// 系统日志保留策略配置（M2：操作日志 / 登录日志定期归档清理）
+///
+/// 保留天数由 `retention_days` 控制（默认 `LOG_RETENTION_DAYS`=90 天），
+/// 供每日归档任务 `cleanup_expired_logs` 读取（cron: "0 0 3 * * *"）。
+#[derive(Clone, Deserialize)]
+pub struct SysLogConfig {
+    /// 操作日志 / 登录日志保留天数（默认 90 天）
+    ///
+    /// 每日定时清理早于（当前时间 - retention_days）的日志，避免日志表无限增长。
+    #[serde(default = "default_sys_log_retention_days")]
+    pub retention_days: i64,
+}
+
+impl fmt::Debug for SysLogConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SysLogConfig")
+            .field("retention_days", &self.retention_days)
+            .finish()
+    }
+}
+
+impl Default for SysLogConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_sys_log_retention_days(),
+        }
+    }
+}
+
+fn default_sys_log_retention_days() -> i64 {
+    crate::common::constants::LOG_RETENTION_DAYS
 }
 
 /// 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
@@ -670,6 +707,13 @@ impl Settings {
         if let Ok(v) = std::env::var("MONITOR_METRICS_TOKEN") {
             self.monitor.metrics_token = v;
         }
+        // 系统日志保留天数（M2）：LOG_RETENTION_DAYS 环境变量覆盖默认 90 天
+        if let Ok(v) = std::env::var("LOG_RETENTION_DAYS")
+            && let Ok(days) = v.parse::<i64>()
+            && days > 0
+        {
+            self.sys_log.retention_days = days;
+        }
     }
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
@@ -733,6 +777,7 @@ impl Settings {
             config_enc_key: std::env::var("CONFIG_ENC_KEY").unwrap_or_default(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
+            sys_log: SysLogConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -832,6 +877,7 @@ mod tests {
             config_enc_key: String::new(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
+            sys_log: SysLogConfig::default(),
         }
     }
 
@@ -885,6 +931,7 @@ mod tests {
             config_enc_key: "encryption-key-should-not-leak".to_string(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
+            sys_log: SysLogConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);

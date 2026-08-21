@@ -154,7 +154,7 @@ impl JobScheduler {
     /// 注册并调度内置 cron 任务（直接添加到 TokioScheduler，不依赖 sys_job 表）
     ///
     /// 目前注册的内置调度任务：
-    /// - `cleanup_expired_logs`：每日凌晨 3:00 清理 90 天前的日志（P0-R81-019，cron: "0 0 3 * * *"）
+    /// - `cleanup_expired_logs`：每日凌晨 3:00 清理 retention_days（默认 90）天前的日志（M2，cron: "0 0 3 * * *"）
     /// - `login_anomaly_detector`：每 5 分钟扫描最近 5 分钟失败登录，按 IP 分组阈值告警
     /// - `mmdb_auto_update`：按 `config.ip_location.auto_update_cron` 定时更新 mmdb 文件（默认每周二 04:00）
     async fn register_builtin_scheduled_jobs(
@@ -176,13 +176,16 @@ impl JobScheduler {
         let report_config = config.clone();
 
         // 日志保留期清理任务：每日凌晨 3:00 执行（cron: "0 0 3 * * *"）
-        // 删除 90 天前的操作日志和登录日志，避免日志表无限增长导致生产崩溃
+        // 删除 (当前时间 - sys_log.retention_days) 天前的操作日志和登录日志，
+        // 避免日志表无限增长导致生产崩溃（M2，保留天数可配置，默认 90）
         // FIX-Cron: tokio-cron-scheduler 0.15.1 强制要求 6 字段（含秒）cron 表达式，
         // 5 字段的 "0 3 * * *" 会触发 ParseSchedule 错误，改为 "0 0 3 * * *"（秒=0 分=0 时=3）
+        let cleanup_config = config.clone();
         let cleanup_job = Job::new_async("0 0 3 * * *", move |_uuid, _l| {
             let db = db.clone();
+            let config = cleanup_config.clone();
             Box::pin(async move {
-                tracing::info!("内置任务 cleanup_expired_logs 开始执行：清理 90 天前的日志");
+                tracing::info!("内置任务 cleanup_expired_logs 开始执行：清理过期日志");
 
                 // 清理操作日志
                 let oper_log_service =
@@ -190,14 +193,14 @@ impl JobScheduler {
                 let logininfor_service =
                     crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
 
-                const RETENTION_DAYS: i64 = crate::common::constants::LOG_RETENTION_DAYS;
+                let retention_days = config.sys_log.retention_days;
 
-                match oper_log_service.cleanup_old_logs(RETENTION_DAYS).await {
+                match oper_log_service.cleanup_old_logs(retention_days).await {
                     Ok(affected) => {
                         tracing::info!(
                             "cleanup_expired_logs: 清理操作日志 {} 条（保留 {} 天）",
                             affected,
-                            RETENTION_DAYS
+                            retention_days
                         );
                     }
                     Err(e) => {
@@ -205,12 +208,12 @@ impl JobScheduler {
                     }
                 }
 
-                match logininfor_service.cleanup_old_logs(RETENTION_DAYS).await {
+                match logininfor_service.cleanup_old_logs(retention_days).await {
                     Ok(affected) => {
                         tracing::info!(
                             "cleanup_expired_logs: 清理登录日志 {} 条（保留 {} 天）",
                             affected,
-                            RETENTION_DAYS
+                            retention_days
                         );
                     }
                     Err(e) => {
@@ -228,7 +231,8 @@ impl JobScheduler {
         })?;
 
         tracing::info!(
-            "内置定时任务注册成功: cleanup_expired_logs (cron: '0 0 3 * * *', 保留 90 天)"
+            "内置定时任务注册成功: cleanup_expired_logs (cron: '0 0 3 * * *', 保留 {} 天)",
+            config.sys_log.retention_days
         );
 
         // 登录异常检测任务：每 5 分钟执行（cron: "0 */5 * * * *"）
