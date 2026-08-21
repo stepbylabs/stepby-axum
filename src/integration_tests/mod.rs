@@ -26,6 +26,7 @@ mod sys_config_dict;
 mod sys_http_debug;
 mod sys_job;
 mod sys_logininfor;
+mod sys_log_clean_export;
 mod sys_menu_dept;
 mod sys_misc_extra;
 mod sys_msg;

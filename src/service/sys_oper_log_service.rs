@@ -200,6 +200,28 @@ impl SysOperLogService {
         Ok(result.rows_affected)
     }
 
+    /// 按时间范围清理操作日志（物理删除 [begin, end] 区间的日志，边界含端点）
+    ///
+    /// 供 `DELETE /monitor/operlog/clean?params[beginTime]=&params[endTime]=` 使用：
+    /// 传入 `begin_time` / `end_time`（`%Y-%m-%d`）显式清理指定时间段的日志。
+    /// 单侧不传时该侧不设边界。解析失败返回 `ServiceError::bad_request`。
+    pub async fn clean_oper_logs_by_range(
+        &self,
+        begin_time: Option<String>,
+        end_time: Option<String>,
+    ) -> Result<u64, ServiceError> {
+        let begin = match begin_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
+        let end = match end_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
+        let result = self.oper_log_repo.delete_by_time_range(begin, end).await?;
+        Ok(result.rows_affected)
+    }
+
     /// 审计大屏统计：按业务类型聚合
     pub async fn stats_by_business_type(&self) -> Result<Vec<AuditBusinessTypeStat>, ServiceError> {
         let rows = self.oper_log_repo.stats_by_business_type().await?;

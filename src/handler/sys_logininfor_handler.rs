@@ -118,20 +118,55 @@ pub async fn unlock(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.unlock")))
 }
 
+/// 登录日志清理查询参数（兼容前端 addDateRange 嵌套格式 params[beginTime]/params[endTime]）
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct LogininforCleanQuery {
+    /// 清理时间范围起点（`%Y-%m-%d`），与 endTime 同时提供时执行按时间范围清理
+    #[serde(alias = "params[beginTime]", default)]
+    pub begin_time: Option<String>,
+    /// 清理时间范围终点（`%Y-%m-%d`），与 beginTime 同时提供时执行按时间范围清理
+    #[serde(alias = "params[endTime]", default)]
+    pub end_time: Option<String>,
+}
+
 /// DELETE /monitor/logininfor/clean
-/// 清空全部登录日志
+/// 清空登录日志（可选按时间范围清理）
+///
+/// - 不传时间参数：清空全部登录日志（物理删除）。
+/// - 传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`）：仅清理 [begin, end] 区间的日志。
 #[utoipa::path(
     delete,
     path = "/monitor/logininfor/clean",
+    params(LogininforCleanQuery),
     responses(
         (status = 200, description = "清空成功", body = AjaxResult<serde_json::Value>),
         (status = 500, description = "服务器错误"),
     ),
     tag = "monitor-logininfor"
 )]
-pub async fn clean(State(state): State<Arc<AppState>>) -> Result<AjaxResult<()>, AppError> {
-    state.logininfor_service.clean_logininfors().await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.clear")))
+pub async fn clean(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LogininforCleanQuery>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 传入时间范围时执行按时间清理，否则清空全部
+    let affected = if query.begin_time.is_some() || query.end_time.is_some() {
+        tracing::warn!(
+            "登录日志清理（按时间范围）：begin={:?} end={:?}，操作者 = sys/logininfor/clean（管理员）",
+            query.begin_time,
+            query.end_time
+        );
+        state
+            .logininfor_service
+            .clean_logininfors_by_range(query.begin_time.clone(), query.end_time.clone())
+            .await?
+    } else {
+        state.logininfor_service.clean_logininfors().await?;
+        0 // 全量清空不返回具体数量，兼容既有契约
+    };
+    Ok(AjaxResult::success(
+        serde_json::json!({ "affected": affected }),
+    ))
 }
 
 /// POST /monitor/logininfor/export

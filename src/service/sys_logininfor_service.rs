@@ -168,6 +168,28 @@ impl SysLogininforService {
         Ok(result.rows_affected)
     }
 
+    /// 按时间范围清理登录日志（物理删除 [begin, end] 区间的日志，边界含端点）
+    ///
+    /// 供 `DELETE /monitor/logininfor/clean?params[beginTime]=&params[endTime]=` 使用：
+    /// 传入 `begin_time` / `end_time`（`%Y-%m-%d`）显式清理指定时间段的日志。
+    /// 单侧不传时该侧不设边界。解析失败返回 `ServiceError::bad_request`。
+    pub async fn clean_logininfors_by_range(
+        &self,
+        begin_time: Option<String>,
+        end_time: Option<String>,
+    ) -> Result<u64, ServiceError> {
+        let begin = match begin_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
+        let end = match end_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
+        let result = self.logininfor_repo.delete_by_time_range(begin, end).await?;
+        Ok(result.rows_affected)
+    }
+
     /// 登录统计：最近 N 天每天成功/失败次数（首页仪表盘用）
     pub async fn daily_stats(&self, days: i64) -> Result<Vec<LoginDailyStat>, ServiceError> {
         let rows = self.logininfor_repo.daily_stats(days).await?;

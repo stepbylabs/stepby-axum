@@ -80,14 +80,28 @@ pub async fn remove(
 /// 操作日志清理保留最近 N 天（仅删除早于该天数的日志，保证审计合规）
 const OPER_LOG_CLEAN_RETAIN_DAYS: i64 = 30;
 
+/// 操作日志清理查询参数（兼容前端 addDateRange 嵌套格式 params[beginTime]/params[endTime]）
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct OperLogCleanQuery {
+    /// 清理时间范围起点（`%Y-%m-%d`），与 endTime 同时提供时执行按时间范围清理
+    #[serde(alias = "params[beginTime]", default)]
+    pub begin_time: Option<String>,
+    /// 清理时间范围终点（`%Y-%m-%d`），与 beginTime 同时提供时执行按时间范围清理
+    #[serde(alias = "params[endTime]", default)]
+    pub end_time: Option<String>,
+}
+
 /// DELETE /monitor/operlog/clean
-/// 清空操作日志（仅删除 30 天前的日志，保留最近 30 天用于审计）
+/// 清空操作日志（可选按时间范围清理）
 ///
-/// 修复 P0-R81-010：原端点物理删除全部日志，违反审计合规。
-/// 现改为仅删除 30 天前日志，并记录操作者信息到 tracing::warn!
+/// - 不传时间参数：仅删除 OPER_LOG_CLEAN_RETAIN_DAYS（30）天前的日志，保留最近同天数用于审计
+///   （修复 P0-R81-010：原端点物理删除全部日志，违反审计合规）。
+/// - 传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`）：按时间范围清理 [begin, end] 区间日志。
 #[utoipa::path(
     delete,
     path = "/monitor/operlog/clean",
+    params(OperLogCleanQuery),
     responses(
         (status = 200, description = "清空成功", body = AjaxResult<serde_json::Value>),
         (status = 500, description = "服务器错误"),
@@ -96,14 +110,28 @@ const OPER_LOG_CLEAN_RETAIN_DAYS: i64 = 30;
 )]
 pub async fn clean(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<OperLogCleanQuery>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    // 仅删除 OPER_LOG_CLEAN_RETAIN_DAYS 天前的日志，保留最近同天数用于审计
-    let days = OPER_LOG_CLEAN_RETAIN_DAYS;
-    tracing::warn!(
-        "操作日志清理：仅删除 {} 天前日志，操作者 = sys/operlog/clean（管理员）",
-        days
-    );
-    let affected = state.oper_log_service.clean_oper_logs(days).await?;
+    // 传入时间范围时执行按时间清理，否则回退保留期清理（保留最近 30 天）
+    let affected = if query.begin_time.is_some() || query.end_time.is_some() {
+        tracing::warn!(
+            "操作日志清理（按时间范围）：begin={:?} end={:?}，操作者 = sys/operlog/clean（管理员）",
+            query.begin_time,
+            query.end_time
+        );
+        state
+            .oper_log_service
+            .clean_oper_logs_by_range(query.begin_time.clone(), query.end_time.clone())
+            .await?
+    } else {
+        // 仅删除 OPER_LOG_CLEAN_RETAIN_DAYS 天前的日志，保留最近同天数用于审计
+        let days = OPER_LOG_CLEAN_RETAIN_DAYS;
+        tracing::warn!(
+            "操作日志清理：仅删除 {} 天前日志，操作者 = sys/operlog/clean（管理员）",
+            days
+        );
+        state.oper_log_service.clean_oper_logs(days).await?
+    };
     Ok(AjaxResult::success(
         serde_json::json!({ "affected": affected }),
     ))
