@@ -92,6 +92,10 @@ ammonia = "4"
 tokio-cron-scheduler = "0.15"
 croner = "3"
 
+# HTTP 响应缓存层（P3-6）：进程内 TTL 缓存，仅缓存白名单幂等只读 GET 接口的响应体
+# future 特性启用 async API（Cache::get / Cache::insert），用于 axum 中间件异步读写
+moka = { version = "0.12", features = ["future"] }
+
 # Excel 导出（T-10：启用 constant_memory 流式模式，大数据量内存 O(1)）
 rust_xlsxwriter = { version = "0.96", features = ["constant_memory"] }
 
