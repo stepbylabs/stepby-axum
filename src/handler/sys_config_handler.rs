@@ -215,7 +215,7 @@ pub async fn export(
         ExcelColumn {
             key: "configId",
             header: ("参数主键", "Config ID"),
-            getter: |r: &SysConfigModel| CellValue::Text(r.config_id.to_string().into()),
+            getter: |r: &SysConfigModel| CellValue::Number(r.config_id as f64),
         },
         ExcelColumn {
             key: "configName",
@@ -260,14 +260,7 @@ pub async fn export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysConfigModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysConfigModel| CellValue::from_opt_datetime(r.create_time),
         },
     ];
 

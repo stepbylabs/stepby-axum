@@ -115,7 +115,7 @@ pub async fn export(
         ExcelColumn {
             key: "operId",
             header: ("日志编号", "Log ID"),
-            getter: |r: &SysJobLogModel| CellValue::Text(r.job_log_id.to_string().into()),
+            getter: |r: &SysJobLogModel| CellValue::Number(r.job_log_id as f64),
         },
         ExcelColumn {
             key: "jobName",
@@ -163,14 +163,7 @@ pub async fn export(
         ExcelColumn {
             key: "execTime",
             header: ("执行时间", "Execute Time"),
-            getter: |r: &SysJobLogModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysJobLogModel| CellValue::from_opt_datetime(r.create_time),
         },
     ];
 

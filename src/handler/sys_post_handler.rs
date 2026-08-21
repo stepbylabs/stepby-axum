@@ -206,7 +206,7 @@ pub async fn export(
         ExcelColumn {
             key: "postSort",
             header: ("岗位排序", "Sort"),
-            getter: |r: &SysPostModel| CellValue::Text(r.post_sort.to_string().into()),
+            getter: |r: &SysPostModel| CellValue::Number(f64::from(r.post_sort)),
         },
         ExcelColumn {
             key: "status",
@@ -230,14 +230,7 @@ pub async fn export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysPostModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysPostModel| CellValue::from_opt_datetime(r.create_time),
         },
         ExcelColumn {
             key: "remark",

@@ -122,7 +122,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 
 # XML 解析（S3 ListObjectsV2 响应）
-quick-xml = { version = "0.37", features = ["serialize"] }
+# 0.41 修复 RUSTSEC-2026-0194/0195（quick-xml 重复属性/命名空间 DoS），并已在依赖树中
+quick-xml = { version = "0.41", features = ["serialize"] }
 
 # tar.gz 解压（解压 MaxMind 下载包）
 flate2 = "1"
@@ -191,3 +192,7 @@ harness = false
 migration = { path = "migration" }
 # 用于引入 MigratorTrait（调用 Migrator::up），仅测试使用
 sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+# WebSocket 实时通知链路集成测试：真实 TCP + WS 客户端握手/收包（补 M7 0% 覆盖）
+tokio-tungstenite = "0.24"
+# WS 客户端测试需要 futures Stream/Sink 扩展方法
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

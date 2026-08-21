@@ -133,7 +133,7 @@ pub async fn export(
         ExcelColumn {
             key: "roleSort",
             header: ("显示顺序", "Sort"),
-            getter: |r: &SysRoleModel| CellValue::Text(r.role_sort.to_string().into()),
+            getter: |r: &SysRoleModel| CellValue::Number(r.role_sort as f64),
         },
         ExcelColumn {
             key: "status",
@@ -153,12 +153,7 @@ pub async fn export(
             key: "createTime",
             header: ("创建时间", "Create Time"),
             getter: |r: &SysRoleModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
+                CellValue::from_opt_datetime(r.create_time)
             },
         },
         ExcelColumn {

@@ -119,7 +119,7 @@ pub async fn dict_type_export(
         ExcelColumn {
             key: "dictId",
             header: ("字典主键", "Dict ID"),
-            getter: |r: &SysDictTypeModel| CellValue::Text(r.dict_id.to_string().into()),
+            getter: |r: &SysDictTypeModel| CellValue::Number(r.dict_id as f64),
         },
         ExcelColumn {
             key: "dictName",
@@ -152,14 +152,7 @@ pub async fn dict_type_export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysDictTypeModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysDictTypeModel| CellValue::from_opt_datetime(r.create_time),
         },
         ExcelColumn {
             key: "remark",
@@ -449,7 +442,7 @@ pub async fn dict_data_export(
         ExcelColumn {
             key: "dictCode",
             header: ("字典编码", "Dict Code"),
-            getter: |r: &SysDictDataModel| CellValue::Text(r.dict_code.to_string().into()),
+            getter: |r: &SysDictDataModel| CellValue::Number(r.dict_code as f64),
         },
         ExcelColumn {
             key: "dictLabel",
@@ -469,7 +462,7 @@ pub async fn dict_data_export(
             key: "dictSort",
             header: ("字典排序", "Sort"),
             getter: |r: &SysDictDataModel| {
-                CellValue::Text(r.dict_sort.unwrap_or(0).to_string().into())
+                CellValue::Number(f64::from(r.dict_sort.unwrap_or(0)))
             },
         },
         ExcelColumn {
@@ -496,14 +489,7 @@ pub async fn dict_data_export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysDictDataModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysDictDataModel| CellValue::from_opt_datetime(r.create_time),
         },
     ];
 

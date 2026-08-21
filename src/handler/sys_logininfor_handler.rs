@@ -158,7 +158,7 @@ pub async fn export(
         ExcelColumn {
             key: "operId",
             header: ("日志编号", "Log ID"),
-            getter: |r: &SysLogininforModel| CellValue::Text(r.info_id.to_string().into()),
+            getter: |r: &SysLogininforModel| CellValue::Number(r.info_id as f64),
         },
         ExcelColumn {
             key: "userName",
@@ -224,14 +224,7 @@ pub async fn export(
         ExcelColumn {
             key: "loginTime",
             header: ("登录时间", "Login Time"),
-            getter: |r: &SysLogininforModel| {
-                CellValue::Text({
-                    r.login_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysLogininforModel| CellValue::from_opt_datetime(r.login_time),
         },
     ];
 

@@ -175,7 +175,7 @@ pub async fn export(
         ExcelColumn {
             key: "id",
             header: ("ID", "ID"),
-            getter: |r: &SysRateLimitModel| CellValue::Text(r.id.to_string().into()),
+            getter: |r: &SysRateLimitModel| CellValue::Number(r.id as f64),
         },
         ExcelColumn {
             key: "routePrefix",
@@ -185,12 +185,12 @@ pub async fn export(
         ExcelColumn {
             key: "bucketCapacity",
             header: ("桶容量", "Bucket Capacity"),
-            getter: |r: &SysRateLimitModel| CellValue::Text(r.capacity.to_string().into()),
+            getter: |r: &SysRateLimitModel| CellValue::Number(f64::from(r.capacity)),
         },
         ExcelColumn {
             key: "refillRate",
             header: ("补充速率(每秒)", "Refill Rate (per sec)"),
-            getter: |r: &SysRateLimitModel| CellValue::Text(r.refill_per_second.to_string().into()),
+            getter: |r: &SysRateLimitModel| CellValue::Number(r.refill_per_second),
         },
         ExcelColumn {
             key: "enabled",
@@ -216,14 +216,7 @@ pub async fn export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysRateLimitModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysRateLimitModel| CellValue::from_opt_datetime(r.create_time),
         },
     ];
 
