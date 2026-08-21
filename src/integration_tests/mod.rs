@@ -40,8 +40,10 @@ mod sys_task;
 mod sys_user;
 mod sys_user_extra;
 mod sys_user_pref;
+mod menu_perm_contract;
 mod tool_gen;
 mod totp;
+mod ws;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};
