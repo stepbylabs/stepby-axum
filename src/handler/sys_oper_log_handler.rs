@@ -192,7 +192,7 @@ pub async fn export(
         ExcelColumn {
             key: "operId",
             header: ("日志编号", "Log ID"),
-            getter: |r: &SysOperLogModel| CellValue::Text(r.oper_id.to_string().into()),
+            getter: |r: &SysOperLogModel| CellValue::Number(r.oper_id as f64),
         },
         ExcelColumn {
             key: "title",
@@ -274,25 +274,13 @@ pub async fn export(
         ExcelColumn {
             key: "operTime",
             header: ("操作时间", "Operation Time"),
-            getter: |r: &SysOperLogModel| {
-                CellValue::Text({
-                    r.oper_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysOperLogModel| CellValue::from_opt_datetime(r.oper_time),
         },
         ExcelColumn {
             key: "costTime",
             header: ("消耗时间(ms)", "Cost Time (ms)"),
             getter: |r: &SysOperLogModel| {
-                CellValue::Text(
-                    r.cost_time
-                        .map(|c| c.to_string())
-                        .unwrap_or_default()
-                        .into(),
-                )
+                CellValue::Number(r.cost_time.map(|c| c as f64).unwrap_or(0.0))
             },
         },
     ];

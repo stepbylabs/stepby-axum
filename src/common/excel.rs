@@ -3,8 +3,8 @@
 //!
 //! 关键变化：
 //! - `ExcelColumn` 增加 `key`（= JSON 序列化名，serde camelCase）与双语 `header: (zh, en)`
-//! - 单元格类型化（`CellValue`：Text/Number/DateTime），当前导出统一用 Text，
-//!   Number/DateTime 变体保留供后续按列启用
+//! - 单元格类型化（`CellValue`：Text/Number/DateTime/Empty），导出时按列语义写入：
+//!   数值列（ID/排序/耗时）→ Number，日期列（create_time 等）→ DateTime，可选缺省 → Empty
 //! - `fields` 按 **key** 匹配（兼容旧中文名过渡）
 //! - 大数据量走 `constant_memory` 流式模式，内存 O(1)
 //! - 整本工作簿构建经 `spawn_blocking` 卸载到阻塞线程池，避免卡 tokio worker
@@ -30,6 +30,18 @@ pub enum CellValue<'a> {
     Number(f64),
     /// 原始日期时间（写入时按 yyyy-mm-dd hh:mm:ss 格式化为字符串，便于兼容）
     DateTime(chrono::NaiveDateTime),
+    /// 空单元格（不写入内容；用于可选字段缺省时输出空白，而非 "0"/"1970..." 等误导值）
+    Empty,
+}
+
+impl CellValue<'static> {
+    /// 可选日期时间 → 单元格值（Some → DateTime；None → Empty）
+    pub fn from_opt_datetime(dt: Option<chrono::NaiveDateTime>) -> CellValue<'static> {
+        match dt {
+            Some(d) => CellValue::DateTime(d),
+            None => CellValue::Empty,
+        }
+    }
 }
 
 /// Excel 列定义
@@ -346,6 +358,13 @@ where
                             AppError::internal(&crate::tr!("error.excel.data_write_failed"))
                         })?;
                 }
+                CellValue::Empty => {
+                    worksheet
+                        .write_string(target_row, target_col, "")
+                        .map_err(|_| {
+                            AppError::internal(&crate::tr!("error.excel.data_write_failed"))
+                        })?;
+                }
             }
         }
     }
@@ -547,6 +566,33 @@ mod tests {
         // 数字按整数形式读回（无小数），日期时间为字符串格式
         assert_eq!(matrix[1][0], "42.5");
         assert_eq!(matrix[1][1], "2026-01-02 03:04:05");
+    }
+
+    #[test]
+    fn build_xlsx_inner_empty_cells_and_opt_datetime() {
+        // Empty 变体写入空白单元格；from_opt_datetime 将 None → Empty、Some → DateTime
+        assert!(matches!(CellValue::from_opt_datetime(None), CellValue::Empty));
+        let cols = vec![
+            ExcelColumn {
+                key: "a",
+                header: ("存在", "Has"),
+                getter: |_: &SampleRow| CellValue::from_opt_datetime(Some(dt(2026, 3, 4, 5, 6, 7))),
+            },
+            ExcelColumn {
+                key: "b",
+                header: ("缺失", "Missing"),
+                getter: |_: &SampleRow| CellValue::from_opt_datetime(None),
+            },
+        ];
+        let rows = vec![SampleRow {
+            user_id: 1,
+            user_name: "x".into(),
+            dept_id: None,
+        }];
+        let bytes = build_xlsx_inner("data", &cols, &rows, None).expect("构建 xlsx 失败");
+        let matrix = read_xlsx_rows(&bytes).expect("回读失败");
+        assert_eq!(matrix[1][0], "2026-03-04 05:06:07");
+        assert_eq!(matrix[1][1], "", "None → Empty 应输出空白，而非误导默认值");
     }
 
     #[test]

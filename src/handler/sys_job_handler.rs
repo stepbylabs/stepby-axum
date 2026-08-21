@@ -212,7 +212,7 @@ pub async fn export(
         ExcelColumn {
             key: "jobId",
             header: ("任务编号", "Job ID"),
-            getter: |r: &JobVo| CellValue::Text(r.job.job_id.to_string().into()),
+            getter: |r: &JobVo| CellValue::Number(r.job.job_id as f64),
         },
         ExcelColumn {
             key: "jobName",

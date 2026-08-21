@@ -138,7 +138,7 @@ pub async fn export(
         ExcelColumn {
             key: "userId",
             header: ("用户编号", "User ID"),
-            getter: |r: &UserVo| CellValue::Text(r.user.user_id.to_string().into()),
+            getter: |r: &UserVo| CellValue::Number(r.user.user_id as f64),
         },
         ExcelColumn {
             key: "loginName",
@@ -192,15 +192,7 @@ pub async fn export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &UserVo| {
-                CellValue::Text({
-                    r.user
-                        .create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &UserVo| CellValue::from_opt_datetime(r.user.create_time),
         },
     ];
 

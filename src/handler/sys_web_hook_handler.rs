@@ -193,7 +193,7 @@ pub async fn export(
         ExcelColumn {
             key: "id",
             header: ("ID", "ID"),
-            getter: |r: &SysWebHookModel| CellValue::Text(r.id.to_string().into()),
+            getter: |r: &SysWebHookModel| CellValue::Number(r.id as f64),
         },
         ExcelColumn {
             key: "hookName",
@@ -227,14 +227,7 @@ pub async fn export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysWebHookModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysWebHookModel| CellValue::from_opt_datetime(r.create_time),
         },
     ];
     export_to_excel(
@@ -423,7 +416,7 @@ pub async fn log_export(
         ExcelColumn {
             key: "id",
             header: ("ID", "ID"),
-            getter: |r: &SysWebHookLogModel| CellValue::Text(r.id.to_string().into()),
+            getter: |r: &SysWebHookLogModel| CellValue::Number(r.id as f64),
         },
         ExcelColumn {
             key: "hookName",
@@ -459,19 +452,12 @@ pub async fn log_export(
         ExcelColumn {
             key: "costMs",
             header: ("耗时(ms)", "Cost (ms)"),
-            getter: |r: &SysWebHookLogModel| CellValue::Text(r.cost_ms.to_string().into()),
+            getter: |r: &SysWebHookLogModel| CellValue::Number(f64::from(r.cost_ms)),
         },
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysWebHookLogModel| {
-                CellValue::Text({
-                    r.create_time
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_default()
-                        .into()
-                })
-            },
+            getter: |r: &SysWebHookLogModel| CellValue::from_opt_datetime(r.create_time),
         },
     ];
     export_to_excel(
