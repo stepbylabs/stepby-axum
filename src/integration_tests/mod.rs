@@ -42,6 +42,7 @@ mod sys_user;
 mod sys_user_extra;
 mod sys_user_pref;
 mod menu_perm_contract;
+mod response_cache;
 mod tool_gen;
 mod totp;
 mod ws;
