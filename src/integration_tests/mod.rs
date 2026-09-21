@@ -41,6 +41,7 @@ mod sys_task;
 mod sys_user;
 mod sys_user_extra;
 mod sys_user_pref;
+mod sys_web_hook;
 mod menu_perm_contract;
 mod response_cache;
 mod tool_gen;
