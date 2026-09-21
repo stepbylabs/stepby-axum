@@ -106,16 +106,13 @@ async fn it_mon_online_force_logout() {
 async fn it_mon_observability_slow_sql() {
     let ctx = TestContext::new().await;
 
-    // 列表：data.rows 数组 + data.total 数字
+    // 列表：遵循 TableDataInfo 扁平约定 rows 数组 + total 数字
     let v = ctx
         .get_json("/monitor/slow-sql/list?pageNum=1&pageSize=10")
         .await;
+    assert!(v["rows"].is_array(), "slow-sql rows 应为数组，实际: {v}");
     assert!(
-        v["data"]["rows"].is_array(),
-        "slow-sql rows 应为数组，实际: {v}"
-    );
-    assert!(
-        v["data"]["total"].is_number(),
+        v["total"].is_number(),
         "slow-sql total 应为数字，实际: {v}"
     );
 
@@ -132,10 +129,7 @@ async fn it_mon_observability_slow_sql() {
     let v = ctx
         .get_json("/monitor/slow-sql/list?pageNum=1&pageSize=10")
         .await;
-    assert!(
-        v["data"]["rows"].is_array(),
-        "slow-sql rows 应为数组，实际: {v}"
-    );
+    assert!(v["rows"].is_array(), "slow-sql rows 应为数组，实际: {v}");
 }
 
 /// 可观测性-错误日志：列表（含 module/level 过滤）、统计、清空后无数据为空数组。
@@ -143,16 +137,13 @@ async fn it_mon_observability_slow_sql() {
 async fn it_mon_observability_error_log() {
     let ctx = TestContext::new().await;
 
-    // 列表：data.rows 数组 + data.total 数字
+    // 列表：遵循 TableDataInfo 扁平约定 rows 数组 + total 数字
     let v = ctx
         .get_json("/monitor/error-log/list?pageNum=1&pageSize=10")
         .await;
+    assert!(v["rows"].is_array(), "error-log rows 应为数组，实际: {v}");
     assert!(
-        v["data"]["rows"].is_array(),
-        "error-log rows 应为数组，实际: {v}"
-    );
-    assert!(
-        v["data"]["total"].is_number(),
+        v["total"].is_number(),
         "error-log total 应为数字，实际: {v}"
     );
 
@@ -161,7 +152,7 @@ async fn it_mon_observability_error_log() {
         .get_json("/monitor/error-log/list?module=it_mon_unknown&level=ERROR")
         .await;
     assert!(
-        v["data"]["rows"].is_array(),
+        v["rows"].is_array(),
         "error-log 过滤 rows 应为数组，实际: {v}"
     );
 
@@ -178,7 +169,7 @@ async fn it_mon_observability_error_log() {
     let v = ctx
         .get_json("/monitor/error-log/list?pageNum=1&pageSize=10")
         .await;
-    let rows = v["data"]["rows"].as_array().expect("rows 应为数组，实际: {v}");
+    let rows = v["rows"].as_array().expect("rows 应为数组，实际: {v}");
     assert!(rows.is_empty(), "清空后错误日志应为空数组，实际: {v}");
 }
 

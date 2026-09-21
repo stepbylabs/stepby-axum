@@ -18,7 +18,7 @@ use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::common::{AjaxResult, AppError};
+use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::observability::error_log::ErrorEntry;
 use crate::observability::slow::SlowRequestRecord;
 use crate::state::AppState;
@@ -30,13 +30,6 @@ fn default_page_num() -> u64 {
 }
 fn default_page_size() -> u64 {
     10
-}
-
-/// 分页后的列表返回结构（前端统一 data.rows + data.total）
-#[derive(Debug, Serialize, ToSchema)]
-pub struct PagedRows<T> {
-    pub rows: Vec<T>,
-    pub total: usize,
 }
 
 // ==================== 慢请求（慢 SQL 面板）====================
@@ -57,19 +50,19 @@ pub struct SlowQueryDto {
     get,
     path = "/monitor/slow-sql/list",
     responses(
-        (status = 200, description = "查询成功", body = AjaxResult<PagedRows<SlowRequestRecord>>),
+        (status = 200, description = "查询成功", body = TableDataInfo<SlowRequestRecord>),
     ),
     tag = "monitor-observability"
 )]
 pub async fn slow_sql_list(
     State(state): State<Arc<AppState>>,
     Query(dto): Query<SlowQueryDto>,
-) -> Result<AjaxResult<PagedRows<SlowRequestRecord>>, AppError> {
+) -> Result<TableDataInfo<SlowRequestRecord>, AppError> {
     let all = state.observability.slow.list();
     let (offset, limit) = page_slice(dto.page_num, dto.page_size);
     let total = all.len();
     let rows = all.into_iter().skip(offset).take(limit).collect();
-    Ok(AjaxResult::success(PagedRows { rows, total }))
+    Ok(TableDataInfo::new(total as u64, rows))
 }
 
 /// GET /monitor/slow-sql/stats
@@ -127,14 +120,14 @@ pub struct ErrorLogQueryDto {
     get,
     path = "/monitor/error-log/list",
     responses(
-        (status = 200, description = "查询成功", body = AjaxResult<PagedRows<ErrorEntry>>),
+        (status = 200, description = "查询成功", body = TableDataInfo<ErrorEntry>),
     ),
     tag = "monitor-observability"
 )]
 pub async fn error_log_list(
     State(state): State<Arc<AppState>>,
     Query(dto): Query<ErrorLogQueryDto>,
-) -> Result<AjaxResult<PagedRows<ErrorEntry>>, AppError> {
+) -> Result<TableDataInfo<ErrorEntry>, AppError> {
     let (offset, limit) = page_slice(dto.page_num, dto.page_size);
     let (total, list) = state.observability.error_log.list(
         dto.module.as_deref(),
@@ -143,7 +136,7 @@ pub async fn error_log_list(
         limit,
     );
     // 一次取全量后业务层分页，避免重复重复查库；此处错误总线已内部分页，直接返回
-    Ok(AjaxResult::success(PagedRows { rows: list, total }))
+    Ok(TableDataInfo::new(total as u64, list))
 }
 
 /// GET /monitor/error-log/stats

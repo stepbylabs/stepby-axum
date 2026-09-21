@@ -257,15 +257,13 @@ async fn test_observability_slow_error_redis() {
     let ctx = TestContext::new().await;
 
     // 1. 慢请求：列表 / 统计 / 清空
+    //    列表遵循 TableDataInfo 扁平约定（code/msg/total/rows），与前端 response.rows/response.total 对齐
     let v = ctx
         .get_json("/monitor/slow-sql/list?pageNum=1&pageSize=10")
         .await;
+    assert!(v["rows"].is_array(), "slow-sql rows 应为数组，实际: {v}");
     assert!(
-        v["data"]["rows"].is_array(),
-        "slow-sql rows 应为数组，实际: {v}"
-    );
-    assert!(
-        v["data"]["total"].is_number(),
+        v["total"].is_number(),
         "slow-sql total 应为数字，实际: {v}"
     );
     let v = ctx.get_json("/monitor/slow-sql/stats").await;
@@ -280,15 +278,12 @@ async fn test_observability_slow_error_redis() {
     let v = ctx
         .get_json("/monitor/error-log/list?pageNum=1&pageSize=10")
         .await;
-    assert!(
-        v["data"]["rows"].is_array(),
-        "error-log rows 应为数组，实际: {v}"
-    );
+    assert!(v["rows"].is_array(), "error-log rows 应为数组，实际: {v}");
     let v = ctx
         .get_json("/monitor/error-log/list?module=unknown_module&level=ERROR")
         .await;
     assert!(
-        v["data"]["rows"].is_array(),
+        v["rows"].is_array(),
         "error-log 过滤 rows 应为数组，实际: {v}"
     );
     let v = ctx.get_json("/monitor/error-log/stats").await;
