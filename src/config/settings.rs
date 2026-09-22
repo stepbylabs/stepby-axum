@@ -403,8 +403,10 @@ pub struct S3StorageConfig {
     /// 桶名（Bucket）
     #[serde(default)]
     pub bucket: String,
-    /// 是否使用路径风格寻址（MinIO / 阿里云 OSS / 腾讯 COS 均为 true；
-    /// 默认 true。AWS S3 虚拟主机风格请保持 true 并将 endpoint 设为 `https://s3.{region}.amazonaws.com`）
+    /// 寻址风格：`true` 路径风格（MinIO / 阿里云 OSS / 腾讯 COS 默认），
+    /// 对象 URI 为 `/{bucket}/{key}`；`false` 虚拟主机风格（AWS S3 推荐），
+    /// bucket 作为 endpoint 的子域（`{bucket}.{host}/{key}`），并将 endpoint 设为
+    /// `https://s3.{region}.amazonaws.com`。可通过环境变量 `S3_PATH_STYLE=false` 覆盖。
     #[serde(default = "default_s3_path_style")]
     pub path_style: bool,
     /// 对象访问公开 URL 前缀（用于前端拼接访问地址，如 `https://cdn.example.com`）。
@@ -754,6 +756,10 @@ impl Settings {
         }
         if let Ok(v) = std::env::var("S3_PUBLIC_ENDPOINT") {
             self.upload.s3.public_endpoint = v;
+        }
+        // 寻址风格开关（F1）：S3_PATH_STYLE=false 切换为虚拟主机风格，缺省保持路径风格
+        if let Ok(v) = std::env::var("S3_PATH_STYLE") {
+            self.upload.s3.path_style = !(v.eq_ignore_ascii_case("false") || v == "0");
         }
         // 可观测性监控配置（Prometheus 指标 token 脱敏注入，避免明文写入配置文件）
         if let Ok(v) = std::env::var("MONITOR_METRICS_TOKEN") {

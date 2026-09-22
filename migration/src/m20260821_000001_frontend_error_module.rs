@@ -11,9 +11,9 @@
 //! 然后插入菜单元数据（前置约定：系统监控目录 parent_id=2）：
 //!   - C 页面「前端异常」(menu_id=160, path=frontendError, component=monitor/frontendError/index,
 //!     perms=monitor:frontendError:list)
-//!   - F 按钮「异常删除」(menu_id=1061, perms=monitor:frontendError:remove)
-//!     （10xx 段沿用 operlog 家族按钮约定，远离 sys_menu 种子最大 ID 3551，
-//!      避免与 E2E 用例动态创建的 `MAX+1` 测试菜单（3552+）发生主键冲突）
+//!   - F 按钮「异常删除」(menu_id=1061, perms=monitor:frontendError:remove)，
+//!     10xx 段沿用 operlog 家族按钮约定，远离 sys_menu 种子最大 ID 3551，
+//!     避免与 E2E 用例动态创建的 `MAX+1` 测试菜单（3552+）发生主键冲突
 //!   - role_menu 关联 role_id=2
 //!
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
