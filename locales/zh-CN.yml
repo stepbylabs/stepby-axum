@@ -330,6 +330,8 @@ error:
   oper_log:
     id_invalid: 日志 ID 不合法
     anonymous: 匿名
+  frontend_error:
+    not_found: 前端异常记录不存在
   login_log:
     id_invalid: 日志 ID 不合法
     admin_unlock_forbidden: 不允许解锁超级管理员账号

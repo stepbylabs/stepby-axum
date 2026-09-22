@@ -15,6 +15,7 @@ pub mod sys_config;
 pub mod sys_dept;
 pub mod sys_dict_data;
 pub mod sys_dict_type;
+pub mod sys_frontend_error;
 pub mod sys_job;
 pub mod sys_job_log;
 pub mod sys_logininfor;

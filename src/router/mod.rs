@@ -14,6 +14,7 @@ pub mod sys_backup_router;
 pub mod sys_config_router;
 pub mod sys_dept_router;
 pub mod sys_dict_router;
+pub mod sys_frontend_error_router;
 pub mod sys_http_debug_router;
 pub mod sys_job_router;
 pub mod sys_logininfor_router;
@@ -96,6 +97,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_post_router::post_routes())
         .merge(sys_rate_limit_router::rate_limit_routes())
         .merge(sys_oper_log_router::oper_log_routes())
+        .merge(sys_frontend_error_router::frontend_error_routes())
         .merge(sys_logininfor_router::logininfor_routes())
         .merge(monitor_online_router::online_routes())
         .merge(monitor_cache_router::cache_routes())

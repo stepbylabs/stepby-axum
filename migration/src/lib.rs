@@ -48,6 +48,7 @@ pub use m20260819_000005_add_role_custom_sql::Migration as M20260819AddRoleCusto
 pub use m20260819_000006_observability_menu::Migration as M20260819ObservabilityMenu;
 pub use m20260820_000001_demo_seed::Migration as M20260820DemoSeed;
 pub use m20260820_000002_web_hook_module::Migration as M20260820WebHookModule;
+pub use m20260821_000001_frontend_error_module::Migration as M20260821FrontendErrorModule;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -94,6 +95,7 @@ mod m20260819_000005_add_role_custom_sql;
 mod m20260819_000006_observability_menu;
 mod m20260820_000001_demo_seed;
 mod m20260820_000002_web_hook_module;
+mod m20260821_000001_frontend_error_module;
 
 use sea_orm_migration::prelude::*;
 
@@ -149,6 +151,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260819ObservabilityMenu),
             Box::new(M20260820DemoSeed),
             Box::new(M20260820WebHookModule),
+            Box::new(M20260821FrontendErrorModule),
         ]
     }
 }

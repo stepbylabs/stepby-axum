@@ -141,6 +141,13 @@ struct SwaggerAssets;
         crate::handler::sys_oper_log_handler::stats_by_type,
         crate::handler::sys_oper_log_handler::alarm_status,
         crate::handler::sys_oper_log_handler::compliance_report,
+        // ==================== 前端异常监控（Tier-S #1）====================
+        crate::handler::sys_frontend_error_handler::report,
+        crate::handler::sys_frontend_error_handler::list,
+        crate::handler::sys_frontend_error_handler::info,
+        crate::handler::sys_frontend_error_handler::remove,
+        crate::handler::sys_frontend_error_handler::clean,
+        crate::handler::sys_frontend_error_handler::stats,
         // ==================== 缓存监控 ====================
         crate::handler::monitor_cache_handler::get_cache,
         crate::handler::monitor_cache_handler::get_names,
@@ -192,6 +199,7 @@ struct SwaggerAssets;
             crate::entity::sys_logininfor::Model,
             crate::entity::sys_notice::Model,
             crate::entity::sys_oper_log::Model,
+            crate::entity::sys_frontend_error::Model,
             // ==================== DTO ====================
             // 认证
             crate::service::auth_service::LoginDto,
@@ -242,6 +250,13 @@ struct SwaggerAssets;
             crate::service::sys_oper_log_service::AuditDailyStat,
             crate::service::sys_oper_log_service::ComplianceReportVo,
             crate::service::sys_oper_log_service::OperLogAnomaly,
+            // 前端异常监控（Tier-S #1）
+            crate::service::sys_frontend_error_service::FrontendErrorItem,
+            crate::service::sys_frontend_error_service::FrontendReportDto,
+            crate::service::sys_frontend_error_service::FrontendErrorQueryDto,
+            crate::service::sys_frontend_error_service::FrontendErrorStatsVo,
+            crate::service::sys_frontend_error_service::SourceCount,
+            crate::service::sys_frontend_error_service::DailyErrorCount,
             // ==================== Handler 响应类型 ====================
             // 认证
             crate::handler::auth_handler::CaptchaResult,

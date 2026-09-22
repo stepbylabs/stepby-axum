@@ -23,6 +23,7 @@ mod monitor;
 mod monitor_extra;
 mod sys_backup;
 mod sys_config_dict;
+mod sys_frontend_error;
 mod sys_http_debug;
 mod sys_job;
 mod sys_logininfor;

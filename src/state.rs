@@ -7,10 +7,10 @@ use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::scheduler::JobScheduler;
 use crate::service::{
     AuthService, GenTableService, IpLocationService, MailerService, SysBackupService,
-    SysConfigService, SysDeptService, SysDictService, SysHttpDebugService, SysJobService,
-    SysLogininforService, SysMenuService, SysMsgService, SysNoticeService, SysOauthService,
-    SysOperLogService, SysPostService, SysRateLimitService, SysReportService, SysRoleService,
-    SysTaskService, SysUserPrefService, SysUserService, SysWebHookService,
+    SysConfigService, SysDeptService, SysDictService, SysFrontendErrorService, SysHttpDebugService,
+    SysJobService, SysLogininforService, SysMenuService, SysMsgService, SysNoticeService,
+    SysOauthService, SysOperLogService, SysPostService, SysRateLimitService, SysReportService,
+    SysRoleService, SysTaskService, SysUserPrefService, SysUserService, SysWebHookService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -53,6 +53,7 @@ pub struct AppState {
     pub post_service: SysPostService,
     /// 操作日志 Service
     pub oper_log_service: SysOperLogService,
+    pub frontend_error_service: SysFrontendErrorService,
     /// API 限流配置 Service
     pub rate_limit_service: SysRateLimitService,
     /// 登录日志 Service
@@ -226,6 +227,7 @@ impl AppState {
             config_service,
             post_service: SysPostService::new(db.clone()),
             oper_log_service: SysOperLogService::new(db.clone()),
+            frontend_error_service: SysFrontendErrorService::new(db.clone()),
             rate_limit_service: SysRateLimitService::new(db.clone(), redis.clone()),
             logininfor_service: SysLogininforService::new(db.clone()),
             gen_table_service: GenTableService::new(db.clone()),
