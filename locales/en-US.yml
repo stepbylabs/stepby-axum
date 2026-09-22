@@ -327,6 +327,8 @@ error:
   oper_log:
     id_invalid: Invalid log ID
     anonymous: Anonymous
+  frontend_error:
+    not_found: Frontend error record not found
   login_log:
     id_invalid: Invalid log ID
     admin_unlock_forbidden: Cannot unlock the super administrator account

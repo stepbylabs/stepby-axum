@@ -402,6 +402,14 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("DELETE", "/monitor/operlog/clean", "monitor:operlog:remove"),
     ("POST", "/monitor/operlog/export", "monitor:operlog:export"),
 
+    // ===== 前端异常监控（Tier-S #1）=====
+    // report 端点仅需登录（见 is_login_only_path），不在此表
+    ("GET", "/monitor/frontendError/list", "monitor:frontendError:list"),
+    ("GET", "/monitor/frontendError/stats", "monitor:frontendError:list"),
+    ("GET", "/monitor/frontendError/{id}", "monitor:frontendError:list"),
+    ("DELETE", "/monitor/frontendError/{id}", "monitor:frontendError:remove"),
+    ("DELETE", "/monitor/frontendError/clean", "monitor:frontendError:remove"),
+
     // ===== 登录日志 =====
     ("GET", "/monitor/logininfor/list", "monitor:logininfor:list"),
     ("GET", "/monitor/logininfor/stats", "monitor:logininfor:list"),
@@ -683,6 +691,8 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("GET", "/oauth2/my-bindings")
             | ("POST", "/oauth2/bind")
             | ("DELETE", "/oauth2/unbind")
+        // ===== 前端异常/性能上报（任何已登录用户皆可上报，无需 RBAC，Tier-S #1）=====
+            | ("POST", "/monitor/frontendError/report")
     )
 }
 

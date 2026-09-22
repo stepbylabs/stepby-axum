@@ -14,6 +14,7 @@ pub mod sys_backup_handler;
 pub mod sys_config_handler;
 pub mod sys_dept_handler;
 pub mod sys_dict_handler;
+pub mod sys_frontend_error_handler;
 pub mod sys_http_debug_handler;
 pub mod sys_job_handler;
 pub mod sys_job_log_handler;
