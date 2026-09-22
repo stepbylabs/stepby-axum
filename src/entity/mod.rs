@@ -25,6 +25,8 @@ pub mod sys_msg_send_log;
 pub mod sys_msg_template;
 pub mod sys_notice;
 pub mod sys_notice_read;
+pub mod sys_oauth_client;
+pub mod sys_oauth_consent;
 pub mod sys_oauth_provider;
 pub mod sys_oauth_user;
 pub mod sys_oper_log;

@@ -10,6 +10,7 @@ pub mod monitor_log_handler;
 pub mod monitor_observability_handler;
 pub mod monitor_online_handler;
 pub mod monitor_server_handler;
+pub mod sso_handler;
 pub mod sys_backup_handler;
 pub mod sys_config_handler;
 pub mod sys_dept_handler;

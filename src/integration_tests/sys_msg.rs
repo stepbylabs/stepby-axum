@@ -44,7 +44,9 @@ async fn test_msg_channel_crud_chain() {
     let ctx = TestContext::new().await;
 
     // 1. 分页列表（表无种子渠道，初始为空）
-    let v = ctx.get_json("/system/msg/channel/list?pageNum=1&pageSize=10").await;
+    let v = ctx
+        .get_json("/system/msg/channel/list?pageNum=1&pageSize=10")
+        .await;
     assert!(v["rows"].is_array(), "rows 应为数组，实际: {v}");
 
     // 2. 新增渠道（sms 类型模拟投递，it_msg_ 前缀避免冲突）
@@ -137,65 +139,90 @@ async fn test_msg_channel_error_paths() {
 
     // 非法 ID 删除（非数字）→ 400
     let (status, _) = ctx
-        .send_raw(raw_req(&ctx, Method::DELETE, "/system/msg/channel/abc", None))
+        .send_raw(raw_req(
+            &ctx,
+            Method::DELETE,
+            "/system/msg/channel/abc",
+            None,
+        ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 ID 应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 ID 应 400，实际: {status}"
+    );
 
     // 删除不存在的渠道 → 404
     let (status, _) = ctx
-        .send_raw(
-            raw_req(&ctx, Method::DELETE, "/system/msg/channel/999999", None),
-        )
+        .send_raw(raw_req(
+            &ctx,
+            Method::DELETE,
+            "/system/msg/channel/999999",
+            None,
+        ))
         .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "删除不存在应 404，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "删除不存在应 404，实际: {status}"
+    );
 
     // 缺少渠道名（garde length min=1）→ 400
     let (status, _) = ctx
-        .send_raw(
-            raw_req(
-                &ctx,
-                Method::POST,
-                "/system/msg/channel",
-                Some(serde_json::json!({
-                    "channelName": "",
-                    "channelCode": "it_msg_bad",
-                    "channelType": "sms"
-                })),
-            ),
-        )
+        .send_raw(raw_req(
+            &ctx,
+            Method::POST,
+            "/system/msg/channel",
+            Some(serde_json::json!({
+                "channelName": "",
+                "channelCode": "it_msg_bad",
+                "channelType": "sms"
+            })),
+        ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "缺渠道名应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "缺渠道名应 400，实际: {status}"
+    );
 
     // 批量删除超过上限（101 个 id > MAX_BATCH_DELETE_SIZE=100）→ 400
-    let over = (1..=101).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let over = (1..=101)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let (status, _) = ctx
-        .send_raw(
-            raw_req(
-                &ctx,
-                Method::DELETE,
-                &format!("/system/msg/channel/{}", over),
-                None,
-            ),
-        )
+        .send_raw(raw_req(
+            &ctx,
+            Method::DELETE,
+            &format!("/system/msg/channel/{}", over),
+            None,
+        ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "超批量上限应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "超批量上限应 400，实际: {status}"
+    );
 
     // 非法渠道类型 → 400
     let (status, _) = ctx
-        .send_raw(
-            raw_req(
-                &ctx,
-                Method::POST,
-                "/system/msg/channel",
-                Some(serde_json::json!({
-                    "channelName": "it_msg_坏类型",
-                    "channelCode": "it_msg_bad_type",
-                    "channelType": "wechat"
-                })),
-            ),
-        )
+        .send_raw(raw_req(
+            &ctx,
+            Method::POST,
+            "/system/msg/channel",
+            Some(serde_json::json!({
+                "channelName": "it_msg_坏类型",
+                "channelCode": "it_msg_bad_type",
+                "channelType": "wechat"
+            })),
+        ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法渠道类型应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法渠道类型应 400，实际: {status}"
+    );
 }
 
 /// 渠道连通性测试接口（sms 渠道返回 200）。
@@ -228,9 +255,18 @@ async fn test_msg_channel_test() {
 
     // 测试不存在的渠道 → 404
     let (status, _) = ctx
-        .send_raw(raw_req(&ctx, Method::POST, "/system/msg/channel/test/999999", Some(serde_json::json!({}))))
+        .send_raw(raw_req(
+            &ctx,
+            Method::POST,
+            "/system/msg/channel/test/999999",
+            Some(serde_json::json!({})),
+        ))
         .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "测试不存在渠道应 404，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "测试不存在渠道应 404，实际: {status}"
+    );
 }
 
 /// 消息模板全链路（新增 sms 渠道 → 列表 → 新增模板 → 详情 → 修改 → 删除 + 异常路径）。
@@ -253,7 +289,9 @@ async fn test_msg_template_crud_chain() {
     ctx.assert_ok(&v);
 
     // 1. 分页列表（空）
-    let v = ctx.get_json("/system/msg/template/list?pageNum=1&pageSize=10").await;
+    let v = ctx
+        .get_json("/system/msg/template/list?pageNum=1&pageSize=10")
+        .await;
     assert!(v["rows"].is_array(), "rows 应为数组，实际: {v}");
 
     // 2. 新增模板（绑定 sms 渠道）
@@ -272,7 +310,9 @@ async fn test_msg_template_crud_chain() {
         )
         .await;
     ctx.assert_ok(&v);
-    let template_id = v["data"]["templateId"].as_i64().expect("templateId 应为数字");
+    let template_id = v["data"]["templateId"]
+        .as_i64()
+        .expect("templateId 应为数字");
 
     // 3. 详情
     let v = ctx
@@ -335,39 +375,61 @@ async fn test_msg_template_crud_chain() {
             None,
         ))
         .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "删除后详情应 404，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "删除后详情应 404，实际: {status}"
+    );
 
     // 8. 异常路径：非法 ID 删除 → 400
     let (status, _) = ctx
-        .send_raw(raw_req(&ctx, Method::DELETE, "/system/msg/template/xyz", None))
+        .send_raw(raw_req(
+            &ctx,
+            Method::DELETE,
+            "/system/msg/template/xyz",
+            None,
+        ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 ID 应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 ID 应 400，实际: {status}"
+    );
 
     // 9. 异常路径：删除不存在模板 → 404
     let (status, _) = ctx
-        .send_raw(
-            raw_req(&ctx, Method::DELETE, "/system/msg/template/999999", None),
-        )
+        .send_raw(raw_req(
+            &ctx,
+            Method::DELETE,
+            "/system/msg/template/999999",
+            None,
+        ))
         .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "删除不存在模板应 404，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "删除不存在模板应 404，实际: {status}"
+    );
 
     // 10. 异常路径：缺少模板内容（garde length min=1）→ 400
     let (status, _) = ctx
-        .send_raw(
-            raw_req(
-                &ctx,
-                Method::POST,
-                "/system/msg/template",
-                Some(serde_json::json!({
-                    "templateName": "it_msg_缺内容",
-                    "templateCode": "it_msg_tpl_no_content",
-                    "templateSubject": "主题",
-                    "templateContent": ""
-                })),
-            ),
-        )
+        .send_raw(raw_req(
+            &ctx,
+            Method::POST,
+            "/system/msg/template",
+            Some(serde_json::json!({
+                "templateName": "it_msg_缺内容",
+                "templateCode": "it_msg_tpl_no_content",
+                "templateSubject": "主题",
+                "templateContent": ""
+            })),
+        ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "缺模板内容应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "缺模板内容应 400，实际: {status}"
+    );
 }
 
 /// 发送记录生命周期：send → 查询日志 → retry → markPending → retryPending → clean → 删除单条 + 非法 ID 400。
@@ -404,7 +466,9 @@ async fn test_msg_send_log_lifecycle() {
     ctx.assert_ok(&v);
 
     // 1. 日志列表（空）
-    let v = ctx.get_json("/system/msg/log/list?pageNum=1&pageSize=10").await;
+    let v = ctx
+        .get_json("/system/msg/log/list?pageNum=1&pageSize=10")
+        .await;
     assert!(v["rows"].is_array(), "rows 应为数组，实际: {v}");
 
     // 2. 发送一条记录（sms 模拟投递成功，status='0'）
@@ -442,7 +506,11 @@ async fn test_msg_send_log_lifecycle() {
         )
         .await;
     ctx.assert_ok(&v);
-    assert_eq!(v["data"].as_u64(), Some(1), "retry 应返回处理条数，实际: {v}");
+    assert_eq!(
+        v["data"].as_u64(),
+        Some(1),
+        "retry 应返回处理条数，实际: {v}"
+    );
 
     // 5. 标记待重试 → status='2'
     let v = ctx
@@ -452,7 +520,11 @@ async fn test_msg_send_log_lifecycle() {
         )
         .await;
     ctx.assert_ok(&v);
-    assert_eq!(v["data"].as_u64(), Some(1), "markPending 应返回标记条数，实际: {v}");
+    assert_eq!(
+        v["data"].as_u64(),
+        Some(1),
+        "markPending 应返回标记条数，实际: {v}"
+    );
 
     // 6. retryPending 处理待重试批次（status='2' 记录被消费，返回 >=1）
     let v = ctx
@@ -467,7 +539,9 @@ async fn test_msg_send_log_lifecycle() {
     // 7. 清空发送记录
     let v = ctx.delete_json("/system/msg/log/clean").await;
     ctx.assert_ok(&v);
-    let v = ctx.get_json("/system/msg/log/list?pageNum=1&pageSize=10").await;
+    let v = ctx
+        .get_json("/system/msg/log/list?pageNum=1&pageSize=10")
+        .await;
     assert!(
         v["rows"].as_array().expect("rows 应为数组").is_empty(),
         "清空后日志应为空，实际: {v}"
@@ -498,18 +572,24 @@ async fn test_msg_send_log_lifecycle() {
     let (status, _) = ctx
         .send_raw(raw_req(&ctx, Method::DELETE, "/system/msg/log/bad", None))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 ID 应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 ID 应 400，实际: {status}"
+    );
 
     // 11. 非法 ID 重试 → 400
     let (status, _) = ctx
-        .send_raw(
-            raw_req(
-                &ctx,
-                Method::POST,
-                "/system/msg/log/retry/bad",
-                Some(serde_json::json!({})),
-            ),
-        )
+        .send_raw(raw_req(
+            &ctx,
+            Method::POST,
+            "/system/msg/log/retry/bad",
+            Some(serde_json::json!({})),
+        ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 ID 重试应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 ID 重试应 400，实际: {status}"
+    );
 }

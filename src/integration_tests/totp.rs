@@ -76,9 +76,7 @@ async fn test_totp_setup_verify_disable_chain() {
     let otpauth_url = v["data"]["otpauthUrl"]
         .as_str()
         .expect("setup 应返回 otpauthUrl");
-    let qr_code = v["data"]["qrCode"]
-        .as_str()
-        .expect("setup 应返回 qrCode");
+    let qr_code = v["data"]["qrCode"].as_str().expect("setup 应返回 qrCode");
     assert!(!secret.is_empty(), "secret 不应为空");
     assert!(
         otpauth_url.starts_with("otpauth://totp/"),
@@ -92,7 +90,10 @@ async fn test_totp_setup_verify_disable_chain() {
 
     // 3. setup 后（未 verify）状态仍为未启用
     let v = ctx.get_json("/system/user/totp/status").await;
-    assert_eq!(v["data"]["enabled"], false, "verify 前应仍为未启用，实际: {v}");
+    assert_eq!(
+        v["data"]["enabled"], false,
+        "verify 前应仍为未启用，实际: {v}"
+    );
 
     // 4. 用错误验证码 verify → 400
     let correct = generate_totp_code(&secret);
@@ -106,7 +107,10 @@ async fn test_totp_setup_verify_disable_chain() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "错误验证码 verify 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "错误验证码 verify 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -158,7 +162,10 @@ async fn test_totp_setup_verify_disable_chain() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "错误验证码 disable 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "错误验证码 disable 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -176,7 +183,10 @@ async fn test_totp_setup_verify_disable_chain() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "错误密码 disable 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "错误密码 disable 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -217,7 +227,10 @@ async fn test_totp_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "未 setup verify 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "未 setup verify 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -235,7 +248,10 @@ async fn test_totp_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "非法验证码 verify 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "非法验证码 verify 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -253,7 +269,10 @@ async fn test_totp_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "超长验证码 verify 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "超长验证码 verify 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -289,7 +308,10 @@ async fn test_totp_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "非法验证码 disable 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "非法验证码 disable 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,

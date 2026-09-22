@@ -77,6 +77,30 @@ error:
     unknown_error: 第三方登录处理失败，请稍后再试
     local_user_not_found: 本地账号不存在或已停用
     failure_title: 第三方登录失败
+  sso:
+    disabled: 单点登录（SSO）未启用
+    client_not_found: 客户端不存在
+    client_disabled: 该客户端已停用
+    client_id_required: client_id 不能为空
+    client_id_exists: client_id 已存在
+    client_name_required: 客户端名称不能为空
+    redirect_uris_empty: 至少配置一个回调地址
+    redirect_uri_invalid: 回调地址无效，必须为 http(s) 绝对地址
+    redirect_uri_not_allowed: 回调地址未在白名单内
+    scope_invalid: 请求的 scope 含未授权项
+    response_type_unsupported: 仅支持 response_type=code
+    pkce_required: 缺少 PKCE 参数（需 code_challenge 且 method=S256）
+    pkce_method_unsupported: 仅支持 PKCE 方法 S256
+    openid_scope_required: scope 必须包含 openid
+    not_login: 需要登录后授权
+    code_invalid: 授权码无效或已过期
+    client_auth_failed: 客户端凭据校验失败
+    grant_type_unsupported: 不支持的授权类型
+    pkce_verify_failed: PKCE 校验失败
+    token_failed: 令牌签发失败
+    access_token_invalid: 访问令牌无效
+    batch_id_invalid: 客户端 ID 无效
+    redirect_uri_dup: 回调地址重复
   file:
     delete_failed: 删除文件失败
     delete_task_failed: 删除任务失败

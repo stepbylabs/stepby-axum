@@ -114,7 +114,9 @@ async fn test_oauth_provider_crud_chain() {
     ctx.assert_ok(&v);
 
     // 4. 详情确认修改生效
-    let v = ctx.get_json(&format!("/system/oauth/provider/{}", new_id)).await;
+    let v = ctx
+        .get_json(&format!("/system/oauth/provider/{}", new_id))
+        .await;
     assert_eq!(
         v["data"]["providerName"].as_str(),
         Some("集成测试 OAuth 改"),
@@ -129,7 +131,9 @@ async fn test_oauth_provider_crud_chain() {
         )
         .await;
     ctx.assert_ok(&v);
-    let v = ctx.get_json(&format!("/system/oauth/provider/{}", new_id)).await;
+    let v = ctx
+        .get_json(&format!("/system/oauth/provider/{}", new_id))
+        .await;
     assert_eq!(
         v["data"]["enabled"].as_str(),
         Some("0"),
@@ -147,12 +151,16 @@ async fn test_oauth_provider_crud_chain() {
     let v = ctx.get_json("/oauth2/providers").await;
     let providers = v["data"].as_array().expect("data 应为数组");
     assert!(
-        providers.iter().any(|p| p["providerCode"] == "it_oa_github"),
+        providers
+            .iter()
+            .any(|p| p["providerCode"] == "it_oa_github"),
         "启用后公开列表应包含新提供商，实际: {v}"
     );
 
     // 7. 删除提供商
-    let v = ctx.delete_json(&format!("/system/oauth/provider/{}", new_id)).await;
+    let v = ctx
+        .delete_json(&format!("/system/oauth/provider/{}", new_id))
+        .await;
     ctx.assert_ok(&v);
     let v = ctx
         .get_json("/system/oauth/provider/list?providerCode=it_oa_github")
@@ -185,7 +193,10 @@ async fn test_oauth_provider_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "非法 providerType 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "非法 providerType 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -211,7 +222,10 @@ async fn test_oauth_provider_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "重复 providerCode 业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "重复 providerCode 业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -220,11 +234,7 @@ async fn test_oauth_provider_validation_errors() {
 
     // 3. 批量删除传非法 ID（abc）→ 400（provider_id_invalid）
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::DELETE,
-            "/system/oauth/provider/abc",
-            None,
-        ))
+        .send_raw(ctx.request(Method::DELETE, "/system/oauth/provider/abc", None))
         .await;
     assert_ne!(v["code"], 200, "非法 ID 删除业务码不应为 200，实际: {v}");
     assert_eq!(
@@ -237,7 +247,10 @@ async fn test_oauth_provider_validation_errors() {
     let (status, v) = ctx
         .send_raw(ctx.request(Method::DELETE, "/system/oauth/provider/999999", None))
         .await;
-    assert_ne!(v["code"], 200, "删除不存在提供商业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "删除不存在提供商业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::NOT_FOUND,
@@ -267,13 +280,12 @@ async fn test_oauth_authorize_and_bindings() {
 
     // 1. 未启用提供商发起授权 → 400（provider_disabled）
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            "/oauth2/authorize?providerCode=github",
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, "/oauth2/authorize?providerCode=github", None))
         .await;
-    assert_ne!(v["code"], 200, "未启用提供商授权业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "未启用提供商授权业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -288,7 +300,10 @@ async fn test_oauth_authorize_and_bindings() {
             None,
         ))
         .await;
-    assert_ne!(v["code"], 200, "不存在提供商授权业务码不应为 200，实际: {v}");
+    assert_ne!(
+        v["code"], 200,
+        "不存在提供商授权业务码不应为 200，实际: {v}"
+    );
     assert_eq!(
         status,
         axum::http::StatusCode::NOT_FOUND,

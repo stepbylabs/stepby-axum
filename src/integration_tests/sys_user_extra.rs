@@ -19,7 +19,13 @@ use tower::ServiceExt;
 use super::TestContext;
 
 /// 构造 multipart/form-data 请求体（单个字段），供上传测试使用。
-fn multipart_body(boundary: &str, field: &str, filename: &str, content_type: &str, data: &[u8]) -> Vec<u8> {
+fn multipart_body(
+    boundary: &str,
+    field: &str,
+    filename: &str,
+    content_type: &str,
+    data: &[u8],
+) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(
         format!(
@@ -188,7 +194,9 @@ async fn test_user_import_data_success() {
     );
 
     // 反查：导入的 it_user_xlsx 用户应存在于列表
-    let v = ctx.get_json("/system/user/list?userName=it_user_xlsx").await;
+    let v = ctx
+        .get_json("/system/user/list?userName=it_user_xlsx")
+        .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(
         rows.iter().any(|r| r["userName"] == "it_user_xlsx"),
@@ -236,9 +244,9 @@ async fn test_user_avatar_upload() {
     );
     let v = ctx.send_json(req).await;
     let img_url = v["imgUrl"].as_str().unwrap_or("");
+    assert!(!img_url.is_empty(), "头像上传应返回 imgUrl，实际: {v}");
     assert!(
-        !img_url.is_empty(),
-        "头像上传应返回 imgUrl，实际: {v}"
+        img_url.ends_with(".png"),
+        "imgUrl 应为 png 路径，实际: {img_url}"
     );
-    assert!(img_url.ends_with(".png"), "imgUrl 应为 png 路径，实际: {img_url}");
 }

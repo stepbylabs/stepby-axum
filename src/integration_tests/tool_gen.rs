@@ -18,9 +18,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
     let ctx = TestContext::new().await;
 
     // 1. 查询列表（初始为空）
-    let v = ctx
-        .get_json("/tool/gen/list?pageNum=1&pageSize=10")
-        .await;
+    let v = ctx.get_json("/tool/gen/list?pageNum=1&pageSize=10").await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(rows.is_empty(), "初始应无 gen_table 记录，实际: {v}");
 
@@ -57,10 +55,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
         .await;
     ctx.assert_ok(&v);
     let table_id = v["data"]["tableId"].as_i64().expect("应返回 tableId");
-    assert!(
-        table_id > 0,
-        "tableId 应为正数，实际: {table_id}"
-    );
+    assert!(table_id > 0, "tableId 应为正数，实际: {table_id}");
     assert_eq!(
         v["data"]["tableName"].as_str(),
         Some("it_gen_test_table"),
@@ -68,9 +63,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
     );
 
     // 3. 列表查询应包含新表
-    let v = ctx
-        .get_json("/tool/gen/list?pageNum=1&pageSize=10")
-        .await;
+    let v = ctx.get_json("/tool/gen/list?pageNum=1&pageSize=10").await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(
         rows.iter().any(|r| r["tableName"] == "it_gen_test_table"),
@@ -78,9 +71,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
     );
 
     // 4. 详情查询
-    let v = ctx
-        .get_json(&format!("/tool/gen/{}", table_id))
-        .await;
+    let v = ctx.get_json(&format!("/tool/gen/{}", table_id)).await;
     assert_eq!(
         v["data"]["info"]["tableName"].as_str(),
         Some("it_gen_test_table"),
@@ -89,10 +80,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
     let columns = v["data"]["rows"]
         .as_array()
         .expect("详情应包含 columns 数组");
-    assert!(
-        columns.len() >= 3,
-        "应至少 3 列，实际: {v}"
-    );
+    assert!(columns.len() >= 3, "应至少 3 列，实际: {v}");
 
     // 5. 编辑表配置
     let v = ctx
@@ -118,9 +106,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
     ctx.assert_ok(&v);
 
     // 6. 确认编辑生效
-    let v = ctx
-        .get_json(&format!("/tool/gen/{}", table_id))
-        .await;
+    let v = ctx.get_json(&format!("/tool/gen/{}", table_id)).await;
     assert_eq!(
         v["data"]["info"]["functionName"].as_str(),
         Some("集成测试"),
@@ -132,10 +118,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
         .get_json(&format!("/tool/gen/preview/{}", table_id))
         .await;
     let data = v["data"].as_object().expect("预览 data 应为对象");
-    assert!(
-        !data.is_empty(),
-        "预览应返回至少一个模板文件，实际: {v}"
-    );
+    assert!(!data.is_empty(), "预览应返回至少一个模板文件，实际: {v}");
     // 应包含常见模板文件（src/entity/{TableName}.rs）
     let has_entity = data.keys().any(|k| k.contains("src/entity/"));
     assert!(
@@ -145,15 +128,11 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
     );
 
     // 8. 删除表
-    let v = ctx
-        .delete_json(&format!("/tool/gen/{}", table_id))
-        .await;
+    let v = ctx.delete_json(&format!("/tool/gen/{}", table_id)).await;
     ctx.assert_ok(&v);
 
     // 9. 确认删除生效
-    let v = ctx
-        .get_json("/tool/gen/list?pageNum=1&pageSize=10")
-        .await;
+    let v = ctx.get_json("/tool/gen/list?pageNum=1&pageSize=10").await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(
         !rows.iter().any(|r| r["tableName"] == "it_gen_test_table"),
@@ -204,10 +183,7 @@ async fn test_gen_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(
-        v["code"], 200,
-        "非法表名创建表业务码不应为 200，实际: {v}"
-    );
+    assert_ne!(v["code"], 200, "非法表名创建表业务码不应为 200，实际: {v}");
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -218,10 +194,7 @@ async fn test_gen_validation_errors() {
     let (status, v) = ctx
         .send_raw(ctx.request(Method::DELETE, "/tool/gen/999999", None))
         .await;
-    assert_ne!(
-        v["code"], 200,
-        "删除不存在表业务码不应为 200，实际: {v}"
-    );
+    assert_ne!(v["code"], 200, "删除不存在表业务码不应为 200，实际: {v}");
     assert_eq!(
         status,
         axum::http::StatusCode::NOT_FOUND,
@@ -232,10 +205,7 @@ async fn test_gen_validation_errors() {
     let (status, v) = ctx
         .send_raw(ctx.request(Method::GET, "/tool/gen/preview/999999", None))
         .await;
-    assert_ne!(
-        v["code"], 200,
-        "预览不存在表业务码不应为 200，实际: {v}"
-    );
+    assert_ne!(v["code"], 200, "预览不存在表业务码不应为 200，实际: {v}");
     assert_eq!(
         status,
         axum::http::StatusCode::NOT_FOUND,
@@ -254,10 +224,7 @@ async fn test_gen_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(
-        v["code"], 200,
-        "编辑不存在表业务码不应为 200，实际: {v}"
-    );
+    assert_ne!(v["code"], 200, "编辑不存在表业务码不应为 200，实际: {v}");
     assert_eq!(
         status,
         axum::http::StatusCode::NOT_FOUND,
@@ -266,16 +233,9 @@ async fn test_gen_validation_errors() {
 
     // 6. 批量生成代码未传 tables → 400
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            "/tool/gen/batchGenCode",
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, "/tool/gen/batchGenCode", None))
         .await;
-    assert_ne!(
-        v["code"], 200,
-        "未传 tables 业务码不应为 200，实际: {v}"
-    );
+    assert_ne!(v["code"], 200, "未传 tables 业务码不应为 200，实际: {v}");
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,

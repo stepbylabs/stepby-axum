@@ -17,7 +17,7 @@ use axum::http::{Method, Request, StatusCode};
 use std::net::SocketAddr;
 use tower::ServiceExt;
 
-use super::{login, TestContext};
+use super::{TestContext, login};
 
 /// 创建无角色用户（空权限集）并登录，返回其 token（用于 403 断言）。
 async fn create_noperm_user_and_token(ctx: &TestContext) -> String {
@@ -42,12 +42,7 @@ async fn create_noperm_user_and_token(ctx: &TestContext) -> String {
 }
 
 /// 用指定 token 构建请求（用于非 admin 权限断言）。
-fn request_with_token(
-    ctx: &TestContext,
-    method: Method,
-    uri: &str,
-    token: &str,
-) -> Request<Body> {
+fn request_with_token(ctx: &TestContext, method: Method, uri: &str, token: &str) -> Request<Body> {
     let mut req = Request::builder()
         .method(method)
         .uri(uri)

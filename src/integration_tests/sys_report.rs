@@ -59,9 +59,7 @@ async fn test_report_chain() {
     );
 
     // 4. 详情
-    let v = ctx
-        .get_json(&format!("/system/report/{}", report_id))
-        .await;
+    let v = ctx.get_json(&format!("/system/report/{}", report_id)).await;
     assert_eq!(
         v["data"]["reportId"], report_id,
         "报表详情 reportId 应匹配，实际: {v}"
@@ -91,9 +89,7 @@ async fn test_report_chain() {
         )
         .await;
     ctx.assert_ok(&v);
-    let v = ctx
-        .get_json(&format!("/system/report/{}", report_id))
-        .await;
+    let v = ctx.get_json(&format!("/system/report/{}", report_id)).await;
     assert_eq!(
         v["data"]["reportName"], "it_rpt_custom_edited",
         "修改后报表名称应生效，实际: {v}"
@@ -101,7 +97,10 @@ async fn test_report_chain() {
 
     // 6. 手动预览快照（custom 类型 data 透传配置 JSON，不落库不推送）
     let v = ctx
-        .post_json(&format!("/system/report/{}/preview", report_id), serde_json::json!({}))
+        .post_json(
+            &format!("/system/report/{}/preview", report_id),
+            serde_json::json!({}),
+        )
         .await;
     assert_eq!(
         v["data"]["reportCode"], "it_rpt_custom",
@@ -124,13 +123,8 @@ async fn test_report_chain() {
         )
         .await;
     ctx.assert_ok(&v);
-    let v = ctx
-        .get_json(&format!("/system/report/{}", report_id))
-        .await;
-    assert_eq!(
-        v["data"]["status"], "1",
-        "报表状态应为 1(停用)，实际: {v}"
-    );
+    let v = ctx.get_json(&format!("/system/report/{}", report_id)).await;
+    assert_eq!(v["data"]["status"], "1", "报表状态应为 1(停用)，实际: {v}");
 
     // 8. 删除报表定义（级联逻辑删除其下订阅）
     let v = ctx
@@ -140,11 +134,7 @@ async fn test_report_chain() {
 
     // 9. 删除后详情应 404
     let (status, _) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            &format!("/system/report/{}", report_id),
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, &format!("/system/report/{}", report_id), None))
         .await;
     assert_eq!(
         status,
@@ -173,9 +163,7 @@ async fn test_report_chain() {
         StatusCode::BAD_REQUEST,
         "重复编码应 400，实际: {status}"
     );
-    let v = ctx
-        .delete_json(&format!("/system/report/{}", dup_id))
-        .await;
+    let v = ctx.delete_json(&format!("/system/report/{}", dup_id)).await;
     ctx.assert_ok(&v);
 
     // 11. 非法报表类型新增应拒绝（400）
@@ -322,13 +310,19 @@ async fn test_report_sub_chain() {
 
     // 7. 手动触发订阅推送（父报表仍启用；站内信写入 sys_msg_send_log，邮件 no-op）
     let v = ctx
-        .post_json(&format!("/system/report/sub/{}/run", sub_id), serde_json::json!({}))
+        .post_json(
+            &format!("/system/report/sub/{}/run", sub_id),
+            serde_json::json!({}),
+        )
         .await;
     assert_eq!(
         v["data"]["reportName"], "it_rpt_sub_parent_name",
         "推送应返回报表名称，实际: {v}"
     );
-    assert_eq!(v["data"]["emailsSent"], 0, "未启用邮件推送，应 0 封，实际: {v}");
+    assert_eq!(
+        v["data"]["emailsSent"], 0,
+        "未启用邮件推送，应 0 封，实际: {v}"
+    );
     assert_eq!(
         v["data"]["siteMsgs"], 1,
         "站内信应推送给 1 个用户，实际: {v}"
@@ -463,11 +457,7 @@ async fn test_report_sub_chain() {
 
     // 10. 删除后详情应 404
     let (status, _) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            &format!("/system/report/sub/{}", sub_id),
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, &format!("/system/report/sub/{}", sub_id), None))
         .await;
     assert_eq!(
         status,

@@ -30,7 +30,10 @@ async fn test_config_chain() {
 
     // 3. 详情
     let v = ctx.get_json("/system/config/1").await;
-    assert_eq!(v["data"]["configId"], 1, "参数详情 configId 应为 1，实际: {v}");
+    assert_eq!(
+        v["data"]["configId"], 1,
+        "参数详情 configId 应为 1，实际: {v}"
+    );
 
     // 4. 新增参数
     let v = ctx
@@ -89,7 +92,9 @@ async fn test_config_chain() {
     ctx.assert_ok(&v);
 
     // 8. 删除参数
-    let v = ctx.delete_json(&format!("/system/config/{}", config_id)).await;
+    let v = ctx
+        .delete_json(&format!("/system/config/{}", config_id))
+        .await;
     ctx.assert_ok(&v);
     let v = ctx
         .get_json("/system/config/list?configKey=it.test.configKey")
@@ -120,7 +125,10 @@ async fn test_dict_type_chain() {
 
     // 3. 详情
     let v = ctx.get_json("/system/dict/type/1").await;
-    assert_eq!(v["data"]["dictId"], 1, "字典类型详情 dictId 应为 1，实际: {v}");
+    assert_eq!(
+        v["data"]["dictId"], 1,
+        "字典类型详情 dictId 应为 1，实际: {v}"
+    );
 
     // 4. 新增字典类型
     let v = ctx
@@ -157,7 +165,9 @@ async fn test_dict_type_chain() {
         )
         .await;
     ctx.assert_ok(&v);
-    let v = ctx.get_json(&format!("/system/dict/type/{}", dict_id)).await;
+    let v = ctx
+        .get_json(&format!("/system/dict/type/{}", dict_id))
+        .await;
     assert_eq!(
         v["data"]["dictName"].as_str(),
         Some("集成测试字典改"),
@@ -169,7 +179,9 @@ async fn test_dict_type_chain() {
     ctx.assert_ok(&v);
 
     // 8. 删除字典类型
-    let v = ctx.delete_json(&format!("/system/dict/type/{}", dict_id)).await;
+    let v = ctx
+        .delete_json(&format!("/system/dict/type/{}", dict_id))
+        .await;
     ctx.assert_ok(&v);
     let v = ctx
         .get_json("/system/dict/type/list?dictType=it_test_dict")
@@ -211,7 +223,10 @@ async fn test_dict_data_chain() {
 
     // 3. 详情
     let v = ctx.get_json("/system/dict/data/1").await;
-    assert_eq!(v["data"]["dictCode"], 1, "字典数据详情 dictCode 应为 1，实际: {v}");
+    assert_eq!(
+        v["data"]["dictCode"], 1,
+        "字典数据详情 dictCode 应为 1，实际: {v}"
+    );
 
     // 4. 新增字典数据
     let v = ctx
@@ -261,7 +276,9 @@ async fn test_dict_data_chain() {
     );
 
     // 7. 删除字典数据
-    let v = ctx.delete_json(&format!("/system/dict/data/{}", dict_code)).await;
+    let v = ctx
+        .delete_json(&format!("/system/dict/data/{}", dict_code))
+        .await;
     ctx.assert_ok(&v);
     let v = ctx
         .get_json("/system/dict/data/type/it_test_dict_data")

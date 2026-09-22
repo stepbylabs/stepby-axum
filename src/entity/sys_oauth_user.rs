@@ -16,7 +16,7 @@ use crate::common::datetime;
 #[derive(Clone, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
 #[sea_orm(table_name = "sys_oauth_user")]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "SysOauthUser.ts", rename_all = "camelCase")]
+#[ts(export, rename = "SysOauthUser", export_to = "SysOauthUser.ts", rename_all = "camelCase")]
 #[schema(as = SysOauthUser)]
 pub struct Model {
     #[sea_orm(primary_key)]

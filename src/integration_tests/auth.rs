@@ -163,15 +163,17 @@ async fn test_captcha_public() {
             std::net::SocketAddr::from((peer_ip, 1234)),
         ));
 
-    let resp = app
-        .oneshot(req)
-        .await
-        .expect("captchaImage 请求执行失败");
-    assert_eq!(resp.status(), StatusCode::OK, "captchaImage 应返回 HTTP 200");
+    let resp = app.oneshot(req).await.expect("captchaImage 请求执行失败");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "captchaImage 应返回 HTTP 200"
+    );
     let body = to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("读取 captchaImage 响应体失败");
-    let v: serde_json::Value = serde_json::from_slice(&body).expect("captchaImage 响应 JSON 解析失败");
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).expect("captchaImage 响应 JSON 解析失败");
     assert_eq!(v["code"], 200, "captchaImage 业务码应为 200，实际: {:?}", v);
     assert!(
         v["img"].is_string() && !v["img"].as_str().unwrap().is_empty(),
@@ -206,12 +208,20 @@ async fn test_prod_api_prefix() {
         ));
 
     let resp = app.clone().oneshot(req).await.expect("login 请求执行失败");
-    assert_eq!(resp.status(), StatusCode::OK, "prod-api/login 应返回 HTTP 200");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "prod-api/login 应返回 HTTP 200"
+    );
     let body = to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("读取 login 响应体失败");
     let v: serde_json::Value = serde_json::from_slice(&body).expect("login 响应 JSON 解析失败");
-    assert_eq!(v["code"], 200, "prod-api/login 业务码应为 200，实际: {:?}", v);
+    assert_eq!(
+        v["code"], 200,
+        "prod-api/login 业务码应为 200，实际: {:?}",
+        v
+    );
     let token = v["token"].as_str().expect("应返回 token").to_string();
 
     // 受保护接口带前缀访问
@@ -226,10 +236,18 @@ async fn test_prod_api_prefix() {
         )
         .await
         .expect("getInfo 请求执行失败");
-    assert_eq!(resp2.status(), StatusCode::OK, "prod-api/getInfo 应返回 200");
+    assert_eq!(
+        resp2.status(),
+        StatusCode::OK,
+        "prod-api/getInfo 应返回 200"
+    );
     let body2 = to_bytes(resp2.into_body(), usize::MAX)
         .await
         .expect("读取 getInfo 响应体失败");
     let v2: serde_json::Value = serde_json::from_slice(&body2).expect("getInfo 响应 JSON 解析失败");
-    assert_eq!(v2["code"], 200, "prod-api/getInfo 业务码应为 200，实际: {:?}", v2);
+    assert_eq!(
+        v2["code"], 200,
+        "prod-api/getInfo 业务码应为 200，实际: {:?}",
+        v2
+    );
 }

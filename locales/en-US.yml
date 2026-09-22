@@ -77,6 +77,30 @@ error:
     unknown_error: Third-party login failed, please try again
     local_user_not_found: Local account does not exist or is disabled
     failure_title: Third-party login failed
+  sso:
+    disabled: Single sign-on (SSO) is not enabled
+    client_not_found: Client not found
+    client_disabled: This client is disabled
+    client_id_required: client_id is required
+    client_id_exists: client_id already exists
+    client_name_required: Client name is required
+    redirect_uris_empty: At least one redirect URI is required
+    redirect_uri_invalid: Invalid redirect URI, must be an absolute http(s) URL
+    redirect_uri_not_allowed: redirect_uri is not in the whitelist
+    scope_invalid: Requested scope contains unauthorized values
+    response_type_unsupported: Only response_type=code is supported
+    pkce_required: PKCE is required (code_challenge with method=S256)
+    pkce_method_unsupported: Only PKCE method S256 is supported
+    openid_scope_required: scope must include openid
+    not_login: Login required to authorize
+    code_invalid: Authorization code is invalid or expired
+    client_auth_failed: Client authentication failed
+    grant_type_unsupported: Unsupported grant_type
+    pkce_verify_failed: PKCE verification failed
+    token_failed: Token issuance failed
+    access_token_invalid: Access token is invalid
+    batch_id_invalid: Invalid client id
+    redirect_uri_dup: Duplicate redirect URI
   file:
     delete_failed: Failed to delete file
     delete_task_failed: Delete task failed

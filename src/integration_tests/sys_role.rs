@@ -61,9 +61,7 @@ async fn test_role_crud_chain() {
     ctx.assert_ok(&v);
 
     // 2. 按 roleKey 过滤查询到新角色
-    let v = ctx
-        .get_json("/system/role/list?roleKey=it_role_crud")
-        .await;
+    let v = ctx.get_json("/system/role/list?roleKey=it_role_crud").await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert_eq!(rows.len(), 1, "应查到 1 个新角色，实际: {v}");
     let role_id = rows[0]["roleId"].as_i64().expect("roleId 应为数字");
@@ -116,9 +114,7 @@ async fn test_role_crud_chain() {
     ctx.assert_ok(&v);
 
     // 8. 确认删除生效
-    let v = ctx
-        .get_json("/system/role/list?roleKey=it_role_crud")
-        .await;
+    let v = ctx.get_json("/system/role/list?roleKey=it_role_crud").await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(rows.is_empty(), "删除后不应再查到该角色，实际: {v}");
 }
@@ -141,9 +137,7 @@ async fn test_role_auth_user_chain() {
         )
         .await;
     ctx.assert_ok(&v);
-    let v = ctx
-        .get_json("/system/role/list?roleKey=it_role_auth")
-        .await;
+    let v = ctx.get_json("/system/role/list?roleKey=it_role_auth").await;
     let role_id = v["rows"][0]["roleId"]
         .as_i64()
         .expect("应查到新角色 roleId");

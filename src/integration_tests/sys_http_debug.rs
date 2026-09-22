@@ -113,10 +113,7 @@ async fn test_http_debug_external_transport_failure_returns_200_with_error() {
     );
     assert_eq!(v["code"], 200, "业务码应为 200，实际: {v}");
     let data = &v["data"];
-    assert_eq!(
-        data["status"], 0,
-        "传输层失败 status 应为 0，实际: {data}"
-    );
+    assert_eq!(data["status"], 0, "传输层失败 status 应为 0，实际: {data}");
     assert!(
         data["error"].is_string(),
         "传输层失败应携带 error 字符串字段，实际: {data}"

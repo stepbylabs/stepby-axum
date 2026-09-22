@@ -22,12 +22,12 @@ use axum::http::HeaderValue;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsFrame;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::state::AppState;
 
-use super::{build_isolated_state, login, next_peer_ip, RedisSlot};
+use super::{RedisSlot, build_isolated_state, login, next_peer_ip};
 
 /// 客户端 WebSocket 流类型（真实 TCP，非 TLS）。
 type WsStream =
@@ -141,14 +141,19 @@ async fn ws_user_directed_message_and_pong() {
     let _welcome = recv_text(&mut ws, "欢迎").await;
 
     // 1. 用户定向推送 → 仅本连接收到（含身份信息的消息不广播）
-    env.state
-        .broadcast_to_user(env.user_id, "system", serde_json::json!({ "forceLogout": true }));
+    env.state.broadcast_to_user(
+        env.user_id,
+        "system",
+        serde_json::json!({ "forceLogout": true }),
+    );
     let dir = recv_text(&mut ws, "定向").await;
     let v: serde_json::Value = serde_json::from_str(&dir).expect("定向消息 JSON 解析失败");
     assert_eq!(v["data"]["forceLogout"], true);
 
     // 2. 客户端发文本 ping → 服务端回 pong
-    ws.send(WsFrame::Text("ping".into())).await.expect("发送 ping 失败");
+    ws.send(WsFrame::Text("ping".into()))
+        .await
+        .expect("发送 ping 失败");
     let pong = recv_text(&mut ws, "pong").await;
     let v: serde_json::Value = serde_json::from_str(&pong).expect("pong JSON 解析失败");
     assert_eq!(v["type"], "pong", "ping 应收到 pong 响应，实际: {v}");
@@ -165,13 +170,10 @@ async fn ws_auth_via_sec_protocol_header_and_echo() {
     let mut request = format!("ws://{}/ws", env.addr)
         .into_client_request()
         .expect("构造子协议握手请求失败");
-    request
-        .headers_mut()
-        .insert(
-            "sec-websocket-protocol",
-            HeaderValue::from_str(&format!("bearer.{}", env.token))
-                .expect("token 可作为合法头部值"),
-        );
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        HeaderValue::from_str(&format!("bearer.{}", env.token)).expect("token 可作为合法头部值"),
+    );
     let (mut ws, resp) = tokio_tungstenite::connect_async(request)
         .await
         .expect("子协议鉴权握手应成功");
@@ -221,7 +223,11 @@ async fn ws_reject_unauthenticated_and_blacklisted() {
     // 清理黑名单，避免影响其它并行测试（此测试独占 Redis DB，其实不必要，但保持整洁）
     {
         let mut conn = env.state.redis.clone();
-        let _: Option<()> = redis::cmd("DEL").arg(&key).query_async(&mut conn).await.ok();
+        let _: Option<()> = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .ok();
     }
 }
 

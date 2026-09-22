@@ -30,7 +30,10 @@ async fn test_menu_chain() {
     let v = ctx.get_json("/system/menu/roleMenuTreeselect/1").await;
     ctx.assert_ok(&v);
     assert!(
-        v["menus"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        v["menus"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
         "角色菜单树 menus 不应为空，实际: {v}"
     );
 
@@ -59,7 +62,9 @@ async fn test_menu_chain() {
     ctx.assert_ok(&v);
 
     // 6. 按 perms 过滤查到新菜单
-    let v = ctx.get_json("/system/menu/list?menuName=集成测试菜单").await;
+    let v = ctx
+        .get_json("/system/menu/list?menuName=集成测试菜单")
+        .await;
     let data = v["data"].as_array().expect("data 应为数组");
     assert_eq!(data.len(), 1, "应查到 1 条新菜单，实际: {v}");
     let menu_id = data[0]["menuId"].as_i64().expect("menuId 应为数字");
@@ -96,7 +101,9 @@ async fn test_menu_chain() {
     // 9. 删除菜单
     let v = ctx.delete_json(&format!("/system/menu/{}", menu_id)).await;
     ctx.assert_ok(&v);
-    let v = ctx.get_json("/system/menu/list?menuName=集成测试菜单改").await;
+    let v = ctx
+        .get_json("/system/menu/list?menuName=集成测试菜单改")
+        .await;
     let data = v["data"].as_array().expect("data 应为数组");
     assert!(data.is_empty(), "删除后不应再查到该菜单，实际: {v}");
 }
@@ -132,7 +139,10 @@ async fn test_dept_chain() {
 
     // 4. 部门详情
     let v = ctx.get_json("/system/dept/100").await;
-    assert_eq!(v["data"]["deptId"], 100, "部门详情 deptId 应为 100，实际: {v}");
+    assert_eq!(
+        v["data"]["deptId"], 100,
+        "部门详情 deptId 应为 100，实际: {v}"
+    );
 
     // 5. 新增部门（挂在 103 研发部门下）
     let v = ctx
@@ -152,7 +162,9 @@ async fn test_dept_chain() {
     ctx.assert_ok(&v);
 
     // 6. 查询到新部门
-    let v = ctx.get_json("/system/dept/list?deptName=集成测试部门").await;
+    let v = ctx
+        .get_json("/system/dept/list?deptName=集成测试部门")
+        .await;
     let data = v["data"].as_array().expect("data 应为数组");
     assert_eq!(data.len(), 1, "应查到 1 个新部门，实际: {v}");
     let dept_id = data[0]["deptId"].as_i64().expect("deptId 应为数字");
@@ -188,7 +200,9 @@ async fn test_dept_chain() {
     // 9. 删除部门
     let v = ctx.delete_json(&format!("/system/dept/{}", dept_id)).await;
     ctx.assert_ok(&v);
-    let v = ctx.get_json("/system/dept/list?deptName=集成测试部门改").await;
+    let v = ctx
+        .get_json("/system/dept/list?deptName=集成测试部门改")
+        .await;
     let data = v["data"].as_array().expect("data 应为数组");
     assert!(data.is_empty(), "删除后不应再查到该部门，实际: {v}");
 }

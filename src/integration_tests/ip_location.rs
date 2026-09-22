@@ -22,18 +22,23 @@ async fn it_ipl_status_structure() {
 
     let v = ctx.get_json("/system/ipLocation/status").await;
     let d = &v["data"];
-    assert!(d["mmdbLoaded"].is_boolean(), "mmdbLoaded 应为布尔，实际: {v}");
+    assert!(
+        d["mmdbLoaded"].is_boolean(),
+        "mmdbLoaded 应为布尔，实际: {v}"
+    );
     assert!(d["mmdbPath"].is_string(), "mmdbPath 应为字符串，实际: {v}");
     assert!(d["mmdbSize"].is_number(), "mmdbSize 应为数字，实际: {v}");
-    assert!(d["xdbEnabled"].is_boolean(), "xdbEnabled 应为布尔，实际: {v}");
+    assert!(
+        d["xdbEnabled"].is_boolean(),
+        "xdbEnabled 应为布尔，实际: {v}"
+    );
     assert!(d["xdbLoaded"].is_boolean(), "xdbLoaded 应为布尔，实际: {v}");
     assert!(
         d["autoUpdateCron"].is_string(),
         "autoUpdateCron 应为字符串，实际: {v}"
     );
     assert!(
-        !d["currentSource"].as_str().unwrap_or("").is_empty()
-            && d["currentSource"].is_string(),
+        !d["currentSource"].as_str().unwrap_or("").is_empty() && d["currentSource"].is_string(),
         "currentSource 应为非空字符串（默认 p3terx），实际: {v}"
     );
     assert!(
@@ -54,7 +59,10 @@ async fn it_ipl_config_get_and_save_ok() {
     // 1. GET config：脱敏结构
     let v = ctx.get_json("/system/ipLocation/config").await;
     let d = &v["data"];
-    assert!(d["updateSource"].is_string(), "updateSource 应为字符串，实际: {v}");
+    assert!(
+        d["updateSource"].is_string(),
+        "updateSource 应为字符串，实际: {v}"
+    );
     assert!(
         d["maxmindAccountIdConfigured"].is_boolean(),
         "maxmindAccountIdConfigured 应为布尔，实际: {v}"
@@ -112,8 +120,15 @@ async fn it_ipl_config_save_validation_errors() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "非法 update_source 业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 update_source 应 400，实际: {status}");
+    assert_ne!(
+        v["code"], 200,
+        "非法 update_source 业务码不应为 200，实际: {v}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 update_source 应 400，实际: {status}"
+    );
 
     // 2. 切到 maxmind 但未提供凭据 → 400（maxmind_credentials_required）
     let (status, v) = ctx
