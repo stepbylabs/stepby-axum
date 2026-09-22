@@ -29,6 +29,8 @@ pub struct Model {
     pub oper_param: Option<String>,
     /// 变更前数据快照（JSON，仅 PUT/DELETE 记录）
     pub oper_before: Option<String>,
+    /// 字段级变更差异（JSON 数组 [{field,old,new}]，仅 PUT 成功记录）
+    pub oper_diff: Option<String>,
     pub json_result: Option<String>,
     pub status: Option<String>,
     pub error_msg: Option<String>,

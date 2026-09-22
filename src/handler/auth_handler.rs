@@ -246,6 +246,7 @@ pub async fn register(
             // P1-5 修复：改用 serde_json::json! 避免手拼 JSON 导致的注入风险
             oper_param: serde_json::json!({ "username": username }).to_string(),
             oper_before: String::new(),
+            oper_diff: String::new(),
             json_result,
             status,
             error_msg,
