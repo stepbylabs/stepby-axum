@@ -97,11 +97,7 @@ async fn test_backup_chain() {
 
     // 7. 下载不存在的备份 → 404
     let (status, _) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            "/system/backup/download/999999",
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, "/system/backup/download/999999", None))
         .await;
     assert_eq!(
         status,
@@ -111,11 +107,7 @@ async fn test_backup_chain() {
 
     // 8. 恢复不存在的备份 → 404（恢复为高危操作，仅测 404 分支，避免真实改写测试库）
     let (status, _) = ctx
-        .send_raw(ctx.request(
-            Method::POST,
-            "/system/backup/restore/999999",
-            None,
-        ))
+        .send_raw(ctx.request(Method::POST, "/system/backup/restore/999999", None))
         .await;
     assert_eq!(
         status,
@@ -131,11 +123,7 @@ async fn test_backup_chain() {
 
     // 10. 删除后详情应 404
     let (status, _) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            &format!("/system/backup/{}", backup_id),
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, &format!("/system/backup/{}", backup_id), None))
         .await;
     assert_eq!(
         status,

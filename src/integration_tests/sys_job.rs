@@ -26,8 +26,7 @@ async fn test_job_chain() {
     let v = ctx.get_json("/monitor/job/1").await;
     assert_eq!(v["data"]["jobId"], 1, "任务详情 jobId 应为 1，实际: {v}");
     assert_eq!(
-        v["data"]["jobName"],
-        "系统默认（无参）",
+        v["data"]["jobName"], "系统默认（无参）",
         "任务名称应匹配种子数据，实际: {v}"
     );
 
@@ -77,8 +76,7 @@ async fn test_job_chain() {
     ctx.assert_ok(&v);
     let v = ctx.get_json(&format!("/monitor/job/{}", job_id)).await;
     assert_eq!(
-        v["data"]["jobName"],
-        "it_job_test_task_edited",
+        v["data"]["jobName"], "it_job_test_task_edited",
         "修改后任务名称应生效，实际: {v}"
     );
 
@@ -175,9 +173,7 @@ async fn test_job_log_chain() {
     assert!(!rows.is_empty(), "分页应能查到任务日志，实际: {v}");
 
     // 4. 获取第一条日志 id 用于删除测试
-    let job_log_id = rows[0]["jobLogId"]
-        .as_i64()
-        .expect("jobLogId 应为数字");
+    let job_log_id = rows[0]["jobLogId"].as_i64().expect("jobLogId 应为数字");
 
     // 5. 批量删除单条日志
     let v = ctx

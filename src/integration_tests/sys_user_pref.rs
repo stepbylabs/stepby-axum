@@ -18,7 +18,10 @@ async fn test_user_pref_chain() {
 
     // 1. 获取默认偏好结构（admin 无记录：全量接收 + 免打扰关闭）
     let v = ctx.get_json("/system/profile/pref").await;
-    assert_eq!(v["data"]["userId"], 1, "偏好 userId 应为 admin(1)，实际: {v}");
+    assert_eq!(
+        v["data"]["userId"], 1,
+        "偏好 userId 应为 admin(1)，实际: {v}"
+    );
     assert_eq!(
         v["data"]["emailNotify"].as_str(),
         Some("1"),

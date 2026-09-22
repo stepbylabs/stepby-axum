@@ -116,7 +116,10 @@ async fn test_frontend_error_chain() {
     // create_time 必须由服务端在批量落库时写入（insert_many 不触发 before_save），
     // 否则按天聚合统计会把记录漏掉。
     assert!(
-        err["createTime"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        err["createTime"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "落库记录 create_time 不应为空，实际: {err}"
     );
     let err_id = err["id"].as_i64().expect("id 应为数字");
@@ -146,19 +149,19 @@ async fn test_frontend_error_chain() {
         "bySource 应非空，实际: {v}"
     );
     assert_eq!(
-        v["data"]["daily"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0),
+        v["data"]["daily"].as_array().map(|a| a.len()).unwrap_or(0),
         7,
         "daily 长度应为 7，实际: {v}"
     );
-    // 今天已上报 1 条 error，每日趋势中今天应 >=1（校验 create_time 与按天聚合链路真正打通）
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    // 今天已上报 1 条 error，每日趋势中今天应 >=1（校验 create_time 与按天聚合链路真正打通）。
+    // 时钟口径：后端 now_naive()/today_utc() 统一以 UTC 为准（create_time 落 UTC、按天聚合按 UTC），
+    // 故此处必须用 Utc 而非 Local，否则本地跨零点（UTC+8 的凌晨）会让「今日」桶漂移到昨天。
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let today_count = v["data"]["daily"]
         .as_array()
         .and_then(|a| {
-            a.iter().find(|d| d["date"].as_str() == Some(today.as_str()))
+            a.iter()
+                .find(|d| d["date"].as_str() == Some(today.as_str()))
                 .and_then(|d| d["count"].as_i64())
         })
         .unwrap_or(-1);

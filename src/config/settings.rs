@@ -47,6 +47,9 @@ pub struct Settings {
     /// 个人访问令牌（PAT）配置（Tier-S #3）
     #[serde(default)]
     pub pat: PatConfig,
+    /// 单点登录 / OIDC Provider 配置（Tier B，默认关闭）
+    #[serde(default)]
+    pub sso: SsoConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -69,6 +72,7 @@ impl fmt::Debug for Settings {
             .field("monitor", &self.monitor)
             .field("sys_log", &self.sys_log)
             .field("pat", &self.pat)
+            .field("sso", &self.sso)
             .finish()
     }
 }
@@ -152,6 +156,44 @@ fn default_pat_max_expire_days() -> i64 {
 }
 fn default_pat_max_per_user() -> i64 {
     20
+}
+
+/// 单点登录 / OIDC Provider 配置（Tier B：本系统作为授权服务器）
+#[derive(Clone, Debug, Deserialize)]
+pub struct SsoConfig {
+    /// 是否启用 SSO（OIDC Provider）端点。默认关闭，需显式开启（生产按需）
+    #[serde(default = "default_sso_disabled")]
+    pub enabled: bool,
+    /// OIDC issuer（发现文档 iss 与端点绝对前缀）。留空则按请求 Host/scheme 动态生成
+    #[serde(default)]
+    pub issuer: String,
+    /// 授权码有效期（秒，默认 60，短 TTL 一次性使用）
+    #[serde(default = "default_sso_code_ttl_secs")]
+    pub code_ttl_secs: u64,
+    /// ID Token / access_token 有效期（秒，默认 3600）
+    #[serde(default = "default_sso_id_token_ttl_secs")]
+    pub id_token_ttl_secs: u64,
+}
+
+impl Default for SsoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_sso_disabled(),
+            issuer: String::new(),
+            code_ttl_secs: default_sso_code_ttl_secs(),
+            id_token_ttl_secs: default_sso_id_token_ttl_secs(),
+        }
+    }
+}
+
+fn default_sso_disabled() -> bool {
+    false
+}
+fn default_sso_code_ttl_secs() -> u64 {
+    60
+}
+fn default_sso_id_token_ttl_secs() -> u64 {
+    3600
 }
 
 /// 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
@@ -772,6 +814,14 @@ impl Settings {
         {
             self.sys_log.retention_days = days;
         }
+        // 单点登录 / OIDC Provider（Tier B）：默认关闭，SSO_ENABLED=true 显式开启
+        if let Ok(v) = std::env::var("SSO_ENABLED") {
+            self.sso.enabled = v == "true" || v == "1";
+        }
+        // OIDC issuer（发现文档 iss 与端点绝对前缀），留空则按请求 Host 动态生成
+        if let Ok(v) = std::env::var("SSO_ISSUER") {
+            self.sso.issuer = v;
+        }
     }
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
@@ -801,6 +851,7 @@ impl Settings {
 
         let mut settings = Settings {
             pat: PatConfig::default(),
+            sso: SsoConfig::default(),
             server: ServerConfig {
                 host: server_host,
                 port: server_port,
@@ -900,6 +951,7 @@ mod tests {
     fn make_test_settings() -> Settings {
         Settings {
             pat: PatConfig::default(),
+            sso: SsoConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
@@ -946,6 +998,7 @@ mod tests {
     fn test_settings_debug_redacts_config_enc_key() {
         let settings = Settings {
             pat: PatConfig::default(),
+            sso: SsoConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,

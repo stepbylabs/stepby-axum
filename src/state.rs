@@ -6,7 +6,7 @@ use crate::observability::Observability;
 use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::scheduler::JobScheduler;
 use crate::service::{
-    AuthService, GenTableService, IpLocationService, MailerService, SysBackupService,
+    AuthService, GenTableService, IpLocationService, MailerService, SsoService, SysBackupService,
     SysConfigService, SysDeptService, SysDictService, SysFrontendErrorService, SysHttpDebugService,
     SysJobService, SysLogininforService, SysMenuService, SysMsgService, SysNoticeService,
     SysOauthService, SysOperLogService, SysPatService, SysPostService, SysRateLimitService,
@@ -71,6 +71,8 @@ pub struct AppState {
     pub msg_service: SysMsgService,
     /// 第三方登录（OAuth2/OIDC/SSO）Service
     pub oauth_service: SysOauthService,
+    /// 单点登录 / OIDC Provider（本系统作为授权服务器）Service（Tier B）
+    pub sso_service: SsoService,
     /// 在线 HTTP 调试器 Service（服务端转发 + SSRF 防护）
     pub http_debug_service: SysHttpDebugService,
     /// 报表中心 + 定时订阅推送 Service
@@ -239,6 +241,7 @@ impl AppState {
             task_service: SysTaskService::new(db.clone()),
             msg_service: SysMsgService::new(db.clone(), config.clone()),
             oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
+            sso_service: SsoService::new(db.clone()),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
             web_hook_service: SysWebHookService::new(db.clone()),

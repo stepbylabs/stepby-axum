@@ -69,9 +69,7 @@ async fn test_task_chain() {
     );
 
     // 5. 批量删除该任务
-    let v = ctx
-        .delete_json(&format!("/system/task/{}", task_id))
-        .await;
+    let v = ctx.delete_json(&format!("/system/task/{}", task_id)).await;
     ctx.assert_ok(&v);
 
     // 6. 删除后详情应 404

@@ -91,12 +91,18 @@ async fn test_pat_chain() {
             }),
         )
         .await;
-    let token = v["data"]["token"].as_str().expect("应返回明文 token").to_string();
+    let token = v["data"]["token"]
+        .as_str()
+        .expect("应返回明文 token")
+        .to_string();
     assert!(
         token.starts_with("ybt_"),
         "明文令牌应以 ybt_ 前缀开头，实际: {token}"
     );
-    let pat_id = v["data"]["pat"]["patId"].as_str().expect("patId").to_string();
+    let pat_id = v["data"]["pat"]["patId"]
+        .as_str()
+        .expect("patId")
+        .to_string();
     assert_eq!(v["data"]["pat"]["name"], "it_pat_config");
     assert_eq!(v["data"]["pat"]["status"], "0");
     // 脱敏红线：出参绝不包含 token_hash

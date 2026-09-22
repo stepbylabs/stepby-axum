@@ -10,6 +10,7 @@ pub mod monitor_observability_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
 pub mod public;
+pub mod sso_router;
 pub mod sys_backup_router;
 pub mod sys_config_router;
 pub mod sys_dept_router;
@@ -88,6 +89,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_menu_router::menu_routes())
         .merge(sys_msg_router::msg_routes())
         .merge(sys_oauth_router::oauth_routes())
+        .merge(sso_router::sso_routes())
         .merge(sys_notice_router::notice_routes())
         .merge(sys_report_router::report_routes())
         .merge(sys_web_hook_router::web_hook_routes())

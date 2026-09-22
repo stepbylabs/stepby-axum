@@ -53,7 +53,10 @@ async fn test_whitelist_optionselect_is_cached() {
     let (ct1, b1) = raw_get(&ctx, "/system/dict/type/optionselect").await;
     assert_ok_bytes(&b1);
     let (ct2, b2) = raw_get(&ctx, "/system/dict/type/optionselect").await;
-    assert_eq!(b1, b2, "字典类型下拉为白名单 GET，两次响应体应原样复用（命中缓存）");
+    assert_eq!(
+        b1, b2,
+        "字典类型下拉为白名单 GET，两次响应体应原样复用（命中缓存）"
+    );
     assert_eq!(ct1, ct2, "命中缓存时 Content-Type 应一致");
     assert!(!b1.is_empty(), "响应体不应为空");
 }
@@ -93,19 +96,18 @@ async fn test_mutable_dict_data_not_cached() {
 
     // 按类型查询：应查到 1 条
     let (_, b1) = raw_get(&ctx, "/system/dict/data/type/it_cache_var_type").await;
-    let binding1 =
-        serde_json::from_slice::<serde_json::Value>(&b1).expect("响应应为 JSON");
+    let binding1 = serde_json::from_slice::<serde_json::Value>(&b1).expect("响应应为 JSON");
     let data1 = binding1["data"].as_array().expect("data 应为数组");
     assert_eq!(data1.len(), 1, "应查到 1 条字典数据，实际: {b1:?}");
 
     // 删除该条数据（写操作，不走缓存、真实落库）
     let dict_code = data1[0]["dictCode"].as_i64().expect("dictCode 应为数字");
-    ctx.delete_json(&format!("/system/dict/data/{}", dict_code)).await;
+    ctx.delete_json(&format!("/system/dict/data/{}", dict_code))
+        .await;
 
     // 再次按类型查询：因 dict/data/type/* 不入缓存，应返回空（真实反映删除），而非命中旧缓存
     let (_, b2) = raw_get(&ctx, "/system/dict/data/type/it_cache_var_type").await;
-    let binding2 =
-        serde_json::from_slice::<serde_json::Value>(&b2).expect("响应应为 JSON");
+    let binding2 = serde_json::from_slice::<serde_json::Value>(&b2).expect("响应应为 JSON");
     let data2 = binding2["data"].as_array().expect("data 应为数组");
     assert_eq!(
         data2.len(),
@@ -133,13 +135,14 @@ async fn test_mutable_config_not_cached() {
 
     // 按 key 查：v1
     let (_, b1) = raw_get(&ctx, "/system/config/configKey/it.cache.var").await;
-    let binding_c1 =
-        serde_json::from_slice::<serde_json::Value>(&b1).expect("响应应为 JSON");
+    let binding_c1 = serde_json::from_slice::<serde_json::Value>(&b1).expect("响应应为 JSON");
     let val1 = binding_c1["data"].as_str().map(|s| s.to_string());
     assert_eq!(val1.as_deref(), Some("v1"), "首次查询应为 v1，实际: {b1:?}");
 
     // 修改为 v2（写操作真实落库）
-    let v = ctx.get_json("/system/config/list?configKey=it.cache.var").await;
+    let v = ctx
+        .get_json("/system/config/list?configKey=it.cache.var")
+        .await;
     let config_id = v["rows"][0]["configId"].as_i64().expect("应查到 configId");
     ctx.put_json(
         "/system/config",
@@ -153,8 +156,7 @@ async fn test_mutable_config_not_cached() {
 
     // 再次按 key 查：应为 v2（configKey/* 不入缓存，反映最新值，无脏读）
     let (_, b2) = raw_get(&ctx, "/system/config/configKey/it.cache.var").await;
-    let binding_c2 =
-        serde_json::from_slice::<serde_json::Value>(&b2).expect("响应应为 JSON");
+    let binding_c2 = serde_json::from_slice::<serde_json::Value>(&b2).expect("响应应为 JSON");
     let val2 = binding_c2["data"].as_str().map(|s| s.to_string());
     assert_eq!(
         val2.as_deref(),
@@ -205,7 +207,10 @@ async fn test_non_whitelist_get_not_cached() {
         .expect("rows 应为数组")
         .len();
     assert_eq!(rows1, 0, "首次应无数据，实际 {rows1}");
-    assert_eq!(rows2, 1, "非白名单 GET 应反映新增数据（未被缓存），实际 {rows2}");
+    assert_eq!(
+        rows2, 1,
+        "非白名单 GET 应反映新增数据（未被缓存），实际 {rows2}"
+    );
     assert_ne!(b1, b2, "非白名单 GET 响应体应随数据变化而变化");
 }
 
@@ -239,7 +244,9 @@ async fn test_post_not_cached() {
     .await;
 
     // POST 后立即 GET 应能看到新记录 → 证明 POST 未被缓存层吞掉/延迟
-    let v = ctx.get_json("/system/dict/data/list?dictType=it_post_type").await;
+    let v = ctx
+        .get_json("/system/dict/data/list?dictType=it_post_type")
+        .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert_eq!(rows.len(), 1, "POST 应真实写库并立即可查，实际: {v}");
 
@@ -255,7 +262,9 @@ async fn test_post_not_cached() {
         }),
     )
     .await;
-    let v2 = ctx.get_json("/system/dict/data/list?dictType=it_post_type").await;
+    let v2 = ctx
+        .get_json("/system/dict/data/list?dictType=it_post_type")
+        .await;
     let rows2 = v2["rows"].as_array().expect("rows 应为数组");
     assert_eq!(rows2.len(), 2, "第二个 POST 应真实执行，实际: {v2}");
 }

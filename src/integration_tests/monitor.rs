@@ -22,11 +22,10 @@ async fn test_cache_monitoring_chain() {
 
     // 1. 概览：info / dbSize / commandStats
     let v = ctx.get_json("/monitor/cache").await;
-    let info = v["data"]["info"].as_object().expect("info 应为对象，实际: {v}");
-    assert!(
-        info.len() >= 3,
-        "info 应包含 Redis INFO 键值对，实际: {v}"
-    );
+    let info = v["data"]["info"]
+        .as_object()
+        .expect("info 应为对象，实际: {v}");
+    assert!(info.len() >= 3, "info 应包含 Redis INFO 键值对，实际: {v}");
     assert!(
         v["data"]["dbSize"].is_number(),
         "dbSize 应为数字，实际: {v}"
@@ -55,10 +54,7 @@ async fn test_cache_monitoring_chain() {
 
     // 4. 值：读取该键的 OnlineSession JSON
     let v = ctx
-        .get_json(&format!(
-            "/monitor/cache/getValue/online:/{}",
-            first_key
-        ))
+        .get_json(&format!("/monitor/cache/getValue/online:/{}", first_key))
         .await;
     assert_eq!(
         v["data"]["cacheName"].as_str(),
@@ -82,7 +78,9 @@ async fn test_cache_monitoring_chain() {
     ctx.assert_ok(&v);
 
     // 6. 清理：按前缀清空 online: 分组后，键列表应为空
-    let v = ctx.delete_json("/monitor/cache/clearCacheName/online:").await;
+    let v = ctx
+        .delete_json("/monitor/cache/clearCacheName/online:")
+        .await;
     ctx.assert_ok(&v);
     let v = ctx.get_json("/monitor/cache/getKeys/online:").await;
     let keys = v["data"].as_array().expect("data 应为数组，实际: {v}");
@@ -96,11 +94,7 @@ async fn test_cache_validation_errors() {
 
     // 1. 通配符前缀 → 400（name_wildcard_forbidden）
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            "/monitor/cache/getKeys/dict:*",
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, "/monitor/cache/getKeys/dict:*", None))
         .await;
     assert_ne!(v["code"], 200, "通配符前缀业务码不应为 200，实际: {v}");
     assert_eq!(
@@ -111,11 +105,7 @@ async fn test_cache_validation_errors() {
 
     // 2. 非白名单前缀 → 400（prefix_not_allowed）
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            "/monitor/cache/getKeys/session:",
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, "/monitor/cache/getKeys/session:", None))
         .await;
     assert_ne!(v["code"], 200, "非白名单前缀业务码不应为 200，实际: {v}");
     assert_eq!(
@@ -141,11 +131,7 @@ async fn test_cache_validation_errors() {
 
     // 4. clearCacheKey 带通配符 → 400（name_wildcard_forbidden）
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::DELETE,
-            "/monitor/cache/clearCacheKey/dict:*",
-            None,
-        ))
+        .send_raw(ctx.request(Method::DELETE, "/monitor/cache/clearCacheKey/dict:*", None))
         .await;
     assert_ne!(v["code"], 200, "通配符清理业务码不应为 200，实际: {v}");
     assert_eq!(
@@ -262,10 +248,7 @@ async fn test_observability_slow_error_redis() {
         .get_json("/monitor/slow-sql/list?pageNum=1&pageSize=10")
         .await;
     assert!(v["rows"].is_array(), "slow-sql rows 应为数组，实际: {v}");
-    assert!(
-        v["total"].is_number(),
-        "slow-sql total 应为数字，实际: {v}"
-    );
+    assert!(v["total"].is_number(), "slow-sql total 应为数字，实际: {v}");
     let v = ctx.get_json("/monitor/slow-sql/stats").await;
     assert!(v["data"].is_object(), "slow-sql stats 应为对象，实际: {v}");
     let v = ctx.delete_json("/monitor/slow-sql/clear").await;
@@ -321,7 +304,9 @@ async fn test_log_files_and_tail() {
 
     // 1. 文件列表：目录可能为空，但响应结构固定（data.rows 数组）
     let v = ctx.get_json("/monitor/log/files").await;
-    let rows = v["data"]["rows"].as_array().expect("rows 应为数组，实际: {v}");
+    let rows = v["data"]["rows"]
+        .as_array()
+        .expect("rows 应为数组，实际: {v}");
     // 若存在日志文件，每项应含 file_name 字段
     if let Some(first) = rows.first() {
         assert!(

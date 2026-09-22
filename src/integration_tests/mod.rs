@@ -19,15 +19,18 @@ mod auth;
 mod common_handler;
 mod file_common;
 mod ip_location;
+mod menu_perm_contract;
 mod monitor;
 mod monitor_extra;
+mod response_cache;
+mod sso;
 mod sys_backup;
 mod sys_config_dict;
 mod sys_frontend_error;
 mod sys_http_debug;
 mod sys_job;
-mod sys_logininfor;
 mod sys_log_clean_export;
+mod sys_logininfor;
 mod sys_menu_dept;
 mod sys_misc_extra;
 mod sys_msg;
@@ -44,15 +47,13 @@ mod sys_user;
 mod sys_user_extra;
 mod sys_user_pref;
 mod sys_web_hook;
-mod menu_perm_contract;
-mod response_cache;
 mod tool_gen;
 mod totp;
 mod ws;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, LazyLock, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -81,8 +82,7 @@ static TRACING_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn init_test_tracing() {
     TRACING_INIT.get_or_init(|| {
-        let filter = std::env::var("RUST_LOG")
-            .unwrap_or_else(|_| "warn".to_string());
+        let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string());
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_new(&filter)
@@ -99,7 +99,12 @@ static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_peer_ip() -> IpAddr {
     let n = PEER_IP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    IpAddr::V4(Ipv4Addr::new(10, 77, ((n >> 8) & 0xff) as u8, (n & 0xff) as u8))
+    IpAddr::V4(Ipv4Addr::new(
+        10,
+        77,
+        ((n >> 8) & 0xff) as u8,
+        (n & 0xff) as u8,
+    ))
 }
 
 /// 返回 config.toml 的绝对路径（基于 CARGO_MANIFEST_DIR，避免 cwd 依赖）。
@@ -115,9 +120,8 @@ const TEST_REDIS_DB_COUNT: usize = 15;
 /// 空闲 Redis DB 索引池（自由列表）：
 /// - `acquire` 弹出一个空闲索引，测试结束 drop 时归还；
 /// - 配合信号量，保证同时最多 `TEST_REDIS_DB_COUNT` 个测试各占一个唯一 DB。
-static REDIS_DB_FREELIST: LazyLock<Mutex<Vec<u64>>> = LazyLock::new(|| {
-    Mutex::new((1..=TEST_REDIS_DB_COUNT as u64).collect())
-});
+static REDIS_DB_FREELIST: LazyLock<Mutex<Vec<u64>>> =
+    LazyLock::new(|| Mutex::new((1..=TEST_REDIS_DB_COUNT as u64).collect()));
 static REDIS_DB_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(TEST_REDIS_DB_COUNT));
 
@@ -130,7 +134,10 @@ pub struct RedisSlot {
 
 impl Drop for RedisSlot {
     fn drop(&mut self) {
-        REDIS_DB_FREELIST.lock().expect("DB 池锁中毒").push(self.db_index);
+        REDIS_DB_FREELIST
+            .lock()
+            .expect("DB 池锁中毒")
+            .push(self.db_index);
     }
 }
 
@@ -347,12 +354,7 @@ impl TestContext {
 
     /// 执行请求并解析 JSON，断言 HTTP 200 且业务码 code == 200。
     pub async fn send_json(&self, req: Request<Body>) -> serde_json::Value {
-        let resp = self
-            .app
-            .clone()
-            .oneshot(req)
-            .await
-            .expect("请求执行失败");
+        let resp = self.app.clone().oneshot(req).await.expect("请求执行失败");
         let status = resp.status();
         let body = to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -363,21 +365,16 @@ impl TestContext {
                 String::from_utf8_lossy(&body)
             )
         });
-        assert_eq!(
-            v["code"], 200,
-            "业务码应为 200（HTTP {status}），实际: {v}"
-        );
+        assert_eq!(v["code"], 200, "业务码应为 200（HTTP {status}），实际: {v}");
         v
     }
 
     /// 执行请求并返回原始 HTTP 状态码 + JSON（用于 401/404/400 等非快乐路径断言）。
-    pub async fn send_raw(&self, req: Request<Body>) -> (axum::http::StatusCode, serde_json::Value) {
-        let resp = self
-            .app
-            .clone()
-            .oneshot(req)
-            .await
-            .expect("请求执行失败");
+    pub async fn send_raw(
+        &self,
+        req: Request<Body>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let resp = self.app.clone().oneshot(req).await.expect("请求执行失败");
         let status = resp.status();
         let body = to_bytes(resp.into_body(), usize::MAX)
             .await

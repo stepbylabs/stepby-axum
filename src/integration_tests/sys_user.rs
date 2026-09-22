@@ -18,17 +18,21 @@ async fn test_user_list_query_and_detail() {
         .get_json("/system/user/list?pageNum=1&pageSize=10")
         .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
-    assert!(rows.len() >= 2, "种子应至少 2 个用户（admin/ry），实际: {v}");
-    assert!(v["total"].as_u64().unwrap() >= 2, "total 应 >= 2，实际: {v}");
+    assert!(
+        rows.len() >= 2,
+        "种子应至少 2 个用户（admin/ry），实际: {v}"
+    );
+    assert!(
+        v["total"].as_u64().unwrap() >= 2,
+        "total 应 >= 2，实际: {v}"
+    );
     assert!(
         rows.iter().any(|r| r["userName"] == "admin"),
         "列表应包含 admin，实际: {v}"
     );
 
     // 2. 按用户名过滤
-    let v = ctx
-        .get_json("/system/user/list?userName=admin")
-        .await;
+    let v = ctx.get_json("/system/user/list?userName=admin").await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(
         rows.iter().all(|r| r["userName"] == "admin"),
@@ -54,7 +58,10 @@ async fn test_user_list_query_and_detail() {
     // 5. 角色下拉（GET /system/user/，roles 为顶层字段）
     let v = ctx.get_json("/system/user/").await;
     assert!(
-        v["roles"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        v["roles"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
         "用户表单角色下拉应返回角色列表，实际: {v}"
     );
 }

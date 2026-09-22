@@ -111,10 +111,7 @@ async fn it_mon_observability_slow_sql() {
         .get_json("/monitor/slow-sql/list?pageNum=1&pageSize=10")
         .await;
     assert!(v["rows"].is_array(), "slow-sql rows 应为数组，实际: {v}");
-    assert!(
-        v["total"].is_number(),
-        "slow-sql total 应为数字，实际: {v}"
-    );
+    assert!(v["total"].is_number(), "slow-sql total 应为数字，实际: {v}");
 
     // 统计：data 应为对象
     let v = ctx.get_json("/monitor/slow-sql/stats").await;
@@ -218,7 +215,10 @@ async fn it_mon_server_info() {
         d["cpu"]["cpuNum"].as_u64().unwrap_or(0) >= 1,
         "cpu.cpuNum 应 >= 1，实际: {v}"
     );
-    assert!(d["cpu"]["used"].is_f64() || d["cpu"]["used"].is_u64(), "cpu.used 应为数值: {v}");
+    assert!(
+        d["cpu"]["used"].is_f64() || d["cpu"]["used"].is_u64(),
+        "cpu.used 应为数值: {v}"
+    );
     // 内存：total 应 > 0，usage 为数值
     assert!(
         d["mem"]["total"].as_f64().unwrap_or(0.0) > 0.0,
@@ -235,8 +235,14 @@ async fn it_mon_server_info() {
     );
     // 运行时：name / version / runTime 为字符串
     assert!(d["jvm"]["name"].is_string(), "jvm.name 应为字符串: {v}");
-    assert!(d["jvm"]["version"].is_string(), "jvm.version 应为字符串: {v}");
-    assert!(d["jvm"]["runTime"].is_string(), "jvm.runTime 应为字符串: {v}");
+    assert!(
+        d["jvm"]["version"].is_string(),
+        "jvm.version 应为字符串: {v}"
+    );
+    assert!(
+        d["jvm"]["runTime"].is_string(),
+        "jvm.runTime 应为字符串: {v}"
+    );
     // 磁盘：应为数组
     assert!(d["sysFiles"].is_array(), "sysFiles 应为数组，实际: {v}");
 }
@@ -249,7 +255,10 @@ async fn it_mon_cache_chain() {
     // 1. 概览：info 对象 / dbSize 数字 / commandStats 数组
     let v = ctx.get_json("/monitor/cache").await;
     assert!(v["data"]["info"].is_object(), "info 应为对象，实际: {v}");
-    assert!(v["data"]["dbSize"].is_number(), "dbSize 应为数字，实际: {v}");
+    assert!(
+        v["data"]["dbSize"].is_number(),
+        "dbSize 应为数字，实际: {v}"
+    );
     assert!(
         v["data"]["commandStats"].is_array(),
         "commandStats 应为数组，实际: {v}"
@@ -271,10 +280,7 @@ async fn it_mon_cache_chain() {
 
     // 4. 值：读取该键的 OnlineSession JSON（cacheName/cacheKey 回显，cacheValue 非空）
     let v = ctx
-        .get_json(&format!(
-            "/monitor/cache/getValue/online:/{}",
-            first_key
-        ))
+        .get_json(&format!("/monitor/cache/getValue/online:/{}", first_key))
         .await;
     assert_eq!(
         v["data"]["cacheName"].as_str(),
@@ -296,7 +302,9 @@ async fn it_mon_cache_chain() {
     assert!(v["data"].is_array(), "prefixStats 应为数组，实际: {v}");
 
     // 6. 清理：按前缀清空 online: 分组后键列表为空
-    let v = ctx.delete_json("/monitor/cache/clearCacheName/online:").await;
+    let v = ctx
+        .delete_json("/monitor/cache/clearCacheName/online:")
+        .await;
     ctx.assert_ok(&v);
     let v = ctx.get_json("/monitor/cache/getKeys/online:").await;
     let keys = v["data"].as_array().expect("data 应为数组，实际: {v}");
@@ -310,11 +318,7 @@ async fn it_mon_cache_validation_errors() {
 
     // 1. 通配符前缀 → 400（name_wildcard_forbidden）
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            "/monitor/cache/getKeys/dict:*",
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, "/monitor/cache/getKeys/dict:*", None))
         .await;
     assert_ne!(v["code"], 200, "通配符前缀业务码不应为 200，实际: {v}");
     assert_eq!(
@@ -325,11 +329,7 @@ async fn it_mon_cache_validation_errors() {
 
     // 2. 非白名单前缀 → 400（prefix_not_allowed）
     let (status, v) = ctx
-        .send_raw(ctx.request(
-            Method::GET,
-            "/monitor/cache/getKeys/session:",
-            None,
-        ))
+        .send_raw(ctx.request(Method::GET, "/monitor/cache/getKeys/session:", None))
         .await;
     assert_ne!(v["code"], 200, "非白名单前缀业务码不应为 200，实际: {v}");
     assert_eq!(
@@ -346,7 +346,9 @@ async fn it_mon_log_files_and_tail() {
 
     // 1. 文件列表：目录可能为空，但结构固定（data.rows 数组，每项含 fileName）
     let v = ctx.get_json("/monitor/log/files").await;
-    let rows = v["data"]["rows"].as_array().expect("rows 应为数组，实际: {v}");
+    let rows = v["data"]["rows"]
+        .as_array()
+        .expect("rows 应为数组，实际: {v}");
     if let Some(first) = rows.first() {
         assert!(
             first["fileName"].is_string(),

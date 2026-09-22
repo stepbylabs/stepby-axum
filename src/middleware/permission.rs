@@ -579,6 +579,17 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("DELETE", "/system/oauth/provider/{providerIds}", "system:oauth:provider:remove"),
     ("PUT", "/system/oauth/provider/{providerId}/status", "system:oauth:provider:toggle"),
 
+    // ===== 单点登录 / OIDC Provider 客户端管理 =====
+    // 权限对齐 sys_menu 迁移种子（145 目录 / 147 页面 perms=system:oauth:client:list，
+    // 按钮 3265-3268 分别为 add/edit/remove/toggle，见 m20260922_000001_sso_module）。
+    // 路由参数名与 sso_router 完全一致：详情/删除均为 /system/oauth/client/{id}。
+    ("GET", "/system/oauth/client/list", "system:oauth:client:list"),
+    ("GET", "/system/oauth/client/{id}", "system:oauth:client:list"),
+    ("POST", "/system/oauth/client", "system:oauth:client:add"),
+    ("PUT", "/system/oauth/client", "system:oauth:client:edit"),
+    ("DELETE", "/system/oauth/client/{id}", "system:oauth:client:remove"),
+    ("PUT", "/system/oauth/client/{id}/status", "system:oauth:client:toggle"),
+
     // ===== 报表中心 + 定时订阅推送 =====
     // 权限标识与 sys_menu 迁移种子（m20260819_000003_report_module）对齐：
     // 报表定义 system:report:list/query/add/edit/remove/status/preview
@@ -733,6 +744,8 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("GET", "/oauth2/my-bindings")
             | ("POST", "/oauth2/bind")
             | ("DELETE", "/oauth2/unbind")
+        // ===== 单点登录授权同意（本人登录态下批准/拒绝，仅登录，无需 RBAC）=====
+            | ("POST", "/sso/consent")
         // ===== 前端异常/性能上报（任何已登录用户皆可上报，无需 RBAC，Tier-S #1）=====
             | ("POST", "/monitor/frontendError/report")
     )

@@ -25,9 +25,17 @@ async fn it_com_health_check() {
     let ctx = TestContext::new().await;
 
     let v = ctx.get_json("/health").await;
-    assert_eq!(v["data"]["status"].as_str(), Some("UP"), "整体状态应为 UP，实际: {v}");
+    assert_eq!(
+        v["data"]["status"].as_str(),
+        Some("UP"),
+        "整体状态应为 UP，实际: {v}"
+    );
     assert_eq!(v["data"]["db"].as_str(), Some("UP"), "DB 应 UP，实际: {v}");
-    assert_eq!(v["data"]["redis"].as_str(), Some("UP"), "Redis 应 UP，实际: {v}");
+    assert_eq!(
+        v["data"]["redis"].as_str(),
+        Some("UP"),
+        "Redis 应 UP，实际: {v}"
+    );
     assert!(
         !v["data"]["version"].as_str().unwrap_or("").is_empty(),
         "version 不应为空，实际: {v}"
@@ -48,7 +56,11 @@ async fn it_com_captcha_disabled_default() {
         "测试库默认应关闭验证码，实际: {v}"
     );
     assert_eq!(v["img"].as_str(), Some(""), "关闭态 img 应为空，实际: {v}");
-    assert_eq!(v["uuid"].as_str(), Some(""), "关闭态 uuid 应为空，实际: {v}");
+    assert_eq!(
+        v["uuid"].as_str(),
+        Some(""),
+        "关闭态 uuid 应为空，实际: {v}"
+    );
     assert!(
         v["registerEnabled"].is_boolean(),
         "registerEnabled 应为布尔，实际: {v}"
@@ -72,7 +84,9 @@ async fn it_com_get_info_routers() {
         roles.iter().any(|r| r.as_str() == Some("admin")),
         "admin roles 应包含 admin，实际: {v}"
     );
-    let perms = v["permissions"].as_array().expect("permissions 应为数组，实际: {v}");
+    let perms = v["permissions"]
+        .as_array()
+        .expect("permissions 应为数组，实际: {v}");
     assert!(
         perms.iter().any(|p| p.as_str() == Some("*:*:*")),
         "超管权限应包含 *:*:*，实际: {v}"
@@ -80,10 +94,14 @@ async fn it_com_get_info_routers() {
 
     // getRouters：data 为路由树数组
     let v = ctx.get_json("/getRouters").await;
-    let routers = v["data"].as_array().expect("getRouters data 应为数组，实际: {v}");
+    let routers = v["data"]
+        .as_array()
+        .expect("getRouters data 应为数组，实际: {v}");
     assert!(!routers.is_empty(), "admin 路由树不应为空，实际: {v}");
     assert!(
-        routers.iter().all(|r| r.get("path").is_some() && r.get("name").is_some()),
+        routers
+            .iter()
+            .all(|r| r.get("path").is_some() && r.get("name").is_some()),
         "路由节点应含 path/name，实际: {v}"
     );
 }
@@ -108,7 +126,11 @@ async fn it_com_register_validation_branches() {
         ))
         .await;
     assert_ne!(v["code"], 200, "无效 uuid 业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "无效 uuid 应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "无效 uuid 应 400，实际: {status}"
+    );
 
     // 2. 用户名过短（< 2）→ 400（garde length）
     let (status, v) = ctx
@@ -124,7 +146,11 @@ async fn it_com_register_validation_branches() {
         ))
         .await;
     assert_ne!(v["code"], 200, "过短用户名业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "过短用户名应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "过短用户名应 400，实际: {status}"
+    );
 
     // 3. 弱口令（无数字）→ 400（password 复杂度校验，注册入口拦截）
     let (status, v) = ctx
@@ -140,7 +166,11 @@ async fn it_com_register_validation_branches() {
         ))
         .await;
     assert_ne!(v["code"], 200, "弱口令业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "弱口令应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "弱口令应 400，实际: {status}"
+    );
 
     // 4. 合法参数 + 默认禁注册 → 403（registerUser 默认 false，安全失败禁止注册）
     let (status, v) = ctx
@@ -177,7 +207,11 @@ async fn it_com_common_download_validation() {
         ))
         .await;
     assert_ne!(v["code"], 200, "路径穿越下载业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "路径穿越下载应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "路径穿越下载应 400，实际: {status}"
+    );
 
     // 2. /common/download/resource：resource 含 `..` → 400
     let (status, v) = ctx
@@ -188,7 +222,11 @@ async fn it_com_common_download_validation() {
         ))
         .await;
     assert_ne!(v["code"], 200, "资源路径穿越业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "资源路径穿越应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "资源路径穿越应 400，实际: {status}"
+    );
 }
 
 /// 仪表盘聚合统计 /dashboard/stats（本地 DB/Redis 聚合，稳定通过）。
@@ -197,11 +235,26 @@ async fn it_com_dashboard_stats_structure() {
     let ctx = TestContext::new().await;
 
     let v = ctx.get_json("/dashboard/stats").await;
-    assert!(v["data"]["totalUsers"].is_number(), "totalUsers 应为数字，实际: {v}");
-    assert!(v["data"]["totalRoles"].is_number(), "totalRoles 应为数字，实际: {v}");
-    assert!(v["data"]["activeRoles"].is_number(), "activeRoles 应为数字，实际: {v}");
-    assert!(v["data"]["onlineCount"].is_number(), "onlineCount 应为数字，实际: {v}");
-    assert!(v["data"]["todayLogins"].is_number(), "todayLogins 应为数字，实际: {v}");
+    assert!(
+        v["data"]["totalUsers"].is_number(),
+        "totalUsers 应为数字，实际: {v}"
+    );
+    assert!(
+        v["data"]["totalRoles"].is_number(),
+        "totalRoles 应为数字，实际: {v}"
+    );
+    assert!(
+        v["data"]["activeRoles"].is_number(),
+        "activeRoles 应为数字，实际: {v}"
+    );
+    assert!(
+        v["data"]["onlineCount"].is_number(),
+        "onlineCount 应为数字，实际: {v}"
+    );
+    assert!(
+        v["data"]["todayLogins"].is_number(),
+        "todayLogins 应为数字，实际: {v}"
+    );
     assert!(
         v["data"]["recentOperLogs"].is_array(),
         "recentOperLogs 应为数组，实际: {v}"

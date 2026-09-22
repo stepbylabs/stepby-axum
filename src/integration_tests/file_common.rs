@@ -90,15 +90,8 @@ async fn test_captcha_disabled_default() {
     let ctx = TestContext::new().await;
 
     let v = ctx.get_json("/captchaImage").await;
-    assert_eq!(
-        v["captchaEnabled"], false,
-        "默认应关闭验证码，实际: {v}"
-    );
-    assert_eq!(
-        v["img"].as_str(),
-        Some(""),
-        "关闭态 img 应为空，实际: {v}"
-    );
+    assert_eq!(v["captchaEnabled"], false, "默认应关闭验证码，实际: {v}");
+    assert_eq!(v["img"].as_str(), Some(""), "关闭态 img 应为空，实际: {v}");
     assert_eq!(
         v["uuid"].as_str(),
         Some(""),
@@ -136,11 +129,12 @@ async fn test_captcha_enabled_generates_image() {
     req.extensions_mut()
         .insert(ConnectInfo(SocketAddr::from((peer_ip, 1234))));
 
-    let resp = app
-        .oneshot(req)
-        .await
-        .expect("captchaImage 请求执行失败");
-    assert_eq!(resp.status(), StatusCode::OK, "captchaImage 应返回 HTTP 200");
+    let resp = app.oneshot(req).await.expect("captchaImage 请求执行失败");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "captchaImage 应返回 HTTP 200"
+    );
     let body = to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("读取 captchaImage 响应体失败");
@@ -162,7 +156,13 @@ async fn test_captcha_enabled_generates_image() {
 }
 
 /// 构造 multipart/form-data 请求体（单个 file 字段），供上传测试使用。
-fn multipart_body(boundary: &str, field: &str, filename: &str, content_type: &str, data: &[u8]) -> Vec<u8> {
+fn multipart_body(
+    boundary: &str,
+    field: &str,
+    filename: &str,
+    content_type: &str,
+    data: &[u8],
+) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(
         format!(
@@ -212,14 +212,20 @@ async fn test_common_upload_download_delete_chain() {
         .method("POST")
         .uri("/common/upload")
         .header("authorization", format!("Bearer {}", ctx.token))
-        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
         .body(Body::from(body))
         .expect("构造 multipart 上传请求失败");
     req.extensions_mut()
         .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
 
     let v = ctx.send_json(req).await;
-    let url = v["url"].as_str().expect("应返回 url，实际: {v}").to_string();
+    let url = v["url"]
+        .as_str()
+        .expect("应返回 url，实际: {v}")
+        .to_string();
     assert!(
         url.starts_with("/uploads/file/"),
         "url 应位于 /uploads/file/ 下，实际: {v}"
@@ -233,7 +239,10 @@ async fn test_common_upload_download_delete_chain() {
         .as_str()
         .expect("应返回 newFileName，实际: {v}")
         .to_string();
-    assert!(new_file_name.ends_with(".txt"), "newFileName 应保留 .txt，实际: {v}");
+    assert!(
+        new_file_name.ends_with(".txt"),
+        "newFileName 应保留 .txt，实际: {v}"
+    );
     assert_eq!(
         v["originalFilename"].as_str(),
         Some("it-file.txt"),
@@ -302,18 +311,31 @@ async fn test_file_upload_delete_validation_errors() {
     v["data"]["rows"]
         .as_array()
         .expect("rows 应为数组，实际: {v}");
-    assert!(
-        v["data"]["total"].is_number(),
-        "total 应为数字，实际: {v}"
-    );
+    assert!(v["data"]["total"].is_number(), "total 应为数字，实际: {v}");
 
     // 2. 危险扩展名（.exe 不在白名单）→ 400
-    let body = multipart_body(boundary, "file", "it-evil.exe", "application/octet-stream", b"MZit-evil");
+    let body = multipart_body(
+        boundary,
+        "file",
+        "it-evil.exe",
+        "application/octet-stream",
+        b"MZit-evil",
+    );
     let (status, v) = ctx
-        .send_raw(raw_multipart_request(&ctx, Method::POST, "/common/upload", boundary, body))
+        .send_raw(raw_multipart_request(
+            &ctx,
+            Method::POST,
+            "/common/upload",
+            boundary,
+            body,
+        ))
         .await;
     assert_ne!(v["code"], 200, "危险扩展名业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "危险扩展名应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "危险扩展名应 400，实际: {status}"
+    );
 
     // 3. txt 声明但内容是 HTML/脚本（magic 校验拒绝伪装标记）→ 400
     let body = multipart_body(
@@ -324,18 +346,38 @@ async fn test_file_upload_delete_validation_errors() {
         b"<html><script>alert(1)</script></html>",
     );
     let (status, v) = ctx
-        .send_raw(raw_multipart_request(&ctx, Method::POST, "/common/upload", boundary, body))
+        .send_raw(raw_multipart_request(
+            &ctx,
+            Method::POST,
+            "/common/upload",
+            boundary,
+            body,
+        ))
         .await;
     assert_ne!(v["code"], 200, "magic 不匹配业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "magic 不匹配应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "magic 不匹配应 400，实际: {status}"
+    );
 
     // 4. 缺少 file 字段 → 400（field_not_found）
     let body = multipart_body(boundary, "notfile", "it-other.txt", "text/plain", b"hello");
     let (status, v) = ctx
-        .send_raw(raw_multipart_request(&ctx, Method::POST, "/system/file/upload", boundary, body))
+        .send_raw(raw_multipart_request(
+            &ctx,
+            Method::POST,
+            "/system/file/upload",
+            boundary,
+            body,
+        ))
         .await;
     assert_ne!(v["code"], 200, "缺 file 字段业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "缺 file 字段应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "缺 file 字段应 400，实际: {status}"
+    );
 
     // 5. 删除非法文件名（路径穿越）→ 400
     let (status, v) = ctx
@@ -346,7 +388,11 @@ async fn test_file_upload_delete_validation_errors() {
         ))
         .await;
     assert_ne!(v["code"], 200, "路径穿越删除业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "路径穿越删除应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "路径穿越删除应 400，实际: {status}"
+    );
 
     // 6. 下载非法文件名（路径穿越）→ 400
     let (status, v) = ctx
@@ -357,7 +403,11 @@ async fn test_file_upload_delete_validation_errors() {
         ))
         .await;
     assert_ne!(v["code"], 200, "路径穿越下载业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "路径穿越下载应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "路径穿越下载应 400，实际: {status}"
+    );
 }
 
 /// IP 归属地库管理：status / config 结构断言 + 保存（p3terx）+ 参数错误分支。
@@ -428,8 +478,15 @@ async fn test_ip_location_status_config_save() {
             })),
         ))
         .await;
-    assert_ne!(v["code"], 200, "非法 update_source 业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 update_source 应 400，实际: {status}");
+    assert_ne!(
+        v["code"], 200,
+        "非法 update_source 业务码不应为 200，实际: {v}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 update_source 应 400，实际: {status}"
+    );
 
     // 5. 切到 maxmind 但未提供凭据 → 400（maxmind_credentials_required）
     let (status, v) = ctx
@@ -472,7 +529,11 @@ async fn test_http_debugger_validation_errors() {
         ))
         .await;
     assert_ne!(v["code"], 200, "非法方法业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法方法应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法方法应 400，实际: {status}"
+    );
 
     // 2. 非法 scheme（ftp）→ 400（仅允许 http/https）
     let (status, v) = ctx
@@ -487,7 +548,11 @@ async fn test_http_debugger_validation_errors() {
         ))
         .await;
     assert_ne!(v["code"], 200, "非法 scheme 业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 scheme 应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 scheme 应 400，实际: {status}"
+    );
 
     // 3. SSRF 拦截：内网/保留地址 → 400（禁止访问内网）
     let (status, v) = ctx
@@ -502,7 +567,11 @@ async fn test_http_debugger_validation_errors() {
         ))
         .await;
     assert_ne!(v["code"], 200, "SSRF 内网地址业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "SSRF 内网地址应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "SSRF 内网地址应 400，实际: {status}"
+    );
 
     // 4. 缺主机名 URL → 400
     let (status, v) = ctx
@@ -517,5 +586,9 @@ async fn test_http_debugger_validation_errors() {
         ))
         .await;
     assert_ne!(v["code"], 200, "缺主机名业务码不应为 200，实际: {v}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "缺主机名应 400，实际: {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "缺主机名应 400，实际: {status}"
+    );
 }
