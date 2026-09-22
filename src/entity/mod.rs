@@ -28,6 +28,7 @@ pub mod sys_notice_read;
 pub mod sys_oauth_provider;
 pub mod sys_oauth_user;
 pub mod sys_oper_log;
+pub mod sys_pat;
 pub mod sys_post;
 pub mod sys_rate_limit;
 pub mod sys_report;

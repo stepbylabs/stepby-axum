@@ -72,6 +72,24 @@ pub async fn permission_middleware(
         None => None,
     };
 
+    // Tier-S #3：令牌管理类接口禁止由 PAT 调用（防止作用域令牌自我签发 / 扩权 / 续期）。
+    // 该检查置于“无权限要求即放行”之前，因为自助令牌接口本身是“仅登录”路由。
+    if claims.pat_scopes.is_some()
+        && let Some(p) = matched_path.as_deref()
+        && is_pat_management_path(p)
+    {
+        tracing::warn!(
+            user_id = claims.sub,
+            method = %method,
+            path = p,
+            "拒绝：访问令牌不得管理令牌本身"
+        );
+        return Err(AppError::new(
+            403,
+            crate::tr!("error.pat.forbidden_pat_usage"),
+        ));
+    }
+
     let required_perm = match required_perm {
         Some(p) => p,
         None => {
@@ -128,8 +146,12 @@ pub async fn permission_middleware(
         .get_permissions_by_user_id(user_id)
         .await?;
 
-    // 5. 超管短路
-    if permissions.iter().any(|p| p == "*:*:*") {
+    // 5. 超管短路：权限列表含 `*:*:*` 时放行
+    //    Tier-S #3：仅对非 PAT 生效——PAT 即使属主为超管，也必须受自身 scope 约束，
+    //    否则细粒度 scope 形同虚设。
+    let is_pat = claims.pat_scopes.is_some();
+    let is_superadmin = permissions.iter().any(|p| p == "*:*:*");
+    if !is_pat && is_superadmin {
         tracing::debug!(
             user_id,
             method = %method,
@@ -140,7 +162,16 @@ pub async fn permission_middleware(
     }
 
     // 6. 权限匹配
-    if permissions.iter().any(|p| p == required_perm) {
+    //    - 用户维度：超管（*:*:*）或权限列表显式包含 required_perm；
+    //    - 令牌维度（仅 PAT）：required_perm 需被令牌 scope 按段通配覆盖。
+    //    两者取交集，即为 PAT 请求的有效权限（scope ∩ 用户当前权限）。
+    let user_has = is_superadmin || permissions.iter().any(|p| p == required_perm);
+    let scope_ok = match &claims.pat_scopes {
+        Some(scopes) => crate::service::sys_pat_service::scope_allows(scopes, required_perm),
+        None => true,
+    };
+
+    if user_has && scope_ok {
         Ok(next.run(req).await)
     } else {
         tracing::warn!(
@@ -148,7 +179,8 @@ pub async fn permission_middleware(
             method = %method,
             path = ?matched_path,
             required_perm,
-            "权限拒绝：用户缺少所需权限"
+            via_pat = is_pat,
+            "权限拒绝：用户缺少所需权限或超出令牌 scope"
         );
 
         // M-1：权限拒绝写入审计日志（best-effort，不阻断 403 响应）
@@ -621,6 +653,10 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // 此前误用已删除的 monitor:server:list，导致非超管用户看板统计全部 403
     ("GET", "/dashboard/stats", "monitor:dashboard:list"),
     ("GET", "/dashboard/user-stats", "monitor:dashboard:list"),
+
+    // ===== 个人访问令牌管理（Tier-S #3，管理员统一查看 / 吊销）=====
+    ("GET", "/monitor/pat/list", "monitor:pat:list"),
+    ("DELETE", "/monitor/pat/{patId}", "monitor:pat:revoke"),
 ];
 
 /// 根据 HTTP 方法和匹配路径返回所需权限标识。
@@ -673,6 +709,11 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
         // ===== 个人消息偏好 / 免打扰（仅本人操作，仅需登录）=====
             | ("GET", "/system/profile/pref")
             | ("PUT", "/system/profile/pref")
+        // ===== 个人访问令牌自助管理（仅本人操作，仅需登录；PAT 本身被禁，见 is_pat_management_path）=====
+            | ("GET", "/system/user/profile/tokens")
+            | ("GET", "/system/user/profile/tokens/scopes")
+            | ("POST", "/system/user/profile/tokens")
+            | ("DELETE", "/system/user/profile/tokens/{patId}")
         // ===== 下拉树 / 选项（仅登录）=====
             | ("GET", "/system/role/deptTree/{roleId}")
             | ("GET", "/system/menu/treeselect")
@@ -695,6 +736,14 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
         // ===== 前端异常/性能上报（任何已登录用户皆可上报，无需 RBAC，Tier-S #1）=====
             | ("POST", "/monitor/frontendError/report")
     )
+}
+
+/// Tier-S #3：判断某路径是否为“令牌管理类”路径（自助 + 管理端）。
+///
+/// 无论是否已登记权限映射，PAT 认证的请求一律禁止访问这些路径，防止一枚被窃的作用域令牌
+/// 自我签发更宽的令牌、吊销他人令牌或续期。匹配使用路径前缀（覆盖 `{patId}` 参数化模板）。
+fn is_pat_management_path(path: &str) -> bool {
+    path.starts_with("/system/user/profile/tokens") || path.starts_with("/monitor/pat")
 }
 
 #[cfg(test)]

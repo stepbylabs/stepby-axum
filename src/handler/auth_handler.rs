@@ -82,6 +82,7 @@ crate::impl_into_response!(CaptchaResult, LoginResult, GetInfoResult);
         (status = 200, description = "验证码生成成功", body = CaptchaResult),
         (status = 500, description = "服务器错误"),
     ),
+    security(()),
     tag = "auth"
 )]
 pub async fn captcha(
@@ -118,6 +119,7 @@ pub async fn captcha(
         (status = 400, description = "参数错误或验证码失效"),
         (status = 500, description = "服务器错误"),
     ),
+    security(()),
     tag = "auth"
 )]
 pub async fn login(

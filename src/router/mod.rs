@@ -23,6 +23,7 @@ pub mod sys_msg_router;
 pub mod sys_notice_router;
 pub mod sys_oauth_router;
 pub mod sys_oper_log_router;
+pub mod sys_pat_router;
 pub mod sys_post_router;
 pub mod sys_rate_limit_router;
 pub mod sys_report_router;
@@ -82,6 +83,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(auth_router::protected_auth_routes())
         .merge(sys_user_router::user_routes())
         .merge(sys_user_pref_router::user_pref_routes())
+        .merge(sys_pat_router::pat_routes())
         .merge(sys_role_router::role_routes())
         .merge(sys_menu_router::menu_routes())
         .merge(sys_msg_router::msg_routes())

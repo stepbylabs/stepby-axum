@@ -24,6 +24,7 @@ pub mod sys_msg_handler;
 pub mod sys_notice_handler;
 pub mod sys_oauth_handler;
 pub mod sys_oper_log_handler;
+pub mod sys_pat_handler;
 pub mod sys_post_handler;
 pub mod sys_rate_limit_handler;
 pub mod sys_report_handler;

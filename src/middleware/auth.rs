@@ -45,6 +45,16 @@ pub async fn auth_middleware(
     // 1+2. 提取 Bearer token（纯函数，见 extract_bearer_token）
     let token = extract_bearer_token(req.headers())?;
 
+    // Tier-S #3：个人访问令牌（PAT）分支。
+    // 以配置前缀（默认 "ybt_"）区分于登录 JWT（其头以 "eyJ" base64 开头，永不冲突）。
+    // 命中前缀即走 PAT 鉴权：按摘要查库校验有效性，合成带 pat_scopes 的 Claims 注入 extensions，
+    // 跳过 JWT 专属的 blacklist / pwd_ver（PAT 吊销靠每请求查库即时生效）；下游全部无感复用。
+    if !state.config.pat.prefix.is_empty() && token.starts_with(&state.config.pat.prefix) {
+        let claims = authenticate_pat(&state, token, req.extensions().get::<RequestId>().map(|r| r.0.clone())).await?;
+        req.extensions_mut().insert(claims);
+        return Ok(next.run(req).await);
+    }
+
     // 3. JWT 签名验证 + exp 过期校验
     //    verify_token 返回 Result<Claims, JwtError>，通过 From<JwtError> for AppError 自动转为 401
     let claims = JwtUtils::verify_token(token, &state.config.jwt)?;
@@ -113,6 +123,59 @@ pub async fn auth_middleware(
     // 6. 注入 Claims 到 request extensions，供下游 handler/中间件使用
     req.extensions_mut().insert(claims);
     Ok(next.run(req).await)
+}
+
+/// Tier-S #3：个人访问令牌（PAT）鉴权——校验并合成 Claims
+///
+/// 校验：功能启用 → 摘要命中有效令牌（status='0' 且未过期）→ 合成携带 `pat_scopes` 的 Claims。
+/// 最近使用时间以 best-effort `tokio::spawn` 异步更新，不阻塞请求。
+async fn authenticate_pat(
+    state: &Arc<AppState>,
+    token: &str,
+    request_id: Option<String>,
+) -> Result<Claims, AppError> {
+    if !state.config.pat.enabled {
+        // PAT 关闭：携带令牌前缀的请求一律拒绝（不回退到 JWT 分支）
+        return Err(AppError::unauthorized(&crate::tr!(
+            "error.auth.token_invalid"
+        )));
+    }
+    let request_id = request_id.unwrap_or_default();
+    let verified = state
+        .pat_service
+        .verify_token(token)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                request_id = %request_id,
+                error = %e,
+                "PAT 鉴权查库失败（fail-closed 拒绝请求）"
+            );
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
+    let Some(v) = verified else {
+        // 未命中 / 已吊销 / 已过期 → 401
+        return Err(AppError::unauthorized(&crate::tr!(
+            "error.auth.token_revoked"
+        )));
+    };
+    // best-effort 更新最近使用时间（失败仅记 debug，不影响请求）
+    let svc = state.pat_service.clone();
+    let pat_id = v.pat_id.clone();
+    tokio::spawn(async move {
+        svc.touch_last_used(&pat_id).await;
+    });
+    Ok(Claims {
+        sub: v.user_id.to_string(),
+        username: v.username,
+        exp: 0,
+        iat: 0,
+        iss: state.config.pat.prefix.clone(),
+        aud: state.config.pat.prefix.clone(),
+        jti: v.pat_id,
+        pwd_ver: 0,
+        pat_scopes: Some(v.scopes),
+    })
 }
 
 /// 操作人提取器（从 request extensions 中提取 Claims）
@@ -230,6 +293,7 @@ mod tests {
             aud: "yebot".to_string(),
             jti: "jti-1".to_string(),
             pwd_ver: 0,
+            pat_scopes: None,
         };
         parts.extensions.insert(claims);
         let operator = Operator::from_request_parts(&mut parts, &()).await.unwrap();

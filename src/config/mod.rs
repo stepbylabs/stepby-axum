@@ -3,6 +3,6 @@
 pub mod settings;
 
 pub use settings::{
-    DatabaseConfig, JwtConfig, LogConfig, MailConfig, RedisConfig, S3StorageConfig, ServerConfig,
-    Settings, UploadConfig,
+    DatabaseConfig, JwtConfig, LogConfig, MailConfig, PatConfig, RedisConfig, S3StorageConfig,
+    ServerConfig, Settings, UploadConfig,
 };

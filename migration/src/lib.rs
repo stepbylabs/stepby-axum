@@ -50,6 +50,7 @@ pub use m20260820_000001_demo_seed::Migration as M20260820DemoSeed;
 pub use m20260820_000002_web_hook_module::Migration as M20260820WebHookModule;
 pub use m20260821_000001_frontend_error_module::Migration as M20260821FrontendErrorModule;
 pub use m20260822_000001_oper_log_diff::Migration as M20260822OperLogDiff;
+pub use m20260823_000001_sys_pat::Migration as M20260823SysPat;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -98,6 +99,7 @@ mod m20260820_000001_demo_seed;
 mod m20260820_000002_web_hook_module;
 mod m20260821_000001_frontend_error_module;
 mod m20260822_000001_oper_log_diff;
+mod m20260823_000001_sys_pat;
 
 use sea_orm_migration::prelude::*;
 
@@ -155,6 +157,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260820WebHookModule),
             Box::new(M20260821FrontendErrorModule),
             Box::new(M20260822OperLogDiff),
+            Box::new(M20260823SysPat),
         ]
     }
 }

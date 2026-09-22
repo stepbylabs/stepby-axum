@@ -370,6 +370,15 @@ error:
   pref:
     value_invalid: "Message preference field %{field} is invalid (must be '0' or '1')"
     time_invalid: "Do-not-disturb field %{field} has invalid time format (expected HH:MM): %{value}"
+  pat:
+    name_required: Token name is required
+    name_too_long: Token name is too long (max 100 characters)
+    scopes_empty: Token scopes cannot be empty
+    scopes_invalid: "Invalid permission key format: %{value}"
+    count_exceeded: "Per-user token limit reached (%{max})"
+    not_found: Token does not exist
+    forbidden_pat_usage: Access tokens cannot be used to manage tokens themselves
+    create_failed: Failed to generate token
   websocket:
     connected: WebSocket connected
   role:

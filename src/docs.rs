@@ -13,6 +13,7 @@ use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
 use std::sync::OnceLock;
 use utoipa::OpenApi;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme};
 
 /// 嵌入的 Swagger UI 静态资源（本地自托管，替代 unpkg CDN）
 ///
@@ -182,6 +183,13 @@ struct SwaggerAssets;
         crate::handler::sys_report_handler::sub_remove,
         crate::handler::sys_report_handler::sub_status,
         crate::handler::sys_report_handler::sub_run,
+        // ==================== 个人访问令牌（PAT，Tier-S #3）====================
+        crate::handler::sys_pat_handler::list_mine,
+        crate::handler::sys_pat_handler::scope_options,
+        crate::handler::sys_pat_handler::create,
+        crate::handler::sys_pat_handler::revoke_mine,
+        crate::handler::sys_pat_handler::list_all,
+        crate::handler::sys_pat_handler::revoke_by_admin,
     ),
     components(
         schemas(
@@ -288,6 +296,10 @@ struct SwaggerAssets;
             crate::common::TreeSelectVo,
             // ==================== 通用接口 ====================
             crate::handler::common_handler::CommonUploadResult,
+            // ==================== 个人访问令牌（PAT） ====================
+            crate::service::sys_pat_service::PatVo,
+            crate::service::sys_pat_service::CreatePatDto,
+            crate::service::sys_pat_service::CreatePatResult,
         ),
     ),
     tags(
@@ -309,9 +321,39 @@ struct SwaggerAssets;
         (name = "monitor-server", description = "服务器监控"),
         (name = "common", description = "通用接口"),
         (name = "tool-gen", description = "代码生成"),
+        (name = "pat", description = "个人访问令牌（PAT）"),
     ),
 )]
 pub struct ApiDoc;
+
+/// 构建完整 OpenAPI 规范：在 `ApiDoc::openapi()` 基础上注入全局 bearer 认证方案。
+///
+/// utoipa 的 derive 未声明任何 securityScheme，导致 Swagger UI 的 "Authorize" 按钮无效。
+/// 这里以编程方式注册名为 `bearerAuth` 的 HTTP Bearer(JWT) 方案，并设为全局默认要求，
+/// 使所有业务接口默认需要 `Authorization: Bearer <JWT 或 PAT>`；
+/// 公开接口（/login、/captchaImage）通过各自 `#[utoipa::path(security(()))]` 覆盖为免鉴权。
+/// PAT 与 JWT 走同一 bearer 头，故文档描述同时注明两种令牌。
+fn openapi_spec() -> utoipa::openapi::OpenApi {
+    let mut doc = ApiDoc::openapi();
+    let components = doc.components.get_or_insert_with(Default::default);
+    components.add_security_scheme(
+        "bearerAuth",
+        SecurityScheme::Http(
+            HttpBuilder::new()
+                .scheme(HttpAuthScheme::Bearer)
+                .bearer_format("JWT")
+                .description(Some(
+                    "登录后签发的 JWT，或个人访问令牌（PAT，前缀 ybt_）。填入裸令牌字符串即可，无需 \"Bearer \" 前缀。",
+                ))
+                .build(),
+        ),
+    );
+    doc.security = Some(vec![SecurityRequirement::new(
+        "bearerAuth",
+        Vec::<String>::new(),
+    )]);
+    doc
+}
 
 /// 缓存的 OpenAPI JSON（首次访问时生成，后续直接返回）
 ///
@@ -334,7 +376,7 @@ pub async fn openapi_json() -> impl IntoResponse {
     // 失败路径下次请求重试（OnceLock 无法回滚，用 AtomicBool 标记 + 请求级兜底）
     if !OPENAPI_SERIALIZE_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
         let json =
-            OPENAPI_JSON_CACHE.get_or_init(|| match serde_json::to_string(&ApiDoc::openapi()) {
+            OPENAPI_JSON_CACHE.get_or_init(|| match serde_json::to_string(&openapi_spec()) {
                 Ok(json) => json,
                 Err(e) => {
                     tracing::error!(
@@ -361,7 +403,7 @@ pub async fn openapi_json() -> impl IntoResponse {
         );
     }
     // 上次序列化失败：本次重试生成（不再返回缓存错误串）
-    match serde_json::to_string(&ApiDoc::openapi()) {
+    match serde_json::to_string(&openapi_spec()) {
         Ok(json) => (
             [
                 (

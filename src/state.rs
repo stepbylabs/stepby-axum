@@ -9,8 +9,9 @@ use crate::service::{
     AuthService, GenTableService, IpLocationService, MailerService, SysBackupService,
     SysConfigService, SysDeptService, SysDictService, SysFrontendErrorService, SysHttpDebugService,
     SysJobService, SysLogininforService, SysMenuService, SysMsgService, SysNoticeService,
-    SysOauthService, SysOperLogService, SysPostService, SysRateLimitService, SysReportService,
-    SysRoleService, SysTaskService, SysUserPrefService, SysUserService, SysWebHookService,
+    SysOauthService, SysOperLogService, SysPatService, SysPostService, SysRateLimitService,
+    SysReportService, SysRoleService, SysTaskService, SysUserPrefService, SysUserService,
+    SysWebHookService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -33,6 +34,8 @@ pub struct AppState {
     pub user_service: SysUserService,
     /// 用户消息偏好 / 免打扰 Service
     pub user_pref_service: SysUserPrefService,
+    /// 个人访问令牌（PAT）Service（Tier-S #3）
+    pub pat_service: SysPatService,
     /// 角色模块 Service
     pub role_service: SysRoleService,
     /// 菜单模块 Service
@@ -217,6 +220,7 @@ impl AppState {
         Self {
             user_service: user_service.clone(),
             user_pref_service: SysUserPrefService::new(db.clone()),
+            pat_service: SysPatService::new(db.clone(), menu_service.clone()),
             role_service,
             menu_service,
             notice_service: SysNoticeService::new(db.clone()),
