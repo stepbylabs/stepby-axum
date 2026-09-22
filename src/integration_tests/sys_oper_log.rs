@@ -69,7 +69,10 @@ async fn it_opl_list_and_stats() {
         .get_json("/monitor/operlog/list?pageNum=1&pageSize=20")
         .await;
     let rows = v["rows"].as_array().expect("rows 应为数组，实际: {v}");
-    assert!(v["total"].as_u64().unwrap_or(0) >= 1, "total 应 >= 1，实际: {v}");
+    assert!(
+        v["total"].as_u64().unwrap_or(0) >= 1,
+        "total 应 >= 1，实际: {v}"
+    );
     let admin_row = rows
         .iter()
         .find(|r| r["operName"].as_str() == Some("admin"))
@@ -138,6 +141,108 @@ async fn it_opl_list_and_stats() {
         data["operatorBursts"].is_array() && data["moduleBursts"].is_array(),
         "alarm-status 应含 burst 数组，实际: {v}"
     );
+}
+
+/// 轮询直到出现指定 operUrl 且指定 businessType 的日志行，返回该行 JSON。
+/// business_type：1=新增 2=修改 3=删除。
+async fn wait_operlog_row(
+    ctx: &TestContext,
+    expected_url: &str,
+    business_type: i64,
+) -> serde_json::Value {
+    for _ in 0..50 {
+        let v = ctx
+            .get_json("/monitor/operlog/list?pageNum=1&pageSize=50")
+            .await;
+        if let Some(rows) = v["rows"].as_array()
+            && let Some(r) = rows.iter().find(|r| {
+                r["operUrl"].as_str() == Some(expected_url)
+                    && r["businessType"].as_i64() == Some(business_type)
+            })
+        {
+            return r.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("oper_log 记录未在超时内出现（operUrl={expected_url}, businessType={business_type}）");
+}
+
+/// Tier-S #2：PUT 成功后中间件应写入变更前快照（operBefore）与字段级差异（operDiff）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_opl_field_level_diff() {
+    let ctx = TestContext::new().await;
+
+    // 1. 新增一条通知（唯一标题），从列表取回其 noticeId
+    let title = "it_opldiff_原始标题";
+    let v = ctx
+        .post_json(
+            "/system/notice",
+            serde_json::json!({
+                "noticeTitle": title,
+                "noticeType": "1",
+                "noticeContent": "原始内容",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let list = ctx
+        .get_json("/system/notice/list?pageNum=1&pageSize=50")
+        .await;
+    let notice_id = list["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["noticeTitle"].as_str() == Some(title))
+        .and_then(|r| r["noticeId"].as_i64())
+        .expect("应能找到刚新增的通知 noticeId");
+
+    // 2. PUT 修改标题与内容 → 触发 oper_log 中间件计算字段级 diff
+    let v = ctx
+        .put_json(
+            "/system/notice",
+            serde_json::json!({
+                "noticeId": notice_id,
+                "noticeTitle": "it_opldiff_已改标题",
+                "noticeType": "1",
+                "noticeContent": "修改后的内容",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    // 3. 轮询到该 PUT 修改类操作日志行（businessType=2）
+    let row = wait_operlog_row(&ctx, "/system/notice", 2).await;
+
+    // 4. 变更前快照应存在且为合法 JSON 对象字符串
+    let before = row["operBefore"].as_str().unwrap_or("");
+    assert!(
+        !before.is_empty() && before.contains(title),
+        "operBefore 应包含变更前标题，实际: {row}"
+    );
+
+    // 5. 字段级差异应存在、为合法 JSON 数组、包含被改字段（noticeTitle/noticeContent），
+    //    且每条目含 field/old/new 且 old != new
+    let diff_str = row["operDiff"].as_str().unwrap_or("");
+    assert!(
+        !diff_str.is_empty(),
+        "PUT 成功修改应写入 operDiff，实际行: {row}"
+    );
+    let diffs: serde_json::Value = serde_json::from_str(diff_str).expect("operDiff 应为合法 JSON");
+    let arr = diffs.as_array().expect("operDiff 应为数组");
+    assert!(!arr.is_empty(), "operDiff 数组不应为空");
+    let fields: Vec<&str> = arr.iter().filter_map(|d| d["field"].as_str()).collect();
+    assert!(
+        fields.iter().any(|f| f.ends_with("oticeTitle")),
+        "operDiff 应含标题字段变更，实际: {diff_str}"
+    );
+    for d in arr.iter() {
+        assert_ne!(
+            d["old"], d["new"],
+            "operDiff 每条 old 应不等于 new，实际: {d}"
+        );
+    }
 }
 
 /// 操作日志批量删除（正常 + 非法 id）+ 清空 + 导出。

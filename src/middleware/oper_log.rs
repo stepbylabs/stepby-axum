@@ -172,8 +172,16 @@ pub async fn oper_log_middleware(
     // 适用场景：PUT /system/config（ID 在 body 的 configId 字段）、PUT /system/user/profile/resetPwd（body userId）等
     let record_id = extract_record_id(&oper_url, body_bytes_for_snapshot.as_deref());
 
-    // 捕获变更前数据快照（仅 PUT/DELETE 请求）
-    let oper_before = capture_before_snapshot(&state, &method, &oper_url, record_id).await;
+    // 捕获变更前数据快照 Value（仅 PUT/DELETE 请求）
+    // 同时用于：① oper_before 字段；② PUT 成功后与变更后快照比对得到字段级 diff
+    let before_value = capture_before_snapshot(&state, &method, &oper_url, record_id).await;
+    let oper_before = match &before_value {
+        Some(v) => safe_truncate(
+            &serde_json::to_string(v).unwrap_or_default(),
+            MAX_LOG_FIELD_LEN,
+        ),
+        None => String::new(),
+    };
 
     // 执行请求
     let response = next.run(req).await;
@@ -272,6 +280,21 @@ pub async fn oper_log_middleware(
         json_result_raw
     };
 
+    // Tier-S #2：PUT 成功后重新读取变更后快照，逐字段计算 before→after 差异
+    // 仅在"修改"类操作且请求成功（HTTP 2xx）时计算；写入未改变数据时 before==after，diff 为空
+    let oper_diff = if business_type == 2 && status == "0" {
+        match (record_id, &before_value) {
+            (Some(id), Some(before_val)) => match fetch_snapshot_value(&state, &oper_url, id).await
+            {
+                Some(after_val) => compute_field_diff(before_val, &after_val),
+                None => String::new(),
+            },
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
     // 异步写入日志，不阻断响应
     let record = OperLogRecord {
         title,
@@ -286,6 +309,7 @@ pub async fn oper_log_middleware(
         oper_location,
         oper_param,
         oper_before,
+        oper_diff,
         json_result,
         status,
         error_msg,
@@ -398,35 +422,19 @@ fn extract_record_id(oper_url: &str, body: Option<&[u8]>) -> Option<i64> {
     })
 }
 
-/// 捕获变更前数据快照（仅对 PUT/DELETE 请求）
+/// 按路径前缀 + 记录 ID 重新读取实体快照（Value 形式）
 ///
-/// 根据请求路径前缀和记录 ID，调用对应 service 查询旧数据并序列化为 JSON 字符串。
-/// 失败时返回空字符串（不影响主流程）。
-///
-/// 设计要点：
-/// - 仅对 PUT/DELETE 触发（POST 是新增，无"变更前"概念）
-/// - ID 优先从 URL 路径末段解析，若 URL 无数字 ID 则从请求体 JSON 提取（如 PUT /system/config）
-/// - 通过路径前缀分派到对应 service（user/role/menu/dept/post/config/notice）
-/// - 查询失败或路径不匹配时返回空字符串，不影响主流程
-async fn capture_before_snapshot(
+/// 供变更前快照与变更后 diff 计算复用：
+/// - 根据请求路径前缀分派到对应 service 的 get_*_by_id
+/// - 各 service 返回值均实现 serde::Serialize（Model 或 VO）
+/// - 路径不匹配或查询失败时返回 None，不影响主流程
+async fn fetch_snapshot_value(
     state: &Arc<AppState>,
-    method: &Method,
     oper_url: &str,
-    id: Option<i64>,
-) -> String {
-    // 仅对 PUT/DELETE 捕获
-    if !matches!(method, &Method::PUT | &Method::DELETE) {
-        return String::new();
-    }
-
-    let id = match id {
-        Some(id) => id,
-        None => return String::new(), // 无 ID，跳过
-    };
-
+    id: i64,
+) -> Option<serde_json::Value> {
     // 根据路径前缀分派到对应 service
-    // 各 service 的 get_*_by_id 返回值均实现 serde::Serialize（Model 或 VO）
-    let snapshot: Option<serde_json::Value> = if oper_url.starts_with("/system/user") {
+    if oper_url.starts_with("/system/user") {
         state
             .user_service
             .get_user_by_id(id)
@@ -498,15 +506,101 @@ async fn capture_before_snapshot(
             .map(|vo| serde_json::to_value(&vo).unwrap_or_default())
     } else {
         None
+    }
+}
+
+/// 捕获变更前数据快照（仅对 PUT/DELETE 请求）
+///
+/// 根据请求路径前缀和记录 ID，调用对应 service 查询旧数据并序列化为 JSON 字符串。
+/// 失败时返回空字符串（不影响主流程）。
+///
+/// 设计要点：
+/// - 仅对 PUT/DELETE 触发（POST 是新增，无"变更前"概念）
+/// - ID 优先从 URL 路径末段解析，若 URL 无数字 ID 则从请求体 JSON 提取（如 PUT /system/config）
+/// - 通过路径前缀分派到对应 service（见 fetch_snapshot_value）
+/// - 查询失败或路径不匹配时返回 None，不影响主流程
+async fn capture_before_snapshot(
+    state: &Arc<AppState>,
+    method: &Method,
+    oper_url: &str,
+    id: Option<i64>,
+) -> Option<serde_json::Value> {
+    // 仅对 PUT/DELETE 捕获
+    if !matches!(method, &Method::PUT | &Method::DELETE) {
+        return None;
+    }
+    let id = id?; // 无 ID，跳过
+    fetch_snapshot_value(state, oper_url, id).await
+}
+
+/// 计算字段级 before→after 差异（Tier-S #2）
+///
+/// 比对变更前/后两个 JSON 对象的顶层字段，输出 JSON 数组
+/// `[{field, old, new}]`。仅记录发生变化的字段，敏感字段（密码/token/手机号等）
+/// 值统一脱敏为 "***"（审计 diff 不应泄露明文）。数组为空时返回空字符串。
+/// 结果按 MAX_LOG_FIELD_LEN 截断，避免超长。
+fn compute_field_diff(before: &serde_json::Value, after: &serde_json::Value) -> String {
+    let (Some(bmap), Some(omap)) = (before.as_object(), after.as_object()) else {
+        return String::new();
     };
 
-    match snapshot {
-        Some(value) => {
-            let s = serde_json::to_string(&value).unwrap_or_default();
-            safe_truncate(&s, MAX_LOG_FIELD_LEN)
+    // 合并两侧 key，保持稳定顺序（先按变更前字段顺序，再补变更后新增字段）
+    let mut keys: Vec<&String> = bmap.keys().collect();
+    for k in omap.keys() {
+        if !bmap.contains_key(k) {
+            keys.push(k);
         }
-        None => String::new(),
     }
+
+    let mut diffs: Vec<serde_json::Value> = Vec::new();
+    for k in keys {
+        let old_v = bmap.get(k);
+        let new_v = omap.get(k);
+        if old_v == new_v {
+            continue;
+        }
+        // 敏感字段：整字段值脱敏，不泄露旧/新明文
+        let (old_out, new_out) = if is_sensitive_key(k) {
+            (serde_json::json!("***"), serde_json::json!("***"))
+        } else {
+            (
+                old_v.cloned().unwrap_or(serde_json::Value::Null),
+                new_v.cloned().unwrap_or(serde_json::Value::Null),
+            )
+        };
+        diffs.push(serde_json::json!({
+            "field": k,
+            "old": old_out,
+            "new": new_out,
+        }));
+    }
+
+    if diffs.is_empty() {
+        return String::new();
+    }
+    let s = serde_json::to_string(&diffs).unwrap_or_default();
+    safe_truncate(&s, MAX_LOG_FIELD_LEN)
+}
+
+/// 判断字段名是否为敏感字段（与 sanitize_value 的脱敏类别保持一致）
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.contains("phone")
+        || lower.contains("mobile")
+        || lower.contains("idcard")
+        || lower.contains("idno")
+        || lower.contains("email")
+        || lower.contains("bankcard")
+        || lower.contains("cardnumber")
+        || lower.contains("bank_card")
+        || lower.contains("card_number")
+        || lower.contains("token")
+        || lower == "password"
+        || lower == "pwd"
+        || lower == "salt"
+        || lower == "secret"
+        || lower.contains("apikey")
+        || lower.contains("api_key")
 }
 
 /// 脱敏请求参数（移除敏感字段值）
@@ -1010,12 +1104,27 @@ mod tests {
     #[test]
     fn test_infer_module_title_webhook() {
         // WebHook 回调配置 / 推送日志均归类为 module.webHook
-        assert_eq!(infer_module_title("/monitor/webHook/list"), "module.webHook");
+        assert_eq!(
+            infer_module_title("/monitor/webHook/list"),
+            "module.webHook"
+        );
         assert_eq!(infer_module_title("/monitor/webHook"), "module.webHook");
-        assert_eq!(infer_module_title("/monitor/webHook/export"), "module.webHook");
-        assert_eq!(infer_module_title("/monitor/webHook/{id}"), "module.webHook");
-        assert_eq!(infer_module_title("/monitor/webHook/log/list"), "module.webHook");
-        assert_eq!(infer_module_title("/monitor/webHook/log/{id}"), "module.webHook");
+        assert_eq!(
+            infer_module_title("/monitor/webHook/export"),
+            "module.webHook"
+        );
+        assert_eq!(
+            infer_module_title("/monitor/webHook/{id}"),
+            "module.webHook"
+        );
+        assert_eq!(
+            infer_module_title("/monitor/webHook/log/list"),
+            "module.webHook"
+        );
+        assert_eq!(
+            infer_module_title("/monitor/webHook/log/{id}"),
+            "module.webHook"
+        );
         // 不干扰相邻模块
         assert_eq!(infer_module_title("/monitor/job"), "module.job");
         assert_eq!(infer_module_title("/monitor/operlog"), "module.operlog");

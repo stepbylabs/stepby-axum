@@ -40,6 +40,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_task.operator_id 列失败: {}", e))?;
 
+        // 3.3 Tier-S #2：幂等确保 sys_oper_log 含 oper_diff 列（存量库向后兼容）
+        // 背景：m20260822_000001_oper_log_diff 迁移负责全新库建表时带该列，但 AppInitializer
+        // 启动不跑 Migrator::up，故存量库需在此幂等补列，否则操作日志查询/写入会因缺列报错。
+        ensure_oper_log_diff_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_oper_log.oper_diff 列失败: {}", e))?;
+
         // 4. 初始化 Redis
         let redis = db::init_redis(&settings.redis).await?;
 
@@ -281,6 +288,100 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
         .await?;
     } else {
         tracing::info!("sys_task.operator_id 列已存在，无需 ALTER");
+    }
+
+    Ok(())
+}
+
+/// 幂等确保 `sys_oper_log` 表含 `oper_diff` 列（Tier-S #2：字段级审计 diff）
+///
+/// 与 `ensure_task_operator_id_column` 同源方案：实体新增 `oper_diff` 字段后，存量库若无该列，
+/// 操作日志的查询（SeaORM 显式列名 SELECT）与写入都会因缺列报错。m20260822_000001_oper_log_diff
+/// 迁移负责全新库建表时带该列；此处兜底存量库（AppInitializer 启动不跑 Migrator::up）。
+/// `ALTER TABLE ... ADD COLUMN oper_diff TEXT` 语法在 SQLite/MySQL/PostgreSQL 三方言下均合法。
+async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // 1) 表是否存在（避免对尚未建表的空库误执行 ALTER）
+    let table_exists = match backend {
+        DatabaseBackend::Sqlite => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='sys_oper_log'",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::Postgres => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.tables WHERE table_name='sys_oper_log' AND table_schema=current_schema()",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::MySql => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.tables WHERE table_name='sys_oper_log' AND table_schema=DATABASE()",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+    };
+
+    if !table_exists {
+        tracing::info!("sys_oper_log 表尚未创建，跳过 oper_diff 列检查（由 migration 负责建表）");
+        return Ok(());
+    }
+
+    // 2) 列是否存在
+    let has_column = match backend {
+        DatabaseBackend::Sqlite => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "PRAGMA table_info(sys_oper_log)",
+                ))
+                .await?;
+            rows.iter().any(|row| {
+                row.try_get::<String>("", "name")
+                    .map(|n| n.eq_ignore_ascii_case("oper_diff"))
+                    .unwrap_or(false)
+            })
+        }
+        DatabaseBackend::Postgres => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.columns WHERE table_name='sys_oper_log' AND column_name='oper_diff' AND table_schema=current_schema() LIMIT 1",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+        DatabaseBackend::MySql => {
+            let rows = db
+                .query_all(Statement::from_string(
+                    backend,
+                    "SELECT 1 FROM information_schema.columns WHERE table_name='sys_oper_log' AND column_name='oper_diff' AND table_schema=DATABASE() LIMIT 1",
+                ))
+                .await?;
+            !rows.is_empty()
+        }
+    };
+
+    if !has_column {
+        tracing::info!("sys_oper_log 缺少 oper_diff 列，执行幂等 ALTER 添加");
+        db.execute(Statement::from_string(
+            backend,
+            "ALTER TABLE sys_oper_log ADD COLUMN oper_diff TEXT",
+        ))
+        .await?;
+    } else {
+        tracing::info!("sys_oper_log.oper_diff 列已存在，无需 ALTER");
     }
 
     Ok(())

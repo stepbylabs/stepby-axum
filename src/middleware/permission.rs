@@ -216,6 +216,7 @@ fn spawn_permission_denied_audit(
         oper_location,
         oper_param: String::new(), // permission_middleware 不读请求体
         oper_before: String::new(),
+        oper_diff: String::new(),
         json_result: String::new(),
         status: "1".to_string(), // 1=失败
         error_msg,

@@ -70,6 +70,8 @@ pub struct OperLogRecord {
     pub oper_param: String,
     /// 变更前数据快照（JSON 字符串，仅 PUT/DELETE 记录）
     pub oper_before: String,
+    /// 字段级变更差异（JSON 数组 [{field,old,new}]，仅 PUT 成功记录）
+    pub oper_diff: String,
     pub json_result: String,
     pub status: String,
     pub error_msg: String,
@@ -467,6 +469,11 @@ impl SysOperLogService {
                 None
             } else {
                 Some(record.oper_before.clone())
+            }),
+            oper_diff: Set(if record.oper_diff.is_empty() {
+                None
+            } else {
+                Some(record.oper_diff.clone())
             }),
             json_result: Set(Some(record.json_result)),
             status: Set(Some(record.status)),
