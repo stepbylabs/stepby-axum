@@ -98,11 +98,10 @@ pub async fn discovery(
 /// GET /sso/authorize
 pub async fn authorize(
     State(state): State<Arc<AppState>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<AuthorizeQuery>,
 ) -> Result<Response, AppError> {
-    let base = base_url(&headers, peer);
     let token = cookie_value(&headers, SESSION_COOKIE);
     let params = AuthorizeParams {
         client_id: q.client_id,
@@ -114,8 +113,11 @@ pub async fn authorize(
         code_challenge: q.code_challenge,
         code_challenge_method: q.code_challenge_method,
     };
-    // 记录原始 authorize URL，供未登录时回跳
-    let authorize_url = format!("{}/sso/authorize?{}", base, encode_authorize_query(&params));
+    // 未登录回跳目标预先构造（params 稍后会被 authorize 消费）。
+    // redirect 挂**同源相对路径**而非 `{base}` 绝对 URL：前端登录页对 redirect 参数做
+    // 开放重定向守卫（isSafeRedirect 只接受单 `/` 开头的路径），绝对 URL 会被拒绝并
+    // 回落到首页，登出态的 RP 授权链路就此断裂；相对路径还避免把 Host 推导结果回显到 URL。
+    let login_target = login_redirect_target(&params);
 
     let outcome = state
         .sso_service
@@ -131,8 +133,7 @@ pub async fn authorize(
     Ok(match outcome {
         AuthorizeOutcome::NeedLogin => {
             // 引导至前端登录页，登录后按 redirect 回到 authorize（相对路径，同源）
-            let target = format!("/login?redirect={}", urlencode(&authorize_url));
-            redirect_found(&target)
+            redirect_found(&login_target)
         }
         AuthorizeOutcome::NeedConsent(echo) => {
             let target = format!("/sso-consent?{}", encode_consent_query(&echo));
@@ -421,6 +422,13 @@ fn urlencode_spa(s: &str) -> String {
     urlencode(s).replace('+', "%20")
 }
 
+/// 未登录时的登录页跳转目标：`/login?redirect=<urlencode(同源相对 authorize 路径)>`。
+/// redirect 必须是相对路径（非 `{base}` 绝对 URL），否则前端开放重定向守卫会拒绝它。
+fn login_redirect_target(p: &AuthorizeParams) -> String {
+    let authorize_path = format!("/sso/authorize?{}", encode_authorize_query(p));
+    format!("/login?redirect={}", urlencode(&authorize_path))
+}
+
 /// 拼回原始 authorize 查询（用于未登录回跳）
 fn encode_authorize_query(p: &AuthorizeParams) -> String {
     let mut parts: Vec<String> = vec![
@@ -488,5 +496,32 @@ mod tests {
         assert_eq!(urlencode_spa("plain"), "plain");
         // 反证：RP 面向的 urlencode 仍用 +（保持协议面原样，不改）
         assert_eq!(urlencode("openid profile"), "openid+profile");
+    }
+
+    /// 登出态登录回跳的 redirect 参数必须是**同源相对路径**（真实 E2E 审计发现的回归锁定）：
+    /// 绝对 URL（`http://host/sso/authorize?...`）会被前端 isSafeRedirect 开放重定向守卫拒绝，
+    /// 登录成功后回落到首页而非回到 authorize，整条 RP 授权链路断裂。
+    #[test]
+    fn login_redirect_carries_relative_authorize_path() {
+        let p = AuthorizeParams {
+            client_id: "app_x".to_string(),
+            redirect_uri: Some("http://rp.local/cb".to_string()),
+            response_type: "code".to_string(),
+            scope: "openid profile".to_string(),
+            state: Some("s 1".to_string()),
+            nonce: None,
+            code_challenge: Some("chal".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+        };
+        let target = login_redirect_target(&p);
+        // /login?redirect= 后紧跟 %2F（即 /sso/authorize 相对路径），绝不出现 %3A%2F%2F（://）
+        assert!(
+            target.starts_with("/login?redirect=%2Fsso%2Fauthorize%3Fclient_id%3Dapp_x"),
+            "target={target}"
+        );
+        assert!(!target.contains("%3A%2F%2F"), "redirect 内不应混入绝对 URL: {target}");
+        // 内层 authorize 查询的空格先被表单编码为 +，整体再编码时 + 转义为 %2B
+        assert!(target.contains("%26scope%3Dopenid%2Bprofile"));
+        assert!(target.contains("%26state%3Ds%2B1"));
     }
 }

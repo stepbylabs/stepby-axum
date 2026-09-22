@@ -241,7 +241,7 @@ impl OidcError {
 pub enum AuthorizeOutcome {
     /// 302 到给定绝对/相对 URL（携带 code 或 error 参数）
     Redirect(String),
-    /// 未登录：302 到前端登录页（handler 负责拼 `{base}/login?redirect=...`）
+    /// 未登录：302 到前端登录页（handler 负责拼 `/login?redirect=<相对 authorize 路径>`）
     NeedLogin,
     /// 需用户同意：携带同意页所需的回显参数（handler 拼前端 /sso-consent URL）
     NeedConsent(Box<ConsentEcho>),
