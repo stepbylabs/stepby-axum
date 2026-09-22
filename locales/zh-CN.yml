@@ -358,6 +358,15 @@ error:
   pref:
     value_invalid: "消息偏好字段 %{field} 取值非法（须为 0 或 1）"
     time_invalid: "免打扰时间字段 %{field} 格式非法（须为 HH:MM），当前值: %{value}"
+  pat:
+    name_required: 令牌名称不能为空
+    name_too_long: "令牌名称过长（最多 100 字符）"
+    scopes_empty: 令牌权限范围（scopes）不能为空
+    scopes_invalid: "权限标识格式非法：%{value}"
+    count_exceeded: "已达每用户令牌数上限（%{max}）"
+    not_found: 令牌不存在
+    forbidden_pat_usage: 禁止使用访问令牌管理令牌本身
+    create_failed: 令牌生成失败
   role:
     not_found: 角色不存在
     perm_key_exists: 角色权限字符不能重复

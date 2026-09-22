@@ -44,6 +44,9 @@ pub struct Settings {
     /// 系统日志保留策略配置（操作日志 / 登录日志的定期归档清理）
     #[serde(default)]
     pub sys_log: SysLogConfig,
+    /// 个人访问令牌（PAT）配置（Tier-S #3）
+    #[serde(default)]
+    pub pat: PatConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -65,6 +68,7 @@ impl fmt::Debug for Settings {
             )
             .field("monitor", &self.monitor)
             .field("sys_log", &self.sys_log)
+            .field("pat", &self.pat)
             .finish()
     }
 }
@@ -100,6 +104,54 @@ impl Default for SysLogConfig {
 
 fn default_sys_log_retention_days() -> i64 {
     crate::common::constants::LOG_RETENTION_DAYS
+}
+
+/// 个人访问令牌（PAT）配置（Tier-S #3）
+#[derive(Clone, Debug, Deserialize)]
+pub struct PatConfig {
+    /// 是否启用 PAT 鉴权（关闭时携带 ybt_ 前缀的令牌一律 401）
+    #[serde(default = "default_pat_enabled")]
+    pub enabled: bool,
+    /// 令牌前缀（用于在 auth 中间件区分 JWT 与 PAT；真实 JWT 以 "eyJ" 开头，不会冲突）
+    #[serde(default = "default_pat_prefix")]
+    pub prefix: String,
+    /// 创建令牌时的默认有效期（天），用户未指定时使用；NULL 语义由前端显式传 0/不传控制
+    #[serde(default = "default_pat_default_expire_days")]
+    pub default_expire_days: i64,
+    /// 有效期上限（天）：请求的过期天数超过则裁剪至此值；0 表示允许永不过期
+    #[serde(default = "default_pat_max_expire_days")]
+    pub max_expire_days: i64,
+    /// 每用户最多有效令牌数（防令牌泛滥）
+    #[serde(default = "default_pat_max_per_user")]
+    pub max_per_user: i64,
+}
+
+impl Default for PatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_pat_enabled(),
+            prefix: default_pat_prefix(),
+            default_expire_days: default_pat_default_expire_days(),
+            max_expire_days: default_pat_max_expire_days(),
+            max_per_user: default_pat_max_per_user(),
+        }
+    }
+}
+
+fn default_pat_enabled() -> bool {
+    true
+}
+fn default_pat_prefix() -> String {
+    "ybt_".to_string()
+}
+fn default_pat_default_expire_days() -> i64 {
+    90
+}
+fn default_pat_max_expire_days() -> i64 {
+    365
+}
+fn default_pat_max_per_user() -> i64 {
+    20
 }
 
 /// 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
@@ -742,6 +794,7 @@ impl Settings {
             .map_err(|e| anyhow::anyhow!("JWT_EXPIRE_HOURS 解析失败: {}", e))?;
 
         let mut settings = Settings {
+            pat: PatConfig::default(),
             server: ServerConfig {
                 host: server_host,
                 port: server_port,
@@ -840,6 +893,7 @@ mod tests {
     /// 构造一个通过校验的基准 Settings（jwt.secret 为合法强密钥），供测试复用
     fn make_test_settings() -> Settings {
         Settings {
+            pat: PatConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
@@ -885,6 +939,7 @@ mod tests {
     #[test]
     fn test_settings_debug_redacts_config_enc_key() {
         let settings = Settings {
+            pat: PatConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,

@@ -47,6 +47,20 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_oper_log.oper_diff 列失败: {}", e))?;
 
+        // 3.4 Tier-S #3：幂等确保 sys_pat 表存在（存量库向后兼容）
+        // 背景：m20260823_000001_sys_pat 迁移负责全新库建表，但 AppInitializer 启动不跑
+        // Migrator::up（避免对已有种子数据的存量库重跑 seed 导致主键冲突），故存量库需在此
+        // 幂等建表，否则 PAT 鉴权查库与令牌管理接口会因缺表报错。
+        ensure_sys_pat_table(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_pat 表失败: {}", e))?;
+
+        // 3.5 Tier-S #3：幂等确保 PAT 管理菜单存在（存量库启动不跑 Migrator::up，
+        // 与迁移 m20260823_000001_sys_pat 等价地登记 sys_menu，使 /monitor/pat 页面可进入）。
+        ensure_sys_pat_menu(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_pat 管理菜单失败: {}", e))?;
+
         // 4. 初始化 Redis
         let redis = db::init_redis(&settings.redis).await?;
 
@@ -384,5 +398,155 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
         tracing::info!("sys_oper_log.oper_diff 列已存在，无需 ALTER");
     }
 
+    Ok(())
+}
+
+/// 幂等确保 `sys_pat` 表存在（Tier-S #3：个人访问令牌）
+///
+/// `CREATE TABLE IF NOT EXISTS` 在 SQLite/PostgreSQL/MySQL 三方言下均合法且幂等。
+/// 索引创建：SQLite/PostgreSQL 支持 `CREATE INDEX IF NOT EXISTS`，直接执行；MySQL 不支持该子句，
+/// 交由 migration（seaorm `if_not_exists`）在支持 MySQL 的部署中补齐，此处对 MySQL 跳过。
+/// 主键 `pat_id` 用 VARCHAR 由应用生成 uuid，规避自增列跨方言差异。
+async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let dt = match backend {
+        DatabaseBackend::Postgres => "TIMESTAMP",
+        _ => "DATETIME",
+    };
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS sys_pat (
+            pat_id       VARCHAR(64) NOT NULL PRIMARY KEY,
+            user_id      BIGINT NOT NULL,
+            name         VARCHAR(100) NOT NULL,
+            token_hash   VARCHAR(64) NOT NULL,
+            token_prefix VARCHAR(24) NOT NULL,
+            scopes       TEXT NOT NULL,
+            status       VARCHAR(1) NOT NULL DEFAULT '0',
+            expires_at   {dt} NULL,
+            last_used_at {dt} NULL,
+            create_by    VARCHAR(64) DEFAULT '',
+            create_time  {dt} NULL,
+            update_time  {dt} NULL
+        )"
+    );
+    db.execute(Statement::from_string(backend, create_sql))
+        .await?;
+
+    if !matches!(backend, DatabaseBackend::MySql) {
+        // token_hash 唯一索引 + user_id 普通索引（SQLite/PostgreSQL 支持 IF NOT EXISTS）
+        for ddl in [
+            "CREATE UNIQUE INDEX IF NOT EXISTS uk_sys_pat_token_hash ON sys_pat(token_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_sys_pat_user_id ON sys_pat(user_id)",
+        ] {
+            // 并发/已存在时忽略失败（表与索引已由 migration 建好属正常情况）
+            if let Err(e) = db
+                .execute(Statement::from_string(backend, ddl.to_string()))
+                .await
+            {
+                tracing::debug!("sys_pat 索引创建跳过（可能已存在）: {}", e);
+            }
+        }
+    }
+
+    tracing::info!("sys_pat 表已就绪（幂等确保完成）");
+    Ok(())
+}
+
+/// 读取一条 `SELECT COUNT(*) AS c ...` 的结果（跨方言返回 i64）。
+async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i64> {
+    let backend = db.get_database_backend();
+    let row = db.query_one(Statement::from_string(backend, sql)).await?;
+    match row {
+        Some(r) => Ok(r.try_get::<i64>("", "c").unwrap_or(0)),
+        None => Ok(0),
+    }
+}
+
+/// 幂等确保 PAT 管理菜单存在（Tier-S #3）
+///
+/// 背景同 `ensure_sys_pat_table`：存量库启动不跑 Migrator::up，m20260823_000001_sys_pat
+/// 迁移登记的 sys_menu（页 3560 + 按钮 3561）不会落到已有库。此处以等价的检查-后-插入补齐，
+/// 使管理员页 /monitor/pat 在存量库上同样可经"系统监控"菜单进入并被 E2E 覆盖。
+/// 超管用户可见全部菜单（不依赖 sys_role_menu），role_id=2 的授权仅为与普通角色对齐。
+async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    // sys_menu 表存在性保护：空库未建表时跳过，交由 migration 负责初始种子
+    let exists_sql = match backend {
+        DatabaseBackend::Sqlite => {
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sys_menu'".to_string()
+        }
+        DatabaseBackend::Postgres => {
+            "SELECT 1 FROM information_schema.tables WHERE table_name='sys_menu' AND table_schema=current_schema() LIMIT 1".to_string()
+        }
+        DatabaseBackend::MySql => {
+            "SELECT 1 FROM information_schema.tables WHERE table_name='sys_menu' AND table_schema=DATABASE() LIMIT 1".to_string()
+        }
+    };
+    if !db
+        .query_all(Statement::from_string(backend, exists_sql))
+        .await?
+        .is_empty()
+    {
+        let ts = crate::common::datetime::now_naive()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        // 页菜单 3560
+        if count_scalar(
+            db,
+            "SELECT COUNT(*) AS c FROM sys_menu WHERE menu_id=3560".to_string(),
+        )
+        .await?
+            == 0
+        {
+            db.execute(Statement::from_string(
+                backend,
+                format!(
+                    "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) \
+                     VALUES (3560, 'API 令牌', 2, 11, 'pat', 'monitor/pat/index', '', '', '1', '0', 'C', '0', '0', 'monitor:pat:list', 'key', 'admin', '{ts}', '个人访问令牌统一管理', '0', 'menu.pat')"
+                ),
+            ))
+            .await?;
+            tracing::info!("已登记 PAT 管理页菜单 (menu_id=3560)");
+        }
+
+        // 按钮 3561
+        if count_scalar(
+            db,
+            "SELECT COUNT(*) AS c FROM sys_menu WHERE menu_id=3561".to_string(),
+        )
+        .await?
+            == 0
+        {
+            db.execute(Statement::from_string(
+                backend,
+                format!(
+                    "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) \
+                     VALUES (3561, '吊销', 3560, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'monitor:pat:revoke', 'delete', 'admin', '{ts}', '吊销指定用户的访问令牌', '0', '')"
+                ),
+            ))
+            .await?;
+            tracing::info!("已登记 PAT 吊销按钮 (menu_id=3561)");
+        }
+
+        // role_id=2（普通角色）授权，与迁移对齐；超管无需授权即可见全部菜单
+        for mid in [3560i64, 3561] {
+            if count_scalar(
+                db,
+                format!(
+                    "SELECT COUNT(*) AS c FROM sys_role_menu WHERE role_id=2 AND menu_id={mid}"
+                ),
+            )
+            .await?
+                == 0
+            {
+                db.execute(Statement::from_string(
+                    backend,
+                    format!("INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, {mid})"),
+                ))
+                .await?;
+            }
+        }
+    }
     Ok(())
 }

@@ -31,6 +31,13 @@ pub struct Claims {
     /// - `#[serde(default)]` 兼容旧 token（未携带该 claim 视为版本 0，存量用户未改密前版本同为 0，可平滑过渡）。
     #[serde(default)]
     pub pwd_ver: u64,
+    /// 个人访问令牌（PAT）授权范围（Tier-S #3）。
+    ///
+    /// - 登录 JWT 恒为 `None`（`skip_serializing_if` 使其不进入 token 载荷，向后兼容）；
+    /// - PAT 鉴权时由 `auth_middleware` 依据令牌记录合成为 `Some(scopes)`，
+    ///   `permission_middleware` 据此对请求施加“令牌 scope ∩ 用户当前权限”的细粒度约束。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pat_scopes: Option<Vec<String>>,
 }
 
 /// JWT 错误类型（类型化，替代原 anyhow::Result）
@@ -118,6 +125,7 @@ impl JwtUtils {
             aud: config.audience.clone(),
             jti: uuid::Uuid::new_v4().to_string(),
             pwd_ver,
+            pat_scopes: None,
         };
         // SEC-008：显式指定 Algorithm::HS256，不依赖 Header::default()（默认 HS256 但显式更安全）
         let mut header = Header::new(Algorithm::HS256);
@@ -211,6 +219,7 @@ mod tests {
             aud: cfg.audience.clone(),
             jti: "test-jti".to_string(),
             pwd_ver: 0,
+            pat_scopes: None,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
@@ -265,6 +274,7 @@ mod tests {
             aud: cfg.audience.clone(),
             jti: "test-jti".to_string(),
             pwd_ver: 0,
+            pat_scopes: None,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
@@ -288,6 +298,7 @@ mod tests {
             aud: "wrong-audience".to_string(), // 错误的受众
             jti: "test-jti".to_string(),
             pwd_ver: 0,
+            pat_scopes: None,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
