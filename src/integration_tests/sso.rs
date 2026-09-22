@@ -401,11 +401,15 @@ async fn test_sso_security_negative_paths() {
     )
     .await;
     assert_eq!(status, StatusCode::FOUND, "未登录应 302");
+    let loc = location_of(&headers);
+    assert!(loc.starts_with("/login"), "未登录应回跳登录页，实际: {loc}");
+    // redirect 参数必须是同源相对路径（%2F/sso/authorize…）：绝对 URL（含 %3A%2F%2F 即 ://）
+    // 会被前端 isSafeRedirect 开放重定向守卫拒绝 → 登录后回落首页 → RP 链路断裂（E2E 审计回归）
     assert!(
-        location_of(&headers).starts_with("/login"),
-        "未登录应回跳登录页，实际: {}",
-        location_of(&headers)
+        loc.starts_with("/login?redirect=%2Fsso%2Fauthorize"),
+        "redirect 必须挂相对 authorize 路径，实际: {loc}"
     );
+    assert!(!loc.contains("%3A%2F%2F"), "redirect 不应混入绝对 URL: {loc}");
 
     // 4. redirect_uri 不在白名单 → 不可回跳（硬错误 400，防开放重定向）
     let bad = "/sso/authorize?client_id=PLACEHOLDER&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fevil.test%2Fcb&code_challenge=x&code_challenge_method=S256"
