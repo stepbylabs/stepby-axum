@@ -12,7 +12,12 @@ use crate::common::datetime;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
 #[sea_orm(table_name = "sys_dept")]
 #[serde(rename_all = "camelCase")]
-#[ts(export, rename = "SysDept", export_to = "SysDept.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "SysDept",
+    export_to = "SysDept.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = SysDept)]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -22,6 +27,8 @@ pub struct Model {
     pub dept_name: String,
     pub order_num: Option<i32>,
     pub leader: Option<String>,
+    /// 部门主管 user_id（审批「部门主管」策略的定位依据；迁移 m20260923_000002 新增并回填 admin）
+    pub leader_user_id: Option<i64>,
     pub phone: Option<String>,
     pub email: Option<String>,
     pub status: Option<String>,

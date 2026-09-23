@@ -265,11 +265,21 @@ mod tests {
     #[test]
     fn test_is_hashed_static_asset_true_for_hashed_js_css_fonts() {
         let parse = |s: &str| s.parse::<Uri>().unwrap();
-        assert!(is_hashed_static_asset(&parse("/static/js/index-C4xhYXkT.js")));
-        assert!(is_hashed_static_asset(&parse("/static/css/index-abc123.css")));
-        assert!(is_hashed_static_asset(&parse("/static/ttf/codicon-ngg6Pgfi.ttf")));
-        assert!(is_hashed_static_asset(&parse("/static/fonts/font-Dx9g7Kq2.woff2")));
-        assert!(is_hashed_static_asset(&parse("/static/fonts/icon-wJ4Pq8zA.woff")));
+        assert!(is_hashed_static_asset(&parse(
+            "/static/js/index-C4xhYXkT.js"
+        )));
+        assert!(is_hashed_static_asset(&parse(
+            "/static/css/index-abc123.css"
+        )));
+        assert!(is_hashed_static_asset(&parse(
+            "/static/ttf/codicon-ngg6Pgfi.ttf"
+        )));
+        assert!(is_hashed_static_asset(&parse(
+            "/static/fonts/font-Dx9g7Kq2.woff2"
+        )));
+        assert!(is_hashed_static_asset(&parse(
+            "/static/fonts/icon-wJ4Pq8zA.woff"
+        )));
     }
 
     #[test]
@@ -288,8 +298,12 @@ mod tests {
         assert!(!is_hashed_static_asset(&parse("/api/data")));
         assert!(!is_hashed_static_asset(&parse("/static")));
         assert!(!is_hashed_static_asset(&parse("/static/")));
-        assert!(!is_hashed_static_asset(&parse("/static/img/logo-C4xhYXkT.png")));
-        assert!(!is_hashed_static_asset(&parse("/static/js/index-C4xhYXkT.js.map")));
+        assert!(!is_hashed_static_asset(&parse(
+            "/static/img/logo-C4xhYXkT.png"
+        )));
+        assert!(!is_hashed_static_asset(&parse(
+            "/static/js/index-C4xhYXkT.js.map"
+        )));
     }
 
     // ---------- insert_if_absent ----------
@@ -299,7 +313,11 @@ mod tests {
         let mut headers = HeaderMap::new();
         insert_if_absent(&mut headers, "x-content-type-options", "nosniff");
         assert_eq!(
-            headers.get("x-content-type-options").unwrap().to_str().unwrap(),
+            headers
+                .get("x-content-type-options")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "nosniff"
         );
     }
@@ -313,7 +331,11 @@ mod tests {
         );
         insert_if_absent(&mut headers, "x-content-type-options", "nosniff");
         assert_eq!(
-            headers.get("x-content-type-options").unwrap().to_str().unwrap(),
+            headers
+                .get("x-content-type-options")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "custom-value",
             "已存在的同名头不应被覆盖"
         );

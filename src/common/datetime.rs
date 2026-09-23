@@ -312,22 +312,13 @@ mod tests {
         assert_eq!(deserialize_opt(&v).unwrap(), None);
         // RFC3339 → Some
         let v: Value = serde_json::json!("2026-01-02T03:04:05Z");
-        assert_eq!(
-            deserialize_opt(&v).unwrap(),
-            Some(dt(2026, 1, 2, 3, 4, 5))
-        );
+        assert_eq!(deserialize_opt(&v).unwrap(), Some(dt(2026, 1, 2, 3, 4, 5)));
         // 空格分隔 → Some
         let v: Value = serde_json::json!("2026-01-02 03:04:05");
-        assert_eq!(
-            deserialize_opt(&v).unwrap(),
-            Some(dt(2026, 1, 2, 3, 4, 5))
-        );
+        assert_eq!(deserialize_opt(&v).unwrap(), Some(dt(2026, 1, 2, 3, 4, 5)));
         // T 分隔 → Some
         let v: Value = serde_json::json!("2026-01-02T03:04:05");
-        assert_eq!(
-            deserialize_opt(&v).unwrap(),
-            Some(dt(2026, 1, 2, 3, 4, 5))
-        );
+        assert_eq!(deserialize_opt(&v).unwrap(), Some(dt(2026, 1, 2, 3, 4, 5)));
         // 非法 → Err
         let v: Value = serde_json::json!("garbage");
         assert!(deserialize_opt(&v).is_err());
@@ -337,9 +328,6 @@ mod tests {
     fn deserialize_opt_applies_utc_offset() {
         use serde_json::Value;
         let v: Value = serde_json::json!("2026-01-02T11:04:05+08:00");
-        assert_eq!(
-            deserialize_opt(&v).unwrap(),
-            Some(dt(2026, 1, 2, 3, 4, 5))
-        );
+        assert_eq!(deserialize_opt(&v).unwrap(), Some(dt(2026, 1, 2, 3, 4, 5)));
     }
 }

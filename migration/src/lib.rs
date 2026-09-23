@@ -53,6 +53,7 @@ pub use m20260822_000001_oper_log_diff::Migration as M20260822OperLogDiff;
 pub use m20260823_000001_sys_pat::Migration as M20260823SysPat;
 pub use m20260922_000001_sso_module::Migration as M20260922SsoModule;
 pub use m20260923_000001_sso_v4_hardening::Migration as M20260923SsoV4Hardening;
+pub use m20260923_000002_flow_module::Migration as M20260923FlowModule;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -104,6 +105,7 @@ mod m20260822_000001_oper_log_diff;
 mod m20260823_000001_sys_pat;
 mod m20260922_000001_sso_module;
 mod m20260923_000001_sso_v4_hardening;
+mod m20260923_000002_flow_module;
 
 use sea_orm_migration::prelude::*;
 
@@ -164,6 +166,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260823SysPat),
             Box::new(M20260922SsoModule),
             Box::new(M20260923SsoV4Hardening),
+            Box::new(M20260923FlowModule),
         ]
     }
 }

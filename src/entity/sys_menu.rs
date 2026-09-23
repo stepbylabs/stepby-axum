@@ -17,7 +17,12 @@ use crate::utils::tree::TreeNode;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
 #[sea_orm(table_name = "sys_menu")]
 #[serde(rename_all = "camelCase")]
-#[ts(export, rename = "SysMenu", export_to = "SysMenu.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "SysMenu",
+    export_to = "SysMenu.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = SysMenu)]
 pub struct Model {
     #[sea_orm(primary_key)]

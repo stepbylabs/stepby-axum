@@ -523,7 +523,10 @@ pub async fn remove(
         // v4 #18：删除用户同步吊销其全部 SSO 访问令牌（sso:at:* + online:*）——
         // userinfo 只认绑定不校验 pwd_ver，不做联动则旧 AT 在 TTL 内仍可换取身份
         for uid in &deleted_user_ids {
-            state.sso_service.revoke_user_sso_tokens(&mut redis, *uid).await;
+            state
+                .sso_service
+                .revoke_user_sso_tokens(&mut redis, *uid)
+                .await;
         }
     }
 

@@ -86,10 +86,7 @@ pub async fn add(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<WebHookAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state
-        .web_hook_service
-        .add(dto, operator.username())
-        .await?;
+    state.web_hook_service.add(dto, operator.username()).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
@@ -139,7 +136,9 @@ pub async fn change_status(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common.invalid_param")))?;
     state.web_hook_service.change_status(id, status).await?;
-    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.operation")))
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.operation"
+    )))
 }
 
 /// POST /monitor/webHook/{id}/test —— 手动测试推送
@@ -258,7 +257,9 @@ pub async fn remove(
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.web_hook.id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.web_hook.id_invalid"
+        )));
     }
     if ids.len() > MAX_BATCH_DELETE_SIZE {
         return Err(AppError::bad_request(&crate::tr!(
@@ -325,7 +326,9 @@ pub async fn log_remove(
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.web_hook.id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.web_hook.id_invalid"
+        )));
     }
     if ids.len() > MAX_BATCH_DELETE_SIZE {
         return Err(AppError::bad_request(&crate::tr!(
@@ -373,7 +376,9 @@ pub async fn log_retry(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
     if ids.is_empty() {
-        return Err(AppError::bad_request(&crate::tr!("error.web_hook.id_invalid")));
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.web_hook.id_invalid"
+        )));
     }
     if ids.len() > MAX_BATCH_DELETE_SIZE {
         return Err(AppError::bad_request(&crate::tr!(

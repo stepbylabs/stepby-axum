@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use crate::common::error::AppError;
 use crate::config::S3StorageConfig;
 use crate::storage::{
-    canonical_headers, canonical_request, payload_hash, sha256_hex, signature, signing_key,
-    string_to_sign, StorageBackend, StorageObject,
+    StorageBackend, StorageObject, canonical_headers, canonical_request, payload_hash, sha256_hex,
+    signature, signing_key, string_to_sign,
 };
 
 /// S3 兼容对象存储后端
@@ -770,11 +770,11 @@ mod wire_tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
+    use axum::Router;
     use axum::extract::{Request, State};
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
     use axum::routing::any;
-    use axum::Router;
     use tokio::net::TcpListener;
 
     use super::*;

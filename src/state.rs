@@ -7,11 +7,11 @@ use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::scheduler::JobScheduler;
 use crate::service::{
     AuthService, GenTableService, IpLocationService, MailerService, SsoService, SysBackupService,
-    SysConfigService, SysDeptService, SysDictService, SysFrontendErrorService, SysHttpDebugService,
-    SysJobService, SysLogininforService, SysMenuService, SysMsgService, SysNoticeService,
-    SysOauthService, SysOperLogService, SysPatService, SysPostService, SysRateLimitService,
-    SysReportService, SysRoleService, SysTaskService, SysUserPrefService, SysUserService,
-    SysWebHookService,
+    SysConfigService, SysDeptService, SysDictService, SysFlowService, SysFrontendErrorService,
+    SysHttpDebugService, SysJobService, SysLogininforService, SysMenuService, SysMsgService,
+    SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
+    SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysUserPrefService,
+    SysUserService, SysWebHookService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -69,6 +69,8 @@ pub struct AppState {
     pub task_service: SysTaskService,
     /// 消息渠道与模板管理 Service
     pub msg_service: SysMsgService,
+    /// 审批工作流 Service（方案 B′）
+    pub flow_service: SysFlowService,
     /// 第三方登录（OAuth2/OIDC/SSO）Service
     pub oauth_service: SysOauthService,
     /// 单点登录 / OIDC Provider（本系统作为授权服务器）Service（Tier B）
@@ -152,10 +154,9 @@ impl AppState {
     /// 仅与特定用户相关的消息，杜绝跨用户信息泄漏。
     pub fn broadcast_to_user(&self, user_id: i64, msg_type: &str, data: serde_json::Value) {
         let msg = WsMessage::new(msg_type, data);
-        let users = self
-            .ws_users
-            .read()
-            .expect("ws_users RwLock poisoned（broadcast_to_user）");
+        // 锁中毒容错：与 scheduler/registry.rs 同款范式（unwrap_or_else into_inner），
+        // 避免某线程 panic 污染锁后，所有发送方（含审批超时扫描任务）连锁 panic（V6-E6/5-3）
+        let users = self.ws_users.read().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = users.get(&user_id) {
             for tx in conns {
                 // 对端已关闭时 send 返回 Err，忽略（连接关闭时会走 unregister 清理）
@@ -240,6 +241,11 @@ impl AppState {
             backup_service: SysBackupService::new(db.clone(), config.clone()),
             task_service: SysTaskService::new(db.clone()),
             msg_service: SysMsgService::new(db.clone(), config.clone()),
+            flow_service: SysFlowService::new(
+                db.clone(),
+                config.clone(),
+                SysMsgService::new(db.clone(), config.clone()),
+            ),
             oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
             sso_service: SsoService::new(
                 db.clone(),

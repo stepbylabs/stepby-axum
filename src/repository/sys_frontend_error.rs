@@ -10,9 +10,7 @@ use chrono::NaiveDateTime;
 use sea_orm::*;
 
 use crate::common::like_escape;
-use crate::entity::sys_frontend_error::{
-    ActiveModel, Column, Entity as SysFrontendError, Model,
-};
+use crate::entity::sys_frontend_error::{ActiveModel, Column, Entity as SysFrontendError, Model};
 use crate::repository::base::BaseRepository;
 
 /// 前端异常 Repository

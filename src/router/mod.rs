@@ -3,6 +3,7 @@
 pub mod auth_router;
 pub mod common_router;
 pub mod file_router;
+pub mod flow_router;
 pub mod ip_location_router;
 pub mod monitor_cache_router;
 pub mod monitor_log_router;
@@ -111,6 +112,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_backup_router::backup_routes())
         .merge(ip_location_router::ip_location_routes())
         .merge(sys_task_router::task_routes())
+        .merge(flow_router::flow_routes())
         .merge(tool_gen_router::gen_routes())
         .merge(common_router::common_routes())
         .merge(totp_router::totp_routes())

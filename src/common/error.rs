@@ -377,10 +377,7 @@ mod tests {
     fn service_error_constructors_and_display() {
         let e = ServiceError::new(418, "teapot");
         assert_eq!((e.code, e.message.as_str()), (418, "teapot"));
-        assert_eq!(
-            format!("{e}"),
-            "ServiceError(code=418, message=teapot)"
-        );
+        assert_eq!(format!("{e}"), "ServiceError(code=418, message=teapot)");
         assert_eq!(ServiceError::unauthorized("u").code, 401);
         assert_eq!(ServiceError::bad_request("b").code, 400);
         assert_eq!(ServiceError::not_found("n").code, 404);
@@ -440,10 +437,9 @@ mod tests {
     #[test]
     fn from_seaorm_transaction_error() {
         // Transaction 内层 DbErr 委托转换（RecordNotFound → 404）
-        let e: ServiceError = sea_orm::TransactionError::Transaction(
-            sea_orm::DbErr::RecordNotFound("id".into()),
-        )
-        .into();
+        let e: ServiceError =
+            sea_orm::TransactionError::Transaction(sea_orm::DbErr::RecordNotFound("id".into()))
+                .into();
         assert_eq!(e.code, 404);
         // 其它（Connection）→ 500 tx_failed
         let e: ServiceError = sea_orm::TransactionError::Connection(sea_orm::DbErr::Exec(
@@ -501,8 +497,7 @@ mod tests {
         assert_eq!(e.code, 401);
         assert_eq!(e.message, crate::tr!("error.common.cache_auth_failed"));
         // 其它 → 500
-        let e: ServiceError =
-            redis::RedisError::from((redis::ErrorKind::Io, "io")).into();
+        let e: ServiceError = redis::RedisError::from((redis::ErrorKind::Io, "io")).into();
         assert_eq!(e.code, 500);
         assert_eq!(e.message, crate::tr!("error.common.cache_failed"));
     }
@@ -580,8 +575,7 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 4096)
             .await
             .expect("读取响应体失败");
-        let json: serde_json::Value =
-            serde_json::from_slice(&body).expect("响应体应为 JSON");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("响应体应为 JSON");
         assert_eq!(json["code"], 400);
         assert_eq!(json["msg"], "参数错误");
         assert!(json["data"].is_null());
@@ -590,8 +584,7 @@ mod tests {
     #[test]
     fn into_response_with_source_records_log_but_returns_same_body() {
         // source 存在时不应影响响应结构（仅写 tracing 日志）
-        let err = AppError::new(500, "内部错误")
-            .with_source(std::io::Error::other("root"));
+        let err = AppError::new(500, "内部错误").with_source(std::io::Error::other("root"));
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }

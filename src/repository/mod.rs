@@ -9,12 +9,15 @@
 //! - sys_*.rs: 各实体专用 Repository，扩展 BaseRepository 并添加实体特有查询
 
 pub mod base;
+pub mod flow_demo_doc;
 pub mod gen_table;
 pub mod sys_backup_log;
 pub mod sys_config;
 pub mod sys_dept;
 pub mod sys_dict_data;
 pub mod sys_dict_type;
+pub mod sys_flow_log;
+pub mod sys_flow_task;
 pub mod sys_frontend_error;
 pub mod sys_job;
 pub mod sys_job_log;

@@ -77,6 +77,27 @@ error:
     unknown_error: 第三方登录处理失败，请稍后再试
     local_user_not_found: 本地账号不存在或已停用
     failure_title: 第三方登录失败
+  flow:
+    dept_missing: 无法确定提交人所属部门，请完善用户部门信息
+    dept_not_found: 提交人所属部门不存在
+    leader_missing: 该部门未设置主管（leader_user_id），无法发起「部门主管审批」
+    role_not_found: 审批角色不存在
+    role_no_active_user: 审批角色下无可用用户
+    no_assignee: 无法解析出有效审批人，请联系管理员检查审批策略
+    user_not_found: 用户不存在
+    user_disabled: 目标用户已停用，无法转办
+    mode_invalid: 审批模式不合法（single/countersign）
+    task_not_found: 审批任务不存在
+    doc_not_found: 审批单据不存在
+    task_not_pending: 审批任务已处理或已失效，请刷新后重试
+    action_invalid: 不支持的审批动作
+    to_user_required: 转办必须指定目标用户
+    transfer_to_self: 不能转办给自己
+    self_approve_forbidden: 不能审批自己提交的单据
+    self_approve_chain: 审批链的审批人不能仅为提交人本人（禁止全链自审），请调整审批策略或由他人提交
+    not_assignee: 仅当前审批人可操作该任务
+    withdraw_only_applicant: 仅单据提交人可撤回
+    pat_forbidden: 审批操作须本人登录会话执行，不能使用访问令牌（PAT）
   sso:
     disabled: 单点登录（SSO）未启用
     client_not_found: 客户端不存在
@@ -439,6 +460,8 @@ error:
     delete_failed: 删除文件失败
 
 msg:
+  flow:
+    todo_created: 您有新的审批待办，请及时处理
   success:
     default: 操作成功
     query: 查询成功

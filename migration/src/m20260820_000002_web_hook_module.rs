@@ -282,11 +282,15 @@ async fn up_create_tables(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // -------- 索引（hook_id 用于级联查询，状态用于筛选） --------
     manager
         .get_connection()
-        .execute_unprepared("CREATE INDEX IF NOT EXISTS idx_web_hook_log_hook_id ON sys_web_hook_log (hook_id)")
+        .execute_unprepared(
+            "CREATE INDEX IF NOT EXISTS idx_web_hook_log_hook_id ON sys_web_hook_log (hook_id)",
+        )
         .await?;
     manager
         .get_connection()
-        .execute_unprepared("CREATE INDEX IF NOT EXISTS idx_web_hook_log_created ON sys_web_hook_log (create_time)")
+        .execute_unprepared(
+            "CREATE INDEX IF NOT EXISTS idx_web_hook_log_created ON sys_web_hook_log (create_time)",
+        )
         .await?;
 
     Ok(())

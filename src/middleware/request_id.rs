@@ -44,10 +44,10 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
 
     // 覆盖意图：

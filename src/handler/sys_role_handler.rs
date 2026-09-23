@@ -152,9 +152,7 @@ pub async fn export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysRoleModel| {
-                CellValue::from_opt_datetime(r.create_time)
-            },
+            getter: |r: &SysRoleModel| CellValue::from_opt_datetime(r.create_time),
         },
         ExcelColumn {
             key: "remark",

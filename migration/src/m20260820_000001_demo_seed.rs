@@ -37,9 +37,7 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
 /// 当前时间表达式（跨数据库兼容）
 fn now_expr(manager: &SchemaManager<'_>) -> String {
     if is_sqlite(manager) {
-        let now = chrono::Local::now()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         format!("'{}'", now)
     } else {
         "NOW()".to_string()
@@ -69,7 +67,10 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // 仅显式开启演示种子（SEED_DEMO=1）时写入，生产安全
-        if !std::env::var("SEED_DEMO").map(|v| v == "1").unwrap_or(false) {
+        if !std::env::var("SEED_DEMO")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             eprintln!("SEED_DEMO 未开启，跳过演示种子数据");
             return Ok(());
         }
@@ -109,7 +110,10 @@ impl MigrationTrait for Migration {
             .join(", ");
         execute_idempotent_insert(
             manager,
-            &format!("sys_role_menu (role_id, menu_id) VALUES {}", role_menu_values),
+            &format!(
+                "sys_role_menu (role_id, menu_id) VALUES {}",
+                role_menu_values
+            ),
         )
         .await?;
 
@@ -120,7 +124,10 @@ impl MigrationTrait for Migration {
         }
         execute_idempotent_insert(
             manager,
-            &format!("sys_user_role (user_id, role_id) VALUES {}", pairs.join(", ")),
+            &format!(
+                "sys_user_role (user_id, role_id) VALUES {}",
+                pairs.join(", ")
+            ),
         )
         .await?;
 

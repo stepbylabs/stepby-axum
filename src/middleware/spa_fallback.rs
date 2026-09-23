@@ -89,10 +89,10 @@ pub async fn spa_fallback_middleware(req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
 
     // 覆盖意图：
@@ -111,24 +111,36 @@ mod tests {
 
     #[test]
     fn test_browser_navigation_sec_fetch_navigate() {
-        assert!(is_browser_navigation(&req_with(&[("sec-fetch-mode", "navigate")])));
+        assert!(is_browser_navigation(&req_with(&[(
+            "sec-fetch-mode",
+            "navigate"
+        )])));
     }
 
     #[test]
     fn test_browser_navigation_sec_fetch_navigate_case_insensitive() {
-        assert!(is_browser_navigation(&req_with(&[("sec-fetch-mode", "NAVIGATE")])));
+        assert!(is_browser_navigation(&req_with(&[(
+            "sec-fetch-mode",
+            "NAVIGATE"
+        )])));
     }
 
     #[test]
     fn test_browser_navigation_accept_html_fallback() {
         // 无 Sec-Fetch-Mode 时，Accept: text/html 作为兜底
-        assert!(is_browser_navigation(&req_with(&[("accept", "text/html,application/xhtml+xml")])));
+        assert!(is_browser_navigation(&req_with(&[(
+            "accept",
+            "text/html,application/xhtml+xml"
+        )])));
     }
 
     #[test]
     fn test_not_browser_navigation_accept_json() {
         // API 请求：Accept 含 application/json → 非导航
-        assert!(!is_browser_navigation(&req_with(&[("accept", "application/json")])));
+        assert!(!is_browser_navigation(&req_with(&[(
+            "accept",
+            "application/json"
+        )])));
     }
 
     #[test]
@@ -148,7 +160,10 @@ mod tests {
     #[test]
     fn test_not_browser_navigation_sec_fetch_cors() {
         // fetch/XHR 通常携带 sec-fetch-mode: cors
-        assert!(!is_browser_navigation(&req_with(&[("sec-fetch-mode", "cors")])));
+        assert!(!is_browser_navigation(&req_with(&[(
+            "sec-fetch-mode",
+            "cors"
+        )])));
     }
 
     #[test]
@@ -226,6 +241,9 @@ mod tests {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
-        assert!(ct.contains("text/html"), "Accept: text/html 应返回 SPA HTML");
+        assert!(
+            ct.contains("text/html"),
+            "Accept: text/html 应返回 SPA HTML"
+        );
     }
 }

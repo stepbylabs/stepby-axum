@@ -18,7 +18,12 @@ use crate::common::datetime;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
 #[sea_orm(table_name = "sys_web_hook")]
 #[serde(rename_all = "camelCase")]
-#[ts(export, rename = "SysWebHook", export_to = "SysWebHook.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "SysWebHook",
+    export_to = "SysWebHook.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = SysWebHook)]
 pub struct Model {
     #[sea_orm(primary_key)]

@@ -67,6 +67,10 @@ pub use super::sys_user_role::{
     Model as SysUserRoleModel,
 };
 // 补全其余实体模块的公共类型重导出（P3：prelude 完整性）
+pub use super::flow_demo_doc::{
+    ActiveModel as FlowDemoDocActiveModel, Column as FlowDemoDocColumn, Entity as FlowDemoDoc,
+    Model as FlowDemoDocModel,
+};
 pub use super::gen_table::{
     ActiveModel as GenTableActiveModel, Column as GenTableColumn, Entity as GenTable,
     Model as GenTableModel,
@@ -82,6 +86,14 @@ pub use super::sys_backup_log::{
 pub use super::sys_dept::{
     ActiveModel as SysDeptActiveModel, Column as SysDeptColumn, Entity as SysDept,
     Model as SysDeptModel,
+};
+pub use super::sys_flow_log::{
+    ActiveModel as SysFlowLogActiveModel, Column as SysFlowLogColumn, Entity as SysFlowLog,
+    Model as SysFlowLogModel,
+};
+pub use super::sys_flow_task::{
+    ActiveModel as SysFlowTaskActiveModel, Column as SysFlowTaskColumn, Entity as SysFlowTask,
+    Model as SysFlowTaskModel,
 };
 pub use super::sys_notice_read::{
     ActiveModel as SysNoticeReadActiveModel, Column as SysNoticeReadColumn,

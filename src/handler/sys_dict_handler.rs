@@ -461,9 +461,7 @@ pub async fn dict_data_export(
         ExcelColumn {
             key: "dictSort",
             header: ("字典排序", "Sort"),
-            getter: |r: &SysDictDataModel| {
-                CellValue::Number(f64::from(r.dict_sort.unwrap_or(0)))
-            },
+            getter: |r: &SysDictDataModel| CellValue::Number(f64::from(r.dict_sort.unwrap_or(0))),
         },
         ExcelColumn {
             key: "status",
