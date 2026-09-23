@@ -406,7 +406,11 @@ pub async fn client_toggle(
     Path(id): Path<i64>,
     Query(q): Query<ToggleQuery>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.sso_service.toggle_client(id, &q.enabled).await?;
+    // v5-S6：停用时按 client 粒度吊销该客户端名下全部用户的 SSO AT
+    state
+        .sso_service
+        .toggle_client(id, &q.enabled, &mut state.redis.clone())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
