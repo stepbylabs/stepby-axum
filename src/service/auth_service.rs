@@ -93,10 +93,12 @@ pub struct LoginDto {
     pub username: String,
     #[garde(length(min = 5, max = 20))]
     pub password: String,
-    /// 验证码
+    /// 验证码（captchaEnabled=false 时前端/API 调用方可省略；serde default 兼容）
+    #[serde(default)]
     #[garde(skip)]
     pub code: String,
-    /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入）
+    /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入；captcha 关闭时可省略）
+    #[serde(default)]
     #[garde(custom(validate_captcha_uuid_format))]
     pub uuid: String,
     /// TOTP 多因子验证码（可选，仅已启用 TOTP 的用户登录时必填，P0-4 登录链路集成）
@@ -113,10 +115,12 @@ pub struct RegisterDto {
     pub username: String,
     #[garde(length(min = 5, max = 20))]
     pub password: String,
-    /// 验证码
+    /// 验证码（captchaEnabled=false 时可省略；serde default 兼容）
+    #[serde(default)]
     #[garde(skip)]
     pub code: String,
-    /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入）
+    /// 验证码会话 UUID（ERR-29：校验格式防 Redis key 注入；captcha 关闭时可省略）
+    #[serde(default)]
     #[garde(custom(validate_captcha_uuid_format))]
     pub uuid: String,
 }
@@ -841,8 +845,14 @@ impl AuthService {
             .query_async(redis)
             .await
             .unwrap_or(None);
-        let (token, claims) =
-            JwtUtils::generate_token(&user_id, ctx.username, jwt_config, pwd_ver.unwrap_or(0))?;
+        let (token, claims) = JwtUtils::generate_token(
+            &user_id,
+            ctx.username,
+            jwt_config,
+            pwd_ver.unwrap_or(0),
+            // v5-N2 Phase 2：登录查库带出真实 tid（当前存量用户恒 0 = 平台单租户）
+            user.tenant_id,
+        )?;
 
         // 2. 登录日志写入（成功，best-effort）
         //    H-1/H-2 修复：日志写入失败不应阻断登录响应，仅记录警告日志

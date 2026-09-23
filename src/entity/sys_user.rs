@@ -64,6 +64,10 @@ pub struct Model {
     #[ts(as = "Option<String>")]
     pub update_time: Option<NaiveDateTime>,
     pub remark: Option<String>,
+    /// v5-N2 Phase 2（第一步）：租户 ID（登录 JWT 的 tid 数据源；默认 0 = 平台单租户，
+    /// 多租户立项后由租户管理功能维护；Phase 2 后续：Repository 过滤层按 tid 注入条件）
+    #[serde(default)]
+    pub tenant_id: i64,
 }
 
 /// 手动实现 Debug 以脱敏 password 字段，防止密码哈希泄漏到日志
@@ -90,6 +94,7 @@ impl fmt::Debug for Model {
             .field("update_by", &self.update_by)
             .field("update_time", &self.update_time)
             .field("remark", &self.remark)
+            .field("tenant_id", &self.tenant_id)
             .finish()
     }
 }
@@ -127,6 +132,7 @@ mod tests {
             update_by: None,
             update_time: None,
             remark: None,
+            tenant_id: 0,
         };
 
         let debug_str = format!("{:?}", user);

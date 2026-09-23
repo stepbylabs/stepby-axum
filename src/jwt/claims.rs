@@ -120,6 +120,7 @@ impl JwtUtils {
         username: &str,
         config: &JwtConfig,
         pwd_ver: u64,
+        tid: i64,
     ) -> Result<(String, Claims), JwtError> {
         let now = Utc::now();
         let exp = now + chrono::Duration::hours(config.expire_hours);
@@ -135,8 +136,8 @@ impl JwtUtils {
             jti: uuid::Uuid::new_v4().to_string(),
             pwd_ver,
             pat_scopes: None,
-            // v5-N2 Phase 1：当前恒 0（平台单租户）；Phase 2 登录查库带出真实 tid
-            tid: 0,
+            // v5-N2 Phase 2：登录查库带出真实租户 ID（存量用户默认 0）
+            tid,
         };
         // SEC-008：显式指定 Algorithm::HS256，不依赖 Header::default()（默认 HS256 但显式更安全）
         let mut header = Header::new(Algorithm::HS256);
@@ -196,8 +197,8 @@ mod tests {
     #[test]
     fn test_generate_and_verify_roundtrip() {
         let cfg = test_jwt_config();
-        let (token, claims) =
-            JwtUtils::generate_token("1", "admin", &cfg, 0).expect("generate_token must succeed");
+        let (token, claims) = JwtUtils::generate_token("1", "admin", &cfg, 0, 0)
+            .expect("generate_token must succeed");
 
         let verified = JwtUtils::verify_token(&token, &cfg).expect("verify must succeed");
 
@@ -248,8 +249,8 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
         let cfg = test_jwt_config();
-        let (token, _) =
-            JwtUtils::generate_token("1", "admin", &cfg, 0).expect("generate_token must succeed");
+        let (token, _) = JwtUtils::generate_token("1", "admin", &cfg, 0, 0)
+            .expect("generate_token must succeed");
 
         // 篡改签名：先 base64url 解码 → 翻转一个字节 → 重新编码。
         // 不做"末尾字符翻转"是因为 HS256 签名为 32 字节 → base64url 为 43 字符（无填充），
@@ -326,8 +327,8 @@ mod tests {
     #[test]
     fn test_verify_rejects_wrong_secret() {
         let cfg = test_jwt_config();
-        let (token, _) =
-            JwtUtils::generate_token("1", "admin", &cfg, 0).expect("generate_token must succeed");
+        let (token, _) = JwtUtils::generate_token("1", "admin", &cfg, 0, 0)
+            .expect("generate_token must succeed");
 
         // 用不同密钥校验 → 签名不匹配
         let mut wrong_cfg = cfg.clone();

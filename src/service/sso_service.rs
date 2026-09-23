@@ -1745,7 +1745,11 @@ impl SsoService {
 
         // v5-D2：RS256 私钥（PKCS#8 PEM）——新增客户端默认 RS256 签名；
         // 私钥信封加密落库（key 未配置时明文，迁移期策略），公钥经 /sso/jwks 发布。
-        let rsa_private_pem = generate_rsa_private_pem()
+        // keygen 为 CPU 密集大栈操作：spawn_blocking 避免阻塞 tokio worker
+        //（v5-D2 修正：真实运行发现 tokio 栈上 keygen stack overflow 硬崩）
+        let rsa_private_pem = tokio::task::spawn_blocking(generate_rsa_private_pem)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("RSA keygen 任务失败: {e}")))?
             .map_err(|e| ServiceError::internal(&format!("RSA 密钥生成失败: {e}")))?;
         let rsa_private_stored = if self.enc_key.is_empty() {
             tracing::warn!("CONFIG_ENC_KEY 未配置：rsa_private_key 以明文落库（迁移期 fail-open）");
@@ -2281,13 +2285,24 @@ fn resolve_subject(client: &ClientModel, user_id: i64) -> String {
     }
 }
 
-/// v5-D2：生成 RSA-2048 私钥并输出 PKCS#8 PEM（client 级 RS256 签名密钥）
+/// v5-D2：生成 RSA-2048 私钥并输出 PKCS#8 PEM（client 级 RS256 签名密钥）。
+///
+/// v5-D2 修正（真实运行验证发现）：rsa 0.9 的 keygen 素性测试需要较大线程栈，
+/// 在 tokio worker（默认 2MB 栈）上直接调用会 stack overflow（0xC0000005 硬崩、
+/// 连接重置且无任何日志）。故固定在 **16MB 独立栈线程**同步执行——调用方处于
+/// async 上下文时应配合 `tokio::task::spawn_blocking` 使用。
 pub(crate) fn generate_rsa_private_pem() -> anyhow::Result<String> {
     use rsa::pkcs8::EncodePrivateKey;
-    let mut rng = rand::thread_rng();
-    let private = rsa::RsaPrivateKey::new(&mut rng, 2048)?;
-    let pem = private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)?;
-    Ok(pem.to_string())
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let mut rng = rand::thread_rng();
+            let private = rsa::RsaPrivateKey::new(&mut rng, 2048)?;
+            let pem = private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)?;
+            Ok(pem.to_string())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("RSA keygen 线程异常终止"))?
 }
 
 /// v5-D2：从 RS256 私钥 PEM 构造该客户端的 JWK（公钥组件 n/e，base64url 无填充）。
