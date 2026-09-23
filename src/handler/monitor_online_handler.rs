@@ -22,6 +22,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::constants::{SECS_PER_HOUR, SUPER_ADMIN_USER_ID};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::middleware::auth::Operator;
 use crate::state::AppState;
 use crate::utils::crypto::OnlineSession;
 use crate::utils::redis::scan_keys;
@@ -359,6 +360,133 @@ pub async fn force_logout(
         serde_json::json!({
             "tokenHash": token_hash,
             "userId": session.user_id,
+            "userName": session.username
+        }),
+    );
+
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.force_logout"
+    )))
+}
+
+/// GET /monitor/my-session/list（v5-N5：普通用户自助「会话管理」）
+///
+/// 背景：前端 MySessionPanel（菜单 126）此前复用管理员接口 `GET /monitor/online/list`，
+/// 该接口要求 `monitor:online:list` 权限，普通用户必 403（功能不可用）；而菜单
+/// `monitor:session:list` 在后端权限映射中不存在。
+///
+/// 本端点：仅登录（is_login_only_path），**强制**按当前登录用户名过滤，
+/// 前端传入的 userName 一律忽略——用户只能看到自己的会话。
+#[utoipa::path(
+    get,
+    path = "/monitor/my-session/list",
+    params(OnlineQueryDto),
+    responses(
+        (status = 200, description = "查询成功", body = TableDataInfo<SysUserOnline>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-online"
+)]
+pub async fn my_session_list(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(mut query): Query<OnlineQueryDto>,
+) -> Result<TableDataInfo<SysUserOnline>, AppError> {
+    query.user_name = Some(operator.username().to_string()); // 强制本人过滤，忽略入参
+    list(State(state), Query(query)).await
+}
+
+/// DELETE /monitor/my-session/{tokenHash}（v5-N5：自助注销本人会话）
+///
+/// 与管理员 force_logout 的区别：**属主校验**——目标会话的 user_id 必须等于当前
+/// 登录用户，否则 403（防止借自助入口踢他人会话的横向越权）。注销自身当前会话
+/// 允许（前端 isCurrentSession 已排除；后端不做二次限制，自助语义下踢自己可接受）。
+#[utoipa::path(
+    delete,
+    path = "/monitor/my-session/{tokenHash}",
+    params(
+        ("tokenHash" = String, Path, description = "会话编号（token 的 SHA-256 哈希）")
+    ),
+    responses(
+        (status = 200, description = "注销成功", body = AjaxResult<serde_json::Value>),
+        (status = 403, description = "只能注销本人的会话"),
+        (status = 404, description = "会话不存在或已过期"),
+        (status = 503, description = "认证服务暂时不可用"),
+    ),
+    tag = "monitor-online"
+)]
+pub async fn my_session_logout(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(token_hash): Path<String>,
+) -> Result<AjaxResult<()>, AppError> {
+    let user_id: i64 = operator
+        .user_id()
+        .parse()
+        .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
+    let online_key = format!("online:{}", token_hash);
+    let mut redis = state.redis.clone();
+
+    // 1. 读会话 → 确认存在 + 属主校验（v5-N5：横向越权防线）
+    let session_json: Option<String> = redis::cmd("GET")
+        .arg(&online_key)
+        .query_async(&mut redis)
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
+    let session: OnlineSession = match session_json {
+        Some(s) => serde_json::from_str(&s).map_err(|e| {
+            tracing::error!("解析 OnlineSession JSON 失败: {}", e);
+            AppError::internal(&crate::tr!("error.monitor.session_invalid"))
+        })?,
+        None => {
+            return Err(AppError::not_found(&crate::tr!(
+                "error.monitor.session_not_found"
+            )));
+        }
+    };
+    if session.user_id != user_id {
+        return Err(AppError::new(
+            403,
+            crate::tr!("error.monitor.session_not_owned"),
+        ));
+    }
+
+    // 2. 与 force_logout 同款三键 Lua（blacklist + online + sso:at，v5 前轮已联动）
+    let now_secs = chrono::Utc::now().timestamp();
+    let precise_ttl = session.exp.saturating_sub(now_secs).max(0);
+    let fallback_ttl = state
+        .config
+        .jwt
+        .expire_hours
+        .saturating_mul(SECS_PER_HOUR)
+        .max(1);
+    let blacklist_ttl = if session.exp > 0 {
+        precise_ttl.max(1)
+    } else {
+        fallback_ttl
+    };
+    let _: i64 = redis::Script::new(FORCE_LOGOUT_SCRIPT)
+        .key(format!("blacklist:{}", token_hash))
+        .key(&online_key)
+        .key(format!("sso:at:{}", token_hash))
+        .arg(blacklist_ttl)
+        .invoke_async(&mut redis)
+        .await
+        .map_err(|e| {
+            tracing::error!("Lua 自助注销脚本执行失败（fail-closed）: {}", e);
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
+
+    // 3. 定向推送（本人其它端跳登录页）
+    state.broadcast_to_user(
+        user_id,
+        "forceLogout",
+        serde_json::json!({
+            "tokenHash": token_hash,
+            "userId": user_id,
             "userName": session.username
         }),
     );

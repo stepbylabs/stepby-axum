@@ -211,6 +211,7 @@ error:
     too_many_requests: 请求过于频繁，请稍后再试
   monitor:
     session_not_found: 会话不存在或已过期
+    session_not_owned: 只能操作本人的会话
     session_invalid: 会话数据异常
     admin_force_logout_forbidden: 不允许强退超级管理员会话
   post:

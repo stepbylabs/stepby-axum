@@ -78,6 +78,12 @@ impl AppInitializer {
         // 4.1 v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等，详见函数注释）
         revoke_legacy_sso_at_tokens(&mut redis.clone()).await;
 
+        // 4.2 v5-S1：SSO/OIDC 公开端点限流分档（存量库兜底，幂等；与迁移
+        //     m20260924_000001_sso_rate_limit_tiers 等价——启动不跑 Migrator::up）
+        ensure_sso_rate_limit_tiers(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 SSO 限流分档失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -701,6 +707,50 @@ async fn sso_startup_self_check(db: &DatabaseConnection, settings: &Settings) {
             }
         }
     }
+}
+
+/// v5-S1：SSO/OIDC 公开端点限流分档（存量库兜底，幂等）。
+///
+/// 与迁移 m20260924_000001_sso_rate_limit_tiers 等价：rate_limit 中间件先按
+/// route_pattern 精确匹配、未命中回退 '*'；此处为不跑 Migrator::up 的存量库
+/// 以「查存在 → 缺则 INSERT」补齐五条分档（应用层判存，跨 SQLite/PG/MySQL 稳定）。
+/// 已有同 pattern 行（运维自调）不覆盖。生效时机：下次启动或 Redis 配置缓存过期。
+async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_rate_limit").await? {
+        return Ok(()); // 极旧存量库无限流表（理论不可达，防御性跳过）
+    }
+    const TIERS: &[(&str, u32, f64, &str)] = &[
+        ("/sso/token", 30, 0.5, "SSO 令牌兑换（机器对机器，严档防暴力试 secret）"),
+        ("/sso/authorize", 60, 1.0, "SSO 授权端点（浏览器导航，中档）"),
+        ("/sso/logout", 30, 0.5, "SSO 登出（低频严档）"),
+        ("/sso/userinfo", 120, 2.0, "SSO 用户信息（RP 高频会话校验，宽档）"),
+        (
+            "/.well-known/openid-configuration",
+            60,
+            1.0,
+            "OIDC 发现文档（RP 启动期拉取，中档）",
+        ),
+    ];
+    let backend = db.get_database_backend();
+    for (pattern, capacity, refill, description) in TIERS {
+        let count_sql =
+            format!("SELECT COUNT(*) AS c FROM sys_rate_limit WHERE route_pattern = '{pattern}'");
+        let exists = match db.query_one(Statement::from_string(backend, count_sql)).await? {
+            Some(row) => row.try_get::<i64>("", "c").unwrap_or(0) > 0,
+            None => false,
+        };
+        if exists {
+            continue;
+        }
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let insert_sql = format!(
+            "INSERT INTO sys_rate_limit (route_pattern, capacity, refill_per_second, enabled, description, create_by, create_time, update_by, update_time) \
+             VALUES ('{pattern}', {capacity}, {refill}, TRUE, '{description}', 'admin', '{now}', 'admin', '{now}')"
+        );
+        db.execute(Statement::from_string(backend, insert_sql)).await?;
+        tracing::info!("已插入 SSO 限流分档 route_pattern={pattern}");
+    }
+    Ok(())
 }
 
 /// 读取一条 `SELECT COUNT(*) AS c ...` 的结果（跨方言返回 i64）。

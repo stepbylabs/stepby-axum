@@ -209,6 +209,7 @@ error:
     id_invalid: Invalid config ID
   monitor:
     session_not_found: Session does not exist or has expired
+    session_not_owned: You can only manage your own sessions
     session_invalid: Session data invalid
     admin_force_logout_forbidden: Cannot force logout the super administrator
   post:

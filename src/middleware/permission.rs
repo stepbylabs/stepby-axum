@@ -763,6 +763,9 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("POST", "/system/flow/demo/{docId}/resubmit")
             | ("POST", "/system/flow/demo/{docId}/withdraw")
             | ("POST", "/system/flow/task/{taskId}/action")
+        // ===== 个人会话管理（v5-N5：自助查看/注销本人会话，属主校验在 handler；仅登录）=====
+            | ("GET", "/monitor/my-session/list")
+            | ("DELETE", "/monitor/my-session/{tokenHash}")
     )
 }
 
@@ -1299,6 +1302,9 @@ mod tests {
             // monitor_online_router
             ("GET", "/monitor/online/list"),
             ("DELETE", "/monitor/online/{tokenHash}"),
+            // v5-N5：个人会话管理（仅登录白名单）
+            ("GET", "/monitor/my-session/list"),
+            ("DELETE", "/monitor/my-session/{tokenHash}"),
             // monitor_cache_router
             ("GET", "/monitor/cache"),
             ("GET", "/monitor/cache/getNames"),
