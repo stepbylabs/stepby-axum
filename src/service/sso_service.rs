@@ -73,6 +73,10 @@ pub struct SsoClientVo {
     pub redirect_uris: Vec<String>,
     pub scopes: Vec<String>,
     pub grant_types: Vec<String>,
+    /// v5-D2：ID Token 签名算法（RS256/HS256）
+    pub id_token_alg: String,
+    /// v5-D5：subject 标识类型（public/pairwise）
+    pub subject_type: String,
     pub consent_required: String,
     pub enabled: String,
     pub remark: Option<String>,
@@ -124,6 +128,15 @@ pub struct SsoClientUpsertDto {
     #[serde(default)]
     #[ts(optional)]
     pub grant_types: Option<Vec<String>>,
+    /// v5-D2：ID Token 签名算法（RS256/HS256，默认 RS256；改回 HS256 用 id_token_secret 对称验签）
+    #[serde(default)]
+    #[ts(optional)]
+    pub id_token_alg: Option<String>,
+    /// v5-D5：subject 标识类型（public/pairwise，默认 public；**切换会使已发令牌的
+    /// sub 变化，RP 侧视为新用户**——修改时后端强制确认提示由前端承担）
+    #[serde(default)]
+    #[ts(optional)]
+    pub subject_type: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub consent_required: Option<String>,
@@ -1768,9 +1781,9 @@ impl SsoService {
             client_id: Set(client_id.clone()),
             client_secret_hash: Set(client_secret_hash),
             id_token_secret: Set(id_token_secret_stored),
-            id_token_alg: Set("RS256".to_string()),
+            id_token_alg: Set(normalize_id_token_alg(dto.id_token_alg.as_deref())),
             rsa_private_key: Set(Some(rsa_private_stored)),
-            subject_type: Set("public".to_string()),
+            subject_type: Set(normalize_subject_type(dto.subject_type.as_deref())),
             client_name: Set(dto.client_name.trim().to_string()),
             logo_uri: Set(logo_uri),
             redirect_uris: Set(to_json_array(&redirect_uris)),
@@ -1820,6 +1833,11 @@ impl SsoService {
         // 未回传时保留原值（consent_required / enabled 可选）
         let consent_required = normalize_flag(dto.consent_required.as_deref(), &m.consent_required);
         let enabled = normalize_flag(dto.enabled.as_deref(), &m.enabled);
+        // v5-D2/D5：算法与 subject 类型可选更新（未回传保留原值）。
+        // 注意：pairwise 切换会使已发令牌的 sub 变化（RP 视为新用户），前端承担确认提示；
+        // HS256 切换不删除 RSA 私钥（切回 RS256 立即恢复非对称签名）。
+        let id_token_alg = normalize_id_token_alg(dto.id_token_alg.as_deref());
+        let subject_type = normalize_subject_type(dto.subject_type.as_deref());
 
         // 关键：仅将可编辑列标记为 Set 才能被 ActiveModelTrait::update 真实写入；
         // Model.into() 会产生 Unchanged 值并被 update 跳过。client_id /
@@ -1830,6 +1848,8 @@ impl SsoService {
         am.redirect_uris = Set(to_json_array(&redirect_uris));
         am.scopes = Set(to_json_array(&scopes));
         am.grant_types = Set(to_json_array(&grant_types));
+        am.id_token_alg = Set(id_token_alg);
+        am.subject_type = Set(subject_type);
         am.consent_required = Set(consent_required);
         am.enabled = Set(enabled);
         am.remark = Set(dto.remark);
@@ -2462,6 +2482,22 @@ fn normalize_grant_types(input: Option<&[String]>) -> Vec<String> {
     }
 }
 
+/// v5-D2：ID Token 签名算法归一化（白名单 RS256/HS256，非法值回退 RS256）
+fn normalize_id_token_alg(input: Option<&str>) -> String {
+    match input.map(str::trim) {
+        Some("HS256") => "HS256".to_string(),
+        _ => "RS256".to_string(),
+    }
+}
+
+/// v5-D5：subject 标识类型归一化（白名单 public/pairwise，非法值回退 public）
+fn normalize_subject_type(input: Option<&str>) -> String {
+    match input.map(str::trim) {
+        Some("pairwise") => "pairwise".to_string(),
+        _ => "public".to_string(),
+    }
+}
+
 fn normalize_flag(input: Option<&str>, default: &str) -> String {
     match input.map(str::trim) {
         Some("0") => "0".to_string(),
@@ -2489,6 +2525,8 @@ fn client_to_vo(m: ClientModel) -> SsoClientVo {
         redirect_uris: serde_json::from_str(&m.redirect_uris).unwrap_or_default(),
         scopes: serde_json::from_str(&m.scopes).unwrap_or_default(),
         grant_types: serde_json::from_str(&m.grant_types).unwrap_or_default(),
+        id_token_alg: m.id_token_alg,
+        subject_type: m.subject_type,
         consent_required: m.consent_required,
         enabled: m.enabled,
         remark: m.remark,
