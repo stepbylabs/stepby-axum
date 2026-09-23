@@ -48,6 +48,15 @@ impl SysOauthClientRepository {
             .await
     }
 
+    /// 查询全部启用客户端（v5-D2：JWKS 聚合 RS256 公钥用）
+    pub async fn find_all_enabled(&self) -> Result<Vec<Model>, DbErr> {
+        SysOauthClient::find()
+            .filter(Column::Enabled.eq("1"))
+            .filter(Column::DelFlag.ne("2"))
+            .all(self.base.db())
+            .await
+    }
+
     /// client_id 是否已存在（含软删——client_id 唯一约束不因软删释放，防重建同名 client
     /// 继承旧用户授权记录造成静默授权，v2-K4）
     pub async fn exists_by_client_id(&self, client_id: &str) -> Result<bool, DbErr> {

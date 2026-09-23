@@ -5,8 +5,8 @@
 //! - GET  /sso/authorize                     授权端点（解析浏览器会话 Cookie）
 //! - POST /sso/token                         令牌端点（授权码 + PKCE）
 //! - GET  /sso/userinfo                      用户信息端点（Bearer access_token）
+//! - GET  /sso/jwks                          JWKS（v5-D2：聚合启用 RS256 客户端公钥）
 //! - GET|POST /sso/logout                    RP-initiated end-session
-//!   （v5 第八轮：无 /sso/jwks——HS256 不发布公钥，jwks_uri 为 OPTIONAL，RS256/D2 落地时恢复）
 //!
 //! 受保护路由（需 auth + permission）：
 //! - POST /sso/consent                       同意页批准 / 拒绝（仅登录）
@@ -34,6 +34,8 @@ pub fn public_sso_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/sso/authorize", get(sso_handler::authorize))
         .route("/sso/token", post(sso_handler::token))
         .route("/sso/userinfo", get(sso_handler::userinfo))
+        // v5-D2：RS256 客户端公钥发布（聚合；仅启用客户端）
+        .route("/sso/jwks", get(sso_handler::jwks))
         .route(
             "/sso/logout",
             get(sso_handler::logout).post(sso_handler::logout),

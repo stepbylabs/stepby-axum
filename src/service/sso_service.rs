@@ -400,14 +400,14 @@ impl SsoService {
             "token_endpoint": format!("{}/sso/token", issuer),
             "userinfo_endpoint": format!("{}/sso/userinfo", issuer),
             "end_session_endpoint": format!("{}/sso/logout", issuer),
-            // v5 第八轮核查：OIDC Discovery 的 jwks_uri 为 **OPTIONAL**（v4 注释误作
-            // REQUIRED）；HS256 对称签名按规范经 client_secret 通道分发验签密钥，
-            // 不发布公钥——空 JWKS 端点属占位假功能，一并移除（RS256/D2 落地时恢复）。
+            // v5-D2：RS256 客户端公钥经 /sso/jwks 真实发布（kid=client_id）；
+            // HS256 客户端仍按规范不发布公钥（对称密钥经注册通道分发）。
+            "jwks_uri": format!("{}/sso/jwks", issuer),
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
             "grant_types_supported": ["authorization_code"],
             "subject_types_supported": ["public"],
-            "id_token_signing_alg_values_supported": ["HS256"],
+            "id_token_signing_alg_values_supported": ["RS256", "HS256"],
             "scopes_supported": ["openid", "profile", "email"],
             // v3-P1-7：同时声明 client_secret_basic（大量 RP 客户端库默认 Basic）
             "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
@@ -1038,13 +1038,67 @@ impl SsoService {
         header.typ = Some("JWT".to_string());
         // v3-P1'-4：id_token_secret 以 enc2: 信封加密存储，签名前解密（明文兼容迁移期旧数据）
         let secret = self.decrypt_client_secret(&client.id_token_secret);
-        let token = encode(
+        // v5-D2：按客户端声明的算法签发——RS256（默认）用信封加密的 RSA 私钥（PKCS#8 PEM），
+        // header.kid = client_id（JWKS 端点聚合公钥的键）；存量无 RSA 私钥的客户端回落 HS256。
+        let token = if client.id_token_alg == "RS256" {
+            let Some(pem_enc) = &client.rsa_private_key else {
+                tracing::error!(
+                    "RS256 客户端 {} 缺少 RSA 私钥，回落 HS256",
+                    client.client_id
+                );
+                return self.sign_hs256(&payload, &secret, &client.client_id);
+            };
+            let pem = crate::utils::crypto::unseal_sensitive_value(pem_enc, &self.enc_key);
+            header.alg = Algorithm::RS256;
+            header.kid = Some(client.client_id.clone());
+            let key = EncodingKey::from_rsa_pem(pem.as_bytes())
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
+            encode(&header, &payload, &key)
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?
+        } else {
+            self.sign_hs256(&payload, &secret, &client.client_id)?
+        };
+        Ok(token)
+    }
+
+    /// HS256 签发（per-client 对称密钥；v5-D2 前 RS256 客户端的回落路径）
+    fn sign_hs256(
+        &self,
+        payload: &serde_json::Value,
+        secret: &str,
+        _client_id: &str,
+    ) -> Result<String, ServiceError> {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+        let mut header = Header::new(Algorithm::HS256);
+        header.typ = Some("JWT".to_string());
+        encode(
             &header,
-            &payload,
+            payload,
             &EncodingKey::from_secret(secret.as_bytes()),
         )
-        .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
-        Ok(token)
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))
+    }
+
+    /// v5-D2：JWKS 文档——聚合全部启用客户端的 RS256 公钥（kid = client_id）。
+    /// HS256 客户端不发布公钥（对称密钥经注册通道分发），本端点仅含 RS256 条目；
+    /// 全部为 HS256 时返回空 keys（与 jwks_uri OPTIONAL 语义一致，不影响 RP）。
+    pub async fn jwks(&self) -> serde_json::Value {
+        let mut keys: Vec<serde_json::Value> = Vec::new();
+        if let Ok(clients) = self.client_repo.find_all_enabled().await {
+            for c in clients {
+                if c.id_token_alg != "RS256" {
+                    continue;
+                }
+                let Some(pem_enc) = &c.rsa_private_key else {
+                    continue;
+                };
+                let pem = crate::utils::crypto::unseal_sensitive_value(pem_enc, &self.enc_key);
+                if let Ok(jwk) = rsa_public_jwk(&pem, &c.client_id) {
+                    keys.push(jwk);
+                }
+            }
+        }
+        serde_json::json!({ "keys": keys })
     }
 
     // -------------------- userinfo --------------------
@@ -1308,11 +1362,29 @@ impl SsoService {
             )?
         };
 
+        // v5-D2：RS256 私钥（PKCS#8 PEM）——新增客户端默认 RS256 签名；
+        // 私钥信封加密落库（key 未配置时明文，迁移期策略），公钥经 /sso/jwks 发布。
+        let rsa_private_pem = generate_rsa_private_pem()
+            .map_err(|e| ServiceError::internal(&format!("RSA 密钥生成失败: {e}")))?;
+        let rsa_private_stored = if self.enc_key.is_empty() {
+            tracing::warn!("CONFIG_ENC_KEY 未配置：rsa_private_key 以明文落库（迁移期 fail-open）");
+            rsa_private_pem
+        } else {
+            crate::utils::crypto::encrypt_config_value(&rsa_private_pem, &self.enc_key).map_err(
+                |e| {
+                    tracing::error!("RSA 私钥加密失败，拒绝创建客户端（fail-closed）: {}", e);
+                    ServiceError::internal(&crate::tr!("error.sso.secret_encrypt_failed"))
+                },
+            )?
+        };
+
         let now = datetime::now_naive();
         let am = ClientActiveModel {
             client_id: Set(client_id.clone()),
             client_secret_hash: Set(client_secret_hash),
             id_token_secret: Set(id_token_secret_stored),
+            id_token_alg: Set("RS256".to_string()),
+            rsa_private_key: Set(Some(rsa_private_stored)),
             client_name: Set(dto.client_name.trim().to_string()),
             logo_uri: Set(logo_uri),
             redirect_uris: Set(to_json_array(&redirect_uris)),
@@ -1643,9 +1715,11 @@ impl SsoService {
         }
     }
 
-    /// 验签 id_token_hint（HS256 + 每客户端 id_token_secret）：
+    /// 验签 id_token_hint：
     /// 先**手动 base64url 解码** payload 取出 aud 定位客户端（不验签的 peek 仅用于路由，
     /// 随后立即用该客户端密钥完整验签，不信任 peek 结果），再完整验签。
+    /// v5-D2：签名算法按客户端声明分支——RS256 用公钥组件验签（私钥推导公钥），
+    /// HS256 用 id_token_secret；alg 缺省按 HS256 兼容旧客户端。
     /// 返回 `Some((client_id, sub))`；定位/验签任一失败返回 `None`。
     async fn verify_id_token_hint(
         &self,
@@ -1665,15 +1739,47 @@ impl SsoService {
         let Some(client) = self.client_repo.find_by_client_id(&aud).await? else {
             return Ok(None);
         };
-        let secret = self.decrypt_client_secret(&client.id_token_secret);
-        let mut validation = Validation::new(Algorithm::HS256);
+        // v5-D2：按客户端声明算法构造验签密钥（RS256 公钥组件 / HS256 对称密钥）
+        use base64::Engine as _;
+        use rsa::traits::PublicKeyParts;
+        let (alg, key) = match client.id_token_alg.as_str() {
+            "RS256" => {
+                use rsa::pkcs8::DecodePrivateKey;
+                let Some(pem_enc) = &client.rsa_private_key else {
+                    tracing::warn!(
+                        "id_token_hint：RS256 客户端 {} 缺少私钥，验签失败",
+                        client.client_id
+                    );
+                    return Ok(None);
+                };
+                let pem = crate::utils::crypto::unseal_sensitive_value(pem_enc, &self.enc_key);
+                let private = rsa::RsaPrivateKey::from_pkcs8_pem(&pem).map_err(|e| {
+                    tracing::error!("RSA 私钥解析失败 client_id={}: {}", aud, e);
+                    ServiceError::internal(&crate::tr!("error.sso.client_auth_failed"))
+                })?;
+                let b64url = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+                let key = DecodingKey::from_rsa_components(
+                    &b64url(&private.n().to_bytes_be()),
+                    &b64url(&private.e().to_bytes_be()),
+                )
+                .map_err(|e| {
+                    tracing::error!("RSA 公钥组件构造失败 client_id={}: {}", aud, e);
+                    ServiceError::internal(&crate::tr!("error.sso.client_auth_failed"))
+                })?;
+                (Algorithm::RS256, key)
+            }
+            _ => (
+                Algorithm::HS256,
+                DecodingKey::from_secret(
+                    self.decrypt_client_secret(&client.id_token_secret)
+                        .as_bytes(),
+                ),
+            ),
+        };
+        let mut validation = Validation::new(alg);
         validation.set_audience(&[&aud]);
         validation.validate_exp = true;
-        match jsonwebtoken::decode::<serde_json::Value>(
-            hint,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        ) {
+        match jsonwebtoken::decode::<serde_json::Value>(hint, &key, &validation) {
             Ok(data) => {
                 let sub = data
                     .claims
@@ -1745,6 +1851,35 @@ fn peek_jwt_claims(token: &str) -> Option<serde_json::Value> {
 }
 
 // ==================== 纯函数辅助（可单测） ====================
+
+/// v5-D2：生成 RSA-2048 私钥并输出 PKCS#8 PEM（client 级 RS256 签名密钥）
+pub(crate) fn generate_rsa_private_pem() -> anyhow::Result<String> {
+    use rsa::pkcs8::EncodePrivateKey;
+    let mut rng = rand::thread_rng();
+    let private = rsa::RsaPrivateKey::new(&mut rng, 2048)?;
+    let pem = private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)?;
+    Ok(pem.to_string())
+}
+
+/// v5-D2：从 RS256 私钥 PEM 构造该客户端的 JWK（公钥组件 n/e，base64url 无填充）。
+/// kid = client_id（JWKS 聚合键）。私钥解析失败返回 Err（跳过该客户端，不影响整体）。
+fn rsa_public_jwk(private_pem: &str, kid: &str) -> anyhow::Result<serde_json::Value> {
+    use base64::Engine as _;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    let private = rsa::RsaPrivateKey::from_pkcs8_pem(private_pem)?;
+    let n = private.n().to_bytes_be();
+    let e = private.e().to_bytes_be();
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    Ok(serde_json::json!({
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": kid,
+        "n": b64(&n),
+        "e": b64(&e),
+    }))
+}
 
 /// PKCE：S256(code_verifier) == code_challenge（base64url 无填充）
 pub fn pkce_verify(code_verifier: &str, code_challenge: &str) -> bool {

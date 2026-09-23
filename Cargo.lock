@@ -356,6 +356,7 @@ dependencies = [
  "redis",
  "regex",
  "reqwest",
+ "rsa",
  "rust-embed",
  "rust-i18n",
  "rust_xlsxwriter",

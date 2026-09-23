@@ -94,6 +94,12 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO consent 唯一索引失败: {}", e))?;
 
+        // 4.5 v5-D2：为存量 RS256 客户端补生成 RSA 私钥（rsa_private_key IS NULL 的行，
+        //     PKCS#8 PEM 信封加密落库；CONFIG_ENC_KEY 未配置时明文，迁移期策略）
+        ensure_sso_rs256_keys(&db, &settings.config_enc_key)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 SSO RSA 密钥失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -717,6 +723,60 @@ async fn sso_startup_self_check(db: &DatabaseConnection, settings: &Settings) {
             }
         }
     }
+}
+
+/// v5-D2：为存量 RS256 客户端补生成 RSA-2048 私钥（幂等：仅处理 rsa_private_key 为
+/// NULL 且 id_token_alg='RS256' 的行）。PKCS#8 PEM 按 CONFIG_ENC_KEY 信封加密落库
+/// （key 未配置时明文，迁移期策略与 v5-E6 一致）；CONFIG_ENC_KEY 未配置时整体跳过。
+async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow::Result<()> {
+    use rsa::pkcs8::EncodePrivateKey;
+    if !sso_table_exists(db, "sys_oauth_client").await? {
+        return Ok(());
+    }
+    if enc_key.is_empty() {
+        tracing::warn!("CONFIG_ENC_KEY 未配置：跳过 RS256 密钥生成（v5-D2，下次启动重试）");
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let select_sql = "SELECT sso_client_id AS pk, client_id AS cid FROM sys_oauth_client \
+                      WHERE rsa_private_key IS NULL AND id_token_alg = 'RS256'";
+    let rows = db
+        .query_all(Statement::from_string(backend, select_sql))
+        .await?;
+    for row in rows {
+        let pk = row.try_get::<i64>("", "pk").unwrap_or(0);
+        let cid = row.try_get::<String>("", "cid").unwrap_or_default();
+        let mut rng = rand::thread_rng();
+        let private = match rsa::RsaPrivateKey::new(&mut rng, 2048) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::error!("v5-D2 RSA 生成失败 client_id={cid}: {}", e);
+                continue;
+            }
+        };
+        let pem = match private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF) {
+            Ok(p) => p.to_string(),
+            Err(e) => {
+                tracing::error!("v5-D2 RSA PEM 编码失败 client_id={cid}: {}", e);
+                continue;
+            }
+        };
+        let sealed = match crate::utils::crypto::seal_sensitive_value(&pem, enc_key) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("v5-D2 RSA 私钥加密失败 client_id={cid}: {}", e);
+                continue;
+            }
+        };
+        let update_sql = format!(
+            "UPDATE sys_oauth_client SET rsa_private_key = '{}' WHERE sso_client_id = {pk}",
+            sealed.replace('\'', "''")
+        );
+        db.execute(Statement::from_string(backend, update_sql))
+            .await?;
+        tracing::info!("v5-D2 已为存量客户端生成 RS256 密钥 client_id={cid}");
+    }
+    Ok(())
 }
 
 /// v5-E1：consent 组合唯一索引兜底（幂等）——清软删行、同 (user_id, client_id)

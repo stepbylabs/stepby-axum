@@ -28,6 +28,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "pro
 
 # JWT
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# v5-D2：RSA-2048 keypair 生成（client 级 RS256 签名密钥）与公钥组件导出（JWKS）
+rsa = "0.9"
 
 # 中间件
 tower = "0.5"
