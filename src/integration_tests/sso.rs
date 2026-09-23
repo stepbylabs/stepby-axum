@@ -22,6 +22,7 @@ use axum::body::Body;
 use axum::body::to_bytes;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode};
+use base64::Engine as _;
 use tower::ServiceExt;
 
 /// RFC 7636 附录 B 固定向量
@@ -395,7 +396,8 @@ async fn test_sso_security_negative_paths() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "PKCE 不匹配应 400");
     assert_eq!(json_of(&body)["error"].as_str(), Some("invalid_grant"));
 
-    // 2. 错误 client_secret → 400 invalid_client（需重新取码，上一 code 已消耗）
+    // 2. 错误 client_secret → 401 invalid_client + WWW-Authenticate: Basic
+    //   （RFC 6749 §5.2，v2-C2；需重新取码，上一 code 已消耗）
     let (status, headers, _) = raw_get(
         &ctx.app,
         ctx.peer_ip,
@@ -405,7 +407,7 @@ async fn test_sso_security_negative_paths() {
     .await;
     assert_eq!(status, StatusCode::FOUND, "重取授权码应 302");
     let code2 = query_param(&location_of(&headers), "code").expect("应含 code");
-    let (status, _, body) = raw_post(
+    let (status, headers, body) = raw_post(
         &ctx.app,
         ctx.peer_ip,
         "/sso/token",
@@ -414,8 +416,12 @@ async fn test_sso_security_negative_paths() {
         &[],
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "错误密钥应 400");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "错误密钥应 401");
     assert_eq!(json_of(&body)["error"].as_str(), Some("invalid_client"));
+    assert!(
+        headers.get("www-authenticate").is_some(),
+        "invalid_client 401 应带 WWW-Authenticate（v2-C2）"
+    );
 
     // 3. 未登录（无 Cookie）→ 302 引导 /login
     let (status, headers, _) = raw_get(
@@ -1074,4 +1080,192 @@ async fn test_sso_v4_grants_list_and_revoke() {
             .any(|g| g["clientId"].as_str() == Some(cid.as_str())),
         "撤销后 grants 不应再含该客户端，实际: {v}"
     );
+}
+
+/// v2-C2 / RFC 6749 §5.2：client 认证失败（凭据错误 / 缺失）→ 401 + `WWW-Authenticate: Basic`
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_invalid_client_401_www_authenticate() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client(&ctx, "0", "it_sso_v4badcred").await;
+    let code = obtain_code(&ctx, &cid, "openid").await;
+
+    // 错误凭据 → 401 + WWW-Authenticate
+    let form = format!(
+        "grant_type=authorization_code&code={}&client_id={}&client_secret=WRONG&code_verifier={}&redirect_uri={REDIRECT_URI_ENC}",
+        urlenc(&code),
+        urlenc(&cid),
+        urlenc(PKCE_VERIFIER)
+    );
+    let (status, headers, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &form,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "错误凭据应 401，body={}",
+        String::from_utf8_lossy(&body)
+    );
+    let www = headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        www.starts_with("Basic"),
+        "401 应带 WWW-Authenticate: Basic，实际: {www}"
+    );
+
+    // 凭据完全缺失 → 同样 401 + WWW-Authenticate（invalid_client）
+    let form = format!(
+        "grant_type=authorization_code&code={}&code_verifier={}&redirect_uri={REDIRECT_URI_ENC}",
+        urlenc(&code),
+        urlenc(PKCE_VERIFIER)
+    );
+    let (status, headers, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &form,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "缺失凭据应 401，body={}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(headers.get("www-authenticate").is_some());
+
+    // 错误凭据不得消费授权码：再用正确凭据换同一 code 应 invalid_grant（code 尚在，
+    // 但此处验证的是认证失败未产生副作用 —— 正确凭据仍可换）
+    let (tr, _) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    assert!(
+        tr["access_token"].as_str().is_some(),
+        "认证失败后正确凭据仍应可换码"
+    );
+}
+
+/// v3 P1'-5：`client_secret_basic`（Authorization: Basic 头，RFC 6749 §2.3.1）换 token 成功；
+/// 同时验证 Basic 凭据按 form-urlencoded percent-decode 还原
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_client_secret_basic_flow() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client(&ctx, "0", "it_sso_v4basic").await;
+    let code = obtain_code(&ctx, &cid, "openid").await;
+
+    // RFC 6749 §2.3.1：凭据先按 application/x-www-form-urlencoded 编码再拼 Basic
+    let cid_enc: String = url::form_urlencoded::byte_serialize(cid.as_bytes()).collect();
+    let sec_enc: String = url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+    let basic_val =
+        base64::engine::general_purpose::STANDARD.encode(format!("{cid_enc}:{sec_enc}").as_bytes());
+
+    // 表单只带协议参数，凭据走 Basic 头
+    let form = format!(
+        "grant_type=authorization_code&code={}&code_verifier={}&redirect_uri={REDIRECT_URI_ENC}",
+        urlenc(&code),
+        urlenc(PKCE_VERIFIER)
+    );
+    let auth_header = format!("Basic {basic_val}");
+    let (status, headers, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &form,
+        &[("authorization", auth_header.as_str())],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_secret_basic 应成功换 token，body={}",
+        String::from_utf8_lossy(&body)
+    );
+    let tr = json_of(&body);
+    assert!(tr["access_token"].as_str().is_some());
+    assert!(tr["id_token"].as_str().is_some());
+    // RFC 6749 §5.1
+    assert_eq!(
+        headers.get("cache-control").and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        userinfo_status(&ctx, tr["access_token"].as_str().unwrap()).await,
+        StatusCode::OK,
+        "Basic 流程签发的 AT 应可通过 userinfo 校验"
+    );
+}
+
+/// v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等 + blacklist 生效）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_legacy_at_rewrite() {
+    let ctx = sso_ctx().await;
+    let mut redis = ctx.redis();
+
+    // 清理标记，保证本测试触发一次完整转写
+    let _: Result<i64, _> = redis::cmd("DEL")
+        .arg("sso:v4_legacy_at_migrated")
+        .query_async(&mut redis)
+        .await;
+
+    // 伪造历史形态绑定：sso:at:{hash}（A 形态上线前由旧 token 端点写入）
+    let legacy_token = "legacy-jwt-style-sso-access-token";
+    let hash = crate::utils::crypto::token_hash(legacy_token);
+    let at_key = format!("sso:at:{hash}");
+    let _: () = redis::cmd("SETEX")
+        .arg(&at_key)
+        .arg(3600i64)
+        .arg(r#"{"client_id":"app_legacy","user_id":1}"#)
+        .query_async(&mut redis)
+        .await
+        .expect("写入历史绑定失败");
+
+    crate::initialize::revoke_legacy_sso_at_tokens(&mut redis).await;
+
+    // 原绑定被删 + blacklist 命中（业务路由过渡阻断/黑名单双路径立即拒绝）
+    let bound: Option<String> = redis::cmd("GET")
+        .arg(&at_key)
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(bound.is_none(), "历史绑定应被转写删除");
+    let blacklisted: Option<String> = redis::cmd("GET")
+        .arg(format!("blacklist:{hash}"))
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(blacklisted.is_some(), "历史令牌应转写为 blacklist");
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(format!("blacklist:{hash}"))
+        .query_async(&mut redis)
+        .await
+        .expect("TTL 失败");
+    assert!(
+        ttl >= 86_400,
+        "blacklist TTL 应 ≥ 24h（覆盖 JWT 最长剩余寿命），实际 {ttl}"
+    );
+
+    // 幂等：重复调用不报错（标记已置），且不复活任何键
+    crate::initialize::revoke_legacy_sso_at_tokens(&mut redis).await;
+    let blacklisted2: Option<String> = redis::cmd("GET")
+        .arg(format!("blacklist:{hash}"))
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(blacklisted2.is_some());
+
+    // 清理本测试遗留的 blacklist 与标记（隔离 DB 内不影响其它断言）
+    let _: i64 = redis::cmd("DEL")
+        .arg(format!("blacklist:{hash}"))
+        .arg("sso:v4_legacy_at_migrated")
+        .query_async(&mut redis)
+        .await
+        .unwrap_or(0);
 }

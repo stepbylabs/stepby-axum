@@ -67,7 +67,7 @@ pub fn extract_client_ip(
 /// 支持格式：
 /// - 精确 IP：如 "127.0.0.1"、"::1"
 /// - CIDR：如 "10.0.0.0/8"、"192.168.0.0/16"
-fn is_trusted_proxy(ip: &std::net::IpAddr, trusted: &[String]) -> bool {
+pub(crate) fn is_trusted_proxy(ip: &std::net::IpAddr, trusted: &[String]) -> bool {
     for entry in trusted {
         let entry = entry.trim();
         if entry.is_empty() {

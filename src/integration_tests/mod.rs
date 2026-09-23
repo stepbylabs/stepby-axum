@@ -315,6 +315,8 @@ pub struct TestContext {
     pub app: Router,
     pub token: String,
     pub peer_ip: IpAddr,
+    /// 应用状态句柄（测试直查 Redis / DB 用，与 app 共享同一实例）
+    pub state: Arc<AppState>,
     /// 独占的 Redis DB 槽位（drop 时自动归还，保证并行测试 DB 索引唯一）
     _slot: RedisSlot,
 }
@@ -323,15 +325,21 @@ impl TestContext {
     /// 构建隔离状态 + 完整应用，并以 admin/admin123 登录。
     pub async fn new() -> Self {
         let (state, slot) = build_isolated_state().await;
-        let app = crate::router::build_app(state);
+        let app = crate::router::build_app(state.clone());
         let peer_ip = next_peer_ip();
         let token = login(&app, peer_ip, "admin", "admin123").await;
         Self {
             app,
             token,
             peer_ip,
+            state,
             _slot: slot,
         }
+    }
+
+    /// 测试专属的 Redis 连接（与 app 共享同一隔离 DB）
+    pub fn redis(&self) -> redis::aio::ConnectionManager {
+        self.state.redis.clone()
     }
 
     /// 构造带鉴权头 + ConnectInfo 的请求。

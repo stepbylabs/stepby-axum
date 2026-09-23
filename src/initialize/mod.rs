@@ -75,6 +75,9 @@ impl AppInitializer {
         // 4. 初始化 Redis
         let redis = db::init_redis(&settings.redis).await?;
 
+        // 4.1 v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等，详见函数注释）
+        revoke_legacy_sso_at_tokens(&mut redis.clone()).await;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -707,6 +710,101 @@ async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i6
     match row {
         Some(r) => Ok(r.try_get::<i64>("", "c").unwrap_or(0)),
         None => Ok(0),
+    }
+}
+
+/// v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等）。
+///
+/// 背景：P0-A 修复前 SSO access_token 是平台 JWT（可横扫全站业务 API），仅靠
+/// auth 中间件的「`sso:at:{hash}` 绑定命中 → 拒绝」过渡阻断止血。但绑定 TTL（1h 量级）
+/// 短于历史 JWT 本体 TTL（最长 24h）——绑定过期后历史 JWT 失去唯一标识，剩余窗口内
+/// 仍可通行业务路由，**止血动作自毁止血范围**。
+///
+/// 定案（转写而非清除）：首次启动时把存量 `sso:at:*` 绑定转写为
+/// `blacklist:{hash}`（TTL = max(剩余TTL, 24h)）并删除原绑定 → 历史 JWT 立即全量吊销。
+/// 此刻 A 形态（不透明 AT）尚未签发过任何绑定，SCAN 命中的必为历史 JWT 型，无误伤。
+///
+/// 幂等：`sso:v4_legacy_at_migrated` SETNX 标记；已标记即跳过。
+/// 注意：标记随 Redis 清空丢失时会重跑转写——误伤的仅是活跃不透明 AT（持有方重新
+/// 走授权即可，TTL ≤ 1h），可接受；Redis 故障时跳过转写并告警（下次启动重试）。
+pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::ConnectionManager) {
+    const LEGACY_MARKER: &str = "sso:v4_legacy_at_migrated";
+    const LEGACY_AT_PREFIX: &str = "sso:at:";
+    /// 历史 JWT 型 SSO AT 的最大剩余寿命 = 平台 JWT TTL 上限（expire_hours ≤ 24h）
+    const LEGACY_TTL_FLOOR_SECS: i64 = 86_400;
+
+    let marker: Result<Option<String>, _> = redis::cmd("SET")
+        .arg(LEGACY_MARKER)
+        .arg("1")
+        .arg("NX")
+        .query_async(redis)
+        .await;
+    match marker {
+        Err(e) => {
+            tracing::warn!("v4-F1 存量转写跳过（Redis 不可达，下次启动重试）: {e}");
+            return;
+        }
+        Ok(None) => return, // 已标记：转写已完成
+        Ok(Some(_)) => {}
+    }
+
+    let mut cursor = String::from("0");
+    let mut migrated = 0usize;
+    loop {
+        let scan: Result<(String, Vec<String>), _> = redis::cmd("SCAN")
+            .arg(&cursor)
+            .arg("MATCH")
+            .arg(format!("{LEGACY_AT_PREFIX}*"))
+            .arg("COUNT")
+            .arg(500)
+            .query_async(redis)
+            .await;
+        let (next, keys) = match scan {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("v4-F1 存量转写 SCAN 失败（已置标记，可用 DEL {LEGACY_MARKER} 重跑）: {e}");
+                return;
+            }
+        };
+        for key in &keys {
+            let Some(hash) = key.strip_prefix(LEGACY_AT_PREFIX) else {
+                continue;
+            };
+            if hash.is_empty() {
+                continue;
+            }
+            let ttl: i64 = redis::cmd("TTL")
+                .arg(key)
+                .query_async(redis)
+                .await
+                .unwrap_or(-2);
+            if ttl <= 0 {
+                // 已过期/不存在：直接清理
+                let _: Result<i64, _> = redis::cmd("DEL").arg(key).query_async(redis).await;
+                continue;
+            }
+            let blacklist_key = format!("blacklist:{hash}");
+            let effective_ttl = ttl.max(LEGACY_TTL_FLOOR_SECS);
+            let set: Result<Option<()>, _> = redis::cmd("SETEX")
+                .arg(&blacklist_key)
+                .arg(effective_ttl)
+                .arg("1")
+                .query_async(redis)
+                .await;
+            if set.is_ok() {
+                // 绑定转写成功后删除原 key：userinfo（只认绑定）与业务路由（认 blacklist）
+                // 双路径同时立即 401
+                let _: Result<i64, _> = redis::cmd("DEL").arg(key).query_async(redis).await;
+                migrated += 1;
+            }
+        }
+        cursor = next;
+        if cursor == "0" {
+            break;
+        }
+    }
+    if migrated > 0 {
+        tracing::info!("v4-F1 已转写吊销历史 JWT 型 SSO 访问令牌 {migrated} 条（blacklist，TTL≥24h）");
     }
 }
 

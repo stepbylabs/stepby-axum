@@ -520,6 +520,11 @@ pub async fn remove(
                 "error.user.pwd_reset_token_invalidate_failed"
             )));
         }
+        // v4 #18：删除用户同步吊销其全部 SSO 访问令牌（sso:at:* + online:*）——
+        // userinfo 只认绑定不校验 pwd_ver，不做联动则旧 AT 在 TTL 内仍可换取身份
+        for uid in &deleted_user_ids {
+            state.sso_service.revoke_user_sso_tokens(&mut redis, *uid).await;
+        }
     }
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
@@ -582,6 +587,14 @@ pub async fn change_status(
         return Err(e.into());
     }
 
+    // v4 #18：停用用户同步吊销其全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
+    if needs_pwd_changed {
+        state
+            .sso_service
+            .revoke_user_sso_tokens(&mut redis, dto.user_id)
+            .await;
+    }
+
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -632,6 +645,12 @@ pub async fn reset_pwd(
             .await;
         return Err(e.into());
     }
+
+    // v4 #18：重置密码同步吊销该用户全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
+    state
+        .sso_service
+        .revoke_user_sso_tokens(&mut redis, user_id)
+        .await;
 
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.password_reset"
@@ -689,6 +708,12 @@ pub async fn update_profile_pwd(
             .await;
         return Err(e.into());
     }
+
+    // v4 #18：改密同步吊销本人全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
+    state
+        .sso_service
+        .revoke_user_sso_tokens(&mut redis, user_id)
+        .await;
 
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.password_change"
