@@ -157,7 +157,7 @@ pub async fn submit_demo(
         ws_notify_todo(&state, *uid, &outcome.doc.title);
         state
             .flow_service
-            .send_site_audit(*uid, &outcome.doc.title)
+            .send_flow_audit(*uid, "flow_todo", &outcome.doc.title)
             .await;
     }
     Ok(AjaxResult::success(outcome.doc))
@@ -178,7 +178,7 @@ pub async fn resubmit_demo(
         ws_notify_todo(&state, *uid, &outcome.doc.title);
         state
             .flow_service
-            .send_site_audit(*uid, &outcome.doc.title)
+            .send_flow_audit(*uid, "flow_todo", &outcome.doc.title)
             .await;
     }
     Ok(AjaxResult::success(outcome.doc))
@@ -213,10 +213,22 @@ pub async fn act(
     for uid in &outcome.notify_assignees {
         let title = outcome.task.title.clone().unwrap_or_default();
         ws_notify_todo(&state, *uid, &title);
-        state.flow_service.send_site_audit(*uid, &title).await;
+        state
+            .flow_service
+            .send_flow_audit(*uid, "flow_todo", &title)
+            .await;
     }
     if let Some((applicant_id, status)) = outcome.notify_finished {
         ws_notify_finished(&state, applicant_id, status);
+        // 驳回是需要申请人采取行动的终态 → 站内通知（flow_reject 模板，1-8）；
+        // approved 办结以 WS + 待办列表为准，不再重复站内打扰。
+        if status == "rejected" {
+            let title = outcome.task.title.clone().unwrap_or_default();
+            state
+                .flow_service
+                .send_flow_audit(applicant_id, "flow_reject", &title)
+                .await;
+        }
     }
     Ok(AjaxResult::success(outcome.task))
 }

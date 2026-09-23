@@ -1000,19 +1000,20 @@ impl SysFlowService {
             let _ = self.task_repo().touch_reminded(task.task_id, now2).await;
             // 站内审计（send_log；用户可见性以"待办列表"为准，WS 仅加速——此处无 AppState 不发 WS）
             let title = task.title.clone().unwrap_or_default();
-            self.send_site_audit(task.assignee_id, &title).await;
+            self.send_flow_audit(task.assignee_id, "flow_timeout", &title)
+                .await;
             outcome.notify.push((task.assignee_id, title));
             outcome.reminded += 1;
         }
         Ok(outcome)
     }
 
-    /// 发送站内审计消息（site 渠道；to_addr = 字符串化 user_id，V7-E3）
+    /// 发送站内审计消息（site 渠道；to_addr = 字符串化 user_id，V7-E3；模板按场景选择）
     ///
     /// 供 handler / scheduler 调用（通知的最终执行点）；失败不阻断业务。
-    pub async fn send_site_audit(&self, user_id: i64, title: &str) {
+    pub async fn send_flow_audit(&self, user_id: i64, template_code: &str, title: &str) {
         let dto = SendDto {
-            template_code: "flow_todo".to_string(),
+            template_code: template_code.to_string(),
             channel_code: Some("site".to_string()),
             to_addr: user_id.to_string(),
             params: std::collections::HashMap::from([("title".to_string(), title.to_string())]),
@@ -1020,6 +1021,12 @@ impl SysFlowService {
         if let Err(e) = self.msg_service.send(dto, "system").await {
             tracing::warn!("flow 站内提醒发送失败（不阻断业务）: {}", e.message);
         }
+    }
+
+    /// 站内审计的收件地址约定：site 渠道 to_addr = 字符串化 user_id（`sys_msg_service.rs:688-691`）。
+    /// 提取为纯函数便于单测守护该约定（喂错类型会被 dispatch 静默记成功，V7-E3）。
+    pub fn site_to_addr(user_id: i64) -> String {
+        user_id.to_string()
     }
 
     // ---------- 内部工具 ----------
@@ -1139,5 +1146,45 @@ pub(super) fn tx_to_svc(e: TransactionError<ServiceError>) -> ServiceError {
     match e {
         TransactionError::Connection(db) => ServiceError::from(db),
         TransactionError::Transaction(s) => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// V7-E3 / 3-9：site 渠道 to_addr 必须是字符串化 user_id。
+    /// dispatch 对非数字 to_addr 会**静默记成功**（status='0'），喂错类型的回归只能靠该约定单测拦截。
+    #[test]
+    fn site_to_addr_is_numeric_string_of_user_id() {
+        assert_eq!(SysFlowService::site_to_addr(1), "1");
+        assert_eq!(SysFlowService::site_to_addr(42), "42");
+        // 产物必须可被 dispatch 解析回同一 user_id（sys_msg_service.rs:689 parse::<i64>）
+        let addr = SysFlowService::site_to_addr(987654321);
+        assert_eq!(addr.trim().parse::<i64>().ok(), Some(987654321));
+        assert!(
+            addr.chars().all(|c| c.is_ascii_digit()),
+            "to_addr 不得包含非数字字符（否则 dispatch 静默丢件）: {addr}"
+        );
+    }
+
+    /// demo_nodes：single 两级 / countersign 单级会签（Quorum::All）
+    #[test]
+    fn demo_nodes_shape_matches_flow_mode() {
+        let single = demo_nodes("single");
+        assert_eq!(single.len(), 2);
+        assert_eq!(single[0].quorum, Quorum::Any);
+        assert_eq!(single[1].quorum, Quorum::Any);
+
+        let countersign = demo_nodes("countersign");
+        assert_eq!(countersign.len(), 1);
+        assert_eq!(countersign[0].quorum, Quorum::All);
+        assert_eq!(countersign[0].policies.len(), 2);
+    }
+
+    /// 未知模式回退到 single（两级单审），不 panic
+    #[test]
+    fn demo_nodes_unknown_mode_falls_back_to_single() {
+        assert_eq!(demo_nodes("whatever").len(), 2);
     }
 }

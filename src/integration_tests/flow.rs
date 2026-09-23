@@ -327,3 +327,101 @@ async fn test_flow_admin_list() {
     assert!(v["rows"].is_array(), "rows 应为数组，实际: {v}");
     assert!(v["total"].is_u64(), "total 应为数字，实际: {v}");
 }
+
+/// 链路 8：转办边界 —— admin 把待办转回给提交人本人必须 400（防绕过自审禁令），且无副作用
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_transfer_back_to_applicant_rejected() {
+    let ctx = TestContext::new().await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "ry", "admin123").await;
+
+    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_transfer", "single").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+
+    // 动态取提交人 user_id（不硬编码 ry=2）
+    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let applicant_id = v["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc_id))
+        .and_then(|r| r["applicantId"].as_i64())
+        .expect("mine 列表应含该单据且带 applicantId");
+
+    // admin 转办给提交人本人 → 400（transfer 校验 to_user_id != applicant_id）
+    let req = token_request(
+        &ctx,
+        &ctx.token,
+        Method::POST,
+        &format!("/system/flow/task/{task1}/action"),
+        Some(serde_json::json!({ "action": "transfer", "toUserId": applicant_id })),
+    );
+    let (status, _) = ctx.send_raw(req).await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "转办给提交人本人应 400，实际: {status}"
+    );
+
+    // 被拒后 ry 不应出现该单据待办（无副作用）
+    let v = ry_get_json(&ctx, &ry_token, "/system/flow/todo?pageNum=1&pageSize=50").await;
+    let leaked = v["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["bizId"].as_i64() == Some(doc_id));
+    assert!(!leaked, "转办被拒后提交人不应出现该单据待办，实际: {v}");
+}
+
+/// 链路 9：并发双审 —— 3 个并发审批同一 pending 任务，恰 1 个 200、其余 400（条件更新幂等，V4-E1/V3-E1）
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_flow_concurrent_approve_exactly_one_wins() {
+    use futures::future::join_all;
+
+    let ctx = TestContext::new().await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "ry", "admin123").await;
+
+    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_concurrent", "single").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+
+    let reqs: Vec<_> = (0..3)
+        .map(|_| {
+            token_request(
+                &ctx,
+                &ctx.token,
+                Method::POST,
+                &format!("/system/flow/task/{task1}/action"),
+                Some(serde_json::json!({ "action": "approve", "comment": "race" })),
+            )
+        })
+        .collect();
+    let results = join_all(reqs.into_iter().map(|req| {
+        let ctx = &ctx;
+        async move { ctx.send_raw(req).await }
+    }))
+    .await;
+
+    let ok = results
+        .iter()
+        .filter(|(status, _)| *status == axum::http::StatusCode::OK)
+        .count();
+    let rejected = results
+        .iter()
+        .filter(|(status, _)| *status == axum::http::StatusCode::BAD_REQUEST)
+        .count();
+    assert_eq!(ok, 1, "并发 3 审应恰有 1 个成功，实际 ok={ok}");
+    assert_eq!(
+        rejected, 2,
+        "其余应 400（task_not_pending），实际 rejected={rejected}"
+    );
+
+    // 唯一赢家推进到第二级（node 2）
+    let v = ctx
+        .get_json("/system/flow/todo?pageNum=1&pageSize=50")
+        .await;
+    let node2 = v["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["bizId"].as_i64() == Some(doc_id) && r["nodeSeq"].as_i64() == Some(2));
+    assert!(node2.is_some(), "并发赢家应推进到第二级，实际: {v}");
+}
