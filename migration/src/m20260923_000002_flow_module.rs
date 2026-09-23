@@ -209,12 +209,28 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        // 4.8 消息模板种子：flow_todo（{{title}} 变量；channel_code=site）
+        // 4.8 消息模板种子：3 条（待办/超时/驳回；1-8 要求，V7-E2 修正后 site 渠道真实可用）
         execute_idempotent_insert(
             manager,
             &format!(
                 "sys_msg_template (template_name, template_code, channel_code, template_subject, template_content, status, remark, create_by, create_time, del_flag) VALUES \
                 ('审批待办提醒', 'flow_todo', 'site', '您有新的审批待办', '单据「{{{{title}}}}」等待您审批，请及时处理。', '0', '审批待办站内提醒', 'admin', {now}, '0')"
+            ),
+        )
+        .await?;
+        execute_idempotent_insert(
+            manager,
+            &format!(
+                "sys_msg_template (template_name, template_code, channel_code, template_subject, template_content, status, remark, create_by, create_time, del_flag) VALUES \
+                ('审批超时提醒', 'flow_timeout', 'site', '审批待办已超时', '单据「{{{{title}}}}」已超过办理时限，请尽快处理。', '0', '审批超时站内提醒', 'admin', {now}, '0')"
+            ),
+        )
+        .await?;
+        execute_idempotent_insert(
+            manager,
+            &format!(
+                "sys_msg_template (template_name, template_code, channel_code, template_subject, template_content, status, remark, create_by, create_time, del_flag) VALUES \
+                ('审批驳回通知', 'flow_reject', 'site', '您的单据已被驳回', '您提交的单据「{{{{title}}}}」已被驳回，请查看审批意见。', '0', '审批驳回站内通知', 'admin', {now}, '0')"
             ),
         )
         .await?;
@@ -240,8 +256,10 @@ impl MigrationTrait for Migration {
             "DELETE FROM sys_dict_type WHERE dict_type IN ('sys_flow_task_status','sys_flow_action','sys_flow_leave_type')",
         )
         .await?;
-        conn.execute_unprepared("DELETE FROM sys_msg_template WHERE template_code = 'flow_todo'")
-            .await?;
+        conn.execute_unprepared(
+            "DELETE FROM sys_msg_template WHERE template_code IN ('flow_todo','flow_timeout','flow_reject')",
+        )
+        .await?;
         conn.execute_unprepared("DELETE FROM sys_msg_channel WHERE channel_code = 'site'")
             .await?;
         // 表
