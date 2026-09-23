@@ -210,10 +210,12 @@ pub async fn token(
             (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
         ),
         // RFC 6749 §5.2：invalid_client → 401 + WWW-Authenticate: Basic（v2-C2）；
-        // 其余协议错误保持 400
+        // server_error（DB 故障等）→ 500；其余协议错误保持 400
         Err(e) => {
             let status = if e.code == "invalid_client" {
                 StatusCode::UNAUTHORIZED
+            } else if e.code == "server_error" {
+                StatusCode::INTERNAL_SERVER_ERROR
             } else {
                 StatusCode::BAD_REQUEST
             };
@@ -489,14 +491,21 @@ fn with_no_store(mut resp: Response) -> Response {
 }
 
 fn oidc_error_response(status: StatusCode, err: &OidcError) -> Response {
-    (
+    let mut resp = (
         status,
         Json(serde_json::json!({
             "error": err.code,
             "error_description": err.description,
         })),
     )
-        .into_response()
+        .into_response();
+    // v5 核查（F3 补全）：协议面错误响应同样不得被缓存（error_description 含
+    // 客户端/回调线索，与成功响应同标准：no-store）
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp
 }
 
 /// 计算 base URL（scheme://host）
@@ -528,14 +537,18 @@ fn base_url(headers: &HeaderMap, peer: SocketAddr, trusted_proxies: &[String]) -
 /// 解析 `Authorization: Basic` 头为 (client_id, client_secret)（RFC 6749 §2.3.1）。
 ///
 /// Basic 凭据 = base64(`urlencoded(client_id):urlencoded(client_secret)`)，需对两段做
-/// percent-decode（含 `+`→空格，form-urlencoded 语义）。解析失败返回 None（按表单凭据处理）。
+/// percent-decode（含 `+`→空格，form-urlencoded 语义）。auth-scheme 按 RFC 7235
+/// 大小写不敏感匹配。解析失败返回 None（按表单凭据处理）。
 fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     use base64::Engine as _;
     let raw = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
-    let encoded = raw.strip_prefix("Basic ").or(raw.strip_prefix("basic "))?;
+    let (scheme, encoded) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return None;
+    }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded.trim())
         .ok()?;

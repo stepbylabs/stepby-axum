@@ -1119,6 +1119,12 @@ async fn test_sso_v4_invalid_client_401_www_authenticate() {
         www.starts_with("Basic"),
         "401 应带 WWW-Authenticate: Basic，实际: {www}"
     );
+    // v5 核查（F3 补全）：协议面错误响应同样 no-store
+    assert_eq!(
+        headers.get("cache-control").and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "错误响应应 no-store"
+    );
 
     // 凭据完全缺失 → 同样 401 + WWW-Authenticate（invalid_client）
     let form = format!(
@@ -1227,9 +1233,20 @@ async fn test_sso_v4_legacy_at_rewrite() {
         .await
         .expect("写入历史绑定失败");
 
+    // 伪造 A 形态活跃绑定（含 access_token_hash）→ 精准转写必须跳过（v5 核查防误杀）
+    let opaque_hash = crate::utils::crypto::token_hash("active-opaque-access-token");
+    let opaque_key = format!("sso:at:{opaque_hash}");
+    let _: () = redis::cmd("SETEX")
+        .arg(&opaque_key)
+        .arg(3600i64)
+        .arg(r#"{"client_id":"app_now","user_id":1,"access_token_hash":"self","scope":["openid"]}"#)
+        .query_async(&mut redis)
+        .await
+        .expect("写入活跃绑定失败");
+
     crate::initialize::revoke_legacy_sso_at_tokens(&mut redis).await;
 
-    // 原绑定被删 + blacklist 命中（业务路由过渡阻断/黑名单双路径立即拒绝）
+    // 历史绑定被删 + blacklist 命中（业务路由过渡阻断/黑名单双路径立即拒绝）
     let bound: Option<String> = redis::cmd("GET")
         .arg(&at_key)
         .query_async(&mut redis)
@@ -1252,6 +1269,27 @@ async fn test_sso_v4_legacy_at_rewrite() {
         "blacklist TTL 应 ≥ 24h（覆盖 JWT 最长剩余寿命），实际 {ttl}"
     );
 
+    // 活跃不透明 AT 绑定不受影响（精准识别，防误杀）
+    let opaque_alive: Option<String> = redis::cmd("GET")
+        .arg(&opaque_key)
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(opaque_alive.is_some(), "A 形态活跃绑定不得被转写误杀");
+    let opaque_bl: Option<String> = redis::cmd("GET")
+        .arg(format!("blacklist:{opaque_hash}"))
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(opaque_bl.is_none(), "活跃绑定不得写入 blacklist");
+
+    // 清理活跃绑定（隔离 DB 内不影响其它断言）
+    let _: i64 = redis::cmd("DEL")
+        .arg(&opaque_key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or(0);
+
     // 幂等：重复调用不报错（标记已置），且不复活任何键
     crate::initialize::revoke_legacy_sso_at_tokens(&mut redis).await;
     let blacklisted2: Option<String> = redis::cmd("GET")
@@ -1265,6 +1303,79 @@ async fn test_sso_v4_legacy_at_rewrite() {
     let _: i64 = redis::cmd("DEL")
         .arg(format!("blacklist:{hash}"))
         .arg("sso:v4_legacy_at_migrated")
+        .query_async(&mut redis)
+        .await
+        .unwrap_or(0);
+}
+
+/// v5 核查（F2 兑现）：管理员强退在线 SSO 会话 → Lua 原子化吊销
+/// blacklist + online + `sso:at:` 三键（不透明 AT 的唯一吊销路径是 DEL 绑定）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v5_force_logout_revokes_sso_at() {
+    let ctx = sso_ctx().await;
+    let mut redis = ctx.redis();
+
+    // 伪造 SSO 在线会话（user_id=2 非 superadmin，online hash = 不透明 AT hash）
+    let at_hash = crate::utils::crypto::token_hash("sso-at-under-force-logout");
+    let online_json = serde_json::json!({
+        "user_id": 2,
+        "username": "test_force",
+        "ip": "sso",
+        "login_time": "2026-09-23 20:00:00",
+        "browser": "SSO",
+        "os": "-",
+        "jti": "sso-at-app_x",
+        "dept_name": "",
+        "exp": chrono::Utc::now().timestamp() + 3600,
+        "source": "sso"
+    })
+    .to_string();
+    let online_key = format!("online:{at_hash}");
+    let at_key = format!("sso:at:{at_hash}");
+    let _: () = redis::cmd("SETEX")
+        .arg(&online_key)
+        .arg(3600i64)
+        .arg(&online_json)
+        .query_async(&mut redis)
+        .await
+        .expect("写 online 失败");
+    let _: () = redis::cmd("SETEX")
+        .arg(&at_key)
+        .arg(3600i64)
+        .arg(r#"{"client_id":"app_x","user_id":2,"access_token_hash":"self"}"#)
+        .query_async(&mut redis)
+        .await
+        .expect("写绑定失败");
+
+    // 管理员强退
+    let v = ctx
+        .delete_json(&format!("/monitor/online/{}", urlenc(&at_hash)))
+        .await;
+    ctx.assert_ok(&v);
+
+    // 三键全清：online 消失、绑定删除（userinfo 即 401）、blacklist 生效
+    let online_left: Option<String> = redis::cmd("GET")
+        .arg(&online_key)
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(online_left.is_none(), "强退后 online 应删除");
+    let at_left: Option<String> = redis::cmd("GET")
+        .arg(&at_key)
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(at_left.is_none(), "强退 SSO 会话应联动删除 sso:at: 绑定");
+    let bl: Option<String> = redis::cmd("GET")
+        .arg(format!("blacklist:{at_hash}"))
+        .query_async(&mut redis)
+        .await
+        .expect("GET 失败");
+    assert!(bl.is_some(), "强退应写 blacklist");
+
+    // 清理遗留
+    let _: i64 = redis::cmd("DEL")
+        .arg(format!("blacklist:{at_hash}"))
         .query_async(&mut redis)
         .await
         .unwrap_or(0);

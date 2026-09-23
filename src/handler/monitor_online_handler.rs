@@ -28,10 +28,13 @@ use crate::utils::redis::scan_keys;
 
 // ==================== 常量 ====================
 
-/// 强退 Lua 脚本：原子化 SETEX 黑名单 + DEL online（落实 memory 第 68 行约束）
+/// 强退 Lua 脚本：原子化 SETEX 黑名单 + DEL online + DEL SSO AT 绑定（v4-F2 联动）
 ///
 /// KEYS[1] = `blacklist:{token_hash}`
 /// KEYS[2] = `online:{token_hash}`
+/// KEYS[3] = `sso:at:{token_hash}`（v5 核查：SSO 会话的 online hash 即不透明 AT 的
+///   SHA-256，源 sso_service 签发时写 online:{at_hash}；不透明 AT 的吊销唯一路径是
+///   DEL 绑定，不做联动则管理员强退后 RP 侧会话仍有效至 TTL）
 /// ARGV[1] = 黑名单 TTL（秒，M-3：精确剩余有效期 = session.exp - now，回退到 jwt.expire_hours 上界）
 ///
 /// 使用 Lua 保证原子性，避免 SETEX 与 DEL 分离导致：
@@ -40,6 +43,7 @@ use crate::utils::redis::scan_keys;
 const FORCE_LOGOUT_SCRIPT: &str = r#"
 redis.call("SETEX", KEYS[1], ARGV[1], "1")
 redis.call("DEL", KEYS[2])
+redis.call("DEL", KEYS[3])
 return 1
 "#;
 
@@ -309,8 +313,9 @@ pub async fn force_logout(
         ));
     }
 
-    // 3. Lua 原子化 SETEX blacklist + DEL online（落实 memory 第 68 行约束）
-    //    KEYS[1] = blacklist:{token_hash}, KEYS[2] = online:{token_hash}
+    // 3. Lua 原子化 SETEX blacklist + DEL online + DEL sso:at（v4-F2 联动）
+    //    KEYS[1] = blacklist:{token_hash}, KEYS[2] = online:{token_hash},
+    //    KEYS[3] = sso:at:{token_hash}（平台会话无该 key，DEL no-op 无害）
     //    ARGV[1] = 黑名单 TTL（秒）
     //
     //    M-3：精确 TTL 计算（使用 OnlineSession.exp 实际剩余有效期）
@@ -335,6 +340,7 @@ pub async fn force_logout(
     let _: i64 = redis::Script::new(FORCE_LOGOUT_SCRIPT)
         .key(&blacklist_key)
         .key(&online_key)
+        .key(format!("sso:at:{}", token_hash))
         .arg(blacklist_ttl)
         .invoke_async(&mut redis)
         .await
