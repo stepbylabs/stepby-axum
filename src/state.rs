@@ -241,7 +241,13 @@ impl AppState {
             task_service: SysTaskService::new(db.clone()),
             msg_service: SysMsgService::new(db.clone(), config.clone()),
             oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
-            sso_service: SsoService::new(db.clone()),
+            sso_service: SsoService::new(
+                db.clone(),
+                config.config_enc_key.clone(),
+                // v4 §1.3：动态保留字 = 平台 JWT 命名空间（audience/issuer），
+                // 与静态 RESERVED_CLIENT_IDS 一并在 add_client 时比对
+                vec![config.jwt.audience.clone(), config.jwt.issuer.clone()],
+            ),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
             web_hook_service: SysWebHookService::new(db.clone()),

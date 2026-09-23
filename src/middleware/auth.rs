@@ -50,7 +50,12 @@ pub async fn auth_middleware(
     // 命中前缀即走 PAT 鉴权：按摘要查库校验有效性，合成带 pat_scopes 的 Claims 注入 extensions，
     // 跳过 JWT 专属的 blacklist / pwd_ver（PAT 吊销靠每请求查库即时生效）；下游全部无感复用。
     if !state.config.pat.prefix.is_empty() && token.starts_with(&state.config.pat.prefix) {
-        let claims = authenticate_pat(&state, token, req.extensions().get::<RequestId>().map(|r| r.0.clone())).await?;
+        let claims = authenticate_pat(
+            &state,
+            token,
+            req.extensions().get::<RequestId>().map(|r| r.0.clone()),
+        )
+        .await?;
         req.extensions_mut().insert(claims);
         return Ok(next.run(req).await);
     }
@@ -66,44 +71,62 @@ pub async fn auth_middleware(
         .map(|r| r.0.clone())
         .unwrap_or_default();
 
-    // 4+5. Redis 黑名单 + 密码版本号校验（合并为单次 Pipeline，减少 RTT）
+    // 4+5. Redis 黑名单 + 密码版本号 + SSO 过渡阻断（合并为单次 Pipeline，减少 RTT）
     //    fail-closed 策略：Redis 异常时拒绝请求，避免已登出 token 继续访问
     //    使用 token 的 SHA-256 哈希作为 blacklist key，节省 Redis 内存
     let blacklist_key = format!("blacklist:{}", crate::utils::crypto::token_hash(token));
     // P0-R81-007 密码版本号：改密/重置/停用/删除时对 pwd_ver:{user_id} INCR，
     // 登录时写入 claim；若 Redis 当前版本 > claim 版本，说明 token 签发后发生过密码变更 → 拒绝。
     let pwd_ver_key = format!("pwd_ver:{}", claims.sub);
+    // v4-F1 过渡阻断：该 JWT 的哈希命中 `sso:at:{hash}` 绑定 → 是历史阶段由 SSO token 端点
+    // 签发的平台同构 JWT → 其持有者本应只被允许调 /sso/userinfo，必须拒绝进入业务路由
+    // （历史越权止血，见 docs/optimization/topic-sso-multitenant-v4-final-2026-09-23.md §13-F1）。
+    // 【移除条件】A 形态（不透明 access_token）上线且历史令牌全部过期（一个 JWT TTL 周期）后，
+    // 此分支成为死代码（不透明串在 verify_token 即失败），可安全删除。
+    let sso_at_key = format!("sso:at:{}", crate::utils::crypto::token_hash(token));
     let mut redis = state.redis.clone();
-    // Pipeline：一次 RTT 同时查询 blacklist 和 pwd_ver
+    // Pipeline：一次 RTT 同时查询 blacklist / pwd_ver / sso:at
     // R11：命令级超时（REDIS_CMD_TIMEOUT_SECS=3s），fail-closed：超时返回 503 拒绝请求
-    let (is_blacklisted, pwd_ver): (Option<String>, Option<u64>) = tokio::time::timeout(
-        Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-        redis::pipe()
-            .cmd("GET")
-            .arg(&blacklist_key)
-            .cmd("GET")
-            .arg(&pwd_ver_key)
-            .query_async(&mut redis),
-    )
-    .await
-    .map_err(|_| {
-        tracing::error!(
-            request_id = %request_id,
-            user_id = %claims.sub,
-            "Redis 黑名单/pwd_ver 查询超时（fail-closed 拒绝请求）"
-        );
-        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-    })?
-    .map_err(|e| {
-        tracing::error!(
-            request_id = %request_id,
-            user_id = %claims.sub,
-            error = %e,
-            "Redis 黑名单/pwd_ver 查询失败（fail-closed 拒绝请求）"
-        );
-        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-    })?;
+    let (is_blacklisted, pwd_ver, legacy_sso_at): (Option<String>, Option<u64>, Option<String>) =
+        tokio::time::timeout(
+            Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
+            redis::pipe()
+                .cmd("GET")
+                .arg(&blacklist_key)
+                .cmd("GET")
+                .arg(&pwd_ver_key)
+                .cmd("GET")
+                .arg(&sso_at_key)
+                .query_async(&mut redis),
+        )
+        .await
+        .map_err(|_| {
+            tracing::error!(
+                request_id = %request_id,
+                user_id = %claims.sub,
+                "Redis 黑名单/pwd_ver 查询超时（fail-closed 拒绝请求）"
+            );
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?
+        .map_err(|e| {
+            tracing::error!(
+                request_id = %request_id,
+                user_id = %claims.sub,
+                error = %e,
+                "Redis 黑名单/pwd_ver 查询失败（fail-closed 拒绝请求）"
+            );
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
     if is_blacklisted.is_some() {
+        return Err(AppError::unauthorized(&crate::tr!(
+            "error.auth.token_revoked"
+        )));
+    }
+
+    // v4-F1 过渡阻断（见上方注释）：SSO 签发的历史 JWT 型 access_token 禁止进入业务路由。
+    // SSO 令牌只应被 /sso/userinfo 消费（该端点自行校验绑定，不经过本中间件）。
+    if legacy_sso_at.is_some() {
+        tracing::warn!(user_id = %claims.sub, "SSO 历史访问令牌尝试访问业务路由（过渡阻断拒绝）");
         return Err(AppError::unauthorized(&crate::tr!(
             "error.auth.token_revoked"
         )));
@@ -141,18 +164,14 @@ async fn authenticate_pat(
         )));
     }
     let request_id = request_id.unwrap_or_default();
-    let verified = state
-        .pat_service
-        .verify_token(token)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                request_id = %request_id,
-                error = %e,
-                "PAT 鉴权查库失败（fail-closed 拒绝请求）"
-            );
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    let verified = state.pat_service.verify_token(token).await.map_err(|e| {
+        tracing::error!(
+            request_id = %request_id,
+            error = %e,
+            "PAT 鉴权查库失败（fail-closed 拒绝请求）"
+        );
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?;
     let Some(v) = verified else {
         // 未命中 / 已吊销 / 已过期 → 401
         return Err(AppError::unauthorized(&crate::tr!(
@@ -213,6 +232,11 @@ impl Operator {
     /// 获取操作人用户 ID
     pub fn user_id(&self) -> &str {
         &self.0.sub
+    }
+
+    /// 用户认证时刻（JWT iat，UTC 秒；v3 P1'-1：consent 批准路径的 auth_time 数据源）
+    pub fn iat(&self) -> usize {
+        self.0.iat
     }
 }
 

@@ -6,6 +6,7 @@
 //! - 分页查询（client_name 模糊 + enabled 精确）
 //! - 按内部主键 sso_client_id 查询、批量删除、启停
 
+use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
 use crate::common::like_escape;
@@ -29,23 +30,26 @@ impl SysOauthClientRepository {
         &self.base
     }
 
-    /// 按内部主键查询
+    /// 按内部主键查询（排除软删）
     pub async fn find_by_pk(&self, sso_client_id: i64) -> Result<Option<Model>, DbErr> {
         SysOauthClient::find()
             .filter(Column::SsoClientId.eq(sso_client_id))
+            .filter(Column::DelFlag.ne("2"))
             .one(self.base.db())
             .await
     }
 
-    /// 按 client_id（公开标识）查询（唯一）
+    /// 按 client_id（公开标识）查询（唯一；排除软删——软删的 client 一切协议行为失效）
     pub async fn find_by_client_id(&self, client_id: &str) -> Result<Option<Model>, DbErr> {
         SysOauthClient::find()
             .filter(Column::ClientId.eq(client_id))
+            .filter(Column::DelFlag.ne("2"))
             .one(self.base.db())
             .await
     }
 
-    /// client_id 是否已存在
+    /// client_id 是否已存在（含软删——client_id 唯一约束不因软删释放，防重建同名 client
+    /// 继承旧用户授权记录造成静默授权，v2-K4）
     pub async fn exists_by_client_id(&self, client_id: &str) -> Result<bool, DbErr> {
         let count = SysOauthClient::find()
             .filter(Column::ClientId.eq(client_id))
@@ -54,7 +58,7 @@ impl SysOauthClientRepository {
         Ok(count > 0)
     }
 
-    /// 分页查询（client_name 模糊 + client_id/enabled 精确）
+    /// 分页查询（client_name 模糊 + client_id/enabled 精确；仅有效记录）
     pub async fn find_page_filtered(
         &self,
         offset: u64,
@@ -63,7 +67,7 @@ impl SysOauthClientRepository {
         client_id: Option<&str>,
         enabled: Option<&str>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
-        let mut query = SysOauthClient::find();
+        let mut query = SysOauthClient::find().filter(Column::DelFlag.ne("2"));
         if let Some(name) = client_name {
             query = query.filter(Column::ClientName.like(format!("%{}%", like_escape(name))));
         }
@@ -94,11 +98,16 @@ impl SysOauthClientRepository {
         self.base.update(model).await
     }
 
-    /// 按内部主键列表批量删除
-    pub async fn delete_by_ids(&self, ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
-        SysOauthClient::delete_many()
+    /// 软删除（v2-K7/P1-5：对齐 sys_* 规范，del_flag='2'；物理删除会留下孤儿授权记录与
+    /// "重建同名 client 继承旧授权"的静默授权风险）
+    pub async fn soft_delete_by_ids(&self, ids: Vec<i64>) -> Result<(), DbErr> {
+        let now = crate::common::datetime::now_naive();
+        SysOauthClient::update_many()
+            .col_expr(Column::DelFlag, Expr::value("2"))
+            .col_expr(Column::UpdateTime, Expr::value(now))
             .filter(Column::SsoClientId.is_in(ids))
             .exec(self.base.db())
-            .await
+            .await?;
+        Ok(())
     }
 }

@@ -72,6 +72,8 @@ pub struct LogoutQuery {
     #[serde(default)]
     pub client_id: Option<String>,
     #[serde(default)]
+    pub id_token_hint: Option<String>,
+    #[serde(default)]
     pub post_logout_redirect_uri: Option<String>,
 }
 
@@ -89,10 +91,29 @@ pub async fn discovery(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
+    // v4-R3：SSO 关闭时发现文档一并 404（不暴露协议元数据，也避免 RP 误接半可用端点）
+    if !state.config.sso.enabled {
+        return oidc_error_response(
+            StatusCode::NOT_FOUND,
+            &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
+        );
+    }
     let base = base_url(&headers, peer);
     let issuer = state.sso_service.resolve_issuer(&state.config.sso, &base);
     let doc = state.sso_service.discovery(&issuer, &state.config.sso);
-    (StatusCode::OK, Json(doc)).into_response()
+    with_no_store((StatusCode::OK, Json(doc)).into_response())
+}
+
+/// GET /sso/jwks（v4-R3：OIDC Discovery 要求 jwks_uri 可解析；HS256 对称签发无公钥集，
+/// 返回空 keys，升级 RS256 后填充真实公钥）
+pub async fn jwks(State(state): State<Arc<AppState>>) -> Response {
+    if !state.config.sso.enabled {
+        return oidc_error_response(
+            StatusCode::NOT_FOUND,
+            &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
+        );
+    }
+    (StatusCode::OK, Json(state.sso_service.jwks())).into_response()
 }
 
 /// GET /sso/authorize
@@ -161,16 +182,13 @@ pub async fn token(
     let base = base_url(&headers, peer);
     match state
         .sso_service
-        .token(
-            form.0,
-            &mut state.redis.clone(),
-            &state.config.jwt,
-            &state.config.sso,
-            &base,
-        )
+        .token(form.0, &mut state.redis.clone(), &state.config.sso, &base)
         .await
     {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
+        // RFC 6749 §5.1：token 响应必须携带 Cache-Control: no-store
+        Ok(result) => with_no_store(
+            (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
+        ),
         Err(e) => oidc_error_response(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -188,15 +206,11 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     };
     match state
         .sso_service
-        .userinfo(
-            bearer,
-            &mut state.redis.clone(),
-            &state.config.jwt,
-            &state.config.sso,
-        )
+        .userinfo(bearer, &mut state.redis.clone(), &state.config.sso)
         .await
     {
-        Ok(claims) => (StatusCode::OK, Json(claims)).into_response(),
+        // RFC 6750：userinfo 响应不得被缓存
+        Ok(claims) => with_no_store((StatusCode::OK, Json(claims)).into_response()),
         Err(e) => {
             // userinfo 错误按 RFC 6750 返回 401 + WWW-Authenticate
             let mut resp = oidc_error_response(StatusCode::UNAUTHORIZED, &e);
@@ -212,27 +226,49 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     }
 }
 
-/// GET|POST /sso/logout（RP-initiated end-session，best-effort）
+/// GET|POST /sso/logout（RP-initiated end-session，v4-P0-B 真实登出）
+///
+/// 副作用（需通过身份验证，防登出 CSRF）：
+/// - `id_token_hint` 验签通过（对应客户端 HS256 密钥 + aud=client_id）→ 吊销该用户全部
+///   SSO access_token、跨端拉黑 IdP 登录会话；
+/// - 无 hint 时仅同源/同站请求（Sec-Fetch-Site ∈ same-origin/same-site/none）允许按
+///   浏览器 Cookie 登出；跨站且无 hint 的一律无副作用（防 `<img src="/sso/logout">` 登出 CSRF）。
+///
+/// 回跳：`post_logout_redirect_uri` 精确命中该客户端登记白名单才 302（防开放重定向）；
+/// hint 无效时 fail-closed 不回跳。
 pub async fn logout(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<LogoutQuery>,
 ) -> Result<Response, AppError> {
-    // 若携带 post_logout_redirect_uri，则仅当它精确命中该客户端登记的回调地址时才回跳，
-    // 否则忽略（防开放重定向）。SSO 不持有前端 HttpOnly 会话，实际登出由应用自身完成。
-    if let (Some(cid), Some(ru)) = (
-        q.client_id.as_deref(),
-        q.post_logout_redirect_uri.as_deref(),
-    ) {
-        let whitelist = state.sso_service.client_redirect_uris(cid).await?;
-        if whitelist.iter().any(|w| w == ru) {
-            return Ok(redirect_found(ru));
-        }
-    }
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({ "status": "logged_out" })),
-    )
-        .into_response())
+    // CSRF（v4-R5）：Sec-Fetch-Site 由浏览器强制、JS 不可伪造。
+    // 老浏览器无该头 → 保守放行（副作用仍受 hint/白名单约束）。
+    let sec_fetch_site = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let allow_cookie_logout = matches!(sec_fetch_site, "" | "none" | "same-origin" | "same-site");
+    let session_token = cookie_value(&headers, SESSION_COOKIE);
+    let redirect = state
+        .sso_service
+        .end_session(
+            q.client_id.as_deref(),
+            q.id_token_hint.as_deref(),
+            q.post_logout_redirect_uri.as_deref(),
+            session_token.as_deref(),
+            allow_cookie_logout,
+            &mut state.redis.clone(),
+            &state.config.jwt,
+        )
+        .await?;
+    Ok(match redirect {
+        Some(ru) => redirect_found(&ru),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "logged_out" })),
+        )
+            .into_response(),
+    })
 }
 
 // ==================== 同意端点（受保护） ====================
@@ -247,6 +283,10 @@ pub async fn consent(
         .user_id()
         .parse()
         .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))?;
+    // auth_time 权威来源：服务端登录 JWT 的 iat（v3 P1'-1）。
+    // 前端不传或传错均以服务端为准，避免"认证时刻"被客户端伪造。
+    let mut dto = dto;
+    dto.auth_time = Some(operator.iat() as i64);
     let redirect = state
         .sso_service
         .consent(
@@ -325,7 +365,10 @@ pub async fn client_delete(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.sso_service.delete_clients(ids).await?;
+    state
+        .sso_service
+        .delete_clients(ids, &mut state.redis.clone())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
@@ -339,21 +382,72 @@ pub async fn client_toggle(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
+// ==================== 自助授权管理（v4-R8：仅登录，无需管理权限） ====================
+
+/// GET /system/user/profile/sso-grants —— 当前用户"已授权应用"列表
+pub async fn grant_list(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<Vec<crate::service::sso_service::SsoGrantVo>>, AppError> {
+    let user_id: i64 = operator
+        .user_id()
+        .parse()
+        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))?;
+    let grants = state.sso_service.list_user_grants(user_id).await?;
+    Ok(AjaxResult::success(grants))
+}
+
+/// DELETE /system/user/profile/sso-grants/{clientId} —— 撤销对某应用的授权（级联吊销其名下 SSO AT）
+pub async fn grant_revoke(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(client_id): Path<String>,
+) -> Result<AjaxResult<()>, AppError> {
+    let user_id: i64 = operator
+        .user_id()
+        .parse()
+        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))?;
+    let client_id = client_id.trim().to_string();
+    if client_id.is_empty() {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.sso.client_id_required"
+        )));
+    }
+    state
+        .sso_service
+        .revoke_user_grant(user_id, &client_id, &mut state.redis.clone())
+        .await?;
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
+}
+
 // ==================== 内部辅助 ====================
 
 /// 构造 HTTP 302 Found 重定向（携带 Location）。
 /// OAuth2/OIDC 授权回跳规范要求 302；axum 0.8 的 `Redirect` 仅提供 307/308，故手动组装。
+/// 同时携带 `Cache-Control: no-store`（v4-R1：授权码/会话流转 URL 不得被中间层缓存）。
 fn redirect_found(url: &str) -> Response {
     match HeaderValue::from_str(url) {
         Ok(v) => {
             let mut resp = Response::new(Body::empty());
             *resp.status_mut() = StatusCode::FOUND;
-            resp.headers_mut()
-                .insert(axum::http::header::LOCATION, v);
+            resp.headers_mut().insert(axum::http::header::LOCATION, v);
+            resp.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
             resp
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "invalid redirect uri").into_response(),
     }
+}
+
+/// 为响应追加 `Cache-Control: no-store`（token / userinfo / discovery 协议面通用，RFC 6749 §5.1）
+fn with_no_store(mut resp: Response) -> Response {
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp
 }
 
 fn oidc_error_response(status: StatusCode, err: &OidcError) -> Response {
@@ -490,8 +584,14 @@ mod tests {
     /// 而真正的 `+` 字符应保留为 %2B（form 编码本就如此），替换只影响空格。
     #[test]
     fn consent_space_encodes_as_pct20_not_plus() {
-        assert_eq!(urlencode_spa("openid profile email"), "openid%20profile%20email");
-        assert_eq!(urlencode_spa("SSO 客户端"), "SSO%20%E5%AE%A2%E6%88%B7%E7%AB%AF");
+        assert_eq!(
+            urlencode_spa("openid profile email"),
+            "openid%20profile%20email"
+        );
+        assert_eq!(
+            urlencode_spa("SSO 客户端"),
+            "SSO%20%E5%AE%A2%E6%88%B7%E7%AB%AF"
+        );
         assert_eq!(urlencode_spa("a+b"), "a%2Bb");
         assert_eq!(urlencode_spa("plain"), "plain");
         // 反证：RP 面向的 urlencode 仍用 +（保持协议面原样，不改）
@@ -519,7 +619,10 @@ mod tests {
             target.starts_with("/login?redirect=%2Fsso%2Fauthorize%3Fclient_id%3Dapp_x"),
             "target={target}"
         );
-        assert!(!target.contains("%3A%2F%2F"), "redirect 内不应混入绝对 URL: {target}");
+        assert!(
+            !target.contains("%3A%2F%2F"),
+            "redirect 内不应混入绝对 URL: {target}"
+        );
         // 内层 authorize 查询的空格先被表单编码为 +，整体再编码时 + 转义为 %2B
         assert!(target.contains("%26scope%3Dopenid%2Bprofile"));
         assert!(target.contains("%26state%3Ds%2B1"));

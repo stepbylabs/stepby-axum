@@ -20,11 +20,19 @@ pub struct Model {
     pub client_id: String,
     /// 已授予 scope JSON 数组字符串
     pub scopes: String,
+    /// 客户端名称快照（v4-F4/R6：客户端被删除/改名后，用户仍能识别"曾授权给谁"）
+    #[serde(default)]
+    pub client_name_snapshot: String,
+    /// 同意时刻（v4-R6：由 auth_time 改名——本表语义是"用户批准授权的时刻"，
+    /// 与 ID Token 的 auth_time（用户认证时刻）同名不同义，改名防误用）
     #[serde(
         serialize_with = "datetime::serialize_opt",
         deserialize_with = "datetime::deserialize_opt"
     )]
-    pub auth_time: Option<NaiveDateTime>,
+    pub consented_at: Option<NaiveDateTime>,
+    /// 软删除标记（'0'=有效 '2'=用户已撤销；v2-I7 用户自助撤销不物理删，保留审计）
+    #[serde(default)]
+    pub del_flag: String,
     #[serde(
         serialize_with = "datetime::serialize_opt",
         deserialize_with = "datetime::deserialize_opt"
