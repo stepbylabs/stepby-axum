@@ -118,6 +118,8 @@ error:
     client_auth_failed: 客户端凭据校验失败
     grant_type_unsupported: 不支持的授权类型
     rt_invalid: 刷新令牌无效或已过期
+    login_required: 需要重新登录后授权
+    consent_required: 需要用户同意后授权
     pkce_verify_failed: PKCE 校验失败
     token_failed: 令牌签发失败
     access_token_invalid: 访问令牌无效

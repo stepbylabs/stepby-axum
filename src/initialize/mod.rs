@@ -32,6 +32,25 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_user.country_code 列失败: {}", e))?;
 
+        // 3.1.1 v5-N2 Phase 2：幂等确保 sys_user 含 tenant_id 列（登录 JWT tid 数据源；
+        // 存量库启动不跑 Migrator::up，m20260924_000005 由 migration 负责全新库）
+        ensure_user_tenant_id_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_user.tenant_id 列失败: {}", e))?;
+
+        // 3.1.2 真实运行验证发现的存量库漂移：sys_dept 缺 leader_user_id 列导致
+        //        登录链路 dept 查询 500（oper_log 部门名/在线列表）。幂等补列兜底。
+        if sso_table_exists(&db, "sys_dept").await?
+            && !sso_has_column(&db, "sys_dept", "leader_user_id").await?
+        {
+            db.execute(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE sys_dept ADD COLUMN leader_user_id BIGINT".to_string(),
+            ))
+            .await?;
+            tracing::info!("sys_dept.leader_user_id 列已补建（存量库兜底）");
+        }
+
         // 3.2 P0-2：幂等确保 sys_task 含 operator_id 列（存量库向后兼容）
         // 背景：m20260806_000002_add_task_operator_id 迁移负责全新库建表时带该列，
         // 但 AppInitializer 启动不跑 Migrator::up（避免对已有种子数据的存量库重跑 seed 导致主键冲突），
@@ -153,6 +172,26 @@ impl AppInitializer {
         tracing::info!("=== axum-backend 初始化完成 ===");
         Ok(state)
     }
+}
+
+/// v5-N2 Phase 2（第一步）：幂等确保 `sys_user` 含 `tenant_id` 列（登录 JWT 的 tid
+/// 数据源）。与 `ensure_user_country_code_column` 同源方案：表不存在跳过；列不存在
+/// 则 `ALTER TABLE sys_user ADD COLUMN tenant_id BIGINT NOT NULL DEFAULT 0`。
+async fn ensure_user_tenant_id_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_user").await? {
+        return Ok(());
+    }
+    if sso_has_column(db, "sys_user", "tenant_id").await? {
+        tracing::info!("sys_user.tenant_id 列已存在，无需 ALTER");
+        return Ok(());
+    }
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "ALTER TABLE sys_user ADD COLUMN tenant_id BIGINT NOT NULL DEFAULT 0".to_string(),
+    ))
+    .await?;
+    tracing::info!("sys_user.tenant_id 列已补建（v5-N2 Phase 2 存量库兜底）");
+    Ok(())
 }
 
 /// 幂等确保 `sys_user` 表含 `country_code` 列（方案 D，G18：手机号多地区化向后兼容）
@@ -729,9 +768,36 @@ async fn sso_startup_self_check(db: &DatabaseConnection, settings: &Settings) {
 /// NULL 且 id_token_alg='RS256' 的行）。PKCS#8 PEM 按 CONFIG_ENC_KEY 信封加密落库
 /// （key 未配置时明文，迁移期策略与 v5-E6 一致）；CONFIG_ENC_KEY 未配置时整体跳过。
 async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow::Result<()> {
-    use rsa::pkcs8::EncodePrivateKey;
     if !sso_table_exists(db, "sys_oauth_client").await? {
         return Ok(());
+    }
+    // v5-D2/D5：存量库启动不跑 Migrator::up——先幂等补列（id_token_alg/rsa_private_key/
+    // subject_type），否则下方查询因缺列直接失败（真实运行验证发现的启动阻断）
+    if !sso_has_column(db, "sys_oauth_client", "id_token_alg").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_client ADD COLUMN id_token_alg VARCHAR(8) NOT NULL DEFAULT 'RS256'"
+                .to_string(),
+        ))
+        .await?;
+        tracing::info!("sys_oauth_client.id_token_alg 列已补建（v5-D2 存量库兜底）");
+    }
+    if !sso_has_column(db, "sys_oauth_client", "rsa_private_key").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_client ADD COLUMN rsa_private_key TEXT".to_string(),
+        ))
+        .await?;
+        tracing::info!("sys_oauth_client.rsa_private_key 列已补建（v5-D2 存量库兜底）");
+    }
+    if !sso_has_column(db, "sys_oauth_client", "subject_type").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_client ADD COLUMN subject_type VARCHAR(8) NOT NULL DEFAULT 'public'"
+                .to_string(),
+        ))
+        .await?;
+        tracing::info!("sys_oauth_client.subject_type 列已补建（v5-D5 存量库兜底）");
     }
     if enc_key.is_empty() {
         tracing::warn!("CONFIG_ENC_KEY 未配置：跳过 RS256 密钥生成（v5-D2，下次启动重试）");
@@ -746,18 +812,20 @@ async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow
     for row in rows {
         let pk = row.try_get::<i64>("", "pk").unwrap_or(0);
         let cid = row.try_get::<String>("", "cid").unwrap_or_default();
-        let mut rng = rand::thread_rng();
-        let private = match rsa::RsaPrivateKey::new(&mut rng, 2048) {
-            Ok(k) => k,
-            Err(e) => {
+        // v5-D2 修正：keygen 在专用大栈线程执行（tokio 栈上 stack overflow 硬崩，
+        // 与 sso_service::generate_rsa_private_pem 同款防护）
+        let pem = match tokio::task::spawn_blocking(|| {
+            crate::service::sso_service::generate_rsa_private_pem()
+        })
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
                 tracing::error!("v5-D2 RSA 生成失败 client_id={cid}: {}", e);
                 continue;
             }
-        };
-        let pem = match private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF) {
-            Ok(p) => p.to_string(),
             Err(e) => {
-                tracing::error!("v5-D2 RSA PEM 编码失败 client_id={cid}: {}", e);
+                tracing::error!("v5-D2 RSA keygen 任务失败 client_id={cid}: {}", e);
                 continue;
             }
         };
