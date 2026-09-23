@@ -269,6 +269,62 @@ pub async fn token(
     }
 }
 
+/// POST /sso/revoke（v5-D3，RFC 7009：令牌吊销——AT/RT 均可；
+/// 吊销成功与 token 无效/已吊销均返回 200 空体，防枚举；客户端认证失败 401）
+pub async fn revoke(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    form: Result<axum::Form<TokenParams>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let mut params = match form {
+        Ok(f) => f.0,
+        Err(_) => {
+            return oidc_error_response(
+                StatusCode::BAD_REQUEST,
+                &OidcError::new(
+                    "invalid_request",
+                    "malformed revocation request".to_string(),
+                ),
+            );
+        }
+    };
+    if let Some((cid, csec)) = parse_basic_auth(&headers) {
+        if params.client_id.is_none() {
+            params.client_id = Some(cid);
+        }
+        if params.client_secret.is_none() {
+            params.client_secret = Some(csec);
+        }
+    }
+    match state
+        .sso_service
+        .revoke_token(&params, &mut state.redis.clone())
+        .await
+    {
+        // RFC 7009 §2.2：恒 200 空体（含 token 无效/已吊销），防枚举
+        Ok(()) => with_no_store((StatusCode::OK, Json(serde_json::json!({}))).into_response()),
+        Err(e) => {
+            let status = if e.code == "invalid_client" {
+                StatusCode::UNAUTHORIZED
+            } else if e.code == "server_error" {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            let mut resp = oidc_error_response(status, &e);
+            if status == StatusCode::UNAUTHORIZED {
+                resp.headers_mut().insert(
+                    axum::http::header::WWW_AUTHENTICATE,
+                    axum::http::HeaderValue::from_static(
+                        "Basic realm=\"yebot-sso\", charset=\"UTF-8\"",
+                    ),
+                );
+            }
+            resp
+        }
+    }
+}
+
 /// GET /sso/userinfo（Authorization: Bearer）
 pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let bearer = match bearer_token(&headers) {

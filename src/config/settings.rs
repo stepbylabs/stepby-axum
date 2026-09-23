@@ -183,6 +183,11 @@ pub struct SsoConfig {
     /// v4-P0-A：access_token 与 ID Token 生命周期分离——不再错用 id_token_ttl_secs。
     #[serde(default = "default_sso_access_token_ttl_secs")]
     pub access_token_ttl_secs: u64,
+    /// v5-D3：refresh_token 有效期（秒，默认 30 天）。
+    /// RT 为不透明令牌（与 AT 同构：SHA-256 → `sso:rt:{hash}` 绑定），轮换式使用——
+    /// 每次刷新旧 RT 立即作废并签发新 RT；登出/强退/改密全量吊销。
+    #[serde(default = "default_sso_refresh_token_ttl_secs")]
+    pub refresh_token_ttl_secs: u64,
 }
 
 impl Default for SsoConfig {
@@ -193,6 +198,7 @@ impl Default for SsoConfig {
             code_ttl_secs: default_sso_code_ttl_secs(),
             id_token_ttl_secs: default_sso_id_token_ttl_secs(),
             access_token_ttl_secs: default_sso_access_token_ttl_secs(),
+            refresh_token_ttl_secs: default_sso_refresh_token_ttl_secs(),
         }
     }
 }
@@ -208,6 +214,9 @@ fn default_sso_id_token_ttl_secs() -> u64 {
 }
 fn default_sso_access_token_ttl_secs() -> u64 {
     3600
+}
+fn default_sso_refresh_token_ttl_secs() -> u64 {
+    30 * 24 * 3600
 }
 
 /// 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）

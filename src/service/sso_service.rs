@@ -45,6 +45,10 @@ const AT_KEY_PREFIX: &str = "sso:at:";
 const USER_AT_KEY_PREFIX: &str = "sso:user_at:";
 /// 登录会话索引（v3-P0-B）：`sso:sess:{uid}` = Set(token_hash)，end_session 时定位该用户全部登录会话
 const SESS_KEY_PREFIX: &str = "sso:sess:";
+/// v5-D3：refresh_token（不透明令牌）Redis key 前缀：key = `sso:rt:{sha256(token)}`
+const RT_KEY_PREFIX: &str = "sso:rt:";
+/// v5-D3：用户 → 已签发 refresh_token 集合：登出/强退/改密时按用户全量吊销
+const USER_RT_KEY_PREFIX: &str = "sso:user_rt:";
 /// client_id 保留字（v4 §1.3）：禁止与协议自身命名空间/常见系统字冲突。
 /// 注意：与平台 jwt.audience / jwt.issuer 的碰撞校验是**动态比对配置**（见 add_client），
 /// 静态表只兜底通用保留字，不兜底可配置值。
@@ -199,6 +203,25 @@ struct AccessBinding {
     tid: i64,
 }
 
+/// v5-D3：refresh_token 绑定（不透明令牌，存于 `sso:rt:{sha256(token)}`）。
+/// 与 AccessBinding 同构（scope/身份快照），轮换式使用：每次刷新旧 RT 原子作废、签发新 RT。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RefreshBinding {
+    client_id: String,
+    user_id: i64,
+    username: String,
+    #[serde(default)]
+    nick_name: String,
+    #[serde(default)]
+    email: String,
+    scope: Vec<String>,
+    /// 用户认证时刻（继承授权码绑定的 auth_time，id_token 重签保持一致）
+    #[serde(default)]
+    auth_time: i64,
+    #[serde(default)]
+    tid: i64,
+}
+
 /// authorize 请求参数（由 handler 从 query 解出后传入）
 #[derive(Debug, Clone)]
 pub struct AuthorizeParams {
@@ -248,6 +271,8 @@ pub struct ConsentDto {
 /// 参数名由 RFC 6749 强制固定为 snake_case，不参与 camelCase / ts-rs 转换。
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TokenParams {
+    /// grant_type：token 端点必填；revoke 端点无此字段（serde default 兼容共用结构）
+    #[serde(default)]
     pub grant_type: String,
     #[serde(default)]
     pub code: Option<String>,
@@ -262,6 +287,12 @@ pub struct TokenParams {
     pub client_secret: Option<String>,
     #[serde(default)]
     pub code_verifier: Option<String>,
+    /// v5-D3：refresh_token grant 的刷新令牌（grant_type=refresh_token 时必填）
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// v5-D3：RFC 7009 吊销请求的 token 参数（/sso/revoke 用）
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 /// /sso/token 成功响应（bare JSON）—— **协议面**，字段名由 OIDC 规范固定为 snake_case。
@@ -275,6 +306,12 @@ pub struct TokenResult {
     /// v5-E2：授权用户名（审计用，登录日志记录"SSO 令牌签发"事件的主体；
     /// 多一个响应字段对标准 RP 客户端无害）
     pub user_name: String,
+    /// v5-D3：刷新令牌（不透明串；仅 grant_types 含 refresh_token 的客户端签发时出现）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// v5-D3：refresh_token 有效期（秒；与 refresh_token 成对出现）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_expires_in: Option<u64>,
 }
 
 /// OAuth/OIDC 错误（bare JSON：`{"error","error_description"}`），非信封、非 ServiceError
@@ -405,7 +442,12 @@ impl SsoService {
             "jwks_uri": format!("{}/sso/jwks", issuer),
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
-            "grant_types_supported": ["authorization_code"],
+            // v5-D3：refresh_token grant 与 RFC 7009 吊销端点声明
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "revocation_endpoint": format!("{}/sso/revoke", issuer),
+            "revocation_endpoint_auth_methods_supported": [
+                "client_secret_basic", "client_secret_post"
+            ],
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["RS256", "HS256"],
             "scopes_supported": ["openid", "profile", "email"],
@@ -744,9 +786,11 @@ impl SsoService {
 
     // -------------------- 令牌端点 --------------------
 
-    /// 处理 POST /sso/token（authorization_code 交换）
+    /// 处理 POST /sso/token（authorization_code 交换 / refresh_token 刷新）
     ///
     /// v4-P0-A：`jwt` 参数已移除——access_token 不再是平台 JWT，无需平台签名密钥。
+    /// v5-D3：新增 refresh_token grant（RFC 6749 §6）——RT 轮换式使用，
+    /// 每次刷新旧 RT 原子作废（GETDEL 防并发双用）、签发新 AT + 新 RT + 重签 id_token。
     pub async fn token(
         &self,
         params: TokenParams,
@@ -760,22 +804,22 @@ impl SsoService {
                 crate::tr!("error.sso.disabled"),
             ));
         }
-        if params.grant_type != "authorization_code" {
-            return Err(OidcError::new(
+        match params.grant_type.as_str() {
+            "authorization_code" => {
+                self.token_authorization_code(params, redis, config, base_url)
+                    .await
+            }
+            "refresh_token" => self.token_refresh(params, redis, config, base_url).await,
+            _ => Err(OidcError::new(
                 "unsupported_grant_type",
                 crate::tr!("error.sso.grant_type_unsupported"),
-            ));
+            )),
         }
-        let code = params
-            .code
-            .as_deref()
-            .filter(|c| !c.is_empty())
-            .ok_or_else(|| {
-                OidcError::new("invalid_request", crate::tr!("error.sso.code_invalid"))
-            })?;
+    }
 
-        // 客户端凭据校验（client_id/secret 可来自表单或 Basic 头，handler 已合并；
-        // 缺失按 RFC 6749 §5.2 返回 invalid_client，handler 据此映射 401 + WWW-Authenticate）
+    /// 客户端凭据校验（token/revoke 共用）：client_id/secret 来自表单或 Basic 头
+    /// （handler 已合并），缺失/错误按 RFC 6749 §5.2 返回 invalid_client（401）。
+    async fn verify_token_client(&self, params: &TokenParams) -> Result<ClientModel, OidcError> {
         let client_id = params
             .client_id
             .as_deref()
@@ -815,6 +859,155 @@ impl SsoService {
                 crate::tr!("error.sso.client_auth_failed"),
             ));
         }
+        Ok(client)
+    }
+
+    /// v5-D3：签发 refresh_token（grant_types 含 refresh_token 的客户端才签发）。
+    /// 返回 `Some((refresh_token, refresh_expires_in))`；不支持刷新的客户端返回 None。
+    async fn issue_refresh_token(
+        &self,
+        client: &ClientModel,
+        binding: &CodeBinding,
+        redis: &mut ConnectionManager,
+        config: &SsoConfig,
+    ) -> Result<Option<(String, u64)>, OidcError> {
+        let grant_types: Vec<String> =
+            serde_json::from_str(&client.grant_types).unwrap_or_default();
+        if !grant_types.iter().any(|g| g == "refresh_token") {
+            return Ok(None);
+        }
+        let rt = random_urlsafe(32);
+        let rt_hash = crate::utils::crypto::token_hash(&rt);
+        let rt_ttl = config.refresh_token_ttl_secs.max(1);
+        let rt_binding = RefreshBinding {
+            client_id: client.client_id.clone(),
+            user_id: binding.user_id,
+            username: binding.username.clone(),
+            nick_name: binding.nick_name.clone(),
+            email: binding.email.clone(),
+            scope: binding.scope.clone(),
+            auth_time: binding.auth_time,
+            tid: binding.tid,
+        };
+        let json = serde_json::to_string(&rt_binding)
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let rt_key = format!("{}{}", RT_KEY_PREFIX, rt_hash);
+        let _: () = redis::cmd("SET")
+            .arg(&rt_key)
+            .arg(&json)
+            .arg("EX")
+            .arg(rt_ttl)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        // 登记「用户 → RT」集合（登出/强退/改密全量吊销用），TTL 稍大于 RT TTL
+        let user_rt_key = format!("{}{}", USER_RT_KEY_PREFIX, binding.user_id);
+        let _: () = redis::cmd("SADD")
+            .arg(&user_rt_key)
+            .arg(&rt_hash)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = redis::cmd("EXPIRE")
+            .arg(&user_rt_key)
+            .arg(rt_ttl + 60)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        Ok(Some((rt, rt_ttl)))
+    }
+
+    /// v5-D3：签发 access_token（AT 绑定 + 在线会话 + 用户集合），authorization_code
+    /// 与 refresh_token 两条 grant 共用。`binding.access_token_hash` 必须已由调用方回填。
+    async fn issue_access_token(
+        &self,
+        client: &ClientModel,
+        binding: &CodeBinding,
+        redis: &mut ConnectionManager,
+        at_ttl: u64,
+    ) -> Result<(), OidcError> {
+        let at_binding = AccessBinding {
+            client_id: client.client_id.clone(),
+            user_id: binding.user_id,
+            username: binding.username.clone(),
+            nick_name: binding.nick_name.clone(),
+            email: binding.email.clone(),
+            scope: binding.scope.clone(),
+            auth_time: binding.auth_time,
+            tid: binding.tid,
+        };
+        let at_json = serde_json::to_string(&at_binding)
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let at_key = format!("{}{}", AT_KEY_PREFIX, binding.access_token_hash);
+        let _: () = redis::cmd("SET")
+            .arg(&at_key)
+            .arg(&at_json)
+            .arg("EX")
+            .arg(at_ttl)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        // v4-F2：登记「用户 → 已签发 SSO AT」集合（登出/强退/改密全量吊销用）+ 在线可见。
+        // 读路径有 EXISTS 悬空自愈（见 revoke_user_sso_tokens），集合 TTL 稍大于 AT TTL。
+        let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, binding.user_id);
+        let _: () = redis::cmd("SADD")
+            .arg(&user_at_key)
+            .arg(&binding.access_token_hash)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = redis::cmd("EXPIRE")
+            .arg(&user_at_key)
+            .arg(at_ttl + 60)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        // F2：写 online:{hash}（source=sso）→ 在线用户列表可见、管理员可强退
+        let online = crate::utils::crypto::OnlineSession {
+            user_id: binding.user_id,
+            username: binding.username.clone(),
+            ip: "sso".to_string(),
+            login_time: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            browser: "SSO".to_string(),
+            os: "-".to_string(),
+            jti: format!("sso-at-{}", client.client_id),
+            dept_name: String::new(),
+            exp: chrono::Utc::now().timestamp() + at_ttl as i64,
+            source: "sso".to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&online) {
+            let online_key = format!("online:{}", binding.access_token_hash);
+            let _: () = redis::cmd("SETEX")
+                .arg(&online_key)
+                .arg(at_ttl)
+                .arg(&json)
+                .query_async(redis)
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.sso.token_failed"))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// grant_type=authorization_code（RFC 6749 §4.1.3）
+    async fn token_authorization_code(
+        &self,
+        params: TokenParams,
+        redis: &mut ConnectionManager,
+        config: &SsoConfig,
+        base_url: &str,
+    ) -> Result<TokenResult, OidcError> {
+        let code = params
+            .code
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| {
+                OidcError::new("invalid_request", crate::tr!("error.sso.code_invalid"))
+            })?;
+
+        let client = self.verify_token_client(&params).await?;
+        let client_id = client.client_id.clone();
 
         // 一次性取码（原子 GETDEL，防重放）
         let key = format!("{}{}", CODE_KEY_PREFIX, code);
@@ -867,76 +1060,23 @@ impl SsoService {
         // 不透明令牌：① 平台路由在 JWT 解码阶段即 401（天然隔离，零中间件改动）；
         // ② DEL 绑定即即时吊销；③ 泄漏不暴露 claims。RP 一律通过 /sso/userinfo 消费。
         let access_token = random_urlsafe(32);
-        let now_secs = chrono::Utc::now().timestamp();
         let at_ttl = config.access_token_ttl_secs.max(1);
         let at_hash = crate::utils::crypto::token_hash(&access_token);
         binding.access_token_hash = at_hash.clone();
-        let at_binding = AccessBinding {
-            client_id: client.client_id.clone(),
-            user_id: binding.user_id,
-            username: binding.username.clone(),
-            nick_name: binding.nick_name.clone(),
-            email: binding.email.clone(),
-            scope: binding.scope.clone(),
-            auth_time: binding.auth_time,
-            tid: binding.tid,
-        };
-        let at_json = serde_json::to_string(&at_binding)
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
-        let at_key = format!("{}{}", AT_KEY_PREFIX, at_hash);
-        let _: () = redis::cmd("SET")
-            .arg(&at_key)
-            .arg(&at_json)
-            .arg("EX")
-            .arg(at_ttl)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
-        // v4-F2：登记「用户 → 已签发 SSO AT」集合（登出/强退/改密全量吊销用）+ 在线可见。
-        // 读路径有 EXISTS 悬空自愈（见 revoke_user_sso_tokens），集合 TTL 稍大于 AT TTL。
-        let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, binding.user_id);
-        let _: () = redis::cmd("SADD")
-            .arg(&user_at_key)
-            .arg(&at_hash)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
-        let _: () = redis::cmd("EXPIRE")
-            .arg(&user_at_key)
-            .arg(at_ttl + 60)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
-        // F2：写 online:{hash}（source=sso）→ 在线用户列表可见、管理员可强退
-        let online = crate::utils::crypto::OnlineSession {
-            user_id: binding.user_id,
-            username: binding.username.clone(),
-            ip: "sso".to_string(),
-            login_time: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            browser: "SSO".to_string(),
-            os: "-".to_string(),
-            jti: format!("sso-at-{}", client.client_id),
-            dept_name: String::new(),
-            exp: now_secs + at_ttl as i64,
-            source: "sso".to_string(),
-        };
-        if let Ok(json) = serde_json::to_string(&online) {
-            let online_key = format!("online:{}", at_hash);
-            let _: () = redis::cmd("SETEX")
-                .arg(&online_key)
-                .arg(at_ttl)
-                .arg(&json)
-                .query_async(redis)
-                .await
-                .map_err(|_| {
-                    OidcError::new("server_error", crate::tr!("error.sso.token_failed"))
-                })?;
-        }
+        // v5-D3：AT 签发（绑定 + 在线会话 + 用户集合）抽公共 helper 与 refresh grant 共用
+        self.issue_access_token(&client, &binding, redis, at_ttl)
+            .await?;
 
-        // 签发 id_token（HS256 + 每客户端密钥）
+        // 签发 id_token（v5-D2：按客户端声明算法 RS256/HS256）
         let id_token = self
             .build_id_token(&client, &binding, config, base_url)
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+
+        // v5-D3：grant_types 含 refresh_token 的客户端签发 RT（轮换式）
+        let (refresh_token, refresh_expires_in) = self
+            .issue_refresh_token(&client, &binding, redis, config)
+            .await?
+            .unzip();
 
         Ok(TokenResult {
             access_token,
@@ -947,7 +1087,169 @@ impl SsoService {
             scope: binding.scope.join(" "),
             id_token,
             user_name: binding.username.clone(),
+            refresh_token,
+            refresh_expires_in,
         })
+    }
+
+    /// grant_type=refresh_token（RFC 6749 §6 + v5-D3 轮换语义）
+    ///
+    /// 流程：客户端认证 → RT 原子取删（GETDEL，防并发双用/重放）→ 绑定校验
+    /// → 签发新 AT + 新 RT（轮换）+ 重签 id_token。旧 RT 一经使用立即作废。
+    async fn token_refresh(
+        &self,
+        params: TokenParams,
+        redis: &mut ConnectionManager,
+        config: &SsoConfig,
+        base_url: &str,
+    ) -> Result<TokenResult, OidcError> {
+        let rt = params
+            .refresh_token
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| OidcError::new("invalid_request", crate::tr!("error.sso.rt_invalid")))?;
+
+        let client = self.verify_token_client(&params).await?;
+
+        // RT 原子取删：并发双用/重放场景下只有第一次能取到（invalid_grant）
+        let rt_hash = crate::utils::crypto::token_hash(rt);
+        let rt_key = format!("{}{}", RT_KEY_PREFIX, rt_hash);
+        let binding_json: Option<String> = redis::cmd("GETDEL")
+            .arg(&rt_key)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let binding_json = binding_json
+            .ok_or_else(|| OidcError::new("invalid_grant", crate::tr!("error.sso.rt_invalid")))?;
+        let rt_binding: RefreshBinding = serde_json::from_str(&binding_json)
+            .map_err(|_| OidcError::new("invalid_grant", crate::tr!("error.sso.rt_invalid")))?;
+
+        // RT 与请求客户端必须一致（防跨客户端盗用刷新）
+        if rt_binding.client_id != client.client_id {
+            return Err(OidcError::new(
+                "invalid_grant",
+                crate::tr!("error.sso.rt_invalid"),
+            ));
+        }
+
+        // 由 RT 绑定还原 CodeBinding（id_token/AT 签发复用同一身份快照）
+        let binding = CodeBinding {
+            client_id: rt_binding.client_id.clone(),
+            user_id: rt_binding.user_id,
+            username: rt_binding.username.clone(),
+            nick_name: rt_binding.nick_name.clone(),
+            email: rt_binding.email.clone(),
+            access_token_hash: String::new(),
+            totp_enabled: false,
+            tid: rt_binding.tid,
+            redirect_uri: String::new(),
+            scope: rt_binding.scope.clone(),
+            code_challenge: String::new(),
+            nonce: None,
+            auth_time: rt_binding.auth_time,
+        };
+
+        // 签发新 AT（绑定 + 在线会话 + 用户集合）
+        let access_token = random_urlsafe(32);
+        let at_ttl = config.access_token_ttl_secs.max(1);
+        let mut new_binding = binding;
+        new_binding.access_token_hash = crate::utils::crypto::token_hash(&access_token);
+        self.issue_access_token(&client, &new_binding, redis, at_ttl)
+            .await?;
+
+        // 签发新 id_token
+        let id_token = self
+            .build_id_token(&client, &new_binding, config, base_url)
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+
+        // RT 轮换：签发新 RT（旧 RT 已 GETDEL 作废）
+        let (refresh_token, refresh_expires_in) = self
+            .issue_refresh_token(&client, &new_binding, redis, config)
+            .await?
+            .unzip();
+
+        Ok(TokenResult {
+            access_token,
+            token_type: "Bearer",
+            expires_in: at_ttl,
+            scope: new_binding.scope.join(" "),
+            id_token,
+            user_name: new_binding.username.clone(),
+            refresh_token,
+            refresh_expires_in,
+        })
+    }
+
+    /// v5-D3：RFC 7009 令牌吊销（token/revoke 端点内部实现）。
+    /// 吊销成功、token 无效、已吊销一律返回 Ok（规范 §2.2：防 token 枚举）；
+    /// 客户端认证失败由调用方映射 401。
+    pub async fn revoke_token(
+        &self,
+        params: &TokenParams,
+        redis: &mut ConnectionManager,
+    ) -> Result<(), OidcError> {
+        // 客户端认证（失败 → invalid_client 401，由 handler 映射）
+        self.verify_token_client(params).await?;
+        let Some(token) = params.token.as_deref().filter(|s| !s.is_empty()) else {
+            // 缺 token 参数：按规范返回 200（不泄漏存在性）
+            return Ok(());
+        };
+        let token_hash = crate::utils::crypto::token_hash(token);
+
+        // AT 吊销：读绑定拿 user_id → 删绑定 + 在线会话 + 用户集合成员
+        let at_key = format!("{}{}", AT_KEY_PREFIX, token_hash);
+        let at_json: Option<String> = redis::cmd("GET")
+            .arg(&at_key)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        if let Some(json) = at_json {
+            let user_id = serde_json::from_str::<AccessBinding>(&json)
+                .map(|b| b.user_id)
+                .unwrap_or(0);
+            let _: () = redis::cmd("DEL")
+                .arg(&at_key)
+                .arg(format!("online:{}", token_hash))
+                .query_async(redis)
+                .await
+                .unwrap_or(());
+            if user_id > 0 {
+                let _: () = redis::cmd("SREM")
+                    .arg(format!("{}{}", USER_AT_KEY_PREFIX, user_id))
+                    .arg(&token_hash)
+                    .query_async(redis)
+                    .await
+                    .unwrap_or(());
+            }
+            return Ok(());
+        }
+
+        // RT 吊销：删绑定 + 用户集合成员（轮换链终止）
+        let rt_key = format!("{}{}", RT_KEY_PREFIX, token_hash);
+        let rt_json: Option<String> = redis::cmd("GET")
+            .arg(&rt_key)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        if let Some(json) = rt_json {
+            let user_id = serde_json::from_str::<RefreshBinding>(&json)
+                .map(|b| b.user_id)
+                .unwrap_or(0);
+            let _: () = redis::cmd("DEL")
+                .arg(&rt_key)
+                .query_async(redis)
+                .await
+                .unwrap_or(());
+            if user_id > 0 {
+                let _: () = redis::cmd("SREM")
+                    .arg(format!("{}{}", USER_RT_KEY_PREFIX, user_id))
+                    .arg(&token_hash)
+                    .query_async(redis)
+                    .await
+                    .unwrap_or(());
+            }
+        }
+        Ok(())
     }
 
     /// 原子读取并删除授权码（Redis GETDEL），命中返回 Some(JSON 字符串)
@@ -1556,6 +1858,28 @@ impl SsoService {
                 "已全量吊销用户 SSO access_token user_id={} count={}",
                 user_id,
                 hashes.len()
+            );
+        }
+        // v5-D3：同步全量吊销该用户的 refresh_token（否则登出后 RT 仍可换新 AT，
+        // 全量吊销被架空——RT 轮换链必须与 AT 同生命周期终止）
+        let user_rt_key = format!("{}{}", USER_RT_KEY_PREFIX, user_id);
+        let rt_hashes: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(&user_rt_key)
+            .query_async(redis)
+            .await
+            .unwrap_or_default();
+        for h in &rt_hashes {
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(format!("{}{}", RT_KEY_PREFIX, h))
+                .query_async(redis)
+                .await;
+        }
+        if !rt_hashes.is_empty() {
+            let _: Result<i64, _> = redis::cmd("DEL").arg(&user_rt_key).query_async(redis).await;
+            tracing::info!(
+                "已全量吊销用户 SSO refresh_token user_id={} count={}",
+                user_id,
+                rt_hashes.len()
             );
         }
     }
