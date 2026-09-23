@@ -117,6 +117,7 @@ error:
     code_invalid: Authorization code is invalid or expired
     client_auth_failed: Client authentication failed
     grant_type_unsupported: Unsupported grant_type
+    rt_invalid: Refresh token is invalid or expired
     pkce_verify_failed: PKCE verification failed
     token_failed: Token issuance failed
     access_token_invalid: Access token is invalid

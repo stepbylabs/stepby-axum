@@ -178,19 +178,29 @@ async fn add_client_uris(
     name: &str,
     uris: &[&str],
 ) -> (String, String) {
-    let v = ctx
-        .post_json(
-            "/system/oauth/client",
-            serde_json::json!({
-                "clientName": name,
-                "redirectUris": uris,
-                "scopes": ["openid", "profile", "email"],
-                "consentRequired": consent_required,
-                "enabled": "1",
-                "remark": "集成测试 SSO 客户端"
-            }),
-        )
-        .await;
+    add_client_full(ctx, consent_required, name, uris, None).await
+}
+
+/// 完整参数客户端创建（v5-D3：grant_types 可指定，供 refresh_token 链路测试）。
+async fn add_client_full(
+    ctx: &TestContext,
+    consent_required: &str,
+    name: &str,
+    uris: &[&str],
+    grant_types: Option<&[&str]>,
+) -> (String, String) {
+    let mut payload = serde_json::json!({
+        "clientName": name,
+        "redirectUris": uris,
+        "scopes": ["openid", "profile", "email"],
+        "consentRequired": consent_required,
+        "enabled": "1",
+        "remark": "集成测试 SSO 客户端"
+    });
+    if let Some(g) = grant_types {
+        payload["grantTypes"] = serde_json::json!(g);
+    }
+    let v = ctx.post_json("/system/oauth/client", payload).await;
     ctx.assert_ok(&v);
     let cid = v["data"]["clientId"]
         .as_str()
@@ -823,6 +833,157 @@ async fn test_sso_v4_opaque_token_isolation_and_claims() {
     assert_eq!(jwk["alg"], "RS256");
     assert!(jwk["n"].as_str().is_some_and(|s| !s.is_empty()));
     assert_eq!(jwk["e"], "AQAB", "RSA 公钥指数默认 65537");
+}
+
+/// v5-D3：refresh_token 轮换 + RFC 7009 吊销全链路。
+/// ① 授权码兑换返回 RT（grant_types 含 refresh_token）；② refresh 得新 AT/RT（均异于旧）；
+/// ③ 旧 RT 重放 → 400 invalid_grant（轮换作废）；④ 新 AT 可用；⑤ revoke AT → userinfo 401；
+/// ⑥ revoke RT → refresh 400；⑦ revoke 无效 token 恒 200（防枚举）；
+/// ⑧ 未声明 refresh_token 的客户端不签发 RT。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_d3_refresh_rotation_and_revoke() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client_full(
+        &ctx,
+        "0",
+        "it_sso_d3rt",
+        &[REDIRECT_URI],
+        Some(&["authorization_code", "refresh_token"]),
+    )
+    .await;
+
+    // ① 授权码兑换 → AT1 + RT1
+    let code = obtain_code(&ctx, &cid, "openid profile").await;
+    let (tr1, _) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    let at1 = tr1["access_token"].as_str().expect("AT1").to_string();
+    let rt1 = tr1["refresh_token"]
+        .as_str()
+        .expect("应签发 RT1")
+        .to_string();
+    assert!(
+        tr1["refresh_expires_in"].as_u64().unwrap_or(0) > 0,
+        "refresh_expires_in 应为正数"
+    );
+
+    // ② refresh 轮换 → AT2 + RT2
+    let refresh_form = |rt: &str| {
+        format!(
+            "grant_type=refresh_token&client_id={}&client_secret={}&refresh_token={}",
+            urlenc(&cid),
+            urlenc(&secret),
+            urlenc(rt)
+        )
+    };
+    let (r2, _, body2) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &refresh_form(&rt1),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        r2,
+        StatusCode::OK,
+        "refresh 应 200: {}",
+        String::from_utf8_lossy(&body2)
+    );
+    let tr2 = json_of(&body2);
+    let at2 = tr2["access_token"].as_str().expect("AT2").to_string();
+    let rt2 = tr2["refresh_token"]
+        .as_str()
+        .expect("应轮换出 RT2")
+        .to_string();
+    assert_ne!(at1, at2, "AT 应轮换");
+    assert_ne!(rt1, rt2, "RT 应轮换");
+
+    // ③ 旧 RT1 重放 → 400 invalid_grant（轮换后作废）
+    let (r3, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &refresh_form(&rt1),
+        &[],
+    )
+    .await;
+    assert_eq!(r3, StatusCode::BAD_REQUEST, "旧 RT 重放应被拒绝");
+
+    // ④ 新 AT2 可用
+    assert_eq!(
+        userinfo_status(&ctx, &at2).await,
+        StatusCode::OK,
+        "刷新后的 AT 应可用"
+    );
+
+    // ⑤ revoke AT2 → userinfo 401
+    let revoke_form = |t: &str| {
+        format!(
+            "token={}&client_id={}&client_secret={}",
+            urlenc(t),
+            urlenc(&cid),
+            urlenc(&secret)
+        )
+    };
+    let (rr1, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/revoke",
+        "application/x-www-form-urlencoded",
+        &revoke_form(&at2),
+        &[],
+    )
+    .await;
+    assert_eq!(rr1, StatusCode::OK, "revoke 应 200");
+    assert_eq!(
+        userinfo_status(&ctx, &at2).await,
+        StatusCode::UNAUTHORIZED,
+        "吊销后 AT 应立即失效"
+    );
+
+    // ⑥ revoke RT2 → refresh 400
+    let (rr2, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/revoke",
+        "application/x-www-form-urlencoded",
+        &revoke_form(&rt2),
+        &[],
+    )
+    .await;
+    assert_eq!(rr2, StatusCode::OK, "revoke RT 应 200");
+    let (r4, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &refresh_form(&rt2),
+        &[],
+    )
+    .await;
+    assert_eq!(r4, StatusCode::BAD_REQUEST, "吊销后的 RT 刷新应被拒绝");
+
+    // ⑦ revoke 无效 token 恒 200（防枚举，RFC 7009 §2.2）
+    let (rr3, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/revoke",
+        "application/x-www-form-urlencoded",
+        &revoke_form("not-a-real-token"),
+        &[],
+    )
+    .await;
+    assert_eq!(rr3, StatusCode::OK, "无效 token 吊销应恒 200");
+
+    // ⑧ 未声明 refresh_token 的客户端不签发 RT
+    let (cid2, secret2) = add_client(&ctx, "0", "it_sso_d3nort").await;
+    let code2 = obtain_code(&ctx, &cid2, "openid profile").await;
+    let (tr3, _) = exchange_token(&ctx, &code2, &cid2, &secret2, true).await;
+    assert!(
+        tr3.get("refresh_token").is_none(),
+        "未声明 refresh_token grant 的客户端不应获得 RT，实际: {tr3}"
+    );
 }
 
 /// v4 §7：token 请求必须携带与 authorize 完全一致的 redirect_uri（缺失 → 400 invalid_grant）

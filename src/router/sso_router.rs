@@ -33,6 +33,8 @@ pub fn public_sso_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/sso/authorize", get(sso_handler::authorize))
         .route("/sso/token", post(sso_handler::token))
+        // v5-D3：RFC 7009 令牌吊销（AT/RT；防枚举恒 200）
+        .route("/sso/revoke", post(sso_handler::revoke))
         .route("/sso/userinfo", get(sso_handler::userinfo))
         // v5-D2：RS256 客户端公钥发布（聚合；仅启用客户端）
         .route("/sso/jwks", get(sso_handler::jwks))
