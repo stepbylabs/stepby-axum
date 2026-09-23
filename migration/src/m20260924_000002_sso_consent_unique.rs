@@ -28,10 +28,8 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
         // 1. 清理软删行（撤销语义已改物理删，软删行为脏数据）
-        conn.execute_unprepared(
-            "DELETE FROM sys_oauth_consent WHERE del_flag = '2'",
-        )
-        .await?;
+        conn.execute_unprepared("DELETE FROM sys_oauth_consent WHERE del_flag = '2'")
+            .await?;
         // 2. 去重：同 (user_id, client_id) 保留最早 consent_id
         conn.execute_unprepared(
             "DELETE FROM sys_oauth_consent WHERE consent_id NOT IN (\
