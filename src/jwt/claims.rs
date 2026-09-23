@@ -38,6 +38,15 @@ pub struct Claims {
     ///   `permission_middleware` 据此对请求施加“令牌 scope ∩ 用户当前权限”的细粒度约束。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pat_scopes: Option<Vec<String>>,
+    /// v5-N2 Phase 1：租户 ID（多租户前瞻基础设施）。
+    ///
+    /// - 登录时从用户记录写入（当前恒 0 = 平台单租户，字段语义与 sys_oauth_client 等
+    ///   表的预留列一致：默认 0、不参与过滤）；
+    /// - `#[serde(default)]` 兼容旧 token（未携带视为 0）；
+    /// - 多租户立项（Phase 2）后：登录查库带出真实 tid，Repository 过滤层据此注入
+    ///   `tenant_id = tid` 条件——Phase 1 仅打通"签发→携带→访问器"链路，零行为变更。
+    #[serde(default)]
+    pub tid: i64,
 }
 
 /// JWT 错误类型（类型化，替代原 anyhow::Result）
@@ -126,6 +135,8 @@ impl JwtUtils {
             jti: uuid::Uuid::new_v4().to_string(),
             pwd_ver,
             pat_scopes: None,
+            // v5-N2 Phase 1：当前恒 0（平台单租户）；Phase 2 登录查库带出真实 tid
+            tid: 0,
         };
         // SEC-008：显式指定 Algorithm::HS256，不依赖 Header::default()（默认 HS256 但显式更安全）
         let mut header = Header::new(Algorithm::HS256);
@@ -220,6 +231,7 @@ mod tests {
             jti: "test-jti".to_string(),
             pwd_ver: 0,
             pat_scopes: None,
+            tid: 0,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
@@ -275,6 +287,7 @@ mod tests {
             jti: "test-jti".to_string(),
             pwd_ver: 0,
             pat_scopes: None,
+            tid: 0,
         };
         let token = encode_claims(&claims, &cfg.secret);
 
@@ -299,6 +312,7 @@ mod tests {
             jti: "test-jti".to_string(),
             pwd_ver: 0,
             pat_scopes: None,
+            tid: 0,
         };
         let token = encode_claims(&claims, &cfg.secret);
 

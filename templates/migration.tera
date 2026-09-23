@@ -3,6 +3,7 @@
 -- 描述: {{ table.tableComment | default(value="") }}
 
 CREATE TABLE IF NOT EXISTS {{ table.tableName }} (
-{% for col in columns %}    {{ col.columnName }} {{ col.columnType }}{% if col.isRequired == "1" %} NOT NULL{% endif %}{% if col.isPk == "1" %} PRIMARY KEY{% endif %}{% if col.isIncrement == "1" %} AUTOINCREMENT{% endif %}{% if not loop.last %},{% endif %}
-
-{% endfor %});
+{% for col in columns %}    {{ col.columnName }} {{ col.columnType }}{% if col.isRequired == "1" %} NOT NULL{% endif %}{% if col.isPk == "1" %} PRIMARY KEY{% endif %}{% if col.isIncrement == "1" %} AUTOINCREMENT{% endif %},
+{% endfor %}    -- v5-E3（多租户前瞻）：租户 ID 预留列，默认 0 = 平台单租户，不参与查询过滤
+    tenant_id BIGINT NOT NULL DEFAULT 0
+);

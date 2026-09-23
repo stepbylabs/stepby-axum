@@ -167,6 +167,9 @@ struct CodeBinding {
     /// 旧绑定 JSON 缺省 false）
     #[serde(default)]
     totp_enabled: bool,
+    /// v5-N2 Phase 1：租户 ID（会话用户所属租户，当前恒 0；Phase 2 隔离过滤键）
+    #[serde(default)]
+    tid: i64,
     redirect_uri: String,
     scope: Vec<String>,
     code_challenge: String,
@@ -191,6 +194,9 @@ struct AccessBinding {
     /// 用户认证时刻（UTC 秒，v3 P1'-1：取登录 JWT 的 iat，而非授权时刻）
     #[serde(default)]
     auth_time: i64,
+    /// v5-N2 Phase 1：租户 ID（随码继承；旧绑定 JSON 缺省 0）
+    #[serde(default)]
+    tid: i64,
 }
 
 /// authorize 请求参数（由 handler 从 query 解出后传入）
@@ -409,7 +415,7 @@ impl SsoService {
             // v4 §6：claims_supported 与 scopes_supported 自洽（email scope 有对应 claim）
             "claims_supported": [
                 "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "at_hash",
-                "acr", "amr", "preferred_username", "name", "email", "email_verified"
+                "acr", "amr", "tid", "preferred_username", "name", "email", "email_verified"
             ],
         })
     }
@@ -561,6 +567,7 @@ impl SsoService {
                 identity.auth_time,
                 identity.user_id,
                 &identity.username,
+                identity.tid,
                 &client.client_id,
                 &redirect_uri,
                 &requested,
@@ -579,6 +586,7 @@ impl SsoService {
         &self,
         user_id: i64,
         username: &str,
+        tid: i64,
         dto: ConsentDto,
         redis: &mut ConnectionManager,
         config: &SsoConfig,
@@ -642,12 +650,13 @@ impl SsoService {
             .await?;
 
         // auth_time：同意页批准路径的身份来自登录态 Operator，其认证时刻由 handler 从
-        // Claims.iat 传入（v3 P1'-1）
+        // Claims.iat 传入（v3 P1'-1）；tid 随会话携带（v5-N2 Phase 1）
         self.issue_code_redirect(
             dto.auth_time
                 .unwrap_or_else(|| chrono::Utc::now().timestamp()),
             user_id,
             username,
+            tid,
             &client.client_id,
             &redirect_uri,
             &requested,
@@ -669,6 +678,7 @@ impl SsoService {
         auth_time: i64,
         user_id: i64,
         username: &str,
+        tid: i64,
         client_id: &str,
         redirect_uri: &str,
         scope: &[String],
@@ -697,6 +707,7 @@ impl SsoService {
             nick_name,
             email,
             totp_enabled,
+            tid,
             redirect_uri: redirect_uri.to_string(),
             scope: scope.to_vec(),
             code_challenge: code_challenge.to_string(),
@@ -868,6 +879,7 @@ impl SsoService {
             email: binding.email.clone(),
             scope: binding.scope.clone(),
             auth_time: binding.auth_time,
+            tid: binding.tid,
         };
         let at_json = serde_json::to_string(&at_binding)
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
@@ -1019,6 +1031,8 @@ impl SsoService {
             claims.insert("acr".into(), serde_json::json!("pwd"));
             claims.insert("amr".into(), serde_json::json!(["pwd"]));
         }
+        // v5-N2 Phase 1：租户 ID（tid）——多租户立项后 RP 可按租户区分用户主体
+        claims.insert("tid".into(), serde_json::json!(binding.tid));
         let payload = serde_json::Value::Object(claims);
         let mut header = Header::new(Algorithm::HS256);
         header.typ = Some("JWT".to_string());
@@ -1153,6 +1167,8 @@ impl SsoService {
             username: claims.username,
             // v3 P1'-1：登录 JWT 的 iat 即用户认证时刻（claims.rs:123 签发时写入）
             auth_time: claims.iat as i64,
+            // v5-N2 Phase 1：租户 ID 随会话携带
+            tid: claims.tid,
         }))
     }
 
@@ -1713,6 +1729,8 @@ struct SessionIdentity {
     /// 用户认证时刻（UTC 秒，v3 P1'-1：登录 JWT 的 iat——ID Token 的 auth_time 语义应为
     /// "用户实际完成认证的时刻"，而非"授权发生时刻"，否则 RP 的 max_age 判断永久失效）
     auth_time: i64,
+    /// v5-N2 Phase 1：租户 ID（登录 JWT tid；旧 token 缺省 0）
+    tid: i64,
 }
 
 /// 手动解码 JWT payload（base64url，**不验签**）。
