@@ -50,6 +50,9 @@ pub struct MetricsRegistry {
     counters: RwLock<HashMap<LabelSet, u64>>,
     durations: RwLock<HashMap<LabelSet, DurationSeries>>,
     total_requests: AtomicU64,
+    /// v5-D7：SSO 事件计数（event, outcome）→ 次数（token_issued/token_refreshed/
+    /// token_revoked/authorize/logout × ok/各错误码）
+    sso_counters: RwLock<HashMap<(String, String), u64>>,
 }
 
 impl Default for MetricsRegistry {
@@ -58,6 +61,7 @@ impl Default for MetricsRegistry {
             counters: RwLock::new(HashMap::new()),
             durations: RwLock::new(HashMap::new()),
             total_requests: AtomicU64::new(0),
+            sso_counters: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -107,6 +111,45 @@ impl MetricsRegistry {
     /// 累计请求总数（无标签）
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// v5-D7：记录一次 SSO 事件计数（event/outcome 标签组）
+    ///
+    /// event：`token_issued`（授权码兑换）/`token_refreshed`（RT 轮换）/
+    /// `token_revoked`（RFC 7009）/`authorize`（授权端点判定）/`logout`（end_session）
+    /// outcome：`ok` 或 OIDC 错误码（invalid_grant/invalid_client/login_required/...）
+    pub fn record_sso_event(&self, event: &str, outcome: &str) {
+        let mut counters = match self.sso_counters.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *counters
+            .entry((event.to_string(), outcome.to_string()))
+            .or_insert(0) += 1;
+    }
+
+    /// v5-D7：渲染 SSO 事件计数（`yebot_sso_events_total{event,outcome}`）
+    fn render_sso_prometheus(&self) -> String {
+        let mut s = String::new();
+        s.push_str("# HELP yebot_sso_events_total SSO 协议事件计数（event,outcome）\n");
+        s.push_str("# TYPE yebot_sso_events_total counter\n");
+        let counters = match self.sso_counters.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut keys: Vec<&(String, String)> = counters.keys().collect();
+        keys.sort();
+        for (event, outcome) in keys {
+            if let Some(c) = counters.get(&(event.clone(), outcome.clone())) {
+                s.push_str(&format!(
+                    "yebot_sso_events_total{{event=\"{}\",outcome=\"{}\"}} {}\n",
+                    escape_label(event),
+                    escape_label(outcome),
+                    c
+                ));
+            }
+        }
+        s
     }
 
     /// 渲染 Prometheus 文本格式的 HTTP 业务指标
@@ -182,6 +225,8 @@ impl MetricsRegistry {
                 ));
             }
         }
+        // v5-D7：SSO 协议事件计数
+        s.push_str(&self.render_sso_prometheus());
         s
     }
 }
@@ -234,6 +279,30 @@ mod tests {
         assert!(text.contains("le=\"+Inf\""));
         assert!(text.contains("yebot_http_request_duration_seconds_sum"));
         assert_eq!(reg.total_requests(), 2);
+    }
+
+    #[test]
+    fn test_sso_events_counter_rendering() {
+        // v5-D7：SSO 事件计数按 (event,outcome) 聚合并渲染
+        let reg = test_instance();
+        reg.record_sso_event("token_issued", "ok");
+        reg.record_sso_event("token_issued", "ok");
+        reg.record_sso_event("token_issued", "invalid_grant");
+        reg.record_sso_event("token_refreshed", "ok");
+        reg.record_sso_event("authorize", "login");
+        reg.record_sso_event("token_revoked", "ok");
+        reg.record_sso_event("logout", "ok");
+        let text = reg.render_prometheus();
+        assert!(text.contains("yebot_sso_events_total{event=\"token_issued\",outcome=\"ok\"} 2"));
+        assert!(text.contains(
+            "yebot_sso_events_total{event=\"token_issued\",outcome=\"invalid_grant\"} 1"
+        ));
+        assert!(
+            text.contains("yebot_sso_events_total{event=\"token_refreshed\",outcome=\"ok\"} 1")
+        );
+        assert!(text.contains("event=\"authorize\""));
+        assert!(text.contains("event=\"token_revoked\""));
+        assert!(text.contains("event=\"logout\""));
     }
 
     #[test]

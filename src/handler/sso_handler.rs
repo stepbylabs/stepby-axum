@@ -166,20 +166,39 @@ pub async fn authorize(
     Ok(match outcome {
         AuthorizeOutcome::NeedLogin => {
             // 引导至前端登录页，登录后按 redirect 回到 authorize（相对路径，同源）
+            // v5-D7：授权端点事件计数
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event("authorize", "login");
             redirect_found(&login_target)
         }
         AuthorizeOutcome::NeedConsent(echo) => {
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event("authorize", "consent");
             let target = format!("/sso-consent?{}", encode_consent_query(&echo));
             redirect_found(&target)
         }
-        AuthorizeOutcome::Redirect(url) => redirect_found(&url),
-        AuthorizeOutcome::HardError(err) => oidc_error_response(
-            StatusCode::BAD_REQUEST,
-            &OidcError {
-                code: "invalid_request",
-                description: err.message,
-            },
-        ),
+        AuthorizeOutcome::Redirect(url) => {
+            // v5-D7：带 code 的成功签发与带 error 的拒绝（prompt=none/max_age 等）分开计
+            let outcome = if url.contains("error=") {
+                "rejected"
+            } else {
+                "ok"
+            };
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event("authorize", outcome);
+            redirect_found(&url)
+        }
+        AuthorizeOutcome::HardError(err) => {
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event("authorize", "invalid_request");
+            oidc_error_response(
+                StatusCode::BAD_REQUEST,
+                &OidcError {
+                    code: "invalid_request",
+                    description: err.message,
+                },
+            )
+        }
     })
 }
 
@@ -215,6 +234,12 @@ pub async fn token(
     // v5-E2：SSO 令牌签发事件写入登录日志（best-effort：spawn 异步写，不阻塞响应、
     // 失败不影响 token 发放）。审计链与本地登录对齐：登录日志可按 user_name 溯源
     // "该用户在何时为哪个 RP 兑换过令牌"。
+    // v5-D7：协议事件指标（event 按 grant_type；outcome=ok 或错误码）
+    let m_event = if params.grant_type == "refresh_token" {
+        "token_refreshed"
+    } else {
+        "token_issued"
+    };
     match state
         .sso_service
         .token(
@@ -226,6 +251,8 @@ pub async fn token(
         .await
     {
         Ok(result) => {
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event(m_event, "ok");
             let ip = crate::utils::ip::extract_client_ip(
                 &headers,
                 peer.ip(),
@@ -260,6 +287,9 @@ pub async fn token(
         // RFC 6749 §5.2：invalid_client → 401 + WWW-Authenticate: Basic（v2-C2）；
         // server_error（DB 故障等）→ 500；其余协议错误保持 400
         Err(e) => {
+            // v5-D7：失败也计数（outcome=OIDC 错误码）
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event(m_event, e.code);
             let status = if e.code == "invalid_client" {
                 StatusCode::UNAUTHORIZED
             } else if e.code == "server_error" {
@@ -314,8 +344,15 @@ pub async fn revoke(
         .await
     {
         // RFC 7009 §2.2：恒 200 空体（含 token 无效/已吊销），防枚举
-        Ok(()) => with_no_store((StatusCode::OK, Json(serde_json::json!({}))).into_response()),
+        Ok(()) => {
+            // v5-D7：吊销事件计数（无效 token 也计为 ok——防枚举语义，不区分）
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event("token_revoked", "ok");
+            with_no_store((StatusCode::OK, Json(serde_json::json!({}))).into_response())
+        }
         Err(e) => {
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_sso_event("token_revoked", e.code);
             let status = if e.code == "invalid_client" {
                 StatusCode::UNAUTHORIZED
             } else if e.code == "server_error" {
@@ -405,6 +442,8 @@ pub async fn logout(
             &state.config.jwt,
         )
         .await?;
+    // v5-D7：登出事件计数
+    crate::observability::metrics::MetricsRegistry::global().record_sso_event("logout", "ok");
     Ok(match redirect {
         Some(ru) => redirect_found(&ru),
         None => (
