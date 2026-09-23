@@ -784,6 +784,17 @@ async fn test_sso_v4_opaque_token_isolation_and_claims() {
         id_claims["at_hash"].as_str().is_some_and(|s| !s.is_empty()),
         "id_token 应携带 at_hash（v4 C7），实际: {id_claims}"
     );
+    // ⑤ v5-E5：认证强度声明（admin 未启用 TOTP → acr="pwd"、amr=["pwd"]）
+    assert_eq!(
+        id_claims["acr"].as_str(),
+        Some("pwd"),
+        "未启用 TOTP 用户 acr 应为 pwd，实际: {id_claims}"
+    );
+    assert_eq!(
+        id_claims["amr"][0].as_str(),
+        Some("pwd"),
+        "amr 应含 pwd，实际: {id_claims}"
+    );
 
     // ⑤ email 数据链路：scope 含 email → userinfo 返回 email + email_verified:false
     let (status, _, body) = raw_get(
