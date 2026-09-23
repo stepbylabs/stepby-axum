@@ -225,10 +225,12 @@ pub struct SysWebHookService {
     #[allow(dead_code)]
     http_client_override: Option<Arc<reqwest::Client>>,
     db: DatabaseConnection,
+    /// v5-E6：secret 信封加密主密钥（CONFIG_ENC_KEY；空=迁移期明文）
+    enc_key: String,
 }
 
 impl SysWebHookService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, enc_key: String) -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
@@ -241,7 +243,28 @@ impl SysWebHookService {
             http,
             http_client_override: None,
             db,
+            enc_key,
         }
+    }
+
+    /// v5-E6：secret 写入口（幂等 seal：key 未配置→明文；已加密→原样；失败→Err）
+    fn seal_secret(&self, secret: Option<String>) -> Result<Option<String>, ServiceError> {
+        match secret {
+            Some(s) if !s.is_empty() => {
+                crate::utils::crypto::seal_sensitive_value(&s, &self.enc_key)
+                    .map(Some)
+                    .map_err(|e| ServiceError::internal(&format!("web_hook secret 加密失败: {e}")))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// v5-E6：secret 读出口（unseal：明文兼容，解密失败原样返回）
+    fn unseal_secret(&self, secret: &Option<String>) -> Option<String> {
+        secret
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| crate::utils::crypto::unseal_sensitive_value(s, &self.enc_key))
     }
 
     /// 对目标 URL 执行 SSRF 双层校验（静态 + 动态 DNS），返回规范化 URL
@@ -337,10 +360,12 @@ impl SysWebHookService {
             hook_name: Set(dto.hook_name),
             event_types: Set(event_types),
             target_url: Set(dto.target_url.trim().to_string()),
-            secret: Set(dto
-                .secret
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())),
+            // v5-E6：secret 信封加密（幂等，防双重加密）
+            secret: Set(self.seal_secret(
+                dto.secret
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            )?),
             content_type: Set(content_type),
             timeout_secs: Set(timeout_secs),
             status: Set(status),
@@ -385,10 +410,12 @@ impl SysWebHookService {
         am.hook_name = Set(dto.hook_name);
         am.event_types = Set(event_types);
         am.target_url = Set(dto.target_url.trim().to_string());
-        am.secret = Set(dto
-            .secret
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()));
+        // v5-E6：secret 非空才覆盖（留空保持不变）；信封加密（幂等）
+        am.secret = Set(self.seal_secret(
+            dto.secret
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        )?);
         am.content_type = Set(content_type);
         am.timeout_secs = Set(timeout_secs);
         am.status = Set(status);
@@ -482,7 +509,8 @@ impl SysWebHookService {
             .header("content-type", content_type_header(&hook.content_type))
             .header("user-agent", "yebot-webhook/1.0")
             .header("X-Webhook-Event", event_type);
-        let signature = sign_payload(hook.secret.as_deref().unwrap_or(""), &body);
+        // v5-E6：secret 为信封加密存储，签名前解密
+        let signature = sign_payload(&self.unseal_secret(&hook.secret).unwrap_or_default(), &body);
         if !signature.is_empty() {
             builder = builder.header("X-Webhook-Signature", format!("sha256={}", signature));
         }
@@ -572,6 +600,7 @@ impl SysWebHookService {
         let log_repo = self.log_repo.clone();
         let http = Arc::new(self.http.clone());
         let db = self.db.clone();
+        let enc_key = self.enc_key.clone();
         let event_type = event_type.to_string();
 
         tokio::spawn(async move {
@@ -597,9 +626,10 @@ impl SysWebHookService {
                 let db2 = db.clone();
                 let event_type = event_type.clone();
                 let payload = payload.clone();
+                let enc_key = enc_key.clone();
                 tokio::spawn(async move {
                     // 新建一个与 Service 等价的投递器（复用同一 http 客户端与 DB）
-                    let svc = SysWebHookService::with_shared(db2, hc);
+                    let svc = SysWebHookService::with_shared(db2, hc, enc_key);
                     if let Err(e) = svc.deliver(&hook, &event_type, &payload).await {
                         tracing::warn!(
                             hook_id = hook.id,
@@ -615,13 +645,14 @@ impl SysWebHookService {
     }
 
     /// 用共享 http 客户端构造投递器（供事件分发内部使用）
-    fn with_shared(db: DatabaseConnection, http: Arc<reqwest::Client>) -> Self {
+    fn with_shared(db: DatabaseConnection, http: Arc<reqwest::Client>, enc_key: String) -> Self {
         Self {
             hook_repo: SysWebHookRepository::new(db.clone()),
             log_repo: SysWebHookLogRepository::new(db.clone()),
             http: (*http).clone(),
             http_client_override: None,
             db,
+            enc_key,
         }
     }
 
@@ -696,9 +727,10 @@ impl SysWebHookService {
         let mut ok_count = 0usize;
         for log in failed {
             // 依据记录快照构造虚拟 hook 重新投递（hook 可能已删除）
+            // v5-E6：从库里取出的 secret 为密文 → unseal 后交给 deliver 签名
             let (target_url, secret) =
                 match self.hook_repo.find_by_id(log.hook_id.unwrap_or(-1)).await {
-                    Ok(Some(h)) => (h.target_url.clone(), h.secret.clone()),
+                    Ok(Some(h)) => (h.target_url.clone(), self.unseal_secret(&h.secret)),
                     _ => (log.target_url.clone(), None),
                 };
             let payload: serde_json::Value = log
@@ -884,7 +916,7 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let svc = SysWebHookService::new(db.clone());
+        let svc = SysWebHookService::new(db.clone(), String::new());
         let hook = SysWebHookModel {
             id: 1,
             hook_name: "本地测试".to_string(),
@@ -930,7 +962,7 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let svc = SysWebHookService::new(db.clone());
+        let svc = SysWebHookService::new(db.clone(), String::new());
         let hook = SysWebHookModel {
             id: 2,
             hook_name: "不可达".to_string(),

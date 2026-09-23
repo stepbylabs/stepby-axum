@@ -84,6 +84,36 @@ fn derive_aes_key_v2(master_key: &str, salt: &[u8]) -> [u8; 32] {
 ///
 /// # 返回
 /// 加密后的字符串（带 `enc2:` 前缀），失败返回 anyhow::Error
+/// v5-E6：敏感列写入口（幂等）。
+///
+/// - `CONFIG_ENC_KEY` 未配置 → 原样明文（迁移期 fail-open，与 id_token_secret 策略一致）
+/// - 值已带 `enc2:`/`enc:` 前缀 → 原样返回（**防双重加密**：出参明文回显→前端回传→重复 seal）
+/// - 其余 → 信封加密（失败返回 Err，调用方 fail-closed 拒绝写入）
+pub fn seal_sensitive_value(plaintext: &str, master_key: &str) -> anyhow::Result<String> {
+    if master_key.is_empty() || plaintext.is_empty() {
+        return Ok(plaintext.to_string());
+    }
+    if plaintext.starts_with(ENCRYPTED_PREFIX) || plaintext.starts_with(ENCRYPTED_PREFIX_V2) {
+        return Ok(plaintext.to_string());
+    }
+    encrypt_config_value(plaintext, master_key)
+}
+
+/// v5-E6：敏感列读出口。解密失败（密钥不匹配/数据损坏）时**原样返回存储值**并记日志——
+/// 读路径宽松化：密文回显给授权管理员优于整列表 500；明文旧数据（回填前）原样通过。
+pub fn unseal_sensitive_value(stored: &str, master_key: &str) -> String {
+    if stored.is_empty() {
+        return String::new();
+    }
+    decrypt_config_value(stored, master_key).unwrap_or_else(|e| {
+        tracing::error!(
+            "敏感值解密失败（原样返回存储值，请检查启动回填与 CONFIG_ENC_KEY）: {}",
+            e
+        );
+        stored.to_string()
+    })
+}
+
 pub fn encrypt_config_value(plaintext: &str, master_key: &str) -> anyhow::Result<String> {
     // 生成随机盐与 nonce
     let mut salt = [0u8; SALT_LEN];

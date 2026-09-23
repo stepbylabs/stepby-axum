@@ -188,15 +188,51 @@ pub async fn token(
             params.client_secret = Some(csec);
         }
     }
+    // v5-E2：SSO 令牌签发事件写入登录日志（best-effort：spawn 异步写，不阻塞响应、
+    // 失败不影响 token 发放）。审计链与本地登录对齐：登录日志可按 user_name 溯源
+    // "该用户在何时为哪个 RP 兑换过令牌"。
     match state
         .sso_service
-        .token(params, &mut state.redis.clone(), &state.config.sso, &base)
+        .token(
+            params.clone(),
+            &mut state.redis.clone(),
+            &state.config.sso,
+            &base,
+        )
         .await
     {
-        // RFC 6749 §5.1：token 响应必须携带 Cache-Control: no-store
-        Ok(result) => with_no_store(
-            (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
-        ),
+        Ok(result) => {
+            let ip = crate::utils::ip::extract_client_ip(
+                &headers,
+                peer.ip(),
+                &state.config.server.trusted_proxies,
+            );
+            let db = state.db.clone();
+            let user_name = result.user_name.clone();
+            let cid = params.client_id.clone().unwrap_or_default();
+            tokio::spawn(async move {
+                let now = crate::common::datetime::now_naive();
+                use sea_orm::{ActiveModelTrait, Set};
+                let am = crate::entity::sys_logininfor::ActiveModel {
+                    user_name: Set(Some(user_name)),
+                    ipaddr: Set(Some(ip)),
+                    login_location: Set(None),
+                    browser: Set(Some("SSO".to_string())),
+                    os: Set(Some("-".to_string())),
+                    status: Set(Some("0".to_string())),
+                    msg: Set(Some(format!("SSO 令牌签发: {cid}"))),
+                    login_time: Set(Some(now)),
+                    ..Default::default()
+                };
+                if let Err(e) = am.insert(&db).await {
+                    tracing::warn!("SSO 令牌签发日志写入失败（best-effort）: {}", e);
+                }
+            });
+            // RFC 6749 §5.1：token 响应必须携带 Cache-Control: no-store
+            with_no_store(
+                (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
+            )
+        }
         // RFC 6749 §5.2：invalid_client → 401 + WWW-Authenticate: Basic（v2-C2）；
         // server_error（DB 故障等）→ 500；其余协议错误保持 400
         Err(e) => {

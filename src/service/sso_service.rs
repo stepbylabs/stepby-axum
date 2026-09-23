@@ -262,6 +262,9 @@ pub struct TokenResult {
     pub expires_in: u64,
     pub scope: String,
     pub id_token: String,
+    /// v5-E2：授权用户名（审计用，登录日志记录"SSO 令牌签发"事件的主体；
+    /// 多一个响应字段对标准 RP 客户端无害）
+    pub user_name: String,
 }
 
 /// OAuth/OIDC 错误（bare JSON：`{"error","error_description"}`），非信封、非 ServiceError
@@ -918,6 +921,7 @@ impl SsoService {
             expires_in: at_ttl,
             scope: binding.scope.join(" "),
             id_token,
+            user_name: binding.username.clone(),
         })
     }
 
