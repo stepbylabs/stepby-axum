@@ -413,7 +413,8 @@ impl SysOperLogService {
             .into_iter()
             .map(|m| OperLogAnomaly {
                 oper_id: m.oper_id,
-                title: m.title.unwrap_or_default(),
+                // 与 stats_top_modules / xlsx 导出一致：module.* 键翻成中文，避免报告露裸键
+                title: anomaly_display_title(m.title.as_deref()),
                 oper_name: m.oper_name.unwrap_or_default(),
                 oper_url: m.oper_url.unwrap_or_default(),
                 oper_ip: m.oper_ip.unwrap_or_default(),
@@ -681,9 +682,27 @@ pub(crate) fn eval_fail_rate(total: i64, fail: i64, threshold: i64) -> (f64, boo
     (rounded, raw >= threshold as f64)
 }
 
+/// 合规报告 anomalies 的模块标题展示：T-11 新数据存 i18n key（module.*）须翻译，
+/// 历史中文原文经 `module_title` 回退原样返回，报告/PDF 永不露裸键。
+fn anomaly_display_title(raw: Option<&str>) -> String {
+    crate::common::i18n::module_title(raw.unwrap_or_default()).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::eval_fail_rate;
+    use super::{anomaly_display_title, eval_fail_rate};
+
+    #[test]
+    fn anomaly_display_title_translates_module_key() {
+        // 轮2回归：module.* 键必须翻成中文，合规报告 PDF 不露裸键
+        assert_eq!(anomaly_display_title(Some("module.user")), "用户管理");
+        assert_eq!(anomaly_display_title(None), "");
+    }
+
+    #[test]
+    fn anomaly_display_title_keeps_legacy_chinese_verbatim() {
+        assert_eq!(anomaly_display_title(Some("用户管理")), "用户管理");
+    }
 
     #[test]
     fn eval_fail_rate_zero_total_is_zero_no_alarm() {
