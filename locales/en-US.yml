@@ -1,4 +1,4 @@
-﻿# en-US messages
+# en-US messages
 # Mirrors zh-CN.yml keys. Fallback chain: en-US -> zh-CN.
 
 error:
@@ -104,6 +104,7 @@ error:
     client_id_reserved: client_id is a reserved identifier
     secret_encrypt_failed: Failed to encrypt client secret, check the server master key config
     access_denied: You denied the authorization request
+    logo_uri_invalid: logo_uri must be an http(s) absolute URL of at most 500 characters
   file:
     delete_failed: Failed to delete file
     delete_task_failed: Delete task failed

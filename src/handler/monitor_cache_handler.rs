@@ -35,7 +35,37 @@ const ALLOWED_CACHE_PREFIXES: &[&str] = &[
     "login_ip:",
     "blacklist:",
     "online:",
+    // v3 §5.1：仅暴露不透明 AT 绑定（运维可见/可清理）；
+    // 不加 sso:code:——授权码 TTL 仅 60s 且含 PKCE challenge，无运维价值且有泄漏面
+    "sso:at:",
+    "sso:user_at:",
 ];
+
+/// `sso:at:` 绑定 value（AccessBinding JSON）中的个人信息字段——
+/// 缓存监控页展示时一律脱敏（v4 F4-1：username/email/nick_name 全脱敏，
+/// 保留 client_id/user_id/scope/iat 供排障）
+const SSO_BINDING_SENSITIVE_FIELDS: &[&str] = &["username", "email", "nick_name"];
+
+/// 对 `sso:at:` 类缓存值做个人信息脱敏：JSON 中命中敏感字段替换为固定掩码；
+/// 非 JSON / 无敏感字段时原样返回
+fn mask_sso_binding_value(value: &str) -> String {
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(value) else {
+        return value.to_string();
+    };
+    if let Some(obj) = json.as_object_mut() {
+        let mut masked = false;
+        for field in SSO_BINDING_SENSITIVE_FIELDS {
+            if obj.contains_key(*field) {
+                obj.insert(field.to_string(), serde_json::json!("***"));
+                masked = true;
+            }
+        }
+        if !masked {
+            return value.to_string();
+        }
+    }
+    serde_json::to_string(&json).unwrap_or_else(|_| value.to_string())
+}
 
 /// 校验缓存前缀是否在白名单内，防止通配符滥用或误删关键键
 fn validate_cache_prefix(prefix: &str) -> Result<(), AppError> {
@@ -378,7 +408,7 @@ pub async fn get_value(
         });
 
     let cache_value = if key_type == "string" {
-        redis::cmd("GET")
+        let raw = redis::cmd("GET")
             .arg(&cache_key)
             .query_async::<Option<String>>(&mut redis)
             .await
@@ -386,7 +416,13 @@ pub async fn get_value(
                 tracing::error!("Redis GET 查询失败: {}", e);
                 AppError::internal(&crate::tr!("error.cache.value_query_failed"))
             })?
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // SSO 绑定值含 username/email/nick_name，展示前脱敏（v4 F4-1）
+        if cache_key.starts_with("sso:") {
+            mask_sso_binding_value(&raw)
+        } else {
+            raw
+        }
     } else {
         crate::tr!("error.cache.type_not_previewable", r#type = key_type).to_string()
     };
@@ -682,5 +718,39 @@ mod tests {
         assert!(validate_cache_prefix("user:token:1").is_err());
         // 空串既不在白名单前缀内，也会被拒
         assert!(validate_cache_prefix("").is_err());
+    }
+
+    #[test]
+    fn sso_at_prefix_is_whitelisted() {
+        assert!(validate_cache_prefix("sso:at:abc123").is_ok());
+        assert!(validate_cache_prefix("sso:user_at:1").is_ok());
+        // sso:code: 刻意不入白名单（TTL 短且含 PKCE challenge）
+        assert!(validate_cache_prefix("sso:code:xyz").is_err());
+        assert!(validate_cache_prefix("sso:sess:1").is_err());
+    }
+
+    #[test]
+    fn mask_sso_binding_value_masks_pii_fields() {
+        let binding = r#"{"client_id":"app_x","user_id":1,"username":"admin","email":"a@b.c","nick_name":"管理员","scope":["openid"],"iat":1700000000}"#;
+        let masked = mask_sso_binding_value(binding);
+        let v: serde_json::Value = serde_json::from_str(&masked).unwrap();
+        assert_eq!(v["username"], "***");
+        assert_eq!(v["email"], "***");
+        assert_eq!(v["nick_name"], "***");
+        // 排障字段保留
+        assert_eq!(v["client_id"], "app_x");
+        assert_eq!(v["user_id"], 1);
+        assert_eq!(v["scope"][0], "openid");
+    }
+
+    #[test]
+    fn mask_sso_binding_value_passthrough_non_binding() {
+        // 非 JSON 原样返回
+        assert_eq!(mask_sso_binding_value("plain"), "plain");
+        // JSON 但无敏感字段原样返回
+        assert_eq!(
+            mask_sso_binding_value(r#"{"client_id":"a","scope":[]}"#),
+            r#"{"client_id":"a","scope":[]}"#
+        );
     }
 }

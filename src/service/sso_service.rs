@@ -236,15 +236,20 @@ pub struct ConsentDto {
 
 /// /sso/token 请求参数 —— **OAuth2/OIDC 协议面**（外部 RP 用标准客户端库调用），
 /// 参数名由 RFC 6749 强制固定为 snake_case，不参与 camelCase / ts-rs 转换。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct TokenParams {
     pub grant_type: String,
     #[serde(default)]
     pub code: Option<String>,
     #[serde(default)]
     pub redirect_uri: Option<String>,
-    pub client_id: String,
-    pub client_secret: String,
+    /// client_id / client_secret 支持两种认证方式（RFC 6749 §2.3）：
+    /// `client_secret_post`（表单字段）与 `client_secret_basic`（Authorization: Basic 头，
+    /// 由 handler 解析合并进本结构，v3 P1'-5）。二者均可能为 None，由 token() 统一校验。
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub client_secret: Option<String>,
     #[serde(default)]
     pub code_verifier: Option<String>,
 }
@@ -748,10 +753,19 @@ impl SsoService {
                 OidcError::new("invalid_request", crate::tr!("error.sso.code_invalid"))
             })?;
 
-        // 客户端凭据校验
+        // 客户端凭据校验（client_id/secret 可来自表单或 Basic 头，handler 已合并；
+        // 缺失按 RFC 6749 §5.2 返回 invalid_client，handler 据此映射 401 + WWW-Authenticate）
+        let client_id = params
+            .client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                OidcError::new("invalid_client", crate::tr!("error.sso.client_not_found"))
+            })?;
         let client = self
             .client_repo
-            .find_by_client_id(&params.client_id)
+            .find_by_client_id(client_id)
             .await
             .map_err(|_| {
                 OidcError::new("invalid_grant", crate::tr!("error.sso.client_auth_failed"))
@@ -765,7 +779,14 @@ impl SsoService {
                 crate::tr!("error.sso.client_disabled"),
             ));
         }
-        let expected_hash = crate::utils::crypto::token_hash(&params.client_secret);
+        let client_secret = params
+            .client_secret
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                OidcError::new("invalid_client", crate::tr!("error.sso.client_auth_failed"))
+            })?;
+        let expected_hash = crate::utils::crypto::token_hash(client_secret);
         if !secret_eq(&expected_hash, &client.client_secret_hash) {
             return Err(OidcError::new(
                 "invalid_client",
@@ -786,7 +807,7 @@ impl SsoService {
         // v4 §7：authorize 携带了 redirect_uri 时，token 请求**必须**携带完全相同的值
         // （RFC 6749 §10.6），不留"未提供即通过"的口子——否则多回调地址的 RP 在 token
         // 阶段失去 redirect_uri 绑定防线。
-        if binding.client_id != params.client_id {
+        if binding.client_id != client_id {
             return Err(OidcError::new(
                 "invalid_grant",
                 crate::tr!("error.sso.code_invalid"),
@@ -1194,6 +1215,8 @@ impl SsoService {
         let redirect_uris = validate_redirect_uris(&dto.redirect_uris)?;
         let scopes = validate_scopes(&dto.scopes)?;
         let grant_types = normalize_grant_types(dto.grant_types.as_deref());
+        // v3 P1'-3：logo_uri 同意页渲染前必须服务端校验
+        let logo_uri = validate_logo_uri(&dto.logo_uri)?;
 
         // client_id：留空自动生成，否则校验格式 + 唯一
         let client_id = match dto.client_id.as_deref().map(str::trim) {
@@ -1253,7 +1276,7 @@ impl SsoService {
             client_secret_hash: Set(client_secret_hash),
             id_token_secret: Set(id_token_secret_stored),
             client_name: Set(dto.client_name.trim().to_string()),
-            logo_uri: Set(dto.logo_uri.unwrap_or_default().trim().to_string()),
+            logo_uri: Set(logo_uri),
             redirect_uris: Set(to_json_array(&redirect_uris)),
             scopes: Set(to_json_array(&scopes)),
             grant_types: Set(to_json_array(&grant_types)),
@@ -1289,6 +1312,8 @@ impl SsoService {
         let redirect_uris = validate_redirect_uris(&dto.redirect_uris)?;
         let scopes = validate_scopes(&dto.scopes)?;
         let grant_types = normalize_grant_types(dto.grant_types.as_deref());
+        // v3 P1'-3：logo_uri 同意页渲染前必须服务端校验
+        let logo_uri = validate_logo_uri(&dto.logo_uri)?;
 
         let m = self
             .client_repo
@@ -1305,7 +1330,7 @@ impl SsoService {
         // client_secret_hash / id_token_secret / create_* 保持 Unchanged，杜绝密钥篡改。
         let mut am: ClientActiveModel = m.into();
         am.client_name = Set(dto.client_name.trim().to_string());
-        am.logo_uri = Set(dto.logo_uri.unwrap_or_default().trim().to_string());
+        am.logo_uri = Set(logo_uri);
         am.redirect_uris = Set(to_json_array(&redirect_uris));
         am.scopes = Set(to_json_array(&scopes));
         am.grant_types = Set(to_json_array(&grant_types));
@@ -1745,6 +1770,37 @@ fn validate_client_name(name: &str) -> Result<(), ServiceError> {
         )));
     }
     Ok(())
+}
+
+/// v3 P1'-3：`logo_uri` 服务端校验——同意页会直接渲染该 URL，不校验即允许管理员填入
+/// 任意第三方地址（追踪像素泄漏用户 IP/行为）或超长字符串（DB 列宽溢出）。
+/// 规则：空值合法（无 logo）；非空必须为 http(s) 绝对地址、host 非空、总长 ≤ 500。
+fn validate_logo_uri(
+    logo_uri: &Option<String>,
+) -> Result<String, ServiceError> {
+    let Some(raw) = logo_uri.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(String::new());
+    };
+    if raw.chars().count() > 500 {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.sso.logo_uri_invalid"
+        )));
+    }
+    if !(raw.starts_with("http://") || raw.starts_with("https://")) {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.sso.logo_uri_invalid"
+        )));
+    }
+    let host_ok = url::Url::parse(raw)
+        .ok()
+        .map(|u| !u.host_str().unwrap_or_default().is_empty())
+        .unwrap_or(false);
+    if !host_ok {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.sso.logo_uri_invalid"
+        )));
+    }
+    Ok(raw.to_string())
 }
 
 fn normalize_grant_types(input: Option<&[String]>) -> Vec<String> {

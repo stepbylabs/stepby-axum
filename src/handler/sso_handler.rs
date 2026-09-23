@@ -98,7 +98,7 @@ pub async fn discovery(
             &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
         );
     }
-    let base = base_url(&headers, peer);
+    let base = base_url(&headers, peer, &state.config.server.trusted_proxies);
     let issuer = state.sso_service.resolve_issuer(&state.config.sso, &base);
     let doc = state.sso_service.discovery(&issuer, &state.config.sso);
     with_no_store((StatusCode::OK, Json(doc)).into_response())
@@ -171,25 +171,63 @@ pub async fn authorize(
     })
 }
 
-/// POST /sso/token（application/x-www-form-urlencoded）
+/// POST /sso/token（application/x-www-form-urlencoded，另支持 Authorization: Basic 客户端认证）
 pub async fn token(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    form: axum::Form<TokenParams>,
+    // Form rejection（缺字段/编码错）统一为 OIDC 标准错误体，而非 axum 默认纯文本（v3 P1'-5）
+    form: Result<axum::Form<TokenParams>, axum::extract::rejection::FormRejection>,
 ) -> Response {
     // 与 discovery 端点同源推导 issuer：保证 id_token 的 iss 恒等于发现文档 advertised issuer
-    let base = base_url(&headers, peer);
+    let base = base_url(&headers, peer, &state.config.server.trusted_proxies);
+    let mut params = match form {
+        Ok(f) => f.0,
+        Err(_) => {
+            return oidc_error_response(
+                StatusCode::BAD_REQUEST,
+                &OidcError::new("invalid_request", "malformed token request".to_string()),
+            );
+        }
+    };
+    // v3 P1'-5：client_secret_basic（RFC 6749 §2.3.1）——主流客户端库默认 Basic 认证；
+    // Basic 与表单同时出现时表单字段优先（规范未定义，取保守合并：缺哪个补哪个）
+    if let Some((cid, csec)) = parse_basic_auth(&headers) {
+        if params.client_id.is_none() {
+            params.client_id = Some(cid);
+        }
+        if params.client_secret.is_none() {
+            params.client_secret = Some(csec);
+        }
+    }
     match state
         .sso_service
-        .token(form.0, &mut state.redis.clone(), &state.config.sso, &base)
+        .token(params, &mut state.redis.clone(), &state.config.sso, &base)
         .await
     {
         // RFC 6749 §5.1：token 响应必须携带 Cache-Control: no-store
         Ok(result) => with_no_store(
             (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
         ),
-        Err(e) => oidc_error_response(StatusCode::BAD_REQUEST, &e),
+        // RFC 6749 §5.2：invalid_client → 401 + WWW-Authenticate: Basic（v2-C2）；
+        // 其余协议错误保持 400
+        Err(e) => {
+            let status = if e.code == "invalid_client" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            let mut resp = oidc_error_response(status, &e);
+            if status == StatusCode::UNAUTHORIZED {
+                resp.headers_mut().insert(
+                    axum::http::header::WWW_AUTHENTICATE,
+                    axum::http::HeaderValue::from_static(
+                        "Basic realm=\"yebot-sso\", charset=\"UTF-8\"",
+                    ),
+                );
+            }
+            resp
+        }
     }
 }
 
@@ -461,20 +499,76 @@ fn oidc_error_response(status: StatusCode, err: &OidcError) -> Response {
         .into_response()
 }
 
-/// 计算 base URL（scheme://host），优先 X-Forwarded-Proto + Host
-fn base_url(headers: &HeaderMap, peer: SocketAddr) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "http".to_string());
+/// 计算 base URL（scheme://host）
+///
+/// v3 P1'-2：`X-Forwarded-Proto` 仅在 TCP 对端位于 `server.trusted_proxies` 白名单时才采信
+/// （复用 utils::ip 的可信代理范式）；不可信来源伪造该头会把 issuer 误标为 https。
+/// Host 头为 HTTP 语义必需（HTTP/1.1），直连与反代场景均以其为准。
+fn base_url(headers: &HeaderMap, peer: SocketAddr, trusted_proxies: &[String]) -> String {
+    let scheme = if crate::utils::ip::is_trusted_proxy(&peer.ip(), trusted_proxies) {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("http")
+            .to_string()
+    } else {
+        "http".to_string()
+    };
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| peer.to_string());
     format!("{}://{}", scheme, host)
+}
+
+/// 解析 `Authorization: Basic` 头为 (client_id, client_secret)（RFC 6749 §2.3.1）。
+///
+/// Basic 凭据 = base64(`urlencoded(client_id):urlencoded(client_secret)`)，需对两段做
+/// percent-decode（含 `+`→空格，form-urlencoded 语义）。解析失败返回 None（按表单凭据处理）。
+fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
+    use base64::Engine as _;
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let encoded = raw.strip_prefix("Basic ").or(raw.strip_prefix("basic "))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    let joined = String::from_utf8(decoded).ok()?;
+    let (cid, csec) = joined.split_once(':')?;
+    Some((form_urldecode(cid)?, form_urldecode(csec)?))
+}
+
+/// form-urlencoded 解码：`+` → 空格，`%XX` → 字节；非法转义返回 None（fail-closed）
+fn form_urldecode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                let hex = bytes.get(i + 1..i + 3)?;
+                let hi = (hex[0] as char).to_digit(16)?;
+                let lo = (hex[1] as char).to_digit(16)?;
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// 从 Cookie 头解析指定 cookie 值
@@ -579,6 +673,69 @@ fn encode_consent_query(e: &crate::service::sso_service::ConsentEcho) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+
+    /// Basic 认证凭据的 form-urlencoded 解码（RFC 6749 §2.3.1）：
+    /// `+`→空格、`%XX`→字节、非法转义 fail-closed 返回 None
+    #[test]
+    fn form_urldecode_decodes_percent_and_plus() {
+        assert_eq!(form_urldecode("app_x"), Some("app_x".to_string()));
+        assert_eq!(form_urldecode("a+b"), Some("a b".to_string()));
+        assert_eq!(form_urldecode("%2Fx"), Some("/x".to_string()));
+        assert_eq!(form_urldecode("a%20b"), Some("a b".to_string()));
+        // 非法：截断的 %XX
+        assert_eq!(form_urldecode("a%2"), None);
+        // 非法：非 hex 转义
+        assert_eq!(form_urldecode("%zz"), None);
+    }
+
+    /// parse_basic_auth：标准 base64 头解析 + 解码失败返回 None
+    #[test]
+    fn parse_basic_auth_roundtrip() {
+        let mut headers = HeaderMap::new();
+        let raw = base64::engine::general_purpose::STANDARD.encode(b"app_x:secret-1");
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Basic {raw}")).unwrap(),
+        );
+        assert_eq!(
+            parse_basic_auth(&headers),
+            Some(("app_x".to_string(), "secret-1".to_string()))
+        );
+        // 非 Basic 头 → None
+        let mut headers2 = HeaderMap::new();
+        headers2.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer abc"),
+        );
+        assert_eq!(parse_basic_auth(&headers2), None);
+        // base64 无效 → None
+        let mut headers3 = HeaderMap::new();
+        headers3.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Basic !!!!"),
+        );
+        assert_eq!(parse_basic_auth(&headers3), None);
+    }
+
+    /// base_url：X-Forwarded-Proto 仅在可信代理时采信（v3 P1'-2）
+    #[test]
+    fn base_url_ignores_forwarded_proto_from_untrusted_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", axum::http::HeaderValue::from_static("sso.corp.com"));
+        headers.insert(
+            "x-forwarded-proto",
+            axum::http::HeaderValue::from_static("https"),
+        );
+        let peer: std::net::SocketAddr = "9.9.9.9:1234".parse().unwrap();
+        // 不可信对端伪造 proto → 回退 http
+        assert_eq!(base_url(&headers, peer, &[]), "http://sso.corp.com");
+        // 对端是可信代理 → 采信 https
+        assert_eq!(
+            base_url(&headers, peer, &["9.9.9.9".to_string()]),
+            "https://sso.corp.com"
+        );
+    }
 
     /// 同意页 echo 查询必须把空格编码为 %20（Vue Router 不把 `+` 还原为空格，否则 scope 解析出错）；
     /// 而真正的 `+` 字符应保留为 %2B（form 编码本就如此），替换只影响空格。
