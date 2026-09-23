@@ -170,6 +170,13 @@ pub const MODULE_TITLES: &[(&str, &str, &str)] = &[
     ("module.server", "服务器监控", "Server Monitor"),
     ("module.auditDashboard", "审计仪表盘", "Audit Dashboard"),
     ("module.webHook", "WebHook 订阅", "WebHook Subscription"),
+    ("module.flow", "审批中心", "Approval Center"),
+    (
+        "module.oauthClient",
+        "SSO 客户端管理",
+        "SSO Client Management",
+    ),
+    ("module.ssoConsent", "SSO 授权同意", "SSO Consent"),
     ("module.other", "其他", "Other"),
 ];
 
@@ -397,7 +404,9 @@ mod tests {
     #[tokio::test]
     async fn current_locale_falls_back_for_unknown_task_local() {
         // task-local 注入未知语言（fr-FR）→ 回退 zh-CN
-        let got = LOCALE.scope("fr-FR".to_string(), async { current_locale() }).await;
+        let got = LOCALE
+            .scope("fr-FR".to_string(), async { current_locale() })
+            .await;
         assert_eq!(got, "zh-CN");
     }
 
@@ -450,20 +459,23 @@ mod tests {
         assert_eq!(zh.range_lower_than(&1), "数值不能小于 1");
         assert_eq!(zh.range_greater_than(&100), "数值不能大于 100");
         assert_eq!(zh.email_invalid(InvalidEmail::Empty), "邮箱不能为空");
-        assert_eq!(
-            zh.email_invalid(InvalidEmail::MissingAt),
-            "邮箱缺少 @ 符号"
-        );
+        assert_eq!(zh.email_invalid(InvalidEmail::MissingAt), "邮箱缺少 @ 符号");
         assert_eq!(
             zh.email_invalid(InvalidEmail::UserLengthExceeded),
             "邮箱用户名部分过长"
         );
-        assert_eq!(zh.email_invalid(InvalidEmail::InvalidUser), "邮箱用户名含非法字符");
+        assert_eq!(
+            zh.email_invalid(InvalidEmail::InvalidUser),
+            "邮箱用户名含非法字符"
+        );
         assert_eq!(
             zh.email_invalid(InvalidEmail::DomainLengthExceeded),
             "邮箱域名过长"
         );
-        assert_eq!(zh.email_invalid(InvalidEmail::InvalidDomain), "邮箱域名含非法字符");
+        assert_eq!(
+            zh.email_invalid(InvalidEmail::InvalidDomain),
+            "邮箱域名含非法字符"
+        );
         assert_eq!(zh.url_invalid(InvalidUrl::EmptyHost), "URL 缺少主机名");
         assert_eq!(zh.url_invalid(InvalidUrl::InvalidPort), "URL 端口号无效");
         assert_eq!(

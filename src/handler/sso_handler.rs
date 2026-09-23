@@ -104,18 +104,6 @@ pub async fn discovery(
     with_no_store((StatusCode::OK, Json(doc)).into_response())
 }
 
-/// GET /sso/jwks（v4-R3：OIDC Discovery 要求 jwks_uri 可解析；HS256 对称签发无公钥集，
-/// 返回空 keys，升级 RS256 后填充真实公钥）
-pub async fn jwks(State(state): State<Arc<AppState>>) -> Response {
-    if !state.config.sso.enabled {
-        return oidc_error_response(
-            StatusCode::NOT_FOUND,
-            &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
-        );
-    }
-    (StatusCode::OK, Json(state.sso_service.jwks())).into_response()
-}
-
 /// GET /sso/authorize
 pub async fn authorize(
     State(state): State<Arc<AppState>>,

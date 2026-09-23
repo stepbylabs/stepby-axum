@@ -146,6 +146,6 @@ starttls = false
 enabled = false
 # OIDC issuer（发现文档 iss）；留空时回退为请求 base_url（仅限开发环境，v4-R3）
 issuer = ""
-code_ttl_secs = 300            # 授权码有效期（默认 300s）
+code_ttl_secs = 60             # 授权码有效期（默认 60s，短 TTL 一次性使用；v5 第八轮与代码默认对齐）
 id_token_ttl_secs = 3600       # ID Token 有效期（默认 1h）
 access_token_ttl_secs = 3600   # SSO 访问令牌（不透明）有效期（默认 1h，v4-P0-A）

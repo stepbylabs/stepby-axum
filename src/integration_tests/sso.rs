@@ -223,6 +223,11 @@ async fn test_sso_full_flow_and_replay() {
     assert_eq!(doc["response_types_supported"][0], "code");
     assert_eq!(doc["code_challenge_methods_supported"][0], "S256");
     assert_eq!(doc["id_token_signing_alg_values_supported"][0], "HS256");
+    // v5 第八轮：HS256 形态不发布 jwks_uri（占位空 JWKS 已移除，RS256/D2 恢复）
+    assert!(
+        doc.get("jwks_uri").is_none(),
+        "HS256 形态发现文档不得声明 jwks_uri，实际: {doc}"
+    );
     assert!(
         doc["token_endpoint"]
             .as_str()
