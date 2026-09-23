@@ -46,15 +46,19 @@ const ALLOWED_CACHE_PREFIXES: &[&str] = &[
 /// 保留 client_id/user_id/scope/iat 供排障）
 const SSO_BINDING_SENSITIVE_FIELDS: &[&str] = &["username", "email", "nick_name"];
 
-/// 对 `sso:at:` 类缓存值做个人信息脱敏：JSON 中命中敏感字段替换为固定掩码；
+/// `online:` 会话 value（OnlineSession JSON）中的个人信息字段——
+/// v5-S3：与 sso:at: 同标准脱敏（username/ip），其余字段供排障
+const ONLINE_SESSION_SENSITIVE_FIELDS: &[&str] = &["username", "ip"];
+
+/// 对 `sso:at:` / `online:` 类缓存值做个人信息脱敏：JSON 中命中敏感字段替换为固定掩码；
 /// 非 JSON / 无敏感字段时原样返回
-fn mask_sso_binding_value(value: &str) -> String {
+fn mask_sso_binding_value(value: &str, fields: &[&str]) -> String {
     let Ok(mut json) = serde_json::from_str::<serde_json::Value>(value) else {
         return value.to_string();
     };
     if let Some(obj) = json.as_object_mut() {
         let mut masked = false;
-        for field in SSO_BINDING_SENSITIVE_FIELDS {
+        for field in fields {
             if obj.contains_key(*field) {
                 obj.insert(field.to_string(), serde_json::json!("***"));
                 masked = true;
@@ -417,9 +421,12 @@ pub async fn get_value(
                 AppError::internal(&crate::tr!("error.cache.value_query_failed"))
             })?
             .unwrap_or_default();
-        // SSO 绑定值含 username/email/nick_name，展示前脱敏（v4 F4-1）
+        // SSO 绑定（username/email/nick_name，v4 F4-1）与在线会话（username/ip，v5-S3）
+        // 展示前按前缀选字段集脱敏
         if cache_key.starts_with("sso:") {
-            mask_sso_binding_value(&raw)
+            mask_sso_binding_value(&raw, SSO_BINDING_SENSITIVE_FIELDS)
+        } else if cache_key.starts_with("online:") {
+            mask_sso_binding_value(&raw, ONLINE_SESSION_SENSITIVE_FIELDS)
         } else {
             raw
         }
@@ -732,7 +739,7 @@ mod tests {
     #[test]
     fn mask_sso_binding_value_masks_pii_fields() {
         let binding = r#"{"client_id":"app_x","user_id":1,"username":"admin","email":"a@b.c","nick_name":"管理员","scope":["openid"],"iat":1700000000}"#;
-        let masked = mask_sso_binding_value(binding);
+        let masked = mask_sso_binding_value(binding, SSO_BINDING_SENSITIVE_FIELDS);
         let v: serde_json::Value = serde_json::from_str(&masked).unwrap();
         assert_eq!(v["username"], "***");
         assert_eq!(v["email"], "***");
@@ -744,12 +751,31 @@ mod tests {
     }
 
     #[test]
+    fn mask_online_session_value_masks_username_and_ip() {
+        // v5-S3：online: 会话 username/ip 脱敏，其余排障字段保留
+        let session = r#"{"user_id":2,"username":"tester","ip":"203.0.113.9","browser":"Chrome","os":"Win","jti":"sso-at-app_x","dept_name":"","exp":1790000000,"source":"sso"}"#;
+        let masked = mask_sso_binding_value(session, ONLINE_SESSION_SENSITIVE_FIELDS);
+        let v: serde_json::Value = serde_json::from_str(&masked).unwrap();
+        assert_eq!(v["username"], "***");
+        assert_eq!(v["ip"], "***");
+        assert_eq!(v["user_id"], 2);
+        assert_eq!(v["jti"], "sso-at-app_x");
+        assert_eq!(v["source"], "sso");
+    }
+
+    #[test]
     fn mask_sso_binding_value_passthrough_non_binding() {
         // 非 JSON 原样返回
-        assert_eq!(mask_sso_binding_value("plain"), "plain");
+        assert_eq!(
+            mask_sso_binding_value("plain", SSO_BINDING_SENSITIVE_FIELDS),
+            "plain"
+        );
         // JSON 但无敏感字段原样返回
         assert_eq!(
-            mask_sso_binding_value(r#"{"client_id":"a","scope":[]}"#),
+            mask_sso_binding_value(
+                r#"{"client_id":"a","scope":[]}"#,
+                SSO_BINDING_SENSITIVE_FIELDS
+            ),
             r#"{"client_id":"a","scope":[]}"#
         );
     }

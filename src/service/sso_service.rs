@@ -1359,9 +1359,13 @@ impl SsoService {
         for id in &ids {
             if let Some(m) = self.client_repo.find_by_pk(*id).await? {
                 // 2. 级联吊销该客户端全部已授权用户的 SSO 令牌
+                // v5 第九轮修正：原误用 revoke_user_sso_tokens（**全量**吊销该用户
+                // 所有客户端的 AT）——删客户端 A 不应波及用户对客户端 B 的有效会话；
+                // 改为按 client 粒度（仅删 client_id 匹配的绑定与 online）
                 let user_ids = self.consent_repo.user_ids_by_client(&m.client_id).await?;
                 for uid in user_ids {
-                    self.revoke_user_sso_tokens(redis, uid).await;
+                    self.revoke_user_client_tokens(redis, uid, &m.client_id)
+                        .await;
                 }
                 // 3. 清理同意记录（物理删，历史审计可走操作日志）
                 self.consent_repo.delete_by_client(&m.client_id).await?;
@@ -1372,11 +1376,20 @@ impl SsoService {
         Ok(())
     }
 
-    pub async fn toggle_client(&self, pk: i64, enabled: &str) -> Result<(), ServiceError> {
+    /// 启停客户端（v5-S6：**停用即吊销**该 client 名下全部用户的 SSO AT——
+    /// 否则重新启用后 TTL 内存量绑定复活；启用方向无需副作用）。
+    /// 停用期间 userinfo 的 client.enabled 校验本就拒绝旧令牌，本步把语义做实。
+    pub async fn toggle_client(
+        &self,
+        pk: i64,
+        enabled: &str,
+        redis: &mut ConnectionManager,
+    ) -> Result<(), ServiceError> {
         let m =
             self.client_repo.find_by_pk(pk).await?.ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.sso.client_not_found"))
             })?;
+        let client_id = m.client_id.clone();
         // 仅将 enabled 标记为 Set 才会被 update 写入（before_save 刷新 update_time）
         let mut am: ClientActiveModel = m.into();
         am.enabled = Set(if enabled == "1" {
@@ -1385,14 +1398,23 @@ impl SsoService {
             "0".to_string()
         });
         self.client_repo.update(am).await?;
+        // v5-S6：停用 → 按 client 粒度吊销该客户端名下全部用户的 AT
+        if enabled != "1" {
+            let user_ids = self.consent_repo.user_ids_by_client(&client_id).await?;
+            for uid in user_ids {
+                self.revoke_user_client_tokens(redis, uid, &client_id).await;
+            }
+        }
         Ok(())
     }
 
     // -------------------- 令牌吊销（v4-F2 / P0-B） --------------------
 
-    /// 全量吊销某用户的全部 SSO access_token（登出 / 强退 / 改密 / 删客户端级联）：
+    /// 全量吊销某用户的全部 SSO access_token（登出 / 强退 / 改密 / 停用/删除用户）：
     /// 遍历 `sso:user_at:{uid}` 索引，逐个 DEL `sso:at:{hash}` 与 `online:{hash}`，
     /// 最后清空索引。集合中已自然过期的 hash 删不到任何 key，悬空自愈、无害。
+    /// （v5 第九轮：客户端级联场景改用 revoke_user_client_tokens 按 client 粒度，
+    /// 不再波及用户在其它客户端的有效会话。）
     pub async fn revoke_user_sso_tokens(&self, redis: &mut ConnectionManager, user_id: i64) {
         let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, user_id);
         let hashes: Vec<String> = redis::cmd("SMEMBERS")
