@@ -249,7 +249,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_crud_roundtrip() {
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let repo = BaseRepository::<SysJob>::new(db.clone());
 
         // 迁移种子数据默认 3 条系统任务
@@ -281,7 +283,11 @@ mod tests {
         let updated = repo.update(am).await.unwrap();
         assert_eq!(updated.job_name, "t1-updated");
         assert_eq!(
-            repo.find_by_id(model.job_id).await.unwrap().unwrap().job_name,
+            repo.find_by_id(model.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .job_name,
             "t1-updated"
         );
 
@@ -294,7 +300,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_many_and_find_one() {
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let repo = BaseRepository::<SysJob>::new(db.clone());
         repo.insert(make_job("alpha")).await.unwrap();
         repo.insert(make_job("beta")).await.unwrap();
@@ -330,7 +338,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_conn_variants_with_database_connection() {
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let repo = BaseRepository::<SysJob>::new(db.clone());
 
         // insert_conn
@@ -338,20 +348,24 @@ mod tests {
         assert!(model.job_id > 0);
 
         // find_by_id_conn
-        let found = repo.find_by_id_conn(&db, model.job_id).await.unwrap().unwrap();
+        let found = repo
+            .find_by_id_conn(&db, model.job_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found.job_name, "conn-a");
 
         // find_many_conn / find_one_conn
         let sel = SysJob::find().filter(sys_job::Column::JobId.eq(model.job_id));
-        assert_eq!(repo.find_many_conn(&db, sel.clone()).await.unwrap().len(), 1);
+        assert_eq!(
+            repo.find_many_conn(&db, sel.clone()).await.unwrap().len(),
+            1
+        );
         assert!(repo.find_one_conn(&db, sel).await.unwrap().is_some());
 
         // insert_many_conn
         let res = repo
-            .insert_many_conn(
-                &db,
-                vec![make_job("conn-b"), make_job("conn-c")],
-            )
+            .insert_many_conn(&db, vec![make_job("conn-b"), make_job("conn-c")])
             .await
             .unwrap();
         // 批量插入后 last_insert_id 为最后一行 id（种子占用 1-3，sqlite 序列设为 100，
@@ -369,13 +383,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_transaction_commit_persists_changes() {
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let repo = BaseRepository::<SysJob>::new(db.clone());
 
         let tx = db.begin().await.unwrap();
         let model = repo.insert_conn(&tx, make_job("tx-commit")).await.unwrap();
         // 事务内可见
-        assert!(repo.find_by_id_conn(&tx, model.job_id).await.unwrap().is_some());
+        assert!(
+            repo.find_by_id_conn(&tx, model.job_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         tx.commit().await.unwrap();
 
         // 提交后通过连接池可见
@@ -385,12 +406,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_transaction_rollback_discards_changes() {
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let repo = BaseRepository::<SysJob>::new(db.clone());
 
         let tx = db.begin().await.unwrap();
-        let model = repo.insert_conn(&tx, make_job("tx-rollback")).await.unwrap();
-        assert!(repo.find_by_id_conn(&tx, model.job_id).await.unwrap().is_some());
+        let model = repo
+            .insert_conn(&tx, make_job("tx-rollback"))
+            .await
+            .unwrap();
+        assert!(
+            repo.find_by_id_conn(&tx, model.job_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         tx.rollback().await.unwrap();
 
         // 回滚后连接池不可见，数量恢复种子 3 条
@@ -400,10 +431,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_by_id_unknown_id_returns_none() {
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let repo = BaseRepository::<SysJob>::new(db.clone());
         // 种子占用 1-3，999999999 必然不存在
         assert!(repo.find_by_id(999999999).await.unwrap().is_none());
-        assert!(repo.find_by_id_conn(&db, 999999999).await.unwrap().is_none());
+        assert!(
+            repo.find_by_id_conn(&db, 999999999)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

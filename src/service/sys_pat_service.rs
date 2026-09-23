@@ -269,7 +269,9 @@ impl SysPatService {
         if row.status != "0" {
             return Ok(None);
         }
-        if let Some(exp) = row.expires_at && exp <= datetime::now_naive() {
+        if let Some(exp) = row.expires_at
+            && exp <= datetime::now_naive()
+        {
             return Ok(None);
         }
         let scopes: Vec<String> = serde_json::from_str(&row.scopes).unwrap_or_default();

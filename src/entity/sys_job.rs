@@ -12,7 +12,12 @@ use crate::common::datetime;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
 #[sea_orm(table_name = "sys_job")]
 #[serde(rename_all = "camelCase")]
-#[ts(export, rename = "SysJob", export_to = "SysJob.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "SysJob",
+    export_to = "SysJob.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = SysJob)]
 pub struct Model {
     #[sea_orm(primary_key)]

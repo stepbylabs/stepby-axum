@@ -21,9 +21,7 @@ use crate::common::error::ServiceError;
 use crate::common::i18n::validate;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::ssrf;
-use crate::entity::sys_web_hook::{
-    ActiveModel as SysWebHookActiveModel, Model as SysWebHookModel,
-};
+use crate::entity::sys_web_hook::{ActiveModel as SysWebHookActiveModel, Model as SysWebHookModel};
 use crate::entity::sys_web_hook_log::{
     ActiveModel as SysWebHookLogActiveModel, Model as SysWebHookLogModel,
 };
@@ -194,7 +192,8 @@ pub fn hook_matches_event(event_types: &str, event_type: &str) -> bool {
     if raw.is_empty() {
         return true;
     }
-    raw.split(',').any(|s| s.trim().eq_ignore_ascii_case(event_type))
+    raw.split(',')
+        .any(|s| s.trim().eq_ignore_ascii_case(event_type))
 }
 
 /// 计算请求体签名：HMAC-SHA256(key=secret, data=body) 的十六进制串
@@ -247,11 +246,10 @@ impl SysWebHookService {
 
     /// 对目标 URL 执行 SSRF 双层校验（静态 + 动态 DNS），返回规范化 URL
     async fn validate_target_url(&self, raw: &str) -> Result<url::Url, ServiceError> {
-        let url = ssrf::validate_url(raw.trim())
-            .map_err(|e| ServiceError::bad_request(&e))?;
-        let host = url.host_str().ok_or_else(|| {
-            ServiceError::bad_request(&crate::tr!("error.web_hook.url_invalid"))
-        })?;
+        let url = ssrf::validate_url(raw.trim()).map_err(|e| ServiceError::bad_request(&e))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.web_hook.url_invalid")))?;
         let port = url
             .port_or_known_default()
             .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
@@ -267,7 +265,12 @@ impl SysWebHookService {
         timeout: &Option<i32>,
         status: &Option<String>,
     ) -> (String, i32, String) {
-        let ct = match content_type.as_deref().unwrap_or("json").to_ascii_lowercase().as_str() {
+        let ct = match content_type
+            .as_deref()
+            .unwrap_or("json")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "form" | "form-urlencoded" => "form-urlencoded".to_string(),
             _ => "json".to_string(),
         };
@@ -315,11 +318,8 @@ impl SysWebHookService {
         operator: &str,
     ) -> Result<SysWebHookModel, ServiceError> {
         validate(&dto)?;
-        let (content_type, timeout_secs, status) = Self::normalize(
-            &dto.content_type,
-            &dto.timeout_secs,
-            &dto.status,
-        );
+        let (content_type, timeout_secs, status) =
+            Self::normalize(&dto.content_type, &dto.timeout_secs, &dto.status);
         let event_types = dto.event_types.unwrap_or_default().trim().to_string();
         if !event_types.is_empty() {
             for ev in event_types.split(',') {
@@ -337,7 +337,10 @@ impl SysWebHookService {
             hook_name: Set(dto.hook_name),
             event_types: Set(event_types),
             target_url: Set(dto.target_url.trim().to_string()),
-            secret: Set(dto.secret.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())),
+            secret: Set(dto
+                .secret
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())),
             content_type: Set(content_type),
             timeout_secs: Set(timeout_secs),
             status: Set(status),
@@ -382,7 +385,10 @@ impl SysWebHookService {
         am.hook_name = Set(dto.hook_name);
         am.event_types = Set(event_types);
         am.target_url = Set(dto.target_url.trim().to_string());
-        am.secret = Set(dto.secret.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        am.secret = Set(dto
+            .secret
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()));
         am.content_type = Set(content_type);
         am.timeout_secs = Set(timeout_secs);
         am.status = Set(status);
@@ -446,7 +452,8 @@ impl SysWebHookService {
     ) -> Result<DeliveryResult, ServiceError> {
         let start = Instant::now();
         let body = self.build_body(hook, payload);
-        let timeout = Duration::from_secs(hook.timeout_secs.clamp(1, MAX_TIMEOUT_SECS as i32) as u64);
+        let timeout =
+            Duration::from_secs(hook.timeout_secs.clamp(1, MAX_TIMEOUT_SECS as i32) as u64);
 
         // 构造日志行（先落库，便于投递期间即可查询“进行中”状态）
         let now = crate::common::datetime::now_naive();
@@ -499,7 +506,11 @@ impl SysWebHookService {
                     if ok { "0" } else { "1" }.to_string(),
                     Some(code),
                     Some(txt),
-                    if ok { None } else { Some(format!("HTTP {}", code)) },
+                    if ok {
+                        None
+                    } else {
+                        Some(format!("HTTP {}", code))
+                    },
                 )
             }
             Err(e) => (
@@ -659,7 +670,8 @@ impl SysWebHookService {
 
     /// 清空推送记录（按保留期：先清理超期，再清剩余）
     pub async fn clean_logs(&self) -> Result<(u64, u64), ServiceError> {
-        let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(LOG_RETENTION_DAYS);
+        let cutoff =
+            crate::common::datetime::now_naive() - chrono::Duration::days(LOG_RETENTION_DAYS);
         let expired = self
             .log_repo
             .delete_older_than(cutoff)
@@ -684,10 +696,11 @@ impl SysWebHookService {
         let mut ok_count = 0usize;
         for log in failed {
             // 依据记录快照构造虚拟 hook 重新投递（hook 可能已删除）
-            let (target_url, secret) = match self.hook_repo.find_by_id(log.hook_id.unwrap_or(-1)).await {
-                Ok(Some(h)) => (h.target_url.clone(), h.secret.clone()),
-                _ => (log.target_url.clone(), None),
-            };
+            let (target_url, secret) =
+                match self.hook_repo.find_by_id(log.hook_id.unwrap_or(-1)).await {
+                    Ok(Some(h)) => (h.target_url.clone(), h.secret.clone()),
+                    _ => (log.target_url.clone(), None),
+                };
             let payload: serde_json::Value = log
                 .payload
                 .as_deref()
@@ -734,11 +747,7 @@ fn flatten_json_to_form(value: &serde_json::Value) -> String {
                 serde_json::Value::Null => String::new(),
                 other => other.to_string(),
             };
-            parts.push(format!(
-                "{}={}",
-                k,
-                urlencoding_encode(&val)
-            ));
+            parts.push(format!("{}={}", k, urlencoding_encode(&val)));
         }
     }
     parts.join("&")
@@ -792,11 +801,23 @@ mod tests {
 
     #[test]
     fn hook_matches_comma_separated() {
-        assert!(hook_matches_event("login_success,user_created", "login_success"));
-        assert!(hook_matches_event("login_success,user_created", "user_created"));
-        assert!(!hook_matches_event("login_success,user_created", "login_failure"));
+        assert!(hook_matches_event(
+            "login_success,user_created",
+            "login_success"
+        ));
+        assert!(hook_matches_event(
+            "login_success,user_created",
+            "user_created"
+        ));
+        assert!(!hook_matches_event(
+            "login_success,user_created",
+            "login_failure"
+        ));
         // 大小写不敏感 + 空白容忍
-        assert!(hook_matches_event(" Login_Success , user_created ", "login_success"));
+        assert!(hook_matches_event(
+            " Login_Success , user_created ",
+            "login_success"
+        ));
     }
 
     #[test]
@@ -860,7 +881,9 @@ mod tests {
         });
 
         // 直接迁移建好的临时库构造 Service（不经过保存，故无 SSRF 拦截）
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let svc = SysWebHookService::new(db.clone());
         let hook = SysWebHookModel {
             id: 1,
@@ -890,7 +913,8 @@ mod tests {
         // 签名头已上报
         let sig = server.await.unwrap();
         assert!(
-            sig.to_ascii_lowercase().starts_with("x-webhook-signature: sha256="),
+            sig.to_ascii_lowercase()
+                .starts_with("x-webhook-signature: sha256="),
             "应携带签名头: {sig}"
         );
 
@@ -903,7 +927,9 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_to_unreachable_logs_failure() {
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let svc = SysWebHookService::new(db.clone());
         let hook = SysWebHookModel {
             id: 2,

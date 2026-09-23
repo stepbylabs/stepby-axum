@@ -668,6 +668,9 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // ===== 个人访问令牌管理（Tier-S #3，管理员统一查看 / 吊销）=====
     ("GET", "/monitor/pat/list", "monitor:pat:list"),
     ("DELETE", "/monitor/pat/{patId}", "monitor:pat:revoke"),
+
+    // ===== 审批工作流（方案 B′；管理视图；个人数据接口走仅登录白名单）=====
+    ("GET", "/system/flow/list", "system:flow:list"),
 ];
 
 /// 根据 HTTP 方法和匹配路径返回所需权限标识。
@@ -751,6 +754,15 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("DELETE", "/system/user/profile/sso-grants/{clientId}")
         // ===== 前端异常/性能上报（任何已登录用户皆可上报，无需 RBAC，Tier-S #1）=====
             | ("POST", "/monitor/frontendError/report")
+        // ===== 审批工作流个人数据接口（归属校验在 service 层：待办=assignee、我发起=applicant；V2-P0-2）=====
+            | ("GET", "/system/flow/todo")
+            | ("GET", "/system/flow/mine")
+            | ("GET", "/system/flow/pending-count")
+            | ("GET", "/system/flow/task/{taskId}")
+            | ("POST", "/system/flow/demo/submit")
+            | ("POST", "/system/flow/demo/{docId}/resubmit")
+            | ("POST", "/system/flow/demo/{docId}/withdraw")
+            | ("POST", "/system/flow/task/{taskId}/action")
     )
 }
 
@@ -1392,6 +1404,16 @@ mod tests {
             ("POST", "/monitor/webHook/log/{ids}/retry"),
             ("GET", "/monitor/webHook/log/{id}"),
             ("DELETE", "/monitor/webHook/log/{id}"),
+            // sys_flow_router（审批工作流：管理视图走权限表，个人数据走仅登录白名单）
+            ("GET", "/system/flow/list"),
+            ("GET", "/system/flow/todo"),
+            ("GET", "/system/flow/mine"),
+            ("GET", "/system/flow/pending-count"),
+            ("GET", "/system/flow/task/{taskId}"),
+            ("POST", "/system/flow/demo/submit"),
+            ("POST", "/system/flow/demo/{docId}/resubmit"),
+            ("POST", "/system/flow/demo/{docId}/withdraw"),
+            ("POST", "/system/flow/task/{taskId}/action"),
         ];
 
         let mut uncovered: Vec<(&str, &str)> = Vec::new();

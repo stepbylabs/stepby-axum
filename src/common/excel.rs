@@ -284,9 +284,7 @@ where
             let mut seen = std::collections::HashSet::new();
             list.iter()
                 .filter_map(|f| {
-                    let idx = columns
-                        .iter()
-                        .position(|c| c.key == f || c.header.0 == f)?;
+                    let idx = columns.iter().position(|c| c.key == f || c.header.0 == f)?;
                     seen.insert(idx).then_some(idx)
                 })
                 .collect()
@@ -571,7 +569,10 @@ mod tests {
     #[test]
     fn build_xlsx_inner_empty_cells_and_opt_datetime() {
         // Empty 变体写入空白单元格；from_opt_datetime 将 None → Empty、Some → DateTime
-        assert!(matches!(CellValue::from_opt_datetime(None), CellValue::Empty));
+        assert!(matches!(
+            CellValue::from_opt_datetime(None),
+            CellValue::Empty
+        ));
         let cols = vec![
             ExcelColumn {
                 key: "a",
@@ -679,7 +680,10 @@ mod tests {
         // 小数保留（用非圆周率近似值，避免 clippy::approx_constant 误报）
         assert_eq!(import_cell_to_string(&Data::Float(2.76)), "2.76");
         // 大数（>= 1e15）不再取整，避免精度损失
-        assert_eq!(import_cell_to_string(&Data::Float(1e15)), "1000000000000000");
+        assert_eq!(
+            import_cell_to_string(&Data::Float(1e15)),
+            "1000000000000000"
+        );
         assert_eq!(import_cell_to_string(&Data::Bool(true)), "true");
         // 其余变体 → 空串
         assert_eq!(
@@ -693,7 +697,10 @@ mod tests {
         assert_eq!(import_cell_to_string(&Data::DateTimeIso("2026".into())), "");
         assert_eq!(import_cell_to_string(&Data::DurationIso("P1D".into())), "");
         assert_eq!(import_cell_to_string(&Data::Empty), "");
-        assert_eq!(import_cell_to_string(&Data::Error(calamine::CellErrorType::NA)), "");
+        assert_eq!(
+            import_cell_to_string(&Data::Error(calamine::CellErrorType::NA)),
+            ""
+        );
     }
 
     #[test]
@@ -736,7 +743,8 @@ mod tests {
         assert_eq!(rows[0], vec!["用户名", "邮箱"]);
         assert_eq!(rows[1], vec!["admin", "a@b.com"]);
 
-        let bytes_en = build_import_template_bytes("Import", &columns, false).expect("模板生成失败");
+        let bytes_en =
+            build_import_template_bytes("Import", &columns, false).expect("模板生成失败");
         let rows_en = read_xlsx_rows(&bytes_en).expect("模板回读失败");
         assert_eq!(rows_en[0], vec!["Username", "Email"]);
     }
@@ -781,12 +789,15 @@ mod tests {
         let cols = test_columns();
         let rows = test_rows();
         let fields = vec!["userName".to_string()];
-        let resp = export_to_excel_with_fields("数据", "plain.xlsx", &cols, &rows, Some(&fields), true)
-            .await
-            .expect("导出失败");
+        let resp =
+            export_to_excel_with_fields("数据", "plain.xlsx", &cols, &rows, Some(&fields), true)
+                .await
+                .expect("导出失败");
         // 显式 truncated=true → 设置标记
         assert_eq!(
-            resp.headers().get("X-Export-Truncated").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("X-Export-Truncated")
+                .and_then(|v| v.to_str().ok()),
             Some("true")
         );
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
@@ -806,13 +817,14 @@ mod tests {
             user_name: "u".into(),
             dept_id: None,
         };
-        let rows: Vec<SampleRow> =
-            std::iter::repeat_n(row, EXPORT_MAX_ROWS as usize).collect();
+        let rows: Vec<SampleRow> = std::iter::repeat_n(row, EXPORT_MAX_ROWS as usize).collect();
         let resp = export_to_excel("数据", "big.xlsx", &cols, &rows)
             .await
             .expect("导出失败");
         assert_eq!(
-            resp.headers().get("X-Export-Truncated").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("X-Export-Truncated")
+                .and_then(|v| v.to_str().ok()),
             Some("true")
         );
     }
@@ -870,8 +882,8 @@ mod tests {
     async fn build_xlsx_uses_locale_and_writes_cells() {
         let cols = test_columns();
         let rows = test_rows();
-        let bytes = build_xlsx("数据", &cols, &rows, None, "en-US".to_string())
-            .expect("build_xlsx 失败");
+        let bytes =
+            build_xlsx("数据", &cols, &rows, None, "en-US".to_string()).expect("build_xlsx 失败");
         let matrix = read_xlsx_rows(&bytes).expect("回读失败");
         // locale 经 build_xlsx 注入 en-US → 英文表头
         assert_eq!(matrix[0], vec!["User ID", "Username"]);

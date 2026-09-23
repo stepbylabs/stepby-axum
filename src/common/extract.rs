@@ -80,7 +80,8 @@ mod tests {
     #[tokio::test]
     async fn valid_json_and_validation_ok() {
         let req = json_request(r#"{"name":"Alice","age":30}"#);
-        let ValidatedJson(dto) = ValidatedJson::<TestDto>::from_request(req, &()).await
+        let ValidatedJson(dto) = ValidatedJson::<TestDto>::from_request(req, &())
+            .await
             .expect("合法 JSON 且校验通过应成功");
         assert_eq!(dto.name, "Alice");
         assert_eq!(dto.age, 30);

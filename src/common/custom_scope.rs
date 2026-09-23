@@ -247,11 +247,13 @@ pub fn parse_custom_sql(
 /// 从 operator 的角色中提取自定义数据权限条件。
 ///
 /// 仅收集 `data_scope == "2"`（自定义）角色的 `custom_sql`，取第一个非空且可解析者。
-/// 解析失败（含注入尝试 / 列不在白名单）时安全地返回 `Ok(None)`——不注入任何条件，
-/// 避免因配置错误导致数据权限绕过或 SQL 注入；同时不阻断主流程。
+///
+/// **fail-closed 语义（5-1 修复，v4 §V4-E3）**：解析失败（含注入尝试 / 列不在白名单）返回
+/// `Err`，由调用方**拒绝本次请求**——"不把片段当 SQL 执行"只防住了注入，防不住越权；
+/// 若静默返回 `Ok(None)`，该角色将失去字段级过滤（数据范围被放大），属于 fail-open。
 pub fn derive_user_custom_conditions(
     roles: &[crate::entity::sys_role::Model],
-) -> Option<Vec<CustomCondition>> {
+) -> Result<Option<Vec<CustomCondition>>, ParseError> {
     for r in roles {
         if r.data_scope.as_deref() != Some("2") {
             continue;
@@ -260,18 +262,19 @@ pub fn derive_user_custom_conditions(
             continue;
         };
         match parse_custom_sql(sql, USER_CUSTOM_COLUMNS) {
-            Ok(conds) if !conds.is_empty() => return Some(conds),
+            Ok(conds) if !conds.is_empty() => return Ok(Some(conds)),
             Ok(_) => continue,
-            Err(_) => {
+            Err(e) => {
                 tracing::warn!(
                     role_id = r.role_id,
-                    "custom_sql 解析失败，忽略自定义数据权限条件（fail-closed）"
+                    "custom_sql 解析失败，拒绝本次请求（fail-closed）: {}",
+                    e
                 );
-                return None;
+                return Err(e);
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// 把一组自定义条件 + 解析器组合成一条 `Condition`（参数化）。
@@ -434,7 +437,7 @@ mod tests {
     fn derive_picks_custom_scope_role_custom_sql() {
         // (a) data_scope=custom + custom_sql → 应提取出自定义条件
         let roles = vec![role(1, Some("2"), Some("status = '0'"))];
-        let conds = derive_user_custom_conditions(&roles).unwrap();
+        let conds = derive_user_custom_conditions(&roles).unwrap().unwrap();
         assert_eq!(conds.len(), 1);
         assert_eq!(conds[0].column, "status");
     }
@@ -442,27 +445,31 @@ mod tests {
     #[test]
     fn derive_ignores_non_custom_scope() {
         // (b) data_scope=本部门(3) → 不生成自定义条件（走部门过滤路径）
-        assert!(derive_user_custom_conditions(&[role(1, Some("3"), None)]).is_none());
+        assert!(
+            derive_user_custom_conditions(&[role(1, Some("3"), None)])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn derive_rejects_injection_safely() {
-        // (d) 注入尝试的 custom_sql → 返回 None（fail-closed），绝不拼 SQL
+        // (d) 注入尝试的 custom_sql → Err（fail-closed：调用方拒绝请求，绝不拼 SQL）
         assert!(
             derive_user_custom_conditions(&[role(1, Some("2"), Some("1=1; DROP TABLE sys_user"))])
-                .is_none()
+                .is_err()
         );
     }
 
     #[test]
     fn derive_ignores_invalid_custom_sql_on_noncustom_role_first() {
         // 多角色：先一个 data_scope=2 但 custom_sql 非法，随后的合法角色不应被采用
-        // （fail-closed：出现非法时整体弃用自定义，保护数据权限不绕过）
+        // （fail-closed：出现非法时整体拒绝本次请求，保护数据权限不绕过）
         let roles = vec![
             role(1, Some("2"), Some("1=1; DROP TABLE sys_user")),
             role(2, Some("2"), Some("status = '0'")),
         ];
-        assert!(derive_user_custom_conditions(&roles).is_none());
+        assert!(derive_user_custom_conditions(&roles).is_err());
     }
 
     // ---------- Value::as_i64 / as_str ----------
@@ -567,19 +574,31 @@ mod tests {
     #[test]
     fn derive_skips_role_without_custom_scope_value() {
         // data_scope 为 None 的角色跳过
-        assert!(derive_user_custom_conditions(&[role(1, None, Some("status = '0'"))]).is_none());
+        assert!(
+            derive_user_custom_conditions(&[role(1, None, Some("status = '0'"))])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn derive_continues_when_custom_sql_is_none() {
         // data_scope=2 但 custom_sql 为 None → 继续，最终 None
-        assert!(derive_user_custom_conditions(&[role(1, Some("2"), None)]).is_none());
+        assert!(
+            derive_user_custom_conditions(&[role(1, Some("2"), None)])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn derive_continues_when_custom_sql_is_blank() {
         // data_scope=2 但 custom_sql 为空白（解析为空）→ 继续，最终 None
-        assert!(derive_user_custom_conditions(&[role(1, Some("2"), Some("   "))]).is_none());
+        assert!(
+            derive_user_custom_conditions(&[role(1, Some("2"), Some("   "))])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -589,7 +608,7 @@ mod tests {
             role(1, Some("1"), None),
             role(2, Some("2"), Some("status = '0'")),
         ];
-        let conds = derive_user_custom_conditions(&roles).unwrap();
+        let conds = derive_user_custom_conditions(&roles).unwrap().unwrap();
         assert_eq!(conds.len(), 1);
         assert_eq!(conds[0].column, "status");
     }
@@ -599,7 +618,8 @@ mod tests {
     #[test]
     fn build_filter_appends_when_some_resolvable() {
         use sea_orm::ColumnTrait;
-        let conds = parse_custom_sql("status = '0' AND dept_id >= 100", USER_CUSTOM_COLUMNS).unwrap();
+        let conds =
+            parse_custom_sql("status = '0' AND dept_id >= 100", USER_CUSTOM_COLUMNS).unwrap();
         // 仅 status 可解析，dept_id 被丢弃 → 仍应组装出 Some 条件
         let mapped = build_filter(&conds, |c| match c.column.as_str() {
             "status" => {

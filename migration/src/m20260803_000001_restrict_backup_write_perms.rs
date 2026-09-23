@@ -47,7 +47,10 @@ impl MigrationTrait for Migration {
         for menu_id in [1201i64, 1202, 1211] {
             let sql = match backend {
                 sea_orm_migration::sea_orm::DatabaseBackend::Postgres => {
-                    format!("INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, {}) ON CONFLICT DO NOTHING", menu_id)
+                    format!(
+                        "INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, {}) ON CONFLICT DO NOTHING",
+                        menu_id
+                    )
                 }
                 sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {
                     format!(

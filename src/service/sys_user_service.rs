@@ -688,8 +688,15 @@ impl SysUserService {
                                 .collect();
                             let rids = self.role_dept_repo.find_by_role_ids(&role_ids).await?;
                             scope_dept_ids = Some(rids.into_iter().map(|rd| rd.dept_id).collect());
-                            // 自定义模式下额外附加 custom_sql 白名单条件（fail-closed）
-                            custom_conds = custom_scope::derive_user_custom_conditions(&op_roles);
+                            // 自定义模式下额外附加 custom_sql 白名单条件；
+                            // 解析失败 → 拒绝本次请求（fail-closed，5-1 修复）
+                            custom_conds = custom_scope::derive_user_custom_conditions(&op_roles)
+                                .map_err(|e| {
+                                ServiceError::bad_request(&format!(
+                                    "custom_sql 解析失败，已拒绝本次请求: {}",
+                                    e
+                                ))
+                            })?;
                         }
                         3 => {
                             // 本部门：filter by operator.dept_id

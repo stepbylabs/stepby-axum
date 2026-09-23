@@ -565,7 +565,10 @@ mod tests {
         let name = gen_uuid_filename("PNG").expect("合法扩展名应成功");
         assert!(name.ends_with(".png"), "实际: {name}");
         let uuid_part = name.trim_end_matches(".png");
-        assert!(uuid::Uuid::parse_str(uuid_part).is_ok(), "应为 UUID: {name}");
+        assert!(
+            uuid::Uuid::parse_str(uuid_part).is_ok(),
+            "应为 UUID: {name}"
+        );
     }
 
     #[test]
@@ -866,9 +869,16 @@ mod tests {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
         // 即使 html 不在白名单也会被 DANGEROUS_EXTS 强制拒绝
-        let err = save_upload_bytes(&backend, b"<html></html>", Some("html"), None, &cfg, UploadKind::Common)
-            .await
-            .expect_err("危险扩展名应失败");
+        let err = save_upload_bytes(
+            &backend,
+            b"<html></html>",
+            Some("html"),
+            None,
+            &cfg,
+            UploadKind::Common,
+        )
+        .await
+        .expect_err("危险扩展名应失败");
         assert_eq!(err.code, 400);
         assert!(err.message.contains("html"));
     }
@@ -877,9 +887,16 @@ mod tests {
     async fn save_upload_bytes_rejects_ext_not_in_whitelist() {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
-        let err = save_upload_bytes(&backend, b"data", Some("xyz"), None, &cfg, UploadKind::Common)
-            .await
-            .expect_err("白名单外应失败");
+        let err = save_upload_bytes(
+            &backend,
+            b"data",
+            Some("xyz"),
+            None,
+            &cfg,
+            UploadKind::Common,
+        )
+        .await
+        .expect_err("白名单外应失败");
         assert_eq!(err.code, 400);
     }
 
@@ -888,9 +905,16 @@ mod tests {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
         // 声明 pdf 但内容是纯文本 → magic 校验失败
-        let err = save_upload_bytes(&backend, b"not a pdf at all", Some("pdf"), None, &cfg, UploadKind::Common)
-            .await
-            .expect_err("magic 不匹配应失败");
+        let err = save_upload_bytes(
+            &backend,
+            b"not a pdf at all",
+            Some("pdf"),
+            None,
+            &cfg,
+            UploadKind::Common,
+        )
+        .await
+        .expect_err("magic 不匹配应失败");
         assert_eq!(err.code, 400);
     }
 
@@ -899,14 +923,24 @@ mod tests {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
         // 声明 jpg 但字节为 PNG → 以 magic 识别结果 png 为准保存
-        let file = save_upload_bytes(&backend, PNG_MAGIC, Some("jpg"), Some("photo.jpg"), &cfg, UploadKind::Common)
-            .await
-            .expect("应按实际类型保存");
+        let file = save_upload_bytes(
+            &backend,
+            PNG_MAGIC,
+            Some("jpg"),
+            Some("photo.jpg"),
+            &cfg,
+            UploadKind::Common,
+        )
+        .await
+        .expect("应按实际类型保存");
         assert_eq!(file.ext, "png");
         assert!(file.new_filename.ends_with(".png"));
         assert_eq!(file.size, PNG_MAGIC.len() as u64);
         assert_eq!(file.original_filename.as_deref(), Some("photo.jpg"));
-        assert_eq!(file.url, format!("mock://{}/{}", cfg.common_dir, file.new_filename));
+        assert_eq!(
+            file.url,
+            format!("mock://{}/{}", cfg.common_dir, file.new_filename)
+        );
         // 后端收到 key = 生成的 UUID 文件名
         let calls = backend.0.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -919,9 +953,16 @@ mod tests {
     async fn save_upload_bytes_image_matches_declared() {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
-        let file = save_upload_bytes(&backend, JPG_MAGIC, Some("jpeg"), None, &cfg, UploadKind::Common)
-            .await
-            .expect("JPEG 应成功");
+        let file = save_upload_bytes(
+            &backend,
+            JPG_MAGIC,
+            Some("jpeg"),
+            None,
+            &cfg,
+            UploadKind::Common,
+        )
+        .await
+        .expect("JPEG 应成功");
         assert_eq!(file.ext, "jpg"); // jpeg 归一为 jpg
         assert!(file.new_filename.ends_with(".jpg"));
     }
@@ -930,9 +971,16 @@ mod tests {
     async fn save_upload_bytes_non_image_success() {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
-        let file = save_upload_bytes(&backend, b"hello world", Some("txt"), None, &cfg, UploadKind::Common)
-            .await
-            .expect("txt 应成功");
+        let file = save_upload_bytes(
+            &backend,
+            b"hello world",
+            Some("txt"),
+            None,
+            &cfg,
+            UploadKind::Common,
+        )
+        .await
+        .expect("txt 应成功");
         assert_eq!(file.ext, "txt");
         assert!(file.new_filename.ends_with(".txt"));
     }

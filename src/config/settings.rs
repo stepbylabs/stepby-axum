@@ -50,6 +50,9 @@ pub struct Settings {
     /// 单点登录 / OIDC Provider 配置（Tier B，默认关闭）
     #[serde(default)]
     pub sso: SsoConfig,
+    /// 审批工作流配置（m20260923_000002；cron 为空 = 禁用超时扫描）
+    #[serde(default)]
+    pub flow: FlowConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -73,6 +76,7 @@ impl fmt::Debug for Settings {
             .field("sys_log", &self.sys_log)
             .field("pat", &self.pat)
             .field("sso", &self.sso)
+            .field("flow", &self.flow)
             .finish()
     }
 }
@@ -558,6 +562,57 @@ fn default_common_max_size() -> usize {
     crate::common::constants::UPLOAD_MAX_SIZE
 }
 
+/// 审批工作流配置（m20260923_000002 flow_module）
+///
+/// - `timeout_scan_cron` 为空 = 禁用超时扫描任务（mmdb_auto_update 同款约定）
+/// - `enabled` 为第二开关（运行配置级），两个条件同时满足才注册任务
+#[derive(Debug, Clone, Deserialize)]
+pub struct FlowConfig {
+    /// 超时扫描 cron（6 字段含秒，默认每 10 分钟）；空字符串 = 禁用
+    #[serde(default = "default_flow_scan_cron")]
+    pub timeout_scan_cron: String,
+    /// 是否启用审批超时扫描（第二开关，默认 true）
+    #[serde(default = "default_flow_scan_enabled")]
+    pub enabled: bool,
+    /// 待办 SLA 时长（小时，超过即触发提醒；默认 48h）
+    #[serde(default = "default_flow_timeout_hours")]
+    pub timeout_hours: i64,
+    /// 同一任务的重复提醒间隔（秒，Redis SETNX TTL；默认 3600）
+    #[serde(default = "default_flow_remind_interval")]
+    pub remind_interval_secs: u64,
+    /// 单次扫描最多处理的任务数（分页限量，防止超出任务超时上限）
+    #[serde(default = "default_flow_scan_batch")]
+    pub scan_batch_limit: u64,
+}
+
+fn default_flow_scan_cron() -> String {
+    "0 */10 * * * *".to_string()
+}
+fn default_flow_scan_enabled() -> bool {
+    true
+}
+fn default_flow_timeout_hours() -> i64 {
+    48
+}
+fn default_flow_remind_interval() -> u64 {
+    3600
+}
+fn default_flow_scan_batch() -> u64 {
+    200
+}
+
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            timeout_scan_cron: default_flow_scan_cron(),
+            enabled: default_flow_scan_enabled(),
+            timeout_hours: default_flow_timeout_hours(),
+            remind_interval_secs: default_flow_remind_interval(),
+            scan_batch_limit: default_flow_scan_batch(),
+        }
+    }
+}
+
 /// IP 归属地查询配置
 #[derive(Debug, Clone, Deserialize)]
 pub struct IpLocationConfig {
@@ -881,6 +936,7 @@ impl Settings {
         let mut settings = Settings {
             pat: PatConfig::default(),
             sso: SsoConfig::default(),
+            flow: FlowConfig::default(),
             server: ServerConfig {
                 host: server_host,
                 port: server_port,
@@ -977,8 +1033,8 @@ impl Settings {
                     "SSO_ENABLED=true 时必须显式配置 SSO_ISSUER（https URL），禁止按请求 Host 动态推导（可被伪造）"
                 );
             }
-            let is_local = issuer.starts_with("http://localhost")
-                || issuer.starts_with("http://127.0.0.1");
+            let is_local =
+                issuer.starts_with("http://localhost") || issuer.starts_with("http://127.0.0.1");
             if !issuer.starts_with("https://") && !is_local {
                 anyhow::bail!(
                     "SSO_ISSUER 必须为 https URL（OIDC 规范要求），当前: {issuer}（本地开发可用 http://localhost 或 http://127.0.0.1）"
@@ -1035,6 +1091,7 @@ mod tests {
             config_enc_key: String::new(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
+            flow: FlowConfig::default(),
             sys_log: SysLogConfig::default(),
         }
     }
@@ -1091,6 +1148,7 @@ mod tests {
             config_enc_key: "encryption-key-should-not-leak".to_string(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
+            flow: FlowConfig::default(),
             sys_log: SysLogConfig::default(),
         };
 

@@ -186,7 +186,12 @@ impl SysFrontendErrorService {
         let models: Vec<FrontendErrorActiveModel> = items
             .into_iter()
             .map(|it| FrontendErrorActiveModel {
-                level: Set(normalize_enum(&it.level, ALLOWED_LEVELS, "info", MAX_LEVEL_LEN)),
+                level: Set(normalize_enum(
+                    &it.level,
+                    ALLOWED_LEVELS,
+                    "info",
+                    MAX_LEVEL_LEN,
+                )),
                 source: Set(normalize_enum(
                     &it.source,
                     ALLOWED_SOURCES,

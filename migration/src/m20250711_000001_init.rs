@@ -1206,8 +1206,12 @@ async fn set_auto_increment(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 async fn insert_sys_user(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
     let sqls = [
-        format!("sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (1, 103, 'admin', 'Yebot管理员', '00', 'admin@yebot.dev', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '管理员')"),
-        format!("sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (2, 105, 'ry', 'Yebot', '00', 'ry@yebot.dev', '15666666666', '1', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '测试员')"),
+        format!(
+            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (1, 103, 'admin', 'Yebot管理员', '00', 'admin@yebot.dev', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '管理员')"
+        ),
+        format!(
+            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (2, 105, 'ry', 'Yebot', '00', 'ry@yebot.dev', '15666666666', '1', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '测试员')"
+        ),
     ];
     for sql in sqls {
         execute_idempotent_insert(manager, &sql).await?;
@@ -1221,8 +1225,12 @@ async fn insert_sys_role(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // 注意：menu_check_strictly / dept_check_strictly 为 boolean 类型，
     // 使用 TRUE/FALSE 跨数据库兼容（SQLite 3.23+, MySQL, PostgreSQL 均支持）
     let sqls = [
-        format!("sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_by, create_time, remark) VALUES (1, '超级管理员', 'admin', 1, '1', TRUE, TRUE, '0', '0', 'admin', {now}, '超级管理员')"),
-        format!("sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_by, create_time, remark) VALUES (2, '普通角色', 'common', 2, '2', TRUE, TRUE, '0', '0', 'admin', {now}, '普通角色')"),
+        format!(
+            "sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_by, create_time, remark) VALUES (1, '超级管理员', 'admin', 1, '1', TRUE, TRUE, '0', '0', 'admin', {now}, '超级管理员')"
+        ),
+        format!(
+            "sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_by, create_time, remark) VALUES (2, '普通角色', 'common', 2, '2', TRUE, TRUE, '0', '0', 'admin', {now}, '普通角色')"
+        ),
     ];
     for sql in sqls {
         execute_idempotent_insert(manager, &sql).await?;
@@ -1233,7 +1241,8 @@ async fn insert_sys_role(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 /// 插入 sys_menu 初始数据（目录 + 菜单 + 按钮）
 async fn insert_sys_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
+    let sql = format!(
+        "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
 (1, '系统管理', 0, 1, 'system', NULL, '', '', '1', '0', 'M', '0', '0', '', 'system', 'admin', {now}, '系统管理目录', '0'), \
 (2, '系统监控', 0, 2, 'monitor', NULL, '', '', '1', '0', 'M', '0', '0', '', 'monitor', 'admin', {now}, '系统监控目录', '0'), \
 (3, '系统工具', 0, 3, 'tool', NULL, '', '', '1', '0', 'M', '0', '0', '', 'tool', 'admin', {now}, '系统工具目录', '0'), \
@@ -1318,7 +1327,8 @@ async fn insert_sys_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 (1057, '生成删除', 116, 3, '#', '', '', '', '1', '0','F', '0', '0', 'tool:gen:remove', '#', 'admin', {now}, '', '0'), \
 (1058, '导入代码', 116, 4, '#', '', '', '', '1', '0','F', '0', '0', 'tool:gen:import', '#', 'admin', {now}, '', '0'), \
 (1059, '预览代码', 116, 5, '#', '', '', '', '1', '0','F', '0', '0', 'tool:gen:preview', '#', 'admin', {now}, '', '0'), \
-(1060, '生成代码', 116, 6, '#', '', '', '', '1', '0','F', '0', '0', 'tool:gen:code', '#', 'admin', {now}, '', '0')");
+(1060, '生成代码', 116, 6, '#', '', '', '', '1', '0','F', '0', '0', 'tool:gen:code', '#', 'admin', {now}, '', '0')"
+    );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
 }
@@ -1355,7 +1365,8 @@ async fn insert_sys_role_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
 /// 插入 sys_dict_type 初始数据（10 条内置字典类型）
 async fn insert_sys_dict_type(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_dict_type (dict_id, dict_name, dict_type, status, create_by, create_time, remark, del_flag) VALUES \
+    let sql = format!(
+        "sys_dict_type (dict_id, dict_name, dict_type, status, create_by, create_time, remark, del_flag) VALUES \
 (1, '用户性别', 'sys_user_sex', '0', 'admin', {now}, '用户性别列表', '0'), \
 (2, '菜单状态', 'sys_show_hide', '0', 'admin', {now}, '菜单状态列表', '0'), \
 (3, '系统开关', 'sys_normal_disable', '0', 'admin', {now}, '系统开关列表', '0'), \
@@ -1365,7 +1376,8 @@ async fn insert_sys_dict_type(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
 (7, '通知类型', 'sys_notice_type', '0', 'admin', {now}, '通知类型列表', '0'), \
 (8, '通知状态', 'sys_notice_status', '0', 'admin', {now}, '通知状态列表', '0'), \
 (9, '操作类型', 'sys_oper_type', '0', 'admin', {now}, '操作类型列表', '0'), \
-(10, '系统状态', 'sys_common_status', '0', 'admin', {now}, '登录状态列表', '0')");
+(10, '系统状态', 'sys_common_status', '0', 'admin', {now}, '登录状态列表', '0')"
+    );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
 }
@@ -1373,7 +1385,8 @@ async fn insert_sys_dict_type(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
 /// 插入 sys_dict_data 初始数据（29 条内置字典数据）
 async fn insert_sys_dict_data(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_dict_data (dict_code, dict_sort, dict_label, dict_value, dict_type, css_class, list_class, is_default, status, create_by, create_time, remark, del_flag) VALUES \
+    let sql = format!(
+        "sys_dict_data (dict_code, dict_sort, dict_label, dict_value, dict_type, css_class, list_class, is_default, status, create_by, create_time, remark, del_flag) VALUES \
 (1, 1, '男', '0', 'sys_user_sex', '', '', 'Y', '0', 'admin', {now}, '性别男', '0'), \
 (2, 2, '女', '1', 'sys_user_sex', '', '', 'N', '0', 'admin', {now}, '性别女', '0'), \
 (3, 3, '未知', '2', 'sys_user_sex', '', '', 'N', '0', 'admin', {now}, '性别未知', '0'), \
@@ -1402,7 +1415,8 @@ async fn insert_sys_dict_data(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
 (26, 8, '生成代码', '8', 'sys_oper_type', '', 'warning', 'N', '0', 'admin', {now}, '生成操作', '0'), \
 (27, 9, '清空数据', '9', 'sys_oper_type', '', 'danger', 'N', '0', 'admin', {now}, '清空操作', '0'), \
 (28, 1, '成功', '0', 'sys_common_status', '', 'primary', 'N', '0', 'admin', {now}, '正常状态', '0'), \
-(29, 2, '失败', '1', 'sys_common_status', '', 'danger', 'N', '0', 'admin', {now}, '停用状态', '0')");
+(29, 2, '失败', '1', 'sys_common_status', '', 'danger', 'N', '0', 'admin', {now}, '停用状态', '0')"
+    );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
 }
@@ -1410,10 +1424,12 @@ async fn insert_sys_dict_data(manager: &SchemaManager<'_>) -> Result<(), DbErr> 
 /// 插入 sys_job 初始数据（3 个系统默认定时任务）
 async fn insert_sys_job(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_job (job_id, job_name, job_group, invoke_target, cron_expression, misfire_policy, concurrent, status, create_by, create_time, remark, del_flag) VALUES \
+    let sql = format!(
+        "sys_job (job_id, job_name, job_group, invoke_target, cron_expression, misfire_policy, concurrent, status, create_by, create_time, remark, del_flag) VALUES \
 (1, '系统默认（无参）', 'DEFAULT', 'ryTask.ryNoParams', '0/10 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0'), \
 (2, '系统默认（有参）', 'DEFAULT', 'ryTask.ryParams(''ry'')', '0/15 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0'), \
-(3, '系统默认（多参）', 'DEFAULT', 'ryTask.ryMultipleParams(''ry'', true, 2000L, 316.50D, 100)', '0/20 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0')");
+(3, '系统默认（多参）', 'DEFAULT', 'ryTask.ryMultipleParams(''ry'', true, 2000L, 316.50D, 100)', '0/20 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0')"
+    );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
 }
@@ -1421,7 +1437,8 @@ async fn insert_sys_job(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 /// 插入 sys_dept 初始数据（Yebot 标准 5 级部门树）
 async fn insert_sys_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_dept (dept_id, parent_id, ancestors, dept_name, order_num, leader, phone, email, status, del_flag, create_by, create_time) VALUES \
+    let sql = format!(
+        "sys_dept (dept_id, parent_id, ancestors, dept_name, order_num, leader, phone, email, status, del_flag, create_by, create_time) VALUES \
 (100, 0, '0', 'Yebot科技', 0, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
 (101, 100, '0,100', '深圳总公司', 1, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
 (102, 100, '0,100', '长沙分公司', 2, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
@@ -1431,7 +1448,8 @@ async fn insert_sys_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 (106, 101, '0,100,101', '财务部门', 4, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
 (107, 101, '0,100,101', '运维部门', 5, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
 (108, 102, '0,100,102', '市场部门', 1, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(109, 102, '0,100,102', '财务部门', 2, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now})");
+(109, 102, '0,100,102', '财务部门', 2, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now})"
+    );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
 }
@@ -1439,11 +1457,13 @@ async fn insert_sys_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 /// 插入 sys_post 初始数据（Yebot 标准 4 个岗位）
 async fn insert_sys_post(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_post (post_id, post_code, post_name, post_sort, status, del_flag, create_by, create_time, remark) VALUES \
+    let sql = format!(
+        "sys_post (post_id, post_code, post_name, post_sort, status, del_flag, create_by, create_time, remark) VALUES \
 (1, 'ceo', '董事长', 1, '0', '0', 'admin', {now}, ''), \
 (2, 'se', '项目经理', 2, '0', '0', 'admin', {now}, ''), \
 (3, 'hr', '人力资源', 3, '0', '0', 'admin', {now}, ''), \
-(4, 'user', '普通员工', 4, '0', '0', 'admin', {now}, '')");
+(4, 'user', '普通员工', 4, '0', '0', 'admin', {now}, '')"
+    );
     execute_idempotent_insert(manager, &sql).await?;
 
     // 插入 sys_user_post 关联（admin 关联董事长，ry 关联普通员工）
@@ -1523,7 +1543,8 @@ async fn create_sys_config(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 /// 插入 sys_config 初始数据（Yebot 标准参数配置）
 async fn insert_sys_config(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_config (config_id, config_name, config_key, config_value, config_type, create_by, create_time, remark) VALUES \
+    let sql = format!(
+        "sys_config (config_id, config_name, config_key, config_value, config_type, create_by, create_time, remark) VALUES \
 (1, '主框架页-默认皮肤主题名称', 'sys.index.skinName', 'skin-blue', 'Y', 'admin', {now}, '蓝色 skin-blue、绿色 skin-green、黄色 skin-yellow、红色 skin-red'), \
 (2, '用户管理-账号初始密码', 'sys.user.initPassword', '123456', 'Y', 'admin', {now}, '初始化密码 123456'), \
 (3, '主框架页-侧边栏主题', 'sys.index.sideTheme', 'theme-dark', 'Y', 'admin', {now}, '深色主题 theme-dark，浅色主题 theme-light'), \
@@ -1582,7 +1603,8 @@ async fn create_sys_notice(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 /// 插入 sys_notice 初始数据（Yebot 标准 2 条通知公告）
 async fn insert_sys_notice(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
-    let sql = format!("sys_notice (notice_id, notice_title, notice_type, notice_content, status, create_by, create_time, remark) VALUES \
+    let sql = format!(
+        "sys_notice (notice_id, notice_title, notice_type, notice_content, status, create_by, create_time, remark) VALUES \
 (1, '温馨提醒：Yebot管理系统新版本发布啦', '2', '新版本内容', '0', 'admin', {now}, '管理员'), \
 (2, '维护通知：Yebot系统凌晨维护', '1', '维护内容', '0', 'admin', {now}, '管理员')",
         now = now

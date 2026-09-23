@@ -46,7 +46,9 @@ pub async fn report(
         .frontend_error_service
         .report(body.items, Some(operator.username().to_string()))
         .await?;
-    Ok(AjaxResult::success(serde_json::json!({ "reported": reported })))
+    Ok(AjaxResult::success(
+        serde_json::json!({ "reported": reported }),
+    ))
 }
 
 /// GET /monitor/frontendError/list

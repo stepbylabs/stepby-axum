@@ -186,7 +186,10 @@ impl SysLogininforService {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
-        let result = self.logininfor_repo.delete_by_time_range(begin, end).await?;
+        let result = self
+            .logininfor_repo
+            .delete_by_time_range(begin, end)
+            .await?;
         Ok(result.rows_affected)
     }
 

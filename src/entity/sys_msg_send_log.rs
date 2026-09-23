@@ -16,7 +16,12 @@ use crate::common::datetime;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
 #[sea_orm(table_name = "sys_msg_send_log")]
 #[serde(rename_all = "camelCase")]
-#[ts(export, rename = "SysMsgSendLog", export_to = "SysMsgSendLog.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "SysMsgSendLog",
+    export_to = "SysMsgSendLog.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = SysMsgSendLog)]
 pub struct Model {
     #[sea_orm(primary_key)]

@@ -238,6 +238,11 @@ impl Operator {
     pub fn iat(&self) -> usize {
         self.0.iat
     }
+
+    /// 是否 PAT 会话（V7-E1 方案 S：审批写动作要求本人 JWT 会话，禁 PAT 代持）
+    pub fn is_pat(&self) -> bool {
+        self.0.pat_scopes.is_some()
+    }
 }
 
 #[cfg(test)]

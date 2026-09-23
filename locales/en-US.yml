@@ -77,6 +77,27 @@ error:
     unknown_error: Third-party login failed, please try again
     local_user_not_found: Local account does not exist or is disabled
     failure_title: Third-party login failed
+  flow:
+    dept_missing: Cannot determine the applicant's department, please complete user department info
+    dept_not_found: The applicant's department does not exist
+    leader_missing: This department has no leader set (leader_user_id); the "Dept Leader" approval cannot start
+    role_not_found: Approval role not found
+    role_no_active_user: No active user under the approval role
+    no_assignee: Cannot resolve any valid approver, please ask the admin to check the approval policy
+    user_not_found: User not found
+    user_disabled: Target user is disabled, cannot transfer
+    mode_invalid: Invalid approval mode (single/countersign)
+    task_not_found: Approval task not found
+    doc_not_found: Approval document not found
+    task_not_pending: This approval task has been processed or expired, please refresh
+    action_invalid: Unsupported approval action
+    to_user_required: Transfer requires a target user
+    transfer_to_self: Cannot transfer to yourself
+    self_approve_forbidden: You cannot approve a document submitted by yourself
+    self_approve_chain: The approval chain cannot consist solely of the applicant (self-approval is forbidden); adjust the policy or let someone else submit
+    not_assignee: Only the current assignee can operate this task
+    withdraw_only_applicant: Only the applicant can withdraw this document
+    pat_forbidden: Approval must be performed in a personal login session; personal access tokens (PAT) are not allowed
   sso:
     disabled: Single sign-on (SSO) is not enabled
     client_not_found: Client not found
@@ -453,6 +474,8 @@ error:
     delete_failed: Failed to delete file
 
 msg:
+  flow:
+    todo_created: You have a new approval task to handle
   success:
     default: Operation succeeded
     query: Query succeeded
