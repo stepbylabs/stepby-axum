@@ -33,6 +33,7 @@ pub fn public_sso_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/sso/authorize", get(sso_handler::authorize))
         .route("/sso/token", post(sso_handler::token))
         .route("/sso/userinfo", get(sso_handler::userinfo))
+        .route("/sso/jwks", get(sso_handler::jwks))
         .route(
             "/sso/logout",
             get(sso_handler::logout).post(sso_handler::logout),
@@ -62,5 +63,14 @@ pub fn sso_routes() -> Router<Arc<AppState>> {
         .route(
             "/system/oauth/client",
             post(sso_handler::client_add).put(sso_handler::client_edit),
+        )
+        // ===== 自助授权管理（v4-R8：仅登录，无需管理权限）=====
+        .route(
+            "/system/user/profile/sso-grants",
+            get(sso_handler::grant_list),
+        )
+        .route(
+            "/system/user/profile/sso-grants/{client_id}",
+            axum::routing::delete(sso_handler::grant_revoke),
         )
 }

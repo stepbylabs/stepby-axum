@@ -324,6 +324,7 @@ mod crypto_tests {
             os: "Windows".to_string(),
             jti: "test-jti".to_string(),
             dept_name: "研发部".to_string(),
+            source: "login".to_string(),
             exp: 1800000000,
         };
         let json = serde_json::to_string(&session).unwrap();
@@ -387,4 +388,8 @@ pub struct OnlineSession {
     /// 旧 JSON 反序列化时默认 0，force_logout 时回退到 jwt.expire_hours 保守上界
     #[serde(default)]
     pub exp: i64,
+    /// 令牌来源（v4-F2 新增）：`login` = 平台登录会话（缺省），`sso` = SSO Provider 签发的
+    /// 不透明 access_token。旧 JSON 反序列化时默认 `login`，在线列表/强退据此区分展示与清理。
+    #[serde(default)]
+    pub source: String,
 }

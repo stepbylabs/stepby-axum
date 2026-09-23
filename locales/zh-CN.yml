@@ -101,6 +101,9 @@ error:
     access_token_invalid: 访问令牌无效
     batch_id_invalid: 客户端 ID 无效
     redirect_uri_dup: 回调地址重复
+    client_id_reserved: client_id 为保留字，不允许使用
+    secret_encrypt_failed: 客户端密钥加密失败，请检查服务端主密钥配置
+    access_denied: 您拒绝了本次授权请求
   file:
     delete_failed: 删除文件失败
     delete_task_failed: 删除任务失败

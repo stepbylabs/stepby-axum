@@ -135,3 +135,17 @@ from_email = ""
 from_name = "yebot 系统"
 # 是否使用 STARTTLS（端口 587 时通常为 true，端口 465 SSL 直连时为 false）
 starttls = false
+
+# 单点登录（OIDC Provider，v4 加固后）——整段可选，缺省 enabled=false
+# 生产部署硬约束：
+#   ① issuer 必须为 https 绝对地址（本机回环豁免），通过环境变量 SSO_ISSUER 注入；
+#   ② SSO 与前端需**同源部署**（authorize 依赖 Admin-Token Cookie，跨源需 SameSite=None 专用改造，当前不支持）；
+#   ③ Redis >= 6.2（授权码一次性消费依赖 GETDEL）；
+#   ④ CONFIG_ENC_KEY 必须配置（id_token_secret 信封加密，v3-P1'-4）。
+[sso]
+enabled = false
+# OIDC issuer（发现文档 iss）；留空时回退为请求 base_url（仅限开发环境，v4-R3）
+issuer = ""
+code_ttl_secs = 300            # 授权码有效期（默认 300s）
+id_token_ttl_secs = 3600       # ID Token 有效期（默认 1h）
+access_token_ttl_secs = 3600   # SSO 访问令牌（不透明）有效期（默认 1h，v4-P0-A）

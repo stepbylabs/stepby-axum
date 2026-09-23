@@ -746,6 +746,9 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("DELETE", "/oauth2/unbind")
         // ===== 单点登录授权同意（本人登录态下批准/拒绝，仅登录，无需 RBAC）=====
             | ("POST", "/sso/consent")
+        // ===== 用户自助管理本人 SSO 授权（v2-I7：查看已授权应用 / 撤销同意，仅本人，无需 RBAC）=====
+            | ("GET", "/system/user/profile/sso-grants")
+            | ("DELETE", "/system/user/profile/sso-grants/{clientId}")
         // ===== 前端异常/性能上报（任何已登录用户皆可上报，无需 RBAC，Tier-S #1）=====
             | ("POST", "/monitor/frontendError/report")
     )
@@ -756,7 +759,12 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
 /// 无论是否已登记权限映射，PAT 认证的请求一律禁止访问这些路径，防止一枚被窃的作用域令牌
 /// 自我签发更宽的令牌、吊销他人令牌或续期。匹配使用路径前缀（覆盖 `{patId}` 参数化模板）。
 fn is_pat_management_path(path: &str) -> bool {
-    path.starts_with("/system/user/profile/tokens") || path.starts_with("/monitor/pat")
+    // v2-P0-C：`/sso/*` 受保护面（授权同意等）对 PAT 一律禁止——窄作用域的 PAT 不得代表用户
+    // 批准 SSO 授权（否则等于用作用域令牌为第三方签发完整身份令牌，scope 逃逸）。
+    // 公开的协议端点（/sso/authorize 等）不经过本中间件，不受影响。
+    path.starts_with("/sso/")
+        || path.starts_with("/system/user/profile/tokens")
+        || path.starts_with("/monitor/pat")
 }
 
 #[cfg(test)]

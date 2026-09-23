@@ -164,15 +164,21 @@ pub struct SsoConfig {
     /// 是否启用 SSO（OIDC Provider）端点。默认关闭，需显式开启（生产按需）
     #[serde(default = "default_sso_disabled")]
     pub enabled: bool,
-    /// OIDC issuer（发现文档 iss 与端点绝对前缀）。留空则按请求 Host/scheme 动态生成
+    /// OIDC issuer（发现文档 iss 与端点绝对前缀）。
+    /// enabled=true 时必须显式配置且为 https（localhost/127.0.0.1 例外）——
+    /// v4-P1-2：不再允许按请求 Host 推导（Host 头可被伪造，issuer 可被诱导）。
     #[serde(default)]
     pub issuer: String,
     /// 授权码有效期（秒，默认 60，短 TTL 一次性使用）
     #[serde(default = "default_sso_code_ttl_secs")]
     pub code_ttl_secs: u64,
-    /// ID Token / access_token 有效期（秒，默认 3600）
+    /// ID Token 有效期（秒，默认 3600）
     #[serde(default = "default_sso_id_token_ttl_secs")]
     pub id_token_ttl_secs: u64,
+    /// access_token（不透明令牌）有效期（秒，默认 3600）。
+    /// v4-P0-A：access_token 与 ID Token 生命周期分离——不再错用 id_token_ttl_secs。
+    #[serde(default = "default_sso_access_token_ttl_secs")]
+    pub access_token_ttl_secs: u64,
 }
 
 impl Default for SsoConfig {
@@ -182,6 +188,7 @@ impl Default for SsoConfig {
             issuer: String::new(),
             code_ttl_secs: default_sso_code_ttl_secs(),
             id_token_ttl_secs: default_sso_id_token_ttl_secs(),
+            access_token_ttl_secs: default_sso_access_token_ttl_secs(),
         }
     }
 }
@@ -193,6 +200,9 @@ fn default_sso_code_ttl_secs() -> u64 {
     60
 }
 fn default_sso_id_token_ttl_secs() -> u64 {
+    3600
+}
+fn default_sso_access_token_ttl_secs() -> u64 {
     3600
 }
 
@@ -818,9 +828,28 @@ impl Settings {
         if let Ok(v) = std::env::var("SSO_ENABLED") {
             self.sso.enabled = v == "true" || v == "1";
         }
-        // OIDC issuer（发现文档 iss 与端点绝对前缀），留空则按请求 Host 动态生成
+        // OIDC issuer（发现文档 iss 与端点绝对前缀），enabled=true 时必须显式配置（v4-P1-2）
         if let Ok(v) = std::env::var("SSO_ISSUER") {
             self.sso.issuer = v;
+        }
+        // v4-P1-3：TTL 三项支持 env 覆盖（容器场景无法改配置文件）
+        if let Ok(v) = std::env::var("SSO_CODE_TTL_SECS")
+            && let Ok(n) = v.parse::<u64>()
+            && n > 0
+        {
+            self.sso.code_ttl_secs = n;
+        }
+        if let Ok(v) = std::env::var("SSO_ID_TOKEN_TTL_SECS")
+            && let Ok(n) = v.parse::<u64>()
+            && n > 0
+        {
+            self.sso.id_token_ttl_secs = n;
+        }
+        if let Ok(v) = std::env::var("SSO_ACCESS_TOKEN_TTL_SECS")
+            && let Ok(n) = v.parse::<u64>()
+            && n > 0
+        {
+            self.sso.access_token_ttl_secs = n;
         }
     }
 
@@ -938,6 +967,23 @@ impl Settings {
                 "CONFIG_ENC_KEY 长度不足 32 字符（当前 {} 字符），低熵密钥无法保证 AES-256-GCM 安全，请使用 ≥32 随机字符",
                 self.config_enc_key.len()
             );
+        }
+        // v4-P1-2：SSO 启用时强制显式 issuer（https，localhost/127.0.0.1 例外）。
+        // 不再允许按请求 Host 推导 issuer——Host 头可被攻击者伪造，issuer 可被诱导错配。
+        if self.sso.enabled {
+            let issuer = self.sso.issuer.trim();
+            if issuer.is_empty() {
+                anyhow::bail!(
+                    "SSO_ENABLED=true 时必须显式配置 SSO_ISSUER（https URL），禁止按请求 Host 动态推导（可被伪造）"
+                );
+            }
+            let is_local = issuer.starts_with("http://localhost")
+                || issuer.starts_with("http://127.0.0.1");
+            if !issuer.starts_with("https://") && !is_local {
+                anyhow::bail!(
+                    "SSO_ISSUER 必须为 https URL（OIDC 规范要求），当前: {issuer}（本地开发可用 http://localhost 或 http://127.0.0.1）"
+                );
+            }
         }
         Ok(())
     }

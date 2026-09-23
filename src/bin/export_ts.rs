@@ -67,6 +67,7 @@ fn main() {
         axum_backend::service::sso_service::SsoClientUpsertDto,
         axum_backend::service::sso_service::SsoClientCreateResult,
         axum_backend::service::sso_service::ConsentDto,
+        axum_backend::service::sso_service::SsoGrantVo,
         // ---- service：其它 VO / DTO ----
         axum_backend::service::sys_job_service::JobVo,
         axum_backend::service::sys_logininfor_service::LoginDailyStat,

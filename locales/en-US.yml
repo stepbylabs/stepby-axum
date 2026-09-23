@@ -101,6 +101,9 @@ error:
     access_token_invalid: Access token is invalid
     batch_id_invalid: Invalid client id
     redirect_uri_dup: Duplicate redirect URI
+    client_id_reserved: client_id is a reserved identifier
+    secret_encrypt_failed: Failed to encrypt client secret, check the server master key config
+    access_denied: You denied the authorization request
   file:
     delete_failed: Failed to delete file
     delete_task_failed: Delete task failed

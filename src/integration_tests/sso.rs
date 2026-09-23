@@ -39,6 +39,9 @@ const REDIRECT_URI_ENC: &str = "https%3A%2F%2Fapp.test%2Fsso%2Fcallback";
 async fn sso_ctx() -> TestContext {
     unsafe {
         std::env::set_var("SSO_ENABLED", "true");
+        // v4-P1-2：enabled=true 时 validate_secrets 强制要求显式 https issuer
+        //（禁止按请求 Host 推导），测试与其对齐，同时覆盖 issuer 恒定语义
+        std::env::set_var("SSO_ISSUER", "https://sso.test");
     }
     TestContext::new().await
 }
@@ -164,12 +167,22 @@ fn token_form(code: &str, client_id: &str, client_secret: &str, verifier: &str) 
 
 /// 新增一个 consent_required 可控的客户端，返回 (clientId, 一次性明文 clientSecret)。
 async fn add_client(ctx: &TestContext, consent_required: &str, name: &str) -> (String, String) {
+    add_client_uris(ctx, consent_required, name, &[REDIRECT_URI]).await
+}
+
+/// 同 add_client，但可指定回调地址白名单（跨客户端拒绝用例需要互异的地址）。
+async fn add_client_uris(
+    ctx: &TestContext,
+    consent_required: &str,
+    name: &str,
+    uris: &[&str],
+) -> (String, String) {
     let v = ctx
         .post_json(
             "/system/oauth/client",
             serde_json::json!({
                 "clientName": name,
-                "redirectUris": [REDIRECT_URI],
+                "redirectUris": uris,
                 "scopes": ["openid", "profile", "email"],
                 "consentRequired": consent_required,
                 "enabled": "1",
@@ -229,7 +242,12 @@ async fn test_sso_full_flow_and_replay() {
         &[("cookie", cookie.as_str())],
     )
     .await;
-    assert_eq!(status, StatusCode::FOUND, "免同意 authorize 应 302，body={}", String::from_utf8_lossy(&abody));
+    assert_eq!(
+        status,
+        StatusCode::FOUND,
+        "免同意 authorize 应 302，body={}",
+        String::from_utf8_lossy(&abody)
+    );
     let loc = location_of(&headers);
     assert!(
         loc.starts_with(REDIRECT_URI),
@@ -279,12 +297,19 @@ async fn test_sso_full_flow_and_replay() {
         id_claims["iss"].as_str(),
         doc["issuer"].as_str()
     );
-    assert_eq!(id_claims["aud"].as_str().unwrap_or_default(), cid, "id_token aud 应为 client_id");
+    assert_eq!(
+        id_claims["aud"].as_str().unwrap_or_default(),
+        cid,
+        "id_token aud 应为 client_id"
+    );
     assert!(
         !id_claims["sub"].as_str().unwrap_or_default().is_empty(),
         "id_token sub 应非空，实际: {id_claims}"
     );
-    assert!(id_claims["exp"].as_i64().unwrap_or(0) > id_claims["iat"].as_i64().unwrap_or(0), "exp 应晚于 iat");
+    assert!(
+        id_claims["exp"].as_i64().unwrap_or(0) > id_claims["iat"].as_i64().unwrap_or(0),
+        "exp 应晚于 iat"
+    );
 
     // 5. userinfo（Bearer access_token）→ 200，sub 非空
     let bearer = format!("Bearer {access_token}");
@@ -409,7 +434,10 @@ async fn test_sso_security_negative_paths() {
         loc.starts_with("/login?redirect=%2Fsso%2Fauthorize"),
         "redirect 必须挂相对 authorize 路径，实际: {loc}"
     );
-    assert!(!loc.contains("%3A%2F%2F"), "redirect 不应混入绝对 URL: {loc}");
+    assert!(
+        !loc.contains("%3A%2F%2F"),
+        "redirect 不应混入绝对 URL: {loc}"
+    );
 
     // 4. redirect_uri 不在白名单 → 不可回跳（硬错误 400，防开放重定向）
     let bad = "/sso/authorize?client_id=PLACEHOLDER&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fevil.test%2Fcb&code_challenge=x&code_challenge_method=S256"
@@ -604,4 +632,446 @@ async fn cid_pk(ctx: &TestContext, client_id: &str) -> i64 {
         .find(|r| r["clientId"].as_str() == Some(client_id))
         .and_then(|r| r["ssoClientId"].as_i64())
         .unwrap_or_else(|| panic!("未能按 clientId={client_id} 反查主键，实际: {v}"))
+}
+
+// ==================== v4 加固专项（P0-A / P0-B / §7 / §6 / R1 / R8） ====================
+
+/// 带自定义 scope 的 authorize URL（email claim 用例需要）
+fn authorize_url_scopes(client_id: &str, challenge: &str, scope: &str) -> String {
+    format!(
+        "/sso/authorize?client_id={}&response_type=code&scope={}&redirect_uri={}&state=st_42&code_challenge={}&code_challenge_method=S256",
+        urlenc(client_id),
+        urlenc(scope),
+        REDIRECT_URI_ENC,
+        urlenc(challenge)
+    )
+}
+
+/// authorize（带会话 Cookie）→ 提取一次性 code
+async fn obtain_code(ctx: &TestContext, cid: &str, scope: &str) -> String {
+    let cookie = format!("Admin-Token={}", ctx.token);
+    let (status, headers, body) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &authorize_url_scopes(cid, PKCE_CHALLENGE, scope),
+        &[("cookie", cookie.as_str())],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FOUND,
+        "authorize 应 302，body={}",
+        String::from_utf8_lossy(&body)
+    );
+    let loc = location_of(&headers);
+    query_param(&loc, "code").expect("回跳应含 code")
+}
+
+/// token 交换 → (access_token, id_token, 响应头)
+async fn exchange_token(
+    ctx: &TestContext,
+    code: &str,
+    cid: &str,
+    secret: &str,
+    with_redirect_uri: bool,
+) -> (serde_json::Value, HeaderMap) {
+    let mut form = format!(
+        "grant_type=authorization_code&code={}&client_id={}&client_secret={}&code_verifier={}",
+        urlenc(code),
+        urlenc(cid),
+        urlenc(secret),
+        urlenc(PKCE_VERIFIER)
+    );
+    if with_redirect_uri {
+        form.push_str(&format!("&redirect_uri={REDIRECT_URI_ENC}"));
+    }
+    let (status, headers, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &form,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "token 交换应 200，body={}",
+        String::from_utf8_lossy(&body)
+    );
+    (json_of(&body), headers)
+}
+
+/// userinfo 请求状态码
+async fn userinfo_status(ctx: &TestContext, access_token: &str) -> StatusCode {
+    let bearer = format!("Bearer {access_token}");
+    let (status, _, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/userinfo",
+        &[("authorization", bearer.as_str())],
+    )
+    .await;
+    status
+}
+
+/// v4-P0-A：access_token 为不透明令牌——
+/// ① 形如随机串（非三段 JWT）；② 不能访问平台业务 API（越权隔离）；
+/// ③ token/userinfo 响应携带 Cache-Control: no-store（RFC 6749 §5.1）；
+/// ④ id_token 携带 auth_time + at_hash；⑤ email scope 走通完整数据链路。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_opaque_token_isolation_and_claims() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client(&ctx, "0", "it_sso_v4opaque").await;
+
+    let code = obtain_code(&ctx, &cid, "openid profile email").await;
+    let (tr, token_headers) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    let access_token = tr["access_token"]
+        .as_str()
+        .expect("应返回 access_token")
+        .to_string();
+
+    // ① 不透明令牌：不是 JWT（无 '.' 三段结构）
+    assert!(
+        !access_token.contains('.'),
+        "SSO access_token 必须为不透明令牌（不得复用平台 JWT），实际: {access_token}"
+    );
+
+    // ③ no-store 头（RFC 6749 §5.1）
+    let cache_control = token_headers
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store"),
+        "token 响应必须携带 Cache-Control: no-store，实际: {cache_control}"
+    );
+
+    // ② 业务 API 越权隔离：SSO AT 调 /getInfo 必须 401
+    let bearer = format!("Bearer {access_token}");
+    let (status, _, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        "/getInfo",
+        &[("authorization", bearer.as_str())],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "SSO 访问令牌不得访问平台业务 API（v4-P0-A 越权隔离）"
+    );
+
+    // ④ id_token 声明：auth_time 为登录认证时刻（iat 同源）、at_hash 存在
+    let id_claims = decode_jwt_payload(tr["id_token"].as_str().unwrap());
+    assert!(
+        id_claims["auth_time"].as_i64().unwrap_or(0) > 0,
+        "id_token 应携带 auth_time（v3 P1'-1），实际: {id_claims}"
+    );
+    assert!(
+        id_claims["at_hash"].as_str().is_some_and(|s| !s.is_empty()),
+        "id_token 应携带 at_hash（v4 C7），实际: {id_claims}"
+    );
+
+    // ⑤ email 数据链路：scope 含 email → userinfo 返回 email + email_verified:false
+    let (status, _, body) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/userinfo",
+        &[("authorization", bearer.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "userinfo 应 200");
+    let ui = json_of(&body);
+    assert!(
+        ui["email"].is_string(),
+        "email scope 应回显 email claim（v4 §6），实际: {ui}"
+    );
+    assert_eq!(ui["email_verified"], serde_json::json!(false));
+}
+
+/// v4 §7：token 请求必须携带与 authorize 完全一致的 redirect_uri（缺失 → 400 invalid_grant）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_token_redirect_uri_mandatory() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client(&ctx, "0", "it_sso_v4ru").await;
+    let code = obtain_code(&ctx, &cid, "openid profile").await;
+
+    // 缺失 redirect_uri → 拒绝（不再允许"未提供即通过"）
+    let (status, _, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &format!(
+            "grant_type=authorization_code&code={}&client_id={}&client_secret={}&code_verifier={}",
+            urlenc(&code),
+            urlenc(&cid),
+            urlenc(&secret),
+            urlenc(PKCE_VERIFIER)
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "缺 redirect_uri 应 400");
+    assert_eq!(
+        json_of(&body)["error"].as_str(),
+        Some("invalid_grant"),
+        "缺 redirect_uri 应 invalid_grant，实际: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+/// v4-P0-B：end_session 真实登出——
+/// ① 同源 Cookie 登出 → 302 回跳白名单地址；② 该用户 SSO AT 即刻 401；
+/// ③ 浏览器会话 JWT 进黑名单（后续 /getInfo 401）；④ 跨站无 hint 的登出 CSRF 无副作用；
+/// ⑤ hint 被篡改/跨客户端 → fail-closed 不回跳。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_end_session_real_logout() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client(&ctx, "0", "it_sso_v4logout").await;
+
+    // 签发一枚有效 SSO AT
+    let code = obtain_code(&ctx, &cid, "openid profile").await;
+    let (tr, _) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    let access_token = tr["access_token"].as_str().unwrap().to_string();
+    assert_eq!(userinfo_status(&ctx, &access_token).await, StatusCode::OK);
+
+    // ④ 跨站且无 hint 的登出（CSRF 模拟）→ 无副作用：不回跳、AT 仍有效
+    let logout_url = format!(
+        "/sso/logout?client_id={}&post_logout_redirect_uri={}",
+        urlenc(&cid),
+        REDIRECT_URI_ENC
+    );
+    let (status, headers, body) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &logout_url,
+        &[("sec-fetch-site", "cross-site")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "跨站无 hint 登出不得回跳");
+    assert_eq!(
+        json_of(&body)["status"].as_str(),
+        Some("logged_out"),
+        "跨站无 hint 登出应返回 logged_out JSON"
+    );
+    assert!(
+        headers.get("location").is_none(),
+        "跨站无 hint 登出不应携带 Location"
+    );
+    assert_eq!(
+        userinfo_status(&ctx, &access_token).await,
+        StatusCode::OK,
+        "跨站 CSRF 登出后 SSO AT 不应被吊销"
+    );
+
+    // ① 同源 Cookie 登出（无 sec-fetch-site 头 = 同源保守放行）→ 302 回跳白名单
+    let cookie = format!("Admin-Token={}", ctx.token);
+    let (status, headers, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &logout_url,
+        &[("cookie", cookie.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "同源登出应 302 回跳白名单地址");
+    assert_eq!(location_of(&headers), REDIRECT_URI);
+
+    // ② SSO AT 即刻失效
+    assert_eq!(
+        userinfo_status(&ctx, &access_token).await,
+        StatusCode::UNAUTHORIZED,
+        "end_session 后 SSO AT 应被全量吊销（v4-P0-B）"
+    );
+
+    // ③ 浏览器会话 JWT 黑名单：携带旧 Cookie 的业务请求 401
+    let (status, _, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        "/getInfo",
+        &[("cookie", cookie.as_str())],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "end_session 后浏览器会话应被拉黑（v4-P0-B）"
+    );
+}
+
+/// v4-P0-B：id_token_hint 验签失败 / 跨客户端误用 → fail-closed（不回跳、不产生副作用）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_end_session_hint_fail_closed() {
+    let ctx = sso_ctx().await;
+    let (cid_a, secret_a) = add_client(&ctx, "0", "it_sso_v4hintA").await;
+    // 客户端 B 登记互异的回调地址，验证 A 的 hint 不得回跳到 B 的登记地址
+    let (cid_b, _) = add_client_uris(&ctx, "0", "it_sso_v4hintB", &["https://b.test/cb"]).await;
+
+    // 客户端 A 签发 id_token
+    let code = obtain_code(&ctx, &cid_a, "openid profile").await;
+    let (tr, _) = exchange_token(&ctx, &code, &cid_a, &secret_a, true).await;
+    let id_token = tr["id_token"].as_str().unwrap().to_string();
+    let access_token = tr["access_token"].as_str().unwrap().to_string();
+
+    // 用 A 的 hint 但要求回跳到 A 的白名单 → hint 有效，应 302
+    let logout_url = format!(
+        "/sso/logout?id_token_hint={}&post_logout_redirect_uri={}",
+        urlenc(&id_token),
+        REDIRECT_URI_ENC
+    );
+    let (status, headers, _) = raw_get(&ctx.app, ctx.peer_ip, &logout_url, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::FOUND,
+        "有效 hint（aud=A）+ A 白名单回跳应 302"
+    );
+    assert_eq!(location_of(&headers), REDIRECT_URI);
+    // hint 路径吊销了 A 名下该用户的全部 AT（跨端登出语义）
+    assert_eq!(
+        userinfo_status(&ctx, &access_token).await,
+        StatusCode::UNAUTHORIZED,
+        "有效 hint 登出应吊销用户全部 SSO AT"
+    );
+
+    // 跨客户端误用：A 的有效 hint + client_id=B + B 的登记回跳地址 →
+    // 回跳目标以 hint 的 aud（A）为准，A 白名单不含 B 的地址 → fail-closed 不回跳
+    let (status, headers, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!(
+            "/sso/logout?id_token_hint={}&client_id={}&post_logout_redirect_uri={}",
+            urlenc(&id_token),
+            urlenc(&cid_b),
+            "https%3A%2F%2Fb.test%2Fcb"
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "跨客户端回跳地址不得放行");
+    assert!(headers.get("location").is_none());
+
+    // 篡改 hint（破坏签名）→ fail-closed：200 logged_out、不回跳
+    let tampered = format!("{}tampered", &id_token[..id_token.len() - 4]);
+    let (status, headers, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!(
+            "/sso/logout?id_token_hint={}&post_logout_redirect_uri={}",
+            urlenc(&tampered),
+            REDIRECT_URI_ENC
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "篡改 hint 不得回跳");
+    assert!(headers.get("location").is_none());
+}
+
+/// v3-K3/v4：客户端禁用/删除后，已签发 SSO AT 即刻失效（不等到 TTL 过期）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_disabled_client_invalidates_at() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client(&ctx, "0", "it_sso_v4disable").await;
+    let code = obtain_code(&ctx, &cid, "openid profile").await;
+    let (tr, _) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    let access_token = tr["access_token"].as_str().unwrap().to_string();
+    assert_eq!(userinfo_status(&ctx, &access_token).await, StatusCode::OK);
+
+    // 停用客户端 → AT 立即 401
+    let pk = cid_pk(&ctx, &cid).await;
+    let v = ctx
+        .put_json(
+            &format!("/system/oauth/client/{pk}/status?enabled=0"),
+            serde_json::json!({}),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        userinfo_status(&ctx, &access_token).await,
+        StatusCode::UNAUTHORIZED,
+        "客户端停用后其名下 SSO AT 应立即失效（v3-K3）"
+    );
+}
+
+/// v4-R8：自助授权管理——consent 批准后 grants 列表可见（client_name 快照），
+/// 撤销后同意记录软删且该客户端名下 AT 级联吊销。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_v4_grants_list_and_revoke() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client(&ctx, "1", "it_sso_v4grants").await;
+
+    // authorize → NeedConsent → consent 批准（auth_time 由服务端 Operator.iat 权威注入）
+    let cookie = format!("Admin-Token={}", ctx.token);
+    let (status, headers, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &authorize_url_scopes(&cid, PKCE_CHALLENGE, "openid profile email"),
+        &[("cookie", cookie.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "需同意客户端应 302 引导同意页");
+    let loc = location_of(&headers);
+    assert!(
+        loc.starts_with("/sso-consent"),
+        "应引导至同意页，实际: {loc}"
+    );
+
+    let v = ctx
+        .post_json(
+            "/sso/consent",
+            serde_json::json!({
+                "clientId": cid,
+                "redirectUri": REDIRECT_URI,
+                "scope": "openid profile email",
+                "state": "st_42",
+                "codeChallenge": PKCE_CHALLENGE,
+                "codeChallengeMethod": "S256",
+                "approved": true
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let redirect = v["data"]["redirect"]
+        .as_str()
+        .expect("consent 应返回 redirect");
+    let code = query_param(redirect, "code").expect("consent 回跳应含 code");
+
+    let (tr, _) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    let access_token = tr["access_token"].as_str().unwrap().to_string();
+    assert_eq!(userinfo_status(&ctx, &access_token).await, StatusCode::OK);
+
+    // grants 列表可见（client_name 快照）
+    let v = ctx.get_json("/system/user/profile/sso-grants").await;
+    ctx.assert_ok(&v);
+    let rows = v["data"].as_array().expect("grants 数组");
+    let grant = rows
+        .iter()
+        .find(|g| g["clientId"].as_str() == Some(cid.as_str()))
+        .unwrap_or_else(|| panic!("grants 应含刚授权的客户端，实际: {v}"));
+    assert_eq!(grant["clientName"].as_str(), Some("it_sso_v4grants"));
+    assert!(
+        grant["consentedAt"].is_string(),
+        "grants 应含同意时刻，实际: {grant}"
+    );
+
+    // 撤销授权 → 该客户端名下 AT 级联吊销 + 记录软删
+    let v = ctx
+        .delete_json(&format!("/system/user/profile/sso-grants/{}", urlenc(&cid)))
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        userinfo_status(&ctx, &access_token).await,
+        StatusCode::UNAUTHORIZED,
+        "撤销授权后该客户端名下 SSO AT 应级联吊销（v4-R8）"
+    );
+    let v = ctx.get_json("/system/user/profile/sso-grants").await;
+    let rows = v["data"].as_array().expect("grants 数组");
+    assert!(
+        !rows
+            .iter()
+            .any(|g| g["clientId"].as_str() == Some(cid.as_str())),
+        "撤销后 grants 不应再含该客户端，实际: {v}"
+    );
 }

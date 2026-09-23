@@ -881,6 +881,8 @@ impl AuthService {
             os: ctx.os.to_string(),
             jti: claims.jti,
             dept_name,
+            // v4-P0-A：会话来源标识（login=平台登录；sso=SSO 签发的 access_token）
+            source: "login".to_string(),
             // R11：防 usize→i64 溢出（与 jwt/claims.rs:106 的 try_from 防御保持一致）
             exp: i64::try_from(claims.exp).unwrap_or(0),
         };

@@ -61,6 +61,17 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_pat 管理菜单失败: {}", e))?;
 
+        // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
+        // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
+        // 与迁移 m20260923_000001_sso_v4_hardening 等价（启动不跑 Migrator::up 的存量库兜底）。
+        ensure_sso_v4_columns(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 SSO v4 列失败: {}", e))?;
+
+        // 3.7 v4 §1.3：SSO 启动自检（issuer https、client_id 与平台 JWT 命名空间碰撞告警）。
+        // 仅告警不阻断（存量部署允许先启动后整改），新客户端已由 add_client 硬校验拦截。
+        sso_startup_self_check(&db, &settings).await;
+
         // 4. 初始化 Redis
         let redis = db::init_redis(&settings.redis).await?;
 
@@ -450,6 +461,243 @@ async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Result<()> {
 
     tracing::info!("sys_pat 表已就绪（幂等确保完成）");
     Ok(())
+}
+
+/// 幂等检查表是否存在（三方言）
+async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> anyhow::Result<bool> {
+    let backend = db.get_database_backend();
+    let sql = match backend {
+        DatabaseBackend::Sqlite => {
+            format!("SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}'")
+        }
+        DatabaseBackend::Postgres => format!(
+            "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=current_schema() LIMIT 1"
+        ),
+        DatabaseBackend::MySql => format!(
+            "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=DATABASE() LIMIT 1"
+        ),
+    };
+    Ok(!db
+        .query_all(Statement::from_string(backend, sql))
+        .await?
+        .is_empty())
+}
+
+/// 幂等检查列是否存在（三方言）
+async fn sso_has_column(
+    db: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> anyhow::Result<bool> {
+    let backend = db.get_database_backend();
+    let rows = match backend {
+        DatabaseBackend::Sqlite => {
+            db.query_all(Statement::from_string(
+                backend,
+                format!("PRAGMA table_info({table})"),
+            ))
+            .await?
+        }
+        _ => {
+            let schema = if backend == DatabaseBackend::Postgres {
+                "table_schema=current_schema()"
+            } else {
+                "table_schema=DATABASE()"
+            };
+            db.query_all(Statement::from_string(
+                backend,
+                format!("SELECT 1 FROM information_schema.columns WHERE table_name='{table}' AND column_name='{column}' AND {schema} LIMIT 1"),
+            ))
+            .await?
+        }
+    };
+    if backend == DatabaseBackend::Sqlite {
+        Ok(rows.iter().any(|row| {
+            row.try_get::<String>("", "name")
+                .map(|n| n.eq_ignore_ascii_case(column))
+                .unwrap_or(false)
+        }))
+    } else {
+        Ok(!rows.is_empty())
+    }
+}
+
+/// v4 加固：幂等确保 SSO 表新列与存量数据回填（等价 m20260923_000001_sso_v4_hardening）
+///
+/// - sys_oauth_client：+ update_by / + del_flag（客户端软删，v2-K7/P1-5）
+/// - sys_oauth_consent：auth_time → consented_at 更名（v4-R4 语义修正）、
+///   + client_name_snapshot（v4-R6 名称快照）、+ del_flag（撤销=软删，v2-I7）
+/// - 存量回填：consented_at ← create_time；client_name_snapshot ← 当前客户端名；
+///   grant_types 去除未实现的 refresh_token（v4 §1.2）
+/// - 存量明文 id_token_secret 以 CONFIG_ENC_KEY 加密（v3-P1'-4，读到一条加密一条）
+async fn ensure_sso_v4_columns(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_oauth_client").await?
+        || !sso_table_exists(db, "sys_oauth_consent").await?
+    {
+        tracing::info!("SSO 表尚未创建，跳过 v4 列检查（由 migration 负责建表）");
+        return Ok(());
+    }
+
+    // ---- sys_oauth_client ----
+    if !sso_has_column(db, "sys_oauth_client", "update_by").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_client ADD COLUMN update_by VARCHAR(64) DEFAULT ''",
+        ))
+        .await?;
+    }
+    if !sso_has_column(db, "sys_oauth_client", "del_flag").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_client ADD COLUMN del_flag VARCHAR(1) NOT NULL DEFAULT '0'",
+        ))
+        .await?;
+    }
+
+    // ---- sys_oauth_consent：auth_time → consented_at ----
+    let has_consented_at = sso_has_column(db, "sys_oauth_consent", "consented_at").await?;
+    let has_auth_time = sso_has_column(db, "sys_oauth_consent", "auth_time").await?;
+    if !has_consented_at && has_auth_time {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_consent RENAME COLUMN auth_time TO consented_at",
+        ))
+        .await?;
+        tracing::info!("sys_oauth_consent.auth_time 已更名为 consented_at（v4-R4）");
+    } else if !has_consented_at && !has_auth_time {
+        // 极旧结构缺列：直接补（无可迁移数据）
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_consent ADD COLUMN consented_at DATETIME",
+        ))
+        .await?;
+    }
+    if !sso_has_column(db, "sys_oauth_consent", "client_name_snapshot").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_consent ADD COLUMN client_name_snapshot VARCHAR(128) NOT NULL DEFAULT ''",
+        ))
+        .await?;
+    }
+    if !sso_has_column(db, "sys_oauth_consent", "del_flag").await? {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_oauth_consent ADD COLUMN del_flag VARCHAR(1) NOT NULL DEFAULT '0'",
+        ))
+        .await?;
+    }
+
+    // ---- 存量回填 ----
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_oauth_consent SET consented_at = create_time WHERE consented_at IS NULL",
+    ))
+    .await?;
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_oauth_consent SET client_name_snapshot = COALESCE(\
+            (SELECT c.client_name FROM sys_oauth_client c WHERE c.client_id = sys_oauth_consent.client_id), '') \
+         WHERE client_name_snapshot = ''",
+    ))
+    .await?;
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_oauth_client SET grant_types = '[\"authorization_code\"]' \
+         WHERE grant_types LIKE '%refresh_token%'",
+    ))
+    .await?;
+
+    // ---- 存量明文 id_token_secret 加密（fail-open：主密钥未配置时跳过，留待配置后回填）----
+    let backend = db.get_database_backend();
+    let rows = db
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT sso_client_id, id_token_secret FROM sys_oauth_client \
+             WHERE id_token_secret NOT LIKE 'enc:%' AND id_token_secret != ''",
+        ))
+        .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let enc_key = std::env::var("CONFIG_ENC_KEY").unwrap_or_default();
+    if enc_key.is_empty() {
+        tracing::warn!(
+            "检测到 {} 条明文 id_token_secret，但 CONFIG_ENC_KEY 未配置，跳过加密（fail-open，与配置层策略一致）",
+            rows.len()
+        );
+        return Ok(());
+    }
+    let mut encrypted = 0usize;
+    let (ph_enc, ph_pk) = if backend == DatabaseBackend::Postgres {
+        ("$1", "$2")
+    } else {
+        ("?", "?")
+    };
+    for row in rows {
+        let Ok(pk) = row.try_get::<i64>("", "sso_client_id") else {
+            continue;
+        };
+        let Ok(plain) = row.try_get::<String>("", "id_token_secret") else {
+            continue;
+        };
+        match crate::utils::crypto::encrypt_config_value(&plain, &enc_key) {
+            Ok(enc) => {
+                db.execute(Statement::from_sql_and_values(
+                    backend,
+                    format!(
+                        "UPDATE sys_oauth_client SET id_token_secret = {ph_enc} WHERE sso_client_id = {ph_pk}"
+                    ),
+                    [enc.into(), pk.into()],
+                ))
+                .await?;
+                encrypted += 1;
+            }
+            Err(e) => tracing::error!("id_token_secret 回填加密失败 sso_client_id={pk}: {e}"),
+        }
+    }
+    if encrypted > 0 {
+        tracing::info!("已加密存量明文 id_token_secret {encrypted} 条（v3-P1'-4）");
+    }
+    Ok(())
+}
+
+/// v4 §1.3 / §10：SSO 启动自检（仅告警，不阻断启动）
+///
+/// 1. SSO 启用时 issuer 必须为 https（本机回环豁免，validate_secrets 已硬校验，此处兜底告警）；
+/// 2. 存量 client_id 与平台 JWT 命名空间（audience/issuer）碰撞 → 告警（新客户端已被
+///    add_client 保留字校验拦截，存量只提示管理员整改）。
+async fn sso_startup_self_check(db: &DatabaseConnection, settings: &Settings) {
+    if !settings.sso.enabled {
+        return;
+    }
+    if !sso_table_exists(db, "sys_oauth_client")
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let issuer = settings.sso.issuer.trim();
+    if issuer.is_empty() {
+        tracing::warn!("SSO 启动自检：issuer 未配置（SSO_ISSUER），发现文档将回退请求 base_url");
+    }
+    let audience = settings.jwt.audience.trim();
+    let jwt_issuer = settings.jwt.issuer.trim();
+    let backend = db.get_database_backend();
+    for reserved in [audience, jwt_issuer] {
+        if reserved.is_empty() {
+            continue;
+        }
+        let sql =
+            format!("SELECT COUNT(*) AS c FROM sys_oauth_client WHERE client_id = '{reserved}'");
+        if let Ok(Some(row)) = db.query_one(Statement::from_string(backend, sql)).await {
+            let count = row.try_get::<i64>("", "c").unwrap_or(0);
+            if count > 0 {
+                tracing::warn!(
+                    "SSO 启动自检：存在与平台 JWT 命名空间撞名的 client_id='{reserved}'，请尽快整改（v4 §1.3）"
+                );
+            }
+        }
+    }
 }
 
 /// 读取一条 `SELECT COUNT(*) AS c ...` 的结果（跨方言返回 i64）。

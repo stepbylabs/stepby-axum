@@ -50,6 +50,12 @@ pub struct Model {
     /// 多租户前向兼容预留字段（默认 0，本轮不参与过滤）
     pub tenant_id: i64,
     pub create_by: String,
+    /// 更新人（v4-R6：对齐 sys_* 表规范；轮换密钥/启停等操作记录）
+    #[serde(default)]
+    pub update_by: String,
+    /// 软删除标记（'0'=有效 '2'=已删除；v2-K7/P1-5 对齐 sys_* 规范，删除不再物理删）
+    #[serde(default)]
+    pub del_flag: String,
     #[serde(
         serialize_with = "datetime::serialize_opt",
         deserialize_with = "datetime::deserialize_opt"
@@ -80,6 +86,8 @@ impl std::fmt::Debug for Model {
             .field("remark", &self.remark)
             .field("tenant_id", &self.tenant_id)
             .field("create_by", &self.create_by)
+            .field("update_by", &self.update_by)
+            .field("del_flag", &self.del_flag)
             .field("create_time", &self.create_time)
             .field("update_time", &self.update_time)
             .finish()

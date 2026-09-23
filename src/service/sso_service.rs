@@ -21,6 +21,7 @@
 //!
 //! 分层约束：不依赖 axum/tower；Redis / JwtConfig / SsoConfig 由调用方注入。
 
+use base64::Engine as _;
 use redis::aio::ConnectionManager;
 use sea_orm::DatabaseConnection;
 use sea_orm::Set;
@@ -38,8 +39,18 @@ use crate::repository::sys_oauth_consent::SysOauthConsentRepository;
 
 /// 授权码 Redis key 前缀
 const CODE_KEY_PREFIX: &str = "sso:code:";
-/// access_token 绑定 Redis key 前缀
+/// access_token（不透明令牌，v4-P0-A）Redis key 前缀：key = `sso:at:{sha256(token)}`
 const AT_KEY_PREFIX: &str = "sso:at:";
+/// 用户 → 已签发 SSO access_token 集合（v4-F2）：登出/强退/改密时按用户全量吊销
+const USER_AT_KEY_PREFIX: &str = "sso:user_at:";
+/// 登录会话索引（v3-P0-B）：`sso:sess:{uid}` = Set(token_hash)，end_session 时定位该用户全部登录会话
+const SESS_KEY_PREFIX: &str = "sso:sess:";
+/// client_id 保留字（v4 §1.3）：禁止与协议自身命名空间/常见系统字冲突。
+/// 注意：与平台 jwt.audience / jwt.issuer 的碰撞校验是**动态比对配置**（见 add_client），
+/// 静态表只兜底通用保留字，不兜底可配置值。
+const RESERVED_CLIENT_IDS: &[&str] = &[
+    "sso", "oidc", "oauth", "oauth2", "admin", "system", "api", "internal", "yebot",
+];
 
 // ==================== 对外 DTO / VO ====================
 
@@ -123,7 +134,11 @@ pub struct SsoClientUpsertDto {
 /// 新增结果：明文 client_secret 仅此一次返回
 #[derive(Debug, Clone, Serialize, ToSchema, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "SsoClientCreateResult.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    export_to = "SsoClientCreateResult.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = SsoClientCreateResult)]
 pub struct SsoClientCreateResult {
     pub client_id: String,
@@ -139,6 +154,15 @@ struct CodeBinding {
     client_id: String,
     user_id: i64,
     username: String,
+    /// 昵称（v4 §6，issue_code_redirect 时查 sys_user 填充；旧绑定 JSON 缺省空串）
+    #[serde(default)]
+    nick_name: String,
+    /// 邮箱（v4 §6，email scope 数据链路）
+    #[serde(default)]
+    email: String,
+    /// access_token 的 SHA-256 哈希（v4 C7：ID Token 的 at_hash 计算用；兑换时写入）
+    #[serde(default)]
+    access_token_hash: String,
     redirect_uri: String,
     scope: Vec<String>,
     code_challenge: String,
@@ -146,13 +170,23 @@ struct CodeBinding {
     auth_time: i64,
 }
 
-/// access_token 绑定（供 userinfo 校验令牌确由本模块签发并还原 scope/身份）
+/// access_token 绑定（v4-P0-A：access_token 为**不透明令牌**，本结构是其唯一载体，
+/// 存于 `sso:at:{sha256(token)}`；平台业务路由对不透明串在 JWT 解码阶段即 401，天然隔离）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AccessBinding {
     client_id: String,
     user_id: i64,
     username: String,
+    /// 昵称（v4 §6：name claim 用昵称而非登录名，避免向 RP 泄漏工号/内部登录名）
+    #[serde(default)]
+    nick_name: String,
+    /// 邮箱（v4 §6：email scope 的真实数据链路，token 签发时查 sys_user 写入）
+    #[serde(default)]
+    email: String,
     scope: Vec<String>,
+    /// 用户认证时刻（UTC 秒，v3 P1'-1：取登录 JWT 的 iat，而非授权时刻）
+    #[serde(default)]
+    auth_time: i64,
 }
 
 /// authorize 请求参数（由 handler 从 query 解出后传入）
@@ -193,6 +227,11 @@ pub struct ConsentDto {
     #[ts(optional)]
     pub code_challenge_method: Option<String>,
     pub approved: bool,
+    /// 用户认证时刻（登录 JWT 的 iat，v3 P1'-1）：由前端从 Operator 身份透传；
+    /// 缺省回退为当前时间（仅影响存量旧前端的 auth_time 精度，不阻断流程）
+    #[serde(default)]
+    #[ts(optional)]
+    pub auth_time: Option<i64>,
 }
 
 /// /sso/token 请求参数 —— **OAuth2/OIDC 协议面**（外部 RP 用标准客户端库调用），
@@ -262,25 +301,80 @@ pub struct ConsentEcho {
     pub code_challenge: String,
 }
 
+/// 用户"已授权应用"条目（v4-R8 自助撤销授权页）。
+/// client_name 取同意时的**快照**（客户端改名不追溯篡改用户已见的授权对象）。
+#[derive(Debug, Clone, Serialize, ToSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "SsoGrantVo.ts", rename_all = "camelCase")]
+pub struct SsoGrantVo {
+    pub client_id: String,
+    pub client_name: String,
+    pub scopes: Vec<String>,
+    /// 授权时刻（yyyy-MM-dd HH:mm:ss）；存量旧记录可能为空
+    pub consented_at: Option<String>,
+}
+
 // ==================== Service ====================
 
 pub struct SsoService {
     client_repo: SysOauthClientRepository,
     consent_repo: SysOauthConsentRepository,
+    /// 主密钥（CONFIG_ENC_KEY，v3-P1'-4：id_token_secret 以 enc2: 信封加密存储）
+    enc_key: String,
+    /// 动态保留字（v4 §1.3）：平台 jwt.audience / jwt.issuer 等可配置值，
+    /// 构造时由调用方从配置注入，add_client 时与静态表一并比对。
+    reserved_ids: Vec<String>,
 }
 
 impl SsoService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, enc_key: String, reserved_ids: Vec<String>) -> Self {
         Self {
             client_repo: SysOauthClientRepository::new(db.clone()),
             consent_repo: SysOauthConsentRepository::new(db),
+            enc_key,
+            reserved_ids,
         }
+    }
+
+    /// 查询用户资料（昵称/邮箱，v4 §6 email scope 数据链路；查不到返回空串，
+    /// 不阻断授权流程——scope 按最小化原则不输出空 claim 之外的敏感信息）
+    async fn lookup_user_profile(&self, user_id: i64) -> (String, String) {
+        use sea_orm::EntityTrait;
+        match crate::entity::sys_user::Entity::find_by_id(user_id)
+            .one(self.client_repo.base().db())
+            .await
+        {
+            Ok(Some(u)) => (u.nick_name.clone(), u.email.clone().unwrap_or_default()),
+            _ => (String::new(), String::new()),
+        }
+    }
+
+    /// 解密客户端 id_token_secret（v3-P1'-4）。
+    /// - `enc2:` 前缀 → AES-256-GCM 解密（主密钥 CONFIG_ENC_KEY）；
+    /// - 明文（迁移期存量）→ 直接返回并记 warn，等待启动回填任务加密；
+    /// - 主密钥未配置且存量明文 → 明文返回（与 config_enc_key 的 fail-open 策略一致）。
+    fn decrypt_client_secret(&self, stored: &str) -> String {
+        if crate::utils::crypto::is_encrypted(stored) {
+            match crate::utils::crypto::decrypt_config_value(stored, &self.enc_key) {
+                Ok(v) => return v,
+                Err(e) => {
+                    tracing::error!("id_token_secret 解密失败（主密钥错误或数据损坏）: {}", e)
+                }
+            }
+        } else if !self.enc_key.is_empty() {
+            tracing::warn!("检测到未加密的存量 id_token_secret，等待启动回填任务处理");
+            return stored.to_string();
+        }
+        stored.to_string()
     }
 
     // -------------------- 发现文档 --------------------
 
     /// 构造 OIDC 发现文档（bare JSON）
-    pub fn discovery(&self, issuer: &str, config: &SsoConfig) -> serde_json::Value {
+    ///
+    /// v4 §5：本函数仅在 SSO enabled 时被调用（handler 层已拦截 disabled → 404），
+    /// 非标准字段 `sso_enabled` 已移除（不再向匿名调用者暴露内部开关状态）。
+    pub fn discovery(&self, issuer: &str, _config: &SsoConfig) -> serde_json::Value {
         let issuer = issuer.trim_end_matches('/');
         serde_json::json!({
             "issuer": issuer,
@@ -288,20 +382,30 @@ impl SsoService {
             "token_endpoint": format!("{}/sso/token", issuer),
             "userinfo_endpoint": format!("{}/sso/userinfo", issuer),
             "end_session_endpoint": format!("{}/sso/logout", issuer),
+            // v4 §5：OIDC Discovery 规定 jwks_uri 为 REQUIRED。HS256 不发布公钥，
+            // 返回空 keys 集合（合规 RP 不会从对称密钥验证方拉取 JWKS）。
+            "jwks_uri": format!("{}/sso/jwks", issuer),
             "response_types_supported": ["code"],
+            "response_modes_supported": ["query"],
             "grant_types_supported": ["authorization_code"],
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["HS256"],
             "scopes_supported": ["openid", "profile", "email"],
-            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            // v3-P1-7：同时声明 client_secret_basic（大量 RP 客户端库默认 Basic）
+            "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
             "code_challenge_methods_supported": ["S256"],
+            // v4 §6：claims_supported 与 scopes_supported 自洽（email scope 有对应 claim）
             "claims_supported": [
-                "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce",
-                "preferred_username", "name", "email"
+                "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "at_hash",
+                "preferred_username", "name", "email", "email_verified"
             ],
-            // 内部标记：本系统未启用时前端不展示入口
-            "sso_enabled": config.enabled,
         })
+    }
+
+    /// JWKS 端点响应（v4 §5）：HS256 对称签名不发布公钥，返回空 keys 集合以满足
+    /// OIDC Discovery 对 jwks_uri REQUIRED 的要求；升级 RS256 后此处返回真实公钥集。
+    pub fn jwks(&self) -> serde_json::Value {
+        serde_json::json!({ "keys": [] })
     }
 
     /// 解析 issuer：配置优先，回退请求 base_url
@@ -354,15 +458,15 @@ impl SsoService {
 
         // 3. redirect_uri 解析（精确匹配白名单）；缺失/不匹配均不可信 → 硬错误，
         //    遵循 RFC 6749 §4.1.2.1：redirect_uri 缺失或不匹配时 MUST NOT 自动回跳。
-        let redirect_uri = match self.resolve_redirect_uri(params.redirect_uri.as_deref(), &whitelist)
-        {
-            Some(u) => u,
-            None => {
-                return Ok(AuthorizeOutcome::HardError(ServiceError::bad_request(
-                    &crate::tr!("error.sso.redirect_uri_not_allowed"),
-                )));
-            }
-        };
+        let redirect_uri =
+            match self.resolve_redirect_uri(params.redirect_uri.as_deref(), &whitelist) {
+                Some(u) => u,
+                None => {
+                    return Ok(AuthorizeOutcome::HardError(ServiceError::bad_request(
+                        &crate::tr!("error.sso.redirect_uri_not_allowed"),
+                    )));
+                }
+            };
 
         // 4. response_type / PKCE / scope 校验（此时 redirect_uri 已可信，错误回跳给 RP）
         if params.response_type != "code" {
@@ -392,8 +496,8 @@ impl SsoService {
                 &crate::tr!("error.sso.pkce_method_unsupported"),
             )));
         }
-        let requested: Vec<String> = split_scope(&params.scope);
-        if !requested.iter().any(|s| s == "openid") {
+        let requested_all: Vec<String> = split_scope(&params.scope);
+        if !requested_all.iter().any(|s| s == "openid") {
             return Ok(AuthorizeOutcome::Redirect(redirect_error_url(
                 Some(&redirect_uri),
                 &params.state,
@@ -401,7 +505,15 @@ impl SsoService {
                 &crate::tr!("error.sso.openid_scope_required"),
             )));
         }
-        if !scopes_subset(&requested, &client_scopes) {
+        // v3-P1'-6（互操作）：未注册/未知 scope **忽略**而非整体拒绝——主流 OIDC 客户端库
+        // 默认请求 offline_access/address/phone 等，严格子集校验会让授权莫名失败。
+        // 仅当忽略后没有任何有效 scope 时才报 invalid_scope。实际授予集合必须与
+        // 同意页展示、code 绑定、token 响应三处一致（v4 §R4）。
+        let requested: Vec<String> = requested_all
+            .into_iter()
+            .filter(|r| client_scopes.iter().any(|a| a == r))
+            .collect();
+        if requested.is_empty() {
             return Ok(AuthorizeOutcome::Redirect(redirect_error_url(
                 Some(&redirect_uri),
                 &params.state,
@@ -437,9 +549,10 @@ impl SsoService {
             }
         }
 
-        // 6. 直接签发授权码并回跳
+        // 6. 直接签发授权码并回跳（auth_time 取登录会话的认证时刻，v3 P1'-1）
         let url = self
             .issue_code_redirect(
+                identity.auth_time,
                 identity.user_id,
                 &identity.username,
                 &client.client_id,
@@ -492,13 +605,13 @@ impl SsoService {
             )));
         }
 
-        // 拒绝：回跳携带 access_denied
+        // 拒绝：回跳携带 access_denied（v3-P2'-3：错误描述不得误用"未登录"文案）
         if !dto.approved {
             return Ok(redirect_error_url(
                 Some(&redirect_uri),
                 &dto.state,
                 "access_denied",
-                &crate::tr!("error.sso.not_login"),
+                &crate::tr!("error.sso.access_denied"),
             ));
         }
 
@@ -509,19 +622,24 @@ impl SsoService {
             )));
         }
 
-        // 记录同意
+        // 记录同意（consented_at = 批准时刻；client_name 快照供"已授权应用"展示，v4-R6）
         let now = datetime::now_naive();
         self.consent_repo
             .upsert(
                 user_id,
                 &client.client_id,
+                &client.client_name,
                 &serde_json::to_string(&requested)
                     .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?,
                 now,
             )
             .await?;
 
+        // auth_time：同意页批准路径的身份来自登录态 Operator，其认证时刻由 handler 从
+        // Claims.iat 传入（v3 P1'-1）
         self.issue_code_redirect(
+            dto.auth_time
+                .unwrap_or_else(|| chrono::Utc::now().timestamp()),
             user_id,
             username,
             &client.client_id,
@@ -537,9 +655,12 @@ impl SsoService {
     }
 
     /// 解析一次性授权码并签发回跳 URL（供 authorize 直发与 consent 批准复用）
+    ///
+    /// `auth_time`：用户认证时刻（登录 JWT 的 iat，v3 P1'-1），随码绑定写入 ID Token。
     #[allow(clippy::too_many_arguments)]
     async fn issue_code_redirect(
         &self,
+        auth_time: i64,
         user_id: i64,
         username: &str,
         client_id: &str,
@@ -552,15 +673,23 @@ impl SsoService {
         config: &SsoConfig,
     ) -> Result<String, ServiceError> {
         let code = random_urlsafe(32);
+        // v4 §6：查一次用户资料填充 email/nick_name（email scope 的真实数据链路；
+        // 绑定随码缓存，token 兑换与 userinfo 无需再查库）
+        let (nick_name, email) = self.lookup_user_profile(user_id).await;
         let binding = CodeBinding {
             client_id: client_id.to_string(),
             user_id,
             username: username.to_string(),
+            nick_name,
+            email,
             redirect_uri: redirect_uri.to_string(),
             scope: scope.to_vec(),
             code_challenge: code_challenge.to_string(),
             nonce: nonce.map(|s| s.to_string()),
-            auth_time: chrono::Utc::now().timestamp(),
+            // v3 P1'-1：认证时刻（登录时点）而非授权时点
+            auth_time,
+            // v4 C7：授权码阶段尚未签发 AT，占位空串；token 端点签发后回填
+            access_token_hash: String::new(),
         };
         let json = serde_json::to_string(&binding)
             .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
@@ -590,11 +719,12 @@ impl SsoService {
     // -------------------- 令牌端点 --------------------
 
     /// 处理 POST /sso/token（authorization_code 交换）
+    ///
+    /// v4-P0-A：`jwt` 参数已移除——access_token 不再是平台 JWT，无需平台签名密钥。
     pub async fn token(
         &self,
         params: TokenParams,
         redis: &mut ConnectionManager,
-        jwt: &JwtConfig,
         config: &SsoConfig,
         base_url: &str,
     ) -> Result<TokenResult, OidcError> {
@@ -652,20 +782,30 @@ impl SsoService {
         let binding: CodeBinding = serde_json::from_str(&binding_json)
             .map_err(|_| OidcError::new("invalid_grant", crate::tr!("error.sso.code_invalid")))?;
 
-        // 绑定一致性：client_id / redirect_uri
+        // 绑定一致性：client_id / redirect_uri。
+        // v4 §7：authorize 携带了 redirect_uri 时，token 请求**必须**携带完全相同的值
+        // （RFC 6749 §10.6），不留"未提供即通过"的口子——否则多回调地址的 RP 在 token
+        // 阶段失去 redirect_uri 绑定防线。
         if binding.client_id != params.client_id {
             return Err(OidcError::new(
                 "invalid_grant",
                 crate::tr!("error.sso.code_invalid"),
             ));
         }
-        if let Some(ru) = params.redirect_uri.as_deref().filter(|s| !s.is_empty())
-            && ru != binding.redirect_uri
-        {
-            return Err(OidcError::new(
-                "invalid_grant",
-                crate::tr!("error.sso.redirect_uri_not_allowed"),
-            ));
+        match params.redirect_uri.as_deref().filter(|s| !s.is_empty()) {
+            None => {
+                return Err(OidcError::new(
+                    "invalid_grant",
+                    "redirect_uri required".to_string(),
+                ));
+            }
+            Some(ru) if ru != binding.redirect_uri => {
+                return Err(OidcError::new(
+                    "invalid_grant",
+                    crate::tr!("error.sso.redirect_uri_not_allowed"),
+                ));
+            }
+            _ => {}
         }
 
         // PKCE 校验
@@ -676,35 +816,78 @@ impl SsoService {
                 crate::tr!("error.sso.pkce_verify_failed"),
             ));
         }
+        let mut binding = binding;
+        // v4 C7：为 ID Token 的 at_hash 记录 access_token 哈希（在下方生成令牌后写入）
 
-        // 签发 access_token（复用平台 JWT）+ 记录绑定供 userinfo 校验
-        let (access_token, _claims) =
-            JwtUtils::generate_token(&binding.user_id.to_string(), &binding.username, jwt, 0)
-                .map_err(|_| {
-                    OidcError::new("server_error", crate::tr!("error.sso.token_failed"))
-                })?;
+        // v4-P0-A：access_token 改为**不透明令牌**（random 32B，base64url）。
+        // 旧实现复用平台 JWT（iss/aud 与登录令牌同构），可被用于横扫全站受保护 API（越权）；
+        // 不透明令牌：① 平台路由在 JWT 解码阶段即 401（天然隔离，零中间件改动）；
+        // ② DEL 绑定即即时吊销；③ 泄漏不暴露 claims。RP 一律通过 /sso/userinfo 消费。
+        let access_token = random_urlsafe(32);
+        let now_secs = chrono::Utc::now().timestamp();
+        let at_ttl = config.access_token_ttl_secs.max(1);
+        let at_hash = crate::utils::crypto::token_hash(&access_token);
+        binding.access_token_hash = at_hash.clone();
         let at_binding = AccessBinding {
             client_id: client.client_id.clone(),
             user_id: binding.user_id,
             username: binding.username.clone(),
+            nick_name: binding.nick_name.clone(),
+            email: binding.email.clone(),
             scope: binding.scope.clone(),
+            auth_time: binding.auth_time,
         };
         let at_json = serde_json::to_string(&at_binding)
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
-        let at_key = format!(
-            "{}{}",
-            AT_KEY_PREFIX,
-            crate::utils::crypto::token_hash(&access_token)
-        );
-        let ttl = config.id_token_ttl_secs.max(1);
+        let at_key = format!("{}{}", AT_KEY_PREFIX, at_hash);
         let _: () = redis::cmd("SET")
             .arg(&at_key)
             .arg(&at_json)
             .arg("EX")
-            .arg(ttl)
+            .arg(at_ttl)
             .query_async(redis)
             .await
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        // v4-F2：登记「用户 → 已签发 SSO AT」集合（登出/强退/改密全量吊销用）+ 在线可见。
+        // 读路径有 EXISTS 悬空自愈（见 revoke_user_sso_tokens），集合 TTL 稍大于 AT TTL。
+        let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, binding.user_id);
+        let _: () = redis::cmd("SADD")
+            .arg(&user_at_key)
+            .arg(&at_hash)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = redis::cmd("EXPIRE")
+            .arg(&user_at_key)
+            .arg(at_ttl + 60)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        // F2：写 online:{hash}（source=sso）→ 在线用户列表可见、管理员可强退
+        let online = crate::utils::crypto::OnlineSession {
+            user_id: binding.user_id,
+            username: binding.username.clone(),
+            ip: "sso".to_string(),
+            login_time: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            browser: "SSO".to_string(),
+            os: "-".to_string(),
+            jti: format!("sso-at-{}", client.client_id),
+            dept_name: String::new(),
+            exp: now_secs + at_ttl as i64,
+            source: "sso".to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&online) {
+            let online_key = format!("online:{}", at_hash);
+            let _: () = redis::cmd("SETEX")
+                .arg(&online_key)
+                .arg(at_ttl)
+                .arg(&json)
+                .query_async(redis)
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.sso.token_failed"))
+                })?;
+        }
 
         // 签发 id_token（HS256 + 每客户端密钥）
         let id_token = self
@@ -714,7 +897,9 @@ impl SsoService {
         Ok(TokenResult {
             access_token,
             token_type: "Bearer",
-            expires_in: ttl,
+            // v4-P0-A：expires_in 必须等于 access_token 的真实生命周期
+            //（旧实现错用 id_token_ttl_secs，而 JWT exp 由 jwt.expire_hours 决定，两者严重不一致）
+            expires_in: at_ttl,
             scope: binding.scope.join(" "),
             id_token,
         })
@@ -761,23 +946,45 @@ impl SsoService {
         if let Some(n) = &binding.nonce {
             claims.insert("nonce".into(), serde_json::json!(n));
         }
-        // profile 声明
-        if binding.scope.iter().any(|s| s == "profile")
-            || binding.scope.iter().any(|s| s == "email")
-        {
+        // v4 §6：profile 声明（name 用昵称而非登录名，避免向 RP 泄漏工号/内部登录名）
+        if binding.scope.iter().any(|s| s == "profile") {
             claims.insert(
                 "preferred_username".into(),
                 serde_json::json!(binding.username),
             );
-            claims.insert("name".into(), serde_json::json!(binding.username));
+            let display = if binding.nick_name.is_empty() {
+                &binding.username
+            } else {
+                &binding.nick_name
+            };
+            claims.insert("name".into(), serde_json::json!(display));
+        }
+        // v4 §6：email 声明（数据链路：issue_code_redirect 时查 sys_user 写入绑定）。
+        // 本系统无邮箱验证流程，email_verified 恒 false（规范要求 claim 存在时必须携带）。
+        if binding.scope.iter().any(|s| s == "email") {
+            claims.insert("email".into(), serde_json::json!(binding.email));
+            claims.insert("email_verified".into(), serde_json::json!(false));
+        }
+        // v4 C7：at_hash = base64url(SHA256(access_token) 左半 128bit)。
+        // access_token 与 ID Token 同时返回时建议携带，防令牌替换攻击。
+        {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(binding.access_token_hash.as_bytes());
+            let digest = hasher.finalize();
+            let at_hash = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(&digest[..digest.len() / 2]);
+            claims.insert("at_hash".into(), serde_json::json!(at_hash));
         }
         let payload = serde_json::Value::Object(claims);
         let mut header = Header::new(Algorithm::HS256);
         header.typ = Some("JWT".to_string());
+        // v3-P1'-4：id_token_secret 以 enc2: 信封加密存储，签名前解密（明文兼容迁移期旧数据）
+        let secret = self.decrypt_client_secret(&client.id_token_secret);
         let token = encode(
             &header,
             &payload,
-            &EncodingKey::from_secret(client.id_token_secret.as_bytes()),
+            &EncodingKey::from_secret(secret.as_bytes()),
         )
         .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
         Ok(token)
@@ -785,12 +992,15 @@ impl SsoService {
 
     // -------------------- userinfo --------------------
 
-    /// 处理 GET /sso/userinfo（Bearer access_token → 按 scope 返回身份声明）
+    /// 处理 GET|POST /sso/userinfo（Bearer access_token → 按 scope 返回身份声明）
+    ///
+    /// v4-P0-A：access_token 为不透明令牌——校验方式改为「SHA-256 → GET `sso:at:{hash}` 绑定」，
+    /// 不再做任何 JWT 解码（平台 JWT 在此也无效：无绑定即 401）。绑定缺失/删除即吊销，天然即时生效。
+    /// v3-K3：同时校验 client 仍存在且启用——禁用/删除客户端后旧令牌立即失效，不再放行到 TTL 过期。
     pub async fn userinfo(
         &self,
         bearer: &str,
         redis: &mut ConnectionManager,
-        jwt: &JwtConfig,
         config: &SsoConfig,
     ) -> Result<serde_json::Value, OidcError> {
         if !config.enabled {
@@ -799,20 +1009,13 @@ impl SsoService {
                 crate::tr!("error.sso.disabled"),
             ));
         }
-        // 校验平台 JWT 签名
-        let claims = JwtUtils::verify_token(bearer, jwt).map_err(|_| {
+        let invalid = || {
             OidcError::new(
                 "invalid_token",
                 crate::tr!("error.sso.access_token_invalid"),
             )
-        })?;
-        let user_id: i64 = claims.sub.parse().map_err(|_| {
-            OidcError::new(
-                "invalid_token",
-                crate::tr!("error.sso.access_token_invalid"),
-            )
-        })?;
-        // 必须为本模块签发的 access_token（绑定存在），且属主一致
+        };
+        // 不透明令牌：哈希命中绑定才有效
         let at_key = format!(
             "{}{}",
             AT_KEY_PREFIX,
@@ -823,34 +1026,33 @@ impl SsoService {
             .query_async(redis)
             .await
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
-        let raw = raw.ok_or_else(|| {
-            OidcError::new(
-                "invalid_token",
-                crate::tr!("error.sso.access_token_invalid"),
-            )
-        })?;
-        let binding: AccessBinding = serde_json::from_str(&raw).map_err(|_| {
-            OidcError::new(
-                "invalid_token",
-                crate::tr!("error.sso.access_token_invalid"),
-            )
-        })?;
-        if binding.user_id != user_id {
-            return Err(OidcError::new(
-                "invalid_token",
-                crate::tr!("error.sso.access_token_invalid"),
-            ));
+        let raw = raw.ok_or_else(invalid)?;
+        let binding: AccessBinding = serde_json::from_str(&raw).map_err(|_| invalid())?;
+        // v3-K3：client 存在且启用（软删/停用后即时失效）
+        let client = self
+            .client_repo
+            .find_by_client_id(&binding.client_id)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?
+            .ok_or_else(invalid)?;
+        if client.enabled != "1" {
+            return Err(invalid());
         }
 
+        // 按 scope 最小化下发（v2-I8/§6：profile→preferred_username/name；email→email/email_verified）
         let mut claims = serde_json::Map::new();
         claims.insert("sub".into(), serde_json::json!(binding.user_id.to_string()));
-        let wants_profile = binding.scope.iter().any(|s| s == "profile" || s == "email");
-        if wants_profile {
+        if binding.scope.iter().any(|s| s == "profile") {
             claims.insert(
                 "preferred_username".into(),
                 serde_json::json!(binding.username),
             );
-            claims.insert("name".into(), serde_json::json!(binding.username));
+            claims.insert("name".into(), serde_json::json!(binding.nick_name));
+        }
+        if binding.scope.iter().any(|s| s == "email") {
+            claims.insert("email".into(), serde_json::json!(binding.email));
+            // 本系统无邮箱验证流程：规范要求 claim 存在时必须带 email_verified，恒 false
+            claims.insert("email_verified".into(), serde_json::json!(false));
         }
         Ok(serde_json::Value::Object(claims))
     }
@@ -877,7 +1079,8 @@ impl SsoService {
             Err(_) => return Ok(None),
         };
         // 黑名单校验：已登出的会话不再视为有效
-        let blacklist_key = format!("blacklist:{}", crate::utils::crypto::token_hash(token));
+        let token_hash = crate::utils::crypto::token_hash(token);
+        let blacklist_key = format!("blacklist:{}", token_hash);
         let blacklisted: Option<String> = redis::cmd("GET")
             .arg(&blacklist_key)
             .query_async(redis)
@@ -886,9 +1089,27 @@ impl SsoService {
         if blacklisted.is_some() {
             return Ok(None);
         }
+        // v3-P0-B：登记登录会话索引（`sso:sess:{uid}` = hash 集合），
+        // end_session 可按用户跨端拉黑全部 IdP 会话；TTL = JWT 剩余寿命。
+        let remaining = (claims.exp as i64)
+            .saturating_sub(chrono::Utc::now().timestamp())
+            .max(60);
+        let sess_key = format!("{}{}", SESS_KEY_PREFIX, user_id);
+        let _: Result<i64, _> = redis::cmd("SADD")
+            .arg(&sess_key)
+            .arg(&token_hash)
+            .query_async(redis)
+            .await;
+        let _: Result<i64, _> = redis::cmd("EXPIRE")
+            .arg(&sess_key)
+            .arg(remaining)
+            .query_async(redis)
+            .await;
         Ok(Some(SessionIdentity {
             user_id,
             username: claims.username,
+            // v3 P1'-1：登录 JWT 的 iat 即用户认证时刻（claims.rs:123 签发时写入）
+            auth_time: claims.iat as i64,
         }))
     }
 
@@ -900,6 +1121,40 @@ impl SsoService {
             return Ok(Vec::new());
         };
         Ok(serde_json::from_str(&c.redirect_uris).unwrap_or_default())
+    }
+
+    // -------------------- 自助授权管理（v4-R8） --------------------
+
+    /// 当前用户"已授权应用"列表（client_name 用同意时快照，v4-R6）
+    pub async fn list_user_grants(&self, user_id: i64) -> Result<Vec<SsoGrantVo>, ServiceError> {
+        let rows = self.consent_repo.find_by_user(user_id).await?;
+        Ok(rows
+            .into_iter()
+            .map(|m| SsoGrantVo {
+                client_id: m.client_id,
+                client_name: m.client_name_snapshot,
+                scopes: serde_json::from_str(&m.scopes).unwrap_or_default(),
+                consented_at: m
+                    .consented_at
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+            })
+            .collect())
+    }
+
+    /// 用户撤销对某 client 的授权：软删同意记录 + 级联吊销该客户端名下的 SSO access_token。
+    /// 返回是否确实存在有效授权（不存在时幂等成功，前端提示已撤销）。
+    pub async fn revoke_user_grant(
+        &self,
+        user_id: i64,
+        client_id: &str,
+        redis: &mut ConnectionManager,
+    ) -> Result<bool, ServiceError> {
+        let revoked = self.consent_repo.revoke(user_id, client_id).await?;
+        if revoked {
+            self.revoke_user_client_tokens(redis, user_id, client_id)
+                .await;
+        }
+        Ok(revoked)
     }
 
     pub async fn get_client_page(
@@ -953,6 +1208,14 @@ impl SsoService {
                         "error.sso.client_id_exists"
                     )));
                 }
+                // v4 §1.3：保留字双校验——静态通用表 + 动态配置值（jwt.audience/issuer 等），
+                // 防止 client_id 与平台自身命名空间/受众标识撞名造成令牌语义混淆。
+                if RESERVED_CLIENT_IDS.contains(&cid) || self.reserved_ids.iter().any(|r| r == cid)
+                {
+                    return Err(ServiceError::bad_request(&crate::tr!(
+                        "error.sso.client_id_reserved"
+                    )));
+                }
                 cid.to_string()
             }
             _ => loop {
@@ -963,16 +1226,32 @@ impl SsoService {
             },
         };
 
-        // 密钥：明文 client_secret 返回一次；id_token_secret 仅服务端持有
+        // 密钥：明文 client_secret 返回一次；id_token_secret 仅服务端持有。
+        // v3-P1'-4：主密钥已配置时必须加密成功才落库（fail-closed，拒绝明文入库）；
+        // 主密钥未配置（迁移期 fail-open 策略）才允许明文。
         let client_secret = random_urlsafe(32);
         let client_secret_hash = crate::utils::crypto::token_hash(&client_secret);
         let id_token_secret = random_urlsafe(32);
+        let id_token_secret_stored = if self.enc_key.is_empty() {
+            tracing::warn!("CONFIG_ENC_KEY 未配置：id_token_secret 以明文落库（迁移期 fail-open）");
+            id_token_secret
+        } else {
+            crate::utils::crypto::encrypt_config_value(&id_token_secret, &self.enc_key).map_err(
+                |e| {
+                    tracing::error!(
+                        "id_token_secret 加密失败，拒绝创建客户端（fail-closed）: {}",
+                        e
+                    );
+                    ServiceError::internal(&crate::tr!("error.sso.secret_encrypt_failed"))
+                },
+            )?
+        };
 
         let now = datetime::now_naive();
         let am = ClientActiveModel {
             client_id: Set(client_id.clone()),
             client_secret_hash: Set(client_secret_hash),
-            id_token_secret: Set(id_token_secret),
+            id_token_secret: Set(id_token_secret_stored),
             client_name: Set(dto.client_name.trim().to_string()),
             logo_uri: Set(dto.logo_uri.unwrap_or_default().trim().to_string()),
             redirect_uris: Set(to_json_array(&redirect_uris)),
@@ -983,6 +1262,7 @@ impl SsoService {
             remark: Set(dto.remark),
             tenant_id: Set(0),
             create_by: Set(create_by.to_string()),
+            update_by: Set(create_by.to_string()),
             create_time: Set(Some(now)),
             update_time: Set(Some(now)),
             ..Default::default()
@@ -998,7 +1278,7 @@ impl SsoService {
     pub async fn edit_client(
         &self,
         dto: SsoClientUpsertDto,
-        _update_by: &str,
+        update_by: &str,
     ) -> Result<SsoClientVo, ServiceError> {
         if dto.sso_client_id <= 0 {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -1032,19 +1312,43 @@ impl SsoService {
         am.consent_required = Set(consent_required);
         am.enabled = Set(enabled);
         am.remark = Set(dto.remark);
+        am.update_by = Set(update_by.to_string());
 
         // 经 ActiveModelBehavior::before_save 刷新 update_time
         let saved = self.client_repo.update(am).await?;
         Ok(client_to_vo(saved))
     }
 
-    pub async fn delete_clients(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
+    /// 批量删除客户端（v4-R9：**软删** + 级联清理）。
+    ///
+    /// 级联顺序（先吊销令牌再软删，避免竞态窗口内已删客户端仍可用旧令牌换身份）：
+    /// 1. 逐个取有效客户端 → client_id；
+    /// 2. 对每个 client 查出已授权用户 → 全量吊销其 SSO access_token（sso:at:* + online:*）；
+    /// 3. 删除该 client 的全部同意记录；
+    /// 4. 软删客户端（del_flag='2'，client_id 唯一约束不释放，防重建撞名，v2-K4）。
+    pub async fn delete_clients(
+        &self,
+        ids: Vec<i64>,
+        redis: &mut ConnectionManager,
+    ) -> Result<(), ServiceError> {
         if ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.sso.batch_id_invalid"
             )));
         }
-        self.client_repo.delete_by_ids(ids).await?;
+        for id in &ids {
+            if let Some(m) = self.client_repo.find_by_pk(*id).await? {
+                // 2. 级联吊销该客户端全部已授权用户的 SSO 令牌
+                let user_ids = self.consent_repo.user_ids_by_client(&m.client_id).await?;
+                for uid in user_ids {
+                    self.revoke_user_sso_tokens(redis, uid).await;
+                }
+                // 3. 清理同意记录（物理删，历史审计可走操作日志）
+                self.consent_repo.delete_by_client(&m.client_id).await?;
+            }
+        }
+        // 4. 软删
+        self.client_repo.soft_delete_by_ids(ids).await?;
         Ok(())
     }
 
@@ -1062,6 +1366,242 @@ impl SsoService {
         });
         self.client_repo.update(am).await?;
         Ok(())
+    }
+
+    // -------------------- 令牌吊销（v4-F2 / P0-B） --------------------
+
+    /// 全量吊销某用户的全部 SSO access_token（登出 / 强退 / 改密 / 删客户端级联）：
+    /// 遍历 `sso:user_at:{uid}` 索引，逐个 DEL `sso:at:{hash}` 与 `online:{hash}`，
+    /// 最后清空索引。集合中已自然过期的 hash 删不到任何 key，悬空自愈、无害。
+    pub async fn revoke_user_sso_tokens(&self, redis: &mut ConnectionManager, user_id: i64) {
+        let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, user_id);
+        let hashes: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(&user_at_key)
+            .query_async(redis)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("读取用户 SSO 令牌索引失败 user_id={}: {}", user_id, e);
+                Vec::new()
+            });
+        for h in &hashes {
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(format!("{}{}", AT_KEY_PREFIX, h))
+                .query_async(redis)
+                .await;
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(format!("online:{}", h))
+                .query_async(redis)
+                .await;
+        }
+        let _: Result<i64, _> = redis::cmd("DEL").arg(&user_at_key).query_async(redis).await;
+        if !hashes.is_empty() {
+            tracing::info!(
+                "已全量吊销用户 SSO access_token user_id={} count={}",
+                user_id,
+                hashes.len()
+            );
+        }
+    }
+
+    /// 按客户端粒度吊销某用户的 SSO access_token（v4-R8 自助撤销授权的级联动作）：
+    /// 读取每个 AT 的绑定 JSON，仅删除 `client_id` 匹配的令牌及其在线会话。
+    pub async fn revoke_user_client_tokens(
+        &self,
+        redis: &mut ConnectionManager,
+        user_id: i64,
+        client_id: &str,
+    ) {
+        let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, user_id);
+        let hashes: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(&user_at_key)
+            .query_async(redis)
+            .await
+            .unwrap_or_default();
+        for h in &hashes {
+            let at_key = format!("{}{}", AT_KEY_PREFIX, h);
+            let binding_json: Option<String> = redis::cmd("GET")
+                .arg(&at_key)
+                .query_async(redis)
+                .await
+                .unwrap_or(None);
+            let matched = binding_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<AccessBinding>(j).ok())
+                .map(|b| b.client_id == client_id)
+                .unwrap_or(false);
+            if matched {
+                let _: Result<i64, _> = redis::cmd("DEL").arg(&at_key).query_async(redis).await;
+                let _: Result<i64, _> = redis::cmd("DEL")
+                    .arg(format!("online:{}", h))
+                    .query_async(redis)
+                    .await;
+                let _: Result<i64, _> = redis::cmd("SREM")
+                    .arg(&user_at_key)
+                    .arg(h)
+                    .query_async(redis)
+                    .await;
+            }
+        }
+    }
+
+    /// v4-P0-B：end_session 真实登出（RP-initiated Single Logout）。
+    ///
+    /// 身份来源（二选一，均需通过验证才产生副作用）：
+    /// - `id_token_hint`：用对应客户端的 id_token_secret 验签（HS256），`aud` 必须等于
+    ///   该 client_id → `sub` 即目标用户；
+    /// - 浏览器 `session_token`（Admin-Token Cookie）：平台 JWT 验签通过即本人会话。
+    ///
+    /// 副作用：① 全量吊销目标用户 SSO access_token；② 黑名单该浏览器会话 JWT（剩余寿命 TTL，
+    /// 仅当 hint 用户与 Cookie 用户一致或无 hint 时）。
+    ///
+    /// 返回 `Some(redirect_uri)`：`post_logout_redirect_uri` 精确命中该客户端登记白名单且
+    /// 身份验证通过时回跳；hint 无效时 fail-closed 不回跳（OIDC 安全 BCP）。
+    /// `allow_cookie_logout`：CSRF 防护（v4-R5）——无 hint 时仅允许同源/同站发起的登出
+    /// （Sec-Fetch-Site ∈ same-origin/same-site/none）；跨站且无 hint 一律不产生副作用。
+    pub async fn end_session(
+        &self,
+        client_id: Option<&str>,
+        id_token_hint: Option<&str>,
+        post_logout_redirect_uri: Option<&str>,
+        session_token: Option<&str>,
+        allow_cookie_logout: bool,
+        redis: &mut ConnectionManager,
+        jwt: &JwtConfig,
+    ) -> Result<Option<String>, ServiceError> {
+        // 1. 身份判定
+        let mut hint_user: Option<i64> = None;
+        let mut hint_client_id: Option<String> = None;
+        if let Some(hint) = id_token_hint.filter(|h| !h.is_empty()) {
+            match self.verify_id_token_hint(hint).await? {
+                Some((cid, uid)) => {
+                    hint_client_id = Some(cid);
+                    hint_user = Some(uid);
+                }
+                // hint 携带但验签失败：fail-closed，不产生任何副作用、不回跳
+                None => {
+                    tracing::warn!("end_session：id_token_hint 验签失败，拒绝登出与回跳");
+                    return Ok(None);
+                }
+            }
+        }
+
+        // 2. 副作用：吊销 SSO 令牌 + 跨端拉黑 IdP 登录会话
+        if let Some(uid) = hint_user {
+            self.revoke_user_sso_tokens(redis, uid).await;
+            self.blacklist_user_sessions(redis, uid).await;
+        }
+
+        // 3. 黑名单浏览器会话（仅无 hint 或 hint 用户与 Cookie 用户一致时）
+        if let Some(token) = session_token.filter(|t| !t.is_empty())
+            && let Ok(claims) = JwtUtils::verify_token(token, jwt)
+        {
+            let cookie_user: Option<i64> = claims.sub.parse().ok();
+            let hint_allows = hint_user.is_none() || hint_user == cookie_user;
+            if hint_allows && (hint_user.is_some() || allow_cookie_logout) {
+                let token_hash = crate::utils::crypto::token_hash(token);
+                let ttl = (claims.exp as i64)
+                    .saturating_sub(chrono::Utc::now().timestamp())
+                    .max(60);
+                let _: Result<(), _> = redis::cmd("SETEX")
+                    .arg(format!("blacklist:{}", token_hash))
+                    .arg(ttl)
+                    .arg("1")
+                    .query_async(redis)
+                    .await;
+                if let Some(uid) = cookie_user {
+                    self.revoke_user_sso_tokens(redis, uid).await;
+                }
+            }
+        }
+
+        // 4. 回跳判定：post_logout_redirect_uri 必须精确命中客户端白名单（防开放重定向），
+        //    且需通过身份验证（有效 hint 或同源 Cookie 登出），fail-closed
+        let target_client = hint_client_id.or_else(|| client_id.map(str::to_string));
+        if let (Some(cid), Some(ru)) = (target_client.as_deref(), post_logout_redirect_uri)
+            && (hint_user.is_some() || allow_cookie_logout)
+            && self
+                .client_redirect_uris(cid)
+                .await?
+                .iter()
+                .any(|w| w == ru)
+        {
+            return Ok(Some(ru.to_string()));
+        }
+        Ok(None)
+    }
+
+    /// 按用户拉黑其全部 IdP 登录会话（`sso:sess:{uid}` 索引 → 逐 hash 写 blacklist），
+    /// 供 end_session 跨端登出；拉黑后清空索引。
+    async fn blacklist_user_sessions(&self, redis: &mut ConnectionManager, user_id: i64) {
+        let sess_key = format!("{}{}", SESS_KEY_PREFIX, user_id);
+        let hashes: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(&sess_key)
+            .query_async(redis)
+            .await
+            .unwrap_or_default();
+        for h in &hashes {
+            // 会话剩余寿命未知（索引与 JWT 同 TTL），拉黑 24h 足以覆盖任何在途会话
+            let _: Result<(), _> = redis::cmd("SETEX")
+                .arg(format!("blacklist:{}", h))
+                .arg(86_400i64)
+                .arg("1")
+                .query_async(redis)
+                .await;
+        }
+        if !hashes.is_empty() {
+            let _: Result<i64, _> = redis::cmd("DEL").arg(&sess_key).query_async(redis).await;
+            tracing::info!(
+                "已拉黑用户 IdP 会话 user_id={} count={}",
+                user_id,
+                hashes.len()
+            );
+        }
+    }
+
+    /// 验签 id_token_hint（HS256 + 每客户端 id_token_secret）：
+    /// 先**手动 base64url 解码** payload 取出 aud 定位客户端（不验签的 peek 仅用于路由，
+    /// 随后立即用该客户端密钥完整验签，不信任 peek 结果），再完整验签。
+    /// 返回 `Some((client_id, sub))`；定位/验签任一失败返回 `None`。
+    async fn verify_id_token_hint(
+        &self,
+        hint: &str,
+    ) -> Result<Option<(String, i64)>, ServiceError> {
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+        let aud = peek_jwt_claims(hint).and_then(|claims| match claims.get("aud") {
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(serde_json::Value::Array(arr)) => {
+                arr.first().and_then(|v| v.as_str()).map(str::to_string)
+            }
+            _ => None,
+        });
+        let Some(aud) = aud else {
+            return Ok(None);
+        };
+        let Some(client) = self.client_repo.find_by_client_id(&aud).await? else {
+            return Ok(None);
+        };
+        let secret = self.decrypt_client_secret(&client.id_token_secret);
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_audience(&[&aud]);
+        validation.validate_exp = true;
+        match jsonwebtoken::decode::<serde_json::Value>(
+            hint,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        ) {
+            Ok(data) => {
+                let sub = data
+                    .claims
+                    .get("sub")
+                    .and_then(|s| s.as_str())
+                    .and_then(|s| s.parse::<i64>().ok());
+                Ok(sub.map(|uid| (aud, uid)))
+            }
+            Err(e) => {
+                tracing::warn!("id_token_hint 验签失败 client_id={}: {}", aud, e);
+                Ok(None)
+            }
+        }
     }
 
     // -------------------- 内部：redirect_uri --------------------
@@ -1101,6 +1641,20 @@ fn resolve_redirect_uri(requested: Option<&str>, whitelist: &[String]) -> Option
 struct SessionIdentity {
     user_id: i64,
     username: String,
+    /// 用户认证时刻（UTC 秒，v3 P1'-1：登录 JWT 的 iat——ID Token 的 auth_time 语义应为
+    /// "用户实际完成认证的时刻"，而非"授权发生时刻"，否则 RP 的 max_age 判断永久失效）
+    auth_time: i64,
+}
+
+/// 手动解码 JWT payload（base64url，**不验签**）。
+/// 仅用于 id_token_hint 的 aud 路由（先定位客户端再用其密钥完整验签），
+/// 结果绝不作为信任依据。格式非法返回 None。
+fn peek_jwt_claims(token: &str) -> Option<serde_json::Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('=').as_bytes())
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 // ==================== 纯函数辅助（可单测） ====================
@@ -1454,6 +2008,8 @@ mod tests {
             "error.sso.access_token_invalid",
             "error.sso.batch_id_invalid",
             "error.sso.redirect_uri_dup",
+            "error.sso.client_id_reserved",
+            "error.sso.secret_encrypt_failed",
         );
         // en-US 显式切换 locale
         crate::common::i18n::with_locale_sync("en-US", || {
@@ -1481,6 +2037,8 @@ mod tests {
                 "error.sso.access_token_invalid",
                 "error.sso.batch_id_invalid",
                 "error.sso.redirect_uri_dup",
+                "error.sso.client_id_reserved",
+                "error.sso.secret_encrypt_failed",
             );
         });
     }
