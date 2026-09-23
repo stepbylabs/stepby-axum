@@ -713,20 +713,23 @@ async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i6
     }
 }
 
-/// v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等）。
+/// v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等 + 精准识别）。
 ///
 /// 背景：P0-A 修复前 SSO access_token 是平台 JWT（可横扫全站业务 API），仅靠
 /// auth 中间件的「`sso:at:{hash}` 绑定命中 → 拒绝」过渡阻断止血。但绑定 TTL（1h 量级）
 /// 短于历史 JWT 本体 TTL（最长 24h）——绑定过期后历史 JWT 失去唯一标识，剩余窗口内
 /// 仍可通行业务路由，**止血动作自毁止血范围**。
 ///
-/// 定案（转写而非清除）：首次启动时把存量 `sso:at:*` 绑定转写为
+/// 定案（转写而非清除）：把存量 `sso:at:*` 绑定转写为
 /// `blacklist:{hash}`（TTL = max(剩余TTL, 24h)）并删除原绑定 → 历史 JWT 立即全量吊销。
-/// 此刻 A 形态（不透明 AT）尚未签发过任何绑定，SCAN 命中的必为历史 JWT 型，无误伤。
+///
+/// **精准识别（v5 核查修正）**：绑定 value 含 `access_token_hash` 字段即 A 形态
+/// （不透明 AT）活跃绑定，**跳过不转写**——仅转写无该字段的历史 JWT 型绑定。
+/// 消除两类误杀：① P0-A 已部署实例（6a60528）升级到本版时，存量绑定是不透明 AT；
+/// ② Redis 清空导致标记丢失后重跑。
 ///
 /// 幂等：`sso:v4_legacy_at_migrated` SETNX 标记；已标记即跳过。
-/// 注意：标记随 Redis 清空丢失时会重跑转写——误伤的仅是活跃不透明 AT（持有方重新
-/// 走授权即可，TTL ≤ 1h），可接受；Redis 故障时跳过转写并告警（下次启动重试）。
+/// Redis 故障时跳过转写并告警（下次启动重试）。
 pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::ConnectionManager) {
     const LEGACY_MARKER: &str = "sso:v4_legacy_at_migrated";
     const LEGACY_AT_PREFIX: &str = "sso:at:";
@@ -750,6 +753,7 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
 
     let mut cursor = String::from("0");
     let mut migrated = 0usize;
+    let mut skipped = 0usize;
     loop {
         let scan: Result<(String, Vec<String>), _> = redis::cmd("SCAN")
             .arg(&cursor)
@@ -762,7 +766,9 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
         let (next, keys) = match scan {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("v4-F1 存量转写 SCAN 失败（已置标记，可用 DEL {LEGACY_MARKER} 重跑）: {e}");
+                tracing::warn!(
+                    "v4-F1 存量转写 SCAN 失败（已置标记，可用 DEL {LEGACY_MARKER} 重跑）: {e}"
+                );
                 return;
             }
         };
@@ -772,6 +778,25 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
             };
             if hash.is_empty() {
                 continue;
+            }
+            // v5 核查：A 形态活跃绑定（value 含 access_token_hash）不转写，防误杀
+            let is_legacy: Option<bool> = redis::cmd("GET")
+                .arg(key)
+                .query_async::<Option<String>>(redis)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+                .map(|json| !json.get("access_token_hash").is_some());
+            match is_legacy {
+                Some(false) => {
+                    skipped += 1;
+                    continue;
+                }
+                None => {
+                    // 读取/解析失败（key 已过期或 value 异常）→ 按过期清理处理
+                }
+                _ => {}
             }
             let ttl: i64 = redis::cmd("TTL")
                 .arg(key)
@@ -804,7 +829,12 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
         }
     }
     if migrated > 0 {
-        tracing::info!("v4-F1 已转写吊销历史 JWT 型 SSO 访问令牌 {migrated} 条（blacklist，TTL≥24h）");
+        tracing::info!(
+            "v4-F1 已转写吊销历史 JWT 型 SSO 访问令牌 {migrated} 条（blacklist，TTL≥24h）"
+        );
+    }
+    if skipped > 0 {
+        tracing::info!("v4-F1 跳过 A 形态活跃绑定 {skipped} 条（含 access_token_hash，不转写）");
     }
 }
 

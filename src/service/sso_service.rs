@@ -768,7 +768,8 @@ impl SsoService {
             .find_by_client_id(client_id)
             .await
             .map_err(|_| {
-                OidcError::new("invalid_grant", crate::tr!("error.sso.client_auth_failed"))
+                // v5 核查：DB 故障不是 invalid_grant（误导 RP 重试语义），按 server_error
+                OidcError::new("server_error", crate::tr!("error.sso.client_auth_failed"))
             })?
             .ok_or_else(|| {
                 OidcError::new("invalid_client", crate::tr!("error.sso.client_not_found"))
@@ -1775,9 +1776,7 @@ fn validate_client_name(name: &str) -> Result<(), ServiceError> {
 /// v3 P1'-3：`logo_uri` 服务端校验——同意页会直接渲染该 URL，不校验即允许管理员填入
 /// 任意第三方地址（追踪像素泄漏用户 IP/行为）或超长字符串（DB 列宽溢出）。
 /// 规则：空值合法（无 logo）；非空必须为 http(s) 绝对地址、host 非空、总长 ≤ 500。
-fn validate_logo_uri(
-    logo_uri: &Option<String>,
-) -> Result<String, ServiceError> {
+fn validate_logo_uri(logo_uri: &Option<String>) -> Result<String, ServiceError> {
     let Some(raw) = logo_uri.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(String::new());
     };
