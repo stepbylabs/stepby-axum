@@ -324,10 +324,12 @@ pub struct SysOauthService {
     user_role_repo: SysUserRoleRepository,
     user_service: SysUserService,
     http: reqwest::Client,
+    /// v5-E6：敏感列信封加密主密钥（CONFIG_ENC_KEY；空=迁移期 fail-open 明文落库）
+    enc_key: String,
 }
 
 impl SysOauthService {
-    pub fn new(db: DatabaseConnection, user_service: SysUserService) -> Self {
+    pub fn new(db: DatabaseConnection, user_service: SysUserService, enc_key: String) -> Self {
         Self {
             provider_repo: SysOauthProviderRepository::new(db.clone()),
             oauth_user_repo: SysOauthUserRepository::new(db.clone()),
@@ -335,7 +337,23 @@ impl SysOauthService {
             user_role_repo: SysUserRoleRepository::new(db),
             user_service,
             http: reqwest::Client::new(),
+            enc_key,
         }
+    }
+
+    /// v5-E6：敏感列写入口——CONFIG_ENC_KEY 已配置 → 信封加密（fail-closed，
+    /// 加密失败拒绝写入；幂等：已带 enc2:/enc: 前缀原样）；未配置 → 明文落库
+    /// （迁移期策略，与 id_token_secret 一致）。
+    fn seal(&self, plaintext: &str) -> Result<String, ServiceError> {
+        crate::utils::crypto::seal_sensitive_value(plaintext, &self.enc_key).map_err(|e| {
+            tracing::error!("敏感值加密失败，拒绝写入: {}", e);
+            ServiceError::internal(&crate::tr!("error.sso.secret_encrypt_failed"))
+        })
+    }
+
+    /// v5-E6：敏感列读出口——幂等/明文兼容，解密失败原样返回（读路径宽松化）。
+    fn unseal(&self, stored: &str) -> String {
+        crate::utils::crypto::unseal_sensitive_value(stored, &self.enc_key)
     }
 
     // ==================== 提供商配置 ====================
@@ -396,7 +414,8 @@ impl SysOauthService {
             provider_name: Set(dto.provider_name),
             provider_type: Set(dto.provider_type),
             client_id: Set(dto.client_id),
-            client_secret: Set(dto.client_secret),
+            // v5-E6：client_secret 信封加密落库（CONFIG_ENC_KEY 未配置时明文，迁移期策略）
+            client_secret: Set(self.seal(&dto.client_secret)?),
             authorize_url: Set(dto.authorize_url),
             token_url: Set(dto.token_url),
             user_info_url: Set(dto.user_info_url),
@@ -456,9 +475,9 @@ impl SysOauthService {
         am.provider_name = Set(dto.provider_name);
         am.provider_type = Set(dto.provider_type);
         am.client_id = Set(dto.client_id);
-        // secret：非空才覆盖（留空保持不变），避免每次编辑都要重填
+        // secret：非空才覆盖（留空保持不变），避免每次编辑都要重填；v5-E6 加密落库
         if !dto.client_secret.is_empty() {
-            am.client_secret = Set(dto.client_secret);
+            am.client_secret = Set(self.seal(&dto.client_secret)?);
         }
         am.authorize_url = Set(dto.authorize_url);
         am.token_url = Set(dto.token_url);
@@ -699,12 +718,17 @@ impl SysOauthService {
             .await?;
 
         if let Some(binding) = existing_binding {
-            // 已绑定 → 更新令牌信息并直接登录
+            // 已绑定 → 更新令牌信息并直接登录（v5-E6：令牌信封加密）
+            let sealed_at = self.seal(&access_token)?;
+            let sealed_rt = match &token_payload.refresh_token {
+                Some(rt) => Some(self.seal(rt)?),
+                None => None,
+            };
             self.oauth_user_repo
                 .update(SysOauthUserActiveModel {
                     oauth_id: Set(binding.oauth_id),
-                    access_token: Set(Some(access_token)),
-                    refresh_token: Set(token_payload.refresh_token),
+                    access_token: Set(Some(sealed_at)),
+                    refresh_token: Set(sealed_rt),
                     expires_at: Set(token_payload.expires_at),
                     last_login_time: Set(Some(crate::common::datetime::now_naive())),
                     ..Default::default()
@@ -774,6 +798,15 @@ impl SysOauthService {
         }
 
         let now = crate::common::datetime::now_naive();
+        // v5-E6：令牌信封加密（Option 逐个处理）
+        let sealed_at = match &info.access_token {
+            Some(t) => Some(self.seal(t)?),
+            None => None,
+        };
+        let sealed_rt = match &info.refresh_token {
+            Some(t) => Some(self.seal(t)?),
+            None => None,
+        };
         let am = SysOauthUserActiveModel {
             user_id: Set(user_id),
             provider: Set(info.provider),
@@ -781,8 +814,8 @@ impl SysOauthService {
             nickname: Set(info.nickname),
             avatar: Set(info.avatar),
             email: Set(info.email),
-            access_token: Set(info.access_token),
-            refresh_token: Set(info.refresh_token),
+            access_token: Set(sealed_at),
+            refresh_token: Set(sealed_rt),
             expires_at: Set(info.expires_at),
             last_login_time: Set(Some(now)),
             create_time: Set(Some(now)),
@@ -873,9 +906,11 @@ impl SysOauthService {
         code: &str,
         redirect_uri: &str,
     ) -> Result<TokenPayload, ServiceError> {
+        // v5-E6：secret 为信封加密存储，换取 token 前解密（先绑定避免临时值悬垂）
+        let secret_plain = self.unseal(&provider.client_secret);
         let params = [
             ("client_id", provider.client_id.as_str()),
-            ("client_secret", provider.client_secret.as_str()),
+            ("client_secret", secret_plain.as_str()),
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("grant_type", "authorization_code"),
@@ -1052,6 +1087,13 @@ impl SysOauthService {
         let email = identity.email.clone();
         let avatar = identity.avatar.clone();
 
+        // v5-E6：令牌信封加密（事务外先算好，避免闭包借用 self）
+        let sealed_at = self.seal(&access_token)?;
+        let sealed_rt = match &token.refresh_token {
+            Some(t) => Some(self.seal(t)?),
+            None => None,
+        };
+
         let user = db
             .transaction::<_, SysUserModel, sea_orm::DbErr>(|txn| {
                 let mut user_am = SysUserActiveModel {
@@ -1078,8 +1120,8 @@ impl SysOauthService {
                 let nick2 = nick.clone();
                 let email2 = email.clone();
                 let avatar2 = avatar.clone();
-                let access_token2 = access_token.clone();
-                let refresh2 = token.refresh_token.clone();
+                let access_token2 = sealed_at;
+                let refresh2 = sealed_rt;
                 let expires2 = token.expires_at;
 
                 async move {

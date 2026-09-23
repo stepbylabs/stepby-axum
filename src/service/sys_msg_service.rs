@@ -283,6 +283,8 @@ pub struct SysMsgService {
     mailer: MailerService,
     /// 用户消息偏好 Repository（site 站内信需尊重用户的站内信开关与免打扰）
     pref_repo: SysUserPrefRepository,
+    /// v5-E6：渠道 config_json 信封加密主密钥（CONFIG_ENC_KEY）
+    enc_key: String,
 }
 
 impl SysMsgService {
@@ -291,8 +293,9 @@ impl SysMsgService {
             channel_repo: SysMsgChannelRepository::new(db.clone()),
             template_repo: SysMsgTemplateRepository::new(db.clone()),
             send_log_repo: SysMsgSendLogRepository::new(db.clone()),
-            mailer: MailerService::new(config),
+            mailer: MailerService::new(config.clone()),
             pref_repo: SysUserPrefRepository::new(db),
+            enc_key: config.config_enc_key.clone(),
         }
     }
 
@@ -328,6 +331,19 @@ impl SysMsgService {
                 query.status.as_deref(),
             )
             .await?;
+        // v5-E6：出参 unseal（管理员配置回显明文；幂等 seal 保证编辑回传不双重加密）
+        let rows = rows
+            .into_iter()
+            .map(|mut m| {
+                if let Some(c) = &m.config_json {
+                    m.config_json = Some(crate::utils::crypto::unseal_sensitive_value(
+                        c,
+                        &self.enc_key,
+                    ));
+                }
+                m
+            })
+            .collect();
         Ok((rows, total))
     }
 
@@ -336,10 +352,19 @@ impl SysMsgService {
         &self,
         channel_id: i64,
     ) -> Result<SysMsgChannelModel, ServiceError> {
-        self.channel_repo
+        let mut model = self
+            .channel_repo
             .find_active_by_id(channel_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.channel_not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.channel_not_found")))?;
+        // v5-E6：出参 unseal（配置回显明文）
+        if let Some(c) = &model.config_json {
+            model.config_json = Some(crate::utils::crypto::unseal_sensitive_value(
+                c,
+                &self.enc_key,
+            ));
+        }
+        Ok(model)
     }
 
     /// 新增消息渠道
@@ -359,11 +384,19 @@ impl SysMsgService {
         }
 
         let now = crate::common::datetime::now_naive();
+        // v5-E6：config_json（含 SMTP 等凭据）信封加密落库（幂等；key 未配置时明文）
+        let sealed_config = match &dto.config_json {
+            Some(c) => Some(
+                crate::utils::crypto::seal_sensitive_value(c, &self.enc_key)
+                    .map_err(|e| ServiceError::internal(&format!("渠道配置加密失败: {e}")))?,
+            ),
+            None => None,
+        };
         let am = SysMsgChannelActiveModel {
             channel_name: Set(dto.channel_name),
             channel_code: Set(dto.channel_code),
             channel_type: Set(dto.channel_type),
-            config_json: Set(dto.config_json),
+            config_json: Set(sealed_config),
             status: Set(dto.status.or(Some("0".to_string()))),
             remark: Set(dto.remark),
             create_by: Set(Some(operator.to_string())),
@@ -401,7 +434,14 @@ impl SysMsgService {
         am.channel_name = Set(dto.channel_name);
         am.channel_code = Set(dto.channel_code);
         am.channel_type = Set(dto.channel_type);
-        am.config_json = Set(dto.config_json);
+        // v5-E6：config_json 信封加密（幂等：已带 enc2:/enc: 前缀原样，防双重加密）
+        am.config_json = Set(match &dto.config_json {
+            Some(c) => Some(
+                crate::utils::crypto::seal_sensitive_value(c, &self.enc_key)
+                    .map_err(|e| ServiceError::internal(&format!("渠道配置加密失败: {e}")))?,
+            ),
+            None => None,
+        });
         am.status = Set(dto.status);
         am.remark = Set(dto.remark);
         am.update_by = Set(Some(operator.to_string()));

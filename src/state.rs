@@ -246,7 +246,12 @@ impl AppState {
                 config.clone(),
                 SysMsgService::new(db.clone(), config.clone()),
             ),
-            oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
+            oauth_service: SysOauthService::new(
+                db.clone(),
+                user_service.clone(),
+                // v5-E6：provider secret / 第三方令牌信封加密
+                config.config_enc_key.clone(),
+            ),
             sso_service: SsoService::new(
                 db.clone(),
                 config.config_enc_key.clone(),
@@ -256,7 +261,7 @@ impl AppState {
             ),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
-            web_hook_service: SysWebHookService::new(db.clone()),
+            web_hook_service: SysWebHookService::new(db.clone(), config.config_enc_key.clone()),
             mailer_service: MailerService::new(config.clone()),
             job_scheduler,
             db,

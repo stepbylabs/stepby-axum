@@ -84,6 +84,16 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO 限流分档失败: {}", e))?;
 
+        // 4.3 v5-E6：运行期敏感凭据存量明文回填（幂等；CONFIG_ENC_KEY 未配置时跳过，
+        //     与 id_token_secret 迁移期 fail-open 策略一致）
+        ensure_runtime_secrets_encrypted(&db, &settings.config_enc_key).await;
+
+        // 4.4 v5-E1：consent 组合唯一索引（存量库兜底：清软删行/去重/建索引，
+        //     与迁移 m20260924_000002_sso_consent_unique 等价）
+        ensure_sso_consent_unique(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 SSO consent 唯一索引失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -709,6 +719,107 @@ async fn sso_startup_self_check(db: &DatabaseConnection, settings: &Settings) {
     }
 }
 
+/// v5-E1：consent 组合唯一索引兜底（幂等）——清软删行、同 (user_id, client_id)
+/// 去重（保留最早）、建唯一索引 uq_sso_consent_user_client。与迁移
+/// m20260924_000002_sso_consent_unique 等价；索引已存在时 CREATE IF NOT EXISTS 跳过。
+async fn ensure_sso_consent_unique(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_oauth_consent").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let stmts = [
+        "DELETE FROM sys_oauth_consent WHERE del_flag = '2'",
+        "DELETE FROM sys_oauth_consent WHERE consent_id NOT IN (\
+         SELECT MIN(consent_id) FROM sys_oauth_consent GROUP BY user_id, client_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_sso_consent_user_client \
+         ON sys_oauth_consent (user_id, client_id)",
+    ];
+    for sql in stmts {
+        db.execute(Statement::from_string(backend, sql)).await?;
+    }
+    Ok(())
+}
+
+/// v5-E6：运行期敏感凭据存量明文回填（幂等）。
+///
+/// 范围（四组明文落库的敏感列，与 id_token_secret 同标准信封加密）：
+/// - `sys_oauth_provider.client_secret`（第三方 OAuth 客户端密钥）
+/// - `sys_oauth_user.access_token` / `refresh_token`（第三方用户令牌）
+/// - `sys_msg_channel.config_json`（渠道配置，含 SMTP 凭据）
+/// - `sys_web_hook.secret`（回调 HMAC 签名密钥）
+///
+/// 规则：CONFIG_ENC_KEY 未配置 → 跳过（fail-open，下次启动重试）；
+/// 值已带 `enc2:`/`enc:` 前缀 → 跳过（已加密）；空值 → 跳过；
+/// 其余 → `seal_sensitive_value` 加密 UPDATE（逐行，幂等：回填后即带前缀）。
+async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, enc_key: &str) {
+    if enc_key.is_empty() {
+        tracing::warn!("CONFIG_ENC_KEY 未配置：跳过运行期敏感凭据存量明文回填（v5-E6）");
+        return;
+    }
+    // (表, 主键列, 敏感列)
+    const TARGETS: &[(&str, &str, &str)] = &[
+        ("sys_oauth_provider", "provider_id", "client_secret"),
+        ("sys_oauth_user", "oauth_id", "access_token"),
+        ("sys_oauth_user", "oauth_id", "refresh_token"),
+        ("sys_msg_channel", "channel_id", "config_json"),
+        ("sys_web_hook", "id", "secret"),
+    ];
+    let backend = db.get_database_backend();
+    let mut sealed_total = 0usize;
+    for (table, pk, col) in TARGETS {
+        let select_sql = format!(
+            "SELECT {pk} AS pk, {col} AS val FROM {table} WHERE {col} IS NOT NULL AND {col} != ''"
+        );
+        let rows = match db
+            .query_all(Statement::from_string(backend, select_sql))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // 表可能不存在（极旧存量库），warn 并继续下一目标
+                tracing::warn!("v5-E6 回填读取 {table}.{col} 失败（跳过）: {}", e);
+                continue;
+            }
+        };
+        for row in rows {
+            let pk_val = match row.try_get::<i64>("", "pk") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let val = match row.try_get::<String>("", "val") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // 已加密（带前缀）或空值跳过
+            if val.starts_with("enc2:") || val.starts_with("enc:") {
+                continue;
+            }
+            let sealed = match crate::utils::crypto::seal_sensitive_value(&val, enc_key) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("v5-E6 回填加密失败 {table}.{col} pk={pk_val}: {}", e);
+                    continue;
+                }
+            };
+            let update_sql = format!(
+                "UPDATE {table} SET {col} = '{}' WHERE {pk} = {pk_val}",
+                sealed.replace('\'', "''")
+            );
+            if let Err(e) = db
+                .execute(Statement::from_string(backend, update_sql))
+                .await
+            {
+                tracing::error!("v5-E6 回填更新失败 {table}.{col} pk={pk_val}: {}", e);
+                continue;
+            }
+            sealed_total += 1;
+        }
+    }
+    if sealed_total > 0 {
+        tracing::info!("v5-E6 已加密回填运行期敏感凭据 {sealed_total} 条（v5-E6）");
+    }
+}
+
 /// v5-S1：SSO/OIDC 公开端点限流分档（存量库兜底，幂等）。
 ///
 /// 与迁移 m20260924_000001_sso_rate_limit_tiers 等价：rate_limit 中间件先按
@@ -720,10 +831,25 @@ async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<
         return Ok(()); // 极旧存量库无限流表（理论不可达，防御性跳过）
     }
     const TIERS: &[(&str, u32, f64, &str)] = &[
-        ("/sso/token", 30, 0.5, "SSO 令牌兑换（机器对机器，严档防暴力试 secret）"),
-        ("/sso/authorize", 60, 1.0, "SSO 授权端点（浏览器导航，中档）"),
+        (
+            "/sso/token",
+            30,
+            0.5,
+            "SSO 令牌兑换（机器对机器，严档防暴力试 secret）",
+        ),
+        (
+            "/sso/authorize",
+            60,
+            1.0,
+            "SSO 授权端点（浏览器导航，中档）",
+        ),
         ("/sso/logout", 30, 0.5, "SSO 登出（低频严档）"),
-        ("/sso/userinfo", 120, 2.0, "SSO 用户信息（RP 高频会话校验，宽档）"),
+        (
+            "/sso/userinfo",
+            120,
+            2.0,
+            "SSO 用户信息（RP 高频会话校验，宽档）",
+        ),
         (
             "/.well-known/openid-configuration",
             60,
@@ -735,7 +861,10 @@ async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<
     for (pattern, capacity, refill, description) in TIERS {
         let count_sql =
             format!("SELECT COUNT(*) AS c FROM sys_rate_limit WHERE route_pattern = '{pattern}'");
-        let exists = match db.query_one(Statement::from_string(backend, count_sql)).await? {
+        let exists = match db
+            .query_one(Statement::from_string(backend, count_sql))
+            .await?
+        {
             Some(row) => row.try_get::<i64>("", "c").unwrap_or(0) > 0,
             None => false,
         };
@@ -747,7 +876,8 @@ async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<
             "INSERT INTO sys_rate_limit (route_pattern, capacity, refill_per_second, enabled, description, create_by, create_time, update_by, update_time) \
              VALUES ('{pattern}', {capacity}, {refill}, TRUE, '{description}', 'admin', '{now}', 'admin', '{now}')"
         );
-        db.execute(Statement::from_string(backend, insert_sql)).await?;
+        db.execute(Statement::from_string(backend, insert_sql))
+            .await?;
         tracing::info!("已插入 SSO 限流分档 route_pattern={pattern}");
     }
     Ok(())

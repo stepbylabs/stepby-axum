@@ -50,17 +50,20 @@ impl SysOauthConsentRepository {
             .await
     }
 
-    /// 用户撤销对某 client 的授权（v2-I7：软删 del_flag='2'，保留审计痕迹）。
+    /// 用户撤销对某 client 的授权。
+    ///
+    /// v5-E1 语义变更：由软删（del_flag='2'）改为**物理删除**——
+    /// ① 组合唯一索引 (user_id, client_id) 要求撤销后可重新同意，软删的旧行会与
+    ///    新授权行冲突（多次"同意→撤销"产生多行 del_flag='2' 使唯一键失效）；
+    /// ② 审计痕迹由操作日志承接（撤销本身有 oper_log DELETE 记录），与
+    ///    delete_clients 清理同意记录的物理删语义一致。
     /// 返回是否确实存在有效授权记录（不存在返回 Ok(false)）。
     pub async fn revoke(&self, user_id: i64, client_id: &str) -> Result<bool, DbErr> {
         let existing = self.find_by_user_client(user_id, client_id).await?;
         let Some(row) = existing else {
             return Ok(false);
         };
-        let mut am: ActiveModel = row.into();
-        am.del_flag = Set("2".to_string());
-        am.update_time = Set(Some(crate::common::datetime::now_naive()));
-        am.update(self.base.db()).await?;
+        row.delete(self.base.db()).await?;
         Ok(true)
     }
 
