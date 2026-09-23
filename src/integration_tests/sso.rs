@@ -835,6 +835,46 @@ async fn test_sso_v4_opaque_token_isolation_and_claims() {
     assert_eq!(jwk["e"], "AQAB", "RSA 公钥指数默认 65537");
 }
 
+/// v5-D4：prompt=none 静默模式——
+/// ① 未登录 + prompt=none → 302 回跳 error=login_required（redirect_uri 可信前提下）；
+/// ② 未登录 + 无 prompt → 引导登录页（行为不变）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_d4_prompt_none_requires_error_redirect() {
+    let ctx = sso_ctx().await;
+    let (cid, _secret) = add_client(&ctx, "0", "it_sso_d4pn").await;
+
+    // ① prompt=none（未登录）→ 302 回跳 error=login_required
+    let auth_url = format!(
+        "/sso/authorize?client_id={}&redirect_uri={}&response_type=code&scope=openid&prompt=none&code_challenge={}&code_challenge_method=S256",
+        urlenc(&cid),
+        REDIRECT_URI_ENC,
+        PKCE_CHALLENGE
+    );
+    let (status, headers, _) = raw_get(&ctx.app, ctx.peer_ip, &auth_url, &[]).await;
+    assert_eq!(status, StatusCode::FOUND, "prompt=none 应 302 回跳 error");
+    let loc = location_of(&headers);
+    assert_eq!(
+        query_param(&loc, "error").as_deref(),
+        Some("login_required"),
+        "prompt=none 未登录应回跳 login_required，实际: {loc}"
+    );
+
+    // ② 无 prompt（未登录）→ 302 登录页（行为不变）
+    let auth_url2 = format!(
+        "/sso/authorize?client_id={}&redirect_uri={}&response_type=code&scope=openid&code_challenge={}&code_challenge_method=S256",
+        urlenc(&cid),
+        REDIRECT_URI_ENC,
+        PKCE_CHALLENGE
+    );
+    let (status2, headers2, _) = raw_get(&ctx.app, ctx.peer_ip, &auth_url2, &[]).await;
+    assert_eq!(status2, StatusCode::FOUND);
+    let loc2 = location_of(&headers2);
+    assert!(
+        loc2.starts_with("/login"),
+        "无 prompt 未登录应引导登录页，实际: {loc2}"
+    );
+}
+
 /// v5-D3：refresh_token 轮换 + RFC 7009 吊销全链路。
 /// ① 授权码兑换返回 RT（grant_types 含 refresh_token）；② refresh 得新 AT/RT（均异于旧）；
 /// ③ 旧 RT 重放 → 400 invalid_grant（轮换作废）；④ 新 AT 可用；⑤ revoke AT → userinfo 401；

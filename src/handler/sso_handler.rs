@@ -65,6 +65,15 @@ pub struct AuthorizeQuery {
     pub code_challenge: Option<String>,
     #[serde(default)]
     pub code_challenge_method: Option<String>,
+    /// v5-D4：OIDC Core §3.1.2.1 认证请求参数（空格分隔：login/none/consent/select_account）
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// v5-D4：重认证阈值（秒）——auth_time 距今超过该值须重新认证
+    #[serde(default)]
+    pub max_age: Option<i64>,
+    /// v5-D4：期望认证强度（宽松语义：mfa 满足度以 id_token.acr 真实声明为准，v5-E5）
+    #[serde(default)]
+    pub acr_values: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +142,9 @@ pub async fn authorize(
         nonce: q.nonce,
         code_challenge: q.code_challenge,
         code_challenge_method: q.code_challenge_method,
+        prompt: q.prompt,
+        max_age: q.max_age,
+        acr_values: q.acr_values,
     };
     // 未登录回跳目标预先构造（params 稍后会被 authorize 消费）。
     // redirect 挂**同源相对路径**而非 `{base}` 绝对 URL：前端登录页对 redirect 参数做
@@ -879,6 +891,9 @@ mod tests {
             nonce: None,
             code_challenge: Some("chal".to_string()),
             code_challenge_method: Some("S256".to_string()),
+            prompt: None,
+            max_age: None,
+            acr_values: None,
         };
         let target = login_redirect_target(&p);
         // /login?redirect= 后紧跟 %2F（即 /sso/authorize 相对路径），绝不出现 %3A%2F%2F（://）

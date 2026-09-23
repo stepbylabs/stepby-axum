@@ -38,7 +38,12 @@ const TIERS: &[(&str, u32, f64, &str)] = &[
         0.5,
         "SSO 令牌兑换（机器对机器，严档防暴力试 secret）",
     ),
-    ("/sso/authorize", 60, 1.0, "SSO 授权端点（浏览器导航，中档）"),
+    (
+        "/sso/authorize",
+        60,
+        1.0,
+        "SSO 授权端点（浏览器导航，中档）",
+    ),
     ("/sso/logout", 30, 0.5, "SSO 登出（低频严档）"),
     (
         "/sso/userinfo",

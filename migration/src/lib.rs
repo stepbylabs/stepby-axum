@@ -57,6 +57,7 @@ pub use m20260923_000002_flow_module::Migration as M20260923FlowModule;
 pub use m20260924_000001_sso_rate_limit_tiers::Migration as M20260924SsoRateLimitTiers;
 pub use m20260924_000002_sso_consent_unique::Migration as M20260924SsoConsentUnique;
 pub use m20260924_000003_sso_rs256::Migration as M20260924SsoRs256;
+pub use m20260924_000004_sso_subject_type::Migration as M20260924SsoSubjectType;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -112,6 +113,7 @@ mod m20260923_000002_flow_module;
 mod m20260924_000001_sso_rate_limit_tiers;
 mod m20260924_000002_sso_consent_unique;
 mod m20260924_000003_sso_rs256;
+mod m20260924_000004_sso_subject_type;
 
 use sea_orm_migration::prelude::*;
 
@@ -176,6 +178,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260924SsoRateLimitTiers),
             Box::new(M20260924SsoConsentUnique),
             Box::new(M20260924SsoRs256),
+            Box::new(M20260924SsoSubjectType),
         ]
     }
 }

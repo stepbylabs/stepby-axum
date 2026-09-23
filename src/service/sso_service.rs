@@ -233,6 +233,14 @@ pub struct AuthorizeParams {
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// v5-D4：OIDC Core §3.1.2.1 prompt（空格分隔；`login`=强制重认证，
+    /// `none`=纯静默模式——任何交互需求都以 error 回跳，绝不出现登录/同意页）
+    pub prompt: Option<String>,
+    /// v5-D4：重认证阈值（秒）——auth_time 距今超过该值须重新认证（RFC 6749 扩展）
+    pub max_age: Option<i64>,
+    /// v5-D4：期望认证强度（宽松语义：acr 满足度以 id_token.acr 真实声明为准——v5-E5
+    /// 已按用户 TOTP 启用状态真实签发 acr/amr；不满足时 RP 可依 claims essential 拒绝）
+    pub acr_values: Option<String>,
 }
 
 /// consent 批准入参（同意页回传，属「应用私有 API」→ camelCase + ts-rs 导出；
@@ -488,10 +496,24 @@ impl SsoService {
             return Err(ServiceError::bad_request(&crate::tr!("error.sso.disabled")));
         }
 
-        // 1. 解析会话（JWT 校验 + 黑名单）；未登录 → 引导登录
+        // 1. 解析会话（JWT 校验 + 黑名单）；未登录 → 引导登录。
+        //    v5-D4：prompt=none 时改为向 RP 回跳 login_required（redirect_uri 可信前提下）。
         let identity = match self.resolve_session(session_token, redis, jwt).await? {
             Some(id) => id,
-            None => return Ok(AuthorizeOutcome::NeedLogin),
+            None => {
+                if prompt_contains(&params, "none") {
+                    // 回跳 error 前必须先确保 redirect_uri 可信（防开放重定向）
+                    if let Some(ru) = self.validate_client_redirect_quiet(&params).await? {
+                        return Ok(AuthorizeOutcome::Redirect(redirect_error_url(
+                            Some(&ru),
+                            &params.state,
+                            "login_required",
+                            &crate::tr!("error.sso.login_required"),
+                        )));
+                    }
+                }
+                return Ok(AuthorizeOutcome::NeedLogin);
+            }
         };
 
         // 2. 校验客户端存在且启用
@@ -576,6 +598,27 @@ impl SsoService {
             )));
         }
 
+        // 4.5 v5-D4：重认证判定（prompt=login 强制；max_age 超龄强制）——
+        //     prompt=none 回跳 login_required，否则引导重新登录。
+        //     acr_values 宽松语义：本系统恒按用户 TOTP 状态签发真实 acr（v5-E5），
+        //     RP 依 id_token.acr 自行判断满足度，此处不做硬拒绝。
+        let needs_reauth = prompt_contains(&params, "login")
+            || params
+                .max_age
+                .map(|ma| chrono::Utc::now().timestamp() - identity.auth_time > ma)
+                .unwrap_or(false);
+        if needs_reauth {
+            if prompt_contains(&params, "none") {
+                return Ok(AuthorizeOutcome::Redirect(redirect_error_url(
+                    Some(&redirect_uri),
+                    &params.state,
+                    "login_required",
+                    &crate::tr!("error.sso.login_required"),
+                )));
+            }
+            return Ok(AuthorizeOutcome::NeedLogin);
+        }
+
         // 5. 同意判定
         if client.consent_required == "1" {
             let granted = self
@@ -590,6 +633,15 @@ impl SsoService {
                 }
             };
             if need {
+                // v5-D4：prompt=none 需要用户同意 → 回跳 consent_required（不出同意页）
+                if prompt_contains(&params, "none") {
+                    return Ok(AuthorizeOutcome::Redirect(redirect_error_url(
+                        Some(&redirect_uri),
+                        &params.state,
+                        "consent_required",
+                        &crate::tr!("error.sso.consent_required"),
+                    )));
+                }
                 return Ok(AuthorizeOutcome::NeedConsent(Box::new(ConsentEcho {
                     client_id: client.client_id.clone(),
                     client_name: client.client_name.clone(),
@@ -621,6 +673,25 @@ impl SsoService {
             )
             .await?;
         Ok(AuthorizeOutcome::Redirect(url))
+    }
+
+    /// v5-D4：prompt=none 无会话时的静默校验——client 存在/启用 + redirect_uri 命中白名单
+    /// 才允许向 RP 回跳 error（防开放重定向）。返回可信的 redirect_uri；校验不过返回 None。
+    async fn validate_client_redirect_quiet(
+        &self,
+        params: &AuthorizeParams,
+    ) -> Result<Option<String>, ServiceError> {
+        let Some(client) = self
+            .client_repo
+            .find_by_client_id(&params.client_id)
+            .await?
+            .filter(|c| c.enabled == "1")
+        else {
+            return Ok(None);
+        };
+        let whitelist: Vec<String> =
+            serde_json::from_str(&client.redirect_uris).unwrap_or_default();
+        Ok(self.resolve_redirect_uri(params.redirect_uri.as_deref(), &whitelist))
     }
 
     /// 同意页批准 / 拒绝（受保护接口，用户身份来自登录态 Operator）
@@ -1286,7 +1357,11 @@ impl SsoService {
         let mut claims = serde_json::Map::new();
         claims.insert("iss".into(), serde_json::json!(issuer));
         claims.insert("aud".into(), serde_json::json!(client.client_id));
-        claims.insert("sub".into(), serde_json::json!(binding.user_id.to_string()));
+        // v5-D5：pairwise 客户端呈现 per-client 稳定假名 sub
+        claims.insert(
+            "sub".into(),
+            serde_json::json!(resolve_subject(client, binding.user_id)),
+        );
         claims.insert("iat".into(), serde_json::json!(now));
         claims.insert("exp".into(), serde_json::json!(exp));
         claims.insert("auth_time".into(), serde_json::json!(binding.auth_time));
@@ -1454,7 +1529,11 @@ impl SsoService {
 
         // 按 scope 最小化下发（v2-I8/§6：profile→preferred_username/name；email→email/email_verified）
         let mut claims = serde_json::Map::new();
-        claims.insert("sub".into(), serde_json::json!(binding.user_id.to_string()));
+        // v5-D5：pairwise 客户端 sub 与 id_token 一致（per-client 稳定假名）
+        claims.insert(
+            "sub".into(),
+            serde_json::json!(resolve_subject(&client, binding.user_id)),
+        );
         if binding.scope.iter().any(|s| s == "profile") {
             claims.insert(
                 "preferred_username".into(),
@@ -1687,6 +1766,7 @@ impl SsoService {
             id_token_secret: Set(id_token_secret_stored),
             id_token_alg: Set("RS256".to_string()),
             rsa_private_key: Set(Some(rsa_private_stored)),
+            subject_type: Set("public".to_string()),
             client_name: Set(dto.client_name.trim().to_string()),
             logo_uri: Set(logo_uri),
             redirect_uris: Set(to_json_array(&redirect_uris)),
@@ -2176,6 +2256,31 @@ fn peek_jwt_claims(token: &str) -> Option<serde_json::Value> {
 
 // ==================== 纯函数辅助（可单测） ====================
 
+/// v5-D4：prompt 参数是否包含指定指令（空格分隔，OIDC Core §3.1.2.1）
+fn prompt_contains(params: &AuthorizeParams, directive: &str) -> bool {
+    params
+        .prompt
+        .as_deref()
+        .map(|p| p.split_whitespace().any(|w| w == directive))
+        .unwrap_or(false)
+}
+
+/// v5-D5：pairwise subject 派生——`SHA-256("{client_id}:{user_id}")` hex 截断 32 字符。
+/// 同一用户对不同 RP 呈现不同的稳定假名 sub，防 RP 间串联画像；同 RP 内恒定（可关联登录）。
+fn pairwise_subject(client_id: &str, user_id: i64) -> String {
+    let digest = crate::utils::crypto::token_hash(&format!("{client_id}:{user_id}"));
+    digest[..32].to_string()
+}
+
+/// subject 解析：public → user_id 字符串；pairwise → per-client 稳定假名
+fn resolve_subject(client: &ClientModel, user_id: i64) -> String {
+    if client.subject_type == "pairwise" {
+        pairwise_subject(&client.client_id, user_id)
+    } else {
+        user_id.to_string()
+    }
+}
+
 /// v5-D2：生成 RSA-2048 私钥并输出 PKCS#8 PEM（client 级 RS256 签名密钥）
 pub(crate) fn generate_rsa_private_pem() -> anyhow::Result<String> {
     use rsa::pkcs8::EncodePrivateKey;
@@ -2464,6 +2569,41 @@ mod tests {
             vec!["openid", "profile", "email"]
         );
         assert!(split_scope("").is_empty());
+    }
+
+    #[test]
+    fn prompt_contains_directives() {
+        let base = |prompt: Option<&str>| AuthorizeParams {
+            client_id: "app_x".to_string(),
+            redirect_uri: None,
+            response_type: "code".to_string(),
+            scope: "openid".to_string(),
+            state: None,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            prompt: prompt.map(str::to_string),
+            max_age: None,
+            acr_values: None,
+        };
+        assert!(prompt_contains(&base(Some("none")), "none"));
+        assert!(prompt_contains(&base(Some("login none")), "none"));
+        assert!(prompt_contains(&base(Some("login none")), "login"));
+        assert!(!prompt_contains(&base(Some("login")), "none"));
+        assert!(!prompt_contains(&base(None), "none"));
+        assert!(!prompt_contains(&base(Some("nonexistent")), "none"));
+    }
+
+    #[test]
+    fn pairwise_subject_stable_and_distinct() {
+        // 同 RP 同用户恒定；不同 RP 假名互异；异用户假名互异
+        let a1 = pairwise_subject("app_a", 1);
+        assert_eq!(a1, pairwise_subject("app_a", 1), "同 RP 同用户应恒定");
+        assert_ne!(a1, pairwise_subject("app_b", 1), "不同 RP 假名应互异");
+        assert_ne!(a1, pairwise_subject("app_a", 2), "不同用户假名应互异");
+        assert_eq!(a1.len(), 32, "假名应截断为 32 hex 字符");
+        // sub 与 user_id 不应可逆关联（假名 ≠ user_id 字符串）
+        assert_ne!(a1, "1");
     }
 
     #[test]

@@ -32,9 +32,7 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
-                "ALTER TABLE sys_oauth_client ADD COLUMN rsa_private_key TEXT",
-            )
+            .execute_unprepared("ALTER TABLE sys_oauth_client ADD COLUMN rsa_private_key TEXT")
             .await?;
         Ok(())
     }

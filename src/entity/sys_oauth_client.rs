@@ -38,6 +38,9 @@ pub struct Model {
     /// v5-D2：RS256 私钥（PKCS#8 PEM，信封加密落库；NULL=尚未生成，签发时回落 HS256）
     #[serde(default)]
     pub rsa_private_key: Option<String>,
+    /// v5-D5：subject 标识类型（public/pairwise；pairwise 时 sub 为 per-client 稳定假名）
+    #[serde(default)]
+    pub subject_type: String,
     /// 客户端名称（同意页 / 列表展示）
     pub client_name: String,
     /// Logo URI（同意页展示，可空）
@@ -84,6 +87,7 @@ impl std::fmt::Debug for Model {
             .field("id_token_secret", &"<redacted>")
             .field("id_token_alg", &self.id_token_alg)
             .field("rsa_private_key", &"<redacted>")
+            .field("subject_type", &self.subject_type)
             .field("client_name", &self.client_name)
             .field("logo_uri", &self.logo_uri)
             .field("redirect_uris", &self.redirect_uris)
