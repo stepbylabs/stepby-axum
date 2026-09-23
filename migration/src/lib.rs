@@ -54,6 +54,7 @@ pub use m20260823_000001_sys_pat::Migration as M20260823SysPat;
 pub use m20260922_000001_sso_module::Migration as M20260922SsoModule;
 pub use m20260923_000001_sso_v4_hardening::Migration as M20260923SsoV4Hardening;
 pub use m20260923_000002_flow_module::Migration as M20260923FlowModule;
+pub use m20260924_000001_sso_rate_limit_tiers::Migration as M20260924SsoRateLimitTiers;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -106,6 +107,7 @@ mod m20260823_000001_sys_pat;
 mod m20260922_000001_sso_module;
 mod m20260923_000001_sso_v4_hardening;
 mod m20260923_000002_flow_module;
+mod m20260924_000001_sso_rate_limit_tiers;
 
 use sea_orm_migration::prelude::*;
 
