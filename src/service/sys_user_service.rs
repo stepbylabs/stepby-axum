@@ -11,7 +11,10 @@ use futures::future::FutureExt;
 use garde::Validate;
 use redis::aio::ConnectionManager;
 use regex::Regex;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, Statement,
+    TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use ts_rs::TS;
@@ -385,6 +388,10 @@ pub struct UserVo {
     pub role_ids: Vec<i64>,
     /// 部门信息（对齐前端 prop="dept.deptName"）
     pub dept: Option<SysDeptModel>,
+    /// v5-E4：是否已绑定第三方登录身份（sys_oauth_user 存在该 user_id 的绑定；
+    /// 管理员识别账号来源，绑定明细见用户个人中心的"第三方绑定"页签）
+    #[serde(default)]
+    pub oauth_bound: bool,
 }
 
 /// 用户授权角色视图对象（对齐前端 UserAuthRoleResult）
@@ -633,18 +640,57 @@ impl SysUserService {
         let dept_map: std::collections::HashMap<i64, SysDeptModel> =
             depts.into_iter().map(|d| (d.dept_id, d)).collect();
 
+        // 3.5 v5-E4：批量查询第三方登录绑定集合（1 次 DB 查询；账号来源标识）
+        let oauth_bound_set = self.oauth_bound_user_ids(&user_ids).await;
+
         // 4. 在内存中组装 UserVo
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
             let role_ids = role_ids_map.get(&user.user_id).cloned().unwrap_or_default();
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
+            let oauth_bound = oauth_bound_set.contains(&user.user_id);
             vos.push(UserVo {
                 user,
                 role_ids,
                 dept,
+                oauth_bound,
             });
         }
         Ok((vos, total))
+    }
+
+    /// v5-E4：查询一批 user_id 中已绑定第三方登录身份（sys_oauth_user 存在记录）的集合。
+    /// 查询失败时返回空集合并记 warn（标记降级为未绑定，不阻断列表主流程）。
+    async fn oauth_bound_user_ids(
+        &self,
+        user_ids: &[i64],
+    ) -> std::collections::HashSet<i64> {
+        if user_ids.is_empty() {
+            return std::collections::HashSet::new();
+        }
+        let id_list = user_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT DISTINCT user_id FROM sys_oauth_user WHERE user_id IN ({id_list})"
+        );
+        let backend = self.db().get_database_backend();
+        match self
+            .db()
+            .query_all(Statement::from_string(backend, sql))
+            .await
+        {
+            Ok(rows) => rows
+                .iter()
+                .filter_map(|r| r.try_get::<i64>("", "user_id").ok())
+                .collect(),
+            Err(e) => {
+                tracing::warn!("查询第三方绑定集合失败（标记降级为未绑定）: {}", e);
+                std::collections::HashSet::new()
+            }
+        }
     }
 
     /// 解析数据权限过滤参数（C10：从 get_user_page / export_users 抽出的公共方法）
@@ -801,15 +847,18 @@ impl SysUserService {
         let dept_map: std::collections::HashMap<i64, SysDeptModel> =
             depts.into_iter().map(|d| (d.dept_id, d)).collect();
 
-        // 3. 组装 UserVo
+        // 3. 组装 UserVo（v5-E4：绑定标记随导出/列表一致）
+        let oauth_bound_set = self.oauth_bound_user_ids(&user_ids).await;
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
             let role_ids = role_ids_map.get(&user.user_id).cloned().unwrap_or_default();
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
+            let oauth_bound = oauth_bound_set.contains(&user.user_id);
             vos.push(UserVo {
                 user,
                 role_ids,
                 dept,
+                oauth_bound,
             });
         }
         Ok(vos)
@@ -844,10 +893,12 @@ impl SysUserService {
         } else {
             None
         };
+        let oauth_bound_set = self.oauth_bound_user_ids(std::slice::from_ref(&user_id)).await;
         Ok(UserVo {
             user,
             role_ids,
             dept,
+            oauth_bound: oauth_bound_set.contains(&user_id),
         })
     }
 
