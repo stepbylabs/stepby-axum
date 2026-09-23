@@ -163,6 +163,10 @@ struct CodeBinding {
     /// access_token 的 SHA-256 哈希（v4 C7：ID Token 的 at_hash 计算用；兑换时写入）
     #[serde(default)]
     access_token_hash: String,
+    /// v5-E5：用户是否启用 TOTP（authorize 时点快照 → ID Token acr/amr claim；
+    /// 旧绑定 JSON 缺省 false）
+    #[serde(default)]
+    totp_enabled: bool,
     redirect_uri: String,
     scope: Vec<String>,
     code_challenge: String,
@@ -405,7 +409,7 @@ impl SsoService {
             // v4 §6：claims_supported 与 scopes_supported 自洽（email scope 有对应 claim）
             "claims_supported": [
                 "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "at_hash",
-                "preferred_username", "name", "email", "email_verified"
+                "acr", "amr", "preferred_username", "name", "email", "email_verified"
             ],
         })
     }
@@ -678,12 +682,21 @@ impl SsoService {
         // v4 §6：查一次用户资料填充 email/nick_name（email scope 的真实数据链路；
         // 绑定随码缓存，token 兑换与 userinfo 无需再查库）
         let (nick_name, email) = self.lookup_user_profile(user_id).await;
+        // v5-E5：TOTP 启用状态快照（Redis totp:enabled:{uid}；fail-open 查询失败视为未启用，
+        // 与登录链路 fail-closed 不同——此处仅影响 acr 声明强度，不涉放行决策）
+        let totp_enabled: bool = redis::cmd("EXISTS")
+            .arg(format!("totp:enabled:{}", user_id))
+            .query_async::<i64>(redis)
+            .await
+            .map(|n| n > 0)
+            .unwrap_or(false);
         let binding = CodeBinding {
             client_id: client_id.to_string(),
             user_id,
             username: username.to_string(),
             nick_name,
             email,
+            totp_enabled,
             redirect_uri: redirect_uri.to_string(),
             scope: scope.to_vec(),
             code_challenge: code_challenge.to_string(),
@@ -995,6 +1008,16 @@ impl SsoService {
             let at_hash = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(&digest[..digest.len() / 2]);
             claims.insert("at_hash".into(), serde_json::json!(at_hash));
+        }
+        // v5-E5：认证强度声明（RFC 8176 acr / OIDC amr）——authorize 时点快照
+        // 用户 TOTP 启用状态：启用 → acr="mfa"、amr=["pwd","totp"]；否则 acr="pwd"、
+        // amr=["pwd"]。RP 据此判断认证强度（如要求 mfa 才放行敏感操作）。
+        if binding.totp_enabled {
+            claims.insert("acr".into(), serde_json::json!("mfa"));
+            claims.insert("amr".into(), serde_json::json!(["pwd", "totp"]));
+        } else {
+            claims.insert("acr".into(), serde_json::json!("pwd"));
+            claims.insert("amr".into(), serde_json::json!(["pwd"]));
         }
         let payload = serde_json::Value::Object(claims);
         let mut header = Header::new(Algorithm::HS256);
