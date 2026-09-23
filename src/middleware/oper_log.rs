@@ -723,6 +723,15 @@ pub(crate) fn infer_module_title(path: &str) -> String {
         "module.gen".to_string()
     } else if path.starts_with("/common/") {
         "module.common".to_string()
+    } else if path.starts_with("/system/flow") {
+        // 审批工作流（须与 common/i18n.rs 的 MODULE_TITLES 同步登记，V7 §3.5.2）
+        "module.flow".to_string()
+    } else if path.starts_with("/system/oauth/client") {
+        // v5 第八轮：SSO 客户端管理操作日志归类（与 MODULE_TITLES 同步登记）
+        "module.oauthClient".to_string()
+    } else if path.starts_with("/sso/consent") {
+        // v5 第八轮：SSO 同意决策（批准/拒绝）是写操作，须归类（与 MODULE_TITLES 同步登记）
+        "module.ssoConsent".to_string()
     } else if path == "/logout"
         || path == "/login"
         || path == "/register"
@@ -1128,6 +1137,28 @@ mod tests {
         // 不干扰相邻模块
         assert_eq!(infer_module_title("/monitor/job"), "module.job");
         assert_eq!(infer_module_title("/monitor/operlog"), "module.operlog");
+    }
+
+    #[test]
+    fn test_infer_module_title_sso() {
+        // v5 第八轮：SSO 同意决策 / 客户端管理操作日志归类
+        assert_eq!(infer_module_title("/sso/consent"), "module.ssoConsent");
+        assert_eq!(
+            infer_module_title("/system/oauth/client"),
+            "module.oauthClient"
+        );
+        assert_eq!(
+            infer_module_title("/system/oauth/client/list"),
+            "module.oauthClient"
+        );
+        // grants 自助管理归个人中心（页面在个人中心内）
+        assert_eq!(
+            infer_module_title("/system/user/profile/sso-grants"),
+            "module.profile"
+        );
+        // 不干扰相邻模块
+        assert_eq!(infer_module_title("/system/user"), "module.user");
+        assert_eq!(infer_module_title("/sso/authorize"), "module.other");
     }
 
     #[test]

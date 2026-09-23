@@ -387,9 +387,9 @@ impl SsoService {
             "token_endpoint": format!("{}/sso/token", issuer),
             "userinfo_endpoint": format!("{}/sso/userinfo", issuer),
             "end_session_endpoint": format!("{}/sso/logout", issuer),
-            // v4 §5：OIDC Discovery 规定 jwks_uri 为 REQUIRED。HS256 不发布公钥，
-            // 返回空 keys 集合（合规 RP 不会从对称密钥验证方拉取 JWKS）。
-            "jwks_uri": format!("{}/sso/jwks", issuer),
+            // v5 第八轮核查：OIDC Discovery 的 jwks_uri 为 **OPTIONAL**（v4 注释误作
+            // REQUIRED）；HS256 对称签名按规范经 client_secret 通道分发验签密钥，
+            // 不发布公钥——空 JWKS 端点属占位假功能，一并移除（RS256/D2 落地时恢复）。
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
             "grant_types_supported": ["authorization_code"],
@@ -405,12 +405,6 @@ impl SsoService {
                 "preferred_username", "name", "email", "email_verified"
             ],
         })
-    }
-
-    /// JWKS 端点响应（v4 §5）：HS256 对称签名不发布公钥，返回空 keys 集合以满足
-    /// OIDC Discovery 对 jwks_uri REQUIRED 的要求；升级 RS256 后此处返回真实公钥集。
-    pub fn jwks(&self) -> serde_json::Value {
-        serde_json::json!({ "keys": [] })
     }
 
     /// 解析 issuer：配置优先，回退请求 base_url
