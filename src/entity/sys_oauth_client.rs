@@ -32,6 +32,12 @@ pub struct Model {
     pub client_secret_hash: String,
     /// HS256 ID Token 签名密钥（仅服务端使用，脱敏出参）
     pub id_token_secret: String,
+    /// v5-D2：ID Token 签名算法（RS256/HS256，新增客户端默认 RS256）
+    #[serde(default)]
+    pub id_token_alg: String,
+    /// v5-D2：RS256 私钥（PKCS#8 PEM，信封加密落库；NULL=尚未生成，签发时回落 HS256）
+    #[serde(default)]
+    pub rsa_private_key: Option<String>,
     /// 客户端名称（同意页 / 列表展示）
     pub client_name: String,
     /// Logo URI（同意页展示，可空）
@@ -76,6 +82,8 @@ impl std::fmt::Debug for Model {
             .field("client_id", &self.client_id)
             .field("client_secret_hash", &"<redacted>")
             .field("id_token_secret", &"<redacted>")
+            .field("id_token_alg", &self.id_token_alg)
+            .field("rsa_private_key", &"<redacted>")
             .field("client_name", &self.client_name)
             .field("logo_uri", &self.logo_uri)
             .field("redirect_uris", &self.redirect_uris)

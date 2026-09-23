@@ -222,12 +222,9 @@ async fn test_sso_full_flow_and_replay() {
     let doc = json_of(&body);
     assert_eq!(doc["response_types_supported"][0], "code");
     assert_eq!(doc["code_challenge_methods_supported"][0], "S256");
-    assert_eq!(doc["id_token_signing_alg_values_supported"][0], "HS256");
-    // v5 第八轮：HS256 形态不发布 jwks_uri（占位空 JWKS 已移除，RS256/D2 恢复）
-    assert!(
-        doc.get("jwks_uri").is_none(),
-        "HS256 形态发现文档不得声明 jwks_uri，实际: {doc}"
-    );
+    // v5-D2：RS256 为推荐算法（HS256 兼容保留）
+    assert_eq!(doc["id_token_signing_alg_values_supported"][0], "RS256");
+    assert!(doc["jwks_uri"].is_string(), "RS256 形态应声明 jwks_uri");
     assert!(
         doc["token_endpoint"]
             .as_str()
@@ -811,6 +808,21 @@ async fn test_sso_v4_opaque_token_isolation_and_claims() {
         "email scope 应回显 email claim（v4 §6），实际: {ui}"
     );
     assert_eq!(ui["email_verified"], serde_json::json!(false));
+
+    // ⑥ v5-D2：JWKS 端点聚合该客户端的 RS256 公钥（kid=client_id），私钥不出库
+    let (jw_status, _, jw_body) = raw_get(&ctx.app, ctx.peer_ip, "/sso/jwks", &[]).await;
+    assert_eq!(jw_status, StatusCode::OK, "jwks 应 200");
+    let jw = json_of(&jw_body);
+    let jwk = jw["keys"]
+        .as_array()
+        .expect("keys 数组")
+        .iter()
+        .find(|k| k["kid"].as_str() == Some(cid.as_str()))
+        .unwrap_or_else(|| panic!("jwks 应含该客户端公钥，实际: {jw}"));
+    assert_eq!(jwk["kty"], "RSA");
+    assert_eq!(jwk["alg"], "RS256");
+    assert!(jwk["n"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(jwk["e"], "AQAB", "RSA 公钥指数默认 65537");
 }
 
 /// v4 §7：token 请求必须携带与 authorize 完全一致的 redirect_uri（缺失 → 400 invalid_grant）

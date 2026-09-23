@@ -104,6 +104,18 @@ pub async fn discovery(
     with_no_store((StatusCode::OK, Json(doc)).into_response())
 }
 
+/// GET /sso/jwks（v5-D2：聚合全部启用 RS256 客户端的公钥，kid=client_id；
+/// HS256 客户端不发布公钥。无 RS256 客户端时返回空 keys——jwks_uri 为 OPTIONAL）
+pub async fn jwks(State(state): State<Arc<AppState>>) -> Response {
+    if !state.config.sso.enabled {
+        return oidc_error_response(
+            StatusCode::NOT_FOUND,
+            &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
+        );
+    }
+    with_no_store((StatusCode::OK, Json(state.sso_service.jwks().await)).into_response())
+}
+
 /// GET /sso/authorize
 pub async fn authorize(
     State(state): State<Arc<AppState>>,
