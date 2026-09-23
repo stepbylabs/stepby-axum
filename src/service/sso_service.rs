@@ -2027,6 +2027,35 @@ impl SsoService {
                     .await;
             }
         }
+        // v5-D3 修正：按 client 粒度同步吊销 refresh_token（RT 轮换链终止）——
+        // 否则撤权/删客户端/停用后 RT 仍可换出新 AT，级联吊销被架空
+        let user_rt_key = format!("{}{}", USER_RT_KEY_PREFIX, user_id);
+        let rt_hashes: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(&user_rt_key)
+            .query_async(redis)
+            .await
+            .unwrap_or_default();
+        for h in &rt_hashes {
+            let rt_key = format!("{}{}", RT_KEY_PREFIX, h);
+            let binding_json: Option<String> = redis::cmd("GET")
+                .arg(&rt_key)
+                .query_async(redis)
+                .await
+                .unwrap_or(None);
+            let matched = binding_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<RefreshBinding>(j).ok())
+                .map(|b| b.client_id == client_id)
+                .unwrap_or(false);
+            if matched {
+                let _: Result<i64, _> = redis::cmd("DEL").arg(&rt_key).query_async(redis).await;
+                let _: Result<i64, _> = redis::cmd("SREM")
+                    .arg(&user_rt_key)
+                    .arg(h)
+                    .query_async(redis)
+                    .await;
+            }
+        }
     }
 
     /// v4-P0-B：end_session 真实登出（RP-initiated Single Logout）。
