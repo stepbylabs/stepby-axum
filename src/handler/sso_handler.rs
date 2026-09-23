@@ -356,6 +356,7 @@ pub async fn consent(
         .consent(
             user_id,
             operator.username(),
+            operator.tenant_id(),
             dto,
             &mut state.redis.clone(),
             &state.config.sso,

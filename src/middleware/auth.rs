@@ -194,6 +194,9 @@ async fn authenticate_pat(
         jti: v.pat_id,
         pwd_ver: 0,
         pat_scopes: Some(v.scopes),
+        // v5-N2 Phase 1：PAT 合成 Claims 的 tid——PAT 属用户级凭据，租户随用户
+        // （当前 PAT 记录无 tid 列，恒 0；Phase 2 随 sys_pat 加列带出）
+        tid: 0,
     })
 }
 
@@ -242,6 +245,12 @@ impl Operator {
     /// 是否 PAT 会话（V7-E1 方案 S：审批写动作要求本人 JWT 会话，禁 PAT 代持）
     pub fn is_pat(&self) -> bool {
         self.0.pat_scopes.is_some()
+    }
+
+    /// v5-N2 Phase 1：获取租户 ID（当前恒 0 = 平台单租户；
+    /// 多租户 Phase 2 立项后 Repository 过滤层据此注入 tid 条件）
+    pub fn tenant_id(&self) -> i64 {
+        self.0.tid
     }
 }
 
@@ -323,10 +332,12 @@ mod tests {
             jti: "jti-1".to_string(),
             pwd_ver: 0,
             pat_scopes: None,
+            tid: 0,
         };
         parts.extensions.insert(claims);
         let operator = Operator::from_request_parts(&mut parts, &()).await.unwrap();
         assert_eq!(operator.user_id(), "42");
         assert_eq!(operator.username(), "alice");
+        assert_eq!(operator.tenant_id(), 0, "v5-N2 Phase 1：tid 默认平台租户 0");
     }
 }
