@@ -31,6 +31,20 @@ cargo test --workspace     # 单元测试 + 集成测试
 cargo clippy -- -D warnings # 静态检查，0 告警
 ```
 
+## SSO/OIDC Provider 全链路真实验证
+
+`scripts/e2e_sso_oidc.py`（仅标准库）对运行中的服务执行 11 步真实 HTTP 验证：
+login → client 创建（RS256 keygen）→ authorize(code) → token 兑换（RS256
+id_token + refresh_token 30d）→ id_token claims（acr/amr/tid）→ JWKS 公钥
+独立 RSA 验签 → userinfo → refresh 轮换 → 旧 RT 重放拒绝 → revoke 即时失效
+→ /metrics SSO 事件序列。
+
+```bash
+# 前置：.env 配置 SSO_ENABLED=true / SSO_ISSUER=http://127.0.0.1:8080 / CONFIG_ENC_KEY
+docker compose up -d redis && cargo run          # 终端 1
+python scripts/e2e_sso_oidc.py                   # 终端 2（--base 可指定地址）
+```
+
 ## License
 
 [MIT](LICENSE)，Copyright (c) 2024-2026 Yebot。
