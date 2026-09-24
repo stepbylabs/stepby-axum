@@ -20,5 +20,7 @@ pub fn public_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(crate::router::sys_oauth_router::public_oauth_routes(
             state.clone(),
         ))
-        .merge(crate::router::sso_router::public_sso_routes(state))
+        .merge(crate::router::sso_router::public_sso_routes(state.clone()))
+        // v5-D12：SCIM 2.0（Bearer 自校验，禁用时 404）
+        .merge(crate::router::scim_router::public_scim_routes(state))
 }

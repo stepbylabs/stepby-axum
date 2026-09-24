@@ -50,6 +50,9 @@ pub struct Settings {
     /// 单点登录 / OIDC Provider 配置（Tier B，默认关闭）
     #[serde(default)]
     pub sso: SsoConfig,
+    /// v5-D12：SCIM 2.0 用户目录同步配置（供外部 IdP provisioning 调用，默认关闭）
+    #[serde(default)]
+    pub scim: ScimConfig,
     /// 审批工作流配置（m20260923_000002；cron 为空 = 禁用超时扫描）
     #[serde(default)]
     pub flow: FlowConfig,
@@ -217,6 +220,31 @@ fn default_sso_access_token_ttl_secs() -> u64 {
 }
 fn default_sso_refresh_token_ttl_secs() -> u64 {
     30 * 24 * 3600
+}
+
+/// v5-D12：SCIM 2.0 用户目录同步配置（RFC 7644 最小可用子集）
+#[derive(Clone, Deserialize)]
+pub struct ScimConfig {
+    /// 是否启用 /scim/v2 端点。默认关闭，需显式开启（SCIM_ENABLED=true）
+    #[serde(default = "default_scim_disabled")]
+    pub enabled: bool,
+    /// SCIM Bearer Token（IdP 服务器对服务器调用的专用凭据，与用户 JWT 无关）。
+    /// enabled=true 时必须非空且 ≥32 字符（SCIM_BEARER_TOKEN 环境变量注入）。
+    #[serde(default)]
+    pub bearer_token: String,
+}
+
+impl Default for ScimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_scim_disabled(),
+            bearer_token: String::new(),
+        }
+    }
+}
+
+fn default_scim_disabled() -> bool {
+    false
 }
 
 /// 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
@@ -915,6 +943,13 @@ impl Settings {
         {
             self.sso.access_token_ttl_secs = n;
         }
+        // v5-D12：SCIM（SCIM_ENABLED=true 显式开启；SCIM_BEARER_TOKEN 为 IdP 调用凭据）
+        if let Ok(v) = std::env::var("SCIM_ENABLED") {
+            self.scim.enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = std::env::var("SCIM_BEARER_TOKEN") {
+            self.scim.bearer_token = v;
+        }
     }
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
@@ -1047,6 +1082,19 @@ impl Settings {
             if !issuer.starts_with("https://") && !is_local {
                 anyhow::bail!(
                     "SSO_ISSUER 必须为 https URL（OIDC 规范要求），当前: {issuer}（本地开发可用 http://localhost 或 http://127.0.0.1）"
+                );
+            }
+        }
+        // v5-D12：SCIM 启用时强制显式 Bearer Token（服务器对服务器凭据，低熵即拒绝）
+        if self.scim.enabled {
+            let bt = self.scim.bearer_token.trim();
+            if bt.is_empty() {
+                anyhow::bail!("SCIM_ENABLED=true 时必须显式配置 SCIM_BEARER_TOKEN（≥32 随机字符）");
+            }
+            if bt.len() < 32 {
+                anyhow::bail!(
+                    "SCIM_BEARER_TOKEN 长度不足 32 字符（当前 {} 字符），低熵令牌无法抵御枚举攻击",
+                    bt.len()
                 );
             }
         }
