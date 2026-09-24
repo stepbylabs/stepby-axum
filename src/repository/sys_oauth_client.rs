@@ -75,8 +75,13 @@ impl SysOauthClientRepository {
         client_name: Option<&str>,
         client_id: Option<&str>,
         enabled: Option<&str>,
+        tenant_id: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOauthClient::find().filter(Column::DelFlag.ne("2"));
+        // v5-N2 Phase 2：租户过滤（平台管理员 None 全量；租户用户 Some(tid) 隔离）
+        if let Some(tid) = tenant_id {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(name) = client_name {
             query = query.filter(Column::ClientName.like(format!("%{}%", like_escape(name))));
         }

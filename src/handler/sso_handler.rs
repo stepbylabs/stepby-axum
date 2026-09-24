@@ -491,18 +491,26 @@ pub async fn consent(
 /// GET /system/oauth/client/list
 pub async fn client_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(q): Query<SsoClientQueryDto>,
 ) -> Result<TableDataInfo<SsoClientVo>, AppError> {
-    let (rows, total) = state.sso_service.get_client_page(q).await?;
+    let (rows, total) = state
+        .sso_service
+        .get_client_page(q, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
 /// GET /system/oauth/client/{id}
 pub async fn client_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
 ) -> Result<AjaxResult<SsoClientVo>, AppError> {
-    let vo = state.sso_service.get_client_by_pk(id).await?;
+    let vo = state
+        .sso_service
+        .get_client_by_pk(id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -514,7 +522,7 @@ pub async fn client_add(
 ) -> Result<AjaxResult<crate::service::sso_service::SsoClientCreateResult>, AppError> {
     let res = state
         .sso_service
-        .add_client(dto, operator.username())
+        .add_client(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(res))
 }
@@ -527,7 +535,7 @@ pub async fn client_edit(
 ) -> Result<AjaxResult<SsoClientVo>, AppError> {
     let vo = state
         .sso_service
-        .edit_client(dto, operator.username())
+        .edit_client(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -535,6 +543,7 @@ pub async fn client_edit(
 /// DELETE /system/oauth/client/{ids}
 pub async fn client_delete(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids = crate::utils::parse_id_list::<i64>(&ids);
@@ -551,7 +560,7 @@ pub async fn client_delete(
     }
     state
         .sso_service
-        .delete_clients(ids, &mut state.redis.clone())
+        .delete_clients(ids, &mut state.redis.clone(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
@@ -559,13 +568,19 @@ pub async fn client_delete(
 /// PUT /system/oauth/client/{id}/status
 pub async fn client_toggle(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
     Query(q): Query<ToggleQuery>,
 ) -> Result<AjaxResult<()>, AppError> {
     // v5-S6：停用时按 client 粒度吊销该客户端名下全部用户的 SSO AT
     state
         .sso_service
-        .toggle_client(id, &q.enabled, &mut state.redis.clone())
+        .toggle_client(
+            id,
+            &q.enabled,
+            &mut state.redis.clone(),
+            operator.tenant_id(),
+        )
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }

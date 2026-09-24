@@ -49,6 +49,7 @@ mod sys_user;
 mod sys_user_extra;
 mod sys_user_pref;
 mod sys_web_hook;
+mod tenant_scope;
 mod tool_gen;
 mod totp;
 mod ws;
