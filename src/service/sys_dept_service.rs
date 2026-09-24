@@ -586,12 +586,16 @@ impl SysDeptService {
 
         let dept_repo = self.dept_repo.clone();
         let user_repo = self.user_repo.clone();
+        let user_dept_repo = crate::repository::sys_user_dept::SysUserDeptRepository::new(
+            self.db().clone(),
+        );
         // P0-H4 TOCTOU 修复：将所有校验和软删除放入事务内
         let txn_result = self
             .db()
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 let dept_repo = dept_repo.clone();
                 let user_repo = user_repo.clone();
+                let user_dept_repo = user_dept_repo.clone();
                 async move {
                     // 1. 事务内重新检查子部门
                     let child_select = SysDept::find()
@@ -632,6 +636,10 @@ impl SysDeptService {
                     if user_count > 0 {
                         return Err(sea_orm::DbErr::Custom(crate::tr!("error.dept.has_users")));
                     }
+
+                    // 3.5 多部门任职：物理清理该部门的兼职记录（sys_user_dept）——
+                    // 兼职属弱关联（主部门才阻断删除），部门删除时自动解除兼职
+                    user_dept_repo.delete_by_dept_id_conn(txn, dept_id).await?;
 
                     // 4. 软删除（del_flag = '2'）
                     let mut am: SysDeptActiveModel = existing.into();

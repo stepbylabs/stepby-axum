@@ -31,12 +31,12 @@ use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Model as SysUserModel};
 use crate::entity::sys_user_post::ActiveModel as SysUserPostActiveModel;
-use crate::entity::sys_user_role::ActiveModel as SysUserRoleActiveModel;
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_post::SysPostRepository;
 use crate::repository::sys_role::SysRoleRepository;
 use crate::repository::sys_role_dept::SysRoleDeptRepository;
 use crate::repository::sys_user::SysUserRepository;
+use crate::repository::sys_user_dept::SysUserDeptRepository;
 use crate::repository::sys_user_post::SysUserPostRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::utils::password::{
@@ -77,6 +77,10 @@ pub struct UserAddDto {
     /// 岗位 ID 列表（None 不绑定，Some(vec![]) 清空）
     #[garde(skip)]
     pub post_ids: Option<Vec<i64>>,
+    /// 兼职部门 ID 列表（多部门任职最小侵入版：主部门=dept_id，本列表=兼职；
+    /// None 不绑定，Some(vec![]) 清空兼职；服务层自动排除与 dept_id 重复项）
+    #[garde(skip)]
+    pub dept_ids: Option<Vec<i64>>,
     #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
@@ -108,6 +112,10 @@ pub struct UserEditDto {
     /// None 不修改岗位绑定，Some(vec![]) 清空岗位绑定
     #[garde(skip)]
     pub post_ids: Option<Vec<i64>>,
+    /// 兼职部门 ID 列表（None 不修改兼职绑定，Some(vec![]) 全量替换 admin 来源兼职；
+    /// SCIM 同步的兼职记录（source='scim:{gid}'）不受影响）
+    #[garde(skip)]
+    pub dept_ids: Option<Vec<i64>>,
     #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
@@ -392,6 +400,10 @@ pub struct UserVo {
     /// 管理员识别账号来源，绑定明细见用户个人中心的"第三方绑定"页签）
     #[serde(default)]
     pub oauth_bound: bool,
+    /// 多部门任职（最小侵入版）：兼职部门 ID 列表（sys_user_dept 全部行；
+    /// 主部门 = dept_id 不在此列）
+    #[serde(default)]
+    pub dept_ids: Vec<i64>,
 }
 
 /// 用户授权角色视图对象（对齐前端 UserAuthRoleResult）
@@ -435,6 +447,13 @@ pub struct UserFormVo {
     pub role_ids: Vec<i64>,
     pub roles: Vec<SysRoleModel>,
     pub posts: Vec<SysPostModel>,
+    /// 多部门任职：兼职部门 ID 列表（**仅 admin 来源**，编辑可改）
+    pub dept_ids: Vec<i64>,
+    /// v5-D12 Group：SCIM 组联动角色 id 集合（source like 'scim:%'）——前端
+    /// 角色树上禁选并标记"来自组"，提交不包含（防止误转 admin 行）
+    pub scim_role_ids: Vec<i64>,
+    /// v5-D12 Group：SCIM 组同步兼职部门 id 集合（只读标记，提交不包含）
+    pub scim_dept_ids: Vec<i64>,
 }
 
 // ==================== 辅助函数 ====================
@@ -460,6 +479,7 @@ pub struct SysUserService {
     user_repo: SysUserRepository,
     user_role_repo: SysUserRoleRepository,
     user_post_repo: SysUserPostRepository,
+    user_dept_repo: SysUserDeptRepository,
     dept_repo: SysDeptRepository,
     post_repo: SysPostRepository,
     role_repo: SysRoleRepository,
@@ -474,6 +494,7 @@ impl SysUserService {
             user_repo: SysUserRepository::new(db.clone()),
             user_role_repo: SysUserRoleRepository::new(db.clone()),
             user_post_repo: SysUserPostRepository::new(db.clone()),
+            user_dept_repo: SysUserDeptRepository::new(db.clone()),
             dept_repo: SysDeptRepository::new(db.clone()),
             post_repo: SysPostRepository::new(db.clone()),
             role_repo: SysRoleRepository::new(db.clone()),
@@ -643,17 +664,25 @@ impl SysUserService {
         // 3.5 v5-E4：批量查询第三方登录绑定集合（1 次 DB 查询；账号来源标识）
         let oauth_bound_set = self.oauth_bound_user_ids(&user_ids).await;
 
+        // 3.6 多部门任职：批量查询兼职部门映射（1 次 DB 查询）
+        let dept_ids_map = self
+            .user_dept_repo
+            .find_dept_ids_by_user_ids(&user_ids)
+            .await?;
+
         // 4. 在内存中组装 UserVo
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
             let role_ids = role_ids_map.get(&user.user_id).cloned().unwrap_or_default();
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
             let oauth_bound = oauth_bound_set.contains(&user.user_id);
+            let dept_ids = dept_ids_map.get(&user.user_id).cloned().unwrap_or_default();
             vos.push(UserVo {
                 user,
                 role_ids,
                 dept,
                 oauth_bound,
+                dept_ids,
             });
         }
         Ok((vos, total))
@@ -845,16 +874,23 @@ impl SysUserService {
 
         // 3. 组装 UserVo（v5-E4：绑定标记随导出/列表一致）
         let oauth_bound_set = self.oauth_bound_user_ids(&user_ids).await;
+        // 多部门任职：批量查询兼职部门映射
+        let dept_ids_map = self
+            .user_dept_repo
+            .find_dept_ids_by_user_ids(&user_ids)
+            .await?;
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
             let role_ids = role_ids_map.get(&user.user_id).cloned().unwrap_or_default();
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
             let oauth_bound = oauth_bound_set.contains(&user.user_id);
+            let dept_ids = dept_ids_map.get(&user.user_id).cloned().unwrap_or_default();
             vos.push(UserVo {
                 user,
                 role_ids,
                 dept,
                 oauth_bound,
+                dept_ids,
             });
         }
         Ok(vos)
@@ -892,11 +928,20 @@ impl SysUserService {
         let oauth_bound_set = self
             .oauth_bound_user_ids(std::slice::from_ref(&user_id))
             .await;
+        // 多部门任职：兼职部门列表
+        let dept_ids = self
+            .user_dept_repo
+            .find_by_user_id(user_id)
+            .await?
+            .into_iter()
+            .map(|ud| ud.dept_id)
+            .collect();
         Ok(UserVo {
             user,
             role_ids,
             dept,
             oauth_bound: oauth_bound_set.contains(&user_id),
+            dept_ids,
         })
     }
 
@@ -1030,9 +1075,9 @@ impl SysUserService {
         // 查询全部可用岗位
         let all_posts: Vec<SysPostModel> = self.post_repo.find_active_all().await?;
 
-        // 若 user_id 为 None（新增场景），返回空 role_ids/post_ids 和 None 的 data
-        let (user, role_ids, post_ids) = match user_id {
-            None => (None, vec![], vec![]),
+        // 若 user_id 为 None（新增场景），返回空 role_ids/post_ids/dept_ids 和 None 的 data
+        let (user, role_ids, post_ids, dept_ids, scim_role_ids, scim_dept_ids) = match user_id {
+            None => (None, vec![], vec![], vec![], vec![], vec![]),
             Some(uid) => {
                 let user_model = self
                     .user_repo
@@ -1062,7 +1107,37 @@ impl SysUserService {
                 }
                 let rids = self.get_role_ids_by_user_id(uid).await?;
                 let pids = self.get_post_ids_by_user_id(uid).await?;
-                (Some(user_model), rids, pids)
+                // 编辑回显语义：dept_ids 仅 admin 来源（可改）；scim 来源单独只读标记
+                let dids = self
+                    .user_dept_repo
+                    .find_dept_ids_by_user_and_source(uid, "admin")
+                    .await?;
+                let scim_dids = self
+                    .user_dept_repo
+                    .find_dept_ids_by_user_and_source(uid, "scim:")
+                    .await;
+                // scim 来源前缀查询（scim:{gid}）：用 like 兜底（source='scim:' 精确
+                // 匹配不命中），走 repo find_by_user_id 后内存过滤更简单
+                let scim_dids = match scim_dids {
+                    Ok(v) if !v.is_empty() => v,
+                    _ => self
+                        .user_dept_repo
+                        .find_by_user_id(uid)
+                        .await?
+                        .into_iter()
+                        .filter(|ud| ud.source.starts_with("scim:"))
+                        .map(|ud| ud.dept_id)
+                        .collect(),
+                };
+                let scim_rids = self
+                    .user_role_repo
+                    .find_by_user_id(uid)
+                    .await?
+                    .into_iter()
+                    .filter(|ur| ur.source.starts_with("scim:"))
+                    .map(|ur| ur.role_id)
+                    .collect();
+                (Some(user_model), rids, pids, dids, scim_rids, scim_dids)
             }
         };
 
@@ -1072,6 +1147,9 @@ impl SysUserService {
             role_ids,
             roles: all_roles,
             posts: all_posts,
+            dept_ids,
+            scim_role_ids,
+            scim_dept_ids,
         })
     }
 
@@ -1108,6 +1186,7 @@ impl SysUserService {
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
+        let user_dept_repo = self.user_dept_repo.clone();
         let result = self
             .db()
             .transaction::<_, SysUserModel, sea_orm::DbErr>(|txn| {
@@ -1133,22 +1212,23 @@ impl SysUserService {
 
                 let role_ids = dto.role_ids.clone();
                 let post_ids = dto.post_ids.clone();
+                let dept_ids = dto.dept_ids.clone().map(|ids| {
+                    // 兼职部门：排除与主部门重复项（主部门唯一事实源 = dept_id）
+                    match dto.dept_id {
+                        Some(main) => ids.into_iter().filter(|d| *d != main).collect::<Vec<_>>(),
+                        None => ids,
+                    }
+                });
                 async move {
                     // 1. 插入 sys_user（通过 Repository）
                     let new_user = user_repo.base().insert_conn(txn, user_am).await?;
 
-                    // 2. 若 role_ids 非空，批量插入 sys_user_role（通过 Repository）
-                    if let Some(ids) = role_ids
-                        && !ids.is_empty()
-                    {
-                        let models: Vec<SysUserRoleActiveModel> = ids
-                            .into_iter()
-                            .map(|rid| SysUserRoleActiveModel {
-                                user_id: Set(new_user.user_id),
-                                role_id: Set(rid),
-                            })
-                            .collect();
-                        user_role_repo.insert_many_conn(txn, models).await?;
+                    // 2. 角色授权（幂等抢占式：无行插 admin 行；scim 行抢占为 admin；admin 行跳过，
+                    //    防止管理员勾选 SCIM 已授角色时撞 UNIQUE(user_id, role_id)）
+                    if let Some(ids) = role_ids {
+                        user_role_repo
+                            .upsert_admin_grants_conn(txn, new_user.user_id, ids)
+                            .await?;
                     }
 
                     // 3. 若 post_ids 非空，批量插入 sys_user_post（通过 Repository）
@@ -1164,6 +1244,13 @@ impl SysUserService {
                             })
                             .collect();
                         user_post_repo.insert_many_conn(txn, models).await?;
+                    }
+
+                    // 4. 多部门任职（幂等抢占式：防与 SCIM 组兼职绑定撞 UNIQUE(user_id, dept_id)）
+                    if let Some(ids) = dept_ids {
+                        user_dept_repo
+                            .upsert_admin_depts_conn(txn, new_user.user_id, ids)
+                            .await?;
                     }
                     Ok(new_user)
                 }
@@ -1270,26 +1357,30 @@ impl SysUserService {
 
                 let role_ids = dto.role_ids.clone();
                 let post_ids = dto.post_ids.clone();
+                let dept_ids = dto.dept_ids.clone().map(|ids| {
+                    // 兼职部门：排除与主部门重复项
+                    match dto.dept_id {
+                        Some(main) => ids.into_iter().filter(|d| *d != main).collect::<Vec<_>>(),
+                        None => ids,
+                    }
+                });
+                let user_dept_repo = self.user_dept_repo.clone();
                 let user_id = dto.user_id;
                 async move {
                     // 1. 更新 sys_user（通过 Repository）
                     let updated = user_repo.base().update_conn(txn, am).await?;
 
-                    // 2. 若 role_ids 为 Some（非 None），重分配角色（通过 Repository）
+                    // 2. 若 role_ids 为 Some（非 None），重分配角色（幂等抢占式插入）
                     if let Some(ids) = role_ids {
-                        // 先删除旧关联
-                        user_role_repo.delete_by_user_id_conn(txn, user_id).await?;
-                        // 若非空，再插入新关联
-                        if !ids.is_empty() {
-                            let models: Vec<SysUserRoleActiveModel> = ids
-                                .into_iter()
-                                .map(|rid| SysUserRoleActiveModel {
-                                    user_id: Set(user_id),
-                                    role_id: Set(rid),
-                                })
-                                .collect();
-                            user_role_repo.insert_many_conn(txn, models).await?;
-                        }
+                        // 先删除旧关联（v5-D12 Group：仅删管理员手授行，保留
+                        // SCIM 组联动行 source='scim:{gid}'——消除回写抖动）
+                        user_role_repo
+                            .delete_admin_by_user_id_conn(txn, user_id)
+                            .await?;
+                        // 再写入新关联（scim 已有行抢占为 admin，防撞唯一约束）
+                        user_role_repo
+                            .upsert_admin_grants_conn(txn, user_id, ids)
+                            .await?;
                     }
 
                     // 3. 若 post_ids 为 Some（非 None），重分配岗位（通过 Repository）
@@ -1308,6 +1399,17 @@ impl SysUserService {
                                 .collect();
                             user_post_repo.insert_many_conn(txn, models).await?;
                         }
+                    }
+
+                    // 4. 多部门任职：dept_ids 为 Some（非 None）时全量替换 admin 来源
+                    // 兼职记录（SCIM 同步行 source='scim:{gid}' 不受影响；幂等抢占式插入）
+                    if let Some(ids) = dept_ids {
+                        user_dept_repo
+                            .delete_admin_by_user_id_conn(txn, user_id)
+                            .await?;
+                        user_dept_repo
+                            .upsert_admin_depts_conn(txn, user_id, ids)
+                            .await?;
                     }
                     Ok(updated)
                 }
@@ -1360,6 +1462,7 @@ impl SysUserService {
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
+        let user_dept_repo = self.user_dept_repo.clone();
         self.db()
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 async move {
@@ -1374,6 +1477,9 @@ impl SysUserService {
 
                     // 3. 物理删除 sys_user_post 关联（SEC-005：补全孤儿记录清理）
                     user_post_repo.delete_by_user_id_conn(txn, user_id).await?;
+
+                    // 3.5 多部门任职：物理删除兼职部门关联（孤儿记录清理）
+                    user_dept_repo.delete_by_user_id_conn(txn, user_id).await?;
 
                     // 4. 物理删除 sys_notice_read 关联（清理已读记录，避免已读列表显示已删除用户）
                     SysNoticeRead::delete_many()
@@ -1432,6 +1538,7 @@ impl SysUserService {
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
+        let user_dept_repo = self.user_dept_repo.clone();
         let db = self.db().clone();
 
         db.transaction::<_, (), sea_orm::DbErr>(|txn| {
@@ -1474,6 +1581,9 @@ impl SysUserService {
 
                     // 6. 物理删除 sys_user_post 关联（SEC-005：补全孤儿记录清理）
                     user_post_repo.delete_by_user_id_conn(txn, user_id).await?;
+
+                    // 7. 多部门任职：物理删除兼职部门关联（孤儿记录清理）
+                    user_dept_repo.delete_by_user_id_conn(txn, user_id).await?;
                 }
                 Ok(())
             }
@@ -1687,19 +1797,15 @@ impl SysUserService {
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 let role_ids = role_ids.clone();
                 async move {
-                    // 先删除旧关联（通过 Repository）
-                    user_role_repo.delete_by_user_id_conn(txn, user_id).await?;
-                    // 若非空，再插入新关联（通过 Repository）
-                    if !role_ids.is_empty() {
-                        let models: Vec<SysUserRoleActiveModel> = role_ids
-                            .into_iter()
-                            .map(|rid| SysUserRoleActiveModel {
-                                user_id: Set(user_id),
-                                role_id: Set(rid),
-                            })
-                            .collect();
-                        user_role_repo.insert_many_conn(txn, models).await?;
-                    }
+                    // 先删除旧关联（通过 Repository；v5-D12 Group：仅删管理员手授行
+                    // source='admin'，保留 SCIM 组联动行——消除回写抖动）
+                    user_role_repo
+                        .delete_admin_by_user_id_conn(txn, user_id)
+                        .await?;
+                    // 再写入新关联（幂等抢占式：scim 已有行抢占为 admin，防撞唯一约束）
+                    user_role_repo
+                        .upsert_admin_grants_conn(txn, user_id, role_ids)
+                        .await?;
                     Ok(())
                 }
                 .boxed()
