@@ -415,6 +415,7 @@ mod tests {
         custom_sql: Option<&str>,
     ) -> crate::entity::sys_role::Model {
         crate::entity::sys_role::Model {
+            tenant_id: 0,
             role_id: id,
             role_name: format!("role-{id}"),
             role_key: format!("key-{id}"),

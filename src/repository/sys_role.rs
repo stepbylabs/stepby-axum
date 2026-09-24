@@ -119,8 +119,12 @@ impl SysRoleRepository {
         status: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysRole::find().filter(Column::DelFlag.eq("0"));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(name) = role_name {
             query = query.filter(Column::RoleName.like(format!("%{}%", like_escape(name))));
         }
@@ -165,8 +169,13 @@ impl SysRoleRepository {
         scope_role_ids: Option<&[i64]>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysRole::find().filter(Column::DelFlag.eq("0"));
+        // 多租户 Phase 2：租户用户仅见本租户角色；平台 0 不过滤
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(name) = role_name {
             query = query.filter(Column::RoleName.like(format!("%{}%", like_escape(name))));
         }

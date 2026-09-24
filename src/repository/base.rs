@@ -230,6 +230,7 @@ mod tests {
 
     fn make_job(name: &str) -> SysJobActiveModel {
         SysJobActiveModel {
+            tenant_id: Set(0),
             job_name: Set(name.to_string()),
             job_group: Set("DEFAULT".to_string()),
             invoke_target: Set("unitTest.base".to_string()),

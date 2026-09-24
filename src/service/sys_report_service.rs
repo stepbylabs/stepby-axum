@@ -990,6 +990,7 @@ mod tests {
 
     fn sample_report() -> SysReportModel {
         SysReportModel {
+            tenant_id: 0,
             report_id: 1,
             report_code: "LOGIN_7D".to_string(),
             report_name: "登录统计".to_string(),

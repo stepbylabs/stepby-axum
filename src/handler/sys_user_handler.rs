@@ -109,7 +109,11 @@ pub async fn list(
     })?;
     let (rows, total) = state
         .user_service
-        .get_user_page(query, Some(operator_user_id))
+        .get_user_page(
+            query,
+            Some(operator_user_id),
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -131,7 +135,11 @@ pub async fn export(
     })?;
     let rows = state
         .user_service
-        .export_users(query, Some(operator_user_id))
+        .export_users(
+            query,
+            Some(operator_user_id),
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
 
     let columns = [

@@ -8,6 +8,7 @@ use crate::scheduler::JobScheduler;
 use crate::service::{
     AuthService, GenTableService, IpLocationService, MailerService, SsoService, SysBackupService,
     SysConfigService, SysDeptService, SysDictService, SysFlowService, SysFrontendErrorService,
+    SysTenantService,
     SysHttpDebugService, SysJobService, SysLogininforService, SysMenuService, SysMsgService,
     SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
     SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysUserPrefService,
@@ -44,6 +45,7 @@ pub struct AppState {
     pub notice_service: SysNoticeService,
     /// 部门模块 Service
     pub dept_service: SysDeptService,
+    pub tenant_service: SysTenantService,
     /// 认证服务
     pub auth_service: AuthService,
     /// 定时任务 Service
@@ -232,6 +234,7 @@ impl AppState {
             menu_service,
             notice_service: SysNoticeService::new(db.clone()),
             dept_service: SysDeptService::new(db.clone()),
+            tenant_service: SysTenantService::new(db.clone()),
             auth_service,
             job_service: SysJobService::new(db.clone(), job_scheduler.clone()),
             dict_service: SysDictService::new(db.clone(), redis.clone()),

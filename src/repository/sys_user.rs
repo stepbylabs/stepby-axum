@@ -241,8 +241,13 @@ impl SysUserRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         last_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
+        // 多租户 Phase 2：租户用户仅见本租户（tenant_scope(tid)=Some(t)）；平台 0 不过滤
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(name) = user_name {
             query = query.filter(Column::UserName.like(format!("%{}%", like_escape(name))));
         }
@@ -447,9 +452,9 @@ mod tests {
         loop {
             let (page, _) = repo
                 .find_page_with_data_scope(
-                    0, size, None, None, None, None, None, None, None, None, None, cursor,
-                )
-                .await
+                    0, size, None, None, None, None, None, None, None, None, None, cursor, None,
+            )
+            .await
                 .unwrap();
             if page.is_empty() {
                 break;
@@ -498,8 +503,9 @@ mod tests {
                 None,
                 None,
                 None,
-            )
-            .await
+                None,
+        )
+        .await
             .unwrap();
         assert!(expected_total >= 4, "自定义数据权限过滤应命中至少 4 条");
         assert!(
@@ -526,8 +532,9 @@ mod tests {
                     None,
                     None,
                     cursor,
-                )
-                .await
+                    None,
+            )
+            .await
                 .unwrap();
             if page.is_empty() {
                 break;
@@ -561,9 +568,9 @@ mod tests {
         // OFFSET 全量（大 limit，无过滤）作为基准集合
         let (offset_all, _) = repo
             .find_page_with_data_scope(
-                0, 1000, None, None, None, None, None, None, None, None, None, None,
-            )
-            .await
+                0, 1000, None, None, None, None, None, None, None, None, None, None, None,
+        )
+        .await
             .unwrap();
         let offset_ids: std::collections::HashSet<i64> =
             offset_all.iter().map(|u| u.user_id).collect();
@@ -574,9 +581,9 @@ mod tests {
         loop {
             let (page, _) = repo
                 .find_page_with_data_scope(
-                    0, size, None, None, None, None, None, None, None, None, None, cursor,
-                )
-                .await
+                    0, size, None, None, None, None, None, None, None, None, None, cursor, None,
+            )
+            .await
                 .unwrap();
             if page.is_empty() {
                 break;

@@ -29,6 +29,7 @@ error:
     login_failed: 用户名或密码错误
     account_deleted: 账号已删除，请联系管理员
     account_disabled: 账号已停用，请联系管理员
+    tenant_disabled: 租户已停用
     account_locked: 账号已被锁定，请稍后再试
     register_exists: 用户名已存在
     register_disabled: 当前系统未开放注册，请联系管理员
@@ -101,6 +102,8 @@ error:
     withdraw_only_applicant: 仅单据提交人可撤回
     pat_forbidden: 审批操作须本人登录会话执行，不能使用访问令牌（PAT）
   sso:
+    platform_protected: 平台根部门不允许通过租户接口操作
+    ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户
     disabled: 单点登录（SSO）未启用
     client_not_found: 客户端不存在
     client_disabled: 该客户端已停用
@@ -413,6 +416,14 @@ error:
   pref:
     value_invalid: "消息偏好字段 %{field} 取值非法（须为 0 或 1）"
     time_invalid: "免打扰时间字段 %{field} 格式非法（须为 HH:MM），当前值: %{value}"
+  tenant:
+    name_required: 租户名称不能为空
+    name_duplicate: 租户名称已存在
+    not_found: 租户不存在
+    status_invalid: "status 必须为 0(正常) 或 1(停用)，当前值: %{value}"
+    has_users: "租户内仍有 %{count} 个用户，无法删除"
+    platform_protected: 平台根部门不允许通过租户接口操作
+    disabled: 租户已被停用，无法登录
   pat:
     name_required: 令牌名称不能为空
     name_too_long: "令牌名称过长（最多 100 字符）"

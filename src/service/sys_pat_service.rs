@@ -96,10 +96,11 @@ impl SysPatService {
         }
     }
 
-    /// 签发令牌，返回一次性明文 + 脱敏视图
+    /// 签发令牌，返回一次性明文 + 脱敏视图（tenant_id 随 operator 带出，PAT 归 operator 租户）
     pub async fn create(
         &self,
         user_id: i64,
+        tenant_id: i64,
         username: &str,
         dto: CreatePatDto,
         config: &PatConfig,
@@ -154,6 +155,7 @@ impl SysPatService {
 
         let model = PatModel {
             pat_id: format!("{:x}", uuid::Uuid::new_v4().simple()),
+            tenant_id,
             user_id,
             name: name.to_string(),
             token_hash,

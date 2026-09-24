@@ -35,9 +35,16 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<OperLogQueryDto>,
 ) -> Result<TableDataInfo<SysOperLogModel>, AppError> {
-    let (rows, total) = state.oper_log_service.get_oper_log_page(query).await?;
+    let (rows, total) = state
+        .oper_log_service
+        .get_oper_log_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -202,7 +209,13 @@ pub async fn export(
         None
     };
 
-    let rows = state.oper_log_service.export_oper_logs(query).await?;
+    let rows = state
+        .oper_log_service
+        .export_oper_logs(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
 
     // 完成任务进度
     if let Some(tid) = task_id {

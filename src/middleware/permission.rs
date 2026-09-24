@@ -242,6 +242,7 @@ fn spawn_permission_denied_audit(
         request_method: method.to_string(),
         operator_type: 1, // 1=后台用户
         oper_name: claims.username.clone(),
+        tenant_id: claims.tid,
         dept_name: String::new(), // spawn 内查询后填入
         oper_url,
         oper_ip,
@@ -370,6 +371,14 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("PUT", "/system/dept/updateSort", "system:dept:edit"),
     ("DELETE", "/system/dept/{deptId}", "system:dept:remove"),
     // treeselect：仅需登录，不在此表
+
+    // ===== 租户管理（多租户 Phase 2 立项实施，m20260925_000002 菜单 3700 段） =====
+    ("GET", "/system/tenant/list", "system:tenant:list"),
+    ("GET", "/system/tenant/{deptId}", "system:tenant:query"),
+    ("POST", "/system/tenant", "system:tenant:add"),
+    ("PUT", "/system/tenant", "system:tenant:edit"),
+    ("PUT", "/system/tenant/changeStatus", "system:tenant:edit"),
+    ("DELETE", "/system/tenant/{deptId}", "system:tenant:remove"),
 
     // ===== 定时任务管理 =====
     ("GET", "/monitor/job/list", "monitor:job:list"),

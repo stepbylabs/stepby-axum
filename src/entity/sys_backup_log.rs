@@ -15,6 +15,8 @@ use crate::common::datetime;
 #[serde(rename_all = "camelCase")]
 #[schema(as = SysBackupLog)]
 pub struct Model {
+    /// 多租户归属（Phase 2 立项铺开，迁移 m20260925_000001；0=平台租户）
+    pub tenant_id: i64,
     #[sea_orm(primary_key)]
     pub backup_id: i64,
     /// 备份文件名

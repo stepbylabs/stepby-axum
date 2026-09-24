@@ -115,6 +115,7 @@ impl SysPostService {
     pub async fn get_post_page(
         &self,
         query: PostQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysPostModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -128,6 +129,7 @@ impl SysPostService {
                 query.post_code.as_deref(),
                 query.post_name.as_deref(),
                 query.status.as_deref(),
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
@@ -282,6 +284,7 @@ impl SysPostService {
     pub async fn export_posts(
         &self,
         query: PostQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysPostModel>, ServiceError> {
         // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS）
         let (rows, _) = self
@@ -292,6 +295,7 @@ impl SysPostService {
                 query.post_code.as_deref(),
                 query.post_name.as_deref(),
                 query.status.as_deref(),
+                tenant_scope,
             )
             .await?;
         Ok(rows)

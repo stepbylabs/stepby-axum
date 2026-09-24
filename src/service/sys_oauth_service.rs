@@ -1398,6 +1398,7 @@ mod tests {
     #[test]
     fn test_provider_vo_masks_secret() {
         let m = SysOauthProviderModel {
+            tenant_id: 0,
             provider_id: 1,
             provider_code: "github".into(),
             provider_name: "GitHub".into(),

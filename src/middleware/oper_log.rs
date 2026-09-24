@@ -82,15 +82,16 @@ pub async fn oper_log_middleware(
 
     // 提取操作人信息（auth_middleware 已注入 Claims）
     // 必须在 req.into_parts() 之前从 extensions 读取
-    let (oper_name, operator_type, user_id) = req
+    let (oper_name, operator_type, user_id, operator_tid) = req
         .extensions()
         .get::<crate::jwt::Claims>()
-        .map(|c| (c.username.clone(), 1i32, c.sub.clone()))
+        .map(|c| (c.username.clone(), 1i32, c.sub.clone(), c.tid))
         .unwrap_or_else(|| {
             (
                 crate::tr!("error.oper_log.anonymous").to_string(),
                 0,
                 String::new(),
+                0i64,
             )
         });
 
@@ -303,6 +304,7 @@ pub async fn oper_log_middleware(
         request_method: method.to_string(),
         operator_type,
         oper_name: oper_name.clone(),
+        tenant_id: operator_tid,
         dept_name: String::new(), // 占位，spawn 任务中查询后填入
         oper_url,
         oper_ip,

@@ -76,6 +76,8 @@ pub struct OperLogRecord {
     pub status: String,
     pub error_msg: String,
     pub cost_time: i64,
+    /// 操作人所属租户（多租户 Phase 2：随 JWT tid 带出；0=平台）
+    pub tenant_id: i64,
 }
 
 // ==================== 辅助函数 ====================
@@ -101,6 +103,7 @@ impl SysOperLogService {
     pub async fn get_oper_log_page(
         &self,
         query: OperLogQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysOperLogModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -127,6 +130,7 @@ impl SysOperLogService {
                 begin,
                 end,
                 query.last_id,
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
@@ -139,6 +143,7 @@ impl SysOperLogService {
     pub async fn export_oper_logs(
         &self,
         query: OperLogQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysOperLogModel>, ServiceError> {
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -161,6 +166,7 @@ impl SysOperLogService {
                 begin,
                 end,
                 None, // 导出固定走 OFFSET 全量路径，不走 keyset
+                tenant_scope,
             )
             .await?;
         Ok(rows)
@@ -485,6 +491,7 @@ impl SysOperLogService {
             }),
             oper_time: Set(Some(now)),
             cost_time: Set(Some(record.cost_time)),
+            tenant_id: Set(record.tenant_id),
             ..Default::default()
         };
 

@@ -705,6 +705,7 @@ mod tests {
     #[test]
     fn test_job_vo_from_model() {
         let job = SysJobModel {
+            tenant_id: 0,
             job_id: 1,
             job_name: "test".to_string(),
             job_group: "DEFAULT".to_string(),

@@ -48,7 +48,11 @@ pub async fn list(
     })?;
     let list = state
         .dept_service
-        .list_depts(query, Some(operator_user_id))
+        .list_depts(
+            query,
+            Some(operator_user_id),
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(AjaxResult::success(list))
 }
@@ -126,7 +130,10 @@ pub async fn treeselect(
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
     let tree = state
         .dept_service
-        .build_dept_tree_select(operator_user_id)
+        .build_dept_tree_select(
+            operator_user_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(AjaxResult::success(tree))
 }

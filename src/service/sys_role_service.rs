@@ -299,6 +299,7 @@ impl SysRoleService {
         &self,
         query: RoleQueryDto,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysRoleModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -324,6 +325,7 @@ impl SysRoleService {
                 scope_ref,
                 None,
                 None,
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
@@ -334,6 +336,7 @@ impl SysRoleService {
         &self,
         query: RoleQueryDto,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysRoleModel>, ServiceError> {
         // P0-2 修复：导出接口需应用与 list 相同的数据权限过滤，防止越权导出（P0-6 统一入口）
         let scope_role_ids: Option<Vec<i64>> = match operator_user_id {
@@ -353,6 +356,7 @@ impl SysRoleService {
                 scope_role_ids.as_deref(),
                 None,
                 None,
+                tenant_scope,
             )
             .await?;
         Ok(rows)

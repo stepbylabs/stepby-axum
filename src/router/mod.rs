@@ -16,6 +16,7 @@ pub mod sso_router;
 pub mod sys_backup_router;
 pub mod sys_config_router;
 pub mod sys_dept_router;
+pub mod sys_tenant_router;
 pub mod sys_dict_router;
 pub mod sys_frontend_error_router;
 pub mod sys_http_debug_router;
@@ -98,6 +99,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_report_router::report_routes())
         .merge(sys_web_hook_router::web_hook_routes())
         .merge(sys_dept_router::dept_routes())
+        .merge(sys_tenant_router::tenant_routes())
         .merge(sys_job_router::job_routes())
         .merge(sys_dict_router::dict_routes())
         .merge(sys_http_debug_router::http_debug_routes())

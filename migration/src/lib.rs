@@ -64,6 +64,8 @@ pub use m20260924_000007_sector_identifier::Migration as M20260924SectorIdentifi
 pub use m20260924_000008_scim_groups::Migration as M20260924ScimGroups;
 pub use m20260924_000009_user_dept::Migration as M20260924UserDept;
 pub use m20260924_000010_common_role_readonly::Migration as M20260924CommonRoleReadonly;
+pub use m20260925_000001_multitenant_phase2::Migration as M20260925MultitenantPhase2;
+pub use m20260925_000002_tenant_module::Migration as M20260925TenantModule;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -126,6 +128,8 @@ mod m20260924_000007_sector_identifier;
 mod m20260924_000008_scim_groups;
 mod m20260924_000009_user_dept;
 mod m20260924_000010_common_role_readonly;
+mod m20260925_000001_multitenant_phase2;
+mod m20260925_000002_tenant_module;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -268,6 +272,8 @@ impl MigratorTrait for Migrator {
             Box::new(M20260924ScimGroups),
             Box::new(M20260924UserDept),
             Box::new(M20260924CommonRoleReadonly),
+            Box::new(M20260925MultitenantPhase2),
+            Box::new(M20260925TenantModule),
         ]
     }
 }

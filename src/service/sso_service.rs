@@ -774,6 +774,7 @@ impl SsoService {
         self.consent_repo
             .upsert(
                 user_id,
+                tid,
                 &client.client_id,
                 &client.client_name,
                 &serde_json::to_string(&requested)

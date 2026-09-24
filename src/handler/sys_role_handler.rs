@@ -79,7 +79,11 @@ pub async fn list(
     })?;
     let (rows, total) = state
         .role_service
-        .get_role_page(query, Some(operator_user_id))
+        .get_role_page(
+            query,
+            Some(operator_user_id),
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -111,7 +115,11 @@ pub async fn export(
     })?;
     let rows = state
         .role_service
-        .export_roles(query, Some(operator_user_id))
+        .export_roles(
+            query,
+            Some(operator_user_id),
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
 
     let columns = [
