@@ -61,6 +61,8 @@ pub use m20260924_000004_sso_subject_type::Migration as M20260924SsoSubjectType;
 pub use m20260924_000005_user_tenant_id::Migration as M20260924UserTenantId;
 pub use m20260924_000006_scim_external_id::Migration as M20260924ScimExternalId;
 pub use m20260924_000007_sector_identifier::Migration as M20260924SectorIdentifier;
+pub use m20260924_000008_scim_groups::Migration as M20260924ScimGroups;
+pub use m20260924_000009_user_dept::Migration as M20260924UserDept;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -120,6 +122,8 @@ mod m20260924_000004_sso_subject_type;
 mod m20260924_000005_user_tenant_id;
 mod m20260924_000006_scim_external_id;
 mod m20260924_000007_sector_identifier;
+mod m20260924_000008_scim_groups;
+mod m20260924_000009_user_dept;
 
 use sea_orm_migration::prelude::*;
 
@@ -188,6 +192,8 @@ impl MigratorTrait for Migrator {
             Box::new(M20260924UserTenantId),
             Box::new(M20260924ScimExternalId),
             Box::new(M20260924SectorIdentifier),
+            Box::new(M20260924ScimGroups),
+            Box::new(M20260924UserDept),
         ]
     }
 }
