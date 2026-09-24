@@ -1253,29 +1253,25 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
         tracing::info!("多租户 tenant_id 列已补建 {added} 张表（存量库兜底）");
     }
 
-    // ---- 2. 幂等建索引（MySQL 不支持 IF NOT EXISTS，交由 migration 补齐，此处跳过）----
-    if !matches!(backend, DatabaseBackend::MySql) {
-        let mut idx_sqls: Vec<String> = Vec::new();
+    // ---- 2. 幂等建索引（三方言全覆盖：MySQL 经 information_schema 查存后建，不再跳过）----
+    {
+        let mut idx_defs: Vec<(String, String, String)> = Vec::new();
         // 大表组合索引（时间列名各异：oper_time/login_time/create_time）
         for (t, c) in [
             ("sys_oper_log", "oper_time"),
             ("sys_logininfor", "login_time"),
             ("sys_msg_send_log", "create_time"),
         ] {
-            idx_sqls.push(format!(
-                "CREATE INDEX IF NOT EXISTS idx_{t}_tid_time ON {t} (tenant_id, {c})"
-            ));
+            idx_defs.push((t.to_string(), format!("idx_{t}_tid_time"), format!("tenant_id, {c}")));
         }
         for t in TABLES {
             if !matches!(*t, "sys_oper_log" | "sys_logininfor" | "sys_msg_send_log") {
-                idx_sqls.push(format!(
-                    "CREATE INDEX IF NOT EXISTS idx_{t}_tid ON {t} (tenant_id)"
-                ));
+                idx_defs.push((t.to_string(), format!("idx_{t}_tid"), "tenant_id".to_string()));
             }
         }
-        for ddl in idx_sqls {
-            if let Err(e) = db.execute(Statement::from_string(backend, ddl)).await {
-                tracing::debug!("租户索引创建跳过（可能已存在）: {}", e);
+        for (table, index_name, columns) in &idx_defs {
+            if let Err(e) = ensure_tenant_index(db, table, index_name, columns).await {
+                tracing::debug!("租户索引 {index_name} 创建跳过: {}", e);
             }
         }
     }
@@ -1328,6 +1324,47 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
 
     tracing::info!("多租户 Phase 2 模块已就绪（幂等确保完成）");
     Ok(())
+}
+
+/// 方言感知的幂等索引创建：SQLite/PostgreSQL 直接 `CREATE INDEX IF NOT EXISTS`；
+/// MySQL 不支持该子句，先查 information_schema.statistics 判存在，缺失才建
+/// （补齐此前"MySQL 跳过、依赖 migration 补齐"的方言缺口——存量库不跑 migration）。
+async fn ensure_tenant_index(
+    db: &DatabaseConnection,
+    table: &str,
+    index_name: &str,
+    columns: &str,
+) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    match backend {
+        DatabaseBackend::MySql => {
+            let exists = db
+                .query_all(Statement::from_string(
+                    backend,
+                    format!(
+                        "SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='{table}' AND index_name='{index_name}' LIMIT 1"
+                    ),
+                ))
+                .await?;
+            if !exists.is_empty() {
+                return Ok(());
+            }
+            db.execute(Statement::from_string(
+                backend,
+                format!("CREATE INDEX {index_name} ON {table} ({columns})"),
+            ))
+            .await?;
+            Ok(())
+        }
+        _ => {
+            db.execute(Statement::from_string(
+                backend,
+                format!("CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"),
+            ))
+            .await?;
+            Ok(())
+        }
+    }
 }
 
 /// 幂等检查表是否存在（三方言）
