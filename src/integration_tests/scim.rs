@@ -388,3 +388,43 @@ async fn test_scim_external_id_and_events() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
+
+/// v5-D12 Groups 显式协议边界：501 + SCIM 错误体（映射语义拍板前不预建）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scim_groups_not_implemented_boundary() {
+    let ctx = scim_ctx().await;
+
+    // ① 无凭据 → 401（协议边界端点同样受 Bearer 保护）
+    let (status, _, _) = raw_get(&ctx.app, ctx.peer_ip, "/scim/v2/Groups", &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // ② 携带凭据 → 501（显式声明未实现，非模糊 404）
+    let (status, _, body) =
+        raw_get(&ctx.app, ctx.peer_ip, "/scim/v2/Groups", &scim_headers()).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "Groups 应 501");
+    let e = json_of(&body);
+    assert_eq!(
+        e["schemas"][0],
+        serde_json::json!("urn:ietf:params:scim:api:messages:2.0:Error"),
+        "应返回 SCIM 错误体"
+    );
+    assert!(
+        e["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Group provisioning"),
+        "错误详情应说明 Group 未启用"
+    );
+
+    // ③ POST /Groups → 同样 501（写方向一致）
+    let (status, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Groups",
+        "application/json",
+        r#"{"displayName":"x"}"#,
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+}

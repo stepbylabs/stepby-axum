@@ -213,3 +213,28 @@ pub async fn delete_user(
         Err(e) => scim_error_response_for_app(e),
     }
 }
+
+/// /scim/v2/Groups（全部方法）——显式协议边界（v5-D12 深化）。
+///
+/// Group provisioning **暂未实现**：Group 的语义选择（映射到 sys_role 角色 /
+/// sys_dept 部门树 / 独立用户组表）取决于第一个对接的 IdP 的组语义
+///（Okta 组→权限容器→A；Entra 组→组织架构→B），无 IdP 场景下任何映射均为
+/// 空转协议，故不预建。本端点返回明确 SCIM 501（带三种语义备选说明），把
+/// "未实现"从模糊 404 变为可对接的显式声明——对接方一眼可知系统能力边界。
+/// 映射语义拍板后按 RFC 7644 §4.2 实现并替换本端点。
+pub async fn groups_not_implemented(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = check_access(&state, &headers) {
+        return resp;
+    }
+    scim_error_response(
+        501,
+        ScimError::new(
+            501,
+            "Group provisioning 尚未启用（当前仅支持 Users）。Group 映射语义（角色/部门/独立用户组）\
+             将随首个对接 IdP 的组语义确定后实现",
+        ),
+    )
+}
