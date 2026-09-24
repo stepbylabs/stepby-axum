@@ -20,6 +20,8 @@ use crate::common::datetime;
 #[sea_orm(table_name = "sys_pat")]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
+    /// 多租户归属（Phase 2 立项铺开，迁移 m20260925_000001；0=平台租户）
+    pub tenant_id: i64,
     /// 令牌 ID（应用生成的 uuid hex，非自增，跨方言可移植）
     #[sea_orm(primary_key, auto_increment = false)]
     pub pat_id: String,

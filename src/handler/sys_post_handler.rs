@@ -37,9 +37,16 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<PostQueryDto>,
 ) -> Result<TableDataInfo<SysPostModel>, AppError> {
-    let (rows, total) = state.post_service.get_post_page(query).await?;
+    let (rows, total) = state
+        .post_service
+        .get_post_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -183,9 +190,16 @@ pub async fn remove(
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<PostQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.post_service.export_posts(query).await?;
+    let rows = state
+        .post_service
+        .export_posts(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
 
     let columns = [
         ExcelColumn {

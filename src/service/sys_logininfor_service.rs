@@ -77,6 +77,7 @@ impl SysLogininforService {
     pub async fn get_logininfor_page(
         &self,
         query: LogininforQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysLogininforModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -102,6 +103,7 @@ impl SysLogininforService {
                 begin_time,
                 end_time,
                 query.last_id,
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
@@ -114,6 +116,7 @@ impl SysLogininforService {
     pub async fn export_logininfors(
         &self,
         query: LogininforQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysLogininforModel>, ServiceError> {
         let begin_time = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -135,6 +138,7 @@ impl SysLogininforService {
                 begin_time,
                 end_time,
                 None, // 导出固定走 OFFSET 全量路径，不走 keyset
+            tenant_scope,
             )
             .await?;
         Ok(rows)

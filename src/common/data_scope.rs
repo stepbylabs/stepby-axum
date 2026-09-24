@@ -37,6 +37,7 @@ mod tests {
 
     fn role(id: i64, scope: Option<&str>) -> sys_role::Model {
         sys_role::Model {
+            tenant_id: 0,
             role_id: id,
             role_name: format!("role-{id}"),
             role_key: format!("key-{id}"),

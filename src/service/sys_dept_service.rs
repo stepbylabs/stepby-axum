@@ -148,8 +148,13 @@ impl SysDeptService {
         &self,
         query: DeptQueryDto,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysDeptModel>, ServiceError> {
         let mut select = SysDept::find().filter(DeptColumn::DelFlag.eq("0"));
+        // 多租户 Phase 2：租户用户仅见本租户部门树；平台 0 不过滤
+        if let Some(t) = tenant_scope {
+            select = select.filter(DeptColumn::TenantId.eq(t));
+        }
         if let Some(ref name) = query.dept_name {
             select = select.filter(DeptColumn::DeptName.like(format!("%{}%", like_escape(name))));
         }
@@ -671,11 +676,12 @@ impl SysDeptService {
     pub async fn build_dept_tree_select(
         &self,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<TreeSelectVo>, ServiceError> {
         let list = match operator_user_id {
             Some(uid) => {
                 // 复用 list_depts 的数据范围过滤（空 query）
-                self.list_depts(DeptQueryDto::default(), Some(uid)).await?
+                self.list_depts(DeptQueryDto::default(), Some(uid), tenant_scope).await?
             }
             None => self.dept_repo.find_active_all().await?,
         };

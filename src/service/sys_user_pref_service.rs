@@ -134,7 +134,12 @@ impl SysUserPrefService {
     /// 更新当前用户偏好（幂等 upsert）
     ///
     /// 校验通过后写入。部分更新字段沿用现有值（无记录时沿用默认值）。
-    pub async fn update(&self, user_id: i64, dto: PrefUpdateDto) -> Result<PrefVo, ServiceError> {
+    pub async fn update(
+        &self,
+        user_id: i64,
+        tenant_id: i64,
+        dto: PrefUpdateDto,
+    ) -> Result<PrefVo, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         Self::validate_dto(&dto)?;
 
@@ -155,7 +160,7 @@ impl SysUserPrefService {
             dnd_end: dto.dnd_end.clone().unwrap_or(base.dnd_end),
         };
 
-        self.pref_repo.upsert(user_id, &vo_to_model(&vo)).await?;
+        self.pref_repo.upsert(user_id, &vo_to_model(&vo, tenant_id)).await?;
         Ok(vo)
     }
 
@@ -290,9 +295,10 @@ pub fn is_in_dnd_window(start: &str, end: &str, now: &str) -> bool {
     }
 }
 
-/// 将 PrefVo 转换为可写入库的 Model
-fn vo_to_model(vo: &PrefVo) -> PrefModel {
+/// 将 PrefVo 转换为可写入库的 Model（tenant_id 随 operator 带出，归 operator 租户）
+fn vo_to_model(vo: &PrefVo, tenant_id: i64) -> PrefModel {
     PrefModel {
+        tenant_id,
         user_id: vo.user_id,
         email_notify: vo.email_notify.clone(),
         sysmsg_notify: vo.sysmsg_notify.clone(),
@@ -354,6 +360,7 @@ mod tests {
     #[test]
     fn test_channel_allows() {
         let mut p = PrefModel {
+            tenant_id: 0,
             user_id: 1,
             email_notify: "1".into(),
             sysmsg_notify: "1".into(),

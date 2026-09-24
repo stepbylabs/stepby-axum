@@ -240,6 +240,7 @@ pub async fn register(
             request_method: "POST".to_string(),
             operator_type: 0, // 匿名注册
             oper_name,
+            tenant_id: 0, // 匿名注册无租户上下文
             dept_name: String::new(),
             oper_url: "/register".to_string(),
             oper_ip: ip.to_string(),

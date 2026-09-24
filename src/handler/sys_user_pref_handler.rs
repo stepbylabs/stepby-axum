@@ -37,6 +37,9 @@ pub async fn update_pref(
     Json(dto): Json<PrefUpdateDto>,
 ) -> Result<AjaxResult<PrefVo>, AppError> {
     let user_id = parse_user_id(operator.user_id())?;
-    let vo = state.user_pref_service.update(user_id, dto).await?;
+    let vo = state
+        .user_pref_service
+        .update(user_id, operator.tenant_id(), dto)
+        .await?;
     Ok(AjaxResult::success(vo))
 }

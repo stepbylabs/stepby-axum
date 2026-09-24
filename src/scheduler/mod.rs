@@ -1443,6 +1443,7 @@ mod tests {
     /// 构造一个测试用 sys_job Model（concurrent='1'、misfire_policy='3'）
     fn job(id: i64, name: &str, cron: &str, invoke: &str) -> SysJobModel {
         SysJobModel {
+            tenant_id: 0,
             job_id: id,
             job_name: name.to_string(),
             job_group: "DEFAULT".to_string(),
@@ -1974,6 +1975,7 @@ mod tests {
             Arc::new(|| Box::pin(async { Ok("load-done".to_string()) })),
         );
         let am = SysJobActiveModel {
+            tenant_id: Set(0),
             job_name: Set("unit-load".to_string()),
             job_group: Set("DEFAULT".to_string()),
             invoke_target: Set(target.to_string()),

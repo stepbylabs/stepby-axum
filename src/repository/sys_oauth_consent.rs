@@ -87,9 +87,11 @@ impl SysOauthConsentRepository {
     }
 
     /// 写入/更新授权记录（存在即覆盖，否则插入；`client_name` 为同意时的名称快照）
+    /// `tenant_id`：consent 随 user 归属其租户（operator 的 tid，调用方带出）
     pub async fn upsert(
         &self,
         user_id: i64,
+        tenant_id: i64,
         client_id: &str,
         client_name_snapshot: &str,
         scopes_json: &str,
@@ -112,6 +114,7 @@ impl SysOauthConsentRepository {
         } else {
             let am = ActiveModel {
                 consent_id: NotSet,
+                tenant_id: Set(tenant_id),
                 user_id: Set(user_id),
                 client_id: Set(client_id.to_string()),
                 scopes: Set(scopes_json.to_string()),

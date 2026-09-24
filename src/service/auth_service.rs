@@ -737,6 +737,22 @@ impl AuthService {
             )));
         }
 
+        // 2.1 多租户 Phase 2：租户停用校验（dept 树根=租户；对外统一 login_failed，
+        //     细分原因仅写登录日志——与账号停用同款反枚举策略）
+        if user.tenant_id != 0
+            && self
+                .user_service
+                .ensure_tenant_active_for_login(user.tenant_id)
+                .await
+                .is_err()
+        {
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.tenant_disabled"))
+                .await;
+            return Err(ServiceError::unauthorized(&crate::tr!(
+                "error.auth.login_failed"
+            )));
+        }
+
         // 3. 密码校验（支持 MD5→Argon2 自动升级）
         // Argon2 verify 是 CPU 密集型同步操作，用 spawn_blocking 包裹避免阻塞 Tokio runtime（P0-31）
         let stored_password = user.password.as_deref().unwrap_or("").to_string();

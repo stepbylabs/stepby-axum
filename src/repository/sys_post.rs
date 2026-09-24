@@ -138,8 +138,13 @@ impl SysPostRepository {
         post_code: Option<&str>,
         post_name: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysPost::find().filter(Column::DelFlag.eq("0"));
+        // 多租户 Phase 2：租户用户仅见本租户岗位；平台 0 不过滤
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(code) = post_code {
             query = query.filter(Column::PostCode.like(format!("%{}%", like_escape(code))));
         }

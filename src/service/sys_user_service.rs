@@ -605,6 +605,7 @@ impl SysUserService {
         &self,
         query: UserQueryDto,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<UserVo>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -640,6 +641,7 @@ impl SysUserService {
                 begin,
                 end,
                 query.last_id,
+                tenant_scope,
             )
             .await?;
 
@@ -818,6 +820,7 @@ impl SysUserService {
         &self,
         query: UserQueryDto,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<UserVo>, ServiceError> {
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
@@ -852,6 +855,7 @@ impl SysUserService {
                 begin,
                 end,
                 None, // 导出固定走 OFFSET 全量路径，不走 keyset
+                tenant_scope,
             )
             .await?;
 
@@ -1154,6 +1158,56 @@ impl SysUserService {
     }
 
     /// 新增用户（事务：插入用户 + 批量插入角色关联）
+    /// 登录链路校验：租户用户（tid≠0）根部门被停用/删除 → 拒绝登录
+    /// 对外错误统一由调用方转 login_failed（C-1 反枚举），本方法仅给出细分原因。
+    pub async fn ensure_tenant_active_for_login(&self, tenant_id: i64) -> Result<(), ServiceError> {
+        if tenant_id == 0 {
+            return Ok(());
+        }
+        let root = self
+            .dept_repo
+            .base()
+            .find_by_id(tenant_id)
+            .await?
+            .ok_or_else(|| ServiceError::forbidden(&crate::tr!("error.tenant.disabled")))?;
+        if root.del_flag.as_deref() == Some("2") || root.status.as_deref() == Some("1") {
+            return Err(ServiceError::forbidden(&crate::tr!("error.tenant.disabled")));
+        }
+        Ok(())
+    }
+
+    /// 多租户 Phase 2（dept 树根=租户）：按主部门解析用户归属租户
+    /// - 无主部门 → 平台租户 0；
+    /// - 部门链根 = 平台根部门（PLATFORM_ROOT_DEPT_ID=100）→ 0（平台用户）；
+    /// - 否则 → 根部门 dept_id（租户用户，tenant_id = 租户根）。
+    pub async fn resolve_user_tenant(&self, dept_id: Option<i64>) -> Result<i64, ServiceError> {
+        const PLATFORM_ROOT_DEPT_ID: i64 = crate::service::sys_tenant_service::PLATFORM_ROOT_DEPT_ID;
+        let Some(dept_id) = dept_id else {
+            return Ok(0);
+        };
+        let dept = self
+            .dept_repo
+            .base()
+            .find_by_id(dept_id)
+            .await?
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.dept.not_found")))?;
+        let ancestors = dept.ancestors.as_deref().unwrap_or("");
+        let root_id: i64 = if ancestors == "0" || ancestors.is_empty() {
+            // 自身即顶层部门（租户根）
+            dept.dept_id
+        } else {
+            // RuoYi ancestors 格式 "0,<root>,<parent>,..."：第二段即租户根
+            ancestors
+                .split(',')
+                .nth(1)
+                .and_then(|s| s.trim().parse().ok())
+                .ok_or_else(|| {
+                    ServiceError::internal(&crate::tr!("error.tenant.ancestors_invalid"))
+                })?
+        };
+        Ok(if root_id == PLATFORM_ROOT_DEPT_ID { 0 } else { root_id })
+    }
+
     pub async fn add_user(
         &self,
         dto: UserAddDto,
@@ -1183,6 +1237,8 @@ impl SysUserService {
                 tracing::error!("密码加密 spawn_blocking 失败: {}", e);
                 ServiceError::internal(&crate::tr!("error.common.password_encrypt_failed"))
             })??;
+        // 多租户 Phase 2：tenant_id 随主部门自动解析（dept 树根=租户）
+        let user_tenant_id = self.resolve_user_tenant(dto.dept_id).await?;
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -1209,6 +1265,8 @@ impl SysUserService {
                 user_am.update_by = Set(Some(operator.to_string()));
                 user_am.update_time = Set(Some(now));
                 user_am.remark = Set(dto.remark.clone());
+                // 多租户 Phase 2：tenant_id 随主部门自动解析（闭包外已算好）
+                user_am.tenant_id = Set(user_tenant_id);
 
                 let role_ids = dto.role_ids.clone();
                 let post_ids = dto.post_ids.clone();
@@ -1320,6 +1378,8 @@ impl SysUserService {
                 .await?;
         }
 
+        // 多租户 Phase 2：主部门变更时 tenant_id 联动重算（dept 树根=租户）
+        let new_tenant_id = self.resolve_user_tenant(dto.dept_id).await?;
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -1328,8 +1388,10 @@ impl SysUserService {
             .transaction::<_, SysUserModel, sea_orm::DbErr>(|txn| {
                 let now = crate::common::datetime::now_naive();
                 let mut am: SysUserActiveModel = existing.into();
+                // 多租户 Phase 2：主部门变更时 tenant_id 联动重算（闭包外已算好）
                 if let Some(dept_id) = dto.dept_id {
                     am.dept_id = Set(Some(dept_id));
+                    am.tenant_id = Set(new_tenant_id);
                 }
                 if let Some(ref nick) = dto.nick_name {
                     am.nick_name = Set(nick.clone());

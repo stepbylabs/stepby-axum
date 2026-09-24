@@ -115,7 +115,7 @@ pub async fn create(
     let user_id = parse_user_id(operator.user_id())?;
     let result = state
         .pat_service
-        .create(user_id, operator.username(), dto, &state.config.pat)
+        .create(user_id, operator.tenant_id(), operator.username(), dto, &state.config.pat)
         .await?;
     Ok(AjaxResult::success(result))
 }

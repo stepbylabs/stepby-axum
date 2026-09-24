@@ -29,6 +29,7 @@ error:
     login_failed: Incorrect username or password
     account_deleted: Account deleted, please contact the administrator
     account_disabled: Account disabled, please contact the administrator
+    tenant_disabled: Tenant has been disabled
     account_locked: Account locked, please try again later
     register_exists: Username already exists
     register_disabled: Registration is not enabled, please contact the administrator
@@ -101,6 +102,8 @@ error:
     withdraw_only_applicant: Only the applicant can withdraw this document
     pat_forbidden: Approval must be performed in a personal login session; personal access tokens (PAT) are not allowed
   sso:
+    platform_protected: Platform root department cannot be modified via tenant API
+    ancestors_invalid: Invalid department ancestors data, cannot resolve tenant
     disabled: Single sign-on (SSO) is not enabled
     client_not_found: Client not found
     client_disabled: This client is disabled
@@ -425,6 +428,14 @@ error:
   pref:
     value_invalid: "Message preference field %{field} is invalid (must be '0' or '1')"
     time_invalid: "Do-not-disturb field %{field} has invalid time format (expected HH:MM): %{value}"
+  tenant:
+    name_required: Tenant name is required
+    name_duplicate: Tenant name already exists
+    not_found: Tenant does not exist
+    status_invalid: "status must be 0 (active) or 1 (disabled), current value: %{value}"
+    has_users: "Tenant still has %{count} user(s), cannot delete"
+    platform_protected: Platform root department cannot be modified via tenant API
+    disabled: Tenant has been disabled, login denied
   pat:
     name_required: Token name is required
     name_too_long: Token name is too long (max 100 characters)

@@ -54,8 +54,8 @@ impl SysUserPrefRepository {
         let sql = match backend {
             DatabaseBackend::Sqlite | DatabaseBackend::Postgres => {
                 "INSERT INTO sys_user_pref \
-                 (user_id, email_notify, sysmsg_notify, announce_notify, dnd_enabled, dnd_start, dnd_end, update_time) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 (user_id, tenant_id, email_notify, sysmsg_notify, announce_notify, dnd_enabled, dnd_start, dnd_end, update_time) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(user_id) DO UPDATE SET \
                     email_notify=excluded.email_notify, sysmsg_notify=excluded.sysmsg_notify, \
                     announce_notify=excluded.announce_notify, dnd_enabled=excluded.dnd_enabled, \
@@ -63,8 +63,8 @@ impl SysUserPrefRepository {
             }
             DatabaseBackend::MySql => {
                 "INSERT INTO sys_user_pref \
-                 (user_id, email_notify, sysmsg_notify, announce_notify, dnd_enabled, dnd_start, dnd_end, update_time) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 (user_id, tenant_id, email_notify, sysmsg_notify, announce_notify, dnd_enabled, dnd_start, dnd_end, update_time) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON DUPLICATE KEY UPDATE \
                     email_notify=VALUES(email_notify), sysmsg_notify=VALUES(sysmsg_notify), \
                     announce_notify=VALUES(announce_notify), dnd_enabled=VALUES(dnd_enabled), \
@@ -73,6 +73,7 @@ impl SysUserPrefRepository {
         };
         let values: Vec<Value> = vec![
             user_id.into(),
+            model.tenant_id.into(),
             model.email_notify.clone().into(),
             model.sysmsg_notify.clone().into(),
             model.announce_notify.clone().into(),

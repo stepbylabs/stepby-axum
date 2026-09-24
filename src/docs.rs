@@ -236,6 +236,11 @@ struct SwaggerAssets;
             crate::service::sys_menu_service::MenuSortDto,
             // 部门
             crate::service::sys_dept_service::DeptAddDto,
+            crate::service::sys_tenant_service::TenantVo,
+            crate::service::sys_tenant_service::TenantQueryDto,
+            crate::service::sys_tenant_service::TenantAddDto,
+            crate::service::sys_tenant_service::TenantEditDto,
+            crate::service::sys_tenant_service::TenantStatusDto,
             crate::service::sys_dept_service::DeptEditDto,
             // 岗位
             crate::service::sys_post_service::PostAddDto,

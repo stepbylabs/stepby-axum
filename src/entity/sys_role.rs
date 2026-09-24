@@ -20,6 +20,8 @@ use crate::common::datetime;
 )]
 #[schema(as = SysRole)]
 pub struct Model {
+    /// 多租户归属（Phase 2 立项铺开，迁移 m20260925_000001；0=平台租户）
+    pub tenant_id: i64,
     #[sea_orm(primary_key)]
     pub role_id: i64,
     pub role_name: String,

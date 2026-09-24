@@ -15,6 +15,7 @@ use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SUPER_ADMIN_USER_ID};
 use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_logininfor::Model as SysLogininforModel;
+use crate::middleware::Operator;
 use crate::service::sys_logininfor_service::{LoginDailyStat, LogininforQueryDto};
 use crate::state::AppState;
 use crate::utils::parse_id_list;
@@ -33,9 +34,16 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<LogininforQueryDto>,
 ) -> Result<TableDataInfo<SysLogininforModel>, AppError> {
-    let (rows, total) = state.logininfor_service.get_logininfor_page(query).await?;
+    let (rows, total) = state
+        .logininfor_service
+        .get_logininfor_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -185,9 +193,16 @@ pub async fn clean(
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<LogininforQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.logininfor_service.export_logininfors(query).await?;
+    let rows = state
+        .logininfor_service
+        .export_logininfors(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
 
     let columns = [
         ExcelColumn {

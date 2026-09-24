@@ -747,6 +747,8 @@ impl SysWebHookService {
                 .and_then(|p| serde_json::from_str(p).ok())
                 .unwrap_or_else(|| serde_json::json!({ "event": log.event_type, "note": "retry" }));
             let hook = SysWebHookModel {
+                // 投递用临时构造（不入库）：tenant_id 无语义，填平台 0
+                tenant_id: 0,
                 id: log.hook_id.unwrap_or(-1),
                 hook_name: log.hook_name.clone().unwrap_or_default(),
                 event_types: String::new(),
@@ -935,6 +937,7 @@ mod tests {
             .unwrap();
         let svc = SysWebHookService::new(db.clone(), String::new());
         let hook = SysWebHookModel {
+            tenant_id: 0,
             id: 1,
             hook_name: "本地测试".to_string(),
             event_types: "login_success".to_string(),
@@ -981,6 +984,7 @@ mod tests {
             .unwrap();
         let svc = SysWebHookService::new(db.clone(), String::new());
         let hook = SysWebHookModel {
+            tenant_id: 0,
             id: 2,
             hook_name: "不可达".to_string(),
             event_types: "login_success".to_string(),

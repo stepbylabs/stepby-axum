@@ -57,8 +57,13 @@ impl SysOperLogRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         last_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOperLog::find();
+        // 多租户 Phase 2：租户用户仅见本租户操作日志；平台 0 不过滤
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(t) = title {
             // T-11：title 新数据存 i18n key（module.*），旧数据为中文。
             // 搜索时同时匹配中文原文（LIKE）与对应的 key（精确），保证新旧均可搜到。
@@ -432,14 +437,14 @@ mod tests {
         let size = 3u64;
 
         let (p0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(p0.len(), 3);
         let mut cursor = p0.last().unwrap().oper_id;
 
         let (p1, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor))
+            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor), None)
             .await
             .unwrap();
         assert_eq!(p1.len(), 3);
@@ -464,7 +469,7 @@ mod tests {
 
         cursor = p1.last().unwrap().oper_id;
         let (p2, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor))
+            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor), None)
             .await
             .unwrap();
         assert_eq!(p2.len(), 1);
@@ -479,6 +484,7 @@ mod tests {
                 None,
                 None,
                 Some(p2[0].oper_id),
+                None,
             )
             .await
             .unwrap();
@@ -493,13 +499,13 @@ mod tests {
         let repo = insert_7(&db).await;
         // 过滤 status='0'（i==6 被排除），keyset 仍应只命中过滤后的行
         let (first, total) = repo
-            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, None)
+            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(total, 6);
         let cursor = first.last().unwrap().oper_id;
         let (next, _) = repo
-            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, Some(cursor))
+            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, Some(cursor), None)
             .await
             .unwrap();
         assert!(next.iter().all(|m| m.status.as_deref() == Some("0")));
@@ -515,21 +521,21 @@ mod tests {
 
         // OFFSET 分页
         let (o0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         let (o1, _) = repo
-            .find_page_filtered(3, size, None, None, None, None, None, None, None)
+            .find_page_filtered(3, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         let (o2, _) = repo
-            .find_page_filtered(6, size, None, None, None, None, None, None, None)
+            .find_page_filtered(6, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
 
         // keyset 连续翻页
         let (k0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         let (k1, _) = repo
@@ -543,6 +549,7 @@ mod tests {
                 None,
                 None,
                 Some(k0.last().unwrap().oper_id),
+                None,
             )
             .await
             .unwrap();
@@ -557,6 +564,7 @@ mod tests {
                 None,
                 None,
                 Some(k1.last().unwrap().oper_id),
+                None,
             )
             .await
             .unwrap();
