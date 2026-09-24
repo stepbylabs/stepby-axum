@@ -127,11 +127,23 @@ pub async fn create_user(
     }
     let base = base_url_of(&headers);
     match state.scim_service.create_user(&body, &base).await {
-        Ok(resp) => (
-            StatusCode::CREATED,
-            Json(serde_json::to_value(resp).unwrap()),
-        )
-            .into_response(),
+        Ok(resp) => {
+            // v5-D12：provision 事件（火后即忘；无订阅时无副作用）
+            state.web_hook_service.dispatch_event(
+                crate::service::sys_web_hook_service::EVENT_SCIM_USER_PROVISIONED,
+                serde_json::json!({
+                    "id": resp.id,
+                    "userName": resp.user_name,
+                    "externalId": resp.external_id,
+                    "displayName": resp.name.display_name,
+                }),
+            );
+            (
+                StatusCode::CREATED,
+                Json(serde_json::to_value(resp).unwrap()),
+            )
+                .into_response()
+        }
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -179,8 +191,25 @@ pub async fn delete_user(
     if let Err(resp) = check_access(&state, &headers) {
         return resp;
     }
+    // deprovision 事件需要 userName——先读取（404 时直接返回错误响应）
+    let base = base_url_of(&headers);
+    let user = match state.scim_service.get_user(id, &base).await {
+        Ok(u) => u,
+        Err(e) => return scim_error_response_for_app(e),
+    };
     match state.scim_service.delete_user(id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            // v5-D12：deprovision 事件（火后即忘）
+            state.web_hook_service.dispatch_event(
+                crate::service::sys_web_hook_service::EVENT_SCIM_USER_DEACTIVATED,
+                serde_json::json!({
+                    "id": user.id,
+                    "userName": user.user_name,
+                    "externalId": user.external_id,
+                }),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => scim_error_response_for_app(e),
     }
 }

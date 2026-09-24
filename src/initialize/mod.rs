@@ -38,6 +38,17 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_user.tenant_id 列失败: {}", e))?;
 
+        // 3.1.3 v5-D12：幂等确保 sys_user 含 scim_external_id 列（SCIM 用户目录同步；
+        // m20260924_000006 由 migration 负责全新库）
+        if !sso_has_column(&db, "sys_user", "scim_external_id").await? {
+            db.execute(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE sys_user ADD COLUMN scim_external_id VARCHAR(255)".to_string(),
+            ))
+            .await?;
+            tracing::info!("sys_user.scim_external_id 列已补建（存量库兜底）");
+        }
+
         // 3.1.2 真实运行验证发现的存量库漂移：sys_dept 缺 leader_user_id 列导致
         //        登录链路 dept 查询 500（oper_log 部门名/在线列表）。幂等补列兜底。
         if sso_table_exists(&db, "sys_dept").await?

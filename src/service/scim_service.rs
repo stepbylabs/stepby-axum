@@ -122,7 +122,7 @@ impl ScimService {
         ScimUser {
             schemas: vec![SCIM_USER_SCHEMA.to_string()],
             id: m.user_id.to_string(),
-            external_id: None,
+            external_id: m.scim_external_id.clone(),
             user_name: m.user_name.clone(),
             name: ScimName {
                 display_name: m.nick_name.clone(),
@@ -133,6 +133,24 @@ impl ScimService {
                 resource_type: "User".to_string(),
                 location: format!("{base_url}/scim/v2/Users/{}", m.user_id),
             },
+        }
+    }
+
+    /// filter 白名单解析：`userName eq "x"` / `externalId eq "x"`（值允许单/双引号）。
+    /// 返回 (列名, 转义后值)；不支持的 filter 返回 None（调用方 400）。
+    fn parse_filter(filter: &str) -> Option<(&'static str, String)> {
+        let parts: Vec<&str> = filter.split_whitespace().collect();
+        if parts.len() != 3 || !parts[1].eq_ignore_ascii_case("eq") {
+            return None;
+        }
+        let val = parts[2].trim_matches('\'').trim_matches('"');
+        let val_esc = val.replace('\'', "''");
+        if parts[0].eq_ignore_ascii_case("userName") {
+            Some(("user_name", val_esc))
+        } else if parts[0].eq_ignore_ascii_case("externalId") {
+            Some(("scim_external_id", val_esc))
+        } else {
+            None
         }
     }
 
@@ -151,21 +169,16 @@ impl ScimService {
         let count = count.clamp(1, 200);
         let mut where_clause = String::from("del_flag <> '2'");
         if let Some(f) = filter {
-            let f = f.trim();
-            let cap = f.split_whitespace().map(str::to_string).collect::<Vec<_>>();
-            // 仅支持：userName eq "<value>"（值允许单/双引号包裹）
-            if cap.len() == 3
-                && cap[0].eq_ignore_ascii_case("userName")
-                && cap[1].eq_ignore_ascii_case("eq")
-            {
-                let val = cap[2].trim_matches('\'').trim_matches('"');
-                let val_esc = val.replace('\'', "''");
-                where_clause.push_str(&format!(" AND user_name = '{val_esc}'"));
-            } else {
-                return Err(ScimError::new(
-                    400,
-                    "unsupported filter（仅支持 userName eq \"<value>\"）",
-                ));
+            match Self::parse_filter(f) {
+                Some((col, val)) => {
+                    where_clause.push_str(&format!(" AND {col} = '{val}'"));
+                }
+                None => {
+                    return Err(ScimError::new(
+                        400,
+                        "unsupported filter（仅支持 userName eq / externalId eq \"<value>\"）",
+                    ));
+                }
             }
         }
         // 计数 + 分页（两方言参数化差异大，此处值均已转义/白名单，拼接安全）
@@ -251,6 +264,27 @@ impl ScimService {
             .unwrap_or("")
             .to_string();
         let active = body.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+        // v5-D12：externalId（IdP 侧唯一标识）——非空时全局唯一校验（重复推送防重）
+        let external_id = body
+            .get("externalId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(ext) = &external_id {
+            if ext.len() > 255 {
+                return Err(ScimError::new(400, "externalId 长度须 ≤255"));
+            }
+            if sys_user::Entity::find()
+                .filter(sys_user::Column::ScimExternalId.eq(ext))
+                .one(self.db())
+                .await
+                .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
+                .is_some()
+            {
+                return Err(ScimError::new(409, "externalId 已存在"));
+            }
+        }
         // 随机 32B 密码（base64url）——不可知，IdP provisioning 场景本地登录走找回
         let random_pwd = crate::service::sso_service::random_urlsafe_pub(24);
         let hashed = crate::utils::password::encrypt_password(&random_pwd)
@@ -265,6 +299,7 @@ impl ScimService {
             del_flag: Set(Some("0".to_string())),
             user_type: Set(Some("00".to_string())),
             country_code: Set(Some("CN".to_string())),
+            scim_external_id: Set(external_id),
             create_by: Set(Some("scim".to_string())),
             update_by: Set(Some("scim".to_string())),
             create_time: Set(Some(now)),
@@ -307,6 +342,13 @@ impl ScimService {
             }
             .to_string(),
         ));
+        // v5-D12：PUT 同步 externalId（未提供时置空——全量语义）
+        am.scim_external_id = Set(body
+            .get("externalId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string));
         am.update_time = Set(Some(crate::common::datetime::now_naive()));
         am.update_by = Set(Some("scim".to_string()));
         let saved = am
@@ -358,6 +400,24 @@ impl ScimService {
                         .to_string();
                     am.email = Set(if ev.is_empty() { None } else { Some(ev) });
                 }
+                "externalId" => {
+                    let ext = value.as_str().map(str::trim).filter(|s| !s.is_empty());
+                    if let Some(e) = ext {
+                        if e.len() > 255 {
+                            return Err(ScimError::new(400, "externalId 长度须 ≤255"));
+                        }
+                        // 唯一性（排除自身）
+                        if let Ok(Some(other)) = sys_user::Entity::find()
+                            .filter(sys_user::Column::ScimExternalId.eq(e))
+                            .one(self.db())
+                            .await
+                            && other.user_id != id
+                        {
+                            return Err(ScimError::new(409, "externalId 已存在"));
+                        }
+                    }
+                    am.scim_external_id = Set(ext.map(str::to_string));
+                }
                 "" => {
                     // 无 path 的 replace：value 是含字段的对象
                     if let Some(act) = value.get("active").and_then(|v| v.as_bool()) {
@@ -371,6 +431,28 @@ impl ScimService {
                             None
                         } else {
                             Some(ev.to_string())
+                        });
+                    }
+                    if let Some(ext) = value
+                        .get("externalId")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                    {
+                        if ext.len() > 255 {
+                            return Err(ScimError::new(400, "externalId 长度须 ≤255"));
+                        }
+                        if let Ok(Some(other)) = sys_user::Entity::find()
+                            .filter(sys_user::Column::ScimExternalId.eq(ext))
+                            .one(self.db())
+                            .await
+                            && other.user_id != id
+                        {
+                            return Err(ScimError::new(409, "externalId 已存在"));
+                        }
+                        am.scim_external_id = Set(if ext.is_empty() {
+                            None
+                        } else {
+                            Some(ext.to_string())
                         });
                     }
                 }

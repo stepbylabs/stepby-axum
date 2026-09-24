@@ -68,6 +68,10 @@ pub struct Model {
     /// 多租户立项后由租户管理功能维护；Phase 2 后续：Repository 过滤层按 tid 注入条件）
     #[serde(default)]
     pub tenant_id: i64,
+    /// v5-D12：SCIM externalId（IdP 侧用户唯一标识；NULL = 非 SCIM provision，
+    /// 全局唯一索引 idx_sys_user_scim_external_id）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scim_external_id: Option<String>,
 }
 
 /// 手动实现 Debug 以脱敏 password 字段，防止密码哈希泄漏到日志
@@ -133,6 +137,7 @@ mod tests {
             update_time: None,
             remark: None,
             tenant_id: 0,
+            scim_external_id: None,
         };
 
         let debug_str = format!("{:?}", user);

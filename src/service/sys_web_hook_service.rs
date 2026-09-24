@@ -34,6 +34,10 @@ use crate::repository::sys_web_hook_log::SysWebHookLogRepository;
 pub const EVENT_LOGIN_SUCCESS: &str = "login_success";
 /// 登录失败事件（含账号锁定等态）；payload 含用户名与原因
 pub const EVENT_LOGIN_FAILURE: &str = "login_failure";
+/// v5-D12：SCIM provision 创建用户事件（payload 含 id/userName/externalId）
+pub const EVENT_SCIM_USER_PROVISIONED: &str = "scim_user_provisioned";
+/// v5-D12：SCIM deprovision 停用用户事件（payload 含 id/userName）
+pub const EVENT_SCIM_USER_DEACTIVATED: &str = "scim_user_deactivated";
 
 /// 事件分发中间件注入的扩展 key（当前仅用于路由分发）
 pub const EVENT_HEADERS: [&str; 1] = ["X-Webhook-Event"];
@@ -765,7 +769,13 @@ impl SysWebHookService {
 
     /// 事件类型列表常量（供前端下拉提示；不作为枚举强校验，允许自定义事件）
     pub fn supported_events() -> Vec<&'static str> {
-        vec![EVENT_LOGIN_SUCCESS, EVENT_LOGIN_FAILURE]
+        vec![
+            EVENT_LOGIN_SUCCESS,
+            EVENT_LOGIN_FAILURE,
+            // v5-D12：SCIM 用户目录同步事件（provision 创建 / deprovision 停用）
+            EVENT_SCIM_USER_PROVISIONED,
+            EVENT_SCIM_USER_DEACTIVATED,
+        ]
     }
 }
 
