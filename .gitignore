@@ -28,6 +28,7 @@ data/*.xdb
 logs/
 backend*.log
 build-*.log
+server*.log
 backend.err
 *.sql
 
