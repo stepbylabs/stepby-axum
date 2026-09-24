@@ -1667,6 +1667,7 @@ impl SsoService {
     pub async fn get_client_page(
         &self,
         q: SsoClientQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SsoClientVo>, u64), ServiceError> {
         let page_num = q.page_num.unwrap_or(1).max(1);
         let page_size = q.page_size.unwrap_or(10).clamp(1, 100);
@@ -1679,16 +1680,28 @@ impl SsoService {
                 q.client_name.as_deref(),
                 q.client_id.as_deref(),
                 q.enabled.as_deref(),
+                // v5-N2 Phase 2：租户过滤（平台管理员 tid=0 全量；租户用户本租户隔离）
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         Ok((rows.into_iter().map(client_to_vo).collect(), total))
     }
 
-    pub async fn get_client_by_pk(&self, pk: i64) -> Result<SsoClientVo, ServiceError> {
+    pub async fn get_client_by_pk(
+        &self,
+        pk: i64,
+        operator_tid: i64,
+    ) -> Result<SsoClientVo, ServiceError> {
         let m =
             self.client_repo.find_by_pk(pk).await?.ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.sso.client_not_found"))
             })?;
+        // v5-N2 Phase 2：读归属校验（跨租户资源按 404 语义隐藏存在性）
+        if !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id) {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.sso.client_not_found"
+            )));
+        }
         Ok(client_to_vo(m))
     }
 
@@ -1696,6 +1709,7 @@ impl SsoService {
         &self,
         dto: SsoClientUpsertDto,
         create_by: &str,
+        operator_tid: i64,
     ) -> Result<SsoClientCreateResult, ServiceError> {
         validate_client_name(&dto.client_name)?;
         let redirect_uris = validate_redirect_uris(&dto.redirect_uris)?;
@@ -1792,7 +1806,8 @@ impl SsoService {
             consent_required: Set(normalize_flag(dto.consent_required.as_deref(), "1")),
             enabled: Set(normalize_flag(dto.enabled.as_deref(), "1")),
             remark: Set(dto.remark),
-            tenant_id: Set(0),
+            // v5-N2 Phase 2：归属写入（平台管理员 tid=0 → 平台资源；租户管理员 → 本租户）
+            tenant_id: Set(operator_tid),
             create_by: Set(create_by.to_string()),
             update_by: Set(create_by.to_string()),
             create_time: Set(Some(now)),
@@ -1811,6 +1826,7 @@ impl SsoService {
         &self,
         dto: SsoClientUpsertDto,
         update_by: &str,
+        operator_tid: i64,
     ) -> Result<SsoClientVo, ServiceError> {
         if dto.sso_client_id <= 0 {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -1829,6 +1845,12 @@ impl SsoService {
             .find_by_pk(dto.sso_client_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.sso.client_not_found")))?;
+        // v5-N2 Phase 2：写归属校验（跨租户资源按 404 语义拒绝）
+        if !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id) {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.sso.client_not_found"
+            )));
+        }
 
         // 未回传时保留原值（consent_required / enabled 可选）
         let consent_required = normalize_flag(dto.consent_required.as_deref(), &m.consent_required);
@@ -1898,6 +1920,7 @@ impl SsoService {
         &self,
         ids: Vec<i64>,
         redis: &mut ConnectionManager,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         if ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -1906,6 +1929,12 @@ impl SsoService {
         }
         for id in &ids {
             if let Some(m) = self.client_repo.find_by_pk(*id).await? {
+                // v5-N2 Phase 2：写归属校验（跨租户资源按 404 语义拒绝）
+                if !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id) {
+                    return Err(ServiceError::not_found(&crate::tr!(
+                        "error.sso.client_not_found"
+                    )));
+                }
                 // 2. 级联吊销该客户端全部已授权用户的 SSO 令牌
                 // v5 第九轮修正：原误用 revoke_user_sso_tokens（**全量**吊销该用户
                 // 所有客户端的 AT）——删客户端 A 不应波及用户对客户端 B 的有效会话；
@@ -1932,11 +1961,18 @@ impl SsoService {
         pk: i64,
         enabled: &str,
         redis: &mut ConnectionManager,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         let m =
             self.client_repo.find_by_pk(pk).await?.ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.sso.client_not_found"))
             })?;
+        // v5-N2 Phase 2：写归属校验（跨租户资源按 404 语义拒绝）
+        if !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id) {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.sso.client_not_found"
+            )));
+        }
         let client_id = m.client_id.clone();
         // 仅将 enabled 标记为 Set 才会被 update 写入（before_save 刷新 update_time）
         let mut am: ClientActiveModel = m.into();

@@ -12,6 +12,7 @@ pub mod image;
 pub mod page;
 pub mod response;
 pub mod ssrf;
+pub mod tenant;
 pub mod upload;
 
 pub use error::{AppError, ServiceError};
