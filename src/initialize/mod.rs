@@ -533,10 +533,7 @@ async fn flow_insert(db: &DatabaseConnection, body: &str) -> Result<(), DbErr> {
 /// flow 种子用当前时间表达式（与迁移 now_expr 同构）
 fn flow_now(db: &DatabaseConnection) -> String {
     if db.get_database_backend() == DatabaseBackend::Sqlite {
-        format!(
-            "'{}'",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        )
+        format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
     } else {
         "NOW()".to_string()
     }
@@ -546,9 +543,21 @@ fn flow_now(db: &DatabaseConnection) -> String {
 async fn ensure_flow_tables(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
     let (id_task, id_log, id_doc) = match backend {
-        DatabaseBackend::Sqlite => ("INTEGER PRIMARY KEY AUTOINCREMENT", "INTEGER PRIMARY KEY AUTOINCREMENT", "INTEGER PRIMARY KEY AUTOINCREMENT"),
-        DatabaseBackend::Postgres => ("BIGSERIAL PRIMARY KEY", "BIGSERIAL PRIMARY KEY", "BIGSERIAL PRIMARY KEY"),
-        _ => ("BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY", "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY", "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"),
+        DatabaseBackend::Sqlite => (
+            "INTEGER PRIMARY KEY AUTOINCREMENT",
+            "INTEGER PRIMARY KEY AUTOINCREMENT",
+            "INTEGER PRIMARY KEY AUTOINCREMENT",
+        ),
+        DatabaseBackend::Postgres => (
+            "BIGSERIAL PRIMARY KEY",
+            "BIGSERIAL PRIMARY KEY",
+            "BIGSERIAL PRIMARY KEY",
+        ),
+        _ => (
+            "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+            "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+            "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        ),
     };
     let ts = match backend {
         DatabaseBackend::Postgres => "TIMESTAMP",
@@ -677,12 +686,51 @@ async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbErr> {
     let now = flow_now(db);
 
     // 菜单 3600/3601/3611 + role 2 授权（与迁移 4.1-4.3 同构；remark 亦对齐迁移）
-    let menus: &[(i64, &str, i64, i64, &str, &str, &str, &str, &str, &str, &str)] = &[
-        (3600, "审批中心", 1, 95, "flow", "ParentView", "M", "", "example", "审批工作流", "route.flow"),
-        (3601, "审批中心", 3600, 1, "todo", "system/flow/index", "C", "system:flow:list", "checkbox", "审批待办/我发起/全部单据", "route.flowTodo"),
-        (3611, "全部单据查询", 3601, 1, "", "", "F", "system:flow:list", "#", "", ""),
+    // 类型标注省略（11 元元组触发 clippy type_complexity，交给编译器推断）
+    let menus = &[
+        (
+            3600,
+            "审批中心",
+            1,
+            95,
+            "flow",
+            "ParentView",
+            "M",
+            "",
+            "example",
+            "审批工作流",
+            "route.flow",
+        ),
+        (
+            3601,
+            "审批中心",
+            3600,
+            1,
+            "todo",
+            "system/flow/index",
+            "C",
+            "system:flow:list",
+            "checkbox",
+            "审批待办/我发起/全部单据",
+            "route.flowTodo",
+        ),
+        (
+            3611,
+            "全部单据查询",
+            3601,
+            1,
+            "",
+            "",
+            "F",
+            "system:flow:list",
+            "#",
+            "",
+            "",
+        ),
     ];
-    for (menu_id, name, parent, order, path, component, mtype, perms, icon, remark, i18n_key) in menus {
+    for (menu_id, name, parent, order, path, component, mtype, perms, icon, remark, i18n_key) in
+        menus
+    {
         // F 按钮（3611）无 i18n_key 列值，与其余 C/M 分支拼列
         if *mtype == "F" {
             flow_insert(
@@ -703,14 +751,23 @@ async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbErr> {
             )
             .await?;
         }
-        flow_insert(db, &format!("sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})")).await?;
+        flow_insert(
+            db,
+            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})"),
+        )
+        .await?;
     }
 
     // 字典 70/71/72 段（与迁移 4.4-4.6 同构）
     let dict_types: &[(i64, &str, &str, &str)] = &[
         (70, "审批状态", "sys_flow_task_status", "审批任务与单据状态"),
         (71, "审批动作", "sys_flow_action", "审批流水动作"),
-        (72, "请假类型", "sys_flow_leave_type", "示例审批单据-请假类型"),
+        (
+            72,
+            "请假类型",
+            "sys_flow_leave_type",
+            "示例审批单据-请假类型",
+        ),
     ];
     for (dict_id, name, dtype, remark) in dict_types {
         flow_insert(
@@ -786,9 +843,24 @@ async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbErr> {
     )
     .await?;
     let templates: &[(&str, &str, &str, &str)] = &[
-        ("审批待办提醒", "flow_todo", "您有新的审批待办", "单据「{{{{title}}}}」等待您审批，请及时处理。"),
-        ("审批超时提醒", "flow_timeout", "审批待办已超时", "单据「{{{{title}}}}」已超过办理时限，请尽快处理。"),
-        ("审批驳回通知", "flow_reject", "您的单据已被驳回", "您提交的单据「{{{{title}}}}」已被驳回，请查看审批意见。"),
+        (
+            "审批待办提醒",
+            "flow_todo",
+            "您有新的审批待办",
+            "单据「{{{{title}}}}」等待您审批，请及时处理。",
+        ),
+        (
+            "审批超时提醒",
+            "flow_timeout",
+            "审批待办已超时",
+            "单据「{{{{title}}}}」已超过办理时限，请尽快处理。",
+        ),
+        (
+            "审批驳回通知",
+            "flow_reject",
+            "您的单据已被驳回",
+            "您提交的单据「{{{{title}}}}」已被驳回，请查看审批意见。",
+        ),
     ];
     for (name, code, subject, content) in templates {
         flow_insert(
@@ -1614,9 +1686,12 @@ mod flow_backfill_tests {
     async fn flow_backfill_is_idempotent_on_existing_db() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         for ddl in MIN_SEED_TABLES {
-            db.execute(Statement::from_string(DatabaseBackend::Sqlite, ddl.to_string()))
-                .await
-                .unwrap();
+            db.execute(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                ddl.to_string(),
+            ))
+            .await
+            .unwrap();
         }
         // 首次调用：种子落库
         ensure_flow_module(&db).await.unwrap();
@@ -1650,7 +1725,8 @@ mod flow_backfill_tests {
         let count_dict: u64 = db
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
-                "SELECT COUNT(*) AS c FROM sys_dict_data WHERE dict_type = 'sys_flow_task_status'".to_string(),
+                "SELECT COUNT(*) AS c FROM sys_dict_data WHERE dict_type = 'sys_flow_task_status'"
+                    .to_string(),
             ))
             .await
             .unwrap()

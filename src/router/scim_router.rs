@@ -5,7 +5,7 @@
 use crate::handler::scim_handler;
 use crate::state::AppState;
 use axum::Router;
-use axum::routing::{get, patch, post, put};
+use axum::routing::get;
 use std::sync::Arc;
 
 /// /scim/v2/Users 路由组（Bearer 自校验）

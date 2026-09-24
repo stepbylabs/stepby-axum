@@ -981,6 +981,7 @@ impl Settings {
             pat: PatConfig::default(),
             sso: SsoConfig::default(),
             flow: FlowConfig::default(),
+            scim: ScimConfig::default(),
             server: ServerConfig {
                 host: server_host,
                 port: server_port,
@@ -1111,6 +1112,7 @@ mod tests {
         Settings {
             pat: PatConfig::default(),
             sso: SsoConfig::default(),
+            scim: ScimConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
@@ -1159,6 +1161,7 @@ mod tests {
         let settings = Settings {
             pat: PatConfig::default(),
             sso: SsoConfig::default(),
+            scim: ScimConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
