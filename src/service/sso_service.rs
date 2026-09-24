@@ -77,6 +77,8 @@ pub struct SsoClientVo {
     pub id_token_alg: String,
     /// v5-D5：subject 标识类型（public/pairwise）
     pub subject_type: String,
+    /// v5-D5：sector 聚合标识（https URL；NULL = 以 client_id 为 salt）
+    pub sector_identifier_uri: Option<String>,
     pub consent_required: String,
     pub enabled: String,
     pub remark: Option<String>,
@@ -137,6 +139,11 @@ pub struct SsoClientUpsertDto {
     #[serde(default)]
     #[ts(optional)]
     pub subject_type: Option<String>,
+    /// v5-D5：sector 聚合标识（https URL；pairwise 下同 sector 的多个 RP 获得相同
+    /// sub；留空 = 以 client_id 为 salt）
+    #[serde(default)]
+    #[ts(optional)]
+    pub sector_identifier_uri: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub consent_required: Option<String>,
@@ -1798,6 +1805,9 @@ impl SsoService {
             id_token_alg: Set(normalize_id_token_alg(dto.id_token_alg.as_deref())),
             rsa_private_key: Set(Some(rsa_private_stored)),
             subject_type: Set(normalize_subject_type(dto.subject_type.as_deref())),
+            sector_identifier_uri: Set(validate_sector_identifier(
+                dto.sector_identifier_uri.as_deref(),
+            )?),
             client_name: Set(dto.client_name.trim().to_string()),
             logo_uri: Set(logo_uri),
             redirect_uris: Set(to_json_array(&redirect_uris)),
@@ -1899,6 +1909,9 @@ impl SsoService {
             am.rsa_private_key = Set(Some(sealed));
         }
         am.subject_type = Set(subject_type);
+        am.sector_identifier_uri = Set(validate_sector_identifier(
+            dto.sector_identifier_uri.as_deref(),
+        )?);
         am.consent_required = Set(consent_required);
         am.enabled = Set(enabled);
         am.remark = Set(dto.remark);
@@ -2381,17 +2394,25 @@ fn prompt_contains(params: &AuthorizeParams, directive: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// v5-D5：pairwise subject 派生——`SHA-256("{client_id}:{user_id}")` hex 截断 32 字符。
-/// 同一用户对不同 RP 呈现不同的稳定假名 sub，防 RP 间串联画像；同 RP 内恒定（可关联登录）。
-fn pairwise_subject(client_id: &str, user_id: i64) -> String {
-    let digest = crate::utils::crypto::token_hash(&format!("{client_id}:{user_id}"));
+/// v5-D5：pairwise subject 派生——`SHA-256("{sector}:{user_id}")` hex 截断 32 字符。
+/// 同一用户对不同 sector 呈现不同的稳定假名 sub，防 RP 间串联画像；同 sector 内
+/// 恒定（可关联登录）。salt 取 client.sector_identifier_uri（未声明时 fallback
+/// client_id——既有行为，回归不变）。
+fn pairwise_subject(salt: &str, user_id: i64) -> String {
+    let digest = crate::utils::crypto::token_hash(&format!("{salt}:{user_id}"));
     digest[..32].to_string()
 }
 
-/// subject 解析：public → user_id 字符串；pairwise → per-client 稳定假名
+/// subject 解析：public → user_id 字符串；pairwise → per-sector 稳定假名
+///（sector_identifier_uri 声明优先，未声明 fallback client_id）
 fn resolve_subject(client: &ClientModel, user_id: i64) -> String {
     if client.subject_type == "pairwise" {
-        pairwise_subject(&client.client_id, user_id)
+        let salt = client
+            .sector_identifier_uri
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&client.client_id);
+        pairwise_subject(salt.trim(), user_id)
     } else {
         user_id.to_string()
     }
@@ -2590,6 +2611,26 @@ fn normalize_subject_type(input: Option<&str>) -> String {
     }
 }
 
+/// v5-D5：sector_identifier_uri 归一化（空 → None；非空必须 https URL，非法拒绝）
+fn validate_sector_identifier(input: Option<&str>) -> Result<Option<String>, ServiceError> {
+    match input.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) => {
+            if s.len() > 255 {
+                return Err(ServiceError::bad_request(
+                    "sector_identifier_uri 长度须 ≤255",
+                ));
+            }
+            if !s.starts_with("https://") {
+                return Err(ServiceError::bad_request(
+                    "sector_identifier_uri 必须为 https URL（OIDC 规范要求）",
+                ));
+            }
+            Ok(Some(s.to_string()))
+        }
+    }
+}
+
 fn normalize_flag(input: Option<&str>, default: &str) -> String {
     match input.map(str::trim) {
         Some("0") => "0".to_string(),
@@ -2619,6 +2660,7 @@ fn client_to_vo(m: ClientModel) -> SsoClientVo {
         grant_types: serde_json::from_str(&m.grant_types).unwrap_or_default(),
         id_token_alg: m.id_token_alg,
         subject_type: m.subject_type,
+        sector_identifier_uri: m.sector_identifier_uri,
         consent_required: m.consent_required,
         enabled: m.enabled,
         remark: m.remark,
@@ -2754,6 +2796,40 @@ mod tests {
         assert_eq!(a1.len(), 32, "假名应截断为 32 hex 字符");
         // sub 与 user_id 不应可逆关联（假名 ≠ user_id 字符串）
         assert_ne!(a1, "1");
+    }
+
+    #[test]
+    fn pairwise_sector_aggregation() {
+        // v5-D5：同 sector 的两个 RP → 相同 sub（组织内账号关联）
+        let rp1 = pairwise_subject("https://corp.example/sector", 7);
+        let rp2 = pairwise_subject("https://corp.example/sector", 7);
+        assert_eq!(rp1, rp2, "同 sector 不同 RP 应同 sub");
+        // 不同 sector → 互异
+        assert_ne!(
+            rp1,
+            pairwise_subject("https://other.example/sector", 7),
+            "不同 sector 假名应互异"
+        );
+        // sector 模式与 fallback（client_id 模式）互异
+        assert_ne!(
+            rp1,
+            pairwise_subject("app_a", 7),
+            "sector 与 client_id 盐应互异"
+        );
+    }
+
+    #[test]
+    fn sector_identifier_validation() {
+        // https 合法；http/空超长非法
+        assert!(
+            validate_sector_identifier(Some("https://corp.example/sector"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(validate_sector_identifier(Some("")).unwrap().is_none());
+        assert!(validate_sector_identifier(None).unwrap().is_none());
+        assert!(validate_sector_identifier(Some("http://corp.example")).is_err());
+        assert!(validate_sector_identifier(Some(&"x".repeat(256))).is_err());
     }
 
     #[test]

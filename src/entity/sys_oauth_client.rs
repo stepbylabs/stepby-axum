@@ -41,6 +41,10 @@ pub struct Model {
     /// v5-D5：subject 标识类型（public/pairwise；pairwise 时 sub 为 per-client 稳定假名）
     #[serde(default)]
     pub subject_type: String,
+    /// v5-D5：sector 聚合标识（https URI；pairwise 下同 sector 的多个 RP 获得
+    /// 相同 sub；NULL = 以 client_id 为 salt 的既有行为）
+    #[serde(default)]
+    pub sector_identifier_uri: Option<String>,
     /// 客户端名称（同意页 / 列表展示）
     pub client_name: String,
     /// Logo URI（同意页展示，可空）
