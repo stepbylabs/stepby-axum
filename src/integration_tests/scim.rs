@@ -157,6 +157,7 @@ async fn test_scim_users_crud_and_deprovision() {
         &ctx.app,
         ctx.peer_ip,
         "/scim/v2/Users",
+        "application/json",
         &create_body.to_string(),
         &scim_headers(),
     )
@@ -216,8 +217,9 @@ async fn test_scim_users_crud_and_deprovision() {
         &ctx.app,
         ctx.peer_ip,
         "/login",
+        "application/json",
         r#"{"username":"scim.user01","password":"any-guess","code":"","uuid":""}"#,
-        &[("content-type", "application/json")],
+        &[],
     )
     .await;
     assert_ne!(status, StatusCode::OK, "provision 用户随机密码不应可登录");
