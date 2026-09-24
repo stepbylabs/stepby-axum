@@ -49,6 +49,18 @@ impl AppInitializer {
             tracing::info!("sys_user.scim_external_id 列已补建（存量库兜底）");
         }
 
+        // 3.1.4 v5-D5：幂等确保 sys_oauth_client 含 sector_identifier_uri 列
+        //（pairwise sector 聚合；m20260924_000007 由 migration 负责全新库）
+        if !sso_has_column(&db, "sys_oauth_client", "sector_identifier_uri").await? {
+            db.execute(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE sys_oauth_client ADD COLUMN sector_identifier_uri VARCHAR(255)"
+                    .to_string(),
+            ))
+            .await?;
+            tracing::info!("sys_oauth_client.sector_identifier_uri 列已补建（存量库兜底）");
+        }
+
         // 3.1.2 真实运行验证发现的存量库漂移：sys_dept 缺 leader_user_id 列导致
         //        登录链路 dept 查询 500（oper_log 部门名/在线列表）。幂等补列兜底。
         if sso_table_exists(&db, "sys_dept").await?

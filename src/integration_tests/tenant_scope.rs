@@ -20,6 +20,7 @@ fn upsert_dto(name: &str) -> SsoClientUpsertDto {
         grant_types: Some(vec!["authorization_code".to_string()]),
         id_token_alg: None,
         subject_type: None,
+        sector_identifier_uri: None,
         consent_required: Some("0".to_string()),
         enabled: Some("1".to_string()),
         remark: None,
