@@ -1133,6 +1133,7 @@ impl SysOauthService {
                             vec![SysUserRoleActiveModel {
                                 user_id: Set(new_user.user_id),
                                 role_id: Set(DEFAULT_ROLE_ID),
+                                source: Set("admin".to_owned()),
                             }],
                         )
                         .await?;

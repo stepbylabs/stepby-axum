@@ -1233,6 +1233,7 @@ impl AuthService {
             status: Some("0".to_string()),
             role_ids: None,
             post_ids: None,
+            dept_ids: None,
             remark: None,
         };
         self.user_service.add_user(add_dto, "register").await?;

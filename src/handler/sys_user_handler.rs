@@ -530,6 +530,15 @@ pub async fn remove(
         }
     }
 
+    // v5-D12 Group：用户删除联动清理 SCIM 组成员记录与 scim 来源授权/兼职
+    // （失败不阻断删除主流程——成员记录悬挂仅影响组详情展示，grant 引擎对
+    // 软删用户天然拒绝）
+    for uid in &deleted_user_ids {
+        if let Err(e) = state.scim_group_service.cleanup_user_membership(*uid).await {
+            tracing::warn!("用户删除 SCIM 成员清理失败 user_id={uid}: {}", e.detail);
+        }
+    }
+
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 

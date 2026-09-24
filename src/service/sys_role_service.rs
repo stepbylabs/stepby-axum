@@ -1229,6 +1229,7 @@ impl SysRoleService {
             .map(|&uid| SysUserRoleActiveModel {
                 user_id: Set(uid),
                 role_id: Set(dto.role_id),
+                source: Set("admin".to_owned()),
             })
             .collect();
         self.user_role_repo.insert_many(models).await?;
