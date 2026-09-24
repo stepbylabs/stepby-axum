@@ -1839,6 +1839,30 @@ impl SsoService {
         let id_token_alg = normalize_id_token_alg(dto.id_token_alg.as_deref());
         let subject_type = normalize_subject_type(dto.subject_type.as_deref());
 
+        // v5-D2 修正：显式切到 RS256 且当前无 RSA 私钥时**当场生成**——启动 ensure
+        // 只覆盖"启动时点已声明 RS256"的客户端，存量 HS256 客户端中途切换会留下
+        // key NULL 窗口（签发回落 HS256，与 RP 预期的 JWKS 验签不符）。生成后信封
+        // 加密落库（同 add_client；CONFIG_ENC_KEY 未配置时明文，迁移期策略）。
+        let mut new_rsa_key: Option<String> = None;
+        if id_token_alg == "RS256" && dto.id_token_alg.is_some() && m.rsa_private_key.is_none() {
+            let pem = tokio::task::spawn_blocking(generate_rsa_private_pem)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("RSA keygen 任务失败: {e}")))?
+                .map_err(|e| ServiceError::internal(&format!("RSA 密钥生成失败: {e}")))?;
+            let sealed = if self.enc_key.is_empty() {
+                tracing::warn!(
+                    "CONFIG_ENC_KEY 未配置：rsa_private_key 以明文落库（迁移期 fail-open）"
+                );
+                pem
+            } else {
+                crate::utils::crypto::encrypt_config_value(&pem, &self.enc_key).map_err(|e| {
+                    tracing::error!("RSA 私钥加密失败（fail-closed）: {}", e);
+                    ServiceError::internal(&crate::tr!("error.sso.secret_encrypt_failed"))
+                })?
+            };
+            new_rsa_key = Some(sealed);
+        }
+
         // 关键：仅将可编辑列标记为 Set 才能被 ActiveModelTrait::update 真实写入；
         // Model.into() 会产生 Unchanged 值并被 update 跳过。client_id /
         // client_secret_hash / id_token_secret / create_* 保持 Unchanged，杜绝密钥篡改。
@@ -1849,6 +1873,9 @@ impl SsoService {
         am.scopes = Set(to_json_array(&scopes));
         am.grant_types = Set(to_json_array(&grant_types));
         am.id_token_alg = Set(id_token_alg);
+        if let Some(sealed) = new_rsa_key {
+            am.rsa_private_key = Set(Some(sealed));
+        }
         am.subject_type = Set(subject_type);
         am.consent_required = Set(consent_required);
         am.enabled = Set(enabled);
