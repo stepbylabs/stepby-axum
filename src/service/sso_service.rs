@@ -2636,6 +2636,11 @@ fn redirect_error_url(
 }
 
 /// 生成 URL-safe 随机串（base64url 无填充）
+/// v5-D12：公开随机串生成（SCIM provision 随机密码用）
+pub(crate) fn random_urlsafe_pub(bytes_len: usize) -> String {
+    random_urlsafe(bytes_len)
+}
+
 fn random_urlsafe(bytes_len: usize) -> String {
     use base64::Engine;
     let mut buf = vec![0u8; bytes_len];

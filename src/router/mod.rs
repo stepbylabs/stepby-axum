@@ -11,6 +11,7 @@ pub mod monitor_observability_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
 pub mod public;
+pub mod scim_router;
 pub mod sso_router;
 pub mod sys_backup_router;
 pub mod sys_config_router;

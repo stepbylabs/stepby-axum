@@ -661,10 +661,7 @@ impl SysUserService {
 
     /// v5-E4：查询一批 user_id 中已绑定第三方登录身份（sys_oauth_user 存在记录）的集合。
     /// 查询失败时返回空集合并记 warn（标记降级为未绑定，不阻断列表主流程）。
-    async fn oauth_bound_user_ids(
-        &self,
-        user_ids: &[i64],
-    ) -> std::collections::HashSet<i64> {
+    async fn oauth_bound_user_ids(&self, user_ids: &[i64]) -> std::collections::HashSet<i64> {
         if user_ids.is_empty() {
             return std::collections::HashSet::new();
         }
@@ -673,9 +670,8 @@ impl SysUserService {
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!(
-            "SELECT DISTINCT user_id FROM sys_oauth_user WHERE user_id IN ({id_list})"
-        );
+        let sql =
+            format!("SELECT DISTINCT user_id FROM sys_oauth_user WHERE user_id IN ({id_list})");
         let backend = self.db().get_database_backend();
         match self
             .db()
@@ -893,7 +889,9 @@ impl SysUserService {
         } else {
             None
         };
-        let oauth_bound_set = self.oauth_bound_user_ids(std::slice::from_ref(&user_id)).await;
+        let oauth_bound_set = self
+            .oauth_bound_user_ids(std::slice::from_ref(&user_id))
+            .await;
         Ok(UserVo {
             user,
             role_ids,

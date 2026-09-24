@@ -24,6 +24,7 @@ mod menu_perm_contract;
 mod monitor;
 mod monitor_extra;
 mod response_cache;
+mod scim;
 mod sso;
 mod sys_backup;
 mod sys_config_dict;
@@ -190,6 +191,11 @@ async fn build_isolated_state() -> (Arc<AppState>, RedisSlot) {
 
     let mut settings = Settings::from_file(&manifest_config_path())
         .expect("加载 config/config.toml 失败（请确认 cwd 或 CARGO_MANIFEST_DIR 正确）");
+
+    // v5-D12：测试环境统一开启 SCIM（Bearer 固定测试值）——其它测试不请求 /scim/*
+    // 故无干扰；SCIM 用例依赖此配置。
+    settings.scim.enabled = true;
+    settings.scim.bearer_token = "scim-test-bearer-token-0123456789abcdef".to_string();
 
     let slot = acquire_redis_slot().await;
     let db_path = unique_temp_db_path();

@@ -75,6 +75,8 @@ pub struct AppState {
     pub oauth_service: SysOauthService,
     /// 单点登录 / OIDC Provider（本系统作为授权服务器）Service（Tier B）
     pub sso_service: SsoService,
+    /// v5-D12：SCIM 2.0 用户目录同步 Service（外部 IdP provisioning）
+    pub scim_service: crate::service::scim_service::ScimService,
     /// 在线 HTTP 调试器 Service（服务端转发 + SSRF 防护）
     pub http_debug_service: SysHttpDebugService,
     /// 报表中心 + 定时订阅推送 Service
@@ -259,6 +261,7 @@ impl AppState {
                 // 与静态 RESERVED_CLIENT_IDS 一并在 add_client 时比对
                 vec![config.jwt.audience.clone(), config.jwt.issuer.clone()],
             ),
+            scim_service: crate::service::scim_service::ScimService::new(db.clone()),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
             web_hook_service: SysWebHookService::new(db.clone(), config.config_enc_key.clone()),
