@@ -38,6 +38,10 @@ pub const EVENT_LOGIN_FAILURE: &str = "login_failure";
 pub const EVENT_SCIM_USER_PROVISIONED: &str = "scim_user_provisioned";
 /// v5-D12：SCIM deprovision 停用用户事件（payload 含 id/userName）
 pub const EVENT_SCIM_USER_DEACTIVATED: &str = "scim_user_deactivated";
+/// v5-D12 Group：SCIM 建组事件（payload 含 id/displayName/externalId/memberCount）
+pub const EVENT_SCIM_GROUP_PROVISIONED: &str = "scim_group_provisioned";
+/// v5-D12 Group：SCIM 删组事件（payload 含 id/displayName/externalId）
+pub const EVENT_SCIM_GROUP_DELETED: &str = "scim_group_deleted";
 
 /// 事件分发中间件注入的扩展 key（当前仅用于路由分发）
 pub const EVENT_HEADERS: [&str; 1] = ["X-Webhook-Event"];
@@ -775,6 +779,9 @@ impl SysWebHookService {
             // v5-D12：SCIM 用户目录同步事件（provision 创建 / deprovision 停用）
             EVENT_SCIM_USER_PROVISIONED,
             EVENT_SCIM_USER_DEACTIVATED,
+            // v5-D12 Group：SCIM 组事件（建组 / 删组）
+            EVENT_SCIM_GROUP_PROVISIONED,
+            EVENT_SCIM_GROUP_DELETED,
         ]
     }
 }

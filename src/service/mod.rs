@@ -15,6 +15,7 @@ pub mod auth_service;
 pub mod gen_table_service;
 pub mod ip_location_service;
 pub mod mailer_service;
+pub mod scim_group_service;
 pub mod scim_service;
 pub mod sso_service;
 pub mod sys_backup_service;

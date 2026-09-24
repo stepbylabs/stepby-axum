@@ -22,17 +22,18 @@ pub fn public_scim_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .patch(scim_handler::patch_user)
                 .delete(scim_handler::delete_user),
         )
-        // v5-D12：Groups 显式协议边界（501 + 语义说明；映射拍板后替换实现）
+        // v5-D12 Group：Groups 真实现（RFC 7644 §4.2——组→角色集合 / 组→兼职部门
+        // 双映射联动，替换原 501 显式边界）
         .route(
             "/scim/v2/Groups",
-            get(scim_handler::groups_not_implemented).post(scim_handler::groups_not_implemented),
+            get(scim_handler::list_groups).post(scim_handler::create_group),
         )
         .route(
             "/scim/v2/Groups/{id}",
-            get(scim_handler::groups_not_implemented)
-                .put(scim_handler::groups_not_implemented)
-                .patch(scim_handler::groups_not_implemented)
-                .delete(scim_handler::groups_not_implemented),
+            get(scim_handler::get_group)
+                .put(scim_handler::put_group)
+                .patch(scim_handler::patch_group)
+                .delete(scim_handler::delete_group),
         )
         .with_state(state)
 }

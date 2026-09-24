@@ -77,6 +77,8 @@ pub struct AppState {
     pub sso_service: SsoService,
     /// v5-D12：SCIM 2.0 用户目录同步 Service（外部 IdP provisioning）
     pub scim_service: crate::service::scim_service::ScimService,
+    /// v5-D12 Group：SCIM Group 双映射联动引擎（组→角色集合 / 组→兼职部门）
+    pub scim_group_service: crate::service::scim_group_service::ScimGroupService,
     /// 在线 HTTP 调试器 Service（服务端转发 + SSRF 防护）
     pub http_debug_service: SysHttpDebugService,
     /// 报表中心 + 定时订阅推送 Service
@@ -262,6 +264,8 @@ impl AppState {
                 vec![config.jwt.audience.clone(), config.jwt.issuer.clone()],
             ),
             scim_service: crate::service::scim_service::ScimService::new(db.clone()),
+            scim_group_service:
+                crate::service::scim_group_service::ScimGroupService::new(db.clone()),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
             web_hook_service: SysWebHookService::new(db.clone(), config.config_enc_key.clone()),

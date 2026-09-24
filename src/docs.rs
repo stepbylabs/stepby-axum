@@ -47,6 +47,11 @@ struct SwaggerAssets;
         crate::handler::sys_user_handler::remove,
         crate::handler::sys_user_handler::import_template,
         crate::handler::sys_user_handler::import_data,
+        // ==================== SCIM 组管理（v5-D12 Group） ====================
+        crate::handler::sys_scim_group_handler::list,
+        crate::handler::sys_scim_group_handler::get_info,
+        crate::handler::sys_scim_group_handler::edit,
+        crate::handler::sys_scim_group_handler::remove,
         // ==================== 角色管理 ====================
         crate::handler::sys_role_handler::list,
         crate::handler::sys_role_handler::get_info_by_id,
@@ -208,6 +213,11 @@ struct SwaggerAssets;
             crate::entity::sys_notice::Model,
             crate::entity::sys_oper_log::Model,
             crate::entity::sys_frontend_error::Model,
+            // ==================== SCIM Group（v5-D12 Group） ====================
+            crate::service::scim_group_service::ScimGroupAdminRow,
+            crate::service::scim_group_service::ScimGroupAdminDetail,
+            crate::service::scim_group_service::ScimGroupAdminMember,
+            crate::handler::sys_scim_group_handler::ScimGroupAdminUpsertDto,
             // ==================== DTO ====================
             // 认证
             crate::service::auth_service::LoginDto,

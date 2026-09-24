@@ -61,6 +61,11 @@ fn main() {
         axum_backend::entity::sys_user_pref::Model,
         axum_backend::entity::sys_web_hook::Model,
         axum_backend::entity::sys_web_hook_log::Model,
+        // ---- entity：SCIM Group / 多部门任职（v5-D12 Group） ----
+        axum_backend::entity::sys_scim_group::Model,
+        axum_backend::entity::sys_scim_group_binding::Model,
+        axum_backend::entity::sys_scim_group_member::Model,
+        axum_backend::entity::sys_user_dept::Model,
         // ---- service：SSO / OIDC Provider（应用私有 API） ----
         axum_backend::service::sso_service::SsoClientVo,
         axum_backend::service::sso_service::SsoClientQueryDto,
@@ -68,6 +73,11 @@ fn main() {
         axum_backend::service::sso_service::SsoClientCreateResult,
         axum_backend::service::sso_service::ConsentDto,
         axum_backend::service::sso_service::SsoGrantVo,
+        // ---- service：SCIM Group 管理（v5-D12 Group） ----
+        axum_backend::service::scim_group_service::ScimGroupAdminRow,
+        axum_backend::service::scim_group_service::ScimGroupAdminDetail,
+        axum_backend::service::scim_group_service::ScimGroupAdminMember,
+        axum_backend::handler::sys_scim_group_handler::ScimGroupAdminUpsertDto,
         // ---- service：其它 VO / DTO ----
         axum_backend::service::sys_job_service::JobVo,
         axum_backend::service::sys_logininfor_service::LoginDailyStat,

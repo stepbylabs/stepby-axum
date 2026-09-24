@@ -183,6 +183,8 @@ pub async fn patch_user(
 }
 
 /// DELETE /scim/v2/Users/{id}（deprovision = 停用，204）
+/// v5-D12 Group：deprovision 联动——清理组成员记录 + 撤 scim 来源授权/兼职
+/// （admin 手授保留；见 scim_group_service::cleanup_user_membership）。
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -199,6 +201,10 @@ pub async fn delete_user(
     };
     match state.scim_service.delete_user(id).await {
         Ok(()) => {
+            // v5-D12 Group：成员记录 + scim 来源授权联动清理（失败不阻断停用主流程）
+            if let Err(e) = state.scim_group_service.cleanup_user_membership(id).await {
+                tracing::warn!("SCIM deprovision 成员清理失败 user_id={id}: {}", e.detail);
+            }
             // v5-D12：deprovision 事件（火后即忘）
             state.web_hook_service.dispatch_event(
                 crate::service::sys_web_hook_service::EVENT_SCIM_USER_DEACTIVATED,
@@ -214,27 +220,149 @@ pub async fn delete_user(
     }
 }
 
-/// /scim/v2/Groups（全部方法）——显式协议边界（v5-D12 深化）。
-///
-/// Group provisioning **暂未实现**：Group 的语义选择（映射到 sys_role 角色 /
-/// sys_dept 部门树 / 独立用户组表）取决于第一个对接的 IdP 的组语义
-///（Okta 组→权限容器→A；Entra 组→组织架构→B），无 IdP 场景下任何映射均为
-/// 空转协议，故不预建。本端点返回明确 SCIM 501（带三种语义备选说明），把
-/// "未实现"从模糊 404 变为可对接的显式声明——对接方一眼可知系统能力边界。
-/// 映射语义拍板后按 RFC 7644 §4.2 实现并替换本端点。
-pub async fn groups_not_implemented(
+// ==================== Groups（v5-D12 Group：RFC 7644 §4.2 真实现） ====================
+
+/// GET /scim/v2/Groups?startIndex=&count=&filter=
+pub async fn list_groups(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     if let Err(resp) = check_access(&state, &headers) {
         return resp;
     }
-    scim_error_response(
-        501,
-        ScimError::new(
-            501,
-            "Group provisioning 尚未启用（当前仅支持 Users）。Group 映射语义（角色/部门/独立用户组）\
-             将随首个对接 IdP 的组语义确定后实现",
-        ),
-    )
+    let base = base_url_of(&headers);
+    let start_index = q
+        .get("startIndex")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let count = q.get("count").and_then(|v| v.parse().ok()).unwrap_or(100);
+    let filter = q.get("filter").map(String::as_str);
+    match state
+        .scim_group_service
+        .list_groups(start_index, count, filter, &base)
+        .await
+    {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Err(e) => scim_error_response_for_app(e),
+    }
+}
+
+/// GET /scim/v2/Groups/{id}
+pub async fn get_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Err(resp) = check_access(&state, &headers) {
+        return resp;
+    }
+    let base = base_url_of(&headers);
+    match state.scim_group_service.get_group(id, &base).await {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Err(e) => scim_error_response_for_app(e),
+    }
+}
+
+/// POST /scim/v2/Groups（provision：建组 + 成员 + role 组联动授权）
+pub async fn create_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = check_access(&state, &headers) {
+        return resp;
+    }
+    let base = base_url_of(&headers);
+    match state.scim_group_service.create_group(&body, &base).await {
+        Ok(resp) => {
+            state.web_hook_service.dispatch_event(
+                crate::service::sys_web_hook_service::EVENT_SCIM_GROUP_PROVISIONED,
+                serde_json::json!({
+                    "id": resp.id,
+                    "displayName": resp.display_name,
+                    "externalId": resp.external_id,
+                    "memberCount": resp.members.len(),
+                }),
+            );
+            (
+                StatusCode::CREATED,
+                Json(serde_json::to_value(resp).unwrap()),
+            )
+                .into_response()
+        }
+        Err(e) => scim_error_response_for_app(e),
+    }
+}
+
+/// PUT /scim/v2/Groups/{id}（displayName + members 全量 diff，幂等）
+pub async fn put_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = check_access(&state, &headers) {
+        return resp;
+    }
+    let base = base_url_of(&headers);
+    match state
+        .scim_group_service
+        .put_group(id, &body, &base)
+        .await
+    {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Err(e) => scim_error_response_for_app(e),
+    }
+}
+
+/// PATCH /scim/v2/Groups/{id}（add/remove members、replace displayName/members）
+pub async fn patch_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(resp) = check_access(&state, &headers) {
+        return resp;
+    }
+    let base = base_url_of(&headers);
+    match state
+        .scim_group_service
+        .patch_group(id, &body, &base)
+        .await
+    {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Err(e) => scim_error_response_for_app(e),
+    }
+}
+
+/// DELETE /scim/v2/Groups/{id}（软删 + 撤仅本组 source 的授权/兼职，204）
+pub async fn delete_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Err(resp) = check_access(&state, &headers) {
+        return resp;
+    }
+    let base = base_url_of(&headers);
+    let group = match state.scim_group_service.get_group(id, &base).await {
+        Ok(g) => g,
+        Err(e) => return scim_error_response_for_app(e),
+    };
+    match state.scim_group_service.delete_group(id).await {
+        Ok(()) => {
+            state.web_hook_service.dispatch_event(
+                crate::service::sys_web_hook_service::EVENT_SCIM_GROUP_DELETED,
+                serde_json::json!({
+                    "id": group.id,
+                    "displayName": group.display_name,
+                    "externalId": group.external_id,
+                }),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => scim_error_response_for_app(e),
+    }
 }
