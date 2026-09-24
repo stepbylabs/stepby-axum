@@ -37,6 +37,7 @@
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
 
 use sea_orm_migration::prelude::*;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -120,8 +121,8 @@ impl MigrationTrait for Migration {
         // external_id 唯一（NULL 不受唯一约束——mysql/pg/sqlite 三方言同语义）
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uk_scim_group_external_id ON sys_scim_group (external_id)",
+            .execute_index_ddl_ic(
+                "CREATE UNIQUE INDEX uk_scim_group_external_id ON sys_scim_group (external_id)",
             )
             .await?;
 
@@ -139,8 +140,8 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uk_scim_group_binding ON sys_scim_group_binding (group_id, target_id)",
+            .execute_index_ddl_ic(
+                "CREATE UNIQUE INDEX uk_scim_group_binding ON sys_scim_group_binding (group_id, target_id)",
             )
             .await?;
 

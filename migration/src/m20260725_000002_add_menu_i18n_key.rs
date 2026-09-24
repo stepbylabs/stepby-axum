@@ -19,6 +19,8 @@
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::{DatabaseBackend, Statement};
 
+use crate::adapt_placeholders;
+
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -34,9 +36,12 @@ impl MigrationTrait for Migration {
         let conn = manager.get_connection();
 
         // ========== 1. 添加 i18n_key 列（三库统一语法） ==========
-        // SQLite/Postgres/MySQL 均支持 ALTER TABLE ADD COLUMN
-        conn.execute_unprepared("ALTER TABLE sys_menu ADD COLUMN i18n_key VARCHAR(100) NULL")
-            .await?;
+        // SQLite/Postgres/MySQL 均支持 ALTER TABLE ADD COLUMN；
+        // MySQL DDL 隐式提交：若本迁移此前在后续步骤失败过，重跑时列已存在，需先判定
+        if !manager.has_column("sys_menu", "i18n_key").await? {
+            conn.execute_unprepared("ALTER TABLE sys_menu ADD COLUMN i18n_key VARCHAR(100) NULL")
+                .await?;
+        }
 
         // ========== 2. 填充内置菜单 i18n_key ==========
         // 仅 M（目录）和 C（菜单）类型需要 i18n_key，F（按钮）类型不进入路由树
@@ -94,7 +99,7 @@ impl MigrationTrait for Migration {
         for (menu_id, i18n_key) in updates {
             conn.execute(Statement::from_sql_and_values(
                 backend,
-                "UPDATE sys_menu SET i18n_key = $1 WHERE menu_id = $2",
+                adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = $1 WHERE menu_id = $2"),
                 [(*i18n_key).into(), (*menu_id).into()],
             ))
             .await?;

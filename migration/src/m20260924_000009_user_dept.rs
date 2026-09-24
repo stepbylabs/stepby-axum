@@ -16,6 +16,7 @@
 //! 跨 sqlite/postgres/mysql 兼容，DCL 参考 m20260922_000001_sso_module。
 
 use sea_orm_migration::prelude::*;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -71,14 +72,14 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uk_user_dept ON sys_user_dept (user_id, dept_id)",
+            .execute_index_ddl_ic(
+                "CREATE UNIQUE INDEX uk_user_dept ON sys_user_dept (user_id, dept_id)",
             )
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE INDEX IF NOT EXISTS idx_user_dept_dept ON sys_user_dept (dept_id)",
+            .execute_index_ddl_ic(
+                "CREATE INDEX idx_user_dept_dept ON sys_user_dept (dept_id)",
             )
             .await?;
         Ok(())

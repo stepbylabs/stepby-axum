@@ -16,6 +16,7 @@
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
 
 use sea_orm_migration::prelude::*;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -317,8 +318,8 @@ async fn up_create_tables(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // sys_oauth_user 索引（user_id 关联查询）
     manager
         .get_connection()
-        .execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_oauth_user_user_id ON sys_oauth_user (user_id)",
+        .execute_index_ddl_ic(
+            "CREATE INDEX idx_oauth_user_user_id ON sys_oauth_user (user_id)",
         )
         .await?;
 

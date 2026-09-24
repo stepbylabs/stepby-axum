@@ -14,6 +14,7 @@
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
 
 use sea_orm_migration::prelude::*;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -286,14 +287,14 @@ async fn up_create_tables(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // -------- 索引（report_id 用于级联查询/删除，状态用于订阅扫描） --------
     manager
         .get_connection()
-        .execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_report_sub_report_id ON sys_report_sub (report_id)",
+        .execute_index_ddl_ic(
+            "CREATE INDEX idx_report_sub_report_id ON sys_report_sub (report_id)",
         )
         .await?;
     manager
         .get_connection()
-        .execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_report_sub_status ON sys_report_sub (status)",
+        .execute_index_ddl_ic(
+            "CREATE INDEX idx_report_sub_status ON sys_report_sub (status)",
         )
         .await?;
 

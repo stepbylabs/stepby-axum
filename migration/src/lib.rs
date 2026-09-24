@@ -126,6 +126,77 @@ mod m20260924_000008_scim_groups;
 mod m20260924_000009_user_dept;
 
 use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::DatabaseBackend;
+use std::borrow::Cow;
+
+/// 将 SQL 中的 PostgreSQL 风格 `$N` 占位符按目标方言转换：
+/// Postgres 原样返回；MySQL/SQLite 将 `$N`（连续数字）替换为 `?`。
+///
+/// 背景：`Statement::from_sql_and_values` **不会**自动改写占位符——
+/// MySQL 驱动只识别 `?`（`$1` 会被当作列名，报 1054 Unknown column '$1'）；
+/// SQLite 的 `$1` 是合法命名参数恰好可用，但统一转换消除方言差异。
+/// 迁移 SQL 统一按 PG 风格书写占位符，经本函数适配后交给 from_sql_and_values。
+/// 单引号字符串字面量内的 `$` 不转换。
+pub fn adapt_placeholders(backend: DatabaseBackend, sql: &str) -> Cow<'_, str> {
+    if backend == DatabaseBackend::Postgres || !sql.contains('$') {
+        return Cow::Borrowed(sql);
+    }
+    let mut out = String::with_capacity(sql.len());
+    let mut in_string = false;
+    let mut chars = sql.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        match c {
+            '\'' => {
+                in_string = !in_string;
+                out.push('\'');
+            }
+            '$' if !in_string && chars.peek().is_some_and(|&(_, nc)| nc.is_ascii_digit()) => {
+                out.push('?');
+                while chars.peek().is_some_and(|&(_, nc)| nc.is_ascii_digit()) {
+                    chars.next();
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// MySQL 方言兼容扩展：索引 DDL 幂等执行器。
+///
+/// `CREATE [UNIQUE] INDEX IF NOT EXISTS` 是 SQLite / PostgreSQL / MariaDB 支持的语法，
+/// MySQL 8.0 不支持（MariaDB 专属扩展）。因此迁移中的索引 DDL 统一去掉
+/// `IF NOT EXISTS`，改由本 trait 执行并容错"索引已存在"类错误，保证跨方言幂等：
+/// - MySQL   1061: `Duplicate key name 'xxx'`
+/// - PostgreSQL 42P07: `relation "xxx" already exists`
+/// - SQLite: `index xxx already exists`
+///
+/// 仅用于索引类 DDL（表/数据类 DDL 不适用，避免误吞 `Table already exists` 等错误）。
+#[async_trait::async_trait]
+pub trait IndexDdlExt {
+    /// 执行索引类 DDL；若错误为"索引已存在"则视为成功，其余错误原样上抛。
+    async fn execute_index_ddl_ic(&self, sql: &str) -> Result<(), DbErr>;
+}
+
+#[async_trait::async_trait]
+impl IndexDdlExt for SchemaManagerConnection<'_> {
+    async fn execute_index_ddl_ic(&self, sql: &str) -> Result<(), DbErr> {
+        match self.execute_unprepared(sql).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("Duplicate key name")
+                    || msg.contains("42P07")
+                    || msg.contains("already exists")
+                {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+}
 
 /// 数据库迁移管理器
 pub struct Migrator;

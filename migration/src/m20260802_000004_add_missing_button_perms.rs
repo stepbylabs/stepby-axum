@@ -17,6 +17,8 @@
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::Statement;
 
+use crate::adapt_placeholders;
+
 /// 判断是否 SQLite 后端
 fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
     matches!(
@@ -49,8 +51,8 @@ fn now_expr(manager: &SchemaManager<'_>) -> String {
 /// 插入按钮权限菜单（参数化查询，避免 SQL 注入）
 ///
 /// 多数据库兼容：
-/// - 使用 `$1, $2, ...` 占位符（Postgres）/ `?` 占位符（MySQL/SQLite）
-///   sea-orm Statement::from_sql_and_values 会根据 backend 自动转换
+/// - SQL 统一按 PG 风格书写 `$1, $2, ...` 占位符，
+///   经 `adapt_placeholders` 适配方言（PG 原样 / MySQL·SQLite 转 `?`）
 /// - create_time 使用 now_expr() 适配不同数据库
 async fn insert_button_perm(
     manager: &SchemaManager<'_>,
@@ -71,7 +73,7 @@ async fn insert_button_perm(
         .get_connection()
         .execute(Statement::from_sql_and_values(
             backend,
-            &sql,
+            adapt_placeholders(backend, &sql),
             [
                 menu_id.into(),
                 menu_name.into(),
@@ -108,7 +110,7 @@ async fn insert_role_menu_idempotent(
         .get_connection()
         .execute(Statement::from_sql_and_values(
             backend,
-            &sql,
+            adapt_placeholders(backend, &sql),
             [role_id.into(), menu_id.into()],
         ))
         .await?;

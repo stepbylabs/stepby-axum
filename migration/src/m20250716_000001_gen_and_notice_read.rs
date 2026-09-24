@@ -7,6 +7,7 @@
 //! 3. sys_notice_read   - 通知公告已读记录表
 
 use sea_orm_migration::prelude::*;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -146,8 +147,8 @@ async fn create_gen_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // 唯一索引：table_name
     manager
         .get_connection()
-        .execute_unprepared(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_gen_table_name ON gen_table (table_name)",
+        .execute_index_ddl_ic(
+            "CREATE UNIQUE INDEX idx_gen_table_name ON gen_table (table_name)",
         )
         .await?;
     Ok(())
@@ -242,8 +243,8 @@ async fn create_gen_table_column(manager: &SchemaManager<'_>) -> Result<(), DbEr
     // 普通索引：table_id
     manager
         .get_connection()
-        .execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_gen_table_column_table_id ON gen_table_column (table_id)",
+        .execute_index_ddl_ic(
+            "CREATE INDEX idx_gen_table_column_table_id ON gen_table_column (table_id)",
         )
         .await?;
     Ok(())
@@ -287,8 +288,8 @@ async fn create_sys_notice_read(manager: &SchemaManager<'_>) -> Result<(), DbErr
     // 普通索引：notice_id
     manager
         .get_connection()
-        .execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_notice_read_notice_id ON sys_notice_read (notice_id)",
+        .execute_index_ddl_ic(
+            "CREATE INDEX idx_notice_read_notice_id ON sys_notice_read (notice_id)",
         )
         .await?;
     Ok(())

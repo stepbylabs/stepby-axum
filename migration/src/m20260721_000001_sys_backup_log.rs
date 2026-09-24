@@ -15,6 +15,7 @@
 //! - create_time: 操作时间
 
 use sea_orm_migration::prelude::*;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -88,14 +89,14 @@ impl MigrationTrait for Migration {
         // 普通索引：backup_type / create_time
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE INDEX IF NOT EXISTS idx_sys_backup_log_type ON sys_backup_log (backup_type)",
+            .execute_index_ddl_ic(
+                "CREATE INDEX idx_sys_backup_log_type ON sys_backup_log (backup_type)",
             )
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE INDEX IF NOT EXISTS idx_sys_backup_log_create_time ON sys_backup_log (create_time)",
+            .execute_index_ddl_ic(
+                "CREATE INDEX idx_sys_backup_log_create_time ON sys_backup_log (create_time)",
             )
             .await?;
         Ok(())

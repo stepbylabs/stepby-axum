@@ -20,6 +20,8 @@
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::Statement;
 
+use crate::adapt_placeholders;
+
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -32,7 +34,7 @@ impl MigrationTrait for Migration {
         // 1. 修复 /system/dashboard 数据看板菜单的 i18n_key
         conn.execute(Statement::from_sql_and_values(
             backend,
-            "UPDATE sys_menu SET i18n_key = $1 WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index' AND (i18n_key IS NULL OR i18n_key = '')",
+            adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = $1 WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index' AND (i18n_key IS NULL OR i18n_key = '')"),
             ["menu.dashboard".into()],
         ))
         .await?;
@@ -41,7 +43,7 @@ impl MigrationTrait for Migration {
         //    使用 menu.helpCenter 区别于 tool/help 子菜单（menu.help）
         conn.execute(Statement::from_sql_and_values(
             backend,
-            "UPDATE sys_menu SET i18n_key = $1 WHERE path = 'help-center' AND parent_id = 0 AND menu_type = 'M' AND (i18n_key IS NULL OR i18n_key = '')",
+            adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = $1 WHERE path = 'help-center' AND parent_id = 0 AND menu_type = 'M' AND (i18n_key IS NULL OR i18n_key = '')"),
             ["menu.helpCenter".into()],
         ))
         .await?;
@@ -55,14 +57,14 @@ impl MigrationTrait for Migration {
 
         conn.execute(Statement::from_sql_and_values(
             backend,
-            "UPDATE sys_menu SET i18n_key = NULL WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index' AND i18n_key = $1",
+            adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = NULL WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index' AND i18n_key = $1"),
             ["menu.dashboard".into()],
         ))
         .await?;
 
         conn.execute(Statement::from_sql_and_values(
             backend,
-            "UPDATE sys_menu SET i18n_key = NULL WHERE path = 'help-center' AND parent_id = 0 AND menu_type = 'M' AND i18n_key = $1",
+            adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = NULL WHERE path = 'help-center' AND parent_id = 0 AND menu_type = 'M' AND i18n_key = $1"),
             ["menu.helpCenter".into()],
         ))
         .await?;
