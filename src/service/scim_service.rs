@@ -110,13 +110,14 @@ impl ScimService {
     /// Model → SCIM User（location 由调用方传入 base_url）
     fn to_scim_user(&self, m: &sys_user::Model, base_url: &str) -> ScimUser {
         let mut emails = Vec::new();
-        if let Some(v) = &m.email {
-            if !v.is_empty() {
-                emails.push(ScimEmail {
-                    value: v.clone(),
-                    primary: true,
-                });
-            }
+        // let-chains 合并（clippy collapsible_if；项目已在用 let-chains 语法）
+        if let Some(v) = &m.email
+            && !v.is_empty()
+        {
+            emails.push(ScimEmail {
+                value: v.clone(),
+                primary: true,
+            });
         }
         ScimUser {
             schemas: vec![SCIM_USER_SCHEMA.to_string()],
