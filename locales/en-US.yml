@@ -87,6 +87,8 @@ error:
     user_not_found: User not found
     user_disabled: Target user is disabled, cannot transfer
     mode_invalid: Invalid approval mode (single/countersign)
+    leave_type_invalid: Invalid leave type (annual/sick/personal)
+    title_blank: Document title cannot be blank
     task_not_found: Approval task not found
     doc_not_found: Approval document not found
     task_not_pending: This approval task has been processed or expired, please refresh

@@ -106,11 +106,11 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
 #[derive(Debug, Clone, serde::Deserialize, garde::Validate, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowSubmitDto {
-    /// 单据标题
+    /// 单据标题（trim 后非空，≤200）
     #[garde(length(chars, min = 1, max = 200))]
     pub title: String,
-    /// 请假类型（annual/sick/personal）
-    #[garde(ascii)]
+    /// 请假类型（annual/sick/personal，枚举校验防任意 ascii 入库撞列宽）
+    #[garde(ascii, length(chars, max = 16), custom(validate_leave_type))]
     pub leave_type: String,
     /// 请假天数（1-365）
     #[garde(range(min = 1, max = 365))]
@@ -118,9 +118,29 @@ pub struct FlowSubmitDto {
     /// 事由
     #[garde(length(chars, max = 500))]
     pub reason: Option<String>,
-    /// 审批模式（single/countersign）
-    #[garde(ascii)]
+    /// 审批模式（single/countersign，枚举校验——非法值显式 400，不静默回退）
+    #[garde(ascii, length(chars, max = 16), custom(validate_flow_mode))]
     pub flow_mode: String,
+}
+
+/// leave_type 枚举白名单（对齐迁移字典 sys_flow_leave_type 与 DB VARCHAR(16)）
+fn validate_leave_type(value: &str, _ctx: &()) -> garde::Result {
+    if matches!(value, "annual" | "sick" | "personal") {
+        Ok(())
+    } else {
+        Err(garde::Error::new(crate::tr!(
+            "error.flow.leave_type_invalid"
+        )))
+    }
+}
+
+/// flow_mode 枚举白名单（非法值 400，不静默回退——对齐"显式报错不静默跳过"原则）
+fn validate_flow_mode(value: &str, _ctx: &()) -> garde::Result {
+    if matches!(value, "single" | "countersign") {
+        Ok(())
+    } else {
+        Err(garde::Error::new(crate::tr!("error.flow.mode_invalid")))
+    }
 }
 
 /// 审批动作 DTO
@@ -298,8 +318,15 @@ impl SysFlowService {
         &self,
         applicant_id: i64,
         applicant_name: &str,
-        dto: FlowSubmitDto,
+        mut dto: FlowSubmitDto,
     ) -> Result<FlowSubmitOutcome, ServiceError> {
+        // title 白空格防御：trim 后必须非空（garde min=1 拦不住 " "）
+        dto.title = dto.title.trim().to_string();
+        if dto.title.is_empty() {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.title_blank"
+            )));
+        }
         let user = sys_user::Entity::find_by_id(applicant_id)
             .one(&self.db)
             .await?

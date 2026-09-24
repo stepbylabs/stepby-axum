@@ -87,6 +87,8 @@ error:
     user_not_found: 用户不存在
     user_disabled: 目标用户已停用，无法转办
     mode_invalid: 审批模式不合法（single/countersign）
+    leave_type_invalid: 请假类型不合法（annual/sick/personal）
+    title_blank: 单据标题不能为空白
     task_not_found: 审批任务不存在
     doc_not_found: 审批单据不存在
     task_not_pending: 审批任务已处理或已失效，请刷新后重试
