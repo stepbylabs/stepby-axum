@@ -59,6 +59,7 @@ pub use m20260924_000002_sso_consent_unique::Migration as M20260924SsoConsentUni
 pub use m20260924_000003_sso_rs256::Migration as M20260924SsoRs256;
 pub use m20260924_000004_sso_subject_type::Migration as M20260924SsoSubjectType;
 pub use m20260924_000005_user_tenant_id::Migration as M20260924UserTenantId;
+pub use m20260924_000006_scim_external_id::Migration as M20260924ScimExternalId;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -116,6 +117,7 @@ mod m20260924_000002_sso_consent_unique;
 mod m20260924_000003_sso_rs256;
 mod m20260924_000004_sso_subject_type;
 mod m20260924_000005_user_tenant_id;
+mod m20260924_000006_scim_external_id;
 
 use sea_orm_migration::prelude::*;
 
@@ -182,6 +184,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260924SsoRs256),
             Box::new(M20260924SsoSubjectType),
             Box::new(M20260924UserTenantId),
+            Box::new(M20260924ScimExternalId),
         ]
     }
 }

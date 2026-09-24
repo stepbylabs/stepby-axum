@@ -284,3 +284,107 @@ async fn test_scim_users_crud_and_deprovision() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "PUT 改名应 400");
 }
+
+/// v5-D12 深化：externalId 落库/回显/过滤/唯一性 + provision 事件不阻断主链
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scim_external_id_and_events() {
+    let ctx = scim_ctx().await;
+
+    // ① 创建带 externalId（201，回显一致）
+    let create_body = serde_json::json!({
+        "userName": "scim.ext01",
+        "externalId": "idp-abc-001",
+        "name": {"displayName": "外部同步用户"},
+        "active": true
+    });
+    let (status, _, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users",
+        "application/json",
+        &create_body.to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let created = json_of(&body);
+    assert_eq!(created["externalId"], serde_json::json!("idp-abc-001"));
+    let uid = created["id"].as_str().unwrap_or_default().to_string();
+
+    // ② GET 回显 externalId
+    let (status, _, body) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Users/{uid}"),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_of(&body)["externalId"],
+        serde_json::json!("idp-abc-001")
+    );
+
+    // ③ externalId eq filter → 命中
+    let (status, _, body) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users?filter=externalId%20eq%20%22idp-abc-001%22",
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_of(&body)["totalResults"], serde_json::json!(1));
+
+    // ④ 重复 externalId → 409
+    let dup_body = serde_json::json!({
+        "userName": "scim.ext02",
+        "externalId": "idp-abc-001"
+    });
+    let (status, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users",
+        "application/json",
+        &dup_body.to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "重复 externalId 应 409");
+
+    // ⑤ PATCH 更新 externalId → 200 回显新值
+    let patch_body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "path": "externalId", "value": "idp-abc-002"}]
+    })
+    .to_string();
+    let (status, _, body) = raw_request(
+        &ctx.app,
+        ctx.peer_ip,
+        Method::PATCH,
+        &format!("/scim/v2/Users/{uid}"),
+        Some(("application/json", &patch_body)),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        json_of(&body)["externalId"],
+        serde_json::json!("idp-abc-002")
+    );
+
+    // ⑥ DELETE（deprovision，触发 scim_user_deactivated 事件——无订阅时火后即忘不阻断）
+    let (status, _, _) = raw_delete(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Users/{uid}"),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
