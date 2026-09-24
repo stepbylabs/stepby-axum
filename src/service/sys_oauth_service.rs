@@ -67,6 +67,18 @@ fn validate_provider_type(provider_type: &str) -> Result<(), ServiceError> {
     }
 }
 
+/// 提供商归属校验：平台操作者（tid=0）放行任意资源；租户操作者仅能访问
+/// 本租户的提供商。用于详情/编辑/删除/启停前的越权防护。
+fn ensure_provider_access(operator_tid: i64, provider_tid: i64) -> Result<(), ServiceError> {
+    if crate::common::tenant::tenant_allowed(operator_tid, provider_tid) {
+        Ok(())
+    } else {
+        Err(ServiceError::forbidden(&crate::tr!(
+            "error.common.forbidden"
+        )))
+    }
+}
+
 /// 生成授权/状态随机串（基于 CSPRNG）
 fn random_token(len: usize) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -358,10 +370,11 @@ impl SysOauthService {
 
     // ==================== 提供商配置 ====================
 
-    /// 分页查询提供商
+    /// 分页查询提供商（管理端，租户过滤：tid=0 平台全量，tid≠0 仅本租户）
     pub async fn get_provider_page(
         &self,
         query: ProviderQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<ProviderVo>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -373,13 +386,18 @@ impl SysOauthService {
                 query.provider_code.as_deref(),
                 query.provider_type.as_deref(),
                 query.enabled.as_deref(),
+                tenant_scope,
             )
             .await?;
         Ok((rows.iter().map(ProviderVo::from_model).collect(), total))
     }
 
-    /// 查询提供商详情（脱敏 secret）
-    pub async fn get_provider_by_id(&self, provider_id: i64) -> Result<ProviderVo, ServiceError> {
+    /// 查询提供商详情（脱敏 secret；operator_tid≠0 时校验归属）
+    pub async fn get_provider_by_id(
+        &self,
+        provider_id: i64,
+        operator_tid: i64,
+    ) -> Result<ProviderVo, ServiceError> {
         let model = self
             .provider_repo
             .find_by_id(provider_id)
@@ -387,14 +405,16 @@ impl SysOauthService {
             .ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.oauth.provider_not_found"))
             })?;
+        ensure_provider_access(operator_tid, model.tenant_id)?;
         Ok(ProviderVo::from_model(&model))
     }
 
-    /// 新增提供商
+    /// 新增提供商（tenant_id 取操作者租户：平台建平台级，租户建租户专属）
     pub async fn add_provider(
         &self,
         dto: ProviderUpsertDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<ProviderVo, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_provider_type(&dto.provider_type)?;
@@ -425,6 +445,7 @@ impl SysOauthService {
             enabled: Set(dto.enabled.unwrap_or_else(|| "0".to_string())),
             display_order: Set(dto.display_order.unwrap_or(0)),
             remark: Set(dto.remark),
+            tenant_id: Set(operator_tid),
             create_time: Set(Some(now)),
             update_time: Set(Some(now)),
             ..Default::default()
@@ -434,11 +455,12 @@ impl SysOauthService {
         Ok(ProviderVo::from_model(&model))
     }
 
-    /// 修改提供商
+    /// 修改提供商（operator_tid≠0 时校验归属）
     pub async fn edit_provider(
         &self,
         dto: ProviderUpsertDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<ProviderVo, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_provider_type(&dto.provider_type)?;
@@ -452,6 +474,7 @@ impl SysOauthService {
             .ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.oauth.provider_not_found"))
             })?;
+        ensure_provider_access(operator_tid, existing.tenant_id)?;
 
         // 唯一编码校验（排除自身）
         if existing.provider_code != dto.provider_code
@@ -495,8 +518,12 @@ impl SysOauthService {
         Ok(ProviderVo::from_model(&model))
     }
 
-    /// 批量删除提供商
-    pub async fn delete_providers(&self, provider_ids: Vec<i64>) -> Result<(), ServiceError> {
+    /// 批量删除提供商（operator_tid≠0 时逐一校验归属）
+    pub async fn delete_providers(
+        &self,
+        provider_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if provider_ids.is_empty() {
             return Ok(());
         }
@@ -506,15 +533,19 @@ impl SysOauthService {
                 "error.oauth.provider_not_found"
             )));
         }
+        for p in &existing {
+            ensure_provider_access(operator_tid, p.tenant_id)?;
+        }
         self.provider_repo.delete_by_ids(provider_ids).await?;
         Ok(())
     }
 
-    /// 启停提供商
+    /// 启停提供商（operator_tid≠0 时校验归属）
     pub async fn toggle_provider(
         &self,
         provider_id: i64,
         enabled: String,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         if enabled != "0" && enabled != "1" {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -528,6 +559,7 @@ impl SysOauthService {
             .ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.oauth.provider_not_found"))
             })?;
+        ensure_provider_access(operator_tid, existing.tenant_id)?;
         let mut am: SysOauthProviderActiveModel = existing.into();
         am.enabled = Set(enabled);
         am.update_time = Set(Some(crate::common::datetime::now_naive()));

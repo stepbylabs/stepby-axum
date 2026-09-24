@@ -33,10 +33,13 @@ use crate::state::AppState;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
-    _operator: Operator,
+    operator: Operator,
     Query(query): Query<TenantQueryDto>,
 ) -> Result<AjaxResult<Vec<TenantVo>>, AppError> {
-    let list = state.tenant_service.list(query).await?;
+    let list = state
+        .tenant_service
+        .list(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(list))
 }
 
@@ -53,10 +56,13 @@ pub async fn list(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
-    _operator: Operator,
+    operator: Operator,
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<TenantVo>, AppError> {
-    let vo = state.tenant_service.get_info(dept_id).await?;
+    let vo = state
+        .tenant_service
+        .get_info(dept_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -101,7 +107,7 @@ pub async fn edit(
 ) -> Result<AjaxResult<TenantVo>, AppError> {
     let vo = state
         .tenant_service
-        .edit(dto, operator.username())
+        .edit(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -124,7 +130,7 @@ pub async fn change_status(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state
         .tenant_service
-        .change_status(dto, operator.username())
+        .change_status(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -147,7 +153,7 @@ pub async fn remove(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state
         .tenant_service
-        .remove(dept_id, operator.username())
+        .remove(dept_id, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

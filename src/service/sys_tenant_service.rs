@@ -122,12 +122,34 @@ impl SysTenantService {
         Ok(())
     }
 
+    /// 租户归属校验：平台操作者（tid=0）放行任意租户；租户操作者仅能
+    /// 访问/操作本租户（dept_id == tid）。用于租户接口的越权防护。
+    fn ensure_tenant_access(operator_tid: i64, dept_id: i64) -> Result<(), ServiceError> {
+        if crate::common::tenant::tenant_allowed(operator_tid, dept_id) {
+            Ok(())
+        } else {
+            Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )))
+        }
+    }
+
     /// 租户列表（parent_id=0 的顶层部门，排除平台根；tenant_name 模糊过滤）
-    pub async fn list(&self, q: TenantQueryDto) -> Result<Vec<TenantVo>, ServiceError> {
+    ///
+    /// 多租户：tenant_scope 为 Some(tid)（租户操作者）时仅返回本租户根，
+    /// 防止 common 只读权限（菜单 3700）跨租户窥探租户名录。
+    pub async fn list(
+        &self,
+        q: TenantQueryDto,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<TenantVo>, ServiceError> {
         let mut query = SysDept::find()
             .filter(DeptColumn::ParentId.eq(0))
             .filter(DeptColumn::DelFlag.eq("0"))
             .filter(DeptColumn::DeptId.ne(PLATFORM_ROOT_DEPT_ID));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(DeptColumn::DeptId.eq(tid));
+        }
         if let Some(name) = q.tenant_name.as_deref().filter(|s| !s.is_empty()) {
             query = query.filter(DeptColumn::DeptName.like(format!("%{}%", like_escape(name))));
         }
@@ -154,9 +176,10 @@ impl SysTenantService {
         Ok(vos)
     }
 
-    /// 租户详情
-    pub async fn get_info(&self, dept_id: i64) -> Result<TenantVo, ServiceError> {
+    /// 租户详情（operator_tid≠0 时仅允许查本租户）
+    pub async fn get_info(&self, dept_id: i64, operator_tid: i64) -> Result<TenantVo, ServiceError> {
         Self::ensure_not_platform_root(dept_id)?;
+        Self::ensure_tenant_access(operator_tid, dept_id)?;
         let root = self
             .load_tenant_root(dept_id)
             .await?
@@ -238,13 +261,15 @@ impl SysTenantService {
         })
     }
 
-    /// 修改租户信息（根部门字段）
+    /// 修改租户信息（根部门字段；operator_tid≠0 时仅允许改本租户）
     pub async fn edit(
         &self,
         dto: TenantEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<TenantVo, ServiceError> {
         Self::ensure_not_platform_root(dto.dept_id)?;
+        Self::ensure_tenant_access(operator_tid, dto.dept_id)?;
         let root = self
             .load_tenant_root(dto.dept_id)
             .await?
@@ -296,13 +321,16 @@ impl SysTenantService {
         })
     }
 
-    /// 启停租户（停用后该租户用户登录被拒绝，见 auth_service 登录链路校验）
+    /// 启停租户（停用后该租户用户登录被拒绝，见 auth_service 登录链路校验；
+    /// operator_tid≠0 时仅允许操作本租户）
     pub async fn change_status(
         &self,
         dto: TenantStatusDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         Self::ensure_not_platform_root(dto.dept_id)?;
+        Self::ensure_tenant_access(operator_tid, dto.dept_id)?;
         if dto.status != "0" && dto.status != "1" {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.tenant.status_invalid"
@@ -321,9 +349,16 @@ impl SysTenantService {
         Ok(())
     }
 
-    /// 删除租户（软删根部门及其子树；租户内仍有用户时拒绝）
-    pub async fn remove(&self, dept_id: i64, operator: &str) -> Result<(), ServiceError> {
+    /// 删除租户（软删根部门及其子树；租户内仍有用户时拒绝；
+    /// operator_tid≠0 时仅允许删本租户）
+    pub async fn remove(
+        &self,
+        dept_id: i64,
+        operator: &str,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         Self::ensure_not_platform_root(dept_id)?;
+        Self::ensure_tenant_access(operator_tid, dept_id)?;
         let root = self
             .load_tenant_root(dept_id)
             .await?

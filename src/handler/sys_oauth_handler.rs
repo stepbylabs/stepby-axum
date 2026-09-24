@@ -198,21 +198,29 @@ pub async fn callback(
 
 // ==================== 提供商管理 Handler ====================
 
-/// GET /system/oauth/provider/list — 提供商分页
+/// GET /system/oauth/provider/list — 提供商分页（租户过滤）
 pub async fn provider_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<ProviderQueryDto>,
 ) -> Result<TableDataInfo<ProviderVo>, AppError> {
-    let (rows, total) = state.oauth_service.get_provider_page(query).await?;
+    let (rows, total) = state
+        .oauth_service
+        .get_provider_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
 /// GET /system/oauth/provider/{providerId} — 提供商详情
 pub async fn provider_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(provider_id): Path<i64>,
 ) -> Result<AjaxResult<ProviderVo>, AppError> {
-    let vo = state.oauth_service.get_provider_by_id(provider_id).await?;
+    let vo = state
+        .oauth_service
+        .get_provider_by_id(provider_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -224,7 +232,7 @@ pub async fn provider_add(
 ) -> Result<AjaxResult<ProviderVo>, AppError> {
     let vo = state
         .oauth_service
-        .add_provider(dto, operator.username())
+        .add_provider(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -237,7 +245,7 @@ pub async fn provider_edit(
 ) -> Result<AjaxResult<ProviderVo>, AppError> {
     let vo = state
         .oauth_service
-        .edit_provider(dto, operator.username())
+        .edit_provider(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -245,6 +253,7 @@ pub async fn provider_edit(
 /// DELETE /system/oauth/provider/{providerIds} — 批量删除提供商
 pub async fn provider_delete(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids = crate::utils::parse_id_list::<i64>(&ids);
@@ -259,19 +268,23 @@ pub async fn provider_delete(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.oauth_service.delete_providers(ids).await?;
+    state
+        .oauth_service
+        .delete_providers(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
 /// PUT /system/oauth/provider/{providerId}/status — 启停提供商
 pub async fn provider_toggle(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(provider_id): Path<i64>,
     Query(query): Query<ToggleQuery>,
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .oauth_service
-        .toggle_provider(provider_id, query.enabled)
+        .toggle_provider(provider_id, query.enabled, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }

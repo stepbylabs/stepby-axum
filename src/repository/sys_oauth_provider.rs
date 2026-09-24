@@ -39,9 +39,14 @@ impl SysOauthProviderRepository {
     }
 
     /// 按 provider_code 查询提供商（唯一编码）
+    ///
+    /// 多租户：仅匹配平台级提供商（tid=0）。本方法只服务于匿名登录链路
+    /// （begin_oauth / oauth_callback），匿名请求无租户上下文，租户专属
+    /// 提供商（tid≠0）不允许进入匿名授权流程。
     pub async fn find_by_code(&self, provider_code: &str) -> Result<Option<Model>, DbErr> {
         SysOauthProvider::find()
             .filter(Column::ProviderCode.eq(provider_code))
+            .filter(Column::TenantId.eq(0))
             .one(self.base.db())
             .await
     }
@@ -64,15 +69,22 @@ impl SysOauthProviderRepository {
     }
 
     /// 查询所有已启用提供商（登录页展示 + 生成授权 URL）
+    ///
+    /// 多租户：登录页为匿名全局入口，仅展示平台级提供商（tid=0）；
+    /// 租户专属提供商（tid≠0）需租户上下文场景，不进入登录页。
     pub async fn find_all_enabled(&self) -> Result<Vec<Model>, DbErr> {
         SysOauthProvider::find()
             .filter(Column::Enabled.eq("1"))
+            .filter(Column::TenantId.eq(0))
             .order_by_asc(Column::DisplayOrder)
             .all(self.base.db())
             .await
     }
 
     /// 分页查询提供商（provider_name 模糊 + provider_code/provider_type/enabled 精确）
+    ///
+    /// 多租户：tenant_scope 为 Some(tid) 时仅返回该租户（含平台 tid=0 由调用方
+    /// 传入 None 表示平台全量可见）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -82,8 +94,12 @@ impl SysOauthProviderRepository {
         provider_code: Option<&str>,
         provider_type: Option<&str>,
         enabled: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOauthProvider::find();
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(name) = provider_name {
             query = query.filter(Column::ProviderName.like(format!("%{}%", like_escape(name))));
         }

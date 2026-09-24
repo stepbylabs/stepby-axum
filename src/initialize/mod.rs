@@ -122,6 +122,17 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SCIM Group 模块失败: {}", e))?;
 
+        // 3.5d 多租户 Phase 2 存量库兜底：
+        // 与迁移 m20260925_000001_multitenant_phase2 / m20260925_000002_tenant_module 等价
+        // （启动不跑 Migrator::up）——27 张业务表幂等补 tenant_id 列 + tid 索引 +
+        // 菜单 3700-3704 段登记。缺此兜底时（优先级最高的一项）：实体 SELECT 带
+        // tenant_id → config/dict/job/task 等管理接口全站 500；调度器加载 sys_job 失败；
+        // 租户管理页面无菜单入口。
+        ensure_multitenant_module(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 2 模块失败: {}", e))?;
+
+
         // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
         // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
         // 与迁移 m20260923_000001_sso_v4_hardening 等价（启动不跑 Migrator::up 的存量库兜底）。
@@ -1187,6 +1198,135 @@ async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Result<()> {
     }
 
     tracing::info!("sys_pat 表已就绪（幂等确保完成）");
+    Ok(())
+}
+
+/// 多租户 Phase 2 存量库兜底（与迁移 m20260925_000001/000002 等价，全幂等）：
+/// 1) 27 张业务表补 tenant_id 列（BIGINT NOT NULL DEFAULT 0，存量归平台租户 0）
+/// 2) tid 索引（3 张大表用 (tenant_id, 时间列) 组合索引，其余单列）
+/// 3) 菜单 3700-3704 租户管理段 + role_menu（3700/3701 → role_id=2 只读）
+async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // ---- 1. 幂等补列 ----
+    const TABLES: &[&str] = &[
+        "sys_dept",
+        "sys_role",
+        "sys_post",
+        "sys_config",
+        "sys_dict_type",
+        "sys_dict_data",
+        "sys_notice",
+        "sys_notice_read",
+        "sys_pat",
+        "sys_user_pref",
+        "sys_oauth_consent",
+        "sys_oauth_provider",
+        "sys_oauth_user",
+        "sys_msg_channel",
+        "sys_msg_template",
+        "sys_msg_send_log",
+        "sys_web_hook",
+        "sys_web_hook_log",
+        "sys_report",
+        "sys_report_sub",
+        "sys_job",
+        "sys_job_log",
+        "sys_task",
+        "sys_backup_log",
+        "sys_oper_log",
+        "sys_logininfor",
+        "sys_frontend_error",
+    ];
+    let mut added = 0usize;
+    for table in TABLES {
+        if sso_table_exists(db, table).await? && !sso_has_column(db, table, "tenant_id").await? {
+            db.execute(Statement::from_string(
+                backend,
+                format!("ALTER TABLE {table} ADD COLUMN tenant_id BIGINT NOT NULL DEFAULT 0"),
+            ))
+            .await?;
+            added += 1;
+        }
+    }
+    if added > 0 {
+        tracing::info!("多租户 tenant_id 列已补建 {added} 张表（存量库兜底）");
+    }
+
+    // ---- 2. 幂等建索引（MySQL 不支持 IF NOT EXISTS，交由 migration 补齐，此处跳过）----
+    if !matches!(backend, DatabaseBackend::MySql) {
+        let mut idx_sqls: Vec<String> = Vec::new();
+        // 大表组合索引（时间列名各异：oper_time/login_time/create_time）
+        for (t, c) in [
+            ("sys_oper_log", "oper_time"),
+            ("sys_logininfor", "login_time"),
+            ("sys_msg_send_log", "create_time"),
+        ] {
+            idx_sqls.push(format!(
+                "CREATE INDEX IF NOT EXISTS idx_{t}_tid_time ON {t} (tenant_id, {c})"
+            ));
+        }
+        for t in TABLES {
+            if !matches!(*t, "sys_oper_log" | "sys_logininfor" | "sys_msg_send_log") {
+                idx_sqls.push(format!(
+                    "CREATE INDEX IF NOT EXISTS idx_{t}_tid ON {t} (tenant_id)"
+                ));
+            }
+        }
+        for ddl in idx_sqls {
+            if let Err(e) = db.execute(Statement::from_string(backend, ddl)).await {
+                tracing::debug!("租户索引创建跳过（可能已存在）: {}", e);
+            }
+        }
+    }
+
+    // ---- 3. 菜单 3700-3704 段幂等登记 + role_menu（对齐 m20260925_000002）----
+    let insert_prefix = match backend {
+        DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
+        DatabaseBackend::Postgres => "INSERT INTO ",
+        DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+    };
+    let insert_suffix = if backend == DatabaseBackend::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let now_expr = match backend {
+        DatabaseBackend::Sqlite => format!(
+            "'{}'",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        ),
+        _ => "NOW()".to_string(),
+    };
+    let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
+    let body_rows = [
+        format!(
+            "{menu_cols} VALUES (3700, '租户管理', 1, 8, 'tenant', 'system/tenant/index', '', '', '1', '0', 'C', '0', '0', 'system:tenant:list', 'peoples', 'admin', {now_expr}, '多租户管理（dept 树根=租户）', '0', 'menu.tenant')"
+        ),
+        "sys_role_menu (role_id, menu_id) VALUES (2, 3700)".to_string(),
+        format!(
+            "{menu_cols} VALUES (3701, '租户查询', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:query', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        "sys_role_menu (role_id, menu_id) VALUES (2, 3701)".to_string(),
+        format!(
+            "{menu_cols} VALUES (3702, '租户新增', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:add', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3703, '租户修改', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:edit', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3704, '租户删除', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+    ];
+    for body in body_rows {
+        db.execute(Statement::from_string(
+            backend,
+            format!("{insert_prefix}{body}{insert_suffix}"),
+        ))
+        .await?;
+    }
+
+    tracing::info!("多租户 Phase 2 模块已就绪（幂等确保完成）");
     Ok(())
 }
 
