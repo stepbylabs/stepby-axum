@@ -665,6 +665,15 @@ async fn ensure_flow_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {
 
 /// 幂等补种 flow 菜单（3600 段）/字典（70 段）/site 渠道/flow_* 模板
 async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbErr> {
+    // sys_menu 表存在性保护：全新空库未建系统表时跳过种子（交由 migration 初始种子负责），
+    // 与 ensure_sys_pat_menu 同范式——否则空库启动会因种子 INSERT 失败而阻断（影响面回归修复）
+    let sys_menu_exists = sso_table_exists(db, "sys_menu")
+        .await
+        .map_err(|e| DbErr::Custom(format!("flow 种子表存在性检查失败: {}", e)))?;
+    if !sys_menu_exists {
+        tracing::info!("flow 种子跳过（sys_menu 不存在，空库交由 migration 负责初始种子）");
+        return Ok(());
+    }
     let now = flow_now(db);
 
     // 菜单 3600/3601/3611 + role 2 授权（与迁移 4.1-4.3 同构；remark 亦对齐迁移）
@@ -1567,4 +1576,87 @@ async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod flow_backfill_tests {
+    use super::*;
+    use sea_orm::Database;
+
+    /// 依赖表最小 DDL（种子写入目标：sys_menu/sys_role_menu/sys_dict_type/sys_dict_data/
+    /// sys_msg_channel/sys_msg_template；列结构对齐各自迁移，仅保留种子涉及列 + 唯一键）
+    const MIN_SEED_TABLES: &[&str] = &[
+        "CREATE TABLE sys_menu (menu_id INTEGER PRIMARY KEY, menu_name VARCHAR(64), parent_id INTEGER, order_num INTEGER, path VARCHAR(64), component VARCHAR(64), query VARCHAR(64), route_name VARCHAR(64), is_frame VARCHAR(2), is_cache VARCHAR(2), menu_type VARCHAR(2), visible VARCHAR(2), status VARCHAR(2), perms VARCHAR(64), icon VARCHAR(64), create_by VARCHAR(64), create_time DATETIME, remark VARCHAR(500), del_flag VARCHAR(1), i18n_key VARCHAR(64))",
+        "CREATE TABLE sys_role_menu (role_id BIGINT, menu_id BIGINT, PRIMARY KEY (role_id, menu_id))",
+        "CREATE TABLE sys_dict_type (dict_id INTEGER PRIMARY KEY, dict_name VARCHAR(64), dict_type VARCHAR(64) UNIQUE, status VARCHAR(2), create_by VARCHAR(64), create_time DATETIME, remark VARCHAR(500), del_flag VARCHAR(1))",
+        "CREATE TABLE sys_dict_data (dict_code INTEGER PRIMARY KEY, dict_sort INTEGER, dict_label VARCHAR(64), dict_value VARCHAR(64), dict_type VARCHAR(64), css_class VARCHAR(64), list_class VARCHAR(64), is_default VARCHAR(2), status VARCHAR(2), create_by VARCHAR(64), create_time DATETIME, remark VARCHAR(500), del_flag VARCHAR(1), dict_label_en VARCHAR(64))",
+        "CREATE TABLE sys_msg_channel (channel_id INTEGER PRIMARY KEY AUTOINCREMENT, channel_name VARCHAR(64), channel_code VARCHAR(64) UNIQUE, channel_type VARCHAR(32), config_json TEXT, status VARCHAR(2), remark VARCHAR(500), create_by VARCHAR(64), create_time DATETIME, del_flag VARCHAR(1))",
+        "CREATE TABLE sys_msg_template (template_id INTEGER PRIMARY KEY AUTOINCREMENT, template_name VARCHAR(64), template_code VARCHAR(64) UNIQUE, channel_code VARCHAR(64), template_subject VARCHAR(200), template_content TEXT, status VARCHAR(2), remark VARCHAR(500), create_by VARCHAR(64), create_time DATETIME, del_flag VARCHAR(1))",
+    ];
+
+    /// 场景 1：全新空库（连 sys_menu 都没有）→ 三表兜底建出、种子安全跳过、不阻断启动
+    #[tokio::test]
+    async fn flow_backfill_on_empty_db_creates_tables_and_skips_seeds() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        ensure_flow_module(&db).await.unwrap();
+        let tables = db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sys_flow_task','sys_flow_log','flow_demo_doc')".to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(tables.len(), 3, "空库应兜底建出三张 flow 表");
+    }
+
+    /// 场景 2：存量库（有 sys_menu 等系统表）→ 种子落库 + 重复调用幂等（不报错、不重复行）
+    #[tokio::test]
+    async fn flow_backfill_is_idempotent_on_existing_db() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        for ddl in MIN_SEED_TABLES {
+            db.execute(Statement::from_string(DatabaseBackend::Sqlite, ddl.to_string()))
+                .await
+                .unwrap();
+        }
+        // 首次调用：种子落库
+        ensure_flow_module(&db).await.unwrap();
+        // 重复调用（模拟每次启动）：幂等不报错
+        ensure_flow_module(&db).await.unwrap();
+
+        let count_menu: u64 = db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) AS c FROM sys_menu WHERE menu_id = 3600".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "c")
+            .unwrap() as u64;
+        assert_eq!(count_menu, 1, "menu 3600 应恰一条（幂等防重）");
+
+        let count_tpl: u64 = db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) AS c FROM sys_msg_template WHERE template_code IN ('flow_todo','flow_timeout','flow_reject')".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "c")
+            .unwrap() as u64;
+        assert_eq!(count_tpl, 3, "三条 flow 模板应恰各一条（UNIQUE 幂等）");
+
+        let count_dict: u64 = db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) AS c FROM sys_dict_data WHERE dict_type = 'sys_flow_task_status'".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "c")
+            .unwrap() as u64;
+        assert_eq!(count_dict, 7, "审批状态字典应恰 7 条");
+    }
 }
