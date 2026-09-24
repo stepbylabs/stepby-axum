@@ -33,6 +33,7 @@ pub mod sys_rate_limit_handler;
 pub mod sys_report_handler;
 pub mod sys_role_handler;
 pub mod sys_task_handler;
+pub mod sys_scim_group_handler;
 pub mod sys_user_handler;
 pub mod sys_user_pref_handler;
 pub mod sys_web_hook_handler;

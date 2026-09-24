@@ -329,6 +329,12 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("POST", "/system/user/importData", "system:user:import"),
     // profile / 个人改密 / 角色下拉：仅需登录，不在此表
 
+    // ===== SCIM 组管理（v5-D12 Group） =====
+    ("GET", "/system/scimGroup/list", "system:scimgroup:list"),
+    ("GET", "/system/scimGroup/{id}", "system:scimgroup:query"),
+    ("PUT", "/system/scimGroup/{id}", "system:scimgroup:edit"),
+    ("DELETE", "/system/scimGroup/{id}", "system:scimgroup:remove"),
+
     // ===== 角色管理 =====
     ("GET", "/system/role/list", "system:role:list"),
     ("GET", "/system/role/{id}", "system:role:query"),

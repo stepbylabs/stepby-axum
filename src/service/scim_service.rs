@@ -90,6 +90,32 @@ impl ScimError {
     }
 }
 
+/// v5-D12 Group：实现 std Error（SeaORM `transaction` 泛型约束 E: Error + From<DbErr>，
+/// 使 SCIM 事务闭包可直接以 ScimError 为错误类型）
+impl std::fmt::Display for ScimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SCIM error {}: {}", self.status, self.detail)
+    }
+}
+
+impl std::error::Error for ScimError {}
+
+impl From<sea_orm::DbErr> for ScimError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        ScimError::new(500, format!("数据库错误: {e}"))
+    }
+}
+
+/// SeaORM 事务双层错误（连接层 DbErr / 事务层 ScimError）→ ScimError
+impl From<sea_orm::TransactionError<ScimError>> for ScimError {
+    fn from(e: sea_orm::TransactionError<ScimError>) -> Self {
+        match e {
+            sea_orm::TransactionError::Connection(db) => ScimError::from(db),
+            sea_orm::TransactionError::Transaction(se) => se,
+        }
+    }
+}
+
 const SCIM_USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
 
 pub struct ScimService {

@@ -43,6 +43,7 @@ pub mod sys_role_dept;
 pub mod sys_role_menu;
 pub mod sys_task;
 pub mod sys_user;
+pub mod sys_user_dept;
 pub mod sys_user_post;
 pub mod sys_user_pref;
 pub mod sys_user_role;

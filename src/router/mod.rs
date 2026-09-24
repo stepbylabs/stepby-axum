@@ -27,6 +27,7 @@ pub mod sys_notice_router;
 pub mod sys_oauth_router;
 pub mod sys_oper_log_router;
 pub mod sys_pat_router;
+pub mod sys_scim_group_router;
 pub mod sys_post_router;
 pub mod sys_rate_limit_router;
 pub mod sys_report_router;
@@ -85,6 +86,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(auth_router::protected_auth_routes())
         .merge(sys_user_router::user_routes())
+        .merge(sys_scim_group_router::scim_group_routes())
         .merge(sys_user_pref_router::user_pref_routes())
         .merge(sys_pat_router::pat_routes())
         .merge(sys_role_router::role_routes())
