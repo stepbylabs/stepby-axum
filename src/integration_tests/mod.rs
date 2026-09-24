@@ -25,6 +25,7 @@ mod monitor;
 mod monitor_extra;
 mod response_cache;
 mod scim;
+mod scim_groups;
 mod sso;
 mod sys_backup;
 mod sys_config_dict;
