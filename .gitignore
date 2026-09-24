@@ -41,3 +41,6 @@ build_out.txt
 fmt_after.txt
 
 /graphify-out/
+
+# ts-rs 默认导出目录残留（正式导出目录为 ../yebot-ui/src/types/api/generated，见 .cargo/config.toml）
+/bindings/
