@@ -18,6 +18,8 @@
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::Statement;
 
+use crate::adapt_placeholders;
+
 /// 判断是否 SQLite 后端
 fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
     matches!(
@@ -96,9 +98,13 @@ impl MigrationTrait for Migration {
         let now = now_expr(manager);
         conn.execute(Statement::from_sql_and_values(
             backend,
-            format!(
-                "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES ($1, '数据看板', 1, 0, 'dashboard', 'dashboard/index', '', '', '1', '0', 'C', '0', '0', 'monitor:dashboard:list', 'chart', 'admin', {}, '系统数据看板（用户/角色/登录/操作统计）', '0', 'menu.dashboard')",
-                now
+            adapt_placeholders(
+                backend,
+                format!(
+                    "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES ($1, '数据看板', 1, 0, 'dashboard', 'dashboard/index', '', '', '1', '0', 'C', '0', '0', 'monitor:dashboard:list', 'chart', 'admin', {}, '系统数据看板（用户/角色/登录/操作统计）', '0', 'menu.dashboard')",
+                    now
+                )
+                .as_str(),
             ),
             [next_id.into()],
         ))
@@ -116,7 +122,7 @@ impl MigrationTrait for Migration {
         };
         conn.execute(Statement::from_sql_and_values(
             backend,
-            &role_menu_sql,
+            adapt_placeholders(backend, &role_menu_sql),
             [next_id.into()],
         ))
         .await?;

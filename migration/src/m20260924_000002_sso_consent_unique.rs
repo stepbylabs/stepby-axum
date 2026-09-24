@@ -14,6 +14,8 @@
 //! 存量库兜底：AppInitializer::ensure_sso_consent_unique 以等价 SQL 幂等执行。
 
 use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::DatabaseBackend;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -31,14 +33,18 @@ impl MigrationTrait for Migration {
         conn.execute_unprepared("DELETE FROM sys_oauth_consent WHERE del_flag = '2'")
             .await?;
         // 2. 去重：同 (user_id, client_id) 保留最早 consent_id
+        //    MySQL 不允许 DELETE 目标表同时出现在子查询 FROM（1093），
+        //    派生表包裹（物化）后三方言等价
         conn.execute_unprepared(
             "DELETE FROM sys_oauth_consent WHERE consent_id NOT IN (\
-             SELECT MIN(consent_id) FROM sys_oauth_consent GROUP BY user_id, client_id)",
+             SELECT keep_id FROM (\
+             SELECT MIN(consent_id) AS keep_id FROM sys_oauth_consent GROUP BY user_id, client_id\
+             ) keep_rows)",
         )
         .await?;
         // 3. 组合唯一索引
-        conn.execute_unprepared(
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_sso_consent_user_client \
+        conn.execute_index_ddl_ic(
+            "CREATE UNIQUE INDEX uq_sso_consent_user_client \
              ON sys_oauth_consent (user_id, client_id)",
         )
         .await?;
@@ -46,10 +52,20 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .get_connection()
-            .execute_unprepared("DROP INDEX IF EXISTS uq_sso_consent_user_client")
-            .await?;
+        let conn = manager.get_connection();
+        // MySQL 语法为 DROP INDEX <name> ON <table>，且不支持 IF EXISTS
+        match manager.get_database_backend() {
+            DatabaseBackend::MySql => {
+                conn.execute_unprepared(
+                    "DROP INDEX uq_sso_consent_user_client ON sys_oauth_consent",
+                )
+                .await?;
+            }
+            _ => {
+                conn.execute_unprepared("DROP INDEX IF EXISTS uq_sso_consent_user_client")
+                    .await?;
+            }
+        }
         Ok(())
     }
 }

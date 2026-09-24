@@ -1512,21 +1512,50 @@ async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow
 
 /// v5-E1：consent 组合唯一索引兜底（幂等）——清软删行、同 (user_id, client_id)
 /// 去重（保留最早）、建唯一索引 uq_sso_consent_user_client。与迁移
-/// m20260924_000002_sso_consent_unique 等价；索引已存在时 CREATE IF NOT EXISTS 跳过。
+/// m20260924_000002_sso_consent_unique 等价；索引已存在时容错跳过。
 async fn ensure_sso_consent_unique(db: &DatabaseConnection) -> anyhow::Result<()> {
     if !sso_table_exists(db, "sys_oauth_consent").await? {
         return Ok(());
     }
     let backend = db.get_database_backend();
+    // 去重 DELETE：MySQL 不允许 DELETE 目标表同时出现在子查询 FROM（1093），
+    // 派生表包裹（物化）后三方言等价，与迁移侧 SQL 一致
+    let dedup_sql = "DELETE FROM sys_oauth_consent WHERE consent_id NOT IN (\
+         SELECT keep_id FROM (\
+         SELECT MIN(consent_id) AS keep_id FROM sys_oauth_consent GROUP BY user_id, client_id\
+         ) keep_rows)";
     let stmts = [
         "DELETE FROM sys_oauth_consent WHERE del_flag = '2'",
-        "DELETE FROM sys_oauth_consent WHERE consent_id NOT IN (\
-         SELECT MIN(consent_id) FROM sys_oauth_consent GROUP BY user_id, client_id)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_sso_consent_user_client \
-         ON sys_oauth_consent (user_id, client_id)",
+        dedup_sql,
     ];
     for sql in stmts {
-        db.execute(Statement::from_string(backend, sql)).await?;
+        db.execute(Statement::from_string(backend, sql.to_string()))
+            .await?;
+    }
+    // 唯一索引：MySQL 不支持 CREATE INDEX IF NOT EXISTS（MariaDB 专属子句），
+    // 剥离子句后执行并容错"索引已存在"（1061 Duplicate key name / 42P07 / already exists）
+    let idx_sql = match backend {
+        DatabaseBackend::MySql => {
+            "CREATE UNIQUE INDEX uq_sso_consent_user_client \
+             ON sys_oauth_consent (user_id, client_id)"
+        }
+        _ => {
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_sso_consent_user_client \
+             ON sys_oauth_consent (user_id, client_id)"
+        }
+    };
+    if let Err(e) = db
+        .execute(Statement::from_string(backend, idx_sql.to_string()))
+        .await
+    {
+        let msg = e.to_string();
+        if !(msg.contains("Duplicate key name")
+            || msg.contains("42P07")
+            || msg.contains("already exists"))
+        {
+            return Err(e.into());
+        }
+        tracing::debug!("uq_sso_consent_user_client 已存在，跳过");
     }
     Ok(())
 }

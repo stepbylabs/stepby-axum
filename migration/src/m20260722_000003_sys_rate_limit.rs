@@ -21,6 +21,7 @@
 //! - SQLite：BOOLEAN 类型实际存储为 INTEGER（0/1），SeaORM 自动转换
 
 use sea_orm_migration::prelude::*;
+use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -120,15 +121,15 @@ impl MigrationTrait for Migration {
         // route_pattern 唯一索引
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sys_rate_limit_route_pattern ON sys_rate_limit (route_pattern)",
+            .execute_index_ddl_ic(
+                "CREATE UNIQUE INDEX idx_sys_rate_limit_route_pattern ON sys_rate_limit (route_pattern)",
             )
             .await?;
         // enabled 索引（中间件查询启用配置时使用）
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE INDEX IF NOT EXISTS idx_sys_rate_limit_enabled ON sys_rate_limit (enabled)",
+            .execute_index_ddl_ic(
+                "CREATE INDEX idx_sys_rate_limit_enabled ON sys_rate_limit (enabled)",
             )
             .await?;
 
