@@ -269,6 +269,28 @@ pub fn ensure_menu_filter_coverage<'a>(
     Ok(())
 }
 
+/// 构造 `perms LIKE <占位符>` 的 SQL 片段（**集中生成，禁止各调用点手拼**）。
+///
+/// ⚠️ **2026-09-26 事故与教训**：`initialize::ensure_tenant_role_menu_governance` 原实现只把
+/// 占位符拼成 `? OR ? OR …`（**漏写 `perms LIKE`**），生成的 SQL 退化为
+/// `SELECT menu_id FROM sys_menu WHERE ? OR ? OR …`——字符串常量在 SQLite 布尔上下文中恒为假
+/// ⇒ 子查询返回空集 ⇒ `DELETE` 影响 0 行 ⇒ **存量库的平台专属菜单治理从未生效**（且因日志只在
+/// `rows_affected() > 0` 时打印而完全静默；实测 role2 仍持 13 个平台专属菜单，含 3800/3802）。
+/// 故把该片段的生成收敛到此函数，并由单测 `perms_like_clause_always_has_column` 锁死"必带列名"。
+///
+/// - `ph(i)`：第 i 个（**1 起**）占位符文本，由调用方按方言提供（Postgres `$i`，其余 `?`）。
+pub fn perms_like_clause<F>(prefixes: &[&str], ph: F) -> String
+where
+    F: Fn(usize) -> String,
+{
+    prefixes
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| format!("perms LIKE {}", ph(idx + 1)))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// 按 tenant_id 分组（升序），供后台批量任务"逐组带 tid 上下文执行"。
 ///
 /// 语义：后台任务（WebHook 事件分发 / 报表订阅推送等）**不得**跨租户批量触达，
@@ -488,5 +510,36 @@ mod tests {
                 "m000005 使用了未在 PLATFORM_ONLY_PERM_PREFIXES 声明的前缀 `{p}`"
             );
         }
+    }
+
+    /// 2026-09-26 事故回归防线：LIKE 片段**必须**带 `perms LIKE` 列名。
+    ///
+    /// 原 `initialize` 实现只把占位符拼成 `? OR ? …`，使 SQL 退化为
+    /// `WHERE ? OR ? …`（字符串常量作布尔值恒假）⇒ 子查询空集 ⇒ DELETE 0 行 ⇒
+    /// **存量库治理静默失效**。本单测锁死"列名存在 + 条件条数与前缀数一致 + 方言占位符编号"。
+    #[test]
+    fn perms_like_clause_always_has_column() {
+        let clause = perms_like_clause(PLATFORM_ONLY_PERM_PREFIXES, |_| "?".to_string());
+        assert!(
+            clause.contains("perms LIKE"),
+            "LIKE 片段必须带列名，否则 `WHERE ? OR ?` 恒为假、治理静默失效"
+        );
+        assert_eq!(
+            clause.matches("perms LIKE").count(),
+            PLATFORM_ONLY_PERM_PREFIXES.len(),
+            "每个平台专属前缀都要有独立的 LIKE 条件"
+        );
+        assert_eq!(
+            clause.matches('?').count(),
+            PLATFORM_ONLY_PERM_PREFIXES.len(),
+            "占位符个数应与前缀数一致"
+        );
+        // Postgres 方言：占位符按 1 起编号
+        assert_eq!(
+            perms_like_clause(&["tool:gen:"], |i| format!("${i}")),
+            "perms LIKE $1"
+        );
+        // 空前缀集：产出空串（调用方不应据此拼出非法 SQL）
+        assert_eq!(perms_like_clause(&[], |_| "?".to_string()), "");
     }
 }

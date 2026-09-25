@@ -2079,10 +2079,10 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
     // ---- ① 剔除平台专属菜单（域名管理 / 代码生成 / 缓存监控）----
     // 目标角色：平台普通角色（role_id=2，只读白名单曾保底授予）+ 存量租户自建角色
     // （tenant_id <> 0，初始化时复制了平台普通角色菜单 ⇒ 残留假入口）。
-    let like_clause = (1..=platform_only_prefixes.len())
-        .map(ph)
-        .collect::<Vec<_>>()
-        .join(" OR ");
+    // 集中生成 LIKE 子句（**含 `perms LIKE` 列名**）：见 `common::tenant::perms_like_clause`
+    // 的文档——原实现只拼裸占位符（`? OR ? …`），使本段 SQL 恒为假、DELETE 影响 0 行，
+    // 导致**存量库的平台专属菜单治理从未生效**（2026-09-26 实测 role2 仍持 13 个，含 3800/3802）。
+    let like_clause = crate::common::tenant::perms_like_clause(platform_only_prefixes, ph);
     let like_values: Vec<Value> = platform_only_prefixes
         .iter()
         .map(|p| format!("{p}%").into())
