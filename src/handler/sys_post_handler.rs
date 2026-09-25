@@ -88,9 +88,14 @@ pub async fn optionselect(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(post_id): Path<i64>,
 ) -> Result<AjaxResult<SysPostModel>, AppError> {
-    let model = state.post_service.get_post_by_id(post_id).await?;
+    // 多租户：租户操作者只能读取本租户岗位详情；平台（tenant_id=0）全量
+    let model = state
+        .post_service
+        .get_post_by_id(post_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -138,7 +143,11 @@ pub async fn edit(
     ValidatedJson(dto): ValidatedJson<PostEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     // 多租户 Phase 3：记录被操作岗位所属租户，供审计 target_tenant_id（平台代管场景）
-    if let Ok(post) = state.post_service.get_post_by_id(dto.post_id).await {
+    if let Ok(post) = state
+        .post_service
+        .get_post_by_id(dto.post_id, operator.tenant_id())
+        .await
+    {
         target_tenant.set(post.tenant_id);
     }
     state
@@ -187,7 +196,11 @@ pub async fn remove(
         let mut resolved: Vec<i64> = Vec::new();
         let mut all_resolved = true;
         for pid in &ids {
-            match state.post_service.get_post_by_id(*pid).await {
+            match state
+                .post_service
+                .get_post_by_id(*pid, operator.tenant_id())
+                .await
+            {
                 Ok(post) => {
                     if !resolved.contains(&post.tenant_id) {
                         resolved.push(post.tenant_id);

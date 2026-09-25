@@ -121,22 +121,43 @@ impl SysOperLogRepository {
     }
 
     /// 批量删除操作日志（物理删除）
-    pub async fn delete_by_ids(&self, oper_ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
-        SysOperLog::delete_many()
-            .filter(Column::OperId.is_in(oper_ids))
-            .exec(self.base.db())
-            .await
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户日志与目标资源属于本租户的代管日志
+    /// （与 `find_page_filtered` 可见性一致）；`None`（平台）→ 不过滤。
+    pub async fn delete_by_ids(
+        &self,
+        oper_ids: Vec<i64>,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysOperLog::delete_many().filter(Column::OperId.is_in(oper_ids));
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 删除 N 天前的操作日志（按 oper_time 过滤，物理删除）
     ///
     /// 用于保留期清理：仅删除 oper_time < (now - days) 的记录，
     /// 保留最近 N 天日志用于审计。
-    pub async fn delete_older_than(&self, cutoff: NaiveDateTime) -> Result<DeleteResult, DbErr> {
-        SysOperLog::delete_many()
-            .filter(Column::OperTime.lt(cutoff))
-            .exec(self.base.db())
-            .await
+    pub async fn delete_older_than(
+        &self,
+        cutoff: NaiveDateTime,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysOperLog::delete_many().filter(Column::OperTime.lt(cutoff));
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 按时间范围删除操作日志（物理删除 [begin, end] 区间内日志，边界含端点）
@@ -147,8 +168,16 @@ impl SysOperLogRepository {
         &self,
         begin: Option<NaiveDateTime>,
         end: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<DeleteResult, DbErr> {
         let mut query = SysOperLog::delete_many();
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
         if let Some(b) = begin {
             query = query.filter(Column::OperTime.gte(b));
         }

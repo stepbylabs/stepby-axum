@@ -101,7 +101,13 @@ impl SysPatRepository {
     /// 吊销令牌（置 status='1'），返回受影响行数
     ///
     /// `owner_user_id` 为 Some 时仅吊销该用户的令牌（自助场景越权保护）；None 为管理员场景。
-    pub async fn revoke(&self, pat_id: &str, owner_user_id: Option<i64>) -> Result<u64, DbErr> {
+    /// `tenant_scope` 为 Some(tid) 时仅吊销本租户令牌（管理员越权保护）；None 不过滤。
+    pub async fn revoke(
+        &self,
+        pat_id: &str,
+        owner_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
+    ) -> Result<u64, DbErr> {
         let mut update = SysPat::update_many()
             .col_expr(Column::Status, Expr::value("1"))
             .col_expr(
@@ -111,6 +117,9 @@ impl SysPatRepository {
             .filter(Column::PatId.eq(pat_id));
         if let Some(uid) = owner_user_id {
             update = update.filter(Column::UserId.eq(uid));
+        }
+        if let Some(t) = tenant_scope {
+            update = update.filter(Column::TenantId.eq(t));
         }
         let res = update.exec(self.base.db()).await?;
         Ok(res.rows_affected)

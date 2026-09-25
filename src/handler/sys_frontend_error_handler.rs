@@ -44,7 +44,11 @@ pub async fn report(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let reported = state
         .frontend_error_service
-        .report(body.items, Some(operator.username().to_string()))
+        .report(
+            body.items,
+            Some(operator.username().to_string()),
+            operator.tenant_id(),
+        )
         .await?;
     Ok(AjaxResult::success(
         serde_json::json!({ "reported": reported }),
@@ -64,9 +68,17 @@ pub async fn report(
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<FrontendErrorQueryDto>,
 ) -> Result<TableDataInfo<SysFrontendErrorModel>, AppError> {
-    let (rows, total) = state.frontend_error_service.get_page(query).await?;
+    // 多租户：租户操作者仅见本租户记录；平台（tenant_id=0）全量
+    let (rows, total) = state
+        .frontend_error_service
+        .get_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -83,9 +95,13 @@ pub async fn list(
 )]
 pub async fn info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
 ) -> Result<AjaxResult<SysFrontendErrorModel>, AppError> {
-    let model = state.frontend_error_service.get_by_id(id).await?;
+    let model = state
+        .frontend_error_service
+        .get_by_id(id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -102,6 +118,7 @@ pub async fn info(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
@@ -116,7 +133,13 @@ pub async fn remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.frontend_error_service.remove(ids).await?;
+    state
+        .frontend_error_service
+        .remove(
+            ids,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -144,23 +167,33 @@ pub struct FrontendErrorCleanQuery {
 )]
 pub async fn clean(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<FrontendErrorCleanQuery>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 多租户：租户操作者仅清理本租户记录；平台（tenant_id=0）全量
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let affected = if query.begin_time.is_some() || query.end_time.is_some() {
         tracing::warn!(
             "前端异常清理（按时间范围）：begin={:?} end={:?}，操作者={}",
             query.begin_time,
             query.end_time,
-            "monitor/frontendError/clean"
+            operator.username()
         );
         state
             .frontend_error_service
-            .clean_by_range(query.begin_time.clone(), query.end_time.clone())
+            .clean_by_range(
+                query.begin_time.clone(),
+                query.end_time.clone(),
+                tenant_scope,
+            )
             .await?
     } else {
         let days = FRONTEND_ERROR_CLEAN_RETAIN_DAYS;
         tracing::warn!("前端异常清理：仅删除 {} 天前记录", days);
-        state.frontend_error_service.clean(days).await?
+        state
+            .frontend_error_service
+            .clean(days, tenant_scope)
+            .await?
     };
     Ok(AjaxResult::success(
         serde_json::json!({ "affected": affected }),

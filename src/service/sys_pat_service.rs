@@ -233,16 +233,30 @@ impl SysPatService {
 
     /// 自助吊销（越权保护：仅本人令牌）
     pub async fn revoke_mine(&self, pat_id: &str, user_id: i64) -> Result<(), ServiceError> {
-        let affected = self.pat_repo.revoke(pat_id, Some(user_id)).await?;
+        let affected = self.pat_repo.revoke(pat_id, Some(user_id), None).await?;
         if affected == 0 {
             return Err(ServiceError::not_found(&crate::tr!("error.pat.not_found")));
         }
         Ok(())
     }
 
-    /// 管理员吊销（不限属主）
-    pub async fn revoke_by_admin(&self, pat_id: &str) -> Result<(), ServiceError> {
-        let affected = self.pat_repo.revoke(pat_id, None).await?;
+    /// 管理员吊销（不限属主，但受租户归属收敛：仅本租户令牌）
+    ///
+    /// `operator_tid`：租户管理员只能吊销本租户令牌（跨租户统一按不存在处理，避免存在性泄露）；
+    /// 平台（0）不限。
+    pub async fn revoke_by_admin(
+        &self,
+        pat_id: &str,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        let affected = self
+            .pat_repo
+            .revoke(
+                pat_id,
+                None,
+                crate::common::tenant::tenant_scope(operator_tid),
+            )
+            .await?;
         if affected == 0 {
             return Err(ServiceError::not_found(&crate::tr!("error.pat.not_found")));
         }

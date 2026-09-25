@@ -178,6 +178,7 @@ impl SysFrontendErrorService {
         &self,
         items: Vec<FrontendErrorItem>,
         user_name: Option<String>,
+        tenant_id: i64,
     ) -> Result<u64, ServiceError> {
         let items: Vec<FrontendErrorItem> = items.into_iter().take(MAX_ITEMS_PER_REPORT).collect();
         if items.is_empty() {
@@ -207,6 +208,8 @@ impl SysFrontendErrorService {
                 view_height: Set(it.view_height),
                 value: Set(it.value),
                 user_name: Set(user_name.clone()),
+                // 多租户：上报记录归属上报者租户（平台 0），供列表/统计按租户收敛
+                tenant_id: Set(tenant_id),
                 // 批量 insert_many 不触发 ActiveModelBehavior::before_save，
                 // 故 create_time 必须在此显式写入，否则落库为 NULL 且破坏按天聚合统计。
                 create_time: Set(Some(crate::common::datetime::now_naive())),
@@ -218,9 +221,12 @@ impl SysFrontendErrorService {
     }
 
     /// 分页查询
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户记录；平台 → `None` 全量。
     pub async fn get_page(
         &self,
         query: FrontendErrorQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<FrontendErrorModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let begin = match query.begin_time.as_deref() {
@@ -241,37 +247,61 @@ impl SysFrontendErrorService {
                 query.name.as_deref(),
                 begin,
                 end,
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
     }
 
     /// 详情查询（不存在返回 ServiceError::not_found）
-    pub async fn get_by_id(&self, id: i64) -> Result<FrontendErrorModel, ServiceError> {
-        self.repo
-            .find_by_id(id)
-            .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.frontend_error.not_found")))
+    ///
+    /// `operator_tid`：租户操作者只能查询本租户记录（越权统一按不存在处理，避免存在性泄露）；
+    /// 平台（0）放行。
+    pub async fn get_by_id(
+        &self,
+        id: i64,
+        operator_tid: i64,
+    ) -> Result<FrontendErrorModel, ServiceError> {
+        let model = self.repo.find_by_id(id).await?.ok_or_else(|| {
+            ServiceError::not_found(&crate::tr!("error.frontend_error.not_found"))
+        })?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.frontend_error.not_found"
+            )));
+        }
+        Ok(model)
     }
 
     /// 批量删除（物理删除）
-    pub async fn remove(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
-        self.repo.delete_by_ids(ids).await?;
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户记录；`None`（平台）→ 不过滤。
+    pub async fn remove(
+        &self,
+        ids: Vec<i64>,
+        tenant_scope: Option<i64>,
+    ) -> Result<(), ServiceError> {
+        self.repo.delete_by_ids(ids, tenant_scope).await?;
         Ok(())
     }
 
     /// 保留期清理：仅删除 days 天前的记录，返回受影响行数
-    pub async fn clean(&self, days: i64) -> Result<u64, ServiceError> {
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅清理本租户记录；`None`（平台）→ 全量。
+    pub async fn clean(&self, days: i64, tenant_scope: Option<i64>) -> Result<u64, ServiceError> {
         let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
-        let result = self.repo.delete_older_than(cutoff).await?;
+        let result = self.repo.delete_older_than(cutoff, tenant_scope).await?;
         Ok(result.rows_affected)
     }
 
     /// 按时间范围清理（物理删除 [begin, end] 区间，任一侧可为空）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅清理本租户记录；`None`（平台）→ 全量。
     pub async fn clean_by_range(
         &self,
         begin_time: Option<String>,
         end_time: Option<String>,
+        tenant_scope: Option<i64>,
     ) -> Result<u64, ServiceError> {
         let begin = match begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -281,7 +311,10 @@ impl SysFrontendErrorService {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
-        let result = self.repo.delete_by_time_range(begin, end).await?;
+        let result = self
+            .repo
+            .delete_by_time_range(begin, end, tenant_scope)
+            .await?;
         Ok(result.rows_affected)
     }
 

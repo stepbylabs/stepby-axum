@@ -526,7 +526,7 @@ async fn fetch_snapshot_value(
     } else if oper_url.starts_with("/system/post") {
         state
             .post_service
-            .get_post_by_id(id)
+            .get_post_by_id(id, 0) // 内部快照提取：0=平台视角，不做租户越权过滤
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())

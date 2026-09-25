@@ -178,8 +178,17 @@ impl SysOperLogService {
     }
 
     /// 批量删除操作日志（物理删除）
-    pub async fn delete_oper_logs(&self, oper_ids: Vec<i64>) -> Result<(), ServiceError> {
-        self.oper_log_repo.delete_by_ids(oper_ids).await?;
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户（含代管目标为本租户）日志；
+    /// `None`（平台）→ 不过滤。
+    pub async fn delete_oper_logs(
+        &self,
+        oper_ids: Vec<i64>,
+        tenant_scope: Option<i64>,
+    ) -> Result<(), ServiceError> {
+        self.oper_log_repo
+            .delete_by_ids(oper_ids, tenant_scope)
+            .await?;
         Ok(())
     }
 
@@ -188,9 +197,16 @@ impl SysOperLogService {
     /// 修复 P0-R81-010：原 clean_oper_logs 物理删除全部日志，违反审计合规。
     /// 现仅删除 `days` 天前的日志，默认 30 天。
     /// 配合 handler 层 tracing::warn! 记录操作者信息。
-    pub async fn clean_oper_logs(&self, days: i64) -> Result<u64, ServiceError> {
+    pub async fn clean_oper_logs(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<u64, ServiceError> {
         let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
-        let result = self.oper_log_repo.delete_older_than(cutoff).await?;
+        let result = self
+            .oper_log_repo
+            .delete_older_than(cutoff, tenant_scope)
+            .await?;
         Ok(result.rows_affected)
     }
 
@@ -209,7 +225,8 @@ impl SysOperLogService {
     /// 默认保留 90 天，避免操作日志无限增长导致生产崩溃。
     pub async fn cleanup_old_logs(&self, days: i64) -> Result<u64, ServiceError> {
         let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
-        let result = self.oper_log_repo.delete_older_than(cutoff).await?;
+        // 后台定时清理无操作人上下文，按平台视角（None）全量清理
+        let result = self.oper_log_repo.delete_older_than(cutoff, None).await?;
         Ok(result.rows_affected)
     }
 
@@ -222,6 +239,7 @@ impl SysOperLogService {
         &self,
         begin_time: Option<String>,
         end_time: Option<String>,
+        tenant_scope: Option<i64>,
     ) -> Result<u64, ServiceError> {
         let begin = match begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -231,7 +249,10 @@ impl SysOperLogService {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
-        let result = self.oper_log_repo.delete_by_time_range(begin, end).await?;
+        let result = self
+            .oper_log_repo
+            .delete_by_time_range(begin, end, tenant_scope)
+            .await?;
         Ok(result.rows_affected)
     }
 
