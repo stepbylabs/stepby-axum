@@ -33,6 +33,11 @@ pub fn flow_routes() -> Router<Arc<AppState>> {
             post(flow_handler::withdraw_demo),
         )
         .route("/system/flow/task/{taskId}/action", post(flow_handler::act))
+        // 加签：在当前节点追加会签审批人（W-3）
+        .route(
+            "/system/flow/task/{taskId}/countersign-add",
+            post(flow_handler::countersign_add),
+        )
         // 管理视图（权限键 system:flow:list）
         .route("/system/flow/list", get(flow_handler::list))
 }

@@ -55,11 +55,12 @@ impl Observability {
 pub async fn monitoring_middleware(req: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = req.method().clone();
-    // 优先路由模板，避免查询参数/动态 ID 导致高基数标签
+    // 优先路由模板，避免查询参数/动态 ID 导致高基数标签；
+    // 归一化 nest 前缀（/prod-api|/dev-api|/stage-api），避免同一路由产生两套指标标签。
     let path = req
         .extensions()
         .get::<MatchedPath>()
-        .map(|m| m.as_str().to_string())
+        .map(|m| crate::middleware::normalize_api_prefix(m.as_str()).to_string())
         .unwrap_or_else(|| req.uri().path().to_string());
 
     let resp = next.run(req).await;

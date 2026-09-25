@@ -584,7 +584,47 @@ pub async fn remove(
         }
     }
 
+    // W-4：用户离岗（删除）→ 其 pending 审批待办自动转办（部门主管 → admin 回退）
+    // 非阻断：删除已生效，转办失败仅告警（待办保持 pending，可由管理员人工转办）
+    for uid in &deleted_user_ids {
+        auto_reassign_flow_tasks(&state, *uid).await;
+    }
+
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
+}
+
+/// W-4：离岗用户的 pending 审批待办自动转办 + 通知新审批人
+///
+/// 失败不阻断调用方主流程（用户停用/删除已生效），仅记录告警。
+async fn auto_reassign_flow_tasks(state: &AppState, user_id: i64) {
+    match state.flow_service.handle_user_disabled(user_id).await {
+        Ok(items) => {
+            for item in items {
+                // WS 定向推送"新待办"（严禁全局广播：待办含他人单据标题）
+                state.broadcast_to_user(
+                    item.to_user_id,
+                    "flowTodo",
+                    serde_json::json!({
+                        "bizType": crate::service::sys_flow_service::BIZ_TYPE_DEMO,
+                        "taskId": item.task_id,
+                        "title": item.title,
+                        "message": crate::tr!("msg.flow.todo_created"),
+                    }),
+                );
+                state
+                    .flow_service
+                    .send_flow_audit(item.to_user_id, "flow_todo", &item.title)
+                    .await;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id,
+                error = %e.message,
+                "离岗自动转办失败（待办保持 pending，需人工转办）"
+            );
+        }
+    }
 }
 
 /// PUT /system/user/changeStatus
@@ -651,6 +691,9 @@ pub async fn change_status(
             .sso_service
             .revoke_user_sso_tokens(&mut redis, dto.user_id)
             .await;
+        // W-4：停用即离岗 → 其 pending 审批待办自动转办（部门主管 → admin 回退）
+        // 非阻断：停用已生效，转办失败仅告警（待办保持 pending，可由管理员人工转办）
+        auto_reassign_flow_tasks(&state, dto.user_id).await;
     }
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))

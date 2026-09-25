@@ -27,16 +27,21 @@ pub struct Settings {
     /// 启用 IP 库管理（License Key 加密存储）时必须配置，否则相关功能降级。
     #[serde(default)]
     pub config_enc_key: String,
-    /// 权限未映射路由的默认处置策略（权限 fail-open 加固，B3）
+    /// 权限未映射路由的默认处置策略（权限 fail-closed 加固，B3 / W-1）
     ///
-    /// - false（默认，开发/兼容）：未登记权限映射且不在"仅登录白名单"的路由**放行**
-    ///   （保持现有默认行为，零破坏性）。
-    /// - true（生产推荐）：此类路由**拒绝（403）**并审计，实现 fail-closed，
-    ///   防止新增路由漏登记权限导致越权。
+    /// - true（**默认**，fail-closed）：未登记权限映射且不在"仅登录白名单"的受保护路由
+    ///   **拒绝（403）**并审计，防止新增路由漏登记权限导致越权。
+    /// - false（**显式** opt-out，开发/兼容）：此类路由**放行**（fail-open，安全假设被削弱）。
     ///
-    /// 注意：permission_middleware 仅作用于 protected 路由子树的 route_layer，
-    /// 公开路由（/login /health /ws /swagger-ui / 等）不受影响。
-    #[serde(default)]
+    /// 默认值与 `from_env_only()`（配置文件全缺失时的回退路径）及集成测试夹具保持一致，
+    /// 避免"换配置来源即换安全姿态"的环境漂移。
+    ///
+    /// 注意：①permission_middleware 仅作用于 protected 路由子树的 route_layer，
+    /// 公开路由（/login /health /ws /swagger-ui / 等）不受影响；
+    /// ②在 TOML 中本键位于**顶层**，必须写在任何 `[table]` 段之前，
+    /// 否则会被解析进上一张表（如 `[log]`）而被静默忽略（曾发生，见单测
+    /// `test_shipped_configs_are_fail_closed`）。
+    #[serde(default = "default_deny_by_default")]
     pub permission_deny_by_default: bool,
     /// 可观测性监控配置（慢请求阈值 / 缓冲容量 / Prometheus 指标 token）
     #[serde(default)]
@@ -115,6 +120,13 @@ impl Default for SysLogConfig {
 
 fn default_sys_log_retention_days() -> i64 {
     crate::common::constants::LOG_RETENTION_DAYS
+}
+
+/// `permission_deny_by_default` 的缺省值：`true`（fail-closed，W-1）
+///
+/// 与 `from_env_only()`、集成测试夹具保持一致；只有显式写 `false` 才降级为 fail-open。
+fn default_deny_by_default() -> bool {
+    true
 }
 
 /// 个人访问令牌（PAT）配置（Tier-S #3）
@@ -877,10 +889,10 @@ impl Settings {
         if let Ok(v) = std::env::var("CONFIG_ENC_KEY") {
             self.config_enc_key = v;
         }
-        // 权限 fail-open 加固开关（B3）：未映射路由是否默认拒绝
+        // 权限 fail-closed 开关（B3 / W-1）：未映射路由是否默认拒绝
         // PERMISSION_DENY_BY_DEFAULT=true 时，受保护路由中未登记权限映射且不在"仅登录白名单"的
         // 路径将被拒绝（403），实现 fail-closed，防止新增路由漏登记权限导致越权。
-        // 缺省不设置则保持 false（fail-open 放行，兼容现有默认行为，零破坏性）。
+        // 缺省（不设置且配置文件未写）即 true（fail-closed）；显式设 false/0 才降级为 fail-open。
         if let Ok(v) = std::env::var("PERMISSION_DENY_BY_DEFAULT") {
             self.permission_deny_by_default = v == "true" || v == "1";
         }
@@ -1165,6 +1177,57 @@ mod tests {
             flow: FlowConfig::default(),
             sys_log: SysLogConfig::default(),
         }
+    }
+
+    /// W-1 回归：`permission_deny_by_default` 缺键时缺省即 fail-closed（true）
+    ///
+    /// 防止"换配置来源即换安全姿态"：此前结构体缺省为 false（fail-open），
+    /// 而 `from_env_only()` / 集成测试夹具为 true，造成环境漂移。
+    /// 以入库模板为基底去掉该键，既覆盖全部必填字段，又直接验证"缺键 == true"。
+    #[test]
+    fn test_deny_by_default_defaults_to_true() {
+        let template = std::fs::read_to_string("config/config.toml.example")
+            .expect("config/config.toml.example 应存在");
+        let without_key = template
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("permission_deny_by_default"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let s: Settings = toml::from_str(&without_key).expect("模板（去掉该键）应可解析");
+        assert!(
+            s.permission_deny_by_default,
+            "permission_deny_by_default 缺省必须为 true（fail-closed）"
+        );
+    }
+
+    /// W-1 回归：入库配置模板必须在**顶层**显式 fail-closed
+    ///
+    /// 曾发生：该键被误写在 `[log]` 段之后，被 TOML 解析进 `log` 表而被**静默忽略**，
+    /// 实际生效的是结构体缺省值 —— 安全开关形同虚设。本断言锁住"顶层 + true"两个要点。
+    #[test]
+    fn test_shipped_config_template_is_fail_closed() {
+        // config.toml.example 为唯一入库模板；config.toml / config.toml.prod 均被 .gitignore 排除，
+        // 若本机存在则一并校验（缺失时跳过，不算失败）。
+        let mut checked = 0usize;
+        for path in ["config/config.toml.example", "config/config.toml.prod"] {
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) if path.ends_with(".example") => panic!("{path} 缺失（入库模板必须存在）"),
+                Err(_) => continue,
+            };
+            let value: toml::Value =
+                toml::from_str(&content).unwrap_or_else(|e| panic!("{path} TOML 解析失败: {e}"));
+            assert_eq!(
+                value
+                    .get("permission_deny_by_default")
+                    .and_then(|v| v.as_bool()),
+                Some(true),
+                "{path} 必须在**顶层**显式 permission_deny_by_default = true；\
+                 写在 [table] 段之后会被解析进该表而静默忽略"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 1, "至少应校验 config/config.toml.example");
     }
 
     /// 验证 Settings Debug 输出不泄漏 config_enc_key

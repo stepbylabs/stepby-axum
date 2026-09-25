@@ -29,7 +29,7 @@ use crate::entity::flow_demo_doc::{
 use crate::entity::{
     flow_demo_doc, sys_dept, sys_flow_log, sys_flow_task, sys_role, sys_user, sys_user_role,
 };
-use crate::repository::flow_demo_doc::FlowDemoDocRepository;
+use crate::repository::flow_demo_doc::{FlowDemoDocRepository, FlowDocScope};
 use crate::repository::sys_flow_log::SysFlowLogRepository;
 use crate::repository::sys_flow_task::SysFlowTaskRepository;
 use crate::service::sys_msg_service::{SendDto, SysMsgService};
@@ -155,6 +155,15 @@ pub struct FlowActionDto {
     pub to_user_id: Option<i64>,
 }
 
+/// 加签 DTO（W-3：对当前节点追加一名会签审批人）
+#[derive(Debug, Clone, serde::Deserialize, garde::Validate, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowCountersignDto {
+    /// 被加签的审批人 user_id（必须为正整数；garde 拦截 0/负数）
+    #[garde(range(min = 1))]
+    pub to_user_id: i64,
+}
+
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowPageQuery {
@@ -196,6 +205,41 @@ pub struct FlowScanOutcome {
 }
 
 // ==================== Service ====================
+
+/// 离岗自动转办结果项（W-4）：调用方据此推送"新待办"通知与站内审计
+#[derive(Debug, Clone)]
+pub struct FlowReassignItem {
+    pub task_id: i64,
+    /// 新审批人
+    pub to_user_id: i64,
+    /// 单据标题（task 行冗余快照）
+    pub title: String,
+}
+
+/// 由 `data_scope` 取值与预取上下文决定单据可见范围（纯函数，W-5）
+///
+/// 拆出为纯函数以便无 DB 单测全部取值分支；`role_bound_dept_ids` / `dept_subtree_ids`
+/// 由调用方**按需**预取（仅 2 / 4 分支需要），此处不做 IO。
+fn decide_doc_scope(
+    data_scope: Option<i32>,
+    operator_id: i64,
+    operator_dept_id: Option<i64>,
+    role_bound_dept_ids: Vec<i64>,
+    dept_subtree_ids: Option<Vec<i64>>,
+) -> FlowDocScope {
+    match data_scope {
+        // 全部数据
+        Some(1) => FlowDocScope::All,
+        // 自定义：角色绑定部门并集（单据表无自定义字段，custom_sql 不参与）
+        Some(2) => FlowDocScope::Depts(role_bound_dept_ids),
+        // 本部门
+        Some(3) => FlowDocScope::Depts(operator_dept_id.map(|d| vec![d]).unwrap_or_default()),
+        // 本部门及以下：部门子树（含自身）
+        Some(4) => FlowDocScope::Depts(dept_subtree_ids.unwrap_or_default()),
+        // 仅本人(5) / 无角色(None) / 未知值：安全降级（fail-closed）
+        _ => FlowDocScope::Applicant(operator_id),
+    }
+}
 
 /// 审批工作流 Service（不 Clone：持有消息 Service，AppState 内单实例构造）
 pub struct SysFlowService {
@@ -811,8 +855,153 @@ impl SysFlowService {
         })
     }
 
-    // ---------- 重新提交（round_no + 1；V4-E1 轮次设计） ----------
+    // ---------- 加签（W-3 / 方案 §7.6） ----------
 
+    /// 加签：对当前待办所在节点追加一名会签审批人
+    ///
+    /// 语义：**显式运营动作**（审批人知情、有流水），复用提交时的快照事务模式，
+    /// **不违反 D2**（D2 禁的是"运行时重算审批策略"，加签是有人发起的一次性追加）。
+    ///
+    /// 行为：
+    /// 1. 同轮同节点的全部 pending 行升级为 `countersign`（节点由单审转为会签，须全部通过）；
+    /// 2. 追加一条同轮同节点的 pending 会签行（快照 node_name/title/applicant/due_at）；
+    /// 3. 写 `countersign_add` 流水。
+    ///
+    /// 防重：先按 `(biz,round,node,assignee)` 判重（显式 400），唯一索引 `uk_flow_task_biz` 兜底。
+    pub async fn countersign_add(
+        &self,
+        operator_id: i64,
+        is_pat: bool,
+        task_id: i64,
+        to_user_id: i64,
+    ) -> Result<FlowActOutcome, ServiceError> {
+        if is_pat {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.pat_forbidden"
+            )));
+        }
+        let task = self.load_task_for_act(task_id, operator_id).await?;
+        if task.status != "pending" {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.task_not_pending"
+            )));
+        }
+        if to_user_id == operator_id {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.transfer_to_self"
+            )));
+        }
+        // 禁自审：加签目标不得是单据提交人
+        if to_user_id == task.applicant_id {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.self_approve_forbidden"
+            )));
+        }
+        let target = sys_user::Entity::find_by_id(to_user_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.user_not_found")))?;
+        if target.status.as_deref() != Some("0") || target.del_flag.as_deref() == Some("2") {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.user_disabled"
+            )));
+        }
+        // 防重：同轮同节点已存在该审批人（含已处理行）→ 400，避免唯一索引报错暴露为 500
+        if self
+            .task_repo()
+            .exists_node_assignee(
+                &task.biz_type,
+                task.biz_id,
+                task.round_no,
+                task.node_seq,
+                to_user_id,
+            )
+            .await?
+        {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.countersign_duplicate"
+            )));
+        }
+
+        let now = crate::common::datetime::now_naive();
+        let task_biz_type = task.biz_type.clone();
+        let task_title = task.title.clone();
+        let task_applicant_name = task.applicant_name.clone();
+        let task_node_name = task.node_name.clone();
+        let task_due_at = task.due_at;
+        self.db
+            .transaction::<_, (), ServiceError>(|txn| {
+                Box::pin(async move {
+                    // 1) 同轮同节点 pending 行升级为会签
+                    sys_flow_task::Entity::update_many()
+                        .col_expr(
+                            sys_flow_task::Column::TaskType,
+                            sea_query::Expr::value("countersign"),
+                        )
+                        .filter(sys_flow_task::Column::BizType.eq(task_biz_type.clone()))
+                        .filter(sys_flow_task::Column::BizId.eq(task.biz_id))
+                        .filter(sys_flow_task::Column::RoundNo.eq(task.round_no))
+                        .filter(sys_flow_task::Column::NodeSeq.eq(task.node_seq))
+                        .filter(sys_flow_task::Column::Status.eq("pending"))
+                        .exec(txn)
+                        .await
+                        .map_err(super::sys_flow_service::db_to_svc)?;
+
+                    // 2) 追加会签行（快照同节点上下文）
+                    let am = sys_flow_task::ActiveModel {
+                        tenant_id: Set(task.tenant_id),
+                        biz_type: Set(task_biz_type.clone()),
+                        biz_id: Set(task.biz_id),
+                        round_no: Set(task.round_no),
+                        node_seq: Set(task.node_seq),
+                        node_name: Set(task_node_name.clone()),
+                        assignee_id: Set(to_user_id),
+                        task_type: Set("countersign".to_string()),
+                        status: Set("pending".to_string()),
+                        title: Set(task_title.clone()),
+                        applicant_id: Set(task.applicant_id),
+                        applicant_name: Set(task_applicant_name.clone()),
+                        due_at: Set(task_due_at),
+                        ..Default::default()
+                    };
+                    sys_flow_task::Entity::insert(am)
+                        .exec(txn)
+                        .await
+                        .map_err(super::sys_flow_service::db_to_svc)?;
+
+                    // 3) 流水
+                    let log_am = sys_flow_log::ActiveModel {
+                        tenant_id: Set(task.tenant_id),
+                        biz_type: Set(task_biz_type.clone()),
+                        biz_id: Set(task.biz_id),
+                        round_no: Set(task.round_no),
+                        node_seq: Set(Some(task.node_seq)),
+                        action: Set("countersign_add".to_string()),
+                        from_status: Set(Some("pending".to_string())),
+                        to_status: Set(Some("pending".to_string())),
+                        operator_id: Set(Some(operator_id)),
+                        to_user_id: Set(Some(to_user_id)),
+                        acted_at: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    sys_flow_log::Entity::insert(log_am)
+                        .exec(txn)
+                        .await
+                        .map_err(super::sys_flow_service::db_to_svc)?;
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(super::sys_flow_service::tx_to_svc)?;
+
+        Ok(FlowActOutcome {
+            task: self.task_by_id(task_id).await?,
+            notify_assignees: vec![to_user_id],
+            notify_finished: None,
+        })
+    }
+
+    // ---------- 重新提交（round_no + 1；V4-E1 轮次设计） ----------
     /// 重新提交（draft/rejected/withdrawn 状态的单据，发起人本人）：轮次 +1，重建任务
     pub async fn resubmit_demo(
         &self,
@@ -970,20 +1159,203 @@ impl SysFlowService {
             .await?)
     }
 
-    /// 管理视图：全部单据（**调用方须持有 system:flow:list**；data_scope 由调用方叠加，V3-E4）
+    /// 管理视图：全部单据（**调用方须持有 system:flow:list**）
     ///
-    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户单据；平台 → `None` 全量。
+    /// - `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户单据；平台 → `None` 全量
+    /// - `doc_scope`：按操作者 `data_scope` 解析出的单据可见范围（W-5 / 方案 §7.6）
     pub async fn all_page(
         &self,
         query: FlowPageQuery,
         tenant_scope: Option<i64>,
+        doc_scope: &FlowDocScope,
     ) -> Result<(Vec<flow_demo_doc::Model>, u64), ServiceError> {
         let (offset, limit) = page_args(&query);
         let status = query.status.as_deref();
         Ok(self
             .doc_repo()
-            .find_all_page(status, offset, limit, tenant_scope)
+            .find_all_page(status, offset, limit, tenant_scope, doc_scope)
             .await?)
+    }
+
+    /// 解析操作者在管理视图中的单据可见范围（W-5）
+    ///
+    /// 方案 §7.6 定案：**只做「部门树 + 本人」过滤**（复用 `min_data_scope` +
+    /// `find_descendant_ids`），**否决**把 `custom_sql`（`sys_user` 字段白名单）套到单据表上
+    /// —— 属语义错配。取值口径：
+    /// - 超管（`SUPER_ADMIN_USER_ID`）/ `data_scope=1` → 全部
+    /// - `data_scope=2`（自定义）→ 角色绑定部门（`sys_role_dept`）的并集
+    /// - `data_scope=3`（本部门）→ 操作者部门
+    /// - `data_scope=4`（本部门及以下）→ 部门子树（递归 CTE，含自身）
+    /// - `data_scope=5` / 无角色 / 未知值 → 仅本人（安全降级，fail-closed）
+    pub async fn resolve_doc_scope(&self, operator_id: i64) -> Result<FlowDocScope, ServiceError> {
+        if operator_id == crate::common::constants::SUPER_ADMIN_USER_ID {
+            return Ok(FlowDocScope::All);
+        }
+        let op_user = sys_user::Entity::find_by_id(operator_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.user_not_found")))?;
+        let roles = self.operator_roles(operator_id).await?;
+        let min_scope = crate::common::data_scope::min_data_scope(&roles);
+
+        // 按需取"角色绑定部门"（仅 data_scope=2 需要）
+        let role_bound_dept_ids = if min_scope == Some(2) {
+            let role_ids: Vec<i64> = roles
+                .iter()
+                .filter(|r| r.data_scope.as_deref() == Some("2"))
+                .map(|r| r.role_id)
+                .collect();
+            if role_ids.is_empty() {
+                Vec::new()
+            } else {
+                crate::entity::sys_role_dept::Entity::find()
+                    .filter(crate::entity::sys_role_dept::Column::RoleId.is_in(role_ids))
+                    .all(&self.db)
+                    .await?
+                    .into_iter()
+                    .map(|rd| rd.dept_id)
+                    .collect()
+            }
+        } else {
+            Vec::new()
+        };
+
+        // 按需取"部门子树"（仅 data_scope=4 需要）
+        let dept_subtree_ids = if min_scope == Some(4) {
+            let dept_id = op_user.dept_id.unwrap_or(0);
+            Some(
+                crate::repository::sys_dept::SysDeptRepository::new(self.db.clone())
+                    .find_descendant_ids(dept_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok(decide_doc_scope(
+            min_scope,
+            operator_id,
+            op_user.dept_id,
+            role_bound_dept_ids,
+            dept_subtree_ids,
+        ))
+    }
+
+    /// 查询操作者的全部角色（用于 data_scope 解析）
+    async fn operator_roles(&self, operator_id: i64) -> Result<Vec<sys_role::Model>, ServiceError> {
+        let links = sys_user_role::Entity::find()
+            .filter(sys_user_role::Column::UserId.eq(operator_id))
+            .all(&self.db)
+            .await?;
+        if links.is_empty() {
+            return Ok(Vec::new());
+        }
+        let role_ids: Vec<i64> = links.into_iter().map(|l| l.role_id).collect();
+        Ok(sys_role::Entity::find()
+            .filter(sys_role::Column::RoleId.is_in(role_ids))
+            .all(&self.db)
+            .await?)
+    }
+
+    // ---------- 离岗自动转办（W-4 / 方案 §7.6） ----------
+
+    /// 用户离岗（停用 / 删除）→ 其全部 pending 待办自动转办
+    ///
+    /// 目标解析链：所在部门主管（`sys_dept.leader_user_id`）→ 不可用（缺失/停用/已删除/
+    /// 等于本人/等于单据提交人）时回退 `admin(SUPER_ADMIN_USER_ID)`。
+    /// 系统动作：`operator_id = NULL`（对齐 `sys_task.operator_id=None` 系统归因），
+    /// 逐条写 `transfer` 流水；返回成功转办的 `(task_id, to_user_id)` 列表供调用方推送通知。
+    ///
+    /// 幂等性：依赖 `transfer_if_pending` 的条件更新（`WHERE status='pending'`），
+    /// 并发下已被处理的行走 `rows_affected == 0` 跳过，不产生重复流水。
+    pub async fn handle_user_disabled(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<FlowReassignItem>, ServiceError> {
+        let pending = self.task_repo().find_pending_by_assignee(user_id).await?;
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut done: Vec<FlowReassignItem> = Vec::new();
+        for task in pending {
+            let target = self
+                .resolve_reassign_target(user_id, task.applicant_id)
+                .await?;
+            let affected = self
+                .task_repo()
+                .transfer_if_pending(task.task_id, target)
+                .await?;
+            if affected == 0 {
+                // 并发下该行已被处理（撤回/审批/他人转办），跳过以保持幂等
+                continue;
+            }
+            let now = crate::common::datetime::now_naive();
+            self.write_log(
+                &task.biz_type,
+                task.biz_id,
+                task.round_no,
+                Some(task.node_seq),
+                "transfer",
+                Some("pending"),
+                Some("pending"),
+                // 系统动作：无操作者（离岗转办由停用/删除用户触发，非人为审批动作）
+                None,
+                Some(target),
+                Some("用户离岗自动转办"),
+                now,
+                task.tenant_id,
+            )
+            .await?;
+            done.push(FlowReassignItem {
+                task_id: task.task_id,
+                to_user_id: target,
+                title: task.title.clone().unwrap_or_default(),
+            });
+        }
+        Ok(done)
+    }
+
+    /// 解析离岗转办的目标审批人：部门主管 → admin 回退
+    ///
+    /// 过滤条件：可用（`status='0'` 且未软删除）、不等于离岗本人、不等于单据提交人（禁自审）。
+    async fn resolve_reassign_target(
+        &self,
+        disabled_user_id: i64,
+        applicant_id: i64,
+    ) -> Result<i64, ServiceError> {
+        let mut candidates: Vec<i64> = Vec::new();
+        if let Some(u) = sys_user::Entity::find_by_id(disabled_user_id)
+            .one(&self.db)
+            .await?
+            && let Some(dept_id) = u.dept_id
+            && let Some(dept) = sys_dept::Entity::find_by_id(dept_id).one(&self.db).await?
+            && let Some(leader) = dept.leader_user_id
+            && leader > 0
+        {
+            candidates.push(leader);
+        }
+        // 回退链终点：超管（部门主管缺失/不可用时保底，避免待办悬空）
+        candidates.push(crate::common::constants::SUPER_ADMIN_USER_ID);
+
+        for c in candidates {
+            if c == disabled_user_id || c == applicant_id {
+                continue;
+            }
+            if self.is_active_user(c).await? {
+                return Ok(c);
+            }
+        }
+        Err(ServiceError::bad_request(&crate::tr!(
+            "error.flow.no_assignee"
+        )))
+    }
+
+    /// 用户是否可用（启用且未软删除）
+    async fn is_active_user(&self, user_id: i64) -> Result<bool, ServiceError> {
+        let Some(u) = sys_user::Entity::find_by_id(user_id).one(&self.db).await? else {
+            return Ok(false);
+        };
+        Ok(u.status.as_deref() == Some("0") && u.del_flag.as_deref() != Some("2"))
     }
 
     /// 任务详情 + 单据信息 + 时间线（assignee / 发起人 / 持有 system:flow:list 者可看）
@@ -1221,6 +1593,55 @@ pub(super) fn tx_to_svc(e: TransactionError<ServiceError>) -> ServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W-5：管理视图 data_scope → 单据可见范围的全部分支（纯函数，无 DB）
+    #[test]
+    fn decide_doc_scope_covers_all_data_scope_branches() {
+        // 1 全部
+        assert_eq!(
+            decide_doc_scope(Some(1), 7, Some(100), vec![9], Some(vec![100, 101])),
+            FlowDocScope::All
+        );
+        // 2 自定义 → 角色绑定部门（不使用 dept 子树/本人）
+        assert_eq!(
+            decide_doc_scope(Some(2), 7, Some(100), vec![9, 11], Some(vec![100, 101])),
+            FlowDocScope::Depts(vec![9, 11])
+        );
+        // 2 自定义但未绑定部门 → 空集合（不可见任何单据，而非降级为全量）
+        assert_eq!(
+            decide_doc_scope(Some(2), 7, Some(100), vec![], None),
+            FlowDocScope::Depts(vec![])
+        );
+        // 3 本部门
+        assert_eq!(
+            decide_doc_scope(Some(3), 7, Some(100), vec![], None),
+            FlowDocScope::Depts(vec![100])
+        );
+        // 3 本部门但操作者无部门 → 空集合
+        assert_eq!(
+            decide_doc_scope(Some(3), 7, None, vec![], None),
+            FlowDocScope::Depts(vec![])
+        );
+        // 4 本部门及以下 → 子树
+        assert_eq!(
+            decide_doc_scope(Some(4), 7, Some(100), vec![], Some(vec![100, 101, 102])),
+            FlowDocScope::Depts(vec![100, 101, 102])
+        );
+        // 5 仅本人
+        assert_eq!(
+            decide_doc_scope(Some(5), 7, Some(100), vec![], None),
+            FlowDocScope::Applicant(7)
+        );
+        // 无角色（None）/ 未知值：一律安全降级为仅本人
+        assert_eq!(
+            decide_doc_scope(None, 7, Some(100), vec![], None),
+            FlowDocScope::Applicant(7)
+        );
+        assert_eq!(
+            decide_doc_scope(Some(99), 7, Some(100), vec![], None),
+            FlowDocScope::Applicant(7)
+        );
+    }
 
     /// V7-E3 / 3-9：site 渠道 to_addr 必须是字符串化 user_id。
     /// dispatch 对非数字 to_addr 会**静默记成功**（status='0'），喂错类型的回归只能靠该约定单测拦截。

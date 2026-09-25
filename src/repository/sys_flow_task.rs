@@ -60,6 +60,16 @@ impl SysFlowTaskRepository {
             .await
     }
 
+    /// 某审批人的全部 pending 待办（离岗自动转办入口，W-4；不分页，量级受待办规模约束）
+    pub async fn find_pending_by_assignee(&self, assignee_id: i64) -> Result<Vec<Model>, DbErr> {
+        SysFlowTask::find()
+            .filter(Column::AssigneeId.eq(assignee_id))
+            .filter(Column::Status.eq("pending"))
+            .order_by_asc(Column::TaskId)
+            .all(self.base.db())
+            .await
+    }
+
     /// 某单据某轮的全部任务行（会签/或签聚合判定 + 时间线）
     pub async fn find_by_biz_round(
         &self,
@@ -131,6 +141,46 @@ impl SysFlowTaskRepository {
             .col_expr(Column::AssigneeId, Expr::value(new_assignee_id))
             .col_expr(Column::Status, Expr::value("pending"))
             .filter(Column::TaskId.eq(task_id))
+            .filter(Column::Status.eq("pending"))
+            .exec(self.base.db())
+            .await?;
+        Ok(res.rows_affected)
+    }
+
+    /// 同轮同节点是否已存在指定审批人的任务行（加签防重，W-3）
+    pub async fn exists_node_assignee(
+        &self,
+        biz_type: &str,
+        biz_id: i64,
+        round_no: i32,
+        node_seq: i32,
+        assignee_id: i64,
+    ) -> Result<bool, DbErr> {
+        Ok(SysFlowTask::find()
+            .filter(Column::BizType.eq(biz_type))
+            .filter(Column::BizId.eq(biz_id))
+            .filter(Column::RoundNo.eq(round_no))
+            .filter(Column::NodeSeq.eq(node_seq))
+            .filter(Column::AssigneeId.eq(assignee_id))
+            .count(self.base.db())
+            .await?
+            > 0)
+    }
+
+    /// 将同轮同节点的全部 pending 行升级为会签（加签语义：节点由单审转会签，须全部通过）
+    pub async fn mark_node_countersign(
+        &self,
+        biz_type: &str,
+        biz_id: i64,
+        round_no: i32,
+        node_seq: i32,
+    ) -> Result<u64, DbErr> {
+        let res = SysFlowTask::update_many()
+            .col_expr(Column::TaskType, Expr::value("countersign"))
+            .filter(Column::BizType.eq(biz_type))
+            .filter(Column::BizId.eq(biz_id))
+            .filter(Column::RoundNo.eq(round_no))
+            .filter(Column::NodeSeq.eq(node_seq))
             .filter(Column::Status.eq("pending"))
             .exec(self.base.db())
             .await?;

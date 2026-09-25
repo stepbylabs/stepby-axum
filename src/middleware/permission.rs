@@ -29,6 +29,7 @@ use futures::FutureExt;
 
 use crate::common::AppError;
 use crate::jwt::Claims;
+use crate::middleware::normalize_api_prefix;
 use crate::middleware::oper_log::infer_module_title;
 use crate::service::sys_oper_log_service::OperLogRecord;
 use crate::state::AppState;
@@ -59,12 +60,20 @@ pub async fn permission_middleware(
         .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))?;
 
     // 2. 获取匹配的路由路径和 HTTP 方法
+    //
+    // 同源部署时 `/prod-api`、`/dev-api`、`/stage-api` 通过 `Router::nest` 挂载，
+    // axum 会把 nest 前缀并入 `MatchedPath`（如 `/prod-api/getInfo`）；而权限映射表
+    // 与仅登录白名单均以**去前缀**的路由模板登记 ⇒ 必须先归一化，否则查表必然失败。
+    //
+    // 历史缺陷（本轮修复）：此前未归一化，叠加 deny_by_default=false 时，带前缀请求会走
+    // "未登记权限映射即放行"分支，导致 `/prod-api/*` 下的请求**整体绕过 RBAC**
+    // （超管判定与细粒度权限均不生效）；deny_by_default=true 时则全部 403。
     let method = req.method().clone();
     let matched_path = req
         .extensions()
         .get::<MatchedPath>()
         .cloned()
-        .map(|p| p.as_str().to_string());
+        .map(|p| normalize_api_prefix(p.as_str()).to_string());
 
     // 3. 查表获取所需权限（无匹配路径或无权限要求则放行）
     let required_perm = match matched_path.as_deref() {
@@ -608,7 +617,9 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/system/oauth/provider/{providerId}", "system:oauth:provider:list"),
     ("POST", "/system/oauth/provider", "system:oauth:provider:add"),
     ("PUT", "/system/oauth/provider", "system:oauth:provider:edit"),
-    ("DELETE", "/system/oauth/provider/{providerIds}", "system:oauth:provider:remove"),
+    // 参数名须与 router/sys_oauth_router.rs 注册**逐字一致**：该行曾误写 `{providerIds}`（复数），
+    // 与路由 `{providerId}` 不匹配 ⇒ 查表失败静默 fail-open（deny_by_default=false 时整体绕过 RBAC）
+    ("DELETE", "/system/oauth/provider/{providerId}", "system:oauth:provider:remove"),
     ("PUT", "/system/oauth/provider/{providerId}/status", "system:oauth:provider:toggle"),
 
     // ===== 单点登录 / OIDC Provider 客户端管理 =====
@@ -783,7 +794,9 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("POST", "/sso/consent")
         // ===== 用户自助管理本人 SSO 授权（v2-I7：查看已授权应用 / 撤销同意，仅本人，无需 RBAC）=====
             | ("GET", "/system/user/profile/sso-grants")
-            | ("DELETE", "/system/user/profile/sso-grants/{clientId}")
+            // 参数名须与 router/sso_router.rs 注册逐字一致（`{client_id}`，非 `{clientId}`），
+            // 否则 fail-closed 下自助撤销授权会被误拦为 403
+            | ("DELETE", "/system/user/profile/sso-grants/{client_id}")
         // ===== 前端异常/性能上报（任何已登录用户皆可上报，无需 RBAC，Tier-S #1）=====
             | ("POST", "/monitor/frontendError/report")
         // ===== 审批工作流个人数据接口（归属校验在 service 层：待办=assignee、我发起=applicant；V2-P0-2）=====
@@ -795,6 +808,8 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("POST", "/system/flow/demo/{docId}/resubmit")
             | ("POST", "/system/flow/demo/{docId}/withdraw")
             | ("POST", "/system/flow/task/{taskId}/action")
+            // 加签（W-3）：写动作，与 action 同口径（service 层归属 + PAT 校验）
+            | ("POST", "/system/flow/task/{taskId}/countersign-add")
         // ===== 个人会话管理（v5-N5：自助查看/注销本人会话，属主校验在 handler；仅登录）=====
             | ("GET", "/monitor/my-session/list")
             | ("DELETE", "/monitor/my-session/{tokenHash}")
@@ -1469,6 +1484,7 @@ mod tests {
             ("POST", "/system/flow/demo/{docId}/resubmit"),
             ("POST", "/system/flow/demo/{docId}/withdraw"),
             ("POST", "/system/flow/task/{taskId}/action"),
+            ("POST", "/system/flow/task/{taskId}/countersign-add"),
         ];
 
         let mut uncovered: Vec<(&str, &str)> = Vec::new();
@@ -1528,6 +1544,200 @@ mod tests {
             get_required_perm("DELETE", "/system/task/{taskId}"),
             Some("system:task:remove")
         );
+    }
+
+    /// O-5：源码级"路由注册 ⊆ 权限登记"守卫（权威完整性检查）
+    ///
+    /// 与 `test_all_protected_routes_covered`（手写清单，便于人读）不同，本用例**直接扫描源码**：
+    /// `router/mod.rs` 的 `protected` 子树 merge 清单 → 各 router 函数体 → 全部 `.route(...)`。
+    /// 由此消除"新增路由漏登记 ⇒ 测试假绿 + 运行时 403（fail-closed）/ 越权（fail-open）"的结构性弱点。
+    #[test]
+    fn test_scanned_protected_routes_are_registered() {
+        let scanned = scan_protected_routes();
+        assert!(
+            scanned.len() > 250,
+            "扫描到的受保护路由数异常偏少（{}），疑似解析器失效",
+            scanned.len()
+        );
+        let mut uncovered: Vec<String> = Vec::new();
+        for (method, path) in &scanned {
+            if get_required_perm(method, path).is_none() && !is_login_only_path(method, path) {
+                uncovered.push(format!("{method} {path}"));
+            }
+        }
+        uncovered.sort();
+        uncovered.dedup();
+        assert!(
+            uncovered.is_empty(),
+            "以下受保护路由未登记权限映射且不在仅登录白名单（fail-closed 下 403 生产事故 / fail-open 下越权）：{uncovered:#?}"
+        );
+    }
+
+    /// 扫描 `src/router` 中注册于 `protected` 子树内的全部 `.route(...)`，返回 (METHOD, path)
+    ///
+    /// axum 的 `Router` 不支持运行时枚举，故以源码解析代替：
+    /// ① 从 `router/mod.rs` 的 `let protected = Router::new() ... .merge(<mod>::<fn>())` 取目标函数；
+    /// ② 从对应文件的函数体做花括号配平截取；
+    /// ③ 对每个 `.route(` 取括号内首字符串字面量为路径，取 `get/post/put/delete/patch` 为方法。
+    fn scan_protected_routes() -> Vec<(String, String)> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/router");
+        let mod_rs =
+            std::fs::read_to_string(format!("{dir}/mod.rs")).expect("读取 router/mod.rs 失败");
+        let seg_start = mod_rs
+            .find("let protected = Router::new()")
+            .expect("未找到 protected 子树起始");
+        let seg_rest = &mod_rs[seg_start..];
+        let seg_end = seg_rest
+            .find("oper_log_middleware")
+            .expect("未找到 protected 子树结束标记");
+        let seg = &seg_rest[..seg_end];
+
+        // ① 抽取 `.merge(<module>::<fn>())` 目标
+        let mut targets: Vec<(String, String)> = Vec::new();
+        let mut rest = seg;
+        while let Some(i) = rest.find(".merge(") {
+            rest = &rest[i + ".merge(".len()..];
+            let close = rest.find(')').expect("merge 调用未闭合");
+            let arg = rest[..close].trim();
+            if let Some((m, f)) = arg.split_once("::") {
+                // arg 形如 `auth_router::protected_auth_routes(`（首个 ')' 前的调用前缀）
+                targets.push((
+                    m.trim().to_string(),
+                    f.trim().trim_end_matches('(').trim().to_string(),
+                ));
+            }
+        }
+        assert!(
+            targets.len() > 30,
+            "protected 子树 merge 清单解析异常（{} 项）",
+            targets.len()
+        );
+
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (module, func) in targets {
+            let src = std::fs::read_to_string(format!("{dir}/{module}.rs"))
+                .unwrap_or_else(|e| panic!("读取 {module}.rs 失败: {e}"));
+            let body = extract_fn_body(&src, &func)
+                .unwrap_or_else(|| panic!("在 {module}.rs 中未找到函数 {func}"));
+            let mut r = body.as_str();
+            while let Some(i) = r.find(".route(") {
+                let from_call = &r[i + ".route(".len() - 1..];
+                let (args, consumed) = take_balanced_parens(from_call)
+                    .unwrap_or_else(|| panic!("{module}::{func} 的 .route( 未闭合"));
+                let path = first_string_literal(args).unwrap_or_else(|| {
+                    panic!("{module}::{func} 的 .route 首参不是字符串字面量: {args}")
+                });
+                let methods = extract_http_methods(args);
+                assert!(
+                    !methods.is_empty(),
+                    "{module}::{func} 路由 {path} 未识别到 HTTP 方法: {args}"
+                );
+                for m in methods {
+                    out.push((m, path.clone()));
+                }
+                r = &from_call[consumed..];
+            }
+        }
+        out
+    }
+
+    /// 取 `src` 的函数体（`fn <name>` 起第一个 `{` 到配平 `}`），支持 `pub`/`pub(crate)` 前缀
+    fn extract_fn_body(src: &str, name: &str) -> Option<String> {
+        let needle = format!("fn {name}(");
+        let start = src.find(&needle)?;
+        let after = &src[start..];
+        let brace = after.find('{')?;
+        let body = &after[brace..];
+        let bytes = body.as_bytes();
+        let mut depth = 0usize;
+        let mut in_str = false;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let b = bytes[i];
+            // 行注释：跳到行尾（避免注释里的括号干扰配平）
+            if !in_str && b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            match b {
+                b'"' => in_str = !in_str,
+                b'{' if !in_str => depth += 1,
+                b'}' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(body[..=i].to_string());
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// 取以 `(` 起始的平衡括号内容，返回 (内部文本, 含括号总长度)
+    fn take_balanced_parens(s: &str) -> Option<(&str, usize)> {
+        let bytes = s.as_bytes();
+        if bytes.first() != Some(&b'(') {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut in_str = false;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'"' => in_str = !in_str,
+                b'(' if !in_str => depth += 1,
+                b')' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&s[1..i], i + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 取首个双引号字符串字面量内容
+    fn first_string_literal(s: &str) -> Option<String> {
+        let start = s.find('"')?;
+        let rest = &s[start + 1..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
+    /// 抽取 axum 方法路由器标识符（`get(...)` / `post(...)` / `put(...)` / `delete(...)` / `patch(...)`）
+    fn extract_http_methods(args: &str) -> Vec<String> {
+        const METHODS: [&str; 5] = ["get", "post", "put", "delete", "patch"];
+        let bytes = args.as_bytes();
+        let mut out: Vec<String> = Vec::new();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_alphabetic() {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let word = &args[start..i];
+                let mut j = i;
+                while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len()
+                    && bytes[j] == b'('
+                    && METHODS.contains(&word)
+                    && !out.iter().any(|x| x.eq_ignore_ascii_case(word))
+                {
+                    out.push(word.to_ascii_uppercase());
+                }
+                continue;
+            }
+            i += 1;
+        }
+        out
     }
 
     // ===== 消息渠道与模板管理权限映射 =====

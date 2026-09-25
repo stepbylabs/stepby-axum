@@ -12,6 +12,20 @@ pub struct FlowDemoDocRepository {
     base: BaseRepository<FlowDemoDoc>,
 }
 
+/// 管理视图的单据可见范围（W-5 / 方案 §7.6 定案：「部门树 + 本人」）
+///
+/// 单据表不含自定义字段，故 `custom_sql`（`sys_user` 字段白名单语义）**不适用**，
+/// 显式不参与过滤；需要"自定义部门"语义时按 `sys_role_dept` 绑定落为 `Depts`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowDocScope {
+    /// 全部可见（超管 / `data_scope=1`）
+    All,
+    /// 按**提交人部门**限定（`data_scope=2/3/4` 解析出的部门集合；空集合 ⇒ 不可见任何单据）
+    Depts(Vec<i64>),
+    /// 仅本人发起（`data_scope=5`；以及无角色/未知值时的安全降级）
+    Applicant(i64),
+}
+
 impl FlowDemoDocRepository {
     pub fn new(db: DatabaseConnection) -> Self {
         Self {
@@ -41,15 +55,17 @@ impl FlowDemoDocRepository {
         Ok((rows, total))
     }
 
-    /// 管理视图：全部单据（调用方需持有 system:flow:list 权限键，且自行叠加 data_scope）
+    /// 管理视图：全部单据（调用方需持有 `system:flow:list` 权限键）
     ///
-    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户单据；`None`（平台）→ 全量。
+    /// - `tenant_scope`：`Some(tid)` → 仅本租户单据；`None`（平台）→ 全量
+    /// - `doc_scope`：调用方按操作者 `data_scope` 解析出的单据可见范围（W-5）
     pub async fn find_all_page(
         &self,
         status: Option<&str>,
         offset: u64,
         limit: u64,
         tenant_scope: Option<i64>,
+        doc_scope: &FlowDocScope,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = FlowDemoDoc::find();
         if let Some(t) = tenant_scope {
@@ -57,6 +73,19 @@ impl FlowDemoDocRepository {
         }
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
+        }
+        match doc_scope {
+            FlowDocScope::All => {}
+            FlowDocScope::Depts(ids) => {
+                // 空部门集合表示"不可见任何单据"：直接短路，避免生成 `IN ()` 非法 SQL
+                if ids.is_empty() {
+                    return Ok((vec![], 0));
+                }
+                query = query.filter(Column::DeptId.is_in(ids.clone()));
+            }
+            FlowDocScope::Applicant(uid) => {
+                query = query.filter(Column::ApplicantId.eq(*uid));
+            }
         }
         let total = query.clone().count(self.base.db()).await?;
         let rows = query

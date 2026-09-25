@@ -103,6 +103,7 @@ error:
     not_assignee: Only the current assignee can operate this task
     withdraw_only_applicant: Only the applicant can withdraw this document
     pat_forbidden: Approval must be performed in a personal login session; personal access tokens (PAT) are not allowed
+    countersign_duplicate: This approver is already at the current approval node; no duplicate countersign is needed
   sso:
     platform_protected: Platform root department cannot be modified via tenant API
     ancestors_invalid: Invalid department ancestors data, cannot resolve tenant
