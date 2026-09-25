@@ -540,7 +540,7 @@ pub async fn remove(
     let deleted_user_ids = user_ids.clone();
     state
         .user_service
-        .delete_users(user_ids, operator_user_id)
+        .delete_users(user_ids, operator_user_id, operator.tenant_id())
         .await?;
 
     // P0-5 修复：用户删除后失效其活动会话
@@ -630,6 +630,7 @@ pub async fn change_status(
             &dto.status,
             operator.username(),
             operator_user_id,
+            operator.tenant_id(),
         )
         .await;
 
@@ -691,7 +692,12 @@ pub async fn reset_pwd(
     // 步骤2：更新 DB 密码
     let db_result = state
         .user_service
-        .reset_user_pwd(dto, operator.username(), operator_user_id)
+        .reset_user_pwd(
+            dto,
+            operator.username(),
+            operator_user_id,
+            operator.tenant_id(),
+        )
         .await;
 
     // 步骤3：DB 失败则 DECR 回滚 Redis 标记
@@ -867,7 +873,12 @@ pub async fn auth_role(
     };
     state
         .user_service
-        .assign_user_roles(dto.user_id, role_ids, operator_user_id)
+        .assign_user_roles(
+            dto.user_id,
+            role_ids,
+            operator_user_id,
+            operator.tenant_id(),
+        )
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.assign_role"

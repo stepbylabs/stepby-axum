@@ -147,12 +147,26 @@ impl SysPostService {
     }
 
     /// 根据 post_id 查询岗位详情
-    pub async fn get_post_by_id(&self, post_id: i64) -> Result<SysPostModel, ServiceError> {
+    ///
+    /// `operator_tid`：操作者租户。租户管理员只能读取本租户岗位（平台 0 放行）；
+    /// 内部审计快照等无操作人上下文场景传 0 跳过过滤。
+    pub async fn get_post_by_id(
+        &self,
+        post_id: i64,
+        operator_tid: i64,
+    ) -> Result<SysPostModel, ServiceError> {
         let model = self
             .post_repo
             .find_active_by_id(post_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.post.not_found")))?;
+        // 多租户越权防护：租户管理员不得读取其他租户岗位详情（与本文件 edit/delete 的
+        // forbidden 惯例保持一致）
+        if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
         Ok(model)
     }
 
@@ -209,13 +223,8 @@ impl SysPostService {
     ) -> Result<SysPostModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        let existing = self.get_post_by_id(dto.post_id).await?;
-        // 多租户越权防护：只能修改本租户岗位（平台操作者放行）
-        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!(
-                "error.common.forbidden"
-            )));
-        }
+        // 多租户越权防护：只能修改本租户岗位（平台操作者放行，由 get_post_by_id 统一校验）
+        let existing = self.get_post_by_id(dto.post_id, operator_tid).await?;
 
         // post_code 变更时校验唯一性（排除自身）
         let old_post_code = existing.post_code.clone();

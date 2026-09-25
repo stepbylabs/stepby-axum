@@ -145,20 +145,38 @@ impl SysLogininforService {
     }
 
     /// 批量删除登录日志（物理删除）
-    pub async fn delete_logininfors(&self, info_ids: Vec<i64>) -> Result<(), ServiceError> {
-        self.logininfor_repo.delete_by_ids(info_ids).await?;
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户日志；`None`（平台）→ 不过滤。
+    pub async fn delete_logininfors(
+        &self,
+        info_ids: Vec<i64>,
+        tenant_scope: Option<i64>,
+    ) -> Result<(), ServiceError> {
+        self.logininfor_repo
+            .delete_by_ids(info_ids, tenant_scope)
+            .await?;
         Ok(())
     }
 
     /// 解锁用户（删除该用户的登录失败日志，status=1）
-    pub async fn unlock_user(&self, user_name: &str) -> Result<(), ServiceError> {
-        self.logininfor_repo.delete_by_user_name(user_name).await?;
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户日志；`None`（平台）→ 不过滤。
+    pub async fn unlock_user(
+        &self,
+        user_name: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<(), ServiceError> {
+        self.logininfor_repo
+            .delete_by_user_name(user_name, tenant_scope)
+            .await?;
         Ok(())
     }
 
-    /// 清空全部登录日志（物理删除）
-    pub async fn clean_logininfors(&self) -> Result<(), ServiceError> {
-        self.logininfor_repo.clean_all().await?;
+    /// 清空登录日志（物理删除）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅清空本租户日志；`None`（平台）→ 清空全部。
+    pub async fn clean_logininfors(&self, tenant_scope: Option<i64>) -> Result<(), ServiceError> {
+        self.logininfor_repo.clean_all(tenant_scope).await?;
         Ok(())
     }
 
@@ -168,7 +186,8 @@ impl SysLogininforService {
     /// 默认保留 90 天，避免登录日志无限增长导致生产崩溃。
     pub async fn cleanup_old_logs(&self, days: i64) -> Result<u64, ServiceError> {
         let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
-        let result = self.logininfor_repo.delete_older_than(cutoff).await?;
+        // 后台定时清理无操作人上下文，按平台视角（None）全量清理
+        let result = self.logininfor_repo.delete_older_than(cutoff, None).await?;
         Ok(result.rows_affected)
     }
 
@@ -181,6 +200,7 @@ impl SysLogininforService {
         &self,
         begin_time: Option<String>,
         end_time: Option<String>,
+        tenant_scope: Option<i64>,
     ) -> Result<u64, ServiceError> {
         let begin = match begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -192,7 +212,7 @@ impl SysLogininforService {
         };
         let result = self
             .logininfor_repo
-            .delete_by_time_range(begin, end)
+            .delete_by_time_range(begin, end, tenant_scope)
             .await?;
         Ok(result.rows_affected)
     }

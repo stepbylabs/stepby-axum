@@ -184,8 +184,13 @@ pub async fn list_all(
 )]
 pub async fn revoke_by_admin(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(pat_id): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.pat_service.revoke_by_admin(&pat_id).await?;
+    // 多租户：租户操作者仅能吊销本租户令牌；平台（tenant_id=0）不限
+    state
+        .pat_service
+        .revoke_by_admin(&pat_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

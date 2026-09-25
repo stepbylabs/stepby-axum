@@ -64,6 +64,7 @@ pub async fn list(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(oper_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&oper_ids);
@@ -80,7 +81,14 @@ pub async fn remove(
         )));
     }
 
-    state.oper_log_service.delete_oper_logs(ids).await?;
+    // 多租户：租户操作者仅能删除本租户日志；平台（tenant_id=0）全量
+    state
+        .oper_log_service
+        .delete_oper_logs(
+            ids,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -117,27 +125,39 @@ pub struct OperLogCleanQuery {
 )]
 pub async fn clean(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<OperLogCleanQuery>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 多租户：租户操作者仅清理本租户日志；平台（tenant_id=0）全量
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     // 传入时间范围时执行按时间清理，否则回退保留期清理（保留最近 30 天）
     let affected = if query.begin_time.is_some() || query.end_time.is_some() {
         tracing::warn!(
-            "操作日志清理（按时间范围）：begin={:?} end={:?}，操作者 = sys/operlog/clean（管理员）",
+            "操作日志清理（按时间范围）：begin={:?} end={:?}，操作者 = {}",
             query.begin_time,
-            query.end_time
+            query.end_time,
+            operator.username()
         );
         state
             .oper_log_service
-            .clean_oper_logs_by_range(query.begin_time.clone(), query.end_time.clone())
+            .clean_oper_logs_by_range(
+                query.begin_time.clone(),
+                query.end_time.clone(),
+                tenant_scope,
+            )
             .await?
     } else {
         // 仅删除 OPER_LOG_CLEAN_RETAIN_DAYS 天前的日志，保留最近同天数用于审计
         let days = OPER_LOG_CLEAN_RETAIN_DAYS;
         tracing::warn!(
-            "操作日志清理：仅删除 {} 天前日志，操作者 = sys/operlog/clean（管理员）",
-            days
+            "操作日志清理：仅删除 {} 天前日志，操作者 = {}",
+            days,
+            operator.username()
         );
-        state.oper_log_service.clean_oper_logs(days).await?
+        state
+            .oper_log_service
+            .clean_oper_logs(days, tenant_scope)
+            .await?
     };
     Ok(AjaxResult::success(
         serde_json::json!({ "affected": affected }),

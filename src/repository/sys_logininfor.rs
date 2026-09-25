@@ -132,31 +132,51 @@ impl SysLogininforRepository {
     }
 
     /// 批量删除登录日志（物理删除）
-    pub async fn delete_by_ids(&self, info_ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
-        SysLogininfor::delete_many()
-            .filter(Column::InfoId.is_in(info_ids))
-            .exec(self.base.db())
-            .await
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户日志；`None`（平台）→ 不过滤。
+    pub async fn delete_by_ids(
+        &self,
+        info_ids: Vec<i64>,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysLogininfor::delete_many().filter(Column::InfoId.is_in(info_ids));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 按用户名删除登录日志（用于解锁用户，清除登录失败记录）
-    pub async fn delete_by_user_name(&self, user_name: &str) -> Result<DeleteResult, DbErr> {
-        SysLogininfor::delete_many()
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户日志；`None`（平台）→ 不过滤。
+    pub async fn delete_by_user_name(
+        &self,
+        user_name: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysLogininfor::delete_many()
             .filter(Column::UserName.eq(user_name))
-            .filter(Column::Status.eq("1"))
-            .exec(self.base.db())
-            .await
+            .filter(Column::Status.eq("1"));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 删除 N 天前的登录日志（按 login_time 过滤，物理删除）
     ///
     /// 用于保留期清理：仅删除 login_time < cutoff 的记录，
     /// 保留最近 N 天日志用于审计。
-    pub async fn delete_older_than(&self, cutoff: NaiveDateTime) -> Result<DeleteResult, DbErr> {
-        SysLogininfor::delete_many()
-            .filter(Column::LoginTime.lt(cutoff))
-            .exec(self.base.db())
-            .await
+    pub async fn delete_older_than(
+        &self,
+        cutoff: NaiveDateTime,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysLogininfor::delete_many().filter(Column::LoginTime.lt(cutoff));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 按时间范围删除登录日志（物理删除 [begin, end] 区间内日志，边界含端点）
@@ -167,8 +187,12 @@ impl SysLogininforRepository {
         &self,
         begin: Option<NaiveDateTime>,
         end: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<DeleteResult, DbErr> {
         let mut query = SysLogininfor::delete_many();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(b) = begin {
             query = query.filter(Column::LoginTime.gte(b));
         }
@@ -183,9 +207,15 @@ impl SysLogininforRepository {
         self.base.insert(model).await
     }
 
-    /// 清空登录日志（物理删除全部）
-    pub async fn clean_all(&self) -> Result<DeleteResult, DbErr> {
-        SysLogininfor::delete_many().exec(self.base.db()).await
+    /// 清空登录日志（物理删除）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅清空本租户日志；`None`（平台）→ 清空全部。
+    pub async fn clean_all(&self, tenant_scope: Option<i64>) -> Result<DeleteResult, DbErr> {
+        let mut query = SysLogininfor::delete_many();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 统计最近 N 天每天的登录成功/失败次数

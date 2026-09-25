@@ -1596,6 +1596,7 @@ impl SysUserService {
         &self,
         user_id: i64,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 超管保护
         if user_id == SUPER_ADMIN_USER_ID {
@@ -1612,6 +1613,13 @@ impl SysUserService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+        }
+
+        // 越权防护：租户管理员不得跨租户删除用户
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         // 垂直越权校验（REGRESS-002）
@@ -1676,6 +1684,7 @@ impl SysUserService {
         &self,
         user_ids: Vec<i64>,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 预校验：超管保护（事务外快速失败，避免无效事务开销）
         if user_ids.contains(&SUPER_ADMIN_USER_ID) {
@@ -1686,7 +1695,9 @@ impl SysUserService {
 
         // 单个 ID 直接走 delete_user（保持原有事务行为，避免嵌套事务开销）
         if user_ids.len() == 1 {
-            return self.delete_user(user_ids[0], operator_user_id).await;
+            return self
+                .delete_user(user_ids[0], operator_user_id, operator_tid)
+                .await;
         }
 
         // C-2：批量垂直越权校验（事务前统一执行，全部通过后才进入事务）
@@ -1695,6 +1706,14 @@ impl SysUserService {
         for target_user_id in &user_ids {
             self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
                 .await?;
+            // 越权防护：租户管理员不得跨租户删除用户（按 id 列表删除必须逐个收敛归属）
+            if let Some(target) = self.user_repo.base().find_by_id(*target_user_id).await?
+                && !crate::common::tenant::tenant_allowed(operator_tid, target.tenant_id)
+            {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
+            }
         }
 
         // 批量删除：单个事务包装所有操作
@@ -1767,6 +1786,7 @@ impl SysUserService {
         dto: UserPwdResetDto,
         _operator: &str,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -1788,6 +1808,13 @@ impl SysUserService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+        }
+
+        // 越权防护：租户管理员不得跨租户重置用户密码
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         // 垂直越权校验（REGRESS-002）
@@ -1886,6 +1913,7 @@ impl SysUserService {
         status: &str,
         operator: &str,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 超管保护
         if user_id == SUPER_ADMIN_USER_ID && status == "1" {
@@ -1902,6 +1930,13 @@ impl SysUserService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+        }
+
+        // 越权防护：租户管理员不得跨租户启停用户
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         // 垂直越权校验（REGRESS-002）
@@ -1929,6 +1964,7 @@ impl SysUserService {
         user_id: i64,
         role_ids: Vec<i64>,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 超管保护：禁止修改超级管理员角色绑定
         if user_id == SUPER_ADMIN_USER_ID {
@@ -1953,6 +1989,13 @@ impl SysUserService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+        }
+
+        // 越权防护：租户管理员不得跨租户为用户分配角色
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         let user_role_repo = self.user_role_repo.clone();

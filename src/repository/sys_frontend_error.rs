@@ -46,8 +46,13 @@ impl SysFrontendErrorRepository {
         name: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysFrontendError::find();
+        // 多租户：租户操作者仅见本租户记录；平台（None）不过滤
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(l) = level {
             query = query.filter(Column::Level.eq(l));
         }
@@ -91,28 +96,48 @@ impl SysFrontendErrorRepository {
     }
 
     /// 批量删除（物理删除）
-    pub async fn delete_by_ids(&self, ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
-        SysFrontendError::delete_many()
-            .filter(Column::Id.is_in(ids))
-            .exec(self.base.db())
-            .await
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户记录；`None`（平台）→ 不过滤。
+    pub async fn delete_by_ids(
+        &self,
+        ids: Vec<i64>,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysFrontendError::delete_many().filter(Column::Id.is_in(ids));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 删除 N 天前的记录（保留期清理）
-    pub async fn delete_older_than(&self, cutoff: NaiveDateTime) -> Result<DeleteResult, DbErr> {
-        SysFrontendError::delete_many()
-            .filter(Column::CreateTime.lt(cutoff))
-            .exec(self.base.db())
-            .await
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户记录；`None`（平台）→ 不过滤。
+    pub async fn delete_older_than(
+        &self,
+        cutoff: NaiveDateTime,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysFrontendError::delete_many().filter(Column::CreateTime.lt(cutoff));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
     }
 
     /// 按时间范围删除（边界含端点，任一侧可为空）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户记录；`None`（平台）→ 不过滤。
     pub async fn delete_by_time_range(
         &self,
         begin: Option<NaiveDateTime>,
         end: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<DeleteResult, DbErr> {
         let mut query = SysFrontendError::delete_many();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(b) = begin {
             query = query.filter(Column::CreateTime.gte(b));
         }

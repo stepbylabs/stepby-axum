@@ -63,6 +63,7 @@ pub async fn list(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(info_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&info_ids);
@@ -79,7 +80,14 @@ pub async fn remove(
         )));
     }
 
-    state.logininfor_service.delete_logininfors(ids).await?;
+    // 多租户：租户操作者仅能删除本租户日志；平台（tenant_id=0）全量
+    state
+        .logininfor_service
+        .delete_logininfors(
+            ids,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -99,6 +107,7 @@ pub async fn remove(
 )]
 pub async fn unlock(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(user_name): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     // 超管保护（P0-R81-006）：禁止解锁超级管理员账号（M-2 + M-3 Major：使用常量替代硬编码）
@@ -112,7 +121,14 @@ pub async fn unlock(
         ));
     }
 
-    state.logininfor_service.unlock_user(&user_name).await?;
+    // 多租户：租户操作者仅能解锁本租户用户（不跨租户清除登录失败日志）
+    state
+        .logininfor_service
+        .unlock_user(
+            &user_name,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     // 同步重置 Redis 中的登录失败计数，否则用户仍会被锁定（auth_service 使用 login_fail:{username}）
     let fail_key = format!("login_fail:{}", user_name);
     let mut redis = state.redis.clone();
@@ -155,21 +171,32 @@ pub struct LogininforCleanQuery {
 )]
 pub async fn clean(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<LogininforCleanQuery>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 多租户：租户操作者仅清理本租户日志；平台（tenant_id=0）全量
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     // 传入时间范围时执行按时间清理，否则清空全部
     let affected = if query.begin_time.is_some() || query.end_time.is_some() {
         tracing::warn!(
-            "登录日志清理（按时间范围）：begin={:?} end={:?}，操作者 = sys/logininfor/clean（管理员）",
+            "登录日志清理（按时间范围）：begin={:?} end={:?}，操作者 = {}",
             query.begin_time,
-            query.end_time
+            query.end_time,
+            operator.username()
         );
         state
             .logininfor_service
-            .clean_logininfors_by_range(query.begin_time.clone(), query.end_time.clone())
+            .clean_logininfors_by_range(
+                query.begin_time.clone(),
+                query.end_time.clone(),
+                tenant_scope,
+            )
             .await?
     } else {
-        state.logininfor_service.clean_logininfors().await?;
+        state
+            .logininfor_service
+            .clean_logininfors(tenant_scope)
+            .await?;
         0 // 全量清空不返回具体数量，兼容既有契约
     };
     Ok(AjaxResult::success(
