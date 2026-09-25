@@ -39,8 +39,9 @@ use crate::entity::sys_user_role::{
 };
 use crate::service::scim_service::ScimError;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
+    DatabaseTransaction, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    TransactionTrait, Value,
 };
 
 const SCIM_GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
@@ -181,17 +182,17 @@ impl ScimGroupService {
     }
 
     /// filter 白名单：displayName eq / externalId eq（同 Users 语义）
+    /// 返回 (列名, 原始值)；值由调用方参数化绑定（不再做字符串转义）。
     fn parse_group_filter(filter: &str) -> Option<(&'static str, String)> {
         let parts: Vec<&str> = filter.split_whitespace().collect();
         if parts.len() != 3 || !parts[1].eq_ignore_ascii_case("eq") {
             return None;
         }
         let val = parts[2].trim_matches('\'').trim_matches('"');
-        let val_esc = val.replace('\'', "''");
         if parts[0].eq_ignore_ascii_case("displayName") {
-            Some(("display_name", val_esc))
+            Some(("display_name", val.to_string()))
         } else if parts[0].eq_ignore_ascii_case("externalId") {
-            Some(("external_id", val_esc))
+            Some(("external_id", val.to_string()))
         } else {
             None
         }
@@ -209,15 +210,26 @@ impl ScimGroupService {
         let backend = self.db().get_database_backend();
         let start = start_index.max(1);
         let count = count.clamp(1, 200);
+        // Postgres 需 $n 占位符，Sqlite/MySQL 用 ?（值均参数化绑定，杜绝拼接注入）
+        let ph = |i: usize| -> String {
+            if backend == DatabaseBackend::Postgres {
+                format!("${i}")
+            } else {
+                "?".to_string()
+            }
+        };
         let mut where_clause = String::from("del_flag <> '2'");
+        let mut values: Vec<Value> = Vec::new();
         // v5-N2 Phase 3：按 SCIM 凭据归属租户过滤（0 = 平台租户，全量可见）
         if let Some(tid) = crate::common::tenant::tenant_scope(self.tenant_id) {
-            where_clause.push_str(&format!(" AND tenant_id = {tid}"));
+            where_clause.push_str(&format!(" AND tenant_id = {}", ph(values.len() + 1)));
+            values.push(tid.into());
         }
         if let Some(f) = filter {
             match Self::parse_group_filter(f) {
                 Some((col, val)) => {
-                    where_clause.push_str(&format!(" AND {col} = '{val}'"));
+                    where_clause.push_str(&format!(" AND {col} = {}", ph(values.len() + 1)));
+                    values.push(val.into());
                 }
                 None => {
                     return Err(ScimError::new(
@@ -230,7 +242,11 @@ impl ScimGroupService {
         let count_sql = format!("SELECT COUNT(*) AS c FROM sys_scim_group WHERE {where_clause}");
         let total = self
             .db()
-            .query_one(Statement::from_string(backend, count_sql))
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                count_sql,
+                values.clone(),
+            ))
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
             .and_then(|r| r.try_get::<i64>("", "c").ok())
@@ -241,7 +257,7 @@ impl ScimGroupService {
         );
         let rows = self
             .db()
-            .query_all(Statement::from_string(backend, list_sql))
+            .query_all(Statement::from_sql_and_values(backend, list_sql, values))
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
         let mut resources = Vec::with_capacity(rows.len());

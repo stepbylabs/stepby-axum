@@ -241,25 +241,38 @@ impl SysLogininforRepository {
         let today = crate::common::datetime::today_utc();
         let start_date = today - Duration::days(days - 1);
         // tenant_scope=Some(t) 时按租户维度统计（报表快照/login 统计多租户隔离）
+        // Postgres 需 $n 占位符，Sqlite/MySQL 用 ?（from_sql_and_values 不改写占位符）
+        let ph = |i: usize| -> String {
+            if backend == DatabaseBackend::Postgres {
+                format!("${i}")
+            } else {
+                "?".to_string()
+            }
+        };
         let (sql, values): (String, Vec<Value>) = match tenant_scope {
             Some(t) => (
-                "SELECT DATE(login_time) AS d, \
+                format!(
+                    "SELECT DATE(login_time) AS d, \
                  COUNT(CASE WHEN status = '0' THEN 1 END) AS success, \
                  COUNT(CASE WHEN status = '1' THEN 1 END) AS fail \
-                 FROM sys_logininfor WHERE login_time >= ? AND tenant_id = ? \
+                 FROM sys_logininfor WHERE login_time >= {} AND tenant_id = {} \
                  GROUP BY DATE(login_time) \
-                 ORDER BY d ASC"
-                    .to_string(),
+                 ORDER BY d ASC",
+                    ph(1),
+                    ph(2)
+                ),
                 vec![start_date.into(), t.into()],
             ),
             None => (
-                "SELECT DATE(login_time) AS d, \
+                format!(
+                    "SELECT DATE(login_time) AS d, \
                  COUNT(CASE WHEN status = '0' THEN 1 END) AS success, \
                  COUNT(CASE WHEN status = '1' THEN 1 END) AS fail \
-                 FROM sys_logininfor WHERE login_time >= ? \
+                 FROM sys_logininfor WHERE login_time >= {} \
                  GROUP BY DATE(login_time) \
-                 ORDER BY d ASC"
-                    .to_string(),
+                 ORDER BY d ASC",
+                    ph(1)
+                ),
                 vec![start_date.into()],
             ),
         };
