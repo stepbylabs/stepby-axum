@@ -59,6 +59,9 @@ pub struct OnlineQueryDto {
     /// 用户名称（模糊查询）
     #[serde(alias = "userName")]
     pub user_name: Option<String>,
+    /// 租户筛选（仅平台操作者有效；租户操作者恒为本租户，见 §27.13.2 分层视图）
+    #[serde(alias = "tenantId")]
+    pub tenant_id: Option<i64>,
 }
 
 /// 在线用户信息（对齐前端 SysUserOnline）
@@ -81,6 +84,10 @@ pub struct SysUserOnline {
     pub os: String,
     /// 登录时间（时间戳，毫秒）
     pub login_time: i64,
+    /// 所属租户 ID（0 = 平台租户；§27.13.2 分层视图：平台分组/筛选依据）
+    pub tenant_id: i64,
+    /// 所属租户名称（平台租户为 "平台"；租户行缺失时为空串，前端按 tenantId 展示）
+    pub tenant_name: String,
 }
 
 // ==================== Handler 实现 ====================
@@ -94,6 +101,10 @@ pub struct SysUserOnline {
 /// 降级策略：Redis SCAN/MGET 失败时降级调用 `get_online_users` 查 sys_logininfor 表，记 warn 日志。
 ///
 /// 客户端分页：total 为当前真实在线总数，后端不做服务端切片，返回全部在线用户由前端分页展示。
+///
+/// §27.13.2 分层视图（Phase 3）：
+/// - 平台操作者（tid=0）：全量在线会话，可按 `tenantId` 筛选分组；
+/// - 租户操作者（tid≠0）：**仅本租户**会话（含旧 JSON 会话按 user_id 回查兜底归属）。
 #[utoipa::path(
     get,
     path = "/monitor/online/list",
@@ -106,6 +117,7 @@ pub struct SysUserOnline {
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<OnlineQueryDto>,
 ) -> Result<TableDataInfo<SysUserOnline>, AppError> {
     let mut redis = state.redis.clone();
@@ -118,7 +130,7 @@ pub async fn list(
                 "Redis SCAN online:* 失败，降级到 sys_logininfor 查询: {}",
                 e
             );
-            return fallback_to_logininfor(&state, &query).await;
+            return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
         }
     };
 
@@ -132,12 +144,12 @@ pub async fn list(
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Redis MGET online 失败，降级到 sys_logininfor 查询: {}", e);
-                return fallback_to_logininfor(&state, &query).await;
+                return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
             }
         };
 
-    // 3. 解析 JSON 为 OnlineSession，构建 SysUserOnline 列表
-    let mut online_list: Vec<SysUserOnline> = Vec::new();
+    // 3. 解析 JSON 为 OnlineSession（先全量收集，便于批量兜底回填租户归属）
+    let mut sessions: Vec<(String, OnlineSession)> = Vec::new();
     for (key, value) in keys.iter().zip(values.iter()) {
         let Some(json) = value else {
             continue;
@@ -149,7 +161,51 @@ pub async fn list(
                 continue;
             }
         };
+        // 从 key 提取 token_hash: "online:{token_hash}" → token_hash
+        let token_hash = key.strip_prefix("online:").unwrap_or(key).to_string();
+        sessions.push((token_hash, session));
+    }
 
+    // 3.1 旧会话兜底：v2.13 前的 online JSON 无 tenant_id（serde default=0），
+    //     按 user_id 回查 sys_user.tenant_id——否则租户管理员既看不到也踢不掉本租户旧会话
+    let legacy_user_ids: Vec<i64> = sessions
+        .iter()
+        .filter(|(_, s)| s.tenant_id == 0 && s.user_id > 0)
+        .map(|(_, s)| s.user_id)
+        .collect();
+    let legacy_tenant_map = if legacy_user_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        state
+            .user_service
+            .tenant_ids_by_user_ids(&legacy_user_ids)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("在线会话租户兜底回填失败（按平台会话处理）: {}", e);
+                std::collections::HashMap::new()
+            })
+    };
+
+    // 3.2 租户过滤 + 构建列表
+    let operator_tid = operator.tenant_id();
+    let mut online_list: Vec<SysUserOnline> = Vec::new();
+    for (token_hash, session) in sessions {
+        // 会话租户归属：新会话取 JSON 字段；旧会话按 user_id 兜底
+        let session_tid = if session.tenant_id != 0 {
+            session.tenant_id
+        } else {
+            legacy_tenant_map.get(&session.user_id).copied().unwrap_or(0)
+        };
+        // 租户操作者：仅本租户（无法定位租户的旧会话视为平台会话，不展示）
+        if operator_tid != 0 && session_tid != operator_tid {
+            continue;
+        }
+        // 平台操作者：可按租户筛选
+        if let Some(filter_tid) = query.tenant_id
+            && session_tid != filter_tid
+        {
+            continue;
+        }
         // 应用过滤条件（ipaddr / user_name 模糊匹配）
         if let Some(ref ip_filter) = query.ipaddr
             && !session.ip.contains(ip_filter.as_str())
@@ -161,12 +217,6 @@ pub async fn list(
         {
             continue;
         }
-
-        // 从 key 提取 token_hash: "online:{token_hash}" → token_hash
-        let token_hash = key.strip_prefix("online:").unwrap_or(key);
-
-        // loginLocation: 复用 ip_locator 查询（mmdb 不存在时返回空字符串）
-        let login_location = state.ip_locator.locate(&session.ip);
 
         // login_time: 解析 "%Y-%m-%d %H:%M:%S"（本地时区） → timestamp_millis
         // 注意：session.login_time 由 chrono::Local::now() 生成（北京时间），
@@ -181,8 +231,11 @@ pub async fn list(
                 })
                 .unwrap_or_default();
 
+        // loginLocation: 复用 ip_locator 查询（mmdb 不存在时返回空字符串）
+        let login_location = state.ip_locator.locate(&session.ip);
+
         online_list.push(SysUserOnline {
-            token_id: token_hash.to_string(),
+            token_id: token_hash,
             dept_name: session.dept_name,
             user_name: session.username,
             ipaddr: session.ip,
@@ -190,8 +243,17 @@ pub async fn list(
             browser: session.browser,
             os: session.os,
             login_time: login_time_millis,
+            tenant_id: session_tid,
+            tenant_name: if session_tid == 0 {
+                crate::tr!("common.platform_tenant")
+            } else {
+                String::new()
+            },
         });
     }
+
+    // 3.3 租户名填充（缺失租户行留空，前端按 tenantId 展示）
+    fill_tenant_names(&state, &mut online_list).await;
 
     // M-4：按 login_time 倒序排序，确保最新登录的用户排在前面（与 ify-admin 前端期望一致）
     online_list.sort_by_key(|item| std::cmp::Reverse(item.login_time));
@@ -199,6 +261,29 @@ pub async fn list(
     // C-03：在线用户为动态数据（非持久化），采用客户端分页模式
     let total = online_list.len() as u64;
     Ok(TableDataInfo::new(total, online_list))
+}
+
+/// 填充在线用户的 `tenantName`（平台租户由调用方置为 "平台"，此处只处理 tid≠0）
+async fn fill_tenant_names(state: &AppState, list: &mut [SysUserOnline]) {
+    let mut ids: Vec<i64> = Vec::new();
+    for item in list.iter() {
+        if item.tenant_id != 0 && !ids.contains(&item.tenant_id) {
+            ids.push(item.tenant_id);
+        }
+    }
+    if ids.is_empty() {
+        return;
+    }
+    match state.tenant_service.tenant_name_map(&ids).await {
+        Ok(map) => {
+            for item in list.iter_mut() {
+                if item.tenant_id != 0 {
+                    item.tenant_name = map.get(&item.tenant_id).cloned().unwrap_or_default();
+                }
+            }
+        }
+        Err(e) => tracing::warn!("在线用户租户名查询失败（tenantName 留空）: {}", e),
+    }
 }
 
 /// 降级查询：Redis 故障时查 sys_logininfor 表最近 30 分钟登录记录
@@ -210,15 +295,46 @@ pub async fn list(
 async fn fallback_to_logininfor(
     state: &AppState,
     query: &OnlineQueryDto,
+    operator_tid: i64,
 ) -> Result<TableDataInfo<SysUserOnline>, AppError> {
     let rows = state
         .logininfor_service
-        .get_online_users(query.ipaddr.as_deref(), query.user_name.as_deref())
+        .get_online_users(
+            query.ipaddr.as_deref(),
+            query.user_name.as_deref(),
+            crate::common::tenant::tenant_scope(operator_tid),
+        )
         .await?;
 
-    let online_list: Vec<SysUserOnline> = rows
-        .iter()
-        .map(|r| SysUserOnline {
+    // 租户归属：登录记录已带 tenant_id；此处按用户名回查 sys_user 以统一口径（与主路径一致的展示用分组）
+    let names: Vec<String> = rows.iter().filter_map(|r| r.user_name.clone()).collect();
+    let tenant_of_name = state
+        .user_service
+        .tenant_ids_by_user_names(&names)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("降级路径租户归属回查失败（按平台会话处理）: {}", e);
+            std::collections::HashMap::new()
+        });
+
+    let mut online_list: Vec<SysUserOnline> = Vec::new();
+    for r in rows.iter() {
+        let tid = r
+            .user_name
+            .as_ref()
+            .and_then(|n| tenant_of_name.get(n))
+            .copied()
+            .unwrap_or(0);
+        // 分层视图：租户操作者仅本租户；平台操作者可按 tenantId 筛选
+        if operator_tid != 0 && tid != operator_tid {
+            continue;
+        }
+        if let Some(filter_tid) = query.tenant_id
+            && tid != filter_tid
+        {
+            continue;
+        }
+        online_list.push(SysUserOnline {
             token_id: r.info_id.to_string(),
             dept_name: String::new(),
             user_name: r.user_name.clone().unwrap_or_default(),
@@ -237,8 +353,15 @@ async fn fallback_to_logininfor(
                         .unwrap_or_default()
                 })
                 .unwrap_or_default(),
-        })
-        .collect();
+            tenant_id: tid,
+            tenant_name: if tid == 0 {
+                crate::tr!("common.platform_tenant")
+            } else {
+                String::new()
+            },
+        });
+    }
+    fill_tenant_names(state, &mut online_list).await;
 
     let total = online_list.len() as u64;
     Ok(TableDataInfo::new(total, online_list))
@@ -251,9 +374,10 @@ async fn fallback_to_logininfor(
 ///
 /// 流程：
 /// 1. GET `online:{token_hash}` → JSON → OnlineSession（确认会话存在 + 获取 user_id 用于超管保护）
-/// 2. 超管保护：user_id == SUPER_ADMIN_USER_ID 返回 403
-/// 3. Lua 原子化 SETEX `blacklist:{token_hash}` + DEL `online:{token_hash}`
-/// 4. fail-closed：Redis 故障返回 503
+/// 2. 租户越权防护（§27.13.2 分层视图）：租户操作者只能强退本租户会话，跨租户返回 403
+/// 3. 超管保护：user_id == SUPER_ADMIN_USER_ID 返回 403
+/// 4. Lua 原子化 SETEX `blacklist:{token_hash}` + DEL `online:{token_hash}`
+/// 5. fail-closed：Redis 故障返回 503
 ///
 /// Lua 脚本 TTL 说明（M-3 精确化）：
 /// ARGV[1] = `max(session.exp - now, 1)`（精确剩余有效期，秒）。
@@ -268,7 +392,7 @@ async fn fallback_to_logininfor(
     ),
     responses(
         (status = 200, description = "强退成功", body = AjaxResult<serde_json::Value>),
-        (status = 403, description = "不允许强退超级管理员"),
+        (status = 403, description = "不允许强退超级管理员 / 跨租户越权"),
         (status = 404, description = "会话不存在或已过期"),
         (status = 503, description = "认证服务暂时不可用"),
     ),
@@ -276,6 +400,7 @@ async fn fallback_to_logininfor(
 )]
 pub async fn force_logout(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(token_hash): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let online_key = format!("online:{}", token_hash);
@@ -306,7 +431,34 @@ pub async fn force_logout(
         AppError::internal(&crate::tr!("error.monitor.session_invalid"))
     })?;
 
-    // 2. 超管保护（P0-R81-006）：禁止强退超级管理员
+    // 2. 租户越权防护（§27.13.2 分层视图）：租户操作者只能强退本租户会话。
+    //    旧 JSON（v2.13 前无 tenant_id，默认 0）按 user_id 回查 sys_user.tenant_id 兜底；
+    //    回查失败/用户已删除时按平台会话处理（0）→ 与 tenants 隔离口径一致地拒绝。
+    let operator_tid = operator.tenant_id();
+    if operator_tid != 0 {
+        let session_tid = if session.tenant_id != 0 {
+            session.tenant_id
+        } else {
+            state
+                .user_service
+                .tenant_ids_by_user_ids(&[session.user_id])
+                .await
+                .ok()
+                .and_then(|m| m.get(&session.user_id).copied())
+                .unwrap_or(0)
+        };
+        if session_tid != operator_tid {
+            tracing::warn!(
+                "跨租户强退拦截：operator_tid={} session_tid={} user_id={}",
+                operator_tid,
+                session_tid,
+                session.user_id
+            );
+            return Err(AppError::new(403, crate::tr!("error.common.forbidden")));
+        }
+    }
+
+    // 3. 超管保护（P0-R81-006）：禁止强退超级管理员
     if session.user_id == SUPER_ADMIN_USER_ID {
         return Err(AppError::new(
             403,
@@ -314,7 +466,7 @@ pub async fn force_logout(
         ));
     }
 
-    // 3. Lua 原子化 SETEX blacklist + DEL online + DEL sso:at（v4-F2 联动）
+    // 4. Lua 原子化 SETEX blacklist + DEL online + DEL sso:at（v4-F2 联动）
     //    KEYS[1] = blacklist:{token_hash}, KEYS[2] = online:{token_hash},
     //    KEYS[3] = sso:at:{token_hash}（平台会话无该 key，DEL no-op 无害）
     //    ARGV[1] = 黑名单 TTL（秒）
@@ -393,7 +545,7 @@ pub async fn my_session_list(
     Query(mut query): Query<OnlineQueryDto>,
 ) -> Result<TableDataInfo<SysUserOnline>, AppError> {
     query.user_name = Some(operator.username().to_string()); // 强制本人过滤，忽略入参
-    list(State(state), Query(query)).await
+    list(State(state), operator, Query(query)).await
 }
 
 /// DELETE /monitor/my-session/{tokenHash}（v5-N5：自助注销本人会话）

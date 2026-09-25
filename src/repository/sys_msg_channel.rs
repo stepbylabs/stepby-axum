@@ -38,13 +38,19 @@ impl SysMsgChannelRepository {
             .await
     }
 
-    /// 按 channel_code 查询渠道（唯一编码，未删除）
-    pub async fn find_by_code(&self, channel_code: &str) -> Result<Option<Model>, DbErr> {
-        SysMsgChannel::find()
-            .filter(Column::ChannelCode.eq(channel_code))
-            .filter(Column::DelFlag.eq("0"))
-            .one(self.base.db())
-            .await
+    /// 按 channel_code 查询渠道（唯一编码，未删除；tenant_scope 过滤租户）
+    pub async fn find_by_code(
+        &self,
+        channel_code: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<Option<Model>, DbErr> {
+        let mut q = SysMsgChannel::find();
+        q = q.filter(Column::ChannelCode.eq(channel_code));
+        q = q.filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            q = q.filter(Column::TenantId.eq(tid));
+        }
+        q.one(self.base.db()).await
     }
 
     /// 按 ID 列表批量查询渠道（单次 SELECT）
@@ -68,9 +74,13 @@ impl SysMsgChannelRepository {
         channel_code: Option<&str>,
         channel_type: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysMsgChannel::find();
         query = query.filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(name) = channel_name {
             query = query.filter(Column::ChannelName.like(format!("%{}%", like_escape(name))));
         }

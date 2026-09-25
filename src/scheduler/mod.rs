@@ -330,7 +330,8 @@ impl JobScheduler {
                     };
 
                     match notice_service
-                        .add_notice(dto, "system/scheduler", None)
+                        // 系统级（定时任务）无操作者租户上下文 → 平台租户 0
+                        .add_notice(dto, "system/scheduler", 0, None)
                         .await
                     {
                         Ok(_) => {
@@ -381,7 +382,7 @@ impl JobScheduler {
 
                 let msg_service = crate::service::sys_msg_service::SysMsgService::new(db, config);
 
-                match msg_service.retry_pending(MESSAGE_RETRY_BATCH).await {
+                match msg_service.retry_pending(MESSAGE_RETRY_BATCH, 0).await {
                     Ok(n) => {
                         if n > 0 {
                             tracing::info!("msg_send_retry: 本次重试完成 {} 条待重试消息", n);
@@ -645,10 +646,16 @@ impl JobScheduler {
     ///
     /// - 单个任务加载失败不阻断其他任务
     /// - misfire_policy='1'/'2' 的任务补执行一次
+    ///
+    /// 多租户：调度器为平台级组件，需覆盖**所有租户**的启用任务，故 tenant_scope 传 None；
+    /// 每个 job 自身的 tenant_id 在写 job_log / 任务进度时用于归属。
     pub async fn load_from_db(&self, job_repo: &SysJobRepository) -> Result<(), SchedulerError> {
-        let jobs = job_repo.find_by_status("0").await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e))
-        })?;
+        let jobs = job_repo
+            .find_by_status("0", None)
+            .await
+            .map_err(|e| {
+                SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e))
+            })?;
 
         for job in jobs {
             match self.add_job(&job).await {
@@ -1279,8 +1286,11 @@ async fn execute_with_logging(
     lock_guard.finish().await;
 
     // 写日志（失败不影响主流程）
+    // 多租户：调度器无登录操作者上下文，日志归属**按 job 行自身 tenant_id** 落库
+    // （平台级系统任务 tid=0），避免租户任务日志落到平台维度导致租户侧不可见。
     let log_repo = SysJobLogRepository::new(db.clone());
     let log_am = sys_job_log::ActiveModel {
+        tenant_id: Set(job.tenant_id),
         job_name: Set(job.job_name.clone()),
         job_group: Set(job.job_group.clone()),
         invoke_target: Set(job.invoke_target.clone()),
@@ -1726,7 +1736,7 @@ mod tests {
         let job = job(9001, "unit-success", "0 0 3 * * *", target);
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
-        let logs = log_repo.find_by_job_name("unit-success").await.unwrap();
+        let logs = log_repo.find_by_job_name("unit-success", None).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status.as_deref(), Some("0"));
         assert!(
@@ -1765,7 +1775,7 @@ mod tests {
         let job = job(9002, "unit-fail", "0 0 3 * * *", target);
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
-        let logs = log_repo.find_by_job_name("unit-fail").await.unwrap();
+        let logs = log_repo.find_by_job_name("unit-fail", None).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status.as_deref(), Some("1"));
         assert!(logs[0].exception_info.as_deref().unwrap().contains("boom"));
@@ -1795,7 +1805,7 @@ mod tests {
         let job = job(9003, "unit-panic", "0 0 3 * * *", target);
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
-        let logs = log_repo.find_by_job_name("unit-panic").await.unwrap();
+        let logs = log_repo.find_by_job_name("unit-panic", None).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status.as_deref(), Some("1"));
     }
@@ -1828,7 +1838,7 @@ mod tests {
         );
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
-        let logs = log_repo.find_by_job_name("unit-skiplock").await.unwrap();
+        let logs = log_repo.find_by_job_name("unit-skiplock", None).await.unwrap();
         assert!(logs.is_empty(), "锁被占用时应跳过执行，不写日志");
     }
 
@@ -1858,7 +1868,7 @@ mod tests {
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
         let logs = log_repo
-            .find_by_job_name("unit-skipconcurrent")
+            .find_by_job_name("unit-skipconcurrent", None)
             .await
             .unwrap();
         assert!(logs.is_empty(), "并发禁止时应跳过执行，不写日志");
@@ -1959,7 +1969,7 @@ mod tests {
         // run_once 内部 spawn 执行，等待其完成并写入日志
         tokio::time::sleep(Duration::from_millis(600)).await;
         let log_repo = SysJobLogRepository::new(db.clone());
-        let logs = log_repo.find_by_job_name("unit-once").await.unwrap();
+        let logs = log_repo.find_by_job_name("unit-once", None).await.unwrap();
         assert_eq!(logs.len(), 1);
     }
 

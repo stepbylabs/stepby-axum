@@ -286,17 +286,23 @@ impl SysFrontendErrorService {
     }
 
     /// 概览统计：来源分布 + 最近 days 天每日 error 数
-    pub async fn get_stats(&self, days: i64) -> Result<FrontendErrorStatsVo, ServiceError> {
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    pub async fn get_stats(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<FrontendErrorStatsVo, ServiceError> {
         let by_source = self
             .repo
-            .stats_by_source()
+            .stats_by_source(tenant_scope)
             .await?
             .into_iter()
             .map(|(source, count)| SourceCount { source, count })
             .collect();
         let daily = self
             .repo
-            .stats_daily_errors(days)
+            .stats_daily_errors(days, tenant_scope)
             .await?
             .into_iter()
             .map(|(date, count)| DailyErrorCount { date, count })

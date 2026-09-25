@@ -29,29 +29,50 @@ impl SysJobLogRepository {
     }
 
     /// 按任务名称查询日志
-    pub async fn find_by_job_name(&self, job_name: &str) -> Result<Vec<Model>, DbErr> {
-        SysJobLog::find()
-            .filter(Column::JobName.eq(job_name))
-            .all(self.base.db())
-            .await
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户日志；None（平台 0）不过滤。
+    pub async fn find_by_job_name(
+        &self,
+        job_name: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysJobLog::find().filter(Column::JobName.eq(job_name));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.all(self.base.db()).await
     }
 
     /// 按状态查询（0=成功 1=失败）
-    pub async fn find_by_status(&self, status: &str) -> Result<Vec<Model>, DbErr> {
-        SysJobLog::find()
-            .filter(Column::Status.eq(status))
-            .all(self.base.db())
-            .await
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户日志；None（平台 0）不过滤。
+    pub async fn find_by_status(
+        &self,
+        status: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysJobLog::find().filter(Column::Status.eq(status));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.all(self.base.db()).await
     }
 
     /// 分页查询任务日志（按创建时间倒序）
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户日志；None（平台 0）不过滤。
     pub async fn find_page_desc(
         &self,
         offset: u64,
         limit: u64,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
-        let total = SysJobLog::find().count(self.base.db()).await?;
-        let rows = SysJobLog::find()
+        let mut query = SysJobLog::find();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        let total = query.clone().count(self.base.db()).await?;
+        let rows = query
             .order_by_desc(Column::CreateTime)
             .offset(offset)
             .limit(limit)
@@ -61,6 +82,8 @@ impl SysJobLogRepository {
     }
 
     /// 多条件分页查询（job_name 模糊，job_group/status 精确，时间范围，按 create_time 倒序）
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户日志；None（平台 0）不过滤。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -71,8 +94,12 @@ impl SysJobLogRepository {
         status: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysJobLog::find();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(name) = job_name {
             query = query.filter(Column::JobName.like(format!("%{}%", like_escape(name))));
         }
@@ -101,6 +128,17 @@ impl SysJobLogRepository {
         Ok((rows, total))
     }
 
+    /// 按 ID 列表查询（多租户归属校验用）
+    pub async fn find_by_ids(&self, ids: &[i64]) -> Result<Vec<Model>, DbErr> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysJobLog::find()
+            .filter(Column::JobLogId.is_in(ids.to_vec()))
+            .all(self.base.db())
+            .await
+    }
+
     /// 批量物理删除
     pub async fn delete_by_ids(&self, ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
         SysJobLog::delete_many()
@@ -114,8 +152,12 @@ impl SysJobLogRepository {
         self.base.insert(model).await
     }
 
-    /// 清空任务日志（物理删除全部）
-    pub async fn clean_all(&self) -> Result<DeleteResult, DbErr> {
-        SysJobLog::delete_many().exec(self.base.db()).await
+    /// 清空任务日志（物理删除；tenant_scope=None 时清空全部，Some(tid) 仅清本租户）
+    pub async fn clean_all(&self, tenant_scope: Option<i64>) -> Result<DeleteResult, DbErr> {
+        let mut query = SysJobLog::delete_many();
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
+        query.exec(self.base.db()).await
     }
 }

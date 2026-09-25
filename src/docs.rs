@@ -195,6 +195,13 @@ struct SwaggerAssets;
         crate::handler::sys_pat_handler::revoke_mine,
         crate::handler::sys_pat_handler::list_all,
         crate::handler::sys_pat_handler::revoke_by_admin,
+        // ==================== 租户域名管理（多租户 Phase 3 域名链路）====================
+        crate::handler::sys_tenant_domain_handler::list,
+        crate::handler::sys_tenant_domain_handler::add,
+        crate::handler::sys_tenant_domain_handler::verify,
+        crate::handler::sys_tenant_domain_handler::set_primary,
+        crate::handler::sys_tenant_domain_handler::change_status,
+        crate::handler::sys_tenant_domain_handler::remove,
     ),
     components(
         schemas(
@@ -241,6 +248,13 @@ struct SwaggerAssets;
             crate::service::sys_tenant_service::TenantAddDto,
             crate::service::sys_tenant_service::TenantEditDto,
             crate::service::sys_tenant_service::TenantStatusDto,
+            // 租户域名（多租户 Phase 3 域名链路）
+            crate::service::sys_tenant_domain_service::TenantDomainVo,
+            crate::service::sys_tenant_domain_service::TenantDomainVerifyVo,
+            crate::service::sys_tenant_domain_service::TenantDomainAddDto,
+            crate::service::sys_tenant_domain_service::TenantDomainStatusDto,
+            crate::service::sys_tenant_domain_service::TenantDomainIdDto,
+            crate::handler::sys_tenant_domain_handler::TenantDomainQueryDto,
             crate::service::sys_dept_service::DeptEditDto,
             // 岗位
             crate::service::sys_post_service::PostAddDto,
@@ -337,6 +351,7 @@ struct SwaggerAssets;
         (name = "common", description = "通用接口"),
         (name = "tool-gen", description = "代码生成"),
         (name = "pat", description = "个人访问令牌（PAT）"),
+        (name = "system-tenant-domain", description = "租户域名管理（多租户 Phase 3 域名链路）"),
     ),
 )]
 pub struct ApiDoc;

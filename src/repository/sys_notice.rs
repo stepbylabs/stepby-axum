@@ -60,8 +60,12 @@ impl SysNoticeRepository {
         create_by: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysNotice::find();
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(title) = notice_title {
             query = query.filter(Column::NoticeTitle.like(format!("%{}%", like_escape(title))));
         }
@@ -109,10 +113,18 @@ impl SysNoticeRepository {
             .await
     }
 
-    /// 查询状态正常的顶部公告（status='0'），限制返回条数
-    pub async fn find_top_notices(&self, limit: u64) -> Result<Vec<Model>, DbErr> {
-        SysNotice::find()
-            .filter(Column::Status.eq("0"))
+    /// 查询状态正常的顶部公告（status='0'），限制返回条数（tenant_scope 过滤租户）
+    pub async fn find_top_notices(
+        &self,
+        limit: u64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysNotice::find();
+        query = query.filter(Column::Status.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
+        query
             .order_by_desc(Column::CreateTime)
             .limit(limit)
             .all(self.base.db())

@@ -72,13 +72,19 @@ impl SysPatRepository {
     }
 
     /// 全量分页查询（管理员），可选按 user_id 过滤
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户令牌；`None`（平台）→ 全量。
     pub async fn find_page_all(
         &self,
         user_id: Option<i64>,
         offset: u64,
         limit: u64,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysPat::find();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(uid) = user_id {
             query = query.filter(Column::UserId.eq(uid));
         }
@@ -90,19 +96,6 @@ impl SysPatRepository {
             .all(self.base.db())
             .await?;
         Ok((rows, total))
-    }
-
-    /// 按 pat_id 查询（可选限定属主，用于自助吊销的越权保护）
-    pub async fn find_by_id_scoped(
-        &self,
-        pat_id: &str,
-        owner_user_id: Option<i64>,
-    ) -> Result<Option<Model>, DbErr> {
-        let mut query = SysPat::find().filter(Column::PatId.eq(pat_id));
-        if let Some(uid) = owner_user_id {
-            query = query.filter(Column::UserId.eq(uid));
-        }
-        query.one(self.base.db()).await
     }
 
     /// 吊销令牌（置 status='1'），返回受影响行数

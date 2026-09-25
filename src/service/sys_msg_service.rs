@@ -318,6 +318,7 @@ impl SysMsgService {
     pub async fn get_channel_page(
         &self,
         query: ChannelQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysMsgChannelModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -329,6 +330,7 @@ impl SysMsgService {
                 query.channel_code.as_deref(),
                 query.channel_type.as_deref(),
                 query.status.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         // v5-E6：出参 unseal（管理员配置回显明文；幂等 seal 保证编辑回传不双重加密）
@@ -351,12 +353,17 @@ impl SysMsgService {
     pub async fn get_channel_by_id(
         &self,
         channel_id: i64,
+        operator_tid: i64,
     ) -> Result<SysMsgChannelModel, ServiceError> {
         let mut model = self
             .channel_repo
             .find_active_by_id(channel_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.channel_not_found")))?;
+        // 越权防护：租户管理员不得读取其他租户消息渠道
+        if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         // v5-E6：出参 unseal（配置回显明文）
         if let Some(c) = &model.config_json {
             model.config_json = Some(crate::utils::crypto::unseal_sensitive_value(
@@ -372,6 +379,7 @@ impl SysMsgService {
         &self,
         dto: ChannelAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysMsgChannelModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_channel_type(&dto.channel_type)?;
@@ -393,6 +401,7 @@ impl SysMsgService {
             None => None,
         };
         let am = SysMsgChannelActiveModel {
+            tenant_id: Set(operator_tid),
             channel_name: Set(dto.channel_name),
             channel_code: Set(dto.channel_code),
             channel_type: Set(dto.channel_type),
@@ -415,12 +424,13 @@ impl SysMsgService {
         &self,
         dto: ChannelEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysMsgChannelModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_channel_type(&dto.channel_type)?;
         Self::validate_config_json(&dto.config_json)?;
 
-        let existing = self.get_channel_by_id(dto.channel_id).await?;
+        let existing = self.get_channel_by_id(dto.channel_id, operator_tid).await?;
         // 唯一编码校验（排除自身）
         if existing.channel_code != dto.channel_code
             && self.channel_repo.exists_by_code(&dto.channel_code).await?
@@ -452,7 +462,11 @@ impl SysMsgService {
     }
 
     /// 批量删除消息渠道（物理删除；被模板引用的渠道拒绝删除）
-    pub async fn delete_channel(&self, channel_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_channel(
+        &self,
+        channel_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if channel_ids.is_empty() {
             return Ok(());
         }
@@ -462,11 +476,21 @@ impl SysMsgService {
                 "error.msg.channel_not_found"
             )));
         }
+        // 越权防护：租户管理员不得跨租户删除消息渠道
+        if existing
+            .iter()
+            .any(|c| !crate::common::tenant::tenant_allowed(operator_tid, c.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         // 引用校验：任一渠道被启用模板引用则拒绝删除
         for channel in &existing {
             let refs = self
                 .template_repo
-                .count_by_channel_code(&channel.channel_code)
+                .count_by_channel_code(
+                    &channel.channel_code,
+                    crate::common::tenant::tenant_scope(operator_tid),
+                )
                 .await?;
             if refs > 0 {
                 return Err(ServiceError::bad_request(&crate::tr!(
@@ -480,8 +504,8 @@ impl SysMsgService {
     }
 
     /// 渠道连通性测试（email 校验 SMTP 配置可用；sms/site 校验配置合法性）
-    pub async fn test_channel(&self, channel_id: i64) -> Result<(), ServiceError> {
-        let channel = self.get_channel_by_id(channel_id).await?;
+    pub async fn test_channel(&self, channel_id: i64, operator_tid: i64) -> Result<(), ServiceError> {
+        let channel = self.get_channel_by_id(channel_id, operator_tid).await?;
         match channel.channel_type.as_str() {
             "email" => {
                 if !self.mailer.is_enabled() {
@@ -507,6 +531,7 @@ impl SysMsgService {
     pub async fn get_template_page(
         &self,
         query: TemplateQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysMsgTemplateModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -518,6 +543,7 @@ impl SysMsgService {
                 query.template_code.as_deref(),
                 query.channel_code.as_deref(),
                 query.status.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         Ok((rows, total))
@@ -527,21 +553,29 @@ impl SysMsgService {
     pub async fn get_template_by_id(
         &self,
         template_id: i64,
+        operator_tid: i64,
     ) -> Result<SysMsgTemplateModel, ServiceError> {
-        self.template_repo
+        let model = self
+            .template_repo
             .find_active_by_id(template_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.template_not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.template_not_found")))?;
+        // 越权防护：租户管理员不得读取其他租户消息模板
+        if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        Ok(model)
     }
 
-    /// 校验模板绑定的渠道存在且启用
+    /// 校验模板绑定的渠道存在且启用（按模板租户维度查找渠道）
     async fn validate_channel_exists(
         &self,
         channel_code: &str,
+        tenant_id: i64,
     ) -> Result<SysMsgChannelModel, ServiceError> {
         let channel = self
             .channel_repo
-            .find_by_code(channel_code)
+            .find_by_code(channel_code, crate::common::tenant::tenant_scope(tenant_id))
             .await?
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.msg.channel_not_found")))?;
         if channel.status.as_deref() != Some("0") {
@@ -557,13 +591,14 @@ impl SysMsgService {
         &self,
         dto: TemplateAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysMsgTemplateModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         let channel_code = dto
             .channel_code
             .clone()
             .unwrap_or_else(|| "email".to_string());
-        self.validate_channel_exists(&channel_code).await?;
+        self.validate_channel_exists(&channel_code, operator_tid).await?;
 
         if self
             .template_repo
@@ -577,6 +612,7 @@ impl SysMsgService {
 
         let now = crate::common::datetime::now_naive();
         let am = SysMsgTemplateActiveModel {
+            tenant_id: Set(operator_tid),
             template_name: Set(dto.template_name),
             template_code: Set(dto.template_code),
             channel_code: Set(channel_code),
@@ -600,15 +636,16 @@ impl SysMsgService {
         &self,
         dto: TemplateEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysMsgTemplateModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         let channel_code = dto
             .channel_code
             .clone()
             .unwrap_or_else(|| "email".to_string());
-        self.validate_channel_exists(&channel_code).await?;
+        self.validate_channel_exists(&channel_code, operator_tid).await?;
 
-        let existing = self.get_template_by_id(dto.template_id).await?;
+        let existing = self.get_template_by_id(dto.template_id, operator_tid).await?;
         if existing.template_code != dto.template_code
             && self
                 .template_repo
@@ -636,7 +673,11 @@ impl SysMsgService {
     }
 
     /// 批量删除消息模板
-    pub async fn delete_template(&self, template_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_template(
+        &self,
+        template_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if template_ids.is_empty() {
             return Ok(());
         }
@@ -645,6 +686,13 @@ impl SysMsgService {
             return Err(ServiceError::not_found(&crate::tr!(
                 "error.msg.template_not_found"
             )));
+        }
+        // 越权防护：租户管理员不得跨租户删除消息模板
+        if existing
+            .iter()
+            .any(|t| !crate::common::tenant::tenant_allowed(operator_tid, t.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
         }
         self.template_repo.delete_by_ids(template_ids).await?;
         Ok(())
@@ -656,6 +704,7 @@ impl SysMsgService {
     pub async fn get_send_log_page(
         &self,
         query: SendLogQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysMsgSendLogModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -667,13 +716,18 @@ impl SysMsgService {
                 query.template_code.as_deref(),
                 query.channel_code.as_deref(),
                 query.status.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         Ok((rows, total))
     }
 
     /// 批量删除发送记录
-    pub async fn delete_send_logs(&self, log_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_send_logs(
+        &self,
+        log_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if log_ids.is_empty() {
             return Ok(());
         }
@@ -683,13 +737,27 @@ impl SysMsgService {
                 "error.msg.log_not_found"
             )));
         }
+        // 越权防护：租户管理员不得跨租户删除发送记录
+        if existing
+            .iter()
+            .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         self.send_log_repo.delete_by_ids(log_ids).await?;
         Ok(())
     }
 
-    /// 清空发送记录
-    pub async fn clean_send_logs(&self, limit: Option<u64>) -> Result<u64, ServiceError> {
-        let result = self.send_log_repo.clean(limit).await?;
+    /// 清空发送记录（按操作者租户维度，禁止跨租户 mass-clean）
+    pub async fn clean_send_logs(
+        &self,
+        limit: Option<u64>,
+        operator_tid: i64,
+    ) -> Result<u64, ServiceError> {
+        let result = self
+            .send_log_repo
+            .clean(limit, crate::common::tenant::tenant_scope(operator_tid))
+            .await?;
         Ok(result.rows_affected)
     }
 
@@ -753,14 +821,20 @@ impl SysMsgService {
         &self,
         dto: SendDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysMsgSendLogModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
         let template = self
             .template_repo
-            .find_by_code(&dto.template_code)
+            // 按编码全局查找后做 tenant_allowed 判定（跨租户明确返回 403，不静默降级）
+            .find_by_code(&dto.template_code, None)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.template_not_found")))?;
+        // 越权防护：租户管理员不得跨租户使用消息模板
+        if !crate::common::tenant::tenant_allowed(operator_tid, template.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         if template.status.as_deref() != Some("0") {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.msg.template_disabled"
@@ -773,7 +847,10 @@ impl SysMsgService {
             .unwrap_or_else(|| template.channel_code.clone());
         let channel = self
             .channel_repo
-            .find_by_code(&channel_code)
+            .find_by_code(
+                &channel_code,
+                crate::common::tenant::tenant_scope(template.tenant_id),
+            )
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.channel_not_found")))?;
         if channel.status.as_deref() != Some("0") {
@@ -804,6 +881,8 @@ impl SysMsgService {
         };
 
         let am = SysMsgSendLogActiveModel {
+            // 运行期产物：归所属模板租户（可能由定时/异步投递触发，无操作者上下文）
+            tenant_id: Set(template.tenant_id),
             template_code: Set(Some(dto.template_code)),
             channel_code: Set(Some(channel.channel_code.clone())),
             to_addr: Set(dto.to_addr),
@@ -826,7 +905,11 @@ impl SysMsgService {
     ///
     /// 复用记录中已渲染的 subject/content；成功置 status='0'，
     /// 失败累加 retry_count，未达上限保持 status='2'，达到上限置 status='1'。
-    pub async fn retry_logs(&self, log_ids: Vec<i64>) -> Result<u64, ServiceError> {
+    pub async fn retry_logs(
+        &self,
+        log_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<u64, ServiceError> {
         if log_ids.is_empty() {
             return Ok(0);
         }
@@ -836,13 +919,23 @@ impl SysMsgService {
                 "error.msg.log_not_found"
             )));
         }
+        // 越权防护：租户管理员不得跨租户重试发送记录
+        if logs
+            .iter()
+            .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
 
         let mut processed = 0u64;
         for log in logs {
             let channel_code = log.channel_code.clone().unwrap_or_default();
             let channel = self
                 .channel_repo
-                .find_by_code(&channel_code)
+                .find_by_code(
+                    &channel_code,
+                    crate::common::tenant::tenant_scope(log.tenant_id),
+                )
                 .await?
                 .ok_or_else(|| {
                     ServiceError::not_found(&crate::tr!("error.msg.channel_not_found"))
@@ -890,9 +983,21 @@ impl SysMsgService {
     }
 
     /// 将指定 log_id 置为待重试状态（前端「触发重试」按钮）
-    pub async fn mark_pending_retry(&self, log_ids: &[i64]) -> Result<u64, ServiceError> {
+    pub async fn mark_pending_retry(
+        &self,
+        log_ids: &[i64],
+        operator_tid: i64,
+    ) -> Result<u64, ServiceError> {
         if log_ids.is_empty() {
             return Ok(0);
+        }
+        let existing = self.send_log_repo.find_by_ids(log_ids).await?;
+        // 越权防护：租户管理员不得跨租户标记发送记录
+        if existing
+            .iter()
+            .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
         }
         let result = self.send_log_repo.mark_pending_retry(log_ids).await?;
         Ok(result.rows_affected)
@@ -901,13 +1006,23 @@ impl SysMsgService {
     /// 待重试批次批量重试（定时任务调用）
     ///
     /// 查询 status='2' 且 retry_count < max_retry_count 的记录，最多 batch_limit 条，逐条重发。
-    pub async fn retry_pending(&self, batch_limit: u64) -> Result<u64, ServiceError> {
-        let pending = self.send_log_repo.find_pending_retry(batch_limit).await?;
+    pub async fn retry_pending(
+        &self,
+        batch_limit: u64,
+        operator_tid: i64,
+    ) -> Result<u64, ServiceError> {
+        let pending = self
+            .send_log_repo
+            .find_pending_retry(
+                batch_limit,
+                crate::common::tenant::tenant_scope(operator_tid),
+            )
+            .await?;
         let ids: Vec<i64> = pending.iter().map(|l| l.log_id).collect();
         if ids.is_empty() {
             return Ok(0);
         }
-        self.retry_logs(ids).await
+        self.retry_logs(ids, operator_tid).await
     }
 
     /// 解析逗号分隔 id 列表

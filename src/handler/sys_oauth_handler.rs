@@ -333,7 +333,7 @@ pub async fn bind_oauth(
     let user_id = parse_user_id(operator.user_id())?;
     let binding = state
         .oauth_service
-        .bind_oauth(dto, user_id, &mut state.redis.clone())
+        .bind_oauth(dto, user_id, &mut state.redis.clone(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(serde_json::json!({
         "provider": binding.provider,

@@ -31,6 +31,58 @@ use crate::service::sys_oper_log_service::OperLogRecord;
 use crate::state::AppState;
 use crate::utils::ip::extract_client_ip;
 
+/// 「目标租户单元」：中间件在请求处理前注入到 request extensions，
+/// handler 在确知「被操作资源所属租户」时写入，中间件在 `next.run` 返回后读取并落库。
+///
+/// 多租户 Phase 3：操作者租户（`Claims.tid`）与目标资源租户不同（平台代管）时，
+/// 审计日志记录 `target_tenant_id` = 被操作资源租户，使资源所属租户也能检索到该操作；
+/// 二者相同或无 handler 写入时为 `None`。
+///
+/// 内部使用 `Arc<Mutex<Option<i64>>>` 共享内部可变性，避免跨 `await` 持有 `MutexGuard`。
+#[derive(Clone, Debug, Default)]
+pub struct TargetTenant(pub Arc<std::sync::Mutex<Option<i64>>>);
+
+impl TargetTenant {
+    /// 创建空单元（`None` 表示未记录目标租户）
+    pub fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(None)))
+    }
+
+    /// handler 侧写入被操作资源所属租户
+    ///
+    /// Mutex 中毒时静默忽略（审计字段，不应影响主流程）。
+    pub fn set(&self, tenant_id: i64) {
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = Some(tenant_id);
+        }
+    }
+
+    /// 中间件侧读取目标租户；未写入或中毒时返回 `None`
+    pub fn get(&self) -> Option<i64> {
+        self.0.lock().ok().and_then(|guard| *guard)
+    }
+}
+
+/// 提取器实现：handler 通过 `TargetTenant` 参数注入即可写入目标租户，
+/// 无需手工访问 extensions（未注入时返回独立空单元，写入不生效但不报错）。
+impl<S> axum::extract::FromRequestParts<S> for TargetTenant
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(parts
+            .extensions
+            .get::<TargetTenant>()
+            .cloned()
+            .unwrap_or_else(TargetTenant::new))
+    }
+}
+
 /// 日志记录的请求体/响应体阈值（超出则记录截断警告）
 /// 原 64KB 过小，正常请求体（如富文本通知、菜单配置）会被静默丢弃，导致日志缺失且转发空体。
 const MAX_BODY_BYTES: usize = 1024 * 1024; // 1MB
@@ -120,7 +172,10 @@ pub async fn oper_log_middleware(
 
     // 读取请求体（用于 oper_param + 提取 ID 用于审计快照）
     // SEC-006：检查 Content-Length，超大请求体不缓冲直接透传，避免 10MB×并发数 的内存放大
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    // 多租户 Phase 3：注入「目标租户单元」，供 handler 写入被操作资源所属租户
+    let target_tenant = TargetTenant::new();
+    parts.extensions.insert(target_tenant.clone());
     let req_content_length = parts
         .headers
         .get(axum::http::header::CONTENT_LENGTH)
@@ -186,6 +241,9 @@ pub async fn oper_log_middleware(
 
     // 执行请求
     let response = next.run(req).await;
+
+    // 多租户 Phase 3：读取 handler 写入的目标租户；与操作者租户相同则不记录（NULL）
+    let target_tenant_id = target_tenant.get().filter(|t| *t != operator_tid);
 
     // 计算耗时
     let cost_time = start.elapsed().as_millis() as i64;
@@ -305,6 +363,7 @@ pub async fn oper_log_middleware(
         operator_type,
         oper_name: oper_name.clone(),
         tenant_id: operator_tid,
+        target_tenant_id,
         dept_name: String::new(), // 占位，spawn 任务中查询后填入
         oper_url,
         oper_ip,
@@ -460,7 +519,7 @@ async fn fetch_snapshot_value(
     } else if oper_url.starts_with("/system/dept") {
         state
             .dept_service
-            .get_dept_by_id(id, None) // 内部快照提取：无操作人上下文，不过滤
+            .get_dept_by_id(id, None, None) // 内部快照提取：无操作人上下文，不过滤
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())
@@ -474,28 +533,28 @@ async fn fetch_snapshot_value(
     } else if oper_url.starts_with("/system/config") {
         state
             .config_service
-            .get_config_by_id(id)
+            .get_config_by_id(id, None) // 内部快照提取：无操作人上下文，不过滤（平台视角）
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())
     } else if oper_url.starts_with("/system/notice") {
         state
             .notice_service
-            .get_notice_by_id(id)
+            .get_notice_by_id(id, 0) // 内部快照提取：0=平台视角，不做租户越权过滤
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())
     } else if oper_url.starts_with("/system/dict/type") {
         state
             .dict_service
-            .get_dict_type_by_id(id)
+            .get_dict_type_by_id(id, None) // 内部快照提取：无操作人上下文，不过滤（平台视角）
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())
     } else if oper_url.starts_with("/system/dict/data") {
         state
             .dict_service
-            .get_dict_data_by_id(id)
+            .get_dict_data_by_id(id, None) // 内部快照提取：无操作人上下文，不过滤（平台视角）
             .await
             .ok()
             .map(|m| serde_json::to_value(&m).unwrap_or_default())

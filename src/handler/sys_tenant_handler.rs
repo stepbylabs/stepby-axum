@@ -1,22 +1,24 @@
 // axum-backend/src/handler/sys_tenant_handler.rs
-//! 租户管理 Handler（多租户 Phase 2 立项实施）
+//! 租户管理 Handler（多租户 Phase 3：事实源 = `sys_tenant`，主键为 `tenant_id`）
 //!
 //! 接口路径与返回格式对齐 yebot-ui 前端调用规范：
-//! - GET    /system/tenant/list            租户列表（parent_id=0 顶层部门，排除平台根）
-//! - GET    /system/tenant/{deptId}        租户详情
-//! - POST   /system/tenant                 新建租户
-//! - PUT    /system/tenant                 修改租户
-//! - PUT    /system/tenant/changeStatus    租户启停（停用后该租户用户无法登录）
-//! - DELETE /system/tenant/{deptId}        删除租户（租户内仍有用户时拒绝）
+//! - GET    /system/tenant/list            租户列表（平台全量；租户操作者仅本租户）
+//! - GET    /system/tenant/{tenantId}      租户详情
+//! - POST   /system/tenant                 新建租户（含根部门/默认角色/管理员初始化，仅平台）
+//! - PUT    /system/tenant                 修改租户（平台可改全部；租户仅名称/联系人/备注）
+//! - PUT    /system/tenant/changeStatus    租户启停（停用立即吊销该租户全部会话，仅平台）
+//! - DELETE /system/tenant/{tenantId}      删除租户（软删回收站；租户内仍有用户时拒绝，仅平台）
+//! - PUT    /system/tenant/restore/{tenantId}  恢复租户（回收站 → 停用态，仅平台）
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use std::sync::Arc;
 
 use crate::common::{AjaxResult, AppError};
-use crate::middleware::Operator;
+use crate::middleware::{Operator, TargetTenant};
 use crate::service::sys_tenant_service::{
-    SysTenantService, TenantAddDto, TenantEditDto, TenantQueryDto, TenantStatusDto, TenantVo,
+    SysTenantService, TenantAddDto, TenantEditDto, TenantPackageOptionVo, TenantQueryDto,
+    TenantStatusDto, TenantVo,
 };
 use crate::state::AppState;
 
@@ -43,37 +45,39 @@ pub async fn list(
     Ok(AjaxResult::success(list))
 }
 
-/// GET /system/tenant/{deptId} — 租户详情
+/// GET /system/tenant/{tenantId} — 租户详情
 #[utoipa::path(
     get,
-    path = "/system/tenant/{deptId}",
-    params(("deptId" = i64, Path, description = "租户 ID（根部门 ID）")),
+    path = "/system/tenant/{tenantId}",
+    params(("tenantId" = i64, Path, description = "租户 ID（独立 id 空间）")),
     responses(
         (status = 200, description = "查询成功", body = AjaxResult<TenantVo>),
         (status = 404, description = "租户不存在"),
+        (status = 403, description = "跨租户访问被拒绝"),
     ),
     tag = "system-tenant"
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
     operator: Operator,
-    Path(dept_id): Path<i64>,
+    Path(tenant_id): Path<i64>,
 ) -> Result<AjaxResult<TenantVo>, AppError> {
     let vo = state
         .tenant_service
-        .get_info(dept_id, operator.tenant_id())
+        .get_info(tenant_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
 
-/// POST /system/tenant — 新建租户
+/// POST /system/tenant — 新建租户（仅平台管理员）
 #[utoipa::path(
     post,
     path = "/system/tenant",
     request_body = TenantAddDto,
     responses(
-        (status = 200, description = "创建成功", body = AjaxResult<TenantVo>),
+        (status = 200, description = "创建成功（含一次性返回的租户管理员初始密码）", body = AjaxResult<TenantVo>),
         (status = 400, description = "参数错误"),
+        (status = 403, description = "仅平台管理员可新建租户"),
     ),
     tag = "system-tenant"
 )]
@@ -84,7 +88,7 @@ pub async fn add(
 ) -> Result<AjaxResult<TenantVo>, AppError> {
     let vo = state
         .tenant_service
-        .add(dto, operator.username())
+        .add(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -97,14 +101,18 @@ pub async fn add(
     responses(
         (status = 200, description = "修改成功", body = AjaxResult<TenantVo>),
         (status = 400, description = "参数错误"),
+        (status = 403, description = "租户越权修改平台分配项（套餐/配额/到期）"),
     ),
     tag = "system-tenant"
 )]
 pub async fn edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    target_tenant: TargetTenant,
     Json(dto): Json<TenantEditDto>,
 ) -> Result<AjaxResult<TenantVo>, AppError> {
+    // 多租户 Phase 3：记录被操作租户，供审计 target_tenant_id（平台代管场景）
+    target_tenant.set(dto.tenant_id);
     let vo = state
         .tenant_service
         .edit(dto, operator.username(), operator.tenant_id())
@@ -112,7 +120,7 @@ pub async fn edit(
     Ok(AjaxResult::success(vo))
 }
 
-/// PUT /system/tenant/changeStatus — 租户启停
+/// PUT /system/tenant/changeStatus — 租户启停（仅平台管理员）
 #[utoipa::path(
     put,
     path = "/system/tenant/changeStatus",
@@ -120,14 +128,18 @@ pub async fn edit(
     responses(
         (status = 200, description = "操作成功", body = AjaxResult<serde_json::Value>),
         (status = 400, description = "参数错误"),
+        (status = 403, description = "仅平台管理员可启停租户"),
     ),
     tag = "system-tenant"
 )]
 pub async fn change_status(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    target_tenant: TargetTenant,
     Json(dto): Json<TenantStatusDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 多租户 Phase 3：记录被操作租户，供审计 target_tenant_id
+    target_tenant.set(dto.tenant_id);
     state
         .tenant_service
         .change_status(dto, operator.username(), operator.tenant_id())
@@ -135,27 +147,79 @@ pub async fn change_status(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
-/// DELETE /system/tenant/{deptId} — 删除租户
+/// DELETE /system/tenant/{tenantId} — 删除租户（仅平台管理员）
 #[utoipa::path(
     delete,
-    path = "/system/tenant/{deptId}",
-    params(("deptId" = i64, Path, description = "租户 ID（根部门 ID）")),
+    path = "/system/tenant/{tenantId}",
+    params(("tenantId" = i64, Path, description = "租户 ID（独立 id 空间）")),
     responses(
         (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
         (status = 400, description = "租户内仍有用户"),
+        (status = 403, description = "仅平台管理员可删除租户"),
     ),
     tag = "system-tenant"
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
     operator: Operator,
-    Path(dept_id): Path<i64>,
+    target_tenant: TargetTenant,
+    Path(tenant_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 多租户 Phase 3：记录被删租户，供审计 target_tenant_id
+    target_tenant.set(tenant_id);
     state
         .tenant_service
-        .remove(dept_id, operator.username(), operator.tenant_id())
+        .remove(tenant_id, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
+}
+
+/// PUT /system/tenant/restore/{tenantId} — 恢复租户（仅平台管理员）
+#[utoipa::path(
+    put,
+    path = "/system/tenant/restore/{tenantId}",
+    params(("tenantId" = i64, Path, description = "租户 ID（独立 id 空间）")),
+    responses(
+        (status = 200, description = "恢复成功（恢复为停用态，需显式启用）", body = AjaxResult<TenantVo>),
+        (status = 400, description = "租户不在回收站"),
+        (status = 403, description = "仅平台管理员可恢复租户"),
+    ),
+    tag = "system-tenant"
+)]
+pub async fn restore(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    target_tenant: TargetTenant,
+    Path(tenant_id): Path<i64>,
+) -> Result<AjaxResult<TenantVo>, AppError> {
+    // 多租户 Phase 3：记录被恢复租户，供审计 target_tenant_id
+    target_tenant.set(tenant_id);
+    let vo = state
+        .tenant_service
+        .restore(tenant_id, operator.username(), operator.tenant_id())
+        .await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// GET /system/tenant/package/options — 套餐下拉（仅平台管理员）
+#[utoipa::path(
+    get,
+    path = "/system/tenant/package/options",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<TenantPackageOptionVo>>),
+        (status = 403, description = "仅平台管理员可查询套餐名录"),
+    ),
+    tag = "system-tenant"
+)]
+pub async fn package_options(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<Vec<TenantPackageOptionVo>>, AppError> {
+    let list = state
+        .tenant_service
+        .package_options(operator.tenant_id())
+        .await?;
+    Ok(AjaxResult::success(list))
 }
 
 /// 供 router 挂载的类型自检（避免 unused import 告警）

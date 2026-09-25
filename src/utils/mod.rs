@@ -2,6 +2,7 @@
 
 pub mod captcha;
 pub mod crypto;
+pub mod dns_txt;
 pub mod ip;
 pub mod ip_location;
 pub mod password;

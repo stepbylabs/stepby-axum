@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::common::{AjaxResult, AppError, TreeSelectVo};
 use crate::entity::sys_dept::Model as SysDeptModel;
-use crate::middleware::Operator;
+use crate::middleware::{Operator, TargetTenant};
 use crate::service::sys_dept_service::{DeptAddDto, DeptEditDto, DeptQueryDto, DeptSortDto};
 use crate::state::AppState;
 
@@ -76,7 +76,7 @@ pub async fn update_sort(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state
         .dept_service
-        .update_dept_sort(dto, operator.username())
+        .update_dept_sort(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.sort")))
 }
@@ -104,7 +104,11 @@ pub async fn list_exclude(
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
     let list = state
         .dept_service
-        .list_exclude(dept_id, operator_user_id)
+        .list_exclude(
+            dept_id,
+            operator_user_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(AjaxResult::success(list))
 }
@@ -161,7 +165,11 @@ pub async fn get_info(
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
     let dept = state
         .dept_service
-        .get_dept_by_id(dept_id, operator_user_id)
+        .get_dept_by_id(
+            dept_id,
+            operator_user_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(AjaxResult::success(dept))
 }
@@ -185,7 +193,7 @@ pub async fn add(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let dept = state
         .dept_service
-        .add_dept(dto, operator.username())
+        .add_dept(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.add_dept",
@@ -209,11 +217,20 @@ pub async fn add(
 pub async fn edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    target_tenant: TargetTenant,
     Json(dto): Json<DeptEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 多租户 Phase 3：记录被操作部门所属租户，供审计 target_tenant_id（平台代管场景）
+    if let Ok(dept) = state
+        .dept_service
+        .get_dept_by_id(dto.dept_id, None, None)
+        .await
+    {
+        target_tenant.set(dept.tenant_id);
+    }
     state
         .dept_service
-        .edit_dept(dto, operator.username())
+        .edit_dept(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -234,8 +251,21 @@ pub async fn edit(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
+    target_tenant: TargetTenant,
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.dept_service.delete_dept(dept_id).await?;
+    // 多租户 Phase 3：记录被删部门所属租户，供审计 target_tenant_id（平台代管场景）
+    if let Ok(dept) = state
+        .dept_service
+        .get_dept_by_id(dept_id, None, None)
+        .await
+    {
+        target_tenant.set(dept.tenant_id);
+    }
+    state
+        .dept_service
+        .delete_dept(dept_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

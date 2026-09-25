@@ -50,9 +50,14 @@ use crate::utils::parse_id_list;
 )]
 pub async fn dict_type_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<DictTypeQueryDto>,
 ) -> Result<TableDataInfo<SysDictTypeModel>, AppError> {
-    let (rows, total) = state.dict_service.get_dict_type_page(query).await?;
+    // 多租户（§27.8）：平台操作者(0) 全量；租户仅返回「本租户自建类型 + 平台类型」
+    let (rows, total) = state
+        .dict_service
+        .get_dict_type_page(query, Some(operator.tenant_id()))
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -69,8 +74,13 @@ pub async fn dict_type_list(
 )]
 pub async fn dict_type_optionselect(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<Vec<SysDictTypeModel>>, AppError> {
-    let rows = state.dict_service.get_all_dict_types().await?;
+    // 多租户（§27.8）：内容随租户域变化（本租户自建类型 + 平台类型），不可被跨租户共享缓存
+    let rows = state
+        .dict_service
+        .get_all_dict_types(Some(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(rows))
 }
 
@@ -111,9 +121,14 @@ pub async fn dict_type_refresh_cache(
 )]
 pub async fn dict_type_export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<DictTypeQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.dict_service.export_dict_types(query).await?;
+    // 多租户（§27.8）：平台操作者全量导出；租户导出生效视图
+    let rows = state
+        .dict_service
+        .export_dict_types(query, Some(operator.tenant_id()))
+        .await?;
 
     let columns = [
         ExcelColumn {
@@ -188,9 +203,14 @@ pub async fn dict_type_export(
 )]
 pub async fn dict_type_get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(dict_id): Path<i64>,
 ) -> Result<AjaxResult<SysDictTypeModel>, AppError> {
-    let model = state.dict_service.get_dict_type_by_id(dict_id).await?;
+    // 多租户（§27.8）：租户仅可见平台类型或本租户自建类型，否则 403
+    let model = state
+        .dict_service
+        .get_dict_type_by_id(dict_id, Some(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -213,7 +233,7 @@ pub async fn dict_type_add(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .dict_service
-        .add_dict_type(dto, operator.username())
+        .add_dict_type(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
@@ -238,7 +258,7 @@ pub async fn dict_type_edit(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .dict_service
-        .edit_dict_type(dto, operator.username())
+        .edit_dict_type(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -259,6 +279,7 @@ pub async fn dict_type_edit(
 )]
 pub async fn dict_type_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(dict_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&dict_ids);
@@ -274,7 +295,10 @@ pub async fn dict_type_remove(
         )));
     }
 
-    state.dict_service.delete_dict_types(ids).await?;
+    state
+        .dict_service
+        .delete_dict_types(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -294,9 +318,14 @@ pub async fn dict_type_remove(
 )]
 pub async fn dict_data_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<DictDataQueryDto>,
 ) -> Result<TableDataInfo<SysDictDataModel>, AppError> {
-    let (rows, total) = state.dict_service.get_dict_data_page(query).await?;
+    // 多租户（§27.8）：平台操作者(0) 全量；租户仅返回「平台类型数据 + 本租户自建类型数据」
+    let (rows, total) = state
+        .dict_service
+        .get_dict_data_page(query, Some(operator.tenant_id()))
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -316,9 +345,14 @@ pub async fn dict_data_list(
 )]
 pub async fn dict_data_by_type(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(dict_type): Path<String>,
 ) -> Result<AjaxResult<Vec<SysDictDataModel>>, AppError> {
-    let rows = state.dict_service.get_dict_data_by_type(&dict_type).await?;
+    // 多租户（§27.8）：本租户自建类型数据优先，否则回落平台类型数据
+    let rows = state
+        .dict_service
+        .get_dict_data_by_type(&dict_type, Some(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(rows))
 }
 
@@ -338,9 +372,14 @@ pub async fn dict_data_by_type(
 )]
 pub async fn dict_data_get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(dict_code): Path<i64>,
 ) -> Result<AjaxResult<SysDictDataModel>, AppError> {
-    let model = state.dict_service.get_dict_data_by_id(dict_code).await?;
+    // 多租户（§27.8）：租户仅可见平台数据或本租户自建数据，否则 403
+    let model = state
+        .dict_service
+        .get_dict_data_by_id(dict_code, Some(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -363,7 +402,7 @@ pub async fn dict_data_add(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .dict_service
-        .add_dict_data(dto, operator.username())
+        .add_dict_data(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
@@ -388,7 +427,7 @@ pub async fn dict_data_edit(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .dict_service
-        .edit_dict_data(dto, operator.username())
+        .edit_dict_data(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -409,6 +448,7 @@ pub async fn dict_data_edit(
 )]
 pub async fn dict_data_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(dict_codes): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&dict_codes);
@@ -426,7 +466,10 @@ pub async fn dict_data_remove(
         )));
     }
 
-    state.dict_service.delete_dict_data(ids).await?;
+    state
+        .dict_service
+        .delete_dict_data(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -434,9 +477,14 @@ pub async fn dict_data_remove(
 /// 导出字典数据列表
 pub async fn dict_data_export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<DictDataQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.dict_service.export_dict_data(query).await?;
+    // 多租户（§27.8）：平台操作者全量导出；租户导出生效视图
+    let rows = state
+        .dict_service
+        .export_dict_data(query, Some(operator.tenant_id()))
+        .await?;
 
     let columns = [
         ExcelColumn {

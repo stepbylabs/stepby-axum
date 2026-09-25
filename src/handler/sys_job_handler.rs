@@ -40,9 +40,13 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<JobQueryDto>,
 ) -> Result<TableDataInfo<JobVo>, AppError> {
-    let (rows, total) = state.job_service.get_job_page(query).await?;
+    let (rows, total) = state
+        .job_service
+        .get_job_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -62,9 +66,16 @@ pub async fn list(
 )]
 pub async fn get_info_by_id(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(job_id): Path<i64>,
 ) -> Result<AjaxResult<JobVo>, AppError> {
-    let vo = state.job_service.get_job_by_id(job_id).await?;
+    let vo = state
+        .job_service
+        .get_job_by_id_scoped(
+            job_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -85,7 +96,10 @@ pub async fn add(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<JobAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.job_service.add_job(dto, operator.username()).await?;
+    state
+        .job_service
+        .add_job(dto, operator.username(), operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
@@ -107,7 +121,10 @@ pub async fn edit(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<JobEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.job_service.edit_job(dto, operator.username()).await?;
+    state
+        .job_service
+        .edit_job(dto, operator.username(), operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -127,6 +144,7 @@ pub async fn edit(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(job_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&job_ids);
@@ -141,7 +159,10 @@ pub async fn remove(
         )));
     }
 
-    state.job_service.delete_jobs(ids).await?;
+    state
+        .job_service
+        .delete_jobs(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -159,9 +180,13 @@ pub async fn remove(
 )]
 pub async fn change_status(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     ValidatedJson(dto): ValidatedJson<JobStatusDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.job_service.change_status(dto).await?;
+    state
+        .job_service
+        .change_status(dto, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.status_change"
     )))
@@ -182,9 +207,13 @@ pub async fn change_status(
 )]
 pub async fn run(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     ValidatedJson(dto): ValidatedJson<JobRunDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.job_service.run_job_once(dto).await?;
+    state
+        .job_service
+        .run_job_once(dto, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.execute")))
 }
 
@@ -204,9 +233,16 @@ pub async fn run(
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<JobQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.job_service.export_jobs(query).await?;
+    let rows = state
+        .job_service
+        .export_jobs(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
 
     let columns = [
         ExcelColumn {

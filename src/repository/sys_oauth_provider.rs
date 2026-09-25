@@ -60,14 +60,6 @@ impl SysOauthProviderRepository {
         Ok(count > 0)
     }
 
-    /// 查询所有提供商（按 display_order 升序）
-    pub async fn find_all(&self) -> Result<Vec<Model>, DbErr> {
-        SysOauthProvider::find()
-            .order_by_asc(Column::DisplayOrder)
-            .all(self.base.db())
-            .await
-    }
-
     /// 查询所有已启用提供商（登录页展示 + 生成授权 URL）
     ///
     /// 多租户：登录页为匿名全局入口，仅展示平台级提供商（tid=0）；

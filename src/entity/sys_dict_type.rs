@@ -25,7 +25,12 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub dict_id: i64,
     pub dict_name: Option<String>,
-    #[sea_orm(unique)]
+    /// 字典类型标识。
+    ///
+    /// 唯一性已由迁移 `m20260925_000004` 的复合唯一索引
+    /// `uk_sys_dict_type_tenant (tenant_id, dict_type)` 承担（同租户内唯一；平台与各租户
+    /// 可自建同名类型——但服务层显式禁止租户与平台类型同名，见 `sys_dict_service`），
+    /// 故此处不再标注单列 unique 属性；运行时查询由 SQL 显式构造，不受该属性影响。
     pub dict_type: Option<String>,
     pub status: Option<String>,
     pub create_by: Option<String>,

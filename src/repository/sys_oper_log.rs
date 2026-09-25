@@ -60,9 +60,14 @@ impl SysOperLogRepository {
         tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOperLog::find();
-        // 多租户 Phase 2：租户用户仅见本租户操作日志；平台 0 不过滤
+        // 多租户 Phase 2/3：租户用户可见「本租户操作日志」与「目标资源属于本租户的代管操作日志」；
+        // 平台 0（tenant_scope=None）不过滤
         if let Some(t) = tenant_scope {
-            query = query.filter(Column::TenantId.eq(t));
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
         }
         if let Some(t) = title {
             // T-11：title 新数据存 i18n key（module.*），旧数据为中文。
@@ -165,13 +170,27 @@ impl SysOperLogRepository {
 
     /// 按业务类型聚合统计（审计大屏用）
     ///
-    /// 返回 Vec<(business_type, count)>，按 count 降序
-    pub async fn stats_by_business_type(&self) -> Result<Vec<(Option<i32>, i64)>, DbErr> {
+    /// 返回 Vec<(business_type, count)>，按 count 降序。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户操作日志与目标资源属于本租户的
+    /// 代管日志（与 `find_page_filtered` 语义一致）；`None`（平台操作者）→ 全量不过滤。
+    pub async fn stats_by_business_type(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<(Option<i32>, i64)>, DbErr> {
         use sea_orm::sea_query::Expr;
-        let rows: Vec<(Option<i32>, i64)> = SysOperLog::find()
+        let mut query = SysOperLog::find()
             .select_only()
             .column(Column::BusinessType)
-            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .column_as(Expr::col(Column::OperId).count(), "cnt");
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        let rows: Vec<(Option<i32>, i64)> = query
             .group_by(Column::BusinessType)
             .order_by_desc(Expr::col(Column::OperId).count())
             .into_tuple::<(Option<i32>, i64)>()
@@ -182,14 +201,28 @@ impl SysOperLogRepository {
 
     /// 按操作人聚合 Top N（审计大屏用）
     ///
-    /// 返回 Vec<(oper_name, count)>，按 count 降序，限制 N 条
-    pub async fn stats_top_operators(&self, limit: u64) -> Result<Vec<(String, i64)>, DbErr> {
+    /// 返回 Vec<(oper_name, count)>，按 count 降序，限制 N 条。
+    ///
+    /// 多租户：与 `stats_by_business_type` 同租户过滤语义（`tenant_scope`）。
+    pub async fn stats_top_operators(
+        &self,
+        limit: u64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<(String, i64)>, DbErr> {
         use sea_orm::sea_query::Expr;
-        let rows: Vec<(String, i64)> = SysOperLog::find()
+        let mut query = SysOperLog::find()
             .filter(Column::OperName.is_not_null())
             .select_only()
             .column(Column::OperName)
-            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .column_as(Expr::col(Column::OperId).count(), "cnt");
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        let rows: Vec<(String, i64)> = query
             .group_by(Column::OperName)
             .order_by_desc(Expr::col(Column::OperId).count())
             .limit(limit)
@@ -205,7 +238,14 @@ impl SysOperLogRepository {
     ///
     /// P1 优化: 原实现循环 N 天每天执行 2 次 COUNT（2N 次 RTT），
     /// 改为单次 GROUP BY DATE(oper_time) 聚合查询，再在 Rust 侧补齐无操作日期为零值。
-    pub async fn stats_daily(&self, days: i64) -> Result<Vec<(String, i64, i64)>, DbErr> {
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户相关（含平台代管目标为本租户的日志）；
+    /// `None`（平台）→ 全量。
+    pub async fn stats_daily(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<(String, i64, i64)>, DbErr> {
         use chrono::Duration;
         use std::collections::HashMap;
 
@@ -217,30 +257,38 @@ impl SysOperLogRepository {
         let db = self.base.db();
         let backend = db.get_database_backend();
 
-        let (sql, values) = match backend {
-            DatabaseBackend::Sqlite => (
+        // 租户过滤后缀（`t IN (tenant_id, target_tenant_id)` 单占位符，便于三方言复用）
+        let tenant_clause = match (backend, tenant_scope) {
+            (DatabaseBackend::Postgres, Some(_)) => " AND $2 IN (tenant_id, target_tenant_id)",
+            (_, Some(_)) => " AND ? IN (tenant_id, target_tenant_id)",
+            (_, None) => "",
+        };
+        let mut values: Vec<Value> = vec![begin_time.into()];
+        if let Some(t) = tenant_scope {
+            values.push(t.into());
+        }
+
+        let sql = match backend {
+            DatabaseBackend::Sqlite => format!(
                 "SELECT strftime('%Y-%m-%d', oper_time) AS d, \
                  SUM(CASE WHEN status='0' THEN 1 ELSE 0 END) AS success, \
                  SUM(CASE WHEN status='1' THEN 1 ELSE 0 END) AS fail \
-                 FROM sys_oper_log WHERE oper_time >= ? \
-                 GROUP BY d ORDER BY d ASC",
-                vec![begin_time.into()],
+                 FROM sys_oper_log WHERE oper_time >= ?{tenant_clause} \
+                 GROUP BY d ORDER BY d ASC"
             ),
-            DatabaseBackend::Postgres => (
+            DatabaseBackend::Postgres => format!(
                 "SELECT TO_CHAR(oper_time, 'YYYY-MM-DD') AS d, \
                  SUM(CASE WHEN status='0' THEN 1 ELSE 0 END) AS success, \
                  SUM(CASE WHEN status='1' THEN 1 ELSE 0 END) AS fail \
-                 FROM sys_oper_log WHERE oper_time >= $1 \
-                 GROUP BY d ORDER BY d ASC",
-                vec![begin_time.into()],
+                 FROM sys_oper_log WHERE oper_time >= $1{tenant_clause} \
+                 GROUP BY d ORDER BY d ASC"
             ),
-            DatabaseBackend::MySql => (
+            DatabaseBackend::MySql => format!(
                 "SELECT DATE_FORMAT(oper_time, '%Y-%m-%d') AS d, \
                  SUM(CASE WHEN status='0' THEN 1 ELSE 0 END) AS success, \
                  SUM(CASE WHEN status='1' THEN 1 ELSE 0 END) AS fail \
-                 FROM sys_oper_log WHERE oper_time >= ? \
-                 GROUP BY d ORDER BY d ASC",
-                vec![begin_time.into()],
+                 FROM sys_oper_log WHERE oper_time >= ?{tenant_clause} \
+                 GROUP BY d ORDER BY d ASC"
             ),
         };
 
@@ -270,18 +318,31 @@ impl SysOperLogRepository {
 
     /// 统计操作日志总数和成功/失败数
     ///
-    /// 返回 (total, success, fail)
-    pub async fn stats_summary(&self) -> Result<(i64, i64, i64), DbErr> {
-        let total = SysOperLog::find()
+    /// 返回 (total, success, fail)。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户（含代管目标为本租户）日志；
+    /// `None`（平台操作者）→ 全量不过滤。
+    pub async fn stats_summary(&self, tenant_scope: Option<i64>) -> Result<(i64, i64, i64), DbErr> {
+        let mut base = SysOperLog::find();
+        if let Some(t) = tenant_scope {
+            base = base.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        let total = base
+            .clone()
             .count(self.base.db())
             .await
             .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
-        let success = SysOperLog::find()
+        let success = base
+            .clone()
             .filter(Column::Status.eq("0"))
             .count(self.base.db())
             .await
             .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
-        let fail = SysOperLog::find()
+        let fail = base
             .filter(Column::Status.eq("1"))
             .count(self.base.db())
             .await
@@ -292,9 +353,22 @@ impl SysOperLogRepository {
     /// 查询最近的异常操作日志（status=1，失败），按 oper_time 倒序
     ///
     /// 用于审计合规报告 anomalies 列表。
-    pub async fn find_recent_anomalies(&self, limit: u64) -> Result<Vec<Model>, DbErr> {
-        SysOperLog::find()
-            .filter(Column::Status.eq("1"))
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅返回本租户相关异常；`None`（平台）→ 全量。
+    pub async fn find_recent_anomalies(
+        &self,
+        limit: u64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysOperLog::find().filter(Column::Status.eq("1"));
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        query
             .order_by_desc(Column::OperTime)
             .limit(limit)
             .all(self.base.db())
@@ -306,13 +380,27 @@ impl SysOperLogRepository {
     /// 返回 Vec<(module_name, count)>，按 count 降序，限制 N 条。
     /// title 可能为 NULL（旧数据）或 i18n key（module.*），这里按原文分组，
     /// 展示层统一走 module_title() 翻译。
-    pub async fn stats_top_modules(&self, limit: u64) -> Result<Vec<(String, i64)>, DbErr> {
+    ///
+    /// 多租户：与 `stats_by_business_type` 同租户过滤语义（`tenant_scope`）。
+    pub async fn stats_top_modules(
+        &self,
+        limit: u64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<(String, i64)>, DbErr> {
         use sea_orm::sea_query::Expr;
-        let rows: Vec<(String, i64)> = SysOperLog::find()
+        let mut query = SysOperLog::find()
             .filter(Column::Title.is_not_null())
             .select_only()
             .column(Column::Title)
-            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .column_as(Expr::col(Column::OperId).count(), "cnt");
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        let rows: Vec<(String, i64)> = query
             .group_by(Column::Title)
             .order_by_desc(Expr::col(Column::OperId).count())
             .limit(limit)
@@ -325,17 +413,30 @@ impl SysOperLogRepository {
     /// 统计最近 `window_minutes` 分钟内的操作总数与失败数
     ///
     /// 用于异常操作告警：失败率 = fail / total。
-    pub async fn failure_stats_in_window(&self, window_minutes: i64) -> Result<(i64, i64), DbErr> {
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户相关；`None`（平台）→ 全量。
+    pub async fn failure_stats_in_window(
+        &self,
+        window_minutes: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<(i64, i64), DbErr> {
         let begin =
             crate::common::datetime::now_naive() - chrono::Duration::minutes(window_minutes);
-        let total = SysOperLog::find()
-            .filter(Column::OperTime.gte(begin))
+        let mut base = SysOperLog::find().filter(Column::OperTime.gte(begin));
+        if let Some(t) = tenant_scope {
+            base = base.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        let total = base
+            .clone()
             .count(self.base.db())
             .await
             .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
-        let fail = SysOperLog::find()
+        let fail = base
             .filter(Column::Status.eq("1"))
-            .filter(Column::OperTime.gte(begin))
             .count(self.base.db())
             .await
             .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
@@ -345,21 +446,32 @@ impl SysOperLogRepository {
     /// 统计最近 `window_minutes` 分钟内失败操作次数 >= `min_count` 的操作人（Burst）
     ///
     /// 用于异常操作告警：同一账号在窗口内连续失败过多，疑似异常/被攻击。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户相关；`None`（平台）→ 全量。
     pub async fn failure_burst_operators(
         &self,
         window_minutes: i64,
         min_count: i64,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<(String, i64)>, DbErr> {
         use sea_orm::sea_query::{Expr, ExprTrait};
         let begin =
             crate::common::datetime::now_naive() - chrono::Duration::minutes(window_minutes);
-        let rows: Vec<(String, i64)> = SysOperLog::find()
+        let mut query = SysOperLog::find()
             .filter(Column::Status.eq("1"))
             .filter(Column::OperTime.gte(begin))
             .filter(Column::OperName.is_not_null())
             .select_only()
             .column(Column::OperName)
-            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .column_as(Expr::col(Column::OperId).count(), "cnt");
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        let rows: Vec<(String, i64)> = query
             .group_by(Column::OperName)
             .having(Expr::col(Column::OperId).count().gte(min_count))
             .order_by_desc(Expr::col(Column::OperId).count())
@@ -372,21 +484,32 @@ impl SysOperLogRepository {
     /// 统计最近 `window_minutes` 分钟内失败操作次数 >= `min_count` 的模块（Burst）
     ///
     /// 用于异常操作告警：某模块在窗口内连续/大量失败，疑似接口故障或越权尝试。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户相关；`None`（平台）→ 全量。
     pub async fn failure_burst_modules(
         &self,
         window_minutes: i64,
         min_count: i64,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<(String, i64)>, DbErr> {
         use sea_orm::sea_query::{Expr, ExprTrait};
         let begin =
             crate::common::datetime::now_naive() - chrono::Duration::minutes(window_minutes);
-        let rows: Vec<(String, i64)> = SysOperLog::find()
+        let mut query = SysOperLog::find()
             .filter(Column::Status.eq("1"))
             .filter(Column::OperTime.gte(begin))
             .filter(Column::Title.is_not_null())
             .select_only()
             .column(Column::Title)
-            .column_as(Expr::col(Column::OperId).count(), "cnt")
+            .column_as(Expr::col(Column::OperId).count(), "cnt");
+        if let Some(t) = tenant_scope {
+            query = query.filter(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        let rows: Vec<(String, i64)> = query
             .group_by(Column::Title)
             .having(Expr::col(Column::OperId).count().gte(min_count))
             .order_by_desc(Expr::col(Column::OperId).count())
@@ -572,5 +695,64 @@ mod tests {
         assert_eq!(o0, k0, "keyset 首页与 OFFSET 首页一致");
         assert_eq!(o1, k1, "keyset 第二页与 OFFSET 第二页一致");
         assert_eq!(o2, k2, "keyset 最后一页与 OFFSET 末页一致");
+    }
+
+    /// 构造一条带租户归属的操作日志（tenant_id = 归属租户；target_tenant_id = 平台代管目标）。
+    fn log_row_tenant(
+        id: i64,
+        status: &str,
+        t: NaiveDateTime,
+        tenant_id: i64,
+        target_tenant_id: Option<i64>,
+    ) -> ActiveModel {
+        ActiveModel {
+            oper_id: Set(id),
+            title: Set(Some("更新".to_string())),
+            status: Set(Some(status.to_string())),
+            oper_time: Set(Some(t)),
+            tenant_id: Set(tenant_id),
+            target_tenant_id: Set(target_tenant_id),
+            ..Default::default()
+        }
+    }
+
+    /// 多租户隔离：租户操作者仅统计本租户（含平台代管目标为本租户）日志；平台（None）全量。
+    #[tokio::test]
+    async fn stats_summary_and_business_type_are_tenant_scoped() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let repo = SysOperLogRepository::new(db.clone());
+        let base = datetime::now_naive();
+        // 租户 7：2 条（1 成功 1 失败）；租户 9：1 条成功；
+        // 平台代管目标租户 7：1 条成功（tenant_id=0, target_tenant_id=7）
+        repo.insert(log_row_tenant(1, "0", base, 7, None))
+            .await
+            .unwrap();
+        repo.insert(log_row_tenant(2, "1", base, 7, None))
+            .await
+            .unwrap();
+        repo.insert(log_row_tenant(3, "0", base, 9, None))
+            .await
+            .unwrap();
+        repo.insert(log_row_tenant(4, "0", base, 0, Some(7)))
+            .await
+            .unwrap();
+
+        // 平台（None）全量：4 条，成功 3 / 失败 1
+        let (total, success, fail) = repo.stats_summary(None).await.unwrap();
+        assert_eq!((total, success, fail), (4, 3, 1));
+
+        // 租户 7：自身 2 条 + 平台代管 1 条 = 3 条，成功 2 / 失败 1
+        let (total, success, fail) = repo.stats_summary(Some(7)).await.unwrap();
+        assert_eq!((total, success, fail), (3, 2, 1));
+
+        // 租户 9：仅自身 1 条成功（看不到租户 7 的日志）
+        let (total, success, fail) = repo.stats_summary(Some(9)).await.unwrap();
+        assert_eq!((total, success, fail), (1, 1, 0));
+
+        // 业务类型分布同样按租户收敛（租户 7 共 3 条）
+        let rows = repo.stats_by_business_type(Some(7)).await.unwrap();
+        assert_eq!(rows.iter().map(|(_, c)| *c).sum::<i64>(), 3);
     }
 }

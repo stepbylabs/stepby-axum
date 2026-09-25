@@ -45,17 +45,28 @@ pub async fn auth_middleware(
     // 1+2. 提取 Bearer token（纯函数，见 extract_bearer_token）
     let token = extract_bearer_token(req.headers())?;
 
+    // P2-11：提取 request_id / 方法 / 路径（结构化日志 + 租户宽限期只读判定）
+    let request_id = req
+        .extensions()
+        .get::<RequestId>()
+        .map(|r| r.0.clone())
+        .unwrap_or_default();
+    let req_is_write = is_write_method(req.method());
+    let req_path = req.uri().path().to_string();
+
     // Tier-S #3：个人访问令牌（PAT）分支。
     // 以配置前缀（默认 "ybt_"）区分于登录 JWT（其头以 "eyJ" base64 开头，永不冲突）。
     // 命中前缀即走 PAT 鉴权：按摘要查库校验有效性，合成带 pat_scopes 的 Claims 注入 extensions，
     // 跳过 JWT 专属的 blacklist / pwd_ver（PAT 吊销靠每请求查库即时生效）；下游全部无感复用。
     if !state.config.pat.prefix.is_empty() && token.starts_with(&state.config.pat.prefix) {
-        let claims = authenticate_pat(
-            &state,
-            token,
-            req.extensions().get::<RequestId>().map(|r| r.0.clone()),
-        )
-        .await?;
+        let claims = authenticate_pat(&state, token, Some(request_id.clone())).await?;
+        // Phase 3：PAT 同样受租户生命周期闸门约束（否则租户停用后凭 PAT 仍可长期访问）
+        if claims.tid != 0 {
+            let runtime = load_tenant_runtime_state(&state, claims.tid, &request_id).await?;
+            enforce_tenant_runtime(runtime, claims.tid, req_is_write, &req_path, &request_id)?;
+        }
+        // Phase 3 域名链路：PAT 会话同样校验 host 归属与 token tid 一致性
+        ensure_host_tenant_consistent(host_tenant_of(&req), claims.tid)?;
         req.extensions_mut().insert(claims);
         return Ok(next.run(req).await);
     }
@@ -64,14 +75,8 @@ pub async fn auth_middleware(
     //    verify_token 返回 Result<Claims, JwtError>，通过 From<JwtError> for AppError 自动转为 401
     let claims = JwtUtils::verify_token(token, &state.config.jwt)?;
 
-    // P2-11：提取 request_id 用于错误日志结构化字段（request_id_middleware 在本中间件之前执行）
-    let request_id = req
-        .extensions()
-        .get::<RequestId>()
-        .map(|r| r.0.clone())
-        .unwrap_or_default();
-
-    // 4+5. Redis 黑名单 + 密码版本号 + SSO 过渡阻断（合并为单次 Pipeline，减少 RTT）
+    // 4+5. Redis 黑名单 + 密码版本号 + SSO 过渡阻断 + 租户运行时状态
+    //    （合并为单次 Pipeline，减少 RTT；租户键仅租户用户追加查询，平台租户零开销）
     //    fail-closed 策略：Redis 异常时拒绝请求，避免已登出 token 继续访问
     //    使用 token 的 SHA-256 哈希作为 blacklist key，节省 Redis 内存
     let blacklist_key = format!("blacklist:{}", crate::utils::crypto::token_hash(token));
@@ -84,39 +89,57 @@ pub async fn auth_middleware(
     // 【移除条件】A 形态（不透明 access_token）上线且历史令牌全部过期（一个 JWT TTL 周期）后，
     // 此分支成为死代码（不透明串在 verify_token 即失败），可安全删除。
     let sso_at_key = format!("sso:at:{}", crate::utils::crypto::token_hash(token));
+    // 多租户 Phase 3：租户生命周期运行时键（§27.4）——不依赖 JWT 声明即可让存量令牌
+    // 随租户停用/删除/超期立即失效，并支持「宽限期只读」非二值状态。
+    let tenant_tid = claims.tid;
+    let check_tenant = tenant_tid != 0;
+    let tenant_state_key = crate::common::tenant::tenant_state_key(tenant_tid);
+    let tenant_exp_key = crate::common::tenant::tenant_expire_key(tenant_tid);
     let mut redis = state.redis.clone();
-    // Pipeline：一次 RTT 同时查询 blacklist / pwd_ver / sso:at
+    let mut pipe = redis::pipe();
+    pipe.cmd("GET")
+        .arg(&blacklist_key)
+        .cmd("GET")
+        .arg(&pwd_ver_key)
+        .cmd("GET")
+        .arg(&sso_at_key);
+    if check_tenant {
+        pipe.cmd("GET")
+            .arg(&tenant_state_key)
+            .cmd("GET")
+            .arg(&tenant_exp_key);
+    }
+    // Pipeline：一次 RTT 同时查询 blacklist / pwd_ver / sso:at [ / tenant:state / tenant:exp ]
     // R11：命令级超时（REDIS_CMD_TIMEOUT_SECS=3s），fail-closed：超时返回 503 拒绝请求
-    let (is_blacklisted, pwd_ver, legacy_sso_at): (Option<String>, Option<u64>, Option<String>) =
-        tokio::time::timeout(
-            Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::pipe()
-                .cmd("GET")
-                .arg(&blacklist_key)
-                .cmd("GET")
-                .arg(&pwd_ver_key)
-                .cmd("GET")
-                .arg(&sso_at_key)
-                .query_async(&mut redis),
-        )
-        .await
-        .map_err(|_| {
-            tracing::error!(
-                request_id = %request_id,
-                user_id = %claims.sub,
-                "Redis 黑名单/pwd_ver 查询超时（fail-closed 拒绝请求）"
-            );
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?
-        .map_err(|e| {
-            tracing::error!(
-                request_id = %request_id,
-                user_id = %claims.sub,
-                error = %e,
-                "Redis 黑名单/pwd_ver 查询失败（fail-closed 拒绝请求）"
-            );
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    let vals: Vec<Option<String>> = tokio::time::timeout(
+        Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
+        pipe.query_async(&mut redis),
+    )
+    .await
+    .map_err(|_| {
+        tracing::error!(
+            request_id = %request_id,
+            user_id = %claims.sub,
+            "Redis 黑名单/pwd_ver 查询超时（fail-closed 拒绝请求）"
+        );
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?
+    .map_err(|e| {
+        tracing::error!(
+            request_id = %request_id,
+            user_id = %claims.sub,
+            error = %e,
+            "Redis 黑名单/pwd_ver 查询失败（fail-closed 拒绝请求）"
+        );
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?;
+    let is_blacklisted = vals.first().cloned().flatten();
+    let pwd_ver: Option<u64> = vals
+        .get(1)
+        .cloned()
+        .flatten()
+        .and_then(|s| s.parse::<u64>().ok());
+    let legacy_sso_at = vals.get(2).cloned().flatten();
     if is_blacklisted.is_some() {
         return Err(AppError::unauthorized(&crate::tr!(
             "error.auth.token_revoked"
@@ -143,7 +166,27 @@ pub async fn auth_middleware(
         )));
     }
 
-    // 6. 注入 Claims 到 request extensions，供下游 handler/中间件使用
+    // 6. 多租户 Phase 3：租户生命周期闸门（逐请求判定，存量 JWT 同样受控）
+    if check_tenant {
+        let state_raw = vals.get(3).cloned().flatten();
+        let expire_epoch: i64 = vals
+            .get(4)
+            .cloned()
+            .flatten()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let runtime = crate::common::tenant::eval_tenant_runtime_state(
+            state_raw.as_deref(),
+            expire_epoch,
+            chrono::Utc::now().timestamp(),
+        );
+        enforce_tenant_runtime(runtime, tenant_tid, req_is_write, &req_path, &request_id)?;
+    }
+
+    // 7. 多租户 Phase 3 域名链路：host 归属租户与 JWT tid 必须一致（以 token 为准，禁止静默降级）
+    ensure_host_tenant_consistent(host_tenant_of(&req), claims.tid)?;
+
+    // 8. 注入 Claims 到 request extensions，供下游 handler/中间件使用
     req.extensions_mut().insert(claims);
     Ok(next.run(req).await)
 }
@@ -184,6 +227,8 @@ async fn authenticate_pat(
     tokio::spawn(async move {
         svc.touch_last_used(&pat_id).await;
     });
+    // Phase 3：PAT 同样受租户生命周期闸门约束（否则租户停用后凭 PAT 仍可长期访问）
+    let pat_tid = v.tenant_id;
     Ok(Claims {
         sub: v.user_id.to_string(),
         username: v.username,
@@ -194,10 +239,152 @@ async fn authenticate_pat(
         jti: v.pat_id,
         pwd_ver: 0,
         pat_scopes: Some(v.scopes),
-        // v5-N2 Phase 1：PAT 合成 Claims 的 tid——PAT 属用户级凭据，租户随用户
-        // （当前 PAT 记录无 tid 列，恒 0；Phase 2 随 sys_pat 加列带出）
-        tid: 0,
+        // v5-N2 Phase 3：PAT 合成 Claims 的 tid 随令牌行带出（PAT 属用户级凭据，租户随用户）
+        tid: pat_tid,
     })
+}
+
+/// 查询租户运行时状态（PAT 路径；JWT 路径在同一 Pipeline 中已内联查询以省 RTT）。
+/// Redis 异常 → 503 fail-closed（拒绝请求，不静默放行）。
+async fn load_tenant_runtime_state(
+    state: &Arc<AppState>,
+    tenant_id: i64,
+    request_id: &str,
+) -> Result<crate::common::tenant::TenantRuntimeState, AppError> {
+    if tenant_id == 0 {
+        return Ok(crate::common::tenant::TenantRuntimeState::Active);
+    }
+    let state_key = crate::common::tenant::tenant_state_key(tenant_id);
+    let exp_key = crate::common::tenant::tenant_expire_key(tenant_id);
+    let mut redis = state.redis.clone();
+    let vals: Vec<Option<String>> = match tokio::time::timeout(
+        Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
+        redis::pipe()
+            .cmd("GET")
+            .arg(&state_key)
+            .cmd("GET")
+            .arg(&exp_key)
+            .query_async(&mut redis),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::error!(
+                request_id = %request_id,
+                tenant_id,
+                error = %e,
+                "租户运行时键查询失败（fail-closed 拒绝请求）"
+            );
+            return Err(AppError::new(
+                503,
+                crate::tr!("error.auth.auth_unavailable"),
+            ));
+        }
+        Err(_) => {
+            tracing::error!(
+                request_id = %request_id,
+                tenant_id,
+                "租户运行时键查询超时（fail-closed 拒绝请求）"
+            );
+            return Err(AppError::new(
+                503,
+                crate::tr!("error.auth.auth_unavailable"),
+            ));
+        }
+    };
+    let state_raw = vals.first().cloned().flatten();
+    let expire_epoch = vals
+        .get(1)
+        .cloned()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    Ok(crate::common::tenant::eval_tenant_runtime_state(
+        state_raw.as_deref(),
+        expire_epoch,
+        chrono::Utc::now().timestamp(),
+    ))
+}
+
+/// 请求方法是否写操作（宽限期「只读」判定；只放行 GET/HEAD/OPTIONS）
+fn is_write_method(m: &axum::http::Method) -> bool {
+    !matches!(
+        *m,
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    )
+}
+
+/// 取出 host 归属租户（由 `tenant_host_middleware` 注入；缺失视为无上下文）
+fn host_tenant_of(req: &Request) -> Option<i64> {
+    req.extensions()
+        .get::<crate::middleware::HostTenant>()
+        .and_then(|h| h.tid())
+}
+
+/// 多租户 Phase 3 域名链路一致性校验（安全关键）：
+/// - 无 host 租户上下文（`None`）→ 放行（平台 host / 未绑定域名 / 来源不可信）；
+/// - host 归属 == token tid → 放行；
+/// - host 归属 != token tid → **403**（以 token 为准，绝不静默改用 host 的 tid）。
+pub fn ensure_host_tenant_consistent(
+    host_tid: Option<i64>,
+    token_tid: i64,
+) -> Result<(), AppError> {
+    if let Some(host) = host_tid
+        && host != token_tid
+    {
+        tracing::warn!(
+            host_tenant_id = host,
+            token_tenant_id = token_tid,
+            "请求 host 归属租户与登录令牌 tid 不一致（拒绝访问，禁止静默降级）"
+        );
+        return Err(AppError::forbidden(&crate::tr!(
+            "error.tenant.host_mismatch"
+        )));
+    }
+    Ok(())
+}
+
+/// 按租户运行时状态执行闸门（JWT 与 PAT 两条链路共用，保证行为一致）：
+/// - `Active`：放行；
+/// - `Grace`：仅放行读请求与登出（`*/logout`），其余写请求 403 `expired_readonly`；
+/// - `Disabled`：403 `tenant.disabled` 拒绝全部请求。
+fn enforce_tenant_runtime(
+    runtime: crate::common::tenant::TenantRuntimeState,
+    tenant_id: i64,
+    is_write: bool,
+    path: &str,
+    request_id: &str,
+) -> Result<(), AppError> {
+    use crate::common::tenant::TenantRuntimeState as Rt;
+    match runtime {
+        Rt::Active => Ok(()),
+        Rt::Grace => {
+            if is_write && !path.ends_with("/logout") {
+                tracing::info!(
+                    request_id = %request_id,
+                    tenant_id,
+                    path = %path,
+                    "租户处于到期宽限期：拒绝写请求（只读模式）"
+                );
+                Err(AppError::new(
+                    403,
+                    crate::tr!("error.tenant.expired_readonly"),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Rt::Disabled => {
+            tracing::warn!(
+                request_id = %request_id,
+                tenant_id,
+                path = %path,
+                "租户已停用/超期：拒绝请求"
+            );
+            Err(AppError::new(403, crate::tr!("error.tenant.disabled")))
+        }
+    }
 }
 
 /// 操作人提取器（从 request extensions 中提取 Claims）

@@ -96,12 +96,15 @@ impl SysTaskService {
         &self,
         dto: TaskCreateDto,
         operator: &str,
+        operator_tid: i64,
         state: &AppState,
     ) -> Result<SysTaskModel, ServiceError> {
         // P1：参数校验（task_type/task_name 长度、total 范围）
         crate::common::i18n::validate(&dto)?;
         let now = crate::common::datetime::now_naive();
         let am = SysTaskActiveModel {
+            // 多租户 Phase 2：任务单据归属提交人/归属人租户
+            tenant_id: Set(operator_tid),
             task_type: Set(dto.task_type),
             task_name: Set(dto.task_name),
             status: Set("pending".to_string()),
@@ -146,8 +149,11 @@ impl SysTaskService {
             existing.progress
         };
 
+        // 多租户：系统侧（定时/异步）更新按任务行自身 tid 归属，禁止回落到 0
+        let owner_tid = existing.tenant_id;
         let now = crate::common::datetime::now_naive();
         let mut am: SysTaskActiveModel = existing.into();
+        am.tenant_id = Set(owner_tid);
         am.status = Set("running".to_string());
         am.progress = Set(progress);
         am.current = Set(current);
@@ -175,8 +181,11 @@ impl SysTaskService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         let final_current = existing.total;
+        // 多租户：系统侧更新按任务行自身 tid 归属，禁止回落到 0
+        let owner_tid = existing.tenant_id;
         let now = crate::common::datetime::now_naive();
         let mut am: SysTaskActiveModel = existing.into();
+        am.tenant_id = Set(owner_tid);
         am.status = Set("success".to_string());
         am.progress = Set(100);
         am.current = Set(final_current);
@@ -203,8 +212,11 @@ impl SysTaskService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
+        // 多租户：系统侧更新按任务行自身 tid 归属，禁止回落到 0
+        let owner_tid = existing.tenant_id;
         let now = crate::common::datetime::now_naive();
         let mut am: SysTaskActiveModel = existing.into();
+        am.tenant_id = Set(owner_tid);
         am.status = Set("failed".to_string());
         am.result_msg = Set(Some(error_msg));
         am.update_time = Set(Some(now));
@@ -240,9 +252,12 @@ impl SysTaskService {
     }
 
     /// 分页查询任务
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户任务；None（平台 0）不过滤。
     pub async fn get_task_page(
         &self,
         query: TaskQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysTaskModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -267,21 +282,48 @@ impl SysTaskService {
                 query.operator.as_deref(),
                 begin,
                 end,
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
     }
 
     /// 查询任务详情
-    pub async fn get_task_by_id(&self, task_id: i64) -> Result<SysTaskModel, ServiceError> {
-        self.task_repo
+    ///
+    /// 多租户：tenant_scope=Some(tid) 时跨租户任务视为不存在（404）。
+    pub async fn get_task_by_id(
+        &self,
+        task_id: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<SysTaskModel, ServiceError> {
+        let model = self
+            .task_repo
             .find_by_id(task_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
+        if let Some(t) = tenant_scope
+            && model.tenant_id != t
+        {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.task.not_found"
+            )));
+        }
+        Ok(model)
     }
 
     /// 批量删除任务
-    pub async fn delete_tasks(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
+    ///
+    /// 多租户越权防护：任一所选任务跨越操作者租户即整体拒绝（平台操作者放行）。
+    pub async fn delete_tasks(&self, ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
+        for id in &ids {
+            if let Some(task) = self.task_repo.find_by_id(*id).await?
+                && !crate::common::tenant::tenant_allowed(operator_tid, task.tenant_id)
+            {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
+            }
+        }
         self.task_repo.delete_by_ids(ids).await?;
         Ok(())
     }

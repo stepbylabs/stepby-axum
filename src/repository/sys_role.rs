@@ -33,12 +33,16 @@ impl SysRoleRepository {
         &self.base
     }
 
-    /// 查询所有未删除角色（del_flag = '0'）
-    pub async fn find_active_all(&self) -> Result<Vec<Model>, DbErr> {
-        SysRole::find()
-            .filter(Column::DelFlag.eq("0"))
-            .all(self.base.db())
-            .await
+    /// 查询未删除角色（del_flag = '0'）。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户角色（`tenant_id = tid`）；
+    /// `None`（平台操作者）→ 全量不过滤。
+    pub async fn find_active_all(&self, tenant_scope: Option<i64>) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysRole::find().filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
+        query.all(self.base.db()).await
     }
 
     /// 按 role_id 列表批量查询未删除角色（P0-R81-005 用于校验待分配角色层级）

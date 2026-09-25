@@ -418,6 +418,22 @@ pub async fn read_field_limited(
     Ok((bytes, ext, original_filename))
 }
 
+/// 由路径中的 kind 段（`file` / `avatar`）反查配置目录（如 `uploads/file`）
+///
+/// 供鉴权预览/下载路由把 `uploads/{tid}/{kind}/{key}` 还原为存储后端的 `dir` 参数。
+/// 仅当 kind 与配置目录末段完全一致时命中，避免请求路径段被用于拼接任意目录。
+pub fn resolve_kind_dir(cfg: &UploadConfig, kind: &str) -> Option<String> {
+    [&cfg.common_dir, &cfg.avatar_dir]
+        .into_iter()
+        .find(|dir| {
+            PathBuf::from(dir)
+                .file_name()
+                .and_then(|leaf| leaf.to_str())
+                == Some(kind)
+        })
+        .cloned()
+}
+
 /// 统一文件保存入口（P0-3 上传链路收敛）
 ///
 /// 三处上传 handler（common_handler / file_handler / 头像）此前各自重复实现
@@ -428,12 +444,15 @@ pub async fn read_field_limited(
 /// 4. magic bytes 严格校验（图片以实际类型为准，文本类拒绝伪装标记内容）
 /// 5. 生成 UUID 文件名（ext 净化）
 /// 6. spawn_blocking 写盘
+///
+/// `tenant_id` 为上传者租户（平台 = 0），决定落盘/对象 key 的 `{tid}` 段。
 pub async fn save_upload_bytes(
     storage: &dyn crate::storage::StorageBackend,
     bytes: &[u8],
     declared_ext: Option<&str>,
     original_filename: Option<&str>,
     upload_cfg: &UploadConfig,
+    tenant_id: i64,
     kind: UploadKind,
 ) -> Result<UploadedFile, AppError> {
     if bytes.is_empty() {
@@ -503,8 +522,11 @@ pub async fn save_upload_bytes(
     // 生成唯一文件名（ext 已在函数内净化）
     let new_filename = gen_uuid_filename(&ext)?;
 
-    // 保存到当前存储后端（local 写本地磁盘 / s3 上传对象），URL 由后端返回
-    let url = storage.save(dir, &new_filename, url_prefix, bytes).await?;
+    // 保存到当前存储后端（local 写本地磁盘 / s3 上传对象），URL 由后端返回；
+    // 路径含上传者租户维度（`uploads/{tid}/...`），实现物理隔离
+    let url = storage
+        .save(dir, tenant_id, &new_filename, url_prefix, bytes)
+        .await?;
 
     Ok(UploadedFile {
         new_filename,
@@ -556,6 +578,22 @@ mod tests {
         assert_eq!(max, cfg.avatar_max_size);
         assert_eq!(dir, &cfg.avatar_dir);
         assert_eq!(prefix, &cfg.avatar_url_prefix);
+    }
+
+    #[test]
+    fn resolve_kind_dir_matches_config_leaf_only() {
+        let cfg = UploadConfig::default();
+        // kind 段等于配置目录末段时命中
+        assert_eq!(resolve_kind_dir(&cfg, "file"), Some(cfg.common_dir.clone()));
+        assert_eq!(
+            resolve_kind_dir(&cfg, "avatar"),
+            Some(cfg.avatar_dir.clone())
+        );
+        // 任意/穿越路径段均不命中（防止路径段被用于拼接旁路目录）
+        assert_eq!(resolve_kind_dir(&cfg, ""), None);
+        assert_eq!(resolve_kind_dir(&cfg, ".."), None);
+        assert_eq!(resolve_kind_dir(&cfg, "uploads/file"), None);
+        assert_eq!(resolve_kind_dir(&cfg, "other"), None);
     }
 
     // ---------- gen_uuid_filename ----------
@@ -788,10 +826,10 @@ mod tests {
 
     // ---------- save_upload_bytes（mock 后端） ----------
 
-    /// 记录保存调用（dir, key, bytes）
-    type SaveCalls = Vec<(String, String, Vec<u8>)>;
+    /// 记录保存调用（tenant_id, dir, key, bytes）
+    type SaveCalls = Vec<(i64, String, String, Vec<u8>)>;
 
-    /// 记录保存调用（dir, key, bytes）的内存 mock 后端
+    /// 记录保存调用（tenant_id, dir, key, bytes）的内存 mock 后端
     struct MockBackend(Arc<Mutex<SaveCalls>>);
 
     #[async_trait]
@@ -803,28 +841,37 @@ mod tests {
         async fn save(
             &self,
             dir: &str,
+            tenant_id: i64,
             key: &str,
             _url_prefix: &str,
             bytes: &[u8],
         ) -> Result<String, AppError> {
-            self.0
-                .lock()
-                .unwrap()
-                .push((dir.to_string(), key.to_string(), bytes.to_vec()));
-            Ok(format!("mock://{dir}/{key}"))
+            self.0.lock().unwrap().push((
+                tenant_id,
+                dir.to_string(),
+                key.to_string(),
+                bytes.to_vec(),
+            ));
+            Ok(format!("mock://{tenant_id}/{dir}/{key}"))
         }
 
-        async fn read(&self, _dir: &str, _key: &str) -> Result<Option<Vec<u8>>, AppError> {
+        async fn read(
+            &self,
+            _dir: &str,
+            _tenant_id: i64,
+            _key: &str,
+        ) -> Result<Option<Vec<u8>>, AppError> {
             Ok(None)
         }
 
-        async fn delete(&self, _dir: &str, _key: &str) -> Result<(), AppError> {
+        async fn delete(&self, _dir: &str, _tenant_id: i64, _key: &str) -> Result<(), AppError> {
             Ok(())
         }
 
         async fn list(
             &self,
             _dir: &str,
+            _tenant_id: i64,
             _url_prefix: &str,
         ) -> Result<Vec<crate::storage::StorageObject>, AppError> {
             Ok(Vec::new())
@@ -835,7 +882,7 @@ mod tests {
     async fn save_upload_bytes_rejects_empty() {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
-        let err = save_upload_bytes(&backend, b"", Some("png"), None, &cfg, UploadKind::Common)
+        let err = save_upload_bytes(&backend, b"", Some("png"), None, &cfg, 0, UploadKind::Common)
             .await
             .expect_err("空文件应失败");
         assert_eq!(err.code, 400);
@@ -847,7 +894,7 @@ mod tests {
         let cfg = UploadConfig::default();
         // common_max_size 默认 10MB，给 11MB 数据（不实际分配，用重复小向量）
         let big: Vec<u8> = vec![0u8; cfg.common_max_size + 1];
-        let err = save_upload_bytes(&backend, &big, Some("png"), None, &cfg, UploadKind::Common)
+        let err = save_upload_bytes(&backend, &big, Some("png"), None, &cfg, 0, UploadKind::Common)
             .await
             .expect_err("超限应失败");
         assert_eq!(err.code, 400);
@@ -858,7 +905,7 @@ mod tests {
     async fn save_upload_bytes_rejects_missing_ext() {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
-        let err = save_upload_bytes(&backend, b"data", None, None, &cfg, UploadKind::Common)
+        let err = save_upload_bytes(&backend, b"data", None, None, &cfg, 0, UploadKind::Common)
             .await
             .expect_err("缺扩展名应失败");
         assert_eq!(err.code, 400);
@@ -875,6 +922,7 @@ mod tests {
             Some("html"),
             None,
             &cfg,
+            0,
             UploadKind::Common,
         )
         .await
@@ -893,6 +941,7 @@ mod tests {
             Some("xyz"),
             None,
             &cfg,
+            0,
             UploadKind::Common,
         )
         .await
@@ -911,6 +960,7 @@ mod tests {
             Some("pdf"),
             None,
             &cfg,
+            0,
             UploadKind::Common,
         )
         .await
@@ -929,6 +979,7 @@ mod tests {
             Some("jpg"),
             Some("photo.jpg"),
             &cfg,
+            7,
             UploadKind::Common,
         )
         .await
@@ -939,14 +990,15 @@ mod tests {
         assert_eq!(file.original_filename.as_deref(), Some("photo.jpg"));
         assert_eq!(
             file.url,
-            format!("mock://{}/{}", cfg.common_dir, file.new_filename)
+            format!("mock://7/{}/{}", cfg.common_dir, file.new_filename)
         );
-        // 后端收到 key = 生成的 UUID 文件名
+        // 后端收到 key = 生成的 UUID 文件名，tenant_id = 上传者租户
         let calls = backend.0.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, cfg.common_dir);
-        assert_eq!(calls[0].1, file.new_filename);
-        assert_eq!(calls[0].2, PNG_MAGIC);
+        assert_eq!(calls[0].0, 7, "应把上传者租户透传给存储后端");
+        assert_eq!(calls[0].1, cfg.common_dir);
+        assert_eq!(calls[0].2, file.new_filename);
+        assert_eq!(calls[0].3, PNG_MAGIC);
     }
 
     #[tokio::test]
@@ -959,6 +1011,7 @@ mod tests {
             Some("jpeg"),
             None,
             &cfg,
+            0,
             UploadKind::Common,
         )
         .await
@@ -977,6 +1030,7 @@ mod tests {
             Some("txt"),
             None,
             &cfg,
+            0,
             UploadKind::Common,
         )
         .await

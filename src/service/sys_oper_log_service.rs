@@ -78,6 +78,11 @@ pub struct OperLogRecord {
     pub cost_time: i64,
     /// 操作人所属租户（多租户 Phase 2：随 JWT tid 带出；0=平台）
     pub tenant_id: i64,
+    /// 被操作资源的目标租户（多租户 Phase 3）
+    ///
+    /// 仅当操作者租户与目标资源租户不一致（平台代管他租户资源）时由 handler 写入；
+    /// 二者一致或无目标租户上下文时为 `None`（写库为 NULL）。
+    pub target_tenant_id: Option<i64>,
 }
 
 // ==================== 辅助函数 ====================
@@ -231,8 +236,16 @@ impl SysOperLogService {
     }
 
     /// 审计大屏统计：按业务类型聚合
-    pub async fn stats_by_business_type(&self) -> Result<Vec<AuditBusinessTypeStat>, ServiceError> {
-        let rows = self.oper_log_repo.stats_by_business_type().await?;
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    pub async fn stats_by_business_type(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<AuditBusinessTypeStat>, ServiceError> {
+        let rows = self
+            .oper_log_repo
+            .stats_by_business_type(tenant_scope)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|(bt, cnt)| AuditBusinessTypeStat {
@@ -247,8 +260,14 @@ impl SysOperLogService {
     /// 直接基于库内全量 GROUP BY business_type 聚合，替代前端拉取 pageSize=1000
     /// 全量明细后再在客户端分组的低效做法。
     /// 业务类型编码对齐既有约定：1=新增(insert) 2=修改(update) 3=删除(delete) 0/其他=其他(other)。
-    pub async fn oper_log_type_stats(&self) -> Result<OperLogTypeStatsVo, ServiceError> {
-        let rows = self.oper_log_repo.stats_by_business_type().await?;
+    pub async fn oper_log_type_stats(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<OperLogTypeStatsVo, ServiceError> {
+        let rows = self
+            .oper_log_repo
+            .stats_by_business_type(tenant_scope)
+            .await?;
         let mut vo = OperLogTypeStatsVo {
             insert: 0,
             update: 0,
@@ -270,8 +289,12 @@ impl SysOperLogService {
     pub async fn stats_top_operators(
         &self,
         limit: u64,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<AuditOperatorStat>, ServiceError> {
-        let rows = self.oper_log_repo.stats_top_operators(limit).await?;
+        let rows = self
+            .oper_log_repo
+            .stats_top_operators(limit, tenant_scope)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|(name, cnt)| AuditOperatorStat {
@@ -288,8 +311,12 @@ impl SysOperLogService {
     pub async fn stats_top_modules(
         &self,
         limit: u64,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<AuditModuleStat>, ServiceError> {
-        let rows = self.oper_log_repo.stats_top_modules(limit).await?;
+        let rows = self
+            .oper_log_repo
+            .stats_top_modules(limit, tenant_scope)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|(name, cnt)| AuditModuleStat {
@@ -307,21 +334,24 @@ impl SysOperLogService {
     /// - 是否有模块失败 Burst >= `fail_threshold`
     ///
     /// 任一命中即 `alert_triggered = true`，供前端展示告警横幅。
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
     pub async fn get_alarm_status(
         &self,
         window_minutes: i64,
         fail_threshold: i64,
         fail_rate_threshold: i64,
+        tenant_scope: Option<i64>,
     ) -> Result<AlarmStatusVo, ServiceError> {
         let (total, fail) = self
             .oper_log_repo
-            .failure_stats_in_window(window_minutes)
+            .failure_stats_in_window(window_minutes, tenant_scope)
             .await?;
         let (fail_rate, fail_rate_alarm) = eval_fail_rate(total, fail, fail_rate_threshold);
 
         let operator_bursts: Vec<AlarmItem> = self
             .oper_log_repo
-            .failure_burst_operators(window_minutes, fail_threshold)
+            .failure_burst_operators(window_minutes, fail_threshold, tenant_scope)
             .await?
             .into_iter()
             .map(|(name, cnt)| AlarmItem { name, count: cnt })
@@ -329,7 +359,7 @@ impl SysOperLogService {
 
         let module_bursts: Vec<AlarmItem> = self
             .oper_log_repo
-            .failure_burst_modules(window_minutes, fail_threshold)
+            .failure_burst_modules(window_minutes, fail_threshold, tenant_scope)
             .await?
             .into_iter()
             .map(|(name, cnt)| AlarmItem {
@@ -358,8 +388,14 @@ impl SysOperLogService {
     }
 
     /// 审计大屏统计：最近 N 天每日成功/失败
-    pub async fn stats_daily(&self, days: i64) -> Result<Vec<AuditDailyStat>, ServiceError> {
-        let rows = self.oper_log_repo.stats_daily(days).await?;
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    pub async fn stats_daily(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<AuditDailyStat>, ServiceError> {
+        let rows = self.oper_log_repo.stats_daily(days, tenant_scope).await?;
         Ok(rows
             .into_iter()
             .map(|(date, success, fail)| AuditDailyStat {
@@ -371,8 +407,13 @@ impl SysOperLogService {
     }
 
     /// 审计大屏统计：汇总数据
-    pub async fn stats_summary(&self) -> Result<AuditSummary, ServiceError> {
-        let (total, success, fail) = self.oper_log_repo.stats_summary().await?;
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    pub async fn stats_summary(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<AuditSummary, ServiceError> {
+        let (total, success, fail) = self.oper_log_repo.stats_summary(tenant_scope).await?;
         Ok(AuditSummary {
             total,
             success,
@@ -381,12 +422,18 @@ impl SysOperLogService {
     }
 
     /// 综合审计统计（一次性返回所有大屏数据）
-    pub async fn get_audit_stats(&self, days: i64) -> Result<AuditStatsVo, ServiceError> {
-        let summary = self.stats_summary().await?;
-        let business_types = self.stats_by_business_type().await?;
-        let top_operators = self.stats_top_operators(10).await?;
-        let top_modules = self.stats_top_modules(10).await?;
-        let daily = self.stats_daily(days).await?;
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    pub async fn get_audit_stats(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<AuditStatsVo, ServiceError> {
+        let summary = self.stats_summary(tenant_scope).await?;
+        let business_types = self.stats_by_business_type(tenant_scope).await?;
+        let top_operators = self.stats_top_operators(10, tenant_scope).await?;
+        let top_modules = self.stats_top_modules(10, tenant_scope).await?;
+        let daily = self.stats_daily(days, tenant_scope).await?;
         Ok(AuditStatsVo {
             summary,
             business_types,
@@ -405,16 +452,19 @@ impl SysOperLogService {
     /// - daily：最近 N 天每日趋势
     /// - anomalies：最近 50 条异常操作（status=1 失败的写操作）
     /// - generated_at / period_from / period_to：报告周期元数据
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
     pub async fn get_compliance_report(
         &self,
         days: i64,
+        tenant_scope: Option<i64>,
     ) -> Result<ComplianceReportVo, ServiceError> {
-        let summary = self.stats_summary().await?;
-        let business_types = self.stats_by_business_type().await?;
-        let top_operators = self.stats_top_operators(10).await?;
-        let top_modules = self.stats_top_modules(10).await?;
-        let daily = self.stats_daily(days).await?;
-        let anomaly_models = self.oper_log_repo.find_recent_anomalies(50).await?;
+        let summary = self.stats_summary(tenant_scope).await?;
+        let business_types = self.stats_by_business_type(tenant_scope).await?;
+        let top_operators = self.stats_top_operators(10, tenant_scope).await?;
+        let top_modules = self.stats_top_modules(10, tenant_scope).await?;
+        let daily = self.stats_daily(days, tenant_scope).await?;
+        let anomaly_models = self.oper_log_repo.find_recent_anomalies(50, tenant_scope).await?;
         let anomalies = anomaly_models
             .into_iter()
             .map(|m| OperLogAnomaly {
@@ -492,6 +542,7 @@ impl SysOperLogService {
             oper_time: Set(Some(now)),
             cost_time: Set(Some(record.cost_time)),
             tenant_id: Set(record.tenant_id),
+            target_tenant_id: Set(record.target_tenant_id),
             ..Default::default()
         };
 

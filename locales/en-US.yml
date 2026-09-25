@@ -22,6 +22,7 @@ error:
     parse_failed: Failed to parse request parameters
     time_format_invalid: "Invalid time format: %{s}"
     batch_size_exceeded: "Batch operation size cannot exceed %{max}"
+    forbidden: Access to this resource is forbidden
   auth:
     captcha_expired: Captcha expired or does not exist
     captcha_wrong: Incorrect captcha
@@ -30,6 +31,7 @@ error:
     account_deleted: Account deleted, please contact the administrator
     account_disabled: Account disabled, please contact the administrator
     tenant_disabled: Tenant has been disabled
+    tenant_grace: Tenant has expired (read-only during grace period)
     account_locked: Account locked, please try again later
     register_exists: Username already exists
     register_disabled: Registration is not enabled, please contact the administrator
@@ -187,6 +189,10 @@ error:
     not_found: Configuration not found
     key_exists: Configuration key already exists
     id_invalid: Invalid config ID
+    governance_forbidden: This configuration is governed by the platform and cannot be modified by tenants
+    platform_row_forbidden: Platform-level configuration cannot be operated by tenants
+    scope_invalid: Invalid configuration governance scope
+    flag_invalid: Invalid configuration governance flag
   dept:
     not_found: Department does not exist
     parent_not_found: Parent department does not exist
@@ -352,6 +358,8 @@ error:
     data_not_found: Dict data does not exist
     id_invalid: Invalid dict ID
     data_id_invalid: Invalid dict data ID
+    platform_row_forbidden: Platform-level dict cannot be operated by tenants
+    platform_type_exists: Dict type conflicts with a platform type and cannot be created by tenants
   job:
     cron_invalid: Invalid cron expression
     name_exists: Job name already exists
@@ -436,6 +444,25 @@ error:
     has_users: "Tenant still has %{count} user(s), cannot delete"
     platform_protected: Platform root department cannot be modified via tenant API
     disabled: Tenant has been disabled, login denied
+    platform_only: This operation is restricted to platform administrators
+    code_invalid: "Invalid tenant code (2-32 chars of lowercase letters/digits/underscore/hyphen, starting with a letter or digit)"
+    code_duplicate: Tenant code is already taken, please choose another
+    package_not_found: The specified package does not exist or is disabled
+    account_quota_exceeded: "Tenant account quota reached (%{max}), cannot add user"
+    expired: Tenant has expired beyond the grace period, login denied
+    expired_readonly: Tenant has expired (read-only during grace period), please renew before writing
+    not_deleted: Tenant is not in the recycle bin
+    admin_user_conflict: "Tenant admin username is already taken (%{user_name})"
+    admin_init_failed: Failed to initialize the tenant administrator, please retry
+    menu_outside_package: "Menu %{menu_id} is not included in the current tenant package and cannot be granted"
+    domain_platform_only: Domain management is restricted to platform administrators
+    domain_invalid: "Invalid domain (lowercase letters/digits/hyphen, at least two labels of 1-63 chars each)"
+    domain_conflict: The domain is already taken (including historical bindings), please choose another
+    domain_not_found: Domain binding does not exist
+    domain_not_verified: The domain has not passed DNS TXT verification and cannot be set as primary
+    domain_verify_failed: DNS TXT verification failed, please confirm the DNS record has taken effect
+    domain_primary_forbidden: The tenant already has a primary domain; use the set-primary API to switch
+    host_mismatch: The current domain does not belong to the tenant of the logged-in account; access denied
   pat:
     name_required: Token name is required
     name_too_long: Token name is too long (max 100 characters)
@@ -584,6 +611,8 @@ common:
   disabled: Disabled
   yes: "Yes"
   no: "No"
+  # Platform tenant display name (§27.13.2 online-user tiered view: tenant name for tenantId=0)
+  platform_tenant: Platform
   job:
     misfire_default: Default Policy
     misfire_immediate: Execute Immediately

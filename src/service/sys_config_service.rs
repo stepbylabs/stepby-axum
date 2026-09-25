@@ -1,11 +1,24 @@
 //! 参数配置模块 Service 层
 //!
 //! 职责：
-//! - 参数配置 CRUD、config_key 唯一性校验
-//! - 按 config_key 查询参数值（前端读取配置用）
+//! - 参数配置 CRUD、config_key 唯一性校验（复合唯一域 `(tenant_id, config_key)`）
+//! - 按 config_key 查询生效参数值（租户覆盖行优先，回落平台默认行）
 //! - 批量物理删除（config 表无 del_flag）
-//! - Excel 导出全量查询
-//! - 刷新缓存（当前无缓存层，直接返回成功）
+//! - Excel 导出（平台全量 / 租户生效视图）
+//! - **两层缓存**（§27.8）：平台默认层 `config:def:{key}` + 租户覆盖层 `config:{tid}:{key}`，
+//!   读时合并、不缓存合并结果 → 平台改默认值只失效 def 层即可全局即时生效
+//! - **治理列读写**（§27.8）：`scope` / `tenant_editable` / `visible_to_tenant`
+//!
+//! ## config 治理（§27.8 四条硬规则）
+//! ① `platform_only`（平台安全项）集合在代码常量 [`PLATFORM_LOCKED_KEYS`] 中锁死，
+//!    界面**不允许**下放（`tenant_editable='0'`、`visible_to_tenant='0'`）；
+//! ② 治理元数据（scope/editable/visible）的变更走本 Service 的写路径，
+//!    而 `/system/config` 的写操作已被 `oper_log_middleware` 覆盖审计（actor + 前后值），
+//!    故此处**无需**额外实现审计（元数据变更留痕由中间件保证）；
+//! ③ 默认策略由 seed 常量定义：[`PLATFORM_LOCKED_KEYS`] / [`PLATFORM_DEFAULT_KEYS`]
+//!    即迁移 `m20260925_000004` 的 seed 清单单一事实源，平台在允许范围内覆写；
+//! ④ 敏感项由 `visible_to_tenant='0'` **显式声明**——`is_sensitive_key` 由"主判据"
+//!    降级为"治理列缺省时的兜底"（见 `get_config_by_key`）。
 //!
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
@@ -23,13 +36,67 @@ use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_config::{ActiveModel as SysConfigActiveModel, Model as SysConfigModel};
 use crate::repository::sys_config::SysConfigRepository;
 
-/// 配置缓存 key 前缀（H-4：cache-aside）
+// ==================== 治理常量（§27.8 硬规则① / ③，单一事实源）====================
+
+/// `platform_only`（平台安全项）config key 集合——**代码常量锁死，界面不允许下放**。
+///
+/// 安全底线：密码策略、验证码/注册开关、登录锁定、IP 库凭据、审计告警阈值等。
+/// 与迁移 `migration/src/m20260925_000004_tenant_saas_governance.rs::PLATFORM_ONLY_KEYS`
+/// 及 `AppInitializer::ensure_tenant_saas_governance` 的 seed 保持一致
+/// （migration crate 无法依赖 lib，故保留同值本地副本，**修改时必须两处同步**）。
+pub const PLATFORM_LOCKED_KEYS: &[&str] = &[
+    "sys.user.initPassword",
+    "sys.account.captchaEnabled",
+    "sys.account.registerUser",
+    "sys.login.blackIPList",
+    "ip_location.update_source",
+    "ip_location.maxmind_account_id",
+    "ip_location.maxmind_license_key",
+    "ip_location.auto_update_enabled",
+    "sys.audit.alarm.window_minutes",
+    "sys.audit.alarm.fail_threshold",
+    "sys.audit.alarm.fail_rate_threshold",
+];
+
+/// `platform_default`（平台默认值，租户可见且可覆盖）config key 集合。
+///
+/// 与迁移 `m20260925_000004` 的 `PLATFORM_DEFAULT_KEYS` 保持一致。
+pub const PLATFORM_DEFAULT_KEYS: &[&str] = &[
+    "sys.index.skinName",
+    "sys.index.sideTheme",
+    "sys.login.background",
+];
+
+/// 治理域取值：平台锁定（租户不可见、不可改）
+const SCOPE_PLATFORM_ONLY: &str = "platform_only";
+/// 治理域取值：平台默认（租户可见、可覆盖）
+const SCOPE_PLATFORM_DEFAULT: &str = "platform_default";
+/// 治理域取值：租户私有（仅本租户可见/可改）
+const SCOPE_TENANT_PRIVATE: &str = "tenant_private";
+
+// ==================== 缓存常量 ====================
+
+/// 平台默认层缓存 key 前缀（§27.8：平台默认 `config:def:{key}`，无租户维度）
+const CONFIG_DEFAULT_CACHE_PREFIX: &str = "config:def:";
+/// 租户覆盖层缓存 key 前缀（§27.8：租户覆盖 `config:{tid}:{key}`）
 const CONFIG_CACHE_PREFIX: &str = "config:";
 
-/// 缓存穿透防护：None 值的 sentinel（P2 修复：原实现不缓存 None，恶意请求不存在的 key 每次穿透 DB）
+/// 缓存穿透防护：None 值的 sentinel（原实现不缓存 None，恶意请求不存在的 key 每次穿透 DB）
 const CONFIG_NULL_MARKER: &str = "__NULL__";
-/// 配置缓存 TTL（秒，5 分钟，H-4）
+/// 配置值缓存 TTL（秒，5 分钟，H-4）
 const CONFIG_CACHE_TTL: i64 = 300;
+/// 空值（sentinel）缓存短 TTL（秒）：既防穿透又避免长期陈旧
+const CONFIG_NULL_CACHE_TTL: i64 = 60;
+
+/// 租户覆盖层缓存 key：`config:{tid}:{key}`
+fn tenant_cache_key(tid: i64, config_key: &str) -> String {
+    format!("{CONFIG_CACHE_PREFIX}{tid}:{config_key}")
+}
+
+/// 平台默认层缓存 key：`config:def:{key}`
+fn default_cache_key(config_key: &str) -> String {
+    format!("{CONFIG_DEFAULT_CACHE_PREFIX}{config_key}")
+}
 
 // ==================== DTO ====================
 
@@ -75,6 +142,16 @@ pub struct ConfigAddDto {
     pub config_value: Option<String>,
     #[garde(skip)]
     pub config_type: Option<String>,
+    /// 治理域（仅平台操作者可设置；租户写入被忽略并强制为 tenant_private）。
+    /// 缺省/非法值 → 默认 `platform_only`（fail-closed）。
+    #[garde(skip)]
+    pub scope: Option<String>,
+    /// 租户是否可覆盖（仅平台操作者可设置，'0'/'1'）。
+    #[garde(skip)]
+    pub tenant_editable: Option<String>,
+    /// 租户是否可见（仅平台操作者可设置，'0'/'1'）。
+    #[garde(skip)]
+    pub visible_to_tenant: Option<String>,
     #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
@@ -93,6 +170,15 @@ pub struct ConfigEditDto {
     pub config_value: Option<String>,
     #[garde(skip)]
     pub config_type: Option<String>,
+    /// 治理域（仅平台操作者可设置；租户写入被忽略并保持 tenant_private）。
+    #[garde(skip)]
+    pub scope: Option<String>,
+    /// 租户是否可覆盖（仅平台操作者可设置，'0'/'1'）。
+    #[garde(skip)]
+    pub tenant_editable: Option<String>,
+    /// 租户是否可见（仅平台操作者可设置，'0'/'1'）。
+    #[garde(skip)]
+    pub visible_to_tenant: Option<String>,
     #[garde(length(max = 500))]
     pub remark: Option<String>,
 }
@@ -120,109 +206,247 @@ impl SysConfigService {
         }
     }
 
-    /// H-4：按 config_key 查询参数值，带 Redis cache-aside 缓存
-    ///
-    /// 缓存策略：
-    /// - key: `config:{config_key}`
-    /// - TTL: 300 秒（5 分钟）
-    /// - 命中：直接返回缓存的 config_value
-    /// - 未命中：查 DB，缓存结果（仅缓存 Some 值；None 不缓存会导致缓存穿透，后续按需补充 sentinel）
-    /// - Redis 错误：fail-open 降级到 DB（配置查询非安全敏感场景，可用性优先）
-    ///
-    /// 返回 `Option<String>`：
-    /// - Some(value): 配置存在
-    /// - None: 配置不存在或 DB 错误（调用方按业务默认值处理）
-    ///
-    /// 调用方：AuthService::is_captcha_enabled / is_register_enabled
-    pub async fn get_config_value_by_key_cached(
-        &self,
-        config_key: &str,
-    ) -> Result<Option<String>, ServiceError> {
-        let cache_key = format!("{}{}", CONFIG_CACHE_PREFIX, config_key);
-        let mut conn = self.redis.clone();
+    // ==================== 缓存层（两层）====================
 
-        // 1. 尝试从 Redis 缓存读取（fail-open：超时/错误降级到 DB）
+    /// 读单层缓存：`Some(Some(v))` = 命中值；`Some(None)` = 命中 None sentinel（该层无行）；
+    /// `None` = 未命中或 Redis 异常（fail-open 降级到 DB）。
+    async fn read_cache_layer(&self, cache_key: &str) -> Option<Option<String>> {
+        let mut conn = self.redis.clone();
         let cached: Option<String> = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET").arg(&cache_key).query_async(&mut conn),
+            redis::cmd("GET").arg(cache_key).query_async(&mut conn),
         )
         .await
-        .ok() // 超时 → None（降级到 DB）
-        .and_then(|r| r.ok()) // Redis 错误 → None
+        .ok() // 超时 → 未命中（降级到 DB）
+        .and_then(|r| r.ok()) // Redis 错误 → 未命中
         .flatten(); // Option<Option<String>> → Option<String>
-
-        if let Some(val) = cached {
-            // P2：识别 None sentinel，避免缓存穿透
+        cached.map(|val| {
             if val == CONFIG_NULL_MARKER {
-                return Ok(None);
+                None
+            } else {
+                Some(val)
             }
-            return Ok(Some(val));
-        }
+        })
+    }
 
-        // 2. 缓存未命中 → 查 DB
-        let model = self.config_repo.find_by_config_key(config_key).await?;
-        let value = model.and_then(|m| m.config_value);
-
-        // 3. 缓存结果（best-effort）：Some 值按正常 TTL 缓存；
-        //    None 缓存 sentinel（P2：60s 短 TTL，既防穿透又避免长期陈旧）
-        let cache_ttl = if value.is_some() {
+    /// 写单层缓存（best-effort）：Some 值按正常 TTL；None 写 sentinel 并按短 TTL 防穿透。
+    async fn write_cache_layer(&self, cache_key: &str, value: Option<&str>) {
+        let ttl = if value.is_some() {
             CONFIG_CACHE_TTL
         } else {
-            60i64
+            CONFIG_NULL_CACHE_TTL
         };
-        let cache_value = value
-            .clone()
-            .unwrap_or_else(|| CONFIG_NULL_MARKER.to_string());
+        let cache_value = value.unwrap_or(CONFIG_NULL_MARKER);
+        let mut conn = self.redis.clone();
         let _ = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
             redis::cmd("SETEX")
-                .arg(&cache_key)
-                .arg(cache_ttl)
-                .arg(&cache_value)
+                .arg(cache_key)
+                .arg(ttl)
+                .arg(cache_value)
                 .query_async::<()>(&mut conn),
         )
         .await;
-
-        Ok(value)
     }
 
-    /// H-4：失效指定 config_key 的缓存（修改/删除配置时调用）
-    /// P2 修复: DEL 失败或超时时记录 warn 日志，便于排查脏读风险
-    async fn invalidate_config_cache(&self, config_key: &str) {
-        let cache_key = format!("{}{}", CONFIG_CACHE_PREFIX, config_key);
+    /// DEL 单个缓存 key（best-effort，失败仅 warn）。
+    async fn del_cache_key(&self, cache_key: &str) {
         let mut conn = self.redis.clone();
         let result = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("DEL")
-                .arg(&cache_key)
-                .query_async::<()>(&mut conn),
+            redis::cmd("DEL").arg(cache_key).query_async::<()>(&mut conn),
         )
         .await;
         match result {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    config_key = %config_key,
-                    error = %e,
-                    "配置缓存 DEL 失败，可能产生脏读直至 TTL 过期"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    config_key = %config_key,
-                    "配置缓存 DEL 超时（{}s），可能产生脏读直至 TTL 过期",
-                    REDIS_CMD_TIMEOUT_SECS
-                );
-            }
+            Ok(Err(e)) => tracing::warn!(cache_key = %cache_key, error = %e, "配置缓存 DEL 失败，可能产生脏读直至 TTL 过期"),
+            Err(_) => tracing::warn!(
+                cache_key = %cache_key,
+                "配置缓存 DEL 超时（{}s），可能产生脏读直至 TTL 过期",
+                REDIS_CMD_TIMEOUT_SECS
+            ),
         }
     }
 
-    /// 分页查询参数配置
+    /// 失效**平台默认层**：只删 `config:def:{key}`。
     ///
-    /// 支持 config_name 模糊、config_key 模糊、config_type 精确、时间范围筛选
+    /// 两层缓存「读时合并、不缓存合并结果」→ 平台改默认值只失效本层即可全局即时生效，
+    /// 无需扫描删除各租户的覆盖层 key（租户层只缓存各自的覆盖值，不受平台默认值影响）。
+    async fn invalidate_default_cache(&self, config_key: &str) {
+        self.del_cache_key(&default_cache_key(config_key)).await;
+    }
+
+    /// 失效**指定租户覆盖层**：只删 `config:{tid}:{key}`（租户行写/删时调用）。
+    async fn invalidate_tenant_cache(&self, tid: i64, config_key: &str) {
+        if tid == 0 {
+            // 平台行写入 → 失效平台默认层
+            self.invalidate_default_cache(config_key).await;
+        } else {
+            self.del_cache_key(&tenant_cache_key(tid, config_key)).await;
+        }
+    }
+
+    /// H-4：按 config_key 查询**生效参数值**，带两层 Redis cache-aside 缓存（§27.8）
+    ///
+    /// 调用方**必须显式传入** `tenant_id`：
+    /// - `None`（或 `Some(0)`）：只读平台默认层 `config:def:{key}`；
+    /// - `Some(tid)`（tid≠0）：先读租户覆盖层 `config:{tid}:{key}`，无覆盖（sentinel）则回落平台默认层；
+    ///   `tenant_private` 行只在 tid 匹配时可见（覆盖层 key 已按 tid 隔离）。
+    ///
+    /// 读时合并、不缓存合并结果 → 平台改默认值只失效 def 层；租户改覆盖只失效自己那把 key。
+    /// 运行时读取（登录开关/默认密码等）允许读取 platform_only 的平台值（例如租户必须遵循
+    /// 平台下发的 captchaEnabled）；`visible_to_tenant` 治理的是**运维界面可见性**（见列表视图）。
+    ///
+    /// 返回 `Option<String>`：Some(value) 存在；None 不存在或 Redis/DB 错误（调用方按业务默认值处理）。
+    pub async fn get_config_value_by_key_cached(
+        &self,
+        config_key: &str,
+        tenant_id: Option<i64>,
+    ) -> Result<Option<String>, ServiceError> {
+        let tid = tenant_id.unwrap_or(0);
+
+        // 1. 租户覆盖层（仅 tid != 0）
+        if tid != 0 {
+            let tkey = tenant_cache_key(tid, config_key);
+            match self.read_cache_layer(&tkey).await {
+                Some(Some(v)) => return Ok(Some(v)), // 命中租户覆盖值
+                Some(None) => {}                     // 命中 sentinel：无覆盖 → 回落平台层
+                None => {
+                    // 未命中 → 查本租户覆盖行
+                    let row = self.config_repo.find_by_tenant_key(tid, config_key).await?;
+                    let val = row.and_then(|m| m.config_value);
+                    self.write_cache_layer(&tkey, val.as_deref()).await;
+                    if let Some(v) = val {
+                        return Ok(Some(v));
+                    }
+                    // 无覆盖 → 继续回落平台默认层
+                }
+            }
+        }
+
+        // 2. 平台默认层
+        let dkey = default_cache_key(config_key);
+        if let Some(hit) = self.read_cache_layer(&dkey).await {
+            return Ok(hit);
+        }
+        let row = self.config_repo.find_platform_by_key(config_key).await?;
+        let val = row.and_then(|m| m.config_value);
+        self.write_cache_layer(&dkey, val.as_deref()).await;
+        Ok(val)
+    }
+
+    // ==================== 治理辅助 ====================
+
+    /// key 是否为平台锁定安全项（§27.8 硬规则①：代码常量锁死，界面不允许下放）。
+    fn is_platform_locked(config_key: &str) -> bool {
+        PLATFORM_LOCKED_KEYS.contains(&config_key)
+    }
+
+    /// 归一化治理标志位（'0'/'1'），非法值显式报错（不静默降级）。
+    fn normalize_flag(field: &str, value: &str) -> Result<String, ServiceError> {
+        match value {
+            "0" | "1" => Ok(value.to_string()),
+            _ => Err(ServiceError::bad_request(&crate::tr!(
+                "error.config.flag_invalid",
+                field = field
+            ))),
+        }
+    }
+
+    /// 解析平台操作者提交的治理列（§27.8）：
+    /// - platform_only 常量集合 → 强制 fail-closed（`platform_only` / '0' / '0'），界面不允许下放；
+    /// - 其余项：scope 缺省 = `platform_only`（fail-closed）；editable/visible 缺省按 scope 推导
+    ///   （platform_only → '0'/'0'，其余 → '1'/'1'），非法 scope/标志位 → 400。
+    fn resolve_governance(
+        config_key: &str,
+        scope: Option<&str>,
+        tenant_editable: Option<&str>,
+        visible_to_tenant: Option<&str>,
+    ) -> Result<(String, String, String), ServiceError> {
+        if Self::is_platform_locked(config_key) {
+            // 硬规则①：安全底线在代码常量中锁死，忽略任何提交值
+            return Ok((
+                SCOPE_PLATFORM_ONLY.to_string(),
+                "0".to_string(),
+                "0".to_string(),
+            ));
+        }
+        let scope = scope.unwrap_or(SCOPE_PLATFORM_ONLY);
+        let (def_editable, def_visible) = match scope {
+            SCOPE_PLATFORM_ONLY => ("0", "0"),
+            SCOPE_PLATFORM_DEFAULT | SCOPE_TENANT_PRIVATE => ("1", "1"),
+            _ => {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.config.scope_invalid"
+                )));
+            }
+        };
+        let editable = match tenant_editable {
+            Some(v) => Self::normalize_flag("tenantEditable", v)?,
+            None => def_editable.to_string(),
+        };
+        let visible = match visible_to_tenant {
+            Some(v) => Self::normalize_flag("visibleToTenant", v)?,
+            None => def_visible.to_string(),
+        };
+        Ok((scope.to_string(), editable, visible))
+    }
+
+    /// 租户可写性校验（§27.8 治理表）：
+    ///
+    /// - **平台已有该 key 的行**（`tenant_id=0`）：仅当 `tenant_editable='1' AND
+    ///   visible_to_tenant='1'`（即 `platform_default`）才可写入（写租户覆盖行）；
+    ///   不可编辑 / 不可见 → **403**（fail-closed，用 forbidden 而非 400）；
+    /// - **平台无该 key 的行**：允许租户**自建** `tenant_private` 新键（租户业务配置，
+    ///   行 `tenant_id=tid` 仅本租户可见，不污染平台默认层）；
+    /// - `platform_only` 锁定集合（[`PLATFORM_LOCKED_KEYS`]）一律 **403**，不可自建。
+    async fn ensure_tenant_can_write(
+        &self,
+        tid: i64,
+        config_key: &str,
+    ) -> Result<(), ServiceError> {
+        if Self::is_platform_locked(config_key) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.config.governance_forbidden"
+            )));
+        }
+        let platform = self.config_repo.find_platform_by_key(config_key).await?;
+        // 平台无该 key 的行 → 租户自建 tenant_private 新键（§27.8），故仅 Some 分支需拦截
+        if let Some(m) = platform {
+            let writable = m.tenant_editable.as_deref() == Some("1")
+                && m.visible_to_tenant.as_deref() == Some("1");
+            if !writable {
+                // 平台行不可编辑 / 不可见 → 租户不得写入
+                tracing::debug!(
+                    tid,
+                    config_key,
+                    "租户尝试写入不可下放的 config key，已拒绝（403）"
+                );
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.config.governance_forbidden"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// 校验租户操作者是否可见某平台行（列表/详情读取用于 fail-closed 拦截）。
+    fn platform_row_visible_to_tenant(row: &SysConfigModel) -> bool {
+        row.tenant_id == 0 && row.visible_to_tenant.as_deref() == Some("1")
+    }
+
+    /// 分页查询参数配置（治理视图，§27.8）
+    ///
+    /// - `tenant_id = None / Some(0)`：平台操作者 → **平台全量视图**（现状保留，不过滤）；
+    /// - `tenant_id = Some(tid)`（tid≠0）：租户操作者 → **生效视图**（本租户自己的行 +
+    ///   平台 `visible_to_tenant='1'` 的行；同 key 以租户行覆盖平台行），
+    ///   **绝不返回 platform_only 行**（见 `SysConfigRepository::find_effective_page`）。
+    ///
+    /// 支持 config_name 模糊、config_key 模糊、config_type 精确、时间范围筛选。
     pub async fn get_config_page(
         &self,
         query: ConfigQueryDto,
+        tenant_id: Option<i64>,
     ) -> Result<(Vec<SysConfigModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -237,51 +461,101 @@ impl SysConfigService {
             _ => None,
         };
 
-        let (rows, total) = self
-            .config_repo
-            .find_page_filtered(
-                offset,
-                limit,
-                query.config_name.as_deref(),
-                query.config_key.as_deref(),
-                query.config_type.as_deref(),
-                begin,
-                end,
-            )
-            .await?;
+        let (rows, total) = match tenant_id.filter(|t| *t != 0) {
+            Some(tid) => {
+                self.config_repo
+                    .find_effective_page(
+                        tid,
+                        offset,
+                        limit,
+                        query.config_name.as_deref(),
+                        query.config_key.as_deref(),
+                        query.config_type.as_deref(),
+                        begin,
+                        end,
+                    )
+                    .await?
+            }
+            None => {
+                self.config_repo
+                    .find_page_filtered(
+                        offset,
+                        limit,
+                        query.config_name.as_deref(),
+                        query.config_key.as_deref(),
+                        query.config_type.as_deref(),
+                        begin,
+                        end,
+                    )
+                    .await?
+            }
+        };
         Ok((rows, total))
     }
 
-    /// 根据 config_id 查询参数配置详情
-    pub async fn get_config_by_id(&self, config_id: i64) -> Result<SysConfigModel, ServiceError> {
+    /// 根据 config_id 查询参数配置详情（治理视图）
+    ///
+    /// - 平台操作者（None / Some(0)）：全量可见；
+    /// - 租户操作者（Some(tid)）：仅本租户行或平台 `visible_to_tenant='1'` 的行可见，
+    ///   否则 **403**（不泄露 platform_only / 其它租户行；fail-closed）。
+    pub async fn get_config_by_id(
+        &self,
+        config_id: i64,
+        tenant_id: Option<i64>,
+    ) -> Result<SysConfigModel, ServiceError> {
         let model = self
             .config_repo
             .find_by_id(config_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.config.not_found")))?;
+        if let Some(tid) = tenant_id.filter(|t| *t != 0)
+            && model.tenant_id != tid
+            && !Self::platform_row_visible_to_tenant(&model)
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.config.governance_forbidden"
+            )));
+        }
         Ok(model)
     }
 
-    /// 按 config_key 查询参数值（前端读取配置用）
+    /// 按 config_key 查询**生效参数值**（前端读取配置用，§27.8）
     ///
-    /// 返回 config_value 字符串；若配置不存在返回 not_found。
-    /// 安全：密钥类配置（key 含 secret/password/passwd/token/key/私钥/口令 等）返回值脱敏为 `***`，
-    /// 避免通过 /system/config/configKey/{key} 接口泄露敏感明文（SEC-信息泄露面）。
-    pub async fn get_config_by_key(&self, config_key: &str) -> Result<String, ServiceError> {
+    /// 生效行解析：租户覆盖行优先，回落平台默认行（`find_effective_by_key`）。
+    /// 脱敏规则（治理列为准、`is_sensitive_key` 降级为兜底）：
+    /// - 租户操作者读取平台 `visible_to_tenant != '1'` 的行（含全部 platform_only）→ 脱敏 `***`；
+    /// - 其余情况走 [is_sensitive_key] 兜底（密钥类 key 名启发式，兼容历史数据）。
+    pub async fn get_config_by_key(
+        &self,
+        config_key: &str,
+        tenant_id: Option<i64>,
+    ) -> Result<String, ServiceError> {
         let model = self
             .config_repo
-            .find_by_config_key(config_key)
+            .find_effective_by_key(config_key, tenant_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.config.not_found")))?;
-        let value = model.config_value.unwrap_or_default();
-        if Self::is_sensitive_key(config_key) {
+        // 治理列显式声明「租户不可见」→ 对租户调用一律脱敏；
+        // 治理列缺省（历史行/非平台行）时由 is_sensitive_key 兜底。
+        let masked = match tenant_id.filter(|t| *t != 0) {
+            Some(_) => {
+                model.tenant_id == 0 && model.visible_to_tenant.as_deref() != Some("1")
+                    || Self::is_sensitive_key(config_key)
+            }
+            None => Self::is_sensitive_key(config_key),
+        };
+        if masked {
             Ok("***".to_string())
         } else {
-            Ok(value)
+            Ok(model.config_value.unwrap_or_default())
         }
     }
 
-    /// 判断配置键是否可能为敏感密钥类（用于 configKey 查询脱敏）
+    /// 判断配置键是否可能为敏感密钥类（脱敏**兜底**判据，§27.8 硬规则④）
+    ///
+    /// 主判据已改为治理列 `visible_to_tenant='0'` 的显式声明（见 `get_config_by_key`）；
+    /// 本函数仅在治理列缺省（历史数据 / 非平台行）时兜底，
+    /// 避免通过 `/system/config/configKey/{key}` 泄露密钥类明文（SEC-信息泄露面）。
     fn is_sensitive_key(key: &str) -> bool {
         let lower = key.to_ascii_lowercase();
         lower.contains("secret")
@@ -297,30 +571,64 @@ impl SysConfigService {
             || lower.contains("口令")
     }
 
-    /// 新增参数配置
+    /// 新增参数配置（写治理，§27.8）
     ///
-    /// 业务校验：config_key 唯一性
+    /// - **平台操作者（operator_tid=0）**：全权，可管理治理列（`scope`/`editable`/`visible`）；
+    ///   `platform_only` 常量集合强制锁定，唯一性限于平台层（`tenant_id=0`）。
+    /// - **租户操作者（operator_tid≠0）**：可写「平台行 `tenant_editable='1' AND
+    ///   visible_to_tenant='1'`」的 key（覆盖），也可自建平台**不存在**的新键；
+    ///   写入行 `tenant_id = operator_tid`，治理列固定为
+    ///   `tenant_private`（**不得篡改**）；命中 platform_only / 平台行不可编辑 / 不可见 → **403**。
+    ///   唯一性限于本租户层。
     pub async fn add_config(
         &self,
         dto: ConfigAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysConfigModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        // config_key 唯一性校验
-        let existing = self.config_repo.find_by_config_key(&dto.config_key).await?;
+        // 唯一性校验：复合唯一域 (tenant_id, config_key)，同租户内键名唯一
+        let existing = self
+            .config_repo
+            .find_by_tenant_key(operator_tid, &dto.config_key)
+            .await?;
         if existing.is_some() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.config.key_exists"
             )));
         }
 
+        // 治理列解析：平台操作者可管理；租户操作者仅可覆盖平台可下放项，治理列固定
+        let (scope, tenant_editable, visible_to_tenant) = if operator_tid == 0 {
+            Self::resolve_governance(
+                &dto.config_key,
+                dto.scope.as_deref(),
+                dto.tenant_editable.as_deref(),
+                dto.visible_to_tenant.as_deref(),
+            )?
+        } else {
+            // 租户：先做可写性校验（403），再写固定治理列
+            self.ensure_tenant_can_write(operator_tid, &dto.config_key)
+                .await?;
+            (
+                SCOPE_TENANT_PRIVATE.to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            )
+        };
+
         let now = crate::common::datetime::now_naive();
         let am = SysConfigActiveModel {
+            // 多租户：参数归属操作者租户（平台管理员=0）
+            tenant_id: Set(operator_tid),
             config_name: Set(dto.config_name),
             config_key: Set(dto.config_key),
             config_value: Set(dto.config_value),
             config_type: Set(dto.config_type),
+            scope: Set(Some(scope)),
+            tenant_editable: Set(Some(tenant_editable)),
+            visible_to_tenant: Set(Some(visible_to_tenant)),
             create_by: Set(Some(operator.to_string())),
             create_time: Set(Some(now)),
             update_by: Set(Some(operator.to_string())),
@@ -330,27 +638,45 @@ impl SysConfigService {
         };
 
         let model = self.config_repo.insert(am).await?;
-        // H-4：新增配置后失效该 key 的缓存（best-effort）
-        self.invalidate_config_cache(&model.config_key).await;
+        // 失效对应缓存层：平台行 → def 层；租户行 → 该租户覆盖层
+        self.invalidate_tenant_cache(model.tenant_id, &model.config_key)
+            .await;
         Ok(model)
     }
 
-    /// 修改参数配置
+    /// 修改参数配置（写治理，§27.8）
     ///
-    /// 业务校验：config_key 唯一性（排除自身）
+    /// 越权防护：仅本租户行可改（平台操作者全权）。租户不得改平台行（`tenant_allowed` 拦截）。
+    /// 治理列：平台操作者可管理；租户操作者保持 `tenant_private` 且不得篡改。
     pub async fn edit_config(
         &self,
         dto: ConfigEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysConfigModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        let existing = self.get_config_by_id(dto.config_id).await?;
+        let existing = self.get_config_by_id(dto.config_id, Some(operator_tid)).await?;
+        // 多租户越权防护：只能修改本租户参数（平台操作者放行；租户不得改平台行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
 
-        // config_key 变更时校验唯一性（排除自身）
+        // config_key 变更时校验唯一性（排除自身，限于同一租户层）
         let old_key = existing.config_key.clone();
+        let row_tid = existing.tenant_id;
         if dto.config_key != old_key {
-            let conflict = self.config_repo.find_by_config_key(&dto.config_key).await?;
+            if operator_tid != 0 {
+                // 租户改 key：新 key 必须仍是可覆盖的平台可下放项，否则 403
+                self.ensure_tenant_can_write(operator_tid, &dto.config_key)
+                    .await?;
+            }
+            let conflict = self
+                .config_repo
+                .find_by_tenant_key(row_tid, &dto.config_key)
+                .await?;
             if conflict.is_some() {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.config.key_exists"
@@ -364,34 +690,78 @@ impl SysConfigService {
         am.config_key = Set(dto.config_key.clone());
         am.config_value = Set(dto.config_value);
         am.config_type = Set(dto.config_type);
+        if operator_tid == 0 {
+            // 平台操作者可管理治理列
+            let (scope, editable, visible) = Self::resolve_governance(
+                &dto.config_key,
+                dto.scope.as_deref(),
+                dto.tenant_editable.as_deref(),
+                dto.visible_to_tenant.as_deref(),
+            )?;
+            am.scope = Set(Some(scope));
+            am.tenant_editable = Set(Some(editable));
+            am.visible_to_tenant = Set(Some(visible));
+        } else {
+            // 租户操作者不得篡改治理列：固定 tenant_private 且可见可覆盖
+            am.scope = Set(Some(SCOPE_TENANT_PRIVATE.to_string()));
+            am.tenant_editable = Set(Some("1".to_string()));
+            am.visible_to_tenant = Set(Some("1".to_string()));
+        }
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);
 
         let model = self.config_repo.update(am).await?;
-        // H-4：修改配置后失效缓存。若 config_key 变更，old_key 和 new_key 都需失效
-        // （old_key 缓存的旧值已过时，new_key 可能存在 None 占位缓存）
-        self.invalidate_config_cache(&old_key).await;
-        self.invalidate_config_cache(&model.config_key).await;
+        // 若 config_key 变更，old_key 与 new_key 都需失效（旧层 + 新层）
+        if model.config_key != old_key {
+            self.invalidate_tenant_cache(row_tid, &old_key).await;
+        }
+        self.invalidate_tenant_cache(model.tenant_id, &model.config_key)
+            .await;
         Ok(model)
     }
 
-    /// 批量删除参数配置（物理删除，config 表无 del_flag）
-    pub async fn delete_configs(&self, config_ids: Vec<i64>) -> Result<(), ServiceError> {
+    /// 批量删除参数配置（物理删除，config 表无 del_flag；写治理，§27.8）
+    ///
+    /// - 平台操作者全权；
+    /// - 租户操作者不得删除平台行（`tenant_id=0`）→ **403**；跨租户行 → 403。
+    pub async fn delete_configs(
+        &self,
+        config_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if config_ids.is_empty() {
             return Ok(());
         }
         // H-4：删除前先查询 config_key（单次批量查询，避免 N+1），用于失效缓存
         let models = self.config_repo.find_by_ids(config_ids.clone()).await?;
+        // 写治理：租户不得删除平台行（fail-closed 403，先于通用越权检查给出明确语义）
+        if operator_tid != 0 && models.iter().any(|m| m.tenant_id == 0) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.config.platform_row_forbidden"
+            )));
+        }
+        // 多租户越权防护：任一所选参数跨越操作者租户即整体拒绝（平台操作者放行）
+        if models
+            .iter()
+            .any(|m| !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
         self.config_repo.delete_by_ids(config_ids).await?;
-        // P2 优化: 批量失效 Redis 缓存使用 pipeline，避免循环单条 DEL 的 N 次 RTT
-        // 与 refresh_cache() 方法保持一致
+        // 批量失效对应层的 Redis 缓存：平台行 → def 层；租户行 → 该租户覆盖层
         if !models.is_empty() {
             let mut conn = self.redis.clone();
             let mut pipe = redis::pipe();
             for m in &models {
                 pipe.cmd("DEL")
-                    .arg(format!("{}{}", CONFIG_CACHE_PREFIX, m.config_key));
+                    .arg(if m.tenant_id == 0 {
+                        default_cache_key(&m.config_key)
+                    } else {
+                        tenant_cache_key(m.tenant_id, &m.config_key)
+                    });
             }
             if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
                 tracing::warn!("批量失效配置缓存失败: {}", e);
@@ -402,7 +772,11 @@ impl SysConfigService {
 
     /// 刷新缓存
     ///
-    /// H-4：扫描并清除所有 `config:*` 缓存键。best-effort，Redis 错误仅记日志不影响业务。
+    /// H-4：扫描并清除所有 config 缓存键。best-effort，Redis 错误仅记日志不影响业务。
+    ///
+    /// §27.8 两层缓存：前缀 [`CONFIG_CACHE_PREFIX`]（`config:`）是**两层共同前缀**，
+    /// 既可命中租户覆盖层（`config:{tid}:{key}`），也可命中平台默认层（`config:def:{key}`，
+    /// 由 [`CONFIG_DEFAULT_CACHE_PREFIX`] 构造），故一次 `config:*` 扫描即覆盖两层。
     pub async fn refresh_cache(&self) -> Result<(), ServiceError> {
         let mut conn = self.redis.clone();
         let pattern = format!("{}*", CONFIG_CACHE_PREFIX);
@@ -426,12 +800,16 @@ impl SysConfigService {
         Ok(())
     }
 
-    /// 导出参数配置（全量查询不分页）
+    /// 导出参数配置（全量查询不分页；治理视图，§27.8）
     ///
-    /// 支持与分页查询相同的筛选条件，返回全部匹配记录
+    /// 视图与 [`Self::get_config_page`] 一致：
+    /// - `tenant_id = None / Some(0)`：平台操作者 → **平台全量视图**；
+    /// - `tenant_id = Some(tid)`（tid≠0）：租户操作者 → **生效视图**（本租户行 +
+    ///   平台 `visible_to_tenant='1'` 行，同 key 租户行覆盖平台行），**绝不导出 platform_only**。
     pub async fn export_configs(
         &self,
         query: ConfigQueryDto,
+        tenant_id: Option<i64>,
     ) -> Result<Vec<SysConfigModel>, ServiceError> {
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -442,16 +820,31 @@ impl SysConfigService {
             _ => None,
         };
 
-        let rows = self
-            .config_repo
-            .find_all_filtered(
-                query.config_name.as_deref(),
-                query.config_key.as_deref(),
-                query.config_type.as_deref(),
-                begin,
-                end,
-            )
-            .await?;
+        let rows = match tenant_id.filter(|t| *t != 0) {
+            Some(tid) => {
+                self.config_repo
+                    .find_effective_all(
+                        tid,
+                        query.config_name.as_deref(),
+                        query.config_key.as_deref(),
+                        query.config_type.as_deref(),
+                        begin,
+                        end,
+                    )
+                    .await?
+            }
+            None => {
+                self.config_repo
+                    .find_all_filtered(
+                        query.config_name.as_deref(),
+                        query.config_key.as_deref(),
+                        query.config_type.as_deref(),
+                        begin,
+                        end,
+                    )
+                    .await?
+            }
+        };
         Ok(rows)
     }
 }

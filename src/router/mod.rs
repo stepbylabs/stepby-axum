@@ -17,6 +17,7 @@ pub mod sys_backup_router;
 pub mod sys_config_router;
 pub mod sys_dept_router;
 pub mod sys_tenant_router;
+pub mod sys_tenant_domain_router;
 pub mod sys_dict_router;
 pub mod sys_frontend_error_router;
 pub mod sys_http_debug_router;
@@ -53,6 +54,7 @@ use crate::middleware::request_id_middleware;
 use crate::middleware::response_cache::{ResponseCache, response_cache_middleware};
 use crate::middleware::security_headers;
 use crate::middleware::spa_fallback_middleware;
+use crate::middleware::tenant_host_middleware;
 use crate::observability::monitoring_middleware;
 use crate::state::AppState;
 use axum::Router;
@@ -64,7 +66,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
@@ -79,9 +80,11 @@ const REQUEST_TIMEOUT_SECS: u64 = 120;
 /// 路由结构：
 /// - public_routes：免鉴权（/health、/captchaImage、/login）
 /// - protected：需 auth_middleware + permission_middleware（/logout、/getInfo、/getRouters、/system/*）
-/// - 静态资源：/uploads/*（头像等用户上传文件，免鉴权由前端 baseURL 拼接访问）
+/// - 上传文件预览：`GET /uploads/{tid}/{kind}/{filename}`（受鉴权，替代此前的无鉴权静态直出）
 /// - 全局中间件（由外到内执行顺序，与下方 app.layer 链一致）：
-///   security_headers → locale → request_id → Timeout → Trace → Cors → DefaultBodyLimit → Compression（最内层）
+///   security_headers → locale → request_id → monitoring → Timeout → Trace → Cors
+///   → DefaultBodyLimit → Compression（最内层），其后进入 api 路由的 tenant_host →
+///   （protected 的 spa_fallback → auth → response_cache → rate_limit → idempotency → permission → oper_log）
 pub fn build_app(state: Arc<AppState>) -> Router {
     // 受鉴权保护的业务路由
     let protected = Router::new()
@@ -100,6 +103,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_web_hook_router::web_hook_routes())
         .merge(sys_dept_router::dept_routes())
         .merge(sys_tenant_router::tenant_routes())
+        .merge(sys_tenant_domain_router::tenant_domain_routes())
         .merge(sys_job_router::job_routes())
         .merge(sys_dict_router::dict_routes())
         .merge(sys_http_debug_router::http_debug_routes())
@@ -181,7 +185,15 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     // 该 fallback 会随 Router::nest 一起嵌套到各前缀下，使未匹配的 API 路径返回
     // JSON 404（而非落入 SPA fallback 返回 HTML，避免前端把 HTML 当 JSON 解析报错）。
     let api = public::public_routes(state.clone())
+        .merge(uploads_routes(state.clone()))
         .merge(protected)
+        // tenant_host 中间件（多租户 Phase 3 域名链路）：解析请求 host / 网关注入的
+        // `X-Tenant-Code` → 租户上下文，注入 HostTenant 供 auth_middleware 做一致性校验。
+        // 关键：以 `Router::layer` 挂在 api 整体（在所有业务 route_layer 之外、更外层），
+        // 因此对**公开路由**（登录页 / 公开页 / SSO 回调）同样生效。
+        // 执行顺序（外→内）：tenant_host → spa_fallback → auth → response_cache →
+        //   rate_limit → idempotency → permission → oper_log → handler。
+        .layer(from_fn_with_state(state.clone(), tenant_host_middleware))
         .fallback(api_not_found);
 
     // 根路径挂载 API 路由，并在各前端 baseURL 前缀下重复挂载：
@@ -212,17 +224,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             .route("/api-docs/openapi.json", get(docs::openapi_json));
     }
 
-    // 静态资源服务：头像等用户上传文件（仅本地后端，F1）
-    // /uploads/avatar/xxx.png → <upload_root>/avatar/xxx.png
-    // 必须在 SPA fallback 之前注册
-    // 修复：将相对路径解析为绝对路径，基于可执行文件所在目录，避免依赖进程 CWD
-    // 解析逻辑已移至 common::upload::resolve_upload_root，与 handler 层共享，确保保存与服务路径一致
-    // F1：仅 storage.supports_static()（local）挂载本地目录；s3 后端文件由对象存储公开 URL 访问
-    if state.storage.supports_static() {
-        let upload_root = crate::common::resolve_upload_root(&state.config.upload);
-        tracing::info!("静态资源服务目录: {}", upload_root.display());
-        app = app.nest_service("/uploads", ServeDir::new(upload_root));
-    }
+    // 上传文件预览：由上方 api 中的 uploads_routes 提供受鉴权路由（GET /uploads/{tid}/{kind}/{file}），
+    // 不再使用无鉴权的 ServeDir 静态直出。文件物理隔离在 `uploads/{tid}/...`，
+    // 由 handler 校验请求者租户与路径租户的归属关系（越权 403）。
 
     // 根路径 handler：返回前端 index.html
     if embedded_mode {
@@ -304,6 +308,56 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn(security_headers))
 }
 
+/// 上传文件预览路由（`GET /uploads/{tid}/{kind}/{filename}`）
+///
+/// 取代此前的 `ServeDir` 无鉴权静态直出：
+/// - 仅本地存储后端（`supports_static()`）挂载；S3 后端由对象存储公开 URL 直出
+/// - 请求先经 cookie→Authorization 桥接（浏览器 `<img>` 无法自定义请求头，但前端 token
+///   已存入 Cookie `Admin-Token`），再走 `auth_middleware` 强制鉴权
+/// - 作用域严格限定本路由，避免全局 cookie 鉴权扩大 CSRF 攻击面
+fn uploads_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    if !state.storage.supports_static() {
+        return Router::new();
+    }
+    Router::new()
+        .route(
+            "/uploads/{*path}",
+            get(crate::handler::common_handler::serve_upload),
+        )
+        // 后添加先执行：cookie 桥接（补 Authorization 头）→ auth_middleware（校验）
+        .route_layer(from_fn_with_state(state.clone(), auth_middleware))
+        .route_layer(axum::middleware::from_fn(cookie_token_bridge))
+}
+
+/// Cookie → Authorization 请求头桥接（仅用于 `/uploads/*` 预览路由）
+///
+/// 前端 token 存于 Cookie `Admin-Token`（非 HttpOnly，js-cookie 写入）。
+/// 浏览器在 `<img src>` 等场景无法附加自定义请求头，故此处从 Cookie 提取 token
+/// 并补成 `Authorization: Bearer <token>`，使后续 `auth_middleware` 正常工作。
+/// 若请求已带 Authorization 头则不覆盖（保持既有优先级）。
+async fn cookie_token_bridge(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !req.headers().contains_key(axum::http::header::AUTHORIZATION)
+        && let Some(token) = extract_cookie_token(req.headers(), "Admin-Token")
+        && let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        req.headers_mut()
+            .insert(axum::http::header::AUTHORIZATION, val);
+    }
+    next.run(req).await
+}
+
+/// 从 Cookie 头中提取指定名称的值（简单实现，返回首个匹配项）
+fn extract_cookie_token(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let cookies = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|part| {
+        let (key, value) = part.trim().split_once('=')?;
+        (key == name && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
 /// API 未匹配路径的统一 JSON 404 响应
 ///
 /// 作为嵌套挂载的前缀路由（/prod-api、/dev-api、/stage-api）的 fallback：
@@ -353,4 +407,35 @@ fn build_cors_layer(server_config: &ServerConfig) -> CorsLayer {
         ])
         .allow_credentials(true)
         .allow_origin(AllowOrigin::list(origins))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_cookie_token;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    /// Cookie 提取：命中 / 缺失 / 多 cookie / 空值 / 无 Cookie 头
+    #[test]
+    fn extract_cookie_token_parses_admin_token() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("theme=dark; Admin-Token=abc.def.ghi; other=1"),
+        );
+        assert_eq!(
+            extract_cookie_token(&h, "Admin-Token").as_deref(),
+            Some("abc.def.ghi")
+        );
+        // 名称不匹配
+        assert_eq!(extract_cookie_token(&h, "Admin-Token-Missing"), None);
+        // 空值视为未提供
+        let mut empty = HeaderMap::new();
+        empty.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("Admin-Token=; a=b"),
+        );
+        assert_eq!(extract_cookie_token(&empty, "Admin-Token"), None);
+        // 无 Cookie 头
+        assert_eq!(extract_cookie_token(&HeaderMap::new(), "Admin-Token"), None);
+    }
 }

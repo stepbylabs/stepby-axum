@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_task::Model as SysTaskModel;
+use crate::middleware::Operator;
 use crate::service::sys_task_service::TaskQueryDto;
 use crate::state::AppState;
 use crate::utils::parse_id_list;
@@ -31,9 +32,13 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<TaskQueryDto>,
 ) -> Result<TableDataInfo<SysTaskModel>, AppError> {
-    let (rows, total) = state.task_service.get_task_page(query).await?;
+    let (rows, total) = state
+        .task_service
+        .get_task_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -53,9 +58,16 @@ pub async fn list(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(task_id): Path<i64>,
 ) -> Result<AjaxResult<SysTaskModel>, AppError> {
-    let model = state.task_service.get_task_by_id(task_id).await?;
+    let model = state
+        .task_service
+        .get_task_by_id(
+            task_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -75,6 +87,7 @@ pub async fn get_info(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(task_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&task_ids);
@@ -89,6 +102,9 @@ pub async fn remove(
         )));
     }
 
-    state.task_service.delete_tasks(ids).await?;
+    state
+        .task_service
+        .delete_tasks(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

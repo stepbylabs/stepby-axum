@@ -50,9 +50,13 @@ use crate::state::AppState;
 )]
 pub async fn report_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<ReportQueryDto>,
 ) -> Result<TableDataInfo<SysReportModel>, AppError> {
-    let (rows, total) = state.report_service.get_report_page(query).await?;
+    let (rows, total) = state
+        .report_service
+        .get_report_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -70,9 +74,13 @@ pub async fn report_list(
 )]
 pub async fn report_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(report_id): Path<i64>,
 ) -> Result<AjaxResult<SysReportModel>, AppError> {
-    let vo = state.report_service.get_report_by_id(report_id).await?;
+    let vo = state
+        .report_service
+        .get_report_by_id(report_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -95,7 +103,7 @@ pub async fn report_add(
 ) -> Result<AjaxResult<SysReportModel>, AppError> {
     let vo = state
         .report_service
-        .add_report(dto, operator.username())
+        .add_report(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -119,7 +127,7 @@ pub async fn report_edit(
 ) -> Result<AjaxResult<SysReportModel>, AppError> {
     let vo = state
         .report_service
-        .edit_report(dto, operator.username())
+        .edit_report(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -137,6 +145,7 @@ pub async fn report_edit(
 )]
 pub async fn report_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids = crate::utils::parse_id_list::<i64>(&ids);
@@ -149,7 +158,10 @@ pub async fn report_remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.report_service.delete_report(ids).await?;
+    state
+        .report_service
+        .delete_report(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
@@ -167,10 +179,14 @@ pub async fn report_remove(
 pub async fn report_status(
     State(state): State<Arc<AppState>>,
     Path(report_id): Path<i64>,
+    operator: Operator,
     axum::Json(mut dto): axum::Json<ReportStatusDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     dto.report_id = report_id;
-    state.report_service.change_report_status(dto).await?;
+    state
+        .report_service
+        .change_report_status(dto, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
@@ -187,9 +203,13 @@ pub async fn report_status(
 )]
 pub async fn report_preview(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(report_id): Path<i64>,
 ) -> Result<AjaxResult<ReportSnapshotVo>, AppError> {
-    let vo = state.report_service.preview_report(report_id).await?;
+    let vo = state
+        .report_service
+        .preview_report(report_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -209,9 +229,13 @@ pub async fn report_preview(
 )]
 pub async fn sub_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<SubQueryDto>,
 ) -> Result<TableDataInfo<SysReportSubModel>, AppError> {
-    let (rows, total) = state.report_service.get_sub_page(query).await?;
+    let (rows, total) = state
+        .report_service
+        .get_sub_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -229,9 +253,13 @@ pub async fn sub_list(
 )]
 pub async fn sub_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(sub_id): Path<i64>,
 ) -> Result<AjaxResult<SysReportSubModel>, AppError> {
-    let vo = state.report_service.get_sub_by_id(sub_id).await?;
+    let vo = state
+        .report_service
+        .get_sub_by_id(sub_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -254,7 +282,7 @@ pub async fn sub_add(
 ) -> Result<AjaxResult<SysReportSubModel>, AppError> {
     let vo = state
         .report_service
-        .add_sub(dto, operator.username())
+        .add_sub(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -278,7 +306,7 @@ pub async fn sub_edit(
 ) -> Result<AjaxResult<SysReportSubModel>, AppError> {
     let vo = state
         .report_service
-        .edit_sub(dto, operator.username())
+        .edit_sub(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -296,6 +324,7 @@ pub async fn sub_edit(
 )]
 pub async fn sub_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids = crate::utils::parse_id_list::<i64>(&ids);
@@ -310,7 +339,10 @@ pub async fn sub_remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.report_service.delete_sub(ids).await?;
+    state
+        .report_service
+        .delete_sub(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
@@ -328,10 +360,14 @@ pub async fn sub_remove(
 pub async fn sub_status(
     State(state): State<Arc<AppState>>,
     Path(sub_id): Path<i64>,
+    operator: Operator,
     axum::Json(mut dto): axum::Json<SubStatusDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     dto.sub_id = sub_id;
-    state.report_service.change_sub_status(dto).await?;
+    state
+        .report_service
+        .change_sub_status(dto, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
@@ -348,8 +384,12 @@ pub async fn sub_status(
 )]
 pub async fn sub_run(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(sub_id): Path<i64>,
 ) -> Result<AjaxResult<PushSummaryVo>, AppError> {
-    let vo = state.report_service.run_sub_now(sub_id).await?;
+    let vo = state
+        .report_service
+        .run_sub_now(sub_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(vo))
 }

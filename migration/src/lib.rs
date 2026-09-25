@@ -66,6 +66,9 @@ pub use m20260924_000009_user_dept::Migration as M20260924UserDept;
 pub use m20260924_000010_common_role_readonly::Migration as M20260924CommonRoleReadonly;
 pub use m20260925_000001_multitenant_phase2::Migration as M20260925MultitenantPhase2;
 pub use m20260925_000002_tenant_module::Migration as M20260925TenantModule;
+pub use m20260925_000003_tenant_phase3::Migration as M20260925TenantPhase3;
+pub use m20260925_000004_tenant_saas_governance::Migration as M20260925TenantSaasGovernance;
+pub use m20260925_000005_tenant_unique_scope::Migration as M20260925TenantUniqueScope;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -130,6 +133,9 @@ mod m20260924_000009_user_dept;
 mod m20260924_000010_common_role_readonly;
 mod m20260925_000001_multitenant_phase2;
 mod m20260925_000002_tenant_module;
+mod m20260925_000003_tenant_phase3;
+mod m20260925_000004_tenant_saas_governance;
+mod m20260925_000005_tenant_unique_scope;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -274,6 +280,9 @@ impl MigratorTrait for Migrator {
             Box::new(M20260924CommonRoleReadonly),
             Box::new(M20260925MultitenantPhase2),
             Box::new(M20260925TenantModule),
+            Box::new(M20260925TenantPhase3),
+            Box::new(M20260925TenantSaasGovernance),
+            Box::new(M20260925TenantUniqueScope),
         ]
     }
 }

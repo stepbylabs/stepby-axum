@@ -213,6 +213,8 @@ pub struct SysRoleService {
     user_role_repo: SysUserRoleRepository,
     user_repo: SysUserRepository,
     dept_repo: SysDeptRepository,
+    /// 租户套餐服务（§27.6 生效点①：角色授权 `menu_ids ⊆ 套餐白名单` 校验）
+    tenant_service: crate::service::SysTenantService,
     /// Redis 连接管理器（权限缓存失效）
     redis: ConnectionManager,
 }
@@ -225,7 +227,8 @@ impl SysRoleService {
             role_dept_repo: SysRoleDeptRepository::new(db.clone()),
             user_role_repo: SysUserRoleRepository::new(db.clone()),
             user_repo: SysUserRepository::new(db.clone()),
-            dept_repo: SysDeptRepository::new(db),
+            dept_repo: SysDeptRepository::new(db.clone()),
+            tenant_service: crate::service::SysTenantService::new(db, redis.clone()),
             redis,
         }
     }
@@ -419,17 +422,12 @@ impl SysRoleService {
         Ok(RoleVo { role, menu_ids })
     }
 
-    /// 查询所有未删除角色（用于用户编辑页角色下拉选择）
-    pub async fn get_all_roles(&self) -> Result<Vec<SysRoleModel>, ServiceError> {
-        let roles = self.role_repo.find_active_all().await?;
-        Ok(roles)
-    }
-
     /// 新增角色（事务：插入角色 + 批量插入菜单关联）
     pub async fn add_role(
         &self,
         dto: RoleAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysRoleModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -441,6 +439,15 @@ impl SysRoleService {
             )));
         }
 
+        // §27.6 生效点①：授权菜单必须 ⊆ 租户套餐白名单（无套餐/平台租户 → 不限制）
+        if let Some(ids) = dto.menu_ids.as_deref()
+            && !ids.is_empty()
+        {
+            self.tenant_service
+                .ensure_menus_in_package(operator_tid, ids)
+                .await?;
+        }
+
         let role_repo = self.role_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
         let result = self
@@ -450,6 +457,8 @@ impl SysRoleService {
                 let mut am = SysRoleActiveModel {
                     ..Default::default()
                 };
+                // 多租户 Phase 2：角色归属操作者租户（平台管理员=0）
+                am.tenant_id = Set(operator_tid);
                 am.role_name = Set(dto.role_name.clone());
                 am.role_key = Set(dto.role_key.clone());
                 am.role_sort = Set(dto.role_sort);
@@ -497,6 +506,7 @@ impl SysRoleService {
         &self,
         dto: RoleEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysRoleModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -509,6 +519,12 @@ impl SysRoleService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+        }
+        // 多租户越权防护：只能修改本租户角色（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         // 超管保护：SUPER_ADMIN_ROLE_ID 不允许修改 role_key
@@ -533,6 +549,21 @@ impl SysRoleService {
                     "error.role.perm_key_exists"
                 )));
             }
+        }
+
+        // §27.6 生效点①：授权菜单必须 ⊆ 角色所属租户的套餐白名单。
+        // 平台操作者（tid=0）代管租户角色时，按**角色归属租户**校验（受影响的正是它）。
+        if let Some(ids) = dto.menu_ids.as_deref()
+            && !ids.is_empty()
+        {
+            let effective_tid = if operator_tid == 0 {
+                existing.tenant_id
+            } else {
+                operator_tid
+            };
+            self.tenant_service
+                .ensure_menus_in_package(effective_tid, ids)
+                .await?;
         }
 
         let role_repo = self.role_repo.clone();
@@ -606,7 +637,7 @@ impl SysRoleService {
     ///
     /// M-1 Major TOCTOU 修复：用户关联检查移入事务内，避免事务外预检查后
     /// 被其他事务插入新关联（TOCTOU）导致数据不一致。
-    pub async fn delete_role(&self, role_id: i64) -> Result<(), ServiceError> {
+    pub async fn delete_role(&self, role_id: i64, operator_tid: i64) -> Result<(), ServiceError> {
         // 超管保护
         if role_id == SUPER_ADMIN_ROLE_ID {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -622,6 +653,12 @@ impl SysRoleService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+        }
+        // 多租户越权防护：只能删除本租户角色（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         // 释放唯一字段值，避免软删除后唯一索引冲突（uk_sys_role_key）
@@ -688,7 +725,7 @@ impl SysRoleService {
     /// 对比 handler 层 for 循环调用 delete_role：
     /// - 旧方案：第 2 个角色删除失败时第 1 个已删，第 3 个未删，数据状态不一致
     /// - 新方案：全部成功才提交，部分失败回滚到操作前状态
-    pub async fn delete_roles(&self, role_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_roles(&self, role_ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
         // 预校验：超管保护（事务外快速失败）
         if role_ids.contains(&SUPER_ADMIN_ROLE_ID) {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -698,7 +735,18 @@ impl SysRoleService {
 
         // 单个 ID 直接走 delete_role（保持原有事务行为）
         if role_ids.len() == 1 {
-            return self.delete_role(role_ids[0]).await;
+            return self.delete_role(role_ids[0], operator_tid).await;
+        }
+
+        // 多租户越权防护（批量）：任一所选角色跨越操作者租户即整体拒绝（平台操作者放行）
+        let targets = self.role_repo.find_by_ids(&role_ids).await?;
+        if targets
+            .iter()
+            .any(|r| !crate::common::tenant::tenant_allowed(operator_tid, r.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         // 批量删除：单个事务包装所有操作
@@ -778,6 +826,7 @@ impl SysRoleService {
         role_id: i64,
         status: &str,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 超管保护：SUPER_ADMIN_ROLE_ID 不允许停用
         if role_id == SUPER_ADMIN_ROLE_ID && status == "1" {
@@ -794,6 +843,12 @@ impl SysRoleService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+        }
+        // 多租户越权防护：只能启停本租户角色（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         let now = crate::common::datetime::now_naive();
@@ -813,6 +868,7 @@ impl SysRoleService {
         &self,
         role_id: i64,
         menu_ids: Vec<i64>,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         let existing = self
             .role_repo
@@ -822,6 +878,23 @@ impl SysRoleService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+        }
+        // 多租户越权防护：只能为所属租户范围内的角色授权菜单（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
+        // §27.6 生效点①：授权菜单必须 ⊆ 角色所属租户的套餐白名单
+        if !menu_ids.is_empty() {
+            let effective_tid = if operator_tid == 0 {
+                existing.tenant_id
+            } else {
+                operator_tid
+            };
+            self.tenant_service
+                .ensure_menus_in_package(effective_tid, &menu_ids)
+                .await?;
         }
 
         let role_menu_repo = self.role_menu_repo.clone();
@@ -883,6 +956,7 @@ impl SysRoleService {
         &self,
         dto: DataScopeDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -901,6 +975,12 @@ impl SysRoleService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+        }
+        // 多租户越权防护：只能修改本租户角色的数据权限（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         let now = crate::common::datetime::now_naive();
@@ -959,10 +1039,13 @@ impl SysRoleService {
     ///
     /// SQL 语义：SELECT * FROM sys_user WHERE del_flag='0' AND user_id IN
     ///          (SELECT user_id FROM sys_user_role WHERE role_id=?)
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户用户；平台 → `None` 全量。
     pub async fn get_allocated_users(
         &self,
         query: AuthUserQueryDto,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysUserModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -996,6 +1079,7 @@ impl SysRoleService {
                 query.phonenumber.as_deref(),
                 scope_dept_ids.as_deref(),
                 scope_user_id,
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
@@ -1005,10 +1089,13 @@ impl SysRoleService {
     ///
     /// SQL 语义：SELECT * FROM sys_user WHERE del_flag='0' AND user_id NOT IN
     ///          (SELECT user_id FROM sys_user_role WHERE role_id=?)
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户用户；平台 → `None` 全量。
     pub async fn get_unallocated_users(
         &self,
         query: AuthUserQueryDto,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysUserModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -1038,6 +1125,7 @@ impl SysRoleService {
                 query.phonenumber.as_deref(),
                 scope_dept_ids.as_deref(),
                 scope_user_id,
+                tenant_scope,
             )
             .await?;
         Ok((rows, total))
@@ -1278,12 +1366,39 @@ impl SysRoleService {
     ///
     /// 返回 RoleDeptTreeVo:
     /// - checked_keys: 该角色已勾选的部门 ID 列表（来自 sys_role_dept）
-    /// - depts: 全部部门的树形结构（TreeSelect 格式）
-    pub async fn get_dept_tree(&self, role_id: i64) -> Result<RoleDeptTreeVo, ServiceError> {
-        // 1. 查询全部未删除部门
-        let depts = self.dept_repo.find_active_all().await?;
+    /// - depts: 本租户全部部门的树形结构（TreeSelect 格式）
+    ///
+    /// 多租户加固：先做角色归属校验（不存在/已删除 → 404；跨租户 → 403），
+    /// 再按操作者租户过滤部门树，避免传入任意 role_id 越权读取他租户部门/勾选结果。
+    pub async fn get_dept_tree(
+        &self,
+        role_id: i64,
+        operator_tid: i64,
+    ) -> Result<RoleDeptTreeVo, ServiceError> {
+        // 1. 加载角色并做归属校验（与 delete_role 一致的既有范式）
+        let existing = self
+            .role_repo
+            .base()
+            .find_by_id(role_id)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
+        if existing.del_flag.as_deref() == Some("2") {
+            return Err(ServiceError::not_found(&crate::tr!("error.role.not_found")));
+        }
+        // 多租户越权防护：只能查看本租户角色（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
 
-        // 2. 查询该角色已勾选的部门 ID
+        // 2. 查询本租户未删除部门（平台操作者 tenant_scope=None 不过滤）
+        let depts = self
+            .dept_repo
+            .find_active_all(crate::common::tenant::tenant_scope(operator_tid))
+            .await?;
+
+        // 3. 查询该角色已勾选的部门 ID
         let checked_keys: Vec<i64> = self
             .role_dept_repo
             .find_by_role_id(role_id)
@@ -1292,7 +1407,7 @@ impl SysRoleService {
             .map(|rd| rd.dept_id)
             .collect();
 
-        // 3. 组装部门树（TreeSelect 格式）
+        // 4. 组装部门树（TreeSelect 格式）
         let tree = build_dept_tree_select(&depts, 0);
 
         Ok(RoleDeptTreeVo {

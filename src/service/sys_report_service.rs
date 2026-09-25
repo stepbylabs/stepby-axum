@@ -398,6 +398,7 @@ impl SysReportService {
     pub async fn get_report_page(
         &self,
         query: ReportQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysReportModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -409,16 +410,27 @@ impl SysReportService {
                 query.report_code.as_deref(),
                 query.report_type.as_deref(),
                 query.status.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         Ok((rows, total))
     }
 
-    pub async fn get_report_by_id(&self, report_id: i64) -> Result<SysReportModel, ServiceError> {
-        self.report_repo
+    pub async fn get_report_by_id(
+        &self,
+        report_id: i64,
+        operator_tid: i64,
+    ) -> Result<SysReportModel, ServiceError> {
+        let report = self
+            .report_repo
             .find_by_id(report_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report.not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report.not_found")))?;
+        // 越权防护：租户管理员不得读取其他租户报表定义
+        if !crate::common::tenant::tenant_allowed(operator_tid, report.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        Ok(report)
     }
 
     /// 新增报表定义
@@ -426,6 +438,7 @@ impl SysReportService {
         &self,
         dto: ReportAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysReportModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_report_type(&dto.report_type)?;
@@ -440,6 +453,7 @@ impl SysReportService {
 
         let now = now_naive();
         let am = SysReportActiveModel {
+            tenant_id: Set(operator_tid),
             report_code: Set(dto.report_code),
             report_name: Set(dto.report_name),
             report_type: Set(dto.report_type),
@@ -461,12 +475,13 @@ impl SysReportService {
         &self,
         dto: ReportEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysReportModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_report_type(&dto.report_type)?;
         Self::validate_report_config_json(&dto.config)?;
 
-        let existing = self.get_report_by_id(dto.report_id).await?;
+        let existing = self.get_report_by_id(dto.report_id, operator_tid).await?;
         if existing.report_code != dto.report_code
             && self.report_repo.exists_by_code(&dto.report_code).await?
         {
@@ -493,7 +508,11 @@ impl SysReportService {
     }
 
     /// 批量删除报表定义（逻辑删除，并级联逻辑删除其下全部订阅）
-    pub async fn delete_report(&self, report_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_report(
+        &self,
+        report_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if report_ids.is_empty() {
             return Ok(());
         }
@@ -502,6 +521,13 @@ impl SysReportService {
             return Err(ServiceError::not_found(&crate::tr!(
                 "error.report.not_found"
             )));
+        }
+        // 越权防护：租户管理员不得跨租户删除报表定义
+        if existing
+            .iter()
+            .any(|r| !crate::common::tenant::tenant_allowed(operator_tid, r.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
         }
         for rid in &report_ids {
             self.sub_repo
@@ -516,8 +542,12 @@ impl SysReportService {
     }
 
     /// 报表启停
-    pub async fn change_report_status(&self, dto: ReportStatusDto) -> Result<(), ServiceError> {
-        let existing = self.get_report_by_id(dto.report_id).await?;
+    pub async fn change_report_status(
+        &self,
+        dto: ReportStatusDto,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        let existing = self.get_report_by_id(dto.report_id, operator_tid).await?;
         if existing.status == dto.status {
             return Ok(());
         }
@@ -545,6 +575,7 @@ impl SysReportService {
     pub async fn get_sub_page(
         &self,
         query: SubQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysReportSubModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -555,16 +586,27 @@ impl SysReportService {
                 query.report_id,
                 query.sub_name.as_deref(),
                 query.status.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         Ok((rows, total))
     }
 
-    pub async fn get_sub_by_id(&self, sub_id: i64) -> Result<SysReportSubModel, ServiceError> {
-        self.sub_repo
+    pub async fn get_sub_by_id(
+        &self,
+        sub_id: i64,
+        operator_tid: i64,
+    ) -> Result<SysReportSubModel, ServiceError> {
+        let sub = self
+            .sub_repo
             .find_by_id(sub_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report_sub.not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report_sub.not_found")))?;
+        // 越权防护：租户管理员不得读取其他租户报表订阅
+        if !crate::common::tenant::tenant_allowed(operator_tid, sub.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        Ok(sub)
     }
 
     /// 新增订阅
@@ -572,6 +614,7 @@ impl SysReportService {
         &self,
         dto: SubAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysReportSubModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         self.validate_sub(
@@ -581,11 +624,13 @@ impl SysReportService {
             &dto.receive_email,
             &dto.push_sys_msg,
             &dto.receive_user_ids,
+            operator_tid,
         )
         .await?;
 
         let now = now_naive();
         let am = SysReportSubActiveModel {
+            tenant_id: Set(operator_tid),
             report_id: Set(dto.report_id),
             sub_name: Set(dto.sub_name),
             cron: Set(dto.cron),
@@ -612,6 +657,7 @@ impl SysReportService {
         &self,
         dto: SubEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysReportSubModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         self.validate_sub(
@@ -621,10 +667,11 @@ impl SysReportService {
             &dto.receive_email,
             &dto.push_sys_msg,
             &dto.receive_user_ids,
+            operator_tid,
         )
         .await?;
 
-        let existing = self.get_sub_by_id(dto.sub_id).await?;
+        let existing = self.get_sub_by_id(dto.sub_id, operator_tid).await?;
         let mut am: SysReportSubActiveModel = existing.into();
         am.report_id = Set(dto.report_id);
         am.sub_name = Set(dto.sub_name);
@@ -645,7 +692,11 @@ impl SysReportService {
     }
 
     /// 批量删除订阅
-    pub async fn delete_sub(&self, sub_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_sub(
+        &self,
+        sub_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if sub_ids.is_empty() {
             return Ok(());
         }
@@ -655,13 +706,24 @@ impl SysReportService {
                 "error.report_sub.not_found"
             )));
         }
+        // 越权防护：租户管理员不得跨租户删除报表订阅
+        if existing
+            .iter()
+            .any(|s| !crate::common::tenant::tenant_allowed(operator_tid, s.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         self.sub_repo.soft_delete_by_ids(&sub_ids).await?;
         Ok(())
     }
 
     /// 订阅启停
-    pub async fn change_sub_status(&self, dto: SubStatusDto) -> Result<(), ServiceError> {
-        let existing = self.get_sub_by_id(dto.sub_id).await?;
+    pub async fn change_sub_status(
+        &self,
+        dto: SubStatusDto,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        let existing = self.get_sub_by_id(dto.sub_id, operator_tid).await?;
         if existing.status == dto.status {
             return Ok(());
         }
@@ -682,10 +744,15 @@ impl SysReportService {
         receive_email: &Option<String>,
         push_sys_msg: &str,
         receive_user_ids: &Option<String>,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
-        self.get_report_by_id(*report_id).await.map_err(|_| {
-            ServiceError::bad_request(&crate::tr!("error.report_sub.report_not_found"))
-        })?;
+        self.get_report_by_id(*report_id, operator_tid)
+            .await
+            .map_err(|e| match e.code {
+                // 越权访问跨租户报表：原样返回 403，禁止静默降级为「报表不存在」
+                403 => e,
+                _ => ServiceError::bad_request(&crate::tr!("error.report_sub.report_not_found")),
+            })?;
 
         parse_cron(cron)
             .map_err(|_| ServiceError::bad_request(&crate::tr!("error.report_sub.cron_invalid")))?;
@@ -726,8 +793,8 @@ impl SysReportService {
     pub async fn generate_snapshot(&self, report: &SysReportModel) -> Result<Value, ServiceError> {
         let data = match report.report_type.as_str() {
             "login_stats" => self.snapshot_login(report).await,
-            "user_stats" => self.snapshot_user().await,
-            "msg_stats" => self.snapshot_msg().await,
+            "user_stats" => self.snapshot_user(report.tenant_id).await,
+            "msg_stats" => self.snapshot_msg(report.tenant_id).await,
             "custom" => serde_json::from_str::<Value>(&report.config)
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             _ => Value::Null,
@@ -738,9 +805,11 @@ impl SysReportService {
     /// 登录统计快照：最近 N 天每日成功/失败 + 今日异常 IP 数
     async fn snapshot_login(&self, report: &SysReportModel) -> Value {
         let days = config_days(&report.config, DEFAULT_STAT_DAYS);
+        // 按报表所属租户统计，出租户（tenant_id=0）为平台视角不过滤
+        let tenant = crate::common::tenant::tenant_scope(report.tenant_id);
         let daily = self
             .logininfor_service
-            .daily_stats(days)
+            .daily_stats(days, tenant)
             .await
             .unwrap_or_default()
             .into_iter()
@@ -754,14 +823,14 @@ impl SysReportService {
             .collect::<Vec<_>>();
         let today_failed_ips = self
             .logininfor_service
-            .count_today_failed_ips()
+            .count_today_failed_ips(tenant)
             .await
             .unwrap_or(0);
         serde_json::json!({ "days": days, "todayFailedIps": today_failed_ips, "daily": daily })
     }
 
     /// 用户统计快照：总量/启用/停用/近 7 天新增 + 近 30 天创建趋势
-    async fn snapshot_user(&self) -> Value {
+    async fn snapshot_user(&self, tenant_id: i64) -> Value {
         use chrono::{Duration, NaiveTime};
         let db = self.report_repo.base().db();
         let now = crate::common::datetime::today_utc();
@@ -770,14 +839,20 @@ impl SysReportService {
         let week_begin = week_ago.and_time(NaiveTime::MIN);
         let month_begin = month_ago.and_time(NaiveTime::MIN);
 
-        let total = count_of(db, None).await;
-        let active = count_of(db, Some(("0", None))).await;
-        let disabled = count_of(db, Some(("1", None))).await;
-        let new_this_week = count_of(db, Some(("0", Some(week_begin)))).await;
+        // 按报表所属租户统计用户维度（出租户不过滤）
+        let tenant = crate::common::tenant::tenant_scope(tenant_id);
+        let total = count_of(db, None, tenant).await;
+        let active = count_of(db, Some(("0", None)), tenant).await;
+        let disabled = count_of(db, Some(("1", None)), tenant).await;
+        let new_this_week = count_of(db, Some(("0", Some(week_begin))), tenant).await;
 
-        let recent_users = SysUser::find()
+        let mut query = SysUser::find()
             .filter(UserColumn::DelFlag.ne("2"))
-            .filter(UserColumn::CreateTime.gte(month_begin))
+            .filter(UserColumn::CreateTime.gte(month_begin));
+        if let Some(tid) = tenant {
+            query = query.filter(UserColumn::TenantId.eq(tid));
+        }
+        let recent_users = query
             .order_by_asc(UserColumn::CreateTime)
             .all(db)
             .await
@@ -812,10 +887,15 @@ impl SysReportService {
     }
 
     /// 消息统计快照：发送总量 + 按状态分布（成功/失败/待重试）
-    async fn snapshot_msg(&self) -> Value {
+    async fn snapshot_msg(&self, tenant_id: i64) -> Value {
         let db = self.report_repo.base().db();
+        // 按报表所属租户统计消息投递维度（出租户不过滤）
+        let tenant = crate::common::tenant::tenant_scope(tenant_id);
         let base = |status: Option<&str>| {
             let mut q = SysMsgSendLog::find();
+            if let Some(tid) = tenant {
+                q = q.filter(MsgLogColumn::TenantId.eq(tid));
+            }
             if let Some(s) = status {
                 q = q.filter(MsgLogColumn::Status.eq(s));
             }
@@ -829,8 +909,12 @@ impl SysReportService {
     }
 
     /// 预览报表快照（手动触发，不落库、不推送）
-    pub async fn preview_report(&self, report_id: i64) -> Result<ReportSnapshotVo, ServiceError> {
-        let report = self.get_report_by_id(report_id).await?;
+    pub async fn preview_report(
+        &self,
+        report_id: i64,
+        operator_tid: i64,
+    ) -> Result<ReportSnapshotVo, ServiceError> {
+        let report = self.get_report_by_id(report_id, operator_tid).await?;
         let data = self.generate_snapshot(&report).await?;
         Ok(ReportSnapshotVo {
             report_code: report.report_code.clone(),
@@ -844,39 +928,47 @@ impl SysReportService {
     // ==================== 订阅推送 ====================
 
     /// 手动触发订阅推送（立即生成快照并投递）
-    pub async fn run_sub_now(&self, sub_id: i64) -> Result<PushSummaryVo, ServiceError> {
-        let sub = self.get_sub_by_id(sub_id).await?;
+    pub async fn run_sub_now(
+        &self,
+        sub_id: i64,
+        operator_tid: i64,
+    ) -> Result<PushSummaryVo, ServiceError> {
+        let sub = self.get_sub_by_id(sub_id, operator_tid).await?;
         self.run_subscription(&sub).await
     }
 
     /// 扫描到期订阅并推送（定时任务调用），返回实际执行的订阅数
     pub async fn run_due_subscriptions(&self) -> Result<u64, ServiceError> {
-        let subs = self.sub_repo.find_all_enabled().await?;
+        // 后台批量任务：订阅已按租户分组返回，逐组以该组 tid 为上下文执行，
+        // 严禁跨租户聚合（A 租户报表不得统计 B 租户数据）。
+        let groups = self.sub_repo.find_all_enabled().await?;
         let now = now_naive();
         let mut ran = 0u64;
-        for sub in subs {
-            match parse_cron(&sub.cron) {
-                Ok(cron) if is_due(&cron, sub.last_run_time, now) => {
-                    match self.run_subscription(&sub).await {
-                        Ok(_) => ran += 1,
-                        Err(e) => {
-                            tracing::warn!(
-                                "报表订阅推送失败 sub_id={}, sub_name={}: {}",
-                                sub.sub_id,
-                                sub.sub_name,
-                                e.message
-                            );
+        for (_tid, subs) in groups {
+            for sub in subs {
+                match parse_cron(&sub.cron) {
+                    Ok(cron) if is_due(&cron, sub.last_run_time, now) => {
+                        match self.run_subscription(&sub).await {
+                            Ok(_) => ran += 1,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "报表订阅推送失败 sub_id={}, sub_name={}: {}",
+                                    sub.sub_id,
+                                    sub.sub_name,
+                                    e.message
+                                );
+                            }
                         }
                     }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "报表订阅 cron 非法已跳过 sub_id={}, sub_name={}: {}",
-                        sub.sub_id,
-                        sub.sub_name,
-                        e
-                    );
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "报表订阅 cron 非法已跳过 sub_id={}, sub_name={}: {}",
+                            sub.sub_id,
+                            sub.sub_name,
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -934,6 +1026,8 @@ impl SysReportService {
                 .unwrap_or_default();
             for uid in user_ids {
                 let am = SysMsgSendLogActiveModel {
+                    // 运行期产物：归该订阅所属租户（定时/手动触发均无操作者上下文）
+                    tenant_id: Set(sub.tenant_id),
                     template_code: Set(Some(format!("report_push_{}", report.report_code))),
                     channel_code: Set(Some("site".to_string())),
                     to_addr: Set(uid.to_string()),
@@ -967,9 +1061,16 @@ impl SysReportService {
 }
 
 /// 用户数统计辅助（可选 status 过滤 + 可选 create_time 下限）
-async fn count_of(db: &DatabaseConnection, filter: Option<(&str, Option<NaiveDateTime>)>) -> i64 {
+async fn count_of(
+    db: &DatabaseConnection,
+    filter: Option<(&str, Option<NaiveDateTime>)>,
+    tenant: Option<i64>,
+) -> i64 {
     let mut q = SysUser::find();
     q = q.filter(UserColumn::DelFlag.ne("2"));
+    if let Some(tid) = tenant {
+        q = q.filter(UserColumn::TenantId.eq(tid));
+    }
     if let Some((status, gt)) = filter {
         q = q.filter(UserColumn::Status.eq(status));
         if let Some(begin) = gt {

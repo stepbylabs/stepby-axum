@@ -223,14 +223,17 @@ impl SysDictService {
 
     // ==================== 缓存辅助方法 ====================
 
-    /// 构造字典缓存 key
-    fn cache_key(dict_type: &str) -> String {
-        format!("{}{}", DICT_CACHE_PREFIX, dict_type)
+    /// 构造字典数据缓存 key（两层：平台层 `dict:0:{dict_type}` / 租户层 `dict:{tid}:{dict_type}`）
+    ///
+    /// 多租户隔离：字典数据按**类型归属层**分缓存，`tid` 即数据归属层
+    /// （平台类型数据=0 / 租户自建类型数据=租户 ID），杜绝跨租户串读。
+    fn cache_key(tid: i64, dict_type: &str) -> String {
+        format!("{}{}:{}", DICT_CACHE_PREFIX, tid, dict_type)
     }
 
-    /// 失效指定 dict_type 的缓存（best-effort，失败仅记日志不阻断业务）
-    async fn invalidate_cache(&self, dict_type: &str) {
-        let key = Self::cache_key(dict_type);
+    /// 失效指定层 + dict_type 的缓存（best-effort，失败仅记日志不阻断业务）
+    async fn invalidate_cache(&self, tid: i64, dict_type: &str) {
+        let key = Self::cache_key(tid, dict_type);
         let mut conn = self.redis.clone();
         if let Err(e) = redis::cmd("DEL")
             .arg(&key)
@@ -241,10 +244,10 @@ impl SysDictService {
         }
     }
 
-    /// 失效多个 dict_type 的缓存（P2-6：改 Redis pipeline 批量 DEL，一次往返）
+    /// 失效指定层多个 dict_type 的缓存（P2-6：改 Redis pipeline 批量 DEL，一次往返）
     ///
     /// 保持 best-effort 语义：失败仅 warn 不阻断业务。
-    async fn invalidate_caches(&self, dict_types: &[String]) {
+    async fn invalidate_caches(&self, tid: i64, dict_types: &[String]) {
         if dict_types.is_empty() {
             return;
         }
@@ -253,7 +256,7 @@ impl SysDictService {
         let mut pipe = redis::pipe();
         pipe.atomic(); // 非事务，允许部分成功
         for dt in dict_types {
-            pipe.cmd("DEL").arg(Self::cache_key(dt));
+            pipe.cmd("DEL").arg(Self::cache_key(tid, dt));
         }
         if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
             tracing::warn!(
@@ -263,19 +266,27 @@ impl SysDictService {
             );
             // 回退到逐个 DEL，保证尽可能多的缓存被清除
             for dt in dict_types {
-                self.invalidate_cache(dt).await;
+                self.invalidate_cache(tid, dt).await;
             }
         }
     }
 
     // ==================== 字典类型 ====================
 
+    /// 归一化租户过滤域：`Some(0)`/`None`（平台操作者）→ None（不过滤）；其余 → Some(tid)。
+    fn tenant_scope_of(tenant_id: Option<i64>) -> Option<i64> {
+        tenant_id.filter(|t| *t != 0)
+    }
+
     /// 分页查询字典类型
     ///
+    /// 多租户（§27.8）：`tenant_id = None / Some(0)` → 平台全量；`Some(tid)` →
+    /// 本租户自建类型 + 平台类型（`tenant_id IN (0, tid)`）。
     /// 支持 dict_name 模糊、dict_type 模糊、status 精确、时间范围筛选
     pub async fn get_dict_type_page(
         &self,
         query: DictTypeQueryDto,
+        tenant_id: Option<i64>,
     ) -> Result<(Vec<SysDictTypeModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -295,6 +306,7 @@ impl SysDictService {
             .find_page_filtered(
                 offset,
                 limit,
+                Self::tenant_scope_of(tenant_id),
                 query.dict_name.as_deref(),
                 query.dict_type.as_deref(),
                 query.status.as_deref(),
@@ -306,9 +318,12 @@ impl SysDictService {
     }
 
     /// 导出字典类型列表（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
+    ///
+    /// 多租户视图同 [`Self::get_dict_type_page`]。
     pub async fn export_dict_types(
         &self,
         query: DictTypeQueryDto,
+        tenant_id: Option<i64>,
     ) -> Result<Vec<SysDictTypeModel>, ServiceError> {
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
@@ -327,6 +342,7 @@ impl SysDictService {
             .find_page_filtered(
                 offset,
                 limit,
+                Self::tenant_scope_of(tenant_id),
                 query.dict_name.as_deref(),
                 query.dict_type.as_deref(),
                 query.status.as_deref(),
@@ -337,44 +353,86 @@ impl SysDictService {
         Ok(rows)
     }
 
-    /// 查询全部未删除字典类型（前端下拉选择用）
-    pub async fn get_all_dict_types(&self) -> Result<Vec<SysDictTypeModel>, ServiceError> {
-        let rows = self.dict_type_repo.find_active_all().await?;
+    /// 查询可用的字典类型（前端下拉选择用）
+    ///
+    /// 多租户：`tenant_id = None / Some(0)` → 平台全量；`Some(tid)` → 本租户自建类型 + 平台类型。
+    pub async fn get_all_dict_types(
+        &self,
+        tenant_id: Option<i64>,
+    ) -> Result<Vec<SysDictTypeModel>, ServiceError> {
+        let rows = self
+            .dict_type_repo
+            .find_active_all(Self::tenant_scope_of(tenant_id))
+            .await?;
         Ok(rows)
     }
 
-    /// 根据 dict_id 查询字典类型详情
+    /// 根据 dict_id 查询字典类型详情（治理视图）
+    ///
+    /// - 平台操作者（None / Some(0)）：全量可见；
+    /// - 租户操作者（Some(tid)）：仅本租户行或平台行可见，否则 **403**（fail-closed）。
     pub async fn get_dict_type_by_id(
         &self,
         dict_id: i64,
+        tenant_id: Option<i64>,
     ) -> Result<SysDictTypeModel, ServiceError> {
         let model = self
             .dict_type_repo
             .find_active_by_id(dict_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dict.type_not_found")))?;
+        if let Some(tid) = Self::tenant_scope_of(tenant_id)
+            && model.tenant_id != 0
+            && model.tenant_id != tid
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.dict.platform_row_forbidden"
+            )));
+        }
         Ok(model)
     }
 
-    /// 新增字典类型
+    /// 新增字典类型（写治理，§27.8）
     ///
-    /// 业务校验：dict_type 唯一性（未删除范围内）
+    /// - **平台操作者（operator_tid=0）**：全权，唯一性限于平台层（`tenant_id=0`）。
+    /// - **租户操作者（operator_tid≠0）**：可创建自建类型（`tenant_id=operator_tid`）；
+    ///   但与**平台既有类型同名** → **403**（显式检查，禁止覆盖平台类型；
+    ///   不依赖唯一索引报错，避免 500/400 语义混淆）；与本租户既有类型同名 → 400。
     pub async fn add_dict_type(
         &self,
         dto: DictTypeAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysDictTypeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        // dict_type 唯一性校验
-        let existing = self
+        // 平台层同名校验（复合唯一域 (tenant_id, dict_type)）
+        let platform_existing = self
             .dict_type_repo
-            .find_by_dict_type(&dto.dict_type)
+            .find_platform_by_dict_type(&dto.dict_type)
             .await?;
-        if existing.is_some() {
+        if platform_existing.is_some() {
+            if operator_tid != 0 {
+                // 租户不得创建与平台同名类型（显式 403，不覆盖平台类型）
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.dict.platform_type_exists"
+                )));
+            }
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.dict.type_exists"
             )));
+        }
+        // 本租户层同名校验（平台操作者 operator_tid=0 时上面已覆盖该层）
+        if operator_tid != 0 {
+            let own_existing = self
+                .dict_type_repo
+                .find_by_tenant_dict_type(operator_tid, &dto.dict_type)
+                .await?;
+            if own_existing.is_some() {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.dict.type_exists"
+                )));
+            }
         }
 
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效
@@ -382,6 +440,8 @@ impl SysDictService {
 
         let now = crate::common::datetime::now_naive();
         let am = SysDictTypeActiveModel {
+            // 多租户：字典类型归属操作者租户（平台管理员=0），租户自建类型打租户 ID
+            tenant_id: Set(operator_tid),
             dict_name: Set(Some(dto.dict_name)),
             dict_type: Set(Some(dto.dict_type)),
             status: Set(dto.status),
@@ -395,8 +455,9 @@ impl SysDictService {
         };
 
         let model = self.dict_type_repo.insert(am).await?;
-        // 新增字典类型后失效对应缓存（防御性清理，正常情况下无数据）
-        self.invalidate_cache(&dict_type_for_cache).await;
+        // 新增字典类型后失效对应层缓存（防御性清理，正常情况下无数据）
+        self.invalidate_cache(operator_tid, &dict_type_for_cache)
+            .await;
         Ok(model)
     }
 
@@ -404,24 +465,44 @@ impl SysDictService {
     ///
     /// 业务校验：
     /// - 目标存在且未删除
-    /// - dict_type 若变更，校验新值唯一性
+    /// - **租户不得改平台类型**（`tenant_id=0`）→ **403**
+    /// - dict_type 若变更，校验新值在同层唯一；租户改名撞平台既有类型 → **403**
     /// - 若 dict_type 变更，事务内同步更新 sys_dict_data.dict_type
     pub async fn edit_dict_type(
         &self,
         dto: DictTypeEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysDictTypeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        let existing = self.get_dict_type_by_id(dto.dict_id).await?;
+        let existing = self.get_dict_type_by_id(dto.dict_id, Some(operator_tid)).await?;
+        // 多租户越权防护：只能修改本租户字典类型（平台操作者放行；租户不得改平台类型）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.dict.platform_row_forbidden"
+            )));
+        }
 
-        // dict_type 变更时校验唯一性
+        // dict_type 变更时校验唯一性（限于本行归属层，避免撞唯一索引报 500）
         let old_dict_type = existing.dict_type.clone().unwrap_or_default();
         let dict_type_changed = dto.dict_type != old_dict_type;
         if dict_type_changed {
+            if operator_tid != 0 {
+                // 租户改名撞平台既有类型 → 403（禁止覆盖平台类型）
+                let platform_conflict = self
+                    .dict_type_repo
+                    .find_platform_by_dict_type(&dto.dict_type)
+                    .await?;
+                if platform_conflict.is_some() {
+                    return Err(ServiceError::forbidden(&crate::tr!(
+                        "error.dict.platform_type_exists"
+                    )));
+                }
+            }
             let conflict = self
                 .dict_type_repo
-                .find_by_dict_type(&dto.dict_type)
+                .find_by_tenant_dict_type(existing.tenant_id, &dto.dict_type)
                 .await?;
             if conflict.is_some() {
                 return Err(ServiceError::bad_request(&crate::tr!(
@@ -431,6 +512,9 @@ impl SysDictService {
         }
 
         let now = crate::common::datetime::now_naive();
+        // 级联更新的归属层 = 该类型所属租户（平台类型=0 / 租户自建类型=租户 ID）
+        // 必须在 `existing` 被消费进 ActiveModel 之前取出
+        let row_tid = existing.tenant_id;
         let mut am: SysDictTypeActiveModel = existing.into();
         am.dict_name = Set(Some(dto.dict_name));
         am.dict_type = Set(Some(dto.dict_type.clone()));
@@ -451,10 +535,10 @@ impl SysDictService {
                 let old_dict_type = old_dict_type.clone();
                 let new_dict_type = dto.dict_type.clone();
                 async move {
-                    // 若 dict_type 变更，同步更新 sys_dict_data.dict_type
+                    // 若 dict_type 变更，同步更新 sys_dict_data.dict_type（限本归属层，防跨租户误改）
                     if dict_type_changed {
                         dict_data_repo
-                            .update_dict_type_conn(txn, &old_dict_type, &new_dict_type)
+                            .update_dict_type_conn(txn, row_tid, &old_dict_type, &new_dict_type)
                             .await?;
                     }
                     // 更新字典类型
@@ -464,20 +548,26 @@ impl SysDictService {
                 .boxed()
             })
             .await?;
-        // 字典类型变更后失效新旧 dict_type 缓存
+        // 字典类型变更后失效新旧 dict_type 缓存（限本归属层）
         let mut to_invalidate = vec![dto.dict_type.clone()];
         if dict_type_changed {
             to_invalidate.push(old_dict_type);
         }
-        self.invalidate_caches(&to_invalidate).await;
+        self.invalidate_caches(row_tid, &to_invalidate).await;
         Ok(model)
     }
 
     /// 批量删除字典类型（事务：级联软删除关联字典数据）
     ///
     /// REGRESS-003：软删除时重命名 dict_type 为 `{original}_deleted_{dict_id}`，
-    /// 释放 uk_sys_dict_type 唯一索引，避免无法重新创建同名字典类型。
-    pub async fn delete_dict_types(&self, dict_ids: Vec<i64>) -> Result<(), ServiceError> {
+    /// 释放 `uk_sys_dict_type_tenant (tenant_id, dict_type)` 唯一索引，避免无法重新创建同名字典类型。
+    ///
+    /// 多租户：租户不得删除平台类型（`tenant_id=0`）→ **403**；级联删除限本归属层。
+    pub async fn delete_dict_types(
+        &self,
+        dict_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         // 预查询所有 dict_type 字符串（事务外查询，事务内仅写）
         // 批量查询（单次 SELECT 替代 N 次），并校验全部存在
         let models = self.dict_type_repo.find_active_by_ids(&dict_ids).await?;
@@ -486,15 +576,28 @@ impl SysDictService {
                 "error.dict.type_not_found"
             )));
         }
-        // 保持按 dict_ids 输入顺序构建 (dict_id, dict_type)，便于事务内重命名
-        let mut dict_types: Vec<(i64, String)> = Vec::with_capacity(dict_ids.len());
+        // 租户不得删除平台类型（fail-closed 403，先给出明确语义）
+        if operator_tid != 0 && models.iter().any(|m| m.tenant_id == 0) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.dict.platform_row_forbidden"
+            )));
+        }
+        // 多租户越权防护：任一所选字典类型跨越操作者租户即整体拒绝（平台操作者放行）
+        if models
+            .iter()
+            .any(|m| !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
+        // 保持按 dict_ids 输入顺序构建 (dict_id, dict_type, tenant_id)，便于事务内重命名与级联限层
+        let mut dict_types: Vec<(i64, String, i64)> = Vec::with_capacity(dict_ids.len());
         for dict_id in &dict_ids {
-            let dt = models
-                .iter()
-                .find(|m| m.dict_id == *dict_id)
-                .and_then(|m| m.dict_type.clone())
-                .unwrap_or_default();
-            dict_types.push((*dict_id, dt));
+            let m = models.iter().find(|m| m.dict_id == *dict_id);
+            let dt = m.and_then(|m| m.dict_type.clone()).unwrap_or_default();
+            let owner = m.map(|m| m.tenant_id).unwrap_or(0);
+            dict_types.push((*dict_id, dt, owner));
         }
 
         let dict_type_repo = self.dict_type_repo.clone();
@@ -506,7 +609,7 @@ impl SysDictService {
                 let dict_data_repo = dict_data_repo.clone();
                 let dict_types = dict_types.clone();
                 async move {
-                    for (dict_id, dict_type) in &dict_types {
+                    for (dict_id, dict_type, owner_tid) in &dict_types {
                         // 软删除字典类型并重命名 dict_type（REGRESS-003）
                         // P0-H1 修复：dict_type 列为 VARCHAR(100)，重命名后缀可能超长导致 UPDATE 失败
                         // 截断原始 dict_type 到安全长度，确保 {truncated}_deleted_{dict_id} ≤ 100
@@ -525,9 +628,9 @@ impl SysDictService {
                         dict_type_repo
                             .soft_delete_with_rename_conn(txn, *dict_id, renamed)
                             .await?;
-                        // 级联软删除关联字典数据（按原始 dict_type，dict_data 表无外键约束）
+                        // 级联软删除关联字典数据（限本归属层，dict_data 表无外键约束）
                         dict_data_repo
-                            .soft_delete_by_dict_type_conn(txn, dict_type)
+                            .soft_delete_by_dict_type_conn(txn, *owner_tid, dict_type)
                             .await?;
                     }
                     Ok(())
@@ -535,9 +638,15 @@ impl SysDictService {
                 .boxed()
             })
             .await?;
-        // 删除字典类型后失效所有相关 dict_type 缓存
-        let to_invalidate: Vec<String> = dict_types.iter().map(|(_, dt)| dt.clone()).collect();
-        self.invalidate_caches(&to_invalidate).await;
+        // 删除字典类型后失效所有相关 dict_type 缓存（按各类型归属层逐层失效）
+        let mut invalidations: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for (_, dt, owner_tid) in &dict_types {
+            invalidations.entry(*owner_tid).or_default().push(dt.clone());
+        }
+        for (owner_tid, dts) in invalidations {
+            self.invalidate_caches(owner_tid, &dts).await;
+        }
         Ok(())
     }
 
@@ -545,10 +654,13 @@ impl SysDictService {
 
     /// 分页查询字典数据
     ///
+    /// 多租户：`tenant_id = None / Some(0)` → 平台全量；`Some(tid)` → `tenant_id IN (0, tid)`
+    /// （平台类型数据 + 本租户自建类型数据）。
     /// 支持 dict_type 精确、dict_label 模糊、status 精确筛选
     pub async fn get_dict_data_page(
         &self,
         query: DictDataQueryDto,
+        tenant_id: Option<i64>,
     ) -> Result<(Vec<SysDictDataModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -559,6 +671,7 @@ impl SysDictService {
             .find_page_filtered(
                 offset,
                 limit,
+                Self::tenant_scope_of(tenant_id),
                 query.dict_type.as_deref(),
                 query.dict_label.as_deref(),
                 query.status.as_deref(),
@@ -568,9 +681,12 @@ impl SysDictService {
     }
 
     /// 导出字典数据（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
+    ///
+    /// 多租户视图同 [`Self::get_dict_data_page`]。
     pub async fn export_dict_data(
         &self,
         query: DictDataQueryDto,
+        tenant_id: Option<i64>,
     ) -> Result<Vec<SysDictDataModel>, ServiceError> {
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
@@ -580,6 +696,7 @@ impl SysDictService {
             .find_page_filtered(
                 offset,
                 limit,
+                Self::tenant_scope_of(tenant_id),
                 query.dict_type.as_deref(),
                 query.dict_label.as_deref(),
                 query.status.as_deref(),
@@ -588,95 +705,89 @@ impl SysDictService {
         Ok(rows)
     }
 
-    /// 按 dict_type 查询字典数据列表（前端下拉用，仅返回正常状态数据）
-    ///
-    /// 这是字典模块最核心的查询接口，供前端 select 组件使用。
-    /// 采用 cache-aside 模式：先查 Redis（key=dict:{dict_type}），命中则直接返回；
-    /// 未命中则查 DB，结果序列化后写入 Redis（TTL 30 分钟）。
-    /// 缓存读写失败不阻断业务（best-effort），降级为直接查 DB。
-    ///
-    /// R9-FLW-009 缓存防护：
-    /// - 穿透防护：dict_type 不存在时缓存空值标记（TTL 60s），避免反复打 DB
-    /// - 击穿防护：热点 key 失效瞬间通过 singleflight 串行化 DB 查询，
-    ///   同 dict_type 的并发请求只允许一个查 DB，其他等待复用结果
-    pub async fn get_dict_data_by_type(
-        &self,
-        dict_type: &str,
-    ) -> Result<Vec<SysDictDataModel>, ServiceError> {
-        let key = Self::cache_key(dict_type);
-        let mut conn = self.redis.clone();
-
-        // 1. 尝试从 Redis 读取缓存
+    /// 读单层字典数据缓存：
+    /// - `Some(Some(rows))` = 命中数据；`Some(None)` = 命中空值 sentinel（该层无数据）；
+    /// - `None` = 未命中 / Redis 异常 / 反序列化失败（fail-open 降级 DB）。
+    async fn read_dict_cache_layer(
+        conn: &mut ConnectionManager,
+        key: &str,
+    ) -> Option<Option<Vec<SysDictDataModel>>> {
         let cached: Option<String> = redis::cmd("GET")
-            .arg(&key)
-            .query_async(&mut conn)
+            .arg(key)
+            .query_async(conn)
             .await
             .ok()
             .flatten();
-
-        if let Some(json_str) = cached {
-            // 空值标记：dict_type 不存在，返回空列表（防穿透）
-            if json_str == DICT_NULL_MARKER {
-                return Ok(Vec::new());
-            }
-            match serde_json::from_str::<Vec<SysDictDataModel>>(&json_str) {
-                Ok(rows) => return Ok(rows),
+        match cached {
+            None => None,
+            Some(json_str) if json_str == DICT_NULL_MARKER => Some(None),
+            Some(json_str) => match serde_json::from_str::<Vec<SysDictDataModel>>(&json_str) {
+                Ok(rows) => Some(Some(rows)),
                 Err(e) => {
-                    // 缓存数据损坏，记日志并回退到 DB
+                    // 缓存数据损坏 → 视为未命中，回退查 DB
                     tracing::warn!("字典缓存 {} 反序列化失败，回退查 DB: {}", key, e);
+                    None
                 }
-            }
+            },
+        }
+    }
+
+    /// 读取**某一归属层**的字典数据（cache-aside + singleflight）。
+    ///
+    /// 返回 `Some(rows)` 表示该层有数据；`None` 表示该层无数据（空值 sentinel）→ 调用方回落下一层。
+    ///
+    /// 缓存 key = `dict:{layer_tid}:{dict_type}`（两层缓存：平台层 0 / 租户层 tid）。
+    /// R9-FLW-009 缓存防护：穿透（空值标记）+ 击穿（singleflight，锁粒度=缓存 key）。
+    async fn load_dict_data_layer(
+        &self,
+        layer_tid: i64,
+        dict_type: &str,
+    ) -> Result<Option<Vec<SysDictDataModel>>, ServiceError> {
+        let key = Self::cache_key(layer_tid, dict_type);
+        let mut conn = self.redis.clone();
+
+        // 1. 读缓存
+        match Self::read_dict_cache_layer(&mut conn, &key).await {
+            Some(Some(rows)) => return Ok(Some(rows)),
+            Some(None) => return Ok(None),
+            None => {}
         }
 
-        // 2. 缓存未命中或损坏，通过 singleflight 串行化 DB 查询（防击穿）
-        // 获取或创建 dict_type 对应的 inflight 锁
+        // 2. 未命中 → singleflight（锁粒度=缓存 key，层间不互相阻塞）
         let inflight_lock = {
             let mut map = self.inflight.lock().await;
-            map.entry(dict_type.to_string())
+            map.entry(key.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
 
-        // 持有 inflight 锁期间查 DB + 写缓存（用 async 块收集结果，避免 early return 跳过清理）
-        let result: Result<Vec<SysDictDataModel>, ServiceError> = async {
+        let result: Result<Option<Vec<SysDictDataModel>>, ServiceError> = async {
             let _guard = inflight_lock.lock().await;
 
-            // double-check：持有锁后再次查缓存，可能已被前一个持锁请求填充
-            let cached: Option<String> = redis::cmd("GET")
-                .arg(&key)
-                .query_async(&mut conn)
-                .await
-                .ok()
-                .flatten();
-            if let Some(json_str) = cached {
-                if json_str == DICT_NULL_MARKER {
-                    return Ok(Vec::new());
-                }
-                if let Ok(rows) = serde_json::from_str::<Vec<SysDictDataModel>>(&json_str) {
-                    return Ok(rows);
-                }
+            // double-check：持有锁后再次读缓存，可能已被前一个持锁请求填充
+            match Self::read_dict_cache_layer(&mut conn, &key).await {
+                Some(Some(rows)) => return Ok(Some(rows)),
+                Some(None) => return Ok(None),
+                None => {}
             }
 
-            // 3. 查询 DB
+            // 3. 查 DB（限本归属层，避免跨层/跨租户混读）
             let rows = self
                 .dict_data_repo
-                .find_active_by_dict_type(dict_type)
+                .find_active_by_dict_type_in_tenant(layer_tid, dict_type)
                 .await?;
 
-            // 4. 写入 Redis（best-effort，失败仅记日志）
-            // 空结果写入空值标记（防穿透），非空结果写入完整 JSON
-            let cache_value = if rows.is_empty() {
-                DICT_NULL_MARKER.to_string()
+            // 4. 写缓存（best-effort）：空结果写空值标记（防穿透），非空写完整 JSON
+            let (cache_value, ttl) = if rows.is_empty() {
+                (DICT_NULL_MARKER.to_string(), DICT_NULL_TTL)
             } else {
-                serde_json::to_string(&rows).unwrap_or_else(|e| {
-                    tracing::warn!("序列化字典数据失败，跳过缓存写入: {}", e);
-                    DICT_NULL_MARKER.to_string()
-                })
-            };
-            let ttl = if rows.is_empty() {
-                DICT_NULL_TTL
-            } else {
-                DICT_CACHE_TTL
+                match serde_json::to_string(&rows) {
+                    Ok(json) => (json, DICT_CACHE_TTL),
+                    Err(e) => {
+                        tracing::warn!("序列化字典数据失败，跳过缓存写入: {}", e);
+                        (DICT_NULL_MARKER.to_string(), DICT_NULL_TTL)
+                    }
+                }
             };
             if let Err(e) = redis::cmd("SETEX")
                 .arg(&key)
@@ -688,7 +799,7 @@ impl SysDictService {
                 tracing::warn!("写入字典缓存 {} 失败: {}", key, e);
             }
 
-            Ok(rows)
+            Ok(if rows.is_empty() { None } else { Some(rows) })
         }
         .await;
 
@@ -698,53 +809,105 @@ impl SysDictService {
         drop(inflight_lock);
         {
             let mut map = self.inflight.lock().await;
-            if let Some(arc) = map.get(dict_type)
+            if let Some(arc) = map.get(&key)
                 && Arc::strong_count(arc) == 1
             {
-                map.remove(dict_type);
+                map.remove(&key);
             }
         }
 
         result
     }
 
-    /// 根据 dict_code 查询字典数据详情
+    /// 按 dict_type 查询字典数据列表（前端下拉用，仅返回正常状态数据）
+    ///
+    /// 这是字典模块最核心的查询接口，供前端 select 组件使用。
+    ///
+    /// 多租户（§27.8）：字典数据按**类型归属层**隔离，读时合并、不缓存合并结果。
+    /// - `tenant_id = None / Some(0)`：只读平台层；
+    /// - `tenant_id = Some(tid)`（tid≠0）：本租户自建类型数据优先，无则回落平台类型数据。
+    ///   由于禁止租户创建与平台同名类型，回落不会串读：租户自建类型必然在租户层有数据，
+    ///   平台类型必然在平台层有数据，两层互斥。
+    pub async fn get_dict_data_by_type(
+        &self,
+        dict_type: &str,
+        tenant_id: Option<i64>,
+    ) -> Result<Vec<SysDictDataModel>, ServiceError> {
+        let tid = tenant_id.unwrap_or(0);
+        // 1. 租户层（tid != 0）：本租户自建类型数据
+        if tid != 0
+            && let Some(rows) = self.load_dict_data_layer(tid, dict_type).await?
+        {
+            return Ok(rows);
+        }
+        // 2. 平台层（或回落）
+        Ok(self
+            .load_dict_data_layer(0, dict_type)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// 根据 dict_code 查询字典数据详情（治理视图）
+    ///
+    /// - 平台操作者（None / Some(0)）：全量可见；
+    /// - 租户操作者（Some(tid)）：仅本租户行或平台行可见，否则 **403**（fail-closed）。
     pub async fn get_dict_data_by_id(
         &self,
         dict_code: i64,
+        tenant_id: Option<i64>,
     ) -> Result<SysDictDataModel, ServiceError> {
         let model = self
             .dict_data_repo
             .find_active_by_id(dict_code)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dict.data_not_found")))?;
+        if let Some(tid) = Self::tenant_scope_of(tenant_id)
+            && model.tenant_id != 0
+            && model.tenant_id != tid
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.dict.platform_row_forbidden"
+            )));
+        }
         Ok(model)
     }
 
-    /// 新增字典数据
+    /// 新增字典数据（写治理，§27.8）
+    ///
+    /// - 生效类型解析：本租户自建类型优先，否则平台类型（`find_effective_by_dict_type`）；
+    ///   类型不存在 → 400。
+    /// - 数据行归属层 = **类型归属层**（平台类型 → 0 / 租户自建类型 → 租户 ID）；
+    /// - **租户不得给平台类型新增数据** → **403**（fail-closed）。
     pub async fn add_dict_data(
         &self,
         dto: DictDataAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysDictDataModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        // 校验 dict_type 在 sys_dict_type 中存在
-        let dict_type_exists = self
+        // 校验 dict_type 存在（限操作者可见域：本租户自建类型优先，否则平台类型）
+        let dict_type_model = self
             .dict_type_repo
-            .find_by_dict_type(&dto.dict_type)
-            .await?;
-        if dict_type_exists.is_none() {
-            return Err(ServiceError::bad_request(&crate::tr!(
-                "error.dict.type_not_found"
+            .find_effective_by_dict_type(&dto.dict_type, Some(operator_tid))
+            .await?
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.dict.type_not_found")))?;
+        // 租户不得给平台类型新增数据（只能维护自建类型）
+        if operator_tid != 0 && dict_type_model.tenant_id != operator_tid {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.dict.platform_row_forbidden"
             )));
         }
+        // 数据行归属层 = 类型归属层（保证与类型同层，杜绝跨层孤儿行）
+        let row_tid = dict_type_model.tenant_id;
 
         // 提前克隆 dict_type，避免后续 move 后无法用于缓存失效
         let dict_type_for_cache = dto.dict_type.clone();
 
         let now = crate::common::datetime::now_naive();
         let am = SysDictDataActiveModel {
+            // 多租户：字典数据归属与其类型相同（平台类型=0 / 租户自建类型=租户 ID）
+            tenant_id: Set(row_tid),
             dict_sort: Set(dto.dict_sort),
             dict_label: Set(Some(dto.dict_label)),
             dict_label_en: Set(dto.dict_label_en),
@@ -764,30 +927,44 @@ impl SysDictService {
         };
 
         let model = self.dict_data_repo.insert(am).await?;
-        // 数据变更后失效对应 dict_type 缓存
-        self.invalidate_cache(&dict_type_for_cache).await;
+        // 数据变更后失效**本归属层**的 dict_type 缓存
+        self.invalidate_cache(row_tid, &dict_type_for_cache).await;
         Ok(model)
     }
 
-    /// 修改字典数据
+    /// 修改字典数据（写治理，§27.8）
+    ///
+    /// - 仅本租户行可改（平台操作者全权）；租户不得改平台类型数据 → **403**；
+    /// - dict_type 变更时，新类型必须与数据行**同归属层**（不得跨层搬迁）。
     pub async fn edit_dict_data(
         &self,
         dto: DictDataEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysDictDataModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        let existing = self.get_dict_data_by_id(dto.dict_code).await?;
+        let existing = self
+            .get_dict_data_by_id(dto.dict_code, Some(operator_tid))
+            .await?;
+        // 多租户越权防护：只能修改本租户字典数据（平台操作者放行；租户不得改平台数据）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.dict.platform_row_forbidden"
+            )));
+        }
         // 记录旧 dict_type（dict_type 可能变更，需同时失效新旧缓存）
         let old_dict_type = existing.dict_type.clone().unwrap_or_default();
+        // 数据行归属层（平台数据=0 / 租户自建数据=租户 ID），用于缓存失效与同层校验
+        let row_tid = existing.tenant_id;
 
-        // 校验新 dict_type 在 sys_dict_type 中存在（与 add_dict_data 一致）
+        // 校验新 dict_type 与本数据行同归属层
         if dto.dict_type != old_dict_type {
-            let dict_type_exists = self
+            let type_model = self
                 .dict_type_repo
-                .find_by_dict_type(&dto.dict_type)
+                .find_by_tenant_dict_type(row_tid, &dto.dict_type)
                 .await?;
-            if dict_type_exists.is_none() {
+            if type_model.is_none() {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.dict.type_not_found"
                 )));
@@ -810,28 +987,57 @@ impl SysDictService {
         am.remark = Set(dto.remark);
 
         let model = self.dict_data_repo.update(am).await?;
-        // 失效新旧 dict_type 缓存
+        // 失效新旧 dict_type 缓存（限本归属层）
         let mut to_invalidate = vec![dto.dict_type.clone()];
         if dto.dict_type != old_dict_type {
             to_invalidate.push(old_dict_type);
         }
-        self.invalidate_caches(&to_invalidate).await;
+        self.invalidate_caches(row_tid, &to_invalidate).await;
         Ok(model)
     }
 
     /// 批量删除字典数据（软删除）
-    pub async fn delete_dict_data(&self, dict_codes: Vec<i64>) -> Result<(), ServiceError> {
+    ///
+    /// 多租户：租户不得删除平台类型数据（`tenant_id=0`）→ **403**；跨租户行 → 403。
+    pub async fn delete_dict_data(
+        &self,
+        dict_codes: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if dict_codes.is_empty() {
             return Ok(());
         }
         // 批量查询所有记录的 dict_type，用于删除后失效缓存（单次 SELECT 替代 N 次）
         let models = self.dict_data_repo.find_active_by_ids(&dict_codes).await?;
-        let affected_types: Vec<String> =
-            models.iter().filter_map(|m| m.dict_type.clone()).collect();
+        // 租户不得删除平台类型数据（fail-closed 403，先给出明确语义）
+        if operator_tid != 0 && models.iter().any(|m| m.tenant_id == 0) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.dict.platform_row_forbidden"
+            )));
+        }
+        // 多租户越权防护：任一所选字典数据跨越操作者租户即整体拒绝（平台操作者放行）
+        if models
+            .iter()
+            .any(|m| !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
+        // 按归属层分组收集受影响的 dict_type
+        let mut invalidations: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for m in &models {
+            if let Some(dt) = m.dict_type.clone() {
+                invalidations.entry(m.tenant_id).or_default().push(dt);
+            }
+        }
         // 批量软删除（单次 UPDATE 替代 N 次）
         self.dict_data_repo.soft_delete_many(dict_codes).await?;
-        // 失效所有受影响的 dict_type 缓存
-        self.invalidate_caches(&affected_types).await;
+        // 失效所有受影响的 dict_type 缓存（按归属层）
+        for (owner_tid, dts) in invalidations {
+            self.invalidate_caches(owner_tid, &dts).await;
+        }
         Ok(())
     }
 

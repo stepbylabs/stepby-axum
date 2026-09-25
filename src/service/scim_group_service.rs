@@ -118,11 +118,14 @@ pub struct ScimGroupAdminMember {
 
 pub struct ScimGroupService {
     db: DatabaseConnection,
+    /// v5-N2 Phase 3：SCIM 凭据归属租户。该凭据 provisioning 出的组归属此租户，
+    /// 读路径亦按此租户过滤（0 = 平台租户，读不过滤 + 写归属平台 0）。
+    tenant_id: i64,
 }
 
 impl ScimGroupService {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { db }
+    pub fn new(db: DatabaseConnection, tenant_id: i64) -> Self {
+        Self { db, tenant_id }
     }
 
     fn db(&self) -> &DatabaseConnection {
@@ -199,6 +202,10 @@ impl ScimGroupService {
         let start = start_index.max(1);
         let count = count.clamp(1, 200);
         let mut where_clause = String::from("del_flag <> '2'");
+        // v5-N2 Phase 3：按 SCIM 凭据归属租户过滤（0 = 平台租户，全量可见）
+        if let Some(tid) = crate::common::tenant::tenant_scope(self.tenant_id) {
+            where_clause.push_str(&format!(" AND tenant_id = {tid}"));
+        }
         if let Some(f) = filter {
             match Self::parse_group_filter(f) {
                 Some((col, val)) => {
@@ -286,6 +293,9 @@ impl ScimGroupService {
 
     /// POST /Groups：建组 + 成员 + 联动授权（mapping_type 默认 role；
     /// externalId 唯一校验防 IdP 重复推送）
+    ///
+    /// v5-N2 Phase 3：SCIM 端点由身份凭据的归属租户（`scim.tenant_id`）确定建组归属，
+    /// 取代先前硬编码平台租户 0（与 `scim_service::create_user` 同源语义）。
     pub async fn create_group(
         &self,
         body: &serde_json::Value,
@@ -323,6 +333,8 @@ impl ScimGroupService {
         }
         let member_ids = self.parse_member_ids(body).await?;
         let now = crate::common::datetime::now_naive();
+        // v5-N2 Phase 3：归属 SCIM 凭据所属租户（0 = 平台租户）；取代先前硬编码 Set(0)
+        let tenant_id = self.tenant_id;
 
         let saved = self
             .db()
@@ -333,7 +345,7 @@ impl ScimGroupService {
                         external_id: Set(external_id.clone()),
                         mapping_type: Set(MAPPING_ROLE.to_string()),
                         del_flag: Set(Some("0".to_string())),
-                        tenant_id: Set(0),
+                        tenant_id: Set(tenant_id),
                         create_by: Set(Some("scim".to_string())),
                         create_time: Set(Some(now)),
                         update_time: Set(Some(now)),
@@ -382,6 +394,7 @@ impl ScimGroupService {
                     return Err(ScimError::new(400, "externalId 长度须 ≤255"));
                 }
                 if ScimGroup::find()
+                    .filter(GroupCol::TenantId.eq(m.tenant_id))
                     .filter(GroupCol::ExternalId.eq(ext))
                     .one(self.db())
                     .await
@@ -545,28 +558,25 @@ impl ScimGroupService {
     /// DELETE /Groups/{id}：软删 + 清成员/绑定 + 撤销仅本组 source 的授权与兼职。
     pub async fn delete_group(&self, id: i64) -> Result<(), ScimError> {
         let m = self.find_active(id).await?;
-        self.db()
-            .transaction::<_, (), ScimError>(|txn| {
-                Box::pin(async move {
-                    teardown_group(txn, m.group_id).await?;
-                    Ok(())
-                })
-            })
-            .await?;
-        Ok(())
+        self.teardown(m.group_id).await
     }
 
     // ==================== 管理端（JWT 鉴权 /system/scim-groups） ====================
 
-    /// 管理端列表（分页 + display_name 模糊 + mapping_type 精确），带成员/绑定计数
+    /// 管理端列表（分页 + display_name 模糊 + mapping_type 精确），带成员/绑定计数。
+    /// v5-N2 Phase 3：按操作者租户过滤（operator_tid=0 平台管理员不过滤）。
     pub async fn admin_list(
         &self,
+        operator_tid: i64,
         page: u64,
         page_size: u64,
         display_name: Option<&str>,
         mapping_type: Option<&str>,
     ) -> Result<(Vec<ScimGroupAdminRow>, u64), ScimError> {
         let mut q = ScimGroup::find().filter(GroupCol::DelFlag.ne("2"));
+        if let Some(tid) = crate::common::tenant::tenant_scope(operator_tid) {
+            q = q.filter(GroupCol::TenantId.eq(tid));
+        }
         if let Some(n) = display_name {
             q = q.filter(GroupCol::DisplayName.contains(n));
         }
@@ -610,9 +620,14 @@ impl ScimGroupService {
         Ok((out, total))
     }
 
-    /// 管理端详情（成员展开用户名 + 绑定 id 列表）
-    pub async fn admin_detail(&self, id: i64) -> Result<ScimGroupAdminDetail, ScimError> {
-        let m = self.find_active(id).await?;
+    /// 管理端详情（成员展开用户名 + 绑定 id 列表）。
+    /// v5-N2 Phase 3：按操作者租户过滤（operator_tid=0 平台管理员不过滤）。
+    pub async fn admin_detail(
+        &self,
+        id: i64,
+        operator_tid: i64,
+    ) -> Result<ScimGroupAdminDetail, ScimError> {
+        let m = self.find_active_scoped(id, operator_tid).await?;
         let member_rows = GroupMember::find()
             .filter(MemberCol::GroupId.eq(id))
             .all(self.db())
@@ -654,10 +669,11 @@ impl ScimGroupService {
     pub async fn admin_update(
         &self,
         id: i64,
+        operator_tid: i64,
         mapping_type: Option<String>,
         binding_target_ids: Option<Vec<i64>>,
     ) -> Result<ScimGroupAdminDetail, ScimError> {
-        let m = self.find_active(id).await?;
+        let m = self.find_active_scoped(id, operator_tid).await?;
         if let Some(mt) = &mapping_type {
             if mt != MAPPING_ROLE && mt != MAPPING_DEPT {
                 return Err(ScimError::new(400, "mappingType 仅支持 role / dept"));
@@ -729,12 +745,27 @@ impl ScimGroupService {
                 })
             })
             .await?;
-        self.admin_detail(id).await
+        self.admin_detail(id, operator_tid).await
     }
 
-    /// 管理端删除 = SCIM delete_group 同语义
-    pub async fn admin_delete(&self, id: i64) -> Result<(), ScimError> {
-        self.delete_group(id).await
+    /// 管理端删除 = SCIM delete_group 同语义。
+    /// v5-N2 Phase 3：按操作者租户校验（operator_tid=0 平台管理员不过滤）。
+    pub async fn admin_delete(&self, id: i64, operator_tid: i64) -> Result<(), ScimError> {
+        let m = self.find_active_scoped(id, operator_tid).await?;
+        self.teardown(m.group_id).await
+    }
+
+    /// 组 teardown 公共实现（软删 + 清成员/绑定 + 撤仅本组 source 的授权与兼职）
+    async fn teardown(&self, group_id: i64) -> Result<(), ScimError> {
+        self.db()
+            .transaction::<_, (), ScimError>(|txn| {
+                Box::pin(async move {
+                    teardown_group(txn, group_id).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+        Ok(())
     }
 
     // ==================== 用户侧联动 ====================
@@ -770,11 +801,19 @@ impl ScimGroupService {
     }
 
     async fn find_active(&self, id: i64) -> Result<GroupModel, ScimError> {
+        self.find_active_scoped(id, self.tenant_id).await
+    }
+
+    /// 按指定租户上下文读取活跃组（scope_tid=0 放行任意租户；否则须同租户）
+    async fn find_active_scoped(&self, id: i64, scope_tid: i64) -> Result<GroupModel, ScimError> {
         ScimGroup::find_by_id(id)
             .one(self.db())
             .await
             .map_err(db_err_500)?
-            .filter(|g| g.del_flag.as_deref() != Some("2"))
+            .filter(|g| {
+                g.del_flag.as_deref() != Some("2")
+                    && crate::common::tenant::tenant_allowed(scope_tid, g.tenant_id)
+            })
             .ok_or_else(|| ScimError::new(404, "Group not found"))
     }
 }

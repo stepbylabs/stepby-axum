@@ -69,8 +69,12 @@ impl SysWebHookLogRepository {
         hook_id: Option<i64>,
         event_type: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysWebHookLog::find();
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(hid) = hook_id {
             query = query.filter(Column::HookId.eq(hid));
         }
@@ -98,8 +102,12 @@ impl SysWebHookLogRepository {
         hook_id: Option<i64>,
         event_type: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<Model>, DbErr> {
         let mut query = SysWebHookLog::find();
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(hid) = hook_id {
             query = query.filter(Column::HookId.eq(hid));
         }
@@ -124,9 +132,13 @@ impl SysWebHookLogRepository {
             .await
     }
 
-    /// 全量清空记录
-    pub async fn delete_all(&self) -> Result<DeleteResult, DbErr> {
-        SysWebHookLog::delete_many().exec(self.base.db()).await
+    /// 全量清空记录（tenant_scope=Some(t) 时仅清理该租户，None 为平台全量）
+    pub async fn delete_all(&self, tenant_scope: Option<i64>) -> Result<DeleteResult, DbErr> {
+        let mut q = SysWebHookLog::delete_many();
+        if let Some(tid) = tenant_scope {
+            q = q.filter(Column::TenantId.eq(tid));
+        }
+        q.exec(self.base.db()).await
     }
 
     /// 按指定 hook_id 物理删除（删除回调配置时级联清理记录）
@@ -137,15 +149,17 @@ impl SysWebHookLogRepository {
             .await
     }
 
-    /// 删除早于指定时间的记录（审计保留期清理）
+    /// 删除早于指定时间的记录（审计保留期清理；tenant_scope=Some(t) 时仅清理该租户）
     pub async fn delete_older_than(
         &self,
         cutoff: chrono::NaiveDateTime,
+        tenant_scope: Option<i64>,
     ) -> Result<DeleteResult, DbErr> {
-        SysWebHookLog::delete_many()
-            .filter(Column::CreateTime.lt(cutoff))
-            .exec(self.base.db())
-            .await
+        let mut q = SysWebHookLog::delete_many().filter(Column::CreateTime.lt(cutoff));
+        if let Some(tid) = tenant_scope {
+            q = q.filter(Column::TenantId.eq(tid));
+        }
+        q.exec(self.base.db()).await
     }
 
     /// 更新补写响应详情（投递完成后回填 status_code/response/error_msg/cost_ms）

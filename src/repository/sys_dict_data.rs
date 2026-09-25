@@ -30,40 +30,21 @@ impl SysDictDataRepository {
         &self.base
     }
 
-    /// 按 dict_type 查询所有未删除字典数据（前端字典下拉用）
-    pub async fn find_by_dict_type(&self, dict_type: &str) -> Result<Vec<Model>, DbErr> {
+    /// 按 (tenant_id, dict_type) 查询未删除字典数据（指定归属层）。
+    ///
+    /// 多租户：字典数据按**类型归属层**隔离——平台类型的数据 `tenant_id=0`，
+    /// 租户自建类型的数据 `tenant_id=租户 ID`，不存在跨层混读。
+    pub async fn find_by_tenant_dict_type(
+        &self,
+        tenant_id: i64,
+        dict_type: &str,
+    ) -> Result<Vec<Model>, DbErr> {
         SysDictData::find()
+            .filter(Column::TenantId.eq(tenant_id))
             .filter(Column::DictType.eq(dict_type))
             .filter(Column::DelFlag.eq("0"))
             .all(self.base.db())
             .await
-    }
-
-    /// 查询所有未删除字典数据
-    pub async fn find_active_all(&self) -> Result<Vec<Model>, DbErr> {
-        SysDictData::find()
-            .filter(Column::DelFlag.eq("0"))
-            .all(self.base.db())
-            .await
-    }
-
-    /// 分页查询未删除字典数据
-    pub async fn find_active_page(
-        &self,
-        offset: u64,
-        limit: u64,
-    ) -> Result<(Vec<Model>, u64), DbErr> {
-        let total = SysDictData::find()
-            .filter(Column::DelFlag.eq("0"))
-            .count(self.base.db())
-            .await?;
-        let rows = SysDictData::find()
-            .filter(Column::DelFlag.eq("0"))
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
-        Ok((rows, total))
     }
 
     /// 软删除字典数据
@@ -118,9 +99,17 @@ impl SysDictDataRepository {
             .await
     }
 
-    /// 按 dict_type 查询正常状态字典数据（前端下拉用，status='0'，按 dict_sort 排序）
-    pub async fn find_active_by_dict_type(&self, dict_type: &str) -> Result<Vec<Model>, DbErr> {
+    /// 按 dict_type 查询正常状态字典数据（指定归属层，status='0'，按 dict_sort 排序）
+    ///
+    /// 多租户：`tenant_id` 为**类型归属层**（平台类型=0 / 租户自建类型=租户 ID），
+    /// 由调用方先解析生效类型的归属层再传入，避免跨层混读。
+    pub async fn find_active_by_dict_type_in_tenant(
+        &self,
+        tenant_id: i64,
+        dict_type: &str,
+    ) -> Result<Vec<Model>, DbErr> {
         SysDictData::find()
+            .filter(Column::TenantId.eq(tenant_id))
             .filter(Column::DictType.eq(dict_type))
             .filter(Column::DelFlag.eq("0"))
             .filter(Column::Status.eq("0"))
@@ -130,15 +119,22 @@ impl SysDictDataRepository {
     }
 
     /// 多条件分页查询（dict_type 精确，dict_label 模糊，status 精确）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → `tenant_id IN (0, tid)`（平台类型数据 + 本租户自建类型数据）；
+    /// `None`（平台操作者）→ 全量不过滤。
     pub async fn find_page_filtered(
         &self,
         offset: u64,
         limit: u64,
+        tenant_scope: Option<i64>,
         dict_type: Option<&str>,
         dict_label: Option<&str>,
         status: Option<&str>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysDictData::find().filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.is_in([0i64, tid]));
+        }
         if let Some(dt) = dict_type {
             query = query.filter(Column::DictType.eq(dt));
         }
@@ -172,29 +168,37 @@ impl SysDictDataRepository {
             .await
     }
 
-    /// 按 dict_type 批量更新字典数据的 dict_type 字段（事务上下文，用于字典类型变更时级联同步）
+    /// 按 (tenant_id, dict_type) 批量更新字典数据的 dict_type（事务上下文，用于字典类型变更时级联同步）
+    ///
+    /// 多租户：必须带 `tenant_id` 归属层条件，否则会误改其它租户的同名自建类型数据。
     pub async fn update_dict_type_conn<C: ConnectionTrait>(
         &self,
         conn: &C,
+        tenant_id: i64,
         old_dict_type: &str,
         new_dict_type: &str,
     ) -> Result<UpdateResult, DbErr> {
         SysDictData::update_many()
             .col_expr(Column::DictType, Expr::value(new_dict_type))
+            .filter(Column::TenantId.eq(tenant_id))
             .filter(Column::DictType.eq(old_dict_type))
             .filter(Column::DelFlag.eq("0"))
             .exec(conn)
             .await
     }
 
-    /// 按 dict_type 批量软删除字典数据（事务上下文，用于删除字典类型时级联删除）
+    /// 按 (tenant_id, dict_type) 批量软删除字典数据（事务上下文，用于删除字典类型时级联删除）
+    ///
+    /// 多租户：同样必须带 `tenant_id` 归属层条件，避免误删其它租户同名类型数据。
     pub async fn soft_delete_by_dict_type_conn<C: ConnectionTrait>(
         &self,
         conn: &C,
+        tenant_id: i64,
         dict_type: &str,
     ) -> Result<UpdateResult, DbErr> {
         SysDictData::update_many()
             .col_expr(Column::DelFlag, Expr::value("2"))
+            .filter(Column::TenantId.eq(tenant_id))
             .filter(Column::DictType.eq(dict_type))
             .filter(Column::DelFlag.eq("0"))
             .exec(conn)

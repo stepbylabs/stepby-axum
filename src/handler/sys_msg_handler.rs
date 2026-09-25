@@ -52,9 +52,13 @@ use crate::state::AppState;
 )]
 pub async fn channel_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<ChannelQueryDto>,
 ) -> Result<TableDataInfo<SysMsgChannelModel>, AppError> {
-    let (rows, total) = state.msg_service.get_channel_page(query).await?;
+    let (rows, total) = state
+        .msg_service
+        .get_channel_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -72,9 +76,13 @@ pub async fn channel_list(
 )]
 pub async fn channel_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(channel_id): Path<i64>,
 ) -> Result<AjaxResult<SysMsgChannelModel>, AppError> {
-    let model = state.msg_service.get_channel_by_id(channel_id).await?;
+    let model = state
+        .msg_service
+        .get_channel_by_id(channel_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -97,7 +105,7 @@ pub async fn channel_add(
 ) -> Result<AjaxResult<SysMsgChannelModel>, AppError> {
     let model = state
         .msg_service
-        .add_channel(dto, operator.username())
+        .add_channel(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(model))
 }
@@ -122,7 +130,7 @@ pub async fn channel_edit(
 ) -> Result<AjaxResult<SysMsgChannelModel>, AppError> {
     let model = state
         .msg_service
-        .edit_channel(dto, operator.username())
+        .edit_channel(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(model))
 }
@@ -141,6 +149,7 @@ pub async fn channel_edit(
 )]
 pub async fn channel_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids = crate::service::SysMsgService::parse_ids(&ids);
@@ -155,7 +164,10 @@ pub async fn channel_remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.msg_service.delete_channel(ids).await?;
+    state
+        .msg_service
+        .delete_channel(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -173,9 +185,13 @@ pub async fn channel_remove(
 )]
 pub async fn channel_test(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(channel_id): Path<i64>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.msg_service.test_channel(channel_id).await?;
+    state
+        .msg_service
+        .test_channel(channel_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.test")))
 }
 
@@ -195,9 +211,13 @@ pub async fn channel_test(
 )]
 pub async fn template_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<TemplateQueryDto>,
 ) -> Result<TableDataInfo<SysMsgTemplateModel>, AppError> {
-    let (rows, total) = state.msg_service.get_template_page(query).await?;
+    let (rows, total) = state
+        .msg_service
+        .get_template_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -215,9 +235,13 @@ pub async fn template_list(
 )]
 pub async fn template_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(template_id): Path<i64>,
 ) -> Result<AjaxResult<SysMsgTemplateModel>, AppError> {
-    let model = state.msg_service.get_template_by_id(template_id).await?;
+    let model = state
+        .msg_service
+        .get_template_by_id(template_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -240,7 +264,7 @@ pub async fn template_add(
 ) -> Result<AjaxResult<SysMsgTemplateModel>, AppError> {
     let model = state
         .msg_service
-        .add_template(dto, operator.username())
+        .add_template(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(model))
 }
@@ -265,7 +289,7 @@ pub async fn template_edit(
 ) -> Result<AjaxResult<SysMsgTemplateModel>, AppError> {
     let model = state
         .msg_service
-        .edit_template(dto, operator.username())
+        .edit_template(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(model))
 }
@@ -284,6 +308,7 @@ pub async fn template_edit(
 )]
 pub async fn template_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids = crate::service::SysMsgService::parse_ids(&ids);
@@ -298,7 +323,10 @@ pub async fn template_remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.msg_service.delete_template(ids).await?;
+    state
+        .msg_service
+        .delete_template(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -318,9 +346,13 @@ pub async fn template_remove(
 )]
 pub async fn send_log_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<SendLogQueryDto>,
 ) -> Result<TableDataInfo<SysMsgSendLogModel>, AppError> {
-    let (rows, total) = state.msg_service.get_send_log_page(query).await?;
+    let (rows, total) = state
+        .msg_service
+        .get_send_log_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -338,6 +370,7 @@ pub async fn send_log_list(
 )]
 pub async fn send_log_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids = crate::service::SysMsgService::parse_ids(&ids);
@@ -352,7 +385,10 @@ pub async fn send_log_remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.msg_service.delete_send_logs(ids).await?;
+    state
+        .msg_service
+        .delete_send_logs(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -368,8 +404,12 @@ pub async fn send_log_remove(
 )]
 pub async fn send_log_clean(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<u64>, AppError> {
-    let count = state.msg_service.clean_send_logs(None).await?;
+    let count = state
+        .msg_service
+        .clean_send_logs(None, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(count))
 }
 
@@ -390,7 +430,10 @@ pub async fn send(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<SendDto>,
 ) -> Result<AjaxResult<SysMsgSendLogModel>, AppError> {
-    let model = state.msg_service.send(dto, operator.username()).await?;
+    let model = state
+        .msg_service
+        .send(dto, operator.username(), operator.tenant_id())
+        .await?;
     // 投递成功 status='0'；否则 status='2'（待重试）由定时任务/手动重试兜底
     Ok(AjaxResult::success(model))
 }
@@ -408,6 +451,7 @@ pub async fn send(
 )]
 pub async fn retry_logs(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<u64>, AppError> {
     let ids = crate::service::SysMsgService::parse_ids(&ids);
@@ -422,7 +466,7 @@ pub async fn retry_logs(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    let count = state.msg_service.retry_logs(ids).await?;
+    let count = state.msg_service.retry_logs(ids, operator.tenant_id()).await?;
     Ok(AjaxResult::success(count))
 }
 
@@ -439,9 +483,13 @@ pub async fn retry_logs(
 )]
 pub async fn retry_pending(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(batch): Path<u64>,
 ) -> Result<AjaxResult<u64>, AppError> {
-    let count = state.msg_service.retry_pending(batch).await?;
+    let count = state
+        .msg_service
+        .retry_pending(batch, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(count))
 }
 
@@ -458,6 +506,7 @@ pub async fn retry_pending(
 )]
 pub async fn mark_pending_retry(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<u64>, AppError> {
     let ids = crate::service::SysMsgService::parse_ids(&ids);
@@ -466,6 +515,9 @@ pub async fn mark_pending_retry(
             "error.msg.log_id_invalid"
         )));
     }
-    let count = state.msg_service.mark_pending_retry(&ids).await?;
+    let count = state
+        .msg_service
+        .mark_pending_retry(&ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(count))
 }

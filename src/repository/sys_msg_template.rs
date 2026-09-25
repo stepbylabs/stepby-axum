@@ -39,13 +39,19 @@ impl SysMsgTemplateRepository {
             .await
     }
 
-    /// 按 template_code 查询模板（唯一编码，未删除）
-    pub async fn find_by_code(&self, template_code: &str) -> Result<Option<Model>, DbErr> {
-        SysMsgTemplate::find()
-            .filter(Column::TemplateCode.eq(template_code))
-            .filter(Column::DelFlag.eq("0"))
-            .one(self.base.db())
-            .await
+    /// 按 template_code 查询模板（唯一编码，未删除；tenant_scope 过滤租户）
+    pub async fn find_by_code(
+        &self,
+        template_code: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<Option<Model>, DbErr> {
+        let mut q = SysMsgTemplate::find();
+        q = q.filter(Column::TemplateCode.eq(template_code));
+        q = q.filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            q = q.filter(Column::TenantId.eq(tid));
+        }
+        q.one(self.base.db()).await
     }
 
     /// 按 ID 列表批量查询模板（单次 SELECT）
@@ -59,13 +65,19 @@ impl SysMsgTemplateRepository {
             .await
     }
 
-    /// 按渠道编码统计启用模板数（删除渠道前校验引用）
-    pub async fn count_by_channel_code(&self, channel_code: &str) -> Result<u64, DbErr> {
-        SysMsgTemplate::find()
-            .filter(Column::ChannelCode.eq(channel_code))
-            .filter(Column::DelFlag.eq("0"))
-            .count(self.base.db())
-            .await
+    /// 按渠道编码统计启用模板数（删除渠道前校验引用；tenant_scope 过滤租户）
+    pub async fn count_by_channel_code(
+        &self,
+        channel_code: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<u64, DbErr> {
+        let mut q = SysMsgTemplate::find();
+        q = q.filter(Column::ChannelCode.eq(channel_code));
+        q = q.filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            q = q.filter(Column::TenantId.eq(tid));
+        }
+        q.count(self.base.db()).await
     }
 
     /// 多条件分页查询（template_name 模糊 + template_code/channel_code/status 精确）
@@ -78,9 +90,13 @@ impl SysMsgTemplateRepository {
         template_code: Option<&str>,
         channel_code: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysMsgTemplate::find();
         query = query.filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(name) = template_name {
             query = query.filter(Column::TemplateName.like(format!("%{}%", like_escape(name))));
         }

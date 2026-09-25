@@ -8,12 +8,14 @@
 //! 安全要点：
 //! - 上传：扩展名白名单 + 文件大小限制；图片类型额外做 magic bytes 校验
 //! - 文件名重命名为 `{uuid}.{ext}`，禁止使用前端原文件名（防路径穿越）
+//! - 落盘路径带上传者租户维度：`uploads/{tid}/...`（平台 = 0），实现租户物理隔离
 //! - 下载：fileName / resource 严格路径穿越校验（拒绝 `..`、`/`、`\`）
-//! - download_resource：用 `Path::canonicalize` 二次校验规范化后路径仍以 `uploads/` 开头
+//! - download_resource：解析 `uploads/{tid}/{kind}/{key}` 并校验文件归属租户，越权 403
+//! - serve_upload（GET /uploads/*）：受鉴权预览路由，同样校验文件归属租户
 
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use chrono::Duration;
@@ -23,6 +25,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::{AjaxResult, AppError};
 use crate::entity::{sys_oper_log, sys_role, sys_user};
+use crate::middleware::Operator;
 use crate::state::AppState;
 use crate::utils::redis::scan_keys;
 
@@ -136,7 +139,7 @@ pub async fn dashboard_stats(
         async {
             state
                 .logininfor_service
-                .daily_stats(1)
+                .daily_stats(1, None)
                 .await
                 .ok()
                 .and_then(|v| v.into_iter().next())
@@ -156,7 +159,7 @@ pub async fn dashboard_stats(
         async {
             state
                 .logininfor_service
-                .count_today_failed_ips()
+                .count_today_failed_ips(None)
                 .await
                 .unwrap_or(0)
         }
@@ -380,6 +383,7 @@ pub struct UserCreateTrendItem {
 )]
 pub async fn upload(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     mut multipart: Multipart,
 ) -> Result<CommonUploadResult, AppError> {
     let upload_cfg = &state.config.upload;
@@ -411,6 +415,7 @@ pub async fn upload(
         file_ext.as_deref(),
         original_filename.as_deref(),
         upload_cfg,
+        operator.tenant_id(),
         crate::common::upload::UploadKind::Common,
     )
     .await?;
@@ -432,6 +437,7 @@ pub async fn upload(
 /// - fileName 不能包含 `/`、`\\`、`..`（防路径穿越）
 /// - 文件不存在返回 JSON 错误
 /// - delete=true 时下载后删除原文件
+/// - 仅在请求者自身租户目录（`uploads/{tid}/file/`）内查找，跨租户自然 404
 /// - 响应头 `download-filename`：URL 编码的文件名，前端据此确定保存名
 #[utoipa::path(
     get,
@@ -445,6 +451,7 @@ pub async fn upload(
 )]
 pub async fn download(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(params): Query<DownloadParams>,
 ) -> Result<Response, AppError> {
     // 路径穿越校验：fileName 不能包含路径分隔符或 ..
@@ -461,10 +468,12 @@ pub async fn download(
     }
 
     let upload_cfg = &state.config.upload;
-    // 统一走存储后端读取（local 读盘 / s3 下载对象），文件不存在由后端返回 None
+    // 统一走存储后端读取（local 读盘 / s3 下载对象），文件不存在由后端返回 None；
+    // 读取目录带请求者租户维度，无法读取其它租户文件
+    let tenant_id = operator.tenant_id();
     let bytes = state
         .storage
-        .read(&upload_cfg.common_dir, file_name)
+        .read(&upload_cfg.common_dir, tenant_id, file_name)
         .await?
         .ok_or_else(|| AppError::not_found(&crate::tr!("error.common_handler.file_not_found")))?;
 
@@ -472,7 +481,7 @@ pub async fn download(
     if params.delete {
         state
             .storage
-            .delete(&upload_cfg.common_dir, file_name)
+            .delete(&upload_cfg.common_dir, tenant_id, file_name)
             .await?;
     }
 
@@ -483,9 +492,10 @@ pub async fn download(
 /// 通用资源下载（按相对资源路径）
 ///
 /// 安全要点（更严格）：
-/// - resource 必须以 `uploads/` 开头
+/// - resource 必须形如 `uploads/{tid}/{kind}/{key}`（kind 为配置目录末段：file / avatar）
 /// - 禁止 `..`、`\\`
-/// - 按「目录 + 文件名」拆分后交存储后端二次路径穿越校验（本地基于目录解析 + key 拼接，
+/// - 校验 `{tid}` 与请求者租户的归属关系，越权返回 403
+/// - 按「配置目录 + 文件名」拆分后交存储后端二次路径穿越校验（本地基于目录解析 + key 拼接，
 ///   等价于原 canonicalize 的 upload_root 边界约束）
 #[utoipa::path(
     get,
@@ -493,12 +503,14 @@ pub async fn download(
     params(DownloadResourceParams),
     responses(
         (status = 200, description = "文件二进制流", content_type = "application/octet-stream"),
+        (status = 403, description = "无权访问该租户资源"),
         (status = 404, description = "资源不存在"),
     ),
     tag = "common"
 )]
 pub async fn download_resource(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(params): Query<DownloadResourceParams>,
 ) -> Result<Response, AppError> {
     let resource = params.resource.trim();
@@ -515,25 +527,120 @@ pub async fn download_resource(
         )));
     }
 
-    // 将资源路径拆分为「存储目录 + 文件名」（如 uploads/file/xxx.pdf → uploads/file | xxx.pdf），
-    // 统一走存储后端读取（local 读盘 / s3 下载对象）。后端对 key 做路径穿越校验，
-    // 且本地实现基于目录解析 + key 拼接，等价于原先的 upload_root 边界约束。
-    let (dir, key) = match resource.rsplit_once('/') {
-        Some((d, k)) if !d.is_empty() && !k.is_empty() => (d.to_string(), k.to_string()),
-        _ => {
-            return Err(AppError::bad_request(&crate::tr!(
-                "error.common_handler.resource_path_invalid"
-            )));
-        }
-    };
-    let bytes = state.storage.read(&dir, &key).await?.ok_or_else(|| {
+    let (dir, tenant_id, key) = parse_tenant_resource(&state, resource)?;
+    // 租户归属校验：平台租户（0）可读任意租户资源，非平台租户仅可读自身资源
+    if !crate::common::tenant::tenant_allowed(operator.tenant_id(), tenant_id) {
+        tracing::warn!(
+            operator_tid = operator.tenant_id(),
+            resource_tid = tenant_id,
+            resource = %resource,
+            "资源下载越权访问被拒绝"
+        );
+        return Err(AppError::forbidden(&crate::tr!("error.common.forbidden")));
+    }
+
+    let bytes = state.storage.read(&dir, tenant_id, &key).await?.ok_or_else(|| {
         AppError::not_found(&crate::tr!("error.common_handler.resource_not_found"))
     })?;
 
     Ok(build_download_response(&bytes, &key))
 }
 
+/// GET /uploads/{*path}
+/// 受鉴权文件预览（替代此前的无鉴权 `ServeDir` 静态直出）
+///
+/// 路径形如 `{tid}/{kind}/{key}`（如 `5/avatar/a1b2.png`）：
+/// - 校验 `{tid}` 与请求者租户的归属关系，越权返回 403
+/// - `{kind}` 必须是配置目录末段（file / avatar）之一，防止路径段被用于拼接旁路目录
+/// - 按扩展名设置 Content-Type 以便浏览器内联预览
+#[utoipa::path(
+    get,
+    path = "/uploads/{path}",
+    params(("path" = String, Path, description = "租户维度相对路径 {tid}/{kind}/{filename}")),
+    responses(
+        (status = 200, description = "文件二进制流"),
+        (status = 403, description = "无权访问该租户文件"),
+        (status = 404, description = "文件不存在"),
+    ),
+    tag = "common"
+)]
+pub async fn serve_upload(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(path): Path<String>,
+) -> Result<Response, AppError> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if segments.len() != 3 {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common_handler.resource_path_invalid"
+        )));
+    }
+    let (tid_seg, kind, key) = (segments[0], segments[1], segments[2]);
+    let tenant_id: i64 = tid_seg.parse().map_err(|_| {
+        AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid"))
+    })?;
+    let dir = crate::common::upload::resolve_kind_dir(&state.config.upload, kind).ok_or_else(|| {
+        AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid"))
+    })?;
+
+    if !crate::common::tenant::tenant_allowed(operator.tenant_id(), tenant_id) {
+        tracing::warn!(
+            operator_tid = operator.tenant_id(),
+            resource_tid = tenant_id,
+            path = %path,
+            "文件预览越权访问被拒绝"
+        );
+        return Err(AppError::forbidden(&crate::tr!("error.common.forbidden")));
+    }
+
+    let bytes = state
+        .storage
+        .read(&dir, tenant_id, key)
+        .await?
+        .ok_or_else(|| AppError::not_found(&crate::tr!("error.common_handler.resource_not_found")))?;
+
+    let content_type =
+        crate::storage::content_type_for(key).unwrap_or("application/octet-stream");
+    let mut headers = HeaderMap::new();
+    if let Ok(val) = HeaderValue::from_str(content_type) {
+        headers.insert(axum::http::header::CONTENT_TYPE, val);
+    }
+    if let Ok(val) = HeaderValue::from_str(&bytes.len().to_string()) {
+        headers.insert(axum::http::header::CONTENT_LENGTH, val);
+    }
+    // 禁缓存：响应依赖请求者身份，避免中间层缓存导致跨租户泄漏
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+
+    Ok((axum::http::StatusCode::OK, headers, bytes).into_response())
+}
+
 // ==================== 辅助函数 ====================
+
+/// 解析租户维度资源路径 `uploads/{tid}/{kind}/{key}` → (配置目录, 租户 id, 文件名)
+fn parse_tenant_resource(
+    state: &AppState,
+    resource: &str,
+) -> Result<(String, i64, String), AppError> {
+    let invalid = || {
+        AppError::bad_request(&crate::tr!(
+            "error.common_handler.resource_path_invalid"
+        ))
+    };
+    let segments: Vec<&str> = resource.trim_matches('/').split('/').collect();
+    if segments.len() != 4 || segments[0] != "uploads" {
+        return Err(invalid());
+    }
+    let tenant_id: i64 = segments[1].parse().map_err(|_| invalid())?;
+    let dir =
+        crate::common::upload::resolve_kind_dir(&state.config.upload, segments[2]).ok_or_else(invalid)?;
+    if segments[3].is_empty() {
+        return Err(invalid());
+    }
+    Ok((dir, tenant_id, segments[3].to_string()))
+}
 
 /// 构造文件下载响应（Content-Type: application/octet-stream，带 download-filename 头）
 fn build_download_response(bytes: &[u8], file_name: &str) -> Response {

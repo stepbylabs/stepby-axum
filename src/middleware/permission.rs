@@ -243,6 +243,7 @@ fn spawn_permission_denied_audit(
         operator_type: 1, // 1=后台用户
         oper_name: claims.username.clone(),
         tenant_id: claims.tid,
+        target_tenant_id: None, // 权限拒绝未进入 handler，无目标资源租户上下文
         dept_name: String::new(), // spawn 内查询后填入
         oper_url,
         oper_ip,
@@ -372,13 +373,23 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("DELETE", "/system/dept/{deptId}", "system:dept:remove"),
     // treeselect：仅需登录，不在此表
 
-    // ===== 租户管理（多租户 Phase 2 立项实施，m20260925_000002 菜单 3700 段） =====
+    // ===== 租户管理（多租户 Phase 3：主键 tenantId，事实源 sys_tenant） =====
     ("GET", "/system/tenant/list", "system:tenant:list"),
-    ("GET", "/system/tenant/{deptId}", "system:tenant:query"),
+    ("GET", "/system/tenant/package/options", "system:tenant:list"),
+    ("GET", "/system/tenant/{tenantId}", "system:tenant:query"),
     ("POST", "/system/tenant", "system:tenant:add"),
     ("PUT", "/system/tenant", "system:tenant:edit"),
     ("PUT", "/system/tenant/changeStatus", "system:tenant:edit"),
-    ("DELETE", "/system/tenant/{deptId}", "system:tenant:remove"),
+    ("PUT", "/system/tenant/restore/{tenantId}", "system:tenant:edit"),
+    ("DELETE", "/system/tenant/{tenantId}", "system:tenant:remove"),
+
+    // ===== 租户域名管理（多租户 Phase 3 域名链路：仅平台操作者可写，RBAC 之外服务层再校验） =====
+    ("GET", "/system/tenant/domain/list", "system:tenant:domain:list"),
+    ("POST", "/system/tenant/domain", "system:tenant:domain:add"),
+    ("POST", "/system/tenant/domain/verify/{domainId}", "system:tenant:domain:verify"),
+    ("PUT", "/system/tenant/domain/primary", "system:tenant:domain:edit"),
+    ("PUT", "/system/tenant/domain/changeStatus", "system:tenant:domain:edit"),
+    ("DELETE", "/system/tenant/domain/{domainId}", "system:tenant:domain:remove"),
 
     // ===== 定时任务管理 =====
     ("GET", "/monitor/job/list", "monitor:job:list"),
@@ -1244,6 +1255,22 @@ mod tests {
             ("PUT", "/system/dept/updateSort"),
             ("DELETE", "/system/dept/{deptId}"),
             ("GET", "/system/dept/treeselect"),
+            // sys_tenant_router
+            ("GET", "/system/tenant/list"),
+            ("GET", "/system/tenant/package/options"),
+            ("GET", "/system/tenant/{tenantId}"),
+            ("POST", "/system/tenant"),
+            ("PUT", "/system/tenant"),
+            ("PUT", "/system/tenant/changeStatus"),
+            ("PUT", "/system/tenant/restore/{tenantId}"),
+            ("DELETE", "/system/tenant/{tenantId}"),
+            // sys_tenant_domain_router（多租户 Phase 3 域名链路）
+            ("GET", "/system/tenant/domain/list"),
+            ("POST", "/system/tenant/domain"),
+            ("POST", "/system/tenant/domain/verify/{domainId}"),
+            ("PUT", "/system/tenant/domain/primary"),
+            ("PUT", "/system/tenant/domain/changeStatus"),
+            ("DELETE", "/system/tenant/domain/{domainId}"),
             // sys_job_router
             ("GET", "/monitor/job/list"),
             ("GET", "/monitor/job/{jobId}"),

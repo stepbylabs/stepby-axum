@@ -342,7 +342,8 @@ fn uri_encode(input: &str) -> String {
     out
 }
 
-fn content_type_for(key: &str) -> Option<&'static str> {
+/// 按扩展名推断 Content-Type（供 S3 上传与鉴权预览路由复用）
+pub fn content_type_for(key: &str) -> Option<&'static str> {
     Some(
         match std::path::Path::new(key)
             .extension()
@@ -374,6 +375,7 @@ impl StorageBackend for S3Backend {
     async fn save(
         &self,
         dir: &str,
+        tenant_id: i64,
         key: &str,
         _url_prefix: &str,
         bytes: &[u8],
@@ -388,7 +390,8 @@ impl StorageBackend for S3Backend {
                 "error.file.invalid_name"
             )));
         }
-        let object_key = self.object_key(dir, key);
+        // 对象 key 含租户维度：`uploads/{tid}/{dir}/{key}`
+        let object_key = self.object_key(&crate::storage::tenant_scoped_path(dir, tenant_id), key);
         let uri = self.object_uri(&object_key);
         let content_type = content_type_for(&object_key);
         let resp = self
@@ -400,7 +403,12 @@ impl StorageBackend for S3Backend {
         Ok(self.object_url(&object_key))
     }
 
-    async fn read(&self, dir: &str, key: &str) -> Result<Option<Vec<u8>>, AppError> {
+    async fn read(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, AppError> {
         if key.is_empty()
             || key.contains('/')
             || key.contains('\\')
@@ -411,7 +419,7 @@ impl StorageBackend for S3Backend {
                 "error.file.invalid_name"
             )));
         }
-        let object_key = self.object_key(dir, key);
+        let object_key = self.object_key(&crate::storage::tenant_scoped_path(dir, tenant_id), key);
         let uri = self.object_uri(&object_key);
         let resp = self
             .signed_send(reqwest::Method::GET, &uri, "", None, b"")
@@ -426,7 +434,7 @@ impl StorageBackend for S3Backend {
         Ok(Some(bytes.to_vec()))
     }
 
-    async fn delete(&self, dir: &str, key: &str) -> Result<(), AppError> {
+    async fn delete(&self, dir: &str, tenant_id: i64, key: &str) -> Result<(), AppError> {
         if key.is_empty()
             || key.contains('/')
             || key.contains('\\')
@@ -437,7 +445,7 @@ impl StorageBackend for S3Backend {
                 "error.file.invalid_name"
             )));
         }
-        let object_key = self.object_key(dir, key);
+        let object_key = self.object_key(&crate::storage::tenant_scoped_path(dir, tenant_id), key);
         let uri = self.object_uri(&object_key);
         // DELETE 对象存在时返回 204，不存在时返回 404——两者均视为成功（幂等）
         let resp = self
@@ -460,9 +468,15 @@ impl StorageBackend for S3Backend {
         )))
     }
 
-    async fn list(&self, dir: &str, _url_prefix: &str) -> Result<Vec<StorageObject>, AppError> {
-        // 前缀对象 key：`uploads/{dir}/`
-        let dir_trim = dir.trim_matches('/');
+    async fn list(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        _url_prefix: &str,
+    ) -> Result<Vec<StorageObject>, AppError> {
+        // 前缀对象 key：`uploads/{tid}/{dir}/`
+        let dir_trim = crate::storage::tenant_scoped_path(dir, tenant_id);
+        let dir_trim = dir_trim.trim_matches('/');
         let prefix = if dir_trim.is_empty() {
             "".to_string()
         } else {
@@ -955,35 +969,54 @@ mod wire_tests {
         assert_eq!(backend.kind(), "s3");
 
         let dir = "uploads/file";
+        let tenant_id = 5;
         let filename = "hello-1234.txt";
         let payload = b"the quick brown fox".to_vec();
+        // 对象 key 含租户维度：`uploads/5/file/hello-1234.txt`
+        let expected_key = format!("uploads/{tenant_id}/file/{filename}");
 
         // save → PUT（真实签名 + 服务端验签 + 落内存）
         let url = backend
-            .save(dir, filename, "/uploads/file", &payload)
+            .save(dir, tenant_id, filename, "/uploads/file", &payload)
             .await
             .expect("save 失败");
-        assert_eq!(url, format!("{endpoint}/{BUCKET}/{dir}/{filename}"));
+        assert_eq!(url, format!("{endpoint}/{BUCKET}/{expected_key}"));
 
         // read → GET
         let got = backend
-            .read(dir, filename)
+            .read(dir, tenant_id, filename)
             .await
             .expect("read 失败")
             .expect("对象应存在");
         assert_eq!(got, payload, "回读字节应与写入一致");
 
+        // 跨租户读取不可见（对象 key 前缀隔离）
+        assert_eq!(
+            backend.read(dir, 6, filename).await.unwrap(),
+            None,
+            "其它租户前缀下不应读到本租户对象"
+        );
+
         // list → GET /?list-type=2
-        let list = backend.list(dir, "/uploads/file").await.expect("list 失败");
+        let list = backend
+            .list(dir, tenant_id, "/uploads/file")
+            .await
+            .expect("list 失败");
         assert_eq!(list.len(), 1, "应恰好列举一个对象");
         assert_eq!(list[0].name, filename);
         assert_eq!(list[0].size, payload.len() as u64);
-        assert_eq!(list[0].url, format!("{endpoint}/{BUCKET}/{dir}/{filename}"));
+        assert_eq!(list[0].url, format!("{endpoint}/{BUCKET}/{expected_key}"));
 
         // delete → DELETE，随后 read 为 None，重复 delete 幂等
-        backend.delete(dir, filename).await.expect("delete 失败");
-        assert_eq!(backend.read(dir, filename).await.unwrap(), None);
-        backend.delete(dir, filename).await.expect("重复删除应幂等");
+        backend
+            .delete(dir, tenant_id, filename)
+            .await
+            .expect("delete 失败");
+        assert_eq!(backend.read(dir, tenant_id, filename).await.unwrap(), None);
+        backend
+            .delete(dir, tenant_id, filename)
+            .await
+            .expect("重复删除应幂等");
     }
 
     #[tokio::test]
@@ -993,7 +1026,7 @@ mod wire_tests {
         let (endpoint, st) = spawn_fake_s3().await;
         let backend = backend_for(&endpoint);
         let _ = backend
-            .save("uploads/file", "ok.txt", "/uploads/file", b"abc")
+            .save("uploads/file", 0, "ok.txt", "/uploads/file", b"abc")
             .await
             .expect("正常 save 应成功");
         assert_eq!(st.store.lock().unwrap().len(), 1);

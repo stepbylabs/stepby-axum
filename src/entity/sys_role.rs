@@ -25,7 +25,11 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub role_id: i64,
     pub role_name: String,
-    #[sea_orm(unique)]
+    /// 角色权限字符。
+    ///
+    /// 唯一性已由迁移 `m20260925_000004` 的复合唯一索引
+    /// `uk_sys_role_tenant_key (tenant_id, role_key)` 承担（同租户内唯一，不同租户可同名），
+    /// 故此处不再标注单列 unique 属性；运行时查询由 SQL 显式构造，不受该属性影响。
     pub role_key: String,
     pub role_sort: i32,
     pub data_scope: Option<String>,

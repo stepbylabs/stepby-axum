@@ -138,6 +138,9 @@ pub struct UnlockScreenDto {
 #[serde(rename_all = "camelCase")]
 pub struct LoginVo {
     pub token: String,
+    /// 登录用户所属租户（多租户：供 WebHook 事件分发按租户投递；不序列化给前端）
+    #[serde(skip)]
+    pub tenant_id: i64,
 }
 
 /// 验证码响应 Vo（Service 层返回，Handler 包装为 CaptchaResult）
@@ -229,6 +232,8 @@ pub struct AuthService {
     config_service: SysConfigService,
     /// 全局配置（P0-4：TOTP secret 加解密需要 config_enc_key）
     config: Arc<Settings>,
+    /// 租户服务（Phase 3：登录闸门三态判定 + 运行时键同步，事实源 = sys_tenant）
+    tenant_service: crate::service::SysTenantService,
 }
 
 impl AuthService {
@@ -245,6 +250,7 @@ impl AuthService {
         logininfor_repo: SysLogininforRepository,
         config_service: SysConfigService,
         config: Arc<Settings>,
+        tenant_service: crate::service::SysTenantService,
     ) -> Self {
         Self {
             user_service,
@@ -252,6 +258,7 @@ impl AuthService {
             logininfor_repo,
             config_service,
             config,
+            tenant_service,
         }
     }
 
@@ -263,10 +270,13 @@ impl AuthService {
     /// - 配置不存在或读取失败：默认 true（安全失败，偏向开启验证码）
     /// - 配置值为 "false"（不区分大小写）：返回 false
     /// - 其他值：返回 true
-    async fn is_captcha_enabled(&self) -> bool {
+    ///
+    /// 多租户 Phase 3：`tenant_id` 为 host 解析出的租户上下文（匿名路径无登录态）。
+    /// 该键属 platform_only，租户层无覆盖行，实际回落平台默认层；传租户 ID 保证语义一致。
+    async fn is_captcha_enabled(&self, tenant_id: Option<i64>) -> bool {
         match self
             .config_service
-            .get_config_value_by_key_cached("sys.account.captchaEnabled")
+            .get_config_value_by_key_cached("sys.account.captchaEnabled", tenant_id)
             .await
         {
             Ok(Some(val)) => !val.eq_ignore_ascii_case("false"),
@@ -282,10 +292,13 @@ impl AuthService {
     /// - 配置不存在或读取失败：默认 false（安全失败：配置缺失时禁止注册）
     /// - 配置值为 "true"（不区分大小写）：返回 true
     /// - 其他值：返回 false
-    async fn is_register_enabled(&self) -> bool {
+    ///
+    /// 多租户 Phase 3：`tenant_id` 为 host 解析出的租户上下文；该键属 platform_only，
+    /// 租户层无覆盖行，实际回落平台默认层。
+    async fn is_register_enabled(&self, tenant_id: Option<i64>) -> bool {
         match self
             .config_service
-            .get_config_value_by_key_cached("sys.account.registerUser")
+            .get_config_value_by_key_cached("sys.account.registerUser", tenant_id)
             .await
         {
             Ok(Some(val)) => val.eq_ignore_ascii_case("true"),
@@ -308,12 +321,13 @@ impl AuthService {
         &self,
         redis: &mut redis::aio::ConnectionManager,
         ip: &str,
+        tenant_id: Option<i64>,
     ) -> Result<CaptchaVo, ServiceError> {
-        // 1. 读取验证码开关
-        let captcha_enabled = self.is_captcha_enabled().await;
+        // 1. 读取验证码开关（多租户 Phase 3：透传 host 租户上下文）
+        let captcha_enabled = self.is_captcha_enabled(tenant_id).await;
         // 同时读取注册开关，前端据此控制"立即注册"链接显示，
         // 避免前端探测 /register 触发 403 控制台错误（P0 优化）
-        let register_enabled = self.is_register_enabled().await;
+        let register_enabled = self.is_register_enabled(tenant_id).await;
         if !captcha_enabled {
             return Ok(CaptchaVo {
                 captcha_enabled: false,
@@ -382,6 +396,7 @@ impl AuthService {
         redis: &mut redis::aio::ConnectionManager,
         jwt_config: &JwtConfig,
         ip_locator: &IpLocator,
+        tenant_id: Option<i64>,
     ) -> Result<LoginVo, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -404,7 +419,8 @@ impl AuthService {
         // 2. 验证码 GETDEL 是幂等消耗操作，应在更早阶段拦截明显错误的请求
         // 新顺序：先验证码（无 Redis 计数副作用），再限流（IP/用户计数），最后密码校验
         // 1. 验证码校验（GETDEL 原子化，防重放攻击）
-        self.verify_captcha(redis, &ctx, &dto.uuid, &dto.code)
+        // 多租户 Phase 3：透传 host 租户上下文，验证码开关按租户上下文读取
+        self.verify_captcha(redis, &ctx, &dto.uuid, &dto.code, tenant_id)
             .await?;
 
         // 2. IP 限流校验
@@ -478,8 +494,13 @@ impl AuthService {
         if let Some(count) = fail_count
             && count >= MAX_TOTP_FAIL
         {
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.totp_locked"))
-                .await;
+            self.write_login_log_best_effort(
+                ctx,
+                "1",
+                &crate::tr!("log.auth.totp_locked"),
+                user.tenant_id,
+            )
+            .await;
             return Err(ServiceError::new(
                 1003,
                 crate::tr!("error.totp.login_locked"),
@@ -533,8 +554,13 @@ impl AuthService {
                     tracing::error!(error = %e, "TOTP 失败计数写入失败");
                     ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
                 })?;
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.totp_failed"))
-                .await;
+            self.write_login_log_best_effort(
+                ctx,
+                "1",
+                &crate::tr!("log.auth.totp_failed"),
+                user.tenant_id,
+            )
+            .await;
             return Err(ServiceError::new(
                 1003,
                 crate::tr!("error.totp.code_invalid"),
@@ -570,7 +596,8 @@ impl AuthService {
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
         if ip_count > MAX_LOGIN_IP_COUNT {
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"))
+            // 用户尚未识别（限流发生在查库前）→ 平台租户 0（平台级审计）
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"), 0)
                 .await;
             return Err(ServiceError::new(
                 429,
@@ -606,7 +633,8 @@ impl AuthService {
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.password_locked"))
+            // 用户尚未识别（失败计数发生在查库前）→ 平台租户 0（平台级审计）
+            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.password_locked"), 0)
                 .await;
             return Err(ServiceError::new(
                 429,
@@ -631,8 +659,9 @@ impl AuthService {
         ctx: &LoginContext<'_>,
         uuid: &str,
         code: &str,
+        tenant_id: Option<i64>,
     ) -> Result<(), ServiceError> {
-        if self.is_captcha_enabled().await {
+        if self.is_captcha_enabled(tenant_id).await {
             let captcha_key = format!("captcha:{}:{}", uuid, ctx.login_ip);
             // M-6：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
             // R11：命令级超时（fail-closed 503）
@@ -662,10 +691,12 @@ impl AuthService {
             let stored = match stored_code {
                 Some(c) => c,
                 None => {
+                    // 用户尚未识别（验证码发生在查库前）→ 平台租户 0（平台级审计）
                     self.write_login_log_best_effort(
                         ctx,
                         "1",
                         &crate::tr!("log.auth.captcha_expired"),
+                        0,
                     )
                     .await;
                     return Err(ServiceError::bad_request(&crate::tr!(
@@ -675,7 +706,8 @@ impl AuthService {
             };
 
             if stored.to_lowercase() != code.to_lowercase() {
-                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.captcha_wrong"))
+                // 用户尚未识别（验证码发生在查库前）→ 平台租户 0（平台级审计）
+                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.captcha_wrong"), 0)
                     .await;
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.auth.captcha_wrong"
@@ -718,7 +750,8 @@ impl AuthService {
             Some(u) => u,
             None => {
                 // L-1：用户不存在时不计数（避免无效用户名污染失败计数导致真实用户被锁）
-                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"))
+                // 用户不可识别 → 平台租户 0（平台级审计）
+                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"), 0)
                     .await;
                 return Err(ServiceError::unauthorized(&crate::tr!(
                     "error.auth.login_failed"
@@ -730,27 +763,54 @@ impl AuthService {
         // C-1：账号停用统一返回 login_failed，避免攻击者通过差异错误消息枚举有效用户名。
         // 细分原因仅写入 sys_logininfor 日志（不返回客户端），供管理员审计。
         if user.status.as_deref() == Some("1") {
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.account_disabled"))
-                .await;
+            self.write_login_log_best_effort(
+                ctx,
+                "1",
+                &crate::tr!("log.auth.account_disabled"),
+                user.tenant_id,
+            )
+            .await;
             return Err(ServiceError::unauthorized(&crate::tr!(
                 "error.auth.login_failed"
             )));
         }
 
-        // 2.1 多租户 Phase 2：租户停用校验（dept 树根=租户；对外统一 login_failed，
-        //     细分原因仅写登录日志——与账号停用同款反枚举策略）
-        if user.tenant_id != 0
-            && self
-                .user_service
-                .ensure_tenant_active_for_login(user.tenant_id)
-                .await
-                .is_err()
-        {
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.tenant_disabled"))
-                .await;
-            return Err(ServiceError::unauthorized(&crate::tr!(
-                "error.auth.login_failed"
-            )));
+        // 2.1 多租户 Phase 3：租户闸门（事实源 = sys_tenant；对外统一 login_failed，
+        //     细分原因仅写登录日志——与账号停用同款反枚举策略）。
+        //     三态：停用/不存在/超宽限期 → 拒绝；宽限期 → 放行但仅读（鉴权中间件按
+        //     `tenant:state:{tid}` 拦截写请求）；正常 → 放行。同时重置运行时键，
+        //     使已登录会话的中间件判定与本次登录一致。
+        if user.tenant_id != 0 {
+            match self.tenant_service.resolve_login_state(user.tenant_id).await {
+                Ok(crate::service::sys_tenant_service::TenantLoginState::Active) => {}
+                Ok(crate::service::sys_tenant_service::TenantLoginState::Grace) => {
+                    self.write_login_log_best_effort(
+                        ctx,
+                        "0",
+                        &crate::tr!("log.auth.tenant_grace"),
+                        user.tenant_id,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tenant_id = user.tenant_id,
+                        user = %ctx.username,
+                        error = %e,
+                        "租户闸门拒绝登录（停用/超期/已删除）"
+                    );
+                    self.write_login_log_best_effort(
+                        ctx,
+                        "1",
+                        &crate::tr!("log.auth.tenant_disabled"),
+                        user.tenant_id,
+                    )
+                    .await;
+                    return Err(ServiceError::unauthorized(&crate::tr!(
+                        "error.auth.login_failed"
+                    )));
+                }
+            }
         }
 
         // 3. 密码校验（支持 MD5→Argon2 自动升级）
@@ -767,8 +827,13 @@ impl AuthService {
         })?;
         if !verify_result.is_valid {
             self.record_login_failure(ctx.username, redis).await?;
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"))
-                .await;
+            self.write_login_log_best_effort(
+                ctx,
+                "1",
+                &crate::tr!("log.auth.login_failed"),
+                user.tenant_id,
+            )
+            .await;
             return Err(ServiceError::unauthorized(&crate::tr!(
                 "error.auth.login_failed"
             )));
@@ -874,8 +939,13 @@ impl AuthService {
         //    H-1/H-2 修复：日志写入失败不应阻断登录响应，仅记录警告日志
         //    info_id 仍保留用于登录日志关联，但不再作为 online key
         //    H-3：日志消息改用 tr!("log.auth.login_success") 支持多语言
-        self.write_login_log_best_effort(ctx, "0", &crate::tr!("log.auth.login_success"))
-            .await;
+        self.write_login_log_best_effort(
+            ctx,
+            "0",
+            &crate::tr!("log.auth.login_success"),
+            user.tenant_id,
+        )
+        .await;
 
         // 3. 存储 `online:{token_hash}` → `OnlineSession` JSON，用于在线用户列表与强退
         //    - key 用 token_hash（与 blacklist:{token_hash} 对齐，强退时同一 key 命名空间）
@@ -911,6 +981,8 @@ impl AuthService {
             source: "login".to_string(),
             // R11：防 usize→i64 溢出（与 jwt/claims.rs:106 的 try_from 防御保持一致）
             exp: i64::try_from(claims.exp).unwrap_or(0),
+            // Phase 3：在线会话携带租户 ID（在线用户域按租户分层展示 + 定向踢线）
+            tenant_id: user.tenant_id,
         };
         let session_json = serde_json::to_string(&session)?;
 
@@ -1013,7 +1085,10 @@ impl AuthService {
             tracing::warn!("更新用户登录信息失败（不阻断登录）: {}", e);
         }
 
-        Ok(LoginVo { token })
+        Ok(LoginVo {
+            token,
+            tenant_id: user.tenant_id,
+        })
     }
 
     /// 登出：token 加入 Redis 黑名单 + 删除 online 会话映射（fail-closed：黑名单写入失败返回错误）
@@ -1137,9 +1212,28 @@ impl AuthService {
     ///
     /// 流程：
     /// 1. 查询用户菜单树（menu_service 已过滤 F 类型 + 组装树形结构）
-    /// 2. 递归转换为 RouterVo（menu_to_router）
-    pub async fn get_routers(&self, user_id: i64) -> Result<Vec<RouterVo>, ServiceError> {
+    /// 2. **§27.6 生效点②**：租户用户（`caller_tid != 0`）按 `套餐 ∩ 角色授权` 求交
+    ///    ——套餐白名单（L2）裁剪角色授权菜单（L1），平台租户 / 无套餐租户不裁剪
+    /// 3. 递归转换为 RouterVo（menu_to_router）
+    pub async fn get_routers(
+        &self,
+        user_id: i64,
+        caller_tid: i64,
+    ) -> Result<Vec<RouterVo>, ServiceError> {
         let menu_tree = self.menu_service.get_menu_tree_by_user_id(user_id).await?;
+        // 套餐白名单裁剪：`None` = 该租户未绑定套餐（不限制）
+        let menu_tree = if caller_tid != 0 {
+            match self
+                .tenant_service
+                .package_menu_whitelist(caller_tid)
+                .await?
+            {
+                Some(whitelist) => prune_menu_tree_by_whitelist(menu_tree, &whitelist),
+                None => menu_tree,
+            }
+        } else {
+            menu_tree
+        };
         let routers: Vec<RouterVo> = menu_tree.iter().map(|m| menu_to_router(m, "")).collect();
         Ok(routers)
     }
@@ -1160,6 +1254,7 @@ impl AuthService {
         dto: RegisterDto,
         ip: &str,
         redis: &mut redis::aio::ConnectionManager,
+        tenant_id: Option<i64>,
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -1170,7 +1265,7 @@ impl AuthService {
         //    sys.account.registerUser 默认 false（安全失败：配置缺失时禁止注册）
         //    管理员需显式在 sys_config 中将 registerUser 设为 true 才开放注册
         //    状态码：403 Forbidden（业务策略禁止，非系统错误）
-        if !self.is_register_enabled().await {
+        if !self.is_register_enabled(tenant_id).await {
             return Err(ServiceError::forbidden(&crate::tr!(
                 "error.auth.register_disabled"
             )));
@@ -1180,7 +1275,7 @@ impl AuthService {
         //    若 sys.account.captchaEnabled=false，则跳过验证码校验
         //    captcha key 绑定 IP：captcha:{uuid}:{ip}，防止跨 IP 重放
         //    状态码：400 Bad Request（客户端输入问题，非系统错误）
-        if self.is_captcha_enabled().await {
+        if self.is_captcha_enabled(tenant_id).await {
             let captcha_key = format!("captcha:{}:{}", dto.uuid, ip);
             // C-1：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
             //      与 verify_captcha（464-478 行）保持一致，避免静默吞错掩盖基础设施故障。
@@ -1252,7 +1347,7 @@ impl AuthService {
             dept_ids: None,
             remark: None,
         };
-        self.user_service.add_user(add_dto, "register").await?;
+        self.user_service.add_user(add_dto, "register", 0).await?;
 
         Ok(())
     }
@@ -1373,6 +1468,7 @@ impl AuthService {
     /// 参数：
     /// - status: "0" 成功 / "1" 失败
     /// - msg: 日志消息
+    /// - tenant_id: 被登录用户的租户；用户不可识别时记为平台租户 0（平台级审计）
     /// - browser / os: 从 User-Agent 解析
     /// - login_location: IP 归属地（由 IpLocator 查询得到）
     async fn write_login_log(
@@ -1380,11 +1476,13 @@ impl AuthService {
         ctx: &LoginContext<'_>,
         status: &str,
         msg: &str,
+        tenant_id: i64,
     ) -> Result<i64, ServiceError> {
         let now = crate::common::datetime::now_naive();
         let mut am = sys_logininfor::ActiveModel {
             ..Default::default()
         };
+        am.tenant_id = Set(tenant_id);
         am.user_name = Set(Some(ctx.username.to_string()));
         am.ipaddr = Set(Some(ctx.login_ip.to_string()));
         am.login_location = Set(if ctx.login_location.is_empty() {
@@ -1405,8 +1503,14 @@ impl AuthService {
     ///
     /// 用于认证失败路径：日志写入失败不应掩盖原始的认证错误（如 401），
     /// 用户应看到 401 而非 500。同时避免同步 DB 写入阻塞响应（H-2）。
-    async fn write_login_log_best_effort(&self, ctx: &LoginContext<'_>, status: &str, msg: &str) {
-        if let Err(e) = self.write_login_log(ctx, status, msg).await {
+    async fn write_login_log_best_effort(
+        &self,
+        ctx: &LoginContext<'_>,
+        status: &str,
+        msg: &str,
+        tenant_id: i64,
+    ) {
+        if let Err(e) = self.write_login_log(ctx, status, msg, tenant_id).await {
             tracing::warn!(
                 username = ctx.username,
                 status,
@@ -1465,6 +1569,41 @@ fn parse_os(ua: &str) -> String {
     } else {
         "Unknown".to_string()
     }
+}
+
+/// 按租户套餐白名单裁剪菜单树（§27.6 生效点②：`套餐 ∩ 角色授权`）
+///
+/// 保留规则：
+/// - 节点自身在白名单内 → 保留（其子节点仍逐个按本规则处理）；
+/// - 节点自身不在白名单，但**任一后代**在白名单内 → 保留该父目录骨架，否则其后代
+///   菜单在前端路由树中无处挂载（Vue Router 需要父级 Layout/ParentView）；
+/// - 自身与全部后代都不在白名单 → 整棵子树裁掉。
+///
+/// 白名单已由套餐实体解析（空/NULL 表示不限制 → 调用方不会进入本函数）。
+fn prune_menu_tree_by_whitelist(
+    menus: Vec<SysMenuModel>,
+    whitelist: &std::collections::HashSet<i64>,
+) -> Vec<SysMenuModel> {
+    menus
+        .into_iter()
+        .filter_map(|mut menu| {
+            let children = menu
+                .children
+                .take()
+                .map(|children| prune_menu_tree_by_whitelist(children, whitelist))
+                .unwrap_or_default();
+            if whitelist.contains(&menu.menu_id) || !children.is_empty() {
+                menu.children = if children.is_empty() {
+                    None
+                } else {
+                    Some(children)
+                };
+                Some(menu)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// 将 SysMenuModel 转换为 RouterVo（递归转换子节点）

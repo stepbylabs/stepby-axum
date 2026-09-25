@@ -4,6 +4,7 @@ pub mod constants;
 pub mod custom_scope;
 pub mod data_scope;
 pub mod datetime;
+pub mod double_opt;
 pub mod error;
 pub mod excel;
 pub mod extract;
@@ -20,7 +21,7 @@ pub use extract::ValidatedJson;
 pub use page::PageDomain;
 pub use response::{AjaxResult, TableDataInfo, TreeSelectVo};
 pub use upload::{
-    delete_upload_file, gen_uuid_filename, resolve_upload_dir, resolve_upload_root,
+    delete_upload_file, gen_uuid_filename, resolve_kind_dir, resolve_upload_dir, resolve_upload_root,
     write_upload_file,
 };
 

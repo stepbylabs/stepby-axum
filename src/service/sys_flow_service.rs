@@ -332,6 +332,8 @@ impl SysFlowService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.user_not_found")))?;
         let dept_id = user.dept_id;
+        // 多租户 Phase 2：业务单据/任务/流水归属提交人用户的租户
+        let applicant_tid = user.tenant_id;
         let specs = demo_nodes(&dto.flow_mode);
         let first = specs
             .first()
@@ -361,6 +363,7 @@ impl SysFlowService {
                 let assignees = assignees.clone();
                 Box::pin(async move {
                     let doc_am = FlowDemoDocActiveModel {
+                        tenant_id: Set(applicant_tid),
                         title: Set(dto.title.clone()),
                         applicant_id: Set(applicant_id),
                         applicant_name: Set(Some(applicant_name)),
@@ -389,6 +392,7 @@ impl SysFlowService {
 
                     for uid in &assignees {
                         let task_am = sys_flow_task::ActiveModel {
+                            tenant_id: Set(applicant_tid),
                             biz_type: Set(BIZ_TYPE_DEMO.to_string()),
                             biz_id: Set(doc.doc_id),
                             round_no: Set(1),
@@ -409,6 +413,7 @@ impl SysFlowService {
                     }
 
                     let log_am = sys_flow_log::ActiveModel {
+                        tenant_id: Set(applicant_tid),
                         biz_type: Set(BIZ_TYPE_DEMO.to_string()),
                         biz_id: Set(doc.doc_id),
                         round_no: Set(1),
@@ -521,6 +526,7 @@ impl SysFlowService {
                 None,
                 dto.comment.as_deref(),
                 now,
+                task.tenant_id,
             )
             .await?;
             self.update_doc_status(
@@ -529,6 +535,7 @@ impl SysFlowService {
                 task.round_no,
                 Some(task.node_seq),
                 Some(now),
+                task.tenant_id,
             )
             .await?;
             outcome.notify_finished = Some((task.applicant_id, "rejected"));
@@ -579,6 +586,7 @@ impl SysFlowService {
                         Box::pin(async move {
                             for uid in &assignees {
                                 let am = sys_flow_task::ActiveModel {
+                                    tenant_id: Set(task.tenant_id),
                                     biz_type: Set(task_biz_type.clone()),
                                     biz_id: Set(task.biz_id),
                                     round_no: Set(task.round_no),
@@ -628,6 +636,7 @@ impl SysFlowService {
                         task.round_no,
                         Some(task.node_seq),
                         Some(now),
+                        task.tenant_id,
                     )
                     .await?;
                     outcome.notify_finished = Some((task.applicant_id, "approved"));
@@ -647,6 +656,7 @@ impl SysFlowService {
             None,
             dto.comment.as_deref(),
             now,
+            task.tenant_id,
         )
         .await?;
 
@@ -675,7 +685,11 @@ impl SysFlowService {
         }
         let task = self
             .task_repo()
-            .find_first_pending_by_biz(BIZ_TYPE_DEMO, doc_id)
+            .find_first_pending_by_biz(
+                BIZ_TYPE_DEMO,
+                doc_id,
+                crate::common::tenant::tenant_scope(doc.tenant_id),
+            )
             .await?
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.task_not_pending")))?;
         self.withdraw(operator_id, task.task_id, comment).await
@@ -716,10 +730,18 @@ impl SysFlowService {
             None,
             comment,
             now,
+            task.tenant_id,
         )
         .await?;
-        self.update_doc_status(task.biz_id, "withdrawn", task.round_no, None, Some(now))
-            .await?;
+        self.update_doc_status(
+            task.biz_id,
+            "withdrawn",
+            task.round_no,
+            None,
+            Some(now),
+            task.tenant_id,
+        )
+        .await?;
         Ok(FlowActOutcome {
             task,
             notify_assignees: vec![],
@@ -779,6 +801,7 @@ impl SysFlowService {
             Some(to_user_id),
             comment,
             now,
+            task.tenant_id,
         )
         .await?;
         Ok(FlowActOutcome {
@@ -837,6 +860,7 @@ impl SysFlowService {
         let applicant_name_snap = doc.applicant_name.clone();
         let doc_title_snap = doc.title.clone();
         let doc_status_snap = doc.status.clone();
+        let doc_tid = doc.tenant_id;
         let comment_owned = comment.map(|c| c.to_string());
 
         let db = &self.db;
@@ -848,6 +872,7 @@ impl SysFlowService {
             Box::pin(async move {
                 for uid in &assignees {
                     let am = sys_flow_task::ActiveModel {
+                        tenant_id: Set(doc_tid),
                         biz_type: Set(BIZ_TYPE_DEMO.to_string()),
                         biz_id: Set(doc_id),
                         round_no: Set(new_round),
@@ -868,6 +893,7 @@ impl SysFlowService {
                         .map_err(super::sys_flow_service::db_to_svc)?;
                 }
                 let log_am = sys_flow_log::ActiveModel {
+                    tenant_id: Set(doc_tid),
                     biz_type: Set(BIZ_TYPE_DEMO.to_string()),
                     biz_id: Set(doc_id),
                     round_no: Set(new_round),
@@ -945,13 +971,19 @@ impl SysFlowService {
     }
 
     /// 管理视图：全部单据（**调用方须持有 system:flow:list**；data_scope 由调用方叠加，V3-E4）
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户单据；平台 → `None` 全量。
     pub async fn all_page(
         &self,
         query: FlowPageQuery,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<flow_demo_doc::Model>, u64), ServiceError> {
         let (offset, limit) = page_args(&query);
         let status = query.status.as_deref();
-        Ok(self.doc_repo().find_all_page(status, offset, limit).await?)
+        Ok(self
+            .doc_repo()
+            .find_all_page(status, offset, limit, tenant_scope)
+            .await?)
     }
 
     /// 任务详情 + 单据信息 + 时间线（assignee / 发起人 / 持有 system:flow:list 者可看）
@@ -969,7 +1001,11 @@ impl SysFlowService {
         }
         let timeline = self
             .log_repo()
-            .find_timeline(&task.biz_type, task.biz_id)
+            .find_timeline(
+                &task.biz_type,
+                task.biz_id,
+                crate::common::tenant::tenant_scope(task.tenant_id),
+            )
             .await?;
         let doc = self.doc_by_id(task.biz_id).await.ok();
         Ok(serde_json::json!({
@@ -1022,6 +1058,7 @@ impl SysFlowService {
                     None,
                     Some("超时待审批提醒"),
                     now2,
+                    task.tenant_id,
                 )
                 .await;
             let _ = self.task_repo().touch_reminded(task.task_id, now2).await;
@@ -1045,7 +1082,7 @@ impl SysFlowService {
             to_addr: user_id.to_string(),
             params: std::collections::HashMap::from([("title".to_string(), title.to_string())]),
         };
-        if let Err(e) = self.msg_service.send(dto, "system").await {
+        if let Err(e) = self.msg_service.send(dto, "system", 0).await {
             tracing::warn!("flow 站内提醒发送失败（不阻断业务）: {}", e.message);
         }
     }
@@ -1114,8 +1151,11 @@ impl SysFlowService {
         to_user_id: Option<i64>,
         comment: Option<&str>,
         now: NaiveDateTime,
+        tenant_tid: i64,
     ) -> Result<sys_flow_log::Model, ServiceError> {
         let am = sys_flow_log::ActiveModel {
+            // 运行期产物：流水归属上游单据/任务的租户
+            tenant_id: Set(tenant_tid),
             biz_type: Set(biz_type.to_string()),
             biz_id: Set(biz_id),
             round_no: Set(round_no),
@@ -1143,6 +1183,7 @@ impl SysFlowService {
         round_no: i32,
         node_seq: Option<i32>,
         now: Option<NaiveDateTime>,
+        tenant_tid: i64,
     ) -> Result<(), ServiceError> {
         let finished = if matches!(status, "approved" | "rejected") {
             now
@@ -1150,6 +1191,7 @@ impl SysFlowService {
             None
         };
         let am = FlowDemoDocActiveModel {
+            tenant_id: Set(tenant_tid),
             doc_id: Set(doc_id),
             status: Set(status.to_string()),
             current_round: Set(round_no),

@@ -93,6 +93,44 @@ impl SysUserRepository {
             .await
     }
 
+    /// 批量查询 user_id → tenant_id（在线会话/审计兜底回填用；不含软删行）
+    pub async fn find_tenant_ids_by_user_ids(
+        &self,
+        user_ids: &[i64],
+    ) -> Result<Vec<(i64, i64)>, DbErr> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysUser::find()
+            .select_only()
+            .column(Column::UserId)
+            .column(Column::TenantId)
+            .filter(Column::UserId.is_in(user_ids.to_vec()))
+            .filter(Column::DelFlag.eq("0"))
+            .into_tuple::<(i64, i64)>()
+            .all(self.base.db())
+            .await
+    }
+
+    /// 批量查询 user_name → tenant_id（在线用户 Redis 降级路径的租户过滤用）
+    pub async fn find_tenant_ids_by_user_names(
+        &self,
+        user_names: &[String],
+    ) -> Result<Vec<(String, i64)>, DbErr> {
+        if user_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysUser::find()
+            .select_only()
+            .column(Column::UserName)
+            .column(Column::TenantId)
+            .filter(Column::UserName.is_in(user_names.to_vec()))
+            .filter(Column::DelFlag.eq("0"))
+            .into_tuple::<(String, i64)>()
+            .all(self.base.db())
+            .await
+    }
+
     /// 按用户名查询未删除用户（del_flag = '0'），登录认证用
     ///
     /// H-2：登录认证场景需在 Repository 层过滤 del_flag，与 find_active_all 保持一致。
@@ -123,14 +161,6 @@ impl SysUserRepository {
         SysUser::find()
             .filter(Column::Email.eq(email))
             .one(self.base.db())
-            .await
-    }
-
-    /// 查询所有未删除用户（del_flag = '0'）
-    pub async fn find_active_all(&self) -> Result<Vec<Model>, DbErr> {
-        SysUser::find()
-            .filter(Column::DelFlag.eq("0"))
-            .all(self.base.db())
             .await
     }
 
@@ -313,6 +343,8 @@ impl SysUserRepository {
     ///
     /// P0-6：`scope_dept_ids` / `scope_user_id` 为操作人数据范围过滤（None=不过滤），
     /// 防止低权限管理员通过本端点枚举全部用户；同时补 order_by 稳定分页（P1）。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户用户；`None`（平台）→ 全量。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_in_ids(
         &self,
@@ -323,11 +355,15 @@ impl SysUserRepository {
         phonenumber: Option<&str>,
         scope_dept_ids: Option<&[i64]>,
         scope_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find()
             .filter(Column::DelFlag.eq("0"))
             .filter(Column::UserId.is_in(user_ids))
             .order_by_asc(Column::UserId);
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(name) = user_name {
             query = query.filter(Column::UserName.like(format!("%{}%", like_escape(name))));
         }
@@ -359,6 +395,8 @@ impl SysUserRepository {
     ///
     /// P0-6：`scope_dept_ids` / `scope_user_id` 为操作人数据范围过滤（None=不过滤）；
     /// 补 order_by 稳定分页（P1）。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户用户；`None`（平台）→ 全量。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_not_in_ids(
         &self,
@@ -369,10 +407,14 @@ impl SysUserRepository {
         phonenumber: Option<&str>,
         scope_dept_ids: Option<&[i64]>,
         scope_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find()
             .filter(Column::DelFlag.eq("0"))
             .order_by_asc(Column::UserId);
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if !exclude_ids.is_empty() {
             query = query.filter(Column::UserId.is_not_in(exclude_ids));
         }

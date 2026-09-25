@@ -102,16 +102,22 @@ impl SysLogininforRepository {
     /// 简化实现：查询 status="0"（登录成功）且 login_time >= since 的记录，
     /// 按 login_time 倒序返回。用于在线用户监控页面。
     /// 限制返回数量上限，避免单次查询返回过多记录。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅返回本租户；`None`（平台）→ 全量。
     pub async fn find_online(
         &self,
         since: NaiveDateTime,
         ipaddr: Option<&str>,
         user_name: Option<&str>,
         limit: u64,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<Model>, DbErr> {
         let mut query = SysLogininfor::find()
             .filter(Column::Status.eq("0"))
             .filter(Column::LoginTime.gte(since));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(ip) = ipaddr {
             query = query.filter(Column::Ipaddr.like(format!("%{}%", like_escape(ip))));
         }
@@ -191,7 +197,11 @@ impl SysLogininforRepository {
     /// `DATE(login_time)` 取日期部分（返回 `YYYY-MM-DD`，与输出格式一致），
     /// 故无需按 backend 分支。输出仍补齐为完整 N 天序列（无数据的日期以 0 填充），
     /// 保持前端 dashboard 契约不变。
-    pub async fn daily_stats(&self, days: i64) -> Result<Vec<(String, i64, i64)>, DbErr> {
+    pub async fn daily_stats(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<(String, i64, i64)>, DbErr> {
         use chrono::Duration;
         use std::collections::HashMap;
 
@@ -200,13 +210,30 @@ impl SysLogininforRepository {
         // （与 sys_oper_log::stats_daily 的带时间过滤实现保持一致）
         let today = crate::common::datetime::today_utc();
         let start_date = today - Duration::days(days - 1);
-        let sql = "SELECT DATE(login_time) AS d, \
-                   COUNT(CASE WHEN status = '0' THEN 1 END) AS success, \
-                   COUNT(CASE WHEN status = '1' THEN 1 END) AS fail \
-                   FROM sys_logininfor WHERE login_time >= ? \
-                   GROUP BY DATE(login_time) \
-                   ORDER BY d ASC";
-        let stmt = Statement::from_sql_and_values(backend, sql, [start_date.into()]);
+        // tenant_scope=Some(t) 时按租户维度统计（报表快照/login 统计多租户隔离）
+        let (sql, values): (String, Vec<Value>) = match tenant_scope {
+            Some(t) => (
+                "SELECT DATE(login_time) AS d, \
+                 COUNT(CASE WHEN status = '0' THEN 1 END) AS success, \
+                 COUNT(CASE WHEN status = '1' THEN 1 END) AS fail \
+                 FROM sys_logininfor WHERE login_time >= ? AND tenant_id = ? \
+                 GROUP BY DATE(login_time) \
+                 ORDER BY d ASC"
+                    .to_string(),
+                vec![start_date.into(), t.into()],
+            ),
+            None => (
+                "SELECT DATE(login_time) AS d, \
+                 COUNT(CASE WHEN status = '0' THEN 1 END) AS success, \
+                 COUNT(CASE WHEN status = '1' THEN 1 END) AS fail \
+                 FROM sys_logininfor WHERE login_time >= ? \
+                 GROUP BY DATE(login_time) \
+                 ORDER BY d ASC"
+                    .to_string(),
+                vec![start_date.into()],
+            ),
+        };
+        let stmt = Statement::from_sql_and_values(backend, sql, values);
         let rows = self.base.db().query_all(stmt).await?;
 
         let mut map: HashMap<String, (i64, i64)> = HashMap::new();
@@ -260,17 +287,21 @@ impl SysLogininforRepository {
     /// 统计今日（自当天 00:00 起）登录失败的不重复 IP 数
     ///
     /// 用于 dashboard stats 接口的 todayAnomalyIps 字段。
-    pub async fn count_today_failed_ips(&self) -> Result<i64, DbErr> {
+    pub async fn count_today_failed_ips(&self, tenant_scope: Option<i64>) -> Result<i64, DbErr> {
         use sea_orm::sea_query::Expr;
 
         let today = crate::common::datetime::today_utc();
         let begin = today.and_time(MIDNIGHT);
         // C6（批次3）：原实现用 `.all()` 拉全量 IP 再 `.len()` 计数（N 次传输）。
         // 改为单条 `COUNT(DISTINCT ipaddr)` 聚合，直接返回不重复 IP 数，避免拉全表。
-        let row: Option<(i64,)> = SysLogininfor::find()
-            .filter(Column::Status.eq("1"))
-            .filter(Column::LoginTime.gte(begin))
-            .filter(Column::Ipaddr.is_not_null())
+        let mut q = SysLogininfor::find();
+        q = q.filter(Column::Status.eq("1"));
+        q = q.filter(Column::LoginTime.gte(begin));
+        q = q.filter(Column::Ipaddr.is_not_null());
+        if let Some(tid) = tenant_scope {
+            q = q.filter(Column::TenantId.eq(tid));
+        }
+        let row: Option<(i64,)> = q
             .select_only()
             .column_as(Expr::cust("COUNT(DISTINCT ipaddr)"), "c")
             .into_tuple::<(i64,)>()

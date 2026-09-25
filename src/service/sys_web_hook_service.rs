@@ -314,10 +314,11 @@ impl SysWebHookService {
 
     // ==================== 回调查配置 CRUD ====================
 
-    /// 分页查询回调查配置
+    /// 分页查询回调查配置（operator_tid 用于租户过滤：租户管理员仅见本租户）
     pub async fn list(
         &self,
         query: WebHookQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysWebHookModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -329,17 +330,27 @@ impl SysWebHookService {
                 query.hook_name.as_deref(),
                 query.event_types.as_deref(),
                 query.status.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await
             .map_err(ServiceError::from)
     }
 
-    /// 根据 id 查询回调查配置详情
-    pub async fn get_by_id(&self, id: i64) -> Result<SysWebHookModel, ServiceError> {
-        self.hook_repo
+    /// 根据 id 查询回调查配置详情（跨租户按主键访问 → 403）
+    pub async fn get_by_id(
+        &self,
+        id: i64,
+        operator_tid: i64,
+    ) -> Result<SysWebHookModel, ServiceError> {
+        let model = self
+            .hook_repo
             .find_by_id(id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.web_hook.not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.web_hook.not_found")))?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        Ok(model)
     }
 
     /// 新增回调查配置（保存时执行 SSRF 校验）
@@ -347,6 +358,7 @@ impl SysWebHookService {
         &self,
         dto: WebHookAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysWebHookModel, ServiceError> {
         validate(&dto)?;
         let (content_type, timeout_secs, status) =
@@ -365,6 +377,7 @@ impl SysWebHookService {
 
         let now = crate::common::datetime::now_naive();
         let am = SysWebHookActiveModel {
+            tenant_id: Set(operator_tid),
             hook_name: Set(dto.hook_name),
             event_types: Set(event_types),
             target_url: Set(dto.target_url.trim().to_string()),
@@ -393,9 +406,11 @@ impl SysWebHookService {
         &self,
         dto: WebHookEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysWebHookModel, ServiceError> {
         validate(&dto)?;
-        let existing = self.get_by_id(dto.id).await?;
+        // 越权防护（get_by_id 内已校验租户归属）：租户管理员不得跨租户修改 WebHook 配置
+        let existing = self.get_by_id(dto.id, operator_tid).await?;
         let (content_type, timeout_secs, status) =
             Self::normalize(&dto.content_type, &dto.timeout_secs, &dto.status);
         let event_types = dto.event_types.unwrap_or_default().trim().to_string();
@@ -435,9 +450,17 @@ impl SysWebHookService {
     }
 
     /// 逻辑删除回调查配置（并级联清理其推送记录）
-    pub async fn remove(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn remove(&self, ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
         if ids.is_empty() {
             return Ok(());
+        }
+        // 越权防护：租户管理员不得跨租户删除 WebHook 配置
+        let existing = self.hook_repo.find_by_ids(&ids).await?;
+        if existing
+            .iter()
+            .any(|h| !crate::common::tenant::tenant_allowed(operator_tid, h.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
         }
         for id in &ids {
             let _ = self.log_repo.delete_by_hook_id(*id).await;
@@ -450,13 +473,19 @@ impl SysWebHookService {
     }
 
     /// 启停回调（status：0=启用 1=停用）
-    pub async fn change_status(&self, id: i64, status: &str) -> Result<(), ServiceError> {
+    pub async fn change_status(
+        &self,
+        id: i64,
+        status: &str,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if status != "0" && status != "1" {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.common.invalid_param"
             )));
         }
-        self.get_by_id(id).await?;
+        // 越权防护（get_by_id 内已校验租户归属）：租户管理员不得跨租户启停 WebHook 配置
+        self.get_by_id(id, operator_tid).await?;
         self.hook_repo
             .update_status(id, status)
             .await
@@ -493,6 +522,8 @@ impl SysWebHookService {
         // 构造日志行（先落库，便于投递期间即可查询“进行中”状态）
         let now = crate::common::datetime::now_naive();
         let log_am = SysWebHookLogActiveModel {
+            // 运行期产物：归该 WebHook 配置所属租户（可能由事件分发/重试异步触发，无操作者上下文）
+            tenant_id: Set(hook.tenant_id),
             hook_id: Set(Some(hook.id)),
             hook_name: Set(Some(hook.hook_name.clone())),
             event_type: Set(event_type.to_string()),
@@ -585,8 +616,9 @@ impl SysWebHookService {
         &self,
         id: i64,
         dto: WebHookTestDto,
+        operator_tid: i64,
     ) -> Result<DeliveryResult, ServiceError> {
-        let hook = self.get_by_id(id).await?;
+        let hook = self.get_by_id(id, operator_tid).await?;
         let event_type = dto
             .event_type
             .unwrap_or_else(|| EVENT_LOGIN_SUCCESS.to_string());
@@ -603,7 +635,11 @@ impl SysWebHookService {
     ///
     /// 对于每个命中回调 spawn 一个独立任务投递，互不阻塞调用方（如登录请求）。
     /// 投递失败仅落库 + 日志，不向上抛错，保证事件分发绝不阻断主链路。
-    pub fn dispatch_event(&self, event_type: &str, payload: serde_json::Value) {
+    ///
+    /// 多租户（后台批量任务硬约束）：启用回调**按租户分组**加载，**仅**投递与事件
+    /// 同租户（`tenant_id`）的回调组，并在 payload 注入 `tenantId`，严禁跨租户触达
+    /// （A 租户事件不得推给 B 租户 WebHook）。
+    pub fn dispatch_event(&self, event_type: &str, payload: serde_json::Value, tenant_id: i64) {
         let hook_repo = self.hook_repo.clone();
         let log_repo = self.log_repo.clone();
         let http = Arc::new(self.http.clone());
@@ -612,22 +648,31 @@ impl SysWebHookService {
         let event_type = event_type.to_string();
 
         tokio::spawn(async move {
-            // 先加载启用回调，再在内存中过滤匹配事件，避免对每回调单独查库
-            let hooks = match hook_repo.find_all_enabled().await {
-                Ok(h) => h,
+            // 先按租户分组加载启用回调，再仅取事件所属租户组并在内存中过滤匹配事件
+            let groups = match hook_repo.find_all_enabled().await {
+                Ok(g) => g,
                 Err(e) => {
                     tracing::warn!(event = %event_type, error = %e, "WebHook 事件分发：加载启用回调失败");
                     return;
                 }
             };
-            let matched: Vec<_> = hooks
-                .iter()
+            let matched: Vec<_> = groups
+                .into_iter()
+                .filter(|(tid, _)| *tid == tenant_id)
+                .flat_map(|(_, hooks)| hooks)
                 .filter(|h| hook_matches_event(&h.event_types, &event_type))
-                .cloned()
                 .collect();
             if matched.is_empty() {
                 return;
             }
+            // 事件 payload 注入租户上下文，接收方据此判定归属
+            let payload = {
+                let mut p = payload;
+                if let serde_json::Value::Object(ref mut m) = p {
+                    m.insert("tenantId".to_string(), serde_json::json!(tenant_id));
+                }
+                p
+            };
             for hook in matched {
                 let lr = log_repo.clone();
                 let hc = http.clone();
@@ -666,10 +711,11 @@ impl SysWebHookService {
 
     // ==================== 推送记录管理 ====================
 
-    /// 分页查询推送记录
+    /// 分页查询推送记录（operator_tid 用于租户过滤：租户管理员仅见本租户）
     pub async fn list_logs(
         &self,
         query: WebHookLogQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysWebHookLogModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -681,25 +727,46 @@ impl SysWebHookService {
                 query.hook_id,
                 query.event_type.as_deref(),
                 query.status.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await
             .map_err(ServiceError::from)
     }
 
-    /// 根据 id 查询推送记录详情
-    pub async fn get_log_by_id(&self, id: i64) -> Result<SysWebHookLogModel, ServiceError> {
-        self.log_repo
+    /// 根据 id 查询推送记录详情（跨租户按主键访问 → 403）
+    pub async fn get_log_by_id(
+        &self,
+        id: i64,
+        operator_tid: i64,
+    ) -> Result<SysWebHookLogModel, ServiceError> {
+        let model = self
+            .log_repo
             .find_by_id(id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.web_hook.log_not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.web_hook.log_not_found")))?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        Ok(model)
     }
 
     /// 删除推送记录
-    pub async fn remove_logs(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn remove_logs(
+        &self,
+        ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         if ids.is_empty() {
             return Ok(());
         }
-        let _ = self.log_repo.find_by_ids(&ids).await?;
+        let existing = self.log_repo.find_by_ids(&ids).await?;
+        // 越权防护：租户管理员不得跨租户删除推送记录
+        if existing
+            .iter()
+            .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         self.log_repo
             .delete_by_ids(ids)
             .await
@@ -707,19 +774,20 @@ impl SysWebHookService {
             .map_err(ServiceError::from)
     }
 
-    /// 清空推送记录（按保留期：先清理超期，再清剩余）
-    pub async fn clean_logs(&self) -> Result<(u64, u64), ServiceError> {
+    /// 清空推送记录（按保留期：先清理超期，再清剩余；operator_tid 决定租户范围）
+    pub async fn clean_logs(&self, operator_tid: i64) -> Result<(u64, u64), ServiceError> {
+        let scope = crate::common::tenant::tenant_scope(operator_tid);
         let cutoff =
             crate::common::datetime::now_naive() - chrono::Duration::days(LOG_RETENTION_DAYS);
         let expired = self
             .log_repo
-            .delete_older_than(cutoff)
+            .delete_older_than(cutoff, scope)
             .await
             .map(|r| r.rows_affected)
             .map_err(ServiceError::from)?;
         let all = self
             .log_repo
-            .delete_all()
+            .delete_all(scope)
             .await
             .map(|r| r.rows_affected)
             .map_err(ServiceError::from)?;
@@ -727,11 +795,22 @@ impl SysWebHookService {
     }
 
     /// 重试失败记录（按已保存的 payload 重新投递到原目标）
-    pub async fn retry_logs(&self, ids: Vec<i64>) -> Result<usize, ServiceError> {
+    pub async fn retry_logs(
+        &self,
+        ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<usize, ServiceError> {
         if ids.is_empty() {
             return Ok(0);
         }
         let failed = self.log_repo.find_failed_by_ids(&ids).await?;
+        // 越权防护：租户管理员不得跨租户重试推送记录
+        if failed
+            .iter()
+            .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         let mut ok_count = 0usize;
         for log in failed {
             // 依据记录快照构造虚拟 hook 重新投递（hook 可能已删除）
@@ -747,8 +826,8 @@ impl SysWebHookService {
                 .and_then(|p| serde_json::from_str(p).ok())
                 .unwrap_or_else(|| serde_json::json!({ "event": log.event_type, "note": "retry" }));
             let hook = SysWebHookModel {
-                // 投递用临时构造（不入库）：tenant_id 无语义，填平台 0
-                tenant_id: 0,
+                // 投递用临时构造（不入库）：tenant_id 沿用原记录，保证重试产物归属不变
+                tenant_id: log.tenant_id,
                 id: log.hook_id.unwrap_or(-1),
                 hook_name: log.hook_name.clone().unwrap_or_default(),
                 event_types: String::new(),
@@ -971,7 +1050,7 @@ mod tests {
         );
 
         // 记录已落库且状态=成功
-        let log = svc.get_log_by_id(res.log_id).await.unwrap();
+        let log = svc.get_log_by_id(res.log_id, 0).await.unwrap();
         assert_eq!(log.status, "0");
         assert_eq!(log.hook_name.as_deref(), Some("本地测试"));
         assert_eq!(log.event_type, "login_success");
@@ -1005,7 +1084,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!res.ok, "不可达应失败: {res:?}");
-        let log = svc.get_log_by_id(res.log_id).await.unwrap();
+        let log = svc.get_log_by_id(res.log_id, 0).await.unwrap();
         assert_eq!(log.status, "1");
         assert!(log.error_msg.is_some());
     }

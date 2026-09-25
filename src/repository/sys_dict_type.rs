@@ -31,40 +31,65 @@ impl SysDictTypeRepository {
         &self.base
     }
 
-    /// 按 dict_type 查询（唯一约束，用于获取字典类型详情）
-    pub async fn find_by_dict_type(&self, dict_type: &str) -> Result<Option<Model>, DbErr> {
+    /// 按 (tenant_id, dict_type) 查询单行（复合唯一域 `uk_sys_dict_type_tenant`）。
+    ///
+    /// 用于精确定位某一层（平台 `tenant_id=0` 或某租户）的字典类型。
+    pub async fn find_by_tenant_dict_type(
+        &self,
+        tenant_id: i64,
+        dict_type: &str,
+    ) -> Result<Option<Model>, DbErr> {
         SysDictType::find()
+            .filter(Column::TenantId.eq(tenant_id))
             .filter(Column::DictType.eq(dict_type))
             .filter(Column::DelFlag.eq("0"))
             .one(self.base.db())
             .await
     }
 
-    /// 查询所有未删除字典类型（del_flag = '0'）
-    pub async fn find_active_all(&self) -> Result<Vec<Model>, DbErr> {
-        SysDictType::find()
-            .filter(Column::DelFlag.eq("0"))
-            .all(self.base.db())
-            .await
+    /// 按 dict_type 查询平台行（`tenant_id = 0`）——平台层类型查询入口。
+    pub async fn find_platform_by_dict_type(&self, dict_type: &str) -> Result<Option<Model>, DbErr> {
+        self.find_by_tenant_dict_type(0, dict_type).await
     }
 
-    /// 分页查询未删除字典类型
-    pub async fn find_active_page(
+    /// **生效类型查询**：租户自建类型（`tenant_id = tid`）优先，无则回落平台类型（`tenant_id = 0`）。
+    ///
+    /// - `tenant_scope = None / Some(0)`：只读平台层；
+    /// - `tenant_scope = Some(tid)`（tid≠0）：`tenant_id IN (0, tid)`，按 tenant_id 降序取首行。
+    ///
+    /// 这是 dict_type 的**唯一**按名生效读取入口，不存在"只按 dict_type 查、无租户条件"的路径。
+    pub async fn find_effective_by_dict_type(
         &self,
-        offset: u64,
-        limit: u64,
-    ) -> Result<(Vec<Model>, u64), DbErr> {
-        let total = SysDictType::find()
-            .filter(Column::DelFlag.eq("0"))
-            .count(self.base.db())
-            .await?;
-        let rows = SysDictType::find()
-            .filter(Column::DelFlag.eq("0"))
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
-        Ok((rows, total))
+        dict_type: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<Option<Model>, DbErr> {
+        match tenant_scope.filter(|t| *t != 0) {
+            Some(tid) => {
+                SysDictType::find()
+                    .filter(Column::DictType.eq(dict_type))
+                    .filter(Column::TenantId.is_in([0i64, tid]))
+                    .filter(Column::DelFlag.eq("0"))
+                    .order_by_desc(Column::TenantId)
+                    .one(self.base.db())
+                    .await
+            }
+            None => self.find_platform_by_dict_type(dict_type).await,
+        }
+    }
+
+    /// 查询未删除字典类型（`del_flag = '0'`）。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 本租户自建类型 + 平台类型（`tenant_id IN (0, tid)`）；
+    /// `None`（平台操作者）→ 全量不过滤。
+    pub async fn find_active_all(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysDictType::find().filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.is_in([0i64, tid]));
+        }
+        query.all(self.base.db()).await
     }
 
     /// 软删除字典类型
@@ -108,11 +133,15 @@ impl SysDictTypeRepository {
     }
 
     /// 多条件分页查询（dict_name 模糊，dict_type 模糊，status 精确，时间范围）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 本租户自建类型 + 平台类型（`tenant_id IN (0, tid)`）；
+    /// `None`（平台操作者）→ 全量不过滤。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
         offset: u64,
         limit: u64,
+        tenant_scope: Option<i64>,
         dict_name: Option<&str>,
         dict_type: Option<&str>,
         status: Option<&str>,
@@ -120,6 +149,9 @@ impl SysDictTypeRepository {
         end_time: Option<NaiveDateTime>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysDictType::find().filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.is_in([0i64, tid]));
+        }
         if let Some(name) = dict_name {
             query = query.filter(Column::DictName.like(format!("%{}%", like_escape(name))));
         }
