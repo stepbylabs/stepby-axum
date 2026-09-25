@@ -57,10 +57,19 @@ impl SysRoleRepository {
             .await
     }
 
-    /// 按 role_key 查询（权限校验用）
-    pub async fn find_by_role_key(&self, role_key: &str) -> Result<Option<Model>, DbErr> {
+    /// 按 role_key 在**指定租户内**查询（台账 P0-3：与唯一索引
+    /// `uk_sys_role_tenant_key (tenant_id, role_key)` 语义对齐）。
+    ///
+    /// 管理面键租户内唯一（§27 原则 A）：不同租户可存在同名 role_key，
+    /// 故写路径的查重范围必须是角色归属租户，而非全局。
+    pub async fn find_by_role_key_in_tenant(
+        &self,
+        role_key: &str,
+        tenant_id: i64,
+    ) -> Result<Option<Model>, DbErr> {
         SysRole::find()
             .filter(Column::RoleKey.eq(role_key))
+            .filter(Column::TenantId.eq(tenant_id))
             .filter(Column::DelFlag.eq("0"))
             .one(self.base.db())
             .await

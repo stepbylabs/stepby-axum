@@ -27,6 +27,7 @@ use crate::common::{AjaxResult, AppError};
 use crate::entity::{sys_oper_log, sys_role, sys_user};
 use crate::middleware::Operator;
 use crate::state::AppState;
+use crate::utils::crypto::OnlineSession;
 use crate::utils::redis::scan_keys;
 
 // ==================== DTO ====================
@@ -87,6 +88,10 @@ crate::impl_into_response!(CommonUploadResult);
 /// - loginFail：今日登录失败次数
 /// - onlineCount：当前在线用户数（Redis online:* key 计数）
 /// - recentOperLogs：最近 5 条操作日志
+///
+/// §27.13.2 分层视图（Phase 3）：`monitor:dashboard:list` 为所有登录用户可用
+/// （看板是默认首页），故本接口**必须**按操作者租户过滤——租户操作者（tid≠0）只统计
+/// 本租户的用户/角色/登录日志/操作日志/在线会话；平台操作者（tid=0）全量。
 #[utoipa::path(
     get,
     path = "/dashboard/stats",
@@ -98,19 +103,25 @@ crate::impl_into_response!(CommonUploadResult);
 )]
 pub async fn dashboard_stats(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<DashboardStatsVo>, AppError> {
     use sys_oper_log::Column as OperCol;
     use sys_role::Column as RoleCol;
     use sys_user::Column as UserCol;
 
     let db = &state.db;
+    // 租户维度：None = 平台操作者（不过滤），Some(tid) = 仅本租户
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
 
     // 并发聚合查询：用户/角色/登录日志/操作日志（各查询互不依赖，用 tokio::join! 并发执行）
     let (total_users, total_roles, active_roles, today_login, recent_logs, today_anomaly_ips) = tokio::join!(
         // 用户总数（del_flag != '2'，即未被逻辑删除）
         async {
-            sys_user::Entity::find()
-                .filter(UserCol::DelFlag.ne("2"))
+            let mut query = sys_user::Entity::find().filter(UserCol::DelFlag.ne("2"));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(UserCol::TenantId.eq(tid));
+            }
+            query
                 .count(db)
                 .await
                 .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
@@ -118,8 +129,11 @@ pub async fn dashboard_stats(
         },
         // 角色总数（del_flag != '2'）
         async {
-            sys_role::Entity::find()
-                .filter(RoleCol::DelFlag.ne("2"))
+            let mut query = sys_role::Entity::find().filter(RoleCol::DelFlag.ne("2"));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(RoleCol::TenantId.eq(tid));
+            }
+            query
                 .count(db)
                 .await
                 .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
@@ -127,9 +141,13 @@ pub async fn dashboard_stats(
         },
         // 启用角色数（status='0' 且 del_flag != '2'）
         async {
-            sys_role::Entity::find()
+            let mut query = sys_role::Entity::find()
                 .filter(RoleCol::Status.eq("0"))
-                .filter(RoleCol::DelFlag.ne("2"))
+                .filter(RoleCol::DelFlag.ne("2"));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(RoleCol::TenantId.eq(tid));
+            }
+            query
                 .count(db)
                 .await
                 .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
@@ -139,7 +157,7 @@ pub async fn dashboard_stats(
         async {
             state
                 .logininfor_service
-                .daily_stats(1, None)
+                .daily_stats(1, tenant_scope)
                 .await
                 .ok()
                 .and_then(|v| v.into_iter().next())
@@ -148,7 +166,11 @@ pub async fn dashboard_stats(
         },
         // 最近 5 条操作日志（按 oper_time 降序）
         async {
-            sys_oper_log::Entity::find()
+            let mut query = sys_oper_log::Entity::find();
+            if let Some(tid) = tenant_scope {
+                query = query.filter(OperCol::TenantId.eq(tid));
+            }
+            query
                 .order_by_desc(OperCol::OperTime)
                 .limit(5)
                 .all(db)
@@ -159,18 +181,14 @@ pub async fn dashboard_stats(
         async {
             state
                 .logininfor_service
-                .count_today_failed_ips(None)
+                .count_today_failed_ips(tenant_scope)
                 .await
                 .unwrap_or(0)
         }
     );
 
-    // 在线用户数：Redis SCAN online:*（与 monitor_online_handler 一致）
-    // Redis 故障时降级为 0（不阻塞 dashboard）
-    let online_count = scan_keys(&mut state.redis.clone(), "online:*", 5000)
-        .await
-        .map(|keys| keys.len() as i64)
-        .unwrap_or(0);
+    // 在线用户数：Redis SCAN online:*（与 monitor_online_handler 口径一致，租户仅本租户）
+    let online_count = count_online_sessions(&state, tenant_scope).await;
 
     let recent_oper_logs = recent_logs
         .into_iter()
@@ -192,6 +210,83 @@ pub async fn dashboard_stats(
         online_count,
         recent_oper_logs,
     }))
+}
+
+/// 统计在线会话数（§27.13.2 分层视图口径，与 `monitor_online_handler::list` 一致）
+///
+/// - `tenant_scope = None`（平台操作者）：key 数量即在线数，无需解析 JSON；
+/// - `tenant_scope = Some(tid)`：解析 `OnlineSession` 仅计本租户；v2.13 前的旧 JSON
+///   无 `tenant_id`（serde default=0）时按 `user_id` 回查 `sys_user.tenant_id` 兜底归属
+///   （无法定位租户的旧会话视为平台会话，不计入租户）。
+///
+/// Redis 故障时返回 0（不阻塞 dashboard）。
+async fn count_online_sessions(state: &Arc<AppState>, tenant_scope: Option<i64>) -> i64 {
+    let mut redis = state.redis.clone();
+    let keys = match scan_keys(&mut redis, "online:*", 5000).await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!("Redis SCAN online:* 失败，dashboard 在线数降级为 0: {}", e);
+            return 0;
+        }
+    };
+    if keys.is_empty() {
+        return 0;
+    }
+    let Some(operator_tid) = tenant_scope else {
+        return keys.len() as i64;
+    };
+
+    let values: Vec<Option<String>> =
+        match redis::cmd("MGET").arg(&keys).query_async(&mut redis).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Redis MGET online 失败，dashboard 在线数降级为 0: {}", e);
+                return 0;
+            }
+        };
+
+    let sessions: Vec<OnlineSession> = values
+        .iter()
+        .flatten()
+        .filter_map(|json| match serde_json::from_str::<OnlineSession>(json) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!("解析 online JSON 失败（跳过）: {}", e);
+                None
+            }
+        })
+        .collect();
+
+    // 旧会话兜底：按 user_id 回查 sys_user.tenant_id（否则租户看不到本租户旧会话的在线数）
+    let legacy_user_ids: Vec<i64> = sessions
+        .iter()
+        .filter(|s| s.tenant_id == 0 && s.user_id > 0)
+        .map(|s| s.user_id)
+        .collect();
+    let legacy_tenant_map = if legacy_user_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        state
+            .user_service
+            .tenant_ids_by_user_ids(&legacy_user_ids)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("在线会话租户兜底回填失败（按平台会话处理）: {}", e);
+                std::collections::HashMap::new()
+            })
+    };
+
+    sessions
+        .iter()
+        .filter(|s| {
+            let session_tid = if s.tenant_id != 0 {
+                s.tenant_id
+            } else {
+                legacy_tenant_map.get(&s.user_id).copied().unwrap_or(0)
+            };
+            session_tid == operator_tid
+        })
+        .count() as i64
 }
 
 /// 仪表盘聚合统计响应
@@ -240,6 +335,9 @@ pub struct RecentOperLog {
 /// - activeUsers：启用状态（status='0'）的用户数
 /// - disabledUsers：停用状态（status='1'）的用户数
 /// - createTrend：最近 30 天按天聚合的新增用户数 [{date, count}]
+///
+/// §27.13.2 分层视图：与 `dashboard_stats` 同口径——租户操作者仅统计本租户用户，
+/// 平台操作者全量（`monitor:dashboard:list` 对所有登录用户可用）。
 #[utoipa::path(
     get,
     path = "/dashboard/user-stats",
@@ -251,6 +349,7 @@ pub struct RecentOperLog {
 )]
 pub async fn user_stats(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<UserStatsVo>, AppError> {
     use sys_user::Column as UserCol;
 
@@ -262,47 +361,69 @@ pub async fn user_stats(
     let week_begin = week_ago.and_time(chrono::NaiveTime::MIN);
     let month_begin = month_ago.and_time(chrono::NaiveTime::MIN);
 
+    // 租户维度：None = 平台操作者（不过滤），Some(tid) = 仅本租户
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
+
     // 并发执行：总数 / 周新增 / 启用数 / 停用数 / 月内创建用户列表（用于趋势聚合）
     let (total_users, new_users_this_week, active_users, disabled_users, recent_users) = tokio::join!(
         async {
-            sys_user::Entity::find()
-                .filter(UserCol::DelFlag.ne("2"))
+            let mut query = sys_user::Entity::find().filter(UserCol::DelFlag.ne("2"));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(UserCol::TenantId.eq(tid));
+            }
+            query
                 .count(db)
                 .await
                 .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
                 .unwrap_or(0)
         },
         async {
-            sys_user::Entity::find()
+            let mut query = sys_user::Entity::find()
                 .filter(UserCol::DelFlag.ne("2"))
-                .filter(UserCol::CreateTime.gte(week_begin))
+                .filter(UserCol::CreateTime.gte(week_begin));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(UserCol::TenantId.eq(tid));
+            }
+            query
                 .count(db)
                 .await
                 .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
                 .unwrap_or(0)
         },
         async {
-            sys_user::Entity::find()
+            let mut query = sys_user::Entity::find()
                 .filter(UserCol::DelFlag.ne("2"))
-                .filter(UserCol::Status.eq("0"))
+                .filter(UserCol::Status.eq("0"));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(UserCol::TenantId.eq(tid));
+            }
+            query
                 .count(db)
                 .await
                 .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
                 .unwrap_or(0)
         },
         async {
-            sys_user::Entity::find()
+            let mut query = sys_user::Entity::find()
                 .filter(UserCol::DelFlag.ne("2"))
-                .filter(UserCol::Status.eq("1"))
+                .filter(UserCol::Status.eq("1"));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(UserCol::TenantId.eq(tid));
+            }
+            query
                 .count(db)
                 .await
                 .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
                 .unwrap_or(0)
         },
         async {
-            sys_user::Entity::find()
+            let mut query = sys_user::Entity::find()
                 .filter(UserCol::DelFlag.ne("2"))
-                .filter(UserCol::CreateTime.gte(month_begin))
+                .filter(UserCol::CreateTime.gte(month_begin));
+            if let Some(tid) = tenant_scope {
+                query = query.filter(UserCol::TenantId.eq(tid));
+            }
+            query
                 .order_by_asc(UserCol::CreateTime)
                 .all(db)
                 .await

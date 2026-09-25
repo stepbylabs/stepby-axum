@@ -652,7 +652,8 @@ impl SysMenuService {
         let mut menus: Vec<SysMenuModel> = if roles.is_empty() {
             vec![]
         } else {
-            let is_admin = roles.iter().any(|r| r.role_key == "admin");
+            // 超管判定（台账 P0-2）：以系统标记 + 平台租户归属判定，不依赖可变 role_key
+            let is_admin = roles.iter().any(|r| r.is_platform_super_admin());
 
             if is_admin {
                 // 超管短路：返回所有未删除菜单
@@ -776,7 +777,8 @@ impl SysMenuService {
             }
 
             let role_keys: Vec<String> = roles.iter().map(|r| r.role_key.clone()).collect();
-            let is_admin = role_keys.iter().any(|k| k == "admin");
+            // 超管判定（台账 P0-2）：以系统标记 + 平台租户归属判定，不依赖可变 role_key
+            let is_admin = roles.iter().any(|r| r.is_platform_super_admin());
 
             let permissions = if is_admin {
                 // 超管返回通配权限

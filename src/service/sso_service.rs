@@ -226,9 +226,10 @@ struct AccessBinding {
 /// v5-D3：refresh_token 绑定（不透明令牌，存于 `sso:rt:{sha256(token)}`）。
 /// 与 AccessBinding 同构（scope/身份快照），轮换式使用：每次刷新旧 RT 原子作废、签发新 RT。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RefreshBinding {
+pub(crate) struct RefreshBinding {
     client_id: String,
-    user_id: i64,
+    /// 用户 ID（租户踢线按 legacy 回查 `sys_user.tenant_id` 时需要）
+    pub(crate) user_id: i64,
     username: String,
     #[serde(default)]
     nick_name: String,
@@ -238,8 +239,9 @@ struct RefreshBinding {
     /// 用户认证时刻（继承授权码绑定的 auth_time，id_token 重签保持一致）
     #[serde(default)]
     auth_time: i64,
+    /// 租户 ID（租户踢线按此精确匹配；旧绑定缺省 0 时回退用户归属查询）
     #[serde(default)]
-    tid: i64,
+    pub(crate) tid: i64,
 }
 
 /// authorize 请求参数（由 handler 从 query 解出后传入）
@@ -338,6 +340,10 @@ pub struct TokenResult {
     /// `skip_serializing` 保证不改变 /sso/token 协议响应体）
     #[serde(skip_serializing)]
     pub tenant_id: i64,
+    /// 台账 F-8：授权用户主键（**仅服务端审计使用**，写入 sys_logininfor.user_id 做不可变强关联；
+    /// `skip_serializing` 保证不改变 /sso/token 协议响应体）
+    #[serde(skip_serializing)]
+    pub user_id: i64,
     /// v5-D3：刷新令牌（不透明串；仅 grant_types 含 refresh_token 的客户端签发时出现）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
@@ -1187,6 +1193,8 @@ impl SsoService {
             user_name: binding.username.clone(),
             // v5-N2 Phase 2：登录用户租户（写入登录日志用，不参与响应序列化）
             tenant_id: binding.tid,
+            // 台账 F-8：登录用户主键（写入登录日志做不可变强关联，不参与响应序列化）
+            user_id: binding.user_id,
             refresh_token,
             refresh_expires_in,
         })
@@ -1230,6 +1238,39 @@ impl SsoService {
                 "invalid_grant",
                 crate::tr!("error.sso.rt_invalid"),
             ));
+        }
+
+        // P0-1-c：租户运行时态闸门——RT 虽绑定租户，但停用/超期后存量 RT 不一定已清除
+        // （会话踢线为 best-effort）。此处与鉴权中间件同口径复检（核对刚才即时的踢线结果）；
+        // Redis 异常 **fail-closed**：宁可拒绝刷新，也绝不放行已停用租户的身份续期。
+        // 宽限（Grace）**放行**：只读约束由业务中间件按写方法拦截，刷新端点不自创写拦截。
+        if rt_binding.tid != 0 {
+            let state_key = crate::common::tenant::tenant_state_key(rt_binding.tid);
+            let exp_key = crate::common::tenant::tenant_expire_key(rt_binding.tid);
+            let vals: Vec<Option<String>> = redis::pipe()
+                .cmd("GET")
+                .arg(&state_key)
+                .cmd("GET")
+                .arg(&exp_key)
+                .query_async(redis)
+                .await
+                .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+            let expire_epoch = vals
+                .get(1)
+                .and_then(|v| v.as_deref())
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            let runtime = crate::common::tenant::eval_tenant_runtime_state(
+                vals.first().and_then(|v| v.as_deref()),
+                expire_epoch,
+                chrono::Utc::now().timestamp(),
+            );
+            if runtime == crate::common::tenant::TenantRuntimeState::Disabled {
+                return Err(OidcError::new(
+                    "invalid_grant",
+                    crate::tr!("error.tenant.disabled"),
+                ));
+            }
         }
 
         // 由 RT 绑定还原 CodeBinding（id_token/AT 签发复用同一身份快照）
@@ -1277,6 +1318,8 @@ impl SsoService {
             user_name: new_binding.username.clone(),
             // v5-N2 Phase 2：登录用户租户（写入登录日志用，不参与响应序列化）
             tenant_id: new_binding.tid,
+            // 台账 F-8：登录用户主键（写入登录日志做不可变强关联，不参与响应序列化）
+            user_id: new_binding.user_id,
             refresh_token,
             refresh_expires_in,
         })
@@ -1501,7 +1544,13 @@ impl SsoService {
                     continue;
                 };
                 let pem = crate::utils::crypto::unseal_sensitive_value(pem_enc, &self.enc_key);
-                if let Ok(jwk) = rsa_public_jwk(&pem, &c.client_id) {
+                // D9：kid 优先取登记密钥指纹，为空回退 client_id（存量行为不变）
+                let kid = c
+                    .key_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(c.client_id.as_str());
+                if let Ok(jwk) = rsa_public_jwk(&pem, kid) {
                     keys.push(jwk);
                 }
             }
@@ -1796,6 +1845,9 @@ impl SsoService {
             .await
             .map_err(|e| ServiceError::internal(&format!("RSA keygen 任务失败: {e}")))?
             .map_err(|e| ServiceError::internal(&format!("RSA 密钥生成失败: {e}")))?;
+        // D9：登记密钥指纹（kid）——必须在私钥被信封加密/移出前由明文 PEM 计算
+        let key_id = rsa_key_thumbprint(&rsa_private_pem)
+            .map_err(|e| ServiceError::internal(&format!("RSA thumbprint 计算失败: {e}")))?;
         let rsa_private_stored = if self.enc_key.is_empty() {
             tracing::warn!("CONFIG_ENC_KEY 未配置：rsa_private_key 以明文落库（迁移期 fail-open）");
             rsa_private_pem
@@ -1815,6 +1867,7 @@ impl SsoService {
             id_token_secret: Set(id_token_secret_stored),
             id_token_alg: Set(normalize_id_token_alg(dto.id_token_alg.as_deref())),
             rsa_private_key: Set(Some(rsa_private_stored)),
+            key_id: Set(Some(key_id)),
             subject_type: Set(normalize_subject_type(dto.subject_type.as_deref())),
             sector_identifier_uri: Set(validate_sector_identifier(
                 dto.sector_identifier_uri.as_deref(),
@@ -1887,11 +1940,17 @@ impl SsoService {
         // key NULL 窗口（签发回落 HS256，与 RP 预期的 JWKS 验签不符）。生成后信封
         // 加密落库（同 add_client；CONFIG_ENC_KEY 未配置时明文，迁移期策略）。
         let mut new_rsa_key: Option<String> = None;
+        let mut new_key_id: Option<String> = None;
         if id_token_alg == "RS256" && dto.id_token_alg.is_some() && m.rsa_private_key.is_none() {
             let pem = tokio::task::spawn_blocking(generate_rsa_private_pem)
                 .await
                 .map_err(|e| ServiceError::internal(&format!("RSA keygen 任务失败: {e}")))?
                 .map_err(|e| ServiceError::internal(&format!("RSA 密钥生成失败: {e}")))?;
+            // D9：同步登记新密钥指纹（kid），保证 JWKS 与库内私钥重新对齐
+            new_key_id = Some(
+                rsa_key_thumbprint(&pem)
+                    .map_err(|e| ServiceError::internal(&format!("RSA thumbprint 计算失败: {e}")))?,
+            );
             let sealed = if self.enc_key.is_empty() {
                 tracing::warn!(
                     "CONFIG_ENC_KEY 未配置：rsa_private_key 以明文落库（迁移期 fail-open）"
@@ -1918,6 +1977,9 @@ impl SsoService {
         am.id_token_alg = Set(id_token_alg);
         if let Some(sealed) = new_rsa_key {
             am.rsa_private_key = Set(Some(sealed));
+        }
+        if let Some(kid) = new_key_id {
+            am.key_id = Set(Some(kid));
         }
         am.subject_type = Set(subject_type);
         am.sector_identifier_uri = Set(validate_sector_identifier(
@@ -2469,6 +2531,25 @@ fn rsa_public_jwk(private_pem: &str, kid: &str) -> anyhow::Result<serde_json::Va
     }))
 }
 
+/// D9：计算 RS256 私钥的 JWK Thumbprint（RFC 7638 §3）——规范化 JSON 成员顺序严格为
+/// `e,kty,n`（无空白）→ SHA-256 → base64url 无填充。对同一 PEM 恒定、不同密钥互异，
+/// 作为客户端密钥指纹登记于 `sys_oauth_client.key_id`（供 JWKS `kid` 使用）。
+fn rsa_key_thumbprint(private_pem: &str) -> anyhow::Result<String> {
+    use base64::Engine as _;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    use sha2::{Digest, Sha256};
+    let private = rsa::RsaPrivateKey::from_pkcs8_pem(private_pem)?;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let canon = format!(
+        "{{\"e\":\"{}\",\"kty\":\"RSA\",\"n\":\"{}\"}}",
+        b64(&private.e().to_bytes_be()),
+        b64(&private.n().to_bytes_be())
+    );
+    let digest = Sha256::digest(canon.as_bytes());
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest))
+}
+
 /// PKCE：S256(code_verifier) == code_challenge（base64url 无填充）
 pub fn pkce_verify(code_verifier: &str, code_challenge: &str) -> bool {
     use base64::Engine;
@@ -2920,6 +3001,33 @@ mod tests {
         // 未给出且白名单多值 → 不可猜测，None
         let multi = ["https://a/cb".to_string(), "https://b/cb".to_string()];
         assert_eq!(resolve_redirect_uri(None, &multi), None);
+    }
+
+    /// D9：RFC 7638 §3 JWK Thumbprint——字符集 / 长度 / 同 PEM 恒定 / 异密钥互异。
+    #[test]
+    fn rsa_key_thumbprint_rfc7638_properties() {
+        let pem1 = generate_rsa_private_pem().expect("生成 PEM1 失败");
+        let t1 = rsa_key_thumbprint(&pem1).expect("计算 thumbprint 失败");
+        assert!(
+            t1.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "thumbprint 应仅含 base64url 无填充字符集，实际: {t1}"
+        );
+        // SHA-256(32B) → base64url = 43 字符（容 43±1）
+        assert!(
+            (43usize).abs_diff(t1.len()) <= 1,
+            "thumbprint 长度应 43±1，实际 {}",
+            t1.len()
+        );
+        // 同 PEM 恒定（确定性）
+        assert_eq!(t1, rsa_key_thumbprint(&pem1).unwrap(), "同 PEM 应恒定");
+        // 两次独立生成互不相等
+        let pem2 = generate_rsa_private_pem().expect("生成 PEM2 失败");
+        assert_ne!(
+            t1,
+            rsa_key_thumbprint(&pem2).unwrap(),
+            "不同密钥 thumbprint 应互异"
+        );
     }
 
     /// 校验 error.sso.* 全部键在 zh-CN（默认）与 en-US 双语均存在真实翻译

@@ -39,6 +39,12 @@ pub struct Model {
     pub menu_check_strictly: Option<bool>,
     pub dept_check_strictly: Option<bool>,
     pub status: String,
+    /// 系统角色标记（台账 P0-2：超管判定与可变 `role_key` 解耦）。
+    ///
+    /// 平台超级管理员 = `is_system && tenant_id == 0`（见 [`Model::is_platform_super_admin`]）。
+    /// 仅由种子/迁移置位；业务侧新建角色一律为 `false`，且不可通过 DTO 修改。
+    #[sea_orm(default_value = false)]
+    pub is_system: bool,
     pub del_flag: Option<String>,
     pub create_by: Option<String>,
     #[serde(
@@ -55,6 +61,16 @@ pub struct Model {
     #[ts(as = "Option<String>")]
     pub update_time: Option<NaiveDateTime>,
     pub remark: Option<String>,
+}
+
+impl Model {
+    /// 是否平台超级管理员角色（台账 P0-2 定案口径）：
+    /// 必须同时满足"系统标记"与"平台租户归属"两个条件——
+    /// 租户侧即使自建 `role_key = 'admin'` 的角色（租户内唯一，见
+    /// `uk_sys_role_tenant_key`），也因 `tenant_id != 0` 无法获得超管短路。
+    pub fn is_platform_super_admin(&self) -> bool {
+        self.is_system && self.tenant_id == 0
+    }
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

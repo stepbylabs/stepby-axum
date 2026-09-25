@@ -416,6 +416,7 @@ mod tests {
     ) -> crate::entity::sys_role::Model {
         crate::entity::sys_role::Model {
             tenant_id: 0,
+            is_system: false,
             role_id: id,
             role_name: format!("role-{id}"),
             role_key: format!("key-{id}"),

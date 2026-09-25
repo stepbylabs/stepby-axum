@@ -19,9 +19,13 @@ use axum::Router;
 use axum::routing::{delete, get};
 
 use crate::handler::monitor_cache_handler;
+use crate::middleware::platform_guard::platform_only_guard;
 use crate::state::AppState;
 
 /// 缓存监控路由
+///
+/// P1-1：整组 `/monitor/cache/*` 为平台专属能力，挂 [`platform_only_guard`] 请求层守卫，
+/// 租户操作者（含租户管理员）一律 403（不依赖 perms，作为权限层的第二道防线）。
 pub fn cache_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/monitor/cache", get(monitor_cache_handler::get_cache))
@@ -53,4 +57,5 @@ pub fn cache_routes() -> Router<Arc<AppState>> {
             "/monitor/cache/clearCacheKey/{cacheKey}",
             delete(monitor_cache_handler::clear_cache_key),
         )
+        .route_layer(axum::middleware::from_fn(platform_only_guard))
 }

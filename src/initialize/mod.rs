@@ -178,6 +178,19 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化存量上传路径回填失败: {}", e))?;
 
+        // 3.5j 台账 P0-2 存量库兜底：sys_role.is_system 列 + 平台 admin 角色标记。
+        // 缺此兜底时：实体 SELECT 带 is_system 列 → 角色/菜单/权限链路全站 500；
+        // 超管判定退化为"无一行满足" → 平台管理员失去全部菜单与权限。
+        ensure_role_is_system_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_role.is_system 兜底失败: {}", e))?;
+
+        // 3.5k 台账 F-8 存量库兜底：sys_logininfor.user_id 列 + 索引 + 存量回填。
+        // 缺此兜底时：实体 SELECT 带 user_id 列 → 登录日志列表查询 500。
+        ensure_logininfor_user_id_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_logininfor.user_id 兜底失败: {}", e))?;
+
         // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
         // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
         // 与迁移 m20260923_000001_sso_v4_hardening 等价（启动不跑 Migrator::up 的存量库兜底）。
@@ -216,6 +229,12 @@ impl AppInitializer {
         ensure_sso_rs256_keys(&db, &settings.config_enc_key)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO RSA 密钥失败: {}", e))?;
+
+        // 4.5b 台账 D9：sys_oauth_client.key_id 密钥版本列（存量库兜底，等价迁移
+        //     m20260926_000004）。历史密钥留 NULL = 未登记版本，仅作轮换预备，不做轮换实现。
+        ensure_oauth_client_key_id_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 SSO key_id 列失败: {}", e))?;
 
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
@@ -1391,13 +1410,14 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
     Ok(())
 }
 
-/// 承载租户归属的表清单（Phase 3 remap 改写范围）：
+/// 承载租户归属的表清单（Phase 3 remap 改写范围；同时被
+/// `service::sys_backup_service::export_tenant_package` 复用为「租户数据包」导出范围）：
 /// = Phase 2 `ensure_multitenant_module::TABLES` 的 27 张 + `sys_user`（列由
 /// m20260924_000005 / `ensure_user_tenant_id_column` 补）+ 后加却带 tenant_id
 /// 的 5 张（oauth_client / flow_task / flow_log / scim_group / flow_demo_doc）。
 /// **两处清单须同步维护**（R4 门禁解析的是 ensure_multitenant_module 内的字面量，
 /// 故此处必须独立成表；实际改写前逐个探测列存在性，缺列则跳过）。
-const TENANT_CARRYING_TABLES: &[&str] = &[
+pub(crate) const TENANT_CARRYING_TABLES: &[&str] = &[
     "sys_dept",
     "sys_user",
     "sys_role",
@@ -2011,7 +2031,8 @@ async fn ensure_tenant_unique_scope(db: &DatabaseConnection) -> anyhow::Result<(
 /// 无迁移孪生：纯数据治理修复（依赖 sys_menu 实时 perms 集合与租户角色现状），非 schema 变更。
 async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::Result<()> {
     let self_service_perms = crate::service::sys_tenant_service::TENANT_SELF_SERVICE_PERMS;
-    let excluded_prefix = crate::service::sys_tenant_service::TENANT_ROLE_EXCLUDED_PERM_PREFIX;
+    // 台账 F-4/F-5（原则 B）：平台专属能力 perms 前缀统一清单
+    let platform_only_prefixes = crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES;
     const LIST_PERMS: [&str; 2] = ["system:config:list", "system:dict:list"];
 
     if !sso_table_exists(db, "sys_role_menu").await?
@@ -2029,24 +2050,33 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
         }
     };
 
-    // ---- ① 剔除平台专属菜单（域名管理）----
+    // ---- ① 剔除平台专属菜单（域名管理 / 代码生成 / 缓存监控）----
+    // 目标角色：平台普通角色（role_id=2，只读白名单曾保底授予）+ 存量租户自建角色
+    // （tenant_id <> 0，初始化时复制了平台普通角色菜单 ⇒ 残留假入口）。
+    let like_clause = (1..=platform_only_prefixes.len())
+        .map(ph)
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let like_values: Vec<Value> = platform_only_prefixes
+        .iter()
+        .map(|p| format!("{p}%").into())
+        .collect();
     let removed = db
         .execute(Statement::from_sql_and_values(
             backend,
             format!(
                 "DELETE FROM sys_role_menu WHERE menu_id IN (\
-                   SELECT menu_id FROM sys_menu WHERE perms LIKE {}) \
-                 AND role_id IN (\
-                   SELECT role_id FROM sys_role WHERE tenant_id <> 0 AND del_flag = '0')",
-                ph(1)
+                   SELECT menu_id FROM sys_menu WHERE {like_clause}) \
+                 AND (role_id = 2 OR role_id IN (\
+                   SELECT role_id FROM sys_role WHERE tenant_id <> 0 AND del_flag = '0'))"
             ),
-            [format!("{excluded_prefix}%").into()],
+            like_values,
         ))
         .await?;
     if removed.rows_affected() > 0 {
         tracing::info!(
             removed = removed.rows_affected(),
-            "Phase 3.5h 已剔除租户角色中的平台专属菜单（域名管理）授权"
+            "Phase 3.5h 已剔除平台专属菜单（域名管理/代码生成/缓存监控）授权"
         );
     }
 
@@ -2464,7 +2494,7 @@ async fn ensure_tenant_index(
 }
 
 /// 幂等检查表是否存在（三方言）
-async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> anyhow::Result<bool> {
+pub(crate) async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> anyhow::Result<bool> {
     let backend = db.get_database_backend();
     let sql = match backend {
         DatabaseBackend::Sqlite => {
@@ -2484,7 +2514,7 @@ async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> anyhow::Resul
 }
 
 /// 幂等检查列是否存在（三方言）
-async fn sso_has_column(
+pub(crate) async fn sso_has_column(
     db: &DatabaseConnection,
     table: &str,
     column: &str,
@@ -3197,6 +3227,113 @@ async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// 台账 P0-2（存量库兜底，等价迁移 m20260926_000001）：`sys_role.is_system` 列 +
+/// 平台 admin 角色标记。
+///
+/// 超管判定已改为 `is_system && tenant_id == 0`（`entity/sys_role.rs`），实体 SELECT
+/// 会带 `is_system` 列 ⇒ 存量库缺列时角色/菜单/权限接口全站 500。
+/// 回填为**不变量**（每次启动收敛）：平台租户（tid=0）的 `admin` 角色必须为系统角色。
+async fn ensure_role_is_system_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_role").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    // boolean 字面量按方言书写：PG 不接受 0/1 作为 boolean 默认值
+    let (false_lit, true_lit) = if backend == DatabaseBackend::Postgres {
+        ("FALSE", "TRUE")
+    } else {
+        ("0", "1")
+    };
+    if !sso_has_column(db, "sys_role", "is_system").await? {
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "ALTER TABLE sys_role ADD COLUMN is_system BOOLEAN NOT NULL DEFAULT {false_lit}"
+            ),
+        ))
+        .await?;
+        tracing::info!("sys_role.is_system 列已补建（台账 P0-2 存量库兜底）");
+    }
+    let updated = db
+        .execute(Statement::from_string(
+            backend,
+            format!(
+                "UPDATE sys_role SET is_system = {true_lit} \
+                 WHERE tenant_id = 0 AND role_key = 'admin' AND del_flag = '0'"
+            ),
+        ))
+        .await?;
+    if updated.rows_affected() > 0 {
+        tracing::info!(
+            rows = updated.rows_affected(),
+            "平台 admin 角色已标记为系统角色（is_system=1）"
+        );
+    }
+    Ok(())
+}
+
+/// 台账 F-8（存量库兜底，等价迁移 m20260926_000003）：`sys_logininfor.user_id` 列 +
+/// 索引 + 按 user_name 精确回填（未匹配置 0；user_name 全局唯一 ⇒ 回填无歧义）。
+///
+/// 列定义 `BIGINT NOT NULL DEFAULT 0`：0 为"无对应用户"的唯一缺省表示（与 `tenant_id` 同款）。
+/// 回填仅在**列刚补建**时执行一次（迁移库已回填；避免每次启动全表扫描）。
+async fn ensure_logininfor_user_id_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_logininfor").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    if sso_has_column(db, "sys_logininfor", "user_id").await? {
+        return Ok(());
+    }
+    db.execute(Statement::from_string(
+        backend,
+        "ALTER TABLE sys_logininfor ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0".to_string(),
+    ))
+    .await?;
+    if let Err(e) = db
+        .execute(Statement::from_string(
+            backend,
+            "CREATE INDEX idx_sys_logininfor_user ON sys_logininfor (user_id)".to_string(),
+        ))
+        .await
+    {
+        // 索引已存在（MySQL 1061 / PG 42P07 / SQLite already exists）不影响后续
+        tracing::warn!("sys_logininfor user_id 索引创建跳过: {}", e);
+    }
+    let updated = db
+        .execute(Statement::from_string(
+            backend,
+            "UPDATE sys_logininfor SET user_id = COALESCE(\
+               (SELECT MIN(u.user_id) FROM sys_user u WHERE u.user_name = sys_logininfor.user_name)\
+               , 0) WHERE user_name IS NOT NULL"
+                .to_string(),
+        ))
+        .await?;
+    tracing::info!(
+        rows = updated.rows_affected(),
+        "sys_logininfor.user_id 列已补建并完成存量回填（台账 F-8 存量库兜底）"
+    );
+    Ok(())
+}
+
+/// 台账 D9（存量库兜底，等价迁移 m20260926_000004）：`sys_oauth_client.key_id`
+/// 密钥版本列（RS256 密钥轮换预备；历史密钥留 NULL = 未登记版本）。
+async fn ensure_oauth_client_key_id_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_oauth_client").await? {
+        return Ok(());
+    }
+    if sso_has_column(db, "sys_oauth_client", "key_id").await? {
+        return Ok(());
+    }
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "ALTER TABLE sys_oauth_client ADD COLUMN key_id VARCHAR(64) NULL".to_string(),
+    ))
+    .await?;
+    tracing::info!("sys_oauth_client.key_id 列已补建（台账 D9 存量库兜底）");
     Ok(())
 }
 

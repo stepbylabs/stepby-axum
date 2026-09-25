@@ -109,6 +109,28 @@ impl SysMenuRepository {
         Model::find_by_statement(stmt).all(db).await
     }
 
+    /// 按菜单 ID 集合查询 (menu_id, perms)，仅取两列（§27.13.4 授予前覆盖校验用）
+    ///
+    /// perms 为 None 或空串表示目录 / 无权限点的菜单，调用方需自行跳过。
+    /// 返回顺序不保证；不存在的 ID 自然缺省（由套餐白名单校验负责其合法性）。
+    pub async fn find_perms_by_ids(
+        &self,
+        menu_ids: &[i64],
+    ) -> Result<Vec<(i64, Option<String>)>, DbErr> {
+        if menu_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        SysMenu::find()
+            .select_only()
+            .column(Column::MenuId)
+            .column(Column::Perms)
+            .filter(Column::MenuId.is_in(menu_ids.to_vec()))
+            .filter(Column::DelFlag.eq("0"))
+            .into_tuple::<(i64, Option<String>)>()
+            .all(self.base.db())
+            .await
+    }
+
     /// 软删除菜单
     pub async fn soft_delete(&self, menu_id: i64) -> Result<UpdateResult, DbErr> {
         SysMenu::update_many()

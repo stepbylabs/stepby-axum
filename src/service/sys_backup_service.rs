@@ -13,7 +13,9 @@
 //! - 恢复操作前校验文件路径穿越，必须位于备份目录内
 //! - 备份目录通过路径规范化（canonicalize）二次校验
 
-use sea_orm::{DatabaseConnection, Set};
+use sea_orm::{
+    ConnectionTrait, DatabaseBackend, DatabaseConnection, FromQueryResult, Set, Statement,
+};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,6 +37,13 @@ const BACKUP_TIMEOUT_SECS: u64 = 300;
 
 /// 备份文件存储子目录（相对工作目录）
 const BACKUP_DIR: &str = "backups";
+
+/// 「租户数据包」附加导出表（除 `initialize::TENANT_CARRYING_TABLES` 之外）：
+/// 三张租户表族本体均以 `tenant_id` 为归属列，需随包导出（否则包内缺租户身份与域名/菜单）
+const TENANT_PACKAGE_EXTRA_TABLES: &[&str] = &["sys_tenant", "sys_tenant_domain", "sys_tenant_menu"];
+
+/// 备份日志的 `backup_type`：租户数据包导出
+pub const BACKUP_TYPE_TENANT_EXPORT: &str = "tenant_export";
 
 // ==================== DTO ====================
 
@@ -291,6 +300,141 @@ impl SysBackupService {
         })
     }
 
+    /// 导出「租户数据包」（台账 F-2 定案：整库备份保留 + 新增租户数据包导出；**不做**租户级恢复）
+    ///
+    /// 语义：把该租户在全部「承载租户归属」表（`initialize::TENANT_CARRYING_TABLES`，33 张，
+    /// 逐表探测表/列存在性后按 `tenant_id = ?` 精确收窄）+ 租户表族本体
+    /// （`sys_tenant` / `sys_tenant_domain` / `sys_tenant_menu`）的行导出为**单个 JSON 文件**
+    /// 落盘到备份目录，并登记一条 `backup_type = "tenant_export"` 的备份日志
+    /// ⇒ 直接复用既有备份列表 / 下载 / 删除链路（无需新增存储与清理逻辑）。
+    ///
+    /// 安全：
+    /// - 本方法只服务平台专属能力（路由 `platform_only_guard` + `system:backup:*` 不在租户
+    ///   可授集合），租户操作者一律 403；
+    /// - 导出范围按 `tenant_id = ?` 精确过滤，不含其它租户数据；`tenant_id = 0`（平台租户）
+    ///   同样允许导出（平台代管数据的自留包）；
+    /// - 只导出不导入：租户级恢复需处理跨租户外键/依赖顺序，成本高收益低，明确不做。
+    pub async fn export_tenant_package(
+        &self,
+        tenant_id: i64,
+        operator: &str,
+    ) -> Result<BackupCreateVo, ServiceError> {
+        let db = self.backup_repo.base().db();
+        let backend = db.get_database_backend();
+        // PG 用 $n 占位符，SQLite/MySQL 用 ?
+        let ph = |i: usize| -> String {
+            if backend == DatabaseBackend::Postgres {
+                format!("${i}")
+            } else {
+                "?".to_string()
+            }
+        };
+
+        // 1. 租户存在性校验（不过滤 del_flag：回收站租户同样允许导出留档）
+        let tenant_row = db
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "SELECT tenant_code, tenant_name FROM sys_tenant WHERE tenant_id = {}",
+                    ph(1)
+                ),
+                [tenant_id.into()],
+            ))
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.backup.tenant_not_found")))?;
+        let tenant_code: String = tenant_row.try_get("", "tenant_code").unwrap_or_default();
+        let tenant_name: String = tenant_row.try_get("", "tenant_name").unwrap_or_default();
+
+        // 2. 逐表导出（表 / 列缺失则跳过并登记，兼容历史库）
+        let mut tables = serde_json::Map::new();
+        let mut table_counts = serde_json::Map::new();
+        let mut skipped_tables: Vec<String> = Vec::new();
+        for table in crate::initialize::TENANT_CARRYING_TABLES
+            .iter()
+            .chain(TENANT_PACKAGE_EXTRA_TABLES.iter())
+        {
+            if !crate::initialize::sso_table_exists(db, table).await? {
+                skipped_tables.push((*table).to_string());
+                continue;
+            }
+            if !crate::initialize::sso_has_column(db, table, "tenant_id").await? {
+                skipped_tables.push((*table).to_string());
+                continue;
+            }
+            let rows = db
+                .query_all(Statement::from_sql_and_values(
+                    backend,
+                    format!("SELECT * FROM {} WHERE tenant_id = {}", table, ph(1)),
+                    [tenant_id.into()],
+                ))
+                .await?;
+            // 行 → JSON：sea-orm 的 `JsonValue`（= serde_json::Value）已实现 FromQueryResult，
+            // 按各表实际列类型解码（三方言 sqlx 后端分支齐备），无需逐表维护实体映射。
+            let mut json_rows: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+            for row in &rows {
+                json_rows.push(serde_json::Value::from_query_result(row, "")?);
+            }
+            table_counts.insert(
+                (*table).to_string(),
+                serde_json::Value::from(json_rows.len()),
+            );
+            tables.insert((*table).to_string(), serde_json::Value::Array(json_rows));
+        }
+
+        // 3. 组装包体（含包格式/版本与租户身份，便于离线识别与后续版本演进）
+        let package = serde_json::json!({
+            "format": "yebot-tenant-package",
+            "version": 1,
+            "exportedAt": crate::common::datetime::now_naive(),
+            "tenantId": tenant_id,
+            "tenantCode": tenant_code,
+            "tenantName": tenant_name,
+            "tableCounts": table_counts,
+            "skippedTables": skipped_tables,
+            "tables": tables,
+        });
+
+        // 4. 落盘 + 登记备份日志
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+        let uuid_str = uuid::Uuid::new_v4().simple().to_string();
+        let file_name = format!("tenant_{}_{}_{}.json", tenant_id, ts, uuid_str);
+        let file_path = validate_backup_path(&file_name).await?;
+        let bytes = serde_json::to_vec_pretty(&package).map_err(|e| {
+            tracing::error!("租户数据包序列化失败 (tenant_id={}): {}", tenant_id, e);
+            ServiceError::internal(&crate::tr!("error.backup.tenant_export_serialize_failed"))
+        })?;
+        let file_size = bytes.len() as i64;
+        let file_path_for_write = file_path.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(&file_path_for_write, &bytes))
+            .await
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.backup.write_task_join_failed"))
+            })?
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.write_failed")))?;
+
+        let file_path_str = file_path.to_string_lossy().to_string();
+        let am = SysBackupLogActiveModel {
+            tenant_id: Set(tenant_id),
+            file_name: Set(file_name.clone()),
+            file_path: Set(file_path_str.clone()),
+            file_size: Set(file_size),
+            backup_type: Set(BACKUP_TYPE_TENANT_EXPORT.to_string()),
+            status: Set("success".to_string()),
+            error_msg: Set(None),
+            create_by: Set(Some(operator.to_string())),
+            create_time: Set(Some(crate::common::datetime::now_naive())),
+            ..Default::default()
+        };
+        let log_model = self.backup_repo.insert(am).await?;
+
+        Ok(BackupCreateVo {
+            backup_id: log_model.backup_id,
+            file_name,
+            file_path: file_path_str,
+            file_size,
+        })
+    }
+
     /// 执行备份子进程
     async fn run_backup_process(
         &self,
@@ -427,6 +571,14 @@ impl SysBackupService {
         if log.status != "success" {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.backup.restore_status_invalid"
+            )));
+        }
+
+        // 仅整库备份（manual/auto）可恢复：租户数据包（tenant_export）是 JSON 导出件，
+        // 不承载整库结构，且 F-2 已定案「不做租户级恢复」（跨租户外键/依赖顺序成本高收益低）
+        if log.backup_type == BACKUP_TYPE_TENANT_EXPORT {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.backup.tenant_export_restore_unsupported"
             )));
         }
 
@@ -694,10 +846,13 @@ impl SysBackupService {
         // 批量查询所有备份记录（避免循环内 N+1 查询）
         let logs = self.backup_repo.find_by_ids(&ids).await?;
 
-        // 收集需要删除的原始文件路径（仅 manual/auto 类型，restore 类型不删文件）
+        // 收集需要删除的原始文件路径（manual/auto/tenant_export 有落盘文件，
+        // restore 类型只是恢复记录、无自有文件，不删）
         let mut raw_paths: Vec<PathBuf> = Vec::new();
         for log in &logs {
-            if (log.backup_type == "manual" || log.backup_type == "auto")
+            if (log.backup_type == "manual"
+                || log.backup_type == "auto"
+                || log.backup_type == BACKUP_TYPE_TENANT_EXPORT)
                 && !log.file_path.is_empty()
             {
                 raw_paths.push(PathBuf::from(&log.file_path));

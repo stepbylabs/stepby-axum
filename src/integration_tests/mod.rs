@@ -17,12 +17,14 @@
 
 mod auth;
 mod common_handler;
+mod data_scope_tenant;
 mod file_common;
 mod flow;
 mod ip_location;
 mod menu_perm_contract;
 mod monitor;
 mod monitor_extra;
+mod platform_guard;
 mod response_cache;
 mod scim;
 mod scim_groups;
@@ -50,6 +52,7 @@ mod sys_user;
 mod sys_user_extra;
 mod sys_user_pref;
 mod sys_web_hook;
+mod tenant_index_plan;
 mod tenant_scope;
 mod tool_gen;
 mod totp;

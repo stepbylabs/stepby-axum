@@ -819,16 +819,18 @@ async fn test_sso_v4_opaque_token_isolation_and_claims() {
     );
     assert_eq!(ui["email_verified"], serde_json::json!(false));
 
-    // ⑥ v5-D2：JWKS 端点聚合该客户端的 RS256 公钥（kid=client_id），私钥不出库
+    // ⑥ v5-D2/D9：JWKS 端点聚合该客户端的 RS256 公钥（kid=密钥指纹），私钥不出库
     let (jw_status, _, jw_body) = raw_get(&ctx.app, ctx.peer_ip, "/sso/jwks", &[]).await;
     assert_eq!(jw_status, StatusCode::OK, "jwks 应 200");
     let jw = json_of(&jw_body);
-    let jwk = jw["keys"]
-        .as_array()
-        .expect("keys 数组")
-        .iter()
-        .find(|k| k["kid"].as_str() == Some(cid.as_str()))
-        .unwrap_or_else(|| panic!("jwks 应含该客户端公钥，实际: {jw}"));
+    let keys = jw["keys"].as_array().expect("keys 数组");
+    assert_eq!(keys.len(), 1, "本隔离库仅一个 RS256 客户端，实际: {jw}");
+    let jwk = &keys[0];
+    // D9：kid 取登记密钥指纹（RFC 7638 thumbprint，base64url 无填充 43 字符），
+    // 不再等于 client_id（为空时才回退 client_id）
+    let kid = jwk["kid"].as_str().unwrap_or_default();
+    assert_eq!(kid.len(), 43, "kid 应为 RFC 7638 thumbprint，实际: {kid}");
+    assert_ne!(kid, cid.as_str(), "kid 应为密钥指纹而非 client_id");
     assert_eq!(jwk["kty"], "RSA");
     assert_eq!(jwk["alg"], "RS256");
     assert!(jwk["n"].as_str().is_some_and(|s| !s.is_empty()));
@@ -1608,4 +1610,137 @@ async fn test_sso_v5_force_logout_revokes_sso_at() {
         .query_async(&mut redis)
         .await
         .unwrap_or(0);
+}
+
+/// P0-1：租户停用 → 会话踢线**同步**吊销 SSO refresh_token（`sso:rt:*`）与 PAT。
+///
+/// 复用既有隔离 fixture（`sso_ctx`）：直插 Redis RT 绑定与 `sys_pat` 行后调用
+/// `SysTenantService::revoke_tenant_sessions`，验证：
+/// ① 权威 tid 命中的 RT 被删；② 旧绑定（tid=0）按 `user_id` 回查归属后命中；
+/// ③ 异租户 RT 不受影响；④ 本租户 PAT 置 '1'、异租户 PAT 保持 '0'。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tenant_disabled_revokes_rt_and_pat() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let ctx = sso_ctx().await;
+    let mut redis = ctx.redis();
+    const TID: i64 = 9001;
+    const OTHER_TID: i64 = 9002;
+
+    // ① 将种子用户 1 归属到 TID，使旧绑定（tid=0）按 user_id 回查命中
+    ctx.state
+        .db
+        .execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            format!("UPDATE sys_user SET tenant_id = {TID} WHERE user_id = 1"),
+        ))
+        .await
+        .expect("更新用户归属失败");
+
+    // ② 直插 RT 绑定（权威结构 RefreshBinding）：命中 / 旧绑定命中 / 异租户存活 / 旧绑定异用户存活
+    let rt_json = |tid: i64, uid: i64| {
+        serde_json::json!({
+            "client_id": "app_it_tenant",
+            "user_id": uid,
+            "username": "u",
+            "scope": ["openid"],
+            "tid": tid,
+        })
+        .to_string()
+    };
+    let seeds: [(&str, String); 4] = [
+        ("it-rt-hit", rt_json(TID, 1)),
+        ("it-rt-legacy-hit", rt_json(0, 1)),
+        ("it-rt-other", rt_json(OTHER_TID, 1)),
+        ("it-rt-legacy-other", rt_json(0, 2)),
+    ];
+    let mut hashes = Vec::new();
+    for (name, json) in &seeds {
+        let h = crate::utils::crypto::token_hash(name);
+        let _: () = redis::cmd("SETEX")
+            .arg(format!("sso:rt:{h}"))
+            .arg(3600i64)
+            .arg(json.as_str())
+            .query_async(&mut redis)
+            .await
+            .expect("写 RT 绑定失败");
+        hashes.push(h);
+    }
+
+    // ③ 直插两条 PAT：本租户（应被吊销）+ 异租户（应存活）
+    let pat_sql = |pat_id: &str, tid: i64| {
+        format!(
+            "INSERT INTO sys_pat (tenant_id, pat_id, user_id, name, token_hash, token_prefix, \
+             scopes, status, create_by, create_time, update_time) \
+             VALUES ({tid}, '{pat_id}', 1, 'it_pat', '{hash}', 'ybt_it', '[\"openid\"]', '0', \
+             'admin', datetime('now'), datetime('now'))",
+            hash = crate::utils::crypto::token_hash(pat_id),
+        )
+    };
+    for (pat_id, tid) in [("it-pat-hit", TID), ("it-pat-other", OTHER_TID)] {
+        ctx.state
+            .db
+            .execute(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                pat_sql(pat_id, tid),
+            ))
+            .await
+            .expect("插入 PAT 失败");
+    }
+
+    // ④ 停用租户 → 会话踢线（含 RT + PAT）；admin 在线会话的 legacy 归属亦命中
+    let revoked = ctx.state.tenant_service.revoke_tenant_sessions(TID).await;
+    assert!(
+        revoked >= 1,
+        "应至少吊销 admin 的一个在线会话，实际 {revoked}"
+    );
+
+    macro_rules! get_rt {
+        ($h:expr) => {
+            redis::cmd("GET")
+                .arg(format!("sso:rt:{}", $h))
+                .query_async::<Option<String>>(&mut redis)
+                .await
+                .expect("GET sso:rt 失败")
+        };
+    }
+    assert!(
+        get_rt!(&hashes[0]).is_none(),
+        "权威 tid 命中的 RT 应被吊销"
+    );
+    assert!(
+        get_rt!(&hashes[1]).is_none(),
+        "旧绑定按用户归属回查命中后应被吊销"
+    );
+    assert!(get_rt!(&hashes[2]).is_some(), "异租户 RT 不应被误杀");
+    assert!(
+        get_rt!(&hashes[3]).is_some(),
+        "异租户用户的旧绑定不应被误杀"
+    );
+
+    macro_rules! pat_status {
+        ($pat_id:expr) => {{
+            let row = ctx
+                .state
+                .db
+                .query_one(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    format!("SELECT status FROM sys_pat WHERE pat_id = '{}'", $pat_id),
+                ))
+                .await
+                .expect("查询 PAT 失败")
+                .expect("PAT 行应存在");
+            let s: String = row.try_get("", "status").expect("读取 pat.status 失败");
+            s
+        }};
+    }
+    assert_eq!(pat_status!("it-pat-hit"), "1", "本租户 PAT 应被即时吊销");
+    assert_eq!(pat_status!("it-pat-other"), "0", "异租户 PAT 不应被误吊销");
+
+    // 清理本测试遗留的 RT 绑定（隔离 DB 内不影响其它断言）
+    let mut del = redis::cmd("DEL");
+    for h in &hashes {
+        del.arg(format!("sso:rt:{h}"));
+    }
+    let _: i64 = del.query_async(&mut redis).await.unwrap_or(0);
 }

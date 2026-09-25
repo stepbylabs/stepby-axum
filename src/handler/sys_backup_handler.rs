@@ -81,14 +81,69 @@ pub async fn create(
     operator: Operator,
 ) -> Result<AjaxResult<BackupCreateVo>, AppError> {
     // P1 修复：手动备份限流（60s 最小间隔），防反复触发耗尽磁盘空间
-    let lock_key = format!("backup:create:{}", operator.user_id());
+    acquire_rate_lock(&state, &format!("backup:create:{}", operator.user_id()), 60).await?;
+
+    let vo = state
+        .backup_service
+        .create_backup(operator.username())
+        .await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// POST /system/backup/tenant-export/{tenantId}
+/// 导出指定租户的数据包（JSON，落盘后登记为一条 tenant_export 备份日志）
+///
+/// 台账 F-2 定案：整库备份保留 + 新增「租户数据包导出」，不做租户级恢复。
+/// 导出后可在备份列表中下载 / 删除（复用既有链路与清理逻辑）。
+/// 平台专属：整组 `/system/backup/*` 挂 `platform_only_guard`，租户操作者一律 403。
+#[utoipa::path(
+    post,
+    path = "/system/backup/tenant-export/{tenantId}",
+    params(
+        ("tenantId" = i64, Path, description = "租户 ID")
+    ),
+    responses(
+        (status = 200, description = "导出成功", body = AjaxResult<BackupCreateVo>),
+        (status = 400, description = "操作过于频繁"),
+        (status = 404, description = "租户不存在"),
+        (status = 500, description = "导出失败"),
+    ),
+    tag = "system-backup"
+)]
+pub async fn export_tenant(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(tenant_id): Path<i64>,
+) -> Result<AjaxResult<BackupCreateVo>, AppError> {
+    // 与手动备份同款限流（60s 最小间隔），防反复导出耗尽磁盘空间
+    acquire_rate_lock(
+        &state,
+        &format!("backup:tenant-export:{}", operator.user_id()),
+        60,
+    )
+    .await?;
+
+    let vo = state
+        .backup_service
+        .export_tenant_package(tenant_id, operator.username())
+        .await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// 获取 Redis 限流锁（SET NX EX）；未获取到 → 400「操作过于频繁」，
+/// Redis 异常 → fail-closed 503（备份类接口不可在无锁保护下执行）
+async fn acquire_rate_lock(
+    state: &Arc<AppState>,
+    key: &str,
+    ttl_secs: i64,
+) -> Result<(), AppError> {
     let mut conn = state.redis.clone();
     let acquired: bool = redis::cmd("SET")
-        .arg(&lock_key)
+        .arg(key)
         .arg("1")
         .arg("NX")
         .arg("EX")
-        .arg(60i64)
+        .arg(ttl_secs)
         .query_async(&mut conn)
         .await
         .map_err(|e| {
@@ -100,12 +155,7 @@ pub async fn create(
             "error.backup.too_frequent"
         )));
     }
-
-    let vo = state
-        .backup_service
-        .create_backup(operator.username())
-        .await?;
-    Ok(AjaxResult::success(vo))
+    Ok(())
 }
 
 /// POST /system/backup/restore/{backupId}

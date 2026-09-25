@@ -572,16 +572,21 @@ impl SysOauthService {
     /// 生成授权 URL（state 写入 Redis，回调时一次性校验）
     ///
     /// redirect_uri 解析优先级：配置项 > 请求参数 > 请求 Host 动态生成（https://{host}/auth/oauth/callback）
+    ///
+    /// `tenant_tid`：请求 host 解析出的租户（`HostTenant`，台账 P1-2）。该值随 state
+    /// 一并写入 Redis，回调时据此还原可见范围，使租户自建 provider 可完成整条匿名授权链路
+    /// （列表可见 → 生成授权 URL → 回调换令牌），且回调侧不依赖二次 host 解析。
     pub async fn begin_oauth(
         &self,
         provider_code: &str,
         request_host: &str,
         base_scheme: &str,
+        tenant_tid: Option<i64>,
         redis: &mut ConnectionManager,
     ) -> Result<EnabledProviderVo, ServiceError> {
         let provider = self
             .provider_repo
-            .find_by_code(provider_code)
+            .find_by_code(provider_code, tenant_tid)
             .await?
             .ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.oauth.provider_not_found"))
@@ -603,6 +608,9 @@ impl SysOauthService {
         let state_key = format!("oauth:state:{}", state);
         let state_val = serde_json::json!({
             "provider_code": provider.provider_code,
+            // P1-2：记录 host 归属租户，回调侧据此复现同一可见范围（state 为服务端随机
+            // 且一次性，客户端不可伪造该字段）
+            "tenant_tid": tenant_tid,
         })
         .to_string();
         redis::cmd("SET")
@@ -697,14 +705,19 @@ impl SysOauthService {
 
         // 校验 state（一次性）：从 Redis 读取并删除
         let state_key = format!("oauth:state:{}", state);
-        let provider_code: String =
+        // (provider_code, tenant_tid)：tenant_tid 由 begin_oauth 写入，用于复现同一
+        // 可见范围（P1-2；缺失字段时为 None，与改造前"仅平台级"行为一致）
+        let (provider_code, state_tid): (String, Option<i64>) =
             match self.read_and_delete_redis_string(&state_key, redis).await? {
                 Some(json_str) => serde_json::from_str::<serde_json::Value>(&json_str)
                     .ok()
                     .and_then(|v| {
-                        v.get("provider_code")
+                        let code = v
+                            .get("provider_code")
                             .and_then(|p| p.as_str())
-                            .map(String::from)
+                            .map(String::from)?;
+                        let tid = v.get("tenant_tid").and_then(|t| t.as_i64());
+                        Some((code, tid))
                     })
                     .ok_or_else(|| {
                         ServiceError::bad_request(&crate::tr!("error.oauth.state_invalid"))
@@ -718,7 +731,7 @@ impl SysOauthService {
 
         let provider = self
             .provider_repo
-            .find_by_code(&provider_code)
+            .find_by_code(&provider_code, state_tid)
             .await?
             .ok_or_else(|| {
                 ServiceError::not_found(&crate::tr!("error.oauth.provider_not_found"))
@@ -892,8 +905,11 @@ impl SysOauthService {
     }
 
     /// 登录页启用的提供商列表（公开，脱敏）
-    pub async fn list_enabled_providers(&self) -> Result<Vec<EnabledProviderVo>, ServiceError> {
-        let providers = self.provider_repo.find_all_enabled().await?;
+    pub async fn list_enabled_providers(
+        &self,
+        tenant_tid: Option<i64>,
+    ) -> Result<Vec<EnabledProviderVo>, ServiceError> {
+        let providers = self.provider_repo.find_all_enabled(tenant_tid).await?;
         Ok(providers
             .iter()
             .map(|p| EnabledProviderVo {

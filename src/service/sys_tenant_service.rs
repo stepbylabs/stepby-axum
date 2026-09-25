@@ -23,6 +23,7 @@ use chrono::NaiveDateTime;
 use futures::future::FutureExt;
 use redis::aio::ConnectionManager;
 use sea_orm::*;
+use sea_orm::sea_query::Expr;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -35,6 +36,7 @@ use crate::common::tenant::{
 };
 use crate::entity::sys_dept::{self, Column as DeptColumn, Entity as SysDept};
 use crate::entity::sys_menu::{Column as MenuColumn, Entity as SysMenu};
+use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
 use crate::entity::sys_role::{
     ActiveModel as SysRoleActiveModel, Column as RoleColumn, Entity as SysRole,
 };
@@ -56,6 +58,7 @@ use crate::repository::sys_role_menu::SysRoleMenuRepository;
 use crate::repository::sys_tenant::SysTenantRepository;
 use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
+use crate::service::sso_service::RefreshBinding;
 
 /// 平台组织种子部门 ID（m20250711 init 种子"若依科技"）：
 /// 其下用户与部门 `tenant_id = 0`（平台租户），**仅为组织种子、不再承担租户身份**
@@ -81,13 +84,11 @@ pub(crate) const TENANT_SELF_SERVICE_PERMS: &[&str] = &[
     "system:dict:remove",
 ];
 
-/// 不下放给租户管理员角色的**平台专属 perms 前缀**：
-/// 域名管理接口组（`system:tenant:domain:*`）整体为平台专属（服务层对租户一律 403，
-/// 见 [`crate::service::sys_tenant_domain_service`]），若随平台普通角色继承给租户管理员，
-/// 会造成"菜单可见但请求一律 403"的假入口，故在租户角色菜单集合中显式剔除。
-///
-/// `pub(crate)`：`initialize::ensure_tenant_role_menu_governance` 存量回填复用同一前缀。
-pub(crate) const TENANT_ROLE_EXCLUDED_PERM_PREFIX: &str = "system:tenant:domain:";
+// 不下放给租户管理员角色的**平台专属 perms 前缀**清单统一收敛在
+// [`crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES`]（台账 §3.1 原则 B）：
+// 域名管理（`system:tenant:domain:`）、代码生成（`tool:gen:`）、缓存监控（`monitor:cache:`）
+// 均经服务层守卫对租户一律 403，若随平台普通角色继承给租户管理员，会造成
+// "菜单可见但请求一律 403"的假入口；租户初始化与存量回填均按该清单剔除菜单。
 
 /// 踢线黑名单兜底 TTL（会话 JSON 无 exp 字段时的保守上界，24h）
 const FALLBACK_BLACKLIST_TTL_SECS: i64 = 24 * 3600;
@@ -742,13 +743,16 @@ impl SysTenantService {
                         .all(txn)
                         .await?;
                     base_menu_ids.extend(self_service_menu_ids);
-                    // 剔除平台专属菜单（域名管理：`system:tenant:domain:*`）——租户侧不出现假入口
+                    // 剔除平台专属菜单（域名管理 / 代码生成 / 缓存监控）——租户侧不出现假入口
+                    let mut exclude_cond = sea_orm::Condition::any();
+                    for prefix in crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES {
+                        exclude_cond =
+                            exclude_cond.add(MenuColumn::Perms.like(format!("{prefix}%")));
+                    }
                     let excluded_menu_ids: Vec<i64> = SysMenu::find()
                         .select_only()
                         .column(MenuColumn::MenuId)
-                        .filter(MenuColumn::Perms.like(format!(
-                            "{TENANT_ROLE_EXCLUDED_PERM_PREFIX}%"
-                        )))
+                        .filter(exclude_cond)
                         .into_tuple::<i64>()
                         .all(txn)
                         .await?;
@@ -774,6 +778,8 @@ impl SysTenantService {
                         menu_check_strictly: Set(Some(true)),
                         dept_check_strictly: Set(Some(true)),
                         status: Set("0".to_string()),
+                        // 台账 P0-2：租户默认管理员角色非系统角色（不享超管短路）
+                        is_system: Set(false),
                         del_flag: Set(Some("0".to_string())),
                         create_by: Set(Some(operator_owned.clone())),
                         create_time: Set(Some(now)),
@@ -1341,29 +1347,35 @@ impl SysTenantService {
     /// 扫描 `online:*` → 解析 `OnlineSession.tenant_id`（旧会话无该字段时按 user_id 回查
     /// `sys_user.tenant_id`）→ 原子 Lua「黑名单 + 清 online + 清 SSO AT 绑定」。
     /// 返回被吊销的会话数；Redis 异常返回 0（运行时键仍会拦截后续请求，不静默放行）。
+    ///
+    /// P0-1-a：同口径追加吊销该租户全部 SSO refresh_token（`sso:rt:*`）——停用后存量 RT
+    /// 若不清理，可在 token_refresh 处续期身份（RT 绑定为权威结构 `RefreshBinding`）。
+    /// P0-1-b（F-7）：即时吊销该租户全部 PAT（`sys_pat.status` '0'→'1'）。
+    /// 以上两步为 best-effort：Redis/DB 异常一律 warn，不 panic、不阻断其它吊销。
     pub async fn revoke_tenant_sessions(&self, tenant_id: i64) -> u64 {
         if tenant_id == 0 {
             return 0;
         }
         let mut redis = self.redis.clone();
+        // ① 在线会话扫描：失败仅告警（不得阻断后续 PAT=DB 与 RT 吊销；空结果亦不早退）
         let keys = match crate::utils::redis::scan_keys(&mut redis, "online:*", 5000).await {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!(tenant_id, error = %e, "租户踢线：SCAN online:* 失败");
-                return 0;
+                Vec::new()
             }
         };
-        if keys.is_empty() {
-            return 0;
-        }
-        let values: Vec<Option<String>> =
+        let values: Vec<Option<String>> = if keys.is_empty() {
+            Vec::new()
+        } else {
             match redis::cmd("MGET").arg(&keys).query_async(&mut redis).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(tenant_id, error = %e, "租户踢线：MGET online 失败");
-                    return 0;
+                    Vec::new()
                 }
-            };
+            }
+        };
         // 解析会话；旧会话（无 tenant_id）先收集 user_id 以便批量回查
         let mut sessions = Vec::new();
         let mut legacy_user_ids = Vec::new();
@@ -1379,8 +1391,44 @@ impl SysTenantService {
             }
             sessions.push((token_hash, session));
         }
+        // ② SSO 刷新令牌（sso:rt:*）：以权威结构 RefreshBinding 解析
+        //   - tid == tenant_id → 直接命中；
+        //   - tid == 0（旧绑定）→ 同 online 口径按 user_id 回查归属后判定
+        let rt_keys = match crate::utils::redis::scan_keys(&mut redis, "sso:rt:*", 5000).await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(tenant_id, error = %e, "租户踢线：SCAN sso:rt:* 失败");
+                Vec::new()
+            }
+        };
+        let rt_values: Vec<Option<String>> = if rt_keys.is_empty() {
+            Vec::new()
+        } else {
+            match redis::cmd("MGET").arg(&rt_keys).query_async(&mut redis).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(tenant_id, error = %e, "租户踢线：MGET sso:rt 失败");
+                    Vec::new()
+                }
+            }
+        };
+        let mut rt_entries = Vec::new();
+        for (key, value) in rt_keys.iter().zip(rt_values.iter()) {
+            let Some(json) = value else { continue };
+            let Ok(binding) = serde_json::from_str::<RefreshBinding>(json) else {
+                continue;
+            };
+            let rt_hash = key.strip_prefix("sso:rt:").unwrap_or(key).to_string();
+            if binding.tid == 0 {
+                legacy_user_ids.push(binding.user_id);
+            }
+            rt_entries.push((rt_hash, binding));
+        }
+        // ③ 一次批量回查同时覆盖 online 与 RT 的 legacy user_id 集合
         let mut legacy_tids: HashMap<i64, i64> = HashMap::new();
         if !legacy_user_ids.is_empty() {
+            legacy_user_ids.sort_unstable();
+            legacy_user_ids.dedup();
             let rows = SysUser::find()
                 .filter(UserColumn::UserId.is_in(legacy_user_ids))
                 .all(self.db())
@@ -1418,6 +1466,50 @@ impl SysTenantService {
                 Err(e) => {
                     tracing::warn!(tenant_id, token_hash = %token_hash, error = %e, "租户踢线：Lua 执行失败")
                 }
+            }
+        }
+
+        // ④（P0-1-a）吊销该租户全部 SSO refresh_token（无需维护索引键，扫描即自愈）
+        let mut rt_revoked = 0u64;
+        for (rt_hash, binding) in rt_entries {
+            let rt_tid = if binding.tid != 0 {
+                binding.tid
+            } else {
+                legacy_tids.get(&binding.user_id).copied().unwrap_or(0)
+            };
+            if rt_tid != tenant_id {
+                continue;
+            }
+            let r: Result<i64, redis::RedisError> = redis::cmd("DEL")
+                .arg(format!("sso:rt:{rt_hash}"))
+                .query_async(&mut redis)
+                .await;
+            match r {
+                Ok(_) => rt_revoked += 1,
+                Err(e) => {
+                    tracing::warn!(tenant_id, rt_hash = %rt_hash, error = %e, "租户踢线：DEL sso:rt 失败")
+                }
+            }
+        }
+        if rt_revoked > 0 {
+            tracing::info!(tenant_id, rt_revoked, "租户踢线：SSO refresh_token 已吊销");
+        }
+
+        // ⑤（P0-1-b / F-7）即时吊销该租户全部 PAT：status '0' → '1'
+        match SysPat::update_many()
+            .col_expr(PatColumn::Status, Expr::value("1"))
+            .filter(PatColumn::TenantId.eq(tenant_id))
+            .filter(PatColumn::Status.eq("0"))
+            .exec(self.db())
+            .await
+        {
+            Ok(res) => {
+                if res.rows_affected > 0 {
+                    tracing::info!(tenant_id, pat_revoked = res.rows_affected, "租户踢线：PAT 已吊销");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(tenant_id, error = %e, "租户踢线：PAT 吊销失败（DB 异常）")
             }
         }
         revoked
@@ -1584,6 +1676,11 @@ impl SysTenantService {
         tenant_id: i64,
         menu_ids: &[i64],
     ) -> Result<(), ServiceError> {
+        // 原则 B 前置门禁：平台专属能力（域名管理/代码生成/缓存监控）不进租户可授集合。
+        // 必须置于套餐白名单早退（None=不限制）之前，避免"无套餐 ⇒ 全放开"绕过。
+        if tenant_id != 0 {
+            self.ensure_menus_not_platform_only(menu_ids).await?;
+        }
         let Some(whitelist) = self.package_menu_whitelist(tenant_id).await? else {
             return Ok(());
         };
@@ -1591,6 +1688,34 @@ impl SysTenantService {
             return Err(ServiceError::forbidden(&crate::tr!(
                 "error.tenant.menu_outside_package",
                 menu_id = outside
+            )));
+        }
+        Ok(())
+    }
+
+    /// 原则 B 门禁：菜单集合不得包含平台专属能力（域名管理/代码生成/缓存监控）——
+    /// 租户角色授权（`add_role`/`edit_role`）的唯一入口校验，防止绕过菜单授予面
+    /// 直接构造请求把平台能力授给租户管理员。
+    async fn ensure_menus_not_platform_only(&self, menu_ids: &[i64]) -> Result<(), ServiceError> {
+        if menu_ids.is_empty() {
+            return Ok(());
+        }
+        let rows = SysMenu::find()
+            .select_only()
+            .column(MenuColumn::MenuId)
+            .column(MenuColumn::Perms)
+            .filter(MenuColumn::MenuId.is_in(menu_ids.to_vec()))
+            .into_tuple::<(i64, Option<String>)>()
+            .all(self.db())
+            .await?;
+        if let Some((menu_id, _)) = rows.into_iter().find(|(_, perms)| {
+            perms
+                .as_deref()
+                .is_some_and(crate::common::tenant::is_platform_only_perm)
+        }) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.tenant.menu_platform_only",
+                menu_id = menu_id
             )));
         }
         Ok(())

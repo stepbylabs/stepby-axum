@@ -38,6 +38,10 @@ pub struct Model {
     /// v5-D2：RS256 私钥（PKCS#8 PEM，信封加密落库；NULL=尚未生成，签发时回落 HS256）
     #[serde(default)]
     pub rsa_private_key: Option<String>,
+    /// D9：当前 RS256 密钥指纹（RFC 7638 §3 JWK Thumbprint，base64url 无填充）。
+    /// 作为 JWKS 的 `kid`（为空时回退 client_id）；当前不实现密钥轮换。
+    #[serde(default)]
+    pub key_id: Option<String>,
     /// v5-D5：subject 标识类型（public/pairwise；pairwise 时 sub 为 per-client 稳定假名）
     #[serde(default)]
     pub subject_type: String,
@@ -91,6 +95,7 @@ impl std::fmt::Debug for Model {
             .field("id_token_secret", &"<redacted>")
             .field("id_token_alg", &self.id_token_alg)
             .field("rsa_private_key", &"<redacted>")
+            .field("key_id", &self.key_id)
             .field("subject_type", &self.subject_type)
             .field("client_name", &self.client_name)
             .field("logo_uri", &self.logo_uri)

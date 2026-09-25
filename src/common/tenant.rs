@@ -85,10 +85,121 @@ pub fn eval_tenant_runtime_state(
     TenantRuntimeState::Active
 }
 
+/// 平台专属能力 perms 前缀（台账 §3.1 原则 B：平台能力不进租户可授集合）。
+///
+/// 语义：这些 perms 对应的功能仅平台操作者可用（handler 层另有平台守卫兜底），
+/// 因此**不得**随平台普通角色继承或经套餐白名单下放给租户角色，否则形成
+/// "菜单可见但请求一律 403"的假入口，或造成跨租户可观测/枚举面（如
+/// `/tool/gen/db/list` 可枚举全库表名、`/monitor/cache/*` 可读跨租户会话元数据）。
+///
+/// - `system:tenant:domain:`：租户域名管理（服务层对租户一律 403）
+/// - `tool:gen:`：代码生成（开发期工具，平台专属）
+/// - `tool:httpDebug:`：HTTP 调试器（服务端代理发起任意请求，SSRF 面，平台专属）
+/// - `monitor:cache:`：缓存监控（平台运维面，含跨租户键名与会话元数据）
+/// - `monitor:log:`：实时日志（宿主应用日志，含全平台请求/SQL 日志）
+/// - `monitor:slowSql:`：可观测性（慢请求/错误聚合/Redis 指标，跨租户聚合）
+/// - `monitor:health:`：健康检查（DB/Redis/磁盘等宿主依赖状态，无租户语义）
+/// - `system:backup:`：备份管理（整库 pg_dump/mysqldump 与恢复覆盖现库，
+///   下载面即全库数据 ⇒ 授给租户等于跨租户数据外泄；租户级备份粒度见 §27.12-5 待决）
+pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
+    "system:tenant:domain:",
+    "tool:gen:",
+    "tool:httpDebug:",
+    "monitor:cache:",
+    "monitor:log:",
+    "monitor:slowSql:",
+    "monitor:health:",
+    "system:backup:",
+];
+
+/// 判断 perms 是否属于平台专属能力（前缀匹配，大小写敏感——perms 统一小写）
+pub fn is_platform_only_perm(perms: &str) -> bool {
+    PLATFORM_ONLY_PERM_PREFIXES
+        .iter()
+        .any(|p| perms.starts_with(p))
+}
+
 /// 归属校验：operator_tid 为 0（平台管理员）放行任意资源；否则资源必须属于
 /// 同一租户。用于按主键操作（update/delete/toggle）前的越权防护。
 pub fn tenant_allowed(operator_tid: i64, resource_tid: i64) -> bool {
     operator_tid == 0 || operator_tid == resource_tid
+}
+
+// ==================== §27.13.1/§27.13.4「表 → 过滤接入」矩阵与授予前门禁 ====================
+
+/// 租户表读路径的过滤接入档位（§27.13.1 矩阵的代码侧登记口径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TenantFilterTier {
+    /// 已接：列表/分页等集合读路径带租户过滤（或按主体键精确收窄，语义等价）。
+    Covered,
+    /// 未接：表带 `tenant_id` 列但集合读路径未过滤 ⇒ 其 perms **不得**授予租户角色，
+    /// 否则形成"先授菜单后补过滤"的跨租户读窗口。
+    Tier2,
+}
+
+/// perms 前缀 → (承载表, 档位)。与
+/// `docs/optimization/tier2-filter-matrix-2026-09-25.md` 同步维护（单测保证双向一致）。
+///
+/// 说明：仅登记"有菜单面（可由角色授权触达）"的租户表；无菜单面的表
+/// （`sys_oauth_consent` / `sys_oauth_user` / `sys_user_pref` 等，仅按主体键查询）
+/// 见矩阵文档"按主体键收窄"一节。
+pub const TENANT_FILTER_MATRIX: &[(&str, &str, TenantFilterTier)] = &[
+    ("system:user:", "sys_user", TenantFilterTier::Covered),
+    ("system:dept:", "sys_dept", TenantFilterTier::Covered),
+    ("system:role:", "sys_role", TenantFilterTier::Covered),
+    ("system:post:", "sys_post", TenantFilterTier::Covered),
+    ("system:config:", "sys_config", TenantFilterTier::Covered),
+    ("system:dict:", "sys_dict_type/sys_dict_data", TenantFilterTier::Covered),
+    ("system:notice:", "sys_notice", TenantFilterTier::Covered),
+    ("system:msg:", "sys_msg_template/sys_msg_channel/sys_msg_send_log", TenantFilterTier::Covered),
+    ("system:report:", "sys_report/sys_report_sub", TenantFilterTier::Covered),
+    ("system:webHook:", "sys_web_hook/sys_web_hook_log", TenantFilterTier::Covered),
+    ("system:task:", "sys_task", TenantFilterTier::Covered),
+    ("system:flow:", "sys_flow_task/sys_flow_log", TenantFilterTier::Covered),
+    ("system:scimgroup:", "sys_scim_group", TenantFilterTier::Covered),
+    ("system:pat:", "sys_pat", TenantFilterTier::Covered),
+    ("monitor:pat:", "sys_pat", TenantFilterTier::Covered),
+    ("monitor:job:", "sys_job/sys_job_log", TenantFilterTier::Covered),
+    ("monitor:operlog:", "sys_oper_log", TenantFilterTier::Covered),
+    ("monitor:logininfor:", "sys_logininfor", TenantFilterTier::Covered),
+    ("monitor:frontendError:", "sys_frontend_error", TenantFilterTier::Covered),
+    ("monitor:dashboard:", "sys_user/sys_role/sys_oper_log/sys_logininfor/redis online:*", TenantFilterTier::Covered),
+    ("monitor:online:", "redis online:* (OnlineSession)", TenantFilterTier::Covered),
+    ("system:tenant:", "sys_tenant/sys_tenant_package", TenantFilterTier::Covered),
+    ("system:backup:", "sys_backup_log", TenantFilterTier::Tier2),
+];
+
+/// 查表：按最长前缀匹配返回 (承载表, 档位)（`system:tenant:domain:` 等更长前缀优先）。
+pub fn tenant_filter_lookup(perms: &str) -> Option<(&'static str, TenantFilterTier)> {
+    TENANT_FILTER_MATRIX
+        .iter()
+        .filter(|(prefix, _, _)| perms.starts_with(prefix))
+        .max_by_key(|(prefix, _, _)| prefix.len())
+        .map(|(_, table, tier)| (*table, *tier))
+}
+
+/// 授予前门禁（§27.13.4）：校验待授予租户角色的 perms 是否可授予。
+///
+/// 返回 `Err(perms)` 的两种情况：
+/// ① 平台专属能力前缀（`is_platform_only_perm`）；
+/// ② 命中 tier2（有 `tenant_id` 列但集合读路径未接过滤）表，防"先授菜单后补过滤"。
+///
+/// 平台角色（operator tid = 0）不调用本门禁，由调用方按 `effective_tid` 早退。
+pub fn ensure_menu_filter_coverage<'a>(
+    perms_list: impl IntoIterator<Item = &'a str>,
+) -> Result<(), &'a str> {
+    for perms in perms_list {
+        if is_platform_only_perm(perms) {
+            return Err(perms);
+        }
+        if matches!(
+            tenant_filter_lookup(perms),
+            Some((_, TenantFilterTier::Tier2))
+        ) {
+            return Err(perms);
+        }
+    }
+    Ok(())
 }
 
 /// 按 tenant_id 分组（升序），供后台批量任务"逐组带 tid 上下文执行"。
@@ -160,5 +271,76 @@ mod tests {
     fn test_tenant_runtime_keys() {
         assert_eq!(tenant_state_key(9), "tenant:state:9");
         assert_eq!(tenant_expire_key(9), "tenant:exp:9");
+    }
+
+    #[test]
+    fn test_is_platform_only_perm() {
+        assert!(is_platform_only_perm("tool:gen:list"), "代码生成平台专属");
+        assert!(is_platform_only_perm("monitor:cache:query"), "缓存监控平台专属");
+        assert!(is_platform_only_perm("system:tenant:domain:list"), "域名管理平台专属");
+        assert!(!is_platform_only_perm("system:tenant:list"), "租户管理非平台专属");
+        assert!(!is_platform_only_perm("system:config:edit"), "config 自助能力可下放");
+        assert!(!is_platform_only_perm(""), "空 perms 非平台专属");
+    }
+
+    #[test]
+    fn test_is_platform_only_perm_batch_p2_4() {
+        // P2-4 新增前缀：跨租户可观测面 / 整库备份面 / SSRF 面
+        for perms in [
+            "tool:httpDebug:list",
+            "monitor:log:list",
+            "monitor:slowSql:list",
+            "monitor:health:list",
+            "system:backup:list",
+            "system:backup:query",
+            "system:backup:add",
+            "system:backup:remove",
+            "system:backup:edit",
+        ] {
+            assert!(is_platform_only_perm(perms), "{perms} 应为平台专属");
+        }
+        // 租户可用的看板/在线监控/限流自助不受影响
+        assert!(!is_platform_only_perm("monitor:dashboard:list"));
+        assert!(!is_platform_only_perm("monitor:online:list"));
+        assert!(!is_platform_only_perm("system:rateLimit:list"));
+    }
+
+    #[test]
+    fn test_tenant_filter_lookup() {
+        assert_eq!(
+            tenant_filter_lookup("system:user:list").map(|(_, t)| t),
+            Some(TenantFilterTier::Covered)
+        );
+        assert_eq!(
+            tenant_filter_lookup("monitor:online:list").map(|(_, t)| t),
+            Some(TenantFilterTier::Covered)
+        );
+        assert_eq!(
+            tenant_filter_lookup("system:backup:query").map(|(_, t)| t),
+            Some(TenantFilterTier::Tier2),
+            "备份日志集合读路径未接过滤 ⇒ tier2"
+        );
+        assert_eq!(
+            tenant_filter_lookup("unknown:perm").map(|(_, t)| t),
+            None,
+            "未登记前缀（如第三方/新模块）不触发门禁"
+        );
+    }
+
+    #[test]
+    fn test_ensure_menu_filter_coverage() {
+        // Covered 能力放行
+        assert!(ensure_menu_filter_coverage(["system:user:list", "system:config:edit"]).is_ok());
+        // 平台专属拦截（返回首个不可授予 perms）
+        assert_eq!(
+            ensure_menu_filter_coverage(["system:user:list", "system:backup:list"]),
+            Err("system:backup:list")
+        );
+        assert_eq!(
+            ensure_menu_filter_coverage(["tool:gen:list"]),
+            Err("tool:gen:list")
+        );
+        // 空集合放行（目录菜单无 perms 的场景）
+        assert!(ensure_menu_filter_coverage(Vec::<&str>::new()).is_ok());
     }
 }
