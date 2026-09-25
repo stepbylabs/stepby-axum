@@ -103,6 +103,7 @@ error:
     not_assignee: 仅当前审批人可操作该任务
     withdraw_only_applicant: 仅单据提交人可撤回
     pat_forbidden: 审批操作须本人登录会话执行，不能使用访问令牌（PAT）
+    countersign_duplicate: 该审批人已在当前审批节点，无需重复加签
   sso:
     platform_protected: 平台根部门不允许通过租户接口操作
     ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户

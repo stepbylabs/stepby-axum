@@ -13,6 +13,11 @@
 #
 # 注意：config.toml 已被 .gitignore 排除，不会进入版本控制。
 
+# 权限未映射路由默认拒绝（fail-closed，W-1）。
+# 顶层键：必须写在任何 [table] 段之前，否则会被解析进上一张表而被静默忽略。
+# 仅当需要临时兼容"未登记权限映射"的历史路由时，才显式改为 false（fail-open，安全性下降）。
+permission_deny_by_default = true
+
 [server]
 host = "0.0.0.0"
 port = 8080

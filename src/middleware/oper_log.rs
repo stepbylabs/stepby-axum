@@ -120,11 +120,13 @@ pub async fn oper_log_middleware(
     next: Next,
 ) -> Response {
     let method = req.method().clone();
+    // 归一化 nest 前缀（/prod-api|/dev-api|/stage-api）：模块推断按去前缀的路由模板匹配，
+    // 否则同源部署下所有操作日志都会被推断为"其他"（W-1 同源缺陷）。
     let matched_path = req
         .extensions()
         .get::<MatchedPath>()
         .cloned()
-        .map(|p| p.as_str().to_string())
+        .map(|p| crate::middleware::normalize_api_prefix(p.as_str()).to_string())
         .unwrap_or_default();
 
     // 仅记录写操作

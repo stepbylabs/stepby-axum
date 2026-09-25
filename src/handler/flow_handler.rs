@@ -31,7 +31,9 @@ use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::flow_demo_doc::Model as FlowDemoDocModel;
 use crate::entity::sys_flow_task::Model as SysFlowTaskModel;
 use crate::middleware::Operator;
-use crate::service::sys_flow_service::{FlowActionDto, FlowPageQuery, FlowSubmitDto};
+use crate::service::sys_flow_service::{
+    FlowActionDto, FlowCountersignDto, FlowPageQuery, FlowSubmitDto,
+};
 use crate::state::AppState;
 
 /// 解析 Operator 携带的 user_id（JWT sub，字符串）为 i64
@@ -125,7 +127,13 @@ pub async fn list(
 ) -> Result<TableDataInfo<FlowDemoDocModel>, AppError> {
     // 多租户：租户操作者仅见本租户单据；平台操作者全量（tenant_id=0 → None）
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
-    let (rows, total) = state.flow_service.all_page(query, tenant_scope).await?;
+    // 数据权限（W-5）：按操作者 data_scope 解析单据可见范围（部门树 + 本人；超管全量）
+    let user_id = parse_user_id(operator.user_id())?;
+    let doc_scope = state.flow_service.resolve_doc_scope(user_id).await?;
+    let (rows, total) = state
+        .flow_service
+        .all_page(query, tenant_scope, &doc_scope)
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -198,6 +206,30 @@ pub async fn withdraw_demo(
         .flow_service
         .withdraw_by_doc(user_id, operator.is_pat(), doc_id, None)
         .await?;
+    Ok(AjaxResult::success(outcome.task))
+}
+
+/// POST /system/flow/task/{taskId}/countersign-add — 加签（在当前节点追加会签审批人，W-3）
+pub async fn countersign_add(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(task_id): Path<i64>,
+    Json(dto): Json<FlowCountersignDto>,
+) -> Result<AjaxResult<SysFlowTaskModel>, AppError> {
+    let user_id = parse_user_id(operator.user_id())?;
+    crate::common::i18n::validate(&dto)?;
+    let outcome = state
+        .flow_service
+        .countersign_add(user_id, operator.is_pat(), task_id, dto.to_user_id)
+        .await?;
+    for uid in &outcome.notify_assignees {
+        let title = outcome.task.title.clone().unwrap_or_default();
+        ws_notify_todo(&state, *uid, &title);
+        state
+            .flow_service
+            .send_flow_audit(*uid, "flow_todo", &title)
+            .await;
+    }
     Ok(AjaxResult::success(outcome.task))
 }
 

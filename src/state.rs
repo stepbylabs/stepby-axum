@@ -133,19 +133,15 @@ impl AppState {
 
     /// 注册一个用户的 WebSocket 连接发送端（连接建立时调用）
     pub fn register_ws_user(&self, user_id: i64, tx: mpsc::UnboundedSender<WsMessage>) {
-        let mut users = self
-            .ws_users
-            .write()
-            .expect("ws_users RwLock poisoned（register_ws_user）");
+        // 锁中毒容错：与 broadcast_to_user 同款范式（unwrap_or_else into_inner），
+        // 避免某线程 panic 污染锁后，WS 注册/注销链路被放大为进程级连锁 panic（W-6/5-3）
+        let mut users = self.ws_users.write().unwrap_or_else(|e| e.into_inner());
         users.entry(user_id).or_default().push(tx);
     }
 
     /// 注销一个用户的 WebSocket 连接发送端（连接关闭时调用）
     pub fn unregister_ws_user(&self, user_id: i64, tx: &mpsc::UnboundedSender<WsMessage>) {
-        let mut users = self
-            .ws_users
-            .write()
-            .expect("ws_users RwLock poisoned（unregister_ws_user）");
+        let mut users = self.ws_users.write().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = users.get_mut(&user_id) {
             conns.retain(|t| !t.same_channel(tx));
             if conns.is_empty() {
