@@ -32,7 +32,7 @@ use crate::common::{
 };
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::Model as SysUserModel;
-use crate::middleware::Operator;
+use crate::middleware::{Operator, TargetTenant};
 use crate::service::sys_role_service::{
     AuthUserQueryDto, AuthUserSelectDto, CancelAuthUserDto, DataScopeDto, RoleAddDto, RoleEditDto,
     RoleQueryDto, RoleVo,
@@ -219,7 +219,7 @@ pub async fn add(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let role = state
         .role_service
-        .add_role(dto, operator.username())
+        .add_role(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.add_role",
@@ -243,11 +243,16 @@ pub async fn add(
 pub async fn edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    target_tenant: TargetTenant,
     Json(dto): Json<RoleEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 多租户 Phase 3：记录被操作角色所属租户，供审计 target_tenant_id（平台代管场景）
+    if let Ok(vo) = state.role_service.get_role_by_id(dto.role_id, None).await {
+        target_tenant.set(vo.role.tenant_id);
+    }
     state
         .role_service
-        .edit_role(dto, operator.username())
+        .edit_role(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -268,6 +273,8 @@ pub async fn edit(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
+    target_tenant: TargetTenant,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     // 支持逗号分隔的批量删除
@@ -285,7 +292,30 @@ pub async fn remove(
     }
 
     // R8-API-008：调用批量原子事务方法，保证部分失败时回滚
-    state.role_service.delete_roles(role_ids).await?;
+    // 多租户 Phase 3：解析被删角色所属租户，全部可解析且唯一时记录审计 target_tenant_id
+    // （跨多个租户或存在解析失败时保持 NULL，避免误标归属）
+    {
+        let mut resolved: Vec<i64> = Vec::new();
+        let mut all_resolved = true;
+        for rid in &role_ids {
+            match state.role_service.get_role_by_id(*rid, None).await {
+                Ok(vo) => {
+                    if !resolved.contains(&vo.role.tenant_id) {
+                        resolved.push(vo.role.tenant_id);
+                    }
+                }
+                Err(_) => all_resolved = false,
+            }
+        }
+        if all_resolved && resolved.len() == 1 {
+            target_tenant.set(resolved[0]);
+        }
+    }
+
+    state
+        .role_service
+        .delete_roles(role_ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -308,7 +338,7 @@ pub async fn change_status(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state
         .role_service
-        .update_role_status(dto.role_id, &dto.status, operator.username())
+        .update_role_status(dto.role_id, &dto.status, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -333,7 +363,7 @@ pub async fn data_scope(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state
         .role_service
-        .update_data_scope(dto, operator.username())
+        .update_data_scope(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -347,9 +377,10 @@ pub async fn allocated_user_list(
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
     // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部已授权用户）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let (rows, total) = state
         .role_service
-        .get_allocated_users(query, operator_user_id)
+        .get_allocated_users(query, operator_user_id, tenant_scope)
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -363,9 +394,10 @@ pub async fn unallocated_user_list(
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
     // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部用户）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let (rows, total) = state
         .role_service
-        .get_unallocated_users(query, operator_user_id)
+        .get_unallocated_users(query, operator_user_id, tenant_scope)
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -447,9 +479,13 @@ pub async fn auth_user_select_all(
 )]
 pub async fn dept_tree_select(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(role_id): Path<i64>,
 ) -> Result<RoleDeptTreeResult, AppError> {
-    let vo = state.role_service.get_dept_tree(role_id).await?;
+    let vo = state
+        .role_service
+        .get_dept_tree(role_id, operator.tenant_id())
+        .await?;
     Ok(RoleDeptTreeResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),

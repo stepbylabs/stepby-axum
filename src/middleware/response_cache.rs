@@ -7,12 +7,14 @@
 // - 只缓存白名单中的「静态元数据」接口（字典下拉、字典按类型、参数按 key）。
 //   白名单不包含任何带当前用户身份差异的接口（如 /system/user/list、
 //   /system/menu/list 等），避免缓存污染登录态、权限判断与个人数据泄漏。
-// - 缓存 key = "GET <path>"，TTL 默认 60s（可配置），进程内 moka 缓存。
+// - 缓存 key = "GET <path>#tid=<tid>"，TTL 默认 60s（可配置），进程内 moka 缓存。
+//   多租户（§27.8）：白名单中的字典类型下拉内容随租户域变化（本租户自建类型 + 平台类型），
+//   故 key 必须携带租户 ID，杜绝跨租户共享缓存导致的数据串读。
 //
 // 挂载位置与安全说明：
 // - 作为 protected 路由栈中 auth_middleware 之后、rate_limit 之前的 route_layer（最外层之一）。
-//   白名单接口均为纯静态元数据，缓存内容对不同登录用户完全一致，故位于鉴权之后复用安全：
-//   首个请求仍需通过 auth+permission 校验并触发真实 DB 查询，之后相同 path 的 GET 命中缓存
+//   白名单接口为登录后可见的只读元数据，且 key 已按租户隔离，故位于鉴权之后复用安全：
+//   首个请求仍需通过 auth+permission 校验并触发真实 DB 查询，之后相同 path+tid 的 GET 命中缓存
 //   直接返回，既不重复鉴权也不重复查库，仅服务已登录用户（杜绝未登录可访问的疑虑）。
 // - 位于压缩层（CompressionLayer，全局最外层）之内：缓存的是解压后的原始响应体，
 //   压缩层对命中/未命中响应一视同仁地统一压缩，不产生 Content-Encoding 与缓存体不一致的问题。
@@ -25,6 +27,8 @@ use axum::http::{HeaderValue, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use moka::future::Cache;
+
+use crate::jwt::claims::Claims;
 
 /// 缓存默认 TTL（60s）
 const DEFAULT_TTL_SECS: u64 = 60;
@@ -117,7 +121,14 @@ pub async fn response_cache_middleware(
         return next.run(req).await;
     }
 
-    let key = format!("{} {}", method, path);
+    // 多租户（§27.8）：key 必须携带租户 ID，否则本租户自建字典类型会被跨租户共享缓存串读。
+    // 本中间件位于 auth_middleware 之后，Claims 已注入 extensions；缺失时按平台域（0）处理。
+    let tid = req
+        .extensions()
+        .get::<Claims>()
+        .map(|c| c.tid)
+        .unwrap_or(0);
+    let key = format!("{} {}#tid={}", method, path, tid);
 
     // 1. 缓存命中：直接返回缓存体
     if let Some(cached) = cache.inner.get(&key).await {

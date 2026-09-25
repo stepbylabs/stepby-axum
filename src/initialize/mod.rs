@@ -7,7 +7,10 @@ use crate::scheduler::JobScheduler;
 use crate::service::IpLocationService;
 use crate::state::AppState;
 use crate::utils::ip_location::IpLocator;
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
+use sea_orm::{
+    ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement, TransactionTrait, Value,
+};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 初始化编排模块
@@ -132,6 +135,48 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 2 模块失败: {}", e))?;
 
+        // 3.5e 多租户 Phase 3 存量库兜底：与迁移 m20260925_000003_tenant_phase3 等价
+        // （启动不跑 Migrator::up）——5 张租户表族（sys_tenant / package / domain /
+        // menu / migration_map）+ 默认套餐种子 + **tid remap（唯一不可逆点，§29.7）**。
+        // 缺此兜底时：租户管理服务查 sys_tenant → 500；旧模型"dept 根部门 = 租户"
+        // 的存量数据不会换源到独立 tenant_id 空间。
+        ensure_tenant_phase3(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3 模块失败: {}", e))?;
+
+        // 3.5f 多租户 Phase 3 SaaS 治理存量库兜底：与迁移
+        // m20260925_000004_tenant_saas_governance 等价（启动不跑 Migrator::up）——
+        // sys_config 治理列（scope/tenant_editable/visible_to_tenant）+
+        // sys_oper_log.target_tenant_id + 唯一域租户化 4 项 + config 治理元数据 seed。
+        // 缺此兜底时：sys_config 实体 SELECT 带治理列 → 参数配置全站 500；
+        // 旧单列唯一索引仍生效 → 租户无法自建同 key 覆盖行。
+        ensure_tenant_saas_governance(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3 SaaS 治理模块失败: {}", e))?;
+
+        // 3.5g 多租户 Phase 3.5g 存量库兜底：与迁移
+        // m20260925_000005_tenant_unique_scope 等价（启动不跑 Migrator::up）——
+        // 剩余唯一域租户化 2 项（sys_flow_task 业务唯一、sys_scim_group.external_id）。
+        // 缺此兜底时：不同租户使用相同业务键 / externalId 会互相顶撞（第二个租户写入失败）。
+        ensure_tenant_unique_scope(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3.5g 唯一域租户化模块失败: {}", e))?;
+
+        // 3.5h 多租户 Phase 3.5h 存量库兜底：租户角色菜单治理（一剔一补）——
+        // 剔除平台专属域名管理菜单；补齐 config/dict 的 add/edit/remove 自助按钮。
+        // 缺此兜底时：存量租户自建字典 / config 覆盖与自建键 403（链路断裂），
+        // 且租户侧残留"菜单可见但请求 403"的假入口（仅补缺失授权、幂等）。
+        ensure_tenant_role_menu_governance(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3.5h 租户角色菜单治理失败: {}", e))?;
+
+        // 3.5i 存量库兜底：租户文件隔离前的**扁平**上传路径回填（幂等）——
+        // 隔离前 `sys_user.avatar` 形如 `/uploads/avatar/{key}`（缺 {tid} 段），
+        // 隔离后 `GET /uploads/*` 按 `{tid}/{kind}/{key}` 三段校验 → 段数不足直接 400，
+        // 全站头像破图。此处改写为 `/{prefix}/{tid}/{key}` 并把遗留文件搬到租户目录。
+        ensure_legacy_upload_paths(&db, &settings.upload)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化存量上传路径回填失败: {}", e))?;
 
         // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
         // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
@@ -1270,7 +1315,7 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
             }
         }
         for (table, index_name, columns) in &idx_defs {
-            if let Err(e) = ensure_tenant_index(db, table, index_name, columns).await {
+            if let Err(e) = ensure_tenant_index(db, table, index_name, columns, false).await {
                 tracing::debug!("租户索引 {index_name} 创建跳过: {}", e);
             }
         }
@@ -1311,7 +1356,27 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
             "{menu_cols} VALUES (3703, '租户修改', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:edit', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
         format!(
-            "{menu_cols} VALUES (3704, '租户删除', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
+            "{menu_cols} VALUES (3704, '租户删除', 3700, 4, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        // ---- 域名绑定（多租户 Phase 3 域名链路，menu_id 段位 3800-3804，父 3700）----
+        // 授予约定与 3700/3701 一致：运维查看（list）与验证（verify）授予平台普通角色（role_id=2），
+        // 新增/修改/删除仅平台操作者（operator_tid=0）可用，故不授予普通角色。
+        format!(
+            "{menu_cols} VALUES (3800, '域名查询', 3700, 5, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:list', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        "sys_role_menu (role_id, menu_id) VALUES (2, 3800)".to_string(),
+        format!(
+            "{menu_cols} VALUES (3801, '域名新增', 3700, 6, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:add', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3802, '域名验证', 3700, 7, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:verify', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        "sys_role_menu (role_id, menu_id) VALUES (2, 3802)".to_string(),
+        format!(
+            "{menu_cols} VALUES (3803, '域名修改', 3700, 8, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:edit', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3804, '域名删除', 3700, 9, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
     ];
     for body in body_rows {
@@ -1326,16 +1391,1047 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
     Ok(())
 }
 
+/// 承载租户归属的表清单（Phase 3 remap 改写范围）：
+/// = Phase 2 `ensure_multitenant_module::TABLES` 的 27 张 + `sys_user`（列由
+/// m20260924_000005 / `ensure_user_tenant_id_column` 补）+ 后加却带 tenant_id
+/// 的 5 张（oauth_client / flow_task / flow_log / scim_group / flow_demo_doc）。
+/// **两处清单须同步维护**（R4 门禁解析的是 ensure_multitenant_module 内的字面量，
+/// 故此处必须独立成表；实际改写前逐个探测列存在性，缺列则跳过）。
+const TENANT_CARRYING_TABLES: &[&str] = &[
+    "sys_dept",
+    "sys_user",
+    "sys_role",
+    "sys_post",
+    "sys_config",
+    "sys_dict_type",
+    "sys_dict_data",
+    "sys_notice",
+    "sys_notice_read",
+    "sys_pat",
+    "sys_user_pref",
+    "sys_oauth_consent",
+    "sys_oauth_provider",
+    "sys_oauth_user",
+    "sys_msg_channel",
+    "sys_msg_template",
+    "sys_msg_send_log",
+    "sys_web_hook",
+    "sys_web_hook_log",
+    "sys_report",
+    "sys_report_sub",
+    "sys_job",
+    "sys_job_log",
+    "sys_task",
+    "sys_backup_log",
+    "sys_oper_log",
+    "sys_logininfor",
+    "sys_frontend_error",
+    "sys_oauth_client",
+    "sys_flow_task",
+    "sys_flow_log",
+    "sys_scim_group",
+    "flow_demo_doc",
+];
+
+/// 多租户 Phase 3 存量库兜底（与迁移 m20260925_000003_tenant_phase3 等价，全幂等）：
+///
+/// 1) 幂等建 5 张租户表族（sys_tenant / sys_tenant_package / sys_tenant_domain /
+///    sys_tenant_menu / sys_tenant_migration_map）+ 索引（三方言）；
+/// 2) 默认套餐「标准版」种子（`menu_ids = NULL` = 不限制功能白名单）；
+/// 3) **tid remap（唯一不可逆点，§29.7）**：旧模型"dept 树根 = 租户"（租户 tid 复用
+///    根部门 dept_id）一次性换源为 `sys_tenant.tenant_id` 独立 id 空间：
+///    - 扫 `sys_dept` 中 `parent_id = 0`、未删除、且非平台根（100）的根部门；
+///    - 每根部门建一行 `sys_tenant`（`tenant_code = t{root_dept_id}` 确定性唯一、
+///      `dept_id` = 该根部门）并**同事务**写 `sys_tenant_migration_map`
+///      （`old_tid → new_tenant_id`，回滚唯一依赖，禁止清理）；
+///    - 按映射把承载表的 `tenant_id` 由旧 tid 改写为新 tenant_id；
+///    - 用 BFS 求租户子树，顺带修复子树内 `tenant_id = 0` 的后代部门与用户
+///      （Phase 2 兜底把存量行统一归 0 导致的串号 bug）。
+///
+/// 一次性语义（幂等关键）：仅当 `sys_tenant` 与映射表**均为空**时执行 remap——
+/// 首次启动换源后再次启动即跳过；此后新建租户由服务层落表（其根部门不会再被换源）。
+async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let (id_pk, dt) = match backend {
+        DatabaseBackend::Sqlite => ("INTEGER PRIMARY KEY AUTOINCREMENT", "DATETIME"),
+        DatabaseBackend::Postgres => ("BIGSERIAL PRIMARY KEY", "TIMESTAMP"),
+        _ => ("BIGINT PRIMARY KEY AUTO_INCREMENT", "DATETIME"),
+    };
+    let ph = |i: usize| -> String {
+        if backend == DatabaseBackend::Postgres {
+            format!("${i}")
+        } else {
+            "?".to_string()
+        }
+    };
+    let now_expr = match backend {
+        DatabaseBackend::Sqlite => format!(
+            "'{}'",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        ),
+        _ => "NOW()".to_string(),
+    };
+
+    // ---- 1. 幂等建表（与迁移 m20260925_000003 DDL 逐列一致）----
+    db.execute(Statement::from_string(
+        backend,
+        format!(
+            r#"CREATE TABLE IF NOT EXISTS sys_tenant (
+            tenant_id     {id_pk},
+            tenant_code   VARCHAR(64) NOT NULL,
+            tenant_name   VARCHAR(64) NOT NULL,
+            dept_id       BIGINT NULL,
+            package_id    BIGINT NULL,
+            contact_name  VARCHAR(64) NULL,
+            contact_phone VARCHAR(20) NULL,
+            contact_email VARCHAR(64) NULL,
+            domain        VARCHAR(255) NULL,
+            expire_time   {dt} NULL,
+            account_count INT NOT NULL DEFAULT 0,
+            status        VARCHAR(1) NOT NULL DEFAULT '0',
+            del_flag      VARCHAR(1) NOT NULL DEFAULT '0',
+            create_by     VARCHAR(64) NULL,
+            create_time   {dt} NULL,
+            update_by     VARCHAR(64) NULL,
+            update_time   {dt} NULL,
+            remark        VARCHAR(500) NULL
+        )"#
+        ),
+    ))
+    .await?;
+    db.execute(Statement::from_string(
+        backend,
+        format!(
+            r#"CREATE TABLE IF NOT EXISTS sys_tenant_package (
+            package_id            {id_pk},
+            package_name          VARCHAR(64) NOT NULL,
+            menu_ids              TEXT NULL,
+            default_account_count INT NOT NULL DEFAULT 0,
+            status                VARCHAR(1) NOT NULL DEFAULT '0',
+            del_flag              VARCHAR(1) NOT NULL DEFAULT '0',
+            create_by             VARCHAR(64) NULL,
+            create_time           {dt} NULL,
+            update_by             VARCHAR(64) NULL,
+            update_time           {dt} NULL,
+            remark                VARCHAR(500) NULL
+        )"#
+        ),
+    ))
+    .await?;
+    db.execute(Statement::from_string(
+        backend,
+        format!(
+            r#"CREATE TABLE IF NOT EXISTS sys_tenant_domain (
+            domain_id     {id_pk},
+            tenant_id     BIGINT NOT NULL DEFAULT 0,
+            domain        VARCHAR(255) NOT NULL,
+            domain_type   VARCHAR(16) NOT NULL DEFAULT '1',
+            is_primary    VARCHAR(1) NOT NULL DEFAULT '1',
+            verify_status VARCHAR(1) NOT NULL DEFAULT '0',
+            verify_token  VARCHAR(64) NULL,
+            verified_at   {dt} NULL,
+            status        VARCHAR(1) NOT NULL DEFAULT '0',
+            del_flag      VARCHAR(1) NOT NULL DEFAULT '0',
+            create_by     VARCHAR(64) NULL,
+            create_time   {dt} NULL,
+            update_by     VARCHAR(64) NULL,
+            update_time   {dt} NULL,
+            remark        VARCHAR(500) NULL
+        )"#
+        ),
+    ))
+    .await?;
+    db.execute(Statement::from_string(
+        backend,
+        format!(
+            r#"CREATE TABLE IF NOT EXISTS sys_tenant_menu (
+            l3_id       BIGINT NOT NULL PRIMARY KEY,
+            tenant_id   BIGINT NOT NULL DEFAULT 0,
+            ref_menu_id BIGINT NOT NULL DEFAULT 0,
+            parent_id   BIGINT NOT NULL DEFAULT 0,
+            order_num   INT NOT NULL DEFAULT 0,
+            visible     VARCHAR(1) NOT NULL DEFAULT '0',
+            status      VARCHAR(1) NOT NULL DEFAULT '0',
+            del_flag    VARCHAR(1) NOT NULL DEFAULT '0',
+            create_by   VARCHAR(64) NULL,
+            create_time {dt} NULL,
+            update_by   VARCHAR(64) NULL,
+            update_time {dt} NULL
+        )"#
+        ),
+    ))
+    .await?;
+    db.execute(Statement::from_string(
+        backend,
+        format!(
+            r#"CREATE TABLE IF NOT EXISTS sys_tenant_migration_map (
+            map_id        {id_pk},
+            old_tid       BIGINT NOT NULL,
+            new_tenant_id BIGINT NOT NULL,
+            create_time   {dt} NULL,
+            remark        VARCHAR(500) NULL
+        )"#
+        ),
+    ))
+    .await?;
+
+    // 索引：失败只告警不阻断启动（与 Phase 2 兜底同策略；缺失仅影响性能与
+    // 唯一约束强度，可在服务起来后由 migration 补齐）
+    for (table, index, cols, unique) in [
+        ("sys_tenant", "uk_sys_tenant_code", "tenant_code", true),
+        ("sys_tenant", "idx_sys_tenant_dept", "dept_id", false),
+        (
+            "sys_tenant_package",
+            "uk_sys_tenant_package_name",
+            "package_name",
+            true,
+        ),
+        (
+            "sys_tenant_domain",
+            "uk_sys_tenant_domain_domain",
+            "domain",
+            true,
+        ),
+        (
+            "sys_tenant_domain",
+            "idx_sys_tenant_domain_tid",
+            "tenant_id",
+            false,
+        ),
+        (
+            "sys_tenant_menu",
+            "uk_sys_tenant_menu",
+            "tenant_id, ref_menu_id",
+            true,
+        ),
+        ("sys_tenant_menu", "idx_sys_tenant_menu_tid", "tenant_id", false),
+        (
+            "sys_tenant_migration_map",
+            "uk_sys_tenant_migration_map_old",
+            "old_tid",
+            true,
+        ),
+    ] {
+        if let Err(e) = ensure_tenant_index(db, table, index, cols, unique).await {
+            tracing::warn!("Phase 3 索引 {index} 创建失败（不阻断启动，请人工核查）: {e}");
+        }
+    }
+
+    // ---- 1b. 存量库幂等补列：sys_tenant_domain 域名链路列（domain_type / verified_at）----
+    // 域名链路（§27.7）：`domain_type` 决定验证策略（'0' 子域名平台分配免验证 / '1' 自定义需 DNS TXT），
+    // `verified_at` 记录 TXT 验证通过时间。`CREATE TABLE IF NOT EXISTS` 对存量表不生效，故此处补列。
+    if sso_table_exists(db, "sys_tenant_domain").await? {
+        for (column, column_def) in [
+            ("domain_type", "VARCHAR(16) NOT NULL DEFAULT '1'".to_string()),
+            ("verified_at", format!("{dt} NULL")),
+        ] {
+            if sso_has_column(db, "sys_tenant_domain", column).await? {
+                continue;
+            }
+            db.execute(Statement::from_string(
+                backend,
+                format!("ALTER TABLE sys_tenant_domain ADD COLUMN {column} {column_def}"),
+            ))
+            .await?;
+            tracing::info!("域名链路列 sys_tenant_domain.{column} 已补建（存量库兜底）");
+        }
+    }
+
+    // ---- 2. 默认套餐种子（menu_ids = NULL = 不限制）----
+    if tenant_scalar_count(db, "sys_tenant_package").await? == 0 {
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "INSERT INTO sys_tenant_package (package_name, menu_ids, default_account_count, status, del_flag, create_by, create_time, remark) \
+                 VALUES ('标准版', NULL, 0, '0', '0', 'system', {now_expr}, 'Phase3 默认套餐：menu_ids 为空即不限制功能白名单')"
+            ),
+        ))
+        .await?;
+        tracing::info!("已种入默认租户套餐「标准版」（不限制功能白名单）");
+    }
+
+    // ---- 3. tid remap（唯一不可逆点）----
+    let tenants = tenant_scalar_count(db, "sys_tenant").await?;
+    let mapped = tenant_scalar_count(db, "sys_tenant_migration_map").await?;
+    if tenants > 0 || mapped > 0 {
+        tracing::debug!(
+            "Phase 3 换源已完成（sys_tenant={tenants} 行 / 映射={mapped} 行），跳过一次性 remap"
+        );
+        return Ok(());
+    }
+    if !sso_table_exists(db, "sys_dept").await? {
+        return Ok(());
+    }
+    let roots = db
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT dept_id, dept_name, status FROM sys_dept \
+             WHERE parent_id = 0 AND del_flag = '0' AND dept_id <> 100 ORDER BY dept_id",
+        ))
+        .await?;
+    if roots.is_empty() {
+        tracing::info!("Phase 3 换源：无旧模型租户根部门（parent_id=0 且 dept_id<>100），无需 remap");
+        return Ok(());
+    }
+
+    // 部门父子关系（BFS 求子树；不依赖 ancestors 字段，兼容 NULL/脏数据）
+    let dept_rows = db
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT dept_id, parent_id FROM sys_dept",
+        ))
+        .await?;
+    let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
+    for row in &dept_rows {
+        let Ok(id) = row.try_get::<i64>("", "dept_id") else {
+            continue;
+        };
+        if let Ok(Some(pid)) = row.try_get::<Option<i64>>("", "parent_id") {
+            children.entry(pid).or_default().push(id);
+        }
+    }
+    // 改写范围：逐个探测列存在性（极旧库后加表可能还没有 tenant_id 列）
+    let mut remap_tables: Vec<&str> = Vec::new();
+    for t in TENANT_CARRYING_TABLES {
+        if sso_table_exists(db, t).await? && sso_has_column(db, t, "tenant_id").await? {
+            remap_tables.push(t);
+        }
+    }
+    let default_pkg: Option<i64> = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT package_id FROM sys_tenant_package WHERE package_name = '标准版' AND del_flag = '0' \
+             ORDER BY package_id LIMIT 1"
+                .to_string(),
+        ))
+        .await?
+        .and_then(|r| r.try_get::<i64>("", "package_id").ok());
+
+    let txn = db.begin().await?;
+    let mut migrated = 0usize;
+    for root in &roots {
+        let Ok(root_dept_id) = root.try_get::<i64>("", "dept_id") else {
+            continue;
+        };
+        let dept_name = root
+            .try_get::<Option<String>>("", "dept_name")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("租户{root_dept_id}"));
+        let status = root
+            .try_get::<Option<String>>("", "status")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "0".to_string());
+        let code = format!("t{root_dept_id}");
+        let pkg_id: Value = match default_pkg {
+            Some(v) => v.into(),
+            None => Value::BigInt(None),
+        };
+        txn.execute(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "INSERT INTO sys_tenant (tenant_code, tenant_name, dept_id, package_id, account_count, status, del_flag, create_by, create_time, remark) \
+                 VALUES ({}, {}, {}, {}, 0, {}, '0', 'system', {now_expr}, {})",
+                ph(1),
+                ph(2),
+                ph(3),
+                ph(4),
+                ph(5),
+                ph(6)
+            ),
+            [
+                code.clone().into(),
+                dept_name.clone().into(),
+                root_dept_id.into(),
+                pkg_id,
+                status.into(),
+                "Phase3 存量换源：旧模型租户根部门（dept 树根）→ 独立 tenant_id 空间".into(),
+            ],
+        ))
+        .await?;
+        let new_tid = txn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "SELECT tenant_id FROM sys_tenant WHERE tenant_code = {}",
+                    ph(1)
+                ),
+                [code.clone().into()],
+            ))
+            .await?
+            .and_then(|r| r.try_get::<i64>("", "tenant_id").ok())
+            .filter(|v| *v > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Phase 3 换源失败：tenant_code={code} 插入后回读 tenant_id 为空")
+            })?;
+        // 映射表与业务改写同事务写入（回滚唯一依赖，禁止清理）
+        txn.execute(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "INSERT INTO sys_tenant_migration_map (old_tid, new_tenant_id, create_time, remark) \
+                 VALUES ({}, {}, {now_expr}, {})",
+                ph(1),
+                ph(2),
+                ph(3)
+            ),
+            [
+                root_dept_id.into(),
+                new_tid.into(),
+                "Phase3 remap：旧 tid（租户根 dept_id）→ 新 tenant_id（回滚=反向 UPDATE）".into(),
+            ],
+        ))
+        .await?;
+
+        // 子树 BFS（含软删部门）：顺带修复子树内 tenant_id = 0 的后代部门
+        let mut subtree = vec![root_dept_id];
+        let mut cursor = 0usize;
+        while cursor < subtree.len() {
+            let cur = subtree[cursor];
+            cursor += 1;
+            if let Some(kids) = children.get(&cur) {
+                for k in kids {
+                    if !subtree.contains(k) {
+                        subtree.push(*k);
+                    }
+                }
+            }
+        }
+        for chunk in subtree.chunks(200) {
+            let list = chunk
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            txn.execute(Statement::from_string(
+                backend,
+                format!("UPDATE sys_dept SET tenant_id = {new_tid} WHERE dept_id IN ({list})"),
+            ))
+            .await?;
+            // 子树内用户：tenant_id 仍为旧 tid，或 0（Phase 2 统一归平台）→ 新 tenant_id
+            txn.execute(Statement::from_string(
+                backend,
+                format!(
+                    "UPDATE sys_user SET tenant_id = {new_tid} \
+                     WHERE tenant_id = {root_dept_id} OR (tenant_id = 0 AND dept_id IN ({list}))"
+                ),
+            ))
+            .await?;
+        }
+        // 其余承载表（含 sys_dept / sys_user 的子树外遗留行）：旧 tid → 新 tenant_id
+        for table in &remap_tables {
+            txn.execute(Statement::from_string(
+                backend,
+                format!("UPDATE {table} SET tenant_id = {new_tid} WHERE tenant_id = {root_dept_id}"),
+            ))
+            .await?;
+        }
+        migrated += 1;
+        tracing::info!(
+            "Phase 3 换源：租户根部门 {root_dept_id}（{dept_name}）→ tenant_id={new_tid}（映射已持久化，回滚依赖）"
+        );
+    }
+    txn.commit().await?;
+    tracing::info!(
+        "多租户 Phase 3 换源完成：共迁移 {migrated} 个存量租户；sys_tenant_migration_map 为回滚唯一依赖，禁止清理"
+    );
+    Ok(())
+}
+
+/// 多租户 Phase 3.5f 存量库兜底（与迁移 m20260925_000004_tenant_saas_governance
+/// 等价，全幂等；列定义须与迁移逐列一致）：
+///
+/// 1) `sys_config` 增治理列 `scope` / `tenant_editable` / `visible_to_tenant`；
+/// 2) `sys_oper_log` 增 `target_tenant_id`（审计目标租户列，只建列不写数据）；
+/// 3) **唯一域租户化 4 项**：先幂等删旧单列唯一索引，再建 `(tenant_id, <列>)`
+///    复合唯一索引；**建索引失败只告警不阻断启动**（存量数据可能存在同租户重复 key）；
+/// 4) config 治理元数据 seed（幂等 UPDATE，只改治理列，不动 config_value）。
+///
+/// 缺此兜底时：sys_config 实体 SELECT 带治理列 → 参数配置全站 500；
+/// 旧单列唯一索引仍生效 → 租户无法自建同 key 覆盖行。
+async fn ensure_tenant_saas_governance(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // ---- 1. 幂等补列（列名/类型/默认值须与迁移 m20260925_000004 逐列一致）----
+    for (table, column, column_def) in [
+        (
+            "sys_config",
+            "scope",
+            "VARCHAR(32) NOT NULL DEFAULT 'platform_only'",
+        ),
+        (
+            "sys_config",
+            "tenant_editable",
+            "VARCHAR(1) NOT NULL DEFAULT '0'",
+        ),
+        (
+            "sys_config",
+            "visible_to_tenant",
+            "VARCHAR(1) NOT NULL DEFAULT '0'",
+        ),
+        ("sys_oper_log", "target_tenant_id", "BIGINT NULL"),
+    ] {
+        if !sso_table_exists(db, table).await? || sso_has_column(db, table, column).await? {
+            continue;
+        }
+        db.execute(Statement::from_string(
+            backend,
+            format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}"),
+        ))
+        .await?;
+        tracing::info!("多租户 SaaS 治理列 {table}.{column} 已补建（存量库兜底）");
+    }
+
+    // ---- 2. 唯一域租户化 4 项（先删旧单列唯一，再建复合唯一）----
+    for (table, old_index, new_index, columns) in [
+        (
+            "sys_role",
+            "uk_sys_role_key",
+            "uk_sys_role_tenant_key",
+            "tenant_id, role_key",
+        ),
+        (
+            "sys_user",
+            "idx_sys_user_scim_external_id",
+            "uk_sys_user_tenant_scim",
+            "tenant_id, scim_external_id",
+        ),
+        (
+            "sys_config",
+            "uk_sys_config_key",
+            "uk_sys_config_tenant_key",
+            "tenant_id, config_key",
+        ),
+        (
+            "sys_dict_type",
+            "uk_sys_dict_type",
+            "uk_sys_dict_type_tenant",
+            "tenant_id, dict_type",
+        ),
+    ] {
+        if !sso_table_exists(db, table).await? {
+            continue;
+        }
+        drop_tenant_index(db, table, old_index).await?;
+        if let Err(e) = ensure_tenant_index(db, table, new_index, columns, true).await {
+            tracing::warn!(
+                "Phase 3.5f 唯一索引 {new_index} 创建失败（存量数据可能存在同租户重复 key，不阻断启动，请人工核查）: {e}"
+            );
+        }
+    }
+
+    // ---- 3. config 治理元数据 seed（幂等 UPDATE，只改治理列）----
+    if sso_table_exists(db, "sys_config").await? {
+        let only = crate::service::sys_config_service::PLATFORM_LOCKED_KEYS
+            .iter()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let defaults = crate::service::sys_config_service::PLATFORM_DEFAULT_KEYS
+            .iter()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "UPDATE sys_config SET scope = 'platform_only', tenant_editable = '0', visible_to_tenant = '0' \
+                 WHERE config_key IN ({only})"
+            ),
+        ))
+        .await?;
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "UPDATE sys_config SET scope = 'platform_default', tenant_editable = '1', visible_to_tenant = '1' \
+                 WHERE config_key IN ({defaults})"
+            ),
+        ))
+        .await?;
+    }
+
+    tracing::info!("多租户 Phase 3 SaaS 治理模块已就绪（幂等确保完成）");
+    Ok(())
+}
+
+/// 3.5g 多租户 Phase 3.5g 存量库兜底：与迁移 `m20260925_000005_tenant_unique_scope`
+/// 等价（**双写关系，修改时必须两处同步**——启动不跑 `Migrator::up`）。
+///
+/// 剩余唯一域租户化 2 项（先删旧单列唯一，再建含 tenant_id 的复合唯一）：
+/// - `sys_flow_task`：业务键唯一（biz_type/biz_id/...）改为租户内唯一；
+/// - `sys_scim_group`：`external_id`（IdP 标识）改为租户内唯一。
+///
+/// 缺此兜底时：不同租户使用相同业务键 / externalId 会互相顶撞（第二个租户写入失败）。
+async fn ensure_tenant_unique_scope(db: &DatabaseConnection) -> anyhow::Result<()> {
+    for (table, old_index, new_index, columns) in [
+        (
+            "sys_flow_task",
+            "uk_flow_task_biz",
+            "uk_flow_task_tenant_biz",
+            "tenant_id, biz_type, biz_id, round_no, node_seq, assignee_id",
+        ),
+        (
+            "sys_scim_group",
+            "uk_scim_group_external_id",
+            "uk_scim_group_tenant_external",
+            "tenant_id, external_id",
+        ),
+    ] {
+        if !sso_table_exists(db, table).await? {
+            continue;
+        }
+        drop_tenant_index(db, table, old_index).await?;
+        if let Err(e) = ensure_tenant_index(db, table, new_index, columns, true).await {
+            tracing::warn!(
+                "Phase 3.5g 唯一索引 {new_index} 创建失败（存量数据可能存在同租户重复键，不阻断启动，请人工核查）: {e}"
+            );
+        }
+    }
+    tracing::info!("多租户 Phase 3.5g 唯一域租户化模块已就绪（幂等确保完成）");
+    Ok(())
+}
+
+/// Phase 3.5h 租户角色菜单治理回填（存量库兜底，幂等）：**一剔一补**。
+///
+/// ① **剔除**平台专属菜单：域名管理接口组（`system:tenant:domain:*`）整体为平台专属
+///    （服务层对租户一律 403），存量租户管理员角色因继承平台普通角色而持有
+///    `domain:list` / `domain:verify` → "菜单可见但请求一律 403"的假入口，
+///    此处从非平台租户角色中移除该前缀菜单授权（幂等，重复执行为 0 行）。
+/// ② **补齐**租户自助能力按钮：租户默认管理员角色的菜单 = 平台普通角色菜单 ∩ 套餐白名单，
+///    而平台普通角色只有 config/dict 的 list/query，缺 add/edit/remove 按钮 perms →
+///    存量租户自建字典类型 / 覆盖 `platform_default` 键 / 自建 `tenant_private` 键的
+///    写入链路一律 403（链路断裂）。新建租户已由 `SysTenantService::add` 并入
+///    [`TENANT_SELF_SERVICE_PERMS`]，存量租户在此回填：
+///    - **最小补齐**：仅补缺失授权，不回收①以外的任何已有授权；
+///    - 候选角色 = 非平台租户（`tenant_id <> 0`）、未删除、且已持有 dict/config
+///      **列表**菜单的"管理型角色"（只读角色不会因此获得写权限）；
+///    - 受套餐白名单约束（`menu_ids` 为空 = 不限制；非空则仅补白名单内菜单）。
+///
+/// 无迁移孪生：纯数据治理修复（依赖 sys_menu 实时 perms 集合与租户角色现状），非 schema 变更。
+async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let self_service_perms = crate::service::sys_tenant_service::TENANT_SELF_SERVICE_PERMS;
+    let excluded_prefix = crate::service::sys_tenant_service::TENANT_ROLE_EXCLUDED_PERM_PREFIX;
+    const LIST_PERMS: [&str; 2] = ["system:config:list", "system:dict:list"];
+
+    if !sso_table_exists(db, "sys_role_menu").await?
+        || !sso_table_exists(db, "sys_role").await?
+        || !sso_table_exists(db, "sys_menu").await?
+    {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let ph = |i: usize| -> String {
+        if backend == DatabaseBackend::Postgres {
+            format!("${i}")
+        } else {
+            "?".to_string()
+        }
+    };
+
+    // ---- ① 剔除平台专属菜单（域名管理）----
+    let removed = db
+        .execute(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "DELETE FROM sys_role_menu WHERE menu_id IN (\
+                   SELECT menu_id FROM sys_menu WHERE perms LIKE {}) \
+                 AND role_id IN (\
+                   SELECT role_id FROM sys_role WHERE tenant_id <> 0 AND del_flag = '0')",
+                ph(1)
+            ),
+            [format!("{excluded_prefix}%").into()],
+        ))
+        .await?;
+    if removed.rows_affected() > 0 {
+        tracing::info!(
+            removed = removed.rows_affected(),
+            "Phase 3.5h 已剔除租户角色中的平台专属菜单（域名管理）授权"
+        );
+    }
+
+    // 1) 目标 perms → menu_id（仅启用、未删除；缺菜单的 perms 跳过，不阻断启动）
+    let wanted: Vec<&str> = self_service_perms
+        .iter()
+        .chain(LIST_PERMS.iter())
+        .copied()
+        .collect();
+    let placeholders = (1..=wanted.len())
+        .map(ph)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let menu_rows = db
+        .query_all(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "SELECT menu_id, perms FROM sys_menu WHERE status = '0' AND del_flag = '0' AND perms IN ({placeholders})"
+            ),
+            wanted.iter().map(|p| (*p).into()).collect::<Vec<Value>>(),
+        ))
+        .await?;
+    let mut perm_menu: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for row in &menu_rows {
+        let menu_id = row.try_get::<i64>("", "menu_id").ok();
+        let perms = row.try_get::<Option<String>>("", "perms").ok().flatten();
+        if let (Some(menu_id), Some(perms)) = (menu_id, perms) {
+            perm_menu.entry(perms).or_insert(menu_id);
+        }
+    }
+    let mut targets: Vec<i64> = self_service_perms
+        .iter()
+        .filter_map(|p| perm_menu.get(*p).copied())
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.is_empty() {
+        tracing::info!("Phase 3.5h 自助能力菜单不存在，跳过权限回填");
+        return Ok(());
+    }
+    let list_menu_ids: Vec<i64> = LIST_PERMS
+        .iter()
+        .filter_map(|p| perm_menu.get(*p).copied())
+        .collect();
+    if list_menu_ids.is_empty() {
+        tracing::info!("Phase 3.5h 未找到 dict/config 列表菜单，跳过权限回填");
+        return Ok(());
+    }
+
+    // 2) 候选角色：非平台、未删除、已持有列表菜单
+    let list_ph = (1..=list_menu_ids.len())
+        .map(ph)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let role_rows = db
+        .query_all(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "SELECT DISTINCT rm.role_id AS role_id, r.tenant_id AS tenant_id \
+                 FROM sys_role_menu rm \
+                 JOIN sys_role r ON r.role_id = rm.role_id \
+                 WHERE r.tenant_id <> 0 AND r.del_flag = '0' AND rm.menu_id IN ({list_ph})"
+            ),
+            list_menu_ids
+                .iter()
+                .map(|id| (*id).into())
+                .collect::<Vec<Value>>(),
+        ))
+        .await?;
+    if role_rows.is_empty() {
+        // 无候选角色（无租户角色 / 无持有 config·dict 列表菜单的管理型角色）：
+        // 属正常幂等路径（新租户建租时已并入自助 perms，无需回填），
+        // 但仍打日志，避免"回填是否执行过"不可观测。
+        tracing::info!("Phase 3.5h 无待回填的租户管理型角色（候选为空，跳过自助权限补齐）");
+        return Ok(());
+    }
+
+    // 3) 套餐白名单（None = 不限制）
+    let pkg_rows = db
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT t.tenant_id AS tenant_id, p.menu_ids AS menu_ids \
+             FROM sys_tenant t LEFT JOIN sys_tenant_package p ON p.package_id = t.package_id"
+                .to_string(),
+        ))
+        .await?;
+    let mut whitelist: std::collections::HashMap<i64, Option<std::collections::HashSet<i64>>> =
+        std::collections::HashMap::new();
+    for row in &pkg_rows {
+        let Some(tid) = row.try_get::<i64>("", "tenant_id").ok() else {
+            continue;
+        };
+        let raw = row.try_get::<Option<String>>("", "menu_ids").ok().flatten();
+        // 复用服务层解析口径（空/NULL = 不限制），避免两处语义漂移
+        let parsed = crate::service::sys_tenant_service::parse_menu_ids(&raw)
+            .map(|ids| ids.into_iter().collect::<std::collections::HashSet<i64>>());
+        whitelist.insert(tid, parsed);
+    }
+
+    // 4) 现有授权 → 差集插入
+    let mut candidates: Vec<(i64, i64)> = Vec::new();
+    for row in &role_rows {
+        let role_id = row.try_get::<i64>("", "role_id").ok();
+        let tenant_id = row.try_get::<i64>("", "tenant_id").ok();
+        if let (Some(role_id), Some(tenant_id)) = (role_id, tenant_id) {
+            candidates.push((role_id, tenant_id));
+        }
+    }
+    let role_ph = (1..=candidates.len())
+        .map(ph)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let granted_rows = db
+        .query_all(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "SELECT role_id, menu_id FROM sys_role_menu WHERE role_id IN ({role_ph})"
+            ),
+            candidates
+                .iter()
+                .map(|(rid, _)| (*rid).into())
+                .collect::<Vec<Value>>(),
+        ))
+        .await?;
+    let mut granted: std::collections::HashMap<i64, std::collections::HashSet<i64>> =
+        std::collections::HashMap::new();
+    for row in &granted_rows {
+        let role_id = row.try_get::<i64>("", "role_id").ok();
+        let menu_id = row.try_get::<i64>("", "menu_id").ok();
+        if let (Some(role_id), Some(menu_id)) = (role_id, menu_id) {
+            granted.entry(role_id).or_default().insert(menu_id);
+        }
+    }
+
+    let mut inserted = 0u64;
+    for (role_id, tenant_id) in candidates {
+        let allowed = match whitelist.get(&tenant_id) {
+            Some(Some(set)) => targets
+                .iter()
+                .copied()
+                .filter(|id| set.contains(id))
+                .collect::<Vec<i64>>(),
+            // 无套餐限制（或租户行缺失）：全量补齐
+            _ => targets.clone(),
+        };
+        for menu_id in allowed {
+            if granted.get(&role_id).is_some_and(|s| s.contains(&menu_id)) {
+                continue;
+            }
+            db.execute(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "INSERT INTO sys_role_menu (role_id, menu_id) VALUES ({}, {})",
+                    ph(1),
+                    ph(2)
+                ),
+                [role_id.into(), menu_id.into()],
+            ))
+            .await?;
+            inserted += 1;
+        }
+    }
+    tracing::info!(
+        inserted,
+        roles = granted.len(),
+        "多租户 Phase 3.5h 租户角色菜单治理完成（幂等：剔除平台专属菜单 + 补齐自助按钮授权）"
+    );
+    Ok(())
+}
+
+/// 存量上传路径回填（3.5i，幂等）：把租户文件隔离**之前**写入的扁平引用改为租户维度。
+///
+/// 隔离前：文件落在 `uploads/{kind}/{key}`，DB 存 `/uploads/{kind}/{key}`；
+/// 隔离后：文件落在 `uploads/{tid}/{kind}/{key}`，URL 为 `/{prefix}/{tid}/{key}`，
+/// 且 `GET /uploads/*` 严格按三段解析（`{tid}/{kind}/{key}`）——旧引用段数不足会被判
+/// 路径非法 → **400**（表现为全站头像破图、附件预览失败）。
+///
+/// 处置（逐行、幂等）：
+/// - 第二段已是数字（`/uploads/{tid}/...`）→ 跳过；
+/// - 目标文件已就位 → 只改写 DB 引用；
+/// - 遗留文件存在而目标缺失 → 迁移文件（同盘 rename，跨盘回退 copy+delete）后改写 DB；
+/// - 两侧文件都不存在 → 打 `warn` 跳过该行（改写引用只会把 400 变成 404，无收益）。
+///
+/// 仅 `local` 后端执行：`s3` 后端不存在扁平历史布局（对象键自隔离上线即为租户维度）。
+/// 扫描列：`sys_user.avatar`（全库扫描确认唯一存在活引用的列为该列）。
+async fn ensure_legacy_upload_paths(
+    db: &DatabaseConnection,
+    upload_cfg: &crate::config::UploadConfig,
+) -> anyhow::Result<()> {
+    if upload_cfg.backend != "local" {
+        return Ok(());
+    }
+    if !sso_table_exists(db, "sys_user").await?
+        || !sso_has_column(db, "sys_user", "avatar").await?
+    {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let ph = |i: usize| -> String {
+        if backend == DatabaseBackend::Postgres {
+            format!("${i}")
+        } else {
+            "?".to_string()
+        }
+    };
+    let rows = db
+        .query_all(Statement::from_string(
+            backend,
+            "SELECT user_id, tenant_id, avatar FROM sys_user WHERE avatar LIKE '/uploads/%'".to_string(),
+        ))
+        .await?;
+
+    let (mut migrated, mut moved, mut skipped) = (0u64, 0u64, 0u64);
+    for row in &rows {
+        let Some(user_id) = row.try_get::<i64>("", "user_id").ok() else {
+            continue;
+        };
+        let tenant_id = row.try_get::<i64>("", "tenant_id").ok().unwrap_or(0);
+        let Some(avatar) = row.try_get::<Option<String>>("", "avatar").ok().flatten() else {
+            continue;
+        };
+        let segs: Vec<&str> = avatar.trim_matches('/').split('/').collect();
+        // 仅处理扁平旧式引用；其余形态（已是租户维度 / 外部 URL / 段数异常）不动
+        if segs.len() != 3 || segs[0] != "uploads" || segs[1].parse::<i64>().is_ok() {
+            continue;
+        }
+        let (kind, key) = (segs[1], segs[2]);
+        let Some(dir) = crate::common::upload::resolve_kind_dir(upload_cfg, kind) else {
+            tracing::warn!(user_id, avatar = %avatar, "存量上传路径回填：未知文件类别，跳过");
+            skipped += 1;
+            continue;
+        };
+        let url_prefix = if kind == "avatar" {
+            upload_cfg.avatar_url_prefix.as_str()
+        } else {
+            upload_cfg.common_url_prefix.as_str()
+        };
+        if !crate::storage::valid_key(key) {
+            tracing::warn!(user_id, avatar = %avatar, "存量上传路径回填：文件名非法，跳过");
+            skipped += 1;
+            continue;
+        }
+
+        let legacy_path = crate::common::upload::resolve_upload_dir(&dir).await.join(key);
+        let target_dir = crate::storage::dir_path(&dir, tenant_id).await;
+        let target_path = target_dir.join(key);
+        let (lp, td, tp) = (
+            legacy_path.to_string_lossy().to_string(),
+            target_dir.to_string_lossy().to_string(),
+            target_path.to_string_lossy().to_string(),
+        );
+        let outcome = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+            let (legacy, target) = (std::path::Path::new(&lp), std::path::Path::new(&tp));
+            if target.exists() {
+                return Ok(false); // 文件已就位，无需搬动
+            }
+            if !legacy.exists() {
+                return Ok(false);
+            }
+            std::fs::create_dir_all(&td)?;
+            if std::fs::rename(legacy, target).is_err() {
+                std::fs::copy(legacy, target)?;
+                std::fs::remove_file(legacy)?;
+            }
+            Ok(true)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("存量上传路径回填任务失败: {e}"))?;
+
+        match outcome {
+            Ok(did_move) => {
+                if !did_move && !target_path.exists() {
+                    tracing::warn!(
+                        user_id,
+                        avatar = %avatar,
+                        "存量上传路径回填：遗留文件与目标文件均不存在，保留原引用待人工处置"
+                    );
+                    skipped += 1;
+                    continue;
+                }
+                if did_move {
+                    moved += 1;
+                }
+                let new_url = format!(
+                    "{}/{}",
+                    crate::storage::tenant_scoped_path(url_prefix, tenant_id).trim_end_matches('/'),
+                    key
+                );
+                db.execute(Statement::from_sql_and_values(
+                    backend,
+                    format!(
+                        "UPDATE sys_user SET avatar = {} WHERE user_id = {}",
+                        ph(1),
+                        ph(2)
+                    ),
+                    [new_url.into(), user_id.into()],
+                ))
+                .await?;
+                migrated += 1;
+            }
+            Err(e) => {
+                tracing::warn!(user_id, avatar = %avatar, error = %e, "存量上传路径回填：文件迁移失败，跳过该行");
+                skipped += 1;
+            }
+        }
+    }
+
+    tracing::info!(
+        migrated,
+        moved,
+        skipped,
+        scanned = rows.len(),
+        "存量上传路径回填完成（幂等：扁平 uploads/kind/key → prefix/tid/key，缺 tid 段的历史引用已租户化）"
+    );
+    Ok(())
+}
+
+/// 方言感知的幂等删索引：SQLite/PostgreSQL 用 `DROP INDEX IF EXISTS`；
+/// MySQL 无该从句，先查 information_schema.statistics 判存在再 `DROP INDEX ... ON table`。
+async fn drop_tenant_index(
+    db: &DatabaseConnection,
+    table: &str,
+    index_name: &str,
+) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    match backend {
+        DatabaseBackend::MySql => {
+            let exists = db
+                .query_all(Statement::from_string(
+                    backend,
+                    format!(
+                        "SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='{table}' AND index_name='{index_name}' LIMIT 1"
+                    ),
+                ))
+                .await?;
+            if !exists.is_empty() {
+                db.execute(Statement::from_string(
+                    backend,
+                    format!("DROP INDEX {index_name} ON {table}"),
+                ))
+                .await?;
+            }
+            Ok(())
+        }
+        _ => {
+            db.execute(Statement::from_string(
+                backend,
+                format!("DROP INDEX IF EXISTS {index_name}"),
+            ))
+            .await?;
+            Ok(())
+        }
+    }
+}
+
+/// 标量计数（三方言；表不存在时返回 0，供幂等探测用）
+async fn tenant_scalar_count(db: &DatabaseConnection, table: &str) -> anyhow::Result<i64> {
+    if !sso_table_exists(db, table).await? {
+        return Ok(0);
+    }
+    let backend = db.get_database_backend();
+    let row = db
+        .query_one(Statement::from_string(
+            backend,
+            format!("SELECT COUNT(*) AS c FROM {table}"),
+        ))
+        .await?;
+    Ok(row
+        .and_then(|r| r.try_get::<i64>("", "c").ok())
+        .unwrap_or(0))
+}
+
 /// 方言感知的幂等索引创建：SQLite/PostgreSQL 直接 `CREATE INDEX IF NOT EXISTS`；
 /// MySQL 不支持该子句，先查 information_schema.statistics 判存在，缺失才建
 /// （补齐此前"MySQL 跳过、依赖 migration 补齐"的方言缺口——存量库不跑 migration）。
+/// `unique = true` 时建 `CREATE UNIQUE INDEX`。
 async fn ensure_tenant_index(
     db: &DatabaseConnection,
     table: &str,
     index_name: &str,
     columns: &str,
+    unique: bool,
 ) -> anyhow::Result<()> {
     let backend = db.get_database_backend();
+    let kind = if unique { "UNIQUE " } else { "" };
     match backend {
         DatabaseBackend::MySql => {
             let exists = db
@@ -1351,7 +2447,7 @@ async fn ensure_tenant_index(
             }
             db.execute(Statement::from_string(
                 backend,
-                format!("CREATE INDEX {index_name} ON {table} ({columns})"),
+                format!("CREATE {kind}INDEX {index_name} ON {table} ({columns})"),
             ))
             .await?;
             Ok(())
@@ -1359,7 +2455,7 @@ async fn ensure_tenant_index(
         _ => {
             db.execute(Statement::from_string(
                 backend,
-                format!("CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"),
+                format!("CREATE {kind}INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"),
             ))
             .await?;
             Ok(())

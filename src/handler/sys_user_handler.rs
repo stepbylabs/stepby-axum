@@ -37,7 +37,7 @@ use crate::common::{AjaxResult, AppError, TableDataInfo, TreeSelectVo};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::Model as SysUserModel;
-use crate::middleware::Operator;
+use crate::middleware::{Operator, TargetTenant};
 use crate::service::sys_user_service::{
     ImportResultVo, ProfileUpdateDto, UserAddDto, UserAuthRoleVo, UserEditDto, UserPwdResetDto,
     UserPwdUpdateDto, UserQueryDto, UserVo,
@@ -330,9 +330,10 @@ pub async fn import_data(
     }
 
     // 默认初始密码（读系统配置，读取失败回退与迁移种子一致）
+    // 多租户 Phase 3：显式传入操作者租户，租户级覆盖优先于平台默认层
     let default_password = state
         .config_service
-        .get_config_value_by_key_cached("sys.user.initPassword")
+        .get_config_value_by_key_cached("sys.user.initPassword", Some(operator.tenant_id()))
         .await
         .ok()
         .flatten()
@@ -345,6 +346,7 @@ pub async fn import_data(
             bytes,
             query.update_support == 1,
             operator.username(),
+            operator.tenant_id(),
             &default_password,
         )
         .await?;
@@ -387,7 +389,11 @@ pub async fn get_info_by_id(
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
     let vo = state
         .user_service
-        .get_user_form_data(Some(user_id), operator_user_id)
+        .get_user_form_data(
+            Some(user_id),
+            operator_user_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(UserFormResult {
         code: 200,
@@ -419,7 +425,7 @@ pub async fn add(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let user = state
         .user_service
-        .add_user(dto, operator.username())
+        .add_user(dto, operator.username(), operator.tenant_id())
         .await?;
     // 对齐前端：新增返回提示消息
     Ok(AjaxResult::success_msg(&crate::tr!(
@@ -444,15 +450,20 @@ pub async fn add(
 pub async fn edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    target_tenant: TargetTenant,
     Json(dto): Json<UserEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let operator_user_id: i64 = operator
         .user_id()
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
+    // 多租户 Phase 3：记录被操作用户所属租户，供审计 target_tenant_id（平台代管场景）
+    if let Ok(vo) = state.user_service.get_user_by_id(dto.user_id).await {
+        target_tenant.set(vo.user.tenant_id);
+    }
     state
         .user_service
-        .edit_user(dto, operator.username(), operator_user_id)
+        .edit_user(dto, operator.username(), operator_user_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -478,6 +489,7 @@ pub async fn edit(
 pub async fn remove(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    target_tenant: TargetTenant,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let operator_user_id: i64 = operator
@@ -500,6 +512,26 @@ pub async fn remove(
 
     // 单个 ID 走原路径（保持现有垂直越权校验语义）
     // 批量 ID 调用新增的 delete_users 事务方法（原子性保证）
+    // 多租户 Phase 3：解析被删用户所属租户，全部可解析且唯一时记录审计 target_tenant_id
+    // （跨多个租户或存在解析失败时保持 NULL，避免误标归属）
+    {
+        let mut resolved: Vec<i64> = Vec::new();
+        let mut all_resolved = true;
+        for uid in &user_ids {
+            match state.user_service.get_user_by_id(*uid).await {
+                Ok(vo) => {
+                    if !resolved.contains(&vo.user.tenant_id) {
+                        resolved.push(vo.user.tenant_id);
+                    }
+                }
+                Err(_) => all_resolved = false,
+            }
+        }
+        if all_resolved && resolved.len() == 1 {
+            target_tenant.set(resolved[0]);
+        }
+    }
+
     let deleted_user_ids = user_ids.clone();
     state
         .user_service
@@ -787,9 +819,17 @@ pub async fn update_profile(
 /// roleIds/postIds 为空数组，roles/posts 为全部可用列表。
 pub async fn get_roles_for_user_form(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<UserFormResult, AppError> {
-    // 新增表单场景（None）：不校验目标用户（无目标），roles/posts 下拉保持全量
-    let vo = state.user_service.get_user_form_data(None, None).await?;
+    // 新增表单场景（None）：不校验目标用户（无目标），roles/posts 下拉按操作者租户过滤
+    let vo = state
+        .user_service
+        .get_user_form_data(
+            None,
+            None,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(UserFormResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),
@@ -833,8 +873,18 @@ pub async fn auth_role(
 /// 部门下拉树（对齐前端 deptTreeSelect，返回 AjaxResult<Vec<TreeSelectVo>>）
 pub async fn dept_tree_select(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<Vec<TreeSelectVo>>, AppError> {
-    let tree = state.user_service.get_dept_tree().await?;
+    // P0-6 / 多租户：走 dept_service 统一入口，同时应用 data_scope 与租户过滤
+    // （此前调用 user_service.get_dept_tree 无任何过滤，可枚举全平台部门）
+    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let tree = state
+        .dept_service
+        .build_dept_tree_select(
+            operator_user_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
     Ok(AjaxResult::success(tree))
 }
 
@@ -854,7 +904,11 @@ pub async fn auth_role_get(
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     let vo: UserAuthRoleVo = state
         .user_service
-        .get_auth_role(user_id, operator_user_id)
+        .get_auth_role(
+            user_id,
+            operator_user_id,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(AuthRoleResult {
         code: 200,
@@ -907,6 +961,7 @@ pub async fn avatar_upload(
         file_ext.as_deref(),
         None,
         upload_cfg,
+        operator.tenant_id(),
         crate::common::upload::UploadKind::Avatar,
     )
     .await?;
@@ -922,9 +977,10 @@ pub async fn avatar_upload(
         && !old_filename.is_empty()
         && old_filename != filename
     {
+        // 旧头像文件位于同一租户目录内（URL 形如 /uploads/{tid}/avatar/xxx.png）
         let result = state
             .storage
-            .delete(&upload_cfg.avatar_dir, old_filename)
+            .delete(&upload_cfg.avatar_dir, operator.tenant_id(), old_filename)
             .await;
         if let Err(e) = &result {
             tracing::warn!(

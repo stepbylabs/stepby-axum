@@ -198,8 +198,14 @@ impl SysLogininforService {
     }
 
     /// 登录统计：最近 N 天每天成功/失败次数（首页仪表盘用）
-    pub async fn daily_stats(&self, days: i64) -> Result<Vec<LoginDailyStat>, ServiceError> {
-        let rows = self.logininfor_repo.daily_stats(days).await?;
+    ///
+    /// tenant_scope=Some(t) 时按租户维度统计（报表快照等按租户）。
+    pub async fn daily_stats(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<LoginDailyStat>, ServiceError> {
+        let rows = self.logininfor_repo.daily_stats(days, tenant_scope).await?;
         Ok(rows
             .into_iter()
             .map(|(date, success, fail)| LoginDailyStat {
@@ -225,8 +231,14 @@ impl SysLogininforService {
     }
 
     /// 统计今日登录失败的不重复 IP 数（dashboard stats 用）
-    pub async fn count_today_failed_ips(&self) -> Result<i64, ServiceError> {
-        Ok(self.logininfor_repo.count_today_failed_ips().await?)
+    pub async fn count_today_failed_ips(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<i64, ServiceError> {
+        Ok(self
+            .logininfor_repo
+            .count_today_failed_ips(tenant_scope)
+            .await?)
     }
 
     /// 查询在线用户（最近 30 分钟内登录成功的记录）
@@ -251,6 +263,7 @@ impl SysLogininforService {
         &self,
         ipaddr: Option<&str>,
         user_name: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysLogininforModel>, ServiceError> {
         let since = crate::common::datetime::now_naive() - chrono::Duration::minutes(30);
         let rows = self
@@ -260,6 +273,7 @@ impl SysLogininforService {
                 ipaddr,
                 user_name,
                 crate::common::constants::DROPDOWN_MAX_ROWS,
+                tenant_scope,
             )
             .await?;
         Ok(rows)

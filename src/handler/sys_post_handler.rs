@@ -18,7 +18,7 @@ use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_post::Model as SysPostModel;
-use crate::middleware::Operator;
+use crate::middleware::{Operator, TargetTenant};
 use crate::service::sys_post_service::{PostAddDto, PostEditDto, PostQueryDto};
 use crate::state::AppState;
 use crate::utils::parse_id_list;
@@ -63,8 +63,12 @@ pub async fn list(
 )]
 pub async fn optionselect(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<Vec<SysPostModel>>, AppError> {
-    let rows = state.post_service.get_post_options().await?;
+    let rows = state
+        .post_service
+        .get_post_options(crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(rows))
 }
 
@@ -109,7 +113,7 @@ pub async fn add(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .post_service
-        .add_post(dto, operator.username())
+        .add_post(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
@@ -130,11 +134,16 @@ pub async fn add(
 pub async fn edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    target_tenant: TargetTenant,
     ValidatedJson(dto): ValidatedJson<PostEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
+    // 多租户 Phase 3：记录被操作岗位所属租户，供审计 target_tenant_id（平台代管场景）
+    if let Ok(post) = state.post_service.get_post_by_id(dto.post_id).await {
+        target_tenant.set(post.tenant_id);
+    }
     state
         .post_service
-        .edit_post(dto, operator.username())
+        .edit_post(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -155,6 +164,8 @@ pub async fn edit(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
+    target_tenant: TargetTenant,
     Path(post_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&post_ids);
@@ -170,7 +181,30 @@ pub async fn remove(
         )));
     }
 
-    state.post_service.delete_posts(ids).await?;
+    // 多租户 Phase 3：解析被删岗位所属租户，全部可解析且唯一时记录审计 target_tenant_id
+    // （跨多个租户或存在解析失败时保持 NULL，避免误标归属）
+    {
+        let mut resolved: Vec<i64> = Vec::new();
+        let mut all_resolved = true;
+        for pid in &ids {
+            match state.post_service.get_post_by_id(*pid).await {
+                Ok(post) => {
+                    if !resolved.contains(&post.tenant_id) {
+                        resolved.push(post.tenant_id);
+                    }
+                }
+                Err(_) => all_resolved = false,
+            }
+        }
+        if all_resolved && resolved.len() == 1 {
+            target_tenant.set(resolved[0]);
+        }
+    }
+
+    state
+        .post_service
+        .delete_posts(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 

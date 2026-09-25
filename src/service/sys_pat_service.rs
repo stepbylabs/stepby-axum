@@ -79,6 +79,9 @@ pub struct VerifiedPat {
     pub user_id: i64,
     pub username: String,
     pub scopes: Vec<String>,
+    /// Phase 3：令牌归属租户（随 token 行带出，供鉴权中间件合成 claims.tid 与
+    /// 租户生命周期闸门判定；PAT 属用户级凭据，租户随用户）
+    pub tenant_id: i64,
 }
 
 /// 个人访问令牌 Service
@@ -197,14 +200,20 @@ impl SysPatService {
     }
 
     /// 管理员分页列表（可含全部，联属主用户名）
+    ///
+    /// `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户令牌；平台 → `None` 全量。
     pub async fn list_all(
         &self,
         user_id: Option<i64>,
         page_num: u64,
         page_size: u64,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<PatVo>, u64), ServiceError> {
         let (offset, limit) = page_args(page_num, page_size);
-        let (rows, total) = self.pat_repo.find_page_all(user_id, offset, limit).await?;
+        let (rows, total) = self
+            .pat_repo
+            .find_page_all(user_id, offset, limit, tenant_scope)
+            .await?;
         let ids: Vec<i64> = rows.iter().map(|r| r.user_id).collect();
         let names: std::collections::HashMap<i64, String> = self
             .pat_repo
@@ -282,6 +291,7 @@ impl SysPatService {
             user_id: row.user_id,
             username: row.create_by.clone(),
             scopes,
+            tenant_id: row.tenant_id,
         }))
     }
 

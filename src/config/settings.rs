@@ -232,6 +232,11 @@ pub struct ScimConfig {
     /// enabled=true 时必须非空且 ≥32 字符（SCIM_BEARER_TOKEN 环境变量注入）。
     #[serde(default)]
     pub bearer_token: String,
+    /// SCIM 凭据归属租户（v5-N2 Phase 3 收口）：该凭据 provisioning 出的用户/组
+    /// 归属此租户，读路径亦按此租户过滤。0 = 平台租户（全局 provisioning，不过滤）。
+    /// 通过 SCIM_TENANT_ID 环境变量注入。
+    #[serde(default)]
+    pub tenant_id: i64,
 }
 
 impl Default for ScimConfig {
@@ -239,6 +244,7 @@ impl Default for ScimConfig {
         Self {
             enabled: default_scim_disabled(),
             bearer_token: String::new(),
+            tenant_id: 0,
         }
     }
 }
@@ -949,6 +955,12 @@ impl Settings {
         }
         if let Ok(v) = std::env::var("SCIM_BEARER_TOKEN") {
             self.scim.bearer_token = v;
+        }
+        // v5-N2 Phase 3：SCIM 凭据归属租户（0=平台租户；非 0 时 provisioning 归属该租户）
+        if let Ok(v) = std::env::var("SCIM_TENANT_ID")
+            && let Ok(n) = v.parse::<i64>()
+        {
+            self.scim.tenant_id = n;
         }
     }
 

@@ -31,6 +31,8 @@ impl SysTaskRepository {
     }
 
     /// 多条件分页查询
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户任务；None（平台 0）不过滤。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -41,8 +43,12 @@ impl SysTaskRepository {
         operator: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysTask::find();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(tt) = task_type {
             query = query.filter(Column::TaskType.eq(tt));
         }

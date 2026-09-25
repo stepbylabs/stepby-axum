@@ -201,7 +201,7 @@ pub async fn export(
         };
         let task = state
             .task_service
-            .create_task(dto, "system", &state)
+            .create_task(dto, "system", operator.tenant_id(), &state)
             .await
             .ok();
         task.map(|t| t.task_id)
@@ -382,10 +382,15 @@ fn default_page_size() -> u64 {
 )]
 pub async fn stats(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<AjaxResult<AuditStatsVo>, AppError> {
     let days = params.days.unwrap_or(30).clamp(1, 365);
-    let vo = state.oper_log_service.get_audit_stats(days).await?;
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
+    let vo = state
+        .oper_log_service
+        .get_audit_stats(days, tenant_scope)
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -405,8 +410,13 @@ pub async fn stats(
 )]
 pub async fn stats_by_type(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<OperLogTypeStatsVo>, AppError> {
-    let vo = state.oper_log_service.oper_log_type_stats().await?;
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
+    let vo = state
+        .oper_log_service
+        .oper_log_type_stats(tenant_scope)
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -436,10 +446,15 @@ pub struct AuditStatsQuery {
 )]
 pub async fn compliance_report(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<AjaxResult<ComplianceReportVo>, AppError> {
     let days = params.days.unwrap_or(30).clamp(1, 365);
-    let vo = state.oper_log_service.get_compliance_report(days).await?;
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
+    let vo = state
+        .oper_log_service
+        .get_compliance_report(days, tenant_scope)
+        .await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -474,15 +489,17 @@ pub struct AlarmStatusQuery {
 )]
 pub async fn alarm_status(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(params): Query<AlarmStatusQuery>,
 ) -> Result<AjaxResult<AlarmStatusVo>, AppError> {
     // 读系统配置（带默认值），返回失效时回退默认
     let window_minutes = match params.window_minutes {
         Some(v) => v.clamp(1, 1440),
         None => {
+            // 多租户 Phase 3：告警阈值为 platform_only 安全底线，无操作人上下文，按平台默认层读取（None）
             let v = state
                 .config_service
-                .get_config_value_by_key_cached("sys.audit.alarm.window_minutes")
+                .get_config_value_by_key_cached("sys.audit.alarm.window_minutes", None)
                 .await
                 .ok()
                 .flatten()
@@ -493,9 +510,10 @@ pub async fn alarm_status(
     let fail_threshold = match params.fail_threshold {
         Some(v) => v.max(1),
         None => {
+            // 多租户 Phase 3：告警阈值为 platform_only 安全底线，无操作人上下文，按平台默认层读取（None）
             let v = state
                 .config_service
-                .get_config_value_by_key_cached("sys.audit.alarm.fail_threshold")
+                .get_config_value_by_key_cached("sys.audit.alarm.fail_threshold", None)
                 .await
                 .ok()
                 .flatten()
@@ -506,9 +524,10 @@ pub async fn alarm_status(
     let fail_rate_threshold = match params.fail_rate_threshold {
         Some(v) => v.clamp(0, 100),
         None => {
+            // 多租户 Phase 3：告警阈值为 platform_only 安全底线，无操作人上下文，按平台默认层读取（None）
             let v = state
                 .config_service
-                .get_config_value_by_key_cached("sys.audit.alarm.fail_rate_threshold")
+                .get_config_value_by_key_cached("sys.audit.alarm.fail_rate_threshold", None)
                 .await
                 .ok()
                 .flatten()
@@ -517,9 +536,10 @@ pub async fn alarm_status(
         }
     };
 
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let vo = state
         .oper_log_service
-        .get_alarm_status(window_minutes, fail_threshold, fail_rate_threshold)
+        .get_alarm_status(window_minutes, fail_threshold, fail_rate_threshold, tenant_scope)
         .await?;
     Ok(AjaxResult::success(vo))
 }

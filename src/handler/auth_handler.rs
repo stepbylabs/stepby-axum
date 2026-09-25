@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use utoipa::ToSchema;
 
 use crate::common::{AjaxResult, AppError};
-use crate::middleware::Operator;
+use crate::middleware::{HostTenant, Operator};
 use crate::service::auth_service::{
     CaptchaVo, GetInfoVo, LoginDto, RegisterDto, RouterVo, UnlockScreenDto,
 };
@@ -89,6 +89,7 @@ pub async fn captcha(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    host_tenant: HostTenant,
 ) -> Result<CaptchaResult, AppError> {
     // 提取客户端 IP，用于验证码绑定（防止跨 IP 重放）
     let ip = extract_client_ip(
@@ -97,7 +98,11 @@ pub async fn captcha(
         &state.config.server.trusted_proxies,
     );
     let mut redis = state.redis.clone();
-    let vo: CaptchaVo = state.auth_service.generate_captcha(&mut redis, &ip).await?;
+    // 多租户 Phase 3：透传 host 解析出的租户上下文（匿名路径无登录态）
+    let vo: CaptchaVo = state
+        .auth_service
+        .generate_captcha(&mut redis, &ip, host_tenant.tid())
+        .await?;
     Ok(CaptchaResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),
@@ -126,6 +131,7 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    host_tenant: HostTenant,
     Json(dto): Json<LoginDto>,
 ) -> Result<LoginResult, AppError> {
     let login_ip = extract_client_ip(
@@ -149,13 +155,14 @@ pub async fn login(
             &mut redis,
             &state.config.jwt,
             &state.ip_locator,
+            host_tenant.tid(),
         )
         .await;
 
     // WebHook 事件分发（G5）：登录成功 / 失败均异步通知订阅方，失败含原因供外部风控。
     // 仅借用 vo 而非消费，随后以 `?` 按值传播错误，避免对非 Clone 的 AppError 做 clone。
     match &vo {
-        Ok(_) => {
+        Ok(v) => {
             state.web_hook_service.dispatch_event(
                 crate::service::sys_web_hook_service::EVENT_LOGIN_SUCCESS,
                 serde_json::json!({
@@ -163,6 +170,7 @@ pub async fn login(
                     "ip": login_ip,
                     "time": crate::common::datetime::now_naive().to_string(),
                 }),
+                v.tenant_id,
             );
         }
         Err(err) => {
@@ -174,6 +182,7 @@ pub async fn login(
                     "reason": err.to_string(),
                     "time": crate::common::datetime::now_naive().to_string(),
                 }),
+                0,
             );
         }
     }
@@ -199,6 +208,7 @@ pub async fn register(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    host_tenant: HostTenant,
     Json(dto): Json<RegisterDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     let start = std::time::Instant::now();
@@ -213,7 +223,11 @@ pub async fn register(
     // 执行注册，捕获结果用于审计日志（成功/失败均记录）
     let username = dto.username.clone();
     let mut redis = state.redis.clone();
-    let result = state.auth_service.register(dto, &ip, &mut redis).await;
+    // 多租户 Phase 3：透传 host 解析出的租户上下文（匿名路径无登录态）
+    let result = state
+        .auth_service
+        .register(dto, &ip, &mut redis, host_tenant.tid())
+        .await;
 
     let cost_time = start.elapsed().as_millis() as i64;
     let (status, error_msg, json_result) = match &result {
@@ -241,6 +255,7 @@ pub async fn register(
             operator_type: 0, // 匿名注册
             oper_name,
             tenant_id: 0, // 匿名注册无租户上下文
+            target_tenant_id: None, // 匿名注册无目标资源租户
             dept_name: String::new(),
             oper_url: "/register".to_string(),
             oper_ip: ip.to_string(),
@@ -362,7 +377,11 @@ pub async fn get_routers(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))?;
 
-    let routers: Vec<RouterVo> = state.auth_service.get_routers(user_id).await?;
+    // §27.6 生效点②：调用者租户用于 `套餐 ∩ 角色授权` 求交（平台操作者 tid=0 不裁剪）
+    let routers: Vec<RouterVo> = state
+        .auth_service
+        .get_routers(user_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(routers))
 }
 

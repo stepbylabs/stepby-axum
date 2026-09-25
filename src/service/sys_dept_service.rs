@@ -256,6 +256,7 @@ impl SysDeptService {
         &self,
         dto: DeptSortDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -271,6 +272,21 @@ impl SysDeptService {
         if dept_ids.len() != order_nums.len() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.dept.ids_count_mismatch"
+            )));
+        }
+
+        // 多租户越权防护：排序涉及的部门必须属于操作者租户（平台操作者放行）
+        let targets = self
+            .dept_repo
+            .base()
+            .find_many(SysDept::find().filter(DeptColumn::DeptId.is_in(dept_ids.clone())))
+            .await?;
+        if targets
+            .iter()
+            .any(|d| !crate::common::tenant::tenant_allowed(operator_tid, d.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
             )));
         }
 
@@ -309,13 +325,19 @@ impl SysDeptService {
         &self,
         dept_id: i64,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysDeptModel>, ServiceError> {
         // 数据范围过滤后的可见部门
         let visible_ids: Option<Vec<i64>> = match operator_user_id {
             Some(uid) => self.resolve_scope_dept_ids(uid).await?,
             None => None, // 无操作人上下文（如内部调用）：不过滤，保持原行为
         };
-        let all = self.dept_repo.find_active_all().await?;
+        // 多租户 Phase 2：租户用户仅见本租户部门；平台 0 不过滤
+        let mut select = SysDept::find().filter(DeptColumn::DelFlag.eq("0"));
+        if let Some(t) = tenant_scope {
+            select = select.filter(DeptColumn::TenantId.eq(t));
+        }
+        let all = self.dept_repo.base().find_many(select).await?;
         // 收集要排除的 ID：dept_id 本身 + 后代部门
         let result: Vec<SysDeptModel> = all
             .into_iter()
@@ -347,6 +369,7 @@ impl SysDeptService {
         &self,
         dept_id: i64,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<SysDeptModel, ServiceError> {
         let dept = self
             .dept_repo
@@ -355,6 +378,12 @@ impl SysDeptService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dept.not_found")))?;
         if dept.del_flag.as_deref() == Some("2") {
+            return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
+        }
+        // 多租户 Phase 2：租户用户仅见本租户部门，跨租户视为不存在（不泄漏存在性）
+        if let Some(t) = tenant_scope
+            && dept.tenant_id != t
+        {
             return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
         }
         // 数据范围校验（P0-6）
@@ -380,13 +409,15 @@ impl SysDeptService {
         &self,
         dto: DeptAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysDeptModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
         let parent_id = dto.parent_id.unwrap_or(0);
-        // 计算祖先链
-        let ancestors = if parent_id == 0 {
-            "0".to_string()
+        // 计算祖先链 + 确定归属租户（多租户 Phase 2）
+        let (ancestors, tenant_id) = if parent_id == 0 {
+            // 顶层组织：平台操作者 → 平台根（tid=0）；租户操作者 → 本租户根
+            ("0".to_string(), operator_tid)
         } else {
             let parent = self
                 .dept_repo
@@ -401,10 +432,19 @@ impl SysDeptService {
                     "error.dept.parent_deleted"
                 )));
             }
-            format!(
-                "{},{}",
-                parent.ancestors.as_deref().unwrap_or("0"),
-                parent_id
+            // 越权校验：父部门必须与操作者同租户（平台操作者放行任意）
+            if !crate::common::tenant::tenant_allowed(operator_tid, parent.tenant_id) {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
+            }
+            (
+                format!(
+                    "{},{}",
+                    parent.ancestors.as_deref().unwrap_or("0"),
+                    parent_id
+                ),
+                parent.tenant_id,
             )
         };
 
@@ -414,6 +454,7 @@ impl SysDeptService {
         };
         am.parent_id = Set(Some(parent_id));
         am.ancestors = Set(Some(ancestors));
+        am.tenant_id = Set(tenant_id);
         am.dept_name = Set(dto.dept_name.clone());
         am.order_num = Set(dto.order_num);
         am.leader = Set(dto.leader.clone());
@@ -437,6 +478,7 @@ impl SysDeptService {
         &self,
         dto: DeptEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysDeptModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -450,6 +492,12 @@ impl SysDeptService {
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
         }
+        // 多租户越权防护：只能修改本租户部门（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
 
         // parent_id 校验
         let parent_id = dto.parent_id.unwrap_or(existing.parent_id.unwrap_or(0));
@@ -458,6 +506,8 @@ impl SysDeptService {
                 "error.dept.parent_self_forbidden"
             )));
         }
+        // 父部门是否发生变化（用于跨租户移动校验）
+        let parent_changed = parent_id != existing.parent_id.unwrap_or(0);
 
         // 计算新祖先链 + 校验父部门存在 + 防环
         let new_ancestors = if parent_id == 0 {
@@ -474,6 +524,12 @@ impl SysDeptService {
             if parent.del_flag.as_deref() == Some("2") {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.dept.parent_deleted"
+                )));
+            }
+            // 多租户：禁止跨租户移动部门（新父部门必须与原部门同租户）
+            if parent_changed && parent.tenant_id != existing.tenant_id {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
                 )));
             }
             // 防环校验：新 parent_id 不能是当前部门的后代节点
@@ -578,7 +634,11 @@ impl SysDeptService {
     /// 1. 无子部门（del_flag = '0' 的直接子部门）
     /// 2. 无角色关联（sys_role_dept 中无关联记录）
     /// 3. 无用户关联（sys_user.dept_id 指向此部门的未删除用户）
-    pub async fn delete_dept(&self, dept_id: i64) -> Result<(), ServiceError> {
+    pub async fn delete_dept(
+        &self,
+        dept_id: i64,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         let existing = self
             .dept_repo
             .base()
@@ -587,6 +647,12 @@ impl SysDeptService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dept.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.dept.not_found")));
+        }
+        // 多租户越权防护：只能删除本租户部门（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         let dept_repo = self.dept_repo.clone();
@@ -678,13 +744,11 @@ impl SysDeptService {
         operator_user_id: Option<i64>,
         tenant_scope: Option<i64>,
     ) -> Result<Vec<TreeSelectVo>, ServiceError> {
-        let list = match operator_user_id {
-            Some(uid) => {
-                // 复用 list_depts 的数据范围过滤（空 query）
-                self.list_depts(DeptQueryDto::default(), Some(uid), tenant_scope).await?
-            }
-            None => self.dept_repo.find_active_all().await?,
-        };
+        // 统一复用 list_depts：同时应用租户过滤与 data_scope 过滤
+        // （此前 None 分支直接 find_active_all() 丢弃 tenant_scope，导致跨租户泄漏）
+        let list = self
+            .list_depts(DeptQueryDto::default(), operator_user_id, tenant_scope)
+            .await?;
         let tree = build_dept_tree_select(&list, 0);
         Ok(tree)
     }

@@ -82,15 +82,22 @@ impl SysFlowTaskRepository {
     }
 
     /// 某单据当前轮的任一 pending 任务（发起人撤回入口：docId → taskId）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户任务；`None`（平台）→ 全量。
     pub async fn find_first_pending_by_biz(
         &self,
         biz_type: &str,
         biz_id: i64,
+        tenant_scope: Option<i64>,
     ) -> Result<Option<Model>, DbErr> {
-        SysFlowTask::find()
+        let mut query = SysFlowTask::find()
             .filter(Column::BizType.eq(biz_type))
             .filter(Column::BizId.eq(biz_id))
-            .filter(Column::Status.eq("pending"))
+            .filter(Column::Status.eq("pending"));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query
             .order_by_asc(Column::TaskId)
             .one(self.base.db())
             .await

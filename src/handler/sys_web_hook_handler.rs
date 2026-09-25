@@ -45,9 +45,13 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<WebHookQueryDto>,
 ) -> Result<TableDataInfo<SysWebHookModel>, AppError> {
-    let (rows, total) = state.web_hook_service.list(query).await?;
+    let (rows, total) = state
+        .web_hook_service
+        .list(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -64,9 +68,13 @@ pub async fn list(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
 ) -> Result<AjaxResult<SysWebHookModel>, AppError> {
-    let model = state.web_hook_service.get_by_id(id).await?;
+    let model = state
+        .web_hook_service
+        .get_by_id(id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -86,7 +94,10 @@ pub async fn add(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<WebHookAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
-    state.web_hook_service.add(dto, operator.username()).await?;
+    state
+        .web_hook_service
+        .add(dto, operator.username(), operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 
@@ -109,7 +120,7 @@ pub async fn edit(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .web_hook_service
-        .edit(dto, operator.username())
+        .edit(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -128,6 +139,7 @@ pub async fn edit(
 )]
 pub async fn change_status(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> Result<AjaxResult<()>, AppError> {
@@ -135,7 +147,10 @@ pub async fn change_status(
         .get("status")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request(&crate::tr!("error.common.invalid_param")))?;
-    state.web_hook_service.change_status(id, status).await?;
+    state
+        .web_hook_service
+        .change_status(id, status, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.operation"
     )))
@@ -154,10 +169,14 @@ pub async fn change_status(
 )]
 pub async fn test_hook(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
     ValidatedJson(dto): ValidatedJson<WebHookTestDto>,
 ) -> Result<AjaxResult<crate::service::sys_web_hook_service::DeliveryResult>, AppError> {
-    let result = state.web_hook_service.test_hook(id, dto).await?;
+    let result = state
+        .web_hook_service
+        .test_hook(id, dto, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(result))
 }
 
@@ -174,17 +193,21 @@ pub async fn test_hook(
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<WebHookQueryDto>,
 ) -> Result<Response, AppError> {
     let rows = state
         .web_hook_service
-        .list(WebHookQueryDto {
-            page_num: 1,
-            page_size: crate::common::page::EXPORT_MAX_ROWS,
-            hook_name: query.hook_name,
-            event_types: query.event_types,
-            status: Some(query.status.unwrap_or_default()),
-        })
+        .list(
+            WebHookQueryDto {
+                page_num: 1,
+                page_size: crate::common::page::EXPORT_MAX_ROWS,
+                hook_name: query.hook_name,
+                event_types: query.event_types,
+                status: Some(query.status.unwrap_or_default()),
+            },
+            operator.tenant_id(),
+        )
         .await?
         .0;
 
@@ -253,6 +276,7 @@ pub async fn export(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
@@ -267,7 +291,7 @@ pub async fn remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.web_hook_service.remove(ids).await?;
+    state.web_hook_service.remove(ids, operator.tenant_id()).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -284,9 +308,13 @@ pub async fn remove(
 )]
 pub async fn log_list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<WebHookLogQueryDto>,
 ) -> Result<TableDataInfo<SysWebHookLogModel>, AppError> {
-    let (rows, total) = state.web_hook_service.list_logs(query).await?;
+    let (rows, total) = state
+        .web_hook_service
+        .list_logs(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -303,9 +331,13 @@ pub async fn log_list(
 )]
 pub async fn log_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
 ) -> Result<AjaxResult<SysWebHookLogModel>, AppError> {
-    let model = state.web_hook_service.get_log_by_id(id).await?;
+    let model = state
+        .web_hook_service
+        .get_log_by_id(id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -322,6 +354,7 @@ pub async fn log_info(
 )]
 pub async fn log_remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
@@ -336,7 +369,10 @@ pub async fn log_remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.web_hook_service.remove_logs(ids).await?;
+    state
+        .web_hook_service
+        .remove_logs(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -351,8 +387,12 @@ pub async fn log_remove(
 )]
 pub async fn log_clean(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let (expired, cleaned) = state.web_hook_service.clean_logs().await?;
+    let (expired, cleaned) = state
+        .web_hook_service
+        .clean_logs(operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(serde_json::json!({
         "expired": expired,
         "cleaned": cleaned
@@ -372,6 +412,7 @@ pub async fn log_clean(
 )]
 pub async fn log_retry(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&ids);
@@ -386,7 +427,10 @@ pub async fn log_retry(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    let count = state.web_hook_service.retry_logs(ids).await?;
+    let count = state
+        .web_hook_service
+        .retry_logs(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(serde_json::json!({ "count": count })))
 }
 
@@ -403,17 +447,21 @@ pub async fn log_retry(
 )]
 pub async fn log_export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<WebHookLogQueryDto>,
 ) -> Result<Response, AppError> {
     let rows = state
         .web_hook_service
-        .list_logs(WebHookLogQueryDto {
-            page_num: 1,
-            page_size: crate::common::page::EXPORT_MAX_ROWS,
-            hook_id: query.hook_id,
-            event_type: query.event_type,
-            status: Some(query.status.unwrap_or_default()),
-        })
+        .list_logs(
+            WebHookLogQueryDto {
+                page_num: 1,
+                page_size: crate::common::page::EXPORT_MAX_ROWS,
+                hook_id: query.hook_id,
+                event_type: query.event_type,
+                status: Some(query.status.unwrap_or_default()),
+            },
+            operator.tenant_id(),
+        )
         .await?
         .0;
 

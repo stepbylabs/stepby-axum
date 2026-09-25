@@ -15,6 +15,7 @@ use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_job_log::Model as SysJobLogModel;
+use crate::middleware::Operator;
 use crate::service::sys_job_service::JobLogQueryDto;
 use crate::state::AppState;
 use crate::utils::parse_id_list;
@@ -33,9 +34,13 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<JobLogQueryDto>,
 ) -> Result<TableDataInfo<SysJobLogModel>, AppError> {
-    let (rows, total) = state.job_service.get_job_log_page(query).await?;
+    let (rows, total) = state
+        .job_service
+        .get_job_log_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -55,6 +60,7 @@ pub async fn list(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(job_log_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&job_log_ids);
@@ -71,7 +77,10 @@ pub async fn remove(
         )));
     }
 
-    state.job_service.delete_job_logs(ids).await?;
+    state
+        .job_service
+        .delete_job_logs(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -86,8 +95,14 @@ pub async fn remove(
     ),
     tag = "monitor-joblog"
 )]
-pub async fn clean(State(state): State<Arc<AppState>>) -> Result<AjaxResult<()>, AppError> {
-    state.job_service.clean_job_logs().await?;
+pub async fn clean(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<()>, AppError> {
+    state
+        .job_service
+        .clean_job_logs(operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.clear")))
 }
 
@@ -107,9 +122,16 @@ pub async fn clean(State(state): State<Arc<AppState>>) -> Result<AjaxResult<()>,
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<JobLogQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.job_service.export_job_logs(query).await?;
+    let rows = state
+        .job_service
+        .export_job_logs(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
 
     let columns = [
         ExcelColumn {

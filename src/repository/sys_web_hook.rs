@@ -42,14 +42,18 @@ impl SysWebHookRepository {
             .await
     }
 
-    /// 查询全部启用回调（status='0' 且未删除），供事件分发扫描
-    pub async fn find_all_enabled(&self) -> Result<Vec<Model>, DbErr> {
-        SysWebHook::find()
+    /// 查询全部启用回调（status='0' 且未删除），**按租户分组**返回，供事件分发扫描。
+    ///
+    /// 事件分发为后台批量任务：必须先按租户分组，再逐组以该组 tid 为上下文投递，
+    /// 严禁跨租户批量触达（A 租户事件不得推给 B 租户回调）。
+    pub async fn find_all_enabled(&self) -> Result<Vec<(i64, Vec<Model>)>, DbErr> {
+        let rows = SysWebHook::find()
             .filter(Column::Status.eq("0"))
             .filter(Column::DelFlag.ne("2"))
             .order_by_asc(Column::Id)
             .all(self.base.db())
-            .await
+            .await?;
+        Ok(crate::common::tenant::group_by_tenant(rows, |h| h.tenant_id))
     }
 
     /// 分页查询回调（hook_name/event_types/status 过滤，未删除）
@@ -61,9 +65,13 @@ impl SysWebHookRepository {
         hook_name: Option<&str>,
         event_types: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysWebHook::find();
         query = query.filter(Column::DelFlag.ne("2"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(name) = hook_name {
             query = query.filter(Column::HookName.like(format!("%{}%", like_escape(name))));
         }
@@ -90,9 +98,13 @@ impl SysWebHookRepository {
         hook_name: Option<&str>,
         event_types: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<Model>, DbErr> {
         let mut query = SysWebHook::find();
         query = query.filter(Column::DelFlag.ne("2"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(name) = hook_name {
             query = query.filter(Column::HookName.like(format!("%{}%", like_escape(name))));
         }

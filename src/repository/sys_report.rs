@@ -80,9 +80,13 @@ impl SysReportRepository {
         report_code: Option<&str>,
         report_type: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysReport::find();
         query = query.filter(Column::DelFlag.ne("2"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(name) = report_name {
             query = query.filter(Column::ReportName.like(format!("%{}%", like_escape(name))));
         }

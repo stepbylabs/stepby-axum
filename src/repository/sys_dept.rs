@@ -31,12 +31,16 @@ impl SysDeptRepository {
         &self.base
     }
 
-    /// 查询所有未删除部门（del_flag = '0'）
-    pub async fn find_active_all(&self) -> Result<Vec<Model>, DbErr> {
-        SysDept::find()
-            .filter(Column::DelFlag.eq("0"))
-            .all(self.base.db())
-            .await
+    /// 查询未删除部门（del_flag = '0'）。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户部门（`tenant_id = tid`）；
+    /// `None`（平台操作者）→ 全量不过滤。
+    pub async fn find_active_all(&self, tenant_scope: Option<i64>) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysDept::find().filter(Column::DelFlag.eq("0"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
+        query.all(self.base.db()).await
     }
 
     /// 查询部门的所有后代部门 ID（含自身），使用递归 CTE（P0-R81-004 暂缓项）
@@ -88,15 +92,6 @@ impl SysDeptRepository {
         SysDept::find()
             .filter(Column::DeptId.is_in(dept_ids))
             .filter(Column::DelFlag.eq("0"))
-            .all(self.base.db())
-            .await
-    }
-
-    /// 按状态查询未删除部门
-    pub async fn find_by_status(&self, status: &str) -> Result<Vec<Model>, DbErr> {
-        SysDept::find()
-            .filter(Column::DelFlag.eq("0"))
-            .filter(Column::Status.eq(status))
             .all(self.base.db())
             .await
     }

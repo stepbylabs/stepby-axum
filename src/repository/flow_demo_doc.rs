@@ -42,13 +42,19 @@ impl FlowDemoDocRepository {
     }
 
     /// 管理视图：全部单据（调用方需持有 system:flow:list 权限键，且自行叠加 data_scope）
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户单据；`None`（平台）→ 全量。
     pub async fn find_all_page(
         &self,
         status: Option<&str>,
         offset: u64,
         limit: u64,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = FlowDemoDoc::find();
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }

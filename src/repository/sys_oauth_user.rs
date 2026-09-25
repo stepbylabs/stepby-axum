@@ -50,14 +50,6 @@ impl SysOauthUserRepository {
             .await
     }
 
-    /// 按 oauth_id 查询绑定记录
-    pub async fn find_by_oauth_id(&self, oauth_id: i64) -> Result<Option<Model>, DbErr> {
-        SysOauthUser::find()
-            .filter(Column::OauthId.eq(oauth_id))
-            .one(self.base.db())
-            .await
-    }
-
     /// 插入绑定记录
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

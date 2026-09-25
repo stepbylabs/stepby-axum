@@ -38,9 +38,14 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<ConfigQueryDto>,
 ) -> Result<TableDataInfo<SysConfigModel>, AppError> {
-    let (rows, total) = state.config_service.get_config_page(query).await?;
+    // 治理视图（§27.8）：平台操作者(0) 全量；租户仅返回「本租户行 + 平台 visible_to_tenant='1' 行」
+    let (rows, total) = state
+        .config_service
+        .get_config_page(query, Some(operator.tenant_id()))
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -60,9 +65,14 @@ pub async fn list(
 )]
 pub async fn get_config_by_key(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(config_key): Path<String>,
 ) -> Result<AjaxResult<String>, AppError> {
-    let value = state.config_service.get_config_by_key(&config_key).await?;
+    // 治理视图（§27.8）：租户读取平台不可见行（含 platform_only）时脱敏为 ***
+    let value = state
+        .config_service
+        .get_config_by_key(&config_key, Some(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(value))
 }
 
@@ -82,9 +92,14 @@ pub async fn get_config_by_key(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(config_id): Path<i64>,
 ) -> Result<AjaxResult<SysConfigModel>, AppError> {
-    let model = state.config_service.get_config_by_id(config_id).await?;
+    // 治理视图（§27.8）：租户仅可见本租户行或平台 visible_to_tenant='1' 行，否则 403
+    let model = state
+        .config_service
+        .get_config_by_id(config_id, Some(operator.tenant_id()))
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -107,7 +122,7 @@ pub async fn add(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .config_service
-        .add_config(dto, operator.username())
+        .add_config(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
@@ -132,7 +147,7 @@ pub async fn edit(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .config_service
-        .edit_config(dto, operator.username())
+        .edit_config(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -153,6 +168,7 @@ pub async fn edit(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(config_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&config_ids);
@@ -169,7 +185,10 @@ pub async fn remove(
         )));
     }
 
-    state.config_service.delete_configs(ids).await?;
+    state
+        .config_service
+        .delete_configs(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -207,9 +226,14 @@ pub async fn refresh_cache(State(state): State<Arc<AppState>>) -> Result<AjaxRes
 )]
 pub async fn export(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Form(query): Form<ConfigQueryDto>,
 ) -> Result<Response, AppError> {
-    let rows = state.config_service.export_configs(query).await?;
+    // 治理视图（§27.8）：平台操作者全量导出；租户导出生效视图（绝不导出 platform_only）
+    let rows = state
+        .config_service
+        .export_configs(query, Some(operator.tenant_id()))
+        .await?;
 
     let columns = [
         ExcelColumn {

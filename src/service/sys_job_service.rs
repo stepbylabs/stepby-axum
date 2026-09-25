@@ -255,9 +255,12 @@ impl SysJobService {
     }
 
     /// 分页查询任务列表
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户任务；None（平台 0）不过滤。
     pub async fn get_job_page(
         &self,
         query: JobQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<JobVo>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -268,6 +271,7 @@ impl SysJobService {
                 query.job_name.as_deref(),
                 query.job_group.as_deref(),
                 query.status.as_deref(),
+                tenant_scope,
             )
             .await?;
 
@@ -275,11 +279,29 @@ impl SysJobService {
         Ok((vos, total))
     }
 
-    /// 查询任务详情
+    /// 查询任务详情（内部/无操作人上下文：不过滤，如 oper_log 变更前快照）
+    ///
+    /// 多租户：对外详情接口请使用 `get_job_by_id_scoped`（租户用户跨租户不可见）。
     pub async fn get_job_by_id(&self, job_id: i64) -> Result<JobVo, ServiceError> {
         let job = self
             .job_repo
-            .find_active_by_id(job_id)
+            .find_active_by_id(job_id, None)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
+        Ok(JobVo::from_model(job))
+    }
+
+    /// 查询任务详情（多租户过滤）
+    ///
+    /// tenant_scope=Some(tid) 时跨租户任务视为不存在（404），避免越权读取详情。
+    pub async fn get_job_by_id_scoped(
+        &self,
+        job_id: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<JobVo, ServiceError> {
+        let job = self
+            .job_repo
+            .find_active_by_id(job_id, tenant_scope)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
         Ok(JobVo::from_model(job))
@@ -296,6 +318,7 @@ impl SysJobService {
         &self,
         dto: JobAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysJobModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         // P3 修复: 枚举值白名单校验
@@ -325,6 +348,8 @@ impl SysJobService {
 
         let status = dto.status.unwrap_or_else(|| "0".to_string());
         let model = sys_job::ActiveModel {
+            // 多租户 Phase 2：定时任务归属操作者租户（平台管理员=0，租户管理员=其 tid）
+            tenant_id: Set(operator_tid),
             job_name: Set(dto.job_name),
             job_group: Set(dto.job_group),
             invoke_target: Set(dto.invoke_target),
@@ -369,6 +394,7 @@ impl SysJobService {
         &self,
         dto: JobEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysJobModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         // P3 修复: 枚举值白名单校验
@@ -380,9 +406,16 @@ impl SysJobService {
 
         let existing = self
             .job_repo
-            .find_active_by_id(dto.job_id)
+            .find_active_by_id(dto.job_id, None)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
+
+        // 多租户越权防护：只能修改本租户任务（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
 
         // cron 合法性校验
         if calc_next_valid_time(&dto.cron_expression).is_none() {
@@ -448,7 +481,11 @@ impl SysJobService {
     ///
     /// C-06：job_name 预查询移入事务内，使用同一 conn 查询并执行软删除，
     /// 消除"事务外预查询 → 事务内删除"的 TOCTOU 竞态窗口。
-    pub async fn delete_jobs(&self, job_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_jobs(
+        &self,
+        job_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         let job_repo = self.job_repo.clone();
         // 事务保证：预查询 + 批量软删除原子化（预查询移入事务内，消除 TOCTOU 竞态 C-06）
         // 事务返回需要从调度器移除的 job_id 列表（status='0' 的任务）
@@ -461,6 +498,12 @@ impl SysJobService {
                     for job_id in &job_ids_inner {
                         // 预查询任务存在性及状态（事务内查询，消除 TOCTOU 竞态 C-06）
                         if let Some(job) = job_repo.find_active_by_id_conn(txn, *job_id).await? {
+                            // 多租户越权防护：任一所选任务跨越操作者租户即整体拒绝（平台操作者放行）
+                            if !crate::common::tenant::tenant_allowed(operator_tid, job.tenant_id) {
+                                return Err(ServiceError::forbidden(&crate::tr!(
+                                    "error.common.forbidden"
+                                )));
+                            }
                             let status = job.status.as_deref().unwrap_or("1");
                             if status == "0" {
                                 running_jobs.push(*job_id);
@@ -501,14 +544,25 @@ impl SysJobService {
     ///
     /// P1 修复: 调度器同步失败时仅记录 warn 不阻断，DB 为 source of truth，
     /// 重启后调度器从 DB 加载正确状态。与 delete_jobs 保持一致的容错策略。
-    pub async fn change_status(&self, dto: JobStatusDto) -> Result<(), ServiceError> {
+    pub async fn change_status(
+        &self,
+        dto: JobStatusDto,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
         let existing = self
             .job_repo
-            .find_active_by_id(dto.job_id)
+            .find_active_by_id(dto.job_id, None)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
+
+        // 多租户越权防护：只能启停本租户任务（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
 
         let old_status = existing.status.as_deref().unwrap_or("1").to_string();
 
@@ -552,14 +606,21 @@ impl SysJobService {
     /// 2. 查询任务存在
     /// 3. 验证 job_group 一致
     /// 4. scheduler.run_once
-    pub async fn run_job_once(&self, dto: JobRunDto) -> Result<(), ServiceError> {
+    pub async fn run_job_once(&self, dto: JobRunDto, operator_tid: i64) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
         let job = self
             .job_repo
-            .find_active_by_id(dto.job_id)
+            .find_active_by_id(dto.job_id, None)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
+
+        // 多租户越权防护：只能手动执行本租户任务（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, job.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
 
         // 验证 job_group 一致
         if job.job_group != dto.job_group {
@@ -573,9 +634,12 @@ impl SysJobService {
     }
 
     /// 分页查询任务日志
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户日志；None（平台 0）不过滤。
     pub async fn get_job_log_page(
         &self,
         query: JobLogQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysJobLogModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let (rows, total) = self
@@ -595,6 +659,7 @@ impl SysJobService {
                     Some(v) if !v.is_empty() => Some(crate::common::datetime::parse_query_date(v)?),
                     _ => None,
                 },
+                tenant_scope,
             )
             .await?;
 
@@ -602,19 +667,40 @@ impl SysJobService {
     }
 
     /// 批量删除任务日志
-    pub async fn delete_job_logs(&self, ids: Vec<i64>) -> Result<(), ServiceError> {
+    ///
+    /// 多租户越权防护：任一所选日志跨越操作者租户即整体拒绝（平台操作者放行）。
+    pub async fn delete_job_logs(&self, ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
+        let existing = self.job_log_repo.find_by_ids(&ids).await?;
+        if existing
+            .iter()
+            .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
         self.job_log_repo.delete_by_ids(ids).await?;
         Ok(())
     }
 
     /// 清空任务日志
-    pub async fn clean_job_logs(&self) -> Result<(), ServiceError> {
-        self.job_log_repo.clean_all().await?;
+    ///
+    /// 多租户隔离：平台操作者清空全部，租户管理员仅清空本租户日志。
+    pub async fn clean_job_logs(&self, operator_tid: i64) -> Result<(), ServiceError> {
+        self.job_log_repo
+            .clean_all(crate::common::tenant::tenant_scope(operator_tid))
+            .await?;
         Ok(())
     }
 
     /// 导出任务列表（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
-    pub async fn export_jobs(&self, query: JobQueryDto) -> Result<Vec<JobVo>, ServiceError> {
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅导出本租户任务；None（平台 0）不过滤。
+    pub async fn export_jobs(
+        &self,
+        query: JobQueryDto,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<JobVo>, ServiceError> {
         let (rows, _) = self
             .job_repo
             .find_page_filtered(
@@ -623,6 +709,7 @@ impl SysJobService {
                 query.job_name.as_deref(),
                 query.job_group.as_deref(),
                 query.status.as_deref(),
+                tenant_scope,
             )
             .await?;
 
@@ -631,9 +718,12 @@ impl SysJobService {
     }
 
     /// 导出任务日志列表（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
+    ///
+    /// 多租户 Phase 2：tenant_scope=Some(tid) 仅导出本租户日志；None（平台 0）不过滤。
     pub async fn export_job_logs(
         &self,
         query: JobLogQueryDto,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<SysJobLogModel>, ServiceError> {
         let (rows, _) = self
             .job_log_repo
@@ -652,6 +742,7 @@ impl SysJobService {
                     Some(v) if !v.is_empty() => Some(crate::common::datetime::parse_query_date(v)?),
                     _ => None,
                 },
+                tenant_scope,
             )
             .await?;
 

@@ -82,21 +82,27 @@ where
     serializer.serialize_str(&format!("{}Z", dt.format(DATETIME_ISO)))
 }
 
+/// 兼容解析：优先 RFC3339（含 Z/偏移，按 UTC 语义还原），回退空格 / T 分隔格式。
+///
+/// 三个反序列化入口（[`deserialize`] / [`deserialize_opt`] / [`deserialize_double_opt`]）共用，
+/// 避免解析逻辑三处漂移；失败时返回最后一次尝试的错误文本（由调用方包成 serde 错误）。
+fn parse_flexible(s: &str) -> Result<NaiveDateTime, String> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.naive_utc());
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
+        return Ok(dt);
+    }
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").map_err(|e| e.to_string())
+}
+
 /// 反序列化，兼容 RFC3339（含 Z/偏移）与空格/T 分隔格式
 pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    // 优先 RFC3339（含 Z 或偏移），按 UTC 语义还原
-    if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
-        return Ok(dt.naive_utc());
-    }
-    // 回退到无时区格式（空格 / T 分隔），保持向后兼容
-    if let Ok(dt) = NaiveDateTime::parse_from_str(&s, DATETIME_FORMAT) {
-        return Ok(dt);
-    }
-    NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S").map_err(serde::de::Error::custom)
+    parse_flexible(&s).map_err(serde::de::Error::custom)
 }
 
 /// 序列化 Option<NaiveDateTime>，None 输出为 null
@@ -119,18 +125,27 @@ where
     match opt {
         None => Ok(None),
         Some(ref s) if s.is_empty() => Ok(None),
-        Some(s) => {
-            // 与 deserialize 一致：优先 RFC3339，回退空格/T 分隔
-            if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
-                return Ok(Some(dt.naive_utc()));
-            }
-            if let Ok(dt) = NaiveDateTime::parse_from_str(&s, DATETIME_FORMAT) {
-                return Ok(Some(dt));
-            }
-            NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S")
-                .map(Some)
-                .map_err(serde::de::Error::custom)
-        }
+        Some(s) => parse_flexible(&s).map(Some).map_err(serde::de::Error::custom),
+    }
+}
+
+/// 反序列化「三态」`Option<Option<NaiveDateTime>>`（部分更新语义）：
+/// - 字段缺省 → `None`（由 `#[serde(default)]` 提供，表示**不修改**）；
+/// - 显式 `null` / 空字符串 → `Some(None)`（表示**清空**，如"到期时间置空 = 永不过期"）；
+/// - 有效日期字符串 → `Some(Some(dt))`（表示**设置为该值**）。
+pub fn deserialize_double_opt<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<NaiveDateTime>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    match opt {
+        Some(s) if !s.is_empty() => parse_flexible(&s)
+            .map(|dt| Some(Some(dt)))
+            .map_err(serde::de::Error::custom),
+        // null / 空字符串 → 显式清空
+        _ => Ok(Some(None)),
     }
 }
 
@@ -329,5 +344,30 @@ mod tests {
         use serde_json::Value;
         let v: Value = serde_json::json!("2026-01-02T11:04:05+08:00");
         assert_eq!(deserialize_opt(&v).unwrap(), Some(dt(2026, 1, 2, 3, 4, 5)));
+    }
+
+    #[test]
+    fn deserialize_double_opt_tri_state_semantics() {
+        #[derive(serde::Deserialize)]
+        struct Dto {
+            #[serde(default, deserialize_with = "deserialize_double_opt")]
+            expire_time: Option<Option<NaiveDateTime>>,
+        }
+        // 字段缺省 → None（不修改）
+        let d: Dto = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.expire_time, None);
+        // 显式 null → Some(None)（清空 = 永不过期）
+        let d: Dto = serde_json::from_str(r#"{"expire_time":null}"#).unwrap();
+        assert_eq!(d.expire_time, Some(None));
+        // 空串 → Some(None)（兼容前端清空后传空串）
+        let d: Dto = serde_json::from_str(r#"{"expire_time":""}"#).unwrap();
+        assert_eq!(d.expire_time, Some(None));
+        // 有效日期串（空格分隔 / RFC3339）→ Some(Some(dt))
+        let d: Dto = serde_json::from_str(r#"{"expire_time":"2026-01-02 03:04:05"}"#).unwrap();
+        assert_eq!(d.expire_time, Some(Some(dt(2026, 1, 2, 3, 4, 5))));
+        let d: Dto = serde_json::from_str(r#"{"expire_time":"2026-01-02T11:04:05+08:00"}"#).unwrap();
+        assert_eq!(d.expire_time, Some(Some(dt(2026, 1, 2, 3, 4, 5))));
+        // 非法串 → 解析失败（不静默降级为清空）
+        assert!(serde_json::from_str::<Dto>(r#"{"expire_time":"garbage"}"#).is_err());
     }
 }

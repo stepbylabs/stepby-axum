@@ -68,8 +68,11 @@ pub struct Model {
     /// 多租户立项后由租户管理功能维护；Phase 2 后续：Repository 过滤层按 tid 注入条件）
     #[serde(default)]
     pub tenant_id: i64,
-    /// v5-D12：SCIM externalId（IdP 侧用户唯一标识；NULL = 非 SCIM provision，
-    /// 全局唯一索引 idx_sys_user_scim_external_id）
+    /// v5-D12：SCIM externalId（IdP 侧用户唯一标识；NULL = 非 SCIM provision）。
+    ///
+    /// 唯一性由迁移 `m20260925_000004` 的复合唯一索引
+    /// `uk_sys_user_tenant_scim (tenant_id, scim_external_id)` 承担（同租户内唯一），
+    /// 已取代旧的全局单列索引 `idx_sys_user_scim_external_id`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scim_external_id: Option<String>,
 }

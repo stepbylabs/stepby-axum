@@ -2,11 +2,20 @@
 //
 // P0-59（备份方案）：全局限流中间件
 //
-// 实现：per-IP 令牌桶（Token Bucket）
-// - 每个 IP 维护一个独立令牌桶
+// 实现：per-(租户, IP) 令牌桶（Token Bucket）
+// - 每个「租户 + IP」组合维护一个独立令牌桶（租户彼此隔离，互不占用配额）
 // - 桶容量（capacity）：突发请求上限
 // - 补充速率（refill_per_second）：每秒匀速补充令牌
 // - 内存态（Mutex<HashMap>），单实例有效；多实例部署请改用 Redis 实现
+// - 未登录 / 无 claims 请求（登录页、公开页）回退到平台维度（tid=0），确保可用
+//
+// 多租户（Phase 3）说明：
+// - 维度键形如 `rate_limit:{tid}:{ip}`，与既有 Redis key 命名风格（`rate_limit:config:{route}`）一致；
+//   迁移到 Redis 实现时可直接沿用该 key 布局，无需再造命名。
+// - tid 取自 auth 中间件注入的 `Claims.tid`（中间件链中 auth 先于 rate_limit 执行）；
+//   `Claims.tid = 0` 表示平台租户维度，同时承担「无 claims 兜底」语义。
+// - 配额（capacity / refill_per_second）仍来自平台级 `sys_rate_limit` 表（按请求路径匹配，
+//   未命中回退 `*`），即「租户隔离计数 + 平台统一配额」。
 //
 // M-1 双重限流说明：本中间件与 auth_service.rs 内的 Redis 限流（RATE_LIMIT_SCRIPT）
 // 同时生效，构成两层防护：
@@ -52,6 +61,15 @@ pub struct RateLimitConfig {
     pub capacity: u32,
     /// 每秒补充令牌数
     pub refill_per_second: f64,
+}
+
+/// 构造限流维度键：`rate_limit:{tid}:{ip}`
+///
+/// - `tid` 为请求者租户（取自 `Claims.tid`）；无 claims 时传 `0`（平台维度兜底）
+/// - 命名与既有 Redis key 风格（`rate_limit:config:{route}`）保持一致，
+///   便于后续迁移到 Redis 计数实现时沿用同一 key 布局
+pub fn rate_limit_bucket_key(tenant_id: i64, ip: &str) -> String {
+    format!("rate_limit:{tenant_id}:{ip}")
 }
 
 impl Default for RateLimitConfig {
@@ -154,8 +172,9 @@ static RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(RateLimiter::new);
 /// 1. 从请求扩展中提取 ConnectInfo<SocketAddr>，获取客户端 IP
 /// 2. 复用 auth_handler::extract_client_ip 的可信代理白名单逻辑提取真实客户端 IP
 ///    （trusted_proxies 为空时仅信任直连 IP，不信任 XFF，防止伪造绕过限流）
-/// 3. 从数据库读取限流配置（带 Redis 缓存，5 分钟过期），失败时 fail-closed 返回 503
-/// 4. 调用令牌桶 try_acquire，放行或返回 429
+/// 3. 从请求扩展中提取 `Claims.tid` 作为租户维度（无 claims → 0，平台维度兜底）
+/// 4. 从数据库读取限流配置（带 Redis 缓存，5 分钟过期），失败时 fail-closed 返回 503
+/// 5. 调用令牌桶 try_acquire（键为 `rate_limit:{tid}:{ip}`），放行或返回 429
 pub async fn rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -169,6 +188,15 @@ pub async fn rate_limit_middleware(
         .map(|ci| ci.0.ip())
         .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let ip = extract_client_ip(req.headers(), peer_ip, &state.config.server.trusted_proxies);
+
+    // 租户维度：auth 中间件（route_layer 中先于本中间件执行）已注入 Claims；
+    // 公开端点（/login、/captchaImage 等）无 claims，回退到平台维度 0，保证可用
+    let tenant_id = req
+        .extensions()
+        .get::<crate::jwt::Claims>()
+        .map(|c| c.tid)
+        .unwrap_or(0);
+    let bucket_key = rate_limit_bucket_key(tenant_id, &ip);
 
     // 从数据库读取限流配置（带 Redis 缓存）
     // 查询逻辑：先精确匹配 route_pattern=oper_url，未命中则使用 "*" 全局默认
@@ -194,7 +222,7 @@ pub async fn rate_limit_middleware(
         }
     };
 
-    let (allowed, retry_after) = RATE_LIMITER.try_acquire_with_retry_after(&ip, config);
+    let (allowed, retry_after) = RATE_LIMITER.try_acquire_with_retry_after(&bucket_key, config);
     if allowed {
         next.run(req).await
     } else {
@@ -301,5 +329,44 @@ mod tests {
         let (denied, retry_after) = limiter.try_acquire_with_retry_after("8.8.8.8", config);
         assert!(!denied);
         assert_eq!(retry_after, 60, "补充速率为 0 时应回退到默认 60s");
+    }
+
+    // ---------- 多租户维度（Phase 3） ----------
+
+    #[test]
+    fn test_rate_limit_bucket_key_shape() {
+        // 命名与既有 Redis key 风格一致：rate_limit:{tid}:{ip}
+        assert_eq!(
+            rate_limit_bucket_key(0, "1.2.3.4"),
+            "rate_limit:0:1.2.3.4"
+        );
+        assert_eq!(
+            rate_limit_bucket_key(42, "10.0.0.9"),
+            "rate_limit:42:10.0.0.9"
+        );
+    }
+
+    #[test]
+    fn test_token_bucket_isolates_tenants() {
+        // 同一 IP、不同租户必须各自独立计数（租户 A 用尽不影响租户 B）
+        let limiter = RateLimiter::new();
+        let config = RateLimitConfig {
+            capacity: 1,
+            refill_per_second: 0.0,
+        };
+        let ip = "10.1.1.1";
+        let (tid_a, tid_b) = (5, 6);
+
+        assert!(limiter.try_acquire(&rate_limit_bucket_key(tid_a, ip), config));
+        assert!(
+            !limiter.try_acquire(&rate_limit_bucket_key(tid_a, ip), config),
+            "同租户同 IP 第二次应被限流"
+        );
+        assert!(
+            limiter.try_acquire(&rate_limit_bucket_key(tid_b, ip), config),
+            "不同租户同 IP 应独立计数，仍可放行"
+        );
+        // 平台维度（无 claims 兜底，tid=0）同样独立
+        assert!(limiter.try_acquire(&rate_limit_bucket_key(0, ip), config));
     }
 }

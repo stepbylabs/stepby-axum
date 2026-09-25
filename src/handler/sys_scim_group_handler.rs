@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::middleware::Operator;
 use crate::service::scim_group_service::{ScimGroupAdminDetail, ScimGroupAdminRow};
 use crate::service::scim_service::ScimError;
 use crate::state::AppState;
@@ -48,6 +49,7 @@ pub struct ScimGroupQueryDto {
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(q): Query<ScimGroupQueryDto>,
 ) -> Result<TableDataInfo<ScimGroupAdminRow>, AppError> {
     let page = q.page_num.unwrap_or(1).max(1);
@@ -55,6 +57,7 @@ pub async fn list(
     let (rows, total) = state
         .scim_group_service
         .admin_list(
+            operator.tenant_id(),
             page,
             page_size,
             q.display_name.as_deref(),
@@ -77,11 +80,12 @@ pub async fn list(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
 ) -> Result<AjaxResult<ScimGroupAdminDetail>, AppError> {
     let detail = state
         .scim_group_service
-        .admin_detail(id)
+        .admin_detail(id, operator.tenant_id())
         .await
         .map_err(scim_to_app)?;
     Ok(AjaxResult::success(detail))
@@ -112,12 +116,18 @@ pub struct ScimGroupAdminUpsertDto {
 )]
 pub async fn edit(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
     Json(body): Json<ScimGroupAdminUpsertDto>,
 ) -> Result<AjaxResult<ScimGroupAdminDetail>, AppError> {
     let detail = state
         .scim_group_service
-        .admin_update(id, body.mapping_type, body.binding_target_ids)
+        .admin_update(
+            id,
+            operator.tenant_id(),
+            body.mapping_type,
+            body.binding_target_ids,
+        )
         .await
         .map_err(scim_to_app)?;
     Ok(AjaxResult::success(detail))
@@ -135,11 +145,12 @@ pub async fn edit(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state
         .scim_group_service
-        .admin_delete(id)
+        .admin_delete(id, operator.tenant_id())
         .await
         .map_err(scim_to_app)?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))

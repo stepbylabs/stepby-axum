@@ -1,13 +1,15 @@
 // axum-backend/src/router/sys_tenant_router.rs
-//! 租户管理模块路由注册（多租户 Phase 2 立项实施）
+//! 租户管理模块路由注册（多租户 Phase 3：主键 = `tenant_id`，事实源 = sys_tenant）
 //!
 //! 权限要求（通过 permission_middleware 集中配置，详见 middleware/permission.rs）：
-//! - GET    /system/tenant/list         system:tenant:list
-//! - GET    /system/tenant/{deptId}     system:tenant:query
-//! - POST   /system/tenant              system:tenant:add
-//! - PUT    /system/tenant              system:tenant:edit
-//! - PUT    /system/tenant/changeStatus system:tenant:edit
-//! - DELETE /system/tenant/{deptId}     system:tenant:remove
+//! - GET    /system/tenant/list                 system:tenant:list
+//! - GET    /system/tenant/package/options      system:tenant:list（服务层再校验仅平台）
+//! - GET    /system/tenant/{tenantId}           system:tenant:query
+//! - POST   /system/tenant                      system:tenant:add
+//! - PUT    /system/tenant                      system:tenant:edit
+//! - PUT    /system/tenant/changeStatus         system:tenant:edit
+//! - DELETE /system/tenant/{tenantId}           system:tenant:remove
+//! - PUT    /system/tenant/restore/{tenantId}   system:tenant:edit
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
@@ -20,6 +22,11 @@ use crate::state::AppState;
 pub fn tenant_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/system/tenant/list", get(sys_tenant_handler::list))
+        // 注：`/package/options` 两段路径不会与单段 `{tenantId}` 冲突；静态段注册在前更直观
+        .route(
+            "/system/tenant/package/options",
+            get(sys_tenant_handler::package_options),
+        )
         .route("/system/tenant", post(sys_tenant_handler::add))
         .route("/system/tenant", put(sys_tenant_handler::edit))
         .route(
@@ -27,8 +34,12 @@ pub fn tenant_routes() -> Router<Arc<AppState>> {
             put(sys_tenant_handler::change_status),
         )
         .route(
-            "/system/tenant/{deptId}",
+            "/system/tenant/restore/{tenantId}",
+            put(sys_tenant_handler::restore),
+        )
+        .route(
+            "/system/tenant/{tenantId}",
             delete(sys_tenant_handler::remove),
         )
-        .route("/system/tenant/{deptId}", get(sys_tenant_handler::get_info))
+        .route("/system/tenant/{tenantId}", get(sys_tenant_handler::get_info))
 }

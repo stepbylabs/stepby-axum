@@ -20,7 +20,7 @@ use crate::entity::sys_user;
 use crate::repository::sys_user::SysUserRepository;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    Set,
+    Set, TransactionTrait,
 };
 
 /// SCIM User 资源（响应体）
@@ -120,12 +120,16 @@ const SCIM_USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
 
 pub struct ScimService {
     user_repo: SysUserRepository,
+    /// v5-N2 Phase 3：SCIM 凭据归属租户。该凭据 provisioning 出的用户归属此租户，
+    /// 读路径亦按此租户过滤（0 = 平台租户，读不过滤 + 写归属平台 0）。
+    tenant_id: i64,
 }
 
 impl ScimService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, tenant_id: i64) -> Self {
         Self {
             user_repo: SysUserRepository::new(db),
+            tenant_id,
         }
     }
 
@@ -194,6 +198,10 @@ impl ScimService {
         let start = start_index.max(1);
         let count = count.clamp(1, 200);
         let mut where_clause = String::from("del_flag <> '2'");
+        // v5-N2 Phase 3：按 SCIM 凭据归属租户过滤（0 = 平台租户，全量可见）
+        if let Some(tid) = crate::common::tenant::tenant_scope(self.tenant_id) {
+            where_clause.push_str(&format!(" AND tenant_id = {tid}"));
+        }
         if let Some(f) = filter {
             match Self::parse_filter(f) {
                 Some((col, val)) => {
@@ -247,13 +255,20 @@ impl ScimService {
             .one(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
-            .filter(|u| u.del_flag.as_deref() != Some("2"))
+            .filter(|u| {
+                u.del_flag.as_deref() != Some("2")
+                    && crate::common::tenant::tenant_allowed(self.tenant_id, u.tenant_id)
+            })
             .ok_or_else(|| ScimError::new(404, "User not found"))?;
         Ok(self.to_scim_user(&m, base_url))
     }
 
     /// POST /Users：provision 创建。密码为随机不可知值（IdP 管理凭据，
     /// 本地登录走找回流程）；userName 冲突 → 409 conflict。
+    ///
+    /// v5-N2 Phase 3：SCIM 端点由身份该凭据的归属租户（`scim.tenant_id`，经
+    /// `SCIM_TENANT_ID` 环境变量注入）确定建号归属，取代先前硬编码平台租户 0。
+    /// 平台租户 0 时行为与既有等价（全局 provisioning）。
     pub async fn create_user(
         &self,
         body: &serde_json::Value,
@@ -326,16 +341,44 @@ impl ScimService {
             user_type: Set(Some("00".to_string())),
             country_code: Set(Some("CN".to_string())),
             scim_external_id: Set(external_id),
+            // v5-N2 Phase 3：归属 SCIM 凭据所属租户（0 = 平台租户）；取代先前硬编码 Set(0)
+            tenant_id: Set(self.tenant_id),
             create_by: Set(Some("scim".to_string())),
             update_by: Set(Some("scim".to_string())),
             create_time: Set(Some(now)),
             update_time: Set(Some(now)),
             ..Default::default()
         };
-        let saved = am.insert(self.db()).await.map_err(|e| match e {
-            sea_orm::DbErr::RecordNotInserted => ScimError::new(409, "userName 已存在"),
-            other => ScimError::new(500, format!("数据库错误: {other}")),
-        })?;
+        let saved = {
+            // 多租户配额（§27.4）：所有插入 sys_user 的写路径必须在自身事务内做权威配额校验
+            // （防并发超额）。与 sys_user_service / sys_oauth_service 同一事实源
+            // （`SysTenantService::ensure_account_quota_conn` → 事务内锁租户行后计数）。
+            let tenant_id = self.tenant_id;
+            self.db()
+                .transaction::<_, sys_user::Model, ScimError>(|txn| {
+                    let am = am.clone();
+                    Box::pin(async move {
+                        if let Err(e) =
+                            crate::service::SysTenantService::ensure_account_quota_conn(txn, tenant_id)
+                                .await
+                        {
+                            return Err(
+                                crate::service::SysTenantService::quota_violation_to_service_error(&e)
+                                    .map(|se| ScimError::new(se.code as u16, se.message))
+                                    .unwrap_or_else(|| ScimError::from(e)),
+                            );
+                        }
+                        am.insert(txn).await.map_err(|e| match e {
+                            sea_orm::DbErr::RecordNotInserted => {
+                                ScimError::new(409, "userName 已存在")
+                            }
+                            other => ScimError::new(500, format!("数据库错误: {other}")),
+                        })
+                    })
+                })
+                .await
+                .map_err(ScimError::from)?
+        };
         Ok(self.to_scim_user(&saved, base_url))
     }
 
@@ -515,7 +558,10 @@ impl ScimService {
             .one(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
-            .filter(|u| u.del_flag.as_deref() != Some("2"))
+            .filter(|u| {
+                u.del_flag.as_deref() != Some("2")
+                    && crate::common::tenant::tenant_allowed(self.tenant_id, u.tenant_id)
+            })
             .ok_or_else(|| ScimError::new(404, "User not found"))
     }
 }

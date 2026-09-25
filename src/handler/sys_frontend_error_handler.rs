@@ -189,9 +189,14 @@ pub struct FrontendErrorStatsQuery {
 )]
 pub async fn stats(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(params): Query<FrontendErrorStatsQuery>,
 ) -> Result<AjaxResult<FrontendErrorStatsVo>, AppError> {
     let days = params.days.unwrap_or(30).clamp(1, 365);
-    let vo = state.frontend_error_service.get_stats(days).await?;
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
+    let vo = state
+        .frontend_error_service
+        .get_stats(days, tenant_scope)
+        .await?;
     Ok(AjaxResult::success(vo))
 }

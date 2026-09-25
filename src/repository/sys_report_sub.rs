@@ -43,24 +43,18 @@ impl SysReportSubRepository {
             .await
     }
 
-    /// 查询某报表下的全部订阅（未删除）
-    pub async fn find_by_report_id(&self, report_id: i64) -> Result<Vec<Model>, DbErr> {
-        SysReportSub::find()
-            .filter(Column::ReportId.eq(report_id))
-            .filter(Column::DelFlag.ne("2"))
-            .order_by_asc(Column::SubId)
-            .all(self.base.db())
-            .await
-    }
-
-    /// 查询全部启用订阅（status='0' 且未删除），供定时推送扫描
-    pub async fn find_all_enabled(&self) -> Result<Vec<Model>, DbErr> {
-        SysReportSub::find()
+    /// 查询全部启用订阅（status='0' 且未删除），**按租户分组**返回，供定时推送扫描。
+    ///
+    /// 定时推送为后台批量任务：必须先按租户分组，再逐组以该组 tid 为上下文生成快照，
+    /// 严禁跨租户聚合数据（A 租户报表不得统计 B 租户数据）。
+    pub async fn find_all_enabled(&self) -> Result<Vec<(i64, Vec<Model>)>, DbErr> {
+        let rows = SysReportSub::find()
             .filter(Column::Status.eq("0"))
             .filter(Column::DelFlag.ne("2"))
             .order_by_asc(Column::SubId)
             .all(self.base.db())
-            .await
+            .await?;
+        Ok(crate::common::tenant::group_by_tenant(rows, |s| s.tenant_id))
     }
 
     /// 分页查询订阅（report_id/sub_name/status 过滤）
@@ -72,9 +66,13 @@ impl SysReportSubRepository {
         report_id: Option<i64>,
         sub_name: Option<&str>,
         status: Option<&str>,
+        tenant_scope: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysReportSub::find();
         query = query.filter(Column::DelFlag.ne("2"));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
         if let Some(rid) = report_id {
             query = query.filter(Column::ReportId.eq(rid));
         }

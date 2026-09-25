@@ -11,8 +11,8 @@ use crate::service::{
     SysTenantService,
     SysHttpDebugService, SysJobService, SysLogininforService, SysMenuService, SysMsgService,
     SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
-    SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysUserPrefService,
-    SysUserService, SysWebHookService,
+    SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysTenantDomainService,
+    SysUserPrefService, SysUserService, SysWebHookService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -46,6 +46,8 @@ pub struct AppState {
     /// 部门模块 Service
     pub dept_service: SysDeptService,
     pub tenant_service: SysTenantService,
+    /// 租户域名绑定 Service（多租户 Phase 3 域名链路：DNS TXT 验证 + host→tid 解析）
+    pub tenant_domain_service: SysTenantDomainService,
     /// 认证服务
     pub auth_service: AuthService,
     /// 定时任务 Service
@@ -204,6 +206,13 @@ impl AppState {
         // 减少每次登录 2 次 DB 查询（captchaEnabled + registerUser）。
         let config_service = SysConfigService::new(db.clone(), redis.clone());
 
+        // 多租户 Phase 3：tenant_service 提前实例化（登录闸门 + 运行时状态键 + 定向踢线），
+        // clone 一份注入 AuthService，保证同一实例共享（避免重复 Repository）
+        let tenant_service = SysTenantService::new(db.clone(), redis.clone());
+
+        // 多租户 Phase 3 域名链路：域名服务持有独立 Redis 客户端（host 缓存 tenant:host:{domain}）
+        let tenant_domain_service = SysTenantDomainService::new(db.clone(), redis.clone());
+
         // AuthService 复用上述 Service 实例 + 单独实例化 logininfor_repo
         // REGRESS-007 说明：P0-R81-014 已消除 15 个重复 Repository。
         // 剩余 1 个 logininfor_repo 是 AuthService 直接调用 Repository 层 insert 方法，
@@ -214,6 +223,7 @@ impl AppState {
             SysLogininforRepository::new(db.clone()),
             config_service.clone(),
             config.clone(), // P0-4：TOTP secret 加解密需要 config_enc_key
+            tenant_service.clone(), // Phase 3：登录闸门（sys_tenant 三态）+ 运行时键同步
         );
 
         // 全局可观测性句柄：按配置文件注入慢请求阈值 / 缓冲容量（进程内生效）
@@ -234,7 +244,9 @@ impl AppState {
             menu_service,
             notice_service: SysNoticeService::new(db.clone()),
             dept_service: SysDeptService::new(db.clone()),
-            tenant_service: SysTenantService::new(db.clone()),
+            // 多租户 Phase 3：租户服务需要 Redis（运行时状态键 + 定向会话吊销）
+            tenant_service,
+            tenant_domain_service,
             auth_service,
             job_service: SysJobService::new(db.clone(), job_scheduler.clone()),
             dict_service: SysDictService::new(db.clone(), redis.clone()),
@@ -266,9 +278,14 @@ impl AppState {
                 // 与静态 RESERVED_CLIENT_IDS 一并在 add_client 时比对
                 vec![config.jwt.audience.clone(), config.jwt.issuer.clone()],
             ),
-            scim_service: crate::service::scim_service::ScimService::new(db.clone()),
-            scim_group_service:
-                crate::service::scim_group_service::ScimGroupService::new(db.clone()),
+            scim_service: crate::service::scim_service::ScimService::new(
+                db.clone(),
+                config.scim.tenant_id,
+            ),
+            scim_group_service: crate::service::scim_group_service::ScimGroupService::new(
+                db.clone(),
+                config.scim.tenant_id,
+            ),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
             web_hook_service: SysWebHookService::new(db.clone(), config.config_enc_key.clone()),

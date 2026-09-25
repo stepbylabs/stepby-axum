@@ -227,8 +227,8 @@ async fn test_common_upload_download_delete_chain() {
         .expect("应返回 url，实际: {v}")
         .to_string();
     assert!(
-        url.starts_with("/uploads/file/"),
-        "url 应位于 /uploads/file/ 下，实际: {v}"
+        url.starts_with("/uploads/0/file/"),
+        "url 应位于平台租户目录 /uploads/0/file/ 下，实际: {v}"
     );
     assert_eq!(
         v["fileName"].as_str(),

@@ -41,9 +41,13 @@ use crate::utils::parse_id_list;
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<NoticeQueryDto>,
 ) -> Result<TableDataInfo<SysNoticeModel>, AppError> {
-    let (rows, total) = state.notice_service.get_notice_page(query).await?;
+    let (rows, total) = state
+        .notice_service
+        .get_notice_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -63,9 +67,13 @@ pub async fn list(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(notice_id): Path<i64>,
 ) -> Result<AjaxResult<SysNoticeModel>, AppError> {
-    let model = state.notice_service.get_notice_by_id(notice_id).await?;
+    let model = state
+        .notice_service
+        .get_notice_by_id(notice_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -88,7 +96,7 @@ pub async fn add(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .notice_service
-        .add_notice(dto, operator.username(), Some(&state))
+        .add_notice(dto, operator.username(), operator.tenant_id(), Some(&state))
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
@@ -113,7 +121,7 @@ pub async fn edit(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .notice_service
-        .edit_notice(dto, operator.username())
+        .edit_notice(dto, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -134,6 +142,7 @@ pub async fn edit(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(notice_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let ids: Vec<i64> = parse_id_list::<i64>(&notice_ids);
@@ -151,7 +160,10 @@ pub async fn remove(
         )));
     }
 
-    state.notice_service.delete_notice(ids).await?;
+    state
+        .notice_service
+        .delete_notice(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -172,11 +184,14 @@ pub async fn list_top(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<NoticeTopVo, AppError> {
-    let rows = state.notice_service.get_notice_top().await?;
+    let rows = state
+        .notice_service
+        .get_notice_top(operator.tenant_id())
+        .await?;
     let user_id: i64 = parse_operator_id(&operator)?;
     let unread_count = state
         .notice_service
-        .count_unread(user_id)
+        .count_unread(user_id, operator.tenant_id())
         .await
         .unwrap_or(0);
     Ok(NoticeTopVo {
@@ -195,7 +210,7 @@ pub async fn mark_read(
     let user_id: i64 = parse_operator_id(&operator)?;
     state
         .notice_service
-        .mark_read(params.notice_id, user_id)
+        .mark_read(params.notice_id, user_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
@@ -219,7 +234,7 @@ pub async fn mark_read_all(
     }
     state
         .notice_service
-        .mark_read_all(&params.ids, user_id)
+        .mark_read_all(&params.ids, user_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
@@ -234,7 +249,10 @@ pub async fn mark_all_unread_read(
     operator: Operator,
 ) -> Result<AjaxResult<u64>, AppError> {
     let user_id: i64 = parse_operator_id(&operator)?;
-    let count = state.notice_service.mark_all_unread_read(user_id).await?;
+    let count = state
+        .notice_service
+        .mark_all_unread_read(user_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(count))
 }
 
@@ -256,9 +274,13 @@ pub struct NoticeMarkReadAllParams {
 /// 查询公告已读用户列表
 pub async fn list_read_users(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<NoticeReadUserQueryDto>,
 ) -> Result<TableDataInfo<NoticeReadUserVo>, AppError> {
-    let (rows, total) = state.notice_service.get_read_users_page(query).await?;
+    let (rows, total) = state
+        .notice_service
+        .get_read_users_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 

@@ -93,12 +93,36 @@ impl MigrationTrait for Migration {
         execute_idempotent_insert(manager, "sys_role_menu (role_id, menu_id) VALUES (2, 3701)")
             .await?;
 
+        // ---- 域名绑定（多租户 Phase 3 域名链路，menu_id 段位 3800-3804，父 3700）----
+        // 与 AppInitializer 的 `ensure_multitenant_phase2` 双写保持一致（存量库启动不跑
+        // Migrator::up，两处清单必须双写；R4 为回归门禁）。
+        // 授予约定：查看（list）与验证（verify）授予平台普通角色（role_id=2），
+        // 新增/修改/删除仅平台操作者（operator_tid=0）可用，故不授予普通角色。
+        let domain_rows: &[(i64, &str, i64, &str)] = &[
+            (3800, "域名查询", 5, "system:tenant:domain:list"),
+            (3801, "域名新增", 6, "system:tenant:domain:add"),
+            (3802, "域名验证", 7, "system:tenant:domain:verify"),
+            (3803, "域名修改", 8, "system:tenant:domain:edit"),
+            (3804, "域名删除", 9, "system:tenant:domain:remove"),
+        ];
+        for (menu_id, name, order_num, perms) in domain_rows {
+            let sql = format!(
+                "{menu_cols} VALUES \
+                ({menu_id}, '{name}', 3700, {order_num}, '', '', '', '', '1', '0', 'F', '0', '0', '{perms}', '#', 'admin', {now}, '', '0', NULL)"
+            );
+            execute_idempotent_insert(manager, &sql).await?;
+        }
+        execute_idempotent_insert(manager, "sys_role_menu (role_id, menu_id) VALUES (2, 3800)")
+            .await?;
+        execute_idempotent_insert(manager, "sys_role_menu (role_id, menu_id) VALUES (2, 3802)")
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        for menu_id in [3700, 3701, 3702, 3703, 3704] {
+        for menu_id in [3700, 3701, 3702, 3703, 3704, 3800, 3801, 3802, 3803, 3804] {
             conn.execute_unprepared(&format!(
                 "DELETE FROM sys_role_menu WHERE menu_id = {menu_id}"
             ))

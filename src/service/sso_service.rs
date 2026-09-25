@@ -334,6 +334,10 @@ pub struct TokenResult {
     /// v5-E2：授权用户名（审计用，登录日志记录"SSO 令牌签发"事件的主体；
     /// 多一个响应字段对标准 RP 客户端无害）
     pub user_name: String,
+    /// v5-N2 Phase 2：授权用户的租户 ID（**仅服务端审计使用**，写入 sys_logininfor；
+    /// `skip_serializing` 保证不改变 /sso/token 协议响应体）
+    #[serde(skip_serializing)]
+    pub tenant_id: i64,
     /// v5-D3：刷新令牌（不透明串；仅 grant_types 含 refresh_token 的客户端签发时出现）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
@@ -1066,6 +1070,8 @@ impl SsoService {
             dept_name: String::new(),
             exp: chrono::Utc::now().timestamp() + at_ttl as i64,
             source: "sso".to_string(),
+            // Phase 3：SSO 在线会话携带租户 ID（随授权码绑定继承，供租户分层展示/定向踢线）
+            tenant_id: binding.tid,
         };
         if let Ok(json) = serde_json::to_string(&online) {
             let online_key = format!("online:{}", binding.access_token_hash);
@@ -1179,6 +1185,8 @@ impl SsoService {
             scope: binding.scope.join(" "),
             id_token,
             user_name: binding.username.clone(),
+            // v5-N2 Phase 2：登录用户租户（写入登录日志用，不参与响应序列化）
+            tenant_id: binding.tid,
             refresh_token,
             refresh_expires_in,
         })
@@ -1267,6 +1275,8 @@ impl SsoService {
             scope: new_binding.scope.join(" "),
             id_token,
             user_name: new_binding.username.clone(),
+            // v5-N2 Phase 2：登录用户租户（写入登录日志用，不参与响应序列化）
+            tenant_id: new_binding.tid,
             refresh_token,
             refresh_expires_in,
         })

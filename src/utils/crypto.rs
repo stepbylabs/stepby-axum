@@ -356,6 +356,7 @@ mod crypto_tests {
             dept_name: "研发部".to_string(),
             source: "login".to_string(),
             exp: 1800000000,
+            tenant_id: 0,
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains("\"exp\":1800000000"));
@@ -422,4 +423,9 @@ pub struct OnlineSession {
     /// 不透明 access_token。旧 JSON 反序列化时默认 `login`，在线列表/强退据此区分展示与清理。
     #[serde(default)]
     pub source: String,
+    /// 所属租户 ID（Phase 3 新增，`0` = 平台租户）。在线用户域按租户分层展示与
+    /// 定向踢线（租户停用/删除/到期）依赖此字段；旧 JSON 反序列化时默认 0，
+    /// 踢线侧对 0 值按 `user_id` 回查 `sys_user.tenant_id` 兜底。
+    #[serde(default)]
+    pub tenant_id: i64,
 }

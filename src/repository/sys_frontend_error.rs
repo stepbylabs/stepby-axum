@@ -123,12 +123,21 @@ impl SysFrontendErrorRepository {
     }
 
     /// 聚合统计：按 source 分组计数（仪表盘/概览用）
-    pub async fn stats_by_source(&self) -> Result<Vec<(String, i64)>, DbErr> {
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户；`None`（平台）→ 全量。
+    pub async fn stats_by_source(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<(String, i64)>, DbErr> {
         use sea_orm::sea_query::Expr;
-        let rows: Vec<(String, i64)> = SysFrontendError::find()
+        let mut query = SysFrontendError::find()
             .select_only()
             .column(Column::Source)
-            .column_as(Expr::col(Column::Id).count(), "cnt")
+            .column_as(Expr::col(Column::Id).count(), "cnt");
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        let rows: Vec<(String, i64)> = query
             .group_by(Column::Source)
             .order_by_desc(Expr::col(Column::Id).count())
             .into_tuple::<(String, i64)>()
@@ -138,7 +147,13 @@ impl SysFrontendErrorRepository {
     }
 
     /// 聚合统计：最近 N 天每日 error 数（趋势图用）
-    pub async fn stats_daily_errors(&self, days: i64) -> Result<Vec<(String, i64)>, DbErr> {
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户；`None`（平台）→ 全量。
+    pub async fn stats_daily_errors(
+        &self,
+        days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<(String, i64)>, DbErr> {
         use chrono::Duration;
         use std::collections::HashMap;
         let today = crate::common::datetime::today_utc();
@@ -146,24 +161,31 @@ impl SysFrontendErrorRepository {
         let begin_time = start.and_time(chrono::NaiveTime::MIN);
         let db = self.base.db();
         let backend = db.get_database_backend();
-        let (sql, values) = match backend {
-            DatabaseBackend::Sqlite => (
+        // 租户过滤后缀（单占位符，便于三方言复用）
+        let tenant_clause = match (backend, tenant_scope) {
+            (DatabaseBackend::Postgres, Some(_)) => " AND $2 = tenant_id",
+            (_, Some(_)) => " AND ? = tenant_id",
+            (_, None) => "",
+        };
+        let mut values: Vec<sea_orm::Value> = vec![begin_time.into()];
+        if let Some(t) = tenant_scope {
+            values.push(t.into());
+        }
+        let sql = match backend {
+            DatabaseBackend::Sqlite => format!(
                 "SELECT strftime('%Y-%m-%d', create_time) AS d, COUNT(*) AS c \
-                 FROM sys_frontend_error WHERE create_time >= ? AND level='error' \
-                 GROUP BY d ORDER BY d ASC",
-                vec![begin_time.into()],
+                 FROM sys_frontend_error WHERE create_time >= ? AND level='error'{tenant_clause} \
+                 GROUP BY d ORDER BY d ASC"
             ),
-            DatabaseBackend::Postgres => (
+            DatabaseBackend::Postgres => format!(
                 "SELECT TO_CHAR(create_time, 'YYYY-MM-DD') AS d, COUNT(*) AS c \
-                 FROM sys_frontend_error WHERE create_time >= $1 AND level='error' \
-                 GROUP BY d ORDER BY d ASC",
-                vec![begin_time.into()],
+                 FROM sys_frontend_error WHERE create_time >= $1 AND level='error'{tenant_clause} \
+                 GROUP BY d ORDER BY d ASC"
             ),
-            DatabaseBackend::MySql => (
+            DatabaseBackend::MySql => format!(
                 "SELECT DATE_FORMAT(create_time, '%Y-%m-%d') AS d, COUNT(*) AS c \
-                 FROM sys_frontend_error WHERE create_time >= ? AND level='error' \
-                 GROUP BY d ORDER BY d ASC",
-                vec![begin_time.into()],
+                 FROM sys_frontend_error WHERE create_time >= ? AND level='error'{tenant_clause} \
+                 GROUP BY d ORDER BY d ASC"
             ),
         };
         let rows = db

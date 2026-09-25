@@ -120,9 +120,12 @@ pub async fn mine(
 /// GET /system/flow/list — 全部单据（管理视图；权限键 system:flow:list）
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<FlowPageQuery>,
 ) -> Result<TableDataInfo<FlowDemoDocModel>, AppError> {
-    let (rows, total) = state.flow_service.all_page(query).await?;
+    // 多租户：租户操作者仅见本租户单据；平台操作者全量（tenant_id=0 → None）
+    let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
+    let (rows, total) = state.flow_service.all_page(query, tenant_scope).await?;
     Ok(TableDataInfo::new(total, rows))
 }
 

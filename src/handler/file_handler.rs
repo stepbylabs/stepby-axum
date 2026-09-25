@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::{AjaxResult, AppError};
+use crate::middleware::Operator;
 use crate::state::AppState;
 
 // ==================== DTO ====================
@@ -81,6 +82,7 @@ pub struct FileDeleteRequest {
 /// 文件列表（分页）
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(params): Query<FileListQuery>,
 ) -> Result<AjaxResult<FileListResponse>, AppError> {
     let upload_cfg = &state.config.upload;
@@ -89,10 +91,15 @@ pub async fn list(
     let page_num = params.page_num.clamp(1, 10_000);
     let page_size = params.page_size.clamp(1, 100);
 
-    // 统一走存储后端列举（local 读目录 / s3 ListObjectsV2），URL 由后端生成
+    // 统一走存储后端列举（local 读目录 / s3 ListObjectsV2），URL 由后端生成；
+    // 目录带操作者租户维度，仅可见本租户文件
     let objects = state
         .storage
-        .list(&upload_cfg.common_dir, &upload_cfg.common_url_prefix)
+        .list(
+            &upload_cfg.common_dir,
+            operator.tenant_id(),
+            &upload_cfg.common_url_prefix,
+        )
         .await?;
 
     let mut files: Vec<FileInfo> = Vec::new();
@@ -152,6 +159,7 @@ pub async fn list(
 /// 文件上传（复用 common_upload 的安全策略，P0-3 统一走 save_upload_bytes）
 pub async fn upload(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     mut multipart: Multipart,
 ) -> Result<AjaxResult<FileUploadResponse>, AppError> {
     let upload_cfg = &state.config.upload;
@@ -184,6 +192,7 @@ pub async fn upload(
         file_ext.as_deref(),
         original_filename.as_deref(),
         upload_cfg,
+        operator.tenant_id(),
         crate::common::upload::UploadKind::Common,
     )
     .await?;
@@ -207,6 +216,7 @@ pub async fn upload(
 /// 删除文件（按服务器端文件名）
 pub async fn delete(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Json(req): Json<FileDeleteRequest>,
 ) -> Result<AjaxResult<()>, AppError> {
     let file_name = req.file_name.trim();
@@ -223,10 +233,11 @@ pub async fn delete(
     }
 
     let upload_cfg = &state.config.upload;
-    // 统一走存储后端删除（local 本地删盘带根目录前缀校验 / s3 DeleteObject，幂等）
+    // 统一走存储后端删除（local 本地删盘带根目录前缀校验 / s3 DeleteObject，幂等）；
+    // 目录带操作者租户维度，无法删除其它租户文件
     state
         .storage
-        .delete(&upload_cfg.common_dir, file_name)
+        .delete(&upload_cfg.common_dir, operator.tenant_id(), file_name)
         .await?;
 
     tracing::info!(file_name = %file_name, "文件已删除");

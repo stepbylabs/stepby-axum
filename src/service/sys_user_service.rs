@@ -20,7 +20,6 @@ use std::sync::LazyLock;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::common::TreeSelectVo;
 use crate::common::constants::SUPER_ADMIN_USER_ID;
 use crate::common::custom_scope::{self, CustomCondition};
 use crate::common::error::ServiceError;
@@ -42,9 +41,6 @@ use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::utils::password::{
     encrypt_password, validate_password_complexity, verify_password_with_upgrade_hint,
 };
-
-// 部门树组装函数抽取至 service/mod.rs，避免与 sys_role_service 重复
-use super::build_dept_tree_select;
 
 // ==================== DTO 定义 ====================
 
@@ -484,6 +480,8 @@ pub struct SysUserService {
     post_repo: SysPostRepository,
     role_repo: SysRoleRepository,
     role_dept_repo: SysRoleDeptRepository,
+    /// 租户套餐/配额服务（多租户 §27.1 决策 10：账号配额校验）
+    tenant_service: crate::service::SysTenantService,
     /// Redis 连接管理器（权限缓存失效）
     redis: ConnectionManager,
 }
@@ -498,9 +496,22 @@ impl SysUserService {
             dept_repo: SysDeptRepository::new(db.clone()),
             post_repo: SysPostRepository::new(db.clone()),
             role_repo: SysRoleRepository::new(db.clone()),
+            tenant_service: crate::service::SysTenantService::new(db.clone(), redis.clone()),
             role_dept_repo: SysRoleDeptRepository::new(db),
             redis,
         }
+    }
+
+    /// 账号配额校验（事务内权威版本，§27.1 决策 10）：所有插入 `sys_user` 的写路径
+    /// （新增用户 / OAuth 自动建号 / SCIM 预置）必须在自己事务内调用本方法。
+    pub async fn ensure_account_quota_txn<C: sea_orm::ConnectionTrait>(
+        &self,
+        txn: &C,
+        tenant_id: i64,
+    ) -> Result<(), sea_orm::DbErr> {
+        self.tenant_service
+            .ensure_account_quota_txn(txn, tenant_id)
+            .await
     }
 
     /// 获取数据库连接引用（用于事务）
@@ -1069,15 +1080,17 @@ impl SysUserService {
     ///
     /// P0-6：`operator_user_id` 传入且目标用户存在时，校验目标用户是否在操作人数据范围内，
     /// 不在则返回 404（防止低权限管理员越权读取他人 PII；此前与 list 的数据范围不一致）。
+    /// 多租户：`tenant_scope` 透传至角色/岗位下拉查询，避免跨租户枚举。
     pub async fn get_user_form_data(
         &self,
         user_id: Option<i64>,
         operator_user_id: Option<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<UserFormVo, ServiceError> {
-        // 查询全部可用角色（通过 Repository）
-        let all_roles: Vec<SysRoleModel> = self.role_repo.find_active_all().await?;
-        // 查询全部可用岗位
-        let all_posts: Vec<SysPostModel> = self.post_repo.find_active_all().await?;
+        // 查询全部可用角色（通过 Repository，按租户过滤）
+        let all_roles: Vec<SysRoleModel> = self.role_repo.find_active_all(tenant_scope).await?;
+        // 查询全部可用岗位（通过 Repository，按租户过滤）
+        let all_posts: Vec<SysPostModel> = self.post_repo.find_active_all(tenant_scope).await?;
 
         // 若 user_id 为 None（新增场景），返回空 role_ids/post_ids/dept_ids 和 None 的 data
         let (user, role_ids, post_ids, dept_ids, scim_role_ids, scim_dept_ids) = match user_id {
@@ -1158,30 +1171,10 @@ impl SysUserService {
     }
 
     /// 新增用户（事务：插入用户 + 批量插入角色关联）
-    /// 登录链路校验：租户用户（tid≠0）根部门被停用/删除 → 拒绝登录
-    /// 对外错误统一由调用方转 login_failed（C-1 反枚举），本方法仅给出细分原因。
-    pub async fn ensure_tenant_active_for_login(&self, tenant_id: i64) -> Result<(), ServiceError> {
-        if tenant_id == 0 {
-            return Ok(());
-        }
-        let root = self
-            .dept_repo
-            .base()
-            .find_by_id(tenant_id)
-            .await?
-            .ok_or_else(|| ServiceError::forbidden(&crate::tr!("error.tenant.disabled")))?;
-        if root.del_flag.as_deref() == Some("2") || root.status.as_deref() == Some("1") {
-            return Err(ServiceError::forbidden(&crate::tr!("error.tenant.disabled")));
-        }
-        Ok(())
-    }
-
-    /// 多租户 Phase 2（dept 树根=租户）：按主部门解析用户归属租户
-    /// - 无主部门 → 平台租户 0；
-    /// - 部门链根 = 平台根部门（PLATFORM_ROOT_DEPT_ID=100）→ 0（平台用户）；
-    /// - 否则 → 根部门 dept_id（租户用户，tenant_id = 租户根）。
+    /// 多租户 Phase 2：租户归属单一来源 = `sys_dept.tenant_id`
+    /// - 无主部门 → 平台租户 0（平台用户）；
+    /// - 有主部门 → 直接取该部门 `tenant_id`（0 即平台租户/平台用户）。
     pub async fn resolve_user_tenant(&self, dept_id: Option<i64>) -> Result<i64, ServiceError> {
-        const PLATFORM_ROOT_DEPT_ID: i64 = crate::service::sys_tenant_service::PLATFORM_ROOT_DEPT_ID;
         let Some(dept_id) = dept_id else {
             return Ok(0);
         };
@@ -1191,27 +1184,76 @@ impl SysUserService {
             .find_by_id(dept_id)
             .await?
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.dept.not_found")))?;
-        let ancestors = dept.ancestors.as_deref().unwrap_or("");
-        let root_id: i64 = if ancestors == "0" || ancestors.is_empty() {
-            // 自身即顶层部门（租户根）
-            dept.dept_id
-        } else {
-            // RuoYi ancestors 格式 "0,<root>,<parent>,..."：第二段即租户根
-            ancestors
-                .split(',')
-                .nth(1)
-                .and_then(|s| s.trim().parse().ok())
-                .ok_or_else(|| {
-                    ServiceError::internal(&crate::tr!("error.tenant.ancestors_invalid"))
-                })?
+        Ok(dept.tenant_id)
+    }
+
+    /// 批量 user_id → tenant_id（在线会话旧 JSON 缺 `tenant_id` 时的兜底回填，
+    /// §27.13.2 分层视图与租户踢线共用同一口径）
+    pub async fn tenant_ids_by_user_ids(
+        &self,
+        user_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, ServiceError> {
+        let rows = self.user_repo.find_tenant_ids_by_user_ids(user_ids).await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// 批量 user_name → tenant_id（Redis 降级路径的租户过滤）
+    pub async fn tenant_ids_by_user_names(
+        &self,
+        user_names: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>, ServiceError> {
+        let rows = self
+            .user_repo
+            .find_tenant_ids_by_user_names(user_names)
+            .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// 越权防护：批量角色 ID 必须与 operator 同租户（operator_tid=0 平台管理员放行）
+    async fn ensure_roles_tenant_allowed(
+        &self,
+        operator_tid: i64,
+        role_ids: Option<&[i64]>,
+    ) -> Result<(), ServiceError> {
+        let Some(ids) = role_ids else {
+            return Ok(());
         };
-        Ok(if root_id == PLATFORM_ROOT_DEPT_ID { 0 } else { root_id })
+        for role_id in ids {
+            let Some(role) = self.role_repo.base().find_by_id(*role_id).await? else {
+                continue;
+            };
+            if !crate::common::tenant::tenant_allowed(operator_tid, role.tenant_id) {
+                return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            }
+        }
+        Ok(())
+    }
+
+    /// 越权防护：批量部门 ID（主/兼职）必须与 operator 同租户（operator_tid=0 平台管理员放行）
+    async fn ensure_depts_tenant_allowed(
+        &self,
+        operator_tid: i64,
+        dept_ids: Option<&[i64]>,
+    ) -> Result<(), ServiceError> {
+        let Some(ids) = dept_ids else {
+            return Ok(());
+        };
+        for dept_id in ids {
+            let Some(dept) = self.dept_repo.base().find_by_id(*dept_id).await? else {
+                continue;
+            };
+            if !crate::common::tenant::tenant_allowed(operator_tid, dept.tenant_id) {
+                return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            }
+        }
+        Ok(())
     }
 
     pub async fn add_user(
         &self,
         dto: UserAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysUserModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -1239,11 +1281,21 @@ impl SysUserService {
             })??;
         // 多租户 Phase 2：tenant_id 随主部门自动解析（dept 树根=租户）
         let user_tenant_id = self.resolve_user_tenant(dto.dept_id).await?;
+        // 越权防护：租户管理员不得把用户建到其它租户的部门下
+        if !crate::common::tenant::tenant_allowed(operator_tid, user_tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        // 越权防护：不允许跨租户授角色 / 绑定兼职部门
+        self.ensure_roles_tenant_allowed(operator_tid, dto.role_ids.as_deref())
+            .await?;
+        self.ensure_depts_tenant_allowed(operator_tid, dto.dept_ids.as_deref())
+            .await?;
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
         let user_dept_repo = self.user_dept_repo.clone();
-        let result = self
+        let tenant_service = self.tenant_service.clone();
+        let txn_result = self
             .db()
             .transaction::<_, SysUserModel, sea_orm::DbErr>(|txn| {
                 let now = crate::common::datetime::now_naive();
@@ -1278,6 +1330,12 @@ impl SysUserService {
                     }
                 });
                 async move {
+                    // 0. 多租户 §27.1 决策 10：账号配额（事务内锁租户行 → 计数 → 插入），
+                    //    口径：含停用用户、不含软删、含管理员；account_count<=0 不限
+                    tenant_service
+                        .ensure_account_quota_txn(txn, user_tenant_id)
+                        .await?;
+
                     // 1. 插入 sys_user（通过 Repository）
                     let new_user = user_repo.base().insert_conn(txn, user_am).await?;
 
@@ -1314,7 +1372,23 @@ impl SysUserService {
                 }
                 .boxed()
             })
-            .await?;
+            .await;
+
+        // 配额/租户不可用业务标记 → 带状态的 ServiceError；其余（真实 DB 错误）走通用转换
+        let result = match txn_result {
+            Ok(user) => user,
+            Err(sea_orm::TransactionError::Transaction(db_err)) => {
+                match crate::service::SysTenantService::quota_violation_to_service_error(&db_err) {
+                    Some(service_err) => return Err(service_err),
+                    None => {
+                        return Err(ServiceError::from(sea_orm::TransactionError::Transaction(
+                            db_err,
+                        )));
+                    }
+                }
+            }
+            Err(other) => return Err(ServiceError::from(other)),
+        };
 
         Ok(result)
     }
@@ -1330,6 +1404,7 @@ impl SysUserService {
         dto: UserEditDto,
         operator: &str,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<SysUserModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -1345,6 +1420,11 @@ impl SysUserService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
+        }
+
+        // 越权防护：租户管理员不得跨租户修改用户
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
         }
 
         // 超管保护：user_id==1 不允许停用、不允许修改角色绑定
@@ -1380,6 +1460,17 @@ impl SysUserService {
 
         // 多租户 Phase 2：主部门变更时 tenant_id 联动重算（dept 树根=租户）
         let new_tenant_id = self.resolve_user_tenant(dto.dept_id).await?;
+        // 越权防护：主部门变更后的新归属必须与 operator 同租户
+        if dto.dept_id.is_some()
+            && !crate::common::tenant::tenant_allowed(operator_tid, new_tenant_id)
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        // 越权防护：不允许跨租户授角色 / 绑定兼职部门
+        self.ensure_roles_tenant_allowed(operator_tid, dto.role_ids.as_deref())
+            .await?;
+        self.ensure_depts_tenant_allowed(operator_tid, dto.dept_ids.as_deref())
+            .await?;
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -1971,13 +2062,6 @@ impl SysUserService {
         Ok(old_avatar)
     }
 
-    /// 查询部门下拉树（全部未删除部门，组装为 TreeSelect 格式）
-    pub async fn get_dept_tree(&self) -> Result<Vec<TreeSelectVo>, ServiceError> {
-        let depts = self.dept_repo.find_active_all().await?;
-        let tree = build_dept_tree_select(&depts, 0);
-        Ok(tree)
-    }
-
     /// 根据 user_id 查询用户所属部门名称（用于在线会话填充 dept_name）
     ///
     /// 流程：sys_user.dept_id → sys_dept.dept_name
@@ -2002,10 +2086,12 @@ impl SysUserService {
     /// 查询用户授权角色信息（对齐前端 UserAuthRoleResult）
     ///
     /// 返回用户信息 + 全部可用角色列表（前端用于勾选用户已绑定的角色）
+    /// 多租户：`tenant_scope` 透传至角色查询，避免跨租户枚举他人角色。
     pub async fn get_auth_role(
         &self,
         user_id: i64,
         operator_user_id: i64,
+        tenant_scope: Option<i64>,
     ) -> Result<UserAuthRoleVo, ServiceError> {
         // 超管用户保护：禁止查看超管用户的授权信息（防止信息收集）
         if user_id == SUPER_ADMIN_USER_ID && operator_user_id != SUPER_ADMIN_USER_ID {
@@ -2028,8 +2114,8 @@ impl SysUserService {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
-        // 查询全部未删除角色（通过 Repository，前端根据 user.roleIds 自行标记已勾选）
-        let all_roles: Vec<SysRoleModel> = self.role_repo.find_active_all().await?;
+        // 查询全部未删除角色（通过 Repository，按租户过滤；前端根据 user.roleIds 自行标记已勾选）
+        let all_roles: Vec<SysRoleModel> = self.role_repo.find_active_all(tenant_scope).await?;
 
         Ok(UserAuthRoleVo {
             user,
@@ -2048,6 +2134,7 @@ impl SysUserService {
         xlsx_bytes: Vec<u8>,
         update_support: bool,
         operator: &str,
+        operator_tid: i64,
         default_password: &str,
     ) -> Result<ImportResultVo, ServiceError> {
         use crate::common::excel::read_xlsx_rows;
@@ -2091,8 +2178,9 @@ impl SysUserService {
             .filter(|s| !s.is_empty())
             .collect();
 
-        // 部门名(trim) → dept_id（仅取未删除且精确同名）
-        let mut dept_map: HashMap<String, i64> = HashMap::new();
+        // 部门名(trim) → (dept_id, tenant_id)（仅取未删除且精确同名）
+        // 多租户 Phase 2：租户归属单一来源 = sys_dept.tenant_id，随部门一次读回避免逐行查库
+        let mut dept_map: HashMap<String, (i64, i64)> = HashMap::new();
         for name in &dept_names {
             if let Some(dept) = self
                 .dept_repo
@@ -2101,7 +2189,7 @@ impl SysUserService {
                 .into_iter()
                 .find(|d| d.dept_name.trim() == name.trim() && d.del_flag.as_deref() != Some("2"))
             {
-                dept_map.insert(name.clone(), dept.dept_id);
+                dept_map.insert(name.clone(), (dept.dept_id, dept.tenant_id));
             }
         }
 
@@ -2117,7 +2205,9 @@ impl SysUserService {
         // update_support=true 时，已存在的用户走更新（仅更新资料字段，不重置密码/角色）
         #[derive(Clone)]
         struct PendingInsert {
+            row_num: u32,
             dept_id: Option<i64>,
+            tenant_id: i64,
             user_name: String,
             nick_name: String,
             phonenumber: Option<String>,
@@ -2139,14 +2229,14 @@ impl SysUserService {
                 });
                 continue;
             }
-            let dept_id = match row
+            let (dept_id, row_tenant_id) = match row
                 .dept_name
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
                 Some(name) => match dept_map.get(name) {
-                    Some(id) => Some(*id),
+                    Some((id, tid)) => (Some(*id), *tid),
                     None => {
                         error_list.push(ImportErrorItem {
                             row_num: row.row_num,
@@ -2155,11 +2245,22 @@ impl SysUserService {
                         continue;
                     }
                 },
-                None => None,
+                // 无部门 → 平台租户 0（平台用户）
+                None => (None, 0),
             };
+            // 越权防护：该行归属租户必须与 operator 同租户，否则仅该行失败、不中断整批
+            if !crate::common::tenant::tenant_allowed(operator_tid, row_tenant_id) {
+                error_list.push(ImportErrorItem {
+                    row_num: row.row_num,
+                    error: crate::tr!("error.common.forbidden"),
+                });
+                continue;
+            }
 
             let pending = PendingInsert {
+                row_num: row.row_num,
                 dept_id,
+                tenant_id: row_tenant_id,
                 user_name: login.clone(),
                 nick_name: row.nick_name.trim().to_string(),
                 phonenumber: row
@@ -2178,6 +2279,15 @@ impl SysUserService {
 
             if let Some(existing) = existing_users.get(&login) {
                 if update_support {
+                    // 跨租户更新防护：已存在用户归属租户必须与本行目标租户一致，
+                    // 否则拒绝该行（禁止借批量导入把其它租户的用户"搬运"到本租户）
+                    if existing.tenant_id != row_tenant_id {
+                        error_list.push(ImportErrorItem {
+                            row_num: row.row_num,
+                            error: crate::tr!("error.user.name_duplicate"),
+                        });
+                        continue;
+                    }
                     to_update.push((existing.user_id, pending));
                 } else {
                     error_list.push(ImportErrorItem {
@@ -2202,39 +2312,88 @@ impl SysUserService {
             })??;
         let inserted_count = {
             let user_repo = self.user_repo.clone();
+            let tenant_service = self.tenant_service.clone();
             let now = crate::common::datetime::now_naive();
             let created_by = operator.to_string();
             self.db()
-                .transaction::<_, i64, sea_orm::DbErr>(|txn| {
-                    let mut count = 0i64;
+                .transaction::<_, (i64, Vec<ImportErrorItem>), sea_orm::DbErr>(|txn| {
                     let to_insert = to_insert.clone();
                     let mut to_update = to_update.clone();
                     let hashed = hashed.clone();
                     async move {
+                        let mut count = 0i64;
+                        let mut quota_errors: Vec<ImportErrorItem> = Vec::new();
+
+                        // 多租户配额（§27.4）：按租户分组，每组仅加锁/计数一次；
+                        // 超限行不落库、逐行回显错误（不中断整批导入）。
+                        let mut groups: Vec<(i64, Vec<PendingInsert>)> = Vec::new();
                         for p in to_insert {
-                            let am = SysUserActiveModel {
-                                dept_id: Set(p.dept_id),
-                                user_name: Set(p.user_name),
-                                nick_name: Set(p.nick_name),
-                                phonenumber: Set(p.phonenumber),
-                                email: Set(p.email),
-                                sex: Set(p.sex),
-                                password: Set(Some(hashed.clone())),
-                                status: Set(Some(p.status)),
-                                del_flag: Set(Some("0".to_string())),
-                                create_by: Set(Some(created_by.clone())),
-                                create_time: Set(Some(now)),
-                                update_by: Set(Some(created_by.clone())),
-                                update_time: Set(Some(now)),
-                                ..Default::default()
+                            match groups.iter_mut().find(|(tid, _)| *tid == p.tenant_id) {
+                                Some((_, rows)) => rows.push(p),
+                                None => groups.push((p.tenant_id, vec![p])),
+                            }
+                        }
+
+                        for (tid, rows) in groups {
+                            let availability = tenant_service
+                                .lock_and_available_quota_txn(txn, tid)
+                                .await?;
+                            let (remaining, limit, unavailable) = match availability {
+                                crate::service::sys_tenant_service::TenantQuotaAvailability::Unlimited => {
+                                    (usize::MAX, 0u64, false)
+                                }
+                                crate::service::sys_tenant_service::TenantQuotaAvailability::Limited {
+                                    limit,
+                                    remaining,
+                                } => (remaining as usize, limit, false),
+                                crate::service::sys_tenant_service::TenantQuotaAvailability::Unavailable => {
+                                    (0, 0, true)
+                                }
                             };
-                            user_repo.base().insert_conn(txn, am).await?;
-                            count += 1;
+                            for (idx, p) in rows.into_iter().enumerate() {
+                                if unavailable {
+                                    quota_errors.push(ImportErrorItem {
+                                        row_num: p.row_num,
+                                        error: crate::tr!("error.tenant.disabled"),
+                                    });
+                                    continue;
+                                }
+                                if idx >= remaining {
+                                    quota_errors.push(ImportErrorItem {
+                                        row_num: p.row_num,
+                                        error: crate::tr!(
+                                            "error.tenant.account_quota_exceeded",
+                                            max = limit
+                                        ),
+                                    });
+                                    continue;
+                                }
+                                let am = SysUserActiveModel {
+                                    dept_id: Set(p.dept_id),
+                                    tenant_id: Set(p.tenant_id),
+                                    user_name: Set(p.user_name),
+                                    nick_name: Set(p.nick_name),
+                                    phonenumber: Set(p.phonenumber),
+                                    email: Set(p.email),
+                                    sex: Set(p.sex),
+                                    password: Set(Some(hashed.clone())),
+                                    status: Set(Some(p.status)),
+                                    del_flag: Set(Some("0".to_string())),
+                                    create_by: Set(Some(created_by.clone())),
+                                    create_time: Set(Some(now)),
+                                    update_by: Set(Some(created_by.clone())),
+                                    update_time: Set(Some(now)),
+                                    ..Default::default()
+                                };
+                                user_repo.base().insert_conn(txn, am).await?;
+                                count += 1;
+                            }
                         }
                         for (user_id, p) in to_update.drain(..) {
                             let am = SysUserActiveModel {
                                 user_id: Set(user_id),
                                 dept_id: Set(p.dept_id),
+                                tenant_id: Set(p.tenant_id),
                                 nick_name: Set(p.nick_name),
                                 phonenumber: Set(p.phonenumber),
                                 email: Set(p.email),
@@ -2247,12 +2406,14 @@ impl SysUserService {
                             user_repo.base().update_conn(txn, am).await?;
                             count += 1;
                         }
-                        Ok(count)
+                        Ok((count, quota_errors))
                     }
                     .boxed()
                 })
                 .await?
         };
+        let (inserted_count, quota_errors) = inserted_count;
+        error_list.extend(quota_errors);
 
         Ok(ImportResultVo {
             success: inserted_count as u32,

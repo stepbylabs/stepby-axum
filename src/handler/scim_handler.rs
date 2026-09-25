@@ -137,6 +137,7 @@ pub async fn create_user(
                     "externalId": resp.external_id,
                     "displayName": resp.name.display_name,
                 }),
+                state.config.scim.tenant_id,
             );
             (
                 StatusCode::CREATED,
@@ -213,6 +214,7 @@ pub async fn delete_user(
                     "userName": user.user_name,
                     "externalId": user.external_id,
                 }),
+                state.config.scim.tenant_id,
             );
             StatusCode::NO_CONTENT.into_response()
         }
@@ -284,6 +286,7 @@ pub async fn create_group(
                     "externalId": resp.external_id,
                     "memberCount": resp.members.len(),
                 }),
+                state.config.scim.tenant_id,
             );
             (
                 StatusCode::CREATED,
@@ -360,6 +363,7 @@ pub async fn delete_group(
                     "displayName": group.display_name,
                     "externalId": group.external_id,
                 }),
+                state.config.scim.tenant_id,
             );
             StatusCode::NO_CONTENT.into_response()
         }

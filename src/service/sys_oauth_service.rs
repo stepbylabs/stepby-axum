@@ -750,6 +750,16 @@ impl SysOauthService {
             .await?;
 
         if let Some(binding) = existing_binding {
+            // 校验本地账号仍存在且未停用（停用账号交由 oauth_finalize_login 拒绝）
+            let user = self
+                .user_service
+                .get_active_user_by_username_by_id(binding.user_id)
+                .await?;
+            let Some(u) = user else {
+                return Err(ServiceError::unauthorized(&crate::tr!(
+                    "error.oauth.local_user_not_found"
+                )));
+            };
             // 已绑定 → 更新令牌信息并直接登录（v5-E6：令牌信封加密）
             let sealed_at = self.seal(&access_token)?;
             let sealed_rt = match &token_payload.refresh_token {
@@ -763,26 +773,15 @@ impl SysOauthService {
                     refresh_token: Set(sealed_rt),
                     expires_at: Set(token_payload.expires_at),
                     last_login_time: Set(Some(crate::common::datetime::now_naive())),
+                    // v5-N2 Phase 2：绑定记录归属被绑定用户的租户（已存在用户取其 tenant_id）
+                    tenant_id: Set(u.tenant_id),
                     ..Default::default()
                 })
                 .await?;
 
-            // 校验本地账号仍存在且未停用（停用账号交由 oauth_finalize_login 拒绝）
-            let user = self
-                .user_service
-                .get_active_user_by_username_by_id(binding.user_id)
-                .await?;
-            match user {
-                Some(u) => {
-                    let _ = u;
-                    Ok(OauthCallResult::LoggedIn {
-                        username: user_username(&self.user_service, binding.user_id).await?,
-                    })
-                }
-                None => Err(ServiceError::unauthorized(&crate::tr!(
-                    "error.oauth.local_user_not_found"
-                ))),
-            }
+            Ok(OauthCallResult::LoggedIn {
+                username: user_username(&self.user_service, binding.user_id).await?,
+            })
         } else if provider.auto_create_user == "1" {
             // 未绑定 + 自动创建 → 创建账号并绑定
             let username = self
@@ -799,11 +798,14 @@ impl SysOauthService {
     // ==================== 绑定管理 ====================
 
     /// 当前登录账号绑定第三方身份（校验 handoff）
+    ///
+    /// `operator_tid`：操作者（= 被绑定账号本人）的租户，绑定记录归属被绑定用户的租户。
     pub async fn bind_oauth(
         &self,
         dto: BindOauthDto,
         user_id: i64,
         redis: &mut ConnectionManager,
+        operator_tid: i64,
     ) -> Result<OauthBindingVo, ServiceError> {
         // 校验 handoff 并获取身份
         let handoff_key = format!("oauth:handoff:{}", dto.handoff);
@@ -852,6 +854,8 @@ impl SysOauthService {
             last_login_time: Set(Some(now)),
             create_time: Set(Some(now)),
             update_time: Set(Some(now)),
+            // v5-N2 Phase 2：绑定记录归属被绑定用户的租户（操作者本人即被绑定账号）
+            tenant_id: Set(operator_tid),
             ..Default::default()
         };
         let model = self.oauth_user_repo.insert(am).await?;
@@ -1105,11 +1109,16 @@ impl SysOauthService {
 
         let pcode = provider.provider_code.clone();
         let pname = provider.provider_name.clone();
+        // v5-N2 Phase 2：新建用户与绑定记录归属**供应商所在租户**
+        //（OAuth 回调无操作者上下文；自动建号取客户端/供应商的 tenant_id）
+        let provider_tid = provider.tenant_id;
         let user_role_repo = self.user_role_repo.clone();
         let oauth_user_repo = self.oauth_user_repo.clone();
         let user_repo = self.user_repo.clone();
 
         let db = self.user_repo.base().db().clone();
+        // §27.1 决策 10：OAuth 自动建号也是"插入 sys_user"的写路径，必须受账号配额约束
+        let quota_svc = self.user_service.clone();
         let now = crate::common::datetime::now_naive();
         let nick = identity
             .nickname
@@ -1145,6 +1154,8 @@ impl SysOauthService {
                 user_am.update_by = Set(Some(format!("oauth:{}", pcode)));
                 user_am.update_time = Set(Some(now));
                 user_am.remark = Set(Some(format!("由 {} 第三方登录自动创建", pname)));
+                // v5-N2 Phase 2：新建用户归属供应商租户（见上方 provider_tid 说明）
+                user_am.tenant_id = Set(provider_tid);
 
                 let username2 = username.clone();
                 let pcode2 = pcode.clone();
@@ -1157,6 +1168,10 @@ impl SysOauthService {
                 let expires2 = token.expires_at;
 
                 async move {
+                    // 0. 账号配额（事务内锁租户行后计数，防并发超额；口径见 sys_tenant_service）
+                    quota_svc
+                        .ensure_account_quota_txn(txn, provider_tid)
+                        .await?;
                     let new_user = user_repo.base().insert_conn(txn, user_am).await?;
                     // 绑定默认角色（普通角色）
                     let _ = user_role_repo
@@ -1183,6 +1198,8 @@ impl SysOauthService {
                         last_login_time: Set(Some(now)),
                         create_time: Set(Some(now)),
                         update_time: Set(Some(now)),
+                        // v5-N2 Phase 2：绑定记录归属新建用户的租户（= 供应商租户）
+                        tenant_id: Set(provider_tid),
                         ..Default::default()
                     };
                     oauth_user_repo.base().insert_conn(txn, binding_am).await?;
@@ -1193,6 +1210,13 @@ impl SysOauthService {
             })
             .await
             .map_err(|e| {
+                // 配额超额 / 租户不可用：按业务语义返回（400/403），不掩盖为 500
+                if let sea_orm::TransactionError::Transaction(db_err) = &e
+                    && let Some(service_err) =
+                        crate::service::SysTenantService::quota_violation_to_service_error(db_err)
+                {
+                    return service_err;
+                }
                 tracing::error!("OAuth 自动创建账号事务失败: {}", e);
                 ServiceError::internal(&crate::tr!("error.oauth.auto_create_failed"))
             })?;

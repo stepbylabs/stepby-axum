@@ -135,9 +135,14 @@ impl SysPostService {
         Ok((rows, total))
     }
 
-    /// 查询全部未删除岗位（前端下拉选择用）
-    pub async fn get_post_options(&self) -> Result<Vec<SysPostModel>, ServiceError> {
-        let rows = self.post_repo.find_active_all().await?;
+    /// 查询未删除岗位（前端下拉选择用）。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅本租户岗位；`None`（平台操作者）→ 全量。
+    pub async fn get_post_options(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<SysPostModel>, ServiceError> {
+        let rows = self.post_repo.find_active_all(tenant_scope).await?;
         Ok(rows)
     }
 
@@ -158,6 +163,7 @@ impl SysPostService {
         &self,
         dto: PostAddDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysPostModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
@@ -171,6 +177,8 @@ impl SysPostService {
 
         let now = crate::common::datetime::now_naive();
         let am = SysPostActiveModel {
+            // 多租户 Phase 2：岗位归属操作者租户（平台管理员=0）
+            tenant_id: Set(operator_tid),
             post_code: Set(dto.post_code),
             post_name: Set(dto.post_name),
             post_sort: Set(dto.post_sort.unwrap_or(0)),
@@ -197,10 +205,17 @@ impl SysPostService {
         &self,
         dto: PostEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysPostModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
         let existing = self.get_post_by_id(dto.post_id).await?;
+        // 多租户越权防护：只能修改本租户岗位（平台操作者放行）
+        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
 
         // post_code 变更时校验唯一性（排除自身）
         let old_post_code = existing.post_code.clone();
@@ -236,7 +251,11 @@ impl SysPostService {
     ///
     /// C-05：预检查（关联校验 + post_code 预查询）移入事务内，使用同一 conn 查询，
     /// 消除"事务外预检 → 事务内删除"的 TOCTOU 竞态窗口。
-    pub async fn delete_posts(&self, post_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_posts(
+        &self,
+        post_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         // 事务保证：预检 + 批量软删除原子化（预检移入事务内，消除 TOCTOU 竞态 C-05）
         let post_repo = self.post_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -260,6 +279,16 @@ impl SysPostService {
                             .ok_or_else(|| {
                                 ServiceError::not_found(&crate::tr!("error.post.not_found"))
                             })?;
+                        if existing.del_flag.as_deref() == Some("2") {
+                            return Err(ServiceError::not_found(&crate::tr!("error.post.not_found")));
+                        }
+                        // 多租户越权防护：只能删除本租户岗位（平台操作者放行）
+                        if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id)
+                        {
+                            return Err(ServiceError::forbidden(&crate::tr!(
+                                "error.common.forbidden"
+                            )));
+                        }
                         let renamed = format!("{}_deleted_{}", existing.post_code, post_id);
                         post_repo
                             .soft_delete_with_rename_conn(txn, *post_id, renamed)

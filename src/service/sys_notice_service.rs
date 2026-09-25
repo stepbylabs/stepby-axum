@@ -185,6 +185,7 @@ impl SysNoticeService {
     pub async fn get_notice_page(
         &self,
         query: NoticeQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysNoticeModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -209,18 +210,27 @@ impl SysNoticeService {
                 query.create_by.as_deref(),
                 begin,
                 end,
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         Ok((rows, total))
     }
 
     /// 根据 notice_id 查询通知公告详情
-    pub async fn get_notice_by_id(&self, notice_id: i64) -> Result<SysNoticeModel, ServiceError> {
+    pub async fn get_notice_by_id(
+        &self,
+        notice_id: i64,
+        operator_tid: i64,
+    ) -> Result<SysNoticeModel, ServiceError> {
         let model = self
             .notice_repo
             .find_active_by_id(notice_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.notice.not_found")))?;
+        // 越权防护：租户管理员不得读取其他租户通知公告
+        if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         Ok(model)
     }
 
@@ -233,6 +243,7 @@ impl SysNoticeService {
         &self,
         dto: NoticeAddDto,
         operator: &str,
+        operator_tid: i64,
         state: Option<&AppState>,
     ) -> Result<SysNoticeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
@@ -243,6 +254,7 @@ impl SysNoticeService {
         // 净化 notice_content：移除危险标签和事件属性（P0-R19-002）
         let safe_content = dto.notice_content.clone().map(|c| sanitize_html(&c));
         let am = SysNoticeActiveModel {
+            tenant_id: Set(operator_tid),
             notice_title: Set(dto.notice_title.clone()),
             notice_type: Set(dto.notice_type.clone()),
             notice_content: Set(safe_content.clone()),
@@ -261,8 +273,13 @@ impl SysNoticeService {
         if dto.notify_email
             && let Some(st) = state
         {
-            self.send_notice_email(st, &dto.notice_title, safe_content.as_deref())
-                .await;
+            self.send_notice_email(
+                st,
+                operator_tid,
+                &dto.notice_title,
+                safe_content.as_deref(),
+            )
+            .await;
         }
 
         Ok(model)
@@ -272,14 +289,20 @@ impl SysNoticeService {
     ///
     /// 查询所有 status='0' 且 email 非空的用户邮箱，调用 MailerService 批量发送。
     /// 失败仅记录 tracing::warn!，不阻断主流程。
-    async fn send_notice_email(&self, state: &AppState, title: &str, content: Option<&str>) {
+    async fn send_notice_email(
+        &self,
+        state: &AppState,
+        tenant_id: i64,
+        title: &str,
+        content: Option<&str>,
+    ) {
         if !state.mailer_service.is_enabled() {
             tracing::debug!("邮件功能未启用，跳过通知公告邮件发送: {}", title);
             return;
         }
 
-        // 查询所有启用状态用户邮箱，并按个人偏好/免打扰过滤（email_notify 且 announce_notify，且不在免打扰窗口）
-        let pairs = match self.find_active_user_email_pairs(state).await {
+        // 查询本租户启用状态用户邮箱，并按个人偏好/免打扰过滤（email_notify 且 announce_notify，且不在免打扰窗口）
+        let pairs = match self.find_active_user_email_pairs(state, tenant_id).await {
             Ok(list) if !list.is_empty() => list,
             Ok(_) => {
                 tracing::info!("无启用状态用户邮箱，跳过邮件发送: {}", title);
@@ -357,26 +380,29 @@ impl SysNoticeService {
         }
     }
 
-    /// 查询所有启用状态用户的 (user_id, email)（status='0' 且 email 非空）
+    /// 查询本租户所有启用状态用户的 (user_id, email)（status='0' 且 email 非空）
     ///
     /// 返回二元组以支持按用户偏好/免打扰过滤（enforcement）。
+    /// tenant_id=0（平台）时不过滤，覆盖全部租户。
     async fn find_active_user_email_pairs(
         &self,
         _state: &AppState,
+        tenant_id: i64,
     ) -> Result<Vec<(i64, String)>, ServiceError> {
         use crate::entity::sys_user::{self, Column as UserColumn};
         use sea_orm::*;
         let db = self.db();
-        let users = sys_user::Entity::find()
+        let mut query = sys_user::Entity::find()
             .filter(UserColumn::Status.eq("0"))
             .filter(UserColumn::DelFlag.eq("0"))
             .filter(UserColumn::Email.is_not_null())
-            .filter(UserColumn::Email.ne(""))
-            .all(db)
-            .await
-            .map_err(|_| {
-                ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed"))
-            })?;
+            .filter(UserColumn::Email.ne(""));
+        if let Some(tid) = crate::common::tenant::tenant_scope(tenant_id) {
+            query = query.filter(UserColumn::TenantId.eq(tid));
+        }
+        let users = query.all(db).await.map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed"))
+        })?;
         let pairs: Vec<(i64, String)> = users
             .into_iter()
             .filter_map(|u| {
@@ -392,12 +418,13 @@ impl SysNoticeService {
         &self,
         dto: NoticeEditDto,
         operator: &str,
+        operator_tid: i64,
     ) -> Result<SysNoticeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         // P3 修复: 枚举值白名单校验，防止脏数据
         validate_notice_enum(&dto.notice_type, dto.status.as_deref())?;
 
-        let existing = self.get_notice_by_id(dto.notice_id).await?;
+        let existing = self.get_notice_by_id(dto.notice_id, operator_tid).await?;
 
         let now = crate::common::datetime::now_naive();
         // 净化 notice_content：移除危险标签和事件属性（P0-R19-002）
@@ -416,7 +443,11 @@ impl SysNoticeService {
     }
 
     /// 批量删除通知公告（物理删除，级联清理已读记录）
-    pub async fn delete_notice(&self, notice_ids: Vec<i64>) -> Result<(), ServiceError> {
+    pub async fn delete_notice(
+        &self,
+        notice_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         // 批量校验记录存在（单次 SELECT 替代 N 次）
         if notice_ids.is_empty() {
             return Ok(());
@@ -426,6 +457,13 @@ impl SysNoticeService {
             return Err(ServiceError::not_found(&crate::tr!(
                 "error.notice.not_found"
             )));
+        }
+        // 越权防护：租户管理员不得跨租户删除通知公告
+        if existing
+            .iter()
+            .any(|n| !crate::common::tenant::tenant_allowed(operator_tid, n.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
         }
         // 事务保证：通知删除与已读记录级联清理原子化（P0-76）
         let notice_repo = self.notice_repo.clone();
@@ -451,26 +489,70 @@ impl SysNoticeService {
     /// 查询顶部公告列表（首页通知铃铛用）
     ///
     /// 返回状态正常的公告，限制 10 条。
-    pub async fn get_notice_top(&self) -> Result<Vec<SysNoticeModel>, ServiceError> {
-        let rows = self.notice_repo.find_top_notices(10).await?;
+    pub async fn get_notice_top(
+        &self,
+        operator_tid: i64,
+    ) -> Result<Vec<SysNoticeModel>, ServiceError> {
+        let rows = self
+            .notice_repo
+            .find_top_notices(10, crate::common::tenant::tenant_scope(operator_tid))
+            .await?;
         Ok(rows)
     }
 
-    /// 标记公告已读
-    pub async fn mark_read(&self, notice_id: i64, user_id: i64) -> Result<(), ServiceError> {
-        self.read_repo.mark_read(notice_id, user_id).await?;
+    /// 标记公告已读（已读记录归属随父公告租户）
+    pub async fn mark_read(
+        &self,
+        notice_id: i64,
+        user_id: i64,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        let notice = self
+            .notice_repo
+            .find_active_by_id(notice_id)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.notice.not_found")))?;
+        // 越权防护：租户管理员不得标记其他租户公告
+        if !crate::common::tenant::tenant_allowed(operator_tid, notice.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        // 从属表归属：read 记录随父公告租户
+        self.read_repo
+            .mark_read(notice_id, user_id, notice.tenant_id)
+            .await?;
         Ok(())
     }
 
-    /// 批量标记公告已读
-    pub async fn mark_read_all(&self, ids: &str, user_id: i64) -> Result<(), ServiceError> {
+    /// 批量标记公告已读（按父公告租户分组写入已读记录）
+    pub async fn mark_read_all(
+        &self,
+        ids: &str,
+        user_id: i64,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         let notice_ids: Vec<i64> = parse_id_list::<i64>(ids);
         if notice_ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.notice.id_invalid"
             )));
         }
-        self.read_repo.mark_read_batch(notice_ids, user_id).await?;
+        let notices = self.notice_repo.find_by_ids(&notice_ids).await?;
+        // 越权防护：任一公告跨租户即拒绝（不静默忽略）
+        if notices
+            .iter()
+            .any(|n| !crate::common::tenant::tenant_allowed(operator_tid, n.tenant_id))
+        {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
+        // 从属表归属：按父公告租户分组批量插入
+        let mut by_tenant: std::collections::BTreeMap<i64, Vec<i64>> =
+            std::collections::BTreeMap::new();
+        for n in &notices {
+            by_tenant.entry(n.tenant_id).or_default().push(n.notice_id);
+        }
+        for (tid, ids) in by_tenant {
+            self.read_repo.mark_read_batch(ids, user_id, tid).await?;
+        }
         Ok(())
     }
 
@@ -480,9 +562,17 @@ impl SysNoticeService {
     /// - mark_read_all 需要传入具体 notice IDs，前端只能拿到当前页的 ID
     /// - mark_all_unread_read 服务端查询所有未读并标记，确保跨页未读也被清除
     ///
-    /// 返回标记的条数（用于响应消息展示）
-    pub async fn mark_all_unread_read(&self, user_id: i64) -> Result<u64, ServiceError> {
-        let count = self.read_repo.mark_all_unread_read(user_id).await?;
+    /// 返回标记的条数（用于响应消息展示）。tenant_scope 由 operator 推导：
+    /// 租户操作者仅处理本租户公告，平台操作者按公告实际租户分组写入。
+    pub async fn mark_all_unread_read(
+        &self,
+        user_id: i64,
+        operator_tid: i64,
+    ) -> Result<u64, ServiceError> {
+        let count = self
+            .read_repo
+            .mark_all_unread_read(user_id, crate::common::tenant::tenant_scope(operator_tid))
+            .await?;
         Ok(count)
     }
 
@@ -490,6 +580,7 @@ impl SysNoticeService {
     pub async fn get_read_users_page(
         &self,
         query: NoticeReadUserQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<NoticeReadUserVo>, u64), ServiceError> {
         let page = PageDomain {
             page_num: query.page_num,
@@ -506,13 +597,21 @@ impl SysNoticeService {
                 limit,
                 query.notice_id,
                 query.search_value.as_deref(),
+                crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
         Ok((rows, total))
     }
 
-    /// 统计用户未读公告数
-    pub async fn count_unread(&self, user_id: i64) -> Result<u64, ServiceError> {
-        Ok(self.read_repo.count_unread(user_id).await?)
+    /// 统计用户未读公告数（按租户维度）
+    pub async fn count_unread(
+        &self,
+        user_id: i64,
+        operator_tid: i64,
+    ) -> Result<u64, ServiceError> {
+        Ok(self
+            .read_repo
+            .count_unread(user_id, crate::common::tenant::tenant_scope(operator_tid))
+            .await?)
     }
 }
