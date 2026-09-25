@@ -2031,4 +2031,22 @@ mod tests {
             "初始密码须满足强度要求"
         );
     }
+
+    /// 治理一致性防线（2026-09-26）：租户自助能力清单**必须**全部可授予。
+    ///
+    /// 背景：`initialize::ensure_tenant_role_menu_governance` 的"差集回填"是**第 4 条**写
+    /// `sys_role_menu` 的路径，它按本清单直接 INSERT（不调用 `ensure_menu_filter_coverage`）。
+    /// 当前清单仅 `system:config|dict:add/edit/remove`（过滤矩阵中均为 `Covered`）⇒ 不可利用；
+    /// 但若将来往清单里加平台专属（`PLATFORM_ONLY_PERM_PREFIXES`）或 tier2 的 perms，就会
+    /// **无门禁地**把菜单授给租户角色。故用本断言把该风险**前移到测试期**（清单变更即失败），
+    /// 比在启动链路做运行时过滤更早暴露、且零运行时开销。
+    #[test]
+    fn tenant_self_service_perms_all_grantable() {
+        for p in TENANT_SELF_SERVICE_PERMS {
+            assert!(
+                crate::common::tenant::is_grantable_perm(p),
+                "租户自助能力清单不得含不可授予的 perms（平台专属前缀 / tier2 表）：`{p}`"
+            );
+        }
+    }
 }
