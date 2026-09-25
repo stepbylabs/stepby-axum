@@ -125,7 +125,9 @@ where
     match opt {
         None => Ok(None),
         Some(ref s) if s.is_empty() => Ok(None),
-        Some(s) => parse_flexible(&s).map(Some).map_err(serde::de::Error::custom),
+        Some(s) => parse_flexible(&s)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
     }
 }
 
@@ -365,7 +367,8 @@ mod tests {
         // 有效日期串（空格分隔 / RFC3339）→ Some(Some(dt))
         let d: Dto = serde_json::from_str(r#"{"expire_time":"2026-01-02 03:04:05"}"#).unwrap();
         assert_eq!(d.expire_time, Some(Some(dt(2026, 1, 2, 3, 4, 5))));
-        let d: Dto = serde_json::from_str(r#"{"expire_time":"2026-01-02T11:04:05+08:00"}"#).unwrap();
+        let d: Dto =
+            serde_json::from_str(r#"{"expire_time":"2026-01-02T11:04:05+08:00"}"#).unwrap();
         assert_eq!(d.expire_time, Some(Some(dt(2026, 1, 2, 3, 4, 5))));
         // 非法串 → 解析失败（不静默降级为清空）
         assert!(serde_json::from_str::<Dto>(r#"{"expire_time":"garbage"}"#).is_err());

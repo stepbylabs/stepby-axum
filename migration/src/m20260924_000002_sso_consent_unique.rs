@@ -13,9 +13,9 @@
 //!
 //! 存量库兜底：AppInitializer::ensure_sso_consent_unique 以等价 SQL 幂等执行。
 
+use crate::IndexDdlExt;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
-use crate::IndexDdlExt;
 
 pub struct Migration;
 

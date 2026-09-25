@@ -5,8 +5,8 @@
 //! 仅提供：列表 / 详情（成员只读）/ 绑定与映射类型编辑（全成员联动 diff）/ 删除。
 //! ScimError → AppError 按 status 映射（400/404/409/500）。
 
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -94,7 +94,11 @@ pub async fn get_info(
 /// PUT /system/scimGroup/{id} 请求体：映射类型与/或绑定集合（全量替换）
 #[derive(Debug, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "ScimGroupAdminUpsertDto.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    export_to = "ScimGroupAdminUpsertDto.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = ScimGroupAdminUpsertDto)]
 pub struct ScimGroupAdminUpsertDto {
     /// 映射类型（role/dept）；变更前置：当前绑定必须为空

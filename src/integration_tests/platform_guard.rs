@@ -22,7 +22,8 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Method, Request, StatusCode};
 
 /// 平台专属端点（harness 可端到端覆盖的最小 DB/Redis 只读端点）
-const PLATFORM_ONLY_ENDPOINTS: [&str; 2] = ["/monitor/cache", "/tool/gen/list?pageNum=1&pageSize=10"];
+const PLATFORM_ONLY_ENDPOINTS: [&str; 2] =
+    ["/monitor/cache", "/tool/gen/list?pageNum=1&pageSize=10"];
 
 /// 用当前测试进程的 JWT 配置签发一份指定 `tid` 的合成令牌。
 fn token_with_tid(ctx: &TestContext, tid: i64) -> String {

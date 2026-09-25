@@ -41,5 +41,8 @@ pub fn tenant_routes() -> Router<Arc<AppState>> {
             "/system/tenant/{tenantId}",
             delete(sys_tenant_handler::remove),
         )
-        .route("/system/tenant/{tenantId}", get(sys_tenant_handler::get_info))
+        .route(
+            "/system/tenant/{tenantId}",
+            get(sys_tenant_handler::get_info),
+        )
 }

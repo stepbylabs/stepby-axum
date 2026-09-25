@@ -338,7 +338,12 @@ pub async fn change_status(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     state
         .role_service
-        .update_role_status(dto.role_id, &dto.status, operator.username(), operator.tenant_id())
+        .update_role_status(
+            dto.role_id,
+            &dto.status,
+            operator.username(),
+            operator.tenant_id(),
+        )
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }

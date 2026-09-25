@@ -606,7 +606,11 @@ impl SysJobService {
     /// 2. 查询任务存在
     /// 3. 验证 job_group 一致
     /// 4. scheduler.run_once
-    pub async fn run_job_once(&self, dto: JobRunDto, operator_tid: i64) -> Result<(), ServiceError> {
+    pub async fn run_job_once(
+        &self,
+        dto: JobRunDto,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
         let job = self
@@ -669,7 +673,11 @@ impl SysJobService {
     /// 批量删除任务日志
     ///
     /// 多租户越权防护：任一所选日志跨越操作者租户即整体拒绝（平台操作者放行）。
-    pub async fn delete_job_logs(&self, ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
+    pub async fn delete_job_logs(
+        &self,
+        ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         let existing = self.job_log_repo.find_by_ids(&ids).await?;
         if existing
             .iter()

@@ -256,11 +256,7 @@ pub async fn remove(
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     // 多租户 Phase 3：记录被删部门所属租户，供审计 target_tenant_id（平台代管场景）
-    if let Ok(dept) = state
-        .dept_service
-        .get_dept_by_id(dept_id, None, None)
-        .await
-    {
+    if let Ok(dept) = state.dept_service.get_dept_by_id(dept_id, None, None).await {
         target_tenant.set(dept.tenant_id);
     }
     state

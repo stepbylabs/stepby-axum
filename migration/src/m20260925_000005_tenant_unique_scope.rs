@@ -22,9 +22,9 @@
 //! 本迁移与 `src/initialize/mod.rs::ensure_tenant_unique_scope` 为**双写**关系
 //! （存量库启动不跑 `Migrator::up`，由 AppInitializer 幂等兜底）——修改时必须两处同步。
 
+use crate::IndexDdlExt;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::Statement;
-use crate::IndexDdlExt;
 
 pub struct Migration;
 

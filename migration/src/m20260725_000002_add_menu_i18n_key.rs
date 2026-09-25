@@ -99,7 +99,10 @@ impl MigrationTrait for Migration {
         for (menu_id, i18n_key) in updates {
             conn.execute(Statement::from_sql_and_values(
                 backend,
-                adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = $1 WHERE menu_id = $2"),
+                adapt_placeholders(
+                    backend,
+                    "UPDATE sys_menu SET i18n_key = $1 WHERE menu_id = $2",
+                ),
                 [(*i18n_key).into(), (*menu_id).into()],
             ))
             .await?;

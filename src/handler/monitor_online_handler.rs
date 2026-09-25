@@ -194,7 +194,10 @@ pub async fn list(
         let session_tid = if session.tenant_id != 0 {
             session.tenant_id
         } else {
-            legacy_tenant_map.get(&session.user_id).copied().unwrap_or(0)
+            legacy_tenant_map
+                .get(&session.user_id)
+                .copied()
+                .unwrap_or(0)
         };
         // 租户操作者：仅本租户（无法定位租户的旧会话视为平台会话，不展示）
         if operator_tid != 0 && session_tid != operator_tid {

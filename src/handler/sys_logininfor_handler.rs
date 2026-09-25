@@ -311,7 +311,10 @@ pub async fn stats(
     let days = params.days.unwrap_or(7).clamp(1, 90);
     let data = state
         .logininfor_service
-        .daily_stats(days, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .daily_stats(
+            days,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(AjaxResult::success(data))
 }

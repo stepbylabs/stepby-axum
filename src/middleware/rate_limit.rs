@@ -336,10 +336,7 @@ mod tests {
     #[test]
     fn test_rate_limit_bucket_key_shape() {
         // 命名与既有 Redis key 风格一致：rate_limit:{tid}:{ip}
-        assert_eq!(
-            rate_limit_bucket_key(0, "1.2.3.4"),
-            "rate_limit:0:1.2.3.4"
-        );
+        assert_eq!(rate_limit_bucket_key(0, "1.2.3.4"), "rate_limit:0:1.2.3.4");
         assert_eq!(
             rate_limit_bucket_key(42, "10.0.0.9"),
             "rate_limit:42:10.0.0.9"

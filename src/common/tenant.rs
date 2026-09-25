@@ -149,23 +149,75 @@ pub const TENANT_FILTER_MATRIX: &[(&str, &str, TenantFilterTier)] = &[
     ("system:role:", "sys_role", TenantFilterTier::Covered),
     ("system:post:", "sys_post", TenantFilterTier::Covered),
     ("system:config:", "sys_config", TenantFilterTier::Covered),
-    ("system:dict:", "sys_dict_type/sys_dict_data", TenantFilterTier::Covered),
+    (
+        "system:dict:",
+        "sys_dict_type/sys_dict_data",
+        TenantFilterTier::Covered,
+    ),
     ("system:notice:", "sys_notice", TenantFilterTier::Covered),
-    ("system:msg:", "sys_msg_template/sys_msg_channel/sys_msg_send_log", TenantFilterTier::Covered),
-    ("system:report:", "sys_report/sys_report_sub", TenantFilterTier::Covered),
-    ("system:webHook:", "sys_web_hook/sys_web_hook_log", TenantFilterTier::Covered),
+    (
+        "system:msg:",
+        "sys_msg_template/sys_msg_channel/sys_msg_send_log",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "system:report:",
+        "sys_report/sys_report_sub",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "system:webHook:",
+        "sys_web_hook/sys_web_hook_log",
+        TenantFilterTier::Covered,
+    ),
     ("system:task:", "sys_task", TenantFilterTier::Covered),
-    ("system:flow:", "sys_flow_task/sys_flow_log", TenantFilterTier::Covered),
-    ("system:scimgroup:", "sys_scim_group", TenantFilterTier::Covered),
+    (
+        "system:flow:",
+        "sys_flow_task/sys_flow_log",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "system:scimgroup:",
+        "sys_scim_group",
+        TenantFilterTier::Covered,
+    ),
     ("system:pat:", "sys_pat", TenantFilterTier::Covered),
     ("monitor:pat:", "sys_pat", TenantFilterTier::Covered),
-    ("monitor:job:", "sys_job/sys_job_log", TenantFilterTier::Covered),
-    ("monitor:operlog:", "sys_oper_log", TenantFilterTier::Covered),
-    ("monitor:logininfor:", "sys_logininfor", TenantFilterTier::Covered),
-    ("monitor:frontendError:", "sys_frontend_error", TenantFilterTier::Covered),
-    ("monitor:dashboard:", "sys_user/sys_role/sys_oper_log/sys_logininfor/redis online:*", TenantFilterTier::Covered),
-    ("monitor:online:", "redis online:* (OnlineSession)", TenantFilterTier::Covered),
-    ("system:tenant:", "sys_tenant/sys_tenant_package", TenantFilterTier::Covered),
+    (
+        "monitor:job:",
+        "sys_job/sys_job_log",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "monitor:operlog:",
+        "sys_oper_log",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "monitor:logininfor:",
+        "sys_logininfor",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "monitor:frontendError:",
+        "sys_frontend_error",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "monitor:dashboard:",
+        "sys_user/sys_role/sys_oper_log/sys_logininfor/redis online:*",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "monitor:online:",
+        "redis online:* (OnlineSession)",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "system:tenant:",
+        "sys_tenant/sys_tenant_package",
+        TenantFilterTier::Covered,
+    ),
     ("system:backup:", "sys_backup_log", TenantFilterTier::Tier2),
 ];
 
@@ -178,24 +230,39 @@ pub fn tenant_filter_lookup(perms: &str) -> Option<(&'static str, TenantFilterTi
         .map(|(_, table, tier)| (*table, *tier))
 }
 
+/// 判断 perms 是否**可授予**给租户角色/平台普通角色（原则 B 的统一判定，单一事实源）。
+///
+/// 不可授予的两种情况：
+/// ① 平台专属能力前缀（[`is_platform_only_perm`]）——授了即"菜单可见但请求 403"；
+/// ② 命中 tier2（表带 `tenant_id` 列但集合读路径未接过滤）——授了即形成跨租户读窗口。
+///
+/// 三条写入路径共用本判定，保证语义一致（§27.13.4）：
+/// - 角色授权（用户主动授予）：[`ensure_menu_filter_coverage`] → 命中即 **拒绝**；
+/// - 租户初始化复制平台角色菜单：命中即 **剔除**（否则复制即造出假入口）；
+/// - 套餐变更收敛：命中即 **移除**（不只按白名单收敛）。
+///
+/// 平台角色（tid = 0）不在此判定范围，由调用方按 `effective_tid` 早退。
+pub fn is_grantable_perm(perms: &str) -> bool {
+    if is_platform_only_perm(perms) {
+        return false;
+    }
+    !matches!(
+        tenant_filter_lookup(perms),
+        Some((_, TenantFilterTier::Tier2))
+    )
+}
+
 /// 授予前门禁（§27.13.4）：校验待授予租户角色的 perms 是否可授予。
 ///
-/// 返回 `Err(perms)` 的两种情况：
-/// ① 平台专属能力前缀（`is_platform_only_perm`）；
-/// ② 命中 tier2（有 `tenant_id` 列但集合读路径未接过滤）表，防"先授菜单后补过滤"。
+/// 返回 `Err(perms)` 即首个不可授予项，两种情况见 [`is_grantable_perm`]
+/// （① 平台专属能力前缀；② 命中 tier2 表，防"先授菜单后补过滤"）。
 ///
 /// 平台角色（operator tid = 0）不调用本门禁，由调用方按 `effective_tid` 早退。
 pub fn ensure_menu_filter_coverage<'a>(
     perms_list: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), &'a str> {
     for perms in perms_list {
-        if is_platform_only_perm(perms) {
-            return Err(perms);
-        }
-        if matches!(
-            tenant_filter_lookup(perms),
-            Some((_, TenantFilterTier::Tier2))
-        ) {
+        if !is_grantable_perm(perms) {
             return Err(perms);
         }
     }
@@ -276,10 +343,22 @@ mod tests {
     #[test]
     fn test_is_platform_only_perm() {
         assert!(is_platform_only_perm("tool:gen:list"), "代码生成平台专属");
-        assert!(is_platform_only_perm("monitor:cache:query"), "缓存监控平台专属");
-        assert!(is_platform_only_perm("system:tenant:domain:list"), "域名管理平台专属");
-        assert!(!is_platform_only_perm("system:tenant:list"), "租户管理非平台专属");
-        assert!(!is_platform_only_perm("system:config:edit"), "config 自助能力可下放");
+        assert!(
+            is_platform_only_perm("monitor:cache:query"),
+            "缓存监控平台专属"
+        );
+        assert!(
+            is_platform_only_perm("system:tenant:domain:list"),
+            "域名管理平台专属"
+        );
+        assert!(
+            !is_platform_only_perm("system:tenant:list"),
+            "租户管理非平台专属"
+        );
+        assert!(
+            !is_platform_only_perm("system:config:edit"),
+            "config 自助能力可下放"
+        );
         assert!(!is_platform_only_perm(""), "空 perms 非平台专属");
     }
 
@@ -342,5 +421,72 @@ mod tests {
         );
         // 空集合放行（目录菜单无 perms 的场景）
         assert!(ensure_menu_filter_coverage(Vec::<&str>::new()).is_ok());
+    }
+
+    #[test]
+    fn test_is_grantable_perm() {
+        // 业务面 perms 可授予（Covered）；空 perms（目录菜单）视为可授予
+        assert!(is_grantable_perm("system:user:list"));
+        assert!(is_grantable_perm("system:config:edit"));
+        assert!(is_grantable_perm(""));
+        // 平台专属前缀不可授予（含域名管理——2026-09-26 复核缺陷所在）
+        assert!(!is_grantable_perm("tool:gen:list"));
+        assert!(!is_grantable_perm("monitor:cache:query"));
+        assert!(!is_grantable_perm("system:tenant:domain:add"));
+        assert!(!is_grantable_perm("system:backup:list"));
+        // tier2 表 perms 不可授予（备份日志集合读路径未接过滤）
+        assert!(!is_grantable_perm("system:backup:query"));
+        // 与门禁同源（单一事实源）：不可授予 ⇔ 门禁拒绝
+        for p in [
+            "system:user:list",
+            "system:backup:list",
+            "system:tenant:domain:list",
+            "unknown:perm",
+        ] {
+            assert_eq!(
+                is_grantable_perm(p),
+                ensure_menu_filter_coverage([p]).is_ok(),
+                "`{p}` 的判定应与门禁一致（同一事实源）"
+            );
+        }
+    }
+
+    /// §8.7-B 一致性断言（防"常量与迁移清单只改一处"再次发生）。
+    ///
+    /// 背景：2026-09-26 复核实证 —— `m20260926_000002`（硬编码菜单 ID）与
+    /// `m20260926_000005`（5 项前缀）**都不含 `system:tenant:domain:`**，导致走迁移的
+    /// 新库中平台普通角色仍持有菜单 3800/3802（域名查询/验证）⇒ 假入口。
+    /// 修复 = 新增 `m20260926_000006`（按完整 8 项前缀全量剔除）；本测试锁死该一致性。
+    ///
+    /// `include_str!` 在编译期嵌入源码文本 ⇒ 路径错误即刻暴露，且无运行时 IO。
+    #[test]
+    fn platform_only_prefixes_match_migration_lists() {
+        const M000006_SRC: &str =
+            include_str!("../../migration/src/m20260926_000006_platform_only_prefix_full.rs");
+        const M000005_SRC: &str =
+            include_str!("../../migration/src/m20260926_000005_platform_only_prefix_governance.rs");
+
+        // ① 常量每一项都必须出现在 m000006（"走迁移的新库"的唯一全量治理点）
+        for p in PLATFORM_ONLY_PERM_PREFIXES {
+            assert!(
+                M000006_SRC.contains(p),
+                "平台专属前缀 `{p}` 未出现在 m000006 清单 —— 新增前缀必须同步该迁移，\
+                 否则走迁移的新库不会剔除对应菜单（假入口）"
+            );
+        }
+        // ② m000005 的清单项必须都在常量中（迁移不得使用未声明的前缀）
+        for p in [
+            "tool:httpDebug:",
+            "monitor:log:",
+            "monitor:slowSql:",
+            "monitor:health:",
+            "system:backup:",
+        ] {
+            assert!(M000005_SRC.contains(p), "m000005 清单项 `{p}` 丢失");
+            assert!(
+                PLATFORM_ONLY_PERM_PREFIXES.contains(&p),
+                "m000005 使用了未在 PLATFORM_ONLY_PERM_PREFIXES 声明的前缀 `{p}`"
+            );
+        }
     }
 }

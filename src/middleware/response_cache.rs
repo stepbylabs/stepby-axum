@@ -123,11 +123,7 @@ pub async fn response_cache_middleware(
 
     // 多租户（§27.8）：key 必须携带租户 ID，否则本租户自建字典类型会被跨租户共享缓存串读。
     // 本中间件位于 auth_middleware 之后，Claims 已注入 extensions；缺失时按平台域（0）处理。
-    let tid = req
-        .extensions()
-        .get::<Claims>()
-        .map(|c| c.tid)
-        .unwrap_or(0);
+    let tid = req.extensions().get::<Claims>().map(|c| c.tid).unwrap_or(0);
     let key = format!("{} {}#tid={}", method, path, tid);
 
     // 1. 缓存命中：直接返回缓存体

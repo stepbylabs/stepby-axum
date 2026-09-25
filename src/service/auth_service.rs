@@ -809,7 +809,11 @@ impl AuthService {
         //     `tenant:state:{tid}` 拦截写请求）；正常 → 放行。同时重置运行时键，
         //     使已登录会话的中间件判定与本次登录一致。
         if user.tenant_id != 0 {
-            match self.tenant_service.resolve_login_state(user.tenant_id).await {
+            match self
+                .tenant_service
+                .resolve_login_state(user.tenant_id)
+                .await
+            {
                 Ok(crate::service::sys_tenant_service::TenantLoginState::Active) => {}
                 Ok(crate::service::sys_tenant_service::TenantLoginState::Grace) => {
                     self.write_login_log_best_effort(

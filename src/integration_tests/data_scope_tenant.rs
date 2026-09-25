@@ -121,7 +121,10 @@ async fn it_data_scope_narrows_within_tenant_and_blocks_cross_tenant() {
         total, 2,
         "scope=3 应命中租户 A 本部门 2 人（operator+9002），实际 {total}：{got:?}"
     );
-    assert!(got.contains(&9001) && got.contains(&9002), "本部门应可见：{got:?}");
+    assert!(
+        got.contains(&9001) && got.contains(&9002),
+        "本部门应可见：{got:?}"
+    );
     assert!(
         !got.contains(&9003),
         "同租户·它部门行应被 data_scope=3 收窄挡住：{got:?}"

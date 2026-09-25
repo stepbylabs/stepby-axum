@@ -23,9 +23,9 @@
 //! （存量数据可能存在同租户重复 key，属数据问题，不应阻断启动/迁移）。
 //! `sys_oper_log.target_tenant_id` 由另一条代码链路写入，本迁移不碰实体。
 
+use crate::IndexDdlExt;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::Statement;
-use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -68,7 +68,10 @@ async fn ensure_column(
         )
     };
     let row = conn
-        .query_one(Statement::from_string(conn.get_database_backend(), exists_sql))
+        .query_one(Statement::from_string(
+            conn.get_database_backend(),
+            exists_sql,
+        ))
         .await?;
     let exists = row
         .map(|r| {
@@ -81,8 +84,10 @@ async fn ensure_column(
     if exists {
         return Ok(());
     }
-    conn.execute_unprepared(&format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}"))
-        .await?;
+    conn.execute_unprepared(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {column_def}"
+    ))
+    .await?;
     Ok(())
 }
 
@@ -265,15 +270,30 @@ impl MigrationTrait for Migration {
         let conn = manager.get_connection();
         // 恢复旧单列唯一索引 + 删除新复合唯一索引（失败只告警，回滚不阻断）
         for (table, old_index, new_index, old_col) in [
-            ("sys_role", "uk_sys_role_key", "uk_sys_role_tenant_key", "role_key"),
+            (
+                "sys_role",
+                "uk_sys_role_key",
+                "uk_sys_role_tenant_key",
+                "role_key",
+            ),
             (
                 "sys_user",
                 "idx_sys_user_scim_external_id",
                 "uk_sys_user_tenant_scim",
                 "scim_external_id",
             ),
-            ("sys_config", "uk_sys_config_key", "uk_sys_config_tenant_key", "config_key"),
-            ("sys_dict_type", "uk_sys_dict_type", "uk_sys_dict_type_tenant", "dict_type"),
+            (
+                "sys_config",
+                "uk_sys_config_key",
+                "uk_sys_config_tenant_key",
+                "config_key",
+            ),
+            (
+                "sys_dict_type",
+                "uk_sys_dict_type",
+                "uk_sys_dict_type_tenant",
+                "dict_type",
+            ),
         ] {
             drop_index_idempotent(manager, table, new_index).await?;
             let _ = conn

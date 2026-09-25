@@ -45,7 +45,10 @@ pub async fn list(
 ) -> Result<TableDataInfo<JobVo>, AppError> {
     let (rows, total) = state
         .job_service
-        .get_job_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .get_job_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }

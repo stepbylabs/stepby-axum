@@ -1704,10 +1704,7 @@ async fn test_tenant_disabled_revokes_rt_and_pat() {
                 .expect("GET sso:rt 失败")
         };
     }
-    assert!(
-        get_rt!(&hashes[0]).is_none(),
-        "权威 tid 命中的 RT 应被吊销"
-    );
+    assert!(get_rt!(&hashes[0]).is_none(), "权威 tid 命中的 RT 应被吊销");
     assert!(
         get_rt!(&hashes[1]).is_none(),
         "旧绑定按用户归属回查命中后应被吊销"

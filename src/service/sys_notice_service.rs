@@ -229,7 +229,9 @@ impl SysNoticeService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.notice.not_found")))?;
         // 越权防护：租户管理员不得读取其他租户通知公告
         if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         Ok(model)
     }
@@ -273,13 +275,8 @@ impl SysNoticeService {
         if dto.notify_email
             && let Some(st) = state
         {
-            self.send_notice_email(
-                st,
-                operator_tid,
-                &dto.notice_title,
-                safe_content.as_deref(),
-            )
-            .await;
+            self.send_notice_email(st, operator_tid, &dto.notice_title, safe_content.as_deref())
+                .await;
         }
 
         Ok(model)
@@ -463,7 +460,9 @@ impl SysNoticeService {
             .iter()
             .any(|n| !crate::common::tenant::tenant_allowed(operator_tid, n.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         // 事务保证：通知删除与已读记录级联清理原子化（P0-76）
         let notice_repo = self.notice_repo.clone();
@@ -514,7 +513,9 @@ impl SysNoticeService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.notice.not_found")))?;
         // 越权防护：租户管理员不得标记其他租户公告
         if !crate::common::tenant::tenant_allowed(operator_tid, notice.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         // 从属表归属：read 记录随父公告租户
         self.read_repo
@@ -542,7 +543,9 @@ impl SysNoticeService {
             .iter()
             .any(|n| !crate::common::tenant::tenant_allowed(operator_tid, n.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         // 从属表归属：按父公告租户分组批量插入
         let mut by_tenant: std::collections::BTreeMap<i64, Vec<i64>> =
@@ -604,11 +607,7 @@ impl SysNoticeService {
     }
 
     /// 统计用户未读公告数（按租户维度）
-    pub async fn count_unread(
-        &self,
-        user_id: i64,
-        operator_tid: i64,
-    ) -> Result<u64, ServiceError> {
+    pub async fn count_unread(&self, user_id: i64, operator_tid: i64) -> Result<u64, ServiceError> {
         Ok(self
             .read_repo
             .count_unread(user_id, crate::common::tenant::tenant_scope(operator_tid))

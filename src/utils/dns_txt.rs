@@ -81,7 +81,11 @@ async fn lookup_one(
 ) -> Result<Vec<String>, DnsError> {
     let addr = resolve_addr(resolver).await?;
     let udp = async {
-        let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let bind = if addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
         let socket = UdpSocket::bind(bind).await.map_err(io_err)?;
         socket.connect(addr).await.map_err(io_err)?;
         socket.send(query).await.map_err(io_err)?;
@@ -424,10 +428,7 @@ mod tests {
     fn test_parse_servfail_is_error() {
         // rcode=2（SERVFAIL）：必须报错
         let resp = sample_response(0x0003, 0x8182, &[]);
-        assert!(matches!(
-            parse_txt_response(&resp),
-            Err(DnsError::Rcode(2))
-        ));
+        assert!(matches!(parse_txt_response(&resp), Err(DnsError::Rcode(2))));
     }
 
     #[test]

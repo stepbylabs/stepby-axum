@@ -18,8 +18,8 @@
 //!
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 
@@ -172,9 +172,7 @@ async fn up_create_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // 索引：按时间清理 / 列表倒序，按 level+source 聚合筛选
     manager
         .get_connection()
-        .execute_index_ddl_ic(
-            "CREATE INDEX idx_fe_created ON sys_frontend_error (create_time)",
-        )
+        .execute_index_ddl_ic("CREATE INDEX idx_fe_created ON sys_frontend_error (create_time)")
         .await?;
     manager
         .get_connection()

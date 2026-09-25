@@ -218,7 +218,10 @@ pub async fn provider_list(
 ) -> Result<TableDataInfo<ProviderVo>, AppError> {
     let (rows, total) = state
         .oauth_service
-        .get_provider_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .get_provider_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }

@@ -348,7 +348,9 @@ impl SysWebHookService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.web_hook.not_found")))?;
         if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         Ok(model)
     }
@@ -460,7 +462,9 @@ impl SysWebHookService {
             .iter()
             .any(|h| !crate::common::tenant::tenant_allowed(operator_tid, h.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         for id in &ids {
             let _ = self.log_repo.delete_by_hook_id(*id).await;
@@ -739,23 +743,20 @@ impl SysWebHookService {
         id: i64,
         operator_tid: i64,
     ) -> Result<SysWebHookLogModel, ServiceError> {
-        let model = self
-            .log_repo
-            .find_by_id(id)
-            .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.web_hook.log_not_found")))?;
+        let model =
+            self.log_repo.find_by_id(id).await?.ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!("error.web_hook.log_not_found"))
+            })?;
         if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         Ok(model)
     }
 
     /// 删除推送记录
-    pub async fn remove_logs(
-        &self,
-        ids: Vec<i64>,
-        operator_tid: i64,
-    ) -> Result<(), ServiceError> {
+    pub async fn remove_logs(&self, ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -765,7 +766,9 @@ impl SysWebHookService {
             .iter()
             .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         self.log_repo
             .delete_by_ids(ids)
@@ -809,7 +812,9 @@ impl SysWebHookService {
             .iter()
             .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         let mut ok_count = 0usize;
         for log in failed {

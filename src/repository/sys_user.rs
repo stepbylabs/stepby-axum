@@ -495,8 +495,8 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-            )
-            .await
+                )
+                .await
                 .unwrap();
             if page.is_empty() {
                 break;
@@ -546,8 +546,8 @@ mod tests {
                 None,
                 None,
                 None,
-        )
-        .await
+            )
+            .await
             .unwrap();
         assert!(expected_total >= 4, "自定义数据权限过滤应命中至少 4 条");
         assert!(
@@ -575,8 +575,8 @@ mod tests {
                     None,
                     cursor,
                     None,
-            )
-            .await
+                )
+                .await
                 .unwrap();
             if page.is_empty() {
                 break;
@@ -611,8 +611,8 @@ mod tests {
         let (offset_all, _) = repo
             .find_page_with_data_scope(
                 0, 1000, None, None, None, None, None, None, None, None, None, None, None,
-        )
-        .await
+            )
+            .await
             .unwrap();
         let offset_ids: std::collections::HashSet<i64> =
             offset_all.iter().map(|u| u.user_id).collect();
@@ -624,8 +624,8 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-            )
-            .await
+                )
+                .await
                 .unwrap();
             if page.is_empty() {
                 break;

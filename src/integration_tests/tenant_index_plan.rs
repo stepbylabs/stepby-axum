@@ -125,19 +125,21 @@ async fn it_tenant_tid_index_used_under_skewed_data_sqlite() {
     insert_bulk(db, 1, 1000, 1_000_000).await;
     insert_bulk(db, 2, 5, 2_000_000).await;
     // 刷新统计信息（无 ANALYZE 时计划器只有默认估算；显式 ANALYZE 后仍有选择空间）
-    db.execute_unprepared("ANALYZE").await.expect("ANALYZE 失败");
+    db.execute_unprepared("ANALYZE")
+        .await
+        .expect("ANALYZE 失败");
 
     // 稀有租户（高选择性）：期望命中租户索引
     let rare_plan = explain_tenant_page(db, 2).await;
     let rare_join = rare_plan.join(" | ");
     assert!(
-        rare_plan.iter().any(|d| d.contains("idx_sys_logininfor_tid")),
+        rare_plan
+            .iter()
+            .any(|d| d.contains("idx_sys_logininfor_tid")),
         "稀有租户( tid=2 )查询应走 idx_sys_logininfor_tid(_time)，实际计划: {rare_join}"
     );
     assert!(
-        !rare_plan
-            .iter()
-            .any(|d| d.contains("SCAN sys_logininfor")),
+        !rare_plan.iter().any(|d| d.contains("SCAN sys_logininfor")),
         "稀有租户( tid=2 )查询不应全表扫描，实际计划: {rare_join}"
     );
 
@@ -166,7 +168,9 @@ async fn it_tenant_tid_index_used_under_skewed_data_sqlite() {
     // 直接验证迁移所建单列 `idx_{table}_tid` 在倾斜下被选中而非全表扫描。
     insert_bulk_fe(db, 1, 1000, 1_000_000).await;
     insert_bulk_fe(db, 2, 5, 2_000_000).await;
-    db.execute_unprepared("ANALYZE").await.expect("ANALYZE 失败");
+    db.execute_unprepared("ANALYZE")
+        .await
+        .expect("ANALYZE 失败");
 
     let fe_plan = explain_fe_page(db, 2).await;
     let fe_join = fe_plan.join(" | ");

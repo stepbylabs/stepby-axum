@@ -36,8 +36,8 @@
 //!
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 
@@ -208,10 +208,8 @@ impl MigrationTrait for Migration {
                 "DELETE FROM sys_role_menu WHERE menu_id = {menu_id}"
             ))
             .await?;
-            conn.execute_unprepared(&format!(
-                "DELETE FROM sys_menu WHERE menu_id = {menu_id}"
-            ))
-            .await?;
+            conn.execute_unprepared(&format!("DELETE FROM sys_menu WHERE menu_id = {menu_id}"))
+                .await?;
         }
         // source 列回落：删除 SCIM 来源授权行后去列（保 admin 数据不丢）
         conn.execute_unprepared("DELETE FROM sys_user_role WHERE source <> 'admin'")

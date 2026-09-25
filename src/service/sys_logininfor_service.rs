@@ -138,7 +138,7 @@ impl SysLogininforService {
                 begin_time,
                 end_time,
                 None, // 导出固定走 OFFSET 全量路径，不走 keyset
-            tenant_scope,
+                tenant_scope,
             )
             .await?;
         Ok(rows)

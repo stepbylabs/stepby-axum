@@ -37,7 +37,10 @@ pub async fn list(
 ) -> Result<TableDataInfo<SysTaskModel>, AppError> {
     let (rows, total) = state
         .task_service
-        .get_task_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .get_task_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }

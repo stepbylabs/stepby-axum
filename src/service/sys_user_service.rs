@@ -1223,7 +1223,9 @@ impl SysUserService {
                 continue;
             };
             if !crate::common::tenant::tenant_allowed(operator_tid, role.tenant_id) {
-                return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
             }
         }
         Ok(())
@@ -1243,7 +1245,9 @@ impl SysUserService {
                 continue;
             };
             if !crate::common::tenant::tenant_allowed(operator_tid, dept.tenant_id) {
-                return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
             }
         }
         Ok(())
@@ -1283,7 +1287,9 @@ impl SysUserService {
         let user_tenant_id = self.resolve_user_tenant(dto.dept_id).await?;
         // 越权防护：租户管理员不得把用户建到其它租户的部门下
         if !crate::common::tenant::tenant_allowed(operator_tid, user_tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         // 越权防护：不允许跨租户授角色 / 绑定兼职部门
         self.ensure_roles_tenant_allowed(operator_tid, dto.role_ids.as_deref())
@@ -1424,7 +1430,9 @@ impl SysUserService {
 
         // 越权防护：租户管理员不得跨租户修改用户
         if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         // 超管保护：user_id==1 不允许停用、不允许修改角色绑定
@@ -1464,7 +1472,9 @@ impl SysUserService {
         if dto.dept_id.is_some()
             && !crate::common::tenant::tenant_allowed(operator_tid, new_tenant_id)
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         // 越权防护：不允许跨租户授角色 / 绑定兼职部门
         self.ensure_roles_tenant_allowed(operator_tid, dto.role_ids.as_deref())

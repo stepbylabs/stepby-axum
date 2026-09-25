@@ -54,7 +54,9 @@ impl SysReportSubRepository {
             .order_by_asc(Column::SubId)
             .all(self.base.db())
             .await?;
-        Ok(crate::common::tenant::group_by_tenant(rows, |s| s.tenant_id))
+        Ok(crate::common::tenant::group_by_tenant(rows, |s| {
+            s.tenant_id
+        }))
     }
 
     /// 分页查询订阅（report_id/sub_name/status 过滤）

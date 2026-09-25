@@ -567,7 +567,18 @@ mod tests {
         let mut cursor = p0.last().unwrap().oper_id;
 
         let (p1, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor), None)
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(cursor),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(p1.len(), 3);
@@ -592,7 +603,18 @@ mod tests {
 
         cursor = p1.last().unwrap().oper_id;
         let (p2, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, Some(cursor), None)
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(cursor),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(p2.len(), 1);
@@ -628,7 +650,18 @@ mod tests {
         assert_eq!(total, 6);
         let cursor = first.last().unwrap().oper_id;
         let (next, _) = repo
-            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, Some(cursor), None)
+            .find_page_filtered(
+                0,
+                10,
+                None,
+                None,
+                None,
+                Some("0"),
+                None,
+                None,
+                Some(cursor),
+                None,
+            )
             .await
             .unwrap();
         assert!(next.iter().all(|m| m.status.as_deref() == Some("0")));

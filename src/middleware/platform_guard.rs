@@ -49,7 +49,9 @@ pub async fn platform_only_guard(req: Request, next: Next) -> Result<Response, A
                 path = %path,
                 "租户操作者访问平台专属接口（拒绝，P1-1 第二道防线）"
             );
-            Err(AppError::forbidden(&crate::tr!("error.tenant.platform_only")))
+            Err(AppError::forbidden(&crate::tr!(
+                "error.tenant.platform_only"
+            )))
         }
         None => {
             // fail-closed：本中间件仅挂在已鉴权路由，操作者缺失说明链路异常，拒绝而非放行
@@ -57,7 +59,9 @@ pub async fn platform_only_guard(req: Request, next: Next) -> Result<Response, A
                 path = %path,
                 "平台守卫：缺少操作者上下文（fail-closed 拒绝）"
             );
-            Err(AppError::forbidden(&crate::tr!("error.tenant.platform_only")))
+            Err(AppError::forbidden(&crate::tr!(
+                "error.tenant.platform_only"
+            )))
         }
     }
 }

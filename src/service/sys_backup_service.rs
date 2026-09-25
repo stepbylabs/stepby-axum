@@ -40,7 +40,8 @@ const BACKUP_DIR: &str = "backups";
 
 /// 「租户数据包」附加导出表（除 `initialize::TENANT_CARRYING_TABLES` 之外）：
 /// 三张租户表族本体均以 `tenant_id` 为归属列，需随包导出（否则包内缺租户身份与域名/菜单）
-const TENANT_PACKAGE_EXTRA_TABLES: &[&str] = &["sys_tenant", "sys_tenant_domain", "sys_tenant_menu"];
+const TENANT_PACKAGE_EXTRA_TABLES: &[&str] =
+    &["sys_tenant", "sys_tenant_domain", "sys_tenant_menu"];
 
 /// 备份日志的 `backup_type`：租户数据包导出
 pub const BACKUP_TYPE_TENANT_EXPORT: &str = "tenant_export";

@@ -8,11 +8,10 @@ use crate::scheduler::JobScheduler;
 use crate::service::{
     AuthService, GenTableService, IpLocationService, MailerService, SsoService, SysBackupService,
     SysConfigService, SysDeptService, SysDictService, SysFlowService, SysFrontendErrorService,
-    SysTenantService,
     SysHttpDebugService, SysJobService, SysLogininforService, SysMenuService, SysMsgService,
     SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
     SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysTenantDomainService,
-    SysUserPrefService, SysUserService, SysWebHookService,
+    SysTenantService, SysUserPrefService, SysUserService, SysWebHookService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -222,7 +221,7 @@ impl AppState {
             menu_service.clone(),
             SysLogininforRepository::new(db.clone()),
             config_service.clone(),
-            config.clone(), // P0-4：TOTP secret 加解密需要 config_enc_key
+            config.clone(),         // P0-4：TOTP secret 加解密需要 config_enc_key
             tenant_service.clone(), // Phase 3：登录闸门（sys_tenant 三态）+ 运行时键同步
         );
 

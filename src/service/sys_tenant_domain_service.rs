@@ -230,10 +230,7 @@ impl SysTenantDomainService {
             .await?
             .into_iter()
             .collect();
-        Ok(rows
-            .into_iter()
-            .map(|m| to_vo(&m, &name_map))
-            .collect())
+        Ok(rows.into_iter().map(|m| to_vo(&m, &name_map)).collect())
     }
 
     // ---------- 写操作（仅平台） ----------
@@ -265,7 +262,12 @@ impl SysTenantDomainService {
         validate_domain(&domain)?;
 
         // 全局唯一（含软删行：唯一索引不分软删，历史占用同样拦截）
-        if self.domain_repo.find_by_domain_any(&domain).await?.is_some() {
+        if self
+            .domain_repo
+            .find_by_domain_any(&domain)
+            .await?
+            .is_some()
+        {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.tenant.domain_conflict"
             )));
@@ -378,18 +380,19 @@ impl SysTenantDomainService {
         })?;
 
         // 真实 DNS TXT 查询（超时 / IO / 协议错误 → 按验证失败返回 400）
-        let txt_values = dns_txt::lookup_txt(&txt_record, Duration::from_secs(DNS_TXT_TIMEOUT_SECS))
-            .await
-            .map_err(|e| {
-                if !matches!(e, DnsError::Rcode(3)) {
-                    tracing::warn!(
-                        domain = %model.domain,
-                        error = %e,
-                        "DNS TXT 查询失败，域名验证未通过"
-                    );
-                }
-                ServiceError::bad_request(&crate::tr!("error.tenant.domain_verify_failed"))
-            })?;
+        let txt_values =
+            dns_txt::lookup_txt(&txt_record, Duration::from_secs(DNS_TXT_TIMEOUT_SECS))
+                .await
+                .map_err(|e| {
+                    if !matches!(e, DnsError::Rcode(3)) {
+                        tracing::warn!(
+                            domain = %model.domain,
+                            error = %e,
+                            "DNS TXT 查询失败，域名验证未通过"
+                        );
+                    }
+                    ServiceError::bad_request(&crate::tr!("error.tenant.domain_verify_failed"))
+                })?;
 
         let matched = txt_values.iter().any(|v| v.trim() == token);
         let now = now_naive();
@@ -583,7 +586,9 @@ impl SysTenantDomainService {
         let mut redis = self.redis.clone();
         match tokio::time::timeout(
             Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET").arg(key).query_async::<Option<String>>(&mut redis),
+            redis::cmd("GET")
+                .arg(key)
+                .query_async::<Option<String>>(&mut redis),
         )
         .await
         {
@@ -700,7 +705,10 @@ mod tests {
     #[test]
     fn test_normalize_domain() {
         assert_eq!(normalize_domain("  ACME.Yebot.COM  "), "acme.yebot.com");
-        assert_eq!(normalize_domain("acme.example.com:8443"), "acme.example.com");
+        assert_eq!(
+            normalize_domain("acme.example.com:8443"),
+            "acme.example.com"
+        );
         assert_eq!(normalize_domain("acme.example.com."), "acme.example.com");
         assert_eq!(normalize_domain("[::1]:8080"), "::1");
     }

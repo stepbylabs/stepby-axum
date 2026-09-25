@@ -14,8 +14,8 @@
 //! 幂等：`CREATE TABLE IF NOT EXISTS` + `execute_index_ddl_ic`（三方言）。
 //! 跨 sqlite/postgres/mysql。
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 
@@ -185,7 +185,12 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // 映射表含反向回滚信息，不随 down 删除（禁止清理，§29.7）
         let conn = manager.get_connection();
-        for table in ["sys_tenant_menu", "sys_tenant_domain", "sys_tenant_package", "sys_tenant"] {
+        for table in [
+            "sys_tenant_menu",
+            "sys_tenant_domain",
+            "sys_tenant_package",
+            "sys_tenant",
+        ] {
             conn.execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
                 .await?;
         }

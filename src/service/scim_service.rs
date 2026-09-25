@@ -358,14 +358,17 @@ impl ScimService {
                 .transaction::<_, sys_user::Model, ScimError>(|txn| {
                     let am = am.clone();
                     Box::pin(async move {
-                        if let Err(e) =
-                            crate::service::SysTenantService::ensure_account_quota_conn(txn, tenant_id)
-                                .await
+                        if let Err(e) = crate::service::SysTenantService::ensure_account_quota_conn(
+                            txn, tenant_id,
+                        )
+                        .await
                         {
                             return Err(
-                                crate::service::SysTenantService::quota_violation_to_service_error(&e)
-                                    .map(|se| ScimError::new(se.code as u16, se.message))
-                                    .unwrap_or_else(|| ScimError::from(e)),
+                                crate::service::SysTenantService::quota_violation_to_service_error(
+                                    &e,
+                                )
+                                .map(|se| ScimError::new(se.code as u16, se.message))
+                                .unwrap_or_else(|| ScimError::from(e)),
                             );
                         }
                         am.insert(txn).await.map_err(|e| match e {

@@ -48,7 +48,10 @@ impl SysDictTypeRepository {
     }
 
     /// 按 dict_type 查询平台行（`tenant_id = 0`）——平台层类型查询入口。
-    pub async fn find_platform_by_dict_type(&self, dict_type: &str) -> Result<Option<Model>, DbErr> {
+    pub async fn find_platform_by_dict_type(
+        &self,
+        dict_type: &str,
+    ) -> Result<Option<Model>, DbErr> {
         self.find_by_tenant_dict_type(0, dict_type).await
     }
 
@@ -81,10 +84,7 @@ impl SysDictTypeRepository {
     ///
     /// 多租户：`tenant_scope = Some(tid)` → 本租户自建类型 + 平台类型（`tenant_id IN (0, tid)`）；
     /// `None`（平台操作者）→ 全量不过滤。
-    pub async fn find_active_all(
-        &self,
-        tenant_scope: Option<i64>,
-    ) -> Result<Vec<Model>, DbErr> {
+    pub async fn find_active_all(&self, tenant_scope: Option<i64>) -> Result<Vec<Model>, DbErr> {
         let mut query = SysDictType::find().filter(Column::DelFlag.eq("0"));
         if let Some(tid) = tenant_scope {
             query = query.filter(Column::TenantId.is_in([0i64, tid]));

@@ -69,7 +69,12 @@ impl SysNoticeReadRepository {
             }
         };
 
-        let values: Vec<Value> = vec![notice_id.into(), user_id.into(), now.into(), tenant_id.into()];
+        let values: Vec<Value> = vec![
+            notice_id.into(),
+            user_id.into(),
+            now.into(),
+            tenant_id.into(),
+        ];
         let stmt = Statement::from_sql_and_values(backend, sql, values);
         db.execute(stmt).await?;
         Ok(())

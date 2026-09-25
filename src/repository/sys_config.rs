@@ -105,17 +105,19 @@ impl SysConfigRepository {
         end_time: Option<NaiveDateTime>,
     ) -> Result<Vec<Model>, DbErr> {
         // 1. 本租户自己的行（全量可见，含 tenant_private）
-        let mut own = Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
-            .filter(Column::TenantId.eq(tid))
-            .all(self.base.db())
-            .await?;
+        let mut own =
+            Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
+                .filter(Column::TenantId.eq(tid))
+                .all(self.base.db())
+                .await?;
 
         // 2. 平台可见行（visible_to_tenant = '1'，已排除 platform_only）
-        let platform = Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
-            .filter(Column::TenantId.eq(0))
-            .filter(Column::VisibleToTenant.eq("1"))
-            .all(self.base.db())
-            .await?;
+        let platform =
+            Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
+                .filter(Column::TenantId.eq(0))
+                .filter(Column::VisibleToTenant.eq("1"))
+                .all(self.base.db())
+                .await?;
 
         // 3. 同 key 以租户行覆盖平台行（租户行优先）
         let overridden: std::collections::HashSet<String> =
@@ -143,7 +145,14 @@ impl SysConfigRepository {
         end_time: Option<NaiveDateTime>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let merged = self
-            .find_effective_all(tid, config_name, config_key, config_type, begin_time, end_time)
+            .find_effective_all(
+                tid,
+                config_name,
+                config_key,
+                config_type,
+                begin_time,
+                end_time,
+            )
             .await?;
         let total = merged.len() as u64;
         let rows = merged

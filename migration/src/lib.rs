@@ -74,6 +74,7 @@ pub use m20260926_000002_platform_only_menu_regrant::Migration as M20260926Platf
 pub use m20260926_000003_logininfor_user_id::Migration as M20260926LogininforUserId;
 pub use m20260926_000004_oauth_client_key_id::Migration as M20260926OauthClientKeyId;
 pub use m20260926_000005_platform_only_prefix_governance::Migration as M20260926PlatformOnlyPrefixGovernance;
+pub use m20260926_000006_platform_only_prefix_full::Migration as M20260926PlatformOnlyPrefixFull;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -146,6 +147,7 @@ mod m20260926_000002_platform_only_menu_regrant;
 mod m20260926_000003_logininfor_user_id;
 mod m20260926_000004_oauth_client_key_id;
 mod m20260926_000005_platform_only_prefix_governance;
+mod m20260926_000006_platform_only_prefix_full;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -298,6 +300,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260926LogininforUserId),
             Box::new(M20260926OauthClientKeyId),
             Box::new(M20260926PlatformOnlyPrefixGovernance),
+            Box::new(M20260926PlatformOnlyPrefixFull),
         ]
     }
 }

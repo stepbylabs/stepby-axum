@@ -6,9 +6,7 @@
 
 use sea_orm::*;
 
-use crate::entity::sys_user_dept::{
-    ActiveModel, Column, Entity as SysUserDept, Model,
-};
+use crate::entity::sys_user_dept::{ActiveModel, Column, Entity as SysUserDept, Model};
 use crate::repository::base::BaseRepository;
 
 /// 用户兼职部门 Repository

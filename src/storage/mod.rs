@@ -84,7 +84,8 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<String, AppError>;
 
     /// 读取对象内容（不存在返回 Ok(None)）。
-    async fn read(&self, dir: &str, tenant_id: i64, key: &str) -> Result<Option<Vec<u8>>, AppError>;
+    async fn read(&self, dir: &str, tenant_id: i64, key: &str)
+    -> Result<Option<Vec<u8>>, AppError>;
 
     /// 删除对象（不存在视为成功，幂等）。
     async fn delete(&self, dir: &str, tenant_id: i64, key: &str) -> Result<(), AppError>;

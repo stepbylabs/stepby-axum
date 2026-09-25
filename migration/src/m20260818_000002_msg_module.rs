@@ -14,8 +14,8 @@
 //!
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 
@@ -354,17 +354,19 @@ async fn up_create_tables(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // -------- sys_msg_send_log 索引（status / channel_code / create_time） --------
     manager
         .get_connection()
+        .execute_index_ddl_ic("CREATE INDEX idx_msg_send_log_status ON sys_msg_send_log (status)")
+        .await?;
+    manager
+        .get_connection()
         .execute_index_ddl_ic(
-            "CREATE INDEX idx_msg_send_log_status ON sys_msg_send_log (status)",
+            "CREATE INDEX idx_msg_send_log_channel_code ON sys_msg_send_log (channel_code)",
         )
         .await?;
     manager
         .get_connection()
-        .execute_index_ddl_ic("CREATE INDEX idx_msg_send_log_channel_code ON sys_msg_send_log (channel_code)")
-        .await?;
-    manager
-        .get_connection()
-        .execute_index_ddl_ic("CREATE INDEX idx_msg_send_log_create_time ON sys_msg_send_log (create_time)")
+        .execute_index_ddl_ic(
+            "CREATE INDEX idx_msg_send_log_create_time ON sys_msg_send_log (create_time)",
+        )
         .await?;
 
     Ok(())
