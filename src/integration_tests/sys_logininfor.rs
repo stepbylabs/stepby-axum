@@ -63,6 +63,11 @@ async fn it_lgi_list_and_stats() {
         admin_row["status"].as_str() == Some("0"),
         "admin 成功登录 status 应为 0，实际: {v}"
     );
+    // 台账 F-8：登录日志以不可变主键强关联用户（admin 为真实用户 ⇒ userId > 0）
+    assert!(
+        admin_row["userId"].as_i64().unwrap_or(0) > 0,
+        "admin 登录日志 userId 应为真实主键（>0），实际: {v}"
+    );
 
     // 2. 再触发一次失败登录 → 列表新增 1 条 status='1' 日志
     trigger_failed_login(&ctx, "it_lgi_user").await;
@@ -79,6 +84,12 @@ async fn it_lgi_list_and_stats() {
         rows[0]["userName"].as_str(),
         Some("it_lgi_user"),
         "userName 应为 it_lgi_user，实际: {v}"
+    );
+    // 台账 F-8：用户名不存在 ⇒ 无可关联主键，user_id 记为 0（"无对应用户"）
+    assert_eq!(
+        rows[0]["userId"].as_i64(),
+        Some(0),
+        "不存在用户的失败登录 userId 应为 0，实际: {v}"
     );
 
     // 3. 每日统计（daily_stats 补齐为完整 N 天序列，结构断言）

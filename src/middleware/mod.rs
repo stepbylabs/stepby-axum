@@ -5,6 +5,7 @@ pub mod idempotency;
 pub mod locale;
 pub mod oper_log;
 pub mod permission;
+pub mod platform_guard;
 pub mod rate_limit;
 pub mod request_id;
 pub mod response_cache;

@@ -345,6 +345,9 @@ error:
     read_backup_file_failed: 读取备份文件失败
     unsupported_db_type: "不支持的数据库类型: %{url}"
     db_backup_failed: 数据库备份失败
+    tenant_not_found: 租户不存在，无法导出数据包
+    tenant_export_serialize_failed: 租户数据包序列化失败
+    tenant_export_restore_unsupported: 租户数据包不支持恢复（仅支持整库备份恢复）
     process_timeout: "备份进程超时（%{secs} 秒）"
     process_nonzero_exit: "备份进程返回非零状态: %{err}"
     db_restore_failed: 数据库恢复失败
@@ -443,6 +446,8 @@ error:
     admin_user_conflict: 租户管理员用户名已被占用（%{user_name}）
     admin_init_failed: 租户管理员初始化失败，请重试
     menu_outside_package: 菜单 %{menu_id} 不在当前租户套餐范围内，无法授权
+    menu_platform_only: 菜单 %{menu_id} 属平台专属能力（代码生成/缓存监控/域名管理），不可授予租户角色
+    menu_filter_uncovered: 权限 %{perms} 不可授予租户角色（平台专属能力，或所属数据表未接入租户过滤）
     domain_platform_only: 域名管理仅平台管理员可执行
     domain_invalid: 域名格式非法（小写字母/数字/连字符，至少两级且每级 1-63 位）
     domain_conflict: 该域名已被占用（含历史绑定），请更换

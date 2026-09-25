@@ -342,6 +342,9 @@ error:
     read_backup_file_failed: Failed to read backup file
     unsupported_db_type: "Unsupported database type: %{url}"
     db_backup_failed: Database backup failed
+    tenant_not_found: Tenant not found; cannot export data package
+    tenant_export_serialize_failed: Failed to serialize tenant data package
+    tenant_export_restore_unsupported: Tenant data package cannot be restored (only full database backups can)
     process_timeout: "Backup process timed out (%{secs} seconds)"
     process_nonzero_exit: "Backup process returned non-zero status: %{err}"
     db_restore_failed: Database restore failed
@@ -455,6 +458,8 @@ error:
     admin_user_conflict: "Tenant admin username is already taken (%{user_name})"
     admin_init_failed: Failed to initialize the tenant administrator, please retry
     menu_outside_package: "Menu %{menu_id} is not included in the current tenant package and cannot be granted"
+    menu_platform_only: "Menu %{menu_id} is a platform-only capability (codegen / cache monitor / domain management) and cannot be granted to tenant roles"
+    menu_filter_uncovered: "Permission %{perms} cannot be granted to tenant roles (platform-only capability, or its table is not tenant-filtered)"
     domain_platform_only: Domain management is restricted to platform administrators
     domain_invalid: "Invalid domain (lowercase letters/digits/hyphen, at least two labels of 1-63 chars each)"
     domain_conflict: The domain is already taken (including historical bindings), please choose another

@@ -499,6 +499,7 @@ impl AuthService {
                 "1",
                 &crate::tr!("log.auth.totp_locked"),
                 user.tenant_id,
+                user.user_id,
             )
             .await;
             return Err(ServiceError::new(
@@ -559,6 +560,7 @@ impl AuthService {
                 "1",
                 &crate::tr!("log.auth.totp_failed"),
                 user.tenant_id,
+                user.user_id,
             )
             .await;
             return Err(ServiceError::new(
@@ -596,9 +598,15 @@ impl AuthService {
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
         if ip_count > MAX_LOGIN_IP_COUNT {
-            // 用户尚未识别（限流发生在查库前）→ 平台租户 0（平台级审计）
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.ip_rate_limited"), 0)
-                .await;
+            // 用户尚未识别（限流发生在查库前）→ 平台租户 0 / user_id 0（平台级审计）
+            self.write_login_log_best_effort(
+                ctx,
+                "1",
+                &crate::tr!("log.auth.ip_rate_limited"),
+                0,
+                0,
+            )
+            .await;
             return Err(ServiceError::new(
                 429,
                 crate::tr!("error.auth.rate_limited"),
@@ -633,9 +641,15 @@ impl AuthService {
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
-            // 用户尚未识别（失败计数发生在查库前）→ 平台租户 0（平台级审计）
-            self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.password_locked"), 0)
-                .await;
+            // 用户尚未识别（失败计数发生在查库前）→ 平台租户 0 / user_id 0（平台级审计）
+            self.write_login_log_best_effort(
+                ctx,
+                "1",
+                &crate::tr!("log.auth.password_locked"),
+                0,
+                0,
+            )
+            .await;
             return Err(ServiceError::new(
                 429,
                 crate::tr!("error.auth.password_locked"),
@@ -691,11 +705,12 @@ impl AuthService {
             let stored = match stored_code {
                 Some(c) => c,
                 None => {
-                    // 用户尚未识别（验证码发生在查库前）→ 平台租户 0（平台级审计）
+                    // 用户尚未识别（验证码发生在查库前）→ 平台租户 0 / user_id 0（平台级审计）
                     self.write_login_log_best_effort(
                         ctx,
                         "1",
                         &crate::tr!("log.auth.captcha_expired"),
+                        0,
                         0,
                     )
                     .await;
@@ -706,9 +721,15 @@ impl AuthService {
             };
 
             if stored.to_lowercase() != code.to_lowercase() {
-                // 用户尚未识别（验证码发生在查库前）→ 平台租户 0（平台级审计）
-                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.captcha_wrong"), 0)
-                    .await;
+                // 用户尚未识别（验证码发生在查库前）→ 平台租户 0 / user_id 0（平台级审计）
+                self.write_login_log_best_effort(
+                    ctx,
+                    "1",
+                    &crate::tr!("log.auth.captcha_wrong"),
+                    0,
+                    0,
+                )
+                .await;
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.auth.captcha_wrong"
                 )));
@@ -750,9 +771,15 @@ impl AuthService {
             Some(u) => u,
             None => {
                 // L-1：用户不存在时不计数（避免无效用户名污染失败计数导致真实用户被锁）
-                // 用户不可识别 → 平台租户 0（平台级审计）
-                self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.login_failed"), 0)
-                    .await;
+                // 用户不可识别 → 平台租户 0 / user_id 0（平台级审计）
+                self.write_login_log_best_effort(
+                    ctx,
+                    "1",
+                    &crate::tr!("log.auth.login_failed"),
+                    0,
+                    0,
+                )
+                .await;
                 return Err(ServiceError::unauthorized(&crate::tr!(
                     "error.auth.login_failed"
                 )));
@@ -768,6 +795,7 @@ impl AuthService {
                 "1",
                 &crate::tr!("log.auth.account_disabled"),
                 user.tenant_id,
+                user.user_id,
             )
             .await;
             return Err(ServiceError::unauthorized(&crate::tr!(
@@ -789,6 +817,7 @@ impl AuthService {
                         "0",
                         &crate::tr!("log.auth.tenant_grace"),
                         user.tenant_id,
+                        user.user_id,
                     )
                     .await;
                 }
@@ -804,6 +833,7 @@ impl AuthService {
                         "1",
                         &crate::tr!("log.auth.tenant_disabled"),
                         user.tenant_id,
+                        user.user_id,
                     )
                     .await;
                     return Err(ServiceError::unauthorized(&crate::tr!(
@@ -832,6 +862,7 @@ impl AuthService {
                 "1",
                 &crate::tr!("log.auth.login_failed"),
                 user.tenant_id,
+                user.user_id,
             )
             .await;
             return Err(ServiceError::unauthorized(&crate::tr!(
@@ -944,6 +975,7 @@ impl AuthService {
             "0",
             &crate::tr!("log.auth.login_success"),
             user.tenant_id,
+            user.user_id,
         )
         .await;
 
@@ -1469,6 +1501,7 @@ impl AuthService {
     /// - status: "0" 成功 / "1" 失败
     /// - msg: 日志消息
     /// - tenant_id: 被登录用户的租户；用户不可识别时记为平台租户 0（平台级审计）
+    /// - user_id: 被登录用户主键（台账 F-8）；查库前拦截（限流/验证码/用户不存在）记 0
     /// - browser / os: 从 User-Agent 解析
     /// - login_location: IP 归属地（由 IpLocator 查询得到）
     async fn write_login_log(
@@ -1477,12 +1510,14 @@ impl AuthService {
         status: &str,
         msg: &str,
         tenant_id: i64,
+        user_id: i64,
     ) -> Result<i64, ServiceError> {
         let now = crate::common::datetime::now_naive();
         let mut am = sys_logininfor::ActiveModel {
             ..Default::default()
         };
         am.tenant_id = Set(tenant_id);
+        am.user_id = Set(user_id);
         am.user_name = Set(Some(ctx.username.to_string()));
         am.ipaddr = Set(Some(ctx.login_ip.to_string()));
         am.login_location = Set(if ctx.login_location.is_empty() {
@@ -1509,8 +1544,12 @@ impl AuthService {
         status: &str,
         msg: &str,
         tenant_id: i64,
+        user_id: i64,
     ) {
-        if let Err(e) = self.write_login_log(ctx, status, msg, tenant_id).await {
+        if let Err(e) = self
+            .write_login_log(ctx, status, msg, tenant_id, user_id)
+            .await
+        {
             tracing::warn!(
                 username = ctx.username,
                 status,

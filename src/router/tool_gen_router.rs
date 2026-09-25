@@ -21,9 +21,13 @@ use axum::Router;
 use axum::routing::{get, post, put};
 
 use crate::handler::tool_gen_handler;
+use crate::middleware::platform_guard::platform_only_guard;
 use crate::state::AppState;
 
 /// 代码生成模块路由
+///
+/// P1-1：整组 `/tool/gen/*` 为平台专属能力，挂 [`platform_only_guard`] 请求层守卫，
+/// 租户操作者（含租户管理员）一律 403（不依赖 perms，作为权限层的第二道防线）。
 pub fn gen_routes() -> Router<Arc<AppState>> {
     Router::new()
         // 静态路由优先注册
@@ -59,4 +63,5 @@ pub fn gen_routes() -> Router<Arc<AppState>> {
             get(tool_gen_handler::get_table).delete(tool_gen_handler::delete_table),
         )
         .route("/tool/gen", put(tool_gen_handler::update_table))
+        .route_layer(axum::middleware::from_fn(platform_only_guard))
 }

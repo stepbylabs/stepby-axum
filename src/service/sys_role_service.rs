@@ -25,6 +25,7 @@ use crate::entity::sys_role_menu::ActiveModel as SysRoleMenuActiveModel;
 use crate::entity::sys_user::Model as SysUserModel;
 use crate::entity::sys_user_role::ActiveModel as SysUserRoleActiveModel;
 use crate::repository::sys_dept::SysDeptRepository;
+use crate::repository::sys_menu::SysMenuRepository;
 use crate::repository::sys_role::SysRoleRepository;
 use crate::repository::sys_role_dept::SysRoleDeptRepository;
 use crate::repository::sys_role_menu::SysRoleMenuRepository;
@@ -213,6 +214,8 @@ pub struct SysRoleService {
     user_role_repo: SysUserRoleRepository,
     user_repo: SysUserRepository,
     dept_repo: SysDeptRepository,
+    /// 菜单表只读访问（§27.13.4 授予前门禁：按 menu_id 取 perms 做覆盖校验）
+    menu_repo: SysMenuRepository,
     /// 租户套餐服务（§27.6 生效点①：角色授权 `menu_ids ⊆ 套餐白名单` 校验）
     tenant_service: crate::service::SysTenantService,
     /// Redis 连接管理器（权限缓存失效）
@@ -228,6 +231,7 @@ impl SysRoleService {
             user_role_repo: SysUserRoleRepository::new(db.clone()),
             user_repo: SysUserRepository::new(db.clone()),
             dept_repo: SysDeptRepository::new(db.clone()),
+            menu_repo: SysMenuRepository::new(db.clone()),
             tenant_service: crate::service::SysTenantService::new(db, redis.clone()),
             redis,
         }
@@ -236,6 +240,41 @@ impl SysRoleService {
     /// 获取数据库连接引用（用于事务）
     fn db(&self) -> &DatabaseConnection {
         self.role_repo.base().db()
+    }
+
+    /// §27.13.4 授予前门禁：待授予租户角色的菜单 perms 必须"可授予"。
+    ///
+    /// 不可授予的两种情况（见 `common::tenant::ensure_menu_filter_coverage`）：
+    /// ① 平台专属能力前缀（`is_platform_only_perm`，如 `system:backup:*` / `monitor:log:*`）；
+    /// ② 命中 tier2 的 perms（表带 tenant_id 但集合读路径未接过滤）。
+    ///
+    /// `effective_tid == 0`（平台角色授权）不受限；目录 / 无 perms 的菜单天然通过。
+    async fn ensure_menus_filter_coverage(
+        &self,
+        menu_ids: &[i64],
+        effective_tid: i64,
+    ) -> Result<(), ServiceError> {
+        if effective_tid == 0 || menu_ids.is_empty() {
+            return Ok(());
+        }
+        let rows = self.menu_repo.find_perms_by_ids(menu_ids).await?;
+        let perms_list: Vec<&str> = rows
+            .iter()
+            .filter_map(|(_, perms)| perms.as_deref())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if let Err(offender) = crate::common::tenant::ensure_menu_filter_coverage(perms_list) {
+            tracing::warn!(
+                tenant_id = effective_tid,
+                perms = %offender,
+                "拒绝向租户角色授予不可授予菜单（平台专属 / tier2 未过滤，§27.13.4）"
+            );
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.tenant.menu_filter_uncovered",
+                perms = offender
+            )));
+        }
+        Ok(())
     }
 
     // ==================== 权限缓存失效 ====================
@@ -431,8 +470,13 @@ impl SysRoleService {
     ) -> Result<SysRoleModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        // role_key 查重
-        let exists = self.role_repo.find_by_role_key(&dto.role_key).await?;
+        // role_key 查重（**租户内唯一**，与唯一索引 uk_sys_role_tenant_key 语义对齐，台账 P0-3）：
+        // 查重范围 = 角色归属租户（新角色归属操作者租户，见下方 am.tenant_id），
+        // 而非全局——否则不同租户无法使用同名 role_key。
+        let exists = self
+            .role_repo
+            .find_by_role_key_in_tenant(&dto.role_key, operator_tid)
+            .await?;
         if exists.is_some() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.role.perm_key_exists"
@@ -446,6 +490,8 @@ impl SysRoleService {
             self.tenant_service
                 .ensure_menus_in_package(operator_tid, ids)
                 .await?;
+            // §27.13.4 授予前门禁：不可授予 perms（平台专属 / tier2 未过滤）不得下放租户角色
+            self.ensure_menus_filter_coverage(ids, operator_tid).await?;
         }
 
         let role_repo = self.role_repo.clone();
@@ -537,11 +583,16 @@ impl SysRoleService {
             )));
         }
 
-        // role_key 查重：若 role_key 变更，校验新 role_key 是否已被其他角色占用（通过 Repository）
+        // role_key 查重：若 role_key 变更，校验新 role_key 是否已被**同租户内**其他角色占用
+        // （与唯一索引 uk_sys_role_tenant_key 语义对齐，台账 P0-3；平台操作者代管租户角色时
+        // 按**角色归属租户**校验）
         if let Some(ref new_key) = dto.role_key
             && *new_key != existing.role_key
         {
-            let dup = self.role_repo.find_by_role_key(new_key).await?;
+            let dup = self
+                .role_repo
+                .find_by_role_key_in_tenant(new_key, existing.tenant_id)
+                .await?;
             if let Some(d) = &dup
                 && d.role_id != dto.role_id
             {
@@ -564,6 +615,8 @@ impl SysRoleService {
             self.tenant_service
                 .ensure_menus_in_package(effective_tid, ids)
                 .await?;
+            // §27.13.4 授予前门禁：不可授予 perms（平台专属 / tier2 未过滤）不得下放租户角色
+            self.ensure_menus_filter_coverage(ids, effective_tid).await?;
         }
 
         let role_repo = self.role_repo.clone();
@@ -894,6 +947,9 @@ impl SysRoleService {
             };
             self.tenant_service
                 .ensure_menus_in_package(effective_tid, &menu_ids)
+                .await?;
+            // §27.13.4 授予前门禁：不可授予 perms（平台专属 / tier2 未过滤）不得下放租户角色
+            self.ensure_menus_filter_coverage(&menu_ids, effective_tid)
                 .await?;
         }
 

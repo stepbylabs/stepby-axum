@@ -8,6 +8,10 @@
 //! - /monitor/error-log/stats              — GET    错误聚合统计
 //! - /monitor/error-log/clear              — DELETE 清空错误缓冲
 //! - /monitor/redis/stats                  — GET    Redis 运行指标
+//!
+//! 多租户安全（§27.13.4 / 原则 B）：慢请求/错误聚合为**跨租户宿主级**观测面
+//! （Redis 指标同属平台运维面），挂 [`platform_only_guard`] 请求层守卫，
+//! 租户操作者一律 403。
 
 use std::sync::Arc;
 
@@ -15,9 +19,10 @@ use axum::Router;
 use axum::routing::{delete, get};
 
 use crate::handler::monitor_observability_handler;
+use crate::middleware::platform_guard::platform_only_guard;
 use crate::state::AppState;
 
-/// 可观测性监控路由
+/// 可观测性监控路由（平台专属）
 pub fn observability_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
@@ -48,4 +53,5 @@ pub fn observability_routes() -> Router<Arc<AppState>> {
             "/monitor/redis/stats",
             get(monitor_observability_handler::redis_stats),
         )
+        .route_layer(axum::middleware::from_fn(platform_only_guard))
 }

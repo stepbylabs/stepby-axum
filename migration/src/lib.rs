@@ -69,6 +69,11 @@ pub use m20260925_000002_tenant_module::Migration as M20260925TenantModule;
 pub use m20260925_000003_tenant_phase3::Migration as M20260925TenantPhase3;
 pub use m20260925_000004_tenant_saas_governance::Migration as M20260925TenantSaasGovernance;
 pub use m20260925_000005_tenant_unique_scope::Migration as M20260925TenantUniqueScope;
+pub use m20260926_000001_role_is_system::Migration as M20260926RoleIsSystem;
+pub use m20260926_000002_platform_only_menu_regrant::Migration as M20260926PlatformOnlyMenuRegrant;
+pub use m20260926_000003_logininfor_user_id::Migration as M20260926LogininforUserId;
+pub use m20260926_000004_oauth_client_key_id::Migration as M20260926OauthClientKeyId;
+pub use m20260926_000005_platform_only_prefix_governance::Migration as M20260926PlatformOnlyPrefixGovernance;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -136,6 +141,11 @@ mod m20260925_000002_tenant_module;
 mod m20260925_000003_tenant_phase3;
 mod m20260925_000004_tenant_saas_governance;
 mod m20260925_000005_tenant_unique_scope;
+mod m20260926_000001_role_is_system;
+mod m20260926_000002_platform_only_menu_regrant;
+mod m20260926_000003_logininfor_user_id;
+mod m20260926_000004_oauth_client_key_id;
+mod m20260926_000005_platform_only_prefix_governance;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -283,6 +293,11 @@ impl MigratorTrait for Migrator {
             Box::new(M20260925TenantPhase3),
             Box::new(M20260925TenantSaasGovernance),
             Box::new(M20260925TenantUniqueScope),
+            Box::new(M20260926RoleIsSystem),
+            Box::new(M20260926PlatformOnlyMenuRegrant),
+            Box::new(M20260926LogininforUserId),
+            Box::new(M20260926OauthClientKeyId),
+            Box::new(M20260926PlatformOnlyPrefixGovernance),
         ]
     }
 }

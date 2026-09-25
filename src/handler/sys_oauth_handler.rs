@@ -40,6 +40,7 @@ use utoipa::ToSchema;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
+use crate::middleware::tenant_host::HostTenant;
 use crate::service::auth_service::LoginVo;
 use crate::service::sys_oauth_service::{
     BindOauthDto, EnabledProviderVo, OauthCallResult, ProviderQueryDto, ProviderUpsertDto,
@@ -99,10 +100,18 @@ crate::impl_into_response!(AuthorizeResult);
 // ==================== 公开 Handler ====================
 
 /// GET /oauth2/providers — 登录页启用提供商列表（公开，脱敏）
+///
+/// 多租户（台账 P1-2）：按请求 host 解析出的租户（`HostTenant`，由 tenant_host
+/// 中间件在可信反代环境下注入）取可见集——本租户域名下可见「平台级 + 本租户自建」，
+/// 无 host 上下文（平台 host / 未绑定域名 / 来源不可信）时仅平台级。
 pub async fn list_providers(
     State(state): State<Arc<AppState>>,
+    host_tenant: HostTenant,
 ) -> Result<AjaxResult<Vec<EnabledProviderVo>>, AppError> {
-    let list = state.oauth_service.list_enabled_providers().await?;
+    let list = state
+        .oauth_service
+        .list_enabled_providers(host_tenant.tid())
+        .await?;
     Ok(AjaxResult::success(list))
 }
 
@@ -115,14 +124,17 @@ pub async fn begin_oauth(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(query): Query<AuthorizeQuery>,
+    host_tenant: HostTenant,
 ) -> Result<AuthorizeResult, AppError> {
     let (host, scheme) = base_host_scheme(&headers, peer_addr);
+    // P1-2：host 归属租户随 state 落 Redis，回调侧复现同一 provider 可见范围
     let authorize_url = state
         .oauth_service
         .begin_oauth(
             &query.provider_code,
             &host,
             &scheme,
+            host_tenant.tid(),
             &mut state.redis.clone(),
         )
         .await?;
@@ -298,7 +310,11 @@ pub async fn my_bindings(
 ) -> Result<AjaxResult<Vec<MyBindingVo>>, AppError> {
     let user_id = parse_user_id(operator.user_id())?;
     let bindings = state.oauth_service.list_my_bindings(user_id).await?;
-    let enabled = state.oauth_service.list_enabled_providers().await?;
+    // 名称映射按操作者所属租户取可见集（平台操作者 tid=0 ⇒ 仅平台级 provider）
+    let enabled = state
+        .oauth_service
+        .list_enabled_providers(Some(operator.tenant_id()))
+        .await?;
     // provider_code → provider_name 映射（未启用的提供商也尝试用 code 兜底）
     let mut name_map: std::collections::HashMap<String, String> = enabled
         .iter()

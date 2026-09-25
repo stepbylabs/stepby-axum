@@ -553,6 +553,12 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("POST", "/system/backup", "system:backup:add"),
     ("POST", "/system/backup/restore/{backupId}", "system:backup:edit"),
     ("GET", "/system/backup/download/{backupId}", "system:backup:query"),
+    // 租户数据包导出（F-2）：只读导出语义，复用备份查询权限（平台专属组内）
+    (
+        "POST",
+        "/system/backup/tenant-export/{tenantId}",
+        "system:backup:query",
+    ),
     ("DELETE", "/system/backup/{backupId}", "system:backup:remove"),
 
     // ===== 任务进度中心 =====
@@ -1375,6 +1381,7 @@ mod tests {
             ("POST", "/system/backup"),
             ("POST", "/system/backup/restore/{backupId}"),
             ("GET", "/system/backup/download/{backupId}"),
+            ("POST", "/system/backup/tenant-export/{tenantId}"),
             ("DELETE", "/system/backup/{backupId}"),
             // sys_task_router
             ("GET", "/system/task/list"),

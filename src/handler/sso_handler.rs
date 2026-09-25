@@ -262,12 +262,15 @@ pub async fn token(
             let user_name = result.user_name.clone();
             // v5-N2 Phase 2：登录日志归属被登录用户的租户（tid 随授权用户带入）
             let tenant_id = result.tenant_id;
+            // 台账 F-8：登录日志以不可变主键强关联用户
+            let user_id = result.user_id;
             let cid = params.client_id.clone().unwrap_or_default();
             tokio::spawn(async move {
                 let now = crate::common::datetime::now_naive();
                 use sea_orm::{ActiveModelTrait, Set};
                 let am = crate::entity::sys_logininfor::ActiveModel {
                     tenant_id: Set(tenant_id),
+                    user_id: Set(user_id),
                     user_name: Set(Some(user_name)),
                     ipaddr: Set(Some(ip)),
                     login_location: Set(None),

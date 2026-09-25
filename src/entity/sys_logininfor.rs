@@ -22,6 +22,10 @@ use crate::common::datetime;
 pub struct Model {
     /// 多租户归属（Phase 2 立项铺开，迁移 m20260925_000001；0=平台租户）
     pub tenant_id: i64,
+    /// 登录主体用户主键（台账 F-8，迁移 m20260926_000003；0=无对应用户，
+    /// 如用户名不存在/查库前的限流与验证码拦截；`user_name` 可重名于历史数据，
+    /// 审计域"强关联"以此不可变主键为准）
+    pub user_id: i64,
     #[sea_orm(primary_key)]
     pub info_id: i64,
     pub user_name: Option<String>,

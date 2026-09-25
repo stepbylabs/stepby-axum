@@ -40,13 +40,23 @@ impl SysOauthProviderRepository {
 
     /// 按 provider_code 查询提供商（唯一编码）
     ///
-    /// 多租户：仅匹配平台级提供商（tid=0）。本方法只服务于匿名登录链路
-    /// （begin_oauth / oauth_callback），匿名请求无租户上下文，租户专属
-    /// 提供商（tid≠0）不允许进入匿名授权流程。
-    pub async fn find_by_code(&self, provider_code: &str) -> Result<Option<Model>, DbErr> {
-        SysOauthProvider::find()
-            .filter(Column::ProviderCode.eq(provider_code))
-            .filter(Column::TenantId.eq(0))
+    /// 多租户（Phase 3 域名链路，台账 P1-2）：`tenant_tid = Some(tid)`（tid≠0，
+    /// 即请求 host 归属某租户）时可见范围 = 平台级（tid=0）+ 该租户专属（tid）；
+    /// `None`（无 host 租户上下文 / 平台 host）时仅平台级——与改造前行为一致。
+    /// `provider_code` 仍为**全局唯一**（`exists_by_code` 无租户过滤，见 F-9 原则 A），
+    /// 排序取 tenant_id 降序仅为确定性兜底（历史数据同名时优先租户自有 provider）。
+    pub async fn find_by_code(
+        &self,
+        provider_code: &str,
+        tenant_tid: Option<i64>,
+    ) -> Result<Option<Model>, DbErr> {
+        let mut query = SysOauthProvider::find().filter(Column::ProviderCode.eq(provider_code));
+        query = match tenant_tid.filter(|t| *t != 0) {
+            Some(tid) => query.filter(Column::TenantId.eq(0).or(Column::TenantId.eq(tid))),
+            None => query.filter(Column::TenantId.eq(0)),
+        };
+        query
+            .order_by_desc(Column::TenantId)
             .one(self.base.db())
             .await
     }
@@ -62,12 +72,18 @@ impl SysOauthProviderRepository {
 
     /// 查询所有已启用提供商（登录页展示 + 生成授权 URL）
     ///
-    /// 多租户：登录页为匿名全局入口，仅展示平台级提供商（tid=0）；
-    /// 租户专属提供商（tid≠0）需租户上下文场景，不进入登录页。
-    pub async fn find_all_enabled(&self) -> Result<Vec<Model>, DbErr> {
-        SysOauthProvider::find()
-            .filter(Column::Enabled.eq("1"))
-            .filter(Column::TenantId.eq(0))
+    /// 多租户（Phase 3 域名链路，台账 P1-2）：登录页按 **host 解析出的租户** 取可见集——
+    /// `tenant_tid = Some(tid)`（tid≠0）时返回 `tenant_id IN (0, tid)`（平台级 + 本租户自建）；
+    /// `None` 时仅平台级（平台 host / 未绑定域名 / 来源不可信，即改造前行为）。
+    /// 租户自建 provider 因此只在本租户域名下可见，不会泄漏到其它租户登录页。
+    pub async fn find_all_enabled(&self, tenant_tid: Option<i64>) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysOauthProvider::find().filter(Column::Enabled.eq("1"));
+        query = match tenant_tid.filter(|t| *t != 0) {
+            Some(tid) => query.filter(Column::TenantId.eq(0).or(Column::TenantId.eq(tid))),
+            None => query.filter(Column::TenantId.eq(0)),
+        };
+        query
+            .order_by_desc(Column::TenantId)
             .order_by_asc(Column::DisplayOrder)
             .all(self.base.db())
             .await
