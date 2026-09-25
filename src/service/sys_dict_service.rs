@@ -476,7 +476,9 @@ impl SysDictService {
     ) -> Result<SysDictTypeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        let existing = self.get_dict_type_by_id(dto.dict_id, Some(operator_tid)).await?;
+        let existing = self
+            .get_dict_type_by_id(dto.dict_id, Some(operator_tid))
+            .await?;
         // 多租户越权防护：只能修改本租户字典类型（平台操作者放行；租户不得改平台类型）
         if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
             return Err(ServiceError::forbidden(&crate::tr!(
@@ -642,7 +644,10 @@ impl SysDictService {
         let mut invalidations: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
         for (_, dt, owner_tid) in &dict_types {
-            invalidations.entry(*owner_tid).or_default().push(dt.clone());
+            invalidations
+                .entry(*owner_tid)
+                .or_default()
+                .push(dt.clone());
         }
         for (owner_tid, dts) in invalidations {
             self.invalidate_caches(owner_tid, &dts).await;

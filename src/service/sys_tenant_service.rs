@@ -22,8 +22,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::NaiveDateTime;
 use futures::future::FutureExt;
 use redis::aio::ConnectionManager;
-use sea_orm::*;
 use sea_orm::sea_query::Expr;
+use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -449,10 +449,7 @@ impl SysTenantService {
     }
 
     /// 把租户行批量组装为 Vo（根部门展示字段 + 套餐名 + 用户数，批量查询避免 N+1）
-    async fn build_vos(
-        &self,
-        tenants: Vec<SysTenantModel>,
-    ) -> Result<Vec<TenantVo>, ServiceError> {
+    async fn build_vos(&self, tenants: Vec<SysTenantModel>) -> Result<Vec<TenantVo>, ServiceError> {
         if tenants.is_empty() {
             return Ok(Vec::new());
         }
@@ -535,7 +532,10 @@ impl SysTenantService {
         let rows = SysUser::find()
             .select_only()
             .column(UserColumn::TenantId)
-            .column_as(sea_orm::sea_query::Expr::col(UserColumn::UserId).count(), "cnt")
+            .column_as(
+                sea_orm::sea_query::Expr::col(UserColumn::UserId).count(),
+                "cnt",
+            )
             .filter(UserColumn::TenantId.is_in(tenant_ids.to_vec()))
             .filter(UserColumn::DelFlag.eq("0"))
             .group_by(UserColumn::TenantId)
@@ -592,10 +592,7 @@ impl SysTenantService {
             None => {
                 let mut candidate = String::new();
                 for _ in 0..5 {
-                    let c = format!(
-                        "t{}",
-                        &uuid::Uuid::new_v4().simple().to_string()[..8]
-                    );
+                    let c = format!("t{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
                     if self.tenant_repo.find_by_code_any(&c).await?.is_none() {
                         candidate = c;
                         break;
@@ -617,9 +614,7 @@ impl SysTenantService {
             .or_else(|| package.as_ref().and_then(|p| p.default_account_count))
             .unwrap_or(0)
             .max(0);
-        let package_whitelist = package
-            .as_ref()
-            .and_then(|p| parse_menu_ids(&p.menu_ids));
+        let package_whitelist = package.as_ref().and_then(|p| parse_menu_ids(&p.menu_ids));
 
         // 管理员用户名全局唯一（决策 4：user_name 保持全局唯一）
         let admin_user_name = format!("{tenant_code}_admin");
@@ -743,19 +738,27 @@ impl SysTenantService {
                         .all(txn)
                         .await?;
                     base_menu_ids.extend(self_service_menu_ids);
-                    // 剔除平台专属菜单（域名管理 / 代码生成 / 缓存监控）——租户侧不出现假入口
-                    let mut exclude_cond = sea_orm::Condition::any();
-                    for prefix in crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES {
-                        exclude_cond =
-                            exclude_cond.add(MenuColumn::Perms.like(format!("{prefix}%")));
-                    }
-                    let excluded_menu_ids: Vec<i64> = SysMenu::find()
+                    // 剔除**不可授予**菜单（平台专属前缀 ∪ tier2 未接过滤表）——租户侧不出现
+                    // 假入口、也不带入"先授菜单后补过滤"的跨租户读窗口。判定与角色授权门禁
+                    // `ensure_menu_filter_coverage` 同源（`is_grantable_perm`），避免"复制路径"
+                    // 与"授权路径"口径漂移。
+                    let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
                         .select_only()
                         .column(MenuColumn::MenuId)
-                        .filter(exclude_cond)
-                        .into_tuple::<i64>()
+                        .column(MenuColumn::Perms)
+                        .filter(MenuColumn::DelFlag.eq("0"))
+                        .into_tuple::<(i64, Option<String>)>()
                         .all(txn)
                         .await?;
+                    let excluded_menu_ids: Vec<i64> = menu_perms
+                        .into_iter()
+                        .filter(|(_, perms)| {
+                            perms.as_deref().is_some_and(|p| {
+                                !p.is_empty() && !crate::common::tenant::is_grantable_perm(p)
+                            })
+                        })
+                        .map(|(id, _)| id)
+                        .collect();
                     base_menu_ids.retain(|id| !excluded_menu_ids.contains(id));
                     base_menu_ids.sort_unstable();
                     base_menu_ids.dedup();
@@ -878,12 +881,14 @@ impl SysTenantService {
                 .one(self.db())
                 .await?
                 .filter(|p| p.status.as_deref() != Some("1")),
-            None => SysTenantPackage::find()
-                .filter(PkgColumn::DelFlag.eq("0"))
-                .filter(PkgColumn::Status.eq("0"))
-                .order_by_asc(PkgColumn::PackageId)
-                .one(self.db())
-                .await?,
+            None => {
+                SysTenantPackage::find()
+                    .filter(PkgColumn::DelFlag.eq("0"))
+                    .filter(PkgColumn::Status.eq("0"))
+                    .order_by_asc(PkgColumn::PackageId)
+                    .one(self.db())
+                    .await?
+            }
         };
         if package_id.is_some() && pkg.is_none() {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -1028,9 +1033,32 @@ impl SysTenantService {
         if role_ids.is_empty() {
             return Ok(());
         }
+        // 不可授予菜单（平台专属前缀 ∪ tier2 未接过滤表）——与角色授权门禁同源
+        // （`is_grantable_perm`），套餐变更时一并移除，不把"收敛"只做成白名单裁剪。
+        let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
+            .select_only()
+            .column(MenuColumn::MenuId)
+            .column(MenuColumn::Perms)
+            .filter(MenuColumn::DelFlag.eq("0"))
+            .into_tuple::<(i64, Option<String>)>()
+            .all(self.db())
+            .await?;
+        let ungradable_ids: Vec<i64> = menu_perms
+            .into_iter()
+            .filter(|(_, perms)| {
+                perms
+                    .as_deref()
+                    .is_some_and(|p| !p.is_empty() && !crate::common::tenant::is_grantable_perm(p))
+            })
+            .map(|(id, _)| id)
+            .collect();
         let deleted = SysRoleMenu::delete_many()
             .filter(RoleMenuColumn::RoleId.is_in(role_ids.clone()))
-            .filter(RoleMenuColumn::MenuId.is_not_in(whitelist.to_vec()))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(RoleMenuColumn::MenuId.is_not_in(whitelist.to_vec()))
+                    .add(RoleMenuColumn::MenuId.is_in(ungradable_ids)),
+            )
             .exec(self.db())
             .await?;
         tracing::info!(
@@ -1068,12 +1096,8 @@ impl SysTenantService {
         am.update_time = Set(Some(now));
         self.tenant_repo.base().update(am).await?;
 
-        self.sync_runtime_keys(
-            dto.tenant_id,
-            Some(dto.status.as_str()),
-            tenant.expire_time,
-        )
-        .await;
+        self.sync_runtime_keys(dto.tenant_id, Some(dto.status.as_str()), tenant.expire_time)
+            .await;
         if dto.status == "1" {
             let kicked = self.revoke_tenant_sessions(dto.tenant_id).await;
             tracing::warn!(
@@ -1256,7 +1280,10 @@ impl SysTenantService {
     /// 登录闸门：租户行不存在/已删除/停用 → 403；到期三态 →
     /// 正常 / 宽限期只读（`TenantLoginState::Grace`）/ 超期拒绝。
     /// 同时把运行时键（state/exp）重置为最新，保证已登录会话的中间件判定与登录一致。
-    pub async fn resolve_login_state(&self, tenant_id: i64) -> Result<TenantLoginState, ServiceError> {
+    pub async fn resolve_login_state(
+        &self,
+        tenant_id: i64,
+    ) -> Result<TenantLoginState, ServiceError> {
         if tenant_id == 0 {
             return Ok(TenantLoginState::Active);
         }
@@ -1268,7 +1295,9 @@ impl SysTenantService {
         if tenant.status.as_deref() == Some("1") {
             self.sync_runtime_keys(tenant_id, Some("1"), tenant.expire_time)
                 .await;
-            return Err(ServiceError::forbidden(&crate::tr!("error.tenant.disabled")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.tenant.disabled"
+            )));
         }
         let state = match tenant.expire_time {
             None => TenantLoginState::Active,
@@ -1277,9 +1306,7 @@ impl SysTenantService {
                 if now >= exp + chrono::Duration::days(TENANT_EXPIRE_GRACE_DAYS) {
                     self.sync_runtime_keys(tenant_id, Some("0"), tenant.expire_time)
                         .await;
-                    return Err(ServiceError::forbidden(&crate::tr!(
-                        "error.tenant.expired"
-                    )));
+                    return Err(ServiceError::forbidden(&crate::tr!("error.tenant.expired")));
                 } else if now >= exp {
                     TenantLoginState::Grace
                 } else {
@@ -1321,9 +1348,7 @@ impl SysTenantService {
                 None => TENANT_STATE_ACTIVE,
             }
         };
-        let expire_epoch = expire_time
-            .map(|dt| dt.and_utc().timestamp())
-            .unwrap_or(0);
+        let expire_epoch = expire_time.map(|dt| dt.and_utc().timestamp()).unwrap_or(0);
         let mut redis = self.redis.clone();
         let result: Result<(), redis::RedisError> = redis::pipe()
             .cmd("SETEX")
@@ -1404,7 +1429,11 @@ impl SysTenantService {
         let rt_values: Vec<Option<String>> = if rt_keys.is_empty() {
             Vec::new()
         } else {
-            match redis::cmd("MGET").arg(&rt_keys).query_async(&mut redis).await {
+            match redis::cmd("MGET")
+                .arg(&rt_keys)
+                .query_async(&mut redis)
+                .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(tenant_id, error = %e, "租户踢线：MGET sso:rt 失败");
@@ -1505,7 +1534,11 @@ impl SysTenantService {
         {
             Ok(res) => {
                 if res.rows_affected > 0 {
-                    tracing::info!(tenant_id, pat_revoked = res.rows_affected, "租户踢线：PAT 已吊销");
+                    tracing::info!(
+                        tenant_id,
+                        pat_revoked = res.rows_affected,
+                        "租户踢线：PAT 已吊销"
+                    );
                 }
             }
             Err(e) => {
@@ -1526,7 +1559,9 @@ impl SysTenantService {
             return Ok(());
         }
         let Some(tenant) = self.tenant_repo.find_active_by_id(tenant_id).await? else {
-            return Err(ServiceError::forbidden(&crate::tr!("error.tenant.disabled")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.tenant.disabled"
+            )));
         };
         let limit = tenant.account_count.unwrap_or(0);
         if limit <= 0 {
@@ -1633,7 +1668,9 @@ impl SysTenantService {
             return None;
         };
         if msg == QUOTA_MARKER_DISABLED {
-            return Some(ServiceError::forbidden(&crate::tr!("error.tenant.disabled")));
+            return Some(ServiceError::forbidden(&crate::tr!(
+                "error.tenant.disabled"
+            )));
         }
         if let Some(max) = msg.strip_prefix(QUOTA_MARKER_PREFIX) {
             return Some(ServiceError::bad_request(&crate::tr!(
@@ -1774,7 +1811,9 @@ impl SysTenantService {
         let mut redis = self.redis.clone();
         match tokio::time::timeout(
             std::time::Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET").arg(key).query_async::<Option<String>>(&mut redis),
+            redis::cmd("GET")
+                .arg(key)
+                .query_async::<Option<String>>(&mut redis),
         )
         .await
         {
@@ -1931,12 +1970,20 @@ mod tests {
     #[test]
     fn test_parse_menu_ids() {
         assert_eq!(parse_menu_ids(&None), None, "NULL = 不限制");
-        assert_eq!(parse_menu_ids(&Some("   ".to_string())), None, "空串 = 不限制");
+        assert_eq!(
+            parse_menu_ids(&Some("   ".to_string())),
+            None,
+            "空串 = 不限制"
+        );
         assert_eq!(
             parse_menu_ids(&Some("1,2, 3".to_string())),
             Some(vec![1, 2, 3])
         );
-        assert_eq!(parse_menu_ids(&Some("abc".to_string())), None, "无有效 id = 不限制");
+        assert_eq!(
+            parse_menu_ids(&Some("abc".to_string())),
+            None,
+            "无有效 id = 不限制"
+        );
     }
 
     #[test]
@@ -1966,6 +2013,9 @@ mod tests {
     fn test_generate_init_password_strength() {
         let pwd = generate_init_password();
         assert_eq!(pwd.chars().count(), 12);
-        assert!(crate::utils::password::password_strength_score(&pwd) >= 3, "初始密码须满足强度要求");
+        assert!(
+            crate::utils::password::password_strength_score(&pwd) >= 3,
+            "初始密码须满足强度要求"
+        );
     }
 }

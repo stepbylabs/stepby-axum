@@ -15,8 +15,8 @@
 //! - operator: 操作人
 //! - create_time / update_time: 时间戳
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 
@@ -95,21 +95,15 @@ impl MigrationTrait for Migration {
 
         manager
             .get_connection()
-            .execute_index_ddl_ic(
-                "CREATE INDEX idx_sys_task_status ON sys_task (status)",
-            )
+            .execute_index_ddl_ic("CREATE INDEX idx_sys_task_status ON sys_task (status)")
             .await?;
         manager
             .get_connection()
-            .execute_index_ddl_ic(
-                "CREATE INDEX idx_sys_task_operator ON sys_task (operator)",
-            )
+            .execute_index_ddl_ic("CREATE INDEX idx_sys_task_operator ON sys_task (operator)")
             .await?;
         manager
             .get_connection()
-            .execute_index_ddl_ic(
-                "CREATE INDEX idx_sys_task_create_time ON sys_task (create_time)",
-            )
+            .execute_index_ddl_ic("CREATE INDEX idx_sys_task_create_time ON sys_task (create_time)")
             .await?;
         Ok(())
     }

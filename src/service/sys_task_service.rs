@@ -304,9 +304,7 @@ impl SysTaskService {
         if let Some(t) = tenant_scope
             && model.tenant_id != t
         {
-            return Err(ServiceError::not_found(&crate::tr!(
-                "error.task.not_found"
-            )));
+            return Err(ServiceError::not_found(&crate::tr!("error.task.not_found")));
         }
         Ok(model)
     }

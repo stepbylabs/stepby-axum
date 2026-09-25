@@ -660,9 +660,13 @@ pub async fn download_resource(
         return Err(AppError::forbidden(&crate::tr!("error.common.forbidden")));
     }
 
-    let bytes = state.storage.read(&dir, tenant_id, &key).await?.ok_or_else(|| {
-        AppError::not_found(&crate::tr!("error.common_handler.resource_not_found"))
-    })?;
+    let bytes = state
+        .storage
+        .read(&dir, tenant_id, &key)
+        .await?
+        .ok_or_else(|| {
+            AppError::not_found(&crate::tr!("error.common_handler.resource_not_found"))
+        })?;
 
     Ok(build_download_response(&bytes, &key))
 }
@@ -700,9 +704,10 @@ pub async fn serve_upload(
     let tenant_id: i64 = tid_seg.parse().map_err(|_| {
         AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid"))
     })?;
-    let dir = crate::common::upload::resolve_kind_dir(&state.config.upload, kind).ok_or_else(|| {
-        AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid"))
-    })?;
+    let dir =
+        crate::common::upload::resolve_kind_dir(&state.config.upload, kind).ok_or_else(|| {
+            AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid"))
+        })?;
 
     if !crate::common::tenant::tenant_allowed(operator.tenant_id(), tenant_id) {
         tracing::warn!(
@@ -718,10 +723,11 @@ pub async fn serve_upload(
         .storage
         .read(&dir, tenant_id, key)
         .await?
-        .ok_or_else(|| AppError::not_found(&crate::tr!("error.common_handler.resource_not_found")))?;
+        .ok_or_else(|| {
+            AppError::not_found(&crate::tr!("error.common_handler.resource_not_found"))
+        })?;
 
-    let content_type =
-        crate::storage::content_type_for(key).unwrap_or("application/octet-stream");
+    let content_type = crate::storage::content_type_for(key).unwrap_or("application/octet-stream");
     let mut headers = HeaderMap::new();
     if let Ok(val) = HeaderValue::from_str(content_type) {
         headers.insert(axum::http::header::CONTENT_TYPE, val);
@@ -745,18 +751,15 @@ fn parse_tenant_resource(
     state: &AppState,
     resource: &str,
 ) -> Result<(String, i64, String), AppError> {
-    let invalid = || {
-        AppError::bad_request(&crate::tr!(
-            "error.common_handler.resource_path_invalid"
-        ))
-    };
+    let invalid =
+        || AppError::bad_request(&crate::tr!("error.common_handler.resource_path_invalid"));
     let segments: Vec<&str> = resource.trim_matches('/').split('/').collect();
     if segments.len() != 4 || segments[0] != "uploads" {
         return Err(invalid());
     }
     let tenant_id: i64 = segments[1].parse().map_err(|_| invalid())?;
-    let dir =
-        crate::common::upload::resolve_kind_dir(&state.config.upload, segments[2]).ok_or_else(invalid)?;
+    let dir = crate::common::upload::resolve_kind_dir(&state.config.upload, segments[2])
+        .ok_or_else(invalid)?;
     if segments[3].is_empty() {
         return Err(invalid());
     }

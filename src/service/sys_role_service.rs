@@ -616,7 +616,8 @@ impl SysRoleService {
                 .ensure_menus_in_package(effective_tid, ids)
                 .await?;
             // §27.13.4 授予前门禁：不可授予 perms（平台专属 / tier2 未过滤）不得下放租户角色
-            self.ensure_menus_filter_coverage(ids, effective_tid).await?;
+            self.ensure_menus_filter_coverage(ids, effective_tid)
+                .await?;
         }
 
         let role_repo = self.role_repo.clone();
@@ -778,7 +779,11 @@ impl SysRoleService {
     /// 对比 handler 层 for 循环调用 delete_role：
     /// - 旧方案：第 2 个角色删除失败时第 1 个已删，第 3 个未删，数据状态不一致
     /// - 新方案：全部成功才提交，部分失败回滚到操作前状态
-    pub async fn delete_roles(&self, role_ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
+    pub async fn delete_roles(
+        &self,
+        role_ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         // 预校验：超管保护（事务外快速失败）
         if role_ids.contains(&SUPER_ADMIN_ROLE_ID) {
             return Err(ServiceError::bad_request(&crate::tr!(

@@ -254,12 +254,16 @@ impl SysConfigService {
         let mut conn = self.redis.clone();
         let result = tokio::time::timeout(
             Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("DEL").arg(cache_key).query_async::<()>(&mut conn),
+            redis::cmd("DEL")
+                .arg(cache_key)
+                .query_async::<()>(&mut conn),
         )
         .await;
         match result {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!(cache_key = %cache_key, error = %e, "配置缓存 DEL 失败，可能产生脏读直至 TTL 过期"),
+            Ok(Err(e)) => {
+                tracing::warn!(cache_key = %cache_key, error = %e, "配置缓存 DEL 失败，可能产生脏读直至 TTL 过期")
+            }
             Err(_) => tracing::warn!(
                 cache_key = %cache_key,
                 "配置缓存 DEL 超时（{}s），可能产生脏读直至 TTL 过期",
@@ -656,7 +660,9 @@ impl SysConfigService {
     ) -> Result<SysConfigModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
-        let existing = self.get_config_by_id(dto.config_id, Some(operator_tid)).await?;
+        let existing = self
+            .get_config_by_id(dto.config_id, Some(operator_tid))
+            .await?;
         // 多租户越权防护：只能修改本租户参数（平台操作者放行；租户不得改平台行）
         if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
             return Err(ServiceError::forbidden(&crate::tr!(
@@ -684,6 +690,13 @@ impl SysConfigService {
             }
         }
 
+        // 治理列现值快照（`existing` 随即被 `into()` 转移；供治理列的"部分更新语义"兜底）
+        let (existing_scope, existing_editable, existing_visible) = (
+            existing.scope.clone(),
+            existing.tenant_editable.clone(),
+            existing.visible_to_tenant.clone(),
+        );
+
         let now = crate::common::datetime::now_naive();
         let mut am: SysConfigActiveModel = existing.into();
         am.config_name = Set(dto.config_name);
@@ -691,13 +704,36 @@ impl SysConfigService {
         am.config_value = Set(dto.config_value);
         am.config_type = Set(dto.config_type);
         if operator_tid == 0 {
-            // 平台操作者可管理治理列
-            let (scope, editable, visible) = Self::resolve_governance(
-                &dto.config_key,
-                dto.scope.as_deref(),
-                dto.tenant_editable.as_deref(),
-                dto.visible_to_tenant.as_deref(),
-            )?;
+            // 平台操作者可管理治理列。
+            //
+            // **部分更新语义（2026-09-26 缺陷修复）**：治理列未传时保持**现有值**，而非回落
+            // `platform_only`。否则"只改 remark / 只改值"的常规编辑会把 `platform_default`
+            // 键**静默降级**为 `platform_only`，租户随即失去覆盖能力且无任何提示。
+            // 实测路径：e2e 功能 27 的 `PUT /system/config`（仅改 remark）把
+            // `sys.index.skinName` 降级为 platform_only ⇒ 功能 72 的"租户覆盖 platform_default
+            // 键"断言由 200 变 403。fail-closed 缺省只适用于**新增**（未声明治理的新键），
+            // 不适用于更新（更新时"未传"应表示"不改"）。
+            //
+            // 语义细节：显式改 `scope` 而未传标志位时，仍按新 scope 推导（保持治理一致性）；
+            // 未改 scope 时标志位缺省保持现有值。
+            let scope_in = dto.scope.as_deref().or(existing_scope.as_deref());
+            let (editable_in, visible_in) = if dto.scope.is_some() {
+                (
+                    dto.tenant_editable.as_deref(),
+                    dto.visible_to_tenant.as_deref(),
+                )
+            } else {
+                (
+                    dto.tenant_editable
+                        .as_deref()
+                        .or(existing_editable.as_deref()),
+                    dto.visible_to_tenant
+                        .as_deref()
+                        .or(existing_visible.as_deref()),
+                )
+            };
+            let (scope, editable, visible) =
+                Self::resolve_governance(&dto.config_key, scope_in, editable_in, visible_in)?;
             am.scope = Set(Some(scope));
             am.tenant_editable = Set(Some(editable));
             am.visible_to_tenant = Set(Some(visible));
@@ -756,12 +792,11 @@ impl SysConfigService {
             let mut conn = self.redis.clone();
             let mut pipe = redis::pipe();
             for m in &models {
-                pipe.cmd("DEL")
-                    .arg(if m.tenant_id == 0 {
-                        default_cache_key(&m.config_key)
-                    } else {
-                        tenant_cache_key(m.tenant_id, &m.config_key)
-                    });
+                pipe.cmd("DEL").arg(if m.tenant_id == 0 {
+                    default_cache_key(&m.config_key)
+                } else {
+                    tenant_cache_key(m.tenant_id, &m.config_key)
+                });
             }
             if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
                 tracing::warn!("批量失效配置缓存失败: {}", e);

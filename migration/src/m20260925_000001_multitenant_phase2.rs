@@ -27,9 +27,9 @@
 //! `execute_index_ddl_ic` 幂等索引——存量库与全新库均可安全执行。
 //! 跨 sqlite/postgres/mysql 三方言。
 
+use crate::IndexDdlExt;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::Statement;
-use crate::IndexDdlExt;
 
 pub struct Migration;
 
@@ -51,10 +51,7 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
 
 /// 幂等加列：列已存在则跳过（防存量库经 AppInitializer 兜底补列后迁移重放报
 /// duplicate column）。
-async fn ensure_tenant_column(
-    manager: &SchemaManager<'_>,
-    table: &str,
-) -> Result<(), DbErr> {
+async fn ensure_tenant_column(manager: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
     let conn = manager.get_connection();
     let exists_sql = if is_sqlite(manager) {
         format!("SELECT COUNT(*) AS n FROM pragma_table_info('{table}') WHERE name = 'tenant_id'")
@@ -69,11 +66,12 @@ async fn ensure_tenant_column(
              WHERE table_schema = DATABASE() AND table_name = '{table}' AND column_name = 'tenant_id'"
         )
     };
-    let row = conn.query_one(Statement::from_string(
-        conn.get_database_backend(),
-        exists_sql,
-    ))
-    .await?;
+    let row = conn
+        .query_one(Statement::from_string(
+            conn.get_database_backend(),
+            exists_sql,
+        ))
+        .await?;
     let exists = row
         .map(|r| {
             r.try_get::<i64>("", "n")
@@ -178,24 +176,18 @@ impl MigrationTrait for Migration {
         for table in TABLES {
             // MySQL 无 DROP INDEX IF EXISTS，语法为 DROP INDEX <idx> ON <table>
             if sqlite_or_pg {
-                conn.execute_unprepared(&format!(
-                    "DROP INDEX IF EXISTS idx_{table}_tid_time"
-                ))
-                .await?;
+                conn.execute_unprepared(&format!("DROP INDEX IF EXISTS idx_{table}_tid_time"))
+                    .await?;
                 conn.execute_unprepared(&format!("DROP INDEX IF EXISTS idx_{table}_tid"))
                     .await?;
             } else {
-                conn.execute_unprepared(&format!(
-                    "DROP INDEX idx_{table}_tid_time ON {table}"
-                ))
-                .await?;
+                conn.execute_unprepared(&format!("DROP INDEX idx_{table}_tid_time ON {table}"))
+                    .await?;
                 conn.execute_unprepared(&format!("DROP INDEX idx_{table}_tid ON {table}"))
                     .await?;
             }
-            conn.execute_unprepared(&format!(
-                "ALTER TABLE {table} DROP COLUMN tenant_id"
-            ))
-            .await?;
+            conn.execute_unprepared(&format!("ALTER TABLE {table} DROP COLUMN tenant_id"))
+                .await?;
         }
         Ok(())
     }

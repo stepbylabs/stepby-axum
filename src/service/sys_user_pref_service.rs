@@ -160,7 +160,9 @@ impl SysUserPrefService {
             dnd_end: dto.dnd_end.clone().unwrap_or(base.dnd_end),
         };
 
-        self.pref_repo.upsert(user_id, &vo_to_model(&vo, tenant_id)).await?;
+        self.pref_repo
+            .upsert(user_id, &vo_to_model(&vo, tenant_id))
+            .await?;
         Ok(vo)
     }
 

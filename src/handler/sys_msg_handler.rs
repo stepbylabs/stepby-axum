@@ -466,7 +466,10 @@ pub async fn retry_logs(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    let count = state.msg_service.retry_logs(ids, operator.tenant_id()).await?;
+    let count = state
+        .msg_service
+        .retry_logs(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(count))
 }
 

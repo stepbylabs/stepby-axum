@@ -119,11 +119,7 @@ async fn raw_delete(
 }
 
 /// helper：直接经 service 建一个 SCIM 组（带成员），绕过 HTTP（供绑定联动测试用）
-async fn create_group_via_api(
-    ctx: &TestContext,
-    display_name: &str,
-    member_ids: &[i64],
-) -> i64 {
+async fn create_group_via_api(ctx: &TestContext, display_name: &str, member_ids: &[i64]) -> i64 {
     let members: Vec<serde_json::Value> = member_ids
         .iter()
         .map(|id| serde_json::json!({ "value": id.to_string() }))
@@ -141,9 +137,18 @@ async fn create_group_via_api(
         &scim_headers(),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "建组应 201: {}", String::from_utf8_lossy(&resp));
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "建组应 201: {}",
+        String::from_utf8_lossy(&resp)
+    );
     let j = json_of(&resp);
-    j["id"].as_str().unwrap_or_default().parse::<i64>().expect("组 id 应为数字")
+    j["id"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<i64>()
+        .expect("组 id 应为数字")
 }
 
 /// helper：经管理端 API 替换组绑定（PUT /system/scimGroup/{id}，管理员 JWT）
@@ -163,7 +168,11 @@ async fn admin_put_bindings(ctx: &TestContext, group_id: i64, targets: &[i64]) -
 }
 
 /// helper：直查 sys_user_role 中某用户指定来源的角色集合
-async fn user_role_ids_with_source(db: &sea_orm::DatabaseConnection, user_id: i64, source: &str) -> Vec<i64> {
+async fn user_role_ids_with_source(
+    db: &sea_orm::DatabaseConnection,
+    user_id: i64,
+    source: &str,
+) -> Vec<i64> {
     use crate::entity::sys_user_role::{Column as URC, Entity as UserRole};
     UserRole::find()
         .filter(URC::UserId.eq(user_id))
@@ -201,7 +210,12 @@ async fn test_scim_groups_crud_and_binding_sync() {
             &scim_headers(),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED, "provision 应 201: {}", String::from_utf8_lossy(&resp));
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "provision 应 201: {}",
+            String::from_utf8_lossy(&resp)
+        );
         json_of(&resp)["id"]
             .as_str()
             .unwrap_or_default()
@@ -230,10 +244,7 @@ async fn test_scim_groups_crud_and_binding_sync() {
     //    取测试库任一角色（RuoYi 初始库有 role_id=1/2）
     let role_id: i64 = 2;
     let status = admin_put_bindings(&ctx, gid, &[role_id]).await;
-    assert!(
-        status.is_success(),
-        "绑定应成功: {status}"
-    );
+    assert!(status.is_success(), "绑定应成功: {status}");
     let scim_src = format!("scim:{gid}");
     let granted = user_role_ids_with_source(&db, uid1, &scim_src).await;
     assert_eq!(granted, vec![role_id], "成员应获得组绑定角色（scim 来源）");
@@ -288,7 +299,11 @@ async fn test_scim_groups_crud_and_binding_sync() {
         "admin 手授应抢占 scim 行（source 改写为 admin）"
     );
     let admin_preempted = user_role_ids_with_source(&db, uid1, "admin").await;
-    assert_eq!(admin_preempted, vec![role_id], "抢占后该角色归属 admin 来源");
+    assert_eq!(
+        admin_preempted,
+        vec![role_id],
+        "抢占后该角色归属 admin 来源"
+    );
     let patch_body = serde_json::json!({
         "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
         "Operations": [
@@ -347,7 +362,11 @@ async fn test_scim_groups_crud_and_binding_sync() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let lr = json_of(&body);
-    assert_eq!(lr["totalResults"], serde_json::json!(1), "filter 应命中 1 条");
+    assert_eq!(
+        lr["totalResults"],
+        serde_json::json!(1),
+        "filter 应命中 1 条"
+    );
 
     // ⑧ DELETE 组 → 撤仅 scim 来源授权（uid2 的行删除），admin 行保留；组软删
     let (status, _, _) = raw_delete(

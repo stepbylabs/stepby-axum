@@ -291,7 +291,10 @@ pub async fn remove(
             max = MAX_BATCH_DELETE_SIZE
         )));
     }
-    state.web_hook_service.remove(ids, operator.tenant_id()).await?;
+    state
+        .web_hook_service
+        .remove(ids, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 

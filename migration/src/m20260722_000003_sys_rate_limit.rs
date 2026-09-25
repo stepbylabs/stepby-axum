@@ -20,8 +20,8 @@
 //! - MySQL/PostgreSQL：使用 BOOLEAN 类型
 //! - SQLite：BOOLEAN 类型实际存储为 INTEGER（0/1），SeaORM 自动转换
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 

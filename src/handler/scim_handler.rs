@@ -309,11 +309,7 @@ pub async fn put_group(
         return resp;
     }
     let base = base_url_of(&headers);
-    match state
-        .scim_group_service
-        .put_group(id, &body, &base)
-        .await
-    {
+    match state.scim_group_service.put_group(id, &body, &base).await {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
         Err(e) => scim_error_response_for_app(e),
     }
@@ -330,11 +326,7 @@ pub async fn patch_group(
         return resp;
     }
     let base = base_url_of(&headers);
-    match state
-        .scim_group_service
-        .patch_group(id, &body, &base)
-        .await
-    {
+    match state.scim_group_service.patch_group(id, &body, &base).await {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
         Err(e) => scim_error_response_for_app(e),
     }

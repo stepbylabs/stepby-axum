@@ -464,7 +464,10 @@ impl SysOperLogService {
         let top_operators = self.stats_top_operators(10, tenant_scope).await?;
         let top_modules = self.stats_top_modules(10, tenant_scope).await?;
         let daily = self.stats_daily(days, tenant_scope).await?;
-        let anomaly_models = self.oper_log_repo.find_recent_anomalies(50, tenant_scope).await?;
+        let anomaly_models = self
+            .oper_log_repo
+            .find_recent_anomalies(50, tenant_scope)
+            .await?;
         let anomalies = anomaly_models
             .into_iter()
             .map(|m| OperLogAnomaly {

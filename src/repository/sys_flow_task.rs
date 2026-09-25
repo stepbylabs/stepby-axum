@@ -97,10 +97,7 @@ impl SysFlowTaskRepository {
         if let Some(t) = tenant_scope {
             query = query.filter(Column::TenantId.eq(t));
         }
-        query
-            .order_by_asc(Column::TaskId)
-            .one(self.base.db())
-            .await
+        query.order_by_asc(Column::TaskId).one(self.base.db()).await
     }
 
     /// 条件更新（并发安全 + 幂等）：仅当行仍为 pending 时生效，返回影响行数

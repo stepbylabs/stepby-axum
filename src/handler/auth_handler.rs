@@ -254,7 +254,7 @@ pub async fn register(
             request_method: "POST".to_string(),
             operator_type: 0, // 匿名注册
             oper_name,
-            tenant_id: 0, // 匿名注册无租户上下文
+            tenant_id: 0,           // 匿名注册无租户上下文
             target_tenant_id: None, // 匿名注册无目标资源租户
             dept_name: String::new(),
             oper_url: "/register".to_string(),

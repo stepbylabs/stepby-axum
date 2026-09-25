@@ -882,9 +882,17 @@ mod tests {
     async fn save_upload_bytes_rejects_empty() {
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
         let cfg = UploadConfig::default();
-        let err = save_upload_bytes(&backend, b"", Some("png"), None, &cfg, 0, UploadKind::Common)
-            .await
-            .expect_err("空文件应失败");
+        let err = save_upload_bytes(
+            &backend,
+            b"",
+            Some("png"),
+            None,
+            &cfg,
+            0,
+            UploadKind::Common,
+        )
+        .await
+        .expect_err("空文件应失败");
         assert_eq!(err.code, 400);
     }
 
@@ -894,9 +902,17 @@ mod tests {
         let cfg = UploadConfig::default();
         // common_max_size 默认 10MB，给 11MB 数据（不实际分配，用重复小向量）
         let big: Vec<u8> = vec![0u8; cfg.common_max_size + 1];
-        let err = save_upload_bytes(&backend, &big, Some("png"), None, &cfg, 0, UploadKind::Common)
-            .await
-            .expect_err("超限应失败");
+        let err = save_upload_bytes(
+            &backend,
+            &big,
+            Some("png"),
+            None,
+            &cfg,
+            0,
+            UploadKind::Common,
+        )
+        .await
+        .expect_err("超限应失败");
         assert_eq!(err.code, 400);
         assert!(err.message.contains("MB"));
     }

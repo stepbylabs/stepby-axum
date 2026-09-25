@@ -650,12 +650,9 @@ impl JobScheduler {
     /// 多租户：调度器为平台级组件，需覆盖**所有租户**的启用任务，故 tenant_scope 传 None；
     /// 每个 job 自身的 tenant_id 在写 job_log / 任务进度时用于归属。
     pub async fn load_from_db(&self, job_repo: &SysJobRepository) -> Result<(), SchedulerError> {
-        let jobs = job_repo
-            .find_by_status("0", None)
-            .await
-            .map_err(|e| {
-                SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e))
-            })?;
+        let jobs = job_repo.find_by_status("0", None).await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e))
+        })?;
 
         for job in jobs {
             match self.add_job(&job).await {
@@ -1736,7 +1733,10 @@ mod tests {
         let job = job(9001, "unit-success", "0 0 3 * * *", target);
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
-        let logs = log_repo.find_by_job_name("unit-success", None).await.unwrap();
+        let logs = log_repo
+            .find_by_job_name("unit-success", None)
+            .await
+            .unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status.as_deref(), Some("0"));
         assert!(
@@ -1838,7 +1838,10 @@ mod tests {
         );
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
-        let logs = log_repo.find_by_job_name("unit-skiplock", None).await.unwrap();
+        let logs = log_repo
+            .find_by_job_name("unit-skiplock", None)
+            .await
+            .unwrap();
         assert!(logs.is_empty(), "锁被占用时应跳过执行，不写日志");
     }
 

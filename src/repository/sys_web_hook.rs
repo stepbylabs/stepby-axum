@@ -53,7 +53,9 @@ impl SysWebHookRepository {
             .order_by_asc(Column::Id)
             .all(self.base.db())
             .await?;
-        Ok(crate::common::tenant::group_by_tenant(rows, |h| h.tenant_id))
+        Ok(crate::common::tenant::group_by_tenant(rows, |h| {
+            h.tenant_id
+        }))
     }
 
     /// 分页查询回调（hook_name/event_types/status 过滤，未删除）

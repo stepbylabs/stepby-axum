@@ -14,8 +14,8 @@
 //! - create_by: 操作人
 //! - create_time: 操作时间
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 

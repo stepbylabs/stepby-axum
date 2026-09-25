@@ -6,8 +6,8 @@
 //! 2. gen_table_column  - 代码生成业务表字段
 //! 3. sys_notice_read   - 通知公告已读记录表
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 
@@ -147,9 +147,7 @@ async fn create_gen_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // 唯一索引：table_name
     manager
         .get_connection()
-        .execute_index_ddl_ic(
-            "CREATE UNIQUE INDEX idx_gen_table_name ON gen_table (table_name)",
-        )
+        .execute_index_ddl_ic("CREATE UNIQUE INDEX idx_gen_table_name ON gen_table (table_name)")
         .await?;
     Ok(())
 }

@@ -634,11 +634,7 @@ impl SysDeptService {
     /// 1. 无子部门（del_flag = '0' 的直接子部门）
     /// 2. 无角色关联（sys_role_dept 中无关联记录）
     /// 3. 无用户关联（sys_user.dept_id 指向此部门的未删除用户）
-    pub async fn delete_dept(
-        &self,
-        dept_id: i64,
-        operator_tid: i64,
-    ) -> Result<(), ServiceError> {
+    pub async fn delete_dept(&self, dept_id: i64, operator_tid: i64) -> Result<(), ServiceError> {
         let existing = self
             .dept_repo
             .base()
@@ -657,9 +653,8 @@ impl SysDeptService {
 
         let dept_repo = self.dept_repo.clone();
         let user_repo = self.user_repo.clone();
-        let user_dept_repo = crate::repository::sys_user_dept::SysUserDeptRepository::new(
-            self.db().clone(),
-        );
+        let user_dept_repo =
+            crate::repository::sys_user_dept::SysUserDeptRepository::new(self.db().clone());
         // P0-H4 TOCTOU 修复：将所有校验和软删除放入事务内
         let txn_result = self
             .db()

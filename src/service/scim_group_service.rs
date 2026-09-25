@@ -92,7 +92,11 @@ pub struct ScimGroupListResponse {
 /// 管理端：组详情出参
 #[derive(Debug, serde::Serialize, ts_rs::TS, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "ScimGroupAdminDetail.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    export_to = "ScimGroupAdminDetail.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = ScimGroupAdminDetail)]
 pub struct ScimGroupAdminDetail {
     pub group_id: i64,
@@ -108,7 +112,11 @@ pub struct ScimGroupAdminDetail {
 
 #[derive(Debug, serde::Serialize, ts_rs::TS, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "ScimGroupAdminMember.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    export_to = "ScimGroupAdminMember.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = ScimGroupAdminMember)]
 pub struct ScimGroupAdminMember {
     pub user_id: i64,
@@ -351,10 +359,7 @@ impl ScimGroupService {
                         update_time: Set(Some(now)),
                         ..Default::default()
                     };
-                    let group = am
-                        .insert(txn)
-                        .await
-                        .map_err(db_err_500)?;
+                    let group = am.insert(txn).await.map_err(db_err_500)?;
                     for uid in &member_ids {
                         insert_member(txn, group.group_id, *uid, now).await?;
                     }
@@ -388,7 +393,11 @@ impl ScimGroupService {
         if display_name.len() > 255 {
             return Err(ScimError::new(400, "displayName 长度须 ≤255"));
         }
-        let external_id = match body.get("externalId").and_then(|v| v.as_str()).map(str::trim) {
+        let external_id = match body
+            .get("externalId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+        {
             Some(ext) if !ext.is_empty() => {
                 if ext.len() > 255 {
                     return Err(ScimError::new(400, "externalId 长度须 ≤255"));
@@ -420,7 +429,8 @@ impl ScimGroupService {
                     am.external_id = Set(external_id.clone());
                     am.update_time = Set(Some(now));
                     let group = am.update(txn).await.map_err(db_err_500)?;
-                    diff_members(txn, group.group_id, &group.mapping_type, &member_ids, now).await?;
+                    diff_members(txn, group.group_id, &group.mapping_type, &member_ids, now)
+                        .await?;
                     Ok(group)
                 })
             })
@@ -509,8 +519,7 @@ impl ScimGroupService {
                                 current.display_name = dn.to_string();
                             }
                             ("replace", "") => {
-                                if let Some(dn) =
-                                    value.get("displayName").and_then(|v| v.as_str())
+                                if let Some(dn) = value.get("displayName").and_then(|v| v.as_str())
                                 {
                                     let dn = dn.trim();
                                     if dn.is_empty() || dn.len() > 255 {
@@ -583,11 +592,7 @@ impl ScimGroupService {
         if let Some(t) = mapping_type {
             q = q.filter(GroupCol::MappingType.eq(t));
         }
-        let total = q
-            .clone()
-            .count(self.db())
-            .await
-            .map_err(db_err_500)?;
+        let total = q.clone().count(self.db()).await.map_err(db_err_500)?;
         let rows = q
             .order_by_asc(GroupCol::GroupId)
             .offset((page.saturating_sub(1)) * page_size)
@@ -686,10 +691,7 @@ impl ScimGroupService {
                     .map_err(db_err_500)?
                     .is_some();
                 if has_binding {
-                    return Err(ScimError::new(
-                        400,
-                        "mappingType 变更前必须先清空绑定目标",
-                    ));
+                    return Err(ScimError::new(400, "mappingType 变更前必须先清空绑定目标"));
                 }
             }
         }
@@ -874,17 +876,17 @@ fn parse_member_values(value: &serde_json::Value) -> Result<Vec<i64>, ScimError>
 }
 
 /// 校验成员用户存在且未软删（fail-fast，IdP 重试语义）
-async fn validate_member<C: ConnectionTrait>(
-    txn: &C,
-    user_id: i64,
-) -> Result<(), ScimError> {
+async fn validate_member<C: ConnectionTrait>(txn: &C, user_id: i64) -> Result<(), ScimError> {
     let exists = sys_user::Entity::find_by_id(user_id)
         .one(txn)
         .await
         .map_err(db_err_500)?
         .filter(|u| u.del_flag.as_deref() != Some("2"));
     if exists.is_none() {
-        return Err(ScimError::new(400, format!("member user not found: {user_id}")));
+        return Err(ScimError::new(
+            400,
+            format!("member user not found: {user_id}"),
+        ));
     }
     Ok(())
 }
@@ -927,7 +929,10 @@ async fn delete_member<C: ConnectionTrait>(
 /// 此处仅兜底并发窗口）
 fn is_unique_violation(e: &sea_orm::DbErr) -> bool {
     let s = e.to_string();
-    s.contains("UNIQUE") || s.contains("unique") || s.contains("duplicate") || s.contains("Duplicate")
+    s.contains("UNIQUE")
+        || s.contains("unique")
+        || s.contains("duplicate")
+        || s.contains("Duplicate")
 }
 
 /// 组成员 grant（联动引擎核心）：
@@ -1182,10 +1187,7 @@ async fn grant_single<C: ConnectionTrait>(
 }
 
 /// 组删除 teardown：软删组 + 清成员/绑定 + 撤仅本组 source 的授权与兼职
-async fn teardown_group(
-    txn: &DatabaseTransaction,
-    group_id: i64,
-) -> Result<(), ScimError> {
+async fn teardown_group(txn: &DatabaseTransaction, group_id: i64) -> Result<(), ScimError> {
     let now = crate::common::datetime::now_naive();
     let src = scim_source(group_id);
     // 撤销授权/兼职（仅本组来源）
@@ -1211,7 +1213,11 @@ async fn teardown_group(
         .await
         .map_err(db_err_500)?;
     // 组软删（审计保留）
-    if let Some(g) = ScimGroup::find_by_id(group_id).one(txn).await.map_err(db_err_500)? {
+    if let Some(g) = ScimGroup::find_by_id(group_id)
+        .one(txn)
+        .await
+        .map_err(db_err_500)?
+    {
         let mut am: GroupAM = g.into();
         am.del_flag = Set(Some("2".to_string()));
         am.update_time = Set(Some(now));

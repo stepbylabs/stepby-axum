@@ -280,7 +280,9 @@ impl SysPostService {
                                 ServiceError::not_found(&crate::tr!("error.post.not_found"))
                             })?;
                         if existing.del_flag.as_deref() == Some("2") {
-                            return Err(ServiceError::not_found(&crate::tr!("error.post.not_found")));
+                            return Err(ServiceError::not_found(&crate::tr!(
+                                "error.post.not_found"
+                            )));
                         }
                         // 多租户越权防护：只能删除本租户岗位（平台操作者放行）
                         if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id)

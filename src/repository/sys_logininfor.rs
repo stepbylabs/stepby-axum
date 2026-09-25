@@ -389,7 +389,17 @@ mod tests {
             .unwrap();
         assert_eq!(p2.len(), 1);
         let (p3, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, Some(p2[0].info_id), None)
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(p2[0].info_id),
+                None,
+            )
             .await
             .unwrap();
         assert!(p3.is_empty(), "游标耗尽后应返回空页");

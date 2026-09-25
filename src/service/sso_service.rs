@@ -1254,7 +1254,9 @@ impl SsoService {
                 .arg(&exp_key)
                 .query_async(redis)
                 .await
-                .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
             let expire_epoch = vals
                 .get(1)
                 .and_then(|v| v.as_deref())
@@ -1947,10 +1949,10 @@ impl SsoService {
                 .map_err(|e| ServiceError::internal(&format!("RSA keygen 任务失败: {e}")))?
                 .map_err(|e| ServiceError::internal(&format!("RSA 密钥生成失败: {e}")))?;
             // D9：同步登记新密钥指纹（kid），保证 JWKS 与库内私钥重新对齐
-            new_key_id = Some(
-                rsa_key_thumbprint(&pem)
-                    .map_err(|e| ServiceError::internal(&format!("RSA thumbprint 计算失败: {e}")))?,
-            );
+            new_key_id =
+                Some(rsa_key_thumbprint(&pem).map_err(|e| {
+                    ServiceError::internal(&format!("RSA thumbprint 计算失败: {e}"))
+                })?);
             let sealed = if self.enc_key.is_empty() {
                 tracing::warn!(
                     "CONFIG_ENC_KEY 未配置：rsa_private_key 以明文落库（迁移期 fail-open）"

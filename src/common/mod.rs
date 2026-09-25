@@ -21,8 +21,8 @@ pub use extract::ValidatedJson;
 pub use page::PageDomain;
 pub use response::{AjaxResult, TableDataInfo, TreeSelectVo};
 pub use upload::{
-    delete_upload_file, gen_uuid_filename, resolve_kind_dir, resolve_upload_dir, resolve_upload_root,
-    write_upload_file,
+    delete_upload_file, gen_uuid_filename, resolve_kind_dir, resolve_upload_dir,
+    resolve_upload_root, write_upload_file,
 };
 
 /// 为实现了 `Serialize` 的类型自动实现 `IntoResponse`，

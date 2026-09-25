@@ -55,7 +55,11 @@ impl SysJobRepository {
             query = query.filter(Column::TenantId.eq(t));
         }
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query.offset(offset).limit(limit).all(self.base.db()).await?;
+        let rows = query
+            .offset(offset)
+            .limit(limit)
+            .all(self.base.db())
+            .await?;
         Ok((rows, total))
     }
 

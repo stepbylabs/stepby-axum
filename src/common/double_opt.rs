@@ -46,7 +46,11 @@ mod tests {
     #[test]
     fn explicit_null_means_clear() {
         let dto: Dto = serde_json::from_str(r#"{"v":null}"#).expect("null 应可解析");
-        assert_eq!(dto.v, Some(None), "显式 null = 清空（关键：默认 serde 行为会误判为不修改）");
+        assert_eq!(
+            dto.v,
+            Some(None),
+            "显式 null = 清空（关键：默认 serde 行为会误判为不修改）"
+        );
     }
 
     #[test]

@@ -463,7 +463,12 @@ pub async fn edit(
     }
     state
         .user_service
-        .edit_user(dto, operator.username(), operator_user_id, operator.tenant_id())
+        .edit_user(
+            dto,
+            operator.username(),
+            operator_user_id,
+            operator.tenant_id(),
+        )
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }

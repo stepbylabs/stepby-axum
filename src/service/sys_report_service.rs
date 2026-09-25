@@ -428,7 +428,9 @@ impl SysReportService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report.not_found")))?;
         // 越权防护：租户管理员不得读取其他租户报表定义
         if !crate::common::tenant::tenant_allowed(operator_tid, report.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         Ok(report)
     }
@@ -527,7 +529,9 @@ impl SysReportService {
             .iter()
             .any(|r| !crate::common::tenant::tenant_allowed(operator_tid, r.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         for rid in &report_ids {
             self.sub_repo
@@ -597,14 +601,15 @@ impl SysReportService {
         sub_id: i64,
         operator_tid: i64,
     ) -> Result<SysReportSubModel, ServiceError> {
-        let sub = self
-            .sub_repo
-            .find_by_id(sub_id)
-            .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report_sub.not_found")))?;
+        let sub =
+            self.sub_repo.find_by_id(sub_id).await?.ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!("error.report_sub.not_found"))
+            })?;
         // 越权防护：租户管理员不得读取其他租户报表订阅
         if !crate::common::tenant::tenant_allowed(operator_tid, sub.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         Ok(sub)
     }
@@ -711,7 +716,9 @@ impl SysReportService {
             .iter()
             .any(|s| !crate::common::tenant::tenant_allowed(operator_tid, s.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         self.sub_repo.soft_delete_by_ids(&sub_ids).await?;
         Ok(())

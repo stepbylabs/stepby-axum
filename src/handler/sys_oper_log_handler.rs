@@ -539,7 +539,12 @@ pub async fn alarm_status(
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let vo = state
         .oper_log_service
-        .get_alarm_status(window_minutes, fail_threshold, fail_rate_threshold, tenant_scope)
+        .get_alarm_status(
+            window_minutes,
+            fail_threshold,
+            fail_rate_threshold,
+            tenant_scope,
+        )
         .await?;
     Ok(AjaxResult::success(vo))
 }

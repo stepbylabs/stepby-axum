@@ -16,8 +16,6 @@ pub mod sso_router;
 pub mod sys_backup_router;
 pub mod sys_config_router;
 pub mod sys_dept_router;
-pub mod sys_tenant_router;
-pub mod sys_tenant_domain_router;
 pub mod sys_dict_router;
 pub mod sys_frontend_error_router;
 pub mod sys_http_debug_router;
@@ -29,12 +27,14 @@ pub mod sys_notice_router;
 pub mod sys_oauth_router;
 pub mod sys_oper_log_router;
 pub mod sys_pat_router;
-pub mod sys_scim_group_router;
 pub mod sys_post_router;
 pub mod sys_rate_limit_router;
 pub mod sys_report_router;
 pub mod sys_role_router;
+pub mod sys_scim_group_router;
 pub mod sys_task_router;
+pub mod sys_tenant_domain_router;
+pub mod sys_tenant_router;
 pub mod sys_user_pref_router;
 pub mod sys_user_router;
 pub mod sys_web_hook_router;
@@ -339,7 +339,9 @@ async fn cookie_token_bridge(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if !req.headers().contains_key(axum::http::header::AUTHORIZATION)
+    if !req
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION)
         && let Some(token) = extract_cookie_token(req.headers(), "Admin-Token")
         && let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}"))
     {

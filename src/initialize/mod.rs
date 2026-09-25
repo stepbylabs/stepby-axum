@@ -1042,9 +1042,17 @@ async fn ensure_user_role_source_column(db: &DatabaseConnection) -> Result<(), D
 async fn ensure_user_dept_table(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
     let (id_pk, bigint_type, dt_type) = match backend {
-        DatabaseBackend::Sqlite => ("INTEGER PRIMARY KEY AUTOINCREMENT", "INTEGER NOT NULL", "DATETIME"),
+        DatabaseBackend::Sqlite => (
+            "INTEGER PRIMARY KEY AUTOINCREMENT",
+            "INTEGER NOT NULL",
+            "DATETIME",
+        ),
         DatabaseBackend::Postgres => ("BIGSERIAL PRIMARY KEY", "BIGINT NOT NULL", "TIMESTAMP"),
-        _ => ("BIGINT PRIMARY KEY AUTO_INCREMENT", "INTEGER NOT NULL", "DATETIME"),
+        _ => (
+            "BIGINT PRIMARY KEY AUTO_INCREMENT",
+            "INTEGER NOT NULL",
+            "DATETIME",
+        ),
     };
     flow_exec(
         db,
@@ -1326,11 +1334,19 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
             ("sys_logininfor", "login_time"),
             ("sys_msg_send_log", "create_time"),
         ] {
-            idx_defs.push((t.to_string(), format!("idx_{t}_tid_time"), format!("tenant_id, {c}")));
+            idx_defs.push((
+                t.to_string(),
+                format!("idx_{t}_tid_time"),
+                format!("tenant_id, {c}"),
+            ));
         }
         for t in TABLES {
             if !matches!(*t, "sys_oper_log" | "sys_logininfor" | "sys_msg_send_log") {
-                idx_defs.push((t.to_string(), format!("idx_{t}_tid"), "tenant_id".to_string()));
+                idx_defs.push((
+                    t.to_string(),
+                    format!("idx_{t}_tid"),
+                    "tenant_id".to_string(),
+                ));
             }
         }
         for (table, index_name, columns) in &idx_defs {
@@ -1352,10 +1368,9 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
         ""
     };
     let now_expr = match backend {
-        DatabaseBackend::Sqlite => format!(
-            "'{}'",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        ),
+        DatabaseBackend::Sqlite => {
+            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        }
         _ => "NOW()".to_string(),
     };
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
@@ -1485,10 +1500,9 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         }
     };
     let now_expr = match backend {
-        DatabaseBackend::Sqlite => format!(
-            "'{}'",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        ),
+        DatabaseBackend::Sqlite => {
+            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        }
         _ => "NOW()".to_string(),
     };
 
@@ -1624,7 +1638,12 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
             "tenant_id, ref_menu_id",
             true,
         ),
-        ("sys_tenant_menu", "idx_sys_tenant_menu_tid", "tenant_id", false),
+        (
+            "sys_tenant_menu",
+            "idx_sys_tenant_menu_tid",
+            "tenant_id",
+            false,
+        ),
         (
             "sys_tenant_migration_map",
             "uk_sys_tenant_migration_map_old",
@@ -1642,7 +1661,10 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
     // `verified_at` 记录 TXT 验证通过时间。`CREATE TABLE IF NOT EXISTS` 对存量表不生效，故此处补列。
     if sso_table_exists(db, "sys_tenant_domain").await? {
         for (column, column_def) in [
-            ("domain_type", "VARCHAR(16) NOT NULL DEFAULT '1'".to_string()),
+            (
+                "domain_type",
+                "VARCHAR(16) NOT NULL DEFAULT '1'".to_string(),
+            ),
             ("verified_at", format!("{dt} NULL")),
         ] {
             if sso_has_column(db, "sys_tenant_domain", column).await? {
@@ -1690,7 +1712,9 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         ))
         .await?;
     if roots.is_empty() {
-        tracing::info!("Phase 3 换源：无旧模型租户根部门（parent_id=0 且 dept_id<>100），无需 remap");
+        tracing::info!(
+            "Phase 3 换源：无旧模型租户根部门（parent_id=0 且 dept_id<>100），无需 remap"
+        );
         return Ok(());
     }
 
@@ -1843,7 +1867,9 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         for table in &remap_tables {
             txn.execute(Statement::from_string(
                 backend,
-                format!("UPDATE {table} SET tenant_id = {new_tid} WHERE tenant_id = {root_dept_id}"),
+                format!(
+                    "UPDATE {table} SET tenant_id = {new_tid} WHERE tenant_id = {root_dept_id}"
+                ),
             ))
             .await?;
         }
@@ -2086,10 +2112,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
         .chain(LIST_PERMS.iter())
         .copied()
         .collect();
-    let placeholders = (1..=wanted.len())
-        .map(ph)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let placeholders = (1..=wanted.len()).map(ph).collect::<Vec<_>>().join(", ");
     let menu_rows = db
         .query_all(Statement::from_sql_and_values(
             backend,
@@ -2192,9 +2215,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
     let granted_rows = db
         .query_all(Statement::from_sql_and_values(
             backend,
-            format!(
-                "SELECT role_id, menu_id FROM sys_role_menu WHERE role_id IN ({role_ph})"
-            ),
+            format!("SELECT role_id, menu_id FROM sys_role_menu WHERE role_id IN ({role_ph})"),
             candidates
                 .iter()
                 .map(|(rid, _)| (*rid).into())
@@ -2269,8 +2290,7 @@ async fn ensure_legacy_upload_paths(
     if upload_cfg.backend != "local" {
         return Ok(());
     }
-    if !sso_table_exists(db, "sys_user").await?
-        || !sso_has_column(db, "sys_user", "avatar").await?
+    if !sso_table_exists(db, "sys_user").await? || !sso_has_column(db, "sys_user", "avatar").await?
     {
         return Ok(());
     }
@@ -2285,7 +2305,8 @@ async fn ensure_legacy_upload_paths(
     let rows = db
         .query_all(Statement::from_string(
             backend,
-            "SELECT user_id, tenant_id, avatar FROM sys_user WHERE avatar LIKE '/uploads/%'".to_string(),
+            "SELECT user_id, tenant_id, avatar FROM sys_user WHERE avatar LIKE '/uploads/%'"
+                .to_string(),
         ))
         .await?;
 
@@ -2320,7 +2341,9 @@ async fn ensure_legacy_upload_paths(
             continue;
         }
 
-        let legacy_path = crate::common::upload::resolve_upload_dir(&dir).await.join(key);
+        let legacy_path = crate::common::upload::resolve_upload_dir(&dir)
+            .await
+            .join(key);
         let target_dir = crate::storage::dir_path(&dir, tenant_id).await;
         let target_path = target_dir.join(key);
         let (lp, td, tp) = (
@@ -3487,7 +3510,9 @@ mod scim_group_backfill_tests {
 
         // source 列已存在
         assert!(
-            sso_has_column(&db, "sys_user_role", "source").await.unwrap(),
+            sso_has_column(&db, "sys_user_role", "source")
+                .await
+                .unwrap(),
             "存量库 sys_user_role 应补出 source 列"
         );
 

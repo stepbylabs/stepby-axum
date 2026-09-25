@@ -127,10 +127,8 @@ impl MigrationTrait for Migration {
                 "DELETE FROM sys_role_menu WHERE menu_id = {menu_id}"
             ))
             .await?;
-            conn.execute_unprepared(&format!(
-                "DELETE FROM sys_menu WHERE menu_id = {menu_id}"
-            ))
-            .await?;
+            conn.execute_unprepared(&format!("DELETE FROM sys_menu WHERE menu_id = {menu_id}"))
+                .await?;
         }
         Ok(())
     }

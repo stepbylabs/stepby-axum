@@ -40,7 +40,10 @@ pub async fn list(
 ) -> Result<AjaxResult<Vec<TenantVo>>, AppError> {
     let list = state
         .tenant_service
-        .list(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .list(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(AjaxResult::success(list))
 }

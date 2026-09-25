@@ -13,8 +13,8 @@
 //!
 //! 幂等：全部走 execute_idempotent_insert（INSERT OR IGNORE / ON CONFLICT DO NOTHING）。
 
-use sea_orm_migration::prelude::*;
 use crate::IndexDdlExt;
+use sea_orm_migration::prelude::*;
 
 pub struct Migration;
 
@@ -283,9 +283,7 @@ async fn up_create_tables(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // -------- 索引（hook_id 用于级联查询，状态用于筛选） --------
     manager
         .get_connection()
-        .execute_index_ddl_ic(
-            "CREATE INDEX idx_web_hook_log_hook_id ON sys_web_hook_log (hook_id)",
-        )
+        .execute_index_ddl_ic("CREATE INDEX idx_web_hook_log_hook_id ON sys_web_hook_log (hook_id)")
         .await?;
     manager
         .get_connection()

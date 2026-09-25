@@ -362,7 +362,9 @@ impl SysMsgService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.channel_not_found")))?;
         // 越权防护：租户管理员不得读取其他租户消息渠道
         if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         // v5-E6：出参 unseal（配置回显明文）
         if let Some(c) = &model.config_json {
@@ -481,7 +483,9 @@ impl SysMsgService {
             .iter()
             .any(|c| !crate::common::tenant::tenant_allowed(operator_tid, c.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         // 引用校验：任一渠道被启用模板引用则拒绝删除
         for channel in &existing {
@@ -504,7 +508,11 @@ impl SysMsgService {
     }
 
     /// 渠道连通性测试（email 校验 SMTP 配置可用；sms/site 校验配置合法性）
-    pub async fn test_channel(&self, channel_id: i64, operator_tid: i64) -> Result<(), ServiceError> {
+    pub async fn test_channel(
+        &self,
+        channel_id: i64,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         let channel = self.get_channel_by_id(channel_id, operator_tid).await?;
         match channel.channel_type.as_str() {
             "email" => {
@@ -562,7 +570,9 @@ impl SysMsgService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.template_not_found")))?;
         // 越权防护：租户管理员不得读取其他租户消息模板
         if !crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         Ok(model)
     }
@@ -598,7 +608,8 @@ impl SysMsgService {
             .channel_code
             .clone()
             .unwrap_or_else(|| "email".to_string());
-        self.validate_channel_exists(&channel_code, operator_tid).await?;
+        self.validate_channel_exists(&channel_code, operator_tid)
+            .await?;
 
         if self
             .template_repo
@@ -643,9 +654,12 @@ impl SysMsgService {
             .channel_code
             .clone()
             .unwrap_or_else(|| "email".to_string());
-        self.validate_channel_exists(&channel_code, operator_tid).await?;
+        self.validate_channel_exists(&channel_code, operator_tid)
+            .await?;
 
-        let existing = self.get_template_by_id(dto.template_id, operator_tid).await?;
+        let existing = self
+            .get_template_by_id(dto.template_id, operator_tid)
+            .await?;
         if existing.template_code != dto.template_code
             && self
                 .template_repo
@@ -692,7 +706,9 @@ impl SysMsgService {
             .iter()
             .any(|t| !crate::common::tenant::tenant_allowed(operator_tid, t.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         self.template_repo.delete_by_ids(template_ids).await?;
         Ok(())
@@ -742,7 +758,9 @@ impl SysMsgService {
             .iter()
             .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         self.send_log_repo.delete_by_ids(log_ids).await?;
         Ok(())
@@ -833,7 +851,9 @@ impl SysMsgService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.msg.template_not_found")))?;
         // 越权防护：租户管理员不得跨租户使用消息模板
         if !crate::common::tenant::tenant_allowed(operator_tid, template.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         if template.status.as_deref() != Some("0") {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -924,7 +944,9 @@ impl SysMsgService {
             .iter()
             .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
 
         let mut processed = 0u64;
@@ -997,7 +1019,9 @@ impl SysMsgService {
             .iter()
             .any(|l| !crate::common::tenant::tenant_allowed(operator_tid, l.tenant_id))
         {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         let result = self.send_log_repo.mark_pending_retry(log_ids).await?;
         Ok(result.rows_affected)
