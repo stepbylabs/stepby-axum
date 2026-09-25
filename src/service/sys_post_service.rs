@@ -229,11 +229,15 @@ impl SysPostService {
         }
 
         let now = crate::common::datetime::now_naive();
+        // 部分更新语义快照（2026-09-26 缺陷修复）：`existing` 随即被 `into()` 转移；
+        // 未传排序/状态时保持现值，避免排序被归零、岗位被静默置 NULL 失效
+        let existing_sort = existing.post_sort;
+        let existing_status = existing.status.clone();
         let mut am: SysPostActiveModel = existing.into();
         am.post_code = Set(dto.post_code);
         am.post_name = Set(dto.post_name);
-        am.post_sort = Set(dto.post_sort.unwrap_or(0));
-        am.status = Set(dto.status);
+        am.post_sort = Set(dto.post_sort.unwrap_or(existing_sort));
+        am.status = Set(dto.status.or(existing_status));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);

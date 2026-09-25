@@ -701,22 +701,34 @@ impl ScimGroupService {
             for t in targets {
                 match effective_type {
                     MAPPING_ROLE => {
-                        let ok = crate::entity::sys_role::Entity::find_by_id(*t)
+                        let role = crate::entity::sys_role::Entity::find_by_id(*t)
                             .one(self.db())
                             .await
                             .map_err(db_err_500)?
                             .filter(|r| r.del_flag.as_deref() != Some("2"));
-                        if ok.is_none() {
+                        let Some(role) = role else {
                             return Err(ScimError::new(400, format!("角色不存在: {t}")));
+                        };
+                        // 越权防护（2026-09-26 复核发现并修复）：绑定目标必须属于操作者租户
+                        // （`tenant_allowed` 对平台操作者 tid=0 放行）。否则租户操作者可将组绑定到
+                        // **平台角色**（`tenant_id=0`，携带平台专属菜单）或**他租户角色**，从而把该
+                        // 角色的菜单授权间接授予本租户用户，绕过租户边界
+                        // （`system:scimgroup:*` 在过滤矩阵中为 Covered ⇒ 租户管理员可持有该权限）。
+                        if !crate::common::tenant::tenant_allowed(operator_tid, role.tenant_id) {
+                            return Err(ScimError::new(403, format!("角色不属于当前租户: {t}")));
                         }
                     }
                     MAPPING_DEPT => {
-                        let ok = crate::entity::sys_dept::Entity::find_by_id(*t)
+                        let dept = crate::entity::sys_dept::Entity::find_by_id(*t)
                             .one(self.db())
                             .await
                             .map_err(db_err_500)?;
-                        if ok.is_none() {
+                        let Some(dept) = dept else {
                             return Err(ScimError::new(400, format!("部门不存在: {t}")));
+                        };
+                        // 同理：跨租户部门绑定同样是越权（组→部门映射会改本租户用户的兼职归属）
+                        if !crate::common::tenant::tenant_allowed(operator_tid, dept.tenant_id) {
+                            return Err(ScimError::new(403, format!("部门不属于当前租户: {t}")));
                         }
                     }
                     other => {

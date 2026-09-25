@@ -968,9 +968,19 @@ impl SysTenantService {
                 am.expire_time = Set(v);
             }
         }
-        am.contact_name = Set(dto.contact_name.clone());
-        am.contact_phone = Set(dto.contact_phone.clone());
-        am.contact_email = Set(dto.contact_email.clone());
+        // 部分更新语义（2026-09-26 缺陷修复）：联系信息未传时保持现值，而非置 NULL
+        am.contact_name = Set(dto
+            .contact_name
+            .clone()
+            .or_else(|| tenant.contact_name.clone()));
+        am.contact_phone = Set(dto
+            .contact_phone
+            .clone()
+            .or_else(|| tenant.contact_phone.clone()));
+        am.contact_email = Set(dto
+            .contact_email
+            .clone()
+            .or_else(|| tenant.contact_email.clone()));
         am.remark = Set(dto.remark.clone());
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
@@ -980,11 +990,14 @@ impl SysTenantService {
         if let Some(dept_id) = tenant.dept_id
             && let Some(dept) = self.dept_repo.base().find_by_id(dept_id).await?
         {
+            // 部分更新语义快照（`dept` 随即被 `into()` 转移）：未传时保持根部门现值
+            let (existing_leader, existing_phone, existing_email) =
+                (dept.leader.clone(), dept.phone.clone(), dept.email.clone());
             let mut dam: sys_dept::ActiveModel = dept.into();
             dam.dept_name = Set(name.to_string());
-            dam.leader = Set(dto.leader.clone());
-            dam.phone = Set(dto.phone.clone());
-            dam.email = Set(dto.email.clone());
+            dam.leader = Set(dto.leader.clone().or(existing_leader));
+            dam.phone = Set(dto.phone.clone().or(existing_phone));
+            dam.email = Set(dto.email.clone().or(existing_email));
             if let Some(order) = dto.order_num {
                 dam.order_num = Set(Some(order));
             }

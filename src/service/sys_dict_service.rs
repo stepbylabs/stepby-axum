@@ -517,10 +517,12 @@ impl SysDictService {
         // 级联更新的归属层 = 该类型所属租户（平台类型=0 / 租户自建类型=租户 ID）
         // 必须在 `existing` 被消费进 ActiveModel 之前取出
         let row_tid = existing.tenant_id;
+        // 部分更新语义快照（2026-09-26 缺陷修复）：status 未传时保持现值，避免字典类型被静默置 NULL 失效
+        let existing_status = existing.status.clone();
         let mut am: SysDictTypeActiveModel = existing.into();
         am.dict_name = Set(Some(dto.dict_name));
         am.dict_type = Set(Some(dto.dict_type.clone()));
-        am.status = Set(dto.status);
+        am.status = Set(dto.status.or(existing_status));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);
@@ -977,16 +979,24 @@ impl SysDictService {
         }
 
         let now = crate::common::datetime::now_naive();
+        // 部分更新语义快照（2026-09-26 缺陷修复）：`existing` 随即被 `into()` 转移；
+        // 未传字段保持现值，避免字典数据被静默置 NULL / 排序归零 / 默认标记丢失
+        let existing_sort = existing.dict_sort;
+        let existing_label_en = existing.dict_label_en.clone();
+        let existing_css = existing.css_class.clone();
+        let existing_list = existing.list_class.clone();
+        let existing_default = existing.is_default.clone();
+        let existing_status = existing.status.clone();
         let mut am: SysDictDataActiveModel = existing.into();
-        am.dict_sort = Set(dto.dict_sort);
+        am.dict_sort = Set(dto.dict_sort.or(existing_sort));
         am.dict_label = Set(Some(dto.dict_label));
-        am.dict_label_en = Set(dto.dict_label_en);
+        am.dict_label_en = Set(dto.dict_label_en.or(existing_label_en));
         am.dict_value = Set(Some(dto.dict_value));
         am.dict_type = Set(Some(dto.dict_type.clone()));
-        am.css_class = Set(dto.css_class);
-        am.list_class = Set(dto.list_class);
-        am.is_default = Set(dto.is_default);
-        am.status = Set(dto.status);
+        am.css_class = Set(dto.css_class.or(existing_css));
+        am.list_class = Set(dto.list_class.or(existing_list));
+        am.is_default = Set(dto.is_default.or(existing_default));
+        am.status = Set(dto.status.or(existing_status));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);

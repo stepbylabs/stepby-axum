@@ -426,11 +426,15 @@ impl SysNoticeService {
         let now = crate::common::datetime::now_naive();
         // 净化 notice_content：移除危险标签和事件属性（P0-R19-002）
         let safe_content = dto.notice_content.map(|c| sanitize_html(&c));
+        // 部分更新语义快照（2026-09-26 缺陷修复）：`existing` 随即被 `into()` 转移；
+        // 未传正文/状态时保持现值，避免"只改标题"的 PUT 清空公告正文或隐藏公告
+        let existing_content = existing.notice_content.clone();
+        let existing_status = existing.status.clone();
         let mut am: SysNoticeActiveModel = existing.into();
         am.notice_title = Set(dto.notice_title);
         am.notice_type = Set(dto.notice_type);
-        am.notice_content = Set(safe_content);
-        am.status = Set(dto.status);
+        am.notice_content = Set(safe_content.or(existing_content));
+        am.status = Set(dto.status.or(existing_status));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);

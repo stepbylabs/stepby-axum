@@ -433,8 +433,12 @@ impl SysJobService {
             job_group: Set(dto.job_group),
             invoke_target: Set(dto.invoke_target),
             cron_expression: Set(Some(dto.cron_expression)),
-            misfire_policy: Set(Some(dto.misfire_policy.unwrap_or_else(|| "3".to_string()))),
-            concurrent: Set(Some(dto.concurrent.unwrap_or_else(|| "1".to_string()))),
+            // 部分更新语义（2026-09-26 缺陷修复）：未传时保持现值，
+            // 而非回落默认 "3"/"1"（否则"只改 cron/名称"的 PUT 会重置错过策略与并发策略）
+            misfire_policy: Set(dto
+                .misfire_policy
+                .or_else(|| existing.misfire_policy.clone())),
+            concurrent: Set(dto.concurrent.or_else(|| existing.concurrent.clone())),
             status: Set(Some(new_status.clone())),
             update_by: Set(Some(operator.to_string())),
             remark: Set(dto.remark),

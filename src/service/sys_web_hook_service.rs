@@ -413,9 +413,24 @@ impl SysWebHookService {
         validate(&dto)?;
         // 越权防护（get_by_id 内已校验租户归属）：租户管理员不得跨租户修改 WebHook 配置
         let existing = self.get_by_id(dto.id, operator_tid).await?;
-        let (content_type, timeout_secs, status) =
-            Self::normalize(&dto.content_type, &dto.timeout_secs, &dto.status);
-        let event_types = dto.event_types.unwrap_or_default().trim().to_string();
+        // 部分更新语义快照（`existing` 随即被 `into()` 转移）：未传字段保持现值
+        let existing_event_types = existing.event_types.clone();
+        let existing_content_type = existing.content_type.clone();
+        let existing_timeout_secs = existing.timeout_secs;
+        let existing_status = existing.status.clone();
+        // **部分更新语义（2026-09-26 缺陷修复）**：未传时保持现值，而非回落默认值。
+        // 否则"只改名称/URL"的 PUT 会把已停用的回调静默启用（status 回落 default_enabled_status）
+        // 并清空订阅事件类型、重置 content_type/timeout。
+        let (content_type, timeout_secs, status) = Self::normalize(
+            &dto.content_type.clone().or(Some(existing_content_type)),
+            &dto.timeout_secs.or(Some(existing_timeout_secs)),
+            &dto.status.clone().or(Some(existing_status)),
+        );
+        let event_types = dto
+            .event_types
+            .unwrap_or(existing_event_types)
+            .trim()
+            .to_string();
         if !event_types.is_empty() {
             for ev in event_types.split(',') {
                 if ev.trim().is_empty() {

@@ -442,19 +442,23 @@ impl SysMsgService {
             )));
         }
 
+        // 部分更新语义快照（`existing` 随即被 `into()` 转移）：未传字段保持现值
+        let existing_status = existing.status.clone();
         let mut am: SysMsgChannelActiveModel = existing.into();
         am.channel_name = Set(dto.channel_name);
         am.channel_code = Set(dto.channel_code);
         am.channel_type = Set(dto.channel_type);
         // v5-E6：config_json 信封加密（幂等：已带 enc2:/enc: 前缀原样，防双重加密）
-        am.config_json = Set(match &dto.config_json {
-            Some(c) => Some(
+        // **部分更新语义（2026-09-26 缺陷修复）**：仅当显式传入非空配置时才覆盖，
+        // 否则保持现值——避免"只改名称"的 PUT 把已加密的渠道配置/密钥擦除为 NULL。
+        if let Some(c) = dto.config_json.as_deref().filter(|c| !c.is_empty()) {
+            am.config_json = Set(Some(
                 crate::utils::crypto::seal_sensitive_value(c, &self.enc_key)
                     .map_err(|e| ServiceError::internal(&format!("渠道配置加密失败: {e}")))?,
-            ),
-            None => None,
-        });
-        am.status = Set(dto.status);
+            ));
+        }
+        // status 未传时保持现值，避免渠道被静默置 NULL 失效
+        am.status = Set(dto.status.or(existing_status));
         am.remark = Set(dto.remark);
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(crate::common::datetime::now_naive()));
@@ -650,15 +654,17 @@ impl SysMsgService {
         operator_tid: i64,
     ) -> Result<SysMsgTemplateModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
-        let channel_code = dto
-            .channel_code
-            .clone()
-            .unwrap_or_else(|| "email".to_string());
-        self.validate_channel_exists(&channel_code, operator_tid)
-            .await?;
 
         let existing = self
             .get_template_by_id(dto.template_id, operator_tid)
+            .await?;
+        // 部分更新语义（2026-09-26 缺陷修复）：未传渠道编码时保持现值，
+        // 而非硬编码回落 "email"（否则"只改正文"的 PUT 会把模板静默切到 email 渠道）。
+        let channel_code = dto
+            .channel_code
+            .clone()
+            .unwrap_or_else(|| existing.channel_code.clone());
+        self.validate_channel_exists(&channel_code, operator_tid)
             .await?;
         if existing.template_code != dto.template_code
             && self
@@ -671,13 +677,15 @@ impl SysMsgService {
             )));
         }
 
+        // status 未传时保持现值（避免模板被静默置 NULL 失效）
+        let existing_status = existing.status.clone();
         let mut am: SysMsgTemplateActiveModel = existing.into();
         am.template_name = Set(dto.template_name);
         am.template_code = Set(dto.template_code);
         am.channel_code = Set(channel_code);
         am.template_subject = Set(dto.template_subject);
         am.template_content = Set(dto.template_content);
-        am.status = Set(dto.status);
+        am.status = Set(dto.status.or(existing_status));
         am.remark = Set(dto.remark);
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(crate::common::datetime::now_naive()));
