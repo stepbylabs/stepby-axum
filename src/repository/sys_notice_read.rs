@@ -62,7 +62,7 @@ impl SysNoticeReadRepository {
                 "INSERT OR IGNORE INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES (?, ?, ?, ?)"
             }
             DatabaseBackend::Postgres => {
-                "INSERT INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES (?, ?, ?, ?) ON CONFLICT (notice_id, user_id) DO NOTHING"
+                "INSERT INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES ($1, $2, $3, $4) ON CONFLICT (notice_id, user_id) DO NOTHING"
             }
             DatabaseBackend::MySql => {
                 "INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES (?, ?, ?, ?)"
@@ -97,10 +97,28 @@ impl SysNoticeReadRepository {
         let db = self.base.db();
         let backend = db.get_database_backend();
 
-        // 构建多值 VALUES 子句：每个 notice_id 一个 (?, ?, ?, ?) 占位符组
+        // Postgres 需 $n 占位符，Sqlite/MySQL 用 ?（from_sql_and_values 不改写占位符）
+        let ph = |i: usize| -> String {
+            if backend == DatabaseBackend::Postgres {
+                format!("${i}")
+            } else {
+                "?".to_string()
+            }
+        };
+        // 构建多值 VALUES 子句：每个 notice_id 一组 4 个占位符
         let values_clause = notice_ids
             .iter()
-            .map(|_| "(?, ?, ?, ?)")
+            .enumerate()
+            .map(|(i, _)| {
+                let base = i * 4 + 1;
+                format!(
+                    "({}, {}, {}, {})",
+                    ph(base),
+                    ph(base + 1),
+                    ph(base + 2),
+                    ph(base + 3)
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -142,8 +160,9 @@ impl SysNoticeReadRepository {
     ///
     /// 支持 searchValue 模糊匹配登录名/用户名
     ///
-    /// 安全说明：使用参数化查询（`?` 占位符 + Values），避免 SQL 注入风险。
-    /// SeaORM 的 Statement::from_sql_and_values 会自动处理各数据库后端的占位符差异。
+    /// 安全说明：使用参数化查询（占位符 + Values），避免 SQL 注入风险。
+    /// 注意：Statement::from_sql_and_values 不会改写占位符，Postgres 必须用 $n，
+    /// 故此处按 backend 生成占位符（Sqlite/MySQL 用 ?）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_read_users_page(
         &self,
@@ -156,19 +175,34 @@ impl SysNoticeReadRepository {
         let db = self.base.db();
         let backend = db.get_database_backend();
 
+        // Postgres 需 $n 占位符，Sqlite/MySQL 用 ?
+        let ph = |i: usize| -> String {
+            if backend == DatabaseBackend::Postgres {
+                format!("${i}")
+            } else {
+                "?".to_string()
+            }
+        };
         // 使用参数化查询构建 WHERE 子句，避免 SQL 注入
-        let mut where_clause = String::from("WHERE r.notice_id = ? ");
+        let mut idx = 1usize;
+        let mut where_clause = format!("WHERE r.notice_id = {} ", ph(idx));
         let mut values: Vec<Value> = vec![notice_id.into()];
 
         if let Some(tid) = tenant_scope {
-            where_clause.push_str("AND r.tenant_id = ? ");
+            idx += 1;
+            where_clause.push_str(&format!("AND r.tenant_id = {} ", ph(idx)));
             values.push(tid.into());
         }
 
         if let Some(sv) = search_value
             && !sv.trim().is_empty()
         {
-            where_clause.push_str("AND (u.user_name LIKE ? OR u.nick_name LIKE ?) ");
+            where_clause.push_str(&format!(
+                "AND (u.user_name LIKE {} OR u.nick_name LIKE {}) ",
+                ph(idx + 1),
+                ph(idx + 2)
+            ));
+            idx += 2;
             // 安全：调用 like_escape 转义 %/_ 通配符，防止用户输入 % 匹配全表（信息枚举/性能损耗）
             let pattern = format!("%{}%", crate::common::like_escape(sv));
             values.push(pattern.clone().into());
@@ -204,8 +238,10 @@ impl SysNoticeReadRepository {
              LEFT JOIN sys_dept d ON u.dept_id = d.dept_id \
              {} \
              ORDER BY r.read_time DESC \
-             LIMIT ? OFFSET ?",
-            where_clause
+             LIMIT {} OFFSET {}",
+            where_clause,
+            ph(idx + 1),
+            ph(idx + 2)
         );
         // 追加分页参数到 values
         let mut list_values = values;

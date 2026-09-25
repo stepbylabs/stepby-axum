@@ -52,10 +52,19 @@ impl SysUserPrefRepository {
         let backend = db.get_database_backend();
         let now = crate::common::datetime::now_naive();
         let sql = match backend {
-            DatabaseBackend::Sqlite | DatabaseBackend::Postgres => {
+            DatabaseBackend::Sqlite => {
                 "INSERT INTO sys_user_pref \
                  (user_id, tenant_id, email_notify, sysmsg_notify, announce_notify, dnd_enabled, dnd_start, dnd_end, update_time) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(user_id) DO UPDATE SET \
+                    email_notify=excluded.email_notify, sysmsg_notify=excluded.sysmsg_notify, \
+                    announce_notify=excluded.announce_notify, dnd_enabled=excluded.dnd_enabled, \
+                    dnd_start=excluded.dnd_start, dnd_end=excluded.dnd_end, update_time=excluded.update_time"
+            }
+            DatabaseBackend::Postgres => {
+                "INSERT INTO sys_user_pref \
+                 (user_id, tenant_id, email_notify, sysmsg_notify, announce_notify, dnd_enabled, dnd_start, dnd_end, update_time) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
                  ON CONFLICT(user_id) DO UPDATE SET \
                     email_notify=excluded.email_notify, sysmsg_notify=excluded.sysmsg_notify, \
                     announce_notify=excluded.announce_notify, dnd_enabled=excluded.dnd_enabled, \

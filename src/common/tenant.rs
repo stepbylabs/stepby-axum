@@ -101,6 +101,10 @@ pub fn eval_tenant_runtime_state(
 /// - `monitor:health:`：健康检查（DB/Redis/磁盘等宿主依赖状态，无租户语义）
 /// - `system:backup:`：备份管理（整库 pg_dump/mysqldump 与恢复覆盖现库，
 ///   下载面即全库数据 ⇒ 授给租户等于跨租户数据外泄；租户级备份粒度见 §27.12-5 待决）
+/// - `system:rateLimit:`：API 限流配置（**宿主级安全配置**，`sys_rate_limit` 无 `tenant_id`
+///   列且限流中间件在租户解析**之前**执行 ⇒ 本质无租户维度。若授给租户，其可改/删
+///   `/login`、`*`（全局默认）等规则 ⇒ **关闭全平台登录爆破防护**；导出面亦会泄漏全平台
+///   路由清单。2026-09-26 复核发现并收敛）
 pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "system:tenant:domain:",
     "tool:gen:",
@@ -110,6 +114,7 @@ pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "monitor:slowSql:",
     "monitor:health:",
     "system:backup:",
+    "system:rateLimit:",
 ];
 
 /// 判断 perms 是否属于平台专属能力（前缀匹配，大小写敏感——perms 统一小写）
@@ -400,10 +405,19 @@ mod tests {
         ] {
             assert!(is_platform_only_perm(perms), "{perms} 应为平台专属");
         }
-        // 租户可用的看板/在线监控/限流自助不受影响
+        // 2026-09-26 复核新增：限流配置为**宿主级安全配置**（表无 tenant_id、中间件早于租户
+        // 解析执行），授给租户可关闭全平台 `/login` 爆破防护 ⇒ 收敛为平台专属
+        for perms in [
+            "system:rateLimit:list",
+            "system:rateLimit:export",
+            "system:rateLimit:edit",
+            "system:rateLimit:remove",
+        ] {
+            assert!(is_platform_only_perm(perms), "{perms} 应为平台专属");
+        }
+        // 租户可用的看板/在线监控自助不受影响
         assert!(!is_platform_only_perm("monitor:dashboard:list"));
         assert!(!is_platform_only_perm("monitor:online:list"));
-        assert!(!is_platform_only_perm("system:rateLimit:list"));
     }
 
     #[test]
@@ -480,23 +494,49 @@ mod tests {
     /// 新库中平台普通角色仍持有菜单 3800/3802（域名查询/验证）⇒ 假入口。
     /// 修复 = 新增 `m20260926_000006`（按完整 8 项前缀全量剔除）；本测试锁死该一致性。
     ///
+    /// 2026-09-26 第二批：新增 `system:rateLimit:` ⇒ 令 **最新**全量迁移（`m000007`，9 项）
+    /// 承担"常量全量"断言，历史迁移只断言"其项仍在常量中（未被删）"。
+    /// **约束**：今后每新增一个平台专属前缀，都必须同步开一个新迁移（含完整清单），
+    /// 否则本测试失败 ⇒ 新库路径不会漏剔。
+    ///
     /// `include_str!` 在编译期嵌入源码文本 ⇒ 路径错误即刻暴露，且无运行时 IO。
     #[test]
     fn platform_only_prefixes_match_migration_lists() {
+        // 最新全量治理点（必须含**全部**平台专属前缀）
+        const LATEST_SRC: &str =
+            include_str!("../../migration/src/m20260926_000007_platform_only_ratelimit.rs");
+        // 历史迁移（其项必须仍在常量中，防"常量删了但迁移还留着"的漂移）
         const M000006_SRC: &str =
             include_str!("../../migration/src/m20260926_000006_platform_only_prefix_full.rs");
         const M000005_SRC: &str =
             include_str!("../../migration/src/m20260926_000005_platform_only_prefix_governance.rs");
 
-        // ① 常量每一项都必须出现在 m000006（"走迁移的新库"的唯一全量治理点）
+        // ① 常量每一项都必须出现在**最新**迁移清单中
         for p in PLATFORM_ONLY_PERM_PREFIXES {
             assert!(
-                M000006_SRC.contains(p),
-                "平台专属前缀 `{p}` 未出现在 m000006 清单 —— 新增前缀必须同步该迁移，\
-                 否则走迁移的新库不会剔除对应菜单（假入口）"
+                LATEST_SRC.contains(p),
+                "平台专属前缀 `{p}` 未出现在最新迁移清单（m20260926_000007）—— 新增前缀必须\
+                 同步该迁移的完整清单，否则走迁移的新库不会剔除对应菜单（假入口）"
             );
         }
-        // ② m000005 的清单项必须都在常量中（迁移不得使用未声明的前缀）
+        // ② 历史迁移（m000006，8 项）的项必须都还在常量中
+        for p in [
+            "system:tenant:domain:",
+            "tool:gen:",
+            "tool:httpDebug:",
+            "monitor:cache:",
+            "monitor:log:",
+            "monitor:slowSql:",
+            "monitor:health:",
+            "system:backup:",
+        ] {
+            assert!(M000006_SRC.contains(p), "m000006 清单项 `{p}` 丢失");
+            assert!(
+                PLATFORM_ONLY_PERM_PREFIXES.contains(&p),
+                "m000006 使用了未在 PLATFORM_ONLY_PERM_PREFIXES 声明的前缀 `{p}`"
+            );
+        }
+        // ③ m000005 的清单项必须都在常量中（迁移不得使用未声明的前缀）
         for p in [
             "tool:httpDebug:",
             "monitor:log:",
