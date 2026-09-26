@@ -411,6 +411,15 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("PUT", "/system/tenant/domain/changeStatus", "system:tenant:domain:edit"),
     ("DELETE", "/system/tenant/domain/{domainId}", "system:tenant:domain:remove"),
 
+    // ===== 租户自建导航 L3（批次 3 / MT-1：能力位 nav.l3 门控，服务层按档位+租户收窄） =====
+    // perms 属平台专属前缀 `system:tenantMenu:`，仅由能力位 `nav.l3` 逐条解锁
+    // （`CAPABILITY_UNLOCKED_PERMS`：view_only ⇒ list；full ⇒ add/edit/remove）。
+    ("GET", "/system/tenant/menu/list", "system:tenantMenu:list"),
+    ("GET", "/system/tenant/menu/options", "system:tenantMenu:list"),
+    ("POST", "/system/tenant/menu", "system:tenantMenu:add"),
+    ("PUT", "/system/tenant/menu", "system:tenantMenu:edit"),
+    ("DELETE", "/system/tenant/menu/{l3Id}", "system:tenantMenu:remove"),
+
     // ===== 定时任务管理 =====
     ("GET", "/monitor/job/list", "monitor:job:list"),
     ("GET", "/monitor/job/{jobId}", "monitor:job:query"),
@@ -1320,6 +1329,12 @@ mod tests {
             ("PUT", "/system/tenant/domain/primary"),
             ("PUT", "/system/tenant/domain/changeStatus"),
             ("DELETE", "/system/tenant/domain/{domainId}"),
+            // sys_tenant_nav_router（批次 3：L3 租户自建导航）
+            ("GET", "/system/tenant/menu/list"),
+            ("GET", "/system/tenant/menu/options"),
+            ("POST", "/system/tenant/menu"),
+            ("PUT", "/system/tenant/menu"),
+            ("DELETE", "/system/tenant/menu/{l3Id}"),
             // sys_job_router
             ("GET", "/monitor/job/list"),
             ("GET", "/monitor/job/{jobId}"),
@@ -1887,5 +1902,39 @@ mod tests {
         assert_eq!(get_required_perm("POST", "/system/msg/channel/list"), None);
         assert_eq!(get_required_perm("GET", "/system/msg/log/clean"), None);
         assert_eq!(get_required_perm("GET", "/system/msg/send"), None);
+    }
+
+    /// 批次 3：L3 租户自建导航的权限映射 + 参数名逐字一致（`{l3Id}` 与 router 注册一致）
+    #[test]
+    fn test_tenant_nav_perms_and_param_names() {
+        assert_eq!(
+            get_required_perm("GET", "/system/tenant/menu/list"),
+            Some("system:tenantMenu:list")
+        );
+        assert_eq!(
+            get_required_perm("GET", "/system/tenant/menu/options"),
+            Some("system:tenantMenu:list")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/tenant/menu"),
+            Some("system:tenantMenu:add")
+        );
+        assert_eq!(
+            get_required_perm("PUT", "/system/tenant/menu"),
+            Some("system:tenantMenu:edit")
+        );
+        assert_eq!(
+            get_required_perm("DELETE", "/system/tenant/menu/{l3Id}"),
+            Some("system:tenantMenu:remove")
+        );
+        // 参数名不匹配 ⇒ 查表失败 ⇒ fail-open 下越权 / fail-closed 下误拦，故钉死
+        assert_eq!(
+            get_required_perm("DELETE", "/system/tenant/menu/{id}"),
+            None,
+            "参数名必须与 router 注册逐字一致（{{l3Id}}）"
+        );
+        // 方法混淆不应命中
+        assert_eq!(get_required_perm("GET", "/system/tenant/menu"), None);
+        assert_eq!(get_required_perm("POST", "/system/tenant/menu/list"), None);
     }
 }

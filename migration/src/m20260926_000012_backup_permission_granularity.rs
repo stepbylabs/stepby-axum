@@ -110,10 +110,20 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        conn.execute_unprepared("DELETE FROM sys_role_menu WHERE menu_id IN (3625, 3626)")
-            .await?;
-        conn.execute_unprepared("DELETE FROM sys_menu WHERE menu_id IN (3625, 3626)")
-            .await?;
+        let ids: Vec<String> = [MENU_ID_DOWNLOAD, MENU_ID_EXPORT]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        conn.execute_unprepared(&format!(
+            "DELETE FROM sys_role_menu WHERE menu_id IN ({})",
+            ids.join(", ")
+        ))
+        .await?;
+        conn.execute_unprepared(&format!(
+            "DELETE FROM sys_menu WHERE menu_id IN ({})",
+            ids.join(", ")
+        ))
+        .await?;
         Ok(())
     }
 }

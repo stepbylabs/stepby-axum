@@ -65,14 +65,20 @@ pub const KNOWN_FEATURES: &[FeatureDef] = &[
 
 /// 能力位 → **解锁的平台专属权限白名单**（逐条枚举，禁止前缀通配）。
 ///
-/// 语义：清单内的 perms **仅在对应能力位非 `off` 时**才可授予租户角色；清单外的
-/// 平台专属 perms 恒不可授予（见 [`is_grantable_perm_with_features`]）。
+/// 每项是三元组 `(能力位 key, 所需最低档位, perms 清单)`：**仅当**该能力位的有效模式在
+/// 注册表 `modes` 中的下标 ≥ 所需档位的下标（即"至少开放到该档"）时，清单内的 perms
+/// 才可授予租户角色。清单外的平台专属 perms 恒不可授予
+/// （见 [`is_grantable_perm_with_features`]）。
+///
+/// 为什么需要"所需最低档位"：三态能力位（如 `nav.l3 = off | view_only | full`）的
+/// 只读面与写面必须**分别解锁**，否则 `view_only` 下会把 add/edit/remove 菜单一并授予
+/// role 2，重造"菜单可见但请求 403"的假入口。
 ///
 /// ⚠️ 逐条枚举而非按前缀放开是**刻意的**：`system:backup:` 是**部分解锁**前缀
 /// （只读 3 条 + 导出 1 条可下放，创建/恢复/删除仍平台专属），若按前缀放开则等于把
 /// 整库备份面（含恢复覆盖现库）一并下放。批次 1c 的 `system:tenant:domain:` 则是
 /// **整前缀全量收录**的特例——同一套逐条语义对两种情形都成立。
-pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &[&str])] = &[
+pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &str, &[&str])] = &[
     // 备份只读可见（批次 2）：能力位开启时，租户可读**本租户**的租户数据包（tenant_export）
     // 列表与详情，并可下载自己的数据包；**不含**创建备份 / 恢复 / 删除 / 平台代导出，
     // 也不含整库备份行的读取（服务层按 `backup_type = 'tenant_export' AND tenant_id = 自己`
@@ -82,6 +88,7 @@ pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &[&str])] = &[
     // 因此本清单可以安全收录只读子集。
     (
         "backup.readonly_visible",
+        "on",
         &[
             "system:backup:list",
             "system:backup:query",
@@ -90,13 +97,27 @@ pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &[&str])] = &[
     ),
     // 租户自助导出（批次 2）：能力位开启时，租户可把**本租户**数据包导出为 JSON
     // （端点 `POST /system/backup/self-export`，无租户参数 ⇒ 不存在传他租户 id 的越权面）。
-    ("backup.tenant_self_export", &["system:backup:export"]),
+    ("backup.tenant_self_export", "on", &["system:backup:export"]),
+    // 租户自建导航 L3（批次 3）：**分档解锁**——`view_only` 只给只读入口，
+    // `full` 才给写面。服务层 `SysTenantNavService::resolve_scope` 按同档位守卫，
+    // 因此这里按档解锁不会造出"菜单可见但请求 403"的假入口。
+    ("nav.l3", "view_only", &["system:tenantMenu:list"]),
+    (
+        "nav.l3",
+        "full",
+        &[
+            "system:tenantMenu:add",
+            "system:tenantMenu:edit",
+            "system:tenantMenu:remove",
+        ],
+    ),
     // 租户域名自助（批次 1c）：能力位开启时，域名管理 5 项权限可授予租户管理员，
     // 服务层按 tid 收窄（仅能读写本租户域名）。
     // 清单与 `middleware/permission.rs` 的 `/system/tenant/domain/*` 权限映射逐条对应
     // （单测 `test_unlocked_perms_are_actually_registered` 锁死双向一致）。
     (
         "tenant.domain_self_service",
+        "full",
         &[
             "system:tenant:domain:list",
             "system:tenant:domain:add",
@@ -121,20 +142,41 @@ pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &[&str])] = &[
 /// 创建备份 / 恢复（覆盖现库）/ 删除 的菜单一并授予 role 2，重新造出
 /// "菜单可见但请求一律 403"的假入口。故本函数只吐逐条 perms，调用点均按 perms 匹配。
 ///
-/// 单测 `test_unlocked_perms_are_perm_granular` 锁死"部分解锁前缀不得整前缀放开"。
+/// # 为什么还要 **档位阈值**
+///
+/// 三态能力位（`nav.l3 = off | view_only | full`）的只读面与写面必须分别解锁：
+/// `view_only` 只解锁 `list`，`full` 才解锁 add/edit/remove。比较依据是注册表
+/// `modes` 数组下标（下标越大越开放），与 [`FeatureSet::narrowed_by`] 同一口径。
+///
+/// 单测 `test_unlocked_perms_are_perm_granular` 锁死"部分解锁前缀不得整前缀放开"，
+/// `test_unlocked_perms_respect_mode_threshold` 锁死"档位不足不得解锁"。
 pub fn unlocked_capability_perms(features: &FeatureSet) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
-    for (feat, list) in CAPABILITY_UNLOCKED_PERMS {
-        if !features.is_on(feat) {
+    for (key, required_mode, perms) in CAPABILITY_UNLOCKED_PERMS {
+        if !mode_reaches(features, key, required_mode) {
             continue;
         }
-        for p in *list {
+        for p in *perms {
             if !out.contains(p) {
                 out.push(p);
             }
         }
     }
     out
+}
+
+/// 有效模式是否**至少开放到** `required_mode` 档（同注册表 `modes` 下标比较）。
+///
+/// 未登记的能力位 / 未登记的档位串一律视为"未达到"（fail-closed）。
+fn mode_reaches(features: &FeatureSet, key: &str, required_mode: &str) -> bool {
+    let Some(def) = feature_def(key) else {
+        return false;
+    };
+    let idx_of = |m: &str| def.modes.iter().position(|x| *x == m);
+    match (idx_of(features.mode(key)), idx_of(required_mode)) {
+        (Some(cur), Some(need)) => cur >= need,
+        _ => false,
+    }
 }
 
 /// 构造 `perms NOT IN ($1, $2, …)` 片段（调用方按方言提供占位符；清单为空时返回 `None`）。
@@ -332,7 +374,7 @@ fn builtin_default_features() -> &'static FeatureSet {
 /// **能力位感知的"可授予"判定**（`common::tenant::is_grantable_perm` 的能力位版本）。
 ///
 /// 判定顺序：
-/// 1. 命中 [`CAPABILITY_UNLOCKED_PERMS`] 且对应能力位非 `off` ⇒ **可授予**
+/// 1. 命中 [`CAPABILITY_UNLOCKED_PERMS`] 且对应能力位**达到所需档位** ⇒ **可授予**
 ///    （其服务层必须已按 tid 收窄，见该常量文档）；
 /// 2. 平台专属前缀 ⇒ 不可授予；
 /// 3. 命中 tier2（表带 `tenant_id` 但集合读路径未接过滤）⇒ 不可授予。
@@ -340,10 +382,7 @@ fn builtin_default_features() -> &'static FeatureSet {
 /// 传入 [`FeatureSet::default`] 时与旧 `is_grantable_perm` **逐条等价**（全 `off` 即现状），
 /// 这保证"开关缺省 = 行为不变"。
 pub fn is_grantable_perm_with_features(perms: &str, features: &FeatureSet) -> bool {
-    if CAPABILITY_UNLOCKED_PERMS
-        .iter()
-        .any(|(feat, list)| features.is_on(feat) && list.contains(&perms))
-    {
+    if unlocked_capability_perms(features).contains(&perms) {
         return true;
     }
     if crate::common::tenant::is_platform_only_perm(perms) {
@@ -552,10 +591,12 @@ mod tests {
     fn test_unlocked_perms_are_actually_registered() {
         let src = std::fs::read_to_string("src/middleware/permission.rs")
             .expect("src/middleware/permission.rs 应存在");
-        for (feat, perms_list) in CAPABILITY_UNLOCKED_PERMS {
+        for (feat, required_mode, perms_list) in CAPABILITY_UNLOCKED_PERMS {
+            let def = feature_def(feat)
+                .unwrap_or_else(|| panic!("解锁白名单引用了未登记的能力位 {feat}"));
             assert!(
-                feature_def(feat).is_some(),
-                "解锁白名单引用了未登记的能力位 {feat}"
+                def.modes.contains(required_mode),
+                "解锁白名单为 {feat} 声明了未登记的所需档位 {required_mode}"
             );
             for p in *perms_list {
                 assert!(
@@ -568,6 +609,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **档位阈值**：三态能力位的只读面与写面必须分别解锁（批次 3 `nav.l3`）。
+    ///
+    /// 可证伪性：若 `unlocked_capability_perms` 退回"只看 `is_on`"，第 2 组断言会立即
+    /// 变红（`view_only` 把 add/edit/remove 一并解锁 ⇒ 菜单可见但请求 403 的假入口）。
+    #[test]
+    fn test_unlocked_perms_respect_mode_threshold() {
+        // ① off ⇒ 一条都不解锁
+        let off = FeatureSet::default();
+        assert!(unlocked_capability_perms(&off).is_empty());
+
+        // ② view_only ⇒ 仅 list；写面（add/edit/remove）不得解锁
+        let view_only = FeatureSet::from_json(Some(r#"{"nav.l3":"view_only"}"#));
+        assert_eq!(
+            unlocked_capability_perms(&view_only),
+            vec!["system:tenantMenu:list"]
+        );
+        for p in [
+            "system:tenantMenu:add",
+            "system:tenantMenu:edit",
+            "system:tenantMenu:remove",
+        ] {
+            assert!(
+                !is_grantable_perm_with_features(p, &view_only),
+                "view_only 档不得解锁写面 {p}"
+            );
+        }
+        assert!(is_grantable_perm_with_features(
+            "system:tenantMenu:list",
+            &view_only
+        ));
+
+        // ③ full ⇒ 四项全解锁
+        let full = FeatureSet::from_json(Some(r#"{"nav.l3":"full"}"#));
+        for p in [
+            "system:tenantMenu:list",
+            "system:tenantMenu:add",
+            "system:tenantMenu:edit",
+            "system:tenantMenu:remove",
+        ] {
+            assert!(
+                is_grantable_perm_with_features(p, &full),
+                "full 档应解锁 {p}"
+            );
+        }
+
+        // ④ 单档能力位（off|on）的既有语义不受影响
+        let backup_on = FeatureSet::from_json(Some(r#"{"backup.readonly_visible":"on"}"#));
+        assert_eq!(
+            unlocked_capability_perms(&backup_on),
+            vec![
+                "system:backup:list",
+                "system:backup:query",
+                "system:backup:download"
+            ]
+        );
     }
 
     /// 能力位开启后仍受**既有**门禁约束：开关不是"万能钥匙"。

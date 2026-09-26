@@ -36,6 +36,7 @@ pub mod sys_scim_group_handler;
 pub mod sys_task_handler;
 pub mod sys_tenant_domain_handler;
 pub mod sys_tenant_handler;
+pub mod sys_tenant_nav_handler;
 pub mod sys_user_handler;
 pub mod sys_user_pref_handler;
 pub mod sys_web_hook_handler;

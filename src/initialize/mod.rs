@@ -163,6 +163,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化备份权限粒度化菜单失败: {}", e))?;
 
+        // 3.5d-4 租户自建导航 L3 页面菜单（批次 3）：与迁移
+        // m20260926_000014_tenant_nav_menu 等价（启动不跑 Migrator::up）。
+        // 缺此兜底时存量库无 3627 页面菜单 ⇒ 能力位开启后租户侧仍无入口（假功能）。
+        ensure_tenant_nav_menu(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化租户自建导航菜单失败: {}", e))?;
+
         // 3.5e 多租户 Phase 3 存量库兜底：与迁移 m20260925_000003_tenant_phase3 等价
         // （启动不跑 Migrator::up）——5 张租户表族（sys_tenant / package / domain /
         // menu / migration_map）+ 默认套餐种子 + **tid remap（唯一不可逆点，§29.7）**。
@@ -1612,6 +1619,64 @@ async fn ensure_backup_permission_menus(db: &DatabaseConnection) -> anyhow::Resu
         .await?;
     }
     tracing::info!("备份权限粒度化菜单已就绪（3625-3626，幂等确保完成）");
+    Ok(())
+}
+
+/// 租户自建导航 L3 页面菜单（批次 3；与迁移
+/// `m20260926_000014_tenant_nav_menu` **双写一致**，R4 为回归门禁）。
+///
+/// 新增 `menu-id-registry.md` §「新增 C/F 页面按钮（小模块）3627 起」的一组菜单：
+/// - C 页面 3627「导航设置」（顶层菜单，`system/tenant/nav/index`，
+///   perms `system:tenantMenu:list`）；
+/// - F 按钮 3628 新增 / 3629 修改 / 3630 删除。
+///
+/// **不授予任何角色**：能力位 `nav.l3` 默认 `off`，授予与回收由
+/// [`ensure_tenant_role_menu_governance`] 的 ①/①' 按能力位 **perms 粒度 + 档位阈值**
+/// 动态处理（`view_only` ⇒ 仅回填 3627；`full` ⇒ 追加回填 3628-3630）。
+async fn ensure_tenant_nav_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    let insert_prefix = match backend {
+        DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
+        DatabaseBackend::Postgres => "INSERT INTO ",
+        DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+    };
+    let insert_suffix = if backend == DatabaseBackend::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let now_expr = match backend {
+        DatabaseBackend::Sqlite => {
+            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        }
+        _ => "NOW()".to_string(),
+    };
+    let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
+    let body_rows = [
+        format!(
+            "{menu_cols} VALUES (3627, '导航设置', 0, 91, 'my-nav', 'system/tenant/nav/index', '', '', '1', '0', 'C', '0', '0', 'system:tenantMenu:list', 'tree-table', 'admin', {now_expr}, '租户自建导航 L3 配置（需能力位 nav.l3）', '0', 'menu.myNav')"
+        ),
+        format!(
+            "{menu_cols} VALUES (3628, '导航新增', 3627, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenantMenu:add', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3629, '导航修改', 3627, 2, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenantMenu:edit', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3630, '导航删除', 3627, 3, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenantMenu:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+    ];
+    for body in body_rows {
+        db.execute(Statement::from_string(
+            backend,
+            format!("{insert_prefix}{body}{insert_suffix}"),
+        ))
+        .await?;
+    }
+    tracing::info!("租户自建导航页面菜单已就绪（3627-3630，幂等确保完成）");
     Ok(())
 }
 
