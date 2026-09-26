@@ -93,6 +93,257 @@ pub(crate) const TENANT_SELF_SERVICE_PERMS: &[&str] = &[
 /// 踢线黑名单兜底 TTL（会话 JSON 无 exp 字段时的保守上界，24h）
 const FALLBACK_BLACKLIST_TTL_SECS: i64 = 24 * 3600;
 
+// ---------------------------------------------------------------- 租户角色菜单工具函数
+//
+// 下列三个函数是**模块级自由函数**（`&impl ConnectionTrait`），供"无 `SysTenantService`
+// 实例"的路径复用（如 `sys_oauth_service` 的 OAuth 自动建号），目的是让
+// **"平台普通角色菜单 ∩ 可授予 ∩ 套餐白名单"** 这一口径只有**一处实现**：
+// 租户初始化（`add`，含自助按钮）与租户普通角色（OAuth 自动建号，不含自助按钮）共用，
+// 避免"复制路径 / 授权路径"两处口径漂移。
+
+/// 套餐白名单（`None` = 不限制 / 平台租户 / 租户不存在）。
+///
+/// 与 `SysTenantService::package_menu_whitelist` 同源（后者为本函数的薄包装）。
+pub(crate) async fn package_menu_whitelist_conn(
+    conn: &impl ConnectionTrait,
+    tenant_id: i64,
+) -> Result<Option<HashSet<i64>>, DbErr> {
+    if tenant_id == 0 {
+        return Ok(None);
+    }
+    let Some(tenant) = SysTenant::find()
+        .filter(TenantColumn::TenantId.eq(tenant_id))
+        .filter(TenantColumn::DelFlag.eq("0"))
+        .one(conn)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(package_id) = tenant.package_id else {
+        return Ok(None);
+    };
+    let Some(package) = SysTenantPackage::find()
+        .filter(PkgColumn::PackageId.eq(package_id))
+        .filter(PkgColumn::DelFlag.eq("0"))
+        .one(conn)
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(parse_menu_ids(&package.menu_ids).map(|v| v.into_iter().collect()))
+}
+
+/// 租户角色的**菜单上限** = （平台普通角色菜单 ∪ 租户自助按钮）∩ **可授予** ∩ 套餐白名单。
+///
+/// - `include_self_service = true`：租户管理员角色用（`config`/`dict` 的 add/edit/remove
+///   自助按钮需要，否则租户无法自建字典/覆盖 config）；
+/// - `include_self_service = false`：租户**普通角色**用（OAuth 自动建号默认角色；
+///   普通用户不应获得 config/dict 写权限）。
+///
+/// "可授予"判定与角色授权门禁 `ensure_menu_filter_coverage` 同源
+/// （`common::tenant::is_grantable_perm`），保证"复制/收敛路径"与"授权路径"口径一致。
+pub(crate) async fn tenant_role_menu_ids(
+    conn: &impl ConnectionTrait,
+    whitelist: Option<&HashSet<i64>>,
+    include_self_service: bool,
+) -> Result<Vec<i64>, DbErr> {
+    let mut base_menu_ids: Vec<i64> = SysRoleMenu::find()
+        .filter(RoleMenuColumn::RoleId.eq(COMMON_ROLE_ID))
+        .all(conn)
+        .await?
+        .into_iter()
+        .map(|rm| rm.menu_id)
+        .collect();
+    if include_self_service {
+        let self_service_menu_ids: Vec<i64> = SysMenu::find()
+            .select_only()
+            .column(MenuColumn::MenuId)
+            .filter(MenuColumn::Perms.is_in(TENANT_SELF_SERVICE_PERMS.iter().copied()))
+            .filter(MenuColumn::Status.eq("0"))
+            .filter(MenuColumn::DelFlag.eq("0"))
+            .into_tuple::<i64>()
+            .all(conn)
+            .await?;
+        base_menu_ids.extend(self_service_menu_ids);
+    }
+    // 剔除**不可授予**菜单（平台专属前缀 ∪ tier2 未接过滤表）——租户侧不出现假入口，
+    // 也不带入"先授菜单后补过滤"的跨租户读窗口。
+    let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
+        .select_only()
+        .column(MenuColumn::MenuId)
+        .column(MenuColumn::Perms)
+        .filter(MenuColumn::DelFlag.eq("0"))
+        .into_tuple::<(i64, Option<String>)>()
+        .all(conn)
+        .await?;
+    let excluded_menu_ids: HashSet<i64> = menu_perms
+        .into_iter()
+        .filter(|(_, perms)| {
+            perms
+                .as_deref()
+                .is_some_and(|p| !p.is_empty() && !crate::common::tenant::is_grantable_perm(p))
+        })
+        .map(|(id, _)| id)
+        .collect();
+    base_menu_ids.retain(|id| !excluded_menu_ids.contains(id));
+    base_menu_ids.sort_unstable();
+    base_menu_ids.dedup();
+    Ok(match whitelist {
+        Some(white) => base_menu_ids
+            .into_iter()
+            .filter(|id| white.contains(id))
+            .collect(),
+        None => base_menu_ids,
+    })
+}
+
+/// 按 `(tenant_id, role_key)` 查询启用中的角色 id（租户普通角色定位用）。
+async fn find_role_id_by_key(
+    conn: &impl ConnectionTrait,
+    tenant_id: i64,
+    role_key: &str,
+) -> Result<Option<i64>, DbErr> {
+    Ok(SysRole::find()
+        .filter(RoleColumn::TenantId.eq(tenant_id))
+        .filter(RoleColumn::RoleKey.eq(role_key))
+        .filter(RoleColumn::DelFlag.eq("0"))
+        .one(conn)
+        .await?
+        .map(|r| r.role_id))
+}
+
+/// **OAuth 自动建号的默认角色**解析（GAP-C 根治，第十一批）。
+///
+/// 背景：原实现无条件绑定 `DEFAULT_ROLE_ID`(=2)——那是**平台**普通角色（`tenant_id = 0`）；
+/// 当供应商属租户 T（`provider_tid != 0`）时，就形成"租户用户 → 平台角色"的**跨租户引用**
+/// （第十批 MT-2 复核发现并登记；见 `docs/optimization/all-topics-open-items-2026-09-26.md`
+/// 与 `scripts/tenant-audit-allow.json` 的 notes-R9）。改绑租户**管理员**角色则是**过度授权**，
+/// 故正确解法是：让租户拥有**自己的**普通角色。
+///
+/// 语义：
+/// - `tenant_id == 0` → 平台普通角色 `COMMON_ROLE_ID`（行为不变）；
+/// - `tenant_id != 0` → 该租户的普通角色（`role_key = "{tenant_code}_common"`）；
+///   不存在则**幂等创建**（角色字段以平台普通角色为语义母版；菜单 =
+///   `tenant_role_menu_ids(.., include_self_service = false)`）；并发由唯一索引
+///   `uk_sys_role_tenant_key` 兜底——插入冲突时**回读**已存在行；
+/// - 租户不存在或创建失败 → `Ok(None)`：调用方**不绑定角色**（**fail-closed**：
+///   宁可账号无角色，也绝不复用平台角色，从而不产生跨租户角色引用）。
+pub(crate) async fn resolve_default_role_for_tenant(
+    db: &DatabaseConnection,
+    tenant_id: i64,
+) -> Result<Option<i64>, ServiceError> {
+    if tenant_id == 0 {
+        return Ok(Some(COMMON_ROLE_ID));
+    }
+    let Some(tenant) = SysTenant::find()
+        .filter(TenantColumn::TenantId.eq(tenant_id))
+        .filter(TenantColumn::DelFlag.eq("0"))
+        .one(db)
+        .await?
+    else {
+        tracing::warn!(
+            tenant_id,
+            "OAuth 自动建号：租户不存在，跳过默认角色绑定（fail-closed）"
+        );
+        return Ok(None);
+    };
+    let role_key = format!("{}_common", tenant.tenant_code);
+    if let Some(role_id) = find_role_id_by_key(db, tenant_id, &role_key).await? {
+        return Ok(Some(role_id));
+    }
+
+    // 语义母版：平台普通角色（data_scope / 严格校验开关 / 排序位与其对齐）
+    let template = SysRole::find()
+        .filter(RoleColumn::RoleId.eq(COMMON_ROLE_ID))
+        .one(db)
+        .await?;
+    let whitelist = package_menu_whitelist_conn(db, tenant_id).await?;
+    let role_sort = template.as_ref().map(|r| r.role_sort).unwrap_or(2);
+    let data_scope = template
+        .as_ref()
+        .and_then(|r| r.data_scope.clone())
+        .or_else(|| Some("2".to_string()));
+    let menu_check_strictly = template.as_ref().and_then(|r| r.menu_check_strictly);
+    let dept_check_strictly = template.as_ref().and_then(|r| r.dept_check_strictly);
+    let role_name = format!("{}-普通角色", tenant.tenant_name);
+    let now = now_naive();
+
+    let role_repo = SysRoleRepository::new(db.clone());
+    let role_menu_repo = SysRoleMenuRepository::new(db.clone());
+    let created = db
+        .transaction::<_, i64, DbErr>(|txn| {
+            let role_repo = role_repo.clone();
+            let role_menu_repo = role_menu_repo.clone();
+            let role_key = role_key.clone();
+            let role_name = role_name.clone();
+            let data_scope = data_scope.clone();
+            let whitelist = whitelist.clone();
+            Box::pin(async move {
+                let menu_ids = tenant_role_menu_ids(txn, whitelist.as_ref(), false).await?;
+                let am = SysRoleActiveModel {
+                    role_id: NotSet,
+                    tenant_id: Set(tenant_id),
+                    role_name: Set(role_name),
+                    role_key: Set(role_key),
+                    role_sort: Set(role_sort),
+                    data_scope: Set(data_scope),
+                    custom_sql: Set(None),
+                    menu_check_strictly: Set(menu_check_strictly),
+                    dept_check_strictly: Set(dept_check_strictly),
+                    status: Set("0".to_string()),
+                    // 非系统角色：不享超管短路（与租户管理员角色一致）
+                    is_system: Set(false),
+                    del_flag: Set(Some("0".to_string())),
+                    create_by: Set(Some("oauth:auto-register".to_string())),
+                    create_time: Set(Some(now)),
+                    update_by: Set(Some("oauth:auto-register".to_string())),
+                    update_time: Set(Some(now)),
+                    remark: Set(Some(
+                        "OAuth 自动建号默认角色（租户普通角色；菜单 = 平台普通角色菜单 ∩ 可授予 ∩ 套餐白名单）"
+                            .to_string(),
+                    )),
+                };
+                let role = role_repo.base().insert_conn(txn, am).await?;
+                if !menu_ids.is_empty() {
+                    let rows: Vec<SysRoleMenuActiveModel> = menu_ids
+                        .into_iter()
+                        .map(|menu_id| SysRoleMenuActiveModel {
+                            role_id: Set(role.role_id),
+                            menu_id: Set(menu_id),
+                        })
+                        .collect();
+                    role_menu_repo.insert_many_conn(txn, rows).await?;
+                }
+                Ok(role.role_id)
+            })
+        })
+        .await;
+
+    match created {
+        Ok(role_id) => {
+            tracing::info!(
+                tenant_id,
+                role_id,
+                role_key = %role_key,
+                "OAuth 自动建号：已创建租户普通角色（跨租户角色引用已消除）"
+            );
+            Ok(Some(role_id))
+        }
+        Err(e) => {
+            // 并发：另一请求已创建同名角色 ⇒ 回读（唯一索引 uk_sys_role_tenant_key 兜底）
+            if let Some(role_id) = find_role_id_by_key(db, tenant_id, &role_key).await? {
+                return Ok(Some(role_id));
+            }
+            tracing::warn!(
+                tenant_id,
+                error = %e,
+                "OAuth 自动建号：创建租户普通角色失败，跳过绑定（fail-closed，不使用平台角色兜底）"
+            );
+            Ok(None)
+        }
+    }
+}
+
 /// 运行时键 TTL（覆盖 JWT 有效期上界，续期靠每次登录重写）
 const TENANT_RUNTIME_KEY_TTL_SECS: i64 = 30 * 24 * 3600;
 
@@ -718,57 +969,14 @@ impl SysTenantService {
                     tenant_am.dept_id = Set(Some(dept.dept_id));
                     tenant_repo.base().update_conn(txn, tenant_am).await?;
 
-                    // 4. 默认角色（菜单 = (平台普通角色菜单 ∪ 租户自助按钮 perms) ∩ 套餐白名单）
-                    let mut base_menu_ids: Vec<i64> = SysRoleMenu::find()
-                        .filter(RoleMenuColumn::RoleId.eq(COMMON_ROLE_ID))
-                        .all(txn)
-                        .await?
-                        .into_iter()
-                        .map(|rm| rm.menu_id)
-                        .collect();
-                    // 自助能力按钮（config/dict 的 add/edit/remove）：按 perms 解析菜单 id 补齐，
-                    // 保证"租户自建字典类型 / 租户 config 覆盖与自建键"链路权限完整
-                    let self_service_menu_ids: Vec<i64> = SysMenu::find()
-                        .select_only()
-                        .column(MenuColumn::MenuId)
-                        .filter(MenuColumn::Perms.is_in(TENANT_SELF_SERVICE_PERMS.iter().copied()))
-                        .filter(MenuColumn::Status.eq("0"))
-                        .filter(MenuColumn::DelFlag.eq("0"))
-                        .into_tuple::<i64>()
-                        .all(txn)
-                        .await?;
-                    base_menu_ids.extend(self_service_menu_ids);
-                    // 剔除**不可授予**菜单（平台专属前缀 ∪ tier2 未接过滤表）——租户侧不出现
-                    // 假入口、也不带入"先授菜单后补过滤"的跨租户读窗口。判定与角色授权门禁
-                    // `ensure_menu_filter_coverage` 同源（`is_grantable_perm`），避免"复制路径"
-                    // 与"授权路径"口径漂移。
-                    let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
-                        .select_only()
-                        .column(MenuColumn::MenuId)
-                        .column(MenuColumn::Perms)
-                        .filter(MenuColumn::DelFlag.eq("0"))
-                        .into_tuple::<(i64, Option<String>)>()
-                        .all(txn)
-                        .await?;
-                    let excluded_menu_ids: Vec<i64> = menu_perms
-                        .into_iter()
-                        .filter(|(_, perms)| {
-                            perms.as_deref().is_some_and(|p| {
-                                !p.is_empty() && !crate::common::tenant::is_grantable_perm(p)
-                            })
-                        })
-                        .map(|(id, _)| id)
-                        .collect();
-                    base_menu_ids.retain(|id| !excluded_menu_ids.contains(id));
-                    base_menu_ids.sort_unstable();
-                    base_menu_ids.dedup();
-                    let role_menu_ids: Vec<i64> = match &package_whitelist {
-                        Some(white) => base_menu_ids
-                            .iter()
-                            .copied()
-                            .filter(|id| white.contains(id))
-                            .collect(),
-                        None => base_menu_ids,
+                    // 4. 默认角色（菜单 = (平台普通角色菜单 ∪ 租户自助按钮) ∩ 可授予 ∩ 套餐白名单）
+                    //    与 OAuth 自动建号的"租户普通角色"共用同一实现
+                    //    （`tenant_role_menu_ids`，差异仅在是否含自助按钮）⇒ 口径单点、不漂移。
+                    let role_menu_ids = {
+                        let whitelist: Option<HashSet<i64>> = package_whitelist
+                            .as_ref()
+                            .map(|names| names.iter().copied().collect());
+                        tenant_role_menu_ids(txn, whitelist.as_ref(), true).await?
                     };
                     let role_am = SysRoleActiveModel {
                         role_id: sea_orm::NotSet,
@@ -1715,24 +1923,7 @@ impl SysTenantService {
         &self,
         tenant_id: i64,
     ) -> Result<Option<HashSet<i64>>, ServiceError> {
-        if tenant_id == 0 {
-            return Ok(None);
-        }
-        let Some(tenant) = self.tenant_repo.find_active_by_id(tenant_id).await? else {
-            return Ok(None);
-        };
-        let Some(package_id) = tenant.package_id else {
-            return Ok(None);
-        };
-        let Some(package) = SysTenantPackage::find()
-            .filter(PkgColumn::PackageId.eq(package_id))
-            .filter(PkgColumn::DelFlag.eq("0"))
-            .one(self.db())
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(parse_menu_ids(&package.menu_ids).map(|v| v.into_iter().collect()))
+        Ok(package_menu_whitelist_conn(self.db(), tenant_id).await?)
     }
 
     /// 校验菜单集合是否 ⊆ 套餐白名单（角色授权前置校验，§27.6 生效点①）

@@ -1253,6 +1253,35 @@ impl SysUserService {
         Ok(())
     }
 
+    /// 越权防护：批量岗位 ID 必须与 operator 同租户（operator_tid=0 平台管理员放行）
+    ///
+    /// 第十批（MT-2 复核发现）：`sys_user_post` 是**无 `tenant_id` 的关联表**，
+    /// §27.13.1 对其"依赖父表 JOIN 安全"的前提是**写入时校验父资源归属**；
+    /// 角色 / 部门已有该校验（`ensure_roles_tenant_allowed` / `ensure_depts_tenant_allowed`），
+    /// **岗位漏了** ⇒ 租户操作者可在 add/edit 用户时绑定**他租户或平台岗位**：
+    /// ① 用户详情/列表的 `postGroup` 会**回显他租户岗位名**（跨租户信息泄漏）；
+    /// ② 形成跨租户外键引用（数据完整性破坏）。
+    async fn ensure_posts_tenant_allowed(
+        &self,
+        operator_tid: i64,
+        post_ids: Option<&[i64]>,
+    ) -> Result<(), ServiceError> {
+        let Some(ids) = post_ids else {
+            return Ok(());
+        };
+        for post_id in ids {
+            let Some(post) = self.post_repo.base().find_by_id(*post_id).await? else {
+                continue;
+            };
+            if !crate::common::tenant::tenant_allowed(operator_tid, post.tenant_id) {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn add_user(
         &self,
         dto: UserAddDto,
@@ -1291,10 +1320,12 @@ impl SysUserService {
                 "error.common.forbidden"
             )));
         }
-        // 越权防护：不允许跨租户授角色 / 绑定兼职部门
+        // 越权防护：不允许跨租户授角色 / 绑定兼职部门 / 绑定岗位
         self.ensure_roles_tenant_allowed(operator_tid, dto.role_ids.as_deref())
             .await?;
         self.ensure_depts_tenant_allowed(operator_tid, dto.dept_ids.as_deref())
+            .await?;
+        self.ensure_posts_tenant_allowed(operator_tid, dto.post_ids.as_deref())
             .await?;
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
@@ -1476,10 +1507,12 @@ impl SysUserService {
                 "error.common.forbidden"
             )));
         }
-        // 越权防护：不允许跨租户授角色 / 绑定兼职部门
+        // 越权防护：不允许跨租户授角色 / 绑定兼职部门 / 绑定岗位
         self.ensure_roles_tenant_allowed(operator_tid, dto.role_ids.as_deref())
             .await?;
         self.ensure_depts_tenant_allowed(operator_tid, dto.dept_ids.as_deref())
+            .await?;
+        self.ensure_posts_tenant_allowed(operator_tid, dto.post_ids.as_deref())
             .await?;
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
@@ -1997,6 +2030,14 @@ impl SysUserService {
                 "error.common.forbidden"
             )));
         }
+
+        // 越权防护（第十批 MT-2 复核发现）：**被授角色本身**也须与 operator 同租户。
+        // 原先只校验"目标用户归属"（上一段），漏校验"角色归属"——而 `add_user`/`edit_user`
+        // 两条同类路径都已校验（`ensure_roles_tenant_allowed`）⇒ 本路径是唯一缺口：
+        // 租户操作者可借此把**平台角色或他租户角色**授给本租户用户，该用户随即按该角色的
+        // `sys_role_menu` 获得授权面（跨租户提权 / 越界可见）。
+        self.ensure_roles_tenant_allowed(operator_tid, Some(&role_ids))
+            .await?;
 
         let user_role_repo = self.user_role_repo.clone();
         self.db()
