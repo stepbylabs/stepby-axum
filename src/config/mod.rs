@@ -4,5 +4,5 @@ pub mod settings;
 
 pub use settings::{
     DatabaseConfig, JwtConfig, LogConfig, MailConfig, PatConfig, RedisConfig, S3StorageConfig,
-    ServerConfig, Settings, SsoConfig, UploadConfig,
+    ServerConfig, Settings, SsoConfig, TenantColumnMode, UiConfig, UploadConfig,
 };

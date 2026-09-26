@@ -349,7 +349,10 @@ pub async fn get_info(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))?;
 
-    let vo: GetInfoVo = state.auth_service.get_info(user_id).await?;
+    let vo: GetInfoVo = state
+        .auth_service
+        .get_info(user_id, operator.tenant_id())
+        .await?;
 
     // 将 user 序列化为 json::Value（password 已在 Service 层清空为 None）
     let user_value = serde_json::to_value(&vo.user)?;

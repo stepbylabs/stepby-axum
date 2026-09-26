@@ -71,6 +71,12 @@ pub struct Settings {
     /// 定时任务调度器配置（集群模式 + 内置任务整轮互斥锁）
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    /// UI 展示策略（`[ui]` 段）：业务列表页归属列等前端展示开关。
+    ///
+    /// 属于**展示层开关**（不构成服务端安全边界）：默认 `auto` = 仅平台操作者可见
+    /// 归属列 = 改造前行为；服务端的数据面隔离始终由 `tenant_scope` 承担。
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -97,6 +103,7 @@ impl fmt::Debug for Settings {
             .field("flow", &self.flow)
             .field("features", &self.features)
             .field("scheduler", &self.scheduler)
+            .field("ui", &self.ui)
             .finish()
     }
 }
@@ -154,6 +161,98 @@ fn default_cluster_mode() -> String {
 
 fn default_scheduler_lock_ttl() -> u64 {
     crate::scheduler::cluster::DEFAULT_ROUND_LOCK_TTL_SECS
+}
+
+/// UI 展示策略配置（`[ui]` 段）
+///
+/// 本项目定位「**大而全**」：能力齐备，让使用者自己选择或配置。
+/// 「业务列表页是否显示『所属租户』归属列」原判定为"业务页不加"（F-6，理由：租户用户
+/// 看到的天然只有本租户数据，加列零收益）。按项目准则⑥（原判"不进本仓"的项改为
+/// **提供集成点/开关**），此处把它做成**三态开关**，默认值 = 现状 = 关闭侧安全
+/// （仅平台操作者可见，租户视图零行为变更）。
+#[derive(Clone, Debug, Deserialize)]
+pub struct UiConfig {
+    /// 「所属租户」归属列的展示模式（`auto` | `always` | `never`）
+    ///
+    /// - `auto`（**默认**）：仅平台操作者（`tid == 0`）可见 ⇒ 等价于改造前行为；
+    /// - `always`：平台与租户操作者均可见（租户看到的是自己的租户号或"平台"）；
+    /// - `never`：一律不显示。
+    ///
+    /// 非法取值在启动时回落 `auto` 并告警（fail-safe），不会意外扩大可见面。
+    #[serde(default = "default_tenant_column_mode")]
+    pub show_tenant_column: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            show_tenant_column: default_tenant_column_mode(),
+        }
+    }
+}
+
+fn default_tenant_column_mode() -> String {
+    TenantColumnMode::default().as_str().to_string()
+}
+
+/// 「所属租户」归属列的展示模式（`[ui].show_tenant_column`）
+///
+/// 开关取「模式」而非裸 bool（项目准则③）：`auto` 需要操作者租户上下文才能判定，
+/// 裸 bool 无法表达"平台看、租户不看"这一默认语义。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TenantColumnMode {
+    /// 仅平台操作者（`tid == 0`）可见 —— **默认，等价于改造前行为**
+    #[default]
+    Auto,
+    /// 平台与租户操作者均可见
+    Always,
+    /// 一律不显示
+    Never,
+}
+
+/// `TenantColumnMode` 的合法模式串（顺序：默认项在前，便于阅读时确认"默认为现状"）
+pub const TENANT_COLUMN_MODES: &[&str] = &["auto", "always", "never"];
+
+impl TenantColumnMode {
+    /// 解析配置串；未登记取值一律回落 [`TenantColumnMode::Auto`] 并打 WARN（fail-safe）
+    pub fn parse(raw: &str) -> Self {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "auto" => Self::Auto,
+            "always" => Self::Always,
+            "never" => Self::Never,
+            _ => {
+                tracing::warn!(
+                    value = %raw,
+                    fallback = "auto",
+                    allowed = ?TENANT_COLUMN_MODES,
+                    "配置 [ui].show_tenant_column 取值非法，已回落 auto（仅平台操作者可见归属列）"
+                );
+                Self::Auto
+            }
+        }
+    }
+
+    /// 规范模式串（用于启动姿态日志与文档口径）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+
+    /// 解析后的**有效展示决策**：给定操作者租户号（`0` = 平台），是否显示归属列。
+    ///
+    /// 这是前后端唯一的判定口径：后端在 `getInfo` 时算好布尔下发给前端，
+    /// 前端不做二次推断（避免"平台/租户"判定散落两处而漂移）。
+    pub fn visible_for(self, operator_tid: i64) -> bool {
+        match self {
+            Self::Auto => operator_tid == 0,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
 }
 
 /// 系统日志保留策略配置（M2：操作日志 / 登录日志定期归档清理）
@@ -1145,6 +1244,7 @@ impl Settings {
             sys_log: SysLogConfig::default(),
             features: FeaturesConfig::default(),
             scheduler: SchedulerConfig::default(),
+            ui: UiConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -1281,6 +1381,7 @@ mod tests {
             sys_log: SysLogConfig::default(),
             features: FeaturesConfig::default(),
             scheduler: SchedulerConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 
@@ -1437,6 +1538,60 @@ mod tests {
         );
     }
 
+    /// `[ui].show_tenant_column` 的默认值必须是 `auto`，且入库模板不得隐式改变它
+    #[test]
+    fn test_tenant_column_mode_defaults_to_auto() {
+        let cfg = UiConfig::default();
+        assert_eq!(cfg.show_tenant_column, "auto", "缺省必须为 auto");
+
+        let s: Settings = toml::from_str(
+            &std::fs::read_to_string("config/config.toml.example")
+                .expect("config/config.toml.example 应存在"),
+        )
+        .expect("模板应可解析");
+        assert_eq!(
+            s.ui.show_tenant_column, "auto",
+            "入库模板不得隐式改变归属列展示模式"
+        );
+    }
+
+    /// 归属列三态语义：`auto` 仅平台操作者可见（= 历史行为）、`always` 全可见、`never` 全隐藏
+    ///
+    /// 可证伪性：若把 `Auto` 分支错写成 `operator_tid != 0`，第 1 组断言立即变红
+    /// （那会把"归属列"暴露给租户却对平台隐藏，与"平台运营视图增强"的定案相反）。
+    #[test]
+    fn test_tenant_column_mode_visible_for() {
+        assert!(TenantColumnMode::Auto.visible_for(0), "auto：平台可见");
+        assert!(!TenantColumnMode::Auto.visible_for(7), "auto：租户不可见");
+
+        assert!(TenantColumnMode::Always.visible_for(0));
+        assert!(
+            TenantColumnMode::Always.visible_for(7),
+            "always：租户亦可见"
+        );
+
+        assert!(!TenantColumnMode::Never.visible_for(0));
+        assert!(!TenantColumnMode::Never.visible_for(7), "never：一律隐藏");
+    }
+
+    /// 非法取值回落 `auto`（fail-safe），且 `parse` 忽略大小写与首尾空白
+    #[test]
+    fn test_tenant_column_mode_parse_falls_back_to_auto() {
+        assert_eq!(TenantColumnMode::parse("ALWAYS"), TenantColumnMode::Always);
+        assert_eq!(TenantColumnMode::parse("  never "), TenantColumnMode::Never);
+        for bad in ["", "yes", "true", "on", "view_only"] {
+            assert_eq!(
+                TenantColumnMode::parse(bad),
+                TenantColumnMode::Auto,
+                "非法取值 {bad:?} 必须回落 auto"
+            );
+        }
+        // 注册表与解析器一一对应（防"文档列了但解析不认"的漂移）
+        for m in TENANT_COLUMN_MODES {
+            assert_eq!(&TenantColumnMode::parse(m).as_str(), m);
+        }
+    }
+
     /// 验证 Settings Debug 输出不泄漏 config_enc_key
     #[test]
     fn test_settings_debug_redacts_config_enc_key() {
@@ -1494,6 +1649,7 @@ mod tests {
             sys_log: SysLogConfig::default(),
             features: FeaturesConfig::default(),
             scheduler: SchedulerConfig::default(),
+            ui: UiConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);
