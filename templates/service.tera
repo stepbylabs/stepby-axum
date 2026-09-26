@@ -11,9 +11,12 @@ use crate::repository::{{ table.tableName }}::{{ table.className }}Repository;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
 
 use crate::entity::{{ table.tableName }}::{Column, Entity as {{ table.className }}};
+// 注意 `RoundChain` / `BizTypeRegistration` 定义在 `biz_type` 子模块内，
+// 必须从该子模块导入（从 `sys_flow_service` 顶层导入会解析失败）。
+use crate::service::sys_flow_service::biz_type::{self, BizTypeRegistration, RoundChain};
 use crate::service::sys_flow_service::{
-    biz_type, engine_open_round, resolve_node_assignees, ApproverPolicy, BizTypeRegistration,
-    FlowProjection, NodeSpec, OpenRoundSpec, Quorum, RoundChain,
+    engine_open_round, resolve_node_assignees, ApproverPolicy, FlowProjection, NodeSpec,
+    OpenRoundSpec, Quorum,
 };
 
 /// 审批业务类型（引擎以 `(biz_type, biz_id)` 定位单据，**零表结构变更**）
@@ -181,12 +184,13 @@ impl {{ table.className }}Service {
         }
         // 重提交归属校验：仅**原申请人**可重新提交（首次提交 applicant_id 为 NULL）；
         // 否则任意用户可替他人把单据推入审批链（越权 + 审批人快照被劫持）
-        if let Some(prev) = doc.applicant_id {
-            if prev != applicant_id {
-                return Err(ServiceError::forbidden(&crate::tr!(
-                    "error.gen.flow_only_applicant_can_submit"
-                )));
-            }
+        // let-chain（edition 2024）：等价于嵌套 if，但不触发 clippy::collapsible_if
+        if let Some(prev) = doc.applicant_id
+            && prev != applicant_id
+        {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.gen.flow_only_applicant_can_submit"
+            )));
         }
         // 申请人快照（部门用于部门主管审批定位；租户用于 task/log 归属）
         let applicant = crate::entity::sys_user::Entity::find_by_id(applicant_id)
