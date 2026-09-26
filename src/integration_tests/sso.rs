@@ -1875,3 +1875,66 @@ async fn test_tenant_revoke_rt_sweep_is_not_truncated() {
     }
     let _: i64 = del.query_async(&mut redis).await.unwrap_or(0);
 }
+
+/// 批次 4（可证伪的"关闭态即安全态"）：三个 SSO 可选开关默认 `false` 时，对应端点/字段
+/// **必须不存在**——否则"默认关"只是文档口径而非真实行为。
+///
+/// 覆盖：① `discovery` 不得声明 `introspection_endpoint`；② `POST /sso/introspect` ⇒ **404**；
+/// ③ `GET /sso/client-logo/{clientId}` ⇒ **404**（先用真实客户端排除"因客户端不存在而 404"的假象）。
+///
+/// 开启态的正路径（内省 `active`、审计日志、logo 反代）需改 `config.toml` 并重启，
+/// 单轮 e2e 无法完成 ⇒ 配方见 `yebot-ui/tests/e2e/RUN-RECIPE.md §3.18(2)`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_batch4_optional_switches_are_absent_when_off() {
+    let ctx = sso_ctx().await;
+
+    // ① 发现文档不声明内省端点（关闭态）
+    let (status, _, body) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        "/.well-known/openid-configuration",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "发现文档应 200");
+    let doc = json_of(&body);
+    assert!(
+        doc.get("introspection_endpoint").is_none(),
+        "关闭态 discovery 不得声明 introspection_endpoint，实际: {doc}"
+    );
+
+    // ② 内省端点不存在（不暴露"存在但被关掉"的差异，也不泄漏任何令牌状态）
+    let (status, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/introspect",
+        "application/x-www-form-urlencoded",
+        "token=whatever&token_type_hint=access_token",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "关闭态 /sso/introspect 应 404，实际: {status}"
+    );
+
+    // ③ logo 代理端点不存在（先建真实客户端，确保 404 归因于开关而非"客户端查不到"）
+    let (cid, secret) = add_client(&ctx, "0", "it_sso_batch4_off").await;
+    assert!(
+        !cid.is_empty() && !secret.is_empty(),
+        "客户端应创建成功（cid={cid}）"
+    );
+    let (status, _, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/sso/client-logo/{cid}"),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "关闭态 /sso/client-logo 应 404，实际: {status}"
+    );
+}
