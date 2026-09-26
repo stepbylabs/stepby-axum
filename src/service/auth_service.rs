@@ -25,7 +25,7 @@ use utoipa::ToSchema;
 
 use crate::common::constants::SECS_PER_HOUR;
 use crate::common::error::ServiceError;
-use crate::config::{JwtConfig, Settings};
+use crate::config::{JwtConfig, Settings, TenantColumnMode};
 use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_logininfor;
 use crate::entity::sys_menu::Model as SysMenuModel;
@@ -174,6 +174,11 @@ pub struct GetInfoVo {
     pub is_default_modify_pwd: bool,
     /// 密码是否已过期（对齐前端 isPasswordExpired）
     pub is_password_expired: bool,
+    /// 业务列表页是否显示「所属租户」归属列（`[ui].show_tenant_column` 的**服务端判定结果**）
+    ///
+    /// 后端算好布尔再下发，前端不做二次推断：`auto` 需操作者租户上下文
+    /// （`tid == 0` 才显示），若让前端自行判断"平台/租户"，判定口径会散落两处而漂移。
+    pub show_tenant_column: bool,
 }
 
 /// 路由节点 Vo（对齐前端 RouterVo）
@@ -1212,7 +1217,11 @@ impl AuthService {
     /// 优化：合并查询角色+权限（缓存命中时 0 次 DB），避免分别调用
     /// get_role_keys_by_user_id 和 get_permissions_by_user_id 导致的冗余 DB 往返
     /// （原 8 次 DB → 缓存命中时 3 次 DB + 1 次 Redis GET）
-    pub async fn get_info(&self, user_id: i64) -> Result<GetInfoVo, ServiceError> {
+    pub async fn get_info(
+        &self,
+        user_id: i64,
+        operator_tid: i64,
+    ) -> Result<GetInfoVo, ServiceError> {
         let vo = self.user_service.get_user_by_id(user_id).await?;
         let mut user = vo.user;
         // 清空密码，避免泄露密文（双重保险，entity 已 #[serde(skip_serializing)]）
@@ -1233,6 +1242,10 @@ impl AuthService {
         let is_default_modify_pwd = false;
         // is_password_expired：密码是否过期（当前无密码过期策略，固定为 false）
         let is_password_expired = false;
+        // 「所属租户」归属列展示决策：`[ui].show_tenant_column`（默认 auto）在服务端解析，
+        // 结合操作者租户上下文算出布尔下发（`auto` ⇒ 仅平台操作者可见 = 历史行为）
+        let show_tenant_column =
+            TenantColumnMode::parse(&self.config.ui.show_tenant_column).visible_for(operator_tid);
 
         Ok(GetInfoVo {
             user,
@@ -1241,6 +1254,7 @@ impl AuthService {
             pwd_chrtype,
             is_default_modify_pwd,
             is_password_expired,
+            show_tenant_column,
         })
     }
 

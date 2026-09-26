@@ -3797,6 +3797,14 @@ fn init_feature_flags(settings: &Settings) {
              common/features.rs::CAPABILITY_UNLOCKED_PERMS 的守卫要求"
         );
     }
+
+    // UI 展示策略姿态（`[ui]` 段）：属展示层（非安全边界），无条件打 INFO，
+    // 非法取值已在解析时 WARN 并回落 auto。供运维一眼确认"归属列是否只对平台可见"。
+    let tenant_column = crate::config::TenantColumnMode::parse(&settings.ui.show_tenant_column);
+    tracing::info!(
+        mode = tenant_column.as_str(),
+        "UI 展示策略：[ui].show_tenant_column（auto = 仅平台操作者可见归属列 ⇒ 历史行为）"
+    );
 }
 
 #[cfg(test)]
