@@ -9,6 +9,7 @@
 //! - 并发控制：`concurrent='1'` 时检查 executing_jobs 跳过重叠执行
 //! - 超时控制：60 秒超时被 tokio::time::timeout 杀死
 
+pub mod cluster;
 pub mod registry;
 
 use std::collections::HashMap;
@@ -177,6 +178,34 @@ impl JobScheduler {
         // （db / config 均非 Copy，闭包 move 后原变量不可再使用）
         let report_db = db.clone();
         let report_config = config.clone();
+
+        // 集群模式（`[scheduler].cluster_mode`，项目准则③：开关取「模式」而非裸 bool）。
+        // `auto`（缺省）= 沿用各任务自身历史开关 ⇒ **对存量部署零行为变更**；
+        // 非法取值回落 `auto` 并告警（fail-safe，不会意外开/关锁）。
+        let cluster_mode =
+            crate::scheduler::cluster::ClusterMode::parse_or_auto(&config.scheduler.cluster_mode);
+        if crate::scheduler::cluster::ClusterMode::parse(&config.scheduler.cluster_mode).is_none() {
+            tracing::warn!(
+                value = %config.scheduler.cluster_mode,
+                "scheduler.cluster_mode 取值非法（允许 auto|single|leader|all），已回落 auto（= 沿用各任务历史开关）"
+            );
+        }
+        // flow 的锁 TTL 优先用它自己的配置（须大于单轮扫描最坏耗时），否则用 [scheduler] 兜底
+        let flow_round_lock_ttl = if config.flow.scan_lock_ttl_secs > 0 {
+            config.flow.scan_lock_ttl_secs
+        } else {
+            config.scheduler.lock_ttl_secs
+        };
+        let flow_round_lock_needed =
+            cluster_mode.requires_round_lock(config.flow.scan_lock_enabled);
+        // mmdb 改造前**始终**加锁 ⇒ legacy_enabled 传 true，保证 auto 下保持现状
+        let mmdb_round_lock_needed = cluster_mode.requires_round_lock(true);
+        tracing::info!(
+            cluster_mode = cluster_mode.as_str(),
+            flow_round_lock = flow_round_lock_needed,
+            mmdb_round_lock = mmdb_round_lock_needed,
+            "调度器集群模式已解析（内置任务整轮互斥锁；sys_job 逐任务防重入锁不受本开关影响）"
+        );
 
         // 日志保留期清理任务：每日凌晨 3:00 执行（cron: "0 0 3 * * *"）
         // 删除 (当前时间 - sys_log.retention_days) 天前的操作日志和登录日志，
@@ -476,39 +505,21 @@ impl JobScheduler {
                 let config = flow_scan_config.clone();
                 let mut redis = flow_scan_redis.clone();
                 Box::pin(async move {
-                    // S-1：可选**分布式扫描锁**（`config.flow.scan_lock_enabled`，默认 false）。
-                    // 默认关闭 = 接受单实例部署假设（逐任务 SETNX 已防重复提醒）；
-                    // 多实例部署置 true 后，同一时刻仅一个实例执行整轮扫描 + 尾部巡检。
-                    // 释放走 Lua CAS（release_lock），避免误删其他实例持有的锁。
-                    let lock_key = "lock:scheduler:flow_timeout_scan";
-                    let lock_value = uuid::Uuid::new_v4().to_string();
-                    if config.flow.scan_lock_enabled {
-                        let acquired: Result<Option<String>, _> = redis::cmd("SET")
-                            .arg(lock_key)
-                            .arg(&lock_value)
-                            .arg("NX")
-                            .arg("EX")
-                            .arg(config.flow.scan_lock_ttl_secs)
-                            .query_async(&mut redis)
-                            .await;
-                        match acquired {
-                            Ok(Some(_)) => {}
-                            Ok(None) => {
-                                tracing::info!(
-                                    "flow_timeout_scan: 其他实例正在执行扫描（锁被持有），跳过本次调度"
-                                );
-                                return;
-                            }
-                            Err(e) => {
-                                // fail-closed：多实例下重复提醒/重复巡检的代价高于漏扫一轮
-                                // （下一轮 cron 会重试），故 Redis 故障时不降级执行。
-                                tracing::error!(
-                                    "flow_timeout_scan: 扫描锁获取失败（Redis 故障），跳过本次调度: {e}"
-                                );
-                                return;
-                            }
-                        }
-                    }
+                    // S-1 / 批次 1a：整轮互斥锁统一由 `[scheduler].cluster_mode` 驱动
+                    // （`single`/`all` 不加锁；`leader` 一律加锁；`auto` 沿用
+                    // `[flow].scan_lock_enabled`）。释放走 Lua CAS（`ClusterLock::release`），
+                    // 避免误删其他实例持有的锁。
+                    let Some(round_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                        &mut redis,
+                        "lock:scheduler:flow_timeout_scan",
+                        flow_round_lock_needed,
+                        flow_round_lock_ttl,
+                        "flow_timeout_scan",
+                    )
+                    .await
+                    else {
+                        return;
+                    };
                     let msg_service = crate::service::sys_msg_service::SysMsgService::new(
                         db.clone(),
                         config.clone(),
@@ -543,10 +554,8 @@ impl JobScheduler {
                             tracing::error!("flow_timeout_scan 执行失败: {}", e.message);
                         }
                     }
-                    // S-1：释放扫描锁（CAS，仅本实例持有才删除）
-                    if config.flow.scan_lock_enabled {
-                        release_lock(&mut redis, lock_key, &lock_value).await;
-                    }
+                    // S-1 / 批次 1a：释放整轮互斥锁（CAS，仅本实例持有才删除）
+                    round_lock.release(&mut redis).await;
                 })
             })
             .map_err(|e| {
@@ -560,15 +569,15 @@ impl JobScheduler {
                 ))
             })?;
             tracing::info!(
-                "内置定时任务注册成功: flow_timeout_scan (cron: '{}', 单批上限 {} 条, SLA {}h, 升级阈值 {}h, 分布式扫描锁: {})",
+                "内置定时任务注册成功: flow_timeout_scan (cron: '{}', 单批上限 {} 条, SLA {}h, 升级阈值 {}h, 整轮互斥锁: {})",
                 config.flow.timeout_scan_cron,
                 config.flow.scan_batch_limit,
                 config.flow.timeout_hours,
                 config.flow.escalate_after_hours,
-                if config.flow.scan_lock_enabled {
-                    format!("启用（TTL {}s）", config.flow.scan_lock_ttl_secs)
+                if flow_round_lock_needed {
+                    format!("启用（TTL {}s）", flow_round_lock_ttl)
                 } else {
-                    "未启用（单实例假设）".to_string()
+                    format!("未启用（cluster_mode={}）", cluster_mode.as_str())
                 }
             );
         }
@@ -612,27 +621,22 @@ impl JobScheduler {
                         return;
                     }
 
-                    // Redis 分布式锁（fail-closed：Redis 故障时跳过执行，避免多实例并发下载）
+                    // Redis 整轮互斥锁（批次 1a：统一由 `[scheduler].cluster_mode` 驱动；
+                    // `auto` 下 legacy_enabled=true ⇒ 与改造前"始终加锁"一致）。
+                    // fail-closed：Redis 故障时跳过执行，避免多实例并发下载。
                     const MMDB_LOCK_KEY: &str = "lock:scheduler:mmdb_auto_update";
                     const MMDB_LOCK_TTL_SECS: u64 = crate::common::constants::MMDB_LOCK_TTL_SECS; // 30 分钟
-                    let lock_value = uuid::Uuid::new_v4().to_string();
-
-                    let lock_result: Option<String> = redis::cmd("SET")
-                        .arg(MMDB_LOCK_KEY)
-                        .arg(&lock_value)
-                        .arg("NX")
-                        .arg("EX")
-                        .arg(MMDB_LOCK_TTL_SECS)
-                        .query_async(&mut redis)
-                        .await
-                        .unwrap_or(None);
-
-                    if lock_result.is_none() {
-                        tracing::info!(
-                            "mmdb_auto_update: 其他实例正在执行 IP 库更新，跳过本次调度"
-                        );
+                    let Some(mmdb_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                        &mut redis,
+                        MMDB_LOCK_KEY,
+                        mmdb_round_lock_needed,
+                        MMDB_LOCK_TTL_SECS,
+                        "mmdb_auto_update",
+                    )
+                    .await
+                    else {
                         return;
-                    }
+                    };
 
                     // 执行更新（下载 + 校验 + 热加载）
                     match service.update_now(None).await {
@@ -650,22 +654,8 @@ impl JobScheduler {
                         }
                     }
 
-                    // 释放锁（CAS：仅当 lock_value 匹配时删除，避免误删其他实例的锁）
-                    // Lua 脚本保证 GET + DEL 原子性
-                    let lua_script = r#"
-                        if redis.call('GET', KEYS[1]) == ARGV[1] then
-                            return redis.call('DEL', KEYS[1])
-                        else
-                            return 0
-                        end
-                    "#;
-                    let _: redis::RedisResult<i64> = redis::cmd("EVAL")
-                        .arg(lua_script)
-                        .arg(1)
-                        .arg(MMDB_LOCK_KEY)
-                        .arg(&lock_value)
-                        .query_async(&mut redis)
-                        .await;
+                    // 释放锁（CAS：仅当 fencing token 匹配时删除，避免误删其他实例的锁）
+                    mmdb_lock.release(&mut redis).await;
                 })
             }) {
                 Ok(mmdb_job) => {
@@ -676,8 +666,13 @@ impl JobScheduler {
                         ))
                     })?;
                     tracing::info!(
-                        "内置定时任务注册成功: mmdb_auto_update (cron: '{}', 默认源由 sys_config 决定, Redis 分布式锁已启用)",
-                        mmdb_cron
+                        "内置定时任务注册成功: mmdb_auto_update (cron: '{}', 默认源由 sys_config 决定, 整轮互斥锁: {})",
+                        mmdb_cron,
+                        if mmdb_round_lock_needed {
+                            "已启用".to_string()
+                        } else {
+                            format!("未启用（cluster_mode={}）", cluster_mode.as_str())
+                        }
                     );
                 }
                 Err(e) => {

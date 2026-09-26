@@ -61,13 +61,16 @@ pub struct Settings {
     /// 审批工作流配置（m20260923_000002；cron 为空 = 禁用超时扫描）
     #[serde(default)]
     pub flow: FlowConfig,
-    /// 平台层**能力位**默认值（三层开关的最外层：能开什么）。
+    /// **能力位**默认值（三层开关的最外层：能开什么）。
     ///
     /// 键 = `crate::common::features::KNOWN_FEATURES` 登记的能力位键，值 = 模式串
     /// （如 `off` / `view_only` / `full`）。未登记键与非法模式在启动时被剔除并告警。
     /// **缺省 `{}` = 全关闭**（默认值 = 现状 = 关闭态即安全态）。
     #[serde(default)]
     pub features: FeaturesConfig,
+    /// 定时任务调度器配置（集群模式 + 内置任务整轮互斥锁）
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -93,6 +96,7 @@ impl fmt::Debug for Settings {
             .field("sso", &self.sso)
             .field("flow", &self.flow)
             .field("features", &self.features)
+            .field("scheduler", &self.scheduler)
             .finish()
     }
 }
@@ -107,6 +111,50 @@ impl fmt::Debug for Settings {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(transparent)]
 pub struct FeaturesConfig(pub std::collections::BTreeMap<String, String>);
+
+/// 定时任务调度器配置（`[scheduler]` 段）
+///
+/// 治理的是**内置定时任务**（`flow_timeout_scan` / `mmdb_auto_update`）的
+/// "整轮跨实例互斥"。策略收敛为**模式**（项目准则③），语义与边界见
+/// `crate::scheduler::cluster`（`sys_job` 的逐任务防重入锁**不**受本开关影响）。
+#[derive(Clone, Debug, Deserialize)]
+pub struct SchedulerConfig {
+    /// 集群模式：`auto`（**默认**，沿用各任务历史开关 = 现状）| `single` | `leader` | `all`
+    ///
+    /// - `auto`：`flow` 沿用 `[flow].scan_lock_enabled`；`mmdb` 保持加锁（历史行为）⇒ **默认零行为变更**
+    /// - `single`：明确单实例部署 ⇒ 内置任务一律不加锁
+    /// - `leader`：多实例选主 ⇒ 内置任务一律加锁
+    /// - `all`：每个实例都执行（幂等型任务）⇒ 内置任务一律不加锁
+    ///
+    /// 非法取值在启动时回落 `auto` 并告警（fail-safe，不改变行为）。
+    #[serde(default = "default_cluster_mode")]
+    pub cluster_mode: String,
+    /// 内置任务整轮互斥锁的默认 TTL（秒，默认 300）
+    ///
+    /// 仅 `[flow].scan_lock_enabled` 未给出时作为兜底；`flow` 任务仍优先用
+    /// `[flow].scan_lock_ttl_secs`（该值需大于单轮扫描最坏耗时）。
+    #[serde(default = "default_scheduler_lock_ttl")]
+    pub lock_ttl_secs: u64,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            cluster_mode: default_cluster_mode(),
+            lock_ttl_secs: default_scheduler_lock_ttl(),
+        }
+    }
+}
+
+fn default_cluster_mode() -> String {
+    crate::scheduler::cluster::ClusterMode::default()
+        .as_str()
+        .to_string()
+}
+
+fn default_scheduler_lock_ttl() -> u64 {
+    crate::scheduler::cluster::DEFAULT_ROUND_LOCK_TTL_SECS
+}
 
 /// 系统日志保留策略配置（M2：操作日志 / 登录日志定期归档清理）
 ///
@@ -1096,6 +1144,7 @@ impl Settings {
             permission_deny_by_default: true,
             sys_log: SysLogConfig::default(),
             features: FeaturesConfig::default(),
+            scheduler: SchedulerConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -1231,6 +1280,7 @@ mod tests {
             flow: FlowConfig::default(),
             sys_log: SysLogConfig::default(),
             features: FeaturesConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 
@@ -1359,6 +1409,34 @@ mod tests {
         }
     }
 
+    /// 调度器集群模式缺省必须为 `auto`（= 沿用各任务历史开关 = **默认零行为变更**）
+    ///
+    /// 若缺省写成 `leader` / `single`，存量部署的"flow 扫描锁默认关 / mmdb 锁默认开"
+    /// 会被静默改写 ⇒ 要么多实例重复扫描，要么单实例白付 Redis 往返。
+    #[test]
+    fn test_scheduler_cluster_mode_defaults_to_auto() {
+        use crate::scheduler::cluster::ClusterMode;
+
+        let cfg = SchedulerConfig::default();
+        assert_eq!(cfg.cluster_mode, "auto", "缺省必须为 auto");
+        assert_eq!(cfg.lock_ttl_secs, 300, "缺省 TTL 必须为 300s");
+        assert_eq!(
+            ClusterMode::parse_or_auto(&cfg.cluster_mode),
+            ClusterMode::Auto
+        );
+
+        // 入库模板（含 [scheduler] 段）解析后仍为 auto
+        let s: Settings = toml::from_str(
+            &std::fs::read_to_string("config/config.toml.example")
+                .expect("config/config.toml.example 应存在"),
+        )
+        .expect("模板应可解析");
+        assert_eq!(
+            s.scheduler.cluster_mode, "auto",
+            "入库模板不得隐式改变集群模式"
+        );
+    }
+
     /// 验证 Settings Debug 输出不泄漏 config_enc_key
     #[test]
     fn test_settings_debug_redacts_config_enc_key() {
@@ -1415,6 +1493,7 @@ mod tests {
             flow: FlowConfig::default(),
             sys_log: SysLogConfig::default(),
             features: FeaturesConfig::default(),
+            scheduler: SchedulerConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);
