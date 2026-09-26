@@ -464,7 +464,7 @@ impl SysTenantNavService {
             tenant_id: Set(target_tid),
             ref_menu_id: Set(dto.ref_menu_id),
             parent_id: Set(parent_id),
-            order_num: Set(dto.order_num),
+            order_num: Set(order_num_payload(dto.order_num)),
             visible: Set(Some(visible_payload(dto.visible.as_deref().unwrap_or("0")))),
             status: Set(Some("0".to_string())),
             del_flag: Set(Some("0".to_string())),
@@ -679,6 +679,17 @@ fn visible_payload(visible: &str) -> String {
     }
 }
 
+/// 新增时的 `order_num` 落库载荷（DTO 缺省 ⇒ 0）。
+///
+/// 列 `sys_tenant_menu.order_num` 是 `INT NOT NULL DEFAULT 0`，而 sea-orm 的
+/// `Set(None)` 会在 INSERT 里**显式写入 NULL**、不触发列默认值 ⇒ 直接
+/// `NOT NULL constraint failed`（2026-09-26 活体联调实测：不带 `orderNum` 的
+/// `POST /system/tenant/menu` 返回 500）。故缺省必须在此补 0，
+/// 与 `sys_tenant_service` 建租户根部门时的 `Set(dto_order.or(Some(0)))` 同口径。
+fn order_num_payload(order_num: Option<i32>) -> Option<i32> {
+    order_num.or(Some(0))
+}
+
 /// 展平菜单树为 M/C 节点列表（丢弃 `children`，保留节点自身字段）
 fn flatten_ms(menus: Vec<SysMenuModel>) -> Vec<SysMenuModel> {
     let mut out = Vec::new();
@@ -799,5 +810,17 @@ mod tests {
         assert_eq!(visible_payload("1"), "1");
         assert_eq!(visible_payload("0"), "0");
         assert_eq!(visible_payload("bogus"), "0", "非法值一律归一为显示");
+    }
+
+    #[test]
+    fn test_order_num_payload_defaults_to_zero() {
+        // 列 `order_num` 为 NOT NULL；`Set(None)` 会显式写 NULL 而非走列默认值 ⇒ 500。
+        // 本断言锁定"缺省必须补 0"：若改回 `Set(dto.order_num)` 语义（返回 None），即变红。
+        assert_eq!(
+            order_num_payload(None),
+            Some(0),
+            "orderNum 缺省必须落 0，否则 INSERT 触发 NOT NULL constraint failed"
+        );
+        assert_eq!(order_num_payload(Some(5)), Some(5), "显式值原样保留");
     }
 }
