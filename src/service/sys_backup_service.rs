@@ -799,10 +799,19 @@ impl SysBackupService {
         Ok(())
     }
 
-    /// 分页查询备份日志
+    /// 分页查询备份日志（**租户自助只读**：`operator_tid != 0` 时结构性收窄）
+    ///
+    /// 批次 2（能力位 `backup.readonly_visible`）：租户操作者**只能**看到本租户的
+    /// `tenant_export` 数据包行——同时施加 `tenant_id = 自己` 与
+    /// `backup_type = 'tenant_export'` 两道条件：
+    /// - 前者防跨租户读取；
+    /// - 后者防读到整库备份行（其 `file_name` / `file_path` / `file_size` 即宿主库元数据）。
+    ///
+    /// 平台操作者（`operator_tid == 0`）行为不变（全量 + 原有筛选条件）。
     pub async fn get_backup_log_page(
         &self,
         query: BackupLogQueryDto,
+        operator_tid: i64,
     ) -> Result<(Vec<SysBackupLogModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -817,6 +826,7 @@ impl SysBackupService {
             _ => None,
         };
 
+        let is_tenant = crate::common::tenant::tenant_scope(operator_tid).is_some();
         let (rows, total) = self
             .backup_repo
             .find_page_filtered(
@@ -826,20 +836,50 @@ impl SysBackupService {
                 query.status.as_deref(),
                 begin,
                 end,
+                crate::common::tenant::tenant_scope(operator_tid),
+                is_tenant,
             )
             .await?;
         Ok((rows, total))
     }
 
-    /// 查询备份日志详情
+    /// 查询备份日志详情（**租户自助只读**：`operator_tid != 0` 时行级校验）
+    ///
+    /// 租户只能读取本租户的 `tenant_export` 行；其余一律 403（含"记录不存在"以外的
+    /// 他租户行——不区分 404/403 会让租户可枚举 backup_id 的归属）。
     pub async fn get_backup_by_id(
         &self,
         backup_id: i64,
+        operator_tid: i64,
     ) -> Result<SysBackupLogModel, ServiceError> {
-        self.backup_repo
+        let model = self
+            .backup_repo
             .find_by_id(backup_id)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.backup.record_not_found")))
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.backup.record_not_found")))?;
+        Self::ensure_backup_visible(&model, operator_tid)?;
+        Ok(model)
+    }
+
+    /// 备份行的**租户可见性**守卫（纯函数，便于单测）
+    ///
+    /// - 平台操作者（`operator_tid == 0`）⇒ 放行；
+    /// - 租户操作者 ⇒ 必须 `backup_type == 'tenant_export'` **且** `tenant_id == 自己`。
+    pub(crate) fn ensure_backup_visible(
+        model: &SysBackupLogModel,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        if operator_tid == 0 {
+            return Ok(());
+        }
+        if model.backup_type == BACKUP_TYPE_TENANT_EXPORT
+            && crate::common::tenant::tenant_allowed(operator_tid, model.tenant_id)
+        {
+            return Ok(());
+        }
+        Err(ServiceError::forbidden(&crate::tr!(
+            "error.backup.tenant_scope_denied"
+        )))
     }
 
     /// 批量删除备份日志（批量查询 + 异步删除文件，避免 N+1 与阻塞 IO）
@@ -888,11 +928,15 @@ impl SysBackupService {
     }
 
     /// 读取备份文件二进制内容（供 handler 下载）
+    ///
+    /// 批次 2：`operator_tid != 0`（租户操作者）时先做行级可见性校验——只能下载
+    /// **本租户的 `tenant_export` 数据包**，整库备份（manual/auto/restore）一律 403。
     pub async fn read_backup_file(
         &self,
         backup_id: i64,
+        operator_tid: i64,
     ) -> Result<(Vec<u8>, String), ServiceError> {
-        let log = self.get_backup_by_id(backup_id).await?;
+        let log = self.get_backup_by_id(backup_id, operator_tid).await?;
         if log.status != "success" {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.backup.download_status_invalid"
@@ -924,5 +968,63 @@ impl SysBackupService {
         .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_file_task_failed")))?
         .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed")))?;
         Ok((bytes, log.file_name))
+    }
+}
+
+#[cfg(test)]
+mod tenant_visibility_tests {
+    use super::*;
+
+    /// 构造一条仅用于可见性判定的备份行（不需要真实文件）
+    fn row(tenant_id: i64, backup_type: &str) -> SysBackupLogModel {
+        SysBackupLogModel {
+            tenant_id,
+            backup_id: 1,
+            file_name: "x.sql".to_string(),
+            file_path: "/tmp/x.sql".to_string(),
+            file_size: 1,
+            backup_type: backup_type.to_string(),
+            status: "success".to_string(),
+            error_msg: None,
+            create_by: None,
+            create_time: None,
+        }
+    }
+
+    /// 批次 2 回归锁：租户只能读**本租户的 tenant_export**，整库备份与他租户行一律 403
+    ///
+    /// 可证伪性：若删掉 `backup_type == BACKUP_TYPE_TENANT_EXPORT` 这一半条件，
+    /// "租户读自己的整库备份"断言会从 Err(403) 变成 Ok ⇒ 变红（那等于把宿主库元数据
+    /// 与整库文件下载面下放给租户）。
+    #[test]
+    fn test_ensure_backup_visible_tenant_scope() {
+        const TID: i64 = 9100;
+        // 平台操作者：全量放行
+        for bt in ["manual", "auto", BACKUP_TYPE_TENANT_EXPORT, "restore"] {
+            assert!(
+                SysBackupService::ensure_backup_visible(&row(TID, bt), 0).is_ok(),
+                "平台操作者应可读 {bt} 行"
+            );
+        }
+        // 租户操作者：只有本租户的 tenant_export 可读
+        assert!(
+            SysBackupService::ensure_backup_visible(&row(TID, BACKUP_TYPE_TENANT_EXPORT), TID)
+                .is_ok(),
+            "租户应可读本租户的数据包导出行"
+        );
+        for bt in ["manual", "auto", "restore"] {
+            let err = SysBackupService::ensure_backup_visible(&row(TID, bt), TID)
+                .expect_err("租户不得读整库/恢复类备份行");
+            assert_eq!(err.code, 403, "{bt} 应 403，实际 {err:?}");
+        }
+        // 跨租户：他租户的 tenant_export 亦不可读
+        let err =
+            SysBackupService::ensure_backup_visible(&row(TID + 1, BACKUP_TYPE_TENANT_EXPORT), TID)
+                .expect_err("租户不得读他租户的数据包行");
+        assert_eq!(err.code, 403);
+        // 平台租户行（tenant_id = 0）对租户同样不可见
+        let err = SysBackupService::ensure_backup_visible(&row(0, BACKUP_TYPE_TENANT_EXPORT), TID)
+            .expect_err("租户不得读平台租户的数据包行");
+        assert_eq!(err.code, 403);
     }
 }

@@ -31,7 +31,12 @@ impl SysBackupLogRepository {
 
     /// 多条件分页查询
     ///
-    /// 支持 backup_type 精确、status 精确、时间范围筛选，按 create_time 倒序
+    /// 支持 backup_type 精确、status 精确、时间范围筛选，按 create_time 倒序；
+    /// `tenant_id = Some(t)` 时按租户收窄；`tenant_export_only = true` 时只返回
+    /// `backup_type = 'tenant_export'` 的行。
+    ///
+    /// 批次 2：租户自助只读路径复用本方法——同时传 `tenant_id = Some(自己)` 与
+    /// `tenant_export_only = true` ⇒ 结构性保证租户看不到整库备份行（含路径/大小元数据）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -41,8 +46,19 @@ impl SysBackupLogRepository {
         status: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        tenant_id: Option<i64>,
+        tenant_export_only: bool,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysBackupLog::find();
+        if let Some(tid) = tenant_id {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
+        if tenant_export_only {
+            query = query.filter(
+                Column::BackupType
+                    .eq(crate::service::sys_backup_service::BACKUP_TYPE_TENANT_EXPORT),
+            );
+        }
         if let Some(bt) = backup_type {
             query = query.filter(Column::BackupType.eq(bt));
         }

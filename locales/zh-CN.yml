@@ -337,6 +337,7 @@ error:
     process_start_failed: 启动备份进程失败
     process_exec_failed: 备份进程执行失败
     record_not_found: 备份记录不存在
+    tenant_scope_denied: 无权访问该备份记录（租户仅可访问本租户的数据包导出记录）
     restore_status_invalid: 仅可恢复成功的备份
     too_frequent: 备份操作过于频繁，请稍后再试
     restore_in_progress: 已有恢复任务正在进行中，请稍后再试
