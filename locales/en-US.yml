@@ -469,7 +469,9 @@ error:
     menu_filter_uncovered: "Permission %{perms} cannot be granted to tenant roles (platform-only capability, or its table is not tenant-filtered)"
     feature_invalid: "Invalid value %{mode} for capability %{key} (unregistered key or mode not in the allowed set)"
     feature_platform_disabled: "Capability %{key} is not enabled in the platform [features] config; tenant packages cannot enable it"
-    domain_platform_only: Domain management is restricted to platform administrators
+    domain_platform_only: Domain management is restricted to platform administrators (to allow tenant self-service, enable the tenant.domain_self_service capability)
+    domain_cross_tenant: You are not allowed to access or modify another tenant's domain bindings
+    domain_subdomain_platform_only: Subdomains are allocated by the platform; tenant self-service can only bind custom domains (DNS TXT verification required)
     domain_invalid: "Invalid domain (lowercase letters/digits/hyphen, at least two labels of 1-63 chars each)"
     domain_conflict: The domain is already taken (including historical bindings), please choose another
     domain_not_found: Domain binding does not exist

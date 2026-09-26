@@ -10,8 +10,11 @@
 //!   `find_by_domain_any`（含软删行）；
 //! - 域名类型 `domain_type`：`'0'` 子域名（平台分配，免 DNS 验证）/ `'1'` 自定义域名
 //!   （需 DNS TXT 验证 `_yebot-verify.{domain}` = verify_token）；
-//! - 域名管理（列表/增/删/改/验证/设主）**仅平台操作者**（`operator_tid == 0`）可执行；
-//!   租户操作者一律 **403**（本期仅平台管理域名，租户自助延后至 P3）；
+//! - **操作者范围由能力位 `tenant.domain_self_service` 决定**（见 [`DomainScope`]）：
+//!   - 关闭态（默认 = 现状）：域名管理整体平台专属，租户操作者一律 **403**；
+//!   - 开启态（平台 `[features]` ∩ 租户套餐两层均非 `off`）：**平台操作者**可管理全部租户域名；
+//!     **租户操作者**仅可管理本租户域名，且只能**新增自定义域名**（子域名由平台分配，
+//!     否则租户可无验证占用任意主机名 ⇒ host→tid 劫持）；
 //! - 缓存：`tenant:host:{domain}`（域名→tid，TTL 300s），miss 回源后回填，
 //!   未命中不缓存（负缓存缺失）。
 
@@ -28,6 +31,7 @@ use utoipa::ToSchema;
 
 use crate::common::datetime::{self, now_naive};
 use crate::common::error::ServiceError;
+use crate::common::tenant::tenant_allowed;
 use crate::entity::sys_tenant_domain::{
     ActiveModel as DomainActiveModel, Column as DomainColumn, Entity as SysTenantDomain,
     Model as DomainModel,
@@ -44,10 +48,104 @@ const DNS_TXT_TIMEOUT_SECS: u64 = 5;
 const DOMAIN_TYPE_SUBDOMAIN: &str = "0";
 /// 自定义域名类型标记
 const DOMAIN_TYPE_CUSTOM: &str = "1";
+/// 租户域名自助能力位键（注册表见 `common::features::KNOWN_FEATURES`）
+pub const FEATURE_DOMAIN_SELF_SERVICE: &str = "tenant.domain_self_service";
 
 /// `tenant:host:{domain}` 键名（域名 → tid）
 fn domain_host_key(domain: &str) -> String {
     format!("tenant:host:{}", domain)
+}
+
+/// 域名管理的**操作者数据范围**（由能力位解析得出，是所有接口的唯一准入判据）。
+///
+/// 「关闭态即现状」：能力位 `off` 时租户操作者拿不到 [`DomainScope::Tenant`]，
+/// 一律 403；平台操作者不受能力位影响（恒 [`DomainScope::Platform`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainScope {
+    /// 平台操作者：可见/可写全部租户的域名
+    Platform,
+    /// 租户操作者（能力位开启）：**仅**本租户域名
+    Tenant(i64),
+}
+
+impl DomainScope {
+    /// 该范围是否允许触达 `resource_tid` 归属的资源（复用 `common::tenant::tenant_allowed`）
+    fn allows(self, resource_tid: i64) -> bool {
+        match self {
+            DomainScope::Platform => true,
+            DomainScope::Tenant(tid) => tenant_allowed(tid, resource_tid),
+        }
+    }
+}
+
+/// 跨租户越权（域名归属与操作者租户不一致）——显式 403，**禁止静默降级**
+fn cross_tenant_denied() -> ServiceError {
+    ServiceError::forbidden(&crate::tr!("error.tenant.domain_cross_tenant"))
+}
+
+/// 由能力集解析操作者范围（纯函数，便于单测；唯一准入判据，调用点 [`SysTenantDomainService::resolve_scope`]）
+///
+/// - `operator_tid == 0` ⇒ 平台（不受能力位影响）；
+/// - 否则需 `tenant.domain_self_service` 非 `off`，否则 403（关闭态即现状）。
+fn scope_from_features(
+    operator_tid: i64,
+    features: &crate::common::features::FeatureSet,
+) -> Result<DomainScope, ServiceError> {
+    if operator_tid == 0 {
+        return Ok(DomainScope::Platform);
+    }
+    if features.is_on(FEATURE_DOMAIN_SELF_SERVICE) {
+        Ok(DomainScope::Tenant(operator_tid))
+    } else {
+        Err(ServiceError::forbidden(&crate::tr!(
+            "error.tenant.domain_platform_only"
+        )))
+    }
+}
+
+/// 由范围推导「列表实际过滤值」（纯函数，便于单测；调用点 [`SysTenantDomainService::list`]）
+///
+/// 租户范围内**显式传入他租户 id 一律 403**——不静默降级为"忽略参数"，
+/// 否则越权尝试会被伪装成一次正常空列表（违反"禁止静默降级"硬约束）。
+fn effective_list_filter(
+    scope: DomainScope,
+    requested: Option<i64>,
+) -> Result<Option<i64>, ServiceError> {
+    match scope {
+        DomainScope::Platform => Ok(requested),
+        DomainScope::Tenant(tid) => {
+            if let Some(r) = requested
+                && r != tid
+            {
+                return Err(cross_tenant_denied());
+            }
+            Ok(Some(tid))
+        }
+    }
+}
+
+/// 租户范围内的**写入归属守卫**（纯函数，便于单测；调用点 [`SysTenantDomainService::add`]）
+///
+/// 两条约束缺一不可：
+/// ① 归属租户必须等于自身（`dto.tenant_id` 来自请求体，不可信）；
+/// ② 只能是自定义域名（子域名免 DNS 验证，放给租户等于允许其无验证占用任意主机名）。
+fn ensure_tenant_write_allowed(
+    scope: DomainScope,
+    dto_tenant_id: i64,
+    domain_type: &str,
+) -> Result<(), ServiceError> {
+    let DomainScope::Tenant(tid) = scope else {
+        return Ok(());
+    };
+    if dto_tenant_id != tid {
+        return Err(cross_tenant_denied());
+    }
+    if domain_type != DOMAIN_TYPE_CUSTOM {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.tenant.domain_subdomain_platform_only"
+        )));
+    }
+    Ok(())
 }
 
 // ==================== DTO / Vo ====================
@@ -72,7 +170,8 @@ pub struct TenantDomainVo {
     /// '0' 待验证 / '1' 已验证 / '2' 验证失败
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify_status: Option<String>,
-    /// DNS TXT 校验 token（仅平台操作者可见——域名管理接口整体为平台专属，租户不可调用）
+    /// DNS TXT 校验 token（归属租户与平台可见——`list` 已按 [`DomainScope`] 行级收窄，
+    /// 租户只会拿到本租户行，且租户需据它配置 TXT 记录）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify_token: Option<String>,
     /// 验证通过时间
@@ -193,30 +292,38 @@ impl SysTenantDomainService {
         &self.db
     }
 
-    /// 平台专属操作校验（域名管理仅平台操作者）
-    fn ensure_platform_operator(operator_tid: i64) -> Result<(), ServiceError> {
+    /// 解析操作者的数据范围（**域名管理的唯一准入判据**）。
+    ///
+    /// - `operator_tid == 0`：平台操作者恒放行（不受能力位影响）；
+    /// - `operator_tid != 0`：需该租户**有效能力集**（平台 `[features]` 天花板 ∩ 套餐
+    ///   `features`）中 `tenant.domain_self_service` 非 `off`；否则 403（= 关闭态即现状）。
+    ///
+    /// 平台层未开启时，租户侧无论套餐怎么写都不生效（见 `FeatureSet::narrowed_by`），
+    /// 因此本函数不构成新的越权面。
+    async fn resolve_scope(&self, operator_tid: i64) -> Result<DomainScope, ServiceError> {
         if operator_tid == 0 {
-            Ok(())
-        } else {
-            Err(ServiceError::forbidden(&crate::tr!(
-                "error.tenant.domain_platform_only"
-            )))
+            return Ok(DomainScope::Platform);
         }
+        let features =
+            crate::service::sys_tenant_service::tenant_features_conn(self.db(), operator_tid)
+                .await?;
+        scope_from_features(operator_tid, &features)
     }
 
     // ---------- 查询 ----------
 
-    /// 域名列表（**仅平台操作者**）：
+    /// 域名列表（范围见 [`DomainScope`]）：
     /// - 平台操作者（tid=0）：可按 `tenant_id` 过滤，不过滤则全量；
-    /// - 租户操作者（tid≠0）：**403**（本期域名仅平台管理，租户自助延后至 P3；
-    ///   不静默降级为"只读本租户"，避免域名清单成为租户侧无授权的信息面）。
+    /// - 租户操作者（tid≠0，能力位开启）：**仅本租户**；显式传入他租户 id 一律 **403**
+    ///   （显式越权不静默降级为"忽略参数"）；
+    /// - 能力位关闭：租户操作者 **403**（不降级为"只读本租户"，避免域名清单成为
+    ///   无授权信息面）。
     pub async fn list(
         &self,
         tenant_id: Option<i64>,
         operator_tid: i64,
     ) -> Result<Vec<TenantDomainVo>, ServiceError> {
-        Self::ensure_platform_operator(operator_tid)?;
-        let effective = tenant_id;
+        let effective = effective_list_filter(self.resolve_scope(operator_tid).await?, tenant_id)?;
         let rows = self.domain_repo.list(effective).await?;
         let ids: Vec<i64> = {
             let mut v: Vec<i64> = rows.iter().map(|r| r.tenant_id).collect();
@@ -233,23 +340,21 @@ impl SysTenantDomainService {
         Ok(rows.into_iter().map(|m| to_vo(&m, &name_map)).collect())
     }
 
-    // ---------- 写操作（仅平台） ----------
+    // ---------- 写操作 ----------
 
-    /// 新增域名绑定
+    /// 新增域名绑定（范围见 [`DomainScope`]）
+    ///
+    /// 租户操作者额外两条守卫（缺一不可）：
+    /// ① 归属租户必须等于自身（`dto.tenant_id` 由前端传入，不可信）；
+    /// ② 只能新增**自定义域名**（`domain_type = '1'`）——子域名是平台分配的免验证类型，
+    ///    放给租户等于允许其无验证占用任意主机名（host→tid 劫持）。
     pub async fn add(
         &self,
         dto: TenantDomainAddDto,
         operator: &str,
         operator_tid: i64,
     ) -> Result<TenantDomainVo, ServiceError> {
-        Self::ensure_platform_operator(operator_tid)?;
-
-        // 归属租户必须存在且未删除
-        let tenant = self
-            .tenant_repo
-            .find_active_by_id(dto.tenant_id)
-            .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.not_found")))?;
+        let scope = self.resolve_scope(operator_tid).await?;
 
         let domain_type = dto.domain_type.trim();
         if domain_type != DOMAIN_TYPE_SUBDOMAIN && domain_type != DOMAIN_TYPE_CUSTOM {
@@ -257,6 +362,14 @@ impl SysTenantDomainService {
                 "error.tenant.domain_invalid"
             )));
         }
+        ensure_tenant_write_allowed(scope, dto.tenant_id, domain_type)?;
+
+        // 归属租户必须存在且未删除
+        let tenant = self
+            .tenant_repo
+            .find_active_by_id(dto.tenant_id)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.not_found")))?;
 
         let domain = normalize_domain(&dto.domain);
         validate_domain(&domain)?;
@@ -350,13 +463,16 @@ impl SysTenantDomainService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<TenantDomainVerifyVo, ServiceError> {
-        Self::ensure_platform_operator(operator_tid)?;
+        let scope = self.resolve_scope(operator_tid).await?;
 
         let model = self
             .domain_repo
             .find_by_id(domain_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.domain_not_found")))?;
+        if !scope.allows(model.tenant_id) {
+            return Err(cross_tenant_denied());
+        }
 
         let txt_record = format!("_yebot-verify.{}", model.domain);
 
@@ -432,13 +548,16 @@ impl SysTenantDomainService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<TenantDomainVo, ServiceError> {
-        Self::ensure_platform_operator(operator_tid)?;
+        let scope = self.resolve_scope(operator_tid).await?;
 
         let model = self
             .domain_repo
             .find_by_id(dto.domain_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.domain_not_found")))?;
+        if !scope.allows(model.tenant_id) {
+            return Err(cross_tenant_denied());
+        }
 
         // 只有已验证的域名才可作主域名（主域名承担租户默认入口）
         if model.verify_status.as_deref() != Some("1") {
@@ -494,7 +613,7 @@ impl SysTenantDomainService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<i64, ServiceError> {
-        Self::ensure_platform_operator(operator_tid)?;
+        let scope = self.resolve_scope(operator_tid).await?;
 
         let status = dto.status.trim();
         if status != "0" && status != "1" {
@@ -509,6 +628,9 @@ impl SysTenantDomainService {
             .find_by_id(dto.domain_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.domain_not_found")))?;
+        if !scope.allows(model.tenant_id) {
+            return Err(cross_tenant_denied());
+        }
 
         let now = now_naive();
         let mut am: DomainActiveModel = model.clone().into();
@@ -528,13 +650,16 @@ impl SysTenantDomainService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<i64, ServiceError> {
-        Self::ensure_platform_operator(operator_tid)?;
+        let scope = self.resolve_scope(operator_tid).await?;
 
         let model = self
             .domain_repo
             .find_by_id(domain_id)
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.domain_not_found")))?;
+        if !scope.allows(model.tenant_id) {
+            return Err(cross_tenant_denied());
+        }
 
         self.domain_repo.soft_delete(domain_id, operator).await?;
         self.invalidate_domain_cache(&model.domain).await;
@@ -629,8 +754,9 @@ impl SysTenantDomainService {
 
 /// Model → Vo
 ///
-/// 调用点均为平台专属路径（域名管理仅平台操作者），故 `verify_token` 直接输出；
-/// 若后续开放租户只读视图，需在此按 `operator_tid` 决定是否隐藏 token。
+/// 调用点均已按 [`DomainScope`] 完成行级收窄（平台 = 全部 / 租户 = 仅本租户），
+/// 故 `verify_token` 直接输出：租户拿到的是**本租户**域名的 token，正是其配置
+/// `_yebot-verify.{domain}` TXT 记录所必需的信息。
 fn to_vo(model: &DomainModel, name_map: &HashMap<i64, String>) -> TenantDomainVo {
     TenantDomainVo {
         domain_id: model.domain_id,
@@ -701,6 +827,91 @@ fn validate_domain(domain: &str) -> Result<(), ServiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::features::FeatureSet;
+
+    /// 能力位关闭态（默认）⇒ 租户操作者拿不到任何范围（403）；平台操作者不受影响
+    #[test]
+    fn test_scope_from_features_closed_is_tenant_denied() {
+        let off = FeatureSet::default();
+        assert_eq!(
+            scope_from_features(0, &off).expect("平台操作者恒放行"),
+            DomainScope::Platform,
+            "平台操作者恒放行，不受能力位影响"
+        );
+        let err = scope_from_features(9, &off).expect_err("关闭态下租户必须 403");
+        assert_eq!(err.code, 403, "关闭态即现状：租户一律 403");
+
+        // 显式 off 与"未配置"同效（都不得放行）
+        let explicit_off = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"off"}"#));
+        assert!(scope_from_features(9, &explicit_off).is_err());
+
+        // 开启后租户获得**自己**的范围
+        let on = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"full"}"#));
+        assert_eq!(
+            scope_from_features(9, &on).expect("开启态下租户应获得本租户范围"),
+            DomainScope::Tenant(9)
+        );
+        // 其它能力位不得顺带放行（白名单逐条匹配）
+        let other = FeatureSet::from_json(Some(r#"{"nav.l3":"full"}"#));
+        assert!(scope_from_features(9, &other).is_err());
+    }
+
+    /// 范围 → 行级归属判定（跨租户一律拒绝）
+    #[test]
+    fn test_domain_scope_allows() {
+        assert!(DomainScope::Platform.allows(0));
+        assert!(DomainScope::Platform.allows(7));
+        assert!(DomainScope::Tenant(5).allows(5));
+        assert!(!DomainScope::Tenant(5).allows(7), "跨租户资源必须拒绝");
+        assert!(
+            !DomainScope::Tenant(5).allows(0),
+            "平台租户资源亦不得被租户触达"
+        );
+    }
+
+    /// 列表过滤值：平台可自由过滤；租户被强制收窄，显式越权 403（**不静默降级**）
+    #[test]
+    fn test_effective_list_filter() {
+        assert_eq!(
+            effective_list_filter(DomainScope::Platform, None).expect("平台不过滤应放行"),
+            None
+        );
+        assert_eq!(
+            effective_list_filter(DomainScope::Platform, Some(7)).expect("平台按 tid 过滤应放行"),
+            Some(7)
+        );
+        assert_eq!(
+            effective_list_filter(DomainScope::Tenant(5), None).expect("租户应被收窄"),
+            Some(5),
+            "租户不传过滤也必须收窄到本租户"
+        );
+        assert_eq!(
+            effective_list_filter(DomainScope::Tenant(5), Some(5)).expect("租户传自身 tid 应放行"),
+            Some(5)
+        );
+        let err = effective_list_filter(DomainScope::Tenant(5), Some(7))
+            .expect_err("显式传他租户 id 必须 403，而不是忽略参数返回空列表");
+        assert_eq!(err.code, 403);
+    }
+
+    /// 写入守卫：租户只能写本租户 + 只能自定义域名（子域名由平台分配）
+    #[test]
+    fn test_ensure_tenant_write_allowed() {
+        // 平台范围不受限
+        assert!(
+            ensure_tenant_write_allowed(DomainScope::Platform, 7, DOMAIN_TYPE_SUBDOMAIN).is_ok()
+        );
+        // 租户：本租户 + 自定义域名 ⇒ 放行
+        assert!(ensure_tenant_write_allowed(DomainScope::Tenant(5), 5, DOMAIN_TYPE_CUSTOM).is_ok());
+        // 租户：写他租户 ⇒ 403
+        let err = ensure_tenant_write_allowed(DomainScope::Tenant(5), 7, DOMAIN_TYPE_CUSTOM)
+            .expect_err("租户不得给其他租户绑定域名");
+        assert_eq!(err.code, 403);
+        // 租户：子域名（免验证类型）⇒ 400（否则可无验证占用任意主机名）
+        let err = ensure_tenant_write_allowed(DomainScope::Tenant(5), 5, DOMAIN_TYPE_SUBDOMAIN)
+            .expect_err("租户自助不得新增子域名");
+        assert_eq!(err.code, 400);
+    }
 
     #[test]
     fn test_normalize_domain() {

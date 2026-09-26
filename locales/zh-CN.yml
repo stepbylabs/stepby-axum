@@ -457,7 +457,9 @@ error:
     menu_filter_uncovered: 权限 %{perms} 不可授予租户角色（平台专属能力，或所属数据表未接入租户过滤）
     feature_invalid: 能力位 %{key} 的取值 %{mode} 非法（未登记的能力位键，或模式不在允许集合内）
     feature_platform_disabled: 能力位 %{key} 未在平台配置 [features] 中开启，租户套餐不得开启
-    domain_platform_only: 域名管理仅平台管理员可执行
+    domain_platform_only: 域名管理仅平台管理员可执行（如需租户自助，请开启能力位 tenant.domain_self_service）
+    domain_cross_tenant: 无权访问或操作其他租户的域名绑定
+    domain_subdomain_platform_only: 子域名由平台统一分配，租户自助仅可绑定自定义域名（需 DNS TXT 验证）
     domain_invalid: 域名格式非法（小写字母/数字/连字符，至少两级且每级 1-63 位）
     domain_conflict: 该域名已被占用（含历史绑定），请更换
     domain_not_found: 域名绑定不存在

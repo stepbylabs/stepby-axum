@@ -148,6 +148,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 2 模块失败: {}", e))?;
 
+        // 3.5d-2 租户自助域名页面菜单（批次 1c）：与迁移
+        // m20260926_000011_tenant_domain_self_service_menu 等价（启动不跑 Migrator::up）。
+        // 缺此兜底时存量库无 3900 页面菜单 ⇒ 能力位开启后租户侧仍无入口（假功能）。
+        ensure_domain_self_service_menu(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化租户自助域名菜单失败: {}", e))?;
+
         // 3.5e 多租户 Phase 3 存量库兜底：与迁移 m20260925_000003_tenant_phase3 等价
         // （启动不跑 Migrator::up）——5 张租户表族（sys_tenant / package / domain /
         // menu / migration_map）+ 默认套餐种子 + **tid remap（唯一不可逆点，§29.7）**。
@@ -1488,6 +1495,67 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
     Ok(())
 }
 
+/// 租户自助域名页面菜单（批次 1c；与迁移
+/// `m20260926_000011_tenant_domain_self_service_menu` **双写一致**，R4 为回归门禁）。
+///
+/// 新增 `menu-id-registry.md` §「新增大模块 3900 起」段位的一组自包含菜单：
+/// - C 页面 3900「我的域名」（顶层菜单，`system/tenant/domain/index`，perms 复用
+///   `system:tenant:domain:list`）；
+/// - F 按钮 3901 新增 / 3902 验证 / 3903 修改 / 3904 删除。
+///
+/// **不授予任何角色**：能力位 `tenant.domain_self_service` 默认 `off`，
+/// 授予与回收由 [`ensure_tenant_role_menu_governance`] 的 ①/①' 按能力位动态处理
+/// （开启 ⇒ 回填给平台普通角色 role 2 作新建租户模板；关闭 ⇒ 收回）。
+async fn ensure_domain_self_service_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    let insert_prefix = match backend {
+        DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
+        DatabaseBackend::Postgres => "INSERT INTO ",
+        DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+    };
+    let insert_suffix = if backend == DatabaseBackend::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let now_expr = match backend {
+        DatabaseBackend::Sqlite => {
+            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        }
+        _ => "NOW()".to_string(),
+    };
+    let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
+    let body_rows = [
+        format!(
+            "{menu_cols} VALUES (3900, '我的域名', 0, 90, 'my-domain', 'system/tenant/domain/index', '', '', '1', '0', 'C', '0', '0', 'system:tenant:domain:list', 'link', 'admin', {now_expr}, '租户自助域名管理（需能力位 tenant.domain_self_service）', '0', 'menu.myDomain')"
+        ),
+        format!(
+            "{menu_cols} VALUES (3901, '域名新增', 3900, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:add', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3902, '域名验证', 3900, 2, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:verify', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3903, '域名修改', 3900, 3, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:edit', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+        format!(
+            "{menu_cols} VALUES (3904, '域名删除', 3900, 4, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
+        ),
+    ];
+    for body in body_rows {
+        db.execute(Statement::from_string(
+            backend,
+            format!("{insert_prefix}{body}{insert_suffix}"),
+        ))
+        .await?;
+    }
+    tracing::info!("租户自助域名页面菜单已就绪（3900-3904，幂等确保完成）");
+    Ok(())
+}
+
 /// 承载租户归属的表清单（Phase 3 remap 改写范围；同时被
 /// `service::sys_backup_service::export_tenant_package` 复用为「租户数据包」导出范围）：
 /// = Phase 2 `ensure_multitenant_module::TABLES` 的 27 张 + `sys_user`（列由
@@ -2103,10 +2171,24 @@ async fn ensure_tenant_unique_scope(db: &DatabaseConnection) -> anyhow::Result<(
 
 /// Phase 3.5h 租户角色菜单治理回填（存量库兜底，幂等）：**一剔一补**。
 ///
-/// ① **剔除**平台专属菜单：域名管理接口组（`system:tenant:domain:*`）整体为平台专属
+/// ① **剔除**平台专属菜单：除能力位已解锁者外，全部平台专属前缀
+///    （`system:tenant:domain:*` / `tool:gen:*` / `monitor:cache:*` …）整体为平台专属
 ///    （服务层对租户一律 403），存量租户管理员角色因继承平台普通角色而持有
 ///    `domain:list` / `domain:verify` → "菜单可见但请求一律 403"的假入口，
 ///    此处从非平台租户角色中移除该前缀菜单授权（幂等，重复执行为 0 行）。
+///
+///    **能力位感知（2026-09-26 批次 1c）**：剔除清单 = `PLATFORM_ONLY_PERM_PREFIXES`
+///    **减去**当前平台层已开启能力位所解锁的前缀（见
+///    `common::features::platform_only_prefixes_to_strip`）。否则平台开启
+///    `tenant.domain_self_service` 并授出域名菜单后，**每次重启都会把授权收回**，
+///    能力位形同虚设。默认（全关）下剔除清单 = 全量 ⇒ 与改造前逐条等价。
+///
+///    ①' **回填**（与①严格对称）：对能力位已解锁的前缀，把 `sys_menu` 中对应菜单
+///    重新授予**平台普通角色（role_id=2）**——role 2 是"新建租户默认管理员角色"的
+///    菜单模板（见 `sys_tenant_service::tenant_role_menu_ids`），缺它则能力位开启后
+///    新建租户仍拿不到租户自助页面。**只回填 role 2**，不回填存量租户角色
+///    （那等于静默给存量租户扩权；存量租户的授权由管理员按需授予）。
+///
 /// ② **补齐**租户自助能力按钮：租户默认管理员角色的菜单 = 平台普通角色菜单 ∩ 套餐白名单，
 ///    而平台普通角色只有 config/dict 的 list/query，缺 add/edit/remove 按钮 perms →
 ///    存量租户自建字典类型 / 覆盖 `platform_default` 键 / 自建 `tenant_private` 键的
@@ -2120,8 +2202,13 @@ async fn ensure_tenant_unique_scope(db: &DatabaseConnection) -> anyhow::Result<(
 /// 无迁移孪生：纯数据治理修复（依赖 sys_menu 实时 perms 集合与租户角色现状），非 schema 变更。
 async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::Result<()> {
     let self_service_perms = crate::service::sys_tenant_service::TENANT_SELF_SERVICE_PERMS;
-    // 台账 F-4/F-5（原则 B）：平台专属能力 perms 前缀统一清单
-    let platform_only_prefixes = crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES;
+    // 台账 F-4/F-5（原则 B）：平台专属能力 perms 前缀统一清单。
+    // 剔除清单按**当前平台层能力位**动态收窄，回填清单为其补集（见函数文档 ①/①'）。
+    let platform_features = crate::common::features::platform_features();
+    let unlocked_prefixes =
+        crate::common::features::unlocked_platform_only_prefixes(platform_features);
+    let platform_only_prefixes =
+        crate::common::features::platform_only_prefixes_to_strip(platform_features);
     const LIST_PERMS: [&str; 2] = ["system:config:list", "system:dict:list"];
 
     if !sso_table_exists(db, "sys_role_menu").await?
@@ -2139,33 +2226,80 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
         }
     };
 
-    // ---- ① 剔除平台专属菜单（域名管理 / 代码生成 / 缓存监控）----
+    // ---- ① 剔除平台专属菜单（域名管理 / 代码生成 / 缓存监控 / …）----
     // 目标角色：平台普通角色（role_id=2，只读白名单曾保底授予）+ 存量租户自建角色
     // （tenant_id <> 0，初始化时复制了平台普通角色菜单 ⇒ 残留假入口）。
     // 集中生成 LIKE 子句（**含 `perms LIKE` 列名**）：见 `common::tenant::perms_like_clause`
     // 的文档——原实现只拼裸占位符（`? OR ? …`），使本段 SQL 恒为假、DELETE 影响 0 行，
     // 导致**存量库的平台专属菜单治理从未生效**（2026-09-26 实测 role2 仍持 13 个，含 3800/3802）。
-    let like_clause = crate::common::tenant::perms_like_clause(platform_only_prefixes, ph);
-    let like_values: Vec<Value> = platform_only_prefixes
-        .iter()
-        .map(|p| format!("{p}%").into())
-        .collect();
-    let removed = db
-        .execute(Statement::from_sql_and_values(
-            backend,
-            format!(
-                "DELETE FROM sys_role_menu WHERE menu_id IN (\
-                   SELECT menu_id FROM sys_menu WHERE {like_clause}) \
-                 AND (role_id = 2 OR role_id IN (\
-                   SELECT role_id FROM sys_role WHERE tenant_id <> 0 AND del_flag = '0'))"
-            ),
-            like_values,
-        ))
-        .await?;
-    if removed.rows_affected() > 0 {
+    //
+    // 能力位感知：`platform_only_prefixes` 已按平台层能力位收窄；全量解锁时为空集，
+    // 此时**必须跳过整段 DELETE**（`perms_like_clause` 对空清单返回空串，会让 SQL 退化为
+    // `WHERE` 无谓词 ⇒ 语法错误 / 误删全表）。
+    if !platform_only_prefixes.is_empty() {
+        let like_clause = crate::common::tenant::perms_like_clause(&platform_only_prefixes, ph);
+        let like_values: Vec<Value> = platform_only_prefixes
+            .iter()
+            .map(|p| format!("{p}%").into())
+            .collect();
+        let removed = db
+            .execute(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "DELETE FROM sys_role_menu WHERE menu_id IN (\
+                       SELECT menu_id FROM sys_menu WHERE {like_clause}) \
+                     AND (role_id = 2 OR role_id IN (\
+                       SELECT role_id FROM sys_role WHERE tenant_id <> 0 AND del_flag = '0'))"
+                ),
+                like_values,
+            ))
+            .await?;
+        if removed.rows_affected() > 0 {
+            tracing::info!(
+                removed = removed.rows_affected(),
+                prefixes = platform_only_prefixes.len(),
+                "Phase 3.5h 已剔除平台专属菜单授权（剔除清单已按能力位收窄）"
+            );
+        }
+    }
+
+    // ---- ①' 回填：能力位已解锁的前缀 → 重新授予平台普通角色（role_id=2）----
+    // 与①严格对称：①剔的是"平台专属且未被能力位解锁"的面，①'补的是"已被能力位解锁"的面。
+    // 只补 role 2（新建租户默认管理员角色的菜单模板），不回填存量租户角色。
+    // 幂等：SQLite/MySQL 用 `INSERT OR IGNORE` / `INSERT IGNORE`，Postgres 用
+    // `ON CONFLICT DO NOTHING`，配合 `sys_role_menu` 的 (role_id, menu_id) 主键，
+    // 重复执行 0 行。
+    if !unlocked_prefixes.is_empty() {
+        let like_clause = crate::common::tenant::perms_like_clause(&unlocked_prefixes, ph);
+        let like_values: Vec<Value> = unlocked_prefixes
+            .iter()
+            .map(|p| format!("{p}%").into())
+            .collect();
+        let insert_prefix = match backend {
+            DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
+            DatabaseBackend::Postgres => "INSERT INTO ",
+            DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        };
+        let conflict_suffix = if backend == DatabaseBackend::Postgres {
+            " ON CONFLICT DO NOTHING"
+        } else {
+            ""
+        };
+        let granted = db
+            .execute(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "{insert_prefix}sys_role_menu (role_id, menu_id) \
+                     SELECT 2, menu_id FROM sys_menu WHERE del_flag = '0' AND ({like_clause})\
+                     {conflict_suffix}"
+                ),
+                like_values,
+            ))
+            .await?;
         tracing::info!(
-            removed = removed.rows_affected(),
-            "Phase 3.5h 已剔除平台专属菜单（域名管理/代码生成/缓存监控）授权"
+            granted = granted.rows_affected(),
+            prefixes = %unlocked_prefixes.join(","),
+            "Phase 3.5h 已按能力位回填平台普通角色的已解锁菜单授权"
         );
     }
 
