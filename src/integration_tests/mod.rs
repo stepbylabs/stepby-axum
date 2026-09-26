@@ -17,6 +17,7 @@
 
 mod auth;
 mod capability_features;
+mod clear_fields;
 mod common_handler;
 mod data_scope_tenant;
 mod file_common;
