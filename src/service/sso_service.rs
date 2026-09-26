@@ -467,9 +467,9 @@ impl SsoService {
     ///
     /// v4 §5：本函数仅在 SSO enabled 时被调用（handler 层已拦截 disabled → 404），
     /// 非标准字段 `sso_enabled` 已移除（不再向匿名调用者暴露内部开关状态）。
-    pub fn discovery(&self, issuer: &str, _config: &SsoConfig) -> serde_json::Value {
+    pub fn discovery(&self, issuer: &str, config: &SsoConfig) -> serde_json::Value {
         let issuer = issuer.trim_end_matches('/');
-        serde_json::json!({
+        let mut doc = serde_json::json!({
             "issuer": issuer,
             "authorization_endpoint": format!("{}/sso/authorize", issuer),
             "token_endpoint": format!("{}/sso/token", issuer),
@@ -497,7 +497,15 @@ impl SsoService {
                 "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "at_hash",
                 "acr", "amr", "tid", "preferred_username", "name", "email", "email_verified"
             ],
-        })
+        });
+        // v5-D3 尾项（批次 4）：内省端点仅在开启时广告（RFC 8414 要求"广告了的端点必须真实可用"，
+        // 故关闭态不出现——与端点本身 404 保持一致）。
+        if config.introspection_enabled {
+            doc["introspection_endpoint"] = serde_json::json!(format!("{}/sso/introspect", issuer));
+            doc["introspection_endpoint_auth_methods_supported"] =
+                serde_json::json!(["client_secret_basic", "client_secret_post"]);
+        }
+        doc
     }
 
     /// 解析 issuer：配置优先，回退请求 base_url
@@ -1399,7 +1407,109 @@ impl SsoService {
         Ok(())
     }
 
-    /// 原子读取并删除授权码（Redis GETDEL），命中返回 Some(JSON 字符串)
+    /// **RFC 7662 令牌内省**（批次 4，`[sso].introspection_enabled`）。
+    ///
+    /// 语义与安全要点：
+    /// - 先做**客户端认证**（`verify_token_client`，失败 → `invalid_client` 401），
+    ///   避免匿名探测；
+    /// - 未知 / 已过期 / 非本客户端签发的令牌一律返回 `{"active": false}`——
+    ///   **不区分原因**（RFC 7662 §2.2：不泄漏令牌是否存在，防枚举）；
+    /// - 命中时按 **AT 绑定**（`sso:at:{sha256}`）返回声明，`exp` 由 Redis 剩余 TTL 推算
+    ///   （`/sso/revoke` 是物理 DEL ⇒ 吊销即时反映为 `active: false`，与"停用即断链"一致）；
+    /// - 只报告 **access_token**：`refresh_token` 传进来恒 `active: false`（不暴露 RT 链）。
+    pub async fn introspect(
+        &self,
+        params: &TokenParams,
+        redis: &mut ConnectionManager,
+        config: &SsoConfig,
+        issuer: &str,
+    ) -> Result<serde_json::Value, OidcError> {
+        let client = self.verify_token_client(params).await?;
+        let inactive = serde_json::json!({ "active": false });
+
+        if !config.introspection_enabled {
+            // 端点未启用（handler 已按 404 拦截，此处为纵深防御）
+            return Ok(inactive);
+        }
+        let Some(token) = params.token.as_deref().filter(|s| !s.is_empty()) else {
+            return Ok(inactive);
+        };
+
+        let token_hash = crate::utils::crypto::token_hash(token);
+        let at_key = format!("{}{}", AT_KEY_PREFIX, token_hash);
+        let at_json: Option<String> = redis::cmd("GET")
+            .arg(&at_key)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let Some(at_json) = at_json else {
+            return Ok(inactive);
+        };
+        let Ok(binding) = serde_json::from_str::<AccessBinding>(&at_json) else {
+            return Ok(inactive);
+        };
+        // 只能内省**自己**的令牌：他客户端查询恒 inactive（否则任意已认证客户端都能窥探
+        // 别家令牌的 subject/scope）
+        if binding.client_id != client.client_id {
+            tracing::warn!(
+                asked_by = %client.client_id,
+                issued_to = %binding.client_id,
+                "内省请求的令牌并非本客户端签发，按 inactive 返回"
+            );
+            return Ok(inactive);
+        }
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(&at_key)
+            .query_async(redis)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        if ttl <= 0 {
+            // 绑定存在但已到期（TTL=-1 无过期键 / -2 不存在）⇒ 视为失效，不报告剩余寿命
+            return Ok(inactive);
+        }
+        let now = chrono::Utc::now().timestamp();
+        Ok(serde_json::json!({
+            "active": true,
+            "scope": binding.scope.join(" "),
+            "client_id": binding.client_id,
+            "username": binding.username,
+            "token_type": "Bearer",
+            "exp": now + ttl,
+            "iat": binding.auth_time,
+            "sub": binding.user_id.to_string(),
+            "aud": binding.client_id,
+            "iss": issuer.trim_end_matches('/'),
+            "tenant_id": binding.tid,
+        }))
+    }
+
+    /// 解析同意页 `logo_uri` 的**代理源**（批次 4，`[sso].proxy_logo_uri`）。
+    ///
+    /// 返回 `Some(url)` 的前提：客户端存在且启用、`logo_uri` 非空、且通过 SSRF 校验
+    /// （协议/主机解析）。任何一步不满足一律 `None`（宁可不显示 logo，也不去拉不可信地址）。
+    pub async fn client_logo_source(&self, client_id: &str) -> Option<String> {
+        let client = self.client_repo.find_by_client_id(client_id).await.ok()??;
+        if client.enabled != "1" {
+            return None;
+        }
+        let logo = client.logo_uri.trim();
+        if logo.is_empty() {
+            return None;
+        }
+        let parsed = crate::common::ssrf::validate_url(logo).ok()?;
+        let host = parsed.host_str()?.to_string();
+        let port = parsed.port_or_known_default()?;
+        if crate::common::ssrf::validate_host_resolution(&host, port)
+            .await
+            .is_err()
+        {
+            tracing::warn!(logo_uri = %logo, "同意页 logo 代理：目标地址未通过 SSRF 校验，回落到不外链");
+            return None;
+        }
+        Some(logo.to_string())
+    }
+
+    /// 原子读取并删除授权码（Redis GETDEL），命中返回 Some(JSON 字符串）字符串)
     async fn getdel_code(
         &self,
         key: &str,

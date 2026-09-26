@@ -154,6 +154,31 @@ pub struct ChannelEditDto {
     pub status: Option<String>,
     #[garde(length(max = 500))]
     pub remark: Option<String>,
+    /// 显式清空声明（批次 4）：列出的字段写 NULL；缺省 = 保持现值（见 `common::clear_fields`）
+    #[serde(default)]
+    #[garde(skip)]
+    pub clear_fields: Option<Vec<String>>,
+}
+
+/// 「显式清空」契约：`configJson` 是**默认安全语义**下唯一清不掉、又确实需要清掉的字段。
+///
+/// 背景：`config_json` 未传/空串 = 保持现值（防"只改名称的 PUT 擦除已加密的 SMTP 凭据"），
+/// 故清空必须显式声明。`remark` 不列入：它的更新语义本就是"未传即写 NULL"，无需额外通道。
+impl crate::common::clear_fields::ClearFieldsDto for ChannelEditDto {
+    const CLEARABLE_FIELDS: &'static [&'static str] = &["configJson"];
+
+    fn clear_fields(&self) -> Option<&[String]> {
+        self.clear_fields.as_deref()
+    }
+
+    fn field_value_is_present(&self, field: &str) -> bool {
+        match field {
+            "configJson" => {
+                crate::common::clear_fields::value_is_present(self.config_json.as_deref())
+            }
+            _ => false,
+        }
+    }
 }
 
 /// 消息模板分页查询 DTO
@@ -431,6 +456,8 @@ impl SysMsgService {
         crate::common::i18n::validate(&dto)?;
         validate_channel_type(&dto.channel_type)?;
         Self::validate_config_json(&dto.config_json)?;
+        // 显式清空声明（批次 4）：白名单校验 + 与提交值冲突检测（400），缺省为空集
+        let clears = crate::common::clear_fields::resolve(&dto)?;
 
         let existing = self.get_channel_by_id(dto.channel_id, operator_tid).await?;
         // 唯一编码校验（排除自身）
@@ -456,6 +483,11 @@ impl SysMsgService {
                 crate::utils::crypto::seal_sensitive_value(c, &self.enc_key)
                     .map_err(|e| ServiceError::internal(&format!("渠道配置加密失败: {e}")))?,
             ));
+        }
+        // ③ 显式清空（批次 4）：`clearFields: ["configJson"]` ⇒ 写 NULL（清掉历史凭据）。
+        //    与 ② 互斥由 `clear_fields::resolve` 的冲突检测保证（同时给值 + 声明清空 ⇒ 400）。
+        if crate::common::clear_fields::is_cleared(&clears, "configJson") {
+            am.config_json = Set(None);
         }
         // status 未传时保持现值，避免渠道被静默置 NULL 失效
         am.status = Set(dto.status.or(existing_status));

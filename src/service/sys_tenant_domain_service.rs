@@ -276,20 +276,53 @@ pub struct SysTenantDomainService {
     redis: ConnectionManager,
     domain_repo: SysTenantDomainRepository,
     tenant_repo: SysTenantRepository,
+    /// 全局配置（`[acme]` 证书需求输出集成点；默认 `off` ⇒ 不发任何出站请求）
+    config: std::sync::Arc<crate::config::Settings>,
 }
 
 impl SysTenantDomainService {
-    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        redis: ConnectionManager,
+        config: std::sync::Arc<crate::config::Settings>,
+    ) -> Self {
         Self {
             domain_repo: SysTenantDomainRepository::new(db.clone()),
             tenant_repo: SysTenantRepository::new(db.clone()),
             db,
             redis,
+            config,
         }
     }
 
     fn db(&self) -> &DatabaseConnection {
         &self.db
+    }
+
+    /// 推送「证书需求」事件（`[acme]` 集成点，默认 `off` = 不发）。
+    ///
+    /// 只在**状态迁移**处调用（验证通过 ⇒ `cert.issue`；已验证域名被删 ⇒ `cert.remove`），
+    /// 因此天然幂等、无需缓存去重。推送失败只打 WARN，**绝不影响**域名业务本身。
+    async fn emit_cert_event(&self, event: &'static str, model: &DomainModel) {
+        // 快速路径：`off`（默认）时连租户查询都省掉
+        if self.config.acme.effective_webhook().is_none() {
+            return;
+        }
+        let tenant_code = self
+            .tenant_repo
+            .find_by_id_any(model.tenant_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.tenant_code);
+        crate::service::acme_service::spawn_emit(
+            self.config.acme.clone(),
+            event,
+            model.domain.clone(),
+            model.tenant_id,
+            tenant_code,
+            model.verify_status.clone().unwrap_or_default(),
+        );
     }
 
     /// 解析操作者的数据范围（**域名管理的唯一准入判据**）。
@@ -528,6 +561,12 @@ impl SysTenantDomainService {
                 domain = %model.domain,
                 "DNS TXT 记录未匹配，域名验证失败（记录已置为验证失败）"
             );
+        } else {
+            // 状态迁移 `0/2 → '1'`（上方已早退拦截"本就已验证"的情形）⇒ 需要签发证书
+            let mut verified = model.clone();
+            verified.verify_status = Some(new_status.to_string());
+            self.emit_cert_event(crate::service::acme_service::EVENT_CERT_ISSUE, &verified)
+                .await;
         }
         Ok(TenantDomainVerifyVo {
             domain_id,
@@ -663,6 +702,11 @@ impl SysTenantDomainService {
 
         self.domain_repo.soft_delete(domain_id, operator).await?;
         self.invalidate_domain_cache(&model.domain).await;
+        // 状态迁移 `'1' → 已删`：该域名不再需要证书（接收端可据此吊销/清理）
+        if model.verify_status.as_deref() == Some("1") {
+            self.emit_cert_event(crate::service::acme_service::EVENT_CERT_REMOVE, &model)
+                .await;
+        }
         Ok(model.tenant_id)
     }
 

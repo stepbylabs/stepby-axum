@@ -672,6 +672,42 @@ pub struct TenantEditDto {
     pub email: Option<String>,
     #[serde(default)]
     pub remark: Option<String>,
+    /// 显式清空声明（批次 4）：列出的字段写 NULL；缺省 = 保持现值（见 `common::clear_fields`）
+    #[serde(default)]
+    pub clear_fields: Option<Vec<String>>,
+}
+
+/// 「显式清空」契约（批次 4）：联系人/负责人字段在"未传 = 保持现值"语义下无法清空。
+///
+/// 白名单**逐条枚举**：`contactName`/`contactPhone`/`contactEmail` 落 `sys_tenant` 行，
+/// `leader`/`phone`/`email` 落该租户**根部门**行（`sys_tenant.dept_id` 指向的组织树挂载根）。
+/// `remark` 不列入（其更新语义本就是"未传即写 NULL"）。
+impl crate::common::clear_fields::ClearFieldsDto for TenantEditDto {
+    const CLEARABLE_FIELDS: &'static [&'static str] = &[
+        "contactName",
+        "contactPhone",
+        "contactEmail",
+        "leader",
+        "phone",
+        "email",
+    ];
+
+    fn clear_fields(&self) -> Option<&[String]> {
+        self.clear_fields.as_deref()
+    }
+
+    fn field_value_is_present(&self, field: &str) -> bool {
+        let value = match field {
+            "contactName" => self.contact_name.as_deref(),
+            "contactPhone" => self.contact_phone.as_deref(),
+            "contactEmail" => self.contact_email.as_deref(),
+            "leader" => self.leader.as_deref(),
+            "phone" => self.phone.as_deref(),
+            "email" => self.email.as_deref(),
+            _ => None,
+        };
+        crate::common::clear_fields::value_is_present(value)
+    }
 }
 
 /// 租户启停入参
@@ -1383,6 +1419,8 @@ impl SysTenantService {
         operator_tid: i64,
     ) -> Result<TenantVo, ServiceError> {
         Self::ensure_tenant_access(operator_tid, dto.tenant_id)?;
+        // 显式清空声明（批次 4）：白名单校验 + 与提交值冲突检测（400），缺省为空集
+        let clears = crate::common::clear_fields::resolve(&dto)?;
         let tenant = self.load_tenant(dto.tenant_id).await?;
         let name = dto.tenant_name.trim();
         if name.is_empty() {
@@ -1442,19 +1480,30 @@ impl SysTenantService {
                 am.expire_time = Set(v);
             }
         }
-        // 部分更新语义（2026-09-26 缺陷修复）：联系信息未传时保持现值，而非置 NULL
-        am.contact_name = Set(dto
-            .contact_name
-            .clone()
-            .or_else(|| tenant.contact_name.clone()));
-        am.contact_phone = Set(dto
-            .contact_phone
-            .clone()
-            .or_else(|| tenant.contact_phone.clone()));
-        am.contact_email = Set(dto
-            .contact_email
-            .clone()
-            .or_else(|| tenant.contact_email.clone()));
+        // 部分更新语义（2026-09-26 缺陷修复）：联系信息未传时保持现值，而非置 NULL。
+        // 批次 4 补"显式清空"：`clearFields` 声明的字段才写 NULL（否则这条路被永久堵死）。
+        use crate::common::clear_fields::is_cleared;
+        am.contact_name = Set(if is_cleared(&clears, "contactName") {
+            None
+        } else {
+            dto.contact_name
+                .clone()
+                .or_else(|| tenant.contact_name.clone())
+        });
+        am.contact_phone = Set(if is_cleared(&clears, "contactPhone") {
+            None
+        } else {
+            dto.contact_phone
+                .clone()
+                .or_else(|| tenant.contact_phone.clone())
+        });
+        am.contact_email = Set(if is_cleared(&clears, "contactEmail") {
+            None
+        } else {
+            dto.contact_email
+                .clone()
+                .or_else(|| tenant.contact_email.clone())
+        });
         am.remark = Set(dto.remark.clone());
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
@@ -1469,9 +1518,22 @@ impl SysTenantService {
                 (dept.leader.clone(), dept.phone.clone(), dept.email.clone());
             let mut dam: sys_dept::ActiveModel = dept.into();
             dam.dept_name = Set(name.to_string());
-            dam.leader = Set(dto.leader.clone().or(existing_leader));
-            dam.phone = Set(dto.phone.clone().or(existing_phone));
-            dam.email = Set(dto.email.clone().or(existing_email));
+            // 同口径：未传保持现值；显式 `clearFields: ["leader"/"phone"/"email"]` 才写 NULL
+            dam.leader = Set(if is_cleared(&clears, "leader") {
+                None
+            } else {
+                dto.leader.clone().or(existing_leader)
+            });
+            dam.phone = Set(if is_cleared(&clears, "phone") {
+                None
+            } else {
+                dto.phone.clone().or(existing_phone)
+            });
+            dam.email = Set(if is_cleared(&clears, "email") {
+                None
+            } else {
+                dto.email.clone().or(existing_email)
+            });
             if let Some(order) = dto.order_num {
                 dam.order_num = Set(Some(order));
             }

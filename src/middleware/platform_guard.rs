@@ -29,10 +29,15 @@ use axum::response::Response;
 use crate::common::AppError;
 use crate::jwt::Claims;
 
-/// 能力位感知：平台专属路由组中，**允许租户操作者**访问的 (方法, 路径, 能力位) 清单。
+/// 能力位感知：平台专属路由组中，**允许租户操作者**访问的 (方法, 路径, 能力位, 所需档位)
+/// 清单。
 ///
-/// 语义：仅当**平台层** `[features]` 中对应能力位非 `off` 时，该路径才放行租户操作者；
+/// 语义：仅当**平台层** `[features]` 中对应能力位**达到该档位**时，该路径才放行租户操作者；
 /// 能力位关闭（默认）⇒ 与改造前逐条等价（租户一律 403）。
+///
+/// "所需档位"是三态能力位的必要维度：`backup.visibility` 的 `view_only` 只放行
+/// **列表/详情**，**下载**必须 `full`（下载即拿到备份文件本体；对平台普通角色
+/// `tid = 0` ⇒ 服务层不做行级收窄 ⇒ 等于整库数据下载，见 `common::features`）。
 ///
 /// ⚠️ 本守卫是**第二道防线**（请求层），不是唯一闸门。完整的三层开关为：
 /// ① 平台 `[features]`（本守卫）→ ② 套餐 `features`（决定相关 perms 是否**可授予**租户角色）
@@ -44,29 +49,32 @@ use crate::jwt::Claims;
 /// `backup_type = 'tenant_export' AND tenant_id = 自己`）。
 ///
 /// `download/{backupId}` 用**前缀**匹配（路径含动态段），其余为精确匹配。
-const TENANT_VISIBLE_ROUTES: &[(Method, &str, &str)] = &[
+const TENANT_VISIBLE_ROUTES: &[(Method, &str, &str, &str)] = &[
     (
         Method::GET,
         "/system/backup/list",
-        "backup.readonly_visible",
+        "backup.visibility",
+        "view_only",
     ),
     (
         Method::GET,
         "/system/backup/download/",
-        "backup.readonly_visible",
+        "backup.visibility",
+        "full",
     ),
     (
         Method::POST,
         "/system/backup/self-export",
         "backup.tenant_self_export",
+        "on",
     ),
 ];
 
-/// 租户操作者是否可访问该 (方法, 路径)：返回命中的能力位键（未命中 = `None`）。
+/// 租户操作者是否可访问该 (方法, 路径)：返回命中的 (能力位键, 所需档位)（未命中 = `None`）。
 ///
 /// 纯函数（可单测）：不读全局、不做 IO，只做静态清单匹配，
 /// 因此"未登记路径 = 租户不可达"是**结构性**保证（不会因忘写一个分支而放开）。
-fn tenant_visible_feature(method: &Method, path: &str) -> Option<&'static str> {
+fn tenant_visible_feature(method: &Method, path: &str) -> Option<(&'static str, &'static str)> {
     // 备份详情 `GET /system/backup/{backupId}`：单个**纯数字**动态段
     // （backupId 为雪花/自增整数；"list"/"self-export" 等静态段因含非数字字符被排除）
     if method == Method::GET
@@ -74,11 +82,11 @@ fn tenant_visible_feature(method: &Method, path: &str) -> Option<&'static str> {
         && !rest.is_empty()
         && rest.chars().all(|c| c.is_ascii_digit())
     {
-        return Some("backup.readonly_visible");
+        return Some(("backup.visibility", "view_only"));
     }
     TENANT_VISIBLE_ROUTES
         .iter()
-        .find(|(m, p, _)| {
+        .find(|(m, p, _, _)| {
             m == method
                 && if p.ends_with('/') {
                     path.starts_with(p)
@@ -86,11 +94,11 @@ fn tenant_visible_feature(method: &Method, path: &str) -> Option<&'static str> {
                     path == *p
                 }
         })
-        .map(|(_, _, feat)| *feat)
+        .map(|(_, _, feat, required)| (*feat, *required))
 }
 
 /// 平台专属接口守卫：仅 `tid == 0`（平台操作者）放行，其余（含租户管理员）403；
-/// **但**命中 [`TENANT_VISIBLE_ROUTES`] 且对应平台层能力位非 `off` 时放行租户操作者。
+/// **但**命中 [`TENANT_VISIBLE_ROUTES`] 且对应平台层能力位**达到所需档位**时放行租户操作者。
 ///
 /// 仅用于 `/monitor/cache/*`、`/tool/gen/*`、`/system/backup/*` 等平台专属路由；挂载方式：
 /// `.route_layer(axum::middleware::from_fn(platform_only_guard))`
@@ -106,9 +114,13 @@ pub async fn platform_only_guard(req: Request, next: Next) -> Result<Response, A
     match operator {
         Some((0, _)) => Ok(next.run(req).await),
         Some((tenant_id, user_id)) => {
-            // 能力位放行（第二道防线）：平台层开启 + 路径在租户可见清单内
-            if let Some(feat) = tenant_visible_feature(&method, &path)
-                && crate::common::features::platform_features().is_on(feat)
+            // 能力位放行（第二道防线）：平台层达到所需档位 + 路径在租户可见清单内
+            if let Some((feat, required)) = tenant_visible_feature(&method, &path)
+                && crate::common::features::mode_reaches(
+                    crate::common::features::platform_features(),
+                    feat,
+                    required,
+                )
             {
                 return Ok(next.run(req).await);
             }
@@ -142,19 +154,21 @@ mod tests {
     /// 租户可见清单是**结构性白名单**：只放行登记过的路径，其余一律 `None`
     #[test]
     fn test_tenant_visible_feature_whitelist() {
-        // 只读三件套
+        // 只读两件套（列表 + 详情）：`view_only` 档即可
         assert_eq!(
             tenant_visible_feature(&Method::GET, "/system/backup/list"),
-            Some("backup.readonly_visible")
+            Some(("backup.visibility", "view_only"))
         );
         assert_eq!(
             tenant_visible_feature(&Method::GET, "/system/backup/42"),
-            Some("backup.readonly_visible"),
-            "备份详情（纯数字 backupId）应与列表同能力位"
+            Some(("backup.visibility", "view_only")),
+            "备份详情（纯数字 backupId）应与列表同档"
         );
+        // 下载：必须 `full` 档（MT-7：只读档不得放行下载）
         assert_eq!(
             tenant_visible_feature(&Method::GET, "/system/backup/download/42"),
-            Some("backup.readonly_visible")
+            Some(("backup.visibility", "full")),
+            "下载面必须要求 full 档"
         );
         assert_eq!(
             tenant_visible_feature(&Method::GET, "/system/backup/logs/42"),
@@ -169,7 +183,7 @@ mod tests {
         // 自助导出
         assert_eq!(
             tenant_visible_feature(&Method::POST, "/system/backup/self-export"),
-            Some("backup.tenant_self_export")
+            Some(("backup.tenant_self_export", "on"))
         );
         // 平台代导出（带 tenantId 的越权面）**不得**对租户放行
         assert_eq!(

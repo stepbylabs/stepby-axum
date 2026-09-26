@@ -42,14 +42,14 @@ pub struct FeatureDef {
 /// 排序：按 key 字典序（`to_json` 用 [`BTreeMap`]，顺序一致便于 diff 与断言）。
 pub const KNOWN_FEATURES: &[FeatureDef] = &[
     FeatureDef {
-        key: "backup.readonly_visible",
+        key: "backup.tenant_self_export",
         default_mode: FEATURE_OFF,
         modes: &[FEATURE_OFF, "on"],
     },
     FeatureDef {
-        key: "backup.tenant_self_export",
+        key: "backup.visibility",
         default_mode: FEATURE_OFF,
-        modes: &[FEATURE_OFF, "on"],
+        modes: &[FEATURE_OFF, "view_only", "full"],
     },
     FeatureDef {
         key: "nav.l3",
@@ -70,31 +70,38 @@ pub const KNOWN_FEATURES: &[FeatureDef] = &[
 /// 才可授予租户角色。清单外的平台专属 perms 恒不可授予
 /// （见 [`is_grantable_perm_with_features`]）。
 ///
-/// 为什么需要"所需最低档位"：三态能力位（如 `nav.l3 = off | view_only | full`）的
-/// 只读面与写面必须**分别解锁**，否则 `view_only` 下会把 add/edit/remove 菜单一并授予
-/// role 2，重造"菜单可见但请求 403"的假入口。
+/// 为什么需要"所需最低档位"：三态能力位（`nav.l3` = 导航只读/写面；`backup.visibility`
+/// = 备份只读/下载面）的**只读面与危险面必须分别解锁**，否则 `view_only` 下会把
+/// add/edit/remove 菜单（或备份下载）一并授予 role 2，重造"菜单可见但请求 403"的假入口
+/// （或更糟：把整库下载面下放给普通角色）。
 ///
 /// ⚠️ 逐条枚举而非按前缀放开是**刻意的**：`system:backup:` 是**部分解锁**前缀
-/// （只读 3 条 + 导出 1 条可下放，创建/恢复/删除仍平台专属），若按前缀放开则等于把
-/// 整库备份面（含恢复覆盖现库）一并下放。批次 1c 的 `system:tenant:domain:` 则是
-/// **整前缀全量收录**的特例——同一套逐条语义对两种情形都成立。
+/// （`list`/`query`/`download` 三条可下放，创建/恢复/删除仍平台专属），若按前缀放开
+/// 则等于把整库备份面（含恢复覆盖现库）一并下放。批次 1c 的 `system:tenant:domain:`
+/// 则是**整前缀全量收录**的特例——同一套逐条语义对两种情形都成立。
 pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &str, &[&str])] = &[
-    // 备份只读可见（批次 2）：能力位开启时，租户可读**本租户**的租户数据包（tenant_export）
-    // 列表与详情，并可下载自己的数据包；**不含**创建备份 / 恢复 / 删除 / 平台代导出，
-    // 也不含整库备份行的读取（服务层按 `backup_type = 'tenant_export' AND tenant_id = 自己`
-    // 行级收窄，见 `sys_backup_service`）。
+    // 备份可见性（批次 2 引入，批次 4 / MT-7 升为三档）：**分档解锁**。
+    // - `view_only`：只读可见 —— 列表 + 详情（含整库备份行的元数据）；
+    // - `full`：在只读基础上再放开**下载**。
+    //
+    // **写面/危险面恒不下放**：`add`（创建整库备份）/ `edit`（恢复，覆盖现库）/ `remove`
+    // 不在任何档位内 —— 即使 `full` 也不可授予。
+    //
+    // `download` 之所以单独放在 `full` 档而非 `view_only`：下载即拿到备份文件本体，而平台
+    // 普通角色（role 2）的 `tid = 0` ⇒ 服务层不做行级收窄 ⇒ 等于**整库数据下载**。
+    // MT-7 的诉求正是"平台普通角色可只读查看列表，但下载维持 403"，故只读与下载必须分档。
+    // 租户侧另有两道收窄：permission 层（需租户角色持有 perms，且套餐也开同键才可授予）
+    // 与服务层行级（`backup_type = 'tenant_export' AND tenant_id = 自己`）。
+    //
     // `query` 原同时映射"详情"与"整库下载"，批次 2 已把下载拆为独立的
     // `system:backup:download`（`GET /system/backup/download/{backupId}`），
     // 因此本清单可以安全收录只读子集。
     (
-        "backup.readonly_visible",
-        "on",
-        &[
-            "system:backup:list",
-            "system:backup:query",
-            "system:backup:download",
-        ],
+        "backup.visibility",
+        "view_only",
+        &["system:backup:list", "system:backup:query"],
     ),
+    ("backup.visibility", "full", &["system:backup:download"]),
     // 租户自助导出（批次 2）：能力位开启时，租户可把**本租户**数据包导出为 JSON
     // （端点 `POST /system/backup/self-export`，无租户参数 ⇒ 不存在传他租户 id 的越权面）。
     ("backup.tenant_self_export", "on", &["system:backup:export"]),
@@ -168,7 +175,10 @@ pub fn unlocked_capability_perms(features: &FeatureSet) -> Vec<&'static str> {
 /// 有效模式是否**至少开放到** `required_mode` 档（同注册表 `modes` 下标比较）。
 ///
 /// 未登记的能力位 / 未登记的档位串一律视为"未达到"（fail-closed）。
-fn mode_reaches(features: &FeatureSet, key: &str, required_mode: &str) -> bool {
+///
+/// 公开给请求层守卫使用（`middleware::platform_guard` 按档位放行租户操作者）：
+/// 三态能力位的**只读面与危险面必须按档区分**，否则 `view_only` 会把下载面一并放行。
+pub fn mode_reaches(features: &FeatureSet, key: &str, required_mode: &str) -> bool {
     let Some(def) = feature_def(key) else {
         return false;
     };
@@ -505,13 +515,13 @@ mod tests {
     #[test]
     fn test_from_json_sanitizes_unknown_and_invalid() {
         let f = FeatureSet::from_json(Some(
-            r#"{"nav.l3":"full","not.a.feature":"on","backup.readonly_visible":"bogus","tenant.domain_self_service":"full"}"#,
+            r#"{"nav.l3":"full","not.a.feature":"on","backup.visibility":"bogus","tenant.domain_self_service":"full"}"#,
         ));
         assert_eq!(f.mode("nav.l3"), "full");
         assert_eq!(f.mode("tenant.domain_self_service"), "full");
         assert_eq!(f.mode("not.a.feature"), FEATURE_OFF, "未知 key 不生效");
         assert_eq!(
-            f.mode("backup.readonly_visible"),
+            f.mode("backup.visibility"),
             FEATURE_OFF,
             "非法模式必须回落到默认 off"
         );
@@ -657,27 +667,67 @@ mod tests {
         }
 
         // ④ 单档能力位（off|on）的既有语义不受影响
-        let backup_on = FeatureSet::from_json(Some(r#"{"backup.readonly_visible":"on"}"#));
+        let export_on = FeatureSet::from_json(Some(r#"{"backup.tenant_self_export":"on"}"#));
         assert_eq!(
-            unlocked_capability_perms(&backup_on),
-            vec![
-                "system:backup:list",
-                "system:backup:query",
-                "system:backup:download"
-            ]
+            unlocked_capability_perms(&export_on),
+            vec!["system:backup:export"]
         );
+
+        // ⑤ `backup.visibility`（批次 4 / MT-7）：只读档与下载档必须分离。
+        //
+        // 可证伪性：若把 `download` 也放进 `view_only` 档，第 2 组断言立即变红 ——
+        // 那等于让平台普通角色（role 2，tid=0 ⇒ 无行级收窄）**下载整库备份**。
+        let view_only_ro = FeatureSet::from_json(Some(r#"{"backup.visibility":"view_only"}"#));
+        let mut ro = unlocked_capability_perms(&view_only_ro);
+        ro.sort_unstable();
+        assert_eq!(
+            ro,
+            vec!["system:backup:list", "system:backup:query"],
+            "view_only 档只应解锁只读两项"
+        );
+        assert!(
+            !is_grantable_perm_with_features("system:backup:download", &view_only_ro),
+            "view_only 档不得解锁下载（下载即拿到备份文件本体）"
+        );
+        assert!(
+            !is_grantable_perm_with_features("system:backup:edit", &view_only_ro),
+            "view_only 档不得解锁恢复（覆盖现库）"
+        );
+
+        let full_bak = FeatureSet::from_json(Some(r#"{"backup.visibility":"full"}"#));
+        assert!(
+            is_grantable_perm_with_features("system:backup:download", &full_bak),
+            "full 档才解锁下载"
+        );
+        assert!(
+            !is_grantable_perm_with_features("system:backup:add", &full_bak)
+                && !is_grantable_perm_with_features("system:backup:edit", &full_bak)
+                && !is_grantable_perm_with_features("system:backup:remove", &full_bak),
+            "写面/危险面即使 full 档也不得解锁（创建整库备份 / 恢复覆盖现库 / 删除）"
+        );
+
+        // 请求层守卫用的档位比较（`mode_reaches`）与解锁清单同一口径
+        assert!(mode_reaches(
+            &view_only_ro,
+            "backup.visibility",
+            "view_only"
+        ));
+        assert!(!mode_reaches(&view_only_ro, "backup.visibility", "full"));
+        assert!(mode_reaches(&full_bak, "backup.visibility", "full"));
+        assert!(!mode_reaches(&off, "backup.visibility", "view_only"));
+        assert!(!mode_reaches(&off, "not.a.feature", "view_only"));
     }
 
     /// 能力位开启后仍受**既有**门禁约束：开关不是"万能钥匙"。
     ///
-    /// 批次 2 更新：`backup.readonly_visible` 已收录只读三件套到解锁白名单
+    /// 批次 2 更新：`backup.visibility` 已收录只读两件套 + 下载一件到解锁白名单
     /// （这是能力位的**预期**放开面，由 `test_unlocked_perms_are_perm_granular` 锁定），
-    /// 但备份的**写面与危险面**（add/edit=恢复/remove）即使能力位开启也不得授予；
+    /// 但备份的**写面与危险面**（add/edit=恢复/remove）即使能力位开到 `full` 也不得授予；
     /// 且未登记的能力位（tier2 表在能力位关闭时）恒被拦截。
     #[test]
     fn test_capability_does_not_bypass_existing_gates() {
         let on = FeatureSet::from_json(Some(
-            r#"{"tenant.domain_self_service":"full","backup.readonly_visible":"on"}"#,
+            r#"{"tenant.domain_self_service":"full","backup.visibility":"full"}"#,
         ));
         // 备份写面/危险面：即使只读能力位开启也不可授予
         for p in [
@@ -761,9 +811,7 @@ mod tests {
     /// `to_json` → `from_json` 往返稳定（幂等）
     #[test]
     fn test_json_roundtrip_is_stable() {
-        let f = FeatureSet::from_json(Some(
-            r#"{"backup.readonly_visible":"on","nav.l3":"view_only"}"#,
-        ));
+        let f = FeatureSet::from_json(Some(r#"{"backup.visibility":"full","nav.l3":"view_only"}"#));
         let round = FeatureSet::from_json(Some(&f.to_json()));
         assert_eq!(f, round);
         assert_eq!(f.to_json(), round.to_json());
@@ -783,8 +831,8 @@ mod tests {
             perms_not_in_clause(&unlocked_capability_perms(&off), |i| format!("?{i}")).is_none()
         );
 
-        // ② 仅开备份只读 ⇒ 恰好 3 条只读 perms，且**不含**写面
-        let ro = FeatureSet::from_json(Some(r#"{"backup.readonly_visible":"on"}"#));
+        // ② `backup.visibility = full` ⇒ 恰好 3 条（只读 2 + 下载 1），且**不含**写面
+        let ro = FeatureSet::from_json(Some(r#"{"backup.visibility":"full"}"#));
         let mut unlocked = unlocked_capability_perms(&ro);
         unlocked.sort_unstable();
         assert_eq!(
@@ -794,7 +842,16 @@ mod tests {
                 "system:backup:list",
                 "system:backup:query",
             ],
-            "备份只读能力位只应解锁只读子集"
+            "备份可见性能力位（full 档）只应解锁只读子集 + 下载"
+        );
+        // ②' 仅 `view_only` ⇒ 只读 2 条，**不含**下载（MT-7 的核心诉求）
+        let view_only = FeatureSet::from_json(Some(r#"{"backup.visibility":"view_only"}"#));
+        let mut unlocked_ro = unlocked_capability_perms(&view_only);
+        unlocked_ro.sort_unstable();
+        assert_eq!(
+            unlocked_ro,
+            vec!["system:backup:list", "system:backup:query"],
+            "view_only 档不得把下载混入解锁清单"
         );
         for p in [
             "system:backup:add",
@@ -803,19 +860,19 @@ mod tests {
         ] {
             assert!(
                 !unlocked_capability_perms(&ro).contains(&p),
-                "{p} 属写面/危险面，备份只读能力位不得解锁"
+                "{p} 属写面/危险面，备份可见性能力位不得解锁"
             );
             assert!(
                 !is_grantable_perm_with_features(p, &ro),
-                "{p} 在备份只读能力位下仍必须不可授予"
+                "{p} 在备份可见性能力位下仍必须不可授予"
             );
         }
-        // 且只读子集确实可授予
+        // 且解锁子集确实可授予
         for p in &unlocked {
             assert!(is_grantable_perm_with_features(p, &ro), "{p} 应可授予");
         }
 
-        // ③ 开自助导出 ⇒ 仅解锁 `system:backup:export`（不含只读三项，二者独立）
+        // ③ 开自助导出 ⇒ 仅解锁 `system:backup:export`（不含只读/下载各项，二者独立）
         let ex = FeatureSet::from_json(Some(r#"{"backup.tenant_self_export":"on"}"#));
         assert_eq!(unlocked_capability_perms(&ex), vec!["system:backup:export"]);
         assert!(
@@ -829,7 +886,7 @@ mod tests {
 
         // ⑤ 两者同开 ⇒ 并集且无重复
         let both = FeatureSet::from_json(Some(
-            r#"{"backup.readonly_visible":"on","backup.tenant_self_export":"on"}"#,
+            r#"{"backup.visibility":"full","backup.tenant_self_export":"on"}"#,
         ));
         let list = unlocked_capability_perms(&both);
         assert_eq!(list.len(), 4);
@@ -837,6 +894,22 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 4, "解锁清单不得出现重复项");
+
+        // ⑥ `view_only` + 自助导出 ⇒ 不含下载（三档与单档能力位互不串档）
+        let vt = FeatureSet::from_json(Some(
+            r#"{"backup.visibility":"view_only","backup.tenant_self_export":"on"}"#,
+        ));
+        let mut vt_list = unlocked_capability_perms(&vt);
+        vt_list.sort_unstable();
+        assert_eq!(
+            vt_list,
+            vec![
+                "system:backup:export",
+                "system:backup:list",
+                "system:backup:query"
+            ],
+            "view_only + 自助导出不得顺带放开下载"
+        );
     }
 
     /// `perms NOT IN` 片段：集中生成、带列名、占位符按方言编号
