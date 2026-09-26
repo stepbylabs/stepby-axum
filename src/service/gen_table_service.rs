@@ -2118,4 +2118,70 @@ mod gen_table_template_tests {
             "路由注册函数名不得为 camelCase，实际:\n{router}"
         );
     }
+
+    /// 【第七轮】生成**前端**产物必须能通过 `vue-tsc --noEmit` 的回归锁。
+    ///
+    /// 背景：`api.tera` / `index.tera` 此前也从未被类型检查过。第七轮把 flow 分类渲染的
+    /// `.ts` / `.vue` 落到 yebot-ui 真实路径并跑 `vue-tsc --noEmit`，暴露 3 处真实缺陷：
+    /// ① `import { list } from '@/api/...'` 与页面内 `const list = ref([])` **重名冲突**
+    ///    （TS2440）——**crud 与 flow 的所有生成页面都编译失败**；
+    /// ② `:row-key="(row) => row.id"` 参数隐式 any（TS7006，本仓 `noImplicitAny`）；
+    /// ③ `list(query: any)` 未标注返回类型 ⇒ 推断为 `AxiosResponse`，调用处
+    ///    `res.rows` / `res.data` 报 TS2339（`request` 拦截器实际已解包为 `res.data`）。
+    #[test]
+    fn test_generated_frontend_is_typecheck_clean_by_construction() {
+        let mut table = mk_table();
+        table.tpl_category = Some("flow".to_string());
+        let columns = vec![mk_column()];
+        let files = GenTableService::render_templates(&table, &columns).unwrap();
+
+        // ① API 函数名带实体前缀，杜绝与页面 `const list` 重名
+        let api = files
+            .get("src/api/system/sys_user.ts")
+            .expect("缺少 api.ts");
+        assert!(
+            api.contains("export function listSysUser(query: any): Promise<any>"),
+            "list 必须带实体前缀（避免与页面 const list 冲突），实际:\n{api}"
+        );
+        assert!(
+            !api.contains("export function list("),
+            "不得导出裸 `list`（会与页面局部 `const list` 冲突），实际:\n{api}"
+        );
+        // ③ 全部函数显式标注解包后的返回类型
+        for sig in [
+            "export function getSysUser(id: number): Promise<any>",
+            "export function addSysUser(data: any): Promise<any>",
+            "export function updateSysUser(data: any): Promise<any>",
+            "export function delSysUser(id: number): Promise<any>",
+            "export function submitFlowSysUser(id: number): Promise<any>",
+        ] {
+            assert!(
+                api.contains(sig),
+                "api.ts 缺少标注返回类型的签名 `{sig}`，实际:\n{api}"
+            );
+        }
+
+        // ② 页面：导入前缀名 + `row-key` 用字符串属性名（不产生隐式 any）
+        let vue = files
+            .get("src/views/system/sys_user/index.vue")
+            .expect("缺少 index.vue");
+        assert!(
+            vue.contains(
+                "import { listSysUser, addSysUser, updateSysUser, delSysUser, submitFlowSysUser }"
+            ),
+            "页面必须导入带前缀的 API 函数，实际:\n{vue}"
+        );
+        assert!(
+            vue.contains("await listSysUser({})"),
+            "页面取列表必须调用带前缀的 API 函数，实际:\n{vue}"
+        );
+        assert!(
+            vue.contains("row-key=\"userId\""),
+            "row-key 应使用字符串属性名（避免隐式 any），实际:\n{vue}"
+        );
+        assert!(
+            !vue.contains(":row-key=\"(row) =>"),
+            "不得使用未标注类型的箭头函数作 row-key（TS7006），实际:\n{vue}"
+        );
+    }
 }

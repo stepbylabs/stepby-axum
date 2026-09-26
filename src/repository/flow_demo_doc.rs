@@ -119,15 +119,24 @@ impl FlowDemoDocRepository {
     }
 
     /// 批量取单据标题（已办视图展示用，W-8；一次 `IN` 查询避免 N+1）
+    ///
+    /// **必须带租户收敛**：`flow_demo_doc.tenant_id` 为提交时写入的申请人租户，
+    /// 而单据主键 `doc_id` 是全局自增——不带租户过滤虽不会串 id，
+    /// 但与他租户的 id 集合混查会形成越权可见面（与 `find_all_page` 同款纵深防御）。
+    /// 调用方传**该流水行自身的 `tenant_id`**（与单据提交时写入的一致）。
     pub async fn find_titles_by_ids(
         &self,
         doc_ids: Vec<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<std::collections::HashMap<i64, String>, DbErr> {
         if doc_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        Ok(FlowDemoDoc::find()
-            .filter(Column::DocId.is_in(doc_ids))
+        let mut query = FlowDemoDoc::find().filter(Column::DocId.is_in(doc_ids));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
+        Ok(query
             .all(self.base.db())
             .await?
             .into_iter()
