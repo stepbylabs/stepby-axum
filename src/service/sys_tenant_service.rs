@@ -25,11 +25,13 @@ use redis::aio::ConnectionManager;
 use sea_orm::sea_query::Expr;
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use utoipa::ToSchema;
 
 use crate::common::datetime::{self, now_naive};
 use crate::common::double_opt;
 use crate::common::error::ServiceError;
+use crate::common::features::FeatureSet;
 use crate::common::tenant::{
     TENANT_EXPIRE_GRACE_DAYS, TENANT_STATE_ACTIVE, TENANT_STATE_DISABLED, TENANT_STATE_GRACE,
     tenant_expire_key, tenant_state_key,
@@ -47,7 +49,9 @@ use crate::entity::sys_tenant::{
     ActiveModel as TenantActiveModel, Column as TenantColumn, Entity as SysTenant,
     Model as SysTenantModel,
 };
-use crate::entity::sys_tenant_package::{Column as PkgColumn, Entity as SysTenantPackage};
+use crate::entity::sys_tenant_package::{
+    ActiveModel as PkgActiveModel, Column as PkgColumn, Entity as SysTenantPackage,
+};
 use crate::entity::sys_user::{
     ActiveModel as SysUserActiveModel, Column as UserColumn, Entity as SysUser,
 };
@@ -133,6 +137,57 @@ pub(crate) async fn package_menu_whitelist_conn(
     Ok(parse_menu_ids(&package.menu_ids).map(|v| v.into_iter().collect()))
 }
 
+/// 套餐行 → **租户请求的能力位**（套餐 `features` JSON 净化后的覆盖集）。
+///
+/// 注意：这只是"这个租户想开什么"；**平台层是天花板**，最终有效值由
+/// [`effective_features_from_package`] / [`tenant_features_conn`] 取较保守者合成。
+pub(crate) fn package_feature_overrides(
+    package: Option<&crate::entity::sys_tenant_package::Model>,
+) -> FeatureSet {
+    FeatureSet::from_json(package.and_then(|p| p.features.as_deref()))
+}
+
+/// 有效能力集（**平台天花板 ∩ 套餐请求**）——由套餐行直接合成。
+///
+/// 供"租户尚未落库 / 尚未绑定套餐行"的初始化路径使用（无需回查租户行）。
+/// 平台层未开启的能力位，无论套餐写什么，结果恒为 `off`（见 `FeatureSet::narrowed_by`）。
+pub(crate) fn effective_features_from_package(
+    package: Option<&crate::entity::sys_tenant_package::Model>,
+) -> FeatureSet {
+    crate::common::features::platform_features().narrowed_by(&package_feature_overrides(package))
+}
+
+/// 租户**有效能力集**（按 `tenant_id` 回查套餐行）。
+///
+/// - `tenant_id == 0`（平台租户）→ 仅平台层；
+/// - 租户不存在 / 未绑定套餐 / 套餐已软删 → 仅平台层（未配置 = 跟随平台默认）；
+/// - 套餐 `features` 为空 / 非法 JSON → 仅平台层（**fail-closed**）。
+pub(crate) async fn tenant_features_conn(
+    conn: &impl ConnectionTrait,
+    tenant_id: i64,
+) -> Result<FeatureSet, DbErr> {
+    if tenant_id == 0 {
+        return Ok(crate::common::features::platform_features().clone());
+    }
+    let Some(tenant) = SysTenant::find()
+        .filter(TenantColumn::TenantId.eq(tenant_id))
+        .filter(TenantColumn::DelFlag.eq("0"))
+        .one(conn)
+        .await?
+    else {
+        return Ok(crate::common::features::platform_features().clone());
+    };
+    let Some(package_id) = tenant.package_id else {
+        return Ok(crate::common::features::platform_features().clone());
+    };
+    let package = SysTenantPackage::find()
+        .filter(PkgColumn::PackageId.eq(package_id))
+        .filter(PkgColumn::DelFlag.eq("0"))
+        .one(conn)
+        .await?;
+    Ok(effective_features_from_package(package.as_ref()))
+}
+
 /// 租户角色的**菜单上限** = （平台普通角色菜单 ∪ 租户自助按钮）∩ **可授予** ∩ 套餐白名单。
 ///
 /// - `include_self_service = true`：租户管理员角色用（`config`/`dict` 的 add/edit/remove
@@ -140,11 +195,13 @@ pub(crate) async fn package_menu_whitelist_conn(
 /// - `include_self_service = false`：租户**普通角色**用（OAuth 自动建号默认角色；
 ///   普通用户不应获得 config/dict 写权限）。
 ///
-/// "可授予"判定与角色授权门禁 `ensure_menu_filter_coverage` 同源
-/// （`common::tenant::is_grantable_perm`），保证"复制/收敛路径"与"授权路径"口径一致。
+/// "可授予"判定与角色授权门禁同源，且**带能力位**（`is_grantable_perm_with_features`）：
+/// 平台专属能力（域名管理等）仅在租户套餐对应能力位非 `off` 时才可随复制进入角色菜单，
+/// 否则复制即造出"菜单可见但请求 403"的假入口。
 pub(crate) async fn tenant_role_menu_ids(
     conn: &impl ConnectionTrait,
     whitelist: Option<&HashSet<i64>>,
+    features: &FeatureSet,
     include_self_service: bool,
 ) -> Result<Vec<i64>, DbErr> {
     let mut base_menu_ids: Vec<i64> = SysRoleMenu::find()
@@ -166,8 +223,8 @@ pub(crate) async fn tenant_role_menu_ids(
             .await?;
         base_menu_ids.extend(self_service_menu_ids);
     }
-    // 剔除**不可授予**菜单（平台专属前缀 ∪ tier2 未接过滤表）——租户侧不出现假入口，
-    // 也不带入"先授菜单后补过滤"的跨租户读窗口。
+    // 剔除**不可授予**菜单（平台专属前缀 ∪ tier2 未接过滤表，能力位未开启时平台专属项仍在
+    // 此列）——租户侧不出现假入口，也不带入"先授菜单后补过滤"的跨租户读窗口。
     let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
         .select_only()
         .column(MenuColumn::MenuId)
@@ -179,9 +236,10 @@ pub(crate) async fn tenant_role_menu_ids(
     let excluded_menu_ids: HashSet<i64> = menu_perms
         .into_iter()
         .filter(|(_, perms)| {
-            perms
-                .as_deref()
-                .is_some_and(|p| !p.is_empty() && !crate::common::tenant::is_grantable_perm(p))
+            perms.as_deref().is_some_and(|p| {
+                !p.is_empty()
+                    && !crate::common::features::is_grantable_perm_with_features(p, features)
+            })
         })
         .map(|(id, _)| id)
         .collect();
@@ -258,6 +316,8 @@ pub(crate) async fn resolve_default_role_for_tenant(
         .one(db)
         .await?;
     let whitelist = package_menu_whitelist_conn(db, tenant_id).await?;
+    // 有效能力集（平台天花板 ∩ 套餐）；复制菜单时按它决定平台专属 perms 是否可进角色
+    let features = tenant_features_conn(db, tenant_id).await?;
     let role_sort = template.as_ref().map(|r| r.role_sort).unwrap_or(2);
     let data_scope = template
         .as_ref()
@@ -278,8 +338,9 @@ pub(crate) async fn resolve_default_role_for_tenant(
             let role_name = role_name.clone();
             let data_scope = data_scope.clone();
             let whitelist = whitelist.clone();
+            let features = features.clone();
             Box::pin(async move {
-                let menu_ids = tenant_role_menu_ids(txn, whitelist.as_ref(), false).await?;
+                let menu_ids = tenant_role_menu_ids(txn, whitelist.as_ref(), &features, false).await?;
                 let am = SysRoleActiveModel {
                     role_id: NotSet,
                     tenant_id: Set(tenant_id),
@@ -449,6 +510,71 @@ pub struct TenantPackageOptionVo {
     pub package_name: String,
     /// 套餐默认账号数（NULL / 0 = 不限）
     pub default_account_count: i32,
+}
+
+/// 能力位注册项（管理面渲染用：能力位键 + 该套餐当前模式 + 注册表默认/允许模式）
+///
+/// 前端**不硬编码**能力位清单——一律由本 VO 渲染，保证与后端注册表单一事实源。
+#[derive(Debug, Clone, Serialize, TS, ToSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "PackageFeatureItemVo",
+    export_to = "PackageFeatureItemVo.ts",
+    rename_all = "camelCase"
+)]
+#[schema(as = PackageFeatureItemVo)]
+pub struct PackageFeatureItemVo {
+    /// 能力位键（`common::features::KNOWN_FEATURES` 注册表）
+    pub key: String,
+    /// 该套餐当前**请求**的模式（未显式配置时 = `defaultMode`）
+    pub mode: String,
+    /// 注册表默认模式（恒为 `off`，即"关闭态即安全态"）
+    pub default_mode: String,
+    /// 允许的模式集合（首项恒为 `off`）
+    pub modes: Vec<String>,
+}
+
+/// 套餐能力位配置视图（管理面；仅平台管理员）
+#[derive(Debug, Clone, Serialize, TS, ToSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "PackageFeaturesVo",
+    export_to = "PackageFeaturesVo.ts",
+    rename_all = "camelCase"
+)]
+#[schema(as = PackageFeaturesVo)]
+pub struct PackageFeaturesVo {
+    pub package_id: i64,
+    pub package_name: String,
+    /// 该套餐**显式覆盖**的能力位（key → mode）；未出现的键 = 跟随注册表默认（`off`）
+    pub overrides: std::collections::BTreeMap<String, String>,
+    /// 全量注册表 + 该套餐的当前模式
+    pub items: Vec<PackageFeatureItemVo>,
+    /// 平台层（`config.toml [features]`）已开启的能力位——**天花板**：
+    /// 未出现在此列表的能力位，套餐无法开启（开启即"假入口"，会被服务层拒绝）
+    pub platform_enabled: Vec<String>,
+}
+
+/// 套餐能力位更新入参（仅平台管理员）
+#[derive(Debug, Clone, Deserialize, TS, ToSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "PackageFeaturesUpdateDto",
+    export_to = "PackageFeaturesUpdateDto.ts",
+    rename_all = "camelCase"
+)]
+#[schema(as = PackageFeaturesUpdateDto)]
+pub struct PackageFeaturesUpdateDto {
+    pub package_id: i64,
+    /// 显式覆盖（key → mode）；传空对象 = 全部回落默认（全关闭）。
+    ///
+    /// 未登记键 / 非法模式 / 平台未开启项一律 **400 拒绝**（不静默净化），
+    /// 避免管理面出现"以为开了其实没开"的错觉。
+    #[serde(default)]
+    pub features: HashMap<String, String>,
 }
 
 /// 租户查询入参
@@ -686,6 +812,133 @@ impl SysTenantService {
             .collect())
     }
 
+    /// 读取套餐能力位配置（仅平台管理员）。
+    ///
+    /// 返回**全量注册表**（而非仅已配置项），使前端无需硬编码能力位清单；
+    /// 同时返回平台层已开启项（天花板），前端可据此禁用"平台未开"的开关。
+    pub async fn package_features(
+        &self,
+        package_id: i64,
+        operator_tid: i64,
+    ) -> Result<PackageFeaturesVo, ServiceError> {
+        Self::ensure_platform_operator(operator_tid)?;
+        let package = self.load_package(package_id).await?;
+        Ok(Self::build_package_features_vo(&package))
+    }
+
+    /// 设置套餐能力位（仅平台管理员）。
+    ///
+    /// 三道校验（任一不过即 400，**不静默净化**——管理面配置必须"所见即所得"）：
+    /// ① key 已在 `KNOWN_FEATURES` 登记；② mode 在该能力位的允许集合内；
+    /// ③ 非 `off` 的项必须在平台层 `[features]` 已开启（否则形成"租户开了但平台没开"的假入口）。
+    ///
+    /// 写入后**立即收敛**该套餐下所有租户的角色菜单授权：关闭能力位必须同步回收原先随能力位
+    /// 下放的平台专属菜单（否则残留授权形成"菜单可见但请求 403"）。套餐是跨租户共享的，
+    /// 故收敛按"绑定该套餐的全部租户"逐个执行。
+    pub async fn set_package_features(
+        &self,
+        dto: PackageFeaturesUpdateDto,
+        operator: &str,
+        operator_tid: i64,
+    ) -> Result<PackageFeaturesVo, ServiceError> {
+        use crate::common::features::{FEATURE_OFF, FeatureSet, is_valid_mode, platform_features};
+        Self::ensure_platform_operator(operator_tid)?;
+        let package = self.load_package(dto.package_id).await?;
+
+        for (key, mode) in &dto.features {
+            if !is_valid_mode(key, mode) {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.tenant.feature_invalid",
+                    key = key,
+                    mode = mode
+                )));
+            }
+            if mode != FEATURE_OFF && !platform_features().is_on(key) {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.tenant.feature_platform_disabled",
+                    key = key
+                )));
+            }
+        }
+
+        let platform = platform_features();
+        // 与平台层**同一模式**的显式项是无信息量的（平台是天花板，"未配置 = 跟随平台"
+        // 与"显式写成与平台相同"行为完全一致），剔除后保持最小显式集、便于 diff 审计。
+        // 注意：与平台**不同**的项一律保留（含显式 `off`——它是租户主动收窄，必须落库）。
+        let set = FeatureSet::sanitized(
+            dto.features
+                .iter()
+                .filter(|(k, v)| platform.mode(k) != v.as_str())
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        // 全默认（全关闭）时落 NULL：与存量行语义一致（`NULL` / `{}` 均 = 全默认）
+        let mut am: PkgActiveModel = package.into();
+        am.features = Set(if set.is_default() {
+            None
+        } else {
+            Some(set.to_json())
+        });
+        am.update_by = Set(Some(operator.to_string()));
+        am.update_time = Set(Some(now_naive()));
+        SysTenantPackage::update(am).exec(self.db()).await?;
+
+        let updated = self.load_package(dto.package_id).await?;
+        let tenant_ids: Vec<i64> = SysTenant::find()
+            .select_only()
+            .column(TenantColumn::TenantId)
+            .filter(TenantColumn::PackageId.eq(dto.package_id))
+            .filter(TenantColumn::DelFlag.eq("0"))
+            .into_tuple::<i64>()
+            .all(self.db())
+            .await?;
+        for tid in tenant_ids {
+            self.converge_tenant_role_menus(tid, &updated).await?;
+        }
+
+        Ok(Self::build_package_features_vo(&updated))
+    }
+
+    /// 组装套餐能力位视图（注册表 + 当前模式 + 平台天花板）
+    fn build_package_features_vo(
+        package: &crate::entity::sys_tenant_package::Model,
+    ) -> PackageFeaturesVo {
+        use crate::common::features::{KNOWN_FEATURES, platform_features};
+        let overrides = package_feature_overrides(Some(package));
+        let platform = platform_features();
+        PackageFeaturesVo {
+            package_id: package.package_id,
+            package_name: package.package_name.clone(),
+            overrides: overrides.overrides().clone(),
+            items: KNOWN_FEATURES
+                .iter()
+                .map(|def| PackageFeatureItemVo {
+                    key: def.key.to_string(),
+                    mode: overrides.mode(def.key).to_string(),
+                    default_mode: def.default_mode.to_string(),
+                    modes: def.modes.iter().map(|m| (*m).to_string()).collect(),
+                })
+                .collect(),
+            platform_enabled: KNOWN_FEATURES
+                .iter()
+                .filter(|def| platform.is_on(def.key))
+                .map(|def| def.key.to_string())
+                .collect(),
+        }
+    }
+
+    /// 加载套餐行（未找到 / 已软删 → 404）
+    async fn load_package(
+        &self,
+        package_id: i64,
+    ) -> Result<crate::entity::sys_tenant_package::Model, ServiceError> {
+        SysTenantPackage::find()
+            .filter(PkgColumn::PackageId.eq(package_id))
+            .filter(PkgColumn::DelFlag.eq("0"))
+            .one(self.db())
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.not_found")))
+    }
+
     /// 租户详情（operator_tid≠0 时仅允许查本租户）
     pub async fn get_info(
         &self,
@@ -698,7 +951,6 @@ impl SysTenantService {
         vos.pop()
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.not_found")))
     }
-
     /// 把租户行批量组装为 Vo（根部门展示字段 + 套餐名 + 用户数，批量查询避免 N+1）
     async fn build_vos(&self, tenants: Vec<SysTenantModel>) -> Result<Vec<TenantVo>, ServiceError> {
         if tenants.is_empty() {
@@ -866,6 +1118,9 @@ impl SysTenantService {
             .unwrap_or(0)
             .max(0);
         let package_whitelist = package.as_ref().and_then(|p| parse_menu_ids(&p.menu_ids));
+        // 有效能力集（平台天花板 ∩ 套餐请求）：决定平台专属 perms 是否可随复制进入
+        // 租户角色菜单（关闭态 = 现状 = 一律剔除，杜绝"菜单可见但请求 403"的假入口）。
+        let tenant_features = effective_features_from_package(package.as_ref());
 
         // 管理员用户名全局唯一（决策 4：user_name 保持全局唯一）
         let admin_user_name = format!("{tenant_code}_admin");
@@ -976,7 +1231,7 @@ impl SysTenantService {
                         let whitelist: Option<HashSet<i64>> = package_whitelist
                             .as_ref()
                             .map(|names| names.iter().copied().collect());
-                        tenant_role_menu_ids(txn, whitelist.as_ref(), true).await?
+                        tenant_role_menu_ids(txn, whitelist.as_ref(), &tenant_features, true).await?
                     };
                     let role_am = SysRoleActiveModel {
                         role_id: sea_orm::NotSet,
@@ -1233,29 +1488,24 @@ impl SysTenantService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.not_found")))
     }
 
-    /// 套餐变更收敛：删除该租户所有角色中「不在新套餐白名单内」的菜单授权
-    /// （套餐 menu_ids 为空 = 不限制，则无需收敛）
-    async fn converge_tenant_role_menus(
+    /// 套餐变更收敛：删除该租户所有角色中「不在套餐白名单内」或「已不可授予」的菜单授权。
+    ///
+    /// 两个触发面：
+    /// - **白名单改小**（`menu_ids`）：裁剪超出套餐的菜单（`menu_ids` 为空 = 不限制，不裁剪）；
+    /// - **能力位关闭**（`features`，如关掉 `tenant.domain_self_service`）：回收原先随能力位
+    ///   下放的平台专属菜单。**此面与 `menu_ids` 无关**——即使套餐不限制菜单也必须收敛，
+    ///   否则残留授权形成"菜单可见但请求 403"的假入口。
+    ///
+    /// `pub(crate)`：集成测试直接驱动本收敛面（`capability_features` 模块）。
+    pub(crate) async fn converge_tenant_role_menus(
         &self,
         tenant_id: i64,
         package: &crate::entity::sys_tenant_package::Model,
     ) -> Result<(), ServiceError> {
-        let Some(whitelist) = parse_menu_ids(&package.menu_ids) else {
-            return Ok(());
-        };
-        let role_ids: Vec<i64> = SysRole::find()
-            .select_only()
-            .column(RoleColumn::RoleId)
-            .filter(RoleColumn::TenantId.eq(tenant_id))
-            .filter(RoleColumn::DelFlag.eq("0"))
-            .into_tuple::<i64>()
-            .all(self.db())
-            .await?;
-        if role_ids.is_empty() {
-            return Ok(());
-        }
-        // 不可授予菜单（平台专属前缀 ∪ tier2 未接过滤表）——与角色授权门禁同源
-        // （`is_grantable_perm`），套餐变更时一并移除，不把"收敛"只做成白名单裁剪。
+        let whitelist = parse_menu_ids(&package.menu_ids);
+        // 不可授予菜单（平台专属前缀 ∪ tier2 未接过滤表，**带能力位判定**）——与角色授权
+        // 门禁同源，套餐变更时一并移除，不把"收敛"只做成白名单裁剪。
+        let features = effective_features_from_package(Some(package));
         let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
             .select_only()
             .column(MenuColumn::MenuId)
@@ -1267,26 +1517,45 @@ impl SysTenantService {
         let ungradable_ids: Vec<i64> = menu_perms
             .into_iter()
             .filter(|(_, perms)| {
-                perms
-                    .as_deref()
-                    .is_some_and(|p| !p.is_empty() && !crate::common::tenant::is_grantable_perm(p))
+                perms.as_deref().is_some_and(|p| {
+                    !p.is_empty()
+                        && !crate::common::features::is_grantable_perm_with_features(p, &features)
+                })
             })
             .map(|(id, _)| id)
             .collect();
+        // 两个收敛面都为空 ⇒ 无需删任何东西（也避免空 `Condition::any()` 的语义歧义）
+        if whitelist.is_none() && ungradable_ids.is_empty() {
+            return Ok(());
+        }
+        let role_ids: Vec<i64> = SysRole::find()
+            .select_only()
+            .column(RoleColumn::RoleId)
+            .filter(RoleColumn::TenantId.eq(tenant_id))
+            .filter(RoleColumn::DelFlag.eq("0"))
+            .into_tuple::<i64>()
+            .all(self.db())
+            .await?;
+        if role_ids.is_empty() {
+            return Ok(());
+        }
+        let mut predicate =
+            sea_orm::Condition::any().add(RoleMenuColumn::MenuId.is_in(ungradable_ids.clone()));
+        if let Some(ref wl) = whitelist {
+            predicate = predicate.add(RoleMenuColumn::MenuId.is_not_in(wl.clone()));
+        }
         let deleted = SysRoleMenu::delete_many()
             .filter(RoleMenuColumn::RoleId.is_in(role_ids.clone()))
-            .filter(
-                sea_orm::Condition::any()
-                    .add(RoleMenuColumn::MenuId.is_not_in(whitelist.to_vec()))
-                    .add(RoleMenuColumn::MenuId.is_in(ungradable_ids)),
-            )
+            .filter(predicate)
             .exec(self.db())
             .await?;
         tracing::info!(
             tenant_id,
             roles = role_ids.len(),
             removed = deleted.rows_affected,
-            "套餐变更收敛：已移除超出套餐白名单的角色菜单授权"
+            whitelist_trimmed = whitelist.is_some(),
+            ungrantable = ungradable_ids.len(),
+            "套餐变更收敛：已移除超出套餐白名单 / 已不可授予的角色菜单授权"
         );
         Ok(())
     }

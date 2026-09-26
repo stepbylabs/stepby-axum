@@ -244,8 +244,9 @@ impl SysRoleService {
 
     /// §27.13.4 授予前门禁：待授予租户角色的菜单 perms 必须"可授予"。
     ///
-    /// 不可授予的两种情况（见 `common::tenant::ensure_menu_filter_coverage`）：
-    /// ① 平台专属能力前缀（`is_platform_only_perm`，如 `system:backup:*` / `monitor:log:*`）；
+    /// 不可授予的情况（见 `common::features::is_grantable_perm_with_features`）：
+    /// ① 平台专属能力前缀（`is_platform_only_perm`，如 `system:backup:*` / `monitor:log:*`）
+    ///    ——**除非**租户有效能力位（平台天花板 ∩ 套餐）已显式解锁该项；
     /// ② 命中 tier2 的 perms（表带 tenant_id 但集合读路径未接过滤）。
     ///
     /// `effective_tid == 0`（平台角色授权）不受限；目录 / 无 perms 的菜单天然通过。
@@ -257,17 +258,24 @@ impl SysRoleService {
         if effective_tid == 0 || menu_ids.is_empty() {
             return Ok(());
         }
+        // 有效能力位：三层开关的中间层（平台 `[features]` 为天花板 ∩ 租户套餐
+        // `sys_tenant_package.features`）。全 `off` 时与本门禁原语义逐条等价。
+        let features =
+            crate::service::sys_tenant_service::tenant_features_conn(self.db(), effective_tid)
+                .await?;
         let rows = self.menu_repo.find_perms_by_ids(menu_ids).await?;
         let perms_list: Vec<&str> = rows
             .iter()
             .filter_map(|(_, perms)| perms.as_deref())
             .filter(|p| !p.is_empty())
             .collect();
-        if let Err(offender) = crate::common::tenant::ensure_menu_filter_coverage(perms_list) {
+        if let Err(offender) = crate::common::features::ensure_menu_filter_coverage_with_features(
+            perms_list, &features,
+        ) {
             tracing::warn!(
                 tenant_id = effective_tid,
                 perms = %offender,
-                "拒绝向租户角色授予不可授予菜单（平台专属 / tier2 未过滤，§27.13.4）"
+                "拒绝向租户角色授予不可授予菜单（平台专属未解锁 / tier2 未过滤，§27.13.4）"
             );
             return Err(ServiceError::forbidden(&crate::tr!(
                 "error.tenant.menu_filter_uncovered",

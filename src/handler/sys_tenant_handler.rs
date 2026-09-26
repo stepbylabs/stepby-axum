@@ -17,8 +17,8 @@ use std::sync::Arc;
 use crate::common::{AjaxResult, AppError};
 use crate::middleware::{Operator, TargetTenant};
 use crate::service::sys_tenant_service::{
-    SysTenantService, TenantAddDto, TenantEditDto, TenantPackageOptionVo, TenantQueryDto,
-    TenantStatusDto, TenantVo,
+    PackageFeaturesUpdateDto, PackageFeaturesVo, SysTenantService, TenantAddDto, TenantEditDto,
+    TenantPackageOptionVo, TenantQueryDto, TenantStatusDto, TenantVo,
 };
 use crate::state::AppState;
 
@@ -223,6 +223,57 @@ pub async fn package_options(
         .package_options(operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(list))
+}
+
+/// GET /system/tenant/package/{packageId}/features — 套餐能力位配置（仅平台管理员）
+#[utoipa::path(
+    get,
+    path = "/system/tenant/package/{packageId}/features",
+    params(("packageId" = i64, Path, description = "套餐 ID")),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<PackageFeaturesVo>),
+        (status = 403, description = "仅平台管理员可查询套餐能力位"),
+        (status = 404, description = "套餐不存在"),
+    ),
+    tag = "system-tenant"
+)]
+pub async fn package_features(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(package_id): Path<i64>,
+) -> Result<AjaxResult<PackageFeaturesVo>, AppError> {
+    let vo = state
+        .tenant_service
+        .package_features(package_id, operator.tenant_id())
+        .await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// PUT /system/tenant/package/features — 设置套餐能力位（仅平台管理员）
+///
+/// 写入后立即收敛该套餐下全部租户的角色菜单授权（关闭能力位需回收菜单，避免假入口）。
+#[utoipa::path(
+    put,
+    path = "/system/tenant/package/features",
+    request_body = PackageFeaturesUpdateDto,
+    responses(
+        (status = 200, description = "保存成功（返回保存后的完整配置）", body = AjaxResult<PackageFeaturesVo>),
+        (status = 400, description = "能力位键未登记 / 模式非法 / 平台未开启该项"),
+        (status = 403, description = "仅平台管理员可配置套餐能力位"),
+        (status = 404, description = "套餐不存在"),
+    ),
+    tag = "system-tenant"
+)]
+pub async fn set_package_features(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Json(dto): Json<PackageFeaturesUpdateDto>,
+) -> Result<AjaxResult<PackageFeaturesVo>, AppError> {
+    let vo = state
+        .tenant_service
+        .set_package_features(dto, operator.username(), operator.tenant_id())
+        .await?;
+    Ok(AjaxResult::success(vo))
 }
 
 /// 供 router 挂载的类型自检（避免 unused import 告警）

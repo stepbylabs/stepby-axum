@@ -8,6 +8,7 @@ pub mod double_opt;
 pub mod error;
 pub mod excel;
 pub mod extract;
+pub mod features;
 pub mod i18n;
 pub mod image;
 pub mod page;

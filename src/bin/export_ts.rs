@@ -57,6 +57,8 @@ fn main() {
         axum_backend::entity::sys_report::Model,
         axum_backend::entity::sys_report_sub::Model,
         axum_backend::entity::sys_role::Model,
+        axum_backend::entity::sys_tenant::Model,
+        axum_backend::entity::sys_tenant_package::Model,
         axum_backend::entity::sys_user::Model,
         axum_backend::entity::sys_user_pref::Model,
         axum_backend::entity::sys_web_hook::Model,
@@ -91,6 +93,10 @@ fn main() {
         axum_backend::service::sys_user_service::UserFormVo,
         // ---- service：审批工作流（W-8 已办视图行） ----
         axum_backend::service::sys_flow_service::FlowDoneVo,
+        // ---- service：租户套餐能力位（三层开关中间层，管理面） ----
+        axum_backend::service::sys_tenant_service::PackageFeatureItemVo,
+        axum_backend::service::sys_tenant_service::PackageFeaturesVo,
+        axum_backend::service::sys_tenant_service::PackageFeaturesUpdateDto,
     );
 
     if !failed.is_empty() {

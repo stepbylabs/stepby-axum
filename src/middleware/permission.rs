@@ -385,6 +385,17 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // ===== 租户管理（多租户 Phase 3：主键 tenantId，事实源 sys_tenant） =====
     ("GET", "/system/tenant/list", "system:tenant:list"),
     ("GET", "/system/tenant/package/options", "system:tenant:list"),
+    // 套餐能力位（三层开关中间层）：读写走租户管理权限，服务层再校验仅平台操作者
+    (
+        "GET",
+        "/system/tenant/package/{packageId}/features",
+        "system:tenant:list",
+    ),
+    (
+        "PUT",
+        "/system/tenant/package/features",
+        "system:tenant:edit",
+    ),
     ("GET", "/system/tenant/{tenantId}", "system:tenant:query"),
     ("POST", "/system/tenant", "system:tenant:add"),
     ("PUT", "/system/tenant", "system:tenant:edit"),
@@ -1283,6 +1294,8 @@ mod tests {
             // sys_tenant_router
             ("GET", "/system/tenant/list"),
             ("GET", "/system/tenant/package/options"),
+            ("GET", "/system/tenant/package/{packageId}/features"),
+            ("PUT", "/system/tenant/package/features"),
             ("GET", "/system/tenant/{tenantId}"),
             ("POST", "/system/tenant"),
             ("PUT", "/system/tenant"),

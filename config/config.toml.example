@@ -167,3 +167,29 @@ escalate_after_hours = 72      # 超时升级主管阈值（小时）；0 = 关�
 scan_batch_limit = 200         # 单轮扫描最多处理的任务数（分页限量）
 scan_lock_enabled = false      # S-1 分布式扫描锁；**单实例部署保持 false**，多实例部署须置 true
 scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描最坏耗时，防并发窗口重现
+
+# ==================== 能力位（Feature Flags，三层开关的最外层）====================
+# 定位：本项目「大而全」，能力齐备但**默认安全**——高危能力默认关闭，按需显式开启。
+# 三层收敛：平台 [features]（能开什么）→ 租户套餐 sys_tenant_package.features
+#          （这个租户能开什么）→ 角色授权（这个人能用什么）。
+#
+# 取值规则：
+#   - 键与合法模式由代码注册表 `src/common/features.rs::KNOWN_FEATURES` 定义（单一事实源）；
+#     未登记键、非法模式在启动时被**剔除并告警**（fail-closed，不会意外开启）。
+#   - 开关取「模式」而非裸 bool；`off` = 关闭态 = 与迁移前行为完全一致。
+#   - 本段缺省（整段省略或全为 off）= 全关闭。
+#
+# 本段是**平台层开关**：即使在此开启，租户仍需在套餐 features 中显式开启，权限才可下放。
+#
+# ⚠️ 能力位键**含点号**，TOML 中必须加引号（不加引号会被解析成嵌套表而整段解析失败）。
+[features]
+# 租户域名自助管理（默认 off）——开启后租户管理员可管理**本租户**域名；
+# 需服务层按 tid 收窄 + 租户套餐同时开启，否则"菜单可见但请求 403"的假入口仍被拦截。
+"tenant.domain_self_service" = "off"
+# 备份中心只读可见（默认 off）——开启后租户可授只读子权限（不含下载/恢复/删除）
+"backup.readonly_visible" = "off"
+# 租户自助导出（默认 off）——开启后租户可导出**本租户**数据包
+"backup.tenant_self_export" = "off"
+# 租户自建导航 L3（默认 off）：off | view_only | full
+#   view_only = 仅可查看平台预置的 L3 导航；full = 可在套餐∩角色授权范围内自建导航项
+"nav.l3" = "off"

@@ -61,6 +61,13 @@ pub struct Settings {
     /// 审批工作流配置（m20260923_000002；cron 为空 = 禁用超时扫描）
     #[serde(default)]
     pub flow: FlowConfig,
+    /// 平台层**能力位**默认值（三层开关的最外层：能开什么）。
+    ///
+    /// 键 = `crate::common::features::KNOWN_FEATURES` 登记的能力位键，值 = 模式串
+    /// （如 `off` / `view_only` / `full`）。未登记键与非法模式在启动时被剔除并告警。
+    /// **缺省 `{}` = 全关闭**（默认值 = 现状 = 关闭态即安全态）。
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -85,9 +92,21 @@ impl fmt::Debug for Settings {
             .field("pat", &self.pat)
             .field("sso", &self.sso)
             .field("flow", &self.flow)
+            .field("features", &self.features)
             .finish()
     }
 }
+
+/// 平台层能力位默认值（`config.toml` 的 `[features]` 段）。
+///
+/// `#[serde(transparent)]` + `BTreeMap`：TOML 里就是一个扁平表
+/// （`nav.l3 = "off"`），无嵌套层级；`BTreeMap` 保证序列化顺序稳定。
+///
+/// 单一事实源仍是 `crate::common::features::KNOWN_FEATURES`——本结构只承载
+/// **平台层的显式覆盖**，未写在此处的能力位一律走注册表默认（`off`）。
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(transparent)]
+pub struct FeaturesConfig(pub std::collections::BTreeMap<String, String>);
 
 /// 系统日志保留策略配置（M2：操作日志 / 登录日志定期归档清理）
 ///
@@ -1076,6 +1095,7 @@ impl Settings {
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
             sys_log: SysLogConfig::default(),
+            features: FeaturesConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -1210,6 +1230,7 @@ mod tests {
             permission_deny_by_default: true,
             flow: FlowConfig::default(),
             sys_log: SysLogConfig::default(),
+            features: FeaturesConfig::default(),
         }
     }
 
@@ -1292,6 +1313,52 @@ mod tests {
         );
     }
 
+    /// 能力位缺省必须"全关闭"（**关闭态即安全态**）
+    ///
+    /// 三层开关的最外层（平台 `config`）是"能开什么"的唯一入口：一旦入库模板里
+    /// 预置了能力位，所有租户的默认姿态就被悄悄抬高了。故锁死两点：
+    /// ① 结构体缺省 = 空覆盖表 ⇒ 全部走注册表默认（`off`）；
+    /// ② 入库模板（`config.toml.example` 及本机存在的 `config.toml.prod`）不得预置任何
+    ///    非 `off` 的能力位。
+    #[test]
+    fn test_features_default_to_all_off() {
+        use crate::common::features::{FEATURE_OFF, FeatureSet, KNOWN_FEATURES};
+
+        let cfg = FeaturesConfig::default();
+        assert!(
+            cfg.0.is_empty(),
+            "FeaturesConfig 缺省必须为空表（全走注册表默认 off）"
+        );
+        let set = FeatureSet::sanitized(cfg.0.clone());
+        for def in KNOWN_FEATURES {
+            assert_eq!(
+                set.mode(def.key),
+                FEATURE_OFF,
+                "{} 在平台层缺省下必须为 off",
+                def.key
+            );
+        }
+
+        for path in ["config/config.toml.example", "config/config.toml.prod"] {
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) if path.ends_with(".example") => panic!("{path} 缺失（入库模板必须存在）"),
+                Err(_) => continue,
+            };
+            let s: Settings =
+                toml::from_str(&content).unwrap_or_else(|e| panic!("{path} TOML 解析失败: {e}"));
+            let set = FeatureSet::sanitized(s.features.0.clone());
+            for def in KNOWN_FEATURES {
+                assert_eq!(
+                    set.mode(def.key),
+                    FEATURE_OFF,
+                    "{path} 不得预置能力位 {}（默认必须为 off）",
+                    def.key
+                );
+            }
+        }
+    }
+
     /// 验证 Settings Debug 输出不泄漏 config_enc_key
     #[test]
     fn test_settings_debug_redacts_config_enc_key() {
@@ -1347,6 +1414,7 @@ mod tests {
             permission_deny_by_default: true,
             flow: FlowConfig::default(),
             sys_log: SysLogConfig::default(),
+            features: FeaturesConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);
