@@ -476,6 +476,39 @@ impl JobScheduler {
                 let config = flow_scan_config.clone();
                 let mut redis = flow_scan_redis.clone();
                 Box::pin(async move {
+                    // S-1：可选**分布式扫描锁**（`config.flow.scan_lock_enabled`，默认 false）。
+                    // 默认关闭 = 接受单实例部署假设（逐任务 SETNX 已防重复提醒）；
+                    // 多实例部署置 true 后，同一时刻仅一个实例执行整轮扫描 + 尾部巡检。
+                    // 释放走 Lua CAS（release_lock），避免误删其他实例持有的锁。
+                    let lock_key = "lock:scheduler:flow_timeout_scan";
+                    let lock_value = uuid::Uuid::new_v4().to_string();
+                    if config.flow.scan_lock_enabled {
+                        let acquired: Result<Option<String>, _> = redis::cmd("SET")
+                            .arg(lock_key)
+                            .arg(&lock_value)
+                            .arg("NX")
+                            .arg("EX")
+                            .arg(config.flow.scan_lock_ttl_secs)
+                            .query_async(&mut redis)
+                            .await;
+                        match acquired {
+                            Ok(Some(_)) => {}
+                            Ok(None) => {
+                                tracing::info!(
+                                    "flow_timeout_scan: 其他实例正在执行扫描（锁被持有），跳过本次调度"
+                                );
+                                return;
+                            }
+                            Err(e) => {
+                                // fail-closed：多实例下重复提醒/重复巡检的代价高于漏扫一轮
+                                // （下一轮 cron 会重试），故 Redis 故障时不降级执行。
+                                tracing::error!(
+                                    "flow_timeout_scan: 扫描锁获取失败（Redis 故障），跳过本次调度: {e}"
+                                );
+                                return;
+                            }
+                        }
+                    }
                     let msg_service = crate::service::sys_msg_service::SysMsgService::new(
                         db.clone(),
                         config.clone(),
@@ -490,17 +523,29 @@ impl JobScheduler {
                         .await
                     {
                         Ok(outcome) => {
-                            if outcome.reminded > 0 {
+                            if outcome.reminded > 0 || outcome.escalated > 0 {
                                 tracing::info!(
-                                    "flow_timeout_scan: 本轮超时提醒 {} 条（去重跳过 {} 条）",
+                                    "flow_timeout_scan: 本轮超时提醒 {} 条 / 升级提醒 {} 条（去重跳过 {} 条）",
                                     outcome.reminded,
+                                    outcome.escalated,
                                     outcome.skipped
+                                );
+                            }
+                            // W-9：一致性巡检并入本 Job 尾部（漂移仅告警，明细见 service 日志）
+                            if outcome.drift > 0 {
+                                tracing::warn!(
+                                    "flow_timeout_scan: 一致性巡检发现 {} 条漂移（单据 status 与 task 聚合不一致）",
+                                    outcome.drift
                                 );
                             }
                         }
                         Err(e) => {
                             tracing::error!("flow_timeout_scan 执行失败: {}", e.message);
                         }
+                    }
+                    // S-1：释放扫描锁（CAS，仅本实例持有才删除）
+                    if config.flow.scan_lock_enabled {
+                        release_lock(&mut redis, lock_key, &lock_value).await;
                     }
                 })
             })
@@ -515,10 +560,16 @@ impl JobScheduler {
                 ))
             })?;
             tracing::info!(
-                "内置定时任务注册成功: flow_timeout_scan (cron: '{}', 单批上限 {} 条, SLA {}h)",
+                "内置定时任务注册成功: flow_timeout_scan (cron: '{}', 单批上限 {} 条, SLA {}h, 升级阈值 {}h, 分布式扫描锁: {})",
                 config.flow.timeout_scan_cron,
                 config.flow.scan_batch_limit,
-                config.flow.timeout_hours
+                config.flow.timeout_hours,
+                config.flow.escalate_after_hours,
+                if config.flow.scan_lock_enabled {
+                    format!("启用（TTL {}s）", config.flow.scan_lock_ttl_secs)
+                } else {
+                    "未启用（单实例假设）".to_string()
+                }
             );
         }
 

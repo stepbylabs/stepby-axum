@@ -42,3 +42,12 @@ export function del{{ table.className }}(id: number) {
     method: 'delete'
   })
 }
+{% if is_flow %}
+// 提交审批{{ table.functionName }}（flow 模板：单据进入审批引擎）
+export function submitFlow{{ table.className }}(id: number) {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/submit/' + id,
+    method: 'post'
+  })
+}
+{% endif %}

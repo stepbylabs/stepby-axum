@@ -14,4 +14,5 @@ pub fn {{ table.tableName | camel_case }}_routes() -> Router<Arc<AppState>> {
         .route("/{{ table.moduleName }}/{{ table.tableName }}", post({{ table.tableName }}_handler::add))
         .route("/{{ table.moduleName }}/{{ table.tableName }}", put({{ table.tableName }}_handler::edit))
         .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", delete({{ table.tableName }}_handler::remove))
-}
+{% if is_flow %}        .route("/{{ table.moduleName }}/{{ table.tableName }}/submit/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", post({{ table.tableName }}_handler::submit_flow))
+{% endif %}}

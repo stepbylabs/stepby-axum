@@ -47,6 +47,31 @@ impl SysFlowLogRepository {
             .await
     }
 
+    /// 「已办」分页：我作为**审批人**处理过的流水（W-8）
+    ///
+    /// 口径：`operator_id = 我` 且 `action ∈ {approve, reject}`（即裁决类动作）；
+    /// 提交/撤回/重提交/转办/加签属"发起侧或流转动作"，不计入"我审批过的"。
+    /// 索引 `idx_flow_log_operator (operator_id, acted_at)`（W-12）完全覆盖本查询。
+    pub async fn find_done_page(
+        &self,
+        operator_id: i64,
+        offset: u64,
+        limit: u64,
+    ) -> Result<(Vec<Model>, u64), DbErr> {
+        let query = SysFlowLog::find()
+            .filter(Column::OperatorId.eq(operator_id))
+            .filter(Column::Action.is_in(vec!["approve", "reject"]));
+        let total = query.clone().count(self.base.db()).await?;
+        let rows = query
+            .order_by_desc(Column::ActedAt)
+            .order_by_desc(Column::LogId)
+            .offset(offset)
+            .limit(limit)
+            .all(self.base.db())
+            .await?;
+        Ok((rows, total))
+    }
+
     /// 追加一条流水
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

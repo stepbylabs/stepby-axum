@@ -40,7 +40,7 @@ pub struct Settings {
     /// 公开路由（/login /health /ws /swagger-ui / 等）不受影响；
     /// ②在 TOML 中本键位于**顶层**，必须写在任何 `[table]` 段之前，
     /// 否则会被解析进上一张表（如 `[log]`）而被静默忽略（曾发生，见单测
-    /// `test_shipped_configs_are_fail_closed`）。
+    /// `test_shipped_config_template_is_fail_closed`）。
     #[serde(default = "default_deny_by_default")]
     pub permission_deny_by_default: bool,
     /// 可观测性监控配置（慢请求阈值 / 缓冲容量 / Prometheus 指标 token）
@@ -633,11 +633,33 @@ pub struct FlowConfig {
     #[serde(default = "default_flow_timeout_hours")]
     pub timeout_hours: i64,
     /// 同一任务的重复提醒间隔（秒，Redis SETNX TTL；默认 3600）
+    ///
+    /// W-7 起语义收窄为"**首次提醒**的多实例互斥窗口"：提醒只发一次
+    /// （DB `last_reminded_at` 为事实源），后续不再重复打扰（待办红点常驻由列表承担）。
     #[serde(default = "default_flow_remind_interval")]
     pub remind_interval_secs: u64,
+    /// 升级提醒阈值（小时；默认 72；**0 = 关闭升级**）
+    ///
+    /// 待办超时超过该时长仍 pending 时，额外提醒一次**申请人部门主管**（不可用时回退 admin），
+    /// 形成"首次提醒本人 → 超 N 天升级主管"的闭环（W-7 推荐策略）。
+    #[serde(default = "default_flow_escalate_after_hours")]
+    pub escalate_after_hours: i64,
     /// 单次扫描最多处理的任务数（分页限量，防止超出任务超时上限）
     #[serde(default = "default_flow_scan_batch")]
     pub scan_batch_limit: u64,
+    /// 是否启用**分布式扫描锁**（S-1；默认 `false` = 接受单实例部署假设）
+    ///
+    /// 单实例部署下无需锁：逐任务 `SET NX` 已能防止重复提醒。多实例部署时须置 `true`，
+    /// 否则多实例会**同时**执行整轮扫描（逐任务去重只能收窄不能消除重复提醒/巡检开销）。
+    /// 锁 key 为 `lock:scheduler:flow_timeout_scan`，释放走 Lua CAS（防误删他实例的锁）。
+    #[serde(default = "default_flow_scan_lock_enabled")]
+    pub scan_lock_enabled: bool,
+    /// 分布式扫描锁 TTL（秒；默认 300 = 5 分钟）
+    ///
+    /// 必须**大于**单轮扫描的最坏耗时（`scan_batch_limit` 条任务的提醒 + 巡检），
+    /// 否则锁提前过期会导致并发窗口重现；同理过大会在实例崩溃后延长恢复窗口。
+    #[serde(default = "default_flow_scan_lock_ttl")]
+    pub scan_lock_ttl_secs: u64,
 }
 
 fn default_flow_scan_cron() -> String {
@@ -652,8 +674,17 @@ fn default_flow_timeout_hours() -> i64 {
 fn default_flow_remind_interval() -> u64 {
     3600
 }
+fn default_flow_escalate_after_hours() -> i64 {
+    72
+}
 fn default_flow_scan_batch() -> u64 {
     200
+}
+fn default_flow_scan_lock_enabled() -> bool {
+    false
+}
+fn default_flow_scan_lock_ttl() -> u64 {
+    300
 }
 
 impl Default for FlowConfig {
@@ -663,7 +694,10 @@ impl Default for FlowConfig {
             enabled: default_flow_scan_enabled(),
             timeout_hours: default_flow_timeout_hours(),
             remind_interval_secs: default_flow_remind_interval(),
+            escalate_after_hours: default_flow_escalate_after_hours(),
             scan_batch_limit: default_flow_scan_batch(),
+            scan_lock_enabled: default_flow_scan_lock_enabled(),
+            scan_lock_ttl_secs: default_flow_scan_lock_ttl(),
         }
     }
 }
@@ -1228,6 +1262,34 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 1, "至少应校验 config/config.toml.example");
+    }
+
+    /// S-1：分布式扫描锁缺省必须**关闭**（明确接受单实例部署假设）
+    ///
+    /// 与 W-1 相反方向：扫描锁开启时对 Redis 采用 fail-closed，若缺省就开启，
+    /// 单实例部署遇到 Redis 抖动会**停止**超时提醒（业务可见的功能倒退）。
+    /// 故缺省 false；多实例部署须显式置 true。同时锁 TTL 必须为正数。
+    #[test]
+    fn test_flow_scan_lock_defaults_to_disabled() {
+        let cfg = FlowConfig::default();
+        assert!(
+            !cfg.scan_lock_enabled,
+            "scan_lock_enabled 缺省必须为 false（单实例部署假设；多实例须显式开启）"
+        );
+        assert!(
+            cfg.scan_lock_ttl_secs > 0,
+            "scan_lock_ttl_secs 缺省必须为正数（0 会导致锁立即过期，形同无锁）"
+        );
+        // 缺键解析同样走缺省（老配置文件不写该键不得改变行为）
+        let s: Settings = toml::from_str(
+            &std::fs::read_to_string("config/config.toml.example")
+                .expect("config/config.toml.example 应存在"),
+        )
+        .expect("模板应可解析");
+        assert!(
+            !s.flow.scan_lock_enabled,
+            "入库模板不得隐式开启扫描锁（保持单实例默认）"
+        );
     }
 
     /// 验证 Settings Debug 输出不泄漏 config_enc_key

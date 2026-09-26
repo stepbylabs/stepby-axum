@@ -104,6 +104,7 @@ error:
     withdraw_only_applicant: Only the applicant can withdraw this document
     pat_forbidden: Approval must be performed in a personal login session; personal access tokens (PAT) are not allowed
     countersign_duplicate: This approver is already at the current approval node; no duplicate countersign is needed
+    biz_type_unregistered: The business document type is not registered in the approval engine (biz_type::REGISTRY), so the approval cannot advance
   sso:
     platform_protected: Platform root department cannot be modified via tenant API
     ancestors_invalid: Invalid department ancestors data, cannot resolve tenant
@@ -257,6 +258,11 @@ error:
     template_load_failed: Tera template load failed
     path_empty_component: Path component contains invalid empty string
     record_not_found: Record does not exist
+    flow_biz_type_unregistered: "Business type \"%{biz_type}\" is not registered: add it to sys_flow_service::biz_type::ALL and REGISTRY before submitting"
+    flow_status_not_submittable: "Status \"%{status}\" is not submittable (only draft/rejected/withdrawn)"
+    flow_nodes_empty: "Approval chain is empty: configure at least one approval node"
+    flow_only_applicant_can_submit: Only the original applicant can resubmit this document
+    flow_tenant_mismatch: The document tenant differs from the applicant tenant; submission is forbidden
     field_length_invalid: "%{field} length must be between 1-64"
     field_start_invalid: "%{field} must start with letter or underscore"
     field_char_invalid: "%{field} can only contain letters, digits, underscores"
@@ -644,6 +650,7 @@ excel:
     rate_limit: Rate Limit
     web_hook: WebHooks
     web_hook_log: Delivery Logs
+    flow_doc: Approval Documents
 
 # System notice title/content (triggered by scheduler, visible in notification center)
 notice:
