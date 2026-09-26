@@ -89,6 +89,50 @@ pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// **已被开启的能力位解锁的平台专属前缀**（= [`CAPABILITY_UNLOCKED_PERMS`] 中
+/// 能力位非 `off` 的项所覆盖的前缀，去重后保持 `PLATFORM_ONLY_PERM_PREFIXES` 的顺序）。
+///
+/// 用途见 [`platform_only_prefixes_to_strip`]。
+pub fn unlocked_platform_only_prefixes(features: &FeatureSet) -> Vec<&'static str> {
+    crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES
+        .iter()
+        .copied()
+        .filter(|prefix| {
+            CAPABILITY_UNLOCKED_PERMS.iter().any(|(feat, list)| {
+                features.is_on(feat) && list.iter().any(|p| p.starts_with(prefix))
+            })
+        })
+        .collect()
+}
+
+/// **启动治理应剔除**的平台专属前缀 = 全部平台专属前缀 − [`unlocked_platform_only_prefixes`]。
+///
+/// # 为什么必须能力位感知
+///
+/// `initialize::ensure_tenant_role_menu_governance` 在**每次启动**都会清理存量角色持有的
+/// 平台专属菜单授权（防止"菜单可见但请求一律 403"的假入口）。若能力位（如
+/// `tenant.domain_self_service`）已开启、管理员据此把域名管理菜单授予租户管理员，
+/// 而本清单仍无条件包含该前缀，就会出现 **"刚授完、重启即被收回"** 的权限黑洞——
+/// 能力位形同虚设。故：
+///
+/// - 能力位 `off`（默认）⇒ 该前缀在剔除清单内（= 现状，关闭态即安全态）；
+/// - 能力位非 `off` ⇒ 该前缀移出剔除清单（是否授予仍由套餐与角色授权两层决定）。
+///
+/// # 安全性前提（单测锁死）
+///
+/// "整前缀免剔"只在**该前缀下的全部 perms 都被白名单收录**时才安全；否则会出现
+/// "部分解锁、整前缀免剔"的静默放开。单测
+/// `test_strip_list_only_excludes_fully_unlocked_prefixes` 以
+/// `middleware/permission.rs` 源码为真值做双向断言。
+pub fn platform_only_prefixes_to_strip(features: &FeatureSet) -> Vec<&'static str> {
+    let unlocked = unlocked_platform_only_prefixes(features);
+    crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES
+        .iter()
+        .copied()
+        .filter(|p| !unlocked.contains(p))
+        .collect()
+}
+
 /// 查注册表：返回能力位定义（未知 key 返回 `None`）。
 pub fn feature_def(key: &str) -> Option<&'static FeatureDef> {
     KNOWN_FEATURES.iter().find(|f| f.key == key)
@@ -579,5 +623,92 @@ mod tests {
         let round = FeatureSet::from_json(Some(&f.to_json()));
         assert_eq!(f, round);
         assert_eq!(f.to_json(), round.to_json());
+    }
+
+    /// 从 `permission.rs` 源码里抽取所有以 `prefix` 开头的字符串字面量（去重）。
+    ///
+    /// 用作"权限映射表真值"：`perms` 在 `permission.rs` 中均以 `"<perms>"` 字面量出现。
+    fn perms_literals_with_prefix(src: &str, prefix: &str) -> Vec<String> {
+        let needle = format!("\"{prefix}");
+        let mut out: Vec<String> = Vec::new();
+        let mut rest = src;
+        while let Some(i) = rest.find(&needle) {
+            let tail = &rest[i + 1..];
+            if let Some(end) = tail.find('"') {
+                let lit = &tail[..end];
+                if !out.iter().any(|s| s == lit) {
+                    out.push(lit.to_string());
+                }
+            }
+            rest = &tail[..];
+        }
+        out
+    }
+
+    /// 启动治理剔除清单：默认全剔（现状），仅**整前缀全量解锁**的前缀免剔。
+    ///
+    /// 可证伪性：
+    /// - 若把 `platform_only_prefixes_to_strip` 写成"无条件全剔"（忽略能力位），
+    ///   第二段断言会因清单长度不符而变红；
+    /// - 若白名单**部分**收录某前缀（如漏了 `:remove`）却整前缀免剔，
+    ///   最后一段断言会指名报出缺失的 perms。
+    #[test]
+    fn test_strip_list_only_excludes_fully_unlocked_prefixes() {
+        let all = crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES;
+
+        // ① 默认（全 off）⇒ 剔除清单 == 全部平台专属前缀（= 现状，关闭态即安全态）
+        let stripped = platform_only_prefixes_to_strip(&FeatureSet::default());
+        assert_eq!(stripped, all.to_vec(), "缺省能力集下必须全量剔除");
+        assert!(unlocked_platform_only_prefixes(&FeatureSet::default()).is_empty());
+
+        // ② 开启域名自助 ⇒ 仅 system:tenant:domain: 免剔，其余不动
+        let on = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"full"}"#));
+        let unlocked = unlocked_platform_only_prefixes(&on);
+        assert_eq!(unlocked, vec!["system:tenant:domain:"]);
+        let stripped = platform_only_prefixes_to_strip(&on);
+        assert_eq!(stripped.len(), all.len() - 1);
+        assert!(!stripped.contains(&"system:tenant:domain:"));
+        for p in all {
+            if *p != "system:tenant:domain:" {
+                assert!(stripped.contains(p), "{p} 不在解锁白名单内，必须仍被剔除");
+            }
+        }
+
+        // ③ 整前缀解锁锁：免剔前缀下**全部** perms 必须都在解锁白名单内
+        let src = std::fs::read_to_string("src/middleware/permission.rs")
+            .expect("src/middleware/permission.rs 应存在");
+        let allowed: Vec<String> = CAPABILITY_UNLOCKED_PERMS
+            .iter()
+            .filter(|(feat, _)| on.is_on(feat))
+            .flat_map(|(_, list)| list.iter().map(|p| (*p).to_string()))
+            .collect();
+        for prefix in all {
+            if stripped.contains(prefix) {
+                continue;
+            }
+            let registered = perms_literals_with_prefix(&src, prefix);
+            assert!(
+                !registered.is_empty(),
+                "{prefix} 被整前缀免剔，却在权限映射表中找不到任何 perms"
+            );
+            for perm in registered {
+                assert!(
+                    allowed.contains(&perm),
+                    "{perm} 未被解锁白名单收录，却因前缀 {prefix} 免剔而整面放开"
+                );
+            }
+        }
+    }
+
+    /// 反向锚点：`unlocked_platform_only_prefixes` 只认**开启**的能力位；
+    /// 显式 `off` 与未登记能力位都不产生免剔项。
+    #[test]
+    fn test_strip_list_ignores_off_capabilities() {
+        let explicit_off = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"off"}"#));
+        assert!(unlocked_platform_only_prefixes(&explicit_off).is_empty());
+        assert_eq!(
+            platform_only_prefixes_to_strip(&explicit_off),
+            crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES.to_vec()
+        );
     }
 }

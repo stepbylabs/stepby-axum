@@ -79,6 +79,7 @@ pub use m20260926_000007_platform_only_ratelimit::Migration as M20260926Platform
 pub use m20260926_000008_flow_log_operator_index::Migration as M20260926FlowLogOperatorIndex;
 pub use m20260926_000009_gen_column_rust_naming::Migration as M20260926GenColumnRustNaming;
 pub use m20260926_000010_tenant_package_features::Migration as M20260926TenantPackageFeatures;
+pub use m20260926_000011_tenant_domain_self_service_menu::Migration as M20260926TenantDomainSelfServiceMenu;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -156,6 +157,7 @@ mod m20260926_000007_platform_only_ratelimit;
 mod m20260926_000008_flow_log_operator_index;
 mod m20260926_000009_gen_column_rust_naming;
 mod m20260926_000010_tenant_package_features;
+mod m20260926_000011_tenant_domain_self_service_menu;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -313,6 +315,7 @@ impl MigratorTrait for Migrator {
             Box::new(M20260926FlowLogOperatorIndex),
             Box::new(M20260926GenColumnRustNaming),
             Box::new(M20260926TenantPackageFeatures),
+            Box::new(M20260926TenantDomainSelfServiceMenu),
         ]
     }
 }

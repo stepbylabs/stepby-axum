@@ -219,6 +219,11 @@ pub const TENANT_FILTER_MATRIX: &[(&str, &str, TenantFilterTier)] = &[
         TenantFilterTier::Covered,
     ),
     (
+        "system:tenant:domain:",
+        "sys_tenant_domain",
+        TenantFilterTier::Covered,
+    ),
+    (
         "system:tenant:",
         "sys_tenant/sys_tenant_package",
         TenantFilterTier::Covered,
