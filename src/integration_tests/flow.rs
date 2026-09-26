@@ -1321,3 +1321,113 @@ async fn test_flow_act_unregistered_biz_type_fails_closed() {
         .await
         .expect("清理待办失败");
 }
+
+/// 链路 20：已办视图的标题补齐必须按**流水行自身租户**收敛（跨租户标题泄漏回归锁）
+///
+/// 背景：唯一索引为 `uk_flow_task_tenant_biz (tenant_id, biz_type, biz_id, …)`，
+/// 即 `(biz_type, biz_id)` **不跨租户唯一**。改造前 `find_titles_by_biz` 只按
+/// `biz_type + biz_id IN (…)` 查询并把结果收进以 `biz_id` 为键的 HashMap
+/// ⇒ 他租户同号行会覆盖本租户标题（跨租户标题泄漏）。
+///
+/// **可证伪点**：本用例故意让他租户行**后插入**（`task_id` 更大）。SQLite 全表扫描
+/// 按 rowid 顺序返回，故"后写覆盖"在改造前**必然**选中他租户标题 ⇒ 改造前必红。
+/// 修复后按 `Some(流水租户)` 过滤，同号他租户行不参与查询 ⇒ 恒取本租户标题。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_done_title_is_tenant_scoped() {
+    use crate::service::sys_flow_service::FlowPageQuery;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let ctx = TestContext::new().await;
+    let biz = "it_flow_title_scope";
+    let biz_id = 900_000_003i64;
+    let other_tid = 999i64;
+    let now = crate::common::datetime::now_naive();
+    let operator_id = 1i64;
+
+    let task_repo =
+        crate::repository::sys_flow_task::SysFlowTaskRepository::new(ctx.state.db.clone());
+    let mk_task = |tid: i64, title: &str| crate::entity::sys_flow_task::ActiveModel {
+        biz_type: Set(biz.to_string()),
+        biz_id: Set(biz_id),
+        round_no: Set(1),
+        node_seq: Set(1),
+        node_name: Set(Some("标题租户作用域节点".to_string())),
+        assignee_id: Set(operator_id),
+        task_type: Set("single".to_string()),
+        status: Set("approved".to_string()),
+        title: Set(Some(title.to_string())),
+        applicant_id: Set(operator_id),
+        applicant_name: Set(Some("管理员".to_string())),
+        tenant_id: Set(tid),
+        create_time: Set(Some(now)),
+        ..Default::default()
+    };
+    // 平台行先插入（task_id 小）；他租户行后插入（task_id 大）
+    task_repo
+        .base()
+        .insert(mk_task(0, "平台单据标题"))
+        .await
+        .expect("插入平台 task 失败");
+    task_repo
+        .base()
+        .insert(mk_task(other_tid, "他租户单据标题"))
+        .await
+        .expect("插入他租户 task 失败");
+
+    // admin(1) 在**平台租户**留下一条裁决流水（已办视图的数据源）
+    let log_repo = crate::repository::sys_flow_log::SysFlowLogRepository::new(ctx.state.db.clone());
+    log_repo
+        .base()
+        .insert(crate::entity::sys_flow_log::ActiveModel {
+            biz_type: Set(biz.to_string()),
+            biz_id: Set(biz_id),
+            round_no: Set(1),
+            node_seq: Set(Some(1)),
+            action: Set("approve".to_string()),
+            from_status: Set(Some("pending".to_string())),
+            to_status: Set(Some("approved".to_string())),
+            operator_id: Set(Some(operator_id)),
+            acted_at: Set(Some(now)),
+            tenant_id: Set(0),
+            create_time: Set(Some(now)),
+            ..Default::default()
+        })
+        .await
+        .expect("插入流水失败");
+
+    let (rows, _total) = ctx
+        .state
+        .flow_service
+        .done_page(
+            operator_id,
+            FlowPageQuery {
+                page_num: Some(1),
+                page_size: Some(50),
+                status: None,
+            },
+        )
+        .await
+        .expect("查询已办失败");
+    let row = rows
+        .iter()
+        .find(|r| r.biz_type == biz && r.biz_id == biz_id)
+        .unwrap_or_else(|| {
+            panic!("已办列表应含 (biz_type={biz}, biz_id={biz_id})，实际: {rows:?}")
+        });
+    assert_eq!(
+        row.title, "平台单据标题",
+        "标题必须取**本租户** task 行；取到他租户标题即跨租户泄漏"
+    );
+
+    // 清理
+    crate::entity::sys_flow_task::Entity::delete_many()
+        .filter(crate::entity::sys_flow_task::Column::BizType.eq(biz))
+        .exec(&ctx.state.db)
+        .await
+        .expect("清理 task 失败");
+    crate::entity::sys_flow_log::Entity::delete_many()
+        .filter(crate::entity::sys_flow_log::Column::BizType.eq(biz))
+        .exec(&ctx.state.db)
+        .await
+        .expect("清理流水失败");
+}

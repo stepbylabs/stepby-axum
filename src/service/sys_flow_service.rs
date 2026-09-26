@@ -1404,29 +1404,40 @@ impl SysFlowService {
             .await?;
         // 标题补齐：内置示例单据联查单据表；其它业务类型回退 task 行快照（W-19）。
         // 键含 biz_type，避免不同业务类型主键相同时标题串台。
+        //
+        // **租户维度（必须）**：唯一索引 `uk_flow_task_tenant_biz` 使 `(biz_type, biz_id)`
+        // **不跨租户唯一**，故按 biz_id 无租户查询会取到他租户同行号的标题（跨租户泄漏）。
+        // 精确做法 = 按**流水行自身的 `tenant_id`** 分组查询（task/log 开轮时写入同一租户，
+        // 故该租户必与目标单据行一致；平台行 tid=0 亦精确匹配平台单据）。
         let mut titles: std::collections::HashMap<(String, i64), String> =
             std::collections::HashMap::new();
-        let demo_ids: Vec<i64> = rows
-            .iter()
-            .filter(|r| r.biz_type == biz_type::DEMO_DOC)
-            .map(|r| r.biz_id)
-            .collect();
-        for (id, t) in self.doc_repo().find_titles_by_ids(demo_ids).await? {
-            titles.insert((biz_type::DEMO_DOC.to_string(), id), t);
+
+        let mut demo_by_tid: std::collections::HashMap<i64, Vec<i64>> =
+            std::collections::HashMap::new();
+        let mut others: std::collections::HashMap<(String, i64), Vec<i64>> =
+            std::collections::HashMap::new();
+        for r in &rows {
+            if r.biz_type == biz_type::DEMO_DOC {
+                demo_by_tid.entry(r.tenant_id).or_default().push(r.biz_id);
+            } else {
+                others
+                    .entry((r.biz_type.clone(), r.tenant_id))
+                    .or_default()
+                    .push(r.biz_id);
+            }
         }
-        let other_types: std::collections::HashSet<&str> = rows
-            .iter()
-            .map(|r| r.biz_type.as_str())
-            .filter(|bt| *bt != biz_type::DEMO_DOC)
-            .collect();
-        for bt in other_types {
-            let ids: Vec<i64> = rows
-                .iter()
-                .filter(|r| r.biz_type == bt)
-                .map(|r| r.biz_id)
-                .collect();
-            for (id, t) in self.task_repo().find_titles_by_biz(bt, ids).await? {
-                titles.insert((bt.to_string(), id), t);
+        for (tid, ids) in demo_by_tid {
+            for (id, t) in self.doc_repo().find_titles_by_ids(ids, Some(tid)).await? {
+                titles.insert((biz_type::DEMO_DOC.to_string(), id), t);
+            }
+        }
+        for ((bt, tid), ids) in others {
+            for (id, t) in self
+                .task_repo()
+                .find_titles_by_biz(&bt, ids, Some(tid))
+                .await?
+            {
+                titles.insert((bt.clone(), id), t);
             }
         }
         let vos = rows

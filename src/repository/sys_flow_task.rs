@@ -248,17 +248,27 @@ impl SysFlowTaskRepository {
     ///
     /// 「已办」视图对**非内置示例**业务类型无单据表可联查（W-19：引擎不感知单据表结构），
     /// 故回退到 task 行快照，避免已办列表中标题恒为空。
+    ///
+    /// **必须带租户收敛**：唯一索引为 `uk_flow_task_tenant_biz (tenant_id, biz_type, biz_id, …)`，
+    /// 即 `(biz_type, biz_id)` **不跨租户唯一**——若按 biz_id 无租户查询，
+    /// 同一 `(biz_type, biz_id)` 在他租户存在时会取到他租户的标题（跨租户泄漏）。
+    /// 调用方传**该流水行自身的 `tenant_id`**（`Some(tid)`），与 task 行开轮时写入的租户一致。
     pub async fn find_titles_by_biz(
         &self,
         biz_type: &str,
         biz_ids: Vec<i64>,
+        tenant_scope: Option<i64>,
     ) -> Result<std::collections::HashMap<i64, String>, DbErr> {
         if biz_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        Ok(SysFlowTask::find()
+        let mut query = SysFlowTask::find()
             .filter(Column::BizType.eq(biz_type))
-            .filter(Column::BizId.is_in(biz_ids))
+            .filter(Column::BizId.is_in(biz_ids));
+        if let Some(tid) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(tid));
+        }
+        Ok(query
             .all(self.base.db())
             .await?
             .into_iter()
