@@ -1396,7 +1396,9 @@ impl SysTenantService {
         }
         let mut redis = self.redis.clone();
         // ① 在线会话扫描：失败仅告警（不得阻断后续 PAT=DB 与 RT 吊销；空结果亦不早退）
-        let keys = match crate::utils::redis::scan_keys(&mut redis, "online:*", 5000).await {
+        // 第九批：改用 **不截断** 扫描 —— 原 `scan_keys(.., 5000)` 会在超限时静默截断，
+        // 导致部分在线会话**未被踢线**（安全吊销必须完整）。
+        let keys = match crate::utils::redis::scan_keys_all(&mut redis, "online:*").await {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!(tenant_id, error = %e, "租户踢线：SCAN online:* 失败");
@@ -1432,7 +1434,14 @@ impl SysTenantService {
         // ② SSO 刷新令牌（sso:rt:*）：以权威结构 RefreshBinding 解析
         //   - tid == tenant_id → 直接命中；
         //   - tid == 0（旧绑定）→ 同 online 口径按 user_id 回查归属后判定
-        let rt_keys = match crate::utils::redis::scan_keys(&mut redis, "sso:rt:*", 5000).await {
+        //
+        // 第九批：改用 **不截断** 扫描。原 `scan_keys(.., 5000)` 超限即静默截断 ⇒
+        // 租户 RT 超过 5000 条时**漏清剩余 RT**，停用后仍可用其续期身份（P0-1 的目标口子）。
+        // 关于 D6「索引化」的偏离登记：本处**不引入** `tenant:sso_rt:{tid}` 索引 ——
+        // 变更前签发的 RT 不在索引内，吊销仍须保留本扫描兜底（RT TTL 窗口内），
+        // 故索引只增"签发/吊销/轮换三处写入点 + TTL 索引键"的一致性负担而无净收益；
+        // 正确性由「不截断扫描 + 权威结构按 tid 过滤」保证（详见台账 §5.1-D6 状态行）。
+        let rt_keys = match crate::utils::redis::scan_keys_all(&mut redis, "sso:rt:*").await {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!(tenant_id, error = %e, "租户踢线：SCAN sso:rt:* 失败");
@@ -1512,24 +1521,30 @@ impl SysTenantService {
         }
 
         // ④（P0-1-a）吊销该租户全部 SSO refresh_token（无需维护索引键，扫描即自愈）
-        let mut rt_revoked = 0u64;
+        //   第九批：命中集合先归集再**分批 DEL**（`DEL_BATCH_SIZE`）。原实现逐键 DEL，
+        //   在①/②改为"不截断扫描"后代价随 RT 条数线性增长（数千条 RT ⇒ 数千次往返）。
+        let mut rt_hashes: Vec<String> = Vec::new();
         for (rt_hash, binding) in rt_entries {
             let rt_tid = if binding.tid != 0 {
                 binding.tid
             } else {
                 legacy_tids.get(&binding.user_id).copied().unwrap_or(0)
             };
-            if rt_tid != tenant_id {
-                continue;
+            if rt_tid == tenant_id {
+                rt_hashes.push(rt_hash);
             }
-            let r: Result<i64, redis::RedisError> = redis::cmd("DEL")
-                .arg(format!("sso:rt:{rt_hash}"))
-                .query_async(&mut redis)
-                .await;
-            match r {
-                Ok(_) => rt_revoked += 1,
+        }
+        let mut rt_revoked = 0u64;
+        for chunk in rt_hashes.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
+            let keys: Vec<String> = chunk.iter().map(|h| format!("sso:rt:{h}")).collect();
+            match redis::cmd("DEL")
+                .arg(&keys)
+                .query_async::<i64>(&mut redis)
+                .await
+            {
+                Ok(n) => rt_revoked += n.max(0) as u64,
                 Err(e) => {
-                    tracing::warn!(tenant_id, rt_hash = %rt_hash, error = %e, "租户踢线：DEL sso:rt 失败")
+                    tracing::warn!(tenant_id, batch = keys.len(), error = %e, "租户踢线：批量 DEL sso:rt 失败")
                 }
             }
         }

@@ -210,7 +210,7 @@ impl AppInitializer {
         // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
         // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
         // 与迁移 m20260923_000001_sso_v4_hardening 等价（启动不跑 Migrator::up 的存量库兜底）。
-        ensure_sso_v4_columns(&db)
+        ensure_sso_v4_columns(&db, &settings.config_enc_key)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO v4 列失败: {}", e))?;
 
@@ -2629,8 +2629,15 @@ pub(crate) async fn sso_has_column(
 ///   + client_name_snapshot（v4-R6 名称快照）、+ del_flag（撤销=软删，v2-I7）
 /// - 存量回填：consented_at ← create_time；client_name_snapshot ← 当前客户端名；
 ///   grant_types 去除未实现的 refresh_token（v4 §1.2）
-/// - 存量明文 id_token_secret 以 CONFIG_ENC_KEY 加密（v3-P1'-4，读到一条加密一条）
-async fn ensure_sso_v4_columns(db: &DatabaseConnection) -> anyhow::Result<()> {
+/// - 存量明文 id_token_secret 以 `CONFIG_ENC_KEY` 加密（v3-P1'-4，读到一条加密一条）
+///
+/// 第九批（D10）：主密钥改为**由调用方传入**（`settings.config_enc_key`），
+/// 不再在本函数内 `std::env::var("CONFIG_ENC_KEY")` 直读 —— 收敛为 Settings 单一入口，
+/// 未来接 KMS/HSM 只需改配置层一处（原实现绕过配置层，是密钥读取点分散的最后一处）。
+async fn ensure_sso_v4_columns(
+    db: &DatabaseConnection,
+    config_enc_key: &str,
+) -> anyhow::Result<()> {
     if !sso_table_exists(db, "sys_oauth_client").await?
         || !sso_table_exists(db, "sys_oauth_consent").await?
     {
@@ -2739,7 +2746,7 @@ async fn ensure_sso_v4_columns(db: &DatabaseConnection) -> anyhow::Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
-    let enc_key = std::env::var("CONFIG_ENC_KEY").unwrap_or_default();
+    let enc_key = config_enc_key.to_string();
     if enc_key.is_empty() {
         tracing::warn!(
             "检测到 {} 条明文 id_token_secret，但 CONFIG_ENC_KEY 未配置，跳过加密（fail-open，与配置层策略一致）",
