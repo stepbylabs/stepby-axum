@@ -806,9 +806,16 @@ impl SysFlowService {
         }
 
         // 同意：聚合判定当前节点（会签 All / 或签 Any）
+        // 租户精确收敛（W-2 建议②）：同轮 task 行写入同一租户，带 `Some(tid)` 可杜绝
+        // 把他租户同 (biz_type,biz_id,round_no) 的 approved 行计入本节点 ⇒ 防误判完成。
         let rows = self
             .task_repo()
-            .find_by_biz_round(&task.biz_type, task.biz_id, task.round_no)
+            .find_by_biz_round(
+                &task.biz_type,
+                task.biz_id,
+                task.round_no,
+                Some(task.tenant_id),
+            )
             .await?;
         let same_node: Vec<&sys_flow_task::Model> = rows
             .iter()

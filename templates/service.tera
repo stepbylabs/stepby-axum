@@ -82,7 +82,7 @@ fn flow_projection_sync(
     Box::pin(async move {
         let am = ActiveModel {
             tenant_id: Set(p.tenant_id),
-            {{ pk_column.javaField }}: Set(biz_id),
+            {{ pk_column.rustField }}: Set(biz_id),
             status: Set(p.status),
             current_round: Set(p.current_round),
             current_node_seq: Set(p.current_node_seq),
@@ -133,17 +133,17 @@ impl {{ table.className }}Service {
     pub async fn create(&self, dto: {{ table.className }}AddDto, operator: &str) -> Result<Model, ServiceError> {
         let now = crate::common::datetime::now_naive();
         let mut am = ActiveModel { ..Default::default() };
-{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
+{% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}        am.{{ col.rustField }} = Set(dto.{{ col.rustField }});
 {% endif %}{% endfor %}        am.create_by = Set(Some(operator.to_string()));
         am.create_time = Set(Some(now));
         Ok(self.repo.insert(am).await?)
     }
 
     pub async fn update(&self, dto: {{ table.className }}EditDto, operator: &str) -> Result<Model, ServiceError> {
-        let existing = self.get_by_id(dto.{{ pk_column.javaField }}).await?;
+        let existing = self.get_by_id(dto.{{ pk_column.rustField }}).await?;
         let now = crate::common::datetime::now_naive();
         let mut am: ActiveModel = existing.into();
-{% for col in columns %}{% if col.isEdit == "1" %}        am.{{ col.javaField }} = Set(dto.{{ col.javaField }});
+{% for col in columns %}{% if col.isEdit == "1" %}        am.{{ col.rustField }} = Set(dto.{{ col.rustField }});
 {% endif %}{% endfor %}        am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         Ok(self.repo.update(am).await?)
@@ -255,7 +255,7 @@ impl {{ table.className }}Service {
                             finished_at: Set(None),
                             ..Default::default()
                         })
-                        .filter(Column::{{ pk_column.javaField | pascal_case }}.eq(id))
+                        .filter(Column::{{ pk_column.rustField | pascal_case }}.eq(id))
                         .filter(Column::Status.eq(from_status.as_str()))
                         .exec(txn)
                         .await
@@ -309,14 +309,14 @@ impl {{ table.className }}Service {
 #[serde(rename_all = "camelCase")]
 pub struct {{ table.className }}AddDto {
 {% for col in columns %}{% if col.isInsert == "1" and col.isPk != "1" %}    #[garde(skip)]
-    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
+    pub {{ col.rustField }}: {% if col.isRequired == "1" %}{{ col.rustType }}{% else %}Option<{{ col.rustType }}>{% endif %},
 {% endif %}{% endfor %}}
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct {{ table.className }}EditDto {
     #[garde(skip)]
-    pub {{ pk_column.javaField }}: i64,
+    pub {{ pk_column.rustField }}: i64,
 {% for col in columns %}{% if col.isEdit == "1" %}    #[garde(skip)]
-    pub {{ col.javaField }}: {% if col.isRequired == "1" %}{{ col.javaType }}{% else %}Option<{{ col.javaType }}>{% endif %},
+    pub {{ col.rustField }}: {% if col.isRequired == "1" %}{{ col.rustType }}{% else %}Option<{{ col.rustType }}>{% endif %},
 {% endif %}{% endfor %}}

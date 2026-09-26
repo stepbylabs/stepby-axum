@@ -1431,3 +1431,70 @@ async fn test_flow_done_title_is_tenant_scoped() {
         .await
         .expect("清理流水失败");
 }
+
+/// 链路 21：同轮聚合读取必须按租户精确收敛（W-2 建议② 纵深防御回归锁）
+///
+/// 背景：`(biz_type, biz_id, round_no)` 在 `uk_flow_task_tenant_biz` 下**不跨租户唯一**。
+/// `find_by_biz_round` 曾无租户过滤 ⇒ 会签/或签聚合可能把他租户同号行的 `approved`
+/// 计入本租户节点 ⇒ **误判节点已完成**（正确性缺陷）。
+///
+/// **可证伪点**：造"本租户 1 条 pending + 他租户 1 条 approved"同 (biz_type,biz_id,round_no)
+/// 的两行。带租户收敛时结果集**只含本租户那 1 行**；若过滤被移除，结果集变 2 行 ⇒ 用例红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_find_by_biz_round_is_tenant_scoped() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let ctx = TestContext::new().await;
+    let biz = "it_flow_round_scope";
+    let biz_id = 900_000_004i64;
+    let other_tid = 999i64;
+    let now = crate::common::datetime::now_naive();
+
+    let repo = crate::repository::sys_flow_task::SysFlowTaskRepository::new(ctx.state.db.clone());
+    let mk_task = |tid: i64, status: &str| crate::entity::sys_flow_task::ActiveModel {
+        biz_type: Set(biz.to_string()),
+        biz_id: Set(biz_id),
+        round_no: Set(1),
+        node_seq: Set(1),
+        node_name: Set(Some("同轮聚合节点".to_string())),
+        assignee_id: Set(1),
+        task_type: Set("countersign".to_string()),
+        status: Set(status.to_string()),
+        title: Set(Some("同轮聚合单据".to_string())),
+        applicant_id: Set(1),
+        tenant_id: Set(tid),
+        create_time: Set(Some(now)),
+        ..Default::default()
+    };
+    repo.base()
+        .insert(mk_task(0, "pending"))
+        .await
+        .expect("插入本租户 task 失败");
+    repo.base()
+        .insert(mk_task(other_tid, "approved"))
+        .await
+        .expect("插入他租户 task 失败");
+
+    // 本租户视角：只应看到本租户那 1 行（他租户同号行不得参与聚合）
+    let rows = repo
+        .find_by_biz_round(biz, biz_id, 1, Some(0))
+        .await
+        .expect("查询同轮 task 失败");
+    assert_eq!(
+        rows.len(),
+        1,
+        "同轮聚合必须按租户精确收敛，实际返回 {} 行（含他租户行即误判风险）",
+        rows.len()
+    );
+    assert!(
+        rows.iter().all(|r| r.tenant_id == 0),
+        "结果集不得含他租户行"
+    );
+
+    // 清理
+    crate::entity::sys_flow_task::Entity::delete_many()
+        .filter(crate::entity::sys_flow_task::Column::BizType.eq(biz))
+        .exec(&ctx.state.db)
+        .await
+        .expect("清理 task 失败");
+}

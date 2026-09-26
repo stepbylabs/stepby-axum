@@ -295,6 +295,45 @@ mod crypto_tests {
         assert!(!is_encrypted(""));
     }
 
+    /// 第八批（P0 回归锁）：`seal_sensitive_value` 对已加密值必须**幂等**。
+    ///
+    /// 背景：启动回填 `id_token_secret` 曾因 ① SQL 判据 `NOT LIKE 'enc:%'` 认不出 `enc2:`
+    /// ② 直接调用**无守卫**的 `encrypt_config_value`，导致**每次启动把已加密值再加密一层**
+    /// （base64 膨胀 ×4/3），实测单字段涨到 743 MB、全表 4.5 GB。
+    /// 本用例钉死"seal 幂等"这一不变量：两个前缀的值经 seal 后**逐字节不变**。
+    #[test]
+    fn test_seal_sensitive_value_is_idempotent() {
+        let master_key = "test-master-key-0123456789abcdef";
+        let plaintext = "s3cr3t-32-byte-ish";
+        let once = seal_sensitive_value(plaintext, master_key).unwrap();
+        assert!(once.starts_with(ENCRYPTED_PREFIX_V2));
+        // 再 seal（等价于"回填判定误把密文当明文"）不得改变值
+        let twice = seal_sensitive_value(&once, master_key).unwrap();
+        assert_eq!(twice, once, "已加密值不得被二次加密（幂等）");
+        assert_eq!(twice.len(), once.len(), "长度不得增长");
+        // v1 前缀（历史数据）同样幂等
+        let v1 = format!("{ENCRYPTED_PREFIX}abc123");
+        assert_eq!(seal_sensitive_value(&v1, master_key).unwrap(), v1);
+        // 主密钥缺省（fail-open）时原样返回明文
+        assert_eq!(seal_sensitive_value(plaintext, "").unwrap(), plaintext);
+    }
+
+    /// 第八批：`is_encrypted` 必须同时识别 v1/v2 前缀（启动回填的 SQL 判据由同一
+    /// 常量集合拼出，本断言保证"判据与写入格式"永远一致，不再出现 `enc2:` 漏判）。
+    #[test]
+    fn test_is_encrypted_covers_both_prefixes() {
+        let sealed = seal_sensitive_value("x", "test-master-key-0123456789abcdef").unwrap();
+        assert!(
+            sealed.starts_with(ENCRYPTED_PREFIX_V2),
+            "新写入必须是 v2 格式"
+        );
+        assert!(
+            is_encrypted(&sealed),
+            "is_encrypted 必须识别本模块自己产出的 v2 格式（否则回填会重复加密）"
+        );
+        assert!(is_encrypted(&format!("{ENCRYPTED_PREFIX}v1payload")));
+    }
+
     #[test]
     fn test_decrypt_plaintext_compatibility() {
         // 未配置密钥时，不带前缀的明文直接返回（兼容旧数据）

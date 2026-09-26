@@ -10,9 +10,9 @@ use crate::state::AppState;
 pub fn {{ table.tableName }}_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/{{ table.moduleName }}/{{ table.tableName }}/list", get({{ table.tableName }}_handler::list))
-        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", get({{ table.tableName }}_handler::get_info))
+        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.rustField }}{{ '}' }}", get({{ table.tableName }}_handler::get_info))
         .route("/{{ table.moduleName }}/{{ table.tableName }}", post({{ table.tableName }}_handler::add))
         .route("/{{ table.moduleName }}/{{ table.tableName }}", put({{ table.tableName }}_handler::edit))
-        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", delete({{ table.tableName }}_handler::remove))
-{% if is_flow %}        .route("/{{ table.moduleName }}/{{ table.tableName }}/submit/{{ '{' }}{{ pk_column.javaField }}{{ '}' }}", post({{ table.tableName }}_handler::submit_flow))
+        .route("/{{ table.moduleName }}/{{ table.tableName }}/{{ '{' }}{{ pk_column.rustField }}{{ '}' }}", delete({{ table.tableName }}_handler::remove))
+{% if is_flow %}        .route("/{{ table.moduleName }}/{{ table.tableName }}/submit/{{ '{' }}{{ pk_column.rustField }}{{ '}' }}", post({{ table.tableName }}_handler::submit_flow))
 {% endif %}}
