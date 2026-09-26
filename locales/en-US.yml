@@ -334,6 +334,7 @@ error:
     process_start_failed: Failed to start backup process
     process_exec_failed: Backup process execution failed
     record_not_found: Backup record does not exist
+    tenant_scope_denied: You are not allowed to access this backup record (tenants can only access their own tenant-export packages)
     restore_status_invalid: Only successful backups can be restored
     too_frequent: Backup operation too frequent, please try again later
     restore_in_progress: A restore task is already in progress, please try again later

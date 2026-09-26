@@ -572,12 +572,23 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/system/backup/{backupId}", "system:backup:query"),
     ("POST", "/system/backup", "system:backup:add"),
     ("POST", "/system/backup/restore/{backupId}", "system:backup:edit"),
-    ("GET", "/system/backup/download/{backupId}", "system:backup:query"),
-    // 租户数据包导出（F-2）：只读导出语义，复用备份查询权限（平台专属组内）
+    // 批次 2（MT-7 权限粒度化）：下载**独立**成 perms。
+    // 原与"详情查询"共用 `system:backup:query` ⇒ 授予 query 等于授予整库下载；
+    // 拆分后能力位 `backup.readonly_visible` 才能安全地把只读子集下放给租户
+    // （服务层再按 `backup_type='tenant_export' AND tenant_id=自己` 行级收窄）。
+    ("GET", "/system/backup/download/{backupId}", "system:backup:download"),
+    // 租户数据包导出（F-2）：平台为**指定租户**导出，独立 perms（不复用只读 query）
     (
         "POST",
         "/system/backup/tenant-export/{tenantId}",
-        "system:backup:query",
+        "system:backup:export",
+    ),
+    // 租户**自助**导出（批次 2）：无租户参数，服务层强制用操作者所属租户
+    // ⇒ 不存在"传他租户 id"的越权面；由能力位 `backup.tenant_self_export` 门控
+    (
+        "POST",
+        "/system/backup/self-export",
+        "system:backup:export",
     ),
     ("DELETE", "/system/backup/{backupId}", "system:backup:remove"),
 
@@ -1414,6 +1425,7 @@ mod tests {
             ("POST", "/system/backup/restore/{backupId}"),
             ("GET", "/system/backup/download/{backupId}"),
             ("POST", "/system/backup/tenant-export/{tenantId}"),
+            ("POST", "/system/backup/self-export"),
             ("DELETE", "/system/backup/{backupId}"),
             // sys_task_router
             ("GET", "/system/task/list"),

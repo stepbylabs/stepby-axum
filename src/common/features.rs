@@ -68,11 +68,29 @@ pub const KNOWN_FEATURES: &[FeatureDef] = &[
 /// 语义：清单内的 perms **仅在对应能力位非 `off` 时**才可授予租户角色；清单外的
 /// 平台专属 perms 恒不可授予（见 [`is_grantable_perm_with_features`]）。
 ///
-/// ⚠️ 逐条枚举而非按前缀放开是**刻意的**：`system:backup:` 下
-/// `query` 同时映射"详情查询"与"整库下载"两个端点（`GET /system/backup/download/{id}`），
-/// 按前缀放开等于把整库导出面下放。批次 2 拆分 download 独立权限后，
-/// 本清单才可收录只读子集。
+/// ⚠️ 逐条枚举而非按前缀放开是**刻意的**：`system:backup:` 是**部分解锁**前缀
+/// （只读 3 条 + 导出 1 条可下放，创建/恢复/删除仍平台专属），若按前缀放开则等于把
+/// 整库备份面（含恢复覆盖现库）一并下放。批次 1c 的 `system:tenant:domain:` 则是
+/// **整前缀全量收录**的特例——同一套逐条语义对两种情形都成立。
 pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &[&str])] = &[
+    // 备份只读可见（批次 2）：能力位开启时，租户可读**本租户**的租户数据包（tenant_export）
+    // 列表与详情，并可下载自己的数据包；**不含**创建备份 / 恢复 / 删除 / 平台代导出，
+    // 也不含整库备份行的读取（服务层按 `backup_type = 'tenant_export' AND tenant_id = 自己`
+    // 行级收窄，见 `sys_backup_service`）。
+    // `query` 原同时映射"详情"与"整库下载"，批次 2 已把下载拆为独立的
+    // `system:backup:download`（`GET /system/backup/download/{backupId}`），
+    // 因此本清单可以安全收录只读子集。
+    (
+        "backup.readonly_visible",
+        &[
+            "system:backup:list",
+            "system:backup:query",
+            "system:backup:download",
+        ],
+    ),
+    // 租户自助导出（批次 2）：能力位开启时，租户可把**本租户**数据包导出为 JSON
+    // （端点 `POST /system/backup/self-export`，无租户参数 ⇒ 不存在传他租户 id 的越权面）。
+    ("backup.tenant_self_export", &["system:backup:export"]),
     // 租户域名自助（批次 1c）：能力位开启时，域名管理 5 项权限可授予租户管理员，
     // 服务层按 tid 收窄（仅能读写本租户域名）。
     // 清单与 `middleware/permission.rs` 的 `/system/tenant/domain/*` 权限映射逐条对应
@@ -89,48 +107,51 @@ pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// **已被开启的能力位解锁的平台专属前缀**（= [`CAPABILITY_UNLOCKED_PERMS`] 中
-/// 能力位非 `off` 的项所覆盖的前缀，去重后保持 `PLATFORM_ONLY_PERM_PREFIXES` 的顺序）。
+/// **已被开启的能力位解锁的平台专属 perms 逐条清单**（保持 [`CAPABILITY_UNLOCKED_PERMS`] 顺序）。
 ///
-/// 用途见 [`platform_only_prefixes_to_strip`]。
-pub fn unlocked_platform_only_prefixes(features: &FeatureSet) -> Vec<&'static str> {
-    crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES
-        .iter()
-        .copied()
-        .filter(|prefix| {
-            CAPABILITY_UNLOCKED_PERMS.iter().any(|(feat, list)| {
-                features.is_on(feat) && list.iter().any(|p| p.starts_with(prefix))
-            })
-        })
-        .collect()
+/// 这是「启动治理」（`initialize::ensure_tenant_role_menu_governance`）的**唯一事实源**：
+/// - 剔除条件 = 命中平台专属前缀 **且** 不在本清单内；
+/// - 回填条件 = 在本清单内（授予平台普通角色 role 2，作新建租户的菜单模板）。
+///
+/// # 为什么必须是 **perms 粒度**而非前缀粒度
+///
+/// 批次 1c 的 `system:tenant:domain:` 是"整前缀全量收录"的特例，前缀粒度与 perms 粒度等价；
+/// 但批次 2 的 `system:backup:` 是**部分解锁**（只读 3 条 + 导出 1 条可下放，
+/// 创建/恢复/删除仍平台专属）。若按前缀粒度"整前缀免剔 + 整前缀回填"，会把
+/// 创建备份 / 恢复（覆盖现库）/ 删除 的菜单一并授予 role 2，重新造出
+/// "菜单可见但请求一律 403"的假入口。故本函数只吐逐条 perms，调用点均按 perms 匹配。
+///
+/// 单测 `test_unlocked_perms_are_perm_granular` 锁死"部分解锁前缀不得整前缀放开"。
+pub fn unlocked_capability_perms(features: &FeatureSet) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (feat, list) in CAPABILITY_UNLOCKED_PERMS {
+        if !features.is_on(feat) {
+            continue;
+        }
+        for p in *list {
+            if !out.contains(p) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
-/// **启动治理应剔除**的平台专属前缀 = 全部平台专属前缀 − [`unlocked_platform_only_prefixes`]。
+/// 构造 `perms NOT IN ($1, $2, …)` 片段（调用方按方言提供占位符；清单为空时返回 `None`）。
 ///
-/// # 为什么必须能力位感知
-///
-/// `initialize::ensure_tenant_role_menu_governance` 在**每次启动**都会清理存量角色持有的
-/// 平台专属菜单授权（防止"菜单可见但请求一律 403"的假入口）。若能力位（如
-/// `tenant.domain_self_service`）已开启、管理员据此把域名管理菜单授予租户管理员，
-/// 而本清单仍无条件包含该前缀，就会出现 **"刚授完、重启即被收回"** 的权限黑洞——
-/// 能力位形同虚设。故：
-///
-/// - 能力位 `off`（默认）⇒ 该前缀在剔除清单内（= 现状，关闭态即安全态）；
-/// - 能力位非 `off` ⇒ 该前缀移出剔除清单（是否授予仍由套餐与角色授权两层决定）。
-///
-/// # 安全性前提（单测锁死）
-///
-/// "整前缀免剔"只在**该前缀下的全部 perms 都被白名单收录**时才安全；否则会出现
-/// "部分解锁、整前缀免剔"的静默放开。单测
-/// `test_strip_list_only_excludes_fully_unlocked_prefixes` 以
-/// `middleware/permission.rs` 源码为真值做双向断言。
-pub fn platform_only_prefixes_to_strip(features: &FeatureSet) -> Vec<&'static str> {
-    let unlocked = unlocked_platform_only_prefixes(features);
-    crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES
-        .iter()
-        .copied()
-        .filter(|p| !unlocked.contains(p))
-        .collect()
+/// 与 `common::tenant::perms_like_clause` 配对使用：**集中生成，禁止各调用点手拼**——
+/// 2026-09-26 的治理事故正是"裸占位符漏写列名"导致 SQL 恒假、治理静默失效。
+pub fn perms_not_in_clause<F>(perms: &[&str], ph: F) -> Option<String>
+where
+    F: Fn(usize) -> String,
+{
+    if perms.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "perms NOT IN ({})",
+        (1..=perms.len()).map(ph).collect::<Vec<_>>().join(", ")
+    ))
 }
 
 /// 查注册表：返回能力位定义（未知 key 返回 `None`）。
@@ -549,23 +570,48 @@ mod tests {
         }
     }
 
-    /// tier2 表在能力位未开时仍被拦截（能力位不得绕过过滤接入门禁）
+    /// 能力位开启后仍受**既有**门禁约束：开关不是"万能钥匙"。
+    ///
+    /// 批次 2 更新：`backup.readonly_visible` 已收录只读三件套到解锁白名单
+    /// （这是能力位的**预期**放开面，由 `test_unlocked_perms_are_perm_granular` 锁定），
+    /// 但备份的**写面与危险面**（add/edit=恢复/remove）即使能力位开启也不得授予；
+    /// 且未登记的能力位（tier2 表在能力位关闭时）恒被拦截。
     #[test]
-    fn test_tier2_still_blocked_without_capability() {
+    fn test_capability_does_not_bypass_existing_gates() {
         let on = FeatureSet::from_json(Some(
             r#"{"tenant.domain_self_service":"full","backup.readonly_visible":"on"}"#,
         ));
-        // backup.readonly_visible 已开，但白名单未收录 backup 项 ⇒ 仍不可授予
+        // 备份写面/危险面：即使只读能力位开启也不可授予
         for p in [
-            "system:backup:list",
-            "system:backup:query",
             "system:backup:add",
+            "system:backup:edit",
+            "system:backup:remove",
         ] {
             assert!(
                 !is_grantable_perm_with_features(p, &on),
-                "{p} 未登记解锁白名单，不得因开关存在而放开"
+                "{p} 属平台专属写面，能力位不得放开"
             );
         }
+        // 只开域名能力位时，备份只读项仍不可授予（能力位互不越界）
+        let only_domain = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"full"}"#));
+        for p in [
+            "system:backup:list",
+            "system:backup:query",
+            "system:backup:download",
+            "system:backup:export",
+        ] {
+            assert!(
+                !is_grantable_perm_with_features(p, &only_domain),
+                "{p} 未登记在该能力位的解锁白名单内，不得顺带放开"
+            );
+        }
+        // 未登记的能力位（未知 key）恒为 off ⇒ 不产生任何放开
+        let unknown = FeatureSet::from_json(Some(r#"{"backup.everything":"on"}"#));
+        assert!(unknown.is_default());
+        assert!(!is_grantable_perm_with_features(
+            "system:backup:list",
+            &unknown
+        ));
     }
 
     /// `is_on` 对多模式能力位的语义：非 off 即"开启"
@@ -625,90 +671,83 @@ mod tests {
         assert_eq!(f.to_json(), round.to_json());
     }
 
-    /// 从 `permission.rs` 源码里抽取所有以 `prefix` 开头的字符串字面量（去重）。
+    /// 解锁清单必须是 **perms 粒度**：部分解锁的前缀不得整前缀放开。
     ///
-    /// 用作"权限映射表真值"：`perms` 在 `permission.rs` 中均以 `"<perms>"` 字面量出现。
-    fn perms_literals_with_prefix(src: &str, prefix: &str) -> Vec<String> {
-        let needle = format!("\"{prefix}");
-        let mut out: Vec<String> = Vec::new();
-        let mut rest = src;
-        while let Some(i) = rest.find(&needle) {
-            let tail = &rest[i + 1..];
-            if let Some(end) = tail.find('"') {
-                let lit = &tail[..end];
-                if !out.iter().any(|s| s == lit) {
-                    out.push(lit.to_string());
-                }
-            }
-            rest = &tail[..];
-        }
-        out
-    }
-
-    /// 启动治理剔除清单：默认全剔（现状），仅**整前缀全量解锁**的前缀免剔。
-    ///
-    /// 可证伪性：
-    /// - 若把 `platform_only_prefixes_to_strip` 写成"无条件全剔"（忽略能力位），
-    ///   第二段断言会因清单长度不符而变红；
-    /// - 若白名单**部分**收录某前缀（如漏了 `:remove`）却整前缀免剔，
-    ///   最后一段断言会指名报出缺失的 perms。
+    /// 可证伪性：若把 [`unlocked_capability_perms`] 改成"按前缀收集"（返回该前缀下
+    /// `permission.rs` 中的**全部** perms），第二段断言会因 `system:backup:add` 等
+    /// 混入清单而变红——那等于把创建备份/恢复（覆盖现库）的菜单也授予 role 2。
     #[test]
-    fn test_strip_list_only_excludes_fully_unlocked_prefixes() {
-        let all = crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES;
+    fn test_unlocked_perms_are_perm_granular() {
+        // ① 默认（全 off）⇒ 无任何解锁项；启动治理 ① 的 `NOT IN` 子句为空（全量剔除）
+        let off = FeatureSet::default();
+        assert!(unlocked_capability_perms(&off).is_empty());
+        assert!(
+            perms_not_in_clause(&unlocked_capability_perms(&off), |i| format!("?{i}")).is_none()
+        );
 
-        // ① 默认（全 off）⇒ 剔除清单 == 全部平台专属前缀（= 现状，关闭态即安全态）
-        let stripped = platform_only_prefixes_to_strip(&FeatureSet::default());
-        assert_eq!(stripped, all.to_vec(), "缺省能力集下必须全量剔除");
-        assert!(unlocked_platform_only_prefixes(&FeatureSet::default()).is_empty());
-
-        // ② 开启域名自助 ⇒ 仅 system:tenant:domain: 免剔，其余不动
-        let on = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"full"}"#));
-        let unlocked = unlocked_platform_only_prefixes(&on);
-        assert_eq!(unlocked, vec!["system:tenant:domain:"]);
-        let stripped = platform_only_prefixes_to_strip(&on);
-        assert_eq!(stripped.len(), all.len() - 1);
-        assert!(!stripped.contains(&"system:tenant:domain:"));
-        for p in all {
-            if *p != "system:tenant:domain:" {
-                assert!(stripped.contains(p), "{p} 不在解锁白名单内，必须仍被剔除");
-            }
-        }
-
-        // ③ 整前缀解锁锁：免剔前缀下**全部** perms 必须都在解锁白名单内
-        let src = std::fs::read_to_string("src/middleware/permission.rs")
-            .expect("src/middleware/permission.rs 应存在");
-        let allowed: Vec<String> = CAPABILITY_UNLOCKED_PERMS
-            .iter()
-            .filter(|(feat, _)| on.is_on(feat))
-            .flat_map(|(_, list)| list.iter().map(|p| (*p).to_string()))
-            .collect();
-        for prefix in all {
-            if stripped.contains(prefix) {
-                continue;
-            }
-            let registered = perms_literals_with_prefix(&src, prefix);
-            assert!(
-                !registered.is_empty(),
-                "{prefix} 被整前缀免剔，却在权限映射表中找不到任何 perms"
-            );
-            for perm in registered {
-                assert!(
-                    allowed.contains(&perm),
-                    "{perm} 未被解锁白名单收录，却因前缀 {prefix} 免剔而整面放开"
-                );
-            }
-        }
-    }
-
-    /// 反向锚点：`unlocked_platform_only_prefixes` 只认**开启**的能力位；
-    /// 显式 `off` 与未登记能力位都不产生免剔项。
-    #[test]
-    fn test_strip_list_ignores_off_capabilities() {
-        let explicit_off = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"off"}"#));
-        assert!(unlocked_platform_only_prefixes(&explicit_off).is_empty());
+        // ② 仅开备份只读 ⇒ 恰好 3 条只读 perms，且**不含**写面
+        let ro = FeatureSet::from_json(Some(r#"{"backup.readonly_visible":"on"}"#));
+        let mut unlocked = unlocked_capability_perms(&ro);
+        unlocked.sort_unstable();
         assert_eq!(
-            platform_only_prefixes_to_strip(&explicit_off),
-            crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES.to_vec()
+            unlocked,
+            vec![
+                "system:backup:download",
+                "system:backup:list",
+                "system:backup:query",
+            ],
+            "备份只读能力位只应解锁只读子集"
+        );
+        for p in [
+            "system:backup:add",
+            "system:backup:edit",
+            "system:backup:remove",
+        ] {
+            assert!(
+                !unlocked_capability_perms(&ro).contains(&p),
+                "{p} 属写面/危险面，备份只读能力位不得解锁"
+            );
+            assert!(
+                !is_grantable_perm_with_features(p, &ro),
+                "{p} 在备份只读能力位下仍必须不可授予"
+            );
+        }
+        // 且只读子集确实可授予
+        for p in &unlocked {
+            assert!(is_grantable_perm_with_features(p, &ro), "{p} 应可授予");
+        }
+
+        // ③ 开自助导出 ⇒ 仅解锁 `system:backup:export`（不含只读三项，二者独立）
+        let ex = FeatureSet::from_json(Some(r#"{"backup.tenant_self_export":"on"}"#));
+        assert_eq!(unlocked_capability_perms(&ex), vec!["system:backup:export"]);
+        assert!(
+            !is_grantable_perm_with_features("system:backup:list", &ex),
+            "自助导出能力位不得顺带解锁只读列表"
+        );
+
+        // ④ 域名能力位（整前缀全量收录的特例）仍解锁 5 条
+        let dom = FeatureSet::from_json(Some(r#"{"tenant.domain_self_service":"full"}"#));
+        assert_eq!(unlocked_capability_perms(&dom).len(), 5);
+
+        // ⑤ 两者同开 ⇒ 并集且无重复
+        let both = FeatureSet::from_json(Some(
+            r#"{"backup.readonly_visible":"on","backup.tenant_self_export":"on"}"#,
+        ));
+        let list = unlocked_capability_perms(&both);
+        assert_eq!(list.len(), 4);
+        let mut sorted = list.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "解锁清单不得出现重复项");
+    }
+
+    /// `perms NOT IN` 片段：集中生成、带列名、占位符按方言编号
+    #[test]
+    fn test_perms_not_in_clause() {
+        assert!(perms_not_in_clause(&[], |_| "?".to_string()).is_none());
+        assert_eq!(
+            perms_not_in_clause(&["a", "b"], |i| format!("${i}")).as_deref(),
+            Some("perms NOT IN ($1, $2)")
         );
     }
 }

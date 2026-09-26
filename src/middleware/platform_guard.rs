@@ -22,18 +22,81 @@
 //! 属内层（后执行），故执行时 `Claims` 必已注入；该假设由集成测试证明（平台操作者 200）。
 
 use axum::extract::Request;
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 
 use crate::common::AppError;
 use crate::jwt::Claims;
 
-/// 平台专属接口守卫：仅 `tid == 0`（平台操作者）放行，其余（含租户管理员）403。
+/// 能力位感知：平台专属路由组中，**允许租户操作者**访问的 (方法, 路径, 能力位) 清单。
 ///
-/// 仅用于 `/monitor/cache/*` 与 `/tool/gen/*` 等平台专属路由；挂载方式：
+/// 语义：仅当**平台层** `[features]` 中对应能力位非 `off` 时，该路径才放行租户操作者；
+/// 能力位关闭（默认）⇒ 与改造前逐条等价（租户一律 403）。
+///
+/// ⚠️ 本守卫是**第二道防线**（请求层），不是唯一闸门。完整的三层开关为：
+/// ① 平台 `[features]`（本守卫）→ ② 套餐 `features`（决定相关 perms 是否**可授予**租户角色）
+/// → ③ 角色授权（permission 中间件按 perms 放行）。因此即便某租户套餐未开启，
+/// 守卫放行后仍会在 permission 层 403（不会形成越权）。
+///
+/// 服务层的行级收窄（`tenant_id = 操作者租户`）是最后一道：见
+/// `sys_backup_service`（租户可见的备份清单被强制收窄为
+/// `backup_type = 'tenant_export' AND tenant_id = 自己`）。
+///
+/// `download/{backupId}` 用**前缀**匹配（路径含动态段），其余为精确匹配。
+const TENANT_VISIBLE_ROUTES: &[(Method, &str, &str)] = &[
+    (
+        Method::GET,
+        "/system/backup/list",
+        "backup.readonly_visible",
+    ),
+    (
+        Method::GET,
+        "/system/backup/download/",
+        "backup.readonly_visible",
+    ),
+    (
+        Method::POST,
+        "/system/backup/self-export",
+        "backup.tenant_self_export",
+    ),
+];
+
+/// 租户操作者是否可访问该 (方法, 路径)：返回命中的能力位键（未命中 = `None`）。
+///
+/// 纯函数（可单测）：不读全局、不做 IO，只做静态清单匹配，
+/// 因此"未登记路径 = 租户不可达"是**结构性**保证（不会因忘写一个分支而放开）。
+fn tenant_visible_feature(method: &Method, path: &str) -> Option<&'static str> {
+    // 备份详情 `GET /system/backup/{backupId}`：单个**纯数字**动态段
+    // （backupId 为雪花/自增整数；"list"/"self-export" 等静态段因含非数字字符被排除）
+    if method == Method::GET
+        && let Some(rest) = path.strip_prefix("/system/backup/")
+        && !rest.is_empty()
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some("backup.readonly_visible");
+    }
+    TENANT_VISIBLE_ROUTES
+        .iter()
+        .find(|(m, p, _)| {
+            m == method
+                && if p.ends_with('/') {
+                    path.starts_with(p)
+                } else {
+                    path == *p
+                }
+        })
+        .map(|(_, _, feat)| *feat)
+}
+
+/// 平台专属接口守卫：仅 `tid == 0`（平台操作者）放行，其余（含租户管理员）403；
+/// **但**命中 [`TENANT_VISIBLE_ROUTES`] 且对应平台层能力位非 `off` 时放行租户操作者。
+///
+/// 仅用于 `/monitor/cache/*`、`/tool/gen/*`、`/system/backup/*` 等平台专属路由；挂载方式：
 /// `.route_layer(axum::middleware::from_fn(platform_only_guard))`
 pub async fn platform_only_guard(req: Request, next: Next) -> Result<Response, AppError> {
     let path = req.uri().path().to_string();
+    let method = req.method().clone();
     // 先取出 owned 的操作者上下文（tid + 用户名），避免持有对 req 的借用后再 move req
     let operator = req
         .extensions()
@@ -43,6 +106,12 @@ pub async fn platform_only_guard(req: Request, next: Next) -> Result<Response, A
     match operator {
         Some((0, _)) => Ok(next.run(req).await),
         Some((tenant_id, user_id)) => {
+            // 能力位放行（第二道防线）：平台层开启 + 路径在租户可见清单内
+            if let Some(feat) = tenant_visible_feature(&method, &path)
+                && crate::common::features::platform_features().is_on(feat)
+            {
+                return Ok(next.run(req).await);
+            }
             tracing::warn!(
                 user_id = %user_id,
                 tenant_id,
@@ -62,6 +131,69 @@ pub async fn platform_only_guard(req: Request, next: Next) -> Result<Response, A
             Err(AppError::forbidden(&crate::tr!(
                 "error.tenant.platform_only"
             )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 租户可见清单是**结构性白名单**：只放行登记过的路径，其余一律 `None`
+    #[test]
+    fn test_tenant_visible_feature_whitelist() {
+        // 只读三件套
+        assert_eq!(
+            tenant_visible_feature(&Method::GET, "/system/backup/list"),
+            Some("backup.readonly_visible")
+        );
+        assert_eq!(
+            tenant_visible_feature(&Method::GET, "/system/backup/42"),
+            Some("backup.readonly_visible"),
+            "备份详情（纯数字 backupId）应与列表同能力位"
+        );
+        assert_eq!(
+            tenant_visible_feature(&Method::GET, "/system/backup/download/42"),
+            Some("backup.readonly_visible")
+        );
+        assert_eq!(
+            tenant_visible_feature(&Method::GET, "/system/backup/logs/42"),
+            None,
+            "未登记路径必须不可达"
+        );
+        assert_eq!(
+            tenant_visible_feature(&Method::GET, "/system/backup/self-export"),
+            None,
+            "self-export 是 POST 语义；GET 不匹配（非纯数字段也不匹配详情规则）"
+        );
+        // 自助导出
+        assert_eq!(
+            tenant_visible_feature(&Method::POST, "/system/backup/self-export"),
+            Some("backup.tenant_self_export")
+        );
+        // 平台代导出（带 tenantId 的越权面）**不得**对租户放行
+        assert_eq!(
+            tenant_visible_feature(&Method::POST, "/system/backup/tenant-export/9"),
+            None,
+            "平台代导出必须保持平台专属"
+        );
+    }
+
+    /// 危险写面与整库下载面：租户**永不**放行（能力位不改变这些路径的判定）
+    #[test]
+    fn test_tenant_visible_feature_denies_dangerous_writes() {
+        for (m, p) in [
+            (Method::POST, "/system/backup"),
+            (Method::POST, "/system/backup/restore/1"),
+            (Method::DELETE, "/system/backup/1"),
+            (Method::POST, "/tool/gen/1"),
+            (Method::GET, "/monitor/cache/keys"),
+        ] {
+            assert_eq!(
+                tenant_visible_feature(&m, p),
+                None,
+                "{m} {p} 必须保持平台专属（能力位不得放开）"
+            );
         }
     }
 }

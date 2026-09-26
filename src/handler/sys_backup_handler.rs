@@ -35,9 +35,13 @@ use axum::http::{HeaderValue, StatusCode, header};
 )]
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Query(query): Query<BackupLogQueryDto>,
 ) -> Result<TableDataInfo<SysBackupLogModel>, AppError> {
-    let (rows, total) = state.backup_service.get_backup_log_page(query).await?;
+    let (rows, total) = state
+        .backup_service
+        .get_backup_log_page(query, operator.tenant_id())
+        .await?;
     Ok(TableDataInfo::new(total, rows))
 }
 
@@ -57,9 +61,13 @@ pub async fn list(
 )]
 pub async fn get_info(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(backup_id): Path<i64>,
 ) -> Result<AjaxResult<SysBackupLogModel>, AppError> {
-    let model = state.backup_service.get_backup_by_id(backup_id).await?;
+    let model = state
+        .backup_service
+        .get_backup_by_id(backup_id, operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(model))
 }
 
@@ -126,6 +134,46 @@ pub async fn export_tenant(
     let vo = state
         .backup_service
         .export_tenant_package(tenant_id, operator.username())
+        .await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// POST /system/backup/self-export
+/// **租户自助**导出本租户数据包（批次 2，能力位 `backup.tenant_self_export`）
+///
+/// 与平台版 `tenant-export/{tenantId}` 的差别：**无租户路径参数**——归属租户由
+/// 服务端强制取操作者所属租户（`operator.tenant_id()`），因此不存在"传他租户 id"
+/// 的越权面（结构上不可表达），也无需再做一次归属校验。
+///
+/// 门控（三层缺一不可）：① 平台 `[features].backup.tenant_self_export = on`
+/// （`platform_only_guard` 放行）→ ② 套餐 `features` 同键非 `off`（决定
+/// `system:backup:export` 是否可授予租户角色）→ ③ 角色持有 `system:backup:export`。
+#[utoipa::path(
+    post,
+    path = "/system/backup/self-export",
+    responses(
+        (status = 200, description = "导出成功", body = AjaxResult<BackupCreateVo>),
+        (status = 400, description = "操作过于频繁"),
+        (status = 403, description = "未开启租户自助导出能力位"),
+        (status = 500, description = "导出失败"),
+    ),
+    tag = "system-backup"
+)]
+pub async fn self_export(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<BackupCreateVo>, AppError> {
+    // 与平台导出同款限流（60s 最小间隔），防反复导出耗尽磁盘空间
+    acquire_rate_lock(
+        &state,
+        &format!("backup:self-export:{}", operator.user_id()),
+        60,
+    )
+    .await?;
+
+    let vo = state
+        .backup_service
+        .export_tenant_package(operator.tenant_id(), operator.username())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -290,9 +338,13 @@ async fn clear_business_caches(state: &Arc<AppState>) {
 )]
 pub async fn download(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(backup_id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let (bytes, file_name) = state.backup_service.read_backup_file(backup_id).await?;
+    let (bytes, file_name) = state
+        .backup_service
+        .read_backup_file(backup_id, operator.tenant_id())
+        .await?;
 
     let content_disposition = format!("attachment; filename=\"{}\"", file_name.replace('"', ""));
 
