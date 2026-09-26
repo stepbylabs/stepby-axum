@@ -22,6 +22,8 @@ error:
     parse_failed: 请求参数解析失败
     time_format_invalid: "时间格式不正确: %{s}"
     batch_size_exceeded: "批量操作数量不能超过%{max}"
+    clear_field_unknown: "清空声明包含不可清空的字段: %{field}"
+    clear_field_conflict: "字段 %{field} 同时提交了值与清空声明，请择一"
     forbidden: 无权限访问该资源
   auth:
     captcha_expired: 验证码已过期或不存在

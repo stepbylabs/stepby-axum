@@ -6,8 +6,8 @@
 //! `permission.rs` 原把 `GET /system/backup/download/{backupId}`（整库文件下载）与
 //! `POST /system/backup/tenant-export/{tenantId}`（数据包导出）都映射到
 //! `system:backup:query` ⇒ **授予 query 等于授予整库下载**。而能力位
-//! `backup.readonly_visible` 想下放的正是"只读子集"，两者混在同一条 perms 上
-//! 无法安全拆分。
+//! `backup.visibility`（原 `backup.readonly_visible`）想下放的正是"只读子集"，
+//! 两者混在同一条 perms 上无法安全拆分。
 //!
 //! ## 口径
 //!
@@ -22,9 +22,10 @@
 //!
 //! **不授予任何角色**（保守起步）：两个 perms 均属平台专属前缀 `system:backup:`，
 //! 默认整面不下放。能力位开启后由 `initialize::ensure_tenant_role_menu_governance`
-//! 的 ①' 按 **perms 粒度**回填给平台普通角色（role_id=2）：
-//! - `backup.readonly_visible` ⇒ 回填 `system:backup:list` / `:query` / `:download` 对应菜单；
-//! - `backup.tenant_self_export` ⇒ 回填 `system:backup:export` 对应菜单。
+//! 的 ①' 按 **perms 粒度 + 档位阈值**回填给平台普通角色（role_id=2）：
+//! - `backup.visibility = view_only` ⇒ 回填 `system:backup:list` / `:query`；
+//! - `backup.visibility = full` ⇒ 再回填 `system:backup:download`；
+//! - `backup.tenant_self_export = on` ⇒ 回填 `system:backup:export` 对应菜单。
 //!
 //! 注意 `system:backup:edit`（恢复，覆盖现库）与 `:add` / `:remove` **不在**解锁白名单内，
 //! 因此即使能力位开启，也不会被回填 — 这正是 perms 粒度相对前缀粒度的关键差别。

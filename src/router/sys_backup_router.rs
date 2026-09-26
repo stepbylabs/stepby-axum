@@ -10,8 +10,10 @@
 //!
 //! **批次 2 例外（能力位感知）**：`platform_only_guard` 对**登记在册**的少数路径
 //! 按平台层能力位放行租户操作者——
-//! - `GET /system/backup/list`、`GET /system/backup/{backupId}`、
-//!   `GET /system/backup/download/{backupId}` ⇒ 需 `backup.readonly_visible`；
+//! - `GET /system/backup/list`、`GET /system/backup/{backupId}`
+//!   ⇒ 需 `backup.visibility` 达 `view_only` 档；
+//! - `GET /system/backup/download/{backupId}`
+//!   ⇒ 需 `backup.visibility` 达 `full` 档（下载即拿到文件本体，只读档不放行）；
 //! - `POST /system/backup/self-export` ⇒ 需 `backup.tenant_self_export`。
 //!
 //! 放行后仍有**两道**收窄：permission 层（需租户角色持有对应 perms，而该 perms 只有在

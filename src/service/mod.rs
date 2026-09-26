@@ -11,6 +11,7 @@
 //! - sys_menu_service.rs: 菜单模块（菜单 CRUD、树形结构递归组装、权限标识校验）
 //! - auth_service.rs: 认证服务（登录、登出、验证码、getInfo、getRouters）
 
+pub mod acme_service;
 pub mod auth_service;
 pub mod gen_table_service;
 pub mod ip_location_service;

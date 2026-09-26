@@ -128,7 +128,7 @@ pub async fn jwks(State(state): State<Arc<AppState>>) -> Response {
 /// GET /sso/authorize
 pub async fn authorize(
     State(state): State<Arc<AppState>>,
-    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<AuthorizeQuery>,
 ) -> Result<Response, AppError> {
@@ -146,6 +146,16 @@ pub async fn authorize(
         max_age: q.max_age,
         acr_values: q.acr_values,
     };
+    // 批次 4（`[sso].audit_authorize_get`）：审计快照需在 params 被消费前取（默认关时不取）
+    let audit_enabled = state.config.sso.audit_authorize_get;
+    let audit_snapshot = audit_enabled.then(|| {
+        format!(
+            "client_id={}; redirect_uri={}; scope={}",
+            params.client_id,
+            params.redirect_uri.as_deref().unwrap_or(""),
+            params.scope
+        )
+    });
     // 未登录回跳目标预先构造（params 稍后会被 authorize 消费）。
     // redirect 挂**同源相对路径**而非 `{base}` 绝对 URL：前端登录页对 redirect 参数做
     // 开放重定向守卫（isSafeRedirect 只接受单 `/` 开头的路径），绝对 URL 会被拒绝并
@@ -163,6 +173,41 @@ pub async fn authorize(
         )
         .await?;
 
+    // 批次 4（`[sso].audit_authorize_get`，默认关 = 改造前行为）：为授权端点写一条操作日志。
+    // best-effort：失败只打 WARN，不影响授权跳转（审计是旁路，不是闸门）。
+    if let Some(snapshot) = audit_snapshot {
+        let ip = crate::utils::ip::extract_client_ip(
+            &headers,
+            peer.ip(),
+            &state.config.server.trusted_proxies,
+        );
+        use crate::service::sys_oper_log_service::OperLogRecord;
+        state
+            .oper_log_service
+            .record_oper_log(OperLogRecord {
+                title: "SSO 授权请求".to_string(),
+                business_type: 0,
+                method: "GET".to_string(),
+                request_method: "GET".to_string(),
+                operator_type: 0,
+                oper_name: "anonymous".to_string(),
+                dept_name: String::new(),
+                oper_url: "/sso/authorize".to_string(),
+                oper_ip: ip,
+                oper_location: String::new(),
+                oper_param: snapshot,
+                oper_before: String::new(),
+                oper_diff: String::new(),
+                json_result: String::new(),
+                status: "0".to_string(),
+                error_msg: String::new(),
+                cost_time: 0,
+                tenant_id: 0,
+                target_tenant_id: None,
+            })
+            .await;
+    }
+
     Ok(match outcome {
         AuthorizeOutcome::NeedLogin => {
             // 引导至前端登录页，登录后按 redirect 回到 authorize（相对路径，同源）
@@ -174,7 +219,10 @@ pub async fn authorize(
         AuthorizeOutcome::NeedConsent(echo) => {
             crate::observability::metrics::MetricsRegistry::global()
                 .record_sso_event("authorize", "consent");
-            let target = format!("/sso-consent?{}", encode_consent_query(&echo));
+            let target = format!(
+                "/sso-consent?{}",
+                encode_consent_query(&echo, state.config.sso.proxy_logo_uri)
+            );
             redirect_found(&target)
         }
         AuthorizeOutcome::Redirect(url) => {
@@ -379,6 +427,175 @@ pub async fn revoke(
         }
     }
 }
+
+/// POST /sso/introspect（批次 4，RFC 7662；`[sso].introspection_enabled` 默认 **关** ⇒ 404，
+/// 与"端点不存在"的改造前行为等价）。
+///
+/// 客户端认证：`client_secret_basic` / `client_secret_post`（与 token/revoke 同口径）。
+/// 无论令牌有效与否，**已认证**的请求一律 200（`active: true/false`）——RFC 7662 §2.2
+/// 要求不得借错误码泄漏令牌存在性；只有客户端认证失败才 401。
+pub async fn introspect(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    form: Result<axum::Form<TokenParams>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    // 关闭态 ⇒ 404（端点不存在），不暴露"存在但被关掉"的差异
+    if !state.config.sso.enabled || !state.config.sso.introspection_enabled {
+        return oidc_error_response(
+            StatusCode::NOT_FOUND,
+            &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
+        );
+    }
+    let mut params = match form {
+        Ok(f) => f.0,
+        Err(_) => {
+            return oidc_error_response(
+                StatusCode::BAD_REQUEST,
+                &OidcError::new(
+                    "invalid_request",
+                    "malformed introspection request".to_string(),
+                ),
+            );
+        }
+    };
+    if let Some((cid, csec)) = parse_basic_auth(&headers) {
+        if params.client_id.is_none() {
+            params.client_id = Some(cid);
+        }
+        if params.client_secret.is_none() {
+            params.client_secret = Some(csec);
+        }
+    }
+    let base = base_url(&headers, peer, &state.config.server.trusted_proxies);
+    let issuer = state.sso_service.resolve_issuer(&state.config.sso, &base);
+    match state
+        .sso_service
+        .introspect(
+            &params,
+            &mut state.redis.clone(),
+            &state.config.sso,
+            &issuer,
+        )
+        .await
+    {
+        // RFC 7662 §4：内省响应不得被缓存
+        Ok(body) => with_no_store((StatusCode::OK, Json(body)).into_response()),
+        Err(e) => {
+            let status = if e.code == "invalid_client" {
+                StatusCode::UNAUTHORIZED
+            } else if e.code == "server_error" {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            let mut resp = oidc_error_response(status, &e);
+            if status == StatusCode::UNAUTHORIZED {
+                resp.headers_mut().insert(
+                    axum::http::header::WWW_AUTHENTICATE,
+                    axum::http::HeaderValue::from_static(
+                        "Basic realm=\"yebot-sso\", charset=\"UTF-8\"",
+                    ),
+                );
+            }
+            resp
+        }
+    }
+}
+
+/// GET /sso/client-logo/{clientId}（批次 4，`[sso].proxy_logo_uri` 默认 **关** ⇒ 404）
+///
+/// 同意页的原生行为是直接 `<img src={logo_uri}>` 外链第三方主机——那会把用户 IP / Referer
+/// 泄漏给该主机。开启本开关后同意页改走同源本端点：服务端带 **SSRF 校验** 拉取（协议 +
+/// 主机解析双重检查）、限制体积与超时、只放行 `image/*`，并按客户端 id 短缓存。
+pub async fn client_logo(
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+) -> Response {
+    if !state.config.sso.enabled || !state.config.sso.proxy_logo_uri {
+        return oidc_error_response(
+            StatusCode::NOT_FOUND,
+            &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
+        );
+    }
+    // 缓存的是**已通过 SSRF 校验的目标 URL**（不是图片字节：避免二进制进 Redis 需 base64 膨胀）。
+    // 客户端改了 logo_uri 时靠 TTL 自然过期（1 小时）。
+    let cache_key = format!("sso:logo:{}", client_id);
+    let mut redis = state.redis.clone();
+    let cached_url: Option<String> = redis::cmd("GET")
+        .arg(&cache_key)
+        .query_async(&mut redis)
+        .await
+        .unwrap_or(None);
+    let url = match cached_url.filter(|u| !u.is_empty()) {
+        Some(u) => u,
+        None => {
+            let Some(url) = state.sso_service.client_logo_source(&client_id).await else {
+                // 无 logo / 未通过 SSRF 校验：404 让前端回落到首字母头像（不显示空白）
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let _: Result<(), _> = redis::cmd("SETEX")
+                .arg(&cache_key)
+                .arg(LOGO_CACHE_TTL_SECS)
+                .arg(&url)
+                .query_async(&mut redis)
+                .await;
+            url
+        }
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        // 不跟随重定向：重定向可能把请求引到 SSRF 白名单之外的地址
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let resp = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    // 只放行图片类型：防止把本端点当通用内容代理
+    if !content_type.starts_with("image/") {
+        tracing::warn!(url = %url, content_type = %content_type, "同意页 logo 代理：响应非 image/*，拒绝");
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let bytes = match resp.bytes().await {
+        Ok(b) if b.len() <= MAX_LOGO_BYTES => b,
+        Ok(_) => {
+            tracing::warn!(url = %url, "同意页 logo 代理：体积超限，拒绝");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let mut out = bytes.into_response();
+    if let Ok(ct) = HeaderValue::from_str(&content_type) {
+        out.headers_mut()
+            .insert(axum::http::header::CONTENT_TYPE, ct);
+    }
+    out.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("public, max-age=3600"),
+    );
+    out
+}
+
+/// logo 体积上限（256 KiB）：超限即拒绝，避免把本端点当大文件代理
+const MAX_LOGO_BYTES: usize = 256 * 1024;
+/// logo 目标 URL 缓存 TTL（秒）
+const LOGO_CACHE_TTL_SECS: u64 = 3600;
 
 /// GET /sso/userinfo（Authorization: Bearer）
 pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -829,7 +1046,7 @@ fn encode_authorize_query(p: &AuthorizeParams) -> String {
 /// 拼同意页查询（回显至前端 /sso-consent）。
 /// 该跳转的接收方是**我方前端页面**（非外部 RP），故按「应用私有 API」约定使用 camelCase，
 /// 与前端 ts-rs 生成类型一致；而 RP 面向的 authorize/token 协议参数保持 snake_case（见 AuthorizeQuery）。
-fn encode_consent_query(e: &crate::service::sso_service::ConsentEcho) -> String {
+fn encode_consent_query(e: &crate::service::sso_service::ConsentEcho, proxy_logo: bool) -> String {
     // 全部值经 urlencode_spa：空格→%20，确保 Vue Router 逐字段解析（尤其 scope/clientName）正确。
     let mut parts: Vec<String> = vec![
         format!("clientId={}", urlencode_spa(&e.client_id)),
@@ -840,6 +1057,11 @@ fn encode_consent_query(e: &crate::service::sso_service::ConsentEcho) -> String 
         "codeChallengeMethod=S256".to_string(),
         format!("codeChallenge={}", urlencode_spa(&e.code_challenge)),
     ];
+    // 批次 4（`[sso].proxy_logo_uri`）：同意页改用同源 `/sso/client-logo/{clientId}`，
+    // 不再直接外链第三方主机（避免把用户 IP/Referer 泄漏给该主机）。
+    if proxy_logo {
+        parts.push("logoProxy=1".to_string());
+    }
     if !e.logo_uri.is_empty() {
         parts.push(format!("logoUri={}", urlencode_spa(&e.logo_uri)));
     }

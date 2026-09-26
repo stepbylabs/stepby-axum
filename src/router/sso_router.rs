@@ -38,6 +38,10 @@ pub fn public_sso_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/sso/userinfo", get(sso_handler::userinfo))
         // v5-D2：RS256 客户端公钥发布（聚合；仅启用客户端）
         .route("/sso/jwks", get(sso_handler::jwks))
+        // 批次 4（RFC 7662）：令牌内省。默认关（`[sso].introspection_enabled = false`）⇒ handler 返回 404
+        .route("/sso/introspect", post(sso_handler::introspect))
+        // 批次 4（D9）：同意页 logo 同源代理。默认关（`[sso].proxy_logo_uri = false`）⇒ 404
+        .route("/sso/client-logo/{clientId}", get(sso_handler::client_logo))
         .route(
             "/sso/logout",
             get(sso_handler::logout).post(sso_handler::logout),

@@ -77,6 +77,9 @@ pub struct Settings {
     /// 归属列 = 改造前行为；服务端的数据面隔离始终由 `tenant_scope` 承担。
     #[serde(default)]
     pub ui: UiConfig,
+    /// ACME 证书需求输出（`[acme]` 段）：**集成点**而非内置签发器（默认 `off`）。
+    #[serde(default)]
+    pub acme: AcmeConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -104,6 +107,7 @@ impl fmt::Debug for Settings {
             .field("features", &self.features)
             .field("scheduler", &self.scheduler)
             .field("ui", &self.ui)
+            .field("acme", &self.acme)
             .finish()
     }
 }
@@ -136,6 +140,13 @@ pub struct SchedulerConfig {
     /// 非法取值在启动时回落 `auto` 并告警（fail-safe，不改变行为）。
     #[serde(default = "default_cluster_mode")]
     pub cluster_mode: String,
+    /// **本部署的实例（副本）数**：仅用于启动期**多副本未选模式**的告警（WF-2 加固）。
+    ///
+    /// 为什么是"显式声明"而非探针：副本数无法在进程内可靠探测（该结论此前已被否掉）；
+    /// 部署方如实声明后，`replicas > 1 且 cluster_mode = auto` 会在启动时打出 WARN，
+    /// 避免"多实例并发扫描同一批内置任务"这一静默退化。默认 `1` = 单实例（现状）。
+    #[serde(default = "default_scheduler_replicas")]
+    pub replicas: u32,
     /// 内置任务整轮互斥锁的默认 TTL（秒，默认 300）
     ///
     /// 仅 `[flow].scan_lock_enabled` 未给出时作为兜底；`flow` 任务仍优先用
@@ -148,9 +159,14 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             cluster_mode: default_cluster_mode(),
+            replicas: default_scheduler_replicas(),
             lock_ttl_secs: default_scheduler_lock_ttl(),
         }
     }
+}
+
+fn default_scheduler_replicas() -> u32 {
+    1
 }
 
 fn default_cluster_mode() -> String {
@@ -253,6 +269,135 @@ impl TenantColumnMode {
             Self::Never => false,
         }
     }
+}
+
+/// ACME 证书需求**输出**配置（`[acme]` 段）——集成点，**不是**内置签发器。
+///
+/// # 为什么不做内置签发
+///
+/// 本项目定位「大而全」，但**证书签发属网关职责**：NGINX + certbot、Caddy 自动 HTTPS、
+/// Traefik、云 LB/CDN 证书托管各有成熟方案，内置一套反而把用户锁死在单一栈上。
+/// 按项目准则⑥（原判"不进本仓"的项改为**提供集成点/开关**），这里只做**输出契约**：
+/// 域名集合发生**状态迁移**（验证通过 ⇒ 需要签发；已签发域名被删除 ⇒ 需要吊销/清理）时，
+/// 把「证书需求清单」推给用户自己的脚本，由脚本去调 ACME 客户端。
+///
+/// # 安全姿态
+///
+/// - 默认 `off` = **不发任何出站请求**（关闭态即现状）；
+/// - `mode = webhook` 但 `webhook_url` 缺失/非 http(s) ⇒ 启动 **WARN** 且视为 `off`
+///   （不静默：运维能从日志看出"配了但没生效"）；
+/// - 推送为 fire-and-forget，失败只打 WARN，**绝不影响**域名绑定/验证业务本身；
+/// - `secret` 设置后请求带 `X-Yebot-Signature: sha256=<hmac>`，供接收端验签。
+#[derive(Clone, Deserialize)]
+pub struct AcmeConfig {
+    /// `off`（默认，不发请求）| `webhook`（推送证书需求事件到 `webhook_url`）
+    #[serde(default = "default_acme_mode")]
+    pub mode: String,
+    /// webhook 目标地址（`mode = webhook` 时必填）
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// HMAC-SHA256 签名密钥（可选）
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// 单次推送超时（秒，默认 5；上限 60）
+    #[serde(default = "default_acme_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_acme_mode(),
+            webhook_url: None,
+            secret: None,
+            timeout_secs: default_acme_timeout_secs(),
+        }
+    }
+}
+
+/// 手动实现 Debug 以**脱敏** `secret`（避免签名密钥进日志）
+impl fmt::Debug for AcmeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AcmeConfig")
+            .field("mode", &self.mode)
+            .field("webhook_url", &self.webhook_url)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+/// ACME 输出模式（`[acme].mode`）
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcmeMode {
+    /// 关闭：不发任何出站请求 —— **默认，等价于改造前行为**
+    #[default]
+    Off,
+    /// 推送证书需求事件到 webhook
+    Webhook,
+}
+
+/// `AcmeMode` 的合法模式串（顺序：默认项在前）
+pub const ACME_MODES: &[&str] = &["off", "webhook"];
+
+impl AcmeMode {
+    /// 解析配置串；未登记取值一律回落 [`AcmeMode::Off`] 并打 WARN（fail-safe）
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "webhook" => Self::Webhook,
+            "off" => Self::Off,
+            _ => {
+                tracing::warn!(
+                    value = %raw,
+                    fallback = "off",
+                    allowed = ?ACME_MODES,
+                    "配置 [acme].mode 取值非法，已回落 off（不推送证书需求事件）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
+impl AcmeConfig {
+    /// 解析后的模式（非法值已由 [`AcmeMode::parse`] 打 WARN 并回落 `off`）
+    pub fn mode(&self) -> AcmeMode {
+        AcmeMode::parse(&self.mode)
+    }
+
+    /// 推送超时（秒）：夹在 `1..=60`，防止配置成 0（立即超时）或过大（拖住请求）
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs.clamp(1, 60))
+    }
+
+    /// **本次运行的有效推送目标**：`None` = 不推送（模式为 `off`，或地址缺失/非法）。
+    ///
+    /// 地址合法性用 `http://` / `https://` 前缀判定（拒绝 `file:` / `ftp:` 等），
+    /// 与"只把数据推到运维自己声明的 HTTP 端点"的契约一致。
+    pub fn effective_webhook(&self) -> Option<&str> {
+        if self.mode() != AcmeMode::Webhook {
+            return None;
+        }
+        self.webhook_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+    }
+}
+
+fn default_acme_mode() -> String {
+    AcmeMode::default().as_str().to_string()
+}
+
+fn default_acme_timeout_secs() -> u64 {
+    5
 }
 
 /// 系统日志保留策略配置（M2：操作日志 / 登录日志定期归档清理）
@@ -369,6 +514,29 @@ pub struct SsoConfig {
     /// 每次刷新旧 RT 立即作废并签发新 RT；登出/强退/改密全量吊销。
     #[serde(default = "default_sso_refresh_token_ttl_secs")]
     pub refresh_token_ttl_secs: u64,
+    /// v5-D3 尾项（批次 4）：是否启用 **RFC 7662 令牌内省**端点 `POST /sso/introspect`。
+    ///
+    /// 默认 `false` = 端点 404（= 改造前行为）。原判定"不修"的理由是"AT 已是 RS256 可本地
+    /// 验签的 JWT"——**该理由与实际不符**（可本地验签的是 ID Token；`access_token` 自
+    /// v4-P0-A 起是**不透明令牌**，只存 `sso:at:{sha256}`）。对不发 JWT 的 AT，内省正是
+    /// RFC 7662 的标准机制，故按项目准则⑥补上这个**默认关闭**的集成点。
+    /// 开启后需客户端认证（client_secret_basic / client_secret_post），且**只为签发它的
+    /// 那个客户端**返回 `active: true`（他客户端查询恒 `active: false`，防跨客户端探测）。
+    #[serde(default)]
+    pub introspection_enabled: bool,
+    /// v5 §14 #24（批次 4）：是否为 **GET /sso/authorize 发码/跳转** 写操作审计日志。
+    ///
+    /// 默认 `false` = 不写（= 改造前行为）。原判定"不为单端点扩展 oper_log 中间件"，
+    /// 但授权端点正是钓鱼/越权排查最需要审计的一环；做成开关后想要审计的部署可自行开启。
+    #[serde(default)]
+    pub audit_authorize_get: bool,
+    /// v5-D9（批次 4）：同意页 `logo_uri` 是否经由本服务**代理**拉取。
+    ///
+    /// 默认 `false` = 同意页直接加载第三方 logo（= 改造前行为，会把用户 IP/Referer
+    /// 泄漏给该第三方主机）。开启后同意页改用同源 `/sso/client-logo/{clientId}`，
+    /// 由服务端带 SSRF 防护拉取并短缓存。
+    #[serde(default)]
+    pub proxy_logo_uri: bool,
 }
 
 impl Default for SsoConfig {
@@ -380,6 +548,9 @@ impl Default for SsoConfig {
             id_token_ttl_secs: default_sso_id_token_ttl_secs(),
             access_token_ttl_secs: default_sso_access_token_ttl_secs(),
             refresh_token_ttl_secs: default_sso_refresh_token_ttl_secs(),
+            introspection_enabled: false,
+            audit_authorize_get: false,
+            proxy_logo_uri: false,
         }
     }
 }
@@ -1245,6 +1416,7 @@ impl Settings {
             features: FeaturesConfig::default(),
             scheduler: SchedulerConfig::default(),
             ui: UiConfig::default(),
+            acme: AcmeConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -1382,6 +1554,7 @@ mod tests {
             features: FeaturesConfig::default(),
             scheduler: SchedulerConfig::default(),
             ui: UiConfig::default(),
+            acme: AcmeConfig::default(),
         }
     }
 
@@ -1650,6 +1823,7 @@ mod tests {
             features: FeaturesConfig::default(),
             scheduler: SchedulerConfig::default(),
             ui: UiConfig::default(),
+            acme: AcmeConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);

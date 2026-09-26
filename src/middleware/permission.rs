@@ -583,8 +583,9 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("POST", "/system/backup/restore/{backupId}", "system:backup:edit"),
     // 批次 2（MT-7 权限粒度化）：下载**独立**成 perms。
     // 原与"详情查询"共用 `system:backup:query` ⇒ 授予 query 等于授予整库下载；
-    // 拆分后能力位 `backup.readonly_visible` 才能安全地把只读子集下放给租户
-    // （服务层再按 `backup_type='tenant_export' AND tenant_id=自己` 行级收窄）。
+    // 拆分后能力位 `backup.visibility` 才能安全地把只读子集（`view_only` 档）下放给租户、
+    // 并把下载面单独留在 `full` 档（服务层再按
+    // `backup_type='tenant_export' AND tenant_id=自己` 行级收窄）。
     ("GET", "/system/backup/download/{backupId}", "system:backup:download"),
     // 租户数据包导出（F-2）：平台为**指定租户**导出，独立 perms（不复用只读 query）
     (

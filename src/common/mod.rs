@@ -1,5 +1,6 @@
 // axum-backend/src/common/mod.rs
 
+pub mod clear_fields;
 pub mod constants;
 pub mod custom_scope;
 pub mod data_scope;

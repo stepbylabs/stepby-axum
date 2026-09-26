@@ -208,7 +208,9 @@ impl AppState {
         let tenant_service = SysTenantService::new(db.clone(), redis.clone());
 
         // 多租户 Phase 3 域名链路：域名服务持有独立 Redis 客户端（host 缓存 tenant:host:{domain}）
-        let tenant_domain_service = SysTenantDomainService::new(db.clone(), redis.clone());
+        // 批次 4：注入 config 以承载 `[acme]` 证书需求输出集成点（默认 off = 不发请求）
+        let tenant_domain_service =
+            SysTenantDomainService::new(db.clone(), redis.clone(), config.clone());
 
         // 批次 3：L3 租户自建导航服务（能力位 nav.l3 门控；复用 menu_service 的菜单树口径）
         let tenant_nav_service =

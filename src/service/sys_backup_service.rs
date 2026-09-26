@@ -801,7 +801,7 @@ impl SysBackupService {
 
     /// 分页查询备份日志（**租户自助只读**：`operator_tid != 0` 时结构性收窄）
     ///
-    /// 批次 2（能力位 `backup.readonly_visible`）：租户操作者**只能**看到本租户的
+    /// 批次 2（能力位 `backup.visibility`）：租户操作者**只能**看到本租户的
     /// `tenant_export` 数据包行——同时施加 `tenant_id = 自己` 与
     /// `backup_type = 'tenant_export'` 两道条件：
     /// - 前者防跨租户读取；
@@ -931,6 +931,7 @@ impl SysBackupService {
     ///
     /// 批次 2：`operator_tid != 0`（租户操作者）时先做行级可见性校验——只能下载
     /// **本租户的 `tenant_export` 数据包**，整库备份（manual/auto/restore）一律 403。
+    /// 请求层另需 `backup.visibility` 达 `full` 档（`view_only` 不放行下载面）。
     pub async fn read_backup_file(
         &self,
         backup_id: i64,

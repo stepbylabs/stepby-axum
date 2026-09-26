@@ -22,6 +22,8 @@ error:
     parse_failed: Failed to parse request parameters
     time_format_invalid: "Invalid time format: %{s}"
     batch_size_exceeded: "Batch operation size cannot exceed %{max}"
+    clear_field_unknown: "clearFields contains a non-clearable field: %{field}"
+    clear_field_conflict: "Field %{field} was both submitted with a value and declared for clearing; choose one"
     forbidden: Access to this resource is forbidden
   auth:
     captcha_expired: Captcha expired or does not exist

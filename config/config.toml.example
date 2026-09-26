@@ -155,6 +155,20 @@ code_ttl_secs = 60             # 授权码有效期（默认 60s，短 TTL 一�
 id_token_ttl_secs = 3600       # ID Token 有效期（默认 1h）
 access_token_ttl_secs = 3600   # SSO 访问令牌（不透明）有效期（默认 1h，v4-P0-A）
 
+# ——— 批次 4：三个**默认关闭**的可选端点/行为（准则⑥：不整块砍掉，提供开关）———
+# introspection_enabled：开启后提供 RFC 7662 令牌内省 `POST /sso/introspect`。
+#   ⚠️ access_token 自 v4-P0-A 起是**不透明令牌**（非 JWT）⇒ RP 无法本地验签，
+#      内省正是这类令牌的标准校验机制。开启后需客户端认证，且只为**签发它的客户端**
+#      返回 active=true（他客户端恒 false，防跨客户端探测）。关闭 ⇒ 端点 404。
+introspection_enabled = false
+# audit_authorize_get：为 GET /sso/authorize 写操作审计日志（授权端点排查钓鱼/越权）。
+#   关闭 ⇒ 不写（= 历史行为；该端点此前刻意未接 oper_log 中间件）。
+audit_authorize_get = false
+# proxy_logo_uri：同意页 logo 改由**同源** `/sso/client-logo/{clientId}` 代理拉取
+#   （带 SSRF 校验 + 体积/超时限制 + 仅 image/*）。关闭 ⇒ 同意页直接外链第三方 logo
+#   （= 历史行为，会把用户 IP/Referer 泄漏给该主机）。
+proxy_logo_uri = false
+
 # ==================== 审批工作流（m20260923_000002 flow_module）====================
 # 整个 [flow] 段可省略（全部走结构体缺省）；下列取值与代码缺省一一对应。
 # W-7 起超时提醒策略：**只提醒一次**（DB last_reminded_at 为事实源）+ 超 N 小时升级主管。
@@ -186,8 +200,16 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 # 租户域名自助管理（默认 off）——开启后租户管理员可管理**本租户**域名；
 # 需服务层按 tid 收窄 + 租户套餐同时开启，否则"菜单可见但请求 403"的假入口仍被拦截。
 "tenant.domain_self_service" = "off"
-# 备份中心只读可见（默认 off）——开启后租户可授只读子权限（不含下载/恢复/删除）
-"backup.readonly_visible" = "off"
+# 备份中心可见性（默认 off）：off | view_only | full
+#   view_only = 只读可见（列表 + 详情；**不含下载**）——平台普通角色可查看备份列表，
+#               但下载/恢复/删除维持 403（MT-7 诉求）；
+#   full      = 只读 + 下载（租户只能下载**自己的** tenant_export 数据包，服务层行级收窄）。
+#   ⚠️ 写面/危险面（创建整库备份 / 恢复覆盖现库 / 删除）在任何档位下均不下放。
+#   ⚠️ `full` 档会一并让平台普通角色获得下载面（它是角色菜单模板的回填目标，tid=0 ⇒ 无行级
+#      收窄）⇒ 若只想要"平台普通角色只读"而不想放开整库下载，请仅开 `view_only`。
+#   ⚠️ 批次 2 的旧键名 `backup.readonly_visible`（单档 off|on）已更名为本键（`on` ⇒ `full`）；
+#      旧键会被净化回 `off` 并在日志告警，升级时请同步改名。
+"backup.visibility" = "off"
 # 租户自助导出（默认 off）——开启后租户可导出**本租户**数据包
 "backup.tenant_self_export" = "off"
 # 租户自建导航 L3（默认 off）：off | view_only | full
@@ -207,8 +229,12 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 # ⚠️ 非法取值在启动时回落 `auto` 并告警（fail-safe）。
 # ⚠️ **边界**：`sys_job` 的逐任务防重入锁 `lock:scheduler:{job_id}` 属"同一任务防重入"，
 #    单实例同样需要，**不随本开关关闭**。
+# replicas：本部署的**实例（副本）数**，仅供启动期告警（不参与运行时判定）。
+#    `replicas > 1` 且 `cluster_mode = auto` ⇒ 启动打 WARN，提示改 `leader`。
+#    默认 1 = 单实例（现状）。副本数无法在进程内可靠探测，故要求部署方显式声明。
 [scheduler]
 cluster_mode = "auto"
+replicas = 1
 # 内置任务整轮互斥锁的默认 TTL（秒）；flow 任务仍优先用 [flow].scan_lock_ttl_secs
 lock_ttl_secs = 300
 
@@ -225,3 +251,27 @@ lock_ttl_secs = 300
 # ⚠️ 非法取值在启动时回落 auto 并告警（fail-safe，不会意外扩大可见面）。
 [ui]
 show_tenant_column = "auto"
+
+# ==================== ACME 证书需求输出（集成点）====================
+# 定位：**证书签发属网关职责**（NGINX+certbot / Caddy / Traefik / 云 LB 各有方案），
+# 内置一套只会把用户锁死在单一栈上。故按项目准则⑥做成**集成点**：域名集合发生
+# **状态迁移**时，把「证书需求清单」推给你自己的脚本，由脚本去调 ACME 客户端。
+#
+# 触发时机（只在状态迁移时推送 ⇒ 天然幂等）：
+#   cert.issue   域名 DNS TXT 验证**首次通过** ⇒ 需要签发证书
+#   cert.remove  **已验证**域名被删除         ⇒ 需要吊销/清理证书
+# 载荷（JSON）：
+#   { "source":"yebot", "event":"cert.issue", "host":"shop.example.com",
+#     "tenantId":12, "tenantCode":"acme", "verifyStatus":"1", "occurredAt":"..." }
+# 请求头：Content-Type: application/json、X-Yebot-Event: <event>，
+#        配置 secret 时另带 X-Yebot-Signature: sha256=<HMAC-SHA256(body)>。
+#
+# mode：
+#   off     （默认）不发任何出站请求 ⇒ 等价于历史行为
+#   webhook 推送到 webhook_url（缺失或非 http(s) ⇒ 启动 WARN 并按 off 处理，不静默）
+# 落地配方（certbot / acme.sh / Traefik）见 deploy/README.md §7.1。
+[acme]
+mode = "off"
+# webhook_url = "https://ops.example.com/hooks/yebot-acme"
+# secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
+timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60

@@ -202,10 +202,24 @@ impl JobScheduler {
         let mmdb_round_lock_needed = cluster_mode.requires_round_lock(true);
         tracing::info!(
             cluster_mode = cluster_mode.as_str(),
+            replicas = config.scheduler.replicas,
             flow_round_lock = flow_round_lock_needed,
             mmdb_round_lock = mmdb_round_lock_needed,
             "调度器集群模式已解析（内置任务整轮互斥锁；sys_job 逐任务防重入锁不受本开关影响）"
         );
+        // WF-2 加固（批次 4）：**显式声明多副本**却仍用 `auto` ⇒ 告警。
+        // 为什么用"显式声明"而不是探针：副本数无法在进程内可靠探测（探针不可靠已被历史结论否掉），
+        // 所以要求部署方在 `[scheduler].replicas` 里如实声明；声明了却忘了选模式才告警。
+        if config.scheduler.replicas > 1
+            && cluster_mode == crate::scheduler::cluster::ClusterMode::Auto
+        {
+            tracing::warn!(
+                replicas = config.scheduler.replicas,
+                "[scheduler].replicas > 1 但 cluster_mode = auto：内置任务（flow 超时扫描 / mmdb 更新）\
+                 是否加锁取决于各任务的历史开关。多副本部署请显式置 cluster_mode = \"leader\"\
+                 （仅持锁实例执行整轮），否则会出现多实例并发扫描同一批任务"
+            );
+        }
 
         // 日志保留期清理任务：每日凌晨 3:00 执行（cron: "0 0 3 * * *"）
         // 删除 (当前时间 - sys_log.retention_days) 天前的操作日志和登录日志，

@@ -32,6 +32,10 @@ impl AppInitializer {
         // 否则一律按"全关"处理——虽仍 fail-closed，但会让 `[features]` 里配置的开关静默失效。
         init_feature_flags(&settings);
 
+        // 2.2 ACME 证书需求输出姿态（`[acme]`）：默认 off；配了 webhook 但地址非法时告警，
+        // 避免"以为会推送其实静默失效"（与 MT-4 反代白名单同类坑）。
+        init_acme_output(&settings);
+
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
 
@@ -3870,6 +3874,37 @@ fn init_feature_flags(settings: &Settings) {
         mode = tenant_column.as_str(),
         "UI 展示策略：[ui].show_tenant_column（auto = 仅平台操作者可见归属列 ⇒ 历史行为）"
     );
+}
+
+/// 启动打印 ACME 证书需求输出的**有效姿态**（`[acme]` 段）。
+///
+/// 治理意义与能力位同理：这是"把租户域名清单推出本进程"的唯一出口，必须让运维一眼看到
+/// 本实例**是否会**发请求、发到哪。默认 `off` 打 INFO；`mode = webhook` 但地址缺失/非法时
+/// 打 **WARN**——否则会静默失效（"以为配了其实没生效"，与 MT-4 反代白名单同类坑）。
+fn init_acme_output(settings: &Settings) {
+    use crate::config::settings::AcmeMode;
+
+    let cfg = &settings.acme;
+    match (cfg.mode(), cfg.effective_webhook()) {
+        (AcmeMode::Off, _) => {
+            tracing::info!("ACME 证书需求输出：[acme].mode = off（默认，不发任何出站请求）");
+        }
+        (AcmeMode::Webhook, Some(url)) => {
+            tracing::info!(
+                url = %url,
+                signed = cfg.secret.as_deref().is_some_and(|s| !s.is_empty()),
+                timeout_secs = cfg.timeout().as_secs(),
+                "ACME 证书需求输出：已启用 webhook（域名验证通过 / 已验证域名删除时推送）"
+            );
+        }
+        (AcmeMode::Webhook, None) => {
+            tracing::warn!(
+                webhook_url = ?cfg.webhook_url,
+                "[acme].mode = webhook 但 webhook_url 缺失或非 http(s) ⇒ 本次运行**不会**推送\
+                 （按 off 处理）。请补全 [acme].webhook_url，否则证书需求清单会静默丢失"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
