@@ -4,6 +4,8 @@
 //! 权限要求（通过 permission_middleware 集中配置，详见 middleware/permission.rs）：
 //! - GET    /system/tenant/list                 system:tenant:list
 //! - GET    /system/tenant/package/options      system:tenant:list（服务层再校验仅平台）
+//! - GET    /system/tenant/package/{id}/features system:tenant:list（服务层再校验仅平台）
+//! - PUT    /system/tenant/package/features     system:tenant:edit（服务层再校验仅平台）
 //! - GET    /system/tenant/{tenantId}           system:tenant:query
 //! - POST   /system/tenant                      system:tenant:add
 //! - PUT    /system/tenant                      system:tenant:edit
@@ -26,6 +28,16 @@ pub fn tenant_routes() -> Router<Arc<AppState>> {
         .route(
             "/system/tenant/package/options",
             get(sys_tenant_handler::package_options),
+        )
+        // 套餐能力位（三层开关的中间层；仅平台可配，服务层再校验）
+        // 注：静态段 `package/features` 与 `package/{packageId}/features` 段数不同，不冲突
+        .route(
+            "/system/tenant/package/features",
+            put(sys_tenant_handler::set_package_features),
+        )
+        .route(
+            "/system/tenant/package/{packageId}/features",
+            get(sys_tenant_handler::package_features),
         )
         .route("/system/tenant", post(sys_tenant_handler::add))
         .route("/system/tenant", put(sys_tenant_handler::edit))

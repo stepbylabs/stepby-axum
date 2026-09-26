@@ -27,6 +27,11 @@ impl AppInitializer {
 
         tracing::info!("=== axum-backend 初始化中 ===");
 
+        // 2.1 能力位注入（三层开关的最外层：平台 config「能开什么」）。
+        // 必须在任何服务/中间件读取 `common::features::platform_features()` **之前**完成，
+        // 否则一律按"全关"处理——虽仍 fail-closed，但会让 `[features]` 里配置的开关静默失效。
+        init_feature_flags(&settings);
+
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
 
@@ -206,6 +211,13 @@ impl AppInitializer {
         ensure_gen_column_rust_naming(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 gen_table_column Rust 列名兜底失败: {}", e))?;
+
+        // 3.5.6 台账（能力位批次 0）：`sys_tenant_package.features` 列（租户套餐能力位 JSON）。
+        //        与迁移 m20260926_000010 等价（启动不跑 Migrator::up 的存量库兜底）；
+        //        实体已带 features 字段，缺此兜底则套餐列表/详情/新建/编辑全链 500。
+        ensure_tenant_package_features(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_tenant_package.features 兜底失败: {}", e))?;
 
         // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
         // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
@@ -3527,6 +3539,57 @@ async fn ensure_gen_column_rust_naming(db: &DatabaseConnection) -> anyhow::Resul
         tracing::info!("gen_table_column.{old} 已重命名为 {new}（台账第八批 Java 遗留命名收口）");
     }
     Ok(())
+}
+
+/// 台账（能力位批次 0，存量库兜底，等价迁移 `m20260926_000010`）：
+/// `sys_tenant_package.features` 列（租户套餐能力位 JSON）。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而实体已带
+/// `features` 字段 ⇒ 缺此兜底则套餐列表/详情/新建/编辑全链报 `no such column: features`（500）。
+/// 列可空（NULL = 全默认 = **全部关闭**），**不回填任何值**（关闭态即安全态）。
+async fn ensure_tenant_package_features(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_tenant_package").await? {
+        return Ok(());
+    }
+    if sso_has_column(db, "sys_tenant_package", "features").await? {
+        return Ok(());
+    }
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "ALTER TABLE sys_tenant_package ADD COLUMN features TEXT NULL".to_string(),
+    ))
+    .await?;
+    tracing::info!("sys_tenant_package.features 列已补建（能力位批次 0 存量库兜底）");
+    Ok(())
+}
+
+/// 注入平台层能力位并做**启动治理打印**（幂等：重复调用只保留首次注入）。
+///
+/// 治理意义：能力位是"放开高危能力"的唯一入口，必须让运维一眼看到本实例放开了什么——
+/// 默认全关只打一行 INFO；一旦有开启项则打 WARN 并逐条列出（含模式），避免"隐形放开"。
+fn init_feature_flags(settings: &Settings) {
+    use crate::common::features::{self, FeatureSet, KNOWN_FEATURES};
+
+    // 净化：未登记键 / 非法模式在此被剔除并告警（fail-closed）
+    let effective =
+        features::init_platform_features(FeatureSet::sanitized(settings.features.0.clone()));
+
+    let enabled: Vec<String> = KNOWN_FEATURES
+        .iter()
+        .filter(|def| effective.is_on(def.key))
+        .map(|def| format!("{}={}", def.key, effective.mode(def.key)))
+        .collect();
+
+    if enabled.is_empty() {
+        tracing::info!("能力位：平台层全部关闭（默认安全姿态；租户套餐亦需显式开启）");
+    } else {
+        tracing::warn!(
+            enabled = %enabled.join(", "),
+            "能力位：平台层已放开以下能力（租户套餐需同时开启，权限才可下放）。\
+             已放开项的服务层必须按 tenant_id 收窄 —— 逐条核对 \
+             common/features.rs::CAPABILITY_UNLOCKED_PERMS 的守卫要求"
+        );
+    }
 }
 
 #[cfg(test)]

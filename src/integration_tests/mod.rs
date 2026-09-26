@@ -16,6 +16,7 @@
 //! 若 Redis 不可用，`init_redis` 会在超时后返回错误，测试将以清晰信息失败。
 
 mod auth;
+mod capability_features;
 mod common_handler;
 mod data_scope_tenant;
 mod file_common;

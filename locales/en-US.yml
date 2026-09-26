@@ -467,6 +467,8 @@ error:
     menu_outside_package: "Menu %{menu_id} is not included in the current tenant package and cannot be granted"
     menu_platform_only: "Menu %{menu_id} is a platform-only capability (codegen / cache monitor / domain management) and cannot be granted to tenant roles"
     menu_filter_uncovered: "Permission %{perms} cannot be granted to tenant roles (platform-only capability, or its table is not tenant-filtered)"
+    feature_invalid: "Invalid value %{mode} for capability %{key} (unregistered key or mode not in the allowed set)"
+    feature_platform_disabled: "Capability %{key} is not enabled in the platform [features] config; tenant packages cannot enable it"
     domain_platform_only: Domain management is restricted to platform administrators
     domain_invalid: "Invalid domain (lowercase letters/digits/hyphen, at least two labels of 1-63 chars each)"
     domain_conflict: The domain is already taken (including historical bindings), please choose another
