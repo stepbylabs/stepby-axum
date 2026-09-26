@@ -193,3 +193,21 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 # 租户自建导航 L3（默认 off）：off | view_only | full
 #   view_only = 仅可查看平台预置的 L3 导航；full = 可在套餐∩角色授权范围内自建导航项
 "nav.l3" = "off"
+
+# ==================== 定时任务调度器（集群模式）====================
+# 治理对象：**内置定时任务**（flow_timeout_scan / mmdb_auto_update）的"整轮跨实例互斥"。
+# 开关取「模式」而非裸 bool（项目准则③）；默认 `auto` = 沿用各任务历史开关，
+# **对存量部署零行为变更**。
+#
+#   auto   （默认）flow 沿用 [flow].scan_lock_enabled；mmdb 保持加锁 ⇒ 现状
+#   single 明确单实例部署 ⇒ 内置任务一律不加锁（省一次 Redis NX 往返）
+#   leader 多实例选主 ⇒ 内置任务一律加锁（仅持锁实例执行整轮）
+#   all    每个实例都执行（幂等型任务）⇒ 内置任务一律不加锁
+#
+# ⚠️ 非法取值在启动时回落 `auto` 并告警（fail-safe）。
+# ⚠️ **边界**：`sys_job` 的逐任务防重入锁 `lock:scheduler:{job_id}` 属"同一任务防重入"，
+#    单实例同样需要，**不随本开关关闭**。
+[scheduler]
+cluster_mode = "auto"
+# 内置任务整轮互斥锁的默认 TTL（秒）；flow 任务仍优先用 [flow].scan_lock_ttl_secs
+lock_ttl_secs = 300
