@@ -22,7 +22,7 @@ use utoipa::ToSchema;
 
 use crate::common::{AjaxResult, AppError};
 use crate::state::AppState;
-use crate::utils::redis::scan_keys;
+use crate::utils::redis::{scan_keys, scan_keys_all};
 
 // ==================== 缓存前缀白名单 ====================
 
@@ -466,7 +466,10 @@ pub async fn clear_cache_name(
     let pattern = format!("{}*", cache_name);
 
     // 查询匹配的键
-    let keys: Vec<String> = scan_keys(&mut redis, &pattern, 5000).await?;
+    // 第九批：改用 **不截断** 扫描。本接口语义是"清除**该前缀下全部**缓存"，
+    // 原 `scan_keys(.., 5000)` 超限即静默截断 ⇒ 只清了前 5000 个却报"已清除 N 个"，
+    // 让运维误判缓存已清空。pattern 来自白名单前缀校验（非裸 `*`），无 OOM 风险。
+    let keys: Vec<String> = scan_keys_all(&mut redis, &pattern).await?;
 
     if keys.is_empty() {
         return Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.no_match")));
@@ -639,15 +642,21 @@ async fn delete_keys(
     if keys.is_empty() {
         return Ok(0);
     }
-    let mut cmd = redis::cmd("DEL");
-    for k in keys {
-        cmd.arg(k);
+    // 第九批：分批下发（`scan_keys_all` 不截断 ⇒ 键数无上界；单条超长 DEL 会长时间
+    // 占用 Redis 单线程）。语义不变：返回各批实际删除数之和。
+    let mut deleted = 0i64;
+    for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
+        let mut cmd = redis::cmd("DEL");
+        for k in chunk {
+            cmd.arg(k);
+        }
+        let n: i64 = cmd.query_async(redis).await.map_err(|e| {
+            tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
+            AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
+        })?;
+        deleted += n.max(0);
     }
-    let count: i64 = cmd.query_async(redis).await.map_err(|e| {
-        tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
-        AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
-    })?;
-    Ok(count)
+    Ok(deleted)
 }
 
 // ==================== 单元测试 ====================

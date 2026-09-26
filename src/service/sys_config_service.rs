@@ -815,7 +815,11 @@ impl SysConfigService {
     pub async fn refresh_cache(&self) -> Result<(), ServiceError> {
         let mut conn = self.redis.clone();
         let pattern = format!("{}*", CONFIG_CACHE_PREFIX);
-        let keys = match crate::utils::redis::scan_keys(&mut conn, &pattern, 5000).await {
+        // 第九批：改用 **不截断** 扫描。本函数语义是"清除**所有** config 缓存键"，
+        // 原 `scan_keys(.., 5000)` 超限即静默截断 ⇒ 超 5000 键时残留陈旧缓存，
+        // 配置更新后部分键仍返回旧值（与"刷新缓存"的意图直接冲突）。
+        // pattern 为固定前缀 `config:*`（非通配 `*`），无海量键 OOM 风险。
+        let keys = match crate::utils::redis::scan_keys_all(&mut conn, &pattern).await {
             Ok(ks) => ks,
             Err(e) => {
                 tracing::warn!("刷新配置缓存时扫描键失败: {}", e);
@@ -825,12 +829,15 @@ impl SysConfigService {
         if keys.is_empty() {
             return Ok(());
         }
-        let mut pipe = redis::pipe();
-        for key in &keys {
-            pipe.cmd("DEL").arg(key);
-        }
-        if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
-            tracing::warn!("刷新配置缓存时批量删除失败: {}", e);
+        // 第九批：分批下发（不截断后键数无上界，避免超长 pipeline 长时间占用 Redis）
+        for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
+            let mut pipe = redis::pipe();
+            for key in chunk {
+                pipe.cmd("DEL").arg(key);
+            }
+            if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
+                tracing::warn!("刷新配置缓存时批量删除失败: {}", e);
+            }
         }
         Ok(())
     }

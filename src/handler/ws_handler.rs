@@ -180,25 +180,33 @@ async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
 /// SCAN 匹配 `ws_conn:*` 后 DEL（复用 utils::redis::scan_keys 的 SCAN 游标实现，
 /// 避免 KEYS 阻塞 Redis）。失败仅记日志不阻断启动（计数留待 24h TTL 自然过期）。
 pub async fn reset_ws_conn_counts(state: &AppState) {
-    let keys =
-        match crate::utils::redis::scan_keys(&mut state.redis.clone(), "ws_conn:*", 10000).await {
-            Ok(keys) => keys,
-            Err(e) => {
-                tracing::warn!("WebSocket 连接计数重置失败（SCAN 异常，忽略）: {}", e);
-                return;
-            }
-        };
+    // 第九批：改用 **不截断** 扫描。本函数语义是"重置**全部** `ws_conn:*`"，
+    // 原 `scan_keys(.., 10000)` 超限即静默截断 ⇒ 残留陈旧计数会让相应用户后续 WS 握手恒 429
+    // （实时通知静默失效）—— 与"重置全部"的意图直接冲突。
+    let keys = match crate::utils::redis::scan_keys_all(&mut state.redis.clone(), "ws_conn:*").await
+    {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::warn!("WebSocket 连接计数重置失败（SCAN 异常，忽略）: {}", e);
+            return;
+        }
+    };
     if keys.is_empty() {
         return;
     }
     let mut conn = state.redis.clone();
-    for key in &keys {
+    // 第九批：逐键 DEL 改**分批 DEL**（不截断后条数无上界，往返数由 O(n) 降为 ceil(n/500)）
+    for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
         if let Err(e) = redis::cmd("DEL")
-            .arg(key)
+            .arg(chunk)
             .query_async::<i64>(&mut conn)
             .await
         {
-            tracing::warn!("WebSocket 连接计数重置失败（DEL {}）: {}", key, e);
+            tracing::warn!(
+                "WebSocket 连接计数重置失败（批量 DEL {} 个）: {}",
+                chunk.len(),
+                e
+            );
         }
     }
     tracing::info!("已重置 {} 个 WebSocket 连接计数（服务启动）", keys.len());

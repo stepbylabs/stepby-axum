@@ -1741,3 +1741,137 @@ async fn test_tenant_disabled_revokes_rt_and_pat() {
     }
     let _: i64 = del.query_async(&mut redis).await.unwrap_or(0);
 }
+
+/// 第九批（可证伪锁）：租户吊销的 RT 扫描**不得被上限截断**。
+///
+/// 缺陷背景：`utils::redis::scan_keys` 的 `max_results` 是**硬上限**——达到即 `truncate`
+/// 并只打一条 `warn`（**静默截断**）。`revoke_tenant_sessions` 原先用
+/// `scan_keys(.., 5000)`，因此某租户 RT 超过 5000 条时**只剩前 5000 条被清**，
+/// 剩余 RT 仍可在 `token_refresh` 续期身份 —— 正是 P0-1 要堵的口子。
+///
+/// 播种 5200 条本租户 RT（> 旧上限）+ 2 条异租户 RT 后调用 `revoke_tenant_sessions`，
+/// 断言：本租户 RT 全清（残留 **0**）、异租户 RT 存活。
+/// 对旧实现：截断必然残留 ≥200 条 ⇒ 本用例失败（故为可证伪锁）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tenant_revoke_rt_sweep_is_not_truncated() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let ctx = sso_ctx().await;
+    let mut redis = ctx.redis();
+    const TID: i64 = 9003;
+    const OTHER_TID: i64 = 9004;
+    /// 播种量：必须 > 旧实现的 5000 硬上限，截断路径才会残留
+    const SEED: i64 = 5200;
+    /// 本租户 RT 键前缀（供"残留复核"精确匹配，不误伤其它键）
+    const SWEEP_PREFIX: &str = "it-rt-sweep-";
+
+    // ⓪ 将种子用户 1 归属到 TID：使 admin 的旧会话（OnlineSession.tenant_id=0）
+    //    经 user_id 回查后命中本租户，从而"在线会话吊销"路径也被执行
+    ctx.state
+        .db
+        .execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            format!("UPDATE sys_user SET tenant_id = {TID} WHERE user_id = 1"),
+        ))
+        .await
+        .expect("更新用户归属失败");
+
+    // ① Lua 批量播种（5200 次 SETEX 收敛为单次往返；绑定为权威结构 RefreshBinding）
+    let script = r#"
+        local n = tonumber(ARGV[1])
+        local tid = tonumber(ARGV[2])
+        local prefix = ARGV[3]
+        for i = 1, n do
+          redis.call('SETEX', 'sso:rt:' .. prefix .. i, 3600, string.format(
+            '{"client_id":"app_it_tenant","user_id":1,"username":"u","scope":["openid"],"tid":%d}', tid))
+        end
+        return n
+    "#;
+    let seeded: i64 = redis::cmd("EVAL")
+        .arg(script)
+        .arg(0)
+        .arg(SEED)
+        .arg(TID)
+        .arg(SWEEP_PREFIX)
+        .query_async(&mut redis)
+        .await
+        .expect("批量播种 RT 失败");
+    assert_eq!(seeded, SEED, "播种数量应与预期一致");
+    let sweep_pattern = format!("sso:rt:{SWEEP_PREFIX}*");
+
+    // ①.5 截断语义自证（本用例"可证伪"的依据）：同一 pattern 下，
+    //     上限版 `scan_keys(.., 5000)` 必然截断到 5000（旧实现的漏清与其完全等价），
+    //     不截断版 `scan_keys_all` 返回全量 5200。
+    //     若此步断言失败，说明"截断风险/上限"前提已变 —— 用例需重新设计，
+    //     而不是让 ④ 在前提失效时静默通过。
+    let capped = crate::utils::redis::scan_keys(&mut redis, &sweep_pattern, 5000)
+        .await
+        .expect("上限扫描失败");
+    assert_eq!(
+        capped.len(),
+        5000,
+        "scan_keys 达到上限应截断为 5000（旧实现漏清的等价前提）"
+    );
+    let full = crate::utils::redis::scan_keys_all(&mut redis, &sweep_pattern)
+        .await
+        .expect("全量扫描失败");
+    assert_eq!(
+        full.len(),
+        SEED as usize,
+        "scan_keys_all 应为全量（不截断）语义"
+    );
+
+    // ② 两条异租户 RT（应存活）
+    let keep: Vec<String> = (1..=2).map(|i| format!("it-rt-keep-{i}")).collect();
+    for name in &keep {
+        let h = crate::utils::crypto::token_hash(name);
+        let json = serde_json::json!({
+            "client_id": "app_it_tenant",
+            "user_id": 1,
+            "username": "u",
+            "scope": ["openid"],
+            "tid": OTHER_TID,
+        })
+        .to_string();
+        let _: () = redis::cmd("SETEX")
+            .arg(format!("sso:rt:{h}"))
+            .arg(3600i64)
+            .arg(json)
+            .query_async(&mut redis)
+            .await
+            .expect("写异租户 RT 失败");
+    }
+
+    // ③ 停用租户 → 触发全量吊销
+    let revoked = ctx.state.tenant_service.revoke_tenant_sessions(TID).await;
+    assert!(revoked >= 1, "应至少吊销 admin 的在线会话，实际 {revoked}");
+
+    // ④ 残留复核：本租户 RT 必须全清（旧实现此处必剩 ≥200 条）
+    let left = crate::utils::redis::scan_keys_all(&mut redis, &sweep_pattern)
+        .await
+        .expect("复核扫描失败");
+    assert!(
+        left.is_empty(),
+        "本租户 RT 应被全量吊销，实际残留 {} 条（首条: {:?}）—— 扫描被截断？",
+        left.len(),
+        left.first()
+    );
+
+    // ⑤ 异租户 RT 不得被误杀
+    for name in &keep {
+        let h = crate::utils::crypto::token_hash(name);
+        let v: Option<String> = redis::cmd("GET")
+            .arg(format!("sso:rt:{h}"))
+            .query_async(&mut redis)
+            .await
+            .expect("GET 异租户 RT 失败");
+        assert!(v.is_some(), "异租户 RT {name} 不应被误杀");
+    }
+
+    // 清理本测试遗留
+    let mut del = redis::cmd("DEL");
+    for name in &keep {
+        del.arg(format!("sso:rt:{}", crate::utils::crypto::token_hash(name)));
+    }
+    let _: i64 = del.query_async(&mut redis).await.unwrap_or(0);
+}
