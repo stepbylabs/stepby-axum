@@ -186,6 +186,7 @@ async fn test_flow_withdraw() {
     let ry_token = super::login(&ctx.app, ctx.peer_ip, "ry", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_withdraw", "single").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     let v = ry_post_json(
         &ctx,
@@ -204,6 +205,19 @@ async fn test_flow_withdraw() {
         .find(|r| r["docId"].as_i64() == Some(doc_id))
         .expect("列表应含该单据");
     assert_eq!(doc["status"], "withdrawn", "撤回后应为 withdrawn");
+
+    // W-13：撤回后**他人待办必须消失**（task 行转 cancelled，不再出现在 assignee 待办列表）
+    let v = ctx
+        .get_json("/system/flow/todo?pageNum=1&pageSize=50")
+        .await;
+    assert!(
+        !v["rows"]
+            .as_array()
+            .expect("rows 应为数组")
+            .iter()
+            .any(|r| r["taskId"].as_i64() == Some(task1)),
+        "撤回后 admin 待办 {task1} 应消失，实际: {v}"
+    );
 
     // 撤回后可重新提交
     let v = ry_post_json(
@@ -850,4 +864,460 @@ async fn test_flow_countersign_add() {
         doc["status"], "approved",
         "会签通过并二级同意后应办结，实际: {doc}"
     );
+}
+
+/// 链路 14：已办视图（W-8）—— 仅收录本人**裁决类**动作流水
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_done_view() {
+    let ctx = TestContext::new().await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "ry", "admin123").await;
+
+    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_done", "single").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+    ctx.post_json(
+        &format!("/system/flow/task/{task1}/action"),
+        serde_json::json!({ "action": "approve", "comment": "done-1" }),
+    )
+    .await;
+    let task2 = admin_todo_task_for(&ctx, doc_id, Some(2)).await;
+    ctx.post_json(
+        &format!("/system/flow/task/{task2}/action"),
+        serde_json::json!({ "action": "approve", "comment": "done-2" }),
+    )
+    .await;
+
+    // admin 视角：两条 approve 流水（倒序）
+    let v = ctx
+        .get_json("/system/flow/done?pageNum=1&pageSize=50")
+        .await;
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    let mine: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r["bizId"].as_i64() == Some(doc_id))
+        .collect();
+    assert_eq!(mine.len(), 2, "admin 应看到两条已办流水，实际: {v}");
+    assert!(
+        mine.iter().all(|r| r["action"] == "approve"),
+        "已办仅含裁决类动作，实际: {v}"
+    );
+    assert_eq!(
+        mine[0]["comment"], "done-2",
+        "应按 actedAt 倒序（最新在前）"
+    );
+    assert_eq!(
+        mine[0]["title"], "it_flow_done",
+        "已办应带单据标题（按 biz_id 联查补全），实际: {v}"
+    );
+
+    // ry 视角（ry 只有 submit 流水）：不应出现该单据的已办
+    let v = ry_get_json(&ctx, &ry_token, "/system/flow/done?pageNum=1&pageSize=50").await;
+    assert!(
+        !v["rows"]
+            .as_array()
+            .expect("rows 应为数组")
+            .iter()
+            .any(|r| r["bizId"].as_i64() == Some(doc_id)),
+        "非审批人的已办列表不应含该单据，实际: {v}"
+    );
+}
+
+/// 链路 15：超时扫描幂等（W-13）—— 直调 scan 两轮，第二轮由 SETNX 去重跳过
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_timeout_scan_idempotent() {
+    use sea_orm::{EntityTrait, Set};
+
+    let ctx = TestContext::new().await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "ry", "admin123").await;
+    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_timeout", "single").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+
+    let mut redis = ctx.redis();
+    // 第一轮：due_at 尚在未来 → 无候选
+    let first = ctx
+        .state
+        .flow_service
+        .scan_timeouts_with_redis(&mut redis, 200)
+        .await
+        .expect("首轮扫描失败");
+    assert_eq!(first.reminded, 0, "未超时的待办不应被提醒");
+
+    // 把 due_at 提前到过去，制造超时候选
+    let mut am: crate::entity::sys_flow_task::ActiveModel =
+        crate::entity::sys_flow_task::Entity::find_by_id(task1)
+            .one(&ctx.state.db)
+            .await
+            .expect("查询任务失败")
+            .expect("任务应存在")
+            .into();
+    am.due_at = Set(Some(
+        crate::common::datetime::now_naive() - chrono::Duration::hours(1),
+    ));
+    crate::entity::sys_flow_task::Entity::update(am)
+        .exec(&ctx.state.db)
+        .await
+        .expect("更新 due_at 失败");
+
+    // 第二轮：提醒 1 次（写 timeout_remind 系统流水）
+    let second = ctx
+        .state
+        .flow_service
+        .scan_timeouts_with_redis(&mut redis, 200)
+        .await
+        .expect("第二轮扫描失败");
+    assert_eq!(second.reminded, 1, "超时待办应被提醒一次");
+    assert_eq!(second.skipped, 0, "同一批内不应有跳过");
+
+    // 第三轮：SETNX 去重命中 → 全部 skipped，不重复打扰
+    let third = ctx
+        .state
+        .flow_service
+        .scan_timeouts_with_redis(&mut redis, 200)
+        .await
+        .expect("第三轮扫描失败");
+    assert_eq!(third.reminded, 0, "TTL 内不应重复提醒");
+    assert_eq!(third.skipped, 1, "应记 1 次跳过（去重生效）");
+
+    // 系统归因：timeout_remind 流水的 operatorId 为 null
+    let v = ctx.get_json(&format!("/system/flow/task/{task1}")).await;
+    let timeline = v["data"]["timeline"].as_array().expect("timeline 应为数组");
+    let remind = timeline
+        .iter()
+        .find(|x| x["action"] == "timeout_remind")
+        .unwrap_or_else(|| panic!("应写入 timeout_remind 流水，实际: {timeline:?}"));
+    assert!(
+        remind["operatorId"].is_null(),
+        "超时提醒为系统动作，operatorId 应为 null，实际: {remind}"
+    );
+}
+
+/// 链路 16：升级提醒（W-7）—— 超 N 小时未处理 → 提醒部门主管（跳过 assignee 自身）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_timeout_escalation() {
+    use sea_orm::{EntityTrait, Set};
+
+    let ctx = TestContext::new().await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "ry", "admin123").await;
+
+    // 建一个非 admin 的待办持有人（部门 103 主管固定为 admin(1)）
+    ctx.post_json(
+        "/system/user",
+        serde_json::json!({
+            "deptId": 103,
+            "userName": "it_flow_esc",
+            "nickName": "升级测试",
+            "email": "it.flow.esc@yebot.dev",
+            "phonenumber": "13800007777",
+            "password": "Yebot@12345",
+            "status": "0",
+            "roleIds": [2]
+        }),
+    )
+    .await;
+    let v = ctx.get_json("/system/user/list?userName=it_flow_esc").await;
+    let esc_uid = v["rows"][0]["userId"].as_i64().expect("userId");
+
+    let mut dept_am: crate::entity::sys_dept::ActiveModel =
+        crate::entity::sys_dept::Entity::find_by_id(103)
+            .one(&ctx.state.db)
+            .await
+            .expect("查询部门失败")
+            .expect("部门 103 应存在")
+            .into();
+    dept_am.leader_user_id = Set(Some(1));
+    crate::entity::sys_dept::Entity::update(dept_am)
+        .exec(&ctx.state.db)
+        .await
+        .expect("更新部门主管失败");
+
+    // ry 提交 → 转办给 esc 用户 → 待办超期 100h（> 默认升级阈值 72h）
+    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_escalate", "single").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+    ctx.post_json(
+        &format!("/system/flow/task/{task1}/action"),
+        serde_json::json!({ "action": "transfer", "toUserId": esc_uid }),
+    )
+    .await;
+
+    let mut am: crate::entity::sys_flow_task::ActiveModel =
+        crate::entity::sys_flow_task::Entity::find_by_id(task1)
+            .one(&ctx.state.db)
+            .await
+            .expect("查询任务失败")
+            .expect("任务应存在")
+            .into();
+    am.due_at = Set(Some(
+        crate::common::datetime::now_naive() - chrono::Duration::hours(100),
+    ));
+    crate::entity::sys_flow_task::Entity::update(am)
+        .exec(&ctx.state.db)
+        .await
+        .expect("更新 due_at 失败");
+
+    let mut redis = ctx.redis();
+    let first = ctx
+        .state
+        .flow_service
+        .scan_timeouts_with_redis(&mut redis, 200)
+        .await
+        .expect("扫描失败");
+    assert_eq!(first.reminded, 1, "首次应提醒待办持有人");
+    assert_eq!(
+        first.escalated, 1,
+        "超期超阈值应升级提醒部门主管（esc 的部门主管=admin，非 assignee 自身）"
+    );
+    assert!(
+        first.notify.iter().any(|(uid, _)| *uid == 1),
+        "升级通知应发给 admin(1)，实际: {:?}",
+        first.notify
+    );
+
+    // 第二轮：首次提醒已发（last_reminded_at 非空）且升级去重命中 → 不再打扰
+    let second = ctx
+        .state
+        .flow_service
+        .scan_timeouts_with_redis(&mut redis, 200)
+        .await
+        .expect("扫描失败");
+    assert_eq!(second.reminded, 0, "首次提醒只发一次（W-7）");
+    assert_eq!(second.skipped, 1, "已提醒过应计为跳过");
+    assert_eq!(second.escalated, 0, "升级提醒 7 天 TTL 内不重复");
+}
+
+/// 链路 17：审批单据 Excel 导出（W-11）—— 内容正确 + 可见范围与列表一致
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_export_excel() {
+    use tower::ServiceExt;
+
+    let ctx = TestContext::new().await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "ry", "admin123").await;
+    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_export", "single").await;
+
+    // 导出走表单编码（前端 download() 同款）
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/system/flow/export")
+        .header("authorization", format!("Bearer {}", ctx.token))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("pageNum=1&pageSize=10"))
+        .expect("构造请求失败");
+    let resp = ctx.app.clone().oneshot(req).await.expect("请求执行失败");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("读取响应体失败")
+        .to_vec();
+    assert!(bytes.starts_with(b"PK"), "应为 xlsx（zip）字节流");
+
+    // 回读校验：表头双语 + 含刚提交的单据标题
+    let rows = crate::common::excel::read_xlsx_rows(&bytes).expect("xlsx 回读失败");
+    assert!(!rows.is_empty(), "导出不应为空");
+    assert_eq!(rows[0][0], "单据编号", "表头应为中文（默认 locale）");
+    let hit = rows
+        .iter()
+        .skip(1)
+        .any(|r| r.iter().any(|c| c.contains("it_flow_export")));
+    assert!(hit, "导出内容应含刚提交的单据，实际: {rows:?}");
+    assert!(
+        rows.iter().skip(1).any(|r| r.contains(&doc_id.to_string())),
+        "导出应含单据编号 {doc_id}"
+    );
+}
+
+/// 链路 18（W-19）：通用审批引擎**不绑定单据类型**——任意 `biz_type` 均可开轮
+///
+/// 可证伪点：引擎若仍硬编码 `demo_doc`（改造前即如此），本用例传入
+/// `it_flow_custom_biz` 后，落库 task/log 行的 `biz_type` 就会与入参不一致 → 断言立即失败。
+/// 引擎实现上不触达任何单据表，故 `biz_id` 用一个**不存在的单据主键**也能验证；
+/// 同时顺带锁定"初始节点 task 行也带 `applicant_name` 快照"（改造前 submit 路径漏写，
+/// 只有重提交/加签路径有，属同源不一致）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_engine_open_round_is_biz_type_agnostic() {
+    use crate::service::sys_flow_service::{OpenRoundSpec, biz_type, engine_open_round};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
+
+    let ctx = TestContext::new().await;
+    // 未登记类型：注册表不认识，但引擎仍应**原样落库**（泛化边界 = 引擎不校验业务类型）
+    let custom_biz = "it_flow_custom_biz";
+    assert!(
+        !biz_type::is_registered(custom_biz),
+        "用例前提：该类型不得已被登记为内置类型"
+    );
+    let biz_id = 900_000_001i64; // 不存在于 flow_demo_doc：证明引擎不触达单据表
+    let now = crate::common::datetime::now_naive();
+
+    ctx.state
+        .db
+        .transaction::<_, (), crate::common::error::ServiceError>(|txn| {
+            Box::pin(async move {
+                engine_open_round(
+                    txn,
+                    OpenRoundSpec {
+                        biz_type: custom_biz,
+                        biz_id,
+                        round_no: 1,
+                        title: "it_flow_engine_generic",
+                        applicant_id: 1,
+                        applicant_name: Some("管理员"),
+                        tenant_id: 0,
+                        node_seq: 1,
+                        node_name: "自定义节点",
+                        task_type: "single",
+                        assignees: &[1, 2],
+                        due_at: Some(now),
+                        from_status: Some("draft"),
+                        comment: Some("generic engine"),
+                        now,
+                    },
+                )
+                .await
+            })
+        })
+        .await
+        .expect("引擎开轮应成功（不依赖任何单据表）");
+
+    // ---- task 行：数量 = 快照审批人数，biz_type 原样保留，状态 pending ----
+    let tasks = crate::entity::sys_flow_task::Entity::find()
+        .filter(crate::entity::sys_flow_task::Column::BizType.eq(custom_biz))
+        .filter(crate::entity::sys_flow_task::Column::BizId.eq(biz_id))
+        .all(&ctx.state.db)
+        .await
+        .expect("查询待办失败");
+    assert_eq!(tasks.len(), 2, "应为每个快照审批人各插入一条待办");
+    for t in &tasks {
+        assert_eq!(
+            t.biz_type, custom_biz,
+            "biz_type 必须原样保留（不得回落 demo_doc）"
+        );
+        assert_eq!(t.status, "pending");
+        assert_eq!(t.round_no, 1);
+        assert_eq!(t.node_seq, 1);
+        assert_eq!(t.task_type, "single");
+        assert_eq!(t.applicant_id, 1);
+        assert_eq!(
+            t.applicant_name.as_deref(),
+            Some("管理员"),
+            "初始节点 task 行也应带申请人姓名快照（原 submit 路径漏写）"
+        );
+        assert_eq!(t.title.as_deref(), Some("it_flow_engine_generic"));
+    }
+    let mut assignees: Vec<i64> = tasks.iter().map(|t| t.assignee_id).collect();
+    assignees.sort_unstable();
+    assert_eq!(assignees, vec![1, 2], "审批人快照应与入参一致");
+
+    // ---- log 行：恰 1 条 submit 流水，biz_type 原样保留 ----
+    let logs = crate::entity::sys_flow_log::Entity::find()
+        .filter(crate::entity::sys_flow_log::Column::BizType.eq(custom_biz))
+        .filter(crate::entity::sys_flow_log::Column::BizId.eq(biz_id))
+        .all(&ctx.state.db)
+        .await
+        .expect("查询流水失败");
+    assert_eq!(logs.len(), 1, "开轮应恰写入 1 条 submit 流水");
+    assert_eq!(logs[0].action, "submit");
+    assert_eq!(logs[0].from_status.as_deref(), Some("draft"));
+    assert_eq!(logs[0].to_status.as_deref(), Some("pending"));
+    assert_eq!(logs[0].operator_id, Some(1));
+
+    // ---- 清理（隔离用例不污染其它 flow 断言）----
+    crate::entity::sys_flow_task::Entity::delete_many()
+        .filter(crate::entity::sys_flow_task::Column::BizType.eq(custom_biz))
+        .filter(crate::entity::sys_flow_task::Column::BizId.eq(biz_id))
+        .exec(&ctx.state.db)
+        .await
+        .expect("清理待办失败");
+    crate::entity::sys_flow_log::Entity::delete_many()
+        .filter(crate::entity::sys_flow_log::Column::BizType.eq(custom_biz))
+        .filter(crate::entity::sys_flow_log::Column::BizId.eq(biz_id))
+        .exec(&ctx.state.db)
+        .await
+        .expect("清理流水失败");
+}
+
+/// 链路 19（W-19 推进路径 fail-closed）：**未登记**业务类型的待办在推进时**显式失败**，
+/// 且失败发生在任何写入之前（task 行仍为 `pending`）。
+///
+/// 可证伪点：若引擎在推进时才取注册项（改造前的错误落点），本用例会看到
+/// task 行已被条件更新为 `approved` 却无对应流水/单据回写——即"半应用状态"。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_act_unregistered_biz_type_fails_closed() {
+    use crate::service::sys_flow_service::{FlowActionDto, biz_type};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let ctx = TestContext::new().await;
+    let unknown_biz = "it_flow_unknown_biz";
+    assert!(
+        !biz_type::is_registered(unknown_biz) && biz_type::find(unknown_biz).is_none(),
+        "用例前提：该类型不得被登记为内置类型"
+    );
+
+    let biz_id = 900_000_002i64;
+    let now = crate::common::datetime::now_naive();
+    // 直接落一条 pending 待办：引擎不校验开轮来源，故可绕过 submit 构造该状态
+    let repo = crate::repository::sys_flow_task::SysFlowTaskRepository::new(ctx.state.db.clone());
+    let task = repo
+        .base()
+        .insert(crate::entity::sys_flow_task::ActiveModel {
+            biz_type: Set(unknown_biz.to_string()),
+            biz_id: Set(biz_id),
+            round_no: Set(1),
+            node_seq: Set(1),
+            node_name: Set(Some("未知节点".to_string())),
+            assignee_id: Set(1),
+            task_type: Set("single".to_string()),
+            status: Set("pending".to_string()),
+            title: Set(Some("未登记类型单据".to_string())),
+            applicant_id: Set(1),
+            applicant_name: Set(Some("管理员".to_string())),
+            due_at: Set(Some(now)),
+            create_time: Set(Some(now)),
+            ..Default::default()
+        })
+        .await
+        .expect("插入待办失败");
+
+    let err = ctx
+        .state
+        .flow_service
+        .act(
+            1,
+            false,
+            task.task_id,
+            FlowActionDto {
+                action: "approve".to_string(),
+                comment: None,
+                to_user_id: None,
+            },
+        )
+        .await
+        .expect_err("未登记业务类型的推进必须显式失败（不静默降级）");
+    assert_eq!(err.code, 500, "登记缺失属内部错误");
+    assert!(
+        err.message.contains("未在审批引擎注册"),
+        "错误须指明业务类型未注册，实际: {}",
+        err.message
+    );
+
+    // 关键断言：注册项判定先于写入 → task 行仍为 pending，无半应用状态
+    let after = crate::entity::sys_flow_task::Entity::find()
+        .filter(crate::entity::sys_flow_task::Column::TaskId.eq(task.task_id))
+        .one(&ctx.state.db)
+        .await
+        .expect("回查待办失败")
+        .expect("待办不应消失");
+    assert_eq!(
+        after.status, "pending",
+        "注册项判定必须先于写入，否则会留下半应用状态"
+    );
+    let logs = crate::entity::sys_flow_log::Entity::find()
+        .filter(crate::entity::sys_flow_log::Column::BizType.eq(unknown_biz))
+        .filter(crate::entity::sys_flow_log::Column::BizId.eq(biz_id))
+        .all(&ctx.state.db)
+        .await
+        .expect("查询流水失败");
+    assert!(logs.is_empty(), "失败路径不得写入任何流水");
+
+    // 清理
+    crate::entity::sys_flow_task::Entity::delete_many()
+        .filter(crate::entity::sys_flow_task::Column::BizType.eq(unknown_biz))
+        .exec(&ctx.state.db)
+        .await
+        .expect("清理待办失败");
 }

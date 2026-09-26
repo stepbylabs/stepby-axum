@@ -102,6 +102,39 @@ impl FlowDemoDocRepository {
         FlowDemoDoc::find_by_id(doc_id).one(self.base.db()).await
     }
 
+    /// 按状态分页取单据（一致性巡检用，W-9）
+    pub async fn find_page_by_status(
+        &self,
+        status: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<Model>, DbErr> {
+        FlowDemoDoc::find()
+            .filter(Column::Status.eq(status))
+            .order_by_asc(Column::DocId)
+            .offset(offset)
+            .limit(limit)
+            .all(self.base.db())
+            .await
+    }
+
+    /// 批量取单据标题（已办视图展示用，W-8；一次 `IN` 查询避免 N+1）
+    pub async fn find_titles_by_ids(
+        &self,
+        doc_ids: Vec<i64>,
+    ) -> Result<std::collections::HashMap<i64, String>, DbErr> {
+        if doc_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        Ok(FlowDemoDoc::find()
+            .filter(Column::DocId.is_in(doc_ids))
+            .all(self.base.db())
+            .await?
+            .into_iter()
+            .map(|m| (m.doc_id, m.title))
+            .collect())
+    }
+
     /// 插入
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

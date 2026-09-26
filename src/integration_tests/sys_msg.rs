@@ -593,3 +593,89 @@ async fn test_msg_send_log_lifecycle() {
         "非法 ID 重试应 400，实际: {status}"
     );
 }
+
+/// S-2 契约锁定：`site` 渠道的**非法 `to_addr`** 仍然静默成功（`status='0'`）
+///
+/// 决策依据（方案 §7.6 定案，2026-09-26 拍板「维持关闭」）：dispatch 静默成功是
+/// **全系统既有契约**（`sms`/`site` 均无外部网关，投递即"记录成功"），单改 flow 的
+/// fail-fast 会造成同一系统内语义分裂；因此不改行为，而是用本用例把**既有行为焊死**：
+/// 若将来有人把非法 to_addr 改成失败（status='2'）或抛错，本用例会立即变红，
+/// 迫使改动者显式评估对全系统（邮件/短信/站内）的影响面。
+///
+/// flow 侧的正确性由 `sys_flow_service::tests::site_to_addr_is_numeric_string_of_user_id`
+/// 保证（flow 只会传字符串化 user_id，不会产生非法 to_addr）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_msg_site_illegal_to_addr_silently_succeeds() {
+    let ctx = TestContext::new().await;
+
+    // 前置：site 渠道 + 模板（site 无外部网关，与 flow 站内审计同款）
+    let v = ctx
+        .post_json(
+            "/system/msg/channel",
+            serde_json::json!({
+                "channelName": "it_msg_站内渠道",
+                "channelCode": "it_msg_site_ch",
+                "channelType": "site",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .post_json(
+            "/system/msg/template",
+            serde_json::json!({
+                "templateName": "it_msg_站内模板",
+                "templateCode": "it_msg_site_tpl",
+                "channelCode": "it_msg_site_ch",
+                "templateSubject": "【it_msg】站内 {{title}}",
+                "templateContent": "你有一条待办：{{title}}",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    // 非法 to_addr（不可解析为 user_id）：dispatch 直接 Ok(()) → 发送记录 status='0'
+    let v = ctx
+        .post_json(
+            "/system/msg/send",
+            serde_json::json!({
+                "templateCode": "it_msg_site_tpl",
+                "channelCode": "it_msg_site_ch",
+                "toAddr": "not-a-user-id",
+                "params": { "title": "S-2 契约" }
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"]["status"].as_str(),
+        Some("0"),
+        "site 渠道非法 to_addr 必须**静默成功**（既有契约，S-2 决策关闭 fail-fast），实际: {v}"
+    );
+    let log_id = v["data"]["logId"].as_i64().expect("send 应返回 logId");
+    assert!(
+        v["data"]["lastError"].is_null(),
+        "静默成功不得写入 lastError（否则重试机制会被误触发），实际: {v}"
+    );
+
+    // 落库核对：记录确实以 status='0' 持久化，且 to_addr 原样保留（便于审计定位）
+    let v = ctx
+        .get_json("/system/msg/log/list?toAddr=not-a-user-id&channelCode=it_msg_site_ch")
+        .await;
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    assert_eq!(rows.len(), 1, "应恰有 1 条记录，实际: {v}");
+    assert_eq!(rows[0]["status"].as_str(), Some("0"), "落库状态应为 '0'");
+    assert_eq!(
+        rows[0]["logId"].as_i64(),
+        Some(log_id),
+        "落库记录应与 send 返回为同一条"
+    );
+
+    // 清理（保持隔离用例不污染其它用例的日志断言）
+    let v = ctx
+        .delete_json(&format!("/system/msg/log/{}", log_id))
+        .await;
+    ctx.assert_ok(&v);
+}

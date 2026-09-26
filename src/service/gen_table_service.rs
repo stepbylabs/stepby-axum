@@ -1440,6 +1440,16 @@ impl GenTableService {
         ctx.insert("table", table);
         ctx.insert("columns", columns);
 
+        // W-18：flow（审批单据）模板开关
+        //
+        // `tpl_category = "flow"` 时，7 处模板（entity / service / handler / router /
+        // api / index / migration）按 `{% if is_flow %}` 追加「审批投影列 + 提交审批动作」，
+        // 其余部分与 crud 完全一致——避免为模板差异复制 7 份文件造成双维护。
+        // 生成的适配层调用真实引擎（`engine_open_round` + `resolve_node_assignees`），
+        // 不产生 mock 或占位实现。
+        let is_flow = table.tpl_category.as_deref() == Some("flow");
+        ctx.insert("is_flow", &is_flow);
+
         // 提取主键字段
         let pk_column = columns.iter().find(|c| c.is_pk.as_deref() == Some("1"));
         ctx.insert("pk_column", &pk_column);
@@ -1824,5 +1834,149 @@ mod gen_table_template_tests {
             .get("migration/sys_user.sql")
             .expect("缺少 migration.sql 文件");
         assert!(sql.to_uppercase().contains("CREATE TABLE"));
+    }
+
+    /// W-18：`tpl_category = "flow"`（审批单据）应生成**真实可用**的审批适配层：
+    /// 审批投影列 + 提交审批动作（调用真实引擎 `engine_open_round` / 复用
+    /// `resolve_node_assignees`）；且普通 crud 分类**不得**混入审批内容。
+    #[test]
+    fn test_render_templates_flow_category_emits_approval_adapter() {
+        let mut table = mk_table();
+        table.tpl_category = Some("flow".to_string());
+        let columns = vec![mk_column()];
+        let files = GenTableService::render_templates(&table, &columns).unwrap();
+
+        // flow 与 crud 的输出文件集合一致（仅内容按 is_flow 分支差异）
+        assert_eq!(files.len(), 8, "flow 应仍输出 8 个文件");
+
+        // entity：审批投影列
+        let entity = files
+            .get("src/entity/sys_user.rs")
+            .expect("缺少 entity.rs 文件");
+        for field in [
+            "pub status: String",
+            "pub current_round: i32",
+            "pub current_node_seq: Option<i32>",
+            "pub applicant_id: Option<i64>",
+            "pub applicant_name: Option<String>",
+            "pub dept_id: Option<i64>",
+            "pub submitted_at: Option<NaiveDateTime>",
+            "pub finished_at: Option<NaiveDateTime>",
+        ] {
+            assert!(
+                entity.contains(field),
+                "flow 实体缺少审批投影列 `{field}`，实际:\n{entity}"
+            );
+        }
+
+        // service：真实引擎接线（不得出现 mock/占位）
+        let service = files
+            .get("src/service/sys_user_service.rs")
+            .expect("缺少 service.rs 文件");
+        assert!(service.contains("pub const BIZ_TYPE: &str = \"sys_user\""));
+        assert!(service.contains("pub fn flow_nodes() -> Vec<NodeSpec>"));
+        assert!(service.contains("pub async fn submit_flow("));
+        assert!(
+            service.contains("engine_open_round("),
+            "flow service 必须调用真实引擎开轮"
+        );
+        assert!(
+            service.contains("resolve_node_assignees("),
+            "flow service 必须复用引擎审批人解析（不得复制引擎规则）"
+        );
+        assert!(
+            service.contains("biz_type::is_registered(BIZ_TYPE)"),
+            "未登记业务类型必须显式失败（不静默放行）"
+        );
+        assert!(
+            service.contains("rows_affected != 1"),
+            "单据投影回写必须用条件更新做并发幂等"
+        );
+        // W-19：推进路径（/system/flow/act）需要注册项（链提供者 + 投影回写），
+        // 只登记 ALL 会让审批通过/驳回时取不到注册项而失败
+        assert!(
+            service.contains("pub const fn flow_registration() -> BizTypeRegistration"),
+            "flow service 必须生成登记项构造函数（供 biz_type::REGISTRY 追加）"
+        );
+        assert!(
+            service.contains("fn flow_chain("),
+            "flow service 必须生成审批链提供者（推进路径用）"
+        );
+        assert!(
+            service.contains("fn flow_projection_sync("),
+            "flow service 必须生成投影回写函数（推进路径用）"
+        );
+        assert!(
+            service.contains("REGISTRY"),
+            "登记说明必须指向 biz_type::REGISTRY（否则推进路径取不到注册项）"
+        );
+        // 归属 / 租户一致性校验（安全边界，缺失即可被越权提交）
+        assert!(
+            service.contains("error.gen.flow_only_applicant_can_submit"),
+            "重提交必须校验仅原申请人可提交"
+        );
+        assert!(
+            service.contains("error.gen.flow_tenant_mismatch"),
+            "提交必须校验单据租户与申请人租户一致"
+        );
+
+        // handler / router / api：提交审批出入口
+        let handler = files
+            .get("src/handler/sys_user_handler.rs")
+            .expect("缺少 handler.rs 文件");
+        assert!(handler.contains("pub async fn submit_flow("));
+        assert!(handler.contains(".submit_flow(id, applicant_id"));
+
+        let router = files
+            .get("src/router/sys_user_router.rs")
+            .expect("缺少 router.rs 文件");
+        assert!(router.contains("/system/sys_user/submit/{user_id}"));
+        assert!(router.contains("sys_user_handler::submit_flow"));
+
+        let api = files
+            .get("src/api/system/sys_user.ts")
+            .expect("缺少 api.ts 文件");
+        assert!(api.contains("export function submitFlowSysUser(id: number)"));
+
+        // index.vue：审批状态列 + 提交审批按钮
+        let vue = files
+            .get("src/views/system/sys_user/index.vue")
+            .expect("缺少 index.vue 文件");
+        assert!(vue.contains("审批状态"));
+        assert!(vue.contains("handleSubmitFlow"));
+        assert!(vue.contains("submitFlowSysUser"));
+
+        // migration.sql：审批投影列 DDL
+        let sql = files
+            .get("migration/sys_user.sql")
+            .expect("缺少 migration.sql 文件");
+        assert!(sql.contains("status VARCHAR(16) NOT NULL DEFAULT 'draft'"));
+        assert!(sql.contains("current_round INT NOT NULL DEFAULT 0"));
+
+        // 反向：crud 分类不得泄漏任何审批内容
+        let mut crud_table = table.clone();
+        crud_table.tpl_category = Some("crud".to_string());
+        let crud_files = GenTableService::render_templates(&crud_table, &columns).unwrap();
+        let crud_service = crud_files
+            .get("src/service/sys_user_service.rs")
+            .expect("缺少 crud service.rs 文件");
+        assert!(
+            !crud_service.contains("submit_flow"),
+            "crud 分类不应生成审批动作"
+        );
+        let crud_sql = crud_files
+            .get("migration/sys_user.sql")
+            .expect("缺少 crud migration.sql 文件");
+        assert!(
+            !crud_sql.contains("current_round"),
+            "crud 分类不应包含审批投影列"
+        );
+        let crud_entity = crud_files
+            .get("src/entity/sys_user.rs")
+            .expect("缺少 crud entity.rs 文件");
+        assert!(
+            !crud_entity.contains("current_round"),
+            "crud 实体不应包含审批投影列"
+        );
     }
 }

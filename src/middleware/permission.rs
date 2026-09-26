@@ -714,6 +714,9 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 审批工作流（方案 B′；管理视图；个人数据接口走仅登录白名单）=====
     ("GET", "/system/flow/list", "system:flow:list"),
+    // 导出（W-11）：复用列表权限键——可见范围与 list 完全一致（租户 + data_scope），
+    // 避免"列表看不到但导出能拿到"的数据泄露旁路
+    ("POST", "/system/flow/export", "system:flow:list"),
 ];
 
 /// 根据 HTTP 方法和匹配路径返回所需权限标识。
@@ -802,6 +805,7 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
         // ===== 审批工作流个人数据接口（归属校验在 service 层：待办=assignee、我发起=applicant；V2-P0-2）=====
             | ("GET", "/system/flow/todo")
             | ("GET", "/system/flow/mine")
+            | ("GET", "/system/flow/done")
             | ("GET", "/system/flow/pending-count")
             | ("GET", "/system/flow/task/{taskId}")
             | ("POST", "/system/flow/demo/submit")
@@ -1478,6 +1482,7 @@ mod tests {
             ("GET", "/system/flow/list"),
             ("GET", "/system/flow/todo"),
             ("GET", "/system/flow/mine"),
+            ("GET", "/system/flow/done"),
             ("GET", "/system/flow/pending-count"),
             ("GET", "/system/flow/task/{taskId}"),
             ("POST", "/system/flow/demo/submit"),
@@ -1485,6 +1490,7 @@ mod tests {
             ("POST", "/system/flow/demo/{docId}/withdraw"),
             ("POST", "/system/flow/task/{taskId}/action"),
             ("POST", "/system/flow/task/{taskId}/countersign-add"),
+            ("POST", "/system/flow/export"),
         ];
 
         let mut uncovered: Vec<(&str, &str)> = Vec::new();
@@ -1498,6 +1504,26 @@ mod tests {
             "以下受保护路由未登记权限映射且不在仅登录白名单（deny_by_default=true 下会被 403 误伤，fail-open 下存在越权风险）: {:?}",
             uncovered
         );
+    }
+
+    /// W-15：flow 带参路径的参数名必须与 router 注册**逐字一致**
+    ///
+    /// V6-E3 的失效模式：参数名不一致 ⇒ 查表失败 ⇒ fail-open 静默放行 / fail-closed 误拦 403。
+    /// 本用例把 flow 全部带参路由钉在测试里，后续改名会立即红。
+    #[test]
+    fn test_flow_param_names_match_router() {
+        for (method, path) in [
+            ("GET", "/system/flow/task/{taskId}"),
+            ("POST", "/system/flow/demo/{docId}/resubmit"),
+            ("POST", "/system/flow/demo/{docId}/withdraw"),
+            ("POST", "/system/flow/task/{taskId}/action"),
+            ("POST", "/system/flow/task/{taskId}/countersign-add"),
+        ] {
+            assert!(
+                is_login_only_path(method, path),
+                "flow 仅登录路由未登记或参数名与 router 不一致（静默 fail-open/403 风险）: {method} {path}"
+            );
+        }
     }
 
     #[test]

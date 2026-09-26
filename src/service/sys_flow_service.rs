@@ -34,7 +34,170 @@ use crate::repository::sys_flow_log::SysFlowLogRepository;
 use crate::repository::sys_flow_task::SysFlowTaskRepository;
 use crate::service::sys_msg_service::{SendDto, SysMsgService};
 
-pub const BIZ_TYPE_DEMO: &str = "demo_doc";
+/// 业务单据类型注册表（W-19）
+///
+/// 审批引擎（`sys_flow_task` + `sys_flow_log`）本身**与单据类型无关**：单据只用
+/// `(biz_type, biz_id)` 定位，轮次 / 节点 / 审批人由引擎维护。新增一种业务单据只需两步，
+/// **零表结构变更**：
+/// 1. 在本模块登记业务类型常量并加入 `ALL`（供校验 / 遍历 / 治理引用）；
+/// 2. 在 `REGISTRY` 追加注册项（审批链提供者 + 单据投影回写——见 `BizTypeRegistration`），
+///    并写一层单据适配：开轮时调用 `engine_open_round`（插单据 + 开审批同事务）。
+///
+/// 第 2 步使**推进路径**（`/system/flow/act` 的同意/驳回）同样与单据类型无关：
+/// 引擎按 `task.biz_type` 取注册项 → 链由注册项给出、投影由注册项回写，
+/// 因此新类型**无需**改动引擎即可跑通「提交 → 审批 → 办结」全链。
+///
+/// 单据表本身**不泛化**（`flow_demo_doc` / 未来各业务表结构互不相同），
+/// 泛化边界止于引擎：引擎不知道任何单据表，业务类型由适配层显式传入。
+pub mod biz_type {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use super::*;
+
+    /// 示例请假单（`flow_demo_doc` 表；内置演示与集成测试用）
+    pub const DEMO_DOC: &str = "demo_doc";
+
+    /// 全部**内置**业务单据类型（新增类型必须在此登记）
+    pub const ALL: &[&str] = &[DEMO_DOC];
+
+    /// 是否为已登记的内置业务单据类型
+    pub fn is_registered(biz_type: &str) -> bool {
+        ALL.contains(&biz_type)
+    }
+
+    /// 单轮审批链上下文（**推进**时由适配层按业务类型提供）
+    #[derive(Debug, Clone)]
+    pub struct RoundChain {
+        /// 本轮节点链（`node_seq` 升序）
+        pub nodes: Vec<NodeSpec>,
+        /// 申请人部门快照（`DeptLeader` 策略定位用）。
+        /// `None` = 由引擎回退读取申请人当前部门（见 `approve_or_reject`）。
+        pub dept_id: Option<i64>,
+    }
+
+    /// 审批链提供者：引擎**不感知任何单据表**，链由业务适配层给出。
+    ///
+    /// - 内置示例：数据驱动 —— 链取自 `flow_demo_doc.flow_mode`（提交时快照进单据）；
+    /// - 生成/自研单据：返回自己的常量链（gen_table flow 模板的 `flow_nodes()`）。
+    pub type ChainProvider = fn(
+        &DatabaseConnection,
+        i64,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<RoundChain, ServiceError>> + Send + 'static>,
+    >;
+
+    /// 单据派生投影回写入口（由适配层实现，引擎在推进后调用）。
+    ///
+    /// 投影列契约（生成模板与示例单据一致）：`status` / `current_round` /
+    /// `current_node_seq` / `finished_at` / `update_time` / `tenant_id`。
+    pub type ProjectionSync =
+        fn(
+            &DatabaseConnection,
+            i64,
+            FlowProjection,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceError>> + Send + 'static>>;
+
+    /// 业务类型注册项：引擎推进路径的**唯一**事实源
+    pub struct BizTypeRegistration {
+        /// 业务类型（须与 `ALL` 严格一致；单测锁定）
+        pub biz_type: &'static str,
+        /// 审批链提供者
+        pub chain: ChainProvider,
+        /// 单据派生投影回写入口
+        pub sync_projection: ProjectionSync,
+    }
+
+    /// 内置示例单据的链提供者（链取自单据 `flow_mode`；部门取提交时快照）
+    fn demo_chain(
+        db: &DatabaseConnection,
+        biz_id: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<RoundChain, ServiceError>> + Send + 'static>> {
+        let db = db.clone();
+        Box::pin(async move {
+            let doc = FlowDemoDocEntity::find_by_id(biz_id)
+                .one(&db)
+                .await
+                .map_err(db_to_svc)?
+                .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.doc_not_found")))?;
+            Ok(RoundChain {
+                nodes: demo_nodes(&doc.flow_mode),
+                dept_id: doc.dept_id,
+            })
+        })
+    }
+
+    /// 内置示例单据的投影回写（`flow_demo_doc` 派生列）
+    fn demo_projection_sync(
+        db: &DatabaseConnection,
+        biz_id: i64,
+        p: FlowProjection,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServiceError>> + Send + 'static>> {
+        let db = db.clone();
+        Box::pin(async move {
+            let am = FlowDemoDocActiveModel {
+                tenant_id: Set(p.tenant_id),
+                doc_id: Set(biz_id),
+                status: Set(p.status),
+                current_round: Set(p.current_round),
+                current_node_seq: Set(p.current_node_seq),
+                finished_at: Set(p.finished_at),
+                update_time: Set(Some(p.now)),
+                ..Default::default()
+            };
+            FlowDemoDocEntity::update(am)
+                .exec(&db)
+                .await
+                .map_err(db_to_svc)?;
+            Ok(())
+        })
+    }
+
+    /// 注册表：新增业务类型（含 gen_table 生成的审批单据）**必须同时**：
+    /// ① 在 `ALL` 登记类型常量；② 在本表追加注册项（链提供者 + 投影回写）。
+    ///
+    /// 二者不一致由单测 `registry_matches_registered_types` 锁定，
+    /// 避免出现"登记了但推进不了"（推进路径取不到注册项 → 显式失败，不静默降级）。
+    pub const REGISTRY: &[BizTypeRegistration] = &[BizTypeRegistration {
+        biz_type: DEMO_DOC,
+        chain: demo_chain,
+        sync_projection: demo_projection_sync,
+    }];
+
+    /// 按业务类型取注册项（未登记 → `None`，调用方显式报错）
+    pub fn find(biz_type: &str) -> Option<&'static BizTypeRegistration> {
+        REGISTRY.iter().find(|r| r.biz_type == biz_type)
+    }
+}
+
+/// 引擎 → 适配层的**派生投影**回写指令
+///
+/// 引擎在推进/终止单据后据此调用注册项的 `sync_projection`，由适配层写回自己的单据表；
+/// 引擎自身不构造任何业务表的 SQL（`biz_type` 泛化的关键：引擎不知道单据表结构）。
+#[derive(Debug, Clone)]
+pub struct FlowProjection {
+    /// 目标单据状态（`pending` / `approved` / `rejected` / `withdrawn`）
+    pub status: String,
+    /// 当前轮次
+    pub current_round: i32,
+    /// 当前节点序号（办结/撤回后为最后一个节点）
+    pub current_node_seq: Option<i32>,
+    /// 办结时间（`approved` / `rejected` 时写；`None` = 不改写该列）
+    pub finished_at: Option<NaiveDateTime>,
+    /// 写入时间（投影列 `update_time`）
+    pub now: NaiveDateTime,
+    /// 单据所属租户（与 task / log 行一致）
+    pub tenant_id: i64,
+}
+
+/// 内置示例单据的业务类型（历史常量名保留，等价于 `biz_type::DEMO_DOC`）
+pub const BIZ_TYPE_DEMO: &str = biz_type::DEMO_DOC;
+
+/// 升级提醒的 Redis 去重 TTL（秒）——7 天（W-7）
+///
+/// 升级提醒是"超期未处理的兜底打扰"，频率必须远低于首次提醒；Redis 故障/清空时
+/// 最多重复一次（`flow_escalate:{task_id}` 由 SETNX 保证）。
+const ESCALATE_DEDUP_TTL_SECS: u64 = 7 * 24 * 3600;
 
 // ==================== 审批人策略（编译期枚举，V2 §2.2 / V3 §1.1） ====================
 
@@ -164,7 +327,7 @@ pub struct FlowCountersignDto {
     pub to_user_id: i64,
 }
 
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowPageQuery {
     pub page_num: Option<u64>,
@@ -200,11 +363,37 @@ pub struct FlowActOutcome {
 pub struct FlowScanOutcome {
     pub reminded: u64,
     pub skipped: u64,
+    /// 升级提醒条数（超 N 小时 → 部门主管；W-7）
+    pub escalated: u64,
+    /// 一致性巡检发现的漂移条数（W-9：聚合校验，仅告警不回写）
+    pub drift: u64,
     /// (assignee_id, title)
     pub notify: Vec<(i64, String)>,
 }
 
 // ==================== Service ====================
+
+/// 「已办」视图行（W-8）：流水字段 + 单据标题（流水表本身无标题，需按 biz_id 联查）
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "FlowDoneVo",
+    export_to = "FlowDoneVo.ts",
+    rename_all = "camelCase"
+)]
+pub struct FlowDoneVo {
+    pub log_id: i64,
+    pub biz_type: String,
+    pub biz_id: i64,
+    /// 单据标题（取自业务单据；单据被删时为空串）
+    pub title: String,
+    pub round_no: i32,
+    pub node_seq: Option<i32>,
+    pub action: String,
+    pub comment: Option<String>,
+    pub acted_at: Option<NaiveDateTime>,
+}
 
 /// 离岗自动转办结果项（W-4）：调用方据此推送"新待办"通知与站内审计
 #[derive(Debug, Clone)]
@@ -214,6 +403,44 @@ pub struct FlowReassignItem {
     pub to_user_id: i64,
     /// 单据标题（task 行冗余快照）
     pub title: String,
+}
+
+/// 引擎开轮入参（W-19）：一轮审批的完整**快照**上下文
+///
+/// 关键点：**不含任何 `biz_type` 硬编码**——业务适配层传入自己的 `biz_type` 即可复用引擎；
+/// 审批人在此定格（D2：运行期不重算策略），单据表自身的投影列由适配层在同一事务内回写。
+#[derive(Debug, Clone)]
+pub struct OpenRoundSpec<'a> {
+    /// 业务单据类型（登记于 `biz_type` 模块）
+    pub biz_type: &'a str,
+    /// 业务单据主键
+    pub biz_id: i64,
+    /// 轮次（首次提交 1；重提交为 `current_round + 1`）
+    pub round_no: i32,
+    /// 单据标题（冗余快照进 task 行，列表免 join）
+    pub title: &'a str,
+    /// 申请人 user_id
+    pub applicant_id: i64,
+    /// 申请人姓名快照（可空）
+    pub applicant_name: Option<&'a str>,
+    /// 单据所属租户
+    pub tenant_id: i64,
+    /// 首节点序号
+    pub node_seq: i32,
+    /// 首节点名称
+    pub node_name: &'a str,
+    /// 节点任务类型：`single`（单审）/ `countersign`（会签）
+    pub task_type: &'a str,
+    /// 快照审批人（已由 `resolve_node_assignees` 解析，引擎不再查库）
+    pub assignees: &'a [i64],
+    /// SLA 到期时间（可空）
+    pub due_at: Option<NaiveDateTime>,
+    /// 流水 `from_status`（首提交 `draft`；重提交为提交前状态）
+    pub from_status: Option<&'a str>,
+    /// 流水备注（提交说明 / 重提交意见）
+    pub comment: Option<&'a str>,
+    /// 动作时间
+    pub now: NaiveDateTime,
 }
 
 /// 由 `data_scope` 取值与预取上下文决定单据可见范围（纯函数，W-5）
@@ -241,7 +468,102 @@ fn decide_doc_scope(
     }
 }
 
-/// 审批工作流 Service（不 Clone：持有消息 Service，AppState 内单实例构造）
+// ==================== 审批人解析（自由函数：引擎 ⇄ 业务适配层共用，W-18） ====================
+//
+// 之所以是**自由函数**而非 `SysFlowService` 方法：代码生成器（`flow` 模板）产出的业务适配层
+// 需要在**自己的事务**内解析审批人（单据投影回写 + 开轮必须同事务），此时只能拿到
+// `&DatabaseTransaction`，无法持有 Service 实例。自由函数对 `DatabaseConnection` /
+// `DatabaseTransaction` 一视同仁，引擎语义（启用态过滤、主管缺失显式报错、禁自审回退）
+// 得以**单点复用**，生成代码不必复制一份再各自漂移。
+
+/// 解析单个策略为审批人列表。解析失败**显式报错**，不静默跳过（V2-P0-5）。
+async fn resolve_policy(
+    conn: &impl ConnectionTrait,
+    policy: &ApproverPolicy,
+    applicant_dept_id: Option<i64>,
+) -> Result<Vec<i64>, ServiceError> {
+    match policy {
+        ApproverPolicy::User { user_id } => Ok(vec![*user_id]),
+        ApproverPolicy::DeptLeader => {
+            let dept_id = applicant_dept_id
+                .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.dept_missing")))?;
+            let dept = sys_dept::Entity::find_by_id(dept_id)
+                .one(conn)
+                .await?
+                .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.dept_not_found")))?;
+            match dept.leader_user_id {
+                Some(uid) if uid > 0 => Ok(vec![uid]),
+                // 显式报错而非静默跳过：静默跳过会让单据卡死在无审批人状态（V2-P0-5）
+                _ => Err(ServiceError::bad_request(&crate::tr!(
+                    "error.flow.leader_missing"
+                ))),
+            }
+        }
+        ApproverPolicy::Role { role_key } => {
+            let role = sys_role::Entity::find()
+                .filter(sys_role::Column::RoleKey.eq(*role_key))
+                .one(conn)
+                .await?
+                .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.role_not_found")))?;
+            let urs = sys_user_role::Entity::find()
+                .filter(sys_user_role::Column::RoleId.eq(role.role_id))
+                .all(conn)
+                .await?;
+            let mut ids: Vec<i64> = Vec::new();
+            for ur in urs {
+                if let Some(u) = sys_user::Entity::find_by_id(ur.user_id).one(conn).await? {
+                    // 仅启用且未删除的用户可作为审批人
+                    if u.status.as_deref() == Some("0") && u.del_flag.as_deref() != Some("2") {
+                        ids.push(u.user_id);
+                    }
+                }
+            }
+            if ids.is_empty() {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.flow.role_no_active_user"
+                )));
+            }
+            Ok(ids)
+        }
+    }
+}
+
+/// 解析节点全部审批人（去重）；**提交人不在审批人之列**（V2 §6-4 / 自检 S3）：
+/// 若解析结果包含提交人，则剔除并回退 admin（user_id=1）；admin 自身提交且无其他审批人时保留 admin。
+///
+/// `pub` 供业务适配层（代码生成器的 `flow` 模板）复用：自审剔除与 admin 回退是**引擎规则**，
+/// 复制到生成代码会随引擎演进而漂移。
+pub async fn resolve_node_assignees(
+    conn: &impl ConnectionTrait,
+    spec: &NodeSpec,
+    applicant_id: i64,
+    applicant_dept_id: Option<i64>,
+) -> Result<Vec<i64>, ServiceError> {
+    let mut ids: Vec<i64> = Vec::new();
+    for p in &spec.policies {
+        for uid in resolve_policy(conn, p, applicant_dept_id).await? {
+            if !ids.contains(&uid) {
+                ids.push(uid);
+            }
+        }
+    }
+    if ids.contains(&applicant_id) {
+        // 提交人出现在审批人列 → 剔除；剔除后仍有他人 → 回退 admin 补位（节点可跑）；
+        // 剔除后为空 → 该节点唯一审批人就是提交人（全链自审）→ **拒绝提交**（防单据卡死，V2 §6-4）
+        ids.retain(|id| *id != applicant_id);
+        if ids.is_empty() {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.self_approve_chain"
+            )));
+        }
+        if !ids.contains(&1) {
+            ids.push(1);
+        }
+    }
+    Ok(ids)
+}
+
+/// 审批工作流 Service
 pub struct SysFlowService {
     db: DatabaseConnection,
     config: Arc<crate::config::Settings>,
@@ -259,100 +581,6 @@ impl SysFlowService {
             config,
             msg_service,
         }
-    }
-
-    // ---------- 策略解析（提交时快照） ----------
-
-    /// 解析单个策略为审批人列表。解析失败**显式报错**，不静默跳过（V2-P0-5）。
-    async fn resolve_policy(
-        &self,
-        policy: &ApproverPolicy,
-        applicant_dept_id: Option<i64>,
-    ) -> Result<Vec<i64>, ServiceError> {
-        match policy {
-            ApproverPolicy::User { user_id } => Ok(vec![*user_id]),
-            ApproverPolicy::DeptLeader => {
-                let dept_id = applicant_dept_id.ok_or_else(|| {
-                    ServiceError::bad_request(&crate::tr!("error.flow.dept_missing"))
-                })?;
-                let dept = sys_dept::Entity::find_by_id(dept_id)
-                    .one(&self.db)
-                    .await?
-                    .ok_or_else(|| {
-                        ServiceError::not_found(&crate::tr!("error.flow.dept_not_found"))
-                    })?;
-                match dept.leader_user_id {
-                    Some(uid) if uid > 0 => Ok(vec![uid]),
-                    // 显式报错而非静默跳过：静默跳过会让单据卡死在无审批人状态（V2-P0-5）
-                    _ => Err(ServiceError::bad_request(&crate::tr!(
-                        "error.flow.leader_missing"
-                    ))),
-                }
-            }
-            ApproverPolicy::Role { role_key } => {
-                let role = sys_role::Entity::find()
-                    .filter(sys_role::Column::RoleKey.eq(*role_key))
-                    .one(&self.db)
-                    .await?
-                    .ok_or_else(|| {
-                        ServiceError::not_found(&crate::tr!("error.flow.role_not_found"))
-                    })?;
-                let urs = sys_user_role::Entity::find()
-                    .filter(sys_user_role::Column::RoleId.eq(role.role_id))
-                    .all(&self.db)
-                    .await?;
-                let mut ids: Vec<i64> = Vec::new();
-                for ur in urs {
-                    if let Some(u) = sys_user::Entity::find_by_id(ur.user_id)
-                        .one(&self.db)
-                        .await?
-                    {
-                        // 仅启用且未删除的用户可作为审批人
-                        if u.status.as_deref() == Some("0") && u.del_flag.as_deref() != Some("2") {
-                            ids.push(u.user_id);
-                        }
-                    }
-                }
-                if ids.is_empty() {
-                    return Err(ServiceError::bad_request(&crate::tr!(
-                        "error.flow.role_no_active_user"
-                    )));
-                }
-                Ok(ids)
-            }
-        }
-    }
-
-    /// 解析节点全部审批人（去重）；**提交人不在审批人之列**（V2 §6-4 / 自检 S3）：
-    /// 若解析结果包含提交人，则剔除并回退 admin（user_id=1）；admin 自身提交且无其他审批人时保留 admin。
-    async fn resolve_node_assignees(
-        &self,
-        spec: &NodeSpec,
-        applicant_id: i64,
-        applicant_dept_id: Option<i64>,
-    ) -> Result<Vec<i64>, ServiceError> {
-        let mut ids: Vec<i64> = Vec::new();
-        for p in &spec.policies {
-            for uid in self.resolve_policy(p, applicant_dept_id).await? {
-                if !ids.contains(&uid) {
-                    ids.push(uid);
-                }
-            }
-        }
-        if ids.contains(&applicant_id) {
-            // 提交人出现在审批人列 → 剔除；剔除后仍有他人 → 回退 admin 补位（节点可跑）；
-            // 剔除后为空 → 该节点唯一审批人就是提交人（全链自审）→ **拒绝提交**（防单据卡死，V2 §6-4）
-            ids.retain(|id| *id != applicant_id);
-            if ids.is_empty() {
-                return Err(ServiceError::bad_request(&crate::tr!(
-                    "error.flow.self_approve_chain"
-                )));
-            }
-            if !ids.contains(&1) {
-                ids.push(1);
-            }
-        }
-        Ok(ids)
     }
 
     // ---------- 提交（创建示例单据并发起审批） ----------
@@ -383,9 +611,7 @@ impl SysFlowService {
             .first()
             .cloned()
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.mode_invalid")))?;
-        let assignees = self
-            .resolve_node_assignees(&first, applicant_id, dept_id)
-            .await?;
+        let assignees = resolve_node_assignees(&self.db, &first, applicant_id, dept_id).await?;
 
         let now = crate::common::datetime::now_naive();
         let due_at = now + chrono::Duration::hours(self.config.flow.timeout_hours);
@@ -410,7 +636,7 @@ impl SysFlowService {
                         tenant_id: Set(applicant_tid),
                         title: Set(dto.title.clone()),
                         applicant_id: Set(applicant_id),
-                        applicant_name: Set(Some(applicant_name)),
+                        applicant_name: Set(Some(applicant_name.clone())),
                         dept_id: Set(dept_id),
                         leave_type: Set(dto.leave_type.clone()),
                         days: Set(dto.days),
@@ -434,46 +660,28 @@ impl SysFlowService {
                             ServiceError::internal(&crate::tr!("error.flow.doc_not_found"))
                         })?;
 
-                    for uid in &assignees {
-                        let task_am = sys_flow_task::ActiveModel {
-                            tenant_id: Set(applicant_tid),
-                            biz_type: Set(BIZ_TYPE_DEMO.to_string()),
-                            biz_id: Set(doc.doc_id),
-                            round_no: Set(1),
-                            node_seq: Set(first_node_seq),
-                            node_name: Set(Some(first_node_name.clone())),
-                            assignee_id: Set(*uid),
-                            task_type: Set(node_task_type.to_string()),
-                            status: Set("pending".to_string()),
-                            title: Set(Some(dto.title.clone())),
-                            applicant_id: Set(applicant_id),
-                            due_at: Set(Some(due_at)),
-                            ..Default::default()
-                        };
-                        sys_flow_task::Entity::insert(task_am)
-                            .exec(txn)
-                            .await
-                            .map_err(super::sys_flow_service::db_to_svc)?;
-                    }
-
-                    let log_am = sys_flow_log::ActiveModel {
-                        tenant_id: Set(applicant_tid),
-                        biz_type: Set(BIZ_TYPE_DEMO.to_string()),
-                        biz_id: Set(doc.doc_id),
-                        round_no: Set(1),
-                        node_seq: Set(None),
-                        action: Set("submit".to_string()),
-                        from_status: Set(Some("draft".to_string())),
-                        to_status: Set(Some("pending".to_string())),
-                        operator_id: Set(Some(applicant_id)),
-                        comment: Set(dto.reason.clone()),
-                        acted_at: Set(Some(now)),
-                        ..Default::default()
-                    };
-                    sys_flow_log::Entity::insert(log_am)
-                        .exec(txn)
-                        .await
-                        .map_err(super::sys_flow_service::db_to_svc)?;
+                    // W-19：开审批走通用引擎（biz_type 显式传入，引擎不感知单据表）
+                    super::sys_flow_service::engine_open_round(
+                        txn,
+                        OpenRoundSpec {
+                            biz_type: BIZ_TYPE_DEMO,
+                            biz_id: doc.doc_id,
+                            round_no: 1,
+                            title: &dto.title,
+                            applicant_id,
+                            applicant_name: Some(applicant_name.as_str()),
+                            tenant_id: applicant_tid,
+                            node_seq: first_node_seq,
+                            node_name: &first_node_name,
+                            task_type: node_task_type,
+                            assignees: &assignees,
+                            due_at: Some(due_at),
+                            from_status: Some("draft"),
+                            comment: dto.reason.as_deref(),
+                            now,
+                        },
+                    )
+                    .await?;
 
                     Ok(doc)
                 })
@@ -534,6 +742,13 @@ impl SysFlowService {
         let task = self.load_task_for_act(task_id, operator_id).await?;
         let approve = dto.action == "approve";
 
+        // 业务类型必须已注册（W-19）：推进/终止都要用注册项的链与投影回写。
+        // 必须在**任何写入之前**判定——否则 task 行已被条件更新为 approved/rejected，
+        // 却在取注册项时失败，会留下"任务已动、流水与单据未动"的半应用状态。
+        let reg = biz_type::find(&task.biz_type).ok_or_else(|| {
+            ServiceError::internal(&crate::tr!("error.flow.biz_type_unregistered"))
+        })?;
+
         // 条件更新（并发安全 + 幂等；V3-E1 崩塌点 2 修正后的正确落点）
         let new_task_status = if approve { "approved" } else { "rejected" };
         let affected = self
@@ -573,13 +788,17 @@ impl SysFlowService {
                 task.tenant_id,
             )
             .await?;
-            self.update_doc_status(
+            self.sync_projection(
+                &task.biz_type,
                 task.biz_id,
-                "rejected",
-                task.round_no,
-                Some(task.node_seq),
-                Some(now),
-                task.tenant_id,
+                FlowProjection {
+                    status: "rejected".to_string(),
+                    current_round: task.round_no,
+                    current_node_seq: Some(task.node_seq),
+                    finished_at: Some(now),
+                    now,
+                    tenant_id: task.tenant_id,
+                },
             )
             .await?;
             outcome.notify_finished = Some((task.applicant_id, "rejected"));
@@ -603,16 +822,28 @@ impl SysFlowService {
         let mut to_status = "pending";
 
         if node_done {
-            // 当前节点完成 → 找下一个节点或办结
-            let doc = self.doc_by_id(task.biz_id).await?;
-            let specs = demo_nodes(&doc.flow_mode);
+            // 当前节点完成 → 找下一个节点或办结。
+            // 链与投影均来自业务类型注册项（W-19）：引擎不感知任何单据表，
+            // 故新登记类型（含 gen_table 生成的审批单据）无需改引擎即可推进。
+            // 注册项已在入口处判定（在任何写入之前）。
+            let chain = (reg.chain)(&self.db, task.biz_id).await?;
+            // 部门快照：适配层给出优先（demo = 单据 `dept_id`）；缺失时回退申请人当前部门
+            let dept_id = match chain.dept_id {
+                Some(d) => Some(d),
+                None => sys_user::Entity::find_by_id(task.applicant_id)
+                    .one(&self.db)
+                    .await
+                    .map_err(db_to_svc)?
+                    .and_then(|u| u.dept_id),
+            };
+            let specs = chain.nodes;
             let next = specs.iter().find(|s| s.node_seq > task.node_seq);
             match next {
                 Some(next_spec) => {
                     // 推进下一节点（按提交人部门解析，快照）
-                    let assignees = self
-                        .resolve_node_assignees(next_spec, task.applicant_id, doc.dept_id)
-                        .await?;
+                    let assignees =
+                        resolve_node_assignees(&self.db, next_spec, task.applicant_id, dept_id)
+                            .await?;
                     let due_at = now + chrono::Duration::hours(self.config.flow.timeout_hours);
                     let next_task_type = if next_spec.quorum == Quorum::All {
                         "countersign"
@@ -650,22 +881,25 @@ impl SysFlowService {
                                     .await
                                     .map_err(super::sys_flow_service::db_to_svc)?;
                             }
-                            // doc 派生列推进
-                            let doc_am = FlowDemoDocActiveModel {
-                                doc_id: Set(task.biz_id),
-                                current_node_seq: Set(Some(next_seq)),
-                                update_time: Set(Some(now)),
-                                ..Default::default()
-                            };
-                            FlowDemoDocEntity::update(doc_am)
-                                .exec(txn)
-                                .await
-                                .map_err(super::sys_flow_service::db_to_svc)?;
                             Ok(())
                         })
                     })
                     .await
                     .map_err(super::sys_flow_service::tx_to_svc)?;
+                    // 单据投影推进（展示列；事实源是 task 行，漂移由 W-9 巡检兜底）
+                    self.sync_projection(
+                        &task.biz_type,
+                        task.biz_id,
+                        FlowProjection {
+                            status: "pending".to_string(),
+                            current_round: task.round_no,
+                            current_node_seq: Some(next_seq),
+                            finished_at: None,
+                            now,
+                            tenant_id: task.tenant_id,
+                        },
+                    )
+                    .await?;
                     outcome.notify_assignees = assignees;
                 }
                 None => {
@@ -674,13 +908,17 @@ impl SysFlowService {
                     self.task_repo()
                         .cancel_pending_by_biz(&task.biz_type, task.biz_id, task.round_no)
                         .await?;
-                    self.update_doc_status(
+                    self.sync_projection(
+                        &task.biz_type,
                         task.biz_id,
-                        "approved",
-                        task.round_no,
-                        Some(task.node_seq),
-                        Some(now),
-                        task.tenant_id,
+                        FlowProjection {
+                            status: "approved".to_string(),
+                            current_round: task.round_no,
+                            current_node_seq: Some(task.node_seq),
+                            finished_at: Some(now),
+                            now,
+                            tenant_id: task.tenant_id,
+                        },
                     )
                     .await?;
                     outcome.notify_finished = Some((task.applicant_id, "approved"));
@@ -752,6 +990,13 @@ impl SysFlowService {
                 "error.flow.withdraw_only_applicant"
             )));
         }
+        // 业务类型必须已注册（W-19）：同 `approve_or_reject`，先判定再写入，
+        // 避免"待办已批量取消、单据投影未回写"的半应用状态
+        if biz_type::find(&task.biz_type).is_none() {
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.flow.biz_type_unregistered"
+            )));
+        }
         let affected = self
             .task_repo()
             .cancel_pending_by_biz(&task.biz_type, task.biz_id, task.round_no)
@@ -777,13 +1022,17 @@ impl SysFlowService {
             task.tenant_id,
         )
         .await?;
-        self.update_doc_status(
+        self.sync_projection(
+            &task.biz_type,
             task.biz_id,
-            "withdrawn",
-            task.round_no,
-            None,
-            Some(now),
-            task.tenant_id,
+            FlowProjection {
+                status: "withdrawn".to_string(),
+                current_round: task.round_no,
+                current_node_seq: None,
+                finished_at: None,
+                now,
+                tenant_id: task.tenant_id,
+            },
         )
         .await?;
         Ok(FlowActOutcome {
@@ -1032,9 +1281,8 @@ impl SysFlowService {
             .first()
             .cloned()
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.mode_invalid")))?;
-        let assignees = self
-            .resolve_node_assignees(&first, doc.applicant_id, doc.dept_id)
-            .await?;
+        let assignees =
+            resolve_node_assignees(&self.db, &first, doc.applicant_id, doc.dept_id).await?;
         let now = crate::common::datetime::now_naive();
         let due_at = now + chrono::Duration::hours(self.config.flow.timeout_hours);
         let node_task_type = if first.quorum == Quorum::All {
@@ -1059,46 +1307,28 @@ impl SysFlowService {
             let doc_status = doc_status_snap.clone();
             let comment_owned = comment_owned.clone();
             Box::pin(async move {
-                for uid in &assignees {
-                    let am = sys_flow_task::ActiveModel {
-                        tenant_id: Set(doc_tid),
-                        biz_type: Set(BIZ_TYPE_DEMO.to_string()),
-                        biz_id: Set(doc_id),
-                        round_no: Set(new_round),
-                        node_seq: Set(first_node_seq),
-                        node_name: Set(Some(first_node_name.clone())),
-                        assignee_id: Set(*uid),
-                        task_type: Set(node_task_type.to_string()),
-                        status: Set("pending".to_string()),
-                        title: Set(Some(doc_title.clone())),
-                        applicant_id: Set(applicant_id_snap),
-                        applicant_name: Set(applicant_name_snap.clone()),
-                        due_at: Set(Some(due_at)),
-                        ..Default::default()
-                    };
-                    sys_flow_task::Entity::insert(am)
-                        .exec(txn)
-                        .await
-                        .map_err(super::sys_flow_service::db_to_svc)?;
-                }
-                let log_am = sys_flow_log::ActiveModel {
-                    tenant_id: Set(doc_tid),
-                    biz_type: Set(BIZ_TYPE_DEMO.to_string()),
-                    biz_id: Set(doc_id),
-                    round_no: Set(new_round),
-                    node_seq: Set(None),
-                    action: Set("submit".to_string()),
-                    from_status: Set(Some(doc_status)),
-                    to_status: Set(Some("pending".to_string())),
-                    operator_id: Set(Some(operator_id)),
-                    comment: Set(comment_owned),
-                    acted_at: Set(Some(now)),
-                    ..Default::default()
-                };
-                sys_flow_log::Entity::insert(log_am)
-                    .exec(txn)
-                    .await
-                    .map_err(super::sys_flow_service::db_to_svc)?;
+                // W-19：重提交同样走通用引擎（biz_type 显式传入）
+                super::sys_flow_service::engine_open_round(
+                    txn,
+                    OpenRoundSpec {
+                        biz_type: BIZ_TYPE_DEMO,
+                        biz_id: doc_id,
+                        round_no: new_round,
+                        title: &doc_title,
+                        applicant_id: applicant_id_snap,
+                        applicant_name: applicant_name_snap.as_deref(),
+                        tenant_id: doc_tid,
+                        node_seq: first_node_seq,
+                        node_name: &first_node_name,
+                        task_type: node_task_type,
+                        assignees: &assignees,
+                        due_at: Some(due_at),
+                        from_status: Some(doc_status.as_str()),
+                        comment: comment_owned.as_deref(),
+                        now,
+                    },
+                )
+                .await?;
                 // doc 派生列推进（round +1，状态回 pending，清办结时间）
                 let doc_am = FlowDemoDocActiveModel {
                     doc_id: Set(doc_id),
@@ -1159,6 +1389,66 @@ impl SysFlowService {
             .await?)
     }
 
+    /// 「已办」：我作为审批人处理过的流水（W-8；口径见 `find_done_page`）
+    ///
+    /// 返回视图行：流水字段 + 按 `biz_id` 批量补单据标题（一次 `IN` 查询，避免 N+1）。
+    pub async fn done_page(
+        &self,
+        operator_id: i64,
+        query: FlowPageQuery,
+    ) -> Result<(Vec<FlowDoneVo>, u64), ServiceError> {
+        let (offset, limit) = page_args(&query);
+        let (rows, total) = self
+            .log_repo()
+            .find_done_page(operator_id, offset, limit)
+            .await?;
+        // 标题补齐：内置示例单据联查单据表；其它业务类型回退 task 行快照（W-19）。
+        // 键含 biz_type，避免不同业务类型主键相同时标题串台。
+        let mut titles: std::collections::HashMap<(String, i64), String> =
+            std::collections::HashMap::new();
+        let demo_ids: Vec<i64> = rows
+            .iter()
+            .filter(|r| r.biz_type == biz_type::DEMO_DOC)
+            .map(|r| r.biz_id)
+            .collect();
+        for (id, t) in self.doc_repo().find_titles_by_ids(demo_ids).await? {
+            titles.insert((biz_type::DEMO_DOC.to_string(), id), t);
+        }
+        let other_types: std::collections::HashSet<&str> = rows
+            .iter()
+            .map(|r| r.biz_type.as_str())
+            .filter(|bt| *bt != biz_type::DEMO_DOC)
+            .collect();
+        for bt in other_types {
+            let ids: Vec<i64> = rows
+                .iter()
+                .filter(|r| r.biz_type == bt)
+                .map(|r| r.biz_id)
+                .collect();
+            for (id, t) in self.task_repo().find_titles_by_biz(bt, ids).await? {
+                titles.insert((bt.to_string(), id), t);
+            }
+        }
+        let vos = rows
+            .into_iter()
+            .map(|r| FlowDoneVo {
+                title: titles
+                    .get(&(r.biz_type.clone(), r.biz_id))
+                    .cloned()
+                    .unwrap_or_default(),
+                log_id: r.log_id,
+                biz_type: r.biz_type,
+                biz_id: r.biz_id,
+                round_no: r.round_no,
+                node_seq: r.node_seq,
+                action: r.action,
+                comment: r.comment,
+                acted_at: r.acted_at,
+            })
+            .collect();
+        Ok((vos, total))
+    }
+
     /// 管理视图：全部单据（**调用方须持有 system:flow:list**）
     ///
     /// - `tenant_scope`：租户操作者 → `Some(tid)` 仅本租户单据；平台 → `None` 全量
@@ -1175,6 +1465,25 @@ impl SysFlowService {
             .doc_repo()
             .find_all_page(status, offset, limit, tenant_scope, doc_scope)
             .await?)
+    }
+
+    /// 管理视图导出（W-11）：与 `all_page` **完全同口径**（租户 + `data_scope` 双层过滤）
+    ///
+    /// 导出必须复用列表的可见范围计算，否则会成为数据泄露旁路；
+    /// 行数上限由 `EXPORT_MAX_ROWS` 兜底（超限由 excel 层打 `X-Export-Truncated` 标记）。
+    pub async fn export_docs(
+        &self,
+        query: FlowPageQuery,
+        tenant_scope: Option<i64>,
+        doc_scope: &FlowDocScope,
+    ) -> Result<(Vec<flow_demo_doc::Model>, bool), ServiceError> {
+        let limit = crate::common::page::EXPORT_MAX_ROWS;
+        let status = query.status.as_deref();
+        let (rows, total) = self
+            .doc_repo()
+            .find_all_page(status, 0, limit, tenant_scope, doc_scope)
+            .await?;
+        Ok((rows, total > limit))
     }
 
     /// 解析操作者在管理视图中的单据可见范围（W-5）
@@ -1358,6 +1667,38 @@ impl SysFlowService {
         Ok(u.status.as_deref() == Some("0") && u.del_flag.as_deref() != Some("2"))
     }
 
+    /// 解析升级提醒的目标（W-7）：申请人部门主管 → admin 回退
+    ///
+    /// 跳过"待办持有者本人"（升级给自己无意义）与"申请人本人"（申请人已由首次提醒覆盖）；
+    /// 候选均不可用时返回 `None`（不打扰，交由人工/一致性巡检发现）。
+    async fn resolve_escalation_target(
+        &self,
+        assignee_id: i64,
+        applicant_id: i64,
+    ) -> Result<Option<i64>, ServiceError> {
+        let mut candidates: Vec<i64> = Vec::new();
+        if let Some(applicant) = sys_user::Entity::find_by_id(applicant_id)
+            .one(&self.db)
+            .await?
+            && let Some(dept_id) = applicant.dept_id
+            && let Some(dept) = sys_dept::Entity::find_by_id(dept_id).one(&self.db).await?
+            && let Some(leader) = dept.leader_user_id
+            && leader > 0
+        {
+            candidates.push(leader);
+        }
+        candidates.push(crate::common::constants::SUPER_ADMIN_USER_ID);
+        for c in candidates {
+            if c == assignee_id || c == applicant_id {
+                continue;
+            }
+            if self.is_active_user(c).await? {
+                return Ok(Some(c));
+            }
+        }
+        Ok(None)
+    }
+
     /// 任务详情 + 单据信息 + 时间线（assignee / 发起人 / 持有 system:flow:list 者可看）
     pub async fn task_detail(
         &self,
@@ -1379,7 +1720,13 @@ impl SysFlowService {
                 crate::common::tenant::tenant_scope(task.tenant_id),
             )
             .await?;
-        let doc = self.doc_by_id(task.biz_id).await.ok();
+        // 仅示例单据内联返回单据主体：其它业务类型的明细由业务模块自身接口提供
+        // （引擎不感知单据表结构，W-19），避免把同 id 的无关 demo 单据当成本单据返回。
+        let doc = if task.biz_type == biz_type::DEMO_DOC {
+            self.doc_by_id(task.biz_id).await.ok()
+        } else {
+            None
+        };
         Ok(serde_json::json!({
             "task": task,
             "doc": doc,
@@ -1399,49 +1746,152 @@ impl SysFlowService {
         let candidates = self.task_repo().find_timeout_candidates(now, limit).await?;
         let mut outcome = FlowScanOutcome::default();
         let interval = self.config.flow.remind_interval_secs;
+        let escalate_after_hours = self.config.flow.escalate_after_hours;
         for task in candidates {
-            let key = format!("flow_remind:{}", task.task_id);
-            // SETNX + TTL 去重；Redis 故障时宁可重复也不漏报（login_anomaly_detector 范式）
-            let acquired: Option<String> = redis::cmd("SET")
-                .arg(&key)
-                .arg("1")
-                .arg("NX")
-                .arg("EX")
-                .arg(interval)
-                .query_async(redis)
-                .await
-                .unwrap_or(None);
-            if acquired.is_none() {
+            // ---- 首次提醒（W-7 策略：只提醒一次 + 待办红点常驻）----
+            // 事实源 = DB `last_reminded_at IS NULL`；Redis SETNX 仅作多实例互斥窗口，
+            // 避免多实例同时提醒（TTL = remind_interval_secs）。
+            if task.last_reminded_at.is_none() {
+                let key = format!("flow_remind:{}", task.task_id);
+                let acquired: Option<String> = redis::cmd("SET")
+                    .arg(&key)
+                    .arg("1")
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(interval)
+                    .query_async(redis)
+                    .await
+                    .unwrap_or(None);
+                if acquired.is_none() {
+                    outcome.skipped += 1;
+                    continue;
+                }
+                let now2 = crate::common::datetime::now_naive();
+                let _ = self
+                    .write_log(
+                        &task.biz_type,
+                        task.biz_id,
+                        task.round_no,
+                        Some(task.node_seq),
+                        "timeout_remind",
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some("超时待审批提醒"),
+                        now2,
+                        task.tenant_id,
+                    )
+                    .await;
+                let _ = self.task_repo().touch_reminded(task.task_id, now2).await;
+                let title = task.title.clone().unwrap_or_default();
+                self.send_flow_audit(task.assignee_id, "flow_timeout", &title)
+                    .await;
+                outcome.notify.push((task.assignee_id, title));
+                outcome.reminded += 1;
+            } else {
+                // 已提醒过：不再重复打扰（红点由待办列表/pending-count 常驻体现）
                 outcome.skipped += 1;
+            }
+
+            // ---- 升级提醒（W-7）：超 N 小时仍 pending → 提醒申请人部门主管（回退 admin）----
+            if escalate_after_hours > 0
+                && let Some(due_at) = task.due_at
+            {
+                let overdue_hours = (now - due_at).num_hours();
+                if overdue_hours >= escalate_after_hours
+                    && let Some(target) = self
+                        .resolve_escalation_target(task.assignee_id, task.applicant_id)
+                        .await?
+                {
+                    // 长 TTL 去重（近周级）：Redis 故障/清空时最多重复一次升级提醒
+                    let key = format!("flow_escalate:{}", task.task_id);
+                    let acquired: Option<String> = redis::cmd("SET")
+                        .arg(&key)
+                        .arg("1")
+                        .arg("NX")
+                        .arg("EX")
+                        .arg(ESCALATE_DEDUP_TTL_SECS)
+                        .query_async(redis)
+                        .await
+                        .unwrap_or(None);
+                    if acquired.is_some() {
+                        let title = task.title.clone().unwrap_or_default();
+                        self.send_flow_audit(target, "flow_timeout", &title).await;
+                        outcome.notify.push((target, title));
+                        outcome.escalated += 1;
+                    }
+                }
+            }
+        }
+        // W-9：同 Job 尾部做聚合一致性巡检（省一个调度位；漂移仅告警，不回写）
+        outcome.drift = self.inspect_consistency(limit).await.unwrap_or_else(|e| {
+            tracing::warn!("flow 一致性巡检失败（不影响本轮提醒）: {}", e.message);
+            0
+        });
+        Ok(outcome)
+    }
+
+    /// 一致性巡检（W-9）：单据 `status` 与 task 聚合的**双向**漂移检测
+    ///
+    /// `status` / `current_round` / `current_node_seq` 是派生投影，与 task/log 同事务写入，
+    /// 正常路径下不会漂移；本巡检只在本轮扫描尾部抽样核对，发现不一致**仅告警不回写**
+    /// （自动回写会掩盖写入路径的 bug，且可能覆盖人工修数）。
+    ///
+    /// 两类漂移：
+    /// - **A 单据 pending 但无 pending 待办**（待办被误取消/漏建 ⇒ 单据卡死）
+    /// - **B 存在 pending 待办但单据非 pending**（撤回/驳回未级联取消 ⇒ 幽灵待办）
+    pub async fn inspect_consistency(&self, limit: u64) -> Result<u64, ServiceError> {
+        let mut drift = 0u64;
+        // A：pending 单据应至少有一条 pending 待办
+        let pending_docs = self
+            .doc_repo()
+            .find_page_by_status("pending", 0, limit)
+            .await?;
+        for doc in pending_docs {
+            let has_pending = self
+                .task_repo()
+                .find_first_pending_by_biz(BIZ_TYPE_DEMO, doc.doc_id, None)
+                .await?
+                .is_some();
+            if !has_pending {
+                drift += 1;
+                tracing::warn!(
+                    doc_id = doc.doc_id,
+                    round = doc.current_round,
+                    node_seq = ?doc.current_node_seq,
+                    "flow 一致性漂移 A：单据为 pending 但无 pending 待办（可能卡死）"
+                );
+            }
+        }
+        // B：pending 待办应对应 pending 单据
+        // 仅巡检**内置示例单据**：引擎不感知其它业务类型的单据表（W-19），
+        // 拿 `flow_demo_doc` 判非 demo 任务必然假阳性。
+        let pending_tasks = self.task_repo().find_pending_page(0, limit).await?;
+        let mut checked: std::collections::HashSet<(String, i64)> =
+            std::collections::HashSet::new();
+        for task in pending_tasks {
+            if task.biz_type != biz_type::DEMO_DOC {
                 continue;
             }
-            let now2 = crate::common::datetime::now_naive();
-            // 流水（系统动作：operator_id = NULL，V4 §4-22）
-            let _ = self
-                .write_log(
-                    &task.biz_type,
-                    task.biz_id,
-                    task.round_no,
-                    Some(task.node_seq),
-                    "timeout_remind",
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some("超时待审批提醒"),
-                    now2,
-                    task.tenant_id,
-                )
-                .await;
-            let _ = self.task_repo().touch_reminded(task.task_id, now2).await;
-            // 站内审计（send_log；用户可见性以"待办列表"为准，WS 仅加速——此处无 AppState 不发 WS）
-            let title = task.title.clone().unwrap_or_default();
-            self.send_flow_audit(task.assignee_id, "flow_timeout", &title)
-                .await;
-            outcome.notify.push((task.assignee_id, title));
-            outcome.reminded += 1;
+            if !checked.insert((task.biz_type.clone(), task.biz_id)) {
+                continue;
+            }
+            let doc_pending = self
+                .doc_repo()
+                .find_by_id(task.biz_id)
+                .await?
+                .is_some_and(|d| d.status == "pending");
+            if !doc_pending {
+                drift += 1;
+                tracing::warn!(
+                    biz_id = task.biz_id,
+                    task_id = task.task_id,
+                    "flow 一致性漂移 B：存在 pending 待办但单据非 pending（幽灵待办）"
+                );
+            }
         }
-        Ok(outcome)
+        Ok(drift)
     }
 
     /// 发送站内审计消息（site 渠道；to_addr = 字符串化 user_id，V7-E3；模板按场景选择）
@@ -1547,34 +1997,82 @@ impl SysFlowService {
             .map_err(super::sys_flow_service::db_to_svc)
     }
 
-    /// 推进示例单据派生列
-    async fn update_doc_status(
+    /// 回写单据派生投影（按业务类型分发到注册项，W-19）
+    ///
+    /// 引擎不感知任何单据表：未登记业务类型 → 显式失败（**不静默降级**，
+    /// 否则任务推进成功而单据状态永停 `pending`，成为最隐蔽的一致性破坏）。
+    async fn sync_projection(
         &self,
-        doc_id: i64,
-        status: &str,
-        round_no: i32,
-        node_seq: Option<i32>,
-        now: Option<NaiveDateTime>,
-        tenant_tid: i64,
+        biz_type: &str,
+        biz_id: i64,
+        p: FlowProjection,
     ) -> Result<(), ServiceError> {
-        let finished = if matches!(status, "approved" | "rejected") {
-            now
-        } else {
-            None
-        };
-        let am = FlowDemoDocActiveModel {
-            tenant_id: Set(tenant_tid),
-            doc_id: Set(doc_id),
-            status: Set(status.to_string()),
-            current_round: Set(round_no),
-            current_node_seq: Set(node_seq),
-            finished_at: Set(finished),
-            update_time: Set(now),
+        let reg = biz_type::find(biz_type).ok_or_else(|| {
+            ServiceError::internal(&crate::tr!("error.flow.biz_type_unregistered"))
+        })?;
+        (reg.sync_projection)(&self.db, biz_id, p).await
+    }
+}
+
+/// 通用审批引擎：在**调用方事务内**为任意业务单据开一轮审批（W-19）
+///
+/// 写入内容（与"提交时快照"规则一致，D2：运行期不重算策略）：
+/// - `assignees.len()` 条 pending 待办（审批人在此定格，`task_type` = single/countersign）
+/// - 1 条 `submit` 流水
+///
+/// 两张表（`sys_flow_task` / `sys_flow_log`）**与单据类型无关**，`biz_type` 由入参显式给出；
+/// 单据表自身的投影列（status / current_round / current_node_seq / submitted_at 等）
+/// 由业务适配层在同一事务内自行回写——引擎不感知任何单据表结构。
+///
+/// 之所以是**自由函数**而非 `SysFlowService` 方法：SeaORM `transaction()` 的回调是
+/// `for<'c> FnOnce(&'c DatabaseTransaction)` HRTB，闭包内借用 `&self` 无法对所有 `'c` 成立；
+/// 自由函数只依赖 `txn` 与入参，天然可在事务闭包内调用。
+pub async fn engine_open_round(
+    txn: &DatabaseTransaction,
+    spec: OpenRoundSpec<'_>,
+) -> Result<(), ServiceError> {
+    for uid in spec.assignees {
+        let task_am = sys_flow_task::ActiveModel {
+            tenant_id: Set(spec.tenant_id),
+            biz_type: Set(spec.biz_type.to_string()),
+            biz_id: Set(spec.biz_id),
+            round_no: Set(spec.round_no),
+            node_seq: Set(spec.node_seq),
+            node_name: Set(Some(spec.node_name.to_string())),
+            assignee_id: Set(*uid),
+            task_type: Set(spec.task_type.to_string()),
+            status: Set("pending".to_string()),
+            title: Set(Some(spec.title.to_string())),
+            applicant_id: Set(spec.applicant_id),
+            applicant_name: Set(spec.applicant_name.map(|s| s.to_string())),
+            due_at: Set(spec.due_at),
             ..Default::default()
         };
-        self.doc_repo().update(am).await?;
-        Ok(())
+        sys_flow_task::Entity::insert(task_am)
+            .exec(txn)
+            .await
+            .map_err(db_to_svc)?;
     }
+
+    let log_am = sys_flow_log::ActiveModel {
+        tenant_id: Set(spec.tenant_id),
+        biz_type: Set(spec.biz_type.to_string()),
+        biz_id: Set(spec.biz_id),
+        round_no: Set(spec.round_no),
+        node_seq: Set(None),
+        action: Set("submit".to_string()),
+        from_status: Set(spec.from_status.map(|s| s.to_string())),
+        to_status: Set(Some("pending".to_string())),
+        operator_id: Set(Some(spec.applicant_id)),
+        comment: Set(spec.comment.map(|s| s.to_string())),
+        acted_at: Set(Some(spec.now)),
+        ..Default::default()
+    };
+    sys_flow_log::Entity::insert(log_am)
+        .exec(txn)
+        .await
+        .map_err(db_to_svc)?;
+    Ok(())
 }
 
 /// DbErr → ServiceError（事务闭包内统一映射）
@@ -1676,5 +2174,52 @@ mod tests {
     #[test]
     fn demo_nodes_unknown_mode_falls_back_to_single() {
         assert_eq!(demo_nodes("whatever").len(), 2);
+    }
+
+    /// W-19：业务类型注册表——内置类型可识别，未登记类型不得冒充内置
+    ///
+    /// 注册表是"新增单据类型"的单一入口：若漏登记，`is_registered` 会给出 false，
+    /// 使依赖它的治理/校验逻辑 fail-closed 而不是把未知类型当内置放行。
+    #[test]
+    fn biz_type_registry_lists_only_registered_types() {
+        assert_eq!(BIZ_TYPE_DEMO, "demo_doc");
+        assert_eq!(biz_type::DEMO_DOC, BIZ_TYPE_DEMO);
+        assert_eq!(biz_type::ALL, &["demo_doc"]);
+        assert!(biz_type::is_registered(BIZ_TYPE_DEMO));
+        assert!(!biz_type::is_registered("purchase_order"));
+        assert!(!biz_type::is_registered(""));
+        assert!(
+            !biz_type::is_registered("demo_doc "),
+            "不得宽松匹配（防脏值）"
+        );
+    }
+
+    /// W-19：推进注册表与类型登记表**必须严格一致**
+    ///
+    /// 二者不一致会直接破坏链路：只登记 `ALL` 而未注册 `REGISTRY`，推进路径
+    /// （`/system/flow/act`）取不到链提供者/投影回写 → 报 `biz_type_unregistered`；
+    /// 只在 `REGISTRY` 而未登记 `ALL`，则治理/校验逻辑视其为未登记类型。
+    #[test]
+    fn registry_matches_registered_types() {
+        let reg_keys: Vec<&str> = biz_type::REGISTRY.iter().map(|r| r.biz_type).collect();
+        assert_eq!(
+            reg_keys,
+            biz_type::ALL.to_vec(),
+            "REGISTRY 与 ALL 的业务类型集合与顺序必须一致"
+        );
+        for r in biz_type::REGISTRY {
+            assert!(
+                biz_type::is_registered(r.biz_type),
+                "注册项 {} 未在 ALL 登记",
+                r.biz_type
+            );
+            assert!(
+                biz_type::find(r.biz_type).is_some(),
+                "注册项 {} 必须可被 find 检索到",
+                r.biz_type
+            );
+        }
+        assert!(biz_type::find("purchase_order").is_none());
+        assert!(biz_type::find("").is_none());
     }
 }

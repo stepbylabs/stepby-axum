@@ -89,6 +89,8 @@ fn main() {
         axum_backend::service::sys_user_service::UserAuthRoleVo,
         axum_backend::service::sys_user_service::ProfileVo,
         axum_backend::service::sys_user_service::UserFormVo,
+        // ---- service：审批工作流（W-8 已办视图行） ----
+        axum_backend::service::sys_flow_service::FlowDoneVo,
     );
 
     if !failed.is_empty() {

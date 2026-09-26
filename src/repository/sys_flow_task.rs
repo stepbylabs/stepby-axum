@@ -222,6 +222,17 @@ impl SysFlowTaskRepository {
             .await
     }
 
+    /// 全部 pending 任务（一致性巡检用，W-9；限量避免大库全扫）
+    pub async fn find_pending_page(&self, offset: u64, limit: u64) -> Result<Vec<Model>, DbErr> {
+        SysFlowTask::find()
+            .filter(Column::Status.eq("pending"))
+            .order_by_asc(Column::TaskId)
+            .offset(offset)
+            .limit(limit)
+            .all(self.base.db())
+            .await
+    }
+
     /// 更新最近提醒时间
     pub async fn touch_reminded(&self, task_id: i64, now: NaiveDateTime) -> Result<(), DbErr> {
         let am = ActiveModel {
@@ -231,5 +242,27 @@ impl SysFlowTaskRepository {
         };
         self.base.update(am).await?;
         Ok(())
+    }
+
+    /// 按 `(biz_type, biz_id)` 批量取单据标题（`title` 为开轮时的冗余快照）
+    ///
+    /// 「已办」视图对**非内置示例**业务类型无单据表可联查（W-19：引擎不感知单据表结构），
+    /// 故回退到 task 行快照，避免已办列表中标题恒为空。
+    pub async fn find_titles_by_biz(
+        &self,
+        biz_type: &str,
+        biz_ids: Vec<i64>,
+    ) -> Result<std::collections::HashMap<i64, String>, DbErr> {
+        if biz_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        Ok(SysFlowTask::find()
+            .filter(Column::BizType.eq(biz_type))
+            .filter(Column::BizId.is_in(biz_ids))
+            .all(self.base.db())
+            .await?
+            .into_iter()
+            .filter_map(|m| m.title.map(|t| (m.biz_id, t)))
+            .collect())
     }
 }

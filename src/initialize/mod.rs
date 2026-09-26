@@ -76,6 +76,14 @@ impl AppInitializer {
             .await?;
             tracing::info!("sys_dept.leader_user_id 列已补建（存量库兜底）");
         }
+        // 3.1.2b 主管回填（审批链前置条件）——仅补列不补值会让「部门主管审批」整链不可用：
+        // `ApproverPolicy::DeptLeader` 解析 leader_user_id 为空即 400 error.flow.leader_missing，
+        // 故存量库（列为历史 initialize 所加、从未回填）提交单据必然失败。
+        // 迁移 m20260923_000002 的回填只在"列刚新建"时执行（has_column 即早退），覆盖不到该场景，
+        // 因此这里做**每次启动都执行**的幂等回填。
+        ensure_platform_dept_leaders(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("平台部门主管回填失败: {}", e))?;
 
         // 3.2 P0-2：幂等确保 sys_task 含 operator_id 列（存量库向后兼容）
         // 背景：m20260806_000002_add_task_operator_id 迁移负责全新库建表时带该列，
@@ -758,6 +766,35 @@ async fn ensure_flow_tables(db: &DatabaseConnection) -> Result<(), DbErr> {
     .await
 }
 
+/// 幂等回填平台部门主管（`sys_dept.leader_user_id` → admin，审批链前置条件）
+///
+/// 作用域限定**平台部门（tenant_id = 0）**：租户部门的审批人应由租户自行指派，
+/// 不可把平台 admin 注入为租户部门主管（跨租户越权审批风险）。
+/// 返回受影响行数（0 = 已全部有主管，天然幂等）。列缺失时安全跳过。
+pub(crate) async fn ensure_platform_dept_leaders(db: &DatabaseConnection) -> anyhow::Result<u64> {
+    if !sso_has_column(db, "sys_dept", "leader_user_id").await? {
+        return Ok(0);
+    }
+    let sql = if sso_has_column(db, "sys_dept", "tenant_id").await? {
+        "UPDATE sys_dept SET leader_user_id = 1 WHERE leader_user_id IS NULL AND tenant_id = 0"
+    } else {
+        "UPDATE sys_dept SET leader_user_id = 1 WHERE leader_user_id IS NULL"
+    };
+    let res = db
+        .execute(Statement::from_string(
+            db.get_database_backend(),
+            sql.to_string(),
+        ))
+        .await?;
+    if res.rows_affected() > 0 {
+        tracing::info!(
+            "平台部门主管回填完成（leader_user_id → 1，保证部门主管审批链可用）rows={}",
+            res.rows_affected()
+        );
+    }
+    Ok(res.rows_affected())
+}
+
 /// 幂等建 flow 索引（SQLite/PostgreSQL 支持 IF NOT EXISTS；MySQL 跳过交由迁移补齐，参照 ensure_sys_pat_table）
 async fn ensure_flow_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
@@ -770,6 +807,8 @@ async fn ensure_flow_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {
         "CREATE INDEX IF NOT EXISTS idx_flow_task_assignee ON sys_flow_task (assignee_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_flow_task_due ON sys_flow_task (status, due_at)",
         "CREATE INDEX IF NOT EXISTS idx_flow_log_biz ON sys_flow_log (biz_type, biz_id, round_no)",
+        // W-12：已办视图（operator_id + acted_at）覆盖索引，避免全表扫描
+        "CREATE INDEX IF NOT EXISTS idx_flow_log_operator ON sys_flow_log (operator_id, acted_at)",
         "CREATE INDEX IF NOT EXISTS idx_flow_doc_applicant ON flow_demo_doc (applicant_id, status)",
     ];
     for stmt in indexes {
@@ -3444,6 +3483,118 @@ mod flow_backfill_tests {
             .try_get::<i64>("", "c")
             .unwrap() as u64;
         assert_eq!(count_dict, 7, "审批状态字典应恰 7 条");
+    }
+}
+
+#[cfg(test)]
+mod dept_leader_backfill_tests {
+    use super::*;
+    use sea_orm::Database;
+
+    /// 平台部门主管回填：作用域正确 + 可证伪 + 幂等
+    ///
+    /// 背景（P0 业务阻断）：`ApproverPolicy::DeptLeader` 依赖 `sys_dept.leader_user_id`。
+    /// 迁移 `m20260923_000002` 的回填只在「列刚新建」时执行（`has_column` 即早退），
+    /// 存量库（列为历史 initialize 所加）会全部为 NULL ⇒ 提交单据必然 400
+    /// `error.flow.leader_missing`，部门主管审批整链不可用。故 `initialize` 增加
+    /// 每次启动都执行的幂等回填。本测试**主动构造存量库漂移**（主管全部置 NULL），
+    /// 因此能真正证伪：若回填函数被移除、作用域写错（漏 `tenant_id = 0`）或失去幂等性，
+    /// 断言必红。（不放集成测试：集成库会跑 `Migrator::up`，迁移自身已回填 ⇒ 不可证伪。）
+    #[tokio::test]
+    async fn ensure_platform_dept_leaders_backfills_platform_only_and_is_idempotent() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .expect("建库失败");
+        let backend = db.get_database_backend();
+
+        // 构造两个确定性样本：平台部门（tenant_id=0）与租户部门（tenant_id=7）
+        db.execute(Statement::from_string(
+            backend,
+            "INSERT INTO sys_dept (tenant_id, dept_id, dept_name, leader_user_id, status, del_flag) \
+             VALUES (0, 910001, '回填测试-平台部门', NULL, '0', '0')"
+                .to_string(),
+        ))
+        .await
+        .expect("插入平台样本部门失败");
+        db.execute(Statement::from_string(
+            backend,
+            "INSERT INTO sys_dept (tenant_id, dept_id, dept_name, leader_user_id, status, del_flag) \
+             VALUES (7, 910002, '回填测试-租户部门', NULL, '0', '0')"
+                .to_string(),
+        ))
+        .await
+        .expect("插入租户样本部门失败");
+
+        // 模拟存量库漂移：全部主管置空
+        db.execute(Statement::from_string(
+            backend,
+            "UPDATE sys_dept SET leader_user_id = NULL".to_string(),
+        ))
+        .await
+        .expect("模拟漂移失败");
+
+        // 首次调用：平台部门应被回填
+        let first = ensure_platform_dept_leaders(&db)
+            .await
+            .expect("平台部门主管回填失败");
+        assert!(first >= 1, "存量库应至少回填 1 个平台部门，实际 {first}");
+        assert_eq!(
+            dept_leader(&db, 910001).await,
+            Some(1),
+            "平台部门主管应回填为 admin(1)"
+        );
+        assert_eq!(
+            dept_leader(&db, 910002).await,
+            None,
+            "租户部门不得被平台回填（否则构成跨租户越权审批）"
+        );
+        let null_platform = scalar(
+            &db,
+            "SELECT COUNT(*) AS c FROM sys_dept WHERE tenant_id = 0 AND leader_user_id IS NULL",
+        )
+        .await;
+        assert_eq!(null_platform, 0, "平台部门不得残留无主管");
+
+        // 二次调用：天然幂等（0 行受影响）
+        let second = ensure_platform_dept_leaders(&db)
+            .await
+            .expect("二次回填失败");
+        assert_eq!(second, 0, "重复调用应无副作用（幂等）");
+    }
+
+    /// 列缺失时安全跳过（老库尚未补列不应报错中断启动）
+    #[tokio::test]
+    async fn ensure_platform_dept_leaders_skips_when_table_missing() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let rows = ensure_platform_dept_leaders(&db).await.unwrap();
+        assert_eq!(rows, 0, "无 sys_dept 表时应安全返回 0 而非报错");
+    }
+
+    /// 读取某部门的主管（None = 未设置）
+    async fn dept_leader(db: &DatabaseConnection, dept_id: i64) -> Option<i64> {
+        let row = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                format!("SELECT leader_user_id FROM sys_dept WHERE dept_id = {dept_id}"),
+            ))
+            .await
+            .expect("查询部门主管失败")
+            .expect("样本部门不存在");
+        row.try_get::<Option<i64>>("", "leader_user_id")
+            .expect("读取 leader_user_id 失败")
+    }
+
+    /// 单列单行标量查询（列须 `AS c` 别名）
+    async fn scalar(db: &DatabaseConnection, sql: &str) -> i64 {
+        db.query_one(Statement::from_string(
+            db.get_database_backend(),
+            sql.to_string(),
+        ))
+        .await
+        .expect("查询失败")
+        .expect("无结果行")
+        .try_get::<i64>("", "c")
+        .expect("读取标量失败")
     }
 }
 

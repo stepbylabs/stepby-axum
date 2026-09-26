@@ -9,11 +9,13 @@
     <Transition name="fade" mode="out-in">
       <el-table v-loading="loading" :data="list" :row-key="(row) => row.{{ pk_column.javaField | camel_case }}">
 {% for col in columns %}{% if col.isList == "1" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.javaField | camel_case }}" />
-{% endif %}{% endfor %}      <el-table-column label="操作" width="180">
+{% endif %}{% endfor %}{% if is_flow %}      <el-table-column label="审批状态" prop="status" width="110" />
+{% endif %}      <el-table-column label="操作" width="{% if is_flow %}260{% else %}180{% endif %}">
         <template #default="scope">
           <el-button type="primary" link icon="Edit" class="transition-all duration-200 hover:scale-105" @click="handleEdit(scope.row)">修改</el-button>
           <el-button type="danger" link icon="Delete" class="transition-all duration-200 hover:scale-105" @click="handleDelete(scope.row)">删除</el-button>
-        </template>
+{% if is_flow %}          <el-button v-if="['draft', 'rejected', 'withdrawn'].includes(scope.row.status)" type="warning" link icon="Promotion" class="transition-all duration-200 hover:scale-105" @click="handleSubmitFlow(scope.row)">提交审批</el-button>
+{% endif %}        </template>
       </el-table-column>
       </el-table>
     </Transition>
@@ -36,7 +38,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, type FormInstance } from 'element-plus'
-import { list, add{{ table.className }}, update{{ table.className }}, del{{ table.className }} } from '@/api/{{ table.moduleName }}/{{ table.tableName }}'
+import { list, add{{ table.className }}, update{{ table.className }}, del{{ table.className }}{% if is_flow %}, submitFlow{{ table.className }}{% endif %} } from '@/api/{{ table.moduleName }}/{{ table.tableName }}'
 
 const loading = ref(false)
 const list = ref<any[]>([])
@@ -107,6 +109,14 @@ async function handleDelete(row: any) {
   ElMessage.success('删除成功')
   getList()
 }
+{% if is_flow %}
+// flow 模板：提交审批（后端在同一事务内回写审批投影 + 开启审批轮次）
+async function handleSubmitFlow(row: any) {
+  await submitFlow{{ table.className }}(row.{{ pk_column.javaField | camel_case }})
+  ElMessage.success('已提交审批')
+  getList()
+}
+{% endif %}
 
 onMounted(() => {
   getList()

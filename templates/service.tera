@@ -7,15 +7,117 @@ use garde::Validate;
 use crate::common::error::ServiceError;
 use crate::entity::{{ table.tableName }}::{ActiveModel, Model};
 use crate::repository::{{ table.tableName }}::{{ table.className }}Repository;
+{% if is_flow %}
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
 
+use crate::entity::{{ table.tableName }}::{Column, Entity as {{ table.className }}};
+use crate::service::sys_flow_service::{
+    biz_type, engine_open_round, resolve_node_assignees, ApproverPolicy, BizTypeRegistration,
+    FlowProjection, NodeSpec, OpenRoundSpec, Quorum, RoundChain,
+};
+
+/// 审批业务类型（引擎以 `(biz_type, biz_id)` 定位单据，**零表结构变更**）
+///
+/// ⚠️ 生成后必须**同时**完成两步登记，缺一不可（由单测 `registry_matches_registered_types` 锁定）：
+/// ① 把本常量加入 `crate::service::sys_flow_service::biz_type::ALL`；
+/// ② 把 `flow_registration()` 追加进 `biz_type::REGISTRY`。
+/// 只做①会让**推进路径**（`/system/flow/act`）取不到链/投影回写而显式失败
+/// （`error.flow.biz_type_unregistered`），只做②则治理/校验逻辑视其为未登记类型。
+pub const BIZ_TYPE: &str = "{{ table.tableName }}";
+
+/// 审批链（提交时解析一次并**快照**进 task 行；策略变更 = 发版——方案 D2 定案）
+///
+/// 默认两级单审：① 部门主管（`sys_dept.leader_user_id`）→ ② `admin` 角色。
+/// 需要会签时把对应节点 `quorum` 改为 `Quorum::All`（会签语义由节点决定，与审批人数无关）。
+pub fn flow_nodes() -> Vec<NodeSpec> {
+    vec![
+        NodeSpec {
+            node_seq: 1,
+            node_name: "部门主管审批",
+            policies: vec![ApproverPolicy::DeptLeader],
+            quorum: Quorum::Any,
+        },
+        NodeSpec {
+            node_seq: 2,
+            node_name: "管理员审批",
+            policies: vec![ApproverPolicy::Role { role_key: "admin" }],
+            quorum: Quorum::Any,
+        },
+    ]
+}
+
+/// 审批链提供者（**推进**路径用：引擎按 `task.biz_type` 取注册项后回调本函数）
+///
+/// 链取自 `flow_nodes()`（常量链，非数据驱动）；`dept_id = None` 表示由引擎回退
+/// 读取申请人当前部门快照（`sys_user.dept_id`），用于 `DeptLeader` 策略定位。
+fn flow_chain(
+    _db: &DatabaseConnection,
+    _biz_id: i64,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<RoundChain, ServiceError>> + Send + 'static>,
+> {
+    Box::pin(async move {
+        Ok(RoundChain {
+            nodes: flow_nodes(),
+            dept_id: None,
+        })
+    })
+}
+
+/// 单据派生投影回写（**推进**路径用）：按投影列契约写回本表派生列
+///
+/// 引擎不感知本表结构，只把 `FlowProjection` 交给本函数；因此新增/调整本表投影列
+/// 只需改这里，引擎无需变更。
+fn flow_projection_sync(
+    db: &DatabaseConnection,
+    biz_id: i64,
+    p: FlowProjection,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), ServiceError>> + Send + 'static>,
+> {
+    let db = db.clone();
+    Box::pin(async move {
+        let am = ActiveModel {
+            tenant_id: Set(p.tenant_id),
+            {{ pk_column.javaField }}: Set(biz_id),
+            status: Set(p.status),
+            current_round: Set(p.current_round),
+            current_node_seq: Set(p.current_node_seq),
+            finished_at: Set(p.finished_at),
+            update_time: Set(Some(p.now)),
+            ..Default::default()
+        };
+        {{ table.className }}::update(am)
+            .exec(&db)
+            .await
+            .map_err(crate::service::sys_flow_service::db_to_svc)?;
+        Ok(())
+    })
+}
+
+/// 业务类型注册项（`const fn`，可在 `const` 上下文直接使用）
+///
+/// 登记方式 —— 在 `biz_type::REGISTRY` 中追加：
+/// `{{ table.tableName }}::flow_registration()`
+pub const fn flow_registration() -> BizTypeRegistration {
+    BizTypeRegistration {
+        biz_type: BIZ_TYPE,
+        chain: flow_chain,
+        sync_projection: flow_projection_sync,
+    }
+}
+{% endif %}
 pub struct {{ table.className }}Service {
     repo: {{ table.className }}Repository,
-}
+{% if is_flow %}    db: DatabaseConnection,
+{% endif %}}
 
 impl {{ table.className }}Service {
     pub fn new(db: DatabaseConnection) -> Self {
-        Self { repo: {{ table.className }}Repository::new(db) }
-    }
+{% if is_flow %}        let repo = {{ table.className }}Repository::new(db.clone());
+        Self { repo, db }
+{% else %}        Self { repo: {{ table.className }}Repository::new(db) }
+{% endif %}    }
 
     pub async fn get_all(&self) -> Result<Vec<Model>, ServiceError> {
         Ok(self.repo.find_all().await?)
@@ -48,7 +150,156 @@ impl {{ table.className }}Service {
         self.repo.delete_by_id(id).await?;
         Ok(())
     }
-}
+{% if is_flow %}
+    /// 提交审批：**同一事务**内回写单据投影 + 引擎开轮（`sys_flow_task` 事实源 / `sys_flow_log` 流水）
+    ///
+    /// - 仅 `draft` / `rejected` / `withdrawn` 可提交；条件更新 `WHERE status = 提交前状态`，
+    ///   `rows_affected != 1` 即并发重复提交 → 400（与引擎 task 行条件更新同款幂等语义）
+    /// - 审批人在提交时解析一次并**快照**（方案 D2：运行期不重算策略）
+    /// - 引擎**不感知**本表结构，`biz_type` / `biz_id` 由本适配层显式传入
+    pub async fn submit_flow(
+        &self,
+        id: i64,
+        applicant_id: i64,
+        applicant_name: Option<&str>,
+        config: &crate::config::Settings,
+    ) -> Result<Model, ServiceError> {
+        // 业务类型必须已登记：注册表是唯一事实源，未登记显式失败（不静默放行）
+        if !biz_type::is_registered(BIZ_TYPE) {
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.gen.flow_biz_type_unregistered",
+                biz_type = BIZ_TYPE
+            )));
+        }
+        let doc = self.get_by_id(id).await?;
+        let from_status = doc.status.clone();
+        if !matches!(from_status.as_str(), "draft" | "rejected" | "withdrawn") {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.gen.flow_status_not_submittable",
+                status = from_status.as_str()
+            )));
+        }
+        // 重提交归属校验：仅**原申请人**可重新提交（首次提交 applicant_id 为 NULL）；
+        // 否则任意用户可替他人把单据推入审批链（越权 + 审批人快照被劫持）
+        if let Some(prev) = doc.applicant_id {
+            if prev != applicant_id {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.gen.flow_only_applicant_can_submit"
+                )));
+            }
+        }
+        // 申请人快照（部门用于部门主管审批定位；租户用于 task/log 归属）
+        let applicant = crate::entity::sys_user::Entity::find_by_id(applicant_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.user_not_found")))?;
+        let dept_id = applicant.dept_id;
+        let tenant_id = applicant.tenant_id;
+        // 租户一致性：单据租户预留列非 0 时必须与申请人租户一致，
+        // 否则会形成"单据属 A 租户、任务/流水属 B 租户"的跨租户漂移（显式 403，不静默降级）
+        if doc.tenant_id != 0 && doc.tenant_id != tenant_id {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.gen.flow_tenant_mismatch"
+            )));
+        }
+
+        let specs = flow_nodes();
+        let first = specs
+            .first()
+            .cloned()
+            .ok_or_else(|| ServiceError::internal(&crate::tr!("error.gen.flow_nodes_empty")))?;
+        // 引擎规则（自审剔除 + admin 回退）单点复用，不复制到生成代码
+        let assignees: Vec<i64> =
+            resolve_node_assignees(&self.db, &first, applicant_id, dept_id).await?;
+
+        let now = crate::common::datetime::now_naive();
+        let due_at = Some(now + chrono::Duration::hours(config.flow.timeout_hours));
+        let node_seq = first.node_seq;
+        let node_name = first.node_name.to_string();
+        let task_type = if first.quorum == Quorum::All {
+            "countersign"
+        } else {
+            "single"
+        }
+        .to_string();
+        let next_round = doc.current_round + 1;
+        // 引擎列表用的标题快照：本表无统一"标题"列，用「功能名#主键」（可改为本表业务列）
+        let title = format!("{{ table.functionName }}#{}", id);
+        let applicant_name_owned = applicant_name.map(|s| s.to_string());
+
+        let db = self.db.clone();
+        let doc = db
+            .transaction::<_, Model, ServiceError>(|txn| {
+                let assignees = assignees.clone();
+                let title = title.clone();
+                let from_status = from_status.clone();
+                let applicant_name = applicant_name_owned.clone();
+                let node_name = node_name.clone();
+                let task_type = task_type.clone();
+                Box::pin(async move {
+                    // 1) 条件更新单据投影（并发重复提交由 rows_affected 挡下）
+                    let claim = {{ table.className }}::update_many()
+                        .set(ActiveModel {
+                            tenant_id: Set(tenant_id),
+                            status: Set("pending".to_string()),
+                            current_round: Set(next_round),
+                            current_node_seq: Set(Some(node_seq)),
+                            applicant_id: Set(Some(applicant_id)),
+                            applicant_name: Set(applicant_name.clone()),
+                            dept_id: Set(dept_id),
+                            submitted_at: Set(Some(now)),
+                            finished_at: Set(None),
+                            ..Default::default()
+                        })
+                        .filter(Column::{{ pk_column.javaField | pascal_case }}.eq(id))
+                        .filter(Column::Status.eq(from_status.as_str()))
+                        .exec(txn)
+                        .await
+                        .map_err(crate::service::sys_flow_service::db_to_svc)?;
+                    if claim.rows_affected != 1 {
+                        return Err(ServiceError::bad_request(&crate::tr!(
+                            "error.common.duplicate"
+                        )));
+                    }
+
+                    // 2) 引擎开轮（与投影回写同事务：任一步失败整体回滚）
+                    engine_open_round(
+                        txn,
+                        OpenRoundSpec {
+                            biz_type: BIZ_TYPE,
+                            biz_id: id,
+                            round_no: next_round,
+                            title: &title,
+                            applicant_id,
+                            applicant_name: applicant_name.as_deref(),
+                            tenant_id,
+                            node_seq,
+                            node_name: &node_name,
+                            task_type: &task_type,
+                            assignees: &assignees,
+                            due_at,
+                            from_status: Some(from_status.as_str()),
+                            comment: None,
+                            now,
+                        },
+                    )
+                    .await?;
+
+                    // 3) 读回投影后的单据
+                    {{ table.className }}::find_by_id(id)
+                        .one(txn)
+                        .await
+                        .map_err(crate::service::sys_flow_service::db_to_svc)?
+                        .ok_or_else(|| {
+                            ServiceError::not_found(&crate::tr!("error.gen.record_not_found"))
+                        })
+                })
+            })
+            .await
+            .map_err(crate::service::sys_flow_service::tx_to_svc)?;
+        Ok(doc)
+    }
+{% endif %}}
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]

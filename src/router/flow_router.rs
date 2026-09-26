@@ -18,6 +18,7 @@ pub fn flow_routes() -> Router<Arc<AppState>> {
         // 个人数据（仅登录；归属校验在 service 层）
         .route("/system/flow/todo", get(flow_handler::todo))
         .route("/system/flow/mine", get(flow_handler::mine))
+        .route("/system/flow/done", get(flow_handler::done))
         .route(
             "/system/flow/pending-count",
             get(flow_handler::pending_count),
@@ -40,4 +41,6 @@ pub fn flow_routes() -> Router<Arc<AppState>> {
         )
         // 管理视图（权限键 system:flow:list）
         .route("/system/flow/list", get(flow_handler::list))
+        // 导出（W-11）：与列表同权限键、同可见范围
+        .route("/system/flow/export", post(flow_handler::export))
 }
