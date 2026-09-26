@@ -126,9 +126,9 @@ pub struct GenTableColumnEditDto {
     #[garde(skip)]
     pub column_type: Option<String>,
     #[garde(skip)]
-    pub java_type: Option<String>,
+    pub rust_type: Option<String>,
     #[garde(skip)]
-    pub java_field: Option<String>,
+    pub rust_field: Option<String>,
     #[garde(skip)]
     pub is_pk: Option<String>,
     #[garde(skip)]
@@ -318,12 +318,17 @@ struct ImportPrepared {
 /// 参考 sea-orm 的类型映射规则
 fn column_type_to_rust_type(column_type: &str) -> String {
     let ct = column_type.to_uppercase();
-    if ct.contains("BIGINT") || ct.contains("INT") || ct.contains("INTEGER") {
+    // ⚠️ 判定顺序敏感：`TINYINT` / `SMALLINT` 都**包含** `INT`，必须排在通用
+    // `INT` 之前，否则 `i8` / `i16` 分支恒不可达（第八批由
+    // `test_column_type_mapping_only_emits_rust_types` 实测暴露的既有缺陷）。
+    if ct.contains("BIGINT") {
         "i64".to_string()
     } else if ct.contains("TINYINT") {
         "i8".to_string()
     } else if ct.contains("SMALLINT") {
         "i16".to_string()
+    } else if ct.contains("INT") || ct.contains("INTEGER") {
+        "i64".to_string()
     } else if ct.contains("FLOAT") {
         "f32".to_string()
     } else if ct.contains("DOUBLE") || ct.contains("DECIMAL") || ct.contains("NUMERIC") {
@@ -802,8 +807,8 @@ impl GenTableService {
                         column_name: Set(Some(col.column_name)),
                         column_comment: Set(Some(col.column_comment)),
                         column_type: Set(Some(col.column_type)),
-                        java_type: Set(Some(rust_type)),
-                        java_field: Set(Some(rust_field)),
+                        rust_type: Set(Some(rust_type)),
+                        rust_field: Set(Some(rust_field)),
                         is_pk: Set(Some(is_pk.to_string())),
                         is_increment: Set(Some(is_increment.to_string())),
                         is_required: Set(Some(is_required.to_string())),
@@ -1102,8 +1107,8 @@ impl GenTableService {
                     column_name: Set(col.column_name),
                     column_comment: Set(col.column_comment),
                     column_type: Set(col.column_type),
-                    java_type: Set(col.java_type),
-                    java_field: Set(col.java_field),
+                    rust_type: Set(col.rust_type),
+                    rust_field: Set(col.rust_field),
                     is_pk: Set(col.is_pk),
                     is_increment: Set(col.is_increment),
                     is_required: Set(col.is_required),
@@ -1248,8 +1253,8 @@ impl GenTableService {
                 column_name: Set(Some(col.column_name.clone())),
                 column_comment: Set(Some(col.column_comment.clone())),
                 column_type: Set(Some(col.column_type.clone())),
-                java_type: Set(Some(rust_type)),
-                java_field: Set(Some(rust_field)),
+                rust_type: Set(Some(rust_type)),
+                rust_field: Set(Some(rust_field)),
                 is_pk: Set(Some(is_pk.to_string())),
                 is_increment: Set(Some(is_increment.to_string())),
                 is_required: Set(Some(is_required.to_string())),
@@ -1458,7 +1463,7 @@ impl GenTableService {
         // 在 Rust 侧判定后注入（与 is_flow 同款做法），避免模板内做集合推导。
         let needs_naive = is_flow
             || columns.iter().any(|c| {
-                c.java_type
+                c.rust_type
                     .as_deref()
                     .is_some_and(|t| t.contains("NaiveDateTime"))
             });
@@ -1771,8 +1776,8 @@ mod gen_table_template_tests {
             column_name: Some("user_id".to_string()),
             column_comment: Some("用户ID".to_string()),
             column_type: Some("BIGINT".to_string()),
-            java_type: Some("i64".to_string()),
-            java_field: Some("user_id".to_string()),
+            rust_type: Some("i64".to_string()),
+            rust_field: Some("user_id".to_string()),
             is_pk: Some("1".to_string()),
             is_increment: Some("1".to_string()),
             is_required: Some("1".to_string()),
@@ -1998,7 +2003,7 @@ mod gen_table_template_tests {
     ///
     /// 背景：`is_flow` 分支此前只做字符串断言，从未编译过。第六轮把 flow 分类渲染结果
     /// 落到 crate 内真实路径并跑 `cargo clippy --lib -- -D warnings`，暴露并修复：
-    /// ① 时态列 `java_type` 预包裹 `Option<...>` → 实体/DTO 二次包裹 `Option<Option<..>>`；
+    /// ① 时态列 `rust_type` 预包裹 `Option<...>` → 实体/DTO 二次包裹 `Option<Option<..>>`；
     /// ② 生成 service 从 `sys_flow_service` 顶层导入 `RoundChain`/`BizTypeRegistration`
     ///    （二者实际定义在 `biz_type` 子模块）→ 解析失败；
     /// ③ 生成 handler 用 camelCase AppState 字段名 + 非 snake_case 路由函数名（不符合本仓惯例）；
@@ -2012,9 +2017,9 @@ mod gen_table_template_tests {
         let dt = |name: &str| {
             let mut c = mk_column();
             c.column_name = Some(name.to_string());
-            c.java_field = Some(name.to_string());
+            c.rust_field = Some(name.to_string());
             c.column_type = Some("DATETIME".to_string());
-            c.java_type = Some(column_type_to_rust_type("DATETIME"));
+            c.rust_type = Some(column_type_to_rust_type("DATETIME"));
             c.is_pk = Some("0".to_string());
             c.is_required = Some("0".to_string());
             c.is_insert = Some("1".to_string());
@@ -2183,5 +2188,65 @@ mod gen_table_template_tests {
             !vue.contains(":row-key=\"(row) =>"),
             "不得使用未标注类型的箭头函数作 row-key（TS7006），实际:\n{vue}"
         );
+    }
+
+    /// 【第八批】列类型映射必须只产出 **Rust 类型**（杜绝 Java 遗留值回潮）。
+    ///
+    /// 背景：`gen_table_column` 的两列原为 RuoYi 遗留命名 `java_type`/`java_field`
+    /// （第八批已重命名为 `rust_type`/`rust_field`），而前端编辑表格的下拉此前
+    /// 提供的是 **Java 类型**（`Long`/`Integer`/`BigDecimal`/`Date`…）——这些值会被
+    /// 模板**原样**写进实体/DTO 字段声明 ⇒ 生成无法编译的 Rust。
+    /// 本用例把"映射产出的类型集合"钉死，任何一侧回潮即红。
+    #[test]
+    fn test_column_type_mapping_only_emits_rust_types() {
+        // 与 `entity/gen_table_column.rs` 的 `rust_type` 语义、以及前端
+        // `views/tool/gen/editTable.vue` 的 `rustType` 下拉项**必须逐项一致**
+        const CANONICAL: [&str; 8] = [
+            "i64",
+            "i8",
+            "i16",
+            "f32",
+            "f64",
+            "bool",
+            "String",
+            "chrono::NaiveDateTime",
+        ];
+        let cases = [
+            ("BIGINT", "i64"),
+            ("INT", "i64"),
+            ("INTEGER", "i64"),
+            ("TINYINT", "i8"),
+            ("SMALLINT", "i16"),
+            ("FLOAT", "f32"),
+            ("DOUBLE", "f64"),
+            ("DECIMAL(10,2)", "f64"),
+            ("NUMERIC", "f64"),
+            ("BOOLEAN", "bool"),
+            ("DATE", "chrono::NaiveDateTime"),
+            ("TIME", "chrono::NaiveDateTime"),
+            ("DATETIME", "chrono::NaiveDateTime"),
+            ("TIMESTAMP", "chrono::NaiveDateTime"),
+            ("VARCHAR(100)", "String"),
+            ("TEXT", "String"),
+            ("CHAR(4)", "String"),
+        ];
+        for (physical, expect) in cases {
+            let got = column_type_to_rust_type(physical);
+            assert_eq!(
+                got, expect,
+                "物理类型 {physical} 应映射为 Rust 类型 {expect}"
+            );
+            assert!(
+                CANONICAL.contains(&got.as_str()),
+                "映射产出 `{got}` 不在规范 Rust 类型集合内（Java 遗留值回潮）"
+            );
+        }
+        // 显式反例：Java 类型名不得出现在映射结果中
+        for java_ty in ["Long", "Integer", "Double", "BigDecimal", "Date", "Boolean"] {
+            assert!(
+                !CANONICAL.contains(&java_ty),
+                "规范集合不得含 Java 类型 `{java_ty}`"
+            );
+        }
     }
 }

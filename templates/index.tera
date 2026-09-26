@@ -7,8 +7,8 @@
     </el-row>
 
     <Transition name="fade" mode="out-in">
-      <el-table v-loading="loading" :data="list" row-key="{{ pk_column.javaField | camel_case }}">
-{% for col in columns %}{% if col.isList == "1" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.javaField | camel_case }}" />
+      <el-table v-loading="loading" :data="list" row-key="{{ pk_column.rustField | camel_case }}">
+{% for col in columns %}{% if col.isList == "1" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.rustField | camel_case }}" />
 {% endif %}{% endfor %}{% if is_flow %}      <el-table-column label="审批状态" prop="status" width="110" />
 {% endif %}      <el-table-column label="操作" width="{% if is_flow %}260{% else %}180{% endif %}">
         <template #default="scope">
@@ -23,8 +23,8 @@
     <!-- 新增/修改对话框 -->
     <el-dialog :title="dialog.title" v-model="dialog.visible" width="min(90%, 600px)" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
-{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}        <el-form-item label="{{ col.columnComment }}" prop="{{ col.javaField | camel_case }}">
-          <el-input v-model="form.{{ col.javaField | camel_case }}" placeholder="请输入{{ col.columnComment }}" />
+{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}        <el-form-item label="{{ col.columnComment }}" prop="{{ col.rustField | camel_case }}">
+          <el-input v-model="form.{{ col.rustField | camel_case }}" placeholder="请输入{{ col.columnComment }}" />
         </el-form-item>
 {% endif %}{% endfor %}      </el-form>
       <template #footer>
@@ -53,7 +53,7 @@ const dialog = reactive({
 
 const form = reactive<Record<string, any>>({})
 const rules: Record<string, any> = {
-{% for col in columns %}{% if col.isRequired == "1" and (col.isInsert == "1" or col.isEdit == "1") %}  {{ col.javaField | camel_case }}: [{ required: true, message: '请输入{{ col.columnComment }}', trigger: 'blur' }],
+{% for col in columns %}{% if col.isRequired == "1" and (col.isInsert == "1" or col.isEdit == "1") %}  {{ col.rustField | camel_case }}: [{ required: true, message: '请输入{{ col.columnComment }}', trigger: 'blur' }],
 {% endif %}{% endfor %}}
 
 async function getList() {
@@ -67,7 +67,7 @@ async function getList() {
 }
 
 function resetForm() {
-{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}  form.{{ col.javaField | camel_case }} = undefined
+{% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}  form.{{ col.rustField | camel_case }} = undefined
 {% endif %}{% endfor %}  formRef.value?.resetFields()
 }
 
@@ -105,14 +105,14 @@ async function handleSubmit() {
 }
 
 async function handleDelete(row: any) {
-  await del{{ table.className }}(row.{{ pk_column.javaField | camel_case }})
+  await del{{ table.className }}(row.{{ pk_column.rustField | camel_case }})
   ElMessage.success('删除成功')
   getList()
 }
 {% if is_flow %}
 // flow 模板：提交审批（后端在同一事务内回写审批投影 + 开启审批轮次）
 async function handleSubmitFlow(row: any) {
-  await submitFlow{{ table.className }}(row.{{ pk_column.javaField | camel_case }})
+  await submitFlow{{ table.className }}(row.{{ pk_column.rustField | camel_case }})
   ElMessage.success('已提交审批')
   getList()
 }

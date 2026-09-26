@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct Model {
 {% for col in columns %}    {% if col.isPk == "1" %}#[sea_orm(primary_key)]
-    {% endif %}pub {{ col.javaField }}: {% if col.isPk != "1" and col.isRequired != "1" %}Option<{% endif %}{{ col.javaType }}{% if col.isPk != "1" and col.isRequired != "1" %}>{% endif %},
+    {% endif %}pub {{ col.rustField }}: {% if col.isPk != "1" and col.isRequired != "1" %}Option<{% endif %}{{ col.rustType }}{% if col.isPk != "1" and col.isRequired != "1" %}>{% endif %},
 {% endfor %}{% if is_flow %}    // ---- 审批投影列（flow 模板）：由 submit_flow / 审批推进在同一事务内与
     // `sys_flow_task`（事实源）+ `sys_flow_log`（流水）同步回写，属**派生投影** ----
     /// 审批状态：draft / pending / approved / rejected / withdrawn

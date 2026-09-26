@@ -199,6 +199,14 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_logininfor.user_id 兜底失败: {}", e))?;
 
+        // 3.5.5 台账（第八批）：代码生成列元数据的 Java 遗留命名 → Rust 命名
+        //       （`gen_table_column.java_type/java_field` → `rust_type/rust_field`）。
+        //       与迁移 m20260926_000009 等价（启动不跑 Migrator::up 的存量库兜底）；
+        //       实体已用新列名，缺此兜底则 gen 列表/预览/导入全链 500（no such column）。
+        ensure_gen_column_rust_naming(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 gen_table_column Rust 列名兜底失败: {}", e))?;
+
         // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
         // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
         // 与迁移 m20260923_000001_sso_v4_hardening 等价（启动不跑 Migrator::up 的存量库兜底）。
@@ -2700,12 +2708,32 @@ async fn ensure_sso_v4_columns(db: &DatabaseConnection) -> anyhow::Result<()> {
     .await?;
 
     // ---- 存量明文 id_token_secret 加密（fail-open：主密钥未配置时跳过，留待配置后回填）----
+    //
+    // ⚠️ 双重加密防线（第八批修复，P0）：
+    // 原实现有**两个叠加缺陷**，导致每次启动把已加密值**再加密一次**（base64 膨胀 ×4/3），
+    // 实测把 `id_token_secret` 单字段涨到 743 MB、全表 4.5 GB（启动缓慢如挂死），
+    // 且 HS256 签名密钥被套娃加密 N 层（原密钥不可直接使用）：
+    //   ① SQL 判据 `NOT LIKE 'enc:%'` **认不出 `enc2:`**（本函数的写入格式就是 `enc2:`，
+    //      见 `crypto::ENCRYPTED_PREFIX_V2`）⇒ 每次启动都把这些行重新选出来；
+    //   ② 加密调用用的是**无防重守卫**的 `encrypt_config_value`（`seal_sensitive_value`
+    //      才有前缀守卫）⇒ 选出来就真加密一次。
+    // 修复：① 判据由**共享常量**拼出（两个前缀都排除，杜绝再次漂移）；
+    //       ② 写入改用带守卫的 `seal_sensitive_value`；③ 循环内再用
+    //       `crypto::is_encrypted` 做一次 Rust 侧权威判定（纵深防御）。
     let backend = db.get_database_backend();
+    let (p1, p2) = (
+        crate::utils::crypto::ENCRYPTED_PREFIX,
+        crate::utils::crypto::ENCRYPTED_PREFIX_V2,
+    );
     let rows = db
         .query_all(Statement::from_string(
             backend,
-            "SELECT sso_client_id, id_token_secret FROM sys_oauth_client \
-             WHERE id_token_secret NOT LIKE 'enc:%' AND id_token_secret != ''",
+            format!(
+                "SELECT sso_client_id, id_token_secret FROM sys_oauth_client \
+                 WHERE id_token_secret != '' \
+                   AND id_token_secret NOT LIKE '{p1}%' \
+                   AND id_token_secret NOT LIKE '{p2}%'"
+            ),
         ))
         .await?;
     if rows.is_empty() {
@@ -2732,7 +2760,11 @@ async fn ensure_sso_v4_columns(db: &DatabaseConnection) -> anyhow::Result<()> {
         let Ok(plain) = row.try_get::<String>("", "id_token_secret") else {
             continue;
         };
-        match crate::utils::crypto::encrypt_config_value(&plain, &enc_key) {
+        // Rust 侧权威判定：已加密（enc:/enc2:）一律跳过，避免任何 SQL 判据漂移导致双重加密
+        if crate::utils::crypto::is_encrypted(&plain) {
+            continue;
+        }
+        match crate::utils::crypto::seal_sensitive_value(&plain, &enc_key) {
             Ok(enc) => {
                 db.execute(Statement::from_sql_and_values(
                     backend,
@@ -3396,6 +3428,34 @@ async fn ensure_oauth_client_key_id_column(db: &DatabaseConnection) -> anyhow::R
     ))
     .await?;
     tracing::info!("sys_oauth_client.key_id 列已补建（台账 D9 存量库兜底）");
+    Ok(())
+}
+
+/// 台账（第八批，存量库兜底，等价迁移 `m20260926_000009`）：代码生成列元数据的
+/// **Java 遗留命名 → Rust 命名** —— `gen_table_column.java_type/java_field`
+/// → `rust_type/rust_field`。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而实体已改用新列名
+/// ⇒ 缺此兜底则 gen 列表/详情/预览/导入全链报 `no such column: rust_type`（500）。
+/// 幂等：仅当**旧列存在且新列不存在**时执行 `RENAME COLUMN`；表不存在时安全返回。
+async fn ensure_gen_column_rust_naming(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "gen_table_column").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    for (old, new) in [("java_type", "rust_type"), ("java_field", "rust_field")] {
+        if !sso_has_column(db, "gen_table_column", old).await?
+            || sso_has_column(db, "gen_table_column", new).await?
+        {
+            continue;
+        }
+        db.execute(Statement::from_string(
+            backend,
+            format!("ALTER TABLE gen_table_column RENAME COLUMN {old} TO {new}"),
+        ))
+        .await?;
+        tracing::info!("gen_table_column.{old} 已重命名为 {new}（台账第八批 Java 遗留命名收口）");
+    }
     Ok(())
 }
 

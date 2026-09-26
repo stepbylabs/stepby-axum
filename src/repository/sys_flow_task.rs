@@ -71,16 +71,27 @@ impl SysFlowTaskRepository {
     }
 
     /// 某单据某轮的全部任务行（会签/或签聚合判定 + 时间线）
+    ///
+    /// **纵深防御（W-2 建议②）**：`(biz_type, biz_id, round_no)` 在
+    /// `uk_flow_task_tenant_biz (tenant_id, biz_type, biz_id, …)` 下**不跨租户唯一**，
+    /// 若不带租户收敛，聚合判定可能把他租户同号行的 `approved` 计入本租户节点
+    /// ⇒ **误判节点已完成**（正确性缺陷，非仅可见面）。调用方传**被推进 task 的
+    /// `tenant_id`**（`Some(tid)`）：同轮的 task 行由引擎写入同一租户，故为精确匹配。
     pub async fn find_by_biz_round(
         &self,
         biz_type: &str,
         biz_id: i64,
         round_no: i32,
+        tenant_scope: Option<i64>,
     ) -> Result<Vec<Model>, DbErr> {
-        SysFlowTask::find()
+        let mut query = SysFlowTask::find()
             .filter(Column::BizType.eq(biz_type))
             .filter(Column::BizId.eq(biz_id))
-            .filter(Column::RoundNo.eq(round_no))
+            .filter(Column::RoundNo.eq(round_no));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query
             .order_by_asc(Column::NodeSeq)
             .all(self.base.db())
             .await

@@ -22,10 +22,10 @@ pub struct Model {
     pub column_comment: Option<String>,
     /// 列类型（如 VARCHAR(100)、BIGINT）
     pub column_type: Option<String>,
-    /// Rust 类型（如 String、i64）
-    pub java_type: Option<String>,
+    /// Rust 类型（如 String、i64、chrono::NaiveDateTime）
+    pub rust_type: Option<String>,
     /// Rust 字段名（snake_case）
-    pub java_field: Option<String>,
+    pub rust_field: Option<String>,
     /// 是否主键（1=是 0=否）
     pub is_pk: Option<String>,
     /// 是否自增（1=是 0=否）
