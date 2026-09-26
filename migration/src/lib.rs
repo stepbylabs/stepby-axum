@@ -81,6 +81,8 @@ pub use m20260926_000009_gen_column_rust_naming::Migration as M20260926GenColumn
 pub use m20260926_000010_tenant_package_features::Migration as M20260926TenantPackageFeatures;
 pub use m20260926_000011_tenant_domain_self_service_menu::Migration as M20260926TenantDomainSelfServiceMenu;
 pub use m20260926_000012_backup_permission_granularity::Migration as M20260926BackupPermissionGranularity;
+pub use m20260926_000013_platform_only_tenant_menu::Migration as M20260926PlatformOnlyTenantMenu;
+pub use m20260926_000014_tenant_nav_menu::Migration as M20260926TenantNavMenu;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -160,6 +162,8 @@ mod m20260926_000009_gen_column_rust_naming;
 mod m20260926_000010_tenant_package_features;
 mod m20260926_000011_tenant_domain_self_service_menu;
 mod m20260926_000012_backup_permission_granularity;
+mod m20260926_000013_platform_only_tenant_menu;
+mod m20260926_000014_tenant_nav_menu;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -319,6 +323,8 @@ impl MigratorTrait for Migrator {
             Box::new(M20260926TenantPackageFeatures),
             Box::new(M20260926TenantDomainSelfServiceMenu),
             Box::new(M20260926BackupPermissionGranularity),
+            Box::new(M20260926PlatformOnlyTenantMenu),
+            Box::new(M20260926TenantNavMenu),
         ]
     }
 }

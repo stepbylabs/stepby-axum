@@ -34,6 +34,7 @@ pub mod sys_role_router;
 pub mod sys_scim_group_router;
 pub mod sys_task_router;
 pub mod sys_tenant_domain_router;
+pub mod sys_tenant_nav_router;
 pub mod sys_tenant_router;
 pub mod sys_user_pref_router;
 pub mod sys_user_router;
@@ -104,6 +105,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_dept_router::dept_routes())
         .merge(sys_tenant_router::tenant_routes())
         .merge(sys_tenant_domain_router::tenant_domain_routes())
+        .merge(sys_tenant_nav_router::tenant_nav_routes())
         .merge(sys_job_router::job_routes())
         .merge(sys_dict_router::dict_routes())
         .merge(sys_http_debug_router::http_debug_routes())

@@ -11,7 +11,7 @@ use crate::service::{
     SysHttpDebugService, SysJobService, SysLogininforService, SysMenuService, SysMsgService,
     SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
     SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysTenantDomainService,
-    SysTenantService, SysUserPrefService, SysUserService, SysWebHookService,
+    SysTenantNavService, SysTenantService, SysUserPrefService, SysUserService, SysWebHookService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -47,6 +47,8 @@ pub struct AppState {
     pub tenant_service: SysTenantService,
     /// 租户域名绑定 Service（多租户 Phase 3 域名链路：DNS TXT 验证 + host→tid 解析）
     pub tenant_domain_service: SysTenantDomainService,
+    /// 租户自建导航 L3 Service（批次 3：能力位 nav.l3 门控的导航结构 CRUD）
+    pub tenant_nav_service: SysTenantNavService,
     /// 认证服务
     pub auth_service: AuthService,
     /// 定时任务 Service
@@ -208,6 +210,14 @@ impl AppState {
         // 多租户 Phase 3 域名链路：域名服务持有独立 Redis 客户端（host 缓存 tenant:host:{domain}）
         let tenant_domain_service = SysTenantDomainService::new(db.clone(), redis.clone());
 
+        // 批次 3：L3 租户自建导航服务（能力位 nav.l3 门控；复用 menu_service 的菜单树口径）
+        let tenant_nav_service =
+            SysTenantNavService::new(db.clone(), menu_service.clone(), tenant_service.clone());
+
+        // L3 导航仓储（`get_routers` 的加载期重组数据源，与 AuthService 共享同一 db）
+        let tenant_menu_repo =
+            crate::repository::sys_tenant_menu::SysTenantMenuRepository::new(db.clone());
+
         // AuthService 复用上述 Service 实例 + 单独实例化 logininfor_repo
         // REGRESS-007 说明：P0-R81-014 已消除 15 个重复 Repository。
         // 剩余 1 个 logininfor_repo 是 AuthService 直接调用 Repository 层 insert 方法，
@@ -219,6 +229,7 @@ impl AppState {
             config_service.clone(),
             config.clone(),         // P0-4：TOTP secret 加解密需要 config_enc_key
             tenant_service.clone(), // Phase 3：登录闸门（sys_tenant 三态）+ 运行时键同步
+            tenant_menu_repo,       // 批次 3：L3 导航加载期重组
         );
 
         // 全局可观测性句柄：按配置文件注入慢请求阈值 / 缓冲容量（进程内生效）
@@ -242,6 +253,7 @@ impl AppState {
             // 多租户 Phase 3：租户服务需要 Redis（运行时状态键 + 定向会话吊销）
             tenant_service,
             tenant_domain_service,
+            tenant_nav_service,
             auth_service,
             job_service: SysJobService::new(db.clone(), job_scheduler.clone()),
             dict_service: SysDictService::new(db.clone(), redis.clone()),

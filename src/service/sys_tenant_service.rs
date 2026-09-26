@@ -812,6 +812,17 @@ impl SysTenantService {
             .collect())
     }
 
+    /// 读取租户**有效能力集**（平台天花板 ∩ 套餐 `features`）。
+    ///
+    /// 供"按能力位决定是否启用某功能"的加载期路径复用（如批次 3 的 `get_routers` L3 重组）：
+    /// 关闭态必须完全等价于改造前行为，故调用方需先取能力集再决定是否叠加。
+    pub async fn tenant_features(
+        &self,
+        tenant_id: i64,
+    ) -> Result<crate::common::features::FeatureSet, ServiceError> {
+        Ok(tenant_features_conn(self.db(), tenant_id).await?)
+    }
+
     /// 读取套餐能力位配置（仅平台管理员）。
     ///
     /// 返回**全量注册表**（而非仅已配置项），使前端无需硬编码能力位清单；

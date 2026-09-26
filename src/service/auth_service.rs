@@ -14,6 +14,7 @@
 //! - 错误统一使用 ServiceError
 //! - Service 层返回 Vo（不含 code/msg），Handler 层负责包装为 Result
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,9 +30,11 @@ use crate::config::{JwtConfig, Settings, TenantColumnMode};
 use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_logininfor;
 use crate::entity::sys_menu::Model as SysMenuModel;
+use crate::entity::sys_tenant_menu::Model as SysTenantMenuModel;
 use crate::entity::sys_user::Model as SysUserModel;
 use crate::jwt::JwtUtils;
 use crate::repository::sys_logininfor::SysLogininforRepository;
+use crate::repository::sys_tenant_menu::SysTenantMenuRepository;
 use crate::service::sys_config_service::SysConfigService;
 use crate::service::sys_menu_service::SysMenuService;
 use crate::service::sys_user_service::{SysUserService, UserAddDto};
@@ -239,6 +242,8 @@ pub struct AuthService {
     config: Arc<Settings>,
     /// 租户服务（Phase 3：登录闸门三态判定 + 运行时键同步，事实源 = sys_tenant）
     tenant_service: crate::service::SysTenantService,
+    /// L3 租户自建导航仓储（批次 3：`get_routers` 加载期重组的唯一数据源）
+    tenant_menu_repo: SysTenantMenuRepository,
 }
 
 impl AuthService {
@@ -256,6 +261,7 @@ impl AuthService {
         config_service: SysConfigService,
         config: Arc<Settings>,
         tenant_service: crate::service::SysTenantService,
+        tenant_menu_repo: SysTenantMenuRepository,
     ) -> Self {
         Self {
             user_service,
@@ -264,6 +270,7 @@ impl AuthService {
             config_service,
             config,
             tenant_service,
+            tenant_menu_repo,
         }
     }
 
@@ -1264,7 +1271,10 @@ impl AuthService {
     /// 1. 查询用户菜单树（menu_service 已过滤 F 类型 + 组装树形结构）
     /// 2. **§27.6 生效点②**：租户用户（`caller_tid != 0`）按 `套餐 ∩ 角色授权` 求交
     ///    ——套餐白名单（L2）裁剪角色授权菜单（L1），平台租户 / 无套餐租户不裁剪
-    /// 3. 递归转换为 RouterVo（menu_to_router）
+    /// 3. **批次 3（L3 租户自建导航）**：租户用户再叠加本租户**生效**的 L3 行
+    ///    （`del_flag='0'` + `status='0'`）做视图层重组（换父 / 排序 / 显隐）；
+    ///    只在**已钳制**的菜单树上重组 ⇒ 不新建节点、不新增 component/perms，不扩权
+    /// 4. 递归转换为 RouterVo（menu_to_router）
     pub async fn get_routers(
         &self,
         user_id: i64,
@@ -1281,6 +1291,21 @@ impl AuthService {
                 Some(whitelist) => prune_menu_tree_by_whitelist(menu_tree, &whitelist),
                 None => menu_tree,
             }
+        } else {
+            menu_tree
+        };
+        // L3 视图层重组（批次 3）：**仅在能力位 `nav.l3` 非 off 时生效**
+        // （关闭态即现状：即使库中残留 L3 行，也不得改变导航）。
+        // 平台租户（tid=0）无 L3 行，恒为空 ⇒ 行为与改造前一致。
+        let menu_tree = if caller_tid != 0
+            && self
+                .tenant_service
+                .tenant_features(caller_tid)
+                .await?
+                .is_on(crate::service::sys_tenant_nav_service::FEATURE_NAV_L3)
+        {
+            let l3_rows = self.tenant_menu_repo.list_effective(caller_tid).await?;
+            apply_l3_overrides(menu_tree, &l3_rows)
         } else {
             menu_tree
         };
@@ -1637,7 +1662,10 @@ fn parse_os(ua: &str) -> String {
 /// - 自身与全部后代都不在白名单 → 整棵子树裁掉。
 ///
 /// 白名单已由套餐实体解析（空/NULL 表示不限制 → 调用方不会进入本函数）。
-fn prune_menu_tree_by_whitelist(
+///
+/// 批次 3：改为 `pub(crate)`，供 `service::sys_tenant_nav_service` 的「可选菜单池」复用
+/// （两处必须同一口径，否则页面可选菜单与登录后的实际导航会不一致）。
+pub(crate) fn prune_menu_tree_by_whitelist(
     menus: Vec<SysMenuModel>,
     whitelist: &std::collections::HashSet<i64>,
 ) -> Vec<SysMenuModel> {
@@ -1661,6 +1689,187 @@ fn prune_menu_tree_by_whitelist(
             }
         })
         .collect()
+}
+
+/// L3 导航层级深度上限（防畸形配置把前端路由树打成超深链）
+pub(crate) const L3_MAX_DEPTH: usize = 64;
+
+/// **L3 租户自建导航的视图层重组**（批次 3；纯函数，便于单测）。
+///
+/// ## 输入契约
+///
+/// `tree` 必须是**已被套餐白名单钳制**的菜单树（`套餐 ∩ 角色授权`），`l3_rows` 必须是
+/// 调用方按 `del_flag='0' AND status='0'` 过滤后的**生效**行。
+///
+/// ## 语义（L3 只表达"导航结构"）
+///
+/// - 只对**树中已存在**的节点生效：`ref_menu_id` 不在树上 ⇒ 忽略该行（不新建节点）；
+/// - `parent_id == 0` ⇒ 提升为顶层；`parent_id == <其它 L3 id>` ⇒ 挂到该行引用节点之下；
+/// - `order_num` ⇒ 覆盖排序；`visible == '1'` ⇒ 置 `status='1'`（落到既有
+///   `menu_to_router` 的 `hidden: status == "1"` 口径，前端无需改动）；
+/// - **绝不**修改 `menu_type` / `component` / `perms` / `path` ⇒ 不存在"借 L3 扩权"面。
+///
+/// ## 回退（保守：宁可不动，也不产出畸形导航）
+///
+/// - 父级 L3 行不存在、其引用节点不在树上、或引用节点被停用 ⇒ **该行整体忽略**
+///   （不移动、不改序、不改显隐），节点留在平台默认位置；
+/// - 自父 / 环 / 深度 > [`L3_MAX_DEPTH`] ⇒ 该行回退到平台默认父级；
+/// - 顶层（`parent_id == 0`）恒可解，不受上述回退影响。
+pub(crate) fn apply_l3_overrides(
+    tree: Vec<SysMenuModel>,
+    l3_rows: &[SysTenantMenuModel],
+) -> Vec<SysMenuModel> {
+    if l3_rows.is_empty() {
+        return tree;
+    }
+
+    // 1) 展平（丢弃 children，记录原始父级），保持 DFS 顺序以保证输出确定性
+    let mut nodes: Vec<SysMenuModel> = Vec::new();
+    let mut original_parent: HashMap<i64, i64> = HashMap::new();
+    flatten_menu_tree(tree, 0, &mut nodes, &mut original_parent);
+    let present: HashSet<i64> = nodes.iter().map(|n| n.menu_id).collect();
+
+    // 2) L3 行索引（生效行；同一 ref 的重复挂载由服务层写入时拒绝）
+    let by_l3: HashMap<i64, &SysTenantMenuModel> = l3_rows.iter().map(|r| (r.l3_id, r)).collect();
+    let by_ref: HashMap<i64, &SysTenantMenuModel> =
+        l3_rows.iter().map(|r| (r.ref_menu_id, r)).collect();
+
+    // 3) 期望父级：不可解 / 自父 ⇒ 该行整体不参与（回退平台默认）
+    let mut desired: HashMap<i64, i64> = HashMap::new();
+    for row in l3_rows {
+        if !present.contains(&row.ref_menu_id) {
+            continue;
+        }
+        let Some(target) = resolve_l3_parent(row, &by_l3, &present) else {
+            continue;
+        };
+        if target == row.ref_menu_id {
+            continue;
+        }
+        desired.insert(row.ref_menu_id, target);
+    }
+
+    // 4) 环 / 深度钳制（违规行回退平台默认父级）
+    let mut final_parent: HashMap<i64, i64> = HashMap::new();
+    for &ref_id in desired.keys() {
+        if l3_parent_chain_ok(ref_id, &desired, &original_parent) {
+            final_parent.insert(ref_id, desired[&ref_id]);
+        }
+    }
+    let active: HashSet<i64> = final_parent.keys().copied().collect();
+
+    // 5) 应用排序 / 显隐（仅"整行生效"的节点；回退行保持平台默认）
+    for node in nodes.iter_mut() {
+        let Some(row) = by_ref.get(&node.menu_id) else {
+            continue;
+        };
+        if !active.contains(&node.menu_id) {
+            continue;
+        }
+        if let Some(order_num) = row.order_num {
+            node.order_num = Some(order_num);
+        }
+        if row.visible.as_deref() == Some("1") {
+            node.status = Some("1".to_string());
+        }
+    }
+
+    // 6) 按最终父级分桶（父级恒为 0 或树内节点）并按 (order_num, menu_id) 排序后重建
+    let mut children_of: HashMap<i64, Vec<i64>> = HashMap::new();
+    for node in &nodes {
+        let parent = final_parent
+            .get(&node.menu_id)
+            .copied()
+            .or_else(|| original_parent.get(&node.menu_id).copied())
+            .unwrap_or(0);
+        children_of.entry(parent).or_default().push(node.menu_id);
+    }
+    let mut by_id: HashMap<i64, SysMenuModel> = nodes.into_iter().map(|n| (n.menu_id, n)).collect();
+    for ids in children_of.values_mut() {
+        ids.sort_by_key(|id| {
+            by_id
+                .get(id)
+                .map(|n| (n.order_num.unwrap_or(0), n.menu_id))
+                .unwrap_or((0, *id))
+        });
+    }
+    rebuild_menu_tree(0, &children_of, &mut by_id)
+}
+
+/// 展平菜单树：DFS 顺序收集节点（清空 `children`）并记录原始父级。
+fn flatten_menu_tree(
+    menus: Vec<SysMenuModel>,
+    parent: i64,
+    out: &mut Vec<SysMenuModel>,
+    original_parent: &mut HashMap<i64, i64>,
+) {
+    for mut menu in menus {
+        let id = menu.menu_id;
+        let kids = menu.children.take().unwrap_or_default();
+        original_parent.insert(id, parent);
+        out.push(menu);
+        flatten_menu_tree(kids, id, out, original_parent);
+    }
+}
+
+/// 解析 L3 行期望挂载的父级 `menu_id`；不可解返回 `None`（该行整体忽略）。
+fn resolve_l3_parent(
+    row: &SysTenantMenuModel,
+    by_l3: &HashMap<i64, &SysTenantMenuModel>,
+    present: &HashSet<i64>,
+) -> Option<i64> {
+    if row.parent_id == 0 {
+        return Some(0);
+    }
+    let parent_ref = by_l3.get(&row.parent_id)?.ref_menu_id;
+    present.contains(&parent_ref).then_some(parent_ref)
+}
+
+/// 沿"期望父级 ∪ 原始父级"向上走，检查是否成环或超过深度上限。
+fn l3_parent_chain_ok(
+    menu_id: i64,
+    desired: &HashMap<i64, i64>,
+    original_parent: &HashMap<i64, i64>,
+) -> bool {
+    let mut seen: HashSet<i64> = HashSet::new();
+    seen.insert(menu_id);
+    let mut cur = menu_id;
+    for _ in 0..L3_MAX_DEPTH {
+        let next = desired
+            .get(&cur)
+            .copied()
+            .or_else(|| original_parent.get(&cur).copied())
+            .unwrap_or(0);
+        if next == 0 {
+            return true;
+        }
+        if !seen.insert(next) {
+            return false;
+        }
+        cur = next;
+    }
+    false
+}
+
+/// 按 `children_of` 自顶向下重建树（已按 order_num 排好序）。
+fn rebuild_menu_tree(
+    parent: i64,
+    children_of: &HashMap<i64, Vec<i64>>,
+    by_id: &mut HashMap<i64, SysMenuModel>,
+) -> Vec<SysMenuModel> {
+    let Some(ids) = children_of.get(&parent) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(mut node) = by_id.remove(id) else {
+            continue;
+        };
+        let kids = rebuild_menu_tree(*id, children_of, by_id);
+        node.children = if kids.is_empty() { None } else { Some(kids) };
+        out.push(node);
+    }
+    out
 }
 
 /// 将 SysMenuModel 转换为 RouterVo（递归转换子节点）
@@ -2079,5 +2288,233 @@ mod tests {
 
         let router = menu_to_router(&parent, "");
         assert!(router.children.is_none()); // 全过滤后为 None
+    }
+
+    // ==================== 批次 3：L3 导航视图层重组 ====================
+
+    /// 构造测试用 L3 行
+    fn make_l3(
+        l3_id: i64,
+        ref_menu_id: i64,
+        parent_id: i64,
+        order_num: Option<i32>,
+        visible: &str,
+    ) -> SysTenantMenuModel {
+        SysTenantMenuModel {
+            l3_id,
+            tenant_id: 7,
+            ref_menu_id,
+            parent_id,
+            order_num,
+            visible: Some(visible.to_string()),
+            status: Some("0".to_string()),
+            del_flag: Some("0".to_string()),
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+        }
+    }
+
+    /// 构造 1 > [100 > [101], 102] 的测试菜单树
+    fn l3_test_tree() -> Vec<SysMenuModel> {
+        let mut dir_100 = make_menu(100, 1, "M", "monitor", None, "1", "0", "0", "0", None);
+        dir_100.order_num = Some(1);
+        dir_100.children = Some(vec![{
+            let mut c = make_menu(
+                101,
+                100,
+                "C",
+                "operlog",
+                Some("monitor/operlog/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            );
+            c.order_num = Some(1);
+            c
+        }]);
+        let mut dir_102 = make_menu(
+            102,
+            1,
+            "C",
+            "user",
+            Some("system/user/index"),
+            "1",
+            "0",
+            "0",
+            "0",
+            None,
+        );
+        dir_102.order_num = Some(2);
+        let mut root = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
+        root.order_num = Some(1);
+        root.children = Some(vec![dir_100, dir_102]);
+        vec![root]
+    }
+
+    fn find_menu(tree: &[SysMenuModel], menu_id: i64) -> Option<&SysMenuModel> {
+        for node in tree {
+            if node.menu_id == menu_id {
+                return Some(node);
+            }
+            if let Some(kids) = &node.children
+                && let Some(found) = find_menu(kids, menu_id)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn top_level_ids(tree: &[SysMenuModel]) -> Vec<i64> {
+        let mut ids: Vec<i64> = tree.iter().map(|m| m.menu_id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn test_apply_l3_no_rows_is_identity() {
+        let tree = l3_test_tree();
+        let out = apply_l3_overrides(tree, &[]);
+        assert_eq!(top_level_ids(&out), vec![1]);
+        assert!(
+            find_menu(&out, 101).unwrap().children.is_none(),
+            "101 是叶子，不应凭空多出子节点"
+        );
+        // 102 仍在 1 之下
+        assert_eq!(
+            find_menu(&out, 1).unwrap().children.as_ref().unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_apply_l3_move_to_top_level_and_reorder() {
+        // 101 提升为顶层，order_num = 0（应排在根 1 之前）
+        let rows = vec![make_l3(5000, 101, 0, Some(0), "0")];
+        let out = apply_l3_overrides(l3_test_tree(), &rows);
+        assert_eq!(top_level_ids(&out), vec![1, 101], "101 应被提升为顶层");
+        // 101 已从 100 下移除
+        let dir_100 = find_menu(&out, 100).unwrap();
+        assert!(dir_100.children.is_none(), "100 的唯一子节点已被移走");
+        assert_eq!(find_menu(&out, 101).unwrap().order_num, Some(0));
+    }
+
+    #[test]
+    fn test_apply_l3_reparent_under_other_l3_ref() {
+        // 100 保持顶层(L3 5000)，102 挂到 100 之下(L3 5001) 且序为 3
+        let rows = vec![
+            make_l3(5000, 100, 0, Some(1), "0"),
+            make_l3(5001, 102, 5000, Some(3), "0"),
+        ];
+        let out = apply_l3_overrides(l3_test_tree(), &rows);
+        let dir_100 = find_menu(&out, 100).unwrap();
+        let kids: Vec<i64> = dir_100
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.menu_id)
+            .collect();
+        assert_eq!(kids, vec![101, 102], "102 应换父到 100 之下且排在 101 之后");
+        assert_eq!(top_level_ids(&out), vec![1, 100], "100 被显式提升为顶层");
+        assert!(
+            find_menu(&out, 1).unwrap().children.is_none(),
+            "原属 1 的两个子节点都已迁出"
+        );
+    }
+
+    #[test]
+    fn test_apply_l3_visible_one_maps_to_hidden() {
+        // visible='1' ⇒ status='1' ⇒ menu_to_router 的 hidden=true
+        let rows = vec![make_l3(5000, 102, 0, Some(2), "1")];
+        let out = apply_l3_overrides(l3_test_tree(), &rows);
+        let node_102 = find_menu(&out, 102).unwrap();
+        assert_eq!(node_102.status.as_deref(), Some("1"));
+        let router = menu_to_router(node_102, "");
+        assert!(router.hidden, "L3 隐藏必须落到 hidden 口径");
+    }
+
+    #[test]
+    fn test_apply_l3_unresolvable_parent_row_is_fully_ignored() {
+        // 父 L3 行不存在 ⇒ 该行整体忽略：不移动、不改序、不改显隐
+        let rows = vec![make_l3(5000, 101, 5999, Some(99), "1")];
+        let out = apply_l3_overrides(l3_test_tree(), &rows);
+        let dir_100 = find_menu(&out, 100).unwrap();
+        let kids: Vec<i64> = dir_100
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.menu_id)
+            .collect();
+        assert_eq!(kids, vec![101], "父级不可解时不得移动");
+        let node_101 = find_menu(&out, 101).unwrap();
+        assert_eq!(node_101.order_num, Some(1), "忽略行不得改序");
+        assert_eq!(node_101.status.as_deref(), Some("0"), "忽略行不得改显隐");
+        assert_eq!(top_level_ids(&out), vec![1], "不得产生新的顶层节点");
+    }
+
+    #[test]
+    fn test_apply_l3_parent_ref_absent_from_tree_is_ignored() {
+        // 父 L3 行的引用节点不在（被套餐/角色钳制的）树上 ⇒ 不可解 ⇒ 整行忽略
+        let rows = vec![
+            make_l3(5000, 900, 0, Some(0), "0"),
+            make_l3(5001, 102, 5000, Some(1), "0"),
+        ];
+        let out = apply_l3_overrides(l3_test_tree(), &rows);
+        assert_eq!(
+            find_menu(&out, 900),
+            None,
+            "L3 绝不允许新建节点（ref 不在树上一律忽略）"
+        );
+        let dir_1 = find_menu(&out, 1).unwrap();
+        let kids: Vec<i64> = dir_1
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.menu_id)
+            .collect();
+        assert_eq!(kids, vec![100, 102], "102 应留在平台默认位置");
+    }
+
+    #[test]
+    fn test_apply_l3_cycle_falls_back_to_original_layout() {
+        // 100 要求挂到 101 之下、101 要求挂到 100 之下 ⇒ 成环 ⇒ 双双回退
+        let rows = vec![
+            make_l3(5000, 100, 5001, None, "0"),
+            make_l3(5001, 101, 5000, None, "0"),
+        ];
+        let out = apply_l3_overrides(l3_test_tree(), &rows);
+        assert_eq!(
+            top_level_ids(&out),
+            vec![1],
+            "成环时 100 应留在平台默认父级"
+        );
+        let kids: Vec<i64> = find_menu(&out, 100)
+            .unwrap()
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.menu_id)
+            .collect();
+        assert_eq!(kids, vec![101], "成环时 101 应留在 100 之下");
+    }
+
+    #[test]
+    fn test_apply_l3_self_parent_falls_back() {
+        // 自父（parent_id 指向引用自身的 L3 行）⇒ 该行回退，不得形成自环
+        let rows = vec![make_l3(5000, 102, 5000, Some(9), "0")];
+        let out = apply_l3_overrides(l3_test_tree(), &rows);
+        assert_eq!(
+            find_menu(&out, 1).unwrap().children.as_ref().unwrap().len(),
+            2,
+            "自父行必须回退，102 仍在根目录之下"
+        );
     }
 }

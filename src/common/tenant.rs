@@ -105,8 +105,21 @@ pub fn eval_tenant_runtime_state(
 ///   列且限流中间件在租户解析**之前**执行 ⇒ 本质无租户维度。若授给租户，其可改/删
 ///   `/login`、`*`（全局默认）等规则 ⇒ **关闭全平台登录爆破防护**；导出面亦会泄漏全平台
 ///   路由清单。2026-09-26 复核发现并收敛）
+/// - `system:tenantMenu:`：租户自建导航 L3 管理（批次 3）。**语义与 `system:tenant:domain:`
+///   同类**——功能面向租户（管理的是本租户的导航结构），但**必须经能力位 `nav.l3` 才可下放**：
+///   能力位关闭时若已授菜单，会形成"菜单可见但请求 403"的假入口。故登记在此（默认整面
+///   不下放），由 `common::features::CAPABILITY_UNLOCKED_PERMS` 在能力位开启时逐条解锁。
+///
+/// # 重要：本清单的准确语义
+///
+/// 不是"这些功能只有平台能用"，而是"**这些 perms 默认不得授予租户角色**"——它同时覆盖
+/// 两类：①真正的平台专属能力（`tool:gen:` / `monitor:cache:` …）；②**面向租户但须经
+/// 能力位门控才可下放**的能力（`system:tenant:domain:` / `system:tenantMenu:`，两者都由
+/// 服务层按 `tenant_id` 收窄，关闭态租户一律 403）。两者共用同一套治理机制
+/// （授权拒绝 / 复制剔除 / 启动治理剔除+回填）⇒ 关闭态无假入口、开启态可下放。
 pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "system:tenant:domain:",
+    "system:tenantMenu:",
     "tool:gen:",
     "tool:httpDebug:",
     "monitor:cache:",
@@ -226,6 +239,11 @@ pub const TENANT_FILTER_MATRIX: &[(&str, &str, TenantFilterTier)] = &[
     (
         "system:tenant:",
         "sys_tenant/sys_tenant_package",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "system:tenantMenu:",
+        "sys_tenant_menu",
         TenantFilterTier::Covered,
     ),
     ("system:backup:", "sys_backup_log", TenantFilterTier::Tier2),
@@ -501,6 +519,8 @@ mod tests {
     ///
     /// 2026-09-26 第二批：新增 `system:rateLimit:` ⇒ 令 **最新**全量迁移（`m000007`，9 项）
     /// 承担"常量全量"断言，历史迁移只断言"其项仍在常量中（未被删）"。
+    /// 2026-09-26 第三批（批次 3）：新增 `system:tenantMenu:` ⇒ 最新全量迁移推进到
+    /// `m20260926_000013`（10 项），`m000007` 随之降级为"历史迁移"。
     /// **约束**：今后每新增一个平台专属前缀，都必须同步开一个新迁移（含完整清单），
     /// 否则本测试失败 ⇒ 新库路径不会漏剔。
     ///
@@ -509,8 +529,10 @@ mod tests {
     fn platform_only_prefixes_match_migration_lists() {
         // 最新全量治理点（必须含**全部**平台专属前缀）
         const LATEST_SRC: &str =
-            include_str!("../../migration/src/m20260926_000007_platform_only_ratelimit.rs");
+            include_str!("../../migration/src/m20260926_000013_platform_only_tenant_menu.rs");
         // 历史迁移（其项必须仍在常量中，防"常量删了但迁移还留着"的漂移）
+        const M000007_SRC: &str =
+            include_str!("../../migration/src/m20260926_000007_platform_only_ratelimit.rs");
         const M000006_SRC: &str =
             include_str!("../../migration/src/m20260926_000006_platform_only_prefix_full.rs");
         const M000005_SRC: &str =
@@ -520,8 +542,26 @@ mod tests {
         for p in PLATFORM_ONLY_PERM_PREFIXES {
             assert!(
                 LATEST_SRC.contains(p),
-                "平台专属前缀 `{p}` 未出现在最新迁移清单（m20260926_000007）—— 新增前缀必须\
+                "平台专属前缀 `{p}` 未出现在最新迁移清单（m20260926_000013）—— 新增前缀必须\
                  同步该迁移的完整清单，否则走迁移的新库不会剔除对应菜单（假入口）"
+            );
+        }
+        // ①' 历史迁移 m000007（9 项）的项必须都还在常量中
+        for p in [
+            "system:tenant:domain:",
+            "tool:gen:",
+            "tool:httpDebug:",
+            "monitor:cache:",
+            "monitor:log:",
+            "monitor:slowSql:",
+            "monitor:health:",
+            "system:backup:",
+            "system:rateLimit:",
+        ] {
+            assert!(M000007_SRC.contains(p), "m000007 清单项 `{p}` 丢失");
+            assert!(
+                PLATFORM_ONLY_PERM_PREFIXES.contains(&p),
+                "m000007 使用了未在 PLATFORM_ONLY_PERM_PREFIXES 声明的前缀 `{p}`"
             );
         }
         // ② 历史迁移（m000006，8 项）的项必须都还在常量中

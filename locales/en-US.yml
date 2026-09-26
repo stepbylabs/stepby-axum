@@ -480,6 +480,18 @@ error:
     domain_verify_failed: DNS TXT verification failed, please confirm the DNS record has taken effect
     domain_primary_forbidden: The tenant already has a primary domain; use the set-primary API to switch
     host_mismatch: The current domain does not belong to the tenant of the logged-in account; access denied
+    nav_l3_disabled: Tenant-built navigation is available only after the platform enables the nav.l3 capability
+    nav_l3_readonly: The capability is in view-only mode (nav.l3 = view_only); navigation settings cannot be modified
+    nav_cross_tenant: You are not allowed to access or modify another tenant's navigation settings
+    nav_tenant_required: A platform operator must explicitly specify tenantId
+    nav_ref_menu_invalid: The referenced menu does not exist, is disabled, or is not a directory/page (buttons cannot be navigation nodes)
+    nav_ref_platform_only: This menu belongs to a platform-only capability and cannot be added to tenant navigation
+    nav_ref_outside_package: This menu is outside the tenant's package scope and cannot be added to navigation
+    nav_ref_duplicate: This menu is already in the tenant navigation and cannot be mounted twice
+    nav_parent_invalid: Invalid parent (must be another navigation node of the same tenant, without cycles or excessive depth)
+    nav_status_invalid: "status must be 0 (normal) or 1 (disabled)"
+    nav_has_children: This navigation node still has children; delete them first
+    nav_not_found: Navigation entry not found
   pat:
     name_required: Token name is required
     name_too_long: Token name is too long (max 100 characters)

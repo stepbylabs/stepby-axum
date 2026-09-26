@@ -44,6 +44,7 @@ pub mod sys_role_menu;
 pub mod sys_task;
 pub mod sys_tenant;
 pub mod sys_tenant_domain;
+pub mod sys_tenant_menu;
 pub mod sys_user;
 pub mod sys_user_dept;
 pub mod sys_user_post;

@@ -55,6 +55,29 @@ impl SysMenuRepository {
             .await
     }
 
+    /// 按菜单 ID 查询未删除行（批次 3：L3 引用校验需要单行元数据）
+    pub async fn find_by_id(&self, menu_id: i64) -> Result<Option<Model>, DbErr> {
+        SysMenu::find()
+            .filter(Column::MenuId.eq(menu_id))
+            .filter(Column::DelFlag.eq("0"))
+            .one(self.base.db())
+            .await
+    }
+
+    /// 按菜单 ID 集合查询完整菜单行（批次 3：L3 可选菜单池的批量补全）
+    pub async fn find_by_ids(&self, menu_ids: &[i64]) -> Result<Vec<Model>, DbErr> {
+        if menu_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        SysMenu::find()
+            .filter(Column::MenuId.is_in(menu_ids.to_vec()))
+            .filter(Column::DelFlag.eq("0"))
+            .order_by_asc(Column::OrderNum)
+            .order_by_asc(Column::MenuId)
+            .all(self.base.db())
+            .await
+    }
+
     /// 按角色 ID 查询关联菜单（通过 sys_role_menu 关联表）
     pub async fn find_by_role_id(&self, role_id: i64) -> Result<Vec<Model>, DbErr> {
         // 先查角色菜单关联表，获取 menu_id 列表

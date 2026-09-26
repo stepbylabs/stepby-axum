@@ -468,6 +468,18 @@ error:
     domain_verify_failed: 域名 DNS TXT 验证未通过，请确认解析记录已生效
     domain_primary_forbidden: 该租户已存在主域名，请通过「设为主域名」接口切换
     host_mismatch: 当前访问域名与登录账号所属租户不一致，已拒绝访问
+    nav_l3_disabled: 租户自建导航仅平台开启能力位 nav.l3 后可用
+    nav_l3_readonly: 当前能力位为只读档（nav.l3 = view_only），不能修改导航配置
+    nav_cross_tenant: 无权访问或操作其他租户的导航配置
+    nav_tenant_required: 平台操作者必须显式指定 tenantId
+    nav_ref_menu_invalid: 引用的菜单不存在、已停用，或不是目录/页面类型（按钮不可作为导航节点）
+    nav_ref_platform_only: 该菜单属平台专属能力，不能被租户加入自建导航
+    nav_ref_outside_package: 该菜单不在当前租户套餐范围内，无法加入自建导航
+    nav_ref_duplicate: 该菜单已加入本租户导航，不能重复挂载
+    nav_parent_invalid: 父级非法（须为本租户其它导航节点，且不得成环或超深）
+    nav_status_invalid: "status 必须为 0(正常) 或 1(停用)"
+    nav_has_children: 该导航节点下仍有子节点，请先删除子节点
+    nav_not_found: 导航配置不存在
   pat:
     name_required: 令牌名称不能为空
     name_too_long: "令牌名称过长（最多 100 字符）"
