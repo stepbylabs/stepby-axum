@@ -335,7 +335,10 @@ fn column_type_to_rust_type(column_type: &str) -> String {
         || ct.contains("DATETIME")
         || ct.contains("TIMESTAMP")
     {
-        "Option<chrono::NaiveDateTime>".to_string()
+        // 时态列返回**内层**类型：可空性由模板按 `isRequired` 统一包 `Option<...>`。
+        // 若在此处预先包裹，`entity.tera` / `service.tera` 会对可空列二次包裹，
+        // 产出 `Option<Option<chrono::NaiveDateTime>>`（sea_orm 派生实体/ DTO 均无法编译）。
+        "chrono::NaiveDateTime".to_string()
     } else {
         // 默认 String 类型（VARCHAR/TEXT/CHAR 等）
         "String".to_string()
@@ -1450,6 +1453,17 @@ impl GenTableService {
         let is_flow = table.tpl_category.as_deref() == Some("flow");
         ctx.insert("is_flow", &is_flow);
 
+        // entity 模板是否需要 `use chrono::NaiveDateTime;`：
+        // ① flow 投影列（submitted_at / finished_at）固定需要；② 任一时态列需要。
+        // 在 Rust 侧判定后注入（与 is_flow 同款做法），避免模板内做集合推导。
+        let needs_naive = is_flow
+            || columns.iter().any(|c| {
+                c.java_type
+                    .as_deref()
+                    .is_some_and(|t| t.contains("NaiveDateTime"))
+            });
+        ctx.insert("needs_naive", &needs_naive);
+
         // 提取主键字段
         let pk_column = columns.iter().find(|c| c.is_pk.as_deref() == Some("1"));
         ctx.insert("pk_column", &pk_column);
@@ -1977,6 +1991,131 @@ mod gen_table_template_tests {
         assert!(
             !crud_entity.contains("current_round"),
             "crud 实体不应包含审批投影列"
+        );
+    }
+
+    /// 【第六轮】生成代码**真编译**校验暴露的 6 处缺陷的回归锁。
+    ///
+    /// 背景：`is_flow` 分支此前只做字符串断言，从未编译过。第六轮把 flow 分类渲染结果
+    /// 落到 crate 内真实路径并跑 `cargo clippy --lib -- -D warnings`，暴露并修复：
+    /// ① 时态列 `java_type` 预包裹 `Option<...>` → 实体/DTO 二次包裹 `Option<Option<..>>`；
+    /// ② 生成 service 从 `sys_flow_service` 顶层导入 `RoundChain`/`BizTypeRegistration`
+    ///    （二者实际定义在 `biz_type` 子模块）→ 解析失败；
+    /// ③ 生成 handler 用 camelCase AppState 字段名 + 非 snake_case 路由函数名（不符合本仓惯例）；
+    /// ④ 生成 handler 导入未使用的 `Service` 类型；
+    /// ⑤ 生成 entity 固定导入未使用的 `crate::common::datetime`；
+    /// ⑥ 生成 service 的重提交归属校验用嵌套 if → clippy::collapsible_if。
+    ///
+    /// 本测试把这些「生成的 Rust 必须长什么样」钉死，防止模板回退。
+    #[test]
+    fn test_generated_code_is_clippy_clean_by_construction() {
+        let dt = |name: &str| {
+            let mut c = mk_column();
+            c.column_name = Some(name.to_string());
+            c.java_field = Some(name.to_string());
+            c.column_type = Some("DATETIME".to_string());
+            c.java_type = Some(column_type_to_rust_type("DATETIME"));
+            c.is_pk = Some("0".to_string());
+            c.is_required = Some("0".to_string());
+            c.is_insert = Some("1".to_string());
+            c.is_edit = Some("1".to_string());
+            c.is_list = Some("1".to_string());
+            c
+        };
+
+        // ---------- ① 时态列不得二次包裹 ----------
+        let mut crud = mk_table();
+        crud.tpl_category = Some("crud".to_string());
+        let mut cols = vec![mk_column(), dt("create_time")];
+        let files = GenTableService::render_templates(&crud, &cols).unwrap();
+        let entity = files.get("src/entity/sys_user.rs").unwrap();
+        assert!(
+            !entity.contains("Option<Option<"),
+            "时态列被二次包裹为 Option<Option<..>>，实际:\n{entity}"
+        );
+        assert!(
+            entity.contains("pub create_time: Option<chrono::NaiveDateTime>"),
+            "可空时态列应为 Option<chrono::NaiveDateTime>，实际:\n{entity}"
+        );
+        assert!(
+            entity.contains("use chrono::NaiveDateTime;"),
+            "含时态列的实体必须导入 NaiveDateTime，实际:\n{entity}"
+        );
+        // ⑤ 生成实体不得导入未使用的 datetime 辅助模块
+        assert!(
+            !entity.contains("use crate::common::datetime;"),
+            "生成实体不应导入未使用的 crate::common::datetime，实际:\n{entity}"
+        );
+        // 生成 service 的 DTO 同样不得二次包裹
+        let service_crud = files.get("src/service/sys_user_service.rs").unwrap();
+        assert!(
+            !service_crud.contains("Option<Option<"),
+            "DTO 时态字段被二次包裹，实际:\n{service_crud}"
+        );
+
+        // 无时态列 + 非 flow ⇒ 不得导入 NaiveDateTime（否则 unused import）
+        cols = vec![mk_column()];
+        let files = GenTableService::render_templates(&crud, &cols).unwrap();
+        let entity_plain = files.get("src/entity/sys_user.rs").unwrap();
+        assert!(
+            !entity_plain.contains("use chrono::NaiveDateTime;"),
+            "无时态列且非 flow 的实体不应导入 NaiveDateTime，实际:\n{entity_plain}"
+        );
+
+        // ---------- flow 分类：② ③ ④ ⑥ ----------
+        let mut flow = mk_table();
+        flow.tpl_category = Some("flow".to_string());
+        let files = GenTableService::render_templates(&flow, &cols).unwrap();
+
+        // flow 投影列固定使用 NaiveDateTime
+        let entity_flow = files.get("src/entity/sys_user.rs").unwrap();
+        assert!(
+            entity_flow.contains("use chrono::NaiveDateTime;"),
+            "flow 实体（含投影列）必须导入 NaiveDateTime，实际:\n{entity_flow}"
+        );
+
+        // ② RoundChain / BizTypeRegistration 必须从 biz_type 子模块导入
+        let service = files.get("src/service/sys_user_service.rs").unwrap();
+        assert!(
+            service.contains("biz_type::{self, BizTypeRegistration, RoundChain}"),
+            "RoundChain/BizTypeRegistration 必须从 biz_type 子模块导入，实际:\n{service}"
+        );
+        assert!(
+            !service.contains("ApproverPolicy, BizTypeRegistration"),
+            "不得从 sys_flow_service 顶层导入 BizTypeRegistration（解析会失败），实际:\n{service}"
+        );
+
+        // ⑥ 重提交归属校验必须是 let-chain（嵌套 if 会触发 clippy::collapsible_if）
+        assert!(
+            service.contains(
+                "if let Some(prev) = doc.applicant_id\n            && prev != applicant_id"
+            ),
+            "重提交归属校验应使用 let-chain 形式，实际:\n{service}"
+        );
+
+        // ③ ④ 生成的 Rust 标识符与 AppState 字段必须是 snake_case，且不导入未使用的 Service 类型
+        let handler = files.get("src/handler/sys_user_handler.rs").unwrap();
+        assert!(
+            handler.contains("state.sys_user_service."),
+            "handler 必须以 snake_case 表名访问 AppState 字段，实际:\n{handler}"
+        );
+        assert!(
+            !handler.contains("sysUser_service"),
+            "handler 不得使用 camelCase AppState 字段名，实际:\n{handler}"
+        );
+        assert!(
+            !handler.contains("use crate::service::sys_user_service::SysUserService;"),
+            "handler 不应导入未使用的 Service 类型，实际:\n{handler}"
+        );
+
+        let router = files.get("src/router/sys_user_router.rs").unwrap();
+        assert!(
+            router.contains("pub fn sys_user_routes()"),
+            "路由注册函数名应为 snake_case，实际:\n{router}"
+        );
+        assert!(
+            !router.contains("sysUser_routes"),
+            "路由注册函数名不得为 camelCase，实际:\n{router}"
         );
     }
 }
