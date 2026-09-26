@@ -198,53 +198,9 @@ impl SysUserRepository {
         self.base.update(model).await
     }
 
-    /// 多条件分页查询（user_name 模糊，phonenumber 模糊，status 精确，dept_id 精确，时间范围）
-    #[allow(clippy::too_many_arguments)]
-    pub async fn find_page_filtered(
-        &self,
-        offset: u64,
-        limit: u64,
-        user_name: Option<&str>,
-        phonenumber: Option<&str>,
-        status: Option<&str>,
-        dept_id: Option<i64>,
-        begin_time: Option<NaiveDateTime>,
-        end_time: Option<NaiveDateTime>,
-    ) -> Result<(Vec<Model>, u64), DbErr> {
-        let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
-        if let Some(name) = user_name {
-            query = query.filter(Column::UserName.like(format!("%{}%", like_escape(name))));
-        }
-        if let Some(phone) = phonenumber {
-            query = query.filter(Column::Phonenumber.like(format!("%{}%", like_escape(phone))));
-        }
-        if let Some(st) = status {
-            query = query.filter(Column::Status.eq(st));
-        }
-        if let Some(did) = dept_id {
-            query = query.filter(Column::DeptId.eq(did));
-        }
-        // P1：稳定排序，防翻页重复/漏行
-        query = query.order_by_asc(Column::UserId);
-        if let Some(begin) = begin_time {
-            query = query.filter(Column::CreateTime.gte(begin));
-        }
-        if let Some(end) = end_time {
-            query = query.filter(Column::CreateTime.lte(end));
-        }
-
-        let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
-        Ok((rows, total))
-    }
-
     /// 多条件分页查询 + data_scope 数据权限过滤（P0-R81-004）
     ///
-    /// 在 find_page_filtered 基础上追加两类数据权限过滤：
+    /// 追加两类过滤（**含租户过滤**）：
     /// - scope_dept_ids: Some 时限定 user.dept_id 必须在此集合内
     ///   - None: 不追加 dept_id 过滤
     ///   - Some(空): 不可见任何部门 → 返回空结果

@@ -218,6 +218,10 @@ impl AppInitializer {
         // 仅告警不阻断（存量部署允许先启动后整改），新客户端已由 add_client 硬校验拦截。
         sso_startup_self_check(&db, &settings).await;
 
+        // 3.8 台账 MT-4 / E-2（第十批）：域名链路「静默失效」启动自检。
+        // 仅告警不阻断（同 3.7 口径）。
+        let _ = tenant_host_chain_self_check(&db, &settings.server.trusted_proxies).await;
+
         // 4. 初始化 Redis
         let redis = db::init_redis(&settings.redis).await?;
 
@@ -2831,6 +2835,65 @@ async fn sso_startup_self_check(db: &DatabaseConnection, settings: &Settings) {
     }
 }
 
+/// 台账 MT-4 / E-2（第十批）：域名链路「**静默失效**」启动自检。
+///
+/// ## 为什么需要它
+/// `middleware/tenant_host.rs` 仅在**直连 peer ∈ `server.trusted_proxies`** 时采信
+/// `X-Tenant-Code` / `Host`；若生产反代未把网关 IP 段写入该白名单，域名链路会
+/// **静默退化**为 `HostTenant(None)`（无异常、无日志、页面照常）——排障成本极高。
+///
+/// ## 判据（只报"确定不一致"的组合）
+/// `trusted_proxies` 为空 **且** `sys_tenant_domain` 存在启用中的绑定行
+/// ⇒ 已配置租户域名却永不生效。此组合在开发/单机环境属**正常**
+/// （未部署反代、无域名绑定），故仅在"确有域名绑定"时才告警，避免噪音。
+///
+/// ## 边界
+/// - **仅告警不阻断**（与 3.7 SSO 自检同口径：存量部署允许先启动后整改）；
+/// - 数据隔离**不因此失效**：JWT `tid` 经 `common::tenant::tenant_scope` 仍强制过滤，
+///   降级仅失去"按 host 判定租户 / host×tid 一致性校验"，不产生跨租户数据泄漏；
+/// - 表缺失 / 查询失败一律静默返回（本函数绝不影响启动）。
+///
+/// 返回值：**已告警时**返回可解析的域名绑定数（`Some(count)`），否则 `None`。
+/// "可解析"口径与 `find_active_by_domain` 一致（`del_flag='0' + status='0' + verify_status='1'`）。
+/// 之所以把"是否告警"作为返回值暴露，是为了让本自检**可被断言**（见
+/// `tenant_host_chain_self_check_tests`）——只写日志的检查无法证伪。
+async fn tenant_host_chain_self_check(
+    db: &DatabaseConnection,
+    trusted_proxies: &[String],
+) -> Option<i64> {
+    if !trusted_proxies.is_empty() {
+        return None;
+    }
+    if !sso_table_exists(db, "sys_tenant_domain")
+        .await
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    // 口径与真实的 host→tid 解析源严格一致（`SysTenantDomainRepository::find_active_by_domain`：
+    // del_flag='0' + status='0' + verify_status='1'）——只有"**可解析**的绑定"配合空白名单
+    // 才是**确定**的静默失效；未验证/已停用的绑定不参与解析，不应产生误报。
+    let sql = "SELECT COUNT(*) AS c FROM sys_tenant_domain \
+               WHERE del_flag = '0' AND status = '0' AND verify_status = '1'";
+    if let Ok(Some(row)) = db
+        .query_one(Statement::from_string(db.get_database_backend(), sql))
+        .await
+    {
+        let count = row.try_get::<i64>("", "c").unwrap_or(0);
+        if count > 0 {
+            tracing::warn!(
+                active_domains = count,
+                "域名链路自检：server.trusted_proxies 为空但已存在 {count} 条**可解析**的租户域名绑定\
+                 （启用 + 已校验）⇒ host→租户 解析将**静默失效**（header 一律不采信）。请在生产反代\
+                 环境中把网关 IP 段写入 server.trusted_proxies（台账 MT-4 / E-2；数据隔离不受影响，\
+                 仅失去 host 维度）。"
+            );
+            return Some(count);
+        }
+    }
+    None
+}
+
 /// v5-D2：为存量 RS256 客户端补生成 RSA-2048 私钥（幂等：仅处理 rsa_private_key 为
 /// NULL 且 id_token_alg='RS256' 的行）。PKCS#8 PEM 按 CONFIG_ENC_KEY 信封加密落库
 /// （key 未配置时明文，迁移期策略与 v5-E6 一致）；CONFIG_ENC_KEY 未配置时整体跳过。
@@ -3550,6 +3613,99 @@ mod flow_backfill_tests {
             .try_get::<i64>("", "c")
             .unwrap() as u64;
         assert_eq!(count_dict, 7, "审批状态字典应恰 7 条");
+    }
+}
+
+#[cfg(test)]
+mod tenant_host_chain_self_check_tests {
+    use super::*;
+
+    /// 台账 MT-4 / E-2（第十批）：域名链路「静默失效」自检的**可证伪**回归锁。
+    ///
+    /// 语义：`trusted_proxies` 为空 **且** 存在启用中的 `sys_tenant_domain` 行
+    /// ⇒ 域名链路必然静默失效，自检必须"报出来"（返回告警计数）。
+    ///
+    /// 三条断言分别锁住：① 该组合**确实触发**（不是恒 None 的死检查）；
+    /// ② 配了白名单即**不再告警**（避免噪音）；③ 无域名绑定即**不告警**
+    /// （开发/单机环境的正常态）。任一条件被写反/写漏，本测试即红。
+    #[tokio::test]
+    async fn warns_only_when_proxies_empty_and_domain_bound() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .expect("建库失败");
+        let backend = db.get_database_backend();
+
+        // 干净起点：清空域名表（迁移可能已带入种子，避免依赖其数量）
+        db.execute(Statement::from_string(
+            backend,
+            "DELETE FROM sys_tenant_domain".to_string(),
+        ))
+        .await
+        .expect("清空 sys_tenant_domain 失败");
+
+        let empty: Vec<String> = vec![];
+        let non_empty = vec!["127.0.0.1".to_string()];
+
+        // ③ 无域名绑定 + 白名单为空 ⇒ 不告警（开发/单机正常态）
+        assert_eq!(
+            tenant_host_chain_self_check(&db, &empty).await,
+            None,
+            "无启用域名绑定时不应告警"
+        );
+
+        // 插入 1 条启用中的绑定 + 1 条已停用（不应计入）
+        db.execute(Statement::from_string(
+            backend,
+            "INSERT INTO sys_tenant_domain (tenant_id, domain, domain_type, is_primary, \
+             verify_status, status, del_flag) \
+             VALUES (9030, 'mt4-active.test', '0', '0', '1', '0', '0')"
+                .to_string(),
+        ))
+        .await
+        .expect("插入启用域名失败");
+        db.execute(Statement::from_string(
+            backend,
+            "INSERT INTO sys_tenant_domain (tenant_id, domain, domain_type, is_primary, \
+             verify_status, status, del_flag) \
+             VALUES (9030, 'mt4-disabled.test', '0', '1', '1', '1', '0')"
+                .to_string(),
+        ))
+        .await
+        .expect("插入停用域名失败");
+        // 启用但**未验证**：不参与 host→tid 解析（`find_active_by_domain` 要求 verify_status='1'），
+        // 故不应计入告警数——锁住"自检口径 == 真实解析口径"，避免未验证绑定引发误报。
+        db.execute(Statement::from_string(
+            backend,
+            "INSERT INTO sys_tenant_domain (tenant_id, domain, domain_type, is_primary, \
+             verify_status, status, del_flag) \
+             VALUES (9030, 'mt4-unverified.test', '0', '1', '0', '0', '0')"
+                .to_string(),
+        ))
+        .await
+        .expect("插入未验证域名失败");
+
+        // ① 白名单为空 + 有可解析域名 ⇒ 必须告警，且计数只含"可解析"行（=1：启用+已验证）
+        assert_eq!(
+            tenant_host_chain_self_check(&db, &empty).await,
+            Some(1),
+            "trusted_proxies 为空且存在**可解析**域名绑定时应告警，且计数仅含 \
+             status='0' AND verify_status='1' 的行（停用/未验证行不得计入）"
+        );
+
+        // ② 配了白名单 ⇒ 不告警（域名链路可用，无需提示）
+        assert_eq!(
+            tenant_host_chain_self_check(&db, &non_empty).await,
+            None,
+            "已配置 trusted_proxies 时不应告警"
+        );
+
+        // 清理
+        db.execute(Statement::from_string(
+            backend,
+            "DELETE FROM sys_tenant_domain WHERE domain LIKE 'mt4-%'".to_string(),
+        ))
+        .await
+        .expect("清理域名样本失败");
     }
 }
 

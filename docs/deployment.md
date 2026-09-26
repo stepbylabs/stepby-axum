@@ -445,6 +445,13 @@ trusted_proxies = ["127.0.0.1"]
 
 否则后端无法正确获取客户端真实 IP（会取到 Nginx 的 IP）。
 
+**多租户必读（2026-09-26）**：`trusted_proxies` 还决定**租户域名链路**是否生效——
+`X-Tenant-Code` / `Host → 租户` 的解析**仅**在直连 peer ∈ 白名单时采信 header；
+未配置会让域名链路**静默失效**（全部回落平台租户且无任何报错）。启动自检
+`initialize::tenant_host_chain_self_check` 会在"**已存在租户域名绑定但白名单为空**"时打 **WARN**
+（仅告警不阻断）⇒ **上线后确认日志中无该 WARN**。完整上线检查清单见 `deploy/README.md §7.1`
+（含 ACME 证书、pg/mysql 索引执行计划口径、多实例 `[flow].scan_lock_enabled`、SSO 告警规则）。
+
 ---
 
 ## 9. Docker 部署
@@ -532,7 +539,7 @@ docker-compose up -d
 - [ ] `cors_origins` 仅包含生产域名，不含 `*`
 - [ ] `docs_enabled = false`（关闭 Swagger UI）
 - [ ] `sql_logging = false`（关闭 SQL 日志）
-- [ ] `trusted_proxies` 配置为反向代理真实 IP
+- [ ] `trusted_proxies` 配置为反向代理真实 IP（**多租户域名链路前置**，见 `deploy/README.md §7.1`）
 - [ ] MySQL 用户仅授权 `yebot.*` 数据库
 - [ ] Redis 已设置密码并禁用危险命令
 

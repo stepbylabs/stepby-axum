@@ -40,8 +40,6 @@ use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::service::SysUserService;
 use crate::utils::password::encrypt_password;
 
-/// 自动创建账号时绑定的默认角色（2 = 普通角色，见初始化迁移）
-const DEFAULT_ROLE_ID: i64 = 2;
 /// OAuth state 保存时长（秒）
 const STATE_TTL_SECS: u64 = 600;
 /// 绑定凭据（handoff）保存时长（秒）
@@ -1128,6 +1126,19 @@ impl SysOauthService {
         // v5-N2 Phase 2：新建用户与绑定记录归属**供应商所在租户**
         //（OAuth 回调无操作者上下文；自动建号取客户端/供应商的 tenant_id）
         let provider_tid = provider.tenant_id;
+        // 第十一批（GAP-C 根治，取代第十批的"维持绑定 + WARN + 登记"）：
+        // 原实现无条件绑定平台普通角色（role 2，`tenant_id = 0`）⇒ 供应商属租户 T 时
+        // 形成"租户用户 → 平台角色"的**跨租户引用**。现改为解析/幂等创建**该租户自己的
+        // 普通角色**（`{tenant_code}_common`；平台租户仍绑平台普通角色）：
+        // ① 消除跨租户角色引用；② 不越权（改绑租户管理员角色属过度授权，故按平台普通角色
+        // 的菜单/数据范围语义派生）；③ `None`（租户不存在或创建失败）⇒ **不绑定**（fail-closed，
+        // 绝不用平台角色兜底）。口径与租户初始化的角色菜单计算同源（`sys_tenant_service`）。
+        let default_role_id: Option<i64> =
+            crate::service::sys_tenant_service::resolve_default_role_for_tenant(
+                self.user_repo.base().db(),
+                provider_tid,
+            )
+            .await?;
         let user_role_repo = self.user_role_repo.clone();
         let oauth_user_repo = self.oauth_user_repo.clone();
         let user_repo = self.user_repo.clone();
@@ -1189,17 +1200,27 @@ impl SysOauthService {
                         .ensure_account_quota_txn(txn, provider_tid)
                         .await?;
                     let new_user = user_repo.base().insert_conn(txn, user_am).await?;
-                    // 绑定默认角色（普通角色）
-                    let _ = user_role_repo
-                        .insert_many_conn(
-                            txn,
-                            vec![SysUserRoleActiveModel {
-                                user_id: Set(new_user.user_id),
-                                role_id: Set(DEFAULT_ROLE_ID),
-                                source: Set("admin".to_owned()),
-                            }],
-                        )
-                        .await?;
+                    // 绑定默认角色：平台租户 = 平台普通角色(2)；租户供应商 = **该租户自己的普通角色**
+                    // （`{tenant_code}_common`，见 `resolve_default_role_for_tenant`）。
+                    // `None` ⇒ 不绑定（fail-closed，绝不回退平台角色以免跨租户引用）。
+                    if let Some(role_id) = default_role_id {
+                        let _ = user_role_repo
+                            .insert_many_conn(
+                                txn,
+                                vec![SysUserRoleActiveModel {
+                                    user_id: Set(new_user.user_id),
+                                    role_id: Set(role_id),
+                                    source: Set("admin".to_owned()),
+                                }],
+                            )
+                            .await?;
+                    } else {
+                        tracing::warn!(
+                            tenant_id = provider_tid,
+                            user_id = new_user.user_id,
+                            "OAuth 自动建号：未解析到默认角色，账号未绑定任何角色（fail-closed）"
+                        );
+                    }
                     // 写入第三方绑定
                     let binding_am = SysOauthUserActiveModel {
                         user_id: Set(new_user.user_id),
