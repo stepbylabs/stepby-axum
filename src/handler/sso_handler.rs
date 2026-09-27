@@ -1147,6 +1147,12 @@ fn encode_consent_query(e: &crate::service::sso_service::ConsentEcho, proxy_logo
     if let Some(v) = &e.nonce {
         parts.push(format!("nonce={}", urlencode_spa(v)));
     }
+    // v5-D9：同意票（仅 `[sso].consent_ticket = required` 时下发）——
+    // 前端原样回传至 POST /sso/consent，服务端据此判定"同意参数未被篡改"。
+    // `off` 档 `ticket` 恒 None ⇒ 本段不追加任何参数（关闭态查询串逐字不变）。
+    if let Some(v) = &e.ticket {
+        parts.push(format!("ticket={}", urlencode_spa(v)));
+    }
     parts.join("&")
 }
 

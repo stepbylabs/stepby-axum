@@ -31,6 +31,7 @@ use utoipa::ToSchema;
 
 use crate::common::datetime;
 use crate::common::error::ServiceError;
+use crate::config::settings::SsoConsentTicketMode;
 use crate::config::{JwtConfig, SsoConfig};
 use crate::entity::sys_oauth_client::{ActiveModel as ClientActiveModel, Model as ClientModel};
 use crate::jwt::claims::JwtUtils;
@@ -49,6 +50,11 @@ const SESS_KEY_PREFIX: &str = "sso:sess:";
 const RT_KEY_PREFIX: &str = "sso:rt:";
 /// v5-D3：用户 → 已签发 refresh_token 集合：登出/强退/改密时按用户全量吊销
 const USER_RT_KEY_PREFIX: &str = "sso:user_rt:";
+/// v5-D9：同意票据 Redis key 前缀（`key = sso:consent_ticket:{ticketId}`）。
+///
+/// 票据是**服务端真相**（随机 id + 票面 JSON + TTL），不引入新的签名密钥——
+/// 与 webauthn 挑战态"SETEX + TTL"同法，避免"多一把密钥要轮换/要保管"的额外负担。
+const CONSENT_TICKET_KEY_PREFIX: &str = "sso:consent_ticket:";
 /// client_id 保留字（v4 §1.3）：禁止与协议自身命名空间/常见系统字冲突。
 /// 注意：与平台 jwt.audience / jwt.issuer 的碰撞校验是**动态比对配置**（见 add_client），
 /// 静态表只兜底通用保留字，不兜底可配置值。
@@ -312,6 +318,61 @@ pub struct ConsentDto {
     #[serde(default)]
     #[ts(optional)]
     pub auth_time: Option<i64>,
+    /// v5-D9：同意票据（`[sso].consent_ticket = required` 时必填；`off` 档被完全忽略）。
+    ///
+    /// 由 `authorize` 在判定需同意时签发、经 `/sso-consent?ticket=...` 交前端回传；
+    /// 服务端据此比对"回显参数是否与票面逐字一致"，从而封堵"同意参数被中间人篡改"。
+    #[serde(default)]
+    #[ts(optional)]
+    pub ticket: Option<String>,
+}
+
+/// v5-D9 同意票据的**票面**（存 Redis；`off` 档不产生）。
+///
+/// 只放"需要与提交值逐字比对"的参数 + 发起用户：票据**不携带**任何可被外部推导的密钥材料，
+/// 校验完全在服务端完成（`redirect_uri` 存**已解析**值，`scope` 存**规范化**串）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsentTicket {
+    /// 发起 authorize 的用户（防"拿别人的票"）
+    user_id: i64,
+    client_id: String,
+    /// **已解析**的回调地址（经白名单精确匹配后的服务端权威值）
+    redirect_uri: String,
+    /// **规范化**的 scope（空格连接的已授予集合）
+    scope: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    nonce: Option<String>,
+    code_challenge: String,
+    code_challenge_method: String,
+}
+
+/// 票面与本次提交参数的**逐字比对**（纯函数，便于不依赖 Redis 直接单测）。
+///
+/// 归一规则仅有"`None` 与空串等价"（前端 `q()` 对缺失 query 返回空串/undefined，二者语义相同）；
+/// **不做**大小写/顺序/子集等模糊等价——任何实质差异都必须拒绝（可证伪"改了参数即 400"）。
+#[allow(clippy::too_many_arguments)]
+fn consent_ticket_matches(
+    ticket: &ConsentTicket,
+    user_id: i64,
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    state: Option<&str>,
+    nonce: Option<&str>,
+    code_challenge: &str,
+    code_challenge_method: &str,
+) -> bool {
+    let norm = |v: Option<&str>| v.unwrap_or_default().to_string();
+    ticket.user_id == user_id
+        && ticket.client_id == client_id
+        && ticket.redirect_uri == redirect_uri
+        && ticket.scope == scope
+        && norm(ticket.state.as_deref()) == norm(state)
+        && norm(ticket.nonce.as_deref()) == norm(nonce)
+        && ticket.code_challenge == code_challenge
+        && ticket.code_challenge_method == code_challenge_method
 }
 
 /// /sso/token 请求参数 —— **OAuth2/OIDC 协议面**（外部 RP 用标准客户端库调用），
@@ -409,6 +470,9 @@ pub struct ConsentEcho {
     pub state: Option<String>,
     pub nonce: Option<String>,
     pub code_challenge: String,
+    /// v5-D9：同意票据（仅 `[sso].consent_ticket = required` 时下发；`off` 恒 `None`
+    /// ⇒ 关闭态同意页查询串与改造前逐字一致）。
+    pub ticket: Option<String>,
 }
 
 /// 用户"已授权应用"条目（v4-R8 自助撤销授权页）。
@@ -703,6 +767,25 @@ impl SsoService {
                         &crate::tr!("error.sso.consent_required"),
                     )));
                 }
+                // v5-D9：同意票（`required` 才签发；`off` 恒 None ⇒ 关闭态零行为变更）
+                let ticket = if config.consent_ticket_mode() == SsoConsentTicketMode::Required {
+                    Some(
+                        self.issue_consent_ticket(
+                            redis,
+                            config,
+                            identity.user_id,
+                            &client.client_id,
+                            &redirect_uri,
+                            &requested,
+                            params.state.as_deref(),
+                            params.nonce.as_deref(),
+                            &code_challenge,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
                 return Ok(AuthorizeOutcome::NeedConsent(Box::new(ConsentEcho {
                     client_id: client.client_id.clone(),
                     client_name: client.client_name.clone(),
@@ -712,6 +795,7 @@ impl SsoService {
                     state: params.state.clone(),
                     nonce: params.nonce.clone(),
                     code_challenge,
+                    ticket,
                 })));
             }
         }
@@ -755,6 +839,48 @@ impl SsoService {
         Ok(self.resolve_redirect_uri(params.redirect_uri.as_deref(), &whitelist))
     }
 
+    /// v5-D9：签发**一次性同意票据**（随机 id 落 Redis，票面 = 回显参数 + 发起用户）。
+    ///
+    /// 只在 `[sso].consent_ticket = required` 时被调用；Redis 写入失败按内部错误返回
+    /// （**fail-closed**：宁可让用户重来，也不能降级成"无票也放行"）。
+    #[allow(clippy::too_many_arguments)]
+    async fn issue_consent_ticket(
+        &self,
+        redis: &mut ConnectionManager,
+        config: &SsoConfig,
+        user_id: i64,
+        client_id: &str,
+        redirect_uri: &str,
+        requested: &[String],
+        state: Option<&str>,
+        nonce: Option<&str>,
+        code_challenge: &str,
+    ) -> Result<String, ServiceError> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let ticket = ConsentTicket {
+            user_id,
+            client_id: client_id.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            scope: requested.join(" "),
+            state: state.map(str::to_string),
+            nonce: nonce.map(str::to_string),
+            code_challenge: code_challenge.to_string(),
+            // authorize 已强校验 code_challenge_method == S256（见上文第 4 步），此处随之固化
+            code_challenge_method: "S256".to_string(),
+        };
+        let json = serde_json::to_string(&ticket)
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
+        let key = format!("{CONSENT_TICKET_KEY_PREFIX}{id}");
+        let _: () = redis::cmd("SETEX")
+            .arg(&key)
+            .arg(config.consent_ticket_ttl())
+            .arg(&json)
+            .query_async(redis)
+            .await
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
+        Ok(id)
+    }
+
     /// 同意页批准 / 拒绝（受保护接口，用户身份来自登录态 Operator）
     pub async fn consent(
         &self,
@@ -791,6 +917,49 @@ impl SsoService {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.sso.scope_invalid"
             )));
+        }
+
+        // v5-D9：同意票校验（`required` 档才生效；`off` 档**完全跳过** = 改造前行为）。
+        // 位置在"白名单/scopes 已收敛"之后、"批准/拒绝分流"之前 ⇒ **批准与拒绝都必须带票**。
+        // 校验顺序刻意与错误文案解耦：所有失败一律返回同一条通用文案（不泄漏"票不存在"
+        // 与"参数不符"的区别，避免成为票据探测侧信道）。
+        if config.consent_ticket_mode() == SsoConsentTicketMode::Required {
+            let invalid =
+                || ServiceError::bad_request(&crate::tr!("error.sso.consent_ticket_invalid"));
+            let ticket_id = dto.ticket.as_deref().unwrap_or_default().trim();
+            if ticket_id.is_empty() {
+                return Err(invalid());
+            }
+            let key = format!("{CONSENT_TICKET_KEY_PREFIX}{ticket_id}");
+            let raw: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(redis)
+                .await
+                .map_err(|_| invalid())?;
+            let Some(ticket) = raw.and_then(|s| serde_json::from_str::<ConsentTicket>(&s).ok())
+            else {
+                return Err(invalid());
+            };
+            // 逐字比对（scope / redirect_uri 均用**服务端已解析/规范化**的值，
+            // 从而同时封堵"改 redirectUri 到另一条白名单地址"与"改 scope"）
+            if !consent_ticket_matches(
+                &ticket,
+                user_id,
+                &dto.client_id,
+                &redirect_uri,
+                &requested.join(" "),
+                dto.state.as_deref(),
+                dto.nonce.as_deref(),
+                dto.code_challenge.as_deref().unwrap_or_default(),
+                dto.code_challenge_method.as_deref().unwrap_or_default(),
+            ) {
+                return Err(invalid());
+            }
+            // 校验通过 ⇒ **一次性消费**（批准与拒绝都消费；重放必然失败）。
+            // DEL 失败不影响本次结果（票已通过校验），但会记 WARN 供运维发现 Redis 异常。
+            if let Err(e) = redis::cmd("DEL").arg(&key).query_async::<i64>(redis).await {
+                tracing::warn!(error = %e, "同意票据消费失败（Redis DEL）；该票据在 TTL 内可能仍可重放");
+            }
         }
 
         // 拒绝：回跳携带 access_denied（v3-P2'-3：错误描述不得误用"未登录"文案）
@@ -3069,6 +3238,192 @@ mod tests {
             vec!["openid", "profile", "email"]
         );
         assert!(split_scope("").is_empty());
+    }
+
+    /// v5-D9：同意票逐字比对——**一致即通过**、**任何实质差异即拒绝**（可证伪）。
+    #[test]
+    fn consent_ticket_accepts_exact_match_only() {
+        let ticket = ConsentTicket {
+            user_id: 42,
+            client_id: "app_x".to_string(),
+            redirect_uri: "https://app.test/cb".to_string(),
+            scope: "openid profile".to_string(),
+            state: Some("st_1".to_string()),
+            nonce: Some("n_1".to_string()),
+            code_challenge: "CH".to_string(),
+            code_challenge_method: "S256".to_string(),
+        };
+        // 基线：完全一致 ⇒ 通过
+        assert!(consent_ticket_matches(
+            &ticket,
+            42,
+            "app_x",
+            "https://app.test/cb",
+            "openid profile",
+            Some("st_1"),
+            Some("n_1"),
+            "CH",
+            "S256"
+        ));
+        // 逐项篡改 ⇒ 全部必须失败（少一项都可能放过中间人篡改）
+        let cases: [(&str, bool); 8] = [
+            (
+                "改 scope",
+                consent_ticket_matches(
+                    &ticket,
+                    42,
+                    "app_x",
+                    "https://app.test/cb",
+                    "openid profile email",
+                    Some("st_1"),
+                    Some("n_1"),
+                    "CH",
+                    "S256",
+                ),
+            ),
+            (
+                "改 redirect_uri",
+                consent_ticket_matches(
+                    &ticket,
+                    42,
+                    "app_x",
+                    "https://evil.test/cb",
+                    "openid profile",
+                    Some("st_1"),
+                    Some("n_1"),
+                    "CH",
+                    "S256",
+                ),
+            ),
+            (
+                "改 state",
+                consent_ticket_matches(
+                    &ticket,
+                    42,
+                    "app_x",
+                    "https://app.test/cb",
+                    "openid profile",
+                    Some("st_2"),
+                    Some("n_1"),
+                    "CH",
+                    "S256",
+                ),
+            ),
+            (
+                "改 nonce",
+                consent_ticket_matches(
+                    &ticket,
+                    42,
+                    "app_x",
+                    "https://app.test/cb",
+                    "openid profile",
+                    Some("st_1"),
+                    Some("n_2"),
+                    "CH",
+                    "S256",
+                ),
+            ),
+            (
+                "改 code_challenge",
+                consent_ticket_matches(
+                    &ticket,
+                    42,
+                    "app_x",
+                    "https://app.test/cb",
+                    "openid profile",
+                    Some("st_1"),
+                    Some("n_1"),
+                    "OTHER",
+                    "S256",
+                ),
+            ),
+            (
+                "改 code_challenge_method",
+                consent_ticket_matches(
+                    &ticket,
+                    42,
+                    "app_x",
+                    "https://app.test/cb",
+                    "openid profile",
+                    Some("st_1"),
+                    Some("n_1"),
+                    "CH",
+                    "plain",
+                ),
+            ),
+            (
+                "改 client_id",
+                consent_ticket_matches(
+                    &ticket,
+                    42,
+                    "app_y",
+                    "https://app.test/cb",
+                    "openid profile",
+                    Some("st_1"),
+                    Some("n_1"),
+                    "CH",
+                    "S256",
+                ),
+            ),
+            (
+                "他人用户（拿别人的票）",
+                consent_ticket_matches(
+                    &ticket,
+                    43,
+                    "app_x",
+                    "https://app.test/cb",
+                    "openid profile",
+                    Some("st_1"),
+                    Some("n_1"),
+                    "CH",
+                    "S256",
+                ),
+            ),
+        ];
+        for (name, matched) in cases {
+            assert!(!matched, "{name} 必须被拒绝（票面与提交值逐字比对）");
+        }
+    }
+
+    /// v5-D9：`None` 与空串**等价**（前端 `q()` 缺失 query 时返回空串/undefined），
+    /// 但"空 vs 非空"仍属实质差异（不得被归一放过）。
+    #[test]
+    fn consent_ticket_none_and_empty_are_equivalent() {
+        let mut ticket = ConsentTicket {
+            user_id: 7,
+            client_id: "app_x".to_string(),
+            redirect_uri: "https://app.test/cb".to_string(),
+            scope: "openid".to_string(),
+            state: None,
+            nonce: Some(String::new()),
+            code_challenge: "CH".to_string(),
+            code_challenge_method: "S256".to_string(),
+        };
+        // None（票面） vs 空串（提交） ⇒ 通过
+        assert!(consent_ticket_matches(
+            &ticket,
+            7,
+            "app_x",
+            "https://app.test/cb",
+            "openid",
+            Some(""),
+            None,
+            "CH",
+            "S256"
+        ));
+        // 票面为空、提交非空 ⇒ 拒绝
+        ticket.state = Some(String::new());
+        assert!(!consent_ticket_matches(
+            &ticket,
+            7,
+            "app_x",
+            "https://app.test/cb",
+            "openid",
+            Some("st"),
+            None,
+            "CH",
+            "S256"
+        ));
     }
 
     #[test]

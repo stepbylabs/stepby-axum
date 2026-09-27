@@ -193,6 +193,19 @@ proxy_logo_uri = false
 # ⚠️ 与原则「停用即断链 / 吊销即时生效」存在真实冲突——开启即接受"最多 300 秒的吊销延迟"，
 #    请按「性能 vs 即时性」自行权衡；这也是它默认关闭的原因（冲突不等于永久不做）。
 userinfo_cache_ttl_secs = 0
+# ——— 本轮：D9 同意票（SSO-3 **最后一项**，按准则⑥改判为**默认关的开关**）———
+# POST /sso/consent 的入参是对 authorize 参数的**客户端回显**。服务端已用 redirect_uri 白名单
+# + scopes 子集校验收敛了后果，但"同意参数被中间人/被诱导浏览器篡改"这一攻击面本身仍在。
+#   off（**默认**）= 不签发、不校验 = 历史行为（逐字节等价）；
+#   required = authorize 判定需同意时签发**一次性服务端票据**（随机 id 落 Redis，
+#     票面 = clientId/redirectUri/scope/state/nonce/codeChallenge + 发起用户 userId），
+#     经 /sso-consent?ticket=... 交前端回传；POST /sso/consent 必须带票且回显参数与票面
+#     **逐字一致**（None 与空串归一后比），否则 400；校验通过即**一次性消费**（批准/拒绝都消费）。
+#   ⚠️ 票据是服务端真相（不引入新签名密钥）；Redis 未命中/过期/被篡改 ⇒ 400（fail-closed）。
+#   ⚠️ 开启会改变同意页契约（前端需回传 ticket）——前端已兼容：后端不下发则字段缺省。
+consent_ticket = "off"
+# 同意票据有效期（秒，默认 300；夹取 60..=1800）
+consent_ticket_ttl_secs = 300
 
 # ==================== 审批工作流（m20260923_000002 flow_module）====================
 # 整个 [flow] 段可省略（全部走结构体缺省）；下列取值与代码缺省一一对应。
@@ -372,3 +385,19 @@ rp_id = ""               # 留空 ⇒ 从 [server].cors_origins 首个来源的 
 rp_name = "Yebot"        # 浏览器 passkey 提示中展示的依赖方名称
 origin = ""              # 留空 ⇒ 取 [server].cors_origins 首个来源
 state_ttl_secs = 300     # 挑战 / 会话临时态 TTL（秒，至少 1）
+
+# ==================== 出站韧性（熔断） ====================
+# #10：`[acme]` 与 `[events]` 都是 fire-and-forget POST。目标端点下线时，**每个事件**都会
+#      重新发一次请求（各带一次连接/超时预算）并打一条 WARN —— 既浪费资源，又用噪声淹没
+#      真正的告警。打开熔断后，同一目标 URL 连续失败达阈值即"打开"，冷却期内**直接跳过发送**，
+#      到期放行**一次探测**（半开），探测成功即恢复（连续失败计数清零）。
+#
+# ⚠️ 默认 off = 现状：不判定、不记账，每次都尝试发送（与改造前逐字节等价）。
+# ⚠️ 非法 outbound_breaker 取值回落 off 并打 WARN（fail-safe，不拒绝启动）；
+#    failure_threshold 夹在 1..=1000，cooldown_secs 夹在 1..=86400。
+# ⚠️ 熔断是**进程内**状态：多副本部署时每个实例独立判定（本能力不引入跨实例共享态）。
+# ⚠️ 熔断只影响"是否发出/记账"，**不影响**业务结果（推送本就是 fire-and-forget）。
+[resilience]
+outbound_breaker = "off"  # off（默认，= 现状）| on
+failure_threshold = 5     # 连续失败达该次数 ⇒ 打开熔断（夹在 1..=1000）
+cooldown_secs = 60        # 打开后的冷却秒数，到期放行一次探测（夹在 1..=86400）

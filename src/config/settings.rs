@@ -88,6 +88,12 @@ pub struct Settings {
     /// WebAuthn / Passkey 配置（`[webauthn]` 段）：能力位 `auth.webauthn` 的配置面。
     #[serde(default)]
     pub webauthn: WebauthnConfig,
+    /// 出站**韧性**配置（`[resilience]` 段）：进程内出站 webhook 熔断（#10）。
+    ///
+    /// 作用于 `[acme]` / `[events]` 共用的出站推送：默认 `off` ⇒ 不判定、不记账、
+    /// 每次都尝试发送，与改造前**逐字节等价**。
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -118,6 +124,7 @@ impl fmt::Debug for Settings {
             .field("acme", &self.acme)
             .field("events", &self.events)
             .field("webauthn", &self.webauthn)
+            .field("resilience", &self.resilience)
             .finish()
     }
 }
@@ -614,6 +621,58 @@ fn default_events_timeout_secs() -> u64 {
     5
 }
 
+/// 出站**韧性**配置（`[resilience]` 段）—— 进程内出站 webhook 熔断（#10）。
+///
+/// # 为什么需要它
+///
+/// `[acme]` 与 `[events]` 都是 **fire-and-forget POST**：目标端点下线时，**每一个事件**都会
+/// 重新发一次请求（各带一次连接/超时预算）并打一条 WARN —— 既浪费资源，又用噪声淹没真正的告警。
+///
+/// # 语义（关闭态 = 现状）
+///
+/// - `off`（**默认**）：不判定、不记账、每次都尝试发送，与改造前**逐字节等价**；
+/// - `on`：同一 URL 连续失败达 `failure_threshold` 次即**打开** ⇒ 冷却期内直接跳过发送，
+///   `cooldown_secs` 到期放行**一次探测**（半开），探测成功即恢复（连续失败计数清零）。
+///
+/// 非法档位取值回落 `off` 并打 WARN（fail-safe，不拒绝启动）；数值越界由
+/// [`crate::common::breaker::BreakerConfig::from_settings`] 夹取到上下界。
+#[derive(Clone, Debug, Deserialize)]
+pub struct ResilienceConfig {
+    /// 出站 webhook 熔断档位：`off`（**默认**，= 现状）| `on`
+    #[serde(default = "default_outbound_breaker")]
+    pub outbound_breaker: String,
+    /// 连续失败达到该次数 ⇒ 打开熔断（默认 5；夹取 `1..=1000`）
+    #[serde(default = "default_breaker_failure_threshold")]
+    pub failure_threshold: u32,
+    /// 打开后的冷却秒数，到期放行一次探测（默认 60；夹取 `1..=86400`）
+    #[serde(default = "default_breaker_cooldown_secs")]
+    pub cooldown_secs: u64,
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            outbound_breaker: default_outbound_breaker(),
+            failure_threshold: default_breaker_failure_threshold(),
+            cooldown_secs: default_breaker_cooldown_secs(),
+        }
+    }
+}
+
+fn default_outbound_breaker() -> String {
+    crate::common::breaker::BreakerMode::default()
+        .as_str()
+        .to_string()
+}
+
+fn default_breaker_failure_threshold() -> u32 {
+    5
+}
+
+fn default_breaker_cooldown_secs() -> u64 {
+    60
+}
+
 /// WebAuthn / Passkey 配置（`[webauthn]` 段）——能力位 `auth.webauthn` 的**配置面**。
 ///
 /// # 定位
@@ -902,6 +961,36 @@ pub struct SsoConfig {
     /// **AT 哈希**为维度，且 TTL 上限 300s ⇒ 最坏情况是本已吊销的 AT 在 300s 内仍可读 userinfo。
     #[serde(default)]
     pub userinfo_cache_ttl_secs: u64,
+    /// v5-D9（SSO-3 **最后一项**，本轮按准则⑥由「登记为单独专题」改判为**默认关的开关**）：
+    /// 同意页**服务端票据**。
+    ///
+    /// # 解决什么
+    ///
+    /// `POST /sso/consent` 的入参是对 `authorize` 参数的**客户端回显**（clientId / redirectUri /
+    /// scope / state / nonce / codeChallenge）。服务端已用 `resolve_redirect_uri` 白名单 +
+    /// `scopes_subset` 收敛了实际后果，但"同意参数可被中间人/被诱导的浏览器篡改"这一攻击面
+    /// 本身仍在（典型：把 `scope` 换成更大集合、把 `redirectUri` 换成同客户端的另一个地址）。
+    ///
+    /// # 语义
+    ///
+    /// - `off`（**默认**）：**完全跳过**票据签发与校验 = 改造前行为，逐字节等价；
+    /// - `required`：`authorize` 判定需同意时签发**一次性服务端票据**（随机 id 落 Redis，
+    ///   票面 = 上述参数 + 发起用户的 `userId`），经 `/sso-consent?ticket=...` 交给前端；
+    ///   `POST /sso/consent` 必须携带该票据，且回显参数与票面**逐字一致**（`None` 与空串归一后比），
+    ///   否则一律 400；票据**一次性消费**（校验通过即 DEL，批准/拒绝都消费）且做**归属校验**
+    ///   （票面 `userId` 必须等于当前登录用户）。
+    ///
+    /// ⚠️ 票据是**服务端真相**（随机 id + Redis 票面），不引入新的签名密钥；
+    /// Redis 未命中 / 过期 / 被篡改 ⇒ 400（fail-closed）。
+    /// ⚠️ 开启会改变同意页契约（前端需回传 `ticket`）——前端已做兼容：后端不下发则字段缺省。
+    #[serde(default = "default_sso_consent_ticket_mode")]
+    pub consent_ticket: String,
+    /// v5-D9：同意票据有效期（秒，默认 300；夹取 `60..=1800`）。
+    ///
+    /// 票据只需覆盖"用户读完同意页并点按钮"的窗口；过短会让正常用户中途失效，
+    /// 过长则扩大重放窗口（票据已一次性，故上限 1800s 足够保守）。
+    #[serde(default = "default_sso_consent_ticket_ttl_secs")]
+    pub consent_ticket_ttl_secs: u64,
 }
 
 impl Default for SsoConfig {
@@ -917,6 +1006,8 @@ impl Default for SsoConfig {
             audit_authorize_get: false,
             proxy_logo_uri: false,
             userinfo_cache_ttl_secs: 0,
+            consent_ticket: default_sso_consent_ticket_mode(),
+            consent_ticket_ttl_secs: default_sso_consent_ticket_ttl_secs(),
         }
     }
 }
@@ -942,6 +1033,76 @@ fn default_sso_access_token_ttl_secs() -> u64 {
 }
 fn default_sso_refresh_token_ttl_secs() -> u64 {
     30 * 24 * 3600
+}
+
+/// 同意票据档位（`[sso].consent_ticket`）
+///
+/// 开关取「模式」而非裸 bool（项目准则③）：将来若需要"仅记录不拦截"的观察档，
+/// 可直接扩 `log_only` 而不破坏现有取值语义。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SsoConsentTicketMode {
+    /// 关闭：不签发、不校验同意票据 —— **默认，等价于改造前行为**
+    #[default]
+    Off,
+    /// 必须携带服务端签发的一次性票据，且回显参数须与票面逐字一致
+    Required,
+}
+
+/// `SsoConsentTicketMode` 的合法模式串（顺序：默认项在前）
+pub const SSO_CONSENT_TICKET_MODES: &[&str] = &["off", "required"];
+
+impl SsoConsentTicketMode {
+    /// 解析配置串（大小写无关、两端 trim）；未登记取值一律回落 [`Self::Off`] 并打 WARN
+    /// （fail-safe，不拒绝启动）。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "required" => Self::Required,
+            "off" => Self::Off,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    fallback = "off",
+                    allowed = ?SSO_CONSENT_TICKET_MODES,
+                    "配置 [sso].consent_ticket 取值非法，已回落 off（= 现状：不校验同意票据）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Required => "required",
+        }
+    }
+}
+
+/// 同意票据 TTL 的下界 / 上界（秒）
+pub const SSO_CONSENT_TICKET_TTL_MIN_SECS: u64 = 60;
+pub const SSO_CONSENT_TICKET_TTL_MAX_SECS: u64 = 1800;
+
+impl SsoConfig {
+    /// 解析后的同意票模式（非法值已由 [`SsoConsentTicketMode::parse`] 打 WARN 并回落 `off`）
+    pub fn consent_ticket_mode(&self) -> SsoConsentTicketMode {
+        SsoConsentTicketMode::parse(&self.consent_ticket)
+    }
+
+    /// 同意票据有效期（秒）：夹在 `60..=1800`，防止配成 0（立即失效）或过长（扩大重放窗口）
+    pub fn consent_ticket_ttl(&self) -> u64 {
+        self.consent_ticket_ttl_secs.clamp(
+            SSO_CONSENT_TICKET_TTL_MIN_SECS,
+            SSO_CONSENT_TICKET_TTL_MAX_SECS,
+        )
+    }
+}
+
+fn default_sso_consent_ticket_mode() -> String {
+    SsoConsentTicketMode::default().as_str().to_string()
+}
+
+fn default_sso_consent_ticket_ttl_secs() -> u64 {
+    300
 }
 
 /// v5-D12：SCIM 2.0 用户目录同步配置（RFC 7644 最小可用子集）
@@ -1851,6 +2012,7 @@ impl Settings {
             acme: AcmeConfig::default(),
             events: EventsConfig::default(),
             webauthn: WebauthnConfig::default(),
+            resilience: ResilienceConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -2016,6 +2178,7 @@ mod tests {
             acme: AcmeConfig::default(),
             events: EventsConfig::default(),
             webauthn: WebauthnConfig::default(),
+            resilience: ResilienceConfig::default(),
         }
     }
 
@@ -2038,6 +2201,52 @@ mod tests {
             s.permission_deny_by_default,
             "permission_deny_by_default 缺省必须为 true（fail-closed）"
         );
+    }
+
+    /// v5-D9：同意票档位解析与 TTL 夹取（默认 = 现状；非法值 fail-safe 回落 `off`）。
+    #[test]
+    fn test_sso_consent_ticket_mode_parse_and_clamp() {
+        assert_eq!(
+            SsoConsentTicketMode::parse("required"),
+            SsoConsentTicketMode::Required
+        );
+        assert_eq!(
+            SsoConsentTicketMode::parse("  REQUIRED  "),
+            SsoConsentTicketMode::Required
+        );
+        assert_eq!(
+            SsoConsentTicketMode::parse("off"),
+            SsoConsentTicketMode::Off
+        );
+        for bad in ["", "on", "true", "1", "log_only"] {
+            assert_eq!(
+                SsoConsentTicketMode::parse(bad),
+                SsoConsentTicketMode::Off,
+                "{bad:?} 非法取值必须回落 off（默认 = 现状）"
+            );
+        }
+        assert_eq!(SsoConsentTicketMode::default(), SsoConsentTicketMode::Off);
+        // 常量清单与枚举双向一致
+        assert_eq!(SSO_CONSENT_TICKET_MODES.len(), 2);
+        for raw in SSO_CONSENT_TICKET_MODES {
+            assert_eq!(SsoConsentTicketMode::parse(raw).as_str(), *raw);
+        }
+        // 缺省（未写 [sso].consent_ticket）= off + 300s
+        let d = SsoConfig::default();
+        assert_eq!(d.consent_ticket_mode(), SsoConsentTicketMode::Off);
+        assert_eq!(d.consent_ticket_ttl(), 300);
+        assert!(!d.consent_ticket.is_empty(), "缺省档位串应为已登记取值");
+        // TTL 夹取
+        let s = SsoConfig {
+            consent_ticket_ttl_secs: 0,
+            ..SsoConfig::default()
+        };
+        assert_eq!(s.consent_ticket_ttl(), SSO_CONSENT_TICKET_TTL_MIN_SECS);
+        let s = SsoConfig {
+            consent_ticket_ttl_secs: 999_999,
+            ..SsoConfig::default()
+        };
+        assert_eq!(s.consent_ticket_ttl(), SSO_CONSENT_TICKET_TTL_MAX_SECS);
     }
 
     /// W-1 回归：入库配置模板必须在**顶层**显式 fail-closed
@@ -2289,6 +2498,7 @@ mod tests {
             acme: AcmeConfig::default(),
             events: EventsConfig::default(),
             webauthn: WebauthnConfig::default(),
+            resilience: ResilienceConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);

@@ -200,6 +200,19 @@ async fn build_isolated_state() -> (Arc<AppState>, RedisSlot) {
 async fn build_isolated_state_with_features(
     features: &[(&str, &str)],
 ) -> (Arc<AppState>, RedisSlot) {
+    build_isolated_state_with(features, |_| {}).await
+}
+
+/// 与 [`build_isolated_state_with_features`] 相同，但额外允许调用方对**本实例**的 `Settings`
+/// 做任意调整（如 `[sso].consent_ticket = "required"`）。
+///
+/// 为什么需要：部分开关（如 `[sso].consent_ticket`）由 `settings.sso.*` 直读、**不经**
+/// `FeatureSet`，既要按用例翻档、又**不能**污染并行测试 ⇒ 只能落在实例级 `Settings` 上
+/// （进程级环境变量是全局的，会串档）。`configure` 在能力位覆盖之后、构建 `Arc<Settings>` 之前执行。
+async fn build_isolated_state_with(
+    features: &[(&str, &str)],
+    configure: impl FnOnce(&mut Settings),
+) -> (Arc<AppState>, RedisSlot) {
     // 幂等初始化测试日志，便于并行测试中查看底层错误（DbErr 等）
     init_test_tracing();
 
@@ -227,6 +240,9 @@ async fn build_isolated_state_with_features(
             .0
             .insert((*key).to_string(), (*mode).to_string());
     }
+
+    // 调用方的实例级调整（不影响其它并行测试）
+    configure(&mut settings);
 
     let slot = acquire_redis_slot().await;
     let db_path = unique_temp_db_path();
@@ -367,7 +383,17 @@ impl TestContext {
 
     /// 同上，但注入平台层能力位覆盖（供 `privacy.user_erasure` 等能力位用例按档位验证）。
     pub async fn new_with_features(features: &[(&str, &str)]) -> Self {
-        let (state, slot) = build_isolated_state_with_features(features).await;
+        Self::new_with(features, |_| {}).await
+    }
+
+    /// 同上，但额外允许对**本实例**的 `Settings` 做任意调整（如 `[sso].consent_ticket`）。
+    ///
+    /// 与 `new_with_features` 一样是**实例级**（写入 `Arc<Settings>`），因此不影响并行测试。
+    pub async fn new_with(
+        features: &[(&str, &str)],
+        configure: impl FnOnce(&mut Settings),
+    ) -> Self {
+        let (state, slot) = build_isolated_state_with(features, configure).await;
         let app = crate::router::build_app(state.clone());
         let peer_ip = next_peer_ip();
         let token = login(&app, peer_ip, "admin", "admin123").await;

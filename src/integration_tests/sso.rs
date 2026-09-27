@@ -470,6 +470,114 @@ async fn test_sso_security_negative_paths() {
     );
 }
 
+/// v5-D9（本轮新增）：`[sso].consent_ticket = required` 的**同意票**语义（可证伪）。
+///
+/// 覆盖：① 无票 ⇒ 拒绝；② 伪造票 ⇒ 拒绝；③ 合法票但改了 state ⇒ 拒绝，且**票未被消费**；
+/// ④ 参数一致 ⇒ 成功；⑤ 同票**重放** ⇒ 拒绝（可证伪"一次性"）。
+///
+/// 断言一律比较**业务码**（不假定 HTTP 状态），因此与 `legacy` / `restful` 两档都兼容；
+/// 同时默认档用例 `test_sso_consent_flow`（不带票也成功）继续通过 ⇒ "关闭态零行为变更"
+/// 由**正反两面**同时锁定。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_consent_ticket_required() {
+    unsafe {
+        std::env::set_var("SSO_ENABLED", "true");
+        std::env::set_var("SSO_ISSUER", "https://sso.test");
+    }
+    // 实例级翻档：只影响本用例（写入 `Arc<Settings>`），不污染并行测试
+    let ctx = TestContext::new_with(&[], |s| {
+        s.sso.consent_ticket = "required".to_string();
+    })
+    .await;
+    let (cid, _secret) = add_client(&ctx, "1", "it_sso_consent_ticket").await;
+    let cookie = format!("Admin-Token={}", ctx.token);
+
+    // 1. authorize（需同意）⇒ 302 /sso-consent?...&ticket=<id>
+    let (status, headers, _) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &authorize_url(&cid, PKCE_CHALLENGE, REDIRECT_URI_ENC),
+        &[("cookie", cookie.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let loc = location_of(&headers);
+    assert!(loc.starts_with("/sso-consent"), "实际: {loc}");
+    let ticket = query_param(&loc, "ticket").expect("required 档必须下发 ticket");
+    assert!(!ticket.is_empty(), "票据不得为空串");
+
+    // 2. 无票 ⇒ 拒绝
+    assert_ne!(
+        consent_code(&ctx, &cid, None, "openid profile", "st_42").await,
+        200,
+        "required 档缺票必须拒绝"
+    );
+    // 3. 伪造票 ⇒ 拒绝
+    assert_ne!(
+        consent_code(
+            &ctx,
+            &cid,
+            Some("forged_ticket_id"),
+            "openid profile",
+            "st_42"
+        )
+        .await,
+        200,
+        "伪造票必须拒绝"
+    );
+    // 4. 合法票但改了 state ⇒ 拒绝，且票**未被消费**
+    assert_ne!(
+        consent_code(&ctx, &cid, Some(&ticket), "openid profile", "st_TAMPERED").await,
+        200,
+        "回显参数与票面不一致必须拒绝"
+    );
+    // 4b. 同票 + 原 state ⇒ 仍可成功（证明第 4 步未消费票）
+    assert_eq!(
+        consent_code(&ctx, &cid, Some(&ticket), "openid profile", "st_42").await,
+        200,
+        "参数一致应放行（也证明上一步未消费票）"
+    );
+    // 5. 一次性：同票重放 ⇒ 拒绝
+    assert_ne!(
+        consent_code(&ctx, &cid, Some(&ticket), "openid profile", "st_42").await,
+        200,
+        "票一次性使用，重放必须拒绝"
+    );
+}
+
+/// 提交同意页（可带票），返回**业务码**（不假定 HTTP 状态，兼容 legacy/restful）。
+async fn consent_code(
+    ctx: &TestContext,
+    client_id: &str,
+    ticket: Option<&str>,
+    scope: &str,
+    state: &str,
+) -> i64 {
+    let auth = format!("Bearer {}", ctx.token);
+    let mut body = serde_json::json!({
+        "clientId": client_id,
+        "redirectUri": REDIRECT_URI,
+        "scope": scope,
+        "state": state,
+        "codeChallenge": PKCE_CHALLENGE,
+        "codeChallengeMethod": "S256",
+        "approved": true
+    });
+    if let Some(t) = ticket {
+        body["ticket"] = serde_json::Value::String(t.to_string());
+    }
+    let (_, _, raw) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/consent",
+        "application/json",
+        &body.to_string(),
+        &[("authorization", auth.as_str())],
+    )
+    .await;
+    json_of(&raw)["code"].as_i64().unwrap_or(-1)
+}
+
 /// consent_required='1'：authorize → NeedConsent 引导同意页 → POST /sso/consent 批准 → token。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sso_consent_flow() {

@@ -20,6 +20,8 @@ pub mod tenant;
 pub mod upload;
 pub mod webhook;
 
+pub mod breaker;
+
 #[cfg(test)]
 pub mod fuzz_invariants;
 
