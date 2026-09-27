@@ -48,6 +48,10 @@ impl AppInitializer {
         // 能力位开启但 rp_id/origin 未配置且无法推导/推导非法时打 **WARN**（拒绝静默失效）。
         init_webauthn_output(&settings);
 
+        // 2.5 #10 出站 webhook 熔断（`[resilience].outbound_breaker`）：默认 off = 现状
+        // （不判定/不记账/每次都尝试发送）；on 时对 `[acme]` / `[events]` 的出站推送生效。
+        init_outbound_breaker(&settings);
+
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
 
@@ -4001,6 +4005,16 @@ fn init_http_status_convention(settings: &Settings) {
              标准码与 legacy 档一致"
         );
     }
+}
+
+/// #10：把 `[resilience]` 的出站熔断参数注入全局（默认 `off` = 现状：每次都尝试发送）。
+///
+/// 治理意义：熔断会**改变出站发送行为**（打开期间直接跳过推送），必须让运维一眼看到本实例
+/// 是否启用、阈值与冷却（由 [`crate::common::breaker::init`] 打 INFO）；`off` 档不判定、
+/// 不记账 ⇒ 与改造前逐字节等价。非法档位在解析时 WARN 并回落 `off`（fail-safe）。
+fn init_outbound_breaker(settings: &Settings) {
+    let cfg = crate::common::breaker::BreakerConfig::from_settings(settings);
+    crate::common::breaker::init(cfg);
 }
 
 /// 注入平台层能力位并做**启动治理打印**（幂等：重复调用只保留首次注入）。

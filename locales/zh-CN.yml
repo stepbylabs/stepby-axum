@@ -140,6 +140,7 @@ error:
     secret_encrypt_failed: 客户端密钥加密失败，请检查服务端主密钥配置
     access_denied: 您拒绝了本次授权请求
     logo_uri_invalid: logo_uri 必须为 http(s) 绝对地址且不超过 500 字符
+    consent_ticket_invalid: 同意票据无效或已过期，请重新发起授权
   file:
     delete_failed: 删除文件失败
     delete_task_failed: 删除任务失败

@@ -114,6 +114,15 @@ pub fn spawn_emit(
                 return;
             }
         };
+        // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
+        if !crate::common::breaker::try_acquire(&url) {
+            tracing::debug!(
+                event,
+                host = %crate::common::breaker::host_of(&url),
+                "ACME 证书需求推送已被出站熔断跳过"
+            );
+            return;
+        }
         let mut req = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -122,9 +131,10 @@ pub fn spawn_emit(
         if let Some(secret) = secret.as_deref().filter(|s| !s.is_empty()) {
             req = req.header("X-Yebot-Signature", format!("sha256={}", sign(secret, &bytes)));
         }
-        match req.send().await {
+        let sent_ok = match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 tracing::info!(event, host = %host, tenant_id, "ACME 证书需求已推送");
+                true
             }
             Ok(resp) => {
                 tracing::warn!(
@@ -133,6 +143,7 @@ pub fn spawn_emit(
                     status = %resp.status(),
                     "ACME 证书需求推送被拒（接收端非 2xx；业务不受影响）"
                 );
+                false
             }
             Err(e) => {
                 tracing::warn!(
@@ -141,8 +152,10 @@ pub fn spawn_emit(
                     error = %e,
                     "ACME 证书需求推送失败（业务不受影响；可用 deploy/README §7.1 的全量重推脚本对齐）"
                 );
+                false
             }
-        }
+        };
+        crate::common::breaker::record(&url, sent_ok);
     });
 }
 

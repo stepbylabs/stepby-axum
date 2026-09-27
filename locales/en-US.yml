@@ -140,6 +140,7 @@ error:
     secret_encrypt_failed: Failed to encrypt client secret, check the server master key config
     access_denied: You denied the authorization request
     logo_uri_invalid: logo_uri must be an http(s) absolute URL of at most 500 characters
+    consent_ticket_invalid: Consent ticket is invalid or expired, please restart the authorization
   file:
     delete_failed: Failed to delete file
     delete_task_failed: Delete task failed

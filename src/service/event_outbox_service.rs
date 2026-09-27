@@ -94,6 +94,15 @@ pub fn spawn_emit(cfg: EventsConfig, event: &'static str, data: serde_json::Valu
                 return;
             }
         };
+        // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
+        if !crate::common::breaker::try_acquire(&url) {
+            tracing::debug!(
+                event,
+                host = %crate::common::breaker::host_of(&url),
+                "领域事件推送已被出站熔断跳过"
+            );
+            return;
+        }
         let mut req = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -108,9 +117,10 @@ pub fn spawn_emit(cfg: EventsConfig, event: &'static str, data: serde_json::Valu
                 ),
             );
         }
-        match req.send().await {
+        let sent_ok = match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 tracing::info!(event, "领域事件已推送");
+                true
             }
             Ok(resp) => {
                 tracing::warn!(
@@ -118,11 +128,14 @@ pub fn spawn_emit(cfg: EventsConfig, event: &'static str, data: serde_json::Valu
                     status = %resp.status(),
                     "领域事件推送被拒（接收端非 2xx；业务不受影响）"
                 );
+                false
             }
             Err(e) => {
                 tracing::warn!(event, error = %e, "领域事件推送失败（业务不受影响）");
+                false
             }
-        }
+        };
+        crate::common::breaker::record(&url, sent_ok);
     });
 }
 
