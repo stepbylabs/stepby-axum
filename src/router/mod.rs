@@ -41,6 +41,7 @@ pub mod sys_user_router;
 pub mod sys_web_hook_router;
 pub mod tool_gen_router;
 pub mod totp_router;
+pub mod webauthn_router;
 
 use crate::config::settings::ServerConfig;
 use crate::docs;
@@ -127,6 +128,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(tool_gen_router::gen_routes())
         .merge(common_router::common_routes())
         .merge(totp_router::totp_routes())
+        .merge(webauthn_router::webauthn_routes())
         .merge(file_router::file_routes())
         // oper_log_middleware 记录写操作日志（POST/PUT/DELETE），最内层
         .route_layer(from_fn_with_state(state.clone(), oper_log_middleware))

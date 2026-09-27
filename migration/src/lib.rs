@@ -84,6 +84,7 @@ pub use m20260926_000012_backup_permission_granularity::Migration as M20260926Ba
 pub use m20260926_000013_platform_only_tenant_menu::Migration as M20260926PlatformOnlyTenantMenu;
 pub use m20260926_000014_tenant_nav_menu::Migration as M20260926TenantNavMenu;
 pub use m20260927_000001_oauth_client_prev_secret::Migration as M20260927OauthClientPrevSecret;
+pub use m20260927_000002_sys_user_credential::Migration as M20260927SysUserCredential;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -166,6 +167,7 @@ mod m20260926_000012_backup_permission_granularity;
 mod m20260926_000013_platform_only_tenant_menu;
 mod m20260926_000014_tenant_nav_menu;
 mod m20260927_000001_oauth_client_prev_secret;
+mod m20260927_000002_sys_user_credential;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -329,6 +331,8 @@ impl MigratorTrait for Migrator {
             Box::new(M20260926TenantNavMenu),
             // SSO D9：client_secret 零停机轮换的"双密钥读取期"（新增列，存量行 NULL = 行为不变）
             Box::new(M20260927OauthClientPrevSecret),
+            // WebAuthn / Passkey 凭据表（能力位 auth.webauthn，默认 off）
+            Box::new(M20260927SysUserCredential),
         ]
     }
 }

@@ -222,6 +222,12 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 #
 # ⚠️ 能力位键**含点号**，TOML 中必须加引号（不加引号会被解析成嵌套表而整段解析失败）。
 [features]
+# WebAuthn / Passkey 登录（默认 off）——**登录面能力**：开启后用户可自助绑定 passkey，
+# 并在登录页以 passkey（免密码）登录。关闭态 = 6 条端点一律 404（不暴露"存在但被关"）。
+# ⚠️ 开启前须确认 [webauthn].rp_id / origin 可用（留空则从 [server].cors_origins 首个来源
+#    推导 rp_id=注册域、origin=该来源）；推导失败时启动打 WARN，请求期返回 503。
+# ⚠️ 本能力位不向任何租户下放 perm（登录面能力），无需租户套餐配合。
+"auth.webauthn" = "off"
 # 租户域名自助管理（默认 off）——开启后租户管理员可管理**本租户**域名；
 # 需服务层按 tid 收窄 + 租户套餐同时开启，否则"菜单可见但请求 403"的假入口仍被拦截。
 "tenant.domain_self_service" = "off"
@@ -346,3 +352,23 @@ outbound = "off"
 # webhook_url = "https://ops.example.com/hooks/yebot-events"
 # secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
 timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
+
+# ==================== WebAuthn / Passkey ====================
+# 能力位 `auth.webauthn`（[features] 段，默认 off）的**配置面**。
+#
+# rp_id / origin 是 WebAuthn 的**信任锚**（配错即认证恒失败）：
+#   rp_id  依赖方标识，域名后缀（如 example.com；**不含 scheme 与端口**）；
+#   origin 期望来源（如 https://example.com；**含 scheme**）。
+#
+# 二者留空时从 `[server].cors_origins` 首个来源**推导兜底**：
+#   origin ← cors_origins[0]；rp_id ← 该 origin 的 host 去掉最左子域（app.example.com ⇒ example.com；
+#   localhost / IP 原样保留）。⚠️ 推导是保守启发式，多级公共后缀（如 a.b.co.uk）不精确，
+#   生产环境请**显式配置** rp_id / origin。
+#
+# ⚠️ 能力位开启但 rp_id/origin 未配置且无法推导（或推导结果非法）⇒ 启动打 WARN，
+#    请求期返回 503（服务器未就绪），**拒绝静默失效**。
+[webauthn]
+rp_id = ""               # 留空 ⇒ 从 [server].cors_origins 首个来源的 host 推导注册域
+rp_name = "Yebot"        # 浏览器 passkey 提示中展示的依赖方名称
+origin = ""              # 留空 ⇒ 取 [server].cors_origins 首个来源
+state_ttl_secs = 300     # 挑战 / 会话临时态 TTL（秒，至少 1）

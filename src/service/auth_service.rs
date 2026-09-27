@@ -1151,6 +1151,37 @@ impl AuthService {
         })
     }
 
+    /// **WebAuthn / Passkey 登录的完成链路复用点**（能力位 `auth.webauthn`）。
+    ///
+    /// 入参 `user` 已由 `WebauthnService` 完成断言校验与"可用性 / 租户闸门"校验；本方法只做
+    /// **与密码登录完全一致**的收尾——签发 JWT（含 `pwd_ver`）、写登录成功日志、登记在线会话、
+    /// 更新 `login_ip` / `login_date`、清除失败计数——即直接调用 [`Self::finalize_login`]
+    /// 的同一实现，**不另写一套令牌签发**（避免双份令牌逻辑漂移）。
+    ///
+    /// 说明：passkey 本身即"持有+用户验证"的强多因子，故本路径**不再**要求 TOTP 二次验证
+    /// （密码登录才需要，因为密码是单因子）。
+    pub async fn finalize_webauthn_login(
+        &self,
+        user: &SysUserModel,
+        login_ip: &str,
+        user_agent: &str,
+        redis: &mut redis::aio::ConnectionManager,
+        jwt_config: &JwtConfig,
+        ip_locator: &IpLocator,
+    ) -> Result<LoginVo, ServiceError> {
+        let browser = parse_browser(user_agent);
+        let os = parse_os(user_agent);
+        let login_location = ip_locator.locate(login_ip);
+        let ctx = LoginContext {
+            username: &user.user_name,
+            login_ip,
+            login_location: &login_location,
+            browser: &browser,
+            os: &os,
+        };
+        self.finalize_login(user, redis, jwt_config, &ctx).await
+    }
+
     /// 登出：token 加入 Redis 黑名单 + 删除 online 会话映射（fail-closed：黑名单写入失败返回错误）
     ///
     /// 流程：

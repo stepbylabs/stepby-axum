@@ -44,6 +44,10 @@ impl AppInitializer {
         // 2.3 出站领域事件姿态（`[events]`）：默认 off；配了 webhook 但地址非法时告警（同上）。
         init_events_output(&settings);
 
+        // 2.4 WebAuthn / Passkey 姿态（`[features].auth.webauthn` + `[webauthn]`）：
+        // 能力位开启但 rp_id/origin 未配置且无法推导/推导非法时打 **WARN**（拒绝静默失效）。
+        init_webauthn_output(&settings);
+
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
 
@@ -252,6 +256,13 @@ impl AppInitializer {
         ensure_tenant_package_features(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_tenant_package.features 兜底失败: {}", e))?;
+
+        // 3.5.7 能力位 auth.webauthn：WebAuthn / Passkey 凭据表（存量库兜底，等价迁移
+        //       m20260927_000002）。缺此兜底时：实体已声明该表，任何凭据查询/写入都会
+        //       500（no such table），能力位开启后自助绑定与 passkey 登录全链不可用。
+        ensure_sys_user_credential_table(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_user_credential 表失败: {}", e))?;
 
         // 3.6 v4 加固：幂等确保 SSO 表新列（update_by/del_flag/consented_at/client_name_snapshot）
         // 与存量数据回填（同意时刻/客户端名快照/grant_types 修正/明文 id_token_secret 加密）。
@@ -1374,6 +1385,104 @@ async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Result<()> {
 
     tracing::info!("sys_pat 表已就绪（幂等确保完成）");
     Ok(())
+}
+
+/// 台账（能力位 `auth.webauthn`，存量库兜底，等价迁移 `m20260927_000002`）：
+/// WebAuthn / Passkey 凭据表 `sys_user_credential`。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而实体已声明该表
+/// ⇒ 缺此兜底则凭据查询/写入全链报 `no such table: sys_user_credential`（500），
+/// 能力位开启后自助绑定与 passkey 登录不可用（假功能）。
+///
+/// 幂等：`CREATE TABLE IF NOT EXISTS` 三方言均合法；主键按方言声明自增（SQLite
+/// `INTEGER PRIMARY KEY AUTOINCREMENT` / MySQL `BIGINT AUTO_INCREMENT` / PG `BIGSERIAL`）。
+/// 索引：SQLite/PG 支持 `CREATE INDEX IF NOT EXISTS`，MySQL 不支持该子句，交由 migration 补齐。
+async fn ensure_sys_user_credential_table(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let pk = match backend {
+        DatabaseBackend::Sqlite => "cred_id INTEGER PRIMARY KEY AUTOINCREMENT",
+        DatabaseBackend::MySql => "cred_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        DatabaseBackend::Postgres => "cred_id BIGSERIAL PRIMARY KEY",
+    };
+    let dt = match backend {
+        DatabaseBackend::Postgres => "TIMESTAMP",
+        _ => "DATETIME",
+    };
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS sys_user_credential (
+            {pk},
+            user_id        BIGINT NOT NULL,
+            tenant_id      BIGINT NOT NULL DEFAULT 0,
+            credential_id  VARCHAR(512) NOT NULL,
+            public_key     TEXT NOT NULL,
+            name           VARCHAR(255) NOT NULL,
+            sign_count     BIGINT NOT NULL DEFAULT 0,
+            last_used_at   {dt} NULL,
+            create_time    {dt} NULL,
+            del_flag       VARCHAR(1) NOT NULL DEFAULT '0'
+        )"
+    );
+    db.execute(Statement::from_string(backend, create_sql))
+        .await?;
+
+    if !matches!(backend, DatabaseBackend::MySql) {
+        for ddl in [
+            "CREATE UNIQUE INDEX IF NOT EXISTS uk_sys_user_credential_credential_id ON sys_user_credential(credential_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sys_user_credential_user_id ON sys_user_credential(user_id)",
+        ] {
+            // 并发/已存在时忽略失败（表与索引已由 migration 建好属正常情况）
+            if let Err(e) = db
+                .execute(Statement::from_string(backend, ddl.to_string()))
+                .await
+            {
+                tracing::debug!("sys_user_credential 索引创建跳过（可能已存在）: {}", e);
+            }
+        }
+    }
+
+    tracing::info!("sys_user_credential 表已就绪（幂等确保完成）");
+    Ok(())
+}
+
+/// 启动打印 **WebAuthn / Passkey** 的有效姿态（`[features].auth.webauthn` + `[webauthn]`）。
+///
+/// 治理意义与 `[acme]` / `[events]` 同源：能力位是"放开登录面能力"的唯一入口，
+/// 且 `rp_id` / `origin` 是 WebAuthn 的**信任锚**，配错即认证恒失败。故：
+/// - 能力位 `off`（默认）⇒ 打 INFO（端点表现为 404，不暴露"存在但被关"）；
+/// - 能力位 `on` 且解析出有效 `rp_id` / `origin` ⇒ 打 INFO 列出实际信任锚；
+/// - 能力位 `on` 但 `rp_id` / `origin` 未配置、无法从 `[server].cors_origins` 推导、
+///   或推导结果非法 ⇒ 打 **WARN**（拒绝静默失效：请求期将返回 503 而非静默失败）。
+fn init_webauthn_output(settings: &Settings) {
+    use crate::common::features::FeatureSet;
+
+    let on = FeatureSet::sanitized(settings.features.0.clone())
+        .is_on(crate::service::webauthn_service::FEATURE_WEBAUTHN);
+
+    match (on, settings.webauthn.resolved(&settings.server)) {
+        (false, _) => {
+            tracing::info!(
+                "WebAuthn/Passkey：[features].auth.webauthn = off（默认；端点表现为 404）"
+            );
+        }
+        (true, Some(r)) => {
+            tracing::info!(
+                rp_id = %r.rp_id,
+                rp_name = %r.rp_name,
+                origin = %r.origin,
+                state_ttl_secs = r.state_ttl_secs,
+                "WebAuthn/Passkey：已启用（rp_id / origin 为 WebAuthn 信任锚，配置变更后浏览器旧凭据将失效）"
+            );
+        }
+        (true, None) => {
+            tracing::warn!(
+                rp_id = %settings.webauthn.rp_id,
+                origin = %settings.webauthn.origin,
+                "[features].auth.webauthn = on，但 [webauthn].rp_id / origin 未配置且无法从 \
+                 [server].cors_origins 推导（或推导结果非法）⇒ passkey 注册/登录将返回 503\
+                 （服务器未就绪）。请显式配置 [webauthn].rp_id 与 [webauthn].origin"
+            );
+        }
+    }
 }
 
 /// 多租户 Phase 2 存量库兜底（与迁移 m20260925_000001/000002 等价，全幂等）：

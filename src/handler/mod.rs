@@ -42,6 +42,7 @@ pub mod sys_user_pref_handler;
 pub mod sys_web_hook_handler;
 pub mod tool_gen_handler;
 pub mod totp_handler;
+pub mod webauthn_handler;
 pub mod ws_handler;
 
 pub use health::{health, metrics};

@@ -51,6 +51,7 @@ pub mod sys_tenant_menu;
 pub mod sys_tenant_migration_map;
 pub mod sys_tenant_package;
 pub mod sys_user;
+pub mod sys_user_credential;
 pub mod sys_user_dept;
 pub mod sys_user_post;
 pub mod sys_user_pref;

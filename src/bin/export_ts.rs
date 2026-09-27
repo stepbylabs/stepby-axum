@@ -100,6 +100,13 @@ fn main() {
         axum_backend::service::sys_tenant_service::PackageFeatureItemVo,
         axum_backend::service::sys_tenant_service::PackageFeaturesVo,
         axum_backend::service::sys_tenant_service::PackageFeaturesUpdateDto,
+        // ---- service：WebAuthn / Passkey（能力位 auth.webauthn） ----
+        axum_backend::service::webauthn_service::WebauthnRegisterFinishDto,
+        axum_backend::service::webauthn_service::AttestationResponseDto,
+        axum_backend::service::webauthn_service::WebauthnLoginStartDto,
+        axum_backend::service::webauthn_service::WebauthnLoginFinishDto,
+        axum_backend::service::webauthn_service::AssertionResponseDto,
+        axum_backend::service::webauthn_service::WebauthnCredentialVo,
     );
 
     if !failed.is_empty() {

@@ -17,6 +17,10 @@ pub fn public_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // WebSocket 升级握手：通过 query 参数 token 鉴权（WS 无法使用 layer 中间件）
         .route("/ws", get(ws_handler::ws_handler))
         .merge(auth_router::public_auth_routes(state.clone()))
+        // WebAuthn / Passkey 公开登录端点（免鉴权 + 限流；能力位 auth.webauthn 关闭时 404）
+        .merge(crate::router::webauthn_router::public_webauthn_routes(
+            state.clone(),
+        ))
         .merge(crate::router::sys_oauth_router::public_oauth_routes(
             state.clone(),
         ))

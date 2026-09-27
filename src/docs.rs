@@ -39,6 +39,9 @@ struct SwaggerAssets;
         crate::handler::auth_handler::logout,
         crate::handler::auth_handler::get_info,
         crate::handler::auth_handler::captcha,
+        // WebAuthn / Passkey 登录（能力位 auth.webauthn，默认 off ⇒ 404）
+        crate::handler::webauthn_handler::login_start,
+        crate::handler::webauthn_handler::login_finish,
         // ==================== 用户管理 ====================
         crate::handler::sys_user_handler::list,
         crate::handler::sys_user_handler::get_info_by_id,
@@ -49,6 +52,11 @@ struct SwaggerAssets;
         crate::handler::sys_user_handler::import_data,
         crate::handler::sys_user_handler::anonymize_precheck,
         crate::handler::sys_user_handler::anonymize_user,
+        // WebAuthn / Passkey 自助（绑定 / 凭据管理；能力位 auth.webauthn 门控）
+        crate::handler::webauthn_handler::register_start,
+        crate::handler::webauthn_handler::register_finish,
+        crate::handler::webauthn_handler::list_credentials,
+        crate::handler::webauthn_handler::delete_credential,
         // ==================== SCIM 组管理（v5-D12 Group） ====================
         crate::handler::sys_scim_group_handler::list,
         crate::handler::sys_scim_group_handler::get_info,
@@ -281,6 +289,13 @@ struct SwaggerAssets;
             // ==================== DTO ====================
             // 认证
             crate::service::auth_service::LoginDto,
+            // WebAuthn / Passkey（能力位 auth.webauthn）
+            crate::service::webauthn_service::WebauthnRegisterFinishDto,
+            crate::service::webauthn_service::AttestationResponseDto,
+            crate::service::webauthn_service::WebauthnLoginStartDto,
+            crate::service::webauthn_service::WebauthnLoginFinishDto,
+            crate::service::webauthn_service::AssertionResponseDto,
+            crate::service::webauthn_service::WebauthnCredentialVo,
             // 用户
             crate::service::sys_user_service::UserAddDto,
             crate::service::sys_user_service::UserEditDto,

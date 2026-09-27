@@ -145,6 +145,13 @@ const fn cfg(key: &'static str, coverage: Coverage) -> Item {
 ///
 /// 新增能力位必须在此登记，否则 `FeatureSet::sanitized` 会静默剔除该键。
 pub const FEATURES: &[Item] = &[
+    // WebAuthn / Passkey 登录（默认 off）。登录面能力：开启后用户可自助绑定 passkey，
+    // 并在登录页以 passkey（免密码）登录；关闭态 = 端点 404（不暴露"存在但被关"）。
+    //
+    // `unlocked = &[]`：本能力位解锁的是**登录面**（自助绑定 + 公开登录端点），
+    // 不向任何租户下放平台专属 perm ⇒ 无需（也不得）登记解锁清单。
+    // 服务层守卫：能力位非 on ⇒ 404；用户不存在/停用/删除 ⇒ 拒绝；凭据归属校验（只能操作自己的）。
+    feat("auth.webauthn", &[OFF, "on"], &[]),
     feat(
         "backup.tenant_self_export",
         &[OFF, "on"],

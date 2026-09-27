@@ -12,7 +12,7 @@ use crate::service::{
     SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
     SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysTenantDomainService,
     SysTenantNavService, SysTenantService, SysUserPrefService, SysUserService, SysWebHookService,
-    UserErasureService,
+    UserErasureService, WebauthnService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -35,6 +35,8 @@ pub struct AppState {
     pub user_service: SysUserService,
     /// GDPR 被遗忘权 / 用户匿名化 Service（能力位 `privacy.user_erasure` 门控）
     pub user_erasure_service: UserErasureService,
+    /// WebAuthn / Passkey Service（能力位 `auth.webauthn` 门控；默认 off ⇒ 端点 404）
+    pub webauthn_service: WebauthnService,
     /// 用户消息偏好 / 免打扰 Service
     pub user_pref_service: SysUserPrefService,
     /// 个人访问令牌（PAT）Service（Tier-S #3）
@@ -252,6 +254,15 @@ impl AppState {
             config.clone(),
         );
 
+        // WebAuthn / Passkey Service（能力位 `auth.webauthn` 门控；默认 off ⇒ 端点 404）。
+        // 复用同一 tenant_service：passkey 登录的租户闸门与密码登录口径单点。
+        let webauthn_service = WebauthnService::new(
+            db.clone(),
+            redis.clone(),
+            tenant_service.clone(),
+            config.clone(),
+        );
+
         // 全局可观测性句柄：按配置文件注入慢请求阈值 / 缓冲容量（进程内生效）
         // 注意：Observability 为进程级全局单例，这里仅做一次配置；重复初始化以最后一次为准。
         let observability = Observability::global();
@@ -265,6 +276,7 @@ impl AppState {
         Self {
             user_service: user_service.clone(),
             user_erasure_service,
+            webauthn_service,
             user_pref_service: SysUserPrefService::new(db.clone()),
             pat_service: SysPatService::new(db.clone(), menu_service.clone()),
             role_service,

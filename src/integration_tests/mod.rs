@@ -61,6 +61,7 @@ mod tenant_scope;
 mod tool_gen;
 mod totp;
 mod user_erasure;
+mod webauthn;
 mod ws;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
