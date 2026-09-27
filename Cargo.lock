@@ -340,6 +340,7 @@ dependencies = [
  "futures",
  "futures-util",
  "garde",
+ "governance",
  "hex",
  "hmac",
  "jsonwebtoken",
@@ -1749,6 +1750,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "governance"
+version = "0.1.0"
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2522,6 +2527,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dotenvy",
+ "governance",
  "sea-orm-migration",
  "tokio",
 ]

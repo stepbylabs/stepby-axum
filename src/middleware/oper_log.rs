@@ -657,6 +657,10 @@ fn is_sensitive_key(key: &str) -> bool {
         || lower.contains("cardnumber")
         || lower.contains("bank_card")
         || lower.contains("card_number")
+        // PII 补漏：昵称与头像 URL 同样是个人标识（详见 `sanitize_value` 同名分支注释）
+        || lower.contains("nickname")
+        || lower.contains("nick_name")
+        || lower.contains("avatar")
         || lower.contains("token")
         || lower == "password"
         || lower == "pwd"
@@ -711,6 +715,11 @@ fn sanitize_param(s: String) -> String {
         "cardNumber",
         "card_number",
         "idNo",
+        // PII 补漏：昵称 / 头像 URL（非 JSON 请求体的字符串模式匹配需精确大小写变体）
+        "nickName",
+        "nickname",
+        "nick_name",
+        "avatar",
         "salt",
         "secret",
         "apiKey",
@@ -902,7 +911,14 @@ fn sanitize_value(v: &mut serde_json::Value) {
                     || lower == "salt"
                     || lower == "secret"
                     || lower.contains("apikey")
-                    || lower.contains("api_key");
+                    || lower.contains("api_key")
+                    // PII 补漏（本轮）：昵称与头像 URL 同为个人标识，此前遗漏 ⇒ 改昵称的审计
+                    // `oper_diff` 会留下明文昵称、响应体也会回显，主体身份可从审计反查，
+                    // 使"匿名化 / 被遗忘权"形同虚设。整字段替换 `***`（昵称保留部分字符
+                    // 无意义，不像手机号可保留前 3 后 4）。
+                    || lower.contains("nickname")
+                    || lower.contains("nick_name")
+                    || lower.contains("avatar");
                 if need_mask_token {
                     if let Some(val) = map.get_mut(&k) {
                         *val = serde_json::Value::String("***".to_string());
@@ -1134,6 +1150,59 @@ mod tests {
         assert!(!result.contains("topsecret"));
         // 三个字段均应被替换为 "***"
         assert_eq!(result.matches("\"***\"").count(), 3);
+    }
+
+    /// **PII 补漏回归锁**（本轮）：昵称与头像 URL 此前不在任何脱敏名单内。
+    ///
+    /// 漏项后果：改昵称的操作会在审计 `oper_diff` 留下前后明文昵称，响应体也会原样回显，
+    /// 主体身份可从审计反查 —— 使"匿名化 / 被遗忘权"形同虚设。
+    ///
+    /// 可证伪性：移除 `sanitize_value` 的 nickname/avatar 分支，本用例立即变红。
+    #[test]
+    fn test_sanitize_response_body_nickname_and_avatar() {
+        let body = r#"{"nickName":"张三丰","avatar":"https://cdn.example.com/u/42.png"}"#;
+        let result = sanitize_response_body(body);
+        assert!(!result.contains("张三丰"), "昵称必须脱敏");
+        assert!(!result.contains("cdn.example.com"), "头像 URL 必须脱敏");
+        assert_eq!(result.matches("\"***\"").count(), 2);
+        // 下划线形式同样命中
+        let snake = sanitize_response_body(r#"{"nick_name":"李四"}"#);
+        assert!(!snake.contains("李四"));
+    }
+
+    /// **名单一致性锁**：审计 diff 名单（`is_sensitive_key`）与响应体/参数脱敏名单
+    /// （`sanitize_value` / `sanitize_param`）必须覆盖同一批 PII 字段。
+    ///
+    /// 这两处名单历史上是各写一份的（本次已同步把 nickname/avatar 补进三处）；
+    /// 本用例作为"下次补字段必须三处同时补"的回归锁。
+    #[test]
+    fn test_sensitive_field_lists_stay_consistent() {
+        for key in [
+            "password",
+            "pwd",
+            "nickName",
+            "nick_name",
+            "avatar",
+            "phonenumber",
+            "mobile",
+            "email",
+            "idCard",
+            "idNo",
+            "bankCard",
+            "cardNumber",
+            "apiKey",
+            "secret",
+            "salt",
+            "token",
+        ] {
+            assert!(is_sensitive_key(key), "审计 diff 名单应覆盖 {key}");
+            let body = format!(r#"{{"{key}":"plaintext-value"}}"#);
+            let out = sanitize_response_body(&body);
+            assert!(
+                !out.contains("plaintext-value"),
+                "响应体脱敏名单应覆盖 {key}"
+            );
+        }
     }
 
     // C-1 新 P0：safe_truncate 单元测试

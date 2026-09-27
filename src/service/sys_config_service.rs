@@ -10,13 +10,14 @@
 //! - **治理列读写**（§27.8）：`scope` / `tenant_editable` / `visible_to_tenant`
 //!
 //! ## config 治理（§27.8 四条硬规则）
-//! ① `platform_only`（平台安全项）集合在代码常量 [`PLATFORM_LOCKED_KEYS`] 中锁死，
+//! ① `platform_only`（平台安全项）集合由零依赖共享 crate `governance` 锁死
 //!    界面**不允许**下放（`tenant_editable='0'`、`visible_to_tenant='0'`）；
 //! ② 治理元数据（scope/editable/visible）的变更走本 Service 的写路径，
 //!    而 `/system/config` 的写操作已被 `oper_log_middleware` 覆盖审计（actor + 前后值），
 //!    故此处**无需**额外实现审计（元数据变更留痕由中间件保证）；
-//! ③ 默认策略由 seed 常量定义：[`PLATFORM_LOCKED_KEYS`] / [`PLATFORM_DEFAULT_KEYS`]
-//!    即迁移 `m20260925_000004` 的 seed 清单单一事实源，平台在允许范围内覆写；
+//! ③ 默认策略由注册表声明（`governance::CONFIGS` 的 `Coverage`）：迁移
+//!    `m20260925_000004` 与启动兜底 `ensure_tenant_saas_governance` 都从**同一份数据**
+//!    按覆盖策略分组 seed（此前是"同值本地副本 + 人工两处同步"），平台在允许范围内覆写；
 //! ④ 敏感项由 `visible_to_tenant='0'` **显式声明**——`is_sensitive_key` 由"主判据"
 //!    降级为"治理列缺省时的兜底"（见 `get_config_by_key`）。
 //!
@@ -38,34 +39,20 @@ use crate::repository::sys_config::SysConfigRepository;
 
 // ==================== 治理常量（§27.8 硬规则① / ③，单一事实源）====================
 
-/// `platform_only`（平台安全项）config key 集合——**代码常量锁死，界面不允许下放**。
+/// `platform_only`（平台安全项）config key 集合——**注册表锁死，界面不允许下放**。
 ///
 /// 安全底线：密码策略、验证码/注册开关、登录锁定、IP 库凭据、审计告警阈值等。
-/// 与迁移 `migration/src/m20260925_000004_tenant_saas_governance.rs::PLATFORM_ONLY_KEYS`
-/// 及 `AppInitializer::ensure_tenant_saas_governance` 的 seed 保持一致
-/// （migration crate 无法依赖 lib，故保留同值本地副本，**修改时必须两处同步**）。
-pub const PLATFORM_LOCKED_KEYS: &[&str] = &[
-    "sys.user.initPassword",
-    "sys.account.captchaEnabled",
-    "sys.account.registerUser",
-    "sys.login.blackIPList",
-    "ip_location.update_source",
-    "ip_location.maxmind_account_id",
-    "ip_location.maxmind_license_key",
-    "ip_location.auto_update_enabled",
-    "sys.audit.alarm.window_minutes",
-    "sys.audit.alarm.fail_threshold",
-    "sys.audit.alarm.fail_rate_threshold",
-];
+///
+/// **单一事实源已上移到零依赖共享 crate `governance`**（`CONFIGS` 中
+/// `Coverage::Locked` 的项）。迁移 `m20260925_000004` 与启动兜底
+/// `ensure_tenant_saas_governance` 现在都引用同一份数据，不再需要
+/// 「同值本地副本 + 修改时人工两处同步」。
+pub use governance::locked_keys as platform_locked_keys;
 
 /// `platform_default`（平台默认值，租户可见且可覆盖）config key 集合。
 ///
-/// 与迁移 `m20260925_000004` 的 `PLATFORM_DEFAULT_KEYS` 保持一致。
-pub const PLATFORM_DEFAULT_KEYS: &[&str] = &[
-    "sys.index.skinName",
-    "sys.index.sideTheme",
-    "sys.login.background",
-];
+/// 单一事实源为共享 crate `governance`（`Coverage::Free` / `Coverage::Ceiling` 的项）。
+pub use governance::default_keys as platform_default_keys;
 
 /// 治理域取值：平台锁定（租户不可见、不可改）
 const SCOPE_PLATFORM_ONLY: &str = "platform_only";
@@ -341,9 +328,14 @@ impl SysConfigService {
 
     // ==================== 治理辅助 ====================
 
-    /// key 是否为平台锁定安全项（§27.8 硬规则①：代码常量锁死，界面不允许下放）。
+    /// key 是否为平台锁定安全项（§27.8 硬规则①：注册表锁死，界面不允许下放）。
+    ///
+    /// 判据来自共享注册表的 `Coverage::Locked`。未登记 key 一律**非**锁定
+    /// （交由调用方的其它门禁处理），与旧 `PLATFORM_LOCKED_KEYS.contains` 逐条等价。
     fn is_platform_locked(config_key: &str) -> bool {
-        PLATFORM_LOCKED_KEYS.contains(&config_key)
+        governance::item(config_key)
+            .map(|i| i.coverage == governance::Coverage::Locked)
+            .unwrap_or(false)
     }
 
     /// 归一化治理标志位（'0'/'1'），非法值显式报错（不静默降级）。
@@ -403,7 +395,7 @@ impl SysConfigService {
     ///   不可编辑 / 不可见 → **403**（fail-closed，用 forbidden 而非 400）；
     /// - **平台无该 key 的行**：允许租户**自建** `tenant_private` 新键（租户业务配置，
     ///   行 `tenant_id=tid` 仅本租户可见，不污染平台默认层）；
-    /// - `platform_only` 锁定集合（[`PLATFORM_LOCKED_KEYS`]）一律 **403**，不可自建。
+    /// - `platform_only` 锁定集合（注册表 `Coverage::Locked`）一律 **403**，不可自建。
     async fn ensure_tenant_can_write(
         &self,
         tid: i64,

@@ -39,6 +39,8 @@ fn query_all() -> UserQueryDto {
         begin_time: None,
         end_time: None,
         last_id: None,
+        // 该集成测试只验证 data_scope × tenant_scope 的隔离，不叠加显式租户筛选
+        tenant_id: None,
     }
 }
 

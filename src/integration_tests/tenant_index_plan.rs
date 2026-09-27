@@ -111,6 +111,8 @@ fn logininfor_query() -> LogininforQueryDto {
         begin_time: None,
         end_time: None,
         last_id: None,
+        // 该集成测试只验证 tenant_scope 维度的索引选择，不叠加显式租户筛选
+        tenant_id: None,
     }
 }
 

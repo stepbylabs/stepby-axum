@@ -108,7 +108,7 @@ pub fn eval_tenant_runtime_state(
 /// - `system:tenantMenu:`：租户自建导航 L3 管理（批次 3）。**语义与 `system:tenant:domain:`
 ///   同类**——功能面向租户（管理的是本租户的导航结构），但**必须经能力位 `nav.l3` 才可下放**：
 ///   能力位关闭时若已授菜单，会形成"菜单可见但请求 403"的假入口。故登记在此（默认整面
-///   不下放），由 `common::features::CAPABILITY_UNLOCKED_PERMS` 在能力位开启时逐条解锁。
+///   不下放），由共享注册表（`governance::Item::unlocked`）在能力位开启时逐条解锁。
 ///
 /// # 重要：本清单的准确语义
 ///

@@ -7,6 +7,9 @@ edition = "2024"
 default-run = "axum-backend"
 
 [dependencies]
+# 项目内共享 crate：治理项注册表（单一事实源，与 migration 共用；刻意零第三方依赖）
+governance = { path = "governance" }
+
 # Web 框架
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 
@@ -178,7 +181,9 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 
 [workspace]
-members = ["migration"]
+# `governance`：治理项注册表（单一事实源），由本 crate 与 `migration` 共同依赖。
+# 单独成 crate 的原因见 `governance/src/lib.rs` 头部说明（migration 无法依赖 lib）。
+members = ["governance", "migration"]
 
 [profile.release]
 opt-level = 3

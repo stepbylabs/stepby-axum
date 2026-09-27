@@ -58,6 +58,7 @@ impl SysOperLogRepository {
         end_time: Option<NaiveDateTime>,
         last_id: Option<i64>,
         tenant_scope: Option<i64>,
+        tenant_filter: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOperLog::find();
         // 多租户 Phase 2/3：租户用户可见「本租户操作日志」与「目标资源属于本租户的代管操作日志」；
@@ -68,6 +69,10 @@ impl SysOperLogRepository {
                     .add(Column::TenantId.eq(t))
                     .add(Column::TargetTenantId.eq(t)),
             );
+        }
+        // 显式「按租户筛选」（`[ui].tenant_filter`）：与上面的 tenant_scope 相与 ⇒ 只收窄
+        if let Some(tid) = tenant_filter {
+            query = query.filter(Column::TenantId.eq(tid));
         }
         if let Some(t) = title {
             // T-11：title 新数据存 i18n key（module.*），旧数据为中文。
@@ -589,7 +594,9 @@ mod tests {
         let size = 3u64;
 
         let (p0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                0, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         assert_eq!(p0.len(), 3);
@@ -606,6 +613,7 @@ mod tests {
                 None,
                 None,
                 Some(cursor),
+                None,
                 None,
             )
             .await
@@ -643,6 +651,7 @@ mod tests {
                 None,
                 Some(cursor),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -659,6 +668,7 @@ mod tests {
                 None,
                 Some(p2[0].oper_id),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -673,7 +683,19 @@ mod tests {
         let repo = insert_7(&db).await;
         // 过滤 status='0'（i==6 被排除），keyset 仍应只命中过滤后的行
         let (first, total) = repo
-            .find_page_filtered(0, 10, None, None, None, Some("0"), None, None, None, None)
+            .find_page_filtered(
+                0,
+                10,
+                None,
+                None,
+                None,
+                Some("0"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(total, 6);
@@ -689,6 +711,7 @@ mod tests {
                 None,
                 None,
                 Some(cursor),
+                None,
                 None,
             )
             .await
@@ -706,21 +729,29 @@ mod tests {
 
         // OFFSET 分页
         let (o0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                0, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         let (o1, _) = repo
-            .find_page_filtered(3, size, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                3, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         let (o2, _) = repo
-            .find_page_filtered(6, size, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                6, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
 
         // keyset 连续翻页
         let (k0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                0, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         let (k1, _) = repo
@@ -734,6 +765,7 @@ mod tests {
                 None,
                 None,
                 Some(k0.last().unwrap().oper_id),
+                None,
                 None,
             )
             .await
@@ -749,6 +781,7 @@ mod tests {
                 None,
                 None,
                 Some(k1.last().unwrap().oper_id),
+                None,
                 None,
             )
             .await

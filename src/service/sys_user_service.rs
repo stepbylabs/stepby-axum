@@ -368,6 +368,11 @@ pub struct UserQueryDto {
     /// 游标（keyset 深分页）：上一页最后一条 user_id。存在时启用深分页（PK < last_id），
     /// 不存在时沿用 pageNum/pageSize 的 OFFSET 分页，向后兼容。
     pub last_id: Option<i64>,
+    /// 显式「按租户筛选」（`[ui].tenant_filter` 决定前端是否给出入口）。
+    ///
+    /// 服务层把它与 `tenant_scope` **相与**（AND）⇒ 只能收窄、永不放宽：
+    /// 租户操作者即便手工传他租户 id，结果集也只是空集，不存在越权读面。
+    pub tenant_id: Option<i64>,
 }
 
 impl From<&UserQueryDto> for PageDomain {
@@ -653,6 +658,7 @@ impl SysUserService {
                 end,
                 query.last_id,
                 tenant_scope,
+                query.tenant_id,
             )
             .await?;
 
@@ -867,6 +873,7 @@ impl SysUserService {
                 end,
                 None, // 导出固定走 OFFSET 全量路径，不走 keyset
                 tenant_scope,
+                query.tenant_id,
             )
             .await?;
 
