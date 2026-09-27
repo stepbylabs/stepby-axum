@@ -189,6 +189,10 @@ error:
     import_duplicate_in_file: 与文件中其它行登录名称重复
     pwd_reset_token_invalidate_failed: 密码重置成功，但旧 token 失效标记写入失败
     pwd_change_token_invalidate_failed: 密码修改成功，但旧 token 失效标记写入失败
+    erasure_disabled: 用户匿名化能力未开启
+    erasure_platform_only: 仅平台管理员可执行用户匿名化
+    erasure_forbidden: 不允许匿名化平台用户或超级管理员
+    erasure_revoke_failed: 匿名化前会话失效标记写入失败，已中止（fail-closed）
   config:
     not_found: 参数配置不存在
     key_exists: 参数键名已存在
@@ -556,6 +560,7 @@ msg:
     execute: 执行成功
     user_import: 成功导入 %{n} 个用户
     save: 保存成功
+    erasure_done: 用户已匿名化（不可逆）
     reload: 热加载成功
     password_reset: 密码重置成功
     password_change: 密码修改成功

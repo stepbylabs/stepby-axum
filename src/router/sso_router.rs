@@ -72,6 +72,14 @@ pub fn sso_routes() -> Router<Arc<AppState>> {
             "/system/oauth/client",
             post(sso_handler::client_add).put(sso_handler::client_edit),
         )
+        // ===== SSO D9：client_secret 零停机轮换（双密钥读取期）=====
+        // POST = 轮换（新密钥立即生效，旧密钥进入读取期，明文仅返回一次）
+        // DELETE = 结束读取期（旧密钥立即失效；幂等）
+        .route(
+            "/system/oauth/client/{id}/rotate-secret",
+            post(sso_handler::client_rotate_secret)
+                .delete(sso_handler::client_clear_previous_secret),
+        )
         // ===== 自助授权管理（v4-R8：仅登录，无需管理权限）=====
         .route(
             "/system/user/profile/sso-grants",

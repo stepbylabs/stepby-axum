@@ -32,6 +32,11 @@ impl AppInitializer {
         // 否则一律按"全关"处理——虽仍 fail-closed，但会让 `[features]` 里配置的开关静默失效。
         init_feature_flags(&settings);
 
+        // 2.1b P2-33：HTTP 状态码约定（`[server].http_status_convention`）。
+        // `IntoResponse` 是 trait 方法、签名不含应用状态 ⇒ 与能力位同法在启动期注入全局；
+        // 必须在任何响应产生之前完成，否则前若干请求会按默认档（legacy）出报文。
+        init_http_status_convention(&settings);
+
         // 2.2 ACME 证书需求输出姿态（`[acme]`）：默认 off；配了 webhook 但地址非法时告警，
         // 避免"以为会推送其实静默失效"（与 MT-4 反代白名单同类坑）。
         init_acme_output(&settings);
@@ -296,6 +301,12 @@ impl AppInitializer {
         ensure_oauth_client_key_id_column(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO key_id 列失败: {}", e))?;
+
+        // 4.5c SSO D9：sys_oauth_client.previous_client_secret_hash 双密钥读取期列
+        //      （存量库兜底，等价迁移 m20260927_000001）。存量行留 NULL = 无过渡期 = 行为不变。
+        ensure_oauth_client_prev_secret_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 SSO 旧密钥列失败: {}", e))?;
 
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
@@ -3795,6 +3806,29 @@ async fn ensure_oauth_client_key_id_column(db: &DatabaseConnection) -> anyhow::R
     Ok(())
 }
 
+/// SSO D9（存量库兜底，等价迁移 `m20260927_000001`）：`sys_oauth_client.previous_client_secret_hash`
+/// —— `client_secret` 零停机轮换的"双密钥读取期"列。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而实体已声明该列
+/// ⇒ 缺此兜底则客户端列表/详情/令牌端点鉴权全链报 `no such column: previous_client_secret_hash`（500）。
+/// 幂等：列已存在或表不存在时安全返回；存量行留 `NULL` = 无过渡期 = 行为与改造前逐字节一致。
+async fn ensure_oauth_client_prev_secret_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_oauth_client").await? {
+        return Ok(());
+    }
+    if sso_has_column(db, "sys_oauth_client", "previous_client_secret_hash").await? {
+        return Ok(());
+    }
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "ALTER TABLE sys_oauth_client ADD COLUMN previous_client_secret_hash VARCHAR(64) NULL"
+            .to_string(),
+    ))
+    .await?;
+    tracing::info!("sys_oauth_client.previous_client_secret_hash 列已补建（SSO D9 存量库兜底）");
+    Ok(())
+}
+
 /// 台账（第八批，存量库兜底，等价迁移 `m20260926_000009`）：代码生成列元数据的
 /// **Java 遗留命名 → Rust 命名** —— `gen_table_column.java_type/java_field`
 /// → `rust_type/rust_field`。
@@ -3843,6 +3877,21 @@ async fn ensure_tenant_package_features(db: &DatabaseConnection) -> anyhow::Resu
     .await?;
     tracing::info!("sys_tenant_package.features 列已补建（能力位批次 0 存量库兜底）");
     Ok(())
+}
+
+/// P2-33：把 `[server].http_status_convention` 注入全局档位，并在 `restful` 档打一行 INFO
+/// （便于运维确认"业务失败不再返回 200"这一取向已生效；`legacy` 为默认档，静默）。
+fn init_http_status_convention(settings: &Settings) {
+    use crate::common::http_status::{HttpStatusConvention, set_convention};
+
+    let convention = HttpStatusConvention::parse(&settings.server.http_status_convention);
+    set_convention(convention);
+    if convention == HttpStatusConvention::Restful {
+        tracing::info!(
+            "HTTP 状态码约定 = restful：业务失败不再返回 200（未归类业务码按 400 归类）；\
+             标准码与 legacy 档一致"
+        );
+    }
 }
 
 /// 注入平台层能力位并做**启动治理打印**（幂等：重复调用只保留首次注入）。

@@ -47,6 +47,8 @@ struct SwaggerAssets;
         crate::handler::sys_user_handler::remove,
         crate::handler::sys_user_handler::import_template,
         crate::handler::sys_user_handler::import_data,
+        crate::handler::sys_user_handler::anonymize_precheck,
+        crate::handler::sys_user_handler::anonymize_user,
         // ==================== SCIM 组管理（v5-D12 Group） ====================
         crate::handler::sys_scim_group_handler::list,
         crate::handler::sys_scim_group_handler::get_info,
@@ -355,6 +357,8 @@ struct SwaggerAssets;
             crate::handler::sys_user_handler::ProfileResult,
             crate::handler::sys_user_handler::AuthRoleResult,
             crate::handler::sys_user_handler::AvatarUploadResult,
+            // 用户（GDPR 匿名化报告）
+            crate::service::user_erasure_service::UserErasureReport,
             // 角色
             crate::handler::sys_role_handler::RoleDeptTreeResult,
             // 菜单

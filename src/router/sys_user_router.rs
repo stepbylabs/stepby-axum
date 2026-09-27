@@ -69,6 +69,16 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             "/system/user/authRole/{userId}",
             get(sys_user_handler::auth_role_get),
         )
+        // GET /system/user/{userId}/anonymize/precheck GDPR 用户匿名化预检（dry-run）
+        .route(
+            "/system/user/{userId}/anonymize/precheck",
+            get(sys_user_handler::anonymize_precheck),
+        )
+        // POST /system/user/{userId}/anonymize GDPR 用户匿名化执行（不可逆）
+        .route(
+            "/system/user/{userId}/anonymize",
+            post(sys_user_handler::anonymize_user),
+        )
         // DELETE /system/user/{id} 删除用户
         .route("/system/user/{id}", delete(sys_user_handler::remove))
         // GET /system/user/{id} 查询用户详情

@@ -170,6 +170,23 @@ pub struct SsoClientCreateResult {
     pub client: SsoClientVo,
 }
 
+/// SSO D9：`client_secret` 轮换结果（**新密钥明文仅此一次返回**，不落库）。
+///
+/// 与 [`SsoClientCreateResult`] 刻意分开：轮换**不**回带 client 详情（避免与
+/// `edit` 语义混淆），调用方拿到明文后应立即写入 RP 配置。
+#[derive(Debug, Clone, Serialize, ToSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(
+    export,
+    export_to = "SsoClientRotateResult.ts",
+    rename_all = "camelCase"
+)]
+#[schema(as = SsoClientRotateResult)]
+pub struct SsoClientRotateResult {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
 // ==================== OIDC 端点内部结构 ====================
 
 /// 授权码 Redis 绑定（一次性，绑定 client + redirect_uri + PKCE challenge）
@@ -409,6 +426,12 @@ pub struct SsoGrantVo {
 
 // ==================== Service ====================
 
+/// SSO / OIDC Provider 服务。
+///
+/// `Clone`：仅由 `DatabaseConnection` + `String`/`Vec<String>` 组成（仓储与连接均已 `Clone`），
+/// 克隆即共享同一连接池句柄，无状态复制语义 —— 供 `AppState` 同时注入多个消费方
+/// （如 GDPR 匿名化服务复用其令牌吊销链路）使用。
+#[derive(Clone)]
 pub struct SsoService {
     client_repo: SysOauthClientRepository,
     consent_repo: SysOauthConsentRepository,
@@ -963,11 +986,27 @@ impl SsoService {
                 OidcError::new("invalid_client", crate::tr!("error.sso.client_auth_failed"))
             })?;
         let expected_hash = crate::utils::crypto::token_hash(client_secret);
-        if !secret_eq(&expected_hash, &client.client_secret_hash) {
+        // D9 双密钥读取期：轮换后**新密钥立即生效**，旧密钥摘要暂存 `previous_client_secret_hash`，
+        // 过渡期内两把均可通过客户端鉴权（RP 换配置期间不断服）；过渡期结束清空该列即失效。
+        // 两把均走等时比较，且**不短路**为"先比当前再比旧"的分支差异（两次比较恒发生）。
+        let matches_current = secret_eq(&expected_hash, &client.client_secret_hash);
+        let matches_previous = client
+            .previous_client_secret_hash
+            .as_deref()
+            .map(|prev| secret_eq(&expected_hash, prev))
+            .unwrap_or(false);
+        if !matches_current && !matches_previous {
             return Err(OidcError::new(
                 "invalid_client",
                 crate::tr!("error.sso.client_auth_failed"),
             ));
+        }
+        if matches_previous {
+            // 可观测信号：该 RP 仍在用旧密钥 ⇒ 提示运维"过渡期尚未结束"。
+            tracing::warn!(
+                client_id = %client.client_id,
+                "SSO 客户端使用轮换前的旧 client_secret 完成鉴权（双密钥读取期内），请尽快为 RP 换配新密钥并结束过渡期"
+            );
         }
         Ok(client)
     }
@@ -2187,6 +2226,71 @@ impl SsoService {
                 self.revoke_user_client_tokens(redis, uid, &client_id).await;
             }
         }
+        Ok(())
+    }
+
+    /// **SSO D9：轮换 `client_secret`（零停机「双密钥读取期」）**。
+    ///
+    /// 语义（与 JWT 多密钥轮换同构）：
+    /// 1. 生成新 secret，明文**仅本次响应返回一次**（落库只存 SHA-256 摘要）；
+    /// 2. 轮换前的摘要移入 `previous_client_secret_hash` ⇒ 过渡期内**新旧两把都能鉴权**
+    ///    （RP 换配期间不断服）；旧密钥命中时打 WARN 便于运维收口；
+    /// 3. RP 换配完成后调用 [`Self::clear_previous_client_secret`] 结束过渡期 ⇒ 旧密钥立即失效。
+    ///
+    /// 归属：非本租户客户端按 404 语义拒绝。返回 [`SsoClientRotateResult`]（含一次性明文）。
+    pub async fn rotate_client_secret(
+        &self,
+        pk: i64,
+        update_by: &str,
+        operator_tid: i64,
+    ) -> Result<SsoClientRotateResult, ServiceError> {
+        let m =
+            self.client_repo.find_by_pk(pk).await?.ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!("error.sso.client_not_found"))
+            })?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id) {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.sso.client_not_found"
+            )));
+        }
+        let client_id = m.client_id.clone();
+        let previous_hash = m.client_secret_hash.clone();
+        let new_secret = random_urlsafe(32);
+        let new_hash = crate::utils::crypto::token_hash(&new_secret);
+        let mut am: ClientActiveModel = m.into();
+        // 读取期最多保留"一把"旧密钥：用旧摘要覆盖（而非追加），避免无界堆积。
+        am.previous_client_secret_hash = Set(Some(previous_hash));
+        am.client_secret_hash = Set(new_hash);
+        am.update_by = Set(update_by.to_string());
+        self.client_repo.update(am).await?;
+        Ok(SsoClientRotateResult {
+            client_id,
+            client_secret: new_secret,
+        })
+    }
+
+    /// **SSO D9：结束双密钥读取期**（清空 `previous_client_secret_hash`）。
+    ///
+    /// 幂等：本无过渡期时同样返回成功（清空 = 现状）。本调用起旧 `client_secret` 立即失效。
+    pub async fn clear_previous_client_secret(
+        &self,
+        pk: i64,
+        update_by: &str,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        let m =
+            self.client_repo.find_by_pk(pk).await?.ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!("error.sso.client_not_found"))
+            })?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id) {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.sso.client_not_found"
+            )));
+        }
+        let mut am: ClientActiveModel = m.into();
+        am.previous_client_secret_hash = Set(None);
+        am.update_by = Set(update_by.to_string());
+        self.client_repo.update(am).await?;
         Ok(())
     }
 

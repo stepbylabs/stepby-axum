@@ -42,6 +42,7 @@ use crate::service::sys_user_service::{
     ImportResultVo, ProfileUpdateDto, UserAddDto, UserAuthRoleVo, UserEditDto, UserPwdResetDto,
     UserPwdUpdateDto, UserQueryDto, UserVo,
 };
+use crate::service::user_erasure_service::UserErasureReport;
 use crate::state::AppState;
 use crate::utils::parse_id_list;
 
@@ -625,6 +626,80 @@ async fn auto_reassign_flow_tasks(state: &AppState, user_id: i64) {
             );
         }
     }
+}
+
+/// GET /system/user/{userId}/anonymize/precheck
+///
+/// GDPR 被遗忘权 / 用户匿名化**只读预检**（dry-run）：返回将被置换的字段清单 + 受影响
+/// 关系计数（PAT / 第三方绑定 / 在线会话），**不产生任何写入**。
+///
+/// 能力位 `privacy.user_erasure` 需 ≥ `precheck`，且操作者必须为平台管理员（`tenantId == 0`）；
+/// 任一不满足以 **404** 隐藏端点存在性（与 `[sso].introspection_enabled` 同口径）。
+#[utoipa::path(
+    get,
+    path = "/system/user/{userId}/anonymize/precheck",
+    params(("userId" = i64, Path, description = "用户 ID")),
+    responses(
+        (status = 200, description = "匿名化预检报告", body = UserErasureReport),
+        (status = 404, description = "能力位未开启 / 非平台操作者 / 用户不存在"),
+        (status = 400, description = "平台用户或超级管理员不可匿名化"),
+    ),
+    tag = "system-user"
+)]
+pub async fn anonymize_precheck(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(user_id): Path<i64>,
+) -> Result<AjaxResult<UserErasureReport>, AppError> {
+    let report = state
+        .user_erasure_service
+        .anonymize_precheck(user_id, operator.tenant_id())
+        .await?;
+    Ok(AjaxResult {
+        code: 200,
+        msg: crate::tr!("msg.success.default"),
+        data: Some(report),
+    })
+}
+
+/// POST /system/user/{userId}/anonymize
+///
+/// GDPR 被遗忘权 / 用户匿名化**执行**（**不可逆**）：置换 PII 字段、释放全局唯一登录键、
+/// 停用并软删除，并吊销该用户全部会话 / PAT / SSO 令牌；审计留痕保留。
+///
+/// 能力位 `privacy.user_erasure` 需达 `full`，且操作者必须为平台管理员（`tenantId == 0`）；
+/// 任一不满足以 **404** 隐藏端点存在性。幂等：目标已匿名化 ⇒ 直接返回报告。
+/// 匿名化动作本身由 `oper_log_middleware` 记录（写操作留痕）。
+#[utoipa::path(
+    post,
+    path = "/system/user/{userId}/anonymize",
+    params(("userId" = i64, Path, description = "用户 ID")),
+    responses(
+        (status = 200, description = "匿名化完成报告", body = UserErasureReport),
+        (status = 404, description = "能力位未开启 / 非平台操作者 / 用户不存在"),
+        (status = 400, description = "平台用户或超级管理员不可匿名化"),
+    ),
+    tag = "system-user"
+)]
+pub async fn anonymize_user(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    target_tenant: TargetTenant,
+    Path(user_id): Path<i64>,
+) -> Result<AjaxResult<UserErasureReport>, AppError> {
+    // 审计 target_tenant_id：记录被匿名化用户的租户归属（平台代管场景）
+    if let Ok(vo) = state.user_service.get_user_by_id(user_id).await {
+        target_tenant.set(vo.user.tenant_id);
+    }
+    let report = state
+        .user_erasure_service
+        .anonymize_user(user_id, operator.username(), operator.tenant_id())
+        .await?;
+    Ok(AjaxResult {
+        code: 200,
+        msg: crate::tr!("msg.success.erasure_done"),
+        data: Some(report),
+    })
 }
 
 /// PUT /system/user/changeStatus

@@ -30,6 +30,15 @@ pub struct Model {
     pub client_id: String,
     /// client_secret 明文的 SHA-256 hex（鉴权校验用，脱敏出参）
     pub client_secret_hash: String,
+    /// D9 双密钥读取期：**轮换前**的 `client_secret` 摘要（SHA-256 hex）。
+    ///
+    /// 轮换后新密钥立即生效；旧密钥在过渡期内仍可通过客户端鉴权（供 RP 平滑切换，
+    /// 避免"改密钥即断服"）。过渡期结束由客户端管理端点清空本列。
+    /// `NULL` = 无过渡期（**默认，与改造前逐字节等价**）。
+    ///
+    /// 安全：两把密钥均只存摘要，且校验走等时比较（`secret_eq`）。
+    #[serde(default)]
+    pub previous_client_secret_hash: Option<String>,
     /// HS256 ID Token 签名密钥（仅服务端使用，脱敏出参）
     pub id_token_secret: String,
     /// v5-D2：ID Token 签名算法（RS256/HS256，新增客户端默认 RS256）
@@ -92,6 +101,7 @@ impl std::fmt::Debug for Model {
             .field("sso_client_id", &self.sso_client_id)
             .field("client_id", &self.client_id)
             .field("client_secret_hash", &"<redacted>")
+            .field("previous_client_secret_hash", &"<redacted>")
             .field("id_token_secret", &"<redacted>")
             .field("id_token_alg", &self.id_token_alg)
             .field("rsa_private_key", &"<redacted>")

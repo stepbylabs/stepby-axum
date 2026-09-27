@@ -1,0 +1,51 @@
+[package]
+name = "axum-backend-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.axum-backend]
+path = ".."
+
+# cargo-fuzz 要求 fuzz crate **独立于**主 workspace（主 workspace 已在
+# `../Cargo.toml` 的 `[workspace] exclude` 中排除本目录）。此处再显式声明本目录
+# 为独立 workspace 根，避免 cargo 向上查找父 workspace 时把本 crate 误并进去。
+[workspace]
+
+[profile.release]
+debug = 1
+
+# 每个 fuzz target 一个 [[bin]]；test/doc/bench 关闭，完全交由 libFuzzer 驱动。
+[[bin]]
+name = "ssrf_url"
+path = "fuzz_targets/ssrf_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clear_fields"
+path = "fuzz_targets/clear_fields.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webhook_url"
+path = "fuzz_targets/webhook_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "excel_parse"
+path = "fuzz_targets/excel_parse.rs"
+test = false
+doc = false
+bench = false

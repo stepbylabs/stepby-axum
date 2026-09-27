@@ -60,6 +60,7 @@ mod tenant_index_plan;
 mod tenant_scope;
 mod tool_gen;
 mod totp;
+mod user_erasure;
 mod ws;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -186,6 +187,18 @@ fn unique_temp_db_path() -> String {
 ///
 /// 返回的 `RedisSlot` 必须由调用方持有至测试结束，以独占 Redis DB（drop 自动归还）。
 async fn build_isolated_state() -> (Arc<AppState>, RedisSlot) {
+    build_isolated_state_with_features(&[]).await
+}
+
+/// 与 [`build_isolated_state`] 相同，但允许注入**平台层能力位覆盖**（`[features]`）。
+///
+/// 为何需要：平台层能力位在生产由 `config.toml [features]` 提供并经 `initialize`
+/// 注入进程级 `OnceLock`（不可按用例翻转）；本函数改为**按实例**把覆盖写进
+/// `Settings.features`，使服务层读取的 `FeatureSet` 可按测试独立配置
+/// （`UserErasureService` 即从 `config.features` 净化解析，与启动注入同口径）。
+async fn build_isolated_state_with_features(
+    features: &[(&str, &str)],
+) -> (Arc<AppState>, RedisSlot) {
     // 幂等初始化测试日志，便于并行测试中查看底层错误（DbErr 等）
     init_test_tracing();
 
@@ -205,6 +218,14 @@ async fn build_isolated_state() -> (Arc<AppState>, RedisSlot) {
     // 故无干扰；SCIM 用例依赖此配置。
     settings.scim.enabled = true;
     settings.scim.bearer_token = "scim-test-bearer-token-0123456789abcdef".to_string();
+
+    // 平台层能力位覆盖（集成测试专用）：写入 `Settings.features`，由服务层按实例读取。
+    for (key, mode) in features {
+        settings
+            .features
+            .0
+            .insert((*key).to_string(), (*mode).to_string());
+    }
 
     let slot = acquire_redis_slot().await;
     let db_path = unique_temp_db_path();
@@ -340,7 +361,12 @@ pub struct TestContext {
 impl TestContext {
     /// 构建隔离状态 + 完整应用，并以 admin/admin123 登录。
     pub async fn new() -> Self {
-        let (state, slot) = build_isolated_state().await;
+        Self::new_with_features(&[]).await
+    }
+
+    /// 同上，但注入平台层能力位覆盖（供 `privacy.user_erasure` 等能力位用例按档位验证）。
+    pub async fn new_with_features(features: &[(&str, &str)]) -> Self {
+        let (state, slot) = build_isolated_state_with_features(features).await;
         let app = crate::router::build_app(state.clone());
         let peer_ip = next_peer_ip();
         let token = login(&app, peer_ip, "admin", "admin123").await;

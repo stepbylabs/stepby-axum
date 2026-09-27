@@ -73,6 +73,7 @@ fn main() {
         axum_backend::service::sso_service::SsoClientQueryDto,
         axum_backend::service::sso_service::SsoClientUpsertDto,
         axum_backend::service::sso_service::SsoClientCreateResult,
+        axum_backend::service::sso_service::SsoClientRotateResult,
         axum_backend::service::sso_service::ConsentDto,
         axum_backend::service::sso_service::SsoGrantVo,
         // ---- service：SCIM Group 管理（v5-D12 Group） ----
@@ -91,6 +92,8 @@ fn main() {
         axum_backend::service::sys_user_service::UserAuthRoleVo,
         axum_backend::service::sys_user_service::ProfileVo,
         axum_backend::service::sys_user_service::UserFormVo,
+        // ---- service：GDPR 用户匿名化（被遗忘权）报告 ----
+        axum_backend::service::user_erasure_service::UserErasureReport,
         // ---- service：审批工作流（W-8 已办视图行） ----
         axum_backend::service::sys_flow_service::FlowDoneVo,
         // ---- service：租户套餐能力位（三层开关中间层，管理面） ----

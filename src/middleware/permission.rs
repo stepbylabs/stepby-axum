@@ -338,6 +338,12 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("POST", "/system/user/export", "system:user:export"),
     ("POST", "/system/user/importTemplate", "system:user:import"),
     ("POST", "/system/user/importData", "system:user:import"),
+    // GDPR 被遗忘权 / 用户匿名化：**复用既有** `system:user:remove`（不新造 perm、不新增菜单
+    // 迁移，避免"菜单可见但请求 403"的假入口）；`privacy.user_erasure` 能力位与服务层
+    // 平台归属守卫在 **服务层** 收口（能力位关/非平台 ⇒ 404）。路由参数名须与
+    // router/sys_user_router.rs 注册**逐字一致**（`{userId}`）。
+    ("GET", "/system/user/{userId}/anonymize/precheck", "system:user:remove"),
+    ("POST", "/system/user/{userId}/anonymize", "system:user:remove"),
     // profile / 个人改密 / 角色下拉：仅需登录，不在此表
 
     // ===== SCIM 组管理（v5-D12 Group） =====
@@ -664,6 +670,18 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("PUT", "/system/oauth/client", "system:oauth:client:edit"),
     ("DELETE", "/system/oauth/client/{id}", "system:oauth:client:remove"),
     ("PUT", "/system/oauth/client/{id}/status", "system:oauth:client:toggle"),
+    // SSO D9：client_secret 轮换与"结束读取期"均属**凭据编辑**语义，复用 `edit` 权限，
+    // 不新造 perm ⇒ 不会产生"菜单无此按钮但接口可用"或"菜单可见但 403"的假入口。
+    (
+        "POST",
+        "/system/oauth/client/{id}/rotate-secret",
+        "system:oauth:client:edit",
+    ),
+    (
+        "DELETE",
+        "/system/oauth/client/{id}/rotate-secret",
+        "system:oauth:client:edit",
+    ),
 
     // ===== 报表中心 + 定时订阅推送 =====
     // 权限标识与 sys_menu 迁移种子（m20260819_000003_report_module）对齐：
@@ -915,6 +933,33 @@ mod tests {
         assert_eq!(
             get_required_perm("POST", "/system/user/export"),
             Some("system:user:export")
+        );
+    }
+
+    /// GDPR 用户匿名化：复用 `system:user:remove`，且参数名与 router 注册逐字一致（`{userId}`）
+    #[test]
+    fn test_user_erasure_perms_and_param_names() {
+        assert_eq!(
+            get_required_perm("GET", "/system/user/{userId}/anonymize/precheck"),
+            Some("system:user:remove")
+        );
+        assert_eq!(
+            get_required_perm("POST", "/system/user/{userId}/anonymize"),
+            Some("system:user:remove")
+        );
+        // 参数名不匹配 ⇒ 查表失败（fail-closed 下 404/403 错判），故钉死
+        assert_eq!(
+            get_required_perm("GET", "/system/user/{id}/anonymize/precheck"),
+            None
+        );
+        // 方法混淆不应命中
+        assert_eq!(
+            get_required_perm("POST", "/system/user/{userId}/anonymize/precheck"),
+            None
+        );
+        assert_eq!(
+            get_required_perm("GET", "/system/user/{userId}/anonymize"),
+            None
         );
     }
 
@@ -1257,6 +1302,8 @@ mod tests {
             ("PUT", "/system/user/resetPwd"),
             ("PUT", "/system/user/authRole"),
             ("DELETE", "/system/user/{id}"),
+            ("GET", "/system/user/{userId}/anonymize/precheck"),
+            ("POST", "/system/user/{userId}/anonymize"),
             ("POST", "/system/user/export"),
             ("GET", "/system/user/profile"),
             ("PUT", "/system/user/profile"),

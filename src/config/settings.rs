@@ -904,6 +904,26 @@ pub struct ServerConfig {
     /// 是否启用 API 文档（Swagger UI / OpenAPI JSON），生产环境建议关闭
     #[serde(default = "default_docs_enabled")]
     pub docs_enabled: bool,
+    /// P2-33：HTTP 状态码约定（`legacy` | `restful`）。
+    ///
+    /// - `legacy`（**默认 = 现状**）：已知业务码（400/401/403/404/409/422/429/500/503）
+    ///   映射为同名真实 HTTP 状态，未归类业务码回落 `200 OK`（R19-4.3 既有行为）；
+    /// - `restful`：业务失败**绝不**返回 200 —— 标准 HTTP 域（400..=599）取该状态，
+    ///   2xx 取 200，其余自定义业务码（如 TOTP 的 `1003`）按 `400` 归类
+    ///   （便于网关/监控直接按 HTTP 状态码告警，而无需解析 body）。
+    ///
+    /// ⚠️ 两档差异**只在未归类业务码**上；已知码两档一致。非法值回落 `legacy`（fail-safe）。
+    /// 前端 `request.ts` 错误分支已同样识别 `body.code`（含 1003），故切换不会造成断链。
+    #[serde(default = "default_http_status_convention")]
+    pub http_status_convention: String,
+}
+
+/// P2-33 默认档：`legacy`（= 现状零变更）。取值单一事实源在
+/// [`crate::common::http_status::HttpStatusConvention`]。
+fn default_http_status_convention() -> String {
+    crate::common::http_status::HttpStatusConvention::default()
+        .as_str()
+        .to_string()
 }
 
 #[derive(Clone, Deserialize)]
@@ -1651,6 +1671,7 @@ impl Settings {
                 cors_origins: vec![],
                 trusted_proxies: vec![],
                 docs_enabled: false,
+                http_status_convention: default_http_status_convention(),
             },
             database: DatabaseConfig {
                 url: database_url,
@@ -1811,6 +1832,7 @@ mod tests {
                 cors_origins: vec![],
                 trusted_proxies: vec![],
                 docs_enabled: false,
+                http_status_convention: default_http_status_convention(),
             },
             database: DatabaseConfig {
                 url: "postgres://user:pass@host:5432/db".to_string(),
@@ -2073,6 +2095,7 @@ mod tests {
                 cors_origins: vec![],
                 trusted_proxies: vec![],
                 docs_enabled: false,
+                http_status_convention: default_http_status_convention(),
             },
             database: DatabaseConfig {
                 url: "postgres://user:supersecret@host:5432/db".to_string(),
@@ -2190,6 +2213,27 @@ mod tests {
             "TTL 必须被夹到硬上限 300s（不允许把开关当作绕过停用即时断链的手段）"
         );
         assert_eq!(USERINFO_CACHE_MAX_SECS, 300);
+    }
+
+    /// P2-33：`[server].http_status_convention` **默认 `legacy`（= 现状零变更）**，
+    /// 且取值与 [`crate::common::http_status`] 的档位表同源。若有人把默认改成 `restful`，
+    /// 本用例立即变红（可证伪：那意味着存量部署的 HTTP 语义被静默改变）。
+    #[test]
+    fn test_http_status_convention_default_is_legacy() {
+        assert_eq!(
+            default_http_status_convention(),
+            "legacy",
+            "默认档必须是 legacy（= 改造前行为）"
+        );
+        assert_eq!(
+            default_http_status_convention(),
+            crate::common::http_status::HttpStatusConvention::default().as_str()
+        );
+        // 反序列化缺省（旧配置无该键）同样回落 legacy
+        let parsed: ServerConfig =
+            toml::from_str("host = \"0.0.0.0\"\nport = 8080\ncors_origins = [\"http://x\"]\n")
+                .expect("最小 [server] 配置应可解析");
+        assert_eq!(parsed.http_status_convention, "legacy");
     }
 
     /// 验证 JwtConfig Debug 不泄漏 secret

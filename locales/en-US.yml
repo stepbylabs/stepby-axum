@@ -189,6 +189,10 @@ error:
     import_duplicate_in_file: Duplicate login name within the file
     pwd_reset_token_invalidate_failed: Password reset succeeded, but old token invalidation marking failed
     pwd_change_token_invalidate_failed: Password changed, but old token invalidation marking failed
+    erasure_disabled: User anonymization capability is not enabled
+    erasure_platform_only: Only platform administrators can anonymize users
+    erasure_forbidden: Platform users and the super administrator cannot be anonymized
+    erasure_revoke_failed: Failed to mark sessions invalid before anonymization; aborted (fail-closed)
   config:
     not_found: Configuration not found
     key_exists: Configuration key already exists
@@ -570,6 +574,7 @@ msg:
     execute: Executed successfully
     user_import: Successfully imported %{n} users
     save: Saved successfully
+    erasure_done: User has been anonymized (irreversible)
     reload: Hot-reloaded successfully
     password_reset: Password reset successfully
     password_change: Password changed successfully

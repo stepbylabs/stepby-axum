@@ -34,6 +34,17 @@ trusted_proxies = []
 # 是否启用 API 文档（Swagger UI / OpenAPI JSON）
 # 默认 false（生产 fail-closed），开发环境显式设为 true
 docs_enabled = true
+# P2-33：HTTP 状态码约定（`legacy` | `restful`）
+#   legacy（**默认 = 现状零变更**）：已知业务码（400/401/403/404/409/422/429/500/503）
+#     映射为同名真实 HTTP 状态；**未归类业务码回落 200 OK**（body.code 才是权威业务码）。
+#   restful：业务失败**绝不返回 200** —— 标准 HTTP 域（400..=599）取该状态码本身，
+#     2xx 取 200，其余自定义业务码（如 TOTP 的 1003）一律按 400 归类。
+#     适合"网关/监控直接按 HTTP 状态码告警"的部署；代价是前端不能只看 HTTP 200。
+#   ⚠️ 两档差异**只体现在未归类业务码**上；标准码两档完全一致。
+#   ⚠️ 非法值回落 legacy（fail-safe），不会导致启动失败。
+#   ⚠️ 前端 `request.ts` 成功/失败两个分支均识别 body.code（含 1003 TOTP 流程），
+#      故切到 restful 不会造成"后端改契约、前端不认"的断链。
+http_status_convention = "legacy"
 
 [database]
 # 生产环境通过环境变量 DATABASE_URL 注入，不要将真实密码写入配置文件
@@ -230,6 +241,12 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 # 租户自建导航 L3（默认 off）：off | view_only | full
 #   view_only = 仅可查看平台预置的 L3 导航；full = 可在套餐∩角色授权范围内自建导航项
 "nav.l3" = "off"
+# GDPR 被遗忘权 / 用户匿名化（默认 off）：off | precheck | full
+#   off      = 端点表现为 404（关闭态即安全态）；
+#   precheck = 仅允许**只读预检**（dry-run，返回将被置换的字段与受影响关系计数，不写库）；
+#   full     = 允许执行**不可逆**匿名化（置换 PII 字段 + 释放登录键 + 吊销全部会话/PAT/SSO 令牌）。
+#   ⚠️ 平台治理动作：仅平台管理员（tenant_id == 0）可触发，不随租户套餐下放权限。
+"privacy.user_erasure" = "off"
 
 # ==================== 定时任务调度器（集群模式）====================
 # 治理对象：**内置定时任务**（flow_timeout_scan / mmdb_auto_update）的"整轮跨实例互斥"。

@@ -637,6 +637,140 @@ async fn test_sso_client_crud_and_toggle() {
     ctx.assert_ok(&v);
 }
 
+/// SSO D9：通过令牌端点的**客户端鉴权阶段**判定密钥是否被接受。
+///
+/// 令牌服务先做客户端鉴权、再校验授权码（见 `token_authorization_code`）⇒
+/// 用一个必然无效的授权码即可把两段解耦：
+/// - 密钥**被接受** ⇒ 卡在授权码校验 ⇒ `invalid_grant`（400）；
+/// - 密钥**被拒** ⇒ `invalid_client`（401）。
+async fn client_auth_accepted(ctx: &TestContext, client_id: &str, secret: &str) -> bool {
+    let form = token_form(
+        "bogus-code-for-auth-probe",
+        client_id,
+        secret,
+        PKCE_VERIFIER,
+    );
+    let (status, _, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/sso/token",
+        "application/x-www-form-urlencoded",
+        &form,
+        &[],
+    )
+    .await;
+    let err = json_of(&body)["error"].as_str().unwrap_or("").to_string();
+    if status == StatusCode::UNAUTHORIZED {
+        assert_eq!(
+            err, "invalid_client",
+            "401 必须是客户端鉴权失败，实际: {err}"
+        );
+        return false;
+    }
+    assert_eq!(
+        err, "invalid_grant",
+        "客户端鉴权通过后应因无效授权码返回 invalid_grant，实际 status={status} err={err}"
+    );
+    true
+}
+
+/// SSO D9：`client_secret` 零停机轮换（双密钥读取期）。
+///
+/// 契约（可证伪）：轮换后**新密钥立即可用**且**旧密钥在过渡期内仍可用**（不断服）；
+/// 结束过渡期后**旧密钥立即失效**、新密钥持续有效；未知第三把密钥恒被拒。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_d9_client_secret_rotation_dual_key_read_period() {
+    let ctx = sso_ctx().await;
+    let (cid, old_secret) = add_client(&ctx, "0", "it_sso_d9_rotate").await;
+    let pk = cid_pk(&ctx, &cid).await;
+
+    // 0) 基线：轮换前旧密钥可用
+    assert!(
+        client_auth_accepted(&ctx, &cid, &old_secret).await,
+        "基线：轮换前旧密钥应可通过鉴权"
+    );
+
+    // 1) 轮换：返回一次性新密钥明文
+    let v = ctx
+        .post_json(
+            &format!("/system/oauth/client/{pk}/rotate-secret"),
+            serde_json::json!({}),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"]["clientId"].as_str(),
+        Some(cid.as_str()),
+        "应回带 clientId"
+    );
+    let new_secret = v["data"]["clientSecret"]
+        .as_str()
+        .expect("轮换应返回一次性新密钥明文")
+        .to_string();
+    assert!(!new_secret.is_empty(), "新密钥不应为空");
+    assert_ne!(new_secret, old_secret, "新密钥必须与旧密钥不同");
+
+    // 2) 双密钥读取期：新旧两把都可用
+    assert!(
+        client_auth_accepted(&ctx, &cid, &new_secret).await,
+        "轮换后新密钥应**立即**可用"
+    );
+    assert!(
+        client_auth_accepted(&ctx, &cid, &old_secret).await,
+        "过渡期内旧密钥应仍可用（RP 换配期间不断服）"
+    );
+    // 读取期不等于放行任意密钥
+    assert!(
+        !client_auth_accepted(&ctx, &cid, "unrelated-third-secret-value").await,
+        "未知第三把密钥必须被拒"
+    );
+
+    // 3) 结束读取期（DELETE）⇒ 旧密钥立即失效，新密钥持续有效
+    let v = ctx
+        .delete_json(&format!("/system/oauth/client/{pk}/rotate-secret"))
+        .await;
+    ctx.assert_ok(&v);
+    assert!(
+        !client_auth_accepted(&ctx, &cid, &old_secret).await,
+        "结束读取期后旧密钥必须立即失效"
+    );
+    assert!(
+        client_auth_accepted(&ctx, &cid, &new_secret).await,
+        "结束读取期不应影响新密钥"
+    );
+
+    // 4) 幂等：本无过渡期时再次结束同样成功
+    let v = ctx
+        .delete_json(&format!("/system/oauth/client/{pk}/rotate-secret"))
+        .await;
+    ctx.assert_ok(&v);
+
+    // 5) 连续轮换：第二次轮换后，仅"上一把"（即首次的新密钥）在读取期内，最早的旧密钥不再可用
+    let v = ctx
+        .post_json(
+            &format!("/system/oauth/client/{pk}/rotate-secret"),
+            serde_json::json!({}),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let newest = v["data"]["clientSecret"]
+        .as_str()
+        .expect("应返回新密钥")
+        .to_string();
+    assert!(
+        client_auth_accepted(&ctx, &cid, &new_secret).await,
+        "第二次轮换后，上一把密钥（首次轮换所得）应进入读取期"
+    );
+    assert!(
+        client_auth_accepted(&ctx, &cid, &newest).await,
+        "最新密钥应立即可用"
+    );
+    assert!(
+        !client_auth_accepted(&ctx, &cid, &old_secret).await,
+        "读取期只保留一把旧密钥 ⇒ 更早的密钥不应复活"
+    );
+}
+
 /// 通过列表按 clientId 反查内部主键 ssoClientId。
 async fn cid_pk(ctx: &TestContext, client_id: &str) -> i64 {
     let v = ctx

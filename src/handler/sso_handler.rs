@@ -853,6 +853,37 @@ pub async fn client_toggle(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
+/// POST /system/oauth/client/{id}/rotate-secret —— SSO D9：轮换 `client_secret`。
+///
+/// 零停机语义：新密钥立即生效，旧密钥进入"双密钥读取期"（RP 换配期间不断服）；
+/// 响应中的 `clientSecret` 为**一次性明文**，请立即写入 RP 配置。
+pub async fn client_rotate_secret(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(id): Path<i64>,
+) -> Result<AjaxResult<crate::service::sso_service::SsoClientRotateResult>, AppError> {
+    let res = state
+        .sso_service
+        .rotate_client_secret(id, operator.username(), operator.tenant_id())
+        .await?;
+    Ok(AjaxResult::success(res))
+}
+
+/// DELETE /system/oauth/client/{id}/rotate-secret —— SSO D9：结束双密钥读取期。
+///
+/// 清空旧密钥摘要 ⇒ 旧 `client_secret` 立即失效；幂等（本无过渡期时同样成功）。
+pub async fn client_clear_previous_secret(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(id): Path<i64>,
+) -> Result<AjaxResult<()>, AppError> {
+    state
+        .sso_service
+        .clear_previous_client_secret(id, operator.username(), operator.tenant_id())
+        .await?;
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
+}
+
 // ==================== 自助授权管理（v4-R8：仅登录，无需管理权限） ====================
 
 /// GET /system/user/profile/sso-grants —— 当前用户"已授权应用"列表
