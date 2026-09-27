@@ -544,6 +544,17 @@ error:
     login_locked: Too many failed TOTP attempts, please try again in 10 minutes
     already_enabled: TOTP is already enabled. Please disable it first before re-binding
     pending_expired: The binding session has expired. Please re-fetch the QR code and try again
+  webauthn:
+    disabled: WebAuthn (Passkey) is not enabled
+    config_missing: WebAuthn is not configured (missing rp_id / origin), service unavailable
+    invalid_response: Invalid WebAuthn response
+    session_expired: The WebAuthn session has expired. Please try again
+    duplicate_credential: This authenticator is already registered
+    duplicate_name: A passkey with the same name already exists
+    credential_not_found: Passkey not found
+    user_unavailable: The current account is unavailable
+    user_id_invalid: Invalid user identity
+    internal: WebAuthn service internal error
   upload:
     write_task_failed: File write task failed
     write_failed: Failed to write uploaded file
@@ -583,6 +594,8 @@ msg:
     auth: Authorized successfully
     import: Imported successfully
     sync: Synced successfully
+    webauthn_registered: Passkey registered successfully
+    webauthn_deleted: Passkey deleted
     add_user: "Added user %{name} successfully"
     add_role: "Added role %{name} successfully"
     add_dept: "Added department %{name} successfully"

@@ -530,6 +530,17 @@ error:
     login_locked: TOTP 验证失败次数过多，请 10 分钟后再试
     already_enabled: 您已启用 TOTP，如需更换请先关闭后再重新绑定
     pending_expired: 绑定会话已过期，请重新获取二维码后重试
+  webauthn:
+    disabled: WebAuthn（Passkey）功能未启用
+    config_missing: WebAuthn 未配置（rp_id / origin 缺失），服务暂不可用
+    invalid_response: WebAuthn 响应无效
+    session_expired: WebAuthn 会话已过期，请重新发起
+    duplicate_credential: 该认证器已绑定，请勿重复注册
+    duplicate_name: 同名 Passkey 已存在
+    credential_not_found: Passkey 不存在
+    user_unavailable: 当前账号不可用
+    user_id_invalid: 用户身份无效
+    internal: WebAuthn 服务内部错误
   upload:
     write_task_failed: 文件写入任务失败
     write_failed: 写入上传文件失败
@@ -569,6 +580,8 @@ msg:
     auth: 授权成功
     import: 导入成功
     sync: 同步成功
+    webauthn_registered: Passkey 绑定成功
+    webauthn_deleted: Passkey 已删除
     add_user: "新增用户 %{name} 成功"
     add_role: "新增角色 %{name} 成功"
     add_dept: "新增部门 %{name} 成功"

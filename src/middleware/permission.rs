@@ -835,6 +835,13 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("POST", "/system/user/totp/verify")
             | ("GET", "/system/user/totp/status")
             | ("POST", "/system/user/totp/disable")
+        // ===== WebAuthn / Passkey 自助（本人操作，仅登录；能力位 auth.webauthn 门控）=====
+        // 参数名须与 router/webauthn_router.rs 注册逐字一致（`{credId}`），
+        // 否则 fail-closed 下自助删除会被误拦为 403。
+            | ("POST", "/system/user/webauthn/register/start")
+            | ("POST", "/system/user/webauthn/register/finish")
+            | ("GET", "/system/user/webauthn/credentials")
+            | ("DELETE", "/system/user/webauthn/credentials/{credId}")
         // ===== 公告标记已读（自助，仅登录）=====
             | ("POST", "/system/notice/markRead")
             | ("POST", "/system/notice/markReadAll")

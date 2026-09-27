@@ -62,6 +62,10 @@ pub use super::sys_user::{
     ActiveModel as SysUserActiveModel, Column as SysUserColumn, Entity as SysUser,
     Model as SysUserModel,
 };
+pub use super::sys_user_credential::{
+    ActiveModel as SysUserCredentialActiveModel, Column as SysUserCredentialColumn,
+    Entity as SysUserCredential, Model as SysUserCredentialModel,
+};
 pub use super::sys_user_role::{
     ActiveModel as SysUserRoleActiveModel, Column as SysUserRoleColumn, Entity as SysUserRole,
     Model as SysUserRoleModel,

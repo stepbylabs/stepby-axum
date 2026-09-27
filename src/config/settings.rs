@@ -85,6 +85,9 @@ pub struct Settings {
     /// 默认 `off` ⇒ 一个字节都不发（与改造前逐字节等价）。
     #[serde(default)]
     pub events: EventsConfig,
+    /// WebAuthn / Passkey 配置（`[webauthn]` 段）：能力位 `auth.webauthn` 的配置面。
+    #[serde(default)]
+    pub webauthn: WebauthnConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -114,6 +117,7 @@ impl fmt::Debug for Settings {
             .field("ui", &self.ui)
             .field("acme", &self.acme)
             .field("events", &self.events)
+            .field("webauthn", &self.webauthn)
             .finish()
     }
 }
@@ -608,6 +612,144 @@ fn default_events_outbound() -> String {
 
 fn default_events_timeout_secs() -> u64 {
     5
+}
+
+/// WebAuthn / Passkey 配置（`[webauthn]` 段）——能力位 `auth.webauthn` 的**配置面**。
+///
+/// # 定位
+///
+/// 是否可用由**能力位** `auth.webauthn`（平台层 `[features]`）管辖，本段只承载 RP 参数：
+/// - `rp_id` / `origin` 是 WebAuthn 的**信任锚**（分别用于 `authData` 的 rpIdHash 校验与
+///   `clientDataJSON.origin` 校验），配错即认证恒失败；
+/// - 二者留空时从 `[server].cors_origins` 首个来源**推导兜底**（见 [`Self::resolved`]）——
+///   同源部署（后端嵌入前端）下推导结果与浏览器实际 origin 一致，开箱可用；
+/// - 能力位开启但推导/配置仍为空或非法时，启动打 **WARN**（拒绝静默失效，参照 `[acme]` /
+///   `[events]` 的既有写法），请求期返回 503（服务器未就绪）而非静默 500。
+///
+/// # 安全姿态
+///
+/// 默认值（`rp_id` / `origin` 空）= 与"未配置"等价；能力位缺省 `off` ⇒ 端点 404，
+/// 与改造前逐字节等价（关闭态即安全态）。
+#[derive(Clone, Debug, Deserialize)]
+pub struct WebauthnConfig {
+    /// 依赖方标识（如 `example.com`；**不含 scheme 与端口**）。留空 ⇒ 从
+    /// `[server].cors_origins` 首个来源的 host 推导注册域。
+    #[serde(default)]
+    pub rp_id: String,
+    /// 依赖方显示名（浏览器 passkey 提示中展示）。默认 `Yebot`。
+    #[serde(default = "default_webauthn_rp_name")]
+    pub rp_name: String,
+    /// 期望来源（如 `https://example.com`，**含 scheme**）。留空 ⇒ 取
+    /// `[server].cors_origins` 首个来源。
+    #[serde(default)]
+    pub origin: String,
+    /// 挑战 / 会话临时态 TTL（秒，默认 300，至少 1）
+    #[serde(default = "default_webauthn_state_ttl_secs")]
+    pub state_ttl_secs: u64,
+}
+
+impl Default for WebauthnConfig {
+    fn default() -> Self {
+        Self {
+            rp_id: String::new(),
+            rp_name: default_webauthn_rp_name(),
+            origin: String::new(),
+            state_ttl_secs: default_webauthn_state_ttl_secs(),
+        }
+    }
+}
+
+impl WebauthnConfig {
+    /// 解析出**本次运行的有效 WebAuthn 参数**；`None` = 未配置且无法推导 / 推导结果非法。
+    ///
+    /// 推导规则（仅在对应字段为空时启用）：
+    /// - `origin` ← `[server].cors_origins` 首个非空来源；
+    /// - `rp_id` ← 该 origin 的 host 的**注册域**（去掉最左子域：`app.example.com` ⇒ `example.com`；
+    ///   `localhost` / IP 原样保留）。
+    ///
+    /// ⚠️ 注册域推导是**保守启发式**（取末两段标签），对 `a.b.co.uk` 之类的多级公共后缀不精确；
+    /// 生产环境请**显式配置** `rp_id`。推导值仅在"使用者未配置"时兜底，且非法时返回 `None`
+    /// （fail-closed，宁可不启用也不放行错误信任锚）。
+    pub fn resolved(&self, server: &ServerConfig) -> Option<ResolvedWebauthn> {
+        let origin = {
+            let explicit = self.origin.trim();
+            if !explicit.is_empty() {
+                explicit.to_string()
+            } else {
+                server
+                    .cors_origins
+                    .iter()
+                    .map(|s| s.trim())
+                    .find(|s| !s.is_empty())?
+                    .to_string()
+            }
+        };
+        let rp_id = {
+            let explicit = self.rp_id.trim();
+            if !explicit.is_empty() {
+                explicit.to_string()
+            } else {
+                registrable_domain_of_origin(&origin)?
+            }
+        };
+        if !is_valid_rp_id(&rp_id) || !is_valid_webauthn_origin(&origin) {
+            return None;
+        }
+        Some(ResolvedWebauthn {
+            rp_id,
+            rp_name: self.rp_name.clone(),
+            origin,
+            state_ttl_secs: self.state_ttl_secs.max(1),
+        })
+    }
+}
+
+/// [`WebauthnConfig::resolved`] 的解析结果（rp_id / origin 必定非空且通过基本合法性校验）。
+#[derive(Clone, Debug)]
+pub struct ResolvedWebauthn {
+    pub rp_id: String,
+    pub rp_name: String,
+    pub origin: String,
+    pub state_ttl_secs: u64,
+}
+
+fn default_webauthn_rp_name() -> String {
+    "Yebot".to_string()
+}
+
+fn default_webauthn_state_ttl_secs() -> u64 {
+    300
+}
+
+/// `rp_id` 基本合法性：非空、无 scheme/端口/路径分隔符（WebAuthn 规范要求 rp_id 为域名后缀）。
+fn is_valid_rp_id(rp_id: &str) -> bool {
+    let r = rp_id.trim();
+    !r.is_empty() && !r.contains('/') && !r.contains(':') && !r.contains(' ')
+}
+
+/// `origin` 基本合法性：必须是可解析的 http(s) 绝对 URL（WebAuthn 只允许 http(s)）。
+fn is_valid_webauthn_origin(origin: &str) -> bool {
+    let o = origin.trim();
+    (o.starts_with("https://") || o.starts_with("http://")) && url::Url::parse(o).is_ok()
+}
+
+fn registrable_domain_of_origin(origin: &str) -> Option<String> {
+    let url = url::Url::parse(origin.trim()).ok()?;
+    let host = url.host_str()?;
+    Some(registrable_domain(host))
+}
+
+/// 取 host 的注册域（保守启发式，见 [`WebauthnConfig::resolved`] 的说明）。
+fn registrable_domain(host: &str) -> String {
+    if host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
+    let labels: Vec<&str> = host.split('.').filter(|s| !s.is_empty()).collect();
+    if labels.len() <= 2 {
+        host.to_string()
+    } else {
+        labels[labels.len() - 2..].join(".")
+    }
 }
 
 /// 系统日志保留策略配置（M2：操作日志 / 登录日志定期归档清理）
@@ -1708,6 +1850,7 @@ impl Settings {
             ui: UiConfig::default(),
             acme: AcmeConfig::default(),
             events: EventsConfig::default(),
+            webauthn: WebauthnConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -1872,6 +2015,7 @@ mod tests {
             ui: UiConfig::default(),
             acme: AcmeConfig::default(),
             events: EventsConfig::default(),
+            webauthn: WebauthnConfig::default(),
         }
     }
 
@@ -2144,6 +2288,7 @@ mod tests {
             ui: UiConfig::default(),
             acme: AcmeConfig::default(),
             events: EventsConfig::default(),
+            webauthn: WebauthnConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);

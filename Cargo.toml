@@ -170,6 +170,12 @@ base32 = "0.5"
 # Base64 编解码（TOTP QR 码 Data URL）
 base64 = "0.22"
 
+# WebAuthn / Passkey（纯 Rust：ciborium + coset + p256，无 openssl）
+# 开关：能力位 `auth.webauthn`（默认 off，登录面能力，不向租户解锁 perm）。
+# 必须启用 `send` feature：否则 `PasskeyStore` trait 以 `async_trait(?Send)` 生成，
+# 其返回的 future 非 Send，无法在 axum handler（要求 Send）中被 await（编译期报错）。
+passkey-server = { version = "0.1.4", features = ["send"] }
+
 # 邮件发送（SMTP）
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
@@ -213,3 +219,5 @@ sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx
 tokio-tungstenite = "0.24"
 # WS 客户端测试需要 futures Stream/Sink 扩展方法
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+p256 = "0.13.2"
+coset = "0.4.2"
