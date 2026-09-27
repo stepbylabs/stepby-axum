@@ -36,6 +36,9 @@ impl AppInitializer {
         // 避免"以为会推送其实静默失效"（与 MT-4 反代白名单同类坑）。
         init_acme_output(&settings);
 
+        // 2.3 出站领域事件姿态（`[events]`）：默认 off；配了 webhook 但地址非法时告警（同上）。
+        init_events_output(&settings);
+
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
 
@@ -3902,6 +3905,41 @@ fn init_acme_output(settings: &Settings) {
                 webhook_url = ?cfg.webhook_url,
                 "[acme].mode = webhook 但 webhook_url 缺失或非 http(s) ⇒ 本次运行**不会**推送\
                  （按 off 处理）。请补全 [acme].webhook_url，否则证书需求清单会静默丢失"
+            );
+        }
+    }
+}
+
+/// 启动打印**出站领域事件**的**有效姿态**（`[events]` 段）。
+///
+/// 与 `[acme]` 同源治理逻辑：这是"把领域事件推出本进程"的唯一出口，必须让运维一眼看到
+/// 本实例**是否会**发请求、发到哪、推送哪些事件。默认 `off` 打 INFO；
+/// `outbound = webhook` 但地址缺失/非法时打 **WARN**——否则会静默失效。
+fn init_events_output(settings: &Settings) {
+    use crate::config::settings::EventsOutboundMode;
+
+    let cfg = &settings.events;
+    match (cfg.mode(), cfg.effective_webhook()) {
+        (EventsOutboundMode::Off, _) => {
+            tracing::info!(
+                "领域事件输出：[events].outbound = off（默认，不发任何出站请求）\
+                 —— 需要对接 MQ / 通知 / 数仓时置 webhook 并配置 webhook_url"
+            );
+        }
+        (EventsOutboundMode::Webhook, Some(url)) => {
+            tracing::info!(
+                url = %url,
+                signed = cfg.secret.as_deref().is_some_and(|s| !s.is_empty()),
+                timeout_secs = cfg.timeout().as_secs(),
+                events = ?crate::service::event_outbox_service::ALL_EVENTS,
+                "领域事件输出：已启用 webhook（租户创建 / 启停 / 删除 / 恢复时推送）"
+            );
+        }
+        (EventsOutboundMode::Webhook, None) => {
+            tracing::warn!(
+                webhook_url = ?cfg.webhook_url,
+                "[events].outbound = webhook 但 webhook_url 缺失或非 http(s) ⇒ 本次运行**不会**推送\
+                 （按 off 处理）。请补全 [events].webhook_url，否则领域事件会静默丢失"
             );
         }
     }

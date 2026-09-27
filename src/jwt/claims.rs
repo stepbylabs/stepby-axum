@@ -154,13 +154,45 @@ impl JwtUtils {
     ///
     /// SEC-001：校验 issuer + audience，防止 token 跨服务复用
     /// SEC-008：显式指定 Algorithm::HS256，防止 alg=none 攻击
+    ///
+    /// **密钥轮换（多密钥共存）**：按 `config.verification_secrets()`（当前密钥优先、
+    /// 其后为 `previous_secrets`）逐个尝试验签。命中旧密钥即视为"该 token 签发于轮换之前"，
+    /// 记 debug 级可观测信号后放行 ⇒ 轮换期间**存量 token 不被登出**（零停机）。
+    /// 全部密钥均签名不匹配 ⇒ `InvalidSignature`；过期/格式/claims 类错误与密钥无关，
+    /// 立即返回真实原因（不被"换密钥重试"掩盖成签名失败）。
     pub fn verify_token(token: &str, config: &JwtConfig) -> Result<Claims, JwtError> {
+        for (idx, secret) in config.verification_secrets().into_iter().enumerate() {
+            match Self::verify_with_secret(token, config, secret) {
+                Ok(claims) => {
+                    if idx > 0 {
+                        tracing::debug!(
+                            key_index = idx,
+                            "JWT 由 previous_secrets 验签通过（密钥轮换过渡期内）"
+                        );
+                    }
+                    return Ok(claims);
+                }
+                // 签名不匹配 ⇒ 换下一把候选密钥重试（多密钥共存的核心分支）
+                Err(JwtError::InvalidSignature) => continue,
+                // 过期 / 格式错误 / claims 不符 ⇒ 与密钥无关，立即返回
+                Err(err) => return Err(err),
+            }
+        }
+        Err(JwtError::InvalidSignature)
+    }
+
+    /// 单密钥验签（[`JwtUtils::verify_token`] 候选循环的单元）：校验 issuer + audience。
+    fn verify_with_secret(
+        token: &str,
+        config: &JwtConfig,
+        secret: &str,
+    ) -> Result<Claims, JwtError> {
         let mut validation = Validation::new(Algorithm::HS256);
         validation.set_issuer(&[&config.issuer]);
         validation.set_audience(&[&config.audience]);
         let token_data = decode::<Claims>(
             token,
-            &DecodingKey::from_secret(config.secret.as_bytes()),
+            &DecodingKey::from_secret(secret.as_bytes()),
             &validation,
         )?;
         Ok(token_data.claims)
@@ -179,6 +211,7 @@ mod tests {
             expire_hours: 24,
             issuer: "yebot".to_string(),
             audience: "yebot".to_string(),
+            previous_secrets: vec![],
         }
     }
 
@@ -338,6 +371,143 @@ mod tests {
         assert!(
             matches!(err, JwtError::InvalidSignature),
             "错误密钥应返回 InvalidSignature，实际得到: {err}"
+        );
+    }
+
+    // ==================== 密钥轮换（多密钥共存）====================
+
+    /// 轮换过渡期：用**旧密钥**签发的 token，在 `secret=新密钥 + previous_secrets=[旧密钥]`
+    /// 下仍可通过验签 —— 这是零停机轮换的核心不变量（存量 token 不被登出）。
+    #[test]
+    fn test_verify_accepts_token_signed_by_previous_key_during_rotation() {
+        const NEW_SECRET: &str = "rotated-new-secret-0123456789abcdefghij";
+        const OLD_SECRET: &str = "legacy-old-secret-9876543210zyxwvutsrq";
+        let old_cfg = JwtConfig {
+            secret: OLD_SECRET.to_string(),
+            ..test_jwt_config()
+        };
+        // 轮换前签发的 token（用旧密钥）
+        let (legacy_token, _) =
+            JwtUtils::generate_token("7", "legacy", &old_cfg, 0, 0).expect("旧密钥签发应成功");
+
+        // 轮换后的配置：签发密钥为新，旧密钥进入 previous_secrets
+        let rotated = JwtConfig {
+            secret: NEW_SECRET.to_string(),
+            previous_secrets: vec![OLD_SECRET.to_string()],
+            ..test_jwt_config()
+        };
+
+        let claims = JwtUtils::verify_token(&legacy_token, &rotated)
+            .expect("过渡期内旧密钥签发的 token 必须仍可通过验签");
+        assert_eq!(claims.sub, "7");
+        assert_eq!(claims.username, "legacy");
+
+        // 新密钥签发的 token 同样通过（且不需回退）
+        let (fresh_token, _) =
+            JwtUtils::generate_token("8", "fresh", &rotated, 0, 0).expect("新密钥签发应成功");
+        assert_eq!(
+            JwtUtils::verify_token(&fresh_token, &rotated)
+                .expect("新 token 应通过")
+                .sub,
+            "8"
+        );
+    }
+
+    /// 轮换完成（`previous_secrets` 清空）后，旧密钥签发的 token 必须被拒 —— 轮换真正生效。
+    #[test]
+    fn test_verify_rejects_previous_key_token_after_rotation_completes() {
+        const NEW_SECRET: &str = "rotated-new-secret-0123456789abcdefghij";
+        const OLD_SECRET: &str = "legacy-old-secret-9876543210zyxwvutsrq";
+        let old_cfg = JwtConfig {
+            secret: OLD_SECRET.to_string(),
+            ..test_jwt_config()
+        };
+        let (legacy_token, _) =
+            JwtUtils::generate_token("7", "legacy", &old_cfg, 0, 0).expect("旧密钥签发应成功");
+
+        let done = JwtConfig {
+            secret: NEW_SECRET.to_string(),
+            previous_secrets: vec![],
+            ..test_jwt_config()
+        };
+        let err = JwtUtils::verify_token(&legacy_token, &done).unwrap_err();
+        assert!(
+            matches!(err, JwtError::InvalidSignature),
+            "清空 previous_secrets 后旧 token 应被拒，实际: {err}"
+        );
+    }
+
+    /// 完全未知的第三把密钥签发的 token 不得通过（回退 ≠ 放行任意密钥）。
+    #[test]
+    fn test_verify_rejects_unknown_key_when_rotating() {
+        let cfg = JwtConfig {
+            secret: "rotated-new-secret-0123456789abcdefghij".to_string(),
+            previous_secrets: vec!["legacy-old-secret-9876543210zyxwvutsrq".to_string()],
+            ..test_jwt_config()
+        };
+        let attacker = JwtConfig {
+            secret: "attacker-key-0123456789abcdefghijklmn".to_string(),
+            ..test_jwt_config()
+        };
+        let (forged, _) = JwtUtils::generate_token("1", "attacker", &attacker, 0, 0)
+            .expect("伪造 token 应可编码");
+
+        let err = JwtUtils::verify_token(&forged, &cfg).unwrap_err();
+        assert!(
+            matches!(err, JwtError::InvalidSignature),
+            "未知密钥应被拒，实际: {err}"
+        );
+    }
+
+    /// 旧密钥签发但**已过期**的 token 应返回 `Expired`（而非被回退逻辑掩盖成 InvalidSignature）。
+    #[test]
+    fn test_verify_expired_token_signed_by_previous_key_returns_expired() {
+        const NEW_SECRET: &str = "rotated-new-secret-0123456789abcdefghij";
+        const OLD_SECRET: &str = "legacy-old-secret-9876543210zyxwvutsrq";
+        let cfg = JwtConfig {
+            secret: NEW_SECRET.to_string(),
+            previous_secrets: vec![OLD_SECRET.to_string()],
+            ..test_jwt_config()
+        };
+        let now = Utc::now();
+        let claims = Claims {
+            sub: "9".to_string(),
+            username: "expired".to_string(),
+            exp: (now - chrono::Duration::hours(1)).timestamp() as usize,
+            iat: (now - chrono::Duration::hours(2)).timestamp() as usize,
+            iss: cfg.issuer.clone(),
+            aud: cfg.audience.clone(),
+            jti: "expired-jti".to_string(),
+            pwd_ver: 0,
+            pat_scopes: None,
+            tid: 0,
+        };
+        let token = encode_claims(&claims, OLD_SECRET);
+        let err = JwtUtils::verify_token(&token, &cfg).unwrap_err();
+        assert!(
+            matches!(err, JwtError::Expired),
+            "旧密钥 + 过期应返回 Expired，实际: {err}"
+        );
+    }
+
+    /// `verification_secrets`：当前密钥优先、去空串、trim、去重、保序。
+    #[test]
+    fn test_verification_secrets_order_dedup_and_trim() {
+        let cfg = JwtConfig {
+            secret: "current-secret".to_string(),
+            previous_secrets: vec![
+                "  old-a-secret  ".to_string(),
+                String::new(),                // 空串 ⇒ 忽略
+                "current-secret".to_string(), // 与当前密钥重复 ⇒ 去重
+                "old-b-secret".to_string(),
+                "old-a-secret".to_string(), // trim 后与首项重复 ⇒ 去重
+            ],
+            ..test_jwt_config()
+        };
+        assert_eq!(
+            cfg.verification_secrets(),
+            vec!["current-secret", "old-a-secret", "old-b-secret"],
+            "应为：当前密钥优先 + 去空 + trim + 去重 + 保序"
         );
     }
 }

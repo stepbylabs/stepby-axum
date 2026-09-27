@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::common::{AjaxResult, AppError};
 use crate::middleware::{Operator, TargetTenant};
+use crate::service::event_outbox_service as outbox;
 use crate::service::sys_tenant_service::{
     PackageFeaturesUpdateDto, PackageFeaturesVo, SysTenantService, TenantAddDto, TenantEditDto,
     TenantPackageOptionVo, TenantQueryDto, TenantStatusDto, TenantVo,
@@ -93,6 +94,18 @@ pub async fn add(
         .tenant_service
         .add(dto, operator.username(), operator.tenant_id())
         .await?;
+    // 出站领域事件（`[events].outbound`，默认 `off` = 一个字节都不发）：
+    // fire-and-forget，推送失败不影响创建结果
+    outbox::spawn_emit(
+        state.config.events.clone(),
+        outbox::EVENT_TENANT_CREATED,
+        serde_json::json!({
+            "tenantId": vo.tenant_id,
+            "tenantCode": vo.tenant_code,
+            "tenantName": vo.tenant_name,
+            "operator": operator.username(),
+        }),
+    );
     Ok(AjaxResult::success(vo))
 }
 
@@ -143,10 +156,22 @@ pub async fn change_status(
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     // 多租户 Phase 3：记录被操作租户，供审计 target_tenant_id
     target_tenant.set(dto.tenant_id);
+    // 事件载荷需在 dto 被消费前取出
+    let (event_tenant_id, event_status) = (dto.tenant_id, dto.status.clone());
     state
         .tenant_service
         .change_status(dto, operator.username(), operator.tenant_id())
         .await?;
+    // 出站领域事件（默认 off = 不发）：租户启停（停用同时会触发全链断链，见 P0-1）
+    outbox::spawn_emit(
+        state.config.events.clone(),
+        outbox::EVENT_TENANT_STATUS_CHANGED,
+        serde_json::json!({
+            "tenantId": event_tenant_id,
+            "status": event_status,
+            "operator": operator.username(),
+        }),
+    );
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -174,6 +199,12 @@ pub async fn remove(
         .tenant_service
         .remove(tenant_id, operator.username(), operator.tenant_id())
         .await?;
+    // 出站领域事件（默认 off = 不发）：租户删除（软删进入回收站）
+    outbox::spawn_emit(
+        state.config.events.clone(),
+        outbox::EVENT_TENANT_DELETED,
+        serde_json::json!({ "tenantId": tenant_id, "operator": operator.username() }),
+    );
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
@@ -201,6 +232,12 @@ pub async fn restore(
         .tenant_service
         .restore(tenant_id, operator.username(), operator.tenant_id())
         .await?;
+    // 出站领域事件（默认 off = 不发）：租户从回收站恢复
+    outbox::spawn_emit(
+        state.config.events.clone(),
+        outbox::EVENT_TENANT_RESTORED,
+        serde_json::json!({ "tenantId": vo.tenant_id, "operator": operator.username() }),
+    );
     Ok(AjaxResult::success(vo))
 }
 
