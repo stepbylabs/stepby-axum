@@ -28,6 +28,7 @@ use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::common::AppError;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
@@ -608,13 +609,57 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             );
         }
     };
+    // v5-D11（本轮按准则⑥改判为默认关的开关）：响应**服务端**短 TTL 缓存。
+    // 默认 0 = 不缓存 = 改造前行为；> 0 时按 AT 哈希缓存，TTL 硬上限 300s
+    // （开启即接受"最多 300s 的吊销延迟"，由部署方权衡性能与即时性）。
+    // 注意：这是**服务端**缓存，与 RFC 6750 的 `Cache-Control: no-store` 不冲突——
+    // 后者约束的是浏览器/中间代理，下面命中缓存时同样带 no-store 返回。
+    let ttl = state
+        .config
+        .sso
+        .userinfo_cache_ttl_secs
+        .min(crate::config::settings::USERINFO_CACHE_MAX_SECS);
+    let cache_key = if ttl > 0 {
+        let mut hasher = Sha256::new();
+        hasher.update(bearer.as_bytes());
+        Some(format!("sso:userinfo:{}", hex::encode(hasher.finalize())))
+    } else {
+        None
+    };
+    if let Some(key) = cache_key.as_deref() {
+        let mut redis = state.redis.clone();
+        let hit: Option<String> = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut redis)
+            .await
+            .unwrap_or(None);
+        if let Some(raw) = hit
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+        {
+            return with_no_store((StatusCode::OK, Json(v)).into_response());
+        }
+    }
     match state
         .sso_service
         .userinfo(bearer, &mut state.redis.clone(), &state.config.sso)
         .await
     {
         // RFC 6750：userinfo 响应不得被缓存
-        Ok(claims) => with_no_store((StatusCode::OK, Json(claims)).into_response()),
+        Ok(claims) => {
+            if let Some(key) = cache_key.as_deref()
+                && let Ok(raw) = serde_json::to_string(&claims)
+            {
+                // best-effort 写入：失败只影响"下次是否命中缓存"，不影响本次响应
+                let mut redis = state.redis.clone();
+                let _: Result<(), _> = redis::cmd("SETEX")
+                    .arg(key)
+                    .arg(ttl)
+                    .arg(&raw)
+                    .query_async(&mut redis)
+                    .await;
+            }
+            with_no_store((StatusCode::OK, Json(claims)).into_response())
+        }
         Err(e) => {
             // userinfo 错误按 RFC 6750 返回 401 + WWW-Authenticate
             let mut resp = oidc_error_response(StatusCode::UNAUTHORIZED, &e);

@@ -13,6 +13,7 @@
 
 pub mod acme_service;
 pub mod auth_service;
+pub mod event_outbox_service;
 pub mod gen_table_service;
 pub mod ip_location_service;
 pub mod mailer_service;

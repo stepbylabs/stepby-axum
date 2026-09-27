@@ -80,6 +80,11 @@ pub struct Settings {
     /// ACME 证书需求输出（`[acme]` 段）：**集成点**而非内置签发器（默认 `off`）。
     #[serde(default)]
     pub acme: AcmeConfig,
+    /// 出站**领域事件**集成点（`[events]` 段）：`outbound = "webhook"` 时把租户生命周期等
+    /// 领域事件推给使用者自己声明的接收端（用于对接 MQ / 通知 / 数仓），**不内置消息队列**。
+    /// 默认 `off` ⇒ 一个字节都不发（与改造前逐字节等价）。
+    #[serde(default)]
+    pub events: EventsConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -108,6 +113,7 @@ impl fmt::Debug for Settings {
             .field("scheduler", &self.scheduler)
             .field("ui", &self.ui)
             .field("acme", &self.acme)
+            .field("events", &self.events)
             .finish()
     }
 }
@@ -381,6 +387,7 @@ impl AcmeConfig {
     ///
     /// 地址合法性用 `http://` / `https://` 前缀判定（拒绝 `file:` / `ftp:` 等），
     /// 与"只把数据推到运维自己声明的 HTTP 端点"的契约一致。
+    /// 判定实现收敛在 [`crate::common::webhook::url_is_http`]（与 `[events]` 段共用）。
     pub fn effective_webhook(&self) -> Option<&str> {
         if self.mode() != AcmeMode::Webhook {
             return None;
@@ -388,7 +395,7 @@ impl AcmeConfig {
         self.webhook_url
             .as_deref()
             .map(str::trim)
-            .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+            .filter(|u| crate::common::webhook::url_is_http(u))
     }
 }
 
@@ -397,6 +404,133 @@ fn default_acme_mode() -> String {
 }
 
 fn default_acme_timeout_secs() -> u64 {
+    5
+}
+
+/// 出站**领域事件**集成点（`[events]` 段）——把事件交给用户自己的接收端，
+/// **不是**内置消息队列。
+///
+/// # 定位（项目准则⑥：原判"不进本仓"改为"提供集成点/开关"）
+///
+/// 需要事件驱动 / MQ / 数据同步的使用者不少，但**不应**由本仓内置
+/// Kafka / RabbitMQ / Redis Stream：那会把使用者锁死在单一技术栈上，且绝大多数
+/// 中后台场景用不到真正的 MQ。故此处只提供**出站事件契约**——
+/// `outbound = "webhook"` 时，领域事件以 HTTP POST 推到使用者自己声明的地址，
+/// 由接收端去对接 MQ / 通知 / 数仓 / 审计归档。
+///
+/// # 安全与关闭态
+///
+/// - 默认 `off` ⇒ **一个字节都不发**（`effective_webhook()` 返回 `None` 即直接返回），
+///   与改造前逐字节等价；
+/// - `outbound = webhook` 但地址缺失/非 http(s) ⇒ 启动 **WARN**（拒绝静默失效）；
+/// - 推送 fire-and-forget：失败只 `WARN`，**绝不影响**业务事务本身；
+/// - 可选 HMAC-SHA256 签名（`X-Yebot-Signature: sha256=<hex>`）供接收端验签。
+#[derive(Clone, Deserialize)]
+pub struct EventsConfig {
+    /// `off`（默认，不发请求）| `webhook`（把领域事件推到 `webhook_url`）
+    #[serde(default = "default_events_outbound")]
+    pub outbound: String,
+    /// webhook 目标地址（`outbound = webhook` 时必填）
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// HMAC-SHA256 签名密钥（可选）
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// 单次推送超时（秒，默认 5；夹取 `1..=60`）
+    #[serde(default = "default_events_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            outbound: default_events_outbound(),
+            webhook_url: None,
+            secret: None,
+            timeout_secs: default_events_timeout_secs(),
+        }
+    }
+}
+
+/// 手动实现 Debug 以**脱敏** `secret`（避免签名密钥进日志）
+impl fmt::Debug for EventsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventsConfig")
+            .field("outbound", &self.outbound)
+            .field("webhook_url", &self.webhook_url)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+/// 出站事件模式（`[events].outbound`）
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EventsOutboundMode {
+    /// 关闭：不发任何出站请求 —— **默认，等价于改造前行为**
+    #[default]
+    Off,
+    /// 把领域事件推到 webhook
+    Webhook,
+}
+
+/// `EventsOutboundMode` 的合法模式串（顺序：默认项在前）
+pub const EVENTS_OUTBOUND_MODES: &[&str] = &["off", "webhook"];
+
+impl EventsOutboundMode {
+    /// 解析配置串；未登记取值一律回落 [`EventsOutboundMode::Off`] 并打 WARN（fail-safe）
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "webhook" => Self::Webhook,
+            "off" => Self::Off,
+            _ => {
+                tracing::warn!(
+                    value = %raw,
+                    fallback = "off",
+                    allowed = ?EVENTS_OUTBOUND_MODES,
+                    "配置 [events].outbound 取值非法，已回落 off（不推送领域事件）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
+impl EventsConfig {
+    /// 解析后的模式（非法值已由 [`EventsOutboundMode::parse`] 打 WARN 并回落 `off`）
+    pub fn mode(&self) -> EventsOutboundMode {
+        EventsOutboundMode::parse(&self.outbound)
+    }
+
+    /// 推送超时（秒）：夹在 `1..=60`，防止配置成 0（立即超时）或过大（拖住请求）
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs.clamp(1, 60))
+    }
+
+    /// **本次运行的有效推送目标**：`None` = 不推送（模式为 `off`，或地址缺失/非法）。
+    pub fn effective_webhook(&self) -> Option<&str> {
+        if self.mode() != EventsOutboundMode::Webhook {
+            return None;
+        }
+        self.webhook_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| crate::common::webhook::url_is_http(u))
+    }
+}
+
+fn default_events_outbound() -> String {
+    EventsOutboundMode::default().as_str().to_string()
+}
+
+fn default_events_timeout_secs() -> u64 {
     5
 }
 
@@ -537,6 +671,19 @@ pub struct SsoConfig {
     /// 由服务端带 SSRF 防护拉取并短缓存。
     #[serde(default)]
     pub proxy_logo_uri: bool,
+    /// v5-D11（本轮按准则⑥改判为**默认关的开关**）：`/sso/userinfo` 响应的**服务端**短 TTL 缓存秒数。
+    ///
+    /// 原定案"不修"，理由是与原则 C「停用即断链」/ D3「吊销即时生效」冲突——**该冲突是真的**，
+    /// 但"性能 vs 吊销即时性"应由部署方自己权衡，故做成显式开关：
+    /// - `0`（默认）= **不缓存** = 改造前行为（每次 userinfo 都回查令牌绑定）；
+    /// - `> 0` = 按 AT 哈希缓存响应，**硬上限 300 秒**（`USERINFO_CACHE_MAX_SECS`）——
+    ///   即开启后最多容忍 300 秒的吊销延迟，绝不允许配成"小时级"。
+    ///
+    /// ⚠️ 与 `access_token_ttl_secs` 无关：缓存 TTL 短于 AT 有效期时，AT 过期后
+    /// 缓存条目虽仍在，但 `userinfo` 不会因缓存命中而绕过"AT 过期即失效"——缓存键以
+    /// **AT 哈希**为维度，且 TTL 上限 300s ⇒ 最坏情况是本已吊销的 AT 在 300s 内仍可读 userinfo。
+    #[serde(default)]
+    pub userinfo_cache_ttl_secs: u64,
 }
 
 impl Default for SsoConfig {
@@ -551,6 +698,7 @@ impl Default for SsoConfig {
             introspection_enabled: false,
             audit_authorize_get: false,
             proxy_logo_uri: false,
+            userinfo_cache_ttl_secs: 0,
         }
     }
 }
@@ -558,6 +706,13 @@ impl Default for SsoConfig {
 fn default_sso_disabled() -> bool {
     false
 }
+
+/// `/sso/userinfo` 服务端缓存的**硬上限**（秒）：即便配置写得更大也被夹到这里。
+///
+/// 300s 是"性能可感"与"吊销延迟可接受"之间的折中；不允许更长，
+/// 以免开关被当成"绕过停用即时断链"的手段。
+pub const USERINFO_CACHE_MAX_SECS: u64 = 300;
+
 fn default_sso_code_ttl_secs() -> u64 {
     60
 }
@@ -740,6 +895,31 @@ pub struct JwtConfig {
     /// 默认 "yebot"，生产环境应通过配置显式指定
     #[serde(default = "default_jwt_audience")]
     pub audience: String,
+    /// **密钥轮换过渡期**：旧签名密钥（仅用于**验签回退**，永不用于签发）。
+    ///
+    /// 零停机轮换：① 生成新密钥，把**当前密钥**移入本列表、`secret` 换成新密钥 → 滚动发布；
+    /// ② 过渡期内新 token 用新密钥签发、旧 token 用旧密钥验签（用户无感）；
+    /// ③ 待最长有效期（`expire_hours`）过后清空本列表 ⇒ 轮换完成。
+    ///
+    /// 缺省为空 ⇒ 与改造前逐字节等价（单密钥）。旧密钥同样受 `validate_secrets`
+    /// 强密钥校验（弱密钥 fail-closed 拒绝启动）。
+    #[serde(default)]
+    pub previous_secrets: Vec<String>,
+}
+
+impl JwtConfig {
+    /// 验签候选密钥：**当前密钥优先**，其后依次为 `previous_secrets`
+    /// （去首尾空白、忽略空串、按值去重）。顺序即优先级。
+    pub fn verification_secrets(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = vec![self.secret.as_str()];
+        for secret in &self.previous_secrets {
+            let secret = secret.trim();
+            if !secret.is_empty() && !out.contains(&secret) {
+                out.push(secret);
+            }
+        }
+        out
+    }
 }
 
 /// 手动实现 Debug 以脱敏 secret
@@ -750,6 +930,10 @@ impl fmt::Debug for JwtConfig {
             .field("expire_hours", &self.expire_hours)
             .field("issuer", &self.issuer)
             .field("audience", &self.audience)
+            .field(
+                "previous_secrets",
+                &format!("<redacted; {} 项>", self.previous_secrets.len()),
+            )
             .finish()
     }
 }
@@ -1233,6 +1417,14 @@ impl Settings {
                 self.jwt.expire_hours = 24;
             }
         }
+        // 密钥轮换：逗号分隔的旧密钥列表（仅用于验签回退），空项忽略
+        if let Ok(v) = std::env::var("JWT_PREVIOUS_SECRETS") {
+            self.jwt.previous_secrets = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
         if let Ok(v) = std::env::var("SERVER_HOST") {
             self.server.host = v;
         }
@@ -1399,6 +1591,7 @@ impl Settings {
                 expire_hours: jwt_expire_hours,
                 issuer: "yebot".to_string(),
                 audience: "yebot".to_string(),
+                previous_secrets: vec![],
             },
             log: LogConfig {
                 level: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -1417,6 +1610,7 @@ impl Settings {
             scheduler: SchedulerConfig::default(),
             ui: UiConfig::default(),
             acme: AcmeConfig::default(),
+            events: EventsConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -1456,6 +1650,29 @@ impl Settings {
             anyhow::bail!(
                 "jwt.secret 长度不足 32 字符，当前 {} 字符，请设置更强的密钥",
                 self.jwt.secret.len()
+            );
+        }
+        // 密钥轮换（多密钥共存）：旧密钥同样参与验签，故强度下限与当前密钥一致——
+        // 弱旧密钥会削弱整体签名强度，必须 fail-closed 拒绝启动（不留"过渡期降级"缺口）。
+        for (idx, prev) in self.jwt.previous_secrets.iter().enumerate() {
+            let prev_lower = prev.to_lowercase();
+            if weak_patterns.iter().any(|p| prev_lower.contains(p)) {
+                anyhow::bail!(
+                    "jwt.previous_secrets[{idx}] 命中弱/占位密钥禁止模式，请移除或更换为真实强密钥"
+                );
+            }
+            if prev.trim().len() < 32 {
+                anyhow::bail!(
+                    "jwt.previous_secrets[{idx}] 长度不足 32 字符（当前 {} 字符），旧密钥同样需要满足强度下限",
+                    prev.trim().len()
+                );
+            }
+        }
+        if !self.jwt.previous_secrets.is_empty() {
+            tracing::info!(
+                count = self.jwt.previous_secrets.len(),
+                expire_hours = self.jwt.expire_hours,
+                "JWT 密钥轮换过渡期：当前密钥用于签发，previous_secrets 仅用于验签回退；超过最长有效期后请清空该列表"
             );
         }
         // B8：CONFIG_ENC_KEY 用于派生 AES-256-GCM 密钥（crypto.rs 以 SHA256(master_key) 作 KDF）。
@@ -1536,6 +1753,7 @@ mod tests {
                 expire_hours: 24,
                 issuer: "yebot".to_string(),
                 audience: "yebot".to_string(),
+                previous_secrets: vec![],
             },
             log: LogConfig {
                 level: "info".to_string(),
@@ -1555,6 +1773,7 @@ mod tests {
             scheduler: SchedulerConfig::default(),
             ui: UiConfig::default(),
             acme: AcmeConfig::default(),
+            events: EventsConfig::default(),
         }
     }
 
@@ -1796,6 +2015,7 @@ mod tests {
                 expire_hours: 24,
                 issuer: "yebot".to_string(),
                 audience: "yebot".to_string(),
+                previous_secrets: vec![],
             },
             log: LogConfig {
                 level: "info".to_string(),
@@ -1824,6 +2044,7 @@ mod tests {
             scheduler: SchedulerConfig::default(),
             ui: UiConfig::default(),
             acme: AcmeConfig::default(),
+            events: EventsConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);
@@ -1874,6 +2095,27 @@ mod tests {
         assert!(debug_str.contains("<redacted>"));
     }
 
+    /// v5-D11：userinfo 缓存 TTL **默认 0（关闭 = 改造前行为）** 且**硬上限 300s**。
+    /// 若有人把默认值改大、或去掉夹取，本用例即变红（可证伪）。
+    #[test]
+    fn test_sso_userinfo_cache_ttl_defaults_off_and_clamped() {
+        let cfg = SsoConfig::default();
+        assert_eq!(
+            cfg.userinfo_cache_ttl_secs, 0,
+            "默认必须为 0（不缓存 = 改造前行为）"
+        );
+        let huge = SsoConfig {
+            userinfo_cache_ttl_secs: 86_400,
+            ..cfg
+        };
+        assert_eq!(
+            huge.userinfo_cache_ttl_secs.min(USERINFO_CACHE_MAX_SECS),
+            USERINFO_CACHE_MAX_SECS,
+            "TTL 必须被夹到硬上限 300s（不允许把开关当作绕过停用即时断链的手段）"
+        );
+        assert_eq!(USERINFO_CACHE_MAX_SECS, 300);
+    }
+
     /// 验证 JwtConfig Debug 不泄漏 secret
     #[test]
     fn test_jwt_config_debug_redacts_secret() {
@@ -1882,6 +2124,7 @@ mod tests {
             expire_hours: 24,
             issuer: "yebot".to_string(),
             audience: "yebot".to_string(),
+            previous_secrets: vec![],
         };
         let debug_str = format!("{:?}", jwt_config);
         assert!(

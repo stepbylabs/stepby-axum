@@ -26,8 +26,6 @@
 //! - 可选 HMAC-SHA256 签名（`X-Yebot-Signature: sha256=<hex>`）供接收端验签。
 
 use chrono::NaiveDateTime;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 
 use crate::config::settings::AcmeConfig;
 
@@ -62,12 +60,11 @@ pub fn build_payload(
 }
 
 /// HMAC-SHA256 签名（hex 小写）。未配置 `secret` 时调用方不应调用本函数。
+///
+/// 实现收敛在 [`crate::common::webhook::sign_hmac_sha256`]：与 `[events]` 出站事件
+/// 共用同一内核，避免两处签名口径漂移。
 pub fn sign(secret: &str, body: &[u8]) -> String {
-    // Hmac::<Sha256>::new_from_slice 对任意长度密钥都成功（HMAC 规范允许）；此处退化为不可达
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC 接受任意长度密钥，构造不会失败");
-    mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
+    crate::common::webhook::sign_hmac_sha256(secret, body)
 }
 
 /// 推送证书需求事件（**fire-and-forget**）。

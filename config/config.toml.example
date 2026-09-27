@@ -58,6 +58,14 @@ url = "redis://CHANGE_ME@127.0.0.1:6379/0"
 secret = "CHANGE_ME_TO_A_STRONG_SECRET_KEY_AT_LEAST_32_CHARS"
 expire_hours = 24
 issuer = "yebot"
+# 密钥轮换过渡期：旧签名密钥（**仅用于验签回退，永不用于签发**）。
+# 零停机轮换：① 生成新密钥 → 把当前密钥移入本列表、secret 换成新密钥 → 滚动发布；
+#             ② 过渡期内新 token 用新密钥签发、旧 token 用旧密钥验签（用户无感，不被登出）；
+#             ③ 待超过 expire_hours（最长有效期）后**清空本列表** ⇒ 轮换完成。
+# ⚠️ 无自动迁移：缺省 `[]` = 单密钥，与改造前逐字节等价。
+# ⚠️ 旧密钥同样受强密钥校验（≥32 字符、非弱模式命中）——弱旧密钥会**拒绝启动**（fail-closed）。
+# 亦可用环境变量 JWT_PREVIOUS_SECRETS（逗号分隔）注入。
+previous_secrets = []
 
 [monitor]
 # 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
@@ -168,6 +176,12 @@ audit_authorize_get = false
 #   （带 SSRF 校验 + 体积/超时限制 + 仅 image/*）。关闭 ⇒ 同意页直接外链第三方 logo
 #   （= 历史行为，会把用户 IP/Referer 泄漏给该主机）。
 proxy_logo_uri = false
+# ——— 本轮：D11 userinfo 短 TTL 缓存（原「定案不修」，按准则⑥改判为**默认关的开关**）———
+# 0（默认）= **不缓存** = 历史行为（每次 /sso/userinfo 都回查令牌绑定，吊销即时生效）。
+# > 0 = 按 access_token 哈希做**服务端**响应缓存，秒；**硬上限 300**（写更大也会被夹到 300）。
+# ⚠️ 与原则「停用即断链 / 吊销即时生效」存在真实冲突——开启即接受"最多 300 秒的吊销延迟"，
+#    请按「性能 vs 即时性」自行权衡；这也是它默认关闭的原因（冲突不等于永久不做）。
+userinfo_cache_ttl_secs = 0
 
 # ==================== 审批工作流（m20260923_000002 flow_module）====================
 # 整个 [flow] 段可省略（全部走结构体缺省）；下列取值与代码缺省一一对应。
@@ -207,8 +221,9 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 #   ⚠️ 写面/危险面（创建整库备份 / 恢复覆盖现库 / 删除）在任何档位下均不下放。
 #   ⚠️ `full` 档会一并让平台普通角色获得下载面（它是角色菜单模板的回填目标，tid=0 ⇒ 无行级
 #      收窄）⇒ 若只想要"平台普通角色只读"而不想放开整库下载，请仅开 `view_only`。
-#   ⚠️ 批次 2 的旧键名 `backup.readonly_visible`（单档 off|on）已更名为本键（`on` ⇒ `full`）；
-#      旧键会被净化回 `off` 并在日志告警，升级时请同步改名。
+#   ⚠️ 批次 2 的旧键名 `backup.readonly_visible`（单档 off|on）已更名为本键。
+#      **无自动迁移**：旧键会被净化回 `off` 并在启动日志告警 ⇒ 必须手工改名；
+#      手工迁移请按**保守口径** `on` ⇒ `view_only`（不自动升级为可下载，与 `deploy/README.md §7.2` 一致）。
 "backup.visibility" = "off"
 # 租户自助导出（默认 off）——开启后租户可导出**本租户**数据包
 "backup.tenant_self_export" = "off"
@@ -273,5 +288,34 @@ show_tenant_column = "auto"
 [acme]
 mode = "off"
 # webhook_url = "https://ops.example.com/hooks/yebot-acme"
+# secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
+timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
+
+# ==================== 出站领域事件（集成点）====================
+# 定位：把"领域事件"交给**你自己写的接收端**，**不是**内置消息队列。
+# 需要事件驱动 / MQ / 数据同步时，由接收端转发到 Kafka / RabbitMQ / 数仓 / 通知，
+# 从而不把你锁死在单一技术栈上（项目准则⑥：原判"不进本仓"改为"提供集成点/开关"）。
+#
+#   off     （默认）不发任何出站请求 —— 与改造前逐字节等价
+#   webhook        领域事件以 HTTP POST 推到 webhook_url
+#
+# 信封（稳定契约，改名即破坏接收端）：
+#   { "source": "yebot", "event": "<事件名>", "occurredAt": "<本地时间>", "data": { ... } }
+# 请求头：Content-Type: application/json、X-Yebot-Event: <事件名>；
+#        配置 secret 后追加 X-Yebot-Signature: sha256=<HMAC-SHA256(body) 的 hex>。
+#
+# 当前已发布事件（`src/service/event_outbox_service.rs::ALL_EVENTS`）：
+#   tenant.created          data: { tenantId, tenantCode, tenantName, operator }
+#   tenant.status_changed   data: { tenantId, status, operator }        status: '0' 正常 / '1' 停用
+#   tenant.deleted          data: { tenantId, operator }
+#   tenant.restored         data: { tenantId, operator }
+#
+# ⚠️ 推送为 fire-and-forget：失败只打 WARN，**不影响**租户业务结果；
+#    请用你自己的全量对账脚本兜底（事件只保证"状态迁移时推送一次"，不做服务端去重缓存）。
+# ⚠️ outbound = "webhook" 但 webhook_url 缺失/非 http(s) ⇒ 启动打 WARN 且按 off 处理
+#    （拒绝静默失效）；非法 outbound 取值回落 off 并打 WARN（fail-safe）。
+[events]
+outbound = "off"
+# webhook_url = "https://ops.example.com/hooks/yebot-events"
 # secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
 timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60

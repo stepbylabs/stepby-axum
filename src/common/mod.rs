@@ -17,6 +17,10 @@ pub mod response;
 pub mod ssrf;
 pub mod tenant;
 pub mod upload;
+pub mod webhook;
+
+#[cfg(test)]
+pub mod fuzz_invariants;
 
 pub use error::{AppError, ServiceError};
 pub use extract::ValidatedJson;
