@@ -180,6 +180,14 @@ pub const FEATURES: &[Item] = &[
             ),
         ],
     ),
+    // GDPR 被遗忘权 / 用户匿名化：**平台治理动作**（分档）。
+    //   - `off`（默认）：端点表现为 404（能力不存在 = 关闭态即安全态）；
+    //   - `precheck`：仅允许**只读预检**（dry-run，返回将被置换的字段与受影响关系计数）；
+    //   - `full`：允许真正执行**不可逆**匿名化。
+    // 不向租户解锁任何 perm（`unlocked = &[]`）：匿名化是平台级数据治理 + 不可逆写，
+    // 只允许平台管理员（`tenant_id == 0`）触发，故不随任何租户套餐下放权限；
+    // 两条路由复用既有 `system:user:remove` perm（不新造 perm，避免"菜单可见但请求 403"）。
+    feat("privacy.user_erasure", &[OFF, "precheck", "full"], &[]),
     // 租户域名自助：开启时域名管理 5 项可授予租户管理员，服务层按 tid 收窄
     // （仅能读写本租户域名）。清单与 `middleware/permission.rs` 的
     // `/system/tenant/domain/*` 权限映射逐条对应。

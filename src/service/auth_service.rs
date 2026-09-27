@@ -188,6 +188,12 @@ pub struct GetInfoVo {
     /// 注意它只是**展示入口开关**——数据面收窄由服务层 `tenant_scope ∩ tenantId` 承担，
     /// 筛选参数只能收窄，不是安全边界。
     pub show_tenant_filter: bool,
+    /// 用户管理页是否提供「匿名化（GDPR）」入口（能力位 `privacy.user_erasure` 的**服务端判定结果**）
+    ///
+    /// 与 `show_tenant_column` / `show_tenant_filter` 同源的"单点判定"：后端算好布尔下发，
+    /// 前端只消费不推断。判定 = 平台层能力位非 `off` **且** 操作者为平台（`tenant_id == 0`）：
+    /// 匿名化是平台级不可逆治理动作，只有平台管理员可触发（服务层另有 404 守卫兜底）。
+    pub show_user_erasure: bool,
 }
 
 /// 路由节点 Vo（对齐前端 RouterVo）
@@ -1262,6 +1268,13 @@ impl AuthService {
         // 「按租户筛选」入口决策：`[ui].tenant_filter`（默认 off）同源在服务端解析
         let show_tenant_filter =
             TenantFilterMode::parse(&self.config.ui.tenant_filter).enabled_for(operator_tid);
+        // 「匿名化（GDPR）」入口决策：平台层能力位 `privacy.user_erasure` 非 off **且**
+        // 操作者为平台（tid == 0）。能力集按 `config [features]` 净化解析（与启动注入同源）；
+        // 判定口径只此一处，前端不做二次推断（服务层另有同名档位 + 平台归属守卫兜底）。
+        let platform_features =
+            crate::common::features::FeatureSet::sanitized(self.config.features.0.clone());
+        let show_user_erasure = operator_tid == 0
+            && platform_features.is_on(crate::service::user_erasure_service::FEATURE_USER_ERASURE);
 
         Ok(GetInfoVo {
             user,
@@ -1272,6 +1285,7 @@ impl AuthService {
             is_password_expired,
             show_tenant_column,
             show_tenant_filter,
+            show_user_erasure,
         })
     }
 

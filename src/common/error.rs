@@ -13,6 +13,8 @@
 
 use crate::common::response::AjaxResult;
 use axum::Json;
+// P2-33：主代码改用 `common::http_status::map_status` 后，本类型仅在测试用例（状态码断言）中使用
+#[cfg(test)]
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror::Error;
@@ -335,18 +337,15 @@ impl IntoResponse for AppError {
         // - 500 → 500 Internal Server Error
         // - 503 → 503 Service Unavailable
         // - 其他（含 200/自定义业务码）→ 200 OK（保持原行为，避免破坏非标准业务码）
-        let http_status = match self.code {
-            400 => StatusCode::BAD_REQUEST,
-            401 => StatusCode::UNAUTHORIZED,
-            403 => StatusCode::FORBIDDEN,
-            404 => StatusCode::NOT_FOUND,
-            409 => StatusCode::CONFLICT,
-            422 => StatusCode::UNPROCESSABLE_ENTITY,
-            429 => StatusCode::TOO_MANY_REQUESTS,
-            500 => StatusCode::INTERNAL_SERVER_ERROR,
-            503 => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::OK,
-        };
+        //
+        // P2-33：以上"已知码映射 + 未知码回落 200"即 `legacy` 档（**默认 = 现状**）；
+        // `restful` 档（`[server].http_status_convention = "restful"`）改判为
+        // "业务失败绝不返回 200"（未归类码按 400 归类）。两档差异集中在
+        // [`crate::common::http_status`] 的纯函数里，并配有可证伪单测。
+        let http_status = crate::common::http_status::map_status(
+            self.code,
+            crate::common::http_status::convention(),
+        );
 
         // R8-CONC-016：若存在错误链 source，记录根因到 tracing（不暴露给客户端）
         if let Some(ref src) = self.source {
@@ -546,8 +545,21 @@ mod tests {
         AppError::new(code, "m").into_response().status()
     }
 
+    /// P2-33：HTTP 状态码映射受**进程级**档位影响，读写它的用例必须互斥。
+    fn lock_convention() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::common::http_status::CONVENTION_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 本组用例断言的是 `legacy`（默认档 = 改造前行为），显式归位后断言
+        crate::common::http_status::set_convention(
+            crate::common::http_status::HttpStatusConvention::Legacy,
+        );
+        guard
+    }
+
     #[test]
     fn into_response_maps_known_codes() {
+        let _guard = lock_convention();
         assert_eq!(status_for(400), StatusCode::BAD_REQUEST);
         assert_eq!(status_for(401), StatusCode::UNAUTHORIZED);
         assert_eq!(status_for(403), StatusCode::FORBIDDEN);
@@ -561,10 +573,33 @@ mod tests {
 
     #[test]
     fn into_response_falls_back_to_200_for_unknown_codes() {
+        let _guard = lock_convention();
         // 200 / 自定义业务码 / 600 → 200 OK（保留 body.code 兼容前端）
         assert_eq!(status_for(200), StatusCode::OK);
         assert_eq!(status_for(600), StatusCode::OK);
         assert_eq!(status_for(-1), StatusCode::OK);
+    }
+
+    /// P2-33 端到端（**同一进程内**验证全局档位真的改变了 `IntoResponse` 的行为）：
+    /// `restful` 档下自定义业务码（如 TOTP 的 1003）不得再回落 200。
+    #[test]
+    fn into_response_restful_never_falls_back_to_200() {
+        let _guard = lock_convention();
+        crate::common::http_status::set_convention(
+            crate::common::http_status::HttpStatusConvention::Restful,
+        );
+        assert_eq!(
+            status_for(1003),
+            StatusCode::BAD_REQUEST,
+            "restful 档下 TOTP 业务码 1003 必须是 400（不得回落 200）"
+        );
+        assert_eq!(status_for(601), StatusCode::BAD_REQUEST);
+        // 标准码两档一致
+        assert_eq!(status_for(403), StatusCode::FORBIDDEN);
+        // 复位为默认档，避免影响同进程其他用例
+        crate::common::http_status::set_convention(
+            crate::common::http_status::HttpStatusConvention::Legacy,
+        );
     }
 
     #[tokio::test]

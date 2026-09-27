@@ -10,6 +10,7 @@ pub mod error;
 pub mod excel;
 pub mod extract;
 pub mod features;
+pub mod http_status;
 pub mod i18n;
 pub mod image;
 pub mod page;

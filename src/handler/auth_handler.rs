@@ -67,6 +67,9 @@ pub struct GetInfoResult {
     pub is_default_modify_pwd: bool,
     /// 密码是否已过期
     pub is_password_expired: bool,
+    /// 用户管理页是否提供「匿名化（GDPR）」入口（服务端按能力位 `privacy.user_erasure`
+    /// + 操作者是否平台算好后下发；前端只消费不推断）
+    pub show_user_erasure: bool,
 }
 
 crate::impl_into_response!(CaptchaResult, LoginResult, GetInfoResult);
@@ -366,6 +369,7 @@ pub async fn get_info(
         pwd_chrtype: vo.pwd_chrtype,
         is_default_modify_pwd: vo.is_default_modify_pwd,
         is_password_expired: vo.is_password_expired,
+        show_user_erasure: vo.show_user_erasure,
     })
 }
 

@@ -12,6 +12,7 @@ use crate::service::{
     SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
     SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysTenantDomainService,
     SysTenantNavService, SysTenantService, SysUserPrefService, SysUserService, SysWebHookService,
+    UserErasureService,
 };
 use crate::utils::ip_location::IpLocator;
 use redis::aio::ConnectionManager;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub config: Arc<Settings>,
     /// 用户模块 Service
     pub user_service: SysUserService,
+    /// GDPR 被遗忘权 / 用户匿名化 Service（能力位 `privacy.user_erasure` 门控）
+    pub user_erasure_service: UserErasureService,
     /// 用户消息偏好 / 免打扰 Service
     pub user_pref_service: SysUserPrefService,
     /// 个人访问令牌（PAT）Service（Tier-S #3）
@@ -234,6 +237,21 @@ impl AppState {
             tenant_menu_repo,       // 批次 3：L3 导航加载期重组
         );
 
+        // 用户匿名化 Service（能力位 `privacy.user_erasure` 门控）：
+        // 复用同一个 SsoService 实例（`revoke_user_sso_tokens`），保证吊销口径单点。
+        // 平台层能力集由 `config [features]` 净化解析（与启动注入同源），支持按实例独立配置。
+        let sso_service = SsoService::new(
+            db.clone(),
+            config.config_enc_key.clone(),
+            vec![config.jwt.audience.clone(), config.jwt.issuer.clone()],
+        );
+        let user_erasure_service = UserErasureService::new(
+            db.clone(),
+            redis.clone(),
+            sso_service.clone(),
+            config.clone(),
+        );
+
         // 全局可观测性句柄：按配置文件注入慢请求阈值 / 缓冲容量（进程内生效）
         // 注意：Observability 为进程级全局单例，这里仅做一次配置；重复初始化以最后一次为准。
         let observability = Observability::global();
@@ -246,6 +264,7 @@ impl AppState {
 
         Self {
             user_service: user_service.clone(),
+            user_erasure_service,
             user_pref_service: SysUserPrefService::new(db.clone()),
             pat_service: SysPatService::new(db.clone(), menu_service.clone()),
             role_service,
@@ -280,13 +299,9 @@ impl AppState {
                 // v5-E6：provider secret / 第三方令牌信封加密
                 config.config_enc_key.clone(),
             ),
-            sso_service: SsoService::new(
-                db.clone(),
-                config.config_enc_key.clone(),
-                // v4 §1.3：动态保留字 = 平台 JWT 命名空间（audience/issuer），
-                // 与静态 RESERVED_CLIENT_IDS 一并在 add_client 时比对
-                vec![config.jwt.audience.clone(), config.jwt.issuer.clone()],
-            ),
+            // v4 §1.3：动态保留字 = 平台 JWT 命名空间（audience/issuer），
+            // 与静态 RESERVED_CLIENT_IDS 一并在 add_client 时比对（见上方创建处）
+            sso_service,
             scim_service: crate::service::scim_service::ScimService::new(
                 db.clone(),
                 config.scim.tenant_id,

@@ -184,6 +184,9 @@ mime_guess = "2"
 # `governance`：治理项注册表（单一事实源），由本 crate 与 `migration` 共同依赖。
 # 单独成 crate 的原因见 `governance/src/lib.rs` 头部说明（migration 无法依赖 lib）。
 members = ["governance", "migration"]
+# `fuzz`：cargo-fuzz 独立工程（nightly 覆盖率导向 fuzz），刻意**不**参与主 workspace
+# 构建（其 Cargo.toml 亦自带独立 `[workspace]`）。见 fuzz/README.md 与夜间的 fuzz workflow。
+exclude = ["fuzz"]
 
 [profile.release]
 opt-level = 3
