@@ -54,11 +54,16 @@ impl SysLogininforRepository {
         end_time: Option<NaiveDateTime>,
         last_id: Option<i64>,
         tenant_scope: Option<i64>,
+        tenant_filter: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysLogininfor::find();
         // 多租户 Phase 2：租户用户仅见本租户登录日志；平台 0 不过滤
         if let Some(t) = tenant_scope {
             query = query.filter(Column::TenantId.eq(t));
+        }
+        // 显式「按租户筛选」（`[ui].tenant_filter`）：与 tenant_scope 相与 ⇒ 只收窄
+        if let Some(tid) = tenant_filter {
+            query = query.filter(Column::TenantId.eq(tid));
         }
         if let Some(ip) = ipaddr {
             query = query.filter(Column::Ipaddr.like(format!("%{}%", like_escape(ip))));
@@ -398,7 +403,7 @@ mod tests {
         let size = 3u64;
 
         let (p0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(p0.len(), 3);
@@ -410,7 +415,18 @@ mod tests {
 
         let cursor = p0.last().unwrap().info_id;
         let (p1, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, Some(cursor), None)
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(cursor),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(p1.len(), 3);
@@ -427,7 +443,18 @@ mod tests {
 
         let cursor = p1.last().unwrap().info_id;
         let (p2, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, Some(cursor), None)
+            .find_page_filtered(
+                0,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(cursor),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(p2.len(), 1);
@@ -441,6 +468,7 @@ mod tests {
                 None,
                 None,
                 Some(p2[0].info_id),
+                None,
                 None,
             )
             .await
@@ -456,13 +484,24 @@ mod tests {
         let repo = insert_7(&db).await;
         // 过滤 status='0'（i==6 被排除）
         let (first, total) = repo
-            .find_page_filtered(0, 10, None, None, Some("0"), None, None, None, None)
+            .find_page_filtered(0, 10, None, None, Some("0"), None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(total, 6);
         let cursor = first.last().unwrap().info_id;
         let (next, _) = repo
-            .find_page_filtered(0, 10, None, None, Some("0"), None, None, Some(cursor), None)
+            .find_page_filtered(
+                0,
+                10,
+                None,
+                None,
+                Some("0"),
+                None,
+                None,
+                Some(cursor),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(next.iter().all(|m| m.status.as_deref() == Some("0")));
@@ -477,20 +516,20 @@ mod tests {
         let size = 3u64;
 
         let (o0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         let (o1, _) = repo
-            .find_page_filtered(3, size, None, None, None, None, None, None, None)
+            .find_page_filtered(3, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         let (o2, _) = repo
-            .find_page_filtered(6, size, None, None, None, None, None, None, None)
+            .find_page_filtered(6, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
 
         let (k0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None)
+            .find_page_filtered(0, size, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         let (k1, _) = repo
@@ -503,6 +542,7 @@ mod tests {
                 None,
                 None,
                 Some(k0.last().unwrap().info_id),
+                None,
                 None,
             )
             .await
@@ -517,6 +557,7 @@ mod tests {
                 None,
                 None,
                 Some(k1.last().unwrap().info_id),
+                None,
                 None,
             )
             .await

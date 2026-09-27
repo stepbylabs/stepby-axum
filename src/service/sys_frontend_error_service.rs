@@ -93,6 +93,11 @@ pub struct FrontendErrorQueryDto {
     pub begin_time: Option<String>,
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
+    /// 显式「按租户筛选」（`[ui].tenant_filter` 决定前端是否给出入口）。
+    ///
+    /// 服务层把它与 `tenant_scope` **相与**（AND）⇒ 只能收窄、永不放宽：
+    /// 租户操作者即便手工传他租户 id，结果集也只是空集，不存在越权读面。
+    pub tenant_id: Option<i64>,
 }
 
 impl From<&FrontendErrorQueryDto> for PageDomain {
@@ -248,6 +253,7 @@ impl SysFrontendErrorService {
                 begin,
                 end,
                 tenant_scope,
+                query.tenant_id,
             )
             .await?;
         Ok((rows, total))

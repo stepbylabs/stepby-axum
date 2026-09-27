@@ -2231,32 +2231,35 @@ async fn ensure_tenant_saas_governance(db: &DatabaseConnection) -> anyhow::Resul
 
     // ---- 3. config 治理元数据 seed（幂等 UPDATE，只改治理列）----
     if sso_table_exists(db, "sys_config").await? {
-        let only = crate::service::sys_config_service::PLATFORM_LOCKED_KEYS
-            .iter()
-            .map(|k| format!("'{k}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let defaults = crate::service::sys_config_service::PLATFORM_DEFAULT_KEYS
-            .iter()
-            .map(|k| format!("'{k}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        db.execute(Statement::from_string(
-            backend,
-            format!(
-                "UPDATE sys_config SET scope = 'platform_only', tenant_editable = '0', visible_to_tenant = '0' \
-                 WHERE config_key IN ({only})"
-            ),
-        ))
-        .await?;
-        db.execute(Statement::from_string(
-            backend,
-            format!(
-                "UPDATE sys_config SET scope = 'platform_default', tenant_editable = '1', visible_to_tenant = '1' \
-                 WHERE config_key IN ({defaults})"
-            ),
-        ))
-        .await?;
+        // 按覆盖策略分组做幂等 UPDATE：每组的 (scope, tenant_editable, visible_to_tenant)
+        // 三元组由共享注册表的 `Coverage` 单一事实源给出 ⇒ **新增治理域无需改本函数**
+        // （此前是两个硬编码 SQL 分支，新增一档就要再来一个分支）。
+        // 只改治理列，**绝不动 `config_value`**：平台运维已调过的值不被启动流程覆盖。
+        for coverage in [
+            governance::Coverage::Locked,
+            governance::Coverage::Free,
+            governance::Coverage::Ceiling,
+            governance::Coverage::Private,
+        ] {
+            let keys: Vec<String> = governance::keys_with_coverage(coverage)
+                .map(|k| format!("'{k}'"))
+                .collect();
+            if keys.is_empty() {
+                continue;
+            }
+            db.execute(Statement::from_string(
+                backend,
+                format!(
+                    "UPDATE sys_config SET scope = '{}', tenant_editable = '{}', \
+                     visible_to_tenant = '{}' WHERE config_key IN ({})",
+                    coverage.scope(),
+                    coverage.tenant_editable(),
+                    coverage.visible_to_tenant(),
+                    keys.join(", ")
+                ),
+            ))
+            .await?;
+        }
     }
 
     tracing::info!("多租户 Phase 3 SaaS 治理模块已就绪（幂等确保完成）");
@@ -3866,7 +3869,7 @@ fn init_feature_flags(settings: &Settings) {
             enabled = %enabled.join(", "),
             "能力位：平台层已放开以下能力（租户套餐需同时开启，权限才可下放）。\
              已放开项的服务层必须按 tenant_id 收窄 —— 逐条核对 \
-             common/features.rs::CAPABILITY_UNLOCKED_PERMS 的守卫要求"
+             governance crate 的解锁清单（`governance::Item::unlocked`）的守卫要求"
         );
     }
 

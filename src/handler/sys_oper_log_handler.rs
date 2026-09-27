@@ -207,6 +207,8 @@ pub async fn export(
         begin_time: dto.begin_time,
         end_time: dto.end_time,
         last_id: None,
+        // 导出 DTO 未暴露租户筛选（导出天然按当前操作者 tenant_scope 隔离）
+        tenant_id: None,
     };
 
     // 长任务进度跟踪：行数较大时创建 sys_task 记录（P0-2：记录操作人 user_id 用于定向推送）

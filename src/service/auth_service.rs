@@ -26,7 +26,7 @@ use utoipa::ToSchema;
 
 use crate::common::constants::SECS_PER_HOUR;
 use crate::common::error::ServiceError;
-use crate::config::{JwtConfig, Settings, TenantColumnMode};
+use crate::config::{JwtConfig, Settings, TenantColumnMode, TenantFilterMode};
 use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_logininfor;
 use crate::entity::sys_menu::Model as SysMenuModel;
@@ -182,6 +182,12 @@ pub struct GetInfoVo {
     /// 后端算好布尔再下发，前端不做二次推断：`auto` 需操作者租户上下文
     /// （`tid == 0` 才显示），若让前端自行判断"平台/租户"，判定口径会散落两处而漂移。
     pub show_tenant_column: bool,
+    /// 业务列表页是否提供「按租户筛选」入口（`[ui].tenant_filter` 的**服务端判定结果**）
+    ///
+    /// 与 `show_tenant_column` 同源的"单点判定"：后端算好布尔下发，前端只消费不推断。
+    /// 注意它只是**展示入口开关**——数据面收窄由服务层 `tenant_scope ∩ tenantId` 承担，
+    /// 筛选参数只能收窄，不是安全边界。
+    pub show_tenant_filter: bool,
 }
 
 /// 路由节点 Vo（对齐前端 RouterVo）
@@ -1253,6 +1259,9 @@ impl AuthService {
         // 结合操作者租户上下文算出布尔下发（`auto` ⇒ 仅平台操作者可见 = 历史行为）
         let show_tenant_column =
             TenantColumnMode::parse(&self.config.ui.show_tenant_column).visible_for(operator_tid);
+        // 「按租户筛选」入口决策：`[ui].tenant_filter`（默认 off）同源在服务端解析
+        let show_tenant_filter =
+            TenantFilterMode::parse(&self.config.ui.tenant_filter).enabled_for(operator_tid);
 
         Ok(GetInfoVo {
             user,
@@ -1262,6 +1271,7 @@ impl AuthService {
             is_default_modify_pwd,
             is_password_expired,
             show_tenant_column,
+            show_tenant_filter,
         })
     }
 

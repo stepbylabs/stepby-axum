@@ -22,120 +22,31 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-/// 关闭态字面量（等价于「能力不存在」，是全系统的最小权限基准）
-pub const FEATURE_OFF: &str = "off";
-
-/// 单个能力位的定义（模式集合 + 默认模式）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FeatureDef {
-    /// 能力位键（点分小写，与 `sys_tenant_package.features` JSON 的 key 一致）
-    pub key: &'static str,
-    /// 默认模式（**必须**是 `modes` 中的一项，且注册表内恒为 [`FEATURE_OFF`]）
-    pub default_mode: &'static str,
-    /// 允许的模式集合（首项约定为 `off`，便于阅读时确认"关闭态即安全态"）
-    pub modes: &'static [&'static str],
-}
-
-/// **能力位单一事实源**：新增能力位必须在此登记，否则
-/// [`FeatureSet::sanitized`] 会静默剔除该键（TS/前端/管理页也据此渲染）。
+/// 关闭态字面量、能力位定义与能力位注册表：统一由**零依赖共享 crate `governance`** 提供。
 ///
-/// 排序：按 key 字典序（`to_json` 用 [`BTreeMap`]，顺序一致便于 diff 与断言）。
-pub const KNOWN_FEATURES: &[FeatureDef] = &[
-    FeatureDef {
-        key: "backup.tenant_self_export",
-        default_mode: FEATURE_OFF,
-        modes: &[FEATURE_OFF, "on"],
-    },
-    FeatureDef {
-        key: "backup.visibility",
-        default_mode: FEATURE_OFF,
-        modes: &[FEATURE_OFF, "view_only", "full"],
-    },
-    FeatureDef {
-        key: "nav.l3",
-        default_mode: FEATURE_OFF,
-        modes: &[FEATURE_OFF, "view_only", "full"],
-    },
-    FeatureDef {
-        key: "tenant.domain_self_service",
-        default_mode: FEATURE_OFF,
-        modes: &[FEATURE_OFF, "full"],
-    },
-];
+/// 抽离动机：`migration` crate 无法依赖 lib，此前迁移文件只能保留一份「同值本地副本」
+/// 并靠注释约束「修改时必须两处同步」——这正是 2026-09-26「裸占位符漏写列名导致治理
+/// 静默失效」事故的同一形态。抽到共享 crate 后**复制路径在物理上消失**：`migration`
+/// 与本 crate 引用同一份数据。
+///
+/// 类型与常量名保留原名（`FeatureDef` / `KNOWN_FEATURES` / `FEATURE_OFF`），
+/// 既有调用点的字段访问（`key` / `modes` / `default_mode`）无需任何改写。
+pub use governance::{FEATURES as KNOWN_FEATURES, Item as FeatureDef, OFF as FEATURE_OFF};
 
-/// 能力位 → **解锁的平台专属权限白名单**（逐条枚举，禁止前缀通配）。
-///
-/// 每项是三元组 `(能力位 key, 所需最低档位, perms 清单)`：**仅当**该能力位的有效模式在
-/// 注册表 `modes` 中的下标 ≥ 所需档位的下标（即"至少开放到该档"）时，清单内的 perms
-/// 才可授予租户角色。清单外的平台专属 perms 恒不可授予
-/// （见 [`is_grantable_perm_with_features`]）。
-///
-/// 为什么需要"所需最低档位"：三态能力位（`nav.l3` = 导航只读/写面；`backup.visibility`
-/// = 备份只读/下载面）的**只读面与危险面必须分别解锁**，否则 `view_only` 下会把
-/// add/edit/remove 菜单（或备份下载）一并授予 role 2，重造"菜单可见但请求 403"的假入口
-/// （或更糟：把整库下载面下放给普通角色）。
-///
-/// ⚠️ 逐条枚举而非按前缀放开是**刻意的**：`system:backup:` 是**部分解锁**前缀
-/// （`list`/`query`/`download` 三条可下放，创建/恢复/删除仍平台专属），若按前缀放开
-/// 则等于把整库备份面（含恢复覆盖现库）一并下放。批次 1c 的 `system:tenant:domain:`
-/// 则是**整前缀全量收录**的特例——同一套逐条语义对两种情形都成立。
-pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &str, &[&str])] = &[
-    // 备份可见性（批次 2 引入，批次 4 / MT-7 升为三档）：**分档解锁**。
-    // - `view_only`：只读可见 —— 列表 + 详情（含整库备份行的元数据）；
-    // - `full`：在只读基础上再放开**下载**。
-    //
-    // **写面/危险面恒不下放**：`add`（创建整库备份）/ `edit`（恢复，覆盖现库）/ `remove`
-    // 不在任何档位内 —— 即使 `full` 也不可授予。
-    //
-    // `download` 之所以单独放在 `full` 档而非 `view_only`：下载即拿到备份文件本体，而平台
-    // 普通角色（role 2）的 `tid = 0` ⇒ 服务层不做行级收窄 ⇒ 等于**整库数据下载**。
-    // MT-7 的诉求正是"平台普通角色可只读查看列表，但下载维持 403"，故只读与下载必须分档。
-    // 租户侧另有两道收窄：permission 层（需租户角色持有 perms，且套餐也开同键才可授予）
-    // 与服务层行级（`backup_type = 'tenant_export' AND tenant_id = 自己`）。
-    //
-    // `query` 原同时映射"详情"与"整库下载"，批次 2 已把下载拆为独立的
-    // `system:backup:download`（`GET /system/backup/download/{backupId}`），
-    // 因此本清单可以安全收录只读子集。
-    (
-        "backup.visibility",
-        "view_only",
-        &["system:backup:list", "system:backup:query"],
-    ),
-    ("backup.visibility", "full", &["system:backup:download"]),
-    // 租户自助导出（批次 2）：能力位开启时，租户可把**本租户**数据包导出为 JSON
-    // （端点 `POST /system/backup/self-export`，无租户参数 ⇒ 不存在传他租户 id 的越权面）。
-    ("backup.tenant_self_export", "on", &["system:backup:export"]),
-    // 租户自建导航 L3（批次 3）：**分档解锁**——`view_only` 只给只读入口，
-    // `full` 才给写面。服务层 `SysTenantNavService::resolve_scope` 按同档位守卫，
-    // 因此这里按档解锁不会造出"菜单可见但请求 403"的假入口。
-    ("nav.l3", "view_only", &["system:tenantMenu:list"]),
-    (
-        "nav.l3",
-        "full",
-        &[
-            "system:tenantMenu:add",
-            "system:tenantMenu:edit",
-            "system:tenantMenu:remove",
-        ],
-    ),
-    // 租户域名自助（批次 1c）：能力位开启时，域名管理 5 项权限可授予租户管理员，
-    // 服务层按 tid 收窄（仅能读写本租户域名）。
-    // 清单与 `middleware/permission.rs` 的 `/system/tenant/domain/*` 权限映射逐条对应
-    // （单测 `test_unlocked_perms_are_actually_registered` 锁死双向一致）。
-    (
-        "tenant.domain_self_service",
-        "full",
-        &[
-            "system:tenant:domain:list",
-            "system:tenant:domain:add",
-            "system:tenant:domain:verify",
-            "system:tenant:domain:edit",
-            "system:tenant:domain:remove",
-        ],
-    ),
-];
-
-/// **已被开启的能力位解锁的平台专属 perms 逐条清单**（保持 [`CAPABILITY_UNLOCKED_PERMS`] 顺序）。
+// 能力位在各档解锁的平台专属 perms：**清单已内联进注册表**（`governance::Item::unlocked`），
+// 不再维护平行的第二份数据。
+//
+// 逐条枚举而非按前缀放开仍是**刻意的**：`system:backup:` 是**部分解锁**前缀
+// （`list` / `query` / `download` 三条可下放，创建/恢复/删除仍平台专属），若按前缀放开
+// 则等于把整库备份面（含恢复覆盖现库）一并下放；`system:tenant:domain:` 则是
+// **整前缀全量收录**的特例——同一套逐条语义对两种情形都成立。
+//
+// 为什么需要「所需最低档位」：三态能力位（`nav.l3` = 导航只读/写面；`backup.visibility`
+// = 备份只读/下载面）的**只读面与危险面必须分别解锁**，否则 `view_only` 下会把
+// add/edit/remove 菜单（或备份下载）一并授予 role 2，重造"菜单可见但请求 403"的假入口
+// （或更糟：把整库下载面下放给普通角色）。故注册表的 `unlocked` 字段保留
+// `(所需最低档位, perms 清单)` 语义，由 `unlocked_capability_perms` 消费。
+/// **已被开启的能力位解锁的平台专属 perms 逐条清单**（按注册表 `governance::FEATURES` 顺序）。
 ///
 /// 这是「启动治理」（`initialize::ensure_tenant_role_menu_governance`）的**唯一事实源**：
 /// - 剔除条件 = 命中平台专属前缀 **且** 不在本清单内；
@@ -159,13 +70,15 @@ pub const CAPABILITY_UNLOCKED_PERMS: &[(&str, &str, &[&str])] = &[
 /// `test_unlocked_perms_respect_mode_threshold` 锁死"档位不足不得解锁"。
 pub fn unlocked_capability_perms(features: &FeatureSet) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
-    for (key, required_mode, perms) in CAPABILITY_UNLOCKED_PERMS {
-        if !mode_reaches(features, key, required_mode) {
-            continue;
-        }
-        for p in *perms {
-            if !out.contains(p) {
-                out.push(p);
+    for def in KNOWN_FEATURES {
+        for (required_mode, perms) in def.unlocked {
+            if !mode_reaches(features, def.key, required_mode) {
+                continue;
+            }
+            for p in *perms {
+                if !out.contains(p) {
+                    out.push(p);
+                }
             }
         }
     }
@@ -322,14 +235,11 @@ impl FeatureSet {
             // 若把"未配置"当作 `off`，租户不写该键就会把平台已开启的能力位压回关闭
             // （与"未配置 = 跟随平台默认"的直觉相反，且会让平台开关形同虚设）。
             let effective = match lower.overrides.get(def.key) {
+                // 未配置 = 跟随平台层
                 None => ceiling,
-                Some(request) => {
-                    if mode_rank(def.key, ceiling) <= mode_rank(def.key, request) {
-                        ceiling
-                    } else {
-                        request
-                    }
-                }
+                // 已显式配置 = 走共享注册表的**单一收敛实现**（平台是天花板，租户只能收窄）。
+                // fail-closed：无法判定（未登记项 / 无档位 / 两值皆非法）时回落平台值。
+                Some(request) => governance::converge(def.key, ceiling, request).unwrap_or(ceiling),
             };
             if effective != def.default_mode {
                 map.insert(def.key.to_string(), effective.to_string());
@@ -345,12 +255,8 @@ impl FeatureSet {
     }
 }
 
-/// 模式在注册表 `modes` 中的下标（越小越保守）；未登记模式按最保守（0）处理。
-fn mode_rank(key: &str, mode: &str) -> usize {
-    feature_def(key)
-        .and_then(|def| def.modes.iter().position(|m| *m == mode))
-        .unwrap_or(0)
-}
+// 档位比较（原 `fn mode_rank`）已收敛到共享注册表的 `governance::converge` /
+// `governance::mode_rank`（单一实现）——本地不再保留第二套比较逻辑，避免两处口径漂移。
 
 /// 平台层能力位（`config.toml` 的 `[features]` 段，启动时注入）。
 static PLATFORM_FEATURES: OnceLock<FeatureSet> = OnceLock::new();
@@ -384,7 +290,7 @@ fn builtin_default_features() -> &'static FeatureSet {
 /// **能力位感知的"可授予"判定**（`common::tenant::is_grantable_perm` 的能力位版本）。
 ///
 /// 判定顺序：
-/// 1. 命中 [`CAPABILITY_UNLOCKED_PERMS`] 且对应能力位**达到所需档位** ⇒ **可授予**
+/// 1. 命中注册表 `governance::Item::unlocked` 且对应能力位**达到所需档位** ⇒ **可授予**
 ///    （其服务层必须已按 tid 收窄，见该常量文档）；
 /// 2. 平台专属前缀 ⇒ 不可授予；
 /// 3. 命中 tier2（表带 `tenant_id` 但集合读路径未接过滤）⇒ 不可授予。
@@ -601,22 +507,23 @@ mod tests {
     fn test_unlocked_perms_are_actually_registered() {
         let src = std::fs::read_to_string("src/middleware/permission.rs")
             .expect("src/middleware/permission.rs 应存在");
-        for (feat, required_mode, perms_list) in CAPABILITY_UNLOCKED_PERMS {
-            let def = feature_def(feat)
-                .unwrap_or_else(|| panic!("解锁白名单引用了未登记的能力位 {feat}"));
-            assert!(
-                def.modes.contains(required_mode),
-                "解锁白名单为 {feat} 声明了未登记的所需档位 {required_mode}"
-            );
-            for p in *perms_list {
+        for def in KNOWN_FEATURES {
+            for (required_mode, perms_list) in def.unlocked {
                 assert!(
-                    src.contains(&format!("\"{p}\"")),
-                    "解锁白名单中的 {p} 在 middleware/permission.rs 权限映射中不存在（空条款）"
+                    def.modes.contains(required_mode),
+                    "解锁白名单为 {} 声明了未登记的所需档位 {required_mode}",
+                    def.key
                 );
-                assert!(
-                    crate::common::tenant::is_platform_only_perm(p),
-                    "{p} 不在平台专属前缀内，无需由能力位解锁（白名单条款失效）"
-                );
+                for p in *perms_list {
+                    assert!(
+                        src.contains(&format!("\"{p}\"")),
+                        "解锁白名单中的 {p} 在 middleware/permission.rs 权限映射中不存在（空条款）"
+                    );
+                    assert!(
+                        crate::common::tenant::is_platform_only_perm(p),
+                        "{p} 不在平台专属前缀内，无需由能力位解锁（白名单条款失效）"
+                    );
+                }
             }
         }
     }

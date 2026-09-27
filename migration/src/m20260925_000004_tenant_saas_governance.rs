@@ -24,6 +24,7 @@
 //! `sys_oper_log.target_tenant_id` 由另一条代码链路写入，本迁移不碰实体。
 
 use crate::IndexDdlExt;
+use governance::{keys_with_coverage, Coverage};
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::Statement;
 
@@ -145,36 +146,14 @@ async fn create_unique_index_tolerant(
     Ok(())
 }
 
-/// 安全项 config key（platform_only，平台锁定）。
+/// 安全项 / 可下放项 config key：**一律取自共享注册表 crate `governance`**。
 ///
-/// 单一事实源为 `axum-backend/src/service/sys_config_service.rs::PLATFORM_LOCKED_KEYS`
-/// （migration crate 无法依赖 lib，故此处保留同值本地副本，**修改时必须两处同步**）。
-const PLATFORM_ONLY_KEYS: &[&str] = &[
-    "sys.user.initPassword",
-    "sys.account.captchaEnabled",
-    "sys.account.registerUser",
-    "sys.login.blackIPList",
-    "ip_location.update_source",
-    "ip_location.maxmind_account_id",
-    "ip_location.maxmind_license_key",
-    "ip_location.auto_update_enabled",
-    "sys.audit.alarm.window_minutes",
-    "sys.audit.alarm.fail_threshold",
-    "sys.audit.alarm.fail_rate_threshold",
-];
-
-/// 可下放项 config key（platform_default，有平台默认值）。
-///
-/// 单一事实源为 `axum-backend/src/service/sys_config_service.rs::PLATFORM_DEFAULT_KEYS`
-/// （migration crate 无法依赖 lib，故此处保留同值本地副本，**修改时必须两处同步**）。
-const PLATFORM_DEFAULT_KEYS: &[&str] = &[
-    "sys.index.skinName",
-    "sys.index.sideTheme",
-    "sys.login.background",
-];
-
-fn quoted_list(keys: &[&str]) -> String {
-    keys.iter()
+/// 抽离动机：本 crate 无法依赖 `axum-backend`（lib），此前只能保留同值本地副本并靠注释
+/// 约束「修改时必须两处同步」。该形态已导致过治理静默失效事故，故上移为独立零依赖 crate，
+/// 从物理上消除复制路径（启动兜底 `ensure_tenant_saas_governance` 引用同一份数据）。
+/// 把键清单拼成 SQL 的 `'a', 'b'` 字面量列表。
+fn quoted_list(keys: impl IntoIterator<Item = &'static str>) -> String {
+    keys.into_iter()
         .map(|k| format!("'{k}'"))
         .collect::<Vec<_>>()
         .join(", ")
@@ -249,19 +228,27 @@ impl MigrationTrait for Migration {
         }
 
         // ---- 4. config 治理元数据 seed（幂等 UPDATE，只改治理列，不动 config_value）----
-        // 语义（§27.8）：platform_only = 租户不可见 + 不可改；platform_default = 租户可见 + 可覆盖。
-        conn.execute_unprepared(&format!(
-            "UPDATE sys_config SET scope = 'platform_only', tenant_editable = '0', visible_to_tenant = '0' \
-             WHERE config_key IN ({})",
-            quoted_list(PLATFORM_ONLY_KEYS)
-        ))
-        .await?;
-        conn.execute_unprepared(&format!(
-            "UPDATE sys_config SET scope = 'platform_default', tenant_editable = '1', visible_to_tenant = '1' \
-             WHERE config_key IN ({})",
-            quoted_list(PLATFORM_DEFAULT_KEYS)
-        ))
-        .await?;
+        // 语义由共享注册表的 `Coverage` 单一事实源给出（§27.8）：platform_only = 租户不可见 +
+        // 不可改；platform_default = 租户可见 + 可覆盖。按覆盖策略分组，新增治理域无需改本迁移。
+        for coverage in [
+            Coverage::Locked,
+            Coverage::Free,
+            Coverage::Ceiling,
+            Coverage::Private,
+        ] {
+            let list = quoted_list(keys_with_coverage(coverage));
+            if list.is_empty() {
+                continue;
+            }
+            conn.execute_unprepared(&format!(
+                "UPDATE sys_config SET scope = '{}', tenant_editable = '{}', \
+                 visible_to_tenant = '{}' WHERE config_key IN ({list})",
+                coverage.scope(),
+                coverage.tenant_editable(),
+                coverage.visible_to_tenant()
+            ))
+            .await?;
+        }
 
         Ok(())
     }

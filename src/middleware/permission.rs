@@ -413,7 +413,7 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 租户自建导航 L3（批次 3 / MT-1：能力位 nav.l3 门控，服务层按档位+租户收窄） =====
     // perms 属平台专属前缀 `system:tenantMenu:`，仅由能力位 `nav.l3` 逐条解锁
-    // （`CAPABILITY_UNLOCKED_PERMS`：view_only ⇒ list；full ⇒ add/edit/remove）。
+    // （注册表 `governance::Item::unlocked`：view_only ⇒ list；full ⇒ add/edit/remove）。
     ("GET", "/system/tenant/menu/list", "system:tenantMenu:list"),
     ("GET", "/system/tenant/menu/options", "system:tenantMenu:list"),
     ("POST", "/system/tenant/menu", "system:tenantMenu:add"),

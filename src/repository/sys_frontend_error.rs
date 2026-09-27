@@ -47,11 +47,16 @@ impl SysFrontendErrorRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
+        tenant_filter: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysFrontendError::find();
         // 多租户：租户操作者仅见本租户记录；平台（None）不过滤
         if let Some(t) = tenant_scope {
             query = query.filter(Column::TenantId.eq(t));
+        }
+        // 显式「按租户筛选」（`[ui].tenant_filter`）：与 tenant_scope 相与 ⇒ 只收窄
+        if let Some(tid) = tenant_filter {
+            query = query.filter(Column::TenantId.eq(tid));
         }
         if let Some(l) = level {
             query = query.filter(Column::Level.eq(l));

@@ -203,18 +203,33 @@ pub struct UiConfig {
     /// 非法取值在启动时回落 `auto` 并告警（fail-safe），不会意外扩大可见面。
     #[serde(default = "default_tenant_column_mode")]
     pub show_tenant_column: String,
+    /// 业务列表页「按租户筛选」的可用范围（`off` | `platform` | `always`）
+    ///
+    /// - `off`（**默认**）：不提供筛选入口 ⇒ 等价于改造前行为；
+    /// - `platform`：仅平台操作者可见筛选入口；
+    /// - `always`：平台与租户操作者均可见。
+    ///
+    /// 非法取值回落 `off` 并告警（fail-safe）。筛选在服务层**与 `tenant_scope` 相与**，
+    /// 只能收窄 ⇒ 开关不构成安全边界，只决定前端是否给出入口。
+    #[serde(default = "default_tenant_filter_mode")]
+    pub tenant_filter: String,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             show_tenant_column: default_tenant_column_mode(),
+            tenant_filter: default_tenant_filter_mode(),
         }
     }
 }
 
 fn default_tenant_column_mode() -> String {
     TenantColumnMode::default().as_str().to_string()
+}
+
+fn default_tenant_filter_mode() -> String {
+    TenantFilterMode::default().as_str().to_string()
 }
 
 /// 「所属租户」归属列的展示模式（`[ui].show_tenant_column`）
@@ -273,6 +288,67 @@ impl TenantColumnMode {
             Self::Auto => operator_tid == 0,
             Self::Always => true,
             Self::Never => false,
+        }
+    }
+}
+
+/// 业务列表页「按租户筛选」的可用范围（`[ui].tenant_filter`）。
+///
+/// 与 [`TenantColumnMode`] 是**两个正交开关**：归属列管"看不看得见租户号"，
+/// 本开关管"能不能按租户号收窄结果"。二者共用同一条"只在平台侧才有意义"的默认语义。
+///
+/// 安全口径：显式 `tenantId` 过滤在服务层是**与 `tenant_scope` 相与**的（AND），
+/// 因此**只能收窄、永不放宽**——租户操作者即使手工传他租户 id，结果集也仍是空集，
+/// 不存在越权读面。开关只决定**前端是否给出该筛选入口**。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TenantFilterMode {
+    /// 不提供筛选入口 —— **默认，等价于改造前行为**
+    #[default]
+    Off,
+    /// 仅平台操作者（`tid == 0`）显示筛选入口
+    Platform,
+    /// 平台与租户操作者均显示（租户按自己的 tid 筛选同样只收窄）
+    Always,
+}
+
+/// `TenantFilterMode` 的合法模式串（顺序：默认项在前）
+pub const TENANT_FILTER_MODES: &[&str] = &["off", "platform", "always"];
+
+impl TenantFilterMode {
+    /// 解析配置串；未登记取值一律回落 [`TenantFilterMode::Off`] 并打 WARN（fail-safe）
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" => Self::Off,
+            "platform" => Self::Platform,
+            "always" => Self::Always,
+            _ => {
+                tracing::warn!(
+                    value = %raw,
+                    fallback = "off",
+                    allowed = ?TENANT_FILTER_MODES,
+                    "配置 [ui].tenant_filter 取值非法，已回落 off（不提供按租户筛选入口）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    /// 规范模式串（用于启动姿态日志与文档口径）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Platform => "platform",
+            Self::Always => "always",
+        }
+    }
+
+    /// 解析后的**有效决策**：给定操作者租户号（`0` = 平台），是否提供筛选入口。
+    /// 与 [`TenantColumnMode::visible_for`] 同源——后端在 `getInfo` 算好布尔下发，前端不二次推断。
+    pub fn enabled_for(self, operator_tid: i64) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Platform => operator_tid == 0,
+            Self::Always => true,
         }
     }
 }

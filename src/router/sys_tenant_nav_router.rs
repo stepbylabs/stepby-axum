@@ -9,7 +9,7 @@
 //! - DELETE /system/tenant/menu/{l3Id}    system:tenantMenu:remove
 //!
 //! 注：`system:tenantMenu:` 属平台专属前缀（默认不得授予租户角色），仅由能力位
-//! `nav.l3` 按档位逐条解锁（`CAPABILITY_UNLOCKED_PERMS`）；服务层再按 `NavScope`
+//! `nav.l3` 按档位逐条解锁（注册表 `governance::Item::unlocked`）；服务层再按 `NavScope`
 //! 做能力位分档守卫与行级租户收窄——RBAC 之外的第二、三道闸门。
 
 use axum::Router;

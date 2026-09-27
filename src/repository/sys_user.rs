@@ -228,11 +228,16 @@ impl SysUserRepository {
         end_time: Option<NaiveDateTime>,
         last_id: Option<i64>,
         tenant_scope: Option<i64>,
+        tenant_filter: Option<i64>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
         // 多租户 Phase 2：租户用户仅见本租户（tenant_scope(tid)=Some(t)）；平台 0 不过滤
         if let Some(t) = tenant_scope {
             query = query.filter(Column::TenantId.eq(t));
+        }
+        // 显式「按租户筛选」（`[ui].tenant_filter`）：与 tenant_scope 相与 ⇒ 只收窄
+        if let Some(tid) = tenant_filter {
+            query = query.filter(Column::TenantId.eq(tid));
         }
         if let Some(name) = user_name {
             query = query.filter(Column::UserName.like(format!("%{}%", like_escape(name))));
@@ -451,6 +456,7 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -502,6 +508,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -530,6 +537,7 @@ mod tests {
                     None,
                     None,
                     cursor,
+                    None,
                     None,
                 )
                 .await
@@ -566,7 +574,7 @@ mod tests {
         // OFFSET 全量（大 limit，无过滤）作为基准集合
         let (offset_all, _) = repo
             .find_page_with_data_scope(
-                0, 1000, None, None, None, None, None, None, None, None, None, None, None,
+                0, 1000, None, None, None, None, None, None, None, None, None, None, None, None,
             )
             .await
             .unwrap();
@@ -580,6 +588,7 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
+                    None,
                 )
                 .await
                 .unwrap();
