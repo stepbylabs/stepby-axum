@@ -32,7 +32,7 @@ static TASK_REGISTRY: LazyLock<RwLock<HashMap<String, TaskFn>>> =
 
 /// 注册任务函数
 ///
-/// - `invoke_target`：完整字符串（如 `ryTask.ryNoParams`、`ryTask.ryParams('ry')`）
+/// - `invoke_target`：完整字符串（如 `demoTask.demoNoParams`、`demoTask.demoParams('demo')`）
 /// - `func`：任务执行函数
 ///
 /// 如果 invoke_target 已存在，覆盖旧函数（支持热更新）

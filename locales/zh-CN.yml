@@ -612,9 +612,9 @@ msg:
     job_duration: "%{msg} (耗时 %{ms}ms)"
     invoke_target_not_found: "未找到调用目标: %{target}"
     job_timeout: "任务执行超时（>%{secs}s）"
-    ryNoParams_success: ryNoParams 示例任务执行成功（无业务逻辑，仅演示调度器调用）
-    ryParams_success: "ryParams 示例任务执行成功，参数: %{param}（无业务逻辑，仅演示参数传递）"
-    ryMultipleParams_success: ryMultipleParams 示例任务执行成功（无业务逻辑，仅演示多参数传递）
+    demoNoParams_success: demoNoParams 示例任务执行成功（无业务逻辑，仅演示调度器调用）
+    demoParams_success: "demoParams 示例任务执行成功，参数: %{param}（无业务逻辑，仅演示参数传递）"
+    demoMultipleParams_success: demoMultipleParams 示例任务执行成功（无业务逻辑，仅演示多参数传递）
     cleanup_oper_log: "清理操作日志 %{count} 条"
     cleanup_oper_log_failed: "清理操作日志失败: %{err}"
     cleanup_login_log: "清理登录日志 %{count} 条"

@@ -64,12 +64,12 @@ use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::service::sso_service::RefreshBinding;
 
-/// 平台组织种子部门 ID（m20250711 init 种子"若依科技"）：
+/// 平台组织种子部门 ID（m20250711 init 种子"Yebot科技"）：
 /// 其下用户与部门 `tenant_id = 0`（平台租户），**仅为组织种子、不再承担租户身份**
 /// （§27.1 决策 5：`dept_id = 100` 降级，删除 `ensure_not_platform_root` 一类特判）。
 pub const PLATFORM_ROOT_DEPT_ID: i64 = 100;
 
-/// 平台"普通角色"角色 ID（RuoYi 系种子）：新建租户默认管理员角色的菜单上限来源
+/// 平台"普通角色"角色 ID（init 种子）：新建租户默认管理员角色的菜单上限来源
 const COMMON_ROLE_ID: i64 = 2;
 
 /// 租户初始化时随默认管理员角色一并授予的"租户自助能力"按钮权限（§27.8 / §29）：
@@ -2530,7 +2530,7 @@ mod tests {
 
     #[test]
     fn test_platform_root_constant() {
-        // 平台组织种子固定 100（RuoYi init 种子）；租户身份已与其解耦
+        // 平台组织种子固定 100（init 种子）；租户身份已与其解耦
         assert_eq!(PLATFORM_ROOT_DEPT_ID, 100);
     }
 

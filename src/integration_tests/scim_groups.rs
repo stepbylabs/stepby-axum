@@ -241,7 +241,7 @@ async fn test_scim_groups_crud_and_binding_sync() {
     assert_eq!(g["members"].as_array().map(|a| a.len()), Some(1));
 
     // ④ 管理端绑定角色（role 组）：绑定一个存量角色 → 成员联动获得授权
-    //    取测试库任一角色（RuoYi 初始库有 role_id=1/2）
+    //    取测试库任一角色（初始库有 role_id=1/2）
     let role_id: i64 = 2;
     let status = admin_put_bindings(&ctx, gid, &[role_id]).await;
     assert!(status.is_success(), "绑定应成功: {status}");

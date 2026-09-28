@@ -1513,7 +1513,7 @@ impl AuthService {
             .map(|m| {
                 let router = menu_to_router(m, "");
                 use crate::common::constants::menu_type;
-                // 顶级 C 菜单包装为 Layout + 单 child（对齐 RuoYi 标准 RouterVo 结构）。
+                // 顶级 C 菜单包装为 Layout + 单 child（对齐标准后台 RouterVo 结构）。
                 // 缺陷背景（用户实测）：顶级 C（如 数据看板/导航设置/我的域名）此前生成
                 // `{path:'/x', component:'x/index'}` 单层路由，前端注册为**顶层路由**
                 // ⇒ 点击菜单整页替换渲染（脱离侧边栏/Tab 框架），页面内栅格布局
@@ -2233,11 +2233,11 @@ fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
 ///
 /// 输入：`menu_to_router` 对顶级 C 菜单产出的单层路由
 /// `{path:'/x', component:'x/index', name:'x', meta}`；
-/// 输出：RuoYi 标准结构
+/// 输出：标准后台结构
 /// `{path:'/x', component:'Layout', redirect:'/x/index', name:'x', meta,
 ///   children:[{path:'index', component:'x/index', name:'x-index', meta, query}]}`。
 ///
-/// child path 用 `index`（RuoYi 惯例）；redirect 指向 child 使裸 `/x` 也可达；
+/// child path 用 `index`（框架惯例）；redirect 指向 child 使裸 `/x` 也可达；
 /// child name 追加 `-index` 后缀保证全局唯一（见 menu_to_router 的 name 冲突注释）。
 fn wrap_top_level_page_router(router: RouterVo) -> RouterVo {
     let child = RouterVo {

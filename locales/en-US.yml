@@ -626,9 +626,9 @@ msg:
     job_duration: "%{msg} (elapsed %{ms}ms)"
     invoke_target_not_found: "Invoke target not found: %{target}"
     job_timeout: "Task execution timeout (>%{secs}s)"
-    ryNoParams_success: ryNoParams sample task executed successfully (no business logic, demo only)
-    ryParams_success: "ryParams sample task executed successfully, param: %{param} (no business logic, param demo)"
-    ryMultipleParams_success: ryMultipleParams sample task executed successfully (no business logic, multi-param demo)
+    demoNoParams_success: demoNoParams sample task executed successfully (no business logic, demo only)
+    demoParams_success: "demoParams sample task executed successfully, param: %{param} (no business logic, param demo)"
+    demoMultipleParams_success: demoMultipleParams sample task executed successfully (no business logic, multi-param demo)
     cleanup_oper_log: "Cleaned %{count} operation log(s)"
     cleanup_oper_log_failed: "Failed to clean operation logs: %{err}"
     cleanup_login_log: "Cleaned %{count} login log(s)"

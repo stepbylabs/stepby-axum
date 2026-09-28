@@ -815,7 +815,7 @@ mod tests {
             job_id: 1,
             job_name: "test".to_string(),
             job_group: "DEFAULT".to_string(),
-            invoke_target: "ryTask.ryNoParams".to_string(),
+            invoke_target: "demoTask.demoNoParams".to_string(),
             cron_expression: Some("0 * * * * *".to_string()),
             misfire_policy: Some("3".to_string()),
             concurrent: Some("1".to_string()),
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(vo.job.job_id, 1);
         // 验证 from_model 正确传递 job 各字段
         assert_eq!(vo.job.job_name, "test");
-        assert_eq!(vo.job.invoke_target, "ryTask.ryNoParams");
+        assert_eq!(vo.job.invoke_target, "demoTask.demoNoParams");
         assert_eq!(vo.job.cron_expression, Some("0 * * * * *".to_string()));
         assert_eq!(vo.job.status, Some("0".to_string()));
         // next_valid_time 可能是 Some 或 None（取决于 cron 是否可解析）

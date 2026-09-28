@@ -3,7 +3,7 @@
 //!
 //! ## 背景
 //!
-//! `gen_table_column` 的两列 `java_type` / `java_field` 是 RuoYi（Java）的遗留命名，
+//! `gen_table_column` 的两列 `java_type` / `java_field` 是早期 Java 版本的遗留命名，
 //! 但本仓是 **Rust 后端**，且这两列存的**本来就是 Rust 语义**：
 //! - `java_type`  实际存 `i64` / `String` / `chrono::NaiveDateTime`（Rust 类型）；
 //! - `java_field` 实际存 `user_id` 等 snake_case（Rust 字段名）。

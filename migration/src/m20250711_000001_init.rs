@@ -1227,7 +1227,7 @@ async fn insert_sys_user(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (1, 103, 'admin', 'Yebot管理员', '00', 'admin@yebot.dev', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '管理员')"
         ),
         format!(
-            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (2, 105, 'ry', 'Yebot', '00', 'ry@yebot.dev', '15666666666', '1', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '测试员')"
+            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (2, 105, 'yebot', 'Yebot', '00', 'ry@yebot.dev', '15666666666', '1', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '测试员')"
         ),
     ];
     for sql in sqls {
@@ -1443,9 +1443,9 @@ async fn insert_sys_job(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
     let sql = format!(
         "sys_job (job_id, job_name, job_group, invoke_target, cron_expression, misfire_policy, concurrent, status, create_by, create_time, remark, del_flag) VALUES \
-(1, '系统默认（无参）', 'DEFAULT', 'ryTask.ryNoParams', '0/10 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0'), \
-(2, '系统默认（有参）', 'DEFAULT', 'ryTask.ryParams(''ry'')', '0/15 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0'), \
-(3, '系统默认（多参）', 'DEFAULT', 'ryTask.ryMultipleParams(''ry'', true, 2000L, 316.50D, 100)', '0/20 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0')"
+(1, '系统默认（无参）', 'DEFAULT', 'demoTask.demoNoParams', '0/10 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0'), \
+(2, '系统默认（有参）', 'DEFAULT', 'demoTask.demoParams(''demo'')', '0/15 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0'), \
+(3, '系统默认（多参）', 'DEFAULT', 'demoTask.demoMultipleParams(''demo'', true, 2000L, 316.50D, 100)', '0/20 * * * * ?', '3', '1', '1', 'admin', {now}, '', '0')"
     );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
