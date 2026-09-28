@@ -25,7 +25,7 @@ use axum::response::Response;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::common::ValidatedJson;
 
@@ -52,7 +52,7 @@ const MAX_IMPORT_SIZE: usize = 5 * 1024 * 1024;
 // ==================== 辅助 DTO ====================
 
 /// 启停用户请求体
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeStatusDto {
     #[garde(skip)]
@@ -63,7 +63,7 @@ pub struct ChangeStatusDto {
 
 /// 分配用户角色请求体（对齐前端 PUT /system/user/authRole?userId=&roleIds=）
 /// 本接口字段走 Query，这里同样走 Query 以保持兼容
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct AssignAuthRoleDto {
     #[garde(range(min = 1))]
@@ -74,7 +74,7 @@ pub struct AssignAuthRoleDto {
 }
 
 /// 个人改密请求体
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfilePwdDto {
     #[garde(length(min = 5, max = 20))]
@@ -124,6 +124,16 @@ pub async fn list(
 ///
 /// 前端 download() 发送 application/x-www-form-urlencoded，使用 Form 提取器
 /// P0-1 修复：增加 Operator 参数，应用数据权限过滤，防止越权导出
+#[utoipa::path(
+    post,
+    path = "/system/user/export",
+    params(UserQueryDto),
+    responses(
+        (status = 200, description = "用户列表 xlsx", content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-user"
+)]
 pub async fn export(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -556,7 +566,7 @@ pub async fn remove(
             let pwd_ver_key = format!("pwd_ver:{}", uid);
             pipe.cmd("INCR").arg(&pwd_ver_key).ignore();
         }
-        if let Err(e) = pipe.query_async::<()>(&mut redis).await {
+        if let Err(e) = crate::utils::redis::cmd_timeout(pipe.query_async::<()>(&mut redis)).await {
             tracing::error!(
                 user_ids = ?deleted_user_ids,
                 error = %e,
@@ -704,6 +714,16 @@ pub async fn anonymize_user(
 
 /// PUT /system/user/changeStatus
 /// 启停用户
+#[utoipa::path(
+    put,
+    path = "/system/user/changeStatus",
+    request_body = ChangeStatusDto,
+    responses(
+        (status = 200, description = "修改成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误、不允许停用超管或 Redis 写入失败"),
+    ),
+    tag = "system-user"
+)]
 pub async fn change_status(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -723,18 +743,20 @@ pub async fn change_status(
 
     // 步骤1：停用时先 INCR pwd_ver（fail-closed：写入失败则拒绝停用）
     if needs_pwd_changed {
-        redis::cmd("INCR")
-            .arg(&pwd_ver_key)
-            .query_async::<()>(&mut redis)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    user_id = dto.user_id,
-                    error = %e,
-                    "停用用户前预增 pwd_ver 标记失败（fail-closed 拒绝停用）"
-                );
-                AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
-            })?;
+        crate::utils::redis::cmd_timeout(
+            redis::cmd("INCR")
+                .arg(&pwd_ver_key)
+                .query_async::<()>(&mut redis),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                user_id = dto.user_id,
+                error = %e,
+                "停用用户前预增 pwd_ver 标记失败（fail-closed 拒绝停用）"
+            );
+            AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
+        })?;
     }
 
     // 步骤2：更新 DB 用户状态
@@ -752,10 +774,12 @@ pub async fn change_status(
     // 步骤3：DB 失败则 DECR 回滚 Redis 标记
     if let Err(e) = db_result {
         if needs_pwd_changed {
-            let _ = redis::cmd("DECR")
-                .arg(&pwd_ver_key)
-                .query_async::<()>(&mut redis)
-                .await;
+            let _ = crate::utils::redis::cmd_timeout(
+                redis::cmd("DECR")
+                    .arg(&pwd_ver_key)
+                    .query_async::<()>(&mut redis),
+            )
+            .await;
         }
         return Err(e.into());
     }
@@ -776,6 +800,17 @@ pub async fn change_status(
 
 /// PUT /system/user/resetPwd
 /// 管理员重置密码
+#[utoipa::path(
+    put,
+    path = "/system/user/resetPwd",
+    request_body = UserPwdResetDto,
+    responses(
+        (status = 200, description = "重置成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误或 Redis 写入失败"),
+        (status = 404, description = "用户不存在"),
+    ),
+    tag = "system-user"
+)]
 pub async fn reset_pwd(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -794,18 +829,20 @@ pub async fn reset_pwd(
     let mut redis = state.redis.clone();
 
     // 步骤1：先 INCR pwd_ver（fail-closed：写入失败则拒绝重置）
-    redis::cmd("INCR")
-        .arg(&pwd_ver_key)
-        .query_async::<()>(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                user_id,
-                error = %e,
-                "重置密码前预增 pwd_ver 标记失败（fail-closed 拒绝重置）"
-            );
-            AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
-        })?;
+    crate::utils::redis::cmd_timeout(
+        redis::cmd("INCR")
+            .arg(&pwd_ver_key)
+            .query_async::<()>(&mut redis),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            user_id,
+            error = %e,
+            "重置密码前预增 pwd_ver 标记失败（fail-closed 拒绝重置）"
+        );
+        AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
+    })?;
 
     // 步骤2：更新 DB 密码
     let db_result = state
@@ -820,10 +857,12 @@ pub async fn reset_pwd(
 
     // 步骤3：DB 失败则 DECR 回滚 Redis 标记
     if let Err(e) = db_result {
-        let _ = redis::cmd("DECR")
-            .arg(&pwd_ver_key)
-            .query_async::<()>(&mut redis)
-            .await;
+        let _ = crate::utils::redis::cmd_timeout(
+            redis::cmd("DECR")
+                .arg(&pwd_ver_key)
+                .query_async::<()>(&mut redis),
+        )
+        .await;
         return Err(e.into());
     }
 
@@ -842,6 +881,16 @@ pub async fn reset_pwd(
 /// 个人中心改密
 ///
 /// 前端通过 JSON body 传递 oldPassword/newPassword（避免密码泄露到 URL/日志/浏览器历史）
+#[utoipa::path(
+    put,
+    path = "/system/user/profile/updatePwd",
+    request_body = ProfilePwdDto,
+    responses(
+        (status = 200, description = "改密成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误或旧密码错误"),
+    ),
+    tag = "system-user"
+)]
 pub async fn update_profile_pwd(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -862,18 +911,20 @@ pub async fn update_profile_pwd(
     let mut redis = state.redis.clone();
 
     // 步骤1：先 INCR pwd_ver（fail-closed：写入失败则拒绝改密）
-    redis::cmd("INCR")
-        .arg(&pwd_ver_key)
-        .query_async::<()>(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                user_id,
-                error = %e,
-                "改密前预增 pwd_ver 标记失败（fail-closed 拒绝改密）"
-            );
-            AppError::internal(&crate::tr!("error.user.pwd_change_token_invalidate_failed"))
-        })?;
+    crate::utils::redis::cmd_timeout(
+        redis::cmd("INCR")
+            .arg(&pwd_ver_key)
+            .query_async::<()>(&mut redis),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            user_id,
+            error = %e,
+            "改密前预增 pwd_ver 标记失败（fail-closed 拒绝改密）"
+        );
+        AppError::internal(&crate::tr!("error.user.pwd_change_token_invalidate_failed"))
+    })?;
 
     // 步骤2：更新 DB 密码
     let db_result = state
@@ -883,10 +934,12 @@ pub async fn update_profile_pwd(
 
     // 步骤3：DB 失败则 DECR 回滚 Redis 标记（避免误登出用户）
     if let Err(e) = db_result {
-        let _ = redis::cmd("DECR")
-            .arg(&pwd_ver_key)
-            .query_async::<()>(&mut redis)
-            .await;
+        let _ = crate::utils::redis::cmd_timeout(
+            redis::cmd("DECR")
+                .arg(&pwd_ver_key)
+                .query_async::<()>(&mut redis),
+        )
+        .await;
         return Err(e.into());
     }
 
@@ -906,6 +959,15 @@ pub async fn update_profile_pwd(
 ///
 /// 返回结构对齐前端 UserProfileResult extends AjaxResult：
 /// `{ code, msg, data, roleGroup, postGroup }`（roleGroup/postGroup 在根对象，非 data 内）
+#[utoipa::path(
+    get,
+    path = "/system/user/profile",
+    responses(
+        (status = 200, description = "个人信息（含角色组/岗位组）", body = ProfileResult),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "system-user"
+)]
 pub async fn get_profile(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -928,6 +990,16 @@ pub async fn get_profile(
 /// 修改个人信息（nickName / phonenumber / email / sex）
 ///
 /// 对齐前端 userInfo.vue 提交的 updateUserProfile(data) 请求。
+#[utoipa::path(
+    put,
+    path = "/system/user/profile",
+    request_body = ProfileUpdateDto,
+    responses(
+        (status = 200, description = "修改成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+    ),
+    tag = "system-user"
+)]
 pub async fn update_profile(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -946,6 +1018,15 @@ pub async fn update_profile(
 ///
 /// 对齐前端 getUser()（无 userId 参数）调用：返回 UserFormResult，data 为 None，
 /// roleIds/postIds 为空数组，roles/posts 为全部可用列表。
+#[utoipa::path(
+    get,
+    path = "/system/user/",
+    responses(
+        (status = 200, description = "角色/岗位下拉数据（新增用户表单用）", body = UserFormResult),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "system-user"
+)]
 pub async fn get_roles_for_user_form(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -972,6 +1053,16 @@ pub async fn get_roles_for_user_form(
 
 /// PUT /system/user/authRole
 /// 分配用户角色（对齐前端：Query 参数 userId + roleIds）
+#[utoipa::path(
+    put,
+    path = "/system/user/authRole",
+    params(AssignAuthRoleDto),
+    responses(
+        (status = 200, description = "分配成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误或角色层级越权"),
+    ),
+    tag = "system-user"
+)]
 pub async fn auth_role(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -1005,6 +1096,15 @@ pub async fn auth_role(
 
 /// GET /system/user/deptTree
 /// 部门下拉树（对齐前端 deptTreeSelect，返回 AjaxResult<Vec<TreeSelectVo>>）
+#[utoipa::path(
+    get,
+    path = "/system/user/deptTree",
+    responses(
+        (status = 200, description = "部门下拉树", body = AjaxResult<Vec<TreeSelectVo>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-user"
+)]
 pub async fn dept_tree_select(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -1027,6 +1127,16 @@ pub async fn dept_tree_select(
 ///
 /// 返回结构与 AjaxResult 不同：user 和 roles 字段直接挂在响应根对象上，
 /// 故使用自定义 AuthRoleResult 而非 AjaxResult<UserAuthRoleVo>。
+#[utoipa::path(
+    get,
+    path = "/system/user/authRole/{userId}",
+    params(("userId" = i64, Path, description = "用户 ID")),
+    responses(
+        (status = 200, description = "用户授权角色信息", body = AuthRoleResult),
+        (status = 404, description = "用户不存在"),
+    ),
+    tag = "system-user"
+)]
 pub async fn auth_role_get(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -1060,6 +1170,15 @@ pub async fn auth_role_get(
 /// - 保存到本地 uploads/avatar/{uuid}.{ext} 目录
 /// - 更新 sys_user.avatar 字段为可访问的 URL 路径
 /// - 返回 { code, msg, imgUrl }（imgUrl 在顶层，对齐前端 UserProfileAvatarResult）
+#[utoipa::path(
+    post,
+    path = "/system/user/profile/avatar",
+    responses(
+        (status = 200, description = "头像上传成功（返回 imgUrl）", body = AvatarUploadResult),
+        (status = 400, description = "缺少 avatarfile 字段或文件类型/大小非法"),
+    ),
+    tag = "system-user"
+)]
 pub async fn avatar_upload(
     State(state): State<Arc<AppState>>,
     operator: Operator,

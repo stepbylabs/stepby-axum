@@ -111,7 +111,7 @@ pub struct LoginDto {
 }
 
 /// 注册请求 DTO（对齐前端 register 函数参数）
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterDto {
     #[garde(length(min = 2, max = 30))]
@@ -129,7 +129,7 @@ pub struct RegisterDto {
 }
 
 /// 锁屏解锁请求 DTO（对齐前端 unlockScreen 函数参数）
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UnlockScreenDto {
     #[garde(length(min = 5, max = 20))]
@@ -197,7 +197,7 @@ pub struct GetInfoVo {
 }
 
 /// 路由节点 Vo（对齐前端 RouterVo）
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterVo {
     pub name: String,
@@ -208,11 +208,12 @@ pub struct RouterVo {
     pub always_show: Option<bool>,
     pub meta: MetaVo,
     pub query: Option<String>,
+    #[schema(no_recursion)]
     pub children: Option<Vec<RouterVo>>,
 }
 
 /// 路由 meta 信息（对齐前端 MetaVo）
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MetaVo {
     pub title: String,
@@ -489,11 +490,11 @@ impl AuthService {
         totp_code: Option<&str>,
     ) -> Result<(), ServiceError> {
         let redis_key = format!("totp:enabled:{}", user.user_id);
-        let encrypted: Option<String> = redis::cmd("GET")
-            .arg(&redis_key)
-            .query_async(redis)
-            .await
-            .map_err(|e| {
+        let encrypted: Option<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("GET").arg(&redis_key).query_async(redis),
+        )
+        .await
+        .map_err(|e| {
                 tracing::error!(error = %e, user_id = user.user_id, "TOTP 状态查询失败（fail-closed 503）");
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
@@ -507,14 +508,13 @@ impl AuthService {
         const MAX_TOTP_FAIL: i64 = 5;
         const TOTP_FAIL_TTL: i64 = 600;
         let fail_key = format!("totp:login_fail:{}", ctx.username);
-        let fail_count: Option<i64> = redis::cmd("GET")
-            .arg(&fail_key)
-            .query_async(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "TOTP 失败计数查询失败（fail-closed 503）");
-                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-            })?;
+        let fail_count: Option<i64> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&fail_key).query_async(redis))
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "TOTP 失败计数查询失败（fail-closed 503）");
+                    ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+                })?;
         if let Some(count) = fail_count
             && count >= MAX_TOTP_FAIL
         {
@@ -594,11 +594,10 @@ impl AuthService {
         }
 
         // 验证通过：清除失败计数
-        let _: i64 = redis::cmd("DEL")
-            .arg(&fail_key)
-            .query_async(redis)
-            .await
-            .unwrap_or(0);
+        let _: i64 =
+            crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&fail_key).query_async(redis))
+                .await
+                .unwrap_or(0);
         Ok(())
     }
 
@@ -980,11 +979,11 @@ impl AuthService {
         //    读取失败视为 0（fail-open，仅影响旧 token 失效判断；Redis 不可用时中间件会 fail-closed 拒绝）。
         let user_id = user.user_id.to_string();
         let pwd_ver_key = format!("pwd_ver:{}", user_id);
-        let pwd_ver: Option<u64> = redis::cmd("GET")
-            .arg(&pwd_ver_key)
-            .query_async(redis)
-            .await
-            .unwrap_or(None);
+        let pwd_ver: Option<u64> = crate::utils::redis::cmd_timeout(
+            redis::cmd("GET").arg(&pwd_ver_key).query_async(redis),
+        )
+        .await
+        .unwrap_or(None);
         let (token, claims) = JwtUtils::generate_token(
             &user_id,
             ctx.username,
@@ -1070,11 +1069,11 @@ impl AuthService {
         //   2) pipeline 批量执行 4 个写操作（SETEX online / 条件 DEL old_online / SETEX
         //      user_sessions / DEL login_fail），单次网络往返
         // GET 旧 token_hash（如有）——单独执行，因后续 pipeline 中条件 DEL 依赖其结果
-        let old_token_hash_opt: Option<String> = redis::cmd("GET")
-            .arg(&user_session_key)
-            .query_async(redis)
-            .await
-            .unwrap_or(None);
+        let old_token_hash_opt: Option<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("GET").arg(&user_session_key).query_async(redis),
+        )
+        .await
+        .unwrap_or(None);
         let need_del_old = match old_token_hash_opt.as_ref() {
             Some(old) if old != &token_hash => {
                 tracing::info!(
@@ -1237,17 +1236,16 @@ impl AuthService {
         //   修复 P1-19 Bug：旧方案 logout 仅写黑名单未 DEL online key，
         //   导致用户登出后仍显示在线 30 分钟。online key 会自然过期，DEL 失败仅影响展示及时性。
         let online_key = format!("online:{}", token_hash);
-        let _: () = redis::cmd("DEL")
-            .arg(&online_key)
-            .query_async(redis)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "DEL online:{} 失败（不阻断 logout，key 会自然过期）: {}",
-                    token_hash,
-                    e
-                );
-            });
+        let _: () =
+            crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&online_key).query_async(redis))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "DEL online:{} 失败（不阻断 logout，key 会自然过期）: {}",
+                        token_hash,
+                        e
+                    );
+                });
 
         // 清理 user_sessions 索引（H-3 修复：不再批量删除所有 user_sessions:{user_id}:* ）
         //   原实现 SCAN + 批量 DEL 会误删其他设备（不同 IP/Browser）的索引，导致其他设备

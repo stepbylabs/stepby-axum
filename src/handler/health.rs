@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use utoipa::ToSchema;
 
 /// 健康检查缓存 TTL（R6-PERF-23：避免高频探针打爆 DB/Redis）
 const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -25,7 +26,7 @@ fn health_cache() -> &'static RwLock<Option<(Instant, HealthStatus)>> {
 }
 
 /// 健康检查响应体
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthStatus {
     pub status: String,
@@ -43,6 +44,15 @@ pub struct HealthStatus {
 /// R6-PERF-23：增加 5 秒 TTL 缓存，防止 K8s/Consul 高频探针（每秒 N 次）
 /// 直接打爆 DB ping 和 Redis PING。缓存过期前所有请求直接返回上次结果，
 /// 牺牲最多 5 秒状态延迟换取后端依赖保护。
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "健康检查结果（DB/Redis 连通性）", body = AjaxResult<HealthStatus>),
+    ),
+    security(()),
+    tag = "monitor-health"
+)]
 pub async fn health(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<HealthStatus>, AppError> {
@@ -69,7 +79,9 @@ pub async fn health(
     // 探测 Redis 连通性
     let redis_status = {
         let mut conn = state.redis.clone();
-        match redis::cmd("PING").query_async::<String>(&mut conn).await {
+        match crate::utils::redis::cmd_timeout(redis::cmd("PING").query_async::<String>(&mut conn))
+            .await
+        {
             Ok(_) => "UP".to_string(),
             Err(e) => {
                 tracing::error!(error = ?e, "健康检查：Redis ping 失败");
@@ -120,6 +132,16 @@ static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 ///
 /// 注：sea-orm 1.1 未公开底层 sqlx Pool 的 size()/num_idle() API，
 /// 故连接池容量统计暂不可用。未来 sea-orm 暴露 pool 访问接口后可扩展。
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    responses(
+        (status = 200, description = "Prometheus 文本格式指标", content_type = "text/plain"),
+        (status = 401, description = "已配置 metrics_token 且 Authorization 校验失败"),
+    ),
+    security(()),
+    tag = "monitor-health"
+)]
 pub async fn metrics(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -193,13 +215,14 @@ pub async fn metrics(
 /// Redis 运行指标 → Prometheus gauge（best-effort，失败返回空串不影响整体输出）
 async fn collect_redis_prometheus(state: &Arc<AppState>) -> String {
     let mut conn = state.redis.clone();
-    let info_text: String = match redis::cmd("INFO").query_async(&mut conn).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(error = %e, "/metrics 采集 Redis INFO 失败，跳过 Redis 指标");
-            return String::new();
-        }
-    };
+    let info_text: String =
+        match crate::utils::redis::cmd_timeout(redis::cmd("INFO").query_async(&mut conn)).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "/metrics 采集 Redis INFO 失败，跳过 Redis 指标");
+                return String::new();
+            }
+        };
     let mut map = std::collections::HashMap::new();
     for line in info_text.lines() {
         let line = line.trim();

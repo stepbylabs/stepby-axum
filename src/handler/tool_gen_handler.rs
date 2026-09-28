@@ -31,6 +31,17 @@ use crate::utils::parse_id_list;
 
 /// GET /tool/gen/list
 /// 分页查询代码生成业务表
+#[utoipa::path(
+    get,
+    path = "/tool/gen/list",
+    params(GenTableQueryDto),
+    responses(
+        (status = 200, description = "代码生成业务表分页列表", body = TableDataInfo<crate::entity::gen_table::Model>),
+        (status = 403, description = "非平台操作者"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn list(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GenTableQueryDto>,
@@ -41,6 +52,17 @@ pub async fn list(
 
 /// GET /tool/gen/db/list
 /// 查询数据库表列表（导入表用，排除已导入的表）
+#[utoipa::path(
+    get,
+    path = "/tool/gen/db/list",
+    params(DbTableQueryDto),
+    responses(
+        (status = 200, description = "数据库表分页列表", body = TableDataInfo<DbTableInfo>),
+        (status = 403, description = "非平台操作者"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn db_list(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DbTableQueryDto>,
@@ -51,6 +73,16 @@ pub async fn db_list(
 
 /// GET /tool/gen/{tableId}
 /// 查询代码生成业务表详情（包含列信息和所有表列表）
+#[utoipa::path(
+    get,
+    path = "/tool/gen/{tableId}",
+    params(("tableId" = i64, Path, description = "业务表 ID")),
+    responses(
+        (status = 200, description = "业务表详情（含列信息）", body = AjaxResult<GenTableInfoVo>),
+        (status = 404, description = "业务表不存在"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn get_table(
     State(state): State<Arc<AppState>>,
     Path(table_id): Path<i64>,
@@ -61,6 +93,17 @@ pub async fn get_table(
 
 /// POST /tool/gen/importTable
 /// 导入表（从数据库元数据导入）
+#[utoipa::path(
+    post,
+    path = "/tool/gen/importTable",
+    params(ImportTableParams),
+    responses(
+        (status = 200, description = "导入成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "未选择表或表名非法"),
+        (status = 403, description = "非平台操作者"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn import_table(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -90,7 +133,7 @@ pub async fn import_table(
 }
 
 /// 导入表请求参数
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportTableParams {
     /// 要导入的表名列表（逗号分隔）
@@ -107,6 +150,17 @@ pub struct ImportTableParams {
 /// - 不接收原始 SQL，完全消除 SQL 注入风险
 /// - 表名/列名通过白名单正则校验
 /// - 类型枚举固定，无法传入任意类型
+#[utoipa::path(
+    post,
+    path = "/tool/gen/createTable",
+    request_body = CreateTableDto,
+    responses(
+        (status = 200, description = "建表成功", body = AjaxResult<CreateTableResultVo>),
+        (status = 400, description = "参数错误或表名/列名非法"),
+        (status = 403, description = "非平台操作者"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn create_table(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -122,6 +176,18 @@ pub async fn create_table(
 
 /// PUT /tool/gen
 /// 修改代码生成配置
+#[utoipa::path(
+    put,
+    path = "/tool/gen",
+    request_body = GenTableEditDto,
+    responses(
+        (status = 200, description = "修改成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+        (status = 403, description = "非平台操作者"),
+        (status = 404, description = "业务表不存在"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn update_table(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -136,6 +202,17 @@ pub async fn update_table(
 
 /// DELETE /tool/gen/{tableIds}
 /// 批量删除代码生成业务表
+#[utoipa::path(
+    delete,
+    path = "/tool/gen/{tableIds}",
+    params(("tableIds" = String, Path, description = "业务表 ID 列表（逗号分隔）")),
+    responses(
+        (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "ID 不合法或超过批量上限"),
+        (status = 403, description = "非平台操作者"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn delete_table(
     State(state): State<Arc<AppState>>,
     Path(table_ids): Path<String>,
@@ -159,6 +236,16 @@ pub async fn delete_table(
 
 /// GET /tool/gen/preview/{tableId}
 /// 预览生成代码
+#[utoipa::path(
+    get,
+    path = "/tool/gen/preview/{tableId}",
+    params(("tableId" = i64, Path, description = "业务表 ID")),
+    responses(
+        (status = 200, description = "预览代码（文件名 → 代码内容）", body = AjaxResult<PreviewCodeVo>),
+        (status = 404, description = "业务表不存在"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn preview(
     State(state): State<Arc<AppState>>,
     Path(table_id): Path<i64>,
@@ -184,6 +271,17 @@ fn validate_table_name(table_name: &str) -> Result<(), AppError> {
 
 /// GET /tool/gen/genCode/{tableName}
 /// 生成代码（返回 ZIP 文件下载）
+#[utoipa::path(
+    get,
+    path = "/tool/gen/genCode/{tableName}",
+    params(("tableName" = String, Path, description = "表名")),
+    responses(
+        (status = 200, description = "生成的代码 ZIP", content_type = "application/zip"),
+        (status = 400, description = "表名非法"),
+        (status = 403, description = "非平台操作者"),
+    ),
+    tag = "tool-gen"
+)]
 pub async fn gen_code(
     State(state): State<Arc<AppState>>,
     Path(table_name): Path<String>,

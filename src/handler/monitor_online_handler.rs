@@ -139,14 +139,17 @@ pub async fn list(
     }
 
     // 2. MGET 批量获取所有 online JSON（单次 pipeline，遵循 memory 第 57 行约束）
-    let values: Vec<Option<String>> =
-        match redis::cmd("MGET").arg(&keys).query_async(&mut redis).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Redis MGET online 失败，降级到 sys_logininfor 查询: {}", e);
-                return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
-            }
-        };
+    let values: Vec<Option<String>> = match crate::utils::redis::cmd_timeout(
+        redis::cmd("MGET").arg(&keys).query_async(&mut redis),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Redis MGET online 失败，降级到 sys_logininfor 查询: {}", e);
+            return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
+        }
+    };
 
     // 3. 解析 JSON 为 OnlineSession（先全量收集，便于批量兜底回填租户归属）
     let mut sessions: Vec<(String, OnlineSession)> = Vec::new();
@@ -411,14 +414,14 @@ pub async fn force_logout(
     let mut redis = state.redis.clone();
 
     // 1. GET online:{token_hash} → JSON → OnlineSession（确认会话存在 + 获取 user_id）
-    let session_json: Option<String> = redis::cmd("GET")
-        .arg(&online_key)
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    let session_json: Option<String> = crate::utils::redis::cmd_timeout(
+        redis::cmd("GET").arg(&online_key).query_async(&mut redis),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?;
 
     let session_json = match session_json {
         Some(s) => s,
@@ -583,14 +586,14 @@ pub async fn my_session_logout(
     let mut redis = state.redis.clone();
 
     // 1. 读会话 → 确认存在 + 属主校验（v5-N5：横向越权防线）
-    let session_json: Option<String> = redis::cmd("GET")
-        .arg(&online_key)
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    let session_json: Option<String> = crate::utils::redis::cmd_timeout(
+        redis::cmd("GET").arg(&online_key).query_async(&mut redis),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?;
     let session: OnlineSession = match session_json {
         Some(s) => serde_json::from_str(&s).map_err(|e| {
             tracing::error!("解析 OnlineSession JSON 失败: {}", e);

@@ -8,12 +8,16 @@
 #   docker compose down                     # 停止并移除容器
 #   docker compose down -v                  # 停止并删除数据卷
 #
-# 连接信息：
-#   PostgreSQL: postgres://yebot:yebot123@127.0.0.1:5432/yebot
-#   MySQL:      mysql://yebot:yebot123@127.0.0.1:3306/yebot
+# 连接信息（用户口令全部来自环境变量，不在此文件硬编码）：
+#   PostgreSQL: postgres://${POSTGRES_USER:-yebot}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB:-yebot}
+#   MySQL:      mysql://${MYSQL_USER:-yebot}:${MYSQL_PASSWORD}@127.0.0.1:3306/${MYSQL_DATABASE:-yebot}
+#
+# 必填环境变量（缺省即 fail-fast，避免静默使用弱口令）：
+#   POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD / REDIS_PASSWORD
+#   —— 通过 axum-backend/.env（本目录，已被 .gitignore 忽略）或外部环境变量提供。
 #
 # 测试步骤：
-#   1. 修改 .env 中 DATABASE_URL 指向目标数据库
+#   1. 复制 .env.example 为 .env 并填写上述口令；修改 .env 中 DATABASE_URL 指向目标数据库
 #   2. 运行 migration: cargo run -p migration
 #   3. 启动后端: cargo run
 
@@ -23,16 +27,17 @@ services:
     container_name: yebot-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: yebot
-      POSTGRES_PASSWORD: yebot123
-      POSTGRES_DB: yebot
+      POSTGRES_USER: ${POSTGRES_USER:-yebot}
+      # 必填：缺省即报错（fail-fast），避免静默回落到弱默认口令
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必填（请在 axum-backend/.env 中设置）}
+      POSTGRES_DB: ${POSTGRES_DB:-yebot}
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - yebot_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U yebot -d yebot"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yebot} -d ${POSTGRES_DB:-yebot}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -44,10 +49,11 @@ services:
     container_name: yebot-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: root123
-      MYSQL_DATABASE: yebot
-      MYSQL_USER: yebot
-      MYSQL_PASSWORD: yebot123
+      # 必填：缺省即报错（fail-fast）
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必填（请在 axum-backend/.env 中设置）}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-yebot}
+      MYSQL_USER: ${MYSQL_USER:-yebot}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 必填（请在 axum-backend/.env 中设置）}
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:3306:3306"
@@ -55,7 +61,8 @@ services:
       - yebot_mysql_data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-proot123"]
+      # 口令在容器运行时由 $$MYSQL_ROOT_PASSWORD 展开（不落入 compose 解析结果）
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -68,14 +75,19 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
+      # 必填：redis 访问口令，缺省即报错（fail-fast）
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 必填（请在 axum-backend/.env 中设置）}
     ports:
       - "127.0.0.1:6379:6379"
     # 持久化：AOF（appendonly）+ RDB 快照，防止重启丢失 token 黑名单/登录限流计数
-    command: redis-server --appendonly yes --save 900 1 --save 300 10
+    # 同时强制 requirepass（生产必须设密码；对应 REDIS_URL 需带密码，如 redis://:pass@host:6379/0）
+    # 注意：口令不要包含空格，否则会被字符串形式的 command 拆断
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes --save 900 1 --save 300 10
     volumes:
       - yebot_redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # 口令在容器运行时由 $$REDIS_PASSWORD 展开
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5

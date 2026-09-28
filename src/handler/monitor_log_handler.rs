@@ -149,6 +149,16 @@ pub struct LogTailResponse {
 
 /// GET /monitor/log/files
 /// 列出日志目录下的应用日志文件
+#[utoipa::path(
+    get,
+    path = "/monitor/log/files",
+    responses(
+        (status = 200, description = "日志文件列表", body = AjaxResult<LogFilesResponse>),
+        (status = 403, description = "非平台操作者"),
+        (status = 500, description = "读取日志目录失败"),
+    ),
+    tag = "monitor-log"
+)]
 pub async fn files(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<LogFilesResponse>, AppError> {
@@ -206,6 +216,18 @@ pub async fn files(
 
 /// GET /monitor/log/tail
 /// 读取指定日志文件尾部并过滤
+#[utoipa::path(
+    get,
+    path = "/monitor/log/tail",
+    params(LogTailQuery),
+    responses(
+        (status = 200, description = "日志尾部内容（含级别/关键字过滤）", body = AjaxResult<LogTailResponse>),
+        (status = 400, description = "日志文件名非法或文件不存在"),
+        (status = 403, description = "非平台操作者"),
+        (status = 500, description = "读取日志失败"),
+    ),
+    tag = "monitor-log"
+)]
 pub async fn tail(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LogTailQuery>,

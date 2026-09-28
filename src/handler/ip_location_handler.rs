@@ -232,18 +232,20 @@ pub async fn update_now(
     let lock_key = "ip_location:update:lock";
     let lock_value = uuid::Uuid::new_v4().to_string();
     let mut redis = state.redis.clone();
-    let acquired: bool = redis::cmd("SET")
-        .arg(lock_key)
-        .arg(&lock_value)
-        .arg("NX")
-        .arg("EX")
-        .arg(600i64)
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "IP 库更新锁写入失败（fail-closed 拒绝）");
-            AppError::new(503, crate::tr!("error.ip_location.update_unavailable"))
-        })?;
+    let acquired: bool = crate::utils::redis::cmd_timeout(
+        redis::cmd("SET")
+            .arg(lock_key)
+            .arg(&lock_value)
+            .arg("NX")
+            .arg("EX")
+            .arg(600i64)
+            .query_async(&mut redis),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "IP 库更新锁写入失败（fail-closed 拒绝）");
+        AppError::new(503, crate::tr!("error.ip_location.update_unavailable"))
+    })?;
     if !acquired {
         return Err(AppError::bad_request(&crate::tr!(
             "error.ip_location.update_in_progress"
@@ -256,14 +258,16 @@ pub async fn update_now(
         .await;
 
     // 释放锁（CAS）
-    let _: i64 = redis::cmd("EVAL")
-        .arg(r#"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"#)
-        .arg(1)
-        .arg(lock_key)
-        .arg(&lock_value)
-        .query_async(&mut redis)
-        .await
-        .unwrap_or(0);
+    let _: i64 = crate::utils::redis::cmd_timeout(
+        redis::cmd("EVAL")
+            .arg(r#"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"#)
+            .arg(1)
+            .arg(lock_key)
+            .arg(&lock_value)
+            .query_async(&mut redis),
+    )
+    .await
+    .unwrap_or(0);
 
     Ok(AjaxResult::success(result?))
 }

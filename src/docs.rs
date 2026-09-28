@@ -263,6 +263,115 @@ struct SwaggerAssets;
         crate::handler::flow_handler::withdraw_demo,
         crate::handler::flow_handler::countersign_add,
         crate::handler::flow_handler::act,
+        // ==================== 认证（补充）====================
+        crate::handler::auth_handler::register,
+        crate::handler::auth_handler::get_routers,
+        crate::handler::auth_handler::unlock_screen,
+        // ==================== TOTP 多因子认证 ====================
+        crate::handler::totp_handler::setup,
+        crate::handler::totp_handler::verify,
+        crate::handler::totp_handler::status,
+        crate::handler::totp_handler::disable,
+        // ==================== 健康检查 / 指标 ====================
+        crate::handler::health::health,
+        crate::handler::health::metrics,
+        // ==================== 实时日志监控 ====================
+        crate::handler::monitor_log_handler::files,
+        crate::handler::monitor_log_handler::tail,
+        // ==================== 用户消息偏好 ====================
+        crate::handler::sys_user_pref_handler::get_pref,
+        crate::handler::sys_user_pref_handler::update_pref,
+        // ==================== WebSocket 实时通知 ====================
+        crate::handler::ws_handler::ws_handler,
+        // ==================== 文件管理 ====================
+        crate::handler::file_handler::list,
+        crate::handler::file_handler::upload,
+        crate::handler::file_handler::delete,
+        // ==================== 在线 HTTP 调试器 ====================
+        crate::handler::sys_http_debug_handler::execute,
+        // ==================== SCIM 2.0（v5-D12）====================
+        crate::handler::scim_handler::list_users,
+        crate::handler::scim_handler::get_user,
+        crate::handler::scim_handler::create_user,
+        crate::handler::scim_handler::put_user,
+        crate::handler::scim_handler::patch_user,
+        crate::handler::scim_handler::delete_user,
+        crate::handler::scim_handler::list_groups,
+        crate::handler::scim_handler::get_group,
+        crate::handler::scim_handler::create_group,
+        crate::handler::scim_handler::put_group,
+        crate::handler::scim_handler::patch_group,
+        crate::handler::scim_handler::delete_group,
+        // ==================== 第三方登录 / OAuth2 ====================
+        crate::handler::sys_oauth_handler::list_providers,
+        crate::handler::sys_oauth_handler::begin_oauth,
+        crate::handler::sys_oauth_handler::callback,
+        crate::handler::sys_oauth_handler::provider_list,
+        crate::handler::sys_oauth_handler::provider_info,
+        crate::handler::sys_oauth_handler::provider_add,
+        crate::handler::sys_oauth_handler::provider_edit,
+        crate::handler::sys_oauth_handler::provider_delete,
+        crate::handler::sys_oauth_handler::provider_toggle,
+        crate::handler::sys_oauth_handler::my_bindings,
+        crate::handler::sys_oauth_handler::bind_oauth,
+        crate::handler::sys_oauth_handler::unbind_oauth,
+        // ==================== 单点登录 / OIDC Provider ====================
+        crate::handler::sso_handler::discovery,
+        crate::handler::sso_handler::jwks,
+        crate::handler::sso_handler::authorize,
+        crate::handler::sso_handler::token,
+        crate::handler::sso_handler::revoke,
+        crate::handler::sso_handler::introspect,
+        crate::handler::sso_handler::client_logo,
+        crate::handler::sso_handler::userinfo,
+        crate::handler::sso_handler::logout,
+        crate::handler::sso_handler::consent,
+        crate::handler::sso_handler::client_list,
+        crate::handler::sso_handler::client_info,
+        crate::handler::sso_handler::client_add,
+        crate::handler::sso_handler::client_edit,
+        crate::handler::sso_handler::client_delete,
+        crate::handler::sso_handler::client_toggle,
+        crate::handler::sso_handler::client_rotate_secret,
+        crate::handler::sso_handler::client_clear_previous_secret,
+        crate::handler::sso_handler::grant_list,
+        crate::handler::sso_handler::grant_revoke,
+        // ==================== 代码生成（补充）====================
+        crate::handler::tool_gen_handler::list,
+        crate::handler::tool_gen_handler::db_list,
+        crate::handler::tool_gen_handler::get_table,
+        crate::handler::tool_gen_handler::import_table,
+        crate::handler::tool_gen_handler::create_table,
+        crate::handler::tool_gen_handler::update_table,
+        crate::handler::tool_gen_handler::delete_table,
+        crate::handler::tool_gen_handler::preview,
+        crate::handler::tool_gen_handler::gen_code,
+        // ==================== 通知公告（补充）====================
+        crate::handler::sys_notice_handler::list_top,
+        crate::handler::sys_notice_handler::mark_read,
+        crate::handler::sys_notice_handler::mark_read_all,
+        crate::handler::sys_notice_handler::mark_all_unread_read,
+        crate::handler::sys_notice_handler::list_read_users,
+        // ==================== 角色（补充：授权用户管理）====================
+        crate::handler::sys_role_handler::allocated_user_list,
+        crate::handler::sys_role_handler::unallocated_user_list,
+        crate::handler::sys_role_handler::auth_user_cancel,
+        crate::handler::sys_role_handler::auth_user_cancel_all,
+        crate::handler::sys_role_handler::auth_user_select_all,
+        // ==================== 用户（补充）====================
+        crate::handler::sys_user_handler::export,
+        crate::handler::sys_user_handler::change_status,
+        crate::handler::sys_user_handler::reset_pwd,
+        crate::handler::sys_user_handler::update_profile_pwd,
+        crate::handler::sys_user_handler::get_profile,
+        crate::handler::sys_user_handler::update_profile,
+        crate::handler::sys_user_handler::get_roles_for_user_form,
+        crate::handler::sys_user_handler::auth_role,
+        crate::handler::sys_user_handler::dept_tree_select,
+        crate::handler::sys_user_handler::auth_role_get,
+        crate::handler::sys_user_handler::avatar_upload,
+        // ==================== 字典（补充）====================
+        crate::handler::sys_dict_handler::dict_data_export,
     ),
     components(
         schemas(
@@ -347,6 +456,9 @@ struct SwaggerAssets;
             crate::service::sys_user_service::UserVo,
             crate::service::sys_role_service::RoleVo,
             crate::service::sys_job_service::JobVo,
+            // WebHook 回调配置出参 VO（脱敏：不含 secret 原文，仅 hasSecret）
+            crate::service::sys_web_hook_service::WebHookVo,
+            crate::service::sys_web_hook_service::DeliveryResult,
             // 审计合规报告
             crate::service::sys_oper_log_service::AuditStatsVo,
             crate::service::sys_oper_log_service::AuditSummary,
@@ -432,6 +544,14 @@ struct SwaggerAssets;
         (name = "tool-gen", description = "代码生成"),
         (name = "pat", description = "个人访问令牌（PAT）"),
         (name = "system-tenant-domain", description = "租户域名管理（多租户 Phase 3 域名链路）"),
+        (name = "monitor-health", description = "健康检查与指标"),
+        (name = "monitor-log", description = "实时日志监控"),
+        (name = "tool-http-debug", description = "在线 HTTP 调试器"),
+        (name = "system-file", description = "文件管理"),
+        (name = "ws", description = "WebSocket 实时通知"),
+        (name = "scim", description = "SCIM 2.0 用户/组同步"),
+        (name = "oauth", description = "第三方登录 / OAuth2"),
+        (name = "sso", description = "单点登录 / OIDC Provider"),
     ),
 )]
 pub struct ApiDoc;
@@ -628,3 +748,89 @@ const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
     </script>
 </body>
 </html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::ApiDoc;
+    use utoipa::OpenApi;
+    use utoipa::openapi::PathItem;
+
+    /// PathItem 上是否存在至少一个 HTTP 操作（get/put/post/delete/patch/head/options/trace）
+    fn has_operation(item: &PathItem) -> bool {
+        item.get.is_some()
+            || item.put.is_some()
+            || item.post.is_some()
+            || item.delete.is_some()
+            || item.patch.is_some()
+            || item.head.is_some()
+            || item.options.is_some()
+            || item.trace.is_some()
+    }
+
+    /// 可证伪证据：本次补齐 `#[utoipa::path]` 的路由必须真实出现在 `ApiDoc::openapi()` 的
+    /// `paths` 中，且每条路径至少登记了一个 HTTP 操作。
+    ///
+    /// 路径取自 `src/router/**` 的真实注册（非按 handler 名臆测），覆盖每个本次改动的文件至少 1 条。
+    #[test]
+    fn registered_paths_contain_operations() {
+        let doc = ApiDoc::openapi();
+        let expected = [
+            // sys_http_debug_handler
+            "/tool/http-debug/execute",
+            // health
+            "/health",
+            "/metrics",
+            // monitor_log_handler
+            "/monitor/log/files",
+            "/monitor/log/tail",
+            // sys_user_pref_handler
+            "/system/profile/pref",
+            // ws_handler
+            "/ws",
+            // file_handler
+            "/system/file/list",
+            "/system/file/upload",
+            "/system/file/delete",
+            // totp_handler
+            "/system/user/totp/setup",
+            "/system/user/totp/status",
+            // scim_handler
+            "/scim/v2/Users",
+            "/scim/v2/Groups",
+            // sys_oauth_handler
+            "/oauth2/providers",
+            "/oauth2/authorize",
+            "/system/oauth/provider/list",
+            // sso_handler
+            "/.well-known/openid-configuration",
+            "/sso/authorize",
+            "/sso/token",
+            "/system/oauth/client/list",
+            // tool_gen_handler
+            "/tool/gen/list",
+            "/tool/gen/{tableId}",
+            // sys_notice_handler
+            "/system/notice/listTop",
+            "/system/notice/markRead",
+            // sys_role_handler
+            "/system/role/authUser/allocatedList",
+            "/system/role/authUser/cancel",
+            // sys_user_handler
+            "/system/user/export",
+            "/system/user/profile",
+            // auth_handler
+            "/getRouters",
+            "/register",
+            // sys_dict_handler
+            "/system/dict/data/export",
+        ];
+        for path in expected {
+            let item = doc
+                .paths
+                .paths
+                .get(path)
+                .unwrap_or_else(|| panic!("OpenAPI 文档缺少路径: {path}"));
+            assert!(has_operation(item), "路径 {path} 未登记任何 HTTP 操作");
+        }
+    }
+}

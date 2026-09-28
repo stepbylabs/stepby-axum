@@ -1771,15 +1771,17 @@ impl SysFlowService {
             // 避免多实例同时提醒（TTL = remind_interval_secs）。
             if task.last_reminded_at.is_none() {
                 let key = format!("flow_remind:{}", task.task_id);
-                let acquired: Option<String> = redis::cmd("SET")
-                    .arg(&key)
-                    .arg("1")
-                    .arg("NX")
-                    .arg("EX")
-                    .arg(interval)
-                    .query_async(redis)
-                    .await
-                    .unwrap_or(None);
+                let acquired: Option<String> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SET")
+                        .arg(&key)
+                        .arg("1")
+                        .arg("NX")
+                        .arg("EX")
+                        .arg(interval)
+                        .query_async(redis),
+                )
+                .await
+                .unwrap_or(None);
                 if acquired.is_none() {
                     outcome.skipped += 1;
                     continue;
@@ -1824,15 +1826,17 @@ impl SysFlowService {
                 {
                     // 长 TTL 去重（近周级）：Redis 故障/清空时最多重复一次升级提醒
                     let key = format!("flow_escalate:{}", task.task_id);
-                    let acquired: Option<String> = redis::cmd("SET")
-                        .arg(&key)
-                        .arg("1")
-                        .arg("NX")
-                        .arg("EX")
-                        .arg(ESCALATE_DEDUP_TTL_SECS)
-                        .query_async(redis)
-                        .await
-                        .unwrap_or(None);
+                    let acquired: Option<String> = crate::utils::redis::cmd_timeout(
+                        redis::cmd("SET")
+                            .arg(&key)
+                            .arg("1")
+                            .arg("NX")
+                            .arg("EX")
+                            .arg(ESCALATE_DEDUP_TTL_SECS)
+                            .query_async(redis),
+                    )
+                    .await
+                    .unwrap_or(None);
                     if acquired.is_some() {
                         let title = task.title.clone().unwrap_or_default();
                         self.send_flow_audit(target, "flow_timeout", &title).await;

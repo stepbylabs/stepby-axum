@@ -196,10 +196,10 @@ impl SysMenuService {
     pub async fn invalidate_perm_cache(&self, user_id: i64) {
         let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
         let mut conn = self.redis.clone();
-        if let Err(e) = redis::cmd("DEL")
-            .arg(&key)
-            .query_async::<()>(&mut conn)
-            .await
+        if let Err(e) = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn),
+        )
+        .await
         {
             tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
         }
@@ -213,14 +213,16 @@ impl SysMenuService {
         let pattern = format!("{}*", PERM_CACHE_PREFIX);
         let mut cursor: u64 = 0;
         loop {
-            let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut conn)
-                .await;
+            let scan_result: Result<(u64, Vec<String>), _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut conn),
+            )
+            .await;
             match scan_result {
                 Ok((next_cursor, keys)) => {
                     if !keys.is_empty() {
@@ -228,7 +230,10 @@ impl SysMenuService {
                         for key in &keys {
                             pipe.cmd("DEL").arg(key);
                         }
-                        let _ = pipe.query_async::<Vec<i64>>(&mut conn).await;
+                        let _ = crate::utils::redis::cmd_timeout(
+                            pipe.query_async::<Vec<i64>>(&mut conn),
+                        )
+                        .await;
                     }
                     if next_cursor == 0 {
                         break;
@@ -709,12 +714,11 @@ impl SysMenuService {
         let mut conn = self.redis.clone();
 
         // 1. 尝试从 Redis 读取缓存
-        let cached: Option<String> = redis::cmd("GET")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await
-            .ok()
-            .flatten();
+        let cached: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&key).query_async(&mut conn))
+                .await
+                .ok()
+                .flatten();
 
         if let Some(json_str) = cached {
             // 空值标记：用户无角色，返回空列表（防穿透）
@@ -744,12 +748,12 @@ impl SysMenuService {
             let _guard = inflight_lock.lock().await;
 
             // double-check：持有锁后再次查缓存，可能已被前一个持锁请求填充
-            let cached: Option<String> = redis::cmd("GET")
-                .arg(&key)
-                .query_async(&mut conn)
-                .await
-                .ok()
-                .flatten();
+            let cached: Option<String> = crate::utils::redis::cmd_timeout(
+                redis::cmd("GET").arg(&key).query_async(&mut conn),
+            )
+            .await
+            .ok()
+            .flatten();
             if let Some(json_str) = cached {
                 if json_str == PERM_NULL_MARKER {
                     return Ok((vec![], vec![]));
@@ -764,12 +768,14 @@ impl SysMenuService {
 
             if roles.is_empty() {
                 // 写入空值标记（防穿透）
-                if let Err(e) = redis::cmd("SETEX")
-                    .arg(&key)
-                    .arg(PERM_NULL_TTL)
-                    .arg(PERM_NULL_MARKER)
-                    .query_async::<()>(&mut conn)
-                    .await
+                if let Err(e) = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SETEX")
+                        .arg(&key)
+                        .arg(PERM_NULL_TTL)
+                        .arg(PERM_NULL_MARKER)
+                        .query_async::<()>(&mut conn),
+                )
+                .await
                 {
                     tracing::warn!("写入权限空值缓存 {} 失败: {}", key, e);
                 }
@@ -806,12 +812,14 @@ impl SysMenuService {
                 tracing::warn!("序列化权限缓存失败，跳过缓存写入: {}", e);
                 PERM_NULL_MARKER.to_string()
             });
-            if let Err(e) = redis::cmd("SETEX")
-                .arg(&key)
-                .arg(PERM_CACHE_TTL)
-                .arg(json)
-                .query_async::<()>(&mut conn)
-                .await
+            if let Err(e) = crate::utils::redis::cmd_timeout(
+                redis::cmd("SETEX")
+                    .arg(&key)
+                    .arg(PERM_CACHE_TTL)
+                    .arg(json)
+                    .query_async::<()>(&mut conn),
+            )
+            .await
             {
                 tracing::warn!("写入权限缓存 {} 失败: {}", key, e);
             }

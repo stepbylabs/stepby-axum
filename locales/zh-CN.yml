@@ -182,6 +182,8 @@ error:
     operator_id_parse_failed: 操作人用户 ID 解析失败
     id_empty: 用户 ID 不能为空
     email_invalid: 邮箱格式不正确
+    sex_invalid: 性别取值非法（仅允许 0=男 / 1=女 / 2=未知）
+    status_invalid: 用户状态取值非法（仅允许 0=正常 / 1=停用）
     import_login_required: 登录名称不能为空
     import_login_length: 登录名称长度需为 2-30 个字符
     import_login_format: 登录名称仅允许字母、数字、下划线

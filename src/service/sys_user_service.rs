@@ -42,6 +42,47 @@ use crate::utils::password::{
     encrypt_password, validate_password_complexity, verify_password_with_upgrade_hint,
 };
 
+// ==================== 可选枚举字段归一化（R6-VAL-16 / R6-VAL-17） ====================
+
+/// 归一化 + 校验用户「性别」：`None` / 空串 / 纯空白 ⇒ `None`（视为"未提供"）；
+/// 仅允许 `"0"`(男) / `"1"`(女) / `"2"`(未知)。
+///
+/// # 为什么在 Service 层收口
+///
+/// `sex` 在 DTO 上是 `#[garde(skip)]` 的**自由字符串**，历史实现把 `dto.sex` 原样 `Set(...)`
+/// 写库，导致两个真实问题（R6-VAL-16）：
+/// 1. **枚举不受约束**：`"9"` / `"male"` 等非法值可直接落库，后续按 `sex='0'/'1'` 统计或
+///    前端映射时口径分裂；
+/// 2. **空串与 NULL 混用**：`""` 与 `NULL` 是两种"未设置"表示，任何 `WHERE sex IS NULL`
+///    之类的判断都会漏掉一半数据。
+///
+/// 写入口不止一处（管理面表单 `add_user`/`edit_user`、个人中心 `update_profile`），
+/// 且项目分层约定「参数校验归 Service 层」，故在此统一收口，保证**任何入口**都无法绕过。
+fn normalize_sex(value: Option<String>) -> Result<Option<String>, ServiceError> {
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(v) if matches!(v, "0" | "1" | "2") => Ok(Some(v.to_string())),
+        Some(_) => Err(ServiceError::bad_request(&crate::tr!(
+            "error.user.sex_invalid"
+        ))),
+    }
+}
+
+/// 归一化 + 校验用户「状态」：`None` / 空串 / 纯空白 ⇒ `None`（视为"未提供"）；
+/// 仅允许 `"0"`(正常) / `"1"`(停用)。
+///
+/// 与 [`normalize_sex`] 同源缺陷（R6-VAL-17）：`status` 亦为 `#[garde(skip)]` 自由字符串。
+/// 注意 `None` 的语义按调用点区分——新增时回落默认启用态，编辑时表示"不修改"。
+fn normalize_user_status(value: Option<String>) -> Result<Option<String>, ServiceError> {
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(v) if matches!(v, "0" | "1") => Ok(Some(v.to_string())),
+        Some(_) => Err(ServiceError::bad_request(&crate::tr!(
+            "error.user.status_invalid"
+        ))),
+    }
+}
+
 // ==================== DTO 定义 ====================
 
 /// 新增用户 DTO
@@ -152,7 +193,7 @@ pub struct ImportResultVo {
 }
 
 /// 管理员重置密码 DTO
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserPwdResetDto {
     #[garde(skip)]
@@ -175,7 +216,7 @@ pub struct UserPwdUpdateDto {
 ///
 /// 前端 userInfo.vue 提交 { nickName, phonenumber, email, sex }，
 /// 所有字段可选，仅更新提供的字段。
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileUpdateDto {
     #[garde(length(min = 2, max = 30))]
@@ -530,10 +571,10 @@ impl SysUserService {
     pub async fn invalidate_perm_cache(&self, user_id: i64) {
         let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
         let mut conn = self.redis.clone();
-        if let Err(e) = redis::cmd("DEL")
-            .arg(&key)
-            .query_async::<()>(&mut conn)
-            .await
+        if let Err(e) = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn),
+        )
+        .await
         {
             tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
         }
@@ -1019,6 +1060,9 @@ impl SysUserService {
         // G18：按国家/地区校验手机号（方案 D 多地区化）
         validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
 
+        // R6-VAL-16：性别归一化 + 枚举校验（空串/空白 ⇒ 视为未提供，不修改）
+        let normalized_sex = normalize_sex(dto.sex.clone())?;
+
         let existing = self
             .user_repo
             .base()
@@ -1047,8 +1091,7 @@ impl SysUserService {
             .country_code
             .as_deref()
             .is_none_or(|v| existing.country_code.as_deref() == Some(v));
-        let sex_same = dto
-            .sex
+        let sex_same = normalized_sex
             .as_deref()
             .is_none_or(|v| existing.sex.as_deref() == Some(v));
         if nick_same && email_same && phone_same && country_same && sex_same {
@@ -1069,8 +1112,8 @@ impl SysUserService {
         if let Some(ref cc) = dto.country_code {
             am.country_code = Set(Some(cc.clone()));
         }
-        if let Some(ref sex) = dto.sex {
-            am.sex = Set(Some(sex.clone()));
+        if let Some(sex) = normalized_sex {
+            am.sex = Set(Some(sex));
         }
         am.update_by = Set(Some(user_id.to_string()));
         am.update_time = Set(Some(now));
@@ -1300,6 +1343,11 @@ impl SysUserService {
         // G18：按国家/地区校验手机号（方案 D 多地区化）
         validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
 
+        // R6-VAL-16/17：性别 / 状态（DTO 上为 garde(skip) 自由字符串）必须归一化 + 枚举校验，
+        // 否则 `"9"` / `""` 会直接落库（空串与 NULL 混用、非法枚举破坏后续口径）。
+        let normalized_sex = normalize_sex(dto.sex.clone())?;
+        let normalized_status = normalize_user_status(dto.status.clone())?;
+
         // R19-1.3：密码复杂度校验（拦截纯数字/纯字母等弱口令）
         validate_password_complexity(&dto.password).map_err(|e| ServiceError::bad_request(&e))?;
 
@@ -1352,9 +1400,10 @@ impl SysUserService {
                 user_am.email = Set(dto.email.clone());
                 user_am.phonenumber = Set(dto.phonenumber.clone());
                 user_am.country_code = Set(dto.country_code.clone());
-                user_am.sex = Set(dto.sex.clone());
+                // R6-VAL-16/17：已归一化 + 枚举校验（见函数头部 helper）
+                user_am.sex = Set(normalized_sex.clone());
                 user_am.password = Set(Some(hashed.clone()));
-                user_am.status = Set(dto.status.clone().or_else(|| Some("0".to_string())));
+                user_am.status = Set(normalized_status.clone().or_else(|| Some("0".to_string())));
                 user_am.del_flag = Set(Some("0".to_string()));
                 user_am.create_by = Set(Some(operator.to_string()));
                 user_am.create_time = Set(Some(now));
@@ -1455,6 +1504,10 @@ impl SysUserService {
         // G18：按国家/地区校验手机号（方案 D 多地区化）
         validate_phone_by_region(&dto.phonenumber, &dto.country_code)?;
 
+        // R6-VAL-16/17：性别 / 状态归一化 + 枚举校验（`None` = 不修改，空串视为未提供）
+        let normalized_sex = normalize_sex(dto.sex.clone())?;
+        let normalized_status = normalize_user_status(dto.status.clone())?;
+
         // 查询用户是否存在
         let existing = self
             .user_repo
@@ -1546,11 +1599,11 @@ impl SysUserService {
                 if let Some(ref cc) = dto.country_code {
                     am.country_code = Set(Some(cc.clone()));
                 }
-                if let Some(ref sex) = dto.sex {
-                    am.sex = Set(Some(sex.clone()));
+                if let Some(sex) = normalized_sex.clone() {
+                    am.sex = Set(Some(sex));
                 }
-                if let Some(ref status) = dto.status {
-                    am.status = Set(Some(status.clone()));
+                if let Some(status) = normalized_status.clone() {
+                    am.status = Set(Some(status));
                 }
                 if let Some(ref remark) = dto.remark {
                     am.remark = Set(Some(remark.clone()));
@@ -1955,6 +2008,14 @@ impl SysUserService {
         operator_user_id: i64,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        // R6-VAL-17：状态必须为已登记枚举（"0"=正常 / "1"=停用）。
+        // 该接口的 status 直接来自请求体字符串，此前**原样写库**——非法值（如 "9"）会让
+        // 「按 status 判定账号可用性」的既有口径失效（登录、列表过滤、统计各判一套）。
+        // 注意：本接口是「显式设置状态」，故空串同样属非法（不能像表单那样当作"未提供"）。
+        let status = normalize_user_status(Some(status.to_string()))?
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.user.status_invalid")))?;
+        let status = status.as_str();
+
         // 超管保护
         if user_id == SUPER_ADMIN_USER_ID && status == "1" {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -2540,6 +2601,80 @@ impl SysUserService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- R6-VAL-16 / R6-VAL-17：性别 / 状态归一化 + 枚举校验 ----------
+    //
+    // 可证伪性：修复前 `dto.sex` / `dto.status` 是 `#[garde(skip)]` 自由字符串并被**原样写库**，
+    // 故下列"非法值必须 400"的断言在旧实现下不可能通过（旧实现没有这条校验路径）。
+
+    #[test]
+    fn test_normalize_sex_accepts_registered_enum_only() {
+        for ok in ["0", "1", "2"] {
+            assert_eq!(
+                normalize_sex(Some(ok.to_string())).expect("已登记取值应放行"),
+                Some(ok.to_string())
+            );
+        }
+        // 空 / 纯空白 / None ⇒ 视为"未提供"（不写库）
+        assert_eq!(normalize_sex(None).unwrap(), None);
+        assert_eq!(normalize_sex(Some(String::new())).unwrap(), None);
+        assert_eq!(normalize_sex(Some("   ".to_string())).unwrap(), None);
+        // 两端空白应被 trim 后判定（" 1 " ⇒ Some("1")）
+        assert_eq!(
+            normalize_sex(Some(" 1 ".to_string())).unwrap(),
+            Some("1".to_string())
+        );
+        // 非法取值一律 400
+        for bad in ["9", "male", "M", "男", "-1", "0.0"] {
+            let err = normalize_sex(Some(bad.to_string()))
+                .expect_err(&format!("{bad:?} 非法取值必须被拒绝"));
+            assert_eq!(err.code, 400, "{bad:?} 应返回 400");
+        }
+    }
+
+    /// R6-VAL-13 复核：`nick_name` 是 `Option<String>` 且带 `#[garde(length(min = 2, max = 30))]`，
+    /// 而 garde 对 `Option<T>` 的规则作用于**内层值**（`impl<T: Validate> Validate for Option<T>` 委托内层）
+    /// ⇒ `Some("")` 会被 `length(min = 2)` 拦下（400），**并不会**"空串直接入库"。
+    /// 本用例把该语义固化为可证伪断言（若未来有人误把规则改成只校验外层，这条会变红）。
+    #[test]
+    fn test_user_dto_rejects_empty_nick_name() {
+        let dto = UserAddDto {
+            dept_id: None,
+            user_name: "it_nick_check".to_string(),
+            nick_name: String::new(),
+            email: None,
+            phonenumber: None,
+            country_code: None,
+            sex: Some("0".to_string()),
+            password: "Abcd1234".to_string(),
+            status: Some("0".to_string()),
+            role_ids: None,
+            post_ids: None,
+            dept_ids: None,
+            remark: None,
+        };
+        assert!(
+            crate::common::i18n::validate(&dto).is_err(),
+            "nick_name 传空串必须被 garde 拒绝（Option 规则作用于内层值）"
+        );
+    }
+
+    #[test]
+    fn test_normalize_user_status_accepts_registered_enum_only() {
+        for ok in ["0", "1"] {
+            assert_eq!(
+                normalize_user_status(Some(ok.to_string())).expect("已登记取值应放行"),
+                Some(ok.to_string())
+            );
+        }
+        assert_eq!(normalize_user_status(None).unwrap(), None);
+        assert_eq!(normalize_user_status(Some("".to_string())).unwrap(), None);
+        for bad in ["2", "9", "enabled", "正常", "-1"] {
+            let err = normalize_user_status(Some(bad.to_string()))
+                .expect_err(&format!("{bad:?} 非法取值必须被拒绝"));
+            assert_eq!(err.code, 400, "{bad:?} 应返回 400");
+        }
+    }
 
     fn row(
         login: &str,

@@ -207,6 +207,17 @@ pub async fn login(
 /// - business_type: 1（新增，POST 创建用户）
 /// - operator_type: 0（匿名注册，非后台用户操作）
 /// - 失败时仍记录（status=1），便于追踪注册刷接口/暴力注册行为
+#[utoipa::path(
+    post,
+    path = "/register",
+    request_body = RegisterDto,
+    responses(
+        (status = 200, description = "注册成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误、验证码失效或用户名已存在"),
+    ),
+    security(()),
+    tag = "auth"
+)]
 pub async fn register(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -375,6 +386,15 @@ pub async fn get_info(
 
 /// GET /getRouters
 /// 获取用户路由树
+#[utoipa::path(
+    get,
+    path = "/getRouters",
+    responses(
+        (status = 200, description = "用户路由树", body = AjaxResult<Vec<RouterVo>>),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "auth"
+)]
 pub async fn get_routers(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -394,6 +414,17 @@ pub async fn get_routers(
 
 /// POST /unlockscreen
 /// 锁屏解锁（需登录态，校验当前用户密码）
+#[utoipa::path(
+    post,
+    path = "/unlockscreen",
+    request_body = UnlockScreenDto,
+    responses(
+        (status = 200, description = "解锁成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "密码错误"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "auth"
+)]
 pub async fn unlock_screen(
     State(state): State<Arc<AppState>>,
     operator: Operator,

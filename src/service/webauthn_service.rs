@@ -603,23 +603,24 @@ impl PasskeyStore for WebauthnService {
             .map_err(|e| PasskeyError::InternalError(format!("state serialize failed: {e}")))?;
         let key = format!("{STATE_KEY_PREFIX}{id}");
         let mut conn = self.redis.clone();
-        redis::cmd("SETEX")
-            .arg(&key)
-            .arg(ttl_secs)
-            .arg(payload)
-            .query_async::<()>(&mut conn)
-            .await
-            .map_err(|e| PasskeyError::DatabaseError(format!("redis setex failed: {e}")))
+        crate::utils::redis::cmd_timeout(
+            redis::cmd("SETEX")
+                .arg(&key)
+                .arg(ttl_secs)
+                .arg(payload)
+                .query_async::<()>(&mut conn),
+        )
+        .await
+        .map_err(|e| PasskeyError::DatabaseError(format!("redis setex failed: {e}")))
     }
 
     async fn get_state(&self, id: &str) -> PasskeyResult<Option<PasskeyState>> {
         let key = format!("{STATE_KEY_PREFIX}{id}");
         let mut conn = self.redis.clone();
-        let raw: Option<String> = redis::cmd("GET")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| PasskeyError::DatabaseError(format!("redis get failed: {e}")))?;
+        let raw: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&key).query_async(&mut conn))
+                .await
+                .map_err(|e| PasskeyError::DatabaseError(format!("redis get failed: {e}")))?;
         let Some(raw) = raw else {
             return Ok(None);
         };
@@ -635,9 +636,7 @@ impl PasskeyStore for WebauthnService {
     async fn delete_state(&self, id: &str) -> PasskeyResult<()> {
         let key = format!("{STATE_KEY_PREFIX}{id}");
         let mut conn = self.redis.clone();
-        redis::cmd("DEL")
-            .arg(&key)
-            .query_async::<()>(&mut conn)
+        crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn))
             .await
             .map_err(|e| PasskeyError::DatabaseError(format!("redis del failed: {e}")))
     }

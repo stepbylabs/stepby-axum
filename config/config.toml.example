@@ -401,3 +401,20 @@ state_ttl_secs = 300     # 挑战 / 会话临时态 TTL（秒，至少 1）
 outbound_breaker = "off"  # off（默认，= 现状）| on
 failure_threshold = 5     # 连续失败达该次数 ⇒ 打开熔断（夹在 1..=1000）
 cooldown_secs = 60        # 打开后的冷却秒数，到期放行一次探测（夹在 1..=86400）
+
+# ==================== 全局限流实现 ====================
+# 限流中间件（/login、/register、/captchaImage 等公开认证端点）的令牌桶承载方式。
+#
+# mode = "local"（**默认 = 现状**）：进程内令牌桶（Mutex<HashMap>），单实例精确、无 Redis 往返。
+# mode = "redis"：Redis 分布式令牌桶（Lua 原子执行），**多实例共享同一配额**——
+#   多实例部署（K8s 多副本 / 多机）**必须**切到 redis，否则各实例独立计数，
+#   攻击者轮询不同实例即可把配额放大 N 倍。
+#
+# ⚠️ redis 档下 Redis 命令失败一律 **fail-closed 返回 503**（限流器不可用却放行 = 攻击者获准），
+#    与限流配置查询失败的既有口径一致。单实例部署若无特殊需要，保持 local 即可。
+# ⚠️ 非法 mode 取值回落 local 并打 WARN（fail-safe，不拒绝启动）。
+# ⚠️ 也可用环境变量 RATE_LIMIT_MODE=local|redis 覆盖（容器场景无需改配置文件）。
+[rate_limit]
+mode = "local"           # local（默认，= 现状）| redis
+key_ttl_secs = 300       # Redis 桶键 TTL（秒，夹在 60..=86400）；
+                         # 实际生效值再与「桶自然补满秒数 × 2」取大，避免提前过期导致限流被放宽

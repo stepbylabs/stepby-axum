@@ -6,6 +6,7 @@
 use chrono::NaiveDateTime;
 use sea_orm::*;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::entity::sys_notice_read::{Column, Entity as SysNoticeRead, Model};
 use crate::repository::base::BaseRepository;
@@ -17,7 +18,7 @@ pub struct SysNoticeReadRepository {
 }
 
 /// 已读用户视图对象（联表查询结果）
-#[derive(Debug, Clone, FromQueryResult, Serialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeReadUserVo {
     pub read_id: i64,

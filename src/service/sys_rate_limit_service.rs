@@ -160,14 +160,16 @@ impl SysRateLimitService {
         let pattern = format!("{}*", RATE_LIMIT_CACHE_PREFIX);
         let mut cursor: u64 = 0;
         loop {
-            let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut conn)
-                .await;
+            let scan_result: Result<(u64, Vec<String>), _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut conn),
+            )
+            .await;
             let (next_cursor, keys) = match scan_result {
                 Ok(result) => result,
                 Err(e) => {
@@ -180,7 +182,9 @@ impl SysRateLimitService {
                 for key in &keys {
                     pipe.cmd("DEL").arg(key);
                 }
-                if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
+                if let Err(e) =
+                    crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
+                {
                     tracing::warn!("批量删除限流缓存失败: {}", e);
                 }
             }

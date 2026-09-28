@@ -143,7 +143,7 @@ pub struct DataScopeDto {
 }
 
 /// 角色已授权用户分页查询 DTO
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthUserQueryDto {
     #[serde(default = "default_page_num")]
@@ -167,7 +167,7 @@ impl From<&AuthUserQueryDto> for PageDomain {
 }
 
 /// 取消用户授权 DTO（单条）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelAuthUserDto {
     pub user_id: i64,
@@ -175,7 +175,7 @@ pub struct CancelAuthUserDto {
 }
 
 /// 批量授权用户查询参数（通过 URL query 传递）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthUserSelectDto {
     pub role_id: i64,
@@ -291,10 +291,10 @@ impl SysRoleService {
     pub async fn invalidate_perm_cache(&self, user_id: i64) {
         let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
         let mut conn = self.redis.clone();
-        if let Err(e) = redis::cmd("DEL")
-            .arg(&key)
-            .query_async::<()>(&mut conn)
-            .await
+        if let Err(e) = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn),
+        )
+        .await
         {
             tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
         }
@@ -308,14 +308,16 @@ impl SysRoleService {
         let pattern = format!("{}*", PERM_CACHE_PREFIX);
         let mut cursor: u64 = 0;
         loop {
-            let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut conn)
-                .await;
+            let scan_result: Result<(u64, Vec<String>), _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut conn),
+            )
+            .await;
             match scan_result {
                 Ok((next_cursor, keys)) => {
                     if !keys.is_empty() {
@@ -323,7 +325,10 @@ impl SysRoleService {
                         for key in &keys {
                             pipe.cmd("DEL").arg(key);
                         }
-                        let _ = pipe.query_async::<Vec<i64>>(&mut conn).await;
+                        let _ = crate::utils::redis::cmd_timeout(
+                            pipe.query_async::<Vec<i64>>(&mut conn),
+                        )
+                        .await;
                     }
                     if next_cursor == 0 {
                         break;

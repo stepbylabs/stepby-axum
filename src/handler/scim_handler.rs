@@ -75,6 +75,17 @@ fn base_url_of(headers: &HeaderMap) -> String {
 }
 
 /// GET /scim/v2/Users?startIndex=&count=&filter=
+#[utoipa::path(
+    get,
+    path = "/scim/v2/Users",
+    responses(
+        (status = 200, description = "SCIM ListResponse（用户列表）", body = serde_json::Value),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -101,6 +112,18 @@ pub async fn list_users(
 }
 
 /// GET /scim/v2/Users/{id}
+#[utoipa::path(
+    get,
+    path = "/scim/v2/Users/{id}",
+    params(("id" = i64, Path, description = "用户 ID")),
+    responses(
+        (status = 200, description = "SCIM 用户资源", body = serde_json::Value),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或用户不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -117,6 +140,19 @@ pub async fn get_user(
 }
 
 /// POST /scim/v2/Users
+#[utoipa::path(
+    post,
+    path = "/scim/v2/Users",
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "创建成功（SCIM 用户资源）", body = serde_json::Value),
+        (status = 400, description = "SCIM 请求体非法"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -150,6 +186,20 @@ pub async fn create_user(
 }
 
 /// PUT /scim/v2/Users/{id}
+#[utoipa::path(
+    put,
+    path = "/scim/v2/Users/{id}",
+    params(("id" = i64, Path, description = "用户 ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "更新成功（SCIM 用户资源）", body = serde_json::Value),
+        (status = 400, description = "SCIM 请求体非法"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或用户不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn put_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -167,6 +217,20 @@ pub async fn put_user(
 }
 
 /// PATCH /scim/v2/Users/{id}
+#[utoipa::path(
+    patch,
+    path = "/scim/v2/Users/{id}",
+    params(("id" = i64, Path, description = "用户 ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "更新成功（SCIM 用户资源）", body = serde_json::Value),
+        (status = 400, description = "SCIM 请求体非法"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或用户不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn patch_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -186,6 +250,18 @@ pub async fn patch_user(
 /// DELETE /scim/v2/Users/{id}（deprovision = 停用，204）
 /// v5-D12 Group：deprovision 联动——清理组成员记录 + 撤 scim 来源授权/兼职
 /// （admin 手授保留；见 scim_group_service::cleanup_user_membership）。
+#[utoipa::path(
+    delete,
+    path = "/scim/v2/Users/{id}",
+    params(("id" = i64, Path, description = "用户 ID")),
+    responses(
+        (status = 204, description = "停用成功（无响应体）"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或用户不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -225,6 +301,17 @@ pub async fn delete_user(
 // ==================== Groups（v5-D12 Group：RFC 7644 §4.2 真实现） ====================
 
 /// GET /scim/v2/Groups?startIndex=&count=&filter=
+#[utoipa::path(
+    get,
+    path = "/scim/v2/Groups",
+    responses(
+        (status = 200, description = "SCIM ListResponse（组列表）", body = serde_json::Value),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn list_groups(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -251,6 +338,18 @@ pub async fn list_groups(
 }
 
 /// GET /scim/v2/Groups/{id}
+#[utoipa::path(
+    get,
+    path = "/scim/v2/Groups/{id}",
+    params(("id" = i64, Path, description = "组 ID")),
+    responses(
+        (status = 200, description = "SCIM 组资源", body = serde_json::Value),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或组不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn get_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -267,6 +366,19 @@ pub async fn get_group(
 }
 
 /// POST /scim/v2/Groups（provision：建组 + 成员 + role 组联动授权）
+#[utoipa::path(
+    post,
+    path = "/scim/v2/Groups",
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "创建成功（SCIM 组资源）", body = serde_json::Value),
+        (status = 400, description = "SCIM 请求体非法"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn create_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -299,6 +411,20 @@ pub async fn create_group(
 }
 
 /// PUT /scim/v2/Groups/{id}（displayName + members 全量 diff，幂等）
+#[utoipa::path(
+    put,
+    path = "/scim/v2/Groups/{id}",
+    params(("id" = i64, Path, description = "组 ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "更新成功（SCIM 组资源）", body = serde_json::Value),
+        (status = 400, description = "SCIM 请求体非法"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或组不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn put_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -316,6 +442,20 @@ pub async fn put_group(
 }
 
 /// PATCH /scim/v2/Groups/{id}（add/remove members、replace displayName/members）
+#[utoipa::path(
+    patch,
+    path = "/scim/v2/Groups/{id}",
+    params(("id" = i64, Path, description = "组 ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "更新成功（SCIM 组资源）", body = serde_json::Value),
+        (status = 400, description = "SCIM 请求体非法"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或组不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn patch_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -333,6 +473,18 @@ pub async fn patch_group(
 }
 
 /// DELETE /scim/v2/Groups/{id}（软删 + 撤仅本组 source 的授权/兼职，204）
+#[utoipa::path(
+    delete,
+    path = "/scim/v2/Groups/{id}",
+    params(("id" = i64, Path, description = "组 ID")),
+    responses(
+        (status = 204, description = "删除成功（无响应体）"),
+        (status = 401, description = "SCIM Bearer 凭据无效"),
+        (status = 404, description = "SCIM 未启用或组不存在"),
+    ),
+    security(()),
+    tag = "scim"
+)]
 pub async fn delete_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

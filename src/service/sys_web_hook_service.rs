@@ -14,9 +14,11 @@ use std::time::{Duration, Instant};
 
 use garde::Validate;
 use sea_orm::{DatabaseConnection, Set};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
 
+use crate::common::datetime;
 use crate::common::error::ServiceError;
 use crate::common::i18n::validate;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
@@ -182,6 +184,80 @@ pub struct DeliveryResult {
     pub log_id: i64,
 }
 
+/// 回调查配置**出参 VO**（脱敏）
+///
+/// 安全约束（为何需要独立 VO）：`secret` 是出站请求的 HMAC 签名密钥，若随
+/// `GET /monitor/webHook/list` / `/{id}` 直出实体，则任何持有
+/// `monitor:webHook:list` 的角色（含租户管理员）都能读到密钥，进而伪造第三方
+/// 回调签名。故出参**只暴露** `hasSecret`（是否已配置），永不回传密钥原文。
+/// 同时不暴露 `tenantId` / `delFlag`：二者为内部字段，前端无任何语义。
+///
+/// `secret` 的写入语义（与 i18n `webHook.form.secretTip` 一致）：
+/// - 新增：传非空则设置，空/缺省则未配置；
+/// - 修改：传非空则覆盖，**空/缺省则保持原值**。
+#[derive(Debug, Clone, Serialize, ToSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "WebHookVo",
+    export_to = "WebHookVo.ts",
+    rename_all = "camelCase"
+)]
+#[schema(as = WebHookVo)]
+pub struct WebHookVo {
+    pub id: i64,
+    /// 回调名称
+    pub hook_name: String,
+    /// 订阅的事件类型（逗号分隔；空串匹配全部）
+    pub event_types: String,
+    /// 出站目标 URL
+    pub target_url: String,
+    /// 请求体格式：json / form-urlencoded
+    pub content_type: String,
+    /// 超时秒数
+    pub timeout_secs: i32,
+    /// 状态（0=启用 1=停用）
+    pub status: String,
+    pub remark: Option<String>,
+    /// 是否已配置签名密钥（**不回传密钥原文**）
+    pub has_secret: bool,
+    pub create_by: Option<String>,
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub create_time: Option<chrono::NaiveDateTime>,
+    pub update_by: Option<String>,
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub update_time: Option<chrono::NaiveDateTime>,
+}
+
+impl WebHookVo {
+    /// 由实体模型构造脱敏 VO（**丢弃 `secret` 原文**，仅保留 `hasSecret` 布尔）
+    pub fn from_model(m: SysWebHookModel) -> Self {
+        Self {
+            id: m.id,
+            hook_name: m.hook_name,
+            event_types: m.event_types,
+            target_url: m.target_url,
+            content_type: m.content_type,
+            timeout_secs: m.timeout_secs,
+            status: m.status,
+            remark: m.remark,
+            has_secret: m.secret.as_deref().is_some_and(|s| !s.is_empty()),
+            create_by: m.create_by,
+            create_time: m.create_time,
+            update_by: m.update_by,
+            update_time: m.update_time,
+        }
+    }
+}
+
 /// serde 默认值函数：启用态 "0"
 fn default_enabled_status() -> String {
     "0".to_string()
@@ -315,15 +391,18 @@ impl SysWebHookService {
     // ==================== 回调查配置 CRUD ====================
 
     /// 分页查询回调查配置（operator_tid 用于租户过滤：租户管理员仅见本租户）
+    ///
+    /// 出参为**脱敏 VO**（不含签名密钥原文，仅 `hasSecret`）。
     pub async fn list(
         &self,
         query: WebHookQueryDto,
         operator_tid: i64,
-    ) -> Result<(Vec<SysWebHookModel>, u64), ServiceError> {
+    ) -> Result<(Vec<WebHookVo>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
-        self.hook_repo
+        let (rows, total) = self
+            .hook_repo
             .find_page_filtered(
                 offset,
                 limit,
@@ -333,10 +412,21 @@ impl SysWebHookService {
                 crate::common::tenant::tenant_scope(operator_tid),
             )
             .await
-            .map_err(ServiceError::from)
+            .map_err(ServiceError::from)?;
+        Ok((rows.into_iter().map(WebHookVo::from_model).collect(), total))
     }
 
-    /// 根据 id 查询回调查配置详情（跨租户按主键访问 → 403）
+    /// 查询回调查配置**详情**（脱敏 VO；跨租户按主键访问 → 403）
+    pub async fn detail(&self, id: i64, operator_tid: i64) -> Result<WebHookVo, ServiceError> {
+        self.get_by_id(id, operator_tid)
+            .await
+            .map(WebHookVo::from_model)
+    }
+
+    /// 根据 id 查询回调查配置**实体**（内部使用）
+    ///
+    /// 注意：返回体含 `secret` 密文，**严禁直接作为 HTTP 响应体**；对外一律走
+    /// [`Self::detail`] / [`Self::list`] 的脱敏 VO。
     pub async fn get_by_id(
         &self,
         id: i64,
@@ -450,12 +540,16 @@ impl SysWebHookService {
         am.hook_name = Set(dto.hook_name);
         am.event_types = Set(event_types);
         am.target_url = Set(dto.target_url.trim().to_string());
-        // v5-E6：secret 非空才覆盖（留空保持不变）；信封加密（幂等）
-        am.secret = Set(self.seal_secret(
-            dto.secret
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        )?);
+        // secret 语义（与 i18n `webHook.form.secretTip` 一致）：**传非空才覆盖**；
+        // 空/缺省一律保持原值。此处不能用 `Set(None)`——那会把已配置的签名密钥静默清空，
+        // 导致用户「只改 URL」后回调签名能力无声失效（且无任何提示）。
+        if let Some(plain) = dto
+            .secret
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            am.secret = Set(self.seal_secret(Some(plain))?);
+        }
         am.content_type = Set(content_type);
         am.timeout_secs = Set(timeout_secs);
         am.status = Set(status);

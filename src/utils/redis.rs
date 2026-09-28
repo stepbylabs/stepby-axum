@@ -11,6 +11,35 @@
 
 use crate::common::error::ServiceError;
 
+/// 以统一命令超时包裹任意 Redis 异步命令（R8-CONC-013 收口）。
+///
+/// 背景：`db::redis` 只对**建连**与启动期 **PING** 加了超时护栏，而历史上大量
+/// 调用点直接 `redis::cmd(..).query_async(&mut conn).await`。Redis 网络抖动或
+/// 慢命令时这些 await **没有上界**，会把请求（含登录、缓存监控、在线用户列表等
+/// 主链路）挂死，等于把一次 Redis 抖动放大成服务不可用。
+///
+/// 本函数把「超时」统一转换为 `RedisError`，因此调用方**原有的 `map_err` /
+/// 降级分支无需改动**即可获得超时保护（超时走的就是原来的错误路径）。
+///
+/// 用法：
+/// ```ignore
+/// let v: Option<String> = cmd_timeout(redis::cmd("GET").arg(k).query_async(&mut conn)).await?;
+/// ```
+pub async fn cmd_timeout<F, T>(fut: F) -> Result<T, redis::RedisError>
+where
+    F: std::future::Future<Output = Result<T, redis::RedisError>>,
+{
+    let secs = crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(res) => res,
+        Err(_) => Err(redis::RedisError::from((
+            redis::ErrorKind::Io,
+            "redis command timeout",
+            format!("Redis 命令超过 {secs}s 未返回"),
+        ))),
+    }
+}
+
 /// 分批删除（`DEL`）时的单条命令 key 数上限（第九批）。
 ///
 /// 动机：`scan_keys_all` 不截断 ⇒ 命中键数**无上界**，若把全部 key 塞进一条 `DEL`
@@ -74,18 +103,20 @@ async fn scan_keys_inner(
     let mut keys = Vec::new();
     let mut cursor: u64 = 0;
     loop {
-        let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(100)
-            .query_async(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("执行 Redis SCAN 失败: {}", e);
-                ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-            })?;
+        let (next_cursor, batch): (u64, Vec<String>) = cmd_timeout(
+            redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("执行 Redis SCAN 失败: {}", e);
+            ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+        })?;
         keys.extend(batch);
         // P2：结果上限保护（防 `*` 等 pattern 匹配海量 key 导致内存 OOM）
         // 仅对显式传入上限的调用生效；不截断路径（安全吊销）不适用本保护。

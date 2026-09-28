@@ -27,7 +27,7 @@ use sea_orm::DatabaseConnection;
 use sea_orm::Set;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::common::datetime;
 use crate::common::error::ServiceError;
@@ -92,7 +92,7 @@ pub struct SsoClientVo {
 }
 
 /// 客户端分页查询条件
-#[derive(Debug, Clone, Deserialize, ToSchema, TS)]
+#[derive(Debug, Clone, Deserialize, ToSchema, TS, IntoParams)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "SsoClientQueryDto.ts", rename_all = "camelCase")]
 #[schema(as = SsoClientQueryDto)]
@@ -377,7 +377,7 @@ fn consent_ticket_matches(
 
 /// /sso/token 请求参数 —— **OAuth2/OIDC 协议面**（外部 RP 用标准客户端库调用），
 /// 参数名由 RFC 6749 强制固定为 snake_case，不参与 camelCase / ts-rs 转换。
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, ToSchema)]
 pub struct TokenParams {
     /// grant_type：token 端点必填；revoke 端点无此字段（serde default 兼容共用结构）
     #[serde(default)]
@@ -871,13 +871,15 @@ impl SsoService {
         let json = serde_json::to_string(&ticket)
             .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
         let key = format!("{CONSENT_TICKET_KEY_PREFIX}{id}");
-        let _: () = redis::cmd("SETEX")
-            .arg(&key)
-            .arg(config.consent_ticket_ttl())
-            .arg(&json)
-            .query_async(redis)
-            .await
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("SETEX")
+                .arg(&key)
+                .arg(config.consent_ticket_ttl())
+                .arg(&json)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
         Ok(id)
     }
 
@@ -931,11 +933,10 @@ impl SsoService {
                 return Err(invalid());
             }
             let key = format!("{CONSENT_TICKET_KEY_PREFIX}{ticket_id}");
-            let raw: Option<String> = redis::cmd("GET")
-                .arg(&key)
-                .query_async(redis)
-                .await
-                .map_err(|_| invalid())?;
+            let raw: Option<String> =
+                crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&key).query_async(redis))
+                    .await
+                    .map_err(|_| invalid())?;
             let Some(ticket) = raw.and_then(|s| serde_json::from_str::<ConsentTicket>(&s).ok())
             else {
                 return Err(invalid());
@@ -957,7 +958,11 @@ impl SsoService {
             }
             // 校验通过 ⇒ **一次性消费**（批准与拒绝都消费；重放必然失败）。
             // DEL 失败不影响本次结果（票已通过校验），但会记 WARN 供运维发现 Redis 异常。
-            if let Err(e) = redis::cmd("DEL").arg(&key).query_async::<i64>(redis).await {
+            if let Err(e) = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL").arg(&key).query_async::<i64>(redis),
+            )
+            .await
+            {
                 tracing::warn!(error = %e, "同意票据消费失败（Redis DEL）；该票据在 TTL 内可能仍可重放");
             }
         }
@@ -1038,12 +1043,14 @@ impl SsoService {
         let (nick_name, email) = self.lookup_user_profile(user_id).await;
         // v5-E5：TOTP 启用状态快照（Redis totp:enabled:{uid}；fail-open 查询失败视为未启用，
         // 与登录链路 fail-closed 不同——此处仅影响 acr 声明强度，不涉放行决策）
-        let totp_enabled: bool = redis::cmd("EXISTS")
-            .arg(format!("totp:enabled:{}", user_id))
-            .query_async::<i64>(redis)
-            .await
-            .map(|n| n > 0)
-            .unwrap_or(false);
+        let totp_enabled: bool = crate::utils::redis::cmd_timeout(
+            redis::cmd("EXISTS")
+                .arg(format!("totp:enabled:{}", user_id))
+                .query_async::<i64>(redis),
+        )
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false);
         let binding = CodeBinding {
             client_id: client_id.to_string(),
             user_id,
@@ -1064,17 +1071,19 @@ impl SsoService {
         let json = serde_json::to_string(&binding)
             .map_err(|_| ServiceError::internal(&crate::tr!("error.sso.token_failed")))?;
         let key = format!("{}{}", CODE_KEY_PREFIX, code);
-        redis::cmd("SET")
-            .arg(&key)
-            .arg(&json)
-            .arg("EX")
-            .arg(config.code_ttl_secs.max(1))
-            .query_async::<()>(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("SSO 授权码写入 Redis 失败: {}", e);
-                ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-            })?;
+        crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(&key)
+                .arg(&json)
+                .arg("EX")
+                .arg(config.code_ttl_secs.max(1))
+                .query_async::<()>(redis),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("SSO 授权码写入 Redis 失败: {}", e);
+            ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+        })?;
 
         let sep = if redirect_uri.contains('?') { "&" } else { "?" };
         let mut url = format!("{}{}code={}", redirect_uri, sep, url_encode(&code));
@@ -1210,28 +1219,34 @@ impl SsoService {
         let json = serde_json::to_string(&rt_binding)
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
         let rt_key = format!("{}{}", RT_KEY_PREFIX, rt_hash);
-        let _: () = redis::cmd("SET")
-            .arg(&rt_key)
-            .arg(&json)
-            .arg("EX")
-            .arg(rt_ttl)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(&rt_key)
+                .arg(&json)
+                .arg("EX")
+                .arg(rt_ttl)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
         // 登记「用户 → RT」集合（登出/强退/改密全量吊销用），TTL 稍大于 RT TTL
         let user_rt_key = format!("{}{}", USER_RT_KEY_PREFIX, binding.user_id);
-        let _: () = redis::cmd("SADD")
-            .arg(&user_rt_key)
-            .arg(&rt_hash)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
-        let _: () = redis::cmd("EXPIRE")
-            .arg(&user_rt_key)
-            .arg(rt_ttl + 60)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("SADD")
+                .arg(&user_rt_key)
+                .arg(&rt_hash)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("EXPIRE")
+                .arg(&user_rt_key)
+                .arg(rt_ttl + 60)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
         Ok(Some((rt, rt_ttl)))
     }
 
@@ -1257,29 +1272,35 @@ impl SsoService {
         let at_json = serde_json::to_string(&at_binding)
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
         let at_key = format!("{}{}", AT_KEY_PREFIX, binding.access_token_hash);
-        let _: () = redis::cmd("SET")
-            .arg(&at_key)
-            .arg(&at_json)
-            .arg("EX")
-            .arg(at_ttl)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(&at_key)
+                .arg(&at_json)
+                .arg("EX")
+                .arg(at_ttl)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
         // v4-F2：登记「用户 → 已签发 SSO AT」集合（登出/强退/改密全量吊销用）+ 在线可见。
         // 读路径有 EXISTS 悬空自愈（见 revoke_user_sso_tokens），集合 TTL 稍大于 AT TTL。
         let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, binding.user_id);
-        let _: () = redis::cmd("SADD")
-            .arg(&user_at_key)
-            .arg(&binding.access_token_hash)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
-        let _: () = redis::cmd("EXPIRE")
-            .arg(&user_at_key)
-            .arg(at_ttl + 60)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("SADD")
+                .arg(&user_at_key)
+                .arg(&binding.access_token_hash)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("EXPIRE")
+                .arg(&user_at_key)
+                .arg(at_ttl + 60)
+                .query_async(redis),
+        )
+        .await
+        .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
         // F2：写 online:{hash}（source=sso）→ 在线用户列表可见、管理员可强退
         let online = crate::utils::crypto::OnlineSession {
             user_id: binding.user_id,
@@ -1297,15 +1318,15 @@ impl SsoService {
         };
         if let Ok(json) = serde_json::to_string(&online) {
             let online_key = format!("online:{}", binding.access_token_hash);
-            let _: () = redis::cmd("SETEX")
-                .arg(&online_key)
-                .arg(at_ttl)
-                .arg(&json)
-                .query_async(redis)
-                .await
-                .map_err(|_| {
-                    OidcError::new("server_error", crate::tr!("error.sso.token_failed"))
-                })?;
+            let _: () = crate::utils::redis::cmd_timeout(
+                redis::cmd("SETEX")
+                    .arg(&online_key)
+                    .arg(at_ttl)
+                    .arg(&json)
+                    .query_async(redis),
+            )
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
         }
         Ok(())
     }
@@ -1438,11 +1459,12 @@ impl SsoService {
         // RT 原子取删：并发双用/重放场景下只有第一次能取到（invalid_grant）
         let rt_hash = crate::utils::crypto::token_hash(rt);
         let rt_key = format!("{}{}", RT_KEY_PREFIX, rt_hash);
-        let binding_json: Option<String> = redis::cmd("GETDEL")
-            .arg(&rt_key)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let binding_json: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GETDEL").arg(&rt_key).query_async(redis))
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
         let binding_json = binding_json
             .ok_or_else(|| OidcError::new("invalid_grant", crate::tr!("error.sso.rt_invalid")))?;
         let rt_binding: RefreshBinding = serde_json::from_str(&binding_json)
@@ -1463,16 +1485,16 @@ impl SsoService {
         if rt_binding.tid != 0 {
             let state_key = crate::common::tenant::tenant_state_key(rt_binding.tid);
             let exp_key = crate::common::tenant::tenant_expire_key(rt_binding.tid);
-            let vals: Vec<Option<String>> = redis::pipe()
-                .cmd("GET")
-                .arg(&state_key)
-                .cmd("GET")
-                .arg(&exp_key)
-                .query_async(redis)
-                .await
-                .map_err(|_| {
-                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
-                })?;
+            let vals: Vec<Option<String>> = crate::utils::redis::cmd_timeout(
+                redis::pipe()
+                    .cmd("GET")
+                    .arg(&state_key)
+                    .cmd("GET")
+                    .arg(&exp_key)
+                    .query_async(redis),
+            )
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
             let expire_epoch = vals
                 .get(1)
                 .and_then(|v| v.as_deref())
@@ -1561,55 +1583,62 @@ impl SsoService {
 
         // AT 吊销：读绑定拿 user_id → 删绑定 + 在线会话 + 用户集合成员
         let at_key = format!("{}{}", AT_KEY_PREFIX, token_hash);
-        let at_json: Option<String> = redis::cmd("GET")
-            .arg(&at_key)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let at_json: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&at_key).query_async(redis))
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
         if let Some(json) = at_json {
             let user_id = serde_json::from_str::<AccessBinding>(&json)
                 .map(|b| b.user_id)
                 .unwrap_or(0);
-            let _: () = redis::cmd("DEL")
-                .arg(&at_key)
-                .arg(format!("online:{}", token_hash))
-                .query_async(redis)
+            let _: () = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL")
+                    .arg(&at_key)
+                    .arg(format!("online:{}", token_hash))
+                    .query_async(redis),
+            )
+            .await
+            .unwrap_or(());
+            if user_id > 0 {
+                let _: () = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SREM")
+                        .arg(format!("{}{}", USER_AT_KEY_PREFIX, user_id))
+                        .arg(&token_hash)
+                        .query_async(redis),
+                )
                 .await
                 .unwrap_or(());
-            if user_id > 0 {
-                let _: () = redis::cmd("SREM")
-                    .arg(format!("{}{}", USER_AT_KEY_PREFIX, user_id))
-                    .arg(&token_hash)
-                    .query_async(redis)
-                    .await
-                    .unwrap_or(());
             }
             return Ok(());
         }
 
         // RT 吊销：删绑定 + 用户集合成员（轮换链终止）
         let rt_key = format!("{}{}", RT_KEY_PREFIX, token_hash);
-        let rt_json: Option<String> = redis::cmd("GET")
-            .arg(&rt_key)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let rt_json: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&rt_key).query_async(redis))
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
         if let Some(json) = rt_json {
             let user_id = serde_json::from_str::<RefreshBinding>(&json)
                 .map(|b| b.user_id)
                 .unwrap_or(0);
-            let _: () = redis::cmd("DEL")
-                .arg(&rt_key)
-                .query_async(redis)
-                .await
-                .unwrap_or(());
-            if user_id > 0 {
-                let _: () = redis::cmd("SREM")
-                    .arg(format!("{}{}", USER_RT_KEY_PREFIX, user_id))
-                    .arg(&token_hash)
-                    .query_async(redis)
+            let _: () =
+                crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&rt_key).query_async(redis))
                     .await
                     .unwrap_or(());
+            if user_id > 0 {
+                let _: () = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SREM")
+                        .arg(format!("{}{}", USER_RT_KEY_PREFIX, user_id))
+                        .arg(&token_hash)
+                        .query_async(redis),
+                )
+                .await
+                .unwrap_or(());
             }
         }
         Ok(())
@@ -1645,11 +1674,12 @@ impl SsoService {
 
         let token_hash = crate::utils::crypto::token_hash(token);
         let at_key = format!("{}{}", AT_KEY_PREFIX, token_hash);
-        let at_json: Option<String> = redis::cmd("GET")
-            .arg(&at_key)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let at_json: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&at_key).query_async(redis))
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
         let Some(at_json) = at_json else {
             return Ok(inactive);
         };
@@ -1666,11 +1696,12 @@ impl SsoService {
             );
             return Ok(inactive);
         }
-        let ttl: i64 = redis::cmd("TTL")
-            .arg(&at_key)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let ttl: i64 =
+            crate::utils::redis::cmd_timeout(redis::cmd("TTL").arg(&at_key).query_async(redis))
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
         if ttl <= 0 {
             // 绑定存在但已到期（TTL=-1 无过期键 / -2 不存在）⇒ 视为失效，不报告剩余寿命
             return Ok(inactive);
@@ -1723,11 +1754,12 @@ impl SsoService {
         key: &str,
         redis: &mut ConnectionManager,
     ) -> Result<Option<String>, OidcError> {
-        let val: Option<String> = redis::cmd("GETDEL")
-            .arg(key)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let val: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GETDEL").arg(key).query_async(redis))
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
         Ok(val)
     }
 
@@ -1909,11 +1941,12 @@ impl SsoService {
             AT_KEY_PREFIX,
             crate::utils::crypto::token_hash(bearer)
         );
-        let raw: Option<String> = redis::cmd("GET")
-            .arg(&at_key)
-            .query_async(redis)
-            .await
-            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
+        let raw: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&at_key).query_async(redis))
+                .await
+                .map_err(|_| {
+                    OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+                })?;
         let raw = raw.ok_or_else(invalid)?;
         let binding: AccessBinding = serde_json::from_str(&raw).map_err(|_| invalid())?;
         // v3-K3：client 存在且启用（软删/停用后即时失效）
@@ -1973,11 +2006,11 @@ impl SsoService {
         // 黑名单校验：已登出的会话不再视为有效
         let token_hash = crate::utils::crypto::token_hash(token);
         let blacklist_key = format!("blacklist:{}", token_hash);
-        let blacklisted: Option<String> = redis::cmd("GET")
-            .arg(&blacklist_key)
-            .query_async(redis)
-            .await
-            .unwrap_or(None);
+        let blacklisted: Option<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("GET").arg(&blacklist_key).query_async(redis),
+        )
+        .await
+        .unwrap_or(None);
         if blacklisted.is_some() {
             return Ok(None);
         }
@@ -1987,16 +2020,20 @@ impl SsoService {
             .saturating_sub(chrono::Utc::now().timestamp())
             .max(60);
         let sess_key = format!("{}{}", SESS_KEY_PREFIX, user_id);
-        let _: Result<i64, _> = redis::cmd("SADD")
-            .arg(&sess_key)
-            .arg(&token_hash)
-            .query_async(redis)
-            .await;
-        let _: Result<i64, _> = redis::cmd("EXPIRE")
-            .arg(&sess_key)
-            .arg(remaining)
-            .query_async(redis)
-            .await;
+        let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SADD")
+                .arg(&sess_key)
+                .arg(&token_hash)
+                .query_async(redis),
+        )
+        .await;
+        let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+            redis::cmd("EXPIRE")
+                .arg(&sess_key)
+                .arg(remaining)
+                .query_async(redis),
+        )
+        .await;
         Ok(Some(SessionIdentity {
             user_id,
             username: claims.username,
@@ -2472,25 +2509,32 @@ impl SsoService {
     /// 不再波及用户在其它客户端的有效会话。）
     pub async fn revoke_user_sso_tokens(&self, redis: &mut ConnectionManager, user_id: i64) {
         let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, user_id);
-        let hashes: Vec<String> = redis::cmd("SMEMBERS")
-            .arg(&user_at_key)
-            .query_async(redis)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("读取用户 SSO 令牌索引失败 user_id={}: {}", user_id, e);
-                Vec::new()
-            });
+        let hashes: Vec<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SMEMBERS").arg(&user_at_key).query_async(redis),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("读取用户 SSO 令牌索引失败 user_id={}: {}", user_id, e);
+            Vec::new()
+        });
         for h in &hashes {
-            let _: Result<i64, _> = redis::cmd("DEL")
-                .arg(format!("{}{}", AT_KEY_PREFIX, h))
-                .query_async(redis)
-                .await;
-            let _: Result<i64, _> = redis::cmd("DEL")
-                .arg(format!("online:{}", h))
-                .query_async(redis)
-                .await;
+            let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL")
+                    .arg(format!("{}{}", AT_KEY_PREFIX, h))
+                    .query_async(redis),
+            )
+            .await;
+            let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL")
+                    .arg(format!("online:{}", h))
+                    .query_async(redis),
+            )
+            .await;
         }
-        let _: Result<i64, _> = redis::cmd("DEL").arg(&user_at_key).query_async(redis).await;
+        let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL").arg(&user_at_key).query_async(redis),
+        )
+        .await;
         if !hashes.is_empty() {
             tracing::info!(
                 "已全量吊销用户 SSO access_token user_id={} count={}",
@@ -2501,19 +2545,24 @@ impl SsoService {
         // v5-D3：同步全量吊销该用户的 refresh_token（否则登出后 RT 仍可换新 AT，
         // 全量吊销被架空——RT 轮换链必须与 AT 同生命周期终止）
         let user_rt_key = format!("{}{}", USER_RT_KEY_PREFIX, user_id);
-        let rt_hashes: Vec<String> = redis::cmd("SMEMBERS")
-            .arg(&user_rt_key)
-            .query_async(redis)
-            .await
-            .unwrap_or_default();
+        let rt_hashes: Vec<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SMEMBERS").arg(&user_rt_key).query_async(redis),
+        )
+        .await
+        .unwrap_or_default();
         for h in &rt_hashes {
-            let _: Result<i64, _> = redis::cmd("DEL")
-                .arg(format!("{}{}", RT_KEY_PREFIX, h))
-                .query_async(redis)
-                .await;
+            let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL")
+                    .arg(format!("{}{}", RT_KEY_PREFIX, h))
+                    .query_async(redis),
+            )
+            .await;
         }
         if !rt_hashes.is_empty() {
-            let _: Result<i64, _> = redis::cmd("DEL").arg(&user_rt_key).query_async(redis).await;
+            let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL").arg(&user_rt_key).query_async(redis),
+            )
+            .await;
             tracing::info!(
                 "已全量吊销用户 SSO refresh_token user_id={} count={}",
                 user_id,
@@ -2531,63 +2580,73 @@ impl SsoService {
         client_id: &str,
     ) {
         let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, user_id);
-        let hashes: Vec<String> = redis::cmd("SMEMBERS")
-            .arg(&user_at_key)
-            .query_async(redis)
-            .await
-            .unwrap_or_default();
+        let hashes: Vec<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SMEMBERS").arg(&user_at_key).query_async(redis),
+        )
+        .await
+        .unwrap_or_default();
         for h in &hashes {
             let at_key = format!("{}{}", AT_KEY_PREFIX, h);
-            let binding_json: Option<String> = redis::cmd("GET")
-                .arg(&at_key)
-                .query_async(redis)
-                .await
-                .unwrap_or(None);
+            let binding_json: Option<String> =
+                crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&at_key).query_async(redis))
+                    .await
+                    .unwrap_or(None);
             let matched = binding_json
                 .as_deref()
                 .and_then(|j| serde_json::from_str::<AccessBinding>(j).ok())
                 .map(|b| b.client_id == client_id)
                 .unwrap_or(false);
             if matched {
-                let _: Result<i64, _> = redis::cmd("DEL").arg(&at_key).query_async(redis).await;
-                let _: Result<i64, _> = redis::cmd("DEL")
-                    .arg(format!("online:{}", h))
-                    .query_async(redis)
-                    .await;
-                let _: Result<i64, _> = redis::cmd("SREM")
-                    .arg(&user_at_key)
-                    .arg(h)
-                    .query_async(redis)
-                    .await;
+                let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("DEL").arg(&at_key).query_async(redis),
+                )
+                .await;
+                let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("DEL")
+                        .arg(format!("online:{}", h))
+                        .query_async(redis),
+                )
+                .await;
+                let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SREM")
+                        .arg(&user_at_key)
+                        .arg(h)
+                        .query_async(redis),
+                )
+                .await;
             }
         }
         // v5-D3 修正：按 client 粒度同步吊销 refresh_token（RT 轮换链终止）——
         // 否则撤权/删客户端/停用后 RT 仍可换出新 AT，级联吊销被架空
         let user_rt_key = format!("{}{}", USER_RT_KEY_PREFIX, user_id);
-        let rt_hashes: Vec<String> = redis::cmd("SMEMBERS")
-            .arg(&user_rt_key)
-            .query_async(redis)
-            .await
-            .unwrap_or_default();
+        let rt_hashes: Vec<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SMEMBERS").arg(&user_rt_key).query_async(redis),
+        )
+        .await
+        .unwrap_or_default();
         for h in &rt_hashes {
             let rt_key = format!("{}{}", RT_KEY_PREFIX, h);
-            let binding_json: Option<String> = redis::cmd("GET")
-                .arg(&rt_key)
-                .query_async(redis)
-                .await
-                .unwrap_or(None);
+            let binding_json: Option<String> =
+                crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&rt_key).query_async(redis))
+                    .await
+                    .unwrap_or(None);
             let matched = binding_json
                 .as_deref()
                 .and_then(|j| serde_json::from_str::<RefreshBinding>(j).ok())
                 .map(|b| b.client_id == client_id)
                 .unwrap_or(false);
             if matched {
-                let _: Result<i64, _> = redis::cmd("DEL").arg(&rt_key).query_async(redis).await;
-                let _: Result<i64, _> = redis::cmd("SREM")
-                    .arg(&user_rt_key)
-                    .arg(h)
-                    .query_async(redis)
-                    .await;
+                let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("DEL").arg(&rt_key).query_async(redis),
+                )
+                .await;
+                let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SREM")
+                        .arg(&user_rt_key)
+                        .arg(h)
+                        .query_async(redis),
+                )
+                .await;
             }
         }
     }
@@ -2650,12 +2709,14 @@ impl SsoService {
                 let ttl = (claims.exp as i64)
                     .saturating_sub(chrono::Utc::now().timestamp())
                     .max(60);
-                let _: Result<(), _> = redis::cmd("SETEX")
-                    .arg(format!("blacklist:{}", token_hash))
-                    .arg(ttl)
-                    .arg("1")
-                    .query_async(redis)
-                    .await;
+                let _: Result<(), _> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SETEX")
+                        .arg(format!("blacklist:{}", token_hash))
+                        .arg(ttl)
+                        .arg("1")
+                        .query_async(redis),
+                )
+                .await;
                 if let Some(uid) = cookie_user {
                     self.revoke_user_sso_tokens(redis, uid).await;
                 }
@@ -2682,22 +2743,27 @@ impl SsoService {
     /// 供 end_session 跨端登出；拉黑后清空索引。
     async fn blacklist_user_sessions(&self, redis: &mut ConnectionManager, user_id: i64) {
         let sess_key = format!("{}{}", SESS_KEY_PREFIX, user_id);
-        let hashes: Vec<String> = redis::cmd("SMEMBERS")
-            .arg(&sess_key)
-            .query_async(redis)
-            .await
-            .unwrap_or_default();
+        let hashes: Vec<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SMEMBERS").arg(&sess_key).query_async(redis),
+        )
+        .await
+        .unwrap_or_default();
         for h in &hashes {
             // 会话剩余寿命未知（索引与 JWT 同 TTL），拉黑 24h 足以覆盖任何在途会话
-            let _: Result<(), _> = redis::cmd("SETEX")
-                .arg(format!("blacklist:{}", h))
-                .arg(86_400i64)
-                .arg("1")
-                .query_async(redis)
-                .await;
+            let _: Result<(), _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("SETEX")
+                    .arg(format!("blacklist:{}", h))
+                    .arg(86_400i64)
+                    .arg("1")
+                    .query_async(redis),
+            )
+            .await;
         }
         if !hashes.is_empty() {
-            let _: Result<i64, _> = redis::cmd("DEL").arg(&sess_key).query_async(redis).await;
+            let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL").arg(&sess_key).query_async(redis),
+            )
+            .await;
             tracing::info!(
                 "已拉黑用户 IdP 会话 user_id={} count={}",
                 user_id,

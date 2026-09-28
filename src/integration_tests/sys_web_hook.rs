@@ -237,3 +237,185 @@ async fn test_web_hook_chain() {
         "不存在的回调详情应 404，实际: {status} {body}"
     );
 }
+
+/// WebHook 出参脱敏 + 密钥写入语义（安全回归锁）。
+///
+/// 可证伪性：
+/// - 修复前 `list` / `{id}` **直出实体**，JSON 会带 `secret` 原文 ⇒ 本测试的
+///   `get("secret").is_none()` 断言失败（这是"任何持有 list 权限者都能读到签名
+///   密钥并伪造第三方回调"的真实漏洞）；
+/// - 修复前 `edit` 用 `Set(None)` 无条件覆盖 ⇒ 第 4 步「不传 secret」后
+///   `hasSecret` 会由 true 变 false（静默清空密钥），断言失败。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_web_hook_secret_masked_and_preserved_on_edit() {
+    let ctx = TestContext::new().await;
+    let target = "http://8.8.8.8:59998/webhook";
+
+    // 1. 新增：带签名密钥
+    let v = ctx
+        .post_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "hookName": "it_webhook_secret_脱敏",
+                "eventTypes": "login_success",
+                "targetUrl": target,
+                "secret": "it-secret-value-001",
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    // 2. 列表：不含 secret / tenantId / delFlag，且 hasSecret = true
+    let v = ctx
+        .get_json("/monitor/webHook/list?hookName=it_webhook_secret_")
+        .await;
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    assert_eq!(rows.len(), 1, "应查到 1 条，实际: {v}");
+    let row = &rows[0];
+    assert!(
+        row.get("secret").is_none(),
+        "列表禁止回传 secret，实际: {v}"
+    );
+    assert!(
+        row.get("tenantId").is_none(),
+        "列表禁止回传 tenantId，实际: {v}"
+    );
+    assert!(
+        row.get("delFlag").is_none(),
+        "列表禁止回传 delFlag，实际: {v}"
+    );
+    assert_eq!(
+        row["hasSecret"],
+        serde_json::json!(true),
+        "已配置密钥时 hasSecret 应为 true，实际: {v}"
+    );
+    let hook_id = row["id"].as_i64().expect("id 应为数字");
+
+    // 3. 详情：同样脱敏
+    let v = ctx.get_json(&format!("/monitor/webHook/{}", hook_id)).await;
+    assert!(
+        v["data"].get("secret").is_none(),
+        "详情禁止回传 secret，实际: {v}"
+    );
+    assert!(
+        v["data"].get("tenantId").is_none(),
+        "详情禁止回传 tenantId，实际: {v}"
+    );
+    assert_eq!(
+        v["data"]["hasSecret"],
+        serde_json::json!(true),
+        "详情 hasSecret 应为 true，实际: {v}"
+    );
+
+    // 4. 修改时**不传 secret**（只改名称）→ 已配置的密钥必须保留
+    let v = ctx
+        .put_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "id": hook_id,
+                "hookName": "it_webhook_secret_脱敏改",
+                "eventTypes": "login_success",
+                "targetUrl": target,
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx.get_json(&format!("/monitor/webHook/{}", hook_id)).await;
+    assert_eq!(
+        v["data"]["hookName"].as_str(),
+        Some("it_webhook_secret_脱敏改"),
+        "改名应生效，实际: {v}"
+    );
+    assert_eq!(
+        v["data"]["hasSecret"],
+        serde_json::json!(true),
+        "编辑时留空 secret 必须保持原密钥（不得静默清空），实际: {v}"
+    );
+
+    // 5. 修改时传**空串** → 同为「不改变」语义
+    let v = ctx
+        .put_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "id": hook_id,
+                "hookName": "it_webhook_secret_脱敏改",
+                "eventTypes": "login_success",
+                "targetUrl": target,
+                "secret": "",
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx.get_json(&format!("/monitor/webHook/{}", hook_id)).await;
+    assert_eq!(
+        v["data"]["hasSecret"],
+        serde_json::json!(true),
+        "空串 secret 应视为不改变，实际: {v}"
+    );
+
+    // 6. 修改时传**新密钥** → 覆盖生效（仍为已配置态）
+    let v = ctx
+        .put_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "id": hook_id,
+                "hookName": "it_webhook_secret_脱敏改",
+                "eventTypes": "login_success",
+                "targetUrl": target,
+                "secret": "it-secret-value-002",
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx.get_json(&format!("/monitor/webHook/{}", hook_id)).await;
+    assert_eq!(
+        v["data"]["hasSecret"],
+        serde_json::json!(true),
+        "覆盖新密钥后仍应为已配置态，实际: {v}"
+    );
+
+    // 7. 新增：不带 secret → hasSecret = false
+    let v = ctx
+        .post_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "hookName": "it_webhook_secret_无密钥",
+                "eventTypes": "",
+                "targetUrl": target,
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/monitor/webHook/list?hookName=it_webhook_secret_无密钥")
+        .await;
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    assert_eq!(rows.len(), 1, "应查到 1 条无密钥回调，实际: {v}");
+    assert_eq!(
+        rows[0]["hasSecret"],
+        serde_json::json!(false),
+        "未配置密钥时 hasSecret 应为 false，实际: {v}"
+    );
+    let hook_id_no_secret = rows[0]["id"].as_i64().expect("id 应为数字");
+
+    // 清理，避免污染同库其它用例
+    ctx.delete_json(&format!("/monitor/webHook/{}", hook_id))
+        .await;
+    ctx.delete_json(&format!("/monitor/webHook/{}", hook_id_no_secret))
+        .await;
+}

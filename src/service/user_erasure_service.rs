@@ -230,10 +230,10 @@ impl UserErasureService {
         if keys.is_empty() {
             return 0;
         }
-        let values: Vec<Option<String>> = match redis::cmd("MGET")
-            .arg(&keys)
-            .query_async(&mut redis)
-            .await
+        let values: Vec<Option<String>> = match crate::utils::redis::cmd_timeout(
+            redis::cmd("MGET").arg(&keys).query_async(&mut redis),
+        )
+        .await
         {
             Ok(v) => v,
             Err(e) => {
@@ -327,14 +327,16 @@ impl UserErasureService {
         //    fail-closed：写入失败则中止（不留"密码已清空但旧会话仍可用"的窗口）。
         let mut redis = self.redis.clone();
         let pwd_ver_key = format!("pwd_ver:{}", user_id);
-        redis::cmd("INCR")
-            .arg(&pwd_ver_key)
-            .query_async::<()>(&mut redis)
-            .await
-            .map_err(|e| {
-                tracing::error!(user_id, error = %e, "匿名化前递增 pwd_ver 失败（fail-closed 中止）");
-                ServiceError::internal(&crate::tr!("error.user.erasure_revoke_failed"))
-            })?;
+        crate::utils::redis::cmd_timeout(
+            redis::cmd("INCR")
+                .arg(&pwd_ver_key)
+                .query_async::<()>(&mut redis),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(user_id, error = %e, "匿名化前递增 pwd_ver 失败（fail-closed 中止）");
+            ServiceError::internal(&crate::tr!("error.user.erasure_revoke_failed"))
+        })?;
 
         // ② 字段置换（只改 ERASURE_FIELDS；释放全局唯一登录键，不可再登录）
         let now = crate::common::datetime::now_naive();

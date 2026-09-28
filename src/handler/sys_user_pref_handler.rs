@@ -21,6 +21,15 @@ fn parse_user_id(sub: &str) -> Result<i64, AppError> {
 }
 
 /// GET /system/profile/pref — 查询当前用户消息偏好
+#[utoipa::path(
+    get,
+    path = "/system/profile/pref",
+    responses(
+        (status = 200, description = "当前用户消息偏好", body = AjaxResult<PrefVo>),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "system-user"
+)]
 pub async fn get_pref(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -31,6 +40,17 @@ pub async fn get_pref(
 }
 
 /// PUT /system/profile/pref — 更新当前用户消息偏好 / 免打扰
+#[utoipa::path(
+    put,
+    path = "/system/profile/pref",
+    request_body = PrefUpdateDto,
+    responses(
+        (status = 200, description = "更新后的消息偏好", body = AjaxResult<PrefVo>),
+        (status = 400, description = "参数错误（取值非 '0'/'1' 或时间格式非法）"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "system-user"
+)]
 pub async fn update_pref(
     State(state): State<Arc<AppState>>,
     operator: Operator,

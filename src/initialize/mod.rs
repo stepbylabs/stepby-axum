@@ -3621,12 +3621,14 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
     /// 历史 JWT 型 SSO AT 的最大剩余寿命 = 平台 JWT TTL 上限（expire_hours ≤ 24h）
     const LEGACY_TTL_FLOOR_SECS: i64 = 86_400;
 
-    let marker: Result<Option<String>, _> = redis::cmd("SET")
-        .arg(LEGACY_MARKER)
-        .arg("1")
-        .arg("NX")
-        .query_async(redis)
-        .await;
+    let marker: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
+        redis::cmd("SET")
+            .arg(LEGACY_MARKER)
+            .arg("1")
+            .arg("NX")
+            .query_async(redis),
+    )
+    .await;
     match marker {
         Err(e) => {
             tracing::warn!("v4-F1 存量转写跳过（Redis 不可达，下次启动重试）: {e}");
@@ -3640,14 +3642,16 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
     let mut migrated = 0usize;
     let mut skipped = 0usize;
     loop {
-        let scan: Result<(String, Vec<String>), _> = redis::cmd("SCAN")
-            .arg(&cursor)
-            .arg("MATCH")
-            .arg(format!("{LEGACY_AT_PREFIX}*"))
-            .arg("COUNT")
-            .arg(500)
-            .query_async(redis)
-            .await;
+        let scan: Result<(String, Vec<String>), _> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SCAN")
+                .arg(&cursor)
+                .arg("MATCH")
+                .arg(format!("{LEGACY_AT_PREFIX}*"))
+                .arg("COUNT")
+                .arg(500)
+                .query_async(redis),
+        )
+        .await;
         let (next, keys) = match scan {
             Ok(v) => v,
             Err(e) => {
@@ -3665,14 +3669,16 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
                 continue;
             }
             // v5 核查：A 形态活跃绑定（value 含 access_token_hash）不转写，防误杀
-            let is_legacy: Option<bool> = redis::cmd("GET")
-                .arg(key)
-                .query_async::<Option<String>>(redis)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
-                .map(|json| !json.get("access_token_hash").is_some());
+            let is_legacy: Option<bool> = crate::utils::redis::cmd_timeout(
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async::<Option<String>>(redis),
+            )
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+            .map(|json| !json.get("access_token_hash").is_some());
             match is_legacy {
                 Some(false) => {
                     skipped += 1;
@@ -3683,28 +3689,33 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::Connecti
                 }
                 _ => {}
             }
-            let ttl: i64 = redis::cmd("TTL")
-                .arg(key)
-                .query_async(redis)
-                .await
-                .unwrap_or(-2);
+            let ttl: i64 =
+                crate::utils::redis::cmd_timeout(redis::cmd("TTL").arg(key).query_async(redis))
+                    .await
+                    .unwrap_or(-2);
             if ttl <= 0 {
                 // 已过期/不存在：直接清理
-                let _: Result<i64, _> = redis::cmd("DEL").arg(key).query_async(redis).await;
+                let _: Result<i64, _> =
+                    crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(key).query_async(redis))
+                        .await;
                 continue;
             }
             let blacklist_key = format!("blacklist:{hash}");
             let effective_ttl = ttl.max(LEGACY_TTL_FLOOR_SECS);
-            let set: Result<Option<()>, _> = redis::cmd("SETEX")
-                .arg(&blacklist_key)
-                .arg(effective_ttl)
-                .arg("1")
-                .query_async(redis)
-                .await;
+            let set: Result<Option<()>, _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("SETEX")
+                    .arg(&blacklist_key)
+                    .arg(effective_ttl)
+                    .arg("1")
+                    .query_async(redis),
+            )
+            .await;
             if set.is_ok() {
                 // 绑定转写成功后删除原 key：userinfo（只认绑定）与业务路由（认 blacklist）
                 // 双路径同时立即 401
-                let _: Result<i64, _> = redis::cmd("DEL").arg(key).query_async(redis).await;
+                let _: Result<i64, _> =
+                    crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(key).query_async(redis))
+                        .await;
                 migrated += 1;
             }
         }

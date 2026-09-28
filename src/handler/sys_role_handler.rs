@@ -375,6 +375,16 @@ pub async fn data_scope(
 
 /// GET /system/role/authUser/allocatedList
 /// 查询角色已授权用户列表
+#[utoipa::path(
+    get,
+    path = "/system/role/authUser/allocatedList",
+    params(AuthUserQueryDto),
+    responses(
+        (status = 200, description = "已授权用户分页列表", body = TableDataInfo<SysUserModel>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-role"
+)]
 pub async fn allocated_user_list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -392,6 +402,16 @@ pub async fn allocated_user_list(
 
 /// GET /system/role/authUser/unallocatedList
 /// 查询角色未授权用户列表
+#[utoipa::path(
+    get,
+    path = "/system/role/authUser/unallocatedList",
+    params(AuthUserQueryDto),
+    responses(
+        (status = 200, description = "未授权用户分页列表", body = TableDataInfo<SysUserModel>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-role"
+)]
 pub async fn unallocated_user_list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -409,6 +429,16 @@ pub async fn unallocated_user_list(
 
 /// PUT /system/role/authUser/cancel
 /// 取消单个用户授权
+#[utoipa::path(
+    put,
+    path = "/system/role/authUser/cancel",
+    request_body = CancelAuthUserDto,
+    responses(
+        (status = 200, description = "取消授权成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+    ),
+    tag = "system-role"
+)]
 pub async fn auth_user_cancel(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -429,6 +459,16 @@ pub async fn auth_user_cancel(
 
 /// PUT /system/role/authUser/cancelAll
 /// 批量取消用户授权（通过 URL query 传递 roleId + userIds）
+#[utoipa::path(
+    put,
+    path = "/system/role/authUser/cancelAll",
+    params(AuthUserSelectDto),
+    responses(
+        (status = 200, description = "批量取消授权成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+    ),
+    tag = "system-role"
+)]
 pub async fn auth_user_cancel_all(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -449,6 +489,16 @@ pub async fn auth_user_cancel_all(
 
 /// PUT /system/role/authUser/selectAll
 /// 批量授权用户选择（通过 URL query 传递 roleId + userIds）
+#[utoipa::path(
+    put,
+    path = "/system/role/authUser/selectAll",
+    params(AuthUserSelectDto),
+    responses(
+        (status = 200, description = "批量授权成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+    ),
+    tag = "system-role"
+)]
 pub async fn auth_user_select_all(
     State(state): State<Arc<AppState>>,
     operator: Operator,

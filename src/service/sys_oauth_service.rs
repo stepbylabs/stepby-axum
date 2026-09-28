@@ -611,17 +611,19 @@ impl SysOauthService {
             "tenant_tid": tenant_tid,
         })
         .to_string();
-        redis::cmd("SET")
-            .arg(&state_key)
-            .arg(&state_val)
-            .arg("EX")
-            .arg(STATE_TTL_SECS)
-            .query_async::<()>(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("OAuth state 写入 Redis 失败: {}", e);
-                ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-            })?;
+        crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(&state_key)
+                .arg(&state_val)
+                .arg("EX")
+                .arg(STATE_TTL_SECS)
+                .query_async::<()>(redis),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("OAuth state 写入 Redis 失败: {}", e);
+            ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+        })?;
 
         // 组装授权 URL（保留 scope 原样，不重复编码）
         let sep = if provider.authorize_url.contains('?') {
@@ -928,23 +930,21 @@ impl SysOauthService {
         key: &str,
         redis: &mut ConnectionManager,
     ) -> Result<Option<String>, ServiceError> {
-        let value: Option<String> = redis::cmd("GET")
-            .arg(key)
-            .query_async(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("Redis GET oauth 凭据失败: {}", e);
-                ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-            })?;
-        if value.is_some() {
-            let _: Option<()> = redis::cmd("DEL")
-                .arg(key)
-                .query_async(redis)
+        let value: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(redis))
                 .await
                 .map_err(|e| {
-                    tracing::error!("Redis DEL oauth 凭据失败: {}", e);
+                    tracing::error!("Redis GET oauth 凭据失败: {}", e);
                     ServiceError::internal(&crate::tr!("error.common.cache_failed"))
                 })?;
+        if value.is_some() {
+            let _: Option<()> =
+                crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(key).query_async(redis))
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Redis DEL oauth 凭据失败: {}", e);
+                        ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+                    })?;
         }
         Ok(value)
     }
@@ -1311,17 +1311,19 @@ impl SysOauthService {
         };
         let json_str = serde_json::to_string(&info)
             .map_err(|_| ServiceError::internal(&crate::tr!("error.oauth.unknown_error")))?;
-        redis::cmd("SET")
-            .arg(&key)
-            .arg(json_str)
-            .arg("EX")
-            .arg(HANDOFF_TTL_SECS)
-            .query_async::<()>(redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("OAuth handoff 写入 Redis 失败: {}", e);
-                ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-            })?;
+        crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(&key)
+                .arg(json_str)
+                .arg("EX")
+                .arg(HANDOFF_TTL_SECS)
+                .query_async::<()>(redis),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("OAuth handoff 写入 Redis 失败: {}", e);
+            ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+        })?;
         Ok(handoff)
     }
 }

@@ -6,7 +6,7 @@
 // - 每个「租户 + IP」组合维护一个独立令牌桶（租户彼此隔离，互不占用配额）
 // - 桶容量（capacity）：突发请求上限
 // - 补充速率（refill_per_second）：每秒匀速补充令牌
-// - 内存态（Mutex<HashMap>），单实例有效；多实例部署请改用 Redis 实现
+// - 内存态（Mutex<HashMap>），单实例有效；多实例部署改用 `[rate_limit].mode = "redis"`（见下 M-8）
 // - 未登录 / 无 claims 请求（登录页、公开页）回退到平台维度（tid=0），确保可用
 //
 // 多租户（Phase 3）说明：
@@ -26,8 +26,12 @@
 //
 // M-8 多实例限制：本限流器为内存态（Mutex<HashMap>），仅支持单实例部署。
 // 多实例部署时，各实例独立计数，攻击者可通过轮询不同实例绕过限流。
-// 多实例场景请迁移到 Redis 实现（参考 auth_service.rs 的 RATE_LIMIT_SCRIPT Lua 脚本），
-// 或在反向代理层（Nginx/Ingress）做限流。
+//
+// **2026-09-28 收口（[rate_limit].mode = redis）**：上述限制已提供配置化解法——
+// 配置 `[rate_limit] mode = "redis"`（或环境变量 `RATE_LIMIT_MODE=redis`）后，令牌桶
+// 改由 Redis（Lua 原子执行）承载，多实例**共享同一配额**；Redis 命令失败时
+// **fail-closed 返回 503**（限流器不可用却放行 = 攻击者获准）。
+// 默认仍为 `local`（= 改造前行为，逐字节等价）。
 //
 // 用法：
 //   use axum::middleware::from_fn;
@@ -166,6 +170,97 @@ impl RateLimiter {
 /// 全局限流器单例
 static RATE_LIMITER: LazyLock<RateLimiter> = LazyLock::new(RateLimiter::new);
 
+// ==================== M-8 收口：Redis 分布式令牌桶 ====================
+
+/// Redis 分布式令牌桶 Lua 脚本（原子执行；多实例共享配额）
+///
+/// 与进程内 [`RateLimiter`] **逐字段等价**：以 `HMGET tokens ts`（ts = 毫秒时间戳）
+/// 取桶状态，按 `elapsed_ms` 懒补充令牌并夹取到 `capacity`；够 1 个则扣减并放行，
+/// 否则返回 `ceil((1 - tokens) / refill_per_second)` 秒的 Retry-After
+/// （`refill_per_second = 0` 时回落 60s，与内存实现一致，且避免除零）。
+/// 每次执行刷新 `PEXPIRE`，不产生永久残留键。
+///
+/// 数值以 `string.format('%.6f')` 写回，避免 Lua number → Redis 参数的整数截断
+/// 丢失小数令牌（那会让桶"凭空变慢"）。
+const TOKEN_BUCKET_LUA: &str = r#"
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local ttl_ms = tonumber(ARGV[4])
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1])
+local ts = tonumber(data[2])
+if tokens == nil or ts == nil then
+    tokens = capacity
+    ts = now_ms
+end
+local elapsed = now_ms - ts
+if elapsed > 0 then
+    tokens = math.min(capacity, tokens + (elapsed / 1000.0) * rate)
+    ts = now_ms
+end
+local allowed = 0
+local retry = 0
+if tokens >= 1 then
+    tokens = tokens - 1
+    allowed = 1
+elseif rate > 0 then
+    retry = math.ceil((1 - tokens) / rate)
+    if retry < 1 then retry = 1 end
+else
+    retry = 60
+end
+redis.call('HSET', key, 'tokens', string.format('%.6f', tokens), 'ts', tostring(math.floor(ts)))
+redis.call('PEXPIRE', key, ttl_ms)
+return {allowed, retry}
+"#;
+
+/// 计算 Redis 桶键 TTL（毫秒）
+///
+/// TTL 取「配置值」与「桶自然补满所需秒数 × 2」的**较大者**：若 TTL 短于补满时间，
+/// 桶会在尚未补满时过期并被按"满桶"重建 ⇒ 实际限流比配置更宽松（真实缺陷场景）。
+fn redis_bucket_ttl_ms(config: RateLimitConfig, configured_ttl_secs: u64) -> u64 {
+    let full_refill_secs = if config.refill_per_second > 0.0 {
+        (config.capacity as f64 / config.refill_per_second).ceil() as u64
+    } else {
+        // 补充速率为 0 ⇒ 不存在"自然补满"，TTL 无需抬高
+        0
+    };
+    configured_ttl_secs
+        .max(full_refill_secs.saturating_mul(2))
+        .max(1)
+        .saturating_mul(1000)
+}
+
+/// 从 Redis 消费 1 个令牌（分布式令牌桶，跨实例共享配额）
+///
+/// 返回 `(是否放行, Retry-After 秒数)`。**不吞错**：Redis 命令失败原样返回，
+/// 由调用方 fail-closed 处置（503），绝不在限流器不可用时静默放行。
+pub async fn try_acquire_redis(
+    redis: &mut redis::aio::ConnectionManager,
+    key: &str,
+    config: RateLimitConfig,
+    configured_ttl_secs: u64,
+) -> Result<(bool, u64), redis::RedisError> {
+    let ttl_ms = redis_bucket_ttl_ms(config, configured_ttl_secs);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let (allowed, retry): (i64, i64) = crate::utils::redis::cmd_timeout(
+        redis::Script::new(TOKEN_BUCKET_LUA)
+            .key(key)
+            .arg(config.capacity)
+            .arg(config.refill_per_second)
+            .arg(now_ms)
+            .arg(ttl_ms)
+            .invoke_async(redis),
+    )
+    .await?;
+    Ok((allowed == 1, retry.max(0) as u64))
+}
+
 /// 全局限流中间件
 ///
 /// 流程：
@@ -211,18 +306,34 @@ pub async fn rate_limit_middleware(
         Ok(c) => c,
         Err(e) => {
             tracing::error!("限流配置查询失败（fail-closed）: {}", e);
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "code": 503,
-                    "msg": crate::tr!("error.rate_limit.service_unavailable")
-                })),
-            )
-                .into_response();
+            return rate_limit_unavailable_response();
         }
     };
 
-    let (allowed, retry_after) = RATE_LIMITER.try_acquire_with_retry_after(&bucket_key, config);
+    let (allowed, retry_after) = match state.config.rate_limit.mode() {
+        // 多实例：Redis 分布式令牌桶（跨实例共享配额）；命令失败 fail-closed（503），不静默放行
+        crate::config::settings::RateLimitMode::Redis => {
+            let mut redis = state.redis.clone();
+            match try_acquire_redis(
+                &mut redis,
+                &bucket_key,
+                config,
+                state.config.rate_limit.key_ttl(),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Redis 限流执行失败（fail-closed）: {}", e);
+                    return rate_limit_unavailable_response();
+                }
+            }
+        }
+        // 默认（= 现状）：进程内令牌桶，无 Redis 往返
+        crate::config::settings::RateLimitMode::Local => {
+            RATE_LIMITER.try_acquire_with_retry_after(&bucket_key, config)
+        }
+    };
     if allowed {
         next.run(req).await
     } else {
@@ -242,6 +353,21 @@ pub async fn rate_limit_middleware(
         }
         resp
     }
+}
+
+/// 限流依赖不可用时的统一响应（fail-closed）
+///
+/// 两个触发点：①限流配置查询失败（Redis/DB 故障）；②`mode = "redis"` 下 Redis 命令失败。
+/// 二者都**不得**静默降级放行——限流失效即等于攻击者获准，故统一返回 503。
+fn rate_limit_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "code": 503,
+            "msg": crate::tr!("error.rate_limit.service_unavailable")
+        })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -365,5 +491,34 @@ mod tests {
         );
         // 平台维度（无 claims 兜底，tid=0）同样独立
         assert!(limiter.try_acquire(&rate_limit_bucket_key(0, ip), config));
+    }
+
+    // ---------- M-8 收口：Redis 分布式令牌桶的 TTL 计算 ----------
+
+    #[test]
+    fn test_redis_bucket_ttl_never_shorter_than_full_refill() {
+        // 容量 100、10/s ⇒ 自然补满需 10s ⇒ TTL 至少 20s（配置 5s 必须被抬高）
+        let cfg = RateLimitConfig {
+            capacity: 100,
+            refill_per_second: 10.0,
+        };
+        assert_eq!(
+            redis_bucket_ttl_ms(cfg, 5),
+            20_000,
+            "TTL 短于补满时间会让桶提前过期并重建 ⇒ 限流被悄悄放宽"
+        );
+        // 配置值更大时以配置值为准
+        assert_eq!(redis_bucket_ttl_ms(cfg, 300), 300_000);
+    }
+
+    #[test]
+    fn test_redis_bucket_ttl_zero_refill_keeps_configured() {
+        // refill = 0 ⇒ 无"自然补满"概念，TTL 取配置值（并保留 1s 下限兜底）
+        let cfg = RateLimitConfig {
+            capacity: 10,
+            refill_per_second: 0.0,
+        };
+        assert_eq!(redis_bucket_ttl_ms(cfg, 120), 120_000);
+        assert_eq!(redis_bucket_ttl_ms(cfg, 0), 1_000);
     }
 }

@@ -8,10 +8,11 @@
 # 部署方式：
 #   1. 准备环境变量（敏感字段从环境变量注入，不要写入文件）：
 #      export DATABASE_URL=postgres://user:strong_pass@postgres:5432/yebot
-#      export REDIS_URL=redis://redis:6379/0
+#      export REDIS_URL=redis://:strong_redis_pass@redis:6379/0   # redis 已 requirepass，URL 必须带密码
 #      export JWT_SECRET=<至少 32 字符的强随机密钥>
 #      export JWT_EXPIRE_HOURS=6
 #      export POSTGRES_PASSWORD=<数据库密码>
+#      export REDIS_PASSWORD=<Redis 密码>   # 与 REDIS_URL 中口令一致；缺省即 fail-fast
 #
 #   2. 启动：
 #      docker compose -f docker-compose.prod.yml up -d

@@ -105,7 +105,7 @@ pub struct DictTypeEditDto {
 // ==================== 字典数据 DTO ====================
 
 /// 字典数据分页查询 DTO
-#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DictDataQueryDto {
     #[serde(default = "default_page_num")]
@@ -235,10 +235,10 @@ impl SysDictService {
     async fn invalidate_cache(&self, tid: i64, dict_type: &str) {
         let key = Self::cache_key(tid, dict_type);
         let mut conn = self.redis.clone();
-        if let Err(e) = redis::cmd("DEL")
-            .arg(&key)
-            .query_async::<()>(&mut conn)
-            .await
+        if let Err(e) = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn),
+        )
+        .await
         {
             tracing::warn!("失效字典缓存 {} 失败: {}", key, e);
         }
@@ -258,7 +258,9 @@ impl SysDictService {
         for dt in dict_types {
             pipe.cmd("DEL").arg(Self::cache_key(tid, dt));
         }
-        if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
+        if let Err(e) =
+            crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
+        {
             tracing::warn!(
                 "批量失效字典缓存失败（{} 个 dict_type）: {}",
                 dict_types.len(),
@@ -719,12 +721,11 @@ impl SysDictService {
         conn: &mut ConnectionManager,
         key: &str,
     ) -> Option<Option<Vec<SysDictDataModel>>> {
-        let cached: Option<String> = redis::cmd("GET")
-            .arg(key)
-            .query_async(conn)
-            .await
-            .ok()
-            .flatten();
+        let cached: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(conn))
+                .await
+                .ok()
+                .flatten();
         match cached {
             None => None,
             Some(json_str) if json_str == DICT_NULL_MARKER => Some(None),
@@ -796,12 +797,14 @@ impl SysDictService {
                     }
                 }
             };
-            if let Err(e) = redis::cmd("SETEX")
-                .arg(&key)
-                .arg(ttl)
-                .arg(cache_value)
-                .query_async::<()>(&mut conn)
-                .await
+            if let Err(e) = crate::utils::redis::cmd_timeout(
+                redis::cmd("SETEX")
+                    .arg(&key)
+                    .arg(ttl)
+                    .arg(cache_value)
+                    .query_async::<()>(&mut conn),
+            )
+            .await
             {
                 tracing::warn!("写入字典缓存 {} 失败: {}", key, e);
             }
@@ -1064,14 +1067,16 @@ impl SysDictService {
         let mut keys_to_delete: Vec<String> = Vec::new();
         let mut cursor: u64 = 0;
         loop {
-            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(format!("{}*", DICT_CACHE_PREFIX))
-                .arg("COUNT")
-                .arg(200i64)
-                .query_async(&mut conn)
-                .await?;
+            let (next_cursor, batch): (u64, Vec<String>) = crate::utils::redis::cmd_timeout(
+                redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(format!("{}*", DICT_CACHE_PREFIX))
+                    .arg("COUNT")
+                    .arg(200i64)
+                    .query_async(&mut conn),
+            )
+            .await?;
             keys_to_delete.extend(batch);
             if next_cursor == 0 {
                 break;
@@ -1084,11 +1089,15 @@ impl SysDictService {
         }
 
         // 批量删除所有 dict:* 键
-        let count: i64 = redis::cmd("DEL")
-            .arg(&keys_to_delete)
-            .query_async(&mut conn)
-            .await?;
-        tracing::info!("刷新字典缓存：删除 {} 个键", count);
+        let count: i64 = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL")
+                .arg(&keys_to_delete)
+                .query_async(&mut conn),
+        )
+        .await?;
+        // R5-TRACE-17：字典缓存刷新属**高频常规**操作（每次字典变更都会触发），
+        // 原 info 级会在多实例/批量导入场景刷屏；降为 debug，保留排障能力而不淹没告警。
+        tracing::debug!("刷新字典缓存：删除 {} 个键", count);
         Ok(())
     }
 }

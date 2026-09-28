@@ -94,6 +94,12 @@ pub struct Settings {
     /// 每次都尝试发送，与改造前**逐字节等价**。
     #[serde(default)]
     pub resilience: ResilienceConfig,
+    /// 全局限流实现配置（`[rate_limit]` 段）：`local`（**默认**，进程内令牌桶 = 现状）| `redis`。
+    ///
+    /// 收口长期登记项 M-8「多实例限制」：多实例部署时切 `redis` 即可跨实例共享配额。
+    /// 默认 `local` ⇒ 与改造前**逐字节等价**（关闭态即安全态）。
+    #[serde(default)]
+    pub rate_limit: RateLimitSettings,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -125,6 +131,7 @@ impl fmt::Debug for Settings {
             .field("events", &self.events)
             .field("webauthn", &self.webauthn)
             .field("resilience", &self.resilience)
+            .field("rate_limit", &self.rate_limit)
             .finish()
     }
 }
@@ -671,6 +678,111 @@ fn default_breaker_failure_threshold() -> u32 {
 
 fn default_breaker_cooldown_secs() -> u64 {
     60
+}
+
+// ==================== 全局限流实现档位（[rate_limit]） ====================
+
+/// 限流实现档位字面量（顺序：默认项在前，便于阅读时确认"默认为现状"）
+pub const RATE_LIMIT_MODES: &[&str] = &["local", "redis"];
+
+/// Redis 桶键 TTL 下界 / 上界（秒）
+pub const RATE_LIMIT_KEY_TTL_MIN_SECS: u64 = 60;
+pub const RATE_LIMIT_KEY_TTL_MAX_SECS: u64 = 86_400;
+
+/// 全局限流实现档位（项目准则③：取「模式」而非裸 bool）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RateLimitMode {
+    /// **默认 = 现状**：进程内令牌桶（`Mutex<HashMap>`），单实例下精确、无 Redis 往返。
+    #[default]
+    Local,
+    /// Redis 分布式令牌桶：多实例共享配额（Lua 原子执行）。
+    Redis,
+}
+
+impl RateLimitMode {
+    /// 解析配置串（大小写无关、两端 trim）；未登记取值一律回落 [`RateLimitMode::Local`] 并打 WARN。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "redis" => Self::Redis,
+            "local" => Self::Local,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    fallback = "local",
+                    allowed = ?RATE_LIMIT_MODES,
+                    "配置 [rate_limit].mode 取值非法，已回落 local（= 现状：进程内令牌桶）"
+                );
+                Self::Local
+            }
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Redis => "redis",
+        }
+    }
+}
+
+/// 全局限流实现配置（`[rate_limit]` 段）—— 长期登记项 M-8「多实例限制」的收口开关。
+///
+/// # 为什么需要它
+///
+/// 限流中间件（`middleware/rate_limit.rs`）默认用**进程内**令牌桶：单实例下精确，
+/// 但多实例部署时各实例**独立计数**，攻击者轮询不同实例即可把配额放大 N 倍。
+/// 本段提供 `mode = "redis"` 把令牌桶搬到 Redis，实现跨实例共享配额。
+///
+/// # 语义（默认 = 现状）
+///
+/// - `local`（**默认**）：进程内令牌桶，与改造前**逐字节等价**（无 Redis 往返）；
+/// - `redis`：Redis 分布式令牌桶；Redis 命令失败时 **fail-closed 返回 503**——
+///   限流器不可用却静默放行，等于攻击者获准，与 `get_config_for_route` 的既有
+///   fail-closed 口径一致。
+///
+/// 非法档位取值回落 `local` 并打 WARN（fail-safe，不拒绝启动）；
+/// `key_ttl_secs` 越界由 [`RateLimitSettings::key_ttl`] 夹取。
+#[derive(Clone, Debug, Deserialize)]
+pub struct RateLimitSettings {
+    /// 限流实现档位：`local`（**默认**，= 现状）| `redis`
+    #[serde(default = "default_rate_limit_mode")]
+    pub mode: String,
+    /// Redis 桶键 TTL 秒数（默认 300；夹取 `60..=86400`）。
+    ///
+    /// 实际生效 TTL 还会与「桶自然补满所需秒数 × 2」取大值，避免 TTL 早于补满
+    /// 而**提前重置**桶（那会让限流比配置更宽松）。
+    #[serde(default = "default_rate_limit_key_ttl_secs")]
+    pub key_ttl_secs: u64,
+}
+
+impl Default for RateLimitSettings {
+    fn default() -> Self {
+        Self {
+            mode: default_rate_limit_mode(),
+            key_ttl_secs: default_rate_limit_key_ttl_secs(),
+        }
+    }
+}
+
+impl RateLimitSettings {
+    /// 解析后的档位（非法取值回落 `local` 并打 WARN）
+    pub fn mode(&self) -> RateLimitMode {
+        RateLimitMode::parse(&self.mode)
+    }
+
+    /// 夹取后的 TTL（秒）
+    pub fn key_ttl(&self) -> u64 {
+        self.key_ttl_secs
+            .clamp(RATE_LIMIT_KEY_TTL_MIN_SECS, RATE_LIMIT_KEY_TTL_MAX_SECS)
+    }
+}
+
+fn default_rate_limit_mode() -> String {
+    RateLimitMode::default().as_str().to_string()
+}
+
+fn default_rate_limit_key_ttl_secs() -> u64 {
+    300
 }
 
 /// WebAuthn / Passkey 配置（`[webauthn]` 段）——能力位 `auth.webauthn` 的**配置面**。
@@ -1862,6 +1974,12 @@ impl Settings {
         if let Ok(v) = std::env::var("UPLOAD_BACKEND") {
             self.upload.backend = v;
         }
+        // 全局限流实现档位（M-8 收口）：RATE_LIMIT_MODE=local|redis
+        // 多实例部署时用环境变量切换（容器场景常无法改配置文件）；非法值由 parse 回落 local 并告警。
+        // 缺省（不设置且配置文件未写）即 local（= 现状：进程内令牌桶）。
+        if let Ok(v) = std::env::var("RATE_LIMIT_MODE") {
+            self.rate_limit.mode = v;
+        }
         // S3 兼容对象存储敏感字段通过环境变量注入（避免明文写入配置文件）
         if let Ok(v) = std::env::var("S3_ACCESS_KEY") {
             self.upload.s3.access_key = v;
@@ -2013,6 +2131,7 @@ impl Settings {
             events: EventsConfig::default(),
             webauthn: WebauthnConfig::default(),
             resilience: ResilienceConfig::default(),
+            rate_limit: RateLimitSettings::default(),
         };
 
         settings.apply_env_overrides();
@@ -2179,6 +2298,7 @@ mod tests {
             events: EventsConfig::default(),
             webauthn: WebauthnConfig::default(),
             resilience: ResilienceConfig::default(),
+            rate_limit: RateLimitSettings::default(),
         }
     }
 
@@ -2277,6 +2397,53 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 1, "至少应校验 config/config.toml.example");
+    }
+
+    /// M-8 收口：限流档位解析（**默认 = 现状 local**；非法值 fail-safe 回落 local）+ TTL 夹取
+    #[test]
+    fn test_rate_limit_mode_parse_and_clamp() {
+        assert_eq!(RateLimitMode::parse("redis"), RateLimitMode::Redis);
+        assert_eq!(RateLimitMode::parse("  REDIS  "), RateLimitMode::Redis);
+        assert_eq!(RateLimitMode::parse("local"), RateLimitMode::Local);
+        for bad in ["", "on", "true", "1", "cluster"] {
+            assert_eq!(
+                RateLimitMode::parse(bad),
+                RateLimitMode::Local,
+                "{bad:?} 非法取值必须回落 local（默认 = 现状），不得静默改变限流承载方式"
+            );
+        }
+        assert_eq!(RateLimitMode::default(), RateLimitMode::Local);
+        // 常量清单与枚举双向一致
+        assert_eq!(RATE_LIMIT_MODES.len(), 2);
+        for raw in RATE_LIMIT_MODES {
+            assert_eq!(RateLimitMode::parse(raw).as_str(), *raw);
+        }
+        // 缺省（未写 [rate_limit]）= local + 300s
+        let d = RateLimitSettings::default();
+        assert_eq!(d.mode(), RateLimitMode::Local);
+        assert_eq!(d.key_ttl(), 300);
+        // TTL 夹取
+        let s = RateLimitSettings {
+            key_ttl_secs: 0,
+            ..RateLimitSettings::default()
+        };
+        assert_eq!(s.key_ttl(), RATE_LIMIT_KEY_TTL_MIN_SECS);
+        let s = RateLimitSettings {
+            key_ttl_secs: u64::MAX,
+            ..RateLimitSettings::default()
+        };
+        assert_eq!(s.key_ttl(), RATE_LIMIT_KEY_TTL_MAX_SECS);
+        // 入库模板必须保持 local（多实例才显式切 redis）
+        let tpl: Settings = toml::from_str(
+            &std::fs::read_to_string("config/config.toml.example")
+                .expect("config/config.toml.example 应存在"),
+        )
+        .expect("模板应可解析");
+        assert_eq!(
+            tpl.rate_limit.mode(),
+            RateLimitMode::Local,
+            "入库模板不得隐式启用 redis 限流（单实例默认）"
+        );
     }
 
     /// S-1：分布式扫描锁缺省必须**关闭**（明确接受单实例部署假设）
@@ -2499,6 +2666,7 @@ mod tests {
             events: EventsConfig::default(),
             webauthn: WebauthnConfig::default(),
             resilience: ResilienceConfig::default(),
+            rate_limit: RateLimitSettings::default(),
         };
 
         let debug_str = format!("{:?}", settings);

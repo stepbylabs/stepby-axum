@@ -14,6 +14,7 @@
 use axum::extract::{Path, Query, State};
 use serde::Serialize;
 use std::sync::Arc;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::common::ValidatedJson;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
@@ -168,7 +169,7 @@ pub async fn remove(
 }
 
 /// 顶部公告响应 VO
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeTopVo {
     #[serde(flatten)]
@@ -180,6 +181,15 @@ crate::impl_into_response!(NoticeTopVo);
 
 /// GET /system/notice/listTop
 /// 首页顶部公告列表（通知铃铛用，带未读数）
+#[utoipa::path(
+    get,
+    path = "/system/notice/listTop",
+    responses(
+        (status = 200, description = "顶部公告列表 + 当前用户未读数", body = NoticeTopVo),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-notice"
+)]
 pub async fn list_top(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -202,6 +212,16 @@ pub async fn list_top(
 
 /// POST /system/notice/markRead
 /// 标记公告已读
+#[utoipa::path(
+    post,
+    path = "/system/notice/markRead",
+    params(NoticeMarkReadParams),
+    responses(
+        (status = 200, description = "标记成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误"),
+    ),
+    tag = "system-notice"
+)]
 pub async fn mark_read(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -217,6 +237,16 @@ pub async fn mark_read(
 
 /// POST /system/notice/markReadAll
 /// 批量标记公告已读
+#[utoipa::path(
+    post,
+    path = "/system/notice/markReadAll",
+    params(NoticeMarkReadAllParams),
+    responses(
+        (status = 200, description = "批量标记成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "参数错误或 ID 列表超上限"),
+    ),
+    tag = "system-notice"
+)]
 pub async fn mark_read_all(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -244,6 +274,14 @@ pub async fn mark_read_all(
 ///
 /// 与 markReadAll 的区别：markReadAll 需要前端传入具体 notice IDs，
 /// 前端分页时只能拿到当前页的 ID；本接口服务端查询所有未读并标记，确保跨页未读也被清除。
+#[utoipa::path(
+    post,
+    path = "/system/notice/markAllUnreadRead",
+    responses(
+        (status = 200, description = "已标记的未读数量", body = AjaxResult<u64>),
+    ),
+    tag = "system-notice"
+)]
 pub async fn mark_all_unread_read(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -257,14 +295,14 @@ pub async fn mark_all_unread_read(
 }
 
 /// 标记已读请求参数
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeMarkReadParams {
     pub notice_id: i64,
 }
 
 /// 批量标记已读请求参数
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct NoticeMarkReadAllParams {
     pub ids: String,
@@ -272,6 +310,16 @@ pub struct NoticeMarkReadAllParams {
 
 /// GET /system/notice/readUsers/list
 /// 查询公告已读用户列表
+#[utoipa::path(
+    get,
+    path = "/system/notice/readUsers/list",
+    params(NoticeReadUserQueryDto),
+    responses(
+        (status = 200, description = "公告已读用户分页列表", body = TableDataInfo<NoticeReadUserVo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-notice"
+)]
 pub async fn list_read_users(
     State(state): State<Arc<AppState>>,
     operator: Operator,

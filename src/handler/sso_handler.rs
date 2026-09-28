@@ -29,6 +29,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use utoipa::IntoParams;
 
 use crate::common::AppError;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
@@ -49,7 +50,7 @@ const SESSION_COOKIE: &str = "Admin-Token";
 /// 参数名由 RFC 6749 / OIDC Core 强制固定为 snake_case（`client_id` / `redirect_uri` /
 /// `code_challenge` / `code_challenge_method` …），标准 OIDC 客户端库只发送这些名字。
 /// 因此**不做 camelCase 重命名、也不经 ts-rs 导出**（前端从不以类型化对象消费它，仅靠浏览器 302 跳转）。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct AuthorizeQuery {
     pub client_id: String,
     #[serde(default)]
@@ -77,7 +78,7 @@ pub struct AuthorizeQuery {
     pub acr_values: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct LogoutQuery {
     #[serde(default)]
     pub client_id: Option<String>,
@@ -87,7 +88,7 @@ pub struct LogoutQuery {
     pub post_logout_redirect_uri: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct ToggleQuery {
     pub enabled: String,
@@ -96,6 +97,16 @@ pub struct ToggleQuery {
 // ==================== 公开端点 ====================
 
 /// GET /.well-known/openid-configuration
+#[utoipa::path(
+    get,
+    path = "/.well-known/openid-configuration",
+    responses(
+        (status = 200, description = "OIDC 发现文档（bare JSON）", body = serde_json::Value),
+        (status = 404, description = "SSO 未启用"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn discovery(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -116,6 +127,16 @@ pub async fn discovery(
 
 /// GET /sso/jwks（v5-D2：聚合全部启用 RS256 客户端的公钥，kid=client_id；
 /// HS256 客户端不发布公钥。无 RS256 客户端时返回空 keys——jwks_uri 为 OPTIONAL）
+#[utoipa::path(
+    get,
+    path = "/sso/jwks",
+    responses(
+        (status = 200, description = "JWKS（聚合启用 RS256 客户端公钥）", body = serde_json::Value),
+        (status = 404, description = "SSO 未启用"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn jwks(State(state): State<Arc<AppState>>) -> Response {
     if !state.config.sso.enabled {
         return oidc_error_response(
@@ -127,6 +148,17 @@ pub async fn jwks(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// GET /sso/authorize
+#[utoipa::path(
+    get,
+    path = "/sso/authorize",
+    params(AuthorizeQuery),
+    responses(
+        (status = 302, description = "重定向到前端登录页 / 同意页 / RP 回调（携带 code 或 error）"),
+        (status = 400, description = "invalid_request（协议参数非法）"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn authorize(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -252,6 +284,19 @@ pub async fn authorize(
 }
 
 /// POST /sso/token（application/x-www-form-urlencoded，另支持 Authorization: Basic 客户端认证）
+#[utoipa::path(
+    post,
+    path = "/sso/token",
+    request_body(content = TokenParams, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 200, description = "令牌响应（RFC 6749 §5.1，Cache-Control: no-store）", body = serde_json::Value),
+        (status = 400, description = "invalid_grant 等协议错误"),
+        (status = 401, description = "invalid_client（带 WWW-Authenticate: Basic）"),
+        (status = 500, description = "server_error"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn token(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -368,6 +413,19 @@ pub async fn token(
 
 /// POST /sso/revoke（v5-D3，RFC 7009：令牌吊销——AT/RT 均可；
 /// 吊销成功与 token 无效/已吊销均返回 200 空体，防枚举；客户端认证失败 401）
+#[utoipa::path(
+    post,
+    path = "/sso/revoke",
+    request_body(content = TokenParams, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 200, description = "吊销完成（RFC 7009，恒 200 空体，防枚举）"),
+        (status = 400, description = "协议参数错误"),
+        (status = 401, description = "invalid_client（带 WWW-Authenticate: Basic）"),
+        (status = 500, description = "server_error"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn revoke(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -435,6 +493,20 @@ pub async fn revoke(
 /// 客户端认证：`client_secret_basic` / `client_secret_post`（与 token/revoke 同口径）。
 /// 无论令牌有效与否，**已认证**的请求一律 200（`active: true/false`）——RFC 7662 §2.2
 /// 要求不得借错误码泄漏令牌存在性；只有客户端认证失败才 401。
+#[utoipa::path(
+    post,
+    path = "/sso/introspect",
+    request_body(content = TokenParams, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 200, description = "令牌内省结果（RFC 7662，active: true/false）", body = serde_json::Value),
+        (status = 400, description = "协议参数错误"),
+        (status = 401, description = "invalid_client（带 WWW-Authenticate: Basic）"),
+        (status = 404, description = "内省未启用（introspection_enabled=false）"),
+        (status = 500, description = "server_error"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn introspect(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -509,6 +581,18 @@ pub async fn introspect(
 /// 同意页的原生行为是直接 `<img src={logo_uri}>` 外链第三方主机——那会把用户 IP / Referer
 /// 泄漏给该主机。开启本开关后同意页改走同源本端点：服务端带 **SSRF 校验** 拉取（协议 +
 /// 主机解析双重检查）、限制体积与超时、只放行 `image/*`，并按客户端 id 短缓存。
+#[utoipa::path(
+    get,
+    path = "/sso/client-logo/{clientId}",
+    params(("clientId" = String, Path, description = "OIDC 客户端 ID")),
+    responses(
+        (status = 200, description = "同源代理的客户端 logo 图片", content_type = "image/*"),
+        (status = 404, description = "未开启代理 / 无 logo / 校验失败"),
+        (status = 500, description = "HTTP 客户端构建失败"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn client_logo(
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,
@@ -523,11 +607,10 @@ pub async fn client_logo(
     // 客户端改了 logo_uri 时靠 TTL 自然过期（1 小时）。
     let cache_key = format!("sso:logo:{}", client_id);
     let mut redis = state.redis.clone();
-    let cached_url: Option<String> = redis::cmd("GET")
-        .arg(&cache_key)
-        .query_async(&mut redis)
-        .await
-        .unwrap_or(None);
+    let cached_url: Option<String> =
+        crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&cache_key).query_async(&mut redis))
+            .await
+            .unwrap_or(None);
     let url = match cached_url.filter(|u| !u.is_empty()) {
         Some(u) => u,
         None => {
@@ -535,12 +618,14 @@ pub async fn client_logo(
                 // 无 logo / 未通过 SSRF 校验：404 让前端回落到首字母头像（不显示空白）
                 return StatusCode::NOT_FOUND.into_response();
             };
-            let _: Result<(), _> = redis::cmd("SETEX")
-                .arg(&cache_key)
-                .arg(LOGO_CACHE_TTL_SECS)
-                .arg(&url)
-                .query_async(&mut redis)
-                .await;
+            let _: Result<(), _> = crate::utils::redis::cmd_timeout(
+                redis::cmd("SETEX")
+                    .arg(&cache_key)
+                    .arg(LOGO_CACHE_TTL_SECS)
+                    .arg(&url)
+                    .query_async(&mut redis),
+            )
+            .await;
             url
         }
     };
@@ -599,6 +684,16 @@ const MAX_LOGO_BYTES: usize = 256 * 1024;
 const LOGO_CACHE_TTL_SECS: u64 = 3600;
 
 /// GET /sso/userinfo（Authorization: Bearer）
+#[utoipa::path(
+    get,
+    path = "/sso/userinfo",
+    responses(
+        (status = 200, description = "用户信息 claims（RFC 6750，Cache-Control: no-store）", body = serde_json::Value),
+        (status = 401, description = "invalid_token（带 WWW-Authenticate: Bearer）"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let bearer = match bearer_token(&headers) {
         Some(b) => b,
@@ -628,11 +723,10 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     };
     if let Some(key) = cache_key.as_deref() {
         let mut redis = state.redis.clone();
-        let hit: Option<String> = redis::cmd("GET")
-            .arg(key)
-            .query_async(&mut redis)
-            .await
-            .unwrap_or(None);
+        let hit: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(&mut redis))
+                .await
+                .unwrap_or(None);
         if let Some(raw) = hit
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
         {
@@ -651,12 +745,14 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             {
                 // best-effort 写入：失败只影响"下次是否命中缓存"，不影响本次响应
                 let mut redis = state.redis.clone();
-                let _: Result<(), _> = redis::cmd("SETEX")
-                    .arg(key)
-                    .arg(ttl)
-                    .arg(&raw)
-                    .query_async(&mut redis)
-                    .await;
+                let _: Result<(), _> = crate::utils::redis::cmd_timeout(
+                    redis::cmd("SETEX")
+                        .arg(key)
+                        .arg(ttl)
+                        .arg(&raw)
+                        .query_async(&mut redis),
+                )
+                .await;
             }
             with_no_store((StatusCode::OK, Json(claims)).into_response())
         }
@@ -685,6 +781,19 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 ///
 /// 回跳：`post_logout_redirect_uri` 精确命中该客户端登记白名单才 302（防开放重定向）；
 /// hint 无效时 fail-closed 不回跳。
+///
+/// 注：路由同时注册 GET 与 POST（`/sso/logout`），此处按 GET 记录。
+#[utoipa::path(
+    get,
+    path = "/sso/logout",
+    params(LogoutQuery),
+    responses(
+        (status = 200, description = "登出完成（无 post_logout_redirect_uri 时返回 JSON 状态）", body = serde_json::Value),
+        (status = 302, description = "重定向到 post_logout_redirect_uri（命中白名单时）"),
+    ),
+    security(()),
+    tag = "sso"
+)]
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -725,6 +834,17 @@ pub async fn logout(
 // ==================== 同意端点（受保护） ====================
 
 /// POST /sso/consent —— 返回 { redirect } 供前端跳转
+#[utoipa::path(
+    post,
+    path = "/sso/consent",
+    request_body = ConsentDto,
+    responses(
+        (status = 200, description = "同意/拒绝结果（返回跳转地址）", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "同意参数非法或同意票校验失败"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "sso"
+)]
 pub async fn consent(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -757,6 +877,16 @@ pub async fn consent(
 // ==================== 客户端管理（受保护） ====================
 
 /// GET /system/oauth/client/list
+#[utoipa::path(
+    get,
+    path = "/system/oauth/client/list",
+    params(SsoClientQueryDto),
+    responses(
+        (status = 200, description = "OIDC 客户端分页列表", body = TableDataInfo<SsoClientVo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -770,6 +900,16 @@ pub async fn client_list(
 }
 
 /// GET /system/oauth/client/{id}
+#[utoipa::path(
+    get,
+    path = "/system/oauth/client/{id}",
+    params(("id" = i64, Path, description = "客户端主键 ID")),
+    responses(
+        (status = 200, description = "客户端详情", body = AjaxResult<SsoClientVo>),
+        (status = 404, description = "客户端不存在"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_info(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -783,6 +923,16 @@ pub async fn client_info(
 }
 
 /// POST /system/oauth/client —— 新增（一次性返回明文 secret）
+#[utoipa::path(
+    post,
+    path = "/system/oauth/client",
+    request_body = SsoClientUpsertDto,
+    responses(
+        (status = 200, description = "新增成功（clientSecret 为一次性明文）", body = AjaxResult<crate::service::sso_service::SsoClientCreateResult>),
+        (status = 400, description = "参数错误或 client_id 重复"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_add(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -796,6 +946,17 @@ pub async fn client_add(
 }
 
 /// PUT /system/oauth/client —— 修改
+#[utoipa::path(
+    put,
+    path = "/system/oauth/client",
+    request_body = SsoClientUpsertDto,
+    responses(
+        (status = 200, description = "修改成功", body = AjaxResult<SsoClientVo>),
+        (status = 400, description = "参数错误"),
+        (status = 404, description = "客户端不存在"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -809,6 +970,16 @@ pub async fn client_edit(
 }
 
 /// DELETE /system/oauth/client/{ids}
+#[utoipa::path(
+    delete,
+    path = "/system/oauth/client/{ids}",
+    params(("ids" = String, Path, description = "客户端 ID 列表（逗号分隔）")),
+    responses(
+        (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "ID 不合法或超过批量上限"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_delete(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -834,6 +1005,20 @@ pub async fn client_delete(
 }
 
 /// PUT /system/oauth/client/{id}/status
+#[utoipa::path(
+    put,
+    path = "/system/oauth/client/{id}/status",
+    params(
+        ("id" = i64, Path, description = "客户端主键 ID"),
+        ToggleQuery,
+    ),
+    responses(
+        (status = 200, description = "启停成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "enabled 取值非法"),
+        (status = 404, description = "客户端不存在"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_toggle(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -857,6 +1042,16 @@ pub async fn client_toggle(
 ///
 /// 零停机语义：新密钥立即生效，旧密钥进入"双密钥读取期"（RP 换配期间不断服）；
 /// 响应中的 `clientSecret` 为**一次性明文**，请立即写入 RP 配置。
+#[utoipa::path(
+    post,
+    path = "/system/oauth/client/{id}/rotate-secret",
+    params(("id" = i64, Path, description = "客户端主键 ID")),
+    responses(
+        (status = 200, description = "轮换成功（clientSecret 为一次性明文）", body = AjaxResult<crate::service::sso_service::SsoClientRotateResult>),
+        (status = 404, description = "客户端不存在"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_rotate_secret(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -872,6 +1067,16 @@ pub async fn client_rotate_secret(
 /// DELETE /system/oauth/client/{id}/rotate-secret —— SSO D9：结束双密钥读取期。
 ///
 /// 清空旧密钥摘要 ⇒ 旧 `client_secret` 立即失效；幂等（本无过渡期时同样成功）。
+#[utoipa::path(
+    delete,
+    path = "/system/oauth/client/{id}/rotate-secret",
+    params(("id" = i64, Path, description = "客户端主键 ID")),
+    responses(
+        (status = 200, description = "已结束双密钥读取期（幂等）", body = AjaxResult<serde_json::Value>),
+        (status = 404, description = "客户端不存在"),
+    ),
+    tag = "sso"
+)]
 pub async fn client_clear_previous_secret(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -887,6 +1092,15 @@ pub async fn client_clear_previous_secret(
 // ==================== 自助授权管理（v4-R8：仅登录，无需管理权限） ====================
 
 /// GET /system/user/profile/sso-grants —— 当前用户"已授权应用"列表
+#[utoipa::path(
+    get,
+    path = "/system/user/profile/sso-grants",
+    responses(
+        (status = 200, description = "当前用户已授权应用列表", body = AjaxResult<Vec<crate::service::sso_service::SsoGrantVo>>),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "sso"
+)]
 pub async fn grant_list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -900,6 +1114,17 @@ pub async fn grant_list(
 }
 
 /// DELETE /system/user/profile/sso-grants/{clientId} —— 撤销对某应用的授权（级联吊销其名下 SSO AT）
+#[utoipa::path(
+    delete,
+    path = "/system/user/profile/sso-grants/{clientId}",
+    params(("clientId" = String, Path, description = "OIDC 客户端 ID")),
+    responses(
+        (status = 200, description = "撤销成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "clientId 为空"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "sso"
+)]
 pub async fn grant_revoke(
     State(state): State<Arc<AppState>>,
     operator: Operator,

@@ -118,14 +118,16 @@ impl ClusterLock {
             });
         }
         let value = uuid::Uuid::new_v4().to_string();
-        let acquired: Result<Option<String>, _> = redis::cmd("SET")
-            .arg(key)
-            .arg(&value)
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl_secs)
-            .query_async(redis)
-            .await;
+        let acquired: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(key)
+                .arg(&value)
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl_secs)
+                .query_async(redis),
+        )
+        .await;
         match acquired {
             Ok(Some(_)) => Some(Self {
                 key: key.to_string(),

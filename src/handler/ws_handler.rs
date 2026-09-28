@@ -102,14 +102,14 @@ async fn is_token_blacklisted(
     let token_hash = crate::utils::crypto::token_hash(token);
     let blacklist_key = format!("blacklist:{}", token_hash);
     let mut conn = state.redis.clone();
-    let is_blacklisted: Option<String> = redis::cmd("GET")
-        .arg(&blacklist_key)
-        .query_async(&mut conn)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "WebSocket 黑名单查询失败（fail-closed 拒绝连接）");
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
-        })?;
+    let is_blacklisted: Option<String> = crate::utils::redis::cmd_timeout(
+        redis::cmd("GET").arg(&blacklist_key).query_async(&mut conn),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "WebSocket 黑名单查询失败（fail-closed 拒绝连接）");
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    })?;
     Ok(is_blacklisted.is_some())
 }
 
@@ -129,14 +129,16 @@ async fn incr_ws_conn_count(state: &AppState, user_id: i64) -> Result<u32, axum:
         end
         return v
     "#;
-    let count: u32 = redis::cmd("EVAL")
-        .arg(script)
-        .arg(1) // number of keys
-        .arg(&key)
-        .arg(86400i64) // 24h TTL
-        .query_async(&mut conn)
-        .await
-        .map_err(|e| {
+    let count: u32 = crate::utils::redis::cmd_timeout(
+        redis::cmd("EVAL")
+            .arg(script)
+            .arg(1) // number of keys
+            .arg(&key)
+            .arg(86400i64) // 24h TTL
+            .query_async(&mut conn),
+    )
+    .await
+    .map_err(|e| {
             tracing::error!(user_id = user_id, error = %e, "WebSocket 连接计数 INCR 失败（fail-closed 拒绝连接）");
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         })?;
@@ -158,12 +160,14 @@ async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
         end
         return v
     "#;
-    let _: redis::RedisResult<i64> = redis::cmd("EVAL")
-        .arg(script)
-        .arg(1) // number of keys
-        .arg(&key)
-        .query_async(&mut conn)
-        .await;
+    let _: redis::RedisResult<i64> = crate::utils::redis::cmd_timeout(
+        redis::cmd("EVAL")
+            .arg(script)
+            .arg(1) // number of keys
+            .arg(&key)
+            .query_async(&mut conn),
+    )
+    .await;
 }
 
 /// 重置所有用户的 WebSocket 连接计数（服务启动时调用）
@@ -197,10 +201,10 @@ pub async fn reset_ws_conn_counts(state: &AppState) {
     let mut conn = state.redis.clone();
     // 第九批：逐键 DEL 改**分批 DEL**（不截断后条数无上界，往返数由 O(n) 降为 ceil(n/500)）
     for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
-        if let Err(e) = redis::cmd("DEL")
-            .arg(chunk)
-            .query_async::<i64>(&mut conn)
-            .await
+        if let Err(e) = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL").arg(chunk).query_async::<i64>(&mut conn),
+        )
+        .await
         {
             tracing::warn!(
                 "WebSocket 连接计数重置失败（批量 DEL {} 个）: {}",
@@ -261,6 +265,18 @@ impl Drop for WsConnGuard {
 /// 4. Redis 黑名单校验（C7-3：已登出 token 拒绝连接）
 /// 5. 连接数限制校验（C7-2：每用户最多 5 个并发连接）
 /// 6. 验证通过则升级为 WebSocket，订阅全局广播
+#[utoipa::path(
+    get,
+    path = "/ws",
+    responses(
+        (status = 101, description = "WebSocket 升级成功（实时通知推送）"),
+        (status = 401, description = "token 缺失/无效或已登出（黑名单）"),
+        (status = 429, description = "超过每用户最大并发连接数"),
+        (status = 503, description = "Redis 不可用（fail-closed 拒绝连接）"),
+    ),
+    security(()),
+    tag = "ws"
+)]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,

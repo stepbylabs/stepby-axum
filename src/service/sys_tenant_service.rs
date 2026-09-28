@@ -1913,18 +1913,20 @@ impl SysTenantService {
         };
         let expire_epoch = expire_time.map(|dt| dt.and_utc().timestamp()).unwrap_or(0);
         let mut redis = self.redis.clone();
-        let result: Result<(), redis::RedisError> = redis::pipe()
-            .cmd("SETEX")
-            .arg(tenant_state_key(tenant_id))
-            .arg(TENANT_RUNTIME_KEY_TTL_SECS)
-            .arg(state)
-            .cmd("SETEX")
-            .arg(tenant_expire_key(tenant_id))
-            .arg(TENANT_RUNTIME_KEY_TTL_SECS)
-            .arg(expire_epoch)
-            .query_async(&mut redis)
-            .await
-            .map(|_: Vec<String>| ());
+        let result: Result<(), redis::RedisError> = crate::utils::redis::cmd_timeout(
+            redis::pipe()
+                .cmd("SETEX")
+                .arg(tenant_state_key(tenant_id))
+                .arg(TENANT_RUNTIME_KEY_TTL_SECS)
+                .arg(state)
+                .cmd("SETEX")
+                .arg(tenant_expire_key(tenant_id))
+                .arg(TENANT_RUNTIME_KEY_TTL_SECS)
+                .arg(expire_epoch)
+                .query_async(&mut redis),
+        )
+        .await
+        .map(|_: Vec<String>| ());
         if let Err(e) = result {
             // 键写入失败不阻断业务（DB 仍为事实源，登录闸门每次查库；此处仅影响已登录会话的即时性）
             tracing::warn!(tenant_id, error = %e, "租户运行时键写入失败（Redis 异常）");
@@ -1958,7 +1960,11 @@ impl SysTenantService {
         let values: Vec<Option<String>> = if keys.is_empty() {
             Vec::new()
         } else {
-            match redis::cmd("MGET").arg(&keys).query_async(&mut redis).await {
+            match crate::utils::redis::cmd_timeout(
+                redis::cmd("MGET").arg(&keys).query_async(&mut redis),
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(tenant_id, error = %e, "租户踢线：MGET online 失败");
@@ -2001,10 +2007,10 @@ impl SysTenantService {
         let rt_values: Vec<Option<String>> = if rt_keys.is_empty() {
             Vec::new()
         } else {
-            match redis::cmd("MGET")
-                .arg(&rt_keys)
-                .query_async(&mut redis)
-                .await
+            match crate::utils::redis::cmd_timeout(
+                redis::cmd("MGET").arg(&rt_keys).query_async(&mut redis),
+            )
+            .await
             {
                 Ok(v) => v,
                 Err(e) => {
@@ -2087,10 +2093,10 @@ impl SysTenantService {
         let mut rt_revoked = 0u64;
         for chunk in rt_hashes.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
             let keys: Vec<String> = chunk.iter().map(|h| format!("sso:rt:{h}")).collect();
-            match redis::cmd("DEL")
-                .arg(&keys)
-                .query_async::<i64>(&mut redis)
-                .await
+            match crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL").arg(&keys).query_async::<i64>(&mut redis),
+            )
+            .await
             {
                 Ok(n) => rt_revoked += n.max(0) as u64,
                 Err(e) => {

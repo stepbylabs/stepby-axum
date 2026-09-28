@@ -145,14 +145,16 @@ pub async fn idempotency_middleware(
         IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key
     );
     let mut redis = state.redis.clone();
-    let set_result: Result<Option<String>, _> = redis::cmd("SET")
-        .arg(&redis_key)
-        .arg("1")
-        .arg("NX")
-        .arg("EX")
-        .arg(IDEMPOTENCY_TTL_SECS)
-        .query_async(&mut redis)
-        .await;
+    let set_result: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
+        redis::cmd("SET")
+            .arg(&redis_key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(IDEMPOTENCY_TTL_SECS)
+            .query_async(&mut redis),
+    )
+    .await;
 
     let acquired = match set_result {
         Ok(Some(_)) => true, // SET NX 成功，首次请求
@@ -203,10 +205,12 @@ pub async fn idempotency_middleware(
     if !status.is_success() {
         // 失败响应释放槽位，允许客户端重试
         // best-effort：DEL 失败不影响响应返回，槽位会在 TTL 后自动过期
-        if let Err(e) = redis::cmd("DEL")
-            .arg(&redis_key)
-            .query_async::<()>(&mut redis)
-            .await
+        if let Err(e) = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL")
+                .arg(&redis_key)
+                .query_async::<()>(&mut redis),
+        )
+        .await
         {
             tracing::warn!(
                 error = %e,

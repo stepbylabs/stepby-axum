@@ -236,14 +236,17 @@ async fn count_online_sessions(state: &Arc<AppState>, tenant_scope: Option<i64>)
         return keys.len() as i64;
     };
 
-    let values: Vec<Option<String>> =
-        match redis::cmd("MGET").arg(&keys).query_async(&mut redis).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Redis MGET online 失败，dashboard 在线数降级为 0: {}", e);
-                return 0;
-            }
-        };
+    let values: Vec<Option<String>> = match crate::utils::redis::cmd_timeout(
+        redis::cmd("MGET").arg(&keys).query_async(&mut redis),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Redis MGET online 失败，dashboard 在线数降级为 0: {}", e);
+            return 0;
+        }
+    };
 
     let sessions: Vec<OnlineSession> = values
         .iter()

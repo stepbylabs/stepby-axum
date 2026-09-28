@@ -23,22 +23,23 @@ use crate::common::ValidatedJson;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
-use crate::entity::sys_web_hook::Model as SysWebHookModel;
 use crate::entity::sys_web_hook_log::Model as SysWebHookLogModel;
 use crate::middleware::Operator;
 use crate::service::sys_web_hook_service::{
-    WebHookAddDto, WebHookEditDto, WebHookLogQueryDto, WebHookQueryDto, WebHookTestDto,
+    WebHookAddDto, WebHookEditDto, WebHookLogQueryDto, WebHookQueryDto, WebHookTestDto, WebHookVo,
 };
 use crate::state::AppState;
 use crate::utils::parse_id_list;
 
 /// GET /monitor/webHook/list —— 分页查询回调配置
+///
+/// 出参为脱敏 VO（[`WebHookVo`]）：**不含**签名密钥 `secret`，仅以 `hasSecret` 标注。
 #[utoipa::path(
     get,
     path = "/monitor/webHook/list",
     params(WebHookQueryDto),
     responses(
-        (status = 200, description = "查询成功", body = TableDataInfo<SysWebHookModel>),
+        (status = 200, description = "查询成功", body = TableDataInfo<WebHookVo>),
         (status = 500, description = "服务器错误"),
     ),
     tag = "monitor-webhook"
@@ -47,7 +48,7 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     Query(query): Query<WebHookQueryDto>,
-) -> Result<TableDataInfo<SysWebHookModel>, AppError> {
+) -> Result<TableDataInfo<WebHookVo>, AppError> {
     let (rows, total) = state
         .web_hook_service
         .list(query, operator.tenant_id())
@@ -56,12 +57,14 @@ pub async fn list(
 }
 
 /// GET /monitor/webHook/{id} —— 查询回调详情
+///
+/// 出参为脱敏 VO（[`WebHookVo`]）：**不含**签名密钥 `secret`，仅以 `hasSecret` 标注。
 #[utoipa::path(
     get,
     path = "/monitor/webHook/{id}",
     params(("id" = i64, Path, description = "回调 ID")),
     responses(
-        (status = 200, description = "查询成功", body = AjaxResult<SysWebHookModel>),
+        (status = 200, description = "查询成功", body = AjaxResult<WebHookVo>),
         (status = 404, description = "回调不存在"),
     ),
     tag = "monitor-webhook"
@@ -70,12 +73,12 @@ pub async fn get_info(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     Path(id): Path<i64>,
-) -> Result<AjaxResult<SysWebHookModel>, AppError> {
-    let model = state
+) -> Result<AjaxResult<WebHookVo>, AppError> {
+    let vo = state
         .web_hook_service
-        .get_by_id(id, operator.tenant_id())
+        .detail(id, operator.tenant_id())
         .await?;
-    Ok(AjaxResult::success(model))
+    Ok(AjaxResult::success(vo))
 }
 
 /// POST /monitor/webHook —— 新增回调配置
@@ -215,27 +218,27 @@ pub async fn export(
         ExcelColumn {
             key: "id",
             header: ("ID", "ID"),
-            getter: |r: &SysWebHookModel| CellValue::Number(r.id as f64),
+            getter: |r: &WebHookVo| CellValue::Number(r.id as f64),
         },
         ExcelColumn {
             key: "hookName",
             header: ("回调名称", "Hook Name"),
-            getter: |r: &SysWebHookModel| CellValue::Text(r.hook_name.clone().into()),
+            getter: |r: &WebHookVo| CellValue::Text(r.hook_name.clone().into()),
         },
         ExcelColumn {
             key: "eventTypes",
             header: ("事件类型", "Event Types"),
-            getter: |r: &SysWebHookModel| CellValue::Text(r.event_types.clone().into()),
+            getter: |r: &WebHookVo| CellValue::Text(r.event_types.clone().into()),
         },
         ExcelColumn {
             key: "targetUrl",
             header: ("目标 URL", "Target URL"),
-            getter: |r: &SysWebHookModel| CellValue::Text(r.target_url.clone().into()),
+            getter: |r: &WebHookVo| CellValue::Text(r.target_url.clone().into()),
         },
         ExcelColumn {
             key: "status",
             header: ("状态", "Status"),
-            getter: |r: &SysWebHookModel| {
+            getter: |r: &WebHookVo| {
                 CellValue::Text(
                     (if r.status == "0" {
                         crate::tr!("common.enabled")
@@ -249,7 +252,7 @@ pub async fn export(
         ExcelColumn {
             key: "createTime",
             header: ("创建时间", "Create Time"),
-            getter: |r: &SysWebHookModel| CellValue::from_opt_datetime(r.create_time),
+            getter: |r: &WebHookVo| CellValue::from_opt_datetime(r.create_time),
         },
     ];
     export_to_excel(

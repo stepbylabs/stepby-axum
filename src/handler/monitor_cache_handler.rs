@@ -169,33 +169,35 @@ pub async fn get_cache(
     let mut redis = state.redis.clone();
 
     // 1. 获取 Redis INFO 全量信息
-    let info_text: String = redis::cmd("INFO")
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!("执行 Redis INFO 失败: {}", e);
-            AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
-        })?;
+    let info_text: String =
+        crate::utils::redis::cmd_timeout(redis::cmd("INFO").query_async(&mut redis))
+            .await
+            .map_err(|e| {
+                tracing::error!("执行 Redis INFO 失败: {}", e);
+                AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
+            })?;
     let info = parse_redis_info(&info_text);
 
     // 2. 获取当前数据库键数量
-    let db_size: i64 = redis::cmd("DBSIZE")
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!("执行 Redis DBSIZE 失败: {}", e);
-            AppError::internal(&crate::tr!("error.cache.key_count_failed"))
-        })?;
+    let db_size: i64 =
+        crate::utils::redis::cmd_timeout(redis::cmd("DBSIZE").query_async(&mut redis))
+            .await
+            .map_err(|e| {
+                tracing::error!("执行 Redis DBSIZE 失败: {}", e);
+                AppError::internal(&crate::tr!("error.cache.key_count_failed"))
+            })?;
 
     // 3. 获取命令统计
-    let cmd_text: String = redis::cmd("INFO")
-        .arg("commandstats")
-        .query_async(&mut redis)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("Redis INFO commandstats 查询失败: {}", e);
-            String::new()
-        });
+    let cmd_text: String = crate::utils::redis::cmd_timeout(
+        redis::cmd("INFO")
+            .arg("commandstats")
+            .query_async(&mut redis),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("Redis INFO commandstats 查询失败: {}", e);
+        String::new()
+    });
     let command_stats = parse_command_stats(&cmd_text);
 
     Ok(AjaxResult::success(CacheOverview {
@@ -278,14 +280,13 @@ pub async fn get_hot_keys(
     let mut list = Vec::with_capacity(ranked.len());
     for (key, memory_bytes) in ranked {
         // 非 string 键用 TYPE 标注类型（MEMORY USAGE 对任意类型键均返回字节数）
-        let key_type: String = redis::cmd("TYPE")
-            .arg(&key)
-            .query_async(&mut redis)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis TYPE 查询失败: {}", e);
-                "unknown".to_string()
-            });
+        let key_type: String =
+            crate::utils::redis::cmd_timeout(redis::cmd("TYPE").arg(&key).query_async(&mut redis))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Redis TYPE 查询失败: {}", e);
+                    "unknown".to_string()
+                });
         list.push(HotKey {
             key,
             key_type,
@@ -402,25 +403,27 @@ pub async fn get_value(
     let mut redis = state.redis.clone();
 
     // 查询键的类型，非 string 类型不支持预览
-    let key_type: String = redis::cmd("TYPE")
-        .arg(&cache_key)
-        .query_async(&mut redis)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("Redis TYPE 查询失败: {}", e);
-            "unknown".to_string()
-        });
+    let key_type: String = crate::utils::redis::cmd_timeout(
+        redis::cmd("TYPE").arg(&cache_key).query_async(&mut redis),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("Redis TYPE 查询失败: {}", e);
+        "unknown".to_string()
+    });
 
     let cache_value = if key_type == "string" {
-        let raw = redis::cmd("GET")
-            .arg(&cache_key)
-            .query_async::<Option<String>>(&mut redis)
-            .await
-            .map_err(|e| {
-                tracing::error!("Redis GET 查询失败: {}", e);
-                AppError::internal(&crate::tr!("error.cache.value_query_failed"))
-            })?
-            .unwrap_or_default();
+        let raw = crate::utils::redis::cmd_timeout(
+            redis::cmd("GET")
+                .arg(&cache_key)
+                .query_async::<Option<String>>(&mut redis),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis GET 查询失败: {}", e);
+            AppError::internal(&crate::tr!("error.cache.value_query_failed"))
+        })?
+        .unwrap_or_default();
         // SSO 绑定（username/email/nick_name，v4 F4-1）与在线会话（username/ip，v5-S3）
         // 展示前按前缀选字段集脱敏
         if cache_key.starts_with("sso:") {
@@ -505,14 +508,13 @@ pub async fn clear_cache_key(
     validate_cache_prefix(&cache_key)?;
     let mut redis = state.redis.clone();
 
-    let deleted: i64 = redis::cmd("DEL")
-        .arg(&cache_key)
-        .query_async(&mut redis)
-        .await
-        .map_err(|e| {
-            tracing::error!("执行 Redis DEL {} 失败: {}", cache_key, e);
-            AppError::internal(&crate::tr!("error.cache.key_clear_failed"))
-        })?;
+    let deleted: i64 =
+        crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&cache_key).query_async(&mut redis))
+            .await
+            .map_err(|e| {
+                tracing::error!("执行 Redis DEL {} 失败: {}", cache_key, e);
+                AppError::internal(&crate::tr!("error.cache.key_clear_failed"))
+            })?;
 
     if deleted == 0 {
         return Ok(AjaxResult::success_msg(&crate::tr!(
@@ -627,10 +629,12 @@ async fn compute_key_memory(
     for k in keys {
         pipe.cmd("MEMORY").arg("USAGE").arg(k);
     }
-    let vals: Vec<Option<i64>> = pipe.query_async(redis).await.map_err(|e| {
-        tracing::error!("执行 Redis MEMORY USAGE 批量查询失败: {}", e);
-        AppError::internal(&crate::tr!("error.cache.memory_usage_failed"))
-    })?;
+    let vals: Vec<Option<i64>> = crate::utils::redis::cmd_timeout(pipe.query_async(redis))
+        .await
+        .map_err(|e| {
+            tracing::error!("执行 Redis MEMORY USAGE 批量查询失败: {}", e);
+            AppError::internal(&crate::tr!("error.cache.memory_usage_failed"))
+        })?;
     Ok(keys.iter().cloned().zip(vals).collect())
 }
 
@@ -650,10 +654,12 @@ async fn delete_keys(
         for k in chunk {
             cmd.arg(k);
         }
-        let n: i64 = cmd.query_async(redis).await.map_err(|e| {
-            tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
-            AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
-        })?;
+        let n: i64 = crate::utils::redis::cmd_timeout(cmd.query_async(redis))
+            .await
+            .map_err(|e| {
+                tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
+                AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
+            })?;
         deleted += n.max(0);
     }
     Ok(deleted)
