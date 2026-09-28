@@ -191,6 +191,14 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化前端错误 device_type 列失败: {}", e))?;
 
+        // 3.5d-5 数据看板菜单去重兜底：与迁移 m20260928_000003_dedupe_dashboard_menu
+        // 等价（启动不跑 Migrator::up）。m20260801_000002 查重条件漏顶级 132 导致
+        // 存量库出现两条「数据看板」菜单（132 顶级 + 系统管理下动态 id），菜单树
+        // 渲染两个入口。此处幂等删除 parent_id=1 的重复行（保留顶级 132）。
+        ensure_dashboard_menu_dedupe(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("数据看板菜单去重失败: {}", e))?;
+
         // 3.5d-4 租户自建导航 L3 页面菜单（批次 3）：与迁移
         // m20260926_000014_tenant_nav_menu 等价（启动不跑 Migrator::up）。
         // 缺此兜底时存量库无 3627 页面菜单 ⇒ 能力位开启后租户侧仍无入口（假功能）。
@@ -1495,6 +1503,33 @@ fn init_webauthn_output(settings: &Settings) {
             );
         }
     }
+}
+
+/// 数据看板菜单去重兜底（与迁移 m20260928_000003_dedupe_dashboard_menu 等价，全幂等）：
+/// 删除「系统管理」下与顶级 132 重复的 dashboard 菜单（m20260801_000002 查重条件
+/// 带 parent_id=1 漏判顶级 132 所致的重复注册）。重复执行为 no-op。
+async fn ensure_dashboard_menu_dedupe(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let dedup_rows = db
+        .execute(Statement::from_string(
+            backend,
+            "DELETE FROM sys_role_menu WHERE menu_id IN (
+                SELECT menu_id FROM sys_menu
+                WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index'
+            )",
+        ))
+        .await?;
+    let deleted = db
+        .execute(Statement::from_string(
+            backend,
+            "DELETE FROM sys_menu WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index'",
+        ))
+        .await?;
+    let rows = deleted.rows_affected() + dedup_rows.rows_affected();
+    if rows > 0 {
+        tracing::info!("数据看板重复菜单已清理 {} 行（存量库兜底）", rows);
+    }
+    Ok(())
 }
 
 /// 前端错误日志 device_type 列兜底（FCP-011，与迁移

@@ -87,6 +87,7 @@ pub use m20260927_000001_oauth_client_prev_secret::Migration as M20260927OauthCl
 pub use m20260927_000002_sys_user_credential::Migration as M20260927SysUserCredential;
 pub use m20260928_000001_sys_dept_ancestors_width::Migration as M20260928SysDeptAncestorsWidth;
 pub use m20260928_000002_frontend_error_device_type::Migration as M20260928FrontendErrorDeviceType;
+pub use m20260928_000003_dedupe_dashboard_menu::Migration as M20260928DedupeDashboardMenu;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -172,6 +173,7 @@ mod m20260927_000001_oauth_client_prev_secret;
 mod m20260927_000002_sys_user_credential;
 mod m20260928_000001_sys_dept_ancestors_width;
 mod m20260928_000002_frontend_error_device_type;
+mod m20260928_000003_dedupe_dashboard_menu;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -343,6 +345,8 @@ impl MigratorTrait for Migrator {
             // FCP-011：sys_frontend_error 增加 device_type 列（Web Vitals 移动端分桶）
             //（存量库启动由 ensure_frontend_error_device_type 幂等兜底）
             Box::new(M20260928FrontendErrorDeviceType),
+            // 数据看板菜单去重（m20260801_000002 与 m20260729 重复注册，保留顶级 132）
+            Box::new(M20260928DedupeDashboardMenu),
         ]
     }
 }
