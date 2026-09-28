@@ -98,9 +98,9 @@ pub mod sys_job_router;
   - `execute_task(job)` — 核心执行逻辑：并发检查 → 标记 → 查表 → 超时执行 → 写日志 → 清除标记
 
 - [ ] 3.3 实现 `register_builtin_tasks()` 注册内置任务：
-  - `ryTask.ryNoParams` → 返回 Ok("ryNoParams 执行成功")
-  - `ryTask.ryParams('ry')` → 返回 Ok("ryParams 执行成功，参数: ry")
-  - `ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100)` → 返回 Ok("ryMultipleParams 执行成功")
+  - `demoTask.demoNoParams` → 返回 Ok("demoNoParams 执行成功")
+  - `demoTask.demoParams('demo')` → 返回 Ok("demoParams 执行成功，参数: ry")
+  - `demoTask.demoMultipleParams('demo', true, 2000L, 316.5F, 100)` → 返回 Ok("demoMultipleParams 执行成功")
 
 - [ ] 3.4 在 `src/common/error.rs` 新增 `From<SchedulerError> for ServiceError` 实现
 
