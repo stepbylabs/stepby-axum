@@ -95,7 +95,7 @@ async fn admin_todo_task_for(ctx: &TestContext, doc_id: i64, node_seq: Option<i6
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_single_mode_full_chain() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_single", "single").await;
 
@@ -140,7 +140,7 @@ async fn test_flow_single_mode_full_chain() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_reject_then_resubmit() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_reject", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -183,7 +183,7 @@ async fn test_flow_reject_then_resubmit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_withdraw() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_withdraw", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -235,7 +235,7 @@ async fn test_flow_withdraw() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_countersign_mode() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_countersign", "countersign").await;
 
@@ -283,7 +283,7 @@ async fn test_flow_countersign_mode() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_horizontal_forbidden() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_forbidden", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -347,7 +347,7 @@ async fn test_flow_admin_list() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_transfer_back_to_applicant_rejected() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_transfer", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -393,7 +393,7 @@ async fn test_flow_concurrent_approve_exactly_one_wins() {
     use futures::future::join_all;
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_concurrent", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -449,7 +449,7 @@ async fn test_flow_concurrent_approve_exactly_one_wins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_pat_boundary() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     // 1) ry 提交一张 single 单据：admin（部门主管）持有第一级待办
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_pat", "single").await;
@@ -570,12 +570,12 @@ async fn test_flow_doc_scope_filtering() {
     use crate::repository::flow_demo_doc::{FlowDemoDocRepository, FlowDocScope};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_scope", "single").await;
 
     // 取 ry 的 user_id 与部门（单据 dept_id 为提交人部门快照）
     let ry = crate::entity::sys_user::Entity::find()
-        .filter(crate::entity::sys_user::Column::UserName.eq("yebot"))
+        .filter(crate::entity::sys_user::Column::UserName.eq("stepby"))
         .one(&ctx.state.db)
         .await
         .expect("查询 ry 失败")
@@ -646,7 +646,7 @@ async fn test_flow_user_disabled_auto_transfer() {
     use sea_orm::{EntityTrait, Set};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     // 1) 新建"离岗"用户（部门 103），并固定部门 103 主管 = admin(1)（保证转办目标确定）
     ctx.post_json(
@@ -655,9 +655,9 @@ async fn test_flow_user_disabled_auto_transfer() {
             "deptId": 103,
             "userName": "it_flow_leave",
             "nickName": "离岗测试",
-            "email": "it.flow.leave@yebot.dev",
+            "email": "stepby@tzkj.net",
             "phonenumber": "13800005555",
-            "password": "Yebot@12345",
+            "password": "Stepby@12345",
             "status": "0",
             "roleIds": [2]
         }),
@@ -754,7 +754,7 @@ async fn test_flow_user_disabled_auto_transfer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_countersign_add() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     // 1) 建加签目标用户并登录
     ctx.post_json(
@@ -763,9 +763,9 @@ async fn test_flow_countersign_add() {
             "deptId": 103,
             "userName": "it_flow_cs",
             "nickName": "加签目标",
-            "email": "it.flow.cs@yebot.dev",
+            "email": "stepby@tzkj.net",
             "phonenumber": "13800006666",
-            "password": "Yebot@12345",
+            "password": "Stepby@12345",
             "status": "0",
             "roleIds": [2]
         }),
@@ -775,7 +775,13 @@ async fn test_flow_countersign_add() {
     let cs_uid = v["rows"][0]["userId"]
         .as_i64()
         .expect("应查到加签目标 userId");
-    let cs_token = super::login(&ctx.app, super::next_peer_ip(), "it_flow_cs", "Yebot@12345").await;
+    let cs_token = super::login(
+        &ctx.app,
+        super::next_peer_ip(),
+        "it_flow_cs",
+        "Stepby@12345",
+    )
+    .await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_countersign_add", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -870,7 +876,7 @@ async fn test_flow_countersign_add() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_done_view() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_done", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -927,7 +933,7 @@ async fn test_flow_timeout_scan_idempotent() {
     use sea_orm::{EntityTrait, Set};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_timeout", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
@@ -996,7 +1002,7 @@ async fn test_flow_timeout_escalation() {
     use sea_orm::{EntityTrait, Set};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     // 建一个非 admin 的待办持有人（部门 103 主管固定为 admin(1)）
     ctx.post_json(
@@ -1005,9 +1011,9 @@ async fn test_flow_timeout_escalation() {
             "deptId": 103,
             "userName": "it_flow_esc",
             "nickName": "升级测试",
-            "email": "it.flow.esc@yebot.dev",
+            "email": "stepby@tzkj.net",
             "phonenumber": "13800007777",
-            "password": "Yebot@12345",
+            "password": "Stepby@12345",
             "status": "0",
             "roleIds": [2]
         }),
@@ -1089,7 +1095,7 @@ async fn test_flow_export_excel() {
     use tower::ServiceExt;
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "yebot", "admin123").await;
+    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_export", "single").await;
 
     // 导出走表单编码（前端 download() 同款）

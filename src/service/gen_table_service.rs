@@ -754,11 +754,11 @@ impl GenTableService {
             class_name: Set(Some(class_name.clone())),
             tpl_category: Set(Some("crud".to_string())),
             tpl_web_type: Set(Some("element-plus".to_string())),
-            package_name: Set(Some("yebot".to_string())),
+            package_name: Set(Some("stepby".to_string())),
             module_name: Set(Some("system".to_string())),
             business_name: Set(Some(table_name.replace('_', ""))),
             function_name: Set(Some(class_name.clone())),
-            function_author: Set(Some("yebot".to_string())),
+            function_author: Set(Some("stepby".to_string())),
             gen_type: Set(Some("0".to_string())),
             gen_path: Set(Some("/".to_string())),
             options: Set(None),
@@ -1753,11 +1753,11 @@ mod gen_table_template_tests {
             class_name: Some("SysUser".to_string()),
             tpl_category: Some("crud".to_string()),
             tpl_web_type: Some("element-plus".to_string()),
-            package_name: Some("yebot".to_string()),
+            package_name: Some("stepby".to_string()),
             module_name: Some("system".to_string()),
             business_name: Some("user".to_string()),
             function_name: Some("用户管理".to_string()),
-            function_author: Some("yebot".to_string()),
+            function_author: Some("stepby".to_string()),
             gen_type: Some("0".to_string()),
             gen_path: Some("/".to_string()),
             options: None,
@@ -2127,7 +2127,7 @@ mod gen_table_template_tests {
     /// 【第七轮】生成**前端**产物必须能通过 `vue-tsc --noEmit` 的回归锁。
     ///
     /// 背景：`api.tera` / `index.tera` 此前也从未被类型检查过。第七轮把 flow 分类渲染的
-    /// `.ts` / `.vue` 落到 yebot-ui 真实路径并跑 `vue-tsc --noEmit`，暴露 3 处真实缺陷：
+    /// `.ts` / `.vue` 落到 stepby-ui 真实路径并跑 `vue-tsc --noEmit`，暴露 3 处真实缺陷：
     /// ① `import { list } from '@/api/...'` 与页面内 `const list = ref([])` **重名冲突**
     ///    （TS2440）——**crud 与 flow 的所有生成页面都编译失败**；
     /// ② `:row-key="(row) => row.id"` 参数隐式 any（TS7006，本仓 `noImplicitAny`）；

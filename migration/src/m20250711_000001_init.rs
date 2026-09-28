@@ -1219,15 +1219,15 @@ async fn set_auto_increment(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 // ========== 初始数据插入 ==========
 
 /// 插入 sys_user 初始数据（admin + ry）
-/// 密码均为 admin123，盐值 yebot_admin，MD5(明文+盐值)
+/// 密码均为 admin123，盐值 stepby_admin，MD5(明文+盐值)
 async fn insert_sys_user(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
     let sqls = [
         format!(
-            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (1, 103, 'admin', 'Yebot管理员', '00', 'admin@yebot.dev', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '管理员')"
+            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (1, 103, 'admin', 'Stepby管理员', '00', 'stepby@tzkj.net', '15888888888', '0', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '管理员')"
         ),
         format!(
-            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (2, 105, 'yebot', 'Yebot', '00', 'ry@yebot.dev', '15666666666', '1', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '测试员')"
+            "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES (2, 105, 'stepby', 'Stepby', '00', 'stepby@tzkj.net', '15666666666', '1', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', '127.0.0.1', {now}, 'admin', {now}, '测试员')"
         ),
     ];
     for sql in sqls {
@@ -1263,7 +1263,7 @@ async fn insert_sys_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 (1, '系统管理', 0, 1, 'system', NULL, '', '', '1', '0', 'M', '0', '0', '', 'system', 'admin', {now}, '系统管理目录', '0'), \
 (2, '系统监控', 0, 2, 'monitor', NULL, '', '', '1', '0', 'M', '0', '0', '', 'monitor', 'admin', {now}, '系统监控目录', '0'), \
 (3, '系统工具', 0, 3, 'tool', NULL, '', '', '1', '0', 'M', '0', '0', '', 'tool', 'admin', {now}, '系统工具目录', '0'), \
-(4, 'Yebot官网', 0, 4, 'https://yebot.dev', NULL, '', '', '0', '0', 'M', '0', '0', '', 'guide', 'admin', {now}, 'Yebot官网地址', '0'), \
+(4, 'Stepby官网', 0, 4, 'https://stepby.tzkj.net', NULL, '', '', '0', '0', 'M', '0', '0', '', 'guide', 'admin', {now}, 'Stepby官网地址', '0'), \
 (100, '用户管理', 1, 1, 'user', 'system/user/index', '', '', '1', '0', 'C', '0', '0', 'system:user:list', 'user', 'admin', {now}, '用户管理菜单', '0'), \
 (101, '角色管理', 1, 2, 'role', 'system/role/index', '', '', '1', '0', 'C', '0', '0', 'system:role:list', 'peoples', 'admin', {now}, '角色管理菜单', '0'), \
 (102, '菜单管理', 1, 3, 'menu', 'system/menu/index', '', '', '1', '0', 'C', '0', '0', 'system:menu:list', 'tree-table', 'admin', {now}, '菜单管理菜单', '0'), \
@@ -1451,27 +1451,27 @@ async fn insert_sys_job(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     Ok(())
 }
 
-/// 插入 sys_dept 初始数据（Yebot 标准 5 级部门树）
+/// 插入 sys_dept 初始数据（Stepby 标准 5 级部门树）
 async fn insert_sys_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
     let sql = format!(
         "sys_dept (dept_id, parent_id, ancestors, dept_name, order_num, leader, phone, email, status, del_flag, create_by, create_time) VALUES \
-(100, 0, '0', 'Yebot科技', 0, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(101, 100, '0,100', '深圳总公司', 1, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(102, 100, '0,100', '长沙分公司', 2, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(103, 101, '0,100,101', '研发部门', 1, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(104, 101, '0,100,101', '市场部门', 2, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(105, 101, '0,100,101', '测试部门', 3, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(106, 101, '0,100,101', '财务部门', 4, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(107, 101, '0,100,101', '运维部门', 5, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(108, 102, '0,100,102', '市场部门', 1, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now}), \
-(109, 102, '0,100,102', '财务部门', 2, 'Yebot', '15888888888', 'admin@yebot.dev', '0', '0', 'admin', {now})"
+(100, 0, '0', 'Stepby科技', 0, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(101, 100, '0,100', '深圳总公司', 1, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(102, 100, '0,100', '长沙分公司', 2, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(103, 101, '0,100,101', '研发部门', 1, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(104, 101, '0,100,101', '市场部门', 2, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(105, 101, '0,100,101', '测试部门', 3, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(106, 101, '0,100,101', '财务部门', 4, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(107, 101, '0,100,101', '运维部门', 5, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(108, 102, '0,100,102', '市场部门', 1, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now}), \
+(109, 102, '0,100,102', '财务部门', 2, 'Stepby', '15888888888', 'stepby@tzkj.net', '0', '0', 'admin', {now})"
     );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
 }
 
-/// 插入 sys_post 初始数据（Yebot 标准 4 个岗位）
+/// 插入 sys_post 初始数据（Stepby 标准 4 个岗位）
 async fn insert_sys_post(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
     let sql = format!(
@@ -1557,7 +1557,7 @@ async fn create_sys_config(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     Ok(())
 }
 
-/// 插入 sys_config 初始数据（Yebot 标准参数配置）
+/// 插入 sys_config 初始数据（Stepby 标准参数配置）
 async fn insert_sys_config(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
     let sql = format!(
@@ -1617,13 +1617,13 @@ async fn create_sys_notice(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     Ok(())
 }
 
-/// 插入 sys_notice 初始数据（Yebot 标准 2 条通知公告）
+/// 插入 sys_notice 初始数据（Stepby 标准 2 条通知公告）
 async fn insert_sys_notice(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);
     let sql = format!(
         "sys_notice (notice_id, notice_title, notice_type, notice_content, status, create_by, create_time, remark) VALUES \
-(1, '温馨提醒：Yebot管理系统新版本发布啦', '2', '新版本内容', '0', 'admin', {now}, '管理员'), \
-(2, '维护通知：Yebot系统凌晨维护', '1', '维护内容', '0', 'admin', {now}, '管理员')",
+(1, '温馨提醒：Stepby管理系统新版本发布啦', '2', '新版本内容', '0', 'admin', {now}, '管理员'), \
+(2, '维护通知：Stepby系统凌晨维护', '1', '维护内容', '0', 'admin', {now}, '管理员')",
         now = now
     );
     execute_idempotent_insert(manager, &sql).await?;

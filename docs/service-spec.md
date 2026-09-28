@@ -3,7 +3,7 @@
 > **阶段：** 第三阶段「用户/角色/菜单 Service 层业务实现」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **开发优先原则：** 接口契约对齐 stepby-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -17,7 +17,7 @@
 2. **事务控制**：核心多表操作使用 SeaORM `TransactionTrait` 真事务（修正旧实现事务形同虚设的缺陷）
 3. **参数校验**：使用 `garde` crate 对 DTO 进行结构化校验
 4. **业务规则**：补齐查重、级联清理、超管保护等业务规则
-5. **密码安全**：复用已有 `utils::password` 模块（Argon2id 为主算法，"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 验证 fallback，不兼容旧数据）
+5. **密码安全**：复用已有 `utils::password` 模块（Argon2id 为主算法，"stepby_admin" 仅作 LEGACY_SALT 用于旧 MD5 验证 fallback，不兼容旧数据）
 6. **树形组装**：复用已有 `utils::tree::build_tree` 工具函数，规避 O(n²) 递归 clone 问题
 
 ### 1.2 模块清单
@@ -120,7 +120,7 @@ Service 方法入口处统一调用 `dto.validate()?` 进行校验，校验失�
 | 个人中心改密 | `encrypt_password(新明文)` 后入库 | `verify_password(旧明文, 旧密文)` 比对 |
 | 登录校验 | — | `verify_password(输入明文, 库中密文)` 比对 |
 
-> **盐值说明：** 本项目密码算法为 Argon2id（每用户独立随机盐），"yebot_admin" 仅作 LEGACY_SALT 用于旧 MD5 哈希的验证 fallback（升级前已存在的用户密码）。初始数据密码均为 `admin123`。数据库密码与旧数据**不兼容**，新部署需使用 Argon2id 生成的密码。
+> **盐值说明：** 本项目密码算法为 Argon2id（每用户独立随机盐），"stepby_admin" 仅作 LEGACY_SALT 用于旧 MD5 哈希的验证 fallback（升级前已存在的用户密码）。初始数据密码均为 `admin123`。数据库密码与旧数据**不兼容**，新部署需使用 Argon2id 生成的密码。
 
 ### 2.5 软删除策略
 
@@ -840,7 +840,7 @@ src/service/dto/                # DTO 定义（可选独立目录）
 |------|----------------|--------|
 | ORM | rbatis + html_sql | SeaORM 原生 |
 | 事务 | `GLOBAL_DB.acquire_begin()`（形同虚设） | `TransactionTrait::transaction()`（真事务） |
-| 密码 | MD5 + "salvo_admin" | MD5 + "yebot_admin"（不兼容旧数据） |
+| 密码 | MD5 + "salvo_admin" | MD5 + "stepby_admin"（不兼容旧数据） |
 | 参数校验 | 零散 if 判断 | garde crate 结构化校验 |
 | 用户名查重 | 有 | 有 |
 | role_key 查重 | 无 | 有 |

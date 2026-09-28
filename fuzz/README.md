@@ -35,7 +35,7 @@ rustup toolchain install nightly
 cargo install cargo-fuzz --locked
 
 # 进入 fuzz 工程（独立 workspace）
-cd d:\Projects\yebot\axum-backend\fuzz
+cd d:\Projects\stepby\axum-backend\fuzz
 
 # 编译全部 target（验证能真实编译）
 cargo +nightly fuzz build

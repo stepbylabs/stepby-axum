@@ -150,9 +150,9 @@ async fn test_role_auth_user_chain() {
                 "deptId": 103,
                 "userName": "it_auth_user",
                 "nickName": "授权测试用户",
-                "email": "it.auth@yebot.dev",
+                "email": "stepby@tzkj.net",
                 "phonenumber": "13800003333",
-                "password": "Yebot@12345",
+                "password": "Stepby@12345",
                 "status": "0"
             }),
         )

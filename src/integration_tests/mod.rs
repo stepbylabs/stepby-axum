@@ -176,7 +176,7 @@ async fn acquire_redis_slot() -> RedisSlot {
 fn unique_temp_db_path() -> String {
     let pid = std::process::id();
     let seq = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let p = std::env::temp_dir().join(format!("yebot_it_{}_{}.db", pid, seq));
+    let p = std::env::temp_dir().join(format!("stepby_it_{}_{}.db", pid, seq));
     p.to_string_lossy().to_string()
 }
 

@@ -200,7 +200,7 @@ impl SysFrontendErrorService {
             .into_iter()
             .map(|it| {
                 // FCP-010：vitals 同步观察进 Prometheus 直方图/gauge（与落库同源），
-                // 供 yebot-frontend-vitals 告警组做 P95 退化检测
+                // 供 stepby-frontend-vitals 告警组做 P95 退化检测
                 if it.source == "vital" {
                     if let (Some(name), Some(value)) = (it.name.as_deref(), it.value) {
                         let device = it.device_type.as_deref().unwrap_or("unknown");

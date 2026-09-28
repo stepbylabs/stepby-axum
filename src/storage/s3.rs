@@ -598,7 +598,7 @@ mod tests {
             access_key: "ak".into(),
             secret_key: "sk".into(),
             endpoint: "http://localhost:9000".into(),
-            bucket: "yebot".into(),
+            bucket: "stepby".into(),
             ..Default::default()
         };
         let backend = S3Backend::try_new(&cfg).expect("完整配置应成功");

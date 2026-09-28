@@ -95,7 +95,7 @@ async fn test_gen_table_create_list_detail_edit_preview_delete_chain() {
                 "functionAuthor": "tester",
                 "tplCategory": "crud",
                 "tplWebType": "element-plus",
-                "packageName": "com.yebot.gen",
+                "packageName": "com.stepby.gen",
                 "moduleName": "gen",
                 "businessName": "test_table",
                 "genType": "0",

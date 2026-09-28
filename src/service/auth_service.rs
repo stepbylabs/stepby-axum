@@ -696,8 +696,8 @@ impl AuthService {
             1,
             30,
             secret_bytes,
-            Some("Yebot".to_string()),
-            "yebot-user".to_string(),
+            Some("Stepby".to_string()),
+            "stepby-user".to_string(),
         )
         .map_err(|_| ServiceError::new(500, crate::tr!("error.totp.totp_build_failed")))?;
 

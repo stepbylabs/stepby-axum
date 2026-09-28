@@ -64,20 +64,20 @@ fn main() {
     // rust-embed 在编译时扫描 folder 指定的目录，若目录不存在会 panic
     // 此处提前校验并给出友好错误提示，避免编译到一半才失败
     //
-    // 使用 `frontend-dist/`（项目内路径）而非 `../yebot-ui/dist/`：
+    // 使用 `frontend-dist/`（项目内路径）而非 `../stepby-ui/dist/`：
     // - cross 交叉编译时，容器只自动挂载 Cargo.toml 所在目录
-    // - `../yebot-ui/dist` 需要额外挂载，而中文路径（如 `桌面`）在 Docker 挂载时可能失败
+    // - `../stepby-ui/dist` 需要额外挂载，而中文路径（如 `桌面`）在 Docker 挂载时可能失败
     // - `frontend-dist/` 在项目内部，cross 自动挂载，无需额外配置
     let frontend_dist = Path::new("frontend-dist");
     if !frontend_dist.exists() {
         panic!(
             "\n\n========================================\n\
              前端构建产物不存在: frontend-dist/\n\
-             请先执行构建脚本（会自动复制 yebot-ui/dist → frontend-dist）：\n\
+             请先执行构建脚本（会自动复制 stepby-ui/dist → frontend-dist）：\n\
              \n  powershell -File scripts/build-all.ps1\n\
              \n或手动复制：\n\
-             \n  pnpm --dir yebot-ui build:embedded\n\
-             \n  xcopy /E /I /Y yebot-ui\\dist axum-backend\\frontend-dist\n\
+             \n  pnpm --dir stepby-ui build:embedded\n\
+             \n  xcopy /E /I /Y stepby-ui\\dist axum-backend\\frontend-dist\n\
              ========================================\n"
         );
     }

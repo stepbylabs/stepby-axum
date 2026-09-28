@@ -101,7 +101,7 @@ pub enum DbKind {
 ///
 /// - `postgres://` 或 `postgresql://` → Postgres
 /// - `mysql://` → Mysql
-/// - `sqlite://` 或 `sqlite://./data/yebot.db` → Sqlite
+/// - `sqlite://` 或 `sqlite://./data/stepby.db` → Sqlite
 fn parse_db_kind(url: &str) -> Result<DbKind, ServiceError> {
     if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         Ok(DbKind::Postgres)
@@ -119,7 +119,7 @@ fn parse_db_kind(url: &str) -> Result<DbKind, ServiceError> {
 
 /// 解析 SQLite 数据库文件路径
 ///
-/// 支持 `sqlite://./data/yebot.db?mode=rwc` 和 `sqlite:./data/yebot.db` 两种格式
+/// 支持 `sqlite://./data/stepby.db?mode=rwc` 和 `sqlite:./data/stepby.db` 两种格式
 fn parse_sqlite_file_path(url: &str) -> Result<PathBuf, ServiceError> {
     let stripped = url
         .strip_prefix("sqlite://")
@@ -384,7 +384,7 @@ impl SysBackupService {
 
         // 3. 组装包体（含包格式/版本与租户身份，便于离线识别与后续版本演进）
         let package = serde_json::json!({
-            "format": "yebot-tenant-package",
+            "format": "stepby-tenant-package",
             "version": 1,
             "exportedAt": crate::common::datetime::now_naive(),
             "tenantId": tenant_id,

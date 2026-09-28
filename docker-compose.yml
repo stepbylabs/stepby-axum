@@ -9,8 +9,8 @@
 #   docker compose down -v                  # 停止并删除数据卷
 #
 # 连接信息（用户口令全部来自环境变量，不在此文件硬编码）：
-#   PostgreSQL: postgres://${POSTGRES_USER:-yebot}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB:-yebot}
-#   MySQL:      mysql://${MYSQL_USER:-yebot}:${MYSQL_PASSWORD}@127.0.0.1:3306/${MYSQL_DATABASE:-yebot}
+#   PostgreSQL: postgres://${POSTGRES_USER:-stepby}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB:-stepby}
+#   MySQL:      mysql://${MYSQL_USER:-stepby}:${MYSQL_PASSWORD}@127.0.0.1:3306/${MYSQL_DATABASE:-stepby}
 #
 # 必填环境变量（缺省即 fail-fast，避免静默使用弱口令）：
 #   POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD / REDIS_PASSWORD
@@ -24,41 +24,41 @@
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: yebot-postgres
+    container_name: stepby-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-yebot}
+      POSTGRES_USER: ${POSTGRES_USER:-stepby}
       # 必填：缺省即报错（fail-fast），避免静默回落到弱默认口令
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必填（请在 axum-backend/.env 中设置）}
-      POSTGRES_DB: ${POSTGRES_DB:-yebot}
+      POSTGRES_DB: ${POSTGRES_DB:-stepby}
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - yebot_pg_data:/var/lib/postgresql/data
+      - stepby_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yebot} -d ${POSTGRES_DB:-yebot}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stepby} -d ${POSTGRES_DB:-stepby}"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - yebot_net
+      - stepby_net
 
   mysql:
     image: mysql:8.0
-    container_name: yebot-mysql
+    container_name: stepby-mysql
     restart: unless-stopped
     environment:
       # 必填：缺省即报错（fail-fast）
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必填（请在 axum-backend/.env 中设置）}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-yebot}
-      MYSQL_USER: ${MYSQL_USER:-yebot}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-stepby}
+      MYSQL_USER: ${MYSQL_USER:-stepby}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 必填（请在 axum-backend/.env 中设置）}
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:3306:3306"
     volumes:
-      - yebot_mysql_data:/var/lib/mysql
+      - stepby_mysql_data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
       # 口令在容器运行时由 $$MYSQL_ROOT_PASSWORD 展开（不落入 compose 解析结果）
@@ -67,11 +67,11 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - yebot_net
+      - stepby_net
 
   redis:
     image: redis:7-alpine
-    container_name: yebot-redis
+    container_name: stepby-redis
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
@@ -84,7 +84,7 @@ services:
     # 注意：口令不要包含空格，否则会被字符串形式的 command 拆断
     command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes --save 900 1 --save 300 10
     volumes:
-      - yebot_redis_data:/data
+      - stepby_redis_data:/data
     healthcheck:
       # 口令在容器运行时由 $$REDIS_PASSWORD 展开
       test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
@@ -92,13 +92,13 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - yebot_net
+      - stepby_net
 
 volumes:
-  yebot_pg_data:
-  yebot_mysql_data:
-  yebot_redis_data:
+  stepby_pg_data:
+  stepby_mysql_data:
+  stepby_redis_data:
 
 networks:
-  yebot_net:
+  stepby_net:
     driver: bridge

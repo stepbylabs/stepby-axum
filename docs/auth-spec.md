@@ -3,7 +3,7 @@
 > **阶段：** 第四阶段「Axum 原生鉴权体系实现」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **开发优先原则：** 接口契约对齐 stepby-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -890,5 +890,5 @@ Service 方法调用：service.method(dto, operator.username())
 | 用户信息注入 | `depot.insert("userId", user_id)` | `req.extensions_mut().insert(Claims)` |
 | 提取器 | `depot.get::<i32>("userId")` | `Operator`（实现 `FromRequestParts`） |
 | 登出 | `redis::del(token)` | `redis::set(blacklist:{token}, EX ttl)` |
-| 密码盐值 | `"salvo_admin"` | `"yebot_admin"` |
+| 密码盐值 | `"salvo_admin"` | `"stepby_admin"` |
 | 响应码 | code=0 成功 | code=200 成功（对齐本项目前端） |

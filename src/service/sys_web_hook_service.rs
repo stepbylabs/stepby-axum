@@ -318,7 +318,7 @@ impl SysWebHookService {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .user_agent("yebot-webhook/1.0")
+            .user_agent("stepby-webhook/1.0")
             .build()
             .expect("reqwest client 初始化失败");
         Self {
@@ -659,7 +659,7 @@ impl SysWebHookService {
             .post(&hook.target_url)
             .timeout(timeout)
             .header("content-type", content_type_header(&hook.content_type))
-            .header("user-agent", "yebot-webhook/1.0")
+            .header("user-agent", "stepby-webhook/1.0")
             .header("X-Webhook-Event", event_type);
         // v5-E6：secret 为信封加密存储，签名前解密
         let signature = sign_payload(&self.unseal_secret(&hook.secret).unwrap_or_default(), &body);

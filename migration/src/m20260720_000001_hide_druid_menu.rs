@@ -2,7 +2,7 @@
 //!
 //! 背景：
 //!   Druid 是阿里巴巴 Java 数据库连接池监控工具，当前 Java 系后台框架普遍集成。
-//!   yebot 后端基于 Rust + Axum + SeaORM，从未集成 Druid，但 migration m20250711
+//!   stepby 后端基于 Rust + Axum + SeaORM，从未集成 Druid，但 migration m20250711
 //!   原样拷贝了参考 admin 项目的 sys_menu 种子数据，导致 menu_id=111（数据监控/druid）
 //!   在前端动态菜单中显示，点击后进入占位页 `views/monitor/druid/index.vue`，
 //!   该页面 `<script setup>` 为空，仅显示 "Druid 未配置" 提示。

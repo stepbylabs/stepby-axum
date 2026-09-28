@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_looks_like_domain() {
-        assert!(looks_like_domain("acme.yebot.com"));
+        assert!(looks_like_domain("acme.stepby.com"));
         assert!(!looks_like_domain("localhost"));
         assert!(!looks_like_domain(""));
         // 裸 IPv4（含点）仍会被当作域名尝试——由域名格式校验兜底拒绝；

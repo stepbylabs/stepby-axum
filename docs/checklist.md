@@ -177,7 +177,7 @@
 - [ ] `constants` 模块含 `SUCCESS`/`BAD_REQUEST`/`UNAUTHORIZED`/`NOT_FOUND`/`INTERNAL_ERROR`/`WARNING`
 - [ ] 含 `STATUS_NORMAL`（"0"）/ `STATUS_DISABLED`（"1"）
 - [ ] 含 `SUPER_ADMIN_ROLE`（"admin"）/ `ALL_PERMISSIONS`（"*:*:*"）
-- [ ] 含 `password.rs` 中 `LEGACY_SALT` 常量（"yebot_admin"，仅旧 MD5 验证用）
+- [ ] 含 `password.rs` 中 `LEGACY_SALT` 常量（"stepby_admin"，仅旧 MD5 验证用）
 
 ### 4.5 配置管理
 
@@ -224,7 +224,7 @@
 - [ ] `encrypt_password()` 使用 Argon2id + 随机盐（旧 MD5 仅作 fallback 验证）
 - [ ] `verify_password()` 比对加密结果
 - [ ] 单元测试 `test_encrypt_and_verify` 通过
-- [ ] 旧 MD5 盐值常量 `LEGACY_SALT`（"yebot_admin"）仅用于旧密码验证（非新密码加密）
+- [ ] 旧 MD5 盐值常量 `LEGACY_SALT`（"stepby_admin"）仅用于旧密码验证（非新密码加密）
 
 ### 4.11 验证码工具
 

@@ -88,7 +88,7 @@ impl MigrationTrait for Migration {
         for (id, dept_id, name, nick, sex) in users {
             let sql = format!(
                 "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES \
-                 ({id}, {dept_id}, '{name}', '{nick}', '00', '{name}@yebot.dev', '18{sex}888888', '{sex}', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', '127.0.0.1', {now}, 'demo', {now}, '演示用户')"
+                 ({id}, {dept_id}, '{name}', '{nick}', '00', '{name}@stepby.tzkj.net', '18{sex}888888', '{sex}', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', '127.0.0.1', {now}, 'demo', {now}, '演示用户')"
             );
             execute_idempotent_insert(manager, &sql).await?;
         }

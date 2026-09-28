@@ -2,8 +2,8 @@
 //! 轻量 Prometheus 文本格式指标（零外部依赖）
 //!
 //! 由于后端已有 /metrics 端点（health.rs）暴露进程级指标，本模块补充 **HTTP 业务指标**：
-//! - `yebot_http_requests_total{method,status,path}`（counter）
-//! - `yebot_http_request_duration_seconds_bucket/sum/count`（histogram）
+//! - `stepby_http_requests_total{method,status,path}`（counter）
+//! - `stepby_http_request_duration_seconds_bucket/sum/count`（histogram）
 //!
 //! 存储为进程内 `RwLock<HashMap>`，通过全局静态 `OnceLock<Arc<MetricsRegistry>>` 共享。
 //! 由 `observability::monitoring_middleware` 在每个请求上记录，
@@ -207,8 +207,8 @@ impl MetricsRegistry {
         gauges.insert(device.to_string(), value.min(100.0));
     }
 
-    /// FCP-010：渲染 Web Vitals 指标（`yebot_frontend_vital_seconds` histogram +
-    /// `yebot_frontend_cls` gauge），供 Prometheus 前端性能退化告警消费。
+    /// FCP-010：渲染 Web Vitals 指标（`stepby_frontend_vital_seconds` histogram +
+    /// `stepby_frontend_cls` gauge），供 Prometheus 前端性能退化告警消费。
     fn render_vitals_prometheus(&self) -> String {
         let mut s = String::new();
         let vitals = match self.vitals.read() {
@@ -216,9 +216,9 @@ impl MetricsRegistry {
             Err(p) => p.into_inner(),
         };
         s.push_str(
-            "# HELP yebot_frontend_vital_seconds Web Vitals 时间型指标分布（秒，name,device）\n",
+            "# HELP stepby_frontend_vital_seconds Web Vitals 时间型指标分布（秒，name,device）\n",
         );
-        s.push_str("# TYPE yebot_frontend_vital_seconds histogram\n");
+        s.push_str("# TYPE stepby_frontend_vital_seconds histogram\n");
         let mut keys: Vec<&(String, String)> = vitals.keys().collect();
         keys.sort();
         for key in &keys {
@@ -226,7 +226,7 @@ impl MetricsRegistry {
                 let (name, device) = (*key).clone();
                 for (i, bound) in VITAL_BUCKETS_S.iter().enumerate() {
                     s.push_str(&format!(
-                        "yebot_frontend_vital_seconds_bucket{{name=\"{}\",device=\"{}\",le=\"{}\"}} {}\n",
+                        "stepby_frontend_vital_seconds_bucket{{name=\"{}\",device=\"{}\",le=\"{}\"}} {}\n",
                         escape_label(&name),
                         escape_label(&device),
                         bound,
@@ -234,19 +234,19 @@ impl MetricsRegistry {
                     ));
                 }
                 s.push_str(&format!(
-                    "yebot_frontend_vital_seconds_bucket{{name=\"{}\",device=\"{}\",le=\"+Inf\"}} {}\n",
+                    "stepby_frontend_vital_seconds_bucket{{name=\"{}\",device=\"{}\",le=\"+Inf\"}} {}\n",
                     escape_label(&name),
                     escape_label(&device),
                     series.count
                 ));
                 s.push_str(&format!(
-                    "yebot_frontend_vital_seconds_sum{{name=\"{}\",device=\"{}\"}} {}\n",
+                    "stepby_frontend_vital_seconds_sum{{name=\"{}\",device=\"{}\"}} {}\n",
                     escape_label(&name),
                     escape_label(&device),
                     series.sum_secs
                 ));
                 s.push_str(&format!(
-                    "yebot_frontend_vital_seconds_count{{name=\"{}\",device=\"{}\"}} {}\n",
+                    "stepby_frontend_vital_seconds_count{{name=\"{}\",device=\"{}\"}} {}\n",
                     escape_label(&name),
                     escape_label(&device),
                     series.count
@@ -257,14 +257,14 @@ impl MetricsRegistry {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        s.push_str("# HELP yebot_frontend_cls 最新 CLS 累计值（无量纲，device 分桶）\n");
-        s.push_str("# TYPE yebot_frontend_cls gauge\n");
+        s.push_str("# HELP stepby_frontend_cls 最新 CLS 累计值（无量纲，device 分桶）\n");
+        s.push_str("# TYPE stepby_frontend_cls gauge\n");
         let mut devs: Vec<&String> = gauges.keys().collect();
         devs.sort();
         for dev in devs {
             if let Some(v) = gauges.get(dev) {
                 s.push_str(&format!(
-                    "yebot_frontend_cls{{device=\"{}\"}} {}\n",
+                    "stepby_frontend_cls{{device=\"{}\"}} {}\n",
                     escape_label(dev),
                     v
                 ));
@@ -273,11 +273,11 @@ impl MetricsRegistry {
         s
     }
 
-    /// v5-D7：渲染 SSO 事件计数（`yebot_sso_events_total{event,outcome}`）
+    /// v5-D7：渲染 SSO 事件计数（`stepby_sso_events_total{event,outcome}`）
     fn render_sso_prometheus(&self) -> String {
         let mut s = String::new();
-        s.push_str("# HELP yebot_sso_events_total SSO 协议事件计数（event,outcome）\n");
-        s.push_str("# TYPE yebot_sso_events_total counter\n");
+        s.push_str("# HELP stepby_sso_events_total SSO 协议事件计数（event,outcome）\n");
+        s.push_str("# TYPE stepby_sso_events_total counter\n");
         let counters = match self.sso_counters.read() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -287,7 +287,7 @@ impl MetricsRegistry {
         for (event, outcome) in keys {
             if let Some(c) = counters.get(&(event.clone(), outcome.clone())) {
                 s.push_str(&format!(
-                    "yebot_sso_events_total{{event=\"{}\",outcome=\"{}\"}} {}\n",
+                    "stepby_sso_events_total{{event=\"{}\",outcome=\"{}\"}} {}\n",
                     escape_label(event),
                     escape_label(outcome),
                     c
@@ -300,8 +300,8 @@ impl MetricsRegistry {
     /// 渲染 Prometheus 文本格式的 HTTP 业务指标
     pub fn render_prometheus(&self) -> String {
         let mut s = String::new();
-        s.push_str("# HELP yebot_http_requests_total 累计 HTTP 请求数（method,status,path）\n");
-        s.push_str("# TYPE yebot_http_requests_total counter\n");
+        s.push_str("# HELP stepby_http_requests_total 累计 HTTP 请求数（method,status,path）\n");
+        s.push_str("# TYPE stepby_http_requests_total counter\n");
 
         let counters = match self.counters.read() {
             Ok(g) => g,
@@ -319,7 +319,7 @@ impl MetricsRegistry {
         for key in &keys {
             if let Some(c) = counters.get(key) {
                 s.push_str(&format!(
-                    "yebot_http_requests_total{{method=\"{}\",status=\"{}\",path=\"{}\"}} {}\n",
+                    "stepby_http_requests_total{{method=\"{}\",status=\"{}\",path=\"{}\"}} {}\n",
                     escape_label(&key.method),
                     escape_label(&key.status),
                     escape_label(&key.path),
@@ -329,17 +329,17 @@ impl MetricsRegistry {
         }
         // 聚合总数（无标签）
         s.push_str(&format!(
-            "yebot_http_requests_total {{}} {}\n",
+            "stepby_http_requests_total {{}} {}\n",
             self.total_requests()
         ));
 
-        s.push_str("# HELP yebot_http_request_duration_seconds HTTP 请求耗时分布（秒）\n");
-        s.push_str("# TYPE yebot_http_request_duration_seconds histogram\n");
+        s.push_str("# HELP stepby_http_request_duration_seconds HTTP 请求耗时分布（秒）\n");
+        s.push_str("# TYPE stepby_http_request_duration_seconds histogram\n");
         for key in &keys {
             if let Some(series) = durations.get(key) {
                 for (i, bound) in DURATION_BUCKETS_S.iter().enumerate() {
                     s.push_str(&format!(
-                        "yebot_http_request_duration_seconds_bucket{{method=\"{}\",status=\"{}\",path=\"{}\",le=\"{}\"}} {}\n",
+                        "stepby_http_request_duration_seconds_bucket{{method=\"{}\",status=\"{}\",path=\"{}\",le=\"{}\"}} {}\n",
                         escape_label(&key.method),
                         escape_label(&key.status),
                         escape_label(&key.path),
@@ -348,21 +348,21 @@ impl MetricsRegistry {
                     ));
                 }
                 s.push_str(&format!(
-                    "yebot_http_request_duration_seconds_bucket{{method=\"{}\",status=\"{}\",path=\"{}\",le=\"+Inf\"}} {}\n",
+                    "stepby_http_request_duration_seconds_bucket{{method=\"{}\",status=\"{}\",path=\"{}\",le=\"+Inf\"}} {}\n",
                     escape_label(&key.method),
                     escape_label(&key.status),
                     escape_label(&key.path),
                     series.count
                 ));
                 s.push_str(&format!(
-                    "yebot_http_request_duration_seconds_sum{{method=\"{}\",status=\"{}\",path=\"{}\"}} {}\n",
+                    "stepby_http_request_duration_seconds_sum{{method=\"{}\",status=\"{}\",path=\"{}\"}} {}\n",
                     escape_label(&key.method),
                     escape_label(&key.status),
                     escape_label(&key.path),
                     series.sum_secs
                 ));
                 s.push_str(&format!(
-                    "yebot_http_request_duration_seconds_count{{method=\"{}\",status=\"{}\",path=\"{}\"}} {}\n",
+                    "stepby_http_request_duration_seconds_count{{method=\"{}\",status=\"{}\",path=\"{}\"}} {}\n",
                     escape_label(&key.method),
                     escape_label(&key.status),
                     escape_label(&key.path),
@@ -421,10 +421,10 @@ mod tests {
         reg.record("GET", 500, "/boom", 2.0);
         let text = reg.render_prometheus();
         assert!(text.contains(
-            "yebot_http_requests_total{method=\"GET\",status=\"200\",path=\"/health\"} 1"
+            "stepby_http_requests_total{method=\"GET\",status=\"200\",path=\"/health\"} 1"
         ));
         assert!(text.contains("le=\"+Inf\""));
-        assert!(text.contains("yebot_http_request_duration_seconds_sum"));
+        assert!(text.contains("stepby_http_request_duration_seconds_sum"));
         assert_eq!(reg.total_requests(), 2);
     }
 
@@ -440,12 +440,12 @@ mod tests {
         reg.record_sso_event("token_revoked", "ok");
         reg.record_sso_event("logout", "ok");
         let text = reg.render_prometheus();
-        assert!(text.contains("yebot_sso_events_total{event=\"token_issued\",outcome=\"ok\"} 2"));
+        assert!(text.contains("stepby_sso_events_total{event=\"token_issued\",outcome=\"ok\"} 2"));
         assert!(text.contains(
-            "yebot_sso_events_total{event=\"token_issued\",outcome=\"invalid_grant\"} 1"
+            "stepby_sso_events_total{event=\"token_issued\",outcome=\"invalid_grant\"} 1"
         ));
         assert!(
-            text.contains("yebot_sso_events_total{event=\"token_refreshed\",outcome=\"ok\"} 1")
+            text.contains("stepby_sso_events_total{event=\"token_refreshed\",outcome=\"ok\"} 1")
         );
         assert!(text.contains("event=\"authorize\""));
         assert!(text.contains("event=\"token_revoked\""));
@@ -465,19 +465,19 @@ mod tests {
         reg.set_frontend_cls("tablet", 0.03);
         let text = reg.render_prometheus();
         assert!(text.contains(
-            "yebot_frontend_vital_seconds_bucket{name=\"LCP\",device=\"mobile\",le=\"1.8\"} 2"
+            "stepby_frontend_vital_seconds_bucket{name=\"LCP\",device=\"mobile\",le=\"1.8\"} 2"
         ));
         assert!(text.contains(
-            "yebot_frontend_vital_seconds_bucket{name=\"LCP\",device=\"mobile\",le=\"+Inf\"} 2"
+            "stepby_frontend_vital_seconds_bucket{name=\"LCP\",device=\"mobile\",le=\"+Inf\"} 2"
         ));
         assert!(text.contains(
-            "yebot_frontend_vital_seconds_bucket{name=\"FCP\",device=\"desktop\",le=\"1\"} 1"
+            "stepby_frontend_vital_seconds_bucket{name=\"FCP\",device=\"desktop\",le=\"1\"} 1"
         ));
         assert!(text.contains(
-            "yebot_frontend_vital_seconds_bucket{name=\"LCP\",device=\"unknown\",le=\"4\"} 1"
+            "stepby_frontend_vital_seconds_bucket{name=\"LCP\",device=\"unknown\",le=\"4\"} 1"
         ));
         assert!(!text.contains("name=\"XXX\""));
-        assert!(text.contains("yebot_frontend_cls{device=\"tablet\"} 0.03"));
+        assert!(text.contains("stepby_frontend_cls{device=\"tablet\"} 0.03"));
     }
 
     #[test]

@@ -10,7 +10,7 @@
 
 | 编号 | 任务 | 优先级 | 依赖 |
 |------|------|--------|------|
-| T00 | 添加新依赖（futures, regex, once_cell）+ 盐值改为 yebot_admin | P0 | — |
+| T00 | 添加新依赖（futures, regex, once_cell）+ 盐值改为 stepby_admin | P0 | — |
 | T01 | 创建 DTO 定义（用户/角色/菜单） | P0 | T00 |
 | T02 | 为 SysMenuModel 实现 TreeNode trait + 新增 children 字段 | P0 | T00 |
 | T03 | 实现 SysUserService 用户业务逻辑 | P0 | T01, T02 |
@@ -34,9 +34,9 @@
    - `futures = "0.3"`（事务闭包 `boxed()`）
    - `regex = "1"`（garde regex 校验）
    - `once_cell = "1"`（全局正则常量）
-2. `constants.rs` 中 `PASSWORD_SALT` 改为 `"yebot_admin"`
+2. `constants.rs` 中 `PASSWORD_SALT` 改为 `"stepby_admin"`
 3. `password.rs` 注释更新
-4. migration 初始用户密码改为新盐值生成的 MD5（admin123 + yebot_admin = `bfb6b8dd9b268e241c82a257e235e550`）
+4. migration 初始用户密码改为新盐值生成的 MD5（admin123 + stepby_admin = `ba976d23f6d1012cfe81ceb960a1058c`）
 
 **验收：**
 - [ ] Cargo.toml 依赖添加

@@ -6,7 +6,7 @@
 //! 只读"的语义预期不符（详见 docs/optimization/topic-multitenant-sso-audit-2026-09-23.md
 //! §8.2 安全发现）。
 //!
-//! 目标状态（声明式，与 yebot-ui tests/e2e/deep-e2e.mjs M9 前置完全同款语义）：
+//! 目标状态（声明式，与 stepby-ui tests/e2e/deep-e2e.mjs M9 前置完全同款语义）：
 //!   - 全部目录(M)与页面(C)：页面可见可进；
 //!   - F 按钮中仅只读权限（perms 以 :list/:query/:view/:center 结尾）：
 //!     保住页面内子资源 API（如字典 :query）不被 403，页面能正常加载数据；
@@ -19,7 +19,7 @@
 //!     m20260924_000005 租户迁移的覆盖范围），role_id=2 为 init 种子角色；
 //!   - LIKE 后缀匹配三方言（sqlite/postgres/mysql）通用，perms 值均为小写无
 //!     collation 歧义；
-//!   - 存量兼容：yebot 当前无生产用户依赖 common 写权限（本地开发 + e2e 库），
+//!   - 存量兼容：stepby 当前无生产用户依赖 common 写权限（本地开发 + e2e 库），
 //!     收回无存量风险；e2e 库此前已由 deep-e2e M9 前置收紧至同一目标集合，
 //!     本迁移与其幂等收敛。
 

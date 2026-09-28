@@ -40,8 +40,8 @@ fn generate_totp_code(secret: &str) -> String {
         1,
         30,
         secret_bytes,
-        Some("Yebot".to_string()),
-        "yebot-user".to_string(),
+        Some("Stepby".to_string()),
+        "stepby-user".to_string(),
     )
     .expect("构造 TOTP 失败");
     totp.generate_current().expect("生成当前验证码失败")

@@ -85,7 +85,7 @@ fn build_valid_import_xlsx() -> Vec<u8> {
         },
         ImportColumn {
             header: ("邮箱", "Email"),
-            sample: "it.user.import@yebot.dev",
+            sample: "stepby@tzkj.net",
             width: 26.0,
         },
         ImportColumn {

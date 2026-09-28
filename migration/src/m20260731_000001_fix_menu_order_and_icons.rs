@@ -18,7 +18,7 @@
 //!    - 1 系统管理 → 2
 //!    - 2 系统监控 → 3
 //!    - 3 系统工具 → 4
-//!    - 4 Yebot官网 → 5
+//!    - 4 Stepby官网 → 5
 //! 2. 4 组 icon 去重（保留语义更匹配的一方，替换另一方）：
 //!    - 120 审计大屏 chart→eye-open（审计=监察/看守语义）
 //!    - 126 会话管理 online→people（会话=用户群语义，与 109 在线用户区分）
@@ -71,7 +71,7 @@ impl MigrationTrait for Migration {
             .get_connection()
             .execute_unprepared("UPDATE sys_menu SET order_num = 4 WHERE menu_id = 3")
             .await?;
-        // 4 Yebot官网 → 5
+        // 4 Stepby官网 → 5
         manager
             .get_connection()
             .execute_unprepared("UPDATE sys_menu SET order_num = 5 WHERE menu_id = 4")

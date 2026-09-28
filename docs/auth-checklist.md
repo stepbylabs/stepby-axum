@@ -285,7 +285,7 @@
 - [ ] 黑名单 TTL 等于 JWT 剩余有效期（不无限期存储）
 - [ ] 验证码一次性使用（登录后 DEL）
 - [ ] 验证码大小写不敏感校验
-- [ ] 盐值为 `"yebot_admin"`（非 `"salvo_admin"`）
+- [ ] 盐值为 `"stepby_admin"`（非 `"salvo_admin"`）
 
 ---
 
@@ -358,7 +358,7 @@
 | `depot.insert("userId", user_id)` | `req.extensions_mut().insert(Claims)` | [ ] |
 | `depot.get::<i32>("userId")` | `Operator` 提取器（`FromRequestParts`） | [ ] |
 | `redis::del(token)` 登出 | `redis::set(blacklist:{token}, EX ttl)` | [ ] |
-| 密码盐值 `"salvo_admin"` | `"yebot_admin"` | [ ] |
+| 密码盐值 `"salvo_admin"` | `"stepby_admin"` | [ ] |
 | 响应码 code=0 成功 | code=200 成功（对齐本项目前端） | [ ] |
 | 验证码 5 位 | 验证码 4 位（排除易混淆字符） | [ ] |
 

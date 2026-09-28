@@ -44,8 +44,8 @@ async fn test_notice_chain() {
         v["data"]["noticeTitle"]
             .as_str()
             .unwrap_or("")
-            .contains("Yebot"),
-        "种子公告标题应包含 Yebot，实际: {v}"
+            .contains("Stepby"),
+        "种子公告标题应包含 Stepby，实际: {v}"
     );
 
     // 4. 新增通知公告（it_notice_ 前缀避免与种子冲突）

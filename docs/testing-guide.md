@@ -93,7 +93,7 @@ cp config/config.toml.example config/config.toml
 # 编辑 config.toml，填入真实数据库和 Redis 连接信息
 # 或创建 .env 文件
 cat > .env << EOF
-DATABASE_URL=mysql://yebot:password@127.0.0.1:3306/yebot
+DATABASE_URL=mysql://stepby:password@127.0.0.1:3306/stepby
 REDIS_URL=redis://:password@127.0.0.1:6379/0
 JWT_SECRET=test_secret_at_least_32_characters_long!!
 EOF
@@ -104,7 +104,7 @@ PowerShell 等价命令：
 ```powershell
 # PowerShell 等价命令
 @"
-DATABASE_URL=sqlite://./data/yebot.db?mode=rwc
+DATABASE_URL=sqlite://./data/stepby.db?mode=rwc
 REDIS_URL=redis://127.0.0.1:6379
 JWT_SECRET=change_me_in_production
 RUST_LOG=info
@@ -114,7 +114,7 @@ RUST_LOG=info
 ### 2.4 数据库初始化
 
 ```bash
-export DATABASE_URL="mysql://yebot:password@127.0.0.1:3306/yebot"
+export DATABASE_URL="mysql://stepby:password@127.0.0.1:3306/stepby"
 cd migration && cargo run && cd ..
 ```
 
@@ -216,7 +216,7 @@ cargo test --lib -- "export_bindings"
 
 ### 4.2 导出目录
 
-导出的 `.ts` 文件位于 `../yebot-ui/src/types/api/generated/`：
+导出的 `.ts` 文件位于 `../stepby-ui/src/types/api/generated/`：
 
 ```
 generated/
@@ -246,7 +246,7 @@ generated/
 `.cargo/config.toml`：
 ```toml
 [env]
-TS_RS_EXPORT_DIR = { value = "../yebot-ui/src/types/api/generated", relative = true }
+TS_RS_EXPORT_DIR = { value = "../stepby-ui/src/types/api/generated", relative = true }
 TS_RS_LARGE_INT = "number"  # i64 映射为 number 而非 string
 ```
 
@@ -254,10 +254,10 @@ TS_RS_LARGE_INT = "number"  # i64 映射为 number 而非 string
 
 ```bash
 # 检查文件是否生成
-ls -la ../yebot-ui/src/types/api/generated/
+ls -la ../stepby-ui/src/types/api/generated/
 
 # 验证类型内容（示例）
-cat ../yebot-ui/src/types/api/generated/SysUser.ts
+cat ../stepby-ui/src/types/api/generated/SysUser.ts
 # 期望输出：
 # export type Model = { userId: number, deptId: number | null, ... }
 ```
@@ -271,7 +271,7 @@ cat ../yebot-ui/src/types/api/generated/SysUser.ts
 cargo test --lib -- "export_bindings"
 
 # 检查是否有未提交的变更（类型与代码不一致时失败）
-git diff --exit-code ../yebot-ui/src/types/api/generated/
+git diff --exit-code ../stepby-ui/src/types/api/generated/
 ```
 
 ---
@@ -299,13 +299,13 @@ cargo build --release
 ### 5.3 数据库迁移测试
 
 ```bash
-export DATABASE_URL="mysql://yebot:password@127.0.0.1:3306/yebot"
+export DATABASE_URL="mysql://stepby:password@127.0.0.1:3306/stepby"
 cd migration && cargo run && cd ..
 ```
 
 验证：
 ```bash
-mysql -u yebot -p yebot -e "SHOW TABLES;"
+mysql -u stepby -p stepby -e "SHOW TABLES;"
 # 期望输出 24 张表（23 张业务表 + seaql_migrations）
 # 业务表：sys_config, sys_dept, sys_dict_data, sys_dict_type, sys_job, sys_job_log,
 #         sys_logininfor, sys_menu, sys_notice, sys_notice_read, sys_oper_log, sys_post,
@@ -726,7 +726,7 @@ jobs:
         run: cargo test --lib -- "export_bindings"
 
       - name: Check TS types unchanged
-        run: git diff --exit-code ../yebot-ui/src/types/api/generated/
+        run: git diff --exit-code ../stepby-ui/src/types/api/generated/
 
       - name: Build release
         run: cargo build --release
@@ -882,8 +882,8 @@ chmod +x .git/hooks/pre-commit
 
 ```powershell
 # PowerShell 环境变量设置（请替换为实际测试账号）
-$env:YEBOT_TEST_USER='<your-test-username>'
-$env:YEBOT_TEST_PASS='<your-test-password>'
+$env:STEPBY_TEST_USER='<your-test-username>'
+$env:STEPBY_TEST_PASS='<your-test-password>'
 
 # 全量测试（45 项功能）
 node tests/main.mjs
@@ -923,9 +923,9 @@ node tests/main.mjs --headless
 
 ```powershell
 # PowerShell 环境变量设置（请替换为实际测试账号）
-$env:YEBOT_TEST_USER='<your-test-username>'
-$env:YEBOT_TEST_PASS='<your-test-password>'
-$env:YEBOT_BASE_URL='http://localhost:8080'
+$env:STEPBY_TEST_USER='<your-test-username>'
+$env:STEPBY_TEST_PASS='<your-test-password>'
+$env:STEPBY_BASE_URL='http://localhost:8080'
 
 # 全量深度测试（75 模块）
 node tests/deep-e2e.mjs --headless
@@ -1069,7 +1069,7 @@ tests/
 
 #### 关键测试技术
 
-- **Tour 遮罩处理**：登录后通过 `localStorage.setItem('yebot-layout-tour', 'completed')` 禁用新手引导，已显示的遮罩通过 Escape 键关闭
+- **Tour 遮罩处理**：登录后通过 `localStorage.setItem('stepby-layout-tour', 'completed')` 禁用新手引导，已显示的遮罩通过 Escape 键关闭
 - **三阶段点击策略**：`clickButton` 函数依次尝试普通点击 → force click → evaluate 触发 click，绕过 Tour 遮罩和遮挡元素
 - **403/401 错误过滤**：通过 `page.on('response')` 追踪 403/401 响应 URL，过滤 `/register` 探测和权限隔离测试产生的预期错误
 - **嵌入式模式适配**：M9 写操作权限测试通过 `basePaths = ['', '/dev-api']` 依次尝试，适配嵌入式模式（同源）和开发模式（/dev-api 代理）
@@ -1110,7 +1110,7 @@ tests/
 
 1. 后端启动在 `http://localhost:8080`（release 构建嵌入式模式）
 2. `frontend-dist/` 已同步最新前端构建（`pnpm run build:embedded` + robocopy 同步）
-3. 测试账号已创建（通过 `YEBOT_TEST_USER` / `YEBOT_TEST_PASS` 环境变量配置）
+3. 测试账号已创建（通过 `STEPBY_TEST_USER` / `STEPBY_TEST_PASS` 环境变量配置）
 4. 数据库已初始化（含定时任务 jobId=1、代码生成 tableId=4、角色 roleId=144）
 
 #### 测试报告
@@ -1137,7 +1137,7 @@ tests/
 | 验证码图片 `data:image/gif;base64,undefined` | 后端 `captchaEnabled=false` 时 `res.img` 为空，前端未校验直接拼接 | `login.vue` 和 `register.vue` 的 `getCode()` 增加 `res.img` 非空校验 |
 | 嵌入式模式登录失败 | 误用 `build:prod`（`VITE_APP_BASE_API='/prod-api'`）构建嵌入式前端 | 改用 `build:embedded`（`VITE_APP_BASE_API=''`）同源访问 |
 | M9 写操作权限测试 status=200 | 测试使用 `/dev-api/system/user`，嵌入式模式下 404 | 依次尝试 `''` 和 `'/dev-api'` 两个 base path |
-| Tour 遮罩拦截按钮点击 | `yebot-tour-mask` overlay 覆盖全屏 | 登录后设置 localStorage + Escape 键关闭 + 三阶段点击策略 |
+| Tour 遮罩拦截按钮点击 | `stepby-tour-mask` overlay 覆盖全屏 | 登录后设置 localStorage + Escape 键关闭 + 三阶段点击策略 |
 | `/register` 探测产生 403 | 前端 `checkRegisterEnabled()` 单独探测 `/register` | 从 `/captchaImage` 响应读取 `registerEnabled` 字段 |
 | 通知中心详情对话框不显示 | `handleViewDetail` 打开对话框后调用 `handleMarkRead`，后者检测到 `currentNotice.noticeId === row.noticeId` 后立即关闭对话框 | 拆分 `handleMarkRead`（不关闭对话框）和 `handleDialogMarkRead`（对话框内标记后关闭），消除竞态 |
 | `sanitizeHtml is not a function` | `notice-center/index.vue` 缺少 `sanitizeHtml` 导入 | 添加 `import { sanitizeHtml } from '@/utils/index'` |
@@ -1211,7 +1211,7 @@ tests/
 | 代码生成器 synchDb/delTable/genCode 未测试 | 仅验证按钮可见性，未测试实际功能 | 新增同步数据库API调用/生成代码下载触发/删除表确认对话框+取消后列表不变测试 |
 | 测试报告结构不完整 | 缺少 elapsedMs/modules/environment 字段 | runner.mjs/result.mjs 添加总耗时/模块分组统计/运行环境信息 |
 | 失败项错误信息不足 | 无 stack/screenshot 信息 | record 函数失败时自动捕获 stack（前15行），runner 模块异常时自动截图 |
-| 三套 CONFIG 定义不同步 | config.mjs 硬编码弱密码 admin123、frontendUrl 默认值不一致 | deep-e2e.mjs / main.mjs 的 frontendUrl 增加 YEBOT_UI_URL 环境变量回退；次要账号 secondaryUsername/Password 支持 YEBOT_TEST_USER_SECONDARY / YEBOT_TEST_PASS_SECONDARY 环境变量覆盖；debug-add-buttons.mjs 改为从 test-config.mjs 导入。注：e2e/lib/config.mjs 为抽取的死代码，实际运行使用 deep-e2e.mjs 内联 CONFIG，二者默认值仍存在差异（8080 vs 5173），后续需统一为单一配置源 |
+| 三套 CONFIG 定义不同步 | config.mjs 硬编码弱密码 admin123、frontendUrl 默认值不一致 | deep-e2e.mjs / main.mjs 的 frontendUrl 增加 STEPBY_UI_URL 环境变量回退；次要账号 secondaryUsername/Password 支持 STEPBY_TEST_USER_SECONDARY / STEPBY_TEST_PASS_SECONDARY 环境变量覆盖；debug-add-buttons.mjs 改为从 test-config.mjs 导入。注：e2e/lib/config.mjs 为抽取的死代码，实际运行使用 deep-e2e.mjs 内联 CONFIG，二者默认值仍存在差异（8080 vs 5173），后续需统一为单一配置源 |
 | 前端 console 硬编码中文（74处） | 开发者日志使用中文不利于国际化检索 | 34 个文件的 74 处 console.log/error/warn 中文替换为英文 |
 
 #### v0.2.9 深层隐患修复（2026-07-30，第四轮循环）
@@ -1264,8 +1264,8 @@ tests/
 | useFormDraft 文档示例硬编码中文 | docstring 中 `modal.confirm('检测到未提交的草稿...')` | 新增 `common.formDraft.*` i18n key，文档示例改用 `t()` |
 | runner.mjs 浏览器双重关闭 | 登录失败时 `browser.close()` + `return 1`，finally 块再次 close 抛 "Target closed" | 移除登录失败分支的 close 调用，由 finally 统一关闭 |
 | main.mjs CLI 参数双重解析 | 顶部位置参数解析（argv[2]/argv[3]）与 main() 内 `--headless`/`--feature=` 解析并存 | 删除顶部死代码，统一在 main() 内解析 |
-| main.mjs / deep-e2e.mjs 次要账号硬编码 | `secondaryUsername: 'ry'` 无环境变量覆盖 | 支持 `YEBOT_TEST_USER_SECONDARY` / `YEBOT_TEST_PASS_SECONDARY` 环境变量 |
-| main.mjs / deep-e2e.mjs frontendUrl 缺少 YEBOT_UI_URL 回退 | 仅支持 `FRONTEND_URL`，与 test-config.mjs 的 `YEBOT_UI_URL` 不一致 | 增加 `YEBOT_UI_URL` 环境变量回退，与 test-config.mjs 保持一致 |
+| main.mjs / deep-e2e.mjs 次要账号硬编码 | `secondaryUsername: 'ry'` 无环境变量覆盖 | 支持 `STEPBY_TEST_USER_SECONDARY` / `STEPBY_TEST_PASS_SECONDARY` 环境变量 |
+| main.mjs / deep-e2e.mjs frontendUrl 缺少 STEPBY_UI_URL 回退 | 仅支持 `FRONTEND_URL`，与 test-config.mjs 的 `STEPBY_UI_URL` 不一致 | 增加 `STEPBY_UI_URL` 环境变量回退，与 test-config.mjs 保持一致 |
 | main.mjs 文件头注释过时 | 写 "前端启动在 http://localhost:81" 和 "admin/admin123 账号可用" | 更新为环境变量注入说明 |
 | config.toml.prod 缺少安全警告 | SQLite + 无密码 Redis 作为生产默认值无风险提示 | 添加安全警告注释，明确生产必须通过环境变量切换 |
 | config.toml.prod 缺少通用上传配置 | 缺 `common_allowed_exts` / `common_max_size` 字段 | 补齐字段，与 config.toml.example 保持一致 |
@@ -1314,7 +1314,7 @@ tests/
 | IP 库更新成功消息硬编码中文 | `ip_location_service.rs` 的 `UpdateResult.message` 用 `format!("IP 库更新成功…")` | 改用 `tr!("msg.success.ip_location_update")`，新增对应 i18n key |
 | IP 库更新错误消息硬编码中文 | `ip_location_service.rs` 中 7 处 `anyhow::bail!` 和 7 处 `anyhow::anyhow!` 使用中文 | 全部转换为英文（操作诊断信息，locale 中性） |
 | 调度器 Display 实现硬编码中文 | `scheduler/mod.rs` 的 `SchedulerError` Display impl 使用中文 | 转换为英文（Display 仅用于日志/调试，API 层已用 `tr!` 转换） |
-| 邮件发件人默认名称中文 | `settings.rs` 的 `default_mail_from_name` 返回 `"yebot 系统"` | 改为 `"yebot System"`（locale 中性默认值） |
+| 邮件发件人默认名称中文 | `settings.rs` 的 `default_mail_from_name` 返回 `"stepby 系统"` | 改为 `"stepby System"`（locale 中性默认值） |
 | MySessionPanel 强退按钮无 loading 状态 | `MySessionPanel.vue` 的 `handleForceLogout` 按钮缺少 `:loading` 绑定，可重复点击发送重复请求 | 新增 `logoutTokenId` ref 跟踪当前操作的 tokenId，按钮绑定 `:loading`，finally 中重置 |
 | 操作日志清空/PDF 按钮无 loading 状态 | `operlog/index.vue` 的 `handleClean` 和 `handlePrintPdf` 缺少 loading 绑定 | 新增 `cleanLoading` / `printLoading` ref，按钮绑定 `:loading`，Promise 链和 try/finally 中管理状态 |
 | 调度日志清空按钮无 loading 状态 | `job/log.vue` 的 `handleClean` 缺少 loading 绑定 | 新增 `cleanLoading` ref，按钮绑定 `:loading`，Promise 链 finally 中重置 |
@@ -1401,7 +1401,7 @@ tests/
 | request.ts 4 处 console 未加 DEV 守卫 | 请求拦截器错误（line 143/166）、响应拦截器错误（line 248）、下载解析错误（line 381）在生产环境输出到控制台 | 全部包裹 `if (import.meta.env.DEV)` 守卫 |
 | download.ts 1 处 console.error 未加 DEV 守卫 | `plugins/download.ts` line 114 的错误解析日志在生产环境输出 | 包裹 `if (import.meta.env.DEV)` 守卫 |
 | zh-CN/en-US i18n 键不对齐 | `noticeCenter.markAllReadSuccessCount` 仅存在于 zh-CN，en-US 缺失导致英文环境 `t()` 返回 undefined | 补充 en-US 翻译 `'Marked {count} notices as read'` |
-| vitest localStorage 环境不可用 | jsdom 在特定 Node.js 版本下 localStorage.getItem 不是函数，导致 `yebot.test.ts` 整个文件 49 个用例无法执行 | 新增 `src/test/setup.ts` setupFiles，提供 localStorage/sessionStorage mock 兜底 |
+| vitest localStorage 环境不可用 | jsdom 在特定 Node.js 版本下 localStorage.getItem 不是函数，导致 `stepby.test.ts` 整个文件 49 个用例无法执行 | 新增 `src/test/setup.ts` setupFiles，提供 localStorage/sessionStorage mock 兜底 |
 
 **涉及文件**：
 - 后端：`gen_table_service.rs`（`import_tables` 单事务批量导入 + `preview` 统一 `AjaxResult<PreviewCodeVo>` + `templates/gen/*.tera` 外置模板渲染）、`tool_gen_handler.rs`
