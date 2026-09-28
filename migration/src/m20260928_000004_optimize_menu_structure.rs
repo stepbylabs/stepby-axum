@@ -90,21 +90,22 @@ const ORDER_UPDATES: &[(i64, i32)] = &[
 /// - 其余：健康检查=druid(连接池巡检)、备份=backup、运行监控=server、
 ///   报表=excel、审批=form、关于系统=icon(信息)。
 const ICON_UPDATES: &[(i64, &str)] = &[
-    (107, "message"),  // 通知公告：广播
-    (140, "email"),    // 消息管理：站内信/邮件
-    (118, "backup"),   // 备份管理
-    (124, "icon"),     // 关于系统：信息
-    (133, "druid"),    // 健康检查：连接池巡检
-    (135, "log"),      // 实时日志
-    (145, "enter"),    // 单点登录：进入
-    (146, "key"),      // 登录配置：密钥凭证
-    (151, "excel"),    // 报表中心
-    (157, "link"),     // WebHook：回调链接
-    (3550, "server"),  // 运行监控：服务
-    (3600, "form"),    // 审批中心：审批表单
-    (3700, "nested"),  // 租户管理：层级结构
-    (3950, "peoples"), // 租户服务：组织
-    (3627, "drag"),    // 我的导航：拖拽摆位
+    (107, "message"),    // 通知公告：广播
+    (140, "email"),      // 消息管理：站内信/邮件
+    (118, "backup"),     // 备份管理
+    (124, "icon"),       // 关于系统：信息
+    (133, "druid"),      // 健康检查：连接池巡检
+    (135, "log"),        // 实时日志
+    (145, "enter"),      // 单点登录：进入
+    (146, "switch"),     // 登录配置：SSO 切换（⚠️ sprite 无 key.svg，勿用）
+    (3560, "clipboard"), // API 令牌：复制凭证（历史遗留 key.svg 不存在，渲染空白）
+    (151, "excel"),      // 报表中心
+    (157, "link"),       // WebHook：回调链接
+    (3550, "server"),    // 运行监控：服务
+    (3600, "form"),      // 审批中心：审批表单
+    (3700, "nested"),    // 租户管理：层级结构
+    (3950, "peoples"),   // 租户服务：组织
+    (3627, "drag"),      // 我的导航：拖拽摆位
 ];
 
 fn idempotent_insert_prefix(backend: DatabaseBackend) -> &'static str {
@@ -224,9 +225,10 @@ mod tests {
         for (menu_id, order) in ORDER_UPDATES {
             let parent = match *menu_id {
                 3900 | 3627 => 3950,
-                100..=108 | 125 | 134 | 140 | 151 | 3600 | 145 | 157 | 3700 => 1,
-                109 | 110 | 113 | 118 | 119 | 120 | 121 | 122 | 133 | 160 | 3550 | 501 => 2,
-                115 | 116 | 117 | 3410 | 3560 => 3,
+                100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 125 | 134 | 140 | 151
+                | 3600 | 145 | 157 | 3700 => 1,
+                109 | 110 | 113 | 118 | 119 | 120 | 121 | 122 | 133 | 135 | 160 | 3550 | 501 => 2,
+                115 | 116 | 117 | 124 | 128 | 129 | 131 | 3410 | 3560 => 3,
                 127 | 132 | 1 | 2 | 3 | 3950 | 4 => 0,
                 other => panic!("未归类菜单: {}", other),
             };
@@ -235,10 +237,10 @@ mod tests {
         for (parent, orders) in by_parent {
             let mut sorted = orders.clone();
             sorted.sort();
-            let uniq = sorted.dedup().len();
+            sorted.dedup();
             assert_eq!(
                 sorted.len(),
-                uniq,
+                orders.len(),
                 "parent {} 存在重复 order: {:?}",
                 parent,
                 sorted

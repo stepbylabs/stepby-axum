@@ -1629,9 +1629,10 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
         "UPDATE sys_menu SET icon = 'log' WHERE menu_id = 135",
         "UPDATE sys_menu SET icon = 'druid' WHERE menu_id = 133",
         "UPDATE sys_menu SET icon = 'icon' WHERE menu_id = 124",
-        "UPDATE sys_menu SET icon = 'key' WHERE menu_id = 146",
+        "UPDATE sys_menu SET icon = 'switch' WHERE menu_id = 146",
         "UPDATE sys_menu SET icon = 'nested' WHERE menu_id = 3700",
         "UPDATE sys_menu SET icon = 'peoples' WHERE menu_id = 3950",
+        "UPDATE sys_menu SET icon = 'clipboard' WHERE menu_id = 3560",
         "UPDATE sys_menu SET icon = 'drag' WHERE menu_id = 3627",
     ];
     for sql in updates {
