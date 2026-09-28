@@ -149,7 +149,8 @@ impl MigrationTrait for Migration {
             conn.execute_unprepared(&rm_sql).await?;
         }
 
-        // 2. 自助页收编：parent 移入 3950（幂等 UPDATE）
+        // 2. 自助页收编：parent 移入 3950 + 改名「域名管理」（幂等 UPDATE）；
+        //    命名与「菜单管理」区分：菜单管理=定义全系统菜单；本页=租户自助管理域名绑定
         for (menu_id, parent) in [(3900_i64, 3950_i64), (3627_i64, 3950_i64)] {
             conn.execute_unprepared(&format!(
                 "UPDATE sys_menu SET parent_id = {} WHERE menu_id = {}",
@@ -157,6 +158,8 @@ impl MigrationTrait for Migration {
             ))
             .await?;
         }
+        conn.execute_unprepared("UPDATE sys_menu SET menu_name = '域名管理' WHERE menu_id = 3900")
+            .await?;
         // 2b. API 令牌（个人开发者向）归属「系统工具」（原在系统监控下，
         //     order=5 与实时日志冲突；移动后 parent=3、order=5 无冲突）
         conn.execute_unprepared("UPDATE sys_menu SET parent_id = 3 WHERE menu_id = 3560")
