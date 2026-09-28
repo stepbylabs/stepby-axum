@@ -1566,6 +1566,7 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
 
     // ---- ② 自助页收编 + order 重排 + icon 修正（幂等 UPDATE 清单）----
     let updates: &[&str] = &[
+        "UPDATE sys_menu SET menu_name = '域名管理' WHERE menu_id = 3900",
         "UPDATE sys_menu SET parent_id = 3950 WHERE menu_id = 3900",
         "UPDATE sys_menu SET parent_id = 3950 WHERE menu_id = 3627",
         "UPDATE sys_menu SET parent_id = 3 WHERE menu_id = 3560",
