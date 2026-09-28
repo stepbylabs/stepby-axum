@@ -11,8 +11,8 @@
 #   5. 不做多阶段构建，保留完整工具链便于 cargo clippy / cargo test
 #
 # 构建与运行：
-#   docker build -f Dockerfile.dev -t yebot-backend:dev .
-#   docker run -it --rm -p 8080:8080 -v ${PWD}:/app -v yebot_cargo_cache:/usr/local/cargo/registry yebot-backend:dev
+#   docker build -f Dockerfile.dev -t stepby-backend:dev .
+#   docker run -it --rm -p 8080:8080 -v ${PWD}:/app -v stepby_cargo_cache:/usr/local/cargo/registry stepby-backend:dev
 #
 # 或使用 docker compose（见 docker-compose.dev.yml）：
 #   docker compose -f docker-compose.dev.yml up
@@ -64,6 +64,6 @@ EXPOSE 8080
 # 等价于：cargo watch -x run
 # 若 cargo-watch 安装失败（见上方 RUN 步骤），fallback 到 cargo run
 # 也可在 docker run 时覆盖命令：
-#   docker run ... yebot-backend:dev cargo clippy --all-targets -- -D warnings
-#   docker run ... yebot-backend:dev cargo test
+#   docker run ... stepby-backend:dev cargo clippy --all-targets -- -D warnings
+#   docker run ... stepby-backend:dev cargo test
 CMD ["sh", "-c", "command -v cargo-watch >/dev/null 2>&1 && cargo watch -x run || cargo run"]

@@ -76,11 +76,11 @@ dev-db-logs:
 
 # 构建生产 Docker 镜像
 docker-build:
-    docker build -t yebot-backend:latest .
+    docker build -t stepby-backend:latest .
 
 # 构建开发 Docker 镜像
 docker-build-dev:
-    docker build -f Dockerfile.dev -t yebot-backend:dev .
+    docker build -f Dockerfile.dev -t stepby-backend:dev .
 
 # 一键检查（CI 本地等价）：fmt-check + clippy + test
 ci-check: fmt-check clippy test
