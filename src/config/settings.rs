@@ -100,6 +100,19 @@ pub struct Settings {
     /// 默认 `local` ⇒ 与改造前**逐字节等价**（关闭态即安全态）。
     #[serde(default)]
     pub rate_limit: RateLimitSettings,
+    /// **风控集成点**（`[risk_control]` 段）：登录面可疑特征（工具型 UA / 异地登录）的
+    /// 可插拔处置。全部默认 `off` ⇒ 不判定、不记录额外审计、与改造前**逐字节等价**。
+    ///
+    /// 按项目准则⑥：这类"需外部数据源/引擎"的能力**不内置实现、也不整块砍掉**，
+    /// 而是提供**开关 + 集成点**，由使用者按自身合规要求开启。
+    #[serde(default)]
+    pub risk_control: RiskControlConfig,
+    /// **上传文件病毒扫描集成点**（`[upload_scan]` 段）：默认 `off` ⇒ 不发起任何外部调用。
+    ///
+    /// 按项目准则⑥提供**可插拔的 HTTP 扫描集成点**（不内置杀毒引擎、也不砍掉上传能力）：
+    /// 使用者把 `url` 指向自己的 AV 网关（ClamAV REST / VirusTotal 代理 / 自研）即可开启。
+    #[serde(default)]
+    pub upload_scan: UploadScanConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -132,6 +145,8 @@ impl fmt::Debug for Settings {
             .field("webauthn", &self.webauthn)
             .field("resilience", &self.resilience)
             .field("rate_limit", &self.rate_limit)
+            .field("risk_control", &self.risk_control)
+            .field("upload_scan", &self.upload_scan)
             .finish()
     }
 }
@@ -783,6 +798,292 @@ fn default_rate_limit_mode() -> String {
 
 fn default_rate_limit_key_ttl_secs() -> u64 {
     300
+}
+
+// ==================== 风控集成点（[risk_control]） ====================
+
+/// 登录面「工具型 UA」处置档位字面量（顺序：默认项在前 ⇒ "默认为现状"）
+pub const LOGIN_UA_FILTER_MODES: &[&str] = &["off", "block", "strict"];
+
+/// 登录面「工具型 UA」处置档位（项目准则③：取「模式」而非裸 bool）。
+///
+/// 定位：**弱信号**防护（UA 可伪造），用于挡掉批量脚本的"顺手尝试"，**不是**安全边界。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoginUaFilterMode {
+    /// **默认 = 现状**：不判定 UA。
+    #[default]
+    Off,
+    /// 命中工具型 UA 特征（`curl/`、`wget/`、`python-requests/` 等）⇒ 拒绝登录。
+    /// 空 UA **放行**但打 WARN（很多合法 SDK/HTTP/1.0 客户端不发 UA，硬拦误伤面大）。
+    Block,
+    /// 在 `block` 基础上**同时拒绝空 UA**（适合"只允许浏览器登录"的部署）。
+    Strict,
+}
+
+impl LoginUaFilterMode {
+    /// 解析配置串（大小写无关、两端 trim）；未登记取值一律回落 [`Self::Off`] 并打 WARN。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "block" => Self::Block,
+            "strict" => Self::Strict,
+            "off" => Self::Off,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    allowed = ?LOGIN_UA_FILTER_MODES,
+                    "配置 [risk_control].login_ua_filter 取值非法，已回落 off（= 现状：不判定 UA）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Block => "block",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+/// 登录面「异地登录」处置档位字面量（顺序：默认项在前 ⇒ "默认为现状"）
+pub const LOGIN_GEO_ALERT_MODES: &[&str] = &["off", "alert"];
+
+/// 登录面「异地登录」处置档位。
+///
+/// **只有「告警」没有「拦截」**是刻意的：地区识别基于 IP 库，VPN / 运营商出口 / 移动网络
+/// 都会造成误判，拦截会变成"用户被自己锁在门外"。故本档位只产生**可审计的告警**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoginGeoAlertMode {
+    /// **默认 = 现状**：不比对历史登录地区。
+    #[default]
+    Off,
+    /// 与上一次**成功**登录的粗粒度地区不同 ⇒ 打 WARN + 在登录日志 `msg` 中留痕。
+    Alert,
+}
+
+impl LoginGeoAlertMode {
+    /// 解析配置串（大小写无关、两端 trim）；未登记取值一律回落 [`Self::Off`] 并打 WARN。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "alert" => Self::Alert,
+            "off" => Self::Off,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    allowed = ?LOGIN_GEO_ALERT_MODES,
+                    "配置 [risk_control].login_geo_alert 取值非法，已回落 off（= 现状：不比对）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Alert => "alert",
+        }
+    }
+}
+
+/// 内置的「工具型 UA」特征清单（仅当使用者未自定义 `login_ua_blocklist` 时生效）。
+///
+/// 只收录**明显不是浏览器**的命令行/抓取工具标识；刻意**不含** `node` / `axios` / `okhttp` 等
+/// 同时被合法 SDK 使用的标识——它们启用后可能误伤使用者自己的服务端集成（清单可由使用者覆盖）。
+pub const DEFAULT_UA_BLOCKLIST: &[&str] = &[
+    "curl/",
+    "wget/",
+    "python-requests/",
+    "python-urllib/",
+    "go-http-client/",
+    "libwww-perl/",
+    "java/",
+    "httpclient/",
+    "scrapy/",
+];
+
+/// 风控集成点配置（`[risk_control]` 段）。
+///
+/// # 关闭态 = 现状
+///
+/// 两个档位默认均为 `off` ⇒ 不读取 UA 判定、不查历史登录、**不产生额外审计行**，
+/// 与改造前逐字节等价。开启后才产生对应行为（可选集成点）。
+#[derive(Clone, Debug, Deserialize)]
+pub struct RiskControlConfig {
+    /// 登录面工具型 UA 处置（`off` | `block` | `strict`），默认 `off`。
+    #[serde(default = "default_login_ua_filter")]
+    pub login_ua_filter: String,
+    /// 自定义工具型 UA 特征清单（**大小写无关的子串匹配**，取小写后比对）。
+    /// 留空 ⇒ 使用内置 [`DEFAULT_UA_BLOCKLIST`]。
+    #[serde(default)]
+    pub login_ua_blocklist: Vec<String>,
+    /// 登录面异地告警（`off` | `alert`），默认 `off`。
+    #[serde(default = "default_login_geo_alert")]
+    pub login_geo_alert: String,
+}
+
+impl Default for RiskControlConfig {
+    fn default() -> Self {
+        Self {
+            login_ua_filter: default_login_ua_filter(),
+            login_ua_blocklist: Vec::new(),
+            login_geo_alert: default_login_geo_alert(),
+        }
+    }
+}
+
+impl RiskControlConfig {
+    pub fn ua_filter(&self) -> LoginUaFilterMode {
+        LoginUaFilterMode::parse(&self.login_ua_filter)
+    }
+
+    pub fn geo_alert(&self) -> LoginGeoAlertMode {
+        LoginGeoAlertMode::parse(&self.login_geo_alert)
+    }
+
+    /// 生效的 UA 特征清单（已小写化；配置为空 ⇒ 内置默认清单）。
+    pub fn ua_patterns(&self) -> Vec<String> {
+        let source: Vec<String> = if self.login_ua_blocklist.is_empty() {
+            DEFAULT_UA_BLOCKLIST
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            self.login_ua_blocklist.clone()
+        };
+        source
+            .into_iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+}
+
+fn default_login_ua_filter() -> String {
+    LoginUaFilterMode::default().as_str().to_string()
+}
+
+fn default_login_geo_alert() -> String {
+    LoginGeoAlertMode::default().as_str().to_string()
+}
+
+// ==================== 上传文件病毒扫描集成点（[upload_scan]） ====================
+
+/// 上传扫描档位字面量（顺序：默认项在前 ⇒ "默认为现状"）
+pub const UPLOAD_SCAN_MODES: &[&str] = &["off", "http"];
+
+/// 上传扫描档位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UploadScanMode {
+    /// **默认 = 现状**：不发起任何外部调用。
+    #[default]
+    Off,
+    /// 把文件字节 POST 给使用者配置的扫描端点，按响应判定是否放行。
+    Http,
+}
+
+impl UploadScanMode {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "http" => Self::Http,
+            "off" => Self::Off,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    allowed = ?UPLOAD_SCAN_MODES,
+                    "配置 [upload_scan].mode 取值非法，已回落 off（= 现状：不扫描）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Http => "http",
+        }
+    }
+}
+
+/// 扫描端点请求超时（秒）默认值与夹取区间。
+pub const UPLOAD_SCAN_TIMEOUT_MIN_SECS: u64 = 1;
+pub const UPLOAD_SCAN_TIMEOUT_MAX_SECS: u64 = 60;
+
+/// 上传文件病毒扫描集成点配置（`[upload_scan]` 段）——**可插拔，不内置杀毒引擎**。
+///
+/// # 请求/响应对照表（集成契约）
+///
+/// 请求：`POST <url>`，`Content-Type: application/octet-stream`，body = 文件原始字节；
+/// 请求头 `X-Yebot-Filename: <URL 编码后的文件名>`（避免头注入），
+/// `token` 非空时附 `Authorization: Bearer <token>`。
+///
+/// 响应：HTTP 2xx + JSON `{"clean": true|false, "detail": "可选说明"}`。
+/// - `clean=true` ⇒ 放行；
+/// - `clean=false` ⇒ 拒绝（400，对外用 i18n 文案，**不回显** `detail` 原文，仅落 tracing，防反射注入）；
+/// - 非 2xx / 无 `clean` 字段 / 解析失败 / 连接失败 ⇒ 按 `fail_closed` 处置。
+///
+/// # fail_closed（默认 true）
+///
+/// 使用者开启扫描即表示"要把扫描作为上传闸门"：扫描器不可用时**默认拒绝上传**（503），
+/// 避免"扫描器挂了就等同于没扫描"。确实希望降级放行的部署可显式置 `fail_closed = false`。
+#[derive(Clone, Debug, Deserialize)]
+pub struct UploadScanConfig {
+    /// 档位（`off` | `http`），默认 `off`。
+    #[serde(default = "default_upload_scan_mode")]
+    pub mode: String,
+    /// 扫描端点 URL（`mode = "http"` 时必填；经 `common::ssrf` 校验，禁内网/元数据地址）。
+    #[serde(default)]
+    pub url: String,
+    /// 可选 Bearer 令牌（面向需要鉴权的 AV 网关）。
+    #[serde(default)]
+    pub token: String,
+    /// 请求超时秒数（默认 10，夹取 1..=60）——扫描是**上传主链路**，超时即 503/放行由 `fail_closed` 决定。
+    #[serde(default = "default_upload_scan_timeout_secs")]
+    pub timeout_secs: u64,
+    /// 扫描器不可用时的姿态：`true`（默认）= 拒绝上传（fail-closed），`false` = 记 WARN 后放行。
+    #[serde(default = "default_upload_scan_fail_closed")]
+    pub fail_closed: bool,
+}
+
+impl Default for UploadScanConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_upload_scan_mode(),
+            url: String::new(),
+            token: String::new(),
+            timeout_secs: default_upload_scan_timeout_secs(),
+            fail_closed: default_upload_scan_fail_closed(),
+        }
+    }
+}
+
+impl UploadScanConfig {
+    pub fn mode(&self) -> UploadScanMode {
+        UploadScanMode::parse(&self.mode)
+    }
+
+    /// 生效超时（夹取到 `1..=60` 秒）。
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.timeout_secs
+                .clamp(UPLOAD_SCAN_TIMEOUT_MIN_SECS, UPLOAD_SCAN_TIMEOUT_MAX_SECS),
+        )
+    }
+}
+
+fn default_upload_scan_mode() -> String {
+    UploadScanMode::default().as_str().to_string()
+}
+
+fn default_upload_scan_timeout_secs() -> u64 {
+    10
+}
+
+fn default_upload_scan_fail_closed() -> bool {
+    true
 }
 
 /// WebAuthn / Passkey 配置（`[webauthn]` 段）——能力位 `auth.webauthn` 的**配置面**。
@@ -2132,6 +2433,8 @@ impl Settings {
             webauthn: WebauthnConfig::default(),
             resilience: ResilienceConfig::default(),
             rate_limit: RateLimitSettings::default(),
+            risk_control: RiskControlConfig::default(),
+            upload_scan: UploadScanConfig::default(),
         };
 
         settings.apply_env_overrides();
@@ -2299,6 +2602,8 @@ mod tests {
             webauthn: WebauthnConfig::default(),
             resilience: ResilienceConfig::default(),
             rate_limit: RateLimitSettings::default(),
+            risk_control: RiskControlConfig::default(),
+            upload_scan: UploadScanConfig::default(),
         }
     }
 
@@ -2667,6 +2972,8 @@ mod tests {
             webauthn: WebauthnConfig::default(),
             resilience: ResilienceConfig::default(),
             rate_limit: RateLimitSettings::default(),
+            risk_control: RiskControlConfig::default(),
+            upload_scan: UploadScanConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);

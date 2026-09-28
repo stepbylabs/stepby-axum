@@ -15,9 +15,11 @@ pub mod i18n;
 pub mod image;
 pub mod page;
 pub mod response;
+pub mod risk_control;
 pub mod ssrf;
 pub mod tenant;
 pub mod upload;
+pub mod upload_scan;
 pub mod webhook;
 
 pub mod breaker;

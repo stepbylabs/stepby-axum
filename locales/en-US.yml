@@ -25,7 +25,11 @@ error:
     clear_field_unknown: "clearFields contains a non-clearable field: %{field}"
     clear_field_conflict: "Field %{field} was both submitted with a value and declared for clearing; choose one"
     forbidden: Access to this resource is forbidden
+  upload_scan:
+    rejected: The uploaded file did not pass the security scan and was rejected
+    unavailable: File security scanning service is unavailable, please try again later
   auth:
+    ua_blocked: This login client signature is not allowed; please sign in with a browser
     captcha_expired: Captcha expired or does not exist
     captcha_wrong: Incorrect captcha
     captcha_gen_failed: Captcha generation failed, please try again later
@@ -645,6 +649,8 @@ log:
     permission_denied: "Permission denied: missing required permission %{perm}"
     totp_failed: Incorrect TOTP verification code
     totp_locked: Too many failed TOTP attempts, temporarily locked
+    ua_blocked: Login client signature rejected by risk-control policy
+    geo_alert: "Impossible-travel alert: region changed from %{prev} to %{now}"
   oauth:
     login_success: "Third-party login successful (%{provider})"
     login_failed: "Third-party login failed (%{provider})"

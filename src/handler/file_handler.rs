@@ -203,6 +203,16 @@ pub async fn upload(
         }
     }
 
+    // 上传扫描集成点（`[upload_scan]`，默认 off ⇒ **零出站**、逐字节等价于改造前）
+    if let Some(bytes) = file_bytes.as_deref() {
+        crate::common::upload_scan::ensure_clean(
+            &state.config.upload_scan,
+            original_filename.as_deref().unwrap_or_default(),
+            bytes,
+        )
+        .await?;
+    }
+
     // P0-3：统一校验 + 保存（扩展名白名单、危险类型拒绝、magic bytes 严格化、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
         state.storage.as_ref(),

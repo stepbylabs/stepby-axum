@@ -9,6 +9,8 @@
 //!
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
+use std::time::Duration;
+
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
@@ -17,6 +19,13 @@ use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::entity::sys_oper_log::{ActiveModel as SysOperLogActiveModel, Model as SysOperLogModel};
 use crate::repository::sys_oper_log::SysOperLogRepository;
+use crate::utils::retry::{RetryPolicy, retry_async};
+
+/// 操作日志写入的有界重试策略（R5-RATE-29）：3 次尝试 / 100ms 间隔。
+///
+/// DB 短暂抖动（连接重置、锁等待超时）多为毫秒级可恢复，固定短退避即可覆盖；
+/// 次数硬上限确保 DB 长时间不可用时 spawn 任务不会被无限占用。
+const OPER_LOG_WRITE_RETRY: RetryPolicy = RetryPolicy::new(3, Duration::from_millis(100));
 
 // ==================== DTO ====================
 
@@ -537,9 +546,15 @@ impl SysOperLogService {
     /// 异步写入不阻断主流程，写入失败仅记日志不返回错误。
     /// 此方法为独立接口，中间件可选择调用。
     ///
-    /// 修复 P0-R81-011：spawn 写入无重试，进程崩溃或 DB 临时不可用时日志丢失。
-    /// 现在包装为重试函数：最多 3 次尝试，间隔 100ms，3 次都失败则 tracing::error!。
+    /// 修复 P0-R81-011 / R5-RATE-29：写入复用共享的有界重试助手
+    /// （`utils::retry`，3 次尝试 / 100ms 间隔）；重试仍失败时记 `tracing::error!`，
+    /// 并携带 oper_url / request_method / oper_name，避免审计记录从日志流中凭空消失。
     pub async fn record_oper_log(&self, record: OperLogRecord) {
+        // 重试耗尽后的 error 日志需要能定位到具体请求，故在字段被 move 进 ActiveModel 前留副本
+        let oper_url = record.oper_url.clone();
+        let request_method = record.request_method.clone();
+        let oper_name = record.oper_name.clone();
+
         let now = crate::common::datetime::now_naive();
         let am = SysOperLogActiveModel {
             title: Set(Some(record.title)),
@@ -577,34 +592,26 @@ impl SysOperLogService {
             ..Default::default()
         };
 
-        // 重试机制：最多 3 次尝试，间隔 100ms
-        const MAX_ATTEMPTS: u32 = 3;
-        const RETRY_INTERVAL_MS: u64 = 100;
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            match self.oper_log_repo.insert(am.clone()).await {
-                Ok(_) => return,
-                Err(e) => {
-                    if attempt < MAX_ATTEMPTS {
-                        tracing::warn!(
-                            "操作日志写入失败（第 {}/{} 次），{}ms 后重试: {}",
-                            attempt,
-                            MAX_ATTEMPTS,
-                            RETRY_INTERVAL_MS,
-                            e
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS))
-                            .await;
-                    } else {
-                        // 3 次都失败，记录错误日志（无法再恢复）
-                        tracing::error!(
-                            "操作日志写入失败（已重试 {} 次，放弃）: {}",
-                            MAX_ATTEMPTS,
-                            e
-                        );
-                    }
-                }
-            }
+        // 有界重试：最多 OPER_LOG_WRITE_RETRY.max_attempts 次尝试，间隔 OPER_LOG_WRITE_RETRY.interval。
+        // 闭包内自行 clone 数据库连接与 ActiveModel，构造所有权自足的 future，
+        // 使重试观察不到借用关系（避免 `FnMut() -> Fut` 的借用生命周期问题）。
+        let db = self.oper_log_repo.base().db().clone();
+        if let Err(e) = retry_async(OPER_LOG_WRITE_RETRY, || {
+            let db = db.clone();
+            let am = am.clone();
+            async move { SysOperLogRepository::new(db).insert(am).await }
+        })
+        .await
+        {
+            // 重试耗尽：记录错误日志，携带可定位信息（无法再恢复）
+            tracing::error!(
+                oper_url = %oper_url,
+                request_method = %request_method,
+                oper_name = %oper_name,
+                "操作日志写入失败（已尝试 {} 次，放弃）: {}",
+                OPER_LOG_WRITE_RETRY.max_attempts,
+                e
+            );
         }
     }
 }

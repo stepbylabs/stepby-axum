@@ -7,6 +7,7 @@ pub mod ip;
 pub mod ip_location;
 pub mod password;
 pub mod redis;
+pub mod retry;
 pub mod sanitize;
 pub mod tree;
 pub mod xdb_reader;

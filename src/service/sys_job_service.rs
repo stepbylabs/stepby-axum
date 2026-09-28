@@ -98,7 +98,9 @@ pub struct JobAddDto {
     pub job_group: String,
     #[garde(length(min = 1, max = 500))]
     pub invoke_target: String,
-    #[garde(length(min = 1, max = 255))]
+    /// 校验上限与**列宽**对齐（64）：`m20260719_000001` 已对全部安装形态把该列收窄到 64，
+    /// 若此处仍按 255 放行，65~255 字符的表达式会通过校验后落库报错（500）
+    #[garde(length(min = 1, max = crate::common::constants::CRON_EXPRESSION_MAX_LEN))]
     pub cron_expression: String,
     #[garde(skip)]
     pub misfire_policy: Option<String>,
@@ -122,7 +124,8 @@ pub struct JobEditDto {
     pub job_group: String,
     #[garde(length(min = 1, max = 500))]
     pub invoke_target: String,
-    #[garde(length(min = 1, max = 255))]
+    /// 校验上限与**列宽**对齐（64）——理由同 [`JobAddDto::cron_expression`]
+    #[garde(length(min = 1, max = crate::common::constants::CRON_EXPRESSION_MAX_LEN))]
     pub cron_expression: String,
     #[garde(skip)]
     pub misfire_policy: Option<String>,

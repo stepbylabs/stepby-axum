@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;
 
+use crate::common::constants::menu_type as menu_kind;
 use crate::common::datetime::{self, now_naive};
 use crate::common::error::ServiceError;
 use crate::common::tenant::is_platform_only_perm;
@@ -53,7 +54,7 @@ use crate::service::sys_tenant_service::SysTenantService;
 pub const FEATURE_NAV_L3: &str = "nav.l3";
 
 /// L3 允许引用的菜单类型（目录 M / 页面 C；按钮 F 不是导航节点）
-const NAV_MENU_TYPES: [&str; 2] = ["M", "C"];
+const NAV_MENU_TYPES: [&str; 2] = [menu_kind::DIR, menu_kind::MENU];
 
 /// 停用态字面量（`sys_menu.status` / `sys_tenant_menu.status`）
 const STATUS_DISABLED: &str = "1";
@@ -402,7 +403,7 @@ impl SysTenantNavService {
         let mut out: Vec<TenantNavMenuOptionVo> = candidates
             .into_iter()
             .filter(|m| {
-                let mt = m.menu_type.as_deref().unwrap_or("C");
+                let mt = m.menu_type.as_deref().unwrap_or(menu_kind::MENU);
                 NAV_MENU_TYPES.contains(&mt)
                     && m.status.as_deref().unwrap_or("0") != STATUS_DISABLED
                     && !m
@@ -414,7 +415,7 @@ impl SysTenantNavService {
                 selected: selected.contains(&m.menu_id),
                 menu_id: m.menu_id,
                 menu_name: m.menu_name,
-                menu_type: m.menu_type.unwrap_or_else(|| "C".to_string()),
+                menu_type: m.menu_type.unwrap_or_else(|| menu_kind::MENU.to_string()),
                 parent_id: m.parent_id.unwrap_or(0),
                 perms: m.perms,
                 icon: m.icon,

@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use utoipa::{IntoParams, ToSchema};
 
+use crate::common::constants::menu_type as menu_kind;
 use crate::common::error::ServiceError;
 use crate::common::{TreeSelectVo, like_escape};
 use crate::entity::sys_menu::{
@@ -380,7 +381,7 @@ impl SysMenuService {
 
         // perms 查重（仅 menu_type='C' 或 'F' 时，通过 Repository）
         let menu_type = dto.menu_type.as_str();
-        if (menu_type == "C" || menu_type == "F")
+        if (menu_type == menu_kind::MENU || menu_type == menu_kind::BUTTON)
             && let Some(ref perms) = dto.perms
             && !perms.is_empty()
         {
@@ -671,7 +672,7 @@ impl SysMenuService {
 
         // 过滤按钮类型（F 不进路由树）+ 隐藏菜单（visible='1'）+ 停用菜单（status='1'）
         menus.retain(|m| {
-            m.menu_type.as_deref() != Some("F")
+            m.menu_type.as_deref() != Some(menu_kind::BUTTON)
                 && m.visible.as_deref() == Some("0")
                 && m.status.as_deref() == Some("0")
         });
