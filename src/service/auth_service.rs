@@ -226,7 +226,7 @@ pub struct RouterVo {
 }
 
 /// 路由 meta 信息（对齐前端 MetaVo）
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MetaVo {
     pub title: String,
@@ -1508,7 +1508,27 @@ impl AuthService {
         } else {
             menu_tree
         };
-        let routers: Vec<RouterVo> = menu_tree.iter().map(|m| menu_to_router(m, "")).collect();
+        let routers: Vec<RouterVo> = menu_tree
+            .iter()
+            .map(|m| {
+                let router = menu_to_router(m, "");
+                use crate::common::constants::menu_type;
+                // 顶级 C 菜单包装为 Layout + 单 child（对齐 RuoYi 标准 RouterVo 结构）。
+                // 缺陷背景（用户实测）：顶级 C（如 数据看板/导航设置/我的域名）此前生成
+                // `{path:'/x', component:'x/index'}` 单层路由，前端注册为**顶层路由**
+                // ⇒ 点击菜单整页替换渲染（脱离侧边栏/Tab 框架），页面内栅格布局
+                // 因缺容器上下文而竖排。包装后与其他菜单一致地在 Tab 内容区渲染。
+                // 外链（meta.link 存在，is_frame=0）不包装——它由 Link 组件以 <a> 打开。
+                let is_top_level_page = m.parent_id == Some(0)
+                    && m.menu_type.as_deref() == Some(menu_type::MENU)
+                    && router.meta.link.is_none();
+                if is_top_level_page && router.component != "Layout" {
+                    wrap_top_level_page_router(router)
+                } else {
+                    router
+                }
+            })
+            .collect();
         Ok(routers)
     }
 
@@ -2180,7 +2200,6 @@ fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
     // 用 name 作为子路由的 parent_path 传参
     // 这样嵌套层级越深，name 前缀越长，确保唯一
     let child_parent_path = name.clone();
-
     // children 递归转换（过滤 F 类型，防御性二次过滤）
     let children = if let Some(ref kids) = menu.children {
         let router_kids: Vec<RouterVo> = kids
@@ -2207,6 +2226,41 @@ fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
         meta,
         query: menu.query.clone(),
         children,
+    }
+}
+
+/// 顶级 C 菜单的 Layout 包装（纯函数，便于单测；调用点 `get_routers` 组装层）
+///
+/// 输入：`menu_to_router` 对顶级 C 菜单产出的单层路由
+/// `{path:'/x', component:'x/index', name:'x', meta}`；
+/// 输出：RuoYi 标准结构
+/// `{path:'/x', component:'Layout', redirect:'/x/index', name:'x', meta,
+///   children:[{path:'index', component:'x/index', name:'x-index', meta, query}]}`。
+///
+/// child path 用 `index`（RuoYi 惯例）；redirect 指向 child 使裸 `/x` 也可达；
+/// child name 追加 `-index` 后缀保证全局唯一（见 menu_to_router 的 name 冲突注释）。
+fn wrap_top_level_page_router(router: RouterVo) -> RouterVo {
+    let child = RouterVo {
+        name: format!("{}-index", router.name),
+        path: "index".to_string(),
+        hidden: false,
+        redirect: None,
+        component: router.component.clone(),
+        always_show: None,
+        meta: router.meta.clone(),
+        query: router.query.clone(),
+        children: None,
+    };
+    RouterVo {
+        name: router.name,
+        path: router.path.clone(),
+        hidden: router.hidden,
+        redirect: Some(format!("{}/index", router.path)),
+        component: "Layout".to_string(),
+        always_show: None,
+        meta: router.meta,
+        query: None,
+        children: Some(vec![child]),
     }
 }
 
@@ -2418,6 +2472,37 @@ mod tests {
         let router = menu_to_router(&menu, "");
         assert_eq!(router.path, "/dashboard"); // 顶级 C 菜单也需 / 前缀
         assert_eq!(router.component, "dashboard/index"); // component 原样保留
+    }
+
+    #[test]
+    fn test_wrap_top_level_page_router_layout_structure() {
+        // 用户实测缺陷回归锁：顶级 C 菜单必须包装为 Layout + 单 child，
+        // 否则前端整页渲染（脱离侧边栏/Tab 框架）且栅格竖排
+        let menu = make_menu(
+            132,
+            0,
+            "C",
+            "dashboard",
+            Some("dashboard/index"),
+            "1",
+            "0",
+            "0",
+            "0",
+            None,
+        );
+        let single = menu_to_router(&menu, "");
+        let wrapped = wrap_top_level_page_router(single);
+
+        assert_eq!(wrapped.path, "/dashboard");
+        assert_eq!(wrapped.component, "Layout");
+        assert_eq!(wrapped.redirect, Some("/dashboard/index".to_string()));
+        let kids = wrapped.children.as_ref().expect("必须有单 child");
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].path, "index");
+        assert_eq!(kids[0].component, "dashboard/index");
+        assert_eq!(kids[0].name, "dashboard-index");
+        assert_eq!(kids[0].meta.title, wrapped.meta.title);
+        assert!(wrapped.meta.link.is_none());
     }
 
     #[test]
