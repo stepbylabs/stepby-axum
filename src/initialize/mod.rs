@@ -199,6 +199,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("数据看板菜单去重失败: {}", e))?;
 
+        // 3.5d-6 菜单信息架构优化兜底：与迁移 m20260928_000004_optimize_menu_structure
+        // 等价（启动不跑 Migrator::up）——3950「租户服务」目录 + 自助页收编 +
+        // order 重排（消除重复 order）+ icon 语义修正，全部幂等。
+        ensure_menu_structure_optimize(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("菜单结构优化失败: {}", e))?;
+
         // 3.5d-4 租户自建导航 L3 页面菜单（批次 3）：与迁移
         // m20260926_000014_tenant_nav_menu 等价（启动不跑 Migrator::up）。
         // 缺此兜底时存量库无 3627 页面菜单 ⇒ 能力位开启后租户侧仍无入口（假功能）。
@@ -1503,6 +1510,138 @@ fn init_webauthn_output(settings: &Settings) {
             );
         }
     }
+}
+
+/// 菜单信息架构优化兜底（与迁移 m20260928_000004_optimize_menu_structure 等价，全幂等）：
+/// ① 新目录 3950「租户服务」并收编自助页 3900/3627（原游离顶层）；
+/// ② 三个目录内 order 重排（消除 order=8/10/11 多处重复导致的显示顺序不稳定）；
+/// ③ icon 语义修正（peoples/connection/documentation 等多处复用改贴切图标）。
+/// 全部为幂等 UPDATE/INSERT，重复执行无副作用。
+async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // ---- ① 3950 目录（幂等插入）----
+    let exists: Option<i64> = match db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT menu_id FROM sys_menu WHERE menu_id = 3950".to_string(),
+        ))
+        .await
+    {
+        Ok(row) => row.and_then(|r| r.try_get_by_index::<i64>(0).ok()),
+        Err(_) => None,
+    };
+    if exists.is_none() {
+        let prefix = match backend {
+            DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO",
+            DatabaseBackend::MySql => "INSERT IGNORE INTO",
+            DatabaseBackend::Postgres => "INSERT INTO",
+        };
+        let now = match backend {
+            DatabaseBackend::Sqlite => "'2026-09-28 00:00:00'".to_string(),
+            _ => "NOW()".to_string(),
+        };
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "{} sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES (3950, '租户服务', 0, 5, 'tenant-space', NULL, '', '', '1', '0', 'M', '0', '0', '', 'shopping', 'admin', {}, '租户自助功能聚合（我的域名 / 导航设置）', '0', 'menu.tenantSpace')",
+                prefix, now
+            ),
+        ))
+        .await?;
+        let rm_prefix = match backend {
+            DatabaseBackend::Postgres => {
+                "INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, 3950) ON CONFLICT DO NOTHING"
+            }
+            DatabaseBackend::Sqlite => {
+                "INSERT OR IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, 3950)"
+            }
+            DatabaseBackend::MySql => {
+                "INSERT IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, 3950)"
+            }
+        };
+        db.execute(Statement::from_string(backend, rm_prefix.to_string()))
+            .await?;
+    }
+
+    // ---- ② 自助页收编 + order 重排 + icon 修正（幂等 UPDATE 清单）----
+    let updates: &[&str] = &[
+        "UPDATE sys_menu SET parent_id = 3950 WHERE menu_id = 3900",
+        "UPDATE sys_menu SET parent_id = 3950 WHERE menu_id = 3627",
+        "UPDATE sys_menu SET parent_id = 3 WHERE menu_id = 3560",
+        "UPDATE sys_menu SET order_num = 1 WHERE menu_id = 3900",
+        "UPDATE sys_menu SET order_num = 2 WHERE menu_id = 3627",
+        // 顶层：工作台 0 / 数据看板 1 / 系统管理 2 / 系统监控 3 / 系统工具 4 / 租户服务 5 / 官网 6
+        "UPDATE sys_menu SET order_num = 0 WHERE menu_id = 127",
+        "UPDATE sys_menu SET order_num = 1 WHERE menu_id = 132",
+        "UPDATE sys_menu SET order_num = 2 WHERE menu_id = 1",
+        "UPDATE sys_menu SET order_num = 3 WHERE menu_id = 2",
+        "UPDATE sys_menu SET order_num = 4 WHERE menu_id = 3",
+        "UPDATE sys_menu SET order_num = 5 WHERE menu_id = 3950",
+        "UPDATE sys_menu SET order_num = 6 WHERE menu_id = 4",
+        // 系统管理(1)
+        "UPDATE sys_menu SET order_num = 1 WHERE menu_id = 100",
+        "UPDATE sys_menu SET order_num = 2 WHERE menu_id = 101",
+        "UPDATE sys_menu SET order_num = 3 WHERE menu_id = 102",
+        "UPDATE sys_menu SET order_num = 4 WHERE menu_id = 103",
+        "UPDATE sys_menu SET order_num = 5 WHERE menu_id = 104",
+        "UPDATE sys_menu SET order_num = 6 WHERE menu_id = 105",
+        "UPDATE sys_menu SET order_num = 7 WHERE menu_id = 106",
+        "UPDATE sys_menu SET order_num = 8 WHERE menu_id = 107",
+        "UPDATE sys_menu SET order_num = 9 WHERE menu_id = 3700",
+        "UPDATE sys_menu SET order_num = 10 WHERE menu_id = 108",
+        "UPDATE sys_menu SET order_num = 11 WHERE menu_id = 125",
+        "UPDATE sys_menu SET order_num = 12 WHERE menu_id = 134",
+        "UPDATE sys_menu SET order_num = 13 WHERE menu_id = 140",
+        "UPDATE sys_menu SET order_num = 14 WHERE menu_id = 151",
+        "UPDATE sys_menu SET order_num = 15 WHERE menu_id = 3600",
+        "UPDATE sys_menu SET order_num = 16 WHERE menu_id = 145",
+        "UPDATE sys_menu SET order_num = 17 WHERE menu_id = 157",
+        // 系统监控(2)
+        "UPDATE sys_menu SET order_num = 1 WHERE menu_id = 109",
+        "UPDATE sys_menu SET order_num = 2 WHERE menu_id = 110",
+        "UPDATE sys_menu SET order_num = 3 WHERE menu_id = 119",
+        "UPDATE sys_menu SET order_num = 4 WHERE menu_id = 113",
+        "UPDATE sys_menu SET order_num = 5 WHERE menu_id = 135",
+        "UPDATE sys_menu SET order_num = 6 WHERE menu_id = 118",
+        "UPDATE sys_menu SET order_num = 7 WHERE menu_id = 3550",
+        "UPDATE sys_menu SET order_num = 8 WHERE menu_id = 133",
+        "UPDATE sys_menu SET order_num = 9 WHERE menu_id = 121",
+        "UPDATE sys_menu SET order_num = 10 WHERE menu_id = 122",
+        "UPDATE sys_menu SET order_num = 11 WHERE menu_id = 120",
+        "UPDATE sys_menu SET order_num = 12 WHERE menu_id = 160",
+        "UPDATE sys_menu SET order_num = 13 WHERE menu_id = 501",
+        // 系统工具(3)
+        "UPDATE sys_menu SET order_num = 1 WHERE menu_id = 115",
+        "UPDATE sys_menu SET order_num = 2 WHERE menu_id = 116",
+        "UPDATE sys_menu SET order_num = 3 WHERE menu_id = 117",
+        "UPDATE sys_menu SET order_num = 4 WHERE menu_id = 3410",
+        "UPDATE sys_menu SET order_num = 5 WHERE menu_id = 3560",
+        "UPDATE sys_menu SET order_num = 6 WHERE menu_id = 124",
+        "UPDATE sys_menu SET order_num = 7 WHERE menu_id = 128",
+        "UPDATE sys_menu SET order_num = 8 WHERE menu_id = 129",
+        "UPDATE sys_menu SET order_num = 9 WHERE menu_id = 131",
+        // icon 语义修正
+        "UPDATE sys_menu SET icon = 'enter' WHERE menu_id = 145",
+        "UPDATE sys_menu SET icon = 'link' WHERE menu_id = 157",
+        "UPDATE sys_menu SET icon = 'sunny' WHERE menu_id = 133",
+        "UPDATE sys_menu SET icon = 'documentation' WHERE menu_id = 107",
+        "UPDATE sys_menu SET icon = 'time' WHERE menu_id = 135",
+        "UPDATE sys_menu SET icon = 'star' WHERE menu_id = 124",
+        "UPDATE sys_menu SET icon = 'validCode' WHERE menu_id = 146",
+        "UPDATE sys_menu SET icon = 'backup' WHERE menu_id = 118",
+        "UPDATE sys_menu SET icon = 'server' WHERE menu_id = 3550",
+        "UPDATE sys_menu SET icon = 'excel' WHERE menu_id = 151",
+        "UPDATE sys_menu SET icon = 'form' WHERE menu_id = 3600",
+        "UPDATE sys_menu SET icon = 'skill' WHERE menu_id = 3700",
+        "UPDATE sys_menu SET icon = 'drag' WHERE menu_id = 3627",
+    ];
+    for sql in updates {
+        db.execute(Statement::from_string(backend, sql.to_string()))
+            .await?;
+    }
+    tracing::info!("菜单信息架构优化已应用（order 重排 / 自助页收编 3950 / icon 语义修正）");
+    Ok(())
 }
 
 /// 数据看板菜单去重兜底（与迁移 m20260928_000003_dedupe_dashboard_menu 等价，全幂等）：
