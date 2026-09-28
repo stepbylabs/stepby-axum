@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20250711_000001_init.rs
+﻿// axum-backend/migration/src/m20250711_000001_init.rs
 //! 初始迁移：创建 15 张系统核心表 + 索引 + 初始数据
 //!
 //! 表清单（按创建顺序）：
