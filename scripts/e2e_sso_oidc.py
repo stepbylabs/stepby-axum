@@ -162,9 +162,9 @@ def main():
 
     # 11. /metrics SSO 事件序列
     st, raw = req("GET", "/metrics")
-    hit = ('yebot_sso_events_total{event="token_issued",outcome="ok"}' in raw
-           and 'yebot_sso_events_total{event="token_revoked"' in raw
-           and 'yebot_sso_events_total{event="authorize"' in raw)
+    hit = ('stepby_sso_events_total{event="token_issued",outcome="ok"}' in raw
+           and 'stepby_sso_events_total{event="token_revoked"' in raw
+           and 'stepby_sso_events_total{event="authorize"' in raw)
     check("11.metrics_sso_events", hit)
 
     conn.close()

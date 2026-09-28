@@ -51,8 +51,8 @@ http_status_convention = "legacy"
 # 支持以下三种数据库：
 #   MySQL:      mysql://user:password@host:3306/database
 #   PostgreSQL: postgres://user:password@host:5432/database
-#   SQLite:     sqlite://./data/yebot.db?mode=rwc
-url = "mysql://CHANGE_ME:CHANGE_ME@127.0.0.1:3306/yebot"
+#   SQLite:     sqlite://./data/stepby.db?mode=rwc
+url = "mysql://CHANGE_ME:CHANGE_ME@127.0.0.1:3306/stepby"
 max_connections = 10
 min_connections = 1
 connect_timeout = 10
@@ -77,7 +77,7 @@ url = "redis://CHANGE_ME@127.0.0.1:6379/0"
 # 启动时会校验：拒绝 CHANGE_ME 占位符和 < 32 字符的密钥
 secret = "CHANGE_ME_TO_A_STRONG_SECRET_KEY_AT_LEAST_32_CHARS"
 expire_hours = 24
-issuer = "yebot"
+issuer = "stepby"
 # 密钥轮换过渡期：旧签名密钥（**仅用于验签回退，永不用于签发**）。
 # 零停机轮换：① 生成新密钥 → 把当前密钥移入本列表、secret 换成新密钥 → 滚动发布；
 #             ② 过渡期内新 token 用新密钥签发、旧 token 用旧密钥验签（用户无感，不被登出）；
@@ -137,7 +137,7 @@ access_key = "minioadmin"
 secret_key = "minioadmin"
 endpoint = "http://127.0.0.1:9000"
 region = "us-east-1"
-bucket = "yebot"
+bucket = "stepby"
 # 是否路径风格寻址（MinIO / 自建对象存储必须 true；AWS S3 可 false）
 path_style = true
 # 对外公开访问 URL 前缀（可为 CDN/网关，缺省回退 endpoint；留空则自动使用 endpoint）
@@ -165,7 +165,7 @@ password = ""
 # 发件人邮箱地址（通常与 username 相同）
 from_email = ""
 # 发件人显示名称
-from_name = "yebot 系统"
+from_name = "stepby 系统"
 # 是否使用 STARTTLS（端口 587 时通常为 true，端口 465 SSL 直连时为 false）
 starttls = false
 
@@ -331,10 +331,10 @@ tenant_filter = "off"
 #   cert.issue   域名 DNS TXT 验证**首次通过** ⇒ 需要签发证书
 #   cert.remove  **已验证**域名被删除         ⇒ 需要吊销/清理证书
 # 载荷（JSON）：
-#   { "source":"yebot", "event":"cert.issue", "host":"shop.example.com",
+#   { "source":"stepby", "event":"cert.issue", "host":"shop.example.com",
 #     "tenantId":12, "tenantCode":"acme", "verifyStatus":"1", "occurredAt":"..." }
-# 请求头：Content-Type: application/json、X-Yebot-Event: <event>，
-#        配置 secret 时另带 X-Yebot-Signature: sha256=<HMAC-SHA256(body)>。
+# 请求头：Content-Type: application/json、X-Stepby-Event: <event>，
+#        配置 secret 时另带 X-Stepby-Signature: sha256=<HMAC-SHA256(body)>。
 #
 # mode：
 #   off     （默认）不发任何出站请求 ⇒ 等价于历史行为
@@ -342,7 +342,7 @@ tenant_filter = "off"
 # 落地配方（certbot / acme.sh / Traefik）见 deploy/README.md §7.1。
 [acme]
 mode = "off"
-# webhook_url = "https://ops.example.com/hooks/yebot-acme"
+# webhook_url = "https://ops.example.com/hooks/stepby-acme"
 # secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
 timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
 
@@ -355,9 +355,9 @@ timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
 #   webhook        领域事件以 HTTP POST 推到 webhook_url
 #
 # 信封（稳定契约，改名即破坏接收端）：
-#   { "source": "yebot", "event": "<事件名>", "occurredAt": "<本地时间>", "data": { ... } }
-# 请求头：Content-Type: application/json、X-Yebot-Event: <事件名>；
-#        配置 secret 后追加 X-Yebot-Signature: sha256=<HMAC-SHA256(body) 的 hex>。
+#   { "source": "stepby", "event": "<事件名>", "occurredAt": "<本地时间>", "data": { ... } }
+# 请求头：Content-Type: application/json、X-Stepby-Event: <事件名>；
+#        配置 secret 后追加 X-Stepby-Signature: sha256=<HMAC-SHA256(body) 的 hex>。
 #
 # 当前已发布事件（`src/service/event_outbox_service.rs::ALL_EVENTS`）：
 #   tenant.created          data: { tenantId, tenantCode, tenantName, operator }
@@ -371,7 +371,7 @@ timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
 #    （拒绝静默失效）；非法 outbound 取值回落 off 并打 WARN（fail-safe）。
 [events]
 outbound = "off"
-# webhook_url = "https://ops.example.com/hooks/yebot-events"
+# webhook_url = "https://ops.example.com/hooks/stepby-events"
 # secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
 timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
 
@@ -391,7 +391,7 @@ timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
 #    请求期返回 503（服务器未就绪），**拒绝静默失效**。
 [webauthn]
 rp_id = ""               # 留空 ⇒ 从 [server].cors_origins 首个来源的 host 推导注册域
-rp_name = "Yebot"        # 浏览器 passkey 提示中展示的依赖方名称
+rp_name = "Stepby"        # 浏览器 passkey 提示中展示的依赖方名称
 origin = ""              # 留空 ⇒ 取 [server].cors_origins 首个来源
 state_ttl_secs = 300     # 挑战 / 会话临时态 TTL（秒，至少 1）
 
@@ -466,7 +466,7 @@ login_geo_alert = "off"
 # 默认 off ⇒ 不校验地址、不建 HTTP 客户端、**一个字节都不出站**（与改造前逐字节等价）。
 #
 # 请求契约：POST <url>，Content-Type: application/octet-stream，body = 文件原始字节；
-#          X-Yebot-Filename: <URL 编码的文件名>；token 非空时附 Authorization: Bearer <token>。
+#          X-Stepby-Filename: <URL 编码的文件名>；token 非空时附 Authorization: Bearer <token>。
 # 响应契约：HTTP 2xx + JSON {"clean": true|false, "detail": "可选说明"}。
 #          clean=true ⇒ 放行；clean=false ⇒ 400 拒绝（detail 只落日志，**不回显**给用户）。
 #          非 2xx / 缺 clean 字段 / 解析失败 / 连接失败 ⇒ 按 fail_closed 处置。
