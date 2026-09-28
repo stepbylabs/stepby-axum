@@ -377,6 +377,15 @@ pub fn validate_import_row(row: &ImportUserRow) -> Result<(), String> {
 }
 
 /// 简单邮箱格式校验（与 garde email 规则一致的宽松校验）
+/// W9（NL2SQL v4 升格项）：LIKE 查询参数约束
+///
+/// - 截断到 50 字符：防"超长 LIKE 模式逐行回溯"的 CPU 消耗（无索引 LIKE 全表扫描，扫描行数不受分页限制）
+/// - trim：去除首尾空白，避免"全空格"这类无意义模式
+/// - 不做字符集黑名单：`like_escape` 已在 repository 层处理通配符转义，此处不重复
+fn clamp_like_param(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().chars().take(50).collect())
+}
+
 fn is_valid_email(s: &str) -> bool {
     let at = s.find('@');
     let Some(at) = at else { return false };
@@ -660,10 +669,14 @@ impl SysUserService {
     /// 超管（user_id==1）短路：直接返回全部。
     pub async fn get_user_page(
         &self,
-        query: UserQueryDto,
+        mut query: UserQueryDto,
         operator_user_id: Option<i64>,
         tenant_scope: Option<i64>,
     ) -> Result<(Vec<UserVo>, u64), ServiceError> {
+        // W9（现存 P1）：LIKE 查询参数约束 —— 截断超长输入，防"超长 LIKE 模式逐行回溯"的 CPU 消耗
+        // （MAX_PAGE_SIZE 只限返回行数，不限扫描行数；like_escape 已防注入，此处补长度与字符整洁）
+        query.user_name = clamp_like_param(query.user_name);
+        query.phonenumber = clamp_like_param(query.phonenumber);
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
@@ -876,10 +889,13 @@ impl SysUserService {
     /// 而非 PageDomain.limit()（受 MAX_PAGE_SIZE=100 限制），避免静默截断导出数据。
     pub async fn export_users(
         &self,
-        query: UserQueryDto,
+        mut query: UserQueryDto,
         operator_user_id: Option<i64>,
         tenant_scope: Option<i64>,
     ) -> Result<Vec<UserVo>, ServiceError> {
+        // W9：同 get_user_page，导出入口同样约束 LIKE 参数（导出扫描行数更大，更需防护）
+        query.user_name = clamp_like_param(query.user_name);
+        query.phonenumber = clamp_like_param(query.phonenumber);
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
 
