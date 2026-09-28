@@ -109,9 +109,9 @@
 ### invoke_target 解析策略
 
 - [ ] invoke_target 完整字符串作为注册表 key（无 Java Bean 反射）
-- [ ] `ryTask.ryNoParams` → 注册表 key 为 `ryTask.ryNoParams`
-- [ ] `ryTask.ryParams('ry')` → 注册表 key 为 `ryTask.ryParams('ry')`（含参数）
-- [ ] `ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100)` → 完整字符串作为 key
+- [ ] `demoTask.demoNoParams` → 注册表 key 为 `demoTask.demoNoParams`
+- [ ] `demoTask.demoParams('demo')` → 注册表 key 为 `demoTask.demoParams('demo')`（含参数）
+- [ ] `demoTask.demoMultipleParams('demo', true, 2000L, 316.5F, 100)` → 完整字符串作为 key
 - [ ] 未注册的 invoke_target → 写失败日志（status='1', exception_info="未找到调用目标: xxx"）
 
 ### 并发控制
@@ -130,7 +130,7 @@
 - [ ] `AppState::new()` 保持**同步函数**签名（不改 async）
 - [ ] `AppState::new()` 新增 `job_scheduler: Arc<JobScheduler>` 参数
 - [ ] 调度器在 `AppInitializer::run` 中提前异步创建后以参数传入 `AppState::new`
-- [ ] 内置任务函数（ryNoParams / ryParams / ryMultipleParams）启动时注册到 registry
+- [ ] 内置任务函数（demoNoParams / demoParams / demoMultipleParams）启动时注册到 registry
 
 ## 安全验收
 

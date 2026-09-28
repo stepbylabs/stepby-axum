@@ -404,9 +404,9 @@ pub fn list_registered_tasks() -> Vec<String>;
 
 | invoke_target 字符串 | 注册表 key | 说明 |
 |----------------------|-----------|------|
-| `ryTask.ryNoParams` | `ryTask.ryNoParams` | 完整字符串作为 key |
-| `ryTask.ryParams('ry')` | `ryTask.ryParams('ry')` | 完整字符串（含参数）作为 key |
-| `ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100)` | 同左 | 完整字符串作为 key |
+| `demoTask.demoNoParams` | `demoTask.demoNoParams` | 完整字符串作为 key |
+| `demoTask.demoParams('demo')` | `demoTask.demoParams('demo')` | 完整字符串（含参数）作为 key |
+| `demoTask.demoMultipleParams('demo', true, 2000L, 316.5F, 100)` | 同左 | 完整字符串作为 key |
 
 - 内置任务在 `scheduler/mod.rs` 的 `register_builtin_tasks()` 中注册
 - 后续扩展：调用 `register_task("customTask.doSomething", func)` 即可
@@ -729,9 +729,9 @@ async fn execute_inner(invoke_target: &str) -> Result<String, String> {
 
 | invoke_target | 功能 | 默认 cron | 说明 |
 |---------------|------|-----------|------|
-| `ryTask.ryNoParams` | 示例任务（无参数） | 0/10 * * * * ? | 每 10 秒执行，输出 "ryNoParams 执行成功" |
-| `ryTask.ryParams('ry')` | 示例任务（带参数） | 0/15 * * * * ? | 每 15 秒执行，输出 "ryParams 执行成功，参数: ry" |
-| `ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100)` | 示例任务（多参数） | 0/20 * * * * ? | 每 20 秒执行，输出 "ryMultipleParams 执行成功" |
+| `demoTask.demoNoParams` | 示例任务（无参数） | 0/10 * * * * ? | 每 10 秒执行，输出 "demoNoParams 执行成功" |
+| `demoTask.demoParams('demo')` | 示例任务（带参数） | 0/15 * * * * ? | 每 15 秒执行，输出 "demoParams 执行成功，参数: ry" |
+| `demoTask.demoMultipleParams('demo', true, 2000L, 316.5F, 100)` | 示例任务（多参数） | 0/20 * * * * ? | 每 20 秒执行，输出 "demoMultipleParams 执行成功" |
 
 注册位置：`src/scheduler/mod.rs` 的 `register_builtin_tasks()` 函数，在 `JobScheduler::new()` 中调用。
 
