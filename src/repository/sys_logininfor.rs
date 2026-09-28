@@ -136,6 +136,37 @@ impl SysLogininforRepository {
             .await
     }
 
+    /// 查询某用户名**最近一次成功登录**的归属地（`[risk_control].login_geo_alert` 集成点用）。
+    ///
+    /// 语义：`status = "0"`（登录成功）按 `login_time` 倒序取 **1 条**，只返回 `login_location`。
+    /// 返回 `None` 表示"无可比对的上一跳"（首次成功登录 / 归属地为空）。
+    ///
+    /// 多租户：`tenant_scope = Some(tid)` → 仅在本租户内比对。**调用方必须传租户**
+    /// （同一用户名可能存在于不同租户，跨租户比对既会误报也是跨租户信息泄漏）。
+    ///
+    /// 调用时机：必须在写入**本次**登录日志**之前**调用，否则"最近一次"会命中本次记录。
+    /// 仅在档位 `alert` 时被调用 ⇒ 关闭态零查询（默认 = 现状）。
+    pub async fn find_latest_success_location(
+        &self,
+        user_name: &str,
+        tenant_scope: Option<i64>,
+    ) -> Result<Option<String>, DbErr> {
+        let mut query = SysLogininfor::find()
+            .filter(Column::Status.eq("0"))
+            .filter(Column::UserName.eq(user_name));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        let row = query
+            .order_by_desc(Column::LoginTime)
+            .order_by_desc(Column::InfoId)
+            .one(self.base.db())
+            .await?;
+        Ok(row
+            .and_then(|m| m.login_location)
+            .filter(|s| !s.trim().is_empty()))
+    }
+
     /// 批量删除登录日志（物理删除）
     ///
     /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户日志；`None`（平台）→ 不过滤。

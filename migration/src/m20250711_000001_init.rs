@@ -956,57 +956,61 @@ async fn create_sys_job_log(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     Ok(())
 }
 
+/// 构建 sys_dept 建表语句（独立成函数，便于单测直接断言列定义 DDL）
+fn sys_dept_table_stmt() -> TableCreateStatement {
+    Table::create()
+        .table(Alias::new("sys_dept"))
+        .if_not_exists()
+        .col(
+            ColumnDef::new(Alias::new("dept_id"))
+                .big_integer()
+                .not_null()
+                .auto_increment()
+                .primary_key(),
+        )
+        .col(
+            ColumnDef::new(Alias::new("parent_id"))
+                .big_integer()
+                .default(0),
+        )
+        .col(
+            // R5-DB-26：ancestors 是逗号拼接的祖先 ID 链（如 "0,100,101,102,..."），
+            // 部门树较深或 ID 较大时必然超过 50 字符。SQLite 不强制 VARCHAR 长度
+            // （静默放行），但 PostgreSQL/MySQL 会强制 ⇒ 写部门时插入失败/截断，
+            // 故建为 VARCHAR(500)（存量库由 m20260928_000001 方言感知放宽）。
+            ColumnDef::new(Alias::new("ancestors"))
+                .string_len(500)
+                .default(""),
+        )
+        .col(
+            ColumnDef::new(Alias::new("dept_name"))
+                .string_len(30)
+                .default(""),
+        )
+        .col(ColumnDef::new(Alias::new("order_num")).integer().default(0))
+        .col(ColumnDef::new(Alias::new("leader")).string_len(20).null())
+        .col(ColumnDef::new(Alias::new("phone")).string_len(11).null())
+        .col(ColumnDef::new(Alias::new("email")).string_len(50).null())
+        .col(ColumnDef::new(Alias::new("status")).char().default("0"))
+        .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
+        .col(
+            ColumnDef::new(Alias::new("create_by"))
+                .string_len(64)
+                .default(""),
+        )
+        .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
+        .col(
+            ColumnDef::new(Alias::new("update_by"))
+                .string_len(64)
+                .default(""),
+        )
+        .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
+        .to_owned()
+}
+
 /// 创建 sys_dept 表（部门信息表，树形结构）
 async fn create_sys_dept(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    manager
-        .create_table(
-            Table::create()
-                .table(Alias::new("sys_dept"))
-                .if_not_exists()
-                .col(
-                    ColumnDef::new(Alias::new("dept_id"))
-                        .big_integer()
-                        .not_null()
-                        .auto_increment()
-                        .primary_key(),
-                )
-                .col(
-                    ColumnDef::new(Alias::new("parent_id"))
-                        .big_integer()
-                        .default(0),
-                )
-                .col(
-                    ColumnDef::new(Alias::new("ancestors"))
-                        .string_len(50)
-                        .default(""),
-                )
-                .col(
-                    ColumnDef::new(Alias::new("dept_name"))
-                        .string_len(30)
-                        .default(""),
-                )
-                .col(ColumnDef::new(Alias::new("order_num")).integer().default(0))
-                .col(ColumnDef::new(Alias::new("leader")).string_len(20).null())
-                .col(ColumnDef::new(Alias::new("phone")).string_len(11).null())
-                .col(ColumnDef::new(Alias::new("email")).string_len(50).null())
-                .col(ColumnDef::new(Alias::new("status")).char().default("0"))
-                .col(ColumnDef::new(Alias::new("del_flag")).char().default("0"))
-                .col(
-                    ColumnDef::new(Alias::new("create_by"))
-                        .string_len(64)
-                        .default(""),
-                )
-                .col(ColumnDef::new(Alias::new("create_time")).date_time().null())
-                .col(
-                    ColumnDef::new(Alias::new("update_by"))
-                        .string_len(64)
-                        .default(""),
-                )
-                .col(ColumnDef::new(Alias::new("update_time")).date_time().null())
-                .to_owned(),
-        )
-        .await?;
-
+    manager.create_table(sys_dept_table_stmt()).await?;
     Ok(())
 }
 
@@ -1179,8 +1183,15 @@ async fn set_auto_increment(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                 "INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('{}', {})",
                 table, value
             );
-            // 忽略错误（表可能不存在 sqlite_sequence 记录）
-            let _ = manager.get_connection().execute_unprepared(&sql).await;
+            // R5-DB-23：维持 best-effort（表可能尚无 sqlite_sequence 记录，失败不阻断迁移），
+            // 但不能像原先 `let _ = ...` 那样静默吞错——失败必须可见（方言 + 底层错误）。
+            // 本 crate 未引入 tracing（避免新增依赖），沿用既有最轻量设施 eprintln!。
+            if let Err(e) = manager.get_connection().execute_unprepared(&sql).await {
+                eprintln!(
+                    "[migration][warn] m20250711_000001 set_auto_increment(sqlite) {table}: \
+                     自增起始值设置失败，已忽略（不阻断迁移）: {e}"
+                );
+            }
         } else if is_postgres(manager) {
             // PostgreSQL: 使用 setval 重置序列
             // pg_get_serial_sequence 自动查找 SERIAL/IDENTITY 列对应的序列名
@@ -1189,7 +1200,13 @@ async fn set_auto_increment(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                 "SELECT setval(pg_get_serial_sequence('{}', '{}'), {}, false)",
                 table, pk_col, value
             );
-            let _ = manager.get_connection().execute_unprepared(&sql).await;
+            // R5-DB-23：同上，best-effort 但失败可见（如 pg_get_serial_sequence 返回 NULL）
+            if let Err(e) = manager.get_connection().execute_unprepared(&sql).await {
+                eprintln!(
+                    "[migration][warn] m20250711_000001 set_auto_increment(postgres) \
+                     {table}.{pk_col}: 序列起始值设置失败，已忽略（不阻断迁移）: {e}"
+                );
+            }
         } else {
             // MySQL
             let sql = format!("ALTER TABLE {} AUTO_INCREMENT = {}", table, value);
@@ -1611,4 +1628,27 @@ async fn insert_sys_notice(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     );
     execute_idempotent_insert(manager, &sql).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // QueryStatementBuilder（提供 `to_string(query_builder)`）已由 `super::*`（prelude）带入
+    use sea_orm_migration::sea_orm::sea_query::PostgresQueryBuilder;
+
+    /// 可证伪（R5-DB-26）：全新库 `sys_dept.ancestors` 必须建为 VARCHAR(500)。
+    ///
+    /// 该缺陷在 SQLite 上测不出来（不强制 VARCHAR 长度），但 PostgreSQL/MySQL 会强制：
+    /// 若宽度回退到 50，深层部门的祖先链 CSV 写入会失败/截断。本断言直接锚定生成的
+    /// 建表 DDL，故任何人改回 50 都会立即失败。
+    #[test]
+    fn sys_dept_ancestors_is_varchar_500() {
+        let ddl = sys_dept_table_stmt()
+            .to_string(PostgresQueryBuilder)
+            .to_lowercase();
+        assert!(
+            ddl.contains("\"ancestors\" varchar(500)"),
+            "sys_dept.ancestors 应为 varchar(500)，实际建表 DDL: {ddl}"
+        );
+    }
 }

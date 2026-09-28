@@ -36,12 +36,18 @@ const LOCK_TTL_SECS: u64 = TASK_TIMEOUT_SECS * 3 / 2;
 const LOCK_RENEW_INTERVAL_SECS: u64 = TASK_TIMEOUT_SECS / 2;
 /// 消息发送失败单批次重试上限（防止单次重试耗时过长）
 const MESSAGE_RETRY_BATCH: u64 = 100;
+/// 任务日志写入的有界重试策略（R5-IDEMP-35）：3 次尝试 / 100ms 间隔。
+///
+/// 原实现单次 `insert` 失败即放弃（仅 `tracing::error!`），DB 短暂抖动会直接丢失审计。
+/// 与操作日志写入（`service/sys_oper_log_service`）复用同一 `utils::retry` 助手。
+const JOB_LOG_WRITE_RETRY: RetryPolicy = RetryPolicy::new(3, Duration::from_millis(100));
 
 use crate::config::Settings;
 use crate::entity::sys_job::Model as SysJobModel;
 use crate::entity::sys_job_log;
 use crate::repository::sys_job::SysJobRepository;
 use crate::repository::sys_job_log::SysJobLogRepository;
+use crate::utils::retry::{RetryPolicy, retry_async};
 
 // ==================== 错误类型 ====================
 
@@ -1349,7 +1355,6 @@ async fn execute_with_logging(
     // 写日志（失败不影响主流程）
     // 多租户：调度器无登录操作者上下文，日志归属**按 job 行自身 tenant_id** 落库
     // （平台级系统任务 tid=0），避免租户任务日志落到平台维度导致租户侧不可见。
-    let log_repo = SysJobLogRepository::new(db.clone());
     let log_am = sys_job_log::ActiveModel {
         tenant_id: Set(job.tenant_id),
         job_name: Set(job.job_name.clone()),
@@ -1365,8 +1370,24 @@ async fn execute_with_logging(
         create_time: Set(Some(crate::common::datetime::now_naive())),
         ..Default::default()
     };
-    if let Err(e) = log_repo.insert(log_am).await {
-        tracing::error!("写入任务日志失败 job_id={}: {}", job.job_id, e);
+    // R5-IDEMP-35：写入失败不再单次放弃，改为有界重试（复用 utils::retry 助手），
+    // 重试耗尽后 error 日志携带 job_id / job_name / job_group，便于反查是哪条任务日志丢失。
+    // 闭包内 clone 数据库连接与 ActiveModel，构造所有权自足的 future（避免借用生命周期问题）。
+    if let Err(e) = retry_async(JOB_LOG_WRITE_RETRY, || {
+        let db = db.clone();
+        let am = log_am.clone();
+        async move { SysJobLogRepository::new(db).insert(am).await }
+    })
+    .await
+    {
+        tracing::error!(
+            job_id = job.job_id,
+            job_name = %job.job_name,
+            job_group = %job.job_group,
+            "写入任务日志失败（已尝试 {} 次，放弃）: {}",
+            JOB_LOG_WRITE_RETRY.max_attempts,
+            e
+        );
     }
 }
 

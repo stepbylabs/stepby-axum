@@ -282,3 +282,106 @@ async fn test_convergence_revokes_ungrantable_even_without_menu_whitelist() {
          （否则残留「菜单可见但请求 403」的假入口）"
     );
 }
+
+/// ⑤ **UI 入口下发跟随能力位/展示开关，且不与端点可用性漂移**（第二十一批修复的回归锁）
+///
+/// # 本用例锁定的真实缺陷
+///
+/// `GetInfoVo` 一直**算好了** `show_tenant_column` / `show_tenant_filter`，但 handler 的
+/// `GetInfoResult` **从未包含**这两个字段 ⇒ 前端 `userStore.showTenantColumn` 恒为 `false`
+/// ⇒ F-6「所属租户」归属列 /「按租户筛选」入口**实际从未出现**（前端只 mock API 的单测与
+/// e2e 均无此断言，故长期未被发现）。本用例断言字段**真的存在**。
+///
+/// 同时锁定第二十批实测到的 404 假入口：能力位 `auth.webauthn` 关闭时
+/// `GET /system/user/webauthn/credentials` 为 404，故 `getInfo.showPasskey` 与
+/// `captchaImage.webauthnEnabled` 必须为 `false`；开启时必须为 `true`（同一判据）。
+///
+/// # 可证伪性
+///
+/// - 把 `GetInfoResult::show_tenant_column` 字段删掉 ⇒ 第①段 `is_boolean()` 立即变红
+///   （这正是修复前的状态）。
+/// - 若 `showPasskey` 改成"恒 true"或改用别的判据 ⇒ 第①段与 404 的交叉断言变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ui_entry_flags_are_delivered_and_follow_capability() {
+    // ---------- ① 默认姿态：能力位全 off、[ui] 默认（auto / off） ----------
+    let ctx = TestContext::new().await;
+    let info = ctx.get_json("/getInfo").await;
+    assert!(
+        info["showTenantColumn"].is_boolean(),
+        "getInfo 必须下发 showTenantColumn（修复前 handler 漏该字段 ⇒ 前端恒 false）：{info}"
+    );
+    assert_eq!(
+        info["showTenantColumn"], true,
+        "[ui].show_tenant_column=auto + 平台操作者（tid=0）⇒ 归属列可见（历史行为）"
+    );
+    assert!(
+        info["showTenantFilter"].is_boolean(),
+        "getInfo 必须下发 showTenantFilter（修复前同样漏字段）"
+    );
+    assert_eq!(
+        info["showTenantFilter"], false,
+        "[ui].tenant_filter 默认 off"
+    );
+    assert_eq!(
+        info["showPasskey"], false,
+        "能力位 auth.webauthn 默认 off ⇒ 不下发通行密钥入口"
+    );
+
+    let captcha = ctx.get_json("/captchaImage").await;
+    assert_eq!(
+        captcha["webauthnEnabled"], false,
+        "登录页 passkey 入口开关必须与同一能力位同源"
+    );
+
+    // 交叉锁（负向）：入口开关为 false ⇒ 端点必须**确实不可用**（否则即"入口可见但请求 404"或反之）
+    let (status, body) = ctx
+        .send_raw(ctx.request(
+            axum::http::Method::GET,
+            "/system/user/webauthn/credentials",
+            None,
+        ))
+        .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::NOT_FOUND,
+        "能力位关闭时 WebAuthn 自助端点应为 404（与 showPasskey=false 同源），实际 {status} {body}"
+    );
+
+    // ---------- ② 开启能力位 + 显式展示开关（并配好 RP 信任锚，使端点真的可用） ----------
+    let ctx = TestContext::new_with(&[("auth.webauthn", "on")], |s| {
+        s.ui.show_tenant_column = "never".to_string();
+        s.ui.tenant_filter = "platform".to_string();
+        s.webauthn.rp_id = "localhost".to_string();
+        s.webauthn.origin = "http://localhost".to_string();
+    })
+    .await;
+    let info = ctx.get_json("/getInfo").await;
+    assert_eq!(
+        info["showTenantColumn"], false,
+        "[ui].show_tenant_column=never ⇒ 平台操作者亦不可见（证明下发值真的随配置变化）"
+    );
+    assert_eq!(
+        info["showTenantFilter"], true,
+        "[ui].tenant_filter=platform + 平台操作者 ⇒ 提供筛选入口"
+    );
+    assert_eq!(
+        info["showPasskey"], true,
+        "能力位 auth.webauthn=on ⇒ 下发通行密钥入口"
+    );
+    let captcha = ctx.get_json("/captchaImage").await;
+    assert_eq!(captcha["webauthnEnabled"], true);
+
+    // 交叉锁（正向）：入口开关为 true ⇒ 端点必须真的可用（200，而非仅"不是 404"）
+    let (status, body) = ctx
+        .send_raw(ctx.request(
+            axum::http::Method::GET,
+            "/system/user/webauthn/credentials",
+            None,
+        ))
+        .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "能力位开启且 RP 已配置时端点应可用，实际 {status} {body}"
+    );
+}

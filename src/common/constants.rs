@@ -76,3 +76,56 @@ pub const UPLOAD_MAX_SIZE: usize = 10 * 1024 * 1024;
 
 /// 邮件 SMTP 发送超时（P1：防止 SMTP 无响应时无限挂起拖住请求）
 pub const MAIL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `sys_job.cron_expression` 列宽 / DTO 校验上限（字符数）。
+///
+/// 为什么必须是 64 而不是建表语句里的 255：`migration/src/m20260719_000001_adjust_field_length.rs`
+/// 对**所有安装形态**把该列收窄到 64（存量库 `ALTER`；新库先建 255 再收窄 ⇒ 终态一致）。
+/// DTO 若仍按 255 校验，则 65~255 字符的表达式会**通过校验后**在落库时报错（500），
+/// 用户看到的是"系统错误"而不是"参数过长"。此处对齐为 64，把失败提前成可诊断的 400。
+///
+/// ⚠️ 该值与 migration 的 64 属**跨 crate 约定**（migration 不依赖 axum-backend，
+/// 无法直接引用本常量）——改宽度必须同时改迁移文件。
+/// 64 字符对 Quartz 风格表达式（含 `MON-FRI` 与年份字段）绰绰有余。
+pub const CRON_EXPRESSION_MAX_LEN: usize = 64;
+
+// ==================== 菜单类型（sys_menu.menu_type 取值域） ====================
+
+/// `sys_menu.menu_type` 的取值域 —— **单一事实源**。
+///
+/// R6-RUST-10：这三个字面量此前在 `auth_service` / `sys_menu_service` /
+/// `sys_tenant_nav_service` 三处各写一遍（其中一处还自建了局部数组 `NAV_MENU_TYPES`），
+/// 拼错一个字母不会报错、只会**静默走错分支**（例如把 `"C"` 写成 `"c"` ⇒ 菜单被当成按钮过滤掉）。
+/// 收敛到此处后，各调用点只引用常量。
+///
+/// 为什么不抽 enum：`menu_type` 允许**未登记取值**（历史数据 / 第三方导入 / 手改库），
+/// 现有实现把它们一律当作"既不是目录也不是菜单"（既不加 Layout/ParentView，也满足 `!= "C"`）。
+/// 改成 enum 必须额外引入 `Unknown` 变体才能保持同一语义，换来仅是穷尽性检查，不值当；
+/// 而常量化已消除"拼写不一致"这一真实风险。
+///
+/// 取值为**数据库持久化契约**（有单测锁死），不得改动；改动等于静默改变所有存量数据的语义。
+pub mod menu_type {
+    /// 目录（Directory）：仅承载子路由，不渲染页面组件（`component` 走 Layout / ParentView）
+    pub const DIR: &str = "M";
+    /// 菜单（Menu）：渲染 `component` 的页面
+    pub const MENU: &str = "C";
+    /// 按钮（Button）：仅作为权限点（`perms`），**不进路由树**
+    pub const BUTTON: &str = "F";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 取值是**数据库持久化契约**：被改掉会静默改变全部存量菜单的语义
+    #[test]
+    fn test_menu_type_values_are_persisted_contract() {
+        assert_eq!(menu_type::DIR, "M");
+        assert_eq!(menu_type::MENU, "C");
+        assert_eq!(menu_type::BUTTON, "F");
+        // 三者互不相同：否则"目录 / 菜单 / 按钮"的分支会互相吞掉
+        assert_ne!(menu_type::DIR, menu_type::MENU);
+        assert_ne!(menu_type::MENU, menu_type::BUTTON);
+        assert_ne!(menu_type::DIR, menu_type::BUTTON);
+    }
+}

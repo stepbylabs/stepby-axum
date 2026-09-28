@@ -418,3 +418,56 @@ cooldown_secs = 60        # 打开后的冷却秒数，到期放行一次探测�
 mode = "local"           # local（默认，= 现状）| redis
 key_ttl_secs = 300       # Redis 桶键 TTL（秒，夹在 60..=86400）；
                          # 实际生效值再与「桶自然补满秒数 × 2」取大，避免提前过期导致限流被放宽
+
+# ==================== 登录风控集成点 ====================
+# 定位（项目准则⑥）：本仓**不内置风控数据源**，而是提供"开关 + 判定内核 + 审计留痕"的集成点，
+# 由使用者按自身合规要求开启。全部默认 off ⇒ 不判定 UA、不查历史登录、不产生额外审计行，
+# 与改造前**逐字节等价**（关闭态即安全态）。
+#
+# ⚠️ UA 是**弱信号**（可随意伪造），本档位用于挡掉批量脚本的"顺手尝试"，**不是**安全边界；
+#    真正的登录防护是验证码 + 限流 + 失败锁定 + TOTP。
+[risk_control]
+# 登录面工具型 UA 处置：
+#   off（**默认 = 现状**）：不判定 UA。
+#   block：命中 login_ua_blocklist（大小写无关子串）⇒ 403 并写一条失败登录日志；
+#          空 UA **放行**但打 WARN —— 空 UA 是弱信号（HTTP/1.0 客户端、部分 SDK 与探针都不发 UA），
+#          硬拦误伤面大且"加一个 header"即可绕过。
+#   strict：在 block 基础上**同时拒绝空 UA**（适合"只允许浏览器登录"的封闭部署）。
+# 非法取值回落 off 并打 WARN（fail-safe）。
+login_ua_filter = "off"
+
+# 自定义工具型 UA 特征清单（大小写无关的**子串**匹配）。
+# 留空（默认）⇒ 使用内置清单：curl/、wget/、python-requests/、python-urllib/、
+# go-http-client/、libwww-perl/、java/、httpclient/、scrapy/。
+# ⚠️ 内置清单刻意不含 node/axios/okhttp 等同时被合法 SDK 使用的标识
+#    （收录它们会在启用后误伤使用者自己的服务端集成）。
+login_ua_blocklist = []
+
+# 登录面异地告警：
+#   off（**默认 = 现状**）：不与历史登录比对。
+#   alert：与同租户内同用户名**最近一次成功登录**的归属地做**粗粒度（国家 + 省份）**比对；
+#          不同 ⇒ 打 WARN 并把对比结果写入本次成功登录日志的 msg（可审计）。
+# 只有"告警"没有"拦截"是刻意的：地区识别基于 IP 库，VPN / 运营商出口 / 移动网络都会误判，
+# 拦截会变成"用户被自己锁在门外"。非法取值回落 off 并打 WARN（fail-safe）。
+login_geo_alert = "off"
+
+# ==================== 上传文件病毒扫描集成点 ====================
+# 定位（项目准则⑥）：本仓**不内置杀毒引擎**（ClamAV / VirusTotal 都不进本仓），
+# 而是把文件字节交给使用者自己声明的扫描端点，由使用者按合规要求决定开启。
+# 默认 off ⇒ 不校验地址、不建 HTTP 客户端、**一个字节都不出站**（与改造前逐字节等价）。
+#
+# 请求契约：POST <url>，Content-Type: application/octet-stream，body = 文件原始字节；
+#          X-Yebot-Filename: <URL 编码的文件名>；token 非空时附 Authorization: Bearer <token>。
+# 响应契约：HTTP 2xx + JSON {"clean": true|false, "detail": "可选说明"}。
+#          clean=true ⇒ 放行；clean=false ⇒ 400 拒绝（detail 只落日志，**不回显**给用户）。
+#          非 2xx / 缺 clean 字段 / 解析失败 / 连接失败 ⇒ 按 fail_closed 处置。
+# 生效位置：/common/upload、/system/file/upload、/system/user/profile/avatar（均在落盘**之前**）。
+#
+# ⚠️ 端点地址经 common::ssrf 校验（仅 http(s)，且拒绝内网/环回/链路本地/云元数据地址）；
+#    指向内网地址会被判为"扫描器不可用"，而非静默放行。
+[upload_scan]
+mode = "off"             # off（默认 = 现状）| http
+url = ""                 # 扫描端点（mode = "http" 时必填）
+token = ""               # 可选 Bearer 令牌（面向需鉴权的 AV 网关）
+timeout_secs = 10        # 请求超时秒数（夹在 1..=60）；扫描在上传主链路上，超时即按 fail_closed 处置
+fail_closed = true       # 扫描器不可用时：true（默认）= 拒绝上传（503）；false = 记 WARN 后放行

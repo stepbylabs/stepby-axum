@@ -1205,6 +1205,12 @@ pub async fn avatar_upload(
         }
     }
 
+    // 上传扫描集成点（`[upload_scan]`，默认 off ⇒ **零出站**、逐字节等价于改造前）
+    if let Some(bytes) = file_bytes.as_deref() {
+        crate::common::upload_scan::ensure_clean(&state.config.upload_scan, "avatar", bytes)
+            .await?;
+    }
+
     // P0-3：统一校验 + 保存（头像白名单、危险类型拒绝、magic bytes 以实际类型为准、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
         state.storage.as_ref(),

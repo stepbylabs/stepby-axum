@@ -159,6 +159,13 @@ pub struct CaptchaVo {
     /// 注册开关（从 sys_config.sys.account.registerUser 读取）
     /// 前端据此控制"立即注册"链接显示，避免探测 /register 触发 403 控制台错误
     pub register_enabled: bool,
+    /// WebAuthn / Passkey 登录开关（能力位 `auth.webauthn` 在**本 host 租户的生效档位**）
+    ///
+    /// 与 `register_enabled` 同一动机：前端据此控制登录页"通行密钥登录"入口显示，
+    /// 避免探测 `/login/webauthn/*` 触发 404 控制台错误与"入口可见但请求 404"的假入口。
+    /// 无 host 租户上下文时按**平台层**判定（与 `is_captcha_enabled` 的 `None` 口径一致）；
+    /// 查库失败按关闭态处理（fail-closed：不明确的姿态不下发入口）。
+    pub webauthn_enabled: bool,
 }
 
 /// 用户信息响应 Vo（Service 层返回，Handler 包装为 GetInfoResult）
@@ -194,6 +201,12 @@ pub struct GetInfoVo {
     /// 前端只消费不推断。判定 = 平台层能力位非 `off` **且** 操作者为平台（`tenant_id == 0`）：
     /// 匿名化是平台级不可逆治理动作，只有平台管理员可触发（服务层另有 404 守卫兜底）。
     pub show_user_erasure: bool,
+    /// 个人中心是否提供「通行密钥（Passkey）」入口（能力位 `auth.webauthn` 的**服务端判定结果**）
+    ///
+    /// 与 `show_user_erasure` 同源的"单点判定"，但判定面不同：WebAuthn 是**登录面自助能力**
+    /// （可随租户套餐收敛），故取**本租户的生效档位**（平台天花板 ∩ 套餐 `features`）而非仅平台层。
+    /// 前端只消费不推断 —— 否则会造出"入口可见但请求 404"的假入口（能力位关闭时后端不注册该路由）。
+    pub show_passkey: bool,
 }
 
 /// 路由节点 Vo（对齐前端 RouterVo）
@@ -331,6 +344,23 @@ impl AuthService {
         }
     }
 
+    /// 能力位 `auth.webauthn` 的**平台层**姿态（与 `WebauthnService::ensure_enabled` 同一判据）。
+    ///
+    /// 为什么按平台层而不是"租户生效层"：WebAuthn 的**端点守卫**（`WebauthnService::ensure_enabled`）
+    /// 与登录/自助路由都只按平台层 `[features]` 判定。若 UI 入口改按租户层隐藏而端点仍可用，
+    /// 二者立刻漂移（入口消失但接口还能调）。故此处**唯一口径 = 端点口径**，保证
+    /// "可见即可用、不可见即 404"：既不造假入口，也不藏掉真入口。
+    ///
+    /// 判据表达式与端点守卫逐字同源（`mode_reaches(..., "on")`）而非 `is_on`：后者在将来为
+    /// 该能力位新增中间档位时会与端点守卫分叉。
+    fn webauthn_capability_on(&self) -> bool {
+        crate::common::features::mode_reaches(
+            &crate::common::features::FeatureSet::sanitized(self.config.features.0.clone()),
+            crate::service::webauthn_service::FEATURE_WEBAUTHN,
+            "on",
+        )
+    }
+
     /// 生成验证码并存入 Redis（绑定客户端 IP）
     ///
     /// 流程：
@@ -353,12 +383,15 @@ impl AuthService {
         // 同时读取注册开关，前端据此控制"立即注册"链接显示，
         // 避免前端探测 /register 触发 403 控制台错误（P0 优化）
         let register_enabled = self.is_register_enabled(tenant_id).await;
+        // 登录页「通行密钥登录」入口开关：与 WebAuthn 端点守卫同一判据（见 webauthn_capability_on）
+        let webauthn_enabled = self.webauthn_capability_on();
         if !captcha_enabled {
             return Ok(CaptchaVo {
                 captcha_enabled: false,
                 img: String::new(),
                 uuid: String::new(),
                 register_enabled,
+                webauthn_enabled,
             });
         }
 
@@ -394,6 +427,7 @@ impl AuthService {
             img: captcha.img_base64,
             uuid: captcha.uuid,
             register_enabled,
+            webauthn_enabled,
         })
     }
 
@@ -443,6 +477,12 @@ impl AuthService {
         // 1. 验证码放在限流之后，攻击者可消耗 IP 限流额度后才被验证码拦截，浪费限流配额
         // 2. 验证码 GETDEL 是幂等消耗操作，应在更早阶段拦截明显错误的请求
         // 新顺序：先验证码（无 Redis 计数副作用），再限流（IP/用户计数），最后密码校验
+        //
+        // 风控集成点（`[risk_control]`，默认 `off` ⇒ 不判定，逐字节等价于改造前）：
+        // 工具型 UA 处置放在最前 —— 脚本化尝试最廉价地被挡掉，且**不**消耗/写入密码失败计数
+        // （它不是"密码错误"，不应影响账号锁定语义）。此刻尚未查库 ⇒ 日志归属传 (0, 0)。
+        self.enforce_login_ua(user_agent, &ctx, 0, 0).await?;
+
         // 1. 验证码校验（GETDEL 原子化，防重放攻击）
         // 多租户 Phase 3：透传 host 租户上下文，验证码开关按租户上下文读取
         self.verify_captcha(redis, &ctx, &dto.uuid, &dto.code, tenant_id)
@@ -469,8 +509,101 @@ impl AuthService {
         self.verify_totp_if_enabled(redis, &ctx, &user, dto.totp_code.as_deref())
             .await?;
 
+        // 风控集成点（`[risk_control].login_geo_alert`，默认 `off` ⇒ 不查库、零行为变更）：
+        // 必须在 finalize_login 写入本次成功日志**之前**取"上一跳"，否则会读到本次记录。
+        let geo_note = self.evaluate_login_geo(&ctx, user.tenant_id).await;
+
         // 6. JWT 签发 + 登录日志（成功）+ 在线映射 + 更新登录信息 + 清除失败计数
-        self.finalize_login(&user, redis, jwt_config, &ctx).await
+        self.finalize_login(&user, redis, jwt_config, &ctx, geo_note)
+            .await
+    }
+
+    /// 风控集成点：工具型 UA 处置（`[risk_control].login_ua_filter`）。
+    ///
+    /// 关闭态（默认 `off`）恒放行 ⇒ **零行为变更**。命中时写一条**失败**登录日志并返回 403：
+    /// - `tenant_id` / `user_id`：密码登录路径此刻尚未查库 ⇒ 传 `(0, 0)`
+    ///   （与"查库前的验证码/限流拦截"同一语义：平台级审计）；WebAuthn / OAuth 路径
+    ///   已识别用户 ⇒ 传真实归属，保证日志可追溯。
+    /// - 对外文案用 `error.auth.ua_blocked`：本判定**不依赖用户名是否存在**，不构成用户枚举面，
+    ///   故可给出比 `login_failed` 更可诊断的提示（这是弱信号防护，不是安全边界）。
+    ///
+    /// 三条登录链路（密码 / WebAuthn / OAuth）共用本方法，保证同一判据、不出现"某条链路漏判"。
+    async fn enforce_login_ua(
+        &self,
+        user_agent: &str,
+        ctx: &LoginContext<'_>,
+        tenant_id: i64,
+        user_id: i64,
+    ) -> Result<(), ServiceError> {
+        use crate::common::risk_control::{UaVerdict, ua_verdict};
+
+        let cfg = &self.config.risk_control;
+        let hit = match ua_verdict(cfg.ua_filter(), &cfg.ua_patterns(), user_agent) {
+            UaVerdict::Allow => return Ok(()),
+            UaVerdict::BlockTool(pattern) => format!("tool:{pattern}"),
+            UaVerdict::BlockEmpty => "empty-ua".to_string(),
+        };
+        tracing::warn!(
+            username = ctx.username,
+            login_ip = ctx.login_ip,
+            user_agent,
+            hit = %hit,
+            "登录被风控拒绝（工具型 UA / 空 UA；弱信号防护，非安全边界）"
+        );
+        self.write_login_log_best_effort(
+            ctx,
+            "1",
+            &crate::tr!("log.auth.ua_blocked"),
+            tenant_id,
+            user_id,
+        )
+        .await;
+        Err(ServiceError::forbidden(&crate::tr!(
+            "error.auth.ua_blocked"
+        )))
+    }
+
+    /// 风控集成点：异地登录告警（`[risk_control].login_geo_alert`）。
+    ///
+    /// 关闭态（默认 `off`）⇒ **不查库**、返回 `None`。开启后取本租户内同用户名最近一次
+    /// **成功**登录的归属地，与本次做粗粒度（国家 + 省份）比对；不同 ⇒ 打 WARN 并把对比结果
+    /// 作为本次成功登录日志的 `msg`（可审计）。
+    ///
+    /// **从不拦截登录**：地区识别基于 IP 库，VPN / 运营商出口 / 移动网络都会造成误判，
+    /// 拦截会变成"用户被自己锁在门外"。查库失败也只降级为不告警（不阻断登录）。
+    async fn evaluate_login_geo(&self, ctx: &LoginContext<'_>, tenant_id: i64) -> Option<String> {
+        use crate::common::risk_control::geo_alert;
+        use crate::config::settings::LoginGeoAlertMode;
+
+        let mode = self.config.risk_control.geo_alert();
+        if mode == LoginGeoAlertMode::Off {
+            return None;
+        }
+        // 只在**本租户内**比对：同一用户名可能存在于不同租户，
+        // 跨租户比对既会误报，也是跨租户信息泄漏。
+        let previous = match self
+            .logininfor_repo
+            .find_latest_success_location(ctx.username, Some(tenant_id))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "异地登录比对的历史记录查询失败（跳过告警，不影响登录）"
+                );
+                return None;
+            }
+        };
+        let (prev, now) = geo_alert(mode, previous.as_deref(), ctx.login_location)?;
+        tracing::warn!(
+            username = ctx.username,
+            login_ip = ctx.login_ip,
+            previous_region = %prev,
+            current_region = %now,
+            "异地登录告警（仅告警不拦截；基于 IP 归属地粗粒度比对）"
+        );
+        Some(crate::tr!("log.auth.geo_alert", prev = prev, now = now).to_string())
     }
 
     /// TOTP 多因子校验（P0-4 登录链路集成）
@@ -966,12 +1099,16 @@ impl AuthService {
     /// 解决旧方案两个 Bug：
     /// - logout 未 DEL online key，用户登出后仍显示在线 30 分钟
     /// - 30 分钟硬窗口与 JWT 24h 有效期不一致
+    ///
+    /// `geo_note`：风控集成点产出的**异地登录告警说明**（[`Self::evaluate_login_geo`]）；
+    /// `None`（默认，档位 `off`）⇒ 日志消息仍是 `log.auth.login_success`，逐字节等价于改造前。
     async fn finalize_login(
         &self,
         user: &SysUserModel,
         redis: &mut redis::aio::ConnectionManager,
         jwt_config: &JwtConfig,
         ctx: &LoginContext<'_>,
+        geo_note: Option<String>,
     ) -> Result<LoginVo, ServiceError> {
         // 1. JWT 签发（M-7：generate_token 同时返回 claims，避免后续重复 verify）
         //    P0-R81-007：读取当前密码版本号 pwd_ver:{user_id}（无则 0）写入 claim，
@@ -997,14 +1134,11 @@ impl AuthService {
         //    H-1/H-2 修复：日志写入失败不应阻断登录响应，仅记录警告日志
         //    info_id 仍保留用于登录日志关联，但不再作为 online key
         //    H-3：日志消息改用 tr!("log.auth.login_success") 支持多语言
-        self.write_login_log_best_effort(
-            ctx,
-            "0",
-            &crate::tr!("log.auth.login_success"),
-            user.tenant_id,
-            user.user_id,
-        )
-        .await;
+        //    风控集成点：命中异地告警时用告警说明替换成功文案（`off` 档下 geo_note 恒 None）
+        let login_msg =
+            geo_note.unwrap_or_else(|| crate::tr!("log.auth.login_success").to_string());
+        self.write_login_log_best_effort(ctx, "0", &login_msg, user.tenant_id, user.user_id)
+            .await;
 
         // 3. 存储 `online:{token_hash}` → `OnlineSession` JSON，用于在线用户列表与强退
         //    - key 用 token_hash（与 blacklist:{token_hash} 对齐，强退时同一 key 命名空间）
@@ -1178,7 +1312,13 @@ impl AuthService {
             browser: &browser,
             os: &os,
         };
-        self.finalize_login(user, redis, jwt_config, &ctx).await
+        // 风控集成点：与密码登录**同一判据**（三条登录链路一致，不出现某条链路漏判）。
+        // 本路径已识别用户 ⇒ 日志归属传真实 tenant_id / user_id。
+        self.enforce_login_ua(user_agent, &ctx, user.tenant_id, user.user_id)
+            .await?;
+        let geo_note = self.evaluate_login_geo(&ctx, user.tenant_id).await;
+        self.finalize_login(user, redis, jwt_config, &ctx, geo_note)
+            .await
     }
 
     /// 登出：token 加入 Redis 黑名单 + 删除 online 会话映射（fail-closed：黑名单写入失败返回错误）
@@ -1304,6 +1444,11 @@ impl AuthService {
             crate::common::features::FeatureSet::sanitized(self.config.features.0.clone());
         let show_user_erasure = operator_tid == 0
             && platform_features.is_on(crate::service::user_erasure_service::FEATURE_USER_ERASURE);
+        // 个人中心「通行密钥（Passkey）」入口决策：能力位 `auth.webauthn`，
+        // **与 WebAuthn 端点守卫同一判据**（见 `webauthn_capability_on`）——
+        // 关闭态后端对 `/system/user/webauthn/*` 一律 404，故入口必须同步隐藏，
+        // 否则即"入口可见但请求 404"的假入口（第二十批实测正是这里打出了 404）。
+        let show_passkey = self.webauthn_capability_on();
 
         Ok(GetInfoVo {
             user,
@@ -1315,6 +1460,7 @@ impl AuthService {
             show_tenant_column,
             show_tenant_filter,
             show_user_erasure,
+            show_passkey,
         })
     }
 
@@ -1522,7 +1668,12 @@ impl AuthService {
         };
         // 复用 finalize_login（JWT 签发 + 登录成功日志 + 在线映射 + 旧会话清理），
         // 正常路径仅一条登录日志，避免重复写入。
-        self.finalize_login(&user, redis, jwt_config, &ctx).await
+        // 风控集成点：与密码登录**同一判据**（本路径已识别用户 ⇒ 日志归属传真实值）。
+        self.enforce_login_ua(user_agent, &ctx, user.tenant_id, user.user_id)
+            .await?;
+        let geo_note = self.evaluate_login_geo(&ctx, user.tenant_id).await;
+        self.finalize_login(&user, redis, jwt_config, &ctx, geo_note)
+            .await
     }
 
     /// 锁屏解锁（需登录态，校验当前用户密码）
@@ -1945,7 +2096,10 @@ fn rebuild_menu_tree(
 /// 导致 `/dashboard` 路由被覆盖，其子路由全部 404。
 /// 修复：子路由 name 添加父路径前缀，如 `system-dashboard`、`dashboard-workbench`。
 fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
-    let menu_type = menu.menu_type.as_deref().unwrap_or("C");
+    use crate::common::constants::menu_type;
+
+    // R6-RUST-10：局部变量改名 `menu_kind`，避免与 `menu_type` 常量模块同名遮蔽
+    let menu_kind = menu.menu_type.as_deref().unwrap_or(menu_type::MENU);
     let is_frame = menu.is_frame.as_deref().unwrap_or("1");
     let is_cache = menu.is_cache.as_deref().unwrap_or("0");
     let visible = menu.visible.as_deref().unwrap_or("0");
@@ -1971,9 +2125,9 @@ fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
     // component 转换
     let component = match menu.component.as_deref() {
         None | Some("") => {
-            if parent_id == 0 && menu_type == "M" {
+            if parent_id == 0 && menu_kind == menu_type::DIR {
                 "Layout".to_string()
-            } else if parent_id != 0 && menu_type == "M" {
+            } else if parent_id != 0 && menu_kind == menu_type::DIR {
                 "ParentView".to_string()
             } else {
                 String::new()
@@ -1983,14 +2137,14 @@ fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
     };
 
     // redirect 转换
-    let redirect = if is_frame == "1" && menu_type == "M" {
+    let redirect = if is_frame == "1" && menu_kind == menu_type::DIR {
         Some("noRedirect".to_string())
     } else {
         None
     };
 
     // alwaysShow 转换
-    let always_show = if visible == "0" && menu_type != "C" && is_frame == "1" {
+    let always_show = if visible == "0" && menu_kind != menu_type::MENU && is_frame == "1" {
         Some(true)
     } else {
         None
@@ -2031,7 +2185,7 @@ fn menu_to_router(menu: &SysMenuModel, parent_path: &str) -> RouterVo {
     let children = if let Some(ref kids) = menu.children {
         let router_kids: Vec<RouterVo> = kids
             .iter()
-            .filter(|k| k.menu_type.as_deref() != Some("F"))
+            .filter(|k| k.menu_type.as_deref() != Some(menu_type::BUTTON))
             .map(|k| menu_to_router(k, &child_parent_path))
             .collect();
         if router_kids.is_empty() {

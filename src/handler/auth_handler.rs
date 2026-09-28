@@ -41,6 +41,9 @@ pub struct CaptchaResult {
     pub uuid: String,
     /// 注册开关（前端据此控制"立即注册"链接显示）
     pub register_enabled: bool,
+    /// WebAuthn / Passkey 登录开关（能力位 `auth.webauthn` 在**本 host 租户的生效档位**；
+    /// 前端据此控制登录页"通行密钥登录"入口显示，避免造出"入口可见但请求 404"的假入口）
+    pub webauthn_enabled: bool,
 }
 
 /// 登录响应体（token 在顶层，对齐前端 LoginInfoResult extends AjaxResult）
@@ -67,9 +70,19 @@ pub struct GetInfoResult {
     pub is_default_modify_pwd: bool,
     /// 密码是否已过期
     pub is_password_expired: bool,
+    /// 业务列表页是否显示「所属租户」归属列（服务端按 `[ui].show_tenant_column` +
+    /// 操作者租户上下文算好后下发；前端只消费不推断）
+    pub show_tenant_column: bool,
+    /// 业务列表页是否提供「按租户筛选」入口（服务端按 `[ui].tenant_filter` +
+    /// 操作者租户上下文算好后下发）
+    pub show_tenant_filter: bool,
     /// 用户管理页是否提供「匿名化（GDPR）」入口（服务端按能力位 `privacy.user_erasure`
     /// + 操作者是否平台算好后下发；前端只消费不推断）
     pub show_user_erasure: bool,
+    /// 个人中心是否提供「通行密钥（Passkey）」入口（服务端按能力位 `auth.webauthn`
+    /// 在**本租户的生效档位**算好后下发；前端只消费不推断，避免造出
+    /// "入口可见但请求 404"的假入口）
+    pub show_passkey: bool,
 }
 
 crate::impl_into_response!(CaptchaResult, LoginResult, GetInfoResult);
@@ -113,6 +126,7 @@ pub async fn captcha(
         img: vo.img,
         uuid: vo.uuid,
         register_enabled: vo.register_enabled,
+        webauthn_enabled: vo.webauthn_enabled,
     })
 }
 
@@ -380,7 +394,10 @@ pub async fn get_info(
         pwd_chrtype: vo.pwd_chrtype,
         is_default_modify_pwd: vo.is_default_modify_pwd,
         is_password_expired: vo.is_password_expired,
+        show_tenant_column: vo.show_tenant_column,
+        show_tenant_filter: vo.show_tenant_filter,
         show_user_erasure: vo.show_user_erasure,
+        show_passkey: vo.show_passkey,
     })
 }
 
