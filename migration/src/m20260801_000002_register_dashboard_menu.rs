@@ -69,10 +69,13 @@ impl MigrationTrait for Migration {
         let backend = manager.get_database_backend();
 
         // 1. 检查是否已存在（幂等性）
+        // ⚠️ 查重条件**不含 parent_id**：m20260729 已在顶级（parent_id=0）注册过同
+        //    component 的「数据看板」，若只查 parent_id=1 会导致重复注册（2026-09-28
+        //    实测存量库出现 132 顶级 + 动态 id 两条；由 m20260928_000003 清理存量）。
         let existing: Option<i64> = conn
             .query_one(Statement::from_sql_and_values(
                 backend,
-                "SELECT menu_id FROM sys_menu WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index' LIMIT 1",
+                "SELECT menu_id FROM sys_menu WHERE path = 'dashboard' AND component = 'dashboard/index' LIMIT 1",
                 [],
             ))
             .await?
