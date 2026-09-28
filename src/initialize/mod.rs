@@ -183,6 +183,14 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化备份权限粒度化菜单失败: {}", e))?;
 
+        // 3.5d-4 前端错误日志 device_type 列兜底（FCP-011）：与迁移
+        // m20260928_000002_frontend_error_device_type 等价（启动不跑 Migrator::up）。
+        // 缺此兜底时存量库实体 SELECT 带 device_type ⇒ /monitor/frontendError
+        // 列表/上报全站 500。
+        ensure_frontend_error_device_type(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化前端错误 device_type 列失败: {}", e))?;
+
         // 3.5d-4 租户自建导航 L3 页面菜单（批次 3）：与迁移
         // m20260926_000014_tenant_nav_menu 等价（启动不跑 Migrator::up）。
         // 缺此兜底时存量库无 3627 页面菜单 ⇒ 能力位开启后租户侧仍无入口（假功能）。
@@ -1487,6 +1495,26 @@ fn init_webauthn_output(settings: &Settings) {
             );
         }
     }
+}
+
+/// 前端错误日志 device_type 列兜底（FCP-011，与迁移
+/// m20260928_000002_frontend_error_device_type 等价，全幂等）：
+/// `sys_frontend_error` 存量库补 `device_type VARCHAR(16) NULL`。
+/// 缺此兜底时（优先级最高的一项）：实体 SELECT 带 device_type ⇒
+/// /monitor/frontendError 列表/上报全站 500。
+async fn ensure_frontend_error_device_type(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    if sso_table_exists(db, "sys_frontend_error").await?
+        && !sso_has_column(db, "sys_frontend_error", "device_type").await?
+    {
+        db.execute(Statement::from_string(
+            backend,
+            "ALTER TABLE sys_frontend_error ADD COLUMN device_type VARCHAR(16) NULL",
+        ))
+        .await?;
+        tracing::info!("sys_frontend_error.device_type 列已补建（存量库兜底，FCP-011）");
+    }
+    Ok(())
 }
 
 /// 多租户 Phase 2 存量库兜底（与迁移 m20260925_000001/000002 等价，全幂等）：

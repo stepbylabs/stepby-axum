@@ -57,6 +57,15 @@ max_connections = 10
 min_connections = 1
 connect_timeout = 10
 idle_timeout = 600
+# 语句级超时（秒，默认 60；0 = 显式关闭）——R9-ERR-004：
+#   PostgreSQL: statement_timeout + idle_in_transaction_session_timeout（覆盖全部语句）；
+#   MySQL:      SET SESSION max_execution_time（⚠️ 引擎限制，仅覆盖 SELECT）；
+#   SQLite:     本地嵌入库无服务端语句超时，本项不生效（busy_timeout=5s 兜底）。
+#   报表类长查询请按需调大或置 0 关闭。
+statement_timeout_secs = 60
+# data_scope 部门递归 CTE 深度上限（默认 30）——防 sys_dept.parent_id 脏数据
+# 成环时 PostgreSQL 无限递归（写入侧另有防环校验，本值为纵深防御第二道防线）。
+dept_cte_max_depth = 30
 
 [redis]
 # 生产环境通过环境变量 REDIS_URL 注入
