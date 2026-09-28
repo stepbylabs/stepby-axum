@@ -309,7 +309,7 @@ mod tests {
         MailerService {
             transporter: None,
             from_email: "noreply@example.com".to_string(),
-            from_name: "Yebot".to_string(),
+            from_name: "Stepby".to_string(),
             enabled: false,
         }
     }
@@ -325,7 +325,7 @@ mod tests {
         MailerService {
             transporter: Some(transporter),
             from_email: "noreply@example.com".to_string(),
-            from_name: "Yebot".to_string(),
+            from_name: "Stepby".to_string(),
             enabled: true,
         }
     }

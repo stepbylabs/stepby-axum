@@ -9,7 +9,7 @@
 //! - `domain` **全局唯一**（唯一索引不分软删，历史占用同样拦截）→ 占用探测用
 //!   `find_by_domain_any`（含软删行）；
 //! - 域名类型 `domain_type`：`'0'` 子域名（平台分配，免 DNS 验证）/ `'1'` 自定义域名
-//!   （需 DNS TXT 验证 `_yebot-verify.{domain}` = verify_token）；
+//!   （需 DNS TXT 验证 `_stepby-verify.{domain}` = verify_token）；
 //! - **操作者范围由能力位 `tenant.domain_self_service` 决定**（见 [`DomainScope`]）：
 //!   - 关闭态（默认 = 现状）：域名管理整体平台专属，租户操作者一律 **403**；
 //!   - 开启态（平台 `[features]` ∩ 租户套餐两层均非 `off`）：**平台操作者**可管理全部租户域名；
@@ -507,7 +507,7 @@ impl SysTenantDomainService {
             return Err(cross_tenant_denied());
         }
 
-        let txt_record = format!("_yebot-verify.{}", model.domain);
+        let txt_record = format!("_stepby-verify.{}", model.domain);
 
         // 子域名由平台分配免验证；已验证域名幂等返回
         if model.domain_type == DOMAIN_TYPE_SUBDOMAIN || model.verify_status.as_deref() == Some("1")
@@ -800,7 +800,7 @@ impl SysTenantDomainService {
 ///
 /// 调用点均已按 [`DomainScope`] 完成行级收窄（平台 = 全部 / 租户 = 仅本租户），
 /// 故 `verify_token` 直接输出：租户拿到的是**本租户**域名的 token，正是其配置
-/// `_yebot-verify.{domain}` TXT 记录所必需的信息。
+/// `_stepby-verify.{domain}` TXT 记录所必需的信息。
 fn to_vo(model: &DomainModel, name_map: &HashMap<i64, String>) -> TenantDomainVo {
     TenantDomainVo {
         domain_id: model.domain_id,
@@ -959,7 +959,7 @@ mod tests {
 
     #[test]
     fn test_normalize_domain() {
-        assert_eq!(normalize_domain("  ACME.Yebot.COM  "), "acme.yebot.com");
+        assert_eq!(normalize_domain("  ACME.Stepby.COM  "), "acme.stepby.com");
         assert_eq!(
             normalize_domain("acme.example.com:8443"),
             "acme.example.com"
@@ -970,12 +970,12 @@ mod tests {
 
     #[test]
     fn test_validate_domain() {
-        assert!(validate_domain("acme.yebot.com").is_ok());
+        assert!(validate_domain("acme.stepby.com").is_ok());
         assert!(validate_domain("a-b.example.io").is_ok());
         // 单标签拒绝
         assert!(validate_domain("localhost").is_err());
         // 非法字符拒绝
-        assert!(validate_domain("acme_yebot.com").is_err());
+        assert!(validate_domain("acme_stepby.com").is_err());
         // 标签以 - 开头/结尾拒绝
         assert!(validate_domain("-acme.com").is_err());
         assert!(validate_domain("acme-.com").is_err());

@@ -135,7 +135,7 @@ pub fn resolve_upload_root(upload_config: &crate::config::UploadConfig) -> PathB
 /// `ServeDir` 服务路径一致。
 ///
 /// # 参数
-/// - `dir`: 配置中的目录路径（如 "uploads/avatar" 或 "/data/yebot/uploads/file"）
+/// - `dir`: 配置中的目录路径（如 "uploads/avatar" 或 "/data/stepby/uploads/file"）
 ///
 /// # 返回
 /// - 绝对路径：直接返回
@@ -680,9 +680,9 @@ mod tests {
         // 绝对 avatar_dir：取父目录后 is_absolute 直接返回，不触碰文件系统
         let cfg = UploadConfig {
             avatar_dir: if cfg!(windows) {
-                r"C:\yebot\uploads\avatar".to_string()
+                r"C:\stepby\uploads\avatar".to_string()
             } else {
-                "/srv/yebot/uploads/avatar".to_string()
+                "/srv/stepby/uploads/avatar".to_string()
             },
             ..Default::default()
         };
@@ -697,9 +697,9 @@ mod tests {
     #[tokio::test]
     async fn resolve_upload_dir_absolute_path_passes_through() {
         let dir = if cfg!(windows) {
-            r"C:\yebot\uploads\file"
+            r"C:\stepby\uploads\file"
         } else {
-            "/srv/yebot/uploads/file"
+            "/srv/stepby/uploads/file"
         };
         let resolved = resolve_upload_dir(dir).await;
         assert_eq!(resolved, std::path::PathBuf::from(dir));
@@ -1058,7 +1058,8 @@ mod tests {
     // ---------- 测试辅助 ----------
 
     fn temp_root() -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("yebot_upload_test_{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("stepby_upload_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("创建临时目录失败");
         root
     }

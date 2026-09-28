@@ -3,7 +3,7 @@
 > **阶段：** 第一阶段「工程脚手架与基础框架」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** 项目规则基线见根目录 `README.md` 与 `SECURITY.md`；Trae IDE 规则文件 `axum-backend/.trae/rules/project-rules.md`（IDE 内自动加载，非项目文档）
-> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **开发优先原则：** 接口契约对齐 stepby-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -398,7 +398,7 @@ pub struct RedisConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct JwtConfig {
     pub secret: String,
-    pub expire_hours: i64,        // yebot 默认 24 小时
+    pub expire_hours: i64,        // stepby 默认 24 小时
     pub issuer: String,
 }
 
@@ -641,7 +641,7 @@ pub struct AppState {
 | 算法 | 用途 | 说明 |
 |------|------|------|
 | **Argon2id** | 主算法（新密码加密与验证） | 2024 年密码哈希竞赛推荐，抗 GPU/ASIC 暴力破解；每用户独立随机盐（`SaltString::generate(&mut OsRng)`） |
-| MD5 + 固定盐值 | 旧哈希验证 fallback（仅兼容历史数据） | 旧哈希格式为 32 位 hex（MD5 摘要），盐值常量 `LEGACY_SALT = "yebot_admin"`；不用于新密码加密 |
+| MD5 + 固定盐值 | 旧哈希验证 fallback（仅兼容历史数据） | 旧哈希格式为 32 位 hex（MD5 摘要），盐值常量 `LEGACY_SALT = "stepby_admin"`；不用于新密码加密 |
 
 > **关键约束：** 旧 MD5 仅保留 `verify_legacy_md5` 一处使用点，禁止用于 `encrypt_password`。验证旧 MD5 哈希成功后，调用方应通过 `verify_password_with_upgrade_hint` 返回的 `needs_upgrade` 提示，将密码重新用 Argon2id 加密并落库，完成渐进式升级。
 
@@ -1034,10 +1034,10 @@ async fn main() {
 
 | 优先级 | 要点 | 本阶段应用场景 |
 |--------|------|----------------|
-| 第一 | 接口契约对齐前端 | 响应结构体字段名、状态码、Token 契约（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "yebot_admin"） |
+| 第一 | 接口契约对齐前端 | 响应结构体字段名、状态码、Token 契约（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "stepby_admin"） |
 | 第二 | Axum 官方最佳实践 | 分层架构、State 注入、initialize 编排、错误 IntoResponse、中间件 from_fn |
 | 第三 | Axum + SeaORM 原生惯例 | SeaORM ConnectOptions 配置、paginate 分页查询模式 |
-| 第四 | 业界通用做法 | 验证码接口设计（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "yebot_admin"） |
+| 第四 | 业界通用做法 | 验证码接口设计（密码算法改为 Argon2id，旧 MD5 fallback 用 LEGACY_SALT "stepby_admin"） |
 
 ---
 

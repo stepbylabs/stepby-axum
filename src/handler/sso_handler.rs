@@ -402,7 +402,7 @@ pub async fn token(
                 resp.headers_mut().insert(
                     axum::http::header::WWW_AUTHENTICATE,
                     axum::http::HeaderValue::from_static(
-                        "Basic realm=\"yebot-sso\", charset=\"UTF-8\"",
+                        "Basic realm=\"stepby-sso\", charset=\"UTF-8\"",
                     ),
                 );
             }
@@ -478,7 +478,7 @@ pub async fn revoke(
                 resp.headers_mut().insert(
                     axum::http::header::WWW_AUTHENTICATE,
                     axum::http::HeaderValue::from_static(
-                        "Basic realm=\"yebot-sso\", charset=\"UTF-8\"",
+                        "Basic realm=\"stepby-sso\", charset=\"UTF-8\"",
                     ),
                 );
             }
@@ -567,7 +567,7 @@ pub async fn introspect(
                 resp.headers_mut().insert(
                     axum::http::header::WWW_AUTHENTICATE,
                     axum::http::HeaderValue::from_static(
-                        "Basic realm=\"yebot-sso\", charset=\"UTF-8\"",
+                        "Basic realm=\"stepby-sso\", charset=\"UTF-8\"",
                     ),
                 );
             }

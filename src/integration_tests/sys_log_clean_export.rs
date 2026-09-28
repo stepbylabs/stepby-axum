@@ -29,16 +29,16 @@ async fn create_noperm_user_and_token(ctx: &TestContext) -> String {
                 "deptId": 103,
                 "userName": uname,
                 "nickName": "无权限测试",
-                "email": "it.noperm@yebot.dev",
+                "email": "stepby@tzkj.net",
                 "phonenumber": "13800009999",
                 "sex": "0",
-                "password": "Yebot@12345",
+                "password": "Stepby@12345",
                 "status": "0"
             }),
         )
         .await;
     ctx.assert_ok(&v);
-    login(&ctx.app, ctx.peer_ip, uname, "Yebot@12345").await
+    login(&ctx.app, ctx.peer_ip, uname, "Stepby@12345").await
 }
 
 /// 用指定 token 构建请求（用于非 admin 权限断言）。

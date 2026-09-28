@@ -206,8 +206,8 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("菜单结构优化失败: {}", e))?;
 
-        // 3.5d-7 去若依化遗留种子改名兜底（与迁移 m20250711 init 的 yebot 化种子对齐，
-        // 存量库不跑 Migrator::up）：ry 演示用户 → yebot；ryTask 系演示任务目标 →
+        // 3.5d-7 去若依化遗留种子改名兜底（与迁移 m20250711 init 的 stepby 化种子对齐，
+        // 存量库不跑 Migrator::up）：ry 演示用户 → stepby；ryTask 系演示任务目标 →
         // demoTask 系。全部幂等 UPDATE，重复执行无副作用。
         ensure_rename_legacy_seed(&db)
             .await
@@ -1651,13 +1651,13 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
 }
 
 /// 去若依化遗留种子改名兜底（全幂等）：
-/// ① ry 演示用户 → yebot（用户名/邮箱/备注）；
+/// ① ry 演示用户 → stepby（用户名/邮箱/备注）；
 /// ② sys_job 演示任务目标 ryTask 系 → demoTask 系（与 scheduler 注册的白名单一致，
 ///    否则改名后任务执行报"目标未注册"）。
 async fn ensure_rename_legacy_seed(db: &DatabaseConnection) -> anyhow::Result<()> {
     let backend = db.get_database_backend();
     let updates: &[&str] = &[
-        "UPDATE sys_user SET user_name = 'yebot', email = 'yebot@yebot.dev', remark = '演示账号' WHERE user_name = 'ry'",
+        "UPDATE sys_user SET user_name = 'stepby', email = 'stepby@tzkj.net', remark = '演示账号' WHERE user_name = 'ry'",
         "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryMultipleParams', 'demoMultipleParams') WHERE invoke_target LIKE '%ryMultipleParams%'",
         "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryNoParams', 'demoNoParams') WHERE invoke_target LIKE '%ryNoParams%'",
         "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryParams', 'demoParams') WHERE invoke_target LIKE '%ryParams%'",

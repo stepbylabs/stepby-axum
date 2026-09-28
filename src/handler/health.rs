@@ -123,10 +123,10 @@ static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 ///
 /// Prometheus 文本格式指标端点（免鉴权），供监控系统采集。
 /// 暴露指标：
-/// - yebot_uptime_seconds：进程运行时长
-/// - yebot_process_resident_memory_bytes / yebot_process_virtual_memory_bytes：进程内存
-/// - yebot_db_backend：数据库后端类型（sqlite/mysql/postgres，info 标签）
-/// - yebot_db_connected：数据库连通性（1=已连接 0=未连接）
+/// - stepby_uptime_seconds：进程运行时长
+/// - stepby_process_resident_memory_bytes / stepby_process_virtual_memory_bytes：进程内存
+/// - stepby_db_backend：数据库后端类型（sqlite/mysql/postgres，info 标签）
+/// - stepby_db_connected：数据库连通性（1=已连接 0=未连接）
 ///
 /// 无 Grafana/Prometheus 时仍可 `curl http://localhost:8080/metrics` 查看文本格式指标。
 ///
@@ -170,35 +170,35 @@ pub async fn metrics(
 
     let mut s = String::new();
     // uptime
-    s.push_str("# HELP yebot_uptime_seconds 进程运行时长（秒）\n");
-    s.push_str("# TYPE yebot_uptime_seconds gauge\n");
-    s.push_str(&format!("yebot_uptime_seconds {}\n", uptime));
+    s.push_str("# HELP stepby_uptime_seconds 进程运行时长（秒）\n");
+    s.push_str("# TYPE stepby_uptime_seconds gauge\n");
+    s.push_str(&format!("stepby_uptime_seconds {}\n", uptime));
     // 进程内存
-    s.push_str("# HELP yebot_process_resident_memory_bytes 进程常驻内存（字节）\n");
-    s.push_str("# TYPE yebot_process_resident_memory_bytes gauge\n");
-    s.push_str(&format!("yebot_process_resident_memory_bytes {}\n", rss));
-    s.push_str("# HELP yebot_process_virtual_memory_bytes 进程虚拟内存（字节）\n");
-    s.push_str("# TYPE yebot_process_virtual_memory_bytes gauge\n");
-    s.push_str(&format!("yebot_process_virtual_memory_bytes {}\n", vms));
+    s.push_str("# HELP stepby_process_resident_memory_bytes 进程常驻内存（字节）\n");
+    s.push_str("# TYPE stepby_process_resident_memory_bytes gauge\n");
+    s.push_str(&format!("stepby_process_resident_memory_bytes {}\n", rss));
+    s.push_str("# HELP stepby_process_virtual_memory_bytes 进程虚拟内存（字节）\n");
+    s.push_str("# TYPE stepby_process_virtual_memory_bytes gauge\n");
+    s.push_str(&format!("stepby_process_virtual_memory_bytes {}\n", vms));
     // 进程信息
-    s.push_str("# HELP yebot_process_info 进程信息（version=后端版本）\n");
-    s.push_str("# TYPE yebot_process_info gauge\n");
+    s.push_str("# HELP stepby_process_info 进程信息（version=后端版本）\n");
+    s.push_str("# TYPE stepby_process_info gauge\n");
     s.push_str(&format!(
-        "yebot_process_info{{version=\"{}\"}} 1\n",
+        "stepby_process_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     ));
     // DB 后端类型指标
-    s.push_str("# HELP yebot_db_backend 数据库后端类型（sqlite/mysql/postgres）\n");
-    s.push_str("# TYPE yebot_db_backend gauge\n");
+    s.push_str("# HELP stepby_db_backend 数据库后端类型（sqlite/mysql/postgres）\n");
+    s.push_str("# TYPE stepby_db_backend gauge\n");
     s.push_str(&format!(
-        "yebot_db_backend{{backend=\"{}\"}} 1\n",
+        "stepby_db_backend{{backend=\"{}\"}} 1\n",
         db_backend_name
     ));
     // DB 连通性指标
-    s.push_str("# HELP yebot_db_connected 数据库连通性（1=已连接 0=未连接）\n");
-    s.push_str("# TYPE yebot_db_connected gauge\n");
+    s.push_str("# HELP stepby_db_connected 数据库连通性（1=已连接 0=未连接）\n");
+    s.push_str("# TYPE stepby_db_connected gauge\n");
     s.push_str(&format!(
-        "yebot_db_connected{{backend=\"{}\"}} {}\n",
+        "stepby_db_connected{{backend=\"{}\"}} {}\n",
         db_backend_name,
         if db_connected { 1 } else { 0 }
     ));
@@ -238,31 +238,34 @@ async fn collect_redis_prometheus(state: &Arc<AppState>) -> String {
     let mut s = String::new();
     // 仅在取值成功时输出对应 gauge，保证单行格式正确。
     if let Some(v) = num("uptime_in_seconds") {
-        s.push_str(&format!("yebot_redis_uptime_seconds {}\n", format_gauge(v)));
+        s.push_str(&format!(
+            "stepby_redis_uptime_seconds {}\n",
+            format_gauge(v)
+        ));
     }
     if let Some(v) = num("connected_clients") {
-        s.push_str(&format!("yebot_redis_connected_clients {}\n", v));
+        s.push_str(&format!("stepby_redis_connected_clients {}\n", v));
     }
     if let Some(v) = num("used_memory") {
-        s.push_str(&format!("yebot_redis_used_memory_bytes {}\n", v));
+        s.push_str(&format!("stepby_redis_used_memory_bytes {}\n", v));
     }
     if let Some(v) = num("used_memory_peak") {
-        s.push_str(&format!("yebot_redis_used_memory_peak_bytes {}\n", v));
+        s.push_str(&format!("stepby_redis_used_memory_peak_bytes {}\n", v));
     }
     if let Some(v) = num("keyspace_hits") {
-        s.push_str(&format!("yebot_redis_keyspace_hits {}\n", v));
+        s.push_str(&format!("stepby_redis_keyspace_hits {}\n", v));
     }
     if let Some(v) = num("keyspace_misses") {
-        s.push_str(&format!("yebot_redis_keyspace_misses {}\n", v));
+        s.push_str(&format!("stepby_redis_keyspace_misses {}\n", v));
     }
     if let Some(v) = num("total_commands_processed") {
-        s.push_str(&format!("yebot_redis_commands_processed {}\n", v));
+        s.push_str(&format!("stepby_redis_commands_processed {}\n", v));
     }
     if let Some(v) = num("total_net_input_bytes") {
-        s.push_str(&format!("yebot_redis_net_input_bytes {}\n", v));
+        s.push_str(&format!("stepby_redis_net_input_bytes {}\n", v));
     }
     if let Some(v) = num("total_net_output_bytes") {
-        s.push_str(&format!("yebot_redis_net_output_bytes {}\n", v));
+        s.push_str(&format!("stepby_redis_net_output_bytes {}\n", v));
     }
     s
 }

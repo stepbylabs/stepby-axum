@@ -209,8 +209,8 @@ mod tests {
         JwtConfig {
             secret: "placeholder-strong-secret-0123456789abcdef".to_string(),
             expire_hours: 24,
-            issuer: "yebot".to_string(),
-            audience: "yebot".to_string(),
+            issuer: "stepby".to_string(),
+            audience: "stepby".to_string(),
             previous_secrets: vec![],
         }
     }
@@ -237,8 +237,8 @@ mod tests {
 
         assert_eq!(verified.sub, "1");
         assert_eq!(verified.username, "admin");
-        assert_eq!(verified.iss, "yebot");
-        assert_eq!(verified.aud, "yebot");
+        assert_eq!(verified.iss, "stepby");
+        assert_eq!(verified.aud, "stepby");
         assert_eq!(verified.jti, claims.jti, "jti 应原样往返");
         assert!(verified.exp > verified.iat, "exp 应晚于 iat");
         // 默认 24h 有效期，exp 应大约在 now+24h 附近（容差 1 分钟）

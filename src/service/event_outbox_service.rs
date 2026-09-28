@@ -43,7 +43,7 @@ pub const ALL_EVENTS: &[&str] = &[
 ];
 
 /// 载荷来源标识（接收端可据此区分多实例 / 多环境）。
-pub const SOURCE: &str = "yebot";
+pub const SOURCE: &str = "stepby";
 
 /// 构造事件信封（**纯函数**，便于单测与契约冻结）。
 ///
@@ -106,11 +106,11 @@ pub fn spawn_emit(cfg: EventsConfig, event: &'static str, data: serde_json::Valu
         let mut req = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("X-Yebot-Event", event)
+            .header("X-Stepby-Event", event)
             .body(bytes.clone());
         if let Some(secret) = secret.as_deref().filter(|s| !s.is_empty()) {
             req = req.header(
-                "X-Yebot-Signature",
+                "X-Stepby-Signature",
                 format!(
                     "sha256={}",
                     crate::common::webhook::sign_hmac_sha256(secret, &bytes)
@@ -214,7 +214,7 @@ mod tests {
             serde_json::json!({ "tenantId": 42, "tenantCode": "acme" }),
             ts,
         );
-        assert_eq!(env["source"], "yebot");
+        assert_eq!(env["source"], "stepby");
         assert_eq!(env["event"], "tenant.created");
         assert_eq!(env["occurredAt"], "2026-09-27T10:30:00");
         assert_eq!(env["data"]["tenantId"], 42);

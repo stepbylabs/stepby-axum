@@ -169,7 +169,7 @@ mod tests {
     /// 创建一次性临时根目录（避免污染仓库 uploads/）。
     fn temp_root() -> std::path::PathBuf {
         let root =
-            std::env::temp_dir().join(format!("yebot_storage_test_{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("stepby_storage_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("创建临时目录失败");
         root
     }
@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_traversal_keys() {
         let dir = std::env::temp_dir()
-            .join("yebot_storage_noop")
+            .join("stepby_storage_noop")
             .to_string_lossy()
             .to_string();
         let backend = LocalBackend;

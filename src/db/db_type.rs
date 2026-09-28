@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn test_sqlite_url() {
         assert_eq!(
-            DbType::from_url("sqlite://./data/yebot.db?mode=rwc").unwrap(),
+            DbType::from_url("sqlite://./data/stepby.db?mode=rwc").unwrap(),
             DbType::Sqlite
         );
     }

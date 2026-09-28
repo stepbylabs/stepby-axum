@@ -20,7 +20,7 @@ use crate::common::{AjaxResult, AppError};
 use crate::middleware::Operator;
 use crate::state::AppState;
 
-const TOTP_ISSUER: &str = "Yebot";
+const TOTP_ISSUER: &str = "Stepby";
 
 /// pending secret 缓存 TTL（秒，10 分钟）：setup 后需在有效期内完成 verify
 const TOTP_PENDING_TTL_SECS: i64 = 600;
@@ -122,7 +122,7 @@ pub async fn setup(
         30,
         secret_bytes.clone(),
         Some(TOTP_ISSUER.to_string()),
-        "yebot-user".to_string(),
+        "stepby-user".to_string(),
     )
     .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
@@ -274,7 +274,7 @@ pub async fn verify(
         30,
         secret_bytes,
         Some(TOTP_ISSUER.to_string()),
-        "yebot-user".to_string(),
+        "stepby-user".to_string(),
     )
     .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
@@ -457,7 +457,7 @@ pub async fn disable(
         30,
         secret_bytes.clone(),
         Some(TOTP_ISSUER.to_string()),
-        "yebot-user".to_string(),
+        "stepby-user".to_string(),
     )
     .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 

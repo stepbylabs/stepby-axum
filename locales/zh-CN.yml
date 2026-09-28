@@ -691,7 +691,7 @@ notice:
     title: "登录异常告警 - IP %{ip}"
     content: "最近 %{minutes} 分钟内 IP %{ip} 失败登录 %{count} 次，疑似撞库攻击，请及时关注。"
   email:
-    footer: "此邮件由 yebot 系统自动发送，请勿直接回复。"
+    footer: "此邮件由 stepby 系统自动发送，请勿直接回复。"
 
 # WebSocket 系统消息（连接成功提示等）
 websocket:

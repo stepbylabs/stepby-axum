@@ -117,8 +117,8 @@ async fn test_dept_chain() {
     let v = ctx.get_json("/system/dept/list").await;
     let data = v["data"].as_array().expect("data 应为数组");
     assert!(
-        data.iter().any(|d| d["deptName"] == "Yebot科技"),
-        "部门列表应包含 Yebot科技，实际: {v}"
+        data.iter().any(|d| d["deptName"] == "Stepby科技"),
+        "部门列表应包含 Stepby科技，实际: {v}"
     );
 
     // 2. 排除节点列表（排除 100 后不应包含其自身）
@@ -133,8 +133,8 @@ async fn test_dept_chain() {
     let v = ctx.get_json("/system/dept/treeselect").await;
     let data = v["data"].as_array().expect("data 应为数组");
     assert!(
-        data.iter().any(|n| n["label"] == "Yebot科技"),
-        "部门树应包含 Yebot科技，实际: {v}"
+        data.iter().any(|n| n["label"] == "Stepby科技"),
+        "部门树应包含 Stepby科技，实际: {v}"
     );
 
     // 4. 部门详情
@@ -152,9 +152,9 @@ async fn test_dept_chain() {
                 "parentId": 103,
                 "deptName": "集成测试部门",
                 "orderNum": 99,
-                "leader": "Yebot",
+                "leader": "Stepby",
                 "phone": "15888888888",
-                "email": "it.dept@yebot.dev",
+                "email": "stepby@tzkj.net",
                 "status": "0"
             }),
         )

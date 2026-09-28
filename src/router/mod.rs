@@ -201,7 +201,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .fallback(api_not_found);
 
     // 根路径挂载 API 路由，并在各前端 baseURL 前缀下重复挂载：
-    // 生产构建 baseURL=/prod-api、开发 /dev-api、预发 /stage-api（见 yebot-ui/.env.*）。
+    // 生产构建 baseURL=/prod-api、开发 /dev-api、预发 /stage-api（见 stepby-ui/.env.*）。
     // 「后端嵌入前端」同源部署（embedded_assets）时浏览器直达后端，需命中带前缀的 API 路径。
     //
     // 为何用 Router::nest 而非 URI 改写中间件：

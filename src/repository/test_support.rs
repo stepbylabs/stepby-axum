@@ -22,7 +22,7 @@ pub async fn migrated_db() -> Result<DatabaseConnection, DbErr> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    let p = std::env::temp_dir().join(format!("yebot_repo_test_{}_{}_{}.db", pid, seq, nanos));
+    let p = std::env::temp_dir().join(format!("stepby_repo_test_{}_{}_{}.db", pid, seq, nanos));
     let url = format!("sqlite://{}?mode=rwc", p.to_string_lossy());
     let db = Database::connect(&url).await?;
     migration::Migrator::up(&db, None).await?;

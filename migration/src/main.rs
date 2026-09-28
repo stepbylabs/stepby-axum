@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 从环境变量读取连接串（运行前请设置 DATABASE_URL）
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://./data/yebot.db?mode=rwc".to_string());
+        .unwrap_or_else(|_| "sqlite://./data/stepby.db?mode=rwc".to_string());
 
     println!("正在连接数据库: {}", database_url);
     let connection = Database::connect(&database_url).await?;

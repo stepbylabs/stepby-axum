@@ -59,7 +59,7 @@ const CONSENT_TICKET_KEY_PREFIX: &str = "sso:consent_ticket:";
 /// 注意：与平台 jwt.audience / jwt.issuer 的碰撞校验是**动态比对配置**（见 add_client），
 /// 静态表只兜底通用保留字，不兜底可配置值。
 const RESERVED_CLIENT_IDS: &[&str] = &[
-    "sso", "oidc", "oauth", "oauth2", "admin", "system", "api", "internal", "yebot",
+    "sso", "oidc", "oauth", "oauth2", "admin", "system", "api", "internal", "stepby",
 ];
 
 // ==================== 对外 DTO / VO ====================

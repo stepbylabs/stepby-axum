@@ -25,7 +25,7 @@ use argon2::{
 };
 
 /// 旧密码方案的固定盐值（仅用于验证旧 MD5 哈希，不用于新密码）
-const LEGACY_SALT: &str = "yebot_admin";
+const LEGACY_SALT: &str = "stepby_admin";
 
 /// Top 常见弱口令黑名单（来源：Have I Been Pwned / SecLists 公开统计）
 ///
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_verify_legacy_md5() {
-        // 旧 MD5 + 固定盐值 "yebot_admin" 的哈希值
+        // 旧 MD5 + 固定盐值 "stepby_admin" 的哈希值
         let password = "admin123";
         let salted = format!("{}{}", password, LEGACY_SALT);
         use md5::{Digest, Md5};
@@ -323,11 +323,11 @@ mod tests {
     #[test]
     fn test_password_complexity_valid() {
         // 字母 + 数字 + 不在黑名单
-        assert!(validate_password_complexity("yebot2026").is_ok());
+        assert!(validate_password_complexity("stepby2026").is_ok());
         // 含大写字母 + 数字
-        assert!(validate_password_complexity("Yebot2026").is_ok());
+        assert!(validate_password_complexity("Stepby2026").is_ok());
         // 含特殊字符 + 字母 + 数字
-        assert!(validate_password_complexity("Yebot@2026").is_ok());
+        assert!(validate_password_complexity("Stepby@2026").is_ok());
     }
 
     #[test]

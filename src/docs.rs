@@ -28,9 +28,9 @@ struct SwaggerAssets;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Yebot Axum Backend API",
+        title = "Stepby Axum Backend API",
         version = "1.0.0",
-        description = "基于 Axum 0.8 + SeaORM 1.1 的 Yebot 后端 API",
+        description = "基于 Axum 0.8 + SeaORM 1.1 的 Stepby 后端 API",
         license(name = "MIT", identifier = "MIT"),
     ),
     paths(
@@ -726,7 +726,7 @@ const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Yebot Axum Backend API - Swagger UI</title>
+    <title>Stepby Axum Backend API - Swagger UI</title>
     <link rel="stylesheet" href="../swagger-ui-static/swagger-ui.css">
     <style>
         body { margin: 0; }

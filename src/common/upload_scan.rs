@@ -103,7 +103,7 @@ pub async fn scan_bytes(cfg: &UploadScanConfig, filename: &str, bytes: &[u8]) ->
     let mut req = client
         .post(url.as_str())
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-        .header("X-Yebot-Filename", encoded_name)
+        .header("X-Stepby-Filename", encoded_name)
         .body(bytes.to_vec());
     if !cfg.token.trim().is_empty() {
         req = req.bearer_auth(cfg.token.trim());

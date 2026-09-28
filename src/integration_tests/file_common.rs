@@ -74,11 +74,11 @@ async fn test_metrics_prometheus_text() {
         .expect("读取 metrics 响应体失败");
     let text = String::from_utf8_lossy(&body);
     assert!(
-        text.contains("yebot_uptime_seconds"),
+        text.contains("stepby_uptime_seconds"),
         "应包含 uptime 指标，实际: {text}"
     );
     assert!(
-        text.contains("yebot_db_backend"),
+        text.contains("stepby_db_backend"),
         "应包含 db_backend 指标，实际: {text}"
     );
 }

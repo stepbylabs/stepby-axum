@@ -650,7 +650,7 @@ pub mod constants {
     pub const ALL_PERMISSIONS: &str = "*:*:*";
 
     /// 密码加盐密钥
-    pub const PASSWORD_SALT: &str = "yebot_admin";
+    pub const PASSWORD_SALT: &str = "stepby_admin";
 }
 ```
 
@@ -901,7 +901,7 @@ git commit -m "feat: 添加 JWT 工具 Claims 与 token 生成/验证"
 use md5::{Digest, Md5};
 use crate::common::constants::constants::PASSWORD_SALT;
 
-/// 密码加盐 MD5（盐值 "yebot_admin"，不兼容旧密码）
+/// 密码加盐 MD5（盐值 "stepby_admin"，不兼容旧密码）
 pub fn encrypt_password(password: &str) -> String {
     let salted = format!("{}{}", password, PASSWORD_SALT);
     let mut hasher = Md5::new();

@@ -1049,7 +1049,7 @@ impl SysOauthService {
         // github 需要 User-Agent + Accept
         if provider.provider_code == "github" {
             req = req
-                .header("User-Agent", "yebot-oauth")
+                .header("User-Agent", "stepby-oauth")
                 .header("Accept", "application/vnd.github+json");
         }
         let resp = req.send().await.map_err(|e| {

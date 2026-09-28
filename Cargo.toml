@@ -181,7 +181,7 @@ passkey-server = { version = "0.1.4", features = ["send"] }
 # 邮件发送（SMTP）
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
-# 前端静态资源嵌入（编译时将 yebot-ui/dist 嵌入到二进制，发布单可执行文件）
+# 前端静态资源嵌入（编译时将 stepby-ui/dist 嵌入到二进制，发布单可执行文件）
 # 通过 #[derive(RustEmbed)] 派生 Embed trait，运行时通过 EmbeddedAssets::get(path) 读取
 rust-embed = { version = "8", features = ["mime-guess"] }
 

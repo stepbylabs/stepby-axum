@@ -30,7 +30,7 @@
 > 数据库支持 MySQL、PostgreSQL 和 SQLite 三种类型，通过 `DATABASE_URL` 协议前缀自动识别：
 > - MySQL：`mysql://user:password@host:3306/database`
 > - PostgreSQL：`postgres://user:password@host:5432/database`
-> - SQLite：`sqlite://./data/yebot.db?mode=rwc`（适合开发/测试环境）
+> - SQLite：`sqlite://./data/stepby.db?mode=rwc`（适合开发/测试环境）
 
 **硬件建议（生产环境）**
 
@@ -59,15 +59,15 @@ sudo mysql -u root -p
 ```
 
 ```sql
-CREATE DATABASE yebot CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'yebot'@'%' IDENTIFIED BY 'your_strong_password';
-GRANT ALL PRIVILEGES ON yebot.* TO 'yebot'@'%';
+CREATE DATABASE stepby CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'stepby'@'%' IDENTIFIED BY 'your_strong_password';
+GRANT ALL PRIVILEGES ON stepby.* TO 'stepby'@'%';
 FLUSH PRIVILEGES;
 ```
 
 **PostgreSQL 替代方案**
 
-如使用 PostgreSQL，连接串改为 `postgres://yebot:password@127.0.0.1:5432/yebot`：
+如使用 PostgreSQL，连接串改为 `postgres://stepby:password@127.0.0.1:5432/stepby`：
 
 ```bash
 sudo apt install postgresql postgresql-contrib
@@ -78,14 +78,14 @@ sudo -u postgres psql
 ```
 
 ```sql
-CREATE DATABASE yebot;
-CREATE USER yebot WITH PASSWORD 'your_strong_password';
-GRANT ALL PRIVILEGES ON DATABASE yebot TO yebot;
+CREATE DATABASE stepby;
+CREATE USER stepby WITH PASSWORD 'your_strong_password';
+GRANT ALL PRIVILEGES ON DATABASE stepby TO stepby;
 ```
 
 **SQLite 替代方案（开发/测试环境）**
 
-SQLite 无需独立服务，连接串使用 `sqlite://./data/yebot.db?mode=rwc`，数据库文件自动创建于 `data/` 目录下。
+SQLite 无需独立服务，连接串使用 `sqlite://./data/stepby.db?mode=rwc`，数据库文件自动创建于 `data/` 目录下。
 
 ### 2.2 Redis 7.0
 
@@ -133,8 +133,8 @@ cargo --version
 ### 3.2 克隆代码
 
 ```bash
-git clone <your-repo-url> yebot
-cd yebot/axum-backend
+git clone <your-repo-url> stepby
+cd stepby/axum-backend
 ```
 
 ### 3.3 编译构建
@@ -163,7 +163,7 @@ Release 构建启用了以下优化（见 `Cargo.toml` `[profile.release]`）：
 
 ```bash
 # 设置数据库连接串
-export DATABASE_URL="mysql://yebot:your_password@127.0.0.1:3306/yebot"
+export DATABASE_URL="mysql://stepby:your_password@127.0.0.1:3306/stepby"
 
 # 执行迁移（创建 17 张系统表 + 索引 + 初始数据）
 cd migration
@@ -206,7 +206,7 @@ trusted_proxies = ["127.0.0.1"]
 docs_enabled = false
 
 [database]
-url = "mysql://yebot:password@127.0.0.1:3306/yebot"
+url = "mysql://stepby:password@127.0.0.1:3306/stepby"
 max_connections = 10
 min_connections = 1
 connect_timeout = 10
@@ -219,7 +219,7 @@ max_connections = 10
 [jwt]
 secret = "your_strong_secret_at_least_32_characters_long"
 expire_hours = 24
-issuer = "yebot"
+issuer = "stepby"
 
 [log]
 level = "info"
@@ -262,7 +262,7 @@ mmdb_path = "data/GeoLite2-City.mmdb"
 在项目根目录创建 `.env` 文件（已被 `.gitignore` 排除）：
 
 ```env
-DATABASE_URL=mysql://yebot:password@127.0.0.1:3306/yebot
+DATABASE_URL=mysql://stepby:password@127.0.0.1:3306/stepby
 REDIS_URL=redis://:password@127.0.0.1:6379/0
 JWT_SECRET=your_strong_secret_at_least_32_characters_long
 ```
@@ -324,7 +324,7 @@ curl -L -o data/GeoLite2-City.mmdb \
 
 ```bash
 # 设置环境变量（或通过 .env 文件）
-export DATABASE_URL="mysql://yebot:password@127.0.0.1:3306/yebot"
+export DATABASE_URL="mysql://stepby:password@127.0.0.1:3306/stepby"
 export REDIS_URL="redis://:password@127.0.0.1:6379/0"
 export JWT_SECRET="your_strong_secret_at_least_32_characters_long"
 
@@ -339,7 +339,7 @@ export JWT_SECRET="your_strong_secret_at_least_32_characters_long"
 
 ### 7.2 Systemd 服务
 
-创建 `/etc/systemd/system/yebot.service`：
+创建 `/etc/systemd/system/stepby.service`：
 
 ```ini
 [Unit]
@@ -348,11 +348,11 @@ After=network.target mysql.service redis-server.service
 
 [Service]
 Type=simple
-User=yebot
-Group=yebot
-WorkingDirectory=/opt/yebot
-EnvironmentFile=/opt/yebot/.env
-ExecStart=/opt/yebot/axum-backend
+User=stepby
+Group=stepby
+WorkingDirectory=/opt/stepby
+EnvironmentFile=/opt/stepby/.env
+ExecStart=/opt/stepby/axum-backend
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -364,11 +364,11 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable yebot
-sudo systemctl start yebot
+sudo systemctl enable stepby
+sudo systemctl start stepby
 
 # 查看日志
-sudo journalctl -u yebot -f
+sudo journalctl -u stepby -f
 ```
 
 ### 7.3 健康检查
@@ -397,7 +397,7 @@ server {
 
     # 前端静态资源
     location / {
-        root /opt/yebot/frontend/dist;
+        root /opt/stepby/frontend/dist;
         try_files $uri $uri/ /index.html;
     }
 
@@ -489,7 +489,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - DATABASE_URL=mysql://yebot:password@db:3306/yebot
+      - DATABASE_URL=mysql://stepby:password@db:3306/stepby
       - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET=your_strong_secret_at_least_32_characters_long
     depends_on:
@@ -502,8 +502,8 @@ services:
   db:
     image: mysql:8.0
     environment:
-      - MYSQL_DATABASE=yebot
-      - MYSQL_USER=yebot
+      - MYSQL_DATABASE=stepby
+      - MYSQL_USER=stepby
       - MYSQL_PASSWORD=password
       - MYSQL_ROOT_PASSWORD=root_password
     volumes:
@@ -540,7 +540,7 @@ docker-compose up -d
 - [ ] `docs_enabled = false`（关闭 Swagger UI）
 - [ ] `sql_logging = false`（关闭 SQL 日志）
 - [ ] `trusted_proxies` 配置为反向代理真实 IP（**多租户域名链路前置**，见 `deploy/README.md §7.1`）
-- [ ] MySQL 用户仅授权 `yebot.*` 数据库
+- [ ] MySQL 用户仅授权 `stepby.*` 数据库
 - [ ] Redis 已设置密码并禁用危险命令
 
 ### 数据
@@ -610,10 +610,10 @@ Redis 连接异常，登录限流和黑名单校验采用 fail-closed 策略。�
 
 ```bash
 # Systemd 日志
-sudo journalctl -u yebot -f --since "1 hour ago"
+sudo journalctl -u stepby -f --since "1 hour ago"
 
 # 按级别过滤
-sudo journalctl -u yebot -p err
+sudo journalctl -u stepby -p err
 
 # Docker 日志
 docker-compose logs -f backend

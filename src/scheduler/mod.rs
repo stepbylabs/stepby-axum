@@ -1449,10 +1449,10 @@ fn register_builtin_tasks(db: DatabaseConnection) {
         }),
     );
 
-    // demoTask.demoMultipleParams('yebot', true, 2000L, 316.5F, 100) — 多参数示例任务
+    // demoTask.demoMultipleParams('stepby', true, 2000L, 316.5F, 100) — 多参数示例任务
     // 演示多类型参数（字符串/布尔/长整型/浮点/整型）的任务调用形式
     registry::register_task(
-        "demoTask.demoMultipleParams('yebot', true, 2000L, 316.5F, 100)",
+        "demoTask.demoMultipleParams('stepby', true, 2000L, 316.5F, 100)",
         Arc::new(|| {
             Box::pin(async {
                 tracing::info!("demoTask.demoMultipleParams 示例任务触发（多类型参数）");
@@ -1708,7 +1708,7 @@ mod tests {
         for expected in [
             "demoTask.demoNoParams",
             "demoTask.demoParams('demo')",
-            "demoTask.demoMultipleParams('yebot', true, 2000L, 316.5F, 100)",
+            "demoTask.demoMultipleParams('stepby', true, 2000L, 316.5F, 100)",
             "cleanup_expired_logs",
         ] {
             assert!(

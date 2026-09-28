@@ -1,7 +1,7 @@
 // axum-backend/src/utils/dns_txt.rs
 //! DNS TXT 记录解析（多租户 Phase 3 域名绑定：自定义域名 DNS TXT 验证）
 //!
-//! 用途：查询 `_yebot-verify.{domain}` 的 TXT 记录，比对平台下发的 `verify_token`，
+//! 用途：查询 `_stepby-verify.{domain}` 的 TXT 记录，比对平台下发的 `verify_token`，
 //! 从而证明申请人对该域名拥有控制权（子域名由平台分配，走免验证分支，不经本模块）。
 //!
 //! 设计约束（**不新增第三方 DNS 依赖**）：
@@ -386,15 +386,15 @@ mod tests {
 
     #[test]
     fn test_build_query_encodes_labels_and_qtype_txt() {
-        let q = build_query("_yebot-verify.example.com", 0x1234);
+        let q = build_query("_stepby-verify.example.com", 0x1234);
         // header：id=0x1234, flags=0x0100, qd=1, an=0, ns=0, ar=0
         assert_eq!(&q[0..2], &[0x12, 0x34]);
         assert_eq!(&q[2..4], &[0x01, 0x00]);
         assert_eq!(&q[4..6], &[0x00, 0x01]);
         assert_eq!(&q[6..12], &[0, 0, 0, 0, 0, 0]);
-        // 首标签 "_yebot-verify"（13 字节）
-        assert_eq!(q[12], 13);
-        assert_eq!(&q[13..26], b"_yebot-verify");
+        // 首标签 "_stepby-verify"（14 字节）
+        assert_eq!(q[12], 14);
+        assert_eq!(&q[13..27], b"_stepby-verify");
         // 名称以 0 结束，随后 QTYPE=16 / QCLASS=1
         let qtype_pos = q.len() - 4;
         assert_eq!(q[qtype_pos - 1], 0, "名称须以 root label 结束");

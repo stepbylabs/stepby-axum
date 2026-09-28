@@ -355,7 +355,7 @@ impl SysNoticeService {
         );
 
         // P3：邮件主题前缀按请求 locale 双语（notice 发送在请求作用域内）
-        let subject_prefix = crate::common::i18n::pick("【yebot 通知】", "[yebot Notice] ");
+        let subject_prefix = crate::common::i18n::pick("【stepby 通知】", "[stepby Notice] ");
         let subject = format!("{}{}", subject_prefix, title);
         match state
             .mailer_service

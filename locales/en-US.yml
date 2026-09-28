@@ -704,7 +704,7 @@ notice:
     title: "Login Anomaly Alert - IP %{ip}"
     content: "IP %{ip} failed login %{count} times within the last %{minutes} minutes, suspected credential stuffing attack, please investigate."
   email:
-    footer: "This email is automatically sent by the yebot system. Please do not reply."
+    footer: "This email is automatically sent by the stepby system. Please do not reply."
 
 # WebSocket system messages (connection success prompt, etc.)
 websocket:

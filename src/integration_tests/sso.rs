@@ -2125,7 +2125,7 @@ async fn test_tenant_revoke_rt_sweep_is_not_truncated() {
 /// ③ `GET /sso/client-logo/{clientId}` ⇒ **404**（先用真实客户端排除"因客户端不存在而 404"的假象）。
 ///
 /// 开启态的正路径（内省 `active`、审计日志、logo 反代）需改 `config.toml` 并重启，
-/// 单轮 e2e 无法完成 ⇒ 配方见 `yebot-ui/tests/e2e/RUN-RECIPE.md §3.18(2)`。
+/// 单轮 e2e 无法完成 ⇒ 配方见 `stepby-ui/tests/e2e/RUN-RECIPE.md §3.18(2)`。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sso_batch4_optional_switches_are_absent_when_off() {
     let ctx = sso_ctx().await;

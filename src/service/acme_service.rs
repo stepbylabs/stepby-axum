@@ -23,7 +23,7 @@
 //!
 //! - 默认 `off` ⇒ 本模块**一个字节都不发**（`effective_webhook()` 为 `None` 时直接返回）；
 //! - 推送 fire-and-forget：失败只 `WARN`，**绝不影响**域名绑定/验证业务本身；
-//! - 可选 HMAC-SHA256 签名（`X-Yebot-Signature: sha256=<hex>`）供接收端验签。
+//! - 可选 HMAC-SHA256 签名（`X-Stepby-Signature: sha256=<hex>`）供接收端验签。
 
 use chrono::NaiveDateTime;
 
@@ -35,7 +35,7 @@ pub const EVENT_CERT_ISSUE: &str = "cert.issue";
 pub const EVENT_CERT_REMOVE: &str = "cert.remove";
 
 /// 载荷来源标识（接收端可据此区分多实例/多环境）
-const PAYLOAD_SOURCE: &str = "yebot";
+const PAYLOAD_SOURCE: &str = "stepby";
 
 /// 构造证书需求事件载荷（**纯函数**，便于单测与契约冻结）。
 ///
@@ -126,10 +126,10 @@ pub fn spawn_emit(
         let mut req = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("X-Yebot-Event", event)
+            .header("X-Stepby-Event", event)
             .body(bytes.clone());
         if let Some(secret) = secret.as_deref().filter(|s| !s.is_empty()) {
-            req = req.header("X-Yebot-Signature", format!("sha256={}", sign(secret, &bytes)));
+            req = req.header("X-Stepby-Signature", format!("sha256={}", sign(secret, &bytes)));
         }
         let sent_ok = match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -242,7 +242,7 @@ mod tests {
             "1",
             ts,
         );
-        assert_eq!(p["source"], "yebot");
+        assert_eq!(p["source"], "stepby");
         assert_eq!(p["event"], "cert.issue");
         assert_eq!(p["host"], "shop.example.com");
         assert_eq!(p["tenantId"], 12);

@@ -352,7 +352,7 @@ fn render_report_html(report: &SysReportModel, snapshot: &Value) -> String {
     format!(
         "<div style=\"font-family: Arial, sans-serif; line-height: 1.6;\">\
         <h3>{}</h3><p>类型：{}　生成时间：{}</p><pre style=\"background:#f5f5f5;padding:12px;\">{}</pre>\
-        <p style=\"color:#999;font-size:12px;\">此邮件由 yebot 系统自动发送，请勿直接回复。</p></div>",
+        <p style=\"color:#999;font-size:12px;\">此邮件由 stepby 系统自动发送，请勿直接回复。</p></div>",
         report.report_name, report.report_type, generated, body
     )
 }

@@ -83,8 +83,8 @@
 
 ## 4. 密码安全验收
 
-- [ ] 盐值为 `"yebot_admin"`（非 `"salvo_admin"`）
-- [ ] migration 初始用户密码使用新盐值生成（admin123 + yebot_admin）
+- [ ] 盐值为 `"stepby_admin"`（非 `"salvo_admin"`）
+- [ ] migration 初始用户密码使用新盐值生成（admin123 + stepby_admin）
 - [ ] 新增用户：明文密码经 `encrypt_password` 加密后入库
 - [ ] 重置密码：明文密码经 `encrypt_password` 加密后入库
 - [ ] 个人改密：`verify_password` 校验旧密码

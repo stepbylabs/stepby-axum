@@ -19,7 +19,7 @@
 //! - 若把"租户操作者"误判为平台（`operator_tid == 0` 写成 `>= 0`），同样变红。
 //! - 平台操作者断言提供**反向对照**：改造不得把平台侧一并锁死。
 //!
-//! 命名空间隔离：租户 9060、域名 `it-1c-*.yebot.test`，避免与其它用例冲突。
+//! 命名空间隔离：租户 9060、域名 `it-1c-*.stepby.test`，避免与其它用例冲突。
 
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 
@@ -78,7 +78,7 @@ async fn test_domain_self_service_denied_for_tenant_by_default() {
         .add(
             TenantDomainAddDto {
                 tenant_id: TID,
-                domain: "it-1c-add.yebot.test".to_string(),
+                domain: "it-1c-add.stepby.test".to_string(),
                 domain_type: "1".to_string(),
                 is_primary: None,
                 remark: None,
@@ -181,7 +181,7 @@ async fn test_domain_self_service_menu_registered_but_ungranted_by_default() {
 async fn test_domain_platform_operator_unaffected_by_capability() {
     let ctx = TestContext::new().await;
     let db = &ctx.state.db;
-    let domain_id = insert_domain(db, "it-1c-platform.yebot.test", TID).await;
+    let domain_id = insert_domain(db, "it-1c-platform.stepby.test", TID).await;
     assert!(domain_id > 0, "自增主键应回填");
 
     let svc: &SysTenantDomainService = &ctx.state.tenant_domain_service;

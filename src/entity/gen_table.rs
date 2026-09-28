@@ -29,7 +29,7 @@ pub struct Model {
     pub tpl_category: Option<String>,
     /// 前端模板类型（element-plus）
     pub tpl_web_type: Option<String>,
-    /// 生成包路径（如 com.yebot.system）
+    /// 生成包路径（如 com.stepby.system）
     pub package_name: Option<String>,
     /// 生成模块名（如 system）
     pub module_name: Option<String>,

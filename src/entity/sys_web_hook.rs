@@ -2,7 +2,7 @@
 //!
 //! event_types: 逗号分隔的事件类型（如 "login,report_pushed,user.created"），空串表示匹配全部
 //! target_url:  出站投递目标 URL（http/https，经 SSRF 校验放行）
-//! secret:      签名密钥（非空时出站请求携带 `X-Yebot-Signature: sha256=<hmac>` 供接收方验签）
+//! secret:      签名密钥（非空时出站请求携带 `X-Stepby-Signature: sha256=<hmac>` 供接收方验签）
 //! content_type: json（默认）/ form-urlencoded
 //! status:       "0"=启用 "1"=停用
 

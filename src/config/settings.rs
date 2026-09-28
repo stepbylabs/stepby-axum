@@ -402,7 +402,7 @@ impl TenantFilterMode {
 /// - `mode = webhook` 但 `webhook_url` 缺失/非 http(s) ⇒ 启动 **WARN** 且视为 `off`
 ///   （不静默：运维能从日志看出"配了但没生效"）；
 /// - 推送为 fire-and-forget，失败只打 WARN，**绝不影响**域名绑定/验证业务本身；
-/// - `secret` 设置后请求带 `X-Yebot-Signature: sha256=<hmac>`，供接收端验签。
+/// - `secret` 设置后请求带 `X-Stepby-Signature: sha256=<hmac>`，供接收端验签。
 #[derive(Clone, Deserialize)]
 pub struct AcmeConfig {
     /// `off`（默认，不发请求）| `webhook`（推送证书需求事件到 `webhook_url`）
@@ -533,7 +533,7 @@ fn default_acme_timeout_secs() -> u64 {
 ///   与改造前逐字节等价；
 /// - `outbound = webhook` 但地址缺失/非 http(s) ⇒ 启动 **WARN**（拒绝静默失效）；
 /// - 推送 fire-and-forget：失败只 `WARN`，**绝不影响**业务事务本身；
-/// - 可选 HMAC-SHA256 签名（`X-Yebot-Signature: sha256=<hex>`）供接收端验签。
+/// - 可选 HMAC-SHA256 签名（`X-Stepby-Signature: sha256=<hex>`）供接收端验签。
 #[derive(Clone, Deserialize)]
 pub struct EventsConfig {
     /// `off`（默认，不发请求）| `webhook`（把领域事件推到 `webhook_url`）
@@ -1017,7 +1017,7 @@ pub const UPLOAD_SCAN_TIMEOUT_MAX_SECS: u64 = 60;
 /// # 请求/响应对照表（集成契约）
 ///
 /// 请求：`POST <url>`，`Content-Type: application/octet-stream`，body = 文件原始字节；
-/// 请求头 `X-Yebot-Filename: <URL 编码后的文件名>`（避免头注入），
+/// 请求头 `X-Stepby-Filename: <URL 编码后的文件名>`（避免头注入），
 /// `token` 非空时附 `Authorization: Bearer <token>`。
 ///
 /// 响应：HTTP 2xx + JSON `{"clean": true|false, "detail": "可选说明"}`。
@@ -1108,7 +1108,7 @@ pub struct WebauthnConfig {
     /// `[server].cors_origins` 首个来源的 host 推导注册域。
     #[serde(default)]
     pub rp_id: String,
-    /// 依赖方显示名（浏览器 passkey 提示中展示）。默认 `Yebot`。
+    /// 依赖方显示名（浏览器 passkey 提示中展示）。默认 `Stepby`。
     #[serde(default = "default_webauthn_rp_name")]
     pub rp_name: String,
     /// 期望来源（如 `https://example.com`，**含 scheme**）。留空 ⇒ 取
@@ -1186,7 +1186,7 @@ pub struct ResolvedWebauthn {
 }
 
 fn default_webauthn_rp_name() -> String {
-    "Yebot".to_string()
+    "Stepby".to_string()
 }
 
 fn default_webauthn_state_ttl_secs() -> u64 {
@@ -1735,7 +1735,7 @@ pub struct JwtConfig {
     pub expire_hours: i64,
     pub issuer: String,
     /// JWT 受众（aud claim），用于防止 token 跨服务复用（SEC-001）
-    /// 默认 "yebot"，生产环境应通过配置显式指定
+    /// 默认 "stepby"，生产环境应通过配置显式指定
     #[serde(default = "default_jwt_audience")]
     pub audience: String,
     /// **密钥轮换过渡期**：旧签名密钥（仅用于**验签回退**，永不用于签发）。
@@ -2182,7 +2182,7 @@ fn default_mail_port() -> u16 {
 }
 
 fn default_mail_from_name() -> String {
-    "yebot System".to_string()
+    "stepby System".to_string()
 }
 
 fn default_mail_starttls() -> bool {
@@ -2195,7 +2195,7 @@ fn default_docs_enabled() -> bool {
 }
 
 fn default_jwt_audience() -> String {
-    "yebot".to_string()
+    "stepby".to_string()
 }
 
 impl Settings {
@@ -2441,8 +2441,8 @@ impl Settings {
             jwt: JwtConfig {
                 secret: jwt_secret,
                 expire_hours: jwt_expire_hours,
-                issuer: "yebot".to_string(),
-                audience: "yebot".to_string(),
+                issuer: "stepby".to_string(),
+                audience: "stepby".to_string(),
                 previous_secrets: vec![],
             },
             log: LogConfig {
@@ -2481,13 +2481,13 @@ impl Settings {
     /// 启动时直接报错拒绝，防止生产环境使用不安全配置。
     fn validate_secrets(&self) -> anyhow::Result<()> {
         // B10：显式拒绝弱/占位密钥（大小写不敏感 deny-list），覆盖 CHANGE_ME（旧逻辑）、
-        // 测试前缀 yebot_local_test_*、example/password/test_ 等常见弱密钥模式。
+        // 测试前缀 stepby_local_test_*、example/password/test_ 等常见弱密钥模式。
         // 使用 deny-list 而非激进熵评分，避免误杀合法开发密钥（向后兼容）。
         let weak_patterns: &[&str] = &[
             "changeme",
             "change_me",
             "test_",
-            "yebot_local_test_",
+            "stepby_local_test_",
             "example",
             "password",
         ];
@@ -2611,8 +2611,8 @@ mod tests {
             jwt: JwtConfig {
                 secret: "placeholder-strong-secret-0123456789abcdef".to_string(),
                 expire_hours: 24,
-                issuer: "yebot".to_string(),
-                audience: "yebot".to_string(),
+                issuer: "stepby".to_string(),
+                audience: "stepby".to_string(),
                 previous_secrets: vec![],
             },
             log: LogConfig {
@@ -2974,8 +2974,8 @@ mod tests {
             jwt: JwtConfig {
                 secret: "a-very-long-jwt-secret-key-for-testing-32+chars".to_string(),
                 expire_hours: 24,
-                issuer: "yebot".to_string(),
-                audience: "yebot".to_string(),
+                issuer: "stepby".to_string(),
+                audience: "stepby".to_string(),
                 previous_secrets: vec![],
             },
             log: LogConfig {
@@ -3045,7 +3045,7 @@ mod tests {
     #[test]
     fn test_database_config_debug_redacts_url() {
         let db_config = DatabaseConfig {
-            url: "mysql://root:password123@localhost:3306/yebot".to_string(),
+            url: "mysql://root:password123@localhost:3306/stepby".to_string(),
             max_connections: 20,
             min_connections: 5,
             connect_timeout: 8,
@@ -3111,8 +3111,8 @@ mod tests {
         let jwt_config = JwtConfig {
             secret: "my-super-secret-jwt-key-1234567890123456".to_string(),
             expire_hours: 24,
-            issuer: "yebot".to_string(),
-            audience: "yebot".to_string(),
+            issuer: "stepby".to_string(),
+            audience: "stepby".to_string(),
             previous_secrets: vec![],
         };
         let debug_str = format!("{:?}", jwt_config);
@@ -3166,9 +3166,9 @@ mod tests {
         s.jwt.secret = "a-valid-strong-jwt-secret-key-0123456789abcdef".to_string();
         assert!(s.validate_secrets().is_ok(), "合法强密钥应被接受");
 
-        // 测试前缀 yebot_local_test_* 应被拒
+        // 测试前缀 stepby_local_test_* 应被拒
         let mut s2 = make_test_settings();
-        s2.jwt.secret = "yebot_local_test_abc1234567890123456789".to_string();
+        s2.jwt.secret = "stepby_local_test_abc1234567890123456789".to_string();
         assert!(s2.validate_secrets().is_err(), "测试前缀密钥应被拒绝");
 
         // CHANGE_ME 占位（大小写不敏感）应被拒

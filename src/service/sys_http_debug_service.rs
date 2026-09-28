@@ -126,7 +126,7 @@ impl SysHttpDebugService {
                 .redirect(reqwest::redirect::Policy::none())
                 // 连接被拒等快速失败；TLS 校验默认开启（rustls）
                 .connect_timeout(Duration::from_secs(10))
-                .user_agent("yebot-http-debugger/1.0")
+                .user_agent("stepby-http-debugger/1.0")
                 .build()
                 .expect("reqwest client 初始化失败"),
         }

@@ -1,6 +1,6 @@
-# Yebot Axum Backend
+# Stepby Axum Backend
 
-Yebot 系统的后端服务，基于 **Rust (Axum + SeaORM + Redis)** 构建，为 Yebot 管理系统提供完整的 RESTful API 与实时能力。整体介绍与前端入口请见[根仓库 README](../README.md)。
+Stepby 系统的后端服务，基于 **Rust (Axum + SeaORM + Redis)** 构建，为 Stepby 管理系统提供完整的 RESTful API 与实时能力。整体介绍与前端入口请见[根仓库 README](../README.md)。
 
 ## 核心能力
 
@@ -47,4 +47,4 @@ python scripts/e2e_sso_oidc.py                   # 终端 2（--base 可指定�
 
 ## License
 
-[MIT](LICENSE)，Copyright (c) 2024-2026 Yebot。
+[MIT](LICENSE)，Copyright (c) 2024-2026 Stepby。

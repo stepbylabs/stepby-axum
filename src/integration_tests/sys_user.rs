@@ -79,10 +79,10 @@ async fn test_user_crud_chain() {
                 "deptId": 103,
                 "userName": "it_crud_user",
                 "nickName": "集成测试用户",
-                "email": "it.crud@yebot.dev",
+                "email": "stepby@tzkj.net",
                 "phonenumber": "13800001111",
                 "sex": "0",
-                "password": "Yebot@12345",
+                "password": "Stepby@12345",
                 "status": "0",
                 "postIds": [1],
                 "roleIds": [2]
@@ -164,9 +164,9 @@ async fn test_user_role_assign_chain() {
                 "deptId": 103,
                 "userName": "it_role_user",
                 "nickName": "角色分配测试",
-                "email": "it.role@yebot.dev",
+                "email": "stepby@tzkj.net",
                 "phonenumber": "13800002222",
-                "password": "Yebot@12345",
+                "password": "Stepby@12345",
                 "status": "0"
             }),
         )
@@ -230,8 +230,8 @@ async fn test_profile_and_password_chain() {
         .put_json(
             "/system/user/profile",
             serde_json::json!({
-                "nickName": "Yebot管理员改",
-                "email": "admin@yebot.dev",
+                "nickName": "Stepby管理员改",
+                "email": "stepby@tzkj.net",
                 "sex": "1"
             }),
         )
@@ -302,9 +302,9 @@ async fn test_admin_reset_pwd_invalidates_token() {
                 "deptId": 103,
                 "userName": "it_reset_pwd_user",
                 "nickName": "重置密码目标",
-                "email": "it.reset@yebot.dev",
+                "email": "stepby@tzkj.net",
                 "phonenumber": "13800003333",
-                "password": "Yebot@12345",
+                "password": "Stepby@12345",
                 "status": "0",
                 "roleIds": [2]
             }),
@@ -321,7 +321,7 @@ async fn test_admin_reset_pwd_invalidates_token() {
 
     // 2. 目标用户自行登录，拿到 token A
     let user_peer = super::next_peer_ip();
-    let token_a = super::login(&ctx.app, user_peer, "it_reset_pwd_user", "Yebot@12345").await;
+    let token_a = super::login(&ctx.app, user_peer, "it_reset_pwd_user", "Stepby@12345").await;
     let status_a = ctx
         .send_raw(
             axum::http::Request::builder()
@@ -402,9 +402,9 @@ async fn test_disable_enable_invalidates_token() {
                 "deptId": 103,
                 "userName": "it_disable_user",
                 "nickName": "停用目标",
-                "email": "it.disable@yebot.dev",
+                "email": "stepby@tzkj.net",
                 "phonenumber": "13800004444",
-                "password": "Yebot@12345",
+                "password": "Stepby@12345",
                 "status": "0",
                 "roleIds": [2]
             }),
@@ -421,7 +421,7 @@ async fn test_disable_enable_invalidates_token() {
 
     // 2. 目标用户自行登录，拿到 token A
     let user_peer = super::next_peer_ip();
-    let token_a = super::login(&ctx.app, user_peer, "it_disable_user", "Yebot@12345").await;
+    let token_a = super::login(&ctx.app, user_peer, "it_disable_user", "Stepby@12345").await;
 
     // 3. 管理员停用用户
     let v = ctx
@@ -476,7 +476,7 @@ async fn test_disable_enable_invalidates_token() {
     );
 
     // 7. 重新登录 → 新 token 可用
-    let token_b = super::login(&ctx.app, user_peer, "it_disable_user", "Yebot@12345").await;
+    let token_b = super::login(&ctx.app, user_peer, "it_disable_user", "Stepby@12345").await;
     let (status, _) = ctx
         .send_raw(
             axum::http::Request::builder()

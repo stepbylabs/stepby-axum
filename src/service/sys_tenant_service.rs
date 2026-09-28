@@ -64,7 +64,7 @@ use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::service::sso_service::RefreshBinding;
 
-/// 平台组织种子部门 ID（m20250711 init 种子"Yebot科技"）：
+/// 平台组织种子部门 ID（m20250711 init 种子"Stepby科技"）：
 /// 其下用户与部门 `tenant_id = 0`（平台租户），**仅为组织种子、不再承担租户身份**
 /// （§27.1 决策 5：`dept_id = 100` 降级，删除 `ensure_not_platform_root` 一类特判）。
 pub const PLATFORM_ROOT_DEPT_ID: i64 = 100;

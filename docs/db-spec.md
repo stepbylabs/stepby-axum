@@ -3,7 +3,7 @@
 > **阶段：** 第二阶段「系统核心数据库表结构设计」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **开发优先原则：** 接口契约对齐 stepby-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -739,10 +739,10 @@ impl ActiveModelBehavior for ActiveModel {}
 
 ```sql
 INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, create_by, create_time, remark)
-VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'bfb6b8dd9b268e241c82a257e235e550', '0', '0', 'admin', NOW(), '管理员');
+VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', 'admin', NOW(), '管理员');
 ```
 
-> **密码说明：** `admin123` + `yebot_admin` 盐值后 MD5 = `bfb6b8dd9b268e241c82a257e235e550`。盐值已从 `"salvo_admin"` 改为 `"yebot_admin"`，不兼容旧密码。
+> **密码说明：** `admin123` + `stepby_admin` 盐值后 MD5 = `ba976d23f6d1012cfe81ceb960a1058c`。盐值已从 `"salvo_admin"` 改为 `"stepby_admin"`，不兼容旧密码。
 
 ### 7.3 admin 角色初始数据
 

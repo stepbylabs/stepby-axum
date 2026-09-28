@@ -2,7 +2,7 @@
 //! 单点登录 / OIDC Provider（SSO server 角色）模块迁移
 //!
 //! 与 m20260819_000001_oauth_module（OAuth **客户端**：本系统作为第三方登录的消费方）
-//! 互补：本模块让 Yebot 充当**授权服务器**，向企业内部其它应用签发令牌。
+//! 互补：本模块让 Stepby 充当**授权服务器**，向企业内部其它应用签发令牌。
 //!
 //! 新增两张表（跨 sqlite/postgres/mysql 兼容，DCL 参考 m20260819_000001_oauth_module）：
 //!   1. sys_oauth_client   已注册 OAuth2/OIDC 客户端（应用）配置

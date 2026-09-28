@@ -433,7 +433,7 @@ impl IpLocationService {
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
-            .user_agent("yebot-backend/0.1")
+            .user_agent("stepby-backend/0.1")
             .build()?;
 
         let response = client
@@ -477,7 +477,7 @@ impl IpLocationService {
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
-            .user_agent("yebot-backend/0.1")
+            .user_agent("stepby-backend/0.1")
             .build()?;
 
         let response = client
