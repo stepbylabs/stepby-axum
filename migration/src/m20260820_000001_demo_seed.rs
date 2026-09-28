@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260820_000001_demo_seed.rs
+﻿// axum-backend/migration/src/m20260820_000001_demo_seed.rs
 //! 演示种子数据迁移（B 类演示种子）
 //!
 //! 目的：提供一套「开箱即用、可登录演示」的真实示例数据，方便在线 Demo / 本地体验，
@@ -88,7 +88,7 @@ impl MigrationTrait for Migration {
         for (id, dept_id, name, nick, sex) in users {
             let sql = format!(
                 "sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, login_ip, login_date, create_by, create_time, remark) VALUES \
-                 ({id}, {dept_id}, '{name}', '{nick}', '00', '{name}@stepby.tzkj.net', '18{sex}888888', '{sex}', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', '127.0.0.1', {now}, 'demo', {now}, '演示用户')"
+                 ({id}, {dept_id}, '{name}', '{nick}', '00', '{name}@tzkj.net', '18{sex}888888', '{sex}', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', '127.0.0.1', {now}, 'demo', {now}, '演示用户')"
             );
             execute_idempotent_insert(manager, &sql).await?;
         }
