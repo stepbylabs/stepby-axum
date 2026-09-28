@@ -1659,6 +1659,27 @@ pub struct DatabaseConfig {
     /// 超时返回错误（业务层转为 503），而非无限阻塞协程。
     #[serde(default = "default_db_acquire_timeout_secs")]
     pub acquire_timeout_secs: u64,
+    /// 语句级超时（秒，默认 60；**0 = 关闭**）
+    ///
+    /// R9-ERR-004：防止单条 SQL（报表/误操作全表查询）无限占用连接拖垮服务。
+    /// - PostgreSQL：连接参数 `statement_timeout`（覆盖全部语句）+
+    ///   `idle_in_transaction_session_timeout`（同值，防"开事务后挂起"泄漏）；
+    /// - MySQL：连接建立后 `SET SESSION max_execution_time`（⚠️ 仅覆盖 SELECT，
+    ///   写语句无服务端语句超时，属 MySQL 引擎限制）；
+    /// - SQLite：本地嵌入库无服务端语句超时概念，`busy_timeout=5s` 已兜底锁等待，
+    ///   本项对 SQLite 不生效。
+    ///
+    /// 报表类长查询请按需调大或关闭（0）。连接池初始化时快照到
+    /// [`crate::db::limits`]，仓库层零签名穿透读取。
+    #[serde(default = "default_db_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+    /// data_scope 部门递归 CTE 深度上限（默认 30）
+    ///
+    /// `find_descendant_ids` 的 `WITH RECURSIVE` 以 `depth < dept_cte_max_depth`
+    /// 纵深防御脏数据成环（PostgreSQL 递归 CTE 无内置上限，SQLite/MySQL 有）。
+    /// 写入侧另有防环校验（sys_dept_service），本值属第二道防线。
+    #[serde(default = "default_db_dept_cte_max_depth")]
+    pub dept_cte_max_depth: u32,
 }
 
 /// 手动实现 Debug 以脱敏 url（含数据库密码）
@@ -1672,6 +1693,8 @@ impl fmt::Debug for DatabaseConfig {
             .field("idle_timeout", &self.idle_timeout)
             .field("max_lifetime_secs", &self.max_lifetime_secs)
             .field("acquire_timeout_secs", &self.acquire_timeout_secs)
+            .field("statement_timeout_secs", &self.statement_timeout_secs)
+            .field("dept_cte_max_depth", &self.dept_cte_max_depth)
             .finish()
     }
 }
@@ -1682,6 +1705,14 @@ fn default_db_max_lifetime_secs() -> u64 {
 
 fn default_db_acquire_timeout_secs() -> u64 {
     10
+}
+
+fn default_db_statement_timeout_secs() -> u64 {
+    60
+}
+
+fn default_db_dept_cte_max_depth() -> u32 {
+    30
 }
 
 #[derive(Clone, Deserialize)]
@@ -2403,6 +2434,8 @@ impl Settings {
                 idle_timeout: 600,
                 max_lifetime_secs: 1800,
                 acquire_timeout_secs: 10,
+                statement_timeout_secs: 60,
+                dept_cte_max_depth: 30,
             },
             redis: RedisConfig { url: redis_url },
             jwt: JwtConfig {
@@ -2569,6 +2602,8 @@ mod tests {
                 idle_timeout: 600,
                 max_lifetime_secs: 1800,
                 acquire_timeout_secs: 10,
+                statement_timeout_secs: 60,
+                dept_cte_max_depth: 30,
             },
             redis: RedisConfig {
                 url: "redis://localhost:6379".to_string(),
@@ -2930,6 +2965,8 @@ mod tests {
                 idle_timeout: 600,
                 max_lifetime_secs: 1800,
                 acquire_timeout_secs: 10,
+                statement_timeout_secs: 60,
+                dept_cte_max_depth: 30,
             },
             redis: RedisConfig {
                 url: "redis://:redispass@host:6379".to_string(),
@@ -3015,6 +3052,8 @@ mod tests {
             idle_timeout: 600,
             max_lifetime_secs: 1800,
             acquire_timeout_secs: 10,
+            statement_timeout_secs: 60,
+            dept_cte_max_depth: 30,
         };
         let debug_str = format!("{:?}", db_config);
         assert!(

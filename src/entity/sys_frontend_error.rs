@@ -43,6 +43,8 @@ pub struct Model {
     pub page_url: Option<String>,
     /// User-Agent
     pub user_agent: Option<String>,
+    /// 设备类型分桶（FCP-011）：mobile / tablet / desktop（前端按 UA+视口推断；NULL = 旧数据/未上报）
+    pub device_type: Option<String>,
     /// 视口宽（px）
     pub view_width: Option<i32>,
     /// 视口高（px）

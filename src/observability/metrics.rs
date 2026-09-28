@@ -19,6 +19,15 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// 直方图采样桶边界（秒）。默认 [5ms,10,25,50,100,250,500,1000ms]。
 pub const DURATION_BUCKETS_S: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
 
+/// Web Vitals 直方图采样桶边界（秒）。边界对齐 perf-budget.json 运行时预算：
+/// FCP ≤ 1.8s、LCP ≤ 2.5s（prometheus histogram_quantile(0.95) 可直接与预算比对）。
+pub const VITAL_BUCKETS_S: &[f64] = &[0.1, 0.25, 0.5, 1.0, 1.8, 2.5, 4.0, 8.0];
+
+/// 时间型 vitals 白名单（CLS 是无量纲分数，走 gauge 单独承载）
+pub const VITAL_TIME_NAMES: &[&str] = &["LCP", "FCP", "INP", "TTFB"];
+/// 设备类型分桶白名单（FCP-011，与前端 frontendErrorReporter.detectDeviceType 对齐）
+pub const VITAL_DEVICES: &[&str] = &["mobile", "tablet", "desktop", "unknown"];
+
 /// 标签组（method + status + path）
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LabelSet {
@@ -34,7 +43,6 @@ struct DurationSeries {
     /// 长度 = BUCKET_COUNT，`buckets[i]` = 观测值 <= bounds[i] 的条数
     buckets: Vec<u64>,
 }
-
 impl Default for DurationSeries {
     fn default() -> Self {
         Self {
@@ -53,6 +61,27 @@ pub struct MetricsRegistry {
     /// v5-D7：SSO 事件计数（event, outcome）→ 次数（token_issued/token_refreshed/
     /// token_revoked/authorize/logout × ok/各错误码）
     sso_counters: RwLock<HashMap<(String, String), u64>>,
+    /// FCP-010：Web Vitals 时间型指标直方图（name ∈ LCP/FCP/INP/TTFB，device ∈ 分桶）
+    vitals: RwLock<HashMap<(String, String), VitalSeries>>,
+    /// FCP-010：CLS 最新累计值（无量纲分数；会话语义 = "当前页面累计偏移"，gauge 承载）
+    cls_gauges: RwLock<HashMap<String, f64>>,
+}
+
+/// Web Vitals 直方图系列（桶边界与 DurationSeries 不同，独立类型避免长度耦合）
+struct VitalSeries {
+    count: u64,
+    sum_secs: f64,
+    buckets: Vec<u64>,
+}
+
+impl VitalSeries {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            sum_secs: 0.0,
+            buckets: vec![0; VITAL_BUCKETS_S.len()],
+        }
+    }
 }
 
 impl Default for MetricsRegistry {
@@ -62,6 +91,8 @@ impl Default for MetricsRegistry {
             durations: RwLock::new(HashMap::new()),
             total_requests: AtomicU64::new(0),
             sso_counters: RwLock::new(HashMap::new()),
+            vitals: RwLock::new(HashMap::new()),
+            cls_gauges: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -126,6 +157,120 @@ impl MetricsRegistry {
         *counters
             .entry((event.to_string(), outcome.to_string()))
             .or_insert(0) += 1;
+    }
+
+    /// FCP-010：记录一次时间型 Web Vitals 观测（value 单位**秒**）。
+    ///
+    /// name 仅接受 LCP/FCP/INP/TTFB（白名单外忽略，防标签基数膨胀）；
+    /// device 仅接受 mobile/tablet/desktop（未知设备归入 unknown 分桶）。
+    /// 值域防御：非有限值或 <=0 忽略；>60s 记为 60s（防离群值撑爆存储）。
+    pub fn record_frontend_vital(&self, name: &str, device: &str, value_secs: f64) {
+        if !VITAL_TIME_NAMES.contains(&name) || !value_secs.is_finite() || value_secs <= 0.0 {
+            return;
+        }
+        let device = if VITAL_DEVICES.contains(&device) {
+            device
+        } else {
+            "unknown"
+        };
+        let clamped = value_secs.min(60.0);
+        let mut vitals = match self.vitals.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let series = vitals
+            .entry((name.to_string(), device.to_string()))
+            .or_insert_with(VitalSeries::new);
+        series.count += 1;
+        series.sum_secs += clamped;
+        for (i, bound) in VITAL_BUCKETS_S.iter().enumerate() {
+            if clamped <= *bound {
+                series.buckets[i] += 1;
+            }
+        }
+    }
+
+    /// FCP-010：更新 CLS 最新累计值（无量纲；按设备分桶取最新值）。
+    pub fn set_frontend_cls(&self, device: &str, value: f64) {
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+        let device = if VITAL_DEVICES.contains(&device) {
+            device
+        } else {
+            "unknown"
+        };
+        let mut gauges = match self.cls_gauges.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        gauges.insert(device.to_string(), value.min(100.0));
+    }
+
+    /// FCP-010：渲染 Web Vitals 指标（`yebot_frontend_vital_seconds` histogram +
+    /// `yebot_frontend_cls` gauge），供 Prometheus 前端性能退化告警消费。
+    fn render_vitals_prometheus(&self) -> String {
+        let mut s = String::new();
+        let vitals = match self.vitals.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        s.push_str(
+            "# HELP yebot_frontend_vital_seconds Web Vitals 时间型指标分布（秒，name,device）\n",
+        );
+        s.push_str("# TYPE yebot_frontend_vital_seconds histogram\n");
+        let mut keys: Vec<&(String, String)> = vitals.keys().collect();
+        keys.sort();
+        for key in &keys {
+            if let Some(series) = vitals.get(*key) {
+                let (name, device) = (*key).clone();
+                for (i, bound) in VITAL_BUCKETS_S.iter().enumerate() {
+                    s.push_str(&format!(
+                        "yebot_frontend_vital_seconds_bucket{{name=\"{}\",device=\"{}\",le=\"{}\"}} {}\n",
+                        escape_label(&name),
+                        escape_label(&device),
+                        bound,
+                        series.buckets[i]
+                    ));
+                }
+                s.push_str(&format!(
+                    "yebot_frontend_vital_seconds_bucket{{name=\"{}\",device=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape_label(&name),
+                    escape_label(&device),
+                    series.count
+                ));
+                s.push_str(&format!(
+                    "yebot_frontend_vital_seconds_sum{{name=\"{}\",device=\"{}\"}} {}\n",
+                    escape_label(&name),
+                    escape_label(&device),
+                    series.sum_secs
+                ));
+                s.push_str(&format!(
+                    "yebot_frontend_vital_seconds_count{{name=\"{}\",device=\"{}\"}} {}\n",
+                    escape_label(&name),
+                    escape_label(&device),
+                    series.count
+                ));
+            }
+        }
+        let gauges = match self.cls_gauges.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        s.push_str("# HELP yebot_frontend_cls 最新 CLS 累计值（无量纲，device 分桶）\n");
+        s.push_str("# TYPE yebot_frontend_cls gauge\n");
+        let mut devs: Vec<&String> = gauges.keys().collect();
+        devs.sort();
+        for dev in devs {
+            if let Some(v) = gauges.get(dev) {
+                s.push_str(&format!(
+                    "yebot_frontend_cls{{device=\"{}\"}} {}\n",
+                    escape_label(dev),
+                    v
+                ));
+            }
+        }
+        s
     }
 
     /// v5-D7：渲染 SSO 事件计数（`yebot_sso_events_total{event,outcome}`）
@@ -227,6 +372,8 @@ impl MetricsRegistry {
         }
         // v5-D7：SSO 协议事件计数
         s.push_str(&self.render_sso_prometheus());
+        // FCP-010：Web Vitals（前端性能退化告警数据源）
+        s.push_str(&self.render_vitals_prometheus());
         s
     }
 }
@@ -303,6 +450,34 @@ mod tests {
         assert!(text.contains("event=\"authorize\""));
         assert!(text.contains("event=\"token_revoked\""));
         assert!(text.contains("event=\"logout\""));
+    }
+
+    #[test]
+    fn test_frontend_vitals_rendering() {
+        // FCP-010：时间型 vitals 走直方图、CLS 走 gauge；白名单外 name/设备归一化
+        let reg = test_instance();
+        reg.record_frontend_vital("LCP", "mobile", 1.2);
+        reg.record_frontend_vital("LCP", "mobile", 0.5);
+        reg.record_frontend_vital("FCP", "desktop", 0.9);
+        reg.record_frontend_vital("LCP", "smart-tv", 3.0); // 非法设备 → unknown
+        reg.record_frontend_vital("XXX", "mobile", 1.0); // 非法指标 → 忽略
+        reg.record_frontend_vital("LCP", "mobile", -1.0); // 非法值 → 忽略
+        reg.set_frontend_cls("tablet", 0.03);
+        let text = reg.render_prometheus();
+        assert!(text.contains(
+            "yebot_frontend_vital_seconds_bucket{name=\"LCP\",device=\"mobile\",le=\"1.8\"} 2"
+        ));
+        assert!(text.contains(
+            "yebot_frontend_vital_seconds_bucket{name=\"LCP\",device=\"mobile\",le=\"+Inf\"} 2"
+        ));
+        assert!(text.contains(
+            "yebot_frontend_vital_seconds_bucket{name=\"FCP\",device=\"desktop\",le=\"1\"} 1"
+        ));
+        assert!(text.contains(
+            "yebot_frontend_vital_seconds_bucket{name=\"LCP\",device=\"unknown\",le=\"4\"} 1"
+        ));
+        assert!(!text.contains("name=\"XXX\""));
+        assert!(text.contains("yebot_frontend_cls{device=\"tablet\"} 0.03"));
     }
 
     #[test]

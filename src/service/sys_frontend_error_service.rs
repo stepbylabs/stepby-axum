@@ -44,6 +44,8 @@ const ALLOWED_SOURCES: &[&str] = &[
 ];
 /// 允许的级别集合（超出归一化为 info）
 const ALLOWED_LEVELS: &[&str] = &["error", "warning", "info"];
+/// 允许的设备类型集合（FCP-011 分桶；超出置 None，防枚举膨胀）
+const ALLOWED_DEVICE_TYPES: &[&str] = &["mobile", "tablet", "desktop"];
 
 // ==================== DTO ====================
 
@@ -63,6 +65,9 @@ pub struct FrontendErrorItem {
     pub page_url: Option<String>,
     #[serde(default)]
     pub user_agent: Option<String>,
+    /// 设备类型分桶（FCP-011）：mobile / tablet / desktop；非法值置 None
+    #[serde(default)]
+    pub device_type: Option<String>,
     #[serde(default)]
     pub view_width: Option<i32>,
     #[serde(default)]
@@ -89,6 +94,8 @@ pub struct FrontendErrorQueryDto {
     pub level: Option<String>,
     pub source: Option<String>,
     pub name: Option<String>,
+    /// 设备类型分桶筛选（FCP-011）：mobile / tablet / desktop
+    pub device_type: Option<String>,
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
     #[serde(alias = "params[endTime]", default)]
@@ -191,34 +198,56 @@ impl SysFrontendErrorService {
         }
         let models: Vec<FrontendErrorActiveModel> = items
             .into_iter()
-            .map(|it| FrontendErrorActiveModel {
-                level: Set(normalize_enum(
-                    &it.level,
-                    ALLOWED_LEVELS,
-                    "info",
-                    MAX_LEVEL_LEN,
-                )),
-                source: Set(normalize_enum(
-                    &it.source,
-                    ALLOWED_SOURCES,
-                    "other",
-                    MAX_SOURCE_LEN,
-                )),
-                name: Set(opt_truncate(&it.name, MAX_NAME_LEN)),
-                message: Set(opt_truncate(&it.message, MAX_MESSAGE_LEN)),
-                stack: Set(opt_truncate(&it.stack, MAX_STACK_LEN)),
-                page_url: Set(opt_truncate(&it.page_url, MAX_PAGE_URL_LEN)),
-                user_agent: Set(opt_truncate(&it.user_agent, MAX_USER_AGENT_LEN)),
-                view_width: Set(it.view_width),
-                view_height: Set(it.view_height),
-                value: Set(it.value),
-                user_name: Set(user_name.clone()),
-                // 多租户：上报记录归属上报者租户（平台 0），供列表/统计按租户收敛
-                tenant_id: Set(tenant_id),
-                // 批量 insert_many 不触发 ActiveModelBehavior::before_save，
-                // 故 create_time 必须在此显式写入，否则落库为 NULL 且破坏按天聚合统计。
-                create_time: Set(Some(crate::common::datetime::now_naive())),
-                ..Default::default()
+            .map(|it| {
+                // FCP-010：vitals 同步观察进 Prometheus 直方图/gauge（与落库同源），
+                // 供 yebot-frontend-vitals 告警组做 P95 退化检测
+                if it.source == "vital" {
+                    if let (Some(name), Some(value)) = (it.name.as_deref(), it.value) {
+                        let device = it.device_type.as_deref().unwrap_or("unknown");
+                        if name == "CLS" {
+                            crate::observability::metrics::MetricsRegistry::global()
+                                .set_frontend_cls(device, value);
+                        } else {
+                            crate::observability::metrics::MetricsRegistry::global()
+                                .record_frontend_vital(name, device, value / 1000.0);
+                        }
+                    }
+                }
+                FrontendErrorActiveModel {
+                    level: Set(normalize_enum(
+                        &it.level,
+                        ALLOWED_LEVELS,
+                        "info",
+                        MAX_LEVEL_LEN,
+                    )),
+                    source: Set(normalize_enum(
+                        &it.source,
+                        ALLOWED_SOURCES,
+                        "other",
+                        MAX_SOURCE_LEN,
+                    )),
+                    name: Set(opt_truncate(&it.name, MAX_NAME_LEN)),
+                    message: Set(opt_truncate(&it.message, MAX_MESSAGE_LEN)),
+                    stack: Set(opt_truncate(&it.stack, MAX_STACK_LEN)),
+                    page_url: Set(opt_truncate(&it.page_url, MAX_PAGE_URL_LEN)),
+                    user_agent: Set(opt_truncate(&it.user_agent, MAX_USER_AGENT_LEN)),
+                    device_type: Set(it
+                        .device_type
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| ALLOWED_DEVICE_TYPES.contains(&s))
+                        .map(str::to_string)),
+                    view_width: Set(it.view_width),
+                    view_height: Set(it.view_height),
+                    value: Set(it.value),
+                    user_name: Set(user_name.clone()),
+                    // 多租户：上报记录归属上报者租户（平台 0），供列表/统计按租户收敛
+                    tenant_id: Set(tenant_id),
+                    // 批量 insert_many 不触发 ActiveModelBehavior::before_save，
+                    // 故 create_time 必须在此显式写入，否则落库为 NULL 且破坏按天聚合统计。
+                    create_time: Set(Some(crate::common::datetime::now_naive())),
+                    ..Default::default()
+                }
             })
             .collect();
         let affected = self.repo.insert_many(models).await?;
@@ -250,6 +279,7 @@ impl SysFrontendErrorService {
                 query.level.as_deref(),
                 query.source.as_deref(),
                 query.name.as_deref(),
+                query.device_type.as_deref(),
                 begin,
                 end,
                 tenant_scope,

@@ -35,7 +35,7 @@ impl SysFrontendErrorRepository {
         SysFrontendError::find_by_id(id).one(self.base.db()).await
     }
 
-    /// 多条件分页查询（level/source 精确，name 模糊，时间范围，按 create_time 倒序）
+    /// 多条件分页查询（level/source/device_type 精确，name 模糊，时间范围，按 create_time 倒序）
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -44,6 +44,7 @@ impl SysFrontendErrorRepository {
         level: Option<&str>,
         source: Option<&str>,
         name: Option<&str>,
+        device_type: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
@@ -66,6 +67,10 @@ impl SysFrontendErrorRepository {
         }
         if let Some(n) = name {
             query = query.filter(Column::Name.like(format!("%{}%", like_escape(n))));
+        }
+        // 设备类型分桶筛选（FCP-011）：mobile / tablet / desktop
+        if let Some(d) = device_type {
+            query = query.filter(Column::DeviceType.eq(d));
         }
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));

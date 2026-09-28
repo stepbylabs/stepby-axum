@@ -86,6 +86,7 @@ pub use m20260926_000014_tenant_nav_menu::Migration as M20260926TenantNavMenu;
 pub use m20260927_000001_oauth_client_prev_secret::Migration as M20260927OauthClientPrevSecret;
 pub use m20260927_000002_sys_user_credential::Migration as M20260927SysUserCredential;
 pub use m20260928_000001_sys_dept_ancestors_width::Migration as M20260928SysDeptAncestorsWidth;
+pub use m20260928_000002_frontend_error_device_type::Migration as M20260928FrontendErrorDeviceType;
 
 mod m20250711_000001_init;
 mod m20250716_000001_gen_and_notice_read;
@@ -170,6 +171,7 @@ mod m20260926_000014_tenant_nav_menu;
 mod m20260927_000001_oauth_client_prev_secret;
 mod m20260927_000002_sys_user_credential;
 mod m20260928_000001_sys_dept_ancestors_width;
+mod m20260928_000002_frontend_error_device_type;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
@@ -338,6 +340,9 @@ impl MigratorTrait for Migrator {
             // R5-DB-26：存量库 sys_dept.ancestors 宽度修正 VARCHAR(50) → VARCHAR(500)
             //（全新库已由 init 建为 500；此迁移方言感知放宽存量库，幂等）
             Box::new(M20260928SysDeptAncestorsWidth),
+            // FCP-011：sys_frontend_error 增加 device_type 列（Web Vitals 移动端分桶）
+            //（存量库启动由 ensure_frontend_error_device_type 幂等兜底）
+            Box::new(M20260928FrontendErrorDeviceType),
         ]
     }
 }

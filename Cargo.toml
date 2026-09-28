@@ -47,6 +47,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 # 日志文件按日轮转（P0-67 未修复项）
 tracing-appender = "0.2"
+# log::LevelFilter：MySQL 连接池 after_connect 路径下 sea-orm 慢语句日志配置的类型（db/pool.rs）
+log = "0.4"
 
 # 时间
 chrono = { version = "0.4", features = ["serde"] }

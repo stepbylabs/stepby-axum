@@ -346,6 +346,7 @@ dependencies = [
  "hmac",
  "jsonwebtoken",
  "lettre",
+ "log",
  "maxminddb",
  "md-5",
  "migration",
