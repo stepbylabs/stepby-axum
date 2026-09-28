@@ -1422,38 +1422,44 @@ async fn execute_inner(
 /// 调度时间由 `register_builtin_scheduled_jobs` 中的 cron "0 0 3 * * *" 控制。
 /// 此处注册函数仅用于通过 invoke_target 调用（如手动执行测试）。
 fn register_builtin_tasks(db: DatabaseConnection) {
-    // ryTask.ryNoParams — 无参数示例任务
+    // demoTask.demoNoParams — 无参数示例任务
     // 演示调度器最简调用形式：无参数、返回成功消息
     registry::register_task(
-        "ryTask.ryNoParams",
+        "demoTask.demoNoParams",
         Arc::new(|| {
             Box::pin(async {
-                tracing::info!("ryTask.ryNoParams 示例任务触发（无参数）");
-                Ok(crate::tr!("msg.scheduler.ryNoParams_success"))
+                tracing::info!("demoTask.demoNoParams 示例任务触发（无参数）");
+                Ok(crate::tr!("msg.scheduler.demoNoParams_success"))
             })
         }),
     );
 
-    // ryTask.ryParams('ry') — 带参数示例任务
+    // demoTask.demoParams('demo') — 带参数示例任务
     // 演示带字符串参数的任务调用形式
     registry::register_task(
-        "ryTask.ryParams('ry')",
+        "demoTask.demoParams('demo')",
         Arc::new(|| {
             Box::pin(async {
-                tracing::info!("ryTask.ryParams('ry') 示例任务触发（带字符串参数）");
-                Ok("ryParams 示例任务执行成功，参数: ry（无业务逻辑，仅演示参数传递）".to_string())
+                tracing::info!("demoTask.demoParams('demo') 示例任务触发（带字符串参数）");
+                Ok(
+                    "demoParams 示例任务执行成功，参数: demo（无业务逻辑，仅演示参数传递）"
+                        .to_string(),
+                )
             })
         }),
     );
 
-    // ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100) — 多参数示例任务
+    // demoTask.demoMultipleParams('yebot', true, 2000L, 316.5F, 100) — 多参数示例任务
     // 演示多类型参数（字符串/布尔/长整型/浮点/整型）的任务调用形式
     registry::register_task(
-        "ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100)",
+        "demoTask.demoMultipleParams('yebot', true, 2000L, 316.5F, 100)",
         Arc::new(|| {
             Box::pin(async {
-                tracing::info!("ryTask.ryMultipleParams 示例任务触发（多类型参数）");
-                Ok("ryMultipleParams 示例任务执行成功（无业务逻辑，仅演示多参数传递）".to_string())
+                tracing::info!("demoTask.demoMultipleParams 示例任务触发（多类型参数）");
+                Ok(
+                    "demoMultipleParams 示例任务执行成功（无业务逻辑，仅演示多参数传递）"
+                        .to_string(),
+                )
             })
         }),
     );
@@ -1700,9 +1706,9 @@ mod tests {
         register_builtin_tasks(db);
         let targets = registry::list_registered_tasks();
         for expected in [
-            "ryTask.ryNoParams",
-            "ryTask.ryParams('ry')",
-            "ryTask.ryMultipleParams('ry', true, 2000L, 316.5F, 100)",
+            "demoTask.demoNoParams",
+            "demoTask.demoParams('demo')",
+            "demoTask.demoMultipleParams('yebot', true, 2000L, 316.5F, 100)",
             "cleanup_expired_logs",
         ] {
             assert!(

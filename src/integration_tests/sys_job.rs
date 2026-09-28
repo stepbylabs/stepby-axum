@@ -37,7 +37,7 @@ async fn test_job_chain() {
             serde_json::json!({
                 "jobName": "it_job_test_task",
                 "jobGroup": "DEFAULT",
-                "invokeTarget": "ryTask.ryNoParams",
+                "invokeTarget": "demoTask.demoNoParams",
                 "cronExpression": "0 0 1 * * *",
                 "misfirePolicy": "3",
                 "concurrent": "1",
@@ -64,7 +64,7 @@ async fn test_job_chain() {
                 "jobId": job_id,
                 "jobName": "it_job_test_task_edited",
                 "jobGroup": "DEFAULT",
-                "invokeTarget": "ryTask.ryNoParams",
+                "invokeTarget": "demoTask.demoNoParams",
                 "cronExpression": "0 0 2 * * *",
                 "misfirePolicy": "3",
                 "concurrent": "1",
@@ -102,7 +102,7 @@ async fn test_job_chain() {
             Some(serde_json::json!({
                 "jobName": "it_job_invalid_cron",
                 "jobGroup": "DEFAULT",
-                "invokeTarget": "ryTask.ryNoParams",
+                "invokeTarget": "demoTask.demoNoParams",
                 "cronExpression": "invalid cron",
                 "status": "0"
             })),

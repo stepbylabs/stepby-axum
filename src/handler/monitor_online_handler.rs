@@ -50,7 +50,7 @@ return 1
 
 // ==================== DTO / Vo ====================
 
-/// 在线用户查询参数（对齐前端 OnlineQueryParams）
+/// 在线用户查询参数（对齐前端 OnlineQueParams）
 #[derive(Debug, Clone, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct OnlineQueryDto {

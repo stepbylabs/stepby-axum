@@ -2192,7 +2192,7 @@ mod gen_table_template_tests {
 
     /// 【第八批】列类型映射必须只产出 **Rust 类型**（杜绝 Java 遗留值回潮）。
     ///
-    /// 背景：`gen_table_column` 的两列原为 RuoYi 遗留命名 `java_type`/`java_field`
+    /// 背景：`gen_table_column` 的两列原为早期 Java 版本的遗留命名 `java_type`/`java_field`
     /// （第八批已重命名为 `rust_type`/`rust_field`），而前端编辑表格的下拉此前
     /// 提供的是 **Java 类型**（`Long`/`Integer`/`BigDecimal`/`Date`…）——这些值会被
     /// 模板**原样**写进实体/DTO 字段声明 ⇒ 生成无法编译的 Rust。

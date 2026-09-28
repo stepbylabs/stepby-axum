@@ -206,6 +206,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("菜单结构优化失败: {}", e))?;
 
+        // 3.5d-7 去若依化遗留种子改名兜底（与迁移 m20250711 init 的 yebot 化种子对齐，
+        // 存量库不跑 Migrator::up）：ry 演示用户 → yebot；ryTask 系演示任务目标 →
+        // demoTask 系。全部幂等 UPDATE，重复执行无副作用。
+        ensure_rename_legacy_seed(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("遗留种子改名失败: {}", e))?;
+
         // 3.5d-4 租户自建导航 L3 页面菜单（批次 3）：与迁移
         // m20260926_000014_tenant_nav_menu 等价（启动不跑 Migrator::up）。
         // 缺此兜底时存量库无 3627 页面菜单 ⇒ 能力位开启后租户侧仍无入口（假功能）。
@@ -1640,6 +1647,27 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
             .await?;
     }
     tracing::info!("菜单信息架构优化已应用（order 重排 / 自助页收编 3950 / icon 语义修正）");
+    Ok(())
+}
+
+/// 去若依化遗留种子改名兜底（全幂等）：
+/// ① ry 演示用户 → yebot（用户名/邮箱/备注）；
+/// ② sys_job 演示任务目标 ryTask 系 → demoTask 系（与 scheduler 注册的白名单一致，
+///    否则改名后任务执行报"目标未注册"）。
+async fn ensure_rename_legacy_seed(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let updates: &[&str] = &[
+        "UPDATE sys_user SET user_name = 'yebot', email = 'yebot@yebot.dev', remark = '演示账号' WHERE user_name = 'ry'",
+        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryMultipleParams', 'demoMultipleParams') WHERE invoke_target LIKE '%ryMultipleParams%'",
+        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryNoParams', 'demoNoParams') WHERE invoke_target LIKE '%ryNoParams%'",
+        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryParams', 'demoParams') WHERE invoke_target LIKE '%ryParams%'",
+        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryTask', 'demoTask') WHERE invoke_target LIKE '%ryTask%'",
+        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ry', 'demo') WHERE invoke_target LIKE '%(''ry'')%'",
+    ];
+    for sql in updates {
+        db.execute(Statement::from_string(backend, sql.to_string()))
+            .await?;
+    }
     Ok(())
 }
 
