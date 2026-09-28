@@ -81,21 +81,30 @@ const ORDER_UPDATES: &[(i64, i32)] = &[
     (131, 9),
 ];
 
-/// (menu_id, icon) 语义修正清单：全部使用现有 sprite 图标，消除多处复用
+/// (menu_id, icon) 语义修正清单（**语义直觉优先**，同语义页面允许复用同图标；
+/// 全部使用现有 sprite 图标，防拼写错误渲染空白）：
+/// - 消息/公告分流：公告=message(广播)、消息管理=email(站内信)、渠道=mail；
+/// - 日志族统一 log：日志管理/实时日志/发送记录；
+/// - 认证族：单点登录=enter、登录配置=key(密钥凭证)、WebHook=link(回调)；
+/// - 结构族：租户管理=nested(层级)、租户服务=peoples(组织)、我的导航=drag(拖拽摆位)；
+/// - 其余：健康检查=druid(连接池巡检)、备份=backup、运行监控=server、
+///   报表=excel、审批=form、关于系统=icon(信息)。
 const ICON_UPDATES: &[(i64, &str)] = &[
-    (145, "enter"),         // 单点登录：登录进入语义（原 connection 与 WebHook 重复）
-    (157, "link"),          // WebHook 订阅：回调链接（原 connection 与 SSO 重复）
-    (133, "sunny"),         // 健康检查：健康状态灯（原 bug 语义相反）
-    (107, "documentation"), // 通知公告：公告即文档（原 message 与消息管理重复）
-    (135, "time"),          // 实时日志：实时性（原 log 与日志管理/发送记录重复）
-    (124, "star"),          // 关于系统（原 component 与组件语义混淆）
-    (146, "validCode"),     // 登录配置：OIDC 配置（原 key 与 API 令牌重复）
-    (118, "backup"),        // 备份管理：backup 图标（原 download 语义弱）
-    (3550, "server"),       // 运行监控：服务运行（原 monitor 与父目录同名）
-    (151, "excel"),         // 报表中心：报表导出（原 chart 与数据看板重复）
-    (3600, "form"),         // 审批中心：审批表单（原 example 无语义）
-    (3700, "skill"),        // 租户管理：角色能力（原 peoples 与角色管理重复）
-    (3627, "drag"),         // 导航设置：拖拽排序（原 tree-table 与菜单管理重复）
+    (107, "message"),  // 通知公告：广播
+    (140, "email"),    // 消息管理：站内信/邮件
+    (118, "backup"),   // 备份管理
+    (124, "icon"),     // 关于系统：信息
+    (133, "druid"),    // 健康检查：连接池巡检
+    (135, "log"),      // 实时日志
+    (145, "enter"),    // 单点登录：进入
+    (146, "key"),      // 登录配置：密钥凭证
+    (151, "excel"),    // 报表中心
+    (157, "link"),     // WebHook：回调链接
+    (3550, "server"),  // 运行监控：服务
+    (3600, "form"),    // 审批中心：审批表单
+    (3700, "nested"),  // 租户管理：层级结构
+    (3950, "peoples"), // 租户服务：组织
+    (3627, "drag"),    // 我的导航：拖拽摆位
 ];
 
 fn idempotent_insert_prefix(backend: DatabaseBackend) -> &'static str {
@@ -149,8 +158,9 @@ impl MigrationTrait for Migration {
             conn.execute_unprepared(&rm_sql).await?;
         }
 
-        // 2. 自助页收编：parent 移入 3950 + 改名「域名管理」（幂等 UPDATE）；
-        //    命名与「菜单管理」区分：菜单管理=定义全系统菜单；本页=租户自助管理域名绑定
+        // 2. 自助页收编：parent 移入 3950 + 改名（幂等 UPDATE）；
+        //    「域名管理」与「菜单管理」区分：菜单管理=定义全系统菜单；本页=租户自助管理域名绑定；
+        //    「我的导航」与「菜单管理」区分：本页=租户自助调整已授权导航的摆位
         for (menu_id, parent) in [(3900_i64, 3950_i64), (3627_i64, 3950_i64)] {
             conn.execute_unprepared(&format!(
                 "UPDATE sys_menu SET parent_id = {} WHERE menu_id = {}",
@@ -159,6 +169,8 @@ impl MigrationTrait for Migration {
             .await?;
         }
         conn.execute_unprepared("UPDATE sys_menu SET menu_name = '域名管理' WHERE menu_id = 3900")
+            .await?;
+        conn.execute_unprepared("UPDATE sys_menu SET menu_name = '我的导航' WHERE menu_id = 3627")
             .await?;
         // 2b. API 令牌（个人开发者向）归属「系统工具」（原在系统监控下，
         //     order=5 与实时日志冲突；移动后 parent=3、order=5 无冲突）

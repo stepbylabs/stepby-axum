@@ -1567,6 +1567,7 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
     // ---- ② 自助页收编 + order 重排 + icon 修正（幂等 UPDATE 清单）----
     let updates: &[&str] = &[
         "UPDATE sys_menu SET menu_name = '域名管理' WHERE menu_id = 3900",
+        "UPDATE sys_menu SET menu_name = '我的导航' WHERE menu_id = 3627",
         "UPDATE sys_menu SET parent_id = 3950 WHERE menu_id = 3900",
         "UPDATE sys_menu SET parent_id = 3950 WHERE menu_id = 3627",
         "UPDATE sys_menu SET parent_id = 3 WHERE menu_id = 3560",
@@ -1622,19 +1623,15 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
         "UPDATE sys_menu SET order_num = 7 WHERE menu_id = 128",
         "UPDATE sys_menu SET order_num = 8 WHERE menu_id = 129",
         "UPDATE sys_menu SET order_num = 9 WHERE menu_id = 131",
-        // icon 语义修正
-        "UPDATE sys_menu SET icon = 'enter' WHERE menu_id = 145",
-        "UPDATE sys_menu SET icon = 'link' WHERE menu_id = 157",
-        "UPDATE sys_menu SET icon = 'sunny' WHERE menu_id = 133",
-        "UPDATE sys_menu SET icon = 'documentation' WHERE menu_id = 107",
-        "UPDATE sys_menu SET icon = 'time' WHERE menu_id = 135",
-        "UPDATE sys_menu SET icon = 'star' WHERE menu_id = 124",
-        "UPDATE sys_menu SET icon = 'validCode' WHERE menu_id = 146",
-        "UPDATE sys_menu SET icon = 'backup' WHERE menu_id = 118",
-        "UPDATE sys_menu SET icon = 'server' WHERE menu_id = 3550",
-        "UPDATE sys_menu SET icon = 'excel' WHERE menu_id = 151",
-        "UPDATE sys_menu SET icon = 'form' WHERE menu_id = 3600",
-        "UPDATE sys_menu SET icon = 'skill' WHERE menu_id = 3700",
+        // icon 语义修正（第二批，语义直觉优先——同语义页面允许复用同图标）：
+        "UPDATE sys_menu SET icon = 'message' WHERE menu_id = 107",
+        "UPDATE sys_menu SET icon = 'email' WHERE menu_id = 140",
+        "UPDATE sys_menu SET icon = 'log' WHERE menu_id = 135",
+        "UPDATE sys_menu SET icon = 'druid' WHERE menu_id = 133",
+        "UPDATE sys_menu SET icon = 'icon' WHERE menu_id = 124",
+        "UPDATE sys_menu SET icon = 'key' WHERE menu_id = 146",
+        "UPDATE sys_menu SET icon = 'nested' WHERE menu_id = 3700",
+        "UPDATE sys_menu SET icon = 'peoples' WHERE menu_id = 3950",
         "UPDATE sys_menu SET icon = 'drag' WHERE menu_id = 3627",
     ];
     for sql in updates {
