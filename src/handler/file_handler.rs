@@ -80,6 +80,16 @@ pub struct FileDeleteRequest {
 
 /// GET /system/file/list
 /// 文件列表（分页）
+#[utoipa::path(
+    get,
+    path = "/system/file/list",
+    params(FileListQuery),
+    responses(
+        (status = 200, description = "文件列表（分页）", body = AjaxResult<FileListResponse>),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "system-file"
+)]
 pub async fn list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -157,6 +167,16 @@ pub async fn list(
 
 /// POST /system/file/upload
 /// 文件上传（复用 common_upload 的安全策略，P0-3 统一走 save_upload_bytes）
+#[utoipa::path(
+    post,
+    path = "/system/file/upload",
+    responses(
+        (status = 200, description = "上传成功（返回可访问 URL）", body = AjaxResult<FileUploadResponse>),
+        (status = 400, description = "缺少 file 字段或文件类型/大小非法"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "system-file"
+)]
 pub async fn upload(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -214,6 +234,17 @@ pub async fn upload(
 
 /// DELETE /system/file/delete
 /// 删除文件（按服务器端文件名）
+#[utoipa::path(
+    delete,
+    path = "/system/file/delete",
+    request_body = FileDeleteRequest,
+    responses(
+        (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "文件名非法（路径穿越等）"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "system-file"
+)]
 pub async fn delete(
     State(state): State<Arc<AppState>>,
     operator: Operator,

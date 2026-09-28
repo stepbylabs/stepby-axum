@@ -182,6 +182,8 @@ error:
     operator_id_parse_failed: Operator user ID parse failed
     id_empty: User ID cannot be empty
     email_invalid: Invalid email format
+    sex_invalid: Invalid sex value (only 0=male / 1=female / 2=unknown are allowed)
+    status_invalid: Invalid user status (only 0=normal / 1=disabled are allowed)
     import_login_required: Login name is required
     import_login_length: Login name must be 2-30 characters long
     import_login_format: Login name only allows letters, digits, and underscores

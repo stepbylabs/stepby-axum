@@ -19,6 +19,17 @@ use crate::state::AppState;
 /// 返回 200 + AjaxResult；传输层错误（连接失败/超时等）不视为 HTTP 错误，
 /// 而是通过 `error` 字段返回（status=0），便于前端在不产生 HTTP 4xx/5xx 的前提下
 /// 统一展示调试结果。SSRF 违规/参数非法则以 400 直接拒绝。
+#[utoipa::path(
+    post,
+    path = "/tool/http-debug/execute",
+    request_body = HttpDebugDto,
+    responses(
+        (status = 200, description = "调试结果（状态码/响应头/响应体/耗时）", body = AjaxResult<HttpDebugVo>),
+        (status = 400, description = "参数非法或目标地址未通过 SSRF 校验"),
+        (status = 403, description = "无权限（tool:httpDebug:list）或非平台操作者"),
+    ),
+    tag = "tool-http-debug"
+)]
 pub async fn execute(
     State(state): State<Arc<AppState>>,
     operator: Operator,

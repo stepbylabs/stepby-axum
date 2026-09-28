@@ -92,6 +92,8 @@ fn main() {
         axum_backend::service::sys_user_service::UserAuthRoleVo,
         axum_backend::service::sys_user_service::ProfileVo,
         axum_backend::service::sys_user_service::UserFormVo,
+        // ---- service：WebHook 回调配置出参 VO（脱敏：不含 secret 原文） ----
+        axum_backend::service::sys_web_hook_service::WebHookVo,
         // ---- service：GDPR 用户匿名化（被遗忘权）报告 ----
         axum_backend::service::user_erasure_service::UserErasureReport,
         // ---- service：审批工作流（W-8 已办视图行） ----

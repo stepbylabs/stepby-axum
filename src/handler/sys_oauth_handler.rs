@@ -35,7 +35,7 @@ use axum::http::HeaderMap;
 use axum::response::Redirect;
 use serde::Deserialize;
 use serde::Serialize;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
@@ -55,21 +55,21 @@ const OAUTH_LOGIN_PAGE: &str = "oauth-login";
 // ==================== DTO / VO ====================
 
 /// 发起授权的查询参数
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizeQuery {
     pub provider_code: String,
 }
 
 /// 启停状态查询参数
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct ToggleQuery {
     pub enabled: String,
 }
 
 /// 解绑查询参数
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct UnbindQuery {
     pub provider: String,
@@ -104,6 +104,15 @@ crate::impl_into_response!(AuthorizeResult);
 /// 多租户（台账 P1-2）：按请求 host 解析出的租户（`HostTenant`，由 tenant_host
 /// 中间件在可信反代环境下注入）取可见集——本租户域名下可见「平台级 + 本租户自建」，
 /// 无 host 上下文（平台 host / 未绑定域名 / 来源不可信）时仅平台级。
+#[utoipa::path(
+    get,
+    path = "/oauth2/providers",
+    responses(
+        (status = 200, description = "登录页启用的第三方提供商列表（已脱敏）", body = AjaxResult<Vec<EnabledProviderVo>>),
+    ),
+    security(()),
+    tag = "oauth"
+)]
 pub async fn list_providers(
     State(state): State<Arc<AppState>>,
     host_tenant: HostTenant,
@@ -119,6 +128,17 @@ pub async fn list_providers(
 ///
 /// 前端拿到 authorize_url 后 `window.location.href = authorizeUrl` 跳转第三方。
 /// state 已由 service 写入 Redis（一次性，防 CSRF/重放）。
+#[utoipa::path(
+    get,
+    path = "/oauth2/authorize",
+    params(AuthorizeQuery),
+    responses(
+        (status = 200, description = "第三方授权 URL", body = AuthorizeResult),
+        (status = 400, description = "provider_code 无效或未启用"),
+    ),
+    security(()),
+    tag = "oauth"
+)]
 pub async fn begin_oauth(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -151,6 +171,16 @@ pub async fn begin_oauth(
 /// - NeedBind{handoff} → 302 到前端 /oauth-login?handoff=xxx（未启用自动创建，需人工绑定）
 ///
 /// 失败：302 到前端 /oauth-login?error=xxx（由前端展示，避免回调页裸报错）
+#[utoipa::path(
+    get,
+    path = "/oauth2/callback",
+    params(crate::service::sys_oauth_service::OauthCallbackDto),
+    responses(
+        (status = 302, description = "重定向到前端 /oauth-login（携带 token / handoff / error）"),
+    ),
+    security(()),
+    tag = "oauth"
+)]
 pub async fn callback(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -211,6 +241,16 @@ pub async fn callback(
 // ==================== 提供商管理 Handler ====================
 
 /// GET /system/oauth/provider/list — 提供商分页（租户过滤）
+#[utoipa::path(
+    get,
+    path = "/system/oauth/provider/list",
+    params(ProviderQueryDto),
+    responses(
+        (status = 200, description = "提供商分页列表", body = TableDataInfo<ProviderVo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "oauth"
+)]
 pub async fn provider_list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -227,6 +267,16 @@ pub async fn provider_list(
 }
 
 /// GET /system/oauth/provider/{providerId} — 提供商详情
+#[utoipa::path(
+    get,
+    path = "/system/oauth/provider/{providerId}",
+    params(("providerId" = i64, Path, description = "提供商 ID")),
+    responses(
+        (status = 200, description = "提供商详情（已脱敏）", body = AjaxResult<ProviderVo>),
+        (status = 404, description = "提供商不存在"),
+    ),
+    tag = "oauth"
+)]
 pub async fn provider_info(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -240,6 +290,16 @@ pub async fn provider_info(
 }
 
 /// POST /system/oauth/provider — 新增提供商
+#[utoipa::path(
+    post,
+    path = "/system/oauth/provider",
+    request_body = ProviderUpsertDto,
+    responses(
+        (status = 200, description = "新增成功（已脱敏）", body = AjaxResult<ProviderVo>),
+        (status = 400, description = "参数错误或 provider_code 重复"),
+    ),
+    tag = "oauth"
+)]
 pub async fn provider_add(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -253,6 +313,17 @@ pub async fn provider_add(
 }
 
 /// PUT /system/oauth/provider — 修改提供商
+#[utoipa::path(
+    put,
+    path = "/system/oauth/provider",
+    request_body = ProviderUpsertDto,
+    responses(
+        (status = 200, description = "修改成功（已脱敏）", body = AjaxResult<ProviderVo>),
+        (status = 400, description = "参数错误"),
+        (status = 404, description = "提供商不存在"),
+    ),
+    tag = "oauth"
+)]
 pub async fn provider_edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -266,6 +337,16 @@ pub async fn provider_edit(
 }
 
 /// DELETE /system/oauth/provider/{providerIds} — 批量删除提供商
+#[utoipa::path(
+    delete,
+    path = "/system/oauth/provider/{providerIds}",
+    params(("providerIds" = String, Path, description = "提供商 ID 列表（逗号分隔）")),
+    responses(
+        (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "ID 不合法或超过批量上限"),
+    ),
+    tag = "oauth"
+)]
 pub async fn provider_delete(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -291,6 +372,20 @@ pub async fn provider_delete(
 }
 
 /// PUT /system/oauth/provider/{providerId}/status — 启停提供商
+#[utoipa::path(
+    put,
+    path = "/system/oauth/provider/{providerId}/status",
+    params(
+        ("providerId" = i64, Path, description = "提供商 ID"),
+        ToggleQuery,
+    ),
+    responses(
+        (status = 200, description = "启停成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "enabled 取值非法"),
+        (status = 404, description = "提供商不存在"),
+    ),
+    tag = "oauth"
+)]
 pub async fn provider_toggle(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -307,6 +402,15 @@ pub async fn provider_toggle(
 // ==================== 绑定管理 Handler ====================
 
 /// GET /oauth2/my-bindings — 当前账号第三方绑定列表（含 provider 名称）
+#[utoipa::path(
+    get,
+    path = "/oauth2/my-bindings",
+    responses(
+        (status = 200, description = "当前账号第三方绑定列表", body = AjaxResult<Vec<MyBindingVo>>),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "oauth"
+)]
 pub async fn my_bindings(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -344,6 +448,17 @@ pub async fn my_bindings(
 }
 
 /// POST /oauth2/bind — 当前登录账号绑定第三方身份（命中 handoff）
+#[utoipa::path(
+    post,
+    path = "/oauth2/bind",
+    request_body = BindOauthDto,
+    responses(
+        (status = 200, description = "绑定成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "handoff 无效或已过期"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "oauth"
+)]
 pub async fn bind_oauth(
     State(state): State<Arc<AppState>>,
     operator: Operator,
@@ -361,6 +476,17 @@ pub async fn bind_oauth(
 }
 
 /// DELETE /oauth2/unbind?provider=xxx — 当前账号解绑第三方身份
+#[utoipa::path(
+    delete,
+    path = "/oauth2/unbind",
+    params(UnbindQuery),
+    responses(
+        (status = 200, description = "解绑成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "provider 非法或未绑定"),
+        (status = 401, description = "未授权"),
+    ),
+    tag = "oauth"
+)]
 pub async fn unbind_oauth(
     State(state): State<Arc<AppState>>,
     operator: Operator,

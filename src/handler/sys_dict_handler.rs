@@ -475,6 +475,16 @@ pub async fn dict_data_remove(
 
 /// POST /system/dict/data/export
 /// 导出字典数据列表
+#[utoipa::path(
+    post,
+    path = "/system/dict/data/export",
+    params(DictDataQueryDto),
+    responses(
+        (status = 200, description = "字典数据 xlsx", content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-dict"
+)]
 pub async fn dict_data_export(
     State(state): State<Arc<AppState>>,
     operator: Operator,

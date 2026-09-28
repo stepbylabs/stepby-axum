@@ -154,7 +154,7 @@ pub struct GenTableColumnEditDto {
 }
 
 /// 代码生成详情响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GenTableInfoVo {
     pub info: GenTableModel,

@@ -329,14 +329,16 @@ impl JobScheduler {
                     let dedup_key = format!("login_anomaly:{}", ip);
                     // SETNX 去重：30 分钟内同一 IP 不重复创建告警
                     // P3 修复: 区分 Redis 错误与 key 已存在，Redis 故障时仍创建告警（宁可重复也不漏报）
-                    let acquired = match redis::cmd("SET")
-                        .arg(&dedup_key)
-                        .arg("1")
-                        .arg("NX")
-                        .arg("EX")
-                        .arg(DEDUP_TTL_SECS)
-                        .query_async::<Option<String>>(&mut redis)
-                        .await
+                    let acquired = match crate::utils::redis::cmd_timeout(
+                        redis::cmd("SET")
+                            .arg(&dedup_key)
+                            .arg("1")
+                            .arg("NX")
+                            .arg("EX")
+                            .arg(DEDUP_TTL_SECS)
+                            .query_async::<Option<String>>(&mut redis),
+                    )
+                    .await
                     {
                         Ok(Some(_)) => true, // 成功获取去重锁
                         Ok(None) => false,   // key 已存在，跳过
@@ -1166,14 +1168,16 @@ async fn execute_with_logging(
     // 释放时通过 Lua CAS 脚本校验，避免误删其他实例持有的锁
     let lock_key = format!("lock:scheduler:{}", job.job_id);
     let lock_value = uuid::Uuid::new_v4().to_string();
-    let lock_result: Result<Option<String>, _> = redis::cmd("SET")
-        .arg(&lock_key)
-        .arg(&lock_value)
-        .arg("NX")
-        .arg("EX")
-        .arg(LOCK_TTL_SECS)
-        .query_async(redis)
-        .await;
+    let lock_result: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
+        redis::cmd("SET")
+            .arg(&lock_key)
+            .arg(&lock_value)
+            .arg("NX")
+            .arg("EX")
+            .arg(LOCK_TTL_SECS)
+            .query_async(redis),
+    )
+    .await;
 
     // Redis 故障 fail-closed 策略（P0-R81-012）：
     // - Redis 不可用时直接跳过本次执行，避免多实例部署下的任务重复执行
@@ -1716,14 +1720,16 @@ mod tests {
         let key = "lock:scheduler:unit-lockguard-finish";
         let value = "token-abc";
         // 普通 SET 预置锁（覆盖历史残留，保证前置条件确定）
-        let _: () = redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("EX")
-            .arg(60)
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .arg("EX")
+                .arg(60)
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         let handle = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
@@ -1731,11 +1737,10 @@ mod tests {
             JobLockGuard::new(handle, redis.clone(), key.to_string(), value.to_string());
         guard.finish().await;
         drop(guard);
-        let v: Option<String> = redis::cmd("GET")
-            .arg(key)
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let v: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(&mut redis))
+                .await
+                .unwrap();
         assert!(v.is_none(), "finish() 应通过 CAS 释放锁");
     }
 
@@ -1746,25 +1751,26 @@ mod tests {
         };
         let key = "lock:scheduler:unit-lockguard-drop";
         let value = "token-def";
-        let _: () = redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("EX")
-            .arg(60)
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .arg("EX")
+                .arg(60)
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         let handle = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
         let guard = JobLockGuard::new(handle, redis.clone(), key.to_string(), value.to_string());
         drop(guard); // Drop 兜底：abort 续期 + spawn 异步释放锁
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let v: Option<String> = redis::cmd("GET")
-            .arg(key)
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let v: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(&mut redis))
+                .await
+                .unwrap();
         assert!(v.is_none(), "Drop 应触发异步释放锁");
     }
 
@@ -1785,11 +1791,13 @@ mod tests {
             Arc::new(|| Box::pin(async { Ok("all-good".to_string()) })),
         );
         // 清理历史残留锁，避免跨测试运行遗留的锁导致本次跳过
-        let _: () = redis::cmd("DEL")
-            .arg("lock:scheduler:9001")
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL")
+                .arg("lock:scheduler:9001")
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         let job = job(9001, "unit-success", "0 0 3 * * *", target);
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
@@ -1827,11 +1835,13 @@ mod tests {
                 })
             }),
         );
-        let _: () = redis::cmd("DEL")
-            .arg("lock:scheduler:9002")
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL")
+                .arg("lock:scheduler:9002")
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         let job = job(9002, "unit-fail", "0 0 3 * * *", target);
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
@@ -1857,11 +1867,13 @@ mod tests {
             })
         });
         registry::register_task(target, f);
-        let _: () = redis::cmd("DEL")
-            .arg("lock:scheduler:9003")
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL")
+                .arg("lock:scheduler:9003")
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         let job = job(9003, "unit-panic", "0 0 3 * * *", target);
         execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
@@ -1881,15 +1893,17 @@ mod tests {
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         // 预置其他实例持有的锁 → execute_with_logging 的 SETNX 应失败并跳过执行
         let lock_key = format!("lock:scheduler:{}", 9004);
-        let _: Option<String> = redis::cmd("SET")
-            .arg(&lock_key)
-            .arg("foreign-token")
-            .arg("NX")
-            .arg("EX")
-            .arg(90)
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: Option<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("SET")
+                .arg(&lock_key)
+                .arg("foreign-token")
+                .arg("NX")
+                .arg("EX")
+                .arg(90)
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         let job = job(
             9004,
             "unit-skiplock",
@@ -1916,11 +1930,13 @@ mod tests {
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let job_id = 9005i64;
         // 清理历史残留锁，保证本次能获取锁以走到并发检查分支
-        let _: () = redis::cmd("DEL")
-            .arg(format!("lock:scheduler:{}", job_id))
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL")
+                .arg(format!("lock:scheduler:{}", job_id))
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         executing_jobs.lock().unwrap().insert(job_id, true); // 模拟已有任务在执行
         let job = job(
             job_id,
@@ -1937,11 +1953,11 @@ mod tests {
         assert!(logs.is_empty(), "并发禁止时应跳过执行，不写日志");
         // 并发跳过会释放已获取的分布式锁
         let lock_key = format!("lock:scheduler:{}", job_id);
-        let v: Option<String> = redis::cmd("GET")
-            .arg(&lock_key)
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let v: Option<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("GET").arg(&lock_key).query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         assert!(v.is_none(), "并发跳过时应释放已获取的分布式锁");
     }
 
@@ -2022,11 +2038,13 @@ mod tests {
         );
         // 清理历史残留锁，避免 run_once 内部获取锁失败跳过执行
         let mut redis = scheduler.redis.clone();
-        let _: () = redis::cmd("DEL")
-            .arg("lock:scheduler:1005")
-            .query_async(&mut redis)
-            .await
-            .unwrap();
+        let _: () = crate::utils::redis::cmd_timeout(
+            redis::cmd("DEL")
+                .arg("lock:scheduler:1005")
+                .query_async(&mut redis),
+        )
+        .await
+        .unwrap();
         let j = job(1005, "unit-once", "0 0 3 * * *", target);
         scheduler.run_once(&j).await.unwrap();
         // run_once 内部 spawn 执行，等待其完成并写入日志

@@ -790,7 +790,9 @@ impl SysConfigService {
                     tenant_cache_key(m.tenant_id, &m.config_key)
                 });
             }
-            if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
+            if let Err(e) =
+                crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
+            {
                 tracing::warn!("批量失效配置缓存失败: {}", e);
             }
         }
@@ -827,7 +829,9 @@ impl SysConfigService {
             for key in chunk {
                 pipe.cmd("DEL").arg(key);
             }
-            if let Err(e) = pipe.query_async::<Vec<i64>>(&mut conn).await {
+            if let Err(e) =
+                crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
+            {
                 tracing::warn!("刷新配置缓存时批量删除失败: {}", e);
             }
         }

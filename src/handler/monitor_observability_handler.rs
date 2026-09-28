@@ -217,13 +217,13 @@ pub async fn redis_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<RedisStats>, AppError> {
     let mut conn = state.redis.clone();
-    let info_text: String = redis::cmd("INFO")
-        .query_async(&mut conn)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Redis INFO 查询失败");
-            AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
-        })?;
+    let info_text: String =
+        crate::utils::redis::cmd_timeout(redis::cmd("INFO").query_async(&mut conn))
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Redis INFO 查询失败");
+                AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
+            })?;
     let mut map = std::collections::HashMap::new();
     for line in info_text.lines() {
         let line = line.trim();

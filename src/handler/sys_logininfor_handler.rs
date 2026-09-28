@@ -132,10 +132,9 @@ pub async fn unlock(
     // 同步重置 Redis 中的登录失败计数，否则用户仍会被锁定（auth_service 使用 login_fail:{username}）
     let fail_key = format!("login_fail:{}", user_name);
     let mut redis = state.redis.clone();
-    let del_result: Result<(), _> = redis::cmd("DEL")
-        .arg(&fail_key)
-        .query_async(&mut redis)
-        .await;
+    let del_result: Result<(), _> =
+        crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&fail_key).query_async(&mut redis))
+            .await;
     if let Err(e) = del_result {
         tracing::warn!("重置 Redis 登录失败计数失败 (user={}): {}", user_name, e);
     }

@@ -16,10 +16,12 @@
 #   docker compose -f docker-compose.dev.yml down          # 停止并移除容器
 #
 # 说明：
+# - 必须提供 .env（复制 .env.example），其中 POSTGRES_PASSWORD / REDIS_PASSWORD /
+#   MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD 为必填，缺省时 `docker compose config` 会直接报错
 # - app 容器内 /app 挂载到当前宿主目录，源码改动立即生效
 # - target 目录单独挂载到 yebot_target 卷，跨容器复用编译缓存
 # - cargo registry 单独挂载到 yebot_cargo_cache 卷，避免重复下载依赖
-# - JWT_SECRET 仅用于开发，生产环境必须使用强密钥并从环境变量注入
+# - JWT_SECRET 缺省为仅开发用占位值，生产环境必须使用强密钥并从环境变量注入
 
 include:
   - docker-compose.yml
@@ -41,12 +43,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # 数据库连接（指向 compose 内的 postgres 服务）
-      DATABASE_URL: postgres://yebot:yebot123@postgres:5432/yebot
-      # Redis 连接
-      REDIS_URL: redis://redis:6379/0
-      # JWT 配置（仅开发环境）
-      JWT_SECRET: dev-only-secret-key-not-for-production-use-32chars
+      # 数据库连接（指向 compose 内的 postgres 服务；口令与 docker-compose.yml 同源，缺省即报错）
+      DATABASE_URL: postgres://${POSTGRES_USER:-yebot}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必填}@postgres:5432/${POSTGRES_DB:-yebot}
+      # Redis 连接（requirepass 已开启，URL 必须携带密码）
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD 必填}@redis:6379/0
+      # JWT 配置（仅开发环境；可通过环境变量覆盖，生产环境必须使用强密钥并从环境变量注入）
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-key-not-for-production-use-32chars}
       JWT_EXPIRE_HOURS: 24
       # 服务器配置
       SERVER_HOST: 0.0.0.0

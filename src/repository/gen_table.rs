@@ -9,6 +9,7 @@
 use chrono::NaiveDateTime;
 use sea_orm::*;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::common::like_escape;
 use crate::entity::gen_table::{
@@ -22,7 +23,7 @@ use crate::entity::gen_table_column::{
 use crate::repository::base::BaseRepository;
 
 /// 数据库表元数据视图（用于导入表时读取数据库现有表结构）
-#[derive(Debug, Clone, FromQueryResult, Serialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DbTableInfo {
     pub table_name: String,

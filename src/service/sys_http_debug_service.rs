@@ -17,6 +17,7 @@
 
 use serde::Deserialize;
 use std::time::{Duration, Instant};
+use utoipa::ToSchema;
 
 use crate::common::error::ServiceError;
 use crate::common::i18n::pick;
@@ -48,7 +49,7 @@ const HOP_BY_HOP_HEADERS: [&str; 9] = [
 ];
 
 /// 请求头单项（保留用户录入顺序，允许重复键）
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderItem {
     pub name: String,
@@ -56,7 +57,7 @@ pub struct HeaderItem {
 }
 
 /// 调试请求 DTO
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpDebugDto {
     /// HTTP 方法（GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS）
@@ -75,7 +76,7 @@ pub struct HttpDebugDto {
 }
 
 /// 响应头输出项
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderVo {
     pub name: String,
@@ -83,7 +84,7 @@ pub struct HeaderVo {
 }
 
 /// 调试执行结果 VO
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpDebugVo {
     /// 最终 HTTP 状态码（0 表示连接/发送阶段失败）
