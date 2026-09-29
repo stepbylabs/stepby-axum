@@ -483,6 +483,6 @@ fail_closed = true       # 扫描器不可用时：true（默认）= 拒绝上�
 
 # ── 运维提示：sys_config 运行时开关（captchaEnabled/registerUser 等）──────────
 # 这些开关存于数据库 sys_config 表（不在本文件），管理端「参数设置」页修改后自动刷新缓存、立即生效。
-# 若绕过管理端直接改库（脚本/DBA），必须手动刷新缓存才生效（双层 cache-aside：config:def:{key} / config:{tid}:{key}，TTL 300s）：
+# 管理端页面保存即自动失效缓存并生效（edit_config 内置 invalidate）；仅当绕过管理端直接改库（脚本/DBA）时才需手动刷新：（双层 cache-aside：config:def:{key} / config:{tid}:{key}，TTL 300s）：
 #   curl -X DELETE -H "Authorization: Bearer <admin_token>" http://<host>:8080/prod-api/system/config/refreshCache
 # 或在管理端「参数设置」页随意保存一次触发 refresh_cache。
