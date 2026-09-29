@@ -1264,6 +1264,7 @@ async fn insert_sys_menu(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 (2, '系统监控', 0, 2, 'monitor', NULL, '', '', '1', '0', 'M', '0', '0', '', 'monitor', 'admin', {now}, '系统监控目录', '0'), \
 (3, '系统工具', 0, 3, 'tool', NULL, '', '', '1', '0', 'M', '0', '0', '', 'tool', 'admin', {now}, '系统工具目录', '0'), \
 (4, 'Stepby官网', 0, 4, 'https://stepby.tzkj.net', NULL, '', '', '0', '0', 'M', '0', '0', '', 'guide', 'admin', {now}, 'Stepby官网地址', '0'), \
+(4100, 'AI助手', 0, 5, 'ai', 'ai/panel/index', '', '', '1', '0', 'C', '0', '0', 'ai:chat', 'chart', 'admin', {now}, 'AI 数据查询助手（NL2SQL，受白名单与租户隔离约束）', '0'), \
 (100, '用户管理', 1, 1, 'user', 'system/user/index', '', '', '1', '0', 'C', '0', '0', 'system:user:list', 'user', 'admin', {now}, '用户管理菜单', '0'), \
 (101, '角色管理', 1, 2, 'role', 'system/role/index', '', '', '1', '0', 'C', '0', '0', 'system:role:list', 'peoples', 'admin', {now}, '角色管理菜单', '0'), \
 (102, '菜单管理', 1, 3, 'menu', 'system/menu/index', '', '', '1', '0', 'C', '0', '0', 'system:menu:list', 'tree-table', 'admin', {now}, '菜单管理菜单', '0'), \

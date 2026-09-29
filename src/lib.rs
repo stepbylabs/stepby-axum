@@ -24,6 +24,9 @@ pub mod repository;
 // ========== 业务逻辑层 ==========
 pub mod service;
 
+// ========== AI 助手（NL2SQL Copilot，方案 topic-ai-nl2sql-v4/v4.1）==========
+pub mod ai;
+
 // ========== HTTP Handler 层 ==========
 pub mod handler;
 

@@ -23,6 +23,15 @@ sea-orm = { version = "1.1", features = [
     "with-chrono",
 ] }
 
+# AI 模块（NL2SQL）：受控执行 LLM 生成 SQL 的行列访问（与 sea-orm 内部 sqlx 同源）
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "mysql",
+    "postgres",
+    "json",
+] }
+
 # 异步 trait 宏（SeaORM ActiveModelBehavior 需要）
 async-trait = "0.1"
 
@@ -130,7 +139,7 @@ maxminddb = "0.29"
 arc-swap = "1"
 
 # HTTP 客户端（用于下载 mmdb 文件、S3/MinIO 对象存储 SigV4 请求）
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 
 # URL 解析（S3/MinIO endpoint 的 host/authority 提取）
 url = "2"

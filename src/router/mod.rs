@@ -1,5 +1,6 @@
 // axum-backend/src/router/mod.rs
 
+pub mod ai_router;
 pub mod auth_router;
 pub mod common_router;
 pub mod file_router;
@@ -111,6 +112,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_dict_router::dict_routes())
         .merge(sys_http_debug_router::http_debug_routes())
         .merge(sys_config_router::config_routes())
+        .merge(ai_router::ai_routes())
         .merge(sys_post_router::post_routes())
         .merge(sys_rate_limit_router::rate_limit_routes())
         .merge(sys_oper_log_router::oper_log_routes())

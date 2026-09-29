@@ -486,3 +486,17 @@ fail_closed = true       # 扫描器不可用时：true（默认）= 拒绝上�
 # 管理端页面保存即自动失效缓存并生效（edit_config 内置 invalidate）；仅当绕过管理端直接改库（脚本/DBA）时才需手动刷新：（双层 cache-aside：config:def:{key} / config:{tid}:{key}，TTL 300s）：
 #   curl -X DELETE -H "Authorization: Bearer <admin_token>" http://<host>:8080/prod-api/system/config/refreshCache
 # 或在管理端「参数设置」页随意保存一次触发 refresh_cache。
+# ── AI 助手（NL2SQL Copilot）──────────────────────────────
+# 三层开关的平台层：enabled=false（默认）时 /ai/* 一律 403。
+# 租户层 = 能力位 ai.copilot（租户套餐 features JSON）；角色层 = ai:chat 授权。
+# api_key 生产环境建议 AI_API_KEY 环境变量注入；provider 为 OpenAI 兼容协议
+# （OpenAI / DeepSeek / 通义千问 / Ollama(/v1) / vLLM 均可）。
+[ai]
+enabled = false
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = "gpt-4o-mini"
+max_rows = 100
+timeout_secs = 30
+allowed_tables = ["sys_user", "sys_dept", "sys_role", "sys_post", "sys_config", "sys_dict_type", "sys_dict_data", "sys_notice", "sys_job", "sys_logininfor", "sys_oper_log", "sys_tenant"]
