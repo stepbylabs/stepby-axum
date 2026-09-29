@@ -1441,3 +1441,11 @@ cd migration && DATABASE_URL=mysql://... cargo run
 # 查看测试覆盖率
 cargo tarpaulin --out Html
 ```
+
+## 附录 · W9 修复的测试口径（2026-09-29）
+
+`like_escape`（`src/common/mod.rs`）已内置 **100 字符模式长度上限**（全站单点防护，防超长 LIKE 逐行回溯的 CPU 型 DoS），并配套 4 个单测（转义/正常搜索不受影响/超长截断/char_boundary 安全）。
+
+- **测试口径**：`cargo test --lib`（含 `common::like_escape_tests` 4 项）——**任何新增 LIKE 查询路径都必须经 `like_escape` 包裹**，不得手写转义。
+- **业务级更严约束**：用户名/手机号等高频搜索字段在 service 层另有 50 字符截断（`clamp_like_param`）。
+- **e2e 口径**：超长关键词（>100 字符）搜索应正常返回（截断后查询），不得 500。
