@@ -1,4 +1,4 @@
-// backend-axum/src/common/breaker.rs
+// stepby-axum/src/common/breaker.rs
 //! #10：**进程内出站 webhook 熔断**（`[resilience] outbound_breaker`）。
 //!
 //! ## 背景：为什么需要它

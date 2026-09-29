@@ -1,4 +1,4 @@
-// backend-axum/migration/src/lib.rs
+// stepby-axum/migration/src/lib.rs
 //! migration 子 crate 库入口
 //! Migrator 实现 MigratorTrait，聚合全部迁移
 

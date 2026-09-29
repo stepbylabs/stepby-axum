@@ -1,6 +1,6 @@
 //! 任务进度中心 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 frontend-vue 前端：
+//! 接口路径对齐 stepby-vue 前端：
 //! - GET    /system/task/list          分页查询任务
 //! - GET    /system/task/{taskId}      查询任务详情
 //! - DELETE /system/task/{taskIds}     批量删除任务

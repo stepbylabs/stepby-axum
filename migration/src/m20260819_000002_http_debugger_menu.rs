@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260819_000002_http_debugger_menu.rs
+// stepby-axum/migration/src/m20260819_000002_http_debugger_menu.rs
 //! 在线 HTTP 调试器 模块迁移
 //!
 //! 本模块为无状态工具（服务端转发，无独立数据表），因此仅注册菜单元数据：

@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000004_oauth_client_key_id.rs
+// stepby-axum/migration/src/m20260926_000004_oauth_client_key_id.rs
 //! 台账 D9（SSO 终稿 §4 低成本预备）：sys_oauth_client 增 `key_id` 密钥版本列。
 //!
 //! 背景：RS256 客户端签名私钥当前"单密钥"（`rsa_private_key` 信封加密落库），

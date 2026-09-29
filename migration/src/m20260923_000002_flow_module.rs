@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260923_000002_flow_module.rs
+// stepby-axum/migration/src/m20260923_000002_flow_module.rs
 //! 审批工作流模块迁移（方案 B′：`sys_flow_task` + `sys_flow_log` 两表，无 `flow_instance`）
 //!
 //! 设计依据：`docs/optimization/topic-workflow-approval-final-2026-09-23.md`（v5+第六/七轮）

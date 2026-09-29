@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_rate_limit.rs
+// stepby-axum/src/repository/sys_rate_limit.rs
 //! sys_rate_limit 数据访问层（API 限流配置表，物理删除）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展限流配置特有查询：

@@ -1,4 +1,4 @@
-// backend-axum/src/utils/mod.rs
+// stepby-axum/src/utils/mod.rs
 
 pub mod captcha;
 pub mod crypto;
@@ -24,7 +24,7 @@ use std::str::FromStr;
 ///
 /// # 示例
 /// ```
-/// use axum_backend::utils::parse_id_list;
+/// use stepby_axum::utils::parse_id_list;
 /// let ids = parse_id_list::<i64>("1, 2, 3");
 /// assert_eq!(ids, vec![1, 2, 3]);
 /// ```

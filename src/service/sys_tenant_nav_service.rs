@@ -1,4 +1,4 @@
-// backend-axum/src/service/sys_tenant_nav_service.rs
+// stepby-axum/src/service/sys_tenant_nav_service.rs
 //! 租户自建导航 L3 服务（批次 3 / MT-1，文档 §29.4）
 //!
 //! ## 三层导航模型中的位置

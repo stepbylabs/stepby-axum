@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000005_platform_only_prefix_governance.rs
+// stepby-axum/migration/src/m20260926_000005_platform_only_prefix_governance.rs
 //! 台账 P2-4（原则 B）：**新增平台专属前缀**对应菜单退出租户与平台普通角色可授集合。
 //!
 //! 与 `m20260926_000002_platform_only_menu_regrant`（覆盖 `tool:gen:` / `monitor:cache:`）

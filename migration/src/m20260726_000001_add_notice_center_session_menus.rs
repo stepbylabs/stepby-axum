@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260726_000001_add_notice_center_session_menus.rs
+// stepby-axum/migration/src/m20260726_000001_add_notice_center_session_menus.rs
 //! 第十一次迁移：新增"通知中心"和"会话管理"两个低成本高价值菜单
 //!
 //! 背景：

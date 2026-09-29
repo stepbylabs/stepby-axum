@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000007_sector_identifier.rs
+// stepby-axum/migration/src/m20260924_000007_sector_identifier.rs
 //! v5-D5：sys_oauth_client 增 sector_identifier_uri 列。
 //!
 //! OIDC Core §8：pairwise subject 下，同一 sector（sector_identifier 指向的

@@ -1,7 +1,7 @@
-// backend-axum/src/handler/sys_dept_handler.rs
+// stepby-axum/src/handler/sys_dept_handler.rs
 //! 部门模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 frontend-vue 前端调用规范：
+//! 接口路径与返回格式对齐 stepby-vue 前端调用规范：
 //! - GET    /system/dept/list                  部门列表（扁平，前端组装树）
 //! - GET    /system/dept/list/exclude/{deptId} 排除指定节点的部门列表（修改父部门选择用）
 //! - GET    /system/dept/treeselect            部门下拉树（返回 TreeSelect 格式）

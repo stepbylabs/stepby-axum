@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000001_sso_rate_limit_tiers.rs
+// stepby-axum/migration/src/m20260924_000001_sso_rate_limit_tiers.rs
 //! v5-S1：SSO/OIDC 公开端点限流分档（docs/optimization/topic-sso-multitenant-final-audit-2026-09-23.md §8.1-S1）
 //!
 //! 背景：SSO 公开端点此前仅由 route_pattern='*' 全局默认档（100 突发 / 10 rps）覆盖，

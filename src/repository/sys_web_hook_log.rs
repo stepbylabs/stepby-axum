@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_web_hook_log.rs
+// stepby-axum/src/repository/sys_web_hook_log.rs
 //! sys_web_hook_log 数据访问层（WebHook 推送记录表，物理删除）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展记录特有查询：

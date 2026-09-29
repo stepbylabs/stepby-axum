@@ -1,4 +1,4 @@
-// backend-axum/src/service/event_outbox_service.rs
+// stepby-axum/src/service/event_outbox_service.rs
 //! 出站**领域事件**集成点（`[events]` 段）——**不是**内置消息队列。
 //!
 //! # 定位（项目准则⑥：原判"不进本仓"改为"提供集成点/开关"）

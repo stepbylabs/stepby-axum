@@ -1,4 +1,4 @@
-// backend-axum/src/db/limits.rs
+// stepby-axum/src/db/limits.rs
 //! 数据库进程级限制快照（R9-ERR-004 / R111-MIN-BE-CORR-002 配套）
 //!
 //! `DatabaseConfig` 只在进程启动时由 `main` 加载一次，但仓库层（如

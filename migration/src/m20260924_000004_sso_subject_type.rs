@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000004_sso_subject_type.rs
+// stepby-axum/migration/src/m20260924_000004_sso_subject_type.rs
 //! v5-D5：客户端 subject 标识类型（OIDC Core §8）。
 //!
 //! - `public`（默认）：所有 RP 看到相同 sub（= user_id 字符串）；

@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260820_000002_web_hook_module.rs
+// stepby-axum/migration/src/m20260820_000002_web_hook_module.rs
 //! WebHook 事件订阅模块迁移（G5）
 //!
 //! 新增两张表（跨 sqlite/postgres/mysql 兼容，参考 m20260818_000002_msg_module）：

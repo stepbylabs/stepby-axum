@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260925_000001_multitenant_phase2.rs
+// stepby-axum/migration/src/m20260925_000001_multitenant_phase2.rs
 //! 多租户 Phase 2（立项实施）：存量 27 张业务/审计表统一铺开 tenant_id。
 //!
 //! 立项定案（2026-09-25 福哥拍板"现在立项"，按文档 §5.3 推荐方案落定）：

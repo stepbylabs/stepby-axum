@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260725_000002_add_menu_i18n_key.rs
+// stepby-axum/migration/src/m20260725_000002_add_menu_i18n_key.rs
 //! 菜单 i18n_key 字段迁移：为 sys_menu 添加 i18n_key 列并填充内置菜单翻译 key
 //!
 //! 背景：

@@ -1,4 +1,4 @@
-// backend-axum/src/router/sys_pat_router.rs
+// stepby-axum/src/router/sys_pat_router.rs
 //! 个人访问令牌（PAT）路由注册
 //!
 //! - 自助：/system/user/profile/tokens*（仅需登录，恒操作本人；已加入 is_login_only_path 白名单）

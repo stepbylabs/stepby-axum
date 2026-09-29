@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/scim.rs
+// stepby-axum/src/integration_tests/scim.rs
 //! v5-D12：SCIM 2.0 用户目录同步端到端链路。
 //!
 //! 覆盖：Bearer 鉴权（缺失/错误 401）→ provision 创建（201 + 随机不可知密码）→

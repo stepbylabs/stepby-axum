@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260729_000001_fix_menu_icons_and_dashboard.rs
+// stepby-axum/migration/src/m20260729_000001_fix_menu_icons_and_dashboard.rs
 //! 第十四次迁移：修复菜单 icon 问题 + order_num 冲突 + 新增 /dashboard 菜单
 //!
 //! 背景：

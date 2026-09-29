@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000011_tenant_domain_self_service_menu.rs
+// stepby-axum/migration/src/m20260926_000011_tenant_domain_self_service_menu.rs
 //! 批次 1c：**租户自助域名管理**页面菜单（能力位 `tenant.domain_self_service` 的③层入口）。
 //!
 //! ## 为什么需要独立页面

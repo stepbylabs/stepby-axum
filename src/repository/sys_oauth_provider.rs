@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_oauth_provider.rs
+// stepby-axum/src/repository/sys_oauth_provider.rs
 //! sys_oauth_provider 数据访问层（OAuth2/OIDC 登录提供商配置表）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展提供商特有查询：

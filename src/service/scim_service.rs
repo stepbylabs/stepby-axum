@@ -1,4 +1,4 @@
-// backend-axum/src/service/scim_service.rs
+// stepby-axum/src/service/scim_service.rs
 //! v5-D12：SCIM 2.0 用户目录同步（RFC 7644 最小可用子集）。
 //!
 //! 面向外部 IdP（Okta / Microsoft Entra ID / Google Workspace）的 provisioning

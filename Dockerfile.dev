@@ -1,4 +1,4 @@
-# axum-backend 开发环境 Dockerfile（R6-BE-ENG-17）
+# stepby-axum 开发环境 Dockerfile（R6-BE-ENG-17）
 #
 # 用途：
 #   提供统一的开发环境，避免开发者本地环境差异，支持热重载迭代。

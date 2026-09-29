@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000002_sso_consent_unique.rs
+// stepby-axum/migration/src/m20260924_000002_sso_consent_unique.rs
 //! v5-E1：sys_oauth_consent 组合唯一索引 (user_id, client_id)。
 //!
 //! 背景：授权同意依赖代码层判重（find_by_user_client 后插入），无 DB 级约束——

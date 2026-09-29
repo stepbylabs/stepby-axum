@@ -1,4 +1,4 @@
-// backend-axum/src/utils/captcha.rs
+// stepby-axum/src/utils/captcha.rs
 
 use captcha::Captcha;
 use captcha::filters::{Dots, Noise, Wave};

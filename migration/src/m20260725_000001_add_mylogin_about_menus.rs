@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260725_000001_add_mylogin_about_menus.rs
+// stepby-axum/migration/src/m20260725_000001_add_mylogin_about_menus.rs
 //! 第十次迁移：新增"我的登录历史"和"关于系统"两个低成本高价值菜单
 //!
 //! 背景：

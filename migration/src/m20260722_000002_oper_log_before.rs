@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260722_000002_oper_log_before.rs
+// stepby-axum/migration/src/m20260722_000002_oper_log_before.rs
 //! 操作日志变更前快照字段迁移
 //!
 //! 在 sys_oper_log 表新增 oper_before 列（TEXT 类型，可空），

@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000009_user_dept.rs
+// stepby-axum/migration/src/m20260924_000009_user_dept.rs
 //! 多部门任职（最小侵入版）——福哥拍板方案一组成。
 //!
 //! 设计决策（§23 §4 更优解，拍板前审查定稿）：

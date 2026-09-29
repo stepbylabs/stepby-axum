@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_pat.rs
+// stepby-axum/src/repository/sys_pat.rs
 //! 个人访问令牌（sys_pat 表）数据访问层
 //!
 //! 提供鉴权查库（按 token_hash）、按用户/全量分页、吊销与最近使用时间更新。

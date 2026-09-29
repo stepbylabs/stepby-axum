@@ -1,4 +1,4 @@
-//! axum-backend 性能基准测试示例（R6-BE-ENG-21）
+//! stepby-axum 性能基准测试示例（R6-BE-ENG-21）
 //!
 //! 用途：
 //!   作为 benches/ 目录的占位示例，演示如何编写并运行性能基准测试。
@@ -23,7 +23,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
-    println!("=== axum-backend 示例基准测试 ===\n");
+    println!("=== stepby-axum 示例基准测试 ===\n");
 
     // 示例 1：字符串拼接性能（format! 宏）
     let start = Instant::now();

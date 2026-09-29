@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000007_platform_only_ratelimit.rs
+// stepby-axum/migration/src/m20260926_000007_platform_only_ratelimit.rs
 //! 台账 2026-09-26 复核（原则 B）：**`system:rateLimit:` 收敛为平台专属**并按完整清单剔除。
 //!
 //! ## 缺陷

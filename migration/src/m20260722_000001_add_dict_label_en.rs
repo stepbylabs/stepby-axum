@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260722_000001_add_dict_label_en.rs
+// stepby-axum/migration/src/m20260722_000001_add_dict_label_en.rs
 //! 字典数据国际化：新增 dict_label_en 字段
 //!
 //! sys_dict_data 原本只有 dict_label（中文标签），新增 dict_label_en（英文标签）

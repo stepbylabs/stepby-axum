@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260927_000002_sys_user_credential.rs
+// stepby-axum/migration/src/m20260927_000002_sys_user_credential.rs
 //! WebAuthn / Passkey 凭据表（sys_user_credential）迁移。
 //!
 //! 能力位 `auth.webauthn`（默认 off）的持久化载体：每个用户可绑定多个 passkey。

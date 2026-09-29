@@ -2,7 +2,7 @@
 
 > **阶段：** 第二阶段「系统核心数据库表结构设计」
 > **对应规范：** `docs/db-spec.md`
-> **规则基线：** `backend-axum/.trae/rules/project-rules.md`
+> **规则基线：** `stepby-axum/.trae/rules/project-rules.md`
 > **用途：** 按任务顺序执行，每个任务含完整代码块，可一键创建文件
 
 ---
@@ -506,7 +506,7 @@ impl ActiveModelBehavior for ActiveModel {}
 **文件：** `src/entity/mod.rs`（覆盖原占位内容）
 
 ```rust
-//! axum-backend SeaORM 实体层
+//! stepby-axum SeaORM 实体层
 //! 包含 11 个系统核心表的实体定义
 
 pub mod sys_dict_data;

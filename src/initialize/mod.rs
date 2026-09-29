@@ -1,4 +1,4 @@
-﻿// axum-backend/src/initialize/mod.rs
+// stepby-axum/src/initialize/mod.rs
 
 use crate::config::Settings;
 use crate::db;
@@ -25,7 +25,7 @@ impl AppInitializer {
         // 2. 初始化日志
         logger::init_logger(&settings.log);
 
-        tracing::info!("=== axum-backend 初始化中 ===");
+        tracing::info!("=== stepby-axum 初始化中 ===");
 
         // 2.1 能力位注入（三层开关的最外层：平台 config「能开什么」）。
         // 必须在任何服务/中间件读取 `common::features::platform_features()` **之前**完成，
@@ -410,7 +410,7 @@ impl AppInitializer {
             storage,
         ));
 
-        tracing::info!("=== axum-backend 初始化完成 ===");
+        tracing::info!("=== stepby-axum 初始化完成 ===");
         Ok(state)
     }
 }

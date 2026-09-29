@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260923_000001_sso_v4_hardening.rs
+// stepby-axum/migration/src/m20260923_000001_sso_v4_hardening.rs
 //! SSO v4 安全加固迁移（对应 docs/optimization/topic-sso-multitenant-v4-final-2026-09-23.md）
 //!
 //! 1. sys_oauth_client：

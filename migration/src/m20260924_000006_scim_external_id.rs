@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000006_scim_external_id.rs
+// stepby-axum/migration/src/m20260924_000006_scim_external_id.rs
 //! v5-D12：SCIM 用户目录同步——sys_user 增 scim_external_id 列。
 //!
 //! externalId 为 IdP 侧用户唯一标识（RFC 7644 §2.3），以 SCIM 写入后用于

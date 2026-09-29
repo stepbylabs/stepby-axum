@@ -1,4 +1,4 @@
-// backend-axum/src/common/image.rs
+// stepby-axum/src/common/image.rs
 
 //! 图片格式识别工具（C13：从 common_handler / sys_user_handler 抽出的公共方法）
 

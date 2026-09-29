@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260818_000003_audit_alarm_config.rs
+// stepby-axum/migration/src/m20260818_000003_audit_alarm_config.rs
 //! 异常操作告警阈值初始配置（sys_config）
 //!
 //! 审计大屏「异常操作告警」功能依赖以下配置项（不配置时后端回退内置默认值）：

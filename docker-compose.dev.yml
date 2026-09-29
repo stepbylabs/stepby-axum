@@ -1,4 +1,4 @@
-# axum-backend 开发环境编排（R6-BE-ENG-18）
+# stepby-axum 开发环境编排（R6-BE-ENG-18）
 #
 # 用途：
 #   一键启动完整的开发环境，包含后端应用服务 + 数据库（PostgreSQL/MySQL/Redis）。

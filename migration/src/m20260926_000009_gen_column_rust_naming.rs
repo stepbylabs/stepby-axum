@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000009_gen_column_rust_naming.rs
+// stepby-axum/migration/src/m20260926_000009_gen_column_rust_naming.rs
 //! 台账（第八批）：代码生成列元数据的 **Java 遗留命名 → Rust 命名**。
 //!
 //! ## 背景

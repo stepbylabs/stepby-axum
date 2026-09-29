@@ -1,4 +1,4 @@
-# axum-backend 部署文档
+# stepby-axum 部署文档
 
 > 版本：v0.1.0 | 更新日期：2026-07-12
 
@@ -134,7 +134,7 @@ cargo --version
 
 ```bash
 git clone <your-repo-url> stepby
-cd stepby/axum-backend
+cd stepby/stepby-axum
 ```
 
 ### 3.3 编译构建
@@ -157,7 +157,7 @@ Release 构建启用了以下优化（见 `Cargo.toml` `[profile.release]`）：
 - `codegen-units = 1`：单代码生成单元（更好优化）
 - `strip = true`：移除调试符号（减小二进制体积）
 
-编译产物位于 `target/release/axum-backend`。
+编译产物位于 `target/release/stepby-axum`。
 
 ### 3.4 执行数据库迁移
 
@@ -329,7 +329,7 @@ export REDIS_URL="redis://:password@127.0.0.1:6379/0"
 export JWT_SECRET="your_strong_secret_at_least_32_characters_long"
 
 # 启动
-./target/release/axum-backend
+./target/release/stepby-axum
 ```
 
 输出：
@@ -352,7 +352,7 @@ User=stepby
 Group=stepby
 WorkingDirectory=/opt/stepby
 EnvironmentFile=/opt/stepby/.env
-ExecStart=/opt/stepby/axum-backend
+ExecStart=/opt/stepby/stepby-axum
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -472,11 +472,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/axum-backend .
+COPY --from=builder /app/target/release/stepby-axum .
 COPY --from=builder /app/config/config.toml.example ./config/config.toml
 
 EXPOSE 8080
-CMD ["./axum-backend"]
+CMD ["./stepby-axum"]
 ```
 
 ### 9.2 docker-compose.yml
@@ -485,7 +485,7 @@ CMD ["./axum-backend"]
 
 services:
   backend:
-    build: ./axum-backend
+    build: ./stepby-axum
     ports:
       - "8080:8080"
     environment:

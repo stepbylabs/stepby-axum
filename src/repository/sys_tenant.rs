@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_tenant.rs
+// stepby-axum/src/repository/sys_tenant.rs
 //! sys_tenant 数据访问层（多租户 Phase 3）
 //!
 //! 租户主表 = 租户身份唯一事实源（`tenant_id` 独立 id 空间，不复用 dept_id）。

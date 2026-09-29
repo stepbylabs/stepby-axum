@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260718_000001_add_more_indexes.rs
+// stepby-axum/migration/src/m20260718_000001_add_more_indexes.rs
 //! 第四次迁移：补充索引（修复 ROUNDS5-7 DB-23/24/27/28/29/30）
 //!
 //! 新增索引：

@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260819_000001_oauth_module.rs
+// stepby-axum/migration/src/m20260819_000001_oauth_module.rs
 //! 第三方登录 / OAuth2 / OIDC 模块迁移
 //!
 //! 新增两张表（跨 sqlite/postgres/mysql 兼容，参考 m20260818_000002_msg_module）：

@@ -1,6 +1,6 @@
 #![no_main]
 
-//! fuzz target：`axum_backend::common::clear_fields::resolve`
+//! fuzz target：`stepby_axum::common::clear_fields::resolve`
 //!
 //! 「显式清空」契约的白名单与冲突判定（DTO 部分更新语义的安全边界）。
 //!
@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use axum_backend::common::clear_fields::{self, ClearFieldsDto};
+use stepby_axum::common::clear_fields::{self, ClearFieldsDto};
 use libfuzzer_sys::fuzz_target;
 
 /// 最小假 DTO：三个可清空字段，值与清空声明均可由 fuzz 输入注入。

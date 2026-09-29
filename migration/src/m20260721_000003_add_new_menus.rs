@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260721_000003_add_new_menus.rs
+// stepby-axum/migration/src/m20260721_000003_add_new_menus.rs
 //! 第七次迁移：新增 3 个菜单种子数据
 //!
 //! 新增菜单：

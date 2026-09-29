@@ -1,4 +1,4 @@
-# axum-backend 测试指引文档
+# stepby-axum 测试指引文档
 
 > 版本：v0.4.0 | 更新日期：2026-07-31
 
@@ -216,7 +216,7 @@ cargo test --lib -- "export_bindings"
 
 ### 4.2 导出目录
 
-导出的 `.ts` 文件位于 `../frontend-vue/src/types/api/generated/`：
+导出的 `.ts` 文件位于 `../stepby-vue/src/types/api/generated/`：
 
 ```
 generated/
@@ -246,7 +246,7 @@ generated/
 `.cargo/config.toml`：
 ```toml
 [env]
-TS_RS_EXPORT_DIR = { value = "../frontend-vue/src/types/api/generated", relative = true }
+TS_RS_EXPORT_DIR = { value = "../stepby-vue/src/types/api/generated", relative = true }
 TS_RS_LARGE_INT = "number"  # i64 映射为 number 而非 string
 ```
 
@@ -254,10 +254,10 @@ TS_RS_LARGE_INT = "number"  # i64 映射为 number 而非 string
 
 ```bash
 # 检查文件是否生成
-ls -la ../frontend-vue/src/types/api/generated/
+ls -la ../stepby-vue/src/types/api/generated/
 
 # 验证类型内容（示例）
-cat ../frontend-vue/src/types/api/generated/SysUser.ts
+cat ../stepby-vue/src/types/api/generated/SysUser.ts
 # 期望输出：
 # export type Model = { userId: number, deptId: number | null, ... }
 ```
@@ -271,7 +271,7 @@ cat ../frontend-vue/src/types/api/generated/SysUser.ts
 cargo test --lib -- "export_bindings"
 
 # 检查是否有未提交的变更（类型与代码不一致时失败）
-git diff --exit-code ../frontend-vue/src/types/api/generated/
+git diff --exit-code ../stepby-vue/src/types/api/generated/
 ```
 
 ---
@@ -726,7 +726,7 @@ jobs:
         run: cargo test --lib -- "export_bindings"
 
       - name: Check TS types unchanged
-        run: git diff --exit-code ../frontend-vue/src/types/api/generated/
+        run: git diff --exit-code ../stepby-vue/src/types/api/generated/
 
       - name: Build release
         run: cargo build --release

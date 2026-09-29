@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260819_000006_observability_menu.rs
+// stepby-axum/migration/src/m20260819_000006_observability_menu.rs
 //! 可观测性（运行监控）模块迁移
 //!
 //! 本模块为无状态工具（进程内可观测性缓冲，无独立数据表），因此仅注册菜单元数据：

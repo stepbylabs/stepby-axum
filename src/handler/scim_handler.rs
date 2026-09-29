@@ -1,4 +1,4 @@
-// backend-axum/src/handler/scim_handler.rs
+// stepby-axum/src/handler/scim_handler.rs
 //! v5-D12：SCIM 2.0 端点（/scim/v2/Users，RFC 7644 最小可用子集）。
 //!
 //! 鉴权：独立 Bearer Token（`scim.bearer_token`，IdP 服务器对服务器凭据，

@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_user_pref.rs
+// stepby-axum/src/repository/sys_user_pref.rs
 //! 用户消息偏好 / 免打扰（sys_user_pref 表）数据访问层
 //!
 //! 以 user_id 为主键，每用户至多一行。提供单用户查询、批量查询（enforcement 用）

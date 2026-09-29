@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260818_000001_add_log_monitor_menu.rs
+// stepby-axum/migration/src/m20260818_000001_add_log_monitor_menu.rs
 //! 新增「实时日志」监控菜单（menu_id=135）
 //!
 //! 背景：

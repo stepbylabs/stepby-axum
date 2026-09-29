@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000003_sso_rs256.rs
+// stepby-axum/migration/src/m20260924_000003_sso_rs256.rs
 //! v5-D2：ID Token 签名升级支持 RS256（非对称）。
 //!
 //! - `id_token_alg`：该客户端 ID Token 的签名算法（RS256/HS256）。

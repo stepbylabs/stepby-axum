@@ -1,4 +1,4 @@
-// backend-axum/src/common/features.rs
+// stepby-axum/src/common/features.rs
 //! 能力位（Feature Flags）注册表与租户能力集。
 //!
 //! # 为什么需要它

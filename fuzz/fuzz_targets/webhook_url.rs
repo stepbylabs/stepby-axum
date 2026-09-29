@@ -1,6 +1,6 @@
 #![no_main]
 
-//! fuzz target：`axum_backend::common::webhook::url_is_http`
+//! fuzz target：`stepby_axum::common::webhook::url_is_http`
 //!
 //! 出站 webhook 目标的 scheme 判定（ACME 证书需求输出 / 领域事件输出共用内核）。
 //!
@@ -18,7 +18,7 @@ fuzz_target!(|data: &[u8]| {
     let trimmed = raw.trim();
     let expected = trimmed.starts_with("http://") || trimmed.starts_with("https://");
     assert_eq!(
-        axum_backend::common::webhook::url_is_http(raw),
+        stepby_axum::common::webhook::url_is_http(raw),
         expected,
         "判定必须等价于裁剪后的前缀判定：{raw:?}"
     );

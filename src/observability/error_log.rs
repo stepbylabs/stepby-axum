@@ -1,4 +1,4 @@
-// backend-axum/src/observability/error_log.rs
+// stepby-axum/src/observability/error_log.rs
 //! 错误聚合总线（Error Bus）
 //!
 //! 通过一个自定义 `tracing_subscriber::Layer` 捕获 `ERROR` 级别日志事件，
@@ -34,7 +34,7 @@ pub struct ErrorEntry {
     pub path: String,
     /// 错误消息（事件 message 字段）
     pub message: String,
-    /// 模块（tracing target，如 axum_backend::service::xxx）
+    /// 模块（tracing target，如 stepby_axum::service::xxx）
     pub module: String,
     /// 日志级别（ERROR）
     pub level: String,

@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260823_000001_sys_pat.rs
+// stepby-axum/migration/src/m20260823_000001_sys_pat.rs
 //! Tier-S #3：个人访问令牌（PAT）模块迁移
 //!
 //! 1. 建表 sys_pat（跨 sqlite/postgres/mysql 兼容，幂等 CREATE TABLE IF NOT EXISTS）：

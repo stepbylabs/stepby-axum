@@ -1,4 +1,4 @@
-# `axum-backend/fuzz` — 覆盖率导向 fuzz（cargo-fuzz）
+# `stepby-axum/fuzz` — 覆盖率导向 fuzz（cargo-fuzz）
 
 `libFuzzer` 驱动的覆盖率导向 fuzz 工程，针对后端**安全边界上的纯函数**。
 用 nightly 工具链运行，是一个**独立 workspace**（刻意不参与主 workspace 构建）。
@@ -35,7 +35,7 @@ rustup toolchain install nightly
 cargo install cargo-fuzz --locked
 
 # 进入 fuzz 工程（独立 workspace）
-cd d:\Projects\stepby\axum-backend\fuzz
+cd d:\Projects\stepby\stepby-axum\fuzz
 
 # 编译全部 target（验证能真实编译）
 cargo +nightly fuzz build

@@ -1,6 +1,6 @@
 #![no_main]
 
-//! fuzz target：`axum_backend::common::ssrf::validate_url`（出站地址静态校验）
+//! fuzz target：`stepby_axum::common::ssrf::validate_url`（出站地址静态校验）
 //!
 //! 这是 SSRF 的第一道防线，属于安全边界上的**纯函数**（不发起 DNS、不做 IO）。
 //!
@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    match axum_backend::common::ssrf::validate_url(raw) {
+    match stepby_axum::common::ssrf::validate_url(raw) {
         Ok(u) => {
             let scheme = u.scheme().to_ascii_lowercase();
             assert!(

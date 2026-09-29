@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/sys_msg.rs
+// stepby-axum/src/integration_tests/sys_msg.rs
 //! 消息中心模块链路集成测试：
 //! - 消息渠道 CRUD（列表/新增/详情/修改/删除 + 异常路径）
 //! - 渠道连通性测试 channel/test

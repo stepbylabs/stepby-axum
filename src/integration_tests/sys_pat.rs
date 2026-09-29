@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/sys_pat.rs
+// stepby-axum/src/integration_tests/sys_pat.rs
 //! 个人访问令牌（PAT）模块链路集成测试（HTTP 端到端，Tier-S #3）：
 //! - 自助签发：POST /system/user/profile/tokens 返回一次性明文（ybt_ 前缀）+ 脱敏视图（不含 token_hash）
 //! - 参数校验：空 scopes / 非法 scope / 空名称 → 400

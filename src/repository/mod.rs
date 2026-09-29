@@ -1,4 +1,4 @@
-// backend-axum/src/repository/mod.rs
+// stepby-axum/src/repository/mod.rs
 //! 数据访问层（Repository Layer）
 //!
 //! 职责：封装数据库查询操作，仅与 SeaORM 交互

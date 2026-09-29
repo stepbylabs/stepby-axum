@@ -1,6 +1,6 @@
 #![no_main]
 
-//! fuzz target：`axum_backend::common::excel::read_xlsx_rows`（xlsx 导入解析入口）
+//! fuzz target：`stepby_axum::common::excel::read_xlsx_rows`（xlsx 导入解析入口）
 //!
 //! 该入口由**用户上传的任意字节**直接驱动（前端仅限制扩展名，内容不可信），
 //! 是典型的解析器不可信输入边界（可被用于探测 calamine 的 panic / 资源耗尽）。
@@ -16,7 +16,7 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // 只要求"不 panic"；解析成功与否都由 calamine 决定，均为合法结局。
-    if let Ok(rows) = axum_backend::common::excel::read_xlsx_rows(data) {
+    if let Ok(rows) = stepby_axum::common::excel::read_xlsx_rows(data) {
         // 触达返回结构，确保编译器不会把调用优化掉（并验证行结构可安全遍历）
         for row in &rows {
             for cell in row {

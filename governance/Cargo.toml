@@ -1,6 +1,6 @@
-# backend-axum/governance/Cargo.toml
+# stepby-axum/governance/Cargo.toml
 #
-# 治理项注册表（单一事实源），由 `axum-backend`（lib）与 `migration` 共同依赖。
+# 治理项注册表（单一事实源），由 `stepby-axum`（lib）与 `migration` 共同依赖。
 # 之所以独立成 crate：migration crate 无法依赖 lib（会形成循环/重量级依赖），
 # 此前只能靠"同值本地副本 + 人工两处同步"维持，属结构性漂移风险。
 #

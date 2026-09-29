@@ -1,4 +1,4 @@
-// backend-axum/src/repository/base.rs
+// stepby-axum/src/repository/base.rs
 //! 通用 Repository 基类：封装 SeaORM 原生 CRUD 操作
 //!
 //! 设计原则：
