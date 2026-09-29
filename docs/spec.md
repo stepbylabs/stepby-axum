@@ -3,7 +3,7 @@
 > **阶段：** 第一阶段「工程脚手架与基础框架」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
 > **规则基线：** 项目规则基线见根目录 `README.md` 与 `SECURITY.md`；Trae IDE 规则文件 `axum-backend/.trae/rules/project-rules.md`（IDE 内自动加载，非项目文档）
-> **开发优先原则：** 接口契约对齐 stepby-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 

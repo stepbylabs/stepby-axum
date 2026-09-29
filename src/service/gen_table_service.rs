@@ -2127,7 +2127,7 @@ mod gen_table_template_tests {
     /// 【第七轮】生成**前端**产物必须能通过 `vue-tsc --noEmit` 的回归锁。
     ///
     /// 背景：`api.tera` / `index.tera` 此前也从未被类型检查过。第七轮把 flow 分类渲染的
-    /// `.ts` / `.vue` 落到 stepby-ui 真实路径并跑 `vue-tsc --noEmit`，暴露 3 处真实缺陷：
+    /// `.ts` / `.vue` 落到 yebot-ui 真实路径并跑 `vue-tsc --noEmit`，暴露 3 处真实缺陷：
     /// ① `import { list } from '@/api/...'` 与页面内 `const list = ref([])` **重名冲突**
     ///    （TS2440）——**crud 与 flow 的所有生成页面都编译失败**；
     /// ② `:row-key="(row) => row.id"` 参数隐式 any（TS7006，本仓 `noImplicitAny`）；
