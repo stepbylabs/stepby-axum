@@ -31,7 +31,39 @@ macro_rules! export_all {
     }};
 }
 
+/// 解析实际导出目录（改名/clone 布局免疫的探测兜底）：
+/// 1. `.cargo/config.toml` [env] 注入的 `TS_RS_EXPORT_DIR` 目录**存在** → 原样使用（常规路径，零行为变化）；
+/// 2. 否则按序探测常见兄弟仓布局（stepby-<技术栈> 命名规范 + 历史名兼容）；
+/// 3. 全部未命中 → 回落 env 原值（保持 `Config::from_env` 的既有报错行为）。
+///
+/// 背景：导出目录跨仓硬编码是目录改名链路的最大断点（本项目已三次改名各断一次），
+/// 此探测使 `cargo ts` 在目录改名后无需同步修改 `.cargo/config.toml` 即可继续工作。
+/// 注：`cargo test` 的 export_bindings_* 测试不走本入口，仍依赖 env 默认值（常规布局下二者一致）。
+fn effective_export_dir() -> String {
+    let from_env = std::env::var("TS_RS_EXPORT_DIR")
+        .unwrap_or_else(|_| "../stepby-vue/src/types/api/generated".to_string());
+    if std::path::Path::new(&from_env).is_dir() {
+        return from_env;
+    }
+    let candidates = [
+        "../stepby-vue/src/types/api/generated",
+        "stepby-vue/src/types/api/generated",
+        "../frontend-vue/src/types/api/generated",
+        "../stepby-ui/src/types/api/generated",
+    ];
+    for c in candidates {
+        if std::path::Path::new(c).is_dir() {
+            eprintln!("[export_ts] TS_RS_EXPORT_DIR 指向的目录不存在，探测到可用导出目录: {c}");
+            return c.to_string();
+        }
+    }
+    from_env
+}
+
 fn main() {
+    let dir = effective_export_dir();
+    // 单线程入口内进程级 env 覆盖（edition 2024 要求 unsafe），供 Config::from_env 统一消费
+    unsafe { std::env::set_var("TS_RS_EXPORT_DIR", &dir) };
     let cfg = Config::from_env();
     let (total, failed) = export_all!(
         &cfg,
