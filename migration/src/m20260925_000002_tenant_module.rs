@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260925_000002_tenant_module.rs
+// stepby-axum/migration/src/m20260925_000002_tenant_module.rs
 //! 多租户 Phase 2（立项实施）——租户管理模块菜单。
 //!
 //! 菜单：3700 段全新号（见 menu-id-registry.md：新增大模块 3700 起步进 100）。

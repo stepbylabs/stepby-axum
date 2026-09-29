@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_msg_template.rs
+// stepby-axum/src/repository/sys_msg_template.rs
 //! sys_msg_template 数据访问层（消息模板表）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展模板特有查询：

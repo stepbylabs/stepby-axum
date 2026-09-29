@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260819_000005_add_role_custom_sql.rs
+// stepby-axum/migration/src/m20260819_000005_add_role_custom_sql.rs
 //! 数据权限加深：为 sys_role 增加 `custom_sql` 列（自定义部门 SQL 过滤片段）
 //!
 //! 背景：data_scope = "2"（自定义数据权限）原本仅支持「勾选部门」（sys_role_dept）。

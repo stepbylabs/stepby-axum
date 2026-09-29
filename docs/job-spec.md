@@ -62,7 +62,7 @@
 | sys_job_log | status='0' | 执行成功 | |
 | sys_job_log | status='1' | 执行失败 | |
 
-> **注意**：旧实现的 status 语义（0=暂停 1=运行）与前端**相反**，axum-backend 遵循前端语义，不照搬旧实现。
+> **注意**：旧实现的 status 语义（0=暂停 1=运行）与前端**相反**，stepby-axum 遵循前端语义，不照搬旧实现。
 
 ---
 
@@ -469,7 +469,7 @@ pub fn list_registered_tasks() -> Vec<String>;
 
 **实现说明**：
 - tokio-cron-scheduler 内部基于 cron 表达式触发，不跟踪 misfire 历史
-- axum-backend 在 `load_from_db()` 阶段对 `misfire_policy='1'` 或 `'2'` 的任务，启动后立即 spawn 一次 `execute_task`
+- stepby-axum 在 `load_from_db()` 阶段对 `misfire_policy='1'` 或 `'2'` 的任务，启动后立即 spawn 一次 `execute_task`
 - `misfire_policy='3'` 的任务仅按 cron 正常调度，不补执行
 - 这是简化实现，不追踪精确的 misfire 次数（Quartz 行为过于复杂，Rust 后端按业务够用原则简化）
 
@@ -780,7 +780,7 @@ async fn execute_inner(invoke_target: &str) -> Result<String, String> {
 | 全局状态 | 支持 Arc 共享 | 依赖全局 Lazy |
 | cron 解析 | 内置 | 内置 |
 
-**决策**：选用 `tokio-cron-scheduler`，符合全局规则"调度内核独立实现"的要求，且与 axum-backend 现有 tokio 生态无缝集成。
+**决策**：选用 `tokio-cron-scheduler`，符合全局规则"调度内核独立实现"的要求，且与 stepby-axum 现有 tokio 生态无缝集成。
 
 ### 10.2 调度器实例管理
 

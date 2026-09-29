@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260724_000001_ip_location_menus.rs
+// stepby-axum/migration/src/m20260724_000001_ip_location_menus.rs
 //! 第九次迁移：新增 IP 归属地库管理菜单和按钮权限
 //!
 //! 背景：

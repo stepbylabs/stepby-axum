@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260925_000003_tenant_phase3.rs
+// stepby-axum/migration/src/m20260925_000003_tenant_phase3.rs
 //! 多租户 Phase 3：独立租户表族（文档 §27 / §29.7 P1 落地）。
 //!
 //! 决策（福哥拍板，§29 专项核查后修订）：

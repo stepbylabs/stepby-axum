@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000014_tenant_nav_menu.rs
+// stepby-axum/migration/src/m20260926_000014_tenant_nav_menu.rs
 //! 批次 3（MT-1）：**租户自建导航 L3** 页面菜单（能力位 `nav.l3` 的③层入口）。
 //!
 //! ## 为什么需要独立页面

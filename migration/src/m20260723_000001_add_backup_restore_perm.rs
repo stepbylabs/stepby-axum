@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260723_000001_add_backup_restore_perm.rs
+// stepby-axum/migration/src/m20260723_000001_add_backup_restore_perm.rs
 //! 第八次迁移：补充备份恢复接口的权限标识
 //!
 //! 背景：

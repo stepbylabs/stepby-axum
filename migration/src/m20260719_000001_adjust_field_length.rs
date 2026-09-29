@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260719_000001_adjust_field_length.rs
+// stepby-axum/migration/src/m20260719_000001_adjust_field_length.rs
 //! 第五次迁移：调整字段长度（P2-30 + P2-31）
 //!
 //! 修改内容：

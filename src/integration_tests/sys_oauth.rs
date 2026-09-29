@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/sys_oauth.rs
+// stepby-axum/src/integration_tests/sys_oauth.rs
 //! 第三方登录 / OAuth2 / OIDC 提供商链路集成测试：
 //! - 公开端点：GET /oauth2/providers（启用提供商列表）、GET /oauth2/authorize
 //! - 提供商管理：列表 / 详情 / 新增 → 修改 → 删除 / 启停（status）

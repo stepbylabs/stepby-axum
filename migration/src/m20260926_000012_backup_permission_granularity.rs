@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000012_backup_permission_granularity.rs
+// stepby-axum/migration/src/m20260926_000012_backup_permission_granularity.rs
 //! 批次 2（MT-7）：备份权限**粒度化**——新增两个按钮 perms。
 //!
 //! ## 缺陷（本轮取证）

@@ -1,4 +1,4 @@
-// backend-axum/src/entity/mod.rs
+// stepby-axum/src/entity/mod.rs
 //! SeaORM 实体层：系统核心表的实体定义
 //!
 //! 字段命名规范：

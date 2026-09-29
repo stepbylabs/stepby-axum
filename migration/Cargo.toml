@@ -1,4 +1,4 @@
-# backend-axum/migration/Cargo.toml
+# stepby-axum/migration/Cargo.toml
 
 [package]
 name = "migration"
@@ -7,7 +7,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-# 项目内共享 crate：治理项注册表（单一事实源，与 axum-backend 共用）。
+# 项目内共享 crate：治理项注册表（单一事实源，与 stepby-axum 共用）。
 # 此前 migration crate 无法依赖 lib，只能保留同值本地副本 + 人工两处同步；
 # 抽为独立零依赖 crate 后复制路径在物理上消失。
 governance = { path = "../governance" }

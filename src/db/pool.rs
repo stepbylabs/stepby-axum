@@ -1,4 +1,4 @@
-// backend-axum/src/db/pool.rs
+// stepby-axum/src/db/pool.rs
 
 use crate::config::DatabaseConfig;
 use crate::db::db_type::DbType;

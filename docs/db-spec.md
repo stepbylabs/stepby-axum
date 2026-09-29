@@ -1,9 +1,9 @@
 # 数据库表结构设计文档（db-spec.md）
 
 > **阶段：** 第二阶段「系统核心数据库表结构设计」
-> **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
-> **规则基线：** `backend-axum/.trae/rules/project-rules.md`（全程永久生效）
-> **开发优先原则：** 接口契约对齐 frontend-vue 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **项目：** stepby-axum（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
+> **规则基线：** `stepby-axum/.trae/rules/project-rules.md`（全程永久生效）
+> **开发优先原则：** 接口契约对齐 stepby-vue 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 

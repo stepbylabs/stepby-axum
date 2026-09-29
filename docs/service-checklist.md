@@ -1,7 +1,7 @@
 # Service 层验收清单（service-checklist.md）
 
 > **阶段：** 第三阶段「用户/角色/菜单 Service 层业务实现」
-> **项目：** axum-backend
+> **项目：** stepby-axum
 > **配套文档：** [service-spec.md](./service-spec.md)、[service-tasks.md](./service-tasks.md)
 
 ---

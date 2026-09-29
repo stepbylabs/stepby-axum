@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260926_000003_logininfor_user_id.rs
+// stepby-axum/migration/src/m20260926_000003_logininfor_user_id.rs
 //! 台账 F-8（§2.4 建议采纳）：sys_logininfor 增 `user_id` 列 + 索引 + 存量回填。
 //!
 //! 背景：登录日志表原只有 `user_name`（可变、可重名于历史数据），审计域"强关联"要求

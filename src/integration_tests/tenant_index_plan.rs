@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/tenant_index_plan.rs
+// stepby-axum/src/integration_tests/tenant_index_plan.rs
 //! 台账 P2-6：组合索引在**租户数据倾斜**下的执行计划验证（SQLite）。
 //!
 //! 背景：迁移 `m20260925_000001_multitenant_phase2.rs` 为 27 张表建了单列

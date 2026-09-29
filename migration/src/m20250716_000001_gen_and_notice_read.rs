@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20250716_000001_gen_and_notice_read.rs
+// stepby-axum/migration/src/m20250716_000001_gen_and_notice_read.rs
 //! 第二次迁移：新增代码生成模块表 + 通知公告已读记录表
 //!
 //! 新增表：

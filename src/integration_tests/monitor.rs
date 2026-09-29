@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/monitor.rs
+// stepby-axum/src/integration_tests/monitor.rs
 //! 系统监控面板链路集成测试：
 //! - 缓存监控：概览（info/dbSize/commandStats）/ 名称列表 / 键列表 / 值 / 清理 / 白名单校验错误
 //! - 在线用户：列表（含当前 admin 会话）/ 强退（超管保护 403 / 不存在 404）

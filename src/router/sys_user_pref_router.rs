@@ -1,4 +1,4 @@
-// backend-axum/src/router/sys_user_pref_router.rs
+// stepby-axum/src/router/sys_user_pref_router.rs
 //! 用户消息偏好 / 免打扰路由注册
 //!
 //! 受保护路由（需 auth_middleware + permission_middleware，但按 is_login_only_path

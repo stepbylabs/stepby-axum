@@ -24,8 +24,8 @@ RUN mkdir -p src migration/src && \
 # 覆盖 dummy src，触发仅源码层的增量编译
 COPY . .
 
-# 编译 release 版本（默认只构建根包 axum-backend；migration 是独立工具二进制，
-# 不是 axum-backend 的依赖，cargo build 不会自动构建它，需显式指定 -p migration）
+# 编译 release 版本（默认只构建根包 stepby-axum；migration 是独立工具二进制，
+# 不是 stepby-axum 的依赖，cargo build 不会自动构建它，需显式指定 -p migration）
 RUN cargo build --release
 # 显式构建 migration 独立二进制（用于数据库迁移），否则 target/release/migration 不会产出
 RUN cargo build --release -p migration
@@ -45,7 +45,7 @@ RUN useradd --no-create-home --system --uid 1000 appuser
 WORKDIR /app
 
 # 复制编译产物
-COPY --from=builder /app/target/release/axum-backend /app/axum-backend
+COPY --from=builder /app/target/release/stepby-axum /app/stepby-axum
 COPY --from=builder /app/target/release/migration /app/migration
 # 复制配置模板（生产环境通过环境变量覆盖敏感字段，或挂载 config.toml）
 COPY --from=builder /app/config /app/config
@@ -67,4 +67,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # 默认启动后端服务
 # 敏感配置通过环境变量注入：DATABASE_URL / REDIS_URL / JWT_SECRET / JWT_EXPIRE_HOURS
-CMD ["./axum-backend"]
+CMD ["./stepby-axum"]

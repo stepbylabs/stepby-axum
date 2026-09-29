@@ -1,9 +1,9 @@
-// backend-axum/governance/src/lib.rs
+// stepby-axum/governance/src/lib.rs
 //! # governance —— 治理项注册表（单一事实源）
 //!
 //! ## 为什么单独成 crate
 //!
-//! `axum-backend`（lib）与 `migration`（migration crate）是 workspace 内两个**互不依赖**
+//! `stepby-axum`（lib）与 `migration`（migration crate）是 workspace 内两个**互不依赖**
 //! 的 crate，而两者都需要同一份治理清单：
 //!
 //! - 平台锁定键 / 平台默认键（`sys_config` 治理列 seed）；
@@ -37,7 +37,7 @@ pub const OFF: &str = "off";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// 能力位：由 `config.toml` `[features]`（平台层）与 `sys_tenant_package.features`
-    /// （租户套餐层）两层收敛，消费方为 `axum_backend::common::features::FeatureSet`。
+    /// （租户套餐层）两层收敛，消费方为 `stepby_axum::common::features::FeatureSet`。
     Feature,
     /// 参数项：由 `sys_config` 行 + 治理列（`scope` / `tenant_editable` /
     /// `visible_to_tenant`）承载。

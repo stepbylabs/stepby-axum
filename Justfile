@@ -1,4 +1,4 @@
-# axum-backend 常用命令封装（R6-BE-ENG-16）
+# stepby-axum 常用命令封装（R6-BE-ENG-16）
 #
 # 使用方式：
 #   安装 just：cargo install just  或  scoop install just (Windows)
@@ -6,7 +6,7 @@
 #   执行命令：just <recipe-name>
 #
 # 说明：
-# - 所有命令默认在 axum-backend 目录下执行（由 justfile 文件位置决定）
+# - 所有命令默认在 stepby-axum 目录下执行（由 justfile 文件位置决定）
 # - 工具链版本由 rust-toolchain.toml 固定为 stable 1.96.0
 # - 依赖服务（PostgreSQL/MySQL/Redis）通过 docker compose 启动
 

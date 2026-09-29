@@ -1,4 +1,4 @@
-// backend-axum/src/common/constants.rs
+// stepby-axum/src/common/constants.rs
 
 //! 项目级常量定义
 //!
@@ -84,7 +84,7 @@ pub const MAIL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// DTO 若仍按 255 校验，则 65~255 字符的表达式会**通过校验后**在落库时报错（500），
 /// 用户看到的是"系统错误"而不是"参数过长"。此处对齐为 64，把失败提前成可诊断的 400。
 ///
-/// ⚠️ 该值与 migration 的 64 属**跨 crate 约定**（migration 不依赖 axum-backend，
+/// ⚠️ 该值与 migration 的 64 属**跨 crate 约定**（migration 不依赖 stepby-axum，
 /// 无法直接引用本常量）——改宽度必须同时改迁移文件。
 /// 64 字符对 Quartz 风格表达式（含 `MON-FRI` 与年份字段）绰绰有余。
 pub const CRON_EXPRESSION_MAX_LEN: usize = 64;

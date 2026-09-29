@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_oauth_user.rs
+// stepby-axum/src/repository/sys_oauth_user.rs
 //! sys_oauth_user 数据访问层（第三方身份绑定表）
 //!
 //! 扩展查询：

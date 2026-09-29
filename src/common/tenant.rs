@@ -1,4 +1,4 @@
-// backend-axum/src/common/tenant.rs
+// stepby-axum/src/common/tenant.rs
 //! v5-N2 Phase 2：多租户过滤基建。
 //!
 //! 语义约定（Phase 2 立项默认规则，随实现固化）：

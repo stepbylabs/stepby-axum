@@ -1,4 +1,4 @@
-# axum-backend 开发环境数据库容器
+# stepby-axum 开发环境数据库容器
 # 用途：本地测试 PostgreSQL 和 MySQL 数据库
 #
 # 启动方式：
@@ -14,7 +14,7 @@
 #
 # 必填环境变量（缺省即 fail-fast，避免静默使用弱口令）：
 #   POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD / REDIS_PASSWORD
-#   —— 通过 axum-backend/.env（本目录，已被 .gitignore 忽略）或外部环境变量提供。
+#   —— 通过 stepby-axum/.env（本目录，已被 .gitignore 忽略）或外部环境变量提供。
 #
 # 测试步骤：
 #   1. 复制 .env.example 为 .env 并填写上述口令；修改 .env 中 DATABASE_URL 指向目标数据库
@@ -29,7 +29,7 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-stepby}
       # 必填：缺省即报错（fail-fast），避免静默回落到弱默认口令
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必填（请在 axum-backend/.env 中设置）}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必填（请在 stepby-axum/.env 中设置）}
       POSTGRES_DB: ${POSTGRES_DB:-stepby}
       TZ: Asia/Shanghai
     ports:
@@ -50,10 +50,10 @@ services:
     restart: unless-stopped
     environment:
       # 必填：缺省即报错（fail-fast）
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必填（请在 axum-backend/.env 中设置）}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必填（请在 stepby-axum/.env 中设置）}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-stepby}
       MYSQL_USER: ${MYSQL_USER:-stepby}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 必填（请在 axum-backend/.env 中设置）}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 必填（请在 stepby-axum/.env 中设置）}
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:3306:3306"
@@ -76,7 +76,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       # 必填：redis 访问口令，缺省即报错（fail-fast）
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 必填（请在 axum-backend/.env 中设置）}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 必填（请在 stepby-axum/.env 中设置）}
     ports:
       - "127.0.0.1:6379:6379"
     # 持久化：AOF（appendonly）+ RDB 快照，防止重启丢失 token 黑名单/登录限流计数

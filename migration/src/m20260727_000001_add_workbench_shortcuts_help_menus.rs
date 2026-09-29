@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260727_000001_add_workbench_shortcuts_help_menus.rs
+// stepby-axum/migration/src/m20260727_000001_add_workbench_shortcuts_help_menus.rs
 //! 第十二次迁移：新增"个人工作台"、"快捷键中心"、"帮助中心"三个低成本高价值菜单
 //!
 //! 背景：

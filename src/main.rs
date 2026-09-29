@@ -1,5 +1,5 @@
-// backend-axum/src/main.rs
-//! backend-axum 应用入口
+// stepby-axum/src/main.rs
+//! stepby-axum 应用入口
 //! 1. 加载 .env 环境变量
 //! 2. 安装 panic hook（将 panic 转入 tracing 结构化日志）
 //! 3. 构建 8MB 栈大小的 Tokio runtime（项目硬约束）
@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use axum_backend::{initialize::AppInitializer, router};
+use stepby_axum::{initialize::AppInitializer, router};
 use tokio::net::TcpListener;
 
 /// 优雅关闭调度器的超时时间（秒）。
@@ -44,7 +44,7 @@ async fn async_main() -> anyhow::Result<()> {
     // （DECR 的 spawn 任务在 runtime 关闭时未执行 / 进程异常退出 / 网络闪断未及时 DECR），
     // 陈旧计数会让该用户后续所有 WS 握手返回 429，实时通知静默失效。
     // 必须在路由构建前清理，使新连接从零计数开始。
-    axum_backend::handler::ws_handler::reset_ws_conn_counts(&state).await;
+    stepby_axum::handler::ws_handler::reset_ws_conn_counts(&state).await;
 
     // 提取监听地址（在 state 被路由消费前取出）
     let host = state.config.server.host.clone();

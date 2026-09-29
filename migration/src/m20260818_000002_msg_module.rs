@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260818_000002_msg_module.rs
+// stepby-axum/migration/src/m20260818_000002_msg_module.rs
 //! 消息渠道与模板管理模块迁移
 //!
 //! 新增三张表（跨 sqlite/postgres/mysql 兼容，参考 m20260721_000002_sys_task）：

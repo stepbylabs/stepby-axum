@@ -1,4 +1,4 @@
-// backend-axum/src/router/sys_scim_group_router.rs
+// stepby-axum/src/router/sys_scim_group_router.rs
 //! v5-D12 Group：SCIM 组管理端路由（JWT 鉴权中间件下）
 
 use axum::Router;

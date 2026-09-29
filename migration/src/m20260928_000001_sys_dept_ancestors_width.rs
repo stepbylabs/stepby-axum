@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260928_000001_sys_dept_ancestors_width.rs
+// stepby-axum/migration/src/m20260928_000001_sys_dept_ancestors_width.rs
 //! R5-DB-26：`sys_dept.ancestors` 宽度修正（VARCHAR(50) → VARCHAR(500)）。
 //!
 //! 缺陷：`ancestors` 存储以逗号拼接的祖先 ID 链（形如 `0,100,101,102,...`，

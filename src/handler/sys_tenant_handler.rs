@@ -1,7 +1,7 @@
-// backend-axum/src/handler/sys_tenant_handler.rs
+// stepby-axum/src/handler/sys_tenant_handler.rs
 //! 租户管理 Handler（多租户 Phase 3：事实源 = `sys_tenant`，主键为 `tenant_id`）
 //!
-//! 接口路径与返回格式对齐 frontend-vue 前端调用规范：
+//! 接口路径与返回格式对齐 stepby-vue 前端调用规范：
 //! - GET    /system/tenant/list            租户列表（平台全量；租户操作者仅本租户）
 //! - GET    /system/tenant/{tenantId}      租户详情
 //! - POST   /system/tenant                 新建租户（含根部门/默认角色/管理员初始化，仅平台）

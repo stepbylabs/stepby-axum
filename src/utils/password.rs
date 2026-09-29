@@ -1,4 +1,4 @@
-// backend-axum/src/utils/password.rs
+// stepby-axum/src/utils/password.rs
 //! 密码加密与验证工具
 //!
 //! 使用 Argon2id 算法（2024 年密码哈希竞赛推荐），每用户独立随机盐。

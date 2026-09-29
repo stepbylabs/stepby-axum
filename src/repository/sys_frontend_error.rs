@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_frontend_error.rs
+// stepby-axum/src/repository/sys_frontend_error.rs
 //! sys_frontend_error 数据访问层（前端异常与性能监控，物理删除）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展前端异常特有查询：

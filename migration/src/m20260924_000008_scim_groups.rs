@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260924_000008_scim_groups.rs
+// stepby-axum/migration/src/m20260924_000008_scim_groups.rs
 //! v5-D12 Group：SCIM Group 资源落地（组→角色集合 / 组→部门 双映射）。
 //!
 //! 拍板方案（福哥 2026-09-24，方案一全做）：

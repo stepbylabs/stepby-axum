@@ -1,4 +1,4 @@
-﻿// axum-backend/migration/src/m20260820_000001_demo_seed.rs
+// stepby-axum/migration/src/m20260820_000001_demo_seed.rs
 //! 演示种子数据迁移（B 类演示种子）
 //!
 //! 目的：提供一套「开箱即用、可登录演示」的真实示例数据，方便在线 Demo / 本地体验，

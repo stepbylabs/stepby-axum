@@ -1,4 +1,4 @@
-// backend-axum/src/router/sys_tenant_router.rs
+// stepby-axum/src/router/sys_tenant_router.rs
 //! 租户管理模块路由注册（多租户 Phase 3：主键 = `tenant_id`，事实源 = sys_tenant）
 //!
 //! 权限要求（通过 permission_middleware 集中配置，详见 middleware/permission.rs）：

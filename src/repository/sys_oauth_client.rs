@@ -1,4 +1,4 @@
-// backend-axum/src/repository/sys_oauth_client.rs
+// stepby-axum/src/repository/sys_oauth_client.rs
 //! sys_oauth_client 数据访问层（OIDC Provider：已注册客户端配置表）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展客户端特有查询：

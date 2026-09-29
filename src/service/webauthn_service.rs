@@ -1,4 +1,4 @@
-// backend-axum/src/service/webauthn_service.rs
+// stepby-axum/src/service/webauthn_service.rs
 //! WebAuthn / Passkey 服务（能力位 `auth.webauthn`，默认 **off**）。
 //!
 //! # 定位

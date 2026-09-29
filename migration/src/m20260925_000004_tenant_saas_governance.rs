@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260925_000004_tenant_saas_governance.rs
+// stepby-axum/migration/src/m20260925_000004_tenant_saas_governance.rs
 //! 多租户 Phase 3.5f：SaaS 治理（config 治理列 + 唯一域租户化 + 审计目标租户）。
 //!
 //! 对应文档 §27.8（config 治理）/ §27.9（隔离缺口：审计目标租户）/ §29.7 P2
@@ -148,7 +148,7 @@ async fn create_unique_index_tolerant(
 
 /// 安全项 / 可下放项 config key：**一律取自共享注册表 crate `governance`**。
 ///
-/// 抽离动机：本 crate 无法依赖 `axum-backend`（lib），此前只能保留同值本地副本并靠注释
+/// 抽离动机：本 crate 无法依赖 `stepby-axum`（lib），此前只能保留同值本地副本并靠注释
 /// 约束「修改时必须两处同步」。该形态已导致过治理静默失效事故，故上移为独立零依赖 crate，
 /// 从物理上消除复制路径（启动兜底 `ensure_tenant_saas_governance` 引用同一份数据）。
 /// 把键清单拼成 SQL 的 `'a', 'b'` 字面量列表。

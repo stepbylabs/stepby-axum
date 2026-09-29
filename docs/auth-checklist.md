@@ -1,9 +1,9 @@
 # 鉴权体系验收清单（auth-checklist.md）
 
 > **阶段：** 第四阶段「Axum 原生鉴权体系实现」
-> **项目：** axum-backend
+> **项目：** stepby-axum
 > **配套文档：** [auth-spec.md](./auth-spec.md)、[auth-tasks.md](./auth-tasks.md)
-> **规则基线：** `backend-axum/.trae/rules/project-rules.md`（全程永久生效）
+> **规则基线：** `stepby-axum/.trae/rules/project-rules.md`（全程永久生效）
 
 ---
 
@@ -346,7 +346,7 @@
 
 ## 16. 关键缺陷修复对照
 
-| 旧实现缺陷 | axum-backend 修复 | 验收 |
+| 旧实现缺陷 | stepby-axum 修复 | 验收 |
 |---------------------|-------------------|------|
 | JWT 中间件只查 Redis 不验 JWT 签名 | JWT 签名验证 + Redis 黑名单双重校验 | [ ] |
 | JWT exp=6h 但 Redis TTL=1h | JWT exp 与 Redis TTL 一致（均为 expire_hours） | [ ] |

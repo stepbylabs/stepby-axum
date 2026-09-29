@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260821_000001_frontend_error_module.rs
+// stepby-axum/migration/src/m20260821_000001_frontend_error_module.rs
 //! 前端异常与性能监控模块迁移（Tier-S #1）
 //!
 //! 新增一张表 `sys_frontend_error`（跨 sqlite/postgres/mysql 兼容，参考 m20260820_000002_web_hook_module）：

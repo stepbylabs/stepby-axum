@@ -1,4 +1,4 @@
-﻿# axum-backend 配置文件模板
+# stepby-axum 配置文件模板
 #
 # 使用方法：
 # 1. 复制本文件为 config.toml：cp config/config.toml.example config/config.toml

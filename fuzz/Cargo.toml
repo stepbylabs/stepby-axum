@@ -1,5 +1,5 @@
 [package]
-name = "axum-backend-fuzz"
+name = "stepby-axum-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.axum-backend]
+[dependencies.stepby-axum]
 path = ".."
 
 # cargo-fuzz 要求 fuzz crate **独立于**主 workspace（主 workspace 已在

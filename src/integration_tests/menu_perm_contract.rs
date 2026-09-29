@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/menu_perm_contract.rs
+// stepby-axum/src/integration_tests/menu_perm_contract.rs
 //! 菜单 ↔ 后端路由权限键 契约一致性测试。
 //!
 //! 背景（优化方案 §3.2）：后端 `get_required_perm` 为每个受保护路由登记所需权限键，

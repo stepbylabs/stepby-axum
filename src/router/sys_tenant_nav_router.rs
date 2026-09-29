@@ -1,4 +1,4 @@
-// backend-axum/src/router/sys_tenant_nav_router.rs
+// stepby-axum/src/router/sys_tenant_nav_router.rs
 //! 租户自建导航 L3 模块路由注册（批次 3 / MT-1）
 //!
 //! 权限要求（通过 permission_middleware 集中配置，详见 middleware/permission.rs）：

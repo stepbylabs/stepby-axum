@@ -1,7 +1,7 @@
-// backend-axum/src/handler/sys_role_handler.rs
+// stepby-axum/src/handler/sys_role_handler.rs
 //! 角色模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 frontend-vue 前端调用规范：
+//! 接口路径与返回格式对齐 stepby-vue 前端调用规范：
 //! - GET    /system/role/list                       分页查询角色
 //! - POST   /system/role                            新增角色
 //! - PUT    /system/role                            修改角色

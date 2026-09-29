@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/tenant_binding_guard.rs
+// stepby-axum/src/integration_tests/tenant_binding_guard.rs
 //! 第十批（MT-2 审计器候选逐条复核发现）：**关联表写入路径的父资源租户归属**回归锁。
 //!
 //! ## 修复前的两处真实缺口

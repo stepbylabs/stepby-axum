@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/auth.rs
+// stepby-axum/src/integration_tests/auth.rs
 //! 认证链路集成测试：登录 → getInfo → getRouters → logout，以及未授权/伪造 token 拒绝。
 
 use axum::body::{Body, to_bytes};

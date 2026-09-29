@@ -1,4 +1,4 @@
-// backend-axum/src/service/sys_tenant_domain_service.rs
+// stepby-axum/src/service/sys_tenant_domain_service.rs
 //! 租户域名绑定服务（多租户 Phase 3 域名链路，文档 §27.7 / §29.6）
 //!
 //! 链路定位：TLS 与 host 路由交 Nginx/网关；网关解析域名后注入内部头

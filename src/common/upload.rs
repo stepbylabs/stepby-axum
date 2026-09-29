@@ -75,7 +75,7 @@ pub struct UploadedFile {
 ///   4. 兜底：创建 CWD + root 并返回（fail-soft，不阻断启动）
 ///
 /// 修复头像 404 问题：原 `ServeDir::new("uploads")` 依赖进程 CWD，
-/// 当后端从 `target/debug/axum-backend.exe` 启动且 CWD 不是 `axum-backend/` 时，
+/// 当后端从 `target/debug/stepby-axum.exe` 启动且 CWD 不是 `stepby-axum/` 时，
 /// 相对路径无法定位到实际的 `uploads/` 目录。
 pub fn resolve_upload_root(upload_config: &crate::config::UploadConfig) -> PathBuf {
     let avatar_dir = PathBuf::from(&upload_config.avatar_dir);

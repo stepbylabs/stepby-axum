@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260728_000001_add_changelog_menu.rs
+// stepby-axum/migration/src/m20260728_000001_add_changelog_menu.rs
 //! 第十三次迁移：新增"更新日志"菜单（TierS-2 功能）
 //!
 //! 背景：

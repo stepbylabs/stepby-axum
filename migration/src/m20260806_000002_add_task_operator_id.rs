@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260806_000002_add_task_operator_id.rs
+// stepby-axum/migration/src/m20260806_000002_add_task_operator_id.rs
 //! 迁移：sys_task 表增加 operator_id 列（P0-2 越权广播修复）
 //!
 //! 背景：taskProgress 消息原通过全局 WS 广播推送给所有在线客户端，存在跨用户

@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260922_000001_sso_module.rs
+// stepby-axum/migration/src/m20260922_000001_sso_module.rs
 //! 单点登录 / OIDC Provider（SSO server 角色）模块迁移
 //!
 //! 与 m20260819_000001_oauth_module（OAuth **客户端**：本系统作为第三方登录的消费方）

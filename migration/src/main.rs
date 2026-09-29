@@ -1,4 +1,4 @@
-// axum-backend/migration/src/main.rs
+// stepby-axum/migration/src/main.rs
 //! migration 命令行入口
 //! 从 DATABASE_URL 环境变量读取连接串，执行迁移
 

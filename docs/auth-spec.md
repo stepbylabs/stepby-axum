@@ -1,9 +1,9 @@
 # Axum 原生鉴权体系设计文档（auth-spec.md）
 
 > **阶段：** 第四阶段「Axum 原生鉴权体系实现」
-> **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
-> **规则基线：** `backend-axum/.trae/rules/project-rules.md`（全程永久生效）
-> **开发优先原则：** 接口契约对齐 frontend-vue 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **项目：** stepby-axum（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
+> **规则基线：** `stepby-axum/.trae/rules/project-rules.md`（全程永久生效）
+> **开发优先原则：** 接口契约对齐 stepby-vue 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -66,7 +66,7 @@
 
 ### 2.1 关键实现差异（修正项）
 
-| 旧框架实现 | axum-backend 改进方案 | 修正理由 |
+| 旧框架实现 | stepby-axum 改进方案 | 修正理由 |
 |----------------------|----------------------|----------|
 | JWT 中间件**只查 Redis 不验 JWT 签名** | JWT 签名验证 + Redis 黑名单双重校验 | JWT 签名验证保证 token 不可伪造；Redis 黑名单支持主动登出 |
 | JWT exp=6h 但 Redis TTL=1h，实际有效期 1h | JWT exp 与 Redis TTL 一致（均为配置的 `expire_hours`） | 消除不一致，避免「token 看似有效实则失效」的困惑 |
@@ -78,7 +78,7 @@
 
 ### 2.2 架构设计借鉴
 
-| 设计点 | axum-backend 对应实现 | 要点 |
+| 设计点 | stepby-axum 对应实现 | 要点 |
 |------------------------|----------------------|----------|
 | `from_fn` + 闭包捕获参数 | `from_fn_with_state(state, auth_middleware)` | Axum 原生中间件模式（非手写 Tower Layer） |
 | Extensions 作为中间件间通信通道 | `req.extensions_mut().insert(Claims)` | JWT 中间件写入 Claims，权限中间件读取 |
@@ -875,7 +875,7 @@ Service 方法调用：service.method(dto, operator.username())
 
 ## 9. 关键实现差异对照表
 
-| 维度 | 旧框架方案 | axum-backend |
+| 维度 | 旧框架方案 | stepby-axum |
 |------|----------------|--------------|
 | Web 框架 | Salvo | Axum 0.8 |
 | ORM | rbatis | SeaORM 1.1 |

@@ -1,9 +1,9 @@
 # 工程脚手架与基础框架 规范文档（spec.md）
 
 > **阶段：** 第一阶段「工程脚手架与基础框架」
-> **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
-> **规则基线：** 项目规则基线见根目录 `README.md` 与 `SECURITY.md`；Trae IDE 规则文件 `backend-axum/.trae/rules/project-rules.md`（IDE 内自动加载，非项目文档）
-> **开发优先原则：** 接口契约对齐 frontend-vue 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **项目：** stepby-axum（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
+> **规则基线：** 项目规则基线见根目录 `README.md` 与 `SECURITY.md`；Trae IDE 规则文件 `stepby-axum/.trae/rules/project-rules.md`（IDE 内自动加载，非项目文档）
+> **开发优先原则：** 接口契约对齐 stepby-vue 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 
@@ -11,7 +11,7 @@
 
 ### 1.1 本阶段目标
 
-在 `backend-axum/` 目录下搭建可编译、可运行、可联调的工程脚手架，完成以下基础能力：
+在 `stepby-axum/` 目录下搭建可编译、可运行、可联调的工程脚手架，完成以下基础能力：
 
 1. 完整分层目录结构（handler / service / repository / entity / common / config / migration / middleware）
 2. Cargo.toml 核心依赖清单（稳定版本号）
@@ -37,7 +37,7 @@
 
 ### 1.4 核心模块设计对照
 
-| 功能点 | axum-backend 对应实现 | 要点 |
+| 功能点 | stepby-axum 对应实现 | 要点 |
 |--------------------------|------------------------|----------|
 | 统一响应结构 Res\<T\> | `src/common/response.rs` AjaxResult\<T\> + TableDataInfo\<T\> | 统一响应结构 + IntoResponse 实现 |
 | 全局错误 AppError | `src/common/error.rs` AppError | 错误类型 + From 转换 + IntoResponse |
@@ -62,7 +62,7 @@
 
 ## 2. 技术栈与稳定版本号
 
-### 2.1 核心依赖清单（主 crate `axum-backend`）
+### 2.1 核心依赖清单（主 crate `stepby-axum`）
 
 > **edition：** 主 crate `Cargo.toml` 使用 `edition = "2024"`（需 Rust 1.96+，支持 let-chains 等稳定语法）。
 
@@ -102,7 +102,7 @@
 > - `thiserror` 已重新引入（版本 `2`），用于自定义错误类型自动派生 `std::error::Error` 和 `Display`，原"移除 thiserror"的说明作废
 > - `md-5` 版本由 0.11 校正为 0.10（与 Cargo.toml 实际版本一致），仅保留作为旧哈希验证 fallback
 > - `toml` 版本由 0.8 升至 1
-> - 完整依赖清单（含 tokio-cron-scheduler/utoipa/maxminddb/lettre/rust-embed/totp-rs 等业务模块依赖）见 `backend-axum/Cargo.toml`
+> - 完整依赖清单（含 tokio-cron-scheduler/utoipa/maxminddb/lettre/rust-embed/totp-rs 等业务模块依赖）见 `stepby-axum/Cargo.toml`
 
 ### 2.2 migration 子 crate 依赖
 
@@ -129,7 +129,7 @@
 ## 3. 完整目录结构设计
 
 ```
-backend-axum/
+stepby-axum/
 ├── Cargo.toml                      # 主 crate 依赖清单 + [workspace] 声明
 ├── config/
 │   └── config.toml                 # 运行配置文件
@@ -431,9 +431,9 @@ url = "redis://127.0.0.1:6379/"
 max_connections = 10
 
 [jwt]
-secret = "axum-backend-secret-key-change-in-production"
+secret = "stepby-axum-secret-key-change-in-production"
 expire_hours = 24
-issuer = "backend-axum"
+issuer = "stepby-axum"
 
 [log]
 level = "info"
@@ -1028,7 +1028,7 @@ async fn main() {
 | 单一 ORM | 仅使用 SeaORM，无其他 ORM |
 | 单向分层 | handler → service → repository → entity，禁止反向 |
 | 接口契约对齐 | 响应结构、字段命名、状态码 100% 对齐本项目前端 |
-| 仅修改 axum-backend | 所有文件均在 backend-axum/ 内创建 |
+| 仅修改 stepby-axum | 所有文件均在 stepby-axum/ 内创建 |
 
 ### 7.2 开发优先原则执行
 

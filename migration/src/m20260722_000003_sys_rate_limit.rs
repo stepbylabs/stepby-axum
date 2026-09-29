@@ -1,4 +1,4 @@
-// axum-backend/migration/src/m20260722_000003_sys_rate_limit.rs
+// stepby-axum/migration/src/m20260722_000003_sys_rate_limit.rs
 //! API 限流配置表迁移
 //!
 //! 新增表：sys_rate_limit - 路由前缀限流配置

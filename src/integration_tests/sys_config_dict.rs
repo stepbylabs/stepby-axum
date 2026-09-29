@@ -1,4 +1,4 @@
-// backend-axum/src/integration_tests/sys_config_dict.rs
+// stepby-axum/src/integration_tests/sys_config_dict.rs
 //! 参数配置 + 字典模块链路集成测试：
 //! - 参数：列表 / 按 key 查值 / 详情 / 新增 → 修改 → 删除 / 刷新缓存
 //! - 字典类型：列表 / 下拉 / 详情 / 新增 → 修改 → 删除 / 刷新缓存

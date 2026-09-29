@@ -1,4 +1,4 @@
-// backend-axum/src/config/mod.rs
+// stepby-axum/src/config/mod.rs
 
 pub mod settings;
 

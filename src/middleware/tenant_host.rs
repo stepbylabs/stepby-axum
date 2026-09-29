@@ -1,4 +1,4 @@
-// backend-axum/src/middleware/tenant_host.rs
+// stepby-axum/src/middleware/tenant_host.rs
 //! host → tid 租户上下文中间件（多租户 Phase 3 域名链路，文档 §27.7 / §29.6）
 //!
 //! 链路定位（安全关键）：
