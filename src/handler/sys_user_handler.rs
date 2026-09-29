@@ -1,7 +1,7 @@
 // axum-backend/src/handler/sys_user_handler.rs
 //! 用户模块 Handler（Axum 原生实现）
 //!
-//! 接口路径与返回格式对齐 stepby-ui 前端调用规范：
+//! 接口路径与返回格式对齐 yebot-ui 前端调用规范：
 //! - GET    /system/user/list                       分页查询用户
 //! - POST   /system/user                            新增用户
 //! - PUT    /system/user                            修改用户

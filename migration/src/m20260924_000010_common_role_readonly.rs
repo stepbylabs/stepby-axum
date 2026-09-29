@@ -6,7 +6,7 @@
 //! 只读"的语义预期不符（详见 docs/optimization/topic-multitenant-sso-audit-2026-09-23.md
 //! §8.2 安全发现）。
 //!
-//! 目标状态（声明式，与 stepby-ui tests/e2e/deep-e2e.mjs M9 前置完全同款语义）：
+//! 目标状态（声明式，与 yebot-ui tests/e2e/deep-e2e.mjs M9 前置完全同款语义）：
 //!   - 全部目录(M)与页面(C)：页面可见可进；
 //!   - F 按钮中仅只读权限（perms 以 :list/:query/:view/:center 结尾）：
 //!     保住页面内子资源 API（如字典 :query）不被 403，页面能正常加载数据；
