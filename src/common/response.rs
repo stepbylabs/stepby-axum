@@ -1,4 +1,4 @@
-// axum-backend/src/common/response.rs
+// backend-axum/src/common/response.rs
 
 use axum::Json;
 use axum::http::StatusCode;

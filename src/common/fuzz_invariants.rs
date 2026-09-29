@@ -1,4 +1,4 @@
-// axum-backend/src/common/fuzz_invariants.rs
+// backend-axum/src/common/fuzz_invariants.rs
 //! **确定性不变式测试**（fuzz 风格的属性断言，运行在 stable 工具链上）。
 //!
 //! # 为什么不是 `cargo-fuzz`

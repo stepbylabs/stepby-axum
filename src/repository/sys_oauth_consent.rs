@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_oauth_consent.rs
+// backend-axum/src/repository/sys_oauth_consent.rs
 //! sys_oauth_consent 数据访问层（OIDC Provider：用户对客户端的授权同意记录）
 //!
 //! - 按 (user_id, client_id) 查询已授予 scope；

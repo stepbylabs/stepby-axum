@@ -3,5 +3,5 @@
 ts = "run --bin export_ts"
 
 [env]
-TS_RS_EXPORT_DIR = { value = "../yebot-ui/src/types/api/generated", relative = true }
+TS_RS_EXPORT_DIR = { value = "../frontend-vue/src/types/api/generated", relative = true }
 TS_RS_LARGE_INT = "number"

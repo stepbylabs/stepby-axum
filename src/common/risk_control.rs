@@ -1,4 +1,4 @@
-// axum-backend/src/common/risk_control.rs
+// backend-axum/src/common/risk_control.rs
 //! 登录面风控集成点（`[risk_control]`）的**纯判定内核**。
 //!
 //! 定位（项目准则⑥）：原判"不进本仓"的登录风控（工具型 UA 拦截 / 异地登录检测）改为

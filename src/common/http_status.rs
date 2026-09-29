@@ -1,4 +1,4 @@
-// axum-backend/src/common/http_status.rs
+// backend-axum/src/common/http_status.rs
 //! P2-33：HTTP 状态码约定（`legacy` | `restful`）—— 原「定案跳过」改为**默认关的开关**。
 //!
 //! ## 背景：为什么当初"跳过"，现在为什么又做成开关

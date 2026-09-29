@@ -1,4 +1,4 @@
-// axum-backend/src/middleware/mod.rs
+// backend-axum/src/middleware/mod.rs
 
 pub mod auth;
 pub mod idempotency;

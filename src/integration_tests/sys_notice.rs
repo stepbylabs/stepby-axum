@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_notice.rs
+// backend-axum/src/integration_tests/sys_notice.rs
 //! 通知公告模块链路集成测试：
 //! - 分页列表 / 顶部公告（含未读数）/ 详情
 //! - 新增 → 查询 → 修改 → 删除

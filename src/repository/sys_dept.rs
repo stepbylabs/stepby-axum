@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_dept.rs
+// backend-axum/src/repository/sys_dept.rs
 //! sys_dept 数据访问层
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展部门特有查询：

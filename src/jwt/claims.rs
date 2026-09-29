@@ -1,4 +1,4 @@
-// axum-backend/src/jwt/claims.rs
+// backend-axum/src/jwt/claims.rs
 
 use crate::config::JwtConfig;
 use chrono::Utc;

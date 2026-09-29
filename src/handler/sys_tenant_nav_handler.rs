@@ -1,4 +1,4 @@
-// axum-backend/src/handler/sys_tenant_nav_handler.rs
+// backend-axum/src/handler/sys_tenant_nav_handler.rs
 //! 租户自建导航 L3 Handler（批次 3 / MT-1）
 //!
 //! 接口路径与权限（权限映射见 middleware/permission.rs）：

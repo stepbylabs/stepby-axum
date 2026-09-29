@@ -1,4 +1,4 @@
-// axum-backend/src/common/i18n.rs
+// backend-axum/src/common/i18n.rs
 //! 国际化（i18n）基础设施
 //!
 //! 分层设计：

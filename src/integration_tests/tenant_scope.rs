@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/tenant_scope.rs
+// backend-axum/src/integration_tests/tenant_scope.rs
 //! v5-N2 Phase 2：多租户过滤层行为验证（service 层直调，绕过 RBAC 以专测过滤）。
 //!
 //! 覆盖：平台管理员（tid=0）全量可见（单租户行为等价）；租户管理员（tid=5）

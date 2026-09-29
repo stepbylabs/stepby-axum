@@ -1,5 +1,5 @@
-// axum-backend/src/lib.rs
-//! axum-backend 库入口
+// backend-axum/src/lib.rs
+//! backend-axum 库入口
 //! 声明全部 17 个模块，供 main.rs 与测试调用
 
 // T-05：编译期嵌入 locales/*.yml，默认回退 zh-CN。

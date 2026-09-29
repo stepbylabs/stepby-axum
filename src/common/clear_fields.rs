@@ -1,4 +1,4 @@
-// axum-backend/src/common/clear_fields.rs
+// backend-axum/src/common/clear_fields.rs
 //! 「显式清空」契约（批次 4）——补上"部分更新语义"缺失的另一半能力。
 //!
 //! # 为什么需要它

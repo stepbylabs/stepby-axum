@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_user.rs
+// backend-axum/src/integration_tests/sys_user.rs
 //! 用户模块链路集成测试：
 //! - 列表 / 详情 / 部门树 / 角色下拉
 //! - 新增 → 修改 → 启停 → 重置密码 → 删除 全 CRUD

@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_role_dept.rs
+// backend-axum/src/repository/sys_role_dept.rs
 //! sys_role_dept 数据访问层（角色部门关联表，复合主键，用于自定义数据权限）
 //!
 //! 扩展关联特有查询：

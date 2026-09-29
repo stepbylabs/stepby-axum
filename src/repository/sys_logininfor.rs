@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_logininfor.rs
+// backend-axum/src/repository/sys_logininfor.rs
 //! sys_logininfor 数据访问层（登录日志表，物理删除）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展登录日志特有查询：

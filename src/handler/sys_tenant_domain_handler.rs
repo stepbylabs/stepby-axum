@@ -1,4 +1,4 @@
-// axum-backend/src/handler/sys_tenant_domain_handler.rs
+// backend-axum/src/handler/sys_tenant_domain_handler.rs
 //! 租户域名管理 Handler（多租户 Phase 3 域名链路，文档 §27.7 / §29.6）
 //!
 //! 接口路径与权限（权限映射见 middleware/permission.rs）：

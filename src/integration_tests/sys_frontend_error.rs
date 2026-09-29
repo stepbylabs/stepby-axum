@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_frontend_error.rs
+// backend-axum/src/integration_tests/sys_frontend_error.rs
 //! 前端异常与性能监控模块链路集成测试（HTTP 端到端，Tier-S #1）：
 //! - 批量上报（异常 + Web Vitals 指标混批）
 //! - 分页列表（按名称模糊 / 按来源过滤）

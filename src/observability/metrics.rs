@@ -1,4 +1,4 @@
-// axum-backend/src/observability/metrics.rs
+// backend-axum/src/observability/metrics.rs
 //! 轻量 Prometheus 文本格式指标（零外部依赖）
 //!
 //! 由于后端已有 /metrics 端点（health.rs）暴露进程级指标，本模块补充 **HTTP 业务指标**：

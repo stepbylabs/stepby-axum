@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/totp.rs
+// backend-axum/src/integration_tests/totp.rs
 //! TOTP 多因子认证链路集成测试：
 //! - 初始状态（enabled=false）
 //! - setup（生成 secret + otpauthUrl + qrCode）→ verify（校验验证码启用）→ status（enabled=true）

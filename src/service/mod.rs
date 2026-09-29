@@ -1,4 +1,4 @@
-// axum-backend/src/service/mod.rs
+// backend-axum/src/service/mod.rs
 //! 业务逻辑层（Service Layer）
 //!
 //! 职责：封装全部业务逻辑、事务控制、参数校验

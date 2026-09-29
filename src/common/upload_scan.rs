@@ -1,4 +1,4 @@
-// axum-backend/src/common/upload_scan.rs
+// backend-axum/src/common/upload_scan.rs
 //! 上传文件病毒扫描**集成点**（`[upload_scan]`）。
 //!
 //! 定位（项目准则⑥）：本仓**不内置杀毒引擎**（ClamAV / VirusTotal 都不进本仓），

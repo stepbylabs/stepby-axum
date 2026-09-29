@@ -1,4 +1,4 @@
-// axum-backend/src/middleware/security_headers.rs
+// backend-axum/src/middleware/security_headers.rs
 //! 安全响应头中间件
 //!
 //! 为所有响应注入标准安全响应头，缓解常见 Web 安全风险（REGRESS-005：补全 HSTS / CSP / Cache-Control）：

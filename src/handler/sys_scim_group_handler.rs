@@ -1,4 +1,4 @@
-// axum-backend/src/handler/sys_scim_group_handler.rs
+// backend-axum/src/handler/sys_scim_group_handler.rs
 //! v5-D12 Group：SCIM 组管理端接口（JWT 鉴权，管理界面用）。
 //!
 //! 职责边界：组权威在 IdP——管理端**不提供建组**（经 SCIM POST /Groups 创建），

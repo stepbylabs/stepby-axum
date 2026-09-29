@@ -3,7 +3,7 @@
 > **阶段：** 第四阶段「Axum 原生鉴权体系实现」
 > **项目：** axum-backend
 > **配套文档：** [auth-spec.md](./auth-spec.md)、[auth-checklist.md](./auth-checklist.md)
-> **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
+> **规则基线：** `backend-axum/.trae/rules/project-rules.md`（全程永久生效）
 
 ---
 

@@ -1,4 +1,4 @@
-// axum-backend/src/scheduler/cluster.rs
+// backend-axum/src/scheduler/cluster.rs
 //! 集群模式（`[scheduler].cluster_mode`）与内置定时任务的「整轮互斥锁」。
 //!
 //! # 为什么需要它

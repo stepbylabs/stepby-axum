@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_user.rs
+// backend-axum/src/repository/sys_user.rs
 //! sys_user 数据访问层
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展用户特有查询：

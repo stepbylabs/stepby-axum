@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_menu_dept.rs
+// backend-axum/src/integration_tests/sys_menu_dept.rs
 //! 菜单 + 部门模块链路集成测试：
 //! - 菜单：列表 / 下拉树 / 角色菜单树 / 详情 / 新增 → 修改 → 排序 → 删除
 //! - 部门：列表 / 排除节点 / 下拉树 / 详情 / 新增 → 修改 → 排序 → 删除

@@ -1,4 +1,4 @@
-// axum-backend/src/router/sys_tenant_domain_router.rs
+// backend-axum/src/router/sys_tenant_domain_router.rs
 //! 租户域名管理模块路由注册（多租户 Phase 3 域名链路）
 //!
 //! 权限要求（通过 permission_middleware 集中配置，详见 middleware/permission.rs）：

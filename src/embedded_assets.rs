@@ -17,14 +17,14 @@
 //! - 生产模式下设置 `EMBEDDED_FRONTEND=false` → 强制禁用嵌入模式（不推荐，仅用于调试）
 //!
 //! ## 构建流程
-//! 1. `pnpm build`（yebot-ui 目录）→ 生成 `yebot-ui/dist/`
-//! 2. 构建脚本将 `yebot-ui/dist/` 复制到 `axum-backend/frontend-dist/`
+//! 1. `pnpm build`（frontend-vue 目录）→ 生成 `frontend-vue/dist/`
+//! 2. 构建脚本将 `frontend-vue/dist/` 复制到 `backend-axum/frontend-dist/`
 //! 3. `cargo build --release` → rust-embed 自动嵌入 frontend-dist/
 //!
 //! ## 重要约束
 //! - 生产模式下若 `frontend-dist` 目录不存在，编译会失败（rust-embed 强制要求目录存在）
 //! - 开发模式下若 `frontend-dist` 目录不存在，ServeDir 会返回 404（不阻塞编译）
-//! - 使用 `frontend-dist/`（项目内路径）而非 `../yebot-ui/dist/` 是为了兼容 cross 交叉编译
+//! - 使用 `frontend-dist/`（项目内路径）而非 `../frontend-vue/dist/` 是为了兼容 cross 交叉编译
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -41,7 +41,7 @@ use rust_embed::RustEmbed;
 /// 嵌入的前端静态资源（仅生产模式编译）
 ///
 /// `folder` 指向前端构建产物目录（相对于 Cargo.toml 所在目录）
-/// 构建脚本（build-all.ps1）会先将 `yebot-ui/dist` 复制到此处，再编译后端
+/// 构建脚本（build-all.ps1）会先将 `frontend-vue/dist` 复制到此处，再编译后端
 #[cfg(not(debug_assertions))]
 #[derive(RustEmbed)]
 #[folder = "frontend-dist/"]
@@ -115,7 +115,7 @@ pub async fn serve_embedded(req: Request) -> Response {
 
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        "Frontend dist not embedded. Run `pnpm build` in yebot-ui directory first.",
+        "Frontend dist not embedded. Run `pnpm build` in frontend-vue directory first.",
     )
         .into_response()
 }
@@ -128,7 +128,7 @@ pub async fn serve_index() -> Response {
     }
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        "Frontend dist not embedded. Run `pnpm build` in yebot-ui directory first.",
+        "Frontend dist not embedded. Run `pnpm build` in frontend-vue directory first.",
     )
         .into_response()
 }
@@ -188,7 +188,7 @@ pub async fn serve_index() -> Response {
         Ok(content) => build_fs_response("index.html", content),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Frontend dist not found. Run `pnpm build` in yebot-ui directory first.",
+            "Frontend dist not found. Run `pnpm build` in frontend-vue directory first.",
         )
             .into_response(),
     }
@@ -220,7 +220,7 @@ async fn serve_from_fs(req: Request) -> Response {
         Ok(content) => build_fs_response("index.html", content),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Frontend dist not found. Run `pnpm build` in yebot-ui directory first.",
+            "Frontend dist not found. Run `pnpm build` in frontend-vue directory first.",
         )
             .into_response(),
     }

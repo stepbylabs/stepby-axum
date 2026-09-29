@@ -1,4 +1,4 @@
-// axum-backend/src/router/scim_router.rs
+// backend-axum/src/router/scim_router.rs
 //! v5-D12：SCIM 2.0 路由（挂公开段——handler 内自校验独立 Bearer Token，
 //! 不走平台 JWT 认证中间件：IdP 为服务器对服务器调用，凭据体系不同）。
 

@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/ip_location.rs
+// backend-axum/src/integration_tests/ip_location.rs
 //! IP 归属地库管理链路集成测试：
 //! - GET  /system/ipLocation/status   状态结构断言
 //! - GET  /system/ipLocation/config   脱敏配置结构断言

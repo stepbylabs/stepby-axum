@@ -1,4 +1,4 @@
-// axum-backend/src/config/mod.rs
+// backend-axum/src/config/mod.rs
 
 pub mod settings;
 

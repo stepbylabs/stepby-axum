@@ -1,4 +1,4 @@
-// axum-backend/src/service/scim_group_service.rs
+// backend-axum/src/service/scim_group_service.rs
 //! v5-D12 Group：SCIM 2.0 Group 资源 + 双映射联动引擎（RFC 7644 §4.2）。
 //!
 //! 拍板方案（福哥 2026-09-24，方案一全做）：

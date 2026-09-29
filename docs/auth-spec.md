@@ -2,8 +2,8 @@
 
 > **阶段：** 第四阶段「Axum 原生鉴权体系实现」
 > **项目：** axum-backend（纯 Axum 0.8 + SeaORM 1.1 生产级后端服务）
-> **规则基线：** `axum-backend/.trae/rules/project-rules.md`（全程永久生效）
-> **开发优先原则：** 接口契约对齐 yebot-ui 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
+> **规则基线：** `backend-axum/.trae/rules/project-rules.md`（全程永久生效）
+> **开发优先原则：** 接口契约对齐 frontend-vue 前端调用规范 ＞ 架构规范遵循 Axum 官方最佳实践 ＞ 同栈细节遵循 Axum + SeaORM 原生惯例
 
 ---
 

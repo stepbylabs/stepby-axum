@@ -1,4 +1,4 @@
-// axum-backend/src/utils/dns_txt.rs
+// backend-axum/src/utils/dns_txt.rs
 //! DNS TXT 记录解析（多租户 Phase 3 域名绑定：自定义域名 DNS TXT 验证）
 //!
 //! 用途：查询 `_stepby-verify.{domain}` 的 TXT 记录，比对平台下发的 `verify_token`，

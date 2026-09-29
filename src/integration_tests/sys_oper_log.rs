@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_oper_log.rs
+// backend-axum/src/integration_tests/sys_oper_log.rs
 //! 操作日志模块链路集成测试：
 //! - 分页列表 + 审计大屏统计（stats / stats-by-type / alarm-status）
 //! - 批量删除（正常 + 非法 id 400）
