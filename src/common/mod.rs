@@ -77,5 +77,48 @@ macro_rules! impl_into_response {
 ///   这是 SeaORM `.like()` 不支持 ESCAPE 子句的已知限制；
 ///   生产环境使用 PostgreSQL/MySQL 不受影响，SQLite 仅用于本地开发
 pub fn like_escape(input: &str) -> String {
+    // W9（NL2SQL v4 升格项）：LIKE 模式长度上限 —— 全站单点防护。
+    // 超长 LIKE 模式会让无索引的 LIKE 查询逐行回溯（CPU 消耗型 DoS；
+    // MAX_PAGE_SIZE 只限制返回行数，不限制扫描行数）。正常搜索远低于此长度，
+    // 截断对真实用户无感；这是除 sys_user_service 的业务级 50 字符约束之外的全站兜底。
+    const MAX_LIKE_PATTERN_LEN: usize = 100;
+    let input = if input.len() > MAX_LIKE_PATTERN_LEN {
+        &input[..input.floor_char_boundary(MAX_LIKE_PATTERN_LEN)]
+    } else {
+        input
+    };
     input.replace('\\', "\\\\").replace('%', "\\%")
+}
+
+#[cfg(test)]
+mod like_escape_tests {
+    use super::like_escape;
+
+    #[test]
+    fn escapes_percent_and_backslash() {
+        assert_eq!(like_escape("a%b"), "a\\%b");
+        assert_eq!(like_escape("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn keeps_normal_search_untouched() {
+        assert_eq!(like_escape("admin"), "admin");
+        assert_eq!(like_escape("用户名"), "用户名");
+    }
+
+    #[test]
+    fn truncates_overlong_pattern() {
+        let long = "x".repeat(500);
+        let escaped = like_escape(&long);
+        assert_eq!(escaped.len(), 100); // 100 个 x（无转义字符，长度即上限）
+    }
+
+    #[test]
+    fn truncation_respects_char_boundary() {
+        // 中文字符（3 字节）跨在 100 字节边界上时不得 panic、不得切出非法 UTF-8
+        let long = "汉".repeat(80); // 240 字节
+        let escaped = like_escape(&long);
+        assert!(escaped.len() <= 102); // ≤ 上限 + 一个多字节字符余量
+        assert!(escaped.chars().all(|ch| ch == '汉'));
+    }
 }
