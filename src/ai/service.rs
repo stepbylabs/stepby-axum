@@ -99,7 +99,6 @@ impl AiService {
                         })
                         .collect::<Result<Vec<_>, sea_orm::DbErr>>()?
                 }
-                _ => Vec::new(),
             };
             if !cols.is_empty() {
                 out.push(TableSchema {
@@ -233,7 +232,6 @@ impl AiService {
                 }
                 (columns, data)
             }
-            _ => anyhow::bail!("不支持的数据库后端"),
         };
         let rows_json = rows
             .into_iter()
