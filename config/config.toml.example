@@ -1,4 +1,4 @@
-# axum-backend 配置文件模板
+﻿# axum-backend 配置文件模板
 #
 # 使用方法：
 # 1. 复制本文件为 config.toml：cp config/config.toml.example config/config.toml
@@ -480,3 +480,9 @@ url = ""                 # 扫描端点（mode = "http" 时必填）
 token = ""               # 可选 Bearer 令牌（面向需鉴权的 AV 网关）
 timeout_secs = 10        # 请求超时秒数（夹在 1..=60）；扫描在上传主链路上，超时即按 fail_closed 处置
 fail_closed = true       # 扫描器不可用时：true（默认）= 拒绝上传（503）；false = 记 WARN 后放行
+
+# ── 运维提示：sys_config 运行时开关（captchaEnabled/registerUser 等）──────────
+# 这些开关存于数据库 sys_config 表（不在本文件），管理端「参数设置」页修改后自动刷新缓存、立即生效。
+# 若绕过管理端直接改库（脚本/DBA），必须手动刷新缓存才生效（双层 cache-aside：config:def:{key} / config:{tid}:{key}，TTL 300s）：
+#   curl -X DELETE -H "Authorization: Bearer <admin_token>" http://<host>:8080/prod-api/system/config/refreshCache
+# 或在管理端「参数设置」页随意保存一次触发 refresh_cache。
