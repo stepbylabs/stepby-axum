@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/data_scope_tenant.rs
+// backend-axum/src/integration_tests/data_scope_tenant.rs
 //! 台账 P2-2：`data_scope × tenant` 组合回归（真实调用 `SysUserService::get_user_page`）。
 //!
 //! 现状缺口：`integration_tests/tenant_scope.rs` 只覆盖「租户隔离」（sso_client 样本），

@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_tenant_domain.rs
+// backend-axum/src/repository/sys_tenant_domain.rs
 //! sys_tenant_domain 数据访问层（多租户 Phase 3 域名绑定链路）
 //!
 //! 域名表语义：`domain` **全局唯一**（唯一索引不分软删，历史占用同样拦截），

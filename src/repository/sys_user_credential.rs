@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_user_credential.rs
+// backend-axum/src/repository/sys_user_credential.rs
 //! WebAuthn / Passkey 凭据（sys_user_credential 表）数据访问层。
 //!
 //! 读取一律按 `del_flag = '0'` 过滤（纵深防御）；删除为**物理删除**（见 service 说明）。

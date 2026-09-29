@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_role.rs
+// backend-axum/src/integration_tests/sys_role.rs
 //! 角色模块链路集成测试：
 //! - 列表 / 详情
 //! - 新增 → 修改 → 启停 → 数据权限 → 删除 全 CRUD

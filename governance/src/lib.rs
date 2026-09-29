@@ -1,4 +1,4 @@
-// axum-backend/governance/src/lib.rs
+// backend-axum/governance/src/lib.rs
 //! # governance —— 治理项注册表（单一事实源）
 //!
 //! ## 为什么单独成 crate

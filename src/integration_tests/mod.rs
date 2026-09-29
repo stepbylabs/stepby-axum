@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/mod.rs
+// backend-axum/src/integration_tests/mod.rs
 //! 集成测试（端到端验证核心业务链路）
 //!
 //! 设计要点（隔离、可重复、无副作用、可并行）：

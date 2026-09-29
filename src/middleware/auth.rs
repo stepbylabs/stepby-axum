@@ -1,4 +1,4 @@
-// axum-backend/src/middleware/auth.rs
+// backend-axum/src/middleware/auth.rs
 
 use crate::common::AppError;
 use crate::jwt::{Claims, JwtUtils};

@@ -4,7 +4,7 @@
 
 > **阶段：** 第一阶段「工程脚手架与基础框架」
 > **对应规范：** `docs/spec.md`
-> **规则基线：** `axum-backend/.trae/rules/project-rules.md`
+> **规则基线：** `backend-axum/.trae/rules/project-rules.md`
 > **执行方式：** 按任务顺序逐个执行，每个任务完成后立即提交（frequent commits）
 
 **Goal:** 搭建 axum-backend 工程脚手架，完成全部通用能力（响应/错误/配置/DB/Redis/日志/JWT/中间件/密码/验证码/树/initialize/migration），服务可编译运行并通过健康检查。
@@ -48,16 +48,16 @@
 ### Task 1: Cargo.toml 依赖清单 + workspace + 基础文件
 
 **Files:**
-- Create: `axum-backend/Cargo.toml`
-- Create: `axum-backend/src/main.rs`（最小占位版，Task 21 替换为完整版）
-- Create: `axum-backend/src/lib.rs`（空占位，Task 20 补全模块声明）
-- Create: `axum-backend/.gitignore`
+- Create: `backend-axum/Cargo.toml`
+- Create: `backend-axum/src/main.rs`（最小占位版，Task 21 替换为完整版）
+- Create: `backend-axum/src/lib.rs`（空占位，Task 20 补全模块声明）
+- Create: `backend-axum/.gitignore`
 
 - [ ] **Step 1: 编写完整 Cargo.toml**
 
 ```toml
 [package]
-name = "axum-backend"
+name = "backend-axum"
 version = "0.1.0"
 edition = "2024"
 
@@ -128,7 +128,7 @@ strip = true
 - [ ] **Step 2: 创建最小占位 main.rs**
 
 ```rust
-// axum-backend/src/main.rs（占位版，Task 21 替换为完整版）
+// backend-axum/src/main.rs（占位版，Task 21 替换为完整版）
 fn main() {
     println!("axum-backend: 脚手架搭建中...");
 }
@@ -137,7 +137,7 @@ fn main() {
 - [ ] **Step 3: 创建空 lib.rs**
 
 ```rust
-// axum-backend/src/lib.rs（占位，Task 20 补全所有模块声明）
+// backend-axum/src/lib.rs（占位，Task 20 补全所有模块声明）
 // 在 Task 20 之前，各模块文件虽已创建但未被 lib.rs 引用，不会参与编译。
 // 这是故意的增量策略：Task 1-19 各自独立创建文件，Task 20 一次性集成。
 ```
@@ -180,12 +180,12 @@ git commit -m "feat: 添加 Cargo.toml 核心依赖清单、workspace 声明与�
 ### Task 2: 配置文件
 
 **Files:**
-- Create: `axum-backend/config/config.toml`
+- Create: `backend-axum/config/config.toml`
 
 - [ ] **Step 1: 创建配置文件**
 
 ```toml
-# axum-backend/config/config.toml
+# backend-axum/config/config.toml
 
 [server]
 host = "0.0.0.0"
@@ -205,7 +205,7 @@ max_connections = 10
 [jwt]
 secret = "axum-backend-secret-key-change-in-production"
 expire_hours = 6
-issuer = "axum-backend"
+issuer = "backend-axum"
 
 [log]
 level = "info"
@@ -225,13 +225,13 @@ git commit -m "feat: 添加运行配置文件 config.toml"
 ### Task 3: 配置管理模块
 
 **Files:**
-- Create: `axum-backend/src/config/mod.rs`
-- Create: `axum-backend/src/config/settings.rs`
+- Create: `backend-axum/src/config/mod.rs`
+- Create: `backend-axum/src/config/settings.rs`
 
 - [ ] **Step 1: 编写 settings.rs**
 
 ```rust
-// axum-backend/src/config/settings.rs
+// backend-axum/src/config/settings.rs
 
 use serde::Deserialize;
 
@@ -294,7 +294,7 @@ impl Settings {
 - [ ] **Step 2: 编写 mod.rs**
 
 ```rust
-// axum-backend/src/config/mod.rs
+// backend-axum/src/config/mod.rs
 
 pub mod settings;
 
@@ -316,13 +316,13 @@ git commit -m "feat: 添加配置管理模块 Settings（含 Redis 配置段）"
 ### Task 4: 统一响应结构体
 
 **Files:**
-- Create: `axum-backend/src/common/response.rs`
-- Create: `axum-backend/src/common/mod.rs`
+- Create: `backend-axum/src/common/response.rs`
+- Create: `backend-axum/src/common/mod.rs`
 
 - [ ] **Step 1: 编写 response.rs**
 
 ```rust
-// axum-backend/src/common/response.rs
+// backend-axum/src/common/response.rs
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -410,7 +410,7 @@ impl<T: Serialize> IntoResponse for TableDataInfo<T> {
 - [ ] **Step 2: 编写 common/mod.rs（预留 error/page/constants 导出）**
 
 ```rust
-// axum-backend/src/common/mod.rs
+// backend-axum/src/common/mod.rs
 
 pub mod constants;
 pub mod error;
@@ -435,12 +435,12 @@ git commit -m "feat: 添加统一响应结构体 AjaxResult/TableDataInfo"
 ### Task 5: 全局错误类型
 
 **Files:**
-- Create: `axum-backend/src/common/error.rs`
+- Create: `backend-axum/src/common/error.rs`
 
 - [ ] **Step 1: 编写 error.rs**
 
 ```rust
-// axum-backend/src/common/error.rs
+// backend-axum/src/common/error.rs
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -563,13 +563,13 @@ git commit -m "feat: 添加全局错误类型 AppError（含 SeaORM/JWT/Redis/an
 ### Task 6: 分页参数 + 系统常量
 
 **Files:**
-- Create: `axum-backend/src/common/page.rs`
-- Create: `axum-backend/src/common/constants.rs`
+- Create: `backend-axum/src/common/page.rs`
+- Create: `backend-axum/src/common/constants.rs`
 
 - [ ] **Step 1: 编写 page.rs**
 
 ```rust
-// axum-backend/src/common/page.rs
+// backend-axum/src/common/page.rs
 
 use serde::Deserialize;
 
@@ -628,7 +628,7 @@ impl Default for PageDomain {
 - [ ] **Step 2: 编写 constants.rs**
 
 ```rust
-// axum-backend/src/common/constants.rs
+// backend-axum/src/common/constants.rs
 
 /// 业务状态码常量（对齐本项目前端约定）
 pub mod constants {
@@ -667,13 +667,13 @@ git commit -m "feat: 添加分页参数 PageDomain 与系统常量 constants"
 ### Task 7: 数据库连接池
 
 **Files:**
-- Create: `axum-backend/src/db/mod.rs`
-- Create: `axum-backend/src/db/pool.rs`
+- Create: `backend-axum/src/db/mod.rs`
+- Create: `backend-axum/src/db/pool.rs`
 
 - [ ] **Step 1: 编写 pool.rs**
 
 ```rust
-// axum-backend/src/db/pool.rs
+// backend-axum/src/db/pool.rs
 
 use std::time::Duration;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
@@ -697,7 +697,7 @@ pub async fn init_database(config: &DatabaseConfig) -> anyhow::Result<DatabaseCo
 - [ ] **Step 2: 编写 db/mod.rs（预留 redis 导出）**
 
 ```rust
-// axum-backend/src/db/mod.rs
+// backend-axum/src/db/mod.rs
 
 pub mod pool;
 pub mod redis;
@@ -719,12 +719,12 @@ git commit -m "feat: 添加数据库连接池初始化（SeaORM ConnectOptions�
 ### Task 8: Redis 连接池
 
 **Files:**
-- Create: `axum-backend/src/db/redis.rs`
+- Create: `backend-axum/src/db/redis.rs`
 
 - [ ] **Step 1: 编写 redis.rs**
 
 ```rust
-// axum-backend/src/db/redis.rs
+// backend-axum/src/db/redis.rs
 
 use redis::aio::ConnectionManager;
 use crate::config::RedisConfig;
@@ -755,12 +755,12 @@ git commit -m "feat: 添加 Redis 连接池初始化（ConnectionManager）"
 ### Task 9: 日志体系
 
 **Files:**
-- Create: `axum-backend/src/logger.rs`
+- Create: `backend-axum/src/logger.rs`
 
 - [ ] **Step 1: 编写 logger.rs**
 
 ```rust
-// axum-backend/src/logger.rs
+// backend-axum/src/logger.rs
 
 use tracing_subscriber::{fmt, EnvFilter, prelude::*};
 use crate::config::LogConfig;
@@ -798,13 +798,13 @@ git commit -m "feat: 添加日志体系初始化（tracing-subscriber）"
 ### Task 10: JWT 工具
 
 **Files:**
-- Create: `axum-backend/src/jwt/mod.rs`
-- Create: `axum-backend/src/jwt/claims.rs`
+- Create: `backend-axum/src/jwt/mod.rs`
+- Create: `backend-axum/src/jwt/claims.rs`
 
 - [ ] **Step 1: 编写 claims.rs**
 
 ```rust
-// axum-backend/src/jwt/claims.rs
+// backend-axum/src/jwt/claims.rs
 
 use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
@@ -870,7 +870,7 @@ impl JwtUtils {
 - [ ] **Step 2: 编写 jwt/mod.rs**
 
 ```rust
-// axum-backend/src/jwt/mod.rs
+// backend-axum/src/jwt/mod.rs
 
 pub mod claims;
 
@@ -890,13 +890,13 @@ git commit -m "feat: 添加 JWT 工具 Claims 与 token 生成/验证"
 ### Task 11: 密码工具
 
 **Files:**
-- Create: `axum-backend/src/utils/mod.rs`
-- Create: `axum-backend/src/utils/password.rs`
+- Create: `backend-axum/src/utils/mod.rs`
+- Create: `backend-axum/src/utils/password.rs`
 
 - [ ] **Step 1: 编写 password.rs**
 
 ```rust
-// axum-backend/src/utils/password.rs
+// backend-axum/src/utils/password.rs
 
 use md5::{Digest, Md5};
 use crate::common::constants::constants::PASSWORD_SALT;
@@ -931,7 +931,7 @@ mod tests {
 - [ ] **Step 2: 编写 utils/mod.rs（预留 captcha/tree 导出）**
 
 ```rust
-// axum-backend/src/utils/mod.rs
+// backend-axum/src/utils/mod.rs
 
 pub mod captcha;
 pub mod password;
@@ -962,12 +962,12 @@ git commit -m "feat: 添加密码加盐 MD5 工具"
 ### Task 12: 验证码工具
 
 **Files:**
-- Create: `axum-backend/src/utils/captcha.rs`
+- Create: `backend-axum/src/utils/captcha.rs`
 
 - [ ] **Step 1: 编写 captcha.rs**
 
 ```rust
-// axum-backend/src/utils/captcha.rs
+// backend-axum/src/utils/captcha.rs
 
 use captcha::Captcha;
 use captcha::filters::Noise;
@@ -1021,12 +1021,12 @@ git commit -m "feat: 添加验证码生成工具（base64 + uuid）"
 ### Task 13: 树构建工具
 
 **Files:**
-- Create: `axum-backend/src/utils/tree.rs`
+- Create: `backend-axum/src/utils/tree.rs`
 
 - [ ] **Step 1: 编写 tree.rs**
 
 ```rust
-// axum-backend/src/utils/tree.rs
+// backend-axum/src/utils/tree.rs
 
 /// 通用树节点 trait（按既有设计实现）
 pub trait TreeNode {
@@ -1088,12 +1088,12 @@ git commit -m "feat: 添加通用树构建工具 TreeNode + build_tree"
 ### Task 14: AppState 共享状态
 
 **Files:**
-- Create: `axum-backend/src/state.rs`
+- Create: `backend-axum/src/state.rs`
 
 - [ ] **Step 1: 编写 state.rs**
 
 ```rust
-// axum-backend/src/state.rs
+// backend-axum/src/state.rs
 
 use std::sync::Arc;
 use redis::aio::ConnectionManager;
@@ -1126,13 +1126,13 @@ git commit -m "feat: 添加 AppState 共享状态（DB + Redis + Config）"
 ### Task 15: 请求 ID 中间件
 
 **Files:**
-- Create: `axum-backend/src/middleware/mod.rs`
-- Create: `axum-backend/src/middleware/request_id.rs`
+- Create: `backend-axum/src/middleware/mod.rs`
+- Create: `backend-axum/src/middleware/request_id.rs`
 
 - [ ] **Step 1: 编写 request_id.rs**
 
 ```rust
-// axum-backend/src/middleware/request_id.rs
+// backend-axum/src/middleware/request_id.rs
 
 use axum::extract::Request;
 use axum::http::HeaderValue;
@@ -1159,7 +1159,7 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
 - [ ] **Step 2: 编写 middleware/mod.rs（预留 auth 导出）**
 
 ```rust
-// axum-backend/src/middleware/mod.rs
+// backend-axum/src/middleware/mod.rs
 
 pub mod auth;
 pub mod request_id;
@@ -1181,12 +1181,12 @@ git commit -m "feat: 添加请求 ID 中间件"
 ### Task 16: JWT 鉴权中间件
 
 **Files:**
-- Create: `axum-backend/src/middleware/auth.rs`
+- Create: `backend-axum/src/middleware/auth.rs`
 
 - [ ] **Step 1: 编写 auth.rs**
 
 ```rust
-// axum-backend/src/middleware/auth.rs
+// backend-axum/src/middleware/auth.rs
 
 use std::sync::Arc;
 use axum::extract::{Request, State};
@@ -1239,13 +1239,13 @@ git commit -m "feat: 添加 JWT 鉴权中间件（from_fn_with_state，手动提
 ### Task 17: 健康检查 Handler
 
 **Files:**
-- Create: `axum-backend/src/handler/mod.rs`
-- Create: `axum-backend/src/handler/health.rs`
+- Create: `backend-axum/src/handler/mod.rs`
+- Create: `backend-axum/src/handler/health.rs`
 
 - [ ] **Step 1: 编写 health.rs**
 
 ```rust
-// axum-backend/src/handler/health.rs
+// backend-axum/src/handler/health.rs
 
 use serde::Serialize;
 use crate::common::{AjaxResult, AppError};
@@ -1272,7 +1272,7 @@ pub async fn health() -> Result<AjaxResult<HealthStatus>, AppError> {
 - [ ] **Step 2: 编写 handler/mod.rs**
 
 ```rust
-// axum-backend/src/handler/mod.rs
+// backend-axum/src/handler/mod.rs
 
 pub mod health;
 
@@ -1292,13 +1292,13 @@ git commit -m "feat: 添加健康检查 handler /health"
 ### Task 18: 路由聚合
 
 **Files:**
-- Create: `axum-backend/src/router/mod.rs`
-- Create: `axum-backend/src/router/public.rs`
+- Create: `backend-axum/src/router/mod.rs`
+- Create: `backend-axum/src/router/public.rs`
 
 - [ ] **Step 1: 编写 public.rs**
 
 ```rust
-// axum-backend/src/router/public.rs
+// backend-axum/src/router/public.rs
 
 use std::sync::Arc;
 use axum::Router;
@@ -1316,7 +1316,7 @@ pub fn public_routes() -> Router<Arc<AppState>> {
 - [ ] **Step 2: 编写 mod.rs 路由聚合**
 
 ```rust
-// axum-backend/src/router/mod.rs
+// backend-axum/src/router/mod.rs
 
 pub mod public;
 
@@ -1357,12 +1357,12 @@ git commit -m "feat: 添加路由聚合与全局中间件叠加（CORS/Trace/Req
 ### Task 19: initialize 初始化编排
 
 **Files:**
-- Create: `axum-backend/src/initialize/mod.rs`
+- Create: `backend-axum/src/initialize/mod.rs`
 
 - [ ] **Step 1: 编写 initialize/mod.rs**
 
 ```rust
-// axum-backend/src/initialize/mod.rs
+// backend-axum/src/initialize/mod.rs
 
 use std::sync::Arc;
 use crate::config::Settings;
@@ -1416,10 +1416,10 @@ git commit -m "feat: 添加 initialize 初始化编排模块"
 ### Task 20: 库入口集成与占位模块
 
 **Files:**
-- Modify: `axum-backend/src/lib.rs`（从空占位替换为完整模块声明）
-- Create: `axum-backend/src/entity/mod.rs`
-- Create: `axum-backend/src/repository/mod.rs`
-- Create: `axum-backend/src/service/mod.rs`
+- Modify: `backend-axum/src/lib.rs`（从空占位替换为完整模块声明）
+- Create: `backend-axum/src/entity/mod.rs`
+- Create: `backend-axum/src/repository/mod.rs`
+- Create: `backend-axum/src/service/mod.rs`
 
 > **关键集成点：** 本 Task 之前各模块文件虽已创建但未被 `lib.rs` 引用，不参与编译。
 > 本 Task 一次性声明所有模块，此后 `cargo check` 将检查全部代码。
@@ -1428,7 +1428,7 @@ git commit -m "feat: 添加 initialize 初始化编排模块"
 - [ ] **Step 1: 编写 lib.rs**
 
 ```rust
-// axum-backend/src/lib.rs
+// backend-axum/src/lib.rs
 
 pub mod common;
 pub mod config;
@@ -1449,17 +1449,17 @@ pub mod utils;
 - [ ] **Step 2: 编写占位模块**
 
 ```rust
-// axum-backend/src/entity/mod.rs
+// backend-axum/src/entity/mod.rs
 //! SeaORM 实体层（业务阶段填充）
 ```
 
 ```rust
-// axum-backend/src/repository/mod.rs
+// backend-axum/src/repository/mod.rs
 //! 数据访问层（业务阶段填充）
 ```
 
 ```rust
-// axum-backend/src/service/mod.rs
+// backend-axum/src/service/mod.rs
 //! 业务逻辑层（业务阶段填充）
 ```
 
@@ -1483,12 +1483,12 @@ git commit -m "feat: 集成库入口 lib.rs 声明所有模块 + 占位模块（
 ### Task 21: 应用入口 main.rs
 
 **Files:**
-- Modify: `axum-backend/src/main.rs`
+- Modify: `backend-axum/src/main.rs`
 
 - [ ] **Step 1: 编写 main.rs**
 
 ```rust
-// axum-backend/src/main.rs
+// backend-axum/src/main.rs
 
 use std::sync::Arc;
 use axum_backend::initialize::AppInitializer;
@@ -1530,15 +1530,15 @@ git commit -m "feat: 添加应用入口 main.rs（通过 AppInitializer 编排�
 ### Task 22: migration 子 crate
 
 **Files:**
-- Create: `axum-backend/migration/Cargo.toml`
-- Create: `axum-backend/migration/src/lib.rs`
-- Create: `axum-backend/migration/src/main.rs`
-- Create: `axum-backend/migration/src/m20250711_000001_init.rs`
+- Create: `backend-axum/migration/Cargo.toml`
+- Create: `backend-axum/migration/src/lib.rs`
+- Create: `backend-axum/migration/src/main.rs`
+- Create: `backend-axum/migration/src/m20250711_000001_init.rs`
 
 - [ ] **Step 1: 编写 migration/Cargo.toml**
 
 ```toml
-# axum-backend/migration/Cargo.toml
+# backend-axum/migration/Cargo.toml
 
 [package]
 name = "migration"
@@ -1553,7 +1553,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 - [ ] **Step 2: 编写 migration/src/lib.rs**
 
 ```rust
-// axum-backend/migration/src/lib.rs
+// backend-axum/migration/src/lib.rs
 
 pub use sea_orm_migration::prelude::*;
 
@@ -1572,7 +1572,7 @@ impl MigratorTrait for Migrator {
 - [ ] **Step 3: 编写 migration/src/m20250711_000001_init.rs**
 
 ```rust
-// axum-backend/migration/src/m20250711_000001_init.rs
+// backend-axum/migration/src/m20250711_000001_init.rs
 
 use sea_orm_migration::prelude::*;
 
@@ -1595,7 +1595,7 @@ impl MigrationTrait for Migration {
 - [ ] **Step 4: 编写 migration/src/main.rs**
 
 ```rust
-// axum-backend/migration/src/main.rs
+// backend-axum/migration/src/main.rs
 
 use sea_orm_migration::prelude::*;
 use migration::Migrator;
@@ -1698,7 +1698,7 @@ git commit -m "feat: 完成第一阶段工程脚手架与基础框架"
 
 ## 自查结果
 
-- [x] 所有任务文件路径明确，均在 `axum-backend/` 内
+- [x] 所有任务文件路径明确，均在 `backend-axum/` 内
 - [x] 每个任务包含完整代码块，无占位符
 - [x] 依赖方向单向：handler → service → repository → entity
 - [x] 响应结构体字段对齐本项目前端（code/msg/data/rows/total）

@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_user_pref.rs
+// backend-axum/src/integration_tests/sys_user_pref.rs
 //! 用户消息偏好 / 免打扰模块链路集成测试：
 //! - GET 获取默认偏好结构（无记录时返回全量接收 + 免打扰关闭）
 //! - PUT 保存偏好（部分更新，合并返回完整 VO）→ 回读验证持久化

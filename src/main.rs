@@ -1,5 +1,5 @@
-// axum-backend/src/main.rs
-//! axum-backend 应用入口
+// backend-axum/src/main.rs
+//! backend-axum 应用入口
 //! 1. 加载 .env 环境变量
 //! 2. 安装 panic hook（将 panic 转入 tracing 结构化日志）
 //! 3. 构建 8MB 栈大小的 Tokio runtime（项目硬约束）

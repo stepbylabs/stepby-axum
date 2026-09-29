@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_tenant_menu.rs
+// backend-axum/src/repository/sys_tenant_menu.rs
 //! sys_tenant_menu（L3 租户自建导航）数据访问层（多租户 Phase 3 / 批次 3）
 //!
 //! 语义要点（与 `entity/sys_tenant_menu.rs` 的硬边界一致）：

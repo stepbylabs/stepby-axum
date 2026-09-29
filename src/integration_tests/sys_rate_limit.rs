@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sys_rate_limit.rs
+// backend-axum/src/integration_tests/sys_rate_limit.rs
 //! API 限流配置模块链路集成测试：
 //! - 分页列表 / 详情（种子全局默认 "*"）
 //! - 新增 → 修改 → 删除 / 状态切换（enabled 布尔开关）

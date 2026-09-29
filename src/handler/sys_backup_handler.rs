@@ -1,6 +1,6 @@
 //! 数据备份/恢复 Handler（Axum 原生实现）
 //!
-//! 接口路径对齐 yebot-ui 前端：
+//! 接口路径对齐 frontend-vue 前端：
 //! - GET    /system/backup/list            分页查询备份日志
 //! - GET    /system/backup/{backupId}      查询备份日志详情
 //! - POST   /system/backup                 创建手动备份

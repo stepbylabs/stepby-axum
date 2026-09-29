@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_msg_send_log.rs
+// backend-axum/src/repository/sys_msg_send_log.rs
 //! sys_msg_send_log 数据访问层（消息发送记录表）
 //!
 //! 扩展方法：

@@ -1,4 +1,4 @@
-// axum-backend/src/router/sys_dept_router.rs
+// backend-axum/src/router/sys_dept_router.rs
 //! 部门模块路由注册
 //!
 //! 权限要求（通过 permission_middleware 集中配置，详见 middleware/permission.rs）：

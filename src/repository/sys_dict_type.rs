@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_dict_type.rs
+// backend-axum/src/repository/sys_dict_type.rs
 //! sys_dict_type 数据访问层（字典类型表）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展字典类型特有查询：

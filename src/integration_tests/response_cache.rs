@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/response_cache.rs
+// backend-axum/src/integration_tests/response_cache.rs
 //! P3-6：HTTP 响应缓存层集成测试
 //!
 //! 通过真实应用栈（build_app + 隔离 DB/Redis）验证缓存中间件行为。

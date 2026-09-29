@@ -1,4 +1,4 @@
-// axum-backend/src/middleware/platform_guard.rs
+// backend-axum/src/middleware/platform_guard.rs
 //! 平台专属接口请求层守卫（多租户安全加固 P1-1：第二道防线）
 //!
 //! 背景：permission 层已把 `tool:gen:*` / `monitor:cache:*` / `system:tenant:domain:*`

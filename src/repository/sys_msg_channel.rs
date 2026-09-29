@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_msg_channel.rs
+// backend-axum/src/repository/sys_msg_channel.rs
 //! sys_msg_channel 数据访问层（消息渠道表）
 //!
 //! 继承 BaseRepository 通用 CRUD，扩展渠道特有查询：

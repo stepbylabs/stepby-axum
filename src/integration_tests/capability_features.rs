@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/capability_features.rs
+// backend-axum/src/integration_tests/capability_features.rs
 //! 能力位（三层开关的**中间层**）回归锁 —— `sys_tenant_package.features`。
 //!
 //! ## 背景

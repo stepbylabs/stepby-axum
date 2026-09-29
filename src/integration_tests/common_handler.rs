@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/common_handler.rs
+// backend-axum/src/integration_tests/common_handler.rs
 //! 公共端点 + 通用模块链路集成测试：
 //! - 验证码 /captchaImage：测试库默认关闭验证码，img/uuid 优雅降级为空（读取 auth_service 真实行为）
 //! - 登录后 /getInfo、/getRouters（公开/受保护链路）

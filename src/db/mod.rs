@@ -1,4 +1,4 @@
-// axum-backend/src/db/mod.rs
+// backend-axum/src/db/mod.rs
 
 pub mod db_type;
 pub mod limits;

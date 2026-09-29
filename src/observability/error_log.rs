@@ -1,4 +1,4 @@
-// axum-backend/src/observability/error_log.rs
+// backend-axum/src/observability/error_log.rs
 //! 错误聚合总线（Error Bus）
 //!
 //! 通过一个自定义 `tracing_subscriber::Layer` 捕获 `ERROR` 级别日志事件，

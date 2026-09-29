@@ -1,4 +1,4 @@
-// axum-backend/src/observability/mod.rs
+// backend-axum/src/observability/mod.rs
 //! 可观测性（Observability）模块
 //!
 //! 聚合运营可观测能力，全部为**进程内真实实现**（零新增外部依赖），

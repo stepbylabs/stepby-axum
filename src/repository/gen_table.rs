@@ -1,4 +1,4 @@
-// axum-backend/src/repository/gen_table.rs
+// backend-axum/src/repository/gen_table.rs
 //! gen_table + gen_table_column 数据访问层（代码生成模块）
 //!
 //! 提供：

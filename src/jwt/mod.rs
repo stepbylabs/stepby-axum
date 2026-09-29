@@ -1,4 +1,4 @@
-// axum-backend/src/jwt/mod.rs
+// backend-axum/src/jwt/mod.rs
 
 pub mod claims;
 

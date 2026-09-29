@@ -3,7 +3,7 @@
 > **阶段：** 第一阶段「工程脚手架与基础框架」
 > **对应规范：** `docs/spec.md`
 > **对应任务：** `docs/tasks.md`
-> **规则基线：** `axum-backend/.trae/rules/project-rules.md`
+> **规则基线：** `backend-axum/.trae/rules/project-rules.md`
 > **用途：** 执行完所有任务后，逐项核对验收。任一项未通过视为阶段未完成。
 
 ---
@@ -35,7 +35,7 @@
 
 ### 1.3 输出规范校验
 
-- [ ] 所有文件均在 `axum-backend/` 目录内
+- [ ] 所有文件均在 `backend-axum/` 目录内
 - [ ] 代码使用蛇形命名法（snake_case）
 - [ ] 核心逻辑添加必要注释
 - [ ] 错误处理完善（无 `unwrap()` 暴露到请求路径，`main.rs` 中的 `expect` 仅限启动阶段）
@@ -46,47 +46,47 @@
 
 ### 2.1 主 crate 必需目录与文件
 
-- [ ] `axum-backend/Cargo.toml` 存在且依赖完整 + `[workspace]` 声明
-- [ ] `axum-backend/config/config.toml` 存在
-- [ ] `axum-backend/.gitignore` 存在（忽略 `/target`）
-- [ ] `axum-backend/src/main.rs` 存在
-- [ ] `axum-backend/src/lib.rs` 存在（声明全部 17 个模块）
-- [ ] `axum-backend/src/config/mod.rs` 存在
-- [ ] `axum-backend/src/config/settings.rs` 存在
-- [ ] `axum-backend/src/common/mod.rs` 存在
-- [ ] `axum-backend/src/common/response.rs` 存在
-- [ ] `axum-backend/src/common/error.rs` 存在
-- [ ] `axum-backend/src/common/page.rs` 存在
-- [ ] `axum-backend/src/common/constants.rs` 存在
-- [ ] `axum-backend/src/db/mod.rs` 存在
-- [ ] `axum-backend/src/db/pool.rs` 存在
-- [ ] `axum-backend/src/db/redis.rs` 存在
-- [ ] `axum-backend/src/entity/mod.rs` 存在（占位）
-- [ ] `axum-backend/src/repository/mod.rs` 存在（占位）
-- [ ] `axum-backend/src/service/mod.rs` 存在（占位）
-- [ ] `axum-backend/src/handler/mod.rs` 存在
-- [ ] `axum-backend/src/handler/health.rs` 存在
-- [ ] `axum-backend/src/middleware/mod.rs` 存在
-- [ ] `axum-backend/src/middleware/auth.rs` 存在
-- [ ] `axum-backend/src/middleware/request_id.rs` 存在
-- [ ] `axum-backend/src/router/mod.rs` 存在
-- [ ] `axum-backend/src/router/public.rs` 存在
-- [ ] `axum-backend/src/jwt/mod.rs` 存在
-- [ ] `axum-backend/src/jwt/claims.rs` 存在
-- [ ] `axum-backend/src/initialize/mod.rs` 存在
-- [ ] `axum-backend/src/utils/mod.rs` 存在
-- [ ] `axum-backend/src/utils/password.rs` 存在
-- [ ] `axum-backend/src/utils/captcha.rs` 存在
-- [ ] `axum-backend/src/utils/tree.rs` 存在
-- [ ] `axum-backend/src/state.rs` 存在
-- [ ] `axum-backend/src/logger.rs` 存在
+- [ ] `backend-axum/Cargo.toml` 存在且依赖完整 + `[workspace]` 声明
+- [ ] `backend-axum/config/config.toml` 存在
+- [ ] `backend-axum/.gitignore` 存在（忽略 `/target`）
+- [ ] `backend-axum/src/main.rs` 存在
+- [ ] `backend-axum/src/lib.rs` 存在（声明全部 17 个模块）
+- [ ] `backend-axum/src/config/mod.rs` 存在
+- [ ] `backend-axum/src/config/settings.rs` 存在
+- [ ] `backend-axum/src/common/mod.rs` 存在
+- [ ] `backend-axum/src/common/response.rs` 存在
+- [ ] `backend-axum/src/common/error.rs` 存在
+- [ ] `backend-axum/src/common/page.rs` 存在
+- [ ] `backend-axum/src/common/constants.rs` 存在
+- [ ] `backend-axum/src/db/mod.rs` 存在
+- [ ] `backend-axum/src/db/pool.rs` 存在
+- [ ] `backend-axum/src/db/redis.rs` 存在
+- [ ] `backend-axum/src/entity/mod.rs` 存在（占位）
+- [ ] `backend-axum/src/repository/mod.rs` 存在（占位）
+- [ ] `backend-axum/src/service/mod.rs` 存在（占位）
+- [ ] `backend-axum/src/handler/mod.rs` 存在
+- [ ] `backend-axum/src/handler/health.rs` 存在
+- [ ] `backend-axum/src/middleware/mod.rs` 存在
+- [ ] `backend-axum/src/middleware/auth.rs` 存在
+- [ ] `backend-axum/src/middleware/request_id.rs` 存在
+- [ ] `backend-axum/src/router/mod.rs` 存在
+- [ ] `backend-axum/src/router/public.rs` 存在
+- [ ] `backend-axum/src/jwt/mod.rs` 存在
+- [ ] `backend-axum/src/jwt/claims.rs` 存在
+- [ ] `backend-axum/src/initialize/mod.rs` 存在
+- [ ] `backend-axum/src/utils/mod.rs` 存在
+- [ ] `backend-axum/src/utils/password.rs` 存在
+- [ ] `backend-axum/src/utils/captcha.rs` 存在
+- [ ] `backend-axum/src/utils/tree.rs` 存在
+- [ ] `backend-axum/src/state.rs` 存在
+- [ ] `backend-axum/src/logger.rs` 存在
 
 ### 2.2 migration 子 crate 文件
 
-- [ ] `axum-backend/migration/Cargo.toml` 存在
-- [ ] `axum-backend/migration/src/lib.rs` 存在
-- [ ] `axum-backend/migration/src/main.rs` 存在
-- [ ] `axum-backend/migration/src/m20250711_000001_init.rs` 存在
+- [ ] `backend-axum/migration/Cargo.toml` 存在
+- [ ] `backend-axum/migration/src/lib.rs` 存在
+- [ ] `backend-axum/migration/src/main.rs` 存在
+- [ ] `backend-axum/migration/src/m20250711_000001_init.rs` 存在
 
 ### 2.3 禁止存在的文件
 

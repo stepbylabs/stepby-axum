@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/sso.rs
+// backend-axum/src/integration_tests/sso.rs
 //! 单点登录 / OIDC Provider（本系统作为授权服务器）端到端链路集成测试。
 //!
 //! 覆盖真实 HTTP 全栈（build_app + auth/permission/rate-limit 中间件 + Redis + sqlite），
@@ -2125,7 +2125,7 @@ async fn test_tenant_revoke_rt_sweep_is_not_truncated() {
 /// ③ `GET /sso/client-logo/{clientId}` ⇒ **404**（先用真实客户端排除"因客户端不存在而 404"的假象）。
 ///
 /// 开启态的正路径（内省 `active`、审计日志、logo 反代）需改 `config.toml` 并重启，
-/// 单轮 e2e 无法完成 ⇒ 配方见 `yebot-ui/tests/e2e/RUN-RECIPE.md §3.18(2)`。
+/// 单轮 e2e 无法完成 ⇒ 配方见 `frontend-vue/tests/e2e/RUN-RECIPE.md §3.18(2)`。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sso_batch4_optional_switches_are_absent_when_off() {
     let ctx = sso_ctx().await;

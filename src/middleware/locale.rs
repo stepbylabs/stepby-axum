@@ -1,4 +1,4 @@
-// axum-backend/src/middleware/locale.rs
+// backend-axum/src/middleware/locale.rs
 //! Locale 中间件（T-05）
 //!
 //! 解析 `Accept-Language` → 协商到支持的语言 → 经 task-local `LOCALE` 注入，

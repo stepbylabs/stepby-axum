@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/file_common.rs
+// backend-axum/src/integration_tests/file_common.rs
 //! 文件与公共端点链路集成测试：
 //! - 健康检查 /health（真实探测 DB/Redis）与 Prometheus 指标 /metrics（免鉴权）
 //! - 验证码 /captchaImage：默认关闭态（img/uuid 为空）与开启态（真实生成 + Redis 存储）

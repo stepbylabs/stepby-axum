@@ -1,4 +1,4 @@
-// axum-backend/src/repository/sys_user_dept.rs
+// backend-axum/src/repository/sys_user_dept.rs
 //! sys_user_dept 数据访问层（用户兼职部门关联，多部门任职最小侵入版）
 //!
 //! 语义约定：本表只存**兼职**部门（主部门唯一事实源 = sys_user.dept_id）；

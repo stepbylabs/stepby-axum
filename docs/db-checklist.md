@@ -3,7 +3,7 @@
 > **阶段：** 第二阶段「系统核心数据库表结构设计」
 > **对应规范：** `docs/db-spec.md`
 > **对应任务：** `docs/db-tasks.md`
-> **规则基线：** `axum-backend/.trae/rules/project-rules.md`
+> **规则基线：** `backend-axum/.trae/rules/project-rules.md`
 > **用途：** 执行完所有任务后，逐项核对验收。任一项未通过视为阶段未完成。
 
 ---

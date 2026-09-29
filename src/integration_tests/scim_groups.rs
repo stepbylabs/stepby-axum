@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/scim_groups.rs
+// backend-axum/src/integration_tests/scim_groups.rs
 //! v5-D12 Group：SCIM 2.0 Group 资源端到端链路（组→角色集合 / 组→兼职部门）。
 //!
 //! 覆盖：鉴权 401 → POST 建组（201 + 成员）→ role 组绑定联动授权

@@ -1,4 +1,4 @@
-// axum-backend/src/utils/sanitize.rs
+// backend-axum/src/utils/sanitize.rs
 //! HTML 白名单净化（P0-R19-002）
 //!
 //! 作为前端净化的补充防线，在后端入库前移除危险 HTML。

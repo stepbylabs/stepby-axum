@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/webauthn.rs
+// backend-axum/src/integration_tests/webauthn.rs
 //! WebAuthn / Passkey 集成测试（能力位 `auth.webauthn`，默认 **off**）。
 //!
 //! 覆盖（均为可证伪的真实断言）：

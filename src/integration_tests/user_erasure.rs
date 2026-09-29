@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/user_erasure.rs
+// backend-axum/src/integration_tests/user_erasure.rs
 //! GDPR 被遗忘权 / 用户匿名化 集成测试（能力位 `privacy.user_erasure`）。
 //!
 //! 复用全局 `TestContext` harness（隔离 sqlite + 独占 Redis DB + 真实 `build_app` 路由栈），

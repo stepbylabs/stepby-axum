@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/tool_gen.rs
+// backend-axum/src/integration_tests/tool_gen.rs
 //! 代码生成模块链路集成测试：
 //! - 创建表 → 列表 → 详情 → 编辑 → 预览 → 删除 全 CRUD
 //! - 参数校验错误分支

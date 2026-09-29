@@ -1,4 +1,4 @@
-// axum-backend/src/integration_tests/tenant_domain_self_service.rs
+// backend-axum/src/integration_tests/tenant_domain_self_service.rs
 //! 租户自助域名管理（批次 1c）回归锁 —— 能力位 `tenant.domain_self_service` 的**关闭态安全**。
 //!
 //! ## 背景

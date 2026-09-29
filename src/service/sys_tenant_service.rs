@@ -1,4 +1,4 @@
-// axum-backend/src/service/sys_tenant_service.rs
+// backend-axum/src/service/sys_tenant_service.rs
 //! 租户管理服务（多租户 Phase 3：**以 `sys_tenant` 为唯一事实源**）
 //!
 //! 决策（§27.1 / §29.7，2026-09-25 专项核查后修订，**推翻 Phase 2「dept 树根=租户」**）：
