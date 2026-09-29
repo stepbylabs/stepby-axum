@@ -53,7 +53,7 @@ python scripts/e2e_sso_oidc.py                   # 终端 2（--base 可指定�
 `sys.account.captchaEnabled`、`sys.account.registerUser` 等运行时开关存于数据库 `sys_config` 表，
 经双层 cache-aside 缓存（Redis：`config:def:{key}` 平台默认层 / `config:{tid}:{key}` 租户覆盖层，TTL 300s）读取：
 
-- **管理端「参数设置」页修改**：保存时自动刷新缓存，**立即生效**（推荐路径）。
+- **管理端「参数设置」页修改**：`edit_config` 保存时内置缓存失效（按层 invalidate），**立即生效，无需任何手动刷新**（实测验证）。（推荐路径）。
 - **绕过管理端直接改库**（脚本/DBA）：需手动刷新缓存，否则最长 5 分钟内读到旧值：
   `DELETE /prod-api/system/config/refreshCache`（需 admin 的 `system:config:remove` 权限）。
 - 启动期开关（本文件 `[server].docs_enabled`、`[ui].tenant_filter` 等）：修改后需**重启服务**生效。
