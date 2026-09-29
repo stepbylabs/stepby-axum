@@ -213,6 +213,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("遗留种子改名失败: {}", e))?;
 
+        // 3.5d-8 AI 助手菜单（NL2SQL v4.1，menu_id 4100 顶级 C 菜单）：幂等登记。
+        // 不授予 role 2（AI 为管理员按需授权：角色管理勾选 ai:chat）；超管 *:*:* 天然可用。
+        // 缺此兜底时：能力位 + [ai].enabled 开启后管理员仍无侧边栏入口（假功能）。
+        ensure_ai_menu(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 AI 助手菜单失败: {}", e))?;
+
         // 3.5d-4 租户自建导航 L3 页面菜单（批次 3）：与迁移
         // m20260926_000014_tenant_nav_menu 等价（启动不跑 Migrator::up）。
         // 缺此兜底时存量库无 3627 页面菜单 ⇒ 能力位开启后租户侧仍无入口（假功能）。
@@ -1349,6 +1356,41 @@ async fn ensure_scim_group_menu(db: &DatabaseConnection) -> Result<(), DbErr> {
         )
         .await?;
     }
+    Ok(())
+}
+
+/// 幂等确保 AI 助手菜单就绪（NL2SQL v4.1，menu_id 4100 顶级 C 菜单，perms `ai:chat`）。
+///
+/// 不授予 role 2：AI 能力由管理员按需在角色管理里勾选 `ai:chat`（三层开关的角色层）；
+/// 超管 `*:*:*` 天然可用。能力位 `ai.copilot` + `[ai].enabled` 双门控在 handler 校验。
+async fn ensure_ai_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let insert_prefix = match backend {
+        DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
+        DatabaseBackend::Postgres => "INSERT INTO ",
+        DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+    };
+    let insert_suffix = if backend == DatabaseBackend::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let now_expr = match backend {
+        DatabaseBackend::Sqlite => {
+            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        }
+        _ => "NOW()".to_string(),
+    };
+    let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
+    db.execute(
+        Statement::from_string(
+            backend,
+            format!(
+                "{insert_prefix}{menu_cols} VALUES (4100, 'AI助手', 0, 9, 'ai', 'ai/panel/index', '', '', '1', '0', 'C', '0', '0', 'ai:chat', 'chart', 'admin', {now_expr}, 'AI 数据查询助手（NL2SQL，受白名单与租户隔离约束）', '0', 'menu.ai'){insert_suffix}"
+            ),
+        ),
+    )
+    .await?;
     Ok(())
 }
 

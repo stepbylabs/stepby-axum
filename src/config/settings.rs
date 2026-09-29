@@ -1,4 +1,4 @@
-// axum-backend/src/config/settings.rs
+﻿// axum-backend/src/config/settings.rs
 
 use serde::Deserialize;
 use std::fmt;
@@ -21,6 +21,9 @@ pub struct Settings {
     /// 邮件 SMTP 配置（可选，未配置时邮件相关功能降级为仅 sys_notice）
     #[serde(default)]
     pub mail: MailConfig,
+    /// AI 助手（NL2SQL Copilot）配置（`[ai]` 段，默认关闭）
+    #[serde(default)]
+    pub ai: AiConfig,
     /// 配置加密主密钥（用于 sys_config 表中敏感字段 AES-256-GCM 加解密）
     ///
     /// 通过 CONFIG_ENC_KEY 环境变量注入，不入配置文件。
@@ -2114,6 +2117,82 @@ fn default_mmdb_update_cron() -> String {
     "0 0 4 * * 2".to_string()
 }
 
+/// AI 助手（NL2SQL Copilot）配置（`[ai]` 段，v4.1-A1：平台层开关，默认关闭）
+///
+/// 三层开关的平台层：`[ai].enabled = false`（默认）时 `/ai/*` 全部 403（明确提示）。
+/// 租户层 = 能力位 `ai.copilot`（governance 注册表）；角色层 = `ai:chat`。
+#[derive(Clone, Deserialize)]
+pub struct AiConfig {
+    /// 是否启用 AI 助手（false 时 /ai/* 一律 403 + 明确降级提示）
+    #[serde(default)]
+    pub enabled: bool,
+    /// LLM 提供方（当前实现 OpenAI 兼容协议：OpenAI / DeepSeek / Ollama / vLLM 等）
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    /// OpenAI 兼容 base_url（如 https://api.openai.com/v1、http://localhost:11434/v1）
+    #[serde(default)]
+    pub base_url: String,
+    /// API Key（生产环境建议 AI_API_KEY 环境变量注入，不落盘）
+    #[serde(default)]
+    pub api_key: String,
+    /// 模型名（如 gpt-4o-mini、deepseek-chat、qwen2.5:7b）
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// 单次查询返回行数上限（同时是注入 SQL 的 LIMIT）
+    #[serde(default = "default_ai_max_rows")]
+    pub max_rows: u32,
+    /// LLM 请求超时（秒）
+    #[serde(default = "default_ai_timeout_secs")]
+    pub timeout_secs: u64,
+    /// 允许查询的表白名单（AI 生成 SQL 只能触及这些表；超出即拒绝）
+    #[serde(default = "default_ai_allowed_tables")]
+    pub allowed_tables: Vec<String>,
+}
+
+fn default_ai_provider() -> String {
+    "openai".to_string()
+}
+fn default_ai_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+fn default_ai_max_rows() -> u32 {
+    100
+}
+fn default_ai_timeout_secs() -> u64 {
+    30
+}
+fn default_ai_allowed_tables() -> Vec<String> {
+    vec![
+        "sys_user".into(),
+        "sys_dept".into(),
+        "sys_role".into(),
+        "sys_post".into(),
+        "sys_config".into(),
+        "sys_dict_type".into(),
+        "sys_dict_data".into(),
+        "sys_notice".into(),
+        "sys_job".into(),
+        "sys_logininfor".into(),
+        "sys_oper_log".into(),
+        "sys_tenant".into(),
+    ]
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_ai_provider(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: default_ai_model(),
+            max_rows: default_ai_max_rows(),
+            timeout_secs: default_ai_timeout_secs(),
+            allowed_tables: default_ai_allowed_tables(),
+        }
+    }
+}
+
 /// 邮件 SMTP 配置
 ///
 /// 未配置（enabled=false）时邮件功能优雅降级为仅 sys_notice 入库，不发送实际邮件。
@@ -2290,6 +2369,10 @@ impl Settings {
         if let Ok(v) = std::env::var("MAIL_PASSWORD") {
             self.mail.password = v;
         }
+        // AI 助手 API Key 通过环境变量注入（避免明文写入配置文件）
+        if let Ok(v) = std::env::var("AI_API_KEY") {
+            self.ai.api_key = v;
+        }
         // 配置加密主密钥（用于 sys_config 表中敏感字段 AES-256-GCM 加解密）
         // 启用 IP 库管理功能时必须配置，否则 License Key 加密功能失效
         if let Ok(v) = std::env::var("CONFIG_ENC_KEY") {
@@ -2418,6 +2501,7 @@ impl Settings {
             sso: SsoConfig::default(),
             flow: FlowConfig::default(),
             scim: ScimConfig::default(),
+            ai: AiConfig::default(),
             server: ServerConfig {
                 host: server_host,
                 port: server_port,
@@ -2586,6 +2670,7 @@ mod tests {
             pat: PatConfig::default(),
             sso: SsoConfig::default(),
             scim: ScimConfig::default(),
+            ai: AiConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
@@ -2949,6 +3034,7 @@ mod tests {
             pat: PatConfig::default(),
             sso: SsoConfig::default(),
             scim: ScimConfig::default(),
+            ai: AiConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,

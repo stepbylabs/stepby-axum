@@ -2,6 +2,10 @@
 # Mirrors zh-CN.yml keys. Fallback chain: en-US -> zh-CN.
 
 error:
+  ai:
+    disabled: AI assistant is disabled. Ask an administrator to enable it in configuration
+    pat_forbidden: AI assistant does not accept Personal Access Tokens (PAT). Use an interactive login session
+    capability_off: AI assistant capability is not enabled for this tenant
   common:
     not_found: Data not found
     db_acquire: Failed to acquire database connection

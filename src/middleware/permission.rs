@@ -324,6 +324,9 @@ fn spawn_permission_denied_audit(
 ///   实现「后端所需权限 ⊆ 菜单可授予权限」契约，杜绝权限键漂移。
 #[rustfmt::skip]
 const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
+    // ===== AI 助手（NL2SQL v4.1：能力位 ai.copilot + ai:chat）=====
+    ("POST", "/ai/chat", "ai:chat"),
+    ("GET", "/ai/tables", "ai:chat"),
     // ===== 用户管理 =====
     ("GET", "/system/user/list", "system:user:list"),
     ("GET", "/system/user/{id}", "system:user:query"),

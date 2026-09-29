@@ -145,6 +145,16 @@ const fn cfg(key: &'static str, coverage: Coverage) -> Item {
 ///
 /// 新增能力位必须在此登记，否则 `FeatureSet::sanitized` 会静默剔除该键。
 pub const FEATURES: &[Item] = &[
+    // AI 助手（NL2SQL Copilot，v5-A1）：**三层开关的租户层**——
+    //   - 平台层：`config.toml` `[ai].enabled`（进程级，默认 false）；
+    //   - 租户层：本能力位（off = 端点 403，关闭态即安全态）；
+    //   - 角色层：菜单 4100（perms `ai:chat`）走常规 role_menu 授权。
+    // `unlocked = &[]`：`ai:chat` 是普通业务权限（非平台专属下放项），
+    // 经菜单 4100 的 role_menu 授权即可，不占用"平台专属 perm 解锁"语义
+    // （该语义受 features 测试「白名单必须 is_platform_only_perm」双向一致锁约束）。
+    // 服务层守卫：`[ai].enabled` off ⇒ 403（明确提示）；PAT 会话 ⇒ 403（B2）；
+    // 查询经 `sql_guard` 白名单 + 租户过滤强制注入（v5-A3）。
+    feat("ai.copilot", &[OFF, "on"], &[]),
     // WebAuthn / Passkey 登录（默认 off）。登录面能力：开启后用户可自助绑定 passkey，
     // 并在登录页以 passkey（免密码）登录；关闭态 = 端点 404（不暴露"存在但被关"）。
     //
