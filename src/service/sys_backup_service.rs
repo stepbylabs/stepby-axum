@@ -46,6 +46,14 @@ const TENANT_PACKAGE_EXTRA_TABLES: &[&str] =
 /// 备份日志的 `backup_type`：租户数据包导出
 pub const BACKUP_TYPE_TENANT_EXPORT: &str = "tenant_export";
 
+/// 整库备份自动轮转保留数量（默认安全：保留最近 10 份成功备份）
+///
+/// 背景：备份功能上线后每次 e2e / 手动备份均真实落盘且无自动清理，
+/// 曾堆积 130+ 份（峰值单份 3.3GB，累计 15GB+）。每次成功备份后自动清理
+/// 超出保留数的最旧整库备份（manual / auto）；`tenant_export` 租户留档与
+/// `restore` 恢复记录（无落盘文件）不参与轮转；手动删除接口不受影响。
+const RETAIN_SUCCESS_BACKUPS: usize = 10;
+
 // ==================== DTO ====================
 
 /// 备份日志分页查询 DTO
@@ -293,12 +301,38 @@ impl SysBackupService {
             ));
         }
 
+        // 成功备份后自动轮转（fail-open：清理异常只记警告，不影响本次备份结果）
+        if let Err(e) = self.cleanup_excess_backups().await {
+            tracing::warn!("备份轮转清理失败（不影响本次备份 backup_id={}）: {}", updated.backup_id, e);
+        }
+
         Ok(BackupCreateVo {
             backup_id: updated.backup_id,
             file_name: updated.file_name,
             file_path: updated.file_path,
             file_size: updated.file_size,
         })
+    }
+
+    /// 自动轮转：删除超出 `RETAIN_SUCCESS_BACKUPS` 的最旧整库备份（文件 + 日志记录）
+    ///
+    /// 复用 `delete_backups` 链路（含 canonicalize 路径二次校验、spawn_blocking 异步删文件），
+    /// 保证与手动删除同级别的安全语义。
+    async fn cleanup_excess_backups(&self) -> Result<(), ServiceError> {
+        let excess_ids = self
+            .backup_repo
+            .find_excess_success_ids(RETAIN_SUCCESS_BACKUPS)
+            .await?;
+        if excess_ids.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(
+            "备份轮转：保留最近 {} 份整库备份，清理 {} 份过期备份（ids 前缀 {:?}...）",
+            RETAIN_SUCCESS_BACKUPS,
+            excess_ids.len(),
+            &excess_ids[..excess_ids.len().min(3)]
+        );
+        self.delete_backups(excess_ids).await
     }
 
     /// 导出「租户数据包」（台账 F-2 定案：整库备份保留 + 新增租户数据包导出；**不做**租户级恢复）

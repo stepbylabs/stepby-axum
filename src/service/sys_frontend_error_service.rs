@@ -201,16 +201,16 @@ impl SysFrontendErrorService {
             .map(|it| {
                 // FCP-010：vitals 同步观察进 Prometheus 直方图/gauge（与落库同源），
                 // 供 stepby-frontend-vitals 告警组做 P95 退化检测
-                if it.source == "vital" {
-                    if let (Some(name), Some(value)) = (it.name.as_deref(), it.value) {
-                        let device = it.device_type.as_deref().unwrap_or("unknown");
-                        if name == "CLS" {
-                            crate::observability::metrics::MetricsRegistry::global()
-                                .set_frontend_cls(device, value);
-                        } else {
-                            crate::observability::metrics::MetricsRegistry::global()
-                                .record_frontend_vital(name, device, value / 1000.0);
-                        }
+                if it.source == "vital"
+                    && let (Some(name), Some(value)) = (it.name.as_deref(), it.value)
+                {
+                    let device = it.device_type.as_deref().unwrap_or("unknown");
+                    if name == "CLS" {
+                        crate::observability::metrics::MetricsRegistry::global()
+                            .set_frontend_cls(device, value);
+                    } else {
+                        crate::observability::metrics::MetricsRegistry::global()
+                            .record_frontend_vital(name, device, value / 1000.0);
                     }
                 }
                 FrontendErrorActiveModel {
@@ -235,7 +235,7 @@ impl SysFrontendErrorService {
                         .device_type
                         .as_deref()
                         .map(str::trim)
-                        .filter(|s| ALLOWED_DEVICE_TYPES.contains(&s))
+                        .filter(|s| ALLOWED_DEVICE_TYPES.contains(s))
                         .map(str::to_string)),
                     view_width: Set(it.view_width),
                     view_height: Set(it.view_height),

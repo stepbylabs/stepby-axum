@@ -97,6 +97,29 @@ impl SysBackupLogRepository {
             .await
     }
 
+    /// 查询超出保留数量的 success 状态整库备份 ID 列表（按 BackupId 倒序，跳过最新 keep 条）
+    ///
+    /// 仅统计 `manual` / `auto` 整库备份：
+    /// - `tenant_export` 是租户数据包留档，不参与轮转计数；
+    /// - `restore` 只是恢复记录、无落盘文件，同样不参与。
+    pub async fn find_excess_success_ids(&self, keep: usize) -> Result<Vec<i64>, DbErr> {
+        let rows = SysBackupLog::find()
+            .filter(
+                Condition::any()
+                    .add(Column::BackupType.eq("manual"))
+                    .add(Column::BackupType.eq("auto")),
+            )
+            .filter(Column::Status.eq("success"))
+            .order_by_desc(Column::BackupId)
+            .all(self.base.db())
+            .await?;
+        Ok(rows
+            .into_iter()
+            .skip(keep)
+            .map(|r| r.backup_id)
+            .collect())
+    }
+
     /// 插入一条记录
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await
