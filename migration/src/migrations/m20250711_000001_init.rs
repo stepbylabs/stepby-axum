@@ -1218,7 +1218,7 @@ async fn set_auto_increment(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 
 // ========== 初始数据插入 ==========
 
-/// 插入 sys_user 初始数据（admin + ry）
+/// 插入 sys_user 初始数据（admin + stepby）
 /// 密码均为 admin123，盐值 stepby_admin，MD5(明文+盐值)
 async fn insert_sys_user(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let now = now_expr(manager);

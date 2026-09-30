@@ -10,6 +10,9 @@ default-run = "stepby-axum"
 # 项目内共享 crate：治理项注册表（单一事实源，与 migration 共用；刻意零第三方依赖）
 governance = { path = "governance" }
 
+# 数据库迁移：全新库自动初始化（AppInitializer 检测空库后执行 Migrator::up，run_migrator_if_fresh_db）
+migration = { path = "migration" }
+
 # Web 框架
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 
@@ -214,7 +217,6 @@ strip = true
 # 性能基准测试（R6-BE-ENG-21）
 # 运行方式：cargo bench
 # 当前为占位示例（std-only），未来如需更精确测量可引入 criterion：
-#   [dev-dependencies]
 #   criterion = { version = "0.5", features = ["html_reports"] }
 # 然后将下方 harness 改为 true（criterion 自带 harness）
 [[bench]]
@@ -222,9 +224,7 @@ name = "example"
 harness = false
 
 [dev-dependencies]
-# 集成测试需要直接驱动 migration crate 的 Migrator 建表 + 种子数据
-migration = { path = "migration" }
-# 用于引入 MigratorTrait（调用 Migrator::up），仅测试使用
+# 用于引入 MigratorTrait（测试直接调用 Migrator::up），仅测试使用
 sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 # WebSocket 实时通知链路集成测试：真实 TCP + WS 客户端握手/收包（补 M7 0% 覆盖）
 tokio-tungstenite = "0.24"

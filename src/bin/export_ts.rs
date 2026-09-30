@@ -33,7 +33,7 @@ macro_rules! export_all {
 
 /// 解析实际导出目录（改名/clone 布局免疫的探测兜底）：
 /// 1. `.cargo/config.toml` [env] 注入的 `TS_RS_EXPORT_DIR` 目录**存在** → 原样使用（常规路径，零行为变化）；
-/// 2. 否则按序探测常见兄弟仓布局（stepby-<技术栈> 命名规范 + 历史名兼容）；
+/// 2. 否则按序探测常见兄弟仓布局（stepby-<技术栈> 命名规范；历史名 frontend-vue/stepby-ui 已随改名清理）；
 /// 3. 全部未命中 → 回落 env 原值（保持 `Config::from_env` 的既有报错行为）。
 ///
 /// 背景：导出目录跨仓硬编码是目录改名链路的最大断点（本项目已三次改名各断一次），
@@ -48,8 +48,6 @@ fn effective_export_dir() -> String {
     let candidates = [
         "../stepby-vue/src/types/api/generated",
         "stepby-vue/src/types/api/generated",
-        "../frontend-vue/src/types/api/generated",
-        "../stepby-ui/src/types/api/generated",
     ];
     for c in candidates {
         if std::path::Path::new(c).is_dir() {

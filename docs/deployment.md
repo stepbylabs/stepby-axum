@@ -159,27 +159,28 @@ Release 构建启用了以下优化（见 `Cargo.toml` `[profile.release]`）：
 
 编译产物位于 `target/release/stepby-axum`。
 
-### 3.4 执行数据库迁移
+### 3.4 数据库初始化（全自动）
+
+**无需手动执行迁移**。后端首次启动时自动检测全新数据库（`seaql_migrations` 表不存在），
+自动执行 `Migrator::up` 完成全部建表与基础种子数据，随后 AppInitializer 幂等兜底补齐
+各模块表/菜单/权限（详见 `src/initialize/mod.rs` 的 `run_migrator_if_fresh_db`）。
 
 ```bash
-# 设置数据库连接串
-export DATABASE_URL="mysql://stepby:your_password@127.0.0.1:3306/stepby"
-
-# 执行迁移（创建 17 张系统表 + 索引 + 初始数据）
-cd migration
-cargo run
-cd ..
+# 确保数据库可达（sqlite 为零配置默认；postgres/mysql 用 docker compose up -d）
+# 然后直接启动后端即可——空库会被自动初始化
+./target/release/stepby-axum
 ```
 
-迁移会创建以下表：
-- `sys_user` / `sys_role` / `sys_menu` / `sys_dept` / `sys_post`
-- `sys_user_role` / `sys_role_menu` / `sys_user_post` / `sys_role_dept`
-- `sys_dict_type` / `sys_dict_data`
-- `sys_oper_log` / `sys_logininfor`
-- `sys_job` / `sys_job_log`
-- `sys_config` / `sys_notice`
+自动迁移会创建全部系统表（17 张基础表 + 演进期新增的 30+ 张业务表：限流/任务/备份/
+WebHook/消息/OAuth/SCIM/flow/租户/报表/PAT/前端错误采集/代码生成等）。
 
-初始数据包含：超级管理员账号（admin / admin123）、默认角色、默认菜单、系统字典。
+初始数据包含：超级管理员账号（admin / admin123）、测试账号（stepby / admin123）、
+默认角色、默认菜单树、系统字典、系统配置。存量库（已有 `seaql_migrations`）启动时
+自动跳过迁移，由 AppInitializer 的 ensure_* 幂等兜底负责演进兼容。
+
+> 历史说明：2026-09-30 前 deployment 流程为 `cd migration && cargo run`——该方式已失效
+> （migration crate 无 bin target），且当时迁移文件分散 87 个；现已重组为
+> `migration/src/migrations/` 子目录集中维护并在全新库启动时自动执行。
 
 ---
 
@@ -343,7 +344,7 @@ export JWT_SECRET="your_strong_secret_at_least_32_characters_long"
 
 ```ini
 [Unit]
-Description=YeBot Axum Backend
+Description=Stepby Axum Backend
 After=network.target mysql.service redis-server.service
 
 [Service]
