@@ -3265,7 +3265,12 @@ pub(crate) fn random_urlsafe_pub(bytes_len: usize) -> String {
 fn random_urlsafe(bytes_len: usize) -> String {
     use base64::Engine;
     let mut buf = vec![0u8; bytes_len];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
+    {
+        {
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+    }
+    }
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 

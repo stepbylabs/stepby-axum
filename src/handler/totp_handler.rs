@@ -13,7 +13,7 @@ use axum::extract::State;
 use base64::Engine;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Builder, Algorithm, Secret, TOTP};
 use utoipa::ToSchema;
 
 use crate::common::{AjaxResult, AppError};
@@ -108,26 +108,22 @@ pub async fn setup(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
-    // 生成随机 secret
-    let secret = Secret::generate_secret();
-    let secret_bytes = secret
-        .to_bytes()
-        .map_err(|_| AppError::internal(&crate::tr!("error.totp.secret_gen_failed")))?;
+    // 生成随机 secret（totp-rs 6 新 API：Secret::generate + Builder）
+    let secret = Secret::generate();
 
     // 构建 TOTP 对象
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes.clone(),
-        Some(TOTP_ISSUER.to_string()),
-        "stepby-user".to_string(),
-    )
-    .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
+    let totp = Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret.clone())
+        .with_issuer(Some(TOTP_ISSUER))
+        .with_account_name("stepby-user")
+        .build()
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
-    // 生成 otpauth URL（totp-rs v5.7+ get_url() 不再接受参数，
-    // issuer/account_name 已在 TOTP::new 时绑定）
+    // 生成 otpauth URL（issuer/account_name 已在 Builder 绑定）
     let otpauth_url = totp.get_url();
 
     // 生成 QR 码（PNG bytes → base64 Data URL）
@@ -138,7 +134,7 @@ pub async fn setup(
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
     let qr_code = format!("data:image/png;base64,{}", b64);
 
-    let secret_str = secret.to_encoded().to_string();
+    let secret_str = secret.to_base32();
 
     // P0-4 安全修复：服务端缓存 pending secret（绑定当前用户），verify 时校验一致，
     // 杜绝"客户端自报 secret+code 自签通过"的绕过。TTL 10 分钟，超时需重新 setup。
@@ -264,21 +260,20 @@ pub async fn verify(
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.decrypt_failed")))?;
 
     // 4. 用 pending secret 校验验证码（不再信任客户端自报 secret）
-    let secret_bytes = Secret::Encoded(secret_str.clone())
-        .to_bytes()
+    let secret = Secret::try_from_base32(&secret_str)
         .map_err(|_| AppError::bad_request(&crate::tr!("error.totp.secret_invalid")))?;
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some(TOTP_ISSUER.to_string()),
-        "stepby-user".to_string(),
-    )
-    .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
+    let totp = Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret)
+        .with_issuer(Some(TOTP_ISSUER))
+        .with_account_name("stepby-user")
+        .build()
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
-    if !totp.check_current(&req.code).unwrap_or(false) {
+    if totp.check_current(&req.code).is_none() {
         // 失败计数
         let _: i64 = redis::Script::new(TOTP_FAIL_SCRIPT)
             .key(&fail_key)
@@ -446,22 +441,20 @@ pub async fn disable(
     let secret_str = crate::utils::crypto::decrypt_config_value(&encrypted_secret, master_key)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.decrypt_failed")))?;
 
-    let secret = Secret::Encoded(secret_str);
-    let secret_bytes = secret
-        .to_bytes()
+    let secret = Secret::try_from_base32(&secret_str)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.secret_decode_failed")))?;
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes.clone(),
-        Some(TOTP_ISSUER.to_string()),
-        "stepby-user".to_string(),
-    )
-    .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
+    let totp = Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret)
+        .with_issuer(Some(TOTP_ISSUER))
+        .with_account_name("stepby-user")
+        .build()
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
-    if !totp.check_current(&req.code).unwrap_or(false) {
+    if totp.check_current(&req.code).is_none() {
         // P0-4：失败计数（防暴力枚举）
         let _: i64 = redis::Script::new(TOTP_FAIL_SCRIPT)
             .key(&fail_key)

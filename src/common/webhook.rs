@@ -6,7 +6,7 @@
 //! （`off | webhook` + http(s) 目标 + 可选 HMAC-SHA256 签名），故把"地址合法性判定"
 //! 与"签名算法"收敛到本模块——**单一事实源**，避免两处各写一套后口径漂移。
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac, KeyInit};
 use sha2::Sha256;
 
 /// 出站目标地址合法性：仅接受 `http://` / `https://`（两端空白自动裁剪）。
@@ -21,7 +21,7 @@ pub fn url_is_http(url: &str) -> bool {
 /// HMAC-SHA256 签名（hex 小写）。未配置 `secret` 时调用方不应调用本函数。
 pub fn sign_hmac_sha256(secret: &str, body: &[u8]) -> String {
     // Hmac::<Sha256>::new_from_slice 对任意长度密钥都成功（HMAC 规范允许）；此处退化为不可达
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(secret.as_bytes())
         .expect("HMAC 接受任意长度密钥，构造不会失败");
     mac.update(body);
     hex::encode(mac.finalize().into_bytes())

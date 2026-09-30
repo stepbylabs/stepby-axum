@@ -655,7 +655,10 @@ mod soft_authenticator {
     impl SoftAuthenticator {
         pub fn new() -> Self {
             Self {
-                signing_key: SigningKey::random(&mut rand::thread_rng()),
+                signing_key: SigningKey::random(&mut {
+                    use rand_os::{rngs::StdRng, SeedableRng};
+                    StdRng::try_from_rng(&mut rand_os::rngs::SysRng).expect("OS RNG seed failed")
+                }),
                 credential_id: rand::random::<[u8; 32]>().to_vec(),
                 // 全零 AAGUID ⇒ 服务端归一为 None，凭据名取显式提交的 name（便于精确断言）
                 aaguid: [0u8; 16],

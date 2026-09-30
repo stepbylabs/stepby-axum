@@ -21,7 +21,7 @@ use std::time::Duration;
 use garde::Validate;
 use sea_orm::Set;
 use serde::{Deserialize, Serialize};
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Builder, Algorithm, Secret, TOTP};
 use utoipa::ToSchema;
 
 use crate::common::constants::SECS_PER_HOUR;
@@ -687,21 +687,20 @@ impl AuthService {
                 tracing::error!(error = %e, user_id = user.user_id, "TOTP secret 解密失败");
                 ServiceError::new(500, crate::tr!("error.totp.decrypt_failed"))
             })?;
-        let secret_bytes = Secret::Encoded(secret_str)
-            .to_bytes()
+        let secret = Secret::try_from_base32(&secret_str)
             .map_err(|_| ServiceError::new(500, crate::tr!("error.totp.secret_decode_failed")))?;
-        let totp = TOTP::new(
-            Algorithm::SHA1,
-            6,
-            1,
-            30,
-            secret_bytes,
-            Some("Stepby".to_string()),
-            "stepby-user".to_string(),
-        )
-        .map_err(|_| ServiceError::new(500, crate::tr!("error.totp.totp_build_failed")))?;
+        let totp = Builder::new()
+            .with_algorithm(Algorithm::SHA1)
+            .with_digits(6)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(secret)
+            .with_issuer(Some("Stepby"))
+            .with_account_name("stepby-user")
+            .build()
+            .map_err(|_| ServiceError::new(500, crate::tr!("error.totp.totp_build_failed")))?;
 
-        if !totp.check_current(code).unwrap_or(false) {
+        if totp.check_current(code).is_none() {
             // 验证码错误：计数 + 写登录日志（fail 提示，不区分具体原因）
             let _: i64 = redis::Script::new(RATE_LIMIT_SCRIPT)
                 .key(&fail_key)

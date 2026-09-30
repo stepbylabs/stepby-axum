@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 pub fn token_hash(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex_encode_digest(&hasher.finalize())
 }
 
 // ==================== AES-256-GCM 加解密（用于敏感配置加密存储） ====================
@@ -119,7 +119,8 @@ pub fn encrypt_config_value(plaintext: &str, master_key: &str) -> anyhow::Result
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    // OsRng：加密安全 OS RNG（rand 0.9；ThreadRng 在 0.9 也是 CryptoRng，但 OsRng 语义更直白）
+    let mut rng = rand::rngs::OsRng;
     rng.fill_bytes(&mut salt);
     rng.fill_bytes(&mut nonce_bytes);
     // P3-7：aes-gcm 0.10 的 Nonce::from_slice 内部调用 generic_array::GenericArray::from_slice，
@@ -144,6 +145,18 @@ pub fn encrypt_config_value(plaintext: &str, master_key: &str) -> anyhow::Result
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&combined);
     Ok(format!("{}{}", ENCRYPTED_PREFIX_V2, b64))
+}
+
+
+
+/// sha2 0.11 的 finalize() 返回 Array<u8, N>（无 LowerHex），统一 hex 编码辅助
+fn hex_encode_digest(digest: &[u8]) -> String {
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    hex
 }
 
 /// 解密敏感配置值
@@ -249,7 +262,7 @@ mod crypto_tests {
         let key = derive_aes_key(master_key);
         let cipher = Aes256Gcm::new(&key.into());
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
         #[allow(deprecated)]
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes()).unwrap();

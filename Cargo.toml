@@ -42,7 +42,7 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "time"] }
 
 # JWT
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 # v5-D2：RSA-2048 keypair 生成（client 级 RS256 签名密钥）与公钥组件导出（JWKS）
 rsa = "0.9"
 
@@ -68,9 +68,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # 工具
 uuid = { version = "1", features = ["v4"] }
 toml = "1"
-argon2 = "0.5"
-md-5 = "0.10"
-sha2 = "0.10"
+argon2 = { version = "0.6", features = ["rand_core"] }
+md-5 = "0.11"
+sha2 = "0.11"
 hex = "0.4"
 
 # 错误处理
@@ -84,7 +84,7 @@ thiserror = "2"
 garde = { version = "0.23", features = ["full"] }
 
 # 国际化（T-05）：编译期嵌入 locales/*.yml，t! 宏按请求 locale 翻译文案
-rust-i18n = "3"
+rust-i18n = "4"
 
 # Redis
 redis = { version = "1.3", features = ["tokio-comp", "connection-manager"] }
@@ -112,17 +112,17 @@ ammonia = "4"
 # tokio-cron-scheduler 内部依赖 croner，项目直接使用 croner 做 cron 表达式验证和下次执行时间计算，
 # 避免引入额外的 cron crate 造成两个 cron 解析库共存
 tokio-cron-scheduler = "0.15"
-croner = "3"
+croner = "4"
 
 # HTTP 响应缓存层（P3-6）：进程内 TTL 缓存，仅缓存白名单幂等只读 GET 接口的响应体
 # future 特性启用 async API（Cache::get / Cache::insert），用于 axum 中间件异步读写
 moka = { version = "0.12", features = ["future"] }
 
 # Excel 导出（T-10：启用 constant_memory 流式模式，大数据量内存 O(1)）
-rust_xlsxwriter = { version = "0.96", features = ["constant_memory"] }
+rust_xlsxwriter = { version = "0.99", features = ["constant_memory"] }
 
 # Excel 导入解析（B3：用户批量导入，读取 xlsx 工作表）
-calamine = "0.26"
+calamine = "0.36"
 
 # 系统监控（CPU/内存/磁盘信息采集）
 sysinfo = "0.39"
@@ -133,56 +133,58 @@ ts-rs = { version = "12", features = ["chrono-impl", "no-serde-warnings"] }
 # OpenAPI 文档自动生成（utoipa）
 # 注：不使用 utoipa-swagger-ui（其 build.rs 需从 GitHub 下载资源），
 # 改为通过 CDN 加载 Swagger UI 前端资源，由 docs.rs 提供 HTML 页面
-utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono"] }
 
 # IP 归属地查询（基于 MaxMindDB 离线数据库）
-maxminddb = "0.29"
+maxminddb = "0.32"
 
 # 原子可替换引用（用于 mmdb 热加载）
 arc-swap = "1"
 
 # HTTP 客户端（用于下载 mmdb 文件、S3/MinIO 对象存储 SigV4 请求）
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "form"] }
 
 # URL 解析（S3/MinIO endpoint 的 host/authority 提取）
 url = "2"
 
 # XML 解析（S3 ListObjectsV2 响应）
 # 0.41 修复 RUSTSEC-2026-0194/0195（quick-xml 重复属性/命名空间 DoS），并已在依赖树中
-quick-xml = { version = "0.41", features = ["serialize"] }
+quick-xml = { version = "0.42", features = ["serialize"] }
 
 # tar.gz 解压（解压 MaxMind 下载包）
 flate2 = "1"
 tar = "0.4"
 
 # AES-256-GCM 加密（用于 License Key 加密存储）
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 
 # 随机数生成（AES-GCM nonce 生成）
 rand = "0.8"
+# rand_os：rand 0.10（加密随机/p256 0.14 的 rand_core 0.10 线）；rsa 0.9 锁死 rand 0.8 线，故双版本共存
+rand_os = { package = "rand", version = "0.10", features = ["std_rng", "sys_rng"] }
 
 # 密钥派生（P1）：PBKDF2-HMAC-SHA256，用于敏感配置加密的加盐 KDF（替代无盐 SHA256）
 # 使用 pbkdf2 的泛型 pbkdf2::<Hmac<Sha256>> 函数，无需启用 simple 特性
-pbkdf2 = "0.12"
-hmac = "0.12"
+pbkdf2 = "0.13"
+hmac = "0.13"
 
 # 模板引擎（代码生成模块使用）
 tera = "2"
 
 # ZIP 压缩（代码生成模块生成代码包下载）
-zip = "2.2"
+zip = "8"
 
 # TOTP 多因子认证
 # - qr：启用二维码生成（get_qr_png / get_qr）
 # - gen_secret：启用 Secret::generate_secret()（CSPRNG 生成 160bit secret）
 # - otpauth：启用 otpauth:// URL 生成（get_url），qr feature 已传递依赖
-totp-rs = { version = "5", features = ["qr", "gen_secret", "otpauth"] }
+totp-rs = { version = "6", features = ["qr", "gen_secret", "otpauth"] }
 
 # Base32 解码（TOTP secret 编码）
 base32 = "0.5"
 
 # Base64 编解码（TOTP QR 码 Data URL）
-base64 = "0.22"
+base64 = "0.23"
 
 # WebAuthn / Passkey（纯 Rust：ciborium + coset + p256，无 openssl）
 # 开关：能力位 `auth.webauthn`（默认 off，登录面能力，不向租户解锁 perm）。
@@ -227,8 +229,8 @@ harness = false
 # 用于引入 MigratorTrait（测试直接调用 Migrator::up），仅测试使用
 sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 # WebSocket 实时通知链路集成测试：真实 TCP + WS 客户端握手/收包（补 M7 0% 覆盖）
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 # WS 客户端测试需要 futures Stream/Sink 扩展方法
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-p256 = "0.13.2"
+p256 = "0.14"
 coset = "0.4.2"

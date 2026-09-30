@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, phc::SaltString},
 };
 
 /// 旧密码方案的固定盐值（仅用于验证旧 MD5 哈希，不用于新密码）
@@ -177,9 +177,9 @@ pub fn password_strength_score(password: &str) -> u8 {
 ///
 /// 返回 Result 而非静默吞错，避免哈希失败时存入空密码。
 pub fn encrypt_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
+    // argon2 0.6：hash_password 单参（内部自动生成随机盐）
     let argon2 = Argon2::default();
-    let hash = argon2.hash_password(password.as_bytes(), &salt)?;
+    let hash = argon2.hash_password(password.as_bytes())?;
     Ok(hash.to_string())
 }
 
