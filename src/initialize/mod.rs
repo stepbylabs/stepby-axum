@@ -1438,6 +1438,13 @@ async fn ensure_ai_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         ),
     )
     .await?;
+    // 兜底修正：init.rs 基线 seed 先占位 menu_id=4100（无 i18n_key），INSERT OR IGNORE 跳过后
+    // 增强列不会写入——UPDATE 幂等补齐（新库/存量库均安全，见 UX 真机核查的新旧库 diff 实证）
+    db.execute(Statement::from_string(
+        backend,
+        "UPDATE sys_menu SET i18n_key = 'menu.ai' WHERE menu_id = 4100 AND (i18n_key IS NULL OR i18n_key = '')".to_string(),
+    ))
+    .await?;
     Ok(())
 }
 
