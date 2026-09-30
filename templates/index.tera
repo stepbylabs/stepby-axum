@@ -1,15 +1,20 @@
 <template>
   <div class="app-container">
-    <el-row :gutter="20" class="mb8">
-      <el-col :span="1.5">
-        <el-button type="primary" plain icon="Plus" class="transition-all duration-200 hover:scale-105" @click="handleAdd">新增</el-button>
-      </el-col>
-    </el-row>
+    <!-- 工具行：Tailwind 布局（原 el-col :span=1.5 为无效小数 + mb8 为 RuoYi 遗留类，已按样式规范改造） -->
+    <div class="mb-2">
+      <el-button type="primary" plain icon="Plus" class="transition-all duration-200 hover:scale-105" @click="handleAdd">新增</el-button>
+    </div>
 
     <Transition name="fade" mode="out-in">
       <el-table v-loading="loading" :data="list" row-key="{{ pk_column.rustField | camel_case }}">
-{% for col in columns %}{% if col.isList == "1" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.rustField | camel_case }}" />
-{% endif %}{% endfor %}{% if is_flow %}      <el-table-column label="审批状态" prop="status" width="110" />
+{% for col in columns %}{% if col.isList == "1" %}{% if col.html_type == "datetime" or col.html_type == "date" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.rustField | camel_case }}" width="170" />
+{% elif col.html_type == "imageUpload" %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.rustField | camel_case }}" width="90">
+        <template #default="scope">
+          <el-image v-if="scope.row.{{ col.rustField | camel_case }}" :src="scope.row.{{ col.rustField | camel_case }}" :preview-src-list="[scope.row.{{ col.rustField | camel_case }}]" preview-teleported fit="cover" class="w-10 h-10 rounded" />
+        </template>
+      </el-table-column>
+{% else %}      <el-table-column label="{{ col.columnComment }}" prop="{{ col.rustField | camel_case }}" />
+{% endif %}{% endif %}{% endfor %}{% if is_flow %}      <el-table-column label="审批状态" prop="status" width="110" />
 {% endif %}      <el-table-column label="操作" width="{% if is_flow %}260{% else %}180{% endif %}">
         <template #default="scope">
           <el-button type="primary" link icon="Edit" class="transition-all duration-200 hover:scale-105" @click="handleEdit(scope.row)">修改</el-button>
@@ -24,8 +29,13 @@
     <el-dialog :title="dialog.title" v-model="dialog.visible" width="min(90%, 600px)" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
 {% for col in columns %}{% if col.isInsert == "1" or col.isEdit == "1" %}        <el-form-item label="{{ col.columnComment }}" prop="{{ col.rustField | camel_case }}">
-          <el-input v-model="form.{{ col.rustField | camel_case }}" placeholder="请输入{{ col.columnComment }}" />
-        </el-form-item>
+{% if col.html_type == "datetime" %}          <el-date-picker v-model="form.{{ col.rustField | camel_case }}" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="请选择{{ col.columnComment }}" class="!w-full" />
+{% elif col.html_type == "date" %}          <el-date-picker v-model="form.{{ col.rustField | camel_case }}" type="date" value-format="YYYY-MM-DD" placeholder="请选择{{ col.columnComment }}" class="!w-full" />
+{% elif col.html_type == "textarea" %}          <el-input v-model="form.{{ col.rustField | camel_case }}" type="textarea" :rows="3" placeholder="请输入{{ col.columnComment }}" />
+{# select/radio/checkbox 列需自行接入字典数据源（项目字典 store 为缓存型，无远程拉取 API），此处按普通输入生成，避免生成不可用代码 #}
+{% elif col.rust_type == "i64" or col.rust_type == "i32" or col.rust_type == "f64" %}          <el-input-number v-model="form.{{ col.rustField | camel_case }}" :controls="false" placeholder="请输入{{ col.columnComment }}" class="!w-full" />
+{% else %}          <el-input v-model="form.{{ col.rustField | camel_case }}" placeholder="请输入{{ col.columnComment }}" />
+{% endif %}        </el-form-item>
 {% endif %}{% endfor %}      </el-form>
       <template #footer>
         <el-button @click="dialog.visible = false">取消</el-button>
@@ -55,6 +65,8 @@ const form = reactive<Record<string, any>>({})
 const rules: Record<string, any> = {
 {% for col in columns %}{% if col.isRequired == "1" and (col.isInsert == "1" or col.isEdit == "1") %}  {{ col.rustField | camel_case }}: [{ required: true, message: '请输入{{ col.columnComment }}', trigger: 'blur' }],
 {% endif %}{% endfor %}}
+
+{# 字典说明：html_type=select/radio/checkbox 且配置 dict_type 的列，生成后需按项目字典 store 自行接入选项数据 #}
 
 async function getList() {
   loading.value = true
