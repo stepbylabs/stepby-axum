@@ -265,6 +265,12 @@ async fn build_isolated_state_with(
     Migrator::up(&db, None)
         .await
         .expect("运行迁移建表 + 种子数据失败");
+    // 存量库兜底：测试隔离库若由旧迁移建表，可能缺 sys_user.password_version 列
+    // （pwd_ver 双写 DB 会 WARN 失败 → 重登签发 claim 读列为 0 → 新 token 被
+    // Redis 中的 pwd_ver 拒绝 401）。与生产启动路径同口径补列。
+    crate::initialize::ensure_user_password_version_column(&db)
+        .await
+        .expect("补建 sys_user.password_version 列失败");
 
     // 3. 初始化 Redis，清空隔离 DB，关闭验证码开关，放大限流容量
     let redis = init_redis(&settings.redis)
@@ -298,10 +304,14 @@ async fn build_isolated_state_with(
     ));
     let ip_location_service =
         IpLocationService::new(db.clone(), settings.clone(), ip_locator.clone());
+    // SharedStore 双档改造：集成测试固定走 redis 档（RedisStore = 生产 redis 档同实现），
+    // 保证原有裸 redis::cmd 断言与业务写入落在同一 Redis DB，测试语义与迁移前一致。
+    let store: Arc<dyn crate::shared_store::SharedStore> =
+        Arc::new(crate::shared_store::RedisStore::new(redis.clone(), db.clone()));
     let job_scheduler = Arc::new(
         JobScheduler::new(
             db.clone(),
-            redis.clone(),
+            store.clone(),
             ip_location_service.clone(),
             settings.clone(),
         )
@@ -315,7 +325,9 @@ async fn build_isolated_state_with(
     (
         Arc::new(AppState::new(
             db,
-            redis,
+            store,
+            // redis 档测试：原生连接注入 rate_limit Lua 令牌桶使用
+            Some(redis.clone()),
             settings,
             job_scheduler,
             ip_locator,
@@ -379,6 +391,9 @@ pub struct TestContext {
     pub peer_ip: IpAddr,
     /// 应用状态句柄（测试直查 Redis / DB 用，与 app 共享同一实例）
     pub state: Arc<AppState>,
+    /// 测试断言专用的原生 Redis 连接（与 app 共享同一隔离 DB）。
+    /// SharedStore 迁移收尾：裸 `redis::cmd` 断言统一取自本字段（redis 档测试语义不变）。
+    pub redis: redis::aio::ConnectionManager,
     /// 独占的 Redis DB 槽位（drop 时自动归还，保证并行测试 DB 索引唯一）
     _slot: RedisSlot,
 }
@@ -402,6 +417,11 @@ impl TestContext {
         configure: impl FnOnce(&mut Settings),
     ) -> Self {
         let (state, slot) = build_isolated_state_with(features, configure).await;
+        // redis 档测试：从 AppState 取回原生 Redis 连接，供各测试文件裸 redis::cmd 断言使用
+        let redis = state
+            .redis_conn
+            .clone()
+            .expect("集成测试固定走 redis 档，redis_conn 必为 Some");
         let app = crate::router::build_app(state.clone());
         let peer_ip = next_peer_ip();
         let token = login(&app, peer_ip, "admin", "admin123").await;
@@ -410,13 +430,14 @@ impl TestContext {
             token,
             peer_ip,
             state,
+            redis,
             _slot: slot,
         }
     }
 
     /// 测试专属的 Redis 连接（与 app 共享同一隔离 DB）
     pub fn redis(&self) -> redis::aio::ConnectionManager {
-        self.state.redis.clone()
+        self.redis.clone()
     }
 
     /// 构造带鉴权头 + ConnectInfo 的请求。

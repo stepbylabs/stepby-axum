@@ -10,23 +10,22 @@
 //! 但依赖 middleware::rate_limit::RateLimitConfig（仅数据结构，无循环依赖）
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use garde::Validate;
-use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_rate_limit::{
     ActiveModel as SysRateLimitActiveModel, Model as SysRateLimitModel,
 };
 use crate::middleware::rate_limit::RateLimitConfig;
 use crate::repository::sys_rate_limit::SysRateLimitRepository;
+use crate::shared_store::SharedStore;
 
 /// 限流缓存 key 前缀（格式：rate_limit:config:{route}）
 const RATE_LIMIT_CACHE_PREFIX: &str = "rate_limit:config:";
@@ -36,8 +35,8 @@ const RATE_LIMIT_CACHE_TTL: i64 = 300;
 const GLOBAL_DEFAULT_PATTERN: &str = "*";
 /// M-2：进程内缓存 TTL（秒）
 ///
-/// 限流中间件每个请求都会调用 get_config_for_route，若每次都走 Redis GET 会引入
-/// 网络往返开销。进程内缓存以短 TTL（10s）缓存最近配置，命中时直接返回，避免 Redis 往返。
+/// 限流中间件每个请求都会调用 get_config_for_route，若每次都走共享存储 GET 会引入
+/// 额外往返开销。进程内缓存以短 TTL（10s）缓存最近配置，命中时直接返回，避免该往返。
 /// 10s 窗口足以平滑突发请求，配置变更后最长 10s 生效（invalidate 时立即清空）。
 const LOCAL_CACHE_TTL_SECS: u64 = 10;
 
@@ -117,22 +116,22 @@ fn default_true() -> bool {
 ///
 /// 数据访问通过 Repository 层委托：
 /// - rate_limit_repo: sys_rate_limit 表 CRUD
-/// - redis: Redis 连接管理器，用于限流配置缓存（cache-aside 模式）
+/// - store: 共享态存储（SharedStore），用于限流配置缓存（cache-aside 模式）
 ///
-/// M-2：增加进程内短 TTL 缓存（local_cache），减少限流中间件每请求一次的 Redis 往返。
-/// 缓存层次：local_cache (10s) → Redis (300s) → DB。配置变更时 invalidate 同时清空 local_cache。
+/// M-2：增加进程内短 TTL 缓存（local_cache），减少限流中间件每请求一次的共享存储往返。
+/// 缓存层次：local_cache (10s) → 共享存储 (300s) → DB。配置变更时 invalidate 同时清空 local_cache。
 pub struct SysRateLimitService {
     rate_limit_repo: SysRateLimitRepository,
-    redis: ConnectionManager,
-    /// M-2：进程内缓存（route → (config, fetched_at)），短 TTL 减少 Redis 往返
+    store: Arc<dyn SharedStore>,
+    /// M-2：进程内缓存（route → (config, fetched_at)），短 TTL 减少共享存储往返
     local_cache: Mutex<HashMap<String, (RateLimitConfig, Instant)>>,
 }
 
 impl SysRateLimitService {
-    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>) -> Self {
         Self {
             rate_limit_repo: SysRateLimitRepository::new(db),
-            redis,
+            store,
             local_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -156,42 +155,20 @@ impl SysRateLimitService {
             let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.clear();
         }
-        let mut conn = self.redis.clone();
         let pattern = format!("{}*", RATE_LIMIT_CACHE_PREFIX);
-        let mut cursor: u64 = 0;
-        loop {
-            let scan_result: Result<(u64, Vec<String>), _> = crate::utils::redis::cmd_timeout(
-                redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(&pattern)
-                    .arg("COUNT")
-                    .arg(100)
-                    .query_async(&mut conn),
-            )
-            .await;
-            let (next_cursor, keys) = match scan_result {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::warn!("扫描限流缓存键失败: {}", e);
-                    return;
-                }
-            };
-            if !keys.is_empty() {
-                let mut pipe = redis::pipe();
-                for key in &keys {
-                    pipe.cmd("DEL").arg(key);
-                }
-                if let Err(e) =
-                    crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
-                {
-                    tracing::warn!("批量删除限流缓存失败: {}", e);
-                }
+        // 全量扫描（原 cursor 循环至游标归零的语义）；失败仅 warn 后返回
+        let keys = match self.store.scan(&pattern, None).await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("扫描限流缓存键失败: {}", e);
+                return;
             }
-            if next_cursor == 0 {
-                break;
+        };
+        if !keys.is_empty() {
+            // 批量删除（原 pipeline 语义——非事务允许部分成功，del 多键等价）
+            if let Err(e) = self.store.del(&keys).await {
+                tracing::warn!("批量删除限流缓存失败: {}", e);
             }
-            cursor = next_cursor;
         }
     }
 
@@ -373,16 +350,9 @@ impl SysRateLimitService {
             }
         }
 
-        // 1. 尝试从 Redis 读取（R8-CONC-013：包裹 3s 超时，防止 Redis 挂起导致请求阻塞）
-        let mut conn = self.redis.clone();
-        let cached: Option<String> = tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET").arg(&key).query_async(&mut conn),
-        )
-        .await
-        .ok() // 超时 → None（缓存未命中，降级到 DB）
-        .and_then(|r| r.ok()) // Redis 错误 → None
-        .flatten(); // Option<Option<String>> → Option<String>
+        // 1. 尝试从共享存储读取（R8-CONC-013：命令级超时已内建于 store 实现层，
+        //    防止存储挂起导致请求阻塞；错误/超时 → 未命中，降级到 DB）
+        let cached: Option<String> = self.store.get(&key).await.ok().flatten();
 
         if let Some(val) = cached
             && let Ok(cached_config) = serde_json::from_str::<RateLimitConfigCached>(&val)
@@ -424,24 +394,16 @@ impl SysRateLimitService {
             None => RateLimitConfig::default(),
         };
 
-        // 3. 缓存到 Redis（best-effort，失败仅记日志不影响业务）
-        //    R8-CONC-013：包裹 3s 超时，防止 SETEX 挂起（Redis 不可用时快速降级）
+        // 3. 缓存到共享存储（best-effort，失败仅记日志不影响业务）
+        //    R8-CONC-013：命令级超时已内建于 store 实现层（快速降级，不挂起请求）
         let cached_config = RateLimitConfigCached::from(&config);
-        if let Ok(val) = serde_json::to_string(&cached_config) {
-            let cache_result = tokio::time::timeout(
-                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-                redis::cmd("SETEX")
-                    .arg(&key)
-                    .arg(RATE_LIMIT_CACHE_TTL)
-                    .arg(val)
-                    .query_async::<()>(&mut conn),
-            )
-            .await;
-            match cache_result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!("缓存限流配置到 Redis 失败 (key={}): {}", key, e),
-                Err(e) => tracing::warn!("缓存限流配置到 Redis 超时 (key={}): {}", key, e),
-            }
+        if let Ok(val) = serde_json::to_string(&cached_config)
+            && let Err(e) = self
+                .store
+                .set_ex(&key, &val, RATE_LIMIT_CACHE_TTL as u64)
+                .await
+        {
+            tracing::warn!("缓存限流配置到 Redis 失败 (key={}): {}", key, e);
         }
 
         // M-2：回填 local_cache（best-effort，即使 Redis 写入失败也回填本地，下次请求仍可命中）

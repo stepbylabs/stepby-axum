@@ -178,28 +178,21 @@ pub async fn self_export(
     Ok(AjaxResult::success(vo))
 }
 
-/// 获取 Redis 限流锁（SET NX EX）；未获取到 → 400「操作过于频繁」，
-/// Redis 异常 → fail-closed 503（备份类接口不可在无锁保护下执行）
+/// 获取限流锁（原 SET NX EX 语义 → `store.set_nx_ex`）；未获取到 → 400「操作过于频繁」，
+/// 共享态存储异常 → fail-closed 503（备份类接口不可在无锁保护下执行）
 async fn acquire_rate_lock(
     state: &Arc<AppState>,
     key: &str,
     ttl_secs: i64,
 ) -> Result<(), AppError> {
-    let mut conn = state.redis.clone();
-    let acquired: bool = crate::utils::redis::cmd_timeout(
-        redis::cmd("SET")
-            .arg(key)
-            .arg("1")
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl_secs)
-            .query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "备份限流锁写入失败（fail-closed 拒绝）");
-        AppError::new(503, crate::tr!("error.backup.service_unavailable"))
-    })?;
+    let acquired = state
+        .store
+        .set_nx_ex(key, "1", ttl_secs.max(1) as u64)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "备份限流锁写入失败（fail-closed 拒绝）");
+            AppError::new(503, crate::tr!("error.backup.service_unavailable"))
+        })?;
     if !acquired {
         return Err(AppError::bad_request(&crate::tr!(
             "error.backup.too_frequent"
@@ -231,47 +224,34 @@ pub async fn restore(
     operator: Operator,
     Path(backup_id): Path<i64>,
 ) -> Result<AjaxResult<()>, AppError> {
-    // P1 修复：恢复为高危操作，加 Redis 互斥锁（10 分钟 TTL 防卡死），
-    // 防止两个并发 restore 互相覆盖（此前无并发控制）
+    // P1 修复：恢复为高危操作，加共享态互斥锁（10 分钟 TTL 防卡死），
+    // 防止两个并发 restore 互相覆盖（此前无并发控制）。
+    // 原 SET NX EX + UUID value + EVAL CAS 释放 → 收敛为 `store.lock_acquire/lock_release`
+    // （UUID fencing token 由实现内置）。
     let restore_lock_key = "backup:restore:lock";
-    let lock_value = uuid::Uuid::new_v4().to_string();
-    let mut redis = state.redis.clone();
-    let acquired: bool = crate::utils::redis::cmd_timeout(
-        redis::cmd("SET")
-            .arg(restore_lock_key)
-            .arg(&lock_value)
-            .arg("NX")
-            .arg("EX")
-            .arg(600i64)
-            .query_async(&mut redis),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "恢复互斥锁写入失败（fail-closed 拒绝）");
-        AppError::new(503, crate::tr!("error.backup.service_unavailable"))
-    })?;
-    if !acquired {
+    let lock_handle = state
+        .store
+        .lock_acquire(restore_lock_key, 600)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "恢复互斥锁写入失败（fail-closed 拒绝）");
+            AppError::new(503, crate::tr!("error.backup.service_unavailable"))
+        })?;
+    let Some(lock_handle) = lock_handle else {
         return Err(AppError::bad_request(&crate::tr!(
             "error.backup.restore_in_progress"
         )));
-    }
+    };
 
     let result = state
         .backup_service
         .restore_backup(backup_id, operator.username())
         .await;
 
-    // 释放锁（CAS：仅当 value 匹配时删除，避免误删其他恢复任务的锁）
-    let _: i64 = crate::utils::redis::cmd_timeout(
-        redis::cmd("EVAL")
-            .arg(r#"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"#)
-            .arg(1)
-            .arg(restore_lock_key)
-            .arg(&lock_value)
-            .query_async(&mut redis),
-    )
-    .await
-    .unwrap_or(0);
+    // 释放锁（CAS：仅当 fencing token 匹配时删除，避免误删其他恢复任务的锁；best-effort）
+    if let Err(e) = state.store.lock_release(&lock_handle).await {
+        tracing::warn!(error = %e, "恢复互斥锁释放失败（TTL 到期后其他任务可抢占）");
+    }
     result?;
 
     // 恢复成功后清理 Redis 业务缓存，避免缓存与恢复后的数据库数据不一致
@@ -287,46 +267,29 @@ pub async fn restore(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.restore")))
 }
 
-/// 清理业务相关 Redis 缓存（恢复备份后调用）
+/// 清理业务相关缓存（恢复备份后调用）
 async fn clear_business_caches(state: &Arc<AppState>) {
     let patterns = ["dict:*", "config:*", "rate_limit:config:*"];
-    let mut redis = state.redis.clone();
     for pattern in &patterns {
-        // 使用 SCAN 迭代匹配的 key 并批量删除（比 KEYS 更安全，不阻塞 Redis）
-        let mut cursor: u64 = 0;
-        loop {
-            let result: (u64, Vec<String>) = match crate::utils::redis::cmd_timeout(
-                redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(pattern)
-                    .arg("COUNT")
-                    .arg(100i64)
-                    .query_async(&mut redis),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, pattern = %pattern, "缓存清理 SCAN 失败，跳过");
-                    break;
-                }
-            };
-            let (next_cursor, keys) = result;
-            if !keys.is_empty() {
-                let mut pipe = redis::pipe();
-                for key in &keys {
-                    pipe.cmd("DEL").arg(key);
-                }
-                let _: redis::RedisResult<()> =
-                    crate::utils::redis::cmd_timeout(pipe.query_async(&mut redis)).await;
-                tracing::info!(pattern = %pattern, count = keys.len(), "已清理缓存 key");
+        // 全量扫描（不截断）后删除——恢复后必须清干净，否则缓存与恢复后的 DB 不一致；
+        // 单次 SCAN 失败仅告警并跳过该 pattern（与原游标循环失败 break 语义一致）
+        let keys = match state.store.scan(pattern, None).await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, pattern = %pattern, "缓存清理 SCAN 失败，跳过");
+                continue;
             }
-            if next_cursor == 0 {
-                break;
-            }
-            cursor = next_cursor;
+        };
+        if keys.is_empty() {
+            continue;
         }
+        // 分批删除（保持原 DEL_BATCH_SIZE 批次语义，防单条超长 DEL 长时间占用后端）
+        for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
+            if let Err(e) = state.store.del(chunk).await {
+                tracing::warn!(error = %e, pattern = %pattern, "缓存清理 DEL 失败（本批跳过）");
+            }
+        }
+        tracing::info!(pattern = %pattern, count = keys.len(), "已清理缓存 key");
     }
 }
 

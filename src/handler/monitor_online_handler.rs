@@ -5,14 +5,15 @@
 //! - DELETE /monitor/online/{tokenHash}     强退用户
 //!
 //! P1-19 方案 B 实现说明：
-//! 在线用户列表通过 Redis SCAN `online:*` + MGET 解析 `OnlineSession` JSON 获取，
+//! 在线用户列表通过共享态存储 SCAN `online:*` + 批量读解析 `OnlineSession` JSON 获取，
 //! 不再查 sys_logininfor 表（消除 30 分钟硬窗口 Bug）。
 //! 登录时 `auth_service::finalize_login` 写入 `online:{token_hash}` → JSON（TTL = JWT 有效期）。
-//! 登出时 `auth_service::logout` DEL `online:{token_hash}`（修复登出后仍显示在线的 Bug）。
-//! 强退时用 Lua 脚本原子化 SETEX blacklist + DEL online（落实 memory 第 68 行约束）。
+//! 登出时 `auth_service::logout` 删除 `online:{token_hash}`（修复登出后仍显示在线的 Bug）。
+//! 强退时经 `store.revoke_session` 原子化 blacklist 登记 + online / sso:at 删除
+//! （redis 档 = 原三键 Lua，已封入 shared_store::RedisStore；local 档 = 单事务）。
 //!
-//! 降级策略：Redis SCAN/MGET 失败时降级查 sys_logininfor 表（记 warn 日志）。
-//! fail-closed：force_logout 的 Redis 操作失败返回 503。
+//! 降级策略：SCAN/批量读失败时降级查 sys_logininfor 表（记 warn 日志）。
+//! fail-closed：force_logout 的共享态存储操作失败返回 503。
 
 use std::sync::Arc;
 
@@ -25,28 +26,12 @@ use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::auth::Operator;
 use crate::state::AppState;
 use crate::utils::crypto::OnlineSession;
-use crate::utils::redis::scan_keys;
 
 // ==================== 常量 ====================
 
-/// 强退 Lua 脚本：原子化 SETEX 黑名单 + DEL online + DEL SSO AT 绑定（v4-F2 联动）
-///
-/// KEYS[1] = `blacklist:{token_hash}`
-/// KEYS[2] = `online:{token_hash}`
-/// KEYS[3] = `sso:at:{token_hash}`（v5 核查：SSO 会话的 online hash 即不透明 AT 的
-///   SHA-256，源 sso_service 签发时写 online:{at_hash}；不透明 AT 的吊销唯一路径是
-///   DEL 绑定，不做联动则管理员强退后 RP 侧会话仍有效至 TTL）
-/// ARGV[1] = 黑名单 TTL（秒，M-3：精确剩余有效期 = session.exp - now，回退到 jwt.expire_hours 上界）
-///
-/// 使用 Lua 保证原子性，避免 SETEX 与 DEL 分离导致：
-/// - 强退后 online key 仍存在（用户出现在在线列表）
-/// - 黑名单写入失败但 online 已删除（用户无法被再次强退）
-const FORCE_LOGOUT_SCRIPT: &str = r#"
-redis.call("SETEX", KEYS[1], ARGV[1], "1")
-redis.call("DEL", KEYS[2])
-redis.call("DEL", KEYS[3])
-return 1
-"#;
+// 强退三键原子操作（原 FORCE_LOGOUT_SCRIPT：SETEX blacklist + DEL online + DEL sso:at）
+// 已收敛为 `SharedStore::revoke_session(token_hash, ttl)`，实现封入 shared_store 双档
+// （redis 档 Lua 原样保留于 RedisStore；local 档为单事务）。本 handler 不再感知实现细节。
 
 // ==================== DTO / Vo ====================
 
@@ -95,10 +80,10 @@ pub struct SysUserOnline {
 /// GET /monitor/online/list
 /// 分页查询在线用户
 ///
-/// P1-19 方案 B：通过 Redis SCAN `online:*` + MGET 解析 `OnlineSession` JSON 获取在线列表，
+/// P1-19 方案 B：通过共享态存储 SCAN `online:*` + 批量读解析 `OnlineSession` JSON 获取在线列表，
 /// 不再查 sys_logininfor 表（消除 30 分钟硬窗口 Bug，列表与 JWT 有效期完全对齐）。
 ///
-/// 降级策略：Redis SCAN/MGET 失败时降级调用 `get_online_users` 查 sys_logininfor 表，记 warn 日志。
+/// 降级策略：SCAN/批量读失败时降级调用 `get_online_users` 查 sys_logininfor 表，记 warn 日志。
 ///
 /// 客户端分页：total 为当前真实在线总数，后端不做服务端切片，返回全部在线用户由前端分页展示。
 ///
@@ -120,14 +105,12 @@ pub async fn list(
     operator: Operator,
     Query(query): Query<OnlineQueryDto>,
 ) -> Result<TableDataInfo<SysUserOnline>, AppError> {
-    let mut redis = state.redis.clone();
-
-    // 1. SCAN online:* 获取所有在线会话 key（复用 monitor_cache_handler::scan_keys）
-    let keys = match scan_keys(&mut redis, "online:*", 5000).await {
+    // 1. SCAN online:* 获取所有在线会话 key（截断版，上限保持 5000）
+    let keys = match state.store.scan("online:*", Some(5000)).await {
         Ok(k) => k,
         Err(e) => {
             tracing::warn!(
-                "Redis SCAN online:* 失败，降级到 sys_logininfor 查询: {}",
+                "共享态存储 SCAN online:* 失败，降级到 sys_logininfor 查询: {}",
                 e
             );
             return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
@@ -138,15 +121,11 @@ pub async fn list(
         return Ok(TableDataInfo::new(0, Vec::new()));
     }
 
-    // 2. MGET 批量获取所有 online JSON（单次 pipeline，遵循 memory 第 57 行约束）
-    let values: Vec<Option<String>> = match crate::utils::redis::cmd_timeout(
-        redis::cmd("MGET").arg(&keys).query_async(&mut redis),
-    )
-    .await
-    {
+    // 2. 批量读取所有 online JSON（原 MGET 单次往返语义 → store.get_many）
+    let values: Vec<Option<String>> = match state.store.get_many(&keys).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("Redis MGET online 失败，降级到 sys_logininfor 查询: {}", e);
+            tracing::warn!("共享态存储批量读取 online 失败，降级到 sys_logininfor 查询: {}", e);
             return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
         }
     };
@@ -379,14 +358,14 @@ async fn fallback_to_logininfor(
 /// P1-19 方案 B：路径参数从 `{tokenId}`（info_id）改为 `{tokenHash}`（token 的 SHA-256 哈希）。
 ///
 /// 流程：
-/// 1. GET `online:{token_hash}` → JSON → OnlineSession（确认会话存在 + 获取 user_id 用于超管保护）
+/// 1. 读 `online:{token_hash}` → JSON → OnlineSession（确认会话存在 + 获取 user_id 用于超管保护）
 /// 2. 租户越权防护（§27.13.2 分层视图）：租户操作者只能强退本租户会话，跨租户返回 403
 /// 3. 超管保护：user_id == SUPER_ADMIN_USER_ID 返回 403
-/// 4. Lua 原子化 SETEX `blacklist:{token_hash}` + DEL `online:{token_hash}`
-/// 5. fail-closed：Redis 故障返回 503
+/// 4. `store.revoke_session` 原子化 blacklist 登记 + 删除 online / sso:at（原三键 Lua 语义）
+/// 5. fail-closed：共享态存储故障返回 503
 ///
-/// Lua 脚本 TTL 说明（M-3 精确化）：
-/// ARGV[1] = `max(session.exp - now, 1)`（精确剩余有效期，秒）。
+/// blacklist TTL 说明（M-3 精确化）：
+/// TTL = `max(session.exp - now, 1)`（精确剩余有效期，秒）。
 /// OnlineSession.exp 由登录流程从 JWT claims.exp 写入（UTC 秒）。
 /// 旧 JSON（v2.13 前，exp 默认 0）回退到 `jwt_config.expire_hours * SECS_PER_HOUR` 保守上界。
 /// 黑名单条目与 token 同时过期，避免旧方案中"登录 1 小时被强退 → 黑名单仍留 24 小时"的内存浪费。
@@ -410,18 +389,16 @@ pub async fn force_logout(
     Path(token_hash): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     let online_key = format!("online:{}", token_hash);
-    let blacklist_key = format!("blacklist:{}", token_hash);
-    let mut redis = state.redis.clone();
 
-    // 1. GET online:{token_hash} → JSON → OnlineSession（确认会话存在 + 获取 user_id）
-    let session_json: Option<String> = crate::utils::redis::cmd_timeout(
-        redis::cmd("GET").arg(&online_key).query_async(&mut redis),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
-        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-    })?;
+    // 1. 读 online:{token_hash} → JSON → OnlineSession（确认会话存在 + 获取 user_id）
+    let session_json = state
+        .store
+        .get(&online_key)
+        .await
+        .map_err(|e| {
+            tracing::error!("共享态存储查询在线会话失败（fail-closed）: {}", e);
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
 
     let session_json = match session_json {
         Some(s) => s,
@@ -472,11 +449,7 @@ pub async fn force_logout(
         ));
     }
 
-    // 4. Lua 原子化 SETEX blacklist + DEL online + DEL sso:at（v4-F2 联动）
-    //    KEYS[1] = blacklist:{token_hash}, KEYS[2] = online:{token_hash},
-    //    KEYS[3] = sso:at:{token_hash}（平台会话无该 key，DEL no-op 无害）
-    //    ARGV[1] = 黑名单 TTL（秒）
-    //
+    // 4. 原子强退：blacklist 登记 + DEL online + DEL sso:at（v4-F2 联动 → store.revoke_session）
     //    M-3：精确 TTL 计算（使用 OnlineSession.exp 实际剩余有效期）
     //    - 新会话（exp > 0）：TTL = max(exp - now, 1)，黑名单条目与 token 同时过期
     //    - 旧会话（exp == 0，兼容 v2.13 前遗留的 online JSON）：回退到 jwt.expire_hours 保守上界
@@ -496,15 +469,12 @@ pub async fn force_logout(
     } else {
         fallback_ttl
     };
-    let _: i64 = redis::Script::new(FORCE_LOGOUT_SCRIPT)
-        .key(&blacklist_key)
-        .key(&online_key)
-        .key(format!("sso:at:{}", token_hash))
-        .arg(blacklist_ttl)
-        .invoke_async(&mut redis)
+    state
+        .store
+        .revoke_session(&token_hash, blacklist_ttl as u64)
         .await
         .map_err(|e| {
-            tracing::error!("Lua 强退脚本执行失败（fail-closed）: {}", e);
+            tracing::error!("revoke_session 强退执行失败（fail-closed）: {}", e);
             AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
 
@@ -583,17 +553,16 @@ pub async fn my_session_logout(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     let online_key = format!("online:{}", token_hash);
-    let mut redis = state.redis.clone();
 
     // 1. 读会话 → 确认存在 + 属主校验（v5-N5：横向越权防线）
-    let session_json: Option<String> = crate::utils::redis::cmd_timeout(
-        redis::cmd("GET").arg(&online_key).query_async(&mut redis),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Redis 查询在线会话失败（fail-closed）: {}", e);
-        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-    })?;
+    let session_json = state
+        .store
+        .get(&online_key)
+        .await
+        .map_err(|e| {
+            tracing::error!("共享态存储查询在线会话失败（fail-closed）: {}", e);
+            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
     let session: OnlineSession = match session_json {
         Some(s) => serde_json::from_str(&s).map_err(|e| {
             tracing::error!("解析 OnlineSession JSON 失败: {}", e);
@@ -612,7 +581,7 @@ pub async fn my_session_logout(
         ));
     }
 
-    // 2. 与 force_logout 同款三键 Lua（blacklist + online + sso:at，v5 前轮已联动）
+    // 2. 与 force_logout 同款原子吊销（blacklist + online + sso:at，经 store.revoke_session）
     let now_secs = chrono::Utc::now().timestamp();
     let precise_ttl = session.exp.saturating_sub(now_secs).max(0);
     let fallback_ttl = state
@@ -626,15 +595,12 @@ pub async fn my_session_logout(
     } else {
         fallback_ttl
     };
-    let _: i64 = redis::Script::new(FORCE_LOGOUT_SCRIPT)
-        .key(format!("blacklist:{}", token_hash))
-        .key(&online_key)
-        .key(format!("sso:at:{}", token_hash))
-        .arg(blacklist_ttl)
-        .invoke_async(&mut redis)
+    state
+        .store
+        .revoke_session(&token_hash, blacklist_ttl as u64)
         .await
         .map_err(|e| {
-            tracing::error!("Lua 自助注销脚本执行失败（fail-closed）: {}", e);
+            tracing::error!("revoke_session 自助注销执行失败（fail-closed）: {}", e);
             AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
 

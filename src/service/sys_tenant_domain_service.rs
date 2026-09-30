@@ -19,10 +19,10 @@
 //!   未命中不缓存（负缓存缺失）。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::NaiveDateTime;
-use redis::aio::ConnectionManager;
 use sea_orm::sea_query::Expr;
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,7 @@ use crate::entity::sys_tenant_domain::{
 };
 use crate::repository::sys_tenant::SysTenantRepository;
 use crate::repository::sys_tenant_domain::SysTenantDomainRepository;
+use crate::shared_store::SharedStore;
 use crate::utils::dns_txt::{self, DnsError};
 
 /// 域名→tid 缓存 TTL（秒）
@@ -273,7 +274,8 @@ pub struct TenantDomainIdDto {
 #[derive(Clone)]
 pub struct SysTenantDomainService {
     db: DatabaseConnection,
-    redis: ConnectionManager,
+    /// 共享态存储（host 缓存 `tenant:host:{domain}` 的 GET/SETEX/DEL 统一走此抽象）
+    store: Arc<dyn SharedStore>,
     domain_repo: SysTenantDomainRepository,
     tenant_repo: SysTenantRepository,
     /// 全局配置（`[acme]` 证书需求输出集成点；默认 `off` ⇒ 不发任何出站请求）
@@ -283,14 +285,14 @@ pub struct SysTenantDomainService {
 impl SysTenantDomainService {
     pub fn new(
         db: DatabaseConnection,
-        redis: ConnectionManager,
+        store: Arc<dyn SharedStore>,
         config: std::sync::Arc<crate::config::Settings>,
     ) -> Self {
         Self {
             domain_repo: SysTenantDomainRepository::new(db.clone()),
             tenant_repo: SysTenantRepository::new(db.clone()),
             db,
-            redis,
+            store,
             config,
         }
     }
@@ -749,50 +751,30 @@ impl SysTenantDomainService {
         self.redis_del(&domain_host_key(&domain)).await;
     }
 
-    // ---------- Redis 工具（best-effort，异常降级） ----------
+    // ---------- 共享态存储工具（best-effort，异常降级） ----------
+    //
+    // SharedStore 迁移：`redis_get`/`redis_setex`/`redis_del` 保留原函数名与调用点，
+    // 内部由裸 Redis 命令（GET/SETEX/DEL + cmd_timeout 包裹）改为 store 薄封装——
+    // 超时保护与异常降级语义由 SharedStore 实现内部承载，调用方口径不变。
 
     async fn redis_get(&self, key: &str) -> Option<String> {
-        let mut redis = self.redis.clone();
-        match tokio::time::timeout(
-            Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET")
-                .arg(key)
-                .query_async::<Option<String>>(&mut redis),
-        )
-        .await
-        {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
+        match self.store.get(key).await {
+            Ok(v) => v,
+            Err(e) => {
                 tracing::warn!(key, error = %e, "域名缓存读取失败（降级回源 DB）");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(key, "域名缓存读取超时（降级回源 DB）");
                 None
             }
         }
     }
 
     async fn redis_setex(&self, key: &str, ttl: i64, value: &str) {
-        let mut redis = self.redis.clone();
-        let _ = tokio::time::timeout(
-            Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("SETEX")
-                .arg(key)
-                .arg(ttl)
-                .arg(value)
-                .query_async::<()>(&mut redis),
-        )
-        .await;
+        // 与原实现一致：写失败静默忽略（cache-aside 回填，best-effort）
+        let _ = self.store.set_ex(key, value, ttl.max(0) as u64).await;
     }
 
     async fn redis_del(&self, key: &str) {
-        let mut redis = self.redis.clone();
-        let _ = tokio::time::timeout(
-            Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("DEL").arg(key).query_async::<()>(&mut redis),
-        )
-        .await;
+        // 与原实现一致：删失败静默忽略（缓存失效，best-effort）
+        let _ = self.store.del(&[key.to_string()]).await;
     }
 }
 

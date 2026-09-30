@@ -129,14 +129,10 @@ pub async fn unlock(
             crate::common::tenant::tenant_scope(operator.tenant_id()),
         )
         .await?;
-    // 同步重置 Redis 中的登录失败计数，否则用户仍会被锁定（auth_service 使用 login_fail:{username}）
+    // 同步重置共享态存储中的登录失败计数，否则用户仍会被锁定（auth_service 使用 login_fail:{username}）
     let fail_key = format!("login_fail:{}", user_name);
-    let mut redis = state.redis.clone();
-    let del_result: Result<(), _> =
-        crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&fail_key).query_async(&mut redis))
-            .await;
-    if let Err(e) = del_result {
-        tracing::warn!("重置 Redis 登录失败计数失败 (user={}): {}", user_name, e);
+    if let Err(e) = state.store.del(std::slice::from_ref(&fail_key)).await {
+        tracing::warn!("重置共享态存储登录失败计数失败 (user={}): {}", user_name, e);
     }
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.unlock")))
 }

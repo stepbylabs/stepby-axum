@@ -106,16 +106,12 @@ async fn test_tenant_scope_isolation() {
         .unwrap_err();
     assert_eq!(err.code, 404, "跨租户改应 404");
     let err = svc
-        .toggle_client(b.client.sso_client_id, "0", &mut ctx.state.redis.clone(), 5)
+        .toggle_client(b.client.sso_client_id, "0", &ctx.state.store, 5)
         .await
         .unwrap_err();
     assert_eq!(err.code, 404, "跨租户启停应 404");
     let err = svc
-        .delete_clients(
-            vec![b.client.sso_client_id],
-            &mut ctx.state.redis.clone(),
-            5,
-        )
+        .delete_clients(vec![b.client.sso_client_id], &ctx.state.store, 5)
         .await
         .unwrap_err();
     assert_eq!(err.code, 404, "跨租户删应 404");
@@ -140,7 +136,7 @@ async fn test_tenant_scope_isolation() {
     assert_eq!(err.code, 404, "其它租户（tid=7）不可见");
 
     // ⑧ 平台管理员对租户资源操作放行（tid=0 全量权限）
-    svc.toggle_client(a.client.sso_client_id, "0", &mut ctx.state.redis.clone(), 0)
+    svc.toggle_client(a.client.sso_client_id, "0", &ctx.state.store, 0)
         .await
         .unwrap();
 }

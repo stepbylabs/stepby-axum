@@ -30,12 +30,12 @@ async fn test_cache_monitoring_chain() {
         v["data"]["dbSize"].is_number(),
         "dbSize 应为数字，实际: {v}"
     );
-    let cmd_stats = v["data"]["commandStats"]
-        .as_array()
-        .expect("commandStats 应为数组，实际: {v}");
+    // SharedStore 迁移后 commandstats 指标不再经 trait 暴露（redis 档专属观测段未
+    // 封装进 SharedStore 能力），已登记降级：commandStats 允许为空列表，
+    // 前端饼图按空态兼容，这里只校验字段仍为数组
     assert!(
-        !cmd_stats.is_empty(),
-        "commandStats 应至少 1 条命令统计，实际: {v}"
+        v["data"]["commandStats"].is_array(),
+        "commandStats 应为数组（迁移后允许为空），实际: {v}"
     );
 
     // 2. 名称列表：登录后应存在 online: 前缀分组

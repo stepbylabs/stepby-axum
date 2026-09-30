@@ -13,10 +13,34 @@
 #
 # 注意：config.toml 已被 .gitignore 排除，不会进入版本控制。
 
+# 配置文件版本（A3）。顶层键：必须写在任何 [table] 段之前。
+# 缺省 = 1（存量配置无此键时按 1 处理，逐字节等价，无迁移）。当前仅支持 1；
+# 更高版本在启动时拒绝（fail-closed：该文件由更新版本的程序生成，静默忽略
+# 未知版本的语义差异比拒绝启动更危险）。
+config_version = 1
+
 # 权限未映射路由默认拒绝（fail-closed，W-1）。
 # 顶层键：必须写在任何 [table] 段之前，否则会被解析进上一张表而被静默忽略。
 # 仅当需要临时兼容"未登记权限映射"的历史路由时，才显式改为 false（fail-open，安全性下降）。
 permission_deny_by_default = true
+
+# ==================== 共享态存储档位（单文件零依赖部署）====================
+# 定位：token/验证码/黑名单/密码版本/租户运行时键/分布式锁/幂等等**共享态**的承载方式。
+#
+# mode = "auto"（**默认**）：`[redis].url` 有效 → redis 档；未配置/占位符 → local 档
+#   （零配置单文件启动：SQLite + local 共享态，双击即跑）。
+# mode = "local"：业务同库承载（sys_shared_kv / sys_shared_lock / sys_token_revocation
+#   三表 + sys_user.password_version 列）——S1 安全态（黑名单/pwd_ver/租户三态）落 DB
+#   权威层，重启不丢失；无任何外部依赖；多实例可共享（SQLite 后端建议单实例）。
+# mode = "redis"：现状命令（Redis 承载）+ S1 低频写双写 DB 权威层 + 启动期从 DB 回填
+#   Redis → 与 local 档双向切换无缝（改配置重启即切，无需迁移、无需全员重登）。
+#
+# ⚠️ 非法取值回落 auto 并打 WARN（fail-safe）；显式 redis 但 url 无效 → 拒绝启动
+#    （fail-closed）。切换详见 docs/optimization/ZERO-DEPENDENCY-DEPLOYMENT-PLAN-2026-10-01.md §4.5。
+# ⚠️ 也可用环境变量 CACHE_MODE=auto|local|redis 覆盖（容器场景无需改配置文件）。
+[cache]
+mode = "auto"
+gc_interval_secs = 600   # local 档过期行 GC 周期（秒）
 
 [server]
 host = "0.0.0.0"

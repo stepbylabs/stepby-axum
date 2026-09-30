@@ -937,12 +937,11 @@ async fn test_flow_timeout_scan_idempotent() {
     let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_timeout", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
-    let mut redis = ctx.redis();
     // 第一轮：due_at 尚在未来 → 无候选
     let first = ctx
         .state
         .flow_service
-        .scan_timeouts_with_redis(&mut redis, 200)
+        .scan_timeouts_with_redis(ctx.state.store.clone(), 200)
         .await
         .expect("首轮扫描失败");
     assert_eq!(first.reminded, 0, "未超时的待办不应被提醒");
@@ -967,7 +966,7 @@ async fn test_flow_timeout_scan_idempotent() {
     let second = ctx
         .state
         .flow_service
-        .scan_timeouts_with_redis(&mut redis, 200)
+        .scan_timeouts_with_redis(ctx.state.store.clone(), 200)
         .await
         .expect("第二轮扫描失败");
     assert_eq!(second.reminded, 1, "超时待办应被提醒一次");
@@ -977,7 +976,7 @@ async fn test_flow_timeout_scan_idempotent() {
     let third = ctx
         .state
         .flow_service
-        .scan_timeouts_with_redis(&mut redis, 200)
+        .scan_timeouts_with_redis(ctx.state.store.clone(), 200)
         .await
         .expect("第三轮扫描失败");
     assert_eq!(third.reminded, 0, "TTL 内不应重复提醒");
@@ -1059,11 +1058,10 @@ async fn test_flow_timeout_escalation() {
         .await
         .expect("更新 due_at 失败");
 
-    let mut redis = ctx.redis();
     let first = ctx
         .state
         .flow_service
-        .scan_timeouts_with_redis(&mut redis, 200)
+        .scan_timeouts_with_redis(ctx.state.store.clone(), 200)
         .await
         .expect("扫描失败");
     assert_eq!(first.reminded, 1, "首次应提醒待办持有人");
@@ -1081,7 +1079,7 @@ async fn test_flow_timeout_escalation() {
     let second = ctx
         .state
         .flow_service
-        .scan_timeouts_with_redis(&mut redis, 200)
+        .scan_timeouts_with_redis(ctx.state.store.clone(), 200)
         .await
         .expect("扫描失败");
     assert_eq!(second.reminded, 0, "首次提醒只发一次（W-7）");

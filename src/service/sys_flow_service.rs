@@ -1754,10 +1754,14 @@ impl SysFlowService {
 
     // ---------- 超时扫描（scheduler 调用；V7-E1 路径② / V5 §1.2） ----------
 
-    /// 超时扫描（带 Redis；由 scheduler 调用，避免 Service 持有连接管理器之外的资源）
+    /// 超时扫描（共享态存储经参数注入，Service 不持有连接资源；由 scheduler 调用）
+    ///
+    /// SharedStore 迁移：原两处 `SET NX EX` 互斥/去重窗口改为 `store.set_nx_ex`（原子语义等价）；
+    /// 命令级超时由 store 内部统一管理（原 `cmd_timeout` 包裹语义），Redis 故障按原
+    /// `unwrap_or(None)` 口径视为「未抢占成功」——宁可漏提醒/重复提醒，不阻断扫描主流程。
     pub async fn scan_timeouts_with_redis(
         &self,
-        redis: &mut redis::aio::ConnectionManager,
+        store: Arc<dyn crate::shared_store::SharedStore>,
         limit: u64,
     ) -> Result<FlowScanOutcome, ServiceError> {
         let now = crate::common::datetime::now_naive();
@@ -1771,18 +1775,12 @@ impl SysFlowService {
             // 避免多实例同时提醒（TTL = remind_interval_secs）。
             if task.last_reminded_at.is_none() {
                 let key = format!("flow_remind:{}", task.task_id);
-                let acquired: Option<String> = crate::utils::redis::cmd_timeout(
-                    redis::cmd("SET")
-                        .arg(&key)
-                        .arg("1")
-                        .arg("NX")
-                        .arg("EX")
-                        .arg(interval)
-                        .query_async(redis),
-                )
-                .await
-                .unwrap_or(None);
-                if acquired.is_none() {
+                // 首次提醒互斥窗（原 SET NX EX；store.set_nx_ex 等价，Err 视为未抢占 → 跳过）
+                let acquired = store
+                    .set_nx_ex(&key, "1", interval)
+                    .await
+                    .unwrap_or(false);
+                if !acquired {
                     outcome.skipped += 1;
                     continue;
                 }
@@ -1824,20 +1822,14 @@ impl SysFlowService {
                         .resolve_escalation_target(task.assignee_id, task.applicant_id)
                         .await?
                 {
-                    // 长 TTL 去重（近周级）：Redis 故障/清空时最多重复一次升级提醒
+                    // 长 TTL 去重（近周级）：存储故障/清空时最多重复一次升级提醒
                     let key = format!("flow_escalate:{}", task.task_id);
-                    let acquired: Option<String> = crate::utils::redis::cmd_timeout(
-                        redis::cmd("SET")
-                            .arg(&key)
-                            .arg("1")
-                            .arg("NX")
-                            .arg("EX")
-                            .arg(ESCALATE_DEDUP_TTL_SECS)
-                            .query_async(redis),
-                    )
-                    .await
-                    .unwrap_or(None);
-                    if acquired.is_some() {
+                    // 升级提醒去重窗（原 SET NX EX；store.set_nx_ex 等价，Err 视为未抢占 → 跳过）
+                    let acquired = store
+                        .set_nx_ex(&key, "1", ESCALATE_DEDUP_TTL_SECS)
+                        .await
+                        .unwrap_or(false);
+                    if acquired {
                         let title = task.title.clone().unwrap_or_default();
                         self.send_flow_audit(target, "flow_timeout", &title).await;
                         outcome.notify.push((target, title));

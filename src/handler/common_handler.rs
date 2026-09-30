@@ -28,7 +28,6 @@ use crate::entity::{sys_oper_log, sys_role, sys_user};
 use crate::middleware::Operator;
 use crate::state::AppState;
 use crate::utils::crypto::OnlineSession;
-use crate::utils::redis::scan_keys;
 
 // ==================== DTO ====================
 
@@ -221,8 +220,9 @@ pub async fn dashboard_stats(
 ///
 /// Redis 故障时返回 0（不阻塞 dashboard）。
 async fn count_online_sessions(state: &Arc<AppState>, tenant_scope: Option<i64>) -> i64 {
-    let mut redis = state.redis.clone();
-    let keys = match scan_keys(&mut redis, "online:*", 5000).await {
+    let store = state.store.clone();
+    // 截断版扫描（保持原 scan_keys 上限 5000 与截断语义——仅读展示，S3 允许截断）
+    let keys = match store.scan("online:*", Some(5000)).await {
         Ok(k) => k,
         Err(e) => {
             tracing::warn!("Redis SCAN online:* 失败，dashboard 在线数降级为 0: {}", e);
@@ -236,11 +236,7 @@ async fn count_online_sessions(state: &Arc<AppState>, tenant_scope: Option<i64>)
         return keys.len() as i64;
     };
 
-    let values: Vec<Option<String>> = match crate::utils::redis::cmd_timeout(
-        redis::cmd("MGET").arg(&keys).query_async(&mut redis),
-    )
-    .await
-    {
+    let values: Vec<Option<String>> = match store.get_many(&keys).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("Redis MGET online 失败，dashboard 在线数降级为 0: {}", e);

@@ -23,7 +23,6 @@ pub struct Migrator;
 
 // 修复预先存在的问题：m20260806_000001_add_log_time_indexes 已创建但漏注册，索引从未生效
 
-use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseBackend;
 use std::borrow::Cow;
 
@@ -189,6 +188,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260928_000002_frontend_error_device_type::Migration),
             Box::new(m20260928_000003_dedupe_dashboard_menu::Migration),
             Box::new(m20260928_000004_optimize_menu_structure::Migration),
+            Box::new(m20261001_000001_shared_store::Migration),
         ]
     }
 }

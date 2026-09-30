@@ -2,8 +2,8 @@
 //!
 //! 职责：
 //! - 登录认证（验证码校验 + 密码校验 + JWT 签发 + 登录日志）
-//! - 登出（token 加入 Redis 黑名单，fail-closed）
-//! - 验证码生成与 Redis 存储
+//! - 登出（token 吊销登记进黑名单，fail-closed）
+//! - 验证码生成与共享态存储（SharedStore）
 //! - 获取用户信息（user + roles + permissions）
 //! - 获取路由树（菜单转路由）
 //! - 登录安全：失败次数限制 + IP 限流 + GETDEL 原子化验证码
@@ -16,18 +16,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use garde::Validate;
-use sea_orm::Set;
+// ConnectionTrait：read_pwd_ver_from_db 直读 DB（query_one/get_database_backend）需要
+use sea_orm::{ConnectionTrait, Set};
 use serde::{Deserialize, Serialize};
-use totp_rs::{Builder, Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret};
 use utoipa::ToSchema;
 
 use crate::common::constants::SECS_PER_HOUR;
 use crate::common::error::ServiceError;
 use crate::config::{JwtConfig, Settings, TenantColumnMode, TenantFilterMode};
-use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_logininfor;
 use crate::entity::sys_menu::Model as SysMenuModel;
 use crate::entity::sys_tenant_menu::Model as SysTenantMenuModel;
@@ -38,6 +37,7 @@ use crate::repository::sys_tenant_menu::SysTenantMenuRepository;
 use crate::service::sys_config_service::SysConfigService;
 use crate::service::sys_menu_service::SysMenuService;
 use crate::service::sys_user_service::{SysUserService, UserAddDto};
+use crate::shared_store::SharedStore;
 use crate::utils::captcha::generate_captcha;
 use crate::utils::ip_location::IpLocator;
 use crate::utils::password::{
@@ -56,18 +56,6 @@ const LOGIN_FAIL_TTL: i64 = 300;
 const MAX_LOGIN_IP_COUNT: i64 = 20;
 /// IP 限流计数 TTL（秒，1 分钟）
 const LOGIN_IP_TTL: i64 = 60;
-
-/// Redis 限流原子化脚本（INCR + EXPIRE 原子执行，防止计数永不过期）
-///
-/// - 首次 INCR 时设置 TTL，确保计数窗口一定会过期
-/// - 通过 Lua 脚本保证原子性，避免 INCR 与 EXPIRE 分离导致计数永驻
-const RATE_LIMIT_SCRIPT: &str = r#"
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return current
-"#;
 
 // ==================== DTO / Vo 定义 ====================
 
@@ -374,7 +362,7 @@ impl AuthService {
     /// 安全说明：验证码 key 绑定客户端 IP，防止跨 IP 重放（验证时同样校验 IP）。
     pub async fn generate_captcha(
         &self,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         ip: &str,
         tenant_id: Option<i64>,
     ) -> Result<CaptchaVo, ServiceError> {
@@ -404,23 +392,17 @@ impl AuthService {
                 ServiceError::internal(&crate::tr!("error.auth.captcha_gen_failed"))
             })?;
 
-        // 3. 存入 Redis，TTL 300s（5 分钟）
+        // 3. 存入共享态存储，TTL 300s（5 分钟）
         //    key 绑定 IP：captcha:{uuid}:{ip}，防止验证码跨 IP 重放
+        //    （R11 命令级超时由 store 内部统一管理；fail-closed：写入失败则验证码未存储，用户无法登录）
         let captcha_key = format!("captcha:{}:{}", captcha.uuid, ip);
-        // R11：命令级超时（fail-closed：超时则验证码未存储，用户无法登录）
-        tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("SETEX")
-                .arg(&captcha_key)
-                .arg(300i64)
-                .arg(captcha.code.to_lowercase())
-                .query_async::<()>(redis),
-        )
-        .await
-        .map_err(|_| {
-            tracing::error!("Redis SETEX 验证码超时（fail-closed）");
-            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })??;
+        store
+            .set_ex(&captcha_key, &captcha.code.to_lowercase(), 300)
+            .await
+            .map_err(|e| {
+                tracing::error!("验证码写入失败（fail-closed）: {}", e);
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+            })?;
 
         Ok(CaptchaVo {
             captcha_enabled: true,
@@ -452,7 +434,7 @@ impl AuthService {
         dto: LoginDto,
         login_ip: &str,
         user_agent: &str,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         jwt_config: &JwtConfig,
         ip_locator: &IpLocator,
         tenant_id: Option<i64>,
@@ -485,18 +467,18 @@ impl AuthService {
 
         // 1. 验证码校验（GETDEL 原子化，防重放攻击）
         // 多租户 Phase 3：透传 host 租户上下文，验证码开关按租户上下文读取
-        self.verify_captcha(redis, &ctx, &dto.uuid, &dto.code, tenant_id)
+        self.verify_captcha(store, &ctx, &dto.uuid, &dto.code, tenant_id)
             .await?;
 
         // 2. IP 限流校验
-        self.check_rate_limit(redis, &ctx).await?;
+        self.check_rate_limit(store, &ctx).await?;
 
         // 3. 用户失败次数校验
-        self.check_fail_count(redis, &ctx).await?;
+        self.check_fail_count(store, &ctx).await?;
 
         // 4. 用户查询 + 状态校验 + 密码校验（返回 verify_result 以避免重复 Argon2 verify）
         let (user, verify_result) = self
-            .verify_user_credentials(&ctx, &dto.password, redis)
+            .verify_user_credentials(&ctx, &dto.password, store)
             .await?;
 
         // 5. 密码升级（MD5 → Argon2，best-effort）
@@ -506,7 +488,7 @@ impl AuthService {
         // 5.5 TOTP 多因子校验（P0-4 登录链路集成）
         // 用户启用 TOTP 后必须提供有效验证码；未提供/错误返回业务码 1003，
         // 前端据此进入 TOTP 输入步骤二次提交。
-        self.verify_totp_if_enabled(redis, &ctx, &user, dto.totp_code.as_deref())
+        self.verify_totp_if_enabled(store, &ctx, &user, dto.totp_code.as_deref())
             .await?;
 
         // 风控集成点（`[risk_control].login_geo_alert`，默认 `off` ⇒ 不查库、零行为变更）：
@@ -514,7 +496,7 @@ impl AuthService {
         let geo_note = self.evaluate_login_geo(&ctx, user.tenant_id).await;
 
         // 6. JWT 签发 + 登录日志（成功）+ 在线映射 + 更新登录信息 + 清除失败计数
-        self.finalize_login(&user, redis, jwt_config, &ctx, geo_note)
+        self.finalize_login(&user, store, jwt_config, &ctx, geo_note)
             .await
     }
 
@@ -617,17 +599,16 @@ impl AuthService {
     /// 防暴力：TOTP 验证码错误计入 `totp:login_fail:{username}`（10 分钟内 ≥5 次锁定）。
     async fn verify_totp_if_enabled(
         &self,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         ctx: &LoginContext<'_>,
         user: &SysUserModel,
         totp_code: Option<&str>,
     ) -> Result<(), ServiceError> {
         let redis_key = format!("totp:enabled:{}", user.user_id);
-        let encrypted: Option<String> = crate::utils::redis::cmd_timeout(
-            redis::cmd("GET").arg(&redis_key).query_async(redis),
-        )
-        .await
-        .map_err(|e| {
+        let encrypted: Option<String> = store
+            .get(&redis_key)
+            .await
+            .map_err(|e| {
                 tracing::error!(error = %e, user_id = user.user_id, "TOTP 状态查询失败（fail-closed 503）");
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
@@ -641,13 +622,14 @@ impl AuthService {
         const MAX_TOTP_FAIL: i64 = 5;
         const TOTP_FAIL_TTL: i64 = 600;
         let fail_key = format!("totp:login_fail:{}", ctx.username);
-        let fail_count: Option<i64> =
-            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&fail_key).query_async(redis))
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "TOTP 失败计数查询失败（fail-closed 503）");
-                    ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-                })?;
+        let fail_count: Option<i64> = store
+            .get(&fail_key)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "TOTP 失败计数查询失败（fail-closed 503）");
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+            })?
+            .and_then(|s| s.parse::<i64>().ok());
         if let Some(count) = fail_count
             && count >= MAX_TOTP_FAIL
         {
@@ -702,10 +684,9 @@ impl AuthService {
 
         if totp.check_current(code).is_none() {
             // 验证码错误：计数 + 写登录日志（fail 提示，不区分具体原因）
-            let _: i64 = redis::Script::new(RATE_LIMIT_SCRIPT)
-                .key(&fail_key)
-                .arg(TOTP_FAIL_TTL)
-                .invoke_async(redis)
+            // （原 INCR+EXPIRE Lua 的原子语义由 store.incr_with_ttl 承载）
+            store
+                .incr_with_ttl(&fail_key, u64::try_from(TOTP_FAIL_TTL).unwrap_or(0))
                 .await
                 .map_err(|e| {
                     tracing::error!(error = %e, "TOTP 失败计数写入失败");
@@ -725,11 +706,8 @@ impl AuthService {
             ));
         }
 
-        // 验证通过：清除失败计数
-        let _: i64 =
-            crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&fail_key).query_async(redis))
-                .await
-                .unwrap_or(0);
+        // 验证通过：清除失败计数（best-effort，失败不阻断登录）
+        let _ = store.del(&[fail_key]).await;
         Ok(())
     }
 
@@ -739,17 +717,16 @@ impl AuthService {
     /// 超限时写入登录日志（status=1，msg="IP 请求频率超限"）并返回错误。
     async fn check_rate_limit(
         &self,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         ctx: &LoginContext<'_>,
     ) -> Result<(), ServiceError> {
         let ip_key = format!("login_ip:{}", ctx.login_ip);
-        let ip_count: i64 = redis::Script::new(RATE_LIMIT_SCRIPT)
-            .key(&ip_key)
-            .arg(LOGIN_IP_TTL)
-            .invoke_async(redis)
+        // 原 INCR+EXPIRE Lua 的原子语义由 store.incr_with_ttl 承载（首次自增时设置 TTL）
+        let ip_count: i64 = store
+            .incr_with_ttl(&ip_key, u64::try_from(LOGIN_IP_TTL).unwrap_or(0))
             .await
             .map_err(|e| {
-                tracing::error!("Redis IP 限流计数失败（fail-closed）: {}", e);
+                tracing::error!("IP 限流计数失败（fail-closed）: {}", e);
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
             })?;
         if ip_count > MAX_LOGIN_IP_COUNT {
@@ -775,24 +752,19 @@ impl AuthService {
     /// 超限时写入登录日志（status=1，msg="密码错误次数过多"）并返回错误。
     async fn check_fail_count(
         &self,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         ctx: &LoginContext<'_>,
     ) -> Result<(), ServiceError> {
         let fail_key = format!("login_fail:{}", ctx.username);
-        // R11：命令级超时（fail-closed 503）
-        let fail_count: Option<i64> = tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET").arg(&fail_key).query_async(redis),
-        )
-        .await
-        .map_err(|_| {
-            tracing::error!("Redis 登录失败计数查询超时（fail-closed）");
-            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?
-        .map_err(|e| {
-            tracing::error!("Redis 登录失败计数查询失败（fail-closed）: {}", e);
-            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+        // R11：命令级超时由 store 内部统一管理（fail-closed 503）
+        let fail_count: Option<i64> = store
+            .get(&fail_key)
+            .await
+            .map_err(|e| {
+                tracing::error!("登录失败计数查询失败（fail-closed）: {}", e);
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+            })?
+            .and_then(|s| s.parse::<i64>().ok());
         if let Some(count) = fail_count
             && count >= MAX_LOGIN_FAIL_COUNT
         {
@@ -824,7 +796,7 @@ impl AuthService {
     /// 判定为"已过期"，既掩盖了基础设施故障，又误伤了正常用户。
     async fn verify_captcha(
         &self,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         ctx: &LoginContext<'_>,
         uuid: &str,
         code: &str,
@@ -832,24 +804,12 @@ impl AuthService {
     ) -> Result<(), ServiceError> {
         if self.is_captcha_enabled(tenant_id).await {
             let captcha_key = format!("captcha:{}:{}", uuid, ctx.login_ip);
-            // M-6：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
-            // R11：命令级超时（fail-closed 503）
-            let stored_code: Option<String> = match tokio::time::timeout(
-                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-                redis::cmd("GETDEL").arg(&captcha_key).query_async(redis),
-            )
-            .await
-            {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => {
-                    tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
-                    return Err(ServiceError::new(
-                        503,
-                        crate::tr!("error.auth.auth_unavailable"),
-                    ));
-                }
-                Err(_) => {
-                    tracing::error!("Redis GETDEL 验证码超时（fail-closed）");
+            // M-6：显式 match 区分存储错误（fail-closed 503）与 key 不存在（captcha_expired）
+            // （原 GETDEL 原子消费语义由 store.consume 承载；R11 命令级超时由 store 内部管理）
+            let stored_code: Option<String> = match store.consume(&captcha_key).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("验证码读取失败（fail-closed）: {}", e);
                     return Err(ServiceError::new(
                         503,
                         crate::tr!("error.auth.auth_unavailable"),
@@ -915,7 +875,7 @@ impl AuthService {
         &self,
         ctx: &LoginContext<'_>,
         password: &str,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
     ) -> Result<(SysUserModel, PasswordVerifyResult), ServiceError> {
         // 1. 用户查询（H-2：Repository 已过滤 del_flag='0'，已删除用户以 None 返回）
         let user = match self
@@ -1015,7 +975,7 @@ impl AuthService {
             ServiceError::internal(&crate::tr!("error.auth.password_verify_failed"))
         })?;
         if !verify_result.is_valid {
-            self.record_login_failure(ctx.username, redis).await?;
+            self.record_login_failure(ctx.username, store).await?;
             self.write_login_log_best_effort(
                 ctx,
                 "1",
@@ -1104,22 +1064,22 @@ impl AuthService {
     async fn finalize_login(
         &self,
         user: &SysUserModel,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         jwt_config: &JwtConfig,
         ctx: &LoginContext<'_>,
         geo_note: Option<String>,
     ) -> Result<LoginVo, ServiceError> {
         // 1. JWT 签发（M-7：generate_token 同时返回 claims，避免后续重复 verify）
-        //    P0-R81-007：读取当前密码版本号 pwd_ver:{user_id}（无则 0）写入 claim，
+        //    P0-R81-007：签发时读取当前密码版本号写入 claim，
         //    auth 中间件据此判定 token 是否在密码变更前签发（旧 token 立即失效）。
-        //    读取失败视为 0（fail-open，仅影响旧 token 失效判断；Redis 不可用时中间件会 fail-closed 拒绝）。
+        //    pwd_ver 权威 = 两档共用的 DB 列（sys_user.password_version：redis 档 INCR 双写同步该列，
+        //    local 档原生即该列），登录签发直接读库，两档统一、权威一致（见 read_pwd_ver_from_db）。
+        //    读取失败视为 0（fail-open，仅影响旧 token 失效判断；store 不可用时中间件会 fail-closed 拒绝）。
         let user_id = user.user_id.to_string();
-        let pwd_ver_key = format!("pwd_ver:{}", user_id);
-        let pwd_ver: Option<u64> = crate::utils::redis::cmd_timeout(
-            redis::cmd("GET").arg(&pwd_ver_key).query_async(redis),
-        )
-        .await
-        .unwrap_or(None);
+        let pwd_ver: Option<u64> = self
+            .read_pwd_ver_from_db(user.user_id)
+            .await
+            .unwrap_or(None);
         let (token, claims) = JwtUtils::generate_token(
             &user_id,
             ctx.username,
@@ -1147,7 +1107,8 @@ impl AuthService {
         //    - SETEX 失败不阻断登录（best-effort）：online key 不影响鉴权，仅影响在线列表展示
         let token_hash = crate::utils::crypto::token_hash(&token);
         let online_key = format!("online:{}", token_hash);
-        let online_ttl = jwt_config.expire_hours * SECS_PER_HOUR;
+        // TTL = jwt_config.expire_hours * SECS_PER_HOUR（与 JWT 过期时间对齐，避免硬编码 7200）
+        let online_ttl = u64::try_from(jwt_config.expire_hours * SECS_PER_HOUR).unwrap_or(0);
         // M-7：claims 已由 generate_token 返回，无需 verify_token 重新解码
         // 查询用户部门名称（失败时填空字符串，不阻断登录）
         // 复用 user_service 的 dept 查询能力，避免 AuthService 直接依赖 SysDeptRepository
@@ -1201,12 +1162,9 @@ impl AuthService {
         //   1) 单独 GET user_sessions（需要结果判断是否 DEL 旧 online key）
         //   2) pipeline 批量执行 4 个写操作（SETEX online / 条件 DEL old_online / SETEX
         //      user_sessions / DEL login_fail），单次网络往返
-        // GET 旧 token_hash（如有）——单独执行，因后续 pipeline 中条件 DEL 依赖其结果
-        let old_token_hash_opt: Option<String> = crate::utils::redis::cmd_timeout(
-            redis::cmd("GET").arg(&user_session_key).query_async(redis),
-        )
-        .await
-        .unwrap_or(None);
+        // GET 旧 token_hash（如有）——读取结果决定是否 DEL 旧 online key（best-effort：失败视为无旧会话）
+        let old_token_hash_opt: Option<String> =
+            store.get(&user_session_key).await.unwrap_or(None);
         let need_del_old = match old_token_hash_opt.as_ref() {
             Some(old) if old != &token_hash => {
                 tracing::info!(
@@ -1224,48 +1182,31 @@ impl AuthService {
             .filter(|old| *old != &token_hash)
             .map(|old| format!("online:{}", old));
 
-        // 构造 pipeline：4 个写操作合并为单次网络往返
-        let mut pipe = redis::pipe();
+        // 原 4 写 pipeline（SETEX online / 条件 DEL old_online / SETEX user_sessions /
+        // DEL login_fail）best-effort：迁移后逐调用 best-effort 等价——每步失败仅 warn
+        // 不阻断登录（原 pipeline 也是整体 best-effort，逐调用不改变失败语义，仅多日志粒度）。
         // (a) SETEX online:{token_hash} session_json (TTL=online_ttl)
-        pipe.cmd("SETEX")
-            .arg(&online_key)
-            .arg(online_ttl)
-            .arg(&session_json);
+        if let Err(e) = store.set_ex(&online_key, &session_json, online_ttl).await {
+            tracing::warn!("online 会话写入失败（不阻断登录，仅影响在线列表展示）: {}", e);
+        }
         // (b) 若旧 token_hash 存在且与新不同，DEL 旧 online key
-        if need_del_old && let Some(ref old_key) = old_online_key {
-            pipe.cmd("DEL").arg(old_key);
+        if need_del_old
+            && let Some(ref old_key) = old_online_key
+            && let Err(e) = store.del(std::slice::from_ref(old_key)).await
+        {
+            tracing::warn!("旧 online 会话清理失败（不阻断登录，key 会自然过期）: {}", e);
         }
         // (c) SETEX user_sessions:{...} token_hash (TTL=online_ttl)
-        pipe.cmd("SETEX")
-            .arg(&user_session_key)
-            .arg(online_ttl)
-            .arg(&token_hash);
+        if let Err(e) = store
+            .set_ex(&user_session_key, &token_hash, online_ttl)
+            .await
+        {
+            tracing::warn!("user_sessions 索引写入失败（不阻断登录，仅影响会话去重）: {}", e);
+        }
         // (d) DEL login_fail:{username}（清除失败计数）
         let fail_key = format!("login_fail:{}", ctx.username);
-        pipe.cmd("DEL").arg(&fail_key);
-        // pipeline 整体执行（best-effort：超时/任一命令失败仅记日志，不阻断登录）
-        // R11：命令级超时
-        match tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            // pipeline 混有 SETEX（返回 Status "OK"）与 DEL（返回整数），
-            // 结果类型不一致，不能用 Vec<i64>（会报 "not convertible to numeric"），
-            // 用 () 忽略全部返回值（本 pipeline 为 best-effort 写操作）。
-            pipe.query_async::<()>(redis),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    "finalize_login pipeline 部分失败（不阻断登录，仅影响在线列表/会话去重/失败计数）: {}",
-                    e
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "finalize_login pipeline 超时（不阻断登录，仅影响在线列表/会话去重/失败计数）"
-                );
-            }
+        if let Err(e) = store.del(&[fail_key]).await {
+            tracing::warn!("登录失败计数清除失败（不阻断登录）: {}", e);
         }
 
         // 4. 更新 login_ip / login_date（失败不阻断登录）
@@ -1297,7 +1238,7 @@ impl AuthService {
         user: &SysUserModel,
         login_ip: &str,
         user_agent: &str,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         jwt_config: &JwtConfig,
         ip_locator: &IpLocator,
     ) -> Result<LoginVo, ServiceError> {
@@ -1316,16 +1257,17 @@ impl AuthService {
         self.enforce_login_ua(user_agent, &ctx, user.tenant_id, user.user_id)
             .await?;
         let geo_note = self.evaluate_login_geo(&ctx, user.tenant_id).await;
-        self.finalize_login(user, redis, jwt_config, &ctx, geo_note)
+        self.finalize_login(user, store, jwt_config, &ctx, geo_note)
             .await
     }
 
-    /// 登出：token 加入 Redis 黑名单 + 删除 online 会话映射（fail-closed：黑名单写入失败返回错误）
+    /// 登出：token 加入黑名单（吊销登记，fail-closed）+ 删除 online 会话映射
     ///
     /// 流程：
     /// 1. 验证 token 获取 claims（计算剩余 TTL）
     /// 2. 计算剩余有效期 = exp - now
-    /// 3. 若剩余 > 0：Redis SETEX blacklist:{token_hash} "1" EX {剩余秒数}（fail-closed）
+    /// 3. 若剩余 > 0：store.revocation_add 登记 blacklist:{token_hash}（TTL=剩余秒数，fail-closed；
+    ///    redis 档 = SETEX + DB 权威层幂等落库双写，local 档 = INSERT DB）
     /// 4. DEL online:{token_hash}（best-effort：失败仅记日志，因 online key 会自然过期）
     ///
     /// P1-19 方案 B：新增步骤 4，修复旧方案 logout 未 DEL online key 的 Bug
@@ -1333,7 +1275,7 @@ impl AuthService {
     pub async fn logout(
         &self,
         token: &str,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         jwt_config: &JwtConfig,
     ) -> Result<(), ServiceError> {
         // 验证 token 获取 claims（计算剩余 TTL）
@@ -1347,44 +1289,29 @@ impl AuthService {
         // token_hash：blacklist key 与 online key 共用同一哈希命名空间
         let token_hash = crate::utils::crypto::token_hash(token);
 
-        // 若 token 仍有效，写入黑名单（fail-closed：失败返回错误）
-        // 使用 token 的 SHA-256 哈希作为 key，节省 Redis 内存
+        // 若 token 仍有效，登记吊销（fail-closed：失败返回错误）
+        // exp_at = claims.exp（UTC 秒）；TTL 由 store 实现按 exp_at - now 计算（与原 SETEX remaining 等价）
         if remaining > 0 {
-            let blacklist_key = format!("blacklist:{}", token_hash);
-            // R11：命令级超时（fail-closed：超时则黑名单未写入，拒绝 logout 以避免 token 仍可用）
-            tokio::time::timeout(
-                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-                redis::cmd("SETEX")
-                    .arg(&blacklist_key)
-                    .arg(remaining)
-                    .arg("1")
-                    .query_async::<()>(redis),
-            )
-            .await
-            .map_err(|_| {
-                tracing::error!("登出黑名单写入超时（fail-closed）");
-                ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
-            })?
-            .map_err(|e| {
-                tracing::error!("登出黑名单写入失败（fail-closed）: {}", e);
-                ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
-            })?;
+            store
+                .revocation_add(&token_hash, i64::try_from(claims.exp).unwrap_or(0), "logout")
+                .await
+                .map_err(|e| {
+                    tracing::error!("登出黑名单写入失败（fail-closed）: {}", e);
+                    ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
+                })?;
         }
 
         // DEL online:{token_hash}（best-effort：失败不阻断 logout）
         //   修复 P1-19 Bug：旧方案 logout 仅写黑名单未 DEL online key，
         //   导致用户登出后仍显示在线 30 分钟。online key 会自然过期，DEL 失败仅影响展示及时性。
         let online_key = format!("online:{}", token_hash);
-        let _: () =
-            crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&online_key).query_async(redis))
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "DEL online:{} 失败（不阻断 logout，key 会自然过期）: {}",
-                        token_hash,
-                        e
-                    );
-                });
+        if let Err(e) = store.del(&[online_key]).await {
+            tracing::warn!(
+                "DEL online:{} 失败（不阻断 logout，key 会自然过期）: {}",
+                token_hash,
+                e
+            );
+        }
 
         // 清理 user_sessions 索引（H-3 修复：不再批量删除所有 user_sessions:{user_id}:* ）
         //   原实现 SCAN + 批量 DEL 会误删其他设备（不同 IP/Browser）的索引，导致其他设备
@@ -1546,7 +1473,7 @@ impl AuthService {
         &self,
         dto: RegisterDto,
         ip: &str,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         tenant_id: Option<i64>,
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
@@ -1570,25 +1497,13 @@ impl AuthService {
         //    状态码：400 Bad Request（客户端输入问题，非系统错误）
         if self.is_captcha_enabled(tenant_id).await {
             let captcha_key = format!("captcha:{}:{}", dto.uuid, ip);
-            // C-1：显式 match 区分 Redis 错误（fail-closed 503）与 key 不存在（captcha_expired）
-            //      与 verify_captcha（464-478 行）保持一致，避免静默吞错掩盖基础设施故障。
-            // R11：命令级超时（fail-closed 503）
-            let stored_code: Option<String> = match tokio::time::timeout(
-                Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-                redis::cmd("GETDEL").arg(&captcha_key).query_async(redis),
-            )
-            .await
-            {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => {
-                    tracing::error!("Redis GETDEL 验证码失败（fail-closed）: {}", e);
-                    return Err(ServiceError::new(
-                        503,
-                        crate::tr!("error.auth.auth_unavailable"),
-                    ));
-                }
-                Err(_) => {
-                    tracing::error!("Redis GETDEL 验证码超时（fail-closed）");
+            // C-1：显式 match 区分存储错误（fail-closed 503）与 key 不存在（captcha_expired）
+            //      与 verify_captcha 保持一致，避免静默吞错掩盖基础设施故障。
+            //      （原 GETDEL 原子消费语义由 store.consume 承载；R11 超时由 store 内部管理）
+            let stored_code: Option<String> = match store.consume(&captcha_key).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("验证码读取失败（fail-closed）: {}", e);
                     return Err(ServiceError::new(
                         503,
                         crate::tr!("error.auth.auth_unavailable"),
@@ -1655,7 +1570,7 @@ impl AuthService {
         username: &str,
         login_ip: &str,
         user_agent: &str,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         jwt_config: &JwtConfig,
         ip_locator: &IpLocator,
     ) -> Result<LoginVo, ServiceError> {
@@ -1691,7 +1606,7 @@ impl AuthService {
         self.enforce_login_ua(user_agent, &ctx, user.tenant_id, user.user_id)
             .await?;
         let geo_note = self.evaluate_login_geo(&ctx, user.tenant_id).await;
-        self.finalize_login(&user, redis, jwt_config, &ctx, geo_note)
+        self.finalize_login(&user, store, jwt_config, &ctx, geo_note)
             .await
     }
 
@@ -1734,30 +1649,44 @@ impl AuthService {
 
     // ==================== 内部辅助方法 ====================
 
-    /// 记录登录失败次数（Lua 脚本原子化 INCR + EXPIRE，防止计数永不过期）
+    /// 登录签发期读取密码版本号（DB 直读，S1 权威层）：`SELECT password_version FROM sys_user WHERE user_id = ?`
+    ///
+    /// 为什么此读点不落 SharedStore：trait 只有 `pwd_ver_incr`（写）与 `auth_gate_check`
+    /// （需 token_hash，登录时无 token），没有独立的 pwd_ver 读方法。
+    /// v5.1 双写后 DB 列是两档共用的权威（redis 档 `pwd_ver_incr` 同步 INCR 该列，local 档
+    /// 原生即该列），故登录签发 JWT 时直接读库，两档统一、权威一致。
+    /// 行不存在 = None = 未设置（调用方按 0 处理，与原 `pwd_ver:{uid}` 键缺失语义等价）。
+    async fn read_pwd_ver_from_db(&self, user_id: i64) -> Result<Option<u64>, sea_orm::DbErr> {
+        let db = self.logininfor_repo.base().db();
+        let row = db
+            .query_one(sea_orm::Statement::from_sql_and_values(
+                db.get_database_backend(),
+                "SELECT password_version FROM sys_user WHERE user_id = ?",
+                [user_id.into()],
+            ))
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let ver: Option<i64> = row.try_get("", "password_version")?;
+        Ok(ver.and_then(|v| u64::try_from(v.max(0)).ok()))
+    }
+
+    /// 记录登录失败次数（原 INCR + EXPIRE Lua 原子语义由 store.incr_with_ttl 承载，防止计数永不过期）
     async fn record_login_failure(
         &self,
         username: &str,
-        redis: &mut redis::aio::ConnectionManager,
+        store: &Arc<dyn SharedStore>,
     ) -> Result<(), ServiceError> {
         let fail_key = format!("login_fail:{}", username);
-        // R11：命令级超时（fail-closed 503）
-        let _: i64 = tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::Script::new(RATE_LIMIT_SCRIPT)
-                .key(&fail_key)
-                .arg(LOGIN_FAIL_TTL)
-                .invoke_async(redis),
-        )
-        .await
-        .map_err(|_| {
-            tracing::error!("Redis 登录失败计数更新超时（fail-closed）");
-            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?
-        .map_err(|e| {
-            tracing::error!("Redis 登录失败计数更新失败（fail-closed）: {}", e);
-            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+        // R11：命令级超时由 store 内部统一管理（fail-closed 503）
+        let _: i64 = store
+            .incr_with_ttl(&fail_key, u64::try_from(LOGIN_FAIL_TTL).unwrap_or(0))
+            .await
+            .map_err(|e| {
+                tracing::error!("登录失败计数更新失败（fail-closed）: {}", e);
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+            })?;
         Ok(())
     }
 

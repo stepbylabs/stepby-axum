@@ -555,34 +555,31 @@ pub async fn remove(
         .await?;
 
     // P0-5 修复：用户删除后失效其活动会话
-    // P0-R81-007 版本号机制：对 pwd_ver:{user_id} INCR，使被删除用户已签发的 JWT 在 auth 中间件被拒绝
-    // （auth.rs 检查 Redis 当前版本 > claim.pwd_ver 则返回 401）。
-    // 版本号单调递增，无需 TTL；fail-closed：写入失败返回错误，避免旧 token 继续可用
-    // P3 优化: 使用 Redis pipeline 批量 INCR，减少 N 次 RTT 为 1 次
-    let mut redis = state.redis.clone();
+    // P0-R81-007 版本号机制：递增 pwd_ver，使被删除用户已签发的 JWT 在 auth 中间件被拒绝
+    // （auth.rs 检查存储当前版本 > claim.pwd_ver 则返回 401）。
+    // 版本号单调递增，无需 TTL；fail-closed：写入失败返回错误，避免旧 token 继续可用。
+    // 原 Redis pipeline 批量 INCR → 逐用户 `store.pwd_ver_incr`（内部含 Redis INCR +
+    // DB password_version 列双写，均已封装进实现）
     if !deleted_user_ids.is_empty() {
-        let mut pipe = redis::pipe();
         for uid in &deleted_user_ids {
-            let pwd_ver_key = format!("pwd_ver:{}", uid);
-            pipe.cmd("INCR").arg(&pwd_ver_key).ignore();
-        }
-        if let Err(e) = crate::utils::redis::cmd_timeout(pipe.query_async::<()>(&mut redis)).await {
-            tracing::error!(
-                user_ids = ?deleted_user_ids,
-                error = %e,
-                "删除用户后批量递增 pwd_ver 标记失败（fail-closed）"
-            );
-            return Err(AppError::internal(&crate::tr!(
-                "error.user.pwd_reset_token_invalidate_failed"
-            )));
+            if let Err(e) = state.store.pwd_ver_incr(&uid.to_string()).await {
+                tracing::error!(
+                    user_ids = ?deleted_user_ids,
+                    error = %e,
+                    "删除用户后递增 pwd_ver 标记失败（fail-closed）"
+                );
+                return Err(AppError::internal(&crate::tr!(
+                    "error.user.pwd_reset_token_invalidate_failed"
+                )));
+            }
         }
         // v4 #18：删除用户同步吊销其全部 SSO 访问令牌（sso:at:* + online:*）——
         // userinfo 只认绑定不校验 pwd_ver，不做联动则旧 AT 在 TTL 内仍可换取身份
+        // （原 sso_service::revoke_user_sso_tokens 语义已收敛为 store.revoke_all_for_user）
         for uid in &deleted_user_ids {
-            state
-                .sso_service
-                .revoke_user_sso_tokens(&mut redis, *uid)
-                .await;
+            if let Err(e) = state.store.revoke_all_for_user(&uid.to_string()).await {
+                tracing::warn!(user_id = *uid, error = %e, "删除用户后吊销 SSO 令牌失败");
+            }
         }
     }
 
@@ -734,33 +731,18 @@ pub async fn change_status(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
-    // P0-C1 修复：停用用户时先对 Redis pwd_ver:{user_id} INCR，再更新 DB；DB 失败则 DECR 回滚
-    // P0-R81-007 版本号机制：停用后旧 token 立即失效，用户重新启用后需重新登录（安全行为）
-    // 启用时不需要递增（旧 token 已过期或用户需重新登录是合理的）
+    // P0-C1 / P0-R81-007：停用后旧 token 立即失效（版本号机制），
+    // 用户重新启用后需重新登录（安全行为）；启用时不需要递增。
+    //
+    // SharedStore 迁移后的 R2 级联修复：原"先 INCR pwd_ver → UPDATE DB → 失败 DECR 回滚"
+    // 两阶段补偿随 `store.pwd_ver_incr` 内部双写（Redis INCR + DB password_version 列
+    // 同步均在实现内）而简化——新顺序 = 先 UPDATE DB 用户状态，成功后递增版本号。
+    // 原 DECR 补偿随双写落库简化删除（Redis 与 DB 列一致性由实现单点维护）；
+    // pwd_ver_incr 失败仅 WARN——DB 列双写失败不破坏 Redis 当期安全。
     let needs_pwd_changed = dto.status == "1";
-    let pwd_ver_key = format!("pwd_ver:{}", dto.user_id);
-    let mut redis = state.redis.clone();
 
-    // 步骤1：停用时先 INCR pwd_ver（fail-closed：写入失败则拒绝停用）
-    if needs_pwd_changed {
-        crate::utils::redis::cmd_timeout(
-            redis::cmd("INCR")
-                .arg(&pwd_ver_key)
-                .query_async::<()>(&mut redis),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                user_id = dto.user_id,
-                error = %e,
-                "停用用户前预增 pwd_ver 标记失败（fail-closed 拒绝停用）"
-            );
-            AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
-        })?;
-    }
-
-    // 步骤2：更新 DB 用户状态
-    let db_result = state
+    // 步骤1：更新 DB 用户状态
+    state
         .user_service
         .update_user_status(
             dto.user_id,
@@ -769,27 +751,21 @@ pub async fn change_status(
             operator_user_id,
             operator.tenant_id(),
         )
-        .await;
+        .await?;
 
-    // 步骤3：DB 失败则 DECR 回滚 Redis 标记
-    if let Err(e) = db_result {
-        if needs_pwd_changed {
-            let _ = crate::utils::redis::cmd_timeout(
-                redis::cmd("DECR")
-                    .arg(&pwd_ver_key)
-                    .query_async::<()>(&mut redis),
-            )
-            .await;
-        }
-        return Err(e.into());
-    }
-
-    // v4 #18：停用用户同步吊销其全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
+    // 步骤2：DB 成功后递增 pwd_ver + 吊销 SSO 令牌
     if needs_pwd_changed {
-        state
-            .sso_service
-            .revoke_user_sso_tokens(&mut redis, dto.user_id)
-            .await;
+        if let Err(e) = state.store.pwd_ver_incr(&dto.user_id.to_string()).await {
+            tracing::warn!(
+                user_id = dto.user_id,
+                error = %e,
+                "停用用户后递增 pwd_ver 失败（原 DECR 补偿随双写落库简化删除）"
+            );
+        }
+        // v4 #18：停用用户同步吊销其全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
+        if let Err(e) = state.store.revoke_all_for_user(&dto.user_id.to_string()).await {
+            tracing::warn!(user_id = dto.user_id, error = %e, "停用用户后吊销 SSO 令牌失败");
+        }
         // W-4：停用即离岗 → 其 pending 审批待办自动转办（部门主管 → admin 回退）
         // 非阻断：停用已生效，转办失败仅告警（待办保持 pending，可由管理员人工转办）
         auto_reassign_flow_tasks(&state, dto.user_id).await;
@@ -823,29 +799,14 @@ pub async fn reset_pwd(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
-    // P0-C1 修复：先对 Redis pwd_ver:{user_id} INCR，再更新 DB；DB 失败则 DECR 回滚
-    // 版本号单调递增，无需 TTL（auth 中间件据此使旧 token 立即失效）
-    let pwd_ver_key = format!("pwd_ver:{}", user_id);
-    let mut redis = state.redis.clone();
-
-    // 步骤1：先 INCR pwd_ver（fail-closed：写入失败则拒绝重置）
-    crate::utils::redis::cmd_timeout(
-        redis::cmd("INCR")
-            .arg(&pwd_ver_key)
-            .query_async::<()>(&mut redis),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(
-            user_id,
-            error = %e,
-            "重置密码前预增 pwd_ver 标记失败（fail-closed 拒绝重置）"
-        );
-        AppError::internal(&crate::tr!("error.user.pwd_reset_token_invalidate_failed"))
-    })?;
-
-    // 步骤2：更新 DB 密码
-    let db_result = state
+    // P0-C1 / P0-R81-007：版本号单调递增，无需 TTL（auth 中间件据此使旧 token 立即失效）。
+    //
+    // SharedStore 迁移后的 R2 级联修复（同 change_status）：先更新 DB 密码，成功后调
+    // `store.pwd_ver_incr`（内部含 Redis INCR + DB 列双写）；原 DECR 补偿随双写落库
+    // 简化删除；pwd_ver_incr 失败仅 WARN——DB 列双写失败不破坏 Redis 当期安全。
+    //
+    // 步骤1：更新 DB 密码
+    state
         .user_service
         .reset_user_pwd(
             dto,
@@ -853,24 +814,21 @@ pub async fn reset_pwd(
             operator_user_id,
             operator.tenant_id(),
         )
-        .await;
+        .await?;
 
-    // 步骤3：DB 失败则 DECR 回滚 Redis 标记
-    if let Err(e) = db_result {
-        let _ = crate::utils::redis::cmd_timeout(
-            redis::cmd("DECR")
-                .arg(&pwd_ver_key)
-                .query_async::<()>(&mut redis),
-        )
-        .await;
-        return Err(e.into());
+    // 步骤2：递增 pwd_ver（返回新版本号，本流程无需消费）+ 吊销 SSO 令牌
+    if let Err(e) = state.store.pwd_ver_incr(&user_id.to_string()).await {
+        tracing::warn!(
+            user_id,
+            error = %e,
+            "重置密码后递增 pwd_ver 失败（原 DECR 补偿随双写落库简化删除）"
+        );
     }
 
     // v4 #18：重置密码同步吊销该用户全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
-    state
-        .sso_service
-        .revoke_user_sso_tokens(&mut redis, user_id)
-        .await;
+    if let Err(e) = state.store.revoke_all_for_user(&user_id.to_string()).await {
+        tracing::warn!(user_id, error = %e, "重置密码后吊销 SSO 令牌失败");
+    }
 
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.password_reset"
@@ -905,49 +863,31 @@ pub async fn update_profile_pwd(
         new_password: dto.new_password,
     };
 
-    // P0-C1 修复：先对 Redis pwd_ver:{user_id} INCR，再更新 DB；DB 失败则 DECR 回滚
-    // 这样即使 Redis 写入失败，DB 也不会被更新（fail-closed）；DB 成功则版本号一定已递增
-    let pwd_ver_key = format!("pwd_ver:{}", user_id);
-    let mut redis = state.redis.clone();
-
-    // 步骤1：先 INCR pwd_ver（fail-closed：写入失败则拒绝改密）
-    crate::utils::redis::cmd_timeout(
-        redis::cmd("INCR")
-            .arg(&pwd_ver_key)
-            .query_async::<()>(&mut redis),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(
-            user_id,
-            error = %e,
-            "改密前预增 pwd_ver 标记失败（fail-closed 拒绝改密）"
-        );
-        AppError::internal(&crate::tr!("error.user.pwd_change_token_invalidate_failed"))
-    })?;
-
-    // 步骤2：更新 DB 密码
-    let db_result = state
+    // P0-C1 / P0-R81-007：版本号机制使旧 token 立即失效。
+    //
+    // SharedStore 迁移后的 R2 级联修复（同 change_status）：先更新 DB 密码，成功后调
+    // `store.pwd_ver_incr`（内部含 Redis INCR + DB 列双写）；原 DECR 补偿随双写落库
+    // 简化删除；pwd_ver_incr 失败仅 WARN——DB 列双写失败不破坏 Redis 当期安全。
+    //
+    // 步骤1：更新 DB 密码
+    state
         .user_service
         .update_user_password(user_id, pwd_dto)
-        .await;
+        .await?;
 
-    // 步骤3：DB 失败则 DECR 回滚 Redis 标记（避免误登出用户）
-    if let Err(e) = db_result {
-        let _ = crate::utils::redis::cmd_timeout(
-            redis::cmd("DECR")
-                .arg(&pwd_ver_key)
-                .query_async::<()>(&mut redis),
-        )
-        .await;
-        return Err(e.into());
+    // 步骤2：递增 pwd_ver（返回新版本号，本流程无需消费）+ 吊销 SSO 令牌
+    if let Err(e) = state.store.pwd_ver_incr(&user_id.to_string()).await {
+        tracing::warn!(
+            user_id,
+            error = %e,
+            "改密后递增 pwd_ver 失败（原 DECR 补偿随双写落库简化删除）"
+        );
     }
 
     // v4 #18：改密同步吊销本人全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
-    state
-        .sso_service
-        .revoke_user_sso_tokens(&mut redis, user_id)
-        .await;
+    if let Err(e) = state.store.revoke_all_for_user(&user_id.to_string()).await {
+        tracing::warn!(user_id, error = %e, "改密后吊销 SSO 令牌失败");
+    }
 
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.password_change"

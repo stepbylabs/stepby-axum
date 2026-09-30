@@ -1,4 +1,9 @@
 // stepby-axum/src/state.rs
+//! 应用全局共享状态。
+//! 共享态存储双档改造：`redis: ConnectionManager` 字段切换为
+//! `store: Arc<dyn SharedStore>`（`[cache].mode = local | redis`，
+//! 方案 docs/optimization/ZERO-DEPENDENCY-DEPLOYMENT-PLAN-2026-10-01.md），
+//! 调用点通过 trait 方法读写共享态，不再感知具体档位。
 
 use crate::config::Settings;
 use crate::handler::ws_handler::WsMessage;
@@ -15,7 +20,6 @@ use crate::service::{
     UserErasureService, WebauthnService,
 };
 use crate::utils::ip_location::IpLocator;
-use redis::aio::ConnectionManager;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -27,8 +31,13 @@ use tokio::sync::{broadcast, mpsc};
 pub struct AppState {
     /// 数据库连接池
     pub db: DatabaseConnection,
-    /// Redis 连接池
-    pub redis: ConnectionManager,
+    /// 共享态存储（`[cache].mode` 双档：local = 纯 SQL 承载 / redis = 现状 Redis 命令）。
+    /// 业务代码经 `SharedStore` trait 方法读写，不直接触碰 Redis 连接。
+    pub store: Arc<dyn crate::shared_store::SharedStore>,
+    /// 仅供 `[rate_limit].mode = "redis"` 的 Lua 令牌桶使用的原生 Redis 连接。
+    /// 该模式与 local 档互斥：local 档（或 Redis 未初始化）时为 None，
+    /// 中间件对此 fail-closed（与 Redis 命令失败同口径返回 503）。
+    pub redis_conn: Option<redis::aio::ConnectionManager>,
     /// 全局配置
     pub config: Arc<Settings>,
     /// 用户模块 Service
@@ -187,7 +196,8 @@ impl AppState {
     /// 同时也实例化 logininfor_repo / config_repo 传入，确保单实例共享。
     pub fn new(
         db: DatabaseConnection,
-        redis: ConnectionManager,
+        store: Arc<dyn crate::shared_store::SharedStore>,
+        redis_conn: Option<redis::aio::ConnectionManager>,
         config: Arc<Settings>,
         job_scheduler: Arc<JobScheduler>,
         ip_locator: Arc<IpLocator>,
@@ -198,24 +208,24 @@ impl AppState {
         let (ws_broadcast, _) = broadcast::channel::<WsMessage>(256);
 
         // 先实例化 user/role/menu service，再 clone 一份注入 AuthService（共享底层 Repository 实例）
-        // 三个 Service 均持有 Redis 连接管理器，用于权限缓存（cache-aside + 失效）
-        let user_service = SysUserService::new(db.clone(), redis.clone());
-        let role_service = SysRoleService::new(db.clone(), redis.clone());
-        let menu_service = SysMenuService::new(db.clone(), redis.clone());
+        // 三个 Service 均持有共享态存储句柄，用于权限缓存（cache-aside + 失效）
+        let user_service = SysUserService::new(db.clone(), store.clone());
+        let role_service = SysRoleService::new(db.clone(), store.clone());
+        let menu_service = SysMenuService::new(db.clone(), store.clone());
 
-        // H-4：config_service 提前实例化（持有 Redis 用于 cache-aside 缓存），
-        // clone 一份注入 AuthService，使登录/注册流程的验证码开关、注册开关查询走 Redis 缓存，
+        // H-4：config_service 提前实例化（持有共享态存储用于 cache-aside 缓存），
+        // clone 一份注入 AuthService，使登录/注册流程的验证码开关、注册开关查询走缓存，
         // 减少每次登录 2 次 DB 查询（captchaEnabled + registerUser）。
-        let config_service = SysConfigService::new(db.clone(), redis.clone());
+        let config_service = SysConfigService::new(db.clone(), store.clone());
 
         // 多租户 Phase 3：tenant_service 提前实例化（登录闸门 + 运行时状态键 + 定向踢线），
         // clone 一份注入 AuthService，保证同一实例共享（避免重复 Repository）
-        let tenant_service = SysTenantService::new(db.clone(), redis.clone());
+        let tenant_service = SysTenantService::new(db.clone(), store.clone());
 
-        // 多租户 Phase 3 域名链路：域名服务持有独立 Redis 客户端（host 缓存 tenant:host:{domain}）
+        // 多租户 Phase 3 域名链路：域名服务持有独立共享态存储（host 缓存 tenant:host:{domain}）
         // 批次 4：注入 config 以承载 `[acme]` 证书需求输出集成点（默认 off = 不发请求）
         let tenant_domain_service =
-            SysTenantDomainService::new(db.clone(), redis.clone(), config.clone());
+            SysTenantDomainService::new(db.clone(), store.clone(), config.clone());
 
         // 批次 3：L3 租户自建导航服务（能力位 nav.l3 门控；复用 menu_service 的菜单树口径）
         let tenant_nav_service =
@@ -249,7 +259,7 @@ impl AppState {
         );
         let user_erasure_service = UserErasureService::new(
             db.clone(),
-            redis.clone(),
+            store.clone(),
             sso_service.clone(),
             config.clone(),
         );
@@ -258,7 +268,7 @@ impl AppState {
         // 复用同一 tenant_service：passkey 登录的租户闸门与密码登录口径单点。
         let webauthn_service = WebauthnService::new(
             db.clone(),
-            redis.clone(),
+            store.clone(),
             tenant_service.clone(),
             config.clone(),
         );
@@ -283,18 +293,18 @@ impl AppState {
             menu_service,
             notice_service: SysNoticeService::new(db.clone()),
             dept_service: SysDeptService::new(db.clone()),
-            // 多租户 Phase 3：租户服务需要 Redis（运行时状态键 + 定向会话吊销）
+            // 多租户 Phase 3：租户服务需要共享态存储（运行时状态键 + 定向会话吊销）
             tenant_service,
             tenant_domain_service,
             tenant_nav_service,
             auth_service,
             job_service: SysJobService::new(db.clone(), job_scheduler.clone()),
-            dict_service: SysDictService::new(db.clone(), redis.clone()),
+            dict_service: SysDictService::new(db.clone(), store.clone()),
             config_service,
             post_service: SysPostService::new(db.clone()),
             oper_log_service: SysOperLogService::new(db.clone()),
             frontend_error_service: SysFrontendErrorService::new(db.clone()),
-            rate_limit_service: SysRateLimitService::new(db.clone(), redis.clone()),
+            rate_limit_service: SysRateLimitService::new(db.clone(), store.clone()),
             logininfor_service: SysLogininforService::new(db.clone()),
             gen_table_service: GenTableService::new(db.clone()),
             backup_service: SysBackupService::new(db.clone(), config.clone()),
@@ -328,7 +338,8 @@ impl AppState {
             mailer_service: MailerService::new(config.clone()),
             job_scheduler,
             db,
-            redis,
+            store,
+            redis_conn,
             config,
             ip_locator,
             ip_location_service,

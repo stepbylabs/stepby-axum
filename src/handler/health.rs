@@ -33,7 +33,8 @@ pub struct HealthStatus {
     pub version: String,
     /// 数据库连通性："UP" / "DOWN"
     pub db: String,
-    /// Redis 连通性："UP" / "DOWN"
+    /// 共享态存储连通性："UP" / "DOWN"
+    /// redis 档 = Redis PING；local 档该字段反映共享态存储（业务库）连通性
     pub redis: String,
 }
 
@@ -76,17 +77,15 @@ pub async fn health(
         }
     };
 
-    // 探测 Redis 连通性
-    let redis_status = {
-        let mut conn = state.redis.clone();
-        match crate::utils::redis::cmd_timeout(redis::cmd("PING").query_async::<String>(&mut conn))
-            .await
-        {
-            Ok(_) => "UP".to_string(),
-            Err(e) => {
-                tracing::error!(error = ?e, "健康检查：Redis ping 失败");
-                "DOWN".to_string()
-            }
+    // 探测共享态存储连通性（SharedStore::ping）
+    // - redis 档 = Redis PING（现状等价）；
+    // - local 档 = 探测业务库 DB 可用性——`redis` 字段保留，此时反映的是
+    //   共享态存储（业务库）的连通性（展示层档位适配，字段名不变兼容前端契约）
+    let redis_status = match state.store.ping().await {
+        Ok(_) => "UP".to_string(),
+        Err(e) => {
+            tracing::error!(error = ?e, "健康检查：共享态存储 ping 失败");
+            "DOWN".to_string()
         }
     };
 
@@ -206,23 +205,58 @@ pub async fn metrics(
     // 业务 HTTP 指标（request counter + duration histogram，由 monitoring_middleware 写入）
     s.push_str(&state.observability.metrics.render_prometheus());
 
-    // Redis 运行指标（INFO 精简为 gauge，best-effort：失败则不输出该组指标）
-    s.push_str(&collect_redis_prometheus(&state).await);
+    // 共享态存储运行指标（按档位适配展示；best-effort：失败则不输出该组指标）
+    s.push_str(&collect_shared_store_prometheus(&state).await);
 
     Ok(s)
 }
 
-/// Redis 运行指标 → Prometheus gauge（best-effort，失败返回空串不影响整体输出）
-async fn collect_redis_prometheus(state: &Arc<AppState>) -> String {
-    let mut conn = state.redis.clone();
-    let info_text: String =
-        match crate::utils::redis::cmd_timeout(redis::cmd("INFO").query_async(&mut conn)).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, "/metrics 采集 Redis INFO 失败，跳过 Redis 指标");
-                return String::new();
+/// 共享态存储运行指标 → Prometheus gauge（best-effort，失败返回空串不影响整体输出）
+///
+/// 展示层档位适配（非语义分叉）：trait 的 `info_summary` 两实现各自自洽——
+/// - redis 档 = INFO 原文 → 按行解析为既有 gauge（现状等价）；
+/// - local 档 = 计数文本（`mode=local kv_entries=N ...`，非 INFO 格式）→
+///   输出 `stepby_shared_store_kind{kind="local"} 1` + 条目计数 gauge。
+async fn collect_shared_store_prometheus(state: &Arc<AppState>) -> String {
+    let info_text: String = match state.store.info_summary().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "/metrics 采集共享态存储 info_summary 失败，跳过该组指标");
+            return String::new();
+        }
+    };
+
+    // local 档：info_summary 返回可读计数文本（非 INFO 格式），按 kind() 分支展示
+    if state.store.kind() != "redis" {
+        let mut map = std::collections::HashMap::new();
+        for pair in info_text.split_whitespace() {
+            if let Some((k, v)) = pair.split_once('=') {
+                map.insert(k.to_string(), v.to_string());
             }
-        };
+        }
+        let mut s = String::new();
+        s.push_str("# HELP stepby_shared_store_kind 共享态存储档位（1=当前档位生效）\n");
+        s.push_str("# TYPE stepby_shared_store_kind gauge\n");
+        s.push_str(&format!(
+            "stepby_shared_store_kind{{kind=\"{}\"}} 1\n",
+            state.store.kind()
+        ));
+        // 条目计数（kv_entries 解析失败则跳过，不影响 kind 指标）
+        if let Some(v) = map
+            .get("kv_entries")
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            s.push_str("# HELP stepby_shared_store_kv_entries 共享态存储条目数（sys_shared_kv 行数）\n");
+            s.push_str("# TYPE stepby_shared_store_kv_entries gauge\n");
+            s.push_str(&format!(
+                "stepby_shared_store_kv_entries {}\n",
+                format_gauge(v)
+            ));
+        }
+        return s;
+    }
+
+    // redis 档：INFO 原文解析（现状等价）
     let mut map = std::collections::HashMap::new();
     for line in info_text.lines() {
         let line = line.trim();

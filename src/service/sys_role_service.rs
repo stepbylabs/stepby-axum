@@ -9,9 +9,9 @@
 
 use futures::future::FutureExt;
 use garde::Validate;
-use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
+use std::sync::Arc;
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
 
@@ -31,6 +31,7 @@ use crate::repository::sys_role_dept::SysRoleDeptRepository;
 use crate::repository::sys_role_menu::SysRoleMenuRepository;
 use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
+use crate::shared_store::SharedStore;
 use crate::utils::parse_id_list;
 
 // 部门树组装函数抽取至 service/mod.rs，避免与 sys_user_service 重复
@@ -204,7 +205,7 @@ const PERM_CACHE_PREFIX: &str = "perm:user:";
 /// - role_dept_repo: sys_role_dept 关联表 CRUD（数据权限）
 /// - user_role_repo: sys_user_role 关联表 CRUD（级联清理 + 授权用户管理）
 /// - dept_repo: sys_dept 表查询（部门树）
-/// - redis: Redis 连接管理器，用于权限缓存失效
+/// - store: 共享态存储（SharedStore），用于权限缓存失效
 /// - 事务通过 role_repo.base().db() 获取连接
 #[derive(Clone)]
 pub struct SysRoleService {
@@ -218,12 +219,12 @@ pub struct SysRoleService {
     menu_repo: SysMenuRepository,
     /// 租户套餐服务（§27.6 生效点①：角色授权 `menu_ids ⊆ 套餐白名单` 校验）
     tenant_service: crate::service::SysTenantService,
-    /// Redis 连接管理器（权限缓存失效）
-    redis: ConnectionManager,
+    /// 共享态存储（权限缓存失效）
+    store: Arc<dyn SharedStore>,
 }
 
 impl SysRoleService {
-    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>) -> Self {
         Self {
             role_repo: SysRoleRepository::new(db.clone()),
             role_menu_repo: SysRoleMenuRepository::new(db.clone()),
@@ -232,8 +233,8 @@ impl SysRoleService {
             user_repo: SysUserRepository::new(db.clone()),
             dept_repo: SysDeptRepository::new(db.clone()),
             menu_repo: SysMenuRepository::new(db.clone()),
-            tenant_service: crate::service::SysTenantService::new(db, redis.clone()),
-            redis,
+            tenant_service: crate::service::SysTenantService::new(db, store.clone()),
+            store,
         }
     }
 
@@ -290,12 +291,7 @@ impl SysRoleService {
     /// 失效指定用户的权限缓存（best-effort，失败仅记日志不阻断业务）
     pub async fn invalidate_perm_cache(&self, user_id: i64) {
         let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
-        let mut conn = self.redis.clone();
-        if let Err(e) = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn),
-        )
-        .await
-        {
+        if let Err(e) = self.store.del(std::slice::from_ref(&key)).await {
             tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
         }
     }
@@ -304,40 +300,16 @@ impl SysRoleService {
     ///
     /// 使用 SCAN 遍历所有 perm:user:* 键并批量删除，避免 KEYS 命令阻塞 Redis。
     pub async fn invalidate_all_perm_cache(&self) {
-        let mut conn = self.redis.clone();
         let pattern = format!("{}*", PERM_CACHE_PREFIX);
-        let mut cursor: u64 = 0;
-        loop {
-            let scan_result: Result<(u64, Vec<String>), _> = crate::utils::redis::cmd_timeout(
-                redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(&pattern)
-                    .arg("COUNT")
-                    .arg(100)
-                    .query_async(&mut conn),
-            )
-            .await;
-            match scan_result {
-                Ok((next_cursor, keys)) => {
-                    if !keys.is_empty() {
-                        let mut pipe = redis::pipe();
-                        for key in &keys {
-                            pipe.cmd("DEL").arg(key);
-                        }
-                        let _ = crate::utils::redis::cmd_timeout(
-                            pipe.query_async::<Vec<i64>>(&mut conn),
-                        )
-                        .await;
-                    }
-                    if next_cursor == 0 {
-                        break;
-                    }
-                    cursor = next_cursor;
-                }
-                Err(_) => break,
-            }
+        // 全量扫描（原 cursor 循环至游标归零的语义）；失败即中止（best-effort，与原 Err(_) => break 一致）
+        let Ok(keys) = self.store.scan(&pattern, None).await else {
+            return;
+        };
+        if keys.is_empty() {
+            return;
         }
+        // 批量删除（原 pipeline 语义——非事务允许部分成功；结果忽略，best-effort）
+        let _ = self.store.del(&keys).await;
     }
 
     /// 分页查询角色（仅未删除）

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDateTime;
 use futures::future::FutureExt;
-use redis::aio::ConnectionManager;
+use std::sync::Arc;
 use sea_orm::sea_query::Expr;
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,7 @@ use crate::repository::sys_tenant::SysTenantRepository;
 use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::service::sso_service::RefreshBinding;
+use crate::shared_store::SharedStore;
 
 /// 平台组织种子部门 ID（m20250711 init 种子"Stepby科技"）：
 /// 其下用户与部门 `tenant_id = 0`（平台租户），**仅为组织种子、不再承担租户身份**
@@ -750,7 +751,8 @@ struct TenantInitOutcome {
 #[derive(Clone)]
 pub struct SysTenantService {
     db: DatabaseConnection,
-    redis: ConnectionManager,
+    /// 共享态存储（Redis / local 双档；运行时键、code 缓存、踢线吊销统一走此抽象）
+    store: Arc<dyn SharedStore>,
     tenant_repo: SysTenantRepository,
     dept_repo: SysDeptRepository,
     user_repo: SysUserRepository,
@@ -760,7 +762,7 @@ pub struct SysTenantService {
 }
 
 impl SysTenantService {
-    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>) -> Self {
         Self {
             tenant_repo: SysTenantRepository::new(db.clone()),
             dept_repo: SysDeptRepository::new(db.clone()),
@@ -769,7 +771,7 @@ impl SysTenantService {
             role_menu_repo: SysRoleMenuRepository::new(db.clone()),
             user_role_repo: SysUserRoleRepository::new(db.clone()),
             db,
-            redis,
+            store,
         }
     }
 
@@ -1912,25 +1914,72 @@ impl SysTenantService {
             }
         };
         let expire_epoch = expire_time.map(|dt| dt.and_utc().timestamp()).unwrap_or(0);
-        let mut redis = self.redis.clone();
-        let result: Result<(), redis::RedisError> = crate::utils::redis::cmd_timeout(
-            redis::pipe()
-                .cmd("SETEX")
-                .arg(tenant_state_key(tenant_id))
-                .arg(TENANT_RUNTIME_KEY_TTL_SECS)
-                .arg(state)
-                .cmd("SETEX")
-                .arg(tenant_expire_key(tenant_id))
-                .arg(TENANT_RUNTIME_KEY_TTL_SECS)
-                .arg(expire_epoch)
-                .query_async(&mut redis),
-        )
-        .await
-        .map(|_: Vec<String>| ());
+        let ttl = TENANT_RUNTIME_KEY_TTL_SECS.max(0) as u64;
+        // 原实现为一条 pipe 双 SETEX（tenant:state / tenant:exp）→ 拆为两次 SharedStore 写入，
+        // 值与 TTL 逐字节等价：state 取 TENANT_STATE_* 常量（'0' 正常 / '1' 宽限 / '2' 停用）；
+        // expire 为 NULL → 写 "0"（永不过期），非 NULL → UTC 秒时间戳
+        // 类型注解：async block 内 `?` 产出 StoreError，编译器无法推断 Ok(()) 的整体类型（E0282）
+        let result: Result<(), crate::shared_store::StoreError> = async {
+            self.store
+                .set_ex(&tenant_state_key(tenant_id), state, ttl)
+                .await?;
+            self.store
+                .set_ex(&tenant_expire_key(tenant_id), &expire_epoch.to_string(), ttl)
+                .await?;
+            Ok(())
+        }
+        .await;
         if let Err(e) = result {
             // 键写入失败不阻断业务（DB 仍为事实源，登录闸门每次查库；此处仅影响已登录会话的即时性）
             tracing::warn!(tenant_id, error = %e, "租户运行时键写入失败（Redis 异常）");
         }
+    }
+
+    /// 启动期**全量重建**租户运行时投影键（R1-redis 档兜底，R8-STARTUP-REBUILD）。
+    ///
+    /// 背景：redis 档下 `tenant:state:{tid}` / `tenant:exp:{tid}` 投影键的既有语义是
+    /// 「键缺失 = Active，事实源 = 库表」（`common/tenant.rs::eval_tenant_runtime_state`），
+    /// 但 Redis 清空 / 过期驱逐 / 重启后，**已停用租户的存量令牌会在「键重建前」复活**
+    /// （窗口截止于该租户下次登录闸门重写或管理员变更）。本函数在启动时从 `sys_tenant`
+    /// 表全量重建投影键，**消除该窗口**（local 档直接查库求值，天然不受影响，无需调用）。
+    ///
+    /// 逐租户复用 [`Self::sync_runtime_keys`]（状态/宽限/到期映射单点），幂等可重入；
+    /// 单键写入失败仅 warn 不中断（与 sync 既有口径一致），返回处理的租户数。
+    pub async fn rebuild_all_runtime_keys(&self) -> u64 {
+        use sea_orm::{ConnectionTrait, Statement};
+        let backend = self.db().get_database_backend();
+        let sql = "SELECT tenant_id, status, expire_time FROM sys_tenant WHERE tenant_id != 0";
+        let rows = match self
+            .db()
+            .query_all(Statement::from_string(backend, sql.to_string()))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "租户运行时键重建：读取 sys_tenant 失败（下次启动重试）");
+                return 0;
+            }
+        };
+        let mut rebuilt = 0u64;
+        for row in rows {
+            let tid: i64 = match row.try_get::<i64>("", "tenant_id") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let status: Option<String> = row.try_get::<Option<String>>("", "status").ok().flatten();
+            let expire_time: Option<chrono::NaiveDateTime> = row
+                .try_get::<Option<chrono::NaiveDateTime>>("", "expire_time")
+                .ok()
+                .flatten();
+            // 写入失败在 sync_runtime_keys 内部 warn（键失败不阻断业务，DB 为事实源）
+            self.sync_runtime_keys(tid, status.as_deref(), expire_time)
+                .await;
+            rebuilt += 1;
+        }
+        if rebuilt > 0 {
+            tracing::info!(rebuilt, "租户运行时投影键已全量重建（R1 启动兜底）");
+        }
+        rebuilt
     }
 
     /// 吊销某租户全部在线会话（停用/删除/到期链路）：
@@ -1946,11 +1995,11 @@ impl SysTenantService {
         if tenant_id == 0 {
             return 0;
         }
-        let mut redis = self.redis.clone();
         // ① 在线会话扫描：失败仅告警（不得阻断后续 PAT=DB 与 RT 吊销；空结果亦不早退）
         // 第九批：改用 **不截断** 扫描 —— 原 `scan_keys(.., 5000)` 会在超限时静默截断，
         // 导致部分在线会话**未被踢线**（安全吊销必须完整）。
-        let keys = match crate::utils::redis::scan_keys_all(&mut redis, "online:*").await {
+        // SharedStore 迁移：`scan(pattern, None)` 即全量版（扫到尾），与原 `scan_keys_all` 等价。
+        let keys = match self.store.scan("online:*", None).await {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!(tenant_id, error = %e, "租户踢线：SCAN online:* 失败");
@@ -1960,11 +2009,7 @@ impl SysTenantService {
         let values: Vec<Option<String>> = if keys.is_empty() {
             Vec::new()
         } else {
-            match crate::utils::redis::cmd_timeout(
-                redis::cmd("MGET").arg(&keys).query_async(&mut redis),
-            )
-            .await
-            {
+            match self.store.get_many(&keys).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(tenant_id, error = %e, "租户踢线：MGET online 失败");
@@ -1997,7 +2042,7 @@ impl SysTenantService {
         // 变更前签发的 RT 不在索引内，吊销仍须保留本扫描兜底（RT TTL 窗口内），
         // 故索引只增"签发/吊销/轮换三处写入点 + TTL 索引键"的一致性负担而无净收益；
         // 正确性由「不截断扫描 + 权威结构按 tid 过滤」保证（详见台账 §5.1-D6 状态行）。
-        let rt_keys = match crate::utils::redis::scan_keys_all(&mut redis, "sso:rt:*").await {
+        let rt_keys = match self.store.scan("sso:rt:*", None).await {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!(tenant_id, error = %e, "租户踢线：SCAN sso:rt:* 失败");
@@ -2007,11 +2052,7 @@ impl SysTenantService {
         let rt_values: Vec<Option<String>> = if rt_keys.is_empty() {
             Vec::new()
         } else {
-            match crate::utils::redis::cmd_timeout(
-                redis::cmd("MGET").arg(&rt_keys).query_async(&mut redis),
-            )
-            .await
-            {
+            match self.store.get_many(&rt_keys).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(tenant_id, error = %e, "租户踢线：MGET sso:rt 失败");
@@ -2061,14 +2102,9 @@ impl SysTenantService {
             } else {
                 FALLBACK_BLACKLIST_TTL_SECS
             };
-            let r: Result<i64, redis::RedisError> = redis::Script::new(REVOKE_SESSION_SCRIPT)
-                .key(format!("blacklist:{token_hash}"))
-                .key(format!("online:{token_hash}"))
-                .key(format!("sso:at:{token_hash}"))
-                .arg(ttl)
-                .invoke_async(&mut redis)
-                .await;
-            match r {
+            // SharedStore 迁移：原逐 token 三键 Lua（blacklist SETEX + online DEL + sso:at DEL，
+            // 原 REVOKE_SESSION_SCRIPT）→ `revoke_session`，三键同生共死的原子语义封进实现
+            match self.store.revoke_session(&token_hash, ttl as u64).await {
                 Ok(_) => revoked += 1,
                 Err(e) => {
                     tracing::warn!(tenant_id, token_hash = %token_hash, error = %e, "租户踢线：Lua 执行失败")
@@ -2077,8 +2113,9 @@ impl SysTenantService {
         }
 
         // ④（P0-1-a）吊销该租户全部 SSO refresh_token（无需维护索引键，扫描即自愈）
-        //   第九批：命中集合先归集再**分批 DEL**（`DEL_BATCH_SIZE`）。原实现逐键 DEL，
-        //   在①/②改为"不截断扫描"后代价随 RT 条数线性增长（数千条 RT ⇒ 数千次往返）。
+        //   原实现：命中集合按 `DEL_BATCH_SIZE`(500) 分批 DEL（减少不截断扫描后的往返次数）
+        //   → SharedStore 迁移后一次传整批即可（`del` 实现内部自行处理分批/单语句批量删除），
+        //   外层不再保留 chunks 循环。
         let mut rt_hashes: Vec<String> = Vec::new();
         for (rt_hash, binding) in rt_entries {
             let rt_tid = if binding.tid != 0 {
@@ -2090,17 +2127,16 @@ impl SysTenantService {
                 rt_hashes.push(rt_hash);
             }
         }
+        let rt_del_keys: Vec<String> = rt_hashes
+            .iter()
+            .map(|h| format!("sso:rt:{h}"))
+            .collect();
         let mut rt_revoked = 0u64;
-        for chunk in rt_hashes.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
-            let keys: Vec<String> = chunk.iter().map(|h| format!("sso:rt:{h}")).collect();
-            match crate::utils::redis::cmd_timeout(
-                redis::cmd("DEL").arg(&keys).query_async::<i64>(&mut redis),
-            )
-            .await
-            {
-                Ok(n) => rt_revoked += n.max(0) as u64,
+        if !rt_del_keys.is_empty() {
+            match self.store.del(&rt_del_keys).await {
+                Ok(n) => rt_revoked = n,
                 Err(e) => {
-                    tracing::warn!(tenant_id, batch = keys.len(), error = %e, "租户踢线：批量 DEL sso:rt 失败")
+                    tracing::warn!(tenant_id, batch = rt_del_keys.len(), error = %e, "租户踢线：批量 DEL sso:rt 失败")
                 }
             }
         }
@@ -2374,48 +2410,27 @@ impl SysTenantService {
         self.redis_del(&code_cache_key(code)).await;
     }
 
+    // SharedStore 迁移：以下三个助手保留原函数名与调用点（`redis_get`/`redis_setex`/`redis_del`），
+    // 内部由裸 Redis 命令（GET/SETEX/DEL + cmd_timeout 包裹）改为 store 薄封装——
+    // 超时保护与异常降级语义由 SharedStore 实现内部承载，调用方口径不变（best-effort）。
     async fn redis_get(&self, key: &str) -> Option<String> {
-        let mut redis = self.redis.clone();
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET")
-                .arg(key)
-                .query_async::<Option<String>>(&mut redis),
-        )
-        .await
-        {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
+        match self.store.get(key).await {
+            Ok(v) => v,
+            Err(e) => {
                 tracing::warn!(key, error = %e, "租户 code 缓存读取失败（降级回源 DB）");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(key, "租户 code 缓存读取超时（降级回源 DB）");
                 None
             }
         }
     }
 
     async fn redis_setex(&self, key: &str, ttl: i64, value: &str) {
-        let mut redis = self.redis.clone();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("SETEX")
-                .arg(key)
-                .arg(ttl)
-                .arg(value)
-                .query_async::<()>(&mut redis),
-        )
-        .await;
+        // 与原实现一致：写失败静默忽略（cache-aside 回填，best-effort）
+        let _ = self.store.set_ex(key, value, ttl.max(0) as u64).await;
     }
 
     async fn redis_del(&self, key: &str) {
-        let mut redis = self.redis.clone();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("DEL").arg(key).query_async::<()>(&mut redis),
-        )
-        .await;
+        // 与原实现一致：删失败静默忽略（缓存失效，best-effort）
+        let _ = self.store.del(&[key.to_string()]).await;
     }
 
     // ---------- 内部工具 ----------
@@ -2442,14 +2457,6 @@ impl SysTenantService {
         Ok(count)
     }
 }
-
-/// 会话吊销 Lua（与 monitor_online_handler 的强退脚本同型：原子化黑名单 + 清 online + 清 SSO AT）
-const REVOKE_SESSION_SCRIPT: &str = r#"
-redis.call("SETEX", KEYS[1], ARGV[1], "1")
-redis.call("DEL", KEYS[2])
-redis.call("DEL", KEYS[3])
-return 1
-"#;
 
 /// 租户短码格式校验：2-32 位小写字母/数字/下划线/连字符，且以字母或数字开头
 fn validate_tenant_code(code: &str) -> Result<(), ServiceError> {
