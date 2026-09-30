@@ -16,6 +16,46 @@ use std::sync::Arc;
 /// 初始化编排模块
 pub struct AppInitializer;
 
+/// 全新库检测 + 自动迁移：seaql_migrations 表不存在（空库）时执行 Migrator::up。
+///
+/// 背景：此前全新库初始化无自动化路径（deployment.md 的 `cd migration && cargo run` 已过时——
+/// migration crate 无 bin target），空库直接启动会因缺基础表失败。本兜底使「拷贝配置 -> 启动后端」
+/// 即可完成全新部署；存量库（seaql_migrations 存在）维持「启动不跑 Migrator::up」的架构约定不变。
+async fn run_migrator_if_fresh_db(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let sql = match backend {
+        DatabaseBackend::Sqlite => {
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='seaql_migrations'"
+        }
+        DatabaseBackend::Postgres => {
+            "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_name = 'seaql_migrations'"
+        }
+        DatabaseBackend::MySql => {
+            "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'seaql_migrations'"
+        }
+        _ => return Ok(()),
+    };
+    let row = db
+        .query_one(Statement::from_string(backend, sql.to_string()))
+        .await
+        .map_err(|e| anyhow::anyhow!("探测 seaql_migrations 失败: {}", e))?;
+    let n = row
+        .and_then(|r| r.try_get::<i64>("", "n").ok())
+        .unwrap_or(0);
+    if n > 0 {
+        tracing::info!("检测到存量库（seaql_migrations 存在），跳过 Migrator::up（启动不跑迁移）");
+        return Ok(());
+    }
+    tracing::info!("检测到全新库（无 seaql_migrations），执行 Migrator::up 全量建表 + 基础种子...");
+    use migration::MigratorTrait;
+    migration::Migrator::up(db, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("全新库 Migrator::up 失败: {}", e))?;
+    tracing::info!("全新库自动迁移完成");
+    Ok(())
+}
+
+
 impl AppInitializer {
     /// 执行完整初始化流程，返回 AppState
     pub async fn run(config_path: &str) -> anyhow::Result<Arc<AppState>> {
@@ -54,6 +94,13 @@ impl AppInitializer {
 
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
+
+        // 3.0 全新库自动初始化：seaql_migrations 表不存在 => 空库 => 自动执行 Migrator::up
+        // （建全部表 + 基础种子）。存量库跳过——架构约定启动不跑 Migrator::up，
+        // 避免 seed 重跑主键冲突；存量库演进由下方 ensure_* 幂等兜底负责。
+        run_migrator_if_fresh_db(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("全新库自动迁移失败: {}", e))?;
 
         // 3.1 G18：幂等确保 sys_user 含 country_code 列（存量库向后兼容，加列后才不会因实体新字段查询报错）
         ensure_user_country_code_column(&db)
