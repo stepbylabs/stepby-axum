@@ -247,7 +247,15 @@ async fn build_isolated_state_with(
     let slot = acquire_redis_slot().await;
     let db_path = unique_temp_db_path();
     settings.database.url = format!("sqlite://{}?mode=rwc", db_path);
-    settings.redis.url = format!("redis://127.0.0.1:6379/{}", slot.db_index);
+    // 测试 harness 不经过 main.rs，dotenvy 未加载——显式加载（CWD = workspace root，.env 可达）
+    let _ = dotenvy::dotenv();
+    // redis 密码从环境注入（.env 的 REDIS_PASSWORD；docker --requirepass 展开），
+    // 无密码环境（REDIS_PASSWORD 未设）保持原行为
+    let redis_auth = match std::env::var("REDIS_PASSWORD") {
+        Ok(p) if !p.is_empty() => format!(":{}@", p),
+        _ => String::new(),
+    };
+    settings.redis.url = format!("redis://{}127.0.0.1:6379/{}", redis_auth, slot.db_index);
     let settings = Arc::new(settings);
 
     // 2. 初始化 DB + 跑迁移（建表 + 种子数据）

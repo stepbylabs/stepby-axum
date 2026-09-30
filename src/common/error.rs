@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(e.code, 500);
         assert_eq!(e.message, crate::tr!("error.common.io_error"));
 
-        let e: ServiceError = argon2::password_hash::Error::Password.into();
+        let e: ServiceError = argon2::password_hash::Error::Crypto.into();
         assert_eq!(e.code, 500);
         assert_eq!(
             e.message,

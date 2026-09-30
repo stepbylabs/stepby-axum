@@ -147,7 +147,12 @@ impl SysPatService {
 
         // 生成明文令牌：prefix + 32 随机字节（hex，64 字符）
         let mut buf = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
+        {
+            use rand_os::{rngs::StdRng, Rng, SeedableRng};
+            let mut rng = StdRng::try_from_rng(&mut rand_os::rngs::SysRng)
+                .expect("OS RNG seed failed");
+            rng.fill_bytes(&mut buf);
+        }
         let secret = hex_encode(&buf);
         let token = format!("{}{}", config.prefix, secret);
         let token_hash = crate::utils::crypto::token_hash(&token);

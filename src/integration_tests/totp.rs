@@ -14,7 +14,7 @@
 
 use super::TestContext;
 use axum::http::Method;
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Builder, Algorithm, Secret, TOTP};
 
 /// 注入 CONFIG_ENC_KEY（≥32 字符），供 TOTP secret 加解密使用。
 ///
@@ -31,20 +31,19 @@ fn ensure_config_enc_key() {
 
 /// 根据 Base32 secret 生成当前 TOTP 验证码（与 totp_handler 使用完全相同的参数）。
 fn generate_totp_code(secret: &str) -> String {
-    let secret_bytes = Secret::Encoded(secret.to_string())
-        .to_bytes()
+    let secret = Secret::try_from_base32(secret.to_string())
         .expect("Base32 secret 解码失败");
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        Some("Stepby".to_string()),
-        "stepby-user".to_string(),
-    )
-    .expect("构造 TOTP 失败");
-    totp.generate_current().expect("生成当前验证码失败")
+    let totp = Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret)
+        .with_issuer(Some("Stepby"))
+        .with_account_name("stepby-user")
+        .build()
+        .expect("构造 TOTP 失败");
+    totp.generate_current().to_string()
 }
 
 /// 生成一个必然与正确验证码不同的 6 位验证码（翻转最后一位）。

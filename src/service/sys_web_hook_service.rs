@@ -288,10 +288,10 @@ pub fn sign_payload(secret: &str, body: &str) -> String {
     if secret.is_empty() {
         return String::new();
     }
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, Mac, KeyInit};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(secret.as_bytes())
         .expect("HMAC 密钥任意长度均可接受，初始化不应失败");
     mac.update(body.as_bytes());
     hex::encode(mac.finalize().into_bytes())
