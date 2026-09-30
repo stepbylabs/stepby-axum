@@ -232,14 +232,13 @@ pub async fn login_finish(
     let user = state.webauthn_service.login_finish(&username, dto).await?;
 
     // 2. 复用既有登录完成链路签发令牌（不另写令牌逻辑）
-    let mut redis = state.redis.clone();
     let vo = state
         .auth_service
         .finalize_webauthn_login(
             &user,
             &login_ip,
             user_agent,
-            &mut redis,
+            &state.store,
             &state.config.jwt,
             &state.ip_locator,
         )

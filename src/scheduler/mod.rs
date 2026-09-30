@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
-use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use tokio::sync::RwLock;
 use tokio_cron_scheduler::{Job, JobScheduler as TokioScheduler};
@@ -102,8 +101,8 @@ impl From<SchedulerError> for crate::common::error::ServiceError {
 pub struct JobScheduler {
     scheduler: Arc<TokioScheduler>,
     db: DatabaseConnection,
-    /// Redis 连接管理器，用于分布式锁（多实例部署时防止任务重复执行）
-    redis: ConnectionManager,
+    /// 共享态存储句柄，用于分布式锁（多实例部署时防止任务重复执行）
+    store: Arc<dyn crate::shared_store::SharedStore>,
     /// 运行中任务的 UUID 映射（job_id -> scheduler 内部 job guid）
     running_jobs: RwLock<HashMap<i64, uuid::Uuid>>,
     /// 正在执行中的任务标记（job_id -> true）
@@ -121,7 +120,7 @@ impl JobScheduler {
     /// 2. 注册内置任务函数到 registry
     pub async fn new(
         db: DatabaseConnection,
-        redis: ConnectionManager,
+        store: Arc<dyn crate::shared_store::SharedStore>,
         ip_location_service: crate::service::IpLocationService,
         config: Arc<Settings>,
     ) -> Result<Self, SchedulerError> {
@@ -140,7 +139,7 @@ impl JobScheduler {
         if let Err(e) = Self::register_builtin_scheduled_jobs(
             &scheduler,
             db.clone(),
-            redis.clone(),
+            store.clone(),
             ip_location_service,
             config,
         )
@@ -152,7 +151,7 @@ impl JobScheduler {
         Ok(Self {
             scheduler: Arc::new(scheduler),
             db,
-            redis,
+            store,
             running_jobs: RwLock::new(HashMap::new()),
             executing_jobs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
@@ -167,16 +166,16 @@ impl JobScheduler {
     async fn register_builtin_scheduled_jobs(
         scheduler: &TokioScheduler,
         db: DatabaseConnection,
-        redis: ConnectionManager,
+        store: Arc<dyn crate::shared_store::SharedStore>,
         ip_location_service: crate::service::IpLocationService,
         config: Arc<Settings>,
     ) -> Result<(), SchedulerError> {
-        // 先 clone 出登录异常检测任务所需的 db/redis，避免被 cleanup_job 闭包 move 后无法使用
+        // 先 clone 出登录异常检测任务所需的 db/store，避免被 cleanup_job 闭包 move 后无法使用
         let anomaly_db = db.clone();
-        let anomaly_redis = redis.clone();
+        let anomaly_store = store.clone();
         // 审批超时扫描（flow_timeout_scan）所需：同样必须在 cleanup_job move db 之前克隆
         let flow_scan_db = db.clone();
-        let flow_scan_redis = redis.clone();
+        let flow_scan_store = store.clone();
         // 消息重试任务也需在 cleanup_job move 前 clone（db 非 Copy）
         let msg_retry_db = db.clone();
         let msg_retry_config = config.clone();
@@ -292,7 +291,7 @@ impl JobScheduler {
         // 为每个异常 IP 创建 sys_notice 通知，同一 IP 30 分钟内不重复告警（Redis SETNX 去重）
         let anomaly_job = Job::new_async("0 */5 * * * *", move |_uuid, _l| {
             let db = anomaly_db.clone();
-            let mut redis = anomaly_redis.clone();
+            let store = anomaly_store.clone();
             Box::pin(async move {
                 tracing::debug!(
                     "内置任务 login_anomaly_detector 开始执行：扫描最近 5 分钟登录失败记录"
@@ -334,26 +333,16 @@ impl JobScheduler {
                 for (ip, count) in anomaly_ips {
                     let dedup_key = format!("login_anomaly:{}", ip);
                     // SETNX 去重：30 分钟内同一 IP 不重复创建告警
-                    // P3 修复: 区分 Redis 错误与 key 已存在，Redis 故障时仍创建告警（宁可重复也不漏报）
-                    let acquired = match crate::utils::redis::cmd_timeout(
-                        redis::cmd("SET")
-                            .arg(&dedup_key)
-                            .arg("1")
-                            .arg("NX")
-                            .arg("EX")
-                            .arg(DEDUP_TTL_SECS)
-                            .query_async::<Option<String>>(&mut redis),
-                    )
-                    .await
-                    {
-                        Ok(Some(_)) => true, // 成功获取去重锁
-                        Ok(None) => false,   // key 已存在，跳过
+                    // P3 修复: 区分存储错误与 key 已存在，共享态存储故障时仍创建告警（宁可重复也不漏报）
+                    let acquired = match store.set_nx_ex(&dedup_key, "1", DEDUP_TTL_SECS).await {
+                        Ok(true) => true,  // 成功获取去重锁
+                        Ok(false) => false, // key 已存在，跳过
                         Err(e) => {
                             tracing::warn!(
                                 "login_anomaly_detector: Redis 去重查询失败，仍创建告警: {}",
                                 e
                             );
-                            true // Redis 故障时仍创建告警（fail-open for alerting）
+                            true // 存储故障时仍创建告警（fail-open for alerting）
                         }
                     };
 
@@ -525,14 +514,14 @@ impl JobScheduler {
             let flow_job = Job::new_async(flow_cron.as_str(), move |_uuid, _l| {
                 let db = flow_scan_db.clone();
                 let config = flow_scan_config.clone();
-                let mut redis = flow_scan_redis.clone();
+                let store = flow_scan_store.clone();
                 Box::pin(async move {
                     // S-1 / 批次 1a：整轮互斥锁统一由 `[scheduler].cluster_mode` 驱动
                     // （`single`/`all` 不加锁；`leader` 一律加锁；`auto` 沿用
-                    // `[flow].scan_lock_enabled`）。释放走 Lua CAS（`ClusterLock::release`），
-                    // 避免误删其他实例持有的锁。
+                    // `[flow].scan_lock_enabled`）。释放走 CAS（`ClusterLock::release` →
+                    // `store.lock_release`），避免误删其他实例持有的锁。
                     let Some(round_lock) = crate::scheduler::cluster::ClusterLock::acquire(
-                        &mut redis,
+                        store.clone(),
                         "lock:scheduler:flow_timeout_scan",
                         flow_round_lock_needed,
                         flow_round_lock_ttl,
@@ -552,7 +541,7 @@ impl JobScheduler {
                         msg_service,
                     );
                     match flow_service
-                        .scan_timeouts_with_redis(&mut redis, config.flow.scan_batch_limit)
+                        .scan_timeouts_with_redis(store.clone(), config.flow.scan_batch_limit)
                         .await
                     {
                         Ok(outcome) => {
@@ -577,7 +566,7 @@ impl JobScheduler {
                         }
                     }
                     // S-1 / 批次 1a：释放整轮互斥锁（CAS，仅本实例持有才删除）
-                    round_lock.release(&mut redis).await;
+                    round_lock.release().await;
                 })
             })
             .map_err(|e| {
@@ -613,7 +602,7 @@ impl JobScheduler {
         // - 调用 IpLocationService::update_now(None) 执行下载+校验+热加载
         // - 失败不阻断调度器和其他任务
         let mmdb_cron = ip_location_service.auto_update_cron().to_string();
-        let mmdb_redis = redis.clone();
+        let mmdb_store = store.clone();
         let mmdb_service = ip_location_service.clone();
 
         if mmdb_cron.trim().is_empty() {
@@ -623,7 +612,7 @@ impl JobScheduler {
         } else {
             // 验证 cron 表达式有效性（提前 fail-fast，避免运行时才发现错误）
             match Job::new_async(mmdb_cron.as_str(), move |_uuid, _l| {
-                let mut redis = mmdb_redis.clone();
+                let store = mmdb_store.clone();
                 let service = mmdb_service.clone();
                 Box::pin(async move {
                     tracing::info!("内置任务 mmdb_auto_update 触发：检查并更新 IP 库");
@@ -643,13 +632,13 @@ impl JobScheduler {
                         return;
                     }
 
-                    // Redis 整轮互斥锁（批次 1a：统一由 `[scheduler].cluster_mode` 驱动；
+                    // 整轮互斥锁（批次 1a：统一由 `[scheduler].cluster_mode` 驱动；
                     // `auto` 下 legacy_enabled=true ⇒ 与改造前"始终加锁"一致）。
-                    // fail-closed：Redis 故障时跳过执行，避免多实例并发下载。
+                    // fail-closed：存储故障时跳过执行，避免多实例并发下载。
                     const MMDB_LOCK_KEY: &str = "lock:scheduler:mmdb_auto_update";
                     const MMDB_LOCK_TTL_SECS: u64 = crate::common::constants::MMDB_LOCK_TTL_SECS; // 30 分钟
                     let Some(mmdb_lock) = crate::scheduler::cluster::ClusterLock::acquire(
-                        &mut redis,
+                        store.clone(),
                         MMDB_LOCK_KEY,
                         mmdb_round_lock_needed,
                         MMDB_LOCK_TTL_SECS,
@@ -677,7 +666,7 @@ impl JobScheduler {
                     }
 
                     // 释放锁（CAS：仅当 fencing token 匹配时删除，避免误删其他实例的锁）
-                    mmdb_lock.release(&mut redis).await;
+                    mmdb_lock.release().await;
                 })
             }) {
                 Ok(mmdb_job) => {
@@ -774,14 +763,14 @@ impl JobScheduler {
         let job_id = job.job_id;
         let job_clone = job.clone();
         let db = self.db.clone();
-        let redis = self.redis.clone();
+        let store = self.store.clone();
         let executing_jobs = self.executing_jobs.clone();
 
         // 创建调度任务
         let sched_job = Job::new_async(cron_str, move |_uuid, _l| {
             let job = job_clone.clone();
             let db = db.clone();
-            let mut redis = redis.clone();
+            let store = store.clone();
             let executing_jobs = executing_jobs.clone();
 
             Box::pin(async move {
@@ -789,7 +778,7 @@ impl JobScheduler {
                 // 注意：std::panic::catch_unwind 无法捕获 async fn poll 时的 panic，
                 // 必须使用 futures::FutureExt::catch_unwind 对 Future 本身进行捕获
                 let result =
-                    AssertUnwindSafe(execute_with_logging(&db, &mut redis, &executing_jobs, &job))
+                    AssertUnwindSafe(execute_with_logging(&db, store, &executing_jobs, &job))
                         .catch_unwind()
                         .await;
 
@@ -879,7 +868,7 @@ impl JobScheduler {
     /// 确保 panic 被记录日志且不影响调度器运行时
     pub async fn run_once(&self, job: &SysJobModel) -> Result<(), SchedulerError> {
         let db = self.db.clone();
-        let mut redis = self.redis.clone();
+        let store = self.store.clone();
         let executing_jobs = self.executing_jobs.clone();
         let job_clone = job.clone();
 
@@ -889,7 +878,7 @@ impl JobScheduler {
             // 必须使用 futures::FutureExt::catch_unwind 对 Future 本身进行捕获
             let result = AssertUnwindSafe(execute_with_logging(
                 &db,
-                &mut redis,
+                store,
                 &executing_jobs,
                 &job_clone,
             ))
@@ -1031,7 +1020,7 @@ impl Drop for ExecutingFlagGuard {
 /// 主任务生命周期 RAII 守卫（P0-5 分布式锁泄漏修复）
 ///
 /// 背景：任务函数 panic 时（execute_inner 未捕获前），`renew_handle.abort()` 与
-/// `release_lock()` 均不会执行 → 续期任务继续每 30s 用 Lua 无限续锁，分布式锁被本实例
+/// `lock_release()` 均不会执行 → 续期任务继续每 30s 无限续锁，分布式锁被本实例
 /// 永久持有，该 job 此后永远不会再执行（直到进程重启）。
 ///
 /// 本守卫保证无论正常返回、业务失败还是 panic/unwind（Drop），续期任务都会被 abort，
@@ -1039,9 +1028,10 @@ impl Drop for ExecutingFlagGuard {
 struct JobLockGuard {
     /// 续期任务句柄（Drop 中 abort，防止无限续锁）
     renew_handle: Option<tokio::task::JoinHandle<()>>,
-    redis: ConnectionManager,
-    lock_key: String,
-    lock_value: String,
+    /// 共享态存储句柄（Drop 中 spawn `lock_release` 用）
+    store: Arc<dyn crate::shared_store::SharedStore>,
+    /// 已获取的分布式锁句柄（含 fencing token，CAS 释放凭据）
+    handle: crate::shared_store::LockHandle,
     /// 是否已释放（防重复 abort/release）
     armed: bool,
 }
@@ -1049,15 +1039,13 @@ struct JobLockGuard {
 impl JobLockGuard {
     fn new(
         renew_handle: tokio::task::JoinHandle<()>,
-        redis: ConnectionManager,
-        lock_key: String,
-        lock_value: String,
+        store: Arc<dyn crate::shared_store::SharedStore>,
+        handle: crate::shared_store::LockHandle,
     ) -> Self {
         Self {
             renew_handle: Some(renew_handle),
-            redis,
-            lock_key,
-            lock_value,
+            store,
+            handle,
             armed: true,
         }
     }
@@ -1069,8 +1057,14 @@ impl JobLockGuard {
         }
         if self.armed {
             self.armed = false;
-            let mut conn = self.redis.clone();
-            release_lock(&mut conn, &self.lock_key, &self.lock_value).await;
+            // best-effort：释放失败仅告警（锁在 TTL 到期后自然失效）
+            if let Err(e) = self.store.lock_release(&self.handle).await {
+                tracing::warn!(
+                    lock_key = %self.handle.key,
+                    error = %e,
+                    "分布式锁释放失败（将在 TTL 到期后自然失效）"
+                );
+            }
         }
     }
 
@@ -1081,11 +1075,17 @@ impl JobLockGuard {
         }
         if self.armed {
             self.armed = false;
-            let mut conn = self.redis.clone();
-            let k = self.lock_key.clone();
-            let v = self.lock_value.clone();
+            let store = self.store.clone();
+            let handle = self.handle.clone();
             tokio::spawn(async move {
-                release_lock(&mut conn, &k, &v).await;
+                // best-effort：释放失败仅告警（锁在 TTL 到期后自然失效）
+                if let Err(e) = store.lock_release(&handle).await {
+                    tracing::warn!(
+                        lock_key = %handle.key,
+                        error = %e,
+                        "分布式锁释放失败（将在 TTL 到期后自然失效）"
+                    );
+                }
             });
         }
     }
@@ -1098,107 +1098,40 @@ impl Drop for JobLockGuard {
     }
 }
 
-/// 释放分布式锁（CAS：仅当锁 value 匹配时才删除，避免误删他人的锁）（P0-6/30 改进）
-///
-/// 使用 Lua 脚本保证 GET + DEL 的原子性，避免以下竞态：
-/// 1. 客户端 A 持有锁（value=A），因 GC 暂停或任务超时导致锁过期
-/// 2. 客户端 B 获取锁（value=B）
-/// 3. 客户端 A 恢复后执行 DEL，误删了 B 的锁，导致 B 的任务重复执行
-///
-/// CAS 校验（fencing token）确保只有 value 匹配时才删除。
-async fn release_lock(redis: &mut ConnectionManager, lock_key: &str, lock_value: &str) {
-    // Lua 脚本：KEYS[1]=lock_key, ARGV[1]=expected lock_value
-    let del_script = r#"
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-    return redis.call("DEL", KEYS[1])
-else
-    return 0
-end
-"#;
-    let _: redis::Value = redis::Script::new(del_script)
-        .key(lock_key)
-        .arg(lock_value)
-        .invoke_async(redis)
-        .await
-        .unwrap_or(redis::Value::Nil);
-}
-
-/// 续期分布式锁（CAS：仅当锁 value 匹配时才延长 TTL）（R8-CONC-007）
-///
-/// 使用 Lua 脚本保证 GET + EXPIRE 的原子性，避免以下竞态：
-/// 1. 客户端 A 持有锁（value=A），但因 GC 暂停或网络延迟导致锁过期
-/// 2. 客户端 B 获取锁（value=B）
-/// 3. 客户端 A 恢复后调用 EXPIRE，错误地延长了 B 的锁，导致 B 的任务被误判仍持锁
-///
-/// CAS 校验（fencing token）确保只有 value 匹配时才续期。
-/// 返回 true 表示续期成功，false 表示锁已被其他实例持有（应中止当前任务）。
-async fn renew_lock(
-    redis: &mut ConnectionManager,
-    lock_key: &str,
-    lock_value: &str,
-    ttl_secs: u64,
-) -> bool {
-    // Lua 脚本：KEYS[1]=lock_key, ARGV[1]=expected lock_value, ARGV[2]=new TTL
-    let renew_script = r#"
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-    return redis.call("EXPIRE", KEYS[1], ARGV[2])
-else
-    return 0
-end
-"#;
-    let result: i64 = redis::Script::new(renew_script)
-        .key(lock_key)
-        .arg(lock_value)
-        .arg(ttl_secs)
-        .invoke_async(redis)
-        .await
-        .unwrap_or(0);
-    result == 1
-}
-
 /// 执行任务并写日志（统一执行逻辑，供定时触发和手动执行复用）
 ///
-/// 分布式锁：通过 Redis SETNX 实现，多实例部署时防止任务重复执行（P0-58）
+/// 分布式锁：通过 `store.lock_acquire`（SETNX + UUID fencing token）实现，
+/// 多实例部署时防止任务重复执行（P0-58）
 /// 并发控制：concurrent='1' 时通过原子 check-and-set 跳过重叠执行（P0-6/P0-30）
 /// 超时控制：60 秒
 /// 异常隔离：使用 ExecutingFlagGuard 确保即使 panic 标记也被清除
 async fn execute_with_logging(
     db: &DatabaseConnection,
-    redis: &mut ConnectionManager,
+    store: Arc<dyn crate::shared_store::SharedStore>,
     executing_jobs: &Arc<std::sync::Mutex<HashMap<i64, bool>>>,
     job: &SysJobModel,
 ) {
-    // 分布式锁：Redis SETNX，TTL 90 秒（REGRESS-008：原 30s < 任务 60s 超时，锁过期后可重复执行）
+    // 分布式锁：TTL 90 秒（REGRESS-008：原 30s < 任务 60s 超时，锁过期后可重复执行）
     // 多实例部署时，其他实例获取锁失败则跳过本次执行
-    // P0-6/30 改进：锁 value 使用随机 UUID 作为 fencing token，
-    // 释放时通过 Lua CAS 脚本校验，避免误删其他实例持有的锁
+    // P0-6/30 改进：fencing token（UUID）由 store 实现层生成并封装进 LockHandle，
+    // 释放/续期均走 CAS 校验，避免误删/误续其他实例持有的锁
     let lock_key = format!("lock:scheduler:{}", job.job_id);
-    let lock_value = uuid::Uuid::new_v4().to_string();
-    let lock_result: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
-        redis::cmd("SET")
-            .arg(&lock_key)
-            .arg(&lock_value)
-            .arg("NX")
-            .arg("EX")
-            .arg(LOCK_TTL_SECS)
-            .query_async(redis),
-    )
-    .await;
+    let lock_result = store.lock_acquire(&lock_key, LOCK_TTL_SECS).await;
 
-    // Redis 故障 fail-closed 策略（P0-R81-012）：
-    // - Redis 不可用时直接跳过本次执行，避免多实例部署下的任务重复执行
+    // 存储故障 fail-closed 策略（P0-R81-012）：
+    // - 存储不可用时直接跳过本次执行，避免多实例部署下的任务重复执行
     // - 之前采用降级模式（视为获取锁成功继续执行），多实例部署会导致任务重复执行
-    // - 现在 fail-closed：Redis 错误时 tracing::error! 记录并 return，跳过执行
-    // - 单实例部署下若有 Redis 依赖则需尽快恢复，否则任务不执行
+    // - 现在 fail-closed：错误时 tracing::error! 记录并 return，跳过执行
+    // - 单实例部署下若有存储依赖则需尽快恢复，否则任务不执行
     //
-    // M-6 Major 告警提升：Redis 持续故障会导致所有定时任务停止执行，需运维介入。
+    // M-6 Major 告警提升：存储持续故障会导致所有定时任务停止执行，需运维介入。
     // 原先使用 warn 级别，告警系统通常不监控 warn；改为 error 级别确保告警触发。
-    let lock_acquired = match lock_result {
+    let lock_handle = match lock_result {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(
                 "Redis 连接失败，跳过本次任务执行以避免多实例重复 (job_id={}, job_name={}, error={})。\
-                 注意：Redis 持续故障会导致所有定时任务停止执行，需运维介入恢复 Redis 服务",
+                 注意：共享态存储持续故障会导致所有定时任务停止执行，需运维介入恢复",
                 job.job_id,
                 job.job_name,
                 e
@@ -1207,10 +1140,10 @@ async fn execute_with_logging(
         }
     };
 
-    if lock_acquired.is_none() {
+    let Some(lock_handle) = lock_handle else {
         tracing::debug!("任务 {} 被其他实例持有分布式锁，跳过本次执行", job.job_name);
         return;
-    }
+    };
 
     let concurrent = job.concurrent.as_deref().unwrap_or("1");
     let enforce_concurrent = concurrent == "1";
@@ -1226,17 +1159,17 @@ async fn execute_with_logging(
             tracing::debug!("任务 {} 禁止并发，跳过本次执行", job.job_name);
             // 释放分布式锁（本实例并发跳过，允许其他实例或其他周期执行）
             // P0-6/30 改进：使用 CAS 释放，避免误删其他实例持有的锁
-            release_lock(redis, &lock_key, &lock_value).await;
+            let _ = store.lock_release(&lock_handle).await;
             return;
         }
     };
 
     let start = std::time::Instant::now();
 
-    // R8-CONC-007: 启动锁续期任务，任务执行过半时调用 Lua 脚本续期
+    // R8-CONC-007: 启动锁续期任务，任务执行过半时续期
     //
     // 续期间隔取 LOCK_RENEW_INTERVAL_SECS（= TASK_TIMEOUT_SECS / 2），确保任务执行过半时触发续期。
-    // 续期使用 CAS Lua 脚本（renew_lock），仅当锁 value 仍为本实例的 fencing token 时才延长 TTL，
+    // 续期使用 CAS（`store.lock_renew`），仅当锁仍为本实例的 fencing token 时才延长 TTL，
     // 避免误续期其他实例持有的锁。
     //
     // 续期任务在独立 tokio::spawn 中运行，与主任务并发：
@@ -1244,9 +1177,8 @@ async fn execute_with_logging(
     // - 续期失败（锁丢失）时仅 warn 告警，不中止主任务（无法安全回滚已开始的执行）
     //   锁丢失意味着另一实例可能已开始执行相同任务，需运维介入排查
     let renew_handle = {
-        let redis_clone = redis.clone();
-        let lock_key_clone = lock_key.clone();
-        let lock_value_clone = lock_value.clone();
+        let store = store.clone();
+        let lock_handle = lock_handle.clone();
         let job_name_clone = job.job_name.clone();
         let job_id = job.job_id;
         tokio::spawn(async move {
@@ -1257,15 +1189,12 @@ async fn execute_with_logging(
                 // 导致分布式锁无人续期而过期（参考 add_job/run_once 的 catch_unwind 写法）。
                 // 注意：catch_unwind 放在 loop 体内每次迭代捕获，而非包裹整个 loop，
                 // 这样 panic 后可主动 break 停止续期，避免吞掉 panic 继续空转。
-                let result = AssertUnwindSafe(async {
-                    let mut conn = redis_clone.clone();
-                    renew_lock(&mut conn, &lock_key_clone, &lock_value_clone, LOCK_TTL_SECS).await
-                })
-                .catch_unwind()
-                .await;
+                let result = AssertUnwindSafe(store.lock_renew(&lock_handle, LOCK_TTL_SECS))
+                    .catch_unwind()
+                    .await;
 
                 match result {
-                    Ok(true) => {
+                    Ok(Ok(true)) => {
                         tracing::trace!(
                             "任务 {} 的分布式锁续期成功 (job_id={})",
                             job_name_clone,
@@ -1274,7 +1203,9 @@ async fn execute_with_logging(
                         // 继续下一轮续期
                         tokio::time::sleep(Duration::from_secs(LOCK_RENEW_INTERVAL_SECS)).await;
                     }
-                    Ok(false) => {
+                    // 续期失败（false = 锁已被他人持有/过期；Err = 存储故障，与原
+                    // `unwrap_or(0) → false` 等价归入锁丢失处理）：仅告警并停止续期
+                    Ok(Ok(false)) | Ok(Err(_)) => {
                         tracing::warn!(
                             "任务 {} 的分布式锁续期失败，锁可能已被其他实例获取 (job_id={})。\
                              另一实例可能正在重复执行此任务，需运维介入排查",
@@ -1301,12 +1232,7 @@ async fn execute_with_logging(
 
     // P0-5：RAII 守卫接管续期任务句柄与锁释放——任何退出路径（含 panic/Drop）都会
     // abort 续期任务并释放分布式锁，杜绝"任务 panic → 续期任务无限续锁 → job 永久禁用"。
-    let mut lock_guard = JobLockGuard::new(
-        renew_handle,
-        redis.clone(),
-        lock_key.clone(),
-        lock_value.clone(),
-    );
+    let mut lock_guard = JobLockGuard::new(renew_handle, store.clone(), lock_handle.clone());
 
     // 执行任务（捕获 panic，避免 panic 跨 spawn 边界传播）
     // P0-5 加固：catch_unwind 包裹，任务函数 panic 转为业务失败而非中断主流程，
@@ -1523,9 +1449,8 @@ fn register_builtin_tasks(db: DatabaseConnection) {
 // - validate_cron / SchedulerError / ExecutingFlagGuard / JobLockGuard / register_builtin_tasks /
 //   execute_inner 均为纯逻辑，不依赖外部 DB/Redis，逐分支覆盖。
 // - 涉及分布式锁 / 任务日志写入的 execute_with_logging 与 JobScheduler 生命周期测试，
-//   通过容错连接本地 Redis（127.0.0.1:6379/15）实现：Redis 不可用时直接 return 跳过，
-//   避免 CI 无 Redis 时挂掉。测试统一使用 Redis DB 15，job_id 使用高位段（1001+ / 9000+），
-//   与集成测试使用的真实 job_id 1~3 及种子数据不冲突。
+//   通过 LocalStore（与测试同库的 SQL 承载）实现，不依赖外部 Redis；
+//   锁键使用 UUID 后缀避免跨测试运行残留。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1535,8 +1460,14 @@ mod tests {
     use crate::repository::sys_job::SysJobRepository;
     use crate::repository::sys_job_log::SysJobLogRepository;
     use crate::service::IpLocationService;
+    use crate::shared_store::LocalStore;
     use crate::utils::ip_location::IpLocator;
     use sea_orm::NotSet;
+
+    /// 唯一化锁键（避免跨测试运行残留未过期锁导致抢占失败）
+    fn unique_lock_key(base: &str) -> String {
+        format!("{base}-{}", uuid::Uuid::new_v4())
+    }
 
     /// 构造一个测试用 sys_job Model（concurrent='1'、misfire_policy='3'）
     fn job(id: i64, name: &str, cron: &str, invoke: &str) -> SysJobModel {
@@ -1559,20 +1490,6 @@ mod tests {
         }
     }
 
-    /// 容错连接本地 Redis（DB 15）：不可用返回 None（测试直接跳过）
-    async fn try_redis() -> Option<ConnectionManager> {
-        let client = redis::Client::open("redis://127.0.0.1:6379/15").ok()?;
-        match tokio::time::timeout(
-            Duration::from_secs(2),
-            redis::aio::ConnectionManager::new(client),
-        )
-        .await
-        {
-            Ok(Ok(c)) => Some(c),
-            _ => None,
-        }
-    }
-
     /// 加载配置（先注入合法 JWT 密钥，规避 validate_secrets 拒绝占位密钥）
     fn load_settings() -> Settings {
         unsafe {
@@ -1586,9 +1503,8 @@ mod tests {
         Settings::from_file(&path).expect("加载 config/config.toml 失败（请确认文件存在）")
     }
 
-    /// 构建完整 JobScheduler（容错 Redis；Redis 不可用返回 None）
+    /// 构建完整 JobScheduler（LocalStore 承载，与测试 DB 同库）
     async fn build_scheduler() -> Option<Arc<JobScheduler>> {
-        let redis = try_redis().await?;
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
@@ -1600,8 +1516,10 @@ mod tests {
         ));
         let ip_location_service =
             IpLocationService::new(db.clone(), settings.clone(), ip_locator.clone());
+        let store: Arc<dyn crate::shared_store::SharedStore> =
+            Arc::new(LocalStore::new(db.clone()));
         let scheduler = Arc::new(
-            JobScheduler::new(db.clone(), redis, ip_location_service, settings)
+            JobScheduler::new(db.clone(), store, ip_location_service, settings)
                 .await
                 .unwrap(),
         );
@@ -1737,96 +1655,66 @@ mod tests {
         assert_eq!(msg, "done-ok");
     }
 
-    // ---------- JobLockGuard（容错 Redis） ----------
+    // ---------- JobLockGuard（LocalStore） ----------
 
     #[tokio::test]
     async fn test_job_lock_guard_finish_releases_lock() {
-        let Some(mut redis) = try_redis().await else {
-            return;
-        };
-        let key = "lock:scheduler:unit-lockguard-finish";
-        let value = "token-abc";
-        // 普通 SET 预置锁（覆盖历史残留，保证前置条件确定）
-        let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("SET")
-                .arg(key)
-                .arg(value)
-                .arg("EX")
-                .arg(60)
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
-        let handle = tokio::spawn(async {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db));
+        let key = unique_lock_key("lock:scheduler:unit-lockguard-finish");
+        let handle = store.lock_acquire(&key, 60).await.unwrap().unwrap();
+        let renew = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
-        let mut guard =
-            JobLockGuard::new(handle, redis.clone(), key.to_string(), value.to_string());
+        let mut guard = JobLockGuard::new(renew, store.clone(), handle);
         guard.finish().await;
         drop(guard);
-        let v: Option<String> =
-            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(&mut redis))
-                .await
-                .unwrap();
-        assert!(v.is_none(), "finish() 应通过 CAS 释放锁");
+        // finish() 已 CAS 释放锁：重新抢占应成功
+        assert!(
+            store.lock_acquire(&key, 60).await.unwrap().is_some(),
+            "finish() 应通过 CAS 释放锁"
+        );
     }
 
     #[tokio::test]
     async fn test_job_lock_guard_drop_releases_lock_async() {
-        let Some(mut redis) = try_redis().await else {
-            return;
-        };
-        let key = "lock:scheduler:unit-lockguard-drop";
-        let value = "token-def";
-        let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("SET")
-                .arg(key)
-                .arg(value)
-                .arg("EX")
-                .arg(60)
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
-        let handle = tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-        });
-        let guard = JobLockGuard::new(handle, redis.clone(), key.to_string(), value.to_string());
-        drop(guard); // Drop 兜底：abort 续期 + spawn 异步释放锁
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let v: Option<String> =
-            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(&mut redis))
-                .await
-                .unwrap();
-        assert!(v.is_none(), "Drop 应触发异步释放锁");
-    }
-
-    // ---------- execute_with_logging（容错 Redis + 临时 SQLite） ----------
-
-    #[tokio::test]
-    async fn test_execute_with_logging_success_writes_log() {
-        let Some(mut redis) = try_redis().await else {
-            return;
-        };
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
+        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db));
+        let key = unique_lock_key("lock:scheduler:unit-lockguard-drop");
+        let handle = store.lock_acquire(&key, 60).await.unwrap().unwrap();
+        let renew = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        let guard = JobLockGuard::new(renew, store.clone(), handle);
+        drop(guard); // Drop 兜底：abort 续期 + spawn 异步释放锁
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Drop 触发的异步释放已完成：重新抢占应成功
+        assert!(
+            store.lock_acquire(&key, 60).await.unwrap().is_some(),
+            "Drop 应触发异步释放锁"
+        );
+    }
+
+    // ---------- execute_with_logging（LocalStore + 临时 SQLite） ----------
+
+    #[tokio::test]
+    async fn test_execute_with_logging_success_writes_log() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let target = "unitTest.scheduler.success";
         registry::register_task(
             target,
             Arc::new(|| Box::pin(async { Ok("all-good".to_string()) })),
         );
-        // 清理历史残留锁，避免跨测试运行遗留的锁导致本次跳过
-        let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL")
-                .arg("lock:scheduler:9001")
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
         let job = job(9001, "unit-success", "0 0 3 * * *", target);
-        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        execute_with_logging(&db, store, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
         let logs = log_repo
             .find_by_job_name("unit-success", None)
@@ -1846,12 +1734,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_logging_business_failure_writes_error_log() {
-        let Some(mut redis) = try_redis().await else {
-            return;
-        };
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
+        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let target = "unitTest.scheduler.fail";
         registry::register_task(
@@ -1862,15 +1748,8 @@ mod tests {
                 })
             }),
         );
-        let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL")
-                .arg("lock:scheduler:9002")
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
         let job = job(9002, "unit-fail", "0 0 3 * * *", target);
-        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        execute_with_logging(&db, store, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
         let logs = log_repo.find_by_job_name("unit-fail", None).await.unwrap();
         assert_eq!(logs.len(), 1);
@@ -1880,12 +1759,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_logging_panic_writes_error_log() {
-        let Some(mut redis) = try_redis().await else {
-            return;
-        };
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
+        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let target = "unitTest.scheduler.panic";
         let f: registry::TaskFn = Arc::new(|| {
@@ -1894,15 +1771,8 @@ mod tests {
             })
         });
         registry::register_task(target, f);
-        let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL")
-                .arg("lock:scheduler:9003")
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
         let job = job(9003, "unit-panic", "0 0 3 * * *", target);
-        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        execute_with_logging(&db, store, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
         let logs = log_repo.find_by_job_name("unit-panic", None).await.unwrap();
         assert_eq!(logs.len(), 1);
@@ -1911,33 +1781,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_logging_skips_when_lock_held() {
-        let Some(mut redis) = try_redis().await else {
-            return;
-        };
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
+        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        // 预置其他实例持有的锁 → execute_with_logging 的 SETNX 应失败并跳过执行
-        let lock_key = format!("lock:scheduler:{}", 9004);
-        let _: Option<String> = crate::utils::redis::cmd_timeout(
-            redis::cmd("SET")
-                .arg(&lock_key)
-                .arg("foreign-token")
-                .arg("NX")
-                .arg("EX")
-                .arg(90)
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
+        // 预置其他实例持有的锁 → execute_with_logging 的抢占应失败并跳过执行。
+        // 锁键必须与实现严格一致：`lock:scheduler:{job_id}`（UUID 只是 LockHandle 内的
+        // fencing token，键名不带 UUID——此前 unique_lock_key 预占错了键，真锁照常获取）。
+        // migrated_db 每用例独立建库，无跨用例残留锁，无需 UUID 化键名。
+        let lock_key = "lock:scheduler:9004".to_string();
+        let _foreign = store
+            .lock_acquire(&lock_key, 90)
+            .await
+            .unwrap()
+            .expect("预置外部锁应成功");
         let job = job(
             9004,
             "unit-skiplock",
             "0 0 3 * * *",
             "unitTest.scheduler.never",
         );
-        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        execute_with_logging(&db, store, &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
         let logs = log_repo
             .find_by_job_name("unit-skiplock", None)
@@ -1948,22 +1813,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_logging_skips_concurrent_overlap() {
-        let Some(mut redis) = try_redis().await else {
-            return;
-        };
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
+        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let job_id = 9005i64;
-        // 清理历史残留锁，保证本次能获取锁以走到并发检查分支
-        let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL")
-                .arg(format!("lock:scheduler:{}", job_id))
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
         executing_jobs.lock().unwrap().insert(job_id, true); // 模拟已有任务在执行
         let job = job(
             job_id,
@@ -1971,24 +1826,22 @@ mod tests {
             "0 0 3 * * *",
             "unitTest.scheduler.never",
         );
-        execute_with_logging(&db, &mut redis, &executing_jobs, &job).await;
+        execute_with_logging(&db, store.clone(), &executing_jobs, &job).await;
         let log_repo = SysJobLogRepository::new(db.clone());
         let logs = log_repo
             .find_by_job_name("unit-skipconcurrent", None)
             .await
             .unwrap();
         assert!(logs.is_empty(), "并发禁止时应跳过执行，不写日志");
-        // 并发跳过会释放已获取的分布式锁
+        // 并发跳过会释放已获取的分布式锁：重新抢占应成功
         let lock_key = format!("lock:scheduler:{}", job_id);
-        let v: Option<String> = crate::utils::redis::cmd_timeout(
-            redis::cmd("GET").arg(&lock_key).query_async(&mut redis),
-        )
-        .await
-        .unwrap();
-        assert!(v.is_none(), "并发跳过时应释放已获取的分布式锁");
+        assert!(
+            store.lock_acquire(&lock_key, 90).await.unwrap().is_some(),
+            "并发跳过时应释放已获取的分布式锁"
+        );
     }
 
-    // ---------- JobScheduler 生命周期（容错 Redis） ----------
+    // ---------- JobScheduler 生命周期（LocalStore） ----------
 
     #[tokio::test]
     async fn test_scheduler_add_and_remove_job() {
@@ -2063,15 +1916,6 @@ mod tests {
             target,
             Arc::new(|| Box::pin(async { Ok("once-done".to_string()) })),
         );
-        // 清理历史残留锁，避免 run_once 内部获取锁失败跳过执行
-        let mut redis = scheduler.redis.clone();
-        let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL")
-                .arg("lock:scheduler:1005")
-                .query_async(&mut redis),
-        )
-        .await
-        .unwrap();
         let j = job(1005, "unit-once", "0 0 3 * * *", target);
         scheduler.run_once(&j).await.unwrap();
         // run_once 内部 spawn 执行，等待其完成并写入日志

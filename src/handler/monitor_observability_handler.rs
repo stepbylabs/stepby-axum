@@ -7,7 +7,7 @@
 //! - GET    /monitor/error-log/list    错误日志列表（按 module/level 过滤 + 分页）
 //! - GET    /monitor/error-log/stats   错误聚合统计（by-module / by-level）
 //! - DELETE /monitor/error-log/clear   清空错误缓冲
-//! - GET    /monitor/redis/stats       Redis 运行指标（INFO 精简版，供 Prometheus/面板）
+//! - GET    /monitor/redis/stats       共享态存储运行指标（info_summary 精简版，供 Prometheus/面板）
 //!
 //! 数据全部读取进程内可观测性全局实例（`state.observability`），
 //! 由监控中间件（observability::monitoring_middleware）与日志层（ErrorCaptureLayer）写入。
@@ -203,27 +203,46 @@ pub struct RedisStats {
 }
 
 /// GET /monitor/redis/stats
-/// Redis 运行指标（真实执行 INFO 命令解析，脱敏——不含配置/密码段）。
+/// 共享态存储运行指标（真实读取 `store.info_summary()`，脱敏——不含配置/密码段）。
+///
+/// 展示层档位适配（非语义分叉）：redis 档 info_summary 返回 INFO 原文 → 按既有字段解析；
+/// local 档返回计数文本（非 INFO 格式）→ 仅填充 `db_size`（条目数），其余字段留空。
 #[utoipa::path(
     get,
     path = "/monitor/redis/stats",
     responses(
         (status = 200, description = "查询成功", body = AjaxResult<RedisStats>),
-        (status = 500, description = "Redis INFO 执行失败"),
+        (status = 500, description = "共享态存储 info_summary 读取失败"),
     ),
     tag = "monitor-observability"
 )]
 pub async fn redis_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<RedisStats>, AppError> {
-    let mut conn = state.redis.clone();
-    let info_text: String =
-        crate::utils::redis::cmd_timeout(redis::cmd("INFO").query_async(&mut conn))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Redis INFO 查询失败");
-                AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
-            })?;
+    let info_text = state
+        .store
+        .info_summary()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "共享态存储 info_summary 查询失败");
+            AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
+        })?;
+
+    // local 档：计数文本按 `key=value` 解析，仅 db_size 有真实对应（条目数）
+    if state.store.kind() != "redis" {
+        let mut map = std::collections::HashMap::new();
+        for pair in info_text.split_whitespace() {
+            if let Some((k, v)) = pair.split_once('=') {
+                map.insert(k.to_string(), v.to_string());
+            }
+        }
+        return Ok(AjaxResult::success(RedisStats {
+            db_size: map.get("kv_entries").cloned().unwrap_or_default(),
+            ..RedisStats::default()
+        }));
+    }
+
+    // redis 档：INFO 原文解析（现状等价）
     let mut map = std::collections::HashMap::new();
     for line in info_text.lines() {
         let line = line.trim();

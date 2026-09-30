@@ -66,6 +66,9 @@ pub mod embedded_assets;
 // ========== 文件存储抽象（F1：本地 / MinIO-S3）==========
 pub mod storage;
 
+// ========== 共享态存储抽象（SharedStore：[cache].mode = local | redis 双档）==========
+pub mod shared_store;
+
 // ========== 集成测试（login → getInfo 冒烟）==========
 // 仅在 `cargo test` 下编译；复用 crate 内部 pub 项构造隔离的 AppState。
 #[cfg(test)]

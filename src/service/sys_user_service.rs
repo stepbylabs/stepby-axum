@@ -9,14 +9,13 @@
 
 use futures::future::FutureExt;
 use garde::Validate;
-use redis::aio::ConnectionManager;
 use regex::Regex;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, Statement,
     TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
 
@@ -38,6 +37,7 @@ use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_dept::SysUserDeptRepository;
 use crate::repository::sys_user_post::SysUserPostRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
+use crate::shared_store::SharedStore;
 use crate::utils::password::{
     encrypt_password, validate_password_complexity, verify_password_with_upgrade_hint,
 };
@@ -523,7 +523,7 @@ const PERM_CACHE_PREFIX: &str = "perm:user:";
 /// - dept_repo: sys_dept 表查询（部门树）
 /// - post_repo: sys_post 表查询（岗位下拉）
 /// - role_repo: sys_role 表查询（角色下拉）
-/// - redis: Redis 连接管理器，用于权限缓存失效
+/// - store: 共享态存储（SharedStore），用于权限缓存失效
 /// - 事务通过 user_repo.base().db() 获取连接
 #[derive(Clone)]
 pub struct SysUserService {
@@ -537,12 +537,12 @@ pub struct SysUserService {
     role_dept_repo: SysRoleDeptRepository,
     /// 租户套餐/配额服务（多租户 §27.1 决策 10：账号配额校验）
     tenant_service: crate::service::SysTenantService,
-    /// Redis 连接管理器（权限缓存失效）
-    redis: ConnectionManager,
+    /// 共享态存储（权限缓存失效）
+    store: Arc<dyn SharedStore>,
 }
 
 impl SysUserService {
-    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>) -> Self {
         Self {
             user_repo: SysUserRepository::new(db.clone()),
             user_role_repo: SysUserRoleRepository::new(db.clone()),
@@ -551,9 +551,9 @@ impl SysUserService {
             dept_repo: SysDeptRepository::new(db.clone()),
             post_repo: SysPostRepository::new(db.clone()),
             role_repo: SysRoleRepository::new(db.clone()),
-            tenant_service: crate::service::SysTenantService::new(db.clone(), redis.clone()),
+            tenant_service: crate::service::SysTenantService::new(db.clone(), store.clone()),
             role_dept_repo: SysRoleDeptRepository::new(db),
-            redis,
+            store,
         }
     }
 
@@ -579,12 +579,7 @@ impl SysUserService {
     /// 失效指定用户的权限缓存（best-effort，失败仅记日志不阻断业务）
     pub async fn invalidate_perm_cache(&self, user_id: i64) {
         let key = format!("{}{}", PERM_CACHE_PREFIX, user_id);
-        let mut conn = self.redis.clone();
-        if let Err(e) = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn),
-        )
-        .await
-        {
+        if let Err(e) = self.store.del(std::slice::from_ref(&key)).await {
             tracing::warn!("失效权限缓存 {} 失败: {}", key, e);
         }
     }

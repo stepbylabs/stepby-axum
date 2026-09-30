@@ -1717,7 +1717,9 @@ async fn test_sso_v4_legacy_at_rewrite() {
         .await
         .expect("写入活跃绑定失败");
 
-    crate::initialize::revoke_legacy_sso_at_tokens(&mut redis).await;
+    // SharedStore 迁移：转写入口改为经 store（RedisStore 档落同一隔离 DB），
+    // 下方裸 redis::cmd 断言（GET blacklist 等）语义不变
+    crate::initialize::revoke_legacy_sso_at_tokens(&ctx.state.store).await;
 
     // 历史绑定被删 + blacklist 命中（业务路由过渡阻断/黑名单双路径立即拒绝）
     let bound: Option<String> = redis::cmd("GET")
@@ -1764,7 +1766,7 @@ async fn test_sso_v4_legacy_at_rewrite() {
         .unwrap_or(0);
 
     // 幂等：重复调用不报错（标记已置），且不复活任何键
-    crate::initialize::revoke_legacy_sso_at_tokens(&mut redis).await;
+    crate::initialize::revoke_legacy_sso_at_tokens(&ctx.state.store).await;
     let blacklisted2: Option<String> = redis::cmd("GET")
         .arg(format!("blacklist:{hash}"))
         .query_async(&mut redis)

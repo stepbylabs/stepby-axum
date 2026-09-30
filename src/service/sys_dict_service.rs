@@ -9,7 +9,6 @@
 
 use futures::future::FutureExt;
 use garde::Validate;
-use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -27,6 +26,7 @@ use crate::entity::sys_dict_type::{
 };
 use crate::repository::sys_dict_data::SysDictDataRepository;
 use crate::repository::sys_dict_type::SysDictTypeRepository;
+use crate::shared_store::SharedStore;
 
 /// 字典缓存 key 前缀（格式：dict:{dict_type}）
 const DICT_CACHE_PREFIX: &str = "dict:";
@@ -193,13 +193,13 @@ pub struct DictDataEditDto {
 /// 数据访问通过 Repository 层委托：
 /// - dict_type_repo: sys_dict_type 表 CRUD
 /// - dict_data_repo: sys_dict_data 表 CRUD
-/// - redis: Redis 连接管理器，用于字典数据缓存（cache-aside 模式）
+/// - store: 共享态存储（SharedStore），用于字典数据缓存（cache-aside 模式）
 ///
 /// R9-FLW-009：缓存穿透防护（空值缓存）+ 击穿防护（singleflight）
 pub struct SysDictService {
     dict_type_repo: SysDictTypeRepository,
     dict_data_repo: SysDictDataRepository,
-    redis: ConnectionManager,
+    store: Arc<dyn SharedStore>,
     /// singleflight 锁表：同 dict_type 的并发查询只允许一个查 DB，其他等待复用结果
     ///
     /// 防止热点 key 失效瞬间 N 个请求同时打 DB（缓存击穿）。
@@ -208,11 +208,11 @@ pub struct SysDictService {
 }
 
 impl SysDictService {
-    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>) -> Self {
         Self {
             dict_type_repo: SysDictTypeRepository::new(db.clone()),
             dict_data_repo: SysDictDataRepository::new(db),
-            redis,
+            store,
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -234,42 +234,30 @@ impl SysDictService {
     /// 失效指定层 + dict_type 的缓存（best-effort，失败仅记日志不阻断业务）
     async fn invalidate_cache(&self, tid: i64, dict_type: &str) {
         let key = Self::cache_key(tid, dict_type);
-        let mut conn = self.redis.clone();
-        if let Err(e) = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn),
-        )
-        .await
-        {
+        if let Err(e) = self.store.del(std::slice::from_ref(&key)).await {
             tracing::warn!("失效字典缓存 {} 失败: {}", key, e);
         }
     }
 
-    /// 失效指定层多个 dict_type 的缓存（P2-6：改 Redis pipeline 批量 DEL，一次往返）
+    /// 失效指定层多个 dict_type 的缓存（P2-6：批量 DEL，一次往返）
     ///
+    /// 原 Redis pipeline 语义保持：非事务，允许部分成功
+    /// （local 档逐键 DELETE 天然部分成功；redis 档单条 DEL 多键等价）。
     /// 保持 best-effort 语义：失败仅 warn 不阻断业务。
     async fn invalidate_caches(&self, tid: i64, dict_types: &[String]) {
         if dict_types.is_empty() {
             return;
         }
-        let mut conn = self.redis.clone();
-        // 构造 pipeline：每个 DEL 独立入队，一次发送
-        let mut pipe = redis::pipe();
-        pipe.atomic(); // 非事务，允许部分成功
-        for dt in dict_types {
-            pipe.cmd("DEL").arg(Self::cache_key(tid, dt));
-        }
-        if let Err(e) =
-            crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
-        {
+        let keys: Vec<String> = dict_types
+            .iter()
+            .map(|dt| Self::cache_key(tid, dt))
+            .collect();
+        if let Err(e) = self.store.del(&keys).await {
             tracing::warn!(
                 "批量失效字典缓存失败（{} 个 dict_type）: {}",
                 dict_types.len(),
                 e
             );
-            // 回退到逐个 DEL，保证尽可能多的缓存被清除
-            for dt in dict_types {
-                self.invalidate_cache(tid, dt).await;
-            }
         }
     }
 
@@ -716,16 +704,12 @@ impl SysDictService {
 
     /// 读单层字典数据缓存：
     /// - `Some(Some(rows))` = 命中数据；`Some(None)` = 命中空值 sentinel（该层无数据）；
-    /// - `None` = 未命中 / Redis 异常 / 反序列化失败（fail-open 降级 DB）。
+    /// - `None` = 未命中 / 共享存储异常 / 反序列化失败（fail-open 降级 DB）。
     async fn read_dict_cache_layer(
-        conn: &mut ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         key: &str,
     ) -> Option<Option<Vec<SysDictDataModel>>> {
-        let cached: Option<String> =
-            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(conn))
-                .await
-                .ok()
-                .flatten();
+        let cached: Option<String> = store.get(key).await.ok().flatten();
         match cached {
             None => None,
             Some(json_str) if json_str == DICT_NULL_MARKER => Some(None),
@@ -752,10 +736,9 @@ impl SysDictService {
         dict_type: &str,
     ) -> Result<Option<Vec<SysDictDataModel>>, ServiceError> {
         let key = Self::cache_key(layer_tid, dict_type);
-        let mut conn = self.redis.clone();
 
         // 1. 读缓存
-        match Self::read_dict_cache_layer(&mut conn, &key).await {
+        match Self::read_dict_cache_layer(&self.store, &key).await {
             Some(Some(rows)) => return Ok(Some(rows)),
             Some(None) => return Ok(None),
             None => {}
@@ -773,7 +756,7 @@ impl SysDictService {
             let _guard = inflight_lock.lock().await;
 
             // double-check：持有锁后再次读缓存，可能已被前一个持锁请求填充
-            match Self::read_dict_cache_layer(&mut conn, &key).await {
+            match Self::read_dict_cache_layer(&self.store, &key).await {
                 Some(Some(rows)) => return Ok(Some(rows)),
                 Some(None) => return Ok(None),
                 None => {}
@@ -797,15 +780,7 @@ impl SysDictService {
                     }
                 }
             };
-            if let Err(e) = crate::utils::redis::cmd_timeout(
-                redis::cmd("SETEX")
-                    .arg(&key)
-                    .arg(ttl)
-                    .arg(cache_value)
-                    .query_async::<()>(&mut conn),
-            )
-            .await
-            {
+            if let Err(e) = self.store.set_ex(&key, &cache_value, ttl as u64).await {
                 tracing::warn!("写入字典缓存 {} 失败: {}", key, e);
             }
 
@@ -1063,38 +1038,23 @@ impl SysDictService {
     ///
     /// 使用 SCAN 遍历所有 dict:* 键并批量删除，避免 KEYS 命令阻塞 Redis。
     pub async fn refresh_all_dict_cache(&self) -> Result<(), ServiceError> {
-        let mut conn = self.redis.clone();
-        let mut keys_to_delete: Vec<String> = Vec::new();
-        let mut cursor: u64 = 0;
-        loop {
-            let (next_cursor, batch): (u64, Vec<String>) = crate::utils::redis::cmd_timeout(
-                redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(format!("{}*", DICT_CACHE_PREFIX))
-                    .arg("COUNT")
-                    .arg(200i64)
-                    .query_async(&mut conn),
-            )
-            .await?;
-            keys_to_delete.extend(batch);
-            if next_cursor == 0 {
-                break;
-            }
-            cursor = next_cursor;
-        }
+        // 全量扫描（原 cursor 循环至游标归零的语义 = scan_keys_all ⇒ scan(pattern, None)）
+        let keys_to_delete = self
+            .store
+            .scan(&format!("{}*", DICT_CACHE_PREFIX), None)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("扫描字典缓存键失败: {}", e)))?;
 
         if keys_to_delete.is_empty() {
             return Ok(());
         }
 
         // 批量删除所有 dict:* 键
-        let count: i64 = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL")
-                .arg(&keys_to_delete)
-                .query_async(&mut conn),
-        )
-        .await?;
+        let count = self
+            .store
+            .del(&keys_to_delete)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("删除字典缓存键失败: {}", e)))?;
         // R5-TRACE-17：字典缓存刷新属**高频常规**操作（每次字典变更都会触发），
         // 原 info 级会在多实例/批量导入场景刷屏；降为 debug，保留排障能力而不淹没告警。
         tracing::debug!("刷新字典缓存：删除 {} 个键", count);

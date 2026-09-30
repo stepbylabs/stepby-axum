@@ -41,6 +41,8 @@ struct WsEnv {
     /// admin 的用户 ID（种子数据固定为 1）
     user_id: i64,
     state: Arc<AppState>,
+    /// 测试断言专用的原生 Redis 连接（redis 档；裸 redis::cmd 断言用）
+    redis: redis::aio::ConnectionManager,
     _slot: RedisSlot,
 }
 
@@ -63,6 +65,11 @@ async fn start_server(state: Arc<AppState>) -> SocketAddr {
 /// 构建隔离状态 + 登录 admin + 启动真实服务。
 async fn setup() -> WsEnv {
     let (state, slot) = build_isolated_state().await;
+    // redis 档测试：从 AppState 取回原生 Redis 连接，供黑名单/连接计数断言使用
+    let redis = state
+        .redis_conn
+        .clone()
+        .expect("集成测试固定走 redis 档，redis_conn 必为 Some");
     let app = crate::router::build_app(state.clone());
     let peer_ip = next_peer_ip();
     let token = login(&app, peer_ip, "admin", "admin123").await;
@@ -72,6 +79,7 @@ async fn setup() -> WsEnv {
         token,
         user_id: 1,
         state,
+        redis,
         _slot: slot,
     }
 }
@@ -210,7 +218,7 @@ async fn ws_reject_unauthenticated_and_blacklisted() {
     let hash = crate::utils::crypto::token_hash(&env.token);
     let key = format!("blacklist:{hash}");
     {
-        let mut conn = env.state.redis.clone();
+        let mut conn = env.redis.clone();
         redis::cmd("SET")
             .arg(&key)
             .arg("1")
@@ -222,7 +230,7 @@ async fn ws_reject_unauthenticated_and_blacklisted() {
     assert_eq!(status, 401, "黑名单 token 应被拒绝");
     // 清理黑名单，避免影响其它并行测试（此测试独占 Redis DB，其实不必要，但保持整洁）
     {
-        let mut conn = env.state.redis.clone();
+        let mut conn = env.redis.clone();
         let _: Option<()> = redis::cmd("DEL")
             .arg(&key)
             .query_async(&mut conn)
@@ -246,7 +254,7 @@ async fn ws_connection_limit_enforced_and_reset_on_close() {
 
     // 确认 Redis 计数为 20
     let count: i64 = {
-        let mut conn = env.state.redis.clone();
+        let mut conn = env.redis.clone();
         redis::cmd("GET")
             .arg(format!("ws_conn:{}", env.user_id))
             .query_async::<Option<i64>>(&mut conn)
@@ -264,7 +272,7 @@ async fn ws_connection_limit_enforced_and_reset_on_close() {
     drop(conns);
     sleep(Duration::from_millis(800)).await; // 等服务端 handle_ws 退出并 DECR
     {
-        let mut conn = env.state.redis.clone();
+        let mut conn = env.redis.clone();
         let remaining: i64 = redis::cmd("GET")
             .arg(format!("ws_conn:{}", env.user_id))
             .query_async::<Option<i64>>(&mut conn)

@@ -113,11 +113,10 @@ pub async fn captcha(
         peer_addr.ip(),
         &state.config.server.trusted_proxies,
     );
-    let mut redis = state.redis.clone();
     // 多租户 Phase 3：透传 host 解析出的租户上下文（匿名路径无登录态）
     let vo: CaptchaVo = state
         .auth_service
-        .generate_captcha(&mut redis, &ip, host_tenant.tid())
+        .generate_captcha(&state.store, &ip, host_tenant.tid())
         .await?;
     Ok(CaptchaResult {
         code: 200,
@@ -161,7 +160,6 @@ pub async fn login(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let mut redis = state.redis.clone();
     let username = dto.username.clone();
     let vo = state
         .auth_service
@@ -169,7 +167,7 @@ pub async fn login(
             dto,
             &login_ip,
             user_agent,
-            &mut redis,
+            &state.store,
             &state.config.jwt,
             &state.ip_locator,
             host_tenant.tid(),
@@ -250,11 +248,10 @@ pub async fn register(
 
     // 执行注册，捕获结果用于审计日志（成功/失败均记录）
     let username = dto.username.clone();
-    let mut redis = state.redis.clone();
     // 多租户 Phase 3：透传 host 解析出的租户上下文（匿名路径无登录态）
     let result = state
         .auth_service
-        .register(dto, &ip, &mut redis, host_tenant.tid())
+        .register(dto, &ip, &state.store, host_tenant.tid())
         .await;
 
     let cost_time = start.elapsed().as_millis() as i64;
@@ -348,10 +345,9 @@ pub async fn logout(
         .strip_prefix("Bearer ")
         .ok_or_else(|| AppError::unauthorized(&crate::tr!("error.auth.token_invalid")))?;
 
-    let mut redis = state.redis.clone();
     state
         .auth_service
-        .logout(token, &mut redis, &state.config.jwt)
+        .logout(token, &state.store, &state.config.jwt)
         .await?;
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.logout")))

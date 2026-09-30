@@ -1,7 +1,7 @@
 //! TOTP 多因子认证 Handler
 //!
 //! 设计要点：
-//! - TOTP secret 存储在 Redis（key: totp:enabled:{user_id}），加密方式：AES-256-GCM
+//! - TOTP secret 存储在共享态存储（key: totp:enabled:{user_id}），加密方式：AES-256-GCM
 //! - 使用 CONFIG_ENC_KEY 作为主密钥，通过 crate::utils::crypto::encrypt_config_value 加密
 //! - 集成 totp-rs crate 生成和验证 TOTP 6 位代码
 //! - 流程：setup（生成 secret + QR）→ verify（验证 code 启用）→ disable（关闭）
@@ -13,7 +13,7 @@ use axum::extract::State;
 use base64::Engine;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
-use totp_rs::{Builder, Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret};
 use utoipa::ToSchema;
 
 use crate::common::{AjaxResult, AppError};
@@ -23,20 +23,19 @@ use crate::state::AppState;
 const TOTP_ISSUER: &str = "Stepby";
 
 /// pending secret 缓存 TTL（秒，10 分钟）：setup 后需在有效期内完成 verify
-const TOTP_PENDING_TTL_SECS: i64 = 600;
+const TOTP_PENDING_TTL_SECS: u64 = 600;
 /// verify / disable 验证码失败次数上限（10 分钟窗口，防暴力枚举）
 const MAX_TOTP_VERIFY_FAIL: i64 = 5;
 /// 失败计数 TTL（秒，10 分钟）
-const TOTP_FAIL_TTL_SECS: i64 = 600;
+const TOTP_FAIL_TTL_SECS: u64 = 600;
+/// enabled 键写入 TTL（秒，10 年）
+///
+/// 原实现为无 TTL 永久键（SET）；trait 仅提供 `set_ex`（必带 TTL），以远超业务
+/// 生命周期（MFA 绑定的人工更换周期）的超长 TTL 等价承载，disable 时主动删除。
+const TOTP_ENABLED_TTL_SECS: u64 = 10 * 365 * 24 * 3600;
 
-/// 原子化失败计数脚本（INCR + EXPIRE，防计数永不过期）
-const TOTP_FAIL_SCRIPT: &str = r#"
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return current
-"#;
+// 原子化失败计数脚本（原 TOTP_FAIL_SCRIPT：INCR + 首次 EXPIRE，防计数永不过期）
+// 已收敛为 `store.incr_with_ttl(key, ttl)`（与原脚本语义逐字等价，实现封入 shared_store）。
 
 // ==================== DTO ====================
 
@@ -124,12 +123,15 @@ pub async fn setup(
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     // 生成 otpauth URL（issuer/account_name 已在 Builder 绑定）
-    let otpauth_url = totp.get_url();
+    // totp-rs 6：to_url() 返回 Result（get_url 的非 Result 旧签名已废弃）
+    let otpauth_url = totp
+        .to_url()
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     // 生成 QR 码（PNG bytes → base64 Data URL）
     // 直接复用 totp-rs 提供的 get_qr_png()，避免直接依赖 qrcodegen_image / image
     let png_bytes = totp
-        .get_qr_png()
+        .to_qr_png()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.qr_gen_failed")))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
     let qr_code = format!("data:image/png;base64,{}", b64);
@@ -148,16 +150,11 @@ pub async fn setup(
     let encrypted_secret = crate::utils::crypto::encrypt_config_value(&secret_str, master_key)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.encrypt_failed")))?;
     let pending_key = format!("totp:pending:{}", user_id);
-    let mut conn = state.redis.clone();
-    crate::utils::redis::cmd_timeout(
-        redis::cmd("SETEX")
-            .arg(&pending_key)
-            .arg(TOTP_PENDING_TTL_SECS)
-            .arg(&encrypted_secret)
-            .query_async::<String>(&mut conn),
-    )
-    .await
-    .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_write_failed")))?;
+    state
+        .store
+        .set_ex(&pending_key, &encrypted_secret, TOTP_PENDING_TTL_SECS)
+        .await
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_write_failed")))?;
 
     Ok(AjaxResult::success(TotpSetupResponse {
         secret: secret_str,
@@ -198,18 +195,17 @@ pub async fn verify(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
-    let mut conn = state.redis.clone();
-
     // 1. 失败限流检查（防暴力枚举）
     let fail_key = format!("totp:verify_fail:{}", user_id);
-    let fail_count: Option<i64> = crate::utils::redis::cmd_timeout(
-        redis::cmd("GET").arg(&fail_key).query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
+    let fail_count = state
+        .store
+        .get(&fail_key)
+        .await
+        .map_err(|e| {
             tracing::error!(error = %e, user_id = user_id, "TOTP verify 失败计数查询失败（fail-closed）");
             AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-        })?;
+        })?
+        .and_then(|v| v.parse::<i64>().ok());
     if let Some(count) = fail_count
         && count >= MAX_TOTP_VERIFY_FAIL
     {
@@ -219,17 +215,17 @@ pub async fn verify(
     }
 
     // 2. 已启用检查：已启用用户必须走 disable 后再重新绑定，防止 MFA 被接管
+    //    （原 EXISTS → get().is_some()，共享态存储均为 string KV，语义等价）
     let enabled_key = format!("totp:enabled:{}", user_id);
-    let enabled: bool = crate::utils::redis::cmd_timeout(
-        redis::cmd("EXISTS")
-            .arg(&enabled_key)
-            .query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, user_id = user_id, "TOTP enabled 查询失败（fail-closed）");
-        AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-    })?;
+    let enabled = state
+        .store
+        .get(&enabled_key)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, user_id = user_id, "TOTP enabled 查询失败（fail-closed）");
+            AppError::new(503, crate::tr!("error.totp.status_check_failed"))
+        })?
+        .is_some();
     if enabled {
         return Err(AppError::bad_request(&crate::tr!(
             "error.totp.already_enabled"
@@ -238,14 +234,14 @@ pub async fn verify(
 
     // 3. 读取 pending secret（setup 时服务端生成并加密缓存）
     let pending_key = format!("totp:pending:{}", user_id);
-    let encrypted: Option<String> = crate::utils::redis::cmd_timeout(
-        redis::cmd("GET").arg(&pending_key).query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, user_id = user_id, "TOTP pending 查询失败（fail-closed）");
-        AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-    })?;
+    let encrypted = state
+        .store
+        .get(&pending_key)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, user_id = user_id, "TOTP pending 查询失败（fail-closed）");
+            AppError::new(503, crate::tr!("error.totp.status_check_failed"))
+        })?;
     let encrypted = encrypted
         .ok_or_else(|| AppError::bad_request(&crate::tr!("error.totp.pending_expired")))?;
 
@@ -274,11 +270,10 @@ pub async fn verify(
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     if totp.check_current(&req.code).is_none() {
-        // 失败计数
-        let _: i64 = redis::Script::new(TOTP_FAIL_SCRIPT)
-            .key(&fail_key)
-            .arg(TOTP_FAIL_TTL_SECS)
-            .invoke_async(&mut conn)
+        // 失败计数（best-effort：incr_with_ttl 原子 INCR + 首次 EXPIRE，失败不阻断）
+        let _ = state
+            .store
+            .incr_with_ttl(&fail_key, TOTP_FAIL_TTL_SECS)
             .await
             .unwrap_or(0);
         return Err(AppError::bad_request(&crate::tr!(
@@ -287,21 +282,18 @@ pub async fn verify(
     }
 
     // 5. 删除 pending，加密写入 enabled（启用 TOTP）
-    let _: i64 = crate::utils::redis::cmd_timeout(
-        redis::cmd("DEL").arg(&pending_key).query_async(&mut conn),
-    )
-    .await
-    .unwrap_or(0);
+    let _ = state
+        .store
+        .del(std::slice::from_ref(&pending_key))
+        .await
+        .unwrap_or(0);
     let encrypted_enabled = crate::utils::crypto::encrypt_config_value(&secret_str, master_key)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.encrypt_failed")))?;
-    crate::utils::redis::cmd_timeout(
-        redis::cmd("SET")
-            .arg(&enabled_key)
-            .arg(&encrypted_enabled)
-            .query_async::<String>(&mut conn),
-    )
-    .await
-    .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_write_failed")))?;
+    state
+        .store
+        .set_ex(&enabled_key, &encrypted_enabled, TOTP_ENABLED_TTL_SECS)
+        .await
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_write_failed")))?;
 
     tracing::info!(user_id = user_id, "用户启用 TOTP 多因子认证");
 
@@ -329,19 +321,20 @@ pub async fn status(
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
     let redis_key = format!("totp:enabled:{}", user_id);
-    let mut conn = state.redis.clone();
-    // P2 修复: 原 unwrap_or(false) 为 fail-open，Redis 故障时误报 TOTP 未启用，
-    // 可能导致前端跳过 MFA 验证流程。改为 fail-closed：Redis 故障时返回 503。
-    let exists: bool = crate::utils::redis::cmd_timeout(
-        redis::cmd("EXISTS").arg(&redis_key).query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
-            tracing::error!(error = %e, user_id = user_id, "TOTP status: Redis EXISTS 失败，fail-closed 返回 503");
+    // P2 修复: 原 unwrap_or(false) 为 fail-open，存储故障时误报 TOTP 未启用，
+    // 可能导致前端跳过 MFA 验证流程。改为 fail-closed：故障时返回 503。
+    // （原 EXISTS → get().is_some()，共享态存储均为 string KV，语义等价）
+    let enabled = state
+        .store
+        .get(&redis_key)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, user_id = user_id, "TOTP status: 键存在性查询失败，fail-closed 返回 503");
             AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-        })?;
+        })?
+        .is_some();
 
-    Ok(AjaxResult::success(TotpStatusResponse { enabled: exists }))
+    Ok(AjaxResult::success(TotpStatusResponse { enabled }))
 }
 
 /// POST /system/user/totp/disable
@@ -368,18 +361,17 @@ pub async fn disable(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.user_id_parse_failed")))?;
 
-    let mut conn = state.redis.clone();
-
     // P0-4：失败限流检查（密码/TOTP 码错误均计数，10 分钟 ≥5 次锁定）
     let fail_key = format!("totp:disable_fail:{}", user_id);
-    let fail_count: Option<i64> = crate::utils::redis::cmd_timeout(
-        redis::cmd("GET").arg(&fail_key).query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
+    let fail_count = state
+        .store
+        .get(&fail_key)
+        .await
+        .map_err(|e| {
             tracing::error!(error = %e, user_id = user_id, "TOTP disable 失败计数查询失败（fail-closed）");
             AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-        })?;
+        })?
+        .and_then(|v| v.parse::<i64>().ok());
     if let Some(count) = fail_count
         && count >= MAX_TOTP_VERIFY_FAIL
     {
@@ -410,10 +402,9 @@ pub async fn disable(
         .verify_password(req.password.as_bytes(), &parsed_hash)
         .is_err()
     {
-        let _: i64 = redis::Script::new(TOTP_FAIL_SCRIPT)
-            .key(&fail_key)
-            .arg(TOTP_FAIL_TTL_SECS)
-            .invoke_async(&mut conn)
+        let _ = state
+            .store
+            .incr_with_ttl(&fail_key, TOTP_FAIL_TTL_SECS)
             .await
             .unwrap_or(0);
         return Err(AppError::bad_request(&crate::tr!(
@@ -423,11 +414,13 @@ pub async fn disable(
 
     // 2. 验证 TOTP code
     let redis_key = format!("totp:enabled:{}", user_id);
-    let mut conn = state.redis.clone();
-    let encrypted_secret: String =
-        crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&redis_key).query_async(&mut conn))
-            .await
-            .map_err(|_| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
+    // 键不存在（未启用）与读取失败均收敛为 404（与原 GET nil → not_found 口径一致）
+    let encrypted_secret = state
+        .store
+        .get(&redis_key)
+        .await
+        .map_err(|_| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?
+        .ok_or_else(|| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
 
     // C2-3 安全修复：解密从 Redis 读取的 TOTP secret
     let master_key = &state.config.config_enc_key;
@@ -455,11 +448,10 @@ pub async fn disable(
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.totp_build_failed")))?;
 
     if totp.check_current(&req.code).is_none() {
-        // P0-4：失败计数（防暴力枚举）
-        let _: i64 = redis::Script::new(TOTP_FAIL_SCRIPT)
-            .key(&fail_key)
-            .arg(TOTP_FAIL_TTL_SECS)
-            .invoke_async(&mut conn)
+        // P0-4：失败计数（防暴力枚举；best-effort，失败不阻断）
+        let _ = state
+            .store
+            .incr_with_ttl(&fail_key, TOTP_FAIL_TTL_SECS)
             .await
             .unwrap_or(0);
         return Err(AppError::bad_request(&crate::tr!(
@@ -467,14 +459,12 @@ pub async fn disable(
         )));
     }
 
-    // 3. 从 Redis 删除 secret
-    crate::utils::redis::cmd_timeout(
-        redis::cmd("DEL")
-            .arg(&redis_key)
-            .query_async::<i64>(&mut conn),
-    )
-    .await
-    .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_delete_failed")))?;
+    // 3. 从共享态存储删除 secret
+    state
+        .store
+        .del(std::slice::from_ref(&redis_key))
+        .await
+        .map_err(|_| AppError::internal(&crate::tr!("error.totp.redis_delete_failed")))?;
 
     tracing::info!(user_id = user_id, "用户关闭 TOTP 多因子认证");
 

@@ -23,19 +23,17 @@
 //!
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
-use std::time::Duration;
-
 use garde::Validate;
-use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
+use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
 use crate::entity::sys_config::{ActiveModel as SysConfigActiveModel, Model as SysConfigModel};
 use crate::repository::sys_config::SysConfigRepository;
+use crate::shared_store::SharedStore;
 
 // ==================== 治理常量（§27.8 硬规则① / ③，单一事实源）====================
 
@@ -176,37 +174,30 @@ pub struct ConfigEditDto {
 
 /// 参数配置模块 Service
 ///
-/// H-4：持有 Redis ConnectionManager 用于 cache-aside 缓存配置值，
+/// H-4：持有共享态存储（SharedStore）用于 cache-aside 缓存配置值，
 /// 减少登录/注册流程对 sys_config 表的频繁查询（每次登录原本 2 次 DB 查询：
 /// captchaEnabled + registerUser）。
 #[derive(Clone)]
 pub struct SysConfigService {
     config_repo: SysConfigRepository,
-    redis: ConnectionManager,
+    store: Arc<dyn SharedStore>,
 }
 
 impl SysConfigService {
-    pub fn new(db: DatabaseConnection, redis: ConnectionManager) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>) -> Self {
         Self {
             config_repo: SysConfigRepository::new(db),
-            redis,
+            store,
         }
     }
 
     // ==================== 缓存层（两层）====================
 
     /// 读单层缓存：`Some(Some(v))` = 命中值；`Some(None)` = 命中 None sentinel（该层无行）；
-    /// `None` = 未命中或 Redis 异常（fail-open 降级到 DB）。
+    /// `None` = 未命中或共享存储异常（fail-open 降级到 DB）。
     async fn read_cache_layer(&self, cache_key: &str) -> Option<Option<String>> {
-        let mut conn = self.redis.clone();
-        let cached: Option<String> = tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("GET").arg(cache_key).query_async(&mut conn),
-        )
-        .await
-        .ok() // 超时 → 未命中（降级到 DB）
-        .and_then(|r| r.ok()) // Redis 错误 → 未命中
-        .flatten(); // Option<Option<String>> → Option<String>
+        // 命令级超时/错误 → 未命中（降级到 DB）——由 store 实现层内建
+        let cached: Option<String> = self.store.get(cache_key).await.ok().flatten();
         cached.map(|val| {
             if val == CONFIG_NULL_MARKER {
                 None
@@ -224,38 +215,16 @@ impl SysConfigService {
             CONFIG_NULL_CACHE_TTL
         };
         let cache_value = value.unwrap_or(CONFIG_NULL_MARKER);
-        let mut conn = self.redis.clone();
-        let _ = tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("SETEX")
-                .arg(cache_key)
-                .arg(ttl)
-                .arg(cache_value)
-                .query_async::<()>(&mut conn),
-        )
-        .await;
+        let _ = self
+            .store
+            .set_ex(cache_key, cache_value, ttl as u64)
+            .await;
     }
 
     /// DEL 单个缓存 key（best-effort，失败仅 warn）。
     async fn del_cache_key(&self, cache_key: &str) {
-        let mut conn = self.redis.clone();
-        let result = tokio::time::timeout(
-            Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
-            redis::cmd("DEL")
-                .arg(cache_key)
-                .query_async::<()>(&mut conn),
-        )
-        .await;
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(cache_key = %cache_key, error = %e, "配置缓存 DEL 失败，可能产生脏读直至 TTL 过期")
-            }
-            Err(_) => tracing::warn!(
-                cache_key = %cache_key,
-                "配置缓存 DEL 超时（{}s），可能产生脏读直至 TTL 过期",
-                REDIS_CMD_TIMEOUT_SECS
-            ),
+        if let Err(e) = self.store.del(&[cache_key.to_string()]).await {
+            tracing::warn!(cache_key = %cache_key, error = %e, "配置缓存 DEL 失败，可能产生脏读直至 TTL 过期")
         }
     }
 
@@ -779,20 +748,20 @@ impl SysConfigService {
             )));
         }
         self.config_repo.delete_by_ids(config_ids).await?;
-        // 批量失效对应层的 Redis 缓存：平台行 → def 层；租户行 → 该租户覆盖层
+        // 批量失效对应层的缓存：平台行 → def 层；租户行 → 该租户覆盖层
+        // （原 pipeline 逐键 DEL 语义——非事务允许部分成功，del 多键等价）
         if !models.is_empty() {
-            let mut conn = self.redis.clone();
-            let mut pipe = redis::pipe();
-            for m in &models {
-                pipe.cmd("DEL").arg(if m.tenant_id == 0 {
-                    default_cache_key(&m.config_key)
-                } else {
-                    tenant_cache_key(m.tenant_id, &m.config_key)
-                });
-            }
-            if let Err(e) =
-                crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
-            {
+            let keys: Vec<String> = models
+                .iter()
+                .map(|m| {
+                    if m.tenant_id == 0 {
+                        default_cache_key(&m.config_key)
+                    } else {
+                        tenant_cache_key(m.tenant_id, &m.config_key)
+                    }
+                })
+                .collect();
+            if let Err(e) = self.store.del(&keys).await {
                 tracing::warn!("批量失效配置缓存失败: {}", e);
             }
         }
@@ -807,13 +776,12 @@ impl SysConfigService {
     /// 既可命中租户覆盖层（`config:{tid}:{key}`），也可命中平台默认层（`config:def:{key}`，
     /// 由 [`CONFIG_DEFAULT_CACHE_PREFIX`] 构造），故一次 `config:*` 扫描即覆盖两层。
     pub async fn refresh_cache(&self) -> Result<(), ServiceError> {
-        let mut conn = self.redis.clone();
         let pattern = format!("{}*", CONFIG_CACHE_PREFIX);
         // 第九批：改用 **不截断** 扫描。本函数语义是"清除**所有** config 缓存键"，
         // 原 `scan_keys(.., 5000)` 超限即静默截断 ⇒ 超 5000 键时残留陈旧缓存，
         // 配置更新后部分键仍返回旧值（与"刷新缓存"的意图直接冲突）。
         // pattern 为固定前缀 `config:*`（非通配 `*`），无海量键 OOM 风险。
-        let keys = match crate::utils::redis::scan_keys_all(&mut conn, &pattern).await {
+        let keys = match self.store.scan(&pattern, None).await {
             Ok(ks) => ks,
             Err(e) => {
                 tracing::warn!("刷新配置缓存时扫描键失败: {}", e);
@@ -823,17 +791,9 @@ impl SysConfigService {
         if keys.is_empty() {
             return Ok(());
         }
-        // 第九批：分批下发（不截断后键数无上界，避免超长 pipeline 长时间占用 Redis）
-        for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
-            let mut pipe = redis::pipe();
-            for key in chunk {
-                pipe.cmd("DEL").arg(key);
-            }
-            if let Err(e) =
-                crate::utils::redis::cmd_timeout(pipe.query_async::<Vec<i64>>(&mut conn)).await
-            {
-                tracing::warn!("刷新配置缓存时批量删除失败: {}", e);
-            }
+        // 批量删除（原分批 pipeline 语义——del 单次多键等价；local 档逐键删除天然部分成功）
+        if let Err(e) = self.store.del(&keys).await {
+            tracing::warn!("刷新配置缓存时批量删除失败: {}", e);
         }
         Ok(())
     }

@@ -139,29 +139,22 @@ pub async fn idempotency_middleware(
         return next.run(req).await;
     }
 
-    // 5. Redis SETNX 抢占幂等槽位
+    // 5. SETNX 抢占幂等槽位（经 SharedStore 抽象，双档等价）
     let redis_key = format!(
         "{}{}:{}",
         IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key
     );
-    let mut redis = state.redis.clone();
-    let set_result: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
-        redis::cmd("SET")
-            .arg(&redis_key)
-            .arg("1")
-            .arg("NX")
-            .arg("EX")
-            .arg(IDEMPOTENCY_TTL_SECS)
-            .query_async(&mut redis),
-    )
-    .await;
+    let set_result = state
+        .store
+        .set_nx_ex(&redis_key, "1", IDEMPOTENCY_TTL_SECS)
+        .await;
 
     let acquired = match set_result {
-        Ok(Some(_)) => true, // SET NX 成功，首次请求
-        Ok(None) => false,   // key 已存在，重复请求
+        Ok(true) => true,   // SET NX 成功，首次请求
+        Ok(false) => false, // key 已存在，重复请求
         Err(e) => {
-            // Redis 故障：fail-closed 拒绝请求（与 auth_middleware 保持一致）
-            // 防御性设计：即使 auth 中间件已保证 Redis 可用，仍不应在 Redis 故障时
+            // 存储故障：fail-closed 拒绝请求（与 auth_middleware 保持一致）
+            // 防御性设计：即使 auth 中间件已保证存储可用，仍不应在故障时
             // 放行写操作（可能导致重复提交），返回 503 让客户端重试。
             tracing::error!(
                 error = %e,
@@ -205,13 +198,7 @@ pub async fn idempotency_middleware(
     if !status.is_success() {
         // 失败响应释放槽位，允许客户端重试
         // best-effort：DEL 失败不影响响应返回，槽位会在 TTL 后自动过期
-        if let Err(e) = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL")
-                .arg(&redis_key)
-                .query_async::<()>(&mut redis),
-        )
-        .await
-        {
+        if let Err(e) = state.store.del(std::slice::from_ref(&redis_key)).await {
             tracing::warn!(
                 error = %e,
                 redis_key = %redis_key,

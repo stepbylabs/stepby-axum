@@ -313,7 +313,12 @@ pub async fn rate_limit_middleware(
     let (allowed, retry_after) = match state.config.rate_limit.mode() {
         // 多实例：Redis 分布式令牌桶（跨实例共享配额）；命令失败 fail-closed（503），不静默放行
         crate::config::settings::RateLimitMode::Redis => {
-            let mut redis = state.redis.clone();
+            // local 档误配 rate_limit.mode=redis（未注入 Redis 连接）：fail-closed
+            // 与 Redis 命令失败同口径 503，不静默放行
+            let Some(mut redis) = state.redis_conn.clone() else {
+                tracing::error!("rate_limit.mode=redis 但未初始化 Redis 连接（fail-closed）");
+                return rate_limit_unavailable_response();
+            };
             match try_acquire_redis(
                 &mut redis,
                 &bucket_key,

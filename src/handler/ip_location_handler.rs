@@ -228,46 +228,33 @@ pub async fn update_now(
     );
 
     // P2 修复：并发/重复触发锁（10 分钟 TTL），防止连续点击重复执行
-    // "下载+解压+热加载"既浪费带宽又可能造成 mmdb 文件与热加载竞态
+    // "下载+解压+热加载"既浪费带宽又可能造成 mmdb 文件与热加载竞态。
+    // 原 SET NX EX + UUID value + EVAL CAS 释放 → 收敛为 `store.lock_acquire/lock_release`
+    // （UUID fencing token 由实现内置）。
     let lock_key = "ip_location:update:lock";
-    let lock_value = uuid::Uuid::new_v4().to_string();
-    let mut redis = state.redis.clone();
-    let acquired: bool = crate::utils::redis::cmd_timeout(
-        redis::cmd("SET")
-            .arg(lock_key)
-            .arg(&lock_value)
-            .arg("NX")
-            .arg("EX")
-            .arg(600i64)
-            .query_async(&mut redis),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "IP 库更新锁写入失败（fail-closed 拒绝）");
-        AppError::new(503, crate::tr!("error.ip_location.update_unavailable"))
-    })?;
-    if !acquired {
+    let lock_handle = state
+        .store
+        .lock_acquire(lock_key, 600)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "IP 库更新锁写入失败（fail-closed 拒绝）");
+            AppError::new(503, crate::tr!("error.ip_location.update_unavailable"))
+        })?;
+    let Some(lock_handle) = lock_handle else {
         return Err(AppError::bad_request(&crate::tr!(
             "error.ip_location.update_in_progress"
         )));
-    }
+    };
 
     let result = state
         .ip_location_service
         .update_now(force_source.as_deref())
         .await;
 
-    // 释放锁（CAS）
-    let _: i64 = crate::utils::redis::cmd_timeout(
-        redis::cmd("EVAL")
-            .arg(r#"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"#)
-            .arg(1)
-            .arg(lock_key)
-            .arg(&lock_value)
-            .query_async(&mut redis),
-    )
-    .await
-    .unwrap_or(0);
+    // 释放锁（CAS：仅当 fencing token 匹配时删除；best-effort）
+    if let Err(e) = state.store.lock_release(&lock_handle).await {
+        tracing::warn!(error = %e, "IP 库更新锁释放失败（TTL 到期后其他任务可抢占）");
+    }
 
     Ok(AjaxResult::success(result?))
 }

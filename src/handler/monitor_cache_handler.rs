@@ -11,7 +11,7 @@
 //! - DELETE /monitor/cache/clearCacheKey/{cacheKey}           清除指定键的缓存
 //! - DELETE /monitor/cache/clearCacheAll                      清除所有缓存（已禁用）
 //!
-//! 直接操作 Redis，使用 redis::cmd 执行原生命令。
+//! 经 SharedStore trait 操作共享态存储（redis 档 = 现状 Redis 命令；local 档 = SQL 承载）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use utoipa::ToSchema;
 
 use crate::common::{AjaxResult, AppError};
 use crate::state::AppState;
-use crate::utils::redis::{scan_keys, scan_keys_all};
+use crate::utils::redis::DEL_BATCH_SIZE;
 
 // ==================== 缓存前缀白名单 ====================
 
@@ -153,7 +153,11 @@ pub struct CachePrefixStat {
 // ==================== Handler 实现 ====================
 
 /// GET /monitor/cache
-/// 获取 Redis 缓存概览信息（info + dbSize + commandStats）
+/// 获取共享态缓存概览信息（info + dbSize + commandStats）
+///
+/// 展示层档位适配：`info_summary` redis 档返回 INFO 原文（解析口径不变）；
+/// local 档返回计数文本（`mode=local kv_entries=N ...`）→ info 只含计数项、
+/// db_size 取条目数。commandstats 段 trait 未暴露（redis 档专属），返回空列表。
 #[utoipa::path(
     get,
     path = "/monitor/cache",
@@ -166,39 +170,33 @@ pub struct CachePrefixStat {
 pub async fn get_cache(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<CacheOverview>, AppError> {
-    let mut redis = state.redis.clone();
-
-    // 1. 获取 Redis INFO 全量信息
-    let info_text: String =
-        crate::utils::redis::cmd_timeout(redis::cmd("INFO").query_async(&mut redis))
-            .await
-            .map_err(|e| {
-                tracing::error!("执行 Redis INFO 失败: {}", e);
-                AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
-            })?;
+    // 1. 读取共享态存储运行摘要
+    let info_text = state.store.info_summary().await.map_err(|e| {
+        tracing::error!("读取共享态存储 info_summary 失败: {}", e);
+        AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
+    })?;
     let info = parse_redis_info(&info_text);
 
     // 2. 获取当前数据库键数量
-    let db_size: i64 =
-        crate::utils::redis::cmd_timeout(redis::cmd("DBSIZE").query_async(&mut redis))
-            .await
-            .map_err(|e| {
-                tracing::error!("执行 Redis DBSIZE 失败: {}", e);
-                AppError::internal(&crate::tr!("error.cache.key_count_failed"))
-            })?;
+    //    redis 档：从 INFO 的 `dbN:keys=N` 段提取（与 DBSIZE 等价，单库部署口径一致）；
+    //    parse_redis_info 已按首个 `:` 切分，键名为 `dbN`（不含冒号），故只按前缀匹配；
+    //    local 档：取 kv_entries 条目计数
+    let db_size: i64 = if state.store.kind() == "redis" {
+        info.iter()
+            .find(|(k, _)| k.starts_with("db") && k[2..].chars().all(|c| c.is_ascii_digit()))
+            .and_then(|(_, v)| v.split(',').next())
+            .and_then(|s| s.trim().strip_prefix("keys="))
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0)
+    } else {
+        info.get("kv_entries")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
 
-    // 3. 获取命令统计
-    let cmd_text: String = crate::utils::redis::cmd_timeout(
-        redis::cmd("INFO")
-            .arg("commandstats")
-            .query_async(&mut redis),
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("Redis INFO commandstats 查询失败: {}", e);
-        String::new()
-    });
-    let command_stats = parse_command_stats(&cmd_text);
+    // 3. 命令统计：trait 未暴露 commandstats（redis 档原 INFO commandstats 段为
+    //    Redis 专属观测，local 档无对应概念）→ 返回空列表，前端饼图按空态兼容
+    let command_stats: Vec<CommandStat> = Vec::new();
 
     Ok(AjaxResult::success(CacheOverview {
         info,
@@ -221,10 +219,12 @@ pub async fn get_cache(
 pub async fn get_names(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<Vec<SysCache>>, AppError> {
-    let mut redis = state.redis.clone();
-
-    // 获取全部键，按前缀（冒号前的部分）分组
-    let keys: Vec<String> = scan_keys(&mut redis, "*", 5000).await?;
+    // 获取全部键（截断版，上限保持 5000），按前缀（冒号前的部分）分组
+    let keys: Vec<String> = state
+        .store
+        .scan("*", Some(5000))
+        .await
+        .map_err(map_scan_error)?;
 
     // 按前缀分组统计
     let mut groups: HashMap<String, usize> = HashMap::new();
@@ -252,6 +252,10 @@ pub async fn get_names(
 
 /// GET /monitor/cache/hotKeys
 /// 获取热 key（大内存键）提示，按内存占用降序取 top N（最多 20）
+///
+/// 展示层档位适配：共享态存储统一为 string KV（redis 档项目内仅 GET/SETEX，
+/// local 档 sys_shared_kv 单值列），原 `MEMORY USAGE`/`TYPE` 命令不可经 trait 获得——
+/// 改以**值字节长度**真实计量（非 mock），key_type 恒为 "string"。
 #[utoipa::path(
     get,
     path = "/monitor/cache/hotKeys",
@@ -264,12 +268,14 @@ pub async fn get_names(
 pub async fn get_hot_keys(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<Vec<HotKey>>, AppError> {
-    let mut redis = state.redis.clone();
+    let keys: Vec<String> = state
+        .store
+        .scan("*", Some(5000))
+        .await
+        .map_err(map_scan_error)?;
+    let stats = collect_value_sizes(&state, &keys).await?;
 
-    let keys: Vec<String> = scan_keys(&mut redis, "*", 5000).await?;
-    let stats = compute_key_memory(&mut redis, &keys).await?;
-
-    // 过滤掉已过期/空内存（None）的键，按内存字节降序排序，取 top 20
+    // 过滤掉不存在/空值（None）的键，按占用字节降序排序，取 top 20
     let mut ranked: Vec<(String, i64)> = stats
         .into_iter()
         .filter_map(|(key, mem)| mem.map(|m| (key, m)))
@@ -277,28 +283,21 @@ pub async fn get_hot_keys(
     ranked.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
     ranked.truncate(20);
 
-    let mut list = Vec::with_capacity(ranked.len());
-    for (key, memory_bytes) in ranked {
-        // 非 string 键用 TYPE 标注类型（MEMORY USAGE 对任意类型键均返回字节数）
-        let key_type: String =
-            crate::utils::redis::cmd_timeout(redis::cmd("TYPE").arg(&key).query_async(&mut redis))
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Redis TYPE 查询失败: {}", e);
-                    "unknown".to_string()
-                });
-        list.push(HotKey {
+    let list = ranked
+        .into_iter()
+        .map(|(key, memory_bytes)| HotKey {
             key,
-            key_type,
+            // 共享态存储全部为 string 类型键（见函数头适配说明）
+            key_type: "string".to_string(),
             memory_bytes,
-        });
-    }
+        })
+        .collect();
 
     Ok(AjaxResult::success(list))
 }
 
 /// GET /monitor/cache/prefixStats
-/// 获取缓存前缀内存统计（按前缀分组，逐键 MEMORY USAGE 累加）
+/// 获取缓存前缀内存统计（按前缀分组，逐键值字节长度累加——适配说明见 get_hot_keys）
 #[utoipa::path(
     get,
     path = "/monitor/cache/prefixStats",
@@ -311,10 +310,12 @@ pub async fn get_hot_keys(
 pub async fn get_prefix_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<Vec<CachePrefixStat>>, AppError> {
-    let mut redis = state.redis.clone();
-
-    let keys: Vec<String> = scan_keys(&mut redis, "*", 5000).await?;
-    let stats = compute_key_memory(&mut redis, &keys).await?;
+    let keys: Vec<String> = state
+        .store
+        .scan("*", Some(5000))
+        .await
+        .map_err(map_scan_error)?;
+    let stats = collect_value_sizes(&state, &keys).await?;
 
     // 按前缀分组累加内存/计数
     let mut groups: HashMap<String, (usize, i64)> = HashMap::new();
@@ -361,10 +362,13 @@ pub async fn get_keys(
 ) -> Result<AjaxResult<Vec<String>>, AppError> {
     // 校验缓存前缀白名单
     validate_cache_prefix(&cache_name)?;
-    let mut redis = state.redis.clone();
     let pattern = format!("{}*", cache_name);
 
-    let keys: Vec<String> = scan_keys(&mut redis, &pattern, 5000).await?;
+    let keys: Vec<String> = state
+        .store
+        .scan(&pattern, Some(5000))
+        .await
+        .map_err(map_scan_error)?;
 
     Ok(AjaxResult::success(keys))
 }
@@ -400,41 +404,26 @@ pub async fn get_value(
             name = cache_name
         )));
     }
-    let mut redis = state.redis.clone();
 
-    // 查询键的类型，非 string 类型不支持预览
-    let key_type: String = crate::utils::redis::cmd_timeout(
-        redis::cmd("TYPE").arg(&cache_key).query_async(&mut redis),
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("Redis TYPE 查询失败: {}", e);
-        "unknown".to_string()
-    });
-
-    let cache_value = if key_type == "string" {
-        let raw = crate::utils::redis::cmd_timeout(
-            redis::cmd("GET")
-                .arg(&cache_key)
-                .query_async::<Option<String>>(&mut redis),
-        )
+    // 读取缓存值（共享态存储统一为 string KV，原 TYPE 预检分支随之收敛：
+    // 键不存在 → 空值，与原 GET nil → unwrap_or_default 等价）
+    let raw = state
+        .store
+        .get(&cache_key)
         .await
         .map_err(|e| {
-            tracing::error!("Redis GET 查询失败: {}", e);
+            tracing::error!("读取缓存值失败: {}", e);
             AppError::internal(&crate::tr!("error.cache.value_query_failed"))
         })?
         .unwrap_or_default();
-        // SSO 绑定（username/email/nick_name，v4 F4-1）与在线会话（username/ip，v5-S3）
-        // 展示前按前缀选字段集脱敏
-        if cache_key.starts_with("sso:") {
-            mask_sso_binding_value(&raw, SSO_BINDING_SENSITIVE_FIELDS)
-        } else if cache_key.starts_with("online:") {
-            mask_sso_binding_value(&raw, ONLINE_SESSION_SENSITIVE_FIELDS)
-        } else {
-            raw
-        }
+    // SSO 绑定（username/email/nick_name，v4 F4-1）与在线会话（username/ip，v5-S3）
+    // 展示前按前缀选字段集脱敏
+    let cache_value = if cache_key.starts_with("sso:") {
+        mask_sso_binding_value(&raw, SSO_BINDING_SENSITIVE_FIELDS)
+    } else if cache_key.starts_with("online:") {
+        mask_sso_binding_value(&raw, ONLINE_SESSION_SENSITIVE_FIELDS)
     } else {
-        crate::tr!("error.cache.type_not_previewable", r#type = key_type).to_string()
+        raw
     };
 
     Ok(AjaxResult::success(SysCache {
@@ -465,21 +454,24 @@ pub async fn clear_cache_name(
 ) -> Result<AjaxResult<()>, AppError> {
     // 校验缓存前缀白名单
     validate_cache_prefix(&cache_name)?;
-    let mut redis = state.redis.clone();
     let pattern = format!("{}*", cache_name);
 
     // 查询匹配的键
     // 第九批：改用 **不截断** 扫描。本接口语义是"清除**该前缀下全部**缓存"，
     // 原 `scan_keys(.., 5000)` 超限即静默截断 ⇒ 只清了前 5000 个却报"已清除 N 个"，
     // 让运维误判缓存已清空。pattern 来自白名单前缀校验（非裸 `*`），无 OOM 风险。
-    let keys: Vec<String> = scan_keys_all(&mut redis, &pattern).await?;
+    let keys: Vec<String> = state
+        .store
+        .scan(&pattern, None)
+        .await
+        .map_err(map_scan_error)?;
 
     if keys.is_empty() {
         return Ok(AjaxResult::success_msg(&crate::tr!("msg.cache.no_match")));
     }
 
     // 批量删除
-    let count = delete_keys(&mut redis, &keys).await?;
+    let count = delete_keys(&state, &keys).await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.cache.cleared",
         count = count
@@ -506,15 +498,15 @@ pub async fn clear_cache_key(
 ) -> Result<AjaxResult<()>, AppError> {
     // 校验缓存键前缀白名单，防止误删关键键
     validate_cache_prefix(&cache_key)?;
-    let mut redis = state.redis.clone();
 
-    let deleted: i64 =
-        crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&cache_key).query_async(&mut redis))
-            .await
-            .map_err(|e| {
-                tracing::error!("执行 Redis DEL {} 失败: {}", cache_key, e);
-                AppError::internal(&crate::tr!("error.cache.key_clear_failed"))
-            })?;
+    let deleted = state
+        .store
+        .del(std::slice::from_ref(&cache_key))
+        .await
+        .map_err(|e| {
+            tracing::error!("删除缓存键 {} 失败: {}", cache_key, e);
+            AppError::internal(&crate::tr!("error.cache.key_clear_failed"))
+        })?;
 
     if deleted == 0 {
         return Ok(AjaxResult::success_msg(&crate::tr!(
@@ -550,12 +542,20 @@ pub async fn clear_cache_all(
 
 // ==================== 辅助函数 ====================
 
-// scan_keys 统一使用 crate::utils::redis::scan_keys（P2：带 max_results 上限，
-// 防 `*` 等 pattern 匹配海量 key 导致 OOM）；原模块内本地实现已移除。
+// 键扫描统一走 `store.scan(pattern, Some(n))` 截断版 / `store.scan(pattern, None)` 全量版
+// （P2：上限保护防 `*` 等 pattern 匹配海量 key 导致 OOM；语义对齐原 utils::redis::scan_keys）。
+
+/// SCAN 类错误统一映射：详情写日志，对外口径与原 utils 层 `error.common.cache_failed` 一致
+fn map_scan_error(e: crate::shared_store::StoreError) -> AppError {
+    tracing::error!("共享态存储键扫描失败: {}", e);
+    AppError::internal(&crate::tr!("error.common.cache_failed"))
+}
 
 /// 解析 Redis INFO 输出为键值对 Map
 ///
-/// INFO 输出格式：每行 `key:value`，以 `#` 开头为分组注释，空行跳过。
+/// INFO 输出格式：每行 `key:value`，以 `#` 开头为分组注释，空行跳过；
+/// 无 `:` 的行回退按 `key=value` 解析——兼容 local 档 info_summary 计数文本
+/// （`mode=local kv_entries=N ...`，非 INFO 格式），调用方无需按档位分叉解析。
 fn parse_redis_info(text: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in text.lines() {
@@ -569,38 +569,20 @@ fn parse_redis_info(text: &str) -> HashMap<String, String> {
             if !k.is_empty() {
                 map.insert(k.to_string(), v.trim().to_string());
             }
+        } else if line.contains('=') {
+            // local 档计数文本（`mode=local kv_entries=N ...`，空格分隔的 key=value
+            // 令牌）兼容解析：逐令牌拆分后插入，调用方无需按档位分叉解析
+            for token in line.split_whitespace() {
+                if let Some((k, v)) = token.split_once('=') {
+                    let k = k.trim();
+                    if !k.is_empty() {
+                        map.insert(k.to_string(), v.trim().to_string());
+                    }
+                }
+            }
         }
     }
     map
-}
-
-/// 解析 Redis INFO commandstats 输出为命令统计列表
-///
-/// 输出格式：`cmdstat_<命令>:calls=N,usec=...`，提取命令名和调用次数。
-fn parse_command_stats(text: &str) -> Vec<CommandStat> {
-    let mut stats = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // 格式：cmdstat_get:calls=100,usec=500,...
-        if let Some((key, rest)) = line.split_once(':')
-            && let Some(name) = key.strip_prefix("cmdstat_")
-        {
-            // 从 calls=N 中提取 N
-            let calls = rest
-                .split(',')
-                .next()
-                .and_then(|s| s.strip_prefix("calls="))
-                .unwrap_or("0");
-            stats.push(CommandStat {
-                name: name.to_string(),
-                value: calls.to_string(),
-            });
-        }
-    }
-    stats
 }
 
 /// 提取键前缀（冒号前含冒号；无冒号则整键）
@@ -614,55 +596,47 @@ fn key_prefix(key: &str) -> String {
     }
 }
 
-/// 批量查询各键内存占用（MEMORY USAGE，字节），key 不存在时返回 None
-///
-/// 使用 pipeline 批量下发，减少 N 次 RTT。空列表直接返回空结果（避免空 pipeline 报错）。
-/// 单个键内存超限/删除等导致 MEMORY USAGE 返回空视为 None，不阻断整体统计。
-async fn compute_key_memory(
-    redis: &mut redis::aio::ConnectionManager,
+/// 批量读取各键值字节长度（string KV 的占用提示，适配说明见 get_hot_keys），
+/// 键不存在时返回 None。单次 `get_many` 批量读（原 MEMORY USAGE pipeline 语义对齐）。
+async fn collect_value_sizes(
+    state: &Arc<AppState>,
     keys: &[String],
 ) -> Result<Vec<(String, Option<i64>)>, AppError> {
     if keys.is_empty() {
         return Ok(Vec::new());
     }
-    let mut pipe = redis::pipe();
-    for k in keys {
-        pipe.cmd("MEMORY").arg("USAGE").arg(k);
-    }
-    let vals: Vec<Option<i64>> = crate::utils::redis::cmd_timeout(pipe.query_async(redis))
+    let vals: Vec<Option<String>> = state
+        .store
+        .get_many(keys)
         .await
         .map_err(|e| {
-            tracing::error!("执行 Redis MEMORY USAGE 批量查询失败: {}", e);
+            tracing::error!("批量读取缓存值失败: {}", e);
             AppError::internal(&crate::tr!("error.cache.memory_usage_failed"))
         })?;
-    Ok(keys.iter().cloned().zip(vals).collect())
+    Ok(keys
+        .iter()
+        .cloned()
+        .zip(vals)
+        .map(|(k, v)| (k, v.map(|s| s.len() as i64)))
+        .collect())
 }
 
-/// 批量删除 Redis 键，返回删除数量
-async fn delete_keys(
-    redis: &mut redis::aio::ConnectionManager,
-    keys: &[String],
-) -> Result<i64, AppError> {
+/// 批量删除键，返回删除数量（分批下发，保持原 DEL_BATCH_SIZE 批次语义）
+async fn delete_keys(state: &Arc<AppState>, keys: &[String]) -> Result<i64, AppError> {
     if keys.is_empty() {
         return Ok(0);
     }
-    // 第九批：分批下发（`scan_keys_all` 不截断 ⇒ 键数无上界；单条超长 DEL 会长时间
+    // 第九批：分批下发（`scan(pattern, None)` 不截断 ⇒ 键数无上界；单条超长 DEL 会长时间
     // 占用 Redis 单线程）。语义不变：返回各批实际删除数之和。
-    let mut deleted = 0i64;
-    for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
-        let mut cmd = redis::cmd("DEL");
-        for k in chunk {
-            cmd.arg(k);
-        }
-        let n: i64 = crate::utils::redis::cmd_timeout(cmd.query_async(redis))
-            .await
-            .map_err(|e| {
-                tracing::error!("执行 Redis DEL 批量删除失败: {}", e);
-                AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
-            })?;
-        deleted += n.max(0);
+    let mut deleted: u64 = 0;
+    for chunk in keys.chunks(DEL_BATCH_SIZE) {
+        let n = state.store.del(chunk).await.map_err(|e| {
+            tracing::error!("批量删除缓存键失败: {}", e);
+            AppError::internal(&crate::tr!("error.cache.key_batch_delete_failed"))
+        })?;
+        deleted += n;
     }
-    Ok(deleted)
+    Ok(deleted as i64)
 }
 
 // ==================== 单元测试 ====================
@@ -693,23 +667,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_stats_extracts_calls() {
-        let text = "# Commandstats\r\ncmdstat_get:calls=1000,usec=20000,usec_per_call=20.00\r\ncmdstat_set:calls=500\r\n";
-        let stats = parse_command_stats(text);
-        assert_eq!(stats.len(), 2);
-        assert_eq!(stats[0].name, "get");
-        assert_eq!(stats[0].value, "1000");
-        assert_eq!(stats[1].name, "set");
-        assert_eq!(stats[1].value, "500");
-    }
-
-    #[test]
-    fn parse_command_stats_ignores_non_cmdstat_lines() {
-        let text = "# Server\nredis_version:7.2.0\ncmdstat_get:calls=42\n";
-        let stats = parse_command_stats(text);
-        assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].name, "get");
-        assert_eq!(stats[0].value, "42");
+    fn parse_redis_info_parses_local_summary_counts() {
+        // local 档 info_summary 计数文本（`key=value` 形态）兼容解析
+        let text = "mode=local kv_entries=42 shared_locks=1 revocations=7\n";
+        let map = parse_redis_info(text);
+        assert_eq!(map.get("mode").map(String::as_str), Some("local"));
+        assert_eq!(map.get("kv_entries").map(String::as_str), Some("42"));
+        assert_eq!(map.get("revocations").map(String::as_str), Some("7"));
     }
 
     #[test]

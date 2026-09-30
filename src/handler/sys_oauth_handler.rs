@@ -155,7 +155,7 @@ pub async fn begin_oauth(
             &host,
             &scheme,
             host_tenant.tid(),
-            &mut state.redis.clone(),
+            &state.store,
         )
         .await?;
     Ok(AuthorizeResult {
@@ -201,7 +201,7 @@ pub async fn callback(
 
     let result = state
         .oauth_service
-        .oauth_callback(dto, &host, &scheme, &mut state.redis.clone())
+        .oauth_callback(dto, &host, &scheme, &state.store)
         .await;
 
     let redirect = match result {
@@ -213,7 +213,7 @@ pub async fn callback(
                     &username,
                     &login_ip,
                     user_agent,
-                    &mut state.redis.clone(),
+                    &state.store,
                     &state.config.jwt,
                     &state.ip_locator,
                 )
@@ -467,7 +467,7 @@ pub async fn bind_oauth(
     let user_id = parse_user_id(operator.user_id())?;
     let binding = state
         .oauth_service
-        .bind_oauth(dto, user_id, &mut state.redis.clone(), operator.tenant_id())
+        .bind_oauth(dto, user_id, &state.store, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(serde_json::json!({
         "provider": binding.provider,

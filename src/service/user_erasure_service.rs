@@ -29,7 +29,6 @@
 
 use std::sync::Arc;
 
-use redis::aio::ConnectionManager;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use serde::Serialize;
 use ts_rs::TS;
@@ -43,6 +42,7 @@ use crate::entity::sys_oauth_user::{Column as OAuthUserColumn, Entity as SysOaut
 use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
 use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Model as SysUserModel};
 use crate::repository::sys_user::SysUserRepository;
+use crate::shared_store::SharedStore;
 use crate::service::sso_service::SsoService;
 
 /// 能力位键（`governance::FEATURES` 单一事实源）。
@@ -101,13 +101,15 @@ pub struct UserErasureReport {
 
 /// 用户匿名化 Service。
 ///
-/// 依赖：`sys_user` 仓储、Redis（会话失效标记）、`SsoService`（复用既有 SSO 令牌吊销）、
+/// 依赖：`sys_user` 仓储、共享态存储（会话失效标记 + SSO 令牌全量吊销）、`SsoService`
+/// （构造保留，SSO 吊销已收敛为 `store.revoke_all_for_user`；字段暂留兼容既有构造方）、
 /// 以及由 `config [features]` 净化解析出的**平台层能力集**（与启动注入同口径）。
 #[derive(Clone)]
 pub struct UserErasureService {
     db: DatabaseConnection,
-    redis: ConnectionManager,
+    store: Arc<dyn SharedStore>,
     user_repo: SysUserRepository,
+    #[allow(dead_code)] // 吊销口径已收敛至 store.revoke_all_for_user；字段保留兼容既有构造方
     sso_service: SsoService,
     /// 平台层能力集（构造时按 `config.features` 净化解析；与 `initialize::init_feature_flags`
     /// 同源同口径，仅**不读进程级 OnceLock**，从而支持每实例（含集成测试）独立配置）。
@@ -117,7 +119,7 @@ pub struct UserErasureService {
 impl UserErasureService {
     pub fn new(
         db: DatabaseConnection,
-        redis: ConnectionManager,
+        store: Arc<dyn SharedStore>,
         sso_service: SsoService,
         config: Arc<Settings>,
     ) -> Self {
@@ -125,7 +127,7 @@ impl UserErasureService {
         Self {
             user_repo: SysUserRepository::new(db.clone()),
             db,
-            redis,
+            store,
             sso_service,
             features,
         }
@@ -217,27 +219,22 @@ impl UserErasureService {
             })
     }
 
-    /// Redis 在线会话数（SCAN `online:*` → 解析 `OnlineSession.user_id`）；取不到按 0。
+    /// 共享态存储在线会话数（SCAN `online:*` 全量 → 解析 `OnlineSession.user_id`）；取不到按 0。
     async fn count_online_sessions(&self, user_id: i64) -> u64 {
-        let mut redis = self.redis.clone();
-        let keys = match crate::utils::redis::scan_keys_all(&mut redis, "online:*").await {
+        let keys = match self.store.scan("online:*", None).await {
             Ok(k) => k,
             Err(e) => {
-                tracing::warn!(user_id, error = %e.message, "匿名化预检：SCAN online:* 失败（按 0 处理）");
+                tracing::warn!(user_id, error = %e, "匿名化预检：SCAN online:* 失败（按 0 处理）");
                 return 0;
             }
         };
         if keys.is_empty() {
             return 0;
         }
-        let values: Vec<Option<String>> = match crate::utils::redis::cmd_timeout(
-            redis::cmd("MGET").arg(&keys).query_async(&mut redis),
-        )
-        .await
-        {
+        let values: Vec<Option<String>> = match self.store.get_many(&keys).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(user_id, error = %e, "匿名化预检：MGET online 失败（按 0 处理）");
+                tracing::warn!(user_id, error = %e, "匿名化预检：批量读取 online 失败（按 0 处理）");
                 return 0;
             }
         };
@@ -323,20 +320,16 @@ impl UserErasureService {
             self.collect_counts(user_id, target.tenant_id).await;
 
         // ① 会话失效标记（复用 delete_user / change_status 的既有机制）：
-        //    对 `pwd_ver:{uid}` INCR，使已签发 JWT 在 auth 中间件被拒绝。
+        //    递增 `pwd_ver:{uid}`（store.pwd_ver_incr 内部含 Redis INCR + DB password_version
+        //    列双写），使已签发 JWT 在 auth 中间件被拒绝。
         //    fail-closed：写入失败则中止（不留"密码已清空但旧会话仍可用"的窗口）。
-        let mut redis = self.redis.clone();
-        let pwd_ver_key = format!("pwd_ver:{}", user_id);
-        crate::utils::redis::cmd_timeout(
-            redis::cmd("INCR")
-                .arg(&pwd_ver_key)
-                .query_async::<()>(&mut redis),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(user_id, error = %e, "匿名化前递增 pwd_ver 失败（fail-closed 中止）");
-            ServiceError::internal(&crate::tr!("error.user.erasure_revoke_failed"))
-        })?;
+        self.store
+            .pwd_ver_incr(&user_id.to_string())
+            .await
+            .map_err(|e| {
+                tracing::error!(user_id, error = %e, "匿名化前递增 pwd_ver 失败（fail-closed 中止）");
+                ServiceError::internal(&crate::tr!("error.user.erasure_revoke_failed"))
+            })?;
 
         // ② 字段置换（只改 ERASURE_FIELDS；释放全局唯一登录键，不可再登录）
         let now = crate::common::datetime::now_naive();
@@ -356,10 +349,12 @@ impl UserErasureService {
         am.update_time = Set(Some(now));
         self.user_repo.update(am).await?;
 
-        // ③ 吊销该用户全部 SSO access/refresh token 及其在线会话（复用既有吊销函数）
-        self.sso_service
-            .revoke_user_sso_tokens(&mut redis, user_id)
-            .await;
+        // ③ 吊销该用户全部 SSO access/refresh token 及其在线会话
+        //    （原 sso_service::revoke_user_sso_tokens 语义已收敛为 store.revoke_all_for_user；
+        //    best-effort 与原函数一致：失败仅记日志，DB 已匿名化 + pwd_ver 已失效当期会话）
+        if let Err(e) = self.store.revoke_all_for_user(&user_id.to_string()).await {
+            tracing::error!(user_id, error = %e, "匿名化：SSO 令牌全量吊销失败");
+        }
 
         // ④ 立即吊销该用户全部 PAT（status '0' → '1'）；best-effort，失败仅告警。
         //    次选时 DB 已匿名化、会话已失效，PAT 残留仅剩"令牌仍可用"的越权面，

@@ -18,9 +18,9 @@
 
 use futures::FutureExt;
 use garde::Validate;
-use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
+use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
@@ -38,6 +38,7 @@ use crate::repository::sys_oauth_user::SysOauthUserRepository;
 use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::service::SysUserService;
+use crate::shared_store::SharedStore;
 use crate::utils::password::encrypt_password;
 
 /// OAuth state 保存时长（秒）
@@ -580,7 +581,7 @@ impl SysOauthService {
         request_host: &str,
         base_scheme: &str,
         tenant_tid: Option<i64>,
-        redis: &mut ConnectionManager,
+        store: &Arc<dyn SharedStore>,
     ) -> Result<EnabledProviderVo, ServiceError> {
         let provider = self
             .provider_repo
@@ -611,19 +612,14 @@ impl SysOauthService {
             "tenant_tid": tenant_tid,
         })
         .to_string();
-        crate::utils::redis::cmd_timeout(
-            redis::cmd("SET")
-                .arg(&state_key)
-                .arg(&state_val)
-                .arg("EX")
-                .arg(STATE_TTL_SECS)
-                .query_async::<()>(redis),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("OAuth state 写入 Redis 失败: {}", e);
-            ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-        })?;
+        // 原 `SET key val EX ttl` → store.set_ex（TTL 语义等价；命令级超时由 store 内部管理）
+        store
+            .set_ex(&state_key, &state_val, STATE_TTL_SECS)
+            .await
+            .map_err(|e| {
+                tracing::error!("OAuth state 写入共享态存储失败: {}", e);
+                ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+            })?;
 
         // 组装授权 URL（保留 scope 原样，不重复编码）
         let sep = if provider.authorize_url.contains('?') {
@@ -686,7 +682,7 @@ impl SysOauthService {
         dto: OauthCallbackDto,
         request_host: &str,
         base_scheme: &str,
-        redis: &mut ConnectionManager,
+        store: &Arc<dyn SharedStore>,
     ) -> Result<OauthCallResult, ServiceError> {
         // 上游拒绝授权
         if let Some(err) = dto.error {
@@ -703,12 +699,12 @@ impl SysOauthService {
             .state
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.oauth.state_invalid")))?;
 
-        // 校验 state（一次性）：从 Redis 读取并删除
+        // 校验 state（一次性）：从共享态存储原子取删
         let state_key = format!("oauth:state:{}", state);
         // (provider_code, tenant_tid)：tenant_tid 由 begin_oauth 写入，用于复现同一
         // 可见范围（P1-2；缺失字段时为 None，与改造前"仅平台级"行为一致）
         let (provider_code, state_tid): (String, Option<i64>) =
-            match self.read_and_delete_redis_string(&state_key, redis).await? {
+            match self.read_and_delete_redis_string(&state_key, store).await? {
                 Some(json_str) => serde_json::from_str::<serde_json::Value>(&json_str)
                     .ok()
                     .and_then(|v| {
@@ -803,7 +799,7 @@ impl SysOauthService {
             Ok(OauthCallResult::LoggedIn { username })
         } else {
             // 未绑定 + 需人工绑定 → 返回一次性 handoff
-            let handoff = self.issue_handoff(&provider, &userinfo, redis).await?;
+            let handoff = self.issue_handoff(&provider, &userinfo, store).await?;
             Ok(OauthCallResult::NeedBind { handoff })
         }
     }
@@ -817,13 +813,13 @@ impl SysOauthService {
         &self,
         dto: BindOauthDto,
         user_id: i64,
-        redis: &mut ConnectionManager,
+        store: &Arc<dyn SharedStore>,
         operator_tid: i64,
     ) -> Result<OauthBindingVo, ServiceError> {
         // 校验 handoff 并获取身份
         let handoff_key = format!("oauth:handoff:{}", dto.handoff);
         let json_str = self
-            .read_and_delete_redis_string(&handoff_key, redis)
+            .read_and_delete_redis_string(&handoff_key, store)
             .await?
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.oauth.handoff_invalid")))?;
         let info: HandoffInfo = serde_json::from_str(&json_str)
@@ -924,29 +920,16 @@ impl SysOauthService {
 
     // ==================== 内部实现 ====================
 
-    /// Redis 读取并删除一个 key（一次性）
+    /// 共享态存储一次性取删（原 GET+DEL 两段式 → store.consume 原子 GETDEL 等价迁移）
     async fn read_and_delete_redis_string(
         &self,
         key: &str,
-        redis: &mut ConnectionManager,
+        store: &Arc<dyn SharedStore>,
     ) -> Result<Option<String>, ServiceError> {
-        let value: Option<String> =
-            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(redis))
-                .await
-                .map_err(|e| {
-                    tracing::error!("Redis GET oauth 凭据失败: {}", e);
-                    ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-                })?;
-        if value.is_some() {
-            let _: Option<()> =
-                crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(key).query_async(redis))
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Redis DEL oauth 凭据失败: {}", e);
-                        ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-                    })?;
-        }
-        Ok(value)
+        store.consume(key).await.map_err(|e| {
+            tracing::error!("共享态存储消费 oauth 凭据失败: {}", e);
+            ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+        })
     }
 
     /// 授权码换令牌
@@ -1295,7 +1278,7 @@ impl SysOauthService {
         &self,
         provider: &SysOauthProviderModel,
         identity: &OauthIdentity,
-        redis: &mut ConnectionManager,
+        store: &Arc<dyn SharedStore>,
     ) -> Result<String, ServiceError> {
         let handoff = random_token(48);
         let key = format!("oauth:handoff:{}", handoff);
@@ -1311,19 +1294,14 @@ impl SysOauthService {
         };
         let json_str = serde_json::to_string(&info)
             .map_err(|_| ServiceError::internal(&crate::tr!("error.oauth.unknown_error")))?;
-        crate::utils::redis::cmd_timeout(
-            redis::cmd("SET")
-                .arg(&key)
-                .arg(json_str)
-                .arg("EX")
-                .arg(HANDOFF_TTL_SECS)
-                .query_async::<()>(redis),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("OAuth handoff 写入 Redis 失败: {}", e);
-            ServiceError::internal(&crate::tr!("error.common.cache_failed"))
-        })?;
+        // 原 `SET key val EX ttl` → store.set_ex（TTL 语义等价；命令级超时由 store 内部管理）
+        store
+            .set_ex(&key, &json_str, HANDOFF_TTL_SECS)
+            .await
+            .map_err(|e| {
+                tracing::error!("OAuth handoff 写入共享态存储失败: {}", e);
+                ServiceError::internal(&crate::tr!("error.common.cache_failed"))
+            })?;
         Ok(handoff)
     }
 }

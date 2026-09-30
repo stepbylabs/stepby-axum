@@ -4,7 +4,7 @@
 //! # 定位
 //!
 //! 在既有账号体系上提供 **passkey（免密码）登录**与**自助绑定/管理**：
-//! - 持久化实现 [`PasskeyStore`]（SeaORM 落库；挑战等临时态存 Redis，带 TTL）；
+//! - 持久化实现 [`PasskeyStore`]（SeaORM 落库；挑战等临时态存共享态存储，带 TTL）；
 //! - 封装注册 / 认证四条流程与凭据自助管理；
 //! - 登录成功**复用既有登录完成链路**（`AuthService` 签发 JWT + 在线会话 + 登录日志）。
 //!
@@ -33,7 +33,6 @@ use passkey_server::types::{
 use passkey_server::{
     PasskeyConfig, PasskeyStore, finish_login, finish_registration, start_login, start_registration,
 };
-use redis::aio::ConnectionManager;
 use sea_orm::{DatabaseConnection, Set};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -215,7 +214,7 @@ impl WebauthnLoginFinishDto {
 /// WebAuthn / Passkey Service（同时是 [`PasskeyStore`] 的持久化实现）。
 #[derive(Clone)]
 pub struct WebauthnService {
-    redis: ConnectionManager,
+    store: Arc<dyn crate::shared_store::SharedStore>,
     user_repo: SysUserRepository,
     cred_repo: SysUserCredentialRepository,
     tenant_service: SysTenantService,
@@ -228,7 +227,7 @@ pub struct WebauthnService {
 impl WebauthnService {
     pub fn new(
         db: DatabaseConnection,
-        redis: ConnectionManager,
+        store: Arc<dyn crate::shared_store::SharedStore>,
         tenant_service: SysTenantService,
         config: Arc<Settings>,
     ) -> Self {
@@ -237,7 +236,7 @@ impl WebauthnService {
         Self {
             user_repo: SysUserRepository::new(db.clone()),
             cred_repo: SysUserCredentialRepository::new(db),
-            redis,
+            store,
             tenant_service,
             features,
             resolved,
@@ -439,7 +438,7 @@ impl WebauthnService {
     }
 }
 
-// ==================== PasskeyStore 实现（SeaORM 落库 + Redis 临时态） ====================
+// ==================== PasskeyStore 实现（SeaORM 落库 + 共享态存储临时态） ====================
 
 #[async_trait]
 impl PasskeyStore for WebauthnService {
@@ -602,25 +601,19 @@ impl PasskeyStore for WebauthnService {
         let payload = serde_json::to_string(&state)
             .map_err(|e| PasskeyError::InternalError(format!("state serialize failed: {e}")))?;
         let key = format!("{STATE_KEY_PREFIX}{id}");
-        let mut conn = self.redis.clone();
-        crate::utils::redis::cmd_timeout(
-            redis::cmd("SETEX")
-                .arg(&key)
-                .arg(ttl_secs)
-                .arg(payload)
-                .query_async::<()>(&mut conn),
-        )
-        .await
-        .map_err(|e| PasskeyError::DatabaseError(format!("redis setex failed: {e}")))
+        self.store
+            .set_ex(&key, &payload, ttl_secs)
+            .await
+            .map_err(|e| PasskeyError::DatabaseError(format!("shared store setex failed: {e}")))
     }
 
     async fn get_state(&self, id: &str) -> PasskeyResult<Option<PasskeyState>> {
         let key = format!("{STATE_KEY_PREFIX}{id}");
-        let mut conn = self.redis.clone();
-        let raw: Option<String> =
-            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&key).query_async(&mut conn))
-                .await
-                .map_err(|e| PasskeyError::DatabaseError(format!("redis get failed: {e}")))?;
+        let raw = self
+            .store
+            .get(&key)
+            .await
+            .map_err(|e| PasskeyError::DatabaseError(format!("shared store get failed: {e}")))?;
         let Some(raw) = raw else {
             return Ok(None);
         };
@@ -635,10 +628,12 @@ impl PasskeyStore for WebauthnService {
 
     async fn delete_state(&self, id: &str) -> PasskeyResult<()> {
         let key = format!("{STATE_KEY_PREFIX}{id}");
-        let mut conn = self.redis.clone();
-        crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(&key).query_async::<()>(&mut conn))
+        self.store
+            .del(std::slice::from_ref(&key))
             .await
-            .map_err(|e| PasskeyError::DatabaseError(format!("redis del failed: {e}")))
+            // del 返回删除条数（u64），本方法只关心成功与否 → 丢弃返回值（原 DEL 语义：键可能已过期，不存在不算失败）
+            .map(|_| ())
+            .map_err(|e| PasskeyError::DatabaseError(format!("shared store del failed: {e}")))
     }
 }
 

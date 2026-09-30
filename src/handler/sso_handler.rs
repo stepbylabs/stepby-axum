@@ -200,7 +200,7 @@ pub async fn authorize(
         .authorize(
             params,
             token.as_deref(),
-            &mut state.redis.clone(),
+            &state.store,
             &state.config.jwt,
             &state.config.sso,
         )
@@ -338,7 +338,7 @@ pub async fn token(
         .sso_service
         .token(
             params.clone(),
-            &mut state.redis.clone(),
+            &state.store,
             &state.config.sso,
             &base,
         )
@@ -453,7 +453,7 @@ pub async fn revoke(
     }
     match state
         .sso_service
-        .revoke_token(&params, &mut state.redis.clone())
+        .revoke_token(&params, &state.store)
         .await
     {
         // RFC 7009 §2.2：恒 200 空体（含 token 无效/已吊销），防枚举
@@ -546,7 +546,7 @@ pub async fn introspect(
         .sso_service
         .introspect(
             &params,
-            &mut state.redis.clone(),
+            &state.store,
             &state.config.sso,
             &issuer,
         )
@@ -603,14 +603,11 @@ pub async fn client_logo(
             &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
         );
     }
-    // 缓存的是**已通过 SSRF 校验的目标 URL**（不是图片字节：避免二进制进 Redis 需 base64 膨胀）。
+    // 缓存的是**已通过 SSRF 校验的目标 URL**（不是图片字节：避免二进制进共享态需 base64 膨胀）。
     // 客户端改了 logo_uri 时靠 TTL 自然过期（1 小时）。
+    // best-effort：读失败视为未命中、写失败仅影响下次命中，均与原 Redis 裸调用等价。
     let cache_key = format!("sso:logo:{}", client_id);
-    let mut redis = state.redis.clone();
-    let cached_url: Option<String> =
-        crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(&cache_key).query_async(&mut redis))
-            .await
-            .unwrap_or(None);
+    let cached_url: Option<String> = state.store.get(&cache_key).await.unwrap_or(None);
     let url = match cached_url.filter(|u| !u.is_empty()) {
         Some(u) => u,
         None => {
@@ -618,14 +615,10 @@ pub async fn client_logo(
                 // 无 logo / 未通过 SSRF 校验：404 让前端回落到首字母头像（不显示空白）
                 return StatusCode::NOT_FOUND.into_response();
             };
-            let _: Result<(), _> = crate::utils::redis::cmd_timeout(
-                redis::cmd("SETEX")
-                    .arg(&cache_key)
-                    .arg(LOGO_CACHE_TTL_SECS)
-                    .arg(&url)
-                    .query_async(&mut redis),
-            )
-            .await;
+            let _: Result<(), _> = state
+                .store
+                .set_ex(&cache_key, &url, LOGO_CACHE_TTL_SECS)
+                .await;
             url
         }
     };
@@ -722,11 +715,8 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         None
     };
     if let Some(key) = cache_key.as_deref() {
-        let mut redis = state.redis.clone();
-        let hit: Option<String> =
-            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(&mut redis))
-                .await
-                .unwrap_or(None);
+        // best-effort：读失败视为未命中（与原 Redis GET unwrap_or(None) 等价）
+        let hit: Option<String> = state.store.get(key).await.unwrap_or(None);
         if let Some(raw) = hit
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
         {
@@ -735,7 +725,7 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
     }
     match state
         .sso_service
-        .userinfo(bearer, &mut state.redis.clone(), &state.config.sso)
+        .userinfo(bearer, &state.store, &state.config.sso)
         .await
     {
         // RFC 6750：userinfo 响应不得被缓存
@@ -744,15 +734,7 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
                 && let Ok(raw) = serde_json::to_string(&claims)
             {
                 // best-effort 写入：失败只影响"下次是否命中缓存"，不影响本次响应
-                let mut redis = state.redis.clone();
-                let _: Result<(), _> = crate::utils::redis::cmd_timeout(
-                    redis::cmd("SETEX")
-                        .arg(key)
-                        .arg(ttl)
-                        .arg(&raw)
-                        .query_async(&mut redis),
-                )
-                .await;
+                let _: Result<(), _> = state.store.set_ex(key, &raw, ttl).await;
             }
             with_no_store((StatusCode::OK, Json(claims)).into_response())
         }
@@ -815,7 +797,7 @@ pub async fn logout(
             q.post_logout_redirect_uri.as_deref(),
             session_token.as_deref(),
             allow_cookie_logout,
-            &mut state.redis.clone(),
+            &state.store,
             &state.config.jwt,
         )
         .await?;
@@ -865,7 +847,7 @@ pub async fn consent(
             operator.username(),
             operator.tenant_id(),
             dto,
-            &mut state.redis.clone(),
+            &state.store,
             &state.config.sso,
         )
         .await?;
@@ -999,7 +981,7 @@ pub async fn client_delete(
     }
     state
         .sso_service
-        .delete_clients(ids, &mut state.redis.clone(), operator.tenant_id())
+        .delete_clients(ids, &state.store, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
@@ -1031,7 +1013,7 @@ pub async fn client_toggle(
         .toggle_client(
             id,
             &q.enabled,
-            &mut state.redis.clone(),
+            &state.store,
             operator.tenant_id(),
         )
         .await?;
@@ -1142,7 +1124,7 @@ pub async fn grant_revoke(
     }
     state
         .sso_service
-        .revoke_user_grant(user_id, &client_id, &mut state.redis.clone())
+        .revoke_user_grant(user_id, &client_id, &state.store)
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }

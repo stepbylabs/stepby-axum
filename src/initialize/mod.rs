@@ -1,10 +1,12 @@
 // stepby-axum/src/initialize/mod.rs
 
 use crate::config::Settings;
+use crate::config::settings::CacheMode;
 use crate::db;
 use crate::logger;
 use crate::scheduler::JobScheduler;
 use crate::service::IpLocationService;
+use crate::shared_store::SharedStore;
 use crate::state::AppState;
 use crate::utils::ip_location::IpLocator;
 use sea_orm::{
@@ -33,7 +35,6 @@ async fn run_migrator_if_fresh_db(db: &DatabaseConnection) -> anyhow::Result<()>
         DatabaseBackend::MySql => {
             "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'seaql_migrations'"
         }
-        _ => return Ok(()),
     };
     let row = db
         .query_one(Statement::from_string(backend, sql.to_string()))
@@ -61,6 +62,14 @@ impl AppInitializer {
     pub async fn run(config_path: &str) -> anyhow::Result<Arc<AppState>> {
         // 1. 加载配置（含 .env 环境变量覆盖）
         let settings = Arc::new(Settings::from_file(config_path)?);
+
+        // 1.1 零配置引导：data 目录自建（SQLite 落盘 / secret.key 引导密钥的宿主目录）。
+        // 失败不阻断——SQLite 初始化会再报真实错误；有 config.toml 的存量部署目录已存在（幂等）。
+        if let Err(e) = std::fs::create_dir_all("data") {
+            tracing::debug!("data 目录创建失败（不阻断，交由后续真实 IO 报错）: {}", e);
+        }
+        // config.toml 路径 database.url 为 sqlite:// 且父目录不存在时统一自建（init 前兜底）
+        ensure_sqlite_parent_dir(&settings.database.url);
 
         // 2. 初始化日志
         logger::init_logger(&settings.log);
@@ -367,11 +376,59 @@ impl AppInitializer {
         // 仅告警不阻断（同 3.7 口径）。
         let _ = tenant_host_chain_self_check(&db, &settings.server.trusted_proxies).await;
 
-        // 4. 初始化 Redis
-        let redis = db::init_redis(&settings.redis).await?;
+        // 3.9 共享态存储持久层兜底（存量库不跑 Migrator::up，迁移 m20261001_000001_shared_store
+        //      由 migration 负责全新库）：三表幂等建表 + sys_user.password_version 列兜底。
+        //      ⚠️ 必须先于步骤 4 的 store 构造——Redis 档的 bootstrap_from_db / R1 投影键
+        //      重建都要读这些表/列（顺序颠倒会使存量库首次升级时回填静默失败）。
+        ensure_shared_store_tables(&db).await?;
+        ensure_user_password_version_column(&db).await?;
+
+        // 4. 初始化共享态存储（[cache].mode：auto 按 [redis].url 裁决；local 纯 SQL；redis 现状）
+        let cache_mode = settings.cache.resolve_mode(&settings.redis.url);
+        // 非法 mode 取值（resolve_mode 已回落 auto 裁决）在此 WARN——拒绝"配错静默生效"
+        let mode_raw = settings.cache.mode.trim().to_ascii_lowercase();
+        if !["", "auto", "local", "redis"].contains(&mode_raw.as_str()) {
+            tracing::warn!(
+                value = %settings.cache.mode,
+                fallback = "auto",
+                allowed = ?["auto", "local", "redis"],
+                "配置 [cache].mode 取值非法，已回落 auto（按 [redis].url 裁决）"
+            );
+        }
+        // Redis 档保留一条原生连接仅供 rate_limit 的 Lua 令牌桶使用（与 local 档互斥，None = fail-closed）
+        let mut redis_conn: Option<redis::aio::ConnectionManager> = None;
+        let store: Arc<dyn SharedStore> = match cache_mode {
+            CacheMode::Redis => {
+                let conn = db::init_redis(&settings.redis).await?;
+                let rs = crate::shared_store::RedisStore::new(conn.clone(), db.clone());
+                redis_conn = Some(conn);
+                // 启动期幂等回填：DB 吊销权威层（sys_token_revocation）→ Redis（档位切换无缝）
+                rs.bootstrap_from_db(&db).await;
+                // R1 启动兜底：全量重建租户运行时投影键（消除「键缺失 = Active」窗口）；
+                // local 档直接查库求值，无需重建
+                let rs_arc: Arc<dyn crate::shared_store::SharedStore> = Arc::new(rs);
+                let tenant_svc =
+                    crate::service::SysTenantService::new(db.clone(), rs_arc.clone());
+                tenant_svc.rebuild_all_runtime_keys().await;
+                rs_arc
+            }
+            CacheMode::Local => {
+                tracing::info!("共享态档位：local（业务同库承载，无 Redis 依赖）");
+                Arc::new(crate::shared_store::LocalStore::new(db.clone()))
+            }
+            CacheMode::Auto => unreachable!("resolve_mode 已裁决"),
+        };
+        match cache_mode {
+            CacheMode::Redis => tracing::info!("共享态档位：redis（安全态双写 DB 权威层）"),
+            CacheMode::Local => {}
+            CacheMode::Auto => unreachable!(),
+        }
+
+        // 4.0a §4.2 分级守卫：local 档 + 多实例 / 显式 local + Redis 配置被忽略 的启动告警
+        init_cache_mode_guards(&db, &settings, cache_mode);
 
         // 4.1 v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等，详见函数注释）
-        revoke_legacy_sso_at_tokens(&mut redis.clone()).await;
+        revoke_legacy_sso_at_tokens(&store).await;
 
         // 4.2 v5-S1：SSO/OIDC 公开端点限流分档（存量库兜底，幂等；与迁移
         //     m20260924_000001_sso_rate_limit_tiers 等价——启动不跑 Migrator::up）
@@ -424,7 +481,7 @@ impl AppInitializer {
         let job_scheduler = Arc::new(
             JobScheduler::new(
                 db.clone(),
-                redis.clone(),
+                store.clone(),
                 ip_location_service.clone(),
                 settings.clone(),
             )
@@ -447,9 +504,13 @@ impl AppInitializer {
         tracing::info!("存储后端已启用: {}", storage.kind());
 
         // 8. 构建 AppState（传入 scheduler + ip_locator + ip_location_service + storage）
+        // 启动打印所需的监听地址（settings 的 Arc 即将移入 AppState，先取出）
+        let (server_host, server_port) =
+            (settings.server.host.clone(), settings.server.port);
         let state = Arc::new(AppState::new(
             db,
-            redis,
+            store,
+            redis_conn,
             settings,
             job_scheduler,
             ip_locator,
@@ -458,8 +519,141 @@ impl AppInitializer {
         ));
 
         tracing::info!("=== stepby-axum 初始化完成 ===");
+        tracing::info!(
+            "访问地址 http://{}:{} ｜ 默认账号 admin / admin123（首次登录强制修改密码）",
+            server_host,
+            server_port
+        );
         Ok(state)
     }
+}
+
+/// §4.2 分级守卫：共享态档位与部署形态不匹配时的启动期告警（只告警不阻断）。
+///
+/// - local + `scheduler.replicas > 1`：SQLite 单写者（max_connections=1）高并发写会 busy 等待
+///   ⇒ **WARN**；MySQL/PG 天然共享 ⇒ INFO（提示 WS 定向消息仍为单实例语义）。
+/// - local + `scheduler.cluster_mode = "leader"`：整轮互斥走 `sys_shared_lock` CAS，语义成立 ⇒ INFO。
+/// - 显式 `mode = "local"` 但 `[redis].url` 有效：Redis 配置被忽略 ⇒ **WARN**（防"配了不生效"误解）。
+fn init_cache_mode_guards(db: &DatabaseConnection, settings: &Settings, mode: CacheMode) {
+    if mode == CacheMode::Local {
+        let replicas = settings.scheduler.replicas;
+        let cluster_mode = settings.scheduler.cluster_mode.trim().to_ascii_lowercase();
+        if replicas > 1 {
+            match db.get_database_backend() {
+                DatabaseBackend::Sqlite => tracing::warn!(
+                    "local 档 + SQLite + 多实例：SQLite 为单写者（max_connections=1），\
+                     高并发写将触发 busy 等待；建议切换 MySQL/PostgreSQL 或配置 [redis] 启用 redis 档"
+                ),
+                _ => tracing::info!(
+                    "local 档（DB 共享）可支撑多实例；注意 WS 定向消息仅本实例可见（既有单实例语义）"
+                ),
+            }
+        }
+        if cluster_mode == "leader" {
+            tracing::info!(
+                "local 档 + scheduler.cluster_mode = leader：内置任务整轮互斥走 sys_shared_lock CAS，语义成立"
+            );
+        }
+    }
+    // 显式 local（原值小写比对，非法值/缺省不触发）但 Redis url 有效 ⇒ WARN
+    if settings.cache.is_explicit_mode("local") {
+        let url = &settings.redis.url;
+        if !url.trim().is_empty() && !url.contains("CHANGE_ME") {
+            tracing::warn!("Redis 配置被忽略（cache.mode=local）；如需 redis 档请改 mode 为 auto/redis");
+        }
+    }
+}
+
+/// 零配置/本地路径引导：`database.url` 为 `sqlite://` 时，解析出库文件父目录并幂等自建。
+///
+/// 统一覆盖两类场景：① from_env_only 的零配置默认（`sqlite://./data/stepby.db?mode=rwc`）；
+/// ② 有 config.toml 但 SQLite 路径父目录尚未创建的存量/新部署。查询串（`?` 起）截除后取
+/// parent；非 sqlite 前缀 / 无 parent / 建目录失败一律静默跳过（后续真实 IO 会报确切错误）。
+fn ensure_sqlite_parent_dir(url: &str) {
+    let Some(path) = url.strip_prefix("sqlite://") else {
+        return;
+    };
+    let file_part = path.split('?').next().unwrap_or(path);
+    let Some(parent) = std::path::Path::new(file_part).parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        tracing::debug!("SQLite 父目录 {parent:?} 创建失败（不阻断，交由 init 报真实错误）: {e}");
+    }
+}
+
+/// 共享态存储三表兜底（存量库不跑 Migrator::up，等价迁移 `m20261001_000001_shared_store`）。
+///
+/// 列定义与迁移**完全一致**（两处必须同步维护）：
+/// - `sys_shared_kv`：S2 一次性/短期态（键值 + 可空过期时间戳 UTC 秒）；
+/// - `sys_shared_lock`：调度锁（单语句 CAS）；
+/// - `sys_token_revocation`：S1 吊销权威层（blacklist + 历史 SSO AT 阻断，source 区分）。
+///
+/// `CREATE TABLE IF NOT EXISTS` 三方言均合法；索引经 `ensure_tenant_index` 方言兜底
+/// （MySQL 不支持 `IF NOT EXISTS` 子句，information_schema 判存在后建——与迁移
+/// IndexDdlExt 容错思路一致）。全部幂等，重复执行无副作用。
+async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    // 主键为 VARCHAR：SQLite/MySQL 直接 PRIMARY KEY；PG VARCHAR PK 通用，无需自增列
+    for ddl in [
+        "CREATE TABLE IF NOT EXISTS sys_shared_kv (
+            kv_key VARCHAR(255) NOT NULL PRIMARY KEY,
+            kv_value TEXT NOT NULL,
+            expire_at BIGINT NULL
+        )",
+        "CREATE TABLE IF NOT EXISTS sys_shared_lock (
+            lock_key VARCHAR(255) NOT NULL PRIMARY KEY,
+            lock_token VARCHAR(64) NOT NULL,
+            expire_at BIGINT NOT NULL
+        )",
+        "CREATE TABLE IF NOT EXISTS sys_token_revocation (
+            token_hash VARCHAR(128) NOT NULL PRIMARY KEY,
+            expire_at BIGINT NOT NULL,
+            source VARCHAR(32) NOT NULL DEFAULT 'logout'
+        )",
+    ] {
+        db.execute(Statement::from_string(backend, ddl.to_string()))
+            .await?;
+    }
+    // 过期行 GC 扫描索引（与迁移同名；MySQL 方言差异由 ensure_tenant_index 收口）
+    ensure_tenant_index(
+        db,
+        "sys_shared_kv",
+        "idx_sys_shared_kv_expire_at",
+        "expire_at",
+        false,
+    )
+    .await?;
+    ensure_tenant_index(
+        db,
+        "sys_token_revocation",
+        "idx_sys_token_revocation_expire_at",
+        "expire_at",
+        false,
+    )
+    .await?;
+    tracing::info!("共享态存储三表已就绪（sys_shared_kv / sys_shared_lock / sys_token_revocation）");
+    Ok(())
+}
+
+/// 幂等确保 `sys_user` 含 `password_version` 列（S1 密码版本号权威层；与
+/// `ensure_user_tenant_id_column` 同范式：表存在检查 + 列存在检查 + ALTER 补列）。
+/// `ALTER TABLE sys_user ADD COLUMN ... BIGINT NOT NULL DEFAULT 0` 三方言语法通用。
+/// 缺此兜底时：存量库实体 SELECT 带 password_version ⇒ 登录/改密链路 500。
+pub(crate) async fn ensure_user_password_version_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_user").await? {
+        return Ok(());
+    }
+    if sso_has_column(db, "sys_user", "password_version").await? {
+        return Ok(());
+    }
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        "ALTER TABLE sys_user ADD COLUMN password_version BIGINT NOT NULL DEFAULT 0".to_string(),
+    ))
+    .await?;
+    tracing::info!("sys_user.password_version 列已补建（存量库兜底）");
+    Ok(())
 }
 
 /// v5-N2 Phase 2（第一步）：幂等确保 `sys_user` 含 `tenant_id` 列（登录 JWT 的 tid
@@ -3940,113 +4134,85 @@ async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i6
 ///
 /// 幂等：`sso:v4_legacy_at_migrated` SETNX 标记；已标记即跳过。
 /// Redis 故障时跳过转写并告警（下次启动重试）。
-pub(crate) async fn revoke_legacy_sso_at_tokens(redis: &mut redis::aio::ConnectionManager) {
+pub(crate) async fn revoke_legacy_sso_at_tokens(store: &Arc<dyn SharedStore>) {
     const LEGACY_MARKER: &str = "sso:v4_legacy_at_migrated";
     const LEGACY_AT_PREFIX: &str = "sso:at:";
     /// 历史 JWT 型 SSO AT 的最大剩余寿命 = 平台 JWT TTL 上限（expire_hours ≤ 24h）
-    const LEGACY_TTL_FLOOR_SECS: i64 = 86_400;
+    const LEGACY_TTL_FLOOR_SECS: u64 = 86_400;
+    /// 幂等标记 TTL。原实现为无 TTL 的永久 SETNX；trait 的 NX 语义统一带 TTL，
+    /// 取 10 年近似"永久"（标记丢失的最坏后果 = 重跑一次幂等转写，无害）。
+    const MARKER_TTL_SECS: u64 = 10 * 365 * 24 * 3600;
 
-    let marker: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
-        redis::cmd("SET")
-            .arg(LEGACY_MARKER)
-            .arg("1")
-            .arg("NX")
-            .query_async(redis),
-    )
-    .await;
-    match marker {
+    // 幂等标记（SETNX；已标记即跳过转写）。store 内部已管超时/事务，无需 cmd_timeout 包裹。
+    match store.set_nx_ex(LEGACY_MARKER, "1", MARKER_TTL_SECS).await {
         Err(e) => {
-            tracing::warn!("v4-F1 存量转写跳过（Redis 不可达，下次启动重试）: {e}");
+            tracing::warn!("v4-F1 存量转写跳过（共享态存储不可达，下次启动重试）: {e}");
             return;
         }
-        Ok(None) => return, // 已标记：转写已完成
-        Ok(Some(_)) => {}
+        Ok(false) => return, // 已标记：转写已完成
+        Ok(true) => {}
     }
 
-    let mut cursor = String::from("0");
+    // 全量扫描 sso:at:*（安全吊销必须扫到尾，禁用截断版）
+    let keys = match store.scan(&format!("{LEGACY_AT_PREFIX}*"), None).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "v4-F1 存量转写 SCAN 失败（已置标记，可用 DEL {LEGACY_MARKER} 重跑）: {e}"
+            );
+            return;
+        }
+    };
+
     let mut migrated = 0usize;
     let mut skipped = 0usize;
-    loop {
-        let scan: Result<(String, Vec<String>), _> = crate::utils::redis::cmd_timeout(
-            redis::cmd("SCAN")
-                .arg(&cursor)
-                .arg("MATCH")
-                .arg(format!("{LEGACY_AT_PREFIX}*"))
-                .arg("COUNT")
-                .arg(500)
-                .query_async(redis),
-        )
-        .await;
-        let (next, keys) = match scan {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    "v4-F1 存量转写 SCAN 失败（已置标记，可用 DEL {LEGACY_MARKER} 重跑）: {e}"
-                );
-                return;
-            }
+    for key in &keys {
+        let Some(hash) = key.strip_prefix(LEGACY_AT_PREFIX) else {
+            continue;
         };
-        for key in &keys {
-            let Some(hash) = key.strip_prefix(LEGACY_AT_PREFIX) else {
-                continue;
-            };
-            if hash.is_empty() {
-                continue;
-            }
-            // v5 核查：A 形态活跃绑定（value 含 access_token_hash）不转写，防误杀
-            let is_legacy: Option<bool> = crate::utils::redis::cmd_timeout(
-                redis::cmd("GET")
-                    .arg(key)
-                    .query_async::<Option<String>>(redis),
-            )
+        if hash.is_empty() {
+            continue;
+        }
+        // v5 核查：A 形态活跃绑定（value 含 access_token_hash）不转写，防误杀
+        let is_legacy = store
+            .get(key)
             .await
             .ok()
             .flatten()
             .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
             .map(|json| !json.get("access_token_hash").is_some());
-            match is_legacy {
-                Some(false) => {
-                    skipped += 1;
-                    continue;
-                }
-                None => {
-                    // 读取/解析失败（key 已过期或 value 异常）→ 按过期清理处理
-                }
-                _ => {}
-            }
-            let ttl: i64 =
-                crate::utils::redis::cmd_timeout(redis::cmd("TTL").arg(key).query_async(redis))
-                    .await
-                    .unwrap_or(-2);
-            if ttl <= 0 {
-                // 已过期/不存在：直接清理
-                let _: Result<i64, _> =
-                    crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(key).query_async(redis))
-                        .await;
+        match is_legacy {
+            Some(false) => {
+                skipped += 1;
                 continue;
             }
-            let blacklist_key = format!("blacklist:{hash}");
-            let effective_ttl = ttl.max(LEGACY_TTL_FLOOR_SECS);
-            let set: Result<Option<()>, _> = crate::utils::redis::cmd_timeout(
-                redis::cmd("SETEX")
-                    .arg(&blacklist_key)
-                    .arg(effective_ttl)
-                    .arg("1")
-                    .query_async(redis),
-            )
+            None => {
+                // 读取/解析失败（key 已过期或 value 异常）→ 按过期清理处理
+            }
+            _ => {}
+        }
+        // TTL 语义：原实现 effective_ttl = max(剩余TTL, 24h) ≥ 24h；trait 未暴露 TTL 读数，
+        // 统一取下界 24h（对已失效/不存在键多吊销一段 hash 属 fail-safe，无越权风险）。
+        let effective_ttl = LEGACY_TTL_FLOOR_SECS;
+        let expire_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            + effective_ttl as i64;
+        // blacklist 登记（redis 档 = SETEX + DB 权威层双写；local 档 = INSERT 权威层）
+        let set = store
+            .revocation_add(hash, expire_at, "sso_legacy_at")
             .await;
-            if set.is_ok() {
+        match set {
+            Ok(()) => {
                 // 绑定转写成功后删除原 key：userinfo（只认绑定）与业务路由（认 blacklist）
                 // 双路径同时立即 401
-                let _: Result<i64, _> =
-                    crate::utils::redis::cmd_timeout(redis::cmd("DEL").arg(key).query_async(redis))
-                        .await;
+                let _ = store.del(std::slice::from_ref(key)).await;
                 migrated += 1;
             }
-        }
-        cursor = next;
-        if cursor == "0" {
-            break;
+            Err(e) => {
+                tracing::warn!("v4-F1 绑定 {} 转写失败（跳过，下次启动重试）: {e}", key);
+            }
         }
     }
     if migrated > 0 {

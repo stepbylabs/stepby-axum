@@ -8,6 +8,12 @@ use std::fmt;
 /// 注意：不 derive(Debug)，改用手动实现以脱敏 config_enc_key
 #[derive(Clone, Deserialize)]
 pub struct Settings {
+    /// 配置文件版本（AGENTS.md A3）。顶层键，必须写在任何 `[table]` 段之前；
+    /// 缺省 = 1（存量配置无迁移，逐字节等价）。当前仅支持 1；更高版本在启动校验时
+    /// 拒绝并提示「配置由更高版本生成」（fail-closed：静默忽略未知版本的语义差异
+    /// 比拒绝启动更危险）。
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
@@ -116,6 +122,13 @@ pub struct Settings {
     /// 使用者把 `url` 指向自己的 AV 网关（ClamAV REST / VirusTotal 代理 / 自研）即可开启。
     #[serde(default)]
     pub upload_scan: UploadScanConfig,
+    /// 共享态存储配置（`[cache]` 段）：`auto`（**默认**，按 `[redis].url` 裁决）| `local` | `redis`。
+    ///
+    /// 方案：`docs/optimization/ZERO-DEPENDENCY-DEPLOYMENT-PLAN-2026-10-01.md` v5.1。
+    /// 默认 `auto` + 未配 Redis ⇒ local 档（零依赖单文件部署）；
+    /// 存量部署（`[redis].url` 有效）在 auto 下自动落到 redis 档 ⇒ **默认零行为变更**。
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -150,6 +163,7 @@ impl fmt::Debug for Settings {
             .field("rate_limit", &self.rate_limit)
             .field("risk_control", &self.risk_control)
             .field("upload_scan", &self.upload_scan)
+            .field("cache", &self.cache)
             .finish()
     }
 }
@@ -803,6 +817,89 @@ fn default_rate_limit_key_ttl_secs() -> u64 {
     300
 }
 
+// ==================== 共享态存储档位（[cache]） ====================
+
+/// 共享态存储档位字面量（`auto` 为默认项，"默认 = 零依赖部署可用"）
+pub const CACHE_MODES: &[&str] = &["auto", "local", "redis"];
+
+/// 共享态存储档位（`[cache].mode` 的解析结果；项目准则③：取「模式」而非裸 bool）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheMode {
+    /// 显式或缺省 `auto`：由 `[redis].url` 有效性裁决（有效 → redis，否则 local）。
+    Auto,
+    /// 纯 SQL 承载共享态（与业务同库，零 Redis 依赖）。
+    Local,
+    /// 现状 Redis 命令（S1 写路径双写 DB 权威层 + 启动期回填）。
+    Redis,
+}
+
+/// 共享态存储配置（`[cache]` 段）。
+///
+/// # 语义（默认 = auto）
+///
+/// - `auto`（**默认**）：`[redis].url` 有效（非空且非占位符）→ redis 档；否则 local 档。
+///   存量部署（配了 Redis）自动保持 redis 档 ⇒ 与改造前**逐字节等价**；
+///   全新单机部署零配置即 local 档（零依赖启动）。
+/// - `local`：纯 SQL 承载（`sys_shared_kv` / `sys_shared_lock` / `sys_token_revocation`）。
+/// - `redis`：现状 Redis 命令；S1 安全态双写 DB 权威层，档位切换无缝。
+///
+/// 非法取值回落 `auto` 并由调用方打 WARN（fail-safe，不拒绝启动）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheConfig {
+    /// `auto`（默认）| `local` | `redis`；非法值启动回落 auto 并 WARN（fail-safe）
+    #[serde(default = "default_cache_mode")]
+    pub mode: String,
+    /// local 档 `sys_shared_kv` / `sys_token_revocation` 过期行 GC 周期（秒，默认 600）
+    #[serde(default = "default_cache_gc_interval")]
+    pub gc_interval_secs: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_cache_mode(),
+            gc_interval_secs: default_cache_gc_interval(),
+        }
+    }
+}
+
+fn default_cache_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_cache_gc_interval() -> u64 {
+    600
+}
+
+impl CacheConfig {
+    /// 解析显式档位并完成 auto 裁决。
+    ///
+    /// - 显式 `local` / `redis`（大小写不敏感）→ 对应档位；
+    /// - `auto` / 空串 / 字段缺省 → [`CacheMode::Auto`]；
+    /// - 非法值 → [`CacheMode::Auto`]（**调用方负责 WARN**，见 `initialize` 启动守卫）；
+    /// - Auto 裁决：`redis_url` 非空且不含 `CHANGE_ME` 占位符 → Redis，否则 Local。
+    pub fn resolve_mode(&self, redis_url: &str) -> CacheMode {
+        match self.mode.trim().to_ascii_lowercase().as_str() {
+            "local" => CacheMode::Local,
+            "redis" => CacheMode::Redis,
+            // "auto" / "" / 非法值统一走 Auto（非法值的 WARN 由调用方按原值输出）
+            _ => {
+                let redis_usable = !redis_url.trim().is_empty() && !redis_url.contains("CHANGE_ME");
+                if redis_usable {
+                    CacheMode::Redis
+                } else {
+                    CacheMode::Local
+                }
+            }
+        }
+    }
+
+    /// mode 字段原值是否**显式**为某档位（大小写不敏感；供启动守卫识别"显式 local 但配了 Redis"）。
+    pub fn is_explicit_mode(&self, mode: &str) -> bool {
+        self.mode.trim().eq_ignore_ascii_case(mode)
+    }
+}
+
 // ==================== 风控集成点（[risk_control]） ====================
 
 /// 登录面「工具型 UA」处置档位字面量（顺序：默认项在前 ⇒ "默认为现状"）
@@ -1265,6 +1362,11 @@ fn default_sys_log_retention_days() -> i64 {
 /// 与 `from_env_only()`、集成测试夹具保持一致；只有显式写 `false` 才降级为 fail-open。
 fn default_deny_by_default() -> bool {
     true
+}
+
+/// `config_version` 缺省值（A3：缺省 = 1 = 存量配置无迁移）。
+fn default_config_version() -> u32 {
+    1
 }
 
 /// 个人访问令牌（PAT）配置（Tier-S #3）
@@ -2395,6 +2497,11 @@ impl Settings {
         if let Ok(v) = std::env::var("RATE_LIMIT_MODE") {
             self.rate_limit.mode = v;
         }
+        // 共享态存储档位：CACHE_MODE=auto|local|redis（对齐 RATE_LIMIT_MODE 的覆盖方式）
+        // 容器场景无法改配置文件时用环境变量切换档位；非法值由 resolve_mode 回落 auto 并告警。
+        if let Ok(v) = std::env::var("CACHE_MODE") {
+            self.cache.mode = v;
+        }
         // S3 兼容对象存储敏感字段通过环境变量注入（避免明文写入配置文件）
         if let Ok(v) = std::env::var("S3_ACCESS_KEY") {
             self.upload.s3.access_key = v;
@@ -2473,22 +2580,33 @@ impl Settings {
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
     ///
-    /// 必需环境变量：DATABASE_URL、REDIS_URL、JWT_SECRET、SERVER_HOST、SERVER_PORT
-    /// 可选环境变量：JWT_EXPIRE_HOURS（默认 24）、CORS_ORIGINS（逗号分隔）、
-    ///                MAIL_PASSWORD、CONFIG_ENC_KEY、RUST_LOG（默认 info）
+    /// 必需环境变量：SERVER_HOST、SERVER_PORT
+    /// 可选环境变量：DATABASE_URL（缺省回退本地 SQLite）、REDIS_URL（缺省 = local 共享态档）、
+    ///              JWT_SECRET（缺省走 data/secret.key 引导密钥）、JWT_EXPIRE_HOURS（默认 24）、
+    ///              CORS_ORIGINS（逗号分隔）、MAIL_PASSWORD、CONFIG_ENC_KEY、RUST_LOG（默认 info）
     /// 其余字段使用与结构体一致的内置默认值。
+    ///
+    /// # 零配置引导（第三档）
+    ///
+    /// 仅本路径（无任何配置文件）允许回退：DATABASE_URL 缺省 → 本地 SQLite；
+    /// REDIS_URL 缺省 → 空（auto 裁决为 local 档）；JWT_SECRET 缺省 → `ensure_jwt_secret_file`
+    /// 生成/复用 `data/secret.key`。**有配置文件的存量部署不经此路径，行为逐字节不变**
+    /// （`validate_secrets` 的占位符拒绝与强度校验保持原样）。
     fn from_env_only() -> anyhow::Result<Self> {
-        let database_url = std::env::var("DATABASE_URL").map_err(|_| {
-            anyhow::anyhow!("环境变量 DATABASE_URL 未设置（容器部署需通过 -e/compose 注入）")
-        })?;
-        let redis_url =
-            std::env::var("REDIS_URL").map_err(|_| anyhow::anyhow!("环境变量 REDIS_URL 未设置"))?;
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .map_err(|_| anyhow::anyhow!("环境变量 JWT_SECRET 未设置"))?;
-        let server_host = std::env::var("SERVER_HOST")
-            .map_err(|_| anyhow::anyhow!("环境变量 SERVER_HOST 未设置"))?;
+        // 零配置回退：DATABASE_URL 缺省 → 本地 SQLite（单文件部署）；REDIS_URL 缺省 → 空（local 档）
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::info!("未检测到配置文件与 DATABASE_URL，已启用零配置默认（SQLite + local 共享态）");
+                "sqlite://./data/stepby.db?mode=rwc".to_string()
+            }
+        };
+        let redis_url = std::env::var("REDIS_URL").unwrap_or_default();
+        // JWT_SECRET 缺省 → 由 ensure_jwt_secret_file 生成/复用引导密钥（构造后统一处理）
+        let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
+        let server_host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let server_port = std::env::var("SERVER_PORT")
-            .map_err(|_| anyhow::anyhow!("环境变量 SERVER_PORT 未设置"))?
+            .unwrap_or_else(|_| "8080".to_string())
             .parse::<u16>()
             .map_err(|e| anyhow::anyhow!("SERVER_PORT 解析失败: {}", e))?;
         let jwt_expire_hours = std::env::var("JWT_EXPIRE_HOURS")
@@ -2552,11 +2670,64 @@ impl Settings {
             rate_limit: RateLimitSettings::default(),
             risk_control: RiskControlConfig::default(),
             upload_scan: UploadScanConfig::default(),
+            config_version: 1,
+            cache: CacheConfig::default(),
         };
 
+        // 零配置引导：JWT_SECRET 缺省时生成/复用 data/secret.key（仅 from_env_only 路径）
+        settings.ensure_jwt_secret_file()?;
         settings.apply_env_overrides();
         settings.validate_secrets()?;
         Ok(settings)
+    }
+
+    /// 零配置引导：JWT 密钥文件兜底（`data/secret.key`）。
+    ///
+    /// 仅 `from_env_only`（无任何配置文件）路径调用。`jwt.secret` 为空/缺省时：
+    /// - `data/secret.key` 存在 → 读取（trim）为密钥（重启幂等：密钥不变 ⇒ 已签发 token 不失效）；
+    /// - 不存在 → `OsRng` 生成 32 字节随机数写为 64 hex 字符（Unix 下 0o600，Windows 无该语义），
+    ///   并 WARN 提示生产环境应通过 JWT_SECRET 注入。
+    ///
+    /// 显式注入的 JWT_SECRET（非空）不动本函数；有 config.toml 的部署走 `validate_secrets`
+    /// 原有校验，与本函数无关。
+    pub fn ensure_jwt_secret_file(&mut self) -> anyhow::Result<()> {
+        if !self.jwt.secret.trim().is_empty() {
+            return Ok(());
+        }
+        let key_path = std::path::Path::new("data/secret.key");
+        // data 目录自建（幂等）
+        if let Some(parent) = key_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("创建 data 目录失败: {}", e))?;
+        }
+        if key_path.exists() {
+            let secret = std::fs::read_to_string(key_path)
+                .map_err(|e| anyhow::anyhow!("读取引导密钥 data/secret.key 失败: {}", e))?
+                .trim()
+                .to_string();
+            if secret.len() >= 32 {
+                tracing::info!("已复用引导 JWT 密钥 data/secret.key");
+                self.jwt.secret = secret;
+                return Ok(());
+            }
+            // 文件损坏/过短：落入下方重新生成路径（覆盖写）
+            tracing::warn!("引导密钥 data/secret.key 长度不足，已重新生成");
+        }
+        use rand::RngCore;
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let secret: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+        std::fs::write(key_path, &secret)
+            .map_err(|e| anyhow::anyhow!("写入引导密钥 data/secret.key 失败: {}", e))?;
+        // Unix 下收紧文件权限为 0600（仅属主可读写）；Windows 无 POSIX 权限语义，跳过
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        tracing::warn!("已生成引导 JWT 密钥 data/secret.key；生产环境请通过 JWT_SECRET 环境变量注入");
+        self.jwt.secret = secret;
+        Ok(())
     }
 
     /// 校验敏感配置不使用默认占位符
@@ -2564,6 +2735,16 @@ impl Settings {
     /// 若 jwt.secret 或 database.url 包含占位符（CHANGE_ME），
     /// 启动时直接报错拒绝，防止生产环境使用不安全配置。
     fn validate_secrets(&self) -> anyhow::Result<()> {
+        // A3（config_version）：当前仅支持版本 1。更高版本意味着配置由更新的程序生成，
+        // 其语义（键名/默认值/结构）可能与本版本不一致——静默忽略未知版本比拒绝启动
+        // 更危险（fail-closed），故显式拒绝并给出升级指引。
+        if self.config_version > 1 {
+            anyhow::bail!(
+                "config_version = {} 高于当前程序支持的版本 1：该配置由更新版本的 stepby-axum \
+                 生成，请升级程序或按新版 config.toml.example 手工迁移本文件",
+                self.config_version
+            );
+        }
         // B10：显式拒绝弱/占位密钥（大小写不敏感 deny-list），覆盖 CHANGE_ME（旧逻辑）、
         // 测试前缀 stepby_local_test_*、example/password/test_ 等常见弱密钥模式。
         // 使用 deny-list 而非激进熵评分，避免误杀合法开发密钥（向后兼容）。
@@ -2724,6 +2905,8 @@ mod tests {
             rate_limit: RateLimitSettings::default(),
             risk_control: RiskControlConfig::default(),
             upload_scan: UploadScanConfig::default(),
+            config_version: 1,
+            cache: CacheConfig::default(),
         }
     }
 
@@ -3097,6 +3280,8 @@ mod tests {
             rate_limit: RateLimitSettings::default(),
             risk_control: RiskControlConfig::default(),
             upload_scan: UploadScanConfig::default(),
+            config_version: 1,
+            cache: CacheConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);

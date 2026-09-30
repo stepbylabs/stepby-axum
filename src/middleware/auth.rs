@@ -19,7 +19,7 @@ use std::time::Duration;
 /// 1. 提取 Authorization header（缺失返回 401）
 /// 2. 解析 Bearer token（格式错误返回 401）
 /// 3. JWT 签名验证 + exp 过期校验（显式 map_err 为 401，不走 anyhow → 500）
-/// 4. Redis 黑名单校验（登出的 token 拒绝访问）
+/// 4. 共享态闸门校验（blacklist / pwd_ver / sso:at / 租户运行时，单次 auth_gate_check）
 /// 5. 注入 Claims 到 request extensions
 ///
 /// 白名单通过路由结构实现：公开路由（/health, /login, /captchaImage）不挂载此中间件，
@@ -62,7 +62,14 @@ pub async fn auth_middleware(
         let claims = authenticate_pat(&state, token, Some(request_id.clone())).await?;
         // Phase 3：PAT 同样受租户生命周期闸门约束（否则租户停用后凭 PAT 仍可长期访问）
         if claims.tid != 0 {
-            let runtime = load_tenant_runtime_state(&state, claims.tid, &request_id).await?;
+            let runtime = load_tenant_runtime_state(
+                &state,
+                &crate::utils::crypto::token_hash(token),
+                &claims.sub,
+                claims.tid,
+                &request_id,
+            )
+            .await?;
             enforce_tenant_runtime(runtime, claims.tid, req_is_write, &req_path, &request_id)?;
         }
         // Phase 3 域名链路：PAT 会话同样校验 host 归属与 token tid 一致性
@@ -75,45 +82,20 @@ pub async fn auth_middleware(
     //    verify_token 返回 Result<Claims, JwtError>，通过 From<JwtError> for AppError 自动转为 401
     let claims = JwtUtils::verify_token(token, &state.config.jwt)?;
 
-    // 4+5. Redis 黑名单 + 密码版本号 + SSO 过渡阻断 + 租户运行时状态
-    //    （合并为单次 Pipeline，减少 RTT；租户键仅租户用户追加查询，平台租户零开销）
-    //    fail-closed 策略：Redis 异常时拒绝请求，避免已登出 token 继续访问
-    //    使用 token 的 SHA-256 哈希作为 blacklist key，节省 Redis 内存
-    let blacklist_key = format!("blacklist:{}", crate::utils::crypto::token_hash(token));
-    // P0-R81-007 密码版本号：改密/重置/停用/删除时对 pwd_ver:{user_id} INCR，
-    // 登录时写入 claim；若 Redis 当前版本 > claim 版本，说明 token 签发后发生过密码变更 → 拒绝。
-    let pwd_ver_key = format!("pwd_ver:{}", claims.sub);
-    // v4-F1 过渡阻断：该 JWT 的哈希命中 `sso:at:{hash}` 绑定 → 是历史阶段由 SSO token 端点
-    // 签发的平台同构 JWT → 其持有者本应只被允许调 /sso/userinfo，必须拒绝进入业务路由
-    // （历史越权止血，见 docs/optimization/topic-sso-multitenant-v4-final-2026-09-23.md §13-F1）。
-    // 【移除条件】A 形态（不透明 access_token）上线且历史令牌全部过期（一个 JWT TTL 周期）后，
-    // 此分支成为死代码（不透明串在 verify_token 即失败），可安全删除。
-    let sso_at_key = format!("sso:at:{}", crate::utils::crypto::token_hash(token));
-    // 多租户 Phase 3：租户生命周期运行时键（§27.4）——不依赖 JWT 声明即可让存量令牌
+    // 4+5. 闸门检查：blacklist + pwd_ver + sso:at 过渡阻断 + 租户运行时状态
+    //    （原 pipe 5 键收敛为单次 store.auth_gate_check；token_hash 与原 blacklist key 同一哈希，
+    //     租户键仅租户用户追加查询，平台租户 tid=0 时两字段恒 None）
+    //    fail-closed 策略：存储层异常时拒绝请求，避免已登出 token 继续访问
+    let token_hash = crate::utils::crypto::token_hash(token);
+    // 多租户 Phase 3：租户生命周期闸门（§27.4）——不依赖 JWT 声明即可让存量令牌
     // 随租户停用/删除/超期立即失效，并支持「宽限期只读」非二值状态。
     let tenant_tid = claims.tid;
     let check_tenant = tenant_tid != 0;
-    let tenant_state_key = crate::common::tenant::tenant_state_key(tenant_tid);
-    let tenant_exp_key = crate::common::tenant::tenant_expire_key(tenant_tid);
-    let mut redis = state.redis.clone();
-    let mut pipe = redis::pipe();
-    pipe.cmd("GET")
-        .arg(&blacklist_key)
-        .cmd("GET")
-        .arg(&pwd_ver_key)
-        .cmd("GET")
-        .arg(&sso_at_key);
-    if check_tenant {
-        pipe.cmd("GET")
-            .arg(&tenant_state_key)
-            .cmd("GET")
-            .arg(&tenant_exp_key);
-    }
-    // Pipeline：一次 RTT 同时查询 blacklist / pwd_ver / sso:at [ / tenant:state / tenant:exp ]
-    // R11：命令级超时（REDIS_CMD_TIMEOUT_SECS=3s），fail-closed：超时返回 503 拒绝请求
-    let vals: Vec<Option<String>> = tokio::time::timeout(
+    // R11：命令级超时（REDIS_CMD_TIMEOUT_SECS=3s，store 内部亦管超时，此处外层兜底），
+    // fail-closed：超时返回 503 拒绝请求
+    let gate = tokio::time::timeout(
         Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-        pipe.query_async(&mut redis),
+        state.store.auth_gate_check(&token_hash, &claims.sub, claims.tid),
     )
     .await
     .map_err(|_| {
@@ -133,22 +115,19 @@ pub async fn auth_middleware(
         );
         AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
     })?;
-    let is_blacklisted = vals.first().cloned().flatten();
-    let pwd_ver: Option<u64> = vals
-        .get(1)
-        .cloned()
-        .flatten()
-        .and_then(|s| s.parse::<u64>().ok());
-    let legacy_sso_at = vals.get(2).cloned().flatten();
-    if is_blacklisted.is_some() {
+    if gate.blacklisted {
         return Err(AppError::unauthorized(&crate::tr!(
             "error.auth.token_revoked"
         )));
     }
 
-    // v4-F1 过渡阻断（见上方注释）：SSO 签发的历史 JWT 型 access_token 禁止进入业务路由。
+    // v4-F1 过渡阻断（历史越权止血，见 docs/optimization/topic-sso-multitenant-v4-final-2026-09-23.md
+    // §13-F1）：该 JWT 的哈希命中 `sso:at:{hash}` 绑定 → 是历史阶段由 SSO token 端点签发的平台
+    // 同构 JWT → 其持有者本应只被允许调 /sso/userinfo，必须拒绝进入业务路由。
     // SSO 令牌只应被 /sso/userinfo 消费（该端点自行校验绑定，不经过本中间件）。
-    if legacy_sso_at.is_some() {
+    // 【移除条件】A 形态（不透明 access_token）上线且历史令牌全部过期（一个 JWT TTL 周期）后，
+    // 此分支成为死代码（不透明串在 verify_token 即失败），可安全删除。
+    if gate.sso_at_bound {
         tracing::warn!(user_id = %claims.sub, "SSO 历史访问令牌尝试访问业务路由（过渡阻断拒绝）");
         return Err(AppError::unauthorized(&crate::tr!(
             "error.auth.token_revoked"
@@ -158,7 +137,8 @@ pub async fn auth_middleware(
     // 改密后旧 token 失效校验（P0-R81-007 版本号机制）
     // 版本号单调递增，无秒级时间戳同秒竞态：即使登录与改密发生在同一秒，版本号也已 +1，
     // 旧 token（版本较低）立即失效；改密后新登录的 token 携带最新版本号，不受影响。
-    if let Some(current_ver) = pwd_ver
+    // pwd_ver None = 键未设置 = 不拒绝（与原"键缺失不拒绝"语义等价）。
+    if let Some(current_ver) = gate.pwd_ver
         && current_ver > claims.pwd_ver
     {
         return Err(AppError::unauthorized(&crate::tr!(
@@ -167,17 +147,11 @@ pub async fn auth_middleware(
     }
 
     // 6. 多租户 Phase 3：租户生命周期闸门（逐请求判定，存量 JWT 同样受控）
+    // tenant_state/tenant_expire None = 键缺失 = Active（与原键缺失语义等价）
     if check_tenant {
-        let state_raw = vals.get(3).cloned().flatten();
-        let expire_epoch: i64 = vals
-            .get(4)
-            .cloned()
-            .flatten()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
         let runtime = crate::common::tenant::eval_tenant_runtime_state(
-            state_raw.as_deref(),
-            expire_epoch,
+            gate.tenant_state.as_deref(),
+            gate.tenant_expire.unwrap_or(0),
             chrono::Utc::now().timestamp(),
         );
         enforce_tenant_runtime(runtime, tenant_tid, req_is_write, &req_path, &request_id)?;
@@ -244,31 +218,30 @@ async fn authenticate_pat(
     })
 }
 
-/// 查询租户运行时状态（PAT 路径；JWT 路径在同一 Pipeline 中已内联查询以省 RTT）。
-/// Redis 异常 → 503 fail-closed（拒绝请求，不静默放行）。
+/// 查询租户运行时状态（PAT 路径；JWT 路径在同一 auth_gate_check 中已内联查询以省 RTT）。
+/// 存储层异常 → 503 fail-closed（拒绝请求，不静默放行）。
+///
+/// 复用 `auth_gate_check` 取租户两键（档位无关，store 内部处理键名构造）：
+/// blacklist/pwd_ver/sso_at 字段对 PAT 无意义（PAT 吊销走每请求查库），本函数只消费
+/// tenant_state/tenant_expire 两字段。
 async fn load_tenant_runtime_state(
     state: &Arc<AppState>,
+    token_hash: &str,
+    uid: &str,
     tenant_id: i64,
     request_id: &str,
 ) -> Result<crate::common::tenant::TenantRuntimeState, AppError> {
     if tenant_id == 0 {
         return Ok(crate::common::tenant::TenantRuntimeState::Active);
     }
-    let state_key = crate::common::tenant::tenant_state_key(tenant_id);
-    let exp_key = crate::common::tenant::tenant_expire_key(tenant_id);
-    let mut redis = state.redis.clone();
-    let vals: Vec<Option<String>> = match tokio::time::timeout(
+    // R11：命令级超时（store 内部亦管超时，此处外层兜底），fail-closed 503
+    let gate = match tokio::time::timeout(
         Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-        redis::pipe()
-            .cmd("GET")
-            .arg(&state_key)
-            .cmd("GET")
-            .arg(&exp_key)
-            .query_async(&mut redis),
+        state.store.auth_gate_check(token_hash, uid, tenant_id),
     )
     .await
     {
-        Ok(Ok(v)) => v,
+        Ok(Ok(g)) => g,
         Ok(Err(e)) => {
             tracing::error!(
                 request_id = %request_id,
@@ -293,16 +266,10 @@ async fn load_tenant_runtime_state(
             ));
         }
     };
-    let state_raw = vals.first().cloned().flatten();
-    let expire_epoch = vals
-        .get(1)
-        .cloned()
-        .flatten()
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0);
+    // tenant_state/tenant_expire None = 键缺失 = Active（与原键缺失语义等价）
     Ok(crate::common::tenant::eval_tenant_runtime_state(
-        state_raw.as_deref(),
-        expire_epoch,
+        gate.tenant_state.as_deref(),
+        gate.tenant_expire.unwrap_or(0),
         chrono::Utc::now().timestamp(),
     ))
 }

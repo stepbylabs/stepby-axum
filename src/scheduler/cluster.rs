@@ -25,7 +25,9 @@
 //! 形态无关（**单实例同样需要**），故**不随本开关关闭**。本模块只治理"整轮扫描/整轮更新"
 //! 这一层的跨实例互斥。
 
-use redis::aio::ConnectionManager;
+use std::sync::Arc;
+
+use crate::shared_store::{LockHandle, SharedStore};
 
 /// 内置任务整轮互斥锁的默认 TTL（秒）
 pub const DEFAULT_ROUND_LOCK_TTL_SECS: u64 = 300;
@@ -88,9 +90,12 @@ impl ClusterMode {
 ///
 /// `held = false` 表示"本模式下不需要锁"——此时 [`ClusterLock::release`] 是空操作，
 /// 因此调用方**无需**区分"取到锁"与"不需要锁"，代码路径唯一。
+///
+/// 内部持共享态存储句柄与锁句柄（含 fencing token）：释放经
+/// `store.lock_release` 的 CAS 完成（仅 token 匹配才删，防误删他实例的锁）。
 pub struct ClusterLock {
-    key: String,
-    value: String,
+    store: Arc<dyn SharedStore>,
+    handle: Option<LockHandle>,
     held: bool,
 }
 
@@ -98,13 +103,13 @@ impl ClusterLock {
     /// 按需取锁。
     ///
     /// - `needed = false`（`single` / `all` 模式）⇒ 直接返回"未持锁"的占位者；
-    /// - `needed = true` ⇒ `SET NX EX` 取锁：
+    /// - `needed = true` ⇒ `store.lock_acquire`（SET NX EX + UUID fencing token）：
     ///   - 取到 ⇒ 返回持锁者（调用方执行完后必须 [`release`](Self::release)）；
     ///   - 被他人持有 ⇒ 返回 `None`（**本次调度跳过**）；
-    ///   - Redis 故障 ⇒ 返回 `None` 并 error 日志（**fail-closed**：多实例下重复执行的代价
+    ///   - 存储故障 ⇒ 返回 `None` 并 error 日志（**fail-closed**：多实例下重复执行的代价
     ///     高于漏跑一轮，下一轮 cron 会重试）。
     pub async fn acquire(
-        redis: &mut ConnectionManager,
+        store: Arc<dyn SharedStore>,
         key: &str,
         needed: bool,
         ttl_secs: u64,
@@ -112,26 +117,15 @@ impl ClusterLock {
     ) -> Option<Self> {
         if !needed {
             return Some(Self {
-                key: key.to_string(),
-                value: String::new(),
+                store,
+                handle: None,
                 held: false,
             });
         }
-        let value = uuid::Uuid::new_v4().to_string();
-        let acquired: Result<Option<String>, _> = crate::utils::redis::cmd_timeout(
-            redis::cmd("SET")
-                .arg(key)
-                .arg(&value)
-                .arg("NX")
-                .arg("EX")
-                .arg(ttl_secs)
-                .query_async(redis),
-        )
-        .await;
-        match acquired {
-            Ok(Some(_)) => Some(Self {
-                key: key.to_string(),
-                value,
+        match store.lock_acquire(key, ttl_secs).await {
+            Ok(Some(handle)) => Some(Self {
+                store,
+                handle: Some(handle),
                 held: true,
             }),
             Ok(None) => {
@@ -139,18 +133,25 @@ impl ClusterLock {
                 None
             }
             Err(e) => {
-                tracing::error!("{task}: 分布式锁获取失败（Redis 故障），跳过本次调度: {e}");
+                tracing::error!("{task}: 分布式锁获取失败（共享态存储故障），跳过本次调度: {e}");
                 None
             }
         }
     }
 
-    /// 释放锁（CAS：仅当锁 value 仍是本实例的 fencing token 时才删除，避免误删他实例的锁）。
+    /// 释放锁（CAS：仅当锁 token 仍是本实例的 fencing token 时才删除，避免误删他实例的锁）。
     ///
-    /// 未持锁（`single` / `all` 模式）时为空操作。
-    pub async fn release(&self, redis: &mut ConnectionManager) {
-        if self.held {
-            super::release_lock(redis, &self.key, &self.value).await;
+    /// 未持锁（`single` / `all` 模式）时为空操作。best-effort：释放失败不影响调用方
+    /// （锁会在 TTL 到期后自然失效）。
+    pub async fn release(&self) {
+        if let Some(handle) = &self.handle
+            && let Err(e) = self.store.lock_release(handle).await
+        {
+            tracing::warn!(
+                lock_key = %handle.key,
+                error = %e,
+                "整轮互斥锁释放失败（将在 TTL 到期后自然失效）"
+            );
         }
     }
 

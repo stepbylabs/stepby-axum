@@ -88,4 +88,5 @@ pub mod m20260928_000001_sys_dept_ancestors_width;
 pub mod m20260928_000002_frontend_error_device_type;
 pub mod m20260928_000003_dedupe_dashboard_menu;
 pub mod m20260928_000004_optimize_menu_structure;
+pub mod m20261001_000001_shared_store;
 

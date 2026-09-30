@@ -92,7 +92,7 @@ fn extract_token_from_protocol(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-/// 检查 token 是否在 Redis 黑名单中（fail-closed：Redis 异常时拒绝连接）
+/// 检查 token 是否在黑名单中（fail-closed：存储异常时拒绝连接）
 ///
 /// 复用 auth_middleware 的黑名单机制：登出时将 token_hash 加入 `blacklist:{token_hash}` key
 async fn is_token_blacklisted(
@@ -101,73 +101,45 @@ async fn is_token_blacklisted(
 ) -> Result<bool, axum::http::StatusCode> {
     let token_hash = crate::utils::crypto::token_hash(token);
     let blacklist_key = format!("blacklist:{}", token_hash);
-    let mut conn = state.redis.clone();
-    let is_blacklisted: Option<String> = crate::utils::redis::cmd_timeout(
-        redis::cmd("GET").arg(&blacklist_key).query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "WebSocket 黑名单查询失败（fail-closed 拒绝连接）");
-        axum::http::StatusCode::SERVICE_UNAVAILABLE
-    })?;
+    let is_blacklisted = state
+        .store
+        .get(&blacklist_key)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "WebSocket 黑名单查询失败（fail-closed 拒绝连接）");
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        })?;
     Ok(is_blacklisted.is_some())
 }
 
 /// 原子化增加用户 WS 连接计数，返回当前连接数
 ///
-/// 使用 Redis INCR 原子操作，支持多实例部署
-/// 若返回值 > MAX_WS_CONN_PER_USER，调用方需 DECR 回滚并拒绝连接
+/// 使用 `store.incr_with_ttl`（INCR + 首次自增时设置 TTL 的原子语义），
+/// 支持多实例部署；若返回值 > MAX_WS_CONN_PER_USER，调用方需 DECR 回滚并拒绝连接
 async fn incr_ws_conn_count(state: &AppState, user_id: i64) -> Result<u32, axum::http::StatusCode> {
     let key = format!("ws_conn:{}", user_id);
-    let mut conn = state.redis.clone();
-    // 使用 Lua 脚本原子化 INCR + EXPIRE，避免进程崩溃后 key 无 TTL 永久存在
-    // 仅在首次 INCR（v==1）时设置 EXPIRE，避免每次续期
-    let script = r#"
-        local v = redis.call('INCR', KEYS[1])
-        if v == 1 then
-            redis.call('EXPIRE', KEYS[1], ARGV[1])
-        end
-        return v
-    "#;
-    let count: u32 = crate::utils::redis::cmd_timeout(
-        redis::cmd("EVAL")
-            .arg(script)
-            .arg(1) // number of keys
-            .arg(&key)
-            .arg(86400i64) // 24h TTL
-            .query_async(&mut conn),
-    )
-    .await
-    .map_err(|e| {
+    // TTL 24h：进程崩溃后 key 无 TTL 永久驻留的防护（与原 Lua INCR+首次 EXPIRE 等价）
+    const WS_CONN_TTL_SECS: u64 = 86400;
+    let count = state
+        .store
+        .incr_with_ttl(&key, WS_CONN_TTL_SECS)
+        .await
+        .map_err(|e| {
             tracing::error!(user_id = user_id, error = %e, "WebSocket 连接计数 INCR 失败（fail-closed 拒绝连接）");
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         })?;
-    Ok(count)
+    Ok(count as u32)
 }
 
-/// 减少用户 WS 连接计数（best-effort：失败仅记日志）
+/// 减少用户 WS 连接计数（best-effort：失败仅忽略，TTL 兜底防残留）
 ///
 /// P2 修复: 原实现 DECR + GET + 条件 DEL 共 3 次 RTT 且非原子，并发关闭时存在竞态
 /// （DECR 后 GET 可能读到对方 DECR 后的值，误判 count<=0 而 DEL key）。
-/// 改用 Lua 脚本原子化执行 DECR → 判断 ≤0 → DEL，单次 RTT 且无竞态。
+/// 改经 `store.decr` 单次原子执行 DECR → 判断 ≤0 → DEL（Lua 语义封进实现层，无竞态）。
 async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
     let key = format!("ws_conn:{}", user_id);
-    let mut conn = state.redis.clone();
-    let script = r#"
-        local v = redis.call('DECR', KEYS[1])
-        if v <= 0 then
-            redis.call('DEL', KEYS[1])
-        end
-        return v
-    "#;
-    let _: redis::RedisResult<i64> = crate::utils::redis::cmd_timeout(
-        redis::cmd("EVAL")
-            .arg(script)
-            .arg(1) // number of keys
-            .arg(&key)
-            .query_async(&mut conn),
-    )
-    .await;
+    // best-effort：递减失败不阻断关闭流程，计数留待 24h TTL 自然过期
+    let _ = state.store.decr(&key).await;
 }
 
 /// 重置所有用户的 WebSocket 连接计数（服务启动时调用）
@@ -181,14 +153,10 @@ async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
 /// 使实时通知静默失效——这是 E2E 中反复出现的 `ws://.../ws ... 429` 控制台错误根因。
 ///
 /// 服务启动时所有历史连接必然已失效，重置计数是安全且正确的做法：
-/// SCAN 匹配 `ws_conn:*` 后 DEL（复用 utils::redis::scan_keys 的 SCAN 游标实现，
-/// 避免 KEYS 阻塞 Redis）。失败仅记日志不阻断启动（计数留待 24h TTL 自然过期）。
+/// SCAN 匹配 `ws_conn:*` 后 DEL（**不截断**全量扫描——残留会让对应用户 WS 握手恒 429）。
+/// 失败仅记日志不阻断启动（计数留待 24h TTL 自然过期）。
 pub async fn reset_ws_conn_counts(state: &AppState) {
-    // 第九批：改用 **不截断** 扫描。本函数语义是"重置**全部** `ws_conn:*`"，
-    // 原 `scan_keys(.., 10000)` 超限即静默截断 ⇒ 残留陈旧计数会让相应用户后续 WS 握手恒 429
-    // （实时通知静默失效）—— 与"重置全部"的意图直接冲突。
-    let keys = match crate::utils::redis::scan_keys_all(&mut state.redis.clone(), "ws_conn:*").await
-    {
+    let keys = match state.store.scan("ws_conn:*", None).await {
         Ok(keys) => keys,
         Err(e) => {
             tracing::warn!("WebSocket 连接计数重置失败（SCAN 异常，忽略）: {}", e);
@@ -198,20 +166,9 @@ pub async fn reset_ws_conn_counts(state: &AppState) {
     if keys.is_empty() {
         return;
     }
-    let mut conn = state.redis.clone();
-    // 第九批：逐键 DEL 改**分批 DEL**（不截断后条数无上界，往返数由 O(n) 降为 ceil(n/500)）
-    for chunk in keys.chunks(crate::utils::redis::DEL_BATCH_SIZE) {
-        if let Err(e) = crate::utils::redis::cmd_timeout(
-            redis::cmd("DEL").arg(chunk).query_async::<i64>(&mut conn),
-        )
-        .await
-        {
-            tracing::warn!(
-                "WebSocket 连接计数重置失败（批量 DEL {} 个）: {}",
-                chunk.len(),
-                e
-            );
-        }
+    // best-effort：批量 DEL 失败仅告警（未删键留待 TTL 自然过期）
+    if let Err(e) = state.store.del(&keys).await {
+        tracing::warn!("WebSocket 连接计数重置失败（批量 DEL {} 个）: {}", keys.len(), e);
     }
     tracing::info!("已重置 {} 个 WebSocket 连接计数（服务启动）", keys.len());
 }
