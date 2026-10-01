@@ -192,7 +192,7 @@ host = "0.0.0.0"
 port = 8080
 
 [database]
-url = "mysql://root:password@127.0.0.1:3306/ry-vue"
+url = "mysql://root:password@127.0.0.1:3306/stepby"
 max_connections = 100
 min_connections = 5
 connect_timeout = 8
@@ -1603,7 +1603,7 @@ use migration::Migrator;
 #[tokio::main]
 async fn main() {
     let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "mysql://root:password@127.0.0.1:3306/ry-vue".to_string());
+        .unwrap_or_else(|_| "mysql://root:password@127.0.0.1:3306/stepby".to_string());
     let db = Database::connect(&url).await.expect("数据库连接失败");
     Migrator::up(&db, None).await.expect("迁移执行失败");
     println!("迁移完成");
@@ -1683,7 +1683,7 @@ Expected: 响应头包含 `X-Request-Id: <uuid>`
 
 - [ ] **Step 8: 验证 migration 可执行**
 
-Run: `cd stepby-axum && DATABASE_URL="mysql://root:password@127.0.0.1:3306/ry-vue" cargo run -p migration`
+Run: `cd stepby-axum && DATABASE_URL="mysql://root:password@127.0.0.1:3306/stepby" cargo run -p migration`
 Expected: 输出 `迁移完成`
 
 - [ ] **Step 9: 最终提交**

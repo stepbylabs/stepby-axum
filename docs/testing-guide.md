@@ -899,9 +899,9 @@ node tests/main.mjs --headless
 
 | 功能 | 测试内容 | 验证方式 |
 |------|---------|---------|
-| 17 | 备份写权限收紧（ry 角色） | 恢复按钮隐藏 + API 403 |
-| 18 | IP 库管理只读权限（ry 角色） | 写按钮隐藏 + GET 200 / PUT·POST 403 |
-| 31 | 备份恢复权限 system:backup:edit | ry 调用 POST /system/backup 返回 403 |
+| 17 | 备份写权限收紧（stepby 角色） | 恢复按钮隐藏 + API 403 |
+| 18 | IP 库管理只读权限（stepby 角色） | 写按钮隐藏 + GET 200 / PUT·POST 403 |
+| 31 | 备份恢复权限 system:backup:edit | stepby 调用 POST /system/backup 返回 403 |
 | 37 | U1 Dashboard 跳转操作日志路由 | 验证跳转到 `/system/log/operlog` |
 | 43 | operlog title i18n 本地化 | `formatModuleTitle` 剥离 `module.` 前缀后 `te()` 回退 |
 | 44 | 提交按钮 `:loading` 绑定 | 源码检查 `submitLoading` ref + `finally` 重置模式 |
@@ -999,7 +999,7 @@ tests/
 | M6 | 个人中心深度测试 | 8 | 基本资料 Tab、修改密码表单、TOTP Tab |
 | M7 | 带参数路由页面测试 | 13 | 代码生成编辑（tableId）、定时任务日志（jobId）、用户分配角色（userId）、角色分配用户（roleId） |
 | M8 | 错误页面和特殊页面测试 | 20 | 401/403/404/500/网络错误/隐私政策/锁屏页 |
-| M9 | 权限隔离深度测试（ry 用户） | 9 | 菜单加载、参数设置/字典管理新增按钮隐藏、在线用户/登录日志访问、写操作 API 403 |
+| M9 | 权限隔离深度测试（stepby 用户） | 9 | 菜单加载、参数设置/字典管理新增按钮隐藏、在线用户/登录日志访问、写操作 API 403 |
 | M10 | i18n 完整性深度扫描 | 3 | 切换英文、中文残留扫描（0 处）、控制台错误 |
 | M11 | 暗色模式深度测试 | 5 | 切换暗色模式、系统管理/监控页面无硬编码白色背景 |
 | M12 | CRUD 操作深度测试 | 10 | 岗位/字典/参数/通知 新增对话框表单字段验证 |
@@ -1019,7 +1019,7 @@ tests/
 | M26 | 完整 CRUD 端到端流程测试 | 8 | 岗位 新增→列表验证→编辑→删除 完整流程、取消操作、唯一性校验 |
 | M27 | 表单字段级校验规则测试 | 8 | cron 表达式必填/字典类型必填/用户名密码格式/邮箱格式校验 |
 | M28 | 实时通信与动态数据测试 | 17 | 通知面板 hover/通知列表/通知详情/标记已读/WebSocket 连接 |
-| M29 | 权限矩阵完整测试 | 19 | admin/ry 用户权限对比、菜单可见性、按钮可见性、API 403 |
+| M29 | 权限矩阵完整测试 | 19 | admin/stepby 用户权限对比、菜单可见性、按钮可见性、API 403 |
 | M30 | i18n + 暗色模式全页面扫描 | 8 | 全页面中文残留扫描/暗色模式 CSS 变量扫描 |
 | M31 | 文件操作与导入导出实际流程测试 | 11 | 用户导出/角色导出/头像上传/备份导出实际下载验证 |
 | M32 | 错误处理与边界场景测试 | 15 | 404 路由/会话过期/token 无效/网络错误/权限拒绝 |
@@ -1264,7 +1264,7 @@ tests/
 | useFormDraft 文档示例硬编码中文 | docstring 中 `modal.confirm('检测到未提交的草稿...')` | 新增 `common.formDraft.*` i18n key，文档示例改用 `t()` |
 | runner.mjs 浏览器双重关闭 | 登录失败时 `browser.close()` + `return 1`，finally 块再次 close 抛 "Target closed" | 移除登录失败分支的 close 调用，由 finally 统一关闭 |
 | main.mjs CLI 参数双重解析 | 顶部位置参数解析（argv[2]/argv[3]）与 main() 内 `--headless`/`--feature=` 解析并存 | 删除顶部死代码，统一在 main() 内解析 |
-| main.mjs / deep-e2e.mjs 次要账号硬编码 | `secondaryUsername: 'ry'` 无环境变量覆盖 | 支持 `STEPBY_TEST_USER_SECONDARY` / `STEPBY_TEST_PASS_SECONDARY` 环境变量 |
+| main.mjs / deep-e2e.mjs 次要账号硬编码 | `secondaryUsername 硬编码旧用户名` 已改为 stepby 并支持环境变量覆盖 | 支持 `STEPBY_TEST_USER_SECONDARY` / `STEPBY_TEST_PASS_SECONDARY` 环境变量 |
 | main.mjs / deep-e2e.mjs frontendUrl 缺少 STEPBY_UI_URL 回退 | 仅支持 `FRONTEND_URL`，与 test-config.mjs 的 `STEPBY_UI_URL` 不一致 | 增加 `STEPBY_UI_URL` 环境变量回退，与 test-config.mjs 保持一致 |
 | main.mjs 文件头注释过时 | 写 "前端启动在 http://localhost:81" 和 "admin/admin123 账号可用" | 更新为环境变量注入说明 |
 | config.toml.prod 缺少安全警告 | SQLite + 无密码 Redis 作为生产默认值无风险提示 | 添加安全警告注释，明确生产必须通过环境变量切换 |

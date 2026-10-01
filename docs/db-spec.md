@@ -739,7 +739,7 @@ impl ActiveModelBehavior for ActiveModel {}
 
 ```sql
 INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, create_by, create_time, remark)
-VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', 'admin', NOW(), '管理员');
+VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@stepby.com', '15888888888', '0', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', 'admin', NOW(), '管理员');
 ```
 
 > **密码说明：** `admin123` + `stepby_admin` 盐值后 MD5 = `ba976d23f6d1012cfe81ceb960a1058c`。盐值已从 `"salvo_admin"` 改为 `"stepby_admin"`，不兼容旧密码。

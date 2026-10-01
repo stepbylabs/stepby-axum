@@ -1162,7 +1162,7 @@ async fn init_data(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     // 1. 插入 admin 用户（密码: admin123 + stepby_admin 盐值 MD5）
     db.execute_unprepared(
         r#"INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, user_type, email, phonenumber, sex, avatar, password, status, del_flag, create_by, create_time, remark)
-           VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@ry.com', '15888888888', '0', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', 'admin', NOW(), '管理员')"#,
+           VALUES (1, 100, 'admin', '演示管理员', '00', 'admin@stepby.com', '15888888888', '0', '', 'ba976d23f6d1012cfe81ceb960a1058c', '0', '0', 'admin', NOW(), '管理员')"#,
     ).await?;
 
     // 2. 插入 admin 角色
