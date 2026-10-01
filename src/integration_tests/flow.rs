@@ -995,7 +995,7 @@ async fn test_flow_timeout_scan_idempotent() {
     );
 }
 
-/// 链路 16：升级提醒（W-7）—— 超 N 小时未处理 → 提醒部门主管（跳过 assignee 自身）
+/// 链路 16：升级提醒（W-7）—— 首次提醒后超 N 天未处理 → 升级提醒部门主管，且重置 N 天周期
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_timeout_escalation() {
     use sea_orm::{EntityTrait, Set};
@@ -1034,7 +1034,7 @@ async fn test_flow_timeout_escalation() {
         .await
         .expect("更新部门主管失败");
 
-    // stepby 提交 → 转办给 esc 用户 → 待办超期 100h（> 默认升级阈值 72h）
+    // stepby 提交 → 转办给 esc 用户（转办重置 last_reminded_at）→ 待办超期
     let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_escalate", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
     ctx.post_json(
@@ -1051,13 +1051,14 @@ async fn test_flow_timeout_escalation() {
             .expect("任务应存在")
             .into();
     am.due_at = Set(Some(
-        crate::common::datetime::now_naive() - chrono::Duration::hours(100),
+        crate::common::datetime::now_naive() - chrono::Duration::hours(1),
     ));
     crate::entity::sys_flow_task::Entity::update(am)
         .exec(&ctx.state.db)
         .await
         .expect("更新 due_at 失败");
 
+    // 第一轮：首次提醒待办持有人（escalate 判定因 last_reminded_at 为空而不触发）
     let first = ctx
         .state
         .flow_service
@@ -1066,16 +1067,27 @@ async fn test_flow_timeout_escalation() {
         .expect("扫描失败");
     assert_eq!(first.reminded, 1, "首次应提醒待办持有人");
     assert_eq!(
-        first.escalated, 1,
-        "超期超阈值应升级提醒部门主管（esc 的部门主管=admin，非 assignee 自身）"
-    );
-    assert!(
-        first.notify.iter().any(|(uid, _)| *uid == 1),
-        "升级通知应发给 admin(1)，实际: {:?}",
-        first.notify
+        first.escalated, 0,
+        "尚未首次提醒完成（last_reminded_at 为空）不应升级"
     );
 
-    // 第二轮：首次提醒已发（last_reminded_at 非空）且升级去重命中 → 不再打扰
+    // 快进时间：把 last_reminded_at 拨回 4 天前（> 默认升级周期 remind_escalate_days=3）
+    let mut am: crate::entity::sys_flow_task::ActiveModel =
+        crate::entity::sys_flow_task::Entity::find_by_id(task1)
+            .one(&ctx.state.db)
+            .await
+            .expect("查询任务失败")
+            .expect("任务应存在")
+            .into();
+    am.last_reminded_at = Set(Some(
+        crate::common::datetime::now_naive() - chrono::Duration::days(4),
+    ));
+    crate::entity::sys_flow_task::Entity::update(am)
+        .exec(&ctx.state.db)
+        .await
+        .expect("回拨 last_reminded_at 失败");
+
+    // 第二轮：首提已过 N 天 → 升级提醒部门主管（esc 的部门主管=admin，非 assignee/申请人本人）
     let second = ctx
         .state
         .flow_service
@@ -1084,7 +1096,34 @@ async fn test_flow_timeout_escalation() {
         .expect("扫描失败");
     assert_eq!(second.reminded, 0, "首次提醒只发一次（W-7）");
     assert_eq!(second.skipped, 1, "已提醒过应计为跳过");
-    assert_eq!(second.escalated, 0, "升级提醒 7 天 TTL 内不重复");
+    assert_eq!(second.escalated, 1, "首提超 N 天应升级提醒部门主管");
+    assert!(
+        second.notify.iter().any(|(uid, _)| *uid == 1),
+        "升级通知应发给 admin(1)，实际: {:?}",
+        second.notify
+    );
+
+    // 第三轮：升级提醒已重写 last_reminded_at（周期重置）→ 不重复升级（防重断言）
+    let third = ctx
+        .state
+        .flow_service
+        .scan_timeouts_with_redis(ctx.state.store.clone(), 200)
+        .await
+        .expect("扫描失败");
+    assert_eq!(third.escalated, 0, "升级提醒后周期重置，N 天内不重复升级");
+    assert_eq!(third.reminded, 0, "首次提醒同样不重复");
+
+    // 升级提醒写流水：timeout_remind（系统归因 operatorId=null）+ 升级备注
+    let v = ctx.get_json(&format!("/system/flow/task/{task1}")).await;
+    let timeline = v["data"]["timeline"].as_array().expect("timeline 应为数组");
+    let escalate_log = timeline
+        .iter()
+        .find(|x| x["action"] == "timeout_remind" && x["comment"] == "超时升级提醒（部门主管）")
+        .unwrap_or_else(|| panic!("应写入升级提醒流水，实际: {timeline:?}"));
+    assert!(
+        escalate_log["operatorId"].is_null(),
+        "升级提醒为系统动作，operatorId 应为 null，实际: {escalate_log}"
+    );
 }
 
 /// 链路 17：审批单据 Excel 导出（W-11）—— 内容正确 + 可见范围与列表一致
