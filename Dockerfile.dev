@@ -1,0 +1,69 @@
+# stepby-axum 开发环境 Dockerfile（R6-BE-ENG-17）
+#
+# 用途：
+#   提供统一的开发环境，避免开发者本地环境差异，支持热重载迭代。
+#
+# 与生产 Dockerfile 的区别：
+#   1. 使用 rust:1.96-bookworm 全量镜像（含调试工具链）
+#   2. 不做 release 优化编译，保留 debug 信息
+#   3. 安装 cargo-watch 支持文件监听热重载
+#   4. 不切换非 root 用户（开发方便调试）
+#   5. 不做多阶段构建，保留完整工具链便于 cargo clippy / cargo test
+#
+# 构建与运行：
+#   docker build -f Dockerfile.dev -t stepby-backend:dev .
+#   docker run -it --rm -p 8080:8080 -v ${PWD}:/app -v stepby_cargo_cache:/usr/local/cargo/registry stepby-backend:dev
+#
+# 或使用 docker compose（见 docker-compose.dev.yml）：
+#   docker compose -f docker-compose.dev.yml up
+
+FROM rust:1.96-bookworm
+
+# 安装系统依赖：
+# - pkg-config / libssl-dev：部分依赖可能需要（本项目用 rustls，但保留以备扩展）
+# - ca-certificates：HTTPS 请求
+# - curl：健康检查与外部资源下载
+# - git：部分 crate 通过 git 源拉取
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 cargo-watch 用于文件监听热重载
+# 失败不阻断构建（网络问题重试即可），但默认 CMD 会 fallback 到 cargo run
+RUN cargo install cargo-watch 2>&1 | tee /tmp/cargo-watch-install.log || echo "[warn] cargo-watch 安装失败，将使用 cargo run 作为 fallback"
+
+WORKDIR /app
+
+# 复制 Cargo.toml / Cargo.lock 与 workspace 子 crate 的 Cargo.toml，预编译依赖
+# 此步骤利用 Docker 层缓存：仅当依赖声明变更时才重新编译依赖
+#
+# 说明：`|| true` 是 Docker 缓存优化的容错策略——依赖预编译失败时不阻断镜像构建，
+# 真正的编译错误会在后续开发时的 `cargo watch -x run` 暴露。
+COPY Cargo.toml Cargo.lock ./
+COPY migration/Cargo.toml migration/
+RUN mkdir -p src migration/src && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > migration/src/main.rs && \
+    (cargo build 2>&1 | tee /tmp/dep-build.log || echo "[warn] 依赖预编译失败，将在开发时完整编译") && \
+    rm -rf src migration/src
+
+# 通过 volume 挂载源码，避免在镜像中重复复制
+# 实际开发时源码通过 -v ${PWD}:/app 挂载
+
+ENV TZ=Asia/Shanghai
+ENV RUST_LOG=info,axum_backend=debug
+ENV RUST_BACKTRACE=1
+
+EXPOSE 8080
+
+# 默认通过 cargo-watch 监听 src 变化自动重编译并运行
+# 等价于：cargo watch -x run
+# 若 cargo-watch 安装失败（见上方 RUN 步骤），fallback 到 cargo run
+# 也可在 docker run 时覆盖命令：
+#   docker run ... stepby-backend:dev cargo clippy --all-targets -- -D warnings
+#   docker run ... stepby-backend:dev cargo test
+CMD ["sh", "-c", "command -v cargo-watch >/dev/null 2>&1 && cargo watch -x run || cargo run"]

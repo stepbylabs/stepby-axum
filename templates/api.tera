@@ -1,0 +1,60 @@
+import request from '@/utils/request'
+
+// 说明：`request` 的响应拦截器**已解包**（返回 `res.data`，见 `utils/request.ts`），
+// 故此处显式标注返回类型为解包后的负载——否则推断为 `AxiosResponse`，
+// 调用处 `res.rows` / `res.data` 会报 TS2339（生成页面直接编译失败）。
+// 类型取 `any` 属**脚手架宽松**：落地时可按实体类型收紧（如 `Promise<TableDataInfo<Xxx>>`）。
+
+// 查询{{ table.functionName }}列表
+// 命名带实体前缀（`listXxx`）：与仓库既有 `listNotice`/`listUser` 等一致，
+// 且避免与页面内 `const list = ref([])` 局部声明**重名冲突**（TS2440）。
+export function list{{ table.className }}(query: any): Promise<any> {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/list',
+    method: 'get',
+    params: query
+  })
+}
+
+// 查询{{ table.functionName }}详细
+export function get{{ table.className }}(id: number): Promise<any> {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/' + id,
+    method: 'get'
+  })
+}
+
+// 新增{{ table.functionName }}
+export function add{{ table.className }}(data: any): Promise<any> {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}',
+    method: 'post',
+    data
+  })
+}
+
+// 修改{{ table.functionName }}
+export function update{{ table.className }}(data: any): Promise<any> {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}',
+    method: 'put',
+    data
+  })
+}
+
+// 删除{{ table.functionName }}
+export function del{{ table.className }}(id: number): Promise<any> {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/' + id,
+    method: 'delete'
+  })
+}
+{% if is_flow %}
+// 提交审批{{ table.functionName }}（flow 模板：单据进入审批引擎）
+export function submitFlow{{ table.className }}(id: number): Promise<any> {
+  return request({
+    url: '/{{ table.moduleName }}/{{ table.tableName }}/submit/' + id,
+    method: 'post'
+  })
+}
+{% endif %}

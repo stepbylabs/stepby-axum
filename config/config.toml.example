@@ -1,0 +1,526 @@
+# stepby-axum 配置文件模板
+#
+# 使用方法：
+# 1. 复制本文件为 config.toml：cp config/config.toml.example config/config.toml
+# 2. 修改下方占位符为真实值
+# 3. 生产环境建议通过环境变量注入敏感字段（环境变量优先级高于配置文件）：
+#    - DATABASE_URL：数据库连接串
+#    - REDIS_URL：Redis 连接串
+#    - JWT_SECRET：JWT 签名密钥（至少 32 字符）
+#    - JWT_EXPIRE_HOURS：JWT 过期小时数
+#    - SERVER_HOST：监听地址
+#    - SERVER_PORT：监听端口
+#
+# 注意：config.toml 已被 .gitignore 排除，不会进入版本控制。
+
+# 配置文件版本（A3）。顶层键：必须写在任何 [table] 段之前。
+# 缺省 = 1（存量配置无此键时按 1 处理，逐字节等价，无迁移）。当前仅支持 1；
+# 更高版本在启动时拒绝（fail-closed：该文件由更新版本的程序生成，静默忽略
+# 未知版本的语义差异比拒绝启动更危险）。
+config_version = 1
+
+# 权限未映射路由默认拒绝（fail-closed，W-1）。
+# 顶层键：必须写在任何 [table] 段之前，否则会被解析进上一张表而被静默忽略。
+# 仅当需要临时兼容"未登记权限映射"的历史路由时，才显式改为 false（fail-open，安全性下降）。
+permission_deny_by_default = true
+
+# ==================== 共享态存储档位（单文件零依赖部署）====================
+# 定位：token/验证码/黑名单/密码版本/租户运行时键/分布式锁/幂等等**共享态**的承载方式。
+#
+# mode = "auto"（**默认**）：`[redis].url` 有效 → redis 档；未配置/占位符 → local 档
+#   （零配置单文件启动：SQLite + local 共享态，双击即跑）。
+# mode = "local"：业务同库承载（sys_shared_kv / sys_shared_lock / sys_token_revocation
+#   三表 + sys_user.password_version 列）——S1 安全态（黑名单/pwd_ver/租户三态）落 DB
+#   权威层，重启不丢失；无任何外部依赖；多实例可共享（SQLite 后端建议单实例）。
+# mode = "redis"：现状命令（Redis 承载）+ S1 低频写双写 DB 权威层 + 启动期从 DB 回填
+#   Redis → 与 local 档双向切换无缝（改配置重启即切，无需迁移、无需全员重登）。
+#
+# ⚠️ 非法取值回落 auto 并打 WARN（fail-safe）；显式 redis 但 url 无效 → 拒绝启动
+#    （fail-closed）。切换详见 docs/optimization/ZERO-DEPENDENCY-DEPLOYMENT-PLAN-2026-10-01.md §4.5。
+# ⚠️ 也可用环境变量 CACHE_MODE=auto|local|redis 覆盖（容器场景无需改配置文件）。
+[cache]
+mode = "auto"
+gc_interval_secs = 600   # local 档过期行 GC 周期（秒）
+
+[server]
+host = "0.0.0.0"
+port = 8080
+# CORS 允许的 Origin 白名单（生产环境必须显式配置，不要使用 *）
+cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:80",
+]
+# 可信代理 IP 白名单（CIDR 或精确 IP）
+# 仅当直连客户端 IP 在此列表内时，才信任 X-Forwarded-For / X-Real-IP
+# 空列表表示不信任任何代理头，直接使用 TCP 对端 IP
+# 生产环境配置为反向代理的真实 IP，如 ["127.0.0.1", "10.0.0.0/8"]
+trusted_proxies = []
+# 是否启用 API 文档（Swagger UI / OpenAPI JSON）
+# 默认 false（生产 fail-closed），开发环境显式设为 true
+docs_enabled = true
+# P2-33：HTTP 状态码约定（`legacy` | `restful`）
+#   legacy（**默认 = 现状零变更**）：已知业务码（400/401/403/404/409/422/429/500/503）
+#     映射为同名真实 HTTP 状态；**未归类业务码回落 200 OK**（body.code 才是权威业务码）。
+#   restful：业务失败**绝不返回 200** —— 标准 HTTP 域（400..=599）取该状态码本身，
+#     2xx 取 200，其余自定义业务码（如 TOTP 的 1003）一律按 400 归类。
+#     适合"网关/监控直接按 HTTP 状态码告警"的部署；代价是前端不能只看 HTTP 200。
+#   ⚠️ 两档差异**只体现在未归类业务码**上；标准码两档完全一致。
+#   ⚠️ 非法值回落 legacy（fail-safe），不会导致启动失败。
+#   ⚠️ 前端 `request.ts` 成功/失败两个分支均识别 body.code（含 1003 TOTP 流程），
+#      故切到 restful 不会造成"后端改契约、前端不认"的断链。
+http_status_convention = "legacy"
+
+[database]
+# 生产环境通过环境变量 DATABASE_URL 注入，不要将真实密码写入配置文件
+# 支持以下三种数据库：
+#   MySQL:      mysql://user:password@host:3306/database
+#   PostgreSQL: postgres://user:password@host:5432/database
+#   SQLite:     sqlite://./data/stepby.db?mode=rwc
+url = "mysql://CHANGE_ME:CHANGE_ME@127.0.0.1:3306/stepby"
+max_connections = 10
+min_connections = 1
+connect_timeout = 10
+idle_timeout = 600
+# 语句级超时（秒，默认 60；0 = 显式关闭）——R9-ERR-004：
+#   PostgreSQL: statement_timeout + idle_in_transaction_session_timeout（覆盖全部语句）；
+#   MySQL:      SET SESSION max_execution_time（⚠️ 引擎限制，仅覆盖 SELECT）；
+#   SQLite:     本地嵌入库无服务端语句超时，本项不生效（busy_timeout=5s 兜底）。
+#   报表类长查询请按需调大或置 0 关闭。
+statement_timeout_secs = 60
+# data_scope 部门递归 CTE 深度上限（默认 30）——防 sys_dept.parent_id 脏数据
+# 成环时 PostgreSQL 无限递归（写入侧另有防环校验，本值为纵深防御第二道防线）。
+dept_cte_max_depth = 30
+
+[redis]
+# 生产环境通过环境变量 REDIS_URL 注入
+# 注意：当前使用 ConnectionManager（单连接多路复用），无需配置连接池大小
+url = "redis://CHANGE_ME@127.0.0.1:6379/0"
+
+[jwt]
+# 生产环境通过环境变量 JWT_SECRET 注入（至少 32 字符）
+# 启动时会校验：拒绝 CHANGE_ME 占位符和 < 32 字符的密钥
+secret = "CHANGE_ME_TO_A_STRONG_SECRET_KEY_AT_LEAST_32_CHARS"
+expire_hours = 24
+issuer = "stepby"
+# 密钥轮换过渡期：旧签名密钥（**仅用于验签回退，永不用于签发**）。
+# 零停机轮换：① 生成新密钥 → 把当前密钥移入本列表、secret 换成新密钥 → 滚动发布；
+#             ② 过渡期内新 token 用新密钥签发、旧 token 用旧密钥验签（用户无感，不被登出）；
+#             ③ 待超过 expire_hours（最长有效期）后**清空本列表** ⇒ 轮换完成。
+# ⚠️ 无自动迁移：缺省 `[]` = 单密钥，与改造前逐字节等价。
+# ⚠️ 旧密钥同样受强密钥校验（≥32 字符、非弱模式命中）——弱旧密钥会**拒绝启动**（fail-closed）。
+# 亦可用环境变量 JWT_PREVIOUS_SECRETS（逗号分隔）注入。
+previous_secrets = []
+
+[monitor]
+# 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
+# 生产环境通过环境变量 MONITOR_METRICS_TOKEN 注入，避免明文写入配置文件
+#
+# /metrics 端点 Bearer token：留空表示匿名可访问（便于本地 curl / 无配置拉取）
+# 配置后 Prometheus 需在 scrape job 中设置 `Authorization: Bearer <token>`。
+# 生产环境建议配置，或在反向代理层限制 /metrics 来源 IP。
+metrics_token = ""
+# 慢请求阈值（毫秒），超过即进入 /monitor/slow-sql 缓冲
+slow_request_ms = 300
+# 慢请求缓冲容量（保留最近 N 条）
+slow_capacity = 200
+# 错误聚合缓冲容量（保留最近 N 条 ERROR 日志）
+error_capacity = 500
+
+[log]
+# 日志级别（枚举）：trace | debug | info | warn | error（默认 info）
+# 也可通过环境变量 RUST_LOG 覆盖（如 RUST_LOG=debug）
+level = "info"
+# SQL 日志（生产环境建议关闭，避免泄露敏感信息）
+sql_logging = false
+
+[upload]
+# 存储后端类型（F1）：local（本地文件系统，默认） | s3（S3 兼容对象存储 MinIO/AWS/OSS/COS）
+# 切换 s3 后，前端无需改动，URL 由后端返回对象存储公开地址
+backend = "local"
+# 头像存储目录（相对路径）
+avatar_dir = "uploads/avatar"
+# 头像访问 URL 前缀
+avatar_url_prefix = "/uploads/avatar"
+# 允许的头像扩展名白名单（小写，不含点）
+avatar_allowed_exts = ["jpg", "jpeg", "png", "gif"]
+# 头像最大字节数（默认 5MB）
+avatar_max_size = 5242880
+# 通用上传文件存储目录（相对路径）
+common_dir = "uploads/file"
+# 通用上传文件访问 URL 前缀
+common_url_prefix = "/uploads/file"
+# 通用上传允许的扩展名白名单（小写，不含点）
+common_allowed_exts = ["jpg", "jpeg", "png", "gif", "pdf", "doc", "docx", "xls", "xlsx", "txt", "zip"]
+# 通用上传最大字节数（默认 10MB）
+common_max_size = 10485760
+
+# S3 兼容对象存储配置（backend = "s3" 时使用；敏感字段支持环境变量注入）
+# access_key / secret_key 可通过 `--env UPLOAD__S3__ACCESS_KEY=...` 或环境变量注入，避免入库配置文件
+[upload.s3]
+access_key = "minioadmin"
+secret_key = "minioadmin"
+endpoint = "http://127.0.0.1:9000"
+region = "us-east-1"
+bucket = "stepby"
+# 是否路径风格寻址（MinIO / 自建对象存储必须 true；AWS S3 可 false）
+path_style = true
+# 对外公开访问 URL 前缀（可为 CDN/网关，缺省回退 endpoint；留空则自动使用 endpoint）
+public_endpoint = "http://127.0.0.1:9000"
+
+[ip_location]
+# MaxMindDB 离线数据库文件路径（相对路径）
+# 文件不存在时所有查询返回空字符串，不影响业务流程
+# 下载地址：https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+mmdb_path = "data/GeoLite2-City.mmdb"
+
+[mail]
+# 邮件 SMTP 配置（可选，未配置时邮件相关功能降级为仅 sys_notice 入库）
+# 启用前请配置真实 SMTP 服务器信息
+enabled = false
+# SMTP 服务器主机（如 smtp.qq.com、smtp.gmail.com、smtp.163.com）
+host = ""
+# SMTP 服务器端口（SSL 直连 465，STARTTLS 587）
+port = 465
+# SMTP 登录用户名（通常为发件邮箱地址）
+username = ""
+# SMTP 登录密码或授权码
+# 生产环境建议通过环境变量 MAIL_PASSWORD 注入，不要写入配置文件
+password = ""
+# 发件人邮箱地址（通常与 username 相同）
+from_email = ""
+# 发件人显示名称
+from_name = "stepby 系统"
+# 是否使用 STARTTLS（端口 587 时通常为 true，端口 465 SSL 直连时为 false）
+starttls = false
+
+# 单点登录（OIDC Provider，v4 加固后）——整段可选，缺省 enabled=false
+# 生产部署硬约束：
+#   ① issuer 必须为 https 绝对地址（本机回环豁免），通过环境变量 SSO_ISSUER 注入；
+#   ② SSO 与前端需**同源部署**（authorize 依赖 Admin-Token Cookie，跨源需 SameSite=None 专用改造，当前不支持）；
+#   ③ Redis >= 6.2（授权码一次性消费依赖 GETDEL）；
+#   ④ CONFIG_ENC_KEY 必须配置（id_token_secret 信封加密，v3-P1'-4）。
+[sso]
+enabled = false
+# OIDC issuer（发现文档 iss）；留空时回退为请求 base_url（仅限开发环境，v4-R3）
+issuer = ""
+code_ttl_secs = 60             # 授权码有效期（默认 60s，短 TTL 一次性使用；v5 第八轮与代码默认对齐）
+id_token_ttl_secs = 3600       # ID Token 有效期（默认 1h）
+access_token_ttl_secs = 3600   # SSO 访问令牌（不透明）有效期（默认 1h，v4-P0-A）
+
+# ——— 批次 4：三个**默认关闭**的可选端点/行为（准则⑥：不整块砍掉，提供开关）———
+# introspection_enabled：开启后提供 RFC 7662 令牌内省 `POST /sso/introspect`。
+#   ⚠️ access_token 自 v4-P0-A 起是**不透明令牌**（非 JWT）⇒ RP 无法本地验签，
+#      内省正是这类令牌的标准校验机制。开启后需客户端认证，且只为**签发它的客户端**
+#      返回 active=true（他客户端恒 false，防跨客户端探测）。关闭 ⇒ 端点 404。
+introspection_enabled = false
+# audit_authorize_get：为 GET /sso/authorize 写操作审计日志（授权端点排查钓鱼/越权）。
+#   关闭 ⇒ 不写（= 历史行为；该端点此前刻意未接 oper_log 中间件）。
+audit_authorize_get = false
+# proxy_logo_uri：同意页 logo 改由**同源** `/sso/client-logo/{clientId}` 代理拉取
+#   （带 SSRF 校验 + 体积/超时限制 + 仅 image/*）。关闭 ⇒ 同意页直接外链第三方 logo
+#   （= 历史行为，会把用户 IP/Referer 泄漏给该主机）。
+proxy_logo_uri = false
+# ——— 本轮：D11 userinfo 短 TTL 缓存（原「定案不修」，按准则⑥改判为**默认关的开关**）———
+# 0（默认）= **不缓存** = 历史行为（每次 /sso/userinfo 都回查令牌绑定，吊销即时生效）。
+# > 0 = 按 access_token 哈希做**服务端**响应缓存，秒；**硬上限 300**（写更大也会被夹到 300）。
+# ⚠️ 与原则「停用即断链 / 吊销即时生效」存在真实冲突——开启即接受"最多 300 秒的吊销延迟"，
+#    请按「性能 vs 即时性」自行权衡；这也是它默认关闭的原因（冲突不等于永久不做）。
+userinfo_cache_ttl_secs = 0
+# ——— 本轮：D9 同意票（SSO-3 **最后一项**，按准则⑥改判为**默认关的开关**）———
+# POST /sso/consent 的入参是对 authorize 参数的**客户端回显**。服务端已用 redirect_uri 白名单
+# + scopes 子集校验收敛了后果，但"同意参数被中间人/被诱导浏览器篡改"这一攻击面本身仍在。
+#   off（**默认**）= 不签发、不校验 = 历史行为（逐字节等价）；
+#   required = authorize 判定需同意时签发**一次性服务端票据**（随机 id 落 Redis，
+#     票面 = clientId/redirectUri/scope/state/nonce/codeChallenge + 发起用户 userId），
+#     经 /sso-consent?ticket=... 交前端回传；POST /sso/consent 必须带票且回显参数与票面
+#     **逐字一致**（None 与空串归一后比），否则 400；校验通过即**一次性消费**（批准/拒绝都消费）。
+#   ⚠️ 票据是服务端真相（不引入新签名密钥）；Redis 未命中/过期/被篡改 ⇒ 400（fail-closed）。
+#   ⚠️ 开启会改变同意页契约（前端需回传 ticket）——前端已兼容：后端不下发则字段缺省。
+consent_ticket = "off"
+# 同意票据有效期（秒，默认 300；夹取 60..=1800）
+consent_ticket_ttl_secs = 300
+
+# ==================== 审批工作流（m20260923_000002 flow_module）====================
+# 整个 [flow] 段可省略（全部走结构体缺省）；下列取值与代码缺省一一对应。
+# W-7 起超时提醒策略：**只提醒一次**（DB last_reminded_at 为事实源）+ 首提后超 N 天升级主管。
+[flow]
+enabled = true                 # 超时扫描任务第二开关（另一开关为 timeout_scan_cron 非空）
+timeout_scan_cron = "0 */10 * * * *"  # 6 字段含秒；空字符串 = 禁用该任务
+timeout_hours = 48             # 待办 SLA（小时），超过即触发提醒
+remind_interval_secs = 3600    # 首次提醒的多实例互斥窗口（Redis SETNX TTL）
+remind_escalate_days = 3       # 升级提醒周期（天，自首次/上次升级提醒起算）；0 = 关闭升级
+scan_batch_limit = 200         # 单轮扫描最多处理的任务数（分页限量）
+scan_lock_enabled = false      # S-1 分布式扫描锁；**单实例部署保持 false**，多实例部署须置 true
+scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描最坏耗时，防并发窗口重现
+
+# ==================== 能力位（Feature Flags，三层开关的最外层）====================
+# 定位：本项目「大而全」，能力齐备但**默认安全**——高危能力默认关闭，按需显式开启。
+# 三层收敛：平台 [features]（能开什么）→ 租户套餐 sys_tenant_package.features
+#          （这个租户能开什么）→ 角色授权（这个人能用什么）。
+#
+# 取值规则：
+#   - 键与合法模式由代码注册表 `src/common/features.rs::KNOWN_FEATURES` 定义（单一事实源）；
+#     未登记键、非法模式在启动时被**剔除并告警**（fail-closed，不会意外开启）。
+#   - 开关取「模式」而非裸 bool；`off` = 关闭态 = 与迁移前行为完全一致。
+#   - 本段缺省（整段省略或全为 off）= 全关闭。
+#
+# 本段是**平台层开关**：即使在此开启，租户仍需在套餐 features 中显式开启，权限才可下放。
+#
+# ⚠️ 能力位键**含点号**，TOML 中必须加引号（不加引号会被解析成嵌套表而整段解析失败）。
+[features]
+# WebAuthn / Passkey 登录（默认 off）——**登录面能力**：开启后用户可自助绑定 passkey，
+# 并在登录页以 passkey（免密码）登录。关闭态 = 6 条端点一律 404（不暴露"存在但被关"）。
+# ⚠️ 开启前须确认 [webauthn].rp_id / origin 可用（留空则从 [server].cors_origins 首个来源
+#    推导 rp_id=注册域、origin=该来源）；推导失败时启动打 WARN，请求期返回 503。
+# ⚠️ 本能力位不向任何租户下放 perm（登录面能力），无需租户套餐配合。
+"auth.webauthn" = "off"
+# 租户域名自助管理（默认 off）——开启后租户管理员可管理**本租户**域名；
+# 需服务层按 tid 收窄 + 租户套餐同时开启，否则"菜单可见但请求 403"的假入口仍被拦截。
+"tenant.domain_self_service" = "off"
+# 备份中心可见性（默认 off）：off | view_only | full
+#   view_only = 只读可见（列表 + 详情；**不含下载**）——平台普通角色可查看备份列表，
+#               但下载/恢复/删除维持 403（MT-7 诉求）；
+#   full      = 只读 + 下载（租户只能下载**自己的** tenant_export 数据包，服务层行级收窄）。
+#   ⚠️ 写面/危险面（创建整库备份 / 恢复覆盖现库 / 删除）在任何档位下均不下放。
+#   ⚠️ `full` 档会一并让平台普通角色获得下载面（它是角色菜单模板的回填目标，tid=0 ⇒ 无行级
+#      收窄）⇒ 若只想要"平台普通角色只读"而不想放开整库下载，请仅开 `view_only`。
+#   ⚠️ 批次 2 的旧键名 `backup.readonly_visible`（单档 off|on）已更名为本键。
+#      **无自动迁移**：旧键会被净化回 `off` 并在启动日志告警 ⇒ 必须手工改名；
+#      手工迁移请按**保守口径** `on` ⇒ `view_only`（不自动升级为可下载，与 `deploy/README.md §7.2` 一致）。
+"backup.visibility" = "off"
+# 租户自助导出（默认 off）——开启后租户可导出**本租户**数据包
+"backup.tenant_self_export" = "off"
+# 租户自建导航 L3（默认 off）：off | view_only | full
+#   view_only = 仅可查看平台预置的 L3 导航；full = 可在套餐∩角色授权范围内自建导航项
+"nav.l3" = "off"
+# GDPR 被遗忘权 / 用户匿名化（默认 off）：off | precheck | full
+#   off      = 端点表现为 404（关闭态即安全态）；
+#   precheck = 仅允许**只读预检**（dry-run，返回将被置换的字段与受影响关系计数，不写库）；
+#   full     = 允许执行**不可逆**匿名化（置换 PII 字段 + 释放登录键 + 吊销全部会话/PAT/SSO 令牌）。
+#   ⚠️ 平台治理动作：仅平台管理员（tenant_id == 0）可触发，不随租户套餐下放权限。
+"privacy.user_erasure" = "off"
+
+# ==================== 定时任务调度器（集群模式）====================
+# 治理对象：**内置定时任务**（flow_timeout_scan / mmdb_auto_update）的"整轮跨实例互斥"。
+# 开关取「模式」而非裸 bool（项目准则③）；默认 `auto` = 沿用各任务历史开关，
+# **对存量部署零行为变更**。
+#
+#   auto   （默认）flow 沿用 [flow].scan_lock_enabled；mmdb 保持加锁 ⇒ 现状
+#   single 明确单实例部署 ⇒ 内置任务一律不加锁（省一次 Redis NX 往返）
+#   leader 多实例选主 ⇒ 内置任务一律加锁（仅持锁实例执行整轮）
+#   all    每个实例都执行（幂等型任务）⇒ 内置任务一律不加锁
+#
+# ⚠️ 非法取值在启动时回落 `auto` 并告警（fail-safe）。
+# ⚠️ **边界**：`sys_job` 的逐任务防重入锁 `lock:scheduler:{job_id}` 属"同一任务防重入"，
+#    单实例同样需要，**不随本开关关闭**。
+# replicas：本部署的**实例（副本）数**，仅供启动期告警（不参与运行时判定）。
+#    `replicas > 1` 且 `cluster_mode = auto` ⇒ 启动打 WARN，提示改 `leader`。
+#    默认 1 = 单实例（现状）。副本数无法在进程内可靠探测，故要求部署方显式声明。
+[scheduler]
+cluster_mode = "auto"
+replicas = 1
+# 内置任务整轮互斥锁的默认 TTL（秒）；flow 任务仍优先用 [flow].scan_lock_ttl_secs
+lock_ttl_secs = 300
+
+# ==================== UI 展示策略 ====================
+# 定位：本项目「大而全」，展示层策略也做成开关（原判定"业务页不加归属列"改为
+# **提供开关**，项目准则⑥）。注意本段是**展示层**开关，不构成服务端安全边界——
+# 数据面隔离始终由服务层的 tenant_scope 承担。
+#
+# show_tenant_column（业务列表页是否显示「所属租户」归属列）：
+#   auto   （默认）仅平台操作者（tid = 0）可见 ⇒ **等价于历史行为**
+#   always 平台与租户操作者均可见（租户看到的是自己的租户号或"平台"）
+#   never  一律不显示
+#
+# ⚠️ 非法取值在启动时回落 auto 并告警（fail-safe，不会意外扩大可见面）。
+[ui]
+show_tenant_column = "auto"
+# tenant_filter（业务列表页「按租户筛选」入口的可见范围）：
+#   off      （默认）不提供入口 ⇒ **等价于历史行为**
+#   platform 仅平台操作者（tid = 0）可见筛选入口
+#   always   平台与租户操作者均可见
+#
+# ⚠️ 该筛选只用于**收窄**：后端把显式 `tenantId` 与行级 `tenant_scope` **相与**（AND）。
+#    它**不构成安全边界** —— 租户即便手工传他租户 id 也只能得到空集，不存在越权读面。
+# ⚠️ 非法取值在启动时回落 `off` 并告警（fail-safe，不会意外扩大可见面）。
+# 已接入页面：操作日志、登录日志、前端错误日志、用户管理。
+tenant_filter = "off"
+
+# ==================== ACME 证书需求输出（集成点）====================
+# 定位：**证书签发属网关职责**（NGINX+certbot / Caddy / Traefik / 云 LB 各有方案），
+# 内置一套只会把用户锁死在单一栈上。故按项目准则⑥做成**集成点**：域名集合发生
+# **状态迁移**时，把「证书需求清单」推给你自己的脚本，由脚本去调 ACME 客户端。
+#
+# 触发时机（只在状态迁移时推送 ⇒ 天然幂等）：
+#   cert.issue   域名 DNS TXT 验证**首次通过** ⇒ 需要签发证书
+#   cert.remove  **已验证**域名被删除         ⇒ 需要吊销/清理证书
+# 载荷（JSON）：
+#   { "source":"stepby", "event":"cert.issue", "host":"shop.example.com",
+#     "tenantId":12, "tenantCode":"acme", "verifyStatus":"1", "occurredAt":"..." }
+# 请求头：Content-Type: application/json、X-Stepby-Event: <event>，
+#        配置 secret 时另带 X-Stepby-Signature: sha256=<HMAC-SHA256(body)>。
+#
+# mode：
+#   off     （默认）不发任何出站请求 ⇒ 等价于历史行为
+#   webhook 推送到 webhook_url（缺失或非 http(s) ⇒ 启动 WARN 并按 off 处理，不静默）
+# 落地配方（certbot / acme.sh / Traefik）见 deploy/README.md §7.1。
+[acme]
+mode = "off"
+# webhook_url = "https://ops.example.com/hooks/stepby-acme"
+# secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
+timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
+
+# ==================== 出站领域事件（集成点）====================
+# 定位：把"领域事件"交给**你自己写的接收端**，**不是**内置消息队列。
+# 需要事件驱动 / MQ / 数据同步时，由接收端转发到 Kafka / RabbitMQ / 数仓 / 通知，
+# 从而不把你锁死在单一技术栈上（项目准则⑥：原判"不进本仓"改为"提供集成点/开关"）。
+#
+#   off     （默认）不发任何出站请求 —— 与改造前逐字节等价
+#   webhook        领域事件以 HTTP POST 推到 webhook_url
+#
+# 信封（稳定契约，改名即破坏接收端）：
+#   { "source": "stepby", "event": "<事件名>", "occurredAt": "<本地时间>", "data": { ... } }
+# 请求头：Content-Type: application/json、X-Stepby-Event: <事件名>；
+#        配置 secret 后追加 X-Stepby-Signature: sha256=<HMAC-SHA256(body) 的 hex>。
+#
+# 当前已发布事件（`src/service/event_outbox_service.rs::ALL_EVENTS`）：
+#   tenant.created          data: { tenantId, tenantCode, tenantName, operator }
+#   tenant.status_changed   data: { tenantId, status, operator }        status: '0' 正常 / '1' 停用
+#   tenant.deleted          data: { tenantId, operator }
+#   tenant.restored         data: { tenantId, operator }
+#
+# ⚠️ 推送为 fire-and-forget：失败只打 WARN，**不影响**租户业务结果；
+#    请用你自己的全量对账脚本兜底（事件只保证"状态迁移时推送一次"，不做服务端去重缓存）。
+# ⚠️ outbound = "webhook" 但 webhook_url 缺失/非 http(s) ⇒ 启动打 WARN 且按 off 处理
+#    （拒绝静默失效）；非法 outbound 取值回落 off 并打 WARN（fail-safe）。
+[events]
+outbound = "off"
+# webhook_url = "https://ops.example.com/hooks/stepby-events"
+# secret = ""            # 可选；设置后请求带 HMAC-SHA256 签名供接收端验签
+timeout_secs = 5         # 单次推送超时（秒），夹在 1..=60
+
+# ==================== WebAuthn / Passkey ====================
+# 能力位 `auth.webauthn`（[features] 段，默认 off）的**配置面**。
+#
+# rp_id / origin 是 WebAuthn 的**信任锚**（配错即认证恒失败）：
+#   rp_id  依赖方标识，域名后缀（如 example.com；**不含 scheme 与端口**）；
+#   origin 期望来源（如 https://example.com；**含 scheme**）。
+#
+# 二者留空时从 `[server].cors_origins` 首个来源**推导兜底**：
+#   origin ← cors_origins[0]；rp_id ← 该 origin 的 host 去掉最左子域（app.example.com ⇒ example.com；
+#   localhost / IP 原样保留）。⚠️ 推导是保守启发式，多级公共后缀（如 a.b.co.uk）不精确，
+#   生产环境请**显式配置** rp_id / origin。
+#
+# ⚠️ 能力位开启但 rp_id/origin 未配置且无法推导（或推导结果非法）⇒ 启动打 WARN，
+#    请求期返回 503（服务器未就绪），**拒绝静默失效**。
+[webauthn]
+rp_id = ""               # 留空 ⇒ 从 [server].cors_origins 首个来源的 host 推导注册域
+rp_name = "Stepby"        # 浏览器 passkey 提示中展示的依赖方名称
+origin = ""              # 留空 ⇒ 取 [server].cors_origins 首个来源
+state_ttl_secs = 300     # 挑战 / 会话临时态 TTL（秒，至少 1）
+
+# ==================== 出站韧性（熔断） ====================
+# #10：`[acme]` 与 `[events]` 都是 fire-and-forget POST。目标端点下线时，**每个事件**都会
+#      重新发一次请求（各带一次连接/超时预算）并打一条 WARN —— 既浪费资源，又用噪声淹没
+#      真正的告警。打开熔断后，同一目标 URL 连续失败达阈值即"打开"，冷却期内**直接跳过发送**，
+#      到期放行**一次探测**（半开），探测成功即恢复（连续失败计数清零）。
+#
+# ⚠️ 默认 off = 现状：不判定、不记账，每次都尝试发送（与改造前逐字节等价）。
+# ⚠️ 非法 outbound_breaker 取值回落 off 并打 WARN（fail-safe，不拒绝启动）；
+#    failure_threshold 夹在 1..=1000，cooldown_secs 夹在 1..=86400。
+# ⚠️ 熔断是**进程内**状态：多副本部署时每个实例独立判定（本能力不引入跨实例共享态）。
+# ⚠️ 熔断只影响"是否发出/记账"，**不影响**业务结果（推送本就是 fire-and-forget）。
+[resilience]
+outbound_breaker = "off"  # off（默认，= 现状）| on
+failure_threshold = 5     # 连续失败达该次数 ⇒ 打开熔断（夹在 1..=1000）
+cooldown_secs = 60        # 打开后的冷却秒数，到期放行一次探测（夹在 1..=86400）
+
+# ==================== 全局限流实现 ====================
+# 限流中间件（/login、/register、/captchaImage 等公开认证端点）的令牌桶承载方式。
+#
+# mode = "local"（**默认 = 现状**）：进程内令牌桶（Mutex<HashMap>），单实例精确、无 Redis 往返。
+# mode = "redis"：Redis 分布式令牌桶（Lua 原子执行），**多实例共享同一配额**——
+#   多实例部署（K8s 多副本 / 多机）**必须**切到 redis，否则各实例独立计数，
+#   攻击者轮询不同实例即可把配额放大 N 倍。
+#
+# ⚠️ redis 档下 Redis 命令失败一律 **fail-closed 返回 503**（限流器不可用却放行 = 攻击者获准），
+#    与限流配置查询失败的既有口径一致。单实例部署若无特殊需要，保持 local 即可。
+# ⚠️ 非法 mode 取值回落 local 并打 WARN（fail-safe，不拒绝启动）。
+# ⚠️ 也可用环境变量 RATE_LIMIT_MODE=local|redis 覆盖（容器场景无需改配置文件）。
+[rate_limit]
+mode = "local"           # local（默认，= 现状）| redis
+key_ttl_secs = 300       # Redis 桶键 TTL（秒，夹在 60..=86400）；
+                         # 实际生效值再与「桶自然补满秒数 × 2」取大，避免提前过期导致限流被放宽
+
+# ==================== 登录风控集成点 ====================
+# 定位（项目准则⑥）：本仓**不内置风控数据源**，而是提供"开关 + 判定内核 + 审计留痕"的集成点，
+# 由使用者按自身合规要求开启。全部默认 off ⇒ 不判定 UA、不查历史登录、不产生额外审计行，
+# 与改造前**逐字节等价**（关闭态即安全态）。
+#
+# ⚠️ UA 是**弱信号**（可随意伪造），本档位用于挡掉批量脚本的"顺手尝试"，**不是**安全边界；
+#    真正的登录防护是验证码 + 限流 + 失败锁定 + TOTP。
+[risk_control]
+# 登录面工具型 UA 处置：
+#   off（**默认 = 现状**）：不判定 UA。
+#   block：命中 login_ua_blocklist（大小写无关子串）⇒ 403 并写一条失败登录日志；
+#          空 UA **放行**但打 WARN —— 空 UA 是弱信号（HTTP/1.0 客户端、部分 SDK 与探针都不发 UA），
+#          硬拦误伤面大且"加一个 header"即可绕过。
+#   strict：在 block 基础上**同时拒绝空 UA**（适合"只允许浏览器登录"的封闭部署）。
+# 非法取值回落 off 并打 WARN（fail-safe）。
+login_ua_filter = "off"
+
+# 自定义工具型 UA 特征清单（大小写无关的**子串**匹配）。
+# 留空（默认）⇒ 使用内置清单：curl/、wget/、python-requests/、python-urllib/、
+# go-http-client/、libwww-perl/、java/、httpclient/、scrapy/。
+# ⚠️ 内置清单刻意不含 node/axios/okhttp 等同时被合法 SDK 使用的标识
+#    （收录它们会在启用后误伤使用者自己的服务端集成）。
+login_ua_blocklist = []
+
+# 登录面异地告警：
+#   off（**默认 = 现状**）：不与历史登录比对。
+#   alert：与同租户内同用户名**最近一次成功登录**的归属地做**粗粒度（国家 + 省份）**比对；
+#          不同 ⇒ 打 WARN 并把对比结果写入本次成功登录日志的 msg（可审计）。
+# 只有"告警"没有"拦截"是刻意的：地区识别基于 IP 库，VPN / 运营商出口 / 移动网络都会误判，
+# 拦截会变成"用户被自己锁在门外"。非法取值回落 off 并打 WARN（fail-safe）。
+login_geo_alert = "off"
+
+# ==================== 上传文件病毒扫描集成点 ====================
+# 定位（项目准则⑥）：本仓**不内置杀毒引擎**（ClamAV / VirusTotal 都不进本仓），
+# 而是把文件字节交给使用者自己声明的扫描端点，由使用者按合规要求决定开启。
+# 默认 off ⇒ 不校验地址、不建 HTTP 客户端、**一个字节都不出站**（与改造前逐字节等价）。
+#
+# 请求契约：POST <url>，Content-Type: application/octet-stream，body = 文件原始字节；
+#          X-Stepby-Filename: <URL 编码的文件名>；token 非空时附 Authorization: Bearer <token>。
+# 响应契约：HTTP 2xx + JSON {"clean": true|false, "detail": "可选说明"}。
+#          clean=true ⇒ 放行；clean=false ⇒ 400 拒绝（detail 只落日志，**不回显**给用户）。
+#          非 2xx / 缺 clean 字段 / 解析失败 / 连接失败 ⇒ 按 fail_closed 处置。
+# 生效位置：/common/upload、/system/file/upload、/system/user/profile/avatar（均在落盘**之前**）。
+#
+# ⚠️ 端点地址经 common::ssrf 校验（仅 http(s)，且拒绝内网/环回/链路本地/云元数据地址）；
+#    指向内网地址会被判为"扫描器不可用"，而非静默放行。
+[upload_scan]
+mode = "off"             # off（默认 = 现状）| http
+url = ""                 # 扫描端点（mode = "http" 时必填）
+token = ""               # 可选 Bearer 令牌（面向需鉴权的 AV 网关）
+timeout_secs = 10        # 请求超时秒数（夹在 1..=60）；扫描在上传主链路上，超时即按 fail_closed 处置
+fail_closed = true       # 扫描器不可用时：true（默认）= 拒绝上传（503）；false = 记 WARN 后放行
+
+# ── 运维提示：sys_config 运行时开关（captchaEnabled/registerUser 等）──────────
+# 这些开关存于数据库 sys_config 表（不在本文件），管理端「参数设置」页修改后自动刷新缓存、立即生效。
+# 管理端页面保存即自动失效缓存并生效（edit_config 内置 invalidate）；仅当绕过管理端直接改库（脚本/DBA）时才需手动刷新：（双层 cache-aside：config:def:{key} / config:{tid}:{key}，TTL 300s）：
+#   curl -X DELETE -H "Authorization: Bearer <admin_token>" http://<host>:8080/prod-api/system/config/refreshCache
+# 或在管理端「参数设置」页随意保存一次触发 refresh_cache。
+# ── AI 助手（NL2SQL Copilot）──────────────────────────────
+# 三层开关的平台层：enabled=false（默认）时 /ai/* 一律 403。
+# 租户层 = 能力位 ai.copilot（租户套餐 features JSON）；角色层 = ai:chat 授权。
+# api_key 生产环境建议 AI_API_KEY 环境变量注入；provider 为 OpenAI 兼容协议
+# （OpenAI / DeepSeek / 通义千问 / Ollama(/v1) / vLLM 均可）。
+[ai]
+enabled = false
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = "gpt-4o-mini"
+max_rows = 100
+timeout_secs = 30
+allowed_tables = ["sys_user", "sys_dept", "sys_role", "sys_post", "sys_config", "sys_dict_type", "sys_dict_data", "sys_notice", "sys_job", "sys_logininfor", "sys_oper_log", "sys_tenant"]

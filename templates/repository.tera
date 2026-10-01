@@ -1,0 +1,39 @@
+//! {{ table.tableName }} 数据访问层
+
+use sea_orm::*;
+
+use crate::entity::{{ table.tableName }}::{ActiveModel, Column, Entity as {{ table.className }}, Model};
+use crate::repository::base::BaseRepository;
+
+#[derive(Clone)]
+pub struct {{ table.className }}Repository {
+    base: BaseRepository<{{ table.className }}>,
+}
+
+impl {{ table.className }}Repository {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { base: BaseRepository::new(db) }
+    }
+
+    pub fn base(&self) -> &BaseRepository<{{ table.className }}> { &self.base }
+
+    pub async fn find_by_id(&self, id: i64) -> Result<Option<Model>, DbErr> {
+        {{ table.className }}::find().filter(Column::{{ pk_column.rustField | pascal_case }}.eq(id)).one(self.base.db()).await
+    }
+
+    pub async fn find_all(&self) -> Result<Vec<Model>, DbErr> {
+        {{ table.className }}::find().all(self.base.db()).await
+    }
+
+    pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
+        self.base.insert(model).await
+    }
+
+    pub async fn update(&self, model: ActiveModel) -> Result<Model, DbErr> {
+        self.base.update(model).await
+    }
+
+    pub async fn delete_by_id(&self, id: i64) -> Result<DeleteResult, DbErr> {
+        {{ table.className }}::delete_many().filter(Column::{{ pk_column.rustField | pascal_case }}.eq(id)).exec(self.base.db()).await
+    }
+}

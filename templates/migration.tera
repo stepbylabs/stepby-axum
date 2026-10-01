@@ -1,0 +1,18 @@
+-- {{ table.functionName }} 表结构（仅供参考，实际表结构由数据库元数据导入）
+-- 表名: {{ table.tableName }}
+-- 描述: {{ table.tableComment | default(value="") }}
+
+CREATE TABLE IF NOT EXISTS {{ table.tableName }} (
+{% for col in columns %}    {{ col.columnName }} {{ col.columnType }}{% if col.isRequired == "1" %} NOT NULL{% endif %}{% if col.isPk == "1" %} PRIMARY KEY{% endif %}{% if col.isIncrement == "1" %} AUTOINCREMENT{% endif %},
+{% endfor %}{% if is_flow %}    -- 审批投影列（flow 模板）：与 sys_flow_task / sys_flow_log **同事务**回写，属派生投影
+    status VARCHAR(16) NOT NULL DEFAULT 'draft',
+    current_round INT NOT NULL DEFAULT 0,
+    current_node_seq INT,
+    applicant_id BIGINT,
+    applicant_name VARCHAR(64),
+    dept_id BIGINT,
+    submitted_at TIMESTAMP,
+    finished_at TIMESTAMP,
+{% endif %}    -- v5-E3（多租户前瞻）：租户 ID 预留列，默认 0 = 平台单租户，不参与查询过滤
+    tenant_id BIGINT NOT NULL DEFAULT 0
+);
