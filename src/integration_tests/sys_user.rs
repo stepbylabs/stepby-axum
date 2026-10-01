@@ -20,7 +20,7 @@ async fn test_user_list_query_and_detail() {
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(
         rows.len() >= 2,
-        "种子应至少 2 个用户（admin/ry），实际: {v}"
+        "种子应至少 2 个用户（admin/stepby），实际: {v}"
     );
     assert!(
         v["total"].as_u64().unwrap() >= 2,

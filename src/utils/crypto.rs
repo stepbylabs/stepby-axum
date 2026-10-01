@@ -422,7 +422,7 @@ mod crypto_tests {
         // 旧 JSON（v2.13 前，无 exp 字段）反序列化时 exp 应默认为 0
         let legacy_json = r#"{
             "user_id": 2,
-            "username": "ry",
+            "username": "stepby",
             "ip": "192.168.1.1",
             "login_time": "2026-07-30 10:00:00",
             "browser": "Firefox",
@@ -432,7 +432,7 @@ mod crypto_tests {
         }"#;
         let session: OnlineSession = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(session.exp, 0, "旧 JSON 反序列化时 exp 应默认为 0");
-        assert_eq!(session.username, "ry");
+        assert_eq!(session.username, "stepby");
         assert_eq!(session.dept_name, "测试部");
     }
 }

@@ -1484,7 +1484,7 @@ async fn insert_sys_post(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     );
     execute_idempotent_insert(manager, &sql).await?;
 
-    // 插入 sys_user_post 关联（admin 关联董事长，ry 关联普通员工）
+    // 插入 sys_user_post 关联（admin 关联董事长，stepby 关联普通员工）
     let user_post_sql = "sys_user_post (user_id, post_id) VALUES (1, 1), (2, 4)";
     execute_idempotent_insert(manager, user_post_sql).await?;
     Ok(())
