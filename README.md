@@ -47,7 +47,7 @@ python scripts/e2e_sso_oidc.py                   # 终端 2（--base 可指定�
 
 ## License
 
-[MIT](LICENSE)，Copyright (c) 2024-2026 Stepby。
+[MIT](LICENSE)，Copyright (c) 2026 Stepby。
 ## 运维提示：sys_config 运行时开关的生效机制
 
 `sys.account.captchaEnabled`、`sys.account.registerUser` 等运行时开关存于数据库 `sys_config` 表，
