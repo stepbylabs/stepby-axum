@@ -2107,12 +2107,13 @@ pub struct FlowConfig {
     /// （DB `last_reminded_at` 为事实源），后续不再重复打扰（待办红点常驻由列表承担）。
     #[serde(default = "default_flow_remind_interval")]
     pub remind_interval_secs: u64,
-    /// 升级提醒阈值（小时；默认 72；**0 = 关闭升级**）
+    /// 升级提醒周期（天；默认 3；**0 = 关闭升级**）
     ///
-    /// 待办超时超过该时长仍 pending 时，额外提醒一次**申请人部门主管**（不可用时回退 admin），
-    /// 形成"首次提醒本人 → 超 N 天升级主管"的闭环（W-7 推荐策略）。
-    #[serde(default = "default_flow_escalate_after_hours")]
-    pub escalate_after_hours: i64,
+    /// 待办**首次提醒后**超过该天数仍未处理时，再次提醒并**升级给申请人部门主管**
+    /// （不可用时回退 admin），形成"首次提醒本人 → 超 N 天升级主管"的闭环（W-7 推荐策略）。
+    /// 周期事实源 = DB `last_reminded_at`：升级提醒同样重写该字段 ⇒ 自动进入下一个 N 天周期。
+    #[serde(default = "default_flow_remind_escalate_days")]
+    pub remind_escalate_days: u64,
     /// 单次扫描最多处理的任务数（分页限量，防止超出任务超时上限）
     #[serde(default = "default_flow_scan_batch")]
     pub scan_batch_limit: u64,
@@ -2143,8 +2144,8 @@ fn default_flow_timeout_hours() -> i64 {
 fn default_flow_remind_interval() -> u64 {
     3600
 }
-fn default_flow_escalate_after_hours() -> i64 {
-    72
+fn default_flow_remind_escalate_days() -> u64 {
+    3
 }
 fn default_flow_scan_batch() -> u64 {
     200
@@ -2163,7 +2164,7 @@ impl Default for FlowConfig {
             enabled: default_flow_scan_enabled(),
             timeout_hours: default_flow_timeout_hours(),
             remind_interval_secs: default_flow_remind_interval(),
-            escalate_after_hours: default_flow_escalate_after_hours(),
+            remind_escalate_days: default_flow_remind_escalate_days(),
             scan_batch_limit: default_flow_scan_batch(),
             scan_lock_enabled: default_flow_scan_lock_enabled(),
             scan_lock_ttl_secs: default_flow_scan_lock_ttl(),

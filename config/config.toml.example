@@ -242,13 +242,13 @@ consent_ticket_ttl_secs = 300
 
 # ==================== 审批工作流（m20260923_000002 flow_module）====================
 # 整个 [flow] 段可省略（全部走结构体缺省）；下列取值与代码缺省一一对应。
-# W-7 起超时提醒策略：**只提醒一次**（DB last_reminded_at 为事实源）+ 超 N 小时升级主管。
+# W-7 起超时提醒策略：**只提醒一次**（DB last_reminded_at 为事实源）+ 首提后超 N 天升级主管。
 [flow]
 enabled = true                 # 超时扫描任务第二开关（另一开关为 timeout_scan_cron 非空）
 timeout_scan_cron = "0 */10 * * * *"  # 6 字段含秒；空字符串 = 禁用该任务
 timeout_hours = 48             # 待办 SLA（小时），超过即触发提醒
 remind_interval_secs = 3600    # 首次提醒的多实例互斥窗口（Redis SETNX TTL）
-escalate_after_hours = 72      # 超时升级主管阈值（小时）；0 = 关闭升级
+remind_escalate_days = 3       # 升级提醒周期（天，自首次/上次升级提醒起算）；0 = 关闭升级
 scan_batch_limit = 200         # 单轮扫描最多处理的任务数（分页限量）
 scan_lock_enabled = false      # S-1 分布式扫描锁；**单实例部署保持 false**，多实例部署须置 true
 scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描最坏耗时，防并发窗口重现

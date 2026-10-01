@@ -580,11 +580,11 @@ impl JobScheduler {
                 ))
             })?;
             tracing::info!(
-                "内置定时任务注册成功: flow_timeout_scan (cron: '{}', 单批上限 {} 条, SLA {}h, 升级阈值 {}h, 整轮互斥锁: {})",
+                "内置定时任务注册成功: flow_timeout_scan (cron: '{}', 单批上限 {} 条, SLA {}h, 升级周期 {} 天, 整轮互斥锁: {})",
                 config.flow.timeout_scan_cron,
                 config.flow.scan_batch_limit,
                 config.flow.timeout_hours,
-                config.flow.escalate_after_hours,
+                config.flow.remind_escalate_days,
                 if flow_round_lock_needed {
                     format!("启用（TTL {}s）", flow_round_lock_ttl)
                 } else {

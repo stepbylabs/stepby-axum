@@ -151,6 +151,12 @@ impl SysFlowTaskRepository {
         let res = SysFlowTask::update_many()
             .col_expr(Column::AssigneeId, Expr::value(new_assignee_id))
             .col_expr(Column::Status, Expr::value("pending"))
+            // 换持有人即重置提醒状态：首次提醒语义针对**当前持有人**，
+            // 不重置会让转办后的新持有人永远收不到首次提醒（W-7）。
+            .col_expr(
+                Column::LastRemindedAt,
+                Expr::value(Option::<NaiveDateTime>::None),
+            )
             .filter(Column::TaskId.eq(task_id))
             .filter(Column::Status.eq("pending"))
             .exec(self.base.db())

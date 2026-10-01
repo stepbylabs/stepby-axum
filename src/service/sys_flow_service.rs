@@ -193,11 +193,21 @@ pub struct FlowProjection {
 /// 内置示例单据的业务类型（历史常量名保留，等价于 `biz_type::DEMO_DOC`）
 pub const BIZ_TYPE_DEMO: &str = biz_type::DEMO_DOC;
 
-/// 升级提醒的 Redis 去重 TTL（秒）——7 天（W-7）
+/// 升级提醒判定（W-7 纯函数，独立单测覆盖）
 ///
-/// 升级提醒是"超期未处理的兜底打扰"，频率必须远低于首次提醒；Redis 故障/清空时
-/// 最多重复一次（`flow_escalate:{task_id}` 由 SETNX 保证）。
-const ESCALATE_DEDUP_TTL_SECS: u64 = 7 * 24 * 3600;
+/// `last_reminded_at` 非空（首次提醒已发）且距 `now` 已满 N 天（`days`）⇒ 需要升级提醒。
+/// `days == 0` = 关闭升级；`last_reminded_at` 为空（尚未首次提醒）⇒ 永不升级。
+/// 周期事实源 = DB `last_reminded_at`：每次升级提醒会重写该字段 ⇒ 自动进入下一个 N 天周期，
+/// Redis 仅承担多实例互斥窗（不再依赖长 TTL 去重，Redis 清空也不会重复升级）。
+fn should_escalate(last_reminded_at: Option<NaiveDateTime>, now: NaiveDateTime, days: u64) -> bool {
+    if days == 0 {
+        return false;
+    }
+    match last_reminded_at {
+        Some(reminded_at) => (now - reminded_at) >= chrono::Duration::days(days as i64),
+        None => false,
+    }
+}
 
 // ==================== 审批人策略（编译期枚举，V2 §2.2 / V3 §1.1） ====================
 
@@ -1768,7 +1778,7 @@ impl SysFlowService {
         let candidates = self.task_repo().find_timeout_candidates(now, limit).await?;
         let mut outcome = FlowScanOutcome::default();
         let interval = self.config.flow.remind_interval_secs;
-        let escalate_after_hours = self.config.flow.escalate_after_hours;
+        let escalate_days = self.config.flow.remind_escalate_days;
         for task in candidates {
             // ---- 首次提醒（W-7 策略：只提醒一次 + 待办红点常驻）----
             // 事实源 = DB `last_reminded_at IS NULL`；Redis SETNX 仅作多实例互斥窗口，
@@ -1776,10 +1786,7 @@ impl SysFlowService {
             if task.last_reminded_at.is_none() {
                 let key = format!("flow_remind:{}", task.task_id);
                 // 首次提醒互斥窗（原 SET NX EX；store.set_nx_ex 等价，Err 视为未抢占 → 跳过）
-                let acquired = store
-                    .set_nx_ex(&key, "1", interval)
-                    .await
-                    .unwrap_or(false);
+                let acquired = store.set_nx_ex(&key, "1", interval).await.unwrap_or(false);
                 if !acquired {
                     outcome.skipped += 1;
                     continue;
@@ -1812,29 +1819,42 @@ impl SysFlowService {
                 outcome.skipped += 1;
             }
 
-            // ---- 升级提醒（W-7）：超 N 小时仍 pending → 提醒申请人部门主管（回退 admin）----
-            if escalate_after_hours > 0
-                && let Some(due_at) = task.due_at
+            // ---- 升级提醒（W-7）：首次提醒后超 N 天仍未处理 → 提醒申请人部门主管（回退 admin）----
+            // 周期事实源 = DB `last_reminded_at`：升级提醒同样重写该字段 ⇒ 进入下一个 N 天周期；
+            // Redis SETNX 仅作多实例互斥窗（TTL = remind_interval_secs，与首次提醒同窗口径），
+            // 存储 故障/清空时最坏退化为本轮多实例各发一次，不会形成旧版"7 天一轮"的周期性重复。
+            if should_escalate(task.last_reminded_at, now, escalate_days)
+                && let Some(target) = self
+                    .resolve_escalation_target(task.assignee_id, task.applicant_id)
+                    .await?
             {
-                let overdue_hours = (now - due_at).num_hours();
-                if overdue_hours >= escalate_after_hours
-                    && let Some(target) = self
-                        .resolve_escalation_target(task.assignee_id, task.applicant_id)
-                        .await?
-                {
-                    // 长 TTL 去重（近周级）：存储故障/清空时最多重复一次升级提醒
-                    let key = format!("flow_escalate:{}", task.task_id);
-                    // 升级提醒去重窗（原 SET NX EX；store.set_nx_ex 等价，Err 视为未抢占 → 跳过）
-                    let acquired = store
-                        .set_nx_ex(&key, "1", ESCALATE_DEDUP_TTL_SECS)
-                        .await
-                        .unwrap_or(false);
-                    if acquired {
-                        let title = task.title.clone().unwrap_or_default();
-                        self.send_flow_audit(target, "flow_timeout", &title).await;
-                        outcome.notify.push((target, title));
-                        outcome.escalated += 1;
-                    }
+                // 升级提醒多实例互斥窗（原 SET NX EX；store.set_nx_ex 等价，Err 视为未抢占 → 跳过）
+                let key = format!("flow_escalate:{}", task.task_id);
+                let acquired = store.set_nx_ex(&key, "1", interval).await.unwrap_or(false);
+                if acquired {
+                    let now2 = crate::common::datetime::now_naive();
+                    // 升级提醒写流水（系统归因 operator_id=NULL）+ 重写 last_reminded_at 重置周期
+                    let _ = self
+                        .write_log(
+                            &task.biz_type,
+                            task.biz_id,
+                            task.round_no,
+                            Some(task.node_seq),
+                            "timeout_remind",
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some("超时升级提醒（部门主管）"),
+                            now2,
+                            task.tenant_id,
+                        )
+                        .await;
+                    let _ = self.task_repo().touch_reminded(task.task_id, now2).await;
+                    let title = task.title.clone().unwrap_or_default();
+                    self.send_flow_audit(target, "flow_timeout", &title).await;
+                    outcome.notify.push((target, title));
+                    outcome.escalated += 1;
                 }
             }
         }
@@ -2105,6 +2125,40 @@ pub(super) fn tx_to_svc(e: TransactionError<ServiceError>) -> ServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W-7：升级提醒判定纯函数的全部分支（时间快进不可行，故抽纯函数单测）
+    #[test]
+    fn should_escalate_covers_all_branches() {
+        let now = crate::common::datetime::now_naive();
+        // days=0 = 关闭升级（即便首提已过很久）
+        assert!(!should_escalate(
+            Some(now - chrono::Duration::days(30)),
+            now,
+            0
+        ));
+        // 尚未首次提醒（last_reminded_at 为空）⇒ 永不升级
+        assert!(!should_escalate(None, now, 3));
+        // 首提后不足 N 天 ⇒ 不升级（边界：N-1 天）
+        assert!(!should_escalate(
+            Some(now - chrono::Duration::days(2)),
+            now,
+            3
+        ));
+        // 恰好 N 天 ⇒ 升级（>= 边界含等号）
+        assert!(should_escalate(
+            Some(now - chrono::Duration::days(3)),
+            now,
+            3
+        ));
+        // 超 N 天 ⇒ 升级
+        assert!(should_escalate(
+            Some(now - chrono::Duration::days(4)),
+            now,
+            3
+        ));
+        // 升级后周期重置语义：last_reminded_at 被重写为当前时刻 ⇒ 回到"不升级"
+        assert!(!should_escalate(Some(now), now, 3));
+    }
 
     /// W-5：管理视图 data_scope → 单据可见范围的全部分支（纯函数，无 DB）
     #[test]
