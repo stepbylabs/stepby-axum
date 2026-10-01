@@ -1,0 +1,42 @@
+//! {{ table.tableName }} 实体定义
+//!
+//! {{ table.tableComment | default(value="") }}
+
+{% if needs_naive %}use chrono::NaiveDateTime;
+{% endif %}use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[sea_orm(table_name = "{{ table.tableName }}")]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+{% for col in columns %}    {% if col.isPk == "1" %}#[sea_orm(primary_key)]
+    {% endif %}pub {{ col.rustField }}: {% if col.isPk != "1" and col.isRequired != "1" %}Option<{% endif %}{{ col.rustType }}{% if col.isPk != "1" and col.isRequired != "1" %}>{% endif %},
+{% endfor %}{% if is_flow %}    // ---- 审批投影列（flow 模板）：由 submit_flow / 审批推进在同一事务内与
+    // `sys_flow_task`（事实源）+ `sys_flow_log`（流水）同步回写，属**派生投影** ----
+    /// 审批状态：draft / pending / approved / rejected / withdrawn
+    pub status: String,
+    /// 当前轮次（首次提交 1；驳回/撤回后重提交 +1）
+    pub current_round: i32,
+    /// 当前节点序号（办结/撤回后为最后一个节点）
+    pub current_node_seq: Option<i32>,
+    /// 申请人 user_id（提交时快照）
+    pub applicant_id: Option<i64>,
+    /// 申请人姓名（提交时快照，列表免 join）
+    pub applicant_name: Option<String>,
+    /// 申请人部门（提交时快照：部门主管审批定位用）
+    pub dept_id: Option<i64>,
+    /// 首次提交时间
+    pub submitted_at: Option<NaiveDateTime>,
+    /// 办结时间（approved 时回写；重新提交时清空）
+    pub finished_at: Option<NaiveDateTime>,
+{% endif %}    /// v5-E3（多租户前瞻）：租户 ID 预留列，默认 0 = 平台单租户，不参与查询过滤；
+    /// 多租户立项（Phase 2）后由 Repository 过滤层按 tid 注入条件
+    pub tenant_id: i64,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+
+#[async_trait::async_trait]
+impl ActiveModelBehavior for ActiveModel {}

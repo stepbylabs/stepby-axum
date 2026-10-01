@@ -1,0 +1,334 @@
+// stepby-axum/src/middleware/idempotency.rs
+//
+// R5-IDEMP-33：幂等性中间件（Idempotency-Key）
+//
+// 实现：基于 Redis SETNX 的请求去重
+// - 客户端在 POST/PUT/DELETE 请求中携带 `Idempotency-Key: <uuid>` 头
+// - 中间件以 `idempotency:{user_id}:{key}` 为 Redis key 执行 `SET ... NX EX <ttl>`
+// - SET 成功（首次请求）：放行
+// - SET 失败（重复请求）：返回 409 Conflict
+// - 缺失 Idempotency-Key 头：放行（幂等性为可选特性，不强制）
+//
+// 适用场景：
+// - 前端按钮重复点击（网络抖动导致用户多次提交）
+// - 网关重试（超时后网关重发同一请求）
+// - 客户端重试逻辑（如支付、下单等关键写操作）
+//
+// 注意：
+// - 仅对写操作（POST/PUT/DELETE）生效，GET 请求直接放行
+// - key 作用域为 `per-user`，不同用户的相同 key 不冲突
+// - TTL 24 小时，覆盖绝大多数业务场景的重复检测窗口
+// - Redis 故障时 fail-open（放行），因 auth 中间件已 fail-closed 保证 Redis 可用性
+//   若 Redis 真的故障，auth 中间件会先返回 503，不会到达此中间件
+
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::{Request, State};
+use axum::http::{HeaderName, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
+use crate::jwt::Claims;
+use crate::state::AppState;
+
+/// 幂等性请求头名称
+const IDEMPOTENCY_HEADER: HeaderName = HeaderName::from_static("idempotency-key");
+
+/// 幂等 key 前缀（Redis 中格式：idempotency:{user_id}:{key}）
+const IDEMPOTENCY_REDIS_PREFIX: &str = "idempotency:";
+
+/// 幂等 key TTL（秒，24 小时）
+///
+/// 覆盖客户端重试窗口（HTTP/2 连接复用、网关重试、用户重复点击）。
+/// 24 小时后自动清理，避免 Redis 无限增长。
+const IDEMPOTENCY_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// 幂等 key 最大长度（UUID 36 字符 + 少量余量，限制恶意超长 key）
+const IDEMPOTENCY_KEY_MAX_LEN: usize = 128;
+
+/// 幂等 key 允许的字符集（字母、数字、连字符、下划线）
+///
+/// 限制字符集防止 Redis key 注入与异常字符导致的存储问题。
+/// UUID v4 默认包含 `[0-9a-f-]`，符合此字符集。
+const IDEMPOTENCY_KEY_ALLOWED_CHARS: &str =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+
+/// 幂等性中间件
+///
+/// 挂载位置：在 auth_middleware 之后（需要 Claims 获取 user_id）
+/// 仅对 POST/PUT/DELETE 生效，GET/OPTIONS/HEAD 直接放行
+pub async fn idempotency_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // 1. 仅写操作需要幂等性校验
+    let method = req.method().clone();
+    if !matches!(method, Method::POST | Method::PUT | Method::DELETE) {
+        return next.run(req).await;
+    }
+
+    // 2. 提取 Idempotency-Key 头（缺失则放行，幂等性为可选特性）
+    let idempotency_key = match req.headers().get(&IDEMPOTENCY_HEADER) {
+        Some(value) => match value.to_str() {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "code": 400,
+                        "msg": crate::tr!("error.auth.idempotency_key_non_ascii")
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => return next.run(req).await,
+    };
+
+    // 3. 校验 key 格式（非空、长度、字符集）
+    if idempotency_key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "code": 400,
+                "msg": crate::tr!("error.auth.idempotency_key_empty")
+            })),
+        )
+            .into_response();
+    }
+    if idempotency_key.len() > IDEMPOTENCY_KEY_MAX_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "code": 400,
+                "msg": crate::tr!("error.auth.idempotency_key_too_long", max = IDEMPOTENCY_KEY_MAX_LEN)
+            })),
+        )
+            .into_response();
+    }
+    if !idempotency_key
+        .chars()
+        .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "code": 400,
+                "msg": crate::tr!("error.auth.idempotency_key_invalid")
+            })),
+        )
+            .into_response();
+    }
+
+    // 4. 从 request extensions 提取 user_id（auth_middleware 已注入 Claims）
+    //    key 作用域为 per-user，防止不同用户使用相同 UUID 导致互相拦截
+    let user_id = req
+        .extensions()
+        .get::<Claims>()
+        .map(|c| c.sub.clone())
+        .unwrap_or_else(|| "anonymous".to_string());
+
+    // H-3：anonymous 请求跳过幂等性校验。
+    //      否则所有匿名用户共享 idempotency:anonymous:{key} 命名空间，
+    //      一个匿名用户的请求会拦截其他匿名用户使用相同 Idempotency-Key 的请求。
+    //      能到达此处的 anonymous 请求通常为公开接口（如登录、注册），无身份绑定，
+    //      跳过幂等性不会引入安全风险（前端可自行通过 Idempotency-Key 防重，但服务端不强制）。
+    if user_id == "anonymous" {
+        return next.run(req).await;
+    }
+
+    // 5. SETNX 抢占幂等槽位（经 SharedStore 抽象，双档等价）
+    let redis_key = format!(
+        "{}{}:{}",
+        IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key
+    );
+    let set_result = state
+        .store
+        .set_nx_ex(&redis_key, "1", IDEMPOTENCY_TTL_SECS)
+        .await;
+
+    let acquired = match set_result {
+        Ok(true) => true,   // SET NX 成功，首次请求
+        Ok(false) => false, // key 已存在，重复请求
+        Err(e) => {
+            // 存储故障：fail-closed 拒绝请求（与 auth_middleware 保持一致）
+            // 防御性设计：即使 auth 中间件已保证存储可用，仍不应在故障时
+            // 放行写操作（可能导致重复提交），返回 503 让客户端重试。
+            tracing::error!(
+                error = %e,
+                redis_key = %redis_key,
+                "Redis 幂等性校验失败（fail-closed 拒绝请求）"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "code": 503,
+                    "msg": crate::tr!("error.auth.auth_unavailable")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !acquired {
+        // 重复请求：返回 409 Conflict
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "code": 409,
+                "msg": crate::tr!("error.auth.duplicate_request")
+            })),
+        )
+            .into_response();
+    }
+
+    // 6. 首次请求，放行执行
+    //    注意：不缓存响应结果（简化实现）。如需缓存，可在 next.run(req).await 后
+    //    将响应体存入 Redis，重复请求时直接返回缓存响应。
+    //    当前实现仅做"拦截重复请求"，符合防重复提交的核心目标。
+    //
+    //    P1 修复：请求失败（4xx/5xx）时释放幂等槽位，允许客户端使用相同 key 重试。
+    //    幂等性的核心目标是"允许客户端安全重试"，若失败请求仍占用槽位 24 小时，
+    //    客户端无法重试失败操作（如参数校验失败、权限不足、内部错误），违背语义。
+    //    仅对成功响应（2xx）保留槽位，防止真正的重复提交。
+    let response = next.run(req).await;
+    let status = response.status();
+    if !status.is_success() {
+        // 失败响应释放槽位，允许客户端重试
+        // best-effort：DEL 失败不影响响应返回，槽位会在 TTL 后自动过期
+        if let Err(e) = state.store.del(std::slice::from_ref(&redis_key)).await {
+            tracing::warn!(
+                error = %e,
+                redis_key = %redis_key,
+                status = %status.as_u16(),
+                "幂等槽位 DEL 失败，槽位将在 TTL 后自动过期"
+            );
+        }
+    }
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_allowed_chars_valid() {
+        // 标准 UUID v4
+        let key = "550e8400-e29b-41d4-a716-446655440000";
+        assert!(
+            key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
+    }
+
+    #[test]
+    fn test_key_allowed_chars_custom() {
+        // 自定义 key
+        let key = "order_create_20260718_001";
+        assert!(
+            key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
+    }
+
+    #[test]
+    fn test_key_allowed_chars_invalid() {
+        // 包含空格
+        let key = "550e8400 e29b";
+        assert!(
+            !key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
+        // 包含特殊字符
+        let key = "order@create!";
+        assert!(
+            !key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
+    }
+
+    #[test]
+    fn test_key_max_length() {
+        let key = "a".repeat(IDEMPOTENCY_KEY_MAX_LEN);
+        assert!(key.len() == IDEMPOTENCY_KEY_MAX_LEN);
+        let key_too_long = "a".repeat(IDEMPOTENCY_KEY_MAX_LEN + 1);
+        assert!(key_too_long.len() > IDEMPOTENCY_KEY_MAX_LEN);
+    }
+
+    #[test]
+    fn test_key_max_length_key_passes_charset() {
+        // 恰好 128 字符且全部为合法字符时应通过字符集校验
+        let key = "k".repeat(IDEMPOTENCY_KEY_MAX_LEN);
+        assert!(
+            key.chars()
+                .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+        );
+    }
+
+    #[test]
+    fn test_key_empty_is_invalid_by_length_check() {
+        // 空 key：长度校验分支（is_empty）应命中
+        let key = "";
+        assert!(key.is_empty());
+        assert!(key.len() <= IDEMPOTENCY_KEY_MAX_LEN);
+    }
+
+    #[test]
+    fn test_key_whitespace_rejected_by_charset() {
+        // 含空白字符（空格/制表符/换行）的 key 应被字符集校验拒绝
+        for key in ["a b", "a\tb", "a\nb", " a"] {
+            assert!(
+                !key.chars()
+                    .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)),
+                "含空白的 key 应被拒绝: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_key_non_ascii_rejected_by_charset() {
+        // 非 ASCII（中文/emoji/全角符号）应被字符集校验拒绝
+        for key in ["订单-001", "a🔒b", "ａｂｃ", "aé"] {
+            assert!(
+                !key.chars()
+                    .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c)),
+                "非 ASCII 的 key 应被拒绝: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_key_underscore_and_dash_are_allowed() {
+        // 字符集明确允许连字符与下划线
+        for key in ["order_create_001", "order-create-001", "a_b-c-d"] {
+            assert!(
+                key.chars()
+                    .all(|c| IDEMPOTENCY_KEY_ALLOWED_CHARS.contains(c))
+            );
+        }
+    }
+
+    #[test]
+    fn test_redis_key_uses_user_scope_and_prefix() {
+        // 校验 Redis key 作用域格式：idempotency:{user_id}:{key}（纯拼接逻辑）
+        let user_id = "user_42";
+        let idempotency_key = "550e8400-e29b-41d4-a716-446655440000";
+        let redis_key = format!(
+            "{}{}:{}",
+            IDEMPOTENCY_REDIS_PREFIX, user_id, idempotency_key
+        );
+        assert_eq!(
+            redis_key,
+            "idempotency:user_42:550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn test_ttl_is_24h() {
+        // TTL 常量：24 小时覆盖客户端重试窗口
+        assert_eq!(IDEMPOTENCY_TTL_SECS, 24 * 60 * 60);
+    }
+}

@@ -1,0 +1,53 @@
+# cargo-deny 配置文件（P2-36: R8-CONF-009）
+#
+# 用途：
+#   供 CI（.github/workflows/security.yml 的 cargo-deny job）执行依赖合规审查。
+#   命令：cargo deny check advisories licenses bans sources
+#
+# 设计原则：
+#   - 允许常见的宽松开源许可证（MIT / Apache-2.0 / BSD / ISC / Zlib 等）
+#   - 检测 RustSec 已知漏洞（advisories），yanked 版本仅告警避免误杀
+#   - 重复依赖仅告警（bans），不阻断 CI
+#   - 限制依赖来源（sources）
+#   - 仅采用 cargo-deny 长期稳定字段，保证跨版本可解析
+
+[advisories]
+# yanked 版本仅告警（传递依赖可能存在 yanked，告警不阻断 CI）
+yanked = "warn"
+# 忽略的漏洞 ID 列表（如需忽略某已知漏洞，按需追加，如 "RUSTSEC-2024-XXXX"）
+ignore = []
+
+[licenses]
+# 允许的许可证白名单；不在白名单内即报 error
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+# 许可证识别置信度阈值（0.0~1.0）
+confidence-threshold = 0.8
+
+[bans]
+# 重复依赖版本仅告警，不阻断 CI
+multiple-versions = "warn"
+# 通配符依赖仅告警
+wildcards = "warn"
+
+[sources]
+# 未知 registry / git 来源仅告警（避免私有源 / git 依赖导致误杀）
+unknown-registry = "warn"
+unknown-git = "warn"
+# 允许的官方 registry
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

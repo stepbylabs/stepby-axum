@@ -1,0 +1,49 @@
+//! {{ table.tableName }} 模块 Handler
+
+use std::sync::Arc;
+use axum::extract::{Path, State};
+
+use crate::common::{AjaxResult, AppError, TableDataInfo, ValidatedJson};
+use crate::middleware::Operator;
+use crate::state::AppState;
+
+pub async fn list(State(state): State<Arc<AppState>>) -> Result<TableDataInfo<crate::entity::{{ table.tableName }}::Model>, AppError> {
+    let rows = state.{{ table.tableName }}_service.get_all().await?;
+    Ok(TableDataInfo::new(rows.len() as u64, rows))
+}
+
+pub async fn get_info(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Result<AjaxResult<crate::entity::{{ table.tableName }}::Model>, AppError> {
+    let model = state.{{ table.tableName }}_service.get_by_id(id).await?;
+    Ok(AjaxResult::success(model))
+}
+
+pub async fn add(State(state): State<Arc<AppState>>, operator: Operator, ValidatedJson(dto): ValidatedJson<crate::service::{{ table.tableName }}_service::{{ table.className }}AddDto>) -> Result<AjaxResult<()>, AppError> {
+    state.{{ table.tableName }}_service.create(dto, operator.username()).await?;
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
+}
+
+pub async fn edit(State(state): State<Arc<AppState>>, operator: Operator, ValidatedJson(dto): ValidatedJson<crate::service::{{ table.tableName }}_service::{{ table.className }}EditDto>) -> Result<AjaxResult<()>, AppError> {
+    state.{{ table.tableName }}_service.update(dto, operator.username()).await?;
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
+}
+
+pub async fn remove(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Result<AjaxResult<()>, AppError> {
+    state.{{ table.tableName }}_service.delete(id).await?;
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
+}
+{% if is_flow %}
+/// 提交审批（flow 模板）：单据进入审批引擎，审批人按策略解析并**快照**进 task 行
+///
+/// 引擎要求 `biz_type` 已登记（见 service 的 `BIZ_TYPE` 常量注释）；未登记显式 500，不静默放行。
+pub async fn submit_flow(State(state): State<Arc<AppState>>, operator: Operator, Path(id): Path<i64>) -> Result<AjaxResult<crate::entity::{{ table.tableName }}::Model>, AppError> {
+    let applicant_id = operator
+        .user_id()
+        .parse::<i64>()
+        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))?;
+    let model = state
+        .{{ table.tableName }}_service
+        .submit_flow(id, applicant_id, Some(operator.username()), &state.config)
+        .await?;
+    Ok(AjaxResult::success(model))
+}
+{% endif %}

@@ -1,0 +1,702 @@
+# zh-CN 文案（默认语言）
+# key 规范：error.common.*（通用错误）/ error.{module}.*（业务错误）/ msg.success.*（操作成功）
+
+error:
+  ai:
+    disabled: AI 助手未启用，请联系管理员在系统配置中开启
+    pat_forbidden: AI 助手不支持访问令牌（PAT）调用，请使用登录会话
+    capability_off: 当前租户未开通 AI 助手能力
+  common:
+    not_found: 数据不存在
+    db_acquire: 数据库连接获取失败
+    bad_format: 数据格式不正确
+    duplicate: 数据重复，请检查唯一字段
+    db_failed: 数据库操作失败，请联系管理员
+    tx_failed: 数据库事务失败，请联系管理员
+    session_expired: 会话已过期，请重新登录
+    session_invalid: 无效的会话，请重新登录
+    token_failed: token 生成失败
+    process_failed: 数据处理失败
+    password_encrypt_failed: 密码加密失败
+    io_error: 系统 IO 错误
+    cache_auth_failed: 缓存认证失败
+    cache_failed: 缓存服务异常，请联系管理员
+    internal: 系统内部错误，请联系管理员
+    validate_failed: 参数校验失败
+    parse_failed: 请求参数解析失败
+    time_format_invalid: "时间格式不正确: %{s}"
+    batch_size_exceeded: "批量操作数量不能超过%{max}"
+    clear_field_unknown: "清空声明包含不可清空的字段: %{field}"
+    clear_field_conflict: "字段 %{field} 同时提交了值与清空声明，请择一"
+    forbidden: 无权限访问该资源
+  upload_scan:
+    rejected: 上传文件未通过安全扫描，已拒绝
+    unavailable: 文件安全扫描服务不可用，请稍后再试
+  auth:
+    ua_blocked: 当前登录客户端特征不被允许，请使用浏览器登录
+    captcha_expired: 验证码已过期或不存在
+    captcha_wrong: 验证码错误
+    captcha_gen_failed: 验证码生成失败，请稍后再试
+    login_failed: 用户名或密码错误
+    account_deleted: 账号已删除，请联系管理员
+    account_disabled: 账号已停用，请联系管理员
+    tenant_disabled: 租户已停用
+    tenant_grace: 租户已到期（宽限期内只读）
+    account_locked: 账号已被锁定，请稍后再试
+    register_exists: 用户名已存在
+    register_disabled: 当前系统未开放注册，请联系管理员
+    old_password_wrong: 原密码错误
+    unauthorized: 未认证，请先登录
+    forbidden: 无权限访问
+    auth_unavailable: 认证服务暂时不可用，请稍后再试
+    rate_limited: 访问频率过高，请稍后再试
+    password_locked: 密码错误次数过多，请 5 分钟后再试
+    password_verify_failed: 密码验证失败，请稍后再试
+    logout_failed: 登出处理失败，请重试
+    totp_required: 需要二次验证
+    totp_invalid: 动态口令错误
+    token_missing: 请求未携带 token，请重新登录
+    duplicate_request: 重复的幂等性请求，请勿重复提交
+    idempotency_key_empty: Idempotency-Key 头不能为空
+    idempotency_key_invalid: Idempotency-Key 包含非法字符，仅允许字母、数字、连字符和下划线
+    idempotency_key_non_ascii: Idempotency-Key 头包含非 ASCII 字符
+    idempotency_key_too_long: "Idempotency-Key 长度不能超过 %{max} 字符"
+    login_info_missing: 无法获取登录信息，请重新登录
+    password_changed: 密码已修改，请重新登录
+    permission_denied: 没有权限访问该资源
+    token_invalid: token 格式错误，应为 Bearer <token>
+    token_revoked: 会话已注销，请重新登录
+    user_id_parse_failed: 用户 ID 解析失败
+    captcha_uuid_invalid: 验证码 UUID 格式无效
+  oauth:
+    provider_not_found: 登录提供商不存在
+    provider_code_exists: 提供商编码已存在
+    provider_disabled: 该登录方式已停用
+    code_missing: 缺少授权码 (code)
+    state_invalid: 授权状态无效或已过期，请重新发起登录
+    token_exchange_failed: 授权码换取令牌失败，请稍后再试
+    userinfo_failed: 获取第三方用户信息失败
+    userinfo_missing_id: 第三方未返回用户唯一标识
+    no_binding: 该第三方账号尚未绑定本地账号
+    auto_create_disabled: 未配置自动创建账号，请先用本地账号登录后绑定
+    auto_create_failed: 自动创建本地账号失败，请联系管理员
+    bind_taken: 该第三方账号已绑定其他本地账号
+    email_conflict: 第三方邮箱已存在本地账号，请改用本地账号登录后绑定
+    username_occupied: "生成本地用户名 %{name} 已被占用，无法自动创建"
+    provider_id_invalid: 提供商 ID 无效
+    handoff_invalid: 关联凭据无效或已过期，请重新发起第三方登录
+    password_wrong: 本地账号密码校验失败
+    unbind_self_last: 已解绑，当前仅剩一个账号来源（本地/第三方），不可再解绑
+    unknown_error: 第三方登录处理失败，请稍后再试
+    local_user_not_found: 本地账号不存在或已停用
+    failure_title: 第三方登录失败
+  flow:
+    dept_missing: 无法确定提交人所属部门，请完善用户部门信息
+    dept_not_found: 提交人所属部门不存在
+    leader_missing: 该部门未设置主管（leader_user_id），无法发起「部门主管审批」
+    role_not_found: 审批角色不存在
+    role_no_active_user: 审批角色下无可用用户
+    no_assignee: 无法解析出有效审批人，请联系管理员检查审批策略
+    user_not_found: 用户不存在
+    user_disabled: 目标用户已停用，无法转办
+    mode_invalid: 审批模式不合法（single/countersign）
+    leave_type_invalid: 请假类型不合法（annual/sick/personal）
+    title_blank: 单据标题不能为空白
+    task_not_found: 审批任务不存在
+    doc_not_found: 审批单据不存在
+    task_not_pending: 审批任务已处理或已失效，请刷新后重试
+    action_invalid: 不支持的审批动作
+    to_user_required: 转办必须指定目标用户
+    transfer_to_self: 不能转办给自己
+    self_approve_forbidden: 不能审批自己提交的单据
+    self_approve_chain: 审批链的审批人不能仅为提交人本人（禁止全链自审），请调整审批策略或由他人提交
+    not_assignee: 仅当前审批人可操作该任务
+    withdraw_only_applicant: 仅单据提交人可撤回
+    pat_forbidden: 审批操作须本人登录会话执行，不能使用访问令牌（PAT）
+    countersign_duplicate: 该审批人已在当前审批节点，无需重复加签
+    biz_type_unregistered: 业务单据类型未在审批引擎注册（biz_type::REGISTRY），无法推进审批
+  sso:
+    platform_protected: 平台根部门不允许通过租户接口操作
+    ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户
+    disabled: 单点登录（SSO）未启用
+    client_not_found: 客户端不存在
+    client_disabled: 该客户端已停用
+    client_id_required: client_id 不能为空
+    client_id_exists: client_id 已存在
+    client_name_required: 客户端名称不能为空
+    redirect_uris_empty: 至少配置一个回调地址
+    redirect_uri_invalid: 回调地址无效，必须为 http(s) 绝对地址
+    redirect_uri_not_allowed: 回调地址未在白名单内
+    scope_invalid: 请求的 scope 含未授权项
+    response_type_unsupported: 仅支持 response_type=code
+    pkce_required: 缺少 PKCE 参数（需 code_challenge 且 method=S256）
+    pkce_method_unsupported: 仅支持 PKCE 方法 S256
+    openid_scope_required: scope 必须包含 openid
+    not_login: 需要登录后授权
+    code_invalid: 授权码无效或已过期
+    client_auth_failed: 客户端凭据校验失败
+    grant_type_unsupported: 不支持的授权类型
+    rt_invalid: 刷新令牌无效或已过期
+    login_required: 需要重新登录后授权
+    consent_required: 需要用户同意后授权
+    pkce_verify_failed: PKCE 校验失败
+    token_failed: 令牌签发失败
+    access_token_invalid: 访问令牌无效
+    batch_id_invalid: 客户端 ID 无效
+    redirect_uri_dup: 回调地址重复
+    client_id_reserved: client_id 为保留字，不允许使用
+    secret_encrypt_failed: 客户端密钥加密失败，请检查服务端主密钥配置
+    access_denied: 您拒绝了本次授权请求
+    logo_uri_invalid: logo_uri 必须为 http(s) 绝对地址且不超过 500 字符
+    consent_ticket_invalid: 同意票据无效或已过期，请重新发起授权
+  file:
+    delete_failed: 删除文件失败
+    delete_task_failed: 删除任务失败
+    empty: 上传文件为空
+    field_not_found: 未找到 file 字段
+    invalid_name: 非法的文件名
+    list_failed: 读取目录失败
+    list_task_failed: 读取目录任务失败
+    multipart_parse_failed: "解析 multipart 失败: %{e}"
+    read_failed: "读取文件内容失败: %{e}"
+    too_large: "文件大小不能超过 %{max}MB"
+    unknown_ext: 无法识别文件扩展名
+    unsupported_type: "不支持的文件类型: %{ext}"
+  storage:
+    unsupported_backend: "不支持的存储后端: %{backend}（支持 local / s3）"
+    s3_missing_config: "S3 存储缺少必需配置（access_key/secret_key/endpoint/bucket）"
+    s3_invalid_endpoint: "S3 端点格式无效"
+    s3_client_build_failed: "S3 客户端初始化失败"
+    s3_request_failed: "S3 请求失败，请检查对象存储可用性"
+    s3_status: "S3 返回错误状态 %{status}: %{detail}"
+    s3_list_failed: "S3 对象列举失败"
+  password:
+    complexity_common: 密码过于常见，请使用更复杂的口令
+    complexity_digit: 密码必须包含至少 1 个数字
+    complexity_letter: 密码必须包含至少 1 个字母
+  user:
+    not_found: 用户不存在
+    not_found_by_id: "用户 ID=%{id} 不存在"
+    name_duplicate: 用户名不能重复
+    phone_invalid: 手机号格式不正确（请检查国家/地区代码）
+    admin_disable_forbidden: 不允许停用超级管理员
+    admin_role_forbidden: 不允许修改超级管理员的角色绑定
+    admin_post_forbidden: 不允许修改超级管理员的岗位绑定
+    admin_delete_forbidden: 不允许删除超级管理员
+    admin_pwd_forbidden: 不允许修改超级管理员密码
+    same_password: 新密码不能与旧密码相同
+    password_missing: 用户密码字段缺失
+    higher_role_forbidden: 不允许操作比自己更高优先级的角色
+    operator_id_parse_failed: 操作人用户 ID 解析失败
+    id_empty: 用户 ID 不能为空
+    email_invalid: 邮箱格式不正确
+    sex_invalid: 性别取值非法（仅允许 0=男 / 1=女 / 2=未知）
+    status_invalid: 用户状态取值非法（仅允许 0=正常 / 1=停用）
+    import_login_required: 登录名称不能为空
+    import_login_length: 登录名称长度需为 2-30 个字符
+    import_login_format: 登录名称仅允许字母、数字、下划线
+    import_nick_required: 用户姓名不能为空
+    import_dept_not_found: "部门「%{name}」不存在"
+    import_duplicate_in_file: 与文件中其它行登录名称重复
+    pwd_reset_token_invalidate_failed: 密码重置成功，但旧 token 失效标记写入失败
+    pwd_change_token_invalidate_failed: 密码修改成功，但旧 token 失效标记写入失败
+    erasure_disabled: 用户匿名化能力未开启
+    erasure_platform_only: 仅平台管理员可执行用户匿名化
+    erasure_forbidden: 不允许匿名化平台用户或超级管理员
+    erasure_revoke_failed: 匿名化前会话失效标记写入失败，已中止（fail-closed）
+  config:
+    not_found: 参数配置不存在
+    key_exists: 参数键名已存在
+    id_invalid: 参数 ID 不合法
+    governance_forbidden: 该参数受平台治理约束，租户不可修改
+    platform_row_forbidden: 平台级参数配置不允许租户操作
+    scope_invalid: 参数治理范围不合法
+    flag_invalid: 参数治理标志不合法
+  dept:
+    not_found: 部门不存在
+    parent_not_found: 父部门不存在
+    parent_deleted: 父部门已删除
+    parent_self_forbidden: 上级部门不能选择自己
+    has_children: 存在子部门，不允许删除
+    assigned_to_role: 部门已分配给角色，不允许删除
+    has_users: 部门下存在用户，不允许删除
+    ids_empty: deptIds/orderNums 解析后为空
+    level_too_deep: 部门层级过深，防环校验失败
+    id_not_found: "部门 ID=%{id} 不存在"
+    ids_count_mismatch: deptIds 与 orderNums 数量不一致
+  menu:
+    not_found: 菜单不存在
+    parent_not_found: 父菜单不存在
+    parent_deleted: 父菜单已删除
+    perm_exists: 权限标识已存在
+    parent_self_forbidden: 上级菜单不能选择自己
+    has_children: 存在子菜单，不允许删除
+    assigned_to_role: 菜单已分配给角色，不允许删除
+    ids_empty: menuIds/orderNums 解析后为空
+    level_too_deep: 菜单层级过深，防环校验失败
+    id_not_found: "菜单 ID=%{id} 不存在"
+    ids_count_mismatch: menuIds 与 orderNums 数量不一致
+  rate_limit:
+    not_found: 限流配置不存在
+    pattern_exists: 路由前缀已存在
+    id_invalid: 参数 ID 不合法
+    service_unavailable: 服务暂时不可用
+    too_many_requests: 请求过于频繁，请稍后再试
+  monitor:
+    session_not_found: 会话不存在或已过期
+    session_not_owned: 只能操作本人的会话
+    session_invalid: 会话数据异常
+    admin_force_logout_forbidden: 不允许强退超级管理员会话
+  post:
+    not_found: 岗位不存在
+    code_exists: 岗位编码已存在
+    id_invalid: 岗位 ID 不合法
+    assigned_to_user: "岗位 %{id} 已分配给用户，不能删除"
+  task:
+    not_found: 任务不存在
+    id_invalid: 任务 ID 不合法
+  gen:
+    time_format: 时间格式不正确
+    int_default: 整数类型默认值不是有效数字
+    int_default_invalid: "整数类型默认值 %{value} 不是有效数字"
+    decimal_default: 小数类型默认值不是有效数字
+    decimal_default_invalid: "小数类型默认值 %{value} 不是有效数字"
+    table_not_found: 代码生成业务表不存在
+    table_name_start: 表名必须以字母开头
+    create_table_failed: 建表失败
+    create_table_failed_with_err: "建表失败: %{err}"
+    table_id_not_found: "表 ID=%{id} 不存在"
+    table_not_imported: "表 %{name} 未导入"
+    table_no_columns: "表 %{name} 不存在或没有字段"
+    table_select_required: 请选择要导入的表
+    table_id_invalid: 表 ID 不合法
+    table_name_invalid: 非法的表名
+    invalid_table_name_with_value: "非法表名: %{name}"
+    table_select_for_gen_required: 请选择要生成的表
+    zip_write_failed: ZIP 写入失败
+    zip_finish_failed: ZIP 完成失败
+    template_load_failed: Tera 模板加载失败
+    path_empty_component: 路径组件包含非法空字符
+    record_not_found: 记录不存在
+    flow_biz_type_unregistered: "业务类型「%{biz_type}」未登记：请先加入 sys_flow_service::biz_type::ALL 与 REGISTRY 再提交审批"
+    flow_status_not_submittable: "当前状态「%{status}」不可提交审批（仅 draft/rejected/withdrawn 可提交）"
+    flow_nodes_empty: 审批链为空：请至少配置一个审批节点
+    flow_only_applicant_can_submit: 仅原申请人可重新提交该单据
+    flow_tenant_mismatch: 单据归属租户与申请人租户不一致，禁止提交审批
+    field_length_invalid: "%{field} 长度必须在1-64之间"
+    field_start_invalid: "%{field} 必须以字母或下划线开头"
+    field_char_invalid: "%{field} 只能包含字母、数字、下划线"
+    bool_default_invalid: "布尔类型默认值 %{value} 必须是 true/false/0/1"
+    table_already_imported: "表 %{name} 已导入，请勿重复导入"
+    table_no_columns_or_not_exist: "表 %{name} 不存在或没有字段"
+    table_already_in_gen: "表 %{name} 已存在于 gen_table，请勿重复创建"
+    table_already_in_db: "表 %{name} 已存在于数据库，请勿重复创建"
+    column_name_duplicate: "列名 %{name} 重复"
+    column_type_length_required: "列 %{name} 的类型 %{ty} 需要指定长度"
+    column_decimal_scale_required: "列 %{name} 的类型 Decimal 需要指定小数位"
+    column_decimal_scale_invalid: "列 %{name} 的小数位 %{scale} 必须小于长度 %{length}"
+    column_auto_inc_no_pk: "列 %{name} 设置自增但未设置主键"
+    column_auto_inc_not_int: "列 %{name} 设置自增但类型 %{ty} 不是整数类型"
+    template_render_failed: "模板渲染失败 (%{name}): %{msg}"
+    path_component_invalid: "路径组件包含非法字符（不允许 .. / \\）：%{name}"
+    batch_tables_exceeded: "单次最多生成 %{max} 张表的代码"
+  common_handler:
+    field_not_found_file: 未找到 file 字段
+    field_not_found_avatar: 未找到 avatarfile 字段
+    file_empty: 上传文件为空
+    file_ext_unknown: 无法识别文件扩展名
+    image_format_unknown: 无法识别的图片格式，仅支持 jpg/jpeg/png/gif
+    filename_invalid: 非法的文件名
+    resource_path_invalid: 非法的资源路径
+    file_not_found: 文件不存在
+    resource_not_found: 资源不存在
+    upload_success: 上传成功
+  cache:
+    name_wildcard_forbidden: 缓存名称不允许包含通配符
+    info_fetch_failed: 获取缓存信息失败
+    key_count_failed: 获取键数量失败
+    value_query_failed: 查询缓存值失败
+    key_clear_failed: 清除缓存键失败
+    key_scan_failed: 扫描缓存键失败
+    key_batch_delete_failed: 批量删除缓存键失败
+    flushdb_disabled: 该端点已禁用：FLUSHDB 会误清 blacklist/online/login_fail 等业务键，请使用 clearCacheName 按前缀清理
+    prefix_not_allowed: "不允许操作缓存前缀: %{prefix}，仅支持: %{allowed}"
+    key_prefix_required: "缓存键必须以 %{name} 开头"
+    key_count_remark: "%{count} 个键"
+    type_not_previewable: "[%{type} 类型缓存，不支持预览]"
+    memory_usage_failed: 扫描缓存键内存占用失败
+  monitor_server:
+    duration_format: "%{days}天%{hours}小时%{minutes}分钟"
+  excel:
+    fields_empty: 导出字段列表为空或无匹配字段
+    build_task_failed: Excel 构建任务失败
+    sheet_create_failed: 创建工作表失败
+    header_write_failed: 写入表头失败
+    data_write_failed: 写入数据失败
+    generate_failed: 生成 Excel 失败
+    import_parse_failed: 解析 Excel 文件失败：%{e}，请使用下载的模板填写，勿改动表头
+  ip_location:
+    source_invalid: 更新源必须为 maxmind 或 p3terx
+    unknown_source_type: "未知的更新源类型: %{s}"
+    maxmind_credentials_required: 切换到 maxmind 源需配置 Account ID 和 License Key
+    private_ip: 内网IP
+    update_unavailable: IP 库更新服务暂不可用，请稍后再试
+    update_in_progress: IP 库更新任务正在进行中，请稍后再试
+  backup:
+    id_invalid: 备份 ID 不合法
+    db_url_invalid: 数据库 URL 格式不正确
+    mkdir_failed: 创建备份目录失败
+    mkdir_task_join_failed: 创建备份目录任务 join 失败
+    filename_invalid: 非法的备份文件名
+    sqlite3_failed: sqlite3 调用失败
+    write_task_join_failed: 写入任务 join 失败
+    write_failed: 写入备份文件失败
+    process_start_failed: 启动备份进程失败
+    process_exec_failed: 备份进程执行失败
+    record_not_found: 备份记录不存在
+    tenant_scope_denied: 无权访问该备份记录（租户仅可访问本租户的数据包导出记录）
+    restore_status_invalid: 仅可恢复成功的备份
+    too_frequent: 备份操作过于频繁，请稍后再试
+    restore_in_progress: 已有恢复任务正在进行中，请稍后再试
+    service_unavailable: 备份服务暂不可用，请稍后再试
+    filename_invalid_restore: 备份文件名不合法
+    file_exist_check_join_failed: 文件存在性检查任务 join 失败
+    file_not_found: 备份文件不存在
+    restore_process_start_failed: 启动恢复进程失败
+    restore_process_exec_failed: 恢复进程执行失败
+    delete_file_task_failed: 删除备份文件任务失败
+    download_status_invalid: 仅可下载成功的备份
+    read_file_task_failed: 读取文件任务失败
+    read_backup_file_failed: 读取备份文件失败
+    unsupported_db_type: "不支持的数据库类型: %{url}"
+    db_backup_failed: 数据库备份失败
+    tenant_not_found: 租户不存在，无法导出数据包
+    tenant_export_serialize_failed: 租户数据包序列化失败
+    tenant_export_restore_unsupported: 租户数据包不支持恢复（仅支持整库备份恢复）
+    process_timeout: "备份进程超时（%{secs} 秒）"
+    process_nonzero_exit: "备份进程返回非零状态: %{err}"
+    db_restore_failed: 数据库恢复失败
+    restore_process_timeout: "恢复进程超时（%{secs} 秒）"
+    restore_process_nonzero_exit: "恢复进程返回非零状态: %{err}"
+    sqlite3_backup_failed: "sqlite3 备份失败: %{err}"
+    sqlite3_branch_unreachable: SQLite 备份应在上文处理，不应到达此分支（请检查代码逻辑）
+    mysql_restore_branch_unreachable: MySQL 恢复应走 run_mysql_restore 独立分支（请检查代码逻辑）
+  server:
+    info_fetch_failed: 服务器信息采集失败
+  dict:
+    type_not_found: 字典类型不存在
+    type_exists: 字典类型已存在
+    data_not_found: 字典数据不存在
+    id_invalid: 字典 ID 不合法
+    data_id_invalid: 字典数据 ID 不合法
+    platform_row_forbidden: 平台级字典不允许租户操作
+    platform_type_exists: 字典类型与平台类型同名，租户不可创建
+  job:
+    cron_invalid: cron 表达式非法
+    name_exists: 任务名称已存在
+    group_mismatch: 任务组名不匹配
+    id_invalid: 任务 ID 不合法
+  scheduler:
+    operation_failed: 调度器操作失败，请联系管理员
+  report:
+    id_empty: 报表 ID 不能为空
+    not_found: 报表不存在
+    code_duplicate: "报表编码「%{code}」已存在"
+    type_invalid: "报表类型不合法，仅支持 login_stats / user_stats / msg_stats / custom，当前值: %{value}"
+    config_json_invalid: 报表配置 config 必须是合法 JSON
+    delete_sub_failed: 删除报表的关联订阅失败
+  report_sub:
+    id_empty: 订阅 ID 不能为空
+    not_found: 订阅不存在
+    report_not_found: 关联报表不存在
+    cron_invalid: cron 表达式非法（须为 6 字段，含秒）
+    push_channel_none: 至少开启一种推送渠道（邮件或站内信）
+    email_invalid: 收件邮箱格式不正确
+    user_ids_invalid: 目标用户 ID 不合法
+  web_hook:
+    id_invalid: 回调 ID 不合法
+    not_found: 回调配置不存在
+    log_not_found: 推送记录不存在
+    url_invalid: 回调地址不合法（仅允许 http/https，且 SSRF 校验未通过）
+    event_invalid: 订阅事件类型不合法
+    name_empty: 回调名称不能为空
+    event_empty: 至少订阅一个事件类型
+  oper_log:
+    id_invalid: 日志 ID 不合法
+    anonymous: 匿名
+  frontend_error:
+    not_found: 前端异常记录不存在
+  login_log:
+    id_invalid: 日志 ID 不合法
+    admin_unlock_forbidden: 不允许解锁超级管理员账号
+  mail:
+    from_invalid: 发件人邮箱地址无效
+    to_invalid: 收件人邮箱地址无效
+    build_failed: 构建邮件失败
+    smtp_not_initialized: SMTP 客户端未初始化
+    send_failed: 邮件发送失败
+    send_timeout: 邮件发送超时（SMTP 无响应）
+  log:
+    list_task_failed: 日志文件列表任务执行失败
+    list_failed: 读取日志文件列表失败
+    invalid_name: 无效的日志文件名
+    tail_task_failed: 日志读取任务执行失败
+    file_not_found: 指定的日志文件不存在
+    tail_failed: 读取日志文件失败
+  notice:
+    not_found: 通知公告不存在
+    id_invalid: 通知公告 ID 不合法
+    user_email_query_failed: 查询用户邮箱失败
+    notice_type_invalid: "notice_type 必须为 1(通知) 或 2(公告)，当前值: %{value}"
+    status_invalid: "status 必须为 0(正常) 或 1(关闭)，当前值: %{value}"
+  pref:
+    value_invalid: "消息偏好字段 %{field} 取值非法（须为 0 或 1）"
+    time_invalid: "免打扰时间字段 %{field} 格式非法（须为 HH:MM），当前值: %{value}"
+  tenant:
+    name_required: 租户名称不能为空
+    name_duplicate: 租户名称已存在
+    not_found: 租户不存在
+    status_invalid: "status 必须为 0(正常) 或 1(停用)，当前值: %{value}"
+    has_users: "租户内仍有 %{count} 个用户，无法删除"
+    platform_protected: 平台根部门不允许通过租户接口操作
+    disabled: 租户已被停用，无法登录
+    platform_only: 该操作仅平台管理员可执行
+    code_invalid: 租户短码格式非法（2-32 位小写字母/数字/下划线/连字符，且以字母或数字开头）
+    code_duplicate: 租户短码已被占用，请更换
+    package_not_found: 指定套餐不存在或已停用
+    account_quota_exceeded: "租户账号数已达上限（%{max}），无法新增用户"
+    expired: 租户已到期且超出宽限期，无法登录
+    expired_readonly: 租户已到期（宽限期内仅可读），请续费后再执行写操作
+    not_deleted: 租户不在回收站，无需恢复
+    admin_user_conflict: 租户管理员用户名已被占用（%{user_name}）
+    admin_init_failed: 租户管理员初始化失败，请重试
+    menu_outside_package: 菜单 %{menu_id} 不在当前租户套餐范围内，无法授权
+    menu_platform_only: 菜单 %{menu_id} 属平台专属能力（代码生成/缓存监控/域名管理），不可授予租户角色
+    menu_filter_uncovered: 权限 %{perms} 不可授予租户角色（平台专属能力，或所属数据表未接入租户过滤）
+    feature_invalid: 能力位 %{key} 的取值 %{mode} 非法（未登记的能力位键，或模式不在允许集合内）
+    feature_platform_disabled: 能力位 %{key} 未在平台配置 [features] 中开启，租户套餐不得开启
+    domain_platform_only: 域名管理仅平台管理员可执行（如需租户自助，请开启能力位 tenant.domain_self_service）
+    domain_cross_tenant: 无权访问或操作其他租户的域名绑定
+    domain_subdomain_platform_only: 子域名由平台统一分配，租户自助仅可绑定自定义域名（需 DNS TXT 验证）
+    domain_invalid: 域名格式非法（小写字母/数字/连字符，至少两级且每级 1-63 位）
+    domain_conflict: 该域名已被占用（含历史绑定），请更换
+    domain_not_found: 域名绑定不存在
+    domain_not_verified: 域名尚未通过 DNS TXT 验证，不能设为主域名
+    domain_verify_failed: 域名 DNS TXT 验证未通过，请确认解析记录已生效
+    domain_primary_forbidden: 该租户已存在主域名，请通过「设为主域名」接口切换
+    host_mismatch: 当前访问域名与登录账号所属租户不一致，已拒绝访问
+    nav_l3_disabled: 租户自建导航仅平台开启能力位 nav.l3 后可用
+    nav_l3_readonly: 当前能力位为只读档（nav.l3 = view_only），不能修改导航配置
+    nav_cross_tenant: 无权访问或操作其他租户的导航配置
+    nav_tenant_required: 平台操作者必须显式指定 tenantId
+    nav_ref_menu_invalid: 引用的菜单不存在、已停用，或不是目录/页面类型（按钮不可作为导航节点）
+    nav_ref_platform_only: 该菜单属平台专属能力，不能被租户加入自建导航
+    nav_ref_outside_package: 该菜单不在当前租户套餐范围内，无法加入自建导航
+    nav_ref_duplicate: 该菜单已加入本租户导航，不能重复挂载
+    nav_parent_invalid: 父级非法（须为本租户其它导航节点，且不得成环或超深）
+    nav_status_invalid: "status 必须为 0(正常) 或 1(停用)"
+    nav_has_children: 该导航节点下仍有子节点，请先删除子节点
+    nav_not_found: 导航配置不存在
+  pat:
+    name_required: 令牌名称不能为空
+    name_too_long: "令牌名称过长（最多 100 字符）"
+    scopes_empty: 令牌权限范围（scopes）不能为空
+    scopes_invalid: "权限标识格式非法：%{value}"
+    count_exceeded: "已达每用户令牌数上限（%{max}）"
+    not_found: 令牌不存在
+    forbidden_pat_usage: 禁止使用访问令牌管理令牌本身
+    create_failed: 令牌生成失败
+  role:
+    not_found: 角色不存在
+    perm_key_exists: 角色权限字符不能重复
+    admin_perm_key_forbidden: 不允许修改超级管理员角色的权限字符
+    admin_delete_forbidden: 不允许删除超级管理员角色
+    admin_disable_forbidden: 不允许停用超级管理员角色
+    admin_data_scope_forbidden: 不允许修改超级管理员角色的数据权限
+    user_id_empty: 用户 ID 不能为空
+    id_empty: 角色 ID 不能为空
+    assigned_to_user: "角色 %{id} 已分配给用户，不允许删除"
+    not_found_by_id: "角色 %{id} 不存在"
+  job_log:
+    id_invalid: 日志 ID 不合法
+  totp:
+    user_id_parse_failed: 用户 ID 解析失败
+    not_enabled: TOTP 未启用
+    secret_invalid: 无效的 TOTP secret
+    code_invalid: 验证码错误或已过期
+    password_hash_invalid: 密码哈希格式错误
+    password_wrong: 密码错误
+    secret_decode_failed: TOTP secret 解码失败
+    secret_gen_failed: 生成 secret 失败
+    totp_build_failed: 构建 TOTP 失败
+    qr_gen_failed: 生成 QR 码失败
+    redis_write_failed: 写入 Redis 失败
+    user_query_failed: 查询用户失败
+    redis_delete_failed: 删除 Redis 失败
+    status_check_failed: TOTP 状态检查服务暂不可用，请稍后重试
+    enc_key_missing: 加密密钥未配置（CONFIG_ENC_KEY），无法加解密 TOTP secret
+    encrypt_failed: TOTP secret 加密失败
+    decrypt_failed: TOTP secret 解密失败
+    login_required: 请提供 TOTP 动态验证码完成二次验证
+    login_locked: TOTP 验证失败次数过多，请 10 分钟后再试
+    already_enabled: 您已启用 TOTP，如需更换请先关闭后再重新绑定
+    pending_expired: 绑定会话已过期，请重新获取二维码后重试
+  webauthn:
+    disabled: WebAuthn（Passkey）功能未启用
+    config_missing: WebAuthn 未配置（rp_id / origin 缺失），服务暂不可用
+    invalid_response: WebAuthn 响应无效
+    session_expired: WebAuthn 会话已过期，请重新发起
+    duplicate_credential: 该认证器已绑定，请勿重复注册
+    duplicate_name: 同名 Passkey 已存在
+    credential_not_found: Passkey 不存在
+    user_unavailable: 当前账号不可用
+    user_id_invalid: 用户身份无效
+    internal: WebAuthn 服务内部错误
+  upload:
+    write_task_failed: 文件写入任务失败
+    write_failed: 写入上传文件失败
+    file_read_task_failed: 文件读取任务失败
+    file_read_failed: 读取文件失败
+    delete_task_failed: 文件删除任务失败
+    delete_failed: 删除文件失败
+
+msg:
+  flow:
+    todo_created: 您有新的审批待办，请及时处理
+  success:
+    default: 操作成功
+    query: 查询成功
+    add: 新增成功
+    edit: 修改成功
+    delete: 删除成功
+    clear: 清空成功
+    unlock: 解锁成功
+    register: 注册成功
+    logout: 退出成功
+    sort: 排序成功
+    restore: 恢复成功
+    force_logout: 强退成功
+    reset: 重置成功
+    refresh: 刷新成功
+    status_change: 状态修改成功
+    execute: 执行成功
+    user_import: 成功导入 %{n} 个用户
+    save: 保存成功
+    erasure_done: 用户已匿名化（不可逆）
+    reload: 热加载成功
+    password_reset: 密码重置成功
+    password_change: 密码修改成功
+    assign_role: 分配角色成功
+    cancel_auth: 取消授权成功
+    auth: 授权成功
+    import: 导入成功
+    sync: 同步成功
+    webauthn_registered: Passkey 绑定成功
+    webauthn_deleted: Passkey 已删除
+    add_user: "新增用户 %{name} 成功"
+    add_role: "新增角色 %{name} 成功"
+    add_dept: "新增部门 %{name} 成功"
+    add_menu: "新增菜单 %{name} 成功"
+    ip_location_update: "IP 库更新成功（源: %{source}，大小: %{size} bytes）"
+    test: 测试通过
+    oauth_login: 第三方登录成功
+    oauth_bind: 绑定成功
+    oauth_unbind: 解绑成功
+  report:
+    push_title: 报表推送
+  cache:
+    no_match: 无匹配缓存
+    key_not_found: 缓存键不存在
+    cleared: "清除成功，共删除 %{count} 个键"
+  export:
+    progress: "导出 %{count} 条"
+    oper_log_task: "操作日志导出"
+  scheduler:
+    job_failed: "任务执行失败: %{err}"
+    job_duration: "%{msg} (耗时 %{ms}ms)"
+    invoke_target_not_found: "未找到调用目标: %{target}"
+    job_timeout: "任务执行超时（>%{secs}s）"
+    demoNoParams_success: demoNoParams 示例任务执行成功（无业务逻辑，仅演示调度器调用）
+    demoParams_success: "demoParams 示例任务执行成功，参数: %{param}（无业务逻辑，仅演示参数传递）"
+    demoMultipleParams_success: demoMultipleParams 示例任务执行成功（无业务逻辑，仅演示多参数传递）
+    cleanup_oper_log: "清理操作日志 %{count} 条"
+    cleanup_oper_log_failed: "清理操作日志失败: %{err}"
+    cleanup_login_log: "清理登录日志 %{count} 条"
+    cleanup_login_log_failed: "清理登录日志失败: %{err}"
+
+# H-3：登录日志审计消息（write_login_log 用，区分细分原因用于审计；
+# 对外返回给用户的错误消息统一用 error.auth.* 系列，避免用户名枚举）
+log:
+  auth:
+    ip_rate_limited: IP 请求频率超限
+    password_locked: 密码错误次数过多
+    captcha_wrong: 验证码错误
+    captcha_expired: 验证码已过期
+    login_failed: 用户不存在/密码错误
+    account_deleted: 账号已删除
+    account_disabled: 账号已停用
+    login_success: 登录成功
+    permission_denied: "权限拒绝：缺少所需权限 %{perm}"
+    totp_failed: TOTP 动态验证码错误
+    totp_locked: TOTP 验证失败次数过多，已临时锁定
+    ua_blocked: 登录客户端特征被风控策略拒绝
+    geo_alert: "异地登录告警：%{prev} 变更为 %{now}"
+  oauth:
+    login_success: "第三方登录成功（%{provider}）"
+    login_failed: "第三方登录失败（%{provider}）"
+    bind_success: "第三方账号绑定成功（%{provider}）"
+    unbind_success: "解绑成功（%{provider}）"
+
+# 通用状态文案（Excel 导出、状态展示等场景使用）
+common:
+  status:
+    normal: 正常
+    disabled: 停用
+    anomaly: 异常
+    success: 成功
+    failed: 失败
+  enabled: 启用
+  disabled: 停用
+  yes: 是
+  no: 否
+  # 平台租户展示名（§27.13.2 在线用户分层视图：tenantId=0 的租户名）
+  platform_tenant: 平台
+  job:
+    misfire_default: 默认策略
+    misfire_immediate: 立即执行
+    misfire_once: 执行一次
+    misfire_give_up: 放弃执行
+    concurrent_allow: 允许
+    concurrent_forbid: 禁止
+
+# Excel 导出工作表名（sheet 标签页名称，用户下载后可见）
+excel:
+  tip_import_xlsx: 仅支持 .xlsx 格式文件
+  sheet:
+    config: 参数配置
+    user: 用户数据
+    user_import: 用户导入
+    role: 角色数据
+    dict_type: 字典类型
+    dict_data: 字典数据
+    oper_log: 操作日志
+    post: 岗位数据
+    logininfor: 登录日志
+    job: 定时任务
+    job_log: 调度日志
+    rate_limit: 限流配置
+    web_hook: 回调配置
+    web_hook_log: 推送记录
+    flow_doc: 审批单据
+
+# 系统通知标题/内容（scheduler 触发的告警通知，前端通知中心可见）
+notice:
+  login_anomaly:
+    title: "登录异常告警 - IP %{ip}"
+    content: "最近 %{minutes} 分钟内 IP %{ip} 失败登录 %{count} 次，疑似撞库攻击，请及时关注。"
+  email:
+    footer: "此邮件由 stepby 系统自动发送，请勿直接回复。"
+
+# WebSocket 系统消息（连接成功提示等）
+websocket:
+  connected: WebSocket 连接成功
