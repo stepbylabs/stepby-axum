@@ -6,7 +6,7 @@
 //!   - 但 system:backup:add(1201, 创建备份) 仍处于不确定状态：
 //!     m20260721_000003 声明插入 (2, 1201)，但 m20260729 的注释说"保留新增类权限"，
 //!     实际 DB 中 (2, 1201) 缺失（历史原因不可考，可能由早期数据迁移或手动操作导致）
-//!   - 测试脚本 testFeature31 期望 ry 调用 POST /system/backup 返回 403
+//!   - 测试脚本 testFeature31 期望 stepby 调用 POST /system/backup 返回 403
 //!
 //! 决策：
 //!   备份创建（add）与恢复（edit）、删除（remove）同属敏感写操作，

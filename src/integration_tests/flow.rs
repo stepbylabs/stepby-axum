@@ -8,7 +8,7 @@
 //! - 管理视图 list 走权限键 system:flow:list
 //! - PAT 边界（W-14）：审批写动作禁 PAT、只读放行
 //!
-//! 账号：ry（普通用户，提交方）/ admin（部门主管 + admin 角色，审批方）。
+//! 账号：stepby（普通用户，提交方）/ admin（部门主管 + admin 角色，审批方）。
 //! 数据前缀：it_flow
 
 use super::TestContext;
@@ -17,7 +17,7 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Method, Request};
 use std::net::SocketAddr;
 
-/// 用指定 token 构造 JSON 请求（ry 等非 admin 账号复用）
+/// 用指定 token 构造 JSON 请求（stepby 等非 admin 账号复用）
 fn token_request(
     ctx: &TestContext,
     token: &str,
@@ -41,7 +41,7 @@ fn token_request(
     req
 }
 
-/// 用 ry 的会话发 POST 并断言业务码 200
+/// 用 stepby 的会话发 POST 并断言业务码 200
 async fn ry_post_json(
     ctx: &TestContext,
     token: &str,
@@ -57,11 +57,11 @@ async fn ry_get_json(ctx: &TestContext, token: &str, uri: &str) -> serde_json::V
     ctx.send_json(req).await
 }
 
-/// ry 提交一张示例请假单（返回 docId）
-async fn submit_as_ry(ctx: &TestContext, ry_token: &str, title: &str, mode: &str) -> i64 {
+/// stepby 提交一张示例请假单（返回 docId）
+async fn submit_as_ry(ctx: &TestContext, stepby_token: &str, title: &str, mode: &str) -> i64 {
     let v = ry_post_json(
         ctx,
-        ry_token,
+        stepby_token,
         "/system/flow/demo/submit",
         serde_json::json!({
             "title": title,
@@ -91,13 +91,13 @@ async fn admin_todo_task_for(ctx: &TestContext, doc_id: i64, node_seq: Option<i6
     .unwrap_or_else(|| panic!("admin 待办中应存在单据 {doc_id} 的任务，实际: {v}"))
 }
 
-/// 链路 1：single 模式两级审批全部通过（ry 提交 → admin 两级审批）
+/// 链路 1：single 模式两级审批全部通过（stepby 提交 → admin 两级审批）
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_single_mode_full_chain() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_single", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_single", "single").await;
 
     // 第一级（部门主管 = admin）
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
@@ -119,8 +119,8 @@ async fn test_flow_single_mode_full_chain() {
         .await;
     ctx.assert_ok(&v);
 
-    // 办结：ry 视角单据 approved；流水含 submit + approve×2
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    // 办结：stepby 视角单据 approved；流水含 submit + approve×2
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
     let doc = v["rows"]
         .as_array()
         .expect("rows 应为数组")
@@ -140,9 +140,9 @@ async fn test_flow_single_mode_full_chain() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_reject_then_resubmit() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_reject", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_reject", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     // 驳回（admin）
@@ -154,8 +154,8 @@ async fn test_flow_reject_then_resubmit() {
         .await;
     ctx.assert_ok(&v);
 
-    // ry 视角单据 rejected
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    // stepby 视角单据 rejected
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
     let doc = v["rows"]
         .as_array()
         .unwrap()
@@ -164,10 +164,10 @@ async fn test_flow_reject_then_resubmit() {
         .expect("列表应含该单据");
     assert_eq!(doc["status"], "rejected", "驳回后单据应为 rejected");
 
-    // ry 重新提交 → round 2
+    // stepby 重新提交 → round 2
     let v = ry_post_json(
         &ctx,
-        &ry_token,
+        &stepby_token,
         &format!("/system/flow/demo/{doc_id}/resubmit"),
         serde_json::json!({}),
     )
@@ -183,21 +183,21 @@ async fn test_flow_reject_then_resubmit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_withdraw() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_withdraw", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_withdraw", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     let v = ry_post_json(
         &ctx,
-        &ry_token,
+        &stepby_token,
         &format!("/system/flow/demo/{doc_id}/withdraw"),
         serde_json::json!({}),
     )
     .await;
     ctx.assert_ok(&v);
 
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
     let doc = v["rows"]
         .as_array()
         .unwrap()
@@ -222,7 +222,7 @@ async fn test_flow_withdraw() {
     // 撤回后可重新提交
     let v = ry_post_json(
         &ctx,
-        &ry_token,
+        &stepby_token,
         &format!("/system/flow/demo/{doc_id}/resubmit"),
         serde_json::json!({}),
     )
@@ -235,9 +235,9 @@ async fn test_flow_withdraw() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_countersign_mode() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_countersign", "countersign").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_countersign", "countersign").await;
 
     // 会签节点（Quorum::All）→ task_type 必须为 countersign（即便解析后仅 1 个审批人）
     let v = ctx
@@ -269,7 +269,7 @@ async fn test_flow_countersign_mode() {
         ctx.assert_ok(&v);
     }
 
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
     let doc = v["rows"]
         .as_array()
         .unwrap()
@@ -279,19 +279,19 @@ async fn test_flow_countersign_mode() {
     assert_eq!(doc["status"], "approved", "会签全部通过后应办结");
 }
 
-/// 链路 5：水平越权 —— 非 assignee（ry）对 admin 的待办发起审批 → 403
+/// 链路 5：水平越权 —— 非 assignee（stepby）对 admin 的待办发起审批 → 403
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_horizontal_forbidden() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_forbidden", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_forbidden", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
-    // ry 用自己的会话审批 admin 的待办（assignee=1 != ry）→ 403
+    // stepby 用自己的会话审批 admin 的待办（assignee=1 != stepby）→ 403
     let req = token_request(
         &ctx,
-        &ry_token,
+        &stepby_token,
         Method::POST,
         &format!("/system/flow/task/{task1}/action"),
         Some(serde_json::json!({ "action": "approve" })),
@@ -347,13 +347,13 @@ async fn test_flow_admin_list() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_transfer_back_to_applicant_rejected() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_transfer", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_transfer", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
-    // 动态取提交人 user_id（不硬编码 ry=2）
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    // 动态取提交人 user_id（不硬编码 stepby=2）
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
     let applicant_id = v["rows"]
         .as_array()
         .unwrap()
@@ -377,8 +377,8 @@ async fn test_flow_transfer_back_to_applicant_rejected() {
         "转办给提交人本人应 400，实际: {status}"
     );
 
-    // 被拒后 ry 不应出现该单据待办（无副作用）
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/todo?pageNum=1&pageSize=50").await;
+    // 被拒后 stepby 不应出现该单据待办（无副作用）
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/todo?pageNum=1&pageSize=50").await;
     let leaked = v["rows"]
         .as_array()
         .unwrap()
@@ -393,9 +393,9 @@ async fn test_flow_concurrent_approve_exactly_one_wins() {
     use futures::future::join_all;
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_concurrent", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_concurrent", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     let reqs: Vec<_> = (0..3)
@@ -449,10 +449,10 @@ async fn test_flow_concurrent_approve_exactly_one_wins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_pat_boundary() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    // 1) ry 提交一张 single 单据：admin（部门主管）持有第一级待办
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_pat", "single").await;
+    // 1) stepby 提交一张 single 单据：admin（部门主管）持有第一级待办
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_pat", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     // 2) admin（超管）签发宽作用域 PAT —— scope 覆盖 system:flow:list 与管理视图
@@ -570,17 +570,17 @@ async fn test_flow_doc_scope_filtering() {
     use crate::repository::flow_demo_doc::{FlowDemoDocRepository, FlowDocScope};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_scope", "single").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_scope", "single").await;
 
-    // 取 ry 的 user_id 与部门（单据 dept_id 为提交人部门快照）
-    let ry = crate::entity::sys_user::Entity::find()
+    // 取 stepby 的 user_id 与部门（单据 dept_id 为提交人部门快照）
+    let stepby = crate::entity::sys_user::Entity::find()
         .filter(crate::entity::sys_user::Column::UserName.eq("stepby"))
         .one(&ctx.state.db)
         .await
-        .expect("查询 ry 失败")
-        .expect("ry 应存在");
-    let ry_dept = ry.dept_id.expect("ry 应有部门");
+        .expect("查询 stepby 失败")
+        .expect("stepby 应存在");
+    let ry_dept = stepby.dept_id.expect("stepby 应有部门");
 
     let repo = FlowDemoDocRepository::new(ctx.state.db.clone());
     let has_doc =
@@ -614,9 +614,9 @@ async fn test_flow_doc_scope_filtering() {
         .expect("空部门集合查询失败");
     assert!(rows.is_empty() && total == 0, "空部门集合应不可见任何单据");
 
-    // Applicant(ry)：可见；Applicant(admin=1)：不可见
+    // Applicant(stepby)：可见；Applicant(admin=1)：不可见
     let (rows, _) = repo
-        .find_all_page(None, 0, 100, None, &FlowDocScope::Applicant(ry.user_id))
+        .find_all_page(None, 0, 100, None, &FlowDocScope::Applicant(stepby.user_id))
         .await
         .expect("Applicant 查询失败");
     assert!(has_doc(&rows), "仅本人范围应含本人单据");
@@ -638,7 +638,7 @@ async fn test_flow_doc_scope_filtering() {
 
 /// 链路 12：离岗自动转办（W-4）—— 停用待办持有人后自动转办 + 系统归因流水
 ///
-/// 场景：管理员把 ry 单据的第一级待办**转办**给一个新用户（该用户所在部门主管 = admin），
+/// 场景：管理员把 stepby 单据的第一级待办**转办**给一个新用户（该用户所在部门主管 = admin），
 /// 随后停用该用户 ⇒ 待办应自动转出（部门主管 admin）并写入 `operator_id = NULL` 的
 /// `transfer` 系统流水。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -646,7 +646,7 @@ async fn test_flow_user_disabled_auto_transfer() {
     use sea_orm::{EntityTrait, Set};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     // 1) 新建"离岗"用户（部门 103），并固定部门 103 主管 = admin(1)（保证转办目标确定）
     ctx.post_json(
@@ -683,8 +683,8 @@ async fn test_flow_user_disabled_auto_transfer() {
         .await
         .expect("更新部门主管失败");
 
-    // 2) ry 提交 → 第一级待办归 admin；admin 将其转办给离岗用户
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_leave_auto", "single").await;
+    // 2) stepby 提交 → 第一级待办归 admin；admin 将其转办给离岗用户
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_leave_auto", "single").await;
     let task_id = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
     let v = ctx
         .post_json(
@@ -754,7 +754,7 @@ async fn test_flow_user_disabled_auto_transfer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_countersign_add() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     // 1) 建加签目标用户并登录
     ctx.post_json(
@@ -783,7 +783,7 @@ async fn test_flow_countersign_add() {
     )
     .await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_countersign_add", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_countersign_add", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     // 2) admin（当前节点审批人）加签 cs_uid
@@ -829,7 +829,7 @@ async fn test_flow_countersign_add() {
         )
         .await;
     ctx.assert_ok(&v);
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
     let doc = v["rows"]
         .as_array()
         .expect("rows 应为数组")
@@ -859,7 +859,7 @@ async fn test_flow_countersign_add() {
         .await;
     ctx.assert_ok(&v);
 
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
     let doc = v["rows"]
         .as_array()
         .expect("rows 应为数组")
@@ -876,9 +876,9 @@ async fn test_flow_countersign_add() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_done_view() {
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_done", "single").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_done", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
     ctx.post_json(
         &format!("/system/flow/task/{task1}/action"),
@@ -915,8 +915,8 @@ async fn test_flow_done_view() {
         "已办应带单据标题（按 biz_id 联查补全），实际: {v}"
     );
 
-    // ry 视角（ry 只有 submit 流水）：不应出现该单据的已办
-    let v = ry_get_json(&ctx, &ry_token, "/system/flow/done?pageNum=1&pageSize=50").await;
+    // stepby 视角（stepby 只有 submit 流水）：不应出现该单据的已办
+    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/done?pageNum=1&pageSize=50").await;
     assert!(
         !v["rows"]
             .as_array()
@@ -933,8 +933,8 @@ async fn test_flow_timeout_scan_idempotent() {
     use sea_orm::{EntityTrait, Set};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_timeout", "single").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_timeout", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     // 第一轮：due_at 尚在未来 → 无候选
@@ -1001,7 +1001,7 @@ async fn test_flow_timeout_escalation() {
     use sea_orm::{EntityTrait, Set};
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
 
     // 建一个非 admin 的待办持有人（部门 103 主管固定为 admin(1)）
     ctx.post_json(
@@ -1034,8 +1034,8 @@ async fn test_flow_timeout_escalation() {
         .await
         .expect("更新部门主管失败");
 
-    // ry 提交 → 转办给 esc 用户 → 待办超期 100h（> 默认升级阈值 72h）
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_escalate", "single").await;
+    // stepby 提交 → 转办给 esc 用户 → 待办超期 100h（> 默认升级阈值 72h）
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_escalate", "single").await;
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
     ctx.post_json(
         &format!("/system/flow/task/{task1}/action"),
@@ -1093,8 +1093,8 @@ async fn test_flow_export_excel() {
     use tower::ServiceExt;
 
     let ctx = TestContext::new().await;
-    let ry_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
-    let doc_id = submit_as_ry(&ctx, &ry_token, "it_flow_export", "single").await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_export", "single").await;
 
     // 导出走表单编码（前端 download() 同款）
     let req = Request::builder()

@@ -262,13 +262,6 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("菜单结构优化失败: {}", e))?;
 
-        // 3.5d-7 去若依化遗留种子改名兜底（与迁移 m20250711 init 的 stepby 化种子对齐，
-        // 存量库不跑 Migrator::up）：ry 演示用户 → stepby；ryTask 系演示任务目标 →
-        // demoTask 系。全部幂等 UPDATE，重复执行无副作用。
-        ensure_rename_legacy_seed(&db)
-            .await
-            .map_err(|e| anyhow::anyhow!("遗留种子改名失败: {}", e))?;
-
         // 3.5d-8 AI 助手菜单（NL2SQL v4.1，menu_id 4100 顶级 C 菜单）：幂等登记。
         // 不授予 role 2（AI 为管理员按需授权：角色管理勾选 ai:chat）；超管 *:*:* 天然可用。
         // 缺此兜底时：能力位 + [ai].enabled 开启后管理员仍无侧边栏入口（假功能）。
@@ -1937,35 +1930,6 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
             .await?;
     }
     tracing::info!("菜单信息架构优化已应用（order 重排 / 自助页收编 3950 / icon 语义修正）");
-    Ok(())
-}
-
-/// 去若依化遗留种子改名兜底（全幂等）：
-/// ① ry 演示用户 → stepby（用户名/邮箱/备注）——**仅在 stepby 尚不存在时执行**；
-///    若两者并存（如历史 e2e 自建过 ry），UPDATE 会撞 `UNIQUE(sys_user.user_name)`
-///    导致启动失败（2026-10-01 实测），此时改为**清理遗留 ry 行**（含角色/岗位关联，
-///    防孤儿），保留规范的 stepby 账号；
-/// ② sys_job 演示任务目标 ryTask 系 → demoTask 系（与 scheduler 注册的白名单一致，
-///    否则改名后任务执行报"目标未注册"）。
-async fn ensure_rename_legacy_seed(db: &DatabaseConnection) -> anyhow::Result<()> {
-    let backend = db.get_database_backend();
-    let updates: &[&str] = &[
-        // ①-a 仅当 stepby 不存在时才改名（避免 UNIQUE(sys_user.user_name) 冲突炸启动）
-        "UPDATE sys_user SET user_name = 'stepby', email = 'stepby@tzkj.net', remark = '演示账号' WHERE user_name = 'ry' AND NOT EXISTS (SELECT 1 FROM sys_user WHERE user_name = 'stepby')",
-        // ①-b stepby 已存在时清理遗留 ry（先关联后本体，防孤儿；三方言通用子查询 DELETE）
-        "DELETE FROM sys_user_role WHERE user_id IN (SELECT user_id FROM sys_user WHERE user_name = 'ry')",
-        "DELETE FROM sys_user_post WHERE user_id IN (SELECT user_id FROM sys_user WHERE user_name = 'ry')",
-        "DELETE FROM sys_user WHERE user_name = 'ry'",
-        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryMultipleParams', 'demoMultipleParams') WHERE invoke_target LIKE '%ryMultipleParams%'",
-        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryNoParams', 'demoNoParams') WHERE invoke_target LIKE '%ryNoParams%'",
-        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryParams', 'demoParams') WHERE invoke_target LIKE '%ryParams%'",
-        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ryTask', 'demoTask') WHERE invoke_target LIKE '%ryTask%'",
-        "UPDATE sys_job SET invoke_target = REPLACE(invoke_target, 'ry', 'demo') WHERE invoke_target LIKE '%(''ry'')%'",
-    ];
-    for sql in updates {
-        db.execute(Statement::from_string(backend, sql.to_string()))
-            .await?;
-    }
     Ok(())
 }
 
