@@ -730,7 +730,7 @@ async fn execute_inner(invoke_target: &str) -> Result<String, String> {
 | invoke_target | 功能 | 默认 cron | 说明 |
 |---------------|------|-----------|------|
 | `demoTask.demoNoParams` | 示例任务（无参数） | 0/10 * * * * ? | 每 10 秒执行，输出 "demoNoParams 执行成功" |
-| `demoTask.demoParams('demo')` | 示例任务（带参数） | 0/15 * * * * ? | 每 15 秒执行，输出 "demoParams 执行成功，参数: ry" |
+| `demoTask.demoParams('demo')` | 示例任务（带参数） | 0/15 * * * * ? | 每 15 秒执行，输出 "demoParams 执行成功，参数: stepby" |
 | `demoTask.demoMultipleParams('demo', true, 2000L, 316.5F, 100)` | 示例任务（多参数） | 0/20 * * * * ? | 每 20 秒执行，输出 "demoMultipleParams 执行成功" |
 
 注册位置：`src/scheduler/mod.rs` 的 `register_builtin_tasks()` 函数，在 `JobScheduler::new()` 中调用。

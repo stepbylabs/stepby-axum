@@ -99,7 +99,7 @@ pub mod sys_job_router;
 
 - [ ] 3.3 实现 `register_builtin_tasks()` 注册内置任务：
   - `demoTask.demoNoParams` → 返回 Ok("demoNoParams 执行成功")
-  - `demoTask.demoParams('demo')` → 返回 Ok("demoParams 执行成功，参数: ry")
+  - `demoTask.demoParams('demo')` → 返回 Ok("demoParams 执行成功，参数: stepby")
   - `demoTask.demoMultipleParams('demo', true, 2000L, 316.5F, 100)` → 返回 Ok("demoMultipleParams 执行成功")
 
 - [ ] 3.4 在 `src/common/error.rs` 新增 `From<SchedulerError> for ServiceError` 实现
