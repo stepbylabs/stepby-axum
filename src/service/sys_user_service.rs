@@ -26,9 +26,13 @@ use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
 use crate::entity::sys_dept::Model as SysDeptModel;
 use crate::entity::sys_notice_read::{Column as NoticeReadColumn, Entity as SysNoticeRead};
+use crate::entity::sys_oauth_user::{Column as OauthUserColumn, Entity as SysOauthUser};
+use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Column as UserColumn, Model as SysUserModel};
+use crate::entity::sys_user_credential::{Column as UserCredentialColumn, Entity as SysUserCredential};
+use crate::entity::sys_user_pref::{Column as UserPrefColumn, Entity as SysUserPref};
 use crate::entity::sys_user_post::ActiveModel as SysUserPostActiveModel;
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_post::SysPostRepository;
@@ -1803,6 +1807,30 @@ impl SysUserService {
                         .filter(NoticeReadColumn::UserId.eq(user_id))
                         .exec(txn)
                         .await?;
+
+                    // 5. E1-a：物理删除该用户全部 PAT（sys_pat 无 del_flag，硬删与同事务
+                    //    既有清理风格一致；配合 verify_token 属主回查构成纵深防御，
+                    //    杜绝被删用户的 PAT 仍可作为长期凭据访问 API）
+                    SysPat::delete_many()
+                        .filter(PatColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
+
+                    // 6. E1-b：清理软删遗留——登录凭据（sys_user_credential，该表删除
+                    //    惯例为物理删除）、消息偏好（sys_user_pref 无 del_flag）、
+                    //    第三方身份绑定（sys_oauth_user 为硬删表）
+                    SysUserCredential::delete_many()
+                        .filter(UserCredentialColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
+                    SysUserPref::delete_many()
+                        .filter(UserPrefColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
+                    SysOauthUser::delete_many()
+                        .filter(OauthUserColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
                     Ok(())
                 }
                 .boxed()
@@ -1912,6 +1940,29 @@ impl SysUserService {
 
                     // 7. 多部门任职：物理删除兼职部门关联（孤儿记录清理）
                     user_dept_repo.delete_by_user_id_conn(txn, user_id).await?;
+
+                    // 8. E1-a/E1-b：与 delete_user 同口径清理——PAT（无 del_flag 硬删）、
+                    //    登录凭据、消息偏好、第三方绑定、公告已读记录
+                    SysPat::delete_many()
+                        .filter(PatColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
+                    SysUserCredential::delete_many()
+                        .filter(UserCredentialColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
+                    SysUserPref::delete_many()
+                        .filter(UserPrefColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
+                    SysOauthUser::delete_many()
+                        .filter(OauthUserColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
+                    SysNoticeRead::delete_many()
+                        .filter(NoticeReadColumn::UserId.eq(user_id))
+                        .exec(txn)
+                        .await?;
                 }
                 Ok(())
             }

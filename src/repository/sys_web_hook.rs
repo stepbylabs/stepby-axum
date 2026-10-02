@@ -152,6 +152,19 @@ impl SysWebHookRepository {
             .await
     }
 
+    /// 按 ID 列表软删（事务内版本，供删除 WebHook 的级联清理事务复用，E1-e）
+    pub async fn soft_delete_by_ids_conn<C: ConnectionTrait>(
+        &self,
+        txn: &C,
+        ids: &[i64],
+    ) -> Result<UpdateResult, DbErr> {
+        SysWebHook::update_many()
+            .col_expr(Column::DelFlag, Expr::value("2"))
+            .filter(Column::Id.is_in(ids.to_vec()))
+            .exec(txn)
+            .await
+    }
+
     /// 更新状态（启停）
     pub async fn update_status(&self, id: i64, status: &str) -> Result<UpdateResult, DbErr> {
         SysWebHook::update_many()

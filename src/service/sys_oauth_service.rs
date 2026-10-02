@@ -555,6 +555,11 @@ impl SysOauthService {
     }
 
     /// 批量删除提供商（operator_tid≠0 时逐一校验归属）
+    ///
+    /// E1-d：单事务包络——先清理 `sys_oauth_user` 中该 provider 的全部第三方绑定
+    /// （硬删表；provider 行删除后绑定记录成为孤儿，回调身份映射/绑定列表会读到
+    /// 悬空引用），再物理删除 provider 行。任一步失败整体回滚。
+    /// 参考 sso_service::delete_clients 的级联清理写法。
     pub async fn delete_providers(
         &self,
         provider_ids: Vec<i64>,
@@ -572,7 +577,28 @@ impl SysOauthService {
         for p in &existing {
             ensure_provider_access(operator_tid, p.tenant_id)?;
         }
-        self.provider_repo.delete_by_ids(provider_ids).await?;
+        // 绑定记录的 provider 列存 provider_code（回调链路写入口径）
+        let provider_codes: Vec<String> = existing
+            .iter()
+            .map(|p| p.provider_code.clone())
+            .collect();
+        let oauth_user_repo = self.oauth_user_repo.clone();
+        let provider_repo = self.provider_repo.clone();
+        self.oauth_user_repo
+            .base()
+            .db()
+            .clone()
+            .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                async move {
+                    oauth_user_repo
+                        .delete_by_providers_conn(txn, provider_codes)
+                        .await?;
+                    provider_repo.delete_by_ids_conn(txn, provider_ids).await?;
+                    Ok(())
+                }
+                .boxed()
+            })
+            .await?;
         Ok(())
     }
 

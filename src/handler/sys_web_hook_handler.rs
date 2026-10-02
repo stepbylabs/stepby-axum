@@ -469,6 +469,8 @@ pub async fn log_export(
                 hook_id: query.hook_id,
                 event_type: query.event_type,
                 status: Some(query.status.unwrap_or_default()),
+                begin_time: query.begin_time,
+                end_time: query.end_time,
             },
             operator.tenant_id(),
         )

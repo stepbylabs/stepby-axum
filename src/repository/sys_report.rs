@@ -146,6 +146,19 @@ impl SysReportRepository {
             .await
     }
 
+    /// 按 ID 列表软删（事务内版本，供删除报表的级联清理事务复用，E1-f）
+    pub async fn soft_delete_by_ids_conn<C: ConnectionTrait>(
+        &self,
+        txn: &C,
+        report_ids: &[i64],
+    ) -> Result<UpdateResult, DbErr> {
+        SysReport::update_many()
+            .col_expr(Column::DelFlag, sea_orm::sea_query::Expr::value("2"))
+            .filter(Column::ReportId.is_in(report_ids.to_vec()))
+            .exec(txn)
+            .await
+    }
+
     /// 插入报表
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

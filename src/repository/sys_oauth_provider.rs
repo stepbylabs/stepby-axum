@@ -160,6 +160,18 @@ impl SysOauthProviderRepository {
             .await
     }
 
+    /// 按 ID 列表物理删除（事务内版本，供删除提供商的级联清理事务复用）
+    pub async fn delete_by_ids_conn<C: ConnectionTrait>(
+        &self,
+        txn: &C,
+        provider_ids: Vec<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        SysOauthProvider::delete_many()
+            .filter(Column::ProviderId.is_in(provider_ids))
+            .exec(txn)
+            .await
+    }
+
     /// 插入提供商
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

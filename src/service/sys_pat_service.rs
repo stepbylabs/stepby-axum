@@ -13,7 +13,7 @@
 //!
 //! 分层约束：不依赖 axum/tower；错误用 ServiceError。
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;
@@ -290,7 +290,10 @@ impl SysPatService {
 
     /// 鉴权：按明文令牌摘要命中有效令牌则返回属主身份 + scopes
     ///
-    /// 校验：enabled（由调用方 middleware 前置判断）→ 摘要命中 → status='0' → 未过期。
+    /// 校验：enabled（由调用方 middleware 前置判断）→ 摘要命中 → status='0' → 未过期
+    /// → 属主 sys_user 存活（E1-a：`del_flag != '2'` 且 `status = '0'`）。
+    /// 属主已软删/停用时令牌立即失效（与 JWT 链路的租户停用闸门口径一致：
+    /// 账号生命周期关闭则其全部凭据随之失效）。
     pub async fn verify_token(&self, token: &str) -> Result<Option<VerifiedPat>, ServiceError> {
         let hash = crate::utils::crypto::token_hash(token);
         let Some(row) = self.pat_repo.find_by_hash(&hash).await? else {
@@ -302,6 +305,17 @@ impl SysPatService {
         if let Some(exp) = row.expires_at
             && exp <= datetime::now_naive()
         {
+            return Ok(None);
+        }
+        // E1-a：回查属主 sys_user，已删/停用账号的 PAT 一律拒绝（纵深防御：
+        // delete_user 事务内会物理清理 PAT，此处再兜底覆盖历史遗留与任何旁路删除）
+        let owner = crate::entity::sys_user::Entity::find_by_id(row.user_id)
+            .one(self.pat_repo.base().db())
+            .await?;
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        if owner.del_flag.as_deref() == Some("2") || owner.status.as_deref() != Some("0") {
             return Ok(None);
         }
         let scopes: Vec<String> = serde_json::from_str(&row.scopes).unwrap_or_default();

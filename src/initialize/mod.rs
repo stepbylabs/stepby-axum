@@ -457,6 +457,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO 旧密钥列失败: {}", e))?;
 
+        // 4.5d E2-a：性能索引兜底（存量库不跑 Migrator::up，等价迁移
+        //      m20261002_000001_perf_indexes）：flow_demo_doc.tenant_id 与
+        //      sys_web_hook_log 的 status/event_type 索引（三库方言感知幂等）。
+        ensure_perf_indexes(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化性能索引兜底失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -513,7 +520,7 @@ impl AppInitializer {
 
         tracing::info!("=== stepby-axum 初始化完成 ===");
         tracing::info!(
-            "访问地址 http://{}:{} ｜ 默认账号 admin / admin123（首次登录强制修改密码）",
+            "访问地址 http://{}:{} ｜ 默认账号 admin / admin123，请尽快登录后台修改密码",
             server_host,
             server_port
         );
@@ -3476,9 +3483,51 @@ async fn ensure_tenant_index(
     }
 }
 
+/// E2-a 性能索引兜底（等价迁移 `m20261002_000001_perf_indexes`，幂等）：
+/// - `idx_flow_doc_tenant ON flow_demo_doc (tenant_id)`
+/// - `idx_web_hook_log_status ON sys_web_hook_log (status)`
+/// - `idx_web_hook_log_event_type ON sys_web_hook_log (event_type)`
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，缺索引仅影响
+/// 查询性能（列表分页/过滤全表扫描），故创建失败只告警不阻断（与 Phase 3 索引兜底
+/// 同策略）。表不存在时（如对应模块建表迁移未应用过的极老存量库）跳过对应索引。
+/// 方言：经 `ensure_tenant_index` 收敛——SQLite/PG 直接 `CREATE INDEX IF NOT EXISTS`，
+/// MySQL 先查 information_schema 判存在，缺失才建。
+async fn ensure_perf_indexes(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let targets: &[(&str, &str, &str)] = &[
+        (
+            "flow_demo_doc",
+            "idx_flow_doc_tenant",
+            "tenant_id",
+        ),
+        (
+            "sys_web_hook_log",
+            "idx_web_hook_log_status",
+            "status",
+        ),
+        (
+            "sys_web_hook_log",
+            "idx_web_hook_log_event_type",
+            "event_type",
+        ),
+    ];
+    for (table, index, cols) in targets {
+        if !sso_table_exists(db, table).await? {
+            tracing::debug!("性能索引 {index} 跳过（表 {table} 不存在）");
+            continue;
+        }
+        if let Err(e) = ensure_tenant_index(db, table, index, cols, false).await {
+            tracing::warn!("性能索引 {index} 创建失败（不阻断启动，请人工核查）: {e}");
+        }
+    }
+    tracing::info!("性能索引兜底完成（flow_demo_doc / sys_web_hook_log，幂等）");
+    Ok(())
+}
+
 /// 幂等检查表是否存在（三方言）
 pub(crate) async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> anyhow::Result<bool> {
     let backend = db.get_database_backend();
+
     let sql = match backend {
         DatabaseBackend::Sqlite => {
             format!("SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}'")

@@ -520,6 +520,8 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // 路由定义见 monitor_online_router.rs：参数名为 {tokenHash}（P1-19 改造后从 tokenId 改为 tokenHash）
     ("GET", "/monitor/online/list", "monitor:online:list"),
     ("DELETE", "/monitor/online/{tokenHash}", "monitor:online:forceLogout"),
+    // 批量强退：权限种子 monitor:online:batchLogout（按钮级权限，与单个强退同菜单）
+    ("POST", "/monitor/online/batchLogout", "monitor:online:batchLogout"),
 
     // ===== 缓存监控 =====
     ("GET", "/monitor/cache", "monitor:cache:list"),
@@ -752,8 +754,15 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // ===== 通用文件上传/下载 =====
     // /common/upload 权限对齐文件管理按钮 system:file:upload（种子 3012），避免任意登录用户可上传
     ("POST", "/common/upload", "system:file:upload"),
-    // 通用下载仅需登录（无敏感数据，但需登录态校验），不设细粒度权限
-    // /common/download 和 /common/download/resource 不在此表
+    // E2-c：/common/download 收紧为 system:file:download（种子 3013，m20260802_000004
+    // 已插入且授权 common 角色，存量库不会 403）。文件管理页下载按钮（前端
+    // v-hasPermi=['system:file:download']）实际走本端点（download.name() 插件唯一调用点），
+    // 此前仅登录即可访问，与前端按钮权限门控脱节（越权下载窗口）。
+    ("GET", "/common/download", "system:file:download"),
+    // /common/download/resource 前端无调用点（download.resource() 插件保留），维持仅登录
+    // E2-c 备注：system:file:copy（种子 3014）为纯前端能力——复制链接走
+    // navigator.clipboard，不发起后端请求，无路由可登记校验；若未来出现
+    // copy 相关后端端点，须同步登记该 perm。
 
     // ===== 仪表盘统计 =====
     // 数据看板为所有登录用户默认首页，权限对齐看板菜单 perms=monitor:dashboard:list（m132）
@@ -810,8 +819,8 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("GET", "/getInfo")
             | ("GET", "/getRouters")
             | ("POST", "/unlockscreen")
-        // ===== 通用下载（仅登录）=====
-            | ("GET", "/common/download")
+        // ===== 通用下载（E2-c：/common/download 已收紧为 system:file:download，
+        // 移出仅登录白名单；resource 版本前端无调用点，维持仅登录）=====
             | ("GET", "/common/download/resource")
         // ===== 个人中心（仅本人操作，仅需登录）=====
             | ("GET", "/system/user/profile")
@@ -1172,6 +1181,17 @@ mod tests {
         );
     }
 
+    // ===== E2-c：通用下载权限（对齐文件管理按钮 system:file:download，种子 3013）=====
+    #[test]
+    fn test_common_download_perm() {
+        assert_eq!(
+            get_required_perm("GET", "/common/download"),
+            Some("system:file:download")
+        );
+        // resource 版本前端无调用点，维持仅登录（无权限映射）
+        assert_eq!(get_required_perm("GET", "/common/download/resource"), None);
+    }
+
     // ===== 仪表盘统计权限 =====
     #[test]
     fn test_dashboard_stats_perm() {
@@ -1210,8 +1230,8 @@ mod tests {
         assert!(is_login_only_path("GET", "/getInfo"));
         assert!(is_login_only_path("GET", "/getRouters"));
         assert!(is_login_only_path("POST", "/unlockscreen"));
-        // 通用下载
-        assert!(is_login_only_path("GET", "/common/download"));
+        // 通用下载（E2-c：/common/download 已收紧为权限映射，不再仅登录）
+        assert!(!is_login_only_path("GET", "/common/download"));
         assert!(is_login_only_path("GET", "/common/download/resource"));
         // 个人中心
         assert!(is_login_only_path("GET", "/system/user/profile"));

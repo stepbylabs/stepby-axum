@@ -89,4 +89,5 @@ pub mod m20260928_000002_frontend_error_device_type;
 pub mod m20260928_000003_dedupe_dashboard_menu;
 pub mod m20260928_000004_optimize_menu_structure;
 pub mod m20261001_000001_shared_store;
+pub mod m20261002_000001_perf_indexes;
 

@@ -189,6 +189,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260928_000003_dedupe_dashboard_menu::Migration),
             Box::new(m20260928_000004_optimize_menu_structure::Migration),
             Box::new(m20261001_000001_shared_store::Migration),
+            Box::new(m20261002_000001_perf_indexes::Migration),
         ]
     }
 }
