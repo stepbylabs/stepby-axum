@@ -10,6 +10,7 @@ use chrono::NaiveDateTime;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_notice::{ActiveModel, Column, Entity as SysNotice, Model};
 use crate::repository::base::BaseRepository;
 
@@ -50,6 +51,9 @@ impl SysNoticeRepository {
     }
 
     /// 多条件分页查询（notice_title 模糊，notice_type 精确，create_by 精确，时间范围）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `notice_id ASC`（P1 稳定排序，防翻页重复/漏行）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -61,6 +65,7 @@ impl SysNoticeRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysNotice::find();
         if let Some(tid) = tenant_scope {
@@ -75,8 +80,6 @@ impl SysNoticeRepository {
         if let Some(cb) = create_by {
             query = query.filter(Column::CreateBy.eq(cb));
         }
-        // P1：稳定排序，防翻页重复/漏行
-        query = query.order_by_asc(Column::NoticeId);
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
         }
@@ -85,11 +88,15 @@ impl SysNoticeRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 notice_id ASC（P1 稳定排序，防翻页重复/漏行）
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::NoticeId),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

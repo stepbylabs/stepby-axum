@@ -205,6 +205,8 @@ pub async fn export(
             WebHookQueryDto {
                 page_num: 1,
                 page_size: crate::common::page::EXPORT_MAX_ROWS,
+                order_by_column: query.order_by_column,
+                is_asc: query.is_asc,
                 hook_name: query.hook_name,
                 event_types: query.event_types,
                 status: Some(query.status.unwrap_or_default()),
@@ -462,6 +464,8 @@ pub async fn log_export(
             WebHookLogQueryDto {
                 page_num: 1,
                 page_size: crate::common::page::EXPORT_MAX_ROWS,
+                order_by_column: query.order_by_column,
+                is_asc: query.is_asc,
                 hook_id: query.hook_id,
                 event_type: query.event_type,
                 status: Some(query.status.unwrap_or_default()),

@@ -10,6 +10,7 @@ error:
     not_found: 数据不存在
     db_acquire: 数据库连接获取失败
     bad_format: 数据格式不正确
+    invalid_param: 请求参数无效
     duplicate: 数据重复，请检查唯一字段
     db_failed: 数据库操作失败，请联系管理员
     tx_failed: 数据库事务失败，请联系管理员
@@ -70,6 +71,9 @@ error:
     captcha_uuid_invalid: 验证码 UUID 格式无效
   oauth:
     provider_not_found: 登录提供商不存在
+    provider_type_invalid: 登录提供商类型无效
+    enabled_invalid: "enabled 必须为 0(停用) 或 1(启用)"
+    client_id_required: client_id 不能为空
     provider_code_exists: 提供商编码已存在
     provider_disabled: 该登录方式已停用
     code_missing: 缺少授权码 (code)
@@ -443,6 +447,21 @@ error:
     tail_task_failed: 日志读取任务执行失败
     file_not_found: 指定的日志文件不存在
     tail_failed: 读取日志文件失败
+  msg:
+    channel_not_found: 消息渠道不存在
+    channel_disabled: 消息渠道已停用，不可使用
+    channel_code_duplicate: 消息渠道编码已存在
+    channel_type_invalid: "消息渠道类型无效: %{channel_type}（支持: email/sms/site）"
+    channel_in_use: "消息渠道「%{channel_name}」已被消息模板引用，无法删除"
+    channel_id_invalid: 消息渠道 ID 不合法
+    config_json_invalid: 渠道配置 JSON 无效
+    mail_disabled: 邮件服务未启用，无法发送邮件
+    template_not_found: 消息模板不存在
+    template_disabled: 消息模板已停用，不可使用
+    template_code_duplicate: 消息模板编码已存在
+    template_id_invalid: 消息模板 ID 不合法
+    log_not_found: 发送日志不存在
+    log_id_invalid: 发送日志 ID 不合法
   notice:
     not_found: 通知公告不存在
     id_invalid: 通知公告 ID 不合法
@@ -565,6 +584,7 @@ msg:
     todo_created: 您有新的审批待办，请及时处理
   success:
     default: 操作成功
+    operation: 操作成功
     query: 查询成功
     add: 新增成功
     edit: 修改成功
@@ -641,6 +661,8 @@ log:
     totp_locked: TOTP 验证失败次数过多，已临时锁定
     ua_blocked: 登录客户端特征被风控策略拒绝
     geo_alert: "异地登录告警：%{prev} 变更为 %{now}"
+    tenant_disabled: 租户已停用
+    tenant_grace: 租户已到期（宽限期内只读）
   oauth:
     login_success: "第三方登录成功（%{provider}）"
     login_failed: "第三方登录失败（%{provider}）"

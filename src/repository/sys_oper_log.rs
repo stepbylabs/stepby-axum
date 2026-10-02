@@ -10,6 +10,7 @@ use chrono::NaiveDateTime;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_oper_log::{ActiveModel, Column, Entity as SysOperLog, Model};
 use crate::repository::base::BaseRepository;
 
@@ -45,6 +46,10 @@ impl SysOperLogRepository {
     ///
     /// `last_id`：游标（keyset 深分页）参数。携带时按 `oper_id < last_id` 过滤 + `oper_id DESC`
     /// 排序，适用于深翻页（避免 OFFSET 线性扫描）；为 `None` 时沿用 `offset/limit` 分页路径。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）。
+    /// 与 keyset 互斥——携带 `last_id` 时固定 `PK DESC`（keyset 语义要求单调主键序），
+    /// 仅 OFFSET 分页路径应用 `sort`；`None` 时回退默认 `oper_time DESC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -59,6 +64,7 @@ impl SysOperLogRepository {
         last_id: Option<i64>,
         tenant_scope: Option<i64>,
         tenant_filter: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOperLog::find();
         // 多租户 Phase 2/3：租户用户可见「本租户操作日志」与「目标资源属于本租户的代管操作日志」；
@@ -115,12 +121,15 @@ impl SysOperLogRepository {
                 .all(self.base.db())
                 .await?
         } else {
-            query
-                .order_by_desc(Column::OperTime)
-                .offset(offset)
-                .limit(limit)
-                .all(self.base.db())
-                .await?
+            // OFFSET 分页路径：动态排序（白名单已解析）或默认 oper_time DESC
+            match sort {
+                Some(s) => query.order_by(s.column, s.dir),
+                None => query.order_by_desc(Column::OperTime),
+            }
+            .offset(offset)
+            .limit(limit)
+            .all(self.base.db())
+            .await?
         };
         Ok((rows, total))
     }
@@ -595,7 +604,7 @@ mod tests {
 
         let (p0, _) = repo
             .find_page_filtered(
-                0, size, None, None, None, None, None, None, None, None, None,
+                0, size, None, None, None, None, None, None, None, None, None, None,
             )
             .await
             .unwrap();
@@ -613,6 +622,7 @@ mod tests {
                 None,
                 None,
                 Some(cursor),
+                None,
                 None,
                 None,
             )
@@ -652,6 +662,7 @@ mod tests {
                 Some(cursor),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -667,6 +678,7 @@ mod tests {
                 None,
                 None,
                 Some(p2[0].oper_id),
+                None,
                 None,
                 None,
             )
@@ -695,6 +707,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -711,6 +724,7 @@ mod tests {
                 None,
                 None,
                 Some(cursor),
+                None,
                 None,
                 None,
             )
@@ -730,19 +744,19 @@ mod tests {
         // OFFSET 分页
         let (o0, _) = repo
             .find_page_filtered(
-                0, size, None, None, None, None, None, None, None, None, None,
+                0, size, None, None, None, None, None, None, None, None, None, None,
             )
             .await
             .unwrap();
         let (o1, _) = repo
             .find_page_filtered(
-                3, size, None, None, None, None, None, None, None, None, None,
+                3, size, None, None, None, None, None, None, None, None, None, None,
             )
             .await
             .unwrap();
         let (o2, _) = repo
             .find_page_filtered(
-                6, size, None, None, None, None, None, None, None, None, None,
+                6, size, None, None, None, None, None, None, None, None, None, None,
             )
             .await
             .unwrap();
@@ -750,7 +764,7 @@ mod tests {
         // keyset 连续翻页
         let (k0, _) = repo
             .find_page_filtered(
-                0, size, None, None, None, None, None, None, None, None, None,
+                0, size, None, None, None, None, None, None, None, None, None, None,
             )
             .await
             .unwrap();
@@ -767,6 +781,7 @@ mod tests {
                 Some(k0.last().unwrap().oper_id),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -781,6 +796,7 @@ mod tests {
                 None,
                 None,
                 Some(k1.last().unwrap().oper_id),
+                None,
                 None,
                 None,
             )

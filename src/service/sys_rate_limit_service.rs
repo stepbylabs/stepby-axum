@@ -20,8 +20,9 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::entity::sys_rate_limit::{
-    ActiveModel as SysRateLimitActiveModel, Model as SysRateLimitModel,
+    ActiveModel as SysRateLimitActiveModel, Column as RateLimitColumn, Model as SysRateLimitModel,
 };
 use crate::middleware::rate_limit::RateLimitConfig;
 use crate::repository::sys_rate_limit::SysRateLimitRepository;
@@ -55,18 +56,28 @@ pub struct RateLimitQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub route_pattern: Option<String>,
     pub enabled: Option<bool>,
 }
 
 impl From<&RateLimitQueryDto> for PageDomain {
     fn from(dto: &RateLimitQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -111,6 +122,20 @@ fn default_true() -> bool {
 }
 
 // ==================== Service 实现 ====================
+
+/// 允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖限流配置业务展示列（路由 pattern、容量/速率、启停、时间）；
+/// `create_by` / `update_by` 等内部审计列不开放动态排序。
+const SORTABLE_COLUMNS: &[(&str, RateLimitColumn)] = &[
+    ("id", RateLimitColumn::Id),
+    ("route_pattern", RateLimitColumn::RoutePattern),
+    ("capacity", RateLimitColumn::Capacity),
+    ("refill_per_second", RateLimitColumn::RefillPerSecond),
+    ("enabled", RateLimitColumn::Enabled),
+    ("create_time", RateLimitColumn::CreateTime),
+    ("update_time", RateLimitColumn::UpdateTime),
+];
 
 /// API 限流配置 Service
 ///
@@ -204,10 +229,15 @@ impl SysRateLimitService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_rate_limit::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let (rows, total) = self
             .rate_limit_repo
-            .find_page_filtered(offset, limit, query.route_pattern.as_deref(), query.enabled)
+            .find_page_filtered(offset, limit, query.route_pattern.as_deref(), query.enabled, sort)
             .await?;
         Ok((rows, total))
     }
@@ -423,9 +453,15 @@ impl SysRateLimitService {
         &self,
         query: RateLimitQueryDto,
     ) -> Result<Vec<SysRateLimitModel>, ServiceError> {
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_rate_limit::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let rows = self
             .rate_limit_repo
-            .find_all_filtered(query.route_pattern.as_deref(), query.enabled)
+            .find_all_filtered(query.route_pattern.as_deref(), query.enabled, sort)
             .await?;
         Ok(rows)
     }

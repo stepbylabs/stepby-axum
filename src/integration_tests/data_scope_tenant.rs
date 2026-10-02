@@ -32,6 +32,8 @@ fn query_all() -> UserQueryDto {
     UserQueryDto {
         page_num: 1,
         page_size: 100,
+        order_by_column: None,
+        is_asc: None,
         dept_id: None,
         user_name: None,
         phonenumber: None,

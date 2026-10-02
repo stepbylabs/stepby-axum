@@ -9,6 +9,7 @@
 use chrono::NaiveDateTime;
 use sea_orm::*;
 
+use crate::common::sort::SortOrder;
 use crate::entity::sys_backup_log::{ActiveModel, Column, Entity as SysBackupLog, Model};
 use crate::repository::base::BaseRepository;
 
@@ -37,6 +38,9 @@ impl SysBackupLogRepository {
     ///
     /// 批次 2：租户自助只读路径复用本方法——同时传 `tenant_id = Some(自己)` 与
     /// `tenant_export_only = true` ⇒ 结构性保证租户看不到整库备份行（含路径/大小元数据）。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `create_time DESC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -48,6 +52,7 @@ impl SysBackupLogRepository {
         end_time: Option<NaiveDateTime>,
         tenant_id: Option<i64>,
         tenant_export_only: bool,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysBackupLog::find();
         if let Some(tid) = tenant_id {
@@ -73,12 +78,15 @@ impl SysBackupLogRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_desc(Column::CreateTime)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 create_time DESC
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_desc(Column::CreateTime),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

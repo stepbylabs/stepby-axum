@@ -23,11 +23,12 @@ use crate::common::constants::SUPER_ADMIN_USER_ID;
 use crate::common::custom_scope::{self, CustomCondition};
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::entity::sys_dept::Model as SysDeptModel;
 use crate::entity::sys_notice_read::{Column as NoticeReadColumn, Entity as SysNoticeRead};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
-use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Model as SysUserModel};
+use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Column as UserColumn, Model as SysUserModel};
 use crate::entity::sys_user_post::ActiveModel as SysUserPostActiveModel;
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_post::SysPostRepository;
@@ -405,6 +406,13 @@ pub struct UserQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub dept_id: Option<i64>,
     pub user_name: Option<String>,
     pub phonenumber: Option<String>,
@@ -427,12 +435,15 @@ pub struct UserQueryDto {
 
 impl From<&UserQueryDto> for PageDomain {
     fn from(dto: &UserQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -510,6 +521,22 @@ pub struct UserFormVo {
 // ==================== 辅助函数 ====================
 
 // ==================== Service 实现 ====================
+
+/// 允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖用户业务展示列；`password`（凭据哈希）、`login_ip`（审计）、`tenant_id`、
+/// `scim_external_id` 等内部/敏感列一律不开放动态排序。
+const SORTABLE_COLUMNS: &[(&str, UserColumn)] = &[
+    ("user_id", UserColumn::UserId),
+    ("dept_id", UserColumn::DeptId),
+    ("user_name", UserColumn::UserName),
+    ("nick_name", UserColumn::NickName),
+    ("email", UserColumn::Email),
+    ("phonenumber", UserColumn::Phonenumber),
+    ("status", UserColumn::Status),
+    ("create_time", UserColumn::CreateTime),
+    ("login_date", UserColumn::LoginDate),
+];
 
 /// 权限缓存 key 前缀（与 sys_menu_service 保持一致）
 const PERM_CACHE_PREFIX: &str = "perm:user:";
@@ -675,6 +702,12 @@ impl SysUserService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, SORTABLE_COLUMNS).map(
+                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
+            )
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -708,6 +741,7 @@ impl SysUserService {
                 query.last_id,
                 tenant_scope,
                 query.tenant_id,
+                sort,
             )
             .await?;
 
@@ -893,6 +927,13 @@ impl SysUserService {
         query.phonenumber = clamp_like_param(query.phonenumber);
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, SORTABLE_COLUMNS).map(
+                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
+            )
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -926,6 +967,7 @@ impl SysUserService {
                 None, // 导出固定走 OFFSET 全量路径，不走 keyset
                 tenant_scope,
                 query.tenant_id,
+                sort,
             )
             .await?;
 

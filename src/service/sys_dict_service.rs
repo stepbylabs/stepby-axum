@@ -18,11 +18,12 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::entity::sys_dict_data::{
-    ActiveModel as SysDictDataActiveModel, Model as SysDictDataModel,
+    ActiveModel as SysDictDataActiveModel, Column as DictDataColumn, Model as SysDictDataModel,
 };
 use crate::entity::sys_dict_type::{
-    ActiveModel as SysDictTypeActiveModel, Model as SysDictTypeModel,
+    ActiveModel as SysDictTypeActiveModel, Column as DictTypeColumn, Model as SysDictTypeModel,
 };
 use crate::repository::sys_dict_data::SysDictDataRepository;
 use crate::repository::sys_dict_type::SysDictTypeRepository;
@@ -50,6 +51,13 @@ pub struct DictTypeQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub dict_name: Option<String>,
     pub dict_type: Option<String>,
     pub status: Option<String>,
@@ -63,12 +71,15 @@ pub struct DictTypeQueryDto {
 
 impl From<&DictTypeQueryDto> for PageDomain {
     fn from(dto: &DictTypeQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -112,6 +123,13 @@ pub struct DictDataQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub dict_type: Option<String>,
     pub dict_label: Option<String>,
     pub status: Option<String>,
@@ -119,12 +137,15 @@ pub struct DictDataQueryDto {
 
 impl From<&DictDataQueryDto> for PageDomain {
     fn from(dto: &DictDataQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -187,6 +208,35 @@ pub struct DictDataEditDto {
 // ==================== 辅助函数 ====================
 
 // ==================== Service 实现 ====================
+
+/// 允许排序的字典类型列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖字典类型业务展示列；`create_by` / `update_by` / `remark` / `del_flag` / `tenant_id`
+/// 等内部列不开放动态排序。
+const DICT_TYPE_SORTABLE_COLUMNS: &[(&str, DictTypeColumn)] = &[
+    ("dict_id", DictTypeColumn::DictId),
+    ("dict_name", DictTypeColumn::DictName),
+    ("dict_type", DictTypeColumn::DictType),
+    ("status", DictTypeColumn::Status),
+    ("create_time", DictTypeColumn::CreateTime),
+    ("update_time", DictTypeColumn::UpdateTime),
+];
+
+/// 允许排序的字典数据列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖字典数据业务展示列；`css_class` / `list_class` / `create_by` / `update_by` /
+/// `remark` / `del_flag` / `tenant_id` 等内部列不开放动态排序。
+const DICT_DATA_SORTABLE_COLUMNS: &[(&str, DictDataColumn)] = &[
+    ("dict_code", DictDataColumn::DictCode),
+    ("dict_sort", DictDataColumn::DictSort),
+    ("dict_label", DictDataColumn::DictLabel),
+    ("dict_value", DictDataColumn::DictValue),
+    ("dict_type", DictDataColumn::DictType),
+    ("is_default", DictDataColumn::IsDefault),
+    ("status", DictDataColumn::Status),
+    ("create_time", DictDataColumn::CreateTime),
+    ("update_time", DictDataColumn::UpdateTime),
+];
 
 /// 字典模块 Service（字典类型 + 字典数据）
 ///
@@ -281,6 +331,14 @@ impl SysDictService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_dict_type::Entity>(
+                prop,
+                DICT_TYPE_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
@@ -302,6 +360,7 @@ impl SysDictService {
                 query.status.as_deref(),
                 begin,
                 end,
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -317,6 +376,15 @@ impl SysDictService {
     ) -> Result<Vec<SysDictTypeModel>, ServiceError> {
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_dict_type::Entity>(
+                prop,
+                DICT_TYPE_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
@@ -338,6 +406,7 @@ impl SysDictService {
                 query.status.as_deref(),
                 begin,
                 end,
+                sort,
             )
             .await?;
         Ok(rows)
@@ -662,6 +731,14 @@ impl SysDictService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_dict_data::Entity>(
+                prop,
+                DICT_DATA_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let (rows, total) = self
             .dict_data_repo
@@ -672,6 +749,7 @@ impl SysDictService {
                 query.dict_type.as_deref(),
                 query.dict_label.as_deref(),
                 query.status.as_deref(),
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -687,6 +765,15 @@ impl SysDictService {
     ) -> Result<Vec<SysDictDataModel>, ServiceError> {
         let offset = 0u64;
         let limit = crate::common::page::EXPORT_MAX_ROWS;
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_dict_data::Entity>(
+                prop,
+                DICT_DATA_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let (rows, _) = self
             .dict_data_repo
@@ -697,6 +784,7 @@ impl SysDictService {
                 query.dict_type.as_deref(),
                 query.dict_label.as_deref(),
                 query.status.as_deref(),
+                sort,
             )
             .await?;
         Ok(rows)

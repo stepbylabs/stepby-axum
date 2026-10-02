@@ -105,6 +105,9 @@ fn logininfor_query() -> LogininforQueryDto {
     LogininforQueryDto {
         page_num: 1,
         page_size: 100,
+        // 不参与动态排序（本测试只验证 tenant_scope 维度的索引选择）
+        order_by_column: None,
+        is_asc: None,
         ipaddr: None,
         user_name: None,
         status: None,

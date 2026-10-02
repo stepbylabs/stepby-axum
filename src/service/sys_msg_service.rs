@@ -27,15 +27,16 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::config::Settings;
 use crate::entity::sys_msg_channel::{
-    ActiveModel as SysMsgChannelActiveModel, Model as SysMsgChannelModel,
+    ActiveModel as SysMsgChannelActiveModel, Column as ChannelColumn, Model as SysMsgChannelModel,
 };
 use crate::entity::sys_msg_send_log::{
-    ActiveModel as SysMsgSendLogActiveModel, Model as SysMsgSendLogModel,
+    ActiveModel as SysMsgSendLogActiveModel, Column as SendLogColumn, Model as SysMsgSendLogModel,
 };
 use crate::entity::sys_msg_template::{
-    ActiveModel as SysMsgTemplateActiveModel, Model as SysMsgTemplateModel,
+    ActiveModel as SysMsgTemplateActiveModel, Column as TemplateColumn, Model as SysMsgTemplateModel,
 };
 use crate::repository::sys_msg_channel::SysMsgChannelRepository;
 use crate::repository::sys_msg_send_log::SysMsgSendLogRepository;
@@ -99,6 +100,13 @@ pub struct ChannelQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub channel_name: Option<String>,
     pub channel_code: Option<String>,
     pub channel_type: Option<String>,
@@ -107,12 +115,15 @@ pub struct ChannelQueryDto {
 
 impl From<&ChannelQueryDto> for PageDomain {
     fn from(dto: &ChannelQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -189,6 +200,13 @@ pub struct TemplateQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub template_name: Option<String>,
     pub template_code: Option<String>,
     pub channel_code: Option<String>,
@@ -197,12 +215,15 @@ pub struct TemplateQueryDto {
 
 impl From<&TemplateQueryDto> for PageDomain {
     fn from(dto: &TemplateQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -262,6 +283,13 @@ pub struct SendLogQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub to_addr: Option<String>,
     pub template_code: Option<String>,
     pub channel_code: Option<String>,
@@ -270,12 +298,15 @@ pub struct SendLogQueryDto {
 
 impl From<&SendLogQueryDto> for PageDomain {
     fn from(dto: &SendLogQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -298,6 +329,47 @@ pub struct SendDto {
 }
 
 // ==================== Service ====================
+
+/// 允许排序的渠道列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖渠道业务展示列；`config_json`（密钥配置）、`tenant_id` / `del_flag` 等内部列不开放动态排序。
+const CHANNEL_SORTABLE_COLUMNS: &[(&str, ChannelColumn)] = &[
+    ("channel_id", ChannelColumn::ChannelId),
+    ("channel_name", ChannelColumn::ChannelName),
+    ("channel_code", ChannelColumn::ChannelCode),
+    ("channel_type", ChannelColumn::ChannelType),
+    ("status", ChannelColumn::Status),
+    ("create_time", ChannelColumn::CreateTime),
+    ("update_time", ChannelColumn::UpdateTime),
+];
+
+/// 允许排序的模板列白名单（数据库列名 snake_case）。
+///
+/// `template_subject` / `template_content`（长文本）与内部列不开放动态排序。
+const TEMPLATE_SORTABLE_COLUMNS: &[(&str, TemplateColumn)] = &[
+    ("template_id", TemplateColumn::TemplateId),
+    ("template_name", TemplateColumn::TemplateName),
+    ("template_code", TemplateColumn::TemplateCode),
+    ("channel_code", TemplateColumn::ChannelCode),
+    ("status", TemplateColumn::Status),
+    ("create_time", TemplateColumn::CreateTime),
+    ("update_time", TemplateColumn::UpdateTime),
+];
+
+/// 允许排序的发送记录列白名单（数据库列名 snake_case）。
+///
+/// 覆盖发送记录业务展示列（含重试次数/发送时间）；`subject` / `content` / `last_error`
+/// （长文本）与 `tenant_id` 等内部列不开放动态排序。
+const SEND_LOG_SORTABLE_COLUMNS: &[(&str, SendLogColumn)] = &[
+    ("log_id", SendLogColumn::LogId),
+    ("template_code", SendLogColumn::TemplateCode),
+    ("channel_code", SendLogColumn::ChannelCode),
+    ("to_addr", SendLogColumn::ToAddr),
+    ("status", SendLogColumn::Status),
+    ("retry_count", SendLogColumn::RetryCount),
+    ("send_time", SendLogColumn::SendTime),
+    ("create_time", SendLogColumn::CreateTime),
+];
 
 /// 消息渠道与模板管理模块 Service
 pub struct SysMsgService {
@@ -346,6 +418,14 @@ impl SysMsgService {
         operator_tid: i64,
     ) -> Result<(Vec<SysMsgChannelModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_msg_channel::Entity>(
+                prop,
+                CHANNEL_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .channel_repo
             .find_page_filtered(
@@ -356,6 +436,7 @@ impl SysMsgService {
                 query.channel_type.as_deref(),
                 query.status.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await?;
         // v5-E6：出参 unseal（管理员配置回显明文；幂等 seal 保证编辑回传不双重加密）
@@ -578,6 +659,14 @@ impl SysMsgService {
         operator_tid: i64,
     ) -> Result<(Vec<SysMsgTemplateModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_msg_template::Entity>(
+                prop,
+                TEMPLATE_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .template_repo
             .find_page_filtered(
@@ -588,6 +677,7 @@ impl SysMsgService {
                 query.channel_code.as_deref(),
                 query.status.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -763,6 +853,14 @@ impl SysMsgService {
         operator_tid: i64,
     ) -> Result<(Vec<SysMsgSendLogModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_msg_send_log::Entity>(
+                prop,
+                SEND_LOG_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .send_log_repo
             .find_page_filtered(
@@ -773,6 +871,7 @@ impl SysMsgService {
                 query.channel_code.as_deref(),
                 query.status.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await?;
         Ok((rows, total))

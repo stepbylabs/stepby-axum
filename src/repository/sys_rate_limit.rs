@@ -9,6 +9,7 @@
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_rate_limit::{ActiveModel, Column, Entity as SysRateLimit, Model};
 use crate::repository::base::BaseRepository;
 
@@ -71,37 +72,49 @@ impl SysRateLimitRepository {
     }
 
     /// 多条件分页查询（route_pattern 模糊 + enabled 精确）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 或未命中时回退默认 `id DESC`。
     pub async fn find_page_filtered(
         &self,
         offset: u64,
         limit: u64,
         route_pattern: Option<&str>,
         enabled: Option<bool>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let query = Self::build_filter_query(route_pattern, enabled);
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_desc(Column::Id)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_desc(Column::Id),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 
     /// 多条件全量查询（导出用，不分页但受 EXPORT_MAX_ROWS 限制防 OOM）
+    ///
+    /// `sort`：动态排序，与 `find_page_filtered` 同口径（导出与页面列表同序）；
+    /// `None` 或未命中时回退默认 `id DESC`。
     pub async fn find_all_filtered(
         &self,
         route_pattern: Option<&str>,
         enabled: Option<bool>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<Vec<Model>, DbErr> {
         let query = Self::build_filter_query(route_pattern, enabled);
-        query
-            .order_by_desc(Column::Id)
-            .limit(crate::common::page::EXPORT_MAX_ROWS)
-            .all(self.base.db())
-            .await
+        match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_desc(Column::Id),
+        }
+        .limit(crate::common::page::EXPORT_MAX_ROWS)
+        .all(self.base.db())
+        .await
     }
 
     /// 构建多条件查询（分页与全量查询共用）

@@ -24,9 +24,10 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::config::Settings;
 use crate::entity::sys_backup_log::{
-    ActiveModel as SysBackupLogActiveModel, Model as SysBackupLogModel,
+    ActiveModel as SysBackupLogActiveModel, Column as BackupLogColumn, Model as SysBackupLogModel,
 };
 use crate::repository::sys_backup_log::SysBackupLogRepository;
 
@@ -64,6 +65,13 @@ pub struct BackupLogQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub backup_type: Option<String>,
     pub status: Option<String>,
     /// 开始时间（兼容前端 addDateRange 嵌套格式 params[beginTime]）
@@ -76,12 +84,15 @@ pub struct BackupLogQueryDto {
 
 impl From<&BackupLogQueryDto> for PageDomain {
     fn from(dto: &BackupLogQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -211,6 +222,19 @@ async fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> 
 }
 
 // ==================== Service 实现 ====================
+
+/// 备份日志允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖备份日志业务展示列（主键、文件名、大小、类型、状态、时间）；
+/// `file_path`（文件系统路径）、`error_msg`、`tenant_id` 等内部/敏感列不开放动态排序。
+const BACKUP_LOG_SORTABLE_COLUMNS: &[(&str, BackupLogColumn)] = &[
+    ("backup_id", BackupLogColumn::BackupId),
+    ("file_name", BackupLogColumn::FileName),
+    ("file_size", BackupLogColumn::FileSize),
+    ("backup_type", BackupLogColumn::BackupType),
+    ("status", BackupLogColumn::Status),
+    ("create_time", BackupLogColumn::CreateTime),
+];
 
 /// 数据备份/恢复 Service
 pub struct SysBackupService {
@@ -850,6 +874,14 @@ impl SysBackupService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_backup_log::Entity>(
+                prop,
+                BACKUP_LOG_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -872,6 +904,7 @@ impl SysBackupService {
                 end,
                 crate::common::tenant::tenant_scope(operator_tid),
                 is_tenant,
+                sort,
             )
             .await?;
         Ok((rows, total))

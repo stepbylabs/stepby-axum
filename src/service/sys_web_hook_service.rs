@@ -22,10 +22,13 @@ use crate::common::datetime;
 use crate::common::error::ServiceError;
 use crate::common::i18n::validate;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::common::ssrf;
-use crate::entity::sys_web_hook::{ActiveModel as SysWebHookActiveModel, Model as SysWebHookModel};
+use crate::entity::sys_web_hook::{
+    ActiveModel as SysWebHookActiveModel, Column as WebHookColumn, Model as SysWebHookModel,
+};
 use crate::entity::sys_web_hook_log::{
-    ActiveModel as SysWebHookLogActiveModel, Model as SysWebHookLogModel,
+    ActiveModel as SysWebHookLogActiveModel, Column as WebHookLogColumn, Model as SysWebHookLogModel,
 };
 use crate::repository::sys_web_hook::SysWebHookRepository;
 use crate::repository::sys_web_hook_log::SysWebHookLogRepository;
@@ -67,6 +70,13 @@ pub struct WebHookQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub hook_name: Option<String>,
     pub event_types: Option<String>,
     pub status: Option<String>,
@@ -74,12 +84,15 @@ pub struct WebHookQueryDto {
 
 impl From<&WebHookQueryDto> for PageDomain {
     fn from(dto: &WebHookQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -152,6 +165,13 @@ pub struct WebHookLogQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub hook_id: Option<i64>,
     pub event_type: Option<String>,
     /// 0=成功 1=失败
@@ -160,12 +180,15 @@ pub struct WebHookLogQueryDto {
 
 impl From<&WebHookLogQueryDto> for PageDomain {
     fn from(dto: &WebHookLogQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -299,6 +322,37 @@ pub fn sign_payload(secret: &str, body: &str) -> String {
 
 // ==================== Service ====================
 
+/// 回调查配置允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖回调配置业务展示列；`secret`（签名密钥）、`tenant_id`、`del_flag` 等内部/敏感列不开放动态排序。
+const WEB_HOOK_SORTABLE_COLUMNS: &[(&str, WebHookColumn)] = &[
+    ("id", WebHookColumn::Id),
+    ("hook_name", WebHookColumn::HookName),
+    ("event_types", WebHookColumn::EventTypes),
+    ("target_url", WebHookColumn::TargetUrl),
+    ("content_type", WebHookColumn::ContentType),
+    ("timeout_secs", WebHookColumn::TimeoutSecs),
+    ("status", WebHookColumn::Status),
+    ("create_time", WebHookColumn::CreateTime),
+    ("update_time", WebHookColumn::UpdateTime),
+];
+
+/// 推送记录允许排序的列白名单。
+///
+/// 覆盖投递留痕业务展示列（主键、关联回调、事件、目标、状态、响应码、耗时、时间）；
+/// `payload` / `response` / `error_msg`（大文本）、`tenant_id` 不开放动态排序。
+const WEB_HOOK_LOG_SORTABLE_COLUMNS: &[(&str, WebHookLogColumn)] = &[
+    ("id", WebHookLogColumn::Id),
+    ("hook_id", WebHookLogColumn::HookId),
+    ("hook_name", WebHookLogColumn::HookName),
+    ("event_type", WebHookLogColumn::EventType),
+    ("target_url", WebHookLogColumn::TargetUrl),
+    ("status", WebHookLogColumn::Status),
+    ("status_code", WebHookLogColumn::StatusCode),
+    ("cost_ms", WebHookLogColumn::CostMs),
+    ("create_time", WebHookLogColumn::CreateTime),
+];
+
 /// WebHook 事件订阅 Service
 pub struct SysWebHookService {
     hook_repo: SysWebHookRepository,
@@ -401,6 +455,13 @@ impl SysWebHookService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_web_hook::Entity>(prop, WEB_HOOK_SORTABLE_COLUMNS)
+                .map(|col| {
+                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
+                })
+        });
         let (rows, total) = self
             .hook_repo
             .find_page_filtered(
@@ -410,6 +471,7 @@ impl SysWebHookService {
                 query.event_types.as_deref(),
                 query.status.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await
             .map_err(ServiceError::from)?;
@@ -833,6 +895,14 @@ impl SysWebHookService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_web_hook_log::Entity>(
+                prop,
+                WEB_HOOK_LOG_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         self.log_repo
             .find_page_filtered(
                 offset,
@@ -841,6 +911,7 @@ impl SysWebHookService {
                 query.event_type.as_deref(),
                 query.status.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await
             .map_err(ServiceError::from)

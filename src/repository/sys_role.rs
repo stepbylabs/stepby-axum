@@ -12,6 +12,7 @@ use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_role::{ActiveModel, Column, Entity as SysRole, Model};
 use crate::entity::sys_user_role::{Column as UserRoleColumn, Entity as SysUserRole};
 use crate::repository::base::BaseRepository;
@@ -171,6 +172,9 @@ impl SysRoleRepository {
     ///   - Some(空): 不可见任何角色 → 返回空结果
     ///   - Some(非空): 限定 role_id IN 集合
     ///   - None: 不追加过滤（data_scope=1 全部）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `role_sort ASC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_with_data_scope(
         &self,
@@ -183,6 +187,7 @@ impl SysRoleRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysRole::find().filter(Column::DelFlag.eq("0"));
         // 多租户 Phase 2：租户用户仅见本租户角色；平台 0 不过滤
@@ -216,12 +221,15 @@ impl SysRoleRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_asc(Column::RoleSort)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 role_sort ASC（角色列表惯例，排序号小的在前）
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::RoleSort),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 }

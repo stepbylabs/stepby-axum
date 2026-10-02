@@ -10,6 +10,7 @@ error:
     not_found: Data not found
     db_acquire: Failed to acquire database connection
     bad_format: Invalid data format
+    invalid_param: Invalid request parameter
     duplicate: Duplicate data, please check unique fields
     db_failed: Database operation failed, please contact the administrator
     tx_failed: Database transaction failed, please contact the administrator
@@ -70,6 +71,9 @@ error:
     captcha_uuid_invalid: Invalid captcha UUID format
   oauth:
     provider_not_found: Login provider not found
+    provider_type_invalid: Invalid login provider type
+    enabled_invalid: "enabled must be 0 (disabled) or 1 (enabled)"
+    client_id_required: client_id is required
     provider_code_exists: Provider code already exists
     provider_disabled: This login method is disabled
     code_missing: Missing authorization code (code)
@@ -240,6 +244,8 @@ error:
     not_found: Rate limit configuration not found
     pattern_exists: Route pattern already exists
     id_invalid: Invalid config ID
+    service_unavailable: Rate limit service temporarily unavailable
+    too_many_requests: Too many requests, please try again later
   monitor:
     session_not_found: Session does not exist or has expired
     session_not_owned: You can only manage your own sessions
@@ -260,6 +266,7 @@ error:
     decimal_default: Decimal default value is not a valid number
     decimal_default_invalid: "Decimal default value %{value} is not a valid number"
     table_not_found: Code generation business table does not exist
+    invalid_table_name_with_value: "Invalid table name: %{name}"
     table_name_start: Table name must start with a letter
     create_table_failed: Failed to create table
     create_table_failed_with_err: "Failed to create table: %{err}"
@@ -579,6 +586,7 @@ msg:
     todo_created: You have a new approval task to handle
   success:
     default: Operation succeeded
+    operation: Operation succeeded
     query: Query succeeded
     add: Added successfully
     edit: Updated successfully
@@ -655,6 +663,8 @@ log:
     totp_locked: Too many failed TOTP attempts, temporarily locked
     ua_blocked: Login client signature rejected by risk-control policy
     geo_alert: "Impossible-travel alert: region changed from %{prev} to %{now}"
+    tenant_disabled: Tenant has been disabled
+    tenant_grace: Tenant has expired (read-only during grace period)
   oauth:
     login_success: "Third-party login successful (%{provider})"
     login_failed: "Third-party login failed (%{provider})"
@@ -689,6 +699,7 @@ excel:
   sheet:
     config: Configuration
     user: User Data
+    user_import: User Import
     role: Role Data
     dict_type: Dict Type
     dict_data: Dict Data

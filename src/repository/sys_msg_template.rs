@@ -10,6 +10,7 @@
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_msg_template::{ActiveModel, Column, Entity as SysMsgTemplate, Model};
 use crate::repository::base::BaseRepository;
 
@@ -81,6 +82,9 @@ impl SysMsgTemplateRepository {
     }
 
     /// 多条件分页查询（template_name 模糊 + template_code/channel_code/status 精确）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `template_id ASC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -91,6 +95,7 @@ impl SysMsgTemplateRepository {
         channel_code: Option<&str>,
         status: Option<&str>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysMsgTemplate::find();
         query = query.filter(Column::DelFlag.eq("0"));
@@ -109,14 +114,17 @@ impl SysMsgTemplateRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
-        query = query.order_by_asc(Column::TemplateId);
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 template_id ASC
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::TemplateId),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

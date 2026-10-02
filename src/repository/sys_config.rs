@@ -12,6 +12,7 @@ use sea_orm::*;
 
 use crate::common::like_escape;
 use crate::common::page::EXPORT_MAX_ROWS;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_config::{ActiveModel, Column, Entity as SysConfig, Model};
 use crate::repository::base::BaseRepository;
 
@@ -94,6 +95,10 @@ impl SysConfigRepository {
     /// 实现说明：平台行需排除"已被本租户覆盖"的 key，跨方言的 `NOT EXISTS` 子查询写法
     /// 成本高且可读性差；sys_config 为小表（运维元数据），故在内存中按键去重合并，
     /// 由调用方分页（见 `find_effective_page`）。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）。合并后的行集
+    /// 无法再走 SQL `ORDER BY`，在内存中按列排序（列覆盖与 service 白名单一致）；
+    /// `None` 时保持原 `config_id ASC` 稳定排序。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_effective_all(
         &self,
@@ -103,6 +108,7 @@ impl SysConfigRepository {
         config_type: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<Vec<Model>, DbErr> {
         // 1. 本租户自己的行（全量可见，含 tenant_private）
         let mut own =
@@ -127,8 +133,32 @@ impl SysConfigRepository {
                 own.push(p);
             }
         }
-        own.sort_by_key(|m| m.config_id);
+        match sort {
+            Some(s) => Self::sort_models_by(&mut own, s),
+            None => own.sort_by_key(|m| m.config_id),
+        }
         Ok(own)
+    }
+
+    /// 内存排序：租户生效视图为「两查询各自拉取后内存合并」，动态排序在此按列应用。
+    ///
+    /// 列覆盖与 service 层 `SORTABLE_COLUMNS` 白名单一致（白名单外的列不会传进来，
+    /// 通配分支仅防御性保持原序）；`Order::Desc` 时反转比较结果（`Equal` 反转仍为 `Equal`）。
+    fn sort_models_by(rows: &mut [Model], sort: SortOrder<Column>) {
+        use std::cmp::Ordering;
+        let asc = matches!(sort.dir, Order::Asc);
+        rows.sort_by(|a, b| {
+            let ord = match sort.column {
+                Column::ConfigId => a.config_id.cmp(&b.config_id),
+                Column::ConfigName => a.config_name.cmp(&b.config_name),
+                Column::ConfigKey => a.config_key.cmp(&b.config_key),
+                Column::ConfigType => a.config_type.cmp(&b.config_type),
+                Column::CreateTime => a.create_time.cmp(&b.create_time),
+                Column::UpdateTime => a.update_time.cmp(&b.update_time),
+                _ => Ordering::Equal,
+            };
+            if asc { ord } else { ord.reverse() }
+        });
     }
 
     /// 租户生效视图分页（见 `find_effective_all`）。total 为合并去重后的总数。
@@ -143,6 +173,7 @@ impl SysConfigRepository {
         config_type: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let merged = self
             .find_effective_all(
@@ -152,6 +183,7 @@ impl SysConfigRepository {
                 config_type,
                 begin_time,
                 end_time,
+                sort,
             )
             .await?;
         let total = merged.len() as u64;
@@ -175,6 +207,9 @@ impl SysConfigRepository {
     }
 
     /// 多条件分页查询（config_name 模糊，config_key 模糊，config_type 精确，时间范围）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `config_id ASC`（原稳定排序语义不变）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -185,10 +220,15 @@ impl SysConfigRepository {
         config_type: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
+        // 稳定排序，防翻页重复/漏行；动态排序（白名单已解析）或默认 config_id ASC
         let query =
-            Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time)
-                .order_by_asc(Column::ConfigId); // P1：稳定排序，防翻页重复/漏行
+            Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time);
+        let query = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::ConfigId),
+        };
 
         let total = query.clone().count(self.base.db()).await?;
         let rows = query
@@ -200,6 +240,9 @@ impl SysConfigRepository {
     }
 
     /// 多条件全量查询（导出用，不分页但受 EXPORT_MAX_ROWS 限制防 OOM）
+    ///
+    /// `sort` 与 `find_page_filtered` 同口径，保证导出与页面列表同序
+    /// （`None` 时同为 `config_id ASC`）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_all_filtered(
         &self,
@@ -208,9 +251,14 @@ impl SysConfigRepository {
         config_type: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<Vec<Model>, DbErr> {
         let query =
             Self::build_filter_query(config_name, config_key, config_type, begin_time, end_time);
+        let query = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::ConfigId),
+        };
         query.limit(EXPORT_MAX_ROWS).all(self.base.db()).await
     }
 

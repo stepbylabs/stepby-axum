@@ -19,9 +19,11 @@ use crate::common::TreeSelectVo;
 use crate::common::constants::{SUPER_ADMIN_ROLE_ID, SUPER_ADMIN_USER_ID};
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::entity::sys_role::{ActiveModel as SysRoleActiveModel, Model as SysRoleModel};
+use crate::common::sort::{self, SortOrder};
+use crate::entity::sys_role::{ActiveModel as SysRoleActiveModel, Column as RoleColumn, Model as SysRoleModel};
 use crate::entity::sys_role_dept::ActiveModel as SysRoleDeptActiveModel;
 use crate::entity::sys_role_menu::ActiveModel as SysRoleMenuActiveModel;
+use crate::entity::sys_user::Column as UserColumn;
 use crate::entity::sys_user::Model as SysUserModel;
 use crate::entity::sys_user_role::ActiveModel as SysUserRoleActiveModel;
 use crate::repository::sys_dept::SysDeptRepository;
@@ -99,6 +101,13 @@ pub struct RoleQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub role_name: Option<String>,
     pub role_key: Option<String>,
     pub status: Option<String>,
@@ -106,12 +115,15 @@ pub struct RoleQueryDto {
 
 impl From<&RoleQueryDto> for PageDomain {
     fn from(dto: &RoleQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -151,6 +163,13 @@ pub struct AuthUserQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub role_id: i64,
     pub user_name: Option<String>,
     pub phonenumber: Option<String>,
@@ -158,12 +177,15 @@ pub struct AuthUserQueryDto {
 
 impl From<&AuthUserQueryDto> for PageDomain {
     fn from(dto: &AuthUserQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -193,6 +215,30 @@ pub struct RoleDeptTreeVo {
 }
 
 // ==================== Service 实现 ====================
+
+/// 角色列表允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖角色业务展示列；`custom_sql`、`tenant_id`、`del_flag` 等内部列不开放动态排序。
+const SORTABLE_COLUMNS: &[(&str, RoleColumn)] = &[
+    ("role_id", RoleColumn::RoleId),
+    ("role_name", RoleColumn::RoleName),
+    ("role_key", RoleColumn::RoleKey),
+    ("role_sort", RoleColumn::RoleSort),
+    ("status", RoleColumn::Status),
+    ("create_time", RoleColumn::CreateTime),
+];
+
+/// 角色已授权/未授权用户列表允许排序的列白名单（查询目标为 sys_user 表）。
+///
+/// `password`（凭据哈希）、`login_ip`（审计）、`tenant_id` 等内部/敏感列不开放动态排序。
+const AUTH_USER_SORTABLE_COLUMNS: &[(&str, UserColumn)] = &[
+    ("user_id", UserColumn::UserId),
+    ("user_name", UserColumn::UserName),
+    ("nick_name", UserColumn::NickName),
+    ("phonenumber", UserColumn::Phonenumber),
+    ("status", UserColumn::Status),
+    ("create_time", UserColumn::CreateTime),
+];
 
 /// 权限缓存 key 前缀（与 sys_menu_service 保持一致）
 const PERM_CACHE_PREFIX: &str = "perm:user:";
@@ -331,6 +377,12 @@ impl SysRoleService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_role::Entity>(prop, SORTABLE_COLUMNS).map(
+                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
+            )
+        });
 
         // 数据权限过滤参数（P0-6 统一入口）
         let mut scope_role_ids: Option<Vec<i64>> = None;
@@ -353,6 +405,7 @@ impl SysRoleService {
                 None,
                 None,
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -371,6 +424,14 @@ impl SysRoleService {
             None => None,
         };
 
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_role::Entity>(prop, SORTABLE_COLUMNS).map(
+                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
+            )
+        });
+
         // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS + 数据权限过滤）
         let (rows, _) = self
             .role_repo
@@ -384,6 +445,7 @@ impl SysRoleService {
                 None,
                 None,
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok(rows)
@@ -1096,6 +1158,11 @@ impl SysRoleService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序（查询目标为 sys_user）
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, AUTH_USER_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
         let (scope_dept_ids, scope_user_id) =
@@ -1126,6 +1193,7 @@ impl SysRoleService {
                 scope_dept_ids.as_deref(),
                 scope_user_id,
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -1146,6 +1214,11 @@ impl SysRoleService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序（查询目标为 sys_user）
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, AUTH_USER_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
         let (scope_dept_ids, scope_user_id) =
@@ -1172,6 +1245,7 @@ impl SysRoleService {
                 scope_dept_ids.as_deref(),
                 scope_user_id,
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok((rows, total))

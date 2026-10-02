@@ -161,6 +161,11 @@ impl SysNoticeReadRepository {
     ///
     /// 支持 searchValue 模糊匹配登录名/用户名
     ///
+    /// `sort`：动态排序（方案 B）。service 层已按 `READ_USER_SORTABLE_COLUMNS` 白名单
+    /// 解析为 `(SQL 列表达式, 是否升序)`——表达式全部来自 service 侧常量白名单
+    /// （如 `r.read_time` / `u.user_name`），无用户可控的字符串拼接注入面；
+    /// `None` 时回退默认 `read_time DESC`。
+    ///
     /// 安全说明：使用参数化查询（占位符 + Values），避免 SQL 注入风险。
     /// 注意：Statement::from_sql_and_values 不会改写占位符，Postgres 必须用 $n，
     /// 故此处按 backend 生成占位符（Sqlite/MySQL 用 ?）。
@@ -172,6 +177,7 @@ impl SysNoticeReadRepository {
         notice_id: i64,
         search_value: Option<&str>,
         tenant_scope: Option<i64>,
+        sort: Option<(&'static str, bool)>,
     ) -> Result<(Vec<NoticeReadUserVo>, u64), DbErr> {
         let db = self.base.db();
         let backend = db.get_database_backend();
@@ -230,6 +236,12 @@ impl SysNoticeReadRepository {
             .map(|row| u64::try_from(row.try_get::<i64>("", "count").unwrap_or(0)).unwrap_or(0))
             .unwrap_or(0);
 
+        // 动态排序（service 层白名单已解析）：expr 来自常量白名单，方向为受限 bool
+        let order_clause = match sort {
+            Some((expr, true)) => format!("ORDER BY {} ASC ", expr),
+            Some((expr, false)) => format!("ORDER BY {} DESC ", expr),
+            None => "ORDER BY r.read_time DESC ".to_string(),
+        };
         // 分页查询（LIMIT/OFFSET 也参数化）
         let list_sql = format!(
             "SELECT r.read_id, r.notice_id, r.user_id, r.read_time, \
@@ -238,9 +250,10 @@ impl SysNoticeReadRepository {
              LEFT JOIN sys_user u ON r.user_id = u.user_id \
              LEFT JOIN sys_dept d ON u.dept_id = d.dept_id \
              {} \
-             ORDER BY r.read_time DESC \
+             {} \
              LIMIT {} OFFSET {}",
             where_clause,
+            order_clause,
             ph(idx + 1),
             ph(idx + 2)
         );

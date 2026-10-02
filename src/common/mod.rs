@@ -16,6 +16,7 @@ pub mod image;
 pub mod page;
 pub mod response;
 pub mod risk_control;
+pub mod sort;
 pub mod ssrf;
 pub mod tenant;
 pub mod upload;

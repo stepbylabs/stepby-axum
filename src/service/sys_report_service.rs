@@ -28,13 +28,16 @@ use utoipa::{IntoParams, ToSchema};
 use crate::common::datetime::now_naive;
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::config::Settings;
 use crate::entity::sys_msg_send_log::{
     ActiveModel as SysMsgSendLogActiveModel, Column as MsgLogColumn, Entity as SysMsgSendLog,
 };
-use crate::entity::sys_report::{ActiveModel as SysReportActiveModel, Model as SysReportModel};
+use crate::entity::sys_report::{
+    ActiveModel as SysReportActiveModel, Column as ReportColumn, Model as SysReportModel,
+};
 use crate::entity::sys_report_sub::{
-    ActiveModel as SysReportSubActiveModel, Model as SysReportSubModel,
+    ActiveModel as SysReportSubActiveModel, Column as SubColumn, Model as SysReportSubModel,
 };
 use crate::entity::sys_user::{Column as UserColumn, Entity as SysUser};
 use crate::repository::sys_msg_send_log::SysMsgSendLogRepository;
@@ -62,6 +65,13 @@ pub struct ReportQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub report_name: Option<String>,
     pub report_code: Option<String>,
     pub report_type: Option<String>,
@@ -70,12 +80,15 @@ pub struct ReportQueryDto {
 
 impl From<&ReportQueryDto> for PageDomain {
     fn from(dto: &ReportQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -146,6 +159,13 @@ pub struct SubQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub report_id: Option<i64>,
     pub sub_name: Option<String>,
     pub status: Option<String>,
@@ -153,12 +173,15 @@ pub struct SubQueryDto {
 
 impl From<&SubQueryDto> for PageDomain {
     fn from(dto: &SubQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -368,6 +391,32 @@ fn config_days(config: &str, default: i64) -> i64 {
 
 // ==================== Service 实现 ====================
 
+/// 报表定义允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖报表业务展示列；`config` / `tenant_id` / `create_by` / `del_flag` 等内部列不开放动态排序。
+const REPORT_SORTABLE_COLUMNS: &[(&str, ReportColumn)] = &[
+    ("report_id", ReportColumn::ReportId),
+    ("report_code", ReportColumn::ReportCode),
+    ("report_name", ReportColumn::ReportName),
+    ("report_type", ReportColumn::ReportType),
+    ("status", ReportColumn::Status),
+    ("create_time", ReportColumn::CreateTime),
+];
+
+/// 报表订阅允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖订阅业务展示列；`tenant_id` / `receive_email` / `receive_user_ids` / `del_flag`
+/// 等收件人或内部列不开放动态排序（收件人属半敏感信息，避免通过排序侧信道探测）。
+const SUB_SORTABLE_COLUMNS: &[(&str, SubColumn)] = &[
+    ("sub_id", SubColumn::SubId),
+    ("report_id", SubColumn::ReportId),
+    ("sub_name", SubColumn::SubName),
+    ("cron", SubColumn::Cron),
+    ("status", SubColumn::Status),
+    ("last_run_time", SubColumn::LastRunTime),
+    ("create_time", SubColumn::CreateTime),
+];
+
 /// 报表中心 + 定时订阅推送模块 Service
 pub struct SysReportService {
     report_repo: SysReportRepository,
@@ -401,6 +450,11 @@ impl SysReportService {
         operator_tid: i64,
     ) -> Result<(Vec<SysReportModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_report::Entity>(prop, REPORT_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .report_repo
             .find_page_filtered(
@@ -411,6 +465,7 @@ impl SysReportService {
                 query.report_type.as_deref(),
                 query.status.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -582,6 +637,14 @@ impl SysReportService {
         operator_tid: i64,
     ) -> Result<(Vec<SysReportSubModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_report_sub::Entity>(
+                prop,
+                SUB_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .sub_repo
             .find_page_filtered(
@@ -591,6 +654,7 @@ impl SysReportService {
                 query.sub_name.as_deref(),
                 query.status.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await?;
         Ok((rows, total))

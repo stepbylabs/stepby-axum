@@ -25,8 +25,10 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
+use crate::common::sort::{self, SortOrder};
 use crate::entity::sys_oauth_provider::{
-    ActiveModel as SysOauthProviderActiveModel, Model as SysOauthProviderModel,
+    ActiveModel as SysOauthProviderActiveModel, Column as OauthProviderColumn,
+    Model as SysOauthProviderModel,
 };
 use crate::entity::sys_oauth_user::{
     ActiveModel as SysOauthUserActiveModel, Model as SysOauthUserModel,
@@ -209,6 +211,13 @@ pub struct ProviderQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub provider_name: Option<String>,
     pub provider_code: Option<String>,
     pub provider_type: Option<String>,
@@ -217,12 +226,15 @@ pub struct ProviderQueryDto {
 
 impl From<&ProviderQueryDto> for PageDomain {
     fn from(dto: &ProviderQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -327,6 +339,22 @@ pub enum OauthCallResult {
 
 // ==================== Service ====================
 
+/// 提供商允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖提供商业务展示列；`client_secret`（OAuth 客户端密钥）、`tenant_id` 等敏感/内部列
+/// 不开放动态排序。
+const OAUTH_PROVIDER_SORTABLE_COLUMNS: &[(&str, OauthProviderColumn)] = &[
+    ("provider_id", OauthProviderColumn::ProviderId),
+    ("provider_code", OauthProviderColumn::ProviderCode),
+    ("provider_name", OauthProviderColumn::ProviderName),
+    ("provider_type", OauthProviderColumn::ProviderType),
+    ("client_id", OauthProviderColumn::ClientId),
+    ("enabled", OauthProviderColumn::Enabled),
+    ("display_order", OauthProviderColumn::DisplayOrder),
+    ("create_time", OauthProviderColumn::CreateTime),
+    ("update_time", OauthProviderColumn::UpdateTime),
+];
+
 /// 第三方登录模块 Service
 pub struct SysOauthService {
     provider_repo: SysOauthProviderRepository,
@@ -376,6 +404,14 @@ impl SysOauthService {
         tenant_scope: Option<i64>,
     ) -> Result<(Vec<ProviderVo>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_oauth_provider::Entity>(
+                prop,
+                OAUTH_PROVIDER_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .provider_repo
             .find_page_filtered(
@@ -386,6 +422,7 @@ impl SysOauthService {
                 query.provider_type.as_deref(),
                 query.enabled.as_deref(),
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok((rows.iter().map(ProviderVo::from_model).collect(), total))
