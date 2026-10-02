@@ -3,6 +3,7 @@
 //! 接口路径对齐前端调用规范：
 //! - GET    /monitor/online/list            分页查询在线用户
 //! - DELETE /monitor/online/{tokenHash}     强退用户
+//! - POST   /monitor/online/batchLogout     批量强退（复用单个强退吊销逻辑，有界并发）
 //!
 //! P1-19 方案 B 实现说明：
 //! 在线用户列表通过共享态存储 SCAN `online:*` + 批量读解析 `OnlineSession` JSON 获取，
@@ -18,10 +19,12 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::Json;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::common::constants::{SECS_PER_HOUR, SUPER_ADMIN_USER_ID};
+use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SECS_PER_HOUR, SUPER_ADMIN_USER_ID};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::auth::Operator;
 use crate::state::AppState;
@@ -32,6 +35,9 @@ use crate::utils::crypto::OnlineSession;
 // 强退三键原子操作（原 FORCE_LOGOUT_SCRIPT：SETEX blacklist + DEL online + DEL sso:at）
 // 已收敛为 `SharedStore::revoke_session(token_hash, ttl)`，实现封入 shared_store 双档
 // （redis 档 Lua 原样保留于 RedisStore；local 档为单事务）。本 handler 不再感知实现细节。
+
+/// 批量强退的并发上限（单次请求内并行吊销的 token 数）
+const BATCH_LOGOUT_CONCURRENCY: usize = 8;
 
 // ==================== DTO / Vo ====================
 
@@ -388,17 +394,50 @@ pub async fn force_logout(
     operator: Operator,
     Path(token_hash): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
+    let (user_id, username) = revoke_one_session(state.as_ref(), &operator, &token_hash).await?;
+
+    // 定向推送 forceLogout 事件，仅通知被强退用户的客户端跳转登录页
+    // P0-2 越权广播修复：原实现走全局广播，所有在线客户端（含无权限用户）都会收到
+    // 他人被强退及其 tokenHash/userId/userName，造成跨用户会话/身份信息泄漏。
+    // 现改为按用户定向投递，仅目标用户的连接收到；失败不阻断主流程（强退已成功，仅 WS 推送失败）。
+    state.broadcast_to_user(
+        user_id,
+        "forceLogout",
+        serde_json::json!({
+            "tokenHash": token_hash,
+            "userId": user_id,
+            "userName": username
+        }),
+    );
+
+    Ok(AjaxResult::success_msg(&crate::tr!(
+        "msg.success.force_logout"
+    )))
+}
+
+/// 单个会话强退核心流程（force_logout / batch_logout 共用）
+///
+/// 流程（与原 force_logout 一致）：
+/// 1. 读 `online:{token_hash}` → JSON → OnlineSession（确认会话存在 + 获取 user_id 用于超管保护）
+/// 2. 租户越权防护（§27.13.2）：租户操作者只能强退本租户会话，跨租户返回 403
+/// 3. 超管保护：user_id == SUPER_ADMIN_USER_ID 返回 403
+/// 4. `store.revoke_session` 原子化 blacklist 登记 + 删除 online / sso:at
+/// 5. fail-closed：共享态存储故障返回 503
+///
+/// blacklist TTL 说明（M-3 精确化）：TTL = `max(session.exp - now, 1)`（精确剩余有效期，秒）；
+/// 旧 JSON（v2.13 前，exp 默认 0）回退到 `jwt_config.expire_hours * SECS_PER_HOUR` 保守上界。
+async fn revoke_one_session(
+    state: &AppState,
+    operator: &Operator,
+    token_hash: &str,
+) -> Result<(i64, String), AppError> {
     let online_key = format!("online:{}", token_hash);
 
     // 1. 读 online:{token_hash} → JSON → OnlineSession（确认会话存在 + 获取 user_id）
-    let session_json = state
-        .store
-        .get(&online_key)
-        .await
-        .map_err(|e| {
-            tracing::error!("共享态存储查询在线会话失败（fail-closed）: {}", e);
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    let session_json = state.store.get(&online_key).await.map_err(|e| {
+        tracing::error!("共享态存储查询在线会话失败（fail-closed）: {}", e);
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?;
 
     let session_json = match session_json {
         Some(s) => s,
@@ -451,10 +490,6 @@ pub async fn force_logout(
 
     // 4. 原子强退：blacklist 登记 + DEL online + DEL sso:at（v4-F2 联动 → store.revoke_session）
     //    M-3：精确 TTL 计算（使用 OnlineSession.exp 实际剩余有效期）
-    //    - 新会话（exp > 0）：TTL = max(exp - now, 1)，黑名单条目与 token 同时过期
-    //    - 旧会话（exp == 0，兼容 v2.13 前遗留的 online JSON）：回退到 jwt.expire_hours 保守上界
-    //    旧方案用 jwt.expire_hours * SECS_PER_HOUR 作为黑名单 TTL（保守上界），
-    //    导致用户登录 1 小时后被强退，黑名单仍保留 24 小时（多 23 小时内存浪费）。
     let now_secs = chrono::Utc::now().timestamp();
     let precise_ttl = session.exp.checked_sub(now_secs).unwrap_or(0).max(0);
     let fallback_ttl = state
@@ -471,30 +506,121 @@ pub async fn force_logout(
     };
     state
         .store
-        .revoke_session(&token_hash, blacklist_ttl as u64)
+        .revoke_session(token_hash, blacklist_ttl as u64)
         .await
         .map_err(|e| {
             tracing::error!("revoke_session 强退执行失败（fail-closed）: {}", e);
             AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
         })?;
 
-    // 定向推送 forceLogout 事件，仅通知被强退用户的客户端跳转登录页
-    // P0-2 越权广播修复：原实现走全局广播，所有在线客户端（含无权限用户）都会收到
-    // 他人被强退及其 tokenHash/userId/userName，造成跨用户会话/身份信息泄漏。
-    // 现改为按用户定向投递，仅目标用户的连接收到；失败不阻断主流程（强退已成功，仅 WS 推送失败）。
-    state.broadcast_to_user(
-        session.user_id,
-        "forceLogout",
-        serde_json::json!({
-            "tokenHash": token_hash,
-            "userId": session.user_id,
-            "userName": session.username
-        }),
-    );
+    Ok((session.user_id, session.username))
+}
 
-    Ok(AjaxResult::success_msg(&crate::tr!(
-        "msg.success.force_logout"
-    )))
+/// POST /monitor/online/batchLogout
+/// 批量强退（前端多选批量操作入口）
+///
+/// 复用单个强退的吊销逻辑（`revoke_one_session`），以有界并发（BATCH_LOGOUT_CONCURRENCY）
+/// 循环执行；每个 token 的成功/失败独立记录，部分失败不阻断其余目标。
+/// 入参上限与批量删除惯例一致（MAX_BATCH_DELETE_SIZE）。
+#[utoipa::path(
+    post,
+    path = "/monitor/online/batchLogout",
+    request_body = BatchLogoutDto,
+    responses(
+        (status = 200, description = "批量强退完成（含逐项结果）", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "token 列表为空或超出批量上限"),
+    ),
+    tag = "monitor-online"
+)]
+pub async fn batch_logout(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Json(dto): Json<BatchLogoutDto>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    // 去空 + 去重，保留首次出现顺序
+    let mut seen = std::collections::HashSet::new();
+    let hashes: Vec<String> = dto
+        .token_hashes
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .collect();
+
+    if hashes.is_empty() {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.monitor.batch_logout_empty"
+        )));
+    }
+    if hashes.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
+    }
+
+    // 有界并发吊销：单项失败（404/403/503）记录为逐项结果，不中断整体
+    let results: Vec<BatchLogoutItem> = futures::stream::iter(hashes)
+        .map(|hash| {
+            let state = state.clone();
+            let operator = operator.clone();
+            async move {
+                match revoke_one_session(state.as_ref(), &operator, &hash).await {
+                    Ok((user_id, username)) => {
+                        // 与单个强退一致：定向推送 forceLogout 事件（失败不阻断主流程）
+                        state.broadcast_to_user(
+                            user_id,
+                            "forceLogout",
+                            serde_json::json!({
+                                "tokenHash": hash,
+                                "userId": user_id,
+                                "userName": username
+                            }),
+                        );
+                        BatchLogoutItem {
+                            token_hash: hash,
+                            code: 200,
+                            msg: crate::tr!("msg.success.force_logout"),
+                        }
+                    }
+                    Err(e) => BatchLogoutItem {
+                        token_hash: hash,
+                        code: e.code,
+                        msg: e.message,
+                    },
+                }
+            }
+        })
+        .buffer_unordered(BATCH_LOGOUT_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    let success_count = results.iter().filter(|r| r.code == 200).count();
+    let failed: Vec<&BatchLogoutItem> = results.iter().filter(|r| r.code != 200).collect();
+
+    Ok(AjaxResult::success(serde_json::json!({
+        "successCount": success_count,
+        "failed": failed,
+    })))
+}
+
+/// POST /monitor/online/batchLogout 入参
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchLogoutDto {
+    /// 会话编号（token 的 SHA-256 哈希）列表
+    pub token_hashes: Vec<String>,
+}
+
+/// 批量强退逐项结果
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchLogoutItem {
+    /// 会话编号（token 的 SHA-256 哈希）
+    pub token_hash: String,
+    /// 单项结果码（200 = 成功，其余与单个强退错误码一致）
+    pub code: i32,
+    /// 单项结果消息
+    pub msg: String,
 }
 
 /// GET /monitor/my-session/list（v5-N5：普通用户自助「会话管理」）

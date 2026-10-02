@@ -3,13 +3,14 @@
 //! 路由结构：
 //! - /monitor/online/list            — GET    查询在线用户列表（管理员）
 //! - /monitor/online/{tokenHash}     — DELETE 强退用户（P1-19：参数从 tokenId 改为 tokenHash）
+//! - /monitor/online/batchLogout     — POST  批量强退（复用单个强退吊销逻辑，有界并发）
 //! - /monitor/my-session/list        — GET    自助会话列表（v5-N5：仅登录，强制按当前用户过滤）
 //! - /monitor/my-session/{tokenHash} — DELETE 自助注销本人会话（v5-N5：仅登录 + 属主校验）
 
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 
 use crate::handler::monitor_online_handler;
 use crate::state::AppState;
@@ -21,6 +22,10 @@ pub fn online_routes() -> Router<Arc<AppState>> {
         .route(
             "/monitor/online/{tokenHash}",
             delete(monitor_online_handler::force_logout),
+        )
+        .route(
+            "/monitor/online/batchLogout",
+            post(monitor_online_handler::batch_logout),
         )
         // v5-N5：普通用户自助「会话管理」（MySessionPanel 专用，仅登录白名单）
         .route(

@@ -66,4 +66,21 @@ impl SysOauthUserRepository {
             .exec(self.base.db())
             .await
     }
+
+    /// 按提供商编码列表物理删除全部绑定（事务内版本）：
+    /// 供删除 OAuth Provider 时级联清理孤儿绑定（E1-d）——
+    /// provider 行删除后其绑定若无主可依，回调/绑定列表会读到悬空引用。
+    pub async fn delete_by_providers_conn<C: ConnectionTrait>(
+        &self,
+        txn: &C,
+        provider_codes: Vec<String>,
+    ) -> Result<DeleteResult, DbErr> {
+        if provider_codes.is_empty() {
+            return Ok(DeleteResult { rows_affected: 0 });
+        }
+        SysOauthUser::delete_many()
+            .filter(Column::Provider.is_in(provider_codes))
+            .exec(txn)
+            .await
+    }
 }

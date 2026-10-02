@@ -12,8 +12,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::future::FutureExt;
 use garde::Validate;
-use sea_orm::{DatabaseConnection, Set};
+use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::{IntoParams, ToSchema};
@@ -176,6 +177,12 @@ pub struct WebHookLogQueryDto {
     pub event_type: Option<String>,
     /// 0=成功 1=失败
     pub status: Option<String>,
+    /// 创建时间范围-起（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    #[serde(alias = "params[beginTime]", default)]
+    pub begin_time: Option<String>,
+    /// 创建时间范围-止（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    #[serde(alias = "params[endTime]", default)]
+    pub end_time: Option<String>,
 }
 
 impl From<&WebHookLogQueryDto> for PageDomain {
@@ -623,6 +630,10 @@ impl SysWebHookService {
     }
 
     /// 逻辑删除回调查配置（并级联清理其推送记录）
+    ///
+    /// E1-e：日志清理不再 `let _` 吞错——原实现中推送记录删除失败会被静默忽略，
+    /// 出现「配置已删但日志残留」的不一致；现把日志清理与配置软删纳入同一事务，
+    /// 任一步失败整体回滚（与 delete_user / remove 租户的原子事务模式一致）。
     pub async fn remove(&self, ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
         if ids.is_empty() {
             return Ok(());
@@ -637,13 +648,20 @@ impl SysWebHookService {
                 "error.common.forbidden"
             )));
         }
-        for id in &ids {
-            let _ = self.log_repo.delete_by_hook_id(*id).await;
-        }
-        self.hook_repo
-            .soft_delete_by_ids(&ids)
+        let log_repo = self.log_repo.clone();
+        let hook_repo = self.hook_repo.clone();
+        self.db
+            .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                async move {
+                    // 级联清理推送记录（物理删，历史审计走操作日志）
+                    log_repo.delete_by_hook_ids_conn(txn, &ids).await?;
+                    // 配置软删
+                    hook_repo.soft_delete_by_ids_conn(txn, &ids).await?;
+                    Ok(())
+                }
+                .boxed()
+            })
             .await
-            .map(|_| ())
             .map_err(ServiceError::from)
     }
 
@@ -903,6 +921,15 @@ impl SysWebHookService {
             )
             .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
+        // P1：时间解析统一走 parse_query_date（本地日→UTC），与全项目一致
+        let begin_time = match query.begin_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
+        let end_time = match query.end_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
         self.log_repo
             .find_page_filtered(
                 offset,
@@ -910,6 +937,8 @@ impl SysWebHookService {
                 query.hook_id,
                 query.event_type.as_deref(),
                 query.status.as_deref(),
+                begin_time,
+                end_time,
                 crate::common::tenant::tenant_scope(operator_tid),
                 sort,
             )

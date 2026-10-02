@@ -10,6 +10,7 @@
 //! - 查询待重试批次（status='2' 且 retry_count<max_retry_count）
 //! - 按 log_id 更新记录
 
+use chrono::NaiveDateTime;
 use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
@@ -35,10 +36,12 @@ impl SysMsgSendLogRepository {
         &self.base
     }
 
-    /// 多条件分页查询（to_addr/template_code/channel_code/status 精确过滤）
+    /// 多条件分页查询（to_addr/template_code/channel_code/status 精确过滤；send_time 范围）
     ///
     /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
     /// `None` 时回退默认 `log_id DESC`。
+    /// 时间范围按 `send_time` 过滤（与列表展示的发送时间列一致）；待发送记录
+    /// `send_time` 为 NULL，不落入任何范围（语义：查询已发送记录的时间段）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -48,6 +51,8 @@ impl SysMsgSendLogRepository {
         template_code: Option<&str>,
         channel_code: Option<&str>,
         status: Option<&str>,
+        begin_time: Option<NaiveDateTime>,
+        end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
         sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
@@ -66,6 +71,12 @@ impl SysMsgSendLogRepository {
         }
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
+        }
+        if let Some(begin) = begin_time {
+            query = query.filter(Column::SendTime.gte(begin));
+        }
+        if let Some(end) = end_time {
+            query = query.filter(Column::SendTime.lte(end));
         }
 
         let total = query.clone().count(self.base.db()).await?;

@@ -10,11 +10,13 @@ use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
 use crate::service::scim_group_service::{ScimGroupAdminDetail, ScimGroupAdminRow};
 use crate::service::scim_service::ScimError;
 use crate::state::AppState;
+use crate::utils::parse_id_list;
 
 /// ScimError → AppError（管理端走全局 AppError 体系）
 fn scim_to_app(e: ScimError) -> AppError {
@@ -138,11 +140,17 @@ pub async fn edit(
 }
 
 /// DELETE /system/scimGroup/{id}（= SCIM DELETE 同语义：软删 + 撤仅 scim 来源授权）
+/// 支持逗号分隔多 id 批量删除（与字典模块 `/system/dict/type/{dictIds}` 惯例一致，
+/// 复用同一路由路径避免 matchit 参数段冲突）。
 #[utoipa::path(
     delete,
     path = "/system/scimGroup/{id}",
+    params(
+        ("id" = String, Path, description = "SCIM 组 ID（单个 id 或逗号分隔 id 列表）")
+    ),
     responses(
         (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "ID 不合法 / 超出批量上限"),
         (status = 404, description = "组不存在"),
     ),
     tag = "system-scim-group"
@@ -150,11 +158,25 @@ pub async fn edit(
 pub async fn remove(
     State(state): State<Arc<AppState>>,
     operator: Operator,
-    Path(id): Path<i64>,
+    Path(ids): Path<String>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    let id_list: Vec<i64> = parse_id_list::<i64>(&ids);
+
+    if id_list.is_empty() {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.id_invalid"
+        )));
+    }
+    if id_list.len() > MAX_BATCH_DELETE_SIZE {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common.batch_size_exceeded",
+            max = MAX_BATCH_DELETE_SIZE
+        )));
+    }
+
     state
         .scim_group_service
-        .admin_delete(id, operator.tenant_id())
+        .admin_batch_delete(id_list, operator.tenant_id())
         .await
         .map_err(scim_to_app)?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))

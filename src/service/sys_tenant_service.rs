@@ -49,6 +49,12 @@ use crate::entity::sys_tenant::{
     ActiveModel as TenantActiveModel, Column as TenantColumn, Entity as SysTenant,
     Model as SysTenantModel,
 };
+use crate::entity::sys_tenant_domain::{
+    ActiveModel as TenantDomainActiveModel, Column as TenantDomainColumn, Entity as SysTenantDomain,
+};
+use crate::entity::sys_tenant_menu::{
+    ActiveModel as TenantMenuActiveModel, Column as TenantMenuColumn, Entity as SysTenantMenu,
+};
 use crate::entity::sys_tenant_package::{
     ActiveModel as PkgActiveModel, Column as PkgColumn, Entity as SysTenantPackage,
 };
@@ -1712,38 +1718,86 @@ impl SysTenantService {
         am.status = Set(Some("1".to_string()));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
-        self.tenant_repo.base().update(am).await?;
 
-        // 域名链路：旧短码让位（tenant_code 已改），失效 tenant:code 缓存
+        // 单事务包络（与 delete_user 原子事务模式一致）：租户行 + 部门树 + 角色 +
+        // 域名 + 租户自建菜单，任一失败整体回滚，避免部分级联的部分成功状态。
+        // 返回角色软删行数仅用于日志。
+        let tenant_repo = self.tenant_repo.clone();
+        let tid = tenant_id;
+        let operator_name = operator.to_string();
+        let roles = self
+            .db()
+            .transaction::<_, sea_orm::UpdateResult, sea_orm::DbErr>(|txn| {
+                async move {
+                    // ① 租户行软删（回收站语义）
+                    tenant_repo.base().update_conn(txn, am).await?;
+
+                    // ② 组织树软删（按租户维度，不依赖 dept 树结构）
+                    let dam: sys_dept::ActiveModel = sys_dept::ActiveModel {
+                        del_flag: Set(Some("2".to_string())),
+                        update_by: Set(Some(operator_name.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    SysDept::update_many()
+                        .set(dam)
+                        .filter(DeptColumn::TenantId.eq(tid))
+                        .exec(txn)
+                        .await?;
+
+                    // ③ 角色软删（del_flag='2' 与租户/部门软删语义一致）：
+                    //    避免已删租户的角色残留在平台角色列表（可被误分配、破坏数据卫生）
+                    let ram: SysRoleActiveModel = SysRoleActiveModel {
+                        del_flag: Set(Some("2".to_string())),
+                        update_by: Set(Some(operator_name.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    let roles = SysRole::update_many()
+                        .set(ram)
+                        .filter(RoleColumn::TenantId.eq(tid))
+                        .filter(RoleColumn::DelFlag.eq("0"))
+                        .exec(txn)
+                        .await?;
+
+                    // ④ E1-c：域名级联软删。域名解析链路 `find_active_by_domain`
+                    //    （repository/sys_tenant_domain.rs）按
+                    //    `del_flag='0' AND status='0' AND verify_status='1'` 过滤，
+                    //    软删行天然被排除——即使并发窗口内残留也不会被解析命中。
+                    let dam2: TenantDomainActiveModel = TenantDomainActiveModel {
+                            del_flag: Set(Some("2".to_string())),
+                            update_by: Set(Some(operator_name.clone())),
+                            update_time: Set(Some(now)),
+                            ..Default::default()
+                        };
+                    SysTenantDomain::update_many()
+                        .set(dam2)
+                        .filter(TenantDomainColumn::TenantId.eq(tid))
+                        .filter(TenantDomainColumn::DelFlag.eq("0"))
+                        .exec(txn)
+                        .await?;
+
+                    // ⑤ E1-c：租户自建导航菜单级联软删（restore 对称恢复）
+                    let mam: TenantMenuActiveModel = TenantMenuActiveModel {
+                        del_flag: Set(Some("2".to_string())),
+                        update_by: Set(Some(operator_name)),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    SysTenantMenu::update_many()
+                        .set(mam)
+                        .filter(TenantMenuColumn::TenantId.eq(tid))
+                        .filter(TenantMenuColumn::DelFlag.eq("0"))
+                        .exec(txn)
+                        .await?;
+                    Ok(roles)
+                }
+                .boxed()
+            })
+            .await?;
+
+        // 域名链路：旧短码让位（tenant_code 已改），失效 tenant:code 缓存（Redis，事务外）
         self.invalidate_code_cache(&tenant.tenant_code).await;
-
-        // 组织树软删（按租户维度，不依赖 dept 树结构）
-        let dam: sys_dept::ActiveModel = sys_dept::ActiveModel {
-            del_flag: Set(Some("2".to_string())),
-            update_by: Set(Some(operator.to_string())),
-            update_time: Set(Some(now)),
-            ..Default::default()
-        };
-        SysDept::update_many()
-            .set(dam)
-            .filter(DeptColumn::TenantId.eq(tenant_id))
-            .exec(self.db())
-            .await?;
-
-        // 角色软删（按租户维度，del_flag='2' 与租户/部门软删语义一致）：
-        // 避免已删租户的角色残留在平台角色列表（可被误分配、破坏数据卫生）
-        let ram: SysRoleActiveModel = SysRoleActiveModel {
-            del_flag: Set(Some("2".to_string())),
-            update_by: Set(Some(operator.to_string())),
-            update_time: Set(Some(now)),
-            ..Default::default()
-        };
-        let roles = SysRole::update_many()
-            .set(ram)
-            .filter(RoleColumn::TenantId.eq(tenant_id))
-            .filter(RoleColumn::DelFlag.eq("0"))
-            .exec(self.db())
-            .await?;
 
         self.sync_runtime_keys(tenant_id, Some("1"), tenant.expire_time)
             .await;
@@ -1752,7 +1806,7 @@ impl SysTenantService {
             tenant_id,
             kicked,
             roles = roles.rows_affected,
-            "租户已删除（回收站）：唯一键让位、组织树软删、角色软删、会话吊销"
+            "租户已删除（回收站）：唯一键让位、组织树/角色/域名/自建菜单软删（单事务）、会话吊销"
         );
         Ok(())
     }
@@ -1823,6 +1877,33 @@ impl SysTenantService {
             .set(ram)
             .filter(RoleColumn::TenantId.eq(tenant_id))
             .filter(RoleColumn::DelFlag.eq("2"))
+            .exec(self.db())
+            .await?;
+
+        // E1-c 对称恢复：域名与租户自建菜单随租户恢复（仅恢复 remove 级联软删的行，
+        // del_flag='2' → '0'；手工删除的域名/菜单已被让位/清理，不受影响）
+        let dam2: TenantDomainActiveModel = TenantDomainActiveModel {
+            del_flag: Set(Some("0".to_string())),
+            update_by: Set(Some(operator.to_string())),
+            update_time: Set(Some(now)),
+            ..Default::default()
+        };
+        SysTenantDomain::update_many()
+            .set(dam2)
+            .filter(TenantDomainColumn::TenantId.eq(tenant_id))
+            .filter(TenantDomainColumn::DelFlag.eq("2"))
+            .exec(self.db())
+            .await?;
+        let mam: TenantMenuActiveModel = TenantMenuActiveModel {
+            del_flag: Set(Some("0".to_string())),
+            update_by: Set(Some(operator.to_string())),
+            update_time: Set(Some(now)),
+            ..Default::default()
+        };
+        SysTenantMenu::update_many()
+            .set(mam)
+            .filter(TenantMenuColumn::TenantId.eq(tenant_id))
+            .filter(TenantMenuColumn::DelFlag.eq("2"))
             .exec(self.db())
             .await?;
         tracing::info!(

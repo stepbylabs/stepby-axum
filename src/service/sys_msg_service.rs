@@ -294,6 +294,12 @@ pub struct SendLogQueryDto {
     pub template_code: Option<String>,
     pub channel_code: Option<String>,
     pub status: Option<String>,
+    /// 发送时间范围-起（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    #[serde(alias = "params[beginTime]", default)]
+    pub begin_time: Option<String>,
+    /// 发送时间范围-止（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    #[serde(alias = "params[endTime]", default)]
+    pub end_time: Option<String>,
 }
 
 impl From<&SendLogQueryDto> for PageDomain {
@@ -861,6 +867,15 @@ impl SysMsgService {
             )
             .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
+        // P1：时间解析统一走 parse_query_date（本地日→UTC），与全项目一致
+        let begin_time = match query.begin_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
+        let end_time = match query.end_time.as_deref() {
+            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
+            _ => None,
+        };
         let (rows, total) = self
             .send_log_repo
             .find_page_filtered(
@@ -870,6 +885,8 @@ impl SysMsgService {
                 query.template_code.as_deref(),
                 query.channel_code.as_deref(),
                 query.status.as_deref(),
+                begin_time,
+                end_time,
                 crate::common::tenant::tenant_scope(operator_tid),
                 sort,
             )

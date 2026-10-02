@@ -8,6 +8,7 @@
 //! - 单条/批量物理删除、全量清空
 //! - 按时间清理过期记录（审计保留期）
 
+use chrono::NaiveDateTime;
 use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
@@ -61,7 +62,7 @@ impl SysWebHookLogRepository {
             .await
     }
 
-    /// 分页查询记录（hook_id/event_type/status 过滤）
+    /// 分页查询记录（hook_id/event_type/status 过滤；create_time 范围）
     ///
     /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
     /// `None` 时回退默认 `id DESC`。
@@ -73,6 +74,8 @@ impl SysWebHookLogRepository {
         hook_id: Option<i64>,
         event_type: Option<&str>,
         status: Option<&str>,
+        begin_time: Option<NaiveDateTime>,
+        end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
         sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
@@ -88,6 +91,12 @@ impl SysWebHookLogRepository {
         }
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
+        }
+        if let Some(begin) = begin_time {
+            query = query.filter(Column::CreateTime.gte(begin));
+        }
+        if let Some(end) = end_time {
+            query = query.filter(Column::CreateTime.lte(end));
         }
 
         let total = query.clone().count(self.base.db()).await?;
@@ -154,6 +163,22 @@ impl SysWebHookLogRepository {
         SysWebHookLog::delete_many()
             .filter(Column::HookId.eq(hook_id))
             .exec(self.base.db())
+            .await
+    }
+
+    /// 按指定 hook_id 列表批量物理删除（事务内版本）：
+    /// 供删除 WebHook 配置的级联清理事务复用（E1-e），任一步失败整体回滚。
+    pub async fn delete_by_hook_ids_conn<C: ConnectionTrait>(
+        &self,
+        txn: &C,
+        hook_ids: &[i64],
+    ) -> Result<DeleteResult, DbErr> {
+        if hook_ids.is_empty() {
+            return Ok(DeleteResult { rows_affected: 0 });
+        }
+        SysWebHookLog::delete_many()
+            .filter(Column::HookId.is_in(hook_ids.to_vec()))
+            .exec(txn)
             .await
     }
 

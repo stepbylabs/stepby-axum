@@ -785,6 +785,20 @@ impl ScimGroupService {
         self.teardown(m.group_id).await
     }
 
+    /// 管理端批量删除：逐组复用 `admin_delete`（每组独立事务：软删 + 清成员/绑定 + 撤授权），
+    /// 任一组失败即整体返回错误（已完成删除的组不回滚，与字典批量删除语义一致）。
+    /// 上限校验（MAX_BATCH_DELETE_SIZE）由 handler 层完成。
+    pub async fn admin_batch_delete(
+        &self,
+        ids: Vec<i64>,
+        operator_tid: i64,
+    ) -> Result<(), ScimError> {
+        for id in ids {
+            self.admin_delete(id, operator_tid).await?;
+        }
+        Ok(())
+    }
+
     /// 组 teardown 公共实现（软删 + 清成员/绑定 + 撤仅本组 source 的授权与兼职）
     async fn teardown(&self, group_id: i64) -> Result<(), ScimError> {
         self.db()

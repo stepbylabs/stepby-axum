@@ -17,9 +17,11 @@
 use std::sync::Arc;
 
 use chrono::NaiveDateTime;
+use futures::future::FutureExt;
 use garde::Validate;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -588,15 +590,26 @@ impl SysReportService {
                 "error.common.forbidden"
             )));
         }
-        for rid in &report_ids {
-            self.sub_repo
-                .soft_delete_by_report_id(*rid)
-                .await
-                .map_err(|_| {
-                    ServiceError::internal(&crate::tr!("error.report.delete_sub_failed"))
-                })?;
-        }
-        self.report_repo.soft_delete_by_ids(&report_ids).await?;
+        // E1-f：单事务包络——原实现逐条循环软删订阅 + 再软删报表，中途失败会留下
+        // 「部分订阅已删、报表仍在/报表已删、部分订阅残留」的不一致状态。
+        // 现将订阅级联软删（一次 IN 批量）与报表软删纳入同一事务，任一步失败整体回滚。
+        let sub_repo = self.sub_repo.clone();
+        let report_repo = self.report_repo.clone();
+        self.report_repo
+            .base()
+            .db()
+            .clone()
+            .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                async move {
+                    sub_repo
+                        .soft_delete_by_report_ids_conn(txn, &report_ids)
+                        .await?;
+                    report_repo.soft_delete_by_ids_conn(txn, &report_ids).await?;
+                    Ok(())
+                }
+                .boxed()
+            })
+            .await?;
         Ok(())
     }
 

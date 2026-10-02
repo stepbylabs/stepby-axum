@@ -140,6 +140,22 @@ impl SysReportSubRepository {
             .await
     }
 
+    /// 按 report_id 列表级联软删全部订阅（事务内版本，E1-f 单事务包络）
+    pub async fn soft_delete_by_report_ids_conn<C: ConnectionTrait>(
+        &self,
+        txn: &C,
+        report_ids: &[i64],
+    ) -> Result<UpdateResult, DbErr> {
+        if report_ids.is_empty() {
+            return Ok(UpdateResult::default());
+        }
+        SysReportSub::update_many()
+            .col_expr(Column::DelFlag, Expr::value("2"))
+            .filter(Column::ReportId.is_in(report_ids.to_vec()))
+            .exec(txn)
+            .await
+    }
+
     /// 更新 last_run_time（定时推送成功后调用）
     pub async fn update_last_run_time(
         &self,

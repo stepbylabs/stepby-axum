@@ -11,6 +11,7 @@ error:
     db_acquire: 数据库连接获取失败
     bad_format: 数据格式不正确
     invalid_param: 请求参数无效
+    id_invalid: 参数 ID 不合法
     duplicate: 数据重复，请检查唯一字段
     db_failed: 数据库操作失败，请联系管理员
     tx_failed: 数据库事务失败，请联系管理员
@@ -251,6 +252,7 @@ error:
     session_not_owned: 只能操作本人的会话
     session_invalid: 会话数据异常
     admin_force_logout_forbidden: 不允许强退超级管理员会话
+    batch_logout_empty: 请选择要强退的会话
   post:
     not_found: 岗位不存在
     code_exists: 岗位编码已存在

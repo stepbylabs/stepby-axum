@@ -46,6 +46,7 @@ mod sys_notice;
 mod sys_oauth;
 mod sys_oper_log;
 mod sys_pat;
+mod sys_pat_owner_guard;
 mod sys_post;
 mod sys_rate_limit;
 mod sys_report;
