@@ -623,6 +623,7 @@ mod soft_authenticator {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use coset::cbor::value::Value;
     use coset::{CborSerializable, CoseKeyBuilder, iana};
+    use p256::elliptic_curve::Generate;
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature, SigningKey};
     use sha2::{Digest, Sha256};
@@ -655,7 +656,7 @@ mod soft_authenticator {
     impl SoftAuthenticator {
         pub fn new() -> Self {
             Self {
-                signing_key: SigningKey::random(&mut {
+                signing_key: SigningKey::generate_from_rng(&mut {
                     use rand_os::{rngs::StdRng, SeedableRng};
                     StdRng::try_from_rng(&mut rand_os::rngs::SysRng).expect("OS RNG seed failed")
                 }),

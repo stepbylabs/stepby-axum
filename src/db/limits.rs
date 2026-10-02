@@ -75,8 +75,9 @@ mod tests {
             dept_cte_max_depth: 0,
         };
         // init 首写优先：本进程内若已被其他测试先行初始化，则此处断言
-        // 只验证夹取逻辑本身（构造期望值对比）
-        let expect_stmt = u64::MAX.min(3600);
+        // 只验证夹取逻辑本身（构造期望值对比）。
+        // u64::MAX 已超上限，实现侧 .min(3600) 后必然夹到 3600（1.99 clippy 确认恒等）。
+        let expect_stmt = 3600u64;
         let expect_depth = 0u32.clamp(1, 1000);
         init(&cfg);
         // 无论如何，快照值必须落在合法区间

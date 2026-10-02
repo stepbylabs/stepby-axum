@@ -635,6 +635,16 @@ fn file_info(path: &str) -> (bool, u64, i64) {
     }
 }
 
+/// sha2 0.11 的 finalize() 返回 Array<u8, N>（无 LowerHex），统一 hex 编码辅助
+fn hex_encode_digest(digest: &[u8]) -> String {
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    hex
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,14 +679,4 @@ mod tests {
         assert_eq!(size, 0);
         assert_eq!(modified, 0);
     }
-}
-
-/// sha2 0.11 的 finalize() 返回 Array<u8, N>（无 LowerHex），统一 hex 编码辅助
-fn hex_encode_digest(digest: &[u8]) -> String {
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{:02x}", b);
-    }
-    hex
 }
