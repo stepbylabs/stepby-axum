@@ -14,7 +14,7 @@
 
 use super::TestContext;
 use axum::http::Method;
-use totp_rs::{Builder, Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret};
 
 /// 注入 CONFIG_ENC_KEY（≥32 字符），供 TOTP secret 加解密使用。
 ///
@@ -31,8 +31,7 @@ fn ensure_config_enc_key() {
 
 /// 根据 Base32 secret 生成当前 TOTP 验证码（与 totp_handler 使用完全相同的参数）。
 fn generate_totp_code(secret: &str) -> String {
-    let secret = Secret::try_from_base32(secret.to_string())
-        .expect("Base32 secret 解码失败");
+    let secret = Secret::try_from_base32(secret).expect("Base32 secret 解码失败");
     let totp = Builder::new()
         .with_algorithm(Algorithm::SHA1)
         .with_digits(6)
