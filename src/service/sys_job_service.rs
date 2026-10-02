@@ -16,8 +16,9 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::entity::sys_job::{self, Model as SysJobModel};
-use crate::entity::sys_job_log::Model as SysJobLogModel;
+use crate::common::sort::{self, SortOrder};
+use crate::entity::sys_job::{self, Column as JobColumn, Model as SysJobModel};
+use crate::entity::sys_job_log::{Column as JobLogColumn, Model as SysJobLogModel};
 use crate::repository::sys_job::SysJobRepository;
 use crate::repository::sys_job_log::SysJobLogRepository;
 use crate::scheduler::JobScheduler;
@@ -72,6 +73,13 @@ pub struct JobQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub job_name: Option<String>,
     pub job_group: Option<String>,
     pub status: Option<String>,
@@ -79,12 +87,15 @@ pub struct JobQueryDto {
 
 impl From<&JobQueryDto> for PageDomain {
     fn from(dto: &JobQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -165,6 +176,13 @@ pub struct JobLogQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub job_name: Option<String>,
     pub job_group: Option<String>,
     pub status: Option<String>,
@@ -178,12 +196,15 @@ pub struct JobLogQueryDto {
 
 impl From<&JobLogQueryDto> for PageDomain {
     fn from(dto: &JobLogQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -234,6 +255,34 @@ pub fn calc_next_valid_time(cron_str: &str) -> Option<String> {
 
 // ==================== Service ====================
 
+/// 允许排序的任务列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖任务业务展示列（主键、名称、分组、调用目标、cron 表达式、状态、创建时间）；
+/// `tenant_id` / `del_flag` / 操作审计列（create_by / update_by / update_time / remark）
+/// 等内部列不开放动态排序。
+const JOB_SORTABLE_COLUMNS: &[(&str, JobColumn)] = &[
+    ("job_id", JobColumn::JobId),
+    ("job_name", JobColumn::JobName),
+    ("job_group", JobColumn::JobGroup),
+    ("invoke_target", JobColumn::InvokeTarget),
+    ("cron_expression", JobColumn::CronExpression),
+    ("status", JobColumn::Status),
+    ("create_time", JobColumn::CreateTime),
+];
+
+/// 允许排序的任务日志列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖日志业务展示列（主键、任务名、分组、调用目标、状态、创建时间）；
+/// `tenant_id` 与大文本列（job_message / exception_info）不开放动态排序。
+const JOB_LOG_SORTABLE_COLUMNS: &[(&str, JobLogColumn)] = &[
+    ("job_log_id", JobLogColumn::JobLogId),
+    ("job_name", JobLogColumn::JobName),
+    ("job_group", JobLogColumn::JobGroup),
+    ("invoke_target", JobLogColumn::InvokeTarget),
+    ("status", JobLogColumn::Status),
+    ("create_time", JobLogColumn::CreateTime),
+];
+
 /// 定时任务 Service
 ///
 /// 持有 Repository + Scheduler 引用，CRUD 操作同步调度器
@@ -266,15 +315,23 @@ impl SysJobService {
         tenant_scope: Option<i64>,
     ) -> Result<(Vec<JobVo>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        let offset = page.offset();
+        let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<sys_job::Entity>(prop, JOB_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .job_repo
             .find_page_filtered(
-                page.offset(),
-                page.limit(),
+                offset,
+                limit,
                 query.job_name.as_deref(),
                 query.job_group.as_deref(),
                 query.status.as_deref(),
                 tenant_scope,
+                sort,
             )
             .await?;
 
@@ -653,11 +710,18 @@ impl SysJobService {
         tenant_scope: Option<i64>,
     ) -> Result<(Vec<SysJobLogModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
+        let offset = page.offset();
+        let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_job_log::Entity>(prop, JOB_LOG_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, total) = self
             .job_log_repo
             .find_page_filtered(
-                page.offset(),
-                page.limit(),
+                offset,
+                limit,
                 query.job_name.as_deref(),
                 query.job_group.as_deref(),
                 query.status.as_deref(),
@@ -671,6 +735,7 @@ impl SysJobService {
                     _ => None,
                 },
                 tenant_scope,
+                sort,
             )
             .await?;
 
@@ -716,6 +781,12 @@ impl SysJobService {
         query: JobQueryDto,
         tenant_scope: Option<i64>,
     ) -> Result<Vec<JobVo>, ServiceError> {
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<sys_job::Entity>(prop, JOB_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, _) = self
             .job_repo
             .find_page_filtered(
@@ -725,6 +796,7 @@ impl SysJobService {
                 query.job_group.as_deref(),
                 query.status.as_deref(),
                 tenant_scope,
+                sort,
             )
             .await?;
 
@@ -740,6 +812,12 @@ impl SysJobService {
         query: JobLogQueryDto,
         tenant_scope: Option<i64>,
     ) -> Result<Vec<SysJobLogModel>, ServiceError> {
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_job_log::Entity>(prop, JOB_LOG_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
         let (rows, _) = self
             .job_log_repo
             .find_page_filtered(
@@ -758,6 +836,7 @@ impl SysJobService {
                     _ => None,
                 },
                 tenant_scope,
+                sort,
             )
             .await?;
 

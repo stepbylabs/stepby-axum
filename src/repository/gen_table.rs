@@ -12,6 +12,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::gen_table::{
     ActiveModel as GenTableActiveModel, Column as GenTableColumn, Entity as GenTable,
     Model as GenTableModel,
@@ -42,6 +43,19 @@ pub struct DbColumnInfo {
     pub ordinal_position: i64,
 }
 
+/// 数据库表元数据列表的可排序列（`find_db_tables` 为原始 SQL 查询、无 sea-orm Entity）
+///
+/// 前端 prop 经 service 层白名单映射到此枚举，SQL 端映射为 SELECT 输出列别名
+/// （编译期常量，非用户输入拼接），保持与 sea-orm 参数化路径同等安全语义：
+/// 不透传任意列，防止按未预期列排序探测表结构。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DbTableSortColumn {
+    /// 表名
+    TableName,
+    /// 表注释（SQLite 元数据无注释概念，恒为空串，按此列排序合法但无效果）
+    TableComment,
+}
+
 /// 代码生成业务表 Repository
 #[derive(Clone)]
 pub struct GenTableRepository {
@@ -60,6 +74,9 @@ impl GenTableRepository {
     }
 
     /// 分页查询代码生成业务表
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 或未命中时回退默认 `table_id DESC`。
     pub async fn find_page_filtered(
         &self,
         offset: u64,
@@ -68,6 +85,7 @@ impl GenTableRepository {
         table_comment: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        sort: Option<SortOrder<GenTableColumn>>,
     ) -> Result<(Vec<GenTableModel>, u64), DbErr> {
         let mut query = GenTable::find();
         if let Some(name) = table_name {
@@ -86,12 +104,14 @@ impl GenTableRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .order_by_desc(GenTableColumn::TableId)
-            .all(self.base.db())
-            .await?;
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_desc(GenTableColumn::TableId),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 
@@ -170,15 +190,39 @@ impl GenTableRepository {
     /// 查询数据库中所有未导入的业务表
     ///
     /// 排除已存在于 gen_table 中的表，排除系统表
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）。
+    /// 列名为编译期常量映射（三库均支持按 SELECT 输出列别名排序），方向由枚举解析，
+    /// 无注入面；`None` 回退原有默认排序（按表名升序）。
     pub async fn find_db_tables(
         &self,
         offset: u64,
         limit: u64,
         table_name: Option<&str>,
         table_comment: Option<&str>,
+        sort: Option<SortOrder<DbTableSortColumn>>,
     ) -> Result<(Vec<DbTableInfo>, u64), DbErr> {
         let db = self.base.db();
         let backend = db.get_database_backend();
+
+        // 动态排序子句：列枚举 → SELECT 输出列别名（table_name / table_comment），
+        // 方向枚举 → ASC/DESC；None 回退各分支原默认（SQLite 按原生列 name，PG/MySQL 按 table_name）
+        let order_by: String = match sort {
+            Some(s) => {
+                let col = match s.column {
+                    DbTableSortColumn::TableName => "table_name",
+                    DbTableSortColumn::TableComment => "table_comment",
+                };
+                match s.dir {
+                    sea_orm::Order::Asc => format!("{col} ASC"),
+                    _ => format!("{col} DESC"),
+                }
+            }
+            None => match backend {
+                DatabaseBackend::Sqlite => "name".to_string(),
+                _ => "table_name".to_string(),
+            },
+        };
 
         // 获取已导入的表名列表
         let imported: Vec<String> = GenTable::find()
@@ -224,7 +268,7 @@ impl GenTableRepository {
                     data_vals.push((limit as i64).into());
                     data_vals.push((offset as i64).into());
                     let sql = format!(
-                        "SELECT name AS table_name, '' AS table_comment FROM sqlite_master WHERE {} ORDER BY name LIMIT ? OFFSET ?",
+                        "SELECT name AS table_name, '' AS table_comment FROM sqlite_master WHERE {} ORDER BY {order_by} LIMIT ? OFFSET ?",
                         where_clause
                     );
                     let count_sql = format!(
@@ -268,7 +312,7 @@ impl GenTableRepository {
                     data_vals.push((offset as i64).into());
                     let sql = format!(
                         "SELECT table_name, COALESCE(obj_description((quote_ident(table_schema)||'.'||quote_ident(table_name))::regclass, 'pg_class'), '') AS table_comment \
-                     FROM information_schema.tables WHERE {} ORDER BY table_name LIMIT ${} OFFSET ${}",
+                     FROM information_schema.tables WHERE {} ORDER BY {order_by} LIMIT ${} OFFSET ${}",
                         where_clause,
                         idx,
                         idx + 1
@@ -302,7 +346,7 @@ impl GenTableRepository {
                     data_vals.push((offset as i64).into());
                     let sql = format!(
                         "SELECT table_name, IFNULL(table_comment, '') AS table_comment \
-                     FROM information_schema.tables WHERE {} ORDER BY table_name LIMIT ? OFFSET ?",
+                     FROM information_schema.tables WHERE {} ORDER BY {order_by} LIMIT ? OFFSET ?",
                         where_clause
                     );
                     let count_sql = format!(

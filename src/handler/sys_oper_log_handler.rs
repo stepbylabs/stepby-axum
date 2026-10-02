@@ -200,6 +200,9 @@ pub async fn export(
         page_num: dto.page_num,
         // P1 修复：导出 page_size 上限 clamp（防超大值一次性查询海量行到内存）
         page_size: dto.page_size.clamp(1, crate::common::page::EXPORT_MAX_ROWS),
+        // 导出 DTO 未暴露排序参数：走默认排序（oper_time DESC）
+        order_by_column: None,
+        is_asc: None,
         title: dto.title,
         business_type: dto.business_type,
         oper_name: dto.oper_name,

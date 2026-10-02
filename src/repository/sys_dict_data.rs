@@ -10,6 +10,7 @@ use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_dict_data::{ActiveModel, Column, Entity as SysDictData, Model};
 use crate::repository::base::BaseRepository;
 
@@ -122,6 +123,9 @@ impl SysDictDataRepository {
     ///
     /// 多租户：`tenant_scope = Some(tid)` → `tenant_id IN (0, tid)`（平台类型数据 + 本租户自建类型数据）；
     /// `None`（平台操作者）→ 全量不过滤。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `dict_sort ASC`（原排序语义不变）。
     pub async fn find_page_filtered(
         &self,
         offset: u64,
@@ -130,6 +134,7 @@ impl SysDictDataRepository {
         dict_type: Option<&str>,
         dict_label: Option<&str>,
         status: Option<&str>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysDictData::find().filter(Column::DelFlag.eq("0"));
         if let Some(tid) = tenant_scope {
@@ -146,12 +151,14 @@ impl SysDictDataRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_asc(Column::DictSort)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::DictSort),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

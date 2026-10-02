@@ -10,6 +10,7 @@ use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_post::{ActiveModel, Column, Entity as SysPost, Model};
 use crate::repository::base::BaseRepository;
 
@@ -126,6 +127,9 @@ impl SysPostRepository {
     }
 
     /// 多条件分页查询（post_code 模糊，post_name 模糊，status 精确）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `post_id ASC` 稳定排序。
     pub async fn find_page_filtered(
         &self,
         offset: u64,
@@ -134,6 +138,7 @@ impl SysPostRepository {
         post_name: Option<&str>,
         status: Option<&str>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysPost::find().filter(Column::DelFlag.eq("0"));
         // 多租户 Phase 2：租户用户仅见本租户岗位；平台 0 不过滤
@@ -149,8 +154,11 @@ impl SysPostRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
-        // P1：稳定排序，防翻页重复/漏行
-        query = query.order_by_asc(Column::PostId);
+        // P1：稳定排序，防翻页重复/漏行；动态排序（白名单已解析）优先，默认 post_id ASC
+        query = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::PostId),
+        };
 
         let total = query.clone().count(self.base.db()).await?;
         let rows = query

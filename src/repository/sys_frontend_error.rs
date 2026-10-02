@@ -10,6 +10,7 @@ use chrono::NaiveDateTime;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_frontend_error::{ActiveModel, Column, Entity as SysFrontendError, Model};
 use crate::repository::base::BaseRepository;
 
@@ -35,7 +36,10 @@ impl SysFrontendErrorRepository {
         SysFrontendError::find_by_id(id).one(self.base.db()).await
     }
 
-    /// 多条件分页查询（level/source/device_type 精确，name 模糊，时间范围，按 create_time 倒序）
+    /// 多条件分页查询（level/source/device_type 精确，name 模糊，时间范围，按 id 倒序）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `id DESC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -49,6 +53,7 @@ impl SysFrontendErrorRepository {
         end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
         tenant_filter: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysFrontendError::find();
         // 多租户：租户操作者仅见本租户记录；平台（None）不过滤
@@ -79,12 +84,15 @@ impl SysFrontendErrorRepository {
             query = query.filter(Column::CreateTime.lte(end));
         }
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_desc(Column::Id)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 id 倒序
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_desc(Column::Id),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

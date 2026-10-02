@@ -14,7 +14,8 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::entity::sys_post::{ActiveModel as SysPostActiveModel, Model as SysPostModel};
+use crate::common::sort::{self, SortOrder};
+use crate::entity::sys_post::{ActiveModel as SysPostActiveModel, Column as PostColumn, Model as SysPostModel};
 use crate::repository::sys_post::SysPostRepository;
 use crate::repository::sys_user_post::SysUserPostRepository;
 
@@ -28,6 +29,13 @@ pub struct PostQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub post_code: Option<String>,
     pub post_name: Option<String>,
     pub status: Option<String>,
@@ -41,12 +49,15 @@ pub struct PostQueryDto {
 
 impl From<&PostQueryDto> for PageDomain {
     fn from(dto: &PostQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -86,6 +97,18 @@ pub struct PostEditDto {
 
 // ==================== Service 实现 ====================
 
+/// 允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖岗位业务展示列；`tenant_id` / `del_flag` / `remark` 等内部列不开放动态排序。
+const SORTABLE_COLUMNS: &[(&str, PostColumn)] = &[
+    ("post_id", PostColumn::PostId),
+    ("post_code", PostColumn::PostCode),
+    ("post_name", PostColumn::PostName),
+    ("post_sort", PostColumn::PostSort),
+    ("status", PostColumn::Status),
+    ("create_time", PostColumn::CreateTime),
+];
+
 /// 岗位模块 Service
 ///
 /// 数据访问通过 Repository 层委托：
@@ -120,6 +143,13 @@ impl SysPostService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_post::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| {
+                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
+                })
+        });
 
         let (rows, total) = self
             .post_repo
@@ -130,6 +160,7 @@ impl SysPostService {
                 query.post_name.as_deref(),
                 query.status.as_deref(),
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -330,6 +361,14 @@ impl SysPostService {
         query: PostQueryDto,
         tenant_scope: Option<i64>,
     ) -> Result<Vec<SysPostModel>, ServiceError> {
+        // 导出与页面列表同序：动态排序白名单解析口径一致
+        let page = PageDomain::from(&query);
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_post::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| {
+                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
+                })
+        });
         // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS）
         let (rows, _) = self
             .post_repo
@@ -340,6 +379,7 @@ impl SysPostService {
                 query.post_name.as_deref(),
                 query.status.as_deref(),
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok(rows)

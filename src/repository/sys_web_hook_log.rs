@@ -12,6 +12,7 @@ use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_web_hook_log::{ActiveModel, Column, Entity as SysWebHookLog, Model};
 use crate::repository::base::BaseRepository;
 
@@ -61,6 +62,9 @@ impl SysWebHookLogRepository {
     }
 
     /// 分页查询记录（hook_id/event_type/status 过滤）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `id DESC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -70,6 +74,7 @@ impl SysWebHookLogRepository {
         event_type: Option<&str>,
         status: Option<&str>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysWebHookLog::find();
         if let Some(tid) = tenant_scope {
@@ -84,14 +89,17 @@ impl SysWebHookLogRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
-        query = query.order_by_desc(Column::Id);
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 id DESC
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_desc(Column::Id),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

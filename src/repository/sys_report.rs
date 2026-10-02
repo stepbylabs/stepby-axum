@@ -11,6 +11,7 @@
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_report::{ActiveModel, Column, Entity as SysReport, Model};
 use crate::repository::base::BaseRepository;
 
@@ -71,6 +72,9 @@ impl SysReportRepository {
     }
 
     /// 分页查询报表（report_name 模糊 + report_code/report_type/status 精确）
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 或未命中时回退默认 `report_id ASC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -81,6 +85,7 @@ impl SysReportRepository {
         report_type: Option<&str>,
         status: Option<&str>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysReport::find();
         query = query.filter(Column::DelFlag.ne("2"));
@@ -99,14 +104,16 @@ impl SysReportRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
-        query = query.order_by_asc(Column::ReportId);
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::ReportId),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

@@ -10,6 +10,7 @@
 use chrono::NaiveDateTime;
 use sea_orm::*;
 
+use crate::common::sort::SortOrder;
 use crate::entity::sys_task::{ActiveModel, Column, Entity as SysTask, Model};
 use crate::repository::base::BaseRepository;
 
@@ -33,6 +34,9 @@ impl SysTaskRepository {
     /// 多条件分页查询
     ///
     /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户任务；None（平台 0）不过滤。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `create_time DESC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -44,6 +48,7 @@ impl SysTaskRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysTask::find();
         if let Some(t) = tenant_scope {
@@ -68,12 +73,15 @@ impl SysTaskRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .order_by_desc(Column::CreateTime)
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 create_time 倒序
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_desc(Column::CreateTime),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

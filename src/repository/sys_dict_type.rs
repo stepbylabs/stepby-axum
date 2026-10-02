@@ -11,6 +11,7 @@ use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_dict_type::{ActiveModel, Column, Entity as SysDictType, Model};
 use crate::repository::base::BaseRepository;
 
@@ -136,6 +137,9 @@ impl SysDictTypeRepository {
     ///
     /// 多租户：`tenant_scope = Some(tid)` → 本租户自建类型 + 平台类型（`tenant_id IN (0, tid)`）；
     /// `None`（平台操作者）→ 全量不过滤。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `dict_id ASC`（原稳定排序语义不变）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -147,6 +151,7 @@ impl SysDictTypeRepository {
         status: Option<&str>,
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysDictType::find().filter(Column::DelFlag.eq("0"));
         if let Some(tid) = tenant_scope {
@@ -161,13 +166,16 @@ impl SysDictTypeRepository {
         if let Some(st) = status {
             query = query.filter(Column::Status.eq(st));
         }
-        // P1：稳定排序，防翻页重复/漏行
-        query = query.order_by_asc(Column::DictId);
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
         }
         if let Some(end) = end_time {
             query = query.filter(Column::CreateTime.lte(end));
+        }
+        // 稳定排序，防翻页重复/漏行；动态排序（白名单已解析）或默认 dict_id ASC
+        match sort {
+            Some(s) => query = query.order_by(s.column, s.dir),
+            None => query = query.order_by_asc(Column::DictId),
         }
 
         let total = query.clone().count(self.base.db()).await?;

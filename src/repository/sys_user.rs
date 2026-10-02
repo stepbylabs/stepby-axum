@@ -13,6 +13,7 @@ use sea_orm::*;
 
 use crate::common::custom_scope::{self, CustomCondition, Op};
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_user::{ActiveModel, Column, Entity as SysUser, Model};
 use crate::repository::base::BaseRepository;
 
@@ -212,6 +213,10 @@ impl SysUserRepository {
     /// `last_id`：游标（keyset 深分页）参数。携带时按 `user_id < last_id` 过滤 +
     /// `user_id DESC` 排序，适用于深翻页（避免 OFFSET 线性扫描）；为 `None` 时沿用
     /// `offset/limit` 分页路径。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）。
+    /// 与 keyset 互斥——携带 `last_id` 时固定 `PK DESC`（keyset 语义要求单调主键序），
+    /// 仅 OFFSET 分页路径应用 `sort`；`None` 时回退默认 `user_id ASC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_with_data_scope(
         &self,
@@ -229,6 +234,7 @@ impl SysUserRepository {
         last_id: Option<i64>,
         tenant_scope: Option<i64>,
         tenant_filter: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
         // 多租户 Phase 2：租户用户仅见本租户（tenant_scope(tid)=Some(t)）；平台 0 不过滤
@@ -289,13 +295,15 @@ impl SysUserRepository {
                 .all(self.base.db())
                 .await?
         } else {
-            // P1：稳定排序，防翻页重复/漏行
-            query
-                .order_by_asc(Column::UserId)
-                .offset(offset)
-                .limit(limit)
-                .all(self.base.db())
-                .await?
+            // OFFSET 分页路径：动态排序（白名单已解析）或默认 user_id ASC（稳定排序，防翻页重复/漏行）
+            match sort {
+                Some(s) => query.order_by(s.column, s.dir),
+                None => query.order_by_asc(Column::UserId),
+            }
+            .offset(offset)
+            .limit(limit)
+            .all(self.base.db())
+            .await?
         };
         Ok((rows, total))
     }
@@ -317,11 +325,11 @@ impl SysUserRepository {
         scope_dept_ids: Option<&[i64]>,
         scope_user_id: Option<i64>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find()
             .filter(Column::DelFlag.eq("0"))
-            .filter(Column::UserId.is_in(user_ids))
-            .order_by_asc(Column::UserId);
+            .filter(Column::UserId.is_in(user_ids));
         if let Some(t) = tenant_scope {
             query = query.filter(Column::TenantId.eq(t));
         }
@@ -344,11 +352,15 @@ impl SysUserRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 user_id ASC（稳定排序，防翻页重复/漏行）
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::UserId),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 
@@ -369,10 +381,9 @@ impl SysUserRepository {
         scope_dept_ids: Option<&[i64]>,
         scope_user_id: Option<i64>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
-        let mut query = SysUser::find()
-            .filter(Column::DelFlag.eq("0"))
-            .order_by_asc(Column::UserId);
+        let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
         if let Some(t) = tenant_scope {
             query = query.filter(Column::TenantId.eq(t));
         }
@@ -398,11 +409,15 @@ impl SysUserRepository {
         }
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 user_id ASC（稳定排序，防翻页重复/漏行）
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query.order_by_asc(Column::UserId),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 }
@@ -456,7 +471,7 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-                    None,
+                    None, None,
                 )
                 .await
                 .unwrap();
@@ -509,6 +524,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -537,6 +553,7 @@ mod tests {
                     None,
                     None,
                     cursor,
+                    None,
                     None,
                     None,
                 )
@@ -575,6 +592,7 @@ mod tests {
         let (offset_all, _) = repo
             .find_page_with_data_scope(
                 0, 1000, None, None, None, None, None, None, None, None, None, None, None, None,
+                None,
             )
             .await
             .unwrap();
@@ -588,7 +606,7 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-                    None,
+                    None, None,
                 )
                 .await
                 .unwrap();

@@ -10,6 +10,7 @@
 use sea_orm::*;
 
 use crate::common::like_escape;
+use crate::common::sort::SortOrder;
 use crate::entity::sys_oauth_provider::{ActiveModel, Column, Entity as SysOauthProvider, Model};
 use crate::repository::base::BaseRepository;
 
@@ -93,6 +94,9 @@ impl SysOauthProviderRepository {
     ///
     /// 多租户：tenant_scope 为 Some(tid) 时仅返回该租户（含平台 tid=0 由调用方
     /// 传入 None 表示平台全量可见）。
+    ///
+    /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
+    /// `None` 时回退默认 `display_order ASC, provider_id ASC`。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_filtered(
         &self,
@@ -103,6 +107,7 @@ impl SysOauthProviderRepository {
         provider_type: Option<&str>,
         enabled: Option<&str>,
         tenant_scope: Option<i64>,
+        sort: Option<SortOrder<Column>>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysOauthProvider::find();
         if let Some(tid) = tenant_scope {
@@ -120,16 +125,19 @@ impl SysOauthProviderRepository {
         if let Some(en) = enabled {
             query = query.filter(Column::Enabled.eq(en));
         }
-        query = query
-            .order_by_asc(Column::DisplayOrder)
-            .order_by_asc(Column::ProviderId);
 
         let total = query.clone().count(self.base.db()).await?;
-        let rows = query
-            .offset(offset)
-            .limit(limit)
-            .all(self.base.db())
-            .await?;
+        // 动态排序（白名单已解析）或默认 display_order ASC, provider_id ASC
+        let rows = match sort {
+            Some(s) => query.order_by(s.column, s.dir),
+            None => query
+                .order_by_asc(Column::DisplayOrder)
+                .order_by_asc(Column::ProviderId),
+        }
+        .offset(offset)
+        .limit(limit)
+        .all(self.base.db())
+        .await?;
         Ok((rows, total))
     }
 

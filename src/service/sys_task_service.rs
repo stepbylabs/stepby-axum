@@ -14,7 +14,10 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::entity::sys_task::{ActiveModel as SysTaskActiveModel, Model as SysTaskModel};
+use crate::common::sort::{self, SortOrder};
+use crate::entity::sys_task::{
+    ActiveModel as SysTaskActiveModel, Column as TaskColumn, Model as SysTaskModel,
+};
 use crate::repository::sys_task::SysTaskRepository;
 use crate::state::AppState;
 
@@ -28,6 +31,13 @@ pub struct TaskQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub task_type: Option<String>,
     pub status: Option<String>,
     pub operator: Option<String>,
@@ -41,12 +51,15 @@ pub struct TaskQueryDto {
 
 impl From<&TaskQueryDto> for PageDomain {
     fn from(dto: &TaskQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -76,6 +89,23 @@ pub struct TaskCreateDto {
 // ==================== 辅助函数 ====================
 
 // ==================== Service 实现 ====================
+
+/// 允许排序的任务列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖任务进度业务展示列（主键、类型、名称、状态、进度、总量、当前完成数、操作人、时间）；
+/// `tenant_id` / `operator_id` 等内部列与大文本列（result_msg）不开放动态排序。
+const TASK_SORTABLE_COLUMNS: &[(&str, TaskColumn)] = &[
+    ("task_id", TaskColumn::TaskId),
+    ("task_type", TaskColumn::TaskType),
+    ("task_name", TaskColumn::TaskName),
+    ("status", TaskColumn::Status),
+    ("progress", TaskColumn::Progress),
+    ("total", TaskColumn::Total),
+    ("current", TaskColumn::Current),
+    ("operator", TaskColumn::Operator),
+    ("create_time", TaskColumn::CreateTime),
+    ("update_time", TaskColumn::UpdateTime),
+];
 
 /// 任务进度 Service
 pub struct SysTaskService {
@@ -262,6 +292,11 @@ impl SysTaskService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_task::Entity>(prop, TASK_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -283,6 +318,7 @@ impl SysTaskService {
                 begin,
                 end,
                 tenant_scope,
+                sort,
             )
             .await?;
         Ok((rows, total))

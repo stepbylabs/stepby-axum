@@ -23,11 +23,14 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::entity::gen_table::{ActiveModel as GenTableActiveModel, Model as GenTableModel};
+use crate::common::sort::{self, SortOrder};
+use crate::entity::gen_table::{
+    ActiveModel as GenTableActiveModel, Column as GenTableCol, Model as GenTableModel,
+};
 use crate::entity::gen_table_column::{
     ActiveModel as GenTableColumnActiveModel, Model as GenTableColumnModel,
 };
-use crate::repository::gen_table::{DbColumnInfo, GenTableRepository};
+use crate::repository::gen_table::{DbColumnInfo, DbTableSortColumn, GenTableRepository};
 
 // ==================== DTO ====================
 
@@ -39,6 +42,13 @@ pub struct GenTableQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub table_name: Option<String>,
     pub table_comment: Option<String>,
     #[serde(alias = "params[beginTime]", default)]
@@ -49,12 +59,15 @@ pub struct GenTableQueryDto {
 
 impl From<&GenTableQueryDto> for PageDomain {
     fn from(dto: &GenTableQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -66,6 +79,13 @@ pub struct DbTableQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub table_name: Option<String>,
     pub table_comment: Option<String>,
 }
@@ -543,6 +563,26 @@ fn infer_html_type(column_type: &str, column_name: &str) -> String {
 
 // ==================== Service 实现 ====================
 
+/// 允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖 gen_table 业务展示列；`options` / `gen_path` / `create_by` 等配置或内部列不开放动态排序。
+const SORTABLE_COLUMNS: &[(&str, GenTableCol)] = &[
+    ("table_id", GenTableCol::TableId),
+    ("table_name", GenTableCol::TableName),
+    ("table_comment", GenTableCol::TableComment),
+    ("create_time", GenTableCol::CreateTime),
+    ("update_time", GenTableCol::UpdateTime),
+];
+
+/// 数据库元数据表列表允许排序的列白名单（`find_db_tables` 为原始 SQL 查询、无 sea-orm Entity）。
+///
+/// 前端 prop 经 camel_to_snake 归一后映射到 [`DbTableSortColumn`]，SQL 端映射为
+/// SELECT 输出列别名（编译期常量），保持与 sea-orm 参数化路径同等安全语义。
+const DB_TABLE_SORTABLE_COLUMNS: &[(&str, DbTableSortColumn)] = &[
+    ("table_name", DbTableSortColumn::TableName),
+    ("table_comment", DbTableSortColumn::TableComment),
+];
+
 /// 代码生成模块 Service
 pub struct GenTableService {
     repo: GenTableRepository,
@@ -563,6 +603,12 @@ impl GenTableService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::gen_table::Entity>(prop, SORTABLE_COLUMNS).map(
+                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
+            )
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
@@ -582,6 +628,7 @@ impl GenTableService {
                 query.table_comment.as_deref(),
                 begin,
                 end,
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -592,14 +639,27 @@ impl GenTableService {
         &self,
         query: DbTableQueryDto,
     ) -> Result<(Vec<crate::repository::gen_table::DbTableInfo>, u64), ServiceError> {
-        let page = PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在下方解析
+        let mut page = PageDomain {
             page_num: query.page_num,
             page_size: query.page_size,
-            order_by_column: None,
-            is_asc: None,
+            order_by_column: query.order_by_column.clone(),
+            is_asc: query.is_asc.clone(),
         };
+        page.sanitize_order_fields();
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：元数据查询无 sea-orm Entity，白名单映射到 DbTableSortColumn
+        // （等价语义：命中才生效，未命中/缺省由 repository 回退默认排序）
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            let key = sort::camel_to_snake(prop);
+            DB_TABLE_SORTABLE_COLUMNS
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, col)| {
+                    SortOrder::new(*col, sort::parse_direction(page.is_asc.as_deref()))
+                })
+        });
         let (rows, total) = self
             .repo
             .find_db_tables(
@@ -607,6 +667,7 @@ impl GenTableService {
                 limit,
                 query.table_name.as_deref(),
                 query.table_comment.as_deref(),
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -732,7 +793,7 @@ impl GenTableService {
         // 3. 读取表注释（仅需 1 条匹配）
         let db_tables = self
             .repo
-            .find_db_tables(0, 1, Some(table_name), None)
+            .find_db_tables(0, 1, Some(table_name), None, None)
             .await?;
         let table_comment = db_tables
             .0
@@ -1058,7 +1119,7 @@ impl GenTableService {
     async fn is_db_table_exists(&self, table_name: &str) -> Result<bool, ServiceError> {
         let (rows, _) = self
             .repo
-            .find_db_tables(0, 1, Some(table_name), None)
+            .find_db_tables(0, 1, Some(table_name), None, None)
             .await?;
         Ok(rows.iter().any(|t| t.table_name == table_name))
     }

@@ -14,7 +14,10 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
-use crate::entity::sys_notice::{ActiveModel as SysNoticeActiveModel, Model as SysNoticeModel};
+use crate::common::sort::{self, SortOrder};
+use crate::entity::sys_notice::{
+    ActiveModel as SysNoticeActiveModel, Column as NoticeColumn, Model as SysNoticeModel,
+};
 use crate::entity::sys_user_pref::Model as PrefModel;
 use crate::repository::sys_notice::SysNoticeRepository;
 use crate::repository::sys_notice_read::{NoticeReadUserVo, SysNoticeReadRepository};
@@ -56,6 +59,13 @@ pub struct NoticeQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     pub notice_title: Option<String>,
     pub notice_type: Option<String>,
     pub create_by: Option<String>,
@@ -69,12 +79,15 @@ pub struct NoticeQueryDto {
 
 impl From<&NoticeQueryDto> for PageDomain {
     fn from(dto: &NoticeQueryDto) -> Self {
-        PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
             page_num: dto.page_num,
             page_size: dto.page_size,
-            order_by_column: None,
-            is_asc: None,
-        }
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
     }
 }
 
@@ -126,6 +139,13 @@ pub struct NoticeReadUserQueryDto {
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    /// 排序字段（前端表头 prop，camelCase/snake_case 均可；经列白名单映射后生效，
+    /// 未命中白名单回退默认排序，绝不透传任意列）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
     /// 公告 ID（必填）
     pub notice_id: i64,
     /// 搜索关键字（登录名/用户名）
@@ -153,6 +173,33 @@ pub struct NoticeMarkReadAllDto {
 // HTML 转义收敛到 `crate::utils::sanitize::html_escape`（见下方调用点），避免重复实现。
 
 // ==================== Service 实现 ====================
+
+/// 允许排序的公告列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 覆盖公告业务展示列；`notice_content`（长文本）、`tenant_id` 等内部列不开放动态排序。
+const NOTICE_SORTABLE_COLUMNS: &[(&str, NoticeColumn)] = &[
+    ("notice_id", NoticeColumn::NoticeId),
+    ("notice_title", NoticeColumn::NoticeTitle),
+    ("notice_type", NoticeColumn::NoticeType),
+    ("status", NoticeColumn::Status),
+    ("create_by", NoticeColumn::CreateBy),
+    ("create_time", NoticeColumn::CreateTime),
+];
+
+/// 已读用户列表允许排序的列白名单（prop snake_case → 联表 SQL 列表达式）。
+///
+/// 已读用户列表为原生 SQL 联表查询（sys_notice_read r + sys_user u + sys_dept d），
+/// 无法复用 sea-orm `resolve_column` 的单实体 Column 枚举映射，改为
+/// `(prop, SQL 列表达式)` 常量映射；表达式全部来自本常量，无字符串拼接注入面。
+const READ_USER_SORTABLE_COLUMNS: &[(&str, &str)] = &[
+    ("read_id", "r.read_id"),
+    ("user_id", "r.user_id"),
+    ("read_time", "r.read_time"),
+    ("user_name", "u.user_name"),
+    ("nick_name", "u.nick_name"),
+    ("dept_name", "d.dept_name"),
+    ("phonenumber", "u.phonenumber"),
+];
 
 /// 通知公告模块 Service
 ///
@@ -190,6 +237,14 @@ impl SysNoticeService {
         let page = PageDomain::from(&query);
         let offset = page.offset();
         let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_notice::Entity>(
+                prop,
+                NOTICE_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
 
         let begin = match query.begin_time.as_deref() {
             Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
@@ -211,6 +266,7 @@ impl SysNoticeService {
                 begin,
                 end,
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await?;
         Ok((rows, total))
@@ -589,12 +645,31 @@ impl SysNoticeService {
         query: NoticeReadUserQueryDto,
         operator_tid: i64,
     ) -> Result<(Vec<NoticeReadUserVo>, u64), ServiceError> {
-        let page = PageDomain {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在此处解析为 SQL 列表达式
+        // （联表原生 SQL 查询，无法走 resolve_column 的 Column 枚举映射）
+        let mut page = PageDomain {
             page_num: query.page_num,
             page_size: query.page_size,
-            order_by_column: None,
-            is_asc: None,
+            order_by_column: query.order_by_column.clone(),
+            is_asc: query.is_asc.clone(),
         };
+        page.sanitize_order_fields();
+        // 白名单命中 → (SQL 列表达式, 是否升序)；未命中/缺省由 repository 回退默认 read_time DESC
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            let key = sort::camel_to_snake(prop);
+            READ_USER_SORTABLE_COLUMNS
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, expr)| {
+                    (
+                        *expr,
+                        matches!(
+                            sort::parse_direction(page.is_asc.as_deref()),
+                            sea_orm::Order::Asc
+                        ),
+                    )
+                })
+        });
         let offset = page.offset();
         let limit = page.limit();
         let (rows, total) = self
@@ -605,6 +680,7 @@ impl SysNoticeService {
                 query.notice_id,
                 query.search_value.as_deref(),
                 crate::common::tenant::tenant_scope(operator_tid),
+                sort,
             )
             .await?;
         Ok((rows, total))
