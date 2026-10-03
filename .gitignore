@@ -44,3 +44,7 @@ fmt_after.txt
 
 # ts-rs 默认导出目录残留（正式导出目录为 ../stepby-vue/src/types/api/generated，见 .cargo/config.toml）
 /bindings/
+
+# 本地运行服务日志（Start-Process 重定向产物）
+/_srv.log
+/_srv_err.log
