@@ -65,7 +65,9 @@ mod tenant_scope;
 mod tool_gen;
 mod totp;
 mod user_erasure;
+mod user_pii_masking;
 mod webauthn;
+mod webhook_unify;
 mod ws;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

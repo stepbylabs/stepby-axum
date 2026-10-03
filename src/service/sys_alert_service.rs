@@ -6,7 +6,8 @@
 //! - 指标采集（真实数据源，见 [`SysAlertService::metric_value`] 逐项说明）
 //! - 评估引擎 [`evaluate_all`]：遍历启用规则 → 取指标 → 比较 → 静默期判定 →
 //!   抢占触发权 → 消息中心发送 → 记录 last_fired_at
-//! - 存量库幂等兜底 [`ensure_alert_rule_table`]（建表 + 菜单种子，启动期调用）
+//!   （存量库表结构兜底由 `initialize/mod.rs::ensure_alert_rule_tables` 负责，
+//!   单一事实源为迁移 `m20261003_000003_alert_rule`，本层不再重复持有 DDL）
 //!
 //! 幂等与并发语义（多实例安全）：
 //! - 触发权经 `repository::claim_fire` 的条件 UPDATE 抢占
@@ -24,7 +25,7 @@
 use std::sync::Arc;
 
 use garde::Validate;
-use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -754,146 +755,6 @@ fn collect_system_metric(metric: &str) -> Result<f64, ServiceError> {
             "error.alert.metric_invalid"
         ))),
     }
-}
-
-/// 存量库幂等兜底：确保 `sys_alert_rule` 表与「告警规则」菜单存在
-///
-/// 由 `AppInitializer::run` 调用（挂载片段见任务报告；与 `ensure_sys_pat_table` 同范式：
-/// 启动不跑 Migrator::up，存量库演进由 ensure_* 幂等兜底负责，全新库迁移先行、此处自动跳过）。
-/// 集成测试亦直接调用本函数准备表结构。
-pub async fn ensure_alert_rule_table(db: &DatabaseConnection) -> anyhow::Result<()> {
-    let backend = db.get_database_backend();
-
-    // -------- 1. 建表（存在即跳过） --------
-    let table_sql = match backend {
-        sea_orm::DatabaseBackend::Sqlite => {
-            r#"CREATE TABLE IF NOT EXISTS sys_alert_rule (
-                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                name               VARCHAR(64) NOT NULL,
-                metric             VARCHAR(64) NOT NULL,
-                comparator         VARCHAR(2) NOT NULL,
-                threshold          DOUBLE NOT NULL,
-                silent_minutes     INT NOT NULL DEFAULT 30,
-                notify_channel_id  BIGINT,
-                notify_template_id BIGINT,
-                enabled            CHAR(1) DEFAULT '1',
-                last_fired_at      DATETIME,
-                created_at         DATETIME,
-                updated_at         DATETIME
-            )"#
-        }
-        sea_orm::DatabaseBackend::Postgres => {
-            r#"CREATE TABLE IF NOT EXISTS sys_alert_rule (
-                id                 BIGSERIAL PRIMARY KEY,
-                name               VARCHAR(64) NOT NULL,
-                metric             VARCHAR(64) NOT NULL,
-                comparator         VARCHAR(2) NOT NULL,
-                threshold          DOUBLE PRECISION NOT NULL,
-                silent_minutes     INT NOT NULL DEFAULT 30,
-                notify_channel_id  BIGINT,
-                notify_template_id BIGINT,
-                enabled            CHAR(1) DEFAULT '1',
-                last_fired_at      TIMESTAMP,
-                created_at         TIMESTAMP,
-                updated_at         TIMESTAMP
-            )"#
-        }
-        sea_orm::DatabaseBackend::MySql => {
-            r#"CREATE TABLE IF NOT EXISTS sys_alert_rule (
-                id                 BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                name               VARCHAR(64) NOT NULL,
-                metric             VARCHAR(64) NOT NULL,
-                comparator         VARCHAR(2) NOT NULL,
-                threshold          DOUBLE NOT NULL,
-                silent_minutes     INT NOT NULL DEFAULT 30,
-                notify_channel_id  BIGINT NULL,
-                notify_template_id BIGINT NULL,
-                enabled            CHAR(1) DEFAULT '1',
-                last_fired_at      DATETIME NULL,
-                created_at         DATETIME,
-                updated_at         DATETIME
-            )"#
-        }
-    };
-    db.execute(sea_orm::Statement::from_string(backend, table_sql.to_string()))
-        .await?;
-
-    // -------- 2. 索引（幂等：SQLite/PG 用 IF NOT EXISTS；MySQL 容错"已存在"） --------
-    let idx_sql = match backend {
-        sea_orm::DatabaseBackend::MySql => {
-            "CREATE INDEX idx_alert_rule_enabled ON sys_alert_rule (enabled)"
-        }
-        _ => "CREATE INDEX IF NOT EXISTS idx_alert_rule_enabled ON sys_alert_rule (enabled)",
-    };
-    if let Err(e) = db
-        .execute(sea_orm::Statement::from_string(
-            backend,
-            idx_sql.to_string(),
-        ))
-        .await
-    {
-        let msg = e.to_string();
-        if msg.contains("Duplicate key name")
-            || msg.contains("42P07")
-            || msg.contains("already exists")
-        {
-            tracing::debug!("idx_alert_rule_enabled 已存在（幂等跳过）");
-        } else {
-            return Err(e.into());
-        }
-    }
-
-    // -------- 3. 菜单种子（幂等 INSERT，与迁移 m20261003_000003 同款） --------
-    let idempotent = |body: &str| -> String {
-        match backend {
-            sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {body}"),
-            sea_orm::DatabaseBackend::Postgres => {
-                format!("INSERT INTO {body} ON CONFLICT DO NOTHING")
-            }
-            sea_orm::DatabaseBackend::MySql => format!("INSERT IGNORE INTO {body}"),
-        }
-    };
-    let now = match backend {
-        sea_orm::DatabaseBackend::Sqlite => format!(
-            "'{}'",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        ),
-        _ => "NOW()".to_string(),
-    };
-
-    let page_body = format!(
-        "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
-        (4110, '告警规则', 2, 60, 'alert', 'monitor/alert/index', '', '', '1', '0', 'C', '0', '0', 'monitor:alert:list', 'alert', 'admin', {now}, '告警规则引擎菜单', '0')"
-    );
-    db.execute(sea_orm::Statement::from_string(
-        backend,
-        idempotent(&page_body),
-    ))
-    .await?;
-    db.execute(sea_orm::Statement::from_string(
-        backend,
-        idempotent("sys_role_menu (role_id, menu_id) VALUES (2, 4110)"),
-    ))
-    .await?;
-
-    for (name, menu_id, perms) in [
-        ("告警查询", 4111, "monitor:alert:query"),
-        ("告警新增", 4112, "monitor:alert:add"),
-        ("告警修改", 4113, "monitor:alert:edit"),
-        ("告警删除", 4114, "monitor:alert:remove"),
-    ] {
-        let body = format!(
-            "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
-            ({menu_id}, '{name}', 4110, 1, '#', '', '', '', '1', '0', 'F', '0', '0', '{perms}', '#', 'admin', {now}, '', '0')"
-        );
-        db.execute(sea_orm::Statement::from_string(
-            backend,
-            idempotent(&body),
-        ))
-        .await?;
-    }
-
-    Ok(())
 }
 
 // ==================== 调度任务函数（scheduler 挂载用） ====================

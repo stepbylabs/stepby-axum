@@ -48,3 +48,6 @@ fmt_after.txt
 # 本地运行服务日志（Start-Process 重定向产物）
 /_srv.log
 /_srv_err.log
+
+/_fg.log
+/_fge.log
