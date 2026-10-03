@@ -4,7 +4,8 @@
 //! 设计要点（隔离、可重复、无副作用、可并行）：
 //! - 每个测试使用独立的临时 sqlite 文件（唯一路径），由 `migrator::Migrator::up` 建表 + 种子数据，
 //!   不触碰开发/生产数据库。
-//! - 每个测试使用独立的 Redis DB 索引（1..=15 轮询分配），`FLUSHDB` 清空，避免并行测试互相干扰。
+//! - 每个测试使用独立的 Redis DB 索引（1..=15，跨进程文件锁仲裁独占），`FLUSHDB` 清空，
+//!   避免并行测试/并行测试进程互相干扰。
 //! - 每个测试使用独立的 peer IP（10.77.x.y），隔离全局内存限流令牌桶，避免并行测试触发 429。
 //! - 测试库中将限流 `*` 默认配置放大到 1,000,000 容量，进一步规避限流对测试的干扰。
 //! - 复用与生产完全一致的初始化路径（Settings → init_database → init_redis →
@@ -72,9 +73,11 @@ mod webhook_tenant;
 mod webhook_unify;
 mod ws;
 
+use std::fs::OpenOptions;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -83,7 +86,6 @@ use axum::http::{Method, Request};
 use migration::Migrator;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use sea_orm_migration::MigratorTrait;
-use tokio::sync::{Semaphore, SemaphorePermit};
 use tower::ServiceExt;
 
 use crate::config::Settings;
@@ -134,48 +136,87 @@ fn manifest_config_path() -> String {
     format!("{}/config/config.toml", dir)
 }
 
-/// 集成测试可用 Redis DB 数（Redis 默认 16 个 DB，0 保留给生产，1..=15 供测试独占）。
-/// 并发测试总数超过该值时，由信号量排队，保证每个测试独占一个 DB 且互不 FLUSHDB 污染。
-const TEST_REDIS_DB_COUNT: usize = 15;
+/// 集成测试可用 Redis DB 数（Redis 默认 16 个 DB，0 保留给 dev/8080 实例，1..=15 供测试独占）。
+/// 槽位仲裁用**跨进程文件锁**：同进程并行用例与同时运行的多个全量测试进程
+/// 各自独占一个 DB 索引，从根上杜绝「两个测试进程重叠时 freelist 各自为政 →
+/// FLUSHDB 清掉对方正在使用的 DB」的互踩假失败。
+const TEST_REDIS_DB_COUNT: u64 = 15;
 
-/// 空闲 Redis DB 索引池（自由列表）：
-/// - `acquire` 弹出一个空闲索引，测试结束 drop 时归还；
-/// - 配合信号量，保证同时最多 `TEST_REDIS_DB_COUNT` 个测试各占一个唯一 DB。
-static REDIS_DB_FREELIST: LazyLock<Mutex<Vec<u64>>> =
-    LazyLock::new(|| Mutex::new((1..=TEST_REDIS_DB_COUNT as u64).collect()));
-static REDIS_DB_SEMAPHORE: LazyLock<Semaphore> =
-    LazyLock::new(|| Semaphore::new(TEST_REDIS_DB_COUNT));
+/// 等待 Redis DB 槽位的总上限。
+///
+/// 正常情况下槽位随测试结束持续释放，排队用例很快就能拿到；只有当某个测试进程
+/// 整体卡死（槽位永不释放）时才会触顶。这里刻意给足 10 分钟（远超单轮全量的
+/// 2-3 分钟），宁可多等也不让排队用例假失败——与旧信号量设计的「无限排队」语义
+/// 等价，仅保留一个防永久挂死的兜底。
+const REDIS_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// 持有 Redis DB 占用权的守卫：字段 `db_index` 为本测试独占的 DB 索引，
-/// `_permit` 持有信号量许可；结构体 drop 时先归还空闲索引，随后释放许可。
-pub struct RedisSlot {
-    pub db_index: u64,
-    _permit: SemaphorePermit<'static>,
-}
+/// 等待期间打 WARN 的间隔（便于诊断「谁占着槽位」）。
+const REDIS_SLOT_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
-impl Drop for RedisSlot {
-    fn drop(&mut self) {
-        REDIS_DB_FREELIST
-            .lock()
-            .expect("DB 池锁中毒")
-            .push(self.db_index);
+/// 尝试独占槽位 `i`：打开（或创建）锁文件 `%TEMP%/stepby_it_redis_db_{i}.lock`
+/// 并尝试加跨进程排他文件锁（`std::fs::File::try_lock`，Rust ≥1.89 稳定）。
+/// 加锁成功返回持有锁的 `File`（File 存活即持有锁，close/drop 自动释放）；
+/// 被其它进程/用例占用（WouldBlock）或打开失败时返回 `None` 让路。
+///
+/// 为什么选文件锁而不是 Redis SETNX 租约：
+/// - 进程被 kill / panic 时 OS 自动释放锁，无 TTL 续租与僵死租约问题；
+/// - 锁文件从不删除（只留空文件），避免「A 解锁删除 → C 新建同名文件 → B 仍持旧
+///   inode/fd」的经典删除竞争；
+/// - 同进程内不同 `File` 句柄同样互斥（Windows LockFileEx 按句柄、Unix flock 按
+///   open file description），进程内并行用例与跨进程天然同一套仲裁。
+fn try_lock_slot(i: u64) -> Option<std::fs::File> {
+    let path = std::env::temp_dir().join(format!("stepby_it_redis_db_{i}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(&path)
+        .ok()?;
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(_) => None,
     }
 }
 
-/// 分配一个独占的 Redis DB 槽位（信号量排队 + 自由列表取唯一索引）。
+/// 持有 Redis DB 占用权的守卫：字段 `db_index` 为本测试独占的 DB 索引，
+/// `_lock` 是对锁文件 `%TEMP%/stepby_it_redis_db_{n}.lock` 的跨进程排他文件锁，
+/// 结构体 drop（测试结束/panic）时 File 关闭、OS 自动释放锁。
+pub struct RedisSlot {
+    pub db_index: u64,
+    _lock: std::fs::File,
+}
+
+/// 分配一个独占的 Redis DB 槽位（跨进程文件锁仲裁）。
+/// 按序扫描 1..=15，全部被占则每 250ms 重扫一轮（持续等待，槽位随测试结束释放）；
+/// 每 30s 打一条 WARN 便于诊断，总等待超过 10 分钟才 panic（防永久挂死兜底）。
 async fn acquire_redis_slot() -> RedisSlot {
-    let permit = REDIS_DB_SEMAPHORE
-        .acquire()
-        .await
-        .expect("获取测试 Redis DB 许可失败（信号量关闭）");
-    let db_index = REDIS_DB_FREELIST
-        .lock()
-        .expect("DB 池锁中毒")
-        .pop()
-        .expect("信号量保证池非空");
-    RedisSlot {
-        db_index,
-        _permit: permit,
+    let start = tokio::time::Instant::now();
+    let mut last_warn = start;
+    loop {
+        for i in 1..=TEST_REDIS_DB_COUNT {
+            if let Some(lock) = try_lock_slot(i) {
+                return RedisSlot {
+                    db_index: i,
+                    _lock: lock,
+                };
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now.duration_since(last_warn) >= REDIS_SLOT_WARN_INTERVAL {
+            tracing::warn!(
+                waited_secs = now.duration_since(start).as_secs(),
+                "测试 Redis DB 槽位（1..=15）全部被占用，继续排队等待……\
+                 （通常因多个测试进程并行或个别用例耗时较长）"
+            );
+            last_warn = now;
+        }
+        assert!(
+            now.duration_since(start) < REDIS_SLOT_WAIT_TIMEOUT,
+            "等待测试 Redis DB 槽位超时（>10 分钟）：1..=15 全部被占用且持续未释放，\
+             请确认是否有卡死的 cargo test 进程未退出"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -194,7 +235,7 @@ fn unique_temp_db_path() -> String {
 /// 3. 清空隔离 Redis DB、强制关闭验证码开关、放大限流默认容量；
 /// 4. 按生产路径组装 IpLocator / IpLocationService / JobScheduler / AppState。
 ///
-/// 返回的 `RedisSlot` 必须由调用方持有至测试结束，以独占 Redis DB（drop 自动归还）。
+/// 返回的 `RedisSlot` 必须由调用方持有至测试结束，以独占 Redis DB（drop 释放文件锁）。
 async fn build_isolated_state() -> (Arc<AppState>, RedisSlot) {
     build_isolated_state_with_features(&[]).await
 }
