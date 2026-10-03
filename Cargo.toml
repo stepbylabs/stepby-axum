@@ -216,13 +216,14 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
-# 性能基准测试（R6-BE-ENG-21）
-# 运行方式：cargo bench
-# 当前为占位示例（std-only），未来如需更精确测量可引入 criterion：
-#   criterion = { version = "0.5", features = ["html_reports"] }
-# 然后将下方 harness 改为 true（criterion 自带 harness）
+# 性能基准测试（R6-BE-ENG-21 / AGENTS.md D11：criterion 真实基准替换占位）
+# 运行方式：
+#   cargo bench                                          # 运行全部基准（完整采样，耗时较长）
+#   cargo bench -- --measurement-time 1                  # 快速跑一轮（每基准采样 1 秒）
+#   cargo bench --bench hot_paths -- --sample-size 20    # 仅跑 hot_paths 并缩小样本数
+# 覆盖面见 benches/hot_paths.rs 顶部注释；报告输出到 target/criterion/report/index.html
 [[bench]]
-name = "example"
+name = "hot_paths"
 harness = false
 
 [dev-dependencies]
@@ -234,3 +235,5 @@ tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 p256 = "0.14"
 coset = "0.4.2"
+# criterion：criterion 基准框架（benches/hot_paths.rs，AGENTS.md D11 真实基准）
+criterion = "0.8.2"
