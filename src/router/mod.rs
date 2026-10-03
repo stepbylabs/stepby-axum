@@ -31,6 +31,7 @@ pub mod sys_oper_log_router;
 pub mod sys_pat_router;
 pub mod sys_post_router;
 pub mod sys_rate_limit_router;
+pub mod sys_report_board_router;
 pub mod sys_report_router;
 pub mod sys_role_router;
 pub mod sys_role_field_perm_router;
@@ -106,6 +107,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sso_router::sso_routes())
         .merge(sys_notice_router::notice_routes())
         .merge(sys_report_router::report_routes())
+        .merge(sys_report_board_router::report_board_routes())
         .merge(sys_web_hook_router::web_hook_routes())
         .merge(sys_dept_router::dept_routes())
         .merge(sys_tenant_router::tenant_routes())

@@ -33,6 +33,7 @@ pub mod sys_oper_log_handler;
 pub mod sys_pat_handler;
 pub mod sys_post_handler;
 pub mod sys_rate_limit_handler;
+pub mod sys_report_board_handler;
 pub mod sys_report_handler;
 pub mod sys_role_handler;
 pub mod sys_scim_group_handler;

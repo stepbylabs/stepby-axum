@@ -208,6 +208,14 @@ struct SwaggerAssets;
         crate::handler::sys_report_handler::sub_remove,
         crate::handler::sys_report_handler::sub_status,
         crate::handler::sys_report_handler::sub_run,
+        // ==================== 报表看板（配置化只读报表 v1）====================
+        crate::handler::sys_report_board_handler::board_list,
+        crate::handler::sys_report_board_handler::board_add,
+        crate::handler::sys_report_board_handler::board_info,
+        crate::handler::sys_report_board_handler::board_edit,
+        crate::handler::sys_report_board_handler::board_remove,
+        crate::handler::sys_report_board_handler::source_list,
+        crate::handler::sys_report_board_handler::source_data,
         // ==================== 个人访问令牌（PAT，Tier-S #3）====================
         crate::handler::sys_pat_handler::list_mine,
         crate::handler::sys_pat_handler::scope_options,
@@ -402,6 +410,12 @@ struct SwaggerAssets;
     ),
     components(
         schemas(
+            // ==================== 报表看板（配置化只读报表 v1） ====================
+            crate::entity::sys_report_board::Model,
+            crate::service::sys_report_board_service::BoardVo,
+            crate::service::sys_report_board_service::ReportBoardConfig,
+            crate::service::sys_report_board_service::SourceMetaVo,
+            crate::service::sys_report_board_service::SourceDataVo,
             // ==================== 实体 ====================
             crate::entity::sys_user::Model,
             crate::entity::sys_role::Model,

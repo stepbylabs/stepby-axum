@@ -39,6 +39,7 @@ pub mod sys_pat;
 pub mod sys_post;
 pub mod sys_rate_limit;
 pub mod sys_report;
+pub mod sys_report_board;
 pub mod sys_report_sub;
 pub mod sys_role;
 pub mod sys_role_dept;

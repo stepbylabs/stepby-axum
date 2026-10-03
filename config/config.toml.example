@@ -111,6 +111,23 @@ issuer = "stepby"
 # 亦可用环境变量 JWT_PREVIOUS_SECRETS（逗号分隔）注入。
 previous_secrets = []
 
+[pat]
+# 个人访问令牌（PAT，Tier-S #3）——均为可选，缺省即使用下列默认值
+# 关闭后携带 ybt_ 前缀的令牌一律 401
+enabled = true
+# 令牌前缀，用于与 JWT 区分（真实 JWT 以 "eyJ" 开头，不会冲突）
+prefix = "ybt_"
+# 创建令牌时的默认有效期（天），用户未指定时使用
+default_expire_days = 90
+# 有效期上限（天）：请求的过期天数超过则裁剪至此值；0 表示允许永不过期
+max_expire_days = 365
+# 每用户最多有效令牌数（防令牌泛滥）：创建时已达上限则返回
+# 400 + error.pat.count_exceeded。默认 50（多设备日常占用 + CI/E2E
+# 并发创建余量；E2E 每轮常创建 2-3 个令牌不删，20 极易触顶）。
+# 生产建议：普通部署维持默认 50 即可；如需收紧可用 20-30，
+# E2E/CI 环境可用环境变量 PAT_MAX_PER_USER 覆盖（须 > 0）。
+max_per_user = 50
+
 [monitor]
 # 可观测性监控配置（慢请求 / 错误聚合 / Prometheus 指标）
 # 生产环境通过环境变量 MONITOR_METRICS_TOKEN 注入，避免明文写入配置文件

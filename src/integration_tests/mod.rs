@@ -52,6 +52,7 @@ mod sys_pat_owner_guard;
 mod sys_post;
 mod sys_rate_limit;
 mod sys_report;
+mod sys_report_board;
 mod sys_role;
 mod sys_task;
 mod sys_user;
@@ -67,6 +68,7 @@ mod totp;
 mod user_erasure;
 mod user_pii_masking;
 mod webauthn;
+mod webhook_tenant;
 mod webhook_unify;
 mod ws;
 

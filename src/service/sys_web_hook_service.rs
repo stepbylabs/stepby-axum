@@ -529,6 +529,23 @@ pub fn hook_matches_subscribed(subscribed_events: Option<&str>, event_key: &str)
     }
 }
 
+/// 按租户口径筛选启用回调组：仅保留与事件同租户（`tenant_id` 精确相等）的回调
+///
+/// P0 跨租户泄漏修复：[`SysWebHookService::dispatch_event`] 与 [`SysWebHookService::emit`]
+/// 两条派发链共用本实现（单一事实源），确保租户口径严格一致、不会漂移——
+/// 事件只投递给事件所属租户自己配置的回调，严禁跨租户触达
+/// （A 租户事件不得推给 B 租户 WebHook；tid=0 平台事件仅投递平台租户回调组）。
+fn filter_groups_by_tenant(
+    groups: Vec<(i64, Vec<SysWebHookModel>)>,
+    tenant_id: i64,
+) -> Vec<SysWebHookModel> {
+    groups
+        .into_iter()
+        .filter(|(tid, _)| *tid == tenant_id)
+        .flat_map(|(_, hooks)| hooks)
+        .collect()
+}
+
 /// 计算请求体签名：HMAC-SHA256(key=secret, data=body) 的十六进制串
 ///
 /// 无 secret 时返回空串（不签名）。约定请求头写入 `X-Webhook-Signature: sha256={hex}`，
@@ -1297,11 +1314,10 @@ impl SysWebHookService {
                 }
             };
             // 方案 C：存量事件名映射为目录键（映射表外原样），统一按 subscribed_events 匹配
+            // 租户口径：与 emit 共用 filter_groups_by_tenant（单一事实源，防口径漂移）
             let mapped = map_legacy_event_key(&event_type).to_string();
-            let matched: Vec<_> = groups
+            let matched: Vec<_> = filter_groups_by_tenant(groups, tenant_id)
                 .into_iter()
-                .filter(|(tid, _)| *tid == tenant_id)
-                .flat_map(|(_, hooks)| hooks)
                 .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &mapped))
                 .collect();
             if matched.is_empty() {
@@ -1343,14 +1359,18 @@ impl SysWebHookService {
 
     /// 事件目录派发（subscribed_events 口径；火后即忘，供 [`emit_event`] 调用）
     ///
-    /// 与 [`Self::dispatch_event`] 的差异：emit 直接收目录 `event_key`，无租户
-    /// 上下文参数，不做同租户过滤（目录事件为开放域广播，接收方按 payload 中的
-    /// `tenantId` 判定归属）；dispatch_event 仍保留同租户过滤（存量硬约束）。
-    /// 两者匹配口径已统一为 [`hook_matches_subscribed`]（方案 C）。
+    /// 与 [`Self::dispatch_event`] 的差异：emit 直接收目录 `event_key`，无旧事件名
+    /// 映射步骤；两者匹配口径已统一为 [`hook_matches_subscribed`]（方案 C）。
     ///
-    /// 派发链路：加载启用回调 → `subscribed_events` 过滤（NULL/空 = 订阅全部）
-    /// → 逐回调 spawn 真实出站投递（含 HMAC 签名）→ 失败仅留痕（web_hook_log）。
-    fn emit(&self, event_key: &str, payload: serde_json::Value) {
+    /// P0 跨租户泄漏修复：`tenant_id` 为事件所属租户（由 [`emit_event`] 调用点从
+    /// 操作者/事件主体上下文取得）。启用回调经 [`filter_groups_by_tenant`] **仅保留
+    /// 与事件同租户的回调**，与 dispatch_event 严格同口径（共用同一过滤实现）——
+    /// 严禁跨租户触达（A 租户事件不得推给 B 租户 WebHook）。
+    ///
+    /// 派发链路：加载启用回调 → 同租户过滤 → `subscribed_events` 过滤
+    /// （NULL/空 = 订阅全部）→ 逐回调 spawn 真实出站投递（含 HMAC 签名）
+    /// → 失败仅留痕（web_hook_log）。
+    fn emit(&self, event_key: &str, payload: serde_json::Value, tenant_id: i64) {
         let hook_repo = self.hook_repo.clone();
         let db = self.db.clone();
         let http = Arc::new(self.http.clone());
@@ -1365,10 +1385,10 @@ impl SysWebHookService {
                     return;
                 }
             };
-            // 目录口径：仅取订阅了该 event_key 的启用回调（subscribed_events 空豁免）
-            let matched: Vec<_> = groups
+            // 租户口径：先与 dispatch_event 共用 filter_groups_by_tenant 精确同租户过滤，
+            // 再取订阅了该 event_key 的启用回调（subscribed_events 空豁免）
+            let matched: Vec<_> = filter_groups_by_tenant(groups, tenant_id)
                 .into_iter()
-                .flat_map(|(_, hooks)| hooks)
                 .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &event_key))
                 .collect();
             if matched.is_empty() {
@@ -1721,12 +1741,20 @@ fn truncate_utf8(s: &str, cap: usize) -> String {
 ///     &state,
 ///     "user.created",
 ///     serde_json::json!({ "userId": 1, "userName": "admin", "tenantId": 0 }),
+///     operator.tenant_id(),
 /// ).await;
 /// ```
 ///
-/// 行为：查启用回调 → `subscribed_events` 过滤（空/NULL = 订阅全部，JSON 数组含
-/// event_key = 命中）→ 逐回调 spawn 真实出站投递（复用既有签名/HMAC + HTTP 链路）
-/// → 发送失败仅写 `sys_web_hook_log`（source='dispatch'），绝不阻断主链路。
+/// # 参数
+/// - `tenant_id`：事件所属租户（P0 跨租户泄漏修复新增，**必传且严禁硬编码 0**）。
+///   调用点从操作者上下文（`Operator::tenant_id()` / 登录主机租户）或事件主体
+///   租户（payload 内 `tenantId`，两者应一致）取得；启用回调**仅匹配同租户**
+///   （与 [`SysWebHookService::dispatch_event`] 共用 [`filter_groups_by_tenant`]，
+///   严格同口径），A 租户事件不会推给 B 租户回调。
+///
+/// 行为：查启用回调 → 同租户过滤 → `subscribed_events` 过滤（空/NULL = 订阅全部，
+/// JSON 数组含 event_key = 命中）→ 逐回调 spawn 真实出站投递（复用既有签名/HMAC +
+/// HTTP 链路）→ 发送失败仅写 `sys_web_hook_log`（source='dispatch'），绝不阻断主链路。
 ///
 /// payload 建议字段与 `sys_webhook_event.payload_example` 种子样例对齐；
 /// 本函数在派发前自动注入 `eventKey` 与 `time`（接收方判定归属的事实源）。
@@ -1734,6 +1762,7 @@ pub async fn emit_event(
     state: &crate::state::AppState,
     event_key: &str,
     mut payload: serde_json::Value,
+    tenant_id: i64,
 ) {
     // 注入事件上下文（对象负载时；非对象负载原样透传，不吞业务数据）
     let payload = if let serde_json::Value::Object(ref mut m) = payload {
@@ -1746,7 +1775,7 @@ pub async fn emit_event(
         payload
     };
     // emit 内部 tokio::spawn 火后即忘，本 await 仅收敛调用侧语义（无阻塞投递）
-    state.web_hook_service.emit(event_key, payload);
+    state.web_hook_service.emit(event_key, payload, tenant_id);
 }
 
 #[cfg(test)]
@@ -1817,6 +1846,69 @@ mod tests {
             map_legacy_event_key(EVENT_LOGIN_SUCCESS)
         ));
         assert!(hook_matches_subscribed(None, "login.success"));
+    }
+
+    #[test]
+    fn dispatch_and_emit_share_tenant_caliber() {
+        // P0 跨租户泄漏防回归：dispatch_event 与 emit_event 的租户口径必须严格一致
+        // （共用 filter_groups_by_tenant：精确同租户过滤，tid=0 平台事件仅投平台租户回调组）
+        fn mk_hook(id: i64, tenant_id: i64, subscribed: Option<&str>) -> SysWebHookModel {
+            SysWebHookModel {
+                tenant_id,
+                id,
+                hook_name: format!("hook-{id}"),
+                event_types: String::new(),
+                subscribed_events: subscribed.map(|s| s.to_string()),
+                target_url: "http://127.0.0.1:1/hook".to_string(),
+                secret: None,
+                content_type: "json".to_string(),
+                timeout_secs: 2,
+                status: "0".to_string(),
+                remark: None,
+                create_by: None,
+                create_time: None,
+                update_by: None,
+                update_time: None,
+                del_flag: "0".to_string(),
+            }
+        }
+        let groups = vec![
+            // 租户 1：一个订阅全部（NULL）+ 一个只订阅 user.created
+            (
+                1,
+                vec![mk_hook(11, 1, None), mk_hook(12, 1, Some(r#"["user.created"]"#))],
+            ),
+            // 租户 2：订阅全部
+            (2, vec![mk_hook(21, 2, None)]),
+            // 平台租户 0：订阅全部
+            (0, vec![mk_hook(1, 0, None)]),
+        ];
+        // 两条派发链同口径模拟：dispatch（映射后 subscribed 匹配）与 emit（目录键直配）
+        let ids_by = |tid: i64, event_key: &str| -> Vec<i64> {
+            filter_groups_by_tenant(groups.clone(), tid)
+                .into_iter()
+                .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), event_key))
+                .map(|h| h.id)
+                .collect()
+        };
+        // 同租户事件：dispatch 与 emit 命中同一 hook 集合
+        assert_eq!(
+            ids_by(1, map_legacy_event_key("user.created")),
+            vec![11, 12],
+            "租户 1 的 user.created 应命中本租户两个回调"
+        );
+        assert_eq!(ids_by(1, "user.created"), vec![11, 12], "emit 同口径命中一致");
+        // 跨租户隔离核心断言：租户 2 触发的事件绝不能命中租户 1 的回调，反之亦然
+        assert_eq!(ids_by(2, "user.created"), vec![21], "租户 2 事件只命中租户 2 回调");
+        assert_eq!(
+            ids_by(1, "role.created"),
+            vec![11],
+            "未订阅事件：仅『订阅全部』（NULL）回调命中，定向订阅回调不命中"
+        );
+        // 平台事件（tid=0）：仅平台租户回调组命中，不波及业务租户
+        assert_eq!(ids_by(0, "user.created"), vec![1], "平台事件仅命中平台租户回调");
+        // 不存在的租户：任何回调都不命中（fail-closed）
+        assert_eq!(ids_by(999, "user.created"), Vec::<i64>::new());
     }
 
     #[test]
