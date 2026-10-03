@@ -108,6 +108,17 @@ async fn test_config_chain() {
 async fn test_dict_type_chain() {
     let ctx = TestContext::new().await;
 
+    // 运行时唯一后缀：并行/残留场景下固定键 it_test_dict 会让
+    // 「应查到 1 条」断言偶发翻车（上一轮失败残留未清理时 rows=2）。
+    // 唯一键 + 末尾按 dictId 精确删除，保证幂等可重跑。
+    let unique = format!(
+        "it_test_dict_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("系统时间应晚于 UNIX_EPOCH")
+            .as_millis()
+    );
+
     // 1. 分页列表
     let v = ctx
         .get_json("/system/dict/type/list?pageNum=1&pageSize=20")
@@ -136,7 +147,7 @@ async fn test_dict_type_chain() {
             "/system/dict/type",
             serde_json::json!({
                 "dictName": "集成测试字典",
-                "dictType": "it_test_dict",
+                "dictType": unique.clone(),
                 "status": "0",
                 "remark": "集成测试"
             }),
@@ -146,7 +157,10 @@ async fn test_dict_type_chain() {
 
     // 5. 按 dictType 过滤查询到新字典类型
     let v = ctx
-        .get_json("/system/dict/type/list?dictType=it_test_dict")
+        .get_json(&format!(
+            "/system/dict/type/list?dictType={}",
+            unique
+        ))
         .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert_eq!(rows.len(), 1, "应查到 1 条新字典类型，实际: {v}");
@@ -159,7 +173,7 @@ async fn test_dict_type_chain() {
             serde_json::json!({
                 "dictId": dict_id,
                 "dictName": "集成测试字典改",
-                "dictType": "it_test_dict",
+                "dictType": unique.clone(),
                 "status": "0"
             }),
         )
@@ -184,7 +198,10 @@ async fn test_dict_type_chain() {
         .await;
     ctx.assert_ok(&v);
     let v = ctx
-        .get_json("/system/dict/type/list?dictType=it_test_dict")
+        .get_json(&format!(
+            "/system/dict/type/list?dictType={}",
+            unique
+        ))
         .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(rows.is_empty(), "删除后不应再查到该字典类型，实际: {v}");

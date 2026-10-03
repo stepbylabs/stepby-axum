@@ -270,7 +270,17 @@ async fn verify_and_inject(
 /// GET /open/v1/profile：AK 身份画像（真实查库）
 ///
 /// 返回凭据归属：PAT 名称 / 属主用户名 / 租户 / PAT 过期时间。
-async fn open_profile(
+#[utoipa::path(
+    get,
+    path = "/open/v1/profile",
+    responses(
+        (status = 200, description = "AK 身份画像（凭据归属：PAT 名称/属主/租户/过期时间）", body = crate::common::response::AjaxResult<crate::service::sys_pat_service::OpenProfileVo>),
+        (status = 401, description = "签名校验失败/凭据无效/已吊销"),
+        (status = 404, description = "令牌不存在"),
+    ),
+    tag = "pat"
+)]
+pub(crate) async fn open_profile(
     axum::extract::Extension(ak): axum::extract::Extension<AkIdentity>,
     State(state): State<Arc<AppState>>,
 ) -> Result<axum::Json<serde_json::Value>, AppError> {
