@@ -394,6 +394,8 @@ struct SwaggerAssets;
         // ==================== 个人访问令牌（PAT：开放 API AK/SK 域）====================
         crate::handler::sys_pat_handler::rotate_ak,
         crate::handler::sys_pat_handler::revoke_ak,
+        // AK/SK 开放 API（签名保护，见 middleware/ak_sign.rs）
+        crate::middleware::ak_sign::open_profile,
     ),
     components(
         schemas(
@@ -558,6 +560,7 @@ struct SwaggerAssets;
             crate::service::sys_web_hook_service::WebhookTestSendDto,
             // ==================== 个人访问令牌（PAT：开放 API AK/SK 域）====================
             crate::service::sys_pat_service::RotateAkResult,
+            crate::service::sys_pat_service::OpenProfileVo,
         ),
     ),
     tags(

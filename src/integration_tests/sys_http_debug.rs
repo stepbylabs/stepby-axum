@@ -101,7 +101,7 @@ async fn test_http_debug_external_transport_failure_returns_200_with_error() {
             Some(serde_json::json!({
                 "method": "GET",
                 "url": "http://8.8.8.8:1/",
-                "timeoutSecs": 2
+                "timeoutSecs": 8
             })),
         ))
         .await;
