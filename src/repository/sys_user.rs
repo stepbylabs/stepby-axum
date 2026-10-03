@@ -64,6 +64,36 @@ fn map_user_custom_scope(c: &CustomCondition) -> Option<SimpleExpr> {
     }
 }
 
+/// 字段级权限 M2：sys_user 列表列裁剪枚举（仅覆盖白名单受控字段，
+/// 白名单见 `service/sys_role_field_perm_service.rs::FIELD_PERM_TABLES`）。
+///
+/// 语义：列入裁剪集合的字段**不参与 SELECT**（数据在查询层即不外泄），
+/// VO 组装层再置 `None` 形成双保险。空切片 = 全列 SELECT = 关闭态零行为变化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserOmitColumn {
+    Phonenumber,
+    Email,
+}
+
+impl UserOmitColumn {
+    /// 映射到 sea-orm 列（白名单封闭枚举，不存在未知列注入面）
+    pub fn to_column(self) -> Column {
+        match self {
+            UserOmitColumn::Phonenumber => Column::Phonenumber,
+            UserOmitColumn::Email => Column::Email,
+        }
+    }
+
+    /// 判断该裁剪项是否命中给定列（Column 未派生 PartialEq，用封闭 matches! 比较）
+    fn matches_column(self, c: Column) -> bool {
+        matches!(
+            (self, c),
+            (UserOmitColumn::Phonenumber, Column::Phonenumber)
+                | (UserOmitColumn::Email, Column::Email)
+        )
+    }
+}
+
 /// 用户 Repository
 #[derive(Clone)]
 pub struct SysUserRepository {
@@ -217,6 +247,9 @@ impl SysUserRepository {
     /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）。
     /// 与 keyset 互斥——携带 `last_id` 时固定 `PK DESC`（keyset 语义要求单调主键序），
     /// 仅 OFFSET 分页路径应用 `sort`；`None` 时回退默认 `user_id ASC`。
+    ///
+    /// `omit_columns`：字段级权限 M2 的列表列裁剪（隐藏字段不参与 SELECT）。
+    /// 空切片 = 全列 SELECT = 关闭态零行为变化（三方言下与历史查询计划一致）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_page_with_data_scope(
         &self,
@@ -235,6 +268,7 @@ impl SysUserRepository {
         tenant_scope: Option<i64>,
         tenant_filter: Option<i64>,
         sort: Option<SortOrder<Column>>,
+        omit_columns: &[UserOmitColumn],
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
         // 多租户 Phase 2：租户用户仅见本租户（tenant_scope(tid)=Some(t)）；平台 0 不过滤
@@ -285,6 +319,45 @@ impl SysUserRepository {
 
         // 过滤条件已齐备，统计总数（与分页模式无关，过滤后计数保持一致）
         let total = query.clone().count(self.base.db()).await?;
+
+        // M2 字段级权限：列表列裁剪（在 total 统计之后应用，COUNT 不受影响）。
+        // 隐藏字段不参与 SELECT——数据在查询层即不外泄；列清单是封闭枚举白名单
+        //（UserOmitColumn），无用户可控拼接面。空切片时保持原 query（全列）。
+        let query = if omit_columns.is_empty() {
+            query
+        } else {
+            let all_columns = [
+                Column::UserId,
+                Column::DeptId,
+                Column::UserName,
+                Column::NickName,
+                Column::UserType,
+                Column::Email,
+                Column::Phonenumber,
+                Column::CountryCode,
+                Column::Sex,
+                Column::Avatar,
+                Column::Password,
+                Column::Status,
+                Column::DelFlag,
+                Column::LoginIp,
+                Column::LoginDate,
+                Column::CreateBy,
+                Column::CreateTime,
+                Column::UpdateBy,
+                Column::UpdateTime,
+                Column::Remark,
+                Column::TenantId,
+                Column::ScimExternalId,
+            ];
+            let mut q = query.select_only();
+            for c in all_columns {
+                if !omit_columns.iter().any(|o| o.matches_column(c)) {
+                    q = q.column(c);
+                }
+            }
+            q
+        };
 
         // P1：keyset 深分页（PK < last_id）+ PK DESC；否则走原 OFFSET 深翻页路径。
         // 注意 keyset 模式排序方向与默认相反（倒序），二者各自返回一致、无重复的分页。
@@ -471,7 +544,7 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-                    None, None,
+                    None, None, &[],
                 )
                 .await
                 .unwrap();
@@ -525,6 +598,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .await
             .unwrap();
@@ -556,6 +630,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    &[],
                 )
                 .await
                 .unwrap();
@@ -592,7 +667,7 @@ mod tests {
         let (offset_all, _) = repo
             .find_page_with_data_scope(
                 0, 1000, None, None, None, None, None, None, None, None, None, None, None, None,
-                None,
+                None, &[],
             )
             .await
             .unwrap();
@@ -606,7 +681,7 @@ mod tests {
             let (page, _) = repo
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-                    None, None,
+                    None, None, &[],
                 )
                 .await
                 .unwrap();

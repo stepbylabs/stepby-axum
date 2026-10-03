@@ -110,7 +110,12 @@ async fn it_list_masks_others_but_plain_for_self() {
     let (rows, _) = ctx
         .state
         .user_service
-        .get_user_page(query_all(), Some(9301), None)
+        .get_user_page(
+            query_all(),
+            Some(9301),
+            None,
+            &std::collections::HashSet::new(),
+        )
         .await
         .expect("get_user_page 失败");
 
@@ -151,7 +156,12 @@ async fn it_list_plain_for_super_admin_role_operator() {
     let (rows, _) = ctx
         .state
         .user_service
-        .get_user_page(query_all(), Some(9303), None)
+        .get_user_page(
+            query_all(),
+            Some(9303),
+            None,
+            &std::collections::HashSet::new(),
+        )
         .await
         .expect("get_user_page 失败");
 

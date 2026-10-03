@@ -42,6 +42,7 @@ pub mod sys_report;
 pub mod sys_report_sub;
 pub mod sys_role;
 pub mod sys_role_dept;
+pub mod sys_role_field_perm;
 pub mod sys_role_menu;
 pub mod sys_scim_group;
 pub mod sys_scim_group_binding;

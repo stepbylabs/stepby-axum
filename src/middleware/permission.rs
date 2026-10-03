@@ -364,6 +364,11 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("PUT", "/system/role/dataScope", "system:role:edit"),
     ("DELETE", "/system/role/{id}", "system:role:remove"),
     ("POST", "/system/role/export", "system:role:export"),
+    // 字段级权限 M2：角色字段权限矩阵（菜单 4120/4121；tableKey 为 query 参数不参与匹配）。
+    // 开关链（sys.fieldPerm.enabled → role.field_perm 能力位 → 角色矩阵行）在服务层收口，
+    // 关闭态接口 403 返回配置关闭提示，路由/权限登记始终生效（能力全备、默认安全）。
+    ("GET", "/system/role/field-perm/{roleId}", "system:role:fieldPerm"),
+    ("PUT", "/system/role/field-perm/{roleId}", "system:role:fieldPermSave"),
     // authUser 系列接口：授权用户管理，使用 system:role:edit
     ("GET", "/system/role/authUser/allocatedList", "system:role:list"),
     ("GET", "/system/role/authUser/unallocatedList", "system:role:list"),
@@ -858,6 +863,10 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
         // 数据安全由 handler 内逐域权限检查（对齐各域 *:list）+ 租户隔离兜底，
         // 取舍说明见 handler/common_search_handler.rs 模块注释）=====
             | ("GET", "/common/global-search")
+        // ===== 字段级权限：当前操作者生效的隐藏字段集（每个登录用户都要拿自己的
+        // 隐藏集驱动列表动态列；fail-safe 语义=关闭/白名单外/管理员恒空数组，
+        // 见 handler/sys_role_field_perm_handler.rs get_field_hidden）=====
+            | ("GET", "/system/user/field-hidden")
         // ===== 个人中心（仅本人操作，仅需登录）=====
             | ("GET", "/system/user/profile")
             | ("PUT", "/system/user/profile")

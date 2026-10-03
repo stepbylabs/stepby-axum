@@ -490,6 +490,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 Webhook 订阅收敛兜底失败: {}", e))?;
 
+        // 4.5i 字段级权限 M2 兜底（等价迁移 m20261003_000005_role_field_perm）：
+        //      sys_role_field_perm 建表 + 角色索引 + 菜单按钮 4120/4121 +
+        //      sys_config 平台开关种子（默认 false = 关闭态零行为变化）。
+        ensure_role_field_perm_tables(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化字段级权限 M2 兜底失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -4864,6 +4871,41 @@ pub(crate) async fn ensure_alert_rule_tables(db: &DatabaseConnection) -> anyhow:
     }
 
     tracing::info!("告警规则兜底完成（sys_alert_rule / enabled 索引 / 菜单 4110-4114，幂等）");
+    Ok(())
+}
+
+/// 字段级权限 M2 兜底（等价迁移 `m20261003_000005_role_field_perm`）：
+/// - 建表 `sys_role_field_perm`（角色字段权限矩阵，UNIQUE(role_id, table_key, field_key)）
+/// - 角色查询索引 idx_role_field_perm_role
+/// - 菜单种子幂等：角色管理按钮 4120（system:role:fieldPerm）/ 4121（fieldPermSave）
+///   + role_menu(role_id=1)
+/// - sys_config 种子幂等：平台开关 `sys.fieldPerm.enabled`（默认 'false' = 关闭态即安全态）
+pub(crate) async fn ensure_role_field_perm_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    // 单一事实源：迁移文件导出的建表 SQL / 索引 / 菜单种子 / config 种子
+    use migration::m20261003_000005_role_field_perm as mig;
+
+    let backend = db.get_database_backend();
+
+    // 1) 建表（引用迁移 create_table_sql；UNIQUE 约束随 IF NOT EXISTS 建表幂等）
+    flow_exec(db, mig::create_table_sql(backend)).await?;
+
+    // 2) 角色查询索引（引用迁移 ROLE_FIELD_PERM_INDEXES；ensure_tenant_index 三方言幂等）
+    for (name, table, cols) in mig::ROLE_FIELD_PERM_INDEXES {
+        ensure_tenant_index(db, table, name, cols, false).await?;
+    }
+
+    // 3) 菜单种子（引用迁移 field_perm_menu_seed_bodies；perms 与 PERM_ROUTE_TABLE 对齐）
+    let now = flow_now(db);
+    for body in mig::field_perm_menu_seed_bodies(&now) {
+        flow_insert(db, &body).await?;
+    }
+
+    // 4) sys_config 平台开关种子（默认 'false'；幂等冲突忽略 = 保留运维已改的值）
+    flow_insert(db, &mig::field_perm_config_seed_body(&now)).await?;
+
+    tracing::info!(
+        "字段级权限 M2 兜底完成（sys_role_field_perm / 菜单 4120-4121 / sys.fieldPerm.enabled，幂等）"
+    );
     Ok(())
 }
 

@@ -6,6 +6,9 @@ error:
     disabled: AI assistant is disabled. Ask an administrator to enable it in configuration
     pat_forbidden: AI assistant does not accept Personal Access Tokens (PAT). Use an interactive login session
     capability_off: AI assistant capability is not enabled for this tenant
+  fieldperm:
+    disabled: Field-level permission is not enabled (platform switch or tenant package capability is off)
+    table_not_allowed: The business table is not in the field-level permission whitelist
   common:
     not_found: Data not found
     db_acquire: Failed to acquire database connection

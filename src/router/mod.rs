@@ -33,6 +33,7 @@ pub mod sys_post_router;
 pub mod sys_rate_limit_router;
 pub mod sys_report_router;
 pub mod sys_role_router;
+pub mod sys_role_field_perm_router;
 pub mod sys_scim_group_router;
 pub mod sys_task_router;
 pub mod sys_tenant_domain_router;
@@ -98,6 +99,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_user_pref_router::user_pref_routes())
         .merge(sys_pat_router::pat_routes())
         .merge(sys_role_router::role_routes())
+        .merge(sys_role_field_perm_router::role_field_perm_routes())
         .merge(sys_menu_router::menu_routes())
         .merge(sys_msg_router::msg_routes())
         .merge(sys_oauth_router::oauth_routes())

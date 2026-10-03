@@ -6,6 +6,9 @@ error:
     disabled: AI 助手未启用，请联系管理员在系统配置中开启
     pat_forbidden: AI 助手不支持访问令牌（PAT）调用，请使用登录会话
     capability_off: 当前租户未开通 AI 助手能力
+  fieldperm:
+    disabled: 字段级权限功能未开启（平台开关或租户套餐能力位未启用）
+    table_not_allowed: 业务表不在字段级权限白名单内
   common:
     not_found: 数据不存在
     db_acquire: 数据库连接获取失败

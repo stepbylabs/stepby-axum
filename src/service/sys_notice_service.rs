@@ -640,9 +640,16 @@ impl SysNoticeService {
     }
 
     /// 查询公告已读用户列表（分页）
+    ///
+    /// M1 脱敏影响面补齐（字段级权限 M2 登记）：`NoticeReadUserVo.phonenumber`
+    /// 按 M1 三口径掩码（本人行 / 超管 → 原值；其余 operator → 掩码）。
+    /// 该出口此前返回手机号原值，与用户列表的 M1 口径漂移，此为脱敏收口。
+    /// 字段级权限 M2 的**隐藏裁剪**不作用于本出口（登记口径：M2 首期只开
+    /// sys_user 列表域；本出口走 M1 掩码口径）。
     pub async fn get_read_users_page(
         &self,
         query: NoticeReadUserQueryDto,
+        operator_user_id: Option<i64>,
         operator_tid: i64,
     ) -> Result<(Vec<NoticeReadUserVo>, u64), ServiceError> {
         // 动态排序透传：先 sanitize（格式白名单），列级白名单在此处解析为 SQL 列表达式
@@ -683,6 +690,44 @@ impl SysNoticeService {
                 sort,
             )
             .await?;
+
+        // M1 三口径掩码（phonenumber）：每次请求计算一次超管视角，逐行判定
+        // （本人行 / 超管 → 原值；其余 → 掩码）。角色查询失败 fail-closed（掩码）。
+        let op_is_super = match operator_user_id {
+            Some(op_uid) => {
+                if op_uid == crate::common::constants::SUPER_ADMIN_USER_ID {
+                    true
+                } else {
+                    match crate::repository::sys_role::SysRoleRepository::new(self.db().clone())
+                        .find_by_user_id(op_uid)
+                        .await
+                    {
+                        Ok(roles) => roles.iter().any(|r| r.is_platform_super_admin()),
+                        Err(e) => {
+                            tracing::warn!(
+                                operator_user_id = op_uid,
+                                "已读用户列表掩码判定：查询 operator 角色失败，fail-closed 按非超管处理: {}",
+                                e
+                            );
+                            false
+                        }
+                    }
+                }
+            }
+            None => false,
+        };
+        let mut rows = rows;
+        for row in &mut rows {
+            if crate::service::sys_user_service::should_mask_pii(
+                operator_user_id,
+                row.user_id,
+                op_is_super,
+            ) && let Some(phone) = row.phonenumber.as_deref()
+            {
+                row.phonenumber = Some(crate::utils::masking::mask_phone(phone));
+            }
+        }
+
         Ok((rows, total))
     }
 

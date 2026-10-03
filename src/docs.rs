@@ -72,6 +72,9 @@ struct SwaggerAssets;
         crate::handler::sys_role_handler::data_scope,
         crate::handler::sys_role_handler::dept_tree_select,
         crate::handler::sys_role_handler::export,
+        // 字段级权限 M2：角色字段权限矩阵
+        crate::handler::sys_role_field_perm_handler::get_matrix,
+        crate::handler::sys_role_field_perm_handler::save_matrix,
         // ==================== 菜单管理 ====================
         crate::handler::sys_menu_handler::list,
         crate::handler::sys_menu_handler::treeselect,
@@ -555,6 +558,9 @@ struct SwaggerAssets;
             crate::service::sys_alert_service::AlertRuleEditDto,
             crate::service::sys_alert_service::AlertRuleEnabledDto,
             crate::service::sys_alert_service::AlertEvaluateResult,
+            // ==================== 字段级权限 M2（角色字段权限矩阵）====================
+            crate::service::sys_role_field_perm_service::FieldPermItem,
+            crate::service::sys_role_field_perm_service::FieldPermSaveDto,
             // ==================== 集成开放域（WebHook 事件目录）====================
             crate::service::sys_web_hook_service::WebhookEventVo,
             crate::service::sys_web_hook_service::WebhookTestSendDto,
