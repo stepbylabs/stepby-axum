@@ -95,10 +95,23 @@ pub async fn add(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<NoticeAddDto>,
 ) -> Result<AjaxResult<()>, AppError> {
+    // 提前取出公告标题（dto 将被 add_notice 按值消费）
+    let notice_title = dto.notice_title.clone();
     state
         .notice_service
         .add_notice(dto, operator.username(), operator.tenant_id(), Some(&state))
         .await?;
+    // Webhook 事件目录（开放域）：新增事务已提交，派发 notice.published
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "notice.published",
+        serde_json::json!({
+            "noticeTitle": notice_title,
+            "tenantId": operator.tenant_id(),
+            "operator": operator.username(),
+        }),
+    )
+    .await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))
 }
 

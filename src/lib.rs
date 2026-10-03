@@ -69,6 +69,9 @@ pub mod storage;
 // ========== 共享态存储抽象（SharedStore：[cache].mode = local | redis 双档）==========
 pub mod shared_store;
 
+// ========== 审计合规域（数据变更留痕：diff 记录 + CSV 导出）==========
+pub mod audit;
+
 // ========== 集成测试（login → getInfo 冒烟）==========
 // 仅在 `cargo test` 下编译；复用 crate 内部 pub 项构造隔离的 AppState。
 #[cfg(test)]

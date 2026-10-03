@@ -9,10 +9,13 @@
 //!
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use hmac::{Hmac, KeyInit, Mac};
 use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
@@ -22,6 +25,7 @@ use crate::entity::sys_oper_log::{
     ActiveModel as SysOperLogActiveModel, Column as OperLogColumn, Model as SysOperLogModel,
 };
 use crate::repository::sys_oper_log::SysOperLogRepository;
+use crate::shared_store::SharedStore;
 use crate::utils::retry::{RetryPolicy, retry_async};
 
 /// 操作日志写入的有界重试策略（R5-RATE-29）：3 次尝试 / 100ms 间隔。
@@ -29,6 +33,165 @@ use crate::utils::retry::{RetryPolicy, retry_async};
 /// DB 短暂抖动（连接重置、锁等待超时）多为毫秒级可恢复，固定短退避即可覆盖；
 /// 次数硬上限确保 DB 长时间不可用时 spawn 任务不会被无限占用。
 const OPER_LOG_WRITE_RETRY: RetryPolicy = RetryPolicy::new(3, Duration::from_millis(100));
+
+// ==================== 防篡改 HMAC 链 ====================
+
+/// 链锁键（SharedStore SETNX 互斥：同一时刻仅一个写入方延长链尾）
+const OPER_CHAIN_LOCK_KEY: &str = "lock:oper_chain";
+
+/// 链锁抢占间隔（毫秒）：SETNX 未命中后的重试等待
+const OPER_CHAIN_LOCK_WAIT_MS: u64 = 300;
+
+/// 链锁抢占尝试次数：重试耗尽即降级（本条 chain_hash 留 NULL，链在非 NULL 子序列上续写）
+const OPER_CHAIN_LOCK_ATTEMPTS: u64 = 3;
+
+/// 链锁 TTL（秒）：正常链计算毫秒级完成；TTL 兜底持有者崩溃后的死锁
+const OPER_CHAIN_LOCK_TTL_SECS: u64 = 5;
+
+/// 链密钥派生盐（HMAC-SHA256(jwt_secret, 盐) → 32 字节链密钥，不落盘不入日志）
+const OPER_CHAIN_KEY_INFO: &[u8] = b"stepby-oper-chain";
+
+/// 链哈希字段拼接分隔符
+const OPER_CHAIN_SEP: &str = "|";
+
+/// HMAC-SHA256 别名
+type HmacSha256 = Hmac<Sha256>;
+
+/// 从 JWT secret 派生链密钥（HMAC-SHA256(jwt_secret, "stepby-oper-chain")，32 字节）
+fn derive_chain_key(jwt_secret: &str) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(jwt_secret.as_bytes())
+        .expect("HMAC 接受任意长度密钥，此处不可能失败");
+    mac.update(OPER_CHAIN_KEY_INFO);
+    mac.finalize().into_bytes().into()
+}
+
+/// 计算 payload 的 SHA-256 指纹（hex）。JSON 序列化按 struct 字段声明序，输出确定性一致。
+fn payload_hex_digest(payload: &ChainPayload) -> String {
+    let json = serde_json::to_string(payload).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    crate::utils::crypto::hex_encode_digest(&hasher.finalize())
+}
+
+/// 计算链节点哈希：HMAC-SHA256(key, prev || "|" || oper_id || "|" || payload_hash)
+///
+/// `prev`：前驱节点 hex（链首传空串）；`oper_id`：本条日志主键；
+/// `payload_hash`：[`payload_hex_digest`] 输出。
+fn compute_chain_hash(key: &[u8; 32], prev: &str, oper_id: i64, payload_hash: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC 接受 32 字节密钥");
+    mac.update(prev.as_bytes());
+    mac.update(OPER_CHAIN_SEP.as_bytes());
+    mac.update(oper_id.to_string().as_bytes());
+    mac.update(OPER_CHAIN_SEP.as_bytes());
+    mac.update(payload_hash.as_bytes());
+    crate::utils::crypto::hex_encode_digest(&mac.finalize().into_bytes())
+}
+
+/// 参与操作日志链哈希计算的最小负载（写入端与校验端共用，字段与顺序必须完全一致）
+///
+/// 两端构造口径统一执行「空串 → None」归一化（对齐 record_oper_log 写库时的
+/// empty→None 行为），保证同一行日志经任一端构造出的序列化结果逐字节相同。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainPayload {
+    title: Option<String>,
+    business_type: Option<i32>,
+    method: Option<String>,
+    request_method: Option<String>,
+    operator_type: Option<i32>,
+    oper_name: Option<String>,
+    dept_name: Option<String>,
+    oper_url: Option<String>,
+    oper_ip: Option<String>,
+    oper_location: Option<String>,
+    oper_param: Option<String>,
+    oper_before: Option<String>,
+    oper_diff: Option<String>,
+    json_result: Option<String>,
+    status: Option<String>,
+    error_msg: Option<String>,
+    /// 固定 `%Y-%m-%d %H:%M:%S%.6f` 格式（chrono 序列化格式有歧义，链哈希要求确定性）
+    oper_time: Option<String>,
+    cost_time: Option<i64>,
+    tenant_id: i64,
+    target_tenant_id: Option<i64>,
+}
+
+impl ChainPayload {
+    /// 「空串 → None」归一化（对齐 record_oper_log 写库口径）
+    fn normalize(s: String) -> Option<String> {
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    /// 写入端构造：来自中间件的 [`OperLogRecord`] + 本条 oper_time 字符串
+    ///
+    /// 必须在 record 被 move 进 ActiveModel 之前调用。
+    fn from_parts(record: &OperLogRecord, oper_time: &str) -> Self {
+        Self {
+            title: Self::normalize(record.title.clone()),
+            business_type: Some(record.business_type),
+            method: Self::normalize(record.method.clone()),
+            request_method: Self::normalize(record.request_method.clone()),
+            operator_type: Some(record.operator_type),
+            oper_name: Self::normalize(record.oper_name.clone()),
+            dept_name: Self::normalize(record.dept_name.clone()),
+            oper_url: Self::normalize(record.oper_url.clone()),
+            oper_ip: Self::normalize(record.oper_ip.clone()),
+            oper_location: Self::normalize(record.oper_location.clone()),
+            oper_param: Self::normalize(record.oper_param.clone()),
+            oper_before: Self::normalize(record.oper_before.clone()),
+            oper_diff: Self::normalize(record.oper_diff.clone()),
+            json_result: Self::normalize(record.json_result.clone()),
+            status: Self::normalize(record.status.clone()),
+            error_msg: Self::normalize(record.error_msg.clone()),
+            oper_time: Some(oper_time.to_string()),
+            cost_time: Some(record.cost_time),
+            tenant_id: record.tenant_id,
+            target_tenant_id: record.target_tenant_id,
+        }
+    }
+
+    /// 校验端构造：从 DB 读回的 [`SysOperLogModel`]（与写入端逐字段对齐）
+    fn from_model(m: &SysOperLogModel) -> Self {
+        let oper_time = m
+            .oper_time
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string());
+        Self {
+            title: Self::normalize(m.title.clone().unwrap_or_default()),
+            business_type: m.business_type,
+            method: Self::normalize(m.method.clone().unwrap_or_default()),
+            request_method: Self::normalize(m.request_method.clone().unwrap_or_default()),
+            operator_type: m.operator_type,
+            oper_name: Self::normalize(m.oper_name.clone().unwrap_or_default()),
+            dept_name: Self::normalize(m.dept_name.clone().unwrap_or_default()),
+            oper_url: Self::normalize(m.oper_url.clone().unwrap_or_default()),
+            oper_ip: Self::normalize(m.oper_ip.clone().unwrap_or_default()),
+            oper_location: Self::normalize(m.oper_location.clone().unwrap_or_default()),
+            oper_param: Self::normalize(m.oper_param.clone().unwrap_or_default()),
+            oper_before: Self::normalize(m.oper_before.clone().unwrap_or_default()),
+            oper_diff: Self::normalize(m.oper_diff.clone().unwrap_or_default()),
+            json_result: Self::normalize(m.json_result.clone().unwrap_or_default()),
+            status: Self::normalize(m.status.clone().unwrap_or_default()),
+            error_msg: Self::normalize(m.error_msg.clone().unwrap_or_default()),
+            oper_time,
+            cost_time: m.cost_time,
+            tenant_id: m.tenant_id,
+            target_tenant_id: m.target_tenant_id,
+        }
+    }
+}
+
+/// HMAC 链上下文（链密钥 + 共享态存储）。`None` = 未启用（chain_hash 恒 NULL）。
+#[derive(Clone)]
+struct OperChainCtx {
+    store: Arc<dyn SharedStore>,
+    /// 链密钥（从 JWT secret 派生，32 字节；不落盘不入日志）
+    key: [u8; 32],
+}
 
 // ==================== DTO ====================
 
@@ -137,12 +300,33 @@ const SORTABLE_COLUMNS: &[(&str, OperLogColumn)] = &[
 #[derive(Clone)]
 pub struct SysOperLogService {
     oper_log_repo: SysOperLogRepository,
+    /// HMAC 防篡改链上下文（`None` = 未启用；scheduler 等无共享态上下文的构造点保持降级）
+    chain: Option<OperChainCtx>,
 }
 
 impl SysOperLogService {
     pub fn new(db: DatabaseConnection) -> Self {
         Self {
             oper_log_repo: SysOperLogRepository::new(db),
+            chain: None,
+        }
+    }
+
+    /// 构造带 HMAC 防篡改链能力的 Service（state 装配专用）
+    ///
+    /// `jwt_secret`：运行时 JWT 签名密钥，链密钥由其派生
+    /// （HMAC-SHA256(jwt_secret, "stepby-oper-chain")），不落盘不入日志。
+    pub fn with_chain(
+        db: DatabaseConnection,
+        store: Arc<dyn SharedStore>,
+        jwt_secret: &str,
+    ) -> Self {
+        Self {
+            oper_log_repo: SysOperLogRepository::new(db),
+            chain: Some(OperChainCtx {
+                store,
+                key: derive_chain_key(jwt_secret),
+            }),
         }
     }
 
@@ -596,6 +780,11 @@ impl SysOperLogService {
     /// 修复 P0-R81-011 / R5-RATE-29：写入复用共享的有界重试助手
     /// （`utils::retry`，3 次尝试 / 100ms 间隔）；重试仍失败时记 `tracing::error!`，
     /// 并携带 oper_url / request_method / oper_name，避免审计记录从日志流中凭空消失。
+    ///
+    /// 防篡改链：启用链能力时（[`Self::with_chain`]），写入成功后在
+    /// `lock:oper_chain` 互斥锁内计算链哈希并回写（insert → 查前驱 → HMAC → UPDATE）；
+    /// 锁抢占重试耗尽或共享态后端异常时降级——本条 chain_hash 留 NULL，
+    /// 后续日志在前一条非 NULL 节点上续链，校验端对称跳过 NULL 行。
     pub async fn record_oper_log(&self, record: OperLogRecord) {
         // 重试耗尽后的 error 日志需要能定位到具体请求，故在字段被 move 进 ActiveModel 前留副本
         let oper_url = record.oper_url.clone();
@@ -603,6 +792,13 @@ impl SysOperLogService {
         let oper_name = record.oper_name.clone();
 
         let now = crate::common::datetime::now_naive();
+        // 链负载必须在 record 被 move 进 ActiveModel 之前构造
+        // （oper_time 用与写库完全相同的 now 值格式化，保证校验端重算一致）
+        let chain_ctx = self.chain.clone();
+        let chain_payload = chain_ctx
+            .as_ref()
+            .map(|_| ChainPayload::from_parts(&record, &now.format("%Y-%m-%d %H:%M:%S%.6f").to_string()));
+
         let am = SysOperLogActiveModel {
             title: Set(Some(record.title)),
             business_type: Set(Some(record.business_type)),
@@ -643,27 +839,160 @@ impl SysOperLogService {
         // 闭包内自行 clone 数据库连接与 ActiveModel，构造所有权自足的 future，
         // 使重试观察不到借用关系（避免 `FnMut() -> Fut` 的借用生命周期问题）。
         let db = self.oper_log_repo.base().db().clone();
-        if let Err(e) = retry_async(OPER_LOG_WRITE_RETRY, || {
+        let inserted = retry_async(OPER_LOG_WRITE_RETRY, || {
             let db = db.clone();
             let am = am.clone();
             async move { SysOperLogRepository::new(db).insert(am).await }
         })
-        .await
-        {
-            // 重试耗尽：记录错误日志，携带可定位信息（无法再恢复）
-            tracing::error!(
-                oper_url = %oper_url,
-                request_method = %request_method,
-                oper_name = %oper_name,
-                "操作日志写入失败（已尝试 {} 次，放弃）: {}",
-                OPER_LOG_WRITE_RETRY.max_attempts,
-                e
-            );
+        .await;
+
+        match inserted {
+            Ok(model) => {
+                // 防篡改链：写入成功后计算并回写链哈希（失败仅告警降级，不阻断日志已落库的事实）
+                if let (Some(ctx), Some(payload)) = (&chain_ctx, chain_payload)
+                    && let Err(e) = self.attach_chain_hash(ctx, model.oper_id, &payload).await
+                {
+                    tracing::warn!(
+                        oper_id = model.oper_id,
+                        "操作日志链哈希计算失败（本条降级为 NULL，链将在后续非 NULL 节点续写）: {}",
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                // 重试耗尽：记录错误日志，携带可定位信息（无法再恢复）
+                tracing::error!(
+                    oper_url = %oper_url,
+                    request_method = %request_method,
+                    oper_name = %oper_name,
+                    "操作日志写入失败（已尝试 {} 次，放弃）: {}",
+                    OPER_LOG_WRITE_RETRY.max_attempts,
+                    e
+                );
+            }
         }
+    }
+
+    /// 在互斥锁内计算并回写链哈希（锁：SharedStore SETNX `lock:oper_chain`）
+    ///
+    /// 流程：SETNX 抢锁（300ms 间隔 × 3 次）→ 查前驱非 NULL chain_hash →
+    /// HMAC-SHA256(prev | oper_id | payload_hash) → UPDATE 回写 → 释放锁。
+    /// 抢锁失败返回 `Ok(None)`（降级 NULL）；DB 错误向上传播由调用方告警。
+    async fn attach_chain_hash(
+        &self,
+        ctx: &OperChainCtx,
+        oper_id: i64,
+        payload: &ChainPayload,
+    ) -> Result<Option<String>, sea_orm::DbErr> {
+        // 抢锁：SETNX + TTL 兜底（持有者崩溃后由 TTL 释放，正常路径毫秒级完成）
+        let mut handle = None;
+        for _ in 0..OPER_CHAIN_LOCK_ATTEMPTS {
+            match ctx.store.lock_acquire(OPER_CHAIN_LOCK_KEY, OPER_CHAIN_LOCK_TTL_SECS).await {
+                Ok(Some(h)) => {
+                    handle = Some(h);
+                    break;
+                }
+                Ok(None) => {
+                    // 锁被其他写入方持有：等待后重试
+                    tokio::time::sleep(Duration::from_millis(OPER_CHAIN_LOCK_WAIT_MS)).await;
+                }
+                Err(e) => {
+                    // 共享态后端异常：放弃抢锁（本条降级 NULL，不因链而丢日志）
+                    tracing::warn!("链锁抢占异常（降级 NULL）: {}", e);
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(handle) = handle else {
+            // 重试耗尽：降级 NULL（链在后续非 NULL 节点续写，校验端跳过 NULL 行）
+            tracing::warn!(
+                oper_id,
+                "链锁抢占重试耗尽（{} 次 × {}ms），本条降级为 NULL",
+                OPER_CHAIN_LOCK_ATTEMPTS,
+                OPER_CHAIN_LOCK_WAIT_MS
+            );
+            return Ok(None);
+        };
+
+        // 锁内：查前驱 → 计算 → 回写
+        let prev = self
+            .oper_log_repo
+            .find_prev_chain_hash(oper_id)
+            .await?
+            .unwrap_or_default();
+        let payload_hash = payload_hex_digest(payload);
+        let chain_hash = compute_chain_hash(&ctx.key, &prev, oper_id, &payload_hash);
+        self.oper_log_repo
+            .set_chain_hash(oper_id, &chain_hash)
+            .await?;
+
+        // 释放锁（CAS；释放失败仅由 TTL 兜底，不影响链正确性——锁已护住读改写窗口）
+        if let Err(e) = ctx.store.lock_release(&handle).await {
+            tracing::warn!("链锁释放失败（等待 TTL {}s 自动过期）: {}", OPER_CHAIN_LOCK_TTL_SECS, e);
+        }
+        Ok(Some(chain_hash))
+    }
+
+    /// 校验操作日志防篡改链完整性（全量，跨租户）
+    ///
+    /// 链哈希跨租户串联，任何子集校验都会因缺失前驱而误报断裂，故固定全量执行。
+    /// 从链首（prev 为空串）起逐条重算 HMAC 并与库内 chain_hash 比对：
+    /// - 全部匹配：`valid = true`，`checked` = 参与校验的节点数；
+    /// - 首个不匹配：`valid = false`，`broken_at_oper_id` = 该节点 oper_id，立即终止。
+    ///
+    /// 未启用链能力（[`Self::new`] 构造）时返回 400——无链密钥无法重算 HMAC。
+    pub async fn verify_chain(&self) -> Result<ChainVerifyVo, ServiceError> {
+        let Some(ctx) = &self.chain else {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.oper_log.chain_disabled"
+            )));
+        };
+
+        let rows = self
+            .oper_log_repo
+            .find_chained_ascending()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("读取操作日志链失败: {}", e)))?;
+
+        let mut prev = String::new();
+        for m in &rows {
+            let Some(stored) = m.chain_hash.as_deref() else {
+                // 查询已过滤 NULL，理论不可达；防御性跳过
+                continue;
+            };
+            let payload = ChainPayload::from_model(m);
+            let payload_hash = payload_hex_digest(&payload);
+            let expected = compute_chain_hash(&ctx.key, &prev, m.oper_id, &payload_hash);
+            if expected != stored {
+                return Ok(ChainVerifyVo {
+                    checked: rows.len() as i64,
+                    broken_at_oper_id: Some(m.oper_id),
+                    valid: false,
+                });
+            }
+            prev = stored.to_string();
+        }
+        Ok(ChainVerifyVo {
+            checked: rows.len() as i64,
+            broken_at_oper_id: None,
+            valid: true,
+        })
     }
 }
 
 // ==================== 审计大屏 VO ====================
+
+/// 操作日志防篡改链校验响应
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainVerifyVo {
+    /// 参与校验的链节点数（chain_hash 非 NULL 的日志条数）
+    pub checked: i64,
+    /// 首个校验失败节点的 oper_id（`valid = true` 时为 null）
+    pub broken_at_oper_id: Option<i64>,
+    /// 链是否完整
+    pub valid: bool,
+}
 
 /// 审计大屏综合统计响应
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -834,6 +1163,139 @@ fn anomaly_display_title(raw: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{anomaly_display_title, eval_fail_rate};
+    use super::{ChainPayload, OperLogRecord, compute_chain_hash, derive_chain_key,
+                payload_hex_digest};
+
+    /// 构造一条最小可用的 OperLogRecord（空串字段走「空串 → None」归一化路径）
+    fn sample_record() -> OperLogRecord {
+        OperLogRecord {
+            title: "module.user".into(),
+            business_type: 2,
+            method: "/system/user".into(),
+            request_method: "PUT".into(),
+            operator_type: 1,
+            oper_name: "admin".into(),
+            dept_name: String::new(),
+            oper_url: "/system/user".into(),
+            oper_ip: "127.0.0.1".into(),
+            oper_location: String::new(),
+            oper_param: String::new(),
+            oper_before: String::new(),
+            oper_diff: String::new(),
+            json_result: "{}".into(),
+            status: "0".into(),
+            error_msg: String::new(),
+            cost_time: 12,
+            tenant_id: 0,
+            target_tenant_id: None,
+        }
+    }
+
+    #[test]
+    fn derive_chain_key_is_deterministic_and_secret_dependent() {
+        let a = derive_chain_key("secret-A");
+        let a2 = derive_chain_key("secret-A");
+        let b = derive_chain_key("secret-B");
+        assert_eq!(a, a2, "同一 secret 派生结果必须一致");
+        assert_ne!(a, b, "不同 secret 派生结果必须不同");
+    }
+
+    #[test]
+    fn chain_hash_changes_with_prev_and_payload() {
+        let key = derive_chain_key("test-secret");
+        let rec = sample_record();
+        let p1 = ChainPayload::from_parts(&rec, "2026-10-03 10:00:00.000000");
+        let p2 = ChainPayload::from_parts(&rec, "2026-10-03 10:00:01.000000");
+        let h1 = payload_hex_digest(&p1);
+        let h1b = payload_hex_digest(&p1);
+        assert_eq!(h1, h1b, "同一负载指纹必须确定");
+
+        let c1 = compute_chain_hash(&key, "", 1, &h1);
+        let c1b = compute_chain_hash(&key, "", 1, &h1);
+        let c2 = compute_chain_hash(&key, &c1, 2, &h1);
+        let c3 = compute_chain_hash(&key, "", 1, &payload_hex_digest(&p2));
+        assert_eq!(c1, c1b, "同输入链哈希必须确定");
+        assert_ne!(c1, c2, "前驱变化必须改变链哈希");
+        assert_ne!(c1, c3, "负载变化必须改变链哈希");
+        assert_eq!(c1.len(), 64, "HMAC-SHA256 hex 输出 64 字符");
+    }
+
+    #[test]
+    fn payload_normalization_aligns_write_and_read_paths() {
+        // 写入端 from_parts（空串→None）与读取端 from_model（Some("")→None 同款归一化）
+        // 的序列化结果必须逐字节一致：写入端与写库 empty→None 口径对齐，
+        // 读取端对历史遗留的库内空串行做同款归一化，两端负载才能逐字节可复算。
+        let mut rec = sample_record();
+        rec.dept_name = "研发部".into();
+        rec.oper_param = r#"{"id":1}"#.into();
+        let write_side = ChainPayload::from_parts(&rec, "2026-10-03 10:00:00.123456");
+
+        // 手工构造"读回 Model"等价负载：None 字段与归一化后一致
+        let mut m = crate::entity::sys_oper_log::Model {
+            tenant_id: 0,
+            target_tenant_id: None,
+            oper_id: 1,
+            title: Some(rec.title.clone()),
+            business_type: Some(rec.business_type),
+            method: Some(rec.method.clone()),
+            request_method: Some(rec.request_method.clone()),
+            operator_type: Some(rec.operator_type),
+            oper_name: Some(rec.oper_name.clone()),
+            dept_name: Some(rec.dept_name.clone()),
+            oper_url: Some(rec.oper_url.clone()),
+            oper_ip: Some(rec.oper_ip.clone()),
+            oper_location: Some(rec.oper_location.clone()),
+            oper_param: Some(rec.oper_param.clone()),
+            oper_before: None,
+            oper_diff: None,
+            json_result: Some(rec.json_result.clone()),
+            status: Some(rec.status.clone()),
+            error_msg: None,
+            oper_time: Some(
+                chrono::NaiveDateTime::parse_from_str(
+                    "2026-10-03 10:00:00.123456",
+                    "%Y-%m-%d %H:%M:%S%.6f",
+                )
+                .unwrap(),
+            ),
+            cost_time: Some(rec.cost_time),
+            chain_hash: None,
+        };
+        let read_side = ChainPayload::from_model(&m);
+        assert_eq!(
+            serde_json::to_string(&write_side).unwrap(),
+            serde_json::to_string(&read_side).unwrap(),
+            "写读两端负载必须逐字节一致"
+        );
+
+        // 空串字段：写入端归一化为 None；库内写的就是 NULL，读回也是 None，两端一致
+        let read_empty = ChainPayload::from_model(&m);
+        assert_eq!(read_empty.dept_name, Some("研发部".into()));
+        // 反向验证：历史行 oper_param = Some("")（写库归一化生效前的遗留数据）
+        // → 读取端同款归一化为 None，与「写入端空串归一化为 None → 库存 NULL」
+        // 的等价行负载逐字节一致
+        m.oper_param = Some(String::new());
+        let read_side2 = ChainPayload::from_model(&m);
+        assert_eq!(read_side2.oper_param, None, "历史行空串 oper_param 应归一化为 None");
+        let mut rec2 = rec.clone();
+        rec2.oper_param = String::new();
+        let write_side2 = ChainPayload::from_parts(&rec2, "2026-10-03 10:00:00.123456");
+        assert_eq!(
+            serde_json::to_string(&write_side2).unwrap(),
+            serde_json::to_string(&read_side2).unwrap(),
+            "空串归一化后写读两端必须一致"
+        );
+    }
+
+    #[test]
+    fn record_normalizes_empty_to_none() {
+        let rec = sample_record();
+        let p = ChainPayload::from_parts(&rec, "2026-10-03 10:00:00.000000");
+        assert_eq!(p.dept_name, None, "空串 dept_name 必须归一化为 None");
+        assert_eq!(p.oper_param, None);
+        assert_eq!(p.title, Some("module.user".into()));
+        assert_eq!(p.oper_time, Some("2026-10-03 10:00:00.000000".into()));
+    }
 
     #[test]
     fn anomaly_display_title_translates_module_key() {

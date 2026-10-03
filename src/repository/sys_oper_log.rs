@@ -206,6 +206,44 @@ impl SysOperLogRepository {
         self.base.insert(model).await
     }
 
+    /// 查询 `oper_id` 之前最近一条 chain_hash 非 NULL 的日志（防篡改链的前驱节点）
+    ///
+    /// 返回 `Some(chain_hash)`：链上前驱哈希；`None`：本条是链首（prev 取空串）。
+    /// 链上跳过 NULL 行（锁竞争降级空洞），保证链在非 NULL 子序列上连续。
+    pub async fn find_prev_chain_hash(&self, oper_id: i64) -> Result<Option<String>, DbErr> {
+        let row = SysOperLog::find()
+            .filter(Column::ChainHash.is_not_null())
+            .filter(Column::OperId.lt(oper_id))
+            .order_by_desc(Column::OperId)
+            .one(self.base.db())
+            .await?;
+        Ok(row.and_then(|m| m.chain_hash))
+    }
+
+    /// 回写指定日志的 chain_hash（链计算完成后的第二次写）
+    ///
+    /// 仅更新 chain_hash 列；行不存在时静默成功（并发下被清理任务删除属于正常边界）。
+    pub async fn set_chain_hash(&self, oper_id: i64, chain_hash: &str) -> Result<(), DbErr> {
+        let am = ActiveModel {
+            oper_id: Set(oper_id),
+            chain_hash: Set(Some(chain_hash.to_string())),
+            ..Default::default()
+        };
+        am.update(self.base.db()).await?;
+        Ok(())
+    }
+
+    /// 按 oper_id 升序拉取全部 chain_hash 非 NULL 的日志（verify-chain 全链校验用）
+    ///
+    /// 链校验必须全量执行：链哈希跨租户串联，任何子集校验都会因缺失前驱而误报断裂。
+    pub async fn find_chained_ascending(&self) -> Result<Vec<Model>, DbErr> {
+        SysOperLog::find()
+            .filter(Column::ChainHash.is_not_null())
+            .order_by_asc(Column::OperId)
+            .all(self.base.db())
+            .await
+    }
+
     /// 清空操作日志（物理删除全部）
     pub async fn clean_all(&self) -> Result<DeleteResult, DbErr> {
         SysOperLog::delete_many().exec(self.base.db()).await

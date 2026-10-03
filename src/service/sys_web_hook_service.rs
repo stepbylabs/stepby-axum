@@ -33,12 +33,13 @@ use crate::entity::sys_web_hook_log::{
 };
 use crate::repository::sys_web_hook::SysWebHookRepository;
 use crate::repository::sys_web_hook_log::SysWebHookLogRepository;
+use crate::repository::sys_webhook_event::SysWebhookEventRepository;
 
 // ==================== 事件常量 ====================
 
-/// 登录成功事件
+/// 登录成功事件（存量 event_types 订阅口径，保留兼容）
 pub const EVENT_LOGIN_SUCCESS: &str = "login_success";
-/// 登录失败事件（含账号锁定等态）；payload 含用户名与原因
+/// 登录失败事件（含账号锁定等态）；payload 含用户名与原因（存量 event_types 订阅口径）
 pub const EVENT_LOGIN_FAILURE: &str = "login_failure";
 /// v5-D12：SCIM provision 创建用户事件（payload 含 id/userName/externalId）
 pub const EVENT_SCIM_USER_PROVISIONED: &str = "scim_user_provisioned";
@@ -60,6 +61,12 @@ const MAX_STORED_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_TIMEOUT_SECS: u64 = 30;
 /// 投递失败记录保留天数（审计保留期，clean 清理）
 const LOG_RETENTION_DAYS: i64 = 30;
+/// 投递来源：手动测试发送（sys_web_hook_log.source；NULL/其他 = 业务事件派发）
+pub const LOG_SOURCE_TEST: &str = "test";
+/// 投递来源：事件派发（emit_event / dispatch_event）
+pub const LOG_SOURCE_DISPATCH: &str = "dispatch";
+/// 投递来源：失败重试
+pub const LOG_SOURCE_RETRY: &str = "retry";
 
 // ==================== DTO ====================
 
@@ -106,6 +113,10 @@ pub struct WebHookAddDto {
     /// 订阅的事件类型（逗号分隔；空串匹配全部）
     #[garde(length(max = 2000))]
     pub event_types: Option<String>,
+    /// 订阅的事件目录键（JSON 数组，如 `["user.created","login.success"]`；
+    /// 缺省/空 = 订阅全部目录事件（兼容存量）。每个 event_key 必须存在于 sys_webhook_event
+    #[garde(length(max = 2000))]
+    pub subscribed_events: Option<Vec<String>>,
     #[garde(length(min = 1, max = 1000))]
     pub target_url: String,
     #[garde(length(max = 255))]
@@ -132,6 +143,9 @@ pub struct WebHookEditDto {
     pub hook_name: String,
     #[garde(length(max = 2000))]
     pub event_types: Option<String>,
+    /// 订阅的事件目录键（语义同新增；未传保持现值）
+    #[garde(length(max = 2000))]
+    pub subscribed_events: Option<Vec<String>>,
     #[garde(length(min = 1, max = 1000))]
     pub target_url: String,
     #[garde(length(max = 255))]
@@ -161,8 +175,7 @@ pub struct WebHookTestDto {
 /// 推送记录分页查询 DTO
 #[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct WebHookLogQueryDto {
-    #[serde(default = "default_page_num")]
+pub struct WebHookLogQueryDto {    #[serde(default = "default_page_num")]
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
@@ -197,6 +210,97 @@ impl From<&WebHookLogQueryDto> for PageDomain {
         page.sanitize_order_fields();
         page
     }
+}
+
+/// 事件目录分页查询 DTO（GET /system/webhook/event/list）
+#[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookEventQueryDto {
+    #[serde(default = "default_page_num")]
+    pub page_num: u64,
+    #[serde(default = "default_page_size")]
+    pub page_size: u64,
+    /// 排序字段（白名单：event_key / name / enabled / id；未命中回退 id 升序）
+    #[serde(default)]
+    pub order_by_column: Option<String>,
+    /// 排序方向 asc / ascending / desc / descending（缺省 desc）
+    #[serde(default)]
+    pub is_asc: Option<String>,
+    /// 事件键模糊过滤
+    pub event_key: Option<String>,
+    /// 事件名称模糊过滤
+    pub name: Option<String>,
+    /// 状态精确过滤（'1'=启用 '0'=停用）
+    pub enabled: Option<String>,
+}
+
+impl From<&WebhookEventQueryDto> for PageDomain {
+    fn from(dto: &WebhookEventQueryDto) -> Self {
+        // 动态排序透传：先 sanitize（格式白名单），列级白名单在 service 查询时解析
+        let mut page = PageDomain {
+            page_num: dto.page_num,
+            page_size: dto.page_size,
+            order_by_column: dto.order_by_column.clone(),
+            is_asc: dto.is_asc.clone(),
+        };
+        page.sanitize_order_fields();
+        page
+    }
+}
+
+/// 事件目录出参 VO
+#[derive(Debug, Clone, Serialize, ToSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename = "WebhookEventVo", export_to = "WebhookEventVo.ts", rename_all = "camelCase")]
+#[schema(as = WebhookEventVo)]
+pub struct WebhookEventVo {
+    pub id: i64,
+    /// 事件键（如 `user.created`）
+    pub event_key: String,
+    /// 事件名称
+    pub name: String,
+    /// 事件说明
+    pub description: Option<String>,
+    /// 负载样例（JSON 文本；test-send 的真实投递数据源）
+    pub payload_example: Option<String>,
+    /// 状态（'1'=启用 '0'=停用）
+    pub enabled: String,
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub created_at: Option<chrono::NaiveDateTime>,
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub updated_at: Option<chrono::NaiveDateTime>,
+}
+
+impl WebhookEventVo {
+    fn from_model(m: crate::entity::sys_webhook_event::Model) -> Self {
+        Self {
+            id: m.id,
+            event_key: m.event_key,
+            name: m.name,
+            description: m.description,
+            payload_example: m.payload_example,
+            enabled: m.enabled,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+        }
+    }
+}
+
+/// 测试发送 DTO（POST /system/webhook/{id}/test-send）
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookTestSendDto {
+    /// 事件目录键（必须存在于 sys_webhook_event；以该事件的 payload_example 构造真实投递）
+    #[garde(length(min = 1, max = 64))]
+    pub event_key: String,
 }
 
 /// 单次出站投递结果（供 test / 事件分发留痕）
@@ -240,6 +344,8 @@ pub struct WebHookVo {
     pub hook_name: String,
     /// 订阅的事件类型（逗号分隔；空串匹配全部）
     pub event_types: String,
+    /// 订阅的事件目录键（JSON 数组字符串；空/缺省 = 订阅全部）
+    pub subscribed_events: Option<String>,
     /// 出站目标 URL
     pub target_url: String,
     /// 请求体格式：json / form-urlencoded
@@ -274,6 +380,7 @@ impl WebHookVo {
             id: m.id,
             hook_name: m.hook_name,
             event_types: m.event_types,
+            subscribed_events: m.subscribed_events,
             target_url: m.target_url,
             content_type: m.content_type,
             timeout_secs: m.timeout_secs,
@@ -308,6 +415,33 @@ pub fn hook_matches_event(event_types: &str, event_type: &str) -> bool {
     }
     raw.split(',')
         .any(|s| s.trim().eq_ignore_ascii_case(event_type))
+}
+
+/// 判断回调的事件目录订阅（subscribed_events）是否命中给定事件键
+///
+/// 匹配规则（迁移 m20261003_000002）：
+/// - `NULL` / 空白 = 订阅全部目录事件（兼容存量回调）；
+/// - 非空 = JSON 数组字符串，任一元素（忽略首尾空白，大小写不敏感）等于 event_key 即命中；
+/// - 非空但非法 JSON 属脏数据 → fail-closed 不匹配（防误发），记 warn 便于排查。
+pub fn hook_matches_subscribed(subscribed_events: Option<&str>, event_key: &str) -> bool {
+    let raw = subscribed_events.unwrap_or("").trim();
+    if raw.is_empty() {
+        return true;
+    }
+    match serde_json::from_str::<Vec<String>>(raw) {
+        // event_key 与数组元素均忽略首尾空白 + 大小写不敏感（对齐 hook_matches_event 口径）
+        Ok(list) => list
+            .iter()
+            .any(|s| s.trim().eq_ignore_ascii_case(event_key.trim())),
+        Err(e) => {
+            tracing::warn!(
+                subscribed_events = %raw,
+                error = %e,
+                "subscribed_events 非法 JSON（fail-closed 不派发），请修正回调配置"
+            );
+            false
+        }
+    }
 }
 
 /// 计算请求体签名：HMAC-SHA256(key=secret, data=body) 的十六进制串
@@ -360,10 +494,23 @@ const WEB_HOOK_LOG_SORTABLE_COLUMNS: &[(&str, WebHookLogColumn)] = &[
     ("create_time", WebHookLogColumn::CreateTime),
 ];
 
+/// 事件目录允许排序的列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
+///
+/// 任务口径：仅开放 event_key / name / enabled 三业务列（另加主键 id 供稳定排序）；
+/// `payload_example`（大文本）、`description` 不开放动态排序。
+const WEBHOOK_EVENT_SORTABLE_COLUMNS: &[(&str, crate::entity::sys_webhook_event::Column)] = &[
+    ("id", crate::entity::sys_webhook_event::Column::Id),
+    ("event_key", crate::entity::sys_webhook_event::Column::EventKey),
+    ("name", crate::entity::sys_webhook_event::Column::Name),
+    ("enabled", crate::entity::sys_webhook_event::Column::Enabled),
+];
+
 /// WebHook 事件订阅 Service
 pub struct SysWebHookService {
     hook_repo: SysWebHookRepository,
     log_repo: SysWebHookLogRepository,
+    /// 事件目录 Repository（订阅校验 / 事件样例查询）
+    event_repo: SysWebhookEventRepository,
     /// 出站 HTTP 客户端（禁自动重定向，SSRF 在保存时已校验，投递直连）
     http: reqwest::Client,
     /// 进程内跳板：方便单元测试注入替换出站转发（可选）
@@ -385,6 +532,7 @@ impl SysWebHookService {
         Self {
             hook_repo: SysWebHookRepository::new(db.clone()),
             log_repo: SysWebHookLogRepository::new(db.clone()),
+            event_repo: SysWebhookEventRepository::new(db.clone()),
             http,
             http_client_override: None,
             db,
@@ -425,6 +573,40 @@ impl SysWebHookService {
             .await
             .map_err(|e| ServiceError::bad_request(&e))?;
         Ok(url)
+    }
+
+    /// 校验订阅的事件目录键（每个 event_key 必须存在于 sys_webhook_event）
+    ///
+    /// 输入为 None 时不校验（未传字段保持现值）；空数组 = 显式订阅全部，合法。
+    /// 返回规范化后的 JSON 数组字符串（去空白；空数组 → None = 订阅全部）。
+    async fn validate_subscribed_events(
+        &self,
+        keys: &Option<Vec<String>>,
+    ) -> Result<Option<String>, ServiceError> {
+        let Some(keys) = keys else {
+            return Ok(None);
+        };
+        for k in keys {
+            let k = k.trim();
+            if k.is_empty() {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.web_hook.event_invalid"
+                )));
+            }
+            if self.event_repo.find_by_event_key(k).await?.is_none() {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.web_hook.event_key_unknown",
+                    key = k
+                )));
+            }
+        }
+        let cleaned: Vec<&str> = keys.iter().map(|s| s.trim()).collect();
+        if cleaned.is_empty() {
+            return Ok(None);
+        }
+        serde_json::to_string(&cleaned)
+            .map(Some)
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.common.process_failed")))
     }
 
     /// 规范化输入（content_type / timeout / status / event_types）
@@ -534,6 +716,8 @@ impl SysWebHookService {
                 }
             }
         }
+        // 订阅的事件目录键校验 + 规范化（每个 event_key 必须存在于目录）
+        let subscribed_events = self.validate_subscribed_events(&dto.subscribed_events).await?;
         self.validate_target_url(&dto.target_url).await?;
 
         let now = crate::common::datetime::now_naive();
@@ -541,6 +725,7 @@ impl SysWebHookService {
             tenant_id: Set(operator_tid),
             hook_name: Set(dto.hook_name),
             event_types: Set(event_types),
+            subscribed_events: Set(subscribed_events),
             target_url: Set(dto.target_url.trim().to_string()),
             // v5-E6：secret 信封加密（幂等，防双重加密）
             secret: Set(self.seal_secret(
@@ -559,7 +744,46 @@ impl SysWebHookService {
             del_flag: Set("0".to_string()),
             ..Default::default()
         };
-        self.hook_repo.insert(am).await.map_err(ServiceError::from)
+        // WebHook 变更 + 审计留痕同事务：add 原为无事务直插，接入变更留痕后
+        // 引入事务保证「变更与留痕」原子性（secret 密文由 record_change 内部打码）
+        let hook_repo = self.hook_repo.clone();
+        let model = self
+            .db
+            .transaction::<_, SysWebHookModel, sea_orm::DbErr>(|txn| {
+                let am = am.clone();
+                // 审计留痕块为 boxed()（需 'static），operator 为 &str 引用生命周期不足，
+                // 克隆为 owned String 移入 async move 块
+                let operator_owned = operator.to_string();
+                async move {
+                    let new_hook = hook_repo.base().insert_conn(txn, am).await?;
+
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚）
+                    let after =
+                        serde_json::to_value(&new_hook).unwrap_or(serde_json::Value::Null);
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            None, // add 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_web_hook",
+                        &new_hook.id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_INSERT,
+                        None,
+                        Some(after),
+                        audit_operator,
+                    )
+                    .await?;
+                    Ok(new_hook)
+                }
+                .boxed()
+            })
+            .await
+            .map_err(ServiceError::from)?;
+        Ok(model)
     }
 
     /// 修改回调查配置（保存时重新执行 SSRF 校验）
@@ -574,6 +798,7 @@ impl SysWebHookService {
         let existing = self.get_by_id(dto.id, operator_tid).await?;
         // 部分更新语义快照（`existing` 随即被 `into()` 转移）：未传字段保持现值
         let existing_event_types = existing.event_types.clone();
+        let existing_subscribed_events = existing.subscribed_events.clone();
         let existing_content_type = existing.content_type.clone();
         let existing_timeout_secs = existing.timeout_secs;
         let existing_status = existing.status.clone();
@@ -599,15 +824,24 @@ impl SysWebHookService {
                 }
             }
         }
+        // 订阅的事件目录键：未传保持现值；传了则校验 + 覆盖（空数组 = 订阅全部）
+        let subscribed_events = match &dto.subscribed_events {
+            Some(_) => self.validate_subscribed_events(&dto.subscribed_events).await?,
+            None => existing_subscribed_events,
+        };
         // 目标 URL 变化时重新做 SSRF 校验
         if dto.target_url.trim() != existing.target_url {
             self.validate_target_url(&dto.target_url).await?;
         }
 
         let now = crate::common::datetime::now_naive();
+        // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
+        let before_snapshot =
+            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysWebHookActiveModel = existing.into();
         am.hook_name = Set(dto.hook_name);
         am.event_types = Set(event_types);
+        am.subscribed_events = Set(subscribed_events);
         am.target_url = Set(dto.target_url.trim().to_string());
         // secret 语义（与 i18n `webHook.form.secretTip` 一致）：**传非空才覆盖**；
         // 空/缺省一律保持原值。此处不能用 `Set(None)`——那会把已配置的签名密钥静默清空，
@@ -626,7 +860,46 @@ impl SysWebHookService {
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
 
-        self.hook_repo.update(am).await.map_err(ServiceError::from)
+        // WebHook 变更 + 审计留痕同事务：edit 原为无事务直更，接入变更留痕后引入事务
+        let hook_repo = self.hook_repo.clone();
+        let model = self
+            .db
+            .transaction::<_, SysWebHookModel, sea_orm::DbErr>(|txn| {
+                let am = am.clone();
+                let before_snapshot = before_snapshot.clone();
+                // 审计留痕块为 boxed()（需 'static），operator 为 &str 引用生命周期不足，
+                // 克隆为 owned String 移入 async move 块
+                let operator_owned = operator.to_string();
+                async move {
+                    let updated = hook_repo.base().update_conn(txn, am).await?;
+
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    let after =
+                        serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            None, // edit 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_web_hook",
+                        &updated.id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_UPDATE,
+                        Some(before_snapshot),
+                        Some(after),
+                        audit_operator,
+                    )
+                    .await?;
+                    Ok(updated)
+                }
+                .boxed()
+            })
+            .await
+            .map_err(ServiceError::from)?;
+        Ok(model)
     }
 
     /// 逻辑删除回调查配置（并级联清理其推送记录）
@@ -648,15 +921,39 @@ impl SysWebHookService {
                 "error.common.forbidden"
             )));
         }
+        // 审计合规域：变更前快照（批量逐条留痕，必须在 existing 被 move 进事务闭包之前计算）
+        let before_snapshots: Vec<serde_json::Value> = existing
+            .iter()
+            .map(|h| serde_json::to_value(h).unwrap_or(serde_json::Value::Null))
+            .collect();
         let log_repo = self.log_repo.clone();
         let hook_repo = self.hook_repo.clone();
         self.db
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                let before_snapshots = before_snapshots.clone();
                 async move {
                     // 级联清理推送记录（物理删，历史审计走操作日志）
                     log_repo.delete_by_hook_ids_conn(txn, &ids).await?;
                     // 配置软删
                     hook_repo.soft_delete_by_ids_conn(txn, &ids).await?;
+
+                    // 审计合规域：DELETE 变更留痕（逐条；同事务提交/回滚。
+                    // remove 签名无操作人信息，操作人两列留空（列可空））
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(txn, None, None)
+                            .await;
+                    for (h, before) in existing.iter().zip(before_snapshots) {
+                        crate::service::sys_audit_change_service::record_change(
+                            txn,
+                            "sys_web_hook",
+                            &h.id.to_string(),
+                            crate::service::sys_audit_change_service::ACTION_DELETE,
+                            Some(before),
+                            None,
+                            audit_operator.clone(),
+                        )
+                        .await?;
+                    }
                     Ok(())
                 }
                 .boxed()
@@ -701,11 +998,14 @@ impl SysWebHookService {
     /// 执行一次出站投递并写入 sys_web_hook_log
     ///
     /// 说明：SSRF 校验仅在保存回调时执行；投递阶段直连目标（由带外调度触发，非用户可改地址）。
+    /// `source` 写入 `sys_web_hook_log.source`（'test'=手动测试发送，'dispatch'=事件派发，
+    /// 'retry'=失败重试；NULL 兼容存量口径）。
     pub async fn deliver(
         &self,
         hook: &SysWebHookModel,
         event_type: &str,
         payload: &serde_json::Value,
+        source: Option<&str>,
     ) -> Result<DeliveryResult, ServiceError> {
         let start = Instant::now();
         let body = self.build_body(hook, payload);
@@ -727,6 +1027,7 @@ impl SysWebHookService {
             response: Set(None),
             error_msg: Set(None),
             cost_ms: Set(0),
+            source: Set(source.map(|s| s.to_string())),
             create_time: Set(Some(now)),
             ..Default::default()
         };
@@ -819,12 +1120,13 @@ impl SysWebHookService {
             .payload
             .unwrap_or_else(|| serde_json::json!({ "event": event_type, "ts": "test" }));
         // 与配置订阅无关：测试总是尝试投递
-        self.deliver(&hook, &event_type, &payload).await
+        self.deliver(&hook, &event_type, &payload, Some(LOG_SOURCE_TEST))
+            .await
     }
 
     // ==================== 事件分发 ====================
 
-    /// 分发事件到所有启用且订阅匹配的回调（火后即忘）
+    /// 分发事件到所有启用且订阅匹配的回调（火后即忘；存量 event_types 订阅口径）
     ///
     /// 对于每个命中回调 spawn 一个独立任务投递，互不阻塞调用方（如登录请求）。
     /// 投递失败仅落库 + 日志，不向上抛错，保证事件分发绝不阻断主链路。
@@ -832,11 +1134,13 @@ impl SysWebHookService {
     /// 多租户（后台批量任务硬约束）：启用回调**按租户分组**加载，**仅**投递与事件
     /// 同租户（`tenant_id`）的回调组，并在 payload 注入 `tenantId`，严禁跨租户触达
     /// （A 租户事件不得推给 B 租户 WebHook）。
+    ///
+    /// 新代码请优先使用 [`Self::emit`] / [`emit_event`]（subscribed_events 目录口径）；
+    /// 本方法保留以兼容既有 `event_types` 订阅（login_success / scim_* 等存量事件）。
     pub fn dispatch_event(&self, event_type: &str, payload: serde_json::Value, tenant_id: i64) {
         let hook_repo = self.hook_repo.clone();
-        let log_repo = self.log_repo.clone();
-        let http = Arc::new(self.http.clone());
         let db = self.db.clone();
+        let http = Arc::new(self.http.clone());
         let enc_key = self.enc_key.clone();
         let event_type = event_type.to_string();
 
@@ -867,7 +1171,6 @@ impl SysWebHookService {
                 p
             };
             for hook in matched {
-                let lr = log_repo.clone();
                 let hc = http.clone();
                 let db2 = db.clone();
                 let event_type = event_type.clone();
@@ -876,7 +1179,10 @@ impl SysWebHookService {
                 tokio::spawn(async move {
                     // 新建一个与 Service 等价的投递器（复用同一 http 客户端与 DB）
                     let svc = SysWebHookService::with_shared(db2, hc, enc_key);
-                    if let Err(e) = svc.deliver(&hook, &event_type, &payload).await {
+                    if let Err(e) =
+                        svc.deliver(&hook, &event_type, &payload, Some(LOG_SOURCE_DISPATCH))
+                            .await
+                    {
                         tracing::warn!(
                             hook_id = hook.id,
                             event = %event_type,
@@ -884,7 +1190,62 @@ impl SysWebHookService {
                             "WebHook 出站投递失败"
                         );
                     }
-                    drop(lr);
+                });
+            }
+        });
+    }
+
+    /// 事件目录派发（subscribed_events 口径；火后即忘，供 [`emit_event`] 调用）
+    ///
+    /// 与 [`Self::dispatch_event`] 的差异仅在订阅匹配列：
+    /// - dispatch_event 匹配存量 `event_types`（逗号分隔）；
+    /// - emit 匹配目录口径 `subscribed_events`（JSON 数组；NULL/空 = 订阅全部）。
+    ///
+    /// 派发链路完全一致：按租户分组加载启用回调 → 同租户过滤 → payload 注入 tenantId
+    /// → 逐回调 spawn 真实出站投递（含 HMAC 签名）→ 失败仅留痕（web_hook_log）。
+    fn emit(&self, event_key: &str, payload: serde_json::Value) {
+        let hook_repo = self.hook_repo.clone();
+        let db = self.db.clone();
+        let http = Arc::new(self.http.clone());
+        let enc_key = self.enc_key.clone();
+        let event_key = event_key.to_string();
+
+        tokio::spawn(async move {
+            let groups = match hook_repo.find_all_enabled().await {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::warn!(event = %event_key, error = %e, "WebHook 目录事件派发：加载启用回调失败");
+                    return;
+                }
+            };
+            // 目录口径：仅取订阅了该 event_key 的启用回调（subscribed_events 空豁免）
+            let matched: Vec<_> = groups
+                .into_iter()
+                .flat_map(|(_, hooks)| hooks)
+                .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &event_key))
+                .collect();
+            if matched.is_empty() {
+                return;
+            }
+            for hook in matched {
+                let hc = http.clone();
+                let db2 = db.clone();
+                let event_key = event_key.clone();
+                let payload = payload.clone();
+                let enc_key = enc_key.clone();
+                tokio::spawn(async move {
+                    let svc = SysWebHookService::with_shared(db2, hc, enc_key);
+                    if let Err(e) =
+                        svc.deliver(&hook, &event_key, &payload, Some(LOG_SOURCE_DISPATCH))
+                            .await
+                    {
+                        tracing::warn!(
+                            hook_id = hook.id,
+                            event = %event_key,
+                            error = %e,
+                            "WebHook 目录事件出站投递失败"
+                        );
+                    }
                 });
             }
         });
@@ -895,6 +1256,7 @@ impl SysWebHookService {
         Self {
             hook_repo: SysWebHookRepository::new(db.clone()),
             log_repo: SysWebHookLogRepository::new(db.clone()),
+            event_repo: SysWebhookEventRepository::new(db.clone()),
             http: (*http).clone(),
             http_client_override: None,
             db,
@@ -1045,6 +1407,7 @@ impl SysWebHookService {
                 id: log.hook_id.unwrap_or(-1),
                 hook_name: log.hook_name.clone().unwrap_or_default(),
                 event_types: String::new(),
+                subscribed_events: None,
                 target_url,
                 secret,
                 content_type: "json".to_string(),
@@ -1057,11 +1420,79 @@ impl SysWebHookService {
                 update_time: None,
                 del_flag: "0".to_string(),
             };
-            let _ = self.deliver(&hook, &log.event_type, &payload).await;
+            let _ = self
+                .deliver(&hook, &log.event_type, &payload, Some(LOG_SOURCE_RETRY))
+                .await;
             // deliver 内部会再写一条新记录；成功以交付结果为准
             ok_count += 1;
         }
         Ok(ok_count)
+    }
+
+    // ==================== 事件目录 ====================
+
+    /// 分页查询事件目录（过滤 + 动态排序白名单：event_key/name/enabled）
+    pub async fn list_events(
+        &self,
+        query: WebhookEventQueryDto,
+    ) -> Result<(Vec<WebhookEventVo>, u64), ServiceError> {
+        let page = PageDomain::from(&query);
+        let offset = page.offset();
+        let limit = page.limit();
+        // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序（id 升序）
+        let sort = page.order_by_column.as_deref().and_then(|prop| {
+            sort::resolve_column::<crate::entity::sys_webhook_event::Entity>(
+                prop,
+                WEBHOOK_EVENT_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+        });
+        let (rows, total) = self
+            .event_repo
+            .find_page_filtered(
+                offset,
+                limit,
+                query.event_key.as_deref(),
+                query.name.as_deref(),
+                query.enabled.as_deref(),
+                sort,
+            )
+            .await
+            .map_err(ServiceError::from)?;
+        Ok((rows.into_iter().map(WebhookEventVo::from_model).collect(), total))
+    }
+
+    /// 按事件目录构造真实测试发送（POST /system/webhook/{id}/test-send）
+    ///
+    /// 与 [`Self::test_hook`] 的差异：
+    /// - event_key 必须存在于 sys_webhook_event（目录口径）；
+    /// - payload 取该事件的 payload_example（真实字段样例）而非占位负载；
+    /// - 投递结果返回给调用方，同时留痕 web_hook_log（source='test'，含签名）。
+    pub async fn test_send(
+        &self,
+        id: i64,
+        event_key: &str,
+        operator_tid: i64,
+    ) -> Result<DeliveryResult, ServiceError> {
+        let hook = self.get_by_id(id, operator_tid).await?;
+        let event = self
+            .event_repo
+            .find_by_event_key(event_key)
+            .await?
+            .ok_or_else(|| {
+                ServiceError::bad_request(&crate::tr!(
+                    "error.web_hook.event_key_unknown",
+                    key = event_key
+                ))
+            })?;
+        // 样例非法 JSON 时回退最小真实负载（仍可真实投递 + 验签）
+        let payload: serde_json::Value = event
+            .payload_example
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!({ "eventKey": event.event_key }));
+        self.deliver(&hook, event.event_key.trim(), &payload, Some(LOG_SOURCE_TEST))
+            .await
     }
 
     // ==================== 查询辅助 ====================
@@ -1133,6 +1564,44 @@ fn truncate_utf8(s: &str, cap: usize) -> String {
     format!("{}…[截断 {}→{}bytes]", &s[..end], end, s.len())
 }
 
+/// 业务事件派发入口（开放域统一事件源，m20261003_000002_webhook_event）
+///
+/// 供各业务模块在**事务提交成功后**调用（handler 层于 service 成功返回后触发，
+/// 避免事务内失败产生假事件）：
+///
+/// ```ignore
+/// crate::service::sys_web_hook_service::emit_event(
+///     &state,
+///     "user.created",
+///     serde_json::json!({ "userId": 1, "userName": "admin", "tenantId": 0 }),
+/// ).await;
+/// ```
+///
+/// 行为：查启用回调 → `subscribed_events` 过滤（空/NULL = 订阅全部，JSON 数组含
+/// event_key = 命中）→ 逐回调 spawn 真实出站投递（复用既有签名/HMAC + HTTP 链路）
+/// → 发送失败仅写 `sys_web_hook_log`（source='dispatch'），绝不阻断主链路。
+///
+/// payload 建议字段与 `sys_webhook_event.payload_example` 种子样例对齐；
+/// 本函数在派发前自动注入 `eventKey` 与 `time`（接收方判定归属的事实源）。
+pub async fn emit_event(
+    state: &crate::state::AppState,
+    event_key: &str,
+    mut payload: serde_json::Value,
+) {
+    // 注入事件上下文（对象负载时；非对象负载原样透传，不吞业务数据）
+    let payload = if let serde_json::Value::Object(ref mut m) = payload {
+        m.entry("eventKey")
+            .or_insert_with(|| serde_json::json!(event_key));
+        m.entry("time")
+            .or_insert_with(|| serde_json::json!(crate::common::datetime::now_naive().to_string()));
+        payload
+    } else {
+        payload
+    };
+    // emit 内部 tokio::spawn 火后即忘，本 await 仅收敛调用侧语义（无阻塞投递）
+    state.web_hook_service.emit(event_key, payload);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1167,6 +1636,24 @@ mod tests {
     #[test]
     fn sign_payload_empty_secret_returns_empty() {
         assert!(sign_payload("", "hello").is_empty());
+    }
+
+    #[test]
+    fn hook_matches_subscribed_null_or_empty_matches_all() {
+        // NULL / 空 = 订阅全部（兼容存量回调）
+        assert!(hook_matches_subscribed(None, "user.created"));
+        assert!(hook_matches_subscribed(Some(""), "user.created"));
+        assert!(hook_matches_subscribed(Some("   "), "anything.else"));
+    }
+
+    #[test]
+    fn hook_matches_subscribed_json_array() {
+        let sub = Some(r#"["user.created","login.success"]"#);
+        assert!(hook_matches_subscribed(sub, "user.created"));
+        assert!(hook_matches_subscribed(sub, " login.success "));
+        assert!(!hook_matches_subscribed(sub, "role.created"));
+        // 脏数据（非法 JSON）fail-closed：不派发
+        assert!(!hook_matches_subscribed(Some("user.created"), "user.created"));
     }
 
     #[test]
@@ -1234,6 +1721,7 @@ mod tests {
             id: 1,
             hook_name: "本地测试".to_string(),
             event_types: "login_success".to_string(),
+            subscribed_events: None,
             target_url: format!("http://{}:{}/hook", addr.ip(), addr.port()),
             secret: Some("test-secret".to_string()),
             content_type: "json".to_string(),
@@ -1247,7 +1735,7 @@ mod tests {
             del_flag: "0".to_string(),
         };
         let res = svc
-            .deliver(&hook, "login_success", &serde_json::json!({"user":"admin"}))
+            .deliver(&hook, "login_success", &serde_json::json!({"user":"admin"}), None)
             .await;
         assert!(res.is_ok(), "投递应成功: {:?}", res.err());
         let res = res.unwrap();
@@ -1281,6 +1769,7 @@ mod tests {
             id: 2,
             hook_name: "不可达".to_string(),
             event_types: "login_success".to_string(),
+            subscribed_events: None,
             target_url: "http://127.0.0.1:1/unreachable".to_string(),
             secret: None,
             content_type: "json".to_string(),
@@ -1294,7 +1783,7 @@ mod tests {
             del_flag: "0".to_string(),
         };
         let res = svc
-            .deliver(&hook, "login_success", &serde_json::json!({}))
+            .deliver(&hook, "login_success", &serde_json::json!({}), None)
             .await
             .unwrap();
         assert!(!res.ok, "不可达应失败: {res:?}");

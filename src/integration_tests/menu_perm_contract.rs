@@ -7,7 +7,8 @@
 //! - 菜单登记了非法/冗余的 perms → 前端按钮权限判断混乱。
 //!
 //! 本测试以生产 `PERM_ROUTE_TABLE`（单一数据源）为准，校验隔离种子数据库中的 `sys_menu`：
-//! 1. `sys_menu.perms` 全部非空值格式合法（`[A-Za-z0-9_:]+`）；
+//! 1. `sys_menu.perms` 全部非空值格式合法（`[A-Za-z0-9_:-]+`，允许连字符以兼容
+//!    `system:webhook:test-send` 这类与路由路径同名的权限键）；
 //! 2. 后端 `all_required_perm_keys()` 中的每个键都必须存在于 `sys_menu.perms`，
 //!    即「后端所需权限 ⊆ 菜单可授予权限」，杜绝权限键漂移。
 
@@ -15,12 +16,13 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
 use crate::middleware::permission::all_required_perm_keys;
 
-/// 权限标识格式合法性校验：仅允许字母/数字/下划线 与 冒号（形如 `module:entity:action`）。
+/// 权限标识格式合法性校验：仅允许字母/数字/下划线/连字符 与 冒号（形如 `module:entity:action`；
+/// 连字符用于与路由路径同名的权限键，如 `system:webhook:test-send`）。
 fn is_well_formed_perm(perm: &str) -> bool {
     !perm.is_empty()
         && perm
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-')
 }
 
 /// 契约一致性：后端路由所需权限 ⊆ sys_menu.perms，且菜单权限标识格式合法。
@@ -45,7 +47,7 @@ async fn test_backend_required_perms_covered_by_menu() {
             .expect("读取 sys_menu.perms 列失败");
         assert!(
             is_well_formed_perm(&p),
-            "sys_menu.perms 格式非法（仅允许 [A-Za-z0-9_:]）: {p:?}"
+            "sys_menu.perms 格式非法（仅允许 [A-Za-z0-9_:-]）: {p:?}"
         );
         menu_perms.insert(p);
     }

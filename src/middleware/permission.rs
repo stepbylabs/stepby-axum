@@ -495,6 +495,8 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 操作日志 =====
     ("GET", "/monitor/operlog/list", "monitor:operlog:list"),
+    // 防篡改链校验（审计巡检）：复用操作日志 query 权限；全量跨租户校验，权限门控兜底
+    ("GET", "/monitor/operlog/verify-chain", "monitor:operlog:query"),
     ("DELETE", "/monitor/operlog/{operIds}", "monitor:operlog:remove"),
     ("DELETE", "/monitor/operlog/clean", "monitor:operlog:remove"),
     ("POST", "/monitor/operlog/export", "monitor:operlog:export"),
@@ -539,6 +541,9 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // ===== 服务器监控 =====
     // 服务监控菜单(m112)已并入健康检查(m133)，该 API 由健康检查页面调用，权限对齐 monitor:health:list
     ("GET", "/monitor/server", "monitor:health:list"),
+    // 数据库连接池监控：与 /monitor/server 同属平台运维面（健康检查页调用），
+    // 复用同一权限键 monitor:health:list（种子已存在，菜单契约测试自动覆盖）
+    ("GET", "/monitor/db-pool", "monitor:health:list"),
 
     // ===== 可观测性监控（慢请求 / 错误聚合 / Redis 指标）=====
     // 慢请求面板（列表 + 聚合 + 清空）共用一个查看权限，运算符粒度与面板按钮一致。
@@ -732,6 +737,33 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/monitor/webHook/log/{id}", "system:webHook:log:list"),
     ("DELETE", "/monitor/webHook/log/{id}", "system:webHook:log:remove"),
 
+    // ===== WebHook 事件目录（开放域 m20261003_000002_webhook_event）=====
+    // 权限标识与 sys_menu 种子 menu_id 3562/3563 对齐：
+    // 事件目录 system:webhook:event:list、测试发送 system:webhook:test-send
+    ("GET", "/system/webhook/event/list", "system:webhook:event:list"),
+    ("POST", "/system/webhook/{id}/test-send", "system:webhook:test-send"),
+
+    // ===== 告警规则引擎（m20261003_000003_alert_rule）=====
+    // 权限标识与 sys_menu 种子 menu_id 4110-4114 对齐：
+    // monitor:alert:list/query/add/edit/remove（平台专属面，整组 platform_only_guard）
+    ("GET", "/monitor/alert/list", "monitor:alert:list"),
+    // 导出与列表同权（无独立导出按钮，复用 4110 list）
+    ("POST", "/monitor/alert/export", "monitor:alert:list"),
+    ("GET", "/monitor/alert/{id}", "monitor:alert:query"),
+    ("POST", "/monitor/alert", "monitor:alert:add"),
+    ("PUT", "/monitor/alert", "monitor:alert:edit"),
+    // 启停切换与手动评估均为编辑语义（复用 4113 edit）
+    ("PUT", "/monitor/alert/changeEnabled", "monitor:alert:edit"),
+    ("POST", "/monitor/alert/{id}/evaluate", "monitor:alert:edit"),
+    ("DELETE", "/monitor/alert/{id}", "monitor:alert:remove"),
+
+    // ===== 审计变更留痕（m20261003_000001_audit_change）=====
+    // 权限标识与 sys_menu 种子 menu_id 4000-4002 对齐：
+    // 变更留痕 system:audit-change:list、变更查询 query、变更导出 export
+    ("GET", "/system/audit-change/list", "system:audit-change:list"),
+    ("GET", "/system/audit-change/{id}", "system:audit-change:query"),
+    ("GET", "/system/audit-change/export", "system:audit-change:export"),
+
     // ===== 审计日志大屏 =====
     // 权限标识与 sys_menu 菜单 120 (审计大屏) 的 perms=monitor:audit:list 对齐
     ("GET", "/monitor/operlog/stats", "monitor:audit:list"),
@@ -822,6 +854,10 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
         // ===== 通用下载（E2-c：/common/download 已收紧为 system:file:download，
         // 移出仅登录白名单；resource 版本前端无调用点，维持仅登录）=====
             | ("GET", "/common/download/resource")
+        // ===== 全局搜索（跨 10 个白名单实体域：单一 RBAC 键语义不成立，故仅登录；
+        // 数据安全由 handler 内逐域权限检查（对齐各域 *:list）+ 租户隔离兜底，
+        // 取舍说明见 handler/common_search_handler.rs 模块注释）=====
+            | ("GET", "/common/global-search")
         // ===== 个人中心（仅本人操作，仅需登录）=====
             | ("GET", "/system/user/profile")
             | ("PUT", "/system/user/profile")
@@ -836,6 +872,9 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("GET", "/system/user/profile/tokens/scopes")
             | ("POST", "/system/user/profile/tokens")
             | ("DELETE", "/system/user/profile/tokens/{patId}")
+        // ===== 开放 API AK/SK 自助管理（仅本人 PAT；敏感操作另受独立限流约束）=====
+            | ("POST", "/system/pat/{patId}/rotate-ak")
+            | ("POST", "/system/pat/{patId}/revoke-ak")
         // ===== 下拉树 / 选项（仅登录）=====
             | ("GET", "/system/role/deptTree/{roleId}")
             | ("GET", "/system/menu/treeselect")
@@ -899,6 +938,7 @@ fn is_pat_management_path(path: &str) -> bool {
     // 公开的协议端点（/sso/authorize 等）不经过本中间件，不受影响。
     path.starts_with("/sso/")
         || path.starts_with("/system/user/profile/tokens")
+        || path.starts_with("/system/pat")
         || path.starts_with("/monitor/pat")
 }
 
@@ -1318,6 +1358,7 @@ mod tests {
             ("POST", "/common/upload"),
             ("GET", "/common/download"),
             ("GET", "/common/download/resource"),
+            ("GET", "/common/global-search"),
             // dashboard
             ("GET", "/dashboard/stats"),
             ("GET", "/dashboard/user-stats"),
@@ -1500,6 +1541,7 @@ mod tests {
             ("DELETE", "/monitor/cache/clearCacheKey/{cacheKey}"),
             // monitor_server_router
             ("GET", "/monitor/server"),
+            ("GET", "/monitor/db-pool"),
             // monitor_log_router
             ("GET", "/monitor/log/files"),
             ("GET", "/monitor/log/tail"),
@@ -1596,6 +1638,9 @@ mod tests {
             ("POST", "/monitor/webHook/log/{ids}/retry"),
             ("GET", "/monitor/webHook/log/{id}"),
             ("DELETE", "/monitor/webHook/log/{id}"),
+            // sys_web_hook_router（事件目录，开放域 m20261003_000002）
+            ("GET", "/system/webhook/event/list"),
+            ("POST", "/system/webhook/{id}/test-send"),
             // sys_flow_router（审批工作流：管理视图走权限表，个人数据走仅登录白名单）
             ("GET", "/system/flow/list"),
             ("GET", "/system/flow/todo"),
@@ -1743,7 +1788,16 @@ mod tests {
             rest = &rest[i + ".merge(".len()..];
             let close = rest.find(')').expect("merge 调用未闭合");
             let arg = rest[..close].trim();
-            if let Some((m, f)) = arg.split_once("::") {
+            if let Some(path) = arg.strip_prefix("crate::") {
+                // 形如 `crate::audit::router::audit_change_routes(`：
+                // 去掉 crate:: 前缀后，末段为函数名（去尾随 '('），前段为 src/ 下的模块文件路径
+                if let Some((file_path, f)) = path.rsplit_once("::") {
+                    targets.push((
+                        file_path.replace("::", "/"),
+                        f.trim().trim_end_matches('(').trim().to_string(),
+                    ));
+                }
+            } else if let Some((m, f)) = arg.split_once("::") {
                 // arg 形如 `auth_router::protected_auth_routes(`（首个 ')' 前的调用前缀）
                 targets.push((
                     m.trim().to_string(),
@@ -1758,9 +1812,16 @@ mod tests {
         );
 
         let mut out: Vec<(String, String)> = Vec::new();
+        let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
         for (module, func) in targets {
-            let src = std::fs::read_to_string(format!("{dir}/{module}.rs"))
-                .unwrap_or_else(|e| panic!("读取 {module}.rs 失败: {e}"));
+            // module 含 '/' 说明是 src/ 下的跨目录模块（如 audit/router），
+            // 否则按惯例解析为 src/router/ 下的平级路由文件
+            let src = if module.contains('/') {
+                std::fs::read_to_string(format!("{src_root}/{module}.rs"))
+            } else {
+                std::fs::read_to_string(format!("{dir}/{module}.rs"))
+            }
+            .unwrap_or_else(|e| panic!("读取 {module}.rs 失败: {e}"));
             let body = extract_fn_body(&src, &func)
                 .unwrap_or_else(|| panic!("在 {module}.rs 中未找到函数 {func}"));
             let mut r = body.as_str();

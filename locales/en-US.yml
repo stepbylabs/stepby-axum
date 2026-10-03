@@ -389,6 +389,7 @@ error:
     mysql_restore_branch_unreachable: MySQL restore should go through run_mysql_restore branch (please check code logic)
   server:
     info_fetch_failed: Server info collection failed
+    pool_stats_failed: Failed to fetch database pool stats
   dict:
     type_not_found: Dict type does not exist
     type_exists: Dict type already exists
@@ -427,9 +428,22 @@ error:
     event_invalid: Invalid subscribed event type
     name_empty: Webhook name must not be empty
     event_empty: Subscribe to at least one event type
+    event_key_unknown: Event key %{key} is not in the event catalog
+  alert:
+    rule_not_found: Alert rule does not exist
+    metric_invalid: Invalid metric identifier
+    metric_fetch_failed: Failed to collect metric, please retry later
+    comparator_invalid: Invalid comparator (only gt/lt/ge/le allowed)
+    enabled_invalid: Invalid enabled status (only 0/1 allowed)
+    channel_unsupported: Notification channel type not supported (site/email only)
+    no_recipient: Admin email not configured, unable to send email notification
   oper_log:
     id_invalid: Invalid log ID
     anonymous: Anonymous
+    chain_disabled: Operation log tamper-proof chain is not enabled
+  audit_change:
+    not_found: Audit change record not found
+    export_empty: No audit change records match the export criteria
   frontend_error:
     not_found: Frontend error record not found
   login_log:
@@ -527,6 +541,17 @@ error:
     not_found: Token does not exist
     forbidden_pat_usage: Access tokens cannot be used to manage tokens themselves
     create_failed: Failed to generate token
+  ak:
+    invalid_signature: Signature verification failed
+    timestamp_out_of_window: "Timestamp is outside the allowed window (±300 seconds)"
+    nonce_reused: Nonce (X-CA-Nonce) has already been used; possible replay attack
+    ak_not_found: Access Key does not exist or is not enabled
+    ak_revoked: The token owning this access key has been revoked
+    expired: The token owning this access key has expired
+    owner_disabled: The owner account of this access key has been deleted or disabled
+    not_enabled: AK/SK is not enabled for this token; rotation unavailable
+    rate_limited: Too many operations, please try again later
+    store_unavailable: Service temporarily unavailable, please try again later
   websocket:
     connected: WebSocket connected
   role:
@@ -714,6 +739,7 @@ excel:
     web_hook: WebHooks
     web_hook_log: Delivery Logs
     flow_doc: Approval Documents
+    alert_rule: Alert Rules
 
 # System notice title/content (triggered by scheduler, visible in notification center)
 notice:
@@ -726,3 +752,11 @@ notice:
 # WebSocket system messages (connection success prompt, etc.)
 websocket:
   connected: WebSocket connected
+
+# Alert rule engine evaluation result texts (sys_alert_service evaluation detail shown to frontend)
+alert:
+  evaluate:
+    fired: Metric %{metric} current value %{value} %{comparator} threshold %{threshold}, alert triggered
+    not_fired: Metric %{metric} current value %{value}, condition not met (%{comparator} %{threshold})
+    silent: Rule is within the silence window (%{minutes} minutes), notification skipped this time
+    no_channel: Threshold hit but no valid notification channel configured, only recorded

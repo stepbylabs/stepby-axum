@@ -221,6 +221,19 @@ pub async fn add(
         .role_service
         .add_role(dto, operator.username(), operator.tenant_id())
         .await?;
+    // Webhook 事件目录（开放域）：新增事务已提交，派发 role.created
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "role.created",
+        serde_json::json!({
+            "roleId": role.role_id,
+            "roleName": role.role_name,
+            "roleKey": role.role_key,
+            "tenantId": role.tenant_id,
+            "operator": operator.username(),
+        }),
+    )
+    .await;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.add_role",
         name = role.role_name
@@ -250,10 +263,23 @@ pub async fn edit(
     if let Ok(vo) = state.role_service.get_role_by_id(dto.role_id, None).await {
         target_tenant.set(vo.role.tenant_id);
     }
+    // 提前取出目标角色 ID（dto 将被 edit_role 按值消费）
+    let target_role_id = dto.role_id;
     state
         .role_service
         .edit_role(dto, operator.username(), operator.tenant_id())
         .await?;
+    // Webhook 事件目录（开放域）：编辑事务已提交，派发 role.updated
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "role.updated",
+        serde_json::json!({
+            "roleId": target_role_id,
+            "tenantId": operator.tenant_id(),
+            "operator": operator.username(),
+        }),
+    )
+    .await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -312,10 +338,23 @@ pub async fn remove(
         }
     }
 
+    // 克隆一份用于事件派发（delete_roles 按值消费原列表）
+    let deleted_role_ids = role_ids.clone();
     state
         .role_service
         .delete_roles(role_ids, operator.tenant_id())
         .await?;
+    // Webhook 事件目录（开放域）：删除事务已提交，派发 role.deleted（含批量 ID 列表）
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "role.deleted",
+        serde_json::json!({
+            "roleIds": deleted_role_ids,
+            "tenantId": operator.tenant_id(),
+            "operator": operator.username(),
+        }),
+    )
+    .await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 

@@ -34,6 +34,9 @@ pub struct Model {
     pub hook_name: String,
     /// 订阅的事件类型（逗号分隔；空串匹配全部）
     pub event_types: String,
+    /// 订阅的事件目录键（JSON 数组字符串，如 `["user.created","login.success"]`；
+    /// NULL 或空 = 订阅全部事件（兼容存量行为）。emit_event 派发按本列过滤。
+    pub subscribed_events: Option<String>,
     /// 出站目标 URL
     pub target_url: String,
     /// 签名密钥（可选）

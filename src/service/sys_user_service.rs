@@ -1479,6 +1479,9 @@ impl SysUserService {
                         None => ids,
                     }
                 });
+                // 审计留痕块为 boxed()（需 'static），operator 为 &str 引用生命周期不足，
+                // 克隆为 owned String 移入 async move 块
+                let operator_owned = operator.to_string();
                 async move {
                     // 0. 多租户 §27.1 决策 10：账号配额（事务内锁租户行 → 计数 → 插入），
                     //    口径：含停用用户、不含软删、含管理员；account_count<=0 不限
@@ -1488,6 +1491,27 @@ impl SysUserService {
 
                     // 1. 插入 sys_user（通过 Repository）
                     let new_user = user_repo.base().insert_conn(txn, user_am).await?;
+
+                    // 1.5 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚；
+                    //     敏感列 password 由 record_change 内部统一打码）
+                    let after =
+                        serde_json::to_value(&new_user).unwrap_or(serde_json::Value::Null);
+                    let audit_operator = crate::service::sys_audit_change_service::resolve_operator(
+                        txn,
+                        None, // add_user 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator_owned.as_str()),
+                    )
+                    .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_user",
+                        &new_user.user_id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_INSERT,
+                        None,
+                        Some(after),
+                        audit_operator,
+                    )
+                    .await?;
 
                     // 2. 角色授权（幂等抢占式：无行插 admin 行；scim 行抢占为 admin；admin 行跳过，
                     //    防止管理员勾选 SCIM 已授角色时撞 UNIQUE(user_id, role_id)）
@@ -1631,6 +1655,9 @@ impl SysUserService {
             .await?;
         self.ensure_posts_tenant_allowed(operator_tid, dto.post_ids.as_deref())
             .await?;
+        // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
+        let before_snapshot =
+            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -1679,6 +1706,9 @@ impl SysUserService {
                 });
                 let user_dept_repo = self.user_dept_repo.clone();
                 let user_id = dto.user_id;
+                // 审计留痕块为 boxed()（需 'static），operator 为 &str 引用生命周期不足，
+                // 克隆为 owned String 移入 async move 块
+                let operator_owned = operator.to_string();
                 async move {
                     // 1. 更新 sys_user（通过 Repository）
                     let updated = user_repo.base().update_conn(txn, am).await?;
@@ -1724,6 +1754,28 @@ impl SysUserService {
                             .upsert_admin_depts_conn(txn, user_id, ids)
                             .await?;
                     }
+
+                    // 5. 审计合规域：UPDATE 变更留痕（同事务提交/回滚，失败令业务一并回滚；
+                    //     敏感列 password 由 record_change 内部统一打码）
+                    let after =
+                        serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            Some(operator_user_id),
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_user",
+                        &updated.user_id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_UPDATE,
+                        Some(before_snapshot),
+                        Some(after),
+                        audit_operator,
+                    )
+                    .await?;
                     Ok(updated)
                 }
                 .boxed()
@@ -1780,6 +1832,9 @@ impl SysUserService {
         // 软删除记录仍占用 user_name 唯一索引，导致无法重新创建同名用户
         let deleted_user_name = format!("{}_deleted_{}", existing.user_name, user_id);
 
+        // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
+        let before_snapshot =
+            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -1792,6 +1847,26 @@ impl SysUserService {
                     am.del_flag = Set(Some("2".to_string()));
                     am.user_name = Set(deleted_user_name);
                     user_repo.base().update_conn(txn, am).await?;
+
+                    // 1.5 审计合规域：DELETE 变更留痕（同事务提交/回滚，失败令业务一并回滚；
+                    //     after 传 None 表示行已删除；敏感列 password 由内部统一打码）
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            Some(operator_user_id),
+                            None, // delete_user 签名仅携带操作人 ID，用户名由回查补齐
+                        )
+                        .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_user",
+                        &user_id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_DELETE,
+                        Some(before_snapshot),
+                        None,
+                        audit_operator,
+                    )
+                    .await?;
 
                     // 2. 物理删除 sys_user_role 关联（通过 Repository）
                     user_role_repo.delete_by_user_id_conn(txn, user_id).await?;

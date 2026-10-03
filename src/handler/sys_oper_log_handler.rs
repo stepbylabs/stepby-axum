@@ -573,3 +573,30 @@ pub async fn alarm_status(
         .await?;
     Ok(AjaxResult::success(vo))
 }
+
+/// GET /monitor/operlog/verify-chain
+/// 校验操作日志防篡改 HMAC 链完整性（全量，跨租户）
+///
+/// 从链首逐节点重算 HMAC-SHA256 并与库内 chain_hash 比对，首个不匹配即报断裂位置。
+/// 审计员日常巡检 / 入侵排查接口：`valid = true` 表示库内留痕未被篡改或删除。
+#[utoipa::path(
+    get,
+    path = "/monitor/operlog/verify-chain",
+    responses(
+        (status = 200, description = "校验完成（valid=false 时携带断裂位置）", body = crate::common::AjaxResult<crate::service::sys_oper_log_service::ChainVerifyVo>),
+        (status = 400, description = "链能力未启用"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-operlog"
+)]
+pub async fn verify_chain(
+    State(state): State<Arc<AppState>>,
+    // 链校验固定全量跨租户执行（子集校验会因缺失前驱误报断裂），
+    // 仅要求登录态提取器存在性校验，不使用操作者上下文
+    _operator: Operator,
+) -> Result<AjaxResult<crate::service::sys_oper_log_service::ChainVerifyVo>, AppError> {
+    // 链哈希跨租户串联，校验固定全量执行（子集校验会因缺失前驱误报断裂），
+    // 因此不收敛 tenant_scope——端点已由 monitor:operlog:query 权限门控。
+    let vo = state.oper_log_service.verify_chain().await?;
+    Ok(AjaxResult::success(vo))
+}

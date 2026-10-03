@@ -2,10 +2,12 @@
 
 pub mod auth_handler;
 pub mod common_handler;
+pub mod common_search_handler;
 pub mod file_handler;
 pub mod flow_handler;
 pub mod health;
 pub mod ip_location_handler;
+pub mod monitor_alert_handler;
 pub mod monitor_cache_handler;
 pub mod monitor_log_handler;
 pub mod monitor_observability_handler;
@@ -40,6 +42,7 @@ pub mod sys_tenant_nav_handler;
 pub mod sys_user_handler;
 pub mod sys_user_pref_handler;
 pub mod sys_web_hook_handler;
+pub mod sys_webhook_event_handler;
 pub mod tool_gen_handler;
 pub mod totp_handler;
 pub mod webauthn_handler;

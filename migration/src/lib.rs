@@ -190,6 +190,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260928_000004_optimize_menu_structure::Migration),
             Box::new(m20261001_000001_shared_store::Migration),
             Box::new(m20261002_000001_perf_indexes::Migration),
+            Box::new(m20261003_000001_audit_change::Migration),
+            Box::new(m20261003_000002_webhook_event::Migration),
+            Box::new(m20261003_000003_alert_rule::Migration),
         ]
     }
 }

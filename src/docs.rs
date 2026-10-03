@@ -157,6 +157,11 @@ struct SwaggerAssets;
         crate::handler::sys_oper_log_handler::stats_by_type,
         crate::handler::sys_oper_log_handler::alarm_status,
         crate::handler::sys_oper_log_handler::compliance_report,
+        crate::handler::sys_oper_log_handler::verify_chain,
+        // ==================== 审计合规域（变更留痕）====================
+        crate::audit::handler::list,
+        crate::audit::handler::get_info,
+        crate::audit::handler::export,
         // ==================== 前端异常监控（Tier-S #1）====================
         crate::handler::sys_frontend_error_handler::report,
         crate::handler::sys_frontend_error_handler::list,
@@ -177,10 +182,12 @@ struct SwaggerAssets;
         crate::handler::monitor_online_handler::force_logout,
         // ==================== 服务器监控 ====================
         crate::handler::monitor_server_handler::get_server,
+        crate::handler::monitor_server_handler::get_db_pool,
         // ==================== 通用接口 ====================
         crate::handler::common_handler::upload,
         crate::handler::common_handler::download,
         crate::handler::common_handler::download_resource,
+        crate::handler::common_search_handler::global_search,
         // ==================== 代码生成（补充） ====================
         crate::handler::tool_gen_handler::batch_gen_code,
         // ==================== 报表中心 + 定时订阅推送 ====================
@@ -372,6 +379,21 @@ struct SwaggerAssets;
         crate::handler::sys_user_handler::avatar_upload,
         // ==================== 字典（补充）====================
         crate::handler::sys_dict_handler::dict_data_export,
+        // ==================== 监控增强（告警规则）====================
+        crate::handler::monitor_alert_handler::list,
+        crate::handler::monitor_alert_handler::get_info,
+        crate::handler::monitor_alert_handler::add,
+        crate::handler::monitor_alert_handler::edit,
+        crate::handler::monitor_alert_handler::change_enabled,
+        crate::handler::monitor_alert_handler::remove,
+        crate::handler::monitor_alert_handler::evaluate,
+        crate::handler::monitor_alert_handler::export,
+        // ==================== 集成开放域（WebHook 事件目录）====================
+        crate::handler::sys_webhook_event_handler::event_list,
+        crate::handler::sys_webhook_event_handler::test_send,
+        // ==================== 个人访问令牌（PAT：开放 API AK/SK 域）====================
+        crate::handler::sys_pat_handler::rotate_ak,
+        crate::handler::sys_pat_handler::revoke_ak,
     ),
     components(
         schemas(
@@ -503,10 +525,14 @@ struct SwaggerAssets;
             crate::handler::monitor_server_handler::JvmInfo,
             crate::handler::monitor_server_handler::SysInfo,
             crate::handler::monitor_server_handler::SysFileInfo,
+            // 数据库连接池监控
+            crate::handler::monitor_server_handler::DbPoolInfo,
             // ==================== 通用响应包装 ====================
             crate::common::TreeSelectVo,
             // ==================== 通用接口 ====================
             crate::handler::common_handler::CommonUploadResult,
+            // 全局搜索
+            crate::service::global_search_service::GlobalSearchItem,
             // ==================== 个人访问令牌（PAT） ====================
             crate::service::sys_pat_service::PatVo,
             crate::service::sys_pat_service::CreatePatDto,
@@ -520,6 +546,18 @@ struct SwaggerAssets;
             crate::service::sys_flow_service::FlowCountersignDto,
             crate::service::sys_flow_service::FlowDoneVo,
             crate::handler::flow_handler::FlowExportDto,
+            // ==================== 监控增强（告警规则）====================
+            crate::entity::sys_alert_rule::Model,
+            crate::service::sys_alert_service::AlertRuleQueryDto,
+            crate::service::sys_alert_service::AlertRuleAddDto,
+            crate::service::sys_alert_service::AlertRuleEditDto,
+            crate::service::sys_alert_service::AlertRuleEnabledDto,
+            crate::service::sys_alert_service::AlertEvaluateResult,
+            // ==================== 集成开放域（WebHook 事件目录）====================
+            crate::service::sys_web_hook_service::WebhookEventVo,
+            crate::service::sys_web_hook_service::WebhookTestSendDto,
+            // ==================== 个人访问令牌（PAT：开放 API AK/SK 域）====================
+            crate::service::sys_pat_service::RotateAkResult,
         ),
     ),
     tags(
@@ -540,6 +578,8 @@ struct SwaggerAssets;
         (name = "monitor-cache", description = "缓存监控"),
         (name = "monitor-online", description = "在线用户"),
         (name = "monitor-server", description = "服务器监控"),
+        (name = "monitor-alert", description = "告警规则（监控增强）"),
+        (name = "monitor-webhook", description = "WebHook 事件目录（集成开放域）"),
         (name = "common", description = "通用接口"),
         (name = "tool-gen", description = "代码生成"),
         (name = "pat", description = "个人访问令牌（PAT）"),
@@ -823,6 +863,20 @@ mod tests {
             "/register",
             // sys_dict_handler
             "/system/dict/data/export",
+            // monitor_alert_handler（监控增强：告警规则）
+            "/monitor/alert/list",
+            "/monitor/alert/{id}",
+            "/monitor/alert",
+            "/monitor/alert/changeEnabled",
+            "/monitor/alert/{ids}",
+            "/monitor/alert/{id}/evaluate",
+            "/monitor/alert/export",
+            // sys_webhook_event_handler（集成开放域：WebHook 事件目录）
+            "/system/webhook/event/list",
+            "/system/webhook/{id}/test-send",
+            // sys_pat_handler（开放 API AK/SK 域）
+            "/system/pat/{patId}/rotate-ak",
+            "/system/pat/{patId}/revoke-ak",
         ];
         for path in expected {
             let item = doc

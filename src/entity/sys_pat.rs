@@ -43,6 +43,11 @@ pub struct Model {
         deserialize_with = "datetime::deserialize_opt"
     )]
     pub expires_at: Option<NaiveDateTime>,
+    /// 开放 API access_key（"ak" + 24 位随机 hex；NULL = 未开通 AK/SK。迁移 m20261003_000002）
+    pub access_key: Option<String>,
+    /// 开放 API secret_key 信封密文（跟随 oauth client_secret 的 CONFIG_ENC_KEY 机制；
+    /// 明文仅在创建/轮换响应中返回一次，绝不落库）
+    pub secret_key: Option<String>,
     /// 最近使用时间（best-effort 更新）
     #[serde(
         serialize_with = "datetime::serialize_opt",
@@ -71,6 +76,8 @@ impl std::fmt::Debug for Model {
             .field("user_id", &self.user_id)
             .field("name", &self.name)
             .field("token_hash", &"<redacted>")
+            .field("access_key", &self.access_key)
+            .field("secret_key", &"<redacted>")
             .field("token_prefix", &self.token_prefix)
             .field("scopes", &self.scopes)
             .field("status", &self.status)

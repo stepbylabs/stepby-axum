@@ -438,6 +438,19 @@ pub async fn add(
         .user_service
         .add_user(dto, operator.username(), operator.tenant_id())
         .await?;
+    // Webhook 事件目录（开放域）：新增事务已提交，派发 user.created（火后即忘，失败仅留日志）
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "user.created",
+        serde_json::json!({
+            "userId": user.user_id,
+            "userName": user.user_name,
+            "nickName": user.nick_name,
+            "tenantId": user.tenant_id,
+            "operator": operator.username(),
+        }),
+    )
+    .await;
     // 对齐前端：新增返回提示消息
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.add_user",
@@ -472,6 +485,8 @@ pub async fn edit(
     if let Ok(vo) = state.user_service.get_user_by_id(dto.user_id).await {
         target_tenant.set(vo.user.tenant_id);
     }
+    // 提前取出目标用户 ID（dto 将被 edit_user 按值消费）
+    let target_user_id = dto.user_id;
     state
         .user_service
         .edit_user(
@@ -481,6 +496,17 @@ pub async fn edit(
             operator.tenant_id(),
         )
         .await?;
+    // Webhook 事件目录（开放域）：编辑事务已提交，派发 user.updated
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "user.updated",
+        serde_json::json!({
+            "userId": target_user_id,
+            "tenantId": operator.tenant_id(),
+            "operator": operator.username(),
+        }),
+    )
+    .await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
 
@@ -597,6 +623,18 @@ pub async fn remove(
     for uid in &deleted_user_ids {
         auto_reassign_flow_tasks(&state, *uid).await;
     }
+
+    // Webhook 事件目录（开放域）：删除及联动清理已完成，派发 user.deleted（含批量 ID 列表）
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "user.deleted",
+        serde_json::json!({
+            "userIds": deleted_user_ids,
+            "tenantId": operator.tenant_id(),
+            "operator": operator.username(),
+        }),
+    )
+    .await;
 
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

@@ -237,6 +237,86 @@ pub async fn get_server(
     Ok(AjaxResult::success(server_info))
 }
 
+// ==================== 数据库连接池监控 ====================
+
+/// 数据库连接池信息（对齐前端 db-pool 对象结构）
+///
+/// 字段语义：
+/// - dbKind：数据库方言（sqlite | mysql | postgres）
+/// - poolSize：当前池内连接总数（sqlx `Pool::size()`）
+/// - numIdle：空闲连接数（sqlx `Pool::num_idle()`）
+/// - busy：繁忙连接数 = poolSize - numIdle（下溢保护为 0）
+/// - maxConn：配置的最大连接数（来源 `config.settings.database.max_connections`）
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DbPoolInfo {
+    /// 数据库方言（sqlite | mysql | postgres；连接不可用时为 unknown）
+    pub db_kind: String,
+    /// 当前池内连接总数
+    pub pool_size: u64,
+    /// 空闲连接数
+    pub num_idle: u64,
+    /// 繁忙连接数（poolSize - numIdle）
+    pub busy: u64,
+    /// 配置的最大连接数
+    pub max_conn: u64,
+}
+
+/// GET /monitor/db-pool
+/// 获取数据库连接池统计信息
+///
+/// 实现（sea-orm 1.x 真实 API）：
+/// - 底层 sqlx 池仅能通过 [`DatabaseConnection`] 的公开 getter 取得
+///   （`get_sqlite_connection_pool` / `get_mysql_connection_pool` / `get_postgres_connection_pool`，
+///   方言不匹配时会 panic，且 `pool` 字段为 pub(crate) 无法直接访问）；
+/// - 故先按枚举变体 match 判定方言（不调用任何 panic 路径），**变体匹配时**才调用对应
+///   getter —— 同方言下 getter 不会 panic，杜绝风险；
+/// - 池统计取 sqlx 原生指标：`Pool::size()`（总连接）、`Pool::num_idle()`（空闲），
+///   busy 为二者差值（saturating，不造假）；
+/// - 若连接类型不可得（Disconnected / Mock / Proxy 等无 sqlx 池的变体），按约定诚实降级：
+///   dbKind 返回 "unknown"，其余统计字段置 0。
+#[utoipa::path(
+    get,
+    path = "/monitor/db-pool",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<DbPoolInfo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-server"
+)]
+pub async fn get_db_pool(State(state): State<Arc<AppState>>) -> AjaxResult<DbPoolInfo> {
+    use sea_orm::DatabaseConnection;
+
+    // 先按连接枚举变体判定方言（安全，无 panic 路径），再调用同方言的池 getter
+    let (db_kind, pool_size, num_idle) = match &state.db {
+        DatabaseConnection::SqlxSqlitePoolConnection(_) => {
+            let pool = state.db.get_sqlite_connection_pool();
+            ("sqlite", pool.size() as u64, pool.num_idle() as u64)
+        }
+        DatabaseConnection::SqlxMySqlPoolConnection(_) => {
+            let pool = state.db.get_mysql_connection_pool();
+            ("mysql", pool.size() as u64, pool.num_idle() as u64)
+        }
+        DatabaseConnection::SqlxPostgresPoolConnection(_) => {
+            let pool = state.db.get_postgres_connection_pool();
+            ("postgres", pool.size() as u64, pool.num_idle() as u64)
+        }
+        // 无 sqlx 池的变体（Disconnected / Mock / Proxy）：真实不可得，诚实降级为 0
+        _ => ("unknown", 0, 0),
+    };
+
+    let info = DbPoolInfo {
+        db_kind: db_kind.to_string(),
+        pool_size,
+        num_idle,
+        // saturating_sub：理论上 num_idle ≤ size，防御异常数据下溢
+        busy: pool_size.saturating_sub(num_idle),
+        // maxConn 从 settings 的 database 段读取（真实字段名 max_connections）
+        max_conn: state.config.database.max_connections as u64,
+    };
+    AjaxResult::success(info)
+}
+
 // ==================== 辅助函数 ====================
 
 /// 构建运行时（JVM）信息

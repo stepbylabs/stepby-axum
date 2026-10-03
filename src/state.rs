@@ -11,13 +11,13 @@ use crate::observability::Observability;
 use crate::repository::sys_logininfor::SysLogininforRepository;
 use crate::scheduler::JobScheduler;
 use crate::service::{
-    AuthService, GenTableService, IpLocationService, MailerService, SsoService, SysBackupService,
-    SysConfigService, SysDeptService, SysDictService, SysFlowService, SysFrontendErrorService,
-    SysHttpDebugService, SysJobService, SysLogininforService, SysMenuService, SysMsgService,
-    SysNoticeService, SysOauthService, SysOperLogService, SysPatService, SysPostService,
-    SysRateLimitService, SysReportService, SysRoleService, SysTaskService, SysTenantDomainService,
-    SysTenantNavService, SysTenantService, SysUserPrefService, SysUserService, SysWebHookService,
-    UserErasureService, WebauthnService,
+    AuthService, GenTableService, IpLocationService, MailerService, SsoService, SysAlertService,
+    SysBackupService, SysConfigService, SysDeptService, SysDictService, SysFlowService,
+    SysFrontendErrorService, SysHttpDebugService, SysJobService, SysLogininforService,
+    SysMenuService, SysMsgService, SysNoticeService, SysOauthService, SysOperLogService,
+    SysPatService, SysPostService, SysRateLimitService, SysReportService, SysRoleService,
+    SysTaskService, SysTenantDomainService, SysTenantNavService, SysTenantService,
+    SysUserPrefService, SysUserService, SysWebHookService, UserErasureService, WebauthnService,
 };
 use crate::utils::ip_location::IpLocator;
 use sea_orm::DatabaseConnection;
@@ -75,9 +75,13 @@ pub struct AppState {
     pub post_service: SysPostService,
     /// 操作日志 Service
     pub oper_log_service: SysOperLogService,
+    /// 审计合规域 Service（数据变更留痕查询 + 导出）
+    pub audit_change_service: crate::service::sys_audit_change_service::SysAuditChangeService,
     pub frontend_error_service: SysFrontendErrorService,
     /// API 限流配置 Service
     pub rate_limit_service: SysRateLimitService,
+    /// 告警规则引擎 Service（指标采集 / 评估 / 通知）
+    pub alert_service: SysAlertService,
     /// 登录日志 Service
     pub logininfor_service: SysLogininforService,
     /// 代码生成模块 Service
@@ -302,9 +306,18 @@ impl AppState {
             dict_service: SysDictService::new(db.clone(), store.clone()),
             config_service,
             post_service: SysPostService::new(db.clone()),
-            oper_log_service: SysOperLogService::new(db.clone()),
+            // 操作日志 Service：启用 HMAC 防篡改链（链密钥从 JWT secret 派生，不落盘）
+            oper_log_service: SysOperLogService::with_chain(
+                db.clone(),
+                store.clone(),
+                &config.jwt.secret,
+            ),
+            // 审计合规域：变更留痕 Service
+            audit_change_service:
+                crate::service::sys_audit_change_service::SysAuditChangeService::new(db.clone()),
             frontend_error_service: SysFrontendErrorService::new(db.clone()),
             rate_limit_service: SysRateLimitService::new(db.clone(), store.clone()),
+            alert_service: SysAlertService::new(db.clone(), store.clone(), config.clone()),
             logininfor_service: SysLogininforService::new(db.clone()),
             gen_table_service: GenTableService::new(db.clone()),
             backup_service: SysBackupService::new(db.clone(), config.clone()),

@@ -8,6 +8,7 @@ pub mod flow_router;
 pub mod ip_location_router;
 pub mod monitor_cache_router;
 pub mod monitor_log_router;
+pub mod monitor_alert_router;
 pub mod monitor_observability_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
@@ -123,6 +124,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(monitor_server_router::server_routes())
         .merge(monitor_log_router::log_routes())
         .merge(monitor_observability_router::observability_routes())
+        .merge(monitor_alert_router::monitor_alert_routes())
+        .merge(crate::audit::router::audit_change_routes())
         .merge(sys_backup_router::backup_routes())
         .merge(ip_location_router::ip_location_routes())
         .merge(sys_task_router::task_routes())
@@ -192,6 +195,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     // JSON 404（而非落入 SPA fallback 返回 HTML，避免前端把 HTML 当 JSON 解析报错）。
     let api = public::public_routes(state.clone())
         .merge(uploads_routes(state.clone()))
+        // AK/SK 签名开放 API（/open/v1/*）：无 Bearer，必须与公开路由同层 merge，
+        // 不得落入 protected 的 auth_middleware route_layer 覆盖范围（否则 401）。
+        // 自带 ak_sign 验签中间件（X-CA-* 签名 + 防重放 + 组件 metrics）。
+        .merge(crate::middleware::ak_sign::ak_protected_routes(state.clone()))
         .merge(protected)
         // tenant_host 中间件（多租户 Phase 3 域名链路）：解析请求 host / 网关注入的
         // `X-Tenant-Code` → 租户上下文，注入 HostTenant 供 auth_middleware 做一致性校验。
