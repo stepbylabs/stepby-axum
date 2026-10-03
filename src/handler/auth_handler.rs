@@ -176,18 +176,12 @@ pub async fn login(
 
     // WebHook 事件分发（G5）：登录成功 / 失败均异步通知订阅方，失败含原因供外部风控。
     // 仅借用 vo 而非消费，随后以 `?` 按值传播错误，避免对非 Clone 的 AppError 做 clone。
-    // 同时派发两条口径：存量 event_types（dispatch_event）+ 事件目录 subscribed_events（emit_event）。
+    // 方案 C（订阅双轨合并）：删除旧口径 dispatch_event 双发——旧口径曾与 emit_event
+    // 对同一登录事件各发一次，两处都配置时会重复推送；现统一走事件目录口径
+    // emit_event（subscribed_events 过滤），存量订阅已由迁移 m20261003_000004
+    // 收敛到新列（login_success → login.success），行为无损。
     match &vo {
         Ok(v) => {
-            state.web_hook_service.dispatch_event(
-                crate::service::sys_web_hook_service::EVENT_LOGIN_SUCCESS,
-                serde_json::json!({
-                    "username": username.clone(),
-                    "ip": login_ip.clone(),
-                    "time": crate::common::datetime::now_naive().to_string(),
-                }),
-                v.tenant_id,
-            );
             // Webhook 事件目录（开放域）：登录成功事件（subscribed_events 过滤口径）
             crate::service::sys_web_hook_service::emit_event(
                 &state,
@@ -201,16 +195,6 @@ pub async fn login(
             .await;
         }
         Err(err) => {
-            state.web_hook_service.dispatch_event(
-                crate::service::sys_web_hook_service::EVENT_LOGIN_FAILURE,
-                serde_json::json!({
-                    "username": username.clone(),
-                    "ip": login_ip.clone(),
-                    "reason": err.to_string(),
-                    "time": crate::common::datetime::now_naive().to_string(),
-                }),
-                0,
-            );
             // Webhook 事件目录（开放域）：登录失败事件（含原因供外部风控）
             crate::service::sys_web_hook_service::emit_event(
                 &state,

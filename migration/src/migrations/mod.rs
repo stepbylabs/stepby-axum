@@ -93,4 +93,5 @@ pub mod m20261002_000001_perf_indexes;
 pub mod m20261003_000001_audit_change;
 pub mod m20261003_000002_webhook_event;
 pub mod m20261003_000003_alert_rule;
+pub mod m20261003_000004_webhook_unify;
 

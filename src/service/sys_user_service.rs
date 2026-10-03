@@ -43,9 +43,65 @@ use crate::repository::sys_user_dept::SysUserDeptRepository;
 use crate::repository::sys_user_post::SysUserPostRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::shared_store::SharedStore;
+use crate::utils::masking;
 use crate::utils::password::{
     encrypt_password, validate_password_complexity, verify_password_with_upgrade_hint,
 };
+
+// ==================== 字段级权限 M1：PII 掩码（phonenumber / email） ====================
+//
+// 口径（三口径，详见 AGENTS.md C9 日志脱敏强制与 masking 模块 rustdoc）：
+// 1. 本人查自己（operator == 目标 user）：原值（看自己的手机号不应被掩码）；
+// 2. 超管（user_id==1 或权限列表含 `*:*:*`，同源判定见 `is_super_viewer`）：原值
+//    （管理员运维需要全值）；
+// 3. 其它 operator：任何用户的 mobile/email 均掩码。
+//
+// 掩码值带可识别形态（含 `****`），编辑回显场景前端未改动直接回传时，
+// `edit_user` 依据 `masking::is_masked` 识别并跳过该字段，防止掩码串覆盖真实值。
+
+/// 三口径判定（纯函数，可单测）：返回 `true` 表示需要对目标用户的 PII 字段掩码。
+///
+/// - `operator_user_id`：当前操作者；`None` 表示无操作者上下文（fail-closed，一律掩码）；
+/// - `operator_is_super`：操作者是否超管视角（`is_super_viewer` 的结果，由调用方
+///   每次请求计算一次，避免列表逐行重复查询）。
+fn should_mask_pii(
+    operator_user_id: Option<i64>,
+    target_user_id: i64,
+    operator_is_super: bool,
+) -> bool {
+    // 口径 2：超管看任何人都原值
+    if operator_is_super {
+        return false;
+    }
+    // 口径 1：本人查自己原值；口径 3：其余一律掩码
+    operator_user_id != Some(target_user_id)
+}
+
+/// 判定 operator 是否为「超管视角」（可看 PII 原值）（纯函数，可单测）。
+///
+/// 判定口径与 `sys_menu_service::get_permissions_by_user_id` 的超管短路（`*:*:*`
+/// 的唯一来源）同源：
+/// - `user_id == SUPER_ADMIN_USER_ID`（内置 admin）；
+/// - 或 operator 拥有平台超管角色（`is_system && tenant_id == 0`，即
+///   `SysRoleModel::is_platform_super_admin`）——该角色在权限解析中被直接授予
+///   `*:*:*` 通配权限。
+fn is_super_viewer(operator_user_id: i64, operator_roles: &[SysRoleModel]) -> bool {
+    operator_user_id == SUPER_ADMIN_USER_ID
+        || operator_roles.iter().any(|r| r.is_platform_super_admin())
+}
+
+/// 就地对 `SysUserModel` 的 PII 字段（phonenumber / email）做展示型掩码（纯函数，可单测）。
+///
+/// 使用 `utils::masking` 的业务展示口径：手机号 `138****5678`、邮箱 `a****@example.com`。
+/// 掩码值必然含 `*`，与 `masking::is_masked` 的编辑回显识别约定配套。
+fn mask_user_pii_in_place(model: &mut SysUserModel) {
+    if let Some(phone) = model.phonenumber.as_deref() {
+        model.phonenumber = Some(masking::mask_phone(phone));
+    }
+    if let Some(email) = model.email.as_deref() {
+        model.email = Some(masking::mask_email(email));
+    }
+}
 
 // ==================== 可选枚举字段归一化（R6-VAL-16 / R6-VAL-17） ====================
 
@@ -676,6 +732,25 @@ impl SysUserService {
             .await
     }
 
+    /// M1 字段级权限：operator 是否为「超管视角」（可看 PII 原值）。
+    ///
+    /// 查询 operator 的角色集合后交由纯函数 [`is_super_viewer`] 判定
+    /// （user_id==1 或拥有平台超管角色 ⇒ 权限列表含 `*:*:*`）。
+    /// 查询失败时 fail-closed（视为非超管，PII 掩码）。
+    async fn viewer_is_super(&self, operator_user_id: i64) -> bool {
+        match self.role_repo.find_by_user_id(operator_user_id).await {
+            Ok(roles) => is_super_viewer(operator_user_id, &roles),
+            Err(e) => {
+                tracing::warn!(
+                    operator_user_id,
+                    "PII 掩码判定：查询 operator 角色失败，fail-closed 按非超管处理: {}",
+                    e
+                );
+                false
+            }
+        }
+    }
+
     /// 分页查询用户（仅未删除）
     ///
     /// 使用批量查询优化 N+1 问题：
@@ -776,6 +851,13 @@ impl SysUserService {
             .find_dept_ids_by_user_ids(&user_ids)
             .await?;
 
+        // M1 字段级权限：每次请求计算一次超管视角（避免逐行重复查角色），
+        // None = 无操作者上下文，fail-closed 按非超管处理（掩码）
+        let op_is_super = match operator_user_id {
+            Some(op) => self.viewer_is_super(op).await,
+            None => false,
+        };
+
         // 4. 在内存中组装 UserVo
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
@@ -783,6 +865,11 @@ impl SysUserService {
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
             let oauth_bound = oauth_bound_set.contains(&user.user_id);
             let dept_ids = dept_ids_map.get(&user.user_id).cloned().unwrap_or_default();
+            // M1 三口径：本人查自己 / 超管 → 原值；其它 → phonenumber/email 掩码
+            let mut user = user;
+            if should_mask_pii(operator_user_id, user.user_id, op_is_super) {
+                mask_user_pii_in_place(&mut user);
+            }
             vos.push(UserVo {
                 user,
                 role_ids,
@@ -999,12 +1086,22 @@ impl SysUserService {
             .user_dept_repo
             .find_dept_ids_by_user_ids(&user_ids)
             .await?;
+        // M1 字段级权限：导出与列表同口径（超管/本人 → 原值，其它 → 掩码）
+        let op_is_super = match operator_user_id {
+            Some(op) => self.viewer_is_super(op).await,
+            None => false,
+        };
         let mut vos = Vec::with_capacity(rows.len());
         for user in rows {
             let role_ids = role_ids_map.get(&user.user_id).cloned().unwrap_or_default();
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
             let oauth_bound = oauth_bound_set.contains(&user.user_id);
             let dept_ids = dept_ids_map.get(&user.user_id).cloned().unwrap_or_default();
+            // M1 三口径：非本人且非超管 → phonenumber/email 掩码
+            let mut user = user;
+            if should_mask_pii(operator_user_id, user.user_id, op_is_super) {
+                mask_user_pii_in_place(&mut user);
+            }
             vos.push(UserVo {
                 user,
                 role_ids,
@@ -1200,6 +1297,12 @@ impl SysUserService {
         let all_posts: Vec<SysPostModel> = self.post_repo.find_active_all(tenant_scope).await?;
 
         // 若 user_id 为 None（新增场景），返回空 role_ids/post_ids/dept_ids 和 None 的 data
+        // M1 字段级权限：每次请求计算一次超管视角；None = 无操作者上下文，
+        // fail-closed 按非超管处理（掩码）
+        let op_is_super = match operator_user_id {
+            Some(op) => self.viewer_is_super(op).await,
+            None => false,
+        };
         let (user, role_ids, post_ids, dept_ids, scim_role_ids, scim_dept_ids) = match user_id {
             None => (None, vec![], vec![], vec![], vec![], vec![]),
             Some(uid) => {
@@ -1228,6 +1331,13 @@ impl SysUserService {
                     if !visible {
                         return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
                     }
+                }
+                // M1 三口径：本人查自己（编辑回显自己资料）/ 超管 → 原值；
+                // 其它 operator 查他人 → 掩码（掩码值含 `****`，edit_user
+                // 会识别未改动的掩码值并跳过写库）
+                let mut user_model = user_model;
+                if should_mask_pii(operator_user_id, uid, op_is_super) {
+                    mask_user_pii_in_place(&mut user_model);
                 }
                 let rids = self.get_role_ids_by_user_id(uid).await?;
                 let pids = self.get_post_ids_by_user_id(uid).await?;
@@ -1580,6 +1690,18 @@ impl SysUserService {
         operator_user_id: i64,
         operator_tid: i64,
     ) -> Result<SysUserModel, ServiceError> {
+        // M1 字段级权限连带：非超管 operator 编辑他人时，详情/编辑回显返回的
+        // phonenumber/email 是掩码值（含 `****`）。前端未改动直接回传时必须视为
+        // "不修改该字段"，否则掩码串会覆盖真实值；且手机号掩码含 `*` 无法通过
+        // 号码格式校验，故必须在校验之前剥离（掩码识别见 `utils::masking::is_masked`）。
+        let mut dto = dto;
+        if dto.phonenumber.as_deref().is_some_and(masking::is_masked) {
+            dto.phonenumber = None;
+        }
+        if dto.email.as_deref().is_some_and(masking::is_masked) {
+            dto.email = None;
+        }
+
         crate::common::i18n::validate(&dto)?;
 
         // G18：按国家/地区校验手机号（方案 D 多地区化）
@@ -2967,4 +3089,136 @@ mod tests {
         let bad_email = row("wangwu", "王五", "", "", "not-an-email", "", "0");
         assert!(validate_import_row(&bad_email).is_err());
     }
+
+    // ---------- 字段级权限 M1：PII 掩码三口径（纯函数单测） ----------
+
+    /// 口径 1：本人查自己 → 原值（不掩码）
+    #[test]
+    fn should_mask_pii_self_view_is_plain() {
+        assert!(!should_mask_pii(Some(9001), 9001, false));
+    }
+
+    /// 口径 2：超管（含 user_id==1 与 `*:*:*` 角色两种来源）看任何人都原值
+    #[test]
+    fn should_mask_pii_super_view_is_plain() {
+        assert!(!should_mask_pii(Some(9002), 9001, true));
+        // user_id==1 在 is_super_viewer 中短路为超管，此处验证标志位路径
+        assert!(!should_mask_pii(Some(SUPER_ADMIN_USER_ID), 9999, true));
+    }
+
+    /// 口径 3：其它 operator 查任何人都掩码；无操作者上下文 fail-closed 也掩码
+    #[test]
+    fn should_mask_pii_other_and_missing_operator_are_masked() {
+        assert!(should_mask_pii(Some(9002), 9001, false));
+        assert!(should_mask_pii(None, 9001, false));
+        // 注：(None, _, true) 组合在真实调用中不可能出现——op_is_super 仅在
+        // operator_user_id 为 Some 时才可能为 true，此处不为其固化行为
+    }
+
+    /// is_super_viewer：user_id==1 短路 + 平台超管角色（is_system && tid==0）
+    /// 判定与非平台超管角色（is_system 但 tid!=0、或 tid==0 但非 is_system）不误判
+    #[test]
+    fn is_super_viewer_matches_role_source_of_wildcard_perm() {
+        // user_id==1（内置 admin）：无条件超管视角
+        assert!(is_super_viewer(SUPER_ADMIN_USER_ID, &[]));
+
+        // 平台超管角色：is_system=true 且 tenant_id==0（*:*:* 的唯一角色来源）
+        let mut platform_super = minimal_role();
+        platform_super.is_system = true;
+        platform_super.tenant_id = 0;
+        assert!(is_super_viewer(9001, &[platform_super.clone()]));
+
+        // is_system 但非平台租户：不构成超管视角
+        let mut system_other_tenant = minimal_role();
+        system_other_tenant.is_system = true;
+        system_other_tenant.tenant_id = 9010;
+        assert!(!is_super_viewer(9001, &[system_other_tenant]));
+
+        // 平台租户但非 is_system：不构成超管视角
+        let mut platform_normal = minimal_role();
+        platform_normal.is_system = false;
+        platform_normal.tenant_id = 0;
+        assert!(!is_super_viewer(9001, &[platform_normal]));
+    }
+
+    /// 构造最小可用 SysRoleModel（其余字段取工程默认语义的安全值）
+    fn minimal_role() -> SysRoleModel {
+        SysRoleModel {
+            tenant_id: 0,
+            role_id: 9001,
+            role_name: "it_role".to_string(),
+            role_key: "it_role_key".to_string(),
+            role_sort: 0,
+            data_scope: Some("1".to_string()),
+            custom_sql: None,
+            menu_check_strictly: None,
+            dept_check_strictly: None,
+            status: "0".to_string(),
+            is_system: false,
+            del_flag: Some("0".to_string()),
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+            remark: None,
+        }
+    }
+
+    /// 构造最小可用 SysUserModel（与 entity 单测同款完整构造，Model 未派生 Default）
+    fn minimal_user(user_id: i64) -> SysUserModel {
+        SysUserModel {
+            user_id,
+            dept_id: None,
+            user_name: format!("it_user_{user_id}"),
+            nick_name: "IT".to_string(),
+            user_type: None,
+            email: None,
+            phonenumber: None,
+            country_code: None,
+            sex: None,
+            avatar: None,
+            password: None,
+            status: Some("0".to_string()),
+            del_flag: Some("0".to_string()),
+            login_ip: None,
+            login_date: None,
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+            remark: None,
+            tenant_id: 0,
+            scim_external_id: None,
+        }
+    }
+
+    /// 掩码应用：phonenumber/email 就地变为掩码形态（含 `*`），None 字段保持 None
+    #[test]
+    fn mask_user_pii_in_place_masks_phone_and_email_only() {
+        let mut model = minimal_user(9001);
+        model.email = Some("alice@example.com".to_string());
+        model.phonenumber = Some("13812345678".to_string());
+        mask_user_pii_in_place(&mut model);
+        assert_eq!(model.phonenumber.as_deref(), Some("138****5678"));
+        assert_eq!(model.email.as_deref(), Some("a****@example.com"));
+        // 其余字段不受影响
+        assert_eq!(model.user_name, "it_user_9001");
+
+        // None 字段：保持 None，不产生空串掩码
+        let mut empty = minimal_user(9002);
+        mask_user_pii_in_place(&mut empty);
+        assert!(empty.phonenumber.is_none());
+        assert!(empty.email.is_none());
+    }
+
+    /// 掩码形态值可被 is_masked 识别（edit_user 剥离逻辑的判据）
+    #[test]
+    fn masked_values_are_recognizable_for_edit_skip() {
+        assert!(masking::is_masked("138****5678"));
+        assert!(masking::is_masked("a****@example.com"));
+        // 真实值不含 *：不会误伤正常提交
+        assert!(!masking::is_masked("13812345678"));
+        assert!(!masking::is_masked("alice@example.com"));
+    }
 }
+

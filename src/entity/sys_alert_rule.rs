@@ -2,7 +2,7 @@
 //! sys_alert_rule 实体定义（告警规则表）
 //!
 //! 表由迁移 m20261003_000003_alert_rule 创建（存量库由
-//! `service/sys_alert_service.rs::ensure_alert_rule_table` 幂等兜底）。
+//! `initialize/mod.rs::ensure_alert_rule_tables` 幂等兜底，DDL 单一事实源在该迁移文件）。
 //!
 //! 字段语义：
 //! - `metric`：指标标识，白名单见 `service/sys_alert_service.rs::VALID_METRICS`

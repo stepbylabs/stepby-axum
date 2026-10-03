@@ -53,12 +53,68 @@ pub const EVENT_SCIM_GROUP_DELETED: &str = "scim_group_deleted";
 /// 事件分发中间件注入的扩展 key（当前仅用于路由分发）
 pub const EVENT_HEADERS: [&str; 1] = ["X-Webhook-Event"];
 
+/// 存量事件名 → 事件目录 event_key 映射表（方案 C 单一匹配口径的兼容桥梁）。
+///
+/// 与 `migration/src/migrations/m20261003_000004_webhook_unify.rs` 的
+/// `LEGACY_EVENT_KEY_MAP` **必须保持一致**（集成测试 `webhook_unify.rs` 双向断言
+/// 两份表相等，防漂移；数据收敛迁移以同一映射改写存量订阅）。
+///
+/// 盘点来源（dispatch_event 全部调用点）：
+/// - auth_handler 登录成功/失败（方案 C 已删除双发）→ `login_success` / `login_failure`；
+/// - webauthn_handler 登录成功/失败 → 同上两个常量；
+/// - scim_handler 四个 SCIM 事件 → **不在事件目录**，不映射：派发时按原事件名
+///   原样匹配 `subscribed_events`（大小写不敏感），语义与旧 `event_types` 口径等价，
+///   不破坏存量用户订阅（数据收敛迁移同样原样保留这些元素）。
+/// - 另宽容收录存量用户可能手写的变体：`login` / `login_fail` / `login_failed`。
+pub const LEGACY_EVENT_KEY_MAP: &[(&str, &str)] = &[
+    ("login", "login.success"),
+    ("login_success", "login.success"),
+    ("login_failure", "login.failed"),
+    ("login_fail", "login.failed"),
+    ("login_failed", "login.failed"),
+];
+
+/// 查映射表：存量事件名 → 目录 event_key；不在表中则**原样返回**（自定义事件名
+/// 与 SCIM 等目录外事件按原名匹配，保持旧口径行为）。
+pub fn map_legacy_event_key(event_type: &str) -> &str {
+    let lower = event_type.trim().to_ascii_lowercase();
+    LEGACY_EVENT_KEY_MAP
+        .iter()
+        .find(|(k, _)| *k == lower)
+        .map_or(event_type, |(_, v)| v)
+}
+
+/// 将存量 `event_types`（逗号分隔；空串 = 订阅全部）转换为目录口径键列表。
+///
+/// 返回 `None` 表示「订阅全部」（空串/全空白/全空元素）；元素经
+/// [`map_legacy_event_key`] 映射（命中映射表 → 目录键，否则原样保留）。
+/// 供保存/更新 DTO 的兼容转换使用（仅传 `event_types` 的存量前端仍可用）。
+pub fn convert_legacy_event_types(event_types: &str) -> Option<Vec<String>> {
+    let raw = event_types.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let items: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| map_legacy_event_key(s).to_string())
+        .collect();
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
 /// 出站请求最大体长（1 MiB，防止 payload 异常膨胀）
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 /// 响应体截断存储上限（8 KiB）
 const MAX_STORED_RESPONSE_BYTES: usize = 8 * 1024;
 /// 出站投递超时上限（秒）
 const MAX_TIMEOUT_SECS: u64 = 30;
+/// 订阅事件键数量上限（SubscribedEventsInput 归一后手动校验，防异常膨胀）
+const MAX_SUBSCRIBED_EVENT_KEYS: usize = 100;
 /// 投递失败记录保留天数（审计保留期，clean 清理）
 const LOG_RETENTION_DAYS: i64 = 30;
 /// 投递来源：手动测试发送（sys_web_hook_log.source；NULL/其他 = 业务事件派发）
@@ -110,13 +166,16 @@ impl From<&WebHookQueryDto> for PageDomain {
 pub struct WebHookAddDto {
     #[garde(length(min = 1, max = 100))]
     pub hook_name: String,
-    /// 订阅的事件类型（逗号分隔；空串匹配全部）
+    /// 订阅的事件类型（逗号分隔；空串匹配全部）。**deprecated（方案 C）**：仍接受，
+    /// 内部经 `convert_legacy_event_types` 转换写入 `subscribed_events`（存量前端兼容）
     #[garde(length(max = 2000))]
     pub event_types: Option<String>,
-    /// 订阅的事件目录键（JSON 数组，如 `["user.created","login.success"]`；
-    /// 缺省/空 = 订阅全部目录事件（兼容存量）。每个 event_key 必须存在于 sys_webhook_event
-    #[garde(length(max = 2000))]
-    pub subscribed_events: Option<Vec<String>>,
+    /// 订阅的事件目录键。接受三种形态（`SubscribedEventsInput`）：
+    /// JSON 数组（新前端）、JSON 数组字符串、逗号分隔串（存量前端）；
+    /// 空 = 订阅全部。每个键必须在事件目录内，或属于该回调的存量订阅/影子值
+    /// （`validate_subscribed_events` 的 extra_allowed，保护存量自定义事件名）
+    #[garde(skip)]
+    pub subscribed_events: Option<SubscribedEventsInput>,
     #[garde(length(min = 1, max = 1000))]
     pub target_url: String,
     #[garde(length(max = 255))]
@@ -141,11 +200,12 @@ pub struct WebHookEditDto {
     pub id: i64,
     #[garde(length(min = 1, max = 100))]
     pub hook_name: String,
+    /// 语义同新增（deprecated；传入且与现值不同时重新转换覆盖 subscribed_events）
     #[garde(length(max = 2000))]
     pub event_types: Option<String>,
     /// 订阅的事件目录键（语义同新增；未传保持现值）
-    #[garde(length(max = 2000))]
-    pub subscribed_events: Option<Vec<String>>,
+    #[garde(skip)]
+    pub subscribed_events: Option<SubscribedEventsInput>,
     #[garde(length(min = 1, max = 1000))]
     pub target_url: String,
     #[garde(length(max = 255))]
@@ -158,6 +218,43 @@ pub struct WebHookEditDto {
     pub status: Option<String>,
     #[garde(length(max = 500))]
     pub remark: Option<String>,
+}
+
+/// 订阅事件入参（方案 C 写入收敛的多形态兼容）：
+///
+/// - `List(Vec<String>)`：新前端直接提交 JSON 数组；
+/// - `Raw(String)`：存量前端提交的字符串——JSON 数组串（如 `["a","b"]`）或
+///   逗号分隔串（如 `a,b`，兼容旧版直接透传行为）；空串 = 订阅全部。
+///
+/// 统一经 [`Self::to_keys`] 归一化为键列表后再校验/落库。
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum SubscribedEventsInput {
+    /// 数组形态（新前端）
+    List(Vec<String>),
+    /// 字符串形态（JSON 数组串 / 逗号分隔串 / 空串）
+    Raw(String),
+}
+
+impl SubscribedEventsInput {
+    /// 归一化为事件键列表（空列表 = 订阅全部）
+    pub fn to_keys(&self) -> Vec<String> {
+        match self {
+            Self::List(v) => v.clone(),
+            Self::Raw(s) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    return Vec::new();
+                }
+                // 优先按 JSON 数组串解析（兼容旧前端 JSON.stringify 提交形态），
+                // 解析失败再按逗号分隔串处理
+                if let Ok(list) = serde_json::from_str::<Vec<String>>(t) {
+                    return list;
+                }
+                t.split(',').map(|x| x.trim().to_string()).collect()
+            }
+        }
+    }
 }
 
 /// 手动测试推送 DTO（复用新增字段；event_type 为空时用 `login_success` 便于演示）
@@ -405,18 +502,6 @@ fn default_timeout_secs() -> i32 {
     10
 }
 
-/// 判断回调的事件类型配置是否命中给定事件
-///
-/// event_types 为逗号分隔；空白视为「匹配全部」。
-pub fn hook_matches_event(event_types: &str, event_type: &str) -> bool {
-    let raw = event_types.trim();
-    if raw.is_empty() {
-        return true;
-    }
-    raw.split(',')
-        .any(|s| s.trim().eq_ignore_ascii_case(event_type))
-}
-
 /// 判断回调的事件目录订阅（subscribed_events）是否命中给定事件键
 ///
 /// 匹配规则（迁移 m20261003_000002）：
@@ -577,15 +662,22 @@ impl SysWebHookService {
 
     /// 校验订阅的事件目录键（每个 event_key 必须存在于 sys_webhook_event）
     ///
-    /// 输入为 None 时不校验（未传字段保持现值）；空数组 = 显式订阅全部，合法。
+    /// 输入为空列表 = 显式订阅全部，合法。每个键必须在事件目录内，**或**命中
+    /// `extra_allowed`（存量豁免集：该回调的影子 `event_types` / 既有
+    /// `subscribed_events` 中已存在的自定义事件名，如 `scim_user_provisioned`、
+    /// 用户自建串——方案 C 收敛后允许存量配置原样编辑，不强制迁移到目录）。
     /// 返回规范化后的 JSON 数组字符串（去空白；空数组 → None = 订阅全部）。
     async fn validate_subscribed_events(
         &self,
-        keys: &Option<Vec<String>>,
+        keys: &[String],
+        extra_allowed: &[String],
     ) -> Result<Option<String>, ServiceError> {
-        let Some(keys) = keys else {
-            return Ok(None);
-        };
+        // 键数量防御（原 garde 长度校验随形态归一改为手动检查，防异常膨胀）
+        if keys.len() > MAX_SUBSCRIBED_EVENT_KEYS {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.web_hook.event_invalid"
+            )));
+        }
         for k in keys {
             let k = k.trim();
             if k.is_empty() {
@@ -593,7 +685,9 @@ impl SysWebHookService {
                     "error.web_hook.event_invalid"
                 )));
             }
-            if self.event_repo.find_by_event_key(k).await?.is_none() {
+            let in_catalog = self.event_repo.find_by_event_key(k).await?.is_some();
+            let in_extra = extra_allowed.iter().any(|e| e.trim().eq_ignore_ascii_case(k));
+            if !in_catalog && !in_extra {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.web_hook.event_key_unknown",
                     key = k
@@ -607,6 +701,15 @@ impl SysWebHookService {
         serde_json::to_string(&cleaned)
             .map(Some)
             .map_err(|_| ServiceError::internal(&crate::tr!("error.common.process_failed")))
+    }
+
+    /// 从影子 `event_types` 逗号串拆出存量豁免集（trim + 去空）
+    fn legacy_event_types_allowlist(event_types: &str) -> Vec<String> {
+        event_types
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 
     /// 规范化输入（content_type / timeout / status / event_types）
@@ -716,8 +819,19 @@ impl SysWebHookService {
                 }
             }
         }
-        // 订阅的事件目录键校验 + 规范化（每个 event_key 必须存在于目录）
-        let subscribed_events = self.validate_subscribed_events(&dto.subscribed_events).await?;
+        // 订阅的事件目录键：优先取 subscribed_events（多形态归一 + 目录/存量豁免校验）；
+        // 未传时由存量 event_types 兼容转换（方案 C：逗号串 → 映射 → JSON 数组），
+        // 空串 = 订阅全部（NULL）。转换结果不做目录强校验（存量自定义事件名合法）。
+        let subscribed_events = match &dto.subscribed_events {
+            Some(input) => {
+                let keys = input.to_keys();
+                let extra = Self::legacy_event_types_allowlist(&event_types);
+                self.validate_subscribed_events(&keys, &extra).await?
+            }
+            None => convert_legacy_event_types(&event_types)
+                .map(|v| serde_json::to_string(&v).unwrap_or_default())
+                .filter(|s| !s.is_empty()),
+        };
         self.validate_target_url(&dto.target_url).await?;
 
         let now = crate::common::datetime::now_naive();
@@ -812,7 +926,8 @@ impl SysWebHookService {
         );
         let event_types = dto
             .event_types
-            .unwrap_or(existing_event_types)
+            .clone()
+            .unwrap_or_else(|| existing_event_types.clone())
             .trim()
             .to_string();
         if !event_types.is_empty() {
@@ -824,10 +939,35 @@ impl SysWebHookService {
                 }
             }
         }
-        // 订阅的事件目录键：未传保持现值；传了则校验 + 覆盖（空数组 = 订阅全部）
+        // 订阅的事件目录键（方案 C 写入收敛）：
+        // - 显式传入 subscribed_events → 多形态归一 + 校验（目录键 ∪ 存量豁免集）后覆盖；
+        // - 未传时：传了 event_types 且与现值不同 → 重新兼容转换覆盖（存量前端改订阅）；
+        //   否则保持现值（部分更新语义：只改名称/URL 不触碰订阅配置）。
         let subscribed_events = match &dto.subscribed_events {
-            Some(_) => self.validate_subscribed_events(&dto.subscribed_events).await?,
-            None => existing_subscribed_events,
+            Some(input) => {
+                let keys = input.to_keys();
+                // 存量豁免集：影子 event_types（现值 + 本次传入）∪ 既有 subscribed_events 已有键
+                let mut extra = Self::legacy_event_types_allowlist(&existing_event_types);
+                extra.extend(Self::legacy_event_types_allowlist(&event_types));
+                if let Some(list) = existing_subscribed_events
+                    .as_deref()
+                    .and_then(|cur| serde_json::from_str::<Vec<String>>(cur.trim()).ok())
+                {
+                    extra.extend(list);
+                }
+                self.validate_subscribed_events(&keys, &extra).await?
+            }
+            None => {
+                let et_changed = dto.event_types.as_deref().map(str::trim)
+                    != Some(existing_event_types.trim());
+                if dto.event_types.is_some() && et_changed {
+                    convert_legacy_event_types(&event_types)
+                        .map(|v| serde_json::to_string(&v).unwrap_or_default())
+                        .filter(|s| !s.is_empty())
+                } else {
+                    existing_subscribed_events
+                }
+            }
         };
         // 目标 URL 变化时重新做 SSRF 校验
         if dto.target_url.trim() != existing.target_url {
@@ -1126,7 +1266,7 @@ impl SysWebHookService {
 
     // ==================== 事件分发 ====================
 
-    /// 分发事件到所有启用且订阅匹配的回调（火后即忘；存量 event_types 订阅口径）
+    /// 分发事件到所有启用且订阅匹配的回调（火后即忘；方案 C 收敛后的派发入口）
     ///
     /// 对于每个命中回调 spawn 一个独立任务投递，互不阻塞调用方（如登录请求）。
     /// 投递失败仅落库 + 日志，不向上抛错，保证事件分发绝不阻断主链路。
@@ -1135,8 +1275,11 @@ impl SysWebHookService {
     /// 同租户（`tenant_id`）的回调组，并在 payload 注入 `tenantId`，严禁跨租户触达
     /// （A 租户事件不得推给 B 租户 WebHook）。
     ///
-    /// 新代码请优先使用 [`Self::emit`] / [`emit_event`]（subscribed_events 目录口径）；
-    /// 本方法保留以兼容既有 `event_types` 订阅（login_success / scim_* 等存量事件）。
+    /// 方案 C（订阅双轨合并）：匹配口径收敛为 `subscribed_events` 列（旧
+    /// `event_types` 口径退役）——入参事件名先经 [`map_legacy_event_key`] 映射
+    /// （`login_success` → `login.success` 等目录键；映射表外事件如 `scim_*`
+    /// 原样保留），再用 [`hook_matches_subscribed`] 匹配（NULL/空 = 订阅全部，
+    /// 兼容存量行为；数据收敛迁移 m20261003_000004 已把存量订阅改写为新列）。
     pub fn dispatch_event(&self, event_type: &str, payload: serde_json::Value, tenant_id: i64) {
         let hook_repo = self.hook_repo.clone();
         let db = self.db.clone();
@@ -1153,11 +1296,13 @@ impl SysWebHookService {
                     return;
                 }
             };
+            // 方案 C：存量事件名映射为目录键（映射表外原样），统一按 subscribed_events 匹配
+            let mapped = map_legacy_event_key(&event_type).to_string();
             let matched: Vec<_> = groups
                 .into_iter()
                 .filter(|(tid, _)| *tid == tenant_id)
                 .flat_map(|(_, hooks)| hooks)
-                .filter(|h| hook_matches_event(&h.event_types, &event_type))
+                .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &mapped))
                 .collect();
             if matched.is_empty() {
                 return;
@@ -1173,7 +1318,8 @@ impl SysWebHookService {
             for hook in matched {
                 let hc = http.clone();
                 let db2 = db.clone();
-                let event_type = event_type.clone();
+                // 投递事件名统一目录口径（方案 C）；映射表外事件 mapped == 原样，scim 等无损
+                let event_type = mapped.clone();
                 let payload = payload.clone();
                 let enc_key = enc_key.clone();
                 tokio::spawn(async move {
@@ -1197,11 +1343,12 @@ impl SysWebHookService {
 
     /// 事件目录派发（subscribed_events 口径；火后即忘，供 [`emit_event`] 调用）
     ///
-    /// 与 [`Self::dispatch_event`] 的差异仅在订阅匹配列：
-    /// - dispatch_event 匹配存量 `event_types`（逗号分隔）；
-    /// - emit 匹配目录口径 `subscribed_events`（JSON 数组；NULL/空 = 订阅全部）。
+    /// 与 [`Self::dispatch_event`] 的差异：emit 直接收目录 `event_key`，无租户
+    /// 上下文参数，不做同租户过滤（目录事件为开放域广播，接收方按 payload 中的
+    /// `tenantId` 判定归属）；dispatch_event 仍保留同租户过滤（存量硬约束）。
+    /// 两者匹配口径已统一为 [`hook_matches_subscribed`]（方案 C）。
     ///
-    /// 派发链路完全一致：按租户分组加载启用回调 → 同租户过滤 → payload 注入 tenantId
+    /// 派发链路：加载启用回调 → `subscribed_events` 过滤（NULL/空 = 订阅全部）
     /// → 逐回调 spawn 真实出站投递（含 HMAC 签名）→ 失败仅留痕（web_hook_log）。
     fn emit(&self, event_key: &str, payload: serde_json::Value) {
         let hook_repo = self.hook_repo.clone();
@@ -1607,30 +1754,100 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_matches_empty_event_types_matches_all() {
-        assert!(hook_matches_event("", "login_success"));
-        assert!(hook_matches_event("  ", "anything"));
+    fn map_legacy_event_key_translates_known_names() {
+        // 映射表内：存量事件名 → 目录键
+        assert_eq!(map_legacy_event_key(EVENT_LOGIN_SUCCESS), "login.success");
+        assert_eq!(map_legacy_event_key(EVENT_LOGIN_FAILURE), "login.failed");
+        // 宽容变体 + 大小写/空白容忍
+        assert_eq!(map_legacy_event_key("login"), "login.success");
+        assert_eq!(map_legacy_event_key("login_fail"), "login.failed");
+        assert_eq!(map_legacy_event_key("Login_Failed"), "login.failed");
+        assert_eq!(map_legacy_event_key("  login_success "), "login.success");
+        // 映射表外：原样返回（SCIM / 自定义事件名保持旧口径语义）
+        assert_eq!(
+            map_legacy_event_key(EVENT_SCIM_USER_PROVISIONED),
+            EVENT_SCIM_USER_PROVISIONED
+        );
+        assert_eq!(map_legacy_event_key("my_event"), "my_event");
     }
 
     #[test]
-    fn hook_matches_comma_separated() {
-        assert!(hook_matches_event(
-            "login_success,user_created",
-            "login_success"
+    fn convert_legacy_event_types_to_catalog_keys() {
+        // 空串 = 订阅全部（None）
+        assert_eq!(convert_legacy_event_types(""), None);
+        assert_eq!(convert_legacy_event_types("   "), None);
+        // 全空元素 → 订阅全部
+        assert_eq!(convert_legacy_event_types(" , "), None);
+        // 映射 + 保留自定义串；空白容忍
+        assert_eq!(
+            convert_legacy_event_types(" login_success , my_event "),
+            Some(vec!["login.success".to_string(), "my_event".to_string()])
+        );
+        // SCIM 存量事件名原样保留
+        assert_eq!(
+            convert_legacy_event_types(EVENT_SCIM_USER_PROVISIONED),
+            Some(vec![EVENT_SCIM_USER_PROVISIONED.to_string()])
+        );
+    }
+
+    #[test]
+    fn dispatch_and_emit_match_consistently_after_mapping() {
+        // 方案 C 防回归：dispatch（映射后走 subscribed_events）与 emit（目录键直配）
+        // 对同一 hook 的匹配结果必须一致
+        let converted = convert_legacy_event_types("login_success,my_event")
+            .map(|v| serde_json::to_string(&v).unwrap_or_default());
+        let sub = converted.as_deref();
+        assert_eq!(
+            sub,
+            Some(r#"["login.success","my_event"]"#),
+            "转换产物应为 JSON 数组串"
+        );
+        // dispatch 路径：映射存量名后匹配
+        assert!(hook_matches_subscribed(
+            sub,
+            map_legacy_event_key(EVENT_LOGIN_SUCCESS)
         ));
-        assert!(hook_matches_event(
-            "login_success,user_created",
-            "user_created"
+        // emit 路径：目录键直接匹配 → 与 dispatch 同判定
+        assert!(hook_matches_subscribed(sub, "login.success"));
+        // 未订阅事件两口径一致不命中
+        assert!(!hook_matches_subscribed(sub, "role.created"));
+        // NULL（存量空 event_types）= 全部：两口径一致命中
+        assert!(hook_matches_subscribed(
+            None,
+            map_legacy_event_key(EVENT_LOGIN_SUCCESS)
         ));
-        assert!(!hook_matches_event(
-            "login_success,user_created",
-            "login_failure"
-        ));
-        // 大小写不敏感 + 空白容忍
-        assert!(hook_matches_event(
-            " Login_Success , user_created ",
-            "login_success"
-        ));
+        assert!(hook_matches_subscribed(None, "login.success"));
+    }
+
+    #[test]
+    fn legacy_map_identical_with_migration_map() {
+        // 服务层映射表与数据收敛迁移映射表必须逐项一致（单一事实源双份，防漂移）
+        let svc_map: Vec<(&str, &str)> = LEGACY_EVENT_KEY_MAP.to_vec();
+        let mig_map: Vec<(&str, &str)> =
+            migration::m20261003_000004_webhook_unify::LEGACY_EVENT_KEY_MAP.to_vec();
+        assert_eq!(svc_map, mig_map, "两份映射表漂移：服务层 {svc_map:?} vs 迁移 {mig_map:?}");
+    }
+
+    #[test]
+    fn subscribed_input_accepts_all_shapes() {
+        // 新前端：数组形态
+        let list = serde_json::from_str::<SubscribedEventsInput>(r#"["user.created"]"#)
+            .expect("数组形态应可反序列化");
+        assert_eq!(list.to_keys(), vec!["user.created".to_string()]);
+        // 存量前端：JSON 数组串（旧版 JSON.stringify 提交形态）
+        let raw = SubscribedEventsInput::Raw(r#"["user.created","login.success"]"#.to_string());
+        assert_eq!(
+            raw.to_keys(),
+            vec!["user.created".to_string(), "login.success".to_string()]
+        );
+        // 存量前端：逗号串
+        let comma = SubscribedEventsInput::Raw("user.created, login.success".to_string());
+        assert_eq!(
+            comma.to_keys(),
+            vec!["user.created".to_string(), "login.success".to_string()]
+        );
+        // 空串 = 订阅全部
+        assert!(SubscribedEventsInput::Raw(String::new()).to_keys().is_empty());
     }
 
     #[test]

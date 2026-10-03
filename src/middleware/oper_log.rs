@@ -30,6 +30,12 @@ use futures::FutureExt;
 use crate::service::sys_oper_log_service::OperLogRecord;
 use crate::state::AppState;
 use crate::utils::ip::extract_client_ip;
+// C9（日志脱敏强制）统一出口：脱敏函数自本文件迁移至 utils::masking（行为不变），
+// 经别名保持原有调用点与单测引用（mask_phone 等）零改动。
+use crate::utils::masking::{
+    log_mask_bankcard as mask_bankcard, log_mask_email as mask_email,
+    log_mask_idcard as mask_idcard, log_mask_phone as mask_phone,
+};
 
 /// 「目标租户单元」：中间件在请求处理前注入到 request extensions，
 /// handler 在确知「被操作资源所属租户」时写入，中间件在 `next.run` 返回后读取并落库。
@@ -961,58 +967,10 @@ fn sanitize_value(v: &mut serde_json::Value) {
     }
 }
 
-/// 手机号脱敏：保留前 3 后 4，中间 4 位用 * 替换
-/// 使用 char 迭代避免 UTF-8 多字节边界切片 panic（P0-New-2）
-fn mask_phone(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() < 7 {
-        return "***".to_string();
-    }
-    let head: String = chars[..3].iter().collect();
-    let tail: String = chars[chars.len() - 4..].iter().collect();
-    format!("{}****{}", head, tail)
-}
-
-/// 身份证号脱敏：保留前 4 后 2，中间 8 位用 * 替换
-/// 使用 char 迭代避免 UTF-8 多字节边界切片 panic（P0-New-2）
-fn mask_idcard(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() < 10 {
-        return "***".to_string();
-    }
-    let head: String = chars[..4].iter().collect();
-    let tail: String = chars[chars.len() - 2..].iter().collect();
-    format!("{}********{}", head, tail)
-}
-
-/// 邮箱脱敏：保留首字符和 @ 域名，中间用 * 填充（如 a***@example.com）（P0-33 改进）
-/// 使用 char 迭代避免 UTF-8 多字节边界切片 panic
-fn mask_email(s: &str) -> String {
-    match s.find('@') {
-        Some(at) if at > 0 => {
-            let (local, domain) = s.split_at(at);
-            let mut chars = local.chars();
-            // 仅保留首字符，其余本地部分替换为 ***
-            let head = chars.next().map(|c| c.to_string()).unwrap_or_default();
-            format!("{}***{}", head, domain)
-        }
-        // 非 email 格式或本地部分为空，直接掩码
-        _ => "***".to_string(),
-    }
-}
-
-/// 银行卡号脱敏：保留前 4 后 4，中间用 * 填充（P0-33 改进）
-/// 使用 char 迭代避免 UTF-8 多字节边界切片 panic
-fn mask_bankcard(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() < 8 {
-        return "***".to_string();
-    }
-    let head: String = chars[..4].iter().collect();
-    let tail: String = chars[chars.len() - 4..].iter().collect();
-    let mask: String = "*".repeat(chars.len() - 8);
-    format!("{}{}{}", head, mask, tail)
-}
+// 脱敏函数已迁移至 utils::masking（C9 统一出口，行为不变）：
+// mask_phone / mask_idcard / mask_email / mask_bankcard 现为
+// crate::utils::masking::{log_mask_phone, log_mask_idcard, log_mask_email,
+// log_mask_bankcard} 的别名引用，见文件头部 use 语句。
 
 #[cfg(test)]
 mod tests {

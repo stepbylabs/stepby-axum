@@ -160,7 +160,9 @@ async fn table_exists(manager: &SchemaManager<'_>, table: &str) -> Result<bool, 
 ///
 /// payload_example 为真实字段样例：emit_event 各接入点的实际 payload 与此对齐，
 /// test-send 直接以本样例构造真实出站投递（含 HMAC 签名）。
-const SEED_EVENTS: &[(&str, &str, &str, &str)] = &[
+/// **单一事实源**：迁移 up 与 initialize 兜底（原 WEBHOOK_SEED_EVENTS 手抄副本已删除）
+/// 共用本常量。
+pub const WEBHOOK_SEED_EVENTS: &[(&str, &str, &str, &str)] = &[
     (
         "user.created",
         "用户创建",
@@ -259,69 +261,151 @@ const SEED_EVENTS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+// ==================== 单一事实源（迁移 up 与 initialize 兜底共用） ====================
+//
+// 存量库不跑 Migrator::up，`initialize/mod.rs::ensure_webhook_event_tables` 每次启动
+// 幂等兜底。建表 SQL / 索引 / 加列 DDL / 种子事件 / 菜单按钮全部以本文件导出项为准
+// （initialize 侧原手抄副本已删除，漂移在物理上不可能）。幂等前缀（INSERT OR IGNORE /
+// ON CONFLICT / IGNORE）、索引容错与列存在性检查是执行机制而非 SQL 内容，
+// 由两侧各自的执行器负责（迁移：execute_idempotent_insert / IndexDdlExt /
+// add_column_if_absent；兜底：flow_insert / ensure_tenant_index / sso_has_column）。
+
+/// webhook 域索引（迁移与兜底共用）
+///
+/// 元组：(索引名, 表名, 列清单, 是否唯一)。`sys_pat` 上的索引两侧均在
+/// "表存在"前提下执行（极老存量库可能没有该表）。
+pub const WEBHOOK_INDEXES: &[(&str, &str, &str, bool)] = &[
+    (
+        "uk_sys_webhook_event_key",
+        "sys_webhook_event",
+        "event_key",
+        true,
+    ),
+    ("uk_sys_pat_access_key", "sys_pat", "access_key", true),
+];
+
+/// 加列 DDL 片段（迁移与兜底共用；列存在性检查各侧自持）
+/// sys_web_hook.subscribed_events：JSON 数组字符串；NULL/空 = 订阅全部（兼容存量行为）
+pub const WEB_HOOK_SUBSCRIBED_EVENTS_DDL: &str = "subscribed_events TEXT NULL";
+/// sys_web_hook_log.source：NULL = 事件派发，'test' = 手动测试发送
+pub const WEB_HOOK_LOG_SOURCE_DDL: &str = "source VARCHAR(16) NULL";
+/// sys_pat.access_key：AK/SK 开放 API 凭据
+pub const PAT_ACCESS_KEY_DDL: &str = "access_key VARCHAR(32) NULL";
+/// sys_pat.secret_key：信封加密存储（跟随 oauth client_secret 的 CONFIG_ENC_KEY 机制），
+/// VARCHAR(255) 容纳密文
+pub const PAT_SECRET_KEY_DDL: &str = "secret_key VARCHAR(255) NULL";
+
+/// 三方言建表 SQL（迁移 up 与 initialize 兜底共用单一来源）
+///
+/// `id` 跨方言自增主键：SQLite INTEGER PRIMARY KEY / MySQL AUTO_INCREMENT / PG BIGSERIAL。
+pub fn create_table_sql(backend: sea_orm_migration::sea_orm::DatabaseBackend) -> String {
+    use sea_orm_migration::sea_orm::DatabaseBackend;
+    let id_col = match backend {
+        DatabaseBackend::Sqlite => "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        DatabaseBackend::Postgres => "id BIGSERIAL PRIMARY KEY",
+        DatabaseBackend::MySql => "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+    };
+    format!(
+        "CREATE TABLE IF NOT EXISTS sys_webhook_event (
+            {id_col},
+            event_key       VARCHAR(64) NOT NULL,
+            name            VARCHAR(64) NOT NULL,
+            description     VARCHAR(255) NULL,
+            payload_example TEXT NULL,
+            enabled         CHAR(1) NOT NULL DEFAULT '1',
+            created_at      TIMESTAMP NULL,
+            updated_at      TIMESTAMP NULL
+        )"
+    )
+}
+
+/// 种子事件 INSERT 语句体（不含幂等前缀——迁移 execute_idempotent_insert /
+/// 兜底 flow_insert 各自拼接，语义等价）
+///
+/// 单引号防御性转义（payload_example 含 JSON 双引号无需处理；描述含单引号场景防御）。
+pub fn webhook_event_seed_bodies(now_expr: &str) -> Vec<String> {
+    let esc = |s: &str| s.replace('\'', "''");
+    WEBHOOK_SEED_EVENTS
+        .iter()
+        .map(|(event_key, name, desc, example)| {
+            format!(
+                "sys_webhook_event (event_key, name, description, payload_example, enabled, created_at, updated_at) VALUES \
+                ('{}', '{}', '{}', '{}', '1', {now_expr}, {now_expr})",
+                esc(event_key),
+                esc(name),
+                esc(desc),
+                esc(example),
+            )
+        })
+        .collect()
+}
+
+/// webhook 菜单按钮种子列清单（迁移与兜底共用）
+pub const WEBHOOK_MENU_COLS: &str = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
+
+/// 菜单按钮种子行（结构化元组，迁移与兜底共用）
+///
+/// 元组：(menu_id, menu_name, parent_id, order_num, perms, icon, remark)
+/// 挂「回调配置」页面（menu_id=158）下，F 按钮形态。
+pub const WEBHOOK_MENU_ROWS: &[(i64, &str, i64, i64, &str, &str, &str)] = &[
+    (
+        3562,
+        "事件目录",
+        158,
+        1,
+        "system:webhook:event:list",
+        "list",
+        "WebHook 事件目录查询",
+    ),
+    (
+        3563,
+        "测试发送",
+        158,
+        2,
+        "system:webhook:test-send",
+        "message",
+        "按事件样例构造真实测试发送",
+    ),
+];
+
+/// 菜单按钮角色关联（role_id=2 超管角色）
+pub const WEBHOOK_MENU_ROLE_ID: i64 = 2;
+
+/// 菜单按钮 INSERT 语句体（不含幂等前缀，语义同上）
+///
+/// 返回顺序：菜单 3562 → role_menu(2,3562) → 菜单 3563 → role_menu(2,3563)。
+pub fn webhook_menu_seed_bodies(now_expr: &str) -> Vec<String> {
+    let mut bodies = Vec::with_capacity(WEBHOOK_MENU_ROWS.len() * 2);
+    for (menu_id, name, parent_id, order_num, perms, icon, remark) in WEBHOOK_MENU_ROWS {
+        bodies.push(format!(
+            "{WEBHOOK_MENU_COLS} VALUES \
+            ({menu_id}, '{name}', {parent_id}, {order_num}, '', '', '', '', '1', '0', 'F', '0', '0', '{perms}', '{icon}', 'admin', {now_expr}, '{remark}', '0')"
+        ));
+        bodies.push(format!(
+            "sys_role_menu (role_id, menu_id) VALUES ({WEBHOOK_MENU_ROLE_ID}, {menu_id})"
+        ));
+    }
+    bodies
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // ==================== 1. 建表 sys_webhook_event ====================
-        // id 跨方言自增主键：SQLite INTEGER PRIMARY KEY / MySQL AUTO_INCREMENT / PG BIGSERIAL
-        let id_col = if is_sqlite(manager) {
-            "id INTEGER PRIMARY KEY AUTOINCREMENT"
-        } else if is_postgres(manager) {
-            "id BIGSERIAL PRIMARY KEY"
-        } else {
-            "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"
-        };
-        let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS sys_webhook_event (
-                {id_col},
-                event_key       VARCHAR(64) NOT NULL,
-                name            VARCHAR(64) NOT NULL,
-                description     VARCHAR(255) NULL,
-                payload_example TEXT NULL,
-                enabled         CHAR(1) NOT NULL DEFAULT '1',
-                created_at      TIMESTAMP NULL,
-                updated_at      TIMESTAMP NULL
-            )"
-        );
+        // ==================== 1. 建表 sys_webhook_event（单一事实源） ====================
+        let backend = manager.get_connection().get_database_backend();
         manager
             .get_connection()
-            .execute_unprepared(&create_sql)
-            .await?;
-        // event_key 唯一索引（幂等；MySQL 经 IndexDdlExt 容错"索引已存在"）
-        manager
-            .get_connection()
-            .execute_index_ddl_ic(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uk_sys_webhook_event_key ON sys_webhook_event (event_key)",
-            )
+            .execute_unprepared(&create_table_sql(backend))
             .await?;
 
-        // ==================== 2. 种子事件 ====================
-        let now = now_expr(manager);
-        for (event_key, name, desc, example) in SEED_EVENTS {
-            // 单引号转义（payload_example 含 JSON 双引号，无需处理；描述含单引号场景防御性替换）
-            let esc = |s: &str| s.replace('\'', "''");
-            execute_idempotent_insert(
-                manager,
-                &format!(
-                    "sys_webhook_event (event_key, name, description, payload_example, enabled, created_at, updated_at) VALUES \
-                    ('{}', '{}', '{}', '{}', '1', {now}, {now})",
-                    esc(event_key),
-                    esc(name),
-                    esc(desc),
-                    esc(example),
-                ),
-            )
-            .await?;
-        }
-
-        // ==================== 3. 加列（幂等，存量行 NULL 兼容） ====================
+        // ==================== 2. 加列（单一事实源 DDL；幂等，存量行 NULL 兼容） ====================
         // sys_web_hook.subscribed_events：JSON 数组字符串；NULL/空 = 订阅全部（兼容存量行为）
         if table_exists(manager, "sys_web_hook").await? {
             add_column_if_absent(
                 manager,
                 "sys_web_hook",
                 "subscribed_events",
-                "subscribed_events TEXT NULL",
+                WEB_HOOK_SUBSCRIBED_EVENTS_DDL,
             )
             .await?;
         }
@@ -331,70 +415,66 @@ impl MigrationTrait for Migration {
                 manager,
                 "sys_web_hook_log",
                 "source",
-                "source VARCHAR(16) NULL",
+                WEB_HOOK_LOG_SOURCE_DDL,
             )
             .await?;
         }
         // sys_pat.access_key / secret_key：AK/SK 开放 API 凭据
         // SK 信封加密存储（跟随 oauth client_secret 的 CONFIG_ENC_KEY 机制），VARCHAR(255) 容纳密文
         if table_exists(manager, "sys_pat").await? {
-            add_column_if_absent(manager, "sys_pat", "access_key", "access_key VARCHAR(32) NULL")
-                .await?;
-            add_column_if_absent(manager, "sys_pat", "secret_key", "secret_key VARCHAR(255) NULL")
-                .await?;
-            // AK 鉴权查库唯一索引
+            add_column_if_absent(manager, "sys_pat", "access_key", PAT_ACCESS_KEY_DDL).await?;
+            add_column_if_absent(manager, "sys_pat", "secret_key", PAT_SECRET_KEY_DDL).await?;
+        }
+
+        // ==================== 3. 索引（单一事实源；幂等） ====================
+        // 加列之后执行：uk_sys_pat_access_key 依赖 access_key 列已存在。
+        // sys_webhook_event 刚建表必存在；sys_pat 不存在（极老存量库）时跳过。
+        // MySQL 经 IndexDdlExt 容错"索引已存在"。
+        for (idx_name, table, cols, unique) in WEBHOOK_INDEXES {
+            if !table_exists(manager, table).await? {
+                continue;
+            }
+            let unique_kw = if *unique { "UNIQUE " } else { "" };
             manager
                 .get_connection()
-                .execute_index_ddl_ic(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uk_sys_pat_access_key ON sys_pat (access_key)",
-                )
+                .execute_index_ddl_ic(&format!(
+                    "CREATE {unique_kw}INDEX IF NOT EXISTS {idx_name} ON {table} ({cols})"
+                ))
                 .await?;
         }
 
-        // ==================== 4. 菜单按钮权限 ====================
+        // ==================== 4. 种子事件（单一事实源） ====================
+        let now = now_expr(manager);
+        for body in webhook_event_seed_bodies(&now) {
+            execute_idempotent_insert(manager, &body).await?;
+        }
+
+        // ==================== 5. 菜单按钮权限（单一事实源） ====================
         // 事件目录列表 / 测试发送，挂「回调配置」页面（menu_id=158）下，授予超管角色 role_id=2
-        const BTN_EVENT_LIST_ID: i64 = 3562;
-        const BTN_TEST_SEND_ID: i64 = 3563;
-        const PARENT_PAGE_ID: i64 = 158;
-
-        let btn_event = format!(
-            "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
-            ({BTN_EVENT_LIST_ID}, '事件目录', {PARENT_PAGE_ID}, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:event:list', 'list', 'admin', {now}, 'WebHook 事件目录查询', '0')"
-        );
-        execute_idempotent_insert(manager, &btn_event).await?;
-        execute_idempotent_insert(
-            manager,
-            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {BTN_EVENT_LIST_ID})"),
-        )
-        .await?;
-
-        let btn_test = format!(
-            "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
-            ({BTN_TEST_SEND_ID}, '测试发送', {PARENT_PAGE_ID}, 2, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:test-send', 'message', 'admin', {now}, '按事件样例构造真实测试发送', '0')"
-        );
-        execute_idempotent_insert(manager, &btn_test).await?;
-        execute_idempotent_insert(
-            manager,
-            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {BTN_TEST_SEND_ID})"),
-        )
-        .await?;
+        for body in webhook_menu_seed_bodies(&now) {
+            execute_idempotent_insert(manager, &body).await?;
+        }
 
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        const BTN_EVENT_LIST_ID: i64 = 3562;
-        const BTN_TEST_SEND_ID: i64 = 3563;
+        // 菜单 id 从种子行单一事实源推导（3562/3563）
+        let menu_ids = WEBHOOK_MENU_ROWS
+            .iter()
+            .map(|(id, ..)| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         manager
             .get_connection()
             .execute_unprepared(&format!(
-                "DELETE FROM sys_role_menu WHERE menu_id IN ({BTN_EVENT_LIST_ID}, {BTN_TEST_SEND_ID})"
+                "DELETE FROM sys_role_menu WHERE menu_id IN ({menu_ids})"
             ))
             .await?;
         manager
             .get_connection()
             .execute_unprepared(&format!(
-                "DELETE FROM sys_menu WHERE menu_id IN ({BTN_EVENT_LIST_ID}, {BTN_TEST_SEND_ID})"
+                "DELETE FROM sys_menu WHERE menu_id IN ({menu_ids})"
             ))
             .await?;
         manager
