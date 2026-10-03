@@ -183,6 +183,8 @@ pub async fn login(
     match &vo {
         Ok(v) => {
             // Webhook 事件目录（开放域）：登录成功事件（subscribed_events 过滤口径）
+            // P0 跨租户修复：tenant_id 取登录用户租户（与 payload tenantId 同源），
+            // 事件仅投递给同租户回调
             crate::service::sys_web_hook_service::emit_event(
                 &state,
                 "login.success",
@@ -191,11 +193,14 @@ pub async fn login(
                     "ip": login_ip,
                     "tenantId": v.tenant_id,
                 }),
+                v.tenant_id,
             )
             .await;
         }
         Err(err) => {
             // Webhook 事件目录（开放域）：登录失败事件（含原因供外部风控）
+            // P0 跨租户修复：登录失败无用户租户可取，取登录尝试所属主机租户上下文
+            // （HostTenant 语义：None = 平台 host → 平台租户 0，非硬编码）
             crate::service::sys_web_hook_service::emit_event(
                 &state,
                 "login.failed",
@@ -204,6 +209,7 @@ pub async fn login(
                     "ip": login_ip,
                     "reason": err.to_string(),
                 }),
+                host_tenant.tid().unwrap_or(0),
             )
             .await;
         }

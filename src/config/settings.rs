@@ -1385,6 +1385,10 @@ pub struct PatConfig {
     #[serde(default = "default_pat_max_expire_days")]
     pub max_expire_days: i64,
     /// 每用户最多有效令牌数（防令牌泛滥）
+    ///
+    /// 创建时若该用户有效令牌数已达上限，返回 400 + `error.pat.count_exceeded`。
+    /// 缺省 50（多设备 + CI/E2E 并发余量，见 `default_pat_max_per_user`）；
+    /// 可用环境变量 `PAT_MAX_PER_USER` 覆盖（须 > 0）。
     #[serde(default = "default_pat_max_per_user")]
     pub max_per_user: i64,
 }
@@ -1413,8 +1417,16 @@ fn default_pat_default_expire_days() -> i64 {
 fn default_pat_max_expire_days() -> i64 {
     365
 }
+/// `max_per_user` 缺省值：50（PAT 每用户有效令牌上限）
+///
+/// 取值理由：默认 20 在"多设备 + CI/E2E 并发"场景下余量不足——
+/// 单用户常见占用为多台日常设备（笔记本/手机/桌面）各持 1-2 个长期令牌，
+/// 而 E2E/集成测试每轮常创建 2-3 个令牌且不主动删除，多轮累积极易触顶
+/// （400 + `error.pat.count_exceeded`）导致流水线误报。取 50 为
+/// "生产日常占用（≈10）+ 测试/CI 并发余量"留出约 5 倍空间，同时仍能
+/// 防御令牌无限泛滥；更高需求通过配置文件或 `PAT_MAX_PER_USER` 显式上调。
 fn default_pat_max_per_user() -> i64 {
-    20
+    50
 }
 
 /// 单点登录 / OIDC Provider 配置（Tier B：本系统作为授权服务器）
@@ -2577,6 +2589,15 @@ impl Settings {
         {
             self.scim.tenant_id = n;
         }
+        // PAT 每用户有效令牌上限（PAT_MAX_PER_USER）：容器/E2E 场景用环境变量调整额度
+        // （E2E 每轮创建 2-3 个令牌不删，固定额度易在流水线中触顶 400）。
+        // 非法（非数字或 ≤ 0）时忽略并告警，保持配置文件/内置默认值（50）。
+        if let Ok(v) = std::env::var("PAT_MAX_PER_USER")
+            && let Ok(n) = v.parse::<i64>()
+            && n > 0
+        {
+            self.pat.max_per_user = n;
+        }
     }
 
     /// 仅从环境变量构建配置（无配置文件场景，如容器通过环境变量注入）
@@ -2930,6 +2951,29 @@ mod tests {
             s.permission_deny_by_default,
             "permission_deny_by_default 缺省必须为 true（fail-closed）"
         );
+    }
+
+    /// PAT 每用户有效令牌上限缺省值回归：缺省 50（多设备 + CI/E2E 并发余量）。
+    ///
+    /// 覆盖两条取值路径：① 内置默认（`PatConfig::default()` / `from_env_only()`）；
+    /// ② serde 缺省（配置文件缺 `[pat]` 段或缺 `max_per_user` 键）。
+    #[test]
+    fn test_pat_max_per_user_default() {
+        assert_eq!(default_pat_max_per_user(), 50);
+        assert_eq!(PatConfig::default().max_per_user, 50);
+        // 空表反序列化 = 全部字段走 serde 缺省（等价于配置文件缺 [pat] 段）
+        let cfg: PatConfig = toml::from_str("").expect("空表应可全缺省反序列化");
+        assert_eq!(cfg.max_per_user, 50);
+    }
+
+    /// 模板一致性回归：config.toml.example 的 [pat] 示例值应与内置默认对齐，
+    /// 防止模板改动后与缺省行为悄然漂移。
+    #[test]
+    fn test_pat_template_matches_default() {
+        let template =
+            std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
+        let s: Settings = toml::from_str(&template).expect("模板应可解析");
+        assert_eq!(s.pat.max_per_user, default_pat_max_per_user());
     }
 
     /// v5-D9：同意票档位解析与 TTL 夹取（默认 = 现状；非法值 fail-safe 回落 `off`）。

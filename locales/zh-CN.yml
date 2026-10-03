@@ -444,6 +444,14 @@ error:
     id_invalid: 日志 ID 不合法
     anonymous: 匿名
     chain_disabled: 操作日志防篡改链未启用
+  report_board:
+    not_found: 看板不存在
+    name_exists: 同名看板已存在
+    name_invalid: 看板名称长度必须在1-64之间
+    enabled_invalid: 启用状态不合法（仅允许 0/1）
+    config_invalid: 看板配置不合法：%{reason}
+    source_unknown: 未知数据源：%{key}
+    range_invalid: 时间范围不合法（仅允许 7d/30d）
   audit_change:
     not_found: 变更留痕记录不存在
     export_empty: 没有符合条件的变更留痕可导出

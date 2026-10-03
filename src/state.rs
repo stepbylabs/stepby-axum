@@ -108,6 +108,8 @@ pub struct AppState {
     pub http_debug_service: SysHttpDebugService,
     /// 报表中心 + 定时订阅推送 Service
     pub report_service: SysReportService,
+    /// 报表看板（配置化只读报表 v1；数据源白名单）
+    pub report_board_service: crate::service::sys_report_board_service::SysReportBoardService,
     /// WebHook 事件订阅 Service（出站回调配置 + 投递记录 + 事件分发）
     pub web_hook_service: SysWebHookService,
     /// 邮件发送 Service（未启用时降级为 no-op）
@@ -359,6 +361,11 @@ impl AppState {
             ),
             http_debug_service: SysHttpDebugService::default(),
             report_service: SysReportService::new(db.clone(), config.clone()),
+            report_board_service:
+                crate::service::sys_report_board_service::SysReportBoardService::new(
+                    db.clone(),
+                    store.clone(),
+                ),
             web_hook_service: SysWebHookService::new(db.clone(), config.config_enc_key.clone()),
             mailer_service: MailerService::new(config.clone()),
             job_scheduler,

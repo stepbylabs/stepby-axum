@@ -41,6 +41,7 @@ pub mod sys_pat_service;
 pub mod sys_role_field_perm_service;
 pub mod sys_post_service;
 pub mod sys_rate_limit_service;
+pub mod sys_report_board_service;
 pub mod sys_report_service;
 pub mod sys_role_service;
 pub mod sys_task_service;

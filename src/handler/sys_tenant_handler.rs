@@ -107,6 +107,8 @@ pub async fn add(
         }),
     );
     // Webhook 事件目录（开放域）：创建事务已提交，派发 tenant.created（subscribed_events 过滤口径）
+    // P0 跨租户修复：操作者为平台管理员（无业务租户上下文），事件主体是**新租户**，
+    // 故 tenant_id 取事件主体的租户 ID（= payload 内 tenantId，接收方判定归属的事实源）
     crate::service::sys_web_hook_service::emit_event(
         &state,
         "tenant.created",
@@ -116,6 +118,7 @@ pub async fn add(
             "tenantName": vo.tenant_name,
             "operator": operator.username(),
         }),
+        vo.tenant_id,
     )
     .await;
     Ok(AjaxResult::success(vo))

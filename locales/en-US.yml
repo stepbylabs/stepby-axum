@@ -444,6 +444,14 @@ error:
     id_invalid: Invalid log ID
     anonymous: Anonymous
     chain_disabled: Operation log tamper-proof chain is not enabled
+  report_board:
+    not_found: Report board not found
+    name_exists: A board with the same name already exists
+    name_invalid: Board name must be 1-64 characters
+    enabled_invalid: Enabled value invalid (only 0/1 allowed)
+    config_invalid: "Invalid board config: %{reason}"
+    source_unknown: "Unknown data source: %{key}"
+    range_invalid: Invalid time range (only 7d/30d allowed)
   audit_change:
     not_found: Audit change record not found
     export_empty: No audit change records match the export criteria

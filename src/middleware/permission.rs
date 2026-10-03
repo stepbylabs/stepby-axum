@@ -590,6 +590,17 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // 见 m20260819_000002_http_debugger_menu）。执行与查看同权，避免开发/运维自行加按钮。
     ("POST", "/tool/http-debug/execute", "tool:httpDebug:list"),
 
+    // ===== 报表看板（配置化只读报表 v1）=====
+    // 权限对齐 sys_menu 迁移种子（tool/reportBoard/index 页面，C 4130 / F 4131，
+    // 见 m20261003_000006_report_board）。读操作统一 list 权限，写操作统一 save 权限。
+    ("GET", "/tool/report-board/list", "tool:reportBoard:list"),
+    ("GET", "/tool/report-board/{boardId}", "tool:reportBoard:list"),
+    ("GET", "/tool/report-board/sources", "tool:reportBoard:list"),
+    ("GET", "/tool/report-board/data/{sourceKey}", "tool:reportBoard:list"),
+    ("POST", "/tool/report-board", "tool:reportBoard:save"),
+    ("PUT", "/tool/report-board/{boardId}", "tool:reportBoard:save"),
+    ("DELETE", "/tool/report-board/{boardId}", "tool:reportBoard:save"),
+
     // ===== 文件管理 =====
     ("GET", "/system/file/list", "system:file:list"),
     // 上传权限对齐 sys_menu 按钮种子 3012（system:file:upload，见 m20260802_000004），

@@ -102,6 +102,7 @@ pub async fn add(
         .add_notice(dto, operator.username(), operator.tenant_id(), Some(&state))
         .await?;
     // Webhook 事件目录（开放域）：新增事务已提交，派发 notice.published
+    // P0 跨租户修复：tenant_id 取操作者租户，事件仅投递给同租户回调
     crate::service::sys_web_hook_service::emit_event(
         &state,
         "notice.published",
@@ -110,6 +111,7 @@ pub async fn add(
             "tenantId": operator.tenant_id(),
             "operator": operator.username(),
         }),
+        operator.tenant_id(),
     )
     .await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.add")))

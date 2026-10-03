@@ -25,14 +25,36 @@ async fn query_subscribed_events(ctx: &TestContext, id: i64) -> Option<String> {
         .flatten()
 }
 
+/// 查询登录用户（admin）所属租户 ID（P0 跨租户修复后事件按租户过滤，hook 必须插在同租户）
+async fn query_admin_tenant_id(ctx: &TestContext) -> i64 {
+    let rows = ctx
+        .state
+        .db
+        .query_all(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT tenant_id FROM sys_user WHERE user_name = 'admin'".to_string(),
+        ))
+        .await
+        .expect("查询 admin 租户失败");
+    rows.first()
+        .and_then(|r| r.try_get::<i64>("", "tenant_id").ok())
+        .expect("种子 admin 必须存在")
+}
+
 /// 以存量形态直插回调（绕过 SSRF/DTO 校验，模拟迁移前的库内数据）。
+/// `tenant_id`：回调归属租户（事件按租户过滤，须与登录用户同租户才会命中）。
 /// target_url 指向必拒绝端口，投递必然失败但会留痕（web_hook_log），供计数断言。
-async fn insert_legacy_hook(ctx: &TestContext, name: &str, event_types: &str) -> i64 {
+async fn insert_legacy_hook(
+    ctx: &TestContext,
+    tenant_id: i64,
+    name: &str,
+    event_types: &str,
+) -> i64 {
     let sql = format!(
         "INSERT INTO sys_web_hook \
          (tenant_id, hook_name, event_types, subscribed_events, target_url, content_type, \
           timeout_secs, status, del_flag, create_time, update_time) \
-         VALUES (1, '{name}', '{event_types}', NULL, 'http://127.0.0.1:1/hook', 'json', \
+         VALUES ({tenant_id}, '{name}', '{event_types}', NULL, 'http://127.0.0.1:1/hook', 'json', \
           2, '0', '0', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
     );
     let res = ctx
@@ -92,8 +114,10 @@ async fn test_webhook_unify_and_login_dispatched_once() {
     let ctx = TestContext::new().await;
 
     // ---- 1. 造存量数据：'login' 订阅 + 空订阅（= 全部）----
-    let hook_login = insert_legacy_hook(&ctx, "it_unify_login", " login , my_event ").await;
-    let hook_all = insert_legacy_hook(&ctx, "it_unify_all", "").await;
+    // P0 跨租户修复后事件按租户过滤：hook 必须插在登录用户（admin）同租户才会命中
+    let admin_tid = query_admin_tenant_id(&ctx).await;
+    let hook_login = insert_legacy_hook(&ctx, admin_tid, "it_unify_login", " login , my_event ").await;
+    let hook_all = insert_legacy_hook(&ctx, admin_tid, "it_unify_all", "").await;
     assert!(hook_login > 0 && hook_all > 0, "存量 hook 应插入成功");
     assert_eq!(
         query_subscribed_events(&ctx, hook_login).await,

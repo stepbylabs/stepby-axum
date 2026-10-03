@@ -497,6 +497,12 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化字段级权限 M2 兜底失败: {}", e))?;
 
+        // 4.5j 报表看板兜底（等价迁移 m20261003_000006_report_board）：
+        //      sys_report_board 建表 + 属主索引 + 菜单种子 4130/4131。
+        ensure_report_board_tables(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化报表看板兜底失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -4906,6 +4912,35 @@ pub(crate) async fn ensure_role_field_perm_tables(db: &DatabaseConnection) -> an
     tracing::info!(
         "字段级权限 M2 兜底完成（sys_role_field_perm / 菜单 4120-4121 / sys.fieldPerm.enabled，幂等）"
     );
+    Ok(())
+}
+
+/// 报表看板兜底（等价迁移 `m20261003_000006_report_board`）：
+/// - 建表 `sys_report_board`（配置化只读报表看板，UNIQUE(user_id, name)）
+/// - 属主查询索引 idx_report_board_user
+/// - 菜单种子幂等：系统工具目录 C 页面 4130（tool:reportBoard:list）/
+///   F 按钮 4131（tool:reportBoard:save）+ role_menu(role_id=2)
+pub(crate) async fn ensure_report_board_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    // 单一事实源：迁移文件导出的建表 SQL / 索引 / 菜单种子
+    use migration::m20261003_000006_report_board as mig;
+
+    let backend = db.get_database_backend();
+
+    // 1) 建表（引用迁移 create_table_sql；UNIQUE 约束随 IF NOT EXISTS 建表幂等）
+    flow_exec(db, mig::create_table_sql(backend)).await?;
+
+    // 2) 属主查询索引（引用迁移 REPORT_BOARD_INDEXES；ensure_tenant_index 三方言幂等）
+    for (name, table, cols) in mig::REPORT_BOARD_INDEXES {
+        ensure_tenant_index(db, table, name, cols, false).await?;
+    }
+
+    // 3) 菜单种子（引用迁移 report_board_menu_seed_bodies；perms 与 PERM_ROUTE_TABLE 对齐）
+    let now = flow_now(db);
+    for body in mig::report_board_menu_seed_bodies(&now) {
+        flow_insert(db, &body).await?;
+    }
+
+    tracing::info!("报表看板兜底完成（sys_report_board / 菜单 4130-4131，幂等）");
     Ok(())
 }
 
