@@ -108,12 +108,22 @@ pub async fn list(
         tracing::warn!(sub = %operator.user_id(), "用户列表: JWT sub 解析失败，拒绝访问");
         AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
     })?;
+    // M2 字段级权限：裁剪判定单一入口（三层开关收敛；关闭态恒空集合 = 零行为变化）
+    let hidden_user_fields = state
+        .field_perm_service
+        .hidden_fields(
+            Some(operator_user_id),
+            operator.tenant_id(),
+            "sys_user",
+        )
+        .await;
     let (rows, total) = state
         .user_service
         .get_user_page(
             query,
             Some(operator_user_id),
             crate::common::tenant::tenant_scope(operator.tenant_id()),
+            &hidden_user_fields,
         )
         .await?;
     Ok(TableDataInfo::new(total, rows))
@@ -144,12 +154,22 @@ pub async fn export(
         tracing::warn!(sub = %operator.user_id(), "用户导出: JWT sub 解析失败，拒绝访问");
         AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
     })?;
+    // M2 字段级权限：导出与列表同口径裁剪（判定单一入口；关闭态恒空集合 = 零行为变化）
+    let hidden_user_fields = state
+        .field_perm_service
+        .hidden_fields(
+            Some(operator_user_id),
+            operator.tenant_id(),
+            "sys_user",
+        )
+        .await;
     let rows = state
         .user_service
         .export_users(
             query,
             Some(operator_user_id),
             crate::common::tenant::tenant_scope(operator.tenant_id()),
+            &hidden_user_fields,
         )
         .await?;
 

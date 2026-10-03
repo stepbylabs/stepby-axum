@@ -116,7 +116,12 @@ async fn it_data_scope_narrows_within_tenant_and_blocks_cross_tenant() {
     let (rows, total) = ctx
         .state
         .user_service
-        .get_user_page(query_all(), Some(9001), tenant_scope(TID_A))
+        .get_user_page(
+            query_all(),
+            Some(9001),
+            tenant_scope(TID_A),
+            &std::collections::HashSet::new(),
+        )
         .await
         .expect("get_user_page 失败");
 
@@ -157,7 +162,12 @@ async fn it_scope_all_still_cannot_see_other_tenant_rows() {
     let (rows, total) = ctx
         .state
         .user_service
-        .get_user_page(query_all(), Some(9005), tenant_scope(TID_A))
+        .get_user_page(
+            query_all(),
+            Some(9005),
+            tenant_scope(TID_A),
+            &std::collections::HashSet::new(),
+        )
         .await
         .expect("get_user_page 失败");
 
@@ -197,7 +207,12 @@ async fn it_platform_operator_ignores_tenant_but_honors_data_scope() {
     let (rows, total) = ctx
         .state
         .user_service
-        .get_user_page(query_all(), Some(9009), tenant_scope(0))
+        .get_user_page(
+            query_all(),
+            Some(9009),
+            tenant_scope(0),
+            &std::collections::HashSet::new(),
+        )
         .await
         .expect("get_user_page 失败");
 

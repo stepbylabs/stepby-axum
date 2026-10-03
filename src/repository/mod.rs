@@ -27,6 +27,7 @@ pub mod sys_logininfor;
 pub mod sys_menu;
 pub mod sys_msg_channel;
 pub mod sys_msg_send_log;
+pub mod sys_role_field_perm;
 pub mod sys_msg_template;
 pub mod sys_notice;
 pub mod sys_notice_read;

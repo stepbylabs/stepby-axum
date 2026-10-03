@@ -38,6 +38,7 @@ pub mod sys_notice_service;
 pub mod sys_oauth_service;
 pub mod sys_oper_log_service;
 pub mod sys_pat_service;
+pub mod sys_role_field_perm_service;
 pub mod sys_post_service;
 pub mod sys_rate_limit_service;
 pub mod sys_report_service;

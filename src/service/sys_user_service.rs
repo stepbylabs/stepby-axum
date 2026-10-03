@@ -64,7 +64,10 @@ use crate::utils::password::{
 /// - `operator_user_id`：当前操作者；`None` 表示无操作者上下文（fail-closed，一律掩码）；
 /// - `operator_is_super`：操作者是否超管视角（`is_super_viewer` 的结果，由调用方
 ///   每次请求计算一次，避免列表逐行重复查询）。
-fn should_mask_pii(
+///
+/// `pub(crate)`：M1 脱敏影响面补齐（字段级权限 M2 登记）——公告已读用户列表
+/// （`sys_notice_service`）的 phonenumber 出口复用同一三口径判定，杜绝口径漂移。
+pub(crate) fn should_mask_pii(
     operator_user_id: Option<i64>,
     target_user_id: i64,
     operator_is_super: bool,
@@ -101,6 +104,57 @@ fn mask_user_pii_in_place(model: &mut SysUserModel) {
     if let Some(email) = model.email.as_deref() {
         model.email = Some(masking::mask_email(email));
     }
+}
+
+/// M2 字段级权限：对单行 `SysUserModel` 应用「隐藏列优先」的展示策略（纯函数，可单测）。
+///
+/// - hidden 集合内的字段直接置 `None`（**优先级高于掩码**：隐藏 = 数据整体不可见，
+///   而非掩码形态——掩码串仍保留形态信息，隐藏连形态都不给）；
+/// - 未隐藏字段走 M1 三口径掩码（`should_mask` 为 true 时）。
+///
+/// 关闭态：`hidden` 为空集合且 `should_mask` 为 false ⇒ 零变化（可证伪单测锁死）。
+/// `pub(crate)`：字段级权限服务（sys_role_field_perm_service）的单测复用同一实现。
+pub(crate) fn apply_field_perm_and_mask(
+    model: &mut SysUserModel,
+    hidden: &std::collections::HashSet<String>,
+    should_mask: bool,
+) {
+    let hide_phone = hidden.contains("phonenumber");
+    let hide_email = hidden.contains("email");
+    if hide_phone {
+        model.phonenumber = None;
+    }
+    if hide_email {
+        model.email = None;
+    }
+    if should_mask {
+        if !hide_phone
+            && let Some(phone) = model.phonenumber.as_deref()
+        {
+            model.phonenumber = Some(masking::mask_phone(phone));
+        }
+        if !hide_email
+            && let Some(email) = model.email.as_deref()
+        {
+            model.email = Some(masking::mask_email(email));
+        }
+    }
+}
+
+/// M2：hidden 字段集合 → repository 列裁剪枚举（封闭白名单映射，纯函数）。
+///
+/// 集合内未知的字段名被静默忽略（白名单外字段本就不参与裁剪，fail-closed 不放大）。
+pub(crate) fn hidden_field_set_to_omit_columns(
+    hidden: &std::collections::HashSet<String>,
+) -> Vec<crate::repository::sys_user::UserOmitColumn> {
+    let mut out = Vec::new();
+    if hidden.contains("phonenumber") {
+        out.push(crate::repository::sys_user::UserOmitColumn::Phonenumber);
+    }
+    if hidden.contains("email") {
+        out.push(crate::repository::sys_user::UserOmitColumn::Email);
+    }
+    out
 }
 
 // ==================== 可选枚举字段归一化（R6-VAL-16 / R6-VAL-17） ====================
@@ -768,11 +822,20 @@ impl SysUserService {
     ///
     /// 取 operator 所有角色中 data_scope 值最小者（最宽松）生效。
     /// 超管（user_id==1）短路：直接返回全部。
+    ///
+    /// M2 字段级权限：`hidden_user_fields` 为裁剪判定单一入口
+    /// （`SysRoleFieldPermService::hidden_fields`）的判定结果，作用于列表/展示面：
+    /// - repository 层按集合做列裁剪（隐藏字段不参与 SELECT，数据在查询层即不外泄）；
+    /// - VO 组装层「隐藏列优先」叠加 M1 掩码（隐藏字段直接 None，掩码只对未隐藏字段生效）。
+    ///
+    /// 关闭态（空集合）时两者均零行为变化。编辑回显 `get_user_form_data` **不裁剪**
+    /// （登记口径：字段级权限只作用于列表/展示，编辑走独立数据范围校验）。
     pub async fn get_user_page(
         &self,
         mut query: UserQueryDto,
         operator_user_id: Option<i64>,
         tenant_scope: Option<i64>,
+        hidden_user_fields: &std::collections::HashSet<String>,
     ) -> Result<(Vec<UserVo>, u64), ServiceError> {
         // W9（现存 P1）：LIKE 查询参数约束 —— 截断超长输入，防"超长 LIKE 模式逐行回溯"的 CPU 消耗
         // （MAX_PAGE_SIZE 只限返回行数，不限扫描行数；like_escape 已防注入，此处补长度与字符整洁）
@@ -803,6 +866,8 @@ impl SysUserService {
 
         let scope_dept_ref = scope_dept_ids.as_deref();
         let custom_ref = custom_conds.as_deref();
+        // M2 字段级权限：hidden 集合 → repository 列裁剪枚举（封闭白名单映射）
+        let omit_columns = hidden_field_set_to_omit_columns(hidden_user_fields);
         let (rows, total) = self
             .user_repo
             .find_page_with_data_scope(
@@ -821,6 +886,7 @@ impl SysUserService {
                 tenant_scope,
                 query.tenant_id,
                 sort,
+                &omit_columns,
             )
             .await?;
 
@@ -865,11 +931,11 @@ impl SysUserService {
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
             let oauth_bound = oauth_bound_set.contains(&user.user_id);
             let dept_ids = dept_ids_map.get(&user.user_id).cloned().unwrap_or_default();
-            // M1 三口径：本人查自己 / 超管 → 原值；其它 → phonenumber/email 掩码
+            // M2 隐藏列优先 + M1 三口径掩码叠加：本人查自己 / 超管 → 原值；
+            // 隐藏字段直接 None（优先级高于掩码）；未隐藏字段非本人非超管 → 掩码
             let mut user = user;
-            if should_mask_pii(operator_user_id, user.user_id, op_is_super) {
-                mask_user_pii_in_place(&mut user);
-            }
+            let should_mask = should_mask_pii(operator_user_id, user.user_id, op_is_super);
+            apply_field_perm_and_mask(&mut user, hidden_user_fields, should_mask);
             vos.push(UserVo {
                 user,
                 role_ids,
@@ -1007,11 +1073,15 @@ impl SysUserService {
     ///
     /// 与 `get_user_page` 的差异：使用 EXPORT_MAX_ROWS 作为 limit，
     /// 而非 PageDomain.limit()（受 MAX_PAGE_SIZE=100 限制），避免静默截断导出数据。
+    ///
+    /// M2 字段级权限：导出与列表**同口径**裁剪（`hidden_user_fields` 来自同一判定入口）。
+    /// 导出是比列表更宽的数据出口，绝不能比列表宽松（否则形成"列表隐藏、导出可见"的绕行口子）。
     pub async fn export_users(
         &self,
         mut query: UserQueryDto,
         operator_user_id: Option<i64>,
         tenant_scope: Option<i64>,
+        hidden_user_fields: &std::collections::HashSet<String>,
     ) -> Result<Vec<UserVo>, ServiceError> {
         // W9：同 get_user_page，导出入口同样约束 LIKE 参数（导出扫描行数更大，更需防护）
         query.user_name = clamp_like_param(query.user_name);
@@ -1041,6 +1111,7 @@ impl SysUserService {
             self.resolve_data_scope(operator_user_id).await?;
 
         // 1. 通过 Repository 多条件查询用户列表（受 EXPORT_MAX_ROWS 限制 + 数据权限过滤）
+        let omit_columns = hidden_field_set_to_omit_columns(hidden_user_fields);
         let (rows, _) = self
             .user_repo
             .find_page_with_data_scope(
@@ -1059,6 +1130,7 @@ impl SysUserService {
                 tenant_scope,
                 query.tenant_id,
                 sort,
+                &omit_columns,
             )
             .await?;
 
@@ -1097,11 +1169,10 @@ impl SysUserService {
             let dept = user.dept_id.and_then(|did| dept_map.get(&did).cloned());
             let oauth_bound = oauth_bound_set.contains(&user.user_id);
             let dept_ids = dept_ids_map.get(&user.user_id).cloned().unwrap_or_default();
-            // M1 三口径：非本人且非超管 → phonenumber/email 掩码
+            // M2 隐藏列优先 + M1 三口径掩码叠加（与列表同口径）
             let mut user = user;
-            if should_mask_pii(operator_user_id, user.user_id, op_is_super) {
-                mask_user_pii_in_place(&mut user);
-            }
+            let should_mask = should_mask_pii(operator_user_id, user.user_id, op_is_super);
+            apply_field_perm_and_mask(&mut user, hidden_user_fields, should_mask);
             vos.push(UserVo {
                 user,
                 role_ids,
@@ -2579,6 +2650,16 @@ impl SysUserService {
 
         // 查询全部未删除角色（通过 Repository，按租户过滤；前端根据 user.roleIds 自行标记已勾选）
         let all_roles: Vec<SysRoleModel> = self.role_repo.find_active_all(tenant_scope).await?;
+
+        // M1 脱敏影响面补齐（字段级权限 M2 登记）：authRole VO 内嵌 user 的
+        // phonenumber/email 按三口径掩码（本人查自己 / 超管 → 原值；其它 → 掩码）。
+        // 口径与 get_user_form_data 一致：本接口是**编辑回显面**（前端勾选角色时
+        // 带出用户信息），不参与 M2 列表裁剪，但掩码必须补齐——此前该出口裸奔原值。
+        let mut user = user;
+        let op_is_super = self.viewer_is_super(operator_user_id).await;
+        if should_mask_pii(Some(operator_user_id), user.user_id, op_is_super) {
+            mask_user_pii_in_place(&mut user);
+        }
 
         Ok(UserAuthRoleVo {
             user,

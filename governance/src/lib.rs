@@ -205,6 +205,14 @@ pub const FEATURES: &[Item] = &[
     // 只允许平台管理员（`tenant_id == 0`）触发，故不随任何租户套餐下放权限；
     // 两条路由复用既有 `system:user:remove` perm（不新造 perm，避免"菜单可见但请求 403"）。
     feat("privacy.user_erasure", &[OFF, "precheck", "full"], &[]),
+    // 字段级权限 M2（三层开关的租户层）：租户套餐是否开通「角色字段级权限」能力。
+    //   - 平台层（主开关）：`sys_config.sys.fieldPerm.enabled`（服务层第一道判定）；
+    //   - 租户层：本能力位（off = 矩阵接口拒绝 + 裁剪恒空，关闭态即安全态）；
+    //   - 角色层：`sys_role_field_perm` 行（hidden 语义，服务层并集判定）。
+    // `unlocked = &[]`：`system:role:fieldPerm` / `system:role:fieldPermSave` 是普通
+    // 业务权限（非平台专属下放项），经菜单 4120/4121 的 role_menu 授权即可，不占用
+    // "平台专属 perm 解锁"语义（受 features 测试"白名单必须 is_platform_only_perm"约束）。
+    feat("role.field_perm", &[OFF, "on"], &[]),
     // 租户域名自助：开启时域名管理 5 项可授予租户管理员，服务层按 tid 收窄
     // （仅能读写本租户域名）。清单与 `middleware/permission.rs` 的
     // `/system/tenant/domain/*` 权限映射逐条对应。
@@ -241,6 +249,8 @@ pub const CONFIGS: &[Item] = &[
     cfg("sys.audit.alarm.fail_rate_threshold", Coverage::Locked),
     cfg("sys.audit.alarm.fail_threshold", Coverage::Locked),
     cfg("sys.audit.alarm.window_minutes", Coverage::Locked),
+    // ---- sys.fieldPerm.*（平台锁定：字段级权限 M2 第一层平台开关，默认 false = 关闭态即安全态）----
+    cfg("sys.fieldPerm.enabled", Coverage::Locked),
     // ---- sys.index.*（平台默认：值为主题名，无有序档位 ⇒ Free）----
     cfg("sys.index.sideTheme", Coverage::Free),
     cfg("sys.index.skinName", Coverage::Free),

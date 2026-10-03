@@ -277,6 +277,12 @@ async fn build_isolated_state_with(
     crate::initialize::ensure_user_password_version_column(&db)
         .await
         .expect("补建 sys_user.password_version 列失败");
+    // 字段级权限 M2 兜底（幂等）：测试库与生产启动路径同口径补齐
+    // sys_role_field_perm 表 / 菜单 4120-4121 / sys.fieldPerm.enabled 种子，
+    // 保证菜单权限契约测试（PERM_ROUTE_TABLE ⊆ sys_menu.perms）覆盖新权限键。
+    crate::initialize::ensure_role_field_perm_tables(&db)
+        .await
+        .expect("字段级权限 M2 兜底失败");
 
     // 3. 初始化 Redis，清空隔离 DB，关闭验证码开关，放大限流容量
     let redis = init_redis(&settings.redis)

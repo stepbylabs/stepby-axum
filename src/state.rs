@@ -82,6 +82,8 @@ pub struct AppState {
     pub rate_limit_service: SysRateLimitService,
     /// 告警规则引擎 Service（指标采集 / 评估 / 通知）
     pub alert_service: SysAlertService,
+    /// 字段级权限 M2：角色字段权限矩阵服务（三层开关判定链单一入口）
+    pub field_perm_service: crate::service::sys_role_field_perm_service::SysRoleFieldPermService,
     /// 登录日志 Service
     pub logininfor_service: SysLogininforService,
     /// 代码生成模块 Service
@@ -222,6 +224,14 @@ impl AppState {
         // 减少每次登录 2 次 DB 查询（captchaEnabled + registerUser）。
         let config_service = SysConfigService::new(db.clone(), store.clone());
 
+        // 字段级权限 M2：矩阵服务复用 config_service（第一层平台开关走 cache-aside 热加载）。
+        // 提前实例化（Self{} 构造会 move config_service 原值）。
+        let field_perm_service =
+            crate::service::sys_role_field_perm_service::SysRoleFieldPermService::new(
+                db.clone(),
+                config_service.clone(),
+            );
+
         // 多租户 Phase 3：tenant_service 提前实例化（登录闸门 + 运行时状态键 + 定向踢线），
         // clone 一份注入 AuthService，保证同一实例共享（避免重复 Repository）
         let tenant_service = SysTenantService::new(db.clone(), store.clone());
@@ -318,6 +328,8 @@ impl AppState {
             frontend_error_service: SysFrontendErrorService::new(db.clone()),
             rate_limit_service: SysRateLimitService::new(db.clone(), store.clone()),
             alert_service: SysAlertService::new(db.clone(), store.clone(), config.clone()),
+            // 字段级权限 M2：矩阵服务（三层开关判定链单一入口）
+            field_perm_service,
             logininfor_service: SysLogininforService::new(db.clone()),
             gen_table_service: GenTableService::new(db.clone()),
             backup_service: SysBackupService::new(db.clone(), config.clone()),
