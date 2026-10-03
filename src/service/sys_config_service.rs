@@ -24,7 +24,8 @@
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
 use garde::Validate;
-use sea_orm::{DatabaseConnection, Set};
+use futures::future::FutureExt;
+use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
@@ -694,6 +695,10 @@ impl SysConfigService {
             existing.visible_to_tenant.clone(),
         );
 
+        // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
+        let before_snapshot =
+            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+
         let now = crate::common::datetime::now_naive();
         let mut am: SysConfigActiveModel = existing.into();
         am.config_name = Set(dto.config_name);
@@ -744,7 +749,50 @@ impl SysConfigService {
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);
 
-        let model = self.config_repo.update(am).await?;
+        // 参数变更 + 审计留痕同事务：edit_config 原为无事务直更，接入变更留痕后
+        // 引入事务保证「变更与留痕」原子性——record_change 失败令业务一并回滚，
+        // 杜绝"参数已改但无痕"的合规缺口。
+        let config_repo = self.config_repo.clone();
+        let model = self
+            .config_repo
+            .base()
+            .db()
+            .transaction::<_, SysConfigModel, sea_orm::DbErr>(|txn| {
+                let am = am.clone();
+                let before_snapshot = before_snapshot.clone();
+                // 审计留痕块为 boxed()（需 'static），operator 为 &str 引用生命周期不足，
+                // 克隆为 owned String 移入 async move 块
+                let operator_owned = operator.to_string();
+                async move {
+                    let model = config_repo.base().update_conn(txn, am).await?;
+
+                    // 审计合规域：UPDATE 变更留痕（敏感列由 record_change 内部统一打码）
+                    let after =
+                        serde_json::to_value(&model).unwrap_or(serde_json::Value::Null);
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            None, // edit_config 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_config",
+                        &model.config_id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_UPDATE,
+                        Some(before_snapshot),
+                        Some(after),
+                        audit_operator,
+                    )
+                    .await?;
+                    Ok(model)
+                }
+                .boxed()
+            })
+            .await
+            .map_err(ServiceError::from)?;
+
         // 若 config_key 变更，old_key 与 new_key 都需失效（旧层 + 新层）
         if model.config_key != old_key {
             self.invalidate_tenant_cache(row_tid, &old_key).await;

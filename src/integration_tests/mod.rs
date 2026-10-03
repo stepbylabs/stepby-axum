@@ -15,10 +15,12 @@
 //! 前置依赖：本机需有可达的 Redis（默认 127.0.0.1:6379，无密码）。
 //! 若 Redis 不可用，`init_redis` 会在超时后返回错误，测试将以清晰信息失败。
 
+mod ak_sign;
 mod auth;
 mod capability_features;
 mod clear_fields;
 mod common_handler;
+mod common_search;
 mod data_scope_tenant;
 mod file_common;
 mod flow;

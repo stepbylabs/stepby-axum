@@ -12,6 +12,7 @@ use axum::routing::{delete, get, post, put};
 use std::sync::Arc;
 
 use crate::handler::sys_web_hook_handler;
+use crate::handler::sys_webhook_event_handler;
 use crate::state::AppState;
 
 /// WebHook 模块路由
@@ -59,5 +60,15 @@ pub fn web_hook_routes() -> Router<Arc<AppState>> {
         .route(
             "/monitor/webHook/log/{id}",
             get(sys_web_hook_handler::log_info).delete(sys_web_hook_handler::log_remove),
+        )
+        // ===== 事件目录（开放域 m20261003_000002）=====
+        // 静态段 /system/webhook/event/list 需在 {id} 动态路由之前注册（axum 0.8 优先匹配静态段）
+        .route(
+            "/system/webhook/event/list",
+            get(sys_webhook_event_handler::event_list),
+        )
+        .route(
+            "/system/webhook/{id}/test-send",
+            post(sys_webhook_event_handler::test_send),
         )
 }

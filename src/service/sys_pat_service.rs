@@ -13,7 +13,7 @@
 //!
 //! 分层约束：不依赖 axum/tower；错误用 ServiceError。
 
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;
@@ -46,6 +46,10 @@ pub struct PatVo {
     pub last_used_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create_time: Option<String>,
+    /// 是否已开通开放 API AK/SK 凭据（access_key 与 secret_key 均非空；
+    /// 前端轮换/吊销按钮恒常显——后端操作幂等，本字段供后续优化展示态）
+    #[serde(default)]
+    pub has_ak: bool,
 }
 
 /// 新建令牌请求 DTO
@@ -60,6 +64,11 @@ pub struct CreatePatDto {
     #[serde(default)]
     #[ts(optional)]
     pub expire_days: Option<i64>,
+    /// 是否同时开通开放 API 的 AK/SK 凭据（true → 生成 access_key/secret_key；
+    /// SK 明文仅创建响应返回一次，落库为信封密文）
+    #[serde(default)]
+    #[ts(optional)]
+    pub with_ak: Option<bool>,
 }
 
 /// 新建令牌结果：明文 `token` 仅此一次返回
@@ -70,6 +79,24 @@ pub struct CreatePatDto {
 pub struct CreatePatResult {
     pub token: String,
     pub pat: PatVo,
+    /// 开放 API access_key（"ak" + 24 位 hex；开通 AK 时返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub access_key: Option<String>,
+    /// 开放 API secret_key 明文（仅创建/轮换响应返回一次，绝不落库）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub secret_key: Option<String>,
+}
+
+/// 轮换 AK/SK 结果：新 SK 明文仅此一次返回
+#[derive(Debug, Clone, Serialize, ToSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "PatRotateAkResult.ts", rename_all = "camelCase")]
+#[schema(as = PatRotateAkResult)]
+pub struct RotateAkResult {
+    pub access_key: String,
+    pub secret_key: String,
 }
 
 /// 鉴权命中的令牌信息（供 auth 中间件合成 Claims）
@@ -82,6 +109,55 @@ pub struct VerifiedPat {
     /// Phase 3：令牌归属租户（随 token 行带出，供鉴权中间件合成 claims.tid 与
     /// 租户生命周期闸门判定；PAT 属用户级凭据，租户随用户）
     pub tenant_id: i64,
+}
+
+/// AK/SK 验签查库命中的凭据信息（供 ak_sign 中间件注入请求扩展）
+#[derive(Debug, Clone)]
+pub struct VerifiedAk {
+    pub pat_id: String,
+    pub user_id: i64,
+    pub tenant_id: i64,
+    pub access_key: String,
+    /// 解密后的 SK 明文（仅进程内用于 HMAC 验签，绝不落日志/响应）
+    pub secret_plain: String,
+    /// PAT 名称（/open/v1/profile 展示用）
+    pub pat_name: String,
+    pub username: String,
+    pub expires_at: Option<chrono::NaiveDateTime>,
+}
+
+/// AK 查库结果（区分失败原因，供中间件映射不同 401 i18n key；
+/// 不区分"不存在"与"SK 损坏"等细节，避免存在性探测）
+#[derive(Debug, Clone)]
+pub enum AkLookup {
+    /// 命中且有效（PAT 有效 + 属主存活 + SK 可解密）
+    Valid(VerifiedAk),
+    /// AK 不存在（含 revoke-ak 已清空的）
+    NotFound,
+    /// AK 所属 PAT 已吊销（status='1'）
+    Revoked,
+    /// AK 所属 PAT 已过期
+    Expired,
+    /// 属主账号已删除/停用（口径对齐 verify_token 的属主校验）
+    OwnerDisabled,
+}
+
+/// 开放 API /open/v1/profile 出参
+#[derive(Debug, Clone, Serialize, ToSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "OpenProfileVo.ts", rename_all = "camelCase")]
+#[schema(as = OpenProfileVo)]
+pub struct OpenProfileVo {
+    /// PAT 名称
+    pub pat_name: String,
+    /// 属主用户名
+    pub username: String,
+    /// 归属租户 ID
+    pub tenant_id: i64,
+    /// PAT 过期时间（None = 永不过期）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expires_at: Option<String>,
 }
 
 /// 个人访问令牌 Service
@@ -100,6 +176,9 @@ impl SysPatService {
     }
 
     /// 签发令牌，返回一次性明文 + 脱敏视图（tenant_id 随 operator 带出，PAT 归 operator 租户）
+    ///
+    /// `enc_key`：CONFIG_ENC_KEY 主密钥（SK 信封加密用，与 oauth client_secret 同机制）。
+    /// `dto.with_ak = true` 时同时生成 AK/SK：SK 明文仅本响应返回一次。
     pub async fn create(
         &self,
         user_id: i64,
@@ -107,6 +186,7 @@ impl SysPatService {
         username: &str,
         dto: CreatePatDto,
         config: &PatConfig,
+        enc_key: &str,
     ) -> Result<CreatePatResult, ServiceError> {
         let name = dto.name.trim();
         if name.is_empty() {
@@ -161,6 +241,24 @@ impl SysPatService {
         let scopes_json = serde_json::to_string(&dto.scopes)
             .map_err(|_| ServiceError::internal(&crate::tr!("error.pat.create_failed")))?;
 
+        // 开放 API AK/SK（with_ak=true 时开通）：SK 明文仅响应一次，落库为 v2 信封密文
+        // （跟随 oauth client_secret 的 seal_sensitive_value 机制——SK 需原文做 HMAC 验签，
+        // 故采用可逆的 AES-256-GCM 信封加密而非单向哈希）
+        let mut ak_plain: Option<String> = None;
+        let mut sk_plain_out: Option<String> = None;
+        let mut ak_column: Option<String> = None;
+        let mut sk_column: Option<String> = None;
+        if dto.with_ak.unwrap_or(false) {
+            let ak = generate_access_key();
+            let sk = generate_secret_key();
+            let sealed = crate::utils::crypto::seal_sensitive_value(&sk, enc_key)
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.pat.create_failed")))?;
+            ak_column = Some(ak.clone());
+            sk_column = Some(sealed);
+            ak_plain = Some(ak);
+            sk_plain_out = Some(sk);
+        }
+
         let model = PatModel {
             pat_id: format!("{:x}", uuid::Uuid::new_v4().simple()),
             tenant_id,
@@ -171,6 +269,8 @@ impl SysPatService {
             scopes: scopes_json,
             status: "0".to_string(),
             expires_at,
+            access_key: ak_column,
+            secret_key: sk_column,
             last_used_at: None,
             create_by: username.to_string(),
             create_time: Some(now),
@@ -181,6 +281,8 @@ impl SysPatService {
         Ok(CreatePatResult {
             token,
             pat: vo_from_model(model, String::new()),
+            access_key: ak_plain,
+            secret_key: sk_plain_out,
         })
     }
 
@@ -334,9 +436,175 @@ impl SysPatService {
             tracing::debug!("更新 PAT last_used_at 失败（忽略）: {}", e);
         }
     }
+
+    // ══ 开放 API AK/SK 域 ══
+
+    /// 轮换 AK/SK：重置 SK（AK 不变），新 SK 明文仅本次响应返回一次
+    ///
+    /// - 属主校验：仅本人 PAT 可轮换（越权按不存在处理，避免存在性泄露）；
+    /// - 未开通 AK 的 PAT → 404 语义错误（error.ak.not_enabled）；
+    /// - 旧 SK 轮换后立即失效（覆盖写信封密文）。
+    pub async fn rotate_ak(
+        &self,
+        pat_id: &str,
+        user_id: i64,
+        enc_key: &str,
+    ) -> Result<RotateAkResult, ServiceError> {
+        let db = self.pat_repo.base().db();
+        let Some(row) = crate::entity::sys_pat::Entity::find_by_id(pat_id.to_string())
+            .one(db)
+            .await?
+        else {
+            return Err(ServiceError::not_found(&crate::tr!("error.pat.not_found")));
+        };
+        // 越权保护：非本人令牌统一按不存在处理
+        if row.user_id != user_id {
+            return Err(ServiceError::not_found(&crate::tr!("error.pat.not_found")));
+        }
+        let access_key = row
+            .access_key
+            .clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.ak.not_enabled")))?;
+
+        let secret_plain = generate_secret_key();
+        let sealed = crate::utils::crypto::seal_sensitive_value(&secret_plain, enc_key)
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.pat.create_failed")))?;
+
+        let mut am: crate::entity::sys_pat::ActiveModel = row.into();
+        am.secret_key = Set(Some(sealed));
+        am.update_time = Set(Some(datetime::now_naive()));
+        am.update(db).await?;
+
+        Ok(RotateAkResult {
+            access_key,
+            secret_key: secret_plain,
+        })
+    }
+
+    /// 吊销 AK/SK：清空两列（幂等；仅本人 PAT，越权按不存在处理）
+    ///
+    /// 清空后 AK 鉴权查库即 NotFound（即时生效，无缓存），SK 密文一并清除。
+    pub async fn revoke_ak(&self, pat_id: &str, user_id: i64) -> Result<(), ServiceError> {
+        let db = self.pat_repo.base().db();
+        let Some(row) = crate::entity::sys_pat::Entity::find_by_id(pat_id.to_string())
+            .one(db)
+            .await?
+        else {
+            return Err(ServiceError::not_found(&crate::tr!("error.pat.not_found")));
+        };
+        if row.user_id != user_id {
+            return Err(ServiceError::not_found(&crate::tr!("error.pat.not_found")));
+        }
+        let mut am: crate::entity::sys_pat::ActiveModel = row.into();
+        am.access_key = Set(None);
+        am.secret_key = Set(None);
+        am.update_time = Set(Some(datetime::now_naive()));
+        am.update(db).await?;
+        Ok(())
+    }
+
+    /// AK 鉴权查库（ak_sign 中间件每请求调用；吊销/过期/属主停用即时生效）
+    ///
+    /// 校验链：access_key 唯一命中 → PAT status='0' → 未过期 → 属主 sys_user 存活
+    /// （与 verify_token 的 E1-a 属主口径一致）→ SK 密文可解密。
+    /// SK 解密失败按 NotFound 处理（fail-closed，不泄露区分信息）。
+    pub async fn verify_ak(&self, access_key: &str, enc_key: &str) -> Result<AkLookup, ServiceError> {
+        use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
+        let db = self.pat_repo.base().db();
+        let Some(row) = SysPat::find()
+            .filter(PatColumn::AccessKey.eq(access_key))
+            .one(db)
+            .await?
+        else {
+            return Ok(AkLookup::NotFound);
+        };
+        if row.status != "0" {
+            return Ok(AkLookup::Revoked);
+        }
+        if let Some(exp) = row.expires_at
+            && exp <= datetime::now_naive()
+        {
+            return Ok(AkLookup::Expired);
+        }
+        // 属主存活校验（E1-a 同口径：del_flag != '2' 且 status = '0'）
+        let owner = crate::entity::sys_user::Entity::find_by_id(row.user_id).one(db).await?;
+        let Some(owner) = owner else {
+            return Ok(AkLookup::OwnerDisabled);
+        };
+        if owner.del_flag.as_deref() == Some("2") || owner.status.as_deref() != Some("0") {
+            return Ok(AkLookup::OwnerDisabled);
+        }
+        let Some(sealed) = row.secret_key.clone().filter(|s| !s.is_empty()) else {
+            return Ok(AkLookup::NotFound);
+        };
+        // SK 需原文参与 HMAC-SHA256 验签 → 采用可逆信封加密存储；此处解密取回原文
+        let secret_plain = match crate::utils::crypto::decrypt_config_value(&sealed, enc_key) {
+            Ok(s) => s,
+            Err(e) => {
+                // 密钥不匹配/数据损坏：fail-closed 拒绝，日志只记根因不落任何密钥信息
+                tracing::error!("PAT AK secret_key 解密失败（按不存在处理）: {}", e);
+                return Ok(AkLookup::NotFound);
+            }
+        };
+        Ok(AkLookup::Valid(VerifiedAk {
+            pat_id: row.pat_id.clone(),
+            user_id: row.user_id,
+            tenant_id: row.tenant_id,
+            access_key: row.access_key.clone().unwrap_or_default(),
+            secret_plain,
+            pat_name: row.name.clone(),
+            username: owner.user_name,
+            expires_at: row.expires_at,
+        }))
+    }
+
+    /// 开放 API /open/v1/profile 数据源（真实查库；属主用户名优先取 sys_user，缺失回退 create_by）
+    pub async fn open_profile(&self, pat_id: &str) -> Result<Option<OpenProfileVo>, ServiceError> {
+        use crate::entity::sys_user;
+        let db = self.pat_repo.base().db();
+        let Some(row) = crate::entity::sys_pat::Entity::find_by_id(pat_id.to_string())
+            .one(db)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let username = sys_user::Entity::find_by_id(row.user_id)
+            .one(db)
+            .await?
+            .map(|u| u.user_name)
+            .unwrap_or_else(|| row.create_by.clone());
+        Ok(Some(OpenProfileVo {
+            pat_name: row.name,
+            username,
+            tenant_id: row.tenant_id,
+            expires_at: fmt_dt(row.expires_at),
+        }))
+    }
 }
 
 // ==================== 纯函数辅助 ====================
+
+/// 生成开放 API access_key："ak" + 12 随机字节 hex（总长 26，满足列宽 VARCHAR(32)）
+fn generate_access_key() -> String {
+    use rand_os::{Rng, rngs::StdRng, SeedableRng};
+    let mut buf = [0u8; 12];
+    let mut rng = StdRng::try_from_rng(&mut rand_os::rngs::SysRng).expect("OS RNG seed failed");
+    rng.fill_bytes(&mut buf);
+    format!("ak{}", hex_encode(&buf))
+}
+
+/// 生成开放 API secret_key：36 随机字节的 base64url（无填充，恰 48 字符）
+///
+/// base64url 字符集不含 '+' '/'，作为签名密钥/HTTP 头取值均安全。
+fn generate_secret_key() -> String {
+    use base64::Engine;
+    use rand_os::{Rng, rngs::StdRng, SeedableRng};
+    let mut buf = [0u8; 36];
+    let mut rng = StdRng::try_from_rng(&mut rand_os::rngs::SysRng).expect("OS RNG seed failed");
+    rng.fill_bytes(&mut buf);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+}
 
 /// 权限标识格式校验：`*` 或 1~3 段以 ':' 分隔，每段为 `*` 或 `[A-Za-z0-9_-]+`
 pub fn is_valid_perm_key(s: &str) -> bool {
@@ -413,6 +681,8 @@ fn vo_from_model(m: PatModel, user_name: String) -> PatVo {
         expires_at: fmt_dt(m.expires_at),
         last_used_at: fmt_dt(m.last_used_at),
         create_time: fmt_dt(m.create_time),
+        // 仅 VO 组装判定：AK 与 SK 密文列均非空即视为已开通（不动其它逻辑）
+        has_ak: m.access_key.is_some() && m.secret_key.is_some(),
     }
 }
 
@@ -488,5 +758,27 @@ mod tests {
     #[test]
     fn test_hex_encode() {
         assert_eq!(hex_encode(&[0x00, 0xff, 0x0a]), "00ff0a");
+    }
+
+    #[test]
+    fn test_generate_access_key_shape() {
+        let ak = generate_access_key();
+        assert!(ak.starts_with("ak"), "AK 应以 ak 前缀开头: {ak}");
+        assert_eq!(ak.len(), 26, "AK 应为 ak + 24 hex 字符");
+        assert!(ak[2..].chars().all(|c| c.is_ascii_hexdigit()));
+        // 随机性：两次生成不重复
+        assert_ne!(generate_access_key(), generate_access_key());
+    }
+
+    #[test]
+    fn test_generate_secret_key_shape() {
+        let sk = generate_secret_key();
+        assert_eq!(sk.len(), 48, "SK 应为 48 字符 base64url，实际: {sk}");
+        assert!(
+            sk.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "SK 应为 base64url 字符集（无 + / =），实际: {sk}"
+        );
+        assert_ne!(generate_secret_key(), generate_secret_key());
     }
 }

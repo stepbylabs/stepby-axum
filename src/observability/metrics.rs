@@ -12,9 +12,9 @@
 //! 正确性说明：bucket 采用 `value <= le` 的累计计数语义，`+Inf` 桶为总观测数，
 //! 符合 Prometheus 直方图约定（可被 rate/histogram_quantile 消费）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// 直方图采样桶边界（秒）。默认 [5ms,10,25,50,100,250,500,1000ms]。
 pub const DURATION_BUCKETS_S: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
@@ -65,7 +65,27 @@ pub struct MetricsRegistry {
     vitals: RwLock<HashMap<(String, String), VitalSeries>>,
     /// FCP-010：CLS 最新累计值（无量纲分数；会话语义 = "当前页面累计偏移"，gauge 承载）
     cls_gauges: RwLock<HashMap<String, f64>>,
+    /// AK 开放 API 请求计数（path, outcome）→ 次数。
+    /// outcome：`ok` 或验签失败原因（invalid_signature/timestamp_out_of_window/
+    /// nonce_reused/ak_not_found/ak_revoked/expired/owner_disabled/store_unavailable），
+    /// 由 `ak_sign` 中间件每请求记录一次。
+    ak_counters: RwLock<HashMap<(String, String), u64>>,
+    /// AK 开放 API 验签失败计数（reason → 次数；outcome != "ok" 时累计）
+    ak_failures: RwLock<HashMap<String, u64>>,
+    /// AK 开放 API 耗时直方图（path → 系列，桶边界复用 DURATION_BUCKETS_S）
+    ak_durations: RwLock<HashMap<String, DurationSeries>>,
+    /// 告警指标源：最近 5xx 响应时间戳环形缓冲（真实记录点 =
+    /// [`MetricsRegistry::record`]，由 monitoring_middleware 每请求调用）。
+    ///
+    /// 累计 counter（`counters`）无法回答"最近 N 分钟"窗口问题，故单独维护
+    /// 有界时间戳队列：`count_recent_5xx` 按窗口过滤计数。进程内口径
+    /// （重启清零、多实例各自统计），与 Prometheus 抓取口径互补不冲突。
+    recent_5xx: Mutex<VecDeque<std::time::Instant>>,
 }
+
+/// 5xx 环形缓冲容量上限（超出丢弃最旧记录）：
+/// 极端场景（5 分钟内 >4096 个 5xx）下告警已必然触发，无需无限累积。
+const RECENT_5XX_MAX_ENTRIES: usize = 4096;
 
 /// Web Vitals 直方图系列（桶边界与 DurationSeries 不同，独立类型避免长度耦合）
 struct VitalSeries {
@@ -93,6 +113,10 @@ impl Default for MetricsRegistry {
             sso_counters: RwLock::new(HashMap::new()),
             vitals: RwLock::new(HashMap::new()),
             cls_gauges: RwLock::new(HashMap::new()),
+            ak_counters: RwLock::new(HashMap::new()),
+            ak_failures: RwLock::new(HashMap::new()),
+            ak_durations: RwLock::new(HashMap::new()),
+            recent_5xx: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -124,6 +148,19 @@ impl MetricsRegistry {
         *counters.entry(key.clone()).or_insert(0) += 1;
         drop(counters);
 
+        // 5xx 窗口缓冲（告警指标源 http_5xx_5m）：真实响应状态 >= 500 时登记时间戳。
+        // 锁持有时间极短（push/pop，不跨 await），中毒时恢复 Guard 防连锁 panic。
+        if status >= 500 {
+            let mut ring = match self.recent_5xx.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if ring.len() >= RECENT_5XX_MAX_ENTRIES {
+                ring.pop_front();
+            }
+            ring.push_back(std::time::Instant::now());
+        }
+
         // histogram
         let mut durations = match self.durations.write() {
             Ok(g) => g,
@@ -142,6 +179,24 @@ impl MetricsRegistry {
     /// 累计请求总数（无标签）
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// 最近 `window` 时间窗内的 5xx 响应计数（告警指标 http_5xx_5m 的数据源）。
+    ///
+    /// 顺带清理窗口外过期记录（惰性收缩，避免长尾低流量场景内存滞留）。
+    pub fn count_recent_5xx(&self, window: std::time::Duration) -> u64 {
+        let mut ring = match self.recent_5xx.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        while let Some(front) = ring.front() {
+            if front.elapsed() > window {
+                ring.pop_front();
+            } else {
+                break;
+            }
+        }
+        ring.len() as u64
     }
 
     /// v5-D7：记录一次 SSO 事件计数（event/outcome 标签组）
@@ -205,6 +260,129 @@ impl MetricsRegistry {
             Err(p) => p.into_inner(),
         };
         gauges.insert(device.to_string(), value.min(100.0));
+    }
+
+    /// AK 开放 API 指标：`ak_sign` 中间件每请求记录一次
+    ///
+    /// - 请求总量：`stepby_ak_requests_total{path,outcome}`
+    /// - 验签失败计数：`stepby_ak_verify_failures_total{reason}`（outcome != "ok" 时累计）
+    /// - 耗时直方图：`stepby_ak_request_duration_seconds{path}`（桶边界复用全局 DURATION_BUCKETS_S）
+    pub fn record_ak_request(&self, path: &str, outcome: &str, duration_secs: f64) {
+        // 请求总量（path, outcome）
+        {
+            let mut counters = match self.ak_counters.write() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *counters
+                .entry((path.to_string(), outcome.to_string()))
+                .or_insert(0) += 1;
+        }
+        // 验签失败计数（reason = outcome，ok 不计入）
+        if outcome != "ok" {
+            let mut failures = match self.ak_failures.write() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *failures.entry(outcome.to_string()).or_insert(0) += 1;
+        }
+        // 耗时直方图
+        let mut durations = match self.ak_durations.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let series = durations.entry(path.to_string()).or_default();
+        series.count += 1;
+        series.sum_secs += duration_secs;
+        for (i, bound) in DURATION_BUCKETS_S.iter().enumerate() {
+            if duration_secs <= *bound {
+                series.buckets[i] += 1;
+            }
+        }
+    }
+
+    /// 渲染 AK 开放 API 指标（Prometheus 文本格式）
+    fn render_ak_prometheus(&self) -> String {
+        let mut s = String::new();
+        let counters = match self.ak_counters.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let failures = match self.ak_failures.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let durations = match self.ak_durations.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        s.push_str(
+            "# HELP stepby_ak_requests_total AK 开放 API 请求数（path,outcome）\n",
+        );
+        s.push_str("# TYPE stepby_ak_requests_total counter\n");
+        let mut req_keys: Vec<(&(String, String), u64)> = counters
+            .iter()
+            .map(|(k, v)| (k, *v))
+            .collect();
+        req_keys.sort();
+        for ((path, outcome), c) in &req_keys {
+            s.push_str(&format!(
+                "stepby_ak_requests_total{{path=\"{}\",outcome=\"{}\"}} {}\n",
+                escape_label(path),
+                escape_label(outcome),
+                c
+            ));
+        }
+
+        s.push_str("# HELP stepby_ak_verify_failures_total AK 验签失败计数（reason）\n");
+        s.push_str("# TYPE stepby_ak_verify_failures_total counter\n");
+        let mut fail_keys: Vec<&String> = failures.keys().collect();
+        fail_keys.sort();
+        for reason in &fail_keys {
+            if let Some(c) = failures.get(*reason) {
+                s.push_str(&format!(
+                    "stepby_ak_verify_failures_total{{reason=\"{}\"}} {}\n",
+                    escape_label(reason),
+                    c
+                ));
+            }
+        }
+
+        s.push_str(
+            "# HELP stepby_ak_request_duration_seconds AK 开放 API 请求耗时分布（秒）\n",
+        );
+        s.push_str("# TYPE stepby_ak_request_duration_seconds histogram\n");
+        let mut dur_keys: Vec<&String> = durations.keys().collect();
+        dur_keys.sort();
+        for path in &dur_keys {
+            if let Some(series) = durations.get(*path) {
+                for (i, bound) in DURATION_BUCKETS_S.iter().enumerate() {
+                    s.push_str(&format!(
+                        "stepby_ak_request_duration_seconds_bucket{{path=\"{}\",le=\"{}\"}} {}\n",
+                        escape_label(path),
+                        bound,
+                        series.buckets[i]
+                    ));
+                }
+                s.push_str(&format!(
+                    "stepby_ak_request_duration_seconds_bucket{{path=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape_label(path),
+                    series.count
+                ));
+                s.push_str(&format!(
+                    "stepby_ak_request_duration_seconds_sum{{path=\"{}\"}} {}\n",
+                    escape_label(path),
+                    series.sum_secs
+                ));
+                s.push_str(&format!(
+                    "stepby_ak_request_duration_seconds_count{{path=\"{}\"}} {}\n",
+                    escape_label(path),
+                    series.count
+                ));
+            }
+        }
+        s
     }
 
     /// FCP-010：渲染 Web Vitals 指标（`stepby_frontend_vital_seconds` histogram +
@@ -372,6 +550,8 @@ impl MetricsRegistry {
         }
         // v5-D7：SSO 协议事件计数
         s.push_str(&self.render_sso_prometheus());
+        // AK 开放 API：请求总量 / 验签失败 / 耗时直方图
+        s.push_str(&self.render_ak_prometheus());
         // FCP-010：Web Vitals（前端性能退化告警数据源）
         s.push_str(&self.render_vitals_prometheus());
         s
@@ -403,6 +583,21 @@ pub fn test_instance() -> Arc<MetricsRegistry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_recent_5xx_window_counting() {
+        let reg = test_instance();
+        // 200 不入缓冲；500/502/503 入缓冲
+        reg.record("GET", 200, "/ok", 0.01);
+        reg.record("GET", 500, "/boom", 0.01);
+        reg.record("POST", 502, "/boom", 0.01);
+        reg.record("GET", 503, "/boom", 0.01);
+        assert_eq!(reg.count_recent_5xx(std::time::Duration::from_secs(300)), 3);
+        // 窗口为零时过期记录全部被惰性清理
+        assert_eq!(reg.count_recent_5xx(std::time::Duration::ZERO), 0);
+        // 清理后计数归零
+        assert_eq!(reg.count_recent_5xx(std::time::Duration::from_secs(300)), 0);
+    }
 
     #[test]
     fn test_bucketize_counts_le_semantics() {
@@ -450,6 +645,34 @@ mod tests {
         assert!(text.contains("event=\"authorize\""));
         assert!(text.contains("event=\"token_revoked\""));
         assert!(text.contains("event=\"logout\""));
+    }
+
+    #[test]
+    fn test_ak_request_metrics_rendering() {
+        // AK 开放 API：请求总量（path,outcome）/ 失败计数（reason）/ 耗时直方图
+        let reg = test_instance();
+        reg.record_ak_request("/open/v1/profile", "ok", 0.01);
+        reg.record_ak_request("/open/v1/profile", "ok", 0.02);
+        reg.record_ak_request("/open/v1/profile", "invalid_signature", 0.005);
+        reg.record_ak_request("/open/v1/profile", "nonce_reused", 0.005);
+        let text = reg.render_prometheus();
+        assert!(text.contains(
+            "stepby_ak_requests_total{path=\"/open/v1/profile\",outcome=\"ok\"} 2"
+        ));
+        assert!(text.contains(
+            "stepby_ak_requests_total{path=\"/open/v1/profile\",outcome=\"invalid_signature\"} 1"
+        ));
+        assert!(text.contains(
+            "stepby_ak_verify_failures_total{reason=\"invalid_signature\"} 1"
+        ));
+        assert!(text.contains(
+            "stepby_ak_verify_failures_total{reason=\"nonce_reused\"} 1"
+        ));
+        assert!(text.contains(
+            "stepby_ak_request_duration_seconds_count{path=\"/open/v1/profile\"} 4"
+        ));
+        // ok 不计入失败
+        assert!(!text.contains("reason=\"ok\""));
     }
 
     #[test]

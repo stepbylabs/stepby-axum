@@ -150,7 +150,7 @@ pub fn encrypt_config_value(plaintext: &str, master_key: &str) -> anyhow::Result
 
 
 /// sha2 0.11 的 finalize() 返回 Array<u8, N>（无 LowerHex），统一 hex 编码辅助
-fn hex_encode_digest(digest: &[u8]) -> String {
+pub fn hex_encode_digest(digest: &[u8]) -> String {
     let mut hex = String::with_capacity(digest.len() * 2);
     for b in digest {
         use std::fmt::Write as _;

@@ -12,14 +12,17 @@
 //! - auth_service.rs: 认证服务（登录、登出、验证码、getInfo、getRouters）
 
 pub mod acme_service;
+pub mod sys_alert_service;
 pub mod auth_service;
 pub mod event_outbox_service;
 pub mod gen_table_service;
+pub mod global_search_service;
 pub mod ip_location_service;
 pub mod mailer_service;
 pub mod scim_group_service;
 pub mod scim_service;
 pub mod sso_service;
+pub mod sys_audit_change_service;
 pub mod sys_backup_service;
 pub mod sys_config_service;
 pub mod sys_dept_service;
@@ -54,6 +57,8 @@ pub use gen_table_service::GenTableService;
 pub use ip_location_service::IpLocationService;
 pub use mailer_service::MailerService;
 pub use sso_service::SsoService;
+pub use sys_alert_service::SysAlertService;
+pub use sys_audit_change_service::SysAuditChangeService;
 pub use sys_backup_service::SysBackupService;
 pub use sys_config_service::SysConfigService;
 pub use sys_dept_service::SysDeptService;

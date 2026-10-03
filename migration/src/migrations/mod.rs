@@ -90,4 +90,7 @@ pub mod m20260928_000003_dedupe_dashboard_menu;
 pub mod m20260928_000004_optimize_menu_structure;
 pub mod m20261001_000001_shared_store;
 pub mod m20261002_000001_perf_indexes;
+pub mod m20261003_000001_audit_change;
+pub mod m20261003_000002_webhook_event;
+pub mod m20261003_000003_alert_rule;
 

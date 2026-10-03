@@ -47,6 +47,8 @@ pub struct Model {
     pub error_msg: Option<String>,
     /// 耗时（毫秒）
     pub cost_ms: i32,
+    /// 投递来源（NULL=业务事件派发，'test'=手动测试发送；迁移 m20261003_000002）
+    pub source: Option<String>,
     #[serde(
         serialize_with = "datetime::serialize_opt",
         deserialize_with = "datetime::deserialize_opt"

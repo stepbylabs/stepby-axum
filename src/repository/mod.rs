@@ -11,6 +11,8 @@
 pub mod base;
 pub mod flow_demo_doc;
 pub mod gen_table;
+pub mod sys_alert_rule;
+pub mod sys_audit_change;
 pub mod sys_backup_log;
 pub mod sys_config;
 pub mod sys_dept;
@@ -53,6 +55,7 @@ pub mod sys_user_pref;
 pub mod sys_user_role;
 pub mod sys_web_hook;
 pub mod sys_web_hook_log;
+pub mod sys_webhook_event;
 
 #[cfg(test)]
 pub mod test_support;

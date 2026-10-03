@@ -106,6 +106,18 @@ pub async fn add(
             "operator": operator.username(),
         }),
     );
+    // Webhook 事件目录（开放域）：创建事务已提交，派发 tenant.created（subscribed_events 过滤口径）
+    crate::service::sys_web_hook_service::emit_event(
+        &state,
+        "tenant.created",
+        serde_json::json!({
+            "tenantId": vo.tenant_id,
+            "tenantCode": vo.tenant_code,
+            "tenantName": vo.tenant_name,
+            "operator": operator.username(),
+        }),
+    )
+    .await;
     Ok(AjaxResult::success(vo))
 }
 

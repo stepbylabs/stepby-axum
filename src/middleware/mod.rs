@@ -1,5 +1,6 @@
 // stepby-axum/src/middleware/mod.rs
 
+pub mod ak_sign;
 pub mod auth;
 pub mod idempotency;
 pub mod locale;
@@ -13,6 +14,7 @@ pub mod security_headers;
 pub mod spa_fallback;
 pub mod tenant_host;
 
+pub use ak_sign::{AkIdentity, ak_protected_routes, ak_sign_middleware};
 pub use auth::{Operator, auth_middleware};
 pub use idempotency::idempotency_middleware;
 pub use locale::{locale_middleware, negotiate};

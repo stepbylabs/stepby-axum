@@ -464,6 +464,26 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化性能索引兜底失败: {}", e))?;
 
+        // 4.5e 审计合规域兜底（存量库不跑 Migrator::up，等价迁移
+        //      m20261003_000001_audit_change）：sys_audit_change 建表 + 三索引 +
+        //      sys_oper_log.chain_hash 列 + 菜单种子 4000-4002（幂等）。
+        ensure_audit_change_tables(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化审计合规域兜底失败: {}", e))?;
+
+        // 4.5f 开放域 Webhook 兜底（等价迁移 m20261003_000002_webhook_event）：
+        //      sys_webhook_event 建表 + 16 个种子事件 + subscribed_events/source/
+        //      access_key/secret_key 列 + uk_sys_pat_access_key + 菜单按钮 3562/3563。
+        ensure_webhook_event_tables(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 Webhook 事件域兜底失败: {}", e))?;
+
+        // 4.5g 告警规则兜底（等价迁移 m20261003_000003_alert_rule）：
+        //      sys_alert_rule 建表 + enabled 索引 + 告警菜单种子 4110-4114。
+        ensure_alert_rule_tables(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化告警规则兜底失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -4641,6 +4661,405 @@ fn init_events_output(settings: &Settings) {
             );
         }
     }
+}
+
+// ==================== 2026-10-03 三迁移兜底（audit_change / webhook_event / alert_rule） ====================
+// 存量库不跑 `Migrator::up`，以下三个兜底函数与迁移保持 DDL/种子双写同步；
+// 全部幂等：建表 IF NOT EXISTS、索引经 ensure_tenant_index（MySQL 查 statistics 判存在）、
+// 加列前 sso_has_column 检查、种子走 flow_insert（三方言 INSERT OR IGNORE / ON CONFLICT / IGNORE）。
+
+/// 审计合规域兜底（等价迁移 `m20261003_000001_audit_change`）：
+/// - 建表 `sys_audit_change`（业务数据变更留痕，三方言幂等）
+/// - 三个审计查询索引（row / time / tenant）
+/// - `sys_oper_log.chain_hash` 列存在性检查加列（操作日志 HMAC-SHA256 防篡改链；
+///   NULL = 未入链，校验接口跳过 NULL 行不误报）
+/// - 菜单种子幂等：变更留痕页面 4000 + 按钮 4001/4002 + role_menu(role_id=2)
+pub(crate) async fn ensure_audit_change_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // 1) 建表（id 自增主键按方言声明，其余列与迁移 DDL 完全一致）
+    let id_col = match backend {
+        DatabaseBackend::Sqlite => "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        DatabaseBackend::MySql => "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        DatabaseBackend::Postgres => "id BIGSERIAL PRIMARY KEY",
+    };
+    let operated_at_col = if backend == DatabaseBackend::MySql {
+        "DATETIME NOT NULL"
+    } else {
+        "TIMESTAMP NOT NULL"
+    };
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS sys_audit_change (
+            {id_col},
+            tenant_id       BIGINT NOT NULL DEFAULT 0,
+            table_name      VARCHAR(64) NOT NULL,
+            row_pk          VARCHAR(64) NOT NULL,
+            action          VARCHAR(16) NOT NULL,
+            changed_fields  TEXT NOT NULL,
+            before_data     TEXT,
+            after_data      TEXT,
+            operator_id     BIGINT,
+            operator_name   VARCHAR(64),
+            operated_at     {operated_at_col}
+        )"
+    );
+    flow_exec(db, create_sql).await?;
+
+    // 2) 三个审计查询索引（ensure_tenant_index 内部三方言幂等：MySQL 先查
+    //    information_schema.statistics 判存在，PG/SQLite 直接 IF NOT EXISTS）
+    for (name, cols) in [
+        ("idx_audit_change_row", "table_name, row_pk"),
+        ("idx_audit_change_time", "operated_at"),
+        ("idx_audit_change_tenant", "tenant_id"),
+    ] {
+        ensure_tenant_index(db, "sys_audit_change", name, cols, false).await?;
+    }
+
+    // 3) sys_oper_log.chain_hash 列（表已存在才检查；极老空库由 migration 负责建表）
+    if sso_table_exists(db, "sys_oper_log").await?
+        && !sso_has_column(db, "sys_oper_log", "chain_hash").await?
+    {
+        tracing::info!("sys_oper_log 缺少 chain_hash 列，执行幂等 ALTER 添加");
+        flow_exec(db, "ALTER TABLE sys_oper_log ADD COLUMN chain_hash VARCHAR(64)").await?;
+    }
+
+    // 4) 菜单种子（幂等 INSERT；列清单与迁移一致，含 i18n_key）
+    let now = flow_now(db);
+    let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
+
+    // C 页面「变更留痕」（挂日志管理目录 108）
+    flow_insert(
+        db,
+        &format!(
+            "{menu_cols} VALUES \
+            (4000, '变更留痕', 108, 4, 'auditChange', 'system/auditChange/index', '', '', '1', '0', 'C', '0', '0', 'system:audit-change:list', 'log', 'admin', {now}, '业务数据变更留痕审计（前后快照 + 字段差异）', '0', 'menu.audit_change')"
+        ),
+    )
+    .await?;
+    flow_insert(db, "sys_role_menu (role_id, menu_id) VALUES (2, 4000)").await?;
+
+    // F 按钮（权限标识与后端 PERM_ROUTE_TABLE 对齐，menu_perm_contract 契约测试依赖）
+    for (menu_id, name, perms) in [
+        (4001, "变更查询", "system:audit-change:query"),
+        (4002, "变更导出", "system:audit-change:export"),
+    ] {
+        flow_insert(
+            db,
+            &format!(
+                "{menu_cols} VALUES \
+                ({menu_id}, '{name}', 4000, 1, '', '', '', '', '1', '0', 'F', '0', '0', '{perms}', '#', 'admin', {now}, '', '0', NULL)"
+            ),
+        )
+        .await?;
+        flow_insert(
+            db,
+            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})"),
+        )
+        .await?;
+    }
+
+    tracing::info!("审计合规域兜底完成（sys_audit_change / chain_hash / 菜单 4000-4002，幂等）");
+    Ok(())
+}
+
+/// Webhook 事件目录种子（与迁移 `m20261003_000002_webhook_event::SEED_EVENTS` 双写同步）：
+/// (event_key, name, description, payload_example)；payload_example 为真实字段样例，
+/// test-send 直接以其构造真实出站投递。
+const WEBHOOK_SEED_EVENTS: &[(&str, &str, &str, &str)] = &[
+    (
+        "user.created",
+        "用户创建",
+        "新用户创建成功后触发（sys_user 新增事务提交后）",
+        r#"{"userId":1,"userName":"admin","nickName":"超级管理员","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "user.updated",
+        "用户修改",
+        "用户信息修改成功后触发（sys_user 编辑事务提交后）",
+        r#"{"userId":1,"userName":"admin","nickName":"超级管理员","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "user.deleted",
+        "用户删除",
+        "用户删除成功后触发（软删 + 关联清理事务提交后）",
+        r#"{"userId":1,"userName":"admin","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "role.created",
+        "角色创建",
+        "新角色创建成功后触发（sys_role 新增事务提交后）",
+        r#"{"roleId":2,"roleKey":"common","roleName":"普通角色","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "role.updated",
+        "角色修改",
+        "角色信息/菜单授权修改成功后触发（sys_role 编辑事务提交后）",
+        r#"{"roleId":2,"roleKey":"common","roleName":"普通角色","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "role.deleted",
+        "角色删除",
+        "角色删除成功后触发（软删 + 关联清理事务提交后）",
+        r#"{"roleId":2,"roleKey":"common","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "login.success",
+        "登录成功",
+        "账号密码登录成功后触发（payload 含用户名/IP/租户）",
+        r#"{"username":"admin","ip":"10.0.0.1","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "login.failed",
+        "登录失败",
+        "账号密码登录失败后触发（payload 含用户名/IP/失败原因）",
+        r#"{"username":"admin","ip":"10.0.0.1","reason":"用户名或密码错误","time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "tenant.created",
+        "租户创建",
+        "新租户创建成功后触发（sys_tenant 新增事务提交后）",
+        r#"{"tenantId":2,"tenantName":"示例租户","time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "tenant.disabled",
+        "租户停用",
+        "租户被停用/到期后触发（运行时状态键切换时）",
+        r#"{"tenantId":2,"tenantName":"示例租户","time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "config.updated",
+        "参数修改",
+        "系统参数配置修改成功后触发（sys_config 编辑后）",
+        r#"{"configKey":"sys.account.captchaEnabled","configValue":"false","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "dict.updated",
+        "字典变更",
+        "字典类型/字典数据变更成功后触发（sys_dict_* 编辑后）",
+        r#"{"dictType":"sys_normal_disable","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "notice.published",
+        "公告发布",
+        "通知公告发布成功后触发（sys_notice 新增后）",
+        r#"{"noticeId":1,"noticeTitle":"系统维护公告","noticeType":"1","tenantId":0,"time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "job.executed",
+        "任务执行成功",
+        "定时任务执行成功后触发（payload 含任务与调用目标）",
+        r#"{"jobId":1,"jobName":"数据备份","invokeTarget":"backup.run","status":"0","time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "job.failed",
+        "任务执行失败",
+        "定时任务执行失败后触发（payload 含任务与错误信息）",
+        r#"{"jobId":1,"jobName":"数据备份","invokeTarget":"backup.run","error":"连接超时","time":"2026-10-03 00:00:00"}"#,
+    ),
+    (
+        "webhook.test",
+        "回调测试",
+        "回调配置手动测试发送时触发（test-send / test 通用样例事件）",
+        r#"{"hookId":1,"hookName":"示例回调","eventKey":"webhook.test","time":"2026-10-03 00:00:00"}"#,
+    ),
+];
+
+/// 开放域集成兜底（等价迁移 `m20261003_000002_webhook_event`）：
+/// - 建表 `sys_webhook_event`（事件目录）+ event_key 唯一索引
+/// - 16 个种子事件幂等 INSERT
+/// - 加列（存在性检查）：sys_web_hook.subscribed_events / sys_web_hook_log.source /
+///   sys_pat.access_key + secret_key（AK/SK 开放 API 凭据，SK 信封加密存 VARCHAR(255)）
+/// - `uk_sys_pat_access_key` 唯一索引（AK 鉴权查库）
+/// - 菜单按钮种子：事件目录 3562 / 测试发送 3563（挂回调配置页面 158，授予 role_id=2）
+pub(crate) async fn ensure_webhook_event_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // 1) 建表（id 跨方言自增主键，与迁移一致）
+    let id_col = match backend {
+        DatabaseBackend::Sqlite => "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        DatabaseBackend::MySql => "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        DatabaseBackend::Postgres => "id BIGSERIAL PRIMARY KEY",
+    };
+    flow_exec(
+        db,
+        format!(
+            "CREATE TABLE IF NOT EXISTS sys_webhook_event (
+                {id_col},
+                event_key       VARCHAR(64) NOT NULL,
+                name            VARCHAR(64) NOT NULL,
+                description     VARCHAR(255) NULL,
+                payload_example TEXT NULL,
+                enabled         CHAR(1) NOT NULL DEFAULT '1',
+                created_at      TIMESTAMP NULL,
+                updated_at      TIMESTAMP NULL
+            )"
+        ),
+    )
+    .await?;
+    ensure_tenant_index(db, "sys_webhook_event", "uk_sys_webhook_event_key", "event_key", true)
+        .await?;
+
+    // 2) 种子事件（幂等；单引号防御性转义，与迁移同口径）
+    let now = flow_now(db);
+    let esc = |s: &str| s.replace('\'', "''");
+    for (event_key, name, desc, example) in WEBHOOK_SEED_EVENTS {
+        flow_insert(
+            db,
+            &format!(
+                "sys_webhook_event (event_key, name, description, payload_example, enabled, created_at, updated_at) VALUES \
+                ('{}', '{}', '{}', '{}', '1', {now}, {now})",
+                esc(event_key),
+                esc(name),
+                esc(desc),
+                esc(example),
+            ),
+        )
+        .await?;
+    }
+
+    // 3) 加列（表存在才检查；存量行 NULL 兼容）
+    if sso_table_exists(db, "sys_web_hook").await?
+        && !sso_has_column(db, "sys_web_hook", "subscribed_events").await?
+    {
+        // JSON 数组字符串；NULL/空 = 订阅全部（兼容存量行为）
+        flow_exec(
+            db,
+            "ALTER TABLE sys_web_hook ADD COLUMN subscribed_events TEXT NULL",
+        )
+        .await?;
+    }
+    if sso_table_exists(db, "sys_web_hook_log").await?
+        && !sso_has_column(db, "sys_web_hook_log", "source").await?
+    {
+        // NULL = 事件派发，'test' = 手动测试发送
+        flow_exec(db, "ALTER TABLE sys_web_hook_log ADD COLUMN source VARCHAR(16) NULL").await?;
+    }
+    if sso_table_exists(db, "sys_pat").await? {
+        if !sso_has_column(db, "sys_pat", "access_key").await? {
+            flow_exec(db, "ALTER TABLE sys_pat ADD COLUMN access_key VARCHAR(32) NULL").await?;
+        }
+        if !sso_has_column(db, "sys_pat", "secret_key").await? {
+            flow_exec(db, "ALTER TABLE sys_pat ADD COLUMN secret_key VARCHAR(255) NULL").await?;
+        }
+        // AK 鉴权查库唯一索引（幂等）
+        ensure_tenant_index(db, "sys_pat", "uk_sys_pat_access_key", "access_key", true).await?;
+    }
+
+    // 4) 菜单按钮权限（挂「回调配置」页面 menu_id=158 下，授予超管角色 role_id=2）
+    const BTN_EVENT_LIST_ID: i64 = 3562;
+    const BTN_TEST_SEND_ID: i64 = 3563;
+    const PARENT_PAGE_ID: i64 = 158;
+    let btn_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
+
+    flow_insert(
+        db,
+        &format!(
+            "{btn_cols} VALUES \
+            ({BTN_EVENT_LIST_ID}, '事件目录', {PARENT_PAGE_ID}, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:event:list', 'list', 'admin', {now}, 'WebHook 事件目录查询', '0')"
+        ),
+    )
+    .await?;
+    flow_insert(
+        db,
+        &format!("sys_role_menu (role_id, menu_id) VALUES (2, {BTN_EVENT_LIST_ID})"),
+    )
+    .await?;
+
+    flow_insert(
+        db,
+        &format!(
+            "{btn_cols} VALUES \
+            ({BTN_TEST_SEND_ID}, '测试发送', {PARENT_PAGE_ID}, 2, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:test-send', 'message', 'admin', {now}, '按事件样例构造真实测试发送', '0')"
+        ),
+    )
+    .await?;
+    flow_insert(
+        db,
+        &format!("sys_role_menu (role_id, menu_id) VALUES (2, {BTN_TEST_SEND_ID})"),
+    )
+    .await?;
+
+    tracing::info!("Webhook 事件域兜底完成（sys_webhook_event / AK/SK 列 / 菜单 3562-3563，幂等）");
+    Ok(())
+}
+
+/// 告警规则引擎兜底（等价迁移 `m20261003_000003_alert_rule`）：
+/// - 建表 `sys_alert_rule`（三方言幂等；metric/comparator 白名单在 service 层校验）
+/// - `idx_alert_rule_enabled` 索引（评估轮询按 enabled 过滤）
+/// - 告警菜单种子：页面 4110（挂系统监控目录 2）+ 按钮 4111-4114（与
+///   PERM_ROUTE_TABLE 对齐），页面对通用角色 role_id=2 可见
+pub(crate) async fn ensure_alert_rule_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+
+    // 1) 建表（id 自增主键 / threshold 浮点 / 时间列按方言声明，与迁移 DDL 一致）
+    let id_col = match backend {
+        DatabaseBackend::Sqlite => "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        DatabaseBackend::MySql => "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        DatabaseBackend::Postgres => "id BIGSERIAL PRIMARY KEY",
+    };
+    let (threshold_col, dt_col) = if backend == DatabaseBackend::Postgres {
+        ("DOUBLE PRECISION NOT NULL", "TIMESTAMP")
+    } else {
+        ("DOUBLE NOT NULL", "DATETIME")
+    };
+    flow_exec(
+        db,
+        format!(
+            "CREATE TABLE IF NOT EXISTS sys_alert_rule (
+                {id_col},
+                name               VARCHAR(64) NOT NULL,
+                metric             VARCHAR(64) NOT NULL,
+                comparator         VARCHAR(2) NOT NULL,
+                threshold          {threshold_col},
+                silent_minutes     INT NOT NULL DEFAULT 30,
+                notify_channel_id  BIGINT,
+                notify_template_id BIGINT,
+                enabled            CHAR(1) DEFAULT '1',
+                last_fired_at      {dt_col},
+                created_at         {dt_col},
+                updated_at         {dt_col}
+            )"
+        ),
+    )
+    .await?;
+
+    // 2) enabled 过滤索引（评估轮询用；三方言幂等）
+    ensure_tenant_index(db, "sys_alert_rule", "idx_alert_rule_enabled", "enabled", false).await?;
+
+    // 3) 菜单元数据（挂「系统监控」目录 menu_id=2，perms 与 PERM_ROUTE_TABLE 对齐）
+    let now = flow_now(db);
+    let btn_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
+
+    // 3.1 C 页面「告警规则」menu_id=4110（对通用角色 role_id=2 可见，与消息模块 140 同口径）
+    flow_insert(
+        db,
+        &format!(
+            "{btn_cols} VALUES \
+            (4110, '告警规则', 2, 60, 'alert', 'monitor/alert/index', '', '', '1', '0', 'C', '0', '0', 'monitor:alert:list', 'alert', 'admin', {now}, '告警规则引擎菜单', '0')"
+        ),
+    )
+    .await?;
+    flow_insert(db, "sys_role_menu (role_id, menu_id) VALUES (2, 4110)").await?;
+
+    // 3.2 F 按钮权限（4111-4114：query/add/edit/remove；与迁移一致不授予 role_menu）
+    for (name, menu_id, perms) in [
+        ("告警查询", 4111, "monitor:alert:query"),
+        ("告警新增", 4112, "monitor:alert:add"),
+        ("告警修改", 4113, "monitor:alert:edit"),
+        ("告警删除", 4114, "monitor:alert:remove"),
+    ] {
+        flow_insert(
+            db,
+            &format!(
+                "{btn_cols} VALUES \
+                ({menu_id}, '{name}', 4110, 1, '#', '', '', '', '1', '0', 'F', '0', '0', '{perms}', '#', 'admin', {now}, '', '0')"
+            ),
+        )
+        .await?;
+    }
+
+    tracing::info!("告警规则兜底完成（sys_alert_rule / enabled 索引 / 菜单 4110-4114，幂等）");
+    Ok(())
 }
 
 #[cfg(test)]

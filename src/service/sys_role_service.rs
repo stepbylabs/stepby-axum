@@ -567,10 +567,34 @@ impl SysRoleService {
                 am.update_time = Set(Some(now));
                 am.remark = Set(dto.remark.clone());
 
+                // 审计留痕块为 boxed()（需 'static），operator 为 &str 引用生命周期不足，
+                // 克隆为 owned String 移入 async move 块
+                let operator_owned = operator.to_string();
                 let menu_ids = dto.menu_ids.clone();
                 async move {
                     // 1. 插入 sys_role（通过 Repository）
                     let new_role = role_repo.base().insert_conn(txn, am).await?;
+
+                    // 1.5 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚）
+                    let after =
+                        serde_json::to_value(&new_role).unwrap_or(serde_json::Value::Null);
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            None, // add_role 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_role",
+                        &new_role.role_id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_INSERT,
+                        None,
+                        Some(after),
+                        audit_operator,
+                    )
+                    .await?;
 
                     // 2. 若 menu_ids 非空，批量插入 sys_role_menu（通过 Repository）
                     if let Some(ids) = menu_ids
@@ -667,6 +691,9 @@ impl SysRoleService {
                 .await?;
         }
 
+        // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
+        let before_snapshot =
+            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let role_repo = self.role_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
         let result = self
@@ -701,6 +728,9 @@ impl SysRoleService {
                 am.update_by = Set(Some(operator.to_string()));
                 am.update_time = Set(Some(now));
 
+                // 审计留痕块为 boxed()（需 'static），operator 为 &str 引用生命周期不足，
+                // 克隆为 owned String 移入 async move 块
+                let operator_owned = operator.to_string();
                 let menu_ids = dto.menu_ids.clone();
                 let role_id = dto.role_id;
                 async move {
@@ -723,6 +753,27 @@ impl SysRoleService {
                             role_menu_repo.insert_many_conn(txn, models).await?;
                         }
                     }
+
+                    // 3. 审计合规域：UPDATE 变更留痕（同事务提交/回滚，失败令业务一并回滚）
+                    let after =
+                        serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            None, // edit_role 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_role",
+                        &updated.role_id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_UPDATE,
+                        Some(before_snapshot),
+                        Some(after),
+                        audit_operator,
+                    )
+                    .await?;
                     Ok(updated)
                 }
                 .boxed()
@@ -766,6 +817,9 @@ impl SysRoleService {
         // 软删除记录仍占用 role_key 唯一索引，导致无法重新创建同 key 角色
         let deleted_role_key = format!("{}_deleted_{}", existing.role_key, role_id);
 
+        // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
+        let before_snapshot =
+            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let role_repo = self.role_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
@@ -790,6 +844,22 @@ impl SysRoleService {
                     am.del_flag = Set(Some("2".to_string()));
                     am.role_key = Set(deleted_role_key);
                     role_repo.base().update_conn(txn, am).await?;
+
+                    // 1.5 审计合规域：DELETE 变更留痕（同事务提交/回滚，失败令业务一并回滚；
+                    //     delete_role 签名无操作人信息，操作人两列留空（列可空））
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(txn, None, None)
+                            .await;
+                    crate::service::sys_audit_change_service::record_change(
+                        txn,
+                        "sys_role",
+                        &role_id.to_string(),
+                        crate::service::sys_audit_change_service::ACTION_DELETE,
+                        Some(before_snapshot),
+                        None,
+                        audit_operator,
+                    )
+                    .await?;
 
                     // 2. 物理删除 sys_role_menu 关联（通过 Repository）
                     role_menu_repo.delete_by_role_id_conn(txn, role_id).await?;
