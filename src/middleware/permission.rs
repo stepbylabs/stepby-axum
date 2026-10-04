@@ -988,18 +988,51 @@ fn is_pat_management_path(path: &str) -> bool {
         || path.starts_with("/monitor/pat")
 }
 
-/// 租户管理开关（[tenant].management）作用路径判定：`/system/tenant` 前缀。
+/// 租户管理开关（[tenant].management）作用路径判定。
 ///
-/// 覆盖租户管理全部端点（list/package/changeStatus/restore/{id} CRUD）；
-/// 不含 `system:tenant:domain:*` 域名自助（由能力位 `tenant.domain_self_service`
-/// 独立管控）与 L3 自建导航（能力位 `nav.l3` 独立管控）。
+/// 覆盖平台侧租户管理全部端点（sys_tenant_router：list/package/changeStatus/
+/// restore/{id} CRUD）；
+/// **不含** `/system/tenant/domain/*` 域名自助（由能力位 `tenant.domain_self_service`
+/// 独立管控）与 `/system/tenant/menu/*` L3 自建导航（能力位 `nav.l3` 独立管控）
+/// ——三者同挂 `/system/tenant` 前缀，若仅按前缀判定会把自助端点一并 403，
+/// 违背"管理开关只管平台侧管理"的语义（注释与实现曾不一致，已修复）。
 fn is_tenant_management_path(path: &str) -> bool {
     path.starts_with("/system/tenant")
+        && !path.starts_with("/system/tenant/domain")
+        && !path.starts_with("/system/tenant/menu")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{get_required_perm, is_login_only_path};
+    use super::{get_required_perm, is_login_only_path, is_tenant_management_path};
+
+    // ===== 租户管理开关路径判定（[tenant].management）=====
+    #[test]
+    fn test_tenant_management_paths_match() {
+        // 平台侧租户管理端点（sys_tenant_router）——开关关闭时应 403
+        assert!(is_tenant_management_path("/system/tenant/list"));
+        assert!(is_tenant_management_path("/system/tenant"));
+        assert!(is_tenant_management_path("/system/tenant/package/options"));
+        assert!(is_tenant_management_path("/system/tenant/package/features"));
+        assert!(is_tenant_management_path("/system/tenant/changeStatus"));
+        assert!(is_tenant_management_path("/system/tenant/restore/1"));
+        assert!(is_tenant_management_path("/system/tenant/1"));
+    }
+
+    #[test]
+    fn test_tenant_self_service_paths_not_matched() {
+        // 域名自助（能力位 tenant.domain_self_service 独立管控）——不受管理开关影响
+        assert!(!is_tenant_management_path("/system/tenant/domain/list"));
+        assert!(!is_tenant_management_path("/system/tenant/domain"));
+        assert!(!is_tenant_management_path(
+            "/system/tenant/domain/verify/1"
+        ));
+        // L3 自建导航（能力位 nav.l3 独立管控）——不受管理开关影响
+        assert!(!is_tenant_management_path("/system/tenant/menu/list"));
+        assert!(!is_tenant_management_path("/system/tenant/menu/1"));
+        // 其他路径恒不命中（matched_path 来自真实注册路由，仅列非 tenant 前缀反例）
+        assert!(!is_tenant_management_path("/system/user/list"));
+    }
 
     // ===== 用户管理权限映射 =====
     #[test]
