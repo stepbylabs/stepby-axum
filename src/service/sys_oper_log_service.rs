@@ -1364,4 +1364,128 @@ mod tests {
         assert_eq!(rate, 24.97);
         assert!(!alarm);
     }
+
+    // ==================== 链写入集成（真实 sqlite 迁移库 + LocalStore） ====================
+    // 覆盖安全审查轮加固的乱序守卫：锁保证互斥但不保证写入序 = oper_id 序，
+    // 乱序时若不拦截会形成分支链（两条 prev 指向同一前驱），verify 按 id 升序
+    // 重算必误报篡改。守卫命中 ⇒ 本条降级 NULL，链在非 NULL 子序列上续写。
+
+    use super::SysOperLogService;
+    use crate::repository::test_support::migrated_db;
+    use crate::shared_store::LocalStore;
+    use sea_orm::{DatabaseConnection, EntityTrait};
+
+    /// 隔离测试库 + 带链上下文的 Service（真实 LocalStore 共享态，密钥固定测试值）
+    async fn chain_fixture() -> (DatabaseConnection, SysOperLogService) {
+        let db = migrated_db().await.unwrap();
+        let store: std::sync::Arc<dyn crate::shared_store::SharedStore> =
+            std::sync::Arc::new(LocalStore::new(db.clone()));
+        let svc = SysOperLogService::with_chain(db.clone(), store, "test-chain-secret");
+        (db, svc)
+    }
+
+    /// 真实插入一条最小操作日志行（oper_id 显式指定，chain_hash 保持 NULL），返回库内模型
+    ///
+    /// 返回模型供 `ChainPayload::from_model` 构建 attach 端负载——verify 端重算
+    /// 用的正是 from_model（读库路径），两端必须同口径，链哈希才能闭合。
+    async fn insert_log_row(
+        db: &DatabaseConnection,
+        oper_id: i64,
+    ) -> crate::entity::sys_oper_log::Model {
+        crate::entity::sys_oper_log::Entity::insert(crate::entity::sys_oper_log::ActiveModel {
+            oper_id: sea_orm::Set(oper_id),
+            tenant_id: sea_orm::Set(0),
+            title: sea_orm::Set(Some("module.test".into())),
+            oper_name: sea_orm::Set(Some("admin".into())),
+            oper_time: sea_orm::Set(Some(
+                chrono::NaiveDate::from_ymd_opt(2026, 10, 4)
+                    .unwrap()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap(),
+            )),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        crate::entity::sys_oper_log::Entity::find_by_id(oper_id)
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn chain_in_order_write_links_and_verifies() {
+        let (db, svc) = chain_fixture().await;
+        let ctx = svc.chain.as_ref().unwrap();
+        let m1 = insert_log_row(&db, 1).await;
+        let m2 = insert_log_row(&db, 2).await;
+        let p1 = ChainPayload::from_model(&m1);
+        let p2 = ChainPayload::from_model(&m2);
+
+        // 顺序写链：1 → 2（2 的 prev 取自 1 的库内 hash）
+        assert!(svc.attach_chain_hash(ctx, 1, &p1).await.unwrap().is_some());
+        assert!(svc.attach_chain_hash(ctx, 2, &p2).await.unwrap().is_some());
+
+        let vo = svc.verify_chain().await.unwrap();
+        assert!(vo.valid, "顺序写链后全链校验必须通过");
+        assert_eq!(vo.checked, 2, "两条非 NULL 节点都参与校验");
+        assert_eq!(vo.broken_at_oper_id, None);
+    }
+
+    #[tokio::test]
+    async fn chain_out_of_order_write_degrades_to_null_and_verify_skips() {
+        let (db, svc) = chain_fixture().await;
+        let ctx = svc.chain.as_ref().unwrap();
+        let m1 = insert_log_row(&db, 1).await;
+        let m2 = insert_log_row(&db, 2).await;
+        let p1 = ChainPayload::from_model(&m1);
+        let p2 = ChainPayload::from_model(&m2);
+
+        // 乱序模拟：oper_id=2 先写链（并发下 id 分配序与 attach 序反转的真实场景）
+        assert!(svc.attach_chain_hash(ctx, 2, &p2).await.unwrap().is_some());
+
+        // oper_id=1 后写 → 乱序守卫命中 → 降级 Ok(None)，不产生分支链
+        assert!(
+            svc.attach_chain_hash(ctx, 1, &p1).await.unwrap().is_none(),
+            "更大 oper_id 已抢先写链时，本条必须降级 NULL"
+        );
+
+        // 库内真值：1 的 chain_hash 保持 NULL
+        let m1_after = crate::entity::sys_oper_log::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(m1_after.chain_hash.is_none(), "降级后不得回写链哈希");
+
+        // verify：NULL 行跳过，链在非 NULL 子序列续写且有效
+        let vo = svc.verify_chain().await.unwrap();
+        assert!(vo.valid, "降级 NULL 后剩余子链校验必须通过");
+        assert_eq!(vo.checked, 1, "仅 oper_id=2 参与校验");
+        assert_eq!(vo.broken_at_oper_id, None);
+    }
+
+    #[tokio::test]
+    async fn chain_verify_detects_tampered_hash() {
+        let (db, svc) = chain_fixture().await;
+        let ctx = svc.chain.as_ref().unwrap();
+        let m1 = insert_log_row(&db, 1).await;
+        let m2 = insert_log_row(&db, 2).await;
+        let p1 = ChainPayload::from_model(&m1);
+        let p2 = ChainPayload::from_model(&m2);
+        svc.attach_chain_hash(ctx, 1, &p1).await.unwrap().unwrap();
+        svc.attach_chain_hash(ctx, 2, &p2).await.unwrap().unwrap();
+
+        // 真实篡改库内 oper_id=2 的 chain_hash → verify 定位断点
+        svc.oper_log_repo
+            .set_chain_hash(2, "deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-dead")
+            .await
+            .unwrap();
+
+        let vo = svc.verify_chain().await.unwrap();
+        assert!(!vo.valid, "链哈希被篡改后校验必须失败");
+        assert_eq!(vo.broken_at_oper_id, Some(2), "断点必须定位在被篡改节点");
+    }
 }
