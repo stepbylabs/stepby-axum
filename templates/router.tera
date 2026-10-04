@@ -1,4 +1,29 @@
 //! {{ table.tableName }} 模块路由
+//!
+//! ==================== 集成清单（挂载前必读，gen-tenant/权限修复 2026-10-05）====================
+//! 生成本路由后必须完成以下**人工步骤**，缺一则存在越权/权限空洞：
+//!
+//! 1. **挂载**：在 `src/router/mod.rs` 的受保护路由组内挂载
+//!    `{{ table.tableName }}_routes()`（鉴权中间件在受保护组统一生效）。
+//!
+//! 2. **权限映射**：在 `src/middleware/permission.rs` 的 `PERM_ROUTE_TABLE` 追加
+//!    以下四行（建议标识，可按模块改名；**缺行 = 登录即可访问，无细粒度权限**）：
+//!    ```ignore
+//!    ("GET",    "/{{ table.moduleName }}/{{ table.tableName }}/list", "{{ table.moduleName }}:{{ table.tableName }}:list"),
+//!    ("GET",    "/{{ table.moduleName }}/{{ table.tableName }}/{id}", "{{ table.moduleName }}:{{ table.tableName }}:query"),
+//!    ("POST",   "/{{ table.moduleName }}/{{ table.tableName }}",      "{{ table.moduleName }}:{{ table.tableName }}:add"),
+//!    ("PUT",    "/{{ table.moduleName }}/{{ table.tableName }}",      "{{ table.moduleName }}:{{ table.tableName }}:edit"),
+//!    ("DELETE", "/{{ table.moduleName }}/{{ table.tableName }}/{id}", "{{ table.moduleName }}:{{ table.tableName }}:remove"),
+//!    ```
+//!    （{{ pk_column.rustField }} 动态段路径请按上表 {id} 形态替换为真实路径。）
+//!
+//! 3. **菜单与按钮种子**：新增迁移（或 initialize 兜底）在 `sys_menu` 登记页面 + 按钮
+//!    （perms 用上述标识），并在 `sys_role_menu` 授权目标角色——否则权限标识"可授但无入口"。
+//!
+//! {% if has_tenant_id %}4. **租户过滤**：service 层查询已按 `tenant_scope` 收敛（平台 tid=0 全量，
+//!    租户仅见本租户行）——无需额外处理；若本表实为**全局配置表**（无租户语义），
+//!    可删除模板生成的租户过滤后重新生成。{% else %}4. 本表列清单不含 `tenant_id`，service 层未生成租户过滤——
+//!    若该表需租户隔离，请在表结构中增加 tenant_id 列后重新生成。{% endif %}
 
 use std::sync::Arc;
 use axum::Router;
