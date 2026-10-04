@@ -1531,15 +1531,58 @@ impl SysTenantService {
         am.update_time = Set(Some(now));
         // 审计合规域：变更前快照（tenant 此前为 clone().into()，本行仍持有完整改前行）
         let before_snapshot = serde_json::to_value(&tenant).unwrap_or(serde_json::Value::Null);
-        // 事务：租户行更新 + 审计留痕原子化（同事务提交/回滚）
+        // 事务：租户行更新 + 审计留痕 + 根部门同步原子化
+        // （根部门同步原在事务外独立写，存在"租户行已提交、根部门同步失败"的
+        //   不一致窗口——本轮一并修复并接入审计留痕）
         let tenant_repo = self.tenant_repo.clone();
+        let dept_repo = self.dept_repo.clone();
         let operator_owned = operator.to_string();
+        // 根部门同步预计算（事务外只读：查部门 + before 快照 + ActiveModel 组装；
+        // dept 不存在或租户未挂载根部门时为 None，跳过同步）
+        let dept_sync: Option<(serde_json::Value, sys_dept::ActiveModel)> = match tenant.dept_id {
+            Some(dept_id) => {
+                let dept = self.dept_repo.base().find_by_id(dept_id).await?;
+                dept.map(|dept| {
+                    let before = serde_json::to_value(&dept).unwrap_or(serde_json::Value::Null);
+                    let (existing_leader, existing_phone, existing_email) =
+                        (dept.leader.clone(), dept.phone.clone(), dept.email.clone());
+                    let mut dam: sys_dept::ActiveModel = dept.into();
+                    dam.dept_name = Set(name.to_string());
+                    // 同口径：未传保持现值；显式 `clearFields: ["leader"/"phone"/"email"]` 才写 NULL
+                    dam.leader = Set(if is_cleared(&clears, "leader") {
+                        None
+                    } else {
+                        dto.leader.clone().or(existing_leader)
+                    });
+                    dam.phone = Set(if is_cleared(&clears, "phone") {
+                        None
+                    } else {
+                        dto.phone.clone().or(existing_phone)
+                    });
+                    dam.email = Set(if is_cleared(&clears, "email") {
+                        None
+                    } else {
+                        dto.email.clone().or(existing_email)
+                    });
+                    if let Some(order) = dto.order_num {
+                        dam.order_num = Set(Some(order));
+                    }
+                    dam.update_by = Set(Some(operator.to_string()));
+                    dam.update_time = Set(Some(now));
+                    (before, dam)
+                })
+            }
+            None => None,
+        };
+
         self.db()
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 let tenant_repo = tenant_repo.clone();
+                let dept_repo = dept_repo.clone();
                 let am = am;
                 let before_snapshot = before_snapshot.clone();
                 let operator = operator_owned.clone();
+                let dept_sync = dept_sync;
                 Box::pin(async move {
                     let model = tenant_repo.base().update_conn(txn, am).await?;
                     // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
@@ -1553,45 +1596,28 @@ impl SysTenantService {
                         Some(operator.as_str()),
                     )
                     .await?;
+                    // 根部门同步（与租户行同提交/回滚）+ sys_dept 审计留痕
+                    if let Some((dept_before, dam)) = dept_sync {
+                        let updated_dept = dept_repo.base().update_conn(txn, dam).await?;
+                        crate::service::sys_audit_change_service::audit_update(
+                            txn,
+                            "sys_dept",
+                            &updated_dept.dept_id.to_string(),
+                            &dept_before,
+                            &updated_dept,
+                            None,
+                            Some(operator.as_str()),
+                        )
+                        .await?;
+                    }
                     Ok(())
                 })
             })
             .await?;
 
-        // 组织树同步（根部门展示字段与租户行一致）
-        if let Some(dept_id) = tenant.dept_id
-            && let Some(dept) = self.dept_repo.base().find_by_id(dept_id).await?
-        {
-            // 部分更新语义快照（`dept` 随即被 `into()` 转移）：未传时保持根部门现值
-            let (existing_leader, existing_phone, existing_email) =
-                (dept.leader.clone(), dept.phone.clone(), dept.email.clone());
-            let mut dam: sys_dept::ActiveModel = dept.into();
-            dam.dept_name = Set(name.to_string());
-            // 同口径：未传保持现值；显式 `clearFields: ["leader"/"phone"/"email"]` 才写 NULL
-            dam.leader = Set(if is_cleared(&clears, "leader") {
-                None
-            } else {
-                dto.leader.clone().or(existing_leader)
-            });
-            dam.phone = Set(if is_cleared(&clears, "phone") {
-                None
-            } else {
-                dto.phone.clone().or(existing_phone)
-            });
-            dam.email = Set(if is_cleared(&clears, "email") {
-                None
-            } else {
-                dto.email.clone().or(existing_email)
-            });
-            if let Some(order) = dto.order_num {
-                dam.order_num = Set(Some(order));
-            }
-            dam.update_by = Set(Some(operator.to_string()));
-            dam.update_time = Set(Some(now));
-            self.dept_repo.base().update(dam).await?;
-        }
-
         // 套餐收敛：改小套餐后必须收敛该租户角色授权，否则残留越权菜单（§27.6 生效点③）
+        // （审计口径：converge 为套餐变更从属动作，sys_tenant UPDATE 留痕已含
+        //   packageId 变更，授权明细不再重复留痕）
         if let Some(pkg) = new_package {
             self.converge_tenant_role_menus(dto.tenant_id, &pkg).await?;
         }
