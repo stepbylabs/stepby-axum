@@ -508,6 +508,7 @@ error:
     platform_protected: Platform root department cannot be modified via tenant API
     disabled: Tenant has been disabled, login denied
     platform_only: This operation is restricted to platform administrators
+    management_disabled: Tenant management is disabled (single-machine mode). Set [tenant].management = true in the configuration to enable it.
     code_invalid: "Invalid tenant code (2-32 chars of lowercase letters/digits/underscore/hyphen, starting with a letter or digit)"
     code_duplicate: Tenant code is already taken, please choose another
     package_not_found: The specified package does not exist or is disabled

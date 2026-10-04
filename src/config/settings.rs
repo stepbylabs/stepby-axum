@@ -77,6 +77,14 @@ pub struct Settings {
     /// **缺省 `{}` = 全关闭**（默认值 = 现状 = 关闭态即安全态）。
     #[serde(default)]
     pub features: FeaturesConfig,
+    /// 租户管理开关（`[tenant]` 段）：`management = true`（**默认**，多租户模式 = 现状）。
+    ///
+    /// `false` = **单机模式**：`/system/tenant*` 全部端点 403（permission 中间件硬拒绝，
+    /// 含超管）——面向零依赖单机部署隐藏租户管理面；**存量租户用户的业务登录/使用
+    /// 不受影响**（开关只收敛"平台侧租户管理功能"，不做数据迁移/阻断）。
+    /// 单机形态由数据天然决定（无租户行 = 全员 tid=0），本开关只控制**管理面可见性**。
+    #[serde(default)]
+    pub tenant: TenantConfig,
     /// 定时任务调度器配置（集群模式 + 内置任务整轮互斥锁）
     #[serde(default)]
     pub scheduler: SchedulerConfig,
@@ -178,6 +186,30 @@ impl fmt::Debug for Settings {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(transparent)]
 pub struct FeaturesConfig(pub std::collections::BTreeMap<String, String>);
+
+/// 租户配置（`[tenant]` 段）
+///
+/// Default 手工实现（`management: true`）：**缺省 = 多租户模式 = 现状零变化**——
+/// 不能 derive Default（bool 默认 false 会把存量部署切到单机模式）。
+#[derive(Clone, Debug, Deserialize)]
+pub struct TenantConfig {
+    /// 租户管理开关：`true`（**默认**）= 多租户模式（现状零变化）；
+    /// `false` = 单机模式（`/system/tenant*` 全端点 403，隐藏租户管理面）。
+    #[serde(default = "default_tenant_management")]
+    pub management: bool,
+}
+
+impl Default for TenantConfig {
+    fn default() -> Self {
+        Self {
+            management: default_tenant_management(),
+        }
+    }
+}
+
+fn default_tenant_management() -> bool {
+    true
+}
 
 /// 定时任务调度器配置（`[scheduler]` 段）
 ///
@@ -2642,6 +2674,7 @@ impl Settings {
             flow: FlowConfig::default(),
             scim: ScimConfig::default(),
             ai: AiConfig::default(),
+            tenant: TenantConfig::default(),
             server: ServerConfig {
                 host: server_host,
                 port: server_port,
@@ -2874,6 +2907,7 @@ mod tests {
             sso: SsoConfig::default(),
             scim: ScimConfig::default(),
             ai: AiConfig::default(),
+            tenant: TenantConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
@@ -3263,6 +3297,7 @@ mod tests {
             sso: SsoConfig::default(),
             scim: ScimConfig::default(),
             ai: AiConfig::default(),
+            tenant: TenantConfig::default(),
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
