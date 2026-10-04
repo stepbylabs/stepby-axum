@@ -237,7 +237,31 @@ impl SysPostService {
             ..Default::default()
         };
 
-        let model = self.post_repo.insert(am).await?;
+        // 事务：插入 + 审计留痕原子化（失败令业务一并回滚）
+        let post_repo = self.post_repo.clone();
+        let operator_owned = operator.to_string();
+        let model = self
+            .db()
+            .transaction::<_, SysPostModel, sea_orm::DbErr>(|txn| {
+                let post_repo = post_repo.clone();
+                let am = am;
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let model = post_repo.base().insert_conn(txn, am).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_post",
+                        &model.post_id.to_string(),
+                        &model,
+                        None, // add_post 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(model)
+                })
+            })
+            .await?;
         Ok(model)
     }
 
@@ -273,6 +297,8 @@ impl SysPostService {
         // 未传排序/状态时保持现值，避免排序被归零、岗位被静默置 NULL 失效
         let existing_sort = existing.post_sort;
         let existing_status = existing.status.clone();
+        // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysPostActiveModel = existing.into();
         am.post_code = Set(dto.post_code);
         am.post_name = Set(dto.post_name);
@@ -282,7 +308,33 @@ impl SysPostService {
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);
 
-        let model = self.post_repo.update(am).await?;
+        // 事务：更新 + 审计留痕原子化（同事务提交/回滚）
+        let post_repo = self.post_repo.clone();
+        let operator_owned = operator.to_string();
+        let model = self
+            .db()
+            .transaction::<_, SysPostModel, sea_orm::DbErr>(|txn| {
+                let post_repo = post_repo.clone();
+                let am = am;
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let model = post_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_post",
+                        &model.post_id.to_string(),
+                        &before_snapshot,
+                        &model,
+                        None, // edit_post 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(model)
+                })
+            })
+            .await?;
         Ok(model)
     }
 
@@ -298,14 +350,17 @@ impl SysPostService {
     pub async fn delete_posts(
         &self,
         post_ids: Vec<i64>,
+        operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
-        // 事务保证：预检 + 批量软删除原子化（预检移入事务内，消除 TOCTOU 竞态 C-05）
+        // 事务保证：预检 + 批量软删除原子化（预检移入事务内，消除 TOCTOU 竞态 C-05），审计留痕同事务
         let post_repo = self.post_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
+        let operator_owned = operator.to_string();
         self.db()
             .transaction::<_, (), ServiceError>(|txn| {
                 let post_ids_inner = post_ids.clone();
+                let operator = operator_owned.clone();
                 async move {
                     for post_id in &post_ids_inner {
                         // 预检：岗位是否已分配给用户（事务内查询，消除 TOCTOU 竞态）
@@ -339,6 +394,16 @@ impl SysPostService {
                         post_repo
                             .soft_delete_with_rename_conn(txn, *post_id, renamed)
                             .await?;
+                        // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                        crate::service::sys_audit_change_service::audit_delete(
+                            txn,
+                            "sys_post",
+                            &post_id.to_string(),
+                            &existing,
+                            None, // delete_posts 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator.as_str()),
+                        )
+                        .await?;
                     }
                     Ok(())
                 }

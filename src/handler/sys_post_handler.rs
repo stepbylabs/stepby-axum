@@ -216,7 +216,7 @@ pub async fn remove(
 
     state
         .post_service
-        .delete_posts(ids, operator.tenant_id())
+        .delete_posts(ids, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

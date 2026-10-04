@@ -325,7 +325,31 @@ impl SysNoticeService {
             ..Default::default()
         };
 
-        let model = self.notice_repo.insert(am).await?;
+        // 事务：插入 + 审计留痕原子化（失败令业务一并回滚）
+        let notice_repo = self.notice_repo.clone();
+        let operator_owned = operator.to_string();
+        let model = self
+            .db()
+            .transaction::<_, SysNoticeModel, sea_orm::DbErr>(|txn| {
+                let notice_repo = notice_repo.clone();
+                let am = am;
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let model = notice_repo.base().insert_conn(txn, am).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_notice",
+                        &model.notice_id.to_string(),
+                        &model,
+                        None, // add_notice 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(model)
+                })
+            })
+            .await?;
 
         // 邮件通知（可选）：仅在调用方传入 AppState 且 dto.notify_email=true 时发送
         if dto.notify_email
@@ -486,6 +510,8 @@ impl SysNoticeService {
         // 未传正文/状态时保持现值，避免"只改标题"的 PUT 清空公告正文或隐藏公告
         let existing_content = existing.notice_content.clone();
         let existing_status = existing.status.clone();
+        // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysNoticeActiveModel = existing.into();
         am.notice_title = Set(dto.notice_title);
         am.notice_type = Set(dto.notice_type);
@@ -495,14 +521,41 @@ impl SysNoticeService {
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);
 
-        let model = self.notice_repo.update(am).await?;
+        // 事务：更新 + 审计留痕原子化（同事务提交/回滚）
+        let notice_repo = self.notice_repo.clone();
+        let operator_owned = operator.to_string();
+        let model = self
+            .db()
+            .transaction::<_, SysNoticeModel, sea_orm::DbErr>(|txn| {
+                let notice_repo = notice_repo.clone();
+                let am = am;
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let model = notice_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_notice",
+                        &model.notice_id.to_string(),
+                        &before_snapshot,
+                        &model,
+                        None, // edit_notice 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(model)
+                })
+            })
+            .await?;
         Ok(model)
     }
 
-    /// 批量删除通知公告（物理删除，级联清理已读记录）
+    /// 批量删除通知公告（物理删除，级联清理已读记录；事务内含 DELETE 审计留痕）
     pub async fn delete_notice(
         &self,
         notice_ids: Vec<i64>,
+        operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 批量校验记录存在（单次 SELECT 替代 N 次）
@@ -524,16 +577,32 @@ impl SysNoticeService {
                 "error.common.forbidden"
             )));
         }
-        // 事务保证：通知删除与已读记录级联清理原子化（P0-76）
+        // 事务保证：通知删除与已读记录级联清理原子化（P0-76），审计留痕同事务
         let notice_repo = self.notice_repo.clone();
         let read_repo = self.read_repo.clone();
+        let existing_inner = existing.clone();
+        let operator_owned = operator.to_string();
         self.db()
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 let notice_ids_inner = notice_ids.clone();
+                let existing_inner = existing_inner.clone();
+                let operator = operator_owned.clone();
                 async move {
                     notice_repo
                         .delete_by_ids_conn(txn, notice_ids_inner.clone())
                         .await?;
+                    // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                    for n in &existing_inner {
+                        crate::service::sys_audit_change_service::audit_delete(
+                            txn,
+                            "sys_notice",
+                            &n.notice_id.to_string(),
+                            n,
+                            None, // delete_notice 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator.as_str()),
+                        )
+                        .await?;
+                    }
                     read_repo
                         .delete_by_notice_ids_conn(txn, notice_ids_inner)
                         .await?;

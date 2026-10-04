@@ -1278,6 +1278,18 @@ impl SysTenantService {
                     let mut tenant_am: TenantActiveModel = tenant.clone().into();
                     tenant_am.dept_id = Set(Some(dept.dept_id));
                     tenant_repo.base().update_conn(txn, tenant_am).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚；after 取回填 dept_id 后的终态行）
+                    let mut tenant_final: SysTenantModel = tenant.clone();
+                    tenant_final.dept_id = Some(dept.dept_id);
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_tenant",
+                        &tenant_final.tenant_id.to_string(),
+                        &tenant_final,
+                        None, // add 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator_owned.as_str()),
+                    )
+                    .await?;
 
                     // 4. 默认角色（菜单 = (平台普通角色菜单 ∪ 租户自助按钮) ∩ 可授予 ∩ 套餐白名单）
                     //    与 OAuth 自动建号的"租户普通角色"共用同一实现
@@ -1517,7 +1529,34 @@ impl SysTenantService {
         am.remark = Set(dto.remark.clone());
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
-        self.tenant_repo.base().update(am).await?;
+        // 审计合规域：变更前快照（tenant 此前为 clone().into()，本行仍持有完整改前行）
+        let before_snapshot = serde_json::to_value(&tenant).unwrap_or(serde_json::Value::Null);
+        // 事务：租户行更新 + 审计留痕原子化（同事务提交/回滚）
+        let tenant_repo = self.tenant_repo.clone();
+        let operator_owned = operator.to_string();
+        self.db()
+            .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                let tenant_repo = tenant_repo.clone();
+                let am = am;
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let model = tenant_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_tenant",
+                        &model.tenant_id.to_string(),
+                        &before_snapshot,
+                        &model,
+                        None, // edit 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await?;
 
         // 组织树同步（根部门展示字段与租户行一致）
         if let Some(dept_id) = tenant.dept_id
@@ -1724,6 +1763,8 @@ impl SysTenantService {
         // 单事务包络（与 delete_user 原子事务模式一致）：租户行 + 部门树 + 角色 +
         // 域名 + 租户自建菜单，任一失败整体回滚，避免部分级联的部分成功状态。
         // 返回角色软删行数仅用于日志。
+        // 审计合规域：变更前快照（tenant 此后仍被引用，快照独立持有改前行状态）
+        let before_snapshot = serde_json::to_value(&tenant).unwrap_or(serde_json::Value::Null);
         let tenant_repo = self.tenant_repo.clone();
         let tid = tenant_id;
         let operator_name = operator.to_string();
@@ -1733,6 +1774,16 @@ impl SysTenantService {
                 async move {
                     // ① 租户行软删（回收站语义）
                     tenant_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_delete(
+                        txn,
+                        "sys_tenant",
+                        &tid.to_string(),
+                        &before_snapshot,
+                        None, // remove 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator_name.as_str()),
+                    )
+                    .await?;
 
                     // ② 组织树软删（按租户维度，不依赖 dept 树结构）
                     let dam: sys_dept::ActiveModel = sys_dept::ActiveModel {

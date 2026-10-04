@@ -401,7 +401,31 @@ impl SysMenuService {
         am.remark = Set(dto.remark.clone());
         am.del_flag = Set(Some("0".to_string()));
 
-        let new_menu = self.menu_repo.insert(am).await?;
+        // 事务：插入 + 审计留痕原子化（失败令业务一并回滚）
+        let menu_repo = self.menu_repo.clone();
+        let operator_owned = operator.to_string();
+        let new_menu = self
+            .db()
+            .transaction::<_, SysMenuModel, sea_orm::DbErr>(|txn| {
+                let menu_repo = menu_repo.clone();
+                let am = am;
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let new_menu = menu_repo.base().insert_conn(txn, am).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_menu",
+                        &new_menu.menu_id.to_string(),
+                        &new_menu,
+                        None, // add_menu 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(new_menu)
+                })
+            })
+            .await?;
         // 菜单变更影响所有用户权限，全量失效权限缓存
         self.invalidate_all_perm_cache().await;
         Ok(new_menu)
@@ -488,6 +512,8 @@ impl SysMenuService {
         );
 
         let now = crate::common::datetime::now_naive();
+        // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysMenuActiveModel = existing.into();
         am.parent_id = Set(Some(parent_id));
         if let Some(ref name) = dto.menu_name {
@@ -530,14 +556,40 @@ impl SysMenuService {
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
 
-        let updated = self.menu_repo.update(am).await?;
+        // 事务：更新 + 审计留痕原子化（同事务提交/回滚）
+        let menu_repo = self.menu_repo.clone();
+        let operator_owned = operator.to_string();
+        let updated = self
+            .db()
+            .transaction::<_, SysMenuModel, sea_orm::DbErr>(|txn| {
+                let menu_repo = menu_repo.clone();
+                let am = am;
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let updated = menu_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_menu",
+                        &updated.menu_id.to_string(),
+                        &before_snapshot,
+                        &updated,
+                        None, // edit_menu 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(updated)
+                })
+            })
+            .await?;
         // 菜单变更影响所有用户权限，全量失效权限缓存
         self.invalidate_all_perm_cache().await;
         Ok(updated)
     }
 
-    /// 删除菜单（事务：子菜单校验 + 菜单分配校验 + 软删除 + 清理 sys_role_menu）
-    pub async fn delete_menu(&self, menu_id: i64) -> Result<(), ServiceError> {
+    /// 删除菜单（事务：子菜单校验 + 菜单分配校验 + 软删除 + 清理 sys_role_menu；含 DELETE 审计留痕）
+    pub async fn delete_menu(&self, menu_id: i64, operator: &str) -> Result<(), ServiceError> {
         let existing = self
             .menu_repo
             .base()
@@ -547,15 +599,20 @@ impl SysMenuService {
         if existing.del_flag.as_deref() == Some("2") {
             return Err(ServiceError::not_found(&crate::tr!("error.menu.not_found")));
         }
+        // 审计合规域：变更前快照（existing 随后被 move 进事务闭包）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
 
         let menu_repo = self.menu_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
+        let operator_owned = operator.to_string();
         // R12 TOCTOU 修复：将子菜单和角色分配校验移入事务内（与 delete_role/delete_dept 一致）
         let txn_result = self
             .db()
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 let menu_repo = menu_repo.clone();
                 let role_menu_repo = role_menu_repo.clone();
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator_owned.clone();
                 async move {
                     // 1. 事务内重新检查子菜单
                     let child_select = SysMenu::find()
@@ -584,6 +641,16 @@ impl SysMenuService {
                     let mut am: SysMenuActiveModel = existing.into();
                     am.del_flag = Set(Some("2".to_string()));
                     menu_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_delete(
+                        txn,
+                        "sys_menu",
+                        &menu_id.to_string(),
+                        &before_snapshot,
+                        None, // delete_menu 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
 
                     // 4. 物理删除 sys_role_menu 关联（冗余保护，正常应已被校验拦截）
                     role_menu_repo.delete_by_menu_id_conn(txn, menu_id).await?;

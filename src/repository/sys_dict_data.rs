@@ -69,6 +69,22 @@ impl SysDictDataRepository {
             .await
     }
 
+    /// 按 dict_code 列表批量软删除字典数据（事务上下文，与审计留痕同事务）
+    pub async fn soft_delete_many_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        dict_codes: Vec<i64>,
+    ) -> Result<UpdateResult, DbErr> {
+        if dict_codes.is_empty() {
+            return Ok(UpdateResult::default());
+        }
+        SysDictData::update_many()
+            .col_expr(Column::DelFlag, Expr::value("2"))
+            .filter(Column::DictCode.is_in(dict_codes))
+            .exec(conn)
+            .await
+    }
+
     /// 插入字典数据
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await
