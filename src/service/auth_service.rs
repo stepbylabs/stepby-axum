@@ -199,6 +199,23 @@ pub struct GetInfoVo {
     /// （可随租户套餐收敛），故取**本租户的生效档位**（平台天花板 ∩ 套餐 `features`）而非仅平台层。
     /// 前端只消费不推断 —— 否则会造出"入口可见但请求 404"的假入口（能力位关闭时后端不注册该路由）。
     pub show_passkey: bool,
+    /// 个人中心是否提供「API 访问令牌（PAT）」入口（`[pat].enabled` 的**服务端判定结果**）
+    ///
+    /// 与 `show_passkey` 同源的"单点判定"：进程静态配置，PAT 关闭时鉴权层对 `ybt_` 令牌
+    /// 一律 401，PAT 自助端点失去意义——入口必须同步隐藏，否则即"页签可见但请求 401"
+    /// 的假入口。前端只消费不推断。
+    pub show_pat: bool,
+    /// 个人中心是否提供「已授权应用（SSO Grants）」入口（`[sso].enabled` 的**服务端判定结果**）
+    ///
+    /// SSO Provider 关闭时 OIDC 端点不注册，授权记录查询必然失败——入口同步隐藏。
+    /// 前端只消费不推断。
+    pub show_sso_grants: bool,
+    /// 角色管理是否提供「字段权限」入口（fieldperm 开关链的**服务端判定结果**）
+    ///
+    /// 与 `sys_role_field_perm_service::ensure_enabled` 开关链**同源**（平台 `sys_config`
+    /// 开关 + 租户能力位 `role.field_perm`），任一层关闭 ⇒ false。前端只消费不推断，
+    /// 避免"按钮可见但点击 403"。
+    pub show_field_perm: bool,
 }
 
 /// 路由节点 Vo（对齐前端 RouterVo）
@@ -1398,6 +1415,42 @@ impl AuthService {
         // 关闭态后端对 `/system/user/webauthn/*` 一律 404，故入口必须同步隐藏，
         // 否则即"入口可见但请求 404"的假入口（第二十批实测正是这里打出了 404）。
         let show_passkey = self.webauthn_capability_on();
+        // 个人中心「API 访问令牌（PAT）」入口决策：`[pat].enabled`（进程静态配置）。
+        // PAT 关闭时鉴权层对 ybt_ 令牌一律 401 ⇒ 入口同步隐藏（消除假入口）。
+        let show_pat = self.config.pat.enabled;
+        // 个人中心「已授权应用（SSO Grants）」入口决策：`[sso].enabled`（进程静态配置）。
+        // SSO 关闭时 OIDC 端点不注册 ⇒ 入口同步隐藏。
+        let show_sso_grants = self.config.sso.enabled;
+        // 角色管理「字段权限」入口决策：与 `sys_role_field_perm_service::ensure_enabled`
+        // 开关链**同源同判据**——第一层平台 `sys_config` 开关（fail-safe 关闭）+
+        // 第二层租户能力位 `role.field_perm`（平台操作者恒可用，由平台开关统一管姿态）。
+        let show_field_perm = {
+            let platform_on = match self
+                .config_service
+                .get_config_value_by_key_cached(
+                    crate::service::sys_role_field_perm_service::FIELD_PERM_ENABLED_CONFIG_KEY,
+                    None,
+                )
+                .await
+            {
+                Ok(Some(val)) => val.trim().eq_ignore_ascii_case("true"),
+                _ => false,
+            };
+            if !platform_on {
+                false
+            } else if operator_tid == 0 {
+                true
+            } else {
+                match self.tenant_service.tenant_features(operator_tid).await {
+                    Ok(f) => {
+                        f.mode(crate::service::sys_role_field_perm_service::FIELD_PERM_FEATURE_KEY)
+                            != crate::common::features::FEATURE_OFF
+                    }
+                    // 查询失败 fail-closed：不明确的姿态不下发入口
+                    Err(_) => false,
+                }
+            }
+        };
 
         Ok(GetInfoVo {
             user,
@@ -1411,6 +1464,9 @@ impl AuthService {
             show_tenant_filter,
             show_user_erasure,
             show_passkey,
+            show_pat,
+            show_sso_grants,
+            show_field_perm,
         })
     }
 
@@ -1421,12 +1477,20 @@ impl AuthService {
     /// 2. **租户管理开关**：`[tenant].management = false`（单机模式）时剪除平台侧
     ///    「租户管理」菜单分支（与 permission_middleware 的 API 403 硬拒对称，
     ///    消除"菜单可见但请求 403"的体验瑕疵；域名自助 / L3 导航不受影响）
-    /// 3. **§27.6 生效点②**：租户用户（`caller_tid != 0`）按 `套餐 ∩ 角色授权` 求交
+    /// 3. **能力位门控剪除（假入口消除）**：
+    ///    - AI：`[ai].enabled = false`（进程级）⇒ 所有人剪 AI 菜单；租户用户
+    ///      `ai.copilot = off` ⇒ 同样剪除（与 ai handler 三层守卫同口径）；
+    ///    - 平台专属下放项（`nav.l3` / `tenant.domain_self_service` / `backup.*` 等）：
+    ///      租户用户按**有效能力集**（平台天花板 ∩ 套餐）剪除不可授予菜单——平台层
+    ///      `[features]` on→off 重启后无授权回收触发点（收敛只在套餐变更时跑），
+    ///      此处为**展示层兜底**，数据层授权回收见方案 §5.17 登记分析；
+    ///      平台操作者不受能力位限制（平台层是天花板而非禁区）。
+    /// 4. **§27.6 生效点②**：租户用户（`caller_tid != 0`）按 `套餐 ∩ 角色授权` 求交
     ///    ——套餐白名单（L2）裁剪角色授权菜单（L1），平台租户 / 无套餐租户不裁剪
-    /// 4. **批次 3（L3 租户自建导航）**：租户用户再叠加本租户**生效**的 L3 行
+    /// 5. **批次 3（L3 租户自建导航）**：租户用户再叠加本租户**生效**的 L3 行
     ///    （`del_flag='0'` + `status='0'`）做视图层重组（换父 / 排序 / 显隐）；
     ///    只在**已钳制**的菜单树上重组 ⇒ 不新建节点、不新增 component/perms，不扩权
-    /// 5. 递归转换为 RouterVo（menu_to_router）
+    /// 6. 递归转换为 RouterVo（menu_to_router）
     pub async fn get_routers(
         &self,
         user_id: i64,
@@ -1440,6 +1504,23 @@ impl AuthService {
         } else {
             menu_tree
         };
+        // 能力位门控剪除：租户有效能力集只查一次（AI 判定与 is_grantable 共用）。
+        let tenant_features = if caller_tid != 0 {
+            Some(self.tenant_service.tenant_features(caller_tid).await?)
+        } else {
+            None
+        };
+        let ai_copilot_on = match &tenant_features {
+            // 平台操作者不受租户能力位限制（与 ai handler tid==0 短路同口径）
+            None => true,
+            Some(f) => f.is_on(crate::ai::FEATURE_AI_COPILOT),
+        };
+        let menu_tree = prune_capability_gated_menus(
+            menu_tree,
+            self.config.ai.enabled,
+            ai_copilot_on,
+            tenant_features.as_ref(),
+        );
         // 套餐白名单裁剪：`None` = 该租户未绑定套餐（不限制）
         let menu_tree = if caller_tid != 0 {
             match self
@@ -1456,12 +1537,10 @@ impl AuthService {
         // L3 视图层重组（批次 3）：**仅在能力位 `nav.l3` 非 off 时生效**
         // （关闭态即现状：即使库中残留 L3 行，也不得改变导航）。
         // 平台租户（tid=0）无 L3 行，恒为空 ⇒ 行为与改造前一致。
-        let menu_tree = if caller_tid != 0
-            && self
-                .tenant_service
-                .tenant_features(caller_tid)
-                .await?
-                .is_on(crate::service::sys_tenant_nav_service::FEATURE_NAV_L3)
+        // 能力集复用上方剪除处的单次查询（`tenant_features`），不再重复查库。
+        let menu_tree = if tenant_features
+            .as_ref()
+            .is_some_and(|f| f.is_on(crate::service::sys_tenant_nav_service::FEATURE_NAV_L3))
         {
             let l3_rows = self.tenant_menu_repo.list_effective(caller_tid).await?;
             apply_l3_overrides(menu_tree, &l3_rows)
@@ -1928,6 +2007,77 @@ fn is_tenant_management_menu(menu: &SysMenuModel) -> bool {
     menu.perms.as_deref().is_some_and(|perms| {
         perms.starts_with("system:tenant:") && !perms.starts_with("system:tenant:domain:")
     })
+}
+
+/// 能力位门控菜单剪除（纯函数，便于单测；**假入口消除的展示层兜底**）。
+///
+/// ## 剪除范围
+///
+/// 1. **AI 入口**（perms = `crate::ai::AI_CHAT_PERM`）：保留当且仅当
+///    `ai_enabled && ai_copilot_on`——与 `ai::handler` 的三层守卫**同口径**
+///    （进程级 `[ai].enabled` + 租户能力位 `ai.copilot`；平台操作者不受租户位限制）。
+/// 2. **平台专属下放项**（`nav.l3` / `tenant.domain_self_service` / `backup.*` 等，
+///    即 `PLATFORM_ONLY_PERM_PREFIXES` 中由能力位解锁的部分）：租户用户按
+///    **有效能力集**（平台天花板 ∩ 套餐）经 `is_grantable_perm_with_features` 判定，
+///    不可授予 ⇒ 剪除。与角色授权门禁同源 ⇒ 判定口径只有一处。
+///
+/// 平台操作者（`tenant_features = None`）不受能力位限制（平台层是天花板而非禁区），
+/// 仅 AI 进程级开关对其生效。
+///
+/// ## 与数据层收敛的分工（方案 §5.17）
+///
+/// 授权回收（删 `sys_role_menu` 行）只在套餐变更时触发；平台层 `[features]`
+/// on→off 重启后存量授权仍残留——本函数在 getRouters 出口剪除展示，**不删数据**
+/// （开关重开即恢复，可回滚）；数据层启动期收敛为登记待拍板项（涉及删除，见 §5.17）。
+///
+/// 空 perms（目录/无权限标识菜单）恒保留；空目录清理语义同
+/// [`prune_tenant_management_menus`]（目录子节点全被剪 ⇒ 目录一并移除，叶子保留）。
+pub(crate) fn prune_capability_gated_menus(
+    menus: Vec<SysMenuModel>,
+    ai_enabled: bool,
+    ai_copilot_on: bool,
+    tenant_features: Option<&crate::common::features::FeatureSet>,
+) -> Vec<SysMenuModel> {
+    menus
+        .into_iter()
+        .filter_map(|mut menu| {
+            if is_capability_gated_menu(&menu, ai_enabled, ai_copilot_on, tenant_features) {
+                return None;
+            }
+            let had_children = menu.children.is_some();
+            let children = menu
+                .children
+                .take()
+                .map(|c| prune_capability_gated_menus(c, ai_enabled, ai_copilot_on, tenant_features))
+                .unwrap_or_default();
+            if had_children && children.is_empty() {
+                return None;
+            }
+            menu.children = if children.is_empty() { None } else { Some(children) };
+            Some(menu)
+        })
+        .collect()
+}
+
+/// 单节点能力位门控判定（纯函数；依据见 [`prune_capability_gated_menus`]）。
+fn is_capability_gated_menu(
+    menu: &SysMenuModel,
+    ai_enabled: bool,
+    ai_copilot_on: bool,
+    tenant_features: Option<&crate::common::features::FeatureSet>,
+) -> bool {
+    let Some(perms) = menu.perms.as_deref().filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    // AI 入口：进程级开关 + 租户能力位（与 ai::handler 守卫同口径）
+    if perms == crate::ai::AI_CHAT_PERM {
+        return !(ai_enabled && ai_copilot_on);
+    }
+    // 平台专属下放项：租户用户按有效能力集判定（与授权门禁同源）
+    match tenant_features {
+        None => false,
+        Some(f) => !crate::common::features::is_grantable_perm_with_features(perms, f),
+    }
 }
 
 /// L3 导航层级深度上限（防畸形配置把前端路由树打成超深链）
@@ -2433,6 +2583,92 @@ mod tests {
         assert_eq!(pruned.len(), 2);
         assert_eq!(pruned[0].menu_id, 1);
         assert_eq!(pruned[1].menu_id, 3900);
+    }
+
+    // ===== 能力位门控菜单剪除（prune_capability_gated_menus）=====
+
+    use crate::common::features::FeatureSet;
+
+    /// AI 菜单节点（menu_id=4100，perms=ai:chat）便捷构造
+    fn ai_menu() -> SysMenuModel {
+        with_perms(
+            make_menu(4100, 0, "C", "ai", Some("ai/panel/index"), "1", "0", "0", "0", None),
+            crate::ai::AI_CHAT_PERM,
+        )
+    }
+
+    #[test]
+    fn test_prune_capability_ai_disabled_cuts_for_everyone() {
+        // [ai].enabled=false（进程级）：平台与租户用户的 AI 菜单都剪除
+        let tree = vec![ai_menu()];
+        assert!(prune_capability_gated_menus(tree.clone(), false, true, None).is_empty());
+        assert!(prune_capability_gated_menus(tree, false, true, Some(&FeatureSet::default())).is_empty());
+    }
+
+    #[test]
+    fn test_prune_capability_ai_tenant_off_cuts_tenant_only() {
+        // [ai].enabled=true + 租户 ai.copilot=off：租户用户剪、平台用户保留
+        let tree = vec![ai_menu()];
+        assert!(
+            prune_capability_gated_menus(tree.clone(), true, false, Some(&FeatureSet::default()))
+                .is_empty()
+        );
+        let kept = prune_capability_gated_menus(tree.clone(), true, true, None);
+        assert_eq!(kept.len(), 1);
+        // 能力位开启的租户同样保留
+        assert_eq!(prune_capability_gated_menus(tree, true, true, Some(&FeatureSet::default())).len(), 1);
+    }
+
+    #[test]
+    fn test_prune_capability_platform_only_perm_follows_grantable() {
+        // 平台专属下放项（system:backup:list，backup.visibility=off）：
+        // 租户用户剪、平台用户保留；能力位开启后租户保留。
+        let backup = with_perms(
+            make_menu(4200, 0, "C", "backup", Some("monitor/backup/index"), "1", "0", "0", "0", None),
+            "system:backup:list",
+        );
+        let tree = vec![backup];
+
+        // 租户（默认全 off 能力集）→ 剪
+        assert!(prune_capability_gated_menus(tree.clone(), true, true, Some(&FeatureSet::default())).is_empty());
+        // 平台 → 保留
+        assert_eq!(prune_capability_gated_menus(tree.clone(), true, true, None).len(), 1);
+        // 租户（backup.visibility=view_only 解锁 list/query）→ 保留
+        let f = FeatureSet::from_json(Some(r#"{"backup.visibility":"view_only"}"#));
+        assert_eq!(prune_capability_gated_menus(tree, true, true, Some(&f)).len(), 1);
+    }
+
+    #[test]
+    fn test_prune_capability_keeps_normal_and_empty_perms() {
+        // 普通 perms（system:user:list）与空/None perms 一律保留
+        let mut dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
+        dir.children = Some(vec![
+            with_perms(
+                make_menu(100, 1, "C", "user", Some("system/user/index"), "1", "0", "0", "0", None),
+                "system:user:list",
+            ),
+            with_perms(
+                make_menu(101, 1, "C", "cfg", Some("system/config/index"), "1", "0", "0", "0", None),
+                "",
+            ),
+            make_menu(102, 1, "C", "plain", Some("x/index"), "1", "0", "0", "0", None),
+        ]);
+        let pruned = prune_capability_gated_menus(
+            vec![dir],
+            true,
+            true,
+            Some(&FeatureSet::default()),
+        );
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].children.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_prune_capability_prunes_empty_directory() {
+        // 目录下仅 AI 菜单且 AI 关闭 → 目录一并剪除
+        let mut dir = make_menu(1, 0, "M", "ai", None, "1", "0", "0", "0", None);
+        dir.children = Some(vec![ai_menu()]);
+        assert!(prune_capability_gated_menus(vec![dir], false, true, None).is_empty());
     }
 
     #[test]

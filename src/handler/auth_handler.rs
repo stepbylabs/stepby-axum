@@ -85,6 +85,15 @@ pub struct GetInfoResult {
     /// 在**本租户的生效档位**算好后下发；前端只消费不推断，避免造出
     /// "入口可见但请求 404"的假入口）
     pub show_passkey: bool,
+    /// 个人中心是否提供「API 访问令牌（PAT）」入口（服务端按 `[pat].enabled`
+    /// 算好后下发；PAT 关闭时入口同步隐藏，避免"页签可见但请求 401"）
+    pub show_pat: bool,
+    /// 个人中心是否提供「已授权应用（SSO Grants）」入口（服务端按 `[sso].enabled`
+    /// 算好后下发；SSO 关闭时入口同步隐藏）
+    pub show_sso_grants: bool,
+    /// 角色管理是否提供「字段权限」入口（服务端按 fieldperm 开关链同源判定后下发；
+    /// 任一层关闭 ⇒ false，避免"按钮可见但点击 403"）
+    pub show_field_perm: bool,
 }
 
 crate::impl_into_response!(CaptchaResult, LoginResult, GetInfoResult);
@@ -410,6 +419,9 @@ pub async fn get_info(
         show_tenant_filter: vo.show_tenant_filter,
         show_user_erasure: vo.show_user_erasure,
         show_passkey: vo.show_passkey,
+        show_pat: vo.show_pat,
+        show_sso_grants: vo.show_sso_grants,
+        show_field_perm: vo.show_field_perm,
     })
 }
 
