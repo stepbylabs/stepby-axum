@@ -914,6 +914,18 @@ impl SysOperLogService {
             return Ok(None);
         };
 
+        // 乱序守卫：更大 oper_id 已抢先写链 → 本条再挂链将与该节点共享前驱
+        // （分支链），verify 按 id 升序重算会误报篡改。降级 NULL，链在非 NULL
+        // 子序列上续写（与锁抢占耗尽的降级语义一致）。锁保证互斥但不保证写入
+        // 顺序与 oper_id 同序，此处补齐顺序约束。
+        if self.oper_log_repo.exists_later_chained(oper_id).await? {
+            tracing::warn!(oper_id, "链写入乱序（更大 oper_id 已抢先写链），本条降级为 NULL");
+            if let Err(e) = ctx.store.lock_release(&handle).await {
+                tracing::warn!("链锁释放失败（等待 TTL {}s 自动过期）: {}", OPER_CHAIN_LOCK_TTL_SECS, e);
+            }
+            return Ok(None);
+        }
+
         // 锁内：查前驱 → 计算 → 回写
         let prev = self
             .oper_log_repo

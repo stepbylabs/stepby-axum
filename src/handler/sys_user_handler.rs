@@ -504,6 +504,15 @@ pub async fn edit(
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     // 多租户 Phase 3：记录被操作用户所属租户，供审计 target_tenant_id（平台代管场景）
+    // 安全审查轮修复：user.updated 事件的租户口径 = **事件主体租户**（目标用户所属租户）
+    // 而非操作者租户——平台管理员（tid=0）代管编辑租户用户时，事件应投递给该租户的回调组
+    let event_tenant_id = state
+        .user_service
+        .get_user_by_id(dto.user_id)
+        .await
+        .ok()
+        .map(|vo| vo.user.tenant_id)
+        .unwrap_or(operator.tenant_id());
     if let Ok(vo) = state.user_service.get_user_by_id(dto.user_id).await {
         target_tenant.set(vo.user.tenant_id);
     }
@@ -519,16 +528,16 @@ pub async fn edit(
         )
         .await?;
     // Webhook 事件目录（开放域）：编辑事务已提交，派发 user.updated
-    // P0 跨租户修复：tenant_id 取操作者租户（与 payload tenantId 同源），事件仅投递给同租户回调
+    // tenant_id 取事件主体（目标用户）租户——平台代管场景事件投递给该租户回调组
     crate::service::sys_web_hook_service::emit_event(
         &state,
         "user.updated",
         serde_json::json!({
             "userId": target_user_id,
-            "tenantId": operator.tenant_id(),
+            "tenantId": event_tenant_id,
             "operator": operator.username(),
         }),
-        operator.tenant_id(),
+        event_tenant_id,
     )
     .await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))

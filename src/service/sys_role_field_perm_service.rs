@@ -27,7 +27,7 @@
 
 use std::collections::HashSet;
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 
 use crate::common::constants::SUPER_ADMIN_USER_ID;
 use crate::common::error::ServiceError;
@@ -227,6 +227,26 @@ impl SysRoleFieldPermService {
 
     // ==================== 矩阵读写接口（服务层） ====================
 
+    /// 校验目标角色存在且属当前操作者租户（安全审查轮 1 修复：矩阵读写此前未校验
+    /// role_id 归属，租户管理员可枚举自增 role_id 跨租户读写他租户角色的字段配置）。
+    /// 404 语义（不区分不存在/越权，防 role_id 探测）；平台操作者（tid=0）恒放行。
+    async fn ensure_role_tenant_allowed(
+        &self,
+        role_id: i64,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        let role = crate::entity::sys_role::Entity::find_by_id(role_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.common.not_found")))?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, role.tenant_id) {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.common.not_found"
+            )));
+        }
+        Ok(())
+    }
+
     /// 查询角色在某业务表下的字段权限矩阵：**全白名单字段** + hidden 态。
     ///
     /// 开关链未开启（第一层/第二层任一不满足）⇒ 拒绝（错误码 + i18n key，
@@ -241,7 +261,11 @@ impl SysRoleFieldPermService {
         let fields = field_perm_whitelist(table_key).ok_or_else(|| {
             ServiceError::bad_request(&crate::tr!("error.common.invalid_param"))
         })?;
+        // 顺序契约：开关链校验（403）先于角色归属（404）——能力位缺失时
+        // 功能未开通，须先 403 短路，不得被资源 404 抢先（契约测试
+        // tenant_without_capability_is_blocked 锁死该顺序）
         self.ensure_enabled(operator_tid).await?;
+        self.ensure_role_tenant_allowed(role_id, operator_tid).await?;
 
         let hidden_rows = self.perm_repo.find_by_role_and_table(role_id, table_key).await?;
         let hidden_set: HashSet<String> = hidden_rows.into_iter().map(|r| r.field_key).collect();
@@ -269,7 +293,9 @@ impl SysRoleFieldPermService {
         let fields = field_perm_whitelist(table_key).ok_or_else(|| {
             ServiceError::bad_request(&crate::tr!("error.common.invalid_param"))
         })?;
+        // 顺序契约同 get_matrix：开关链 403 先行，角色归属 404 在后
         self.ensure_enabled(operator_tid).await?;
+        self.ensure_role_tenant_allowed(role_id, operator_tid).await?;
 
         // 白名单过滤 + 去重（保持请求顺序；重复项幂等合并）
         let mut seen = HashSet::new();

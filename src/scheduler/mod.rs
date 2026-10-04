@@ -183,6 +183,10 @@ impl JobScheduler {
         // （db / config 均非 Copy，闭包 move 后原变量不可再使用）
         let report_db = db.clone();
         let report_config = config.clone();
+        // 告警规则评估任务（alertEvalTask）所需：必须在 cleanup_job move 前 clone
+        let alert_db = db.clone();
+        let alert_store = store.clone();
+        let alert_config = config.clone();
 
         // 集群模式（`[scheduler].cluster_mode`，项目准则③：开关取「模式」而非裸 bool）。
         // `auto`（缺省）= 沿用各任务自身历史开关 ⇒ **对存量部署零行为变更**；
@@ -284,6 +288,39 @@ impl JobScheduler {
         tracing::info!(
             "内置定时任务注册成功: cleanup_expired_logs (cron: '0 0 3 * * *', 保留 {} 天)",
             config.sys_log.retention_days
+        );
+
+        // ==================== 告警规则评估任务（每分钟第 30 秒，错峰其它整分任务）====================
+        // 循环审查轮修复（P0）：be-alert 交付的评估引擎此前只有 registry 函数定义、
+        // 从未注册进调度器——告警规则的定时评估链路断裂（仅手动 evaluate 端点可用）。
+        // 两步注册：① registry 函数（invoke_target = alertEvalTask.run，管理页可手动执行）
+        // ② cron 直接调度（对齐 login_anomaly_detector 范式；错误仅记日志不阻断）
+        crate::service::sys_alert_service::register_alert_eval_task(
+            alert_db.clone(),
+            alert_store.clone(),
+            alert_config.clone(),
+        );
+        let alert_job = Job::new_async("30 * * * * *", move |_uuid, _l| {
+            let db = alert_db.clone();
+            let store = alert_store.clone();
+            let config = alert_config.clone();
+            Box::pin(async move {
+                match crate::service::sys_alert_service::alert_eval_once(db, store, config).await {
+                    Ok(summary) => tracing::info!("内置任务 alertEvalTask: {}", summary),
+                    Err(e) => tracing::error!("内置任务 alertEvalTask: 评估失败: {}", e),
+                }
+            })
+        })
+        .map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to add alert eval task: {}", e))
+        })?;
+
+        scheduler.add(alert_job).await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to add alert eval task: {}", e))
+        })?;
+
+        tracing::info!(
+            "内置定时任务注册成功: alertEvalTask (cron: '30 * * * * *', 每分钟评估启用告警规则)"
         );
 
         // 登录异常检测任务：每 5 分钟执行（cron: "0 */5 * * * *"）

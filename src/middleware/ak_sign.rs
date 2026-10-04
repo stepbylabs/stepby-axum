@@ -248,7 +248,9 @@ async fn verify_and_inject(
     }
 
     // ---- 6. nonce 一次性抢占（SharedStore set_nx_ex；防重放第二道）----
-    let nonce_key = format!("ak:nonce:{}", nonce);
+    // 安全审查轮加固：nonce 键绑定 access_key（命名空间收敛到凭据内，
+    // 防跨 AK/跨用户的 nonce 槽位占用攻击面）
+    let nonce_key = format!("ak:nonce:{}:{}", verified.access_key, nonce);
     let first = state
         .store
         .set_nx_ex(&nonce_key, "1", NONCE_TTL_SECS)
