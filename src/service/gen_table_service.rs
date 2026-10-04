@@ -730,6 +730,7 @@ impl GenTableService {
             .db()
             .transaction::<_, Vec<GenTableModel>, ServiceError>(|txn| {
                 let repo = repo.clone();
+                let operator = operator.to_string();
                 async move {
                     let mut inserted = Vec::with_capacity(prepared.len());
                     for item in prepared {
@@ -740,6 +741,17 @@ impl GenTableService {
                         if !column_ams.is_empty() {
                             repo.insert_columns_conn(txn, column_ams).await?;
                         }
+                        // 审计合规域：INSERT 变更留痕（同事务提交/回滚；gen_table 列明细
+                        // 随表行快照语义覆盖，不逐列重复留痕）
+                        crate::service::sys_audit_change_service::audit_insert(
+                            txn,
+                            "gen_table",
+                            &table_model.table_id.to_string(),
+                            &table_model,
+                            None, // import 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator.as_str()),
+                        )
+                        .await?;
                         inserted.push(table_model);
                     }
                     Ok(inserted)
@@ -1243,12 +1255,25 @@ impl GenTableService {
             .db()
             .transaction::<_, (), ServiceError>(|txn| {
                 let table_ids_inner = table_ids.clone();
+                let before_snapshot = existing.clone();
                 async move {
                     // 级联清理列
                     repo.delete_columns_by_table_ids_conn(txn, table_ids_inner.clone())
                         .await?;
                     // 删除表
                     repo.delete_by_ids_conn(txn, table_ids_inner).await?;
+                    // 审计合规域：DELETE 变更留痕（同事务提交/回滚；逐表 before 快照）
+                    for t in &before_snapshot {
+                        crate::service::sys_audit_change_service::audit_delete(
+                            txn,
+                            "gen_table",
+                            &t.table_id.to_string(),
+                            t,
+                            None, // delete 签名无操作人上下文，操作人两列留空（列可空）
+                            None,
+                        )
+                        .await?;
+                    }
                     Ok(())
                 }
                 .boxed()
