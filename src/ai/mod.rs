@@ -17,3 +17,12 @@ pub mod sql_guard;
 
 /// 能力位键（与 `governance::FEATURES` 登记项逐字一致）
 pub const FEATURE_AI_COPILOT: &str = "ai.copilot";
+
+/// AI 助手菜单（menu_id=4100）的权限标识。
+///
+/// `ai:chat` 是普通业务权限（非平台专属下放项，`unlocked = &[]`），经菜单 4100 的
+/// role_menu 授权即可；进程级 `[ai].enabled` 与租户能力位 `ai.copilot` 关闭时，
+/// 服务层 403 + getRouters 剪除菜单（`prune_capability_gated_menus`）双管齐下，
+/// 消除"菜单可见但请求 403"的假入口。常量化避免字符串散落（getRouters 剪除判定
+/// 与 permission_middleware 路由映射须同字面值）。
+pub const AI_CHAT_PERM: &str = "ai:chat";

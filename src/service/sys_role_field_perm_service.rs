@@ -46,10 +46,11 @@ pub const FIELD_PERM_TABLES: &[(&str, &[&str])] = &[("sys_user", &["phonenumber"
 
 /// 第一层平台开关的 `sys_config` 键（值与迁移种子共享同一字符串常量的语义副本；
 /// 迁移侧常量见 `migration::m20261003_000005_role_field_perm::FIELD_PERM_ENABLED_CONFIG_KEY`）
-const FIELD_PERM_ENABLED_CONFIG_KEY: &str = "sys.fieldPerm.enabled";
-
-/// 第二层套餐能力位键（governance::FEATURES 登记，默认 off）
-const FIELD_PERM_FEATURE_KEY: &str = "role.field_perm";
+/// 第一层平台开关的 `sys_config` 键（`getInfo` 的 `showFieldPerm` 判定与服务层
+/// `platform_enabled` **同源**消费，常量化避免两处漂移）
+pub const FIELD_PERM_ENABLED_CONFIG_KEY: &str = "sys.fieldPerm.enabled";
+/// 第二层租户能力位键（与 `governance::FEATURES` 登记项逐字一致；同上同源消费）
+pub const FIELD_PERM_FEATURE_KEY: &str = "role.field_perm";
 
 /// 查白名单：返回业务表的受控字段清单（未登记的 table_key 返回 None）
 pub fn field_perm_whitelist(table_key: &str) -> Option<&'static [&'static str]> {
