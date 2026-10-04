@@ -1052,7 +1052,30 @@ impl SysDictService {
             ..Default::default()
         };
 
-        let model = self.dict_data_repo.insert(am).await?;
+        let dict_data_repo = self.dict_data_repo.clone();
+        let operator_owned = operator.to_string();
+        let model = self
+            .db()
+            .transaction::<_, SysDictDataModel, sea_orm::DbErr>(|txn| {
+                let dict_data_repo = dict_data_repo.clone();
+                let am = am;
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let model = dict_data_repo.base().insert_conn(txn, am).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚）
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_dict_data",
+                        &model.dict_code.to_string(),
+                        &model,
+                        None, // add_dict_data 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(model)
+                })
+            })
+            .await?;
         // 数据变更后失效**本归属层**的 dict_type 缓存
         self.invalidate_cache(row_tid, &dict_type_for_cache).await;
         Ok(model)
@@ -1106,6 +1129,8 @@ impl SysDictService {
         let existing_list = existing.list_class.clone();
         let existing_default = existing.is_default.clone();
         let existing_status = existing.status.clone();
+        // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysDictDataActiveModel = existing.into();
         am.dict_sort = Set(dto.dict_sort.or(existing_sort));
         am.dict_label = Set(Some(dto.dict_label));
@@ -1120,7 +1145,32 @@ impl SysDictService {
         am.update_time = Set(Some(now));
         am.remark = Set(dto.remark);
 
-        let model = self.dict_data_repo.update(am).await?;
+        let dict_data_repo = self.dict_data_repo.clone();
+        let operator_owned = operator.to_string();
+        let model = self
+            .db()
+            .transaction::<_, SysDictDataModel, sea_orm::DbErr>(|txn| {
+                let dict_data_repo = dict_data_repo.clone();
+                let am = am;
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    let model = dict_data_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_dict_data",
+                        &model.dict_code.to_string(),
+                        &before_snapshot,
+                        &model,
+                        None, // edit_dict_data 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(model)
+                })
+            })
+            .await?;
         // 失效新旧 dict_type 缓存（限本归属层）
         let mut to_invalidate = vec![dto.dict_type.clone()];
         if dto.dict_type != old_dict_type {
@@ -1130,12 +1180,13 @@ impl SysDictService {
         Ok(model)
     }
 
-    /// 批量删除字典数据（软删除）
+    /// 批量删除字典数据（软删除，事务：软删与审计留痕原子化）
     ///
     /// 多租户：租户不得删除平台类型数据（`tenant_id=0`）→ **403**；跨租户行 → 403。
     pub async fn delete_dict_data(
         &self,
         dict_codes: Vec<i64>,
+        operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         if dict_codes.is_empty() {
@@ -1166,8 +1217,34 @@ impl SysDictService {
                 invalidations.entry(m.tenant_id).or_default().push(dt);
             }
         }
-        // 批量软删除（单次 UPDATE 替代 N 次）
-        self.dict_data_repo.soft_delete_many(dict_codes).await?;
+        // 事务：批量软删除 + 逐行 DELETE 审计留痕（同事务提交/回滚）
+        let dict_data_repo = self.dict_data_repo.clone();
+        let operator_owned = operator.to_string();
+        self.db()
+            .transaction::<_, (), sea_orm::DbErr>(|txn| {
+                let dict_data_repo = dict_data_repo.clone();
+                let dict_codes = dict_codes.clone();
+                let models = models.clone();
+                let operator = operator_owned.clone();
+                Box::pin(async move {
+                    // 批量软删除（单次 UPDATE 替代 N 次）
+                    dict_data_repo.soft_delete_many_conn(txn, dict_codes).await?;
+                    for m in &models {
+                        // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                        crate::service::sys_audit_change_service::audit_delete(
+                            txn,
+                            "sys_dict_data",
+                            &m.dict_code.to_string(),
+                            m,
+                            None, // delete_dict_data 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator.as_str()),
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await?;
         // 失效所有受影响的 dict_type 缓存（按归属层）
         for (owner_tid, dts) in invalidations {
             self.invalidate_caches(owner_tid, &dts).await;

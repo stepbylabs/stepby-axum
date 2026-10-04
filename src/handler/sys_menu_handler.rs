@@ -216,9 +216,13 @@ pub async fn update_sort(
 )]
 pub async fn remove(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
     Path(menu_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    state.menu_service.delete_menu(menu_id).await?;
+    state
+        .menu_service
+        .delete_menu(menu_id, operator.username())
+        .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 

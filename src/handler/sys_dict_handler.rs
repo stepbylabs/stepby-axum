@@ -468,7 +468,7 @@ pub async fn dict_data_remove(
 
     state
         .dict_service
-        .delete_dict_data(ids, operator.tenant_id())
+        .delete_dict_data(ids, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
