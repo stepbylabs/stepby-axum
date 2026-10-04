@@ -754,9 +754,15 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("DELETE", "/monitor/webHook/log/{id}", "system:webHook:log:remove"),
 
     // ===== WebHook 事件目录（开放域 m20261003_000002_webhook_event）=====
-    // 权限标识与 sys_menu 种子 menu_id 3562/3563 对齐：
-    // 事件目录 system:webhook:event:list、测试发送 system:webhook:test-send
+    // 权限标识与 sys_menu 种子 menu_id 3562/3563/3564 对齐：
+    // 事件目录 system:webhook:event:list、测试发送 system:webhook:test-send、
+    // 目录停用启用 system:webhook:event:edit（m20261004_000002_webhook_event_edit）
     ("GET", "/system/webhook/event/list", "system:webhook:event:list"),
+    (
+        "PUT",
+        "/system/webhook/event/{id}/enabled",
+        "system:webhook:event:edit",
+    ),
     ("POST", "/system/webhook/{id}/test-send", "system:webhook:test-send"),
 
     // ===== 告警规则引擎（m20261003_000003_alert_rule）=====

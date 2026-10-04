@@ -73,6 +73,22 @@ impl SysAlertRuleRepository {
         Ok((rows, total))
     }
 
+    /// 导出全量查询（同 find_page_filtered 过滤口径，受 max_rows 上限约束，
+    /// 绕过 PageDomain 的分页截断——对齐 sys_audit_change_service.export_changes 范式）
+    pub async fn find_all_filtered(
+        &self,
+        max_rows: u64,
+        name: Option<&str>,
+        metric: Option<&str>,
+        enabled: Option<&str>,
+    ) -> Result<Vec<Model>, DbErr> {
+        Self::build_filter_query(name, metric, enabled)
+            .order_by_desc(Column::Id)
+            .limit(max_rows)
+            .all(self.base.db())
+            .await
+    }
+
     /// 构建多条件查询（分页共用）
     fn build_filter_query(
         name: Option<&str>,

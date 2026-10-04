@@ -400,6 +400,15 @@ pub struct WebhookTestSendDto {
     pub event_key: String,
 }
 
+/// 事件目录停用/启用 DTO（PUT /system/webhook/event/{id}/enabled）
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookEventEnabledDto {
+    /// 目标状态：'1' 启用 / '0' 停用（停用 = 目录下架展示并拒绝新订阅与测试发送）
+    #[garde(length(min = 1, max = 1))]
+    pub enabled: String,
+}
+
 /// 单次出站投递结果（供 test / 事件分发留痕）
 #[derive(Debug, Clone, serde::Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -702,9 +711,15 @@ impl SysWebHookService {
                     "error.web_hook.event_invalid"
                 )));
             }
-            let in_catalog = self.event_repo.find_by_event_key(k).await?.is_some();
+            // 目录命中需 enabled='1'：停用事件（目录下架）拒绝新订阅；
+            // 存量豁免集（extra_allowed）不受目录 enabled 影响（方案 C 兼容口径）。
+            let catalog_hit = self.event_repo.find_by_event_key(k).await?;
+            let in_catalog = matches!(catalog_hit.as_ref(), Some(e) if e.enabled == "1");
             let in_extra = extra_allowed.iter().any(|e| e.trim().eq_ignore_ascii_case(k));
-            if !in_catalog && !in_extra {
+            if in_extra {
+                continue;
+            }
+            if !in_catalog {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.web_hook.event_key_unknown",
                     key = k
@@ -1629,6 +1644,31 @@ impl SysWebHookService {
         Ok((rows.into_iter().map(WebhookEventVo::from_model).collect(), total))
     }
 
+    /// 事件目录停用/启用（system:webhook:event:edit）
+    ///
+    /// 语义边界：`enabled = '0'` 仅下架目录展示并拒绝新订阅
+    /// （[`Self::validate_subscribed_events`]）与测试发送（[`Self::test_send`]）；
+    /// 事件派发（emit_event）以 hook 订阅关系为准、不查目录 enabled——
+    /// 存量 hook 不因目录停用而中断。
+    pub async fn change_event_enabled(&self, id: i64, enabled: &str) -> Result<(), ServiceError> {
+        if enabled != "0" && enabled != "1" {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.web_hook.event_invalid"
+            )));
+        }
+        let affected = self
+            .event_repo
+            .update_enabled(id, enabled)
+            .await
+            .map_err(ServiceError::from)?;
+        if affected == 0 {
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.common.not_found"
+            )));
+        }
+        Ok(())
+    }
+
     /// 按事件目录构造真实测试发送（POST /system/webhook/{id}/test-send）
     ///
     /// 与 [`Self::test_hook`] 的差异：
@@ -1652,6 +1692,13 @@ impl SysWebHookService {
                     key = event_key
                 ))
             })?;
+        // 目录停用（下架）事件拒绝测试发送：与订阅校验同口径，避免"目录上看不到
+        // 却能按样例投递"的认知割裂；派发链（emit_event）不受影响，存量 hook 照常。
+        if event.enabled != "1" {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.web_hook.event_disabled"
+            )));
+        }
         // 样例非法 JSON 时回退最小真实负载（仍可真实投递 + 验签）
         let payload: serde_json::Value = event
             .payload_example

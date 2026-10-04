@@ -249,6 +249,25 @@ impl SysAlertService {
         Ok((rows, total))
     }
 
+    /// 导出全量告警规则（同 list 过滤口径，受 EXPORT_MAX_ROWS 限制，
+    /// 绕过 PageDomain 分页截断——对齐 sys_audit_change_service.export_changes 范式；
+    /// 修复：此前 export 复用 list 分页逻辑，外部直调不传 pageSize 时仅导出前 10 行）
+    pub async fn export_rules(
+        &self,
+        query: AlertRuleQueryDto,
+    ) -> Result<Vec<AlertRuleModel>, ServiceError> {
+        let rows = self
+            .repo
+            .find_all_filtered(
+                crate::common::page::EXPORT_MAX_ROWS,
+                query.name.as_deref(),
+                query.metric.as_deref(),
+                query.enabled.as_deref(),
+            )
+            .await?;
+        Ok(rows)
+    }
+
     /// 按 id 查询告警规则详情
     pub async fn get_by_id(&self, id: i64) -> Result<AlertRuleModel, ServiceError> {
         self.repo

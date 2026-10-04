@@ -31,6 +31,7 @@ use crate::repository::sys_menu::SysMenuRepository;
 use crate::repository::sys_role::SysRoleRepository;
 use crate::repository::sys_role_dept::SysRoleDeptRepository;
 use crate::repository::sys_role_menu::SysRoleMenuRepository;
+use crate::repository::sys_role_field_perm::SysRoleFieldPermRepository;
 use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::shared_store::SharedStore;
@@ -257,6 +258,8 @@ const PERM_CACHE_PREFIX: &str = "perm:user:";
 pub struct SysRoleService {
     role_repo: SysRoleRepository,
     role_menu_repo: SysRoleMenuRepository,
+    /// 字段权限矩阵（角色删除级联清理用；矩阵读写经 SysRoleFieldPermService 独立入口）
+    role_field_perm_repo: SysRoleFieldPermRepository,
     role_dept_repo: SysRoleDeptRepository,
     user_role_repo: SysUserRoleRepository,
     user_repo: SysUserRepository,
@@ -274,6 +277,7 @@ impl SysRoleService {
         Self {
             role_repo: SysRoleRepository::new(db.clone()),
             role_menu_repo: SysRoleMenuRepository::new(db.clone()),
+            role_field_perm_repo: SysRoleFieldPermRepository::new(db.clone()),
             role_dept_repo: SysRoleDeptRepository::new(db.clone()),
             user_role_repo: SysUserRoleRepository::new(db.clone()),
             user_repo: SysUserRepository::new(db.clone()),
@@ -822,6 +826,7 @@ impl SysRoleService {
             serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let role_repo = self.role_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
+        let role_field_perm_repo = self.role_field_perm_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         // M-1 Major TOCTOU 修复：将 count_by_role_id 检查移入事务内，
         // 使用 _conn 变体在事务上下文中重新检查，确保检查与删除原子执行。
@@ -863,6 +868,11 @@ impl SysRoleService {
 
                     // 2. 物理删除 sys_role_menu 关联（通过 Repository）
                     role_menu_repo.delete_by_role_id_conn(txn, role_id).await?;
+
+                    // 2.5 物理删除 sys_role_field_perm 级联（对齐 role_menu 清理纪律）
+                    role_field_perm_repo
+                        .delete_by_role_ids_conn(txn, &[role_id])
+                        .await?;
 
                     // 3. 物理删除 sys_user_role 关联（冗余保护，正常应已被上面校验拦截）
                     user_role_repo.delete_by_role_id_conn(txn, role_id).await?;
@@ -927,6 +937,7 @@ impl SysRoleService {
         // 批量删除：单个事务包装所有操作
         let role_repo = self.role_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
+        let role_field_perm_repo = self.role_field_perm_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let db = self.db().clone();
 
@@ -972,6 +983,11 @@ impl SysRoleService {
 
                         // 5. 物理删除 sys_role_menu 关联
                         role_menu_repo.delete_by_role_id_conn(txn, role_id).await?;
+
+                        // 5.5 物理删除 sys_role_field_perm 级联（对齐 role_menu 清理纪律）
+                        role_field_perm_repo
+                            .delete_by_role_ids_conn(txn, &[role_id])
+                            .await?;
 
                         // 6. 物理删除 sys_user_role 关联（冗余保护）
                         user_role_repo.delete_by_role_id_conn(txn, role_id).await?;

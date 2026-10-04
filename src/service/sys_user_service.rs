@@ -2296,6 +2296,9 @@ impl SysUserService {
             })??;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(hashed));
+        // B4（m20261004_000003）：管理员重置密码 = 下发新初始密码，
+        // 标志置回 '1'（用户下次登录被强制改密——开关开启时）
+        am.must_change_pwd = Set(Some("1".to_string()));
         self.user_repo.update(am).await?;
 
         Ok(())
@@ -2362,6 +2365,9 @@ impl SysUserService {
             })??;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(hashed));
+        // B4（m20261004_000003）：个人改密成功即清除强制首登改密标志
+        // （所有个人改密路径统一经由本函数，标志自然收敛）
+        am.must_change_pwd = Set(Some("0".to_string()));
         self.user_repo.update(am).await?;
 
         Ok(())
@@ -3261,6 +3267,7 @@ mod tests {
             password: None,
             status: Some("0".to_string()),
             del_flag: Some("0".to_string()),
+            must_change_pwd: Some("0".to_string()),
             login_ip: None,
             login_date: None,
             create_by: None,

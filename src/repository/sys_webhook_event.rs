@@ -4,6 +4,7 @@
 //! 提供事件目录分页（过滤 + 动态排序白名单）、按 event_key 存在性校验
 //! （订阅字段写入前的合法性闸门）。
 
+use sea_orm::sea_query::Expr;
 use sea_orm::*;
 
 use crate::entity::sys_webhook_event::{Column, Entity as SysWebhookEvent, Model};
@@ -55,5 +56,17 @@ impl SysWebhookEventRepository {
             .filter(Column::EventKey.eq(event_key))
             .one(&self.db)
             .await
+    }
+
+    /// 更新目录事件 enabled（目录下架展示并拒绝新订阅；派发链不查目录，存量 hook 不中断）
+    ///
+    /// 返回影响行数（0 = 事件不存在，由调用方转 404）。
+    pub async fn update_enabled(&self, id: i64, enabled: &str) -> Result<u64, DbErr> {
+        let res = SysWebhookEvent::update_many()
+            .col_expr(Column::Enabled, Expr::value(enabled.to_string()))
+            .filter(Column::Id.eq(id))
+            .exec(&self.db)
+            .await?;
+        Ok(res.rows_affected)
     }
 }

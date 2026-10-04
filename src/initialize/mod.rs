@@ -375,6 +375,8 @@ impl AppInitializer {
         //      重建都要读这些表/列（顺序颠倒会使存量库首次升级时回填静默失败）。
         ensure_shared_store_tables(&db).await?;
         ensure_user_password_version_column(&db).await?;
+        // B4 强制首登改密兜底：must_change_pwd 列 + admin 标记 + 强改开关 config 种子
+        ensure_user_must_change_pwd_column(&db).await?;
 
         // 4. 初始化共享态存储（[cache].mode：auto 按 [redis].url 裁决；local 纯 SQL；redis 现状）
         let cache_mode = settings.cache.resolve_mode(&settings.redis.url);
@@ -692,6 +694,44 @@ pub(crate) async fn ensure_user_password_version_column(db: &DatabaseConnection)
     ))
     .await?;
     tracing::info!("sys_user.password_version 列已补建（存量库兜底）");
+    Ok(())
+}
+
+/// B4 强制首登改密兜底（等价迁移 `m20261004_000003_force_pwd_change`，幂等）：
+/// 1. `sys_user.must_change_pwd CHAR(1) DEFAULT '0'`——列不存在时补建，**仅本次建列时**
+///    回填 admin 标记（存量库重跑不误标已改密用户）；
+/// 2. `sys_config` 强改开关种子 `sys.user.forceFirstLoginChangePwd='false'`
+///    （幂等 INSERT，不 UPDATE——尊重管理员已改值）。
+pub(crate) async fn ensure_user_must_change_pwd_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_user").await? {
+        return Ok(());
+    }
+    let newly_added = !sso_has_column(db, "sys_user", "must_change_pwd").await?;
+    if newly_added {
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "ALTER TABLE sys_user ADD COLUMN must_change_pwd CHAR(1) DEFAULT '0'".to_string(),
+        ))
+        .await?;
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE sys_user SET must_change_pwd = '1' WHERE user_id = 1 AND must_change_pwd = '0'"
+                .to_string(),
+        ))
+        .await?;
+        tracing::info!("sys_user.must_change_pwd 列已补建并标记 admin（B4 存量库兜底）");
+    }
+    if sso_table_exists(db, "sys_config").await? {
+        let now = flow_now(db);
+        flow_insert(
+            db,
+            &format!(
+                "sys_config (config_id, config_name, config_key, config_value, config_type, create_by, create_time, remark) VALUES \
+                (9010, '用户首登强制改密开关', 'sys.user.forceFirstLoginChangePwd', 'false', 'Y', 'admin', {now}, '开启后初始密码/过期密码用户登录时被强制引导改密')"
+            ),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -3522,10 +3562,11 @@ async fn ensure_tenant_index(
     }
 }
 
-/// E2-a 性能索引兜底（等价迁移 `m20261002_000001_perf_indexes`，幂等）：
+/// E2-a 性能索引兜底（等价迁移 `m20261002_000001_perf_indexes` + `m20261004_000001_alert_rule_index`，幂等）：
 /// - `idx_flow_doc_tenant ON flow_demo_doc (tenant_id)`
 /// - `idx_web_hook_log_status ON sys_web_hook_log (status)`
 /// - `idx_web_hook_log_event_type ON sys_web_hook_log (event_type)`
+/// - `idx_alert_rule_enabled ON sys_alert_rule (enabled)`
 ///
 /// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，缺索引仅影响
 /// 查询性能（列表分页/过滤全表扫描），故创建失败只告警不阻断（与 Phase 3 索引兜底
@@ -3549,6 +3590,11 @@ async fn ensure_perf_indexes(db: &DatabaseConnection) -> anyhow::Result<()> {
             "idx_web_hook_log_event_type",
             "event_type",
         ),
+        (
+            "sys_alert_rule",
+            "idx_alert_rule_enabled",
+            "enabled",
+        ),
     ];
     for (table, index, cols) in targets {
         if !sso_table_exists(db, table).await? {
@@ -3559,7 +3605,7 @@ async fn ensure_perf_indexes(db: &DatabaseConnection) -> anyhow::Result<()> {
             tracing::warn!("性能索引 {index} 创建失败（不阻断启动，请人工核查）: {e}");
         }
     }
-    tracing::info!("性能索引兜底完成（flow_demo_doc / sys_web_hook_log，幂等）");
+    tracing::info!("性能索引兜底完成（flow_demo_doc / sys_web_hook_log / sys_alert_rule，幂等）");
     Ok(())
 }
 
@@ -4748,6 +4794,7 @@ pub(crate) async fn ensure_webhook_event_tables(db: &DatabaseConnection) -> anyh
     // 单一事实源：迁移文件导出的建表 SQL / 索引 / 加列 DDL / 种子事件 / 菜单按钮
     // （原本地 WEBHOOK_SEED_EVENTS 手抄副本已删除；sys_web_hook_service.rs 侧不受影响）
     use migration::m20261003_000002_webhook_event as mig;
+    use migration::m20261004_000002_webhook_event_edit as mig_edit;
 
     let backend = db.get_database_backend();
 
@@ -4823,7 +4870,13 @@ pub(crate) async fn ensure_webhook_event_tables(db: &DatabaseConnection) -> anyh
         flow_insert(db, &body).await?;
     }
 
-    tracing::info!("Webhook 事件域兜底完成（sys_webhook_event / AK/SK 列 / 菜单 3562-3563，幂等）");
+    // 6) 目录停用/启用按钮（引用迁移 webhook_event_edit_menu_bodies，m20261004_000002；
+    //    同挂 menu_id=158 下，授予超管角色 role_id=2）
+    for body in mig_edit::webhook_event_edit_menu_bodies(&now) {
+        flow_insert(db, &body).await?;
+    }
+
+    tracing::info!("Webhook 事件域兜底完成（sys_webhook_event / AK/SK 列 / 菜单 3562-3564，幂等）");
     Ok(())
 }
 

@@ -220,7 +220,8 @@ pub async fn export(
     State(state): State<Arc<AppState>>,
     axum::extract::Form(query): axum::extract::Form<AlertRuleQueryDto>,
 ) -> Result<Response, AppError> {
-    let (rows, _) = state.alert_service.list(query).await?;
+    // 导出走全量口径（EXPORT_MAX_ROWS 上限），不再复用 list 分页逻辑
+    let rows = state.alert_service.export_rules(query).await?;
 
     let columns = [
         ExcelColumn {
