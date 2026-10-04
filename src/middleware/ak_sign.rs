@@ -52,6 +52,14 @@ const TIMESTAMP_WINDOW_SECS: i64 = 300;
 /// nonce 一次性槽位 TTL（秒）：须大于 2×时间戳窗口，保证窗口内重放必被拦截
 const NONCE_TTL_SECS: u64 = 640;
 
+/// nonce 一次性槽位键：绑定 access_key 命名空间（安全审查轮加固）
+///
+/// 同一 nonce 在不同 AK 凭据下互不冲突：防攻击者用已知 nonce 抢占
+/// 其他凭据的槽位制造误拒（跨 AK nonce 槽位占用攻击面收敛到凭据内）。
+fn nonce_key_for(access_key: &str, nonce: &str) -> String {
+    format!("ak:nonce:{}:{}", access_key, nonce)
+}
+
 /// AK 请求体读取上限（1 MiB）：开放 API 机器调用不需要更大报文
 const MAX_AK_BODY_BYTES: usize = 1024 * 1024;
 
@@ -250,7 +258,7 @@ async fn verify_and_inject(
     // ---- 6. nonce 一次性抢占（SharedStore set_nx_ex；防重放第二道）----
     // 安全审查轮加固：nonce 键绑定 access_key（命名空间收敛到凭据内，
     // 防跨 AK/跨用户的 nonce 槽位占用攻击面）
-    let nonce_key = format!("ak:nonce:{}:{}", verified.access_key, nonce);
+    let nonce_key = nonce_key_for(&verified.access_key, &nonce);
     let first = state
         .store
         .set_nx_ex(&nonce_key, "1", NONCE_TTL_SECS)
@@ -358,6 +366,20 @@ mod tests {
     #[test]
     fn test_nonce_ttl_covers_window() {
         assert!(NONCE_TTL_SECS > 2 * TIMESTAMP_WINDOW_SECS as u64);
+    }
+
+    /// nonce 槽位键必须绑定 access_key 命名空间：同 nonce 跨 AK 得到不同键
+    ///（防跨凭据 nonce 槽位占用），同凭据内键确定且包含 nonce 本身
+    #[test]
+    fn test_nonce_key_binds_access_key_namespace() {
+        let a1 = nonce_key_for("AKID-alpha", "n-123");
+        let a2 = nonce_key_for("AKID-beta", "n-123");
+        assert_eq!(a1, nonce_key_for("AKID-alpha", "n-123"), "同凭据同 nonce 键必须确定");
+        assert_ne!(a1, a2, "同 nonce 跨凭据必须映射到不同槽位键");
+        assert!(a1.starts_with("ak:nonce:AKID-alpha:"), "键必须含凭据命名空间前缀");
+        assert!(a1.ends_with(":n-123"), "键必须含 nonce 本身");
+        // 空串边界（构造层已过滤空 nonce，此处锁定函数本身的确定性）
+        assert_eq!(nonce_key_for("AKID-alpha", ""), "ak:nonce:AKID-alpha:");
     }
 
     /// 中间件错误响应映射：401 + 本地化 msg（防止误改统一契约构造路径）
