@@ -1149,6 +1149,8 @@ impl GenTableService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.gen.table_not_found")))?;
 
         let now = crate::common::datetime::now_naive();
+        // 审计合规域：变更前快照（existing 被 into() 转移前计算）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: GenTableActiveModel = existing.into();
         am.table_name = Set(dto.table_name);
         am.table_comment = Set(dto.table_comment);
@@ -1169,13 +1171,14 @@ impl GenTableService {
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
 
-        let model = self.repo.update(am).await?;
+        am.update_by = Set(Some(operator.to_string()));
+        am.update_time = Set(Some(now));
 
-        // 如果有列信息，更新列（先删后插）
-        if let Some(columns) = dto.columns {
-            let mut column_ams: Vec<GenTableColumnActiveModel> = Vec::new();
-            for col in columns {
-                let column_am = GenTableColumnActiveModel {
+        // 如果有列信息，更新列（先删后插）——列 ActiveModel 预构建于事务外（只读 dto）
+        let column_ams_opt: Option<Vec<GenTableColumnActiveModel>> = dto.columns.map(|columns| {
+            columns
+                .into_iter()
+                .map(|col| GenTableColumnActiveModel {
                     table_id: Set(dto.table_id),
                     column_name: Set(col.column_name),
                     column_comment: Set(col.column_comment),
@@ -1198,33 +1201,53 @@ impl GenTableService {
                     update_by: Set(Some(operator.to_string())),
                     update_time: Set(Some(now)),
                     ..Default::default()
-                };
-                column_ams.push(column_am);
-            }
-            // P1 修复: 先删后插需在事务中执行，避免删除成功但插入失败时列记录全部丢失
-            let repo = self.repo.clone();
-            let table_id = dto.table_id;
-            self.repo
-                .base()
-                .db()
-                .transaction::<_, (), ServiceError>(|txn| {
-                    let column_ams_inner = column_ams.clone();
-                    async move {
-                        repo.update_columns_conn(txn, table_id, column_ams_inner)
-                            .await?;
-                        Ok(())
-                    }
-                    .boxed()
                 })
-                .await
-                .map_err(|e| match e {
-                    sea_orm::TransactionError::Transaction(se) => se,
-                    sea_orm::TransactionError::Connection(db_err) => {
-                        tracing::error!("编辑表事务连接错误: {}", db_err);
-                        ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                .collect()
+        });
+
+        // 单事务：主表更新 + 审计留痕 + 列先删后插原子化
+        // （原实现主表裸写 + 列独立事务，存在"主表已更新、列更新失败"的不一致窗口——一并修复）
+        let repo = self.repo.clone();
+        let table_id = dto.table_id;
+        let model = repo
+            .base()
+            .db()
+            .transaction::<_, GenTableModel, ServiceError>(|txn| {
+                let repo = repo.clone();
+                let am = am;
+                let before_snapshot = before_snapshot.clone();
+                let column_ams_inner = column_ams_opt.clone();
+                let operator = operator.to_string();
+                Box::pin(async move {
+                    // 主表更新
+                    let model = repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚；gen_table_column 明细
+                    // 随表行快照语义覆盖，不逐列重复留痕）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "gen_table",
+                        &model.table_id.to_string(),
+                        &before_snapshot,
+                        &model,
+                        None, // update_table 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    // 列先删后插（有提交列信息时）
+                    if let Some(cols) = column_ams_inner {
+                        repo.update_columns_conn(txn, table_id, cols).await?;
                     }
-                })?;
-        }
+                    Ok(model)
+                })
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!("编辑表事务连接错误: {}", db_err);
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
 
         Ok(model)
     }
