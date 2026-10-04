@@ -1418,18 +1418,28 @@ impl AuthService {
     ///
     /// 流程：
     /// 1. 查询用户菜单树（menu_service 已过滤 F 类型 + 组装树形结构）
-    /// 2. **§27.6 生效点②**：租户用户（`caller_tid != 0`）按 `套餐 ∩ 角色授权` 求交
+    /// 2. **租户管理开关**：`[tenant].management = false`（单机模式）时剪除平台侧
+    ///    「租户管理」菜单分支（与 permission_middleware 的 API 403 硬拒对称，
+    ///    消除"菜单可见但请求 403"的体验瑕疵；域名自助 / L3 导航不受影响）
+    /// 3. **§27.6 生效点②**：租户用户（`caller_tid != 0`）按 `套餐 ∩ 角色授权` 求交
     ///    ——套餐白名单（L2）裁剪角色授权菜单（L1），平台租户 / 无套餐租户不裁剪
-    /// 3. **批次 3（L3 租户自建导航）**：租户用户再叠加本租户**生效**的 L3 行
+    /// 4. **批次 3（L3 租户自建导航）**：租户用户再叠加本租户**生效**的 L3 行
     ///    （`del_flag='0'` + `status='0'`）做视图层重组（换父 / 排序 / 显隐）；
     ///    只在**已钳制**的菜单树上重组 ⇒ 不新建节点、不新增 component/perms，不扩权
-    /// 4. 递归转换为 RouterVo（menu_to_router）
+    /// 5. 递归转换为 RouterVo（menu_to_router）
     pub async fn get_routers(
         &self,
         user_id: i64,
         caller_tid: i64,
     ) -> Result<Vec<RouterVo>, ServiceError> {
         let menu_tree = self.menu_service.get_menu_tree_by_user_id(user_id).await?;
+        // 租户管理开关关闭（单机模式）：隐藏平台侧租户管理菜单。对超管/普通用户
+        // 均生效（此处为 getRouters 单一出口，权限缓存中的 perms 发放不受影响）。
+        let menu_tree = if !self.config.tenant.management {
+            prune_tenant_management_menus(menu_tree)
+        } else {
+            menu_tree
+        };
         // 套餐白名单裁剪：`None` = 该租户未绑定套餐（不限制）
         let menu_tree = if caller_tid != 0 {
             match self
@@ -1867,6 +1877,59 @@ pub(crate) fn prune_menu_tree_by_whitelist(
         .collect()
 }
 
+/// 租户管理开关关闭（[tenant].management = false）时剪除平台侧租户管理菜单
+/// （纯函数，便于单测；与 API 侧 `is_tenant_management_path` 403 硬拒对称，
+/// 消除"菜单可见但请求 403"的体验瑕疵）。
+///
+/// ## 判定口径（与 API 侧同一语义：平台侧管理 vs 租户自助）
+///
+/// 按**节点自身** `perms` 判定（不按子树整剪）：
+/// - `system:tenant:*` 且非 `system:tenant:domain:*` → 平台侧租户管理（3700 页面）→ 剪除；
+/// - `system:tenant:domain:*`（域名自助 3800-3804 按钮 / 3900 页面）→ 保留，
+///   由能力位 `tenant.domain_self_service` 独立管控；
+/// - `system:tenantMenu:*`（L3 导航 3627）前缀不同，天然不命中 → 保留，
+///   由能力位 `nav.l3` 独立管控。
+///
+/// ## perms 发放不受影响
+///
+/// `get_permissions_by_user_id` 独立按 `sys_role_menu ∩ sys_menu` 查询按钮 perms，
+/// 与路由树无关——本函数只影响**导航可见性**，域名自助按钮权限（3800-3804，
+/// 挂在 3700 子树下）不会因 3700 被剪而丢失。
+///
+/// 空目录清理：目录子节点全部被剪后目录一并移除（对齐
+/// `prune_menu_tree_by_whitelist` 的骨架保留语义，方向相反：不命中即剪）。
+pub(crate) fn prune_tenant_management_menus(menus: Vec<SysMenuModel>) -> Vec<SysMenuModel> {
+    menus
+        .into_iter()
+        .filter_map(|mut menu| {
+            if is_tenant_management_menu(&menu) {
+                return None;
+            }
+            // 区分"原本有子节点（目录）"与"叶子"：目录子节点全部被剪 → 目录一并
+            // 移除（避免前端渲染空目录）；叶子（children=None）必须保留。
+            let had_children = menu.children.is_some();
+            let children = menu
+                .children
+                .take()
+                .map(prune_tenant_management_menus)
+                .unwrap_or_default();
+            if had_children && children.is_empty() {
+                return None;
+            }
+            menu.children = if children.is_empty() { None } else { Some(children) };
+            Some(menu)
+        })
+        .collect()
+}
+
+/// 是否平台侧租户管理菜单节点（纯函数；判定依据见
+/// [`prune_tenant_management_menus`] 文档）。
+fn is_tenant_management_menu(menu: &SysMenuModel) -> bool {
+    menu.perms.as_deref().is_some_and(|perms| {
+        perms.starts_with("system:tenant:") && !perms.starts_with("system:tenant:domain:")
+    })
+}
+
 /// L3 导航层级深度上限（防畸形配置把前端路由树打成超深链）
 pub(crate) const L3_MAX_DEPTH: usize = 64;
 
@@ -2262,6 +2325,114 @@ mod tests {
             del_flag: Some("0".to_string()),
             children: None,
         }
+    }
+
+    /// 设置 perms 的便捷封装（make_menu 默认 perms=None）
+    fn with_perms(mut menu: SysMenuModel, perms: &str) -> SysMenuModel {
+        menu.perms = Some(perms.to_string());
+        menu
+    }
+
+    // ===== 租户管理开关关闭时的菜单剪除（prune_tenant_management_menus）=====
+
+    #[test]
+    fn test_prune_tenant_management_cuts_management_keeps_self_service() {
+        // 对齐真实种子数据：3700 租户管理（C，system:tenant:list）剪除；
+        // 3900 我的域名（C，system:tenant:domain:list）与
+        // 3627 导航设置（C，system:tenantMenu:list）保留（自助能力，独立管控）；
+        // 系统管理目录（perms=None）与用户管理（system:user:list）保留。
+        let sys_dir = {
+            let mut dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
+            dir.children = Some(vec![
+                with_perms(
+                    make_menu(100, 1, "C", "user", Some("system/user/index"), "1", "0", "0", "0", None),
+                    "system:user:list",
+                ),
+                with_perms(
+                    make_menu(3700, 1, "C", "tenant", Some("system/tenant/index"), "1", "0", "0", "0", None),
+                    "system:tenant:list",
+                ),
+            ]);
+            dir
+        };
+        let tree = vec![
+            sys_dir,
+            with_perms(
+                make_menu(3900, 0, "C", "my-domain", Some("system/tenant/domain/index"), "1", "0", "0", "0", None),
+                "system:tenant:domain:list",
+            ),
+            with_perms(
+                make_menu(3627, 0, "C", "my-nav", Some("system/tenant/nav/index"), "1", "0", "0", "0", None),
+                "system:tenantMenu:list",
+            ),
+        ];
+
+        let pruned = prune_tenant_management_menus(tree);
+        assert_eq!(pruned.len(), 3, "顶层节点数不变");
+
+        // 系统管理目录保留，但仅剩用户管理（3700 被剪）
+        let sys = &pruned[0];
+        let children = sys.children.as_ref().expect("系统管理目录仍有子节点");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].menu_id, 100);
+
+        // 域名自助与 L3 导航保留
+        assert_eq!(pruned[1].menu_id, 3900);
+        assert_eq!(pruned[2].menu_id, 3627);
+    }
+
+    #[test]
+    fn test_prune_tenant_management_prunes_empty_directory() {
+        // 目录下只有租户管理 → 剪除后目录变空 → 目录一并移除
+        let mut sys_dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
+        sys_dir.children = Some(vec![with_perms(
+            make_menu(3700, 1, "C", "tenant", Some("system/tenant/index"), "1", "0", "0", "0", None),
+            "system:tenant:list",
+        )]);
+        let pruned = prune_tenant_management_menus(vec![sys_dir]);
+        assert!(pruned.is_empty(), "空目录应一并剪除");
+    }
+
+    #[test]
+    fn test_prune_tenant_management_node_hit_cuts_subtree_but_keeps_siblings() {
+        // 命中节点整枝剪除（含子节点）；同级兄弟不命中则保留。
+        // F 按钮 perms（如 3800 域名查询 system:tenant:domain:add，挂在 3700 下）
+        // 不进路由树且 perms 发放独立查询，不受本剪除影响。
+        let mut tenant = with_perms(
+            make_menu(3700, 1, "C", "tenant", Some("system/tenant/index"), "1", "0", "0", "0", None),
+            "system:tenant:list",
+        );
+        tenant.children = Some(vec![with_perms(
+            make_menu(3800, 3700, "F", "", None, "1", "0", "0", "0", None),
+            "system:tenant:domain:add",
+        )]);
+        let user = with_perms(
+            make_menu(100, 1, "C", "user", Some("system/user/index"), "1", "0", "0", "0", None),
+            "system:user:list",
+        );
+        let mut dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
+        dir.children = Some(vec![tenant, user]);
+
+        let pruned = prune_tenant_management_menus(vec![dir]);
+        let children = pruned[0].children.as_ref().unwrap();
+        assert_eq!(children.len(), 1, "3700 整枝剪除，100 保留");
+        assert_eq!(children[0].menu_id, 100);
+    }
+
+    #[test]
+    fn test_prune_tenant_management_noop_when_management_menu_absent() {
+        // 无管理菜单时原样保留（含空 perms / None perms 节点）
+        let tree = vec![
+            with_perms(make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None), ""),
+            with_perms(
+                make_menu(3900, 0, "C", "my-domain", Some("system/tenant/domain/index"), "1", "0", "0", "0", None),
+                "system:tenant:domain:list",
+            ),
+        ];
+        let pruned = prune_tenant_management_menus(tree.clone());
+        assert_eq!(pruned.len(), 2);
+        assert_eq!(pruned[0].menu_id, 1);
+        assert_eq!(pruned[1].menu_id, 3900);
     }
 
     #[test]
