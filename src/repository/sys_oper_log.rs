@@ -220,6 +220,21 @@ impl SysOperLogRepository {
         Ok(row.and_then(|m| m.chain_hash))
     }
 
+    /// 是否存在 oper_id 更大且已写链的日志（乱序守卫用）
+    ///
+    /// 链写入必须与 oper_id 严格同序：若更大 oper_id 的日志已抢先写入
+    /// chain_hash，本条再按 `oper_id < 当前` 挂链将与该节点共享同一前驱
+    /// （分支链），verify 按 id 升序重算必然误报断裂。守卫命中时调用方应
+    /// 将本条降级为 NULL（链在非 NULL 子序列上续写）。
+    pub async fn exists_later_chained(&self, oper_id: i64) -> Result<bool, DbErr> {
+        let row = SysOperLog::find()
+            .filter(Column::ChainHash.is_not_null())
+            .filter(Column::OperId.gt(oper_id))
+            .one(self.base.db())
+            .await?;
+        Ok(row.is_some())
+    }
+
     /// 回写指定日志的 chain_hash（链计算完成后的第二次写）
     ///
     /// 仅更新 chain_hash 列；行不存在时静默成功（并发下被清理任务删除属于正常边界）。
