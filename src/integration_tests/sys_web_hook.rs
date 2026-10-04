@@ -419,3 +419,182 @@ async fn test_web_hook_secret_masked_and_preserved_on_edit() {
     ctx.delete_json(&format!("/monitor/webHook/{}", hook_id_no_secret))
         .await;
 }
+
+/// 事件目录停用/启用链路（m20261004_000002_webhook_event_edit）：
+/// 停用 → 目录 enabled=0 生效 → 新订阅与测试发送被拒绝 → 启用恢复订阅可用。
+/// 语义边界（存量 hook 不中断）不在此验证（派发链不查目录，属服务内部路径）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webhook_event_enabled_chain() {
+    let ctx = TestContext::new().await;
+    let target = "http://8.8.8.8:59999/webhook";
+    let catalog_key = "user.created"; // 种子事件（WEBHOOK_SEED_EVENTS 首个）
+
+    // 1. 目录列表应含种子事件且 enabled='1'
+    let v = ctx
+        .get_json("/system/webhook/event/list?pageNum=1&pageSize=50")
+        .await;
+    ctx.assert_ok(&v);
+    let rows = v["rows"].as_array().expect("事件目录 rows 应为数组");
+    assert!(!rows.is_empty(), "种子事件目录不应为空");
+    let event = rows
+        .iter()
+        .find(|r| r["eventKey"] == catalog_key)
+        .expect("目录应含 user.created 种子事件")
+        .clone();
+    let event_id = event["id"].as_i64().expect("事件 id 应为数字");
+    assert_eq!(
+        event["enabled"], serde_json::json!("1"),
+        "种子事件默认启用，实际: {event}"
+    );
+
+    // 2. 停用事件 → 目录查询确认 enabled='0'
+    let v = ctx
+        .put_json(
+            &format!("/system/webhook/event/{}/enabled", event_id),
+            serde_json::json!({ "enabled": "0" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json(&format!(
+            "/system/webhook/event/list?eventKey={}&enabled=0",
+            catalog_key
+        ))
+        .await;
+    ctx.assert_ok(&v);
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    assert_eq!(
+        rows.len(),
+        1,
+        "停用过滤应命中该事件，实际: {v}"
+    );
+
+    // 3. 新订阅被拒绝：subscribedEvents 含停用事件 → 400
+    let (status, body) = ctx
+        .send_raw(auth_json_request(
+            &ctx,
+            Method::POST,
+            "/monitor/webHook",
+            serde_json::json!({
+                "hookName": "it_webhook_订阅停用事件",
+                "subscribedEvents": [catalog_key],
+                "targetUrl": target,
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "订阅停用事件应被拒绝（事件键不在目录口径），实际: {status} {body}"
+    );
+    assert_eq!(body["code"], 400, "订阅停用事件业务码应为 400，实际: {body}");
+
+    // 4. 测试发送被拒绝：对停用事件 test-send → 400
+    //    先建一个订阅其它事件的 hook 作为载体
+    let v = ctx
+        .post_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "hookName": "it_webhook_停用测试载体",
+                "subscribedEvents": ["login.failed"],
+                "targetUrl": target,
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/monitor/webHook/list?hookName=it_webhook_停用测试载体")
+        .await;
+    let carrier_id = v["rows"][0]["id"].as_i64().expect("载体 hook id 应为数字");
+    let (status, body) = ctx
+        .send_raw(auth_json_request(
+            &ctx,
+            Method::POST,
+            &format!("/system/webhook/{}/test-send", carrier_id),
+            serde_json::json!({ "eventKey": catalog_key }),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "停用事件测试发送应被拒绝，实际: {status} {body}"
+    );
+    assert_eq!(body["code"], 400, "停用事件测试发送业务码应为 400，实际: {body}");
+
+    // 5. 启用恢复 → 订阅该事件成功
+    let v = ctx
+        .put_json(
+            &format!("/system/webhook/event/{}/enabled", event_id),
+            serde_json::json!({ "enabled": "1" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .post_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "hookName": "it_webhook_订阅恢复事件",
+                "subscribedEvents": [catalog_key],
+                "targetUrl": target,
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    // 6. 校验分支：非法 enabled 值 → 400；不存在的事件 id → 404（not_found）
+    let (status, body) = ctx
+        .send_raw(auth_json_request(
+            &ctx,
+            Method::PUT,
+            &format!("/system/webhook/event/{}/enabled", event_id),
+            serde_json::json!({ "enabled": "x" }),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法 enabled 取值应被拒绝，实际: {status} {body}"
+    );
+    assert_eq!(body["code"], 400, "非法 enabled 业务码应为 400，实际: {body}");
+    let (status, body) = ctx
+        .send_raw(auth_json_request(
+            &ctx,
+            Method::PUT,
+            "/system/webhook/event/999999999/enabled",
+            serde_json::json!({ "enabled": "1" }),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "不存在的事件应 404，实际: {status} {body}"
+    );
+    assert_eq!(body["code"], 404, "不存在的事件业务码应为 404，实际: {body}");
+
+    // 清理
+    let v = ctx
+        .get_json("/monitor/webHook/list?hookName=it_webhook_停用测试载体")
+        .await;
+    for row in v["rows"].as_array().unwrap() {
+        ctx.delete_json(&format!("/monitor/webHook/{}", row["id"]))
+            .await;
+    }
+    let v = ctx
+        .get_json("/monitor/webHook/list?hookName=it_webhook_订阅恢复事件")
+        .await;
+    for row in v["rows"].as_array().unwrap() {
+        ctx.delete_json(&format!("/monitor/webHook/{}", row["id"]))
+            .await;
+    }
+    ctx.delete_json(&format!("/monitor/webHook/{}", carrier_id))
+        .await;
+}
