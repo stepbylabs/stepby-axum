@@ -99,6 +99,26 @@ pub async fn permission_middleware(
         ));
     }
 
+    // 租户管理开关（[tenant].management，默认 true = 现状零变化）：
+    // 单机模式（false）下 /system/tenant* 全端点 403——**含超管**（"功能已关"语义，
+    // 明确拒绝优于假入口）；存量租户用户的业务登录/使用不受影响。
+    // 置于 perms 匹配之前：无论权限标识如何，开关关闭即硬拒。
+    if !state.config.tenant.management
+        && let Some(path) = matched_path.as_deref()
+        && is_tenant_management_path(path)
+    {
+        tracing::warn!(
+            user_id = claims.sub,
+            method = %method,
+            path,
+            "拒绝：租户管理开关已关闭（[tenant].management = false）"
+        );
+        return Err(AppError::new(
+            403,
+            crate::tr!("error.tenant.management_disabled"),
+        ));
+    }
+
     let required_perm = match required_perm {
         Some(p) => p,
         None => {
@@ -966,6 +986,15 @@ fn is_pat_management_path(path: &str) -> bool {
         || path.starts_with("/system/user/profile/tokens")
         || path.starts_with("/system/pat")
         || path.starts_with("/monitor/pat")
+}
+
+/// 租户管理开关（[tenant].management）作用路径判定：`/system/tenant` 前缀。
+///
+/// 覆盖租户管理全部端点（list/package/changeStatus/restore/{id} CRUD）；
+/// 不含 `system:tenant:domain:*` 域名自助（由能力位 `tenant.domain_self_service`
+/// 独立管控）与 L3 自建导航（能力位 `nav.l3` 独立管控）。
+fn is_tenant_management_path(path: &str) -> bool {
+    path.starts_with("/system/tenant")
 }
 
 #[cfg(test)]

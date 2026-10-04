@@ -508,6 +508,7 @@ error:
     platform_protected: 平台根部门不允许通过租户接口操作
     disabled: 租户已被停用，无法登录
     platform_only: 该操作仅平台管理员可执行
+    management_disabled: 租户管理功能已关闭（单机模式），如需启用请在配置中设置 [tenant].management = true
     code_invalid: 租户短码格式非法（2-32 位小写字母/数字/下划线/连字符，且以字母或数字开头）
     code_duplicate: 租户短码已被占用，请更换
     package_not_found: 指定套餐不存在或已停用
