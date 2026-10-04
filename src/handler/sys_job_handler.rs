@@ -164,7 +164,7 @@ pub async fn remove(
 
     state
         .job_service
-        .delete_jobs(ids, operator.tenant_id())
+        .delete_jobs(ids, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

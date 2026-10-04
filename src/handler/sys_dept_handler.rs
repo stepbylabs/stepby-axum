@@ -261,7 +261,7 @@ pub async fn remove(
     }
     state
         .dept_service
-        .delete_dept(dept_id, operator.tenant_id())
+        .delete_dept(dept_id, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

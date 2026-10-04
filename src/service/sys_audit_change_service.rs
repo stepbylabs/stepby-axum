@@ -393,6 +393,60 @@ impl SysAuditChangeService {
     }
 }
 
+// ==================== 审计快捷入口（收敛业务域接入样板） ====================
+//
+// 2026-10-04 全链路核查补录：sys_audit_change 写入方此前仅 user/role/config/web_hook
+// 四域，其余域接入需重复"resolve_operator + to_value 快照 + record_change"三步样板
+// （每处 ~18 行）。本组快捷函数把样板收敛为一行调用，按 action 语义拆分：
+// - INSERT：before 恒 None
+// - UPDATE：before/after 均必需（字段级 diff 的意义所在）
+// - DELETE：after 恒 None
+// 操作人信息缺失侧由 resolve_operator 在事务内回查补齐（既有口径不变）。
+
+/// INSERT 变更留痕快捷入口（`after` 传插入后的 Model 引用）
+pub async fn audit_insert<C: ConnectionTrait, S: serde::Serialize>(
+    conn: &C,
+    table: &str,
+    pk: &str,
+    after: &S,
+    operator_user_id: Option<i64>,
+    operator_name: Option<&str>,
+) -> Result<(), sea_orm::DbErr> {
+    let operator = resolve_operator(conn, operator_user_id, operator_name).await;
+    let after = serde_json::to_value(after).unwrap_or(Value::Null);
+    record_change(conn, table, pk, ACTION_INSERT, None, Some(after), operator).await
+}
+
+/// UPDATE 变更留痕快捷入口（`before` 传事务内改前快照、`after` 传改后 Model 引用）
+pub async fn audit_update<C: ConnectionTrait, B: serde::Serialize, A: serde::Serialize>(
+    conn: &C,
+    table: &str,
+    pk: &str,
+    before: &B,
+    after: &A,
+    operator_user_id: Option<i64>,
+    operator_name: Option<&str>,
+) -> Result<(), sea_orm::DbErr> {
+    let operator = resolve_operator(conn, operator_user_id, operator_name).await;
+    let before = serde_json::to_value(before).unwrap_or(Value::Null);
+    let after = serde_json::to_value(after).unwrap_or(Value::Null);
+    record_change(conn, table, pk, ACTION_UPDATE, Some(before), Some(after), operator).await
+}
+
+/// DELETE 变更留痕快捷入口（`before` 传事务内删除前 Model 引用）
+pub async fn audit_delete<C: ConnectionTrait, S: serde::Serialize>(
+    conn: &C,
+    table: &str,
+    pk: &str,
+    before: &S,
+    operator_user_id: Option<i64>,
+    operator_name: Option<&str>,
+) -> Result<(), sea_orm::DbErr> {
+    let operator = resolve_operator(conn, operator_user_id, operator_name).await;
+    let before = serde_json::to_value(before).unwrap_or(Value::Null);
+    record_change(conn, table, pk, ACTION_DELETE, Some(before), None, operator).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +509,69 @@ mod tests {
         assert_eq!(sanitize_snapshot(json!(42)), json!(42));
         assert_eq!(sanitize_snapshot(json!([1, 2])), json!([1, 2]));
         assert_eq!(sanitize_snapshot(json!(null)), json!(null));
+    }
+
+    /// 快捷入口端到端：同一事务内 INSERT/UPDATE/DELETE 三连写，
+    /// 断言 action 语义（before/after 侧）、操作人回查与敏感列脱敏全部正确落库。
+    #[tokio::test]
+    async fn audit_helpers_write_correct_action_semantics() {
+        use sea_orm::TransactionTrait;
+        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let after_model = json!({"id": 7_i64, "name": "demo", "password": "plain-secret"});
+
+        let txn = db.begin().await.unwrap();
+        audit_insert(&txn, "sys_demo", "7", &after_model, None, Some("admin"))
+            .await
+            .unwrap();
+        audit_update(
+            &txn,
+            "sys_demo",
+            "7",
+            &after_model,
+            &json!({"id": 7_i64, "name": "demo2"}),
+            None,
+            Some("admin"),
+        )
+        .await
+        .unwrap();
+        audit_delete(
+            &txn,
+            "sys_demo",
+            "7",
+            &json!({"id": 7_i64, "name": "demo2"}),
+            None,
+            Some("admin"),
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        use sea_orm::{EntityTrait, QueryOrder};
+        let rows = crate::entity::sys_audit_change::Entity::find()
+            .order_by_asc(crate::entity::sys_audit_change::Column::Id)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+
+        // INSERT：before 为空、after 有值且敏感列已打码；操作人按用户名回查成功（admin=1）
+        assert_eq!(rows[0].action, "INSERT");
+        assert!(rows[0].before_data.is_none());
+        let after0: Value = serde_json::from_str(rows[0].after_data.as_deref().unwrap()).unwrap();
+        assert_eq!(after0["password"], "***");
+        assert_eq!(rows[0].operator_name.as_deref(), Some("admin"));
+        assert_eq!(rows[0].operator_id, Some(1));
+
+        // UPDATE：两侧均有值，changed_fields 捕获 name 变更（password 值未变不重复计入）
+        assert_eq!(rows[1].action, "UPDATE");
+        let changed1: Vec<String> =
+            serde_json::from_str(rows[1].changed_fields.as_str()).unwrap();
+        assert!(changed1.contains(&"name".to_string()));
+
+        // DELETE：after 为空、before 有值
+        assert_eq!(rows[2].action, "DELETE");
+        assert!(rows[2].after_data.is_none());
+        let before2: Value = serde_json::from_str(rows[2].before_data.as_deref().unwrap()).unwrap();
+        assert_eq!(before2["name"], "demo2");
     }
 }

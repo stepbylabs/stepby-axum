@@ -513,7 +513,29 @@ impl SysDictService {
             ..Default::default()
         };
 
-        let model = self.dict_type_repo.insert(am).await?;
+        let dict_type_repo = self.dict_type_repo.clone();
+        let txn_result = self
+            .db()
+            .transaction::<_, SysDictTypeModel, sea_orm::DbErr>(|txn| {
+                let am = am;
+                let operator = operator.to_string();
+                Box::pin(async move {
+                    let model = dict_type_repo.base().insert_conn(txn, am).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚）
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_dict_type",
+                        &model.dict_id.to_string(),
+                        &model,
+                        None, // add_dict_type 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(model)
+                })
+            })
+            .await;
+        let model = txn_result.map_err(ServiceError::from)?;
         // 新增字典类型后失效对应层缓存（防御性清理，正常情况下无数据）
         self.invalidate_cache(operator_tid, &dict_type_for_cache)
             .await;
@@ -578,6 +600,8 @@ impl SysDictService {
         let row_tid = existing.tenant_id;
         // 部分更新语义快照（2026-09-26 缺陷修复）：status 未传时保持现值，避免字典类型被静默置 NULL 失效
         let existing_status = existing.status.clone();
+        // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysDictTypeActiveModel = existing.into();
         am.dict_name = Set(Some(dto.dict_name));
         am.dict_type = Set(Some(dto.dict_type.clone()));
@@ -597,6 +621,8 @@ impl SysDictService {
                 let dict_data_repo = dict_data_repo.clone();
                 let old_dict_type = old_dict_type.clone();
                 let new_dict_type = dto.dict_type.clone();
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator.to_string();
                 async move {
                     // 若 dict_type 变更，同步更新 sys_dict_data.dict_type（限本归属层，防跨租户误改）
                     if dict_type_changed {
@@ -606,6 +632,17 @@ impl SysDictService {
                     }
                     // 更新字典类型
                     let model = dict_type_repo.base().update_conn(txn, am).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_dict_type",
+                        &model.dict_id.to_string(),
+                        &before_snapshot,
+                        &model,
+                        None, // edit_dict_type 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
                     Ok(model)
                 }
                 .boxed()
@@ -629,6 +666,7 @@ impl SysDictService {
     pub async fn delete_dict_types(
         &self,
         dict_ids: Vec<i64>,
+        operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 预查询所有 dict_type 字符串（事务外查询，事务内仅写）
@@ -665,12 +703,15 @@ impl SysDictService {
 
         let dict_type_repo = self.dict_type_repo.clone();
         let dict_data_repo = self.dict_data_repo.clone();
+        let operator = operator.to_string();
 
         self.db()
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
                 let dict_type_repo = dict_type_repo.clone();
                 let dict_data_repo = dict_data_repo.clone();
                 let dict_types = dict_types.clone();
+                let models = models.clone();
+                let operator = operator.clone();
                 async move {
                     for (dict_id, dict_type, owner_tid) in &dict_types {
                         // 软删除字典类型并重命名 dict_type（REGRESS-003）
@@ -695,6 +736,18 @@ impl SysDictService {
                         dict_data_repo
                             .soft_delete_by_dict_type_conn(txn, *owner_tid, dict_type)
                             .await?;
+                        // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                        if let Some(m) = models.iter().find(|m| m.dict_id == *dict_id) {
+                            crate::service::sys_audit_change_service::audit_delete(
+                                txn,
+                                "sys_dict_type",
+                                &dict_id.to_string(),
+                                m,
+                                None, // delete_dict_types 签名仅携带操作人用户名，ID 由回查补齐
+                                Some(operator.as_str()),
+                            )
+                            .await?;
+                        }
                     }
                     Ok(())
                 }
