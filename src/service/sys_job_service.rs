@@ -423,7 +423,30 @@ impl SysJobService {
             ..Default::default()
         };
 
-        let job = self.job_repo.insert(model).await?;
+        let job_repo = self.job_repo.clone();
+        let txn_result = self
+            .db()
+            .transaction::<_, SysJobModel, sea_orm::DbErr>(|txn| {
+                let job_repo = job_repo.clone();
+                let model = model;
+                let operator = operator.to_string();
+                Box::pin(async move {
+                    let job = job_repo.base().insert_conn(txn, model).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚）
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_job",
+                        &job.job_id.to_string(),
+                        &job,
+                        None, // add_job 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(job)
+                })
+            })
+            .await;
+        let job = txn_result.map_err(ServiceError::from)?;
 
         // status='0' 时注册到调度器（容错：失败仅 warn，不阻断 DB 已提交的插入）
         // 与 edit_job/delete_jobs/change_status 保持一致：DB 为 source of truth，重启后调度器从 DB 恢复
@@ -487,6 +510,9 @@ impl SysJobService {
         let old_status = existing.status.as_deref().unwrap_or("0").to_string();
         let new_status = dto.status.unwrap_or_else(|| old_status.clone());
 
+        // 审计合规域：变更前快照（UPDATE 前取存量行）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+
         let model = sys_job::ActiveModel {
             job_id: Set(dto.job_id),
             job_name: Set(dto.job_name),
@@ -505,8 +531,33 @@ impl SysJobService {
             ..Default::default()
         };
 
-        // DB 更新是主操作，必须成功
-        let job = self.job_repo.update(model).await?;
+        // DB 更新（事务化 + 审计留痕同事务）
+        let job_repo = self.job_repo.clone();
+        let txn_result = self
+            .db()
+            .transaction::<_, SysJobModel, sea_orm::DbErr>(|txn| {
+                let job_repo = job_repo.clone();
+                let model = model;
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator.to_string();
+                Box::pin(async move {
+                    let job = job_repo.base().update_conn(txn, model).await?;
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_job",
+                        &job.job_id.to_string(),
+                        &before_snapshot,
+                        &job,
+                        None, // edit_job 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(job)
+                })
+            })
+            .await;
+        let job = txn_result.map_err(ServiceError::from)?;
 
         // 同步调度器（容错：失败仅 warn，不阻断 DB 已提交的修改）
         // 与 delete_jobs/change_status 保持一致：DB 为 source of truth，重启后调度器从 DB 恢复
@@ -548,15 +599,18 @@ impl SysJobService {
     pub async fn delete_jobs(
         &self,
         job_ids: Vec<i64>,
+        operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         let job_repo = self.job_repo.clone();
+        let operator = operator.to_string();
         // 事务保证：预查询 + 批量软删除原子化（预查询移入事务内，消除 TOCTOU 竞态 C-06）
         // 事务返回需要从调度器移除的 job_id 列表（status='0' 的任务）
         let to_remove_from_scheduler: Vec<i64> = self
             .db()
             .transaction::<_, Vec<i64>, ServiceError>(|txn| {
                 let job_ids_inner = job_ids.clone();
+                let operator = operator.clone();
                 let mut running_jobs: Vec<i64> = Vec::new();
                 async move {
                     for job_id in &job_ids_inner {
@@ -576,6 +630,16 @@ impl SysJobService {
                             job_repo
                                 .soft_delete_with_rename_conn(txn, *job_id, renamed)
                                 .await?;
+                            // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                            crate::service::sys_audit_change_service::audit_delete(
+                                txn,
+                                "sys_job",
+                                &job_id.to_string(),
+                                &job,
+                                None, // delete_jobs 签名仅携带操作人用户名，ID 由回查补齐
+                                Some(operator.as_str()),
+                            )
+                            .await?;
                         }
                     }
                     Ok(running_jobs)

@@ -467,7 +467,30 @@ impl SysDeptService {
         am.update_time = Set(Some(now));
         am.del_flag = Set(Some("0".to_string()));
 
-        let new_dept = self.dept_repo.insert(am).await?;
+        let dept_repo = self.dept_repo.clone();
+        let txn_result = self
+            .db()
+            .transaction::<_, SysDeptModel, sea_orm::DbErr>(|txn| {
+                let dept_repo = dept_repo.clone();
+                let am = am;
+                let operator = operator.to_string();
+                Box::pin(async move {
+                    let new_dept = dept_repo.base().insert_conn(txn, am).await?;
+                    // 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚）
+                    crate::service::sys_audit_change_service::audit_insert(
+                        txn,
+                        "sys_dept",
+                        &new_dept.dept_id.to_string(),
+                        &new_dept,
+                        None, // add_dept 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
+                    Ok(new_dept)
+                })
+            })
+            .await;
+        let new_dept = txn_result.map_err(ServiceError::from)?;
         Ok(new_dept)
     }
 
@@ -579,6 +602,9 @@ impl SysDeptService {
                 let status = status.clone();
                 let operator_owned = operator_owned.clone();
                 let existing_clone = existing.clone();
+                // 审计合规域：变更前快照（必须在 existing_clone 被 into 消费前计算）
+                let before_snapshot =
+                    serde_json::to_value(&existing_clone).unwrap_or(serde_json::Value::Null);
                 async move {
                     let mut am: SysDeptActiveModel = existing_clone.into();
                     am.parent_id = Set(Some(parent_id));
@@ -605,6 +631,18 @@ impl SysDeptService {
                     am.update_time = Set(Some(now));
 
                     let updated = dept_repo.base().update_conn(txn, am).await?;
+
+                    // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_update(
+                        txn,
+                        "sys_dept",
+                        &updated.dept_id.to_string(),
+                        &before_snapshot,
+                        &updated,
+                        None, // edit_dept 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator_owned.as_str()),
+                    )
+                    .await?;
 
                     // 父部门变更：递归更新子部门 ancestors
                     if ancestors_changed {
@@ -634,7 +672,12 @@ impl SysDeptService {
     /// 1. 无子部门（del_flag = '0' 的直接子部门）
     /// 2. 无角色关联（sys_role_dept 中无关联记录）
     /// 3. 无用户关联（sys_user.dept_id 指向此部门的未删除用户）
-    pub async fn delete_dept(&self, dept_id: i64, operator_tid: i64) -> Result<(), ServiceError> {
+    pub async fn delete_dept(
+        &self,
+        dept_id: i64,
+        operator: &str,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         let existing = self
             .dept_repo
             .base()
@@ -651,6 +694,9 @@ impl SysDeptService {
             )));
         }
 
+        // 审计合规域：变更前快照（existing 被 move 进事务闭包前计算）
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+
         let dept_repo = self.dept_repo.clone();
         let user_repo = self.user_repo.clone();
         let user_dept_repo =
@@ -662,6 +708,8 @@ impl SysDeptService {
                 let dept_repo = dept_repo.clone();
                 let user_repo = user_repo.clone();
                 let user_dept_repo = user_dept_repo.clone();
+                let before_snapshot = before_snapshot.clone();
+                let operator = operator.to_string();
                 async move {
                     // 1. 事务内重新检查子部门
                     let child_select = SysDept::find()
@@ -711,6 +759,17 @@ impl SysDeptService {
                     let mut am: SysDeptActiveModel = existing.into();
                     am.del_flag = Set(Some("2".to_string()));
                     dept_repo.base().update_conn(txn, am).await?;
+
+                    // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
+                    crate::service::sys_audit_change_service::audit_delete(
+                        txn,
+                        "sys_dept",
+                        &dept_id.to_string(),
+                        &before_snapshot,
+                        None, // delete_dept 签名仅携带操作人用户名，ID 由回查补齐
+                        Some(operator.as_str()),
+                    )
+                    .await?;
 
                     Ok(())
                 }
