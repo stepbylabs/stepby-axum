@@ -68,6 +68,10 @@ pub fn web_hook_routes() -> Router<Arc<AppState>> {
             get(sys_webhook_event_handler::event_list),
         )
         .route(
+            "/system/webhook/event/{id}/enabled",
+            put(sys_webhook_event_handler::change_event_enabled),
+        )
+        .route(
             "/system/webhook/{id}/test-send",
             post(sys_webhook_event_handler::test_send),
         )

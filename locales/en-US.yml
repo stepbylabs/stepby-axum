@@ -432,6 +432,7 @@ error:
     name_empty: Webhook name must not be empty
     event_empty: Subscribe to at least one event type
     event_key_unknown: Event key %{key} is not in the event catalog
+    event_disabled: Event is disabled (delisted from catalog); subscribe and test-send are rejected
   alert:
     rule_not_found: Alert rule does not exist
     metric_invalid: Invalid metric identifier

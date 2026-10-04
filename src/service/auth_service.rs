@@ -172,6 +172,10 @@ pub struct GetInfoVo {
     pub is_default_modify_pwd: bool,
     /// 密码是否已过期（对齐前端 isPasswordExpired）
     pub is_password_expired: bool,
+    /// B4 强制改密判定（服务端判定结果，对齐 showTenantColumn 单点范式）：
+    /// 强改开关 `sys.user.forceFirstLoginChangePwd`（默认 false）开启 **且**
+    /// （初始密码未修改 || 密码过期）。开关关闭时恒 false，前端零行为变化。
+    pub must_change_password: bool,
     /// 业务列表页是否显示「所属租户」归属列（`[ui].show_tenant_column` 的**服务端判定结果**）
     ///
     /// 后端算好布尔再下发，前端不做二次推断：`auto` 需操作者租户上下文
@@ -1351,11 +1355,30 @@ impl AuthService {
         // pwd_chrtype：密码加密类型（当前固定为 "argon2"）
         let pwd_chrtype = Some("argon2".to_string());
         // is_default_modify_pwd：是否仍使用初始密码
-        // user_type "00"=正常用户（非初始密码标识），不应作为初始密码判断依据
-        // 当前无 pwd_update_time 字段，默认为 false（admin 密码已修改过）
-        let is_default_modify_pwd = false;
+        // B4（m20261004_000003）：真实计算替代历史恒 false——must_change_pwd='1'
+        // （初始密码未修改）即触发；个人改密成功由 update_user_password 统一清除标志，
+        // 此处自然归 false。开关关闭时该标志仍下发（前端软提示），但不会驱动强改流程。
+        let is_default_modify_pwd = user.must_change_pwd.as_deref() == Some("1");
         // is_password_expired：密码是否过期（当前无密码过期策略，固定为 false）
         let is_password_expired = false;
+        // B4：must_change_password（服务端判定，对齐 showTenantColumn 单点范式）——
+        // 强改开关 `sys.user.forceFirstLoginChangePwd`（默认 false）开启 **且**
+        // （初始密码未修改 || 密码过期）时置 true，前端据此强制跳转改密页。
+        // 开关查询失败按关闭态处理（fail-safe：不明确的姿态不拦截用户）。
+        let force_pwd_change_enabled = match self
+            .config_service
+            .get_config_value_by_key_cached(
+                "sys.user.forceFirstLoginChangePwd",
+                Some(operator_tid),
+            )
+            .await
+        {
+            // 显式 "true" 才开启（fail-safe：缺省/失败/任意其它值一律按关闭态，不误拦用户）
+            Ok(Some(val)) => val.eq_ignore_ascii_case("true"),
+            _ => false,
+        };
+        let must_change_password =
+            force_pwd_change_enabled && (is_default_modify_pwd || is_password_expired);
         // 「所属租户」归属列展示决策：`[ui].show_tenant_column`（默认 auto）在服务端解析，
         // 结合操作者租户上下文算出布尔下发（`auto` ⇒ 仅平台操作者可见 = 历史行为）
         let show_tenant_column =
@@ -1383,6 +1406,7 @@ impl AuthService {
             pwd_chrtype,
             is_default_modify_pwd,
             is_password_expired,
+            must_change_password,
             show_tenant_column,
             show_tenant_filter,
             show_user_erasure,

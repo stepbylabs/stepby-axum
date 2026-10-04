@@ -70,6 +70,25 @@ impl SysRoleFieldPermRepository {
             .collect())
     }
 
+    /// 按角色集合物理删除 hidden 行（角色删除级联清理；事务上下文变体）
+    ///
+    /// 对齐 sys_role_menu 删除纪律：角色删除时同步清理其字段权限配置，
+    /// 避免孤儿行累积（hidden 判定按用户当前角色集合查询，孤儿行无泄漏
+    /// 风险但违背关联表清理纪律）。
+    pub async fn delete_by_role_ids_conn<C: ConnectionTrait>(
+        &self,
+        txn: &C,
+        role_ids: &[i64],
+    ) -> Result<DeleteResult, DbErr> {
+        if role_ids.is_empty() {
+            return Ok(DeleteResult { rows_affected: 0 });
+        }
+        SysRoleFieldPerm::delete_many()
+            .filter(Column::RoleId.is_in(role_ids.to_vec()))
+            .exec(txn)
+            .await
+    }
+
     /// 全量覆盖式保存：删除该角色在该表下的全部行后重建 hidden 清单
     ///
     /// 事务保证：DELETE 与 INSERT 同事务，中途失败不产生"半清空"状态。

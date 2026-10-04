@@ -28,6 +28,30 @@
 pub mod local_store;
 pub mod redis_store;
 
+use sea_orm::ConnectionTrait;
+
+/// 清理 `sys_token_revocation` 中已过期的吊销行（调度任务 `tokenRevocationCleanup` 用）
+///
+/// 全链路核查补录（2026-10-04）：该表是登出/强退/SSO 旧版吊销的 **S1 安全态 DB 权威层**，
+/// 读路径虽有 `expire_at` 过滤 + 索引兜底保证正确性，但过期行此前无任何删除路径，
+/// 会随登出/强退次数无限累积。两档 SharedStore 共用本权威层（redis 档 SETEX 自过期 +
+/// DB 双写），清理仅针对 DB 行；redis 键由 TTL 自行过期，无需干预。
+///
+/// 三方言 `DELETE ... WHERE expire_at <= <epoch>` 语法一致；时间戳为服务端 i64 整数
+/// （无注入面），故直接拼接而非参数绑定。
+pub async fn cleanup_expired_token_revocations(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<u64, sea_orm::DbErr> {
+    let now_epoch = chrono::Utc::now().timestamp();
+    let res = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            format!("DELETE FROM sys_token_revocation WHERE expire_at <= {now_epoch}"),
+        ))
+        .await?;
+    Ok(res.rows_affected())
+}
+
 use async_trait::async_trait;
 
 pub use local_store::LocalStore;

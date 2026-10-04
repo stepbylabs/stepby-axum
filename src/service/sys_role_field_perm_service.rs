@@ -761,6 +761,7 @@ mod tests {
             password: None,
             status: None,
             del_flag: None,
+            must_change_pwd: None,
             login_ip: None,
             login_date: None,
             create_by: None,

@@ -96,4 +96,7 @@ pub mod m20261003_000003_alert_rule;
 pub mod m20261003_000004_webhook_unify;
 pub mod m20261003_000005_role_field_perm;
 pub mod m20261003_000006_report_board;
+pub mod m20261004_000001_alert_rule_index;
+pub mod m20261004_000002_webhook_event_edit;
+pub mod m20261004_000003_force_pwd_change;
 

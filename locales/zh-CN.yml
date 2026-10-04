@@ -432,6 +432,7 @@ error:
     name_empty: 回调名称不能为空
     event_empty: 至少订阅一个事件类型
     event_key_unknown: 事件键 %{key} 不在事件目录中
+    event_disabled: 事件已停用（目录下架），不可订阅或测试发送
   alert:
     rule_not_found: 告警规则不存在
     metric_invalid: 指标标识不合法

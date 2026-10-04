@@ -42,6 +42,10 @@ pub struct Model {
     pub password: Option<String>,
     pub status: Option<String>,
     pub del_flag: Option<String>,
+    /// 强制首登改密标志（B4，m20261004_000003）：'1' = 初始密码未修改；
+    /// 个人中心改密成功即清除；仅当 config 开关 `sys.user.forceFirstLoginChangePwd`
+    /// 开启时驱动前端强制改密流程（标志计算见 auth_service.is_default_modify_pwd）
+    pub must_change_pwd: Option<String>,
     pub login_ip: Option<String>,
     #[serde(
         serialize_with = "datetime::serialize_opt",
@@ -132,6 +136,7 @@ mod tests {
             password: Some("$argon2id$v=19$m=65536,t=3,p=4$abc123hash".to_string()),
             status: Some("0".to_string()),
             del_flag: Some("0".to_string()),
+            must_change_pwd: Some("0".to_string()),
             login_ip: Some("127.0.0.1".to_string()),
             login_date: None,
             create_by: Some("admin".to_string()),

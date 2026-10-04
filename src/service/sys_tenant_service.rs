@@ -1338,6 +1338,8 @@ impl SysTenantService {
                         password: Set(Some(password_hash.clone())),
                         status: Set(Some("0".to_string())),
                         del_flag: Set(Some("0".to_string())),
+                        // B4：租户管理员由创建流程分发密码（非系统初始密码），不标待改
+                        must_change_pwd: Set(Some("0".to_string())),
                         login_ip: Set(None),
                         login_date: Set(None),
                         create_by: Set(Some(operator_owned.clone())),

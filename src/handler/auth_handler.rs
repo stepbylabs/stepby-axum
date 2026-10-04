@@ -70,6 +70,8 @@ pub struct GetInfoResult {
     pub is_default_modify_pwd: bool,
     /// 密码是否已过期
     pub is_password_expired: bool,
+    /// B4 强制改密判定（服务端算好下发；开关关闭恒 false，前端零行为变化）
+    pub must_change_password: bool,
     /// 业务列表页是否显示「所属租户」归属列（服务端按 `[ui].show_tenant_column` +
     /// 操作者租户上下文算好后下发；前端只消费不推断）
     pub show_tenant_column: bool,
@@ -403,6 +405,7 @@ pub async fn get_info(
         pwd_chrtype: vo.pwd_chrtype,
         is_default_modify_pwd: vo.is_default_modify_pwd,
         is_password_expired: vo.is_password_expired,
+        must_change_password: vo.must_change_password,
         show_tenant_column: vo.show_tenant_column,
         show_tenant_filter: vo.show_tenant_filter,
         show_user_erasure: vo.show_user_erasure,

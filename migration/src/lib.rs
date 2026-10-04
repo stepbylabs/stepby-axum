@@ -196,6 +196,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20261003_000004_webhook_unify::Migration),
             Box::new(m20261003_000005_role_field_perm::Migration),
             Box::new(m20261003_000006_report_board::Migration),
+            Box::new(m20261004_000001_alert_rule_index::Migration),
+            Box::new(m20261004_000002_webhook_event_edit::Migration),
+            Box::new(m20261004_000003_force_pwd_change::Migration),
         ]
     }
 }

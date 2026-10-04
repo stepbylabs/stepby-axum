@@ -187,6 +187,8 @@ impl JobScheduler {
         let alert_db = db.clone();
         let alert_store = store.clone();
         let alert_config = config.clone();
+        // token 吊销表过期清理（tokenRevocationCleanup）所需：必须在 cleanup_job move 前 clone
+        let revocation_db = db.clone();
 
         // 集群模式（`[scheduler].cluster_mode`，项目准则③：开关取「模式」而非裸 bool）。
         // `auto`（缺省）= 沿用各任务自身历史开关 ⇒ **对存量部署零行为变更**；
@@ -321,6 +323,43 @@ impl JobScheduler {
 
         tracing::info!(
             "内置定时任务注册成功: alertEvalTask (cron: '30 * * * * *', 每分钟评估启用告警规则)"
+        );
+
+        // ==================== token 吊销表过期清理（每日 04:30，错峰日志清理 03:00）====================
+        // 全链路核查补录（2026-10-04）：sys_token_revocation 是登出/强退/SSO 旧版吊销的
+        // S1 安全态 DB 权威层，读路径有 expire_at 过滤 + 索引兜底保证正确性，但过期行
+        // 此前无任何删除路径（随登出/强退无限累积）。比照 cleanup_expired_logs /
+        // alertEvalTask 范式挂内置任务；redis 档键由 TTL 自过期，无需干预。
+        let revocation_job = Job::new_async("0 30 4 * * *", move |_uuid, _l| {
+            let db = revocation_db.clone();
+            Box::pin(async move {
+                match crate::shared_store::cleanup_expired_token_revocations(&db).await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!("内置任务 tokenRevocationCleanup: 清理过期吊销行 {n} 行")
+                    }
+                    Ok(_) => tracing::debug!("内置任务 tokenRevocationCleanup: 无过期吊销行"),
+                    Err(e) => {
+                        tracing::error!("内置任务 tokenRevocationCleanup: 清理失败: {}", e)
+                    }
+                }
+            })
+        })
+        .map_err(|e| {
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to add token revocation cleanup task: {}",
+                e
+            ))
+        })?;
+
+        scheduler.add(revocation_job).await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!(
+                "Failed to add token revocation cleanup task: {}",
+                e
+            ))
+        })?;
+
+        tracing::info!(
+            "内置定时任务注册成功: tokenRevocationCleanup (cron: '0 30 4 * * *', 每日清理过期吊销行)"
         );
 
         // 登录异常检测任务：每 5 分钟执行（cron: "0 */5 * * * *"）
