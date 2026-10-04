@@ -1582,6 +1582,15 @@ impl GenTableService {
         let pk_column = columns.iter().find(|c| c.is_pk.as_deref() == Some("1"));
         ctx.insert("pk_column", &pk_column);
 
+        // 多租户感知（gen-tenant 修复，2026-10-05）：列清单含 `tenant_id` 列时，
+        // service/handler 模板生成租户归属与过滤逻辑——写入归属由 operator 决定
+        // （防 dto 前端伪造），读改删按 `tenant_scope: Option<i64>` 收敛（None = 平台全量，
+        // 对齐项目 tenant_scope 范式）。
+        let has_tenant_id = columns
+            .iter()
+            .any(|c| c.column_name.as_deref() == Some("tenant_id"));
+        ctx.insert("has_tenant_id", &has_tenant_id);
+
         // 生成类名和模块路径
         let class_name = table.class_name.clone().unwrap_or_default();
         let module_name = table.module_name.clone().unwrap_or_default();
@@ -1932,6 +1941,74 @@ mod gen_table_template_tests {
             .get("src/service/sys_user_service.rs")
             .expect("缺少 service.rs 文件");
         assert!(service.contains("SysUserService"));
+
+        // gen-tenant 修复断言：mk_column 列清单不含 tenant_id → 不生成租户过滤
+        assert!(
+            !service.contains("tenant_scope"),
+            "无 tenant_id 列时不应生成租户过滤，实际片段: {}",
+            &service[..service.len().min(600)]
+        );
+    }
+
+    #[test]
+    fn test_tenant_scope_generated_when_tenant_id_column_present() {
+        // gen-tenant 修复（2026-10-05）：列含 tenant_id 时——
+        // ① service 查询生成 tenant_scope 过滤（读路径租户隔离）
+        // ② create 由 operator_tid 决定租户归属（防 dto 前端伪造）
+        // ③ router 生成 PERM_ROUTE_TABLE 集成清单注释（权限登记防遗漏）
+        let table = mk_table();
+        let mut tenant_col = mk_column();
+        tenant_col.column_name = Some("tenant_id".to_string());
+        tenant_col.rust_field = Some("tenant_id".to_string());
+        tenant_col.is_pk = Some("0".to_string());
+        tenant_col.is_insert = Some("1".to_string());
+        tenant_col.is_edit = Some("0".to_string());
+        let id_col = mk_column();
+        let columns = vec![id_col, tenant_col];
+        let files = GenTableService::render_templates(&table, &columns).unwrap();
+
+        let service = files
+            .get("src/service/sys_user_service.rs")
+            .expect("缺少 service.rs 文件");
+        assert!(
+            service.contains("tenant_scope: Option<i64>"),
+            "含 tenant_id 列时应生成 tenant_scope 过滤参数"
+        );
+        assert!(
+            service.contains("Column::TenantId.eq(tid)"),
+            "查询应生成 TenantId 过滤"
+        );
+        assert!(
+            service.contains("am.tenant_id = Set(operator_tid)"),
+            "create 应由 operator_tid 决定租户归属（防 dto 伪造）"
+        );
+
+        let handler = files
+            .get("src/handler/sys_user_handler.rs")
+            .expect("缺少 handler.rs 文件");
+        assert!(
+            handler.contains("tenant_scope_of"),
+            "handler 应生成 tenant_scope 提取 helper"
+        );
+
+        let router = files
+            .get("src/router/sys_user_router.rs")
+            .expect("缺少 router.rs 文件");
+        assert!(
+            router.contains("PERM_ROUTE_TABLE"),
+            "router 应含权限映射集成清单注释（防权限空洞）"
+        );
+        assert!(
+            router.contains("sys_menu"),
+            "router 集成清单应提示菜单种子登记"
+        );
+    }
+
+    #[test]
+    fn test_render_templates_externalized_tail_assertions() {
+        let table = mk_table();
+        let columns = vec![mk_column()];
+        let files = GenTableService::render_templates(&table, &columns).unwrap();
 
         // handler.rs：包含 Handler 函数
         let handler = files
