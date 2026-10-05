@@ -217,10 +217,11 @@ starttls = false
 #   ③ Redis >= 6.2（授权码一次性消费依赖 GETDEL）；
 #   ④ CONFIG_ENC_KEY 必须配置（id_token_secret 信封加密，v3-P1'-4）。
 [sso]
-# ⚠️ 缺省语义：配置文件**整段省略** [sso] 时 enabled 的代码缺省为 **true**（历史行为，
-#    开发/零配置引导友好）——与本模板起步值 false 不同。无 SSO 需求的生产部署照抄本段
-#    （显式 false）；需要 SSO 的部署改 true 并配置 issuer（enabled=true 时 issuer 必须显式
-#    且为 https，localhost/127.0.0.1 例外）。
+# ⚠️ 代码缺省 = **false**（默认关闭；serde 缺省 / Default / from_env_only 三路径一致），
+#    与本模板起步值一致（无漂移）。本地开发可用 `.env` 的 `SSO_ENABLED=true` 覆盖。
+#    需要本系统作为 OIDC Provider 的部署改 true 并配置 issuer（enabled=true 时 issuer
+#    必须显式且为 https，localhost/127.0.0.1 例外）；关闭态 = /sso/* 端点不注册，
+#    个人中心「已授权应用」页签同步隐藏（getInfo showSsoGrants 同源）。
 enabled = false
 # OIDC issuer（发现文档 iss）；留空时回退为请求 base_url（仅限开发环境，v4-R3）
 issuer = ""

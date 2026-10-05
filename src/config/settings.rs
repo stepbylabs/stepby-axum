@@ -1464,14 +1464,13 @@ fn default_pat_max_per_user() -> i64 {
 /// 单点登录 / OIDC Provider 配置（Tier B：本系统作为授权服务器）
 #[derive(Clone, Debug, Deserialize)]
 pub struct SsoConfig {
-    /// 是否启用 SSO（OIDC Provider）端点。
-    ///
-    /// **默认开启**（`default_sso_disabled() = false` ⇒ enabled=true；历史行为，
-    /// 零配置引导/开发场景友好，全部路径——serde 缺省 / `Default::default()` /
-    /// `from_env_only()`——一致）。无 SSO 需求的生产部署应**显式置 false**
-    /// （入库模板 `config.toml.example` 的起步配置即 false；缺省整段省略 = true）。
-    /// ⚠️ 函数名 `default_sso_disabled` 语义是"disabled 标志的默认值"（false = 不禁用），
-    /// 与本键（enabled）极性相反——改动默认值前先核对三处取值路径一致。
+    /// 是否启用 SSO（OIDC Provider）端点。**默认关闭**（`default_sso_disabled()` 返回
+    /// `false` ⇒ enabled=false；serde 缺省 / `Default::default()` / `from_env_only()`
+    /// 三路径一致），与入库模板起步值 false 对齐；需 SSO 的部署显式置 true 并配置
+    /// issuer（enabled=true 时 issuer 必须显式且为 https，localhost/127.0.0.1 例外）。
+    /// ⚠️ 本地开发可用 `.env` 的 `SSO_ENABLED=true` 覆盖（环境变量 > 配置文件）。
+    /// ⚠️ 函数名 `default_sso_disabled` 极易误读为"返回 enabled 的反面"——它就是
+    /// `enabled` 的 serde 缺省函数，返回值即 enabled 缺省值（false = 默认关闭）。
     #[serde(default = "default_sso_disabled")]
     pub enabled: bool,
     /// OIDC issuer（发现文档 iss 与端点绝对前缀）。
