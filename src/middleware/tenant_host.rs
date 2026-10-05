@@ -83,7 +83,11 @@ pub async fn tenant_host_middleware(
 
     // 注意：`&Request`（内含 `Body`）不是 `Send`，不可跨越 `.await` 持有；
     // 因此先把所需请求头提取为 owned `String`，再进入可能 await 的解析逻辑。
-    let host_tid = if trusted {
+    // 单机模式（[tenant].management = false）短路：不存在租户上下文语义，
+    // 不解析历史域名行/租户码（消除语义残留与无谓 DB/缓存查询，§5.22）。
+    let host_tid = if !state.config.tenant.management {
+        None
+    } else if trusted {
         let tenant_code = header_str(&req, "x-tenant-code").map(str::to_owned);
         let host = header_str(&req, "host").map(str::to_owned);
         resolve_host_tenant(&state, tenant_code.as_deref(), host.as_deref()).await

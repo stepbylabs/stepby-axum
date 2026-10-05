@@ -4788,6 +4788,36 @@ fn init_feature_flags(settings: &Settings) {
         mode = tenant_column.as_str(),
         "UI 展示策略：[ui].show_tenant_column（auto = 仅平台操作者可见归属列 ⇒ 历史行为）"
     );
+
+    // 单机模式一致性自检（§5.22）：management=false 时部分配置**会被强制覆盖**，
+    // 在此显式 WARN 消除"配了没生效"的运维困惑（拒绝静默失效准则）。
+    if !settings.tenant.management {
+        // ① [ui] 租户展示配置：单机模式强制隐藏（auth_service 布场门控）
+        if tenant_column.as_str() != "never"
+            || crate::config::TenantFilterMode::parse(&settings.ui.tenant_filter).as_str() != "off"
+        {
+            tracing::warn!(
+                show_tenant_column = tenant_column.as_str(),
+                tenant_filter = %settings.ui.tenant_filter,
+                "单机模式（[tenant].management=false）：[ui] 段的租户展示配置将被强制隐藏\
+                 （showTenantColumn/showTenantFilter 恒 false）——如需保留请切回多租户模式"
+            );
+        }
+        // ② 租户域能力位：单机模式下端点 403 + 菜单剪除 ⇒ 配置空转
+        let tenant_domain_keys = ["nav.l3", "tenant.domain_self_service"];
+        let active_tenant_keys: Vec<&str> = tenant_domain_keys
+            .iter()
+            .filter(|k| effective.is_on(k))
+            .copied()
+            .collect();
+        if !active_tenant_keys.is_empty() {
+            tracing::warn!(
+                keys = %active_tenant_keys.join(", "),
+                "单机模式（[tenant].management=false）：租户域能力位不生效\
+                 （端点 403 + 菜单剪除）——如需启用请切回多租户模式"
+            );
+        }
+    }
 }
 
 /// 启动打印 ACME 证书需求输出的**有效姿态**（`[acme]` 段）。
