@@ -68,6 +68,13 @@ pub const CACHE_IMMUTABLE_SECS: &str = "public, max-age=31536000, immutable";
 /// Swagger UI 静态资源缓存（秒，5 分钟）
 pub const CACHE_SWAGGER_SECS: &str = "public, max-age=300";
 
+/// 用户权限缓存键前缀（`perm:user:{user_id}`，TTL 5 分钟）。
+///
+/// 单一事实源：此前在 `sys_menu_service` / `sys_role_service` / `sys_user_service`
+/// 三处各自私有定义同值常量（靠纪律同步的复制，迟早漂移）——收口于此，
+/// 权限缓存失效面（菜单/角色变更、租户授权收敛、启动期兜底）统一引用。
+pub const PERM_CACHE_PREFIX: &str = "perm:user:";
+
 /// 头像上传最大大小（字节，5MB）
 pub const AVATAR_MAX_SIZE: usize = 5 * 1024 * 1024;
 

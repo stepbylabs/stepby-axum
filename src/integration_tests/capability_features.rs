@@ -385,3 +385,62 @@ async fn test_ui_entry_flags_are_delivered_and_follow_capability() {
         "能力位开启且 RP 已配置时端点应可用，实际 {status} {body}"
     );
 }
+
+/// ⑥ **启动期授权收敛核心**（§5.17）：平台层关闭时回收存量"曾经可授予"授权 + 幂等零删除。
+///
+/// 可证伪性：
+/// - 若 `converge_tenant_role_menus_conn` 忘了带能力位判定（只做白名单裁剪），
+///   `menu_ids = NULL` 时提前返回 ⇒ 第一段断言 `removed >= 1` 变红（菜单未被回收）；
+/// - 若核心不幂等（无收敛面时仍执行删除/返回非零）⇒ 第二段 `removed == 0` 变红。
+///
+/// 测试策略：本用例直驱收敛核心（按租户 ID 收敛，命名空间隔离安全）；
+/// 启动编排函数（`initialize::converge_tenant_grants_on_startup`）为薄编排
+/// （查询 + 循环 + 缓存失效），不单独直测。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_startup_convergence_conn_recovers_and_is_idempotent() {
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+    // 套餐声明 domain full，但测试进程平台层能力位默认全关 ⇒ 有效能力集 = off
+    // ⇒ domain 菜单不可授予（用例① 已锁此判定）⇒ 属于启动期收敛的回收对象
+    insert_package(db, Some(r#"{"tenant.domain_self_service":"full"}"#)).await;
+    insert_tenant_with_package(db).await;
+    insert_role(db).await;
+    let menu_id = domain_menu_id(db).await;
+    grant_menu(db, ROLE_ID, menu_id).await;
+    assert!(has_menu(db, ROLE_ID, menu_id).await);
+
+    let package = crate::entity::sys_tenant_package::Entity::find_by_id(PACKAGE_ID)
+        .one(db)
+        .await
+        .expect("查询套餐失败")
+        .expect("套餐应存在");
+
+    // 第一轮：平台层关闭 ⇒ domain 授权被回收
+    let removed = crate::service::sys_tenant_service::converge_tenant_role_menus_conn(
+        db, TID, &package,
+    )
+    .await
+    .expect("收敛核心执行失败");
+    assert!(
+        removed >= 1,
+        "平台层关闭时存量不可授予授权必须被回收（实际删除 {removed} 行）"
+    );
+    assert!(
+        !has_menu(db, ROLE_ID, menu_id).await,
+        "回收后 sys_role_menu 行必须不存在"
+    );
+
+    // 第二轮：幂等——无收敛面（不可授予集合仅剩该行且已删）⇒ 零删除
+    // 注意：menu_ids=NULL（不限制）⇒ 白名单面不触发；不可授予面第一轮已清空
+    // ⇒ 但不可授予集合本身来自全菜单表（仍有不可授予 perms 清单），
+    //   判定零删除靠"该租户角色已无可删行"路径（role_ids 仍有 ⇒ 靠 predicate 不命中）。
+    let removed2 = crate::service::sys_tenant_service::converge_tenant_role_menus_conn(
+        db, TID, &package,
+    )
+    .await
+    .expect("二次收敛执行失败");
+    assert_eq!(
+        removed2, 0,
+        "幂等约束：第一轮回收后第二轮必须零删除（实际 {removed2}）"
+    );
+}
