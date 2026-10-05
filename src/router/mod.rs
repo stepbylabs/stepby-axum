@@ -90,7 +90,7 @@ const REQUEST_TIMEOUT_SECS: u64 = 120;
 /// - 全局中间件（由外到内执行顺序，与下方 app.layer 链一致）：
 ///   security_headers → locale → request_id → monitoring → Timeout → Trace → Cors
 ///   → DefaultBodyLimit → Compression（最内层），其后进入 api 路由的 tenant_host →
-///   （protected 的 spa_fallback → auth → response_cache → rate_limit → idempotency → permission → oper_log）
+///   （protected 的 spa_fallback → auth → rate_limit → idempotency → permission → oper_log → response_cache）
 pub fn build_app(state: Arc<AppState>) -> Router {
     // 受鉴权保护的业务路由
     let protected = Router::new()
@@ -140,28 +140,28 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(webauthn_router::webauthn_routes())
         .merge(file_router::file_routes())
         // oper_log_middleware 记录写操作日志（POST/PUT/DELETE），最内层
-        .route_layer(from_fn_with_state(state.clone(), oper_log_middleware))
-        // permission_middleware 使用 route_layer（路由匹配后执行，可访问 MatchedPath）
-        .route_layer(from_fn_with_state(state.clone(), permission_middleware))
-        // idempotency_middleware 幂等性校验（R5-IDEMP-33）：基于 Idempotency-Key 头去重
-        // 执行顺序：auth → rate_limit → idempotency → permission → oper_log
-        // 仅对 POST/PUT/DELETE 生效，缺失 Idempotency-Key 头时放行（可选特性）
-        .route_layer(from_fn_with_state(state.clone(), idempotency_middleware))
-        // rate_limit_middleware 限流（P1-34）：per-IP 令牌桶，覆盖所有受保护业务接口
-        // 执行顺序：auth → rate_limit → idempotency → permission → oper_log
-        .route_layer(from_fn_with_state(state.clone(), rate_limit_middleware))
-        // response_cache_middleware（P3-6）：对白名单「幂等只读 GET」做进程内 TTL 缓存
-        // 挂载位置：auth_middleware 之后、rate_limit 之前（route_layer 后添加先执行）。
-        // 安全理由：白名单仅含纯静态元数据接口（字典下拉/字典按类型/参数按 key），缓存内容
-        //   对不同登录用户完全一致，归属无用户差异，故位于鉴权之上复用不泄露个人信息；
+        // response_cache_middleware（P3-6）：对白名单「幂等只读 GET」做进程内 TTL 缓存。
+        // §5.34 挂载位置调整：cache 必须在 permission **内层**（route_layer 先挂载）——
+        //   此前 cache 在 permission 外层，缓存命中直接返回、RBAC 从未执行（旁路：
+        //   无 system:dict:query 权限的用户也能经缓存拿到 optionselect）。
+        //   调整后执行序：auth → rate_limit → idempotency → permission → oper_log → cache
+        //   ⇒ RBAC 恒在缓存之前执行，命中必先过权限闸门。
+        // 安全理由：白名单仅含纯静态元数据接口（字典类型下拉 optionselect），缓存内容
+        //   对不同登录用户完全一致，归属无用户差异，不泄露个人信息；
         //   首个请求仍走 auth+permission 校验与真实 DB 查询，续访问命中缓存直接返回。
-        //   位于全局 CompressionLayer 之内，存的是解压后原始 body，压缩层统一处理命中/未命中。
-        // 实现：以独立 ResponseCache 状态注入（与 AppState 解耦，route_layer 状态类型可自选），
-        //   不触碰 oper_log 等既有中间件。
         .route_layer(from_fn_with_state(
             ResponseCache::default(),
             response_cache_middleware,
         ))
+        .route_layer(from_fn_with_state(state.clone(), oper_log_middleware))
+        // permission_middleware 使用 route_layer（路由匹配后执行，可访问 MatchedPath）
+        .route_layer(from_fn_with_state(state.clone(), permission_middleware))
+        // idempotency_middleware 幂等性校验（R5-IDEMP-33）：基于 Idempotency-Key 头去重
+        // 执行顺序：auth → rate_limit → idempotency → permission → oper_log → cache
+        // 仅对 POST/PUT/DELETE 生效，缺失 Idempotency-Key 头时放行（可选特性）
+        .route_layer(from_fn_with_state(state.clone(), idempotency_middleware))
+        // rate_limit_middleware 限流（P1-34）：per-IP 令牌桶，覆盖所有受保护业务接口
+        .route_layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         // auth_middleware 使用 route_layer（仅当 path+method 完全匹配时执行）
         // 重要：若改用 .layer()，路径匹配但 method 不匹配时（如 GET /system/rateLimit），
         // 鉴权会先返回 401，导致 SPA fallback 无法触发，前端页面加载失败。
@@ -208,8 +208,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // `X-Tenant-Code` → 租户上下文，注入 HostTenant 供 auth_middleware 做一致性校验。
         // 关键：以 `Router::layer` 挂在 api 整体（在所有业务 route_layer 之外、更外层），
         // 因此对**公开路由**（登录页 / 公开页 / SSO 回调）同样生效。
-        // 执行顺序（外→内）：tenant_host → spa_fallback → auth → response_cache →
-        //   rate_limit → idempotency → permission → oper_log → handler。
+        // 执行顺序（外→内）：tenant_host → spa_fallback → auth → rate_limit →
+        //   idempotency → permission → oper_log → response_cache → handler。
         .layer(from_fn_with_state(state.clone(), tenant_host_middleware))
         .fallback(api_not_found);
 

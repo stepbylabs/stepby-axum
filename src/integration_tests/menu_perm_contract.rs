@@ -14,7 +14,12 @@
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
+use super::TestContext;
 use crate::middleware::permission::all_required_perm_keys;
+use axum::body::Body;
+use axum::extract::connect_info::ConnectInfo;
+use axum::http::{Request, StatusCode};
+use std::net::SocketAddr;
 
 /// 权限标识格式合法性校验：仅允许字母/数字/下划线/连字符 与 冒号（形如 `module:entity:action`；
 /// 连字符用于与路由路径同名的权限键，如 `system:webhook:test-send`）。
@@ -75,5 +80,81 @@ async fn test_backend_required_perms_covered_by_menu() {
     assert!(
         !backend_perms.is_empty(),
         "后端权限映射表不应为空（PERM_ROUTE_TABLE 被误删？）"
+    );
+}
+
+/// RBAC 缓存旁路回归锁（§5.34 逐文件审计 F-MW-1）：
+/// response_cache 曾挂在 permission **外层**，缓存命中直接返回、RBAC 从未执行——
+/// 无 `system:dict:query` 权限的普通用户（stepby）也能经缓存拿到 optionselect。
+/// 修复后 cache 移到 permission 内层：admin 预热缓存后，stepby 请求必须被
+/// permission 拒绝（403），**不得**命中缓存。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_response_cache_does_not_bypass_rbac() {
+    let ctx = TestContext::new().await;
+    const URI: &str = "/system/dict/type/optionselect";
+
+    // 1. admin（有 system:dict:query）请求 → 200，缓存写入
+    let mut admin_req = Request::builder()
+        .method(axum::http::Method::GET)
+        .uri(URI)
+        .header("authorization", format!("Bearer {}", ctx.token))
+        .body(Body::empty())
+        .expect("构造 admin 请求失败");
+    admin_req
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4321))));
+    let (admin_status, _) = ctx.send_raw(admin_req).await;
+    assert_eq!(
+        admin_status,
+        StatusCode::OK,
+        "admin 应正常获取字典类型下拉，实际 {admin_status}"
+    );
+
+    // 2. 建一个"空白角色"用户（role 无任何 role_menu 授权 ⇒ perms 集为空，
+    //    必然不含 system:dict:query）。密码哈希直接复制 stepby 的（等价密码）。
+    //    注意：seed 的 role2（stepby 所在角色）持有全量菜单，含 dict:query，
+    //    不能用作反例。
+    ctx.state.db
+        .execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, status, del_flag, create_by, create_time)
+             VALUES (9001, 'IT空白角色', 'it_blank', 99, '1', '0', '0', 'it', CURRENT_TIMESTAMP)",
+        ))
+        .await
+        .expect("插入空白角色失败");
+    ctx.state.db
+        .execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, password, status, del_flag, create_by, create_time, tenant_id)
+             SELECT 9001, dept_id, 'it_blank', 'IT空白用户', password, '0', '0', 'it', CURRENT_TIMESTAMP, tenant_id
+             FROM sys_user WHERE user_name = 'stepby'",
+        ))
+        .await
+        .expect("插入空白用户失败");
+    ctx.state.db
+        .execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO sys_user_role (user_id, role_id) VALUES (9001, 9001)",
+        ))
+        .await
+        .expect("绑定空白角色失败");
+
+    // 3. 空白用户登录 → GET optionselect 必须被 permission 拒绝 403，
+    //    不得因 admin 的缓存命中而旁路（修复前此处返回 200）
+    let blank_token = super::login(&ctx.app, ctx.peer_ip, "it_blank", "admin123").await;
+    let mut blank_req = Request::builder()
+        .method(axum::http::Method::GET)
+        .uri(URI)
+        .header("authorization", format!("Bearer {blank_token}"))
+        .body(Body::empty())
+        .expect("构造空白用户请求失败");
+    blank_req
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4321))));
+    let (status, _) = ctx.send_raw(blank_req).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "无任何授权的用户必须 403（RBAC 不得被缓存旁路），实际 {status}"
     );
 }
