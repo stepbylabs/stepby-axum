@@ -245,6 +245,14 @@ pub const CONFIGS: &[Item] = &[
     // ---- sys.account.*（平台锁定：初始密码 / 验证码 / 注册开关）----
     cfg("sys.account.captchaEnabled", Coverage::Locked),
     cfg("sys.account.registerUser", Coverage::Locked),
+    // ---- sys.ai.*（AI 助手配置热化，§5.39 AI-01：管理页可改热生效；
+    //      平台专属（Locked），api_key 信封加密存储——键值不回显明文）----
+    cfg("sys.ai.allowed_tables", Coverage::Locked),
+    cfg("sys.ai.api_key", Coverage::Locked),
+    cfg("sys.ai.base_url", Coverage::Locked),
+    cfg("sys.ai.enabled", Coverage::Locked),
+    cfg("sys.ai.model", Coverage::Locked),
+    cfg("sys.ai.provider", Coverage::Locked),
     // ---- sys.audit.*（平台锁定：审计告警阈值）----
     cfg("sys.audit.alarm.fail_rate_threshold", Coverage::Locked),
     cfg("sys.audit.alarm.fail_threshold", Coverage::Locked),
