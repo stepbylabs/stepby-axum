@@ -35,16 +35,18 @@ const REDIRECT_URI_ENC: &str = "https%3A%2F%2Fapp.test%2Fsso%2Fcallback";
 
 /// 构建启用了 SSO 的隔离测试上下文。
 ///
-/// 通过 `SSO_ENABLED=true` 环境变量注入（与集成测试框架注入 JWT_SECRET 同一手法）；
+/// 通过实例级 `configure` 显式开启（`settings.sso = SsoConfig::default()` 是集成测试
+/// 夹具的钳制基线，`SSO_ENABLED` 环境变量覆盖已被钳制中和——不再依赖进程级 `set_var`，
+/// 后者会污染并行测试的 `from_file` 结果）。
 /// 该开关仅被 5 个 OIDC 公开端点与 /sso/consent 读取，对其它并行测试无副作用。
 async fn sso_ctx() -> TestContext {
-    unsafe {
-        std::env::set_var("SSO_ENABLED", "true");
+    TestContext::new_with(&[], |s| {
+        s.sso.enabled = true;
         // v4-P1-2：enabled=true 时 validate_secrets 强制要求显式 https issuer
         //（禁止按请求 Host 推导），测试与其对齐，同时覆盖 issuer 恒定语义
-        std::env::set_var("SSO_ISSUER", "https://sso.test");
-    }
-    TestContext::new().await
+        s.sso.issuer = "https://sso.test".to_string();
+    })
+    .await
 }
 
 /// 低层 GET 请求（可带任意头，如 Cookie / Bearer），返回状态码 + 头 + 体。
@@ -480,12 +482,11 @@ async fn test_sso_security_negative_paths() {
 /// 由**正反两面**同时锁定。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sso_consent_ticket_required() {
-    unsafe {
-        std::env::set_var("SSO_ENABLED", "true");
-        std::env::set_var("SSO_ISSUER", "https://sso.test");
-    }
-    // 实例级翻档：只影响本用例（写入 `Arc<Settings>`），不污染并行测试
+    // 实例级翻档：只影响本用例（写入 `Arc<Settings>`），不污染并行测试。
+    // SSO enabled/issuer 同样实例级显式声明（钳制基线为默认关，见 sso_ctx 文档）。
     let ctx = TestContext::new_with(&[], |s| {
+        s.sso.enabled = true;
+        s.sso.issuer = "https://sso.test".to_string();
         s.sso.consent_ticket = "required".to_string();
     })
     .await;

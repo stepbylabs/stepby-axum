@@ -326,18 +326,18 @@ async fn test_ui_entry_flags_are_delivered_and_follow_capability() {
         info["showPasskey"], false,
         "能力位 auth.webauthn 默认 off ⇒ 不下发通行密钥入口"
     );
-    // 本批 +3 布场（PAT / SSO Grants / 字段权限）默认姿态：
-    // [pat].enabled 默认 true ⇒ PAT 页签下发；[sso].enabled 默认 **true**（default_sso_disabled
-    // = false ⇒ enabled=true，历史行为/开发友好，见 settings.rs SsoConfig 文档）⇒ SSO 页签下发；
-    // sys.fieldPerm.enabled 默认 false（平台层第一道开关）⇒ 字段权限按钮隐藏。
+    // 本批 +3 布场（PAT / SSO Grants / 字段权限）默认姿态（测试基线已钳制为代码内建
+    // 默认，不随本机 config.toml / .env 漂移，见 build_isolated_state_with）：
+    // [pat].enabled 默认 true ⇒ PAT 页签下发；[sso].enabled 默认 **false**（默认关闭，
+    // 与模板起步一致）⇒ SSO 页签隐藏；sys.fieldPerm.enabled 默认 false ⇒ 字段权限按钮隐藏。
     assert_eq!(
         info["showPat"], true,
         "[pat].enabled 默认 true ⇒ 下发 API 访问令牌页签入口（现状行为）"
     );
     assert_eq!(
-        info["showSsoGrants"], true,
-        "[sso].enabled 默认 true（历史行为）⇒ 下发已授权应用页签；置 false 时本断言变红 ⇒ \
-         同步核对入口隐藏与 OIDC 端点 404 的同源联动"
+        info["showSsoGrants"], false,
+        "[sso].enabled 默认 false（默认关闭）⇒ 不下发已授权应用页签（关闭态 OIDC 端点\
+         不注册，显示即假入口）；置 true 时本断言变红 ⇒ 同步核对入口显示与端点可用联动"
     );
     assert_eq!(
         info["showFieldPerm"], false,
@@ -459,5 +459,57 @@ async fn test_startup_convergence_conn_recovers_and_is_idempotent() {
     assert_eq!(
         removed2, 0,
         "幂等约束：第一轮回收后第二轮必须零删除（实际 {removed2}）"
+    );
+}
+
+/// ⑦ **单机模式（`[tenant].management = false`）租户语义面全收敛**（§5.20）。
+///
+/// 单机部署不存在租户语义 ⇒ 租户相关展示面整体隐藏：
+/// - `getInfo` 的 `showTenantColumn` / `showTenantFilter` 强制 false
+///   （归属列/筛选入口 4+1 页面全站收敛的**单一布场**）；
+/// - `getRouters` 无「租户管理」菜单（`prune_tenant_management_menus`，含超管）。
+///
+/// 可证伪性：若 get_info 忘了带 management 门控，第①段断言 true≠false 变红；
+/// 若 get_routers 剪除被绕过，第②段含 "system/tenant/index" 变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_standalone_mode_hides_all_tenant_surfaces() {
+    let ctx = TestContext::new_with(&[], |s| {
+        s.tenant.management = false;
+    })
+    .await;
+
+    // ① 展示布场：归属列/筛选入口强制隐藏（[ui] 保持默认 auto/off——单机模式优先级更高）
+    let info = ctx.get_json("/getInfo").await;
+    assert_eq!(
+        info["showTenantColumn"], false,
+        "单机模式下「所属租户」列必须强制隐藏（auto + 平台操作者也不例外）"
+    );
+    assert_eq!(
+        info["showTenantFilter"], false,
+        "单机模式下「按租户筛选」入口必须强制隐藏"
+    );
+
+    // ② 路由树：租户管理菜单被剪除（超管也生效）。
+    //    断言用 component 精确页面前缀："system/tenant/index"（租户管理页）不出现；
+    //    "system/tenant/domain/index"（域名自助）不受管理开关影响，允许存在。
+    let routers = ctx.get_json("/getRouters").await;
+    let flat = routers["data"].to_string();
+    assert!(
+        !flat.contains("system/tenant/index"),
+        "单机模式 getRouters 不得含租户管理菜单：{flat}"
+    );
+
+    // ③ 平台侧租户管理 API 硬拒（含超管；与 §5.16 的 e2e 实测同口径）
+    let (status, _) = ctx
+        .send_raw(ctx.request(
+            axum::http::Method::GET,
+            "/system/tenant/list?pageNum=1&pageSize=1",
+            None,
+        ))
+        .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::FORBIDDEN,
+        "单机模式平台侧租户管理端点应 403（含超管），实际 {status}"
     );
 }

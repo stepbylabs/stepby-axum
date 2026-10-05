@@ -1397,12 +1397,16 @@ impl AuthService {
         let must_change_password =
             force_pwd_change_enabled && (is_default_modify_pwd || is_password_expired);
         // 「所属租户」归属列展示决策：`[ui].show_tenant_column`（默认 auto）在服务端解析，
-        // 结合操作者租户上下文算出布尔下发（`auto` ⇒ 仅平台操作者可见 = 历史行为）
-        let show_tenant_column =
-            TenantColumnMode::parse(&self.config.ui.show_tenant_column).visible_for(operator_tid);
+        // 结合操作者租户上下文算出布尔下发（`auto` ⇒ 仅平台操作者可见 = 历史行为）。
+        // ⚠️ 单机模式（`[tenant].management = false`）**强制隐藏**：单机部署不存在
+        //    租户语义，归属列/筛选入口连同租户管理面整体收敛（§5.20）。
+        let show_tenant_column = self.config.tenant.management
+            && TenantColumnMode::parse(&self.config.ui.show_tenant_column)
+                .visible_for(operator_tid);
         // 「按租户筛选」入口决策：`[ui].tenant_filter`（默认 off）同源在服务端解析
-        let show_tenant_filter =
-            TenantFilterMode::parse(&self.config.ui.tenant_filter).enabled_for(operator_tid);
+        // （单机模式强制隐藏，同上）。
+        let show_tenant_filter = self.config.tenant.management
+            && TenantFilterMode::parse(&self.config.ui.tenant_filter).enabled_for(operator_tid);
         // 「匿名化（GDPR）」入口决策：平台层能力位 `privacy.user_erasure` 非 off **且**
         // 操作者为平台（tid == 0）。能力集按 `config [features]` 净化解析（与启动注入同源）；
         // 判定口径只此一处，前端不做二次推断（服务层另有同名档位 + 平台归属守卫兜底）。

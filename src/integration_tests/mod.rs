@@ -277,6 +277,19 @@ async fn build_isolated_state_with(
     let mut settings = Settings::from_file(&manifest_config_path())
         .expect("加载 config/config.toml 失败（请确认 cwd 或 CARGO_MANIFEST_DIR 正确）");
 
+    // ---- 测试基线与**部署态**解耦（W-1 / 方案 §5.20）----
+    // 本机 config/config.toml 是部署态文件：运维可改单机模式 / 关 SSO / 改 UI 展示……
+    // （实证：本机切 management=false 期间跑全量测试，2 个用例读到单机模式而失败。）
+    // 集成测试断言的是**代码内建默认语义**，不得随部署态漂移——把"开关语义段"钳制为
+    // `Default()`（与入库模板起步值一致）。⚠️ 新增部署态开关段时必须在此登记钳制，
+    // 否则该段的测试结果会随本机配置漂移（呼应 AGENTS.md《开关类能力设计规范》第 8 条）。
+    // 注意：database/redis/log 等基础设施段**不钳制**（下方按测试需要显式覆写）；
+    // configure 闭包在本段之后执行 ⇒ 用例仍可按需翻档（如单机模式用例⑦）。
+    settings.tenant = crate::config::TenantConfig::default();
+    settings.sso = crate::config::SsoConfig::default();
+    settings.pat = crate::config::PatConfig::default();
+    settings.ui = crate::config::UiConfig::default();
+
     // v5-D12：测试环境统一开启 SCIM（Bearer 固定测试值）——其它测试不请求 /scim/*
     // 故无干扰；SCIM 用例依赖此配置。
     settings.scim.enabled = true;
