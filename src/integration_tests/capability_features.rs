@@ -489,27 +489,33 @@ async fn test_standalone_mode_hides_all_tenant_surfaces() {
         "单机模式下「按租户筛选」入口必须强制隐藏"
     );
 
-    // ② 路由树：租户管理菜单被剪除（超管也生效）。
-    //    断言用 component 精确页面前缀："system/tenant/index"（租户管理页）不出现；
-    //    "system/tenant/domain/index"（域名自助）不受管理开关影响，允许存在。
+    // ② 路由树：全部租户语义菜单被剪除（超管也生效；§5.21 全收敛——含域名/导航）。
+    //    断言用 component 精确页面前缀："system/tenant/index"（租户管理页）与
+    //    "system/tenant/domain/index"（我的域名）不出现。
     let routers = ctx.get_json("/getRouters").await;
     let flat = routers["data"].to_string();
     assert!(
         !flat.contains("system/tenant/index"),
         "单机模式 getRouters 不得含租户管理菜单：{flat}"
     );
-
-    // ③ 平台侧租户管理 API 硬拒（含超管；与 §5.16 的 e2e 实测同口径）
-    let (status, _) = ctx
-        .send_raw(ctx.request(
-            axum::http::Method::GET,
-            "/system/tenant/list?pageNum=1&pageSize=1",
-            None,
-        ))
-        .await;
-    assert_eq!(
-        status,
-        axum::http::StatusCode::FORBIDDEN,
-        "单机模式平台侧租户管理端点应 403（含超管），实际 {status}"
+    assert!(
+        !flat.contains("system/tenant/domain/index"),
+        "单机模式 getRouters 不得含我的域名菜单（域名绑定依赖多租户）：{flat}"
     );
+
+    // ③ 平台侧租户语义 API 硬拒（含超管；§5.21 全收敛——含域名自助与 L3 导航端点）
+    for path in [
+        "/system/tenant/list?pageNum=1&pageSize=1",
+        "/system/tenant/domain/list",
+        "/system/tenant/menu/list",
+    ] {
+        let (status, _) = ctx
+            .send_raw(ctx.request(axum::http::Method::GET, path, None))
+            .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "单机模式平台侧租户语义端点应 403（含超管）: {path}，实际 {status}"
+        );
+    }
 }

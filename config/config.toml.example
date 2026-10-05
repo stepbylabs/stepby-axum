@@ -339,12 +339,15 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 # 治理对象：平台侧**多租户管理面**的整体启停（2026-10-05 两态差异化）。
 #
 #   true （默认）= 多租户模式，现状零变化（租户管理菜单/API/生命周期全可用）；
-#   false        = 单机模式：`/system/tenant`（平台侧租户管理端点，**不含**
-#                  /system/tenant/domain/* 与 /system/tenant/menu/* 两个自助面）
-#                  一律 403（含超管），getRouters 同步隐藏「租户管理」菜单。
+#   false        = 单机模式：`/system/tenant` 前缀下的**全部**租户语义端点一律 403
+#                  （含超管）——覆盖租户管理 CRUD、套餐体系、**域名绑定**
+#                  （/system/tenant/domain/*）与 **L3 自建导航**（/system/tenant/menu/*）
+#                  ——三者都绑定 tenant_id，单机模式下均无意义（§5.21 全收敛）；
+#                  getRouters 同步剪除全部租户语义菜单；「所属租户」列/筛选入口
+#                  全站隐藏（getInfo showTenantColumn/showTenantFilter 强制 false）。
 #
-# ⚠️ 只收敛**平台侧管理面**：存量租户用户的业务链路（登录/数据/自助域名/L3 导航）
-#    不受影响；域名自助与 L3 导航由能力位独立管控（见 [features]）。
+# ⚠️ 自助面（域名/L3 导航）的"由能力位独立管控"只适用于**多租户模式**；
+#    单机模式下它们随本开关一并关闭。ACME/webhook 证书等**部署级**能力不受影响。
 # ⚠️ 本键为进程静态配置（改后需重启）；手工 Default 保障缺省 = true（存量部署零变化）。
 [tenant]
 management = true
