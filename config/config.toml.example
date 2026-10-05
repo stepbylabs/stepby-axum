@@ -217,6 +217,10 @@ starttls = false
 #   ③ Redis >= 6.2（授权码一次性消费依赖 GETDEL）；
 #   ④ CONFIG_ENC_KEY 必须配置（id_token_secret 信封加密，v3-P1'-4）。
 [sso]
+# ⚠️ 缺省语义：配置文件**整段省略** [sso] 时 enabled 的代码缺省为 **true**（历史行为，
+#    开发/零配置引导友好）——与本模板起步值 false 不同。无 SSO 需求的生产部署照抄本段
+#    （显式 false）；需要 SSO 的部署改 true 并配置 issuer（enabled=true 时 issuer 必须显式
+#    且为 https，localhost/127.0.0.1 例外）。
 enabled = false
 # OIDC issuer（发现文档 iss）；留空时回退为请求 base_url（仅限开发环境，v4-R3）
 issuer = ""
@@ -284,6 +288,11 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 # 本段是**平台层开关**：即使在此开启，租户仍需在套餐 features 中显式开启，权限才可下放。
 #
 # ⚠️ 能力位键**含点号**，TOML 中必须加引号（不加引号会被解析成嵌套表而整段解析失败）。
+#
+# ⚠️ **启动期授权收敛（§5.17）**：本段任一键从 on/full 改回 off 后重启，启动期会把
+#    各租户角色中"已不可授予"的菜单授权行删除（幂等、WARN 级汇总日志、删除前权限缓存
+#    自动失效）。**该删除不可自动回滚**——重新开启能力位后需重新授权。getRouters 的
+#    展示层剪除（prune_capability_gated_menus）与之配合：收敛前也无可可见入口。
 [features]
 # WebAuthn / Passkey 登录（默认 off）——**登录面能力**：开启后用户可自助绑定 passkey，
 # 并在登录页以 passkey（免密码）登录。关闭态 = 6 条端点一律 404（不暴露"存在但被关"）。
@@ -316,6 +325,28 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 #   full     = 允许执行**不可逆**匿名化（置换 PII 字段 + 释放登录键 + 吊销全部会话/PAT/SSO 令牌）。
 #   ⚠️ 平台治理动作：仅平台管理员（tenant_id == 0）可触发，不随租户套餐下放权限。
 "privacy.user_erasure" = "off"
+# AI 助手 NL2SQL Copilot 的**租户层**开关（默认 off）：off | on
+#   平台层主开关是 [ai].enabled（进程级，默认 false，二者须同时开启才可用）；
+#   off 时 getRouters 同步剪除 AI 菜单（与 ai handler 403 守卫同口径，无假入口）。
+"ai.copilot" = "off"
+# 字段级权限 M2 的**租户层**开关（默认 off）：off | on
+#   平台层主开关是 sys_config `sys.fieldPerm.enabled`（参数管理页，默认 false）；
+#   off 时角色页"字段权限"按钮同步隐藏（getInfo showFieldPerm 与矩阵接口守卫同源）。
+"role.field_perm" = "off"
+
+# ==================== 租户域（[tenant]）====================
+# 治理对象：平台侧**多租户管理面**的整体启停（2026-10-05 两态差异化）。
+#
+#   true （默认）= 多租户模式，现状零变化（租户管理菜单/API/生命周期全可用）；
+#   false        = 单机模式：`/system/tenant`（平台侧租户管理端点，**不含**
+#                  /system/tenant/domain/* 与 /system/tenant/menu/* 两个自助面）
+#                  一律 403（含超管），getRouters 同步隐藏「租户管理」菜单。
+#
+# ⚠️ 只收敛**平台侧管理面**：存量租户用户的业务链路（登录/数据/自助域名/L3 导航）
+#    不受影响；域名自助与 L3 导航由能力位独立管控（见 [features]）。
+# ⚠️ 本键为进程静态配置（改后需重启）；手工 Default 保障缺省 = true（存量部署零变化）。
+[tenant]
+management = true
 
 # ==================== 定时任务调度器（集群模式）====================
 # 治理对象：**内置定时任务**（flow_timeout_scan / mmdb_auto_update）的"整轮跨实例互斥"。
