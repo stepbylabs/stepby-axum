@@ -536,7 +536,9 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 登录日志 =====
     ("GET", "/monitor/logininfor/list", "monitor:logininfor:list"),
-    ("GET", "/monitor/logininfor/stats", "monitor:logininfor:list"),
+    // logininfor/stats 为首页/仪表盘/工作台的登录统计聚合图表接口，
+    // 权限对齐看板菜单口径 monitor:dashboard:list（m132）——普通用户可见首页图表（§5.34 F-T-05）
+    ("GET", "/monitor/logininfor/stats", "monitor:dashboard:list"),
     ("DELETE", "/monitor/logininfor/{infoIds}", "monitor:logininfor:remove"),
     // 路由定义见 sys_logininfor_router.rs：实际方法为 POST（解锁操作有副作用，GET 不规范）
     ("POST", "/monitor/logininfor/unlock/{userName}", "monitor:logininfor:unlock"),
