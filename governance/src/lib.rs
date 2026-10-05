@@ -251,11 +251,10 @@ pub const CONFIGS: &[Item] = &[
     cfg("sys.audit.alarm.window_minutes", Coverage::Locked),
     // ---- sys.fieldPerm.*（平台锁定：字段级权限 M2 第一层平台开关，默认 false = 关闭态即安全态）----
     cfg("sys.fieldPerm.enabled", Coverage::Locked),
-    // ---- sys.index.*（平台默认：值为主题名，无有序档位 ⇒ Free）----
-    cfg("sys.index.sideTheme", Coverage::Free),
-    cfg("sys.index.skinName", Coverage::Free),
+    // ---- sys.index.*（§5.23 移除：sideTheme/skinName 为 RuoYi 遗产死键——前端主题
+    //      走 localStorage（settings store），后端零消费者，参数页修改不生效；
+    //      sys.login.background 同理。历史 seed 行保留（数据不删），仅退出治理注册表）----
     // ---- sys.login.* ----
-    cfg("sys.login.background", Coverage::Free),
     cfg("sys.login.blackIPList", Coverage::Locked),
     // ---- sys.user.* ----
     // B4 强制首登改密开关（§5.23 补登记：此前有运行时消费但未入注册表，
@@ -534,7 +533,13 @@ mod tests {
         assert!(!is_known_mode("nav.l3", "bogus"));
         assert!(!is_known_mode("not.registered", "off"));
         // 无档位项（参数项）：值域由业务规则另行约束，此处不拦
-        assert!(is_known_mode("sys.index.skinName", "any-theme-name"));
+        //（§5.23 后无档位键仅剩 Locked 项——skinName 等死键已移出注册表）
+        assert!(is_known_mode(
+            "sys.account.captchaEnabled",
+            "any-value-passes"
+        ));
+        // 被移出的死键按"未登记"处理（fail-closed）
+        assert!(!is_known_mode("sys.index.skinName", "any-theme-name"));
     }
 
     /// **档位安全单调锁**：`modes` 是"下标越大越开放"的有序档位集合。

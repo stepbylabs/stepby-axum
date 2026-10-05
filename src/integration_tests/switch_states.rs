@@ -211,3 +211,113 @@ async fn test_login_ip_blacklist_blocks_login() {
         "清空黑名单后同 IP 登录必须恢复，实际 {status}"
     );
 }
+
+/// `[risk_control].login_ua_filter = "block"`：工具型 UA 登录 ⇒ 403（登录链路两态
+/// 集成锁定——判定内核单测已完备（risk_control.rs），本用例锁**真实登录链路**）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_login_ua_filter_block_rejects_tool_ua() {
+    let ctx = TestContext::new_with(&[], |s| {
+        s.risk_control.login_ua_filter = "block".to_string();
+    })
+    .await;
+
+    // 工具型 UA（curl）+ 正确凭据 ⇒ 仍 403（UA 风控先于密码校验）
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/login")
+        .header("content-type", "application/json")
+        .header("user-agent", "curl/8.0")
+        .body(Body::from(
+            serde_json::json!({
+                "username": "admin",
+                "password": "admin123",
+                "code": "",
+                "uuid": ""
+            })
+            .to_string(),
+        ))
+        .expect("构造请求失败");
+    let mut req = req;
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4321))));
+    let (status, _) = ctx.send_raw(req).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "block 档下工具型 UA 登录必须 403，实际 {status}"
+    );
+}
+
+/// `[server].docs_enabled = false`：Swagger UI / OpenAPI JSON 路由不注册
+/// （§5.23 补两态——**注意**：嵌入式前端的 SPA fallback 会让未知路径返回 200
+/// index.html，故断言用**内容判定**：响应不得含 OpenAPI 文档特征，即"功能不存在"；
+/// 对照组 docs_enabled=true 时返回真 OpenAPI JSON）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_docs_disabled_serves_no_openapi() {
+    // ---------- 关闭态：openapi.json 响应不含 OpenAPI 文档特征 ----------
+    let ctx = TestContext::new_with(&[], |s| {
+        s.server.docs_enabled = false;
+    })
+    .await;
+
+    for path in ["/api-docs/openapi.json", "/swagger-ui"] {
+        let (status, body) = ctx.send_raw(ctx.request(Method::GET, path, None)).await;
+        let body_str = body.to_string();
+        assert!(
+            !body_str.contains("\"openapi\""),
+            "docs_enabled=false 时 {path} 不得返回 OpenAPI 文档（status={status}）: {}",
+            &body_str[..body_str.len().min(200)]
+        );
+    }
+
+    // ---------- 对照组（默认开启，来自本机 config.toml docs_enabled=true）：
+    //            /api-docs/openapi.json 返回真 OpenAPI 文档 ----------
+    let ctx_on = TestContext::new().await;
+    let (status, body) = ctx_on
+        .send_raw(ctx_on.request(Method::GET, "/api-docs/openapi.json", None))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "docs_enabled=true 时 openapi.json 应 200，实际 {status}"
+    );
+    assert!(
+        body.to_string().contains("\"openapi\""),
+        "docs_enabled=true 时应返回真 OpenAPI 文档"
+    );
+}
+
+/// `[monitor].metrics_token` 非空：/metrics 无令牌 ⇒ **401**、带令牌 ⇒ 200
+/// （原仅匿名态被隐式覆盖，§5.23 补配置态两态）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_metrics_token_requires_bearer() {
+    let ctx = TestContext::new_with(&[], |s| {
+        s.monitor.metrics_token = "it-metrics-secret".to_string();
+    })
+    .await;
+
+    let (status, _) = ctx
+        .send_raw(ctx.request(Method::GET, "/metrics", None))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "配置 token 后无凭据访问 /metrics 必须 401，实际 {status}"
+    );
+
+    // 带正确 Bearer ⇒ 200（存在性证明：拒绝来自 token 校验而非路由缺失）
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/metrics")
+        .header("authorization", "Bearer it-metrics-secret")
+        .body(Body::empty())
+        .expect("构造请求失败");
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4321))));
+    let (status, _) = ctx.send_raw(req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "正确 Bearer 访问 /metrics 必须 200，实际 {status}"
+    );
+}
