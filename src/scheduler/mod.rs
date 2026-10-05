@@ -578,7 +578,7 @@ impl JobScheduler {
         // - 提醒去重：Redis SETNX + TTL（login_anomaly_detector 范式，Redis 故障宁可重复不漏报）
         // - 用户可见性：待办列表 + 站内审计（service 内完成；WS 为加速器，见 V7-E2 取舍说明）
         // - db/config 非 Copy：clone 进闭包（与上方 cleanup/anomaly/msg_retry/report 闭包一致）
-        if !config.flow.enabled || config.flow.timeout_scan_cron.trim().is_empty() {
+        if !flow_scan_should_register(config.flow.enabled, &config.flow.timeout_scan_cron) {
             tracing::info!(
                 "内置任务 flow_timeout_scan 未注册：config.flow.enabled={} 或 timeout_scan_cron 为空",
                 config.flow.enabled
@@ -1002,6 +1002,14 @@ impl JobScheduler {
 }
 
 // ==================== 内部函数 ====================
+
+/// flow_timeout_scan 注册判定（**双开关 AND**：`[flow].enabled` 且 cron 非空）。
+///
+/// 提取为纯函数便于单测锁定（§5.24：关闭态"任务不注册"语义此前只有日志、
+/// 无测试锁定；注册调用点已改用本函数，行为逐字节等价）。
+fn flow_scan_should_register(enabled: bool, timeout_scan_cron: &str) -> bool {
+    enabled && !timeout_scan_cron.trim().is_empty()
+}
 
 /// 校验 cron 表达式合法性
 ///
@@ -1543,6 +1551,23 @@ mod tests {
     /// 唯一化锁键（避免跨测试运行残留未过期锁导致抢占失败）
     fn unique_lock_key(base: &str) -> String {
         format!("{base}-{}", uuid::Uuid::new_v4())
+    }
+
+    /// flow_timeout_scan 注册判定双开关 AND 回归（§5.24：关闭态语义此前无测试锁定）
+    #[test]
+    fn test_flow_scan_should_register() {
+        // 默认组合：enabled=true + cron 非空 ⇒ 注册
+        assert!(flow_scan_should_register(true, "0 */10 * * * *"));
+
+        // 开关一：enabled=false ⇒ 不注册（即使 cron 非空）
+        assert!(!flow_scan_should_register(false, "0 */10 * * * *"));
+
+        // 开关二：cron 为空 / 纯空白 ⇒ 不注册（即使 enabled=true）
+        assert!(!flow_scan_should_register(true, ""));
+        assert!(!flow_scan_should_register(true, "   "));
+
+        // 空白裁剪生效：cron 带首尾空白但仍含表达式 ⇒ 注册
+        assert!(flow_scan_should_register(true, "  0 */10 * * * *  "));
     }
 
     /// 构造一个测试用 sys_job Model（concurrent='1'、misfire_policy='3'）
