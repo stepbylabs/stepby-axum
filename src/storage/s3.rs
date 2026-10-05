@@ -1087,14 +1087,33 @@ mod wire_tests {
     /// 与项目无 C 依赖姿态一致；MinIO 同样适用）。save → read → list → delete → read None
     /// 五段断言 + 租户维度对象键隔离。
     ///
-    /// 前置：本地起一个 S3 兼容服务（二选一）：
-    /// - RustFS：`rustfs.exe server <数据目录> --address :9000 --access-key minioadmin --secret-key minioadmin123`
+    /// **探活自动运行（§5.29，替代 #[ignore]）**：测试开头 TCP 探活 `127.0.0.1:9000`——
+    /// 本地 S3 服务（RustFS/MinIO）在跑则**常规 `cargo test` 自动覆盖本链路**；
+    /// 未运行则显式 SKIP 并打 WARN（有日志可见，不做静默跳过）。
+    /// 前置启动（二选一）：
+    /// - RustFS：`rustfs.exe server <数据目录> --address 127.0.0.1:9000 --access-key minioadmin --secret-key minioadmin123`
     /// - MinIO：`docker compose --profile s3 up -d minio minio-init`
-    /// 标记 `#[ignore]`：常规 `cargo test` 与 CI 不依赖外部服务；显式运行：
-    /// `cargo test --lib storage::s3::tests::s3_backend_roundtrip_live -- --ignored`
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "需要本地 S3 兼容服务（RustFS / MinIO），见测试文档注释"]
     async fn s3_backend_roundtrip_live() {
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        // 探活：本地 S3 服务未运行 ⇒ 显式 SKIP（含启动指引，拒绝静默）
+        if TcpStream::connect_timeout(
+            &"127.0.0.1:9000".parse().expect("探活地址合法"),
+            Duration::from_millis(500),
+        )
+        .is_err()
+        {
+            eprintln!(
+                "SKIP s3_backend_roundtrip_live: 本地 S3 服务未运行（127.0.0.1:9000）。\
+                 启动 RustFS 后常规 cargo test 即自动覆盖本链路：\
+                 rustfs.exe server <数据目录> --address 127.0.0.1:9000 \
+                 --access-key minioadmin --secret-key minioadmin123"
+            );
+            return;
+        }
+
         let cfg = S3StorageConfig {
             access_key: "minioadmin".into(),
             secret_key: "minioadmin123".into(),
