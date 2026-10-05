@@ -988,18 +988,17 @@ fn is_pat_management_path(path: &str) -> bool {
         || path.starts_with("/monitor/pat")
 }
 
-/// 租户管理开关（[tenant].management）作用路径判定。
+/// 租户管理开关（[tenant].management = false，单机模式）作用路径判定。
 ///
-/// 覆盖平台侧租户管理全部端点（sys_tenant_router：list/package/changeStatus/
-/// restore/{id} CRUD）；
-/// **不含** `/system/tenant/domain/*` 域名自助（由能力位 `tenant.domain_self_service`
-/// 独立管控）与 `/system/tenant/menu/*` L3 自建导航（能力位 `nav.l3` 独立管控）
-/// ——三者同挂 `/system/tenant` 前缀，若仅按前缀判定会把自助端点一并 403，
-/// 违背"管理开关只管平台侧管理"的语义（注释与实现曾不一致，已修复）。
+/// **语义演进（§5.21，2026-10-05）**：单机部署不存在租户概念 ⇒ `/system/tenant`
+/// 前缀下的**全部**租户语义端点一律 403（含超管）——覆盖平台侧管理面
+/// （list/package/changeStatus/restore/{id} CRUD）**以及**域名绑定
+/// （`/system/tenant/domain/*`）与 L3 自建导航（`/system/tenant/menu/*`）：
+/// 三者都绑定 tenant_id，单机模式下均无意义（此前的"自助面由能力位独立管控"
+/// 定案只适用于多租户模式；本判定仅在 management = false 分支被调用，
+/// 多租户模式下自助面仍由 `tenant.domain_self_service` / `nav.l3` 独立管控）。
 fn is_tenant_management_path(path: &str) -> bool {
     path.starts_with("/system/tenant")
-        && !path.starts_with("/system/tenant/domain")
-        && !path.starts_with("/system/tenant/menu")
 }
 
 #[cfg(test)]
@@ -1020,17 +1019,18 @@ mod tests {
     }
 
     #[test]
-    fn test_tenant_self_service_paths_not_matched() {
-        // 域名自助（能力位 tenant.domain_self_service 独立管控）——不受管理开关影响
-        assert!(!is_tenant_management_path("/system/tenant/domain/list"));
-        assert!(!is_tenant_management_path("/system/tenant/domain"));
-        assert!(!is_tenant_management_path(
+    fn test_tenant_self_service_paths_also_matched_in_standalone_mode() {
+        // §5.21 单机模式全收敛语义：域名自助与 L3 导航同挂 /system/tenant 前缀
+        // 且绑定 tenant_id ⇒ 单机模式下一并 403（自助面"由能力位独立管控"只适用
+        // 于多租户模式——本判定仅在 management=false 分支被调用，不影响多租户模式）。
+        assert!(is_tenant_management_path("/system/tenant/domain/list"));
+        assert!(is_tenant_management_path("/system/tenant/domain"));
+        assert!(is_tenant_management_path(
             "/system/tenant/domain/verify/1"
         ));
-        // L3 自建导航（能力位 nav.l3 独立管控）——不受管理开关影响
-        assert!(!is_tenant_management_path("/system/tenant/menu/list"));
-        assert!(!is_tenant_management_path("/system/tenant/menu/1"));
-        // 其他路径恒不命中（matched_path 来自真实注册路由，仅列非 tenant 前缀反例）
+        assert!(is_tenant_management_path("/system/tenant/menu/list"));
+        assert!(is_tenant_management_path("/system/tenant/menu/1"));
+        // 非 tenant 前缀路径恒不命中
         assert!(!is_tenant_management_path("/system/user/list"));
     }
 

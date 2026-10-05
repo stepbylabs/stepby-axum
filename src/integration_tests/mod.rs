@@ -345,10 +345,23 @@ async fn build_isolated_state_with(
         .await
         .expect("连接测试 Redis 失败（请确认本机 Redis 可达，默认 127.0.0.1:6379）");
     let mut conn = redis.clone();
-    redis::cmd("FLUSHDB")
-        .query_async::<()>(&mut conn)
-        .await
-        .expect("清空隔离 Redis DB 失败");
+    // FLUSHDB 偶发因并行资源竞争瞬时失败（全量 4 线程 + 运行中后端共享 redis 实例），
+    // 短间隔重试 2 次吸收抖动（实测单跑恒绿、偶发全量挂于此）。
+    let mut flushed = false;
+    for attempt in 0..3 {
+        match redis::cmd("FLUSHDB").query_async::<()>(&mut conn).await {
+            Ok(()) => {
+                flushed = true;
+                break;
+            }
+            Err(e) if attempt < 2 => {
+                tracing::warn!("清空隔离 Redis DB 失败（第 {} 次，重试）: {}", attempt + 1, e);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => panic!("清空隔离 Redis DB 失败（重试耗尽）: {e}"),
+        }
+    }
+    debug_assert!(flushed);
     // 迁移种子把 captchaEnabled 种成 'true'，这里强制关掉，避免 login 要求验证码
     db.execute(Statement::from_string(
         DatabaseBackend::Sqlite,
