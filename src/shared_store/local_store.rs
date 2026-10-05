@@ -561,6 +561,16 @@ impl SharedStore for LocalStore {
         let exp = now + ttl_secs as i64;
         let txn = self.db.begin().await.map_err(|e| StoreError::backend(&e))?;
         // ① 抢占过期锁（对齐 Redis 键 TTL 到期后可被抢占的语义）
+        //
+        // ⚠️ §5.35 双轨契约（E-03 定性）：本段对 `sys_shared_lock` 使用**裸 SQL**
+        // 而非 sea-orm 实体——**设计选择，勿"顺手统一"**：
+        // 1. `shared_store` 是独立基础设施抽象（AGENTS.md A.1），禁止依赖
+        //    `entity` 层，否则引入 entity ↔ shared_store 双向耦合；
+        // 2. 本段为 CAS 抢占语义（DELETE 过期行 → INSERT NX → CAS 释放/续期），
+        //    需要事务内精确控制语句顺序，ORM 封装反而增加间接层；
+        // 3. **表结构演进须双维护**：`sys_shared_lock` 列变更时必须同步
+        //    `src/entity/sys_shared_lock.rs`（ORM 侧消费：count/巡检）与本段
+        //    裸 SQL（CAS 语义消费），两处均在集成测试覆盖下。
         txn.execute(self.stmt(
             "DELETE FROM sys_shared_lock WHERE lock_key = ? AND expire_at <= ?",
             vec![key.to_owned().into(), now.into()],
