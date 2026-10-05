@@ -6,6 +6,12 @@
 //!
 //! `old_tid` 唯一：一个旧 tid 只允许映射一次（重复 remap 会被唯一索引挡住，
 //! 避免把已经 remap 过的数据二次映射成别的租户）。
+//!
+//! ⚠️ **状态：迁移回滚保护的预留表**（§5.34 实体链路盘点 E-02）——表由
+//! initialize Phase 3 迁移创建，但当前**无任何 service/repository/router 消费**
+//! （remap 为一次性历史操作，回滚路径依赖手工 SQL + 本表）。**请勿**在无
+//! 功能设计的情况下新增业务读写；若实现租户迁移功能，应先补 repository +
+//! 审计 + 权限三层。
 
 use chrono::NaiveDateTime;
 use sea_orm::entity::prelude::*;
