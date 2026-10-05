@@ -2712,7 +2712,10 @@ impl Settings {
                 level: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
                 sql_logging: false,
                 file_path: "logs".to_string(),
-                json_stdout: true,
+                // 统一为 false（与 serde 缺省一致）：json_stdout 是日志格式偏好而非
+                // 安全项，缺省 = 纯文本 = 现状；此前 from_env_only 为 true 与
+                // serde 缺省漂移（违背本文件头注释的"无环境漂移"自设原则，§5.23）。
+                json_stdout: false,
             },
             upload: UploadConfig::default(),
             ip_location: IpLocationConfig::default(),
@@ -3004,6 +3007,41 @@ mod tests {
         // 空表反序列化 = 全部字段走 serde 缺省（等价于配置文件缺 [pat] 段）
         let cfg: PatConfig = toml::from_str("").expect("空表应可全缺省反序列化");
         assert_eq!(cfg.max_per_user, 50);
+    }
+
+    /// `[cache].mode` 三档裁决回归（§5.23 开关目录盘点补测——此前 resolve_mode
+    /// 零测试覆盖）：显式档位优先、auto 按redis_url 有效性裁决、非法值回落 auto。
+    #[test]
+    fn test_cache_resolve_mode_matrix() {
+        let mk = |mode: &str| CacheConfig {
+            mode: mode.to_string(),
+            gc_interval_secs: 600,
+        };
+
+        // 显式档位（大小写不敏感）优先，不看 redis_url
+        assert_eq!(mk("redis").resolve_mode(""), CacheMode::Redis);
+        assert_eq!(
+            mk("Redis").resolve_mode("redis://CHANGE_ME@x"),
+            CacheMode::Redis
+        );
+        assert_eq!(mk("LOCAL").resolve_mode("redis://ok@x"), CacheMode::Local);
+
+        // auto 裁决：redis_url 有效（非空且无占位符）→ Redis；否则 Local
+        assert_eq!(
+            mk("auto").resolve_mode("redis://:pass@127.0.0.1:6379/0"),
+            CacheMode::Redis
+        );
+        assert_eq!(mk("auto").resolve_mode(""), CacheMode::Local);
+        assert_eq!(
+            mk("auto").resolve_mode("redis://CHANGE_ME@127.0.0.1:6379/0"),
+            CacheMode::Local,
+            "占位符 url 视为未配置 → Local（零依赖部署语义）"
+        );
+
+        // 非法值 / 空串 → Auto（调用方负责 WARN，fail-safe 回落裁决路径）
+        assert_eq!(mk("bogus").resolve_mode("redis://ok@x"), CacheMode::Redis);
+        assert_eq!(mk("bogus").resolve_mode(""), CacheMode::Local);
+        assert_eq!(mk("").resolve_mode(""), CacheMode::Local);
     }
 
     /// 模板一致性回归：config.toml.example 的 [pat] 示例值应与内置默认对齐，

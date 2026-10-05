@@ -39,6 +39,7 @@ error:
     unavailable: 文件安全扫描服务不可用，请稍后再试
   auth:
     ua_blocked: 当前登录客户端特征不被允许，请使用浏览器登录
+    ip_blacklisted: 当前网络环境不允许登录
     captcha_expired: 验证码已过期或不存在
     captcha_wrong: 验证码错误
     captcha_gen_failed: 验证码生成失败，请稍后再试
@@ -700,6 +701,7 @@ log:
     totp_failed: TOTP 动态验证码错误
     totp_locked: TOTP 验证失败次数过多，已临时锁定
     ua_blocked: 登录客户端特征被风控策略拒绝
+    ip_blacklisted: 登录来源 IP 命中黑名单（sys.login.blackIPList）
     geo_alert: "异地登录告警：%{prev} 变更为 %{now}"
     tenant_disabled: 租户已停用
     tenant_grace: 租户已到期（宽限期内只读）
