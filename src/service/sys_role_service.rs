@@ -1442,6 +1442,7 @@ impl SysRoleService {
         &self,
         dto: AuthUserSelectDto,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 超管角色保护
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
@@ -1461,6 +1462,10 @@ impl SysRoleService {
         for target_user_id in &user_ids {
             self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
                 .await?;
+            // §5.35（S-A-2）：横向越权校验——跨租户 user_ids 一律拒绝
+            // （平台操作者 tid=0 经 tenant_allowed 放行全租户）
+            self.ensure_user_in_operator_tenant(operator_tid, *target_user_id)
+                .await?;
         }
 
         self.user_role_repo
@@ -1468,6 +1473,25 @@ impl SysRoleService {
             .await?;
         // 批量用户角色绑定变更，全量失效权限缓存
         self.invalidate_all_perm_cache().await;
+        Ok(())
+    }
+
+    /// §5.35（S-A-2）：校验目标用户与操作者同租户（横向越权防护）。
+    /// 平台操作者（tid=0）经 `tenant_allowed` 放行全部租户。
+    async fn ensure_user_in_operator_tenant(
+        &self,
+        operator_tid: i64,
+        target_user_id: i64,
+    ) -> Result<(), ServiceError> {
+        let target = self
+            .user_repo
+            .base()
+            .find_by_id(target_user_id)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, target.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+        }
         Ok(())
     }
 
@@ -1482,6 +1506,7 @@ impl SysRoleService {
         &self,
         dto: AuthUserSelectDto,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 超管角色保护：禁止分配超管角色
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
@@ -1500,6 +1525,9 @@ impl SysRoleService {
         // 垂直越权校验：批量检查每个目标用户
         for target_user_id in &user_ids {
             self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
+                .await?;
+            // §5.35（S-A-2）：横向越权校验——跨租户 user_ids 一律拒绝
+            self.ensure_user_in_operator_tenant(operator_tid, *target_user_id)
                 .await?;
         }
 

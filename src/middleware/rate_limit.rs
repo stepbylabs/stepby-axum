@@ -297,7 +297,15 @@ pub async fn rate_limit_middleware(
     // 查询逻辑：先精确匹配 route_pattern=oper_url，未命中则使用 "*" 全局默认
     // 安全（P0-11）：fail-closed，Redis/DB 故障时返回 503 而非静默降级到 DEFAULT_CONFIG，
     // 避免限流配置丢失导致限流被绕过。
-    let oper_url = req.uri().path().to_string();
+    // §5.35（逐文件审计 F-MW-2）：用 MatchedPath（路由模板）而非原始 path——
+    //   嵌入式同源部署下原始 path 带 /prod-api 前缀，会导致 DB 中按模板登记的
+    //   精确限流规则全部失配、静默回退 "*"；与 permission（MatchedPath）口径对齐。
+    let oper_url = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(axum::extract::MatchedPath::as_str)
+        .unwrap_or_else(|| req.uri().path())
+        .to_string();
     let config = match state
         .rate_limit_service
         .get_config_for_route(&oper_url)

@@ -1896,69 +1896,86 @@ impl SysTenantService {
         am.status = Set(Some("1".to_string()));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
-        self.tenant_repo.base().update(am).await?;
+        // §5.35（S-A-1）：五步恢复操作（租户行/组织树/角色/域名/自建菜单）包进
+        // 同一事务——此前非事务，部分失败会留"租户已恢复但其余仍软删"的半恢复态
+        // 且无整体回滚。缓存失效与运行时键同步在事务提交后执行（失败回滚不污染缓存）。
+        let operator_name = operator.to_string();
+        let tenant_repo = self.tenant_repo.clone();
+        let tenant_row = self
+            .db()
+            .transaction::<_, u64, sea_orm::DbErr>(|txn| {
+                Box::pin(async move {
+                    tenant_repo.base().update_conn(txn, am).await?;
+
+                    let dam: sys_dept::ActiveModel = sys_dept::ActiveModel {
+                        del_flag: Set(Some("0".to_string())),
+                        update_by: Set(Some(operator_name.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    SysDept::update_many()
+                        .set(dam)
+                        .filter(DeptColumn::TenantId.eq(tenant_id))
+                        .filter(sys_dept::Column::DelFlag.eq("2"))
+                        .exec(txn)
+                        .await?;
+
+                    // 角色恢复（与 remove 的软删对称；仅恢复 del_flag='2' 的行，避免影响租户内其他状态）
+                    let ram: SysRoleActiveModel = SysRoleActiveModel {
+                        del_flag: Set(Some("0".to_string())),
+                        update_by: Set(Some(operator_name.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    let roles = SysRole::update_many()
+                        .set(ram)
+                        .filter(RoleColumn::TenantId.eq(tenant_id))
+                        .filter(RoleColumn::DelFlag.eq("2"))
+                        .exec(txn)
+                        .await?;
+
+                    // E1-c 对称恢复：域名与租户自建菜单随租户恢复（仅恢复 remove 级联软删的行，
+                    // del_flag='2' → '0'；手工删除的域名/菜单已被让位/清理，不受影响）
+                    let dam2: TenantDomainActiveModel = TenantDomainActiveModel {
+                        del_flag: Set(Some("0".to_string())),
+                        update_by: Set(Some(operator_name.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    SysTenantDomain::update_many()
+                        .set(dam2)
+                        .filter(TenantDomainColumn::TenantId.eq(tenant_id))
+                        .filter(TenantDomainColumn::DelFlag.eq("2"))
+                        .exec(txn)
+                        .await?;
+                    let mam: TenantMenuActiveModel = TenantMenuActiveModel {
+                        del_flag: Set(Some("0".to_string())),
+                        update_by: Set(Some(operator_name.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    SysTenantMenu::update_many()
+                        .set(mam)
+                        .filter(TenantMenuColumn::TenantId.eq(tenant_id))
+                        .filter(TenantMenuColumn::DelFlag.eq("2"))
+                        .exec(txn)
+                        .await?;
+
+                    Ok(roles.rows_affected)
+                })
+            })
+            .await
+            .map_err(|e| ServiceError::internal(&format!("租户恢复事务失败: {e}")))?;
 
         // 域名链路：短码变化，失效 tenant:code 缓存（旧码 / 恢复码 / 最终码）
         self.invalidate_code_cache(&tenant.tenant_code).await;
         self.invalidate_code_cache(&restored_code).await;
         self.invalidate_code_cache(&final_code).await;
 
-        let dam: sys_dept::ActiveModel = sys_dept::ActiveModel {
-            del_flag: Set(Some("0".to_string())),
-            update_by: Set(Some(operator.to_string())),
-            update_time: Set(Some(now)),
-            ..Default::default()
-        };
-        SysDept::update_many()
-            .set(dam)
-            .filter(DeptColumn::TenantId.eq(tenant_id))
-            .exec(self.db())
-            .await?;
-
-        // 角色恢复（与 remove 的软删对称；仅恢复 del_flag='2' 的行，避免影响租户内其他状态）
-        let ram: SysRoleActiveModel = SysRoleActiveModel {
-            del_flag: Set(Some("0".to_string())),
-            update_by: Set(Some(operator.to_string())),
-            update_time: Set(Some(now)),
-            ..Default::default()
-        };
-        let roles = SysRole::update_many()
-            .set(ram)
-            .filter(RoleColumn::TenantId.eq(tenant_id))
-            .filter(RoleColumn::DelFlag.eq("2"))
-            .exec(self.db())
-            .await?;
-
-        // E1-c 对称恢复：域名与租户自建菜单随租户恢复（仅恢复 remove 级联软删的行，
-        // del_flag='2' → '0'；手工删除的域名/菜单已被让位/清理，不受影响）
-        let dam2: TenantDomainActiveModel = TenantDomainActiveModel {
-            del_flag: Set(Some("0".to_string())),
-            update_by: Set(Some(operator.to_string())),
-            update_time: Set(Some(now)),
-            ..Default::default()
-        };
-        SysTenantDomain::update_many()
-            .set(dam2)
-            .filter(TenantDomainColumn::TenantId.eq(tenant_id))
-            .filter(TenantDomainColumn::DelFlag.eq("2"))
-            .exec(self.db())
-            .await?;
-        let mam: TenantMenuActiveModel = TenantMenuActiveModel {
-            del_flag: Set(Some("0".to_string())),
-            update_by: Set(Some(operator.to_string())),
-            update_time: Set(Some(now)),
-            ..Default::default()
-        };
-        SysTenantMenu::update_many()
-            .set(mam)
-            .filter(TenantMenuColumn::TenantId.eq(tenant_id))
-            .filter(TenantMenuColumn::DelFlag.eq("2"))
-            .exec(self.db())
-            .await?;
         tracing::info!(
             tenant_id,
-            roles = roles.rows_affected,
-            "租户已恢复（回收站 → 在册，停用态）：组织树与角色一并恢复"
+            roles = tenant_row,
+            "租户已恢复（回收站 → 在册，停用态，单事务）：组织树/角色/域名/自建菜单一并恢复"
         );
 
         self.sync_runtime_keys(tenant_id, Some("1"), tenant.expire_time)
