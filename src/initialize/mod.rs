@@ -682,6 +682,12 @@ async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<(
     )
     .await?;
     tracing::info!("共享态存储三表已就绪（sys_shared_kv / sys_shared_lock / sys_token_revocation）");
+
+    // ===== AI 助手（AI-01/AI-02，§5.39）：ai_chat_history 表 + sys.ai.* 配置种子兜底 =====
+    // 与 m20261006_000001 迁移同源（pub fn 单一事实源）；存量库启动不跑 Migrator 时由本段兜底。
+    migration::migrations::m20261006_000001_ai_config_and_history::init_ai_config_and_history(db)
+        .await?;
+    tracing::info!("AI 助手：ai_chat_history 表与 sys.ai.* 配置种子已就绪（幂等，管理页可改热生效）");
     Ok(())
 }
 

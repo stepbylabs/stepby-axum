@@ -571,6 +571,9 @@ fail_closed = true       # 扫描器不可用时：true（默认）= 拒绝上�
 # api_key 生产环境建议 AI_API_KEY 环境变量注入；provider 为 OpenAI 兼容协议
 # （OpenAI / DeepSeek / 通义千问 / Ollama(/v1) / vLLM 均可）。
 [ai]
+# ⚠ §5.35：本段为出厂缺省；应用启动后 sys.ai.* 六键（管理页可改，热生效）存在即覆盖本段——
+# 修改 LLM 接入请走 系统管理 > AI 助手配置 管理页，改本文件不会生效。
+
 enabled = false
 provider = "openai"
 base_url = "https://api.openai.com/v1"

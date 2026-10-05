@@ -13,7 +13,7 @@
 //! 3. 在本文件 Migrator Vec 末尾追加 Box::new(<mod名>::Migration)。
 use sea_orm_migration::prelude::*;
 
-mod migrations;
+pub mod migrations;
 /// re-export：AppInitializer 等生产代码调用 Migrator::up 所需的 trait（避免主 crate 引入 sea-orm-migration 依赖）
 pub use sea_orm_migration::MigratorTrait;
 pub use migrations::*;
