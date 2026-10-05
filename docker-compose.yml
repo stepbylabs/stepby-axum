@@ -94,10 +94,49 @@ services:
     networks:
       - stepby_net
 
+  # S3 兼容对象存储（[upload].backend = "s3" 档的本地运行时集成环境）。
+  # profile 隔离：默认 `docker compose up -d` 不启动；按需
+  # `docker compose --profile s3 up -d minio minio-init`（§5.26 storage s3 集成测试前置）。
+  minio:
+    image: minio/minio:latest
+    container_name: stepby-minio
+    profiles: ["s3"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - stepby_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stepby_net
+
+  # 一次性建桶（与 src/storage s3 集成测试的 bucket 约定一致）
+  minio-init:
+    image: minio/mc:latest
+    profiles: ["s3"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin123 &&
+      mc mb --ignore-existing local/stepby-test &&
+      echo 'bucket stepby-test ready'"
+
 volumes:
   stepby_pg_data:
   stepby_mysql_data:
   stepby_redis_data:
+  stepby_minio_data:
 
 networks:
   stepby_net:
