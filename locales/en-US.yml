@@ -39,6 +39,7 @@ error:
     unavailable: File security scanning service is unavailable, please try again later
   auth:
     ua_blocked: This login client signature is not allowed; please sign in with a browser
+    ip_blacklisted: Login is not allowed from this network environment
     captcha_expired: Captcha expired or does not exist
     captcha_wrong: Incorrect captcha
     captcha_gen_failed: Captcha generation failed, please try again later
@@ -702,6 +703,7 @@ log:
     totp_failed: Incorrect TOTP verification code
     totp_locked: Too many failed TOTP attempts, temporarily locked
     ua_blocked: Login client signature rejected by risk-control policy
+    ip_blacklisted: Login source IP hit the blacklist (sys.login.blackIPList)
     geo_alert: "Impossible-travel alert: region changed from %{prev} to %{now}"
     tenant_disabled: Tenant has been disabled
     tenant_grace: Tenant has expired (read-only during grace period)

@@ -481,6 +481,10 @@ impl AuthService {
         // 2. 验证码 GETDEL 是幂等消耗操作，应在更早阶段拦截明显错误的请求
         // 新顺序：先验证码（无 Redis 计数副作用），再限流（IP/用户计数），最后密码校验
         //
+        // 0. 登录 IP 黑名单（sys.login.blackIPList，最廉价拦截：sys_config 缓存读取，
+        //    无 Redis 计数副作用；命中即拒，不进入后续任何校验）
+        self.enforce_ip_blacklist(&ctx).await?;
+
         // 风控集成点（`[risk_control]`，默认 `off` ⇒ 不判定，逐字节等价于改造前）：
         // 工具型 UA 处置放在最前 —— 脚本化尝试最廉价地被挡掉，且**不**消耗/写入密码失败计数
         // （它不是"密码错误"，不应影响账号锁定语义）。此刻尚未查库 ⇒ 日志归属传 (0, 0)。
@@ -519,6 +523,53 @@ impl AuthService {
         // 6. JWT 签发 + 登录日志（成功）+ 在线映射 + 更新登录信息 + 清除失败计数
         self.finalize_login(&user, store, jwt_config, &ctx, geo_note)
             .await
+    }
+
+    /// 登录 IP 黑名单校验（`sys.login.blackIPList`，Locked，全平台共用）。
+    ///
+    /// 此前该键仅登记治理表 + 参数页可配置但**无任何运行时消费**（"登记死键"，
+    /// 管理员配置不生效——§5.23 盘点发现）。现补齐真实消费：登录链路最前段
+    /// （先于 UA 风控/验证码/限流——黑名单是最廉价的拦截）按**精确 IP 匹配**判定，
+    /// 命中 ⇒ 写失败登录日志 + 拒绝。
+    ///
+    /// - 分隔符：逗号 / 分号 / 换行 / 空白（对齐参数页多值录入习惯）；
+    /// - fail-open：键缺失/读取失败 ⇒ 放行（黑名单是附加防线，密码校验/限流/
+    ///   账号锁定仍生效；与 RuoYi 原版语义一致）；
+    /// - 对外文案 `error.auth.ip_blacklisted`（"网络环境不允许"——不给攻击者
+    ///   确认名单命中的信号），日志侧用 `log.auth.ip_blacklisted`（可诊断）。
+    async fn enforce_ip_blacklist(&self, ctx: &LoginContext<'_>) -> Result<(), ServiceError> {
+        let list = match self
+            .config_service
+            .get_config_value_by_key_cached(governance::SYS_LOGIN_BLACK_IP_LIST, None)
+            .await
+        {
+            Ok(Some(v)) if !v.trim().is_empty() => v,
+            _ => return Ok(()),
+        };
+        let blocked = list
+            .split([',', ';', '\n', '\r', ' '])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .any(|ip| ip.eq_ignore_ascii_case(ctx.login_ip));
+        if !blocked {
+            return Ok(());
+        }
+        tracing::warn!(
+            username = ctx.username,
+            login_ip = ctx.login_ip,
+            "登录被拒绝：来源 IP 命中黑名单（sys.login.blackIPList）"
+        );
+        self.write_login_log_best_effort(
+            ctx,
+            "1",
+            &crate::tr!("log.auth.ip_blacklisted"),
+            0,
+            0,
+        )
+        .await;
+        Err(ServiceError::forbidden(&crate::tr!(
+            "error.auth.ip_blacklisted"
+        )))
     }
 
     /// 风控集成点：工具型 UA 处置（`[risk_control].login_ua_filter`）。

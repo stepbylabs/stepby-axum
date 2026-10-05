@@ -35,6 +35,7 @@ mod response_cache;
 mod scim;
 mod scim_groups;
 mod sso;
+mod switch_states;
 mod sys_backup;
 mod sys_config_dict;
 mod sys_frontend_error;

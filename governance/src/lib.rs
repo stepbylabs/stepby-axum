@@ -258,8 +258,15 @@ pub const CONFIGS: &[Item] = &[
     cfg("sys.login.background", Coverage::Free),
     cfg("sys.login.blackIPList", Coverage::Locked),
     // ---- sys.user.* ----
+    // B4 强制首登改密开关（§5.23 补登记：此前有运行时消费但未入注册表，
+    // 治理列不收敛属"登记漂移"；Locked 平台锁定——租户不得自行开启强改）
+    cfg("sys.user.forceFirstLoginChangePwd", Coverage::Locked),
     cfg("sys.user.initPassword", Coverage::Locked),
 ];
+
+/// `sys.login.blackIPList` 的运行时消费键（登录链路 IP 黑名单，
+/// [`crate::service` 层按此键读 sys_config 缓存]）——常量化避免键名散落。
+pub const SYS_LOGIN_BLACK_IP_LIST: &str = "sys.login.blackIPList";
 
 /// 全量治理项（能力位在前、参数项在后；各自内部按 key 字典序）。
 pub fn all() -> impl Iterator<Item = &'static Item> {
