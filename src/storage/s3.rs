@@ -1082,4 +1082,83 @@ mod wire_tests {
             "payload 头与请求体不一致应被服务端验签拒绝"
         );
     }
+
+    /// s3 档**真实运行时链路**回归（§5.27 福哥拍板改用 RustFS——纯 Rust S3 兼容存储，
+    /// 与项目无 C 依赖姿态一致；MinIO 同样适用）。save → read → list → delete → read None
+    /// 五段断言 + 租户维度对象键隔离。
+    ///
+    /// 前置：本地起一个 S3 兼容服务（二选一）：
+    /// - RustFS：`rustfs.exe server <数据目录> --address :9000 --access-key minioadmin --secret-key minioadmin123`
+    /// - MinIO：`docker compose --profile s3 up -d minio minio-init`
+    /// 标记 `#[ignore]`：常规 `cargo test` 与 CI 不依赖外部服务；显式运行：
+    /// `cargo test --lib storage::s3::tests::s3_backend_roundtrip_live -- --ignored`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "需要本地 S3 兼容服务（RustFS / MinIO），见测试文档注释"]
+    async fn s3_backend_roundtrip_live() {
+        let cfg = S3StorageConfig {
+            access_key: "minioadmin".into(),
+            secret_key: "minioadmin123".into(),
+            endpoint: "http://127.0.0.1:9000".into(),
+            bucket: "stepby-test".into(),
+            path_style: true,
+            ..Default::default()
+        };
+        let backend = S3Backend::try_new(&cfg).expect("本地 S3 服务应可达且配置有效");
+
+        // 建桶（S3 CreateBucket = PUT /{bucket}，path-style；已存在则 409/200 均视为就绪）
+        let resp = backend
+            .signed_send(reqwest::Method::PUT, "/stepby-test", "", None, b"")
+            .await
+            .expect("CreateBucket 请求应送达");
+        assert!(
+            resp.status().is_success() || resp.status().as_u16() == 409,
+            "建桶应成功或幂等（已存在），实际 {}",
+            resp.status()
+        );
+
+        // 经 StorageBackend trait 走真实五段链路
+        let backend: std::sync::Arc<dyn StorageBackend> = std::sync::Arc::new(backend);
+
+        // 1. save：租户维度对象键隔离（tenant_id=5）
+        let url = backend
+            .save("uploads/file", 5, "it-roundtrip.txt", "", b"stepby s3 roundtrip")
+            .await
+            .expect("save 应成功");
+        assert!(!url.is_empty(), "save 应返回可访问 URL");
+
+        // 2. read：内容一致
+        let body = backend
+            .read("uploads/file", 5, "it-roundtrip.txt")
+            .await
+            .expect("read 应成功")
+            .expect("对象应存在");
+        assert_eq!(body, b"stepby s3 roundtrip");
+
+        // 3. list：对象可见
+        let objects = backend
+            .list("uploads/file", 5, "")
+            .await
+            .expect("list 应成功");
+        assert!(
+            objects.iter().any(|o| o.name == "it-roundtrip.txt"),
+            "list 应包含刚保存的对象，实际: {objects:?}"
+        );
+
+        // 4. delete：幂等删除 + 复删成功
+        backend
+            .delete("uploads/file", 5, "it-roundtrip.txt")
+            .await
+            .expect("delete 应成功");
+        backend
+            .delete("uploads/file", 5, "it-roundtrip.txt")
+            .await
+            .expect("delete 不存在对象应幂等成功");
+
+        // 5. read：删除后不存在
+        let gone = backend
+            .read("uploads/file", 5, "it-roundtrip.txt")
+            .await
+            .expect("read 应成功");
+        assert!(gone.is_none(), "删除后对象应不存在");
+    }
 }
