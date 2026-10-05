@@ -1641,6 +1641,10 @@ impl SysUserService {
                 // R6-VAL-16/17：已归一化 + 枚举校验（见函数头部 helper）
                 user_am.sex = Set(normalized_sex.clone());
                 user_am.password = Set(Some(hashed.clone()));
+                // B4 一致化（§5.23）：管理员经表单设置初始密码 ⇒ 标记首登待改——
+                // 与导入路径（L2301）同口径；开关 forceFirstLoginChangePwd=false 时
+                // 仅软提示（mustChangePassword 布场 false），开启则强改。
+                user_am.must_change_pwd = Set(Some("1".to_string()));
                 user_am.status = Set(normalized_status.clone().or_else(|| Some("0".to_string())));
                 user_am.del_flag = Set(Some("0".to_string()));
                 user_am.create_by = Set(Some(operator.to_string()));
