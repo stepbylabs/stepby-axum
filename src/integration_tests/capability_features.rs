@@ -326,6 +326,23 @@ async fn test_ui_entry_flags_are_delivered_and_follow_capability() {
         info["showPasskey"], false,
         "能力位 auth.webauthn 默认 off ⇒ 不下发通行密钥入口"
     );
+    // 本批 +3 布场（PAT / SSO Grants / 字段权限）默认姿态：
+    // [pat].enabled 默认 true ⇒ PAT 页签下发；[sso].enabled 默认 **true**（default_sso_disabled
+    // = false ⇒ enabled=true，历史行为/开发友好，见 settings.rs SsoConfig 文档）⇒ SSO 页签下发；
+    // sys.fieldPerm.enabled 默认 false（平台层第一道开关）⇒ 字段权限按钮隐藏。
+    assert_eq!(
+        info["showPat"], true,
+        "[pat].enabled 默认 true ⇒ 下发 API 访问令牌页签入口（现状行为）"
+    );
+    assert_eq!(
+        info["showSsoGrants"], true,
+        "[sso].enabled 默认 true（历史行为）⇒ 下发已授权应用页签；置 false 时本断言变红 ⇒ \
+         同步核对入口隐藏与 OIDC 端点 404 的同源联动"
+    );
+    assert_eq!(
+        info["showFieldPerm"], false,
+        "sys.fieldPerm.enabled 默认 false ⇒ 不下发字段权限按钮（与矩阵接口 403 守卫同源）"
+    );
 
     let captcha = ctx.get_json("/captchaImage").await;
     assert_eq!(

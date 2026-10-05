@@ -1464,7 +1464,14 @@ fn default_pat_max_per_user() -> i64 {
 /// 单点登录 / OIDC Provider 配置（Tier B：本系统作为授权服务器）
 #[derive(Clone, Debug, Deserialize)]
 pub struct SsoConfig {
-    /// 是否启用 SSO（OIDC Provider）端点。默认关闭，需显式开启（生产按需）
+    /// 是否启用 SSO（OIDC Provider）端点。
+    ///
+    /// **默认开启**（`default_sso_disabled() = false` ⇒ enabled=true；历史行为，
+    /// 零配置引导/开发场景友好，全部路径——serde 缺省 / `Default::default()` /
+    /// `from_env_only()`——一致）。无 SSO 需求的生产部署应**显式置 false**
+    /// （入库模板 `config.toml.example` 的起步配置即 false；缺省整段省略 = true）。
+    /// ⚠️ 函数名 `default_sso_disabled` 语义是"disabled 标志的默认值"（false = 不禁用），
+    /// 与本键（enabled）极性相反——改动默认值前先核对三处取值路径一致。
     #[serde(default = "default_sso_disabled")]
     pub enabled: bool,
     /// OIDC issuer（发现文档 iss 与端点绝对前缀）。
@@ -3008,6 +3015,25 @@ mod tests {
             std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
         let s: Settings = toml::from_str(&template).expect("模板应可解析");
         assert_eq!(s.pat.max_per_user, default_pat_max_per_user());
+    }
+
+    /// 模板一致性回归：config.toml.example 的 [tenant].management 应与内置默认对齐
+    /// （true = 多租户模式 = 现状零变化；手工 Default 的语义锁，防模板改动后
+    /// 与缺省行为悄然漂移——参考 test_pat_template_matches_default 同款模式）。
+    #[test]
+    fn test_tenant_template_matches_default() {
+        let template =
+            std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
+        let s: Settings = toml::from_str(&template).expect("模板应可解析");
+        assert_eq!(
+            s.tenant.management,
+            TenantConfig::default().management,
+            "[tenant].management 模板示例必须与内置默认（true = 多租户模式）一致"
+        );
+        assert!(
+            s.tenant.management,
+            "模板示例必须是多租户模式（true）；单机模式属部署方显式决策，不入库模板"
+        );
     }
 
     /// v5-D9：同意票档位解析与 TTL 夹取（默认 = 现状；非法值 fail-safe 回落 `off`）。
