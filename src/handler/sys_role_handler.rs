@@ -525,7 +525,7 @@ pub async fn auth_user_cancel_all(
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     state
         .role_service
-        .cancel_all_auth_users(dto, operator_user_id)
+        .cancel_all_auth_users(dto, operator_user_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.cancel_auth"
@@ -555,7 +555,7 @@ pub async fn auth_user_select_all(
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     state
         .role_service
-        .select_all_auth_users(dto, operator_user_id)
+        .select_all_auth_users(dto, operator_user_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.auth")))
 }

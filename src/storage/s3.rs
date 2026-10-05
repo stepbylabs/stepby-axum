@@ -168,10 +168,17 @@ impl S3Backend {
         }
         let (headers_block, signed_headers) = canonical_headers(&headers);
 
-        let canonical_uri = uri; // 对象路径均为安全字符（字母数字 .- _ /），无需额外编码
+        // §5.35：canonical URI 逐段 RFC3986 编码（`/` 作为路径分隔符保留）——
+        // key 校验放行空格/中文/`#` 等字符，直接拼入签名字符串会导致
+        // 服务端重算签名不一致（403）或路径截断；逐段编码对齐 AWS SigV4 规范。
+        let canonical_uri = uri
+            .split('/')
+            .map(uri_encode)
+            .collect::<Vec<_>>()
+            .join("/");
         let creq = canonical_request(
             method.as_str(),
-            canonical_uri,
+            canonical_uri.as_str(),
             query,
             &headers_block,
             &signed_headers,

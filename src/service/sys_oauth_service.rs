@@ -375,7 +375,14 @@ impl SysOauthService {
             user_repo: SysUserRepository::new(db.clone()),
             user_role_repo: SysUserRoleRepository::new(db),
             user_service,
-            http: reqwest::Client::new(),
+            // §5.35（逐文件审计 S-B-1）：出站 Client 必须带超时——零超时会在
+            // IdP/上游无响应时挂死 worker（AGENTS.md B.6 超时重试铁律）；
+            // connect_timeout 5s 快速失败 + 总超时 30s 上限。
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("oauth 出站 http client 构建失败（不可恢复的编程错误）"),
             enc_key,
         }
     }

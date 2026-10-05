@@ -447,8 +447,11 @@ fn is_write_method(method: Method) -> bool {
 ///
 /// 返回 None 表示无法提取 ID（如 POST 新增、路径无 ID 且 body 非 JSON）。
 fn extract_record_id(oper_url: &str, body: Option<&[u8]>) -> Option<i64> {
+    // §5.35：oper_url 为 path+query（P0-M2 审计语义保留），末段含 `?id=..` 时
+    // 数字解析会失败——先剥掉 query 只按纯路径取末段。
+    let path_only = oper_url.split('?').next().unwrap_or(oper_url);
     // 策略 1：从 URL 路径末段解析数字 ID
-    let path_segments: Vec<&str> = oper_url.split('/').collect();
+    let path_segments: Vec<&str> = path_only.split('/').collect();
     if let Some(last_seg) = path_segments.last()
         && let Ok(id) = last_seg.parse::<i64>()
     {
