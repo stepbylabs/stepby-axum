@@ -652,8 +652,8 @@ const SORTABLE_COLUMNS: &[(&str, UserColumn)] = &[
     ("login_date", UserColumn::LoginDate),
 ];
 
-/// 权限缓存 key 前缀（与 sys_menu_service 保持一致）
-const PERM_CACHE_PREFIX: &str = "perm:user:";
+/// 权限缓存 key 前缀（单一事实源 = `common::constants::PERM_CACHE_PREFIX`）
+use crate::common::constants::PERM_CACHE_PREFIX;
 
 /// 用户模块 Service
 ///

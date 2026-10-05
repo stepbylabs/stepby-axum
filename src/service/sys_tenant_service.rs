@@ -1645,67 +1645,37 @@ impl SysTenantService {
     ///   否则残留授权形成"菜单可见但请求 403"的假入口。
     ///
     /// `pub(crate)`：集成测试直接驱动本收敛面（`capability_features` 模块）。
+    /// 收敛核心见 [`converge_tenant_role_menus_conn`]（单一事实源，启动期兜底共用）；
+    /// 本方法在其上追加**权限缓存失效**（授权行被删 ⇒ `perm:user:*` 缓存必须在
+    /// TTL 之前失效，否则最多 5 分钟窗口内用户仍持旧 perms）。
     pub(crate) async fn converge_tenant_role_menus(
         &self,
         tenant_id: i64,
         package: &crate::entity::sys_tenant_package::Model,
     ) -> Result<(), ServiceError> {
-        let whitelist = parse_menu_ids(&package.menu_ids);
-        // 不可授予菜单（平台专属前缀 ∪ tier2 未接过滤表，**带能力位判定**）——与角色授权
-        // 门禁同源，套餐变更时一并移除，不把"收敛"只做成白名单裁剪。
-        let features = effective_features_from_package(Some(package));
-        let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
-            .select_only()
-            .column(MenuColumn::MenuId)
-            .column(MenuColumn::Perms)
-            .filter(MenuColumn::DelFlag.eq("0"))
-            .into_tuple::<(i64, Option<String>)>()
-            .all(self.db())
-            .await?;
-        let ungradable_ids: Vec<i64> = menu_perms
-            .into_iter()
-            .filter(|(_, perms)| {
-                perms.as_deref().is_some_and(|p| {
-                    !p.is_empty()
-                        && !crate::common::features::is_grantable_perm_with_features(p, &features)
-                })
-            })
-            .map(|(id, _)| id)
-            .collect();
-        // 两个收敛面都为空 ⇒ 无需删任何东西（也避免空 `Condition::any()` 的语义歧义）
-        if whitelist.is_none() && ungradable_ids.is_empty() {
-            return Ok(());
+        let removed = converge_tenant_role_menus_conn(self.db(), tenant_id, package)
+            .await
+            .map_err(ServiceError::from)?;
+        if removed > 0 {
+            self.invalidate_all_perm_cache().await;
         }
-        let role_ids: Vec<i64> = SysRole::find()
-            .select_only()
-            .column(RoleColumn::RoleId)
-            .filter(RoleColumn::TenantId.eq(tenant_id))
-            .filter(RoleColumn::DelFlag.eq("0"))
-            .into_tuple::<i64>()
-            .all(self.db())
-            .await?;
-        if role_ids.is_empty() {
-            return Ok(());
-        }
-        let mut predicate =
-            sea_orm::Condition::any().add(RoleMenuColumn::MenuId.is_in(ungradable_ids.clone()));
-        if let Some(ref wl) = whitelist {
-            predicate = predicate.add(RoleMenuColumn::MenuId.is_not_in(wl.clone()));
-        }
-        let deleted = SysRoleMenu::delete_many()
-            .filter(RoleMenuColumn::RoleId.is_in(role_ids.clone()))
-            .filter(predicate)
-            .exec(self.db())
-            .await?;
-        tracing::info!(
-            tenant_id,
-            roles = role_ids.len(),
-            removed = deleted.rows_affected,
-            whitelist_trimmed = whitelist.is_some(),
-            ungrantable = ungradable_ids.len(),
-            "套餐变更收敛：已移除超出套餐白名单 / 已不可授予的角色菜单授权"
-        );
         Ok(())
+    }
+
+    /// 失效所有用户权限缓存（best-effort，对齐 `sys_menu_service` 同名语义：
+    /// SCAN 遍历 `perm:user:*` 批量删除，避免 KEYS 阻塞；失败仅记日志）。
+    ///
+    /// 触发面：本服务收敛删除了 `sys_role_menu` 行（角色授权集合变化 ⇒ perms 下发变化）。
+    async fn invalidate_all_perm_cache(&self) {
+        let pattern = format!("{}*", crate::common::constants::PERM_CACHE_PREFIX);
+        let Ok(keys) = self.store.scan(&pattern, None).await else {
+            tracing::warn!("权限缓存失效：SCAN {} 失败（best-effort 忽略）", pattern);
+            return;
+        };
+        if keys.is_empty() {
+            return;
+        }
+        let _ = self.store.del(&keys).await;
     }
 
     // ---------- 启停 / 删除 / 恢复 ----------
@@ -2689,6 +2659,83 @@ fn generate_init_password() -> String {
         out.push(SYM[bytes[9 + i] as usize % SYM.len()] as char);
     }
     out
+}
+
+/// **套餐授权收敛核心**（自由函数，单一事实源；方案 §5.17）。
+///
+/// 删除该租户所有角色中「不在套餐白名单内」或「已不可授予」的菜单授权，
+/// 返回删除行数。两个收敛面（白名单改小 / 能力位关闭）语义详见
+/// [`SysTenantService::converge_tenant_role_menus`]。
+///
+/// 两个调用方：
+/// - [`SysTenantService::converge_tenant_role_menus`]（套餐变更 / 套餐能力位变更路径，
+///   追加 perm cache 失效）；
+/// - `initialize::converge_tenant_grants_on_startup`（**启动期兜底**：平台层
+///   `[features]` on→off 改配置重启后，存量授权无回收触发点——收敛只在套餐变更时跑，
+///   此处补全；幂等：无收敛面时零删除）。
+///
+/// 返回 `DbErr`（不映射 ServiceError）：启动兜底调用方按 anyhow 处理并 WARN continue。
+pub(crate) async fn converge_tenant_role_menus_conn(
+    db: &DatabaseConnection,
+    tenant_id: i64,
+    package: &crate::entity::sys_tenant_package::Model,
+) -> Result<u64, DbErr> {
+    let whitelist = parse_menu_ids(&package.menu_ids);
+    // 不可授予菜单（平台专属前缀 ∪ tier2 未接过滤表，**带能力位判定**）——与角色授权
+    // 门禁同源，套餐变更时一并移除，不把"收敛"只做成白名单裁剪。
+    let features = effective_features_from_package(Some(package));
+    let menu_perms: Vec<(i64, Option<String>)> = SysMenu::find()
+        .select_only()
+        .column(MenuColumn::MenuId)
+        .column(MenuColumn::Perms)
+        .filter(MenuColumn::DelFlag.eq("0"))
+        .into_tuple::<(i64, Option<String>)>()
+        .all(db)
+        .await?;
+    let ungradable_ids: Vec<i64> = menu_perms
+        .into_iter()
+        .filter(|(_, perms)| {
+            perms.as_deref().is_some_and(|p| {
+                !p.is_empty()
+                    && !crate::common::features::is_grantable_perm_with_features(p, &features)
+            })
+        })
+        .map(|(id, _)| id)
+        .collect();
+    // 两个收敛面都为空 ⇒ 无需删任何东西（也避免空 `Condition::any()` 的语义歧义）
+    if whitelist.is_none() && ungradable_ids.is_empty() {
+        return Ok(0);
+    }
+    let role_ids: Vec<i64> = SysRole::find()
+        .select_only()
+        .column(RoleColumn::RoleId)
+        .filter(RoleColumn::TenantId.eq(tenant_id))
+        .filter(RoleColumn::DelFlag.eq("0"))
+        .into_tuple::<i64>()
+        .all(db)
+        .await?;
+    if role_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut predicate =
+        sea_orm::Condition::any().add(RoleMenuColumn::MenuId.is_in(ungradable_ids.clone()));
+    if let Some(ref wl) = whitelist {
+        predicate = predicate.add(RoleMenuColumn::MenuId.is_not_in(wl.clone()));
+    }
+    let deleted = SysRoleMenu::delete_many()
+        .filter(RoleMenuColumn::RoleId.is_in(role_ids.clone()))
+        .filter(predicate)
+        .exec(db)
+        .await?;
+    tracing::info!(
+        tenant_id,
+        roles = role_ids.len(),
+        removed = deleted.rows_affected,
+        whitelist_trimmed = whitelist.is_some(),
+        ungrantable = ungradable_ids.len(),
+        "套餐授权收敛：已移除超出套餐白名单 / 已不可授予的角色菜单授权"
+    );
+    Ok(deleted.rows_affected)
 }
 
 #[cfg(test)]

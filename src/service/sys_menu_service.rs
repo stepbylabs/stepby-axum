@@ -32,8 +32,8 @@ use crate::shared_store::SharedStore;
 use crate::utils::parse_id_list;
 use crate::utils::tree::build_tree;
 
-/// 权限缓存 key 前缀（格式：perm:user:{user_id}）
-const PERM_CACHE_PREFIX: &str = "perm:user:";
+/// 权限缓存 key 前缀（单一事实源 = `common::constants::PERM_CACHE_PREFIX`）
+use crate::common::constants::PERM_CACHE_PREFIX;
 /// 权限缓存 TTL（秒，5 分钟，较短以保证权限变更及时生效）
 const PERM_CACHE_TTL: i64 = 300;
 /// 空值缓存标记（防穿透：用户无角色时缓存此标记，避免反复打 DB）

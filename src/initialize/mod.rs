@@ -431,6 +431,14 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO 限流分档失败: {}", e))?;
 
+        // 4.2b §5.17 启动期能力位授权收敛（幂等；**失败不阻断启动**）：
+        //      平台层 `[features]` on→off（改配置重启）后，存量"曾经可授予"的角色菜单
+        //      授权**无回收触发点**（收敛只在套餐变更时跑）——此处按有效能力集
+        //      （平台天花板 ∩ 套餐）对全部绑定套餐的租户全量兜底回收，消除
+        //      "菜单可见但请求 403"假入口的数据层残留（展示层由 getRouters
+        //      `prune_capability_gated_menus` 兜底）。
+        converge_tenant_grants_on_startup(&db, &store).await;
+
         // 4.3 v5-E6：运行期敏感凭据存量明文回填（幂等；CONFIG_ENC_KEY 未配置时跳过，
         //     与 id_token_secret 迁移期 fail-open 策略一致）
         ensure_runtime_secrets_encrypted(&db, &settings.config_enc_key).await;
@@ -4240,6 +4248,126 @@ async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i6
 ///
 /// 幂等：`sso:v4_legacy_at_migrated` SETNX 标记；已标记即跳过。
 /// Redis 故障时跳过转写并告警（下次启动重试）。
+/// §5.17 启动期能力位授权收敛（幂等；**任何失败都不阻断启动**）。
+///
+/// ## 背景（为何需要启动期兜底）
+///
+/// 授权回收（`converge_tenant_role_menus_conn`）此前只在**套餐变更**时触发；平台层
+/// `[features]` on→off（改配置重启）后，租户的"曾经可授予"授权行残留——有效能力集
+/// （平台天花板 ∩ 套餐）已把该能力钳为 off，但 `sys_role_menu` 行还在 ⇒
+/// "菜单可见但请求 403"的假入口数据层残留。
+///
+/// ## 语义
+///
+/// - 遍历**全部绑定套餐**的未删除租户，逐个按其套餐跑收敛核心（幂等：无收敛面零删除）；
+/// - 单租户失败 WARN continue（数据清理任务，非启动必需；下次启动自然重试）；
+/// - 总删除 > 0 ⇒ best-effort 失效全部 `perm:user:*` 权限缓存（授权集合已变化）；
+/// - **WARN 级汇总日志**：授权行被删属不可自动回滚操作（重开能力位后需重新授权），
+///   运维必须能看到本次启动删了什么。
+///
+/// 测试策略：核心收敛语义（回收 + 幂等）由 `integration_tests::capability_features`
+/// 直驱 `converge_tenant_role_menus_conn` 覆盖；本函数为**薄编排**（查询 + 循环 +
+/// 缓存失效），且全表遍历在并行共享库测试下有跨用例污染风险，故不直测。
+async fn converge_tenant_grants_on_startup(
+    db: &DatabaseConnection,
+    store: &Arc<dyn SharedStore>,
+) {
+    use crate::entity::{sys_tenant, sys_tenant_package};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use std::collections::HashMap;
+
+    // 套餐小表全量载入内存（pkg_id → Model），避免逐租户回查
+    let packages: Vec<sys_tenant_package::Model> = match sys_tenant_package::Entity::find()
+        .filter(sys_tenant_package::Column::DelFlag.eq("0"))
+        .all(db)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("启动期授权收敛：查询套餐表失败（跳过，下次启动重试）: {e}");
+            return;
+        }
+    };
+    if packages.is_empty() {
+        return;
+    }
+    let pkg_map: HashMap<i64, sys_tenant_package::Model> = packages
+        .into_iter()
+        .map(|p| (p.package_id, p))
+        .collect();
+
+    let tenants: Vec<sys_tenant::Model> = match sys_tenant::Entity::find()
+        .filter(sys_tenant::Column::DelFlag.eq("0"))
+        .filter(sys_tenant::Column::PackageId.is_not_null())
+        .all(db)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("启动期授权收敛：查询租户表失败（跳过，下次启动重试）: {e}");
+            return;
+        }
+    };
+    if tenants.is_empty() {
+        tracing::info!("启动期授权收敛：无绑定套餐的租户，跳过");
+        return;
+    }
+
+    let mut total_removed: u64 = 0;
+    let mut failed: usize = 0;
+    for t in &tenants {
+        let Some(pkg_id) = t.package_id else { continue };
+        let Some(pkg) = pkg_map.get(&pkg_id) else {
+            tracing::warn!(
+                tenant_id = t.tenant_id,
+                package_id = pkg_id,
+                "启动期授权收敛：租户绑定的套餐不存在/已删除，跳过该租户"
+            );
+            continue;
+        };
+        match crate::service::sys_tenant_service::converge_tenant_role_menus_conn(
+            db,
+            t.tenant_id,
+            pkg,
+        )
+        .await
+        {
+            Ok(removed) => total_removed += removed,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    tenant_id = t.tenant_id,
+                    error = %e,
+                    "启动期授权收敛失败（跳过该租户，不阻断启动）"
+                );
+            }
+        }
+    }
+
+    if total_removed > 0 {
+        // 授权集合已变化 ⇒ perm cache 必须失效（best-effort，对齐 menu_service 同名语义）
+        let pattern = format!("{}*", crate::common::constants::PERM_CACHE_PREFIX);
+        if let Ok(keys) = store.scan(&pattern, None).await
+            && !keys.is_empty()
+        {
+            let _ = store.del(&keys).await;
+        }
+        tracing::warn!(
+            tenants = tenants.len(),
+            removed = total_removed,
+            failed,
+            "启动期授权收敛：回收了平台层能力位/套餐收敛面之外的角色菜单授权。\
+             授权行删除不可自动回滚——重开能力位/扩白名单后需重新授权"
+        );
+    } else {
+        tracing::info!(
+            tenants = tenants.len(),
+            failed,
+            "启动期授权收敛：无残留不可授予授权（幂等零删除）"
+        );
+    }
+}
+
 pub(crate) async fn revoke_legacy_sso_at_tokens(store: &Arc<dyn SharedStore>) {
     const LEGACY_MARKER: &str = "sso:v4_legacy_at_migrated";
     const LEGACY_AT_PREFIX: &str = "sso:at:";
