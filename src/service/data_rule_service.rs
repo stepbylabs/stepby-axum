@@ -49,6 +49,7 @@ pub struct DataRuleContext {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DataRuleDto {
     pub rule_id: Option<i64>,
     pub rule_name: String,
