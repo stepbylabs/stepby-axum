@@ -181,6 +181,11 @@ common_max_size = 10485760
 
 # S3 兼容对象存储配置（backend = "s3" 时使用；敏感字段支持环境变量注入）
 # access_key / secret_key 可通过 `--env UPLOAD__S3__ACCESS_KEY=...` 或环境变量注入，避免入库配置文件
+# 分片上传/断点续传（G-10）：单文件总大小上限（字节，默认 64MB=67108864）与
+#   会话 TTL（秒，默认 7200）。分片先落服务端暂存区（__chunks/），complete 时
+#   整对象校验+扫描后落最终存储；孤儿分片由定时任务 chunk_cleanup 兜底清理。
+# common_chunk_max_total_size = 67108864
+# chunk_session_ttl_secs = 7200
 # G-11：[upload.s3] 为出厂缺省——运行时可在管理页「OSS 存储配置」（sys.upload.s3.* 七键，
 # 平台专属，secret_key 信封加密）动态覆盖，写后热生效、无需重启；
 # backend 档位（local ↔ s3）本身仍以本文件为准（重启生效）。

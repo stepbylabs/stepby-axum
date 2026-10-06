@@ -125,8 +125,15 @@ pub struct AppState {
     pub ai_config_service: Arc<crate::ai::config_service::AiConfigService>,
     /// G-11：OSS 存储配置运行时服务（sys.upload.s3.* 双源 + 后端指纹缓存）
     pub upload_config_service: Arc<crate::service::upload_config_service::UploadConfigService>,
-    /// 文件存储后端（F1：local / s3，按 `upload.backend` 配置切换）
+    /// 文件存储后端（F1：local / s3，按 `upload.backend` 配置切换——启动时构建的出厂档）
     pub storage: Arc<dyn crate::storage::StorageBackend>,
+    /// G-11 第二档：backend 档位热切换层（ArcSwap）
+    ///
+    /// `None` = 未热切换（读走 `storage` 出厂档，行为与改造前逐字节一致）；
+    /// `Some(backend)` = 管理页切换后的运行档（读侧无锁 load_full，写侧整指针
+    /// 替换，旧 Arc 由最后一名使用者持有到在途请求结束——无撕裂）。切换持久化于
+    /// `sys.upload.backend`，重启后由启动恢复逻辑重新装载。
+    pub hot_storage: arc_swap::ArcSwapOption<HotStorageBackend>,
     /// WebSocket 全局广播通道（实时通知推送）
     pub ws_broadcast: broadcast::Sender<WsMessage>,
     /// WebSocket 按用户定向通道注册表（user_id → 该用户全部活跃连接的发送端）
@@ -399,6 +406,7 @@ impl AppState {
             ip_locator,
             ip_location_service,
             storage,
+            hot_storage: arc_swap::ArcSwapOption::new(None),
             ws_broadcast,
             ws_users: RwLock::new(HashMap::new()),
             observability,
@@ -413,11 +421,86 @@ impl AppState {
 ///   （配置未变复用实例，变更整实例替换，旧实例 Arc 存活至在途请求结束）。
 ///
 /// 保存/读取/删除链路统一经本方法取后端，避免"写进新配置、删在旧配置"的撕裂。
+/// G-11 第二档：热切换运行档的 newtype 包装
+///
+/// 为何不用裸 `Arc<dyn StorageBackend>`：arc-swap 的 `ArcSwapOption<T>` 要求
+/// `T: Sized`（`Arc<T>: RefCnt` 需要 T 定长），trait object 直接作 T 编译不过；
+/// newtype 补齐 Sized 约束。内部持有 `Arc<dyn StorageBackend>`（trait 已有
+/// Send+Sync supertrait，字段自动满足跨线程要求），并委托实现全部存储方法——
+/// `Arc<HotStorageBackend>` 可零成本作为 `Arc<dyn StorageBackend>` 使用。
+#[derive(Clone)]
+pub struct HotStorageBackend(std::sync::Arc<dyn crate::storage::StorageBackend>);
+
+impl HotStorageBackend {
+    /// 包装一个运行档后端
+    pub fn new(inner: std::sync::Arc<dyn crate::storage::StorageBackend>) -> Self {
+        Self(inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::storage::StorageBackend for HotStorageBackend {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+
+    fn supports_static(&self) -> bool {
+        self.0.supports_static()
+    }
+
+    async fn save(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        key: &str,
+        url_prefix: &str,
+        bytes: &[u8],
+    ) -> Result<String, crate::common::AppError> {
+        self.0.save(dir, tenant_id, key, url_prefix, bytes).await
+    }
+
+    async fn read(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, crate::common::AppError> {
+        self.0.read(dir, tenant_id, key).await
+    }
+
+    async fn delete(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        key: &str,
+    ) -> Result<(), crate::common::AppError> {
+        self.0.delete(dir, tenant_id, key).await
+    }
+
+    async fn list(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        url_prefix: &str,
+    ) -> Result<Vec<crate::storage::StorageObject>, crate::common::AppError> {
+        self.0.list(dir, tenant_id, url_prefix).await
+    }
+}
+
 impl AppState {
     pub async fn resolve_storage(
         &self,
     ) -> Result<std::sync::Arc<dyn crate::storage::StorageBackend>, crate::common::ServiceError>
     {
+        // G-11 第二档：已热切换 → 直接用运行档（ArcSwap 读侧无锁；解出后 clone
+        // inner Arc，即刻脱离 Guard 生命周期）
+        let hot: Option<std::sync::Arc<HotStorageBackend>> = (*self.hot_storage.load()).clone();
+        if let Some(h) = hot {
+            // HotStorageBackend 实现了 StorageBackend —— Arc<Hot> 直接
+            // unsize coercion 为 Arc<dyn StorageBackend>
+            return Ok(h);
+        }
+        // 未热切换：出厂档 + sys.upload.s3.* 凭据覆盖（第一档逻辑）
         self.upload_config_service
             .resolve_s3_backend(&self.storage)
             .await

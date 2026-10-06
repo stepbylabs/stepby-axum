@@ -52,6 +52,54 @@ pub async fn update_config(
     Ok(AjaxResult::success_msg(&tr!("msg.success.operation")))
 }
 
+/// POST /system/uploadConfig/switchBackend —— backend 档位热切换（G-11 第二档）
+///
+/// 构建新档后端（fail-closed：s3 档配置不完整则拒绝切换）→ ArcSwap 整指针替换
+/// （在途请求由旧实例 Arc 存活，无撕裂）→ 持久化 sys.upload.backend（重启后由
+/// 启动恢复逻辑重新装载）。切到与当前生效档相同的档位 = 幂等（重装后端）。
+#[derive(Debug, serde::Deserialize, garde::Validate, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchBackendDto {
+    /// 目标档位（local / s3）
+    #[garde(length(min = 4, max = 8))]
+    pub mode: String,
+}
+
+pub async fn switch_backend(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    ValidatedJson(dto): ValidatedJson<SwitchBackendDto>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    ensure_platform(&operator)?;
+    let mode = dto.mode.trim().to_lowercase();
+    if mode != "local" && mode != "s3" {
+        return Err(AppError::bad_request(&format!(
+            "不支持的存储档位: {mode}（可选 local / s3）"
+        )));
+    }
+    let backend = state
+        .upload_config_service
+        .build_backend_for_mode(&mode)
+        .await?;
+    // ArcSwap 整指针替换（读侧无锁；在途请求持旧 Arc 至自然结束）
+    state.hot_storage.store(Some(std::sync::Arc::new(
+        crate::state::HotStorageBackend::new(backend),
+    )));
+    state
+        .upload_config_service
+        .persist_backend_mode(&mode)
+        .await?;
+    tracing::info!(
+        operator = %operator.user_id(),
+        mode = %mode,
+        "OSS 存储档位已热切换（无需重启，即时生效）"
+    );
+    Ok(AjaxResult::success(serde_json::json!({
+        "mode": mode,
+        "message": format!("存储档位已切换为 {mode}，立即生效")
+    })))
+}
+
 /// POST /system/uploadConfig/test —— 连通性测试（ListObjectsV2 探活）
 pub async fn test_config(
     State(state): State<Arc<AppState>>,

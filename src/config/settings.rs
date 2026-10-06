@@ -2000,6 +2000,14 @@ pub struct UploadConfig {
     /// 通用上传最大字节数
     #[serde(default = "default_common_max_size")]
     pub common_max_size: usize,
+    /// 分片上传单文件总大小上限（字节，默认 64MB；G-10）——分片暂存 + complete
+    /// 拼接为内存语义（上限 × 并发许可 = 进程峰值），更大文件的流式校验重构另行立项
+    #[serde(default = "default_common_chunk_max_total_size")]
+    pub common_chunk_max_total_size: usize,
+    /// 分片会话 TTL（秒，默认 7200 = 2h；过期未 complete 的会话自动失效，
+    /// 孤儿分片文件由内置定时任务 chunk_cleanup 兜底清理）
+    #[serde(default = "default_chunk_session_ttl_secs")]
+    pub chunk_session_ttl_secs: u64,
     /// 存储后端类型（`local` 或 `s3`），默认 local（F1）
     ///
     /// - `local`：本地文件系统（现有默认行为，配合 `/uploads/*` 静态托管）
@@ -2024,6 +2032,8 @@ impl Default for UploadConfig {
             common_url_prefix: default_common_url_prefix(),
             common_allowed_exts: default_common_allowed_exts(),
             common_max_size: default_common_max_size(),
+            common_chunk_max_total_size: default_common_chunk_max_total_size(),
+            chunk_session_ttl_secs: default_chunk_session_ttl_secs(),
             backend: default_upload_backend(),
             s3: S3StorageConfig::default(),
         }
@@ -2157,6 +2167,14 @@ fn default_common_allowed_exts() -> Vec<String> {
 
 fn default_common_max_size() -> usize {
     crate::common::constants::UPLOAD_MAX_SIZE
+}
+
+fn default_common_chunk_max_total_size() -> usize {
+    64 * 1024 * 1024
+}
+
+fn default_chunk_session_ttl_secs() -> u64 {
+    7200
 }
 
 /// 审批工作流配置（m20260923_000002 flow_module）

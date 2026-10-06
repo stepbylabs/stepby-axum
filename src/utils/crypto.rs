@@ -1,5 +1,7 @@
 //! 加密工具模块
 
+use std::sync::OnceLock;
+
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
@@ -192,6 +194,24 @@ pub fn hex_encode_digest(digest: &[u8]) -> String {
         let _ = write!(hex, "{:02x}", b);
     }
     hex
+}
+
+// ==================== 运行时主密钥（G-14 通用层：EncryptedString 列类型的密钥源） ====================
+
+/// 运行时主密钥（进程级 OnceLock；AppInitializer 启动时注入 settings.config_enc_key）
+static RUNTIME_MASTER_KEY: OnceLock<String> = OnceLock::new();
+
+/// 注入运行时主密钥（启动期调用一次；重复调用为 no-op，首写优先）
+pub fn set_runtime_master_key(key: String) {
+    let _ = RUNTIME_MASTER_KEY.set(key);
+}
+
+/// 读取运行时主密钥（EncryptedString 列类型的 seal/unseal 密钥源）
+///
+/// 未初始化返回空串——seal/unseal 走既有迁移期 fail-open 策略（原样明文），
+/// 与 CONFIG_ENC_KEY 未配置时的全局口径一致；启动回填（v5-E6）兜底存量明文。
+pub fn runtime_master_key() -> &'static str {
+    RUNTIME_MASTER_KEY.get().map(String::as_str).unwrap_or("")
 }
 
 /// 轮换过渡期旧密钥（`CONFIG_ENC_KEY_PREVIOUS`，OnceLock 进程级缓存）

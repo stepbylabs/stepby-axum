@@ -71,6 +71,7 @@ mod tenant_index_plan;
 mod tenant_scope;
 mod tool_gen;
 mod totp;
+mod upload_chunk;
 mod user_erasure;
 mod user_pii_masking;
 mod webauthn;

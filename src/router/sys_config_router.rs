@@ -35,6 +35,10 @@ pub fn config_routes() -> Router<Arc<AppState>> {
             "/system/uploadConfig/test",
             post(upload_config_handler::test_config),
         )
+        .route(
+            "/system/uploadConfig/switchBackend",
+            post(upload_config_handler::switch_backend),
+        )
         // 静态路由优先注册
         .route("/system/config/list", get(sys_config_handler::list))
         .route(

@@ -322,6 +322,16 @@ error:
     file_not_found: 文件不存在
     resource_not_found: 资源不存在
     upload_success: 上传成功
+    chunk_session_invalid: 非法的分片会话 ID
+    chunk_session_missing: 分片会话不存在或已过期，请重新发起上传
+    chunk_store_unavailable: 共享态存储暂不可用，请稍后重试
+    chunk_index_missing: 缺少 partIndex 字段
+    chunk_part_missing: 分片 {index} 缺失，请重新上传该分片
+    chunk_parts_missing: 分片未收齐（已收 {received}/{total}），不能合并
+    chunk_parts_invalid: 分片数量非法（1-10000），或单片大小与总大小不一致
+    chunk_part_too_large: 单片大小超过请求体上限 {limit}MB，请减小单片或增大分片数
+    chunk_total_too_large: 文件总大小超过分片上传上限 {max}MB
+    chunk_busy: 合并任务繁忙，请稍后重试
   cache:
     name_wildcard_forbidden: 缓存名称不允许包含通配符
     info_fetch_failed: 获取缓存信息失败

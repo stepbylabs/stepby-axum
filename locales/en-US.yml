@@ -322,6 +322,16 @@ error:
     file_not_found: File does not exist
     resource_not_found: Resource does not exist
     upload_success: Upload successful
+    chunk_session_invalid: Invalid chunk session ID
+    chunk_session_missing: Chunk session not found or expired, please restart the upload
+    chunk_store_unavailable: Shared-state store temporarily unavailable, please retry later
+    chunk_index_missing: Missing partIndex field
+    chunk_part_missing: Part {index} is missing, please re-upload it
+    chunk_parts_missing: Parts incomplete ({received}/{total} received), cannot merge
+    chunk_parts_invalid: Invalid part count (1-10000), or part size inconsistent with total size
+    chunk_part_too_large: Part size exceeds body limit {limit}MB, reduce part size or increase part count
+    chunk_total_too_large: File total size exceeds chunked-upload limit {max}MB
+    chunk_busy: Merge tasks are busy, please retry later
   excel:
     fields_empty: Export field list is empty or no matching fields
     build_task_failed: Excel build task failed

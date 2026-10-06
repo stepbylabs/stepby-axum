@@ -180,6 +180,8 @@ impl JobScheduler {
         let msg_retry_db = db.clone();
         let msg_retry_config = config.clone();
         let msg_retry_store = store.clone();
+        // G-10：孤儿分片清理任务同样需要 config 快照（TTL 阈值读取）
+        let chunk_cleanup_config = config.clone();
         // 报表订阅推送任务同样需在 cleanup_job / msg_retry_job move 前 clone
         // （db / config 均非 Copy，闭包 move 后原变量不可再使用）
         let report_db = db.clone();
@@ -604,6 +606,69 @@ impl JobScheduler {
 
         tracing::info!(
             "内置定时任务注册成功: report_sub_due (cron: '0 */1 * * * *', 按订阅自身 cron 到期推送)"
+        );
+
+        // G-10 孤儿分片清理任务：每 30 分钟扫一次分片暂存区，删除 mtime 超过
+        // 会话 TTL + 10 分钟余量的分片目录（会话键 TTL 过期后的文件侧兜底——
+        // 进程重启/清理失败等场景的孤儿文件不会无限堆积）。
+        let chunk_cleanup_store = store.clone();
+        let chunk_cleanup_job = Job::new_async("0 */30 * * * *", move |_uuid, _l| {
+            let config = chunk_cleanup_config.clone();
+            let store = chunk_cleanup_store.clone();
+            Box::pin(async move {
+                const CHUNK_CLEANUP_LOCK_KEY: &str = "lock:scheduler:chunk_cleanup";
+                let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                    store.clone(),
+                    CHUNK_CLEANUP_LOCK_KEY,
+                    true,
+                    1500,
+                    "chunk_cleanup",
+                )
+                .await
+                else {
+                    return;
+                };
+                let ttl = config.upload.chunk_session_ttl_secs;
+                let stale_after = std::time::Duration::from_secs(ttl + 600);
+                let root = crate::common::upload::resolve_upload_dir("uploads").await;
+                let chunks_root = root.join("__chunks");
+                let mut removed = 0usize;
+                let Ok(tenant_dirs) = std::fs::read_dir(&chunks_root) else {
+                    return; // 无分片暂存区（从未使用过分片上传）
+                };
+                let now = std::time::SystemTime::now();
+                for tenant_entry in tenant_dirs.flatten() {
+                    let Ok(session_dirs) = std::fs::read_dir(tenant_entry.path()) else {
+                        continue;
+                    };
+                    for session_entry in session_dirs.flatten() {
+                        let stale = session_entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|mtime| now.duration_since(mtime).ok())
+                            .is_some_and(|age| age > stale_after);
+                        if stale && std::fs::remove_dir_all(session_entry.path()).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                    // 租户目录空了顺带清掉（保持暂存区扁平）
+                    let _ = std::fs::remove_dir(tenant_entry.path());
+                }
+                if removed > 0 {
+                    tracing::info!("chunk_cleanup: 已清理过期分片目录 {removed} 个（TTL={ttl}s）");
+                }
+            })
+        })
+        .map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to create chunk cleanup task: {}", e))
+        })?;
+        scheduler.add(chunk_cleanup_job).await.map_err(|e| {
+            SchedulerError::SchedulerInternal(format!("Failed to add chunk cleanup task: {}", e))
+        })?;
+
+        tracing::info!(
+            "内置定时任务注册成功: chunk_cleanup (cron: '0 */30 * * * *', 孤儿分片兜底清理)"
         );
 
         // ==================== 审批超时扫描（m20260923_000002 flow_module；V5 §1.2 路径②）====================
