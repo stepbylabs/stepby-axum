@@ -98,7 +98,11 @@ pub async fn record_change<C: ConnectionTrait>(
         before_data: Set(before_json),
         after_data: Set(after_json),
         // 操作人 ID=0 或名为空视为未知（0 不映射到任何真实用户；空串存 NULL）
-        operator_id: Set(if operator.0 > 0 { Some(operator.0) } else { None }),
+        operator_id: Set(if operator.0 > 0 {
+            Some(operator.0)
+        } else {
+            None
+        }),
         operator_name: Set(if operator.1.is_empty() {
             None
         } else {
@@ -199,11 +203,7 @@ pub async fn resolve_operator<C: ConnectionTrait>(
         (Some(id), None) => {
             let sql = marker("SELECT user_name FROM sys_user WHERE user_id = ? LIMIT 1");
             let row = conn
-                .query_one_raw(Statement::from_sql_and_values(
-                    backend,
-                    &sql,
-                    [id.into()],
-                ))
+                .query_one_raw(Statement::from_sql_and_values(backend, &sql, [id.into()]))
                 .await
                 .ok()
                 .flatten();
@@ -214,13 +214,11 @@ pub async fn resolve_operator<C: ConnectionTrait>(
         }
         (None, Some(name)) => {
             // 排除软删行：软删用户 user_name 已被释放改写，不会撞正常名
-            let sql = marker("SELECT user_id FROM sys_user WHERE user_name = ? AND (del_flag IS NULL OR del_flag <> '2') LIMIT 1");
+            let sql = marker(
+                "SELECT user_id FROM sys_user WHERE user_name = ? AND (del_flag IS NULL OR del_flag <> '2') LIMIT 1",
+            );
             let row = conn
-                .query_one_raw(Statement::from_sql_and_values(
-                    backend,
-                    &sql,
-                    [name.into()],
-                ))
+                .query_one_raw(Statement::from_sql_and_values(backend, &sql, [name.into()]))
                 .await
                 .ok()
                 .flatten();
@@ -430,7 +428,16 @@ pub async fn audit_update<C: ConnectionTrait, B: serde::Serialize, A: serde::Ser
     let operator = resolve_operator(conn, operator_user_id, operator_name).await;
     let before = serde_json::to_value(before).unwrap_or(Value::Null);
     let after = serde_json::to_value(after).unwrap_or(Value::Null);
-    record_change(conn, table, pk, ACTION_UPDATE, Some(before), Some(after), operator).await
+    record_change(
+        conn,
+        table,
+        pk,
+        ACTION_UPDATE,
+        Some(before),
+        Some(after),
+        operator,
+    )
+    .await
 }
 
 /// DELETE 变更留痕快捷入口（`before` 传事务内删除前 Model 引用）
@@ -472,7 +479,10 @@ mod tests {
     fn diff_update_only_changed_keys() {
         let before = json!({"status": "0", "email": "a@x.com", "same": 1});
         let after = json!({"status": "1", "email": "a@x.com", "same": 1});
-        assert_eq!(diff_changed_fields(Some(&before), Some(&after)), vec!["status"]);
+        assert_eq!(
+            diff_changed_fields(Some(&before), Some(&after)),
+            vec!["status"]
+        );
     }
 
     #[test]
@@ -516,7 +526,9 @@ mod tests {
     #[tokio::test]
     async fn audit_helpers_write_correct_action_semantics() {
         use sea_orm::TransactionTrait;
-        let db = crate::repository::test_support::migrated_db().await.unwrap();
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
         let after_model = json!({"id": 7_i64, "name": "demo", "password": "plain-secret"});
 
         let txn = db.begin().await.unwrap();
@@ -564,8 +576,7 @@ mod tests {
 
         // UPDATE：两侧均有值，changed_fields 捕获 name 变更（password 值未变不重复计入）
         assert_eq!(rows[1].action, "UPDATE");
-        let changed1: Vec<String> =
-            serde_json::from_str(rows[1].changed_fields.as_str()).unwrap();
+        let changed1: Vec<String> = serde_json::from_str(rows[1].changed_fields.as_str()).unwrap();
         assert!(changed1.contains(&"name".to_string()));
 
         // DELETE：after 为空、before 有值

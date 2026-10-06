@@ -4,8 +4,19 @@ use crate::config::DatabaseConfig;
 use crate::db::db_type::DbType;
 use crate::db::limits;
 use sea_orm::sqlx::sqlite::SqliteJournalMode;
+// G-12：log_slow_statements / log_statements 定义在 sqlx::ConnectOptions trait 上
+// （MySQL 原生路径同款引入），SQLite/PostgreSQL 的 map_sqlx_*_opts 闭包内调用需要 trait 在作用域
+use sea_orm::sqlx::ConnectOptions as _;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use std::time::Duration;
+
+/// 慢 SQL 日志设置解析（G-12，三后端统一口径）
+///
+/// `threshold_ms > 0` → `Some((Warn, 阈值))`；`0` → `None`（显式关闭）。
+/// WARN 级：慢查询属"需关注但不致命"，与 sqlx 默认 `LogSettings::slow_statements_level` 一致。
+fn slow_sql_logging_settings(threshold_ms: u64) -> Option<(log::LevelFilter, Duration)> {
+    (threshold_ms > 0).then(|| (log::LevelFilter::Warn, Duration::from_millis(threshold_ms)))
+}
 
 /// 初始化数据库连接池
 /// sql_logging 从 LogConfig 传入（避免 DatabaseConfig 与 LogConfig 耦合）
@@ -15,6 +26,10 @@ use std::time::Duration;
 ///
 /// 语句级超时（R9-ERR-004）：防止单条 SQL 无限占用连接，按方言落地
 /// （PostgreSQL 连接参数 / MySQL after_connect 会话变量 / SQLite 不适用）。
+///
+/// 慢 SQL 日志（G-12）：`slow_sql_threshold_ms > 0` 时三后端统一以 WARN 级
+/// 记录超阈值语句——**独立于 `sql_logging` 开关**（sqlx `LogSettings` 中
+/// `slow_statements_level` 与 `statements_level` 是独立字段）。
 pub async fn init_database(
     config: &DatabaseConfig,
     sql_logging: bool,
@@ -52,16 +67,29 @@ pub async fn init_database(
         .sqlx_logging(sql_logging);
 
     if db_type == DbType::Sqlite {
-        opt.map_sqlx_sqlite_opts(|opts| {
-            opts.journal_mode(SqliteJournalMode::Wal)
+        // G-12：sea-orm 主流程在 sql_logging=false 时会 disable_statement_logging()
+        // （连慢语句一并关闭），其 opts_fn 在主流程之后执行，此处覆盖为最终态：
+        // 慢语句日志按配置独立开关，普通语句日志维持 sql_logging 语义。
+        let slow = slow_sql_logging_settings(config.slow_sql_threshold_ms);
+        opt.map_sqlx_sqlite_opts(move |mut o| {
+            match slow {
+                Some((level, dur)) => o = o.log_slow_statements(level, dur),
+                None => o = o.log_slow_statements(log::LevelFilter::Off, Duration::ZERO),
+            }
+            o.journal_mode(SqliteJournalMode::Wal)
                 .busy_timeout(Duration::from_secs(5))
         });
     } else if db_type == DbType::Mysql {
         // MySQL：max_execution_time 是会话变量而非连接参数，sea-orm 未暴露
         // sqlx after_connect 钩子 → 走原生 MySqlPoolOptions 建池后包装回 sea-orm
-        return connect_mysql_with_statement_timeout(&opt, config.statement_timeout_secs).await;
-    } else if db_type == DbType::Postgres && config.statement_timeout_secs > 0 {
-        apply_postgres_statement_timeout(&mut opt, config.statement_timeout_secs);
+        return connect_mysql_with_statement_timeout(
+            &opt,
+            config.statement_timeout_secs,
+            config.slow_sql_threshold_ms,
+        )
+        .await;
+    } else if db_type == DbType::Postgres {
+        apply_postgres_options(&mut opt, config);
     }
 
     let db = Database::connect(opt).await.map_err(|e| {
@@ -72,26 +100,45 @@ pub async fn init_database(
     Ok(db)
 }
 
-/// PostgreSQL 语句级超时（R9-ERR-004）：
+/// PostgreSQL 连接选项（R9-ERR-004 语句级超时 + G-12 慢 SQL 日志）
+///
 /// - `statement_timeout`：覆盖全部语句（毫秒）；
 /// - `idle_in_transaction_session_timeout`：同值，防止"开事务后挂起"的连接
-///   被无限占用（statement_timeout 不覆盖事务间空闲）。
+///   被无限占用（statement_timeout 不覆盖事务间空闲）；
+/// - 慢 SQL 日志：按 `slow_sql_threshold_ms` 独立接线（同 SQLite 语义）。
 ///
-/// 配置 `statement_timeout_secs = 0` 表示显式关闭（不进入本函数）。
-fn apply_postgres_statement_timeout(opt: &mut ConnectOptions, timeout_secs: u64) {
+/// 注意：`map_sqlx_postgres_opts` 的 opts_fn 是**覆盖式存储**（单槽），
+/// 语句超时与慢日志必须合并在同一个闭包内，否则后设者顶掉先设者。
+///
+/// 配置 `statement_timeout_secs = 0` / `slow_sql_threshold_ms = 0` 分别显式关闭对应能力。
+fn apply_postgres_options(opt: &mut ConnectOptions, config: &DatabaseConfig) {
+    let timeout_secs = config.statement_timeout_secs;
+    let slow = slow_sql_logging_settings(config.slow_sql_threshold_ms);
     let timeout_ms = timeout_secs.saturating_mul(1000);
     let stmt_ms = timeout_ms.to_string();
     let idle_txn_ms = timeout_ms.to_string();
-    opt.map_sqlx_postgres_opts(move |pg_opts| {
-        pg_opts.options([
-            ("statement_timeout", stmt_ms.as_str()),
-            ("idle_in_transaction_session_timeout", idle_txn_ms.as_str()),
-        ])
+    opt.map_sqlx_postgres_opts(move |mut pg_opts| {
+        // PgConnectOptions 的 options/log_slow_statements 均为消耗式 builder（self → Self）
+        if timeout_secs > 0 {
+            pg_opts = pg_opts.options([
+                ("statement_timeout", stmt_ms.as_str()),
+                ("idle_in_transaction_session_timeout", idle_txn_ms.as_str()),
+            ]);
+        }
+        match slow {
+            Some((level, dur)) => pg_opts = pg_opts.log_slow_statements(level, dur),
+            None => pg_opts = pg_opts.log_slow_statements(log::LevelFilter::Off, Duration::ZERO),
+        }
+        pg_opts
     });
-    tracing::info!(
-        timeout_secs,
-        "PostgreSQL 语句级超时已启用（statement_timeout + idle_in_transaction_session_timeout）"
-    );
+    if timeout_secs > 0 {
+        tracing::info!(
+            timeout_secs,
+            "PostgreSQL 语句级超时已启用（statement_timeout + idle_in_transaction_session_timeout）"
+        );
+    } else {
+        tracing::info!("PostgreSQL 语句级超时已通过配置显式关闭（statement_timeout_secs=0）");
+    }
 }
 
 /// MySQL 语句级超时（R9-ERR-004）：
@@ -100,13 +147,16 @@ fn apply_postgres_statement_timeout(opt: &mut ConnectOptions, timeout_secs: u64)
 /// ⚠️ 引擎限制：`max_execution_time` 仅覆盖 SELECT；写语句无服务端语句超时，
 /// 路由层 120s 兜底超时仍生效。配置 `statement_timeout_secs = 0` 表示显式关闭。
 ///
+/// G-12：慢 SQL 日志经 `MySqlConnectOptions::log_slow_statements` 接线，
+/// 独立于 `sql_logging` 开关（与 SQLite/PostgreSQL 统一口径）。
+///
 /// 池参数（max/min connections、connect/idle timeout、max_lifetime、
 /// test_before_acquire）经 sea-orm `ConnectOptions::sqlx_pool_options()`
-/// 原样复用；SQL 日志行为（log/disable statement logging、慢语句日志）
-/// 与 sea-orm `SqlxMySqlConnector::connect` 的接线保持一致。
+/// 原样复用。
 async fn connect_mysql_with_statement_timeout(
     opt: &ConnectOptions,
     timeout_secs: u64,
+    slow_sql_threshold_ms: u64,
 ) -> anyhow::Result<DatabaseConnection> {
     use sea_orm::SqlxMySqlConnector;
     use sea_orm::sqlx::ConnectOptions as _;
@@ -121,10 +171,11 @@ async fn connect_mysql_with_statement_timeout(
         sqlx_opts = sqlx_opts.disable_statement_logging();
     } else {
         sqlx_opts = sqlx_opts.log_statements(opt.get_sqlx_logging_level());
-        let (slow_level, slow_threshold) = opt.get_sqlx_slow_statements_logging_settings();
-        if slow_level != log::LevelFilter::Off {
-            sqlx_opts = sqlx_opts.log_slow_statements(slow_level, slow_threshold);
-        }
+    }
+    // G-12：慢语句日志独立于语句日志（LogSettings 两字段独立），按配置显式驱动
+    match slow_sql_logging_settings(slow_sql_threshold_ms) {
+        Some((level, dur)) => sqlx_opts = sqlx_opts.log_slow_statements(level, dur),
+        None => sqlx_opts = sqlx_opts.log_slow_statements(log::LevelFilter::Off, Duration::ZERO),
     }
 
     let pool = if timeout_secs == 0 {

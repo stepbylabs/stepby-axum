@@ -19,6 +19,12 @@ pub struct AjaxResult<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub data: Option<T>,
+    /// 请求追踪 ID（G-13a：与响应头 `X-Request-Id` 同源同值，用户报障时直接贴给
+    /// 运维 grep 结构化日志即可定位整条请求链路）。仅在错误响应出口填充；
+    /// 成功响应缺省不输出（`skip_serializing_if`，老客户端不读不报错，兼容口径）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub trace_id: Option<String>,
 }
 
 impl<T> AjaxResult<T> {
@@ -28,6 +34,7 @@ impl<T> AjaxResult<T> {
             code: 200,
             msg: crate::tr!("msg.success.default"),
             data: Some(data),
+            trace_id: None,
         }
     }
 
@@ -37,6 +44,7 @@ impl<T> AjaxResult<T> {
             code: 200,
             msg: msg.to_string(),
             data: None,
+            trace_id: None,
         }
     }
 
@@ -46,7 +54,14 @@ impl<T> AjaxResult<T> {
             code,
             msg: msg.to_string(),
             data: None,
+            trace_id: None,
         }
+    }
+
+    /// 链式附加请求追踪 ID（G-13a：错误出口 [`AppError::into_response`] 调用）
+    pub fn with_trace_id(mut self, trace_id: String) -> Self {
+        self.trace_id = Some(trace_id);
+        self
     }
 }
 

@@ -336,12 +336,7 @@ pub async fn token(
     };
     match state
         .sso_service
-        .token(
-            params.clone(),
-            &state.store,
-            &state.config.sso,
-            &base,
-        )
+        .token(params.clone(), &state.store, &state.config.sso, &base)
         .await
     {
         Ok(result) => {
@@ -451,11 +446,7 @@ pub async fn revoke(
             params.client_secret = Some(csec);
         }
     }
-    match state
-        .sso_service
-        .revoke_token(&params, &state.store)
-        .await
-    {
+    match state.sso_service.revoke_token(&params, &state.store).await {
         // RFC 7009 §2.2：恒 200 空体（含 token 无效/已吊销），防枚举
         Ok(()) => {
             // v5-D7：吊销事件计数（无效 token 也计为 ok——防枚举语义，不区分）
@@ -544,12 +535,7 @@ pub async fn introspect(
     let issuer = state.sso_service.resolve_issuer(&state.config.sso, &base);
     match state
         .sso_service
-        .introspect(
-            &params,
-            &state.store,
-            &state.config.sso,
-            &issuer,
-        )
+        .introspect(&params, &state.store, &state.config.sso, &issuer)
         .await
     {
         // RFC 7662 §4：内省响应不得被缓存
@@ -1010,12 +996,7 @@ pub async fn client_toggle(
     // v5-S6：停用时按 client 粒度吊销该客户端名下全部用户的 SSO AT
     state
         .sso_service
-        .toggle_client(
-            id,
-            &q.enabled,
-            &state.store,
-            operator.tenant_id(),
-        )
+        .toggle_client(id, &q.enabled, &state.store, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }

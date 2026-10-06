@@ -837,11 +837,7 @@ impl SysMenuService {
                 tracing::warn!("序列化权限缓存失败，跳过缓存写入: {}", e);
                 PERM_NULL_MARKER.to_string()
             });
-            if let Err(e) = self
-                .store
-                .set_ex(&key, &json, PERM_CACHE_TTL as u64)
-                .await
-            {
+            if let Err(e) = self.store.set_ex(&key, &json, PERM_CACHE_TTL as u64).await {
                 tracing::warn!("写入权限缓存 {} 失败: {}", key, e);
             }
 

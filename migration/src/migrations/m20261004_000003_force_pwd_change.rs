@@ -75,7 +75,9 @@ async fn has_column(manager: &SchemaManager<'_>, table: &str, column: &str) -> R
 async fn execute_idempotent_insert(manager: &SchemaManager<'_>, body: &str) -> Result<(), DbErr> {
     let sql = match manager.get_connection().get_database_backend() {
         sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", body),
-        sea_orm::DatabaseBackend::Postgres => format!("INSERT INTO {} ON CONFLICT DO NOTHING", body),
+        sea_orm::DatabaseBackend::Postgres => {
+            format!("INSERT INTO {} ON CONFLICT DO NOTHING", body)
+        }
         _ => format!("INSERT IGNORE INTO {}", body),
     };
     manager.get_connection().execute_unprepared(&sql).await?;
@@ -113,7 +115,10 @@ pub async fn upsert_force_pwd_change_columns(
 
 /// admin 标记回填语句体（仅建列时执行）
 pub fn admin_marker_bodies() -> Vec<String> {
-    vec!["UPDATE sys_user SET must_change_pwd = '1' WHERE user_id = 1 AND must_change_pwd = '0'".to_string()]
+    vec![
+        "UPDATE sys_user SET must_change_pwd = '1' WHERE user_id = 1 AND must_change_pwd = '0'"
+            .to_string(),
+    ]
 }
 
 #[async_trait::async_trait]
@@ -139,7 +144,9 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared("DELETE FROM sys_config WHERE config_key = 'sys.user.forceFirstLoginChangePwd'")
+            .execute_unprepared(
+                "DELETE FROM sys_config WHERE config_key = 'sys.user.forceFirstLoginChangePwd'",
+            )
             .await?;
         manager
             .get_connection()

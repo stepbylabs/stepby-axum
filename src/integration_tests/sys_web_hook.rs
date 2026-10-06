@@ -443,7 +443,8 @@ async fn test_webhook_event_enabled_chain() {
         .clone();
     let event_id = event["id"].as_i64().expect("事件 id 应为数字");
     assert_eq!(
-        event["enabled"], serde_json::json!("1"),
+        event["enabled"],
+        serde_json::json!("1"),
         "种子事件默认启用，实际: {event}"
     );
 
@@ -463,11 +464,7 @@ async fn test_webhook_event_enabled_chain() {
         .await;
     ctx.assert_ok(&v);
     let rows = v["rows"].as_array().expect("rows 应为数组");
-    assert_eq!(
-        rows.len(),
-        1,
-        "停用过滤应命中该事件，实际: {v}"
-    );
+    assert_eq!(rows.len(), 1, "停用过滤应命中该事件，实际: {v}");
 
     // 3. 新订阅被拒绝：subscribedEvents 含停用事件 → 400
     let (status, body) = ctx
@@ -490,7 +487,10 @@ async fn test_webhook_event_enabled_chain() {
         StatusCode::BAD_REQUEST,
         "订阅停用事件应被拒绝（事件键不在目录口径），实际: {status} {body}"
     );
-    assert_eq!(body["code"], 400, "订阅停用事件业务码应为 400，实际: {body}");
+    assert_eq!(
+        body["code"], 400,
+        "订阅停用事件业务码应为 400，实际: {body}"
+    );
 
     // 4. 测试发送被拒绝：对停用事件 test-send → 400
     //    先建一个订阅其它事件的 hook 作为载体
@@ -525,7 +525,10 @@ async fn test_webhook_event_enabled_chain() {
         StatusCode::BAD_REQUEST,
         "停用事件测试发送应被拒绝，实际: {status} {body}"
     );
-    assert_eq!(body["code"], 400, "停用事件测试发送业务码应为 400，实际: {body}");
+    assert_eq!(
+        body["code"], 400,
+        "停用事件测试发送业务码应为 400，实际: {body}"
+    );
 
     // 5. 启用恢复 → 订阅该事件成功
     let v = ctx
@@ -564,7 +567,10 @@ async fn test_webhook_event_enabled_chain() {
         StatusCode::BAD_REQUEST,
         "非法 enabled 取值应被拒绝，实际: {status} {body}"
     );
-    assert_eq!(body["code"], 400, "非法 enabled 业务码应为 400，实际: {body}");
+    assert_eq!(
+        body["code"], 400,
+        "非法 enabled 业务码应为 400，实际: {body}"
+    );
     let (status, body) = ctx
         .send_raw(auth_json_request(
             &ctx,
@@ -578,7 +584,10 @@ async fn test_webhook_event_enabled_chain() {
         StatusCode::NOT_FOUND,
         "不存在的事件应 404，实际: {status} {body}"
     );
-    assert_eq!(body["code"], 404, "不存在的事件业务码应为 404，实际: {body}");
+    assert_eq!(
+        body["code"], 404,
+        "不存在的事件业务码应为 404，实际: {body}"
+    );
 
     // 清理
     let v = ctx

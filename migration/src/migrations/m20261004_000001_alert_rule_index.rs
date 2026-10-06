@@ -35,10 +35,8 @@ impl MigrationTrait for Migration {
             _ => "IF NOT EXISTS ",
         };
         for (idx_name, target) in INDEX_TARGETS {
-            conn.execute_index_ddl_ic(&format!(
-                "CREATE INDEX {ine}{idx_name} ON {target}"
-            ))
-            .await?;
+            conn.execute_index_ddl_ic(&format!("CREATE INDEX {ine}{idx_name} ON {target}"))
+                .await?;
         }
         Ok(())
     }

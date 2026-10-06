@@ -103,3 +103,5 @@ pub mod m20261006_000001_ai_config_and_history;
 pub mod m20261006_000002_data_rule;
 pub mod m20261006_000003_ai_token_usage;
 
+pub mod m20261007_000001_job_log_duration;
+pub mod m20261007_000002_upload_config_menu;

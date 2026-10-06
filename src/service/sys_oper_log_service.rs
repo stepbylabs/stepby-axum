@@ -120,11 +120,7 @@ pub struct ChainPayload {
 impl ChainPayload {
     /// 「空串 → None」归一化（对齐 record_oper_log 写库口径）
     fn normalize(s: String) -> Option<String> {
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        if s.is_empty() { None } else { Some(s) }
     }
 
     /// 写入端构造：来自中间件的 [`OperLogRecord`] + 本条 oper_time 字符串
@@ -344,9 +340,7 @@ impl SysOperLogService {
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
             sort::resolve_column::<crate::entity::sys_oper_log::Entity>(prop, SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let begin = match query.begin_time.as_deref() {
@@ -391,9 +385,7 @@ impl SysOperLogService {
         // 导出与页面列表同序：动态排序白名单解析口径一致
         let sort = page.order_by_column.as_deref().and_then(|prop| {
             sort::resolve_column::<crate::entity::sys_oper_log::Entity>(prop, SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
@@ -795,9 +787,9 @@ impl SysOperLogService {
         // 链负载必须在 record 被 move 进 ActiveModel 之前构造
         // （oper_time 用与写库完全相同的 now 值格式化，保证校验端重算一致）
         let chain_ctx = self.chain.clone();
-        let chain_payload = chain_ctx
-            .as_ref()
-            .map(|_| ChainPayload::from_parts(&record, &now.format("%Y-%m-%d %H:%M:%S%.6f").to_string()));
+        let chain_payload = chain_ctx.as_ref().map(|_| {
+            ChainPayload::from_parts(&record, &now.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+        });
 
         let am = SysOperLogActiveModel {
             title: Set(Some(record.title)),
@@ -887,7 +879,11 @@ impl SysOperLogService {
         // 抢锁：SETNX + TTL 兜底（持有者崩溃后由 TTL 释放，正常路径毫秒级完成）
         let mut handle = None;
         for _ in 0..OPER_CHAIN_LOCK_ATTEMPTS {
-            match ctx.store.lock_acquire(OPER_CHAIN_LOCK_KEY, OPER_CHAIN_LOCK_TTL_SECS).await {
+            match ctx
+                .store
+                .lock_acquire(OPER_CHAIN_LOCK_KEY, OPER_CHAIN_LOCK_TTL_SECS)
+                .await
+            {
                 Ok(Some(h)) => {
                     handle = Some(h);
                     break;
@@ -919,9 +915,16 @@ impl SysOperLogService {
         // 子序列上续写（与锁抢占耗尽的降级语义一致）。锁保证互斥但不保证写入
         // 顺序与 oper_id 同序，此处补齐顺序约束。
         if self.oper_log_repo.exists_later_chained(oper_id).await? {
-            tracing::warn!(oper_id, "链写入乱序（更大 oper_id 已抢先写链），本条降级为 NULL");
+            tracing::warn!(
+                oper_id,
+                "链写入乱序（更大 oper_id 已抢先写链），本条降级为 NULL"
+            );
             if let Err(e) = ctx.store.lock_release(&handle).await {
-                tracing::warn!("链锁释放失败（等待 TTL {}s 自动过期）: {}", OPER_CHAIN_LOCK_TTL_SECS, e);
+                tracing::warn!(
+                    "链锁释放失败（等待 TTL {}s 自动过期）: {}",
+                    OPER_CHAIN_LOCK_TTL_SECS,
+                    e
+                );
             }
             return Ok(None);
         }
@@ -940,7 +943,11 @@ impl SysOperLogService {
 
         // 释放锁（CAS；释放失败仅由 TTL 兜底，不影响链正确性——锁已护住读改写窗口）
         if let Err(e) = ctx.store.lock_release(&handle).await {
-            tracing::warn!("链锁释放失败（等待 TTL {}s 自动过期）: {}", OPER_CHAIN_LOCK_TTL_SECS, e);
+            tracing::warn!(
+                "链锁释放失败（等待 TTL {}s 自动过期）: {}",
+                OPER_CHAIN_LOCK_TTL_SECS,
+                e
+            );
         }
         Ok(Some(chain_hash))
     }
@@ -1174,9 +1181,10 @@ fn anomaly_display_title(raw: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        ChainPayload, OperLogRecord, compute_chain_hash, derive_chain_key, payload_hex_digest,
+    };
     use super::{anomaly_display_title, eval_fail_rate};
-    use super::{ChainPayload, OperLogRecord, compute_chain_hash, derive_chain_key,
-                payload_hex_digest};
 
     /// 构造一条最小可用的 OperLogRecord（空串字段走「空串 → None」归一化路径）
     fn sample_record() -> OperLogRecord {
@@ -1288,7 +1296,10 @@ mod tests {
         // 的等价行负载逐字节一致
         m.oper_param = Some(String::new());
         let read_side2 = ChainPayload::from_model(&m);
-        assert_eq!(read_side2.oper_param, None, "历史行空串 oper_param 应归一化为 None");
+        assert_eq!(
+            read_side2.oper_param, None,
+            "历史行空串 oper_param 应归一化为 None"
+        );
         let mut rec2 = rec.clone();
         rec2.oper_param = String::new();
         let write_side2 = ChainPayload::from_parts(&rec2, "2026-10-03 10:00:00.123456");
@@ -1480,7 +1491,10 @@ mod tests {
 
         // 真实篡改库内 oper_id=2 的 chain_hash → verify 定位断点
         svc.oper_log_repo
-            .set_chain_hash(2, "deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-dead")
+            .set_chain_hash(
+                2,
+                "deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-dead",
+            )
             .await
             .unwrap();
 

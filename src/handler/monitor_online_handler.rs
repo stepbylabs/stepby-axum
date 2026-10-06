@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -131,7 +131,10 @@ pub async fn list(
     let values: Vec<Option<String>> = match state.store.get_many(&keys).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("共享态存储批量读取 online 失败，降级到 sys_logininfor 查询: {}", e);
+            tracing::warn!(
+                "共享态存储批量读取 online 失败，降级到 sys_logininfor 查询: {}",
+                e
+            );
             return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
         }
     };
@@ -681,14 +684,10 @@ pub async fn my_session_logout(
     let online_key = format!("online:{}", token_hash);
 
     // 1. 读会话 → 确认存在 + 属主校验（v5-N5：横向越权防线）
-    let session_json = state
-        .store
-        .get(&online_key)
-        .await
-        .map_err(|e| {
-            tracing::error!("共享态存储查询在线会话失败（fail-closed）: {}", e);
-            AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
-        })?;
+    let session_json = state.store.get(&online_key).await.map_err(|e| {
+        tracing::error!("共享态存储查询在线会话失败（fail-closed）: {}", e);
+        AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
+    })?;
     let session: OnlineSession = match session_json {
         Some(s) => serde_json::from_str(&s).map_err(|e| {
             tracing::error!("解析 OnlineSession JSON 失败: {}", e);

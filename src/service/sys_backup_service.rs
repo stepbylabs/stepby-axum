@@ -327,7 +327,11 @@ impl SysBackupService {
 
         // 成功备份后自动轮转（fail-open：清理异常只记警告，不影响本次备份结果）
         if let Err(e) = self.cleanup_excess_backups().await {
-            tracing::warn!("备份轮转清理失败（不影响本次备份 backup_id={}）: {}", updated.backup_id, e);
+            tracing::warn!(
+                "备份轮转清理失败（不影响本次备份 backup_id={}）: {}",
+                updated.backup_id,
+                e
+            );
         }
 
         Ok(BackupCreateVo {

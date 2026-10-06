@@ -124,6 +124,8 @@ async fn test_webhook_emit_is_tenant_isolated() {
     );
 
     // ---- 5. 清理（逻辑删除 + 级联清留痕）----
-    ctx.delete_json(&format!("/monitor/webHook/{hook_same}")).await;
-    ctx.delete_json(&format!("/monitor/webHook/{hook_other}")).await;
+    ctx.delete_json(&format!("/monitor/webHook/{hook_same}"))
+        .await;
+    ctx.delete_json(&format!("/monitor/webHook/{hook_other}"))
+        .await;
 }

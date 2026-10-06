@@ -30,7 +30,9 @@ impl MigrationName for Migration {
 async fn execute_idempotent_insert(manager: &SchemaManager<'_>, body: &str) -> Result<(), DbErr> {
     let sql = match manager.get_connection().get_database_backend() {
         sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", body),
-        sea_orm::DatabaseBackend::Postgres => format!("INSERT INTO {} ON CONFLICT DO NOTHING", body),
+        sea_orm::DatabaseBackend::Postgres => {
+            format!("INSERT INTO {} ON CONFLICT DO NOTHING", body)
+        }
         _ => format!("INSERT IGNORE INTO {}", body),
     };
     manager.get_connection().execute_unprepared(&sql).await?;

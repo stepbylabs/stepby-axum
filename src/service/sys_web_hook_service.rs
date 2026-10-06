@@ -29,7 +29,8 @@ use crate::entity::sys_web_hook::{
     ActiveModel as SysWebHookActiveModel, Column as WebHookColumn, Model as SysWebHookModel,
 };
 use crate::entity::sys_web_hook_log::{
-    ActiveModel as SysWebHookLogActiveModel, Column as WebHookLogColumn, Model as SysWebHookLogModel,
+    ActiveModel as SysWebHookLogActiveModel, Column as WebHookLogColumn,
+    Model as SysWebHookLogModel,
 };
 use crate::repository::sys_web_hook::SysWebHookRepository;
 use crate::repository::sys_web_hook_log::SysWebHookLogRepository;
@@ -100,11 +101,7 @@ pub fn convert_legacy_event_types(event_types: &str) -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(|s| map_legacy_event_key(s).to_string())
         .collect();
-    if items.is_empty() {
-        None
-    } else {
-        Some(items)
-    }
+    if items.is_empty() { None } else { Some(items) }
 }
 
 /// 出站请求最大体长（1 MiB，防止 payload 异常膨胀）
@@ -272,7 +269,8 @@ pub struct WebHookTestDto {
 /// 推送记录分页查询 DTO
 #[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct WebHookLogQueryDto {    #[serde(default = "default_page_num")]
+pub struct WebHookLogQueryDto {
+    #[serde(default = "default_page_num")]
     pub page_num: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
@@ -348,7 +346,12 @@ impl From<&WebhookEventQueryDto> for PageDomain {
 /// 事件目录出参 VO
 #[derive(Debug, Clone, Serialize, ToSchema, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, rename = "WebhookEventVo", export_to = "WebhookEventVo.ts", rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "WebhookEventVo",
+    export_to = "WebhookEventVo.ts",
+    rename_all = "camelCase"
+)]
 #[schema(as = WebhookEventVo)]
 pub struct WebhookEventVo {
     pub id: i64,
@@ -563,7 +566,7 @@ pub fn sign_payload(secret: &str, body: &str) -> String {
     if secret.is_empty() {
         return String::new();
     }
-    use hmac::{Hmac, Mac, KeyInit};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = <HmacSha256 as KeyInit>::new_from_slice(secret.as_bytes())
@@ -611,7 +614,10 @@ const WEB_HOOK_LOG_SORTABLE_COLUMNS: &[(&str, WebHookLogColumn)] = &[
 /// `payload_example`（大文本）、`description` 不开放动态排序。
 const WEBHOOK_EVENT_SORTABLE_COLUMNS: &[(&str, crate::entity::sys_webhook_event::Column)] = &[
     ("id", crate::entity::sys_webhook_event::Column::Id),
-    ("event_key", crate::entity::sys_webhook_event::Column::EventKey),
+    (
+        "event_key",
+        crate::entity::sys_webhook_event::Column::EventKey,
+    ),
     ("name", crate::entity::sys_webhook_event::Column::Name),
     ("enabled", crate::entity::sys_webhook_event::Column::Enabled),
 ];
@@ -715,7 +721,9 @@ impl SysWebHookService {
             // 存量豁免集（extra_allowed）不受目录 enabled 影响（方案 C 兼容口径）。
             let catalog_hit = self.event_repo.find_by_event_key(k).await?;
             let in_catalog = matches!(catalog_hit.as_ref(), Some(e) if e.enabled == "1");
-            let in_extra = extra_allowed.iter().any(|e| e.trim().eq_ignore_ascii_case(k));
+            let in_extra = extra_allowed
+                .iter()
+                .any(|e| e.trim().eq_ignore_ascii_case(k));
             if in_extra {
                 continue;
             }
@@ -781,10 +789,11 @@ impl SysWebHookService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_web_hook::Entity>(prop, WEB_HOOK_SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+            sort::resolve_column::<crate::entity::sys_web_hook::Entity>(
+                prop,
+                WEB_HOOK_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
         let (rows, total) = self
             .hook_repo
@@ -904,8 +913,7 @@ impl SysWebHookService {
                     let new_hook = hook_repo.base().insert_conn(txn, am).await?;
 
                     // 审计合规域：INSERT 变更留痕（同事务提交/回滚）
-                    let after =
-                        serde_json::to_value(&new_hook).unwrap_or(serde_json::Value::Null);
+                    let after = serde_json::to_value(&new_hook).unwrap_or(serde_json::Value::Null);
                     let audit_operator =
                         crate::service::sys_audit_change_service::resolve_operator(
                             txn,
@@ -990,8 +998,8 @@ impl SysWebHookService {
                 self.validate_subscribed_events(&keys, &extra).await?
             }
             None => {
-                let et_changed = dto.event_types.as_deref().map(str::trim)
-                    != Some(existing_event_types.trim());
+                let et_changed =
+                    dto.event_types.as_deref().map(str::trim) != Some(existing_event_types.trim());
                 if dto.event_types.is_some() && et_changed {
                     convert_legacy_event_types(&event_types)
                         .map(|v| serde_json::to_string(&v).unwrap_or_default())
@@ -1008,8 +1016,7 @@ impl SysWebHookService {
 
         let now = crate::common::datetime::now_naive();
         // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
-        let before_snapshot =
-            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysWebHookActiveModel = existing.into();
         am.hook_name = Set(dto.hook_name);
         am.event_types = Set(event_types);
@@ -1046,8 +1053,7 @@ impl SysWebHookService {
                     let updated = hook_repo.base().update_conn(txn, am).await?;
 
                     // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
-                    let after =
-                        serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
+                    let after = serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
                     let audit_operator =
                         crate::service::sys_audit_change_service::resolve_operator(
                             txn,
@@ -1356,9 +1362,9 @@ impl SysWebHookService {
                 tokio::spawn(async move {
                     // 新建一个与 Service 等价的投递器（复用同一 http 客户端与 DB）
                     let svc = SysWebHookService::with_shared(db2, hc, enc_key);
-                    if let Err(e) =
-                        svc.deliver(&hook, &event_type, &payload, Some(LOG_SOURCE_DISPATCH))
-                            .await
+                    if let Err(e) = svc
+                        .deliver(&hook, &event_type, &payload, Some(LOG_SOURCE_DISPATCH))
+                        .await
                     {
                         tracing::warn!(
                             hook_id = hook.id,
@@ -1417,9 +1423,9 @@ impl SysWebHookService {
                 let enc_key = enc_key.clone();
                 tokio::spawn(async move {
                     let svc = SysWebHookService::with_shared(db2, hc, enc_key);
-                    if let Err(e) =
-                        svc.deliver(&hook, &event_key, &payload, Some(LOG_SOURCE_DISPATCH))
-                            .await
+                    if let Err(e) = svc
+                        .deliver(&hook, &event_key, &payload, Some(LOG_SOURCE_DISPATCH))
+                        .await
                     {
                         tracing::warn!(
                             hook_id = hook.id,
@@ -1641,7 +1647,10 @@ impl SysWebHookService {
             )
             .await
             .map_err(ServiceError::from)?;
-        Ok((rows.into_iter().map(WebhookEventVo::from_model).collect(), total))
+        Ok((
+            rows.into_iter().map(WebhookEventVo::from_model).collect(),
+            total,
+        ))
     }
 
     /// 事件目录停用/启用（system:webhook:event:edit）
@@ -1705,8 +1714,13 @@ impl SysWebHookService {
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_else(|| serde_json::json!({ "eventKey": event.event_key }));
-        self.deliver(&hook, event.event_key.trim(), &payload, Some(LOG_SOURCE_TEST))
-            .await
+        self.deliver(
+            &hook,
+            event.event_key.trim(),
+            &payload,
+            Some(LOG_SOURCE_TEST),
+        )
+        .await
     }
 
     // ==================== 查询辅助 ====================
@@ -1923,7 +1937,10 @@ mod tests {
             // 租户 1：一个订阅全部（NULL）+ 一个只订阅 user.created
             (
                 1,
-                vec![mk_hook(11, 1, None), mk_hook(12, 1, Some(r#"["user.created"]"#))],
+                vec![
+                    mk_hook(11, 1, None),
+                    mk_hook(12, 1, Some(r#"["user.created"]"#)),
+                ],
             ),
             // 租户 2：订阅全部
             (2, vec![mk_hook(21, 2, None)]),
@@ -1944,16 +1961,28 @@ mod tests {
             vec![11, 12],
             "租户 1 的 user.created 应命中本租户两个回调"
         );
-        assert_eq!(ids_by(1, "user.created"), vec![11, 12], "emit 同口径命中一致");
+        assert_eq!(
+            ids_by(1, "user.created"),
+            vec![11, 12],
+            "emit 同口径命中一致"
+        );
         // 跨租户隔离核心断言：租户 2 触发的事件绝不能命中租户 1 的回调，反之亦然
-        assert_eq!(ids_by(2, "user.created"), vec![21], "租户 2 事件只命中租户 2 回调");
+        assert_eq!(
+            ids_by(2, "user.created"),
+            vec![21],
+            "租户 2 事件只命中租户 2 回调"
+        );
         assert_eq!(
             ids_by(1, "role.created"),
             vec![11],
             "未订阅事件：仅『订阅全部』（NULL）回调命中，定向订阅回调不命中"
         );
         // 平台事件（tid=0）：仅平台租户回调组命中，不波及业务租户
-        assert_eq!(ids_by(0, "user.created"), vec![1], "平台事件仅命中平台租户回调");
+        assert_eq!(
+            ids_by(0, "user.created"),
+            vec![1],
+            "平台事件仅命中平台租户回调"
+        );
         // 不存在的租户：任何回调都不命中（fail-closed）
         assert_eq!(ids_by(999, "user.created"), Vec::<i64>::new());
     }
@@ -1964,7 +1993,10 @@ mod tests {
         let svc_map: Vec<(&str, &str)> = LEGACY_EVENT_KEY_MAP.to_vec();
         let mig_map: Vec<(&str, &str)> =
             migration::m20261003_000004_webhook_unify::LEGACY_EVENT_KEY_MAP.to_vec();
-        assert_eq!(svc_map, mig_map, "两份映射表漂移：服务层 {svc_map:?} vs 迁移 {mig_map:?}");
+        assert_eq!(
+            svc_map, mig_map,
+            "两份映射表漂移：服务层 {svc_map:?} vs 迁移 {mig_map:?}"
+        );
     }
 
     #[test]
@@ -1986,7 +2018,11 @@ mod tests {
             vec!["user.created".to_string(), "login.success".to_string()]
         );
         // 空串 = 订阅全部
-        assert!(SubscribedEventsInput::Raw(String::new()).to_keys().is_empty());
+        assert!(
+            SubscribedEventsInput::Raw(String::new())
+                .to_keys()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2009,7 +2045,10 @@ mod tests {
         assert!(hook_matches_subscribed(sub, " login.success "));
         assert!(!hook_matches_subscribed(sub, "role.created"));
         // 脏数据（非法 JSON）fail-closed：不派发
-        assert!(!hook_matches_subscribed(Some("user.created"), "user.created"));
+        assert!(!hook_matches_subscribed(
+            Some("user.created"),
+            "user.created"
+        ));
     }
 
     #[test]
@@ -2091,7 +2130,12 @@ mod tests {
             del_flag: "0".to_string(),
         };
         let res = svc
-            .deliver(&hook, "login_success", &serde_json::json!({"user":"admin"}), None)
+            .deliver(
+                &hook,
+                "login_success",
+                &serde_json::json!({"user":"admin"}),
+                None,
+            )
             .await;
         assert!(res.is_ok(), "投递应成功: {:?}", res.err());
         let res = res.unwrap();

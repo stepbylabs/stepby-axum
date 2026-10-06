@@ -65,21 +65,20 @@ pub async fn global_search(
         // 过短不打 DB，直接空结果（前端搜索框行为契约）
         return Ok(AjaxResult::success(Vec::new()));
     }
-    let limit = params
-        .limit
-        .unwrap_or(LIMIT_DEFAULT)
-        .clamp(1, LIMIT_MAX);
+    let limit = params.limit.unwrap_or(LIMIT_DEFAULT).clamp(1, LIMIT_MAX);
 
     // 2. 解析操作者，取权限列表（与 permission_middleware 同一数据源，含缓存）
     let user_id: i64 = operator
         .user_id()
         .parse()
         .map_err(|_| AppError::internal(&crate::tr!("error.auth.user_id_parse_failed")))?;
-    let permissions = state.menu_service.get_permissions_by_user_id(user_id).await?;
+    let permissions = state
+        .menu_service
+        .get_permissions_by_user_id(user_id)
+        .await?;
     let is_superadmin = permissions.iter().any(|p| p == "*:*:*");
     // 逐域权限判定：超管全域；普通用户仅检索持有对应 *:list 权限的域
-    let has_perm =
-        |perm: &str| is_superadmin || permissions.iter().any(|p| p == perm);
+    let has_perm = |perm: &str| is_superadmin || permissions.iter().any(|p| p == perm);
     let domain_perms: &[(SearchDomain, &str)] = &[
         (SearchDomain::User, "system:user:list"),
         (SearchDomain::Dept, "system:dept:list"),
@@ -106,8 +105,8 @@ pub async fn global_search(
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
 
     // 4. 执行检索（每域 cap 5、前缀优先排序），总条数截断到 limit（硬顶性能安全）
-    let mut items = global_search_service::global_search(&state.db, &domains, tenant_scope, &q)
-        .await?;
+    let mut items =
+        global_search_service::global_search(&state.db, &domains, tenant_scope, &q).await?;
     items.truncate(limit as usize);
 
     Ok(AjaxResult::success(items))

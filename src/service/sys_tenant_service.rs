@@ -21,10 +21,10 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDateTime;
 use futures::future::FutureExt;
-use std::sync::Arc;
 use sea_orm::sea_query::Expr;
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use ts_rs::TS;
 use utoipa::ToSchema;
 
@@ -1461,13 +1461,13 @@ impl SysTenantService {
         // 平台分配项三态：None = 不修改；Some(None) = 清空；Some(Some(v)) = 设置
         let next_package: Option<Option<i64>> = dto.package_id;
         let next_expire: Option<Option<NaiveDateTime>> = dto.expire_time;
-        let next_account: Option<Option<i32>> = dto.account_count.map(|v| v.map(|x| std::cmp::max(x, 0)));
+        let next_account: Option<Option<i32>> =
+            dto.account_count.map(|v| v.map(|x| std::cmp::max(x, 0)));
 
         let tenant_self = operator_tid != 0;
         if tenant_self {
             let package_changed = matches!(next_package, Some(v) if v != tenant.package_id);
-            let account_changed =
-                matches!(next_account, Some(v) if v != tenant.account_count.map(|x| std::cmp::max(x, 0)));
+            let account_changed = matches!(next_account, Some(v) if v != tenant.account_count.map(|x| std::cmp::max(x, 0)));
             let expire_changed = matches!(next_expire, Some(v) if v != tenant.expire_time);
             if package_changed || account_changed || expire_changed {
                 return Err(ServiceError::forbidden(&crate::tr!(
@@ -1813,11 +1813,11 @@ impl SysTenantService {
                     //    `del_flag='0' AND status='0' AND verify_status='1'` 过滤，
                     //    软删行天然被排除——即使并发窗口内残留也不会被解析命中。
                     let dam2: TenantDomainActiveModel = TenantDomainActiveModel {
-                            del_flag: Set(Some("2".to_string())),
-                            update_by: Set(Some(operator_name.clone())),
-                            update_time: Set(Some(now)),
-                            ..Default::default()
-                        };
+                        del_flag: Set(Some("2".to_string())),
+                        update_by: Set(Some(operator_name.clone())),
+                        update_time: Set(Some(now)),
+                        ..Default::default()
+                    };
                     SysTenantDomain::update_many()
                         .set(dam2)
                         .filter(TenantDomainColumn::TenantId.eq(tid))
@@ -2070,7 +2070,11 @@ impl SysTenantService {
                 .set_ex(&tenant_state_key(tenant_id), state, ttl)
                 .await?;
             self.store
-                .set_ex(&tenant_expire_key(tenant_id), &expire_epoch.to_string(), ttl)
+                .set_ex(
+                    &tenant_expire_key(tenant_id),
+                    &expire_epoch.to_string(),
+                    ttl,
+                )
                 .await?;
             Ok(())
         }
@@ -2273,10 +2277,7 @@ impl SysTenantService {
                 rt_hashes.push(rt_hash);
             }
         }
-        let rt_del_keys: Vec<String> = rt_hashes
-            .iter()
-            .map(|h| format!("sso:rt:{h}"))
-            .collect();
+        let rt_del_keys: Vec<String> = rt_hashes.iter().map(|h| format!("sso:rt:{h}")).collect();
         let mut rt_revoked = 0u64;
         if !rt_del_keys.is_empty() {
             match self.store.del(&rt_del_keys).await {
@@ -2571,7 +2572,10 @@ impl SysTenantService {
 
     async fn redis_setex(&self, key: &str, ttl: i64, value: &str) {
         // 与原实现一致：写失败静默忽略（cache-aside 回填，best-effort）
-        let _ = self.store.set_ex(key, value, std::cmp::max(ttl, 0) as u64).await;
+        let _ = self
+            .store
+            .set_ex(key, value, std::cmp::max(ttl, 0) as u64)
+            .await;
     }
 
     async fn redis_del(&self, key: &str) {

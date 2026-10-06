@@ -341,7 +341,10 @@ mod tests {
 
     #[test]
     fn test_log_mask_bankcard_normal() {
-        assert_eq!(log_mask_bankcard("6222021234567890123"), "6222***********0123");
+        assert_eq!(
+            log_mask_bankcard("6222021234567890123"),
+            "6222***********0123"
+        );
     }
 
     #[test]

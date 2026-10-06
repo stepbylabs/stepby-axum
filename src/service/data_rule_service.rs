@@ -9,10 +9,11 @@
 //! 3. 无规则/未接入 = 零附加条件（opt-in 渐进，现状行为不变）；
 //! 4. 多租户行级隔离：租户管理员仅能管理本租户规则；平台管理全量。
 
-use crate::entity::{sys_data_rule, sys_role_data_rule};
 use crate::common::error::ServiceError;
+use crate::entity::{sys_data_rule, sys_role_data_rule};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -25,7 +26,9 @@ pub struct DataRuleService {
 fn is_valid_identifier(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 const OPS: &[&str] = &["eq", "ne", "like", "gt", "lt", "ge", "le", "in"];
@@ -116,8 +119,7 @@ impl DataRuleService {
         size: u64,
     ) -> Result<(Vec<sys_data_rule::Model>, u64), ServiceError> {
         use sea_orm::QuerySelect;
-        let mut sel = sys_data_rule::Entity::find()
-            .filter(sys_data_rule::Column::DelFlag.eq("0"));
+        let mut sel = sys_data_rule::Entity::find().filter(sys_data_rule::Column::DelFlag.eq("0"));
         if operator_tid != 0 {
             sel = sel.filter(sys_data_rule::Column::TenantId.eq(operator_tid));
         }
@@ -163,10 +165,14 @@ impl DataRuleService {
                 let existing = sys_data_rule::Entity::find_by_id(id)
                     .one(self.db.as_ref())
                     .await?
-                    .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dataRule.not_found")))?;
+                    .ok_or_else(|| {
+                        ServiceError::not_found(&crate::tr!("error.dataRule.not_found"))
+                    })?;
                 // 行级越权防护：租户管理员不得改动他租户规则
                 if operator_tid != 0 && existing.tenant_id != operator_tid {
-                    return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+                    return Err(ServiceError::forbidden(&crate::tr!(
+                        "error.common.forbidden"
+                    )));
                 }
                 let mut am: sys_data_rule::ActiveModel = existing.into();
                 am.rule_name = Set(dto.rule_name.clone());
@@ -215,7 +221,9 @@ impl DataRuleService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dataRule.not_found")))?;
         if operator_tid != 0 && existing.tenant_id != operator_tid {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         let mut am: sys_data_rule::ActiveModel = existing.into();
         am.del_flag = Set(Some("1".into()));
@@ -280,7 +288,10 @@ impl DataRuleService {
         let mut cond = Condition::any();
         let mut emitted = false;
         for r in rules {
-            let field_expr = Expr::col((sea_orm::sea_query::Alias::new(&r.table_name), sea_orm::sea_query::Alias::new(&r.field_name)));
+            let field_expr = Expr::col((
+                sea_orm::sea_query::Alias::new(&r.table_name),
+                sea_orm::sea_query::Alias::new(&r.field_name),
+            ));
             // §5.53（类型感知绑定）：fixed 值可解析为 i64 时用数值绑定——
             // 避免 SQLite/PG 下 TEXT '1' 与 INTEGER 列比较的类型排序陷阱
             let value_expr: Expr = match r.value_type.as_str() {
@@ -311,14 +322,20 @@ impl DataRuleService {
             let single = match r.op.as_str() {
                 "eq" => field_expr.eq(value_expr),
                 "ne" => field_expr.ne(value_expr),
-                "like" => field_expr.like(format!("%{}%", r.rule_value.clone().unwrap_or_default())),
+                "like" => {
+                    field_expr.like(format!("%{}%", r.rule_value.clone().unwrap_or_default()))
+                }
                 "gt" => field_expr.gt(value_expr),
                 "lt" => field_expr.lt(value_expr),
                 "ge" => field_expr.gte(value_expr),
                 "le" => field_expr.lte(value_expr),
                 "in" => {
                     let raw = r.rule_value.clone().unwrap_or_default();
-                    let items: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    let items: Vec<String> = raw
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     if items.is_empty() {
                         continue;
                     }
@@ -355,7 +372,9 @@ mod tests {
             role_ids: None,
         };
         assert!(DataRuleService::validate_dto(&base("sys_user", "create_by")).is_ok());
-        assert!(DataRuleService::validate_dto(&base("sys_user; DROP TABLE x", "create_by")).is_err());
+        assert!(
+            DataRuleService::validate_dto(&base("sys_user; DROP TABLE x", "create_by")).is_err()
+        );
         assert!(DataRuleService::validate_dto(&base("SysUser", "create_by")).is_err());
         assert!(DataRuleService::validate_dto(&base("sys_user", "a b")).is_err());
         assert!(DataRuleService::validate_dto(&base("1user", "create_by")).is_err());

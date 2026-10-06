@@ -92,11 +92,8 @@ impl MigrationName for Migration {
 ///
 /// 元组：(索引名, 表名, 列清单)。迁移侧拼 `CREATE INDEX {ine}{name} ON {table} ({cols})`
 /// （MySQL 经 `IndexDdlExt` 容错"索引已存在"）；兜底侧交 `ensure_tenant_index` 幂等执行。
-pub const ROLE_FIELD_PERM_INDEXES: &[(&str, &str, &str)] = &[(
-    "idx_role_field_perm_role",
-    "sys_role_field_perm",
-    "role_id",
-)];
+pub const ROLE_FIELD_PERM_INDEXES: &[(&str, &str, &str)] =
+    &[("idx_role_field_perm_role", "sys_role_field_perm", "role_id")];
 
 /// 第一层平台开关的 `sys_config` 键（迁移与主 crate 服务层共用字符串）
 pub const FIELD_PERM_ENABLED_CONFIG_KEY: &str = "sys.fieldPerm.enabled";
@@ -219,8 +216,7 @@ impl MigrationTrait for Migration {
 
         // ==================== 1. 建表 sys_role_field_perm（单一事实源） ====================
         let backend = conn.get_database_backend();
-        conn.execute_unprepared(&create_table_sql(backend))
-            .await?;
+        conn.execute_unprepared(&create_table_sql(backend)).await?;
 
         // ==================== 2. 角色查询索引（单一事实源） ====================
         // MySQL 不支持 CREATE INDEX IF NOT EXISTS（MariaDB 专属），留空交由
@@ -230,10 +226,8 @@ impl MigrationTrait for Migration {
             _ => "IF NOT EXISTS ",
         };
         for (idx_name, table, cols) in ROLE_FIELD_PERM_INDEXES {
-            conn.execute_index_ddl_ic(&format!(
-                "CREATE INDEX {ine}{idx_name} ON {table} ({cols})"
-            ))
-            .await?;
+            conn.execute_index_ddl_ic(&format!("CREATE INDEX {ine}{idx_name} ON {table} ({cols})"))
+                .await?;
         }
 
         // ==================== 3. 菜单元数据（单一事实源，角色管理按钮段） ====================

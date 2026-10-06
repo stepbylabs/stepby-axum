@@ -605,14 +605,10 @@ async fn collect_value_sizes(
     if keys.is_empty() {
         return Ok(Vec::new());
     }
-    let vals: Vec<Option<String>> = state
-        .store
-        .get_many(keys)
-        .await
-        .map_err(|e| {
-            tracing::error!("批量读取缓存值失败: {}", e);
-            AppError::internal(&crate::tr!("error.cache.memory_usage_failed"))
-        })?;
+    let vals: Vec<Option<String>> = state.store.get_many(keys).await.map_err(|e| {
+        tracing::error!("批量读取缓存值失败: {}", e);
+        AppError::internal(&crate::tr!("error.cache.memory_usage_failed"))
+    })?;
     Ok(keys
         .iter()
         .cloned()

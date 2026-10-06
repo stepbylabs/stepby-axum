@@ -1419,9 +1419,7 @@ impl SsoService {
         let binding_json: Option<String> = store
             .consume(&rt_key)
             .await
-            .map_err(|_| {
-                OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
-            })?;
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
         let binding_json = binding_json
             .ok_or_else(|| OidcError::new("invalid_grant", crate::tr!("error.sso.rt_invalid")))?;
         let rt_binding: RefreshBinding = serde_json::from_str(&binding_json)
@@ -1455,10 +1453,8 @@ impl SsoService {
         if rt_binding.tid != 0 {
             let state_key = crate::common::tenant::tenant_state_key(rt_binding.tid);
             let exp_key = crate::common::tenant::tenant_expire_key(rt_binding.tid);
-            let vals: Vec<Option<String>> = store
-                .get_many(&[state_key, exp_key])
-                .await
-                .map_err(|_| {
+            let vals: Vec<Option<String>> =
+                store.get_many(&[state_key, exp_key]).await.map_err(|_| {
                     OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
                 })?;
             let expire_epoch = vals
@@ -1552,16 +1548,12 @@ impl SsoService {
         let at_json: Option<String> = store
             .get(&at_key)
             .await
-            .map_err(|_| {
-                OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
-            })?;
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
         if let Some(json) = at_json {
             let user_id = serde_json::from_str::<AccessBinding>(&json)
                 .map(|b| b.user_id)
                 .unwrap_or(0);
-            let _: Result<u64, _> = store
-                .del(&[at_key, format!("online:{}", token_hash)])
-                .await;
+            let _: Result<u64, _> = store.del(&[at_key, format!("online:{}", token_hash)]).await;
             if user_id > 0 {
                 let _: Result<(), _> = store
                     .set_rem(&format!("{}{}", USER_AT_KEY_PREFIX, user_id), &token_hash)
@@ -1575,9 +1567,7 @@ impl SsoService {
         let rt_json: Option<String> = store
             .get(&rt_key)
             .await
-            .map_err(|_| {
-                OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
-            })?;
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
         if let Some(json) = rt_json {
             let user_id = serde_json::from_str::<RefreshBinding>(&json)
                 .map(|b| b.user_id)
@@ -1626,9 +1616,7 @@ impl SsoService {
         let at_json: Option<String> = store
             .get(&at_key)
             .await
-            .map_err(|_| {
-                OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
-            })?;
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
         let Some(at_json) = at_json else {
             return Ok(inactive);
         };
@@ -1708,9 +1696,10 @@ impl SsoService {
         key: &str,
         store: &Arc<dyn SharedStore>,
     ) -> Result<Option<String>, OidcError> {
-        let val: Option<String> = store.consume(key).await.map_err(|_| {
-            OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
-        })?;
+        let val: Option<String> = store
+            .consume(key)
+            .await
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
         Ok(val)
     }
 
@@ -1895,9 +1884,7 @@ impl SsoService {
         let raw: Option<String> = store
             .get(&at_key)
             .await
-            .map_err(|_| {
-                OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
-            })?;
+            .map_err(|_| OidcError::new("server_error", crate::tr!("error.common.cache_failed")))?;
         let raw = raw.ok_or_else(invalid)?;
         let binding: AccessBinding = serde_json::from_str(&raw).map_err(|_| invalid())?;
         // v3-K3：client 存在且启用（软删/停用后即时失效）
@@ -2473,9 +2460,7 @@ impl SsoService {
                 .map(|b| b.client_id == client_id)
                 .unwrap_or(false);
             if matched {
-                let _: Result<u64, _> = store
-                    .del(&[at_key, format!("online:{}", h)])
-                    .await;
+                let _: Result<u64, _> = store.del(&[at_key, format!("online:{}", h)]).await;
                 let _: Result<(), _> = store.set_rem(&user_at_key, h).await;
             }
         }
@@ -2591,9 +2576,7 @@ impl SsoService {
         let hashes: Vec<String> = store.set_members(&sess_key).await.unwrap_or_default();
         for h in &hashes {
             // 会话剩余寿命未知（索引与 JWT 同 TTL），拉黑 24h 足以覆盖任何在途会话
-            let _: Result<(), _> = store
-                .set_ex(&format!("blacklist:{}", h), "1", 86_400)
-                .await;
+            let _: Result<(), _> = store.set_ex(&format!("blacklist:{}", h), "1", 86_400).await;
         }
         if !hashes.is_empty() {
             let _: Result<u64, _> = store.del(&[sess_key]).await;
@@ -3100,9 +3083,9 @@ fn random_urlsafe(bytes_len: usize) -> String {
     let mut buf = vec![0u8; bytes_len];
     {
         {
-        use rand::RngCore;
-        rand::rngs::OsRng.fill_bytes(&mut buf);
-    }
+            use rand::RngCore;
+            rand::rngs::OsRng.fill_bytes(&mut buf);
+        }
     }
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }

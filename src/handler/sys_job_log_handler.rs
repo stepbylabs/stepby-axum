@@ -16,9 +16,45 @@ use crate::common::excel::{CellValue, ExcelColumn, export_to_excel};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_job_log::Model as SysJobLogModel;
 use crate::middleware::Operator;
-use crate::service::sys_job_service::JobLogQueryDto;
+use crate::service::sys_job_service::{JobLogQueryDto, JobLogStatsVo};
 use crate::state::AppState;
 use crate::utils::parse_id_list;
+
+/// GET /monitor/jobLog/stats
+/// 定时任务运行统计报表（G-09：成功率趋势 / 耗时分布 / 失败 TOP）
+#[utoipa::path(
+    get,
+    path = "/monitor/jobLog/stats",
+    params(
+        ("days" = Option<u32>, Query, description = "统计窗口天数（默认 7，上限 30）")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<JobLogStatsVo>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-joblog"
+)]
+pub async fn stats(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(days): Query<JobStatsQueryDto>,
+) -> Result<AjaxResult<JobLogStatsVo>, AppError> {
+    let vo = state
+        .job_service
+        .get_job_log_stats(
+            days.days,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
+        .await?;
+    Ok(AjaxResult::success(vo))
+}
+
+/// 报表窗口查询参数
+#[derive(Debug, Clone, serde::Deserialize, utoipa::IntoParams)]
+pub struct JobStatsQueryDto {
+    /// 统计窗口天数（默认 7，上限 30）
+    pub days: Option<u32>,
+}
 
 /// GET /monitor/jobLog/list
 /// 分页查询任务日志

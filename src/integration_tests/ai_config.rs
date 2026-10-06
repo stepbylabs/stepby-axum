@@ -10,15 +10,20 @@
 //! enabled=true 的行为经 update 热化路径在本组内验证（get_effective 断言）。
 
 use super::TestContext;
+use crate::common::features::FEATURE_OFF;
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Method, Request, StatusCode};
-use crate::common::features::FEATURE_OFF;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::net::SocketAddr;
 
 /// 构造 JSON 请求（平台管理员 admin token）
-fn admin_req(ctx: &TestContext, method: Method, uri: &str, body: Option<serde_json::Value>) -> Request<Body> {
+fn admin_req(
+    ctx: &TestContext,
+    method: Method,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> Request<Body> {
     let builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -100,10 +105,7 @@ async fn test_ai_config_mask_never_leaks_plaintext() {
         !body_str.contains(secret),
         "AI 配置响应体不得泄露 api_key 明文: {body_str}"
     );
-    assert!(
-        body_str.contains("sk-"),
-        "掩码应保留前缀特征: {body_str}"
-    );
+    assert!(body_str.contains("sk-"), "掩码应保留前缀特征: {body_str}");
 }
 
 /// 热生效：update 后 get_effective 立即反映（enabled/api_key seal 往返）
@@ -182,7 +184,10 @@ async fn test_ai_history_tenant_isolation() {
 
     // 直插两条分属不同租户的历史（模拟 chat 写入）
     let backend = DatabaseBackend::Sqlite;
-    for (tid, uid, q) in [(1i64, 100i64, "tenant-A 的问题"), (2, 200, "tenant-B 的问题")] {
+    for (tid, uid, q) in [
+        (1i64, 100i64, "tenant-A 的问题"),
+        (2, 200, "tenant-B 的问题"),
+    ] {
         db.execute_raw(sea_orm::Statement::from_sql_and_values(
             backend,
             "INSERT INTO ai_chat_history (tenant_id, user_id, question, sql_text, tables_used, rows_count, duration_ms, success, create_time) \
@@ -364,9 +369,19 @@ async fn test_ai_replay_guard_and_ownership() {
 
     // 造三条历史：user 100 的成功行（真 SQL）/ 失败行（sql_text 空）/ user 200 的成功行
     for (id, uid, q, sql) in [
-        (9001i64, 100i64, "重放成功用例", "SELECT user_id, user_name FROM sys_user WHERE user_id = 1"),
+        (
+            9001i64,
+            100i64,
+            "重放成功用例",
+            "SELECT user_id, user_name FROM sys_user WHERE user_id = 1",
+        ),
         (9002i64, 100i64, "失败留痕行", ""),
-        (9003i64, 200i64, "他人成功行", "SELECT user_id FROM sys_user WHERE user_id = 1"),
+        (
+            9003i64,
+            200i64,
+            "他人成功行",
+            "SELECT user_id FROM sys_user WHERE user_id = 1",
+        ),
     ] {
         db.execute_raw(Statement::from_sql_and_values(
             backend,
@@ -384,7 +399,10 @@ async fn test_ai_replay_guard_and_ownership() {
     // ① 成功重放：guard 重校验通过 → 受控执行返回行
     let outcome = svc.replay(9001, 0, 100).await.expect("重放成功历史应通过");
     assert_eq!(outcome.tables, vec!["sys_user"], "重放应报告引用表");
-    assert!(!outcome.rows.is_empty(), "sys_user 有种子行，重放应返回数据");
+    assert!(
+        !outcome.rows.is_empty(),
+        "sys_user 有种子行，重放应返回数据"
+    );
 
     // ② 横向越权：user 100 重放 user 200 的行 → 拒绝
     let err = svc.replay(9003, 0, 100).await;

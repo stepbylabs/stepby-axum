@@ -36,7 +36,8 @@ use crate::entity::sys_msg_send_log::{
     ActiveModel as SysMsgSendLogActiveModel, Column as SendLogColumn, Model as SysMsgSendLogModel,
 };
 use crate::entity::sys_msg_template::{
-    ActiveModel as SysMsgTemplateActiveModel, Column as TemplateColumn, Model as SysMsgTemplateModel,
+    ActiveModel as SysMsgTemplateActiveModel, Column as TemplateColumn,
+    Model as SysMsgTemplateModel,
 };
 use crate::repository::sys_msg_channel::SysMsgChannelRepository;
 use crate::repository::sys_msg_send_log::SysMsgSendLogRepository;
@@ -66,6 +67,11 @@ fn validate_channel_type(channel_type: &str) -> Result<(), ServiceError> {
 /// 渲染模板：将 {{var}} 占位符替换为 params 中的值；未提供的变量替换为空串。
 ///
 /// 手工扫描实现，避免引入正则依赖，同时天然避免用户输入中的正则元字符误解释。
+///
+/// **有意不引模板引擎**（G-16 深审 2026-10-06 决策）：消息模板场景只需"变量替换"，
+/// 不需要控制流（if/for）；引入 minijinja/tera 是为用不到的能力付费（tera 已在
+/// 依赖树但仅用于代码生成器脚手架）。若未来确需循环渲染（列表类消息），届时
+/// 再评估复用 tera——在此之前请勿重复立项引引擎。
 fn render_template(template: &str, params: &HashMap<String, String>) -> String {
     let mut result = String::new();
     let mut rest = template;
@@ -400,6 +406,29 @@ impl SysMsgService {
             pref_repo: SysUserPrefRepository::new(db),
             enc_key: config.config_enc_key.clone(),
         }
+    }
+
+    /// G-16：按编码渲染平台默认模板（不做渠道查找/不落发送记录）
+    ///
+    /// 供"自带投递链路、只需模板内容"的业务复用（如公告邮件：有用户枚举/偏好过滤/
+    /// 批量发送逻辑，比 [`Self::send`] 的单地址投递更重）。语义：
+    /// - 模板不存在或已停用 → `Ok(None)`，调用方回落内置默认内容；
+    /// - 渲染失败不可能（render_template 无失败路径），返回值恒为渲染后文本。
+    pub async fn render_template_by_code(
+        &self,
+        template_code: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<Option<(String, String)>, ServiceError> {
+        let Some(template) = self.template_repo.find_by_code(template_code, None).await? else {
+            return Ok(None);
+        };
+        if template.status.as_deref() != Some("0") {
+            return Ok(None);
+        }
+        Ok(Some((
+            render_template(&template.template_subject, params),
+            render_template(&template.template_content, params),
+        )))
     }
 
     /// 校验 config_json 为合法 JSON（存在时）

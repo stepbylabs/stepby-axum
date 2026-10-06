@@ -30,10 +30,14 @@ use crate::entity::sys_oauth_user::{Column as OauthUserColumn, Entity as SysOaut
 use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
-use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Column as UserColumn, Model as SysUserModel};
-use crate::entity::sys_user_credential::{Column as UserCredentialColumn, Entity as SysUserCredential};
-use crate::entity::sys_user_pref::{Column as UserPrefColumn, Entity as SysUserPref};
+use crate::entity::sys_user::{
+    ActiveModel as SysUserActiveModel, Column as UserColumn, Model as SysUserModel,
+};
+use crate::entity::sys_user_credential::{
+    Column as UserCredentialColumn, Entity as SysUserCredential,
+};
 use crate::entity::sys_user_post::ActiveModel as SysUserPostActiveModel;
+use crate::entity::sys_user_pref::{Column as UserPrefColumn, Entity as SysUserPref};
 use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_post::SysPostRepository;
 use crate::repository::sys_role::SysRoleRepository;
@@ -128,14 +132,10 @@ pub(crate) fn apply_field_perm_and_mask(
         model.email = None;
     }
     if should_mask {
-        if !hide_phone
-            && let Some(phone) = model.phonenumber.as_deref()
-        {
+        if !hide_phone && let Some(phone) = model.phonenumber.as_deref() {
             model.phonenumber = Some(masking::mask_phone(phone));
         }
-        if !hide_email
-            && let Some(email) = model.email.as_deref()
-        {
+        if !hide_email && let Some(email) = model.email.as_deref() {
             model.email = Some(masking::mask_email(email));
         }
     }
@@ -846,9 +846,8 @@ impl SysUserService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, SORTABLE_COLUMNS).map(
-                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
-            )
+            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let begin = match query.begin_time.as_deref() {
@@ -874,7 +873,10 @@ impl SysUserService {
             let op_user = self.user_repo.base().find_by_id(op_uid).await?;
             let dept_id = op_user.as_ref().and_then(|u| u.dept_id);
             let dept_children = if let Some(d) = dept_id {
-                self.dept_repo.find_descendant_ids(d).await.unwrap_or_default()
+                self.dept_repo
+                    .find_descendant_ids(d)
+                    .await
+                    .unwrap_or_default()
             } else {
                 vec![]
             };
@@ -884,10 +886,9 @@ impl SysUserService {
                 dept_id,
                 dept_children,
             };
-            let rule_service =
-                crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(
-                    self.db().clone(),
-                ));
+            let rule_service = crate::service::data_rule_service::DataRuleService::new(
+                std::sync::Arc::new(self.db().clone()),
+            );
             rule_cond = rule_service
                 .build_conditions(&rule_ctx, "sys_user", &rule_role_ids)
                 .await?;
@@ -1121,9 +1122,8 @@ impl SysUserService {
         // 导出与页面列表同序：动态排序白名单解析口径一致
         let page = PageDomain::from(&query);
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, SORTABLE_COLUMNS).map(
-                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
-            )
+            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let begin = match query.begin_time.as_deref() {
@@ -1148,7 +1148,10 @@ impl SysUserService {
             let op_user = self.user_repo.base().find_by_id(op_uid).await?;
             let dept_id = op_user.as_ref().and_then(|u| u.dept_id);
             let dept_children = if let Some(d) = dept_id {
-                self.dept_repo.find_descendant_ids(d).await.unwrap_or_default()
+                self.dept_repo
+                    .find_descendant_ids(d)
+                    .await
+                    .unwrap_or_default()
             } else {
                 vec![]
             };
@@ -1158,10 +1161,9 @@ impl SysUserService {
                 dept_id,
                 dept_children,
             };
-            let rule_service =
-                crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(
-                    self.db().clone(),
-                ));
+            let rule_service = crate::service::data_rule_service::DataRuleService::new(
+                std::sync::Arc::new(self.db().clone()),
+            );
             rule_cond = rule_service
                 .build_conditions(&rule_ctx, "sys_user", &rule_role_ids)
                 .await?;
@@ -1737,14 +1739,14 @@ impl SysUserService {
 
                     // 1.5 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚；
                     //     敏感列 password 由 record_change 内部统一打码）
-                    let after =
-                        serde_json::to_value(&new_user).unwrap_or(serde_json::Value::Null);
-                    let audit_operator = crate::service::sys_audit_change_service::resolve_operator(
-                        txn,
-                        None, // add_user 签名仅携带操作人用户名，ID 由回查补齐
-                        Some(operator_owned.as_str()),
-                    )
-                    .await;
+                    let after = serde_json::to_value(&new_user).unwrap_or(serde_json::Value::Null);
+                    let audit_operator =
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            None, // add_user 签名仅携带操作人用户名，ID 由回查补齐
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
                     crate::service::sys_audit_change_service::record_change(
                         txn,
                         "sys_user",
@@ -1911,8 +1913,7 @@ impl SysUserService {
         self.ensure_posts_tenant_allowed(operator_tid, dto.post_ids.as_deref())
             .await?;
         // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
-        let before_snapshot =
-            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -2012,8 +2013,7 @@ impl SysUserService {
 
                     // 5. 审计合规域：UPDATE 变更留痕（同事务提交/回滚，失败令业务一并回滚；
                     //     敏感列 password 由 record_change 内部统一打码）
-                    let after =
-                        serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
+                    let after = serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
                     let audit_operator =
                         crate::service::sys_audit_change_service::resolve_operator(
                             txn,
@@ -2088,8 +2088,7 @@ impl SysUserService {
         let deleted_user_name = format!("{}_deleted_{}", existing.user_name, user_id);
 
         // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
-        let before_snapshot =
-            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let user_repo = self.user_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
@@ -3371,4 +3370,3 @@ mod tests {
         assert!(!masking::is_masked("alice@example.com"));
     }
 }
-

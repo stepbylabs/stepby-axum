@@ -181,8 +181,19 @@ pub const REPORT_BOARD_MENU_ROWS: &[ReportBoardMenuRow] = &[
 /// 返回顺序与写库顺序一致：4130 → role_menu(2,4130) → 4131 → role_menu(2,4131)。
 pub fn report_board_menu_seed_bodies(now_expr: &str) -> Vec<String> {
     let mut bodies = Vec::with_capacity(REPORT_BOARD_MENU_ROWS.len() * 2);
-    for (menu_id, name, parent_id, order_num, path, component, menu_type, perms, icon, remark, i18n_key) in
-        REPORT_BOARD_MENU_ROWS
+    for (
+        menu_id,
+        name,
+        parent_id,
+        order_num,
+        path,
+        component,
+        menu_type,
+        perms,
+        icon,
+        remark,
+        i18n_key,
+    ) in REPORT_BOARD_MENU_ROWS
     {
         let i18n_sql = match i18n_key {
             Some(key) => format!("'{key}'"),
@@ -206,8 +217,7 @@ impl MigrationTrait for Migration {
 
         // ==================== 1. 建表 sys_report_board（单一事实源） ====================
         let backend = conn.get_database_backend();
-        conn.execute_unprepared(&create_table_sql(backend))
-            .await?;
+        conn.execute_unprepared(&create_table_sql(backend)).await?;
 
         // ==================== 2. 属主查询索引（单一事实源） ====================
         // MySQL 不支持 CREATE INDEX IF NOT EXISTS（MariaDB 专属），留空交由
@@ -217,10 +227,8 @@ impl MigrationTrait for Migration {
             _ => "IF NOT EXISTS ",
         };
         for (idx_name, table, cols) in REPORT_BOARD_INDEXES {
-            conn.execute_index_ddl_ic(&format!(
-                "CREATE INDEX {ine}{idx_name} ON {table} ({cols})"
-            ))
-            .await?;
+            conn.execute_index_ddl_ic(&format!("CREATE INDEX {ine}{idx_name} ON {table} ({cols})"))
+                .await?;
         }
 
         // ==================== 3. 菜单元数据（单一事实源，系统工具目录 4130 段） ====================

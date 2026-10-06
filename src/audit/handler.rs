@@ -37,7 +37,10 @@ pub async fn list(
 ) -> Result<TableDataInfo<SysAuditChangeModel>, AppError> {
     let (rows, total) = state
         .audit_change_service
-        .get_change_page(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .get_change_page(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -96,7 +99,10 @@ pub async fn export(
 ) -> Result<Response, AppError> {
     let rows = state
         .audit_change_service
-        .export_changes(query, crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .export_changes(
+            query,
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+        )
         .await?;
 
     let csv = build_csv(&rows);

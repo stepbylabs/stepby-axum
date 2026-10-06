@@ -15,7 +15,9 @@ use utoipa::{IntoParams, ToSchema};
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
-use crate::entity::sys_post::{ActiveModel as SysPostActiveModel, Column as PostColumn, Model as SysPostModel};
+use crate::entity::sys_post::{
+    ActiveModel as SysPostActiveModel, Column as PostColumn, Model as SysPostModel,
+};
 use crate::repository::sys_post::SysPostRepository;
 use crate::repository::sys_user_post::SysUserPostRepository;
 
@@ -146,9 +148,7 @@ impl SysPostService {
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
             sort::resolve_column::<crate::entity::sys_post::Entity>(prop, SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let (rows, total) = self
@@ -430,9 +430,7 @@ impl SysPostService {
         let page = PageDomain::from(&query);
         let sort = page.order_by_column.as_deref().and_then(|prop| {
             sort::resolve_column::<crate::entity::sys_post::Entity>(prop, SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
         // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS）
         let (rows, _) = self

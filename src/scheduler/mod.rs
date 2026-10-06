@@ -413,7 +413,7 @@ impl JobScheduler {
                     // SETNX 去重：30 分钟内同一 IP 不重复创建告警
                     // P3 修复: 区分存储错误与 key 已存在，共享态存储故障时仍创建告警（宁可重复也不漏报）
                     let acquired = match store.set_nx_ex(&dedup_key, "1", DEDUP_TTL_SECS).await {
-                        Ok(true) => true,  // 成功获取去重锁
+                        Ok(true) => true,   // 成功获取去重锁
                         Ok(false) => false, // key 已存在，跳过
                         Err(e) => {
                             tracing::warn!(
@@ -1390,6 +1390,14 @@ async fn execute_with_logging(
 
     let elapsed = start.elapsed().as_millis();
 
+    // G-09：job 执行指标（counter + histogram）——观测分层的 Prometheus 面。
+    // 与 sys_job_log 落库共用同一计时点（elapsed），页面报表与专业运维监控口径一致。
+    crate::observability::metrics::MetricsRegistry::global().record_job_execution(
+        &job.job_name,
+        status,
+        elapsed as u64,
+    );
+
     // 正常路径显式释放标记
     guard.disarm();
 
@@ -1411,6 +1419,8 @@ async fn execute_with_logging(
         } else {
             Set(Some(exception_info))
         },
+        // G-09：耗时独立落列（报表聚合口径）；job_message 字符串保留兼容展示
+        duration_ms: Set(Some(elapsed as i64)),
         create_time: Set(Some(crate::common::datetime::now_naive())),
         ..Default::default()
     };
@@ -1841,7 +1851,8 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
+        let store: Arc<dyn crate::shared_store::SharedStore> =
+            Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let target = "unitTest.scheduler.success";
         registry::register_task(
@@ -1872,7 +1883,8 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
+        let store: Arc<dyn crate::shared_store::SharedStore> =
+            Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let target = "unitTest.scheduler.fail";
         registry::register_task(
@@ -1897,7 +1909,8 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
+        let store: Arc<dyn crate::shared_store::SharedStore> =
+            Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let target = "unitTest.scheduler.panic";
         let f: registry::TaskFn = Arc::new(|| {
@@ -1919,7 +1932,8 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
+        let store: Arc<dyn crate::shared_store::SharedStore> =
+            Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         // 预置其他实例持有的锁 → execute_with_logging 的抢占应失败并跳过执行。
         // 锁键必须与实现严格一致：`lock:scheduler:{job_id}`（UUID 只是 LockHandle 内的
@@ -1951,7 +1965,8 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(LocalStore::new(db.clone()));
+        let store: Arc<dyn crate::shared_store::SharedStore> =
+            Arc::new(LocalStore::new(db.clone()));
         let executing_jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let job_id = 9005i64;
         executing_jobs.lock().unwrap().insert(job_id, true); // 模拟已有任务在执行

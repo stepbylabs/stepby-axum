@@ -559,14 +559,8 @@ impl AuthService {
             login_ip = ctx.login_ip,
             "登录被拒绝：来源 IP 命中黑名单（sys.login.blackIPList）"
         );
-        self.write_login_log_best_effort(
-            ctx,
-            "1",
-            &crate::tr!("log.auth.ip_blacklisted"),
-            0,
-            0,
-        )
-        .await;
+        self.write_login_log_best_effort(ctx, "1", &crate::tr!("log.auth.ip_blacklisted"), 0, 0)
+            .await;
         Err(ServiceError::forbidden(&crate::tr!(
             "error.auth.ip_blacklisted"
         )))
@@ -1235,8 +1229,7 @@ impl AuthService {
         //   2) pipeline 批量执行 4 个写操作（SETEX online / 条件 DEL old_online / SETEX
         //      user_sessions / DEL login_fail），单次网络往返
         // GET 旧 token_hash（如有）——读取结果决定是否 DEL 旧 online key（best-effort：失败视为无旧会话）
-        let old_token_hash_opt: Option<String> =
-            store.get(&user_session_key).await.unwrap_or(None);
+        let old_token_hash_opt: Option<String> = store.get(&user_session_key).await.unwrap_or(None);
         let need_del_old = match old_token_hash_opt.as_ref() {
             Some(old) if old != &token_hash => {
                 tracing::info!(
@@ -1259,21 +1252,30 @@ impl AuthService {
         // 不阻断登录（原 pipeline 也是整体 best-effort，逐调用不改变失败语义，仅多日志粒度）。
         // (a) SETEX online:{token_hash} session_json (TTL=online_ttl)
         if let Err(e) = store.set_ex(&online_key, &session_json, online_ttl).await {
-            tracing::warn!("online 会话写入失败（不阻断登录，仅影响在线列表展示）: {}", e);
+            tracing::warn!(
+                "online 会话写入失败（不阻断登录，仅影响在线列表展示）: {}",
+                e
+            );
         }
         // (b) 若旧 token_hash 存在且与新不同，DEL 旧 online key
         if need_del_old
             && let Some(ref old_key) = old_online_key
             && let Err(e) = store.del(std::slice::from_ref(old_key)).await
         {
-            tracing::warn!("旧 online 会话清理失败（不阻断登录，key 会自然过期）: {}", e);
+            tracing::warn!(
+                "旧 online 会话清理失败（不阻断登录，key 会自然过期）: {}",
+                e
+            );
         }
         // (c) SETEX user_sessions:{...} token_hash (TTL=online_ttl)
         if let Err(e) = store
             .set_ex(&user_session_key, &token_hash, online_ttl)
             .await
         {
-            tracing::warn!("user_sessions 索引写入失败（不阻断登录，仅影响会话去重）: {}", e);
+            tracing::warn!(
+                "user_sessions 索引写入失败（不阻断登录，仅影响会话去重）: {}",
+                e
+            );
         }
         // (d) DEL login_fail:{username}（清除失败计数）
         let fail_key = format!("login_fail:{}", ctx.username);
@@ -1365,7 +1367,11 @@ impl AuthService {
         // exp_at = claims.exp（UTC 秒）；TTL 由 store 实现按 exp_at - now 计算（与原 SETEX remaining 等价）
         if remaining > 0 {
             store
-                .revocation_add(&token_hash, i64::try_from(claims.exp).unwrap_or(0), "logout")
+                .revocation_add(
+                    &token_hash,
+                    i64::try_from(claims.exp).unwrap_or(0),
+                    "logout",
+                )
                 .await
                 .map_err(|e| {
                     tracing::error!("登出黑名单写入失败（fail-closed）: {}", e);
@@ -1435,10 +1441,7 @@ impl AuthService {
         // 开关查询失败按关闭态处理（fail-safe：不明确的姿态不拦截用户）。
         let force_pwd_change_enabled = match self
             .config_service
-            .get_config_value_by_key_cached(
-                "sys.user.forceFirstLoginChangePwd",
-                Some(operator_tid),
-            )
+            .get_config_value_by_key_cached("sys.user.forceFirstLoginChangePwd", Some(operator_tid))
             .await
         {
             // 显式 "true" 才开启（fail-safe：缺省/失败/任意其它值一律按关闭态，不误拦用户）
@@ -2052,7 +2055,11 @@ pub(crate) fn prune_tenant_management_menus(menus: Vec<SysMenuModel>) -> Vec<Sys
             if had_children && children.is_empty() {
                 return None;
             }
-            menu.children = if children.is_empty() { None } else { Some(children) };
+            menu.children = if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            };
             Some(menu)
         })
         .collect()
@@ -2105,12 +2112,18 @@ pub(crate) fn prune_capability_gated_menus(
             let children = menu
                 .children
                 .take()
-                .map(|c| prune_capability_gated_menus(c, ai_enabled, ai_copilot_on, tenant_features))
+                .map(|c| {
+                    prune_capability_gated_menus(c, ai_enabled, ai_copilot_on, tenant_features)
+                })
                 .unwrap_or_default();
             if had_children && children.is_empty() {
                 return None;
             }
-            menu.children = if children.is_empty() { None } else { Some(children) };
+            menu.children = if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            };
             Some(menu)
         })
         .collect()
@@ -2550,11 +2563,33 @@ mod tests {
             let mut dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
             dir.children = Some(vec![
                 with_perms(
-                    make_menu(100, 1, "C", "user", Some("system/user/index"), "1", "0", "0", "0", None),
+                    make_menu(
+                        100,
+                        1,
+                        "C",
+                        "user",
+                        Some("system/user/index"),
+                        "1",
+                        "0",
+                        "0",
+                        "0",
+                        None,
+                    ),
                     "system:user:list",
                 ),
                 with_perms(
-                    make_menu(3700, 1, "C", "tenant", Some("system/tenant/index"), "1", "0", "0", "0", None),
+                    make_menu(
+                        3700,
+                        1,
+                        "C",
+                        "tenant",
+                        Some("system/tenant/index"),
+                        "1",
+                        "0",
+                        "0",
+                        "0",
+                        None,
+                    ),
                     "system:tenant:list",
                 ),
             ]);
@@ -2563,17 +2598,43 @@ mod tests {
         let tree = vec![
             sys_dir,
             with_perms(
-                make_menu(3900, 0, "C", "my-domain", Some("system/tenant/domain/index"), "1", "0", "0", "0", None),
+                make_menu(
+                    3900,
+                    0,
+                    "C",
+                    "my-domain",
+                    Some("system/tenant/domain/index"),
+                    "1",
+                    "0",
+                    "0",
+                    "0",
+                    None,
+                ),
                 "system:tenant:domain:list",
             ),
             with_perms(
-                make_menu(3627, 0, "C", "my-nav", Some("system/tenant/nav/index"), "1", "0", "0", "0", None),
+                make_menu(
+                    3627,
+                    0,
+                    "C",
+                    "my-nav",
+                    Some("system/tenant/nav/index"),
+                    "1",
+                    "0",
+                    "0",
+                    "0",
+                    None,
+                ),
                 "system:tenantMenu:list",
             ),
         ];
 
         let pruned = prune_tenant_management_menus(tree);
-        assert_eq!(pruned.len(), 1, "顶层仅剩系统管理目录（3900/3627 一并剪除）");
+        assert_eq!(
+            pruned.len(),
+            1,
+            "顶层仅剩系统管理目录（3900/3627 一并剪除）"
+        );
 
         // 系统管理目录保留，但仅剩用户管理（3700 被剪）
         let sys = &pruned[0];
@@ -2587,7 +2648,18 @@ mod tests {
         // 目录下只有租户管理 → 剪除后目录变空 → 目录一并移除
         let mut sys_dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
         sys_dir.children = Some(vec![with_perms(
-            make_menu(3700, 1, "C", "tenant", Some("system/tenant/index"), "1", "0", "0", "0", None),
+            make_menu(
+                3700,
+                1,
+                "C",
+                "tenant",
+                Some("system/tenant/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            ),
             "system:tenant:list",
         )]);
         let pruned = prune_tenant_management_menus(vec![sys_dir]);
@@ -2600,7 +2672,18 @@ mod tests {
         // F 按钮 perms（如 3800 域名查询 system:tenant:domain:add，挂在 3700 下）
         // 不进路由树且 perms 发放独立查询，不受本剪除影响。
         let mut tenant = with_perms(
-            make_menu(3700, 1, "C", "tenant", Some("system/tenant/index"), "1", "0", "0", "0", None),
+            make_menu(
+                3700,
+                1,
+                "C",
+                "tenant",
+                Some("system/tenant/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            ),
             "system:tenant:list",
         );
         tenant.children = Some(vec![with_perms(
@@ -2608,7 +2691,18 @@ mod tests {
             "system:tenant:domain:add",
         )]);
         let user = with_perms(
-            make_menu(100, 1, "C", "user", Some("system/user/index"), "1", "0", "0", "0", None),
+            make_menu(
+                100,
+                1,
+                "C",
+                "user",
+                Some("system/user/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            ),
             "system:user:list",
         );
         let mut dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
@@ -2625,9 +2719,23 @@ mod tests {
         // 无租户语义菜单时原样保留（含空 perms / None perms 节点）——
         // 3900（domain）在 §5.21 后属于租户语义面会被剪，此处用非租户菜单做反例。
         let tree = vec![
-            with_perms(make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None), ""),
             with_perms(
-                make_menu(100, 0, "C", "user", Some("system/user/index"), "1", "0", "0", "0", None),
+                make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None),
+                "",
+            ),
+            with_perms(
+                make_menu(
+                    100,
+                    0,
+                    "C",
+                    "user",
+                    Some("system/user/index"),
+                    "1",
+                    "0",
+                    "0",
+                    "0",
+                    None,
+                ),
                 "system:user:list",
             ),
         ];
@@ -2644,7 +2752,18 @@ mod tests {
     /// AI 菜单节点（menu_id=4100，perms=ai:chat）便捷构造
     fn ai_menu() -> SysMenuModel {
         with_perms(
-            make_menu(4100, 0, "C", "ai", Some("ai/panel/index"), "1", "0", "0", "0", None),
+            make_menu(
+                4100,
+                0,
+                "C",
+                "ai",
+                Some("ai/panel/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            ),
             crate::ai::AI_CHAT_PERM,
         )
     }
@@ -2654,7 +2773,10 @@ mod tests {
         // [ai].enabled=false（进程级）：平台与租户用户的 AI 菜单都剪除
         let tree = vec![ai_menu()];
         assert!(prune_capability_gated_menus(tree.clone(), false, true, None).is_empty());
-        assert!(prune_capability_gated_menus(tree, false, true, Some(&FeatureSet::default())).is_empty());
+        assert!(
+            prune_capability_gated_menus(tree, false, true, Some(&FeatureSet::default()))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2668,7 +2790,10 @@ mod tests {
         let kept = prune_capability_gated_menus(tree.clone(), true, true, None);
         assert_eq!(kept.len(), 1);
         // 能力位开启的租户同样保留
-        assert_eq!(prune_capability_gated_menus(tree, true, true, Some(&FeatureSet::default())).len(), 1);
+        assert_eq!(
+            prune_capability_gated_menus(tree, true, true, Some(&FeatureSet::default())).len(),
+            1
+        );
     }
 
     #[test]
@@ -2676,18 +2801,38 @@ mod tests {
         // 平台专属下放项（system:backup:list，backup.visibility=off）：
         // 租户用户剪、平台用户保留；能力位开启后租户保留。
         let backup = with_perms(
-            make_menu(4200, 0, "C", "backup", Some("monitor/backup/index"), "1", "0", "0", "0", None),
+            make_menu(
+                4200,
+                0,
+                "C",
+                "backup",
+                Some("monitor/backup/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            ),
             "system:backup:list",
         );
         let tree = vec![backup];
 
         // 租户（默认全 off 能力集）→ 剪
-        assert!(prune_capability_gated_menus(tree.clone(), true, true, Some(&FeatureSet::default())).is_empty());
+        assert!(
+            prune_capability_gated_menus(tree.clone(), true, true, Some(&FeatureSet::default()))
+                .is_empty()
+        );
         // 平台 → 保留
-        assert_eq!(prune_capability_gated_menus(tree.clone(), true, true, None).len(), 1);
+        assert_eq!(
+            prune_capability_gated_menus(tree.clone(), true, true, None).len(),
+            1
+        );
         // 租户（backup.visibility=view_only 解锁 list/query）→ 保留
         let f = FeatureSet::from_json(Some(r#"{"backup.visibility":"view_only"}"#));
-        assert_eq!(prune_capability_gated_menus(tree, true, true, Some(&f)).len(), 1);
+        assert_eq!(
+            prune_capability_gated_menus(tree, true, true, Some(&f)).len(),
+            1
+        );
     }
 
     #[test]
@@ -2696,21 +2841,50 @@ mod tests {
         let mut dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
         dir.children = Some(vec![
             with_perms(
-                make_menu(100, 1, "C", "user", Some("system/user/index"), "1", "0", "0", "0", None),
+                make_menu(
+                    100,
+                    1,
+                    "C",
+                    "user",
+                    Some("system/user/index"),
+                    "1",
+                    "0",
+                    "0",
+                    "0",
+                    None,
+                ),
                 "system:user:list",
             ),
             with_perms(
-                make_menu(101, 1, "C", "cfg", Some("system/config/index"), "1", "0", "0", "0", None),
+                make_menu(
+                    101,
+                    1,
+                    "C",
+                    "cfg",
+                    Some("system/config/index"),
+                    "1",
+                    "0",
+                    "0",
+                    "0",
+                    None,
+                ),
                 "",
             ),
-            make_menu(102, 1, "C", "plain", Some("x/index"), "1", "0", "0", "0", None),
+            make_menu(
+                102,
+                1,
+                "C",
+                "plain",
+                Some("x/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            ),
         ]);
-        let pruned = prune_capability_gated_menus(
-            vec![dir],
-            true,
-            true,
-            Some(&FeatureSet::default()),
-        );
+        let pruned =
+            prune_capability_gated_menus(vec![dir], true, true, Some(&FeatureSet::default()));
         assert_eq!(pruned.len(), 1);
         assert_eq!(pruned[0].children.as_ref().unwrap().len(), 3);
     }

@@ -12,8 +12,8 @@
 //! - auth_service.rs: 认证服务（登录、登出、验证码、getInfo、getRouters）
 
 pub mod acme_service;
-pub mod sys_alert_service;
 pub mod auth_service;
+pub mod data_rule_service;
 pub mod event_outbox_service;
 pub mod gen_table_service;
 pub mod global_search_service;
@@ -22,10 +22,10 @@ pub mod mailer_service;
 pub mod scim_group_service;
 pub mod scim_service;
 pub mod sso_service;
+pub mod sys_alert_service;
 pub mod sys_audit_change_service;
 pub mod sys_backup_service;
 pub mod sys_config_service;
-pub mod data_rule_service;
 pub mod sys_dept_service;
 pub mod sys_dict_service;
 pub mod sys_flow_service;
@@ -39,11 +39,11 @@ pub mod sys_notice_service;
 pub mod sys_oauth_service;
 pub mod sys_oper_log_service;
 pub mod sys_pat_service;
-pub mod sys_role_field_perm_service;
 pub mod sys_post_service;
 pub mod sys_rate_limit_service;
 pub mod sys_report_board_service;
 pub mod sys_report_service;
+pub mod sys_role_field_perm_service;
 pub mod sys_role_service;
 pub mod sys_task_service;
 pub mod sys_tenant_domain_service;
@@ -52,6 +52,7 @@ pub mod sys_tenant_service;
 pub mod sys_user_pref_service;
 pub mod sys_user_service;
 pub mod sys_web_hook_service;
+pub mod upload_config_service;
 pub mod user_erasure_service;
 pub mod webauthn_service;
 

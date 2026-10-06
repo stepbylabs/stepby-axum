@@ -73,6 +73,7 @@ mod tests {
             acquire_timeout_secs: 10,
             statement_timeout_secs: u64::MAX,
             dept_cte_max_depth: 0,
+            slow_sql_threshold_ms: 1000,
         };
         // init 首写优先：本进程内若已被其他测试先行初始化，则此处断言
         // 只验证夹取逻辑本身（构造期望值对比）。

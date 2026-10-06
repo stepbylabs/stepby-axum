@@ -194,7 +194,11 @@ where
     /// 注意：MySQL 不支持 `exec_with_returning`，返回的是受影响行数而非 Model 列表。
     /// §5.52（sea-orm 2.0）：insert_many 返回 InsertManyResult（last_insert_id 变为
     /// Option）——本包装统一改返回受影响行数 u64（调用方仅需行数语义，无取回 last id 需求）。
-    pub async fn insert_many_conn<C>(&self, conn: &C, models: Vec<E::ActiveModel>) -> Result<u64, DbErr>
+    pub async fn insert_many_conn<C>(
+        &self,
+        conn: &C,
+        models: Vec<E::ActiveModel>,
+    ) -> Result<u64, DbErr>
     where
         C: ConnectionTrait,
         E::Model: IntoActiveModel<E::ActiveModel>,

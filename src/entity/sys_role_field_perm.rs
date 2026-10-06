@@ -15,8 +15,8 @@
 //!   → 本表角色行；任一层不满足即空集合（关闭态无行为变化，见服务层单测）。
 
 use chrono::NaiveDateTime;
-use sea_orm::entity::prelude::*;
 use sea_orm::Set;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::common::datetime;
@@ -47,11 +47,7 @@ pub enum Relation {}
 /// 时间戳填充：insert 时写 create_time（本表无 update 语义，保存走全量覆盖重建）。
 #[async_trait::async_trait]
 impl ActiveModelBehavior for ActiveModel {
-    async fn before_save<C>(
-        self,
-        _db: &C,
-        insert: bool,
-    ) -> Result<Self, DbErr>
+    async fn before_save<C>(self, _db: &C, insert: bool) -> Result<Self, DbErr>
     where
         C: sea_orm::ConnectionTrait,
     {

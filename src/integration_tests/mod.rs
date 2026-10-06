@@ -16,19 +16,18 @@
 //! 前置依赖：本机需有可达的 Redis（默认 127.0.0.1:6379，无密码）。
 //! 若 Redis 不可用，`init_redis` 会在超时后返回错误，测试将以清晰信息失败。
 
+mod ai_config;
 mod ak_sign;
 mod auth;
 mod capability_features;
 mod clear_fields;
+mod cluster_lock;
 mod common_handler;
 mod common_search;
+mod data_rule;
 mod data_scope_tenant;
 mod file_common;
 mod flow;
-mod switch_modes;
-mod ai_config;
-mod data_rule;
-mod cluster_lock;
 mod i18n_keys;
 mod ip_location;
 mod menu_perm_contract;
@@ -39,6 +38,7 @@ mod response_cache;
 mod scim;
 mod scim_groups;
 mod sso;
+mod switch_modes;
 mod switch_states;
 mod sys_backup;
 mod sys_config_dict;
@@ -80,8 +80,8 @@ mod ws;
 
 use std::fs::OpenOptions;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -360,7 +360,11 @@ async fn build_isolated_state_with(
                 break;
             }
             Err(e) if attempt < 2 => {
-                tracing::warn!("清空隔离 Redis DB 失败（第 {} 次，重试）: {}", attempt + 1, e);
+                tracing::warn!(
+                    "清空隔离 Redis DB 失败（第 {} 次，重试）: {}",
+                    attempt + 1,
+                    e
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             Err(e) => panic!("清空隔离 Redis DB 失败（重试耗尽）: {e}"),
@@ -400,8 +404,9 @@ async fn build_isolated_state_with(
         IpLocationService::new(db.clone(), settings.clone(), ip_locator.clone());
     // SharedStore 双档改造：集成测试固定走 redis 档（RedisStore = 生产 redis 档同实现），
     // 保证原有裸 redis::cmd 断言与业务写入落在同一 Redis DB，测试语义与迁移前一致。
-    let store: Arc<dyn crate::shared_store::SharedStore> =
-        Arc::new(crate::shared_store::RedisStore::new(redis.clone(), db.clone()));
+    let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(
+        crate::shared_store::RedisStore::new(redis.clone(), db.clone()),
+    );
     let job_scheduler = Arc::new(
         JobScheduler::new(
             db.clone(),

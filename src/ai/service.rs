@@ -187,7 +187,9 @@ impl AiService {
         let (columns, rows): (Vec<String>, Vec<Vec<Value>>) = match backend {
             DbBackend::Sqlite => {
                 let pool = self.db.get_sqlite_connection_pool();
-                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone())).fetch_all(pool).await?;
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone()))
+                    .fetch_all(pool)
+                    .await?;
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -205,7 +207,9 @@ impl AiService {
             }
             DbBackend::Postgres => {
                 let pool = self.db.get_postgres_connection_pool();
-                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone())).fetch_all(pool).await?;
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone()))
+                    .fetch_all(pool)
+                    .await?;
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -223,7 +227,9 @@ impl AiService {
             }
             DbBackend::MySql => {
                 let pool = self.db.get_mysql_connection_pool();
-                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone())).fetch_all(pool).await?;
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone()))
+                    .fetch_all(pool)
+                    .await?;
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -370,7 +376,9 @@ impl AiService {
                 question.into(),
                 sql.into(),
                 tables.join(",").into(),
-                serde_json::to_string(columns).unwrap_or_else(|_| "[]".into()).into(),
+                serde_json::to_string(columns)
+                    .unwrap_or_else(|_| "[]".into())
+                    .into(),
                 (rows_count as i64).into(),
                 (duration_ms as i64).into(),
                 (if success { "1" } else { "0" }).into(),

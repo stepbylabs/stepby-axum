@@ -234,14 +234,10 @@ pub async fn verify(
 
     // 3. 读取 pending secret（setup 时服务端生成并加密缓存）
     let pending_key = format!("totp:pending:{}", user_id);
-    let encrypted = state
-        .store
-        .get(&pending_key)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, user_id = user_id, "TOTP pending 查询失败（fail-closed）");
-            AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-        })?;
+    let encrypted = state.store.get(&pending_key).await.map_err(|e| {
+        tracing::error!(error = %e, user_id = user_id, "TOTP pending 查询失败（fail-closed）");
+        AppError::new(503, crate::tr!("error.totp.status_check_failed"))
+    })?;
     let encrypted = encrypted
         .ok_or_else(|| AppError::bad_request(&crate::tr!("error.totp.pending_expired")))?;
 

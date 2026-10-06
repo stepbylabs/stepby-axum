@@ -232,14 +232,10 @@ pub async fn update_now(
     // 原 SET NX EX + UUID value + EVAL CAS 释放 → 收敛为 `store.lock_acquire/lock_release`
     // （UUID fencing token 由实现内置）。
     let lock_key = "ip_location:update:lock";
-    let lock_handle = state
-        .store
-        .lock_acquire(lock_key, 600)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "IP 库更新锁写入失败（fail-closed 拒绝）");
-            AppError::new(503, crate::tr!("error.ip_location.update_unavailable"))
-        })?;
+    let lock_handle = state.store.lock_acquire(lock_key, 600).await.map_err(|e| {
+        tracing::error!(error = %e, "IP 库更新锁写入失败（fail-closed 拒绝）");
+        AppError::new(503, crate::tr!("error.ip_location.update_unavailable"))
+    })?;
     let Some(lock_handle) = lock_handle else {
         return Err(AppError::bad_request(&crate::tr!(
             "error.ip_location.update_in_progress"

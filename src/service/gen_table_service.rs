@@ -605,9 +605,8 @@ impl GenTableService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::gen_table::Entity>(prop, SORTABLE_COLUMNS).map(
-                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
-            )
+            sort::resolve_column::<crate::entity::gen_table::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let begin = match query.begin_time.as_deref() {
@@ -656,9 +655,7 @@ impl GenTableService {
             DB_TABLE_SORTABLE_COLUMNS
                 .iter()
                 .find(|(name, _)| *name == key)
-                .map(|(_, col)| {
-                    SortOrder::new(*col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|(_, col)| SortOrder::new(*col, sort::parse_direction(page.is_asc.as_deref())))
         });
         let (rows, total) = self
             .repo
@@ -1098,10 +1095,12 @@ impl GenTableService {
 
         // 执行 DDL
         // P2 修复: 错误详情写日志，对外仅返回通用文案，避免泄露 DB schema 细节
-        db.execute_raw(backend.build(&create_stmt)).await.map_err(|e| {
-            tracing::error!(error = %e, table = %dto.table_name, "建表执行失败");
-            ServiceError::internal(&crate::tr!("error.gen.create_table_failed"))
-        })?;
+        db.execute_raw(backend.build(&create_stmt))
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, table = %dto.table_name, "建表执行失败");
+                ServiceError::internal(&crate::tr!("error.gen.create_table_failed"))
+            })?;
 
         // 7. 可选：导入到 gen_table
         let mut table_id = None;

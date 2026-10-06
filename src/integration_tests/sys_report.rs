@@ -225,6 +225,23 @@ async fn test_report_chain() {
 async fn test_report_sub_chain() {
     let ctx = TestContext::new().await;
 
+    // G-16：站内信改走 SysMsgService::send 统一投递内核——前置 seed report_push
+    // 模板（site 渠道由 flow 种子保证；生产环境由 initialize 幂等 seed 等价覆盖）
+    let v = ctx
+        .post_json(
+            "/system/msg/template",
+            serde_json::json!({
+                "templateName": "it_rpt_报表推送模板",
+                "templateCode": "report_push",
+                "channelCode": "site",
+                "templateSubject": "报表推送：{{report_name}}",
+                "templateContent": "{{content}}",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
     // 1. 创建父报表（保持启用，供订阅推送）
     let report_id = create_custom_report(&ctx, "it_rpt_sub_parent", "it_rpt_sub_parent_name").await;
 

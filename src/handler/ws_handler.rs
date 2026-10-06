@@ -101,14 +101,10 @@ async fn is_token_blacklisted(
 ) -> Result<bool, axum::http::StatusCode> {
     let token_hash = crate::utils::crypto::token_hash(token);
     let blacklist_key = format!("blacklist:{}", token_hash);
-    let is_blacklisted = state
-        .store
-        .get(&blacklist_key)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "WebSocket 黑名单查询失败（fail-closed 拒绝连接）");
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
-        })?;
+    let is_blacklisted = state.store.get(&blacklist_key).await.map_err(|e| {
+        tracing::error!(error = %e, "WebSocket 黑名单查询失败（fail-closed 拒绝连接）");
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    })?;
     Ok(is_blacklisted.is_some())
 }
 
@@ -168,7 +164,11 @@ pub async fn reset_ws_conn_counts(state: &AppState) {
     }
     // best-effort：批量 DEL 失败仅告警（未删键留待 TTL 自然过期）
     if let Err(e) = state.store.del(&keys).await {
-        tracing::warn!("WebSocket 连接计数重置失败（批量 DEL {} 个）: {}", keys.len(), e);
+        tracing::warn!(
+            "WebSocket 连接计数重置失败（批量 DEL {} 个）: {}",
+            keys.len(),
+            e
+        );
     }
     tracing::info!("已重置 {} 个 WebSocket 连接计数（服务启动）", keys.len());
 }

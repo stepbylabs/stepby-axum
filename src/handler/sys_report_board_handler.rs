@@ -107,10 +107,7 @@ pub async fn board_info(
     Path(board_id): Path<i64>,
 ) -> Result<AjaxResult<BoardVo>, AppError> {
     let user_id = parse_user_id(operator.user_id())?;
-    let vo = state
-        .report_board_service
-        .get(board_id, user_id)
-        .await?;
+    let vo = state.report_board_service.get(board_id, user_id).await?;
     Ok(AjaxResult::success(vo))
 }
 
@@ -160,10 +157,7 @@ pub async fn board_remove(
     Path(board_id): Path<i64>,
 ) -> Result<AjaxResult<()>, AppError> {
     let user_id = parse_user_id(operator.user_id())?;
-    state
-        .report_board_service
-        .delete(board_id, user_id)
-        .await?;
+    state.report_board_service.delete(board_id, user_id).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }
 
@@ -180,7 +174,9 @@ pub async fn board_remove(
 pub async fn source_list(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<Vec<SourceMetaVo>>, AppError> {
-    Ok(AjaxResult::success(state.report_board_service.available_sources()))
+    Ok(AjaxResult::success(
+        state.report_board_service.available_sources(),
+    ))
 }
 
 /// GET /tool/report-board/data/{sourceKey}?range=7d|30d — 数据源数据

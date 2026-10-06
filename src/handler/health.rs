@@ -126,11 +126,11 @@ static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 /// - stepby_process_resident_memory_bytes / stepby_process_virtual_memory_bytes：进程内存
 /// - stepby_db_backend：数据库后端类型（sqlite/mysql/postgres，info 标签）
 /// - stepby_db_connected：数据库连通性（1=已连接 0=未连接）
+/// - stepby_db_pool_size / idle / busy：连接池容量指标（G-12，取值与
+///   /monitor/db-pool 共用 [`crate::handler::monitor_server_handler::db_pool_gauges`]；
+///   sea-orm 2.0 已公开方言 getter，无 sqlx 池的变体诚实降级为 0）
 ///
 /// 无 Grafana/Prometheus 时仍可 `curl http://localhost:8080/metrics` 查看文本格式指标。
-///
-/// 注：sea-orm 1.1 未公开底层 sqlx Pool 的 size()/num_idle() API，
-/// 故连接池容量统计暂不可用。未来 sea-orm 暴露 pool 访问接口后可扩展。
 #[utoipa::path(
     get,
     path = "/metrics",
@@ -202,6 +202,26 @@ pub async fn metrics(
         if db_connected { 1 } else { 0 }
     ));
 
+    // G-12：连接池容量指标（size/idle/busy，与 /monitor/db-pool 共用取值逻辑）
+    let (pool_kind, pool_size, num_idle) =
+        crate::handler::monitor_server_handler::db_pool_gauges(&state.db);
+    let pool_busy = pool_size.saturating_sub(num_idle);
+    s.push_str("# HELP stepby_db_pool_size 连接池当前连接总数\n");
+    s.push_str("# TYPE stepby_db_pool_size gauge\n");
+    s.push_str(&format!(
+        "stepby_db_pool_size{{backend=\"{pool_kind}\"}} {pool_size}\n"
+    ));
+    s.push_str("# HELP stepby_db_pool_idle 连接池空闲连接数\n");
+    s.push_str("# TYPE stepby_db_pool_idle gauge\n");
+    s.push_str(&format!(
+        "stepby_db_pool_idle{{backend=\"{pool_kind}\"}} {num_idle}\n"
+    ));
+    s.push_str("# HELP stepby_db_pool_busy 连接池繁忙连接数（size - idle）\n");
+    s.push_str("# TYPE stepby_db_pool_busy gauge\n");
+    s.push_str(&format!(
+        "stepby_db_pool_busy{{backend=\"{pool_kind}\"}} {pool_busy}\n"
+    ));
+
     // 业务 HTTP 指标（request counter + duration histogram，由 monitoring_middleware 写入）
     s.push_str(&state.observability.metrics.render_prometheus());
 
@@ -242,11 +262,10 @@ async fn collect_shared_store_prometheus(state: &Arc<AppState>) -> String {
             state.store.kind()
         ));
         // 条目计数（kv_entries 解析失败则跳过，不影响 kind 指标）
-        if let Some(v) = map
-            .get("kv_entries")
-            .and_then(|v| v.parse::<f64>().ok())
-        {
-            s.push_str("# HELP stepby_shared_store_kv_entries 共享态存储条目数（sys_shared_kv 行数）\n");
+        if let Some(v) = map.get("kv_entries").and_then(|v| v.parse::<f64>().ok()) {
+            s.push_str(
+                "# HELP stepby_shared_store_kv_entries 共享态存储条目数（sys_shared_kv 行数）\n",
+            );
             s.push_str("# TYPE stepby_shared_store_kv_entries gauge\n");
             s.push_str(&format!(
                 "stepby_shared_store_kv_entries {}\n",

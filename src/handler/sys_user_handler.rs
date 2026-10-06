@@ -111,11 +111,7 @@ pub async fn list(
     // M2 字段级权限：裁剪判定单一入口（三层开关收敛；关闭态恒空集合 = 零行为变化）
     let hidden_user_fields = state
         .field_perm_service
-        .hidden_fields(
-            Some(operator_user_id),
-            operator.tenant_id(),
-            "sys_user",
-        )
+        .hidden_fields(Some(operator_user_id), operator.tenant_id(), "sys_user")
         .await;
     let (rows, total) = state
         .user_service
@@ -157,11 +153,7 @@ pub async fn export(
     // M2 字段级权限：导出与列表同口径裁剪（判定单一入口；关闭态恒空集合 = 零行为变化）
     let hidden_user_fields = state
         .field_perm_service
-        .hidden_fields(
-            Some(operator_user_id),
-            operator.tenant_id(),
-            "sys_user",
-        )
+        .hidden_fields(Some(operator_user_id), operator.tenant_id(), "sys_user")
         .await;
     let rows = state
         .user_service
@@ -387,6 +379,7 @@ pub async fn import_data(
         code: 200,
         msg,
         data: Some(result),
+        trace_id: None,
     })
 }
 
@@ -739,6 +732,7 @@ pub async fn anonymize_precheck(
         code: 200,
         msg: crate::tr!("msg.success.default"),
         data: Some(report),
+        trace_id: None,
     })
 }
 
@@ -779,6 +773,7 @@ pub async fn anonymize_user(
         code: 200,
         msg: crate::tr!("msg.success.erasure_done"),
         data: Some(report),
+        trace_id: None,
     })
 }
 
@@ -836,7 +831,11 @@ pub async fn change_status(
             );
         }
         // v4 #18：停用用户同步吊销其全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
-        if let Err(e) = state.store.revoke_all_for_user(&dto.user_id.to_string()).await {
+        if let Err(e) = state
+            .store
+            .revoke_all_for_user(&dto.user_id.to_string())
+            .await
+        {
             tracing::warn!(user_id = dto.user_id, error = %e, "停用用户后吊销 SSO 令牌失败");
         }
         // W-4：停用即离岗 → 其 pending 审批待办自动转办（部门主管 → admin 回退）
@@ -1226,7 +1225,8 @@ pub async fn avatar_upload(
 
     // P0-3：统一校验 + 保存（头像白名单、危险类型拒绝、magic bytes 以实际类型为准、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
-        state.storage.as_ref(),
+        // G-11：运行时解析存储后端（s3 档 + sys.upload.s3.* 覆盖生效时用运行时后端）
+        state.resolve_storage().await?.as_ref(),
         file_bytes.as_deref().ok_or_else(|| {
             AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_avatar"))
         })?,

@@ -10,8 +10,8 @@ use crate::entity::sys_data_rule;
 use crate::middleware::Operator;
 use crate::service::data_rule_service::{DataRuleDto, DataRuleService};
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use std::sync::Arc;
 

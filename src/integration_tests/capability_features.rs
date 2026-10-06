@@ -433,11 +433,10 @@ async fn test_startup_convergence_conn_recovers_and_is_idempotent() {
         .expect("套餐应存在");
 
     // 第一轮：平台层关闭 ⇒ domain 授权被回收
-    let removed = crate::service::sys_tenant_service::converge_tenant_role_menus_conn(
-        db, TID, &package,
-    )
-    .await
-    .expect("收敛核心执行失败");
+    let removed =
+        crate::service::sys_tenant_service::converge_tenant_role_menus_conn(db, TID, &package)
+            .await
+            .expect("收敛核心执行失败");
     assert!(
         removed >= 1,
         "平台层关闭时存量不可授予授权必须被回收（实际删除 {removed} 行）"
@@ -451,11 +450,10 @@ async fn test_startup_convergence_conn_recovers_and_is_idempotent() {
     // 注意：menu_ids=NULL（不限制）⇒ 白名单面不触发；不可授予面第一轮已清空
     // ⇒ 但不可授予集合本身来自全菜单表（仍有不可授予 perms 清单），
     //   判定零删除靠"该租户角色已无可删行"路径（role_ids 仍有 ⇒ 靠 predicate 不命中）。
-    let removed2 = crate::service::sys_tenant_service::converge_tenant_role_menus_conn(
-        db, TID, &package,
-    )
-    .await
-    .expect("二次收敛执行失败");
+    let removed2 =
+        crate::service::sys_tenant_service::converge_tenant_role_menus_conn(db, TID, &package)
+            .await
+            .expect("二次收敛执行失败");
     assert_eq!(
         removed2, 0,
         "幂等约束：第一轮回收后第二轮必须零删除（实际 {removed2}）"

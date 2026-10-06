@@ -87,7 +87,11 @@ impl MigrationName for Migration {
 /// 元组：(索引名, 表名, 列清单)。迁移侧拼 `CREATE INDEX {ine}{name} ON {table} ({cols})`
 /// （MySQL 经 `IndexDdlExt` 容错"索引已存在"）；兜底侧交 `ensure_tenant_index` 幂等执行。
 pub const AUDIT_INDEXES: &[(&str, &str, &str)] = &[
-    ("idx_audit_change_row", "sys_audit_change", "table_name, row_pk"),
+    (
+        "idx_audit_change_row",
+        "sys_audit_change",
+        "table_name, row_pk",
+    ),
     ("idx_audit_change_time", "sys_audit_change", "operated_at"),
     ("idx_audit_change_tenant", "sys_audit_change", "tenant_id"),
 ];
@@ -203,8 +207,19 @@ pub const AUDIT_MENU_ROWS: &[AuditMenuRow] = &[
 /// （4000 → role_menu(2,4000) → 4001 → role_menu → 4002 → role_menu）。
 pub fn audit_menu_seed_bodies(now_expr: &str) -> Vec<String> {
     let mut bodies = Vec::with_capacity(AUDIT_MENU_ROWS.len() * 2);
-    for (menu_id, name, parent_id, order_num, path, component, menu_type, perms, icon, remark, i18n_key) in
-        AUDIT_MENU_ROWS
+    for (
+        menu_id,
+        name,
+        parent_id,
+        order_num,
+        path,
+        component,
+        menu_type,
+        perms,
+        icon,
+        remark,
+        i18n_key,
+    ) in AUDIT_MENU_ROWS
     {
         let i18n_sql = match i18n_key {
             Some(key) => format!("'{key}'"),
@@ -228,8 +243,7 @@ impl MigrationTrait for Migration {
 
         // ==================== 1. 建表 sys_audit_change（单一事实源） ====================
         let backend = conn.get_database_backend();
-        conn.execute_unprepared(&create_table_sql(backend))
-            .await?;
+        conn.execute_unprepared(&create_table_sql(backend)).await?;
 
         // ==================== 2. 三个审计查询索引（单一事实源） ====================
         // MySQL 不支持 CREATE INDEX IF NOT EXISTS（MariaDB 专属），留空交由
@@ -239,10 +253,8 @@ impl MigrationTrait for Migration {
             _ => "IF NOT EXISTS ",
         };
         for (idx_name, table, cols) in AUDIT_INDEXES {
-            conn.execute_index_ddl_ic(&format!(
-                "CREATE INDEX {ine}{idx_name} ON {table} ({cols})"
-            ))
-            .await?;
+            conn.execute_index_ddl_ic(&format!("CREATE INDEX {ine}{idx_name} ON {table} ({cols})"))
+                .await?;
         }
 
         // ==================== 3. sys_oper_log 加 chain_hash 列（DDL 单一事实源） ====================

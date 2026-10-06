@@ -10,11 +10,25 @@ use tracing::Instrument;
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
 
+// G-13a：当前请求的 request_id（task-local 传播）
+//
+// 背景：错误响应出口 [`crate::common::error::AppError::into_response`] 拿不到
+// request 上下文（Extensions 在那里已不可达），无法把 request_id 填进
+// `body.trace_id`。axum/tower 中间件链与 handler 在同一 tokio task 上逐层
+// await，故用 `task_local` 作用域传播是零依赖且语义精确的通道：
+// - handler 正常/错误返回路径都在 scope 内，读取恒成功；
+// - 脱离请求上下文（后台任务/定时器）读取失败 → `try_with` 返回 Err，
+//   调用方按"无 trace_id"处理（skip 序列化），不会误填。
+tokio::task_local! {
+    pub static CURRENT_REQUEST_ID: String;
+}
+
 /// 请求 ID 中间件：为每个请求生成 UUID 并写入响应头 X-Request-Id
 ///
 /// 优先复用入站 X-Request-Id 头（用于多服务链路追踪），缺失时生成新 UUID。
 /// 同时将 request_id 注入 tracing span，使后续 handler/中间件的日志自动携带 request_id 字段（P2-10），
 /// 便于通过日志关联同一请求的所有处理步骤。
+/// G-13a：并注入 task-local 作用域，供错误响应出口读取（`body.trace_id`）。
 pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     // 优先复用入站 X-Request-Id（用于多服务链路追踪）
     // 校验长度（≤128）和字符集（字母/数字/连字符），防止日志注入和响应头注入
@@ -33,12 +47,27 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
 
     // 将 request_id 注入 tracing span，使后续 handler/中间件的日志自动携带 request_id 字段（P2-10）
     let span = tracing::info_span!("request", request_id = %request_id);
-    let mut response = next.run(req).instrument(span).await;
+    // G-13a：task-local scope 与 tracing instrument 同一 future 叠加，
+    // handler 及其内部（含 AppError::into_response）均可读取当前 request_id
+    let mut response = CURRENT_REQUEST_ID
+        .scope(request_id.clone(), next.run(req).instrument(span))
+        .await;
 
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("X-Request-Id", val);
     }
     response
+}
+
+/// 读取当前请求的 request_id（G-13a）
+///
+/// 返回 `None` 表示当前不在请求作用域内（后台任务/测试直调等场景），
+/// 调用方应跳过 trace_id 填充（而非编造值）。
+pub fn current_request_id() -> Option<String> {
+    CURRENT_REQUEST_ID
+        .try_with(|id| id.clone())
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -202,5 +231,74 @@ mod tests {
             .unwrap();
         let (parts, _) = call(req).await;
         assert!(parts.headers.contains_key("X-Request-Id"));
+    }
+
+    /// G-13a：错误响应 body 必须携带与响应头同源的 trace_id
+    /// （task-local 传播 → AppError::into_response 填充），报障即可凭该 ID grep 日志。
+    #[tokio::test]
+    async fn test_error_body_carries_trace_id_matching_header() {
+        use crate::common::{AjaxResult, AppError};
+
+        async fn failing_handler() -> Result<AjaxResult<()>, AppError> {
+            Err(AppError::internal("boom"))
+        }
+        let app = Router::new()
+            .route("/fail", get(failing_handler))
+            .layer(axum::middleware::from_fn(request_id_middleware));
+
+        let res = app
+            .oneshot(Request::builder().uri("/fail").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = res.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let header_id = parts
+            .headers
+            .get("X-Request-Id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            json.get("trace_id").and_then(|v| v.as_str()),
+            Some(header_id.as_str()),
+            "body.trace_id 必须与响应头 X-Request-Id 同值"
+        );
+        assert_eq!(json.get("code").and_then(|v| v.as_i64()), Some(500));
+    }
+
+    /// G-13a：成功响应**不得**输出 trace_id 字段（skip_serializing_if 兼容口径）
+    #[tokio::test]
+    async fn test_success_body_omits_trace_id() {
+        use crate::common::{AjaxResult, AppError};
+
+        async fn ok_handler() -> Result<AjaxResult<&'static str>, AppError> {
+            Ok(AjaxResult::success("ok"))
+        }
+        let app = Router::new()
+            .route("/ok", get(ok_handler))
+            .layer(axum::middleware::from_fn(request_id_middleware));
+
+        let res = app
+            .oneshot(Request::builder().uri("/ok").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.get("trace_id").is_none(), "成功响应不应输出 trace_id");
+    }
+
+    /// G-13a：非请求作用域内（后台任务）读取 request_id 必须返回 None，不得编造值
+    #[tokio::test]
+    async fn test_current_request_id_none_outside_scope() {
+        assert!(current_request_id().is_none());
+        CURRENT_REQUEST_ID
+            .scope("scoped-id".to_string(), async {
+                assert_eq!(current_request_id().as_deref(), Some("scoped-id"));
+            })
+            .await;
     }
 }

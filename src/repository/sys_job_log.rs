@@ -168,4 +168,30 @@ impl SysJobLogRepository {
         }
         query.exec(self.base.db()).await
     }
+
+    /// G-09 运行报表：窗口内调度日志行（应用层聚合的数据源）
+    ///
+    /// 只取报表聚合所需列的完整 Model（ORM Select 语义），窗口过滤在 DB 侧完成
+    /// （`create_time >= begin`），聚合在应用层按 UTC 日期分桶——刻意不做 SQL
+    /// `GROUP BY date(...)`：三方言日期函数分叉（SQLite `date()` / MySQL `DATE()` /
+    /// PostgreSQL `date_trunc`），应用层聚合零方言差异且单测友好；窗口由调用方
+    /// 限制（days ≤ 30），行数有上界保护（`max_rows` 截断，防失控表拖垮报表接口）。
+    ///
+    /// 多租户：tenant_scope=Some(tid) 仅本租户；None（平台 0）不过滤。
+    pub async fn find_window_for_stats(
+        &self,
+        begin: NaiveDateTime,
+        max_rows: u64,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysJobLog::find().filter(Column::CreateTime.gte(begin));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query
+            .order_by_asc(Column::CreateTime)
+            .limit(max_rows)
+            .all(self.base.db())
+            .await
+    }
 }

@@ -17,16 +17,7 @@ use crate::state::AppState;
 /// 审计变更留痕路由
 pub fn audit_change_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route(
-            "/system/audit-change/list",
-            get(handler::list),
-        )
-        .route(
-            "/system/audit-change/export",
-            get(handler::export),
-        )
-        .route(
-            "/system/audit-change/{id}",
-            get(handler::get_info),
-        )
+        .route("/system/audit-change/list", get(handler::list))
+        .route("/system/audit-change/export", get(handler::export))
+        .route("/system/audit-change/{id}", get(handler::get_info))
 }

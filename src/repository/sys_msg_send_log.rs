@@ -103,11 +103,7 @@ impl SysMsgSendLogRepository {
     /// 清空发送记录（可选 limit 上限，防误删全表；limit=None 时清空全部）
     ///
     /// tenant_scope=Some(t) 时仅清理该租户记录（mass-clean 必须按租户过滤）。
-    pub async fn clean(
-        &self,
-        limit: Option<u64>,
-        tenant_scope: Option<i64>,
-    ) -> Result<u64, DbErr> {
+    pub async fn clean(&self, limit: Option<u64>, tenant_scope: Option<i64>) -> Result<u64, DbErr> {
         // limit 仅当存在时限制，避免误删全表；None 表示全部清空
         if let Some(l) = limit {
             let where_clause = match tenant_scope {
@@ -124,7 +120,7 @@ impl SysMsgSendLogRepository {
                 .db()
                 .execute_unprepared(&sql)
                 .await
-                .map(|qr| qr.rows_affected())
+                .map(|qr| qr.rows_affected());
         }
         let mut stmt = SysMsgSendLog::delete_many();
         if let Some(t) = tenant_scope {

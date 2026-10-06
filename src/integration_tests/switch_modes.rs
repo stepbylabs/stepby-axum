@@ -136,7 +136,9 @@ async fn test_standalone_metrics_token_requires_bearer() {
     })
     .await;
 
-    let (status, _) = ctx.send_raw(ctx.request(Method::GET, "/metrics", None)).await;
+    let (status, _) = ctx
+        .send_raw(ctx.request(Method::GET, "/metrics", None))
+        .await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
@@ -181,7 +183,11 @@ async fn test_standalone_capability_platform_surface_usable() {
 
     // 对照：租户语义面同模式下被剪（capability test_standalone 已锁，此处快验一条）
     let (status, _) = ctx
-        .send_raw(ctx.request(Method::GET, "/system/tenant/list?pageNum=1&pageSize=1", None))
+        .send_raw(ctx.request(
+            Method::GET,
+            "/system/tenant/list?pageNum=1&pageSize=1",
+            None,
+        ))
         .await;
     assert_eq!(
         status,

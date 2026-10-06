@@ -32,9 +32,7 @@ use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
 use crate::config::Settings;
-use crate::entity::sys_msg_send_log::{
-    ActiveModel as SysMsgSendLogActiveModel, Column as MsgLogColumn, Entity as SysMsgSendLog,
-};
+use crate::entity::sys_msg_send_log::{Column as MsgLogColumn, Entity as SysMsgSendLog};
 use crate::entity::sys_report::{
     ActiveModel as SysReportActiveModel, Column as ReportColumn, Model as SysReportModel,
 };
@@ -42,7 +40,6 @@ use crate::entity::sys_report_sub::{
     ActiveModel as SysReportSubActiveModel, Column as SubColumn, Model as SysReportSubModel,
 };
 use crate::entity::sys_user::{Column as UserColumn, Entity as SysUser};
-use crate::repository::sys_msg_send_log::SysMsgSendLogRepository;
 use crate::repository::sys_report::SysReportRepository;
 use crate::repository::sys_report_sub::SysReportSubRepository;
 use crate::service::{MailerService, SysLogininforService};
@@ -423,9 +420,10 @@ const SUB_SORTABLE_COLUMNS: &[(&str, SubColumn)] = &[
 pub struct SysReportService {
     report_repo: SysReportRepository,
     sub_repo: SysReportSubRepository,
-    send_log_repo: SysMsgSendLogRepository,
     mailer: MailerService,
     logininfor_service: SysLogininforService,
+    /// G-16：站内信推送改走统一投递内核（模板渲染 + dispatch + 重试链），不再直插 send_log
+    msg_service: crate::service::sys_msg_service::SysMsgService,
 }
 
 impl SysReportService {
@@ -433,9 +431,9 @@ impl SysReportService {
         Self {
             report_repo: SysReportRepository::new(db.clone()),
             sub_repo: SysReportSubRepository::new(db.clone()),
-            send_log_repo: SysMsgSendLogRepository::new(db.clone()),
-            mailer: MailerService::new(config),
-            logininfor_service: SysLogininforService::new(db),
+            mailer: MailerService::new(config.clone()),
+            logininfor_service: SysLogininforService::new(db.clone()),
+            msg_service: crate::service::sys_msg_service::SysMsgService::new(db, config),
         }
     }
 
@@ -604,7 +602,9 @@ impl SysReportService {
                     sub_repo
                         .soft_delete_by_report_ids_conn(txn, &report_ids)
                         .await?;
-                    report_repo.soft_delete_by_ids_conn(txn, &report_ids).await?;
+                    report_repo
+                        .soft_delete_by_ids_conn(txn, &report_ids)
+                        .await?;
                     Ok(())
                 }
                 .boxed()
@@ -1101,33 +1101,66 @@ impl SysReportService {
             }
         }
 
-        // 站内信推送：经 site 渠道写入 sys_msg_send_log（与 MSG 模块 site 渠道语义一致，模拟投递并留痕）
+        // 站内信推送（G-16：改走 SysMsgService::send 统一投递内核——模板渲染 + site
+        // 渠道 dispatch（尊重用户消息偏好/免打扰）+ 发送记录落库 + 失败进重试链）。
+        // 此前直插 sys_msg_send_log 且 max_retry_count=0，绕过了重试与偏好语义。
         if sub.push_sys_msg == "1" {
             let user_ids = sub
                 .receive_user_ids
                 .as_deref()
                 .map(parse_id_list::<i64>)
                 .unwrap_or_default();
-            for uid in user_ids {
-                let am = SysMsgSendLogActiveModel {
-                    // 运行期产物：归该订阅所属租户（定时/手动触发均无操作者上下文）
-                    tenant_id: Set(sub.tenant_id),
-                    template_code: Set(Some(format!("report_push_{}", report.report_code))),
-                    channel_code: Set(Some("site".to_string())),
-                    to_addr: Set(uid.to_string()),
-                    subject: Set(Some(title.clone())),
-                    content: Set(Some(text_body.clone())),
-                    status: Set(Some("0".to_string())),
-                    retry_count: Set(Some(0)),
-                    max_retry_count: Set(Some(0)),
-                    last_error: Set(None),
-                    send_time: Set(Some(now)),
-                    remark: Set(Some("report subscription push".to_string())),
-                    create_time: Set(Some(now)),
-                    ..Default::default()
-                };
-                if self.send_log_repo.insert(am).await.is_ok() {
-                    site_msgs += 1;
+            // 模板可用性预检：缺失/停用只 warn 一次，避免逐用户刷屏（send 侧 404 语义不变）
+            let params_tpl = std::collections::HashMap::from([
+                ("report_name".to_string(), report.report_name.clone()),
+                ("report_code".to_string(), report.report_code.clone()),
+                ("content".to_string(), text_body.clone()),
+            ]);
+            match self
+                .msg_service
+                .render_template_by_code("report_push", &params_tpl)
+                .await
+            {
+                Ok(Some(_)) => {
+                    for uid in user_ids {
+                        let dto = crate::service::sys_msg_service::SendDto {
+                            template_code: "report_push".to_string(),
+                            channel_code: Some("site".to_string()),
+                            to_addr: uid.to_string(),
+                            params: params_tpl.clone(),
+                        };
+                        // 对齐 flow 站内提醒范式：operator="system"、operator_tid=0（平台触发）
+                        match self.msg_service.send(dto, "system", 0).await {
+                            Ok(log) => {
+                                // "0"=投递成功 / "2"=待重试（已受理，重试链兜底）均计数；
+                                // "1"=重试耗尽失败不计数
+                                if log.status.as_deref() != Some("1") {
+                                    site_msgs += 1;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "报表订阅站内信推送失败 sub_id={}, to={}: {}",
+                                    sub.sub_id,
+                                    uid,
+                                    e.message
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "报表订阅站内信推送跳过：平台模板 report_push 缺失或已停用（sub_id={}）",
+                        sub.sub_id
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "报表订阅站内信推送跳过：模板查询失败（sub_id={}）: {}",
+                        sub.sub_id,
+                        e.message
+                    );
                 }
             }
         }

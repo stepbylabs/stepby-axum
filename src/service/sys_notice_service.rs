@@ -239,11 +239,8 @@ impl SysNoticeService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_notice::Entity>(
-                prop,
-                NOTICE_SORTABLE_COLUMNS,
-            )
-            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+            sort::resolve_column::<crate::entity::sys_notice::Entity>(prop, NOTICE_SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let begin = match query.begin_time.as_deref() {
@@ -421,21 +418,47 @@ impl SysNoticeService {
             return;
         }
 
-        // 构建邮件正文
-        let body = format!(
-            "<div style=\"font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px;\">
-                <h2 style=\"color: #409EFF; border-bottom: 2px solid #409EFF; padding-bottom: 10px;\">{title}</h2>
-                <div style=\"margin: 20px 0;\">{content}</div>
-                <hr style=\"border: none; border-top: 1px solid #ddd; margin: 20px 0;\"/>
-                <p style=\"color: #999; font-size: 12px;\">{footer}</p>
-            </div>",
-            title = crate::utils::sanitize::html_escape(title),
-            content = crate::utils::sanitize::html_escape(content.unwrap_or("")),
-            footer = crate::tr!("notice.email.footer")
-        );
-
+        // 构建邮件正文（G-16：平台模板 notice_email 优先，缺失/停用回落内置默认）
+        //
+        // 模板变量：{{title}}/{{content}}/{{footer}}，均在**代码侧先 html_escape**
+        // （模板存储的是 HTML 骨架，变量位注入已转义值，二次转义风险为零——
+        // 与 render_template 的纯文本替换语义配合，模板内容本身不参与转义）。
+        // 主题前缀保持按请求 locale 双语（notice 发送在请求作用域内），模板只承载正文骨架。
+        let params = std::collections::HashMap::from([
+            (
+                "title".to_string(),
+                crate::utils::sanitize::html_escape(title),
+            ),
+            (
+                "content".to_string(),
+                crate::utils::sanitize::html_escape(content.unwrap_or("")),
+            ),
+            (
+                "footer".to_string(),
+                crate::tr!("notice.email.footer").to_string(),
+            ),
+        ]);
         // P3：邮件主题前缀按请求 locale 双语（notice 发送在请求作用域内）
         let subject_prefix = crate::common::i18n::pick("【stepby 通知】", "[stepby Notice] ");
+        let body = match state
+            .msg_service
+            .render_template_by_code("notice_email", &params)
+            .await
+        {
+            Ok(Some((_, rendered))) => rendered,
+            // 模板缺失/停用/查询失败：回落内置默认骨架（与 seed 的 notice_email 内容一致）
+            _ => format!(
+                "<div style=\"font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px;\">
+                    <h2 style=\"color: #409EFF; border-bottom: 2px solid #409EFF; padding-bottom: 10px;\">{title}</h2>
+                    <div style=\"margin: 20px 0;\">{content}</div>
+                    <hr style=\"border: none; border-top: 1px solid #ddd; margin: 20px 0;\"/>
+                    <p style=\"color: #999; font-size: 12px;\">{footer}</p>
+                </div>",
+                title = params.get("title").map(String::as_str).unwrap_or(""),
+                content = params.get("content").map(String::as_str).unwrap_or(""),
+                footer = params.get("footer").map(String::as_str).unwrap_or(""),
+            ),
+        };
         let subject = format!("{}{}", subject_prefix, title);
         match state
             .mailer_service

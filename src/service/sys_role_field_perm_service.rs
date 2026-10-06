@@ -31,7 +31,7 @@ use sea_orm::{DatabaseConnection, EntityTrait};
 
 use crate::common::constants::SUPER_ADMIN_USER_ID;
 use crate::common::error::ServiceError;
-use crate::common::features::{FeatureSet, FEATURE_OFF};
+use crate::common::features::{FEATURE_OFF, FeatureSet};
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::repository::sys_role::SysRoleRepository;
 use crate::repository::sys_role_field_perm::SysRoleFieldPermRepository;
@@ -122,18 +122,22 @@ impl SysRoleFieldPermService {
         if operator_tid == 0 {
             return true;
         }
-        let features: FeatureSet =
-            match crate::service::sys_tenant_service::tenant_features_conn(db, operator_tid).await {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!(
-                        tenant_id = operator_tid,
-                        "字段级权限能力位判定：查询租户能力集失败，fail-closed 视为不可用: {}",
-                        e
-                    );
-                    return false;
-                }
-            };
+        let features: FeatureSet = match crate::service::sys_tenant_service::tenant_features_conn(
+            db,
+            operator_tid,
+        )
+        .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(
+                    tenant_id = operator_tid,
+                    "字段级权限能力位判定：查询租户能力集失败，fail-closed 视为不可用: {}",
+                    e
+                );
+                return false;
+            }
+        };
         features.mode(FIELD_PERM_FEATURE_KEY) != FEATURE_OFF
     }
 
@@ -212,7 +216,11 @@ impl SysRoleFieldPermService {
         }
         // 4) 第三层：角色授权行并集
         let role_ids: Vec<i64> = roles.iter().map(|r| r.role_id).collect();
-        match self.perm_repo.hidden_fields_by_roles(&role_ids, table_key).await {
+        match self
+            .perm_repo
+            .hidden_fields_by_roles(&role_ids, table_key)
+            .await
+        {
             Ok(fields) => fields.into_iter().collect(),
             Err(e) => {
                 tracing::warn!(
@@ -259,16 +267,19 @@ impl SysRoleFieldPermService {
         table_key: &str,
     ) -> Result<Vec<FieldPermItem>, ServiceError> {
         // table_key 合法性先于开关校验：不存在的表没有"拒绝查看"的语义必要
-        let fields = field_perm_whitelist(table_key).ok_or_else(|| {
-            ServiceError::bad_request(&crate::tr!("error.common.invalid_param"))
-        })?;
+        let fields = field_perm_whitelist(table_key)
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.invalid_param")))?;
         // 顺序契约：开关链校验（403）先于角色归属（404）——能力位缺失时
         // 功能未开通，须先 403 短路，不得被资源 404 抢先（契约测试
         // tenant_without_capability_is_blocked 锁死该顺序）
         self.ensure_enabled(operator_tid).await?;
-        self.ensure_role_tenant_allowed(role_id, operator_tid).await?;
+        self.ensure_role_tenant_allowed(role_id, operator_tid)
+            .await?;
 
-        let hidden_rows = self.perm_repo.find_by_role_and_table(role_id, table_key).await?;
+        let hidden_rows = self
+            .perm_repo
+            .find_by_role_and_table(role_id, table_key)
+            .await?;
         let hidden_set: HashSet<String> = hidden_rows.into_iter().map(|r| r.field_key).collect();
         Ok(fields
             .iter()
@@ -291,12 +302,12 @@ impl SysRoleFieldPermService {
         table_key: &str,
         dto: FieldPermSaveDto,
     ) -> Result<(), ServiceError> {
-        let fields = field_perm_whitelist(table_key).ok_or_else(|| {
-            ServiceError::bad_request(&crate::tr!("error.common.invalid_param"))
-        })?;
+        let fields = field_perm_whitelist(table_key)
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.common.invalid_param")))?;
         // 顺序契约同 get_matrix：开关链 403 先行，角色归属 404 在后
         self.ensure_enabled(operator_tid).await?;
-        self.ensure_role_tenant_allowed(role_id, operator_tid).await?;
+        self.ensure_role_tenant_allowed(role_id, operator_tid)
+            .await?;
 
         // 白名单过滤 + 去重（保持请求顺序；重复项幂等合并）
         let mut seen = HashSet::new();
@@ -316,17 +327,15 @@ impl SysRoleFieldPermService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::sys_user_service::{apply_field_perm_and_mask, hidden_field_set_to_omit_columns};
-    use sea_orm::{
-        DatabaseBackend, DatabaseConnection, EntityTrait, Statement, ConnectionTrait,
+    use crate::service::sys_user_service::{
+        apply_field_perm_and_mask, hidden_field_set_to_omit_columns,
     };
+    use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement};
     use std::sync::Arc;
 
     use crate::entity::sys_role::{ActiveModel as RoleActiveModel, Entity as SysRole};
     use crate::entity::sys_user::{ActiveModel as UserActiveModel, Entity as SysUser};
-    use crate::entity::sys_user_role::{
-        ActiveModel as UserRoleActiveModel, Entity as SysUserRole,
-    };
+    use crate::entity::sys_user_role::{ActiveModel as UserRoleActiveModel, Entity as SysUserRole};
     use crate::repository::sys_role_field_perm::SysRoleFieldPermRepository;
     use crate::repository::test_support::migrated_db;
     use crate::service::sys_config_service::SysConfigService;
@@ -505,8 +514,23 @@ mod tests {
         let repo = crate::repository::sys_user::SysUserRepository::new(db.clone());
         let (rows, total) = repo
             .find_page_with_data_scope(
-                0, 10, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, &[], None,
+                0,
+                10,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
             )
             .await
             .unwrap();
@@ -632,13 +656,22 @@ mod tests {
         let svc = make_service(&db);
         // tid=300：无 sys_tenant 行 → tenant_features_conn 回落平台默认（全 off）
         assert!(
-            svc.hidden_fields(Some(55), 300, "sys_user").await.is_empty(),
+            svc.hidden_fields(Some(55), 300, "sys_user")
+                .await
+                .is_empty(),
             "租户能力位 role.field_perm 缺省（off）时必须拦截裁剪"
         );
         let err = svc.get_matrix(99, 300, "sys_user").await.unwrap_err();
         assert_eq!(err.code, 403, "能力位缺失时矩阵读必须 403");
         let werr = svc
-            .save_matrix(99, 300, "sys_user", FieldPermSaveDto { hidden_fields: vec![] })
+            .save_matrix(
+                99,
+                300,
+                "sys_user",
+                FieldPermSaveDto {
+                    hidden_fields: vec![],
+                },
+            )
             .await
             .unwrap_err();
         assert_eq!(werr.code, 403, "能力位缺失时矩阵写必须 403");
@@ -673,7 +706,10 @@ mod tests {
         .await
         .unwrap();
         let matrix = svc.get_matrix(99, 0, "sys_user").await.unwrap();
-        let phone = matrix.iter().find(|m| m.field_key == "phonenumber").unwrap();
+        let phone = matrix
+            .iter()
+            .find(|m| m.field_key == "phonenumber")
+            .unwrap();
         let email = matrix.iter().find(|m| m.field_key == "email").unwrap();
         assert!(phone.hidden, "phonenumber 应为 hidden");
         assert!(!email.hidden, "email 应保持可见");
@@ -691,10 +727,20 @@ mod tests {
         .unwrap();
         let matrix = svc.get_matrix(99, 0, "sys_user").await.unwrap();
         assert!(
-            !matrix.iter().find(|m| m.field_key == "phonenumber").unwrap().hidden,
+            !matrix
+                .iter()
+                .find(|m| m.field_key == "phonenumber")
+                .unwrap()
+                .hidden,
             "全量覆盖式保存必须清掉未提交的 hidden 行"
         );
-        assert!(matrix.iter().find(|m| m.field_key == "email").unwrap().hidden);
+        assert!(
+            matrix
+                .iter()
+                .find(|m| m.field_key == "email")
+                .unwrap()
+                .hidden
+        );
 
         // 重复保存幂等：同内容再存一次不报错、不重复（UNIQUE + 冲突忽略）
         svc.save_matrix(
@@ -708,7 +754,11 @@ mod tests {
         .await
         .unwrap();
         let matrix = svc.get_matrix(99, 0, "sys_user").await.unwrap();
-        assert_eq!(matrix.iter().filter(|m| m.hidden).count(), 1, "幂等重放不得产生重复 hidden 行");
+        assert_eq!(
+            matrix.iter().filter(|m| m.hidden).count(),
+            1,
+            "幂等重放不得产生重复 hidden 行"
+        );
 
         // 白名单外 field 拒绝（不落库）
         let rejected = svc
@@ -721,7 +771,10 @@ mod tests {
                 },
             )
             .await;
-        assert!(rejected.is_ok(), "白名单外字段应被静默过滤而非拒绝（防呆不阻断）");
+        assert!(
+            rejected.is_ok(),
+            "白名单外字段应被静默过滤而非拒绝（防呆不阻断）"
+        );
         let matrix = svc.get_matrix(99, 0, "sys_user").await.unwrap();
         assert!(
             matrix.iter().all(|m| !m.hidden),
@@ -735,7 +788,9 @@ mod tests {
                 99,
                 0,
                 "sys_dict",
-                FieldPermSaveDto { hidden_fields: vec![] }
+                FieldPermSaveDto {
+                    hidden_fields: vec![]
+                }
             )
             .await
             .is_err()
@@ -798,7 +853,10 @@ mod tests {
             "bogus".to_string(),
         ]));
         assert_eq!(o.len(), 1);
-        assert_eq!(o[0], crate::repository::sys_user::UserOmitColumn::Phonenumber);
+        assert_eq!(
+            o[0],
+            crate::repository::sys_user::UserOmitColumn::Phonenumber
+        );
         assert!(hidden_field_set_to_omit_columns(&HashSet::new()).is_empty());
     }
 }

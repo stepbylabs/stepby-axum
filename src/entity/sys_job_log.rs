@@ -29,6 +29,11 @@ pub struct Model {
     pub job_message: Option<String>,
     pub status: Option<String>,
     pub exception_info: Option<String>,
+    /// 任务执行耗时（毫秒，G-09 运行报表聚合用；存量行/未知为 NULL）
+    ///
+    /// 历史口径：耗时曾以字符串拼进 `job_message`（`"... (elapsed 123ms)"`），
+    /// 该字符串保留兼容展示，但报表聚合以本列为准。
+    pub duration_ms: Option<i64>,
     #[serde(
         serialize_with = "datetime::serialize_opt",
         deserialize_with = "datetime::deserialize_opt"

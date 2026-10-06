@@ -443,7 +443,9 @@ mod tests {
         let size = 3u64;
 
         let (p0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                0, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         assert_eq!(p0.len(), 3);
@@ -527,7 +529,19 @@ mod tests {
         let repo = insert_7(&db).await;
         // 过滤 status='0'（i==6 被排除）
         let (first, total) = repo
-            .find_page_filtered(0, 10, None, None, Some("0"), None, None, None, None, None, None)
+            .find_page_filtered(
+                0,
+                10,
+                None,
+                None,
+                Some("0"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(total, 6);
@@ -560,20 +574,28 @@ mod tests {
         let size = 3u64;
 
         let (o0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                0, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         let (o1, _) = repo
-            .find_page_filtered(3, size, None, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                3, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         let (o2, _) = repo
-            .find_page_filtered(6, size, None, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                6, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
 
         let (k0, _) = repo
-            .find_page_filtered(0, size, None, None, None, None, None, None, None, None, None)
+            .find_page_filtered(
+                0, size, None, None, None, None, None, None, None, None, None,
+            )
             .await
             .unwrap();
         let (k1, _) = repo

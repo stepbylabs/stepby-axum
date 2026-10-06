@@ -609,11 +609,10 @@ impl PasskeyStore for WebauthnService {
 
     async fn get_state(&self, id: &str) -> PasskeyResult<Option<PasskeyState>> {
         let key = format!("{STATE_KEY_PREFIX}{id}");
-        let raw = self
-            .store
-            .get(&key)
-            .await
-            .map_err(|e| PasskeyError::DatabaseError(format!("shared store get failed: {e}")))?;
+        let raw =
+            self.store.get(&key).await.map_err(|e| {
+                PasskeyError::DatabaseError(format!("shared store get failed: {e}"))
+            })?;
         let Some(raw) = raw else {
             return Ok(None);
         };

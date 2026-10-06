@@ -65,8 +65,8 @@ fn extract_tr_keys(crate_root: &Path) -> BTreeSet<String> {
 /// 专用简易解析：仅匹配 `缩进 key:` 行构建嵌套 path（locales 文件不含列表/锚点等复杂语法）；
 /// 注释行、纯值行、空行均跳过。
 fn parse_locale_key_paths(path: &Path) -> BTreeSet<String> {
-    let content =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
     // (indent, key) 栈：栈顶为最近一层 mapping 的当前节点
     let mut stack: Vec<(usize, String)> = Vec::new();
     let mut keys = BTreeSet::new();
@@ -132,11 +132,19 @@ fn all_tr_keys_exist_in_both_locale_files() {
     assert!(
         missing_zh.is_empty(),
         "以下 tr! key 在 locales/zh-CN.yml 缺失（中文请求将显示裸 key），请补齐：\n{}",
-        missing_zh.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+        missing_zh
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(
         missing_en.is_empty(),
         "以下 tr! key 在 locales/en-US.yml 缺失（英文请求将回退 zh-CN 或显示裸 key），请补齐：\n{}",
-        missing_en.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+        missing_en
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

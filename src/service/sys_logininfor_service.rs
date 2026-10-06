@@ -111,9 +111,7 @@ impl SysLogininforService {
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
             sort::resolve_column::<crate::entity::sys_logininfor::Entity>(prop, SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let begin_time = match query.begin_time.as_deref() {

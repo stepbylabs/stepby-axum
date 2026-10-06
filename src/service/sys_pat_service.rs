@@ -228,9 +228,9 @@ impl SysPatService {
         // 生成明文令牌：prefix + 32 随机字节（hex，64 字符）
         let mut buf = [0u8; 32];
         {
-            use rand_os::{rngs::StdRng, Rng, SeedableRng};
-            let mut rng = StdRng::try_from_rng(&mut rand_os::rngs::SysRng)
-                .expect("OS RNG seed failed");
+            use rand_os::{Rng, SeedableRng, rngs::StdRng};
+            let mut rng =
+                StdRng::try_from_rng(&mut rand_os::rngs::SysRng).expect("OS RNG seed failed");
             rng.fill_bytes(&mut buf);
         }
         let secret = hex_encode(&buf);
@@ -509,7 +509,11 @@ impl SysPatService {
     /// 校验链：access_key 唯一命中 → PAT status='0' → 未过期 → 属主 sys_user 存活
     /// （与 verify_token 的 E1-a 属主口径一致）→ SK 密文可解密。
     /// SK 解密失败按 NotFound 处理（fail-closed，不泄露区分信息）。
-    pub async fn verify_ak(&self, access_key: &str, enc_key: &str) -> Result<AkLookup, ServiceError> {
+    pub async fn verify_ak(
+        &self,
+        access_key: &str,
+        enc_key: &str,
+    ) -> Result<AkLookup, ServiceError> {
         use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
         let db = self.pat_repo.base().db();
         let Some(row) = SysPat::find()
@@ -528,7 +532,9 @@ impl SysPatService {
             return Ok(AkLookup::Expired);
         }
         // 属主存活校验（E1-a 同口径：del_flag != '2' 且 status = '0'）
-        let owner = crate::entity::sys_user::Entity::find_by_id(row.user_id).one(db).await?;
+        let owner = crate::entity::sys_user::Entity::find_by_id(row.user_id)
+            .one(db)
+            .await?;
         let Some(owner) = owner else {
             return Ok(AkLookup::OwnerDisabled);
         };
@@ -587,7 +593,7 @@ impl SysPatService {
 
 /// 生成开放 API access_key："ak" + 12 随机字节 hex（总长 26，满足列宽 VARCHAR(32)）
 fn generate_access_key() -> String {
-    use rand_os::{Rng, rngs::StdRng, SeedableRng};
+    use rand_os::{Rng, SeedableRng, rngs::StdRng};
     let mut buf = [0u8; 12];
     let mut rng = StdRng::try_from_rng(&mut rand_os::rngs::SysRng).expect("OS RNG seed failed");
     rng.fill_bytes(&mut buf);
@@ -599,7 +605,7 @@ fn generate_access_key() -> String {
 /// base64url 字符集不含 '+' '/'，作为签名密钥/HTTP 头取值均安全。
 fn generate_secret_key() -> String {
     use base64::Engine;
-    use rand_os::{Rng, rngs::StdRng, SeedableRng};
+    use rand_os::{Rng, SeedableRng, rngs::StdRng};
     let mut buf = [0u8; 36];
     let mut rng = StdRng::try_from_rng(&mut rand_os::rngs::SysRng).expect("OS RNG seed failed");
     rng.fill_bytes(&mut buf);
