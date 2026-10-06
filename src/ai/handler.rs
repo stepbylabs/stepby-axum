@@ -176,7 +176,7 @@ pub async fn update_config(
     let operator_name = operator.user_id();
     state.ai_config_service.update(&dto).await?;
     tracing::info!(operator = %operator_name, "AI 助手配置已由平台管理员更新");
-    Ok(AjaxResult::success_msg(&tr!("common.success")))
+    Ok(AjaxResult::success_msg(&tr!("msg.success.operation")))
 }
 
 /// POST /system/aiConfig/test —— 连通性测试（独立 10s 超时，返回延迟或错误摘要）

@@ -54,3 +54,5 @@ fmt_after.txt
 
 # 本地测试工具（RustFS 二进制/数据，不入库；获取与运行方式见 src/storage/s3.rs 的 s3_backend_roundtrip_live 测试注释）
 /test-tools/
+_full_t.log
+_ik.log

@@ -10,6 +10,7 @@ error:
     disabled: Field-level permission is not enabled (platform switch or tenant package capability is off)
     table_not_allowed: The business table is not in the field-level permission whitelist
   common:
+    success: Operation successful
     not_found: Data not found
     db_acquire: Failed to acquire database connection
     bad_format: Invalid data format
