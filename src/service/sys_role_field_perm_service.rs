@@ -506,7 +506,7 @@ mod tests {
         let (rows, total) = repo
             .find_page_with_data_scope(
                 0, 10, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, &[],
+                None, &[], None,
             )
             .await
             .unwrap();
