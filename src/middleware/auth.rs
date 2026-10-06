@@ -55,7 +55,7 @@ pub async fn auth_middleware(
     let req_path = req.uri().path().to_string();
 
     // Tier-S #3：个人访问令牌（PAT）分支。
-    // 以配置前缀（默认 "ybt_"）区分于登录 JWT（其头以 "eyJ" base64 开头，永不冲突）。
+    // 以配置前缀（默认 "sb_"，yebot 时代为 "ybt_"）区分于登录 JWT（其头以 "eyJ" base64 开头，永不冲突）。
     // 命中前缀即走 PAT 鉴权：按摘要查库校验有效性，合成带 pat_scopes 的 Claims 注入 extensions，
     // 跳过 JWT 专属的 blacklist / pwd_ver（PAT 吊销靠每请求查库即时生效）；下游全部无感复用。
     if !state.config.pat.prefix.is_empty() && token.starts_with(&state.config.pat.prefix) {

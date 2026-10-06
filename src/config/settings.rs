@@ -1441,7 +1441,9 @@ fn default_pat_enabled() -> bool {
     true
 }
 fn default_pat_prefix() -> String {
-    "ybt_".to_string()
+    // §5.49：yebot 时代遗留前缀改 stepby 品牌（项目未发布无存量令牌——
+    // 改前缀仅影响新签发 PAT；如需兼容旧令牌，config.toml [pat].prefix 显式配回 "ybt_"）
+    "sb_".to_string()
 }
 fn default_pat_default_expire_days() -> i64 {
     90

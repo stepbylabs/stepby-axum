@@ -96,7 +96,7 @@ async fn test_pat_chain() {
         .expect("应返回明文 token")
         .to_string();
     assert!(
-        token.starts_with("ybt_"),
+        token.starts_with("sb_"),
         "明文令牌应以 ybt_ 前缀开头，实际: {token}"
     );
     let pat_id = v["data"]["pat"]["patId"]

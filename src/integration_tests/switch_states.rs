@@ -46,7 +46,7 @@ async fn test_pat_disabled_rejects_ybt_tokens_but_jwt_unaffected() {
             &ctx,
             Method::GET,
             "/system/user/list?pageNum=1&pageSize=1",
-            "ybt_fake_token",
+            "sb_fake_token",
         ))
         .await;
     assert_eq!(
@@ -71,7 +71,7 @@ async fn test_pat_disabled_rejects_ybt_tokens_but_jwt_unaffected() {
             &ctx_on,
             Method::GET,
             "/system/user/list?pageNum=1&pageSize=1",
-            "ybt_fake_token",
+            "sb_fake_token",
         ))
         .await;
     assert_eq!(
