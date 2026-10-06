@@ -25,6 +25,7 @@ mod common_search;
 mod data_scope_tenant;
 mod file_common;
 mod flow;
+mod switch_modes;
 mod ai_config;
 mod cluster_lock;
 mod i18n_keys;
