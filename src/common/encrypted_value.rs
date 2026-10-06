@@ -42,7 +42,8 @@ use crate::utils::crypto::{runtime_master_key, seal_sensitive_value, unseal_sens
 /// // 写入：ActiveModel { secret: Set(Some(EncryptedString("raw-secret".into()))) }
 /// // 读取：model.secret -> Some(EncryptedString("raw-secret"))（已自动解密）
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, ts_rs::TS, utoipa::ToSchema)]
+#[ts(export, export_to = "EncryptedString.ts")]
 pub struct EncryptedString(pub String);
 
 impl EncryptedString {
@@ -123,6 +124,35 @@ impl sea_orm::sea_query::ValueType for EncryptedString {
 
     fn column_type() -> ColumnType {
         ColumnType::Text
+    }
+}
+
+/// NULL 语义（sea_query 0.32 `Nullable`——`Option<EncryptedString>` 的 None 分支）
+impl sea_orm::sea_query::Nullable for EncryptedString {
+    fn null() -> Value {
+        Value::String(None)
+    }
+}
+
+// ==================== 实体 derive 链所需 trait（Serialize/Deserialize/TS/ToSchema） ====================
+
+/// 序列化输出**掩码**（前 2 后 2，中段 ****；≤6 字符全掩码）——实体 Model 直接
+/// 序列化返回前端时，敏感值永不回显明文/密文（安全红线）
+impl serde::Serialize for EncryptedString {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let chars: Vec<char> = self.0.chars().collect();
+        let masked = if chars.is_empty() {
+            String::new()
+        } else if chars.len() <= 6 {
+            "*".repeat(chars.len())
+        } else {
+            format!(
+                "{}****{}",
+                chars[..2].iter().collect::<String>(),
+                chars[chars.len() - 2..].iter().collect::<String>()
+            )
+        };
+        serializer.serialize_str(&masked)
     }
 }
 

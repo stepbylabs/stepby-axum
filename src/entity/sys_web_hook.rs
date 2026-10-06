@@ -39,8 +39,9 @@ pub struct Model {
     pub subscribed_events: Option<String>,
     /// 出站目标 URL
     pub target_url: String,
-    /// 签名密钥（可选）
-    pub secret: Option<String>,
+    /// 签名密钥（可选；G-14 通用层：EncryptedString 列类型，取存自动加解密
+    /// ——enc3 信封，密钥源 runtime_master_key；密文列不可 LIKE/等值查询）
+    pub secret: Option<crate::common::encrypted_value::EncryptedString>,
     /// 请求体格式：json / form-urlencoded
     pub content_type: String,
     /// 超时秒数
