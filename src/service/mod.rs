@@ -25,6 +25,7 @@ pub mod sso_service;
 pub mod sys_audit_change_service;
 pub mod sys_backup_service;
 pub mod sys_config_service;
+pub mod data_rule_service;
 pub mod sys_dept_service;
 pub mod sys_dict_service;
 pub mod sys_flow_service;

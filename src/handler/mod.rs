@@ -3,6 +3,7 @@
 pub mod auth_handler;
 pub mod common_handler;
 pub mod common_search_handler;
+pub mod data_rule_handler;
 pub mod file_handler;
 pub mod flow_handler;
 pub mod health;

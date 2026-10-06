@@ -27,6 +27,7 @@ mod file_common;
 mod flow;
 mod switch_modes;
 mod ai_config;
+mod data_rule;
 mod cluster_lock;
 mod i18n_keys;
 mod ip_location;
