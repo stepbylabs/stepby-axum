@@ -127,9 +127,10 @@ async fn table_exists(manager: &SchemaManager<'_>, table: &str) -> Result<bool, 
         DatabaseBackend::MySql => format!(
             "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=DATABASE() LIMIT 1"
         ),
+        _ => unreachable!("unknown backend"),
     };
     Ok(!conn
-        .query_all(Statement::from_string(backend, sql))
+        .query_all_raw(Statement::from_string(backend, sql))
         .await?
         .is_empty())
 }
@@ -144,7 +145,7 @@ async fn has_column(
     let backend = conn.get_database_backend();
     let rows = match backend {
         DatabaseBackend::Sqlite => {
-            conn.query_all(Statement::from_string(
+            conn.query_all_raw(Statement::from_string(
                 backend,
                 format!("PRAGMA table_info({table})"),
             ))
@@ -156,7 +157,7 @@ async fn has_column(
             } else {
                 "table_schema=DATABASE()"
             };
-            conn.query_all(Statement::from_string(
+            conn.query_all_raw(Statement::from_string(
                 backend,
                 format!(
                     "SELECT 1 FROM information_schema.columns WHERE table_name='{table}' AND column_name='{column}' AND {schema} LIMIT 1"

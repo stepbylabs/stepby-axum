@@ -285,24 +285,32 @@ pub struct DbPoolInfo {
     tag = "monitor-server"
 )]
 pub async fn get_db_pool(State(state): State<Arc<AppState>>) -> AjaxResult<DbPoolInfo> {
-    use sea_orm::DatabaseConnection;
+    use sea_orm::DatabaseConnectionType;
 
-    // 先按连接枚举变体判定方言（安全，无 panic 路径），再调用同方言的池 getter
-    let (db_kind, pool_size, num_idle) = match &state.db {
-        DatabaseConnection::SqlxSqlitePoolConnection(_) => {
+    // §5.52（sea-orm 2.0）：连接枚举改名 DatabaseConnectionType 并收进
+    // DatabaseConnection.inner——先 backend 判方言，池 getter 在变体不符时
+    // 会 panic（backend 与 inner 变体恒一致，见 DatabaseConnection 构造），故安全
+    let db_kind = match state.db.get_database_backend() {
+        sea_orm::DatabaseBackend::Sqlite => "sqlite",
+        sea_orm::DatabaseBackend::MySql => "mysql",
+        sea_orm::DatabaseBackend::Postgres => "postgres",
+        _ => unreachable!("unknown backend"),
+    };
+    let (pool_size, num_idle) = match &state.db.inner {
+        DatabaseConnectionType::SqlxSqlitePoolConnection(_) => {
             let pool = state.db.get_sqlite_connection_pool();
-            ("sqlite", pool.size() as u64, pool.num_idle() as u64)
+            (pool.size() as u64, pool.num_idle() as u64)
         }
-        DatabaseConnection::SqlxMySqlPoolConnection(_) => {
+        DatabaseConnectionType::SqlxMySqlPoolConnection(_) => {
             let pool = state.db.get_mysql_connection_pool();
-            ("mysql", pool.size() as u64, pool.num_idle() as u64)
+            (pool.size() as u64, pool.num_idle() as u64)
         }
-        DatabaseConnection::SqlxPostgresPoolConnection(_) => {
+        DatabaseConnectionType::SqlxPostgresPoolConnection(_) => {
             let pool = state.db.get_postgres_connection_pool();
-            ("postgres", pool.size() as u64, pool.num_idle() as u64)
+            (pool.size() as u64, pool.num_idle() as u64)
         }
         // 无 sqlx 池的变体（Disconnected / Mock / Proxy）：真实不可得，诚实降级为 0
-        _ => ("unknown", 0, 0),
+        _ => (0, 0),
     };
 
     let info = DbPoolInfo {

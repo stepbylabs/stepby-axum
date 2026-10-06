@@ -20,7 +20,7 @@ async fn query_admin_tenant_id(ctx: &TestContext) -> i64 {
     let rows = ctx
         .state
         .db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT tenant_id FROM sys_user WHERE user_name = 'admin'".to_string(),
         ))
@@ -44,7 +44,7 @@ async fn insert_hook(ctx: &TestContext, tenant_id: i64, name: &str) -> i64 {
     let res = ctx
         .state
         .db
-        .execute(Statement::from_string(DatabaseBackend::Sqlite, sql))
+        .execute_raw(Statement::from_string(DatabaseBackend::Sqlite, sql))
         .await
         .expect("插入回调失败");
     res.last_insert_id() as i64
@@ -60,7 +60,7 @@ async fn count_logs_sql(ctx: &TestContext, hook_id: i64, event_type: &str) -> i6
     let rows = ctx
         .state
         .db
-        .query_all(Statement::from_string(DatabaseBackend::Sqlite, sql))
+        .query_all_raw(Statement::from_string(DatabaseBackend::Sqlite, sql))
         .await
         .expect("统计 web_hook_log 失败");
     rows.first()

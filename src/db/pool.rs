@@ -141,7 +141,12 @@ async fn connect_mysql_with_statement_timeout(
             .after_connect(move |conn, _meta| {
                 let set_sql = set_sql.clone();
                 Box::pin(async move {
-                    sea_orm::sqlx::query(&set_sql).execute(conn).await?;
+                    // SAFETY §5.52（sea-orm 2.0/sqlx 0.9 SqlSafeStr 审计）：set_sql 由
+                    // timeout_ms（配置解析的 u64）经 format! 构造，无外部输入参与——
+                    // AssertSqlSafe 为官方人工审计豁免通道。
+                    sqlx::query(sqlx::AssertSqlSafe(set_sql))
+                        .execute(conn)
+                        .await?;
                     Ok(())
                 })
             })

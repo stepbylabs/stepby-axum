@@ -315,11 +315,12 @@ fn format_gauge(v: f64) -> String {
 
 /// 获取数据库后端类型名称
 fn db_backend_name(db: &sea_orm::DatabaseConnection) -> &'static str {
-    use sea_orm::{ConnectionTrait, DatabaseBackend};
+    use sea_orm::DatabaseBackend;
     match db.get_database_backend() {
         DatabaseBackend::Sqlite => "sqlite",
         DatabaseBackend::MySql => "mysql",
         DatabaseBackend::Postgres => "postgres",
+        _ => unreachable!("unknown backend"),
     }
 }
 

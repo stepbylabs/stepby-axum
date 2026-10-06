@@ -114,6 +114,7 @@ pub fn create_table_sql(backend: sea_orm_migration::sea_orm::DatabaseBackend) ->
             "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
             "DATETIME NOT NULL",
         ),
+        _ => unreachable!("unknown backend"),
     };
     format!(
         "CREATE TABLE IF NOT EXISTS sys_role_field_perm (

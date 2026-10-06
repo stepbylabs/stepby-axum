@@ -192,16 +192,18 @@ where
     /// 批量插入记录（使用指定连接）
     ///
     /// 注意：MySQL 不支持 `exec_with_returning`，返回的是受影响行数而非 Model 列表。
-    pub async fn insert_many_conn<C>(
-        &self,
-        conn: &C,
-        models: Vec<E::ActiveModel>,
-    ) -> Result<InsertResult<E::ActiveModel>, DbErr>
+    /// §5.52（sea-orm 2.0）：insert_many 返回 InsertManyResult（last_insert_id 变为
+    /// Option）——本包装统一改返回受影响行数 u64（调用方仅需行数语义，无取回 last id 需求）。
+    pub async fn insert_many_conn<C>(&self, conn: &C, models: Vec<E::ActiveModel>) -> Result<u64, DbErr>
     where
         C: ConnectionTrait,
         E::Model: IntoActiveModel<E::ActiveModel>,
     {
-        E::insert_many(models).exec(conn).await
+        // §5.52（sea-orm 2.0）：InsertManyResult 无 rows_affected 字段——
+        // 批量插入的受影响行数 = 输入模型数（INSERT 语义恒等）
+        let n = models.len() as u64;
+        E::insert_many(models).exec(conn).await?;
+        Ok(n)
     }
 
     /// 更新一条记录（使用指定连接，返回更新后的 Model）
@@ -364,14 +366,12 @@ mod tests {
         );
         assert!(repo.find_one_conn(&db, sel).await.unwrap().is_some());
 
-        // insert_many_conn
+        // insert_many_conn（§5.52 sea-orm 2.0：改返回受影响行数）
         let res = repo
             .insert_many_conn(&db, vec![make_job("conn-b"), make_job("conn-c")])
             .await
             .unwrap();
-        // 批量插入后 last_insert_id 为最后一行 id（种子占用 1-3，sqlite 序列设为 100，
-        // 实际下一个自增为 101：conn-a=101, conn-b=102, conn-c=103）
-        assert_eq!(res.last_insert_id, 103);
+        assert_eq!(res, 2);
         // 总条数 = 3 种子 + 3 新增
         assert_eq!(repo.count().await.unwrap(), 6);
 

@@ -347,7 +347,7 @@ pub struct FlowPageQuery {
 
 fn page_args(query: &FlowPageQuery) -> (u64, u64) {
     let size = query.page_size.unwrap_or(10).clamp(1, 100);
-    let num = query.page_num.unwrap_or(1).max(1);
+    let num = std::cmp::max(query.page_num.unwrap_or(1), 1);
     ((num - 1) * size, size)
 }
 

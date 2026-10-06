@@ -44,7 +44,7 @@ pub async fn cleanup_expired_token_revocations(
 ) -> Result<u64, sea_orm::DbErr> {
     let now_epoch = chrono::Utc::now().timestamp();
     let res = db
-        .execute(sea_orm::Statement::from_string(
+        .execute_raw(sea_orm::Statement::from_string(
             db.get_database_backend(),
             format!("DELETE FROM sys_token_revocation WHERE expire_at <= {now_epoch}"),
         ))

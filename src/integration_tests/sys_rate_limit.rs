@@ -278,7 +278,7 @@ async fn test_rate_limit_mode_switch_local_vs_redis() {
     // `/captchaImage` 无精确规则 ⇒ 回落 `*` 全局默认；直接改库（DTO 校验不允许 refill=0）
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "UPDATE sys_rate_limit SET capacity=2, refill_per_second=0.1 WHERE route_pattern='*'",
         ))

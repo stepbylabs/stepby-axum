@@ -367,7 +367,7 @@ async fn build_isolated_state_with(
     }
     debug_assert!(flushed);
     // 迁移种子把 captchaEnabled 种成 'true'，这里强制关掉，避免 login 要求验证码
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DatabaseBackend::Sqlite,
         "UPDATE sys_config SET config_value='false' WHERE config_key='sys.account.captchaEnabled'",
     ))
@@ -375,14 +375,14 @@ async fn build_isolated_state_with(
     .expect("关闭验证码开关失败");
     // §5.35 R3（部署态段钳制）：sys.ai.* 运行时键强制复位缺省——防前轮运行/E2E
     // 残留 enabled='true' 污染测试（/ai/chat 403 断言等依赖关闭态基线）
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DatabaseBackend::Sqlite,
         "UPDATE sys_config SET config_value='false' WHERE config_key LIKE 'sys.ai.%' AND config_key <> 'sys.ai.allowed_tables'",
     ))
     .await
     .expect("钳制 sys.ai.* 配置失败");
     // 放大全局限流默认容量：并行测试共享全局内存令牌桶，默认 100/10s 易触发 429
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DatabaseBackend::Sqlite,
         "UPDATE sys_rate_limit SET capacity=1000000, refill_per_second=1000000.0 WHERE route_pattern='*'",
     ))

@@ -65,6 +65,7 @@ impl MigrationTrait for Migration {
                     .execute_unprepared("ALTER TABLE sys_dict_data ADD COLUMN dict_label_en TEXT")
                     .await?;
             }
+            _ => unreachable!("unknown backend"),
         }
         // 为现有数据填充英文标签（默认与中文相同，便于后续翻译）
         manager
@@ -90,6 +91,7 @@ impl MigrationTrait for Migration {
                 // SQLite 旧版本不支持 DROP COLUMN，跳过
                 eprintln!("[migration][warn] m20260722_000001: SQLite 不支持 DROP COLUMN，跳过");
             }
+            _ => unreachable!("unknown backend"),
         }
         Ok(())
     }

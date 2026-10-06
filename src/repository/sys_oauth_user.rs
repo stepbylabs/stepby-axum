@@ -74,13 +74,14 @@ impl SysOauthUserRepository {
         &self,
         txn: &C,
         provider_codes: Vec<String>,
-    ) -> Result<DeleteResult, DbErr> {
+    ) -> Result<u64, DbErr> {
         if provider_codes.is_empty() {
-            return Ok(DeleteResult { rows_affected: 0 });
+            return Ok(0);
         }
-        SysOauthUser::delete_many()
+        let res = SysOauthUser::delete_many()
             .filter(Column::Provider.is_in(provider_codes))
             .exec(txn)
-            .await
+            .await?;
+        Ok(res.rows_affected)
     }
 }

@@ -67,7 +67,7 @@ async fn ensure_tenant_column(manager: &SchemaManager<'_>, table: &str) -> Resul
         )
     };
     let row = conn
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             conn.get_database_backend(),
             exists_sql,
         ))

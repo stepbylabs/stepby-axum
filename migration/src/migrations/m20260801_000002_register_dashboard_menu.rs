@@ -73,7 +73,7 @@ impl MigrationTrait for Migration {
         //    component 的「数据看板」，若只查 parent_id=1 会导致重复注册（2026-09-28
         //    实测存量库出现 132 顶级 + 动态 id 两条；由 m20260928_000003 清理存量）。
         let existing: Option<i64> = conn
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT menu_id FROM sys_menu WHERE path = 'dashboard' AND component = 'dashboard/index' LIMIT 1",
                 [],
@@ -87,7 +87,7 @@ impl MigrationTrait for Migration {
 
         // 2. 获取下一个 menu_id
         let next_id: i64 = conn
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT COALESCE(MAX(menu_id), 0) + 1 FROM sys_menu",
                 [],
@@ -99,7 +99,7 @@ impl MigrationTrait for Migration {
         // 3. 插入菜单（含 i18n_key='menu.dashboard'，确保语言切换时菜单名能正确翻译）
         // 多数据库兼容：SQLite 用预计算时间字符串，MySQL/PostgreSQL 用 NOW()
         let now = now_expr(manager);
-        conn.execute(Statement::from_sql_and_values(
+        conn.execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(
                 backend,
@@ -123,7 +123,7 @@ impl MigrationTrait for Migration {
                 idempotent_insert_prefix(manager)
             )
         };
-        conn.execute(Statement::from_sql_and_values(
+        conn.execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(backend, &role_menu_sql),
             [next_id.into()],

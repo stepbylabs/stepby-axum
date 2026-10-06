@@ -56,7 +56,7 @@ impl AiService {
                 DbBackend::Sqlite => {
                     let stmt =
                         Statement::from_string(backend, format!("PRAGMA table_info({table})"));
-                    let rows = self.db.query_all(stmt).await?;
+                    let rows = self.db.query_all_raw(stmt).await?;
                     rows.iter()
                         .map(|r| {
                             Ok((
@@ -73,7 +73,7 @@ impl AiService {
                             "SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name = '{table}' ORDER BY ordinal_position"
                         ),
                     );
-                    let rows = self.db.query_all(stmt).await?;
+                    let rows = self.db.query_all_raw(stmt).await?;
                     rows.iter()
                         .map(|r| {
                             Ok((
@@ -90,7 +90,7 @@ impl AiService {
                             "SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name = '{table}' AND table_schema = DATABASE() ORDER BY ordinal_position"
                         ),
                     );
-                    let rows = self.db.query_all(stmt).await?;
+                    let rows = self.db.query_all_raw(stmt).await?;
                     rows.iter()
                         .map(|r| {
                             Ok((
@@ -100,6 +100,7 @@ impl AiService {
                         })
                         .collect::<Result<Vec<_>, sea_orm::DbErr>>()?
                 }
+                _ => unreachable!("unknown backend"),
             };
             if !cols.is_empty() {
                 out.push(TableSchema {
@@ -176,12 +177,15 @@ impl AiService {
     /// 走 sea-orm 池透出的 sqlx 连接池（三库 Row::columns 均可用）。
     async fn execute_rows(&self, sql: &str) -> Result<(Vec<String>, Vec<Value>)> {
         use sqlx::{Column, Row};
+        // SAFETY §5.52（sqlx 0.9 SqlSafeStr 审计）：sql 为 LLM 生成且已过 sql_guard
+        // 四重守卫（只读 SELECT/表白名单/租户过滤/LIMIT）——该守卫正是本模块的
+        // 安全边界，AssertSqlSafe 为官方人工审计豁免通道。
         let backend = self.db.get_database_backend();
         let sql_owned = sql.to_string();
         let (columns, rows): (Vec<String>, Vec<Vec<Value>>) = match backend {
             DbBackend::Sqlite => {
                 let pool = self.db.get_sqlite_connection_pool();
-                let rows = sqlx::query(&sql_owned).fetch_all(pool).await?;
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone())).fetch_all(pool).await?;
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -199,7 +203,7 @@ impl AiService {
             }
             DbBackend::Postgres => {
                 let pool = self.db.get_postgres_connection_pool();
-                let rows = sqlx::query(&sql_owned).fetch_all(pool).await?;
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone())).fetch_all(pool).await?;
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -217,7 +221,7 @@ impl AiService {
             }
             DbBackend::MySql => {
                 let pool = self.db.get_mysql_connection_pool();
-                let rows = sqlx::query(&sql_owned).fetch_all(pool).await?;
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone())).fetch_all(pool).await?;
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -233,6 +237,7 @@ impl AiService {
                 }
                 (columns, data)
             }
+            _ => unreachable!("unknown backend"),
         };
         let rows_json = rows
             .into_iter()
@@ -297,7 +302,7 @@ impl AiService {
         let backend = self.db.get_database_backend();
         let row = self
             .db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT question, sql_text FROM ai_chat_history WHERE id = ? AND tenant_id = ? AND user_id = ?",
                 [history_id.into(), tenant_id.into(), user_id.into()],
@@ -362,7 +367,7 @@ impl AiService {
                 error_msg.unwrap_or_default().into(),
             ],
         );
-        if let Err(e) = self.db.execute(stmt).await {
+        if let Err(e) = self.db.execute_raw(stmt).await {
             tracing::error!("AI 历史写入失败: {e}");
         }
     }
@@ -380,7 +385,7 @@ impl AiService {
         let offset = (page.saturating_sub(1)).saturating_mul(size);
         let total_row = self
             .db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT COUNT(*) AS c FROM ai_chat_history WHERE tenant_id = ? AND user_id = ?",
                 [tenant_id.into(), user_id.into()],
@@ -391,7 +396,7 @@ impl AiService {
             .unwrap_or(0);
         let rows = self
             .db
-            .query_all(Statement::from_sql_and_values(
+            .query_all_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT id, question, sql_text, tables_used, rows_count, duration_ms, success, error_msg, create_time \
                  FROM ai_chat_history WHERE tenant_id = ? AND user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -444,7 +449,7 @@ impl AiService {
         };
         let total_row = self
             .db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 format!("SELECT COUNT(*) AS c FROM ai_chat_history {where_sql}").as_str(),
                 binds.clone(),
@@ -455,7 +460,7 @@ impl AiService {
             .unwrap_or(0);
         let rows = self
             .db
-            .query_all(Statement::from_sql_and_values(
+            .query_all_raw(Statement::from_sql_and_values(
                 backend,
                 format!(
                     "SELECT id, tenant_id, user_id, question, sql_text, tables_used, rows_count, duration_ms, success, error_msg, create_time \
@@ -501,7 +506,7 @@ impl AiService {
         let backend = self.db.get_database_backend();
         let res = self
             .db
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 backend,
                 "DELETE FROM ai_chat_history WHERE id = ? AND tenant_id = ? AND user_id = ?",
                 [id.into(), tenant_id.into(), user_id.into()],

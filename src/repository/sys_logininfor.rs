@@ -322,7 +322,7 @@ impl SysLogininforRepository {
             ),
         };
         let stmt = Statement::from_sql_and_values(backend, sql, values);
-        let rows = self.base.db().query_all(stmt).await?;
+        let rows = self.base.db().query_all_raw(stmt).await?;
 
         let mut map: HashMap<String, (i64, i64)> = HashMap::new();
         for row in rows {

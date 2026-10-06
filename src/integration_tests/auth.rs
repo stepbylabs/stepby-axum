@@ -143,7 +143,7 @@ async fn test_captcha_public() {
     // 验证码默认被测试 harness 关闭，这里显式开启，走真实的图片生成 + Redis 存储链路
     state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "UPDATE sys_config SET config_value='true' WHERE config_key='sys.account.captchaEnabled'",
         ))

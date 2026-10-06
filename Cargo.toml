@@ -16,8 +16,9 @@ migration = { path = "migration" }
 # Web 框架
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 
-# ORM
-sea-orm = { version = "1.1", features = [
+# ORM（§5.52 DP-02：1.1 → 2.0 升级——2.0 的 SeaQuery/raw 分层使全局 SQL 拦截
+# 在 AST 层安全可行，为 DP-01 结构化数据权限规则引擎的结构性前置）
+sea-orm = { version = "2.0", features = [
     "runtime-tokio-rustls",
     "sqlx-mysql",
     "sqlx-postgres",
@@ -27,8 +28,10 @@ sea-orm = { version = "1.1", features = [
 ] }
 
 # AI 模块（NL2SQL）：受控执行 LLM 生成 SQL 的行列访问（与 sea-orm 内部 sqlx 同源）
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio-rustls",
+# sqlx 0.9 feature 拆分：runtime-tokio + tls-rustls 分列（原 runtime-tokio-rustls 组合取消）
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
     "sqlite",
     "mysql",
     "postgres",
@@ -228,7 +231,7 @@ harness = false
 
 [dev-dependencies]
 # 用于引入 MigratorTrait（测试直接调用 Migrator::up），仅测试使用
-sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+sea-orm-migration = { version = "2.0", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 # WebSocket 实时通知链路集成测试：真实 TCP + WS 客户端握手/收包（补 M7 0% 覆盖）
 tokio-tungstenite = "0.30"
 # WS 客户端测试需要 futures Stream/Sink 扩展方法

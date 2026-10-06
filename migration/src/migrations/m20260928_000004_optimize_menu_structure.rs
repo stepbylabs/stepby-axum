@@ -113,6 +113,7 @@ fn idempotent_insert_prefix(backend: DatabaseBackend) -> &'static str {
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO",
         DatabaseBackend::MySql => "INSERT IGNORE INTO",
         DatabaseBackend::Postgres => "INSERT INTO",
+        _ => "INSERT INTO",
     }
 }
 
@@ -128,7 +129,7 @@ impl MigrationTrait for Migration {
 
         // 1. 新目录 3950「租户服务」（幂等插入；已存在时跳过）
         let exists: Option<i64> = conn
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT menu_id FROM sys_menu WHERE menu_id = 3950",
                 [],

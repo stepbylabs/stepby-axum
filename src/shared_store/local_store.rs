@@ -151,7 +151,7 @@ impl SharedStore for LocalStore {
         //    （logout 覆盖 sso_legacy_at 后仍被 blacklisted 拦截，反之被 sso_at_bound 拦截）。
         let revoked: Option<String> = match self
             .db
-            .query_one(self.stmt(
+            .query_one_raw(self.stmt(
                 "SELECT source FROM sys_token_revocation WHERE token_hash = ? AND expire_at > ?",
                 vec![token_hash.to_owned().into(), now.into()],
             ))
@@ -172,7 +172,7 @@ impl SharedStore for LocalStore {
             Ok(id) => {
                 let row = self
                     .db
-                    .query_one(self.stmt(
+                    .query_one_raw(self.stmt(
                         "SELECT password_version FROM sys_user WHERE user_id = ?",
                         vec![id.into()],
                     ))
@@ -182,7 +182,7 @@ impl SharedStore for LocalStore {
                     Some(r) => r
                         .try_get::<Option<i64>>("", "password_version")
                         .map_err(|e| StoreError::backend(&e))?
-                        .map(|v| v.max(0) as u64),
+                        .map(|v| std::cmp::max(v, 0) as u64),
                     None => None,
                 }
             }
@@ -201,7 +201,7 @@ impl SharedStore for LocalStore {
         } else {
             match self
                 .db
-                .query_one(self.stmt(
+                .query_one_raw(self.stmt(
                     "SELECT status, expire_time FROM sys_tenant WHERE tenant_id = ?",
                     vec![tid.into()],
                 ))
@@ -303,7 +303,7 @@ impl SharedStore for LocalStore {
         })?;
         let txn = self.db.begin().await.map_err(|e| StoreError::backend(&e))?;
         let row = txn
-            .query_one(self.stmt(
+            .query_one_raw(self.stmt(
                 "SELECT password_version FROM sys_user WHERE user_id = ?",
                 vec![uid_i64.into()],
             ))
@@ -322,7 +322,7 @@ impl SharedStore for LocalStore {
                     .map_err(|e| StoreError::backend(&e))?;
                 let new = cur.unwrap_or(0).max(0) + 1;
                 let res = txn
-                    .execute(self.stmt(
+                    .execute_raw(self.stmt(
                         "UPDATE sys_user SET password_version = ? WHERE user_id = ?",
                         vec![new.into(), uid_i64.into()],
                     ))
@@ -351,7 +351,7 @@ impl SharedStore for LocalStore {
                 // 惰性清理：读时发现已过期即删除（等价 Redis 键自然过期后消失）
                 let _ = self
                     .db
-                    .execute(self.stmt(
+                    .execute_raw(self.stmt(
                         "DELETE FROM sys_shared_kv WHERE kv_key = ?",
                         vec![key.to_owned().into()],
                     ))
@@ -375,7 +375,7 @@ impl SharedStore for LocalStore {
         let exp = now + ttl_secs as i64;
         let txn = self.db.begin().await.map_err(|e| StoreError::backend(&e))?;
         // ① 惰性抢占：仅删除同键**已过期**行（expire_at IS NOT NULL 排除永不过期行）
-        txn.execute(self.stmt(
+        txn.execute_raw(self.stmt(
             "DELETE FROM sys_shared_kv WHERE kv_key = ? AND expire_at IS NOT NULL AND expire_at <= ?",
             vec![key.to_owned().into(), now.into()],
         ))
@@ -383,7 +383,7 @@ impl SharedStore for LocalStore {
         .map_err(|e| StoreError::backend(&e))?;
         // ② INSERT：PK 冲突 = 未过期行仍在 → 抢占失败（false）；真 DB 错误才 Err
         match txn
-            .execute(self.stmt(
+            .execute_raw(self.stmt(
                 "INSERT INTO sys_shared_kv (kv_key, kv_value, expire_at) VALUES (?, ?, ?)",
                 vec![key.to_owned().into(), val.to_owned().into(), exp.into()],
             ))
@@ -407,7 +407,7 @@ impl SharedStore for LocalStore {
     async fn consume(&self, key: &str) -> Result<Option<String>, StoreError> {
         let txn = self.db.begin().await.map_err(|e| StoreError::backend(&e))?;
         let row = txn
-            .query_one(self.stmt(
+            .query_one_raw(self.stmt(
                 "SELECT kv_value, expire_at FROM sys_shared_kv WHERE kv_key = ?",
                 vec![key.to_owned().into()],
             ))
@@ -430,7 +430,7 @@ impl SharedStore for LocalStore {
             }
         };
         let res = txn
-            .execute(self.stmt(
+            .execute_raw(self.stmt(
                 "DELETE FROM sys_shared_kv WHERE kv_key = ?",
                 vec![key.to_owned().into()],
             ))
@@ -449,7 +449,7 @@ impl SharedStore for LocalStore {
         let values: Vec<Value> = keys.iter().map(|k| k.clone().into()).collect();
         let res = self
             .db
-            .execute(self.stmt(
+            .execute_raw(self.stmt(
                 &format!("DELETE FROM sys_shared_kv WHERE kv_key IN ({placeholders})"),
                 values,
             ))
@@ -496,7 +496,7 @@ impl SharedStore for LocalStore {
     async fn decr(&self, key: &str) -> Result<i64, StoreError> {
         let txn = self.db.begin().await.map_err(|e| StoreError::backend(&e))?;
         let row = txn
-            .query_one(self.stmt(
+            .query_one_raw(self.stmt(
                 "SELECT kv_value, expire_at FROM sys_shared_kv WHERE kv_key = ?",
                 vec![key.to_owned().into()],
             ))
@@ -513,7 +513,7 @@ impl SharedStore for LocalStore {
                     .map_err(|e| StoreError::backend(&e))?;
                 if is_expired(exp) {
                     // 过期行 = 键已消失（Redis 键自然过期语义）：按空键 -1 返回并顺带删行
-                    txn.execute(self.stmt(
+                    txn.execute_raw(self.stmt(
                         "DELETE FROM sys_shared_kv WHERE kv_key = ?",
                         vec![key.to_owned().into()],
                     ))
@@ -532,14 +532,14 @@ impl SharedStore for LocalStore {
         };
         let new = cur - 1;
         if new <= 0 {
-            txn.execute(self.stmt(
+            txn.execute_raw(self.stmt(
                 "DELETE FROM sys_shared_kv WHERE kv_key = ?",
                 vec![key.to_owned().into()],
             ))
             .await
             .map_err(|e| StoreError::backend(&e))?;
         } else {
-            txn.execute(self.stmt(
+            txn.execute_raw(self.stmt(
                 "UPDATE sys_shared_kv SET kv_value = ? WHERE kv_key = ?",
                 vec![new.to_string().into(), key.to_owned().into()],
             ))
@@ -571,7 +571,7 @@ impl SharedStore for LocalStore {
         // 3. **表结构演进须双维护**：`sys_shared_lock` 列变更时必须同步
         //    `src/entity/sys_shared_lock.rs`（ORM 侧消费：count/巡检）与本段
         //    裸 SQL（CAS 语义消费），两处均在集成测试覆盖下。
-        txn.execute(self.stmt(
+        txn.execute_raw(self.stmt(
             "DELETE FROM sys_shared_lock WHERE lock_key = ? AND expire_at <= ?",
             vec![key.to_owned().into(), now.into()],
         ))
@@ -580,7 +580,7 @@ impl SharedStore for LocalStore {
         // ② INSERT：PK 冲突 = 被持有（None）；并发两事务同时抢占过期锁时，
         //    后者 INSERT 撞 PK → 同样归为 None（前者赢得锁）
         match txn
-            .execute(self.stmt(
+            .execute_raw(self.stmt(
                 "INSERT INTO sys_shared_lock (lock_key, lock_token, expire_at) VALUES (?, ?, ?)",
                 vec![key.to_owned().into(), token.clone().into(), exp.into()],
             ))
@@ -604,7 +604,7 @@ impl SharedStore for LocalStore {
     /// 释放锁：CAS 删除（仅 token 匹配才删，防误删他实例的锁；幂等，0 行亦视为已释放）
     async fn lock_release(&self, handle: &LockHandle) -> Result<(), StoreError> {
         self.db
-            .execute(self.stmt(
+            .execute_raw(self.stmt(
                 "DELETE FROM sys_shared_lock WHERE lock_key = ? AND lock_token = ?",
                 vec![handle.key.clone().into(), handle.token.clone().into()],
             ))
@@ -618,7 +618,7 @@ impl SharedStore for LocalStore {
         let exp = now_secs() + ttl_secs as i64;
         let res = self
             .db
-            .execute(self.stmt(
+            .execute_raw(self.stmt(
                 "UPDATE sys_shared_lock SET expire_at = ? WHERE lock_key = ? AND lock_token = ?",
                 vec![exp.into(), handle.key.clone().into(), handle.token.clone().into()],
             ))
@@ -641,7 +641,7 @@ impl SharedStore for LocalStore {
             // ① 吊销登记（S1 权威层）：已有行取 expire_at 更大值；trait 无 source 参数，
             //    monitor 强退/租户踢线统一按 'logout' 归类（均阻断，见 mod.rs trait 注释）
             let row = txn
-                .query_one(self.stmt(
+                .query_one_raw(self.stmt(
                     "SELECT expire_at FROM sys_token_revocation WHERE token_hash = ?",
                     vec![token_hash.to_owned().into()],
                 ))
@@ -653,7 +653,7 @@ impl SharedStore for LocalStore {
                         .try_get::<i64>("", "expire_at")
                         .map_err(|e| StoreError::backend(&e))?;
                     if exp > old {
-                        txn.execute(self.stmt(
+                        txn.execute_raw(self.stmt(
                             "UPDATE sys_token_revocation SET expire_at = ?, source = ? WHERE token_hash = ?",
                             vec![exp.into(), "logout".to_owned().into(), token_hash.to_owned().into()],
                         ))
@@ -663,7 +663,7 @@ impl SharedStore for LocalStore {
                 }
                 None => {
                     match txn
-                        .execute(self.stmt(
+                        .execute_raw(self.stmt(
                             "INSERT INTO sys_token_revocation (token_hash, expire_at, source) VALUES (?, ?, ?)",
                             vec![
                                 token_hash.to_owned().into(),
@@ -683,7 +683,7 @@ impl SharedStore for LocalStore {
                 }
             }
             // ② online + sso:at 同生共死（Lua KEYS[2]/KEYS[3] 的 DEL）
-            txn.execute(self.stmt(
+            txn.execute_raw(self.stmt(
                 "DELETE FROM sys_shared_kv WHERE kv_key IN (?, ?)",
                 vec![online_key.clone().into(), sso_at_key.clone().into()],
             ))
@@ -807,7 +807,7 @@ impl SharedStore for LocalStore {
         if !pattern.contains('*') {
             let row = self
                 .db
-                .query_one(self.stmt(
+                .query_one_raw(self.stmt(
                     "SELECT kv_key, expire_at FROM sys_shared_kv WHERE kv_key = ?",
                     vec![pattern.to_owned().into()],
                 ))
@@ -848,7 +848,7 @@ impl SharedStore for LocalStore {
         };
         let rows = self
             .db
-            .query_all(self.stmt(&sql, values))
+            .query_all_raw(self.stmt(&sql, values))
             .await
             .map_err(|e| StoreError::backend(&e))?;
         let mut keys: Vec<String> = Vec::new();
@@ -901,7 +901,7 @@ impl LocalStore {
         let sql = format!("SELECT COUNT(*) AS cnt FROM {table}");
         let row = self
             .db
-            .query_one(self.stmt(&sql, Vec::new()))
+            .query_one_raw(self.stmt(&sql, Vec::new()))
             .await
             .map_err(|e| StoreError::backend(&e))?;
         match row {
@@ -919,7 +919,7 @@ impl LocalStore {
         let now = now_secs();
         let txn = self.db.begin().await.map_err(failed)?;
         let row = txn
-            .query_one(self.stmt(
+            .query_one_raw(self.stmt(
                 "SELECT kv_value, expire_at FROM sys_shared_kv WHERE kv_key = ?",
                 vec![key.to_owned().into()],
             ))
@@ -940,7 +940,7 @@ impl LocalStore {
                     )))
                 })?;
                 let new = cur + 1;
-                txn.execute(self.stmt(
+                txn.execute_raw(self.stmt(
                     "UPDATE sys_shared_kv SET kv_value = ? WHERE kv_key = ?",
                     vec![new.to_string().into(), key.to_owned().into()],
                 ))
@@ -950,7 +950,7 @@ impl LocalStore {
                 return Ok(new);
             }
             // 已过期：等价键已消失 → 删除后按首次自增处理
-            txn.execute(self.stmt(
+            txn.execute_raw(self.stmt(
                 "DELETE FROM sys_shared_kv WHERE kv_key = ?",
                 vec![key.to_owned().into()],
             ))
@@ -960,7 +960,7 @@ impl LocalStore {
         // 首次自增：new = 1 且设置 TTL（RATE_LIMIT_SCRIPT 的 INCR==1 → EXPIRE 分支）
         let exp = now + ttl_secs as i64;
         match txn
-            .execute(self.stmt(
+            .execute_raw(self.stmt(
                 "INSERT INTO sys_shared_kv (kv_key, kv_value, expire_at) VALUES (?, ?, ?)",
                 vec![key.to_owned().into(), "1".to_owned().into(), exp.into()],
             ))

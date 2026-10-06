@@ -230,9 +230,10 @@ impl SysFrontendErrorRepository {
                  FROM sys_frontend_error WHERE create_time >= ? AND level='error'{tenant_clause} \
                  GROUP BY d ORDER BY d ASC"
             ),
+            _ => unreachable!("unknown backend"),
         };
         let rows = db
-            .query_all(Statement::from_sql_and_values(backend, sql, values))
+            .query_all_raw(Statement::from_sql_and_values(backend, sql, values))
             .await?;
         let mut counts: HashMap<String, i64> = HashMap::with_capacity(rows.len());
         for row in rows {

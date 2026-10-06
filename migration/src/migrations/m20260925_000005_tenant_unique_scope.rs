@@ -59,7 +59,7 @@ async fn drop_index_idempotent(
         return Ok(());
     }
     let row = conn
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "SELECT COUNT(*) AS n FROM information_schema.statistics \

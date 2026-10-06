@@ -12,8 +12,9 @@ publish = false
 # 抽为独立零依赖 crate 后复制路径在物理上消失。
 governance = { path = "../governance" }
 
-# 数据库迁移（版本与主 crate 的 sea-orm 1.1 对齐）
-sea-orm-migration = { version = "1.1", features = [
+# 数据库迁移（版本与主 crate 的 sea-orm 2.0 对齐——§5.52 DP-02）
+# 注：sea-orm-migration 2.0 仍保留 runtime-tokio-rustls 组合 feature（与 sqlx 根 crate 不同）
+sea-orm-migration = { version = "2.0", features = [
     "runtime-tokio-rustls",
     "sqlx-mysql",
     "sqlx-postgres",

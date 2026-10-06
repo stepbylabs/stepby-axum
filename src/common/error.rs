@@ -421,7 +421,10 @@ mod tests {
         let e: ServiceError = sea_orm::DbErr::TryIntoErr {
             from: "u64",
             into: "u8",
-            source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "conv")),
+            source: std::sync::Arc::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "conv",
+            )),
         }
         .into();
         assert_eq!(e.code, 400);

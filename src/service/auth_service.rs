@@ -1828,7 +1828,7 @@ impl AuthService {
     async fn read_pwd_ver_from_db(&self, user_id: i64) -> Result<Option<u64>, sea_orm::DbErr> {
         let db = self.logininfor_repo.base().db();
         let row = db
-            .query_one(sea_orm::Statement::from_sql_and_values(
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
                 db.get_database_backend(),
                 "SELECT password_version FROM sys_user WHERE user_id = ?",
                 [user_id.into()],

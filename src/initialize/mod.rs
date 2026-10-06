@@ -35,9 +35,10 @@ async fn run_migrator_if_fresh_db(db: &DatabaseConnection) -> anyhow::Result<()>
         DatabaseBackend::MySql => {
             "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'seaql_migrations'"
         }
+        _ => unreachable!("unknown backend"),
     };
     let row = db
-        .query_one(Statement::from_string(backend, sql.to_string()))
+        .query_one_raw(Statement::from_string(backend, sql.to_string()))
         .await
         .map_err(|e| anyhow::anyhow!("探测 seaql_migrations 失败: {}", e))?;
     let n = row
@@ -125,7 +126,7 @@ impl AppInitializer {
         // 3.1.3 v5-D12：幂等确保 sys_user 含 scim_external_id 列（SCIM 用户目录同步；
         // m20260924_000006 由 migration 负责全新库）
         if !sso_has_column(&db, "sys_user", "scim_external_id").await? {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 db.get_database_backend(),
                 "ALTER TABLE sys_user ADD COLUMN scim_external_id VARCHAR(255)".to_string(),
             ))
@@ -136,7 +137,7 @@ impl AppInitializer {
         // 3.1.4 v5-D5：幂等确保 sys_oauth_client 含 sector_identifier_uri 列
         //（pairwise sector 聚合；m20260924_000007 由 migration 负责全新库）
         if !sso_has_column(&db, "sys_oauth_client", "sector_identifier_uri").await? {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 db.get_database_backend(),
                 "ALTER TABLE sys_oauth_client ADD COLUMN sector_identifier_uri VARCHAR(255)"
                     .to_string(),
@@ -150,7 +151,7 @@ impl AppInitializer {
         if sso_table_exists(&db, "sys_dept").await?
             && !sso_has_column(&db, "sys_dept", "leader_user_id").await?
         {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 db.get_database_backend(),
                 "ALTER TABLE sys_dept ADD COLUMN leader_user_id BIGINT".to_string(),
             ))
@@ -661,7 +662,7 @@ async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<(
             source VARCHAR(32) NOT NULL DEFAULT 'logout'
         )",
     ] {
-        db.execute(Statement::from_string(backend, ddl.to_string()))
+        db.execute_raw(Statement::from_string(backend, ddl.to_string()))
             .await?;
     }
     // 过期行 GC 扫描索引（与迁移同名；MySQL 方言差异由 ensure_tenant_index 收口）
@@ -702,7 +703,7 @@ pub(crate) async fn ensure_user_password_version_column(db: &DatabaseConnection)
     if sso_has_column(db, "sys_user", "password_version").await? {
         return Ok(());
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "ALTER TABLE sys_user ADD COLUMN password_version BIGINT NOT NULL DEFAULT 0".to_string(),
     ))
@@ -722,12 +723,12 @@ pub(crate) async fn ensure_user_must_change_pwd_column(db: &DatabaseConnection) 
     }
     let newly_added = !sso_has_column(db, "sys_user", "must_change_pwd").await?;
     if newly_added {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_user ADD COLUMN must_change_pwd CHAR(1) DEFAULT '0'".to_string(),
         ))
         .await?;
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "UPDATE sys_user SET must_change_pwd = '1' WHERE user_id = 1 AND must_change_pwd = '0'"
                 .to_string(),
@@ -760,7 +761,7 @@ async fn ensure_user_tenant_id_column(db: &DatabaseConnection) -> anyhow::Result
         tracing::info!("sys_user.tenant_id 列已存在，无需 ALTER");
         return Ok(());
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "ALTER TABLE sys_user ADD COLUMN tenant_id BIGINT NOT NULL DEFAULT 0".to_string(),
     ))
@@ -782,7 +783,7 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
     let table_exists = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='sys_user'",
                 ))
@@ -791,7 +792,7 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
         }
         DatabaseBackend::Postgres => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.tables WHERE table_name='sys_user' AND table_schema=current_schema()",
                 ))
@@ -800,13 +801,14 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
         }
         DatabaseBackend::MySql => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.tables WHERE table_name='sys_user' AND table_schema=DATABASE()",
                 ))
                 .await?;
             !rows.is_empty()
         }
+        _ => unreachable!("unknown backend"),
     };
 
     if !table_exists {
@@ -818,7 +820,7 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
     let has_column = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "PRAGMA table_info(sys_user)",
                 ))
@@ -831,7 +833,7 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
         }
         DatabaseBackend::Postgres => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.columns WHERE table_name='sys_user' AND column_name='country_code' AND table_schema=current_schema() LIMIT 1",
                 ))
@@ -840,18 +842,19 @@ async fn ensure_user_country_code_column(db: &DatabaseConnection) -> anyhow::Res
         }
         DatabaseBackend::MySql => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.columns WHERE table_name='sys_user' AND column_name='country_code' AND table_schema=DATABASE() LIMIT 1",
                 ))
                 .await?;
             !rows.is_empty()
         }
+        _ => unreachable!("unknown backend"),
     };
 
     if !has_column {
         tracing::info!("sys_user 缺少 country_code 列，执行幂等 ALTER 添加");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "ALTER TABLE sys_user ADD COLUMN country_code VARCHAR(8)",
         ))
@@ -876,7 +879,7 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
     let table_exists = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='sys_task'",
                 ))
@@ -885,7 +888,7 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
         }
         DatabaseBackend::Postgres => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.tables WHERE table_name='sys_task' AND table_schema=current_schema()",
                 ))
@@ -894,13 +897,14 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
         }
         DatabaseBackend::MySql => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.tables WHERE table_name='sys_task' AND table_schema=DATABASE()",
                 ))
                 .await?;
             !rows.is_empty()
         }
+        _ => unreachable!("unknown backend"),
     };
 
     if !table_exists {
@@ -912,7 +916,7 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
     let has_column = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "PRAGMA table_info(sys_task)",
                 ))
@@ -925,7 +929,7 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
         }
         DatabaseBackend::Postgres => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.columns WHERE table_name='sys_task' AND column_name='operator_id' AND table_schema=current_schema() LIMIT 1",
                 ))
@@ -934,18 +938,19 @@ async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> anyhow::Resu
         }
         DatabaseBackend::MySql => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.columns WHERE table_name='sys_task' AND column_name='operator_id' AND table_schema=DATABASE() LIMIT 1",
                 ))
                 .await?;
             !rows.is_empty()
         }
+        _ => unreachable!("unknown backend"),
     };
 
     if !has_column {
         tracing::info!("sys_task 缺少 operator_id 列，执行幂等 ALTER 添加");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "ALTER TABLE sys_task ADD COLUMN operator_id BIGINT",
         ))
@@ -970,7 +975,7 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
     let table_exists = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='sys_oper_log'",
                 ))
@@ -979,7 +984,7 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
         }
         DatabaseBackend::Postgres => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.tables WHERE table_name='sys_oper_log' AND table_schema=current_schema()",
                 ))
@@ -988,13 +993,14 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
         }
         DatabaseBackend::MySql => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.tables WHERE table_name='sys_oper_log' AND table_schema=DATABASE()",
                 ))
                 .await?;
             !rows.is_empty()
         }
+        _ => unreachable!("unknown backend"),
     };
 
     if !table_exists {
@@ -1006,7 +1012,7 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
     let has_column = match backend {
         DatabaseBackend::Sqlite => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "PRAGMA table_info(sys_oper_log)",
                 ))
@@ -1019,7 +1025,7 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
         }
         DatabaseBackend::Postgres => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.columns WHERE table_name='sys_oper_log' AND column_name='oper_diff' AND table_schema=current_schema() LIMIT 1",
                 ))
@@ -1028,18 +1034,19 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
         }
         DatabaseBackend::MySql => {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     "SELECT 1 FROM information_schema.columns WHERE table_name='sys_oper_log' AND column_name='oper_diff' AND table_schema=DATABASE() LIMIT 1",
                 ))
                 .await?;
             !rows.is_empty()
         }
+        _ => unreachable!("unknown backend"),
     };
 
     if !has_column {
         tracing::info!("sys_oper_log 缺少 oper_diff 列，执行幂等 ALTER 添加");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "ALTER TABLE sys_oper_log ADD COLUMN oper_diff TEXT",
         ))
@@ -1059,7 +1066,7 @@ async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyhow::Result<
 
 /// 幂等执行一条 SQL（flow 双写内部用；错误向上传播由调用方统一 anyhow 包装）
 async fn flow_exec(db: &DatabaseConnection, sql: impl Into<String>) -> Result<(), DbErr> {
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         sql.into(),
     ))
@@ -1231,7 +1238,7 @@ pub(crate) async fn ensure_platform_dept_leaders(db: &DatabaseConnection) -> any
         "UPDATE sys_dept SET leader_user_id = 1 WHERE leader_user_id IS NULL"
     };
     let res = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             db.get_database_backend(),
             sql.to_string(),
         ))
@@ -1514,7 +1521,7 @@ async fn ensure_user_role_source_column(db: &DatabaseConnection) -> Result<(), D
     if has_source {
         return Ok(());
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "ALTER TABLE sys_user_role ADD COLUMN source VARCHAR(64) NOT NULL DEFAULT 'admin'"
             .to_string(),
@@ -1703,6 +1710,7 @@ async fn ensure_ai_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        _ => "INSERT INTO ",
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -1716,7 +1724,7 @@ async fn ensure_ai_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         _ => "NOW()".to_string(),
     };
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
-    db.execute(
+    db.execute_raw(
         Statement::from_string(
             backend,
             format!(
@@ -1727,7 +1735,7 @@ async fn ensure_ai_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
     .await?;
     // 兜底修正：init.rs 基线 seed 先占位 menu_id=4100（无 i18n_key），INSERT OR IGNORE 跳过后
     // 增强列不会写入——UPDATE 幂等补齐（新库/存量库均安全，见 UX 真机核查的新旧库 diff 实证）
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         "UPDATE sys_menu SET i18n_key = 'menu.ai' WHERE menu_id = 4100 AND (i18n_key IS NULL OR i18n_key = '')".to_string(),
     ))
@@ -1781,7 +1789,7 @@ async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Result<()> {
             update_time  {dt} NULL
         )"
     );
-    db.execute(Statement::from_string(backend, create_sql))
+    db.execute_raw(Statement::from_string(backend, create_sql))
         .await?;
 
     if !matches!(backend, DatabaseBackend::MySql) {
@@ -1792,7 +1800,7 @@ async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Result<()> {
         ] {
             // 并发/已存在时忽略失败（表与索引已由 migration 建好属正常情况）
             if let Err(e) = db
-                .execute(Statement::from_string(backend, ddl.to_string()))
+                .execute_raw(Statement::from_string(backend, ddl.to_string()))
                 .await
             {
                 tracing::debug!("sys_pat 索引创建跳过（可能已存在）: {}", e);
@@ -1820,6 +1828,7 @@ async fn ensure_sys_user_credential_table(db: &DatabaseConnection) -> anyhow::Re
         DatabaseBackend::Sqlite => "cred_id INTEGER PRIMARY KEY AUTOINCREMENT",
         DatabaseBackend::MySql => "cred_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
         DatabaseBackend::Postgres => "cred_id BIGSERIAL PRIMARY KEY",
+        _ => unreachable!("unknown backend"),
     };
     let dt = match backend {
         DatabaseBackend::Postgres => "TIMESTAMP",
@@ -1839,7 +1848,7 @@ async fn ensure_sys_user_credential_table(db: &DatabaseConnection) -> anyhow::Re
             del_flag       VARCHAR(1) NOT NULL DEFAULT '0'
         )"
     );
-    db.execute(Statement::from_string(backend, create_sql))
+    db.execute_raw(Statement::from_string(backend, create_sql))
         .await?;
 
     if !matches!(backend, DatabaseBackend::MySql) {
@@ -1849,7 +1858,7 @@ async fn ensure_sys_user_credential_table(db: &DatabaseConnection) -> anyhow::Re
         ] {
             // 并发/已存在时忽略失败（表与索引已由 migration 建好属正常情况）
             if let Err(e) = db
-                .execute(Statement::from_string(backend, ddl.to_string()))
+                .execute_raw(Statement::from_string(backend, ddl.to_string()))
                 .await
             {
                 tracing::debug!("sys_user_credential 索引创建跳过（可能已存在）: {}", e);
@@ -1912,7 +1921,7 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
 
     // ---- ① 3950 目录（幂等插入）----
     let exists: Option<i64> = match db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             backend,
             "SELECT menu_id FROM sys_menu WHERE menu_id = 3950".to_string(),
         ))
@@ -1926,12 +1935,13 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
             DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO",
             DatabaseBackend::MySql => "INSERT IGNORE INTO",
             DatabaseBackend::Postgres => "INSERT INTO",
+            _ => unreachable!("unknown backend"),
         };
         let now = match backend {
             DatabaseBackend::Sqlite => "'2026-09-28 00:00:00'".to_string(),
             _ => "NOW()".to_string(),
         };
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!(
                 "{} sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES (3950, '租户服务', 0, 5, 'tenant-space', NULL, '', '', '1', '0', 'M', '0', '0', '', 'shopping', 'admin', {}, '租户自助功能聚合（我的域名 / 导航设置）', '0', 'menu.tenantSpace')",
@@ -1949,8 +1959,9 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
             DatabaseBackend::MySql => {
                 "INSERT IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, 3950)"
             }
+            _ => unreachable!("unknown backend"),
         };
-        db.execute(Statement::from_string(backend, rm_prefix.to_string()))
+        db.execute_raw(Statement::from_string(backend, rm_prefix.to_string()))
             .await?;
     }
 
@@ -2026,7 +2037,7 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
         "UPDATE sys_menu SET icon = 'drag' WHERE menu_id = 3627",
     ];
     for sql in updates {
-        db.execute(Statement::from_string(backend, sql.to_string()))
+        db.execute_raw(Statement::from_string(backend, sql.to_string()))
             .await?;
     }
     tracing::info!("菜单信息架构优化已应用（order 重排 / 自助页收编 3950 / icon 语义修正）");
@@ -2039,7 +2050,7 @@ async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Resu
 async fn ensure_dashboard_menu_dedupe(db: &DatabaseConnection) -> anyhow::Result<()> {
     let backend = db.get_database_backend();
     let dedup_rows = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             "DELETE FROM sys_role_menu WHERE menu_id IN (
                 SELECT menu_id FROM sys_menu
@@ -2048,7 +2059,7 @@ async fn ensure_dashboard_menu_dedupe(db: &DatabaseConnection) -> anyhow::Result
         ))
         .await?;
     let deleted = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             "DELETE FROM sys_menu WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index'",
         ))
@@ -2070,7 +2081,7 @@ async fn ensure_frontend_error_device_type(db: &DatabaseConnection) -> anyhow::R
     if sso_table_exists(db, "sys_frontend_error").await?
         && !sso_has_column(db, "sys_frontend_error", "device_type").await?
     {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "ALTER TABLE sys_frontend_error ADD COLUMN device_type VARCHAR(16) NULL",
         ))
@@ -2120,7 +2131,7 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
     let mut added = 0usize;
     for table in TABLES {
         if sso_table_exists(db, table).await? && !sso_has_column(db, table, "tenant_id").await? {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!("ALTER TABLE {table} ADD COLUMN tenant_id BIGINT NOT NULL DEFAULT 0"),
             ))
@@ -2168,6 +2179,7 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        _ => unreachable!("unknown backend"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -2221,7 +2233,7 @@ async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow::Result<()
         ),
     ];
     for body in body_rows {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!("{insert_prefix}{body}{insert_suffix}"),
         ))
@@ -2252,6 +2264,7 @@ async fn ensure_domain_self_service_menu(db: &DatabaseConnection) -> anyhow::Res
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        _ => unreachable!("unknown backend"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -2283,7 +2296,7 @@ async fn ensure_domain_self_service_menu(db: &DatabaseConnection) -> anyhow::Res
         ),
     ];
     for body in body_rows {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!("{insert_prefix}{body}{insert_suffix}"),
         ))
@@ -2312,6 +2325,7 @@ async fn ensure_backup_permission_menus(db: &DatabaseConnection) -> anyhow::Resu
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        _ => unreachable!("unknown backend"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -2334,7 +2348,7 @@ async fn ensure_backup_permission_menus(db: &DatabaseConnection) -> anyhow::Resu
         ),
     ];
     for body in body_rows {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!("{insert_prefix}{body}{insert_suffix}"),
         ))
@@ -2364,6 +2378,7 @@ async fn ensure_tenant_nav_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        _ => unreachable!("unknown backend"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -2392,7 +2407,7 @@ async fn ensure_tenant_nav_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         ),
     ];
     for body in body_rows {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!("{insert_prefix}{body}{insert_suffix}"),
         ))
@@ -2484,7 +2499,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
     };
 
     // ---- 1. 幂等建表（与迁移 m20260925_000003 DDL 逐列一致）----
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!(
             r#"CREATE TABLE IF NOT EXISTS sys_tenant (
@@ -2510,7 +2525,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         ),
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!(
             r#"CREATE TABLE IF NOT EXISTS sys_tenant_package (
@@ -2529,7 +2544,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         ),
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!(
             r#"CREATE TABLE IF NOT EXISTS sys_tenant_domain (
@@ -2552,7 +2567,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         ),
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!(
             r#"CREATE TABLE IF NOT EXISTS sys_tenant_menu (
@@ -2572,7 +2587,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         ),
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!(
             r#"CREATE TABLE IF NOT EXISTS sys_tenant_migration_map (
@@ -2647,7 +2662,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
             if sso_has_column(db, "sys_tenant_domain", column).await? {
                 continue;
             }
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!("ALTER TABLE sys_tenant_domain ADD COLUMN {column} {column_def}"),
             ))
@@ -2658,7 +2673,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
 
     // ---- 2. 默认套餐种子（menu_ids = NULL = 不限制）----
     if tenant_scalar_count(db, "sys_tenant_package").await? == 0 {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!(
                 "INSERT INTO sys_tenant_package (package_name, menu_ids, default_account_count, status, del_flag, create_by, create_time, remark) \
@@ -2682,7 +2697,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         return Ok(());
     }
     let roots = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT dept_id, dept_name, status FROM sys_dept \
              WHERE parent_id = 0 AND del_flag = '0' AND dept_id <> 100 ORDER BY dept_id",
@@ -2697,7 +2712,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
 
     // 部门父子关系（BFS 求子树；不依赖 ancestors 字段，兼容 NULL/脏数据）
     let dept_rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT dept_id, parent_id FROM sys_dept",
         ))
@@ -2719,7 +2734,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         }
     }
     let default_pkg: Option<i64> = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             backend,
             "SELECT package_id FROM sys_tenant_package WHERE package_name = '标准版' AND del_flag = '0' \
              ORDER BY package_id LIMIT 1"
@@ -2750,7 +2765,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
             Some(v) => v.into(),
             None => Value::BigInt(None),
         };
-        txn.execute(Statement::from_sql_and_values(
+        txn.execute_raw(Statement::from_sql_and_values(
             backend,
             format!(
                 "INSERT INTO sys_tenant (tenant_code, tenant_name, dept_id, package_id, account_count, status, del_flag, create_by, create_time, remark) \
@@ -2773,7 +2788,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         ))
         .await?;
         let new_tid = txn
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 format!(
                     "SELECT tenant_id FROM sys_tenant WHERE tenant_code = {}",
@@ -2788,7 +2803,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
                 anyhow::anyhow!("Phase 3 换源失败：tenant_code={code} 插入后回读 tenant_id 为空")
             })?;
         // 映射表与业务改写同事务写入（回滚唯一依赖，禁止清理）
-        txn.execute(Statement::from_sql_and_values(
+        txn.execute_raw(Statement::from_sql_and_values(
             backend,
             format!(
                 "INSERT INTO sys_tenant_migration_map (old_tid, new_tenant_id, create_time, remark) \
@@ -2825,13 +2840,13 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
                 .map(|v| v.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            txn.execute(Statement::from_string(
+            txn.execute_raw(Statement::from_string(
                 backend,
                 format!("UPDATE sys_dept SET tenant_id = {new_tid} WHERE dept_id IN ({list})"),
             ))
             .await?;
             // 子树内用户：tenant_id 仍为旧 tid，或 0（Phase 2 统一归平台）→ 新 tenant_id
-            txn.execute(Statement::from_string(
+            txn.execute_raw(Statement::from_string(
                 backend,
                 format!(
                     "UPDATE sys_user SET tenant_id = {new_tid} \
@@ -2842,7 +2857,7 @@ async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Result<()> {
         }
         // 其余承载表（含 sys_dept / sys_user 的子树外遗留行）：旧 tid → 新 tenant_id
         for table in &remap_tables {
-            txn.execute(Statement::from_string(
+            txn.execute_raw(Statement::from_string(
                 backend,
                 format!(
                     "UPDATE {table} SET tenant_id = {new_tid} WHERE tenant_id = {root_dept_id}"
@@ -2898,7 +2913,7 @@ async fn ensure_tenant_saas_governance(db: &DatabaseConnection) -> anyhow::Resul
         if !sso_table_exists(db, table).await? || sso_has_column(db, table, column).await? {
             continue;
         }
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}"),
         ))
@@ -2962,7 +2977,7 @@ async fn ensure_tenant_saas_governance(db: &DatabaseConnection) -> anyhow::Resul
             if keys.is_empty() {
                 continue;
             }
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!(
                     "UPDATE sys_config SET scope = '{}', tenant_editable = '{}', \
@@ -3102,7 +3117,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
                 .unwrap_or_default();
         like_values.extend(unlocked_perms.iter().map(|p| (*p).into()));
         let removed = db
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 backend,
                 format!(
                     "DELETE FROM sys_role_menu WHERE menu_id IN (\
@@ -3138,6 +3153,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
             DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
             DatabaseBackend::Postgres => "INSERT INTO ",
             DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+            _ => unreachable!("unknown backend"),
         };
         let conflict_suffix = if backend == DatabaseBackend::Postgres {
             " ON CONFLICT DO NOTHING"
@@ -3145,7 +3161,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
             ""
         };
         let granted = db
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 backend,
                 format!(
                     "{insert_prefix}sys_role_menu (role_id, menu_id) \
@@ -3174,7 +3190,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
         .collect();
     let placeholders = (1..=wanted.len()).map(ph).collect::<Vec<_>>().join(", ");
     let menu_rows = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             backend,
             format!(
                 "SELECT menu_id, perms FROM sys_menu WHERE status = '0' AND del_flag = '0' AND perms IN ({placeholders})"
@@ -3215,7 +3231,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
         .collect::<Vec<_>>()
         .join(", ");
     let role_rows = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             backend,
             format!(
                 "SELECT DISTINCT rm.role_id AS role_id, r.tenant_id AS tenant_id \
@@ -3239,7 +3255,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
 
     // 3) 套餐白名单（None = 不限制）
     let pkg_rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT t.tenant_id AS tenant_id, p.menu_ids AS menu_ids \
              FROM sys_tenant t LEFT JOIN sys_tenant_package p ON p.package_id = t.package_id"
@@ -3273,7 +3289,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
         .collect::<Vec<_>>()
         .join(", ");
     let granted_rows = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             backend,
             format!("SELECT role_id, menu_id FROM sys_role_menu WHERE role_id IN ({role_ph})"),
             candidates
@@ -3307,7 +3323,7 @@ async fn ensure_tenant_role_menu_governance(db: &DatabaseConnection) -> anyhow::
             if granted.get(&role_id).is_some_and(|s| s.contains(&menu_id)) {
                 continue;
             }
-            db.execute(Statement::from_sql_and_values(
+            db.execute_raw(Statement::from_sql_and_values(
                 backend,
                 format!(
                     "INSERT INTO sys_role_menu (role_id, menu_id) VALUES ({}, {})",
@@ -3363,7 +3379,7 @@ async fn ensure_legacy_upload_paths(
         }
     };
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT user_id, tenant_id, avatar FROM sys_user WHERE avatar LIKE '/uploads/%'"
                 .to_string(),
@@ -3448,7 +3464,7 @@ async fn ensure_legacy_upload_paths(
                     crate::storage::tenant_scoped_path(url_prefix, tenant_id).trim_end_matches('/'),
                     key
                 );
-                db.execute(Statement::from_sql_and_values(
+                db.execute_raw(Statement::from_sql_and_values(
                     backend,
                     format!(
                         "UPDATE sys_user SET avatar = {} WHERE user_id = {}",
@@ -3488,7 +3504,7 @@ async fn drop_tenant_index(
     match backend {
         DatabaseBackend::MySql => {
             let exists = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     format!(
                         "SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='{table}' AND index_name='{index_name}' LIMIT 1"
@@ -3496,7 +3512,7 @@ async fn drop_tenant_index(
                 ))
                 .await?;
             if !exists.is_empty() {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     format!("DROP INDEX {index_name} ON {table}"),
                 ))
@@ -3505,7 +3521,7 @@ async fn drop_tenant_index(
             Ok(())
         }
         _ => {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!("DROP INDEX IF EXISTS {index_name}"),
             ))
@@ -3522,7 +3538,7 @@ async fn tenant_scalar_count(db: &DatabaseConnection, table: &str) -> anyhow::Re
     }
     let backend = db.get_database_backend();
     let row = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             backend,
             format!("SELECT COUNT(*) AS c FROM {table}"),
         ))
@@ -3548,7 +3564,7 @@ async fn ensure_tenant_index(
     match backend {
         DatabaseBackend::MySql => {
             let exists = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     format!(
                         "SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='{table}' AND index_name='{index_name}' LIMIT 1"
@@ -3558,7 +3574,7 @@ async fn ensure_tenant_index(
             if !exists.is_empty() {
                 return Ok(());
             }
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!("CREATE {kind}INDEX {index_name} ON {table} ({columns})"),
             ))
@@ -3566,7 +3582,7 @@ async fn ensure_tenant_index(
             Ok(())
         }
         _ => {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!("CREATE {kind}INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"),
             ))
@@ -3637,9 +3653,10 @@ pub(crate) async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> an
         DatabaseBackend::MySql => format!(
             "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=DATABASE() LIMIT 1"
         ),
+        _ => unreachable!("unknown backend"),
     };
     Ok(!db
-        .query_all(Statement::from_string(backend, sql))
+        .query_all_raw(Statement::from_string(backend, sql))
         .await?
         .is_empty())
 }
@@ -3653,7 +3670,7 @@ pub(crate) async fn sso_has_column(
     let backend = db.get_database_backend();
     let rows = match backend {
         DatabaseBackend::Sqlite => {
-            db.query_all(Statement::from_string(
+            db.query_all_raw(Statement::from_string(
                 backend,
                 format!("PRAGMA table_info({table})"),
             ))
@@ -3665,7 +3682,7 @@ pub(crate) async fn sso_has_column(
             } else {
                 "table_schema=DATABASE()"
             };
-            db.query_all(Statement::from_string(
+            db.query_all_raw(Statement::from_string(
                 backend,
                 format!("SELECT 1 FROM information_schema.columns WHERE table_name='{table}' AND column_name='{column}' AND {schema} LIMIT 1"),
             ))
@@ -3708,14 +3725,14 @@ async fn ensure_sso_v4_columns(
 
     // ---- sys_oauth_client ----
     if !sso_has_column(db, "sys_oauth_client", "update_by").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_client ADD COLUMN update_by VARCHAR(64) DEFAULT ''",
         ))
         .await?;
     }
     if !sso_has_column(db, "sys_oauth_client", "del_flag").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_client ADD COLUMN del_flag VARCHAR(1) NOT NULL DEFAULT '0'",
         ))
@@ -3726,7 +3743,7 @@ async fn ensure_sso_v4_columns(
     let has_consented_at = sso_has_column(db, "sys_oauth_consent", "consented_at").await?;
     let has_auth_time = sso_has_column(db, "sys_oauth_consent", "auth_time").await?;
     if !has_consented_at && has_auth_time {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_consent RENAME COLUMN auth_time TO consented_at",
         ))
@@ -3734,21 +3751,21 @@ async fn ensure_sso_v4_columns(
         tracing::info!("sys_oauth_consent.auth_time 已更名为 consented_at（v4-R4）");
     } else if !has_consented_at && !has_auth_time {
         // 极旧结构缺列：直接补（无可迁移数据）
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_consent ADD COLUMN consented_at DATETIME",
         ))
         .await?;
     }
     if !sso_has_column(db, "sys_oauth_consent", "client_name_snapshot").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_consent ADD COLUMN client_name_snapshot VARCHAR(128) NOT NULL DEFAULT ''",
         ))
         .await?;
     }
     if !sso_has_column(db, "sys_oauth_consent", "del_flag").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_consent ADD COLUMN del_flag VARCHAR(1) NOT NULL DEFAULT '0'",
         ))
@@ -3756,19 +3773,19 @@ async fn ensure_sso_v4_columns(
     }
 
     // ---- 存量回填 ----
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "UPDATE sys_oauth_consent SET consented_at = create_time WHERE consented_at IS NULL",
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "UPDATE sys_oauth_consent SET client_name_snapshot = COALESCE(\
             (SELECT c.client_name FROM sys_oauth_client c WHERE c.client_id = sys_oauth_consent.client_id), '') \
          WHERE client_name_snapshot = ''",
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "UPDATE sys_oauth_client SET grant_types = '[\"authorization_code\"]' \
          WHERE grant_types LIKE '%refresh_token%'",
@@ -3794,7 +3811,7 @@ async fn ensure_sso_v4_columns(
         crate::utils::crypto::ENCRYPTED_PREFIX_V2,
     );
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             format!(
                 "SELECT sso_client_id, id_token_secret FROM sys_oauth_client \
@@ -3834,7 +3851,7 @@ async fn ensure_sso_v4_columns(
         }
         match crate::utils::crypto::seal_sensitive_value(&plain, &enc_key) {
             Ok(enc) => {
-                db.execute(Statement::from_sql_and_values(
+                db.execute_raw(Statement::from_sql_and_values(
                     backend,
                     format!(
                         "UPDATE sys_oauth_client SET id_token_secret = {ph_enc} WHERE sso_client_id = {ph_pk}"
@@ -3881,7 +3898,7 @@ async fn sso_startup_self_check(db: &DatabaseConnection, settings: &Settings) {
         }
         let sql =
             format!("SELECT COUNT(*) AS c FROM sys_oauth_client WHERE client_id = '{reserved}'");
-        if let Ok(Some(row)) = db.query_one(Statement::from_string(backend, sql)).await {
+        if let Ok(Some(row)) = db.query_one_raw(Statement::from_string(backend, sql)).await {
             let count = row.try_get::<i64>("", "c").unwrap_or(0);
             if count > 0 {
                 tracing::warn!(
@@ -3933,7 +3950,7 @@ async fn tenant_host_chain_self_check(
     let sql = "SELECT COUNT(*) AS c FROM sys_tenant_domain \
                WHERE del_flag = '0' AND status = '0' AND verify_status = '1'";
     if let Ok(Some(row)) = db
-        .query_one(Statement::from_string(db.get_database_backend(), sql))
+        .query_one_raw(Statement::from_string(db.get_database_backend(), sql))
         .await
     {
         let count = row.try_get::<i64>("", "c").unwrap_or(0);
@@ -3961,7 +3978,7 @@ async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow
     // v5-D2/D5：存量库启动不跑 Migrator::up——先幂等补列（id_token_alg/rsa_private_key/
     // subject_type），否则下方查询因缺列直接失败（真实运行验证发现的启动阻断）
     if !sso_has_column(db, "sys_oauth_client", "id_token_alg").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_client ADD COLUMN id_token_alg VARCHAR(8) NOT NULL DEFAULT 'RS256'"
                 .to_string(),
@@ -3970,7 +3987,7 @@ async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow
         tracing::info!("sys_oauth_client.id_token_alg 列已补建（v5-D2 存量库兜底）");
     }
     if !sso_has_column(db, "sys_oauth_client", "rsa_private_key").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_client ADD COLUMN rsa_private_key TEXT".to_string(),
         ))
@@ -3978,7 +3995,7 @@ async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow
         tracing::info!("sys_oauth_client.rsa_private_key 列已补建（v5-D2 存量库兜底）");
     }
     if !sso_has_column(db, "sys_oauth_client", "subject_type").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             "ALTER TABLE sys_oauth_client ADD COLUMN subject_type VARCHAR(8) NOT NULL DEFAULT 'public'"
                 .to_string(),
@@ -3994,7 +4011,7 @@ async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow
     let select_sql = "SELECT sso_client_id AS pk, client_id AS cid FROM sys_oauth_client \
                       WHERE rsa_private_key IS NULL AND id_token_alg = 'RS256'";
     let rows = db
-        .query_all(Statement::from_string(backend, select_sql))
+        .query_all_raw(Statement::from_string(backend, select_sql))
         .await?;
     for row in rows {
         let pk = row.try_get::<i64>("", "pk").unwrap_or(0);
@@ -4027,7 +4044,7 @@ async fn ensure_sso_rs256_keys(db: &DatabaseConnection, enc_key: &str) -> anyhow
             "UPDATE sys_oauth_client SET rsa_private_key = '{}' WHERE sso_client_id = {pk}",
             sealed.replace('\'', "''")
         );
-        db.execute(Statement::from_string(backend, update_sql))
+        db.execute_raw(Statement::from_string(backend, update_sql))
             .await?;
         tracing::info!("v5-D2 已为存量客户端生成 RS256 密钥 client_id={cid}");
     }
@@ -4053,7 +4070,7 @@ async fn ensure_sso_consent_unique(db: &DatabaseConnection) -> anyhow::Result<()
         dedup_sql,
     ];
     for sql in stmts {
-        db.execute(Statement::from_string(backend, sql.to_string()))
+        db.execute_raw(Statement::from_string(backend, sql.to_string()))
             .await?;
     }
     // 唯一索引：MySQL 不支持 CREATE INDEX IF NOT EXISTS（MariaDB 专属子句），
@@ -4069,7 +4086,7 @@ async fn ensure_sso_consent_unique(db: &DatabaseConnection) -> anyhow::Result<()
         }
     };
     if let Err(e) = db
-        .execute(Statement::from_string(backend, idx_sql.to_string()))
+        .execute_raw(Statement::from_string(backend, idx_sql.to_string()))
         .await
     {
         let msg = e.to_string();
@@ -4115,7 +4132,7 @@ async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, enc_key: &str
             "SELECT {pk} AS pk, {col} AS val FROM {table} WHERE {col} IS NOT NULL AND {col} != ''"
         );
         let rows = match db
-            .query_all(Statement::from_string(backend, select_sql))
+            .query_all_raw(Statement::from_string(backend, select_sql))
             .await
         {
             Ok(r) => r,
@@ -4150,7 +4167,7 @@ async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, enc_key: &str
                 sealed.replace('\'', "''")
             );
             if let Err(e) = db
-                .execute(Statement::from_string(backend, update_sql))
+                .execute_raw(Statement::from_string(backend, update_sql))
                 .await
             {
                 tracing::error!("v5-E6 回填更新失败 {table}.{col} pk={pk_val}: {}", e);
@@ -4206,7 +4223,7 @@ async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<
         let count_sql =
             format!("SELECT COUNT(*) AS c FROM sys_rate_limit WHERE route_pattern = '{pattern}'");
         let exists = match db
-            .query_one(Statement::from_string(backend, count_sql))
+            .query_one_raw(Statement::from_string(backend, count_sql))
             .await?
         {
             Some(row) => row.try_get::<i64>("", "c").unwrap_or(0) > 0,
@@ -4220,7 +4237,7 @@ async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<
             "INSERT INTO sys_rate_limit (route_pattern, capacity, refill_per_second, enabled, description, create_by, create_time, update_by, update_time) \
              VALUES ('{pattern}', {capacity}, {refill}, TRUE, '{description}', 'admin', '{now}', 'admin', '{now}')"
         );
-        db.execute(Statement::from_string(backend, insert_sql))
+        db.execute_raw(Statement::from_string(backend, insert_sql))
             .await?;
         tracing::info!("已插入 SSO 限流分档 route_pattern={pattern}");
     }
@@ -4230,7 +4247,7 @@ async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<
 /// 读取一条 `SELECT COUNT(*) AS c ...` 的结果（跨方言返回 i64）。
 async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i64> {
     let backend = db.get_database_backend();
-    let row = db.query_one(Statement::from_string(backend, sql)).await?;
+    let row = db.query_one_raw(Statement::from_string(backend, sql)).await?;
     match row {
         Some(r) => Ok(r.try_get::<i64>("", "c").unwrap_or(0)),
         None => Ok(0),
@@ -4484,9 +4501,10 @@ async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         DatabaseBackend::MySql => {
             "SELECT 1 FROM information_schema.tables WHERE table_name='sys_menu' AND table_schema=DATABASE() LIMIT 1".to_string()
         }
+        _ => unreachable!("unknown backend"),
     };
     if !db
-        .query_all(Statement::from_string(backend, exists_sql))
+        .query_all_raw(Statement::from_string(backend, exists_sql))
         .await?
         .is_empty()
     {
@@ -4502,7 +4520,7 @@ async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         .await?
             == 0
         {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!(
                     "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) \
@@ -4521,7 +4539,7 @@ async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
         .await?
             == 0
         {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 backend,
                 format!(
                     "INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) \
@@ -4543,7 +4561,7 @@ async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
             .await?
                 == 0
             {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     format!("INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, {mid})"),
                 ))
@@ -4572,7 +4590,7 @@ async fn ensure_role_is_system_column(db: &DatabaseConnection) -> anyhow::Result
         ("0", "1")
     };
     if !sso_has_column(db, "sys_role", "is_system").await? {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!(
                 "ALTER TABLE sys_role ADD COLUMN is_system BOOLEAN NOT NULL DEFAULT {false_lit}"
@@ -4582,7 +4600,7 @@ async fn ensure_role_is_system_column(db: &DatabaseConnection) -> anyhow::Result
         tracing::info!("sys_role.is_system 列已补建（台账 P0-2 存量库兜底）");
     }
     let updated = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             format!(
                 "UPDATE sys_role SET is_system = {true_lit} \
@@ -4612,13 +4630,13 @@ async fn ensure_logininfor_user_id_column(db: &DatabaseConnection) -> anyhow::Re
     if sso_has_column(db, "sys_logininfor", "user_id").await? {
         return Ok(());
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         "ALTER TABLE sys_logininfor ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0".to_string(),
     ))
     .await?;
     if let Err(e) = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             "CREATE INDEX idx_sys_logininfor_user ON sys_logininfor (user_id)".to_string(),
         ))
@@ -4628,7 +4646,7 @@ async fn ensure_logininfor_user_id_column(db: &DatabaseConnection) -> anyhow::Re
         tracing::warn!("sys_logininfor user_id 索引创建跳过: {}", e);
     }
     let updated = db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             "UPDATE sys_logininfor SET user_id = COALESCE(\
                (SELECT MIN(u.user_id) FROM sys_user u WHERE u.user_name = sys_logininfor.user_name)\
@@ -4652,7 +4670,7 @@ async fn ensure_oauth_client_key_id_column(db: &DatabaseConnection) -> anyhow::R
     if sso_has_column(db, "sys_oauth_client", "key_id").await? {
         return Ok(());
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "ALTER TABLE sys_oauth_client ADD COLUMN key_id VARCHAR(64) NULL".to_string(),
     ))
@@ -4674,7 +4692,7 @@ async fn ensure_oauth_client_prev_secret_column(db: &DatabaseConnection) -> anyh
     if sso_has_column(db, "sys_oauth_client", "previous_client_secret_hash").await? {
         return Ok(());
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "ALTER TABLE sys_oauth_client ADD COLUMN previous_client_secret_hash VARCHAR(64) NULL"
             .to_string(),
@@ -4702,7 +4720,7 @@ async fn ensure_gen_column_rust_naming(db: &DatabaseConnection) -> anyhow::Resul
         {
             continue;
         }
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             format!("ALTER TABLE gen_table_column RENAME COLUMN {old} TO {new}"),
         ))
@@ -4725,7 +4743,7 @@ async fn ensure_tenant_package_features(db: &DatabaseConnection) -> anyhow::Resu
     if sso_has_column(db, "sys_tenant_package", "features").await? {
         return Ok(());
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "ALTER TABLE sys_tenant_package ADD COLUMN features TEXT NULL".to_string(),
     ))
@@ -5456,7 +5474,7 @@ mod flow_backfill_tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         ensure_flow_module(&db).await.unwrap();
         let tables = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sys_flow_task','sys_flow_log','flow_demo_doc')".to_string(),
             ))
@@ -5470,7 +5488,7 @@ mod flow_backfill_tests {
     async fn flow_backfill_is_idempotent_on_existing_db() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         for ddl in MIN_SEED_TABLES {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 ddl.to_string(),
             ))
@@ -5483,7 +5501,7 @@ mod flow_backfill_tests {
         ensure_flow_module(&db).await.unwrap();
 
         let count_menu: u64 = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) AS c FROM sys_menu WHERE menu_id = 3600".to_string(),
             ))
@@ -5495,7 +5513,7 @@ mod flow_backfill_tests {
         assert_eq!(count_menu, 1, "menu 3600 应恰一条（幂等防重）");
 
         let count_tpl: u64 = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) AS c FROM sys_msg_template WHERE template_code IN ('flow_todo','flow_timeout','flow_reject')".to_string(),
             ))
@@ -5507,7 +5525,7 @@ mod flow_backfill_tests {
         assert_eq!(count_tpl, 3, "三条 flow 模板应恰各一条（UNIQUE 幂等）");
 
         let count_dict: u64 = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) AS c FROM sys_dict_data WHERE dict_type = 'sys_flow_task_status'"
                     .to_string(),
@@ -5541,7 +5559,7 @@ mod tenant_host_chain_self_check_tests {
         let backend = db.get_database_backend();
 
         // 干净起点：清空域名表（迁移可能已带入种子，避免依赖其数量）
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "DELETE FROM sys_tenant_domain".to_string(),
         ))
@@ -5559,7 +5577,7 @@ mod tenant_host_chain_self_check_tests {
         );
 
         // 插入 1 条启用中的绑定 + 1 条已停用（不应计入）
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "INSERT INTO sys_tenant_domain (tenant_id, domain, domain_type, is_primary, \
              verify_status, status, del_flag) \
@@ -5568,7 +5586,7 @@ mod tenant_host_chain_self_check_tests {
         ))
         .await
         .expect("插入启用域名失败");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "INSERT INTO sys_tenant_domain (tenant_id, domain, domain_type, is_primary, \
              verify_status, status, del_flag) \
@@ -5579,7 +5597,7 @@ mod tenant_host_chain_self_check_tests {
         .expect("插入停用域名失败");
         // 启用但**未验证**：不参与 host→tid 解析（`find_active_by_domain` 要求 verify_status='1'），
         // 故不应计入告警数——锁住"自检口径 == 真实解析口径"，避免未验证绑定引发误报。
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "INSERT INTO sys_tenant_domain (tenant_id, domain, domain_type, is_primary, \
              verify_status, status, del_flag) \
@@ -5605,7 +5623,7 @@ mod tenant_host_chain_self_check_tests {
         );
 
         // 清理
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "DELETE FROM sys_tenant_domain WHERE domain LIKE 'mt4-%'".to_string(),
         ))
@@ -5636,7 +5654,7 @@ mod dept_leader_backfill_tests {
         let backend = db.get_database_backend();
 
         // 构造两个确定性样本：平台部门（tenant_id=0）与租户部门（tenant_id=7）
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "INSERT INTO sys_dept (tenant_id, dept_id, dept_name, leader_user_id, status, del_flag) \
              VALUES (0, 910001, '回填测试-平台部门', NULL, '0', '0')"
@@ -5644,7 +5662,7 @@ mod dept_leader_backfill_tests {
         ))
         .await
         .expect("插入平台样本部门失败");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "INSERT INTO sys_dept (tenant_id, dept_id, dept_name, leader_user_id, status, del_flag) \
              VALUES (7, 910002, '回填测试-租户部门', NULL, '0', '0')"
@@ -5654,7 +5672,7 @@ mod dept_leader_backfill_tests {
         .expect("插入租户样本部门失败");
 
         // 模拟存量库漂移：全部主管置空
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "UPDATE sys_dept SET leader_user_id = NULL".to_string(),
         ))
@@ -5701,7 +5719,7 @@ mod dept_leader_backfill_tests {
     /// 读取某部门的主管（None = 未设置）
     async fn dept_leader(db: &DatabaseConnection, dept_id: i64) -> Option<i64> {
         let row = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 db.get_database_backend(),
                 format!("SELECT leader_user_id FROM sys_dept WHERE dept_id = {dept_id}"),
             ))
@@ -5714,7 +5732,7 @@ mod dept_leader_backfill_tests {
 
     /// 单列单行标量查询（列须 `AS c` 别名）
     async fn scalar(db: &DatabaseConnection, sql: &str) -> i64 {
-        db.query_one(Statement::from_string(
+        db.query_one_raw(Statement::from_string(
             db.get_database_backend(),
             sql.to_string(),
         ))
@@ -5745,7 +5763,7 @@ mod scim_group_backfill_tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         ensure_scim_group_module(&db).await.unwrap();
         let tables = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sys_scim_group','sys_scim_group_binding','sys_scim_group_member','sys_user_dept')".to_string(),
             ))
@@ -5754,7 +5772,7 @@ mod scim_group_backfill_tests {
         assert_eq!(tables.len(), 4, "空库应兜底建出 SCIM 三表 + 兼职表");
         // 空库无 sys_menu：菜单种子应跳过
         let menu = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='sys_menu'"
                     .to_string(),
@@ -5775,7 +5793,7 @@ mod scim_group_backfill_tests {
     async fn scim_group_backfill_is_idempotent_on_existing_db() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         for ddl in MIN_EXISTING_TABLES {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 ddl.to_string(),
             ))
@@ -5798,7 +5816,7 @@ mod scim_group_backfill_tests {
         // 菜单 148 + 3 按钮幂等防重（各恰一条）
         for menu_id in [148i64, 3620, 3621, 3622] {
             let count: i64 = db
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
                     format!("SELECT COUNT(*) AS c FROM sys_menu WHERE menu_id = {menu_id}"),
                 ))
@@ -5810,7 +5828,7 @@ mod scim_group_backfill_tests {
             assert_eq!(count, 1, "menu {menu_id} 应恰一条（幂等防重）");
         }
         let role_menu: i64 = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) AS c FROM sys_role_menu WHERE role_id = 2 AND menu_id IN (148,3620,3621,3622)".to_string(),
             ))

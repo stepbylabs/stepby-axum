@@ -84,7 +84,7 @@ impl SysDeptRepository {
             }
         };
         let stmt = Statement::from_sql_and_values(backend, sql, [dept_id.into()]);
-        let rows = self.base.db().query_all(stmt).await?;
+        let rows = self.base.db().query_all_raw(stmt).await?;
         Ok(rows
             .into_iter()
             .filter_map(|r| r.try_get_by_index::<i64>(0).ok())

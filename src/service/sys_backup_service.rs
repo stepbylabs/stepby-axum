@@ -391,7 +391,7 @@ impl SysBackupService {
 
         // 1. 租户存在性校验（不过滤 del_flag：回收站租户同样允许导出留档）
         let tenant_row = db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 format!(
                     "SELECT tenant_code, tenant_name FROM sys_tenant WHERE tenant_id = {}",
@@ -421,7 +421,7 @@ impl SysBackupService {
                 continue;
             }
             let rows = db
-                .query_all(Statement::from_sql_and_values(
+                .query_all_raw(Statement::from_sql_and_values(
                     backend,
                     format!("SELECT * FROM {} WHERE tenant_id = {}", table, ph(1)),
                     [tenant_id.into()],

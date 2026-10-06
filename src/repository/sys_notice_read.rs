@@ -68,6 +68,7 @@ impl SysNoticeReadRepository {
             DatabaseBackend::MySql => {
                 "INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES (?, ?, ?, ?)"
             }
+            _ => unreachable!("unknown backend"),
         };
 
         let values: Vec<Value> = vec![
@@ -77,7 +78,7 @@ impl SysNoticeReadRepository {
             tenant_id.into(),
         ];
         let stmt = Statement::from_sql_and_values(backend, sql, values);
-        db.execute(stmt).await?;
+        db.execute_raw(stmt).await?;
         Ok(())
     }
 
@@ -142,6 +143,7 @@ impl SysNoticeReadRepository {
                     values_clause
                 )
             }
+            _ => unreachable!("unknown backend"),
         };
 
         let mut values: Vec<Value> = Vec::with_capacity(notice_ids.len() * 4);
@@ -153,7 +155,7 @@ impl SysNoticeReadRepository {
         }
 
         let stmt = Statement::from_sql_and_values(backend, sql, values);
-        db.execute(stmt).await?;
+        db.execute_raw(stmt).await?;
         Ok(())
     }
 
@@ -226,7 +228,7 @@ impl SysNoticeReadRepository {
             where_clause
         );
         let count_result = db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 &count_sql,
                 values.clone(),
@@ -343,11 +345,11 @@ impl SysNoticeReadRepository {
             ),
         };
         let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, values);
-        let row = self.base.db().query_one(stmt).await?;
+        let row = self.base.db().query_one_raw(stmt).await?;
         let unread: i64 = row
             .and_then(|r| r.try_get_by_index::<i64>(0).ok())
             .unwrap_or(0);
-        Ok(u64::try_from(unread.max(0)).unwrap_or(0))
+        Ok(std::cmp::max(unread, 0) as u64)
     }
 
     /// 删除指定公告的所有已读记录（公告删除时级联清理）

@@ -86,7 +86,7 @@ async fn has_column(
     let backend = conn.get_database_backend();
     let rows = match backend {
         sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {
-            conn.query_all(Statement::from_string(
+            conn.query_all_raw(Statement::from_string(
                 backend,
                 format!("PRAGMA table_info({table})"),
             ))
@@ -98,7 +98,7 @@ async fn has_column(
             } else {
                 "table_schema=DATABASE()"
             };
-            conn.query_all(Statement::from_string(
+            conn.query_all_raw(Statement::from_string(
                 backend,
                 format!(
                     "SELECT 1 FROM information_schema.columns WHERE table_name='{table}' AND column_name='{column}' AND {schema} LIMIT 1"
@@ -149,9 +149,10 @@ async fn table_exists(manager: &SchemaManager<'_>, table: &str) -> Result<bool, 
         sea_orm_migration::sea_orm::DatabaseBackend::MySql => format!(
             "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=DATABASE() LIMIT 1"
         ),
+        _ => unreachable!("unknown backend"),
     };
     Ok(!conn
-        .query_all(Statement::from_string(backend, sql))
+        .query_all_raw(Statement::from_string(backend, sql))
         .await?
         .is_empty())
 }
@@ -304,6 +305,7 @@ pub fn create_table_sql(backend: sea_orm_migration::sea_orm::DatabaseBackend) ->
         DatabaseBackend::Sqlite => "id INTEGER PRIMARY KEY AUTOINCREMENT",
         DatabaseBackend::Postgres => "id BIGSERIAL PRIMARY KEY",
         DatabaseBackend::MySql => "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        _ => unreachable!("unknown backend"),
     };
     format!(
         "CREATE TABLE IF NOT EXISTS sys_webhook_event (

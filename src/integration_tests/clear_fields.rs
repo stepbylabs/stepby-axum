@@ -180,7 +180,7 @@ async fn test_tenant_clear_fields_keep_then_clear_root_dept() {
     // 播种：租户行 + 其组织树根部门行（显式给定可清空字段的初值）
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "INSERT INTO sys_tenant (tenant_id, tenant_code, tenant_name, dept_id, contact_name, \
              contact_phone, contact_email, account_count, status, del_flag, create_time, update_time) \
@@ -192,7 +192,7 @@ async fn test_tenant_clear_fields_keep_then_clear_root_dept() {
         .expect("播种租户失败");
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "INSERT INTO sys_dept (tenant_id, dept_id, dept_name, leader, phone, email, status, \
              del_flag, create_time) \
@@ -207,7 +207,7 @@ async fn test_tenant_clear_fields_keep_then_clear_root_dept() {
         let db = ctx.state.db.clone();
         async move {
             let row = db
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
                     format!("SELECT {field} FROM sys_dept WHERE dept_id = 9101"),
                 ))
@@ -222,7 +222,7 @@ async fn test_tenant_clear_fields_keep_then_clear_root_dept() {
         let db = ctx.state.db.clone();
         async move {
             let row = db
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
                     "SELECT contact_name FROM sys_tenant WHERE tenant_id = 9101".to_string(),
                 ))

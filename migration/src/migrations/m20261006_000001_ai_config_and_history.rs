@@ -75,7 +75,7 @@ async fn has_table(manager: &SchemaManager<'_>, table: &str) -> Result<bool, DbE
     match backend {
         sea_orm::DatabaseBackend::Sqlite => {
             let rows = conn
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"),
                 ))
@@ -89,7 +89,7 @@ async fn has_table(manager: &SchemaManager<'_>, table: &str) -> Result<bool, DbE
                 "table_schema=DATABASE()"
             };
             let rows = conn
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     format!(
                         "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND {schema} LIMIT 1"
