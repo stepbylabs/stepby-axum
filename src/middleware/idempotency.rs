@@ -18,8 +18,10 @@
 // - 仅对写操作（POST/PUT/DELETE）生效，GET 请求直接放行
 // - key 作用域为 `per-user`，不同用户的相同 key 不冲突
 // - TTL 24 小时，覆盖绝大多数业务场景的重复检测窗口
-// - Redis 故障时 fail-open（放行），因 auth 中间件已 fail-closed 保证 Redis 可用性
-//   若 Redis 真的故障，auth 中间件会先返回 503，不会到达此中间件
+// - Redis 故障时 **fail-closed（503 拒绝）**：与 auth 中间件 fail-closed 纪律一致——
+//   存储故障时放行写操作可能导致重复提交（幂等性守卫在故障窗口失效即形同虚设）。
+//   （历史教训：fa-middleware Top-6 曾发现头注释写 fail-open 与实现矛盾——实现是
+//   对的，注释已对齐，勿改回。）
 
 use std::sync::Arc;
 

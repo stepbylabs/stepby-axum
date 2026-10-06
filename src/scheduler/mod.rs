@@ -179,10 +179,12 @@ impl JobScheduler {
         // 消息重试任务也需在 cleanup_job move 前 clone（db 非 Copy）
         let msg_retry_db = db.clone();
         let msg_retry_config = config.clone();
+        let msg_retry_store = store.clone();
         // 报表订阅推送任务同样需在 cleanup_job / msg_retry_job move 前 clone
         // （db / config 均非 Copy，闭包 move 后原变量不可再使用）
         let report_db = db.clone();
         let report_config = config.clone();
+        let report_sub_store = store.clone();
         // 告警规则评估任务（alertEvalTask）所需：必须在 cleanup_job move 前 clone
         let alert_db = db.clone();
         let alert_store = store.clone();
@@ -493,8 +495,24 @@ impl JobScheduler {
         let msg_retry_job = Job::new_async("0 */1 * * * *", move |_uuid, _l| {
             let db = msg_retry_db.clone();
             let config = msg_retry_config.clone();
+            let store = msg_retry_store.clone();
             Box::pin(async move {
                 tracing::debug!("内置任务 msg_send_retry 开始执行：重试待重试消息批次");
+
+                // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
+                // 无锁会导致重复投递消息（对齐 mmdb_auto_update 锁范式）
+                const MSG_RETRY_LOCK_KEY: &str = "lock:scheduler:msg_send_retry";
+                let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                    store.clone(),
+                    MSG_RETRY_LOCK_KEY,
+                    true,
+                    55,
+                    "msg_send_retry",
+                )
+                .await
+                else {
+                    return;
+                };
 
                 let msg_service = crate::service::sys_msg_service::SysMsgService::new(db, config);
 
@@ -536,8 +554,24 @@ impl JobScheduler {
         let report_sub_job = Job::new_async("0 */1 * * * *", move |_uuid, _l| {
             let db = report_db.clone();
             let config = report_config.clone();
+            let store = report_sub_store.clone();
             Box::pin(async move {
                 tracing::debug!("内置任务 report_sub_due 开始执行：扫描到期的报表订阅");
+
+                // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
+                // 无锁会导致报表订阅重复推送（对齐 mmdb_auto_update 锁范式）
+                const REPORT_SUB_LOCK_KEY: &str = "lock:scheduler:report_sub_due";
+                let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                    store.clone(),
+                    REPORT_SUB_LOCK_KEY,
+                    true,
+                    55,
+                    "report_sub_due",
+                )
+                .await
+                else {
+                    return;
+                };
 
                 let report_service =
                     crate::service::sys_report_service::SysReportService::new(db, config);
