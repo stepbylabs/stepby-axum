@@ -32,8 +32,9 @@ impl MigrationName for Migration {
     }
 }
 
-/// 与 `common::tenant::PLATFORM_ONLY_PERM_PREFIXES` **逐项一致**（10 项，含本批新增的
-/// `system:tenantMenu:`）。迁移 crate 无法引用 `src` 常量，故显式列出并由单测保双向一致。
+/// 与 `common::tenant::PLATFORM_ONLY_PERM_PREFIXES` **逐项一致**（11 项，含本批新增的
+/// `system:tenantMenu:` 与 `system:aiConfig:`——AI-01 平台专属配置页）。迁移 crate 无法
+/// 引用 `src` 常量，故显式列出并由单测保双向一致。
 const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "system:tenant:domain:",
     "system:tenantMenu:",
@@ -45,6 +46,7 @@ const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "monitor:health:",
     "system:backup:",
     "system:rateLimit:",
+    "system:aiConfig:",
 ];
 
 /// 构造 `perms LIKE '<prefix>%' OR ...` 的条件片段（前缀均来自本文件常量，无注入面）

@@ -10,6 +10,7 @@ error:
     disabled: 字段级权限功能未开启（平台开关或租户套餐能力位未启用）
     table_not_allowed: 业务表不在字段级权限白名单内
   common:
+    success: 操作成功
     not_found: 数据不存在
     db_acquire: 数据库连接获取失败
     bad_format: 数据格式不正确
