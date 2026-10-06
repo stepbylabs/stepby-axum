@@ -46,13 +46,17 @@ pub struct UploadConfigService {
     /// config.toml `[upload.s3]` 段出厂缺省快照（sys.upload.s3.* 键为空时回落）
     pub startup: S3StorageConfig,
     pub enc_key: String,
-    /// config.toml `[upload].backend` 档位快照（"local" | "s3"）——运行时覆盖仅 s3 档生效
+    /// config.toml `[upload].backend` 档位快照（"local" | "s3"）——出厂档；
+    /// 热切换后的运行档位持久化于 `sys.upload.backend`（见 [`Self::effective_backend_mode`]）
     pub startup_backend_mode: String,
     /// 运行时覆盖构建的 S3 后端缓存：`(配置指纹, backend)`——配置未变时复用
     /// 连接池（reqwest Client 内含连接复用），变更后整实例替换（旧实例由
     /// Arc 存活到最后一个使用者，无在途请求撕裂）。
     cached_backend: RwLock<Option<(String, Arc<S3Backend>)>>,
 }
+
+/// 档位持久化键（sys.upload.backend，Locked；空 = 跟随 config.toml 出厂档）
+pub const KEY_BACKEND_MODE: &str = "sys.upload.backend";
 
 /// 管理页回显 VO（secret_key 掩码，永不回显明文）
 #[derive(Debug, Clone, Serialize, TS, ToSchema)]
@@ -281,6 +285,95 @@ impl UploadConfigService {
             effective.bucket,
             started.elapsed().as_millis()
         ))
+    }
+
+    /// **生效档位**（G-11 第二档）：`sys.upload.backend` 非空（local/s3）即覆盖
+    /// config.toml 出厂档；非法值视为空（回落出厂档，与治理注册表 fail-safe 口径一致）
+    pub async fn effective_backend_mode(&self) -> Result<String, ServiceError> {
+        let stored = self.raw(KEY_BACKEND_MODE).await?.unwrap_or_default();
+        let stored = stored.trim().to_lowercase();
+        if stored == "local" || stored == "s3" {
+            Ok(stored)
+        } else {
+            Ok(self.startup_backend_mode.clone())
+        }
+    }
+
+    /// backend 档位热切换（G-11 第二档核心）：构建新档后端 → 持久化键 →
+    /// 由调用方 store 进 `AppState.hot_storage`（ArcSwap 整指针替换，读侧无锁）
+    ///
+    /// - `local`：恒可构建；
+    /// - `s3`：按当前**有效 S3 配置**构建（config.toml 缺省 + sys.upload.s3.* 覆盖），
+    ///   配置不完整则 400（fail-closed——不切到不可用的档）。
+    pub async fn build_backend_for_mode(
+        &self,
+        mode: &str,
+    ) -> Result<Arc<dyn crate::storage::StorageBackend>, ServiceError> {
+        match mode {
+            "local" => Ok(Arc::new(crate::storage::LocalBackend {})
+                as Arc<dyn crate::storage::StorageBackend>),
+            "s3" => {
+                let cfg = self.get_effective().await?;
+                let backend = crate::storage::S3Backend::try_new(&cfg).map_err(|e| {
+                    ServiceError::bad_request(&format!("s3 档配置不可用: {}", e.message))
+                })?;
+                Ok(Arc::new(backend) as Arc<dyn crate::storage::StorageBackend>)
+            }
+            other => Err(ServiceError::bad_request(&format!(
+                "不支持的存储档位: {other}（可选 local / s3）"
+            ))),
+        }
+    }
+
+    /// 档位持久化（写 sys.upload.backend + refreshCache）
+    pub async fn persist_backend_mode(&self, mode: &str) -> Result<(), ServiceError> {
+        let backend = self.db.get_database_backend();
+        let sql = match backend {
+            sea_orm::DatabaseBackend::Postgres => {
+                "UPDATE sys_config SET config_value = $1, update_time = CURRENT_TIMESTAMP WHERE config_key = $2"
+            }
+            _ => {
+                "UPDATE sys_config SET config_value = ?, update_time = CURRENT_TIMESTAMP WHERE config_key = ?"
+            }
+        };
+        self.db
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                backend,
+                sql,
+                [mode.into(), KEY_BACKEND_MODE.into()],
+            ))
+            .await
+            .map_err(|e| ServiceError::internal(&format!("写入 {KEY_BACKEND_MODE} 失败: {e}")))?;
+        self.config_service.refresh_cache().await?;
+        Ok(())
+    }
+
+    /// 启动恢复（G-11 第二档）：`sys.upload.backend` 与出厂档不同 → 返回应装载的
+    /// 运行档后端（调用方 store 进 hot_storage；失败仅告警不阻断启动——回落出厂档）
+    pub async fn restore_backend_if_switched(
+        &self,
+    ) -> Option<Arc<dyn crate::storage::StorageBackend>> {
+        let effective = self.effective_backend_mode().await.ok()?;
+        if effective == self.startup_backend_mode {
+            return None;
+        }
+        match self.build_backend_for_mode(&effective).await {
+            Ok(b) => {
+                tracing::info!(
+                    "G-11 启动恢复：热切换档位 {effective} 已重新装载（出厂档 {}）",
+                    self.startup_backend_mode
+                );
+                Some(b)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "G-11 启动恢复失败（回落出厂档 {}）: {}",
+                    self.startup_backend_mode,
+                    e.message
+                );
+                None
+            }
+        }
     }
 
     /// 上传链路运行时解析（G-11 核心接线点）

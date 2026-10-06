@@ -67,10 +67,15 @@ pub fn init_logger(log_config: &LogConfig) {
         .with_file(true)
         .with_line_number(true);
 
+    // G-13b：OTLP 追踪导出层（可选编译特性；未启用/未配置 endpoint 时为 None，零影响）
+    let otlp_layer = build_otlp_layer();
+    let otlp_enabled = otlp_layer.is_some();
+
     tracing_subscriber::registry()
         .with(env_filter)
         .with(stdout_layer)
         .with(file_layer)
+        .with(otlp_layer)
         // ErrorCaptureLayer：采集 ERROR 级别日志事件到进程内错误总线（供 /monitor/error-log/* 查询）。
         // 需 registry 提供 LookupSpan，以读取当前 request span 上的 request_id/path 进行关联。
         .with(ErrorCaptureLayer::new())
@@ -80,6 +85,61 @@ pub fn init_logger(log_config: &LogConfig) {
         level = %log_config.level,
         file_path = %log_config.file_path,
         json_stdout = log_config.json_stdout,
+        otlp = otlp_enabled,
         "日志系统初始化完成（stdout + 按日轮转文件）"
     );
+}
+
+/// G-13b：OTLP 追踪导出层构建
+///
+/// - 未启用 `otlp` feature → 恒 `None`（零依赖、零出站）；
+/// - 已启用但 `OTEL_EXPORTER_OTLP_ENDPOINT` 未配置/为空 → `None`（零出站，
+///   与 upload_scan 默认 off 同款"未配置即不存在"哲学）；
+/// - 已配置 → OTLP gRPC（tonic）batch exporter + OpenTelemetryLayer，
+///   服务名标签取 `OTEL_SERVICE_NAME`（缺省 `stepby-axum`）。
+#[cfg(feature = "otlp")]
+fn build_otlp_layer<S>() -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync>>
+where
+    S: tracing::Subscriber + Send + Sync + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    // opentelemetry 0.28：with_endpoint 在 WithExportConfig trait、tracer() 在
+    // TracerProvider trait——均需显式引入作用域
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig;
+
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())?;
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()
+        .map_err(|e| {
+            tracing::warn!("OTLP exporter 构建失败（追踪层跳过）: {e}");
+            e
+        })
+        .ok()?;
+
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "stepby-axum".to_string());
+    let resource = opentelemetry_sdk::Resource::builder()
+        .with_attribute(opentelemetry::KeyValue::new("service.name", service_name))
+        .build();
+
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+
+    let tracer = provider.tracer("stepby-axum");
+    tracing::info!(endpoint = %endpoint, "OTLP 追踪导出已启用（G-13b）");
+    Some(Box::new(tracing_opentelemetry::layer().with_tracer(tracer)))
+}
+
+/// G-13b：未启用 `otlp` feature 时恒 None（零依赖路径）
+#[cfg(not(feature = "otlp"))]
+fn build_otlp_layer<S>() -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync>> {
+    None
 }

@@ -445,6 +445,10 @@ impl AppInitializer {
         //     与 id_token_secret 迁移期 fail-open 策略一致）
         ensure_runtime_secrets_encrypted(&db, &settings.config_enc_key).await;
 
+        // G-14：注入 EncryptedString 列类型的运行时密钥（加密通用层密钥源；
+        // 首写优先，重复初始化 no-op）
+        crate::utils::crypto::set_runtime_master_key(settings.config_enc_key.clone());
+
         // 4.4 v5-E1：consent 组合唯一索引（存量库兜底：清软删行/去重/建索引，
         //     与迁移 m20260924_000002_sso_consent_unique 等价）
         ensure_sso_consent_unique(&db)
@@ -593,6 +597,18 @@ impl AppInitializer {
             server_host,
             server_port
         );
+        // G-11 第二档启动恢复：sys.upload.backend 持久化档位与出厂档不同时，
+        // 重新装载热切换运行档（失败回落出厂档，不阻断启动）
+        if let Some(hot) = state
+            .upload_config_service
+            .restore_backend_if_switched()
+            .await
+        {
+            state.hot_storage.store(Some(std::sync::Arc::new(
+                crate::state::HotStorageBackend::new(hot),
+            )));
+        }
+
         Ok(state)
     }
 }

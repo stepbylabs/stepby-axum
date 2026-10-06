@@ -13,15 +13,36 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
-use crate::handler::{common_handler, common_search_handler};
+use crate::handler::{common_handler, common_search_handler, upload_chunk_handler};
 use crate::state::AppState;
 
 /// 通用模块路由（需挂在鉴权中间件下）
 pub fn common_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/common/upload", post(common_handler::upload))
+        // G-10：分片上传/断点续传（init/part/complete 均受 protected 链同款中间件保护）
+        .route(
+            "/common/upload/chunk/init",
+            post(upload_chunk_handler::chunk_init),
+        )
+        .route(
+            "/common/upload/chunk/part",
+            post(upload_chunk_handler::chunk_part),
+        )
+        .route(
+            "/common/upload/chunk/session/{sessionId}",
+            get(upload_chunk_handler::chunk_session),
+        )
+        .route(
+            "/common/upload/chunk/complete",
+            post(upload_chunk_handler::chunk_complete),
+        )
+        .route(
+            "/common/upload/chunk/{sessionId}",
+            delete(upload_chunk_handler::chunk_abort),
+        )
         .route("/common/download", get(common_handler::download))
         .route(
             "/common/download/resource",

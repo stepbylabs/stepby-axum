@@ -78,7 +78,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 /// 全局默认请求体大小上限（10MB，对齐 oper_log 中间件 BODY_READ_LIMIT）
-const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 
 /// 单个请求处理总时长上限（120s，覆盖 Slowloris 慢速攻击与长耗时业务）
 const REQUEST_TIMEOUT_SECS: u64 = 120;

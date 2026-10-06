@@ -48,6 +48,7 @@ pub mod sys_web_hook_handler;
 pub mod sys_webhook_event_handler;
 pub mod tool_gen_handler;
 pub mod totp_handler;
+pub mod upload_chunk_handler;
 pub mod upload_config_handler;
 pub mod webauthn_handler;
 pub mod ws_handler;

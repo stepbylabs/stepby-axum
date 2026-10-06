@@ -264,6 +264,10 @@ pub const CONFIGS: &[Item] = &[
     //      sys.login.background 同理。历史 seed 行保留（数据不删），仅退出治理注册表）----
     // ---- sys.login.* ----
     cfg("sys.login.blackIPList", Coverage::Locked),
+    // ---- sys.upload.backend（G-11 第二档：backend 档位热切换持久化——
+    //      空值 = 跟随 config.toml [upload].backend 出厂缺省；非空（local/s3）=
+    //      管理页热切换后的运行档位，重启后由启动恢复逻辑重新生效）----
+    cfg("sys.upload.backend", Coverage::Locked),
     // ---- sys.upload.s3.*（G-11 OSS 凭据动态化：config.toml [upload.s3] 为出厂缺省，
     //      管理页可改热生效；平台专属（Locked），secret_key 信封加密——键值不回显明文；
     //      仅 backend="s3" 档位下生效，local 档无凭据概念不受影响）----

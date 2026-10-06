@@ -510,6 +510,7 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/system/uploadConfig", "system:uploadConfig:edit"),
     ("PUT", "/system/uploadConfig", "system:uploadConfig:edit"),
     ("POST", "/system/uploadConfig/test", "system:uploadConfig:edit"),
+    ("POST", "/system/uploadConfig/switchBackend", "system:uploadConfig:edit"),
     // DP-01：数据权限规则管理（挂角色生效——perms 与菜单 4117-4120 对齐）
     ("GET", "/system/dataRule/list", "system:dataRule:list"),
     ("GET", "/system/ai/history/admin/export", "monitor:aiHistory:list"),
@@ -853,6 +854,12 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // ===== 通用文件上传/下载 =====
     // /common/upload 权限对齐文件管理按钮 system:file:upload（种子 3012），避免任意登录用户可上传
     ("POST", "/common/upload", "system:file:upload"),
+    // G-10：分片上传/断点续传（与单文件上传同权限——同一能力入口的两种传输形态）
+    ("POST", "/common/upload/chunk/init", "system:file:upload"),
+    ("POST", "/common/upload/chunk/part", "system:file:upload"),
+    ("GET", "/common/upload/chunk/session/{sessionId}", "system:file:upload"),
+    ("POST", "/common/upload/chunk/complete", "system:file:upload"),
+    ("DELETE", "/common/upload/chunk/{sessionId}", "system:file:upload"),
     // E2-c：/common/download 收紧为 system:file:download（种子 3013，m20260802_000004
     // 已插入且授权 common 角色，存量库不会 403）。文件管理页下载按钮（前端
     // v-hasPermi=['system:file:download']）实际走本端点（download.name() 插件唯一调用点），
@@ -1467,6 +1474,12 @@ mod tests {
             ("POST", "/unlockscreen"),
             // common_router
             ("POST", "/common/upload"),
+            // G-10：分片上传/断点续传（与单文件上传同暴露面）
+            ("POST", "/common/upload/chunk/init"),
+            ("POST", "/common/upload/chunk/part"),
+            ("GET", "/common/upload/chunk/session/{sessionId}"),
+            ("POST", "/common/upload/chunk/complete"),
+            ("DELETE", "/common/upload/chunk/{sessionId}"),
             ("GET", "/common/download"),
             ("GET", "/common/download/resource"),
             ("GET", "/common/global-search"),
@@ -1608,6 +1621,7 @@ mod tests {
             ("GET", "/system/uploadConfig"),
             ("PUT", "/system/uploadConfig"),
             ("POST", "/system/uploadConfig/test"),
+            ("POST", "/system/uploadConfig/switchBackend"),
             // DP-01：数据权限规则管理（挂角色生效——perms 与菜单 4117-4120 对齐）
             ("GET", "/system/ai/history"),
             ("DELETE", "/system/ai/history/{id}"),

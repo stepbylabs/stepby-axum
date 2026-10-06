@@ -15,7 +15,7 @@ use crate::config::UploadConfig;
 /// 即使运维在 `common_allowed_exts` / `avatar_allowed_exts` 中放行，也**强制拒绝**：
 /// 这些类型经 `/uploads/*` 静态托管后可能被浏览器按 HTML/SVG 执行，构成存储型 XSS
 /// （SVG 可内嵌脚本，HTML 可直接渲染），或为服务端可执行脚本（php/jsp 等）。
-const DANGEROUS_EXTS: &[&str] = &[
+pub(crate) const DANGEROUS_EXTS: &[&str] = &[
     "html", "htm", "shtml", "svg", "xml", "xhtml", "js", "mjs", "cjs", "php", "php3", "php4",
     "php5", "phtml", "jsp", "jspx", "asp", "aspx", "asax", "ashx", "asmx", "exe", "com", "bat",
     "cmd", "sh", "ps1", "hta", "asis", "pl", "py",

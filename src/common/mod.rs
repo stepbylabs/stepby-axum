@@ -6,6 +6,7 @@ pub mod custom_scope;
 pub mod data_scope;
 pub mod datetime;
 pub mod double_opt;
+pub mod encrypted_value;
 pub mod error;
 pub mod excel;
 pub mod extract;
@@ -20,6 +21,7 @@ pub mod sort;
 pub mod ssrf;
 pub mod tenant;
 pub mod upload;
+pub mod upload_chunk;
 pub mod upload_scan;
 pub mod webhook;
 
