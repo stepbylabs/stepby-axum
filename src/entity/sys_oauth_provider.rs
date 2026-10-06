@@ -14,6 +14,7 @@ use utoipa::ToSchema;
 use crate::common::datetime;
 
 /// 注意：不 derive(Debug)，改用手动实现以脱敏 client_secret 字段
+///（G-14：EncryptedString 自身 Serialize 已输出掩码，此处双保险防日志泄漏）
 #[derive(Clone, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
 #[sea_orm(table_name = "sys_oauth_provider")]
 #[serde(rename_all = "camelCase")]
@@ -37,8 +38,10 @@ pub struct Model {
     pub provider_type: String,
     /// OAuth2 Client ID
     pub client_id: String,
-    /// OAuth2 Client Secret（脱敏出参，写接口明文接收）
-    pub client_secret: String,
+    /// OAuth2 Client Secret（G-14 通用层：EncryptedString 列类型，取存自动加解密
+    /// ——enc3 信封，密钥源 runtime_master_key；密文列不可 LIKE/等值查询；
+    /// 出参经 ProviderVo 一律脱敏为空）
+    pub client_secret: crate::common::encrypted_value::EncryptedString,
     /// 授权端点
     pub authorize_url: String,
     /// 令牌端点

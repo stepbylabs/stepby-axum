@@ -26,13 +26,12 @@ use std::sync::Arc;
 use crate::common::ValidatedJson;
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
-use crate::entity::sys_msg_channel::Model as SysMsgChannelModel;
 use crate::entity::sys_msg_send_log::Model as SysMsgSendLogModel;
 use crate::entity::sys_msg_template::Model as SysMsgTemplateModel;
 use crate::middleware::Operator;
 use crate::service::sys_msg_service::{
-    ChannelAddDto, ChannelEditDto, ChannelQueryDto, SendDto, SendLogQueryDto, TemplateAddDto,
-    TemplateEditDto, TemplateQueryDto,
+    ChannelAddDto, ChannelEditDto, ChannelQueryDto, ChannelVo, SendDto, SendLogQueryDto,
+    TemplateAddDto, TemplateEditDto, TemplateQueryDto,
 };
 use crate::state::AppState;
 
@@ -45,7 +44,7 @@ use crate::state::AppState;
     path = "/system/msg/channel/list",
     params(ChannelQueryDto),
     responses(
-        (status = 200, description = "查询成功", body = TableDataInfo<SysMsgChannelModel>),
+        (status = 200, description = "查询成功", body = TableDataInfo<ChannelVo>),
         (status = 500, description = "服务器错误"),
     ),
     tag = "system-msg"
@@ -54,7 +53,7 @@ pub async fn channel_list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     Query(query): Query<ChannelQueryDto>,
-) -> Result<TableDataInfo<SysMsgChannelModel>, AppError> {
+) -> Result<TableDataInfo<ChannelVo>, AppError> {
     let (rows, total) = state
         .msg_service
         .get_channel_page(query, operator.tenant_id())
@@ -69,7 +68,7 @@ pub async fn channel_list(
     path = "/system/msg/channel/{channelId}",
     params(("channelId" = i64, Path, description = "渠道 ID")),
     responses(
-        (status = 200, description = "查询成功", body = AjaxResult<SysMsgChannelModel>),
+        (status = 200, description = "查询成功", body = AjaxResult<ChannelVo>),
         (status = 404, description = "渠道不存在"),
     ),
     tag = "system-msg"
@@ -78,7 +77,7 @@ pub async fn channel_info(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     Path(channel_id): Path<i64>,
-) -> Result<AjaxResult<SysMsgChannelModel>, AppError> {
+) -> Result<AjaxResult<ChannelVo>, AppError> {
     let model = state
         .msg_service
         .get_channel_by_id(channel_id, operator.tenant_id())
@@ -93,7 +92,7 @@ pub async fn channel_info(
     path = "/system/msg/channel",
     request_body = ChannelAddDto,
     responses(
-        (status = 200, description = "新增成功", body = AjaxResult<SysMsgChannelModel>),
+        (status = 200, description = "新增成功", body = AjaxResult<ChannelVo>),
         (status = 400, description = "参数错误"),
     ),
     tag = "system-msg"
@@ -102,7 +101,7 @@ pub async fn channel_add(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<ChannelAddDto>,
-) -> Result<AjaxResult<SysMsgChannelModel>, AppError> {
+) -> Result<AjaxResult<ChannelVo>, AppError> {
     let model = state
         .msg_service
         .add_channel(dto, operator.username(), operator.tenant_id())
@@ -117,7 +116,7 @@ pub async fn channel_add(
     path = "/system/msg/channel",
     request_body = ChannelEditDto,
     responses(
-        (status = 200, description = "修改成功", body = AjaxResult<SysMsgChannelModel>),
+        (status = 200, description = "修改成功", body = AjaxResult<ChannelVo>),
         (status = 400, description = "参数错误"),
         (status = 404, description = "渠道不存在"),
     ),
@@ -127,7 +126,7 @@ pub async fn channel_edit(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<ChannelEditDto>,
-) -> Result<AjaxResult<SysMsgChannelModel>, AppError> {
+) -> Result<AjaxResult<ChannelVo>, AppError> {
     let model = state
         .msg_service
         .edit_channel(dto, operator.username(), operator.tenant_id())

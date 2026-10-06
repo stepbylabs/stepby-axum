@@ -25,6 +25,7 @@ use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
+use crate::common::encrypted_value::EncryptedString;
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
@@ -194,6 +195,48 @@ impl crate::common::clear_fields::ClearFieldsDto for ChannelEditDto {
                 crate::common::clear_fields::value_is_present(self.config_json.as_deref())
             }
             _ => false,
+        }
+    }
+}
+
+/// 消息渠道出参 VO（G-14：实体 config_json 为 EncryptedString 加密列，
+/// Model 直接序列化会输出掩码；渠道配置遵循"管理员配置**明文回显**"产品语义
+/// ——编辑表单需回填，故经 VO 显式声明出参为解密后明文，字段与 Model 同构）
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelVo {
+    pub tenant_id: i64,
+    pub channel_id: i64,
+    pub channel_name: String,
+    pub channel_code: String,
+    pub channel_type: String,
+    pub config_json: Option<String>,
+    pub status: Option<String>,
+    pub create_by: Option<String>,
+    pub create_time: Option<String>,
+    pub update_by: Option<String>,
+    pub update_time: Option<String>,
+    pub remark: Option<String>,
+    pub del_flag: Option<String>,
+}
+
+impl ChannelVo {
+    fn from_model(m: &SysMsgChannelModel) -> Self {
+        Self {
+            tenant_id: m.tenant_id,
+            channel_id: m.channel_id,
+            channel_name: m.channel_name.clone(),
+            channel_code: m.channel_code.clone(),
+            channel_type: m.channel_type.clone(),
+            // 读路径已自动解密，直取明文（管理员配置回显）
+            config_json: m.config_json.as_ref().map(|e| e.0.clone()),
+            status: m.status.clone(),
+            create_by: m.create_by.clone(),
+            create_time: m.create_time.map(|t| t.to_string()),
+            update_by: m.update_by.clone(),
+            update_time: m.update_time.map(|t| t.to_string()),
+            remark: m.remark.clone(),
+            del_flag: m.del_flag.clone(),
         }
     }
 }
@@ -392,8 +435,6 @@ pub struct SysMsgService {
     mailer: MailerService,
     /// 用户消息偏好 Repository（site 站内信需尊重用户的站内信开关与免打扰）
     pref_repo: SysUserPrefRepository,
-    /// v5-E6：渠道 config_json 信封加密主密钥（CONFIG_ENC_KEY）
-    enc_key: String,
 }
 
 impl SysMsgService {
@@ -404,7 +445,6 @@ impl SysMsgService {
             send_log_repo: SysMsgSendLogRepository::new(db.clone()),
             mailer: MailerService::new(config.clone()),
             pref_repo: SysUserPrefRepository::new(db),
-            enc_key: config.config_enc_key.clone(),
         }
     }
 
@@ -451,7 +491,7 @@ impl SysMsgService {
         &self,
         query: ChannelQueryDto,
         operator_tid: i64,
-    ) -> Result<(Vec<SysMsgChannelModel>, u64), ServiceError> {
+    ) -> Result<(Vec<ChannelVo>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
@@ -474,20 +514,8 @@ impl SysMsgService {
                 sort,
             )
             .await?;
-        // v5-E6：出参 unseal（管理员配置回显明文；幂等 seal 保证编辑回传不双重加密）
-        let rows = rows
-            .into_iter()
-            .map(|mut m| {
-                if let Some(c) = &m.config_json {
-                    m.config_json = Some(crate::utils::crypto::unseal_sensitive_value(
-                        c,
-                        &self.enc_key,
-                    ));
-                }
-                m
-            })
-            .collect();
-        Ok((rows, total))
+        // G-14：实体读路径已自动解密，出参经 VO 明文回显（管理员配置回填语义）
+        Ok((rows.iter().map(ChannelVo::from_model).collect(), total))
     }
 
     /// 查询渠道详情
@@ -495,8 +523,22 @@ impl SysMsgService {
         &self,
         channel_id: i64,
         operator_tid: i64,
+    ) -> Result<ChannelVo, ServiceError> {
+        // G-14：实体读路径已自动解密，出参经 VO 明文回显（管理员配置回填语义）
+        Ok(ChannelVo::from_model(
+            &self
+                .get_channel_model_by_id(channel_id, operator_tid)
+                .await?,
+        ))
+    }
+
+    /// 内部：查询渠道 Model（含越权校验；供 edit 等需要 ActiveModel 转移所有权的路径复用）
+    async fn get_channel_model_by_id(
+        &self,
+        channel_id: i64,
+        operator_tid: i64,
     ) -> Result<SysMsgChannelModel, ServiceError> {
-        let mut model = self
+        let model = self
             .channel_repo
             .find_active_by_id(channel_id)
             .await?
@@ -507,13 +549,6 @@ impl SysMsgService {
                 "error.common.forbidden"
             )));
         }
-        // v5-E6：出参 unseal（配置回显明文）
-        if let Some(c) = &model.config_json {
-            model.config_json = Some(crate::utils::crypto::unseal_sensitive_value(
-                c,
-                &self.enc_key,
-            ));
-        }
         Ok(model)
     }
 
@@ -523,7 +558,7 @@ impl SysMsgService {
         dto: ChannelAddDto,
         operator: &str,
         operator_tid: i64,
-    ) -> Result<SysMsgChannelModel, ServiceError> {
+    ) -> Result<ChannelVo, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_channel_type(&dto.channel_type)?;
         Self::validate_config_json(&dto.config_json)?;
@@ -535,20 +570,14 @@ impl SysMsgService {
         }
 
         let now = crate::common::datetime::now_naive();
-        // v5-E6：config_json（含 SMTP 等凭据）信封加密落库（幂等；key 未配置时明文）
-        let sealed_config = match &dto.config_json {
-            Some(c) => Some(
-                crate::utils::crypto::seal_sensitive_value(c, &self.enc_key)
-                    .map_err(|e| ServiceError::internal(&format!("渠道配置加密失败: {e}")))?,
-            ),
-            None => None,
-        };
+        // G-14：config_json（含 SMTP 等凭据）走 EncryptedString 列类型，
+        // Set 转换时自动加密（enc3 信封；密钥未配置时迁移期 fail-open 明文）
         let am = SysMsgChannelActiveModel {
             tenant_id: Set(operator_tid),
             channel_name: Set(dto.channel_name),
             channel_code: Set(dto.channel_code),
             channel_type: Set(dto.channel_type),
-            config_json: Set(sealed_config),
+            config_json: Set(dto.config_json.map(EncryptedString::plaintext)),
             status: Set(dto.status.or(Some("0".to_string()))),
             remark: Set(dto.remark),
             create_by: Set(Some(operator.to_string())),
@@ -559,7 +588,7 @@ impl SysMsgService {
             ..Default::default()
         };
         let model = self.channel_repo.insert(am).await?;
-        Ok(model)
+        Ok(ChannelVo::from_model(&model))
     }
 
     /// 修改消息渠道
@@ -568,7 +597,7 @@ impl SysMsgService {
         dto: ChannelEditDto,
         operator: &str,
         operator_tid: i64,
-    ) -> Result<SysMsgChannelModel, ServiceError> {
+    ) -> Result<ChannelVo, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         validate_channel_type(&dto.channel_type)?;
         Self::validate_config_json(&dto.config_json)?;
@@ -585,20 +614,20 @@ impl SysMsgService {
             )));
         }
 
-        // 部分更新语义快照（`existing` 随即被 `into()` 转移）：未传字段保持现值
+        // 部分更新语义快照（existing Model 随即被 `into()` 转移）：未传字段保持现值
+        let existing = self
+            .get_channel_model_by_id(dto.channel_id, operator_tid)
+            .await?;
         let existing_status = existing.status.clone();
         let mut am: SysMsgChannelActiveModel = existing.into();
         am.channel_name = Set(dto.channel_name);
         am.channel_code = Set(dto.channel_code);
         am.channel_type = Set(dto.channel_type);
-        // v5-E6：config_json 信封加密（幂等：已带 enc2:/enc: 前缀原样，防双重加密）
+        // G-14：config_json 走 EncryptedString 列类型，Set 转换时自动加密。
         // **部分更新语义（2026-09-26 缺陷修复）**：仅当显式传入非空配置时才覆盖，
         // 否则保持现值——避免"只改名称"的 PUT 把已加密的渠道配置/密钥擦除为 NULL。
         if let Some(c) = dto.config_json.as_deref().filter(|c| !c.is_empty()) {
-            am.config_json = Set(Some(
-                crate::utils::crypto::seal_sensitive_value(c, &self.enc_key)
-                    .map_err(|e| ServiceError::internal(&format!("渠道配置加密失败: {e}")))?,
-            ));
+            am.config_json = Set(Some(EncryptedString::plaintext(c.to_string())));
         }
         // ③ 显式清空（批次 4）：`clearFields: ["configJson"]` ⇒ 写 NULL（清掉历史凭据）。
         //    与 ② 互斥由 `clear_fields::resolve` 的冲突检测保证（同时给值 + 声明清空 ⇒ 400）。
@@ -612,7 +641,7 @@ impl SysMsgService {
         am.update_time = Set(Some(crate::common::datetime::now_naive()));
 
         let model = self.channel_repo.update(am).await?;
-        Ok(model)
+        Ok(ChannelVo::from_model(&model))
     }
 
     /// 批量删除消息渠道（物理删除；被模板引用的渠道拒绝删除）

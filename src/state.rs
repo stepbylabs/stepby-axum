@@ -357,12 +357,7 @@ impl AppState {
                 config.clone(),
                 SysMsgService::new(db.clone(), config.clone()),
             ),
-            oauth_service: SysOauthService::new(
-                db.clone(),
-                user_service.clone(),
-                // v5-E6：provider secret / 第三方令牌信封加密
-                config.config_enc_key.clone(),
-            ),
+            oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
             // v4 §1.3：动态保留字 = 平台 JWT 命名空间（audience/issuer），
             // 与静态 RESERVED_CLIENT_IDS 一并在 add_client 时比对（见上方创建处）
             sso_service,
@@ -381,7 +376,7 @@ impl AppState {
                     db.clone(),
                     store.clone(),
                 ),
-            web_hook_service: SysWebHookService::new(db.clone(), config.config_enc_key.clone()),
+            web_hook_service: SysWebHookService::new(db.clone()),
             ai_config_service: Arc::new(crate::ai::config_service::AiConfigService::new(
                 db.clone().into(),
                 config_service_for_ai,

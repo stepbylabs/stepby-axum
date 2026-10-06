@@ -3,7 +3,8 @@
 //! channel_code: "email"/"sms"/"site"
 //! channel_type: "email"/"sms"/"site"（白名单校验）
 //! status:       "0"=正常, "1"=停用
-//! config_json:  渠道配置 JSON（敏感字段如 SMTP 密码出入参脱敏，不入库明文展示）
+//! config_json:  渠道配置 JSON（G-14：EncryptedString 加密列，enc3 信封取存自动
+//!               加解密；管理端出参经 ChannelVo 明文回显——管理员编辑表单回填语义）
 
 use chrono::NaiveDateTime;
 use sea_orm::Set;
@@ -35,8 +36,9 @@ pub struct Model {
     pub channel_code: String,
     /// 渠道类型（email/sms/site）
     pub channel_type: String,
-    /// 渠道配置 JSON（敏感字段脱敏展示）
-    pub config_json: Option<String>,
+    /// 渠道配置 JSON（G-14 通用层：EncryptedString 列类型，取存自动加解密
+    /// ——enc3 信封，密钥源 runtime_master_key；密文列不可 LIKE/等值查询）
+    pub config_json: Option<crate::common::encrypted_value::EncryptedString>,
     /// 状态（0=正常 1=停用）
     pub status: Option<String>,
     pub create_by: Option<String>,

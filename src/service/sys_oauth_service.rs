@@ -10,7 +10,8 @@
 //!
 //! 安全设计：
 //! - OAuth `state` 参数：随机值 + 服务端 Redis 存储（provider 绑定），回调时一次性校验并删除，防 CSRF/重放
-//! - `client_secret`：写接口明文接收，出参一律脱敏为空，防凭据泄漏
+//! - `client_secret`：写接口明文接收，出参一律脱敏为空，防凭据泄漏；落库走
+//!   EncryptedString 通用层自动加解密（G-14，enc3 信封），服务层零 seal/unseal 散点
 //! - 未绑定身份通过一次性 `handoff` 凭据（Redis，短 TTL）承载，绑定页校验后绑定到当前登录账号
 //!
 //! 分层约束：不依赖任何 Web 框架类型（axum / tower / tower-http），
@@ -23,6 +24,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 
+use crate::common::encrypted_value::EncryptedString;
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
@@ -363,12 +365,10 @@ pub struct SysOauthService {
     user_role_repo: SysUserRoleRepository,
     user_service: SysUserService,
     http: reqwest::Client,
-    /// v5-E6：敏感列信封加密主密钥（CONFIG_ENC_KEY；空=迁移期 fail-open 明文落库）
-    enc_key: String,
 }
 
 impl SysOauthService {
-    pub fn new(db: DatabaseConnection, user_service: SysUserService, enc_key: String) -> Self {
+    pub fn new(db: DatabaseConnection, user_service: SysUserService) -> Self {
         Self {
             provider_repo: SysOauthProviderRepository::new(db.clone()),
             oauth_user_repo: SysOauthUserRepository::new(db.clone()),
@@ -383,23 +383,7 @@ impl SysOauthService {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("oauth 出站 http client 构建失败（不可恢复的编程错误）"),
-            enc_key,
         }
-    }
-
-    /// v5-E6：敏感列写入口——CONFIG_ENC_KEY 已配置 → 信封加密（fail-closed，
-    /// 加密失败拒绝写入；幂等：已带 enc2:/enc: 前缀原样）；未配置 → 明文落库
-    /// （迁移期策略，与 id_token_secret 一致）。
-    fn seal(&self, plaintext: &str) -> Result<String, ServiceError> {
-        crate::utils::crypto::seal_sensitive_value(plaintext, &self.enc_key).map_err(|e| {
-            tracing::error!("敏感值加密失败，拒绝写入: {}", e);
-            ServiceError::internal(&crate::tr!("error.sso.secret_encrypt_failed"))
-        })
-    }
-
-    /// v5-E6：敏感列读出口——幂等/明文兼容，解密失败原样返回（读路径宽松化）。
-    fn unseal(&self, stored: &str) -> String {
-        crate::utils::crypto::unseal_sensitive_value(stored, &self.enc_key)
     }
 
     // ==================== 提供商配置 ====================
@@ -477,8 +461,9 @@ impl SysOauthService {
             provider_name: Set(dto.provider_name),
             provider_type: Set(dto.provider_type),
             client_id: Set(dto.client_id),
-            // v5-E6：client_secret 信封加密落库（CONFIG_ENC_KEY 未配置时明文，迁移期策略）
-            client_secret: Set(self.seal(&dto.client_secret)?),
+            // G-14：client_secret 走 EncryptedString 列类型，Set 转换时自动加密
+            //（enc3 信封；密钥未配置时迁移期 fail-open 明文，与 E6 回填同策略）
+            client_secret: Set(EncryptedString::plaintext(dto.client_secret)),
             authorize_url: Set(dto.authorize_url),
             token_url: Set(dto.token_url),
             user_info_url: Set(dto.user_info_url),
@@ -541,9 +526,10 @@ impl SysOauthService {
         am.provider_name = Set(dto.provider_name);
         am.provider_type = Set(dto.provider_type);
         am.client_id = Set(dto.client_id);
-        // secret：非空才覆盖（留空保持不变），避免每次编辑都要重填；v5-E6 加密落库
+        // secret：非空才覆盖（留空保持不变），避免每次编辑都要重填；
+        // G-14：EncryptedString 列类型，Set 转换时自动加密
         if !dto.client_secret.is_empty() {
-            am.client_secret = Set(self.seal(&dto.client_secret)?);
+            am.client_secret = Set(EncryptedString::plaintext(dto.client_secret));
         }
         am.authorize_url = Set(dto.authorize_url);
         am.token_url = Set(dto.token_url);
@@ -837,17 +823,17 @@ impl SysOauthService {
                     "error.oauth.local_user_not_found"
                 )));
             };
-            // 已绑定 → 更新令牌信息并直接登录（v5-E6：令牌信封加密）
-            let sealed_at = self.seal(&access_token)?;
-            let sealed_rt = match &token_payload.refresh_token {
-                Some(rt) => Some(self.seal(rt)?),
-                None => None,
-            };
+            // 已绑定 → 更新令牌信息并直接登录（G-14：EncryptedString 列类型，
+            // Set 转换时自动加密；access_token 后续 auto_create 分支仍需使用故 clone）
+            let refresh_plain = token_payload
+                .refresh_token
+                .clone()
+                .map(EncryptedString::plaintext);
             self.oauth_user_repo
                 .update(SysOauthUserActiveModel {
                     oauth_id: Set(binding.oauth_id),
-                    access_token: Set(Some(sealed_at)),
-                    refresh_token: Set(sealed_rt),
+                    access_token: Set(Some(EncryptedString::plaintext(access_token.clone()))),
+                    refresh_token: Set(refresh_plain),
                     expires_at: Set(token_payload.expires_at),
                     last_login_time: Set(Some(crate::common::datetime::now_naive())),
                     // v5-N2 Phase 2：绑定记录归属被绑定用户的租户（已存在用户取其 tenant_id）
@@ -909,15 +895,9 @@ impl SysOauthService {
         }
 
         let now = crate::common::datetime::now_naive();
-        // v5-E6：令牌信封加密（Option 逐个处理）
-        let sealed_at = match &info.access_token {
-            Some(t) => Some(self.seal(t)?),
-            None => None,
-        };
-        let sealed_rt = match &info.refresh_token {
-            Some(t) => Some(self.seal(t)?),
-            None => None,
-        };
+        // G-14：EncryptedString 列类型，Set 转换时自动加密（info 下方被 move，先取令牌）
+        let access_plain = info.access_token.clone().map(EncryptedString::plaintext);
+        let refresh_plain = info.refresh_token.clone().map(EncryptedString::plaintext);
         let am = SysOauthUserActiveModel {
             user_id: Set(user_id),
             provider: Set(info.provider),
@@ -925,8 +905,8 @@ impl SysOauthService {
             nickname: Set(info.nickname),
             avatar: Set(info.avatar),
             email: Set(info.email),
-            access_token: Set(sealed_at),
-            refresh_token: Set(sealed_rt),
+            access_token: Set(access_plain),
+            refresh_token: Set(refresh_plain),
             expires_at: Set(info.expires_at),
             last_login_time: Set(Some(now)),
             create_time: Set(Some(now)),
@@ -1007,11 +987,10 @@ impl SysOauthService {
         code: &str,
         redirect_uri: &str,
     ) -> Result<TokenPayload, ServiceError> {
-        // v5-E6：secret 为信封加密存储，换取 token 前解密（先绑定避免临时值悬垂）
-        let secret_plain = self.unseal(&provider.client_secret);
+        // G-14：EncryptedString 读取（find_by_code）时已自动解密，直取明文
         let params = [
             ("client_id", provider.client_id.as_str()),
-            ("client_secret", secret_plain.as_str()),
+            ("client_secret", provider.client_secret.0.as_str()),
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("grant_type", "authorization_code"),
@@ -1206,12 +1185,10 @@ impl SysOauthService {
         let email = identity.email.clone();
         let avatar = identity.avatar.clone();
 
-        // v5-E6：令牌信封加密（事务外先算好，避免闭包借用 self）
-        let sealed_at = self.seal(&access_token)?;
-        let sealed_rt = match &token.refresh_token {
-            Some(t) => Some(self.seal(t)?),
-            None => None,
-        };
+        // G-14：EncryptedString 列类型，Set 转换时自动加密（事务外先算好，
+        // 避免闭包借用；access_token 为函数参数，此处 move 无后续使用）
+        let access_token2 = EncryptedString::plaintext(access_token);
+        let refresh2 = token.refresh_token.clone().map(EncryptedString::plaintext);
 
         let user = db
             .transaction::<_, SysUserModel, sea_orm::DbErr>(|txn| {
@@ -1241,8 +1218,6 @@ impl SysOauthService {
                 let nick2 = nick.clone();
                 let email2 = email.clone();
                 let avatar2 = avatar.clone();
-                let access_token2 = sealed_at;
-                let refresh2 = sealed_rt;
                 let expires2 = token.expires_at;
 
                 async move {
@@ -1545,7 +1520,7 @@ mod tests {
             provider_name: "GitHub".into(),
             provider_type: "github".into(),
             client_id: "cid".into(),
-            client_secret: "super-secret".into(),
+            client_secret: EncryptedString::plaintext("super-secret"),
             authorize_url: "https://a".into(),
             token_url: "https://b".into(),
             user_info_url: "https://c".into(),

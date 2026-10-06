@@ -42,9 +42,17 @@ use crate::utils::crypto::{runtime_master_key, seal_sensitive_value, unseal_sens
 /// // 写入：ActiveModel { secret: Set(Some(EncryptedString("raw-secret".into()))) }
 /// // 读取：model.secret -> Some(EncryptedString("raw-secret"))（已自动解密）
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, ts_rs::TS, utoipa::ToSchema)]
+/// 注意：Debug 手写全掩码（**不可 derive**）——读路径解密后 `self.0` 持有明文，
+/// derive Debug 会把明文打进日志（安全红线）；实体 derive(Debug) 依赖本实现兜底。
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, ts_rs::TS, utoipa::ToSchema)]
 #[ts(export, export_to = "EncryptedString.ts")]
 pub struct EncryptedString(pub String);
+
+impl std::fmt::Debug for EncryptedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EncryptedString(<redacted>)")
+    }
+}
 
 impl EncryptedString {
     /// 以明文构造（后续写库时自动加密）
