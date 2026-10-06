@@ -37,10 +37,11 @@ pub struct Model {
     pub nickname: Option<String>,
     pub avatar: Option<String>,
     pub email: Option<String>,
-    /// 第三方 access_token（脱敏出参）
-    pub access_token: Option<String>,
-    /// 第三方 refresh_token（脱敏出参）
-    pub refresh_token: Option<String>,
+    /// 第三方 access_token（G-14 通用层：EncryptedString 列类型，取存自动加解密
+    /// ——enc3 信封，密钥源 runtime_master_key；密文列不可 LIKE/等值查询）
+    pub access_token: Option<crate::common::encrypted_value::EncryptedString>,
+    /// 第三方 refresh_token（同上，EncryptedString 加密列）
+    pub refresh_token: Option<crate::common::encrypted_value::EncryptedString>,
     /// 令牌过期时间
     #[serde(
         serialize_with = "datetime::serialize_opt",
@@ -84,11 +85,11 @@ impl std::fmt::Debug for Model {
             .field("email", &self.email)
             .field(
                 "access_token",
-                &self.access_token.as_deref().map(|_| "<redacted>"),
+                &self.access_token.as_ref().map(|_| "<redacted>"),
             )
             .field(
                 "refresh_token",
-                &self.refresh_token.as_deref().map(|_| "<redacted>"),
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
             )
             .field("expires_at", &self.expires_at)
             .field("last_login_time", &self.last_login_time)

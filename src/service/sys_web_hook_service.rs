@@ -634,12 +634,10 @@ pub struct SysWebHookService {
     #[allow(dead_code)]
     http_client_override: Option<Arc<reqwest::Client>>,
     db: DatabaseConnection,
-    /// v5-E6：secret 信封加密主密钥（CONFIG_ENC_KEY；空=迁移期明文）
-    enc_key: String,
 }
 
 impl SysWebHookService {
-    pub fn new(db: DatabaseConnection, enc_key: String) -> Self {
+    pub fn new(db: DatabaseConnection) -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
@@ -653,7 +651,6 @@ impl SysWebHookService {
             http,
             http_client_override: None,
             db,
-            enc_key,
         }
     }
 
@@ -1309,7 +1306,6 @@ impl SysWebHookService {
         let hook_repo = self.hook_repo.clone();
         let db = self.db.clone();
         let http = Arc::new(self.http.clone());
-        let enc_key = self.enc_key.clone();
         let event_type = event_type.to_string();
 
         tokio::spawn(async move {
@@ -1345,10 +1341,9 @@ impl SysWebHookService {
                 // 投递事件名统一目录口径（方案 C）；映射表外事件 mapped == 原样，scim 等无损
                 let event_type = mapped.clone();
                 let payload = payload.clone();
-                let enc_key = enc_key.clone();
                 tokio::spawn(async move {
                     // 新建一个与 Service 等价的投递器（复用同一 http 客户端与 DB）
-                    let svc = SysWebHookService::with_shared(db2, hc, enc_key);
+                    let svc = SysWebHookService::with_shared(db2, hc);
                     if let Err(e) = svc
                         .deliver(&hook, &event_type, &payload, Some(LOG_SOURCE_DISPATCH))
                         .await
@@ -1382,7 +1377,6 @@ impl SysWebHookService {
         let hook_repo = self.hook_repo.clone();
         let db = self.db.clone();
         let http = Arc::new(self.http.clone());
-        let enc_key = self.enc_key.clone();
         let event_key = event_key.to_string();
 
         tokio::spawn(async move {
@@ -1407,9 +1401,8 @@ impl SysWebHookService {
                 let db2 = db.clone();
                 let event_key = event_key.clone();
                 let payload = payload.clone();
-                let enc_key = enc_key.clone();
                 tokio::spawn(async move {
-                    let svc = SysWebHookService::with_shared(db2, hc, enc_key);
+                    let svc = SysWebHookService::with_shared(db2, hc);
                     if let Err(e) = svc
                         .deliver(&hook, &event_key, &payload, Some(LOG_SOURCE_DISPATCH))
                         .await
@@ -1427,7 +1420,7 @@ impl SysWebHookService {
     }
 
     /// 用共享 http 客户端构造投递器（供事件分发内部使用）
-    fn with_shared(db: DatabaseConnection, http: Arc<reqwest::Client>, enc_key: String) -> Self {
+    fn with_shared(db: DatabaseConnection, http: Arc<reqwest::Client>) -> Self {
         Self {
             hook_repo: SysWebHookRepository::new(db.clone()),
             log_repo: SysWebHookLogRepository::new(db.clone()),
@@ -1435,7 +1428,6 @@ impl SysWebHookService {
             http: (*http).clone(),
             http_client_override: None,
             db,
-            enc_key,
         }
     }
 
@@ -2098,7 +2090,7 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let svc = SysWebHookService::new(db.clone(), String::new());
+        let svc = SysWebHookService::new(db.clone());
         let hook = SysWebHookModel {
             tenant_id: 0,
             id: 1,
@@ -2153,7 +2145,7 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        let svc = SysWebHookService::new(db.clone(), String::new());
+        let svc = SysWebHookService::new(db.clone());
         let hook = SysWebHookModel {
             tenant_id: 0,
             id: 2,
