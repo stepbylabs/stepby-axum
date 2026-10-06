@@ -9,7 +9,7 @@
 
 use crate::ai::handler;
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use std::sync::Arc;
 
 use crate::state::AppState;
@@ -22,4 +22,8 @@ pub fn ai_routes() -> Router<Arc<AppState>> {
         .route("/system/aiConfig", get(handler::get_config))
         .route("/system/aiConfig", put(handler::update_config))
         .route("/system/aiConfig/test", post(handler::test_config))
+        // AI-02：查询历史（本人=ai:chat 自查；管理视图=monitor:aiHistory:list）
+        .route("/system/ai/history", get(handler::list_my_history))
+        .route("/system/ai/history/admin", get(handler::list_admin_history))
+        .route("/system/ai/history/{id}", delete(handler::remove_my_history))
 }
