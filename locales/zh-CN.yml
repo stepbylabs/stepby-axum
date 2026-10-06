@@ -774,3 +774,11 @@ alert:
     not_fired: 指标 %{metric} 当前值 %{value}，未命中条件（%{comparator} %{threshold}）
     silent: 规则处于静默期内（%{minutes} 分钟），跳过本次通知
     no_channel: 命中阈值但未配置有效通知渠道，仅记录触发
+
+  dataRule:
+    name_invalid: "规则名不能为空且不超过 64 字"
+    identifier_invalid: "%{label}不合法（仅小写字母/数字/下划线，且不以数字开头）: %{value}"
+    op_invalid: "非法操作符: %{value}"
+    value_type_invalid: "非法值类型: %{value}"
+    fixed_value_required: "固定值类型必须提供规则值"
+    not_found: "规则不存在"

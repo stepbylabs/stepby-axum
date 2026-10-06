@@ -3,6 +3,7 @@
 pub mod ai_router;
 pub mod auth_router;
 pub mod common_router;
+pub mod data_rule_router;
 pub mod file_router;
 pub mod flow_router;
 pub mod ip_location_router;
@@ -119,6 +120,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_config_router::config_routes())
         .merge(ai_router::ai_routes())
         .merge(sys_post_router::post_routes())
+        .merge(data_rule_router::data_rule_routes())
         .merge(sys_rate_limit_router::rate_limit_routes())
         .merge(sys_oper_log_router::oper_log_routes())
         .merge(sys_frontend_error_router::frontend_error_routes())

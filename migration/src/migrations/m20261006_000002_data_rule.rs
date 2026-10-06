@@ -91,7 +91,7 @@ impl MigrationTrait for Migration {
             (4117, '数据权限规则', 1, 15, 'dataRule', 'system/dataRule/index', '', '', '1', '0', 'C', '0', '0', 'system:dataRule:list', 'rule', 'admin', {now}, 'DP-01 结构化数据权限规则（挂角色生效，查询期显式注入）', '0'), \
             (4118, '规则新增', 4117, 1, '#', '', '', '', '1', '0', 'F', '0', '0', 'system:dataRule:add', '#', 'admin', {now}, '', '0'), \
             (4119, '规则编辑', 4117, 2, '#', '', '', '', '1', '0', 'F', '0', '0', 'system:dataRule:edit', '#', 'admin', {now}, '', '0'), \
-            (4120, '规则删除', 4117, 3, '#', '', '', '', '1', '0', 'F', '0', '0', 'system:dataRule:remove', '#', 'admin', {now}, '', '0')"
+            (4122, '规则删除', 4117, 3, '#', '', '', '', '1', '0', 'F', '0', '0', 'system:dataRule:remove', '#', 'admin', {now}, '', '0')"
         );
         let menu_sql = match manager.get_connection().get_database_backend() {
             sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", menus_sql),
@@ -111,7 +111,7 @@ impl MigrationTrait for Migration {
         manager
             .get_connection()
             .execute_unprepared(
-                "DELETE FROM sys_menu WHERE menu_id IN (4117, 4118, 4119, 4120)",
+                "DELETE FROM sys_menu WHERE menu_id IN (4117, 4118, 4119, 4122)",
             )
             .await?;
         manager

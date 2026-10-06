@@ -776,3 +776,11 @@ alert:
     not_fired: Metric %{metric} current value %{value}, condition not met (%{comparator} %{threshold})
     silent: Rule is within the silence window (%{minutes} minutes), notification skipped this time
     no_channel: Threshold hit but no valid notification channel configured, only recorded
+
+  dataRule:
+    name_invalid: "Rule name must be 1-64 chars"
+    identifier_invalid: "Invalid %{label} (lowercase/digit/underscore only, must not start with digit): %{value}"
+    op_invalid: "Invalid operator: %{value}"
+    value_type_invalid: "Invalid value type: %{value}"
+    fixed_value_required: "fixed value type requires a rule value"
+    not_found: "Rule not found"
