@@ -503,6 +503,10 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/system/aiConfig", "system:aiConfig:edit"),
     ("PUT", "/system/aiConfig", "system:aiConfig:edit"),
     ("POST", "/system/aiConfig/test", "system:aiConfig:edit"),
+    // AI-02：查询历史（本人=ai:chat 自查；管理视图=monitor:aiHistory:list 平台+租户管理员）
+    ("GET", "/system/ai/history", "ai:chat"),
+    ("DELETE", "/system/ai/history/{id}", "ai:chat"),
+    ("GET", "/system/ai/history/admin", "monitor:aiHistory:list"),
 
     // ===== 参数配置 =====
     ("GET", "/system/config/list", "system:config:list"),
@@ -1587,6 +1591,10 @@ mod tests {
             ("GET", "/system/aiConfig"),
             ("PUT", "/system/aiConfig"),
             ("POST", "/system/aiConfig/test"),
+            // AI-02：查询历史
+            ("GET", "/system/ai/history"),
+            ("DELETE", "/system/ai/history/{id}"),
+            ("GET", "/system/ai/history/admin"),
             ("GET", "/system/config/configKey/{configKey}"),
             ("POST", "/system/config"),
             ("PUT", "/system/config"),

@@ -46,11 +46,58 @@ pub async fn chat(
     }
     // 4. 角色层：ai:chat 由 permission_middleware fail-closed 校验（路由映射已登记）。
 
-    let service = AiService::new(state.db.clone(), effective);
-    let outcome = service
-        .chat(&dto.question, tid)
-        .await
-        .map_err(|e| AppError::bad_request(&format!("AI 查询失败: {e}")))?;
+    let service = AiService::new(state.db.clone(), effective.clone());
+    let started = std::time::Instant::now();
+    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    // AI-02：成功/失败都留痕（spawn 不阻塞响应；写入失败仅日志）
+    let outcome = match service.chat(&dto.question, tid).await {
+        Ok(o) => o,
+        Err(e) => {
+            let db = state.db.clone();
+            let eff = effective.clone();
+            let q = dto.question.clone();
+            let emsg = e.to_string();
+            tokio::spawn(async move {
+                let svc = AiService::new(db, eff);
+                svc.save_history(
+                    tid,
+                    uid,
+                    &q,
+                    "",
+                    &[],
+                    &[],
+                    0,
+                    started.elapsed().as_millis(),
+                    false,
+                    Some(&emsg),
+                )
+                .await;
+            });
+            return Err(AppError::bad_request(&format!("AI 查询失败: {e}")));
+        }
+    };
+    {
+        let db = state.db.clone();
+        let eff = effective.clone();
+        let q = dto.question.clone();
+        let oc = outcome.clone();
+        tokio::spawn(async move {
+            let svc = AiService::new(db, eff);
+            svc.save_history(
+                tid,
+                uid,
+                &q,
+                &oc.sql,
+                &oc.tables,
+                &oc.columns,
+                oc.rows.len(),
+                started.elapsed().as_millis(),
+                true,
+                None,
+            )
+            .await;
+        });
+    }
 
     Ok(Json(json!({
         "code": 200,

@@ -14,6 +14,7 @@ pub struct TableSchema {
     pub columns: Vec<(String, String)>,
 }
 
+#[derive(Clone)]
 pub struct AiChatOutcome {
     /// LLM 生成的 SQL（已经守卫校验/改写）
     pub sql: String,
@@ -280,5 +281,189 @@ impl AiService {
             rows,
             answer,
         })
+    }
+
+    // ==================== AI-02：查询历史持久化（§5.39/§5.41） ====================
+
+    /// 写入一条历史（**spawn 调用，失败仅 error 日志不阻塞响应**）。
+    /// 不存结果集本体（SQL 可重放设计，§5.39 决策 2）；guard 拒绝也留痕（success='0'）。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_history(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        question: &str,
+        sql: &str,
+        tables: &[String],
+        columns: &[String],
+        rows_count: usize,
+        duration_ms: u128,
+        success: bool,
+        error_msg: Option<&str>,
+    ) {
+        let backend = self.db.get_database_backend();
+        let stmt = Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO ai_chat_history (tenant_id, user_id, question, sql_text, tables_used, columns_json, rows_count, duration_ms, success, error_msg, create_time) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            [
+                tenant_id.into(),
+                user_id.into(),
+                question.into(),
+                sql.into(),
+                tables.join(",").into(),
+                serde_json::to_string(columns).unwrap_or_else(|_| "[]".into()).into(),
+                (rows_count as i64).into(),
+                (duration_ms as i64).into(),
+                (if success { "1" } else { "0" }).into(),
+                error_msg.unwrap_or_default().into(),
+            ],
+        );
+        if let Err(e) = self.db.execute(stmt).await {
+            tracing::error!("AI 历史写入失败: {e}");
+        }
+    }
+
+    /// 本人历史分页（user_id 强制过滤，租户隔离由 tenant_id 双条件兜底）
+    pub async fn list_my_history(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        page: u64,
+        size: u64,
+    ) -> Result<(Vec<serde_json::Value>, i64), anyhow::Error> {
+        let backend = self.db.get_database_backend();
+        let size = size.clamp(1, 100);
+        let offset = (page.saturating_sub(1)).saturating_mul(size);
+        let total_row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) AS c FROM ai_chat_history WHERE tenant_id = ? AND user_id = ?",
+                [tenant_id.into(), user_id.into()],
+            ))
+            .await?;
+        let total: i64 = total_row
+            .and_then(|r| r.try_get::<i64>("", "c").ok())
+            .unwrap_or(0);
+        let rows = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                backend,
+                "SELECT id, question, sql_text, tables_used, rows_count, duration_ms, success, error_msg, create_time \
+                 FROM ai_chat_history WHERE tenant_id = ? AND user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                [
+                    tenant_id.into(),
+                    user_id.into(),
+                    (size as i64).into(),
+                    (offset as i64).into(),
+                ],
+            ))
+            .await?;
+        let items = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.try_get::<i64>("", "id").unwrap_or(0),
+                    "question": r.try_get::<String>("", "question").unwrap_or_default(),
+                    "sql": r.try_get::<String>("", "sql_text").unwrap_or_default(),
+                    "tables": r.try_get::<String>("", "tables_used").unwrap_or_default(),
+                    "rowsCount": r.try_get::<i64>("", "rows_count").unwrap_or(0),
+                    "durationMs": r.try_get::<i64>("", "duration_ms").unwrap_or(0),
+                    "success": r.try_get::<String>("", "success").unwrap_or_default() == "1",
+                    "errorMsg": r.try_get::<Option<String>>("", "error_msg").unwrap_or_default(),
+                    "createTime": r.try_get::<String>("", "create_time").unwrap_or_default(),
+                })
+            })
+            .collect();
+        Ok((items, total))
+    }
+
+    /// 管理/平台视图历史分页（租户管理员=本租户全量；平台=跨租户 tenant_id 可选）
+    pub async fn list_admin_history(
+        &self,
+        caller_tid: i64,
+        tenant_filter: Option<i64>,
+        page: u64,
+        size: u64,
+    ) -> Result<(Vec<serde_json::Value>, i64), anyhow::Error> {
+        let backend = self.db.get_database_backend();
+        let size = size.clamp(1, 100);
+        let offset = (page.saturating_sub(1)).saturating_mul(size);
+        // 平台（tid=0）：tenant_filter 有值查单租户，无值跨全量；租户管理员：强制本租户
+        let (where_sql, binds): (String, Vec<sea_orm::Value>) = if caller_tid == 0 {
+            match tenant_filter {
+                Some(t) => ("WHERE tenant_id = ?".into(), vec![t.into()]),
+                None => (String::new(), vec![]),
+            }
+        } else {
+            ("WHERE tenant_id = ?".into(), vec![caller_tid.into()])
+        };
+        let total_row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                format!("SELECT COUNT(*) AS c FROM ai_chat_history {where_sql}").as_str(),
+                binds.clone(),
+            ))
+            .await?;
+        let total: i64 = total_row
+            .and_then(|r| r.try_get::<i64>("", "c").ok())
+            .unwrap_or(0);
+        let rows = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "SELECT id, tenant_id, user_id, question, sql_text, tables_used, rows_count, duration_ms, success, error_msg, create_time \
+                     FROM ai_chat_history {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+                )
+                .as_str(),
+                {
+                    let mut b = binds.clone();
+                    b.push((size as i64).into());
+                    b.push((offset as i64).into());
+                    b
+                },
+            ))
+            .await?;
+        let items = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.try_get::<i64>("", "id").unwrap_or(0),
+                    "tenantId": r.try_get::<i64>("", "tenantId").unwrap_or(0),
+                    "userId": r.try_get::<i64>("", "userId").unwrap_or(0),
+                    "question": r.try_get::<String>("", "question").unwrap_or_default(),
+                    "sql": r.try_get::<String>("", "sql_text").unwrap_or_default(),
+                    "tables": r.try_get::<String>("", "tables_used").unwrap_or_default(),
+                    "rowsCount": r.try_get::<i64>("", "rows_count").unwrap_or(0),
+                    "durationMs": r.try_get::<i64>("", "duration_ms").unwrap_or(0),
+                    "success": r.try_get::<String>("", "success").unwrap_or_default() == "1",
+                    "errorMsg": r.try_get::<Option<String>>("", "error_msg").unwrap_or_default(),
+                    "createTime": r.try_get::<String>("", "create_time").unwrap_or_default(),
+                })
+            })
+            .collect();
+        Ok((items, total))
+    }
+
+    /// 删除本人历史（横向越权防护：仅本人行可删）
+    pub async fn delete_my_history(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        id: i64,
+    ) -> Result<bool, anyhow::Error> {
+        let backend = self.db.get_database_backend();
+        let res = self
+            .db
+            .execute(Statement::from_sql_and_values(
+                backend,
+                "DELETE FROM ai_chat_history WHERE id = ? AND tenant_id = ? AND user_id = ?",
+                [id.into(), tenant_id.into(), user_id.into()],
+            ))
+            .await?;
+        Ok(res.rows_affected() > 0)
     }
 }
