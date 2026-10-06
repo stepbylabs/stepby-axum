@@ -13,7 +13,8 @@ use super::TestContext;
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Method, Request, StatusCode};
-use sea_orm::{ConnectionTrait, DatabaseBackend};
+use crate::common::features::FEATURE_OFF;
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::net::SocketAddr;
 
 /// 构造 JSON 请求（平台管理员 admin token）
@@ -221,4 +222,132 @@ async fn test_ai_history_tenant_isolation() {
         .await
         .expect("越权删除调用不应报错");
     assert!(!deleted, "user 100 不得删除 tenant B user 200 的行");
+}
+
+/// AI-01/02 × **三种部署模式**交叉矩阵（§5.46 福哥令"开关×三模式"核查）：
+///
+/// | 场景 | aiConfig（平台专属） | /ai/chat（三层开关） |
+/// |---|---|---|
+/// | 单机（management=false） | 200（平台专属不受 management 影响） | 非 403（平台跳过能力位） |
+/// | 服务器（management=true，features 全 off） | 200 | 非 403（平台跳过能力位） |
+/// | 多租户租户用户（ai.copilot 默认 off） | 403（非平台操作者） | 403（能力位 fail-closed） |
+/// | sys.ai.enabled=false（任何模式） | 200（配置页不受业务开关影响） | 403（平台层优先） |
+///
+/// 可证伪性：若 aiConfig 误挂 management 门控 → ①变红；若 /ai/chat 误用
+/// 启动快照而非 get_effective → ④变红（update 热关闭后仍放行）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ai_config_across_deployment_modes() {
+    // ---- ① 单机模式（management=false）：aiConfig 平台专属不受 management 影响 ----
+    let ctx = TestContext::new_with(&[], |s| {
+        s.tenant.management = false;
+    })
+    .await;
+    let mut req = admin_req(&ctx, Method::GET, "/system/aiConfig", None);
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
+    let (status, _) = ctx.send_raw(req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "单机模式下 aiConfig（平台专属）应 200，实际 {status}"
+    );
+    drop(ctx);
+
+    // ---- ② 服务器模式（management=true + 平台 /ai/chat 能力位跳过）----
+    // TestContext 默认 management=true；平台账号 tid=0 经 L42 跳过能力位校验
+    let ctx = TestContext::new().await;
+    // 热开启 sys.ai.enabled（AI-01 运行时配置）
+    let (_, body) = ctx
+        .send_raw(admin_req(
+            &ctx,
+            Method::PUT,
+            "/system/aiConfig",
+            Some(serde_json::json!({
+                "enabled": true,
+                "provider": "openai",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKey": "sk-mode-matrix",
+                "model": "gpt-4o-mini",
+                "allowedTables": ["sys_user"]
+            })),
+        ))
+        .await;
+    assert_eq!(body["code"], 200, "热开启应成功: {body}");
+
+    let (status, _) = ctx
+        .send_raw(admin_req(
+            &ctx,
+            Method::POST,
+            "/ai/chat",
+            Some(serde_json::json!({ "question": "矩阵探针" })),
+        ))
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "服务器模式平台账号 /ai/chat 不得 403（平台跳过能力位），实际 {status}"
+    );
+
+    // ---- ③ 多租户租户面（service 层验证，复用 capability 测试基建口径）----
+    // 平台 ai.copilot 注册默认 OFF（governance feat 第一档）；套餐 features=NULL →
+    // 租户有效能力集全 OFF（fail-closed）——租户用户即使热开启平台层也被能力位拦截
+    let db2 = &ctx.state.db;
+    let backend = DatabaseBackend::Sqlite;
+    db2
+        .execute(Statement::from_sql_and_values(
+            backend,
+            "INSERT OR IGNORE INTO sys_tenant_package (package_id, package_name, menu_ids, features, default_account_count, status, del_flag) \
+             VALUES (901, 'ai-mode-pkg', NULL, NULL, 0, '0', '0')",
+            [],
+        ))
+        .await
+        .expect("插入套餐失败");
+    db2
+        .execute(Statement::from_sql_and_values(
+            backend,
+            "INSERT OR IGNORE INTO sys_tenant (tenant_id, tenant_code, tenant_name, package_id, status, del_flag) \
+             VALUES (2, 'ai_mode_t2', 'AI-MODE-T2', 901, '0', '0')",
+            [],
+        ))
+        .await
+        .expect("插入租户失败");
+    let effective = crate::service::sys_tenant_service::tenant_features_conn(db2, 2)
+        .await
+        .expect("解析租户有效能力集失败");
+    assert_eq!(
+        effective.mode("ai.copilot"),
+        FEATURE_OFF,
+        "套餐未配置 ai.copilot 时租户有效档必须 OFF（fail-closed——租户用户即使平台热开启也被能力位拦）"
+    );
+
+    // ---- ④ sys.ai.enabled=false（热关闭）→ 平台 /ai/chat 也 403（平台层优先）----
+    let (_, body) = ctx
+        .send_raw(admin_req(
+            &ctx,
+            Method::PUT,
+            "/system/aiConfig",
+            Some(serde_json::json!({
+                "enabled": false,
+                "provider": "openai",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKey": "sk-x",
+                "model": "gpt-4o-mini",
+                "allowedTables": ["sys_user"]
+            })),
+        ))
+        .await;
+    assert_eq!(body["code"], 200, "热关闭应成功");
+    let (status, _) = ctx
+        .send_raw(admin_req(
+            &ctx,
+            Method::POST,
+            "/ai/chat",
+            Some(serde_json::json!({ "question": "矩阵探针-关闭" })),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "sys.ai.enabled=false 时平台 /ai/chat 也必须 403（平台层优先），实际 {status}"
+    );
 }
