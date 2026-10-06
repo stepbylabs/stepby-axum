@@ -57,3 +57,8 @@ fmt_after.txt
 _full_t.log
 _ik.log
 _full2.log
+check_tests.log
+t5.log
+_fg*.log
+_srv*.log
+_start_server.py
