@@ -188,6 +188,7 @@ pub fn create_table_sql(backend: sea_orm_migration::sea_orm::DatabaseBackend) ->
                 updated_at         DATETIME
             )"#
         }
+        _ => unreachable!("unknown backend"),
     };
     table_sql.to_string()
 }

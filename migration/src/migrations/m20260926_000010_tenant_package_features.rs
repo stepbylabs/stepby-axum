@@ -60,7 +60,7 @@ async fn ensure_column(
         )
     };
     let row = conn
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             conn.get_database_backend(),
             exists_sql,
         ))

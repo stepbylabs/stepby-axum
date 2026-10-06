@@ -116,7 +116,7 @@ impl SysRoleMenuRepository {
         &self,
         conn: &C,
         models: Vec<ActiveModel>,
-    ) -> Result<InsertResult<ActiveModel>, DbErr> {
-        SysRoleMenu::insert_many(models).exec(conn).await
+    ) -> Result<u64, DbErr> {
+        let n = models.len() as u64; let _res = SysRoleMenu::insert_many(models).exec(conn).await?; Ok(n)
     }
 }

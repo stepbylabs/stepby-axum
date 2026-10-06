@@ -107,7 +107,7 @@ impl SysMsgSendLogRepository {
         &self,
         limit: Option<u64>,
         tenant_scope: Option<i64>,
-    ) -> Result<DeleteResult, DbErr> {
+    ) -> Result<u64, DbErr> {
         // limit 仅当存在时限制，避免误删全表；None 表示全部清空
         if let Some(l) = limit {
             let where_clause = match tenant_scope {
@@ -124,15 +124,13 @@ impl SysMsgSendLogRepository {
                 .db()
                 .execute_unprepared(&sql)
                 .await
-                .map(|qr| DeleteResult {
-                    rows_affected: qr.rows_affected(),
-                });
+                .map(|qr| qr.rows_affected())
         }
         let mut stmt = SysMsgSendLog::delete_many();
         if let Some(t) = tenant_scope {
             stmt = stmt.filter(Column::TenantId.eq(t));
         }
-        stmt.exec(self.base.db()).await
+        stmt.exec(self.base.db()).await.map(|d| d.rows_affected)
     }
 
     /// 按 ID 列表批量置为待重试 status='2'（触发重试）

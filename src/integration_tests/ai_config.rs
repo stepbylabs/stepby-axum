@@ -183,7 +183,7 @@ async fn test_ai_history_tenant_isolation() {
     // 直插两条分属不同租户的历史（模拟 chat 写入）
     let backend = DatabaseBackend::Sqlite;
     for (tid, uid, q) in [(1i64, 100i64, "tenant-A 的问题"), (2, 200, "tenant-B 的问题")] {
-        db.execute(sea_orm::Statement::from_sql_and_values(
+        db.execute_raw(sea_orm::Statement::from_sql_and_values(
             backend,
             "INSERT INTO ai_chat_history (tenant_id, user_id, question, sql_text, tables_used, rows_count, duration_ms, success, create_time) \
              VALUES (?, ?, ?, 'SELECT 1', 'sys_user', 1, 5, '1', CURRENT_TIMESTAMP)",
@@ -294,7 +294,7 @@ async fn test_ai_config_across_deployment_modes() {
     let db2 = &ctx.state.db;
     let backend = DatabaseBackend::Sqlite;
     db2
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             backend,
             "INSERT OR IGNORE INTO sys_tenant_package (package_id, package_name, menu_ids, features, default_account_count, status, del_flag) \
              VALUES (901, 'ai-mode-pkg', NULL, NULL, 0, '0', '0')",
@@ -303,7 +303,7 @@ async fn test_ai_config_across_deployment_modes() {
         .await
         .expect("插入套餐失败");
     db2
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             backend,
             "INSERT OR IGNORE INTO sys_tenant (tenant_id, tenant_code, tenant_name, package_id, status, del_flag) \
              VALUES (2, 'ai_mode_t2', 'AI-MODE-T2', 901, '0', '0')",
@@ -368,7 +368,7 @@ async fn test_ai_replay_guard_and_ownership() {
         (9002i64, 100i64, "失败留痕行", ""),
         (9003i64, 200i64, "他人成功行", "SELECT user_id FROM sys_user WHERE user_id = 1"),
     ] {
-        db.execute(Statement::from_sql_and_values(
+        db.execute_raw(Statement::from_sql_and_values(
             backend,
             "INSERT OR IGNORE INTO ai_chat_history (id, tenant_id, user_id, question, sql_text, tables_used, rows_count, duration_ms, success, create_time) \
              VALUES (?, 0, ?, ?, ?, 'sys_user', 1, 5, '1', CURRENT_TIMESTAMP)",

@@ -110,8 +110,8 @@ impl SysUserDeptRepository {
         &self,
         conn: &C,
         models: Vec<ActiveModel>,
-    ) -> Result<InsertResult<ActiveModel>, DbErr> {
-        SysUserDept::insert_many(models).exec(conn).await
+    ) -> Result<u64, DbErr> {
+        let n = models.len() as u64; let _res = SysUserDept::insert_many(models).exec(conn).await?; Ok(n)
     }
 
     /// 管理员侧幂等兼职写入（事务内；UNIQUE(user_id, dept_id) 语义安全写入）：

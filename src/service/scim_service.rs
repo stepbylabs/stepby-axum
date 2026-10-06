@@ -230,7 +230,7 @@ impl ScimService {
         let count_sql = format!("SELECT COUNT(*) AS c FROM sys_user WHERE {where_clause}");
         let total = self
             .db()
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 count_sql,
                 values.clone(),
@@ -245,7 +245,7 @@ impl ScimService {
         );
         let rows = self
             .db()
-            .query_all(Statement::from_sql_and_values(backend, list_sql, values))
+            .query_all_raw(Statement::from_sql_and_values(backend, list_sql, values))
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
         let mut resources = Vec::with_capacity(rows.len());

@@ -199,7 +199,7 @@ pub async fn resolve_operator<C: ConnectionTrait>(
         (Some(id), None) => {
             let sql = marker("SELECT user_name FROM sys_user WHERE user_id = ? LIMIT 1");
             let row = conn
-                .query_one(Statement::from_sql_and_values(
+                .query_one_raw(Statement::from_sql_and_values(
                     backend,
                     &sql,
                     [id.into()],
@@ -216,7 +216,7 @@ pub async fn resolve_operator<C: ConnectionTrait>(
             // 排除软删行：软删用户 user_name 已被释放改写，不会撞正常名
             let sql = marker("SELECT user_id FROM sys_user WHERE user_name = ? AND (del_flag IS NULL OR del_flag <> '2') LIMIT 1");
             let row = conn
-                .query_one(Statement::from_sql_and_values(
+                .query_one_raw(Statement::from_sql_and_values(
                     backend,
                     &sql,
                     [name.into()],

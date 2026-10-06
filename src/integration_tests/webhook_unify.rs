@@ -17,7 +17,7 @@ async fn query_subscribed_events(ctx: &TestContext, id: i64) -> Option<String> {
     let rows = ctx
         .state
         .db
-        .query_all(Statement::from_string(DatabaseBackend::Sqlite, sql))
+        .query_all_raw(Statement::from_string(DatabaseBackend::Sqlite, sql))
         .await
         .expect("查询 subscribed_events 失败");
     rows.first()
@@ -30,7 +30,7 @@ async fn query_admin_tenant_id(ctx: &TestContext) -> i64 {
     let rows = ctx
         .state
         .db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT tenant_id FROM sys_user WHERE user_name = 'admin'".to_string(),
         ))
@@ -60,7 +60,7 @@ async fn insert_legacy_hook(
     let res = ctx
         .state
         .db
-        .execute(Statement::from_string(DatabaseBackend::Sqlite, sql))
+        .execute_raw(Statement::from_string(DatabaseBackend::Sqlite, sql))
         .await
         .expect("插入存量形态回调失败");
     res.last_insert_id() as i64
@@ -130,7 +130,7 @@ async fn test_webhook_unify_and_login_dispatched_once() {
         migration::m20261003_000004_webhook_unify::build_unify_update_sql(DatabaseBackend::Sqlite);
     ctx.state
         .db
-        .execute(Statement::from_string(DatabaseBackend::Sqlite, unify_sql))
+        .execute_raw(Statement::from_string(DatabaseBackend::Sqlite, unify_sql))
         .await
         .expect("执行收敛 SQL 失败");
 
@@ -151,7 +151,7 @@ async fn test_webhook_unify_and_login_dispatched_once() {
         migration::m20261003_000004_webhook_unify::build_unify_update_sql(DatabaseBackend::Sqlite);
     ctx.state
         .db
-        .execute(Statement::from_string(DatabaseBackend::Sqlite, again))
+        .execute_raw(Statement::from_string(DatabaseBackend::Sqlite, again))
         .await
         .expect("重复执行收敛 SQL 失败");
     assert_eq!(

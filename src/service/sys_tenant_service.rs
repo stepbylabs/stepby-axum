@@ -1102,7 +1102,7 @@ impl SysTenantService {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.tenant_id, r.cnt.max(0) as u64))
+            .map(|r| (r.tenant_id, std::cmp::max(r.cnt, 0) as u64))
             .collect())
     }
 
@@ -1170,8 +1170,7 @@ impl SysTenantService {
         let account_count = dto
             .account_count
             .or_else(|| package.as_ref().and_then(|p| p.default_account_count))
-            .unwrap_or(0)
-            .max(0);
+            .unwrap_or(0);
         let package_whitelist = package.as_ref().and_then(|p| parse_menu_ids(&p.menu_ids));
         // 有效能力集（平台天花板 ∩ 套餐请求）：决定平台专属 perms 是否可随复制进入
         // 租户角色菜单（关闭态 = 现状 = 一律剔除，杜绝"菜单可见但请求 403"的假入口）。
@@ -1462,13 +1461,13 @@ impl SysTenantService {
         // 平台分配项三态：None = 不修改；Some(None) = 清空；Some(Some(v)) = 设置
         let next_package: Option<Option<i64>> = dto.package_id;
         let next_expire: Option<Option<NaiveDateTime>> = dto.expire_time;
-        let next_account: Option<Option<i32>> = dto.account_count.map(|v| v.map(|x| x.max(0)));
+        let next_account: Option<Option<i32>> = dto.account_count.map(|v| v.map(|x| std::cmp::max(x, 0)));
 
         let tenant_self = operator_tid != 0;
         if tenant_self {
             let package_changed = matches!(next_package, Some(v) if v != tenant.package_id);
             let account_changed =
-                matches!(next_account, Some(v) if v != tenant.account_count.map(|x| x.max(0)));
+                matches!(next_account, Some(v) if v != tenant.account_count.map(|x| std::cmp::max(x, 0)));
             let expire_changed = matches!(next_expire, Some(v) if v != tenant.expire_time);
             if package_changed || account_changed || expire_changed {
                 return Err(ServiceError::forbidden(&crate::tr!(
@@ -2061,7 +2060,7 @@ impl SysTenantService {
             }
         };
         let expire_epoch = expire_time.map(|dt| dt.and_utc().timestamp()).unwrap_or(0);
-        let ttl = TENANT_RUNTIME_KEY_TTL_SECS.max(0) as u64;
+        let ttl = std::cmp::max(TENANT_RUNTIME_KEY_TTL_SECS, 0) as u64;
         // 原实现为一条 pipe 双 SETEX（tenant:state / tenant:exp）→ 拆为两次 SharedStore 写入，
         // 值与 TTL 逐字节等价：state 取 TENANT_STATE_* 常量（'0' 正常 / '1' 宽限 / '2' 停用）；
         // expire 为 NULL → 写 "0"（永不过期），非 NULL → UTC 秒时间戳
@@ -2098,7 +2097,7 @@ impl SysTenantService {
         let sql = "SELECT tenant_id, status, expire_time FROM sys_tenant WHERE tenant_id != 0";
         let rows = match self
             .db()
-            .query_all(Statement::from_string(backend, sql.to_string()))
+            .query_all_raw(Statement::from_string(backend, sql.to_string()))
             .await
         {
             Ok(r) => r,
@@ -2245,7 +2244,7 @@ impl SysTenantService {
                 continue;
             }
             let ttl = if session.exp > 0 {
-                session.exp.saturating_sub(now_secs).max(1)
+                std::cmp::max(session.exp.saturating_sub(now_secs), 1)
             } else {
                 FALLBACK_BLACKLIST_TTL_SECS
             };
@@ -2572,7 +2571,7 @@ impl SysTenantService {
 
     async fn redis_setex(&self, key: &str, ttl: i64, value: &str) {
         // 与原实现一致：写失败静默忽略（cache-aside 回填，best-effort）
-        let _ = self.store.set_ex(key, value, ttl.max(0) as u64).await;
+        let _ = self.store.set_ex(key, value, std::cmp::max(ttl, 0) as u64).await;
     }
 
     async fn redis_del(&self, key: &str) {

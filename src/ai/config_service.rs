@@ -162,7 +162,7 @@ impl AiConfigService {
     /// 六键 UPDATE（直接 SQL——键固定且平台专属；写后 refreshCache 热生效）
     async fn write_key(&self, key: &str, value: &str) -> Result<(), ServiceError> {
         self.db
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE sys_config SET config_value = ?, update_time = CURRENT_TIMESTAMP WHERE config_key = ?",
                 [value.into(), key.into()],

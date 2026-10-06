@@ -386,10 +386,11 @@ impl SysOperLogRepository {
                  FROM sys_oper_log WHERE oper_time >= ?{tenant_clause} \
                  GROUP BY d ORDER BY d ASC"
             ),
+            _ => unreachable!("unknown backend"),
         };
 
         let rows = db
-            .query_all(Statement::from_sql_and_values(backend, sql, values))
+            .query_all_raw(Statement::from_sql_and_values(backend, sql, values))
             .await?;
 
         // 构建日期→计数映射

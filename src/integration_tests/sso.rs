@@ -1875,7 +1875,7 @@ async fn test_tenant_disabled_revokes_rt_and_pat() {
     // ① 将种子用户 1 归属到 TID，使旧绑定（tid=0）按 user_id 回查命中
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!("UPDATE sys_user SET tenant_id = {TID} WHERE user_id = 1"),
         ))
@@ -1925,7 +1925,7 @@ async fn test_tenant_disabled_revokes_rt_and_pat() {
     for (pat_id, tid) in [("it-pat-hit", TID), ("it-pat-other", OTHER_TID)] {
         ctx.state
             .db
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 pat_sql(pat_id, tid),
             ))
@@ -1965,7 +1965,7 @@ async fn test_tenant_disabled_revokes_rt_and_pat() {
             let row = ctx
                 .state
                 .db
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
                     format!("SELECT status FROM sys_pat WHERE pat_id = '{}'", $pat_id),
                 ))
@@ -2014,7 +2014,7 @@ async fn test_tenant_revoke_rt_sweep_is_not_truncated() {
     //    经 user_id 回查后命中本租户，从而"在线会话吊销"路径也被执行
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!("UPDATE sys_user SET tenant_id = {TID} WHERE user_id = 1"),
         ))

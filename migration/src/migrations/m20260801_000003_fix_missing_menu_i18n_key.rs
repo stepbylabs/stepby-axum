@@ -32,7 +32,7 @@ impl MigrationTrait for Migration {
         let backend = manager.get_database_backend();
 
         // 1. 修复 /system/dashboard 数据看板菜单的 i18n_key
-        conn.execute(Statement::from_sql_and_values(
+        conn.execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = $1 WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index' AND (i18n_key IS NULL OR i18n_key = '')"),
             ["menu.dashboard".into()],
@@ -41,7 +41,7 @@ impl MigrationTrait for Migration {
 
         // 2. 修复 /help-center 顶级目录的 i18n_key
         //    使用 menu.helpCenter 区别于 tool/help 子菜单（menu.help）
-        conn.execute(Statement::from_sql_and_values(
+        conn.execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = $1 WHERE path = 'help-center' AND parent_id = 0 AND menu_type = 'M' AND (i18n_key IS NULL OR i18n_key = '')"),
             ["menu.helpCenter".into()],
@@ -55,14 +55,14 @@ impl MigrationTrait for Migration {
         let conn = manager.get_connection();
         let backend = manager.get_database_backend();
 
-        conn.execute(Statement::from_sql_and_values(
+        conn.execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = NULL WHERE path = 'dashboard' AND parent_id = 1 AND component = 'dashboard/index' AND i18n_key = $1"),
             ["menu.dashboard".into()],
         ))
         .await?;
 
-        conn.execute(Statement::from_sql_and_values(
+        conn.execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(backend, "UPDATE sys_menu SET i18n_key = NULL WHERE path = 'help-center' AND parent_id = 0 AND menu_type = 'M' AND i18n_key = $1"),
             ["menu.helpCenter".into()],

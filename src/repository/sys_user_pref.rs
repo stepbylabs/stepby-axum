@@ -79,6 +79,7 @@ impl SysUserPrefRepository {
                     announce_notify=VALUES(announce_notify), dnd_enabled=VALUES(dnd_enabled), \
                     dnd_start=VALUES(dnd_start), dnd_end=VALUES(dnd_end), update_time=VALUES(update_time)"
             }
+            _ => unreachable!("unknown backend"),
         };
         let values: Vec<Value> = vec![
             user_id.into(),
@@ -92,7 +93,7 @@ impl SysUserPrefRepository {
             now.into(),
         ];
         let stmt = Statement::from_sql_and_values(backend, sql, values);
-        db.execute(stmt).await?;
+        db.execute_raw(stmt).await?;
         Ok(())
     }
 

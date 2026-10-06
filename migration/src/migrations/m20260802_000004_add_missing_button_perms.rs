@@ -71,7 +71,7 @@ async fn insert_button_perm(
     );
     manager
         .get_connection()
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(backend, &sql),
             [
@@ -108,7 +108,7 @@ async fn insert_role_menu_idempotent(
     };
     manager
         .get_connection()
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             backend,
             adapt_placeholders(backend, &sql),
             [role_id.into(), menu_id.into()],

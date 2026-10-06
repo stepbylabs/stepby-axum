@@ -172,14 +172,15 @@ impl SysWebHookLogRepository {
         &self,
         txn: &C,
         hook_ids: &[i64],
-    ) -> Result<DeleteResult, DbErr> {
+    ) -> Result<u64, DbErr> {
         if hook_ids.is_empty() {
-            return Ok(DeleteResult { rows_affected: 0 });
+            return Ok(0);
         }
-        SysWebHookLog::delete_many()
+        let res = SysWebHookLog::delete_many()
             .filter(Column::HookId.is_in(hook_ids.to_vec()))
             .exec(txn)
-            .await
+            .await?;
+        Ok(res.rows_affected)
     }
 
     /// 删除早于指定时间的记录（审计保留期清理；tenant_scope=Some(t) 时仅清理该租户）

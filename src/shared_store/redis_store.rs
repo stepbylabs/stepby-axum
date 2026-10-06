@@ -265,7 +265,7 @@ impl SharedStore for RedisStore {
                     "UPDATE sys_user SET password_version = password_version + 1 WHERE user_id = ?",
                     [uid_i64.into()],
                 );
-                if let Err(e) = self.db.execute(stmt).await {
+                if let Err(e) = self.db.execute_raw(stmt).await {
                     tracing::warn!(
                         uid,
                         error = %e,
@@ -277,7 +277,7 @@ impl SharedStore for RedisStore {
                 tracing::warn!(uid, "pwd_ver DB 列同步跳过：uid 非数值");
             }
         }
-        Ok(new.max(0) as u64)
+        Ok(std::cmp::max(new, 0) as u64)
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
@@ -346,7 +346,7 @@ impl SharedStore for RedisStore {
         let n: i64 = crate::utils::redis::cmd_timeout(cmd.query_async(&mut redis))
             .await
             .map_err(|e| StoreError::backend(&e))?;
-        Ok(n.max(0) as u64)
+        Ok(std::cmp::max(n, 0) as u64)
     }
 
     /// 批量读：单次 Pipeline 多 GET（现状等价，如 sso token_refresh 双键 GET）
@@ -633,7 +633,7 @@ impl RedisStore {
         // ① 吊销权威层 → blacklist 键
         let mut rev_count: usize = 0;
         match db
-            .query_all(Statement::from_sql_and_values(
+            .query_all_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT token_hash, expire_at FROM sys_token_revocation WHERE expire_at > ?",
                 [now.into()],
@@ -683,7 +683,7 @@ impl RedisStore {
         // ② 密码版本列 → pwd_ver 键
         let mut ver_count: usize = 0;
         match db
-            .query_all(Statement::from_sql_and_values(
+            .query_all_raw(Statement::from_sql_and_values(
                 backend,
                 "SELECT user_id, password_version FROM sys_user WHERE password_version > 0",
                 [],
@@ -714,7 +714,7 @@ impl RedisStore {
                         .and_then(|s| s.parse::<u64>().ok())
                         .unwrap_or(0);
                     // 仅 Redis 值落后于 DB 列时回填（幂等；无 TTL，与现状一致）
-                    if cur < db_ver.max(0) as u64 {
+                    if cur < std::cmp::max(db_ver, 0) as u64 {
                         let _: Result<(), _> = crate::utils::redis::cmd_timeout(
                             redis::cmd("SET").arg(&key).arg(db_ver.to_string()).query_async(&mut redis),
                         )

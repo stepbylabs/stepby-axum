@@ -130,7 +130,7 @@ impl SysFlowTaskRepository {
     ) -> Result<u64, DbErr> {
         let mut upd = SysFlowTask::update_many()
             .col_expr(Column::Status, Expr::value(new_status))
-            .col_expr(Column::ActedAt, Expr::current_timestamp().into());
+            .col_expr(Column::ActedAt, Expr::current_timestamp());
         if let Some(c) = comment {
             upd = upd.col_expr(Column::Comment, Expr::value(c));
         }
@@ -213,7 +213,7 @@ impl SysFlowTaskRepository {
     ) -> Result<u64, DbErr> {
         let res = SysFlowTask::update_many()
             .col_expr(Column::Status, Expr::value("cancelled"))
-            .col_expr(Column::ActedAt, Expr::current_timestamp().into())
+            .col_expr(Column::ActedAt, Expr::current_timestamp())
             .filter(Column::BizType.eq(biz_type))
             .filter(Column::BizId.eq(biz_id))
             .filter(Column::RoundNo.eq(round_no))

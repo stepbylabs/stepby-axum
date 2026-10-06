@@ -963,7 +963,7 @@ impl SysUserService {
         let backend = self.db().get_database_backend();
         match self
             .db()
-            .query_all(Statement::from_string(backend, sql))
+            .query_all_raw(Statement::from_string(backend, sql))
             .await
         {
             Ok(rows) => rows

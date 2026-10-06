@@ -937,6 +937,6 @@ async fn update_children_ancestors_conn<C: ConnectionTrait>(
             pattern.into(),
         ],
     );
-    conn.execute(stmt).await?;
+    conn.execute_raw(stmt).await?;
     Ok(())
 }

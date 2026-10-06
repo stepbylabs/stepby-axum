@@ -355,6 +355,7 @@ impl GenTableRepository {
                     );
                     (sql, count_sql, data_vals, vals)
                 }
+                _ => unreachable!("unknown backend"),
             };
 
         let rows = DbTableInfo::find_by_statement(Statement::from_sql_and_values(
@@ -367,7 +368,7 @@ impl GenTableRepository {
 
         // 精确总数：COUNT 查询（已排除已导入表，P0-9 修复：不再用当前页内存过滤行数充当 total）
         let total: i64 = db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 backend,
                 &count_sql,
                 count_values,
@@ -376,7 +377,7 @@ impl GenTableRepository {
             .and_then(|row| row.try_get("", "count").ok())
             .unwrap_or(0);
 
-        Ok((rows, total.max(0) as u64))
+        Ok((rows, std::cmp::max(total, 0) as u64))
     }
 
     /// 查询指定表的列元数据（用于导入表时生成 gen_table_column 记录）
@@ -401,7 +402,7 @@ impl GenTableRepository {
                 let sql = format!("PRAGMA table_info('{}')", table_name);
                 // PRAGMA table_info 返回：cid, name, type, notnull, dflt_value, pk
                 let raw_rows = db
-                    .query_all(Statement::from_sql_and_values(backend, &sql, vec![]))
+                    .query_all_raw(Statement::from_sql_and_values(backend, &sql, vec![]))
                     .await?;
                 let mut result = Vec::new();
                 for row in raw_rows {
@@ -449,6 +450,7 @@ impl GenTableRepository {
                 .all(db)
                 .await
             }
+            _ => Ok(Vec::new()),
         }
     }
 

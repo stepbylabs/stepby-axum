@@ -46,6 +46,7 @@ impl MigrationTrait for Migration {
                     .execute_unprepared("ALTER TABLE sys_oper_log ADD COLUMN oper_diff TEXT")
                     .await?;
             }
+            _ => unreachable!("unknown backend"),
         }
         Ok(())
     }
@@ -65,6 +66,7 @@ impl MigrationTrait for Migration {
                     "[migration][warn] m20260822_000001: SQLite 不支持 DROP COLUMN，跳过回滚"
                 );
             }
+            _ => unreachable!("unknown backend"),
         }
         Ok(())
     }

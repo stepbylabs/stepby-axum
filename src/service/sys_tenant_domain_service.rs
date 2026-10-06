@@ -769,7 +769,7 @@ impl SysTenantDomainService {
 
     async fn redis_setex(&self, key: &str, ttl: i64, value: &str) {
         // 与原实现一致：写失败静默忽略（cache-aside 回填，best-effort）
-        let _ = self.store.set_ex(key, value, ttl.max(0) as u64).await;
+        let _ = self.store.set_ex(key, value, std::cmp::max(ttl, 0) as u64).await;
     }
 
     async fn redis_del(&self, key: &str) {

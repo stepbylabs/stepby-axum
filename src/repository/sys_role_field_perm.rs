@@ -79,14 +79,15 @@ impl SysRoleFieldPermRepository {
         &self,
         txn: &C,
         role_ids: &[i64],
-    ) -> Result<DeleteResult, DbErr> {
+    ) -> Result<u64, DbErr> {
         if role_ids.is_empty() {
-            return Ok(DeleteResult { rows_affected: 0 });
+            return Ok(0);
         }
-        SysRoleFieldPerm::delete_many()
+        let res = SysRoleFieldPerm::delete_many()
             .filter(Column::RoleId.is_in(role_ids.to_vec()))
             .exec(txn)
-            .await
+            .await?;
+        Ok(res.rows_affected)
     }
 
     /// 全量覆盖式保存：删除该角色在该表下的全部行后重建 hidden 清单
@@ -127,6 +128,7 @@ impl SysRoleFieldPermRepository {
                 DatabaseBackend::MySql => {
                     "INSERT IGNORE INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES (?, ?, ?, NOW())"
                 }
+                _ => unreachable!("unknown backend"),
             };
             for field in hidden_fields {
                 let stmt = Statement::from_sql_and_values(
@@ -134,7 +136,7 @@ impl SysRoleFieldPermRepository {
                     insert_sql,
                     vec![role_id.into(), table_key.into(), field.into()],
                 );
-                txn.execute(stmt).await?;
+                txn.execute_raw(stmt).await?;
             }
         }
 

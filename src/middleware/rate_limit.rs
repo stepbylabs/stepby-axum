@@ -258,7 +258,7 @@ pub async fn try_acquire_redis(
             .invoke_async(redis),
     )
     .await?;
-    Ok((allowed == 1, retry.max(0) as u64))
+    Ok((allowed == 1, std::cmp::max(retry, 0) as u64))
 }
 
 /// 全局限流中间件

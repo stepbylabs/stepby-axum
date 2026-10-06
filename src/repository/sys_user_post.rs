@@ -96,7 +96,7 @@ impl SysUserPostRepository {
         &self,
         conn: &C,
         models: Vec<ActiveModel>,
-    ) -> Result<InsertResult<ActiveModel>, DbErr> {
-        SysUserPost::insert_many(models).exec(conn).await
+    ) -> Result<u64, DbErr> {
+        let n = models.len() as u64; let _res = SysUserPost::insert_many(models).exec(conn).await?; Ok(n)
     }
 }

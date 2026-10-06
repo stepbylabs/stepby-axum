@@ -41,6 +41,7 @@ fn widen_ancestors_sql(backend: DatabaseBackend) -> Option<&'static str> {
         DatabaseBackend::Postgres => Some(PG_WIDEN_ANCESTORS),
         DatabaseBackend::MySql => Some(MYSQL_WIDEN_ANCESTORS),
         DatabaseBackend::Sqlite => None,
+        _ => None,
     }
 }
 

@@ -52,7 +52,7 @@ async fn test_tenant_scope_isolation() {
     // ② 直改数据库：把 client A 归属租户 5（模拟租户数据）
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             format!(
                 "UPDATE sys_oauth_client SET tenant_id = 5 WHERE sso_client_id = {}",

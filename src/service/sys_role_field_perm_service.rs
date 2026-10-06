@@ -354,7 +354,7 @@ mod tests {
     /// 修改第一层平台开关（测试专用：直接改 DB 行，新 service 实例读到新值）
     async fn set_config_enabled(db: &DatabaseConnection, on: bool) {
         let val = if on { "true" } else { "false" };
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!(
                 "UPDATE sys_config SET config_value='{val}' WHERE config_key='sys.fieldPerm.enabled'"

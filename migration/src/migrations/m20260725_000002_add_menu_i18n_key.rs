@@ -97,7 +97,7 @@ impl MigrationTrait for Migration {
         ];
 
         for (menu_id, i18n_key) in updates {
-            conn.execute(Statement::from_sql_and_values(
+            conn.execute_raw(Statement::from_sql_and_values(
                 backend,
                 adapt_placeholders(
                     backend,

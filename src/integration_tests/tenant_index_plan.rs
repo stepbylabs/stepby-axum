@@ -65,7 +65,7 @@ async fn explain_fe_page(db: &DatabaseConnection, tid: i64) -> Vec<String> {
     let built = q.build(DatabaseBackend::Sqlite);
     let explain_sql = format!("EXPLAIN QUERY PLAN {}", built.sql);
     let rows = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             explain_sql,
             built.values.map(|v| v.0).unwrap_or_default(),
@@ -89,7 +89,7 @@ async fn explain_tenant_page(db: &DatabaseConnection, tid: i64) -> Vec<String> {
     let built = q.build(DatabaseBackend::Sqlite);
     let explain_sql = format!("EXPLAIN QUERY PLAN {}", built.sql);
     let rows = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             explain_sql,
             built.values.map(|v| v.0).unwrap_or_default(),

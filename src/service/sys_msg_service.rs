@@ -932,7 +932,7 @@ impl SysMsgService {
             .send_log_repo
             .clean(limit, crate::common::tenant::tenant_scope(operator_tid))
             .await?;
-        Ok(result.rows_affected)
+        Ok(result)
     }
 
     // ==================== 投递内核 ====================

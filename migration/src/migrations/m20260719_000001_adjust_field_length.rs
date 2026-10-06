@@ -84,6 +84,7 @@ impl MigrationTrait for Migration {
                      跳过 sys_job.cron_expression / sys_dept.ancestors 字段长度修改"
                 );
             }
+            _ => unreachable!("unknown backend"),
         }
         Ok(())
     }
@@ -126,6 +127,7 @@ impl MigrationTrait for Migration {
                      跳过 sys_job.cron_expression / sys_dept.ancestors 字段长度回滚"
                 );
             }
+            _ => unreachable!("unknown backend"),
         }
         Ok(())
     }

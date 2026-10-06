@@ -128,7 +128,7 @@ async fn test_login_ip_blacklist_blocks_login() {
     // 管理员配置黑名单（等价参数页写入）
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!(
                 "UPDATE sys_config SET config_value='{blacklisted}' \
@@ -173,7 +173,7 @@ async fn test_login_ip_blacklist_blocks_login() {
     // 清空黑名单 + 失效缓存 ⇒ 登录恢复 200
     ctx.state
         .db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "UPDATE sys_config SET config_value='' \
              WHERE config_key='sys.login.blackIPList'"

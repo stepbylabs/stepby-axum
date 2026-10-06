@@ -41,7 +41,7 @@ async fn has_column(manager: &SchemaManager<'_>, table: &str, column: &str) -> R
     match backend {
         sea_orm_migration::sea_orm::DatabaseBackend::Sqlite => {
             let rows = conn
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     format!("PRAGMA table_info({table})"),
                 ))
@@ -59,7 +59,7 @@ async fn has_column(manager: &SchemaManager<'_>, table: &str, column: &str) -> R
                 "table_schema=DATABASE()"
             };
             let rows = conn
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     backend,
                     format!(
                         "SELECT 1 FROM information_schema.columns WHERE table_name='{table}' AND column_name='{column}' AND {schema} LIMIT 1"

@@ -38,7 +38,7 @@ async fn test_backend_required_perms_covered_by_menu() {
 
     // 读取 sys_menu 全部非空 perms（前端经角色可授予的权限全集）
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT perms FROM sys_menu WHERE perms IS NOT NULL AND perms <> ''",
         ))
@@ -115,7 +115,7 @@ async fn test_response_cache_does_not_bypass_rbac() {
     //    注意：seed 的 role2（stepby 所在角色）持有全量菜单，含 dict:query，
     //    不能用作反例。
     ctx.state.db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, status, del_flag, create_by, create_time)
              VALUES (9001, 'IT空白角色', 'it_blank', 99, '1', '0', '0', 'it', CURRENT_TIMESTAMP)",
@@ -123,7 +123,7 @@ async fn test_response_cache_does_not_bypass_rbac() {
         .await
         .expect("插入空白角色失败");
     ctx.state.db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "INSERT INTO sys_user (user_id, dept_id, user_name, nick_name, password, status, del_flag, create_by, create_time, tenant_id)
              SELECT 9001, dept_id, 'it_blank', 'IT空白用户', password, '0', '0', 'it', CURRENT_TIMESTAMP, tenant_id
@@ -132,7 +132,7 @@ async fn test_response_cache_does_not_bypass_rbac() {
         .await
         .expect("插入空白用户失败");
     ctx.state.db
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "INSERT INTO sys_user_role (user_id, role_id) VALUES (9001, 9001)",
         ))
