@@ -377,6 +377,7 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 角色管理 =====
     ("GET", "/system/role/list", "system:role:list"),
+    ("GET", "/system/role/optionselect", "system:role:query"),
     ("GET", "/system/role/{id}", "system:role:query"),
     ("POST", "/system/role", "system:role:add"),
     ("PUT", "/system/role", "system:role:edit"),

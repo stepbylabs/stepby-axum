@@ -103,6 +103,19 @@ impl SysRoleRepository {
             .await
     }
 
+    /// 角色下拉选项查询（启用 + 未删 + 租户行级过滤，按 role_sort 排序）
+    ///
+    /// 供 `GET /system/role/optionselect`（数据权限规则页角色下拉等场景）。
+    pub async fn find_all_enabled(&self, tenant_scope: Option<i64>) -> Result<Vec<Model>, DbErr> {
+        let mut query = SysRole::find()
+            .filter(Column::DelFlag.eq("0"))
+            .filter(Column::Status.eq("0"));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.order_by_asc(Column::RoleSort).all(self.base.db()).await
+    }
+
     /// 软删除角色
     pub async fn soft_delete(&self, role_id: i64) -> Result<UpdateResult, DbErr> {
         SysRole::update_many()

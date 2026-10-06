@@ -49,6 +49,11 @@ pub fn role_routes() -> Router<Arc<AppState>> {
             "/system/role/authUser/selectAll",
             put(sys_role_handler::auth_user_select_all),
         )
+        // GET /system/role/optionselect 角色下拉选项（静态段，必须先于 /{id} 登记）
+        .route(
+            "/system/role/optionselect",
+            get(sys_role_handler::optionselect),
+        )
         // DELETE /system/role/{id} 删除角色（支持批量逗号分隔）
         .route("/system/role/{id}", delete(sys_role_handler::remove))
         // POST /system/role/export 导出角色列表

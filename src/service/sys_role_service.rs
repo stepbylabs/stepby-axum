@@ -374,6 +374,25 @@ impl SysRoleService {
     ///
     /// 取 operator 所有角色中 data_scope 值最小者（最宽松）生效。
     /// 超管（user_id==1）短路：直接返回全部。
+    /// 角色下拉选项（optionselect；启用 + 未删 + 租户行级过滤）
+    ///
+    /// 供数据权限规则页等"角色下拉"场景；不走 data_scope（下拉是身份枚举，
+    /// 不是业务数据读取——与 get_role_page 的 P0-6 口径区分）。
+    pub async fn list_role_options(
+        &self,
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<RoleOptionVo>, ServiceError> {
+        let rows = self.role_repo.find_all_enabled(tenant_scope).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| RoleOptionVo {
+                role_id: r.role_id,
+                role_name: r.role_name,
+                role_key: r.role_key,
+            })
+            .collect())
+    }
+
     pub async fn get_role_page(
         &self,
         query: RoleQueryDto,
@@ -1662,4 +1681,14 @@ impl SysRoleService {
         let menu_ids: Vec<i64> = role_menus.into_iter().map(|rm| rm.menu_id).collect();
         Ok(menu_ids)
     }
+}
+
+
+/// 角色下拉选项出参 VO（optionselect）
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleOptionVo {
+    pub role_id: i64,
+    pub role_name: String,
+    pub role_key: String,
 }

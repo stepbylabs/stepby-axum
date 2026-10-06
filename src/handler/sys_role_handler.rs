@@ -609,3 +609,26 @@ pub struct RoleDeptTreeResult {
 }
 
 crate::impl_into_response!(RoleDeptTreeResult);
+
+
+/// GET /system/role/optionselect
+/// 角色下拉选项（启用角色，租户行级过滤；数据权限规则页等场景）
+#[utoipa::path(
+    get,
+    path = "/system/role/optionselect",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<crate::service::sys_role_service::RoleOptionVo>>),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "system-role"
+)]
+pub async fn optionselect(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<Vec<crate::service::sys_role_service::RoleOptionVo>>, AppError> {
+    let rows = state
+        .role_service
+        .list_role_options(crate::common::tenant::tenant_scope(operator.tenant_id()))
+        .await?;
+    Ok(AjaxResult::success(rows))
+}

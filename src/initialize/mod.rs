@@ -4936,13 +4936,28 @@ async fn ensure_upload_config_menu(db: &DatabaseConnection) -> anyhow::Result<()
         return Ok(());
     }
     let backend = db.get_database_backend();
-    let exists = db
+    let occupied = db
         .query_all_raw(Statement::from_string(
             backend,
-            "SELECT 1 AS one FROM sys_menu WHERE menu_id = 4103".to_string(),
+            "SELECT component, path AS comp_path FROM sys_menu WHERE menu_id = 4103".to_string(),
         ))
         .await?;
-    if !exists.is_empty() {
+    if !occupied.is_empty() {
+        // G-14 批次五加固：4103 已存在时**校验内容**而非盲目跳过——
+        // 若被非目标菜单占位（如历史 e2e 孤儿残留），OR IGNORE 会静默失效
+        // 且无任何日志（实测缺陷：孤儿 test-menu-* 占位导致 OSS 菜单从未落库，
+        // uploadConfig 页面入口丢失）。此处显性化冲突，交由人工/测试侧清理重建。
+        let existing = occupied
+            .first()
+            .and_then(|r| r.try_get::<String>("", "component").ok());
+        if existing.as_deref() == Some("system/uploadConfig/index") {
+            return Ok(());
+        }
+        tracing::warn!(
+            "menu_id=4103 已被其他菜单占用（component={:?}）——OSS 存储配置菜单补建跳过；\
+             请清理占位菜单后重启，或将 G-11 菜单迁移至其他 menu_id",
+            existing
+        );
         return Ok(());
     }
     let now = flow_now(db);
