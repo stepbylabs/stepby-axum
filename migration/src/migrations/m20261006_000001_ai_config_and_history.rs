@@ -164,6 +164,21 @@ impl MigrationTrait for Migration {
             };
             manager.get_connection().execute_unprepared(&sql).await?;
         }
+        // AI-01 管理页菜单（platform-only；perms 契约测试要求后端 perms ⊆ sys_menu.perms）
+        // 超管（role_id=1）经 isAdmin 特判拥有全部 perms，无需 role_menu 授权行
+        let menus_sql = format!(
+            "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
+            (4102, 'AI 助手配置', 1, 14, 'aiConfig', 'system/aiConfig/index', '', '', '1', '0', 'C', '0', '0', 'system:aiConfig:edit', 'ai', 'admin', {now}, 'AI 助手 LLM 接入配置（平台专属）', '0')"
+        );
+        let menu_sql = match manager.get_connection().get_database_backend() {
+            sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", menus_sql),
+            sea_orm::DatabaseBackend::Postgres => format!("INSERT INTO {} ON CONFLICT DO NOTHING", menus_sql),
+            _ => format!("INSERT IGNORE INTO {}", menus_sql),
+        };
+        manager
+            .get_connection()
+            .execute_unprepared(&menu_sql)
+            .await?;
         Ok(())
     }
 

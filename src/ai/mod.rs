@@ -10,6 +10,7 @@
 //! 4. **租户隔离**（v4.1-A3）：非平台调用者的 SQL 必须含 `tenant_id` 过滤（提示词强制 + 守卫兜底）；
 //! 5. **行数上限**：守卫注入 `LIMIT`（`[ai].max_rows`）。
 
+pub mod config_service;
 pub mod handler;
 pub mod provider;
 pub mod service;
