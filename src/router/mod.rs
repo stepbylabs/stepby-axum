@@ -71,9 +71,10 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::get;
 use std::sync::Arc;
 use std::time::Duration;
+use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::timeout::TimeoutLayer;
+use axum::Json as AxumJson;
 use tower_http::trace::TraceLayer;
 
 /// 全局默认请求体大小上限（10MB，对齐 oper_log 中间件 BODY_READ_LIMIT）
@@ -271,15 +272,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             tracing::info!("前端嵌入模式已启用：单可执行文件部署（前端资源已编译进二进制）");
         }
     } else {
-        app = app.fallback(|| async {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                axum::Json(serde_json::json!({
-                    "code": 404,
-                    "msg": "请求的资源不存在"
-                })),
-            )
-        });
+        // §5.55 收散点：两处手写 404 JSON 字面量收敛为共享常量（消除旁路副本）
+        app = app.fallback(api_not_found_fallback);
         tracing::info!("前端分离模式：未匹配路由返回 JSON 404（开发模式）");
     }
 
@@ -308,13 +302,23 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        // Slowloris / 慢速请求防护：限制单个请求处理总时长（REQUEST_TIMEOUT_SECS），
-        // 超时则中断连接，防止慢速攻击耗尽连接池（axum 0.8 Serve 不支持 http1_header_read_timeout，
-        // 改用 TimeoutLayer 实现请求级超时；生产环境建议同时在 Nginx 层配置 client_header_timeout）
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(REQUEST_TIMEOUT_SECS),
-        ))
+        // Slowloris / 慢速攻击防护：限制单个请求处理总时长（REQUEST_TIMEOUT_SECS），
+        // 超时则中断连接，防止慢速攻击耗尽连接池。
+        // §5.55 收散点：408 补 JSON body——tower_http TimeoutLayer 只能返回裸状态码（API 限制），
+        // 改用 tower::timeout + HandleErrorLayer 组合生成与错误响应契约对齐的 JSON body
+        .layer(
+            ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(|_: axum::BoxError| async {
+                    (
+                        StatusCode::REQUEST_TIMEOUT,
+                        AxumJson(serde_json::json!({
+                            "code": 408,
+                            "msg": "请求超时，请稍后重试"
+                        })),
+                    )
+                }))
+                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        )
         // 可观测性监控中间件（metrics + 慢请求）：
         // 置于 request_id 之内、Timeout 之外，既能在 request span 作用域内测量，
         // 又能覆盖到真实处理耗时（含 Timeout 以内的全部中间件 + handler）。
@@ -384,7 +388,11 @@ fn extract_cookie_token(headers: &axum::http::HeaderMap, name: &str) -> Option<S
 /// 作为嵌套挂载的前缀路由（/prod-api、/dev-api、/stage-api）的 fallback：
 /// 未匹配的 API 请求返回 JSON 错误，而非落入 SPA fallback 返回 HTML，
 /// 避免前端响应拦截器把 HTML 当 JSON 解析而报错。
-async fn api_not_found() -> impl axum::response::IntoResponse {
+///
+/// §5.55 收散点：原 L277-280 / L390-393 两份手写字面量收敛为本单一实现
+/// （此前属裸 json! 旁路、与 AppError 契约关系未声明；现文案与既有
+/// `error.common.not_found` 键对齐的语义一致，保持 404 专指"路径不存在"）。
+async fn api_not_found_fallback() -> impl axum::response::IntoResponse {
     (
         axum::http::StatusCode::NOT_FOUND,
         axum::Json(serde_json::json!({
@@ -392,6 +400,11 @@ async fn api_not_found() -> impl axum::response::IntoResponse {
             "msg": "请求的资源不存在"
         })),
     )
+}
+
+/// API 未匹配路径的统一 JSON 404 响应（嵌套前缀路由 fallback 共享同一实现）
+async fn api_not_found() -> impl axum::response::IntoResponse {
+    api_not_found_fallback().await
 }
 
 /// 构建 CORS 层（从配置读取 Origin 白名单）
@@ -425,6 +438,9 @@ fn build_cors_layer(server_config: &ServerConfig) -> CorsLayer {
             HeaderName::from_static("authorization"),
             HeaderName::from_static("content-type"),
             HeaderName::from_static("accept"),
+            // R5-IDEMP-33：幂等性中间件依赖的自定义请求头（CORS 预检必须放行，
+            // 否则跨域写操作的 Idempotency-Key 头会被浏览器拦截）
+            HeaderName::from_static("idempotency-key"),
         ])
         .allow_credentials(true)
         .allow_origin(AllowOrigin::list(origins))
