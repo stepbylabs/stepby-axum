@@ -25,6 +25,7 @@ pub fn ai_routes() -> Router<Arc<AppState>> {
         // AI-02：查询历史（本人=ai:chat 自查；管理视图=monitor:aiHistory:list）
         .route("/system/ai/history", get(handler::list_my_history))
         .route("/system/ai/history/admin", get(handler::list_admin_history))
+        .route("/system/ai/history/admin/export", get(handler::export_admin_history))
         .route("/system/ai/history/{id}", delete(handler::remove_my_history))
         // AI-02 决策 2：重放本人历史（SQL 重新过守卫）
         .route("/ai/replay", post(handler::replay))

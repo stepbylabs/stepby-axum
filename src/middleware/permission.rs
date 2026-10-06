@@ -505,6 +505,7 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("POST", "/system/aiConfig/test", "system:aiConfig:edit"),
     // DP-01：数据权限规则管理（挂角色生效——perms 与菜单 4117-4120 对齐）
     ("GET", "/system/dataRule/list", "system:dataRule:list"),
+    ("GET", "/system/ai/history/admin/export", "monitor:aiHistory:list"),
     ("POST", "/system/dataRule", "system:dataRule:add"),
     ("DELETE", "/system/dataRule/{id}", "system:dataRule:remove"),    // AI-02：查询历史（本人=ai:chat 自查；管理视图=monitor:aiHistory:list 平台+租户管理员）
     ("GET", "/system/ai/history", "ai:chat"),
