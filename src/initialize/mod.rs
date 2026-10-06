@@ -186,6 +186,9 @@ impl AppInitializer {
         // 背景：m20260823_000001_sys_pat 迁移负责全新库建表，但 AppInitializer 启动不跑
         // Migrator::up（避免对已有种子数据的存量库重跑 seed 导致主键冲突），故存量库需在此
         // 幂等建表，否则 PAT 鉴权查库与令牌管理接口会因缺表报错。
+        ensure_data_rule_tables(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 data_rule 表失败: {}", e))?;
         ensure_sys_pat_table(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_pat 表失败: {}", e))?;
@@ -1758,6 +1761,88 @@ async fn ensure_scim_group_module(db: &DatabaseConnection) -> anyhow::Result<()>
         .await
         .map_err(|e| anyhow::anyhow!("SCIM 组菜单种子补齐失败: {}", e))?;
     tracing::info!("SCIM Group 模块与多部门任职表已就绪（幂等确保完成）");
+    Ok(())
+}
+
+/// 幂等确保 DP-01 数据权限规则两表存在（§5.53，等价迁移 `m20261006_000002`）
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而规则引擎
+/// 管理端（/system/dataRule）与求值入口已接线——缺此兜底则存量库访问规则页/带规则
+/// 查询全链路 `no such table: sys_data_rule`（500）。
+///
+/// 幂等：`CREATE TABLE IF NOT EXISTS` 三方言合法；菜单走 INSERT OR IGNORE/等价子句。
+async fn ensure_data_rule_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let pk = match backend {
+        DatabaseBackend::Sqlite => "rule_id INTEGER PRIMARY KEY AUTOINCREMENT",
+        DatabaseBackend::MySql => "rule_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        DatabaseBackend::Postgres => "rule_id BIGSERIAL PRIMARY KEY",
+        _ => unreachable!("unknown backend"),
+    };
+    let create_rule = format!(
+        "CREATE TABLE IF NOT EXISTS sys_data_rule (
+            {pk},
+            rule_name VARCHAR(64) NOT NULL,
+            table_name VARCHAR(64) NOT NULL,
+            field_name VARCHAR(64) NOT NULL,
+            op VARCHAR(8) NOT NULL,
+            value_type VARCHAR(24) NOT NULL,
+            rule_value VARCHAR(255) NULL,
+            status VARCHAR(1) NOT NULL DEFAULT '0',
+            del_flag VARCHAR(1) NOT NULL DEFAULT '0',
+            tenant_id BIGINT NOT NULL DEFAULT 0,
+            create_by VARCHAR(64) NULL,
+            create_time {ts} NULL,
+            update_by VARCHAR(64) NULL,
+            update_time {ts} NULL,
+            remark VARCHAR(255) NULL
+        )",
+        ts = "DATETIME"
+    );
+    db.execute_raw(Statement::from_string(backend, create_rule))
+        .await?;
+    db.execute_raw(Statement::from_string(
+        backend,
+        "CREATE TABLE IF NOT EXISTS sys_role_data_rule (
+            role_id BIGINT NOT NULL,
+            rule_id BIGINT NOT NULL,
+            PRIMARY KEY (role_id, rule_id)
+        )"
+        .to_string(),
+    ))
+    .await?;
+
+    // 菜单幂等种子（与迁移 m20261006_000002 等价口径）
+    let insert_prefix = match backend {
+        DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
+        DatabaseBackend::Postgres => "INSERT INTO ",
+        DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        _ => "INSERT INTO ",
+    };
+    let insert_suffix = if backend == DatabaseBackend::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let now_expr = match backend {
+        DatabaseBackend::Sqlite => {
+            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        }
+        _ => "NOW()".to_string(),
+    };
+    let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
+    let menu_rows = format!(
+        "(4117, '数据权限规则', 1, 15, 'dataRule', 'system/dataRule/index', '', '', '1', '0', 'C', '0', '0', 'system:dataRule:list', 'rule', 'admin', {now_expr}, 'DP-01 结构化数据权限规则', '0'), \
+         (4118, '规则新增', 4117, 1, '#', '', '', '', '1', '0', 'F', '0', '0', 'system:dataRule:add', '#', 'admin', {now_expr}, '', '0'), \
+         (4119, '规则编辑', 4117, 2, '#', '', '', '', '1', '0', 'F', '0', '0', 'system:dataRule:edit', '#', 'admin', {now_expr}, '', '0'), \
+         (4122, '规则删除', 4117, 3, '#', '', '', '', '1', '0', 'F', '0', '0', 'system:dataRule:remove', '#', 'admin', {now_expr}, '', '0')"
+    );
+    db.execute_raw(Statement::from_string(
+        backend,
+        format!("{insert_prefix}{menu_cols} VALUES {menu_rows}{insert_suffix}"),
+    ))
+    .await?;
+    tracing::info!("data_rule 表/菜单已就绪（幂等确保完成）");
     Ok(())
 }
 
