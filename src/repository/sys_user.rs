@@ -269,6 +269,7 @@ impl SysUserRepository {
         tenant_filter: Option<i64>,
         sort: Option<SortOrder<Column>>,
         omit_columns: &[UserOmitColumn],
+        rule_cond: Option<sea_orm::Condition>,
     ) -> Result<(Vec<Model>, u64), DbErr> {
         let mut query = SysUser::find().filter(Column::DelFlag.eq("0"));
         // 多租户 Phase 2：租户用户仅见本租户（tenant_scope(tid)=Some(t)）；平台 0 不过滤
@@ -309,6 +310,10 @@ impl SysUserRepository {
             && let Some(cond) = custom_scope::build_filter(conds, map_user_custom_scope)
         {
             query = query.filter(cond);
+        }
+        // DP-01 数据权限规则引擎：结构化规则 OR 合并条件（None=无规则不注入）
+        if let Some(rc) = rule_cond {
+            query = query.filter(rc);
         }
         if let Some(begin) = begin_time {
             query = query.filter(Column::CreateTime.gte(begin));
@@ -545,6 +550,7 @@ mod tests {
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
                     None, None, &[],
+                    None,
                 )
                 .await
                 .unwrap();
@@ -599,6 +605,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                None,
             )
             .await
             .unwrap();
@@ -631,6 +638,7 @@ mod tests {
                     None,
                     None,
                     &[],
+                    None,
                 )
                 .await
                 .unwrap();
@@ -668,8 +676,9 @@ mod tests {
             .find_page_with_data_scope(
                 0, 1000, None, None, None, None, None, None, None, None, None, None, None, None,
                 None, &[],
-            )
-            .await
+                    None,
+                )
+                .await
             .unwrap();
         let offset_ids: std::collections::HashSet<i64> =
             offset_all.iter().map(|u| u.user_id).collect();
@@ -682,6 +691,7 @@ mod tests {
                 .find_page_with_data_scope(
                     0, size, None, None, None, None, None, None, None, None, None, cursor, None,
                     None, None, &[],
+                    None,
                 )
                 .await
                 .unwrap();

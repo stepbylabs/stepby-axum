@@ -864,6 +864,35 @@ impl SysUserService {
         let (scope_dept_ids, scope_user_id, custom_conds) =
             self.resolve_data_scope(operator_user_id).await?;
 
+        // DP-01 数据权限规则引擎接入（示范点：sys_user 列表——规则挂角色，opt-in）：
+        // 超管短路（与 data_scope 同口径）；无适用规则返回 None 不注入（零行为变化）。
+        // 与 data_scope（部门维度）为 AND 叠加：规则决定"行值满足什么业务条件"。
+        let mut rule_cond: Option<sea_orm::Condition> = None;
+        if let Some(op_uid) = operator_user_id.filter(|id| *id != SUPER_ADMIN_USER_ID) {
+            let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
+            let rule_role_ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+            let dept_id = op_user.as_ref().and_then(|u| u.dept_id);
+            let dept_children = if let Some(d) = dept_id {
+                self.dept_repo.find_descendant_ids(d).await.unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let rule_ctx = crate::service::data_rule_service::DataRuleContext {
+                tenant_id: tenant_scope.unwrap_or(0),
+                user_id: op_uid,
+                dept_id,
+                dept_children,
+            };
+            let rule_service =
+                crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(
+                    self.db().clone(),
+                ));
+            rule_cond = rule_service
+                .build_conditions(&rule_ctx, "sys_user", &rule_role_ids)
+                .await?;
+        }
+
         let scope_dept_ref = scope_dept_ids.as_deref();
         let custom_ref = custom_conds.as_deref();
         // M2 字段级权限：hidden 集合 → repository 列裁剪枚举（封闭白名单映射）
@@ -887,6 +916,7 @@ impl SysUserService {
                 query.tenant_id,
                 sort,
                 &omit_columns,
+                rule_cond,
             )
             .await?;
 
@@ -1110,6 +1140,33 @@ impl SysUserService {
         let (scope_dept_ids, scope_user_id, custom_conds) =
             self.resolve_data_scope(operator_user_id).await?;
 
+        // DP-01 规则引擎接入（导出与列表同口径——P0-1 防"列表隐藏、导出可见"绕行）
+        let mut rule_cond: Option<sea_orm::Condition> = None;
+        if let Some(op_uid) = operator_user_id.filter(|id| *id != SUPER_ADMIN_USER_ID) {
+            let op_roles = self.role_repo.find_by_user_id(op_uid).await?;
+            let rule_role_ids: Vec<i64> = op_roles.iter().map(|r| r.role_id).collect();
+            let op_user = self.user_repo.base().find_by_id(op_uid).await?;
+            let dept_id = op_user.as_ref().and_then(|u| u.dept_id);
+            let dept_children = if let Some(d) = dept_id {
+                self.dept_repo.find_descendant_ids(d).await.unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let rule_ctx = crate::service::data_rule_service::DataRuleContext {
+                tenant_id: tenant_scope.unwrap_or(0),
+                user_id: op_uid,
+                dept_id,
+                dept_children,
+            };
+            let rule_service =
+                crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(
+                    self.db().clone(),
+                ));
+            rule_cond = rule_service
+                .build_conditions(&rule_ctx, "sys_user", &rule_role_ids)
+                .await?;
+        }
+
         // 1. 通过 Repository 多条件查询用户列表（受 EXPORT_MAX_ROWS 限制 + 数据权限过滤）
         let omit_columns = hidden_field_set_to_omit_columns(hidden_user_fields);
         let (rows, _) = self
@@ -1131,6 +1188,7 @@ impl SysUserService {
                 query.tenant_id,
                 sort,
                 &omit_columns,
+                rule_cond,
             )
             .await?;
 
