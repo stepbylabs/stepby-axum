@@ -70,6 +70,7 @@ pub async fn chat(
                     started.elapsed().as_millis(),
                     false,
                     Some(&emsg),
+                    None,
                 )
                 .await;
             });
@@ -94,6 +95,7 @@ pub async fn chat(
                 started.elapsed().as_millis(),
                 true,
                 None,
+                oc.token_usage,
             )
             .await;
         });
@@ -109,6 +111,7 @@ pub async fn chat(
             "columns": outcome.columns,
             "rows": outcome.rows,
             "rowCount": outcome.rows.len(),
+            "tokenUsage": outcome.token_usage,
         }
     })))
 }
@@ -398,7 +401,7 @@ pub async fn replay(
             let emsg = e.to_string();
             tokio::spawn(async move {
                 let svc = AiService::new(db, eff);
-                svc.save_history(tid, uid, &q, "", &[], &[], 0, started.elapsed().as_millis(), false, Some(&emsg)).await;
+                svc.save_history(tid, uid, &q, "", &[], &[], 0, started.elapsed().as_millis(), false, Some(&emsg), None).await;
             });
             return Err(AppError::bad_request(&format!("重放失败: {e}")));
         }
@@ -410,7 +413,7 @@ pub async fn replay(
         let oc = outcome.clone();
         tokio::spawn(async move {
             let svc = AiService::new(db, eff);
-            svc.save_history(tid, uid, &q, &oc.sql, &oc.tables, &oc.columns, oc.rows.len(), started.elapsed().as_millis(), true, None).await;
+            svc.save_history(tid, uid, &q, &oc.sql, &oc.tables, &oc.columns, oc.rows.len(), started.elapsed().as_millis(), true, None, oc.token_usage).await;
         });
     }
     Ok(Json(json!({

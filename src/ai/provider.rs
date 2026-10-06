@@ -7,11 +7,43 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+/// Token 用量观测（§5.57 AI-02 token 计费可见性）：
+/// OpenAI 兼容协议响应 `usage` 字段的标准三值；provider 未返回时为 None。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// 单轮补全结果（文本 + 可选用量）
+#[derive(Debug, Clone)]
+pub struct CompletionResult {
+    pub text: String,
+    pub usage: Option<TokenUsage>,
+}
+
 /// Provider 能力抽象（ NL2SQL v4-X11：仅后端持有密钥与出站调用）
 #[async_trait::async_trait]
 pub trait AiProvider: Send + Sync {
     /// 单轮补全：给定 system 提示与用户问题，返回模型文本
-    async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String>;
+    async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        Ok(self.complete_detailed(system_prompt, user_prompt).await?.text)
+    }
+
+    /// 单轮补全（带用量观测）：默认实现委托 [`Self::complete`] 且 usage=None；
+    /// 支持 usage 的 provider（如 OpenAI 兼容协议）覆写本方法返回真实用量。
+    async fn complete_detailed(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionResult> {
+        Ok(CompletionResult {
+            text: self.complete(system_prompt, user_prompt).await?,
+            usage: None,
+        })
+    }
 }
 
 /// OpenAI 兼容 provider（覆盖绝大多数 LLM 服务与本地推理栈）
@@ -39,6 +71,15 @@ struct ChatMessage<'a> {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    /// OpenAI 兼容协议的用量字段（部分 provider 不返回——Option 容忍）
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Deserialize)]
+struct ChatUsage {
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +110,14 @@ impl OpenAiCompatibleProvider {
 #[async_trait::async_trait]
 impl AiProvider for OpenAiCompatibleProvider {
     async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        Ok(self.complete_detailed(system_prompt, user_prompt).await?.text)
+    }
+
+    async fn complete_detailed(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionResult> {
         if self.base_url.is_empty() {
             anyhow::bail!("AI base_url 未配置（config [ai].base_url）");
         }
@@ -105,10 +154,19 @@ impl AiProvider for OpenAiCompatibleProvider {
             anyhow::bail!("LLM 服务返回异常状态: {status}");
         }
         let parsed: ChatResponse = serde_json::from_str(&text).context("LLM 响应解析失败")?;
-        parsed
+        let content = parsed
             .choices
             .first()
             .and_then(|c| c.message.content.clone())
-            .context("LLM 响应缺少 choices[0].message.content")
+            .context("LLM 响应缺少 choices[0].message.content")?;
+        let usage = parsed.usage.map(|u| TokenUsage {
+            prompt_tokens: u.prompt_tokens.unwrap_or(0),
+            completion_tokens: u.completion_tokens.unwrap_or(0),
+            total_tokens: u.total_tokens.unwrap_or(0),
+        });
+        Ok(CompletionResult {
+            text: content,
+            usage,
+        })
     }
 }
