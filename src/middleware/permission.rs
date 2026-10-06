@@ -507,6 +507,8 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/system/ai/history", "ai:chat"),
     ("DELETE", "/system/ai/history/{id}", "ai:chat"),
     ("GET", "/system/ai/history/admin", "monitor:aiHistory:list"),
+    // AI-02 决策 2：重放本人历史（同 ai:chat——重放是面板子功能）
+    ("POST", "/ai/replay", "ai:chat"),
 
     // ===== 参数配置 =====
     ("GET", "/system/config/list", "system:config:list"),
@@ -1595,6 +1597,7 @@ mod tests {
             ("GET", "/system/ai/history"),
             ("DELETE", "/system/ai/history/{id}"),
             ("GET", "/system/ai/history/admin"),
+            ("POST", "/ai/replay"),
             ("GET", "/system/config/configKey/{configKey}"),
             ("POST", "/system/config"),
             ("PUT", "/system/config"),
