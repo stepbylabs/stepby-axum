@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::ai::FEATURE_AI_COPILOT;
+use crate::ai::config_service;
 use crate::ai::service::AiService;
 use crate::common::{AjaxResult, AppError, ValidatedJson};
 use crate::middleware::auth::Operator;
@@ -28,8 +29,9 @@ pub async fn chat(
     operator: Operator,
     ValidatedJson(dto): ValidatedJson<AiChatDto>,
 ) -> Result<Json<Value>, AppError> {
-    // 1. 平台层开关（fail-closed + 明确降级提示，UX v5-D「错误路径」）
-    if !state.config.ai.enabled {
+    // 1. 平台层开关（§5.39 AI-01：运行时有效配置 sys.ai.* 覆盖 config.toml）
+    let effective = state.ai_config_service.get_effective().await?;
+    if !effective.enabled {
         return Err(AppError::forbidden(&tr!("error.ai.disabled")));
     }
     // 2. PAT 会话拒绝（v4.1-B2：AI 面板仅对交互式会话开放）
@@ -44,7 +46,7 @@ pub async fn chat(
     }
     // 4. 角色层：ai:chat 由 permission_middleware fail-closed 校验（路由映射已登记）。
 
-    let service = AiService::new(state.db.clone(), state.config.ai.clone());
+    let service = AiService::new(state.db.clone(), effective);
     let outcome = service
         .chat(&dto.question, tid)
         .await
@@ -69,13 +71,14 @@ pub async fn tables(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<Value>, AppError> {
-    if !state.config.ai.enabled {
+    let effective = state.ai_config_service.get_effective().await?;
+    if !effective.enabled {
         return Err(AppError::forbidden(&tr!("error.ai.disabled")));
     }
     if operator.is_pat() {
         return Err(AppError::forbidden(&tr!("error.ai.pat_forbidden")));
     }
-    let service = AiService::new(state.db.clone(), state.config.ai.clone());
+    let service = AiService::new(state.db.clone(), effective);
     let schema = service.build_schema().await?;
     let data = Value::Array(
         schema
@@ -93,3 +96,49 @@ pub async fn tables(
     );
     Ok(AjaxResult::success(data))
 }
+
+// ==================== AI-01：运行时配置管理（§5.39，平台专属） ====================
+
+/// 平台操作者门控（非平台租户一律 403）
+fn ensure_platform(operator: &Operator) -> Result<(), AppError> {
+    if operator.tenant_id() != 0 {
+        return Err(AppError::forbidden(&tr!("error.common.forbidden")));
+    }
+    Ok(())
+}
+
+/// GET /system/aiConfig —— 读有效配置（api_key 掩码回显，永不返回明文）
+pub async fn get_config(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<config_service::AiConfigMaskedVo>, AppError> {
+    ensure_platform(&operator)?;
+    Ok(AjaxResult::success(
+        state.ai_config_service.masked().await?,
+    ))
+}
+
+/// PUT /system/aiConfig —— 更新配置（api_key 传空保留原值；SSRF 校验 base_url；
+/// 写后 refreshCache 热生效）
+pub async fn update_config(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    ValidatedJson(dto): ValidatedJson<config_service::AiConfigUpdateDto>,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    ensure_platform(&operator)?;
+    let operator_name = operator.user_id();
+    state.ai_config_service.update(&dto).await?;
+    tracing::info!(operator = %operator_name, "AI 助手配置已由平台管理员更新");
+    Ok(AjaxResult::success_msg(&tr!("common.success")))
+}
+
+/// POST /system/aiConfig/test —— 连通性测试（独立 10s 超时，返回延迟或错误摘要）
+pub async fn test_config(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    ensure_platform(&operator)?;
+    let msg = state.ai_config_service.test_connectivity().await?;
+    Ok(AjaxResult::success_msg(&msg))
+}
+

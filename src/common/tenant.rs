@@ -128,6 +128,7 @@ pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "monitor:health:",
     "system:backup:",
     "system:rateLimit:",
+    "system:aiConfig:",
 ];
 
 /// 判断 perms 是否属于平台专属能力（前缀匹配，大小写敏感——perms 统一小写）

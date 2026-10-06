@@ -9,7 +9,7 @@
 
 use crate::ai::handler;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use std::sync::Arc;
 
 use crate::state::AppState;
@@ -18,4 +18,8 @@ pub fn ai_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/ai/chat", post(handler::chat))
         .route("/ai/tables", get(handler::tables))
+        // AI-01：运行时配置管理（平台专属，handler 内 tenant_id==0 门控）
+        .route("/system/aiConfig", get(handler::get_config))
+        .route("/system/aiConfig", put(handler::update_config))
+        .route("/system/aiConfig/test", post(handler::test_config))
 }

@@ -199,6 +199,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261004_000001_alert_rule_index::Migration),
             Box::new(m20261004_000002_webhook_event_edit::Migration),
             Box::new(m20261004_000003_force_pwd_change::Migration),
+            Box::new(m20261006_000001_ai_config_and_history::Migration),
         ]
     }
 }

@@ -498,6 +498,12 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("PUT", "/system/notice", "system:notice:edit"),
     ("DELETE", "/system/notice/{noticeId}", "system:notice:remove"),
 
+    // ===== AI-01：AI 助手运行时配置（平台专属，handler 内 tenant_id==0 门控）=====
+    // GET/PUT/test 同权限（管理页单权限模型）；GET 回显 api_key 掩码不泄露明文
+    ("GET", "/system/aiConfig", "system:aiConfig:edit"),
+    ("PUT", "/system/aiConfig", "system:aiConfig:edit"),
+    ("POST", "/system/aiConfig/test", "system:aiConfig:edit"),
+
     // ===== 参数配置 =====
     ("GET", "/system/config/list", "system:config:list"),
     ("GET", "/system/config/{configId}", "system:config:query"),
@@ -1577,6 +1583,10 @@ mod tests {
             // sys_config_router
             ("GET", "/system/config/list"),
             ("GET", "/system/config/{configId}"),
+            // AI-01：AI 助手运行时配置（平台专属，handler 内 tenant_id==0 门控）
+            ("GET", "/system/aiConfig"),
+            ("PUT", "/system/aiConfig"),
+            ("POST", "/system/aiConfig/test"),
             ("GET", "/system/config/configKey/{configKey}"),
             ("POST", "/system/config"),
             ("PUT", "/system/config"),
