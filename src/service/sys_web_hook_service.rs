@@ -495,7 +495,7 @@ impl WebHookVo {
             timeout_secs: m.timeout_secs,
             status: m.status,
             remark: m.remark,
-            has_secret: m.secret.as_deref().is_some_and(|s| !s.is_empty()),
+            has_secret: m.secret.as_ref().is_some_and(|s| !s.0.is_empty()),
             create_by: m.create_by,
             create_time: m.create_time,
             update_by: m.update_by,
@@ -655,26 +655,6 @@ impl SysWebHookService {
             db,
             enc_key,
         }
-    }
-
-    /// v5-E6：secret 写入口（幂等 seal：key 未配置→明文；已加密→原样；失败→Err）
-    fn seal_secret(&self, secret: Option<String>) -> Result<Option<String>, ServiceError> {
-        match secret {
-            Some(s) if !s.is_empty() => {
-                crate::utils::crypto::seal_sensitive_value(&s, &self.enc_key)
-                    .map(Some)
-                    .map_err(|e| ServiceError::internal(&format!("web_hook secret 加密失败: {e}")))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// v5-E6：secret 读出口（unseal：明文兼容，解密失败原样返回）
-    fn unseal_secret(&self, secret: &Option<String>) -> Option<String> {
-        secret
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| crate::utils::crypto::unseal_sensitive_value(s, &self.enc_key))
     }
 
     /// 对目标 URL 执行 SSRF 双层校验（静态 + 动态 DNS），返回规范化 URL
@@ -882,12 +862,12 @@ impl SysWebHookService {
             event_types: Set(event_types),
             subscribed_events: Set(subscribed_events),
             target_url: Set(dto.target_url.trim().to_string()),
-            // v5-E6：secret 信封加密（幂等，防双重加密）
-            secret: Set(self.seal_secret(
-                dto.secret
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()),
-            )?),
+            // G-14：EncryptedString 列类型——Set 时自动 seal（幂等，防双重加密）
+            secret: Set(dto
+                .secret
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(crate::common::encrypted_value::EncryptedString)),
             content_type: Set(content_type),
             timeout_secs: Set(timeout_secs),
             status: Set(status),
@@ -1030,7 +1010,8 @@ impl SysWebHookService {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
         {
-            am.secret = Set(self.seal_secret(Some(plain))?);
+            // G-14：Set 时自动 seal（幂等）；空/缺省走 NotSet 保持原值
+            am.secret = Set(Some(crate::common::encrypted_value::EncryptedString(plain)));
         }
         am.content_type = Set(content_type);
         am.timeout_secs = Set(timeout_secs);
@@ -1220,8 +1201,14 @@ impl SysWebHookService {
             .header("content-type", content_type_header(&hook.content_type))
             .header("user-agent", "stepby-webhook/1.0")
             .header("X-Webhook-Event", event_type);
-        // v5-E6：secret 为信封加密存储，签名前解密
-        let signature = sign_payload(&self.unseal_secret(&hook.secret).unwrap_or_default(), &body);
+        // G-14：EncryptedString 读取已自动 unseal，直接取明文签名
+        let signature = sign_payload(
+            hook.secret
+                .as_ref()
+                .map(|e| e.0.as_str())
+                .unwrap_or_default(),
+            &body,
+        );
         if !signature.is_empty() {
             builder = builder.header("X-Webhook-Signature", format!("sha256={}", signature));
         }
@@ -1578,10 +1565,11 @@ impl SysWebHookService {
         let mut ok_count = 0usize;
         for log in failed {
             // 依据记录快照构造虚拟 hook 重新投递（hook 可能已删除）
-            // v5-E6：从库里取出的 secret 为密文 → unseal 后交给 deliver 签名
+            // G-14：EncryptedString 读取已自动 unseal——虚拟 hook 直接持有
+            // Option<EncryptedString>（deliver 签名点统一从 .0 取明文）
             let (target_url, secret) =
                 match self.hook_repo.find_by_id(log.hook_id.unwrap_or(-1)).await {
-                    Ok(Some(h)) => (h.target_url.clone(), self.unseal_secret(&h.secret)),
+                    Ok(Some(h)) => (h.target_url.clone(), h.secret),
                     _ => (log.target_url.clone(), None),
                 };
             let payload: serde_json::Value = log
@@ -2118,7 +2106,9 @@ mod tests {
             event_types: "login_success".to_string(),
             subscribed_events: None,
             target_url: format!("http://{}:{}/hook", addr.ip(), addr.port()),
-            secret: Some("test-secret".to_string()),
+            secret: Some(crate::common::encrypted_value::EncryptedString(
+                "test-secret".to_string(),
+            )),
             content_type: "json".to_string(),
             timeout_secs: 5,
             status: "0".to_string(),
