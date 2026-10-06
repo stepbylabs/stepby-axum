@@ -252,3 +252,72 @@ pub async fn remove_my_history(
     ))
 }
 
+/// POST /ai/replay —— 重放本人历史（AI-02 决策 2；三层校验同 chat，
+/// 历史 SQL 重新过 sql_guard——白名单/租户范围变更后重放被拒是预期语义）
+#[derive(Debug, Deserialize, garde::Validate)]
+pub struct AiReplayDto {
+    #[garde(range(min = 1))]
+    pub history_id: i64,
+}
+
+pub async fn replay(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    ValidatedJson(dto): ValidatedJson<AiReplayDto>,
+) -> Result<Json<Value>, AppError> {
+    // 1. 平台层开关（运行时有效配置）
+    let effective = state.ai_config_service.get_effective().await?;
+    if !effective.enabled {
+        return Err(AppError::forbidden(&tr!("error.ai.disabled")));
+    }
+    // 2. PAT 会话拒绝（与 chat 同口径：AI 面板仅交互式会话）
+    if operator.is_pat() {
+        return Err(AppError::forbidden(&tr!("error.ai.pat_forbidden")));
+    }
+    // 3. 租户层能力位
+    let tid = operator.tenant_id();
+    let fs = state.tenant_service.tenant_features(tid).await?;
+    if tid != 0 && !fs.is_on(FEATURE_AI_COPILOT) {
+        return Err(AppError::forbidden(&tr!("error.ai.capability_off")));
+    }
+    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    let service = AiService::new(state.db.clone(), effective.clone());
+    let started = std::time::Instant::now();
+    let outcome = match service.replay(dto.history_id, tid, uid).await {
+        Ok(o) => o,
+        Err(e) => {
+            let db = state.db.clone();
+            let eff = effective.clone();
+            let q = format!("重放#{id}", id = dto.history_id);
+            let emsg = e.to_string();
+            tokio::spawn(async move {
+                let svc = AiService::new(db, eff);
+                svc.save_history(tid, uid, &q, "", &[], &[], 0, started.elapsed().as_millis(), false, Some(&emsg)).await;
+            });
+            return Err(AppError::bad_request(&format!("重放失败: {e}")));
+        }
+    };
+    {
+        let db = state.db.clone();
+        let eff = effective.clone();
+        let q = outcome.answer.clone();
+        let oc = outcome.clone();
+        tokio::spawn(async move {
+            let svc = AiService::new(db, eff);
+            svc.save_history(tid, uid, &q, &oc.sql, &oc.tables, &oc.columns, oc.rows.len(), started.elapsed().as_millis(), true, None).await;
+        });
+    }
+    Ok(Json(json!({
+        "code": 200,
+        "msg": "ok",
+        "data": {
+            "answer": outcome.answer,
+            "sql": outcome.sql,
+            "tables": outcome.tables,
+            "columns": outcome.columns,
+            "rows": outcome.rows,
+            "rowCount": outcome.rows.len(),
+        }
+    })))
+}
+

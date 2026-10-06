@@ -14,7 +14,7 @@ pub struct TableSchema {
     pub columns: Vec<(String, String)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AiChatOutcome {
     /// LLM 生成的 SQL（已经守卫校验/改写）
     pub sql: String,
@@ -284,6 +284,49 @@ impl AiService {
     }
 
     // ==================== AI-02：查询历史持久化（§5.39/§5.41） ====================
+
+    /// 重放本人历史（AI-02 决策 2"SQL 可重放"）：
+    /// ①本人行校验（横向越权防护）②**重新过 sql_guard**（白名单/租户过滤可能已
+    /// 变更，绝不信任历史 SQL 直执行）③受控执行。失败留痕行（sql_text 空）不可重放。
+    pub async fn replay(
+        &self,
+        history_id: i64,
+        tenant_id: i64,
+        user_id: i64,
+    ) -> Result<AiChatOutcome> {
+        let backend = self.db.get_database_backend();
+        let row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT question, sql_text FROM ai_chat_history WHERE id = ? AND tenant_id = ? AND user_id = ?",
+                [history_id.into(), tenant_id.into(), user_id.into()],
+            ))
+            .await?
+            .context("历史记录不存在或无权重放")?;
+        let question: String = row.try_get("", "question")?;
+        let sql: String = row.try_get("", "sql_text")?;
+        if sql.trim().is_empty() {
+            anyhow::bail!("该历史为失败留痕（无可重放 SQL）");
+        }
+        let guarded = sql_guard::guard(
+            &sql,
+            tenant_id,
+            &self.config.allowed_tables,
+            self.config.max_rows,
+        )
+        .map_err(|v| {
+            anyhow::anyhow!("历史 SQL 未通过当前安全校验（白名单或租户范围可能已变更）: {v}")
+        })?;
+        let (columns, rows) = self.execute_rows(&guarded.sql).await?;
+        Ok(AiChatOutcome {
+            sql: guarded.sql,
+            tables: guarded.tables,
+            columns,
+            rows,
+            answer: format!("重放自历史 #{history_id}：{question}"),
+        })
+    }
 
     /// 写入一条历史（**spawn 调用，失败仅 error 日志不阻塞响应**）。
     /// 不存结果集本体（SQL 可重放设计，§5.39 决策 2）；guard 拒绝也留痕（success='0'）。

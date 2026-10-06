@@ -351,3 +351,49 @@ async fn test_ai_config_across_deployment_modes() {
         "sys.ai.enabled=false 时平台 /ai/chat 也必须 403（平台层优先），实际 {status}"
     );
 }
+
+/// AI-02 重放三断言（§5.49 遗漏修复：决策 2"SQL 可重放"补真实实现）：
+/// ①成功重放：本人成功历史 → guard 重校验 + 受控执行返回结果；
+/// ②横向越权：他人历史 id 重放 → 拒绝；
+/// ③失败留痕行（sql_text 空）→ 明确拒绝不可重放。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ai_replay_guard_and_ownership() {
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+    let backend = DatabaseBackend::Sqlite;
+
+    // 造三条历史：user 100 的成功行（真 SQL）/ 失败行（sql_text 空）/ user 200 的成功行
+    for (id, uid, q, sql) in [
+        (9001i64, 100i64, "重放成功用例", "SELECT user_id, user_name FROM sys_user WHERE user_id = 1"),
+        (9002i64, 100i64, "失败留痕行", ""),
+        (9003i64, 200i64, "他人成功行", "SELECT user_id FROM sys_user WHERE user_id = 1"),
+    ] {
+        db.execute(Statement::from_sql_and_values(
+            backend,
+            "INSERT OR IGNORE INTO ai_chat_history (id, tenant_id, user_id, question, sql_text, tables_used, rows_count, duration_ms, success, create_time) \
+             VALUES (?, 0, ?, ?, ?, 'sys_user', 1, 5, '1', CURRENT_TIMESTAMP)",
+            [id.into(), uid.into(), q.into(), sql.into()],
+        ))
+        .await
+        .expect("插入历史失败");
+    }
+
+    let effective = ctx.state.ai_config_service.get_effective().await.unwrap();
+    let svc = crate::ai::service::AiService::new(ctx.state.db.clone(), effective);
+
+    // ① 成功重放：guard 重校验通过 → 受控执行返回行
+    let outcome = svc.replay(9001, 0, 100).await.expect("重放成功历史应通过");
+    assert_eq!(outcome.tables, vec!["sys_user"], "重放应报告引用表");
+    assert!(!outcome.rows.is_empty(), "sys_user 有种子行，重放应返回数据");
+
+    // ② 横向越权：user 100 重放 user 200 的行 → 拒绝
+    let err = svc.replay(9003, 0, 100).await;
+    assert!(err.is_err(), "重放他人历史必须被拒绝");
+
+    // ③ 失败留痕行：sql_text 空 → 明确拒绝
+    let err = svc.replay(9002, 0, 100).await;
+    assert!(
+        err.is_err() && err.unwrap_err().to_string().contains("失败留痕"),
+        "失败留痕行不可重放（应给出明确语义）"
+    );
+}
