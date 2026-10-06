@@ -3,7 +3,7 @@
 //! - `POST /ai/chat`：`ai:chat` perm（fail-closed 权限映射）+ 能力位 `ai.copilot`
 //!   + 平台层 `[ai].enabled` 三重校验；PAT 会话一律 403（v4.1-B2）。
 
-use axum::{Json, extract::State};
+use axum::{Json, extract::{Query, State}};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -187,5 +187,68 @@ pub async fn test_config(
     ensure_platform(&operator)?;
     let msg = state.ai_config_service.test_connectivity().await?;
     Ok(AjaxResult::success_msg(&msg))
+}
+
+// ==================== AI-02：查询历史（§5.42） ====================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiHistoryPageDto {
+    pub page: Option<u64>,
+    pub size: Option<u64>,
+    /// 管理视图租户筛选（仅平台 tid=0 有效；租户管理员被 service 强制本租户）
+    pub tenant_filter: Option<i64>,
+}
+
+/// GET /system/ai/history —— 本人历史分页（ai:chat 自查）
+pub async fn list_my_history(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(q): Query<AiHistoryPageDto>,
+) -> Result<Json<Value>, AppError> {
+    let tid = operator.tenant_id();
+    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    let effective = state.ai_config_service.get_effective().await?;
+    let service = AiService::new(state.db.clone(), effective);
+    let (items, total) = service
+        .list_my_history(tid, uid, q.page.unwrap_or(1), q.size.unwrap_or(20))
+        .await
+        .map_err(|e| AppError::internal(&format!("查询历史失败: {e}")))?;
+    Ok(Json(json!({ "code": 200, "msg": "ok", "data": { "items": items, "total": total } })))
+}
+
+/// GET /system/ai/history/admin —— 管理/平台视图（monitor:aiHistory:list）
+pub async fn list_admin_history(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(q): Query<AiHistoryPageDto>,
+) -> Result<Json<Value>, AppError> {
+    let tid = operator.tenant_id();
+    let effective = state.ai_config_service.get_effective().await?;
+    let service = AiService::new(state.db.clone(), effective);
+    let (items, total) = service
+        .list_admin_history(tid, q.tenant_filter, q.page.unwrap_or(1), q.size.unwrap_or(20))
+        .await
+        .map_err(|e| AppError::internal(&format!("查询历史失败: {e}")))?;
+    Ok(Json(json!({ "code": 200, "msg": "ok", "data": { "items": items, "total": total } })))
+}
+
+/// DELETE /system/ai/history/{id} —— 删除本人历史（横向越权防护在 service 层）
+pub async fn remove_my_history(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<Value>, AppError> {
+    let tid = operator.tenant_id();
+    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    let effective = state.ai_config_service.get_effective().await?;
+    let service = AiService::new(state.db.clone(), effective);
+    let deleted = service
+        .delete_my_history(tid, uid, id)
+        .await
+        .map_err(|e| AppError::internal(&format!("删除历史失败: {e}")))?;
+    Ok(Json(
+        json!({ "code": 200, "msg": "ok", "data": { "deleted": deleted } })
+    ))
 }
 

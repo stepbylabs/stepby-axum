@@ -15,6 +15,7 @@
 //! - `pub fn` 供 `initialize/mod.rs` 兜底引用（单一事实源，对齐 B4 迁移先例）。
 
 use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::Statement;
 use sea_orm_migration::sea_orm::DatabaseConnection;
 
 /// initialize/mod.rs 存量库兜底入口（包装 SchemaManager，主 crate 无需直接依赖
@@ -67,9 +68,47 @@ pub const AI_CONFIG_SEEDS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// 幂等检查表是否存在（三方言；对齐 has_column 同款口径）
+async fn has_table(manager: &SchemaManager<'_>, table: &str) -> Result<bool, DbErr> {
+    let conn = manager.get_connection();
+    let backend = conn.get_database_backend();
+    match backend {
+        sea_orm::DatabaseBackend::Sqlite => {
+            let rows = conn
+                .query_all(Statement::from_string(
+                    backend,
+                    format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"),
+                ))
+                .await?;
+            Ok(!rows.is_empty())
+        }
+        _ => {
+            let schema = if backend == sea_orm::DatabaseBackend::Postgres {
+                "table_schema=current_schema()"
+            } else {
+                "table_schema=DATABASE()"
+            };
+            let rows = conn
+                .query_all(Statement::from_string(
+                    backend,
+                    format!(
+                        "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND {schema} LIMIT 1"
+                    ),
+                ))
+                .await?;
+            Ok(!rows.is_empty())
+        }
+    }
+}
+
 /// ai_chat_history 建表语句体（迁移与 initialize 兜底共用；三方言由
 /// SchemaManager create_table 自动适配，勿手写 AUTOINCREMENT 差异）
 pub async fn create_ai_chat_history(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    // §5.45 修复：兜底段在存量库执行时表已存在（迁移建过）——幂等跳过，
+    // 否则 CREATE TABLE 报 already exists 导致启动失败
+    if has_table(manager, "ai_chat_history").await? {
+        return Ok(());
+    }
     manager
         .create_table(
             Table::create()
