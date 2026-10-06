@@ -754,6 +754,7 @@ excel:
     web_hook_log: 推送记录
     flow_doc: 审批单据
     alert_rule: 告警规则
+    ai_history: AI 问数历史
 
 # 系统通知标题/内容（scheduler 触发的告警通知，前端通知中心可见）
 notice:

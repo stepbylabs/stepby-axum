@@ -756,6 +756,7 @@ excel:
     web_hook_log: Delivery Logs
     flow_doc: Approval Documents
     alert_rule: Alert Rules
+    ai_history: AI Query History
 
 # System notice title/content (triggered by scheduler, visible in notification center)
 notice:

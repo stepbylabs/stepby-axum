@@ -496,6 +496,22 @@ impl AiService {
         Ok((items, total))
     }
 
+    /// 导出管理/平台视图历史（§5.55 AI-02 结果导出）：
+    /// 与 list_admin_history 同口径（租户过滤一致），但 size 上限放宽到
+    /// EXPORT_MAX_ROWS（导出语义）——复用同一 SQL 生成路径。
+    pub async fn export_admin_history(
+        &self,
+        caller_tid: i64,
+        tenant_filter: Option<i64>,
+        max_rows: u64,
+    ) -> Result<Vec<serde_json::Value>, anyhow::Error> {
+        let size = max_rows.clamp(1, crate::common::page::EXPORT_MAX_ROWS);
+        let (items, _) = self
+            .list_admin_history(caller_tid, tenant_filter, 1, size)
+            .await?;
+        Ok(items)
+    }
+
     /// 删除本人历史（横向越权防护：仅本人行可删）
     pub async fn delete_my_history(
         &self,

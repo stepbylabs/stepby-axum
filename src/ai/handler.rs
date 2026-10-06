@@ -233,6 +233,112 @@ pub async fn list_admin_history(
     Ok(Json(json!({ "code": 200, "msg": "ok", "data": { "items": items, "total": total } })))
 }
 
+/// GET /system/ai/history/admin/export —— AI 问数历史导出（Excel，monitor:aiHistory:list）
+pub async fn export_admin_history(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(q): Query<AiHistoryPageDto>,
+) -> Result<axum::response::Response, AppError> {
+    let tid = operator.tenant_id();
+    let effective = state.ai_config_service.get_effective().await?;
+    let service = AiService::new(state.db.clone(), effective);
+    let items = service
+        .export_admin_history(tid, q.tenant_filter, crate::common::page::EXPORT_MAX_ROWS)
+        .await
+        .map_err(|e| AppError::internal(&format!("导出历史失败: {e}")))?;
+
+    use crate::common::excel::{CellValue, ExcelColumn, export_to_excel_with_fields};
+    let columns = [
+        ExcelColumn {
+            key: "id",
+            header: ("历史ID", "History ID"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Number(r["id"].as_i64().unwrap_or(0) as f64)
+            },
+        },
+        ExcelColumn {
+            key: "tenantId",
+            header: ("租户ID", "Tenant ID"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Number(r["tenantId"].as_i64().unwrap_or(0) as f64)
+            },
+        },
+        ExcelColumn {
+            key: "userId",
+            header: ("用户ID", "User ID"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Number(r["userId"].as_i64().unwrap_or(0) as f64)
+            },
+        },
+        ExcelColumn {
+            key: "question",
+            header: ("问题", "Question"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Text(r["question"].as_str().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "sql",
+            header: ("SQL", "SQL"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Text(r["sql"].as_str().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "rowsCount",
+            header: ("行数", "Rows"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Number(r["rowsCount"].as_i64().unwrap_or(0) as f64)
+            },
+        },
+        ExcelColumn {
+            key: "durationMs",
+            header: ("耗时(ms)", "Duration (ms)"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Number(r["durationMs"].as_i64().unwrap_or(0) as f64)
+            },
+        },
+        ExcelColumn {
+            key: "success",
+            header: ("状态", "Status"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Text(
+                    if r["success"].as_bool() == Some(true) {
+                        "成功"
+                    } else {
+                        "失败"
+                    }
+                    .into(),
+                )
+            },
+        },
+        ExcelColumn {
+            key: "errorMsg",
+            header: ("错误信息", "Error"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Text(r["errorMsg"].as_str().unwrap_or_default().into())
+            },
+        },
+        ExcelColumn {
+            key: "createTime",
+            header: ("时间", "Time"),
+            getter: |r: &serde_json::Value| {
+                CellValue::Text(r["createTime"].as_str().unwrap_or_default().into())
+            },
+        },
+    ];
+
+    export_to_excel_with_fields(
+        &crate::tr!("excel.sheet.ai_history"),
+        "ai_chat_history",
+        &columns,
+        &items,
+        None,
+        false,
+    )
+    .await
+}
+
 /// DELETE /system/ai/history/{id} —— 删除本人历史（横向越权防护在 service 层）
 pub async fn remove_my_history(
     State(state): State<Arc<AppState>>,
