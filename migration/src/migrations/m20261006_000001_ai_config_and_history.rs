@@ -168,7 +168,8 @@ impl MigrationTrait for Migration {
         // 超管（role_id=1）经 isAdmin 特判拥有全部 perms，无需 role_menu 授权行
         let menus_sql = format!(
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
-            (4102, 'AI 助手配置', 1, 14, 'aiConfig', 'system/aiConfig/index', '', '', '1', '0', 'C', '0', '0', 'system:aiConfig:edit', 'ai', 'admin', {now}, 'AI 助手 LLM 接入配置（平台专属）', '0')"
+            (4102, 'AI 助手配置', 1, 14, 'aiConfig', 'system/aiConfig/index', '', '', '1', '0', 'C', '0', '0', 'system:aiConfig:edit', 'ai', 'admin', {now}, 'AI 助手 LLM 接入配置（平台专属）', '0'), \
+            (4115, 'AI 历史查询', 120, 2, '#', '', '', '', '1', '0', 'F', '0', '0', 'monitor:aiHistory:list', '#', 'admin', {now}, 'AI 问数历史管理视图（审计大屏域）', '0')"
         );
         let menu_sql = match manager.get_connection().get_database_backend() {
             sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", menus_sql),
