@@ -156,7 +156,7 @@ async fn test_erasure_full_executes_and_is_idempotent() {
         user_id: Set(uid),
         name: Set("it-token".to_string()),
         token_hash: Set(format!("hash-erasure-{uid}")),
-        token_prefix: Set("ybt_it".to_string()),
+        token_prefix: Set("sb_it".to_string()),
         scopes: Set("[]".to_string()),
         status: Set("0".to_string()),
         create_by: Set("admin".to_string()),

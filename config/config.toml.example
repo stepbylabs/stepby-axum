@@ -113,10 +113,10 @@ previous_secrets = []
 
 [pat]
 # 个人访问令牌（PAT，Tier-S #3）——均为可选，缺省即使用下列默认值
-# 关闭后携带 ybt_ 前缀的令牌一律 401
+# 关闭后携带 PAT 前缀的令牌一律 401
 enabled = true
 # 令牌前缀，用于与 JWT 区分（真实 JWT 以 "eyJ" 开头，不会冲突）
-prefix = "ybt_"
+prefix = "sb_"
 # 创建令牌时的默认有效期（天），用户未指定时使用
 default_expire_days = 90
 # 有效期上限（天）：请求的过期天数超过则裁剪至此值；0 表示允许永不过期

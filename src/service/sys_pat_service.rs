@@ -732,7 +732,7 @@ mod tests {
         let now = datetime::now_naive();
         let cfg = PatConfig {
             enabled: true,
-            prefix: "ybt_".to_string(),
+            prefix: "sb_".to_string(),
             default_expire_days: 90,
             max_expire_days: 365,
             max_per_user: 20,
