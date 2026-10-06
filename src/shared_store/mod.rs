@@ -121,8 +121,12 @@ pub trait SharedStore: Send + Sync {
     /// 登记吊销（blacklist / 历史 SSO AT 阻断）。
     /// redis 档 = SETEX Redis（现状）+ DB 权威层幂等落库（双写）；local 档 = INSERT OR IGNORE DB。
     /// `exp_at`：UTC 秒。
-    async fn revocation_add(&self, token_hash: &str, exp_at: i64, source: &str)
-        -> Result<(), StoreError>;
+    async fn revocation_add(
+        &self,
+        token_hash: &str,
+        exp_at: i64,
+        source: &str,
+    ) -> Result<(), StoreError>;
 
     /// 密码版本号递增（改密/重置/停用/删除）。
     /// redis 档 = INCR Redis + DB 列 max 同步（双写）；local 档 = 事务内 SELECT+UPDATE DB 列。
@@ -164,8 +168,11 @@ pub trait SharedStore: Send + Sync {
     /// - redis 档：`SET NX EX`（release/renew 走 Lua CAS，现状等价）
     /// - local 档：`sys_shared_lock` 单语句 CAS
     /// 返回 None = 已被持有（本次跳过）；TTL 到期后其他持有者可抢占。
-    async fn lock_acquire(&self, key: &str, ttl_secs: u64)
-        -> Result<Option<LockHandle>, StoreError>;
+    async fn lock_acquire(
+        &self,
+        key: &str,
+        ttl_secs: u64,
+    ) -> Result<Option<LockHandle>, StoreError>;
 
     /// 释放锁（CAS：仅当 token 匹配才删除，防误删他实例的锁）
     async fn lock_release(&self, handle: &LockHandle) -> Result<(), StoreError>;
@@ -254,7 +261,10 @@ mod tests {
         // 项目实际使用的键模式形态
         assert!(glob_match("sso:rt:*", "sso:rt:abc123"));
         assert!(glob_match("online:*", "online:deadbeef"));
-        assert!(glob_match("user_sessions:1:*", "user_sessions:1:10.0.0.1:chrome"));
+        assert!(glob_match(
+            "user_sessions:1:*",
+            "user_sessions:1:10.0.0.1:chrome"
+        ));
         assert!(glob_match("ws_conn:*", "ws_conn:42"));
         assert!(glob_match("blacklist:*", "blacklist:ff00"));
         assert!(glob_match("*", "anything:here"));

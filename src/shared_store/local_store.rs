@@ -85,7 +85,12 @@ impl LocalStore {
     /// UPSERT `sys_shared_kv`：先 SELECT 后 UPDATE/INSERT（跨方言通用写法）；
     /// INSERT 撞 PK（并发首插竞态）回退为更新，语义对齐 Redis SETEX 的无条件覆盖。
     /// `expire_at = None` 表示永不过期（对应无 TTL 键，如 pwd_ver 一类键族）。
-    async fn upsert_kv(&self, key: &str, val: &str, expire_at: Option<i64>) -> Result<(), StoreError> {
+    async fn upsert_kv(
+        &self,
+        key: &str,
+        val: &str,
+        expire_at: Option<i64>,
+    ) -> Result<(), StoreError> {
         if let Some(m) = KvEntity::find_by_id(key)
             .one(&self.db)
             .await
@@ -330,7 +335,10 @@ impl SharedStore for LocalStore {
                     .map_err(|e| StoreError::backend(&e))?;
                 txn.commit().await.map_err(|e| StoreError::backend(&e))?;
                 if res.rows_affected() == 0 {
-                    tracing::warn!(uid, "pwd_ver_incr：UPDATE 影响 0 行（行并发删除？），按 new=1 返回");
+                    tracing::warn!(
+                        uid,
+                        "pwd_ver_incr：UPDATE 影响 0 行（行并发删除？），按 new=1 返回"
+                    );
                     1
                 } else {
                     new as u64
@@ -620,7 +628,11 @@ impl SharedStore for LocalStore {
             .db
             .execute_raw(self.stmt(
                 "UPDATE sys_shared_lock SET expire_at = ? WHERE lock_key = ? AND lock_token = ?",
-                vec![exp.into(), handle.key.clone().into(), handle.token.clone().into()],
+                vec![
+                    exp.into(),
+                    handle.key.clone().into(),
+                    handle.token.clone().into(),
+                ],
             ))
             .await
             .map_err(|e| StoreError::backend(&e))?;
@@ -776,7 +788,10 @@ impl SharedStore for LocalStore {
         let members: Vec<String> = serde_json::from_str(&m.kv_value)
             .map_err(|e| StoreError::Corrupted(format!("集合键损坏 {key}: {e}")))?;
         let original_len = members.len();
-        let remaining: Vec<String> = members.into_iter().filter(|x| x.as_str() != member).collect();
+        let remaining: Vec<String> = members
+            .into_iter()
+            .filter(|x| x.as_str() != member)
+            .collect();
         if remaining.is_empty() {
             let key_owned = key.to_string();
             self.del(std::slice::from_ref(&key_owned)).await?;
@@ -868,9 +883,7 @@ impl SharedStore for LocalStore {
                     && keys.len() >= n
                 {
                     // 截断语义对齐 utils::redis::scan_keys：达硬上限即停 + warn（只读展示用）
-                    tracing::warn!(
-                        "scan 达到上限 {n}（pattern={pattern}），提前停止扫描（截断）"
-                    );
+                    tracing::warn!("scan 达到上限 {n}（pattern={pattern}），提前停止扫描（截断）");
                     keys.truncate(n);
                     break;
                 }
@@ -926,12 +939,8 @@ impl LocalStore {
             .await
             .map_err(failed)?;
         if let Some(r) = row {
-            let val: String = r
-                .try_get::<String>("", "kv_value")
-                .map_err(failed)?;
-            let exp: Option<i64> = r
-                .try_get::<Option<i64>>("", "expire_at")
-                .map_err(failed)?;
+            let val: String = r.try_get::<String>("", "kv_value").map_err(failed)?;
+            let exp: Option<i64> = r.try_get::<Option<i64>>("", "expire_at").map_err(failed)?;
             if !is_expired(exp) {
                 // 未过期：cur + 1，保留原 expire_at（对齐 Redis INCR 不重置 TTL）
                 let cur = val.parse::<i64>().map_err(|_| {

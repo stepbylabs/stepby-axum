@@ -6,7 +6,7 @@
 //! （`off | webhook` + http(s) 目标 + 可选 HMAC-SHA256 签名），故把"地址合法性判定"
 //! 与"签名算法"收敛到本模块——**单一事实源**，避免两处各写一套后口径漂移。
 
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 /// 出站目标地址合法性：仅接受 `http://` / `https://`（两端空白自动裁剪）。

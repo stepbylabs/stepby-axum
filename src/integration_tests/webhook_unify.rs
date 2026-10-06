@@ -116,7 +116,8 @@ async fn test_webhook_unify_and_login_dispatched_once() {
     // ---- 1. 造存量数据：'login' 订阅 + 空订阅（= 全部）----
     // P0 跨租户修复后事件按租户过滤：hook 必须插在登录用户（admin）同租户才会命中
     let admin_tid = query_admin_tenant_id(&ctx).await;
-    let hook_login = insert_legacy_hook(&ctx, admin_tid, "it_unify_login", " login , my_event ").await;
+    let hook_login =
+        insert_legacy_hook(&ctx, admin_tid, "it_unify_login", " login , my_event ").await;
     let hook_all = insert_legacy_hook(&ctx, admin_tid, "it_unify_all", "").await;
     assert!(hook_login > 0 && hook_all > 0, "存量 hook 应插入成功");
     assert_eq!(
@@ -183,6 +184,8 @@ async fn test_webhook_unify_and_login_dispatched_once() {
     wait_for_log(&ctx, hook_all, "login.success").await;
 
     // ---- 4. 清理（逻辑删除 + 级联清留痕）----
-    ctx.delete_json(&format!("/monitor/webHook/{hook_login}")).await;
-    ctx.delete_json(&format!("/monitor/webHook/{hook_all}")).await;
+    ctx.delete_json(&format!("/monitor/webHook/{hook_login}"))
+        .await;
+    ctx.delete_json(&format!("/monitor/webHook/{hook_all}"))
+        .await;
 }

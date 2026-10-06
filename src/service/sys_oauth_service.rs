@@ -585,10 +585,8 @@ impl SysOauthService {
             ensure_provider_access(operator_tid, p.tenant_id)?;
         }
         // 绑定记录的 provider 列存 provider_code（回调链路写入口径）
-        let provider_codes: Vec<String> = existing
-            .iter()
-            .map(|p| p.provider_code.clone())
-            .collect();
+        let provider_codes: Vec<String> =
+            existing.iter().map(|p| p.provider_code.clone()).collect();
         let oauth_user_repo = self.oauth_user_repo.clone();
         let provider_repo = self.provider_repo.clone();
         self.oauth_user_repo

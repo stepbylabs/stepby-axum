@@ -29,7 +29,10 @@ pub struct CompletionResult {
 pub trait AiProvider: Send + Sync {
     /// 单轮补全：给定 system 提示与用户问题，返回模型文本
     async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        Ok(self.complete_detailed(system_prompt, user_prompt).await?.text)
+        Ok(self
+            .complete_detailed(system_prompt, user_prompt)
+            .await?
+            .text)
     }
 
     /// 单轮补全（带用量观测）：默认实现委托 [`Self::complete`] 且 usage=None；
@@ -110,7 +113,10 @@ impl OpenAiCompatibleProvider {
 #[async_trait::async_trait]
 impl AiProvider for OpenAiCompatibleProvider {
     async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        Ok(self.complete_detailed(system_prompt, user_prompt).await?.text)
+        Ok(self
+            .complete_detailed(system_prompt, user_prompt)
+            .await?
+            .text)
     }
 
     async fn complete_detailed(

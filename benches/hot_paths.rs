@@ -46,7 +46,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use stepby_axum::common::sort::{camel_to_snake, resolve_column};
 use stepby_axum::entity::sys_logininfor::{Column, Entity as Logininfor};
 use stepby_axum::middleware::ak_sign::sign_string;
-use stepby_axum::service::sys_web_hook_service::{convert_legacy_event_types, map_legacy_event_key};
+use stepby_axum::service::sys_web_hook_service::{
+    convert_legacy_event_types, map_legacy_event_key,
+};
 use stepby_axum::utils::masking::{mask_email, mask_id_card, mask_keep, mask_phone};
 
 // ==================== 输入素材（真实业务口径字面量） ====================
@@ -84,18 +86,14 @@ fn bench_masking(c: &mut Criterion) {
         b.iter(|| mask_phone(black_box(PHONE_11)))
     });
     // mask_phone：空串边界（trim 后为空，原样返回）
-    g.bench_function("mask_phone/empty", |b| {
-        b.iter(|| mask_phone(black_box("")))
-    });
+    g.bench_function("mask_phone/empty", |b| b.iter(|| mask_phone(black_box(""))));
 
     // mask_email：标准邮箱（本地部分掩码 + 域名保留）
     g.bench_function("mask_email/normal", |b| {
         b.iter(|| mask_email(black_box(EMAIL)))
     });
     // mask_email：空串边界（原样返回分支）
-    g.bench_function("mask_email/empty", |b| {
-        b.iter(|| mask_email(black_box("")))
-    });
+    g.bench_function("mask_email/empty", |b| b.iter(|| mask_email(black_box(""))));
 
     // mask_id_card：18 位（保留 4/4）
     g.bench_function("mask_id_card/18_chars", |b| {
@@ -177,7 +175,9 @@ fn bench_webhook(c: &mut Criterion) {
 
     // convert_legacy_event_types：典型混合输入（遗留名 + 目录名 + 空白元素）
     g.bench_function("convert_legacy_event_types/mixed_list", |b| {
-        b.iter(|| convert_legacy_event_types(black_box("login, login_failure, scim.user.created, ")))
+        b.iter(|| {
+            convert_legacy_event_types(black_box("login, login_failure, scim.user.created, "))
+        })
     });
     // convert_legacy_event_types：空串边界（= 订阅全部，返回 None）
     g.bench_function("convert_legacy_event_types/empty_all", |b| {

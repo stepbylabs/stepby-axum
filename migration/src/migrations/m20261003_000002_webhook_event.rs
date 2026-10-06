@@ -77,11 +77,7 @@ async fn execute_idempotent_insert(manager: &SchemaManager<'_>, body: &str) -> R
 }
 
 /// 幂等检查列是否存在（三方言；与 initialize::sso_has_column 同口径）
-async fn has_column(
-    manager: &SchemaManager<'_>,
-    table: &str,
-    column: &str,
-) -> Result<bool, DbErr> {
+async fn has_column(manager: &SchemaManager<'_>, table: &str, column: &str) -> Result<bool, DbErr> {
     let conn = manager.get_connection();
     let backend = conn.get_database_backend();
     let rows = match backend {

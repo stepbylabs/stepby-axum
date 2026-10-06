@@ -121,11 +121,7 @@ impl SysBackupLogRepository {
             .order_by_desc(Column::BackupId)
             .all(self.base.db())
             .await?;
-        Ok(rows
-            .into_iter()
-            .skip(keep)
-            .map(|r| r.backup_id)
-            .collect())
+        Ok(rows.into_iter().skip(keep).map(|r| r.backup_id).collect())
     }
 
     /// 插入一条记录

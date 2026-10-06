@@ -529,15 +529,19 @@ mod tests {
     #[test]
     fn platform_only_prefixes_match_migration_lists() {
         // 最新全量治理点（必须含**全部**平台专属前缀）
-        const LATEST_SRC: &str =
-            include_str!("../../migration/src/migrations/m20260926_000013_platform_only_tenant_menu.rs");
+        const LATEST_SRC: &str = include_str!(
+            "../../migration/src/migrations/m20260926_000013_platform_only_tenant_menu.rs"
+        );
         // 历史迁移（其项必须仍在常量中，防"常量删了但迁移还留着"的漂移）
-        const M000007_SRC: &str =
-            include_str!("../../migration/src/migrations/m20260926_000007_platform_only_ratelimit.rs");
-        const M000006_SRC: &str =
-            include_str!("../../migration/src/migrations/m20260926_000006_platform_only_prefix_full.rs");
-        const M000005_SRC: &str =
-            include_str!("../../migration/src/migrations/m20260926_000005_platform_only_prefix_governance.rs");
+        const M000007_SRC: &str = include_str!(
+            "../../migration/src/migrations/m20260926_000007_platform_only_ratelimit.rs"
+        );
+        const M000006_SRC: &str = include_str!(
+            "../../migration/src/migrations/m20260926_000006_platform_only_prefix_full.rs"
+        );
+        const M000005_SRC: &str = include_str!(
+            "../../migration/src/migrations/m20260926_000005_platform_only_prefix_governance.rs"
+        );
 
         // ① 常量每一项都必须出现在**最新**迁移清单中
         for p in PLATFORM_ONLY_PERM_PREFIXES {

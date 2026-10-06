@@ -13,8 +13,8 @@
 //!   不复用 create_time/update_time 宏，`ActiveModelBehavior` 在下方自行实现。
 
 use chrono::NaiveDateTime;
-use sea_orm::entity::prelude::*;
 use sea_orm::Set;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utoipa::ToSchema;
@@ -80,11 +80,7 @@ pub enum Relation {}
 /// create_time/update_time 固定列名不匹配，故自行实现。）
 #[async_trait::async_trait]
 impl ActiveModelBehavior for ActiveModel {
-    async fn before_save<C>(
-        self,
-        _db: &C,
-        insert: bool,
-    ) -> Result<Self, DbErr>
+    async fn before_save<C>(self, _db: &C, insert: bool) -> Result<Self, DbErr>
     where
         C: sea_orm::ConnectionTrait,
     {

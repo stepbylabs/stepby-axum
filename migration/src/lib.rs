@@ -14,9 +14,9 @@
 use sea_orm_migration::prelude::*;
 
 pub mod migrations;
+pub use migrations::*;
 /// re-export：AppInitializer 等生产代码调用 Migrator::up 所需的 trait（避免主 crate 引入 sea-orm-migration 依赖）
 pub use sea_orm_migration::MigratorTrait;
-pub use migrations::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migrator;
@@ -202,7 +202,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20261006_000001_ai_config_and_history::Migration),
             Box::new(m20261006_000002_data_rule::Migration),
             Box::new(m20261006_000003_ai_token_usage::Migration),
+            Box::new(m20261007_000001_job_log_duration::Migration),
+            Box::new(m20261007_000002_upload_config_menu::Migration),
         ]
     }
 }
-

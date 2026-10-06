@@ -1228,7 +1228,9 @@ impl SysDictService {
                 let operator = operator_owned.clone();
                 Box::pin(async move {
                     // 批量软删除（单次 UPDATE 替代 N 次）
-                    dict_data_repo.soft_delete_many_conn(txn, dict_codes).await?;
+                    dict_data_repo
+                        .soft_delete_many_conn(txn, dict_codes)
+                        .await?;
                     for m in &models {
                         // 审计合规域：DELETE 变更留痕（同事务提交/回滚）
                         crate::service::sys_audit_change_service::audit_delete(

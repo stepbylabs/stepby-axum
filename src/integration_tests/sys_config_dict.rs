@@ -157,10 +157,7 @@ async fn test_dict_type_chain() {
 
     // 5. 按 dictType 过滤查询到新字典类型
     let v = ctx
-        .get_json(&format!(
-            "/system/dict/type/list?dictType={}",
-            unique
-        ))
+        .get_json(&format!("/system/dict/type/list?dictType={}", unique))
         .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert_eq!(rows.len(), 1, "应查到 1 条新字典类型，实际: {v}");
@@ -198,10 +195,7 @@ async fn test_dict_type_chain() {
         .await;
     ctx.assert_ok(&v);
     let v = ctx
-        .get_json(&format!(
-            "/system/dict/type/list?dictType={}",
-            unique
-        ))
+        .get_json(&format!("/system/dict/type/list?dictType={}", unique))
         .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(rows.is_empty(), "删除后不应再查到该字典类型，实际: {v}");

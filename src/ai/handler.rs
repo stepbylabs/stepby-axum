@@ -3,7 +3,10 @@
 //! - `POST /ai/chat`：`ai:chat` perm（fail-closed 权限映射）+ 能力位 `ai.copilot`
 //!   + 平台层 `[ai].enabled` 三重校验；PAT 会话一律 403（v4.1-B2）。
 
-use axum::{Json, extract::{Query, State}};
+use axum::{
+    Json,
+    extract::{Query, State},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -163,9 +166,7 @@ pub async fn get_config(
     operator: Operator,
 ) -> Result<AjaxResult<config_service::AiConfigMaskedVo>, AppError> {
     ensure_platform(&operator)?;
-    Ok(AjaxResult::success(
-        state.ai_config_service.masked().await?,
-    ))
+    Ok(AjaxResult::success(state.ai_config_service.masked().await?))
 }
 
 /// PUT /system/aiConfig —— 更新配置（api_key 传空保留原值；SSRF 校验 base_url；
@@ -217,7 +218,9 @@ pub async fn list_my_history(
         .list_my_history(tid, uid, q.page.unwrap_or(1), q.size.unwrap_or(20))
         .await
         .map_err(|e| AppError::internal(&format!("查询历史失败: {e}")))?;
-    Ok(Json(json!({ "code": 200, "msg": "ok", "data": { "items": items, "total": total } })))
+    Ok(Json(
+        json!({ "code": 200, "msg": "ok", "data": { "items": items, "total": total } }),
+    ))
 }
 
 /// GET /system/ai/history/admin —— 管理/平台视图（monitor:aiHistory:list）
@@ -230,10 +233,17 @@ pub async fn list_admin_history(
     let effective = state.ai_config_service.get_effective().await?;
     let service = AiService::new(state.db.clone(), effective);
     let (items, total) = service
-        .list_admin_history(tid, q.tenant_filter, q.page.unwrap_or(1), q.size.unwrap_or(20))
+        .list_admin_history(
+            tid,
+            q.tenant_filter,
+            q.page.unwrap_or(1),
+            q.size.unwrap_or(20),
+        )
         .await
         .map_err(|e| AppError::internal(&format!("查询历史失败: {e}")))?;
-    Ok(Json(json!({ "code": 200, "msg": "ok", "data": { "items": items, "total": total } })))
+    Ok(Json(
+        json!({ "code": 200, "msg": "ok", "data": { "items": items, "total": total } }),
+    ))
 }
 
 /// GET /system/ai/history/admin/export —— AI 问数历史导出（Excel，monitor:aiHistory:list）
@@ -255,9 +265,7 @@ pub async fn export_admin_history(
         ExcelColumn {
             key: "id",
             header: ("历史ID", "History ID"),
-            getter: |r: &serde_json::Value| {
-                CellValue::Number(r["id"].as_i64().unwrap_or(0) as f64)
-            },
+            getter: |r: &serde_json::Value| CellValue::Number(r["id"].as_i64().unwrap_or(0) as f64),
         },
         ExcelColumn {
             key: "tenantId",
@@ -357,7 +365,7 @@ pub async fn remove_my_history(
         .await
         .map_err(|e| AppError::internal(&format!("删除历史失败: {e}")))?;
     Ok(Json(
-        json!({ "code": 200, "msg": "ok", "data": { "deleted": deleted } })
+        json!({ "code": 200, "msg": "ok", "data": { "deleted": deleted } }),
     ))
 }
 
@@ -401,7 +409,20 @@ pub async fn replay(
             let emsg = e.to_string();
             tokio::spawn(async move {
                 let svc = AiService::new(db, eff);
-                svc.save_history(tid, uid, &q, "", &[], &[], 0, started.elapsed().as_millis(), false, Some(&emsg), None).await;
+                svc.save_history(
+                    tid,
+                    uid,
+                    &q,
+                    "",
+                    &[],
+                    &[],
+                    0,
+                    started.elapsed().as_millis(),
+                    false,
+                    Some(&emsg),
+                    None,
+                )
+                .await;
             });
             return Err(AppError::bad_request(&format!("重放失败: {e}")));
         }
@@ -413,7 +434,20 @@ pub async fn replay(
         let oc = outcome.clone();
         tokio::spawn(async move {
             let svc = AiService::new(db, eff);
-            svc.save_history(tid, uid, &q, &oc.sql, &oc.tables, &oc.columns, oc.rows.len(), started.elapsed().as_millis(), true, None, oc.token_usage).await;
+            svc.save_history(
+                tid,
+                uid,
+                &q,
+                &oc.sql,
+                &oc.tables,
+                &oc.columns,
+                oc.rows.len(),
+                started.elapsed().as_millis(),
+                true,
+                None,
+                oc.token_usage,
+            )
+            .await;
         });
     }
     Ok(Json(json!({
@@ -429,4 +463,3 @@ pub async fn replay(
         }
     })))
 }
-

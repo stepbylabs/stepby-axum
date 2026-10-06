@@ -466,6 +466,8 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 定时任务日志 =====
     ("GET", "/monitor/jobLog/list", "monitor:job:list"),
+    // G-09：运行统计报表（同 monitor:job:list 权限——报表是调度日志的聚合视图）
+    ("GET", "/monitor/jobLog/stats", "monitor:job:list"),
     ("DELETE", "/monitor/jobLog/{jobLogIds}", "monitor:job:remove"),
     ("DELETE", "/monitor/jobLog/clean", "monitor:job:remove"),
     ("POST", "/monitor/jobLog/export", "monitor:job:export"),
@@ -503,6 +505,11 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/system/aiConfig", "system:aiConfig:edit"),
     ("PUT", "/system/aiConfig", "system:aiConfig:edit"),
     ("POST", "/system/aiConfig/test", "system:aiConfig:edit"),
+    // ===== G-11：OSS 存储配置（平台专属，handler 内 tenant_id==0 门控）=====
+    // GET/PUT/test 同权限（管理页单权限模型）；GET 回显 secret_key 掩码不泄露明文
+    ("GET", "/system/uploadConfig", "system:uploadConfig:edit"),
+    ("PUT", "/system/uploadConfig", "system:uploadConfig:edit"),
+    ("POST", "/system/uploadConfig/test", "system:uploadConfig:edit"),
     // DP-01：数据权限规则管理（挂角色生效——perms 与菜单 4117-4120 对齐）
     ("GET", "/system/dataRule/list", "system:dataRule:list"),
     ("GET", "/system/ai/history/admin/export", "monitor:aiHistory:list"),
@@ -1043,9 +1050,7 @@ mod tests {
         // 于多租户模式——本判定仅在 management=false 分支被调用，不影响多租户模式）。
         assert!(is_tenant_management_path("/system/tenant/domain/list"));
         assert!(is_tenant_management_path("/system/tenant/domain"));
-        assert!(is_tenant_management_path(
-            "/system/tenant/domain/verify/1"
-        ));
+        assert!(is_tenant_management_path("/system/tenant/domain/verify/1"));
         assert!(is_tenant_management_path("/system/tenant/menu/list"));
         assert!(is_tenant_management_path("/system/tenant/menu/1"));
         // 非 tenant 前缀路径恒不命中
@@ -1571,6 +1576,8 @@ mod tests {
             ("POST", "/monitor/job/export"),
             // sys_job_log_router
             ("GET", "/monitor/jobLog/list"),
+            // G-09：运行统计报表（与 list 同暴露面，聚合视图）
+            ("GET", "/monitor/jobLog/stats"),
             ("DELETE", "/monitor/jobLog/{jobLogIds}"),
             ("DELETE", "/monitor/jobLog/clean"),
             ("POST", "/monitor/jobLog/export"),
@@ -1597,6 +1604,10 @@ mod tests {
             ("GET", "/system/aiConfig"),
             ("PUT", "/system/aiConfig"),
             ("POST", "/system/aiConfig/test"),
+            // G-11：OSS 存储配置（平台专属，handler 内 tenant_id==0 门控）
+            ("GET", "/system/uploadConfig"),
+            ("PUT", "/system/uploadConfig"),
+            ("POST", "/system/uploadConfig/test"),
             // DP-01：数据权限规则管理（挂角色生效——perms 与菜单 4117-4120 对齐）
             ("GET", "/system/ai/history"),
             ("DELETE", "/system/ai/history/{id}"),

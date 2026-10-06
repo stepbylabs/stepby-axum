@@ -171,11 +171,7 @@ impl S3Backend {
         // §5.35：canonical URI 逐段 RFC3986 编码（`/` 作为路径分隔符保留）——
         // key 校验放行空格/中文/`#` 等字符，直接拼入签名字符串会导致
         // 服务端重算签名不一致（403）或路径截断；逐段编码对齐 AWS SigV4 规范。
-        let canonical_uri = uri
-            .split('/')
-            .map(uri_encode)
-            .collect::<Vec<_>>()
-            .join("/");
+        let canonical_uri = uri.split('/').map(uri_encode).collect::<Vec<_>>().join("/");
         let creq = canonical_request(
             method.as_str(),
             canonical_uri.as_str(),
@@ -1147,7 +1143,13 @@ mod wire_tests {
 
         // 1. save：租户维度对象键隔离（tenant_id=5）
         let url = backend
-            .save("uploads/file", 5, "it-roundtrip.txt", "", b"stepby s3 roundtrip")
+            .save(
+                "uploads/file",
+                5,
+                "it-roundtrip.txt",
+                "",
+                b"stepby s3 roundtrip",
+            )
             .await
             .expect("save 应成功");
         assert!(!url.is_empty(), "save 应返回可访问 URL");

@@ -95,7 +95,9 @@ pub async fn auth_middleware(
     // fail-closed：超时返回 503 拒绝请求
     let gate = tokio::time::timeout(
         Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
-        state.store.auth_gate_check(&token_hash, &claims.sub, claims.tid),
+        state
+            .store
+            .auth_gate_check(&token_hash, &claims.sub, claims.tid),
     )
     .await
     .map_err(|_| {

@@ -357,8 +357,14 @@ impl IntoResponse for AppError {
             );
         }
 
-        let body = Json(AjaxResult::<()>::error(self.code, &self.message));
-        (http_status, body).into_response()
+        // G-13a：错误响应 body 附带请求追踪 ID（与响应头 X-Request-Id 同源同值）。
+        // request_id 经 task-local（CURRENT_REQUEST_ID）从中间件传播到本出口；
+        // 不在请求作用域内（后台任务/定时器产生的错误）则缺省不输出。
+        let mut body = AjaxResult::<()>::error(self.code, &self.message);
+        if let Some(trace_id) = crate::middleware::request_id::current_request_id() {
+            body = body.with_trace_id(trace_id);
+        }
+        (http_status, Json(body)).into_response()
     }
 }
 

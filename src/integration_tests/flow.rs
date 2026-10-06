@@ -120,7 +120,12 @@ async fn test_flow_single_mode_full_chain() {
     ctx.assert_ok(&v);
 
     // 办结：stepby 视角单据 approved；流水含 submit + approve×2
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
     let doc = v["rows"]
         .as_array()
         .expect("rows 应为数组")
@@ -155,7 +160,12 @@ async fn test_flow_reject_then_resubmit() {
     ctx.assert_ok(&v);
 
     // stepby 视角单据 rejected
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
     let doc = v["rows"]
         .as_array()
         .unwrap()
@@ -197,7 +207,12 @@ async fn test_flow_withdraw() {
     .await;
     ctx.assert_ok(&v);
 
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
     let doc = v["rows"]
         .as_array()
         .unwrap()
@@ -269,7 +284,12 @@ async fn test_flow_countersign_mode() {
         ctx.assert_ok(&v);
     }
 
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
     let doc = v["rows"]
         .as_array()
         .unwrap()
@@ -353,7 +373,12 @@ async fn test_flow_transfer_back_to_applicant_rejected() {
     let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
 
     // 动态取提交人 user_id（不硬编码 stepby=2）
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
     let applicant_id = v["rows"]
         .as_array()
         .unwrap()
@@ -378,7 +403,12 @@ async fn test_flow_transfer_back_to_applicant_rejected() {
     );
 
     // 被拒后 stepby 不应出现该单据待办（无副作用）
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/todo?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/todo?pageNum=1&pageSize=50",
+    )
+    .await;
     let leaked = v["rows"]
         .as_array()
         .unwrap()
@@ -829,7 +859,12 @@ async fn test_flow_countersign_add() {
         )
         .await;
     ctx.assert_ok(&v);
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
     let doc = v["rows"]
         .as_array()
         .expect("rows 应为数组")
@@ -859,7 +894,12 @@ async fn test_flow_countersign_add() {
         .await;
     ctx.assert_ok(&v);
 
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/mine?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
     let doc = v["rows"]
         .as_array()
         .expect("rows 应为数组")
@@ -916,7 +956,12 @@ async fn test_flow_done_view() {
     );
 
     // stepby 视角（stepby 只有 submit 流水）：不应出现该单据的已办
-    let v = ry_get_json(&ctx, &stepby_token, "/system/flow/done?pageNum=1&pageSize=50").await;
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/done?pageNum=1&pageSize=50",
+    )
+    .await;
     assert!(
         !v["rows"]
             .as_array()

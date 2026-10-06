@@ -112,7 +112,10 @@ impl SysTenantMenuRepository {
             .one(self.base.db())
             .await?
             .flatten();
-        Ok(std::cmp::max(max.map(|m| m + 1).unwrap_or(L3_ID_BASE), L3_ID_BASE))
+        Ok(std::cmp::max(
+            max.map(|m| m + 1).unwrap_or(L3_ID_BASE),
+            L3_ID_BASE,
+        ))
     }
 
     /// 插入一条 L3 行

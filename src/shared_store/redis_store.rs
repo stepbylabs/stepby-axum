@@ -144,7 +144,9 @@ impl RedisStore {
                         expire_at: Set(exp_at),
                         source: Set(source.to_string()),
                     };
-                    sys_token_revocation::Entity::insert(am).exec(&self.db).await?;
+                    sys_token_revocation::Entity::insert(am)
+                        .exec(&self.db)
+                        .await?;
                 }
             }
             Ok(())
@@ -211,9 +213,7 @@ impl SharedStore for RedisStore {
                 .flatten()
                 .and_then(|s| s.parse::<u64>().ok()),
             // 租户键缺失为 None；tid=0 恒 None
-            tenant_state: (tid != 0)
-                .then(|| vals.get(3).cloned().flatten())
-                .flatten(),
+            tenant_state: (tid != 0).then(|| vals.get(3).cloned().flatten()).flatten(),
             // 不可解析按 None（调用端视为 0 = 永不过期，与 auth.rs:172-177 unwrap_or(0) 等价）
             tenant_expire: (tid != 0)
                 .then(|| {
@@ -253,7 +253,9 @@ impl SharedStore for RedisStore {
     async fn pwd_ver_incr(&self, uid: &str) -> Result<u64, StoreError> {
         let mut redis = self.conn.clone();
         let new: i64 = crate::utils::redis::cmd_timeout(
-            redis::cmd("INCR").arg(format!("pwd_ver:{uid}")).query_async(&mut redis),
+            redis::cmd("INCR")
+                .arg(format!("pwd_ver:{uid}"))
+                .query_async(&mut redis),
         )
         .await
         .map_err(|e| StoreError::backend(&e))?;
@@ -282,11 +284,10 @@ impl SharedStore for RedisStore {
 
     async fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
         let mut redis = self.conn.clone();
-        let v: Option<String> = crate::utils::redis::cmd_timeout(
-            redis::cmd("GET").arg(key).query_async(&mut redis),
-        )
-        .await
-        .map_err(|e| StoreError::backend(&e))?;
+        let v: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GET").arg(key).query_async(&mut redis))
+                .await
+                .map_err(|e| StoreError::backend(&e))?;
         Ok(v)
     }
 
@@ -325,11 +326,10 @@ impl SharedStore for RedisStore {
     /// GETDEL 原子取删（`service/auth_service.rs:839` / `service/sso_service.rs:1463` 同款）
     async fn consume(&self, key: &str) -> Result<Option<String>, StoreError> {
         let mut redis = self.conn.clone();
-        let v: Option<String> = crate::utils::redis::cmd_timeout(
-            redis::cmd("GETDEL").arg(key).query_async(&mut redis),
-        )
-        .await
-        .map_err(|e| StoreError::backend(&e))?;
+        let v: Option<String> =
+            crate::utils::redis::cmd_timeout(redis::cmd("GETDEL").arg(key).query_async(&mut redis))
+                .await
+                .map_err(|e| StoreError::backend(&e))?;
         Ok(v)
     }
 
@@ -549,8 +549,12 @@ impl SharedStore for RedisStore {
         let mut redis = self.conn.clone();
         let _: () = crate::utils::redis::cmd_timeout(
             redis::pipe()
-                .cmd("SADD").arg(key).arg(member)
-                .cmd("EXPIRE").arg(key).arg(ttl_secs)
+                .cmd("SADD")
+                .arg(key)
+                .arg(member)
+                .cmd("EXPIRE")
+                .arg(key)
+                .arg(ttl_secs)
                 .query_async(&mut redis),
         )
         .await
@@ -562,7 +566,10 @@ impl SharedStore for RedisStore {
     async fn set_rem(&self, key: &str, member: &str) -> Result<(), StoreError> {
         let mut redis = self.conn.clone();
         let _: () = crate::utils::redis::cmd_timeout(
-            redis::cmd("SREM").arg(key).arg(member).query_async(&mut redis),
+            redis::cmd("SREM")
+                .arg(key)
+                .arg(member)
+                .query_async(&mut redis),
         )
         .await
         .map_err(|e| StoreError::backend(&e))?;
@@ -598,22 +605,20 @@ impl SharedStore for RedisStore {
     /// 存活探测：PING
     async fn ping(&self) -> Result<(), StoreError> {
         let mut redis = self.conn.clone();
-        let _: String = crate::utils::redis::cmd_timeout(
-            redis::cmd("PING").query_async(&mut redis),
-        )
-        .await
-        .map_err(|e| StoreError::backend(&e))?;
+        let _: String =
+            crate::utils::redis::cmd_timeout(redis::cmd("PING").query_async(&mut redis))
+                .await
+                .map_err(|e| StoreError::backend(&e))?;
         Ok(())
     }
 
     /// 运行摘要：INFO 原文（`/metrics` 消费端自行解析）
     async fn info_summary(&self) -> Result<String, StoreError> {
         let mut redis = self.conn.clone();
-        let info: String = crate::utils::redis::cmd_timeout(
-            redis::cmd("INFO").query_async(&mut redis),
-        )
-        .await
-        .map_err(|e| StoreError::backend(&e))?;
+        let info: String =
+            crate::utils::redis::cmd_timeout(redis::cmd("INFO").query_async(&mut redis))
+                .await
+                .map_err(|e| StoreError::backend(&e))?;
         Ok(info)
     }
 }
@@ -710,13 +715,14 @@ impl RedisStore {
                     )
                     .await
                     .unwrap_or(None);
-                    let cur = redis_val
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
+                    let cur = redis_val.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                     // 仅 Redis 值落后于 DB 列时回填（幂等；无 TTL，与现状一致）
                     if cur < std::cmp::max(db_ver, 0) as u64 {
                         let _: Result<(), _> = crate::utils::redis::cmd_timeout(
-                            redis::cmd("SET").arg(&key).arg(db_ver.to_string()).query_async(&mut redis),
+                            redis::cmd("SET")
+                                .arg(&key)
+                                .arg(db_ver.to_string())
+                                .query_async(&mut redis),
                         )
                         .await;
                         ver_count += 1;

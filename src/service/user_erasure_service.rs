@@ -42,8 +42,8 @@ use crate::entity::sys_oauth_user::{Column as OAuthUserColumn, Entity as SysOaut
 use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
 use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Model as SysUserModel};
 use crate::repository::sys_user::SysUserRepository;
-use crate::shared_store::SharedStore;
 use crate::service::sso_service::SsoService;
+use crate::shared_store::SharedStore;
 
 /// 能力位键（`governance::FEATURES` 单一事实源）。
 pub const FEATURE_USER_ERASURE: &str = "privacy.user_erasure";

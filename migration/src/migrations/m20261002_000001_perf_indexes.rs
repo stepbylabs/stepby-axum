@@ -36,7 +36,10 @@ impl MigrationName for Migration {
 const INDEX_TARGETS: &[(&str, &str)] = &[
     ("idx_flow_doc_tenant", "flow_demo_doc (tenant_id)"),
     ("idx_web_hook_log_status", "sys_web_hook_log (status)"),
-    ("idx_web_hook_log_event_type", "sys_web_hook_log (event_type)"),
+    (
+        "idx_web_hook_log_event_type",
+        "sys_web_hook_log (event_type)",
+    ),
 ];
 
 #[async_trait::async_trait]
@@ -50,10 +53,8 @@ impl MigrationTrait for Migration {
             _ => "IF NOT EXISTS ",
         };
         for (idx_name, target) in INDEX_TARGETS {
-            conn.execute_index_ddl_ic(&format!(
-                "CREATE INDEX {ine}{idx_name} ON {target}"
-            ))
-            .await?;
+            conn.execute_index_ddl_ic(&format!("CREATE INDEX {ine}{idx_name} ON {target}"))
+                .await?;
         }
         Ok(())
     }

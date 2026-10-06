@@ -226,21 +226,25 @@ impl IpLocationService {
     ) -> anyhow::Result<()> {
         let master_key = &self.config.config_enc_key;
 
-        // 加密敏感字段（若主密钥未配置，则不加密存储但给出警告）
+        // G-14 fail-closed 收口：CONFIG_ENC_KEY 未配置时**拒绝保存**敏感凭据（此前
+        // 为明文落库 + WARN 的 fail-open）。运行期保存是管理员主动操作，给出明确
+        // 错误比静默明文更安全（"关闭态即安全态"）；启动回填（v5-E6）只兜底存量
+        // 明文行，不构成对继续产生明文的许可。
+        if master_key.is_empty() {
+            return Err(anyhow::anyhow!(
+                "CONFIG_ENC_KEY 未配置：拒绝以明文存储 MaxMind 凭据。请先在环境变量配置 ≥32 字符的 CONFIG_ENC_KEY 后重试"
+            ));
+        }
+
+        // 加密敏感字段（v3 信封，enc3:k1）
         let account_id_stored = if account_id.is_empty() {
             String::new()
-        } else if master_key.is_empty() {
-            tracing::warn!("CONFIG_ENC_KEY 未配置，Account ID 将以明文存储（不推荐）");
-            account_id.to_string()
         } else {
             encrypt_config_value(account_id, master_key)?
         };
 
         let license_key_stored = if license_key.is_empty() {
             String::new()
-        } else if master_key.is_empty() {
-            tracing::warn!("CONFIG_ENC_KEY 未配置，License Key 将以明文存储（不推荐）");
-            license_key.to_string()
         } else {
             encrypt_config_value(license_key, master_key)?
         };

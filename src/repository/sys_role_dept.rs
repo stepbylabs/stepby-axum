@@ -99,6 +99,8 @@ impl SysRoleDeptRepository {
         conn: &C,
         models: Vec<ActiveModel>,
     ) -> Result<u64, DbErr> {
-        let n = models.len() as u64; let _res = SysRoleDept::insert_many(models).exec(conn).await?; Ok(n)
+        let n = models.len() as u64;
+        let _res = SysRoleDept::insert_many(models).exec(conn).await?;
+        Ok(n)
     }
 }

@@ -57,7 +57,6 @@ async fn run_migrator_if_fresh_db(db: &DatabaseConnection) -> anyhow::Result<()>
     Ok(())
 }
 
-
 impl AppInitializer {
     /// 执行完整初始化流程，返回 AppState
     pub async fn run(config_path: &str) -> anyhow::Result<Arc<AppState>> {
@@ -406,8 +405,7 @@ impl AppInitializer {
                 // R1 启动兜底：全量重建租户运行时投影键（消除「键缺失 = Active」窗口）；
                 // local 档直接查库求值，无需重建
                 let rs_arc: Arc<dyn crate::shared_store::SharedStore> = Arc::new(rs);
-                let tenant_svc =
-                    crate::service::SysTenantService::new(db.clone(), rs_arc.clone());
+                let tenant_svc = crate::service::SysTenantService::new(db.clone(), rs_arc.clone());
                 tenant_svc.rebuild_all_runtime_keys().await;
                 rs_arc
             }
@@ -470,6 +468,25 @@ impl AppInitializer {
         ensure_oauth_client_prev_secret_column(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO 旧密钥列失败: {}", e))?;
+
+        // 4.5c-b G-09：sys_job_log.duration_ms 独立耗时列（存量库兜底，等价迁移
+        //      m20261007_000001）。存量行留 NULL = 无耗时数据 = 报表聚合跳过。
+        ensure_job_log_duration_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 job 日志耗时列失败: {}", e))?;
+
+        // 4.5c-c G-16：平台默认消息模板 seed（notice_email / report_push，幂等）。
+        //      公告邮件与报表订阅站内信自此走 sys_msg_template 存储（管理页可改），
+        //      模板缺失时代码回落内置默认（行为兜底，不是功能缺失）。
+        ensure_msg_template_seeds(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化消息模板 seed 失败: {}", e))?;
+
+        // 4.5c-d G-11：OSS 存储配置管理页菜单（存量库兜底，等价迁移
+        //      m20261007_000002；幂等，menu_id 已存在即跳过）
+        ensure_upload_config_menu(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 OSS 配置菜单失败: {}", e))?;
 
         // 4.5d E2-a：性能索引兜底（存量库不跑 Migrator::up，等价迁移
         //      m20261002_000001_perf_indexes）：flow_demo_doc.tenant_id 与
@@ -558,8 +575,7 @@ impl AppInitializer {
 
         // 8. 构建 AppState（传入 scheduler + ip_locator + ip_location_service + storage）
         // 启动打印所需的监听地址（settings 的 Arc 即将移入 AppState，先取出）
-        let (server_host, server_port) =
-            (settings.server.host.clone(), settings.server.port);
+        let (server_host, server_port) = (settings.server.host.clone(), settings.server.port);
         let state = Arc::new(AppState::new(
             db,
             store,
@@ -612,7 +628,9 @@ fn init_cache_mode_guards(db: &DatabaseConnection, settings: &Settings, mode: Ca
     if settings.cache.is_explicit_mode("local") {
         let url = &settings.redis.url;
         if !url.trim().is_empty() && !url.contains("CHANGE_ME") {
-            tracing::warn!("Redis 配置被忽略（cache.mode=local）；如需 redis 档请改 mode 为 auto/redis");
+            tracing::warn!(
+                "Redis 配置被忽略（cache.mode=local）；如需 redis 档请改 mode 为 auto/redis"
+            );
         }
     }
 }
@@ -685,13 +703,17 @@ async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<(
         false,
     )
     .await?;
-    tracing::info!("共享态存储三表已就绪（sys_shared_kv / sys_shared_lock / sys_token_revocation）");
+    tracing::info!(
+        "共享态存储三表已就绪（sys_shared_kv / sys_shared_lock / sys_token_revocation）"
+    );
 
     // ===== AI 助手（AI-01/AI-02，§5.39）：ai_chat_history 表 + sys.ai.* 配置种子兜底 =====
     // 与 m20261006_000001 迁移同源（pub fn 单一事实源）；存量库启动不跑 Migrator 时由本段兜底。
     migration::migrations::m20261006_000001_ai_config_and_history::init_ai_config_and_history(db)
         .await?;
-    tracing::info!("AI 助手：ai_chat_history 表与 sys.ai.* 配置种子已就绪（幂等，管理页可改热生效）");
+    tracing::info!(
+        "AI 助手：ai_chat_history 表与 sys.ai.* 配置种子已就绪（幂等，管理页可改热生效）"
+    );
     Ok(())
 }
 
@@ -699,7 +721,9 @@ async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<(
 /// `ensure_user_tenant_id_column` 同范式：表存在检查 + 列存在检查 + ALTER 补列）。
 /// `ALTER TABLE sys_user ADD COLUMN ... BIGINT NOT NULL DEFAULT 0` 三方言语法通用。
 /// 缺此兜底时：存量库实体 SELECT 带 password_version ⇒ 登录/改密链路 500。
-pub(crate) async fn ensure_user_password_version_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+pub(crate) async fn ensure_user_password_version_column(
+    db: &DatabaseConnection,
+) -> anyhow::Result<()> {
     if !sso_table_exists(db, "sys_user").await? {
         return Ok(());
     }
@@ -720,7 +744,9 @@ pub(crate) async fn ensure_user_password_version_column(db: &DatabaseConnection)
 ///    回填 admin 标记（存量库重跑不误标已改密用户）；
 /// 2. `sys_config` 强改开关种子 `sys.user.forceFirstLoginChangePwd='false'`
 ///    （幂等 INSERT，不 UPDATE——尊重管理员已改值）。
-pub(crate) async fn ensure_user_must_change_pwd_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+pub(crate) async fn ensure_user_must_change_pwd_column(
+    db: &DatabaseConnection,
+) -> anyhow::Result<()> {
     if !sso_table_exists(db, "sys_user").await? {
         return Ok(());
     }
@@ -3698,26 +3724,14 @@ async fn ensure_tenant_index(
 /// MySQL 先查 information_schema 判存在，缺失才建。
 async fn ensure_perf_indexes(db: &DatabaseConnection) -> anyhow::Result<()> {
     let targets: &[(&str, &str, &str)] = &[
-        (
-            "flow_demo_doc",
-            "idx_flow_doc_tenant",
-            "tenant_id",
-        ),
-        (
-            "sys_web_hook_log",
-            "idx_web_hook_log_status",
-            "status",
-        ),
+        ("flow_demo_doc", "idx_flow_doc_tenant", "tenant_id"),
+        ("sys_web_hook_log", "idx_web_hook_log_status", "status"),
         (
             "sys_web_hook_log",
             "idx_web_hook_log_event_type",
             "event_type",
         ),
-        (
-            "sys_alert_rule",
-            "idx_alert_rule_enabled",
-            "enabled",
-        ),
+        ("sys_alert_rule", "idx_alert_rule_enabled", "enabled"),
     ];
     for (table, index, cols) in targets {
         if !sso_table_exists(db, table).await? {
@@ -4203,8 +4217,9 @@ async fn ensure_sso_consent_unique(db: &DatabaseConnection) -> anyhow::Result<()
 /// - `sys_web_hook.secret`（回调 HMAC 签名密钥）
 ///
 /// 规则：CONFIG_ENC_KEY 未配置 → 跳过（fail-open，下次启动重试）；
-/// 值已带 `enc2:`/`enc:` 前缀 → 跳过（已加密）；空值 → 跳过；
-/// 其余 → `seal_sensitive_value` 加密 UPDATE（逐行，幂等：回填后即带前缀）。
+/// 值已带 `enc3:` 前缀 → 跳过（已是当前格式，幂等）；`enc2:`/`enc:` 存量 →
+/// 解密后以 v3 信封 re-encrypt（G-14 密钥轮换格式迁移，解密失败保持原值下轮重试）；
+/// 明文/空值 → `seal_sensitive_value` 加密 UPDATE（逐行，幂等：回填后即带前缀）。
 async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, enc_key: &str) {
     if enc_key.is_empty() {
         tracing::warn!("CONFIG_ENC_KEY 未配置：跳过运行期敏感凭据存量明文回填（v5-E6）");
@@ -4220,6 +4235,7 @@ async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, enc_key: &str
     ];
     let backend = db.get_database_backend();
     let mut sealed_total = 0usize;
+    let mut reencrypted_total = 0usize;
     for (table, pk, col) in TARGETS {
         let select_sql = format!(
             "SELECT {pk} AS pk, {col} AS val FROM {table} WHERE {col} IS NOT NULL AND {col} != ''"
@@ -4244,15 +4260,37 @@ async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, enc_key: &str
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            // 已加密（带前缀）或空值跳过
-            if val.starts_with("enc2:") || val.starts_with("enc:") {
+            // G-14：已是 v3（enc3:）→ 跳过（幂等）；v1/v2（enc:/enc2:）→ unseal 后
+            // 以 v3 信封 re-encrypt（密钥轮换迁移期）；明文 → seal（enc3）
+            if val.starts_with("enc3:") {
                 continue;
             }
-            let sealed = match crate::utils::crypto::seal_sensitive_value(&val, enc_key) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("v5-E6 回填加密失败 {table}.{col} pk={pk_val}: {}", e);
-                    continue;
+            let is_legacy = val.starts_with("enc2:") || val.starts_with("enc:");
+            let sealed = if is_legacy {
+                // 格式迁移：解出明文再重加密（解密失败=密钥不匹配/数据损坏，
+                // 保持原值不动并告警，下轮启动重试——不"修"坏数据）
+                match crate::utils::crypto::decrypt_config_value(&val, enc_key)
+                    .and_then(|plain| crate::utils::crypto::encrypt_config_value(&plain, enc_key))
+                {
+                    Ok(s) => {
+                        reencrypted_total += 1;
+                        s
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "v5-E6 存量 v1/v2 密文迁移失败（保持原值，下轮重试） {table}.{col} pk={pk_val}: {}",
+                            e
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                match crate::utils::crypto::seal_sensitive_value(&val, enc_key) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("v5-E6 回填加密失败 {table}.{col} pk={pk_val}: {}", e);
+                        continue;
+                    }
                 }
             };
             let update_sql = format!(
@@ -4266,11 +4304,18 @@ async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, enc_key: &str
                 tracing::error!("v5-E6 回填更新失败 {table}.{col} pk={pk_val}: {}", e);
                 continue;
             }
-            sealed_total += 1;
+            if !is_legacy {
+                sealed_total += 1;
+            }
         }
     }
     if sealed_total > 0 {
         tracing::info!("v5-E6 已加密回填运行期敏感凭据 {sealed_total} 条（v5-E6）");
+    }
+    if reencrypted_total > 0 {
+        tracing::info!(
+            "G-14 密钥轮换格式迁移：v1/v2 信封已 re-encrypt 为 v3（enc3:k1）共 {reencrypted_total} 条"
+        );
     }
 }
 
@@ -4340,7 +4385,9 @@ async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<
 /// 读取一条 `SELECT COUNT(*) AS c ...` 的结果（跨方言返回 i64）。
 async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i64> {
     let backend = db.get_database_backend();
-    let row = db.query_one_raw(Statement::from_string(backend, sql)).await?;
+    let row = db
+        .query_one_raw(Statement::from_string(backend, sql))
+        .await?;
     match row {
         Some(r) => Ok(r.try_get::<i64>("", "c").unwrap_or(0)),
         None => Ok(0),
@@ -4384,10 +4431,7 @@ async fn count_scalar(db: &DatabaseConnection, sql: String) -> anyhow::Result<i6
 /// 测试策略：核心收敛语义（回收 + 幂等）由 `integration_tests::capability_features`
 /// 直驱 `converge_tenant_role_menus_conn` 覆盖；本函数为**薄编排**（查询 + 循环 +
 /// 缓存失效），且全表遍历在并行共享库测试下有跨用例污染风险，故不直测。
-async fn converge_tenant_grants_on_startup(
-    db: &DatabaseConnection,
-    store: &Arc<dyn SharedStore>,
-) {
+async fn converge_tenant_grants_on_startup(db: &DatabaseConnection, store: &Arc<dyn SharedStore>) {
     use crate::entity::{sys_tenant, sys_tenant_package};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     use std::collections::HashMap;
@@ -4407,10 +4451,8 @@ async fn converge_tenant_grants_on_startup(
     if packages.is_empty() {
         return;
     }
-    let pkg_map: HashMap<i64, sys_tenant_package::Model> = packages
-        .into_iter()
-        .map(|p| (p.package_id, p))
-        .collect();
+    let pkg_map: HashMap<i64, sys_tenant_package::Model> =
+        packages.into_iter().map(|p| (p.package_id, p)).collect();
 
     let tenants: Vec<sys_tenant::Model> = match sys_tenant::Entity::find()
         .filter(sys_tenant::Column::DelFlag.eq("0"))
@@ -4550,9 +4592,7 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(store: &Arc<dyn SharedStore>) {
             .unwrap_or(0)
             + effective_ttl as i64;
         // blacklist 登记（redis 档 = SETEX + DB 权威层双写；local 档 = INSERT 权威层）
-        let set = store
-            .revocation_add(hash, expire_at, "sso_legacy_at")
-            .await;
+        let set = store.revocation_add(hash, expire_at, "sso_legacy_at").await;
         match set {
             Ok(()) => {
                 // 绑定转写成功后删除原 key：userinfo（只认绑定）与业务路由（认 blacklist）
@@ -4792,6 +4832,112 @@ async fn ensure_oauth_client_prev_secret_column(db: &DatabaseConnection) -> anyh
     ))
     .await?;
     tracing::info!("sys_oauth_client.previous_client_secret_hash 列已补建（SSO D9 存量库兜底）");
+    Ok(())
+}
+
+/// G-09（存量库兜底，等价迁移 `m20261007_000001`）：`sys_job_log.duration_ms`
+/// 独立耗时列——定时任务运行统计报表的聚合基础。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而实体已声明该列
+/// ⇒ 缺此兜底则调度日志写入/查询全链报 `no such column: duration_ms`（500）。
+/// 幂等：列已存在或表不存在时安全返回；存量行留 `NULL` = 无耗时数据，报表聚合跳过。
+async fn ensure_job_log_duration_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_job_log").await? {
+        return Ok(());
+    }
+    if sso_has_column(db, "sys_job_log", "duration_ms").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "ALTER TABLE sys_job_log ADD COLUMN duration_ms BIGINT NULL".to_string(),
+    ))
+    .await?;
+    tracing::info!("sys_job_log.duration_ms 列已补建（G-09 存量库兜底）");
+    Ok(())
+}
+
+/// G-16（平台默认消息模板 seed，幂等；UNIQUE(template_code) 冲突即忽略）
+///
+/// - `notice_email`：通知公告邮件正文骨架（channel_code='email' 仅表达用途；
+///   公告邮件有自带的用户枚举/偏好过滤/批量投递链路，不经过 send() 的渠道查找）。
+///   变量 {{title}}/{{content}}/{{footer}} 均由调用方 html_escape 后注入。
+/// - `report_push`：报表订阅站内信模板（site 渠道，经 SysMsgService::send 统一
+///   投递内核——尊重用户消息偏好/免打扰 + 失败进重试链）。
+///
+/// 表不存在（极旧存量库）时跳过；与代码侧"模板缺失回落内置默认"双保险。
+async fn ensure_msg_template_seeds(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_msg_template").await? {
+        return Ok(());
+    }
+    let now = flow_now(db);
+    // 公告邮件正文骨架（与 sys_notice_service 内置回落内容保持一致）
+    let notice_email_content = "<div style=\"font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px;\">\
+<h2 style=\"color: #409EFF; border-bottom: 2px solid #409EFF; padding-bottom: 10px;\">{{title}}</h2>\
+<div style=\"margin: 20px 0;\">{{content}}</div>\
+<hr style=\"border: none; border-top: 1px solid #ddd; margin: 20px 0;\"/>\
+<p style=\"color: #999; font-size: 12px;\">{{footer}}</p>\
+</div>";
+    let seeds: &[(&str, &str, &str, &str, &str, &str)] = &[
+        (
+            "通知公告邮件",
+            "notice_email",
+            "email",
+            "{{title}}",
+            notice_email_content,
+            "G-16 公告邮件正文骨架（变量已由后端转义）",
+        ),
+        (
+            "报表订阅推送",
+            "report_push",
+            "site",
+            "报表推送：{{report_name}}",
+            "{{content}}",
+            "G-16 报表订阅站内信模板（site 渠道统一投递）",
+        ),
+    ];
+    for (name, code, channel, subject, content, remark) in seeds {
+        flow_insert(
+            db,
+            &format!(
+                "sys_msg_template (template_name, template_code, channel_code, template_subject, template_content, status, remark, create_by, create_time, del_flag) VALUES \
+                 ('{name}', '{code}', '{channel}', '{subject}', '{content}', '0', '{remark}', 'admin', {now}, '0')"
+            ),
+        )
+        .await?;
+    }
+    tracing::info!("平台默认消息模板 seed 完成（notice_email / report_push，G-16）");
+    Ok(())
+}
+
+/// G-11（存量库兜底，等价迁移 `m20261007_000002`）：OSS 存储配置管理页菜单
+/// （menu_id 4103，platform-only，perms `system:uploadConfig:edit`）。
+///
+/// 菜单缺失不产生 500（仅 getRouters 少一个入口），但为"权限齐备、入口可见"
+/// 的完整性兜底（避免"超管有 perms 却无菜单入口"）；幂等：menu_id 已存在跳过。
+async fn ensure_upload_config_menu(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let exists = db
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT 1 AS one FROM sys_menu WHERE menu_id = 4103".to_string(),
+        ))
+        .await?;
+    if !exists.is_empty() {
+        return Ok(());
+    }
+    let now = flow_now(db);
+    flow_insert(
+        db,
+        &format!(
+            "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES              (4103, 'OSS 存储配置', 1, 15, 'uploadConfig', 'system/uploadConfig/index', '', '', '1', '0', 'C', '0', '0', 'system:uploadConfig:edit', 'upload', 'admin', {now}, 'OSS 凭据动态化管理（平台专属；仅 backend=s3 档生效）', '0')"
+        ),
+    )
+    .await?;
+    tracing::info!("OSS 存储配置菜单已补建（menu_id=4103，G-11 存量库兜底）");
     Ok(())
 }
 
@@ -5105,20 +5251,14 @@ pub(crate) async fn ensure_webhook_event_tables(db: &DatabaseConnection) -> anyh
         if !sso_has_column(db, "sys_pat", "access_key").await? {
             flow_exec(
                 db,
-                format!(
-                    "ALTER TABLE sys_pat ADD COLUMN {}",
-                    mig::PAT_ACCESS_KEY_DDL
-                ),
+                format!("ALTER TABLE sys_pat ADD COLUMN {}", mig::PAT_ACCESS_KEY_DDL),
             )
             .await?;
         }
         if !sso_has_column(db, "sys_pat", "secret_key").await? {
             flow_exec(
                 db,
-                format!(
-                    "ALTER TABLE sys_pat ADD COLUMN {}",
-                    mig::PAT_SECRET_KEY_DDL
-                ),
+                format!("ALTER TABLE sys_pat ADD COLUMN {}", mig::PAT_SECRET_KEY_DDL),
             )
             .await?;
         }
@@ -5160,7 +5300,9 @@ pub(crate) async fn ensure_webhook_event_tables(db: &DatabaseConnection) -> anyh
 /// 仅处理 `subscribed_events IS NULL` 且 `event_types` 非空的行；事件名映射与
 /// SQL 单一来源 = 迁移文件 `build_unify_update_sql`（与 service 的 LEGACY_EVENT_KEY_MAP
 /// 由集成测试双向断言防漂移）。
-pub(crate) async fn ensure_webhook_subscription_unify(db: &DatabaseConnection) -> anyhow::Result<()> {
+pub(crate) async fn ensure_webhook_subscription_unify(
+    db: &DatabaseConnection,
+) -> anyhow::Result<()> {
     // 表未建（极老空库）或缺列（迁移未跑过加列）时跳过——由迁移负责全新库
     if !sso_table_exists(db, "sys_web_hook").await? {
         tracing::info!("sys_web_hook 表不存在，跳过订阅收敛（由迁移负责全新库）");
@@ -5341,24 +5483,36 @@ mod single_source_sql_tests {
             bodies[0],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES (4000, '变更留痕', 108, 4, 'auditChange', 'system/auditChange/index', '', '', '1', '0', 'C', '0', '0', 'system:audit-change:list', 'log', 'admin', NOW(), '业务数据变更留痕审计（前后快照 + 字段差异）', '0', 'menu.audit_change')"
         );
-        assert_eq!(bodies[1], "sys_role_menu (role_id, menu_id) VALUES (2, 4000)");
+        assert_eq!(
+            bodies[1],
+            "sys_role_menu (role_id, menu_id) VALUES (2, 4000)"
+        );
         assert_eq!(
             bodies[2],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES (4001, '变更查询', 4000, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:audit-change:query', '#', 'admin', NOW(), '', '0', NULL)"
         );
-        assert_eq!(bodies[3], "sys_role_menu (role_id, menu_id) VALUES (2, 4001)");
+        assert_eq!(
+            bodies[3],
+            "sys_role_menu (role_id, menu_id) VALUES (2, 4001)"
+        );
         assert_eq!(
             bodies[4],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES (4002, '变更导出', 4000, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:audit-change:export', '#', 'admin', NOW(), '', '0', NULL)"
         );
-        assert_eq!(bodies[5], "sys_role_menu (role_id, menu_id) VALUES (2, 4002)");
+        assert_eq!(
+            bodies[5],
+            "sys_role_menu (role_id, menu_id) VALUES (2, 4002)"
+        );
     }
 
     /// sys_webhook_event 建表 SQL：三方言与重构前手抄 DDL 等价
     #[test]
     fn webhook_create_table_sql_matches_legacy_ddl() {
         for (backend, id_col) in [
-            (DatabaseBackend::Sqlite, "id INTEGER PRIMARY KEY AUTOINCREMENT"),
+            (
+                DatabaseBackend::Sqlite,
+                "id INTEGER PRIMARY KEY AUTOINCREMENT",
+            ),
             (DatabaseBackend::Postgres, "id BIGSERIAL PRIMARY KEY"),
             (
                 DatabaseBackend::MySql,
@@ -5476,12 +5630,18 @@ mod single_source_sql_tests {
             bodies[0],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES (3562, '事件目录', 158, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:event:list', 'list', 'admin', NOW(), 'WebHook 事件目录查询', '0')"
         );
-        assert_eq!(bodies[1], "sys_role_menu (role_id, menu_id) VALUES (2, 3562)");
+        assert_eq!(
+            bodies[1],
+            "sys_role_menu (role_id, menu_id) VALUES (2, 3562)"
+        );
         assert_eq!(
             bodies[2],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES (3563, '测试发送', 158, 2, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:test-send', 'message', 'admin', NOW(), '按事件样例构造真实测试发送', '0')"
         );
-        assert_eq!(bodies[3], "sys_role_menu (role_id, menu_id) VALUES (2, 3563)");
+        assert_eq!(
+            bodies[3],
+            "sys_role_menu (role_id, menu_id) VALUES (2, 3563)"
+        );
     }
 
     /// 告警菜单种子：4110-4114 集合一致；仅页面 4110 授予 role_menu(2,·)
@@ -5493,7 +5653,10 @@ mod single_source_sql_tests {
             bodies[0],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES (4110, '告警规则', 2, 60, 'alert', 'monitor/alert/index', '', '', '1', '0', 'C', '0', '0', 'monitor:alert:list', 'alert', 'admin', NOW(), '告警规则引擎菜单', '0')"
         );
-        assert_eq!(bodies[1], "sys_role_menu (role_id, menu_id) VALUES (2, 4110)");
+        assert_eq!(
+            bodies[1],
+            "sys_role_menu (role_id, menu_id) VALUES (2, 4110)"
+        );
         // 按钮 4111-4114 不授予 role_menu（与迁移/兜底原行为一致）
         let joined = bodies.join("\n");
         for (id, perms) in [
@@ -5521,7 +5684,11 @@ mod single_source_sql_tests {
         assert_eq!(
             audit_mig::AUDIT_INDEXES,
             &[
-                ("idx_audit_change_row", "sys_audit_change", "table_name, row_pk"),
+                (
+                    "idx_audit_change_row",
+                    "sys_audit_change",
+                    "table_name, row_pk"
+                ),
                 ("idx_audit_change_time", "sys_audit_change", "operated_at"),
                 ("idx_audit_change_tenant", "sys_audit_change", "tenant_id"),
             ]

@@ -42,15 +42,46 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Alias::new("rule_name")).string_len(64).not_null())
-                    .col(ColumnDef::new(Alias::new("table_name")).string_len(64).not_null())
-                    .col(ColumnDef::new(Alias::new("field_name")).string_len(64).not_null())
+                    .col(
+                        ColumnDef::new(Alias::new("rule_name"))
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("table_name"))
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("field_name"))
+                            .string_len(64)
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Alias::new("op")).string_len(8).not_null())
-                    .col(ColumnDef::new(Alias::new("value_type")).string_len(24).not_null())
+                    .col(
+                        ColumnDef::new(Alias::new("value_type"))
+                            .string_len(24)
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Alias::new("rule_value")).string_len(255))
-                    .col(ColumnDef::new(Alias::new("status")).char_len(1).not_null().default("0"))
-                    .col(ColumnDef::new(Alias::new("del_flag")).char_len(1).not_null().default("0"))
-                    .col(ColumnDef::new(Alias::new("tenant_id")).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Alias::new("status"))
+                            .char_len(1)
+                            .not_null()
+                            .default("0"),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("del_flag"))
+                            .char_len(1)
+                            .not_null()
+                            .default("0"),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("tenant_id"))
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(ColumnDef::new(Alias::new("create_by")).string_len(64))
                     .col(ColumnDef::new(Alias::new("create_time")).date_time())
                     .col(ColumnDef::new(Alias::new("update_by")).string_len(64))
@@ -74,8 +105,16 @@ impl MigrationTrait for Migration {
             .create_table(
                 Table::create()
                     .table(Alias::new("sys_role_data_rule"))
-                    .col(ColumnDef::new(Alias::new("role_id")).big_integer().not_null())
-                    .col(ColumnDef::new(Alias::new("rule_id")).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Alias::new("role_id"))
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("rule_id"))
+                            .big_integer()
+                            .not_null(),
+                    )
                     .primary_key(
                         Index::create()
                             .col(Alias::new("role_id"))
@@ -110,9 +149,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared(
-                "DELETE FROM sys_menu WHERE menu_id IN (4117, 4118, 4119, 4122)",
-            )
+            .execute_unprepared("DELETE FROM sys_menu WHERE menu_id IN (4117, 4118, 4119, 4122)")
             .await?;
         manager
             .get_connection()

@@ -7,9 +7,9 @@ pub mod data_rule_router;
 pub mod file_router;
 pub mod flow_router;
 pub mod ip_location_router;
+pub mod monitor_alert_router;
 pub mod monitor_cache_router;
 pub mod monitor_log_router;
-pub mod monitor_alert_router;
 pub mod monitor_observability_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
@@ -34,8 +34,8 @@ pub mod sys_post_router;
 pub mod sys_rate_limit_router;
 pub mod sys_report_board_router;
 pub mod sys_report_router;
-pub mod sys_role_router;
 pub mod sys_role_field_perm_router;
+pub mod sys_role_router;
 pub mod sys_scim_group_router;
 pub mod sys_task_router;
 pub mod sys_tenant_domain_router;
@@ -64,6 +64,7 @@ use crate::middleware::spa_fallback_middleware;
 use crate::middleware::tenant_host_middleware;
 use crate::observability::monitoring_middleware;
 use crate::state::AppState;
+use axum::Json as AxumJson;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
@@ -74,7 +75,6 @@ use std::time::Duration;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use axum::Json as AxumJson;
 use tower_http::trace::TraceLayer;
 
 /// 全局默认请求体大小上限（10MB，对齐 oper_log 中间件 BODY_READ_LIMIT）
@@ -205,7 +205,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // AK/SK 签名开放 API（/open/v1/*）：无 Bearer，必须与公开路由同层 merge，
         // 不得落入 protected 的 auth_middleware route_layer 覆盖范围（否则 401）。
         // 自带 ak_sign 验签中间件（X-CA-* 签名 + 防重放 + 组件 metrics）。
-        .merge(crate::middleware::ak_sign::ak_protected_routes(state.clone()))
+        .merge(crate::middleware::ak_sign::ak_protected_routes(
+            state.clone(),
+        ))
         .merge(protected)
         // tenant_host 中间件（多租户 Phase 3 域名链路）：解析请求 host / 网关注入的
         // `X-Tenant-Code` → 租户上下文，注入 HostTenant 供 auth_middleware 做一致性校验。
@@ -308,16 +310,18 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // 改用 tower::timeout + HandleErrorLayer 组合生成与错误响应契约对齐的 JSON body
         .layer(
             ServiceBuilder::new()
-                .layer(axum::error_handling::HandleErrorLayer::new(|_: axum::BoxError| async {
-                    (
-                        StatusCode::REQUEST_TIMEOUT,
-                        AxumJson(serde_json::json!({
-                            "code": 408,
-                            "msg": "请求超时，请稍后重试"
-                        })),
-                    )
-                }))
-                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    |_: axum::BoxError| async {
+                        (
+                            StatusCode::REQUEST_TIMEOUT,
+                            AxumJson(serde_json::json!({
+                                "code": 408,
+                                "msg": "请求超时，请稍后重试"
+                            })),
+                        )
+                    },
+                ))
+                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS)),
         )
         // 可观测性监控中间件（metrics + 慢请求）：
         // 置于 request_id 之内、Timeout 之外，既能在 request span 作用域内测量，

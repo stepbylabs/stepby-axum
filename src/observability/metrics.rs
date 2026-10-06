@@ -23,6 +23,11 @@ pub const DURATION_BUCKETS_S: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
 /// FCP ≤ 1.8s、LCP ≤ 2.5s（prometheus histogram_quantile(0.95) 可直接与预算比对）。
 pub const VITAL_BUCKETS_S: &[f64] = &[0.1, 0.25, 0.5, 1.0, 1.8, 2.5, 4.0, 8.0];
 
+/// 定时任务耗时直方图采样桶边界（秒，G-09）。
+/// 任务耗时量级远大于 HTTP 请求（内置任务普遍 10ms~数分钟），独立桶边界：
+/// [100ms, 250ms, 500ms, 1s, 5s, 30s, 60s, 300s]。
+pub const JOB_DURATION_BUCKETS_S: &[f64] = &[0.1, 0.25, 0.5, 1.0, 5.0, 30.0, 60.0, 300.0];
+
 /// 时间型 vitals 白名单（CLS 是无量纲分数，走 gauge 单独承载）
 pub const VITAL_TIME_NAMES: &[&str] = &["LCP", "FCP", "INP", "TTFB"];
 /// 设备类型分桶白名单（FCP-011，与前端 frontendErrorReporter.detectDeviceType 对齐）
@@ -74,6 +79,11 @@ pub struct MetricsRegistry {
     ak_failures: RwLock<HashMap<String, u64>>,
     /// AK 开放 API 耗时直方图（path → 系列，桶边界复用 DURATION_BUCKETS_S）
     ak_durations: RwLock<HashMap<String, DurationSeries>>,
+    /// G-09：定时任务执行计数（job_name, status）→ 次数。
+    /// status："0"=成功 / "1"=失败（与 sys_job_log.status 口径一致）。
+    job_counters: RwLock<HashMap<(String, String), u64>>,
+    /// G-09：定时任务耗时直方图（job_name → 系列，桶边界 JOB_DURATION_BUCKETS_S）
+    job_durations: RwLock<HashMap<String, JobDurationSeries>>,
     /// 告警指标源：最近 5xx 响应时间戳环形缓冲（真实记录点 =
     /// [`MetricsRegistry::record`]，由 monitoring_middleware 每请求调用）。
     ///
@@ -104,6 +114,23 @@ impl VitalSeries {
     }
 }
 
+/// G-09：定时任务耗时直方图系列（桶边界 JOB_DURATION_BUCKETS_S，与 HTTP/vitals 独立）
+struct JobDurationSeries {
+    count: u64,
+    sum_secs: f64,
+    buckets: Vec<u64>,
+}
+
+impl JobDurationSeries {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            sum_secs: 0.0,
+            buckets: vec![0; JOB_DURATION_BUCKETS_S.len()],
+        }
+    }
+}
+
 impl Default for MetricsRegistry {
     fn default() -> Self {
         Self {
@@ -116,6 +143,8 @@ impl Default for MetricsRegistry {
             ak_counters: RwLock::new(HashMap::new()),
             ak_failures: RwLock::new(HashMap::new()),
             ak_durations: RwLock::new(HashMap::new()),
+            job_counters: RwLock::new(HashMap::new()),
+            job_durations: RwLock::new(HashMap::new()),
             recent_5xx: Mutex::new(VecDeque::new()),
         }
     }
@@ -317,14 +346,10 @@ impl MetricsRegistry {
             Err(p) => p.into_inner(),
         };
 
-        s.push_str(
-            "# HELP stepby_ak_requests_total AK 开放 API 请求数（path,outcome）\n",
-        );
+        s.push_str("# HELP stepby_ak_requests_total AK 开放 API 请求数（path,outcome）\n");
         s.push_str("# TYPE stepby_ak_requests_total counter\n");
-        let mut req_keys: Vec<(&(String, String), u64)> = counters
-            .iter()
-            .map(|(k, v)| (k, *v))
-            .collect();
+        let mut req_keys: Vec<(&(String, String), u64)> =
+            counters.iter().map(|(k, v)| (k, *v)).collect();
         req_keys.sort();
         for ((path, outcome), c) in &req_keys {
             s.push_str(&format!(
@@ -349,9 +374,7 @@ impl MetricsRegistry {
             }
         }
 
-        s.push_str(
-            "# HELP stepby_ak_request_duration_seconds AK 开放 API 请求耗时分布（秒）\n",
-        );
+        s.push_str("# HELP stepby_ak_request_duration_seconds AK 开放 API 请求耗时分布（秒）\n");
         s.push_str("# TYPE stepby_ak_request_duration_seconds histogram\n");
         let mut dur_keys: Vec<&String> = durations.keys().collect();
         dur_keys.sort();
@@ -475,6 +498,107 @@ impl MetricsRegistry {
         s
     }
 
+    /// G-09：记录一次定时任务执行（job_name/status/duration_ms）
+    ///
+    /// status："0"=成功 / "1"=失败（与 sys_job_log.status 口径一致，白名单外忽略防标签基数膨胀）。
+    /// 由 [`crate::scheduler::execute_with_logging`] 每次任务执行后记录一次。
+    pub fn record_job_execution(&self, job_name: &str, status: &str, duration_ms: u64) {
+        if status != "0" && status != "1" {
+            return;
+        }
+        let job_name = job_name.trim();
+        if job_name.is_empty() {
+            return;
+        }
+        // counter（job_name, status）
+        {
+            let mut counters = match self.job_counters.write() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *counters
+                .entry((job_name.to_string(), status.to_string()))
+                .or_insert(0) += 1;
+        }
+        // histogram（秒，独立桶边界）
+        let secs = duration_ms as f64 / 1000.0;
+        let mut durations = match self.job_durations.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let series = durations
+            .entry(job_name.to_string())
+            .or_insert_with(JobDurationSeries::new);
+        series.count += 1;
+        series.sum_secs += secs;
+        for (i, bound) in JOB_DURATION_BUCKETS_S.iter().enumerate() {
+            if secs <= *bound {
+                series.buckets[i] += 1;
+            }
+        }
+    }
+
+    /// G-09：渲染定时任务指标（`stepby_job_executions_total{job_name,status}` +
+    /// `stepby_job_duration_seconds{job_name}` histogram）
+    fn render_job_prometheus(&self) -> String {
+        let mut s = String::new();
+        let counters = match self.job_counters.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        s.push_str("# HELP stepby_job_executions_total 定时任务执行计数（job_name,status）\n");
+        s.push_str("# TYPE stepby_job_executions_total counter\n");
+        let mut keys: Vec<&(String, String)> = counters.keys().collect();
+        keys.sort();
+        for (job_name, status) in keys {
+            if let Some(c) = counters.get(&(job_name.clone(), status.clone())) {
+                s.push_str(&format!(
+                    "stepby_job_executions_total{{job_name=\"{}\",status=\"{}\"}} {}\n",
+                    escape_label(job_name),
+                    escape_label(status),
+                    c
+                ));
+            }
+        }
+
+        let durations = match self.job_durations.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        s.push_str("# HELP stepby_job_duration_seconds 定时任务耗时分布（秒）\n");
+        s.push_str("# TYPE stepby_job_duration_seconds histogram\n");
+        let mut dur_keys: Vec<&String> = durations.keys().collect();
+        dur_keys.sort();
+        for job_name in &dur_keys {
+            if let Some(series) = durations.get(*job_name) {
+                for (i, bound) in JOB_DURATION_BUCKETS_S.iter().enumerate() {
+                    s.push_str(&format!(
+                        "stepby_job_duration_seconds_bucket{{job_name=\"{}\",le=\"{}\"}} {}\n",
+                        escape_label(job_name),
+                        bound,
+                        series.buckets[i]
+                    ));
+                }
+                s.push_str(&format!(
+                    "stepby_job_duration_seconds_bucket{{job_name=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape_label(job_name),
+                    series.count
+                ));
+                s.push_str(&format!(
+                    "stepby_job_duration_seconds_sum{{job_name=\"{}\"}} {}\n",
+                    escape_label(job_name),
+                    series.sum_secs
+                ));
+                s.push_str(&format!(
+                    "stepby_job_duration_seconds_count{{job_name=\"{}\"}} {}\n",
+                    escape_label(job_name),
+                    series.count
+                ));
+            }
+        }
+        s
+    }
+
     /// 渲染 Prometheus 文本格式的 HTTP 业务指标
     pub fn render_prometheus(&self) -> String {
         let mut s = String::new();
@@ -554,6 +678,8 @@ impl MetricsRegistry {
         s.push_str(&self.render_ak_prometheus());
         // FCP-010：Web Vitals（前端性能退化告警数据源）
         s.push_str(&self.render_vitals_prometheus());
+        // G-09：定时任务执行计数 / 耗时直方图
+        s.push_str(&self.render_job_prometheus());
         s
     }
 }
@@ -656,21 +782,17 @@ mod tests {
         reg.record_ak_request("/open/v1/profile", "invalid_signature", 0.005);
         reg.record_ak_request("/open/v1/profile", "nonce_reused", 0.005);
         let text = reg.render_prometheus();
-        assert!(text.contains(
-            "stepby_ak_requests_total{path=\"/open/v1/profile\",outcome=\"ok\"} 2"
-        ));
+        assert!(
+            text.contains("stepby_ak_requests_total{path=\"/open/v1/profile\",outcome=\"ok\"} 2")
+        );
         assert!(text.contains(
             "stepby_ak_requests_total{path=\"/open/v1/profile\",outcome=\"invalid_signature\"} 1"
         ));
-        assert!(text.contains(
-            "stepby_ak_verify_failures_total{reason=\"invalid_signature\"} 1"
-        ));
-        assert!(text.contains(
-            "stepby_ak_verify_failures_total{reason=\"nonce_reused\"} 1"
-        ));
-        assert!(text.contains(
-            "stepby_ak_request_duration_seconds_count{path=\"/open/v1/profile\"} 4"
-        ));
+        assert!(text.contains("stepby_ak_verify_failures_total{reason=\"invalid_signature\"} 1"));
+        assert!(text.contains("stepby_ak_verify_failures_total{reason=\"nonce_reused\"} 1"));
+        assert!(
+            text.contains("stepby_ak_request_duration_seconds_count{path=\"/open/v1/profile\"} 4")
+        );
         // ok 不计入失败
         assert!(!text.contains("reason=\"ok\""));
     }
@@ -701,6 +823,50 @@ mod tests {
         ));
         assert!(!text.contains("name=\"XXX\""));
         assert!(text.contains("stepby_frontend_cls{device=\"tablet\"} 0.03"));
+    }
+
+    #[test]
+    fn test_job_execution_metrics_rendering() {
+        // G-09：任务执行计数（job_name,status）+ 耗时直方图（独立桶边界）；
+        // 白名单外 status/空 job_name 忽略防标签基数膨胀
+        let reg = test_instance();
+        reg.record_job_execution("msg_send_retry", "0", 50);
+        reg.record_job_execution("msg_send_retry", "0", 150);
+        reg.record_job_execution("msg_send_retry", "1", 1200);
+        reg.record_job_execution("report_sub_due", "0", 30_000);
+        reg.record_job_execution("bad_job", "2", 100); // 非法 status → 忽略
+        reg.record_job_execution("   ", "0", 100); // 空名 → 忽略
+        let text = reg.render_prometheus();
+        assert!(
+            text.contains(
+                "stepby_job_executions_total{job_name=\"msg_send_retry\",status=\"0\"} 2"
+            )
+        );
+        assert!(
+            text.contains(
+                "stepby_job_executions_total{job_name=\"msg_send_retry\",status=\"1\"} 1"
+            )
+        );
+        assert!(
+            text.contains(
+                "stepby_job_executions_total{job_name=\"report_sub_due\",status=\"0\"} 1"
+            )
+        );
+        assert!(!text.contains("bad_job"));
+        // 耗时直方图：50ms → 0.1 桶、150ms → 0.25 桶、1200ms → 5s 桶、30s → 60s 桶
+        assert!(text.contains(
+            "stepby_job_duration_seconds_bucket{job_name=\"msg_send_retry\",le=\"0.1\"} 1"
+        ));
+        assert!(text.contains(
+            "stepby_job_duration_seconds_bucket{job_name=\"msg_send_retry\",le=\"0.25\"} 2"
+        ));
+        assert!(text.contains(
+            "stepby_job_duration_seconds_bucket{job_name=\"msg_send_retry\",le=\"5\"} 3"
+        ));
+        assert!(text.contains("stepby_job_duration_seconds_count{job_name=\"msg_send_retry\"} 3"));
+        assert!(text.contains(
+            "stepby_job_duration_seconds_bucket{job_name=\"report_sub_due\",le=\"60\"} 1"
+        ));
     }
 
     #[test]

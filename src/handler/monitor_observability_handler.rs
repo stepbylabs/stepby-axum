@@ -219,14 +219,10 @@ pub struct RedisStats {
 pub async fn redis_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<RedisStats>, AppError> {
-    let info_text = state
-        .store
-        .info_summary()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "共享态存储 info_summary 查询失败");
-            AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
-        })?;
+    let info_text = state.store.info_summary().await.map_err(|e| {
+        tracing::error!(error = %e, "共享态存储 info_summary 查询失败");
+        AppError::internal(&crate::tr!("error.cache.info_fetch_failed"))
+    })?;
 
     // local 档：计数文本按 `key=value` 解析，仅 db_size 有真实对应（条目数）
     if state.store.kind() != "redis" {

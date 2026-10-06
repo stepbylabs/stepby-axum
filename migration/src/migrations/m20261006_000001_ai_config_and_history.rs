@@ -15,8 +15,8 @@
 //! - `pub fn` 供 `initialize/mod.rs` 兜底引用（单一事实源，对齐 B4 迁移先例）。
 
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::sea_orm::Statement;
 use sea_orm_migration::sea_orm::DatabaseConnection;
+use sea_orm_migration::sea_orm::Statement;
 
 /// initialize/mod.rs 存量库兜底入口（包装 SchemaManager，主 crate 无需直接依赖
 /// sea-orm-migration）：建 ai_chat_history 表 + `sys.ai.*` 六键幂等种子。
@@ -30,7 +30,9 @@ pub async fn init_ai_config_and_history(db: &DatabaseConnection) -> Result<(), D
     for body in ai_config_seed_bodies(now) {
         let sql = match manager.get_connection().get_database_backend() {
             sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", body),
-            sea_orm::DatabaseBackend::Postgres => format!("INSERT INTO {} ON CONFLICT DO NOTHING", body),
+            sea_orm::DatabaseBackend::Postgres => {
+                format!("INSERT INTO {} ON CONFLICT DO NOTHING", body)
+            }
             _ => format!("INSERT IGNORE INTO {}", body),
         };
         manager.get_connection().execute_unprepared(&sql).await?;
@@ -120,8 +122,16 @@ pub async fn create_ai_chat_history(manager: &SchemaManager<'_>) -> Result<(), D
                         .auto_increment()
                         .primary_key(),
                 )
-                .col(ColumnDef::new(Alias::new("tenant_id")).big_integer().not_null())
-                .col(ColumnDef::new(Alias::new("user_id")).big_integer().not_null())
+                .col(
+                    ColumnDef::new(Alias::new("tenant_id"))
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(Alias::new("user_id"))
+                        .big_integer()
+                        .not_null(),
+                )
                 .col(
                     ColumnDef::new(Alias::new("question"))
                         .string_len(1000)
@@ -146,7 +156,11 @@ pub async fn create_ai_chat_history(manager: &SchemaManager<'_>) -> Result<(), D
                 )
                 .col(ColumnDef::new(Alias::new("success")).char_len(1).not_null())
                 .col(ColumnDef::new(Alias::new("error_msg")).string_len(500))
-                .col(ColumnDef::new(Alias::new("create_time")).date_time().not_null())
+                .col(
+                    ColumnDef::new(Alias::new("create_time"))
+                        .date_time()
+                        .not_null(),
+                )
                 .to_owned(),
         )
         .await?;
@@ -172,7 +186,12 @@ pub fn ai_config_seed_bodies(now_expr: &str) -> Vec<String> {
         (9032, "AI base_url", "sys.ai.base_url", ""),
         (9033, "AI API Key", "sys.ai.api_key", ""),
         (9034, "AI 模型名", "sys.ai.model", "gpt-4o-mini"),
-        (9035, "AI 可查询表白名单", "sys.ai.allowed_tables", "sys_user,sys_dept,sys_role,sys_post,sys_config,sys_dict_type,sys_dict_data"),
+        (
+            9035,
+            "AI 可查询表白名单",
+            "sys.ai.allowed_tables",
+            "sys_user,sys_dept,sys_role,sys_post,sys_config,sys_dict_type,sys_dict_data",
+        ),
     ];
     specs
         .iter()
@@ -213,7 +232,9 @@ impl MigrationTrait for Migration {
         );
         let menu_sql = match manager.get_connection().get_database_backend() {
             sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", menus_sql),
-            sea_orm::DatabaseBackend::Postgres => format!("INSERT INTO {} ON CONFLICT DO NOTHING", menus_sql),
+            sea_orm::DatabaseBackend::Postgres => {
+                format!("INSERT INTO {} ON CONFLICT DO NOTHING", menus_sql)
+            }
             _ => format!("INSERT IGNORE INTO {}", menus_sql),
         };
         manager
@@ -227,7 +248,9 @@ impl MigrationTrait for Migration {
         for (_, key, _) in AI_CONFIG_SEEDS {
             manager
                 .get_connection()
-                .execute_unprepared(&format!("DELETE FROM sys_config WHERE config_key = '{key}'"))
+                .execute_unprepared(&format!(
+                    "DELETE FROM sys_config WHERE config_key = '{key}'"
+                ))
                 .await?;
         }
         manager

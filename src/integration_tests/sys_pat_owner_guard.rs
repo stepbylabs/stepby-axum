@@ -13,12 +13,7 @@ use std::net::SocketAddr;
 use super::{TestContext, login};
 
 /// 以指定 bearer 令牌构造请求。
-fn bearer_request(
-    ctx: &TestContext,
-    bearer: &str,
-    method: Method,
-    uri: &str,
-) -> Request<Body> {
+fn bearer_request(ctx: &TestContext, bearer: &str, method: Method, uri: &str) -> Request<Body> {
     let mut req = Request::builder()
         .method(method)
         .uri(uri)
@@ -55,7 +50,9 @@ async fn test_pat_invalid_after_owner_deleted() {
     ctx.assert_ok(&v);
     // add 接口只返回提示消息，经 list 查询取回 userId
     let v = ctx
-        .get_json(&format!("/system/user/list?userName={uname}&pageNum=1&pageSize=10"))
+        .get_json(&format!(
+            "/system/user/list?userName={uname}&pageNum=1&pageSize=10"
+        ))
         .await;
     ctx.assert_ok(&v);
     let uid = v["rows"][0]["userId"]

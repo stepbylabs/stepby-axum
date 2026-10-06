@@ -40,12 +40,8 @@ impl MigrationName for Migration {
 /// 元组：(索引名, 表名, 列清单, 是否唯一)。MySQL 不支持 CREATE INDEX IF NOT EXISTS：
 /// 迁移侧新表场景直接建（失败上抛真实错误）；兜底侧经 ensure_tenant_index
 /// 先查 information_schema 判存在。
-pub const ALERT_INDEXES: &[(&str, &str, &str, bool)] = &[(
-    "idx_alert_rule_enabled",
-    "sys_alert_rule",
-    "enabled",
-    false,
-)];
+pub const ALERT_INDEXES: &[(&str, &str, &str, bool)] =
+    &[("idx_alert_rule_enabled", "sys_alert_rule", "enabled", false)];
 
 /// 告警菜单种子列清单（迁移与兜底共用）
 pub const ALERT_MENU_COLS: &str = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
@@ -238,10 +234,7 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
 /// 当前时间表达式（跨数据库兼容；SQLite 无 NOW()，落库时取本地时间字面量）
 fn now_expr(manager: &SchemaManager<'_>) -> String {
     if is_sqlite(manager) {
-        format!(
-            "'{}'",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        )
+        format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
     } else {
         "NOW()".to_string()
     }
@@ -256,10 +249,7 @@ async fn execute_idempotent_insert(manager: &SchemaManager<'_>, body: &str) -> R
     } else {
         format!("INSERT IGNORE INTO {body}")
     };
-    manager
-        .get_connection()
-        .execute_unprepared(&sql)
-        .await?;
+    manager.get_connection().execute_unprepared(&sql).await?;
     Ok(())
 }
 
@@ -287,9 +277,7 @@ impl MigrationTrait for Migration {
             } else {
                 manager
                     .get_connection()
-                    .execute_unprepared(&format!(
-                        "CREATE INDEX {idx_name} ON {table} ({cols})"
-                    ))
+                    .execute_unprepared(&format!("CREATE INDEX {idx_name} ON {table} ({cols})"))
                     .await?;
             }
         }

@@ -136,11 +136,7 @@ async fn table_exists(manager: &SchemaManager<'_>, table: &str) -> Result<bool, 
 }
 
 /// 幂等检查列是否存在（三方言）
-async fn has_column(
-    manager: &SchemaManager<'_>,
-    table: &str,
-    column: &str,
-) -> Result<bool, DbErr> {
+async fn has_column(manager: &SchemaManager<'_>, table: &str, column: &str) -> Result<bool, DbErr> {
     let conn = manager.get_connection();
     let backend = conn.get_database_backend();
     let rows = match backend {

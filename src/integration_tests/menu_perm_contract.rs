@@ -131,7 +131,8 @@ async fn test_response_cache_does_not_bypass_rbac() {
         ))
         .await
         .expect("插入空白用户失败");
-    ctx.state.db
+    ctx.state
+        .db
         .execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "INSERT INTO sys_user_role (user_id, role_id) VALUES (9001, 9001)",

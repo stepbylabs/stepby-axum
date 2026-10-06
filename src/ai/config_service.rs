@@ -108,8 +108,12 @@ impl AiConfigService {
         let provider = self
             .effective_string(KEY_PROVIDER, &self.startup.provider)
             .await?;
-        let base_url = self.effective_string(KEY_BASE_URL, &self.startup.base_url).await?;
-        let model = self.effective_string(KEY_MODEL, &self.startup.model).await?;
+        let base_url = self
+            .effective_string(KEY_BASE_URL, &self.startup.base_url)
+            .await?;
+        let model = self
+            .effective_string(KEY_MODEL, &self.startup.model)
+            .await?;
         let allowed_tables_raw = self
             .effective_string(KEY_ALLOWED_TABLES, &self.startup.allowed_tables.join(","))
             .await?;
@@ -179,12 +183,9 @@ impl AiConfigService {
             let url = crate::common::ssrf::validate_url(dto.base_url.trim())
                 .map_err(|e| ServiceError::bad_request(&format!("base_url 不被允许: {e}")))?;
             let port = url.port_or_known_default().unwrap_or(443);
-            crate::common::ssrf::validate_host_resolution(
-                url.host_str().unwrap_or_default(),
-                port,
-            )
-            .await
-            .map_err(|e| ServiceError::bad_request(&format!("base_url 主机不可用: {e}")))?;
+            crate::common::ssrf::validate_host_resolution(url.host_str().unwrap_or_default(), port)
+                .await
+                .map_err(|e| ServiceError::bad_request(&format!("base_url 主机不可用: {e}")))?;
         }
         self.write_key(KEY_ENABLED, if dto.enabled { "true" } else { "false" })
             .await?;
@@ -210,7 +211,10 @@ impl AiConfigService {
         .await?;
         // 热生效：失效 sys_config 缓存（cache-aside 下次读新值）
         self.config_service.refresh_cache().await?;
-        tracing::info!(operator_manual = true, "AI 助手配置已更新（sys.ai.* 六键，热生效）");
+        tracing::info!(
+            operator_manual = true,
+            "AI 助手配置已更新（sys.ai.* 六键，热生效）"
+        );
         Ok(())
     }
 
@@ -218,9 +222,7 @@ impl AiConfigService {
     pub async fn test_connectivity(&self) -> Result<String, ServiceError> {
         let effective = self.get_effective().await?;
         if effective.base_url.is_empty() || effective.api_key.is_empty() {
-            return Err(ServiceError::bad_request(
-                "请先填写 base_url 与 api_key",
-            ));
+            return Err(ServiceError::bad_request("请先填写 base_url 与 api_key"));
         }
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))

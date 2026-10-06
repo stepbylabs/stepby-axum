@@ -21,9 +21,7 @@ use axum::extract::{Path, Query, State};
 
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
-use crate::service::sys_pat_service::{
-    CreatePatDto, CreatePatResult, PatVo, RotateAkResult,
-};
+use crate::service::sys_pat_service::{CreatePatDto, CreatePatResult, PatVo, RotateAkResult};
 use crate::state::AppState;
 
 /// 解析 Operator.user_id（JWT sub）为 i64

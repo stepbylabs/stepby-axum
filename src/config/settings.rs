@@ -36,6 +36,10 @@ pub struct Settings {
     /// 启用 IP 库管理（License Key 加密存储）时必须配置，否则相关功能降级。
     #[serde(default)]
     pub config_enc_key: String,
+    /// 密钥轮换过渡期旧密钥（G-14，可选）：解密 `enc3:k0` 信封用（启动回填把
+    /// 存量 v1/v2/k0 统一迁移到 `enc3:k1` 后即可清空）。空 = 无轮换期（现状）。
+    #[serde(default)]
+    pub config_enc_key_previous: String,
     /// 权限未映射路由的默认处置策略（权限 fail-closed 加固，B3 / W-1）
     ///
     /// - true（**默认**，fail-closed）：未登记权限映射且不在"仅登录白名单"的受保护路由
@@ -152,6 +156,7 @@ impl fmt::Debug for Settings {
             .field("ip_location", &self.ip_location)
             .field("mail", &self.mail)
             .field("config_enc_key", &"<redacted>")
+            .field("config_enc_key_previous", &"<redacted>")
             .field(
                 "permission_deny_by_default",
                 &self.permission_deny_by_default,
@@ -1837,6 +1842,17 @@ pub struct DatabaseConfig {
     /// 写入侧另有防环校验（sys_dept_service），本值属第二道防线。
     #[serde(default = "default_db_dept_cte_max_depth")]
     pub dept_cte_max_depth: u32,
+    /// 慢 SQL 日志阈值（毫秒，默认 1000；**0 = 关闭**）
+    ///
+    /// G-12：超过阈值的语句以 WARN 级记录（走 sqlx `log_slow_statements`，
+    /// 底层为 log crate，与 `sql_logging` 的语句日志同通道）。
+    /// 三后端统一生效：SQLite / PostgreSQL 经 sea-orm `map_sqlx_*_opts` 接线，
+    /// MySQL 经原生 `MySqlConnectOptions::log_slow_statements` 接线。
+    /// 注意：慢语句日志**独立于 `sql_logging` 开关**（sqlx `LogSettings` 的
+    /// `slow_statements_level` 与 `statements_level` 是两个独立字段）——
+    /// `sql_logging=false`（默认，不打印每条语句）时慢语句日志仍可单独开启。
+    #[serde(default = "default_db_slow_sql_threshold_ms")]
+    pub slow_sql_threshold_ms: u64,
 }
 
 /// 手动实现 Debug 以脱敏 url（含数据库密码）
@@ -1852,6 +1868,7 @@ impl fmt::Debug for DatabaseConfig {
             .field("acquire_timeout_secs", &self.acquire_timeout_secs)
             .field("statement_timeout_secs", &self.statement_timeout_secs)
             .field("dept_cte_max_depth", &self.dept_cte_max_depth)
+            .field("slow_sql_threshold_ms", &self.slow_sql_threshold_ms)
             .finish()
     }
 }
@@ -1870,6 +1887,10 @@ fn default_db_statement_timeout_secs() -> u64 {
 
 fn default_db_dept_cte_max_depth() -> u32 {
     30
+}
+
+fn default_db_slow_sql_threshold_ms() -> u64 {
+    1000
 }
 
 #[derive(Clone, Deserialize)]
@@ -2533,6 +2554,10 @@ impl Settings {
         if let Ok(v) = std::env::var("CONFIG_ENC_KEY") {
             self.config_enc_key = v;
         }
+        // G-14：轮换过渡期旧密钥（enc3:k0 解密用，可选）
+        if let Ok(v) = std::env::var("CONFIG_ENC_KEY_PREVIOUS") {
+            self.config_enc_key_previous = v;
+        }
         // 权限 fail-closed 开关（B3 / W-1）：未映射路由是否默认拒绝
         // PERMISSION_DENY_BY_DEFAULT=true 时，受保护路由中未登记权限映射且不在"仅登录白名单"的
         // 路径将被拒绝（403），实现 fail-closed，防止新增路由漏登记权限导致越权。
@@ -2659,7 +2684,9 @@ impl Settings {
         let database_url = match std::env::var("DATABASE_URL") {
             Ok(v) => v,
             Err(_) => {
-                tracing::info!("未检测到配置文件与 DATABASE_URL，已启用零配置默认（SQLite + local 共享态）");
+                tracing::info!(
+                    "未检测到配置文件与 DATABASE_URL，已启用零配置默认（SQLite + local 共享态）"
+                );
                 "sqlite://./data/stepby.db?mode=rwc".to_string()
             }
         };
@@ -2701,6 +2728,7 @@ impl Settings {
                 acquire_timeout_secs: 10,
                 statement_timeout_secs: 60,
                 dept_cte_max_depth: 30,
+                slow_sql_threshold_ms: 1000,
             },
             redis: RedisConfig { url: redis_url },
             jwt: JwtConfig {
@@ -2723,6 +2751,7 @@ impl Settings {
             ip_location: IpLocationConfig::default(),
             mail: MailConfig::default(),
             config_enc_key: std::env::var("CONFIG_ENC_KEY").unwrap_or_default(),
+            config_enc_key_previous: std::env::var("CONFIG_ENC_KEY_PREVIOUS").unwrap_or_default(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
             sys_log: SysLogConfig::default(),
@@ -2791,7 +2820,9 @@ impl Settings {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))?;
         }
-        tracing::warn!("已生成引导 JWT 密钥 data/secret.key；生产环境请通过 JWT_SECRET 环境变量注入");
+        tracing::warn!(
+            "已生成引导 JWT 密钥 data/secret.key；生产环境请通过 JWT_SECRET 环境变量注入"
+        );
         self.jwt.secret = secret;
         Ok(())
     }
@@ -2865,12 +2896,20 @@ impl Settings {
         }
         // B8：CONFIG_ENC_KEY 用于派生 AES-256-GCM 密钥（crypto.rs 以 SHA256(master_key) 作 KDF）。
         // 若显式配置但熵不足（<32 字符），派生出的密钥可被离线暴力枚举，故强制长度下限。
-        // 空值（未配置）保持宽容：系统以明文 fail-open 存储（见 ip_location_service），不在此拦截，
-        // 以免破坏依赖空密钥的开发/测试环境。
+        // 空值（未配置）保持宽容：系统以明文 fail-open 存储（运行期敏感凭据保存入口已
+        // fail-closed 拒绝，见 ip_location_service::save_config），以免破坏依赖空密钥的开发/测试环境。
         if !self.config_enc_key.is_empty() && self.config_enc_key.len() < 32 {
             anyhow::bail!(
                 "CONFIG_ENC_KEY 长度不足 32 字符（当前 {} 字符），低熵密钥无法保证 AES-256-GCM 安全，请使用 ≥32 随机字符",
                 self.config_enc_key.len()
+            );
+        }
+        // G-14：轮换过渡期旧密钥同样强制强度下限——弱旧密钥会削弱整体加密强度
+        // （存量密文经 k0 可被弱密钥离线枚举），对齐 jwt.previous_secrets 的 fail-closed 口径。
+        if !self.config_enc_key_previous.is_empty() && self.config_enc_key_previous.len() < 32 {
+            anyhow::bail!(
+                "CONFIG_ENC_KEY_PREVIOUS 长度不足 32 字符（当前 {} 字符），轮换过渡期旧密钥同样需要满足强度下限",
+                self.config_enc_key_previous.len()
             );
         }
         // v4-P1-2：SSO 启用时强制显式 issuer（https，localhost/127.0.0.1 例外）。
@@ -2937,6 +2976,7 @@ mod tests {
                 acquire_timeout_secs: 10,
                 statement_timeout_secs: 60,
                 dept_cte_max_depth: 30,
+                slow_sql_threshold_ms: 1000,
             },
             redis: RedisConfig {
                 url: "redis://localhost:6379".to_string(),
@@ -2958,6 +2998,7 @@ mod tests {
             ip_location: IpLocationConfig::default(),
             mail: MailConfig::default(),
             config_enc_key: String::new(),
+            config_enc_key_previous: String::new(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
             flow: FlowConfig::default(),
@@ -3050,8 +3091,7 @@ mod tests {
     /// 防止模板改动后与缺省行为悄然漂移。
     #[test]
     fn test_pat_template_matches_default() {
-        let template =
-            std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
+        let template = std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
         let s: Settings = toml::from_str(&template).expect("模板应可解析");
         assert_eq!(s.pat.max_per_user, default_pat_max_per_user());
     }
@@ -3061,8 +3101,7 @@ mod tests {
     /// 与缺省行为悄然漂移——参考 test_pat_template_matches_default 同款模式）。
     #[test]
     fn test_tenant_template_matches_default() {
-        let template =
-            std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
+        let template = std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
         let s: Settings = toml::from_str(&template).expect("模板应可解析");
         assert_eq!(
             s.tenant.management,
@@ -3381,6 +3420,7 @@ mod tests {
                 acquire_timeout_secs: 10,
                 statement_timeout_secs: 60,
                 dept_cte_max_depth: 30,
+                slow_sql_threshold_ms: 1000,
             },
             redis: RedisConfig {
                 url: "redis://:redispass@host:6379".to_string(),
@@ -3411,6 +3451,7 @@ mod tests {
                 starttls: false,
             },
             config_enc_key: "encryption-key-should-not-leak".to_string(),
+            config_enc_key_previous: String::new(),
             monitor: MonitorConfig::default(),
             permission_deny_by_default: true,
             flow: FlowConfig::default(),
@@ -3470,6 +3511,7 @@ mod tests {
             acquire_timeout_secs: 10,
             statement_timeout_secs: 60,
             dept_cte_max_depth: 30,
+            slow_sql_threshold_ms: 1000,
         };
         let debug_str = format!("{:?}", db_config);
         assert!(

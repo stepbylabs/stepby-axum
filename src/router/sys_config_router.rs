@@ -16,12 +16,25 @@ use axum::Router;
 use axum::routing::{delete, get, post, put};
 use std::sync::Arc;
 
-use crate::handler::sys_config_handler;
+use crate::handler::{sys_config_handler, upload_config_handler};
 use crate::state::AppState;
 
 /// 参数配置模块路由
 pub fn config_routes() -> Router<Arc<AppState>> {
     Router::new()
+        // G-11：OSS 存储配置（平台专属，handler 内 tenant_id==0 门控；test 为静态段优先注册）
+        .route(
+            "/system/uploadConfig",
+            get(upload_config_handler::get_config),
+        )
+        .route(
+            "/system/uploadConfig",
+            put(upload_config_handler::update_config),
+        )
+        .route(
+            "/system/uploadConfig/test",
+            post(upload_config_handler::test_config),
+        )
         // 静态路由优先注册
         .route("/system/config/list", get(sys_config_handler::list))
         .route(

@@ -237,7 +237,13 @@ impl SysRateLimitService {
 
         let (rows, total) = self
             .rate_limit_repo
-            .find_page_filtered(offset, limit, query.route_pattern.as_deref(), query.enabled, sort)
+            .find_page_filtered(
+                offset,
+                limit,
+                query.route_pattern.as_deref(),
+                query.enabled,
+                sort,
+            )
             .await?;
         Ok((rows, total))
     }

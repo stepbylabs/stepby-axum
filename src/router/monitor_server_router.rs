@@ -21,9 +21,6 @@ use crate::state::AppState;
 pub fn server_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/monitor/server", get(monitor_server_handler::get_server))
-        .route(
-            "/monitor/db-pool",
-            get(monitor_server_handler::get_db_pool),
-        )
+        .route("/monitor/db-pool", get(monitor_server_handler::get_db_pool))
         .route_layer(axum::middleware::from_fn(platform_only_guard))
 }

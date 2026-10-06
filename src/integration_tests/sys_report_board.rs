@@ -101,13 +101,16 @@ async fn test_report_board_chain() {
 
     // 4. 更新：追加一张卡片（饼图，消息投递分布）
     let mut cfg2 = valid_config();
-    cfg2["cards"].as_array_mut().unwrap().push(serde_json::json!({
-        "id": "c2",
-        "title": "消息投递",
-        "chartType": "pie",
-        "sourceKey": "msg_delivery",
-        "size": { "w": 1, "h": 2 }
-    }));
+    cfg2["cards"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "c2",
+            "title": "消息投递",
+            "chartType": "pie",
+            "sourceKey": "msg_delivery",
+            "size": { "w": 1, "h": 2 }
+        }));
     let v = ctx
         .put_json(
             &format!("/tool/report-board/{board_id}"),
@@ -270,10 +273,7 @@ async fn test_report_board_owner_isolation() {
 
     // 4. 他人改/删 admin 看板 → 404
     for (method, body) in [
-        (
-            Method::PUT,
-            Some(serde_json::json!({ "name": "hijack" })),
-        ),
+        (Method::PUT, Some(serde_json::json!({ "name": "hijack" }))),
         (Method::DELETE, None),
     ] {
         let (status, _) = ctx

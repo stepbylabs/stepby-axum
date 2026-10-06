@@ -61,8 +61,7 @@ fn signed_request(
         nonce,
         sha256_hex(body.as_bytes())
     );
-    let mut mac =
-        <Hmac<Sha256> as KeyInit>::new_from_slice(sk.as_bytes()).expect("HMAC 构造失败");
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(sk.as_bytes()).expect("HMAC 构造失败");
     mac.update(string_to_sign.as_bytes());
     let sig = sig_override
         .unwrap_or_else(|| crate::utils::crypto::hex_encode_digest(&mac.finalize().into_bytes()));
@@ -107,8 +106,7 @@ async fn send(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Valu
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("读取响应体失败");
-    let v: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, v)
 }
 
@@ -136,7 +134,10 @@ async fn test_ak_sign_chain() {
         .as_str()
         .expect("创建响应应含 secretKey 明文")
         .to_string();
-    let pat_id = v["data"]["pat"]["patId"].as_str().expect("patId").to_string();
+    let pat_id = v["data"]["pat"]["patId"]
+        .as_str()
+        .expect("patId")
+        .to_string();
     assert!(
         ak.starts_with("ak") && ak.len() == 26,
         "AK 应为 ak + 24 hex，实际: {ak}"
@@ -239,7 +240,9 @@ async fn test_ak_sign_chain() {
     );
 
     // ---- 6. SK 明文仅返回一次：列表响应无 accessKey/secretKey ----
-    let v = ctx.get_json("/system/user/profile/tokens?pageSize=50").await;
+    let v = ctx
+        .get_json("/system/user/profile/tokens?pageSize=50")
+        .await;
     let rows = v["rows"].as_array().expect("rows 应为数组");
     assert!(
         rows.iter().all(|r| r.get("secretKey").is_none()),
@@ -250,7 +253,8 @@ async fn test_ak_sign_chain() {
         "列表出参不得含 accessKey"
     );
     assert!(
-        rows.iter().any(|r| r["patId"].as_str() == Some(pat_id.as_str())),
+        rows.iter()
+            .any(|r| r["patId"].as_str() == Some(pat_id.as_str())),
         "列表应包含刚创建的 PAT"
     );
 
@@ -287,7 +291,11 @@ async fn test_ak_sign_chain() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "旧 SK 轮换后应失效: {body}");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "旧 SK 轮换后应失效: {body}"
+    );
     assert!(
         body["msg"].as_str().unwrap_or_default().contains("签名"),
         "旧 SK 失败应为签名不匹配: {body}"
@@ -347,7 +355,10 @@ async fn test_ak_sign_chain() {
             }),
         )
         .await;
-    let noak_id = v["data"]["pat"]["patId"].as_str().expect("patId").to_string();
+    let noak_id = v["data"]["pat"]["patId"]
+        .as_str()
+        .expect("patId")
+        .to_string();
     let (status, body) = ctx
         .send_raw(bearer_request(
             &ctx,

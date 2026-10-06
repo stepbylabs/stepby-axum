@@ -17,7 +17,8 @@ use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
 use crate::entity::sys_frontend_error::{
-    ActiveModel as FrontendErrorActiveModel, Column as FrontendErrorColumn, Model as FrontendErrorModel,
+    ActiveModel as FrontendErrorActiveModel, Column as FrontendErrorColumn,
+    Model as FrontendErrorModel,
 };
 use crate::repository::sys_frontend_error::SysFrontendErrorRepository;
 

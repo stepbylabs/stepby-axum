@@ -23,8 +23,8 @@
 //!
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
-use garde::Validate;
 use futures::future::FutureExt;
+use garde::Validate;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -243,10 +243,7 @@ impl SysConfigService {
             CONFIG_NULL_CACHE_TTL
         };
         let cache_value = value.unwrap_or(CONFIG_NULL_MARKER);
-        let _ = self
-            .store
-            .set_ex(cache_key, cache_value, ttl as u64)
-            .await;
+        let _ = self.store.set_ex(cache_key, cache_value, ttl as u64).await;
     }
 
     /// DEL 单个缓存 key（best-effort，失败仅 warn）。
@@ -447,9 +444,7 @@ impl SysConfigService {
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
             sort::resolve_column::<crate::entity::sys_config::Entity>(prop, SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         let begin = match query.begin_time.as_deref() {
@@ -696,8 +691,7 @@ impl SysConfigService {
         );
 
         // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
-        let before_snapshot =
-            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
 
         let now = crate::common::datetime::now_naive();
         let mut am: SysConfigActiveModel = existing.into();
@@ -767,8 +761,7 @@ impl SysConfigService {
                     let model = config_repo.base().update_conn(txn, am).await?;
 
                     // 审计合规域：UPDATE 变更留痕（敏感列由 record_change 内部统一打码）
-                    let after =
-                        serde_json::to_value(&model).unwrap_or(serde_json::Value::Null);
+                    let after = serde_json::to_value(&model).unwrap_or(serde_json::Value::Null);
                     let audit_operator =
                         crate::service::sys_audit_change_service::resolve_operator(
                             txn,
@@ -897,9 +890,7 @@ impl SysConfigService {
         let page = PageDomain::from(&query);
         let sort = page.order_by_column.as_deref().and_then(|prop| {
             sort::resolve_column::<crate::entity::sys_config::Entity>(prop, SORTABLE_COLUMNS)
-                .map(|col| {
-                    SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref()))
-                })
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),

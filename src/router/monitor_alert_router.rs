@@ -31,10 +31,7 @@ pub fn monitor_alert_routes() -> Router<Arc<AppState>> {
     Router::new()
         // 静态路由优先注册
         .route("/monitor/alert/list", get(monitor_alert_handler::list))
-        .route(
-            "/monitor/alert/export",
-            post(monitor_alert_handler::export),
-        )
+        .route("/monitor/alert/export", post(monitor_alert_handler::export))
         .route(
             "/monitor/alert/changeEnabled",
             put(monitor_alert_handler::change_enabled),

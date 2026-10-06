@@ -37,11 +37,7 @@ impl SysReportBoardRepository {
     }
 
     /// 按 ID 查询看板（强制限定属主；他人/不存在的看板统一返回 None → 服务层 404 语义）
-    pub async fn find_by_id_and_user(
-        &self,
-        id: i64,
-        user_id: i64,
-    ) -> Result<Option<Model>, DbErr> {
+    pub async fn find_by_id_and_user(&self, id: i64, user_id: i64) -> Result<Option<Model>, DbErr> {
         SysReportBoard::find()
             .filter(Column::Id.eq(id))
             .filter(Column::UserId.eq(user_id))

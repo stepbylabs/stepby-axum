@@ -3,15 +3,15 @@
 //! 纯函数实现 SigV4 核心计算，便于脱离网络单测（对齐 AWS 官方文档测试向量）。
 //! 上层 [`super::s3::S3Backend`] 复用这些函数组装 canonical request 并发送 HTTP 请求。
 
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// HMAC-SHA256（SigV4 签名密钥逐级 HMAC 使用）
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac =
-        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC key 长度满足要求（任意长度均允许）");
+    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key)
+        .expect("HMAC key 长度满足要求（任意长度均允许）");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }

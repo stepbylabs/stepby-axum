@@ -123,6 +123,8 @@ pub struct AppState {
     pub ip_location_service: IpLocationService,
     /// AI 助手运行时配置 Service（AI-01：sys.ai.* 双源热化 + api_key 信封加密）
     pub ai_config_service: Arc<crate::ai::config_service::AiConfigService>,
+    /// G-11：OSS 存储配置运行时服务（sys.upload.s3.* 双源 + 后端指纹缓存）
+    pub upload_config_service: Arc<crate::service::upload_config_service::UploadConfigService>,
     /// 文件存储后端（F1：local / s3，按 `upload.backend` 配置切换）
     pub storage: Arc<dyn crate::storage::StorageBackend>,
     /// WebSocket 全局广播通道（实时通知推送）
@@ -229,6 +231,8 @@ impl AppState {
         let config_service = SysConfigService::new(db.clone(), store.clone());
         // §5.39 AI-01：ai_config_service 需要在 config_service 被 move 进结构体前克隆
         let config_service_for_ai = config_service.clone();
+        // G-11：upload_config_service 同样在 move 前克隆
+        let config_service_for_upload = config_service.clone();
 
         // 字段级权限 M2：矩阵服务复用 config_service（第一层平台开关走 cache-aside 热加载）。
         // 提前实例化（Self{} 构造会 move config_service 原值）。
@@ -377,6 +381,15 @@ impl AppState {
                 config.ai.clone(),
                 config.config_enc_key.clone(),
             )),
+            upload_config_service: Arc::new(
+                crate::service::upload_config_service::UploadConfigService::new(
+                    db.clone().into(),
+                    config_service_for_upload,
+                    config.upload.s3.clone(),
+                    config.upload.backend.clone(),
+                    config.config_enc_key.clone(),
+                ),
+            ),
             mailer_service: MailerService::new(config.clone()),
             job_scheduler,
             db,
@@ -390,5 +403,23 @@ impl AppState {
             ws_users: RwLock::new(HashMap::new()),
             observability,
         }
+    }
+}
+
+/// G-11：上传链路存储后端运行时解析（统一入口）
+///
+/// - config.toml 档位 `local` 或无运行时覆盖 → 启动时构建的 `storage`（零行为变化）；
+/// - 档位 `s3` 且 `sys.upload.s3.*` 运行时覆盖生效 → 指纹缓存的运行时后端
+///   （配置未变复用实例，变更整实例替换，旧实例 Arc 存活至在途请求结束）。
+///
+/// 保存/读取/删除链路统一经本方法取后端，避免"写进新配置、删在旧配置"的撕裂。
+impl AppState {
+    pub async fn resolve_storage(
+        &self,
+    ) -> Result<std::sync::Arc<dyn crate::storage::StorageBackend>, crate::common::ServiceError>
+    {
+        self.upload_config_service
+            .resolve_s3_backend(&self.storage)
+            .await
     }
 }

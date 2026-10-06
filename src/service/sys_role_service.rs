@@ -20,7 +20,9 @@ use crate::common::constants::{SUPER_ADMIN_ROLE_ID, SUPER_ADMIN_USER_ID};
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
-use crate::entity::sys_role::{ActiveModel as SysRoleActiveModel, Column as RoleColumn, Model as SysRoleModel};
+use crate::entity::sys_role::{
+    ActiveModel as SysRoleActiveModel, Column as RoleColumn, Model as SysRoleModel,
+};
 use crate::entity::sys_role_dept::ActiveModel as SysRoleDeptActiveModel;
 use crate::entity::sys_role_menu::ActiveModel as SysRoleMenuActiveModel;
 use crate::entity::sys_user::Column as UserColumn;
@@ -30,8 +32,8 @@ use crate::repository::sys_dept::SysDeptRepository;
 use crate::repository::sys_menu::SysMenuRepository;
 use crate::repository::sys_role::SysRoleRepository;
 use crate::repository::sys_role_dept::SysRoleDeptRepository;
-use crate::repository::sys_role_menu::SysRoleMenuRepository;
 use crate::repository::sys_role_field_perm::SysRoleFieldPermRepository;
+use crate::repository::sys_role_menu::SysRoleMenuRepository;
 use crate::repository::sys_user::SysUserRepository;
 use crate::repository::sys_user_role::SysUserRoleRepository;
 use crate::shared_store::SharedStore;
@@ -383,9 +385,8 @@ impl SysRoleService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_role::Entity>(prop, SORTABLE_COLUMNS).map(
-                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
-            )
+            sort::resolve_column::<crate::entity::sys_role::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         // 数据权限过滤参数（P0-6 统一入口）
@@ -431,9 +432,8 @@ impl SysRoleService {
         // 导出与页面列表同序：动态排序白名单解析口径一致
         let page = PageDomain::from(&query);
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_role::Entity>(prop, SORTABLE_COLUMNS).map(
-                |col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())),
-            )
+            sort::resolve_column::<crate::entity::sys_role::Entity>(prop, SORTABLE_COLUMNS)
+                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         // 导出使用大分页，获取全部符合条件的记录（上限 EXPORT_MAX_ROWS + 数据权限过滤）
@@ -580,8 +580,7 @@ impl SysRoleService {
                     let new_role = role_repo.base().insert_conn(txn, am).await?;
 
                     // 1.5 审计合规域：INSERT 变更留痕（同事务提交/回滚，失败令业务一并回滚）
-                    let after =
-                        serde_json::to_value(&new_role).unwrap_or(serde_json::Value::Null);
+                    let after = serde_json::to_value(&new_role).unwrap_or(serde_json::Value::Null);
                     let audit_operator =
                         crate::service::sys_audit_change_service::resolve_operator(
                             txn,
@@ -696,8 +695,7 @@ impl SysRoleService {
         }
 
         // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
-        let before_snapshot =
-            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let role_repo = self.role_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
         let result = self
@@ -759,8 +757,7 @@ impl SysRoleService {
                     }
 
                     // 3. 审计合规域：UPDATE 变更留痕（同事务提交/回滚，失败令业务一并回滚）
-                    let after =
-                        serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
+                    let after = serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
                     let audit_operator =
                         crate::service::sys_audit_change_service::resolve_operator(
                             txn,
@@ -822,8 +819,7 @@ impl SysRoleService {
         let deleted_role_key = format!("{}_deleted_{}", existing.role_key, role_id);
 
         // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
-        let before_snapshot =
-            serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
+        let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let role_repo = self.role_repo.clone();
         let role_menu_repo = self.role_menu_repo.clone();
         let role_field_perm_repo = self.role_field_perm_repo.clone();
@@ -1246,8 +1242,11 @@ impl SysRoleService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序（查询目标为 sys_user）
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, AUTH_USER_SORTABLE_COLUMNS)
-                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+            sort::resolve_column::<crate::entity::sys_user::Entity>(
+                prop,
+                AUTH_USER_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
@@ -1302,8 +1301,11 @@ impl SysRoleService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序（查询目标为 sys_user）
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_user::Entity>(prop, AUTH_USER_SORTABLE_COLUMNS)
-                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+            sort::resolve_column::<crate::entity::sys_user::Entity>(
+                prop,
+                AUTH_USER_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
 
         // P0-6：操作人数据范围（与 user list 一致），防止枚举全部用户
@@ -1490,7 +1492,9 @@ impl SysRoleService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         if !crate::common::tenant::tenant_allowed(operator_tid, target.tenant_id) {
-            return Err(ServiceError::forbidden(&crate::tr!("error.common.forbidden")));
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
         }
         Ok(())
     }

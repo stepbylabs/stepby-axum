@@ -548,8 +548,22 @@ mod tests {
         loop {
             let (page, _) = repo
                 .find_page_with_data_scope(
-                    0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-                    None, None, &[],
+                    0,
+                    size,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    cursor,
+                    None,
+                    None,
+                    None,
+                    &[],
                     None,
                 )
                 .await
@@ -674,11 +688,25 @@ mod tests {
         // OFFSET 全量（大 limit，无过滤）作为基准集合
         let (offset_all, _) = repo
             .find_page_with_data_scope(
-                0, 1000, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, &[],
-                    None,
-                )
-                .await
+                0,
+                1000,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .await
             .unwrap();
         let offset_ids: std::collections::HashSet<i64> =
             offset_all.iter().map(|u| u.user_id).collect();
@@ -689,8 +717,22 @@ mod tests {
         loop {
             let (page, _) = repo
                 .find_page_with_data_scope(
-                    0, size, None, None, None, None, None, None, None, None, None, cursor, None,
-                    None, None, &[],
+                    0,
+                    size,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    cursor,
+                    None,
+                    None,
+                    None,
+                    &[],
                     None,
                 )
                 .await

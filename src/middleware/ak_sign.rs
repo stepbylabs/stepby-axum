@@ -109,7 +109,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 macro_rules! ak_fail {
     ($key:literal) => {{
         let outcome: &'static str = $key.strip_prefix("error.ak.").unwrap_or("unknown");
-        (outcome, $crate::common::error::AppError::new(401, $crate::tr!($key)))
+        (
+            outcome,
+            $crate::common::error::AppError::new(401, $crate::tr!($key)),
+        )
     }};
 }
 
@@ -374,9 +377,16 @@ mod tests {
     fn test_nonce_key_binds_access_key_namespace() {
         let a1 = nonce_key_for("AKID-alpha", "n-123");
         let a2 = nonce_key_for("AKID-beta", "n-123");
-        assert_eq!(a1, nonce_key_for("AKID-alpha", "n-123"), "同凭据同 nonce 键必须确定");
+        assert_eq!(
+            a1,
+            nonce_key_for("AKID-alpha", "n-123"),
+            "同凭据同 nonce 键必须确定"
+        );
         assert_ne!(a1, a2, "同 nonce 跨凭据必须映射到不同槽位键");
-        assert!(a1.starts_with("ak:nonce:AKID-alpha:"), "键必须含凭据命名空间前缀");
+        assert!(
+            a1.starts_with("ak:nonce:AKID-alpha:"),
+            "键必须含凭据命名空间前缀"
+        );
         assert!(a1.ends_with(":n-123"), "键必须含 nonce 本身");
         // 空串边界（构造层已过滤空 nonce，此处锁定函数本身的确定性）
         assert_eq!(nonce_key_for("AKID-alpha", ""), "ak:nonce:AKID-alpha:");

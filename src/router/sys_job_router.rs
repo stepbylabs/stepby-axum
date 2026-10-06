@@ -3,7 +3,7 @@
 //!
 //! 路由结构：
 //! - /monitor/job/* — 任务管理（8 个接口）
-//! - /monitor/jobLog/* — 任务日志（4 个接口）
+//! - /monitor/jobLog/* — 任务日志（5 个接口，含 G-09 运行统计报表）
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
@@ -29,6 +29,8 @@ pub fn job_routes() -> Router<Arc<AppState>> {
         .route("/monitor/job/export", post(sys_job_handler::export))
         // ===== 任务日志 =====
         .route("/monitor/jobLog/list", get(sys_job_log_handler::list))
+        // G-09：运行统计报表（成功率趋势 / 耗时分布 / 失败 TOP）
+        .route("/monitor/jobLog/stats", get(sys_job_log_handler::stats))
         .route(
             "/monitor/jobLog/{jobLogIds}",
             delete(sys_job_log_handler::remove),

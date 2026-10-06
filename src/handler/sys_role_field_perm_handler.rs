@@ -111,8 +111,7 @@ pub async fn get_field_hidden(
     Query(query): Query<FieldPermQuery>,
 ) -> Result<AjaxResult<Vec<String>>, AppError> {
     // 白名单外 → 400（与矩阵接口同口径，前端只对白名单表调用）
-    if crate::service::sys_role_field_perm_service::field_perm_whitelist(&query.table_key)
-        .is_none()
+    if crate::service::sys_role_field_perm_service::field_perm_whitelist(&query.table_key).is_none()
     {
         return Err(AppError::new(
             400,

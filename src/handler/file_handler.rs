@@ -104,7 +104,8 @@ pub async fn list(
     // 统一走存储后端列举（local 读目录 / s3 ListObjectsV2），URL 由后端生成；
     // 目录带操作者租户维度，仅可见本租户文件
     let objects = state
-        .storage
+        .resolve_storage()
+        .await?
         .list(
             &upload_cfg.common_dir,
             operator.tenant_id(),
@@ -215,7 +216,8 @@ pub async fn upload(
 
     // P0-3：统一校验 + 保存（扩展名白名单、危险类型拒绝、magic bytes 严格化、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
-        state.storage.as_ref(),
+        // G-11：运行时解析存储后端（s3 档 + sys.upload.s3.* 覆盖生效时用运行时后端）
+        state.resolve_storage().await?.as_ref(),
         file_bytes
             .as_deref()
             .ok_or_else(|| AppError::bad_request(&crate::tr!("error.file.field_not_found")))?,
@@ -277,7 +279,8 @@ pub async fn delete(
     // 统一走存储后端删除（local 本地删盘带根目录前缀校验 / s3 DeleteObject，幂等）；
     // 目录带操作者租户维度，无法删除其它租户文件
     state
-        .storage
+        .resolve_storage()
+        .await?
         .delete(&upload_cfg.common_dir, operator.tenant_id(), file_name)
         .await?;
 

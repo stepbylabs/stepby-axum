@@ -778,8 +778,11 @@ impl SysJobService {
         let limit = page.limit();
         // 动态排序：白名单命中才生效，未命中/缺省由 repository 回退默认排序
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_job_log::Entity>(prop, JOB_LOG_SORTABLE_COLUMNS)
-                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+            sort::resolve_column::<crate::entity::sys_job_log::Entity>(
+                prop,
+                JOB_LOG_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
         let (rows, total) = self
             .job_log_repo
@@ -837,6 +840,55 @@ impl SysJobService {
         Ok(())
     }
 
+    // ==================== G-09：定时任务运行统计报表 ====================
+
+    /// 运行报表窗口默认天数
+    pub const JOB_STATS_DEFAULT_DAYS: u32 = 7;
+    /// 运行报表窗口上限天数（防一次性聚合过大窗口）
+    pub const JOB_STATS_MAX_DAYS: u32 = 30;
+    /// 报表数据源行数上界（防失控表拖垮接口；截断时响应 truncated=true 提示缩小窗口/先清日志）
+    const JOB_STATS_MAX_ROWS: u64 = 200_000;
+
+    /// 定时任务运行统计报表（G-09：成功率趋势 / 耗时分布 / 失败 TOP 的数据源）
+    ///
+    /// 聚合口径：
+    /// - 成功/失败按 `status`（"0"/"1"）；
+    /// - 耗时聚合只用 `duration_ms` 非 NULL 行（G-09 新列；存量旧行为 NULL，跳过不造假）；
+    /// - 按天分桶用**服务器本地日期**（与 `parse_query_date` 的"本地日"过滤口径对称，
+    ///   UTC 存储时间经 `Local` 换算归桶）；
+    /// - 失败 TOP 取失败次数前 10 的 job_name。
+    ///
+    /// 多租户：tenant_scope=Some(tid) 仅本租户；None（平台 0）不过滤。
+    pub async fn get_job_log_stats(
+        &self,
+        days: Option<u32>,
+        tenant_scope: Option<i64>,
+    ) -> Result<JobLogStatsVo, ServiceError> {
+        let days = days
+            .unwrap_or(Self::JOB_STATS_DEFAULT_DAYS)
+            .clamp(1, Self::JOB_STATS_MAX_DAYS);
+        // 窗口起点 = 本地今天往前推 (days-1) 天的本地 00:00 对应 UTC 瞬间
+        let today_local = chrono::Local::now().date_naive();
+        let window_start_local = today_local
+            .checked_sub_signed(chrono::Duration::days((days - 1) as i64))
+            .ok_or_else(|| ServiceError::bad_request("报表窗口日期计算溢出"))?;
+        let begin_utc = window_start_local
+            .and_time(chrono::NaiveTime::MIN)
+            .and_local_timezone(chrono::Local)
+            .single()
+            .map(|dt| dt.with_timezone(&chrono::Utc).naive_utc())
+            .ok_or_else(|| ServiceError::bad_request("报表窗口日期解析失败"))?;
+
+        let rows = self
+            .job_log_repo
+            .find_window_for_stats(begin_utc, Self::JOB_STATS_MAX_ROWS, tenant_scope)
+            .await?;
+        let truncated = rows.len() as u64 >= Self::JOB_STATS_MAX_ROWS;
+        let mut vo = aggregate_job_stats(rows, days, today_local);
+        vo.truncated = truncated;
+        Ok(vo)
+    }
+
     /// 导出任务列表（受 EXPORT_MAX_ROWS 限制，避免无上限查询导致 OOM）
     ///
     /// 多租户 Phase 2：tenant_scope=Some(tid) 仅导出本租户任务；None（平台 0）不过滤。
@@ -879,8 +931,11 @@ impl SysJobService {
         // 导出与页面列表同序：动态排序白名单解析口径一致
         let page = PageDomain::from(&query);
         let sort = page.order_by_column.as_deref().and_then(|prop| {
-            sort::resolve_column::<crate::entity::sys_job_log::Entity>(prop, JOB_LOG_SORTABLE_COLUMNS)
-                .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
+            sort::resolve_column::<crate::entity::sys_job_log::Entity>(
+                prop,
+                JOB_LOG_SORTABLE_COLUMNS,
+            )
+            .map(|col| SortOrder::new(col, sort::parse_direction(page.is_asc.as_deref())))
         });
         let (rows, _) = self
             .job_log_repo
@@ -980,5 +1035,287 @@ mod tests {
         assert_eq!(vo.job.status, Some("0".to_string()));
         // next_valid_time 可能是 Some 或 None（取决于 cron 是否可解析）
         // 但 from_model 不应改变 job 原始字段
+    }
+}
+
+// ==================== G-09：运行统计报表 VO 与聚合 ====================
+
+/// 运行报表单日聚合桶
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JobStatsDailyVo {
+    /// 日期（服务器本地时区 `YYYY-MM-DD`）
+    pub date: String,
+    /// 当日执行总数
+    pub total: u64,
+    /// 当日成功数（status="0"）
+    pub success: u64,
+    /// 当日失败数（status="1"）
+    pub failed: u64,
+    /// 当日成功率（百分数 0-100，1 位小数；total=0 时为 0.0）
+    pub success_rate: f64,
+    /// 当日平均耗时 ms（仅 duration_ms 非 NULL 行参与；无样本为 0）
+    pub avg_ms: u64,
+}
+
+/// 运行报表失败 TOP 条目
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JobFailureTopVo {
+    pub job_name: String,
+    pub failed_count: u64,
+}
+
+/// 运行报表总 VO（`GET /monitor/jobLog/stats`）
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JobLogStatsVo {
+    /// 统计窗口天数（1-30，调用方传参 clamp 后回显）
+    pub window_days: u32,
+    /// 窗口内日志总数
+    pub total: u64,
+    /// 窗口内成功总数
+    pub success: u64,
+    /// 窗口内失败总数
+    pub failed: u64,
+    /// 总成功率（百分数 0-100，1 位小数；total=0 时为 0.0）
+    pub success_rate: f64,
+    /// 平均耗时 ms（仅 duration_ms 非 NULL 行参与；无样本为 0）
+    pub avg_ms: u64,
+    /// 最大单次耗时 ms（仅 duration_ms 非 NULL 行；无样本为 0）
+    pub max_ms: u64,
+    /// 行数截断标记：数据源达到行数上界时为 true（提示缩小窗口或先清理历史日志）
+    pub truncated: bool,
+    /// 按天序列（含空天补零，窗口完整连续）
+    pub daily: Vec<JobStatsDailyVo>,
+    /// 失败 TOP 10（按失败次数降序）
+    pub top_failures: Vec<JobFailureTopVo>,
+}
+
+/// 纯函数：把窗口内调度日志行按本地日期分桶聚合（G-09）
+///
+/// 应用层聚合（非 SQL GROUP BY date(...)）：三方言日期函数分叉（SQLite date() /
+/// MySQL DATE() / PostgreSQL date_trunc），应用层聚合零方言差异且本纯函数可直接单测；
+/// 窗口完整性（空天补零）由 `days` + `today_local` 保证。
+/// 耗时聚合只取 `duration_ms` 非 NULL 行（存量旧行为 NULL 跳过，不编造 0 拉低均值）；
+/// 负值按脏数据防御性跳过。
+fn aggregate_job_stats(
+    rows: Vec<SysJobLogModel>,
+    days: u32,
+    today_local: chrono::NaiveDate,
+) -> JobLogStatsVo {
+    use std::collections::HashMap;
+
+    /// 单日桶累加器
+    struct Bucket {
+        total: u64,
+        success: u64,
+        failed: u64,
+        dur_ms_sum: u64,
+        dur_samples: u64,
+    }
+    let mut daily_map: HashMap<chrono::NaiveDate, Bucket> = HashMap::new();
+    let mut failure_map: HashMap<String, u64> = HashMap::new();
+
+    let mut total = 0u64;
+    let mut success = 0u64;
+    let mut failed = 0u64;
+    let mut dur_ms_sum = 0u64;
+    let mut dur_samples = 0u64;
+    let mut max_ms = 0u64;
+
+    for row in rows {
+        let is_success = row.status.as_deref() == Some("0");
+        let is_failed = row.status.as_deref() == Some("1");
+        total += 1;
+        if is_success {
+            success += 1;
+        } else if is_failed {
+            failed += 1;
+        }
+        // 本地日期归桶（UTC 存储时间 → 服务器本地日）
+        let local_date = row.create_time.map(|utc_naive| {
+            use chrono::TimeZone;
+            chrono::Local.from_utc_datetime(&utc_naive).date_naive()
+        });
+        if let Some(d) = local_date {
+            let bucket = daily_map.entry(d).or_insert(Bucket {
+                total: 0,
+                success: 0,
+                failed: 0,
+                dur_ms_sum: 0,
+                dur_samples: 0,
+            });
+            bucket.total += 1;
+            if is_success {
+                bucket.success += 1;
+            } else if is_failed {
+                bucket.failed += 1;
+            }
+            if let Some(ms) = row.duration_ms.filter(|v| *v >= 0) {
+                bucket.dur_ms_sum += ms as u64;
+                bucket.dur_samples += 1;
+            }
+        }
+        if is_failed {
+            *failure_map.entry(row.job_name.clone()).or_insert(0) += 1;
+        }
+        if let Some(ms) = row.duration_ms.filter(|v| *v >= 0) {
+            let ms = ms as u64;
+            dur_ms_sum += ms;
+            dur_samples += 1;
+            if ms > max_ms {
+                max_ms = ms;
+            }
+        }
+    }
+
+    // 按窗口生成完整日期序列（空天补零）
+    let mut daily = Vec::with_capacity(days as usize);
+    for i in (0..days).rev() {
+        let date = today_local - chrono::Duration::days(i as i64);
+        let (b_total, b_success, b_failed, b_sum, b_n) = match daily_map.get(&date) {
+            Some(b) => (b.total, b.success, b.failed, b.dur_ms_sum, b.dur_samples),
+            None => (0, 0, 0, 0, 0),
+        };
+        daily.push(JobStatsDailyVo {
+            date: date.format("%Y-%m-%d").to_string(),
+            total: b_total,
+            success: b_success,
+            failed: b_failed,
+            success_rate: rate_percent(b_success, b_total),
+            avg_ms: b_sum.checked_div(b_n).unwrap_or(0),
+        });
+    }
+
+    // 失败 TOP 10（失败次数降序，次数并列按名称字典序稳定排序）
+    let mut top: Vec<(String, u64)> = failure_map.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    top.truncate(10);
+
+    JobLogStatsVo {
+        window_days: days,
+        total,
+        success,
+        failed,
+        success_rate: rate_percent(success, total),
+        avg_ms: dur_ms_sum.checked_div(dur_samples).unwrap_or(0),
+        max_ms,
+        truncated: false,
+        daily,
+        top_failures: top
+            .into_iter()
+            .map(|(job_name, failed_count)| JobFailureTopVo {
+                job_name,
+                failed_count,
+            })
+            .collect(),
+    }
+}
+
+/// 成功率（百分数 0-100，1 位小数；total=0 → 0.0）
+fn rate_percent(success: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    ((success as f64 / total as f64) * 1000.0).round() / 10.0
+}
+
+#[cfg(test)]
+mod job_stats_tests {
+    use super::*;
+    use crate::entity::sys_job_log;
+
+    /// 构造一条调度日志（聚合测试数据源）
+    fn log_row(
+        job_name: &str,
+        status: &str,
+        duration_ms: Option<i64>,
+        create_time: Option<chrono::NaiveDateTime>,
+    ) -> sys_job_log::Model {
+        sys_job_log::Model {
+            tenant_id: 0,
+            job_log_id: 0,
+            job_name: job_name.to_string(),
+            job_group: "DEFAULT".to_string(),
+            invoke_target: "test.target".to_string(),
+            job_message: None,
+            status: Some(status.to_string()),
+            exception_info: None,
+            duration_ms,
+            create_time,
+        }
+    }
+
+    #[test]
+    fn test_aggregate_basic_rates_and_duration() {
+        let now_utc = chrono::Utc::now().naive_utc();
+        let rows = vec![
+            log_row("job_a", "0", Some(100), Some(now_utc)),
+            log_row("job_a", "0", Some(200), Some(now_utc)),
+            log_row("job_a", "1", Some(900), Some(now_utc)),
+            log_row("job_b", "0", None, Some(now_utc)), // 无耗时样本：不参与 avg
+        ];
+        let today = chrono::Local::now().date_naive();
+        let vo = aggregate_job_stats(rows, 3, today);
+        assert_eq!(vo.total, 4);
+        assert_eq!(vo.success, 3);
+        assert_eq!(vo.failed, 1);
+        assert_eq!(vo.success_rate, 75.0);
+        // 耗时均值只取 3 个样本：(100+200+900)/3 = 400
+        assert_eq!(vo.avg_ms, 400);
+        assert_eq!(vo.max_ms, 900);
+        // 失败 TOP：job_a 1 次
+        assert_eq!(vo.top_failures.len(), 1);
+        assert_eq!(vo.top_failures[0].job_name, "job_a");
+        // 窗口完整：3 天序列且最后一天 = 今天（4 条全落今日）
+        assert_eq!(vo.daily.len(), 3);
+        assert_eq!(vo.daily[2].total, 4);
+        assert_eq!(vo.daily[2].avg_ms, 400);
+        // 空天补零
+        assert_eq!(vo.daily[0].total, 0);
+        assert_eq!(vo.daily[0].success_rate, 0.0);
+    }
+
+    #[test]
+    fn test_aggregate_empty_window() {
+        let today = chrono::Local::now().date_naive();
+        let vo = aggregate_job_stats(Vec::new(), 1, today);
+        assert_eq!(vo.total, 0);
+        assert_eq!(vo.success_rate, 0.0);
+        assert_eq!(vo.avg_ms, 0);
+        assert_eq!(vo.max_ms, 0);
+        assert_eq!(vo.daily.len(), 1);
+        assert!(vo.top_failures.is_empty());
+        assert!(!vo.truncated);
+    }
+
+    #[test]
+    fn test_aggregate_skips_negative_duration() {
+        let now_utc = chrono::Utc::now().naive_utc();
+        let rows = vec![
+            // 未知 status：计数但不入成功/失败；耗时统计独立于 status（成败皆有耗时语义）
+            log_row("job_x", "9", Some(50), Some(now_utc)),
+            // 负耗时（脏数据）：不参与耗时聚合
+            log_row("job_x", "0", Some(-5), Some(now_utc)),
+        ];
+        let today = chrono::Local::now().date_naive();
+        let vo = aggregate_job_stats(rows, 1, today);
+        assert_eq!(vo.total, 2);
+        assert_eq!(vo.success, 1);
+        assert_eq!(vo.failed, 0);
+        assert_eq!(
+            vo.avg_ms, 50,
+            "负耗时脏数据不得参与均值（有效样本仅 50ms 一条）"
+        );
+        assert_eq!(vo.max_ms, 50);
+    }
+
+    #[test]
+    fn test_rate_percent_edge() {
+        assert_eq!(rate_percent(0, 0), 0.0);
+        assert_eq!(rate_percent(1, 3), 33.3);
+        assert_eq!(rate_percent(2, 3), 66.7);
+        assert_eq!(rate_percent(3, 3), 100.0);
     }
 }

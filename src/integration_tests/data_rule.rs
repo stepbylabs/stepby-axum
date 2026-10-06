@@ -3,8 +3,8 @@
 //! 真实建规则 → build_conditions 求值 → 以 Condition 执行查询验证注入效果。
 
 use super::TestContext;
-use sea_orm::{ColumnTrait, Condition, DatabaseBackend, EntityTrait, QueryFilter, Statement};
 use sea_orm::ConnectionTrait;
+use sea_orm::{ColumnTrait, Condition, DatabaseBackend, EntityTrait, QueryFilter, Statement};
 
 /// 端到端：fixed 规则 + current_user 规则 OR 合并 → 查询仅命中满足任一规则的行。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -16,8 +16,24 @@ async fn test_data_rule_conditions_inject_and_evaluate() {
     // 规则 1（挂角色 2）：sys_user.user_name eq fixed 'stepby'
     // 规则 2（挂角色 2）：sys_user.user_id ge fixed '1'（uid=1 → 所有 id>=1 都命中）
     let rules: Vec<(i64, &str, &str, &str, &str, &str, &str)> = vec![
-        (9101, "仅 stepby", "sys_user", "user_name", "eq", "fixed", "stepby"),
-        (9102, "本人 ID 起", "sys_user", "user_id", "ge", "fixed", "1"),
+        (
+            9101,
+            "仅 stepby",
+            "sys_user",
+            "user_name",
+            "eq",
+            "fixed",
+            "stepby",
+        ),
+        (
+            9102,
+            "本人 ID 起",
+            "sys_user",
+            "user_id",
+            "ge",
+            "fixed",
+            "1",
+        ),
     ];
     for (id, name, field, op, vt, val, rv) in rules {
         db.execute_raw(Statement::from_sql_and_values(
@@ -39,7 +55,9 @@ async fn test_data_rule_conditions_inject_and_evaluate() {
         .expect("绑定规则失败");
     }
 
-    let service = crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(ctx.state.db.clone()));
+    let service = crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(
+        ctx.state.db.clone(),
+    ));
     let rule_ctx = crate::service::data_rule_service::DataRuleContext {
         tenant_id: 0,
         user_id: 1,
@@ -111,7 +129,9 @@ async fn test_data_rule_conditions_inject_and_evaluate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_data_rule_no_rules_is_noop() {
     let ctx = TestContext::new().await;
-    let service = crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(ctx.state.db.clone()));
+    let service = crate::service::data_rule_service::DataRuleService::new(std::sync::Arc::new(
+        ctx.state.db.clone(),
+    ));
     let rule_ctx = crate::service::data_rule_service::DataRuleContext {
         tenant_id: 0,
         user_id: 1,

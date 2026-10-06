@@ -206,11 +206,7 @@ pub struct SysAlertService {
 }
 
 impl SysAlertService {
-    pub fn new(
-        db: DatabaseConnection,
-        store: Arc<dyn SharedStore>,
-        config: Arc<Settings>,
-    ) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>, config: Arc<Settings>) -> Self {
         Self {
             repo: SysAlertRuleRepository::new(db.clone()),
             msg_service: SysMsgService::new(db.clone(), config),
@@ -412,13 +408,13 @@ impl SysAlertService {
 
     /// 单规则评估（内部统一入口），返回粗粒度结果
     async fn evaluate_rule(&self, rule: &AlertRuleModel) -> Result<EvaluateOutcome, ServiceError> {
-        self.evaluate_rule_detailed(rule)
-            .await
-            .map(|r| if r.fired {
+        self.evaluate_rule_detailed(rule).await.map(|r| {
+            if r.fired {
                 EvaluateOutcome::Fired
             } else {
                 EvaluateOutcome::Skipped
-            })
+            }
+        })
     }
 
     /// 单规则评估（完整明细）：
@@ -460,10 +456,7 @@ impl SysAlertService {
             return Ok(AlertEvaluateResult {
                 metric_value: value,
                 fired: false,
-                reason: crate::tr!(
-                    "alert.evaluate.silent",
-                    minutes = rule.silent_minutes
-                ),
+                reason: crate::tr!("alert.evaluate.silent", minutes = rule.silent_minutes),
             });
         }
 
@@ -589,8 +582,7 @@ impl SysAlertService {
     pub async fn metric_value(&self, metric: &str) -> Result<f64, ServiceError> {
         match metric {
             "login_failed_5m" => {
-                let since = crate::common::datetime::now_naive()
-                    - chrono::Duration::minutes(5);
+                let since = crate::common::datetime::now_naive() - chrono::Duration::minutes(5);
                 let count = sys_logininfor::Entity::find()
                     .filter(sys_logininfor::Column::Status.eq("1"))
                     .filter(sys_logininfor::Column::LoginTime.gte(since))
@@ -601,11 +593,11 @@ impl SysAlertService {
             "http_5xx_5m" => {
                 // 进程内 5xx 窗口计数（metrics.rs：monitoring_middleware 真实记录）
                 Ok(crate::observability::metrics::MetricsRegistry::global()
-                    .count_recent_5xx(std::time::Duration::from_secs(300)) as f64)
+                    .count_recent_5xx(std::time::Duration::from_secs(300))
+                    as f64)
             }
             "job_failed_24h" => {
-                let since = crate::common::datetime::now_naive()
-                    - chrono::Duration::hours(24);
+                let since = crate::common::datetime::now_naive() - chrono::Duration::hours(24);
                 let count = sys_job_log::Entity::find()
                     .filter(sys_job_log::Column::Status.eq("1"))
                     .filter(sys_job_log::Column::CreateTime.gte(since))

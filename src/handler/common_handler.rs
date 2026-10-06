@@ -538,7 +538,8 @@ pub async fn upload(
 
     // P0-3：统一校验 + 保存（扩展名白名单、危险类型拒绝、magic bytes、UUID 文件名、写盘）
     let saved = crate::common::upload::save_upload_bytes(
-        state.storage.as_ref(),
+        // G-11：运行时解析存储后端（s3 档 + sys.upload.s3.* 覆盖生效时用运行时后端）
+        state.resolve_storage().await?.as_ref(),
         file_bytes.as_deref().ok_or_else(|| {
             AppError::bad_request(&crate::tr!("error.common_handler.field_not_found_file"))
         })?,
@@ -602,7 +603,8 @@ pub async fn download(
     // 读取目录带请求者租户维度，无法读取其它租户文件
     let tenant_id = operator.tenant_id();
     let bytes = state
-        .storage
+        .resolve_storage()
+        .await?
         .read(&upload_cfg.common_dir, tenant_id, file_name)
         .await?
         .ok_or_else(|| AppError::not_found(&crate::tr!("error.common_handler.file_not_found")))?;
@@ -610,7 +612,8 @@ pub async fn download(
     // delete=true 时下载后删除原文件（后端删除幂等：不存在视为成功）
     if params.delete {
         state
-            .storage
+            .resolve_storage()
+            .await?
             .delete(&upload_cfg.common_dir, tenant_id, file_name)
             .await?;
     }
@@ -670,7 +673,8 @@ pub async fn download_resource(
     }
 
     let bytes = state
-        .storage
+        .resolve_storage()
+        .await?
         .read(&dir, tenant_id, &key)
         .await?
         .ok_or_else(|| {
@@ -729,7 +733,8 @@ pub async fn serve_upload(
     }
 
     let bytes = state
-        .storage
+        .resolve_storage()
+        .await?
         .read(&dir, tenant_id, key)
         .await?
         .ok_or_else(|| {

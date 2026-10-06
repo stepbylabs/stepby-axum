@@ -137,8 +137,11 @@ pub struct SourceDataVo {
 }
 
 /// 消息投递状态扇区标签（zh / en）
-const MSG_STATUS_LABELS: [(&str, &str); 3] =
-    [("成功", "Success"), ("失败", "Failed"), ("待重试", "Pending Retry")];
+const MSG_STATUS_LABELS: [(&str, &str); 3] = [
+    ("成功", "Success"),
+    ("失败", "Failed"),
+    ("待重试", "Pending Retry"),
+];
 
 // ==================== CRUD DTO / VO ====================
 
@@ -224,10 +227,7 @@ pub fn validate_config(config: &ReportBoardConfig) -> Result<(), ServiceError> {
         if !(1..=2).contains(&card.size.w) || !(1..=2).contains(&card.size.h) {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.report_board.config_invalid",
-                reason = format!(
-                    "card size invalid: w={}, h={}",
-                    card.size.w, card.size.h
-                )
+                reason = format!("card size invalid: w={}, h={}", card.size.w, card.size.h)
             )));
         }
         if !is_source_allowed(&card.source_key) {
@@ -383,8 +383,7 @@ impl SysReportBoardService {
                 validate_config(&c)?;
                 c
             }
-            None => serde_json::from_str::<ReportBoardConfig>(&existing.config)
-                .unwrap_or_default(),
+            None => serde_json::from_str::<ReportBoardConfig>(&existing.config).unwrap_or_default(),
         };
 
         // 同名预检（排除自身）
@@ -400,7 +399,8 @@ impl SysReportBoardService {
                 id,
                 user_id,
                 dto.name.map(|_| name.clone()),
-                dto.config.map(|_| serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string())),
+                dto.config
+                    .map(|_| serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string())),
                 dto.enabled.map(|_| enabled.clone()),
             )
             .await?;
@@ -528,8 +528,7 @@ impl SysReportBoardService {
         }
         let rows = query.all(&self.db).await.unwrap_or_default();
 
-        let mut map: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for u in &rows {
             if let Some(ct) = u.create_time {
                 *map.entry(ct.format("%Y-%m-%d").to_string()).or_insert(0) += 1;
@@ -583,7 +582,9 @@ impl SysReportBoardService {
         let sessions: Vec<crate::utils::crypto::OnlineSession> = values
             .iter()
             .flatten()
-            .filter_map(|json| serde_json::from_str::<crate::utils::crypto::OnlineSession>(json).ok())
+            .filter_map(|json| {
+                serde_json::from_str::<crate::utils::crypto::OnlineSession>(json).ok()
+            })
             .collect();
 
         // 旧会话兜底：tenant_id=0 的会话按 user_id 回查 sys_user.tenant_id
@@ -592,8 +593,7 @@ impl SysReportBoardService {
             .filter(|s| s.tenant_id == 0 && s.user_id > 0)
             .map(|s| s.user_id)
             .collect();
-        let mut legacy_map: std::collections::HashMap<i64, i64> =
-            std::collections::HashMap::new();
+        let mut legacy_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
         if !legacy_user_ids.is_empty()
             && let Ok(rows) = SysUser::find()
                 .filter(UserColumn::UserId.is_in(legacy_user_ids))
@@ -672,8 +672,12 @@ fn board_vo_from_model(m: &crate::entity::sys_report_board::Model) -> BoardVo {
         name: m.name.clone(),
         config: serde_json::from_str::<ReportBoardConfig>(&m.config).unwrap_or_default(),
         enabled: m.enabled.clone(),
-        create_time: m.create_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-        update_time: m.update_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+        create_time: m
+            .create_time
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+        update_time: m
+            .update_time
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
     }
 }
 
@@ -756,7 +760,10 @@ mod tests {
     #[test]
     fn validate_config_rejects_duplicate_ids() {
         let cfg = ReportBoardConfig {
-            cards: vec![card("c1", "login_trend", 1, 1), card("c1", "user_growth", 1, 1)],
+            cards: vec![
+                card("c1", "login_trend", 1, 1),
+                card("c1", "user_growth", 1, 1),
+            ],
         };
         assert!(validate_config(&cfg).is_err(), "重复 id 应被拒绝");
     }

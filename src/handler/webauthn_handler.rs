@@ -79,6 +79,7 @@ pub async fn register_start(
         code: 200,
         msg: crate::tr!("msg.success.default"),
         data: Some(options),
+        trace_id: None,
     })
 }
 
@@ -192,6 +193,7 @@ pub async fn login_start(
         code: 200,
         msg: crate::tr!("msg.success.default"),
         data: Some(options),
+        trace_id: None,
     })
 }
 

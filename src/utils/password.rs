@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 
 use argon2::{
     Argon2,
-    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 
 /// 旧密码方案的固定盐值（仅用于验证旧 MD5 哈希，不用于新密码）

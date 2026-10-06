@@ -27,8 +27,7 @@ use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_alert_rule::Model as AlertRuleModel;
 use crate::middleware::Operator;
 use crate::service::sys_alert_service::{
-    AlertEvaluateResult, AlertRuleAddDto, AlertRuleEditDto, AlertRuleEnabledDto,
-    AlertRuleQueryDto,
+    AlertEvaluateResult, AlertRuleAddDto, AlertRuleEditDto, AlertRuleEnabledDto, AlertRuleQueryDto,
 };
 use crate::state::AppState;
 use crate::utils::parse_id_list;
