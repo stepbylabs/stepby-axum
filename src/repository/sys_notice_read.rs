@@ -8,7 +8,7 @@ use sea_orm::*;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::entity::sys_notice_read::{Column, Entity as SysNoticeRead, Model};
+use crate::entity::sys_notice_read::{ActiveModel, Column, Entity as SysNoticeRead, Model};
 use crate::repository::base::BaseRepository;
 
 /// 通知公告已读记录 Repository
@@ -44,8 +44,10 @@ impl SysNoticeReadRepository {
 
     /// 标记公告已读（原子化插入，已读则不重复插入）
     ///
-    /// 使用数据库原生的冲突忽略语义（INSERT OR IGNORE / ON CONFLICT DO NOTHING），
-    /// 避免"先 SELECT 后 INSERT"的 TOCTOU 竞态。依赖 sys_notice_read 表的唯一约束 (notice_id, user_id)。
+    /// §5.55（sea-orm 迁移）：冲突忽略语义改由 sea-query `OnConflict` 生成——
+    /// 三方言（INSERT OR IGNORE / ON CONFLICT DO NOTHING / INSERT IGNORE）
+    /// 由 ORM 按连接方言自动产出，消除三份手写 SQL 的方言漂移面。
+    /// 依赖 sys_notice_read 表的唯一约束 (notice_id, user_id)。
     pub async fn mark_read(
         &self,
         notice_id: i64,
@@ -54,37 +56,37 @@ impl SysNoticeReadRepository {
     ) -> Result<(), DbErr> {
         let now = crate::common::datetime::now_naive();
         let db = self.base.db();
-        let backend = db.get_database_backend();
-
-        // 各数据库后端的冲突忽略语法不同，按 backend 选择原生 SQL
         // 从属表归属：read 记录随父公告租户（写入时必须带父资源租户）
-        let sql = match backend {
-            DatabaseBackend::Sqlite => {
-                "INSERT OR IGNORE INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES (?, ?, ?, ?)"
-            }
-            DatabaseBackend::Postgres => {
-                "INSERT INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES ($1, $2, $3, $4) ON CONFLICT (notice_id, user_id) DO NOTHING"
-            }
-            DatabaseBackend::MySql => {
-                "INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES (?, ?, ?, ?)"
-            }
-            _ => unreachable!("unknown backend"),
+        let am = ActiveModel {
+            notice_id: Set(notice_id),
+            user_id: Set(user_id),
+            read_time: Set(Some(now)),
+            tenant_id: Set(tenant_id),
+            ..Default::default()
         };
-
-        let values: Vec<Value> = vec![
-            notice_id.into(),
-            user_id.into(),
-            now.into(),
-            tenant_id.into(),
-        ];
-        let stmt = Statement::from_sql_and_values(backend, sql, values);
-        db.execute_raw(stmt).await?;
+        let insert = SysNoticeRead::insert(am);
+        // MySQL 不支持无列 ON CONFLICT DO NOTHING，需显式冲突主键列。
+        // on_conflict_do_nothing 返回 TryInsert：Conflicted（已存在被忽略）是**正常路径**
+        // （§5.53 迁移初版误把 RecordNotInserted 当错误上抛 → 400"数据重复"——链路测试实证）
+        match db.get_database_backend() {
+            DatabaseBackend::MySql => {
+                let _ = insert
+                    .on_conflict_do_nothing_on([Column::NoticeId, Column::UserId])
+                    .exec(db)
+                    .await?;
+            }
+            _ => {
+                let _ = insert.on_conflict_do_nothing().exec(db).await?;
+            }
+        }
         Ok(())
     }
 
-    /// 批量标记公告已读（单条 SQL 多值插入，冲突忽略，替代循环 N 次）
+    /// 批量标记公告已读（insert_many 多值插入，冲突忽略，替代循环 N 次）
     ///
-    /// 使用数据库原生的冲突忽略语义（INSERT OR IGNORE / ON CONFLICT DO NOTHING / INSERT IGNORE），
+    /// §5.55（sea-orm 迁移）：多值 VALUES 拼接改由 sea-orm `insert_many` +
+    /// `OnConflict` 生成——占位符方言差异（$n vs ?）由 ORM 封装，
+    /// 消除手写占位符计数与三份方言 SQL 的漂移面。
     /// 依赖 sys_notice_read 表的唯一约束 (notice_id, user_id)，避免 TOCTOU 竞态。
     pub async fn mark_read_batch(
         &self,
@@ -97,65 +99,28 @@ impl SysNoticeReadRepository {
         }
         let now = crate::common::datetime::now_naive();
         let db = self.base.db();
-        let backend = db.get_database_backend();
 
-        // Postgres 需 $n 占位符，Sqlite/MySQL 用 ?（from_sql_and_values 不改写占位符）
-        let ph = |i: usize| -> String {
-            if backend == DatabaseBackend::Postgres {
-                format!("${i}")
-            } else {
-                "?".to_string()
-            }
-        };
-        // 构建多值 VALUES 子句：每个 notice_id 一组 4 个占位符
-        let values_clause = notice_ids
+        let models: Vec<ActiveModel> = notice_ids
             .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let base = i * 4 + 1;
-                format!(
-                    "({}, {}, {}, {})",
-                    ph(base),
-                    ph(base + 1),
-                    ph(base + 2),
-                    ph(base + 3)
-                )
+            .map(|nid| ActiveModel {
+                notice_id: Set(*nid),
+                user_id: Set(user_id),
+                read_time: Set(Some(now)),
+                tenant_id: Set(tenant_id),
+                ..Default::default()
             })
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect();
 
-        let sql = match backend {
-            DatabaseBackend::Sqlite => {
-                format!(
-                    "INSERT OR IGNORE INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES {}",
-                    values_clause
-                )
-            }
-            DatabaseBackend::Postgres => {
-                format!(
-                    "INSERT INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES {} ON CONFLICT (notice_id, user_id) DO NOTHING",
-                    values_clause
-                )
-            }
-            DatabaseBackend::MySql => {
-                format!(
-                    "INSERT IGNORE INTO sys_notice_read (notice_id, user_id, read_time, tenant_id) VALUES {}",
-                    values_clause
-                )
-            }
-            _ => unreachable!("unknown backend"),
-        };
-
-        let mut values: Vec<Value> = Vec::with_capacity(notice_ids.len() * 4);
-        for notice_id in &notice_ids {
-            values.push((*notice_id).into());
-            values.push(user_id.into());
-            values.push(now.into());
-            values.push(tenant_id.into());
-        }
-
-        let stmt = Statement::from_sql_and_values(backend, sql, values);
-        db.execute_raw(stmt).await?;
+        let insert = SysNoticeRead::insert_many(models);
+        // §5.53 终：统一 on_conflict_do_nothing_on（显式冲突目标列）——
+        // 无目标版 on_conflict_do_nothing 在 insert_many 路径下对 SQLite
+        // 实测未注入 ON CONFLICT 子句（UNIQUE 冲突上抛，链路测试实证），
+        // 带目标列版本三方言均正确生成（MySQL 走 ON DUPLICATE KEY polyfill）。
+        // Conflicted（部分/全部已存在被忽略）是正常路径，不得当错误上抛
+        let _ = insert
+            .on_conflict_do_nothing_on([Column::NoticeId, Column::UserId])
+            .exec(db)
+            .await?;
         Ok(())
     }
 
