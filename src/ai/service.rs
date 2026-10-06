@@ -26,6 +26,8 @@ pub struct AiChatOutcome {
     pub rows: Vec<Value>,
     /// LLM 文本（含其解释）
     pub answer: String,
+    /// §5.57 token 用量观测（provider 未上报时为 None）
+    pub token_usage: Option<crate::ai::provider::TokenUsage>,
 }
 
 pub struct AiService {
@@ -268,7 +270,10 @@ impl AiService {
             anyhow::bail!("白名单表 schema 为空（请检查 [ai].allowed_tables）");
         }
         let system_prompt = self.system_prompt(&schema, caller_tid);
-        let answer = self.provider().complete(&system_prompt, q).await?;
+        // §5.57 token 观测：complete_detailed 返回文本 + provider 上报的用量（None=未上报）
+        let completion = self.provider().complete_detailed(&system_prompt, q).await?;
+        let answer = completion.text;
+        let token_usage = completion.usage;
         let raw_sql =
             Self::extract_sql(&answer).context("未能从 AI 回复中提取 SQL，请换个问法或稍后再试")?;
         let guarded = sql_guard::guard(
@@ -285,6 +290,7 @@ impl AiService {
             columns,
             rows,
             answer,
+            token_usage,
         })
     }
 
@@ -330,11 +336,14 @@ impl AiService {
             columns,
             rows,
             answer: format!("重放自历史 #{history_id}：{question}"),
+            // 重放不调用 LLM——无用量数据
+            token_usage: None,
         })
     }
 
     /// 写入一条历史（**spawn 调用，失败仅 error 日志不阻塞响应**）。
     /// 不存结果集本体（SQL 可重放设计，§5.39 决策 2）；guard 拒绝也留痕（success='0'）。
+    /// §5.57：usage 为 provider 返回的 token 用量（None = provider 未上报）。
     #[allow(clippy::too_many_arguments)]
     pub async fn save_history(
         &self,
@@ -348,12 +357,13 @@ impl AiService {
         duration_ms: u128,
         success: bool,
         error_msg: Option<&str>,
+        usage: Option<crate::ai::provider::TokenUsage>,
     ) {
         let backend = self.db.get_database_backend();
         let stmt = Statement::from_sql_and_values(
             backend,
-            "INSERT INTO ai_chat_history (tenant_id, user_id, question, sql_text, tables_used, columns_json, rows_count, duration_ms, success, error_msg, create_time) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            "INSERT INTO ai_chat_history (tenant_id, user_id, question, sql_text, tables_used, columns_json, rows_count, duration_ms, success, error_msg, prompt_tokens, completion_tokens, total_tokens, create_time) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
             [
                 tenant_id.into(),
                 user_id.into(),
@@ -365,6 +375,9 @@ impl AiService {
                 (duration_ms as i64).into(),
                 (if success { "1" } else { "0" }).into(),
                 error_msg.unwrap_or_default().into(),
+                usage.map(|u| u.prompt_tokens).into(),
+                usage.map(|u| u.completion_tokens).into(),
+                usage.map(|u| u.total_tokens).into(),
             ],
         );
         if let Err(e) = self.db.execute_raw(stmt).await {

@@ -1842,6 +1842,14 @@ async fn ensure_data_rule_tables(db: &DatabaseConnection) -> anyhow::Result<()> 
         format!("{insert_prefix}{menu_cols} VALUES {menu_rows}{insert_suffix}"),
     ))
     .await?;
+    // §5.57 token 观测列兜底（等价迁移 m20261006_000003）：存量库 ai_chat_history
+    // 幂等补三列（SQLite 无 IF NOT EXISTS——按错误忽略，列已存在属正常情况）
+    for col in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        let ddl = format!("ALTER TABLE ai_chat_history ADD COLUMN {col} BIGINT NULL");
+        if let Err(e) = db.execute_raw(Statement::from_string(backend, ddl)).await {
+            tracing::debug!("ai_chat_history.{col} 列补建跳过（可能已存在）: {}", e);
+        }
+    }
     tracing::info!("data_rule 表/菜单已就绪（幂等确保完成）");
     Ok(())
 }
