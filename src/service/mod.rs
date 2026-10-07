@@ -21,6 +21,7 @@ pub mod ip_location_service;
 pub mod mailer_service;
 pub mod scim_group_service;
 pub mod scim_service;
+pub mod sms_provider;
 pub mod sso_service;
 pub mod sys_alert_service;
 pub mod sys_audit_change_service;

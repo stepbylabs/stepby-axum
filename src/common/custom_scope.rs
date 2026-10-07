@@ -1,4 +1,5 @@
 //! 数据权限加深：自定义部门 SQL（`custom_sql`）的安全解析与条件构建。
+//! 权威口径与消费面矩阵见 docs/optimization/data-scope-matrix-2026-10-07.md（双路径之二）。
 //!
 //! # 动机
 //!

@@ -492,6 +492,8 @@ error:
     channel_disabled: 消息渠道已停用，不可使用
     channel_code_duplicate: 消息渠道编码已存在
     channel_type_invalid: "消息渠道类型无效: %{channel_type}（支持: email/sms/site）"
+    sms_config_invalid: '短信渠道配置无效'
+    sms_send_failed: '短信投递失败，已转入待重试'
     channel_in_use: "消息渠道「%{channel_name}」已被消息模板引用，无法删除"
     channel_id_invalid: 消息渠道 ID 不合法
     config_json_invalid: 渠道配置 JSON 无效

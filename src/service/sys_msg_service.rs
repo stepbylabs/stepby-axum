@@ -45,6 +45,7 @@ use crate::repository::sys_msg_send_log::SysMsgSendLogRepository;
 use crate::repository::sys_msg_template::SysMsgTemplateRepository;
 use crate::repository::sys_user_pref::SysUserPrefRepository;
 use crate::service::MailerService;
+use crate::service::sms_provider::SmsProvider;
 use crate::service::sys_user_pref_service::{PrefChannel, allows_delivery, now_hm_str};
 use crate::utils::parse_id_list;
 
@@ -694,7 +695,9 @@ impl SysMsgService {
         channel_id: i64,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
-        let channel = self.get_channel_by_id(channel_id, operator_tid).await?;
+        let channel = self
+            .get_channel_model_by_id(channel_id, operator_tid)
+            .await?;
         match channel.channel_type.as_str() {
             "email" => {
                 if !self.mailer.is_enabled() {
@@ -704,9 +707,27 @@ impl SysMsgService {
                 }
                 Ok(())
             }
-            "sms" | "site" => {
-                // 校验通过即为配置合法（无外部网关可连通性探测）
-                Ok(())
+            "site" => Ok(()),
+            "sms" => {
+                // G-07：sms 校验配置完整性（gateway_url/鉴权头配对等），fail-closed
+                let cfg = crate::service::sms_provider::SmsChannelConfig::from_config_json(
+                    channel.config_json.as_ref().map(|e| e.0.as_str()),
+                )
+                .map_err(|e| {
+                    tracing::warn!(
+                        "短信渠道 {} 连通性测试：配置无效: {}",
+                        channel.channel_code,
+                        e
+                    );
+                    ServiceError::bad_request(&crate::tr!("error.msg.sms_config_invalid"))
+                })?;
+                let provider = crate::service::sms_provider::GenericHttpProvider::new();
+                provider.probe(&cfg).await.map_err(|e| {
+                    ServiceError::bad_request(&format!(
+                        "{}: {e}",
+                        crate::tr!("error.msg.sms_config_invalid")
+                    ))
+                })
             }
             _ => Err(ServiceError::bad_request(&crate::tr!(
                 "error.msg.channel_type_invalid"
@@ -1017,9 +1038,31 @@ impl SysMsgService {
                 Ok(())
             }
             "sms" => {
-                tracing::warn!(
-                    "消息渠道 sms 暂无短信网关接入，模拟发送成功: to={}",
-                    to_addr
+                // G-07：真实投递——按渠道 config_json 解析网关配置（EncryptedString
+                // 读路径已解密），GenericHttpProvider 真实 POST；失败 Err 交由调用方
+                // 记 status='2' 待重试（B6：超时 + 重试上限 + 失败审计），绝不静默丢弃。
+                let cfg = crate::service::sms_provider::SmsChannelConfig::from_config_json(
+                    channel.config_json.as_ref().map(|e| e.0.as_str()),
+                )
+                .map_err(|e| {
+                    tracing::error!("短信渠道 {} 配置无效: {}", channel.channel_code, e);
+                    ServiceError::bad_request(&crate::tr!("error.msg.sms_config_invalid"))
+                })?;
+                let provider = crate::service::sms_provider::GenericHttpProvider::new();
+                let gateway_id = provider.send(&cfg, to_addr, content).await.map_err(|e| {
+                    tracing::error!(
+                        "短信投递失败渠道={} to={}: {}",
+                        channel.channel_code,
+                        to_addr,
+                        e
+                    );
+                    ServiceError::internal(&crate::tr!("error.msg.sms_send_failed"))
+                })?;
+                tracing::info!(
+                    "短信投递受理成功渠道={} to={} 网关回执={}",
+                    channel.channel_code,
+                    to_addr,
+                    gateway_id
                 );
                 Ok(())
             }

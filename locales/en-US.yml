@@ -492,6 +492,8 @@ error:
     channel_disabled: Message channel is disabled and cannot be used
     channel_code_duplicate: Message channel code already exists
     channel_type_invalid: "Invalid message channel type: %{channel_type} (supported: email/sms/site)"
+    sms_config_invalid: 'Invalid SMS channel config'
+    sms_send_failed: 'SMS delivery failed, moved to retry'
     channel_in_use: "Message channel \"%{channel_name}\" is referenced by message templates and cannot be deleted"
     channel_id_invalid: Invalid message channel ID
     config_json_invalid: Invalid channel configuration JSON
