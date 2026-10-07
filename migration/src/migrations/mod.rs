@@ -105,3 +105,6 @@ pub mod m20261006_000003_ai_token_usage;
 
 pub mod m20261007_000001_job_log_duration;
 pub mod m20261007_000002_upload_config_menu;
+pub mod m20261007_000003_flow_definition;
+pub mod m20261007_000004_report_dataset;
+pub mod m20261007_000005_flow_report_menus;

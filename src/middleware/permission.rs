@@ -376,6 +376,24 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("DELETE", "/system/scimGroup/{id}", "system:scimgroup:remove"),
 
     // ===== 角色管理 =====
+    ("GET", "/system/flow/definition/list", "flow:definition:list"),
+    ("GET", "/system/flow/definition/{flowId}", "flow:definition:query"),
+    ("POST", "/system/flow/definition", "flow:definition:add"),
+    ("PUT", "/system/flow/definition", "flow:definition:edit"),
+    ("POST", "/system/flow/definition/publish/{flowId}", "flow:definition:publish"),
+    ("DELETE", "/system/flow/definition/{flowId}", "flow:definition:remove"),
+
+    // ===== 报表数据集与大屏（G-01 M1；save/view 同权限键为设计文档 §2.3 决策）=====
+    ("GET", "/report/dataset/list", "report:dataset:list"),
+    ("GET", "/report/dataset/{datasetId}", "report:dataset:list"),
+    ("POST", "/report/dataset", "report:dataset:edit"),
+    ("PUT", "/report/dataset", "report:dataset:edit"),
+    ("DELETE", "/report/dataset/{datasetId}", "report:dataset:edit"),
+    ("POST", "/report/dataset/preview", "report:dataset:edit"),
+    ("GET", "/report/dashboard/list", "report:dashboard:view"),
+    ("GET", "/report/dashboard/{dashboardId}", "report:dashboard:view"),
+    ("POST", "/report/dashboard", "report:dashboard:view"),
+    ("DELETE", "/report/dashboard/{dashboardId}", "report:dashboard:view"),
     ("GET", "/system/role/list", "system:role:list"),
     ("GET", "/system/role/optionselect", "system:role:query"),
     ("GET", "/system/role/{id}", "system:role:query"),
@@ -1764,6 +1782,17 @@ mod tests {
             ("DELETE", "/system/report/sub/{subId}"),
             ("PUT", "/system/report/sub/{subId}/status"),
             ("POST", "/system/report/sub/{subId}/run"),
+            // report_dataset_router（G-01 M1：报表数据集与大屏）
+            ("GET", "/report/dataset/list"),
+            ("GET", "/report/dataset/{datasetId}"),
+            ("POST", "/report/dataset"),
+            ("PUT", "/report/dataset"),
+            ("DELETE", "/report/dataset/{datasetId}"),
+            ("POST", "/report/dataset/preview"),
+            ("GET", "/report/dashboard/list"),
+            ("GET", "/report/dashboard/{dashboardId}"),
+            ("POST", "/report/dashboard"),
+            ("DELETE", "/report/dashboard/{dashboardId}"),
             // sys_web_hook_router
             ("GET", "/monitor/webHook/list"),
             ("POST", "/monitor/webHook/export"),
@@ -1795,6 +1824,13 @@ mod tests {
             ("POST", "/system/flow/task/{taskId}/action"),
             ("POST", "/system/flow/task/{taskId}/countersign-add"),
             ("POST", "/system/flow/export"),
+            // flow_definition_router（G-02 M1：可视化流程定义 CRUD/发布）
+            ("GET", "/system/flow/definition/list"),
+            ("GET", "/system/flow/definition/{flowId}"),
+            ("POST", "/system/flow/definition"),
+            ("PUT", "/system/flow/definition"),
+            ("POST", "/system/flow/definition/publish/{flowId}"),
+            ("DELETE", "/system/flow/definition/{flowId}"),
         ];
 
         let mut uncovered: Vec<(&str, &str)> = Vec::new();

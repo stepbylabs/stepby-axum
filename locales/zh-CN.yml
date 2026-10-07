@@ -125,6 +125,11 @@ error:
     pat_forbidden: 审批操作须本人登录会话执行，不能使用访问令牌（PAT）
     countersign_duplicate: 该审批人已在当前审批节点，无需重复加签
     biz_type_unregistered: 业务单据类型未在审批引擎注册（biz_type::REGISTRY），无法推进审批
+    def_not_found: 流程定义不存在
+    def_code_duplicate: 流程编码已存在
+    def_id_required: 缺少流程定义 ID
+    def_published_immutable: 已发布版本不可修改图定义，请发布新版本
+    graph_invalid: 流程图校验失败
   sso:
     platform_protected: 平台根部门不允许通过租户接口操作
     ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户
@@ -427,6 +432,17 @@ error:
     type_invalid: "报表类型不合法，仅支持 login_stats / user_stats / msg_stats / custom，当前值: %{value}"
     config_json_invalid: 报表配置 config 必须是合法 JSON
     delete_sub_failed: 删除报表的关联订阅失败
+    busy: 报表查询并发已达上限，请稍后重试
+    dashboard_code_duplicate: 大屏编码已存在
+    dashboard_not_found: 大屏不存在
+    dataset_code_duplicate: 数据集编码已存在
+    dataset_disabled: 数据集已停用，不可试跑
+    dataset_id_required: 缺少数据集 ID
+    dataset_not_found: 数据集不存在
+    layout_invalid: 大屏布局 layout_json 不合法（需为对象且 schemaVersion 在 1-10）
+    param_missing: 缺少必填参数
+    query_timeout: 数据集查询超时
+    sql_invalid: SQL 模板校验失败
   report_sub:
     id_empty: 订阅 ID 不能为空
     not_found: 订阅不存在

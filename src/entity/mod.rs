@@ -8,9 +8,12 @@
 
 pub mod prelude;
 
+pub mod flow_definition;
 pub mod flow_demo_doc;
 pub mod gen_table;
 pub mod gen_table_column;
+pub mod report_dashboard;
+pub mod report_dataset;
 pub mod sys_alert_rule;
 pub mod sys_audit_change;
 pub mod sys_backup_log;
