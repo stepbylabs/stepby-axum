@@ -34,6 +34,7 @@ mod menu_perm_contract;
 mod monitor;
 mod monitor_extra;
 mod platform_guard;
+mod report_dataset;
 mod response_cache;
 mod scim;
 mod scim_groups;

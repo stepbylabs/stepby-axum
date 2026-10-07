@@ -110,3 +110,4 @@ pub mod m20261007_000004_report_dataset;
 pub mod m20261007_000005_flow_report_menus;
 pub mod m20261007_000006_flow_task_action;
 pub mod m20261007_000007_sms_cloud_columns;
+pub mod m20261007_000008_report_menus_visible;

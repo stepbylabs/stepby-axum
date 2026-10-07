@@ -27,6 +27,11 @@ pub fn report_routes() -> Router<Arc<AppState>> {
             "/report/dataset/{datasetId}",
             get(report_dataset_handler::dataset_info),
         )
+        // SQL 明文回填（编辑专用；edit 权限键在 permission.rs 把关）
+        .route(
+            "/report/dataset/{datasetId}/sql",
+            post(report_dataset_handler::dataset_sql),
+        )
         .route("/report/dataset", post(report_dataset_handler::dataset_add))
         .route("/report/dataset", put(report_dataset_handler::dataset_edit))
         .route(
