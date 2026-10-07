@@ -15,7 +15,8 @@ use crate::entity::{{ table.tableName }}::{Column, Entity as {{ table.className 
 // 必须从该子模块导入（从 `sys_flow_service` 顶层导入会解析失败）。
 use crate::service::sys_flow_service::biz_type::{self, BizTypeRegistration, RoundChain};
 use crate::service::sys_flow_service::{
-    engine_open_round, resolve_node_assignees, ApproverPolicy, FlowProjection, NodeSpec,
+    engine_open_round, full_actions_vec, resolve_node_assignees, ApproverPolicy,
+    FlowProjection, NodeSpec,
     OpenRoundSpec, Quorum,
 };
 
@@ -41,6 +42,7 @@ pub fn flow_nodes() -> Vec<NodeSpec> {
             quorum: Quorum::Any,
             or_sign: false,
             policy_weights: vec![],
+            actions: full_actions_vec(),
         },
         NodeSpec {
             node_seq: 2,
@@ -49,6 +51,7 @@ pub fn flow_nodes() -> Vec<NodeSpec> {
             quorum: Quorum::Any,
             or_sign: false,
             policy_weights: vec![],
+            actions: full_actions_vec(),
         },
     ]
 }
