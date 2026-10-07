@@ -1683,7 +1683,6 @@ impl SysRoleService {
     }
 }
 
-
 /// 角色下拉选项出参 VO（optionselect）
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
