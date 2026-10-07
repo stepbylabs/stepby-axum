@@ -30,6 +30,32 @@ fn is_well_formed_perm(perm: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-')
 }
 
+/// 菜单数据卫生契约（批次十四）：C 型页面菜单**必须**携带 component——
+/// 无 component 的 C 页面是"点击 404 死入口"（实证：4115 曾被污染为 C 型无
+/// component 且 visible='0' 显示中）。防复发的结构化断言。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_c_type_menus_must_have_component() {
+    let (state, _slot) = super::build_isolated_state().await;
+    let db = &state.db;
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT menu_id, menu_name FROM sys_menu \
+             WHERE menu_type = 'C' AND del_flag = '0' \
+               AND (component IS NULL OR component = '')"
+                .to_string(),
+        ))
+        .await
+        .expect("查询 C 型无 component 菜单失败");
+    assert!(
+        rows.is_empty(),
+        "存在无 component 的 C 型页面（点击即 404 死入口）: {:?}",
+        rows.iter()
+            .map(|r| r.try_get::<i64>("", "menu_id"))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// 契约一致性：后端路由所需权限 ⊆ sys_menu.perms，且菜单权限标识格式合法。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_backend_required_perms_covered_by_menu() {
