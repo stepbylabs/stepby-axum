@@ -27,7 +27,8 @@ use crate::entity::flow_demo_doc::{
     ActiveModel as FlowDemoDocActiveModel, Entity as FlowDemoDocEntity,
 };
 use crate::entity::{
-    flow_demo_doc, sys_dept, sys_flow_log, sys_flow_task, sys_role, sys_user, sys_user_role,
+    flow_demo_doc, flow_graph_doc, sys_dept, sys_flow_log, sys_flow_task, sys_role, sys_user,
+    sys_user_role,
 };
 use crate::repository::flow_demo_doc::{FlowDemoDocRepository, FlowDocScope};
 use crate::repository::sys_flow_log::SysFlowLogRepository;
@@ -58,8 +59,11 @@ pub mod biz_type {
     /// 示例请假单（`flow_demo_doc` 表；内置演示与集成测试用）
     pub const DEMO_DOC: &str = "demo_doc";
 
+    /// 图驱动单据（`flow_graph_doc` 表；批次十六：任一已发布流程图驱动审批）
+    pub const GRAPH_DOC: &str = "flow_graph_doc";
+
     /// 全部**内置**业务单据类型（新增类型必须在此登记）
-    pub const ALL: &[&str] = &[DEMO_DOC];
+    pub const ALL: &[&str] = &[DEMO_DOC, GRAPH_DOC];
 
     /// 是否为已登记的内置业务单据类型
     pub fn is_registered(biz_type: &str) -> bool {
@@ -153,16 +157,86 @@ pub mod biz_type {
         })
     }
 
+    /// 图驱动单据的链提供者（批次十六）：按提交时绑定的 flow_id 版本快照取图，
+    /// 用**冻结在单据里的字段快照**重放静态路由（确定性——同单据重放同路径），
+    /// 再把途经的 approve 节点转成线性 NodeSpec 链喂引擎。
+    fn graph_chain(
+        db: &DatabaseConnection,
+        biz_id: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<RoundChain, ServiceError>> + Send + 'static>> {
+        let db = db.clone();
+        Box::pin(async move {
+            let doc = crate::entity::flow_graph_doc::Entity::find_by_id(biz_id)
+                .one(&db)
+                .await
+                .map_err(db_to_svc)?
+                .ok_or_else(|| {
+                    ServiceError::not_found(&crate::tr!("error.flow.graph_doc_not_found"))
+                })?;
+            // 版本快照：按 doc.flow_id 取图（提交时绑定，后续发版不影响在途单据）
+            let def = crate::entity::prelude::FlowDefinition::find_by_id(doc.flow_id)
+                .one(&db)
+                .await
+                .map_err(db_to_svc)?
+                .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.def_not_found")))?;
+            let graph = crate::common::flow_graph::FlowGraph::parse_and_validate(&def.graph_json)
+                .map_err(|e| ServiceError::bad_request(&e))?;
+            let snapshot: serde_json::Value = serde_json::from_str(&doc.fields_json)
+                .map_err(|e| ServiceError::internal(&format!("字段快照损坏: {e}")))?;
+            let route = graph
+                .route_graph(&snapshot)
+                .map_err(|e| ServiceError::bad_request(&e))?;
+            let nodes = graph_to_specs(&graph, &route)?;
+            Ok(RoundChain {
+                nodes,
+                dept_id: doc.dept_id,
+            })
+        })
+    }
+
+    /// 图驱动单据的投影回写（`flow_graph_doc` 派生列——契约与 demo 一致）
+    fn graph_projection_sync(
+        db: &DatabaseConnection,
+        biz_id: i64,
+        p: FlowProjection,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServiceError>> + Send + 'static>> {
+        let db = db.clone();
+        Box::pin(async move {
+            let am = crate::entity::prelude::FlowGraphDocActiveModel {
+                tenant_id: Set(p.tenant_id),
+                doc_id: Set(biz_id),
+                status: Set(p.status),
+                current_round: Set(p.current_round),
+                current_node_seq: Set(p.current_node_seq),
+                finished_at: Set(p.finished_at),
+                update_time: Set(Some(p.now)),
+                ..Default::default()
+            };
+            crate::entity::prelude::FlowGraphDocEntity::update(am)
+                .exec(&db)
+                .await
+                .map_err(db_to_svc)?;
+            Ok(())
+        })
+    }
+
     /// 注册表：新增业务类型（含 gen_table 生成的审批单据）**必须同时**：
     /// ① 在 `ALL` 登记类型常量；② 在本表追加注册项（链提供者 + 投影回写）。
     ///
     /// 二者不一致由单测 `registry_matches_registered_types` 锁定，
     /// 避免出现"登记了但推进不了"（推进路径取不到注册项 → 显式失败，不静默降级）。
-    pub const REGISTRY: &[BizTypeRegistration] = &[BizTypeRegistration {
-        biz_type: DEMO_DOC,
-        chain: demo_chain,
-        sync_projection: demo_projection_sync,
-    }];
+    pub const REGISTRY: &[BizTypeRegistration] = &[
+        BizTypeRegistration {
+            biz_type: DEMO_DOC,
+            chain: demo_chain,
+            sync_projection: demo_projection_sync,
+        },
+        BizTypeRegistration {
+            biz_type: GRAPH_DOC,
+            chain: graph_chain,
+            sync_projection: graph_projection_sync,
+        },
+    ];
 
     /// 按业务类型取注册项（未登记 → `None`，调用方显式报错）
     pub fn find(biz_type: &str) -> Option<&'static BizTypeRegistration> {
@@ -213,12 +287,14 @@ fn should_escalate(last_reminded_at: Option<NaiveDateTime>, now: NaiveDateTime, 
 
 /// 审批人策略：编译期枚举，提交时解析一次并**快照**进 task 行（不运行时重算）。
 /// 策略变更 = 发版（D2 定案）；运营期换人用转办，不改策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 批次十六：role_key 改 String——图驱动单据（flow_graph_doc）的审批策略来自
+/// graph_json 运行时数据（&'static str 无法承载）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApproverPolicy {
     /// 提交人部门主管（sys_dept.leader_user_id）
     DeptLeader,
     /// 指定角色下的全部启用用户
-    Role { role_key: &'static str },
+    Role { role_key: String },
     /// 指定用户
     User { user_id: i64 },
 }
@@ -238,7 +314,7 @@ pub enum Quorum {
 #[derive(Debug, Clone)]
 pub struct NodeSpec {
     pub node_seq: i32,
-    pub node_name: &'static str,
+    pub node_name: String,
     pub policies: Vec<ApproverPolicy>,
     pub quorum: Quorum,
     /// 节点是否为**或签**（多审批人任一通过即节点通过，兄弟 pending 行取消）；
@@ -272,10 +348,12 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
     match flow_mode {
         "countersign" => vec![NodeSpec {
             node_seq: 1,
-            node_name: "主管与管理员会签",
+            node_name: "主管与管理员会签".to_string(),
             policies: vec![
                 ApproverPolicy::DeptLeader,
-                ApproverPolicy::Role { role_key: "admin" },
+                ApproverPolicy::Role {
+                    role_key: "admin".to_string(),
+                },
             ],
             quorum: Quorum::All,
             or_sign: false,
@@ -283,10 +361,12 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
         }],
         "or_sign" => vec![NodeSpec {
             node_seq: 1,
-            node_name: "主管或管理员任一通过",
+            node_name: "主管或管理员任一通过".to_string(),
             policies: vec![
                 ApproverPolicy::DeptLeader,
-                ApproverPolicy::Role { role_key: "admin" },
+                ApproverPolicy::Role {
+                    role_key: "admin".to_string(),
+                },
             ],
             quorum: Quorum::Any,
             or_sign: true,
@@ -294,10 +374,12 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
         }],
         "weighted" => vec![NodeSpec {
             node_seq: 1,
-            node_name: "加权票（阈值 2）",
+            node_name: "加权票（阈值 2）".to_string(),
             policies: vec![
                 ApproverPolicy::DeptLeader,
-                ApproverPolicy::Role { role_key: "admin" },
+                ApproverPolicy::Role {
+                    role_key: "admin".to_string(),
+                },
             ],
             quorum: Quorum::Weighted { threshold: 2 },
             or_sign: false,
@@ -306,7 +388,7 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
         _ => vec![
             NodeSpec {
                 node_seq: 1,
-                node_name: "部门主管审批",
+                node_name: "部门主管审批".to_string(),
                 policies: vec![ApproverPolicy::DeptLeader],
                 quorum: Quorum::Any,
                 or_sign: false,
@@ -314,8 +396,10 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
             },
             NodeSpec {
                 node_seq: 2,
-                node_name: "管理员审批",
-                policies: vec![ApproverPolicy::Role { role_key: "admin" }],
+                node_name: "管理员审批".to_string(),
+                policies: vec![ApproverPolicy::Role {
+                    role_key: "admin".to_string(),
+                }],
                 quorum: Quorum::Any,
                 or_sign: false,
                 policy_weights: vec![],
@@ -325,6 +409,74 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
 }
 
 // ==================== DTO 与返回结构 ====================
+
+/// 图 → 线性审批链（批次十六：图驱动单据推进的核心转换）。
+///
+/// route 序列中的 approve 节点重编号为 `node_seq` 1..n（start/end 跳过）；
+/// `multi` 四模式 → `Quorum` 映射：single→Any / countersign→All / or_sign→Any+or_sign /
+/// weighted→Weighted{threshold}；`policy_weights` 恒空（BPMN-lite 无审批人级权重
+/// 编辑，加权门槛由节点 `threshold` 承载）。节点名缺省回退节点 id。
+fn graph_to_specs(
+    graph: &crate::common::flow_graph::FlowGraph,
+    route: &[String],
+) -> Result<Vec<NodeSpec>, ServiceError> {
+    let mut specs = Vec::new();
+    for nid in route {
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| &n.id == nid)
+            .ok_or_else(|| ServiceError::internal(&format!("路由节点缺失: {nid}")))?;
+        if node.node_type != "approve" {
+            continue;
+        }
+        let mut policies = Vec::new();
+        for a in &node.assignees {
+            if a.0 == "dept_leader" {
+                policies.push(ApproverPolicy::DeptLeader);
+            } else if let Some(key) = a.0.strip_prefix("role:") {
+                policies.push(ApproverPolicy::Role {
+                    role_key: key.to_string(),
+                });
+            } else {
+                return Err(ServiceError::bad_request(&format!(
+                    "节点 {} 审批人形态非法: {}（校验器回归）",
+                    node.id, a.0
+                )));
+            }
+        }
+        let multi = node
+            .multi
+            .unwrap_or(crate::common::flow_graph::MultiMode::Single);
+        let or_sign = multi == crate::common::flow_graph::MultiMode::OrSign;
+        let quorum = match multi {
+            crate::common::flow_graph::MultiMode::Single
+            | crate::common::flow_graph::MultiMode::OrSign => Quorum::Any,
+            crate::common::flow_graph::MultiMode::Countersign => Quorum::All,
+            crate::common::flow_graph::MultiMode::Weighted => Quorum::Weighted {
+                threshold: node.threshold.unwrap_or(1),
+            },
+        };
+        specs.push(NodeSpec {
+            node_seq: (specs.len() + 1) as i32,
+            node_name: if node.name.is_empty() {
+                node.id.clone()
+            } else {
+                node.name.clone()
+            },
+            policies,
+            quorum,
+            or_sign,
+            policy_weights: vec![],
+        });
+    }
+    if specs.is_empty() {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.flow.graph_no_approve"
+        )));
+    }
+    Ok(specs)
+}
 
 /// 提交示例请假单 DTO
 #[derive(Debug, Clone, serde::Deserialize, garde::Validate, utoipa::ToSchema)]
@@ -406,6 +558,27 @@ fn page_args(query: &FlowPageQuery) -> (u64, u64) {
 #[derive(Debug)]
 pub struct FlowSubmitOutcome {
     pub doc: flow_demo_doc::Model,
+    pub notify_assignees: Vec<i64>,
+}
+
+/// 图驱动单据提交 DTO（批次十六）：flow_code 定位**已发布**版本；
+/// fields 为条件求值字段池（对象；提交时冻结进单据）。
+#[derive(Debug, Clone, serde::Deserialize, garde::Validate, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowGraphSubmitDto {
+    #[garde(length(chars, min = 1, max = 64))]
+    pub flow_code: String,
+    #[garde(length(chars, min = 1, max = 200))]
+    pub title: String,
+    /// 条件求值字段池（JSON 对象；如 `{"days": 5, "leaveType": "sick"}`）
+    #[garde(skip)]
+    pub fields: serde_json::Value,
+}
+
+/// 图驱动单据提交结果
+#[derive(Debug)]
+pub struct GraphSubmitOutcome {
+    pub doc: flow_graph_doc::Model,
     pub notify_assignees: Vec<i64>,
 }
 
@@ -566,7 +739,7 @@ async fn resolve_policy(
         }
         ApproverPolicy::Role { role_key } => {
             let role = sys_role::Entity::find()
-                .filter(sys_role::Column::RoleKey.eq(*role_key))
+                .filter(sys_role::Column::RoleKey.eq(role_key))
                 .one(conn)
                 .await?
                 .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.role_not_found")))?;
@@ -730,7 +903,7 @@ impl SysFlowService {
         };
         // 事务闭包要求 'static：克隆捕获字段，避免借用外层局部变量
         let first_node_seq = first.node_seq;
-        let first_node_name = first.node_name.to_string();
+        let first_node_name = first.node_name.clone();
         let applicant_name_owned = applicant_name.to_string();
 
         let db = &self.db;
@@ -800,6 +973,155 @@ impl SysFlowService {
             .map_err(super::sys_flow_service::tx_to_svc)?;
 
         Ok(FlowSubmitOutcome {
+            doc,
+            notify_assignees: assignees,
+        })
+    }
+
+    /// 提交**图驱动**单据（批次十六）：任一**已发布**流程定义（`is_latest='1'` +
+    /// `status='1'`）都可作为审批流——提交时静态路由成线性链，字段快照冻结进单据
+    /// （推进时由 [`biz_type::graph_chain`] 重放同路径，确定性）。
+    ///
+    /// 与 `submit_demo` 的差异：审批链不再来自 `demo_nodes` 硬编码，而来自设计器
+    /// 画的图（G-02 M3 的"按图推进"闭环）；条件边按 `fields` 求值（fail-closed）。
+    pub async fn submit_graph(
+        &self,
+        applicant_id: i64,
+        applicant_name: &str,
+        dto: FlowGraphSubmitDto,
+    ) -> Result<GraphSubmitOutcome, ServiceError> {
+        let title = dto.title.trim().to_string();
+        if title.is_empty() {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.title_blank"
+            )));
+        }
+        if !dto.fields.is_object() {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.graph_fields_invalid"
+            )));
+        }
+        let user = sys_user::Entity::find_by_id(applicant_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.user_not_found")))?;
+        let dept_id = user.dept_id;
+        let applicant_tid = user.tenant_id;
+
+        // 绑定已发布版本（租户可引用平台图 tid=0 与本租户图；版本快照 = is_latest 行）
+        let def = crate::entity::prelude::FlowDefinition::find()
+            .filter(crate::entity::flow_definition::Column::FlowCode.eq(dto.flow_code.as_str()))
+            .filter(crate::entity::flow_definition::Column::IsLatest.eq("1"))
+            .filter(crate::entity::flow_definition::Column::Status.eq("1"))
+            .filter(crate::entity::flow_definition::Column::DelFlag.eq("0"))
+            .filter(crate::entity::flow_definition::Column::TenantId.is_in(vec![0, applicant_tid]))
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!("error.flow.graph_not_published"))
+            })?;
+        let graph = crate::common::flow_graph::FlowGraph::parse_and_validate(&def.graph_json)
+            .map_err(|e| {
+                ServiceError::bad_request(&format!(
+                    "{}: {e}",
+                    crate::tr!("error.flow.graph_invalid")
+                ))
+            })?;
+        let snapshot = dto.fields.clone();
+        let route = graph
+            .route_graph(&snapshot)
+            .map_err(|e| ServiceError::bad_request(&e))?;
+        let specs = graph_to_specs(&graph, &route)?;
+
+        let first = specs
+            .first()
+            .cloned()
+            .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.graph_no_approve")))?;
+        let assignee_pairs =
+            resolve_node_assignee_pairs(&self.db, &first, applicant_id, dept_id).await?;
+        let weights: Vec<i64> = assignee_pairs.iter().map(|(_, w)| *w).collect();
+        let assignees: Vec<i64> = assignee_pairs.iter().map(|(u, _)| *u).collect();
+
+        let now = crate::common::datetime::now_naive();
+        let due_at = now + chrono::Duration::hours(self.config.flow.timeout_hours);
+        let node_task_type = first.task_type();
+        let node_threshold = match first.quorum {
+            Quorum::Weighted { threshold } => Some(threshold),
+            _ => None,
+        };
+        let first_node_seq = first.node_seq;
+        let first_node_name = first.node_name.clone();
+        let applicant_name_owned = applicant_name.to_string();
+        let fields_json = snapshot.to_string();
+        let flow_id = def.flow_id;
+        let flow_code = def.flow_code.clone();
+
+        let db = &self.db;
+        let doc = db
+            .transaction::<_, flow_graph_doc::Model, ServiceError>(|txn| {
+                let title = title.clone();
+                let applicant_name = applicant_name_owned.clone();
+                let assignees = assignees.clone();
+                let fields_json = fields_json.clone();
+                let flow_code = flow_code.clone();
+                let first_node_name = first_node_name.clone();
+                Box::pin(async move {
+                    let doc_am = flow_graph_doc::ActiveModel {
+                        tenant_id: Set(applicant_tid),
+                        dept_id: Set(dept_id),
+                        flow_id: Set(flow_id),
+                        flow_code: Set(flow_code),
+                        title: Set(title.clone()),
+                        fields_json: Set(fields_json),
+                        status: Set("pending".to_string()),
+                        current_round: Set(1),
+                        current_node_seq: Set(Some(first_node_seq)),
+                        submitted_at: Set(Some(now)),
+                        ..Default::default()
+                    };
+                    let res = flow_graph_doc::Entity::insert(doc_am)
+                        .exec(txn)
+                        .await
+                        .map_err(super::sys_flow_service::db_to_svc)?;
+                    let doc = flow_graph_doc::Entity::find_by_id(res.last_insert_id)
+                        .one(txn)
+                        .await
+                        .map_err(super::sys_flow_service::db_to_svc)?
+                        .ok_or_else(|| {
+                            ServiceError::internal(&crate::tr!("error.flow.graph_doc_not_found"))
+                        })?;
+
+                    super::sys_flow_service::engine_open_round(
+                        txn,
+                        OpenRoundSpec {
+                            biz_type: biz_type::GRAPH_DOC,
+                            biz_id: doc.doc_id,
+                            round_no: 1,
+                            title: &title,
+                            applicant_id,
+                            applicant_name: Some(applicant_name.as_str()),
+                            tenant_id: applicant_tid,
+                            node_seq: first_node_seq,
+                            node_name: &first_node_name,
+                            task_type: node_task_type,
+                            assignees: &assignees,
+                            weights: &weights,
+                            node_threshold,
+                            due_at: Some(due_at),
+                            from_status: Some("draft"),
+                            comment: None,
+                            now,
+                        },
+                    )
+                    .await?;
+
+                    Ok(doc)
+                })
+            })
+            .await
+            .map_err(super::sys_flow_service::tx_to_svc)?;
+
+        Ok(GraphSubmitOutcome {
             doc,
             notify_assignees: assignees,
         })
@@ -1079,7 +1401,7 @@ impl SysFlowService {
                         _ => None,
                     };
                     let db = &self.db;
-                    let next_name = next_spec.node_name.to_string();
+                    let next_name = next_spec.node_name.clone();
                     let next_seq = next_spec.node_seq;
                     let task_biz_type = task.biz_type.clone();
                     let task_title = task.title.clone();
@@ -1699,7 +2021,7 @@ impl SysFlowService {
         };
         // 事务闭包要求 'static：把捕获的字段提前克隆为拥有值（避免借用外层局部变量）
         let first_node_seq = first.node_seq;
-        let first_node_name = first.node_name.to_string();
+        let first_node_name = first.node_name.clone();
         let applicant_id_snap = doc.applicant_id;
         let applicant_name_snap = doc.applicant_name.clone();
         let doc_title_snap = doc.title.clone();
@@ -2653,8 +2975,10 @@ mod tests {
     fn biz_type_registry_lists_only_registered_types() {
         assert_eq!(BIZ_TYPE_DEMO, "demo_doc");
         assert_eq!(biz_type::DEMO_DOC, BIZ_TYPE_DEMO);
-        assert_eq!(biz_type::ALL, &["demo_doc"]);
+        // 批次十六：图驱动单据类型入注册表
+        assert_eq!(biz_type::ALL, &["demo_doc", "flow_graph_doc"]);
         assert!(biz_type::is_registered(BIZ_TYPE_DEMO));
+        assert!(biz_type::is_registered(biz_type::GRAPH_DOC));
         assert!(!biz_type::is_registered("purchase_order"));
         assert!(!biz_type::is_registered(""));
         assert!(

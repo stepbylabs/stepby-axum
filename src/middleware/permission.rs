@@ -1015,6 +1015,7 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("GET", "/system/flow/pending-count")
             | ("GET", "/system/flow/task/{taskId}")
             | ("POST", "/system/flow/demo/submit")
+            | ("POST", "/system/flow/graph/submit")
             | ("POST", "/system/flow/demo/{docId}/resubmit")
             | ("POST", "/system/flow/demo/{docId}/withdraw")
             | ("POST", "/system/flow/task/{taskId}/action")
@@ -1822,6 +1823,7 @@ mod tests {
             ("GET", "/system/flow/pending-count"),
             ("GET", "/system/flow/task/{taskId}"),
             ("POST", "/system/flow/demo/submit"),
+            ("POST", "/system/flow/graph/submit"),
             ("POST", "/system/flow/demo/{docId}/resubmit"),
             ("POST", "/system/flow/demo/{docId}/withdraw"),
             ("POST", "/system/flow/task/{taskId}/action"),

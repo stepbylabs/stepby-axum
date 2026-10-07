@@ -29,6 +29,7 @@ mod data_scope_tenant;
 mod file_common;
 mod flow;
 mod flow_definition;
+mod flow_graph_doc;
 mod i18n_keys;
 mod ip_location;
 mod menu_perm_contract;

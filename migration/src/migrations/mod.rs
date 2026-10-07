@@ -114,3 +114,4 @@ pub mod m20261007_000008_report_menus_visible;
 pub mod m20261007_000009_flow_designer_menu_visible;
 pub mod m20261007_000010_flow_report_role_menus;
 pub mod m20261007_000011_config_seed_and_menu_hygiene;
+pub mod m20261007_000012_flow_graph_doc;

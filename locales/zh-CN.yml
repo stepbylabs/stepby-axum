@@ -134,6 +134,10 @@ error:
     def_id_required: 缺少流程定义 ID
     def_published_immutable: 已发布版本不可修改图定义，请发布新版本
     graph_invalid: 流程图校验失败
+    graph_doc_not_found: 图驱动单据不存在
+    graph_not_published: 流程不存在或未发布（需已发布版本）
+    graph_fields_invalid: 字段快照必须是 JSON 对象
+    graph_no_approve: 路由中不含审批节点，无法发起审批
   sso:
     platform_protected: 平台根部门不允许通过租户接口操作
     ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户

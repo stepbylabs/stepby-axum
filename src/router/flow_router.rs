@@ -26,6 +26,10 @@ pub fn flow_routes() -> Router<Arc<AppState>> {
         .route("/system/flow/task/{taskId}", get(flow_handler::task_detail))
         .route("/system/flow/demo/submit", post(flow_handler::submit_demo))
         .route(
+            "/system/flow/graph/submit",
+            post(flow_handler::submit_graph),
+        )
+        .route(
             "/system/flow/demo/{docId}/resubmit",
             post(flow_handler::resubmit_demo),
         )

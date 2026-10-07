@@ -526,6 +526,11 @@ impl AppInitializer {
         ensure_flow_task_action_columns(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化审批任务扩展列失败: {}", e))?;
+        // 4.5c-f' 批次十六：图驱动单据表（flow_graph_doc，存量库兜底，等价迁移
+        //      m20261007_000012；逐列一致，IF NOT EXISTS 幂等）
+        ensure_flow_graph_doc_table(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化图驱动单据表失败: {}", e))?;
         // 4.5c-g G-07 扩展：短信云运营商支撑列（sys_msg_template.sms_template_code /
         //      sys_msg_send_log.sms_params，存量库兜底，等价迁移 m20261007_000007；幂等）
         ensure_sms_cloud_columns(&db)
@@ -5450,7 +5455,7 @@ async fn ensure_report_menus_visible(db: &DatabaseConnection) -> anyhow::Result<
     Ok(())
 }
 
-/// 台账（G-02 M3，存量库兜底，等价迁移 ）：
+/// 台账（G-02 M3，存量库兜底，等价迁移 m20261007_000009）：
 /// 流程定义设计器上线，翻转菜单 4140（流程定义页面）可见性。
 /// 4141-4145 为 F（按钮）行，visible 无导航语义，不翻。幂等：仅当 visible='1' 置 '0'。
 async fn ensure_flow_designer_menu_visible(db: &DatabaseConnection) -> anyhow::Result<()> {
@@ -5462,6 +5467,56 @@ async fn ensure_flow_designer_menu_visible(db: &DatabaseConnection) -> anyhow::R
         "UPDATE sys_menu SET visible = '0' WHERE menu_id = 4140 AND visible = '1'".to_string(),
     ))
     .await?;
+    Ok(())
+}
+
+/// 台账（批次十六，存量库兜底，等价迁移 m20261007_000012）：
+/// 图驱动单据表 `flow_graph_doc`——任一已发布流程图驱动审批的实例承载表。
+/// 缺此兜底时：存量库启动后 /system/flow/graph/submit 全链 500（表不存在）。
+/// 幂等：CREATE TABLE IF NOT EXISTS；列名/类型与迁移逐列一致（双写关系）。
+async fn ensure_flow_graph_doc_table(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if sso_table_exists(db, "flow_graph_doc").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let auto = match backend {
+        sea_orm::DatabaseBackend::Sqlite => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        sea_orm::DatabaseBackend::Postgres => "BIGSERIAL PRIMARY KEY",
+        _ => "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+    };
+    db.execute_raw(Statement::from_string(
+        backend,
+        format!(
+            "CREATE TABLE IF NOT EXISTS flow_graph_doc (\
+             doc_id {auto},\
+             tenant_id BIGINT NOT NULL DEFAULT 0,\
+             dept_id BIGINT NULL,\
+             flow_id BIGINT NOT NULL,\
+             flow_code VARCHAR(64) NOT NULL,\
+             title VARCHAR(200) NOT NULL,\
+             fields_json TEXT NOT NULL DEFAULT '{{}}',\
+             status VARCHAR(16) NOT NULL DEFAULT 'pending',\
+             current_round INT NOT NULL DEFAULT 1,\
+             current_node_seq INT NULL,\
+             submitted_at DATETIME NULL,\
+             finished_at DATETIME NULL,\
+             create_by VARCHAR(64) DEFAULT '',\
+             create_time DATETIME NULL,\
+             update_by VARCHAR(64) DEFAULT '',\
+             update_time DATETIME NULL,\
+             del_flag VARCHAR(1) DEFAULT '0'\
+             )"
+        ),
+    ))
+    .await?;
+    db.execute_raw(Statement::from_string(
+        backend,
+        "CREATE INDEX IF NOT EXISTS idx_flow_graph_doc_tenant \
+         ON flow_graph_doc (tenant_id, status)"
+            .to_string(),
+    ))
+    .await?;
+    tracing::info!("flow_graph_doc 表已补建（批次十六图驱动单据，存量库兜底）");
     Ok(())
 }
 

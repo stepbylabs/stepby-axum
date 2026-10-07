@@ -36,7 +36,7 @@ pub fn flow_nodes() -> Vec<NodeSpec> {
     vec![
         NodeSpec {
             node_seq: 1,
-            node_name: "部门主管审批",
+            node_name: "部门主管审批".to_string(),
             policies: vec![ApproverPolicy::DeptLeader],
             quorum: Quorum::Any,
             or_sign: false,
@@ -44,8 +44,8 @@ pub fn flow_nodes() -> Vec<NodeSpec> {
         },
         NodeSpec {
             node_seq: 2,
-            node_name: "管理员审批",
-            policies: vec![ApproverPolicy::Role { role_key: "admin" }],
+            node_name: "管理员审批".to_string(),
+            policies: vec![ApproverPolicy::Role { role_key: "admin".to_string() }],
             quorum: Quorum::Any,
             or_sign: false,
             policy_weights: vec![],
