@@ -438,6 +438,13 @@ pub struct SysMsgService {
     pref_repo: SysUserPrefRepository,
 }
 
+/// 云厂商模板制投递上下文（G-07 扩展）：云端模板 code + 原始渲染参数 JSON 快照。
+/// 快照落 `sys_msg_send_log.sms_params`，重试时原样还原（云厂商无法从渲染后文本反推参数）。
+struct SmsCloudCtx<'a> {
+    template_code: &'a str,
+    params_json: String,
+}
+
 impl SysMsgService {
     pub fn new(db: DatabaseConnection, config: Arc<Settings>) -> Self {
         Self {
@@ -1019,13 +1026,17 @@ impl SysMsgService {
     /// 按渠道类型实际投递消息
     ///
     /// - email：经 MailerService（全局 SMTP 配置）真实发送
-    /// - sms / site：无外部网关接入，记录日志后视为模拟成功
+    /// - sms：按渠道 `config_json.provider` 分发——generic 走自由文本 HTTP 网关，
+    ///   aliyun/tencent 走云厂商模板制投递（需 `sms_ctx` 携带云端模板 code 与原始参数；
+    ///   `send_log.sms_params` 快照保证重试可还原）
+    /// - site：站内信投递（尊重用户偏好）
     async fn dispatch(
         &self,
         channel: &SysMsgChannelModel,
         to_addr: &str,
         subject: &str,
         content: &str,
+        sms_ctx: Option<SmsCloudCtx<'_>>,
     ) -> Result<(), ServiceError> {
         match channel.channel_type.as_str() {
             "email" => {
@@ -1038,32 +1049,99 @@ impl SysMsgService {
                 Ok(())
             }
             "sms" => {
-                // G-07：真实投递——按渠道 config_json 解析网关配置（EncryptedString
-                // 读路径已解密），GenericHttpProvider 真实 POST；失败 Err 交由调用方
-                // 记 status='2' 待重试（B6：超时 + 重试上限 + 失败审计），绝不静默丢弃。
-                let cfg = crate::service::sms_provider::SmsChannelConfig::from_config_json(
-                    channel.config_json.as_ref().map(|e| e.0.as_str()),
-                )
-                .map_err(|e| {
-                    tracing::error!("短信渠道 {} 配置无效: {}", channel.channel_code, e);
-                    ServiceError::bad_request(&crate::tr!("error.msg.sms_config_invalid"))
-                })?;
-                let provider = crate::service::sms_provider::GenericHttpProvider::new();
-                let gateway_id = provider.send(&cfg, to_addr, content).await.map_err(|e| {
-                    tracing::error!(
-                        "短信投递失败渠道={} to={}: {}",
-                        channel.channel_code,
-                        to_addr,
-                        e
-                    );
-                    ServiceError::internal(&crate::tr!("error.msg.sms_send_failed"))
-                })?;
-                tracing::info!(
-                    "短信投递受理成功渠道={} to={} 网关回执={}",
-                    channel.channel_code,
-                    to_addr,
-                    gateway_id
-                );
+                // G-07：真实投递——按渠道 config_json 的 provider 分发。
+                // generic：自由文本 HTTP 网关（EncryptedString 读路径已解密）；
+                // aliyun/tencent：云厂商模板制投递（真实签名 + 真实 HTTP），失败 Err
+                // 交由调用方记 status='2' 待重试（B6：超时 + 重试上限 + 失败审计）。
+                let raw_cfg = channel.config_json.as_ref().map(|e| e.0.as_str());
+                let provider_kind = crate::service::sms_provider::detect_provider_kind(raw_cfg);
+                match provider_kind {
+                    crate::service::sms_provider::SmsProviderKind::Generic => {
+                        let cfg = crate::service::sms_provider::SmsChannelConfig::from_config_json(
+                            raw_cfg,
+                        )
+                        .map_err(|e| {
+                            tracing::error!("短信渠道 {} 配置无效: {}", channel.channel_code, e);
+                            ServiceError::bad_request(&crate::tr!("error.msg.sms_config_invalid"))
+                        })?;
+                        let provider = crate::service::sms_provider::GenericHttpProvider::new();
+                        let gateway_id =
+                            provider.send(&cfg, to_addr, content).await.map_err(|e| {
+                                tracing::error!(
+                                    "短信投递失败渠道={} to={}: {}",
+                                    channel.channel_code,
+                                    to_addr,
+                                    e
+                                );
+                                ServiceError::internal(&crate::tr!("error.msg.sms_send_failed"))
+                            })?;
+                        tracing::info!(
+                            "短信投递受理成功渠道={} to={} 网关回执={}",
+                            channel.channel_code,
+                            to_addr,
+                            gateway_id
+                        );
+                    }
+                    kind @ (crate::service::sms_provider::SmsProviderKind::Aliyun
+                    | crate::service::sms_provider::SmsProviderKind::Tencent) => {
+                        // 云厂商为模板制：必须携带云端模板 code 与原始参数（重试由
+                        // send_log.sms_params 快照还原）
+                        let Some(ctx) = sms_ctx else {
+                            return Err(ServiceError::bad_request(&crate::tr!(
+                                "error.msg.sms_template_code_required"
+                            )));
+                        };
+                        let cloud =
+                            crate::service::sms_provider::CloudSmsConfig::from_config_json(raw_cfg)
+                                .map_err(|e| {
+                                    tracing::error!(
+                                        "短信云渠道 {} 配置无效: {}",
+                                        channel.channel_code,
+                                        e
+                                    );
+                                    ServiceError::bad_request(&crate::tr!(
+                                        "error.msg.sms_config_invalid"
+                                    ))
+                                })?;
+                        let params: serde_json::Value =
+                            serde_json::from_str(&ctx.params_json).unwrap_or(serde_json::json!({}));
+                        let result = match kind {
+                            crate::service::sms_provider::SmsProviderKind::Aliyun => {
+                                crate::service::sms_provider::AliyunSmsProvider::new()
+                                    .send_templated(&cloud, to_addr, ctx.template_code, &params)
+                                    .await
+                            }
+                            _ => {
+                                crate::service::sms_provider::TencentSmsProvider::new()
+                                    .send_templated(&cloud, to_addr, ctx.template_code, &params)
+                                    .await
+                            }
+                        };
+                        match result {
+                            Ok(receipt) => {
+                                tracing::info!(
+                                    "云厂商短信受理成功渠道={} provider={:?} to={} code={} 回执={}",
+                                    channel.channel_code,
+                                    kind,
+                                    to_addr,
+                                    ctx.template_code,
+                                    receipt
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "云厂商短信投递失败渠道={} to={}: {}",
+                                    channel.channel_code,
+                                    to_addr,
+                                    e
+                                );
+                                return Err(ServiceError::internal(&crate::tr!(
+                                    "error.msg.sms_send_failed"
+                                )));
+                            }
+                        }
+                    }
+                }
                 Ok(())
             }
             "site" => {
@@ -1140,8 +1218,24 @@ impl SysMsgService {
         let content = render_template(&template.template_content, &dto.params);
         let now = crate::common::datetime::now_naive();
 
+        // G-07 扩展：sms 渠道记录原始参数快照（云厂商重试还原用）；云端模板 code 存在时
+        // 组装模板制投递上下文（generic 网关忽略 sms_ctx，自由文本照投）
+        let sms_params_snapshot = if channel.channel_type == "sms" {
+            serde_json::to_string(&dto.params).ok()
+        } else {
+            None
+        };
+        let sms_ctx = template
+            .sms_template_code
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| SmsCloudCtx {
+                template_code: c,
+                params_json: sms_params_snapshot.clone().unwrap_or_else(|| "{}".into()),
+            });
+
         let (status, last_error, send_time) = match self
-            .dispatch(&channel, &dto.to_addr, &subject, &content)
+            .dispatch(&channel, &dto.to_addr, &subject, &content, sms_ctx)
             .await
         {
             Ok(()) => ("0".to_string(), None, Some(now)),
@@ -1165,6 +1259,7 @@ impl SysMsgService {
             to_addr: Set(dto.to_addr),
             subject: Set(Some(subject)),
             content: Set(Some(content)),
+            sms_params: Set(sms_params_snapshot),
             status: Set(Some(status)),
             retry_count: Set(Some(0)),
             max_retry_count: Set(Some(DEFAULT_MAX_RETRY)),
@@ -1224,8 +1319,28 @@ impl SysMsgService {
             let content = log.content.clone().unwrap_or_default();
             let now = crate::common::datetime::now_naive();
 
+            // G-07 扩展：sms 渠道重试时还原云厂商投递上下文——云端模板 code 从原模板行取
+            // （log.template_code 是本系统模板编码），原始参数从 sms_params 快照还原
+            let cloud_code: Option<String> = if channel.channel_type == "sms" {
+                match log.template_code.as_deref() {
+                    Some(tc) => {
+                        let t = self
+                            .template_repo
+                            .find_by_code(tc, crate::common::tenant::tenant_scope(log.tenant_id))
+                            .await?;
+                        t.and_then(|t| t.sms_template_code)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let sms_ctx = cloud_code.as_deref().map(|c| SmsCloudCtx {
+                template_code: c,
+                params_json: log.sms_params.clone().unwrap_or_else(|| "{}".into()),
+            });
             let (status, last_error, send_time, retry_count) = match self
-                .dispatch(&channel, &log.to_addr, &subject, &content)
+                .dispatch(&channel, &log.to_addr, &subject, &content, sms_ctx)
                 .await
             {
                 Ok(()) => (

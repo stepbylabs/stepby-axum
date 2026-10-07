@@ -38,6 +38,8 @@ pub struct Model {
     pub template_subject: String,
     /// 模板内容（支持 {{var}} 变量）
     pub template_content: String,
+    /// 云厂商短信模板 code（阿里云 SMS_xxxx / 腾讯云数字 code；NULL = 不走云厂商模板制，G-07 扩展）
+    pub sms_template_code: Option<String>,
     /// 状态（0=正常 1=停用）
     pub status: Option<String>,
     pub create_by: Option<String>,

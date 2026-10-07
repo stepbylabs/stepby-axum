@@ -223,6 +223,77 @@ impl SysFlowTaskRepository {
         Ok(res.rows_affected)
     }
 
+    /// 取消同轮同节点的 pending 行（G-02 M2：or_sign 任一通过 / weighted 达标后，
+    /// 兄弟待办随节点完成收敛）。当前行已 approved（非 pending），条件更新天然排除自身。
+    pub async fn cancel_pending_by_node(
+        &self,
+        biz_type: &str,
+        biz_id: i64,
+        round_no: i32,
+        node_seq: i32,
+        tenant_scope: Option<i64>,
+    ) -> Result<u64, DbErr> {
+        let mut upd = SysFlowTask::update_many()
+            .col_expr(Column::Status, Expr::value("cancelled"))
+            .col_expr(Column::ActedAt, Expr::current_timestamp())
+            .filter(Column::BizType.eq(biz_type))
+            .filter(Column::BizId.eq(biz_id))
+            .filter(Column::RoundNo.eq(round_no))
+            .filter(Column::NodeSeq.eq(node_seq))
+            .filter(Column::Status.eq("pending"));
+        if let Some(t) = tenant_scope {
+            upd = upd.filter(Column::TenantId.eq(t));
+        }
+        let res = upd.exec(self.base.db()).await?;
+        Ok(res.rows_affected)
+    }
+
+    /// 委派（G-02 M2）：pending 行换受托人并记录转出人（`delegate_from`），
+    /// 语义与转办同型——处理后回不到转出人；换持有人重置首次提醒（对齐 W-7）。
+    pub async fn delegate_if_pending(
+        &self,
+        task_id: i64,
+        new_assignee_id: i64,
+        delegate_from: i64,
+    ) -> Result<u64, DbErr> {
+        let res = SysFlowTask::update_many()
+            .col_expr(Column::AssigneeId, Expr::value(new_assignee_id))
+            .col_expr(Column::DelegateFrom, Expr::value(delegate_from))
+            .col_expr(
+                Column::LastRemindedAt,
+                Expr::value(Option::<NaiveDateTime>::None),
+            )
+            .filter(Column::TaskId.eq(task_id))
+            .filter(Column::Status.eq("pending"))
+            .exec(self.base.db())
+            .await?;
+        Ok(res.rows_affected)
+    }
+
+    /// 减签·未投票：pending 行置 cancelled（G-02 M2，节点判定已兼容 cancelled 行）
+    pub async fn cancel_row_if_pending(&self, task_id: i64) -> Result<u64, DbErr> {
+        let res = SysFlowTask::update_many()
+            .col_expr(Column::Status, Expr::value("cancelled"))
+            .col_expr(Column::ActedAt, Expr::current_timestamp())
+            .filter(Column::TaskId.eq(task_id))
+            .filter(Column::Status.eq("pending"))
+            .exec(self.base.db())
+            .await?;
+        Ok(res.rows_affected)
+    }
+
+    /// 减签·已投票：approved 行置 discarded（投票事实保留在流水，行不再参与聚合——
+    /// countersign 判定"无 pending 且有 approved"天然排除 discarded，G-02 M2）
+    pub async fn discard_row_if_approved(&self, task_id: i64) -> Result<u64, DbErr> {
+        let res = SysFlowTask::update_many()
+            .col_expr(Column::Status, Expr::value("discarded"))
+            .filter(Column::TaskId.eq(task_id))
+            .filter(Column::Status.eq("approved"))
+            .exec(self.base.db())
+            .await?;
+        Ok(res.rows_affected)
+    }
+
     /// 超时扫描候选：pending 且 due_at 已过（分页限量，V2-P1-6）
     pub async fn find_timeout_candidates(
         &self,

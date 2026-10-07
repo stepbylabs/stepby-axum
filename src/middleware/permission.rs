@@ -1019,6 +1019,7 @@ fn is_login_only_path(method: &str, path: &str) -> bool {
             | ("POST", "/system/flow/task/{taskId}/action")
             // 加签（W-3）：写动作，与 action 同口径（service 层归属 + PAT 校验）
             | ("POST", "/system/flow/task/{taskId}/countersign-add")
+            | ("POST", "/system/flow/task/{taskId}/countersign-del")
         // ===== 个人会话管理（v5-N5：自助查看/注销本人会话，属主校验在 handler；仅登录）=====
             | ("GET", "/monitor/my-session/list")
             | ("DELETE", "/monitor/my-session/{tokenHash}")
@@ -1858,6 +1859,7 @@ mod tests {
             ("POST", "/system/flow/demo/{docId}/withdraw"),
             ("POST", "/system/flow/task/{taskId}/action"),
             ("POST", "/system/flow/task/{taskId}/countersign-add"),
+            ("POST", "/system/flow/task/{taskId}/countersign-del"),
         ] {
             assert!(
                 is_login_only_path(method, path),

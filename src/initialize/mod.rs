@@ -504,6 +504,16 @@ impl AppInitializer {
         ensure_flow_report_menus(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化流程/报表菜单失败: {}", e))?;
+        // 4.5c-f G-02 M2：sys_flow_task 动作矩阵扩展列（weight/threshold/delegate_from，
+        //      存量库兜底，等价迁移 m20261007_000006；has_column 守卫幂等）
+        ensure_flow_task_action_columns(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化审批任务扩展列失败: {}", e))?;
+        // 4.5c-g G-07 扩展：短信云运营商支撑列（sys_msg_template.sms_template_code /
+        //      sys_msg_send_log.sms_params，存量库兜底，等价迁移 m20261007_000007；幂等）
+        ensure_sms_cloud_columns(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化短信云运营商支撑列失败: {}", e))?;
 
         // 4.5d E2-a：性能索引兜底（存量库不跑 Migrator::up，等价迁移
         //      m20261002_000001_perf_indexes）：flow_demo_doc.tenant_id 与
@@ -5317,6 +5327,64 @@ async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow::Result<()>
         .await?;
     }
     tracing::info!("流程/报表菜单已补建（4140-4148，G-01/G-02 存量库兜底）");
+    Ok(())
+}
+
+/// 台账（G-02 M2，存量库兜底，等价迁移 `m20261007_000006`）：
+/// sys_flow_task 动作矩阵扩展列——`weight`（加权票快照，DEFAULT 1）、
+/// `threshold`（weighted 节点门槛快照）、`delegate_from`（委派转出人）。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而
+/// 引擎加权/委派链路已读写新列 ⇒ 缺此兜底则 or_sign/weighted/delegate 全链 500。
+/// 幂等：has_column 守卫逐列判定；表不存在时安全返回。
+async fn ensure_flow_task_action_columns(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_flow_task").await? {
+        return Ok(());
+    }
+    let adds: [(&str, &str); 3] = [
+        ("weight", "INT NOT NULL DEFAULT 1"),
+        ("threshold", "INT NULL"),
+        ("delegate_from", "BIGINT NULL"),
+    ];
+    for (col, ddl) in adds {
+        if sso_has_column(db, "sys_flow_task", col).await? {
+            continue;
+        }
+        db.execute_raw(Statement::from_string(
+            db.get_database_backend(),
+            format!("ALTER TABLE sys_flow_task ADD COLUMN {col} {ddl}"),
+        ))
+        .await?;
+        tracing::info!("sys_flow_task.{col} 已补列（G-02 M2 存量库兜底）");
+    }
+    Ok(())
+}
+
+/// 台账（G-07 扩展，存量库兜底，等价迁移 `m20261007_000007`）：
+/// `sys_msg_template.sms_template_code`（云厂商短信模板 code）与
+/// `sys_msg_send_log.sms_params`（原始渲染参数 JSON 快照，重试还原用）。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而实体已带
+/// 新字段 ⇒ 缺此兜底则模板/发送日志读写全链 500。幂等：has_column 守卫逐列判定。
+async fn ensure_sms_cloud_columns(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let adds: [(&str, &str, &str); 2] = [
+        ("sys_msg_template", "sms_template_code", "VARCHAR(64) NULL"),
+        ("sys_msg_send_log", "sms_params", "TEXT NULL"),
+    ];
+    for (table, col, ddl) in adds {
+        if !sso_table_exists(db, table).await? {
+            continue;
+        }
+        if sso_has_column(db, table, col).await? {
+            continue;
+        }
+        db.execute_raw(Statement::from_string(
+            db.get_database_backend(),
+            format!("ALTER TABLE {table} ADD COLUMN {col} {ddl}"),
+        ))
+        .await?;
+        tracing::info!("{table}.{col} 已补列（G-07 扩展存量库兜底）");
+    }
     Ok(())
 }
 

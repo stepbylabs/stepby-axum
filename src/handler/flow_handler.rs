@@ -473,6 +473,34 @@ pub async fn countersign_add(
     Ok(AjaxResult::success(outcome.task))
 }
 
+/// POST /system/flow/task/{taskId}/countersign-del — 减签（从当前节点移除一名会签审批人，G-02 M2）
+#[utoipa::path(
+    post,
+    path = "/system/flow/task/{taskId}/countersign-del",
+    params(("taskId" = i64, Path, description = "任务 ID")),
+    request_body = FlowCountersignDto,
+    responses(
+        (status = 200, description = "减签成功", body = AjaxResult<SysFlowTaskModel>),
+        (status = 400, description = "PAT 会话 / 目标不在当前节点 / 移除后节点无有效审批人"),
+        (status = 403, description = "非当前审批人"),
+    ),
+    tag = "system-flow"
+)]
+pub async fn countersign_del(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(task_id): Path<i64>,
+    Json(dto): Json<FlowCountersignDto>,
+) -> Result<AjaxResult<SysFlowTaskModel>, AppError> {
+    let user_id = parse_user_id(operator.user_id())?;
+    crate::common::i18n::validate(&dto)?;
+    let outcome = state
+        .flow_service
+        .countersign_del(user_id, operator.is_pat(), task_id, dto.to_user_id, None)
+        .await?;
+    Ok(AjaxResult::success(outcome.task))
+}
+
 /// POST /system/flow/task/{taskId}/action — 审批动作
 #[utoipa::path(
     post,
