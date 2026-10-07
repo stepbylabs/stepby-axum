@@ -475,7 +475,7 @@ async fn test_msg_send_log_lifecycle() {
     let gateway = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let gateway_addr = gateway.local_addr().unwrap();
     let gateway_handle = std::thread::spawn(move || {
-        use std::io::{BufRead, BufReader, Read, Write};
+        use std::io::{BufRead, BufReader, Write};
         let (stream, _) = gateway.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         loop {
@@ -485,7 +485,7 @@ async fn test_msg_send_log_lifecycle() {
                 break;
             }
         }
-        let mut len_line = String::new();
+        let len_line = String::new();
         // 重新读已消费的请求体长度不可行——简化：读取 content-length 在头里已消费，
         // 改为循环读头时记录 content-length（上面循环已丢）——直接再读一行兜底不可靠。
         // 因此本网关在响应后由断言侧校验 dispatch 状态即可。

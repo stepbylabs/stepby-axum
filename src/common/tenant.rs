@@ -196,6 +196,16 @@ pub const TENANT_FILTER_MATRIX: &[(&str, &str, TenantFilterTier)] = &[
         TenantFilterTier::Covered,
     ),
     (
+        "flow:definition:",
+        "flow_definition",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "report:",
+        "report_dataset/report_dashboard",
+        TenantFilterTier::Covered,
+    ),
+    (
         "system:scimgroup:",
         "sys_scim_group",
         TenantFilterTier::Covered,

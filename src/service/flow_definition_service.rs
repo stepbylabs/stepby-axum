@@ -17,6 +17,9 @@ use crate::common::flow_graph::FlowGraph;
 use crate::entity::flow_definition::{ActiveModel as FlowDefActiveModel, Entity as FlowDefEntity};
 use crate::entity::prelude::FlowDefinitionModel;
 
+/// 能力位键（governance 注册表 `flow.designer`：off | view | full，默认 off）
+const DESIGNER_FEATURE_KEY: &str = "flow.designer";
+
 /// 流程定义出参 VO（graph_json 原样返回——结构已校验，非密文）
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +105,32 @@ impl FlowDefinitionService {
         Ok(())
     }
 
+    /// 设计器写面守卫（能力位 `flow.designer` 的端点消费——批次十二随注册表同批接入）。
+    ///
+    /// - 平台操作者（tid=0）不受能力位限制（与 nav.l3 / report.designer 同语义）；
+    /// - 租户操作者需**有效档位 = `full`**（`view` 只读：列表/详情/版本对比可用、
+    ///   写面 403；`off`/非法值 fail-closed 拒绝）；
+    /// - 有效能力集 = 平台 `[features]` 天花板 ∩ 租户套餐（`tenant_features_conn`）。
+    async fn ensure_designer_write(&self, operator_tid: i64) -> Result<(), ServiceError> {
+        if operator_tid == 0 {
+            return Ok(());
+        }
+        let features =
+            crate::service::sys_tenant_service::tenant_features_conn(&self.db, operator_tid)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("tenant features: {e}")))?;
+        if crate::common::features::designer_write_allowed(
+            operator_tid,
+            features.mode(DESIGNER_FEATURE_KEY),
+        ) {
+            Ok(())
+        } else {
+            Err(ServiceError::forbidden(&crate::tr!(
+                "error.flow.def_designer_disabled"
+            )))
+        }
+    }
+
     /// 分页查询（租户过滤；del_flag='0'）
     pub async fn get_page(
         &self,
@@ -153,6 +182,7 @@ impl FlowDefinitionService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<FlowDefVo, ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         FlowGraph::parse_and_validate(&dto.graph_json).map_err(|e| {
             ServiceError::bad_request(&format!("{}: {e}", crate::tr!("error.flow.graph_invalid")))
         })?;
@@ -201,6 +231,7 @@ impl FlowDefinitionService {
         let flow_id = dto
             .flow_id
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.def_id_required")))?;
+        self.ensure_designer_write(operator_tid).await?;
         let m = FlowDefEntity::find_by_id(flow_id)
             .filter(crate::entity::flow_definition::Column::DelFlag.eq("0"))
             .one(&self.db)
@@ -237,6 +268,7 @@ impl FlowDefinitionService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<FlowDefPublishVo, ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         let m = FlowDefEntity::find_by_id(flow_id)
             .filter(crate::entity::flow_definition::Column::DelFlag.eq("0"))
             .one(&self.db)
@@ -295,6 +327,7 @@ impl FlowDefinitionService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         for fid in flow_ids {
             if let Some(m) = FlowDefEntity::find_by_id(fid)
                 .filter(crate::entity::flow_definition::Column::DelFlag.eq("0"))
