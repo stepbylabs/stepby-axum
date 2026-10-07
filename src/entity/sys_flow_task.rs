@@ -82,6 +82,8 @@ pub struct Model {
     pub threshold: Option<i64>,
     /// 委派转出人（delegate 动作记录原审批人；处理完回不到 A，G-02 M2）
     pub delegate_from: Option<i64>,
+    /// 节点高级动作白名单快照（JSON 数组；NULL = 存量行全开放，批次十七）
+    pub actions_json: Option<String>,
     /// 多租户前向兼容预留（默认 0，不参与过滤）
     pub tenant_id: i64,
     pub create_by: Option<String>,

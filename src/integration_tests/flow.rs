@@ -1240,6 +1240,7 @@ async fn test_flow_engine_open_round_is_biz_type_agnostic() {
                     txn,
                     OpenRoundSpec {
                         biz_type: custom_biz,
+                        actions: &[],
                         biz_id,
                         round_no: 1,
                         title: "it_flow_engine_generic",

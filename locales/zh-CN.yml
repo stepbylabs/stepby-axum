@@ -138,6 +138,7 @@ error:
     graph_not_published: 流程不存在或未发布（需已发布版本）
     graph_fields_invalid: 字段快照必须是 JSON 对象
     graph_no_approve: 路由中不含审批节点，无法发起审批
+    action_not_allowed: 节点未开放动作 %{action}，已拒绝
   sso:
     platform_protected: 平台根部门不允许通过租户接口操作
     ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户

@@ -310,6 +310,13 @@ pub enum Quorum {
     Weighted { threshold: i64 },
 }
 
+/// 高级动作全量清单（demo/gen 链默认开放——与批次十七前行为一致）
+pub const FULL_ACTIONS: &[&str] = &["delegate", "countersign_add", "countersign_del"];
+/// 全量动作白名单的 String Vec（NodeSpec.actions 构造用）
+pub fn full_actions_vec() -> Vec<String> {
+    FULL_ACTIONS.iter().map(|s| String::from(*s)).collect()
+}
+
 /// 单个审批节点规格
 #[derive(Debug, Clone)]
 pub struct NodeSpec {
@@ -323,6 +330,10 @@ pub struct NodeSpec {
     /// 与 `policies` 平行的策略级权重（weighted 节点生效；同策略解析出的全部用户共享；
     /// 空 = 全 1）。非 weighted 节点忽略（G-02 M2）
     pub policy_weights: Vec<i64>,
+    /// 节点开放的高级动作白名单（批次十七：delegate/countersign_add/countersign_del）；
+    /// 快照进 task 行（actions_json），动作入口按白名单收窄——**显式声明优于隐式**，
+    /// demo/gen 链填全量（行为与批次十七前一致），图节点按设计器勾选。
+    pub actions: Vec<String>,
 }
 
 impl NodeSpec {
@@ -358,6 +369,7 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
             quorum: Quorum::All,
             or_sign: false,
             policy_weights: vec![],
+            actions: full_actions_vec(),
         }],
         "or_sign" => vec![NodeSpec {
             node_seq: 1,
@@ -371,6 +383,7 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
             quorum: Quorum::Any,
             or_sign: true,
             policy_weights: vec![],
+            actions: full_actions_vec(),
         }],
         "weighted" => vec![NodeSpec {
             node_seq: 1,
@@ -384,6 +397,7 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
             quorum: Quorum::Weighted { threshold: 2 },
             or_sign: false,
             policy_weights: vec![1, 2],
+            actions: full_actions_vec(),
         }],
         _ => vec![
             NodeSpec {
@@ -393,6 +407,7 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
                 quorum: Quorum::Any,
                 or_sign: false,
                 policy_weights: vec![],
+                actions: full_actions_vec(),
             },
             NodeSpec {
                 node_seq: 2,
@@ -403,6 +418,7 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
                 quorum: Quorum::Any,
                 or_sign: false,
                 policy_weights: vec![],
+                actions: full_actions_vec(),
             },
         ],
     }
@@ -468,6 +484,7 @@ fn graph_to_specs(
             quorum,
             or_sign,
             policy_weights: vec![],
+            actions: node.actions.clone(),
         });
     }
     if specs.is_empty() {
@@ -671,6 +688,8 @@ pub struct OpenRoundSpec<'a> {
     pub weights: &'a [i64],
     /// weighted 节点门槛快照（权重和 ≥ threshold 即节点通过；NULL = 非 weighted，G-02 M2）
     pub node_threshold: Option<i64>,
+    /// 节点高级动作白名单快照（批次十七；快照进 task 行 actions_json）
+    pub actions: &'a [String],
     /// SLA 到期时间（可空）
     pub due_at: Option<NaiveDateTime>,
     /// 流水 `from_status`（首提交 `draft`；重提交为提交前状态）
@@ -904,6 +923,7 @@ impl SysFlowService {
         // 事务闭包要求 'static：克隆捕获字段，避免借用外层局部变量
         let first_node_seq = first.node_seq;
         let first_node_name = first.node_name.clone();
+        let first_actions = first.actions.clone();
         let applicant_name_owned = applicant_name.to_string();
 
         let db = &self.db;
@@ -958,6 +978,7 @@ impl SysFlowService {
                             assignees: &assignees,
                             weights: &weights,
                             node_threshold,
+                            actions: &first_actions,
                             due_at: Some(due_at),
                             from_status: Some("draft"),
                             comment: dto.reason.as_deref(),
@@ -1051,6 +1072,7 @@ impl SysFlowService {
         };
         let first_node_seq = first.node_seq;
         let first_node_name = first.node_name.clone();
+        let first_actions = first.actions.clone();
         let applicant_name_owned = applicant_name.to_string();
         let fields_json = snapshot.to_string();
         let flow_id = def.flow_id;
@@ -1107,6 +1129,7 @@ impl SysFlowService {
                             assignees: &assignees,
                             weights: &weights,
                             node_threshold,
+                            actions: &first_actions,
                             due_at: Some(due_at),
                             from_status: Some("draft"),
                             comment: None,
@@ -1403,6 +1426,8 @@ impl SysFlowService {
                     let db = &self.db;
                     let next_name = next_spec.node_name.clone();
                     let next_seq = next_spec.node_seq;
+                    let next_actions_json = serde_json::to_string(&next_spec.actions)
+                        .unwrap_or_else(|_| "[]".to_string());
                     let task_biz_type = task.biz_type.clone();
                     let task_title = task.title.clone();
                     let task_applicant_name = task.applicant_name.clone();
@@ -1431,6 +1456,7 @@ impl SysFlowService {
                                     status: Set("pending".to_string()),
                                     weight: Set(weights.get(idx).copied().unwrap_or(1)),
                                     threshold: Set(next_threshold),
+                                    actions_json: Set(Some(next_actions_json.clone())),
                                     title: Set(task_title.clone()),
                                     applicant_id: Set(task_applicant_id),
                                     applicant_name: Set(task_applicant_name.clone()),
@@ -1667,6 +1693,7 @@ impl SysFlowService {
         comment: Option<&str>,
     ) -> Result<FlowActOutcome, ServiceError> {
         let task = self.load_task_for_act(task_id, operator_id).await?;
+        ensure_action_allowed(task.actions_json.as_deref(), "delegate")?;
         if to_user_id == operator_id {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.flow.delegate_self_forbidden"
@@ -1741,6 +1768,7 @@ impl SysFlowService {
             )));
         }
         let task = self.load_task_for_act(task_id, operator_id).await?;
+        ensure_action_allowed(task.actions_json.as_deref(), "countersign_del")?;
         let rows = self
             .task_repo()
             .find_by_biz_round(
@@ -1857,6 +1885,7 @@ impl SysFlowService {
             )));
         }
         let task = self.load_task_for_act(task_id, operator_id).await?;
+        ensure_action_allowed(task.actions_json.as_deref(), "countersign_add")?;
         if task.status != "pending" {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.flow.task_not_pending"
@@ -2022,6 +2051,7 @@ impl SysFlowService {
         // 事务闭包要求 'static：把捕获的字段提前克隆为拥有值（避免借用外层局部变量）
         let first_node_seq = first.node_seq;
         let first_node_name = first.node_name.clone();
+        let first_actions = first.actions.clone();
         let applicant_id_snap = doc.applicant_id;
         let applicant_name_snap = doc.applicant_name.clone();
         let doc_title_snap = doc.title.clone();
@@ -2054,6 +2084,7 @@ impl SysFlowService {
                         assignees: &assignees,
                         weights: &weights,
                         node_threshold,
+                        actions: &first_actions,
                         due_at: Some(due_at),
                         from_status: Some(doc_status.as_str()),
                         comment: comment_owned.as_deref(),
@@ -2799,6 +2830,9 @@ pub async fn engine_open_round(
                 .filter(|w| *w > 0)
                 .unwrap_or(1)),
             threshold: Set(spec.node_threshold),
+            actions_json: Set(Some(
+                serde_json::to_string(spec.actions).unwrap_or_else(|_| "[]".to_string()),
+            )),
             title: Set(Some(spec.title.to_string())),
             applicant_id: Set(spec.applicant_id),
             applicant_name: Set(spec.applicant_name.map(|s| s.to_string())),
@@ -2830,6 +2864,26 @@ pub async fn engine_open_round(
         .await
         .map_err(db_to_svc)?;
     Ok(())
+}
+
+/// actions 白名单收窄（批次十七，M2 遗留 TODO 闭环）：task 行
+/// 快照该节点开放的高级动作——**NULL = 存量行向后兼容全开放**；非 NULL = 白名单
+/// 严格匹配（不在清单 → 403）。demo/gen 链显式填全量（行为与收窄前一致）。
+fn ensure_action_allowed(actions_json: Option<&str>, action: &str) -> Result<(), ServiceError> {
+    match actions_json {
+        None => Ok(()),
+        Some(raw) => {
+            let list: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
+            if list.iter().any(|a| a == action) {
+                Ok(())
+            } else {
+                Err(ServiceError::forbidden(&crate::tr!(
+                    "error.flow.action_not_allowed",
+                    action = action
+                )))
+            }
+        }
+    }
 }
 
 /// DbErr → ServiceError（事务闭包内统一映射）
@@ -2965,6 +3019,24 @@ mod tests {
     #[test]
     fn demo_nodes_unknown_mode_falls_back_to_single() {
         assert_eq!(demo_nodes("whatever").len(), 2);
+    }
+
+    /// actions 白名单收窄矩阵（批次十七）：NULL=存量行全开放；命中放行；未命中 403
+    #[test]
+    fn test_ensure_action_allowed_matrix() {
+        // 存量行（NULL）向后兼容全开放
+        assert!(ensure_action_allowed(None, "delegate").is_ok());
+        assert!(ensure_action_allowed(None, "countersign_add").is_ok());
+        // 白名单命中
+        let full = Some(r#"["delegate","countersign_add"]"#);
+        assert!(ensure_action_allowed(full, "delegate").is_ok());
+        assert!(ensure_action_allowed(full, "countersign_add").is_ok());
+        // 未命中 → 403
+        assert!(ensure_action_allowed(full, "countersign_del").is_err());
+        // 空 JSON 数组 = 全禁
+        assert!(ensure_action_allowed(Some("[]"), "delegate").is_err());
+        // 损坏 JSON fail-closed（解析失败 → 空清单 → 全禁）
+        assert!(ensure_action_allowed(Some("not-json"), "delegate").is_err());
     }
 
     /// W-19：业务类型注册表——内置类型可识别，未登记类型不得冒充内置
