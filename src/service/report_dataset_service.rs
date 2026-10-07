@@ -238,6 +238,24 @@ impl ReportDatasetService {
         Ok(DatasetVo::from_model(&m))
     }
 
+    /// 取 SQL 模板明文（编辑回填专用；仅持 report:dataset:edit 者可达——权限在路由键层把关）
+    pub async fn get_dataset_sql(
+        &self,
+        dataset_id: i64,
+        operator_tid: i64,
+    ) -> Result<String, ServiceError> {
+        let m = ReportDatasetEntity::find_by_id(dataset_id)
+            .filter(ReportDatasetColumn::DelFlag.eq("0"))
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| {
+                eprintln!("DBG-SQL not_found: id={dataset_id} tid={operator_tid}");
+                ServiceError::not_found(&crate::tr!("error.report.dataset_not_found"))
+            })?;
+        self.ensure_access(m.tenant_id, operator_tid)?;
+        Ok(m.sql_template)
+    }
+
     pub async fn add_dataset(
         &self,
         dto: DatasetUpsertDto,
@@ -323,10 +341,10 @@ impl ReportDatasetService {
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         for id in dataset_ids {
-            if let Some(m) = ReportDatasetEntity::find_by_id(id)
-                .filter(ReportDatasetColumn::DelFlag.eq("0"))
-                .one(&self.db)
-                .await?
+            let raw = ReportDatasetEntity::find_by_id(id).one(&self.db).await?;
+            eprintln!("DBG-REMOVE raw-row={raw:?}");
+            if let Some(m) = raw
+                .filter(|mm| mm.del_flag.as_deref() == Some("0"))
             {
                 self.ensure_access(m.tenant_id, operator_tid)?;
                 let mut am: ReportDatasetActiveModel = m.into();
@@ -350,6 +368,7 @@ impl ReportDatasetService {
             .one(&self.db)
             .await?
             .ok_or_else(|| {
+                eprintln!("DBG-PREVIEW entry not_found: id={}", dto.dataset_id);
                 ServiceError::not_found(&crate::tr!("error.report.dataset_not_found"))
             })?;
         self.ensure_access(m.tenant_id, operator_tid)?;
@@ -439,7 +458,10 @@ impl ReportDatasetService {
         let mut am: ReportDatasetActiveModel = ReportDatasetEntity::find_by_id(m.dataset_id)
             .one(&self.db)
             .await?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report.dataset_not_found")))?
+            .ok_or_else(|| {
+                eprintln!("DBG-PREVIEW rewrite not_found: id={}", m.dataset_id);
+                ServiceError::not_found(&crate::tr!("error.report.dataset_not_found"))
+            })?
             .into();
         am.columns_meta = Set(Some(meta.to_string()));
         am.update(&self.db).await?;

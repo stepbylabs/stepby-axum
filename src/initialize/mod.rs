@@ -504,6 +504,11 @@ impl AppInitializer {
         ensure_flow_report_menus(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化流程/报表菜单失败: {}", e))?;
+        // 4.5c-e G-01 M2：报表前端上线翻转菜单可见性（4146/4148，存量库兜底，
+        //      等价迁移 m20261007_000008；幂等）
+        ensure_report_menus_visible(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("翻转报表菜单可见性失败: {}", e))?;
         // 4.5c-f G-02 M2：sys_flow_task 动作矩阵扩展列（weight/threshold/delegate_from，
         //      存量库兜底，等价迁移 m20261007_000006；has_column 守卫幂等）
         ensure_flow_task_action_columns(&db)
@@ -5327,6 +5332,23 @@ async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow::Result<()>
         .await?;
     }
     tracing::info!("流程/报表菜单已补建（4140-4148，G-01/G-02 存量库兜底）");
+    Ok(())
+}
+
+/// 台账（G-01 M2，存量库兜底，等价迁移 `m20261007_000008`）：
+/// 报表前端三页上线，翻转菜单 4146（报表数据集）/4148（大屏管理）可见性。
+/// **仅翻这两行**——4140-4145（G-02 流程定义）属 M3 前端，继续隐藏。
+/// 幂等：仅当 visible='1' 时置 '0'，可重复执行；表/行不存在零影响。
+async fn ensure_report_menus_visible(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_menu SET visible = '0' WHERE menu_id IN (4146, 4148) AND visible = '1'"
+            .to_string(),
+    ))
+    .await?;
     Ok(())
 }
 

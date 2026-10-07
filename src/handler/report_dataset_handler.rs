@@ -166,6 +166,33 @@ pub async fn dashboard_list(
     Ok(TableDataInfo::new(total, rows))
 }
 
+/// POST /report/dataset/{datasetId}/sql — 取 SQL 模板明文（编辑回填）
+///
+/// 为何独立端点而非 info 出参：list/info 走 `report:dataset:list`（普通可见），
+/// 明文仅 `report:dataset:edit` 持有者可见——权限差异在**路由键**层表达，
+/// fail-closed 中间件天然拦截无 edit 权限者（VO 恒不含明文，零泄漏面）。
+#[utoipa::path(
+    post,
+    path = "/report/dataset/{datasetId}/sql",
+    params(("datasetId" = i64, Path, description = "数据集 ID")),
+    responses(
+        (status = 200, description = "返回 SQL 明文", body = AjaxResult<String>),
+        (status = 403, description = "无 report:dataset:edit 权限"),
+    ),
+    tag = "report"
+)]
+pub async fn dataset_sql(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(dataset_id): Path<i64>,
+) -> Result<AjaxResult<String>, AppError> {
+    let sql = state
+        .report_dataset_service
+        .get_dataset_sql(dataset_id, operator.tenant_id())
+        .await?;
+    Ok(AjaxResult::success(sql))
+}
+
 /// GET /report/dashboard/{dashboardId}
 #[utoipa::path(
     get,
