@@ -225,13 +225,18 @@ impl DataRuleService {
                 "error.common.forbidden"
             )));
         }
+        // 事务保证（批次十五）：软删规则与级联清理角色绑定两步写原子化——
+        // 原实现第二步失败会留下"规则已停用但绑定残留"的半应用状态。
+        use sea_orm::TransactionTrait;
+        let txn = self.db.begin().await?;
         let mut am: sys_data_rule::ActiveModel = existing.into();
         am.del_flag = Set(Some("1".into()));
-        am.update(self.db.as_ref()).await?;
+        am.update(&txn).await?;
         sys_role_data_rule::Entity::delete_many()
             .filter(sys_role_data_rule::Column::RuleId.eq(rule_id))
-            .exec(self.db.as_ref())
+            .exec(&txn)
             .await?;
+        txn.commit().await?;
         Ok(())
     }
 
