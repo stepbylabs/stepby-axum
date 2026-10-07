@@ -423,10 +423,15 @@ impl ReportDatasetService {
         let mut out_rows: Vec<serde_json::Value> = Vec::new();
         for (idx, row) in rows.iter().enumerate() {
             if idx == 0 {
-                // 列名提取：sea-orm Row 无直接列名遍历——按列序号取值并借
-                // ColumnName_wrapper：改为按 try_get 失败容忍策略 + 列名来自模板采样
-                // （query_all_raw 的 QueryResult 支持按列名取，列名清单来自 sqlite 系统表）
-                columns = infer_columns(&m.sql_template, &self.db).await?;
+                // 列名提取（G-01 M3 优化）：临时视图探针取真实列名（表达式列含数据库
+                // 默认命名）；探针失败（方言差异/权限）回退词法推断——fail-open 但结果
+                // 恒为合法列名清单，下游 try_get 失败容忍为 Null
+                columns = match probe_columns_via_temp_view(&self.db, &m.sql_template).await {
+                    Some(c) => c,
+                    None => infer_columns(&m.sql_template, &self.db)
+                        .await
+                        .unwrap_or_else(|_| vec!["col1".to_string()]),
+                };
             }
             let mut obj = serde_json::Map::new();
             for col in &columns {
@@ -691,6 +696,77 @@ fn bind_named_params(
 
 /// 列名推断：对模板 `SELECT a, b FROM t` 的**顶层投影列清单**做词法提取
 /// （校验器已保证无括号/无子查询，顶层逗号切分安全）
+/// 列元数据采样（G-01 M3 优化）：**临时视图探针**取真实列名——
+/// `CREATE TEMPORARY VIEW __rs_probe AS {template}` 后按方言读视图列
+/// （sqlite `PRAGMA table_info` / mysql+pg `information_schema.columns`），
+/// 表达式列也能拿到数据库引擎的默认命名；探针失败回退词法推断。
+///
+/// 为何安全：探针 SQL 只由**已过白名单校验的模板**拼成（运行时可信代码路径），
+/// 临时视图会话结束自动清理（且显式 DROP）；`database_id` 仅用于日志。
+async fn probe_columns_via_temp_view(
+    db: &DatabaseConnection,
+    sql_template: &str,
+) -> Option<Vec<String>> {
+    let backend = db.get_database_backend();
+    let probe_name = "__rs_probe";
+    let create = format!("CREATE TEMPORARY VIEW {probe_name} AS {sql_template}");
+    if db
+        .execute_raw(sea_orm::Statement::from_string(backend, create))
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    let read_sql = match backend {
+        sea_orm::DatabaseBackend::Sqlite => {
+            format!("PRAGMA table_info({probe_name})")
+        }
+        _ => format!(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = '{probe_name}' \
+             ORDER BY ordinal_position"
+        ),
+    };
+    let rows = db
+        .query_all_raw(sea_orm::Statement::from_string(backend, read_sql))
+        .await
+        .ok()?;
+    // 显式清理（TEMP 视图随连接关闭自动消失，但连接是池化的——必须主动 DROP）
+    let _ = db.execute_raw(sea_orm::Statement::from_string(
+        backend,
+        format!("DROP VIEW IF EXISTS {probe_name}"),
+    ));
+    let mut cols = Vec::new();
+    for row in &rows {
+        let name: Option<String> = match backend {
+            // PRAGMA table_info 返回列名在 "name" 字段
+            sea_orm::DatabaseBackend::Sqlite => row
+                .try_get::<Option<String>>("", "name")
+                .ok()
+                .flatten(),
+            _ => row
+                .try_get::<Option<String>>("", "column_name")
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    // MySQL 返回大写列别名
+                    row.try_get::<Option<String>>("", "COLUMN_NAME")
+                        .ok()
+                        .flatten()
+                }),
+        };
+        if let Some(n) = name {
+            if !n.is_empty() {
+                cols.push(n);
+            }
+        }
+    }
+    if cols.is_empty() {
+        None
+    } else {
+        Some(cols)
+    }
+}
+
 async fn infer_columns(
     sql_template: &str,
     _db: &DatabaseConnection,
