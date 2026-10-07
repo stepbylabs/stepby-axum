@@ -66,3 +66,6 @@ _warn*.log
 _snippet.txt
 _e.log
 _d.log
+
+# e2e 批跑后端运行日志（会话产物，不入库）
+tests_e2e_backend*.log

@@ -492,6 +492,19 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 OSS 配置菜单失败: {}", e))?;
 
+        // 4.5c-e G-01/G-02：flow_definition 表 + report_dataset/report_dashboard 两表
+        //      + 流程/报表菜单权限承载（存量库兜底，等价迁移 m20261007_000003/000004/000005；
+        //      幂等：表 EXISTS 跳过 / menu_id 已存在校验内容后跳过）
+        ensure_flow_definition_table(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化流程定义表失败: {}", e))?;
+        ensure_report_tables(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化报表数据集/大屏表失败: {}", e))?;
+        ensure_flow_report_menus(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化流程/报表菜单失败: {}", e))?;
+
         // 4.5d E2-a：性能索引兜底（存量库不跑 Migrator::up，等价迁移
         //      m20261002_000001_perf_indexes）：flow_demo_doc.tenant_id 与
         //      sys_web_hook_log 的 status/event_type 索引（三库方言感知幂等）。
@@ -4969,6 +4982,341 @@ async fn ensure_upload_config_menu(db: &DatabaseConnection) -> anyhow::Result<()
     )
     .await?;
     tracing::info!("OSS 存储配置菜单已补建（menu_id=4103，G-11 存量库兜底）");
+    Ok(())
+}
+
+/// 台账（G-02 M1，存量库兜底，等价迁移 `m20261007_000003`）：flow_definition 表。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而
+/// `flow_definition_service` 已读写该表 ⇒ 缺此兜底则流程定义 CRUD/发布全链 500。
+/// 幂等：表存在即跳过；唯一索引容错"已存在"；demo_v2 种子 WHERE NOT EXISTS。
+async fn ensure_flow_definition_table(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if sso_table_exists(db, "flow_definition").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let (pk, text_type) = match backend {
+        DatabaseBackend::Sqlite => ("INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"),
+        DatabaseBackend::Postgres => ("BIGSERIAL PRIMARY KEY", "TEXT"),
+        _ => ("BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY", "LONGTEXT"),
+    };
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS flow_definition (\
+         flow_id {pk},\
+         tenant_id BIGINT NOT NULL DEFAULT 0,\
+         flow_code VARCHAR(64) NOT NULL,\
+         flow_name VARCHAR(128) NOT NULL,\
+         graph_json {text_type} NOT NULL,\
+         version INT NOT NULL DEFAULT 1,\
+         is_latest CHAR(1) NOT NULL DEFAULT '1',\
+         status CHAR(1) NOT NULL DEFAULT '0',\
+         create_by VARCHAR(64),\
+         create_time DATETIME,\
+         update_by VARCHAR(64),\
+         update_time DATETIME,\
+         remark VARCHAR(500),\
+         del_flag CHAR(1) DEFAULT '0')"
+    );
+    db.execute_raw(Statement::from_string(backend, create_sql))
+        .await?;
+    // 唯一索引 (tenant_id, flow_code, version)：MySQL 不支持 IF NOT EXISTS，容错"已存在"
+    let idx_sql = match backend {
+        DatabaseBackend::MySql => {
+            "CREATE UNIQUE INDEX uq_flow_def_code_ver ON flow_definition (tenant_id, flow_code, version)"
+        }
+        _ => {
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_flow_def_code_ver ON flow_definition (tenant_id, flow_code, version)"
+        }
+    };
+    if let Err(e) = db
+        .execute_raw(Statement::from_string(backend, idx_sql.to_string()))
+        .await
+    {
+        let msg = e.to_string();
+        if !(msg.contains("Duplicate key name")
+            || msg.contains("42P07")
+            || msg.contains("already exists"))
+        {
+            return Err(e.into());
+        }
+    }
+    // demo_v2 种子（与迁移同构，幂等）
+    let graph = r#"{"nodes":[{"id":"start","type":"start"},{"id":"a1","type":"approve","name":"部门主管审批","assignees":["dept_leader"],"quorum":"any"},{"id":"a2","type":"approve","name":"管理员审批","assignees":["role:admin"],"quorum":"any"},{"id":"end","type":"end"}],"edges":[{"from":"start","to":"a1"},{"from":"a1","to":"a2"},{"from":"a2","to":"end"}]}"#;
+    let now = flow_now(db);
+    db.execute_raw(Statement::from_string(
+        backend,
+        format!(
+            "INSERT INTO flow_definition (tenant_id, flow_code, flow_name, graph_json, version, is_latest, status, create_by, create_time, remark, del_flag) \
+             SELECT 0, 'demo_v2', '可配置演示审批流', '{graph}', 1, '1', '0', 'admin', {now}, 'G-02 M1 种子：两级单审（对齐 demo single 模式）', '0' \
+             WHERE NOT EXISTS (SELECT 1 FROM flow_definition WHERE tenant_id = 0 AND flow_code = 'demo_v2')"
+        ),
+    ))
+    .await?;
+    tracing::info!("flow_definition 表已补建（G-02 存量库兜底）");
+    Ok(())
+}
+
+/// 台账（G-01 M1，存量库兜底，等价迁移 `m20261007_000004`）：
+/// report_dataset / report_dashboard 两表。
+///
+/// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，而
+/// `report_dataset_service` 已读写两表 ⇒ 缺此兜底则数据集 CRUD/试跑/大屏存取全链 500。
+/// 幂等：表存在即跳过；唯一索引容错"已存在"。
+async fn ensure_report_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if sso_table_exists(db, "report_dataset").await?
+        && sso_table_exists(db, "report_dashboard").await?
+    {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let (pk, text_type) = match backend {
+        DatabaseBackend::Sqlite => ("INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"),
+        DatabaseBackend::Postgres => ("BIGSERIAL PRIMARY KEY", "TEXT"),
+        _ => ("BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY", "LONGTEXT"),
+    };
+    let dataset_sql = format!(
+        "CREATE TABLE IF NOT EXISTS report_dataset (\
+         dataset_id {pk},\
+         tenant_id BIGINT NOT NULL DEFAULT 0,\
+         dataset_code VARCHAR(64) NOT NULL,\
+         dataset_name VARCHAR(128) NOT NULL,\
+         sql_template {text_type} NOT NULL,\
+         params_schema {text_type},\
+         columns_meta {text_type},\
+         status CHAR(1) NOT NULL DEFAULT '0',\
+         remark VARCHAR(500),\
+         create_by VARCHAR(64),\
+         create_time DATETIME,\
+         update_by VARCHAR(64),\
+         update_time DATETIME,\
+         del_flag CHAR(1) DEFAULT '0')"
+    );
+    db.execute_raw(Statement::from_string(backend, dataset_sql))
+        .await?;
+    let dashboard_sql = format!(
+        "CREATE TABLE IF NOT EXISTS report_dashboard (\
+         dashboard_id {pk},\
+         tenant_id BIGINT NOT NULL DEFAULT 0,\
+         dashboard_code VARCHAR(64) NOT NULL,\
+         dashboard_name VARCHAR(128) NOT NULL,\
+         layout_json {text_type} NOT NULL,\
+         schema_version INT NOT NULL DEFAULT 1,\
+         status CHAR(1) NOT NULL DEFAULT '0',\
+         remark VARCHAR(500),\
+         create_by VARCHAR(64),\
+         create_time DATETIME,\
+         update_by VARCHAR(64),\
+         update_time DATETIME,\
+         del_flag CHAR(1) DEFAULT '0')"
+    );
+    db.execute_raw(Statement::from_string(backend, dashboard_sql))
+        .await?;
+    // 唯一索引：MySQL 不支持 IF NOT EXISTS，容错"已存在"
+    for (idx_name, table, cols) in [
+        (
+            "uq_report_dataset_code",
+            "report_dataset",
+            "(tenant_id, dataset_code)",
+        ),
+        (
+            "uq_report_dashboard_code",
+            "report_dashboard",
+            "(tenant_id, dashboard_code)",
+        ),
+    ] {
+        let idx_sql = match backend {
+            DatabaseBackend::MySql => {
+                format!("CREATE UNIQUE INDEX {idx_name} ON {table} {cols}")
+            }
+            _ => format!("CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} ON {table} {cols}"),
+        };
+        if let Err(e) = db
+            .execute_raw(Statement::from_string(backend, idx_sql))
+            .await
+        {
+            let msg = e.to_string();
+            if !(msg.contains("Duplicate key name")
+                || msg.contains("42P07")
+                || msg.contains("already exists"))
+            {
+                return Err(e.into());
+            }
+        }
+    }
+    tracing::info!("report_dataset / report_dashboard 表已补建（G-01 存量库兜底）");
+    Ok(())
+}
+
+/// 台账（G-01/G-02 M1，存量库兜底，等价迁移 `m20261007_000005`）：
+/// 流程定义与报表数据集/大屏的菜单权限承载（menu_id 4140-4148）。
+///
+/// 契约测试 `menu_perm_contract` 要求后端 PERM_ROUTE_TABLE 每个权限键 ⊆ sys_menu.perms，
+/// 存量库缺菜单行则普通角色永远无法被授予这些能力。页面菜单 `visible='1'`（隐藏，
+/// M2 前端上线时翻转可见性）。幂等 + E6 加固：menu_id 已存在时**校验 perms 内容**，
+/// 被其他菜单占位则显性 warn（不盲目跳过、不覆盖）。
+async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    /// 菜单 seed 行（与迁移 m20261007_000005 的 MENUS 同构）
+    struct MenuSeedRow {
+        menu_id: i64,
+        menu_name: &'static str,
+        parent_id: i64,
+        order_num: i64,
+        menu_type: &'static str,
+        path: &'static str,
+        component: &'static str,
+        perms: &'static str,
+        icon: &'static str,
+    }
+    const MENUS: &[MenuSeedRow] = &[
+        MenuSeedRow {
+            menu_id: 4140,
+            menu_name: "流程定义",
+            parent_id: 1,
+            order_num: 16,
+            menu_type: "C",
+            path: "flowDefinition",
+            component: "flow/designer/index",
+            perms: "flow:definition:list",
+            icon: "form",
+        },
+        MenuSeedRow {
+            menu_id: 4141,
+            menu_name: "流程定义查询",
+            parent_id: 4140,
+            order_num: 1,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "flow:definition:query",
+            icon: "#",
+        },
+        MenuSeedRow {
+            menu_id: 4142,
+            menu_name: "流程定义新增",
+            parent_id: 4140,
+            order_num: 2,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "flow:definition:add",
+            icon: "#",
+        },
+        MenuSeedRow {
+            menu_id: 4143,
+            menu_name: "流程定义编辑",
+            parent_id: 4140,
+            order_num: 3,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "flow:definition:edit",
+            icon: "#",
+        },
+        MenuSeedRow {
+            menu_id: 4144,
+            menu_name: "流程定义发布",
+            parent_id: 4140,
+            order_num: 4,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "flow:definition:publish",
+            icon: "#",
+        },
+        MenuSeedRow {
+            menu_id: 4145,
+            menu_name: "流程定义删除",
+            parent_id: 4140,
+            order_num: 5,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "flow:definition:remove",
+            icon: "#",
+        },
+        MenuSeedRow {
+            menu_id: 4146,
+            menu_name: "报表数据集",
+            parent_id: 1,
+            order_num: 17,
+            menu_type: "C",
+            path: "reportDataset",
+            component: "report/dataset/index",
+            perms: "report:dataset:list",
+            icon: "chart",
+        },
+        MenuSeedRow {
+            menu_id: 4147,
+            menu_name: "数据集编辑",
+            parent_id: 4146,
+            order_num: 1,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "report:dataset:edit",
+            icon: "#",
+        },
+        MenuSeedRow {
+            menu_id: 4148,
+            menu_name: "大屏管理",
+            parent_id: 1,
+            order_num: 18,
+            menu_type: "C",
+            path: "reportDashboard",
+            component: "report/view/index",
+            perms: "report:dashboard:view",
+            icon: "dashboard",
+        },
+    ];
+    let backend = db.get_database_backend();
+    for m in MENUS {
+        let occupied = db
+            .query_all_raw(Statement::from_string(
+                backend,
+                format!("SELECT perms FROM sys_menu WHERE menu_id = {}", m.menu_id),
+            ))
+            .await?;
+        if let Some(row) = occupied.first() {
+            let existing = row.try_get::<String>("", "perms").ok();
+            if existing.as_deref() == Some(m.perms) {
+                continue;
+            }
+            tracing::warn!(
+                "menu_id={} 已被其他菜单占用（perms={existing:?}）——G-01/G-02 菜单 \
+                 （预期 perms={}）补建跳过；请清理占位菜单后重启",
+                m.menu_id,
+                m.perms,
+            );
+            continue;
+        }
+        let now = flow_now(db);
+        flow_insert(
+            db,
+            &format!(
+                "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, \
+                 route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, \
+                 create_by, create_time, remark, del_flag) VALUES \
+                 ({}, '{}', {}, {}, '{}', '{}', '', '', \
+                 '1', '0', '{}', '1', '0', '{}', '{}', 'admin', {}, \
+                 'G-01/G-02 菜单权限承载（存量库兜底）', '0')",
+                m.menu_id,
+                m.menu_name,
+                m.parent_id,
+                m.order_num,
+                m.path,
+                m.component,
+                m.menu_type,
+                m.perms,
+                m.icon,
+                now
+            ),
+        )
+        .await?;
+    }
+    tracing::info!("流程/报表菜单已补建（4140-4148，G-01/G-02 存量库兜底）");
     Ok(())
 }
 

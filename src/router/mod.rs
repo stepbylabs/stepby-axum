@@ -5,6 +5,7 @@ pub mod auth_router;
 pub mod common_router;
 pub mod data_rule_router;
 pub mod file_router;
+pub mod flow_definition_router;
 pub mod flow_router;
 pub mod ip_location_router;
 pub mod monitor_alert_router;
@@ -14,6 +15,7 @@ pub mod monitor_observability_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
 pub mod public;
+pub mod report_dataset_router;
 pub mod scim_router;
 pub mod sso_router;
 pub mod sys_backup_router;
@@ -102,6 +104,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_user_pref_router::user_pref_routes())
         .merge(sys_pat_router::pat_routes())
         .merge(sys_role_router::role_routes())
+        .merge(flow_definition_router::flow_definition_routes())
         .merge(sys_role_field_perm_router::role_field_perm_routes())
         .merge(sys_menu_router::menu_routes())
         .merge(sys_msg_router::msg_routes())
@@ -110,6 +113,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(sys_notice_router::notice_routes())
         .merge(sys_report_router::report_routes())
         .merge(sys_report_board_router::report_board_routes())
+        // G-01 M1：报表数据集与大屏（dataset CRUD/试跑 + dashboard 存取）
+        .merge(report_dataset_router::report_routes())
         .merge(sys_web_hook_router::web_hook_routes())
         .merge(sys_dept_router::dept_routes())
         .merge(sys_tenant_router::tenant_routes())

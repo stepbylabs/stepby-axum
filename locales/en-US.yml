@@ -125,6 +125,11 @@ error:
     pat_forbidden: Approval must be performed in a personal login session; personal access tokens (PAT) are not allowed
     countersign_duplicate: This approver is already at the current approval node; no duplicate countersign is needed
     biz_type_unregistered: The business document type is not registered in the approval engine (biz_type::REGISTRY), so the approval cannot advance
+    def_not_found: Flow definition not found
+    def_code_duplicate: Flow code already exists
+    def_id_required: Missing flow definition ID
+    def_published_immutable: Published version is immutable; publish a new version instead
+    graph_invalid: Flow graph validation failed
   sso:
     platform_protected: Platform root department cannot be modified via tenant API
     ancestors_invalid: Invalid department ancestors data, cannot resolve tenant
@@ -427,6 +432,17 @@ error:
     type_invalid: "Invalid report type, only login_stats / user_stats / msg_stats / custom are supported, current value: %{value}"
     config_json_invalid: Report config must be a valid JSON
     delete_sub_failed: Failed to delete subscriptions of the report
+    busy: Report query concurrency limit reached, please retry later
+    dashboard_code_duplicate: Dashboard code already exists
+    dashboard_not_found: Dashboard does not exist
+    dataset_code_duplicate: Dataset code already exists
+    dataset_disabled: Dataset is disabled and cannot be previewed
+    dataset_id_required: Missing dataset ID
+    dataset_not_found: Dataset does not exist
+    layout_invalid: Invalid dashboard layout_json (must be an object with schemaVersion in 1-10)
+    param_missing: Missing required parameters
+    query_timeout: Dataset query timed out
+    sql_invalid: SQL template validation failed
   report_sub:
     id_empty: Subscription ID must not be empty
     not_found: Subscription does not exist

@@ -205,6 +205,15 @@ pub const FEATURES: &[Item] = &[
     // 只允许平台管理员（`tenant_id == 0`）触发，故不随任何租户套餐下放权限；
     // 两条路由复用既有 `system:user:remove` perm（不新造 perm，避免"菜单可见但请求 403"）。
     feat("privacy.user_erasure", &[OFF, "precheck", "full"], &[]),
+    // 报表设计器（G-01，三档）：租户套餐是否开通「报表数据集/大屏」能力。
+    //   - `off`（默认）：关闭态即安全态；
+    //   - `view`：大屏查看/运行时；
+    //   - `full`：数据集管理 + 设计器编辑。
+    // `unlocked = &[]`：`report:dataset:*` / `report:dashboard:*` 是普通业务权限
+    //（非平台专属下放项），经菜单 4146-4148 的 role_menu 授权即可，不占用
+    // "平台专属 perm 解锁"语义（受 features 测试"白名单必须 is_platform_only_perm"约束）。
+    // M1 先行登记注册表（switch-catalog 同步），端点消费在 M2 设计器落地时接入。
+    feat("report.designer", &[OFF, "view", "full"], &[]),
     // 字段级权限 M2（三层开关的租户层）：租户套餐是否开通「角色字段级权限」能力。
     //   - 平台层（主开关）：`sys_config.sys.fieldPerm.enabled`（服务层第一道判定）；
     //   - 租户层：本能力位（off = 矩阵接口拒绝 + 裁剪恒空，关闭态即安全态）；

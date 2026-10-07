@@ -95,6 +95,10 @@ pub struct AppState {
     /// 消息渠道与模板管理 Service
     pub msg_service: SysMsgService,
     /// 审批工作流 Service（方案 B′）
+    /// G-02 M1：可视化流程定义（flow_definition CRUD/发布）
+    pub flow_definition_service: crate::service::flow_definition_service::FlowDefinitionService,
+    /// G-01 M1：报表数据集与大屏（dataset CRUD/试跑 + dashboard 存取）
+    pub report_dataset_service: crate::service::report_dataset_service::ReportDatasetService,
     pub flow_service: SysFlowService,
     /// 第三方登录（OAuth2/OIDC/SSO）Service
     pub oauth_service: SysOauthService,
@@ -358,6 +362,10 @@ impl AppState {
                 SysMsgService::new(db.clone(), config.clone()),
             ),
             oauth_service: SysOauthService::new(db.clone(), user_service.clone()),
+            flow_definition_service:
+                crate::service::flow_definition_service::FlowDefinitionService::new(db.clone()),
+            report_dataset_service:
+                crate::service::report_dataset_service::ReportDatasetService::new(db.clone()),
             // v4 §1.3：动态保留字 = 平台 JWT 命名空间（audience/issuer），
             // 与静态 RESERVED_CLIENT_IDS 一并在 add_client 时比对（见上方创建处）
             sso_service,
