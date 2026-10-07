@@ -211,6 +211,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261007_000007_sms_cloud_columns::Migration),
             Box::new(m20261007_000008_report_menus_visible::Migration),
             Box::new(m20261007_000009_flow_designer_menu_visible::Migration),
+            Box::new(m20261007_000010_flow_report_role_menus::Migration),
         ]
     }
 }
