@@ -39,6 +39,9 @@ fn dataset_gate() -> Arc<Semaphore> {
 }
 
 const PREVIEW_ROW_LIMIT: u64 = 100;
+
+/// 能力位键（governance 注册表 `report.designer`：off | view | full，默认 off）
+const DESIGNER_FEATURE_KEY: &str = "report.designer";
 /// 试跑超时（秒）
 const PREVIEW_TIMEOUT_SECS: u64 = 10;
 
@@ -200,6 +203,32 @@ impl ReportDatasetService {
         Ok(())
     }
 
+    /// 设计器写面守卫（能力位 `report.designer` 的端点消费——批次十二收口 M1 悬置项）。
+    ///
+    /// - 平台操作者（tid=0）不受能力位限制（平台内部由 role_menu 授权管，与 nav.l3 同语义）；
+    /// - 租户操作者需**有效档位 = `full`**（`view` 只读：列表/详情/预览可用、写面 403；
+    ///   `off`/非法值 fail-closed 拒绝）；
+    /// - 有效能力集 = 平台 `[features]` 天花板 ∩ 租户套餐（`tenant_features_conn`）。
+    async fn ensure_designer_write(&self, operator_tid: i64) -> Result<(), ServiceError> {
+        if operator_tid == 0 {
+            return Ok(());
+        }
+        let features =
+            crate::service::sys_tenant_service::tenant_features_conn(&self.db, operator_tid)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("tenant features: {e}")))?;
+        if crate::common::features::designer_write_allowed(
+            operator_tid,
+            features.mode(DESIGNER_FEATURE_KEY),
+        ) {
+            Ok(())
+        } else {
+            Err(ServiceError::forbidden(&crate::tr!(
+                "error.report.designer_disabled"
+            )))
+        }
+    }
+
     // ==================== 数据集 ====================
 
     pub async fn get_dataset_page(
@@ -249,7 +278,6 @@ impl ReportDatasetService {
             .one(&self.db)
             .await?
             .ok_or_else(|| {
-                eprintln!("DBG-SQL not_found: id={dataset_id} tid={operator_tid}");
                 ServiceError::not_found(&crate::tr!("error.report.dataset_not_found"))
             })?;
         self.ensure_access(m.tenant_id, operator_tid)?;
@@ -262,6 +290,7 @@ impl ReportDatasetService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<DatasetVo, ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         // 白名单校验器（fail-closed）
         crate::common::dataset_sql::validate_select_template(&dto.sql_template).map_err(|e| {
             ServiceError::bad_request(&format!("{}: {e}", crate::tr!("error.report.sql_invalid")))
@@ -309,6 +338,7 @@ impl ReportDatasetService {
         let dataset_id = dto.dataset_id.ok_or_else(|| {
             ServiceError::bad_request(&crate::tr!("error.report.dataset_id_required"))
         })?;
+        self.ensure_designer_write(operator_tid).await?;
         let m = ReportDatasetEntity::find_by_id(dataset_id)
             .filter(ReportDatasetColumn::DelFlag.eq("0"))
             .one(&self.db)
@@ -340,9 +370,9 @@ impl ReportDatasetService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         for id in dataset_ids {
             let raw = ReportDatasetEntity::find_by_id(id).one(&self.db).await?;
-            eprintln!("DBG-REMOVE raw-row={raw:?}");
             if let Some(m) = raw.filter(|mm| mm.del_flag.as_deref() == Some("0")) {
                 self.ensure_access(m.tenant_id, operator_tid)?;
                 let mut am: ReportDatasetActiveModel = m.into();
@@ -366,7 +396,6 @@ impl ReportDatasetService {
             .one(&self.db)
             .await?
             .ok_or_else(|| {
-                eprintln!("DBG-PREVIEW entry not_found: id={}", dto.dataset_id);
                 ServiceError::not_found(&crate::tr!("error.report.dataset_not_found"))
             })?;
         self.ensure_access(m.tenant_id, operator_tid)?;
@@ -461,10 +490,7 @@ impl ReportDatasetService {
         let mut am: ReportDatasetActiveModel = ReportDatasetEntity::find_by_id(m.dataset_id)
             .one(&self.db)
             .await?
-            .ok_or_else(|| {
-                eprintln!("DBG-PREVIEW rewrite not_found: id={}", m.dataset_id);
-                ServiceError::not_found(&crate::tr!("error.report.dataset_not_found"))
-            })?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.report.dataset_not_found")))?
             .into();
         am.columns_meta = Set(Some(meta.to_string()));
         am.update(&self.db).await?;
@@ -522,6 +548,7 @@ impl ReportDatasetService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<DashboardVo, ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         // layout_json 校验：对象 + schemaVersion ∈ 1..=10
         if !dto.layout_json.is_object() {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -598,6 +625,7 @@ impl ReportDatasetService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         for id in dashboard_ids {
             if let Some(m) = ReportDashboardEntity::find_by_id(id)
                 .filter(ReportDashboardColumn::DelFlag.eq("0"))
@@ -728,11 +756,16 @@ async fn probe_columns_via_temp_view(
         .query_all_raw(sea_orm::Statement::from_string(backend, read_sql))
         .await
         .ok()?;
-    // 显式清理（TEMP 视图随连接关闭自动消失，但连接是池化的——必须主动 DROP）
-    let _ = db.execute_raw(sea_orm::Statement::from_string(
-        backend,
-        format!("DROP VIEW IF EXISTS {probe_name}"),
-    ));
+    // 显式清理（TEMP 视图随连接关闭自动消失，但连接是池化的——必须主动 DROP）。
+    // ⚠️ 必须 `.await`（clippy::let_underscore_future 实证）：裸 `let _ =` 创建 future 后
+    // 立即丢弃 ⇒ DROP 语句**从未发往数据库**，池化连接携带残留临时视图归还——
+    // "池化连接必须主动清"的意图此前从未真正生效。清理失败不阻断探针（列已取到）。
+    let _drop_result = db
+        .execute_raw(sea_orm::Statement::from_string(
+            backend,
+            format!("DROP VIEW IF EXISTS {probe_name}"),
+        ))
+        .await;
     let mut cols = Vec::new();
     for row in &rows {
         let name: Option<String> = match backend {
@@ -751,10 +784,10 @@ async fn probe_columns_via_temp_view(
                         .flatten()
                 }),
         };
-        if let Some(n) = name {
-            if !n.is_empty() {
-                cols.push(n);
-            }
+        if let Some(n) = name
+            && !n.is_empty()
+        {
+            cols.push(n);
         }
     }
     if cols.is_empty() { None } else { Some(cols) }

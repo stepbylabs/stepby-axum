@@ -179,6 +179,15 @@ pub const FEATURES: &[Item] = &[
             ("full", &["system:backup:download"]),
         ],
     ),
+    // 流程定义设计器（G-02，三档）：与 report.designer 同构——租户套餐是否开通「流程定义设计」能力。
+    //   - `off`（默认）：关闭态即安全态；
+    //   - `view`：定义列表/详情/版本对比只读（写面 403）；
+    //   - `full`：定义新增/编辑/发布/删除。
+    // `unlocked = &[]`：`flow:definition:*` 是普通业务权限（非平台专属下放项），
+    // 经菜单 4140-4145 的 role_menu 授权即可，不占用"平台专属 perm 解锁"语义
+    //（受 features 测试"白名单必须 is_platform_only_perm"约束）。
+    // 服务层守卫：写面（add/edit/publish/remove）按有效档位收敛（批次十二接入）。
+    feat("flow.designer", &[OFF, "view", "full"], &[]),
     // 租户自建导航 L3：`view_only` 只给只读入口，`full` 才给写面。
     // 服务层 `SysTenantNavService::resolve_scope` 按同档位守卫，故按档解锁不会造出
     // "菜单可见但请求 403"的假入口。

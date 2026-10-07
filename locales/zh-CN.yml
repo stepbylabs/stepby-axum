@@ -129,6 +129,7 @@ error:
     countersign_duplicate: 该审批人已在当前审批节点，无需重复加签
     biz_type_unregistered: 业务单据类型未在审批引擎注册（biz_type::REGISTRY），无法推进审批
     def_not_found: 流程定义不存在
+    def_designer_disabled: 租户未开通流程设计器能力（套餐 flow.designer 档位不足，需 full 才可编辑）
     def_code_duplicate: 流程编码已存在
     def_id_required: 缺少流程定义 ID
     def_published_immutable: 已发布版本不可修改图定义，请发布新版本
@@ -442,6 +443,7 @@ error:
     dataset_disabled: 数据集已停用，不可试跑
     dataset_id_required: 缺少数据集 ID
     dataset_not_found: 数据集不存在
+    designer_disabled: 租户未开通报表设计器能力（套餐 report.designer 档位不足，需 full 才可编辑）
     layout_invalid: 大屏布局 layout_json 不合法（需为对象且 schemaVersion 在 1-10）
     param_missing: 缺少必填参数
     query_timeout: 数据集查询超时

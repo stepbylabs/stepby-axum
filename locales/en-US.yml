@@ -129,6 +129,7 @@ error:
     countersign_duplicate: This approver is already at the current approval node; no duplicate countersign is needed
     biz_type_unregistered: The business document type is not registered in the approval engine (biz_type::REGISTRY), so the approval cannot advance
     def_not_found: Flow definition not found
+    def_designer_disabled: Tenant has not enabled the flow designer capability (package flow.designer tier insufficient; full required to edit)
     def_code_duplicate: Flow code already exists
     def_id_required: Missing flow definition ID
     def_published_immutable: Published version is immutable; publish a new version instead
@@ -442,6 +443,7 @@ error:
     dataset_disabled: Dataset is disabled and cannot be previewed
     dataset_id_required: Missing dataset ID
     dataset_not_found: Dataset does not exist
+    designer_disabled: Tenant has not enabled the report designer capability (package report.designer tier insufficient; full required to edit)
     layout_invalid: Invalid dashboard layout_json (must be an object with schemaVersion in 1-10)
     param_missing: Missing required parameters
     query_timeout: Dataset query timed out

@@ -102,6 +102,16 @@ pub fn mode_reaches(features: &FeatureSet, key: &str, required_mode: &str) -> bo
     }
 }
 
+/// 设计器类能力位（`report.designer` / `flow.designer`，off|view|full 三档）的
+/// **写面**档位判定（纯函数，单一事实源——两个 service 共用，禁止各自复制）。
+///
+/// - `operator_tid == 0`：平台操作者不受能力位限制（平台内部由 role_menu 授权管，
+///   与 `nav.l3` 的"平台跳过能力位"同语义）；
+/// - 租户操作者仅 `full` 档可写（`view` 只读、`off` 关闭、非法值 fail-closed 拒绝）。
+pub fn designer_write_allowed(operator_tid: i64, mode: &str) -> bool {
+    operator_tid == 0 || mode == "full"
+}
+
 /// 构造 `perms NOT IN ($1, $2, …)` 片段（调用方按方言提供占位符；清单为空时返回 `None`）。
 ///
 /// 与 `common::tenant::perms_like_clause` 配对使用：**集中生成，禁止各调用点手拼**——
@@ -326,6 +336,27 @@ pub fn ensure_menu_filter_coverage_with_features<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 设计器类写面档位判定三档矩阵（report.designer / flow.designer 共用）
+    #[test]
+    fn test_designer_write_allowed_matrix() {
+        // 平台操作者（tid=0）不受能力位影响
+        for mode in ["off", "view", "full", "bogus", ""] {
+            assert!(
+                designer_write_allowed(0, mode),
+                "平台 tid=0 在 {mode} 档必须放行"
+            );
+        }
+        // 租户操作者：仅 full 可写（view 只读、off/非法 fail-closed）
+        assert!(!designer_write_allowed(7, "off"), "off 档写面拒绝");
+        assert!(
+            !designer_write_allowed(7, "view"),
+            "view 档写面拒绝（只读）"
+        );
+        assert!(designer_write_allowed(7, "full"), "full 档写面放行");
+        assert!(!designer_write_allowed(7, "bogus"), "非法档位 fail-closed");
+        assert!(!designer_write_allowed(7, ""), "空档位 fail-closed");
+    }
 
     /// 注册表自洽：默认模式必须是合法模式，且**恒为 off**（"关闭态即安全态"）
     #[test]

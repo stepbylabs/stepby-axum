@@ -634,7 +634,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Read, Write};
+            use std::io::{BufRead, BufReader, Write};
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request_line = String::new();
@@ -722,7 +722,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Read, Write};
+            use std::io::{BufRead, BufReader, Write};
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request_line = String::new();
@@ -885,8 +885,7 @@ mod tests {
             let mut body = vec![0u8; content_length];
             std::io::Read::read_exact(&mut reader, &mut body).unwrap();
             let body_str = String::from_utf8(body).unwrap();
-            let respond =
-                format!("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let respond = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
             let mut w = stream;
             w.write_all(respond.as_bytes()).unwrap();
             (request_line.contains("POST"), has_auth, body_str)
