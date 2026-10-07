@@ -610,7 +610,6 @@ pub struct RoleDeptTreeResult {
 
 crate::impl_into_response!(RoleDeptTreeResult);
 
-
 /// GET /system/role/optionselect
 /// 角色下拉选项（启用角色，租户行级过滤；数据权限规则页等场景）
 #[utoipa::path(

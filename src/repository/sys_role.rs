@@ -113,7 +113,10 @@ impl SysRoleRepository {
         if let Some(t) = tenant_scope {
             query = query.filter(Column::TenantId.eq(t));
         }
-        query.order_by_asc(Column::RoleSort).all(self.base.db()).await
+        query
+            .order_by_asc(Column::RoleSort)
+            .all(self.base.db())
+            .await
     }
 
     /// 软删除角色

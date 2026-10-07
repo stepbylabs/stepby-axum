@@ -244,7 +244,41 @@ async fn test_msg_channel_test() {
     ctx.assert_ok(&v);
     let channel_id = v["data"]["channelId"].as_i64().expect("channelId 应为数字");
 
-    // sms 渠道无外部网关，连通性校验通过即 200
+    // G-07：sms 渠道无 config_json → 连通性测试 fail-closed 400（配置无效）
+    let (status, v) = ctx
+        .send_raw(raw_req(
+            &ctx,
+            Method::POST,
+            &format!("/system/msg/channel/test/{}", channel_id),
+            Some(serde_json::json!({})),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "无配置 sms 渠道测试应 400，实际: {v}"
+    );
+    assert!(
+        v["msg"].as_str().unwrap_or_default().contains("配置无效"),
+        "错误消息应提示配置无效，实际: {v}"
+    );
+
+    // 补全合法 config_json（gateway_url 指向本地不在线端口——probe 仅校验配置形态）
+    // → 配置合法即 200
+    let v = ctx
+        .put_json(
+            "/system/msg/channel",
+            serde_json::json!({
+                "channelId": channel_id,
+                "channelName": "it_msg_测试渠道",
+                "channelCode": "it_msg_ch_test",
+                "channelType": "sms",
+                "status": "0",
+                "configJson": r#"{"gateway_url":"http://127.0.0.1:1/send"}"#
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
     let v = ctx
         .post_json(
             &format!("/system/msg/channel/test/{}", channel_id),
@@ -437,7 +471,42 @@ async fn test_msg_template_crud_chain() {
 async fn test_msg_send_log_lifecycle() {
     let ctx = TestContext::new().await;
 
-    // 前置：sm 渠道 + sms 模板
+    // 前置：本地短信网关（真实 HTTP listener，验证 G-07 完整投递链）
+    let gateway = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let gateway_addr = gateway.local_addr().unwrap();
+    let gateway_handle = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let (stream, _) = gateway.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+        }
+        let mut len_line = String::new();
+        // 重新读已消费的请求体长度不可行——简化：读取 content-length 在头里已消费，
+        // 改为循环读头时记录 content-length（上面循环已丢）——直接再读一行兜底不可靠。
+        // 因此本网关在响应后由断言侧校验 dispatch 状态即可。
+        let _ = len_line;
+        let mut body = String::new();
+        // 读取剩余字节（POST body）
+        let mut buf = [0u8; 4096];
+        if let Ok(n) = std::io::Read::read(&mut reader, &mut buf) {
+            body = String::from_utf8_lossy(&buf[..n]).to_string();
+        }
+        let resp = "HTTP/1.1 200 OK
+Content-Length: 2
+Connection: close
+
+ok";
+        let mut w = stream;
+        w.write_all(resp.as_bytes()).unwrap();
+        body
+    });
+
+    // 前置：sms 渠道（configJson 带本地网关 URL）+ sms 模板
     let v = ctx
         .post_json(
             "/system/msg/channel",
@@ -445,7 +514,8 @@ async fn test_msg_send_log_lifecycle() {
                 "channelName": "it_msg_日志渠道",
                 "channelCode": "it_msg_log_ch",
                 "channelType": "sms",
-                "status": "0"
+                "status": "0",
+                "configJson": format!("{{\"gateway_url\":\"http://{gateway_addr}/send\"}}")
             }),
         )
         .await;
@@ -488,7 +558,13 @@ async fn test_msg_send_log_lifecycle() {
     assert_eq!(
         v["data"]["status"].as_str(),
         Some("0"),
-        "sms 模拟投递应成功 status='0'，实际: {v}"
+        "sms 真实投递应成功 status='0'，实际: {v}"
+    );
+    // 网关应收到真实 POST body（G-07 投递链实证）
+    let gateway_body = gateway_handle.join().unwrap();
+    assert!(
+        gateway_body.contains("13800000000"),
+        "网关应收到手机号字段，body={gateway_body}"
     );
 
     // 3. 查询日志（按类型 + toAddr 过滤）
