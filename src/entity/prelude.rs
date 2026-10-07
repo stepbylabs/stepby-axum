@@ -79,6 +79,9 @@ pub use super::flow_demo_doc::{
     ActiveModel as FlowDemoDocActiveModel, Column as FlowDemoDocColumn, Entity as FlowDemoDoc,
     Model as FlowDemoDocModel,
 };
+pub use super::flow_graph_doc::{
+    ActiveModel as FlowGraphDocActiveModel, Entity as FlowGraphDocEntity,
+};
 pub use super::gen_table::{
     ActiveModel as GenTableActiveModel, Column as GenTableColumn, Entity as GenTable,
     Model as GenTableModel,

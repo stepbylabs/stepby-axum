@@ -134,6 +134,10 @@ error:
     def_id_required: Missing flow definition ID
     def_published_immutable: Published version is immutable; publish a new version instead
     graph_invalid: Flow graph validation failed
+    graph_doc_not_found: Graph-driven document not found
+    graph_not_published: Flow does not exist or is not published (published version required)
+    graph_fields_invalid: Fields snapshot must be a JSON object
+    graph_no_approve: Route contains no approval node; cannot start approval
   sso:
     platform_protected: Platform root department cannot be modified via tenant API
     ancestors_invalid: Invalid department ancestors data, cannot resolve tenant

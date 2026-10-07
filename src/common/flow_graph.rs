@@ -75,6 +75,51 @@ where
 }
 
 impl EdgeCondition {
+    /// 按单据字段快照求值条件（批次十六：图驱动单据推进的核心求值器）。
+    ///
+    /// - `snapshot`：单据字段快照 JSON（对象，如 `{"days": 5, "leave_type": "sick"}`）；
+    /// - 数字比较：两边均可数值化（i64/u64/f64 宽松化到 f64）；
+    /// - 字符串比较：仅 `=` / `!=`（6 比较符白名单对字符串只保留等值语义，有序比较
+    ///   对字符串业务含义不明——fail-closed 拒绝而非猜测）；
+    /// - 字段缺失 / 类型不符 / 非法比较符 → **Err（fail-closed）**：图引用了单据
+    ///   没有的字段 = 图与业务不匹配，提交时必须显式 400 而非静默走某条边。
+    pub fn evaluate(&self, snapshot: &serde_json::Value) -> Result<bool, String> {
+        let field_val = snapshot.get(&self.field).ok_or_else(|| {
+            format!(
+                "条件字段 {} 不在单据字段快照中（图与业务不匹配）",
+                self.field
+            )
+        })?;
+        match (&self.value, field_val) {
+            (serde_json::Value::Number(want), got) => {
+                let got = got
+                    .as_f64()
+                    .ok_or_else(|| format!("字段 {} 的值不是数字: {got}", self.field))?;
+                let want = want.as_f64().unwrap_or(f64::NAN);
+                Ok(match self.op.as_str() {
+                    "=" => got == want,
+                    "!=" => got != want,
+                    ">" => got > want,
+                    ">=" => got >= want,
+                    "<" => got < want,
+                    "<=" => got <= want,
+                    other => return Err(format!("比较符不在白名单: {other}")),
+                })
+            }
+            (serde_json::Value::String(want), got) => {
+                let got = got
+                    .as_str()
+                    .ok_or_else(|| format!("字段 {} 的值不是字符串: {got}", self.field))?;
+                Ok(match self.op.as_str() {
+                    "=" => got == want,
+                    "!=" => got != want,
+                    other => return Err(format!("字符串字段不支持比较符 {other}（仅 = / !=）")),
+                })
+            }
+            _ => Err(format!("条件值类型不支持: {}", self.value)),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.field.is_empty()
             || self.field.len() > 64
@@ -275,6 +320,76 @@ impl FlowGraph {
         }
         dfs(start_id, &adj, &mut state)?;
         Ok(())
+    }
+
+    /// 提交时**静态路由**（批次十六：图驱动单据推进的核心）。
+    ///
+    /// 从 start 出发，每个节点按出边条件对 `snapshot` 求值选边：
+    /// 真值条件边优先（声明序），全假时走第一条**无条件默认边**，
+    /// 无真值且无默认 → Err（fail-closed，提交时 400）；
+    /// 直到 end，返回途经节点 id 序列（含 start/end——approve 节点在序列中的
+    /// 顺序即之后 `node_seq` 重编号依据）。
+    ///
+    /// 为何是**提交时静态**而非运行期动态选边：字段快照冻结在单据（提交时写入）
+    /// ⇒ 同单据重放同路径（确定性）；引擎推进内核（线性链 + 节点内四模式）零改动，
+    /// 或签/加权/会签与加减签全部复用。并行分支等超集能力超出 BPMN-lite 白名单
+    /// 设计立场（validate 已保证无环）。
+    pub fn route_graph(&self, snapshot: &serde_json::Value) -> Result<Vec<String>, String> {
+        let start = self
+            .nodes
+            .iter()
+            .find(|n| n.node_type == "start")
+            .ok_or_else(|| "缺少 start 节点".to_string())?;
+        let end = self
+            .nodes
+            .iter()
+            .find(|n| n.node_type == "end")
+            .ok_or_else(|| "缺少 end 节点".to_string())?;
+        // 邻接表（保持边声明序——真值边"声明序优先"语义依赖此顺序）
+        let mut adj: std::collections::HashMap<&str, Vec<&GraphEdge>> = Default::default();
+        for e in &self.edges {
+            adj.entry(e.from.as_str()).or_default().push(e);
+        }
+        let mut route = vec![start.id.clone()];
+        let mut cur = start;
+        // 步数上界双保险（validate 已保证无环；防御 route 逻辑自身回归）
+        let max_steps = self.nodes.len() + 1;
+        for _ in 0..max_steps {
+            if cur.id == end.id {
+                return Ok(route);
+            }
+            let out = adj
+                .get(cur.id.as_str())
+                .ok_or_else(|| format!("节点 {} 无出边（流程中断）", cur.id))?;
+            let mut default_edge: Option<&GraphEdge> = None;
+            let mut chosen: Option<&GraphEdge> = None;
+            for e in out {
+                match &e.condition {
+                    Some(c) => {
+                        if c.evaluate(snapshot)? {
+                            chosen = Some(e);
+                            break;
+                        }
+                    }
+                    None => {
+                        if default_edge.is_none() {
+                            default_edge = Some(e);
+                        }
+                    }
+                }
+            }
+            let next_edge = chosen.or(default_edge).ok_or_else(|| {
+                format!("节点 {} 的全部条件边均为假且无默认边（无可达路径）", cur.id)
+            })?;
+            let next = self
+                .nodes
+                .iter()
+                .find(|n| n.id == next_edge.to)
+                .ok_or_else(|| format!("边指向不存在的节点: {}", next_edge.to))?;
+            route.push(next.id.clone());
+            cur = next;
+        }
+        Err("路由步数超上界（疑似环，validate 回归）".to_string())
     }
 }
 
@@ -595,5 +710,99 @@ mod tests {
             serde_json::json!([{"from":"s","to":"a"},{"from":"a","to":"e"}]),
         );
         assert!(FlowGraph::parse_and_validate(&g).is_ok());
+    }
+
+    // ==================== 批次十六：条件求值 + 静态路由（图驱动推进） ====================
+
+    /// 求值器：数字 6 比较符矩阵
+    #[test]
+    fn test_evaluate_condition_numeric_ops() {
+        let snap = serde_json::json!({ "days": 5 });
+        let cond = |op: &str, v: i64| EdgeCondition {
+            field: "days".into(),
+            op: op.into(),
+            value: serde_json::json!(v),
+        };
+        assert!(cond("=", 5).evaluate(&snap).unwrap());
+        assert!(!cond("=", 4).evaluate(&snap).unwrap());
+        assert!(cond("!=", 4).evaluate(&snap).unwrap());
+        assert!(cond(">", 4).evaluate(&snap).unwrap());
+        assert!(!cond(">", 5).evaluate(&snap).unwrap());
+        assert!(cond(">=", 5).evaluate(&snap).unwrap());
+        assert!(!cond("<", 5).evaluate(&snap).unwrap());
+        assert!(cond("<=", 5).evaluate(&snap).unwrap());
+    }
+
+    /// 求值器：字符串仅等值；有序比较符 fail-closed；字段缺失 fail-closed
+    #[test]
+    fn test_evaluate_condition_string_and_fail_closed() {
+        let snap = serde_json::json!({ "leave_type": "sick" });
+        let cond = |op: &str, v: &str| EdgeCondition {
+            field: "leave_type".into(),
+            op: op.into(),
+            value: serde_json::json!(v),
+        };
+        assert!(cond("=", "sick").evaluate(&snap).unwrap());
+        assert!(cond("!=", "annual").evaluate(&snap).unwrap());
+        // 字符串有序比较符 → Err（语义不明，fail-closed）
+        assert!(cond(">", "a").evaluate(&snap).is_err());
+        // 字段缺失 → Err
+        let missing = EdgeCondition {
+            field: "nonexistent".into(),
+            op: "=".into(),
+            value: serde_json::json!(1),
+        };
+        assert!(missing.evaluate(&snap).is_err(), "缺失字段必须 fail-closed");
+    }
+
+    /// 路由：菱形多分支——真值条件边优先（请假 >3 天走长链，否则走默认短链）
+    #[test]
+    fn test_route_graph_conditional_branch() {
+        let g = FlowGraph::parse_and_validate(&graph(
+            serde_json::json!([
+                {"id":"s","type":"start"},
+                {"id":"leader","type":"approve","name":"主管","assignees":["dept_leader"]},
+                {"id":"director","type":"approve","name":"总监","assignees":["role:director"],"multi":"weighted","threshold":2},
+                {"id":"end","type":"end"}
+            ]),
+            serde_json::json!([
+                {"from":"s","to":"leader"},
+                {"from":"leader","to":"director","condition":{"field":"days","op":">","value":3}},
+                {"from":"leader","to":"end"},
+                {"from":"director","to":"end"}
+            ]),
+        ))
+        .expect("图应合法");
+        // days=5：条件真 → 经总监
+        let long = g
+            .route_graph(&serde_json::json!({ "days": 5 }))
+            .expect("应可路由");
+        assert_eq!(long, vec!["s", "leader", "director", "end"]);
+        // days=1：条件假 → 默认边直达 end
+        let short = g
+            .route_graph(&serde_json::json!({ "days": 1 }))
+            .expect("应可路由");
+        assert_eq!(short, vec!["s", "leader", "end"]);
+    }
+
+    /// 路由：全部条件边为假且无默认边 → Err（fail-closed）
+    #[test]
+    fn test_route_graph_no_reachable_path_rejected() {
+        let g = FlowGraph::parse_and_validate(&graph(
+            serde_json::json!([
+                {"id":"s","type":"start"},
+                {"id":"a","type":"approve","name":"审批","assignees":["dept_leader"]},
+                {"id":"e","type":"end"}
+            ]),
+            serde_json::json!([
+                {"from":"s","to":"a","condition":{"field":"days","op":">","value":100}},
+                {"from":"a","to":"e"}
+            ]),
+        ))
+        .expect("图应合法");
+        let err = g
+            .route_graph(&serde_json::json!({ "days": 1 }))
+            .unwrap_err();
+        assert!(err.contains("无可达路径"), "err={err}");
     }
 }

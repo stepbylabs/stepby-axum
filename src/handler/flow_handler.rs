@@ -29,10 +29,11 @@ use axum::response::IntoResponse;
 
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::flow_demo_doc::Model as FlowDemoDocModel;
+use crate::entity::flow_graph_doc::Model as FlowGraphDocModel;
 use crate::entity::sys_flow_task::Model as SysFlowTaskModel;
 use crate::middleware::Operator;
 use crate::service::sys_flow_service::{
-    FlowActionDto, FlowCountersignDto, FlowDoneVo, FlowPageQuery, FlowSubmitDto,
+    FlowActionDto, FlowCountersignDto, FlowDoneVo, FlowGraphSubmitDto, FlowPageQuery, FlowSubmitDto,
 };
 use crate::state::AppState;
 
@@ -247,6 +248,42 @@ pub async fn submit_demo(
     let outcome = state
         .flow_service
         .submit_demo(user_id, operator.username(), dto)
+        .await?;
+    for uid in &outcome.notify_assignees {
+        ws_notify_todo(&state, *uid, &outcome.doc.title);
+        state
+            .flow_service
+            .send_flow_audit(*uid, "flow_todo", &outcome.doc.title)
+            .await;
+    }
+    Ok(AjaxResult::success(outcome.doc))
+}
+
+/// POST /system/flow/graph/submit — 提交**图驱动**单据（批次十六：按图推进闭环）
+///
+/// 任一已发布流程定义（`is_latest='1'` + `status='1'`）都可驱动审批：
+/// 提交时静态路由（条件边按 fields 求值，fail-closed），字段快照冻结进单据，
+/// 推进时重放同路径。待办/动作/办结复用通用 task 端点。
+#[utoipa::path(
+    post,
+    path = "/system/flow/graph/submit",
+    request_body = FlowGraphSubmitDto,
+    responses(
+        (status = 200, description = "提交成功", body = AjaxResult<FlowGraphDocModel>),
+        (status = 400, description = "图非法/条件求值失败/无审批节点"),
+        (status = 404, description = "流程未发布或不存在"),
+    ),
+    tag = "system-flow"
+)]
+pub async fn submit_graph(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Json(dto): Json<FlowGraphSubmitDto>,
+) -> Result<AjaxResult<FlowGraphDocModel>, AppError> {
+    let user_id = parse_user_id(operator.user_id())?;
+    let outcome = state
+        .flow_service
+        .submit_graph(user_id, operator.username(), dto)
         .await?;
     for uid in &outcome.notify_assignees {
         ws_notify_todo(&state, *uid, &outcome.doc.title);

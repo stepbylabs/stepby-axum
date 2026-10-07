@@ -10,6 +10,7 @@ pub mod prelude;
 
 pub mod flow_definition;
 pub mod flow_demo_doc;
+pub mod flow_graph_doc;
 pub mod gen_table;
 pub mod gen_table_column;
 pub mod report_dashboard;
