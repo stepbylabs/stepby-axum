@@ -343,9 +343,7 @@ impl ReportDatasetService {
         for id in dataset_ids {
             let raw = ReportDatasetEntity::find_by_id(id).one(&self.db).await?;
             eprintln!("DBG-REMOVE raw-row={raw:?}");
-            if let Some(m) = raw
-                .filter(|mm| mm.del_flag.as_deref() == Some("0"))
-            {
+            if let Some(m) = raw.filter(|mm| mm.del_flag.as_deref() == Some("0")) {
                 self.ensure_access(m.tenant_id, operator_tid)?;
                 let mut am: ReportDatasetActiveModel = m.into();
                 am.del_flag = Set(Some("1".to_string()));
@@ -739,10 +737,9 @@ async fn probe_columns_via_temp_view(
     for row in &rows {
         let name: Option<String> = match backend {
             // PRAGMA table_info 返回列名在 "name" 字段
-            sea_orm::DatabaseBackend::Sqlite => row
-                .try_get::<Option<String>>("", "name")
-                .ok()
-                .flatten(),
+            sea_orm::DatabaseBackend::Sqlite => {
+                row.try_get::<Option<String>>("", "name").ok().flatten()
+            }
             _ => row
                 .try_get::<Option<String>>("", "column_name")
                 .ok()
@@ -760,11 +757,7 @@ async fn probe_columns_via_temp_view(
             }
         }
     }
-    if cols.is_empty() {
-        None
-    } else {
-        Some(cols)
-    }
+    if cols.is_empty() { None } else { Some(cols) }
 }
 
 async fn infer_columns(

@@ -181,7 +181,8 @@ async fn test_report_dataset_crud_chain() {
         .collect::<Vec<_>>();
     assert!(!cols.is_empty(), "preview 应返回列元数据");
     assert!(
-        cols.iter().all(|c| !c.starts_with("col1") || *c == "user_id"),
+        cols.iter()
+            .all(|c| !c.starts_with("col1") || *c == "user_id"),
         "探针应取真实列名，实际: {cols:?}"
     );
     assert!(

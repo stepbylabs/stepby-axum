@@ -509,6 +509,11 @@ impl AppInitializer {
         ensure_report_menus_visible(&db)
             .await
             .map_err(|e| anyhow::anyhow!("翻转报表菜单可见性失败: {}", e))?;
+        // 4.5c-f G-02 M3：流程定义设计器上线翻转菜单可见性（4140，存量库兜底，
+        //      等价迁移 m20261007_000009；幂等）
+        ensure_flow_designer_menu_visible(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("翻转流程设计器菜单可见性失败: {}", e))?;
         // 4.5c-f G-02 M2：sys_flow_task 动作矩阵扩展列（weight/threshold/delegate_from，
         //      存量库兜底，等价迁移 m20261007_000006；has_column 守卫幂等）
         ensure_flow_task_action_columns(&db)
@@ -5347,6 +5352,21 @@ async fn ensure_report_menus_visible(db: &DatabaseConnection) -> anyhow::Result<
         db.get_database_backend(),
         "UPDATE sys_menu SET visible = '0' WHERE menu_id IN (4146, 4148) AND visible = '1'"
             .to_string(),
+    ))
+    .await?;
+    Ok(())
+}
+
+/// 台账（G-02 M3，存量库兜底，等价迁移 ）：
+/// 流程定义设计器上线，翻转菜单 4140（流程定义页面）可见性。
+/// 4141-4145 为 F（按钮）行，visible 无导航语义，不翻。幂等：仅当 visible='1' 置 '0'。
+async fn ensure_flow_designer_menu_visible(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_menu SET visible = '0' WHERE menu_id = 4140 AND visible = '1'".to_string(),
     ))
     .await?;
     Ok(())
