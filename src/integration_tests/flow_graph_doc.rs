@@ -272,3 +272,77 @@ async fn test_graph_doc_unpublished_flow_rejected() {
         .await;
     assert_eq!(status, 404, "未发布流程必须 404");
 }
+
+/// 链路③：actions 白名单收窄——a1 未勾 delegate → delegate 调用 403
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_graph_doc_action_whitelist_denies_delegate() {
+    let ctx = TestContext::new().await;
+    // 图定义：a1 仅勾 countersign_add（不含 delegate）
+    let graph = serde_json::json!({
+        "nodes": [
+            {"id": "s", "type": "start", "name": "开始"},
+            {"id": "a1", "type": "approve", "name": "主管", "assignees": ["role:admin"], "multi": "single", "threshold": 1, "actions": ["countersign_add"]},
+            {"id": "e", "type": "end", "name": "结束"}
+        ],
+        "edges": [
+            {"from": "s", "to": "a1"},
+            {"from": "a1", "to": "e"}
+        ]
+    })
+    .to_string();
+    let v = post_json(
+        &ctx,
+        &ctx.token,
+        "/system/flow/definition",
+        serde_json::json!({
+            "flowCode": "it_graph_actions",
+            "flowName": "集成测试·动作收窄",
+            "graphJson": graph
+        }),
+    )
+    .await;
+    ctx.assert_ok(&v);
+    let flow_id = v["data"]["flowId"].as_i64().expect("flowId");
+    let v = ctx
+        .send_json(token_request(
+            &ctx,
+            &ctx.token,
+            Method::POST,
+            &format!("/system/flow/definition/publish/{flow_id}"),
+            None,
+        ))
+        .await;
+    ctx.assert_ok(&v);
+
+    let ry_token = stepby_token(&ctx).await;
+    let v = post_json(
+        &ctx,
+        &ry_token,
+        "/system/flow/graph/submit",
+        serde_json::json!({
+            "flowCode": "it_graph_actions",
+            "title": "动作收窄",
+            "fields": {"days": 1}
+        }),
+    )
+    .await;
+    ctx.assert_ok(&v);
+    let doc_id = v["data"]["docId"].as_i64().expect("docId");
+    let task1 = admin_todo_task_for(&ctx, doc_id, 1).await;
+
+    // delegate 经通用 action 端点分发；未在白名单 → 403
+    let (status, _) = ctx
+        .send_raw(token_request(
+            &ctx,
+            &ctx.token,
+            Method::POST,
+            &format!("/system/flow/task/{task1}/action"),
+            Some(serde_json::json!({
+                "action": "delegate",
+                "toUserId": 2,
+                "comment": "不在白名单"
+            })),
+        ))
+        .await;
+    assert_eq!(status, 403, "未勾 delegate 必须被白名单拦截: {status}");
+}

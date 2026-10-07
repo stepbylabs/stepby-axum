@@ -138,6 +138,7 @@ error:
     graph_not_published: Flow does not exist or is not published (published version required)
     graph_fields_invalid: Fields snapshot must be a JSON object
     graph_no_approve: Route contains no approval node; cannot start approval
+    action_not_allowed: Node does not allow action %{action}; rejected
   sso:
     platform_protected: Platform root department cannot be modified via tenant API
     ancestors_invalid: Invalid department ancestors data, cannot resolve tenant

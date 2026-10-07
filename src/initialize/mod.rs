@@ -5531,10 +5531,11 @@ async fn ensure_flow_task_action_columns(db: &DatabaseConnection) -> anyhow::Res
     if !sso_table_exists(db, "sys_flow_task").await? {
         return Ok(());
     }
-    let adds: [(&str, &str); 3] = [
+    let adds: [(&str, &str); 4] = [
         ("weight", "INT NOT NULL DEFAULT 1"),
         ("threshold", "INT NULL"),
         ("delegate_from", "BIGINT NULL"),
+        ("actions_json", "TEXT NULL"),
     ];
     for (col, ddl) in adds {
         if sso_has_column(db, "sys_flow_task", col).await? {
