@@ -6,7 +6,9 @@
 //!
 //! data_scope 取值语义（与 sea-orm entity `sys_role.data_scope` 一致）：
 //! - 1 = 全部数据
-//! - 2 = 自定义（角色绑定部门）
+//! - 2 = 自定义（角色绑定部门，sys_role_dept 关联表）
+//!
+//! 权威口径与消费面矩阵见 docs/optimization/data-scope-matrix-2026-10-07.md。
 //! - 3 = 本部门
 //! - 4 = 本部门及以下
 //! - 5 = 仅本人
