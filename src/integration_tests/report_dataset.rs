@@ -172,13 +172,21 @@ async fn test_report_dataset_crud_chain() {
     )
     .await;
     ctx.assert_ok(&v);
+    // G-01 M3：columns_meta 走临时视图探针——应返回真实列名（而非 colN 占位）
+    let cols = v["data"]["columns"]
+        .as_array()
+        .expect("columns 应为数组")
+        .iter()
+        .map(|c| c.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(!cols.is_empty(), "preview 应返回列元数据");
     assert!(
-        v["data"]["columns"]
-            .as_array()
-            .expect("columns 应为数组")
-            .len()
-            > 0,
-        "preview 应返回列元数据"
+        cols.iter().all(|c| !c.starts_with("col1") || *c == "user_id"),
+        "探针应取真实列名，实际: {cols:?}"
+    );
+    assert!(
+        cols.contains(&"user_id".to_string()) && cols.contains(&"user_name".to_string()),
+        "探针应取到真实列名 user_id/user_name，实际: {cols:?}"
     );
 
     // 6) 编辑（改名）
