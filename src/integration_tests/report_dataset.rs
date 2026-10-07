@@ -120,21 +120,45 @@ async fn test_report_dataset_crud_chain() {
         "info 出参不得携带 SQL 明文，实际: {v}"
     );
 
-    // 3b) 无 edit 权限者（stepby 普通用户）调 SQL 端点 → 403（权限键 fail-closed 拦截）
-    let stepby_token = super::login(&ctx.app, super::next_peer_ip(), "stepby", "admin123").await;
-    let (status, _) = ctx
-        .send_raw(token_request(
-            &ctx,
-            &stepby_token,
-            Method::POST,
-            &format!("/report/dataset/{dataset_id}/sql"),
-            Some(serde_json::json!({})),
+    // 3b) 无 edit 权限者调 SQL 端点 → 403（权限键 fail-closed 拦截）
+    // 批次十三起 role 2 全量授权 G-01/G-02 菜单（用户拍板），种子 stepby 用户（role 2）
+    // 已合法持有 report:dataset:edit ⇒ 临时摘除其角色构造"真正无权限者"，断言后恢复。
+    {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+        let db = &ctx.state.db;
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "DELETE FROM sys_user_role WHERE user_id = \
+             (SELECT user_id FROM sys_user WHERE user_name = 'stepby')"
+                .to_string(),
         ))
-        .await;
-    assert_eq!(
-        status, 403,
-        "无 edit 权限取 SQL 明文必须 403，实际: {status}"
-    );
+        .await
+        .expect("摘除 stepby 角色失败");
+        let stepby_token =
+            super::login(&ctx.app, super::next_peer_ip(), "stepby", "admin123").await;
+        let (status, _) = ctx
+            .send_raw(token_request(
+                &ctx,
+                &stepby_token,
+                Method::POST,
+                &format!("/report/dataset/{dataset_id}/sql"),
+                Some(serde_json::json!({})),
+            ))
+            .await;
+        assert_eq!(
+            status, 403,
+            "无 edit 权限取 SQL 明文必须 403，实际: {status}"
+        );
+        // 恢复 stepby ↔ role 2（不影响其它用例的种子假设）
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO sys_user_role (user_id, role_id) \
+             SELECT user_id, 2 FROM sys_user WHERE user_name = 'stepby'"
+                .to_string(),
+        ))
+        .await
+        .expect("恢复 stepby 角色失败");
+    }
 
     // 4) 非法模板（INSERT）→ 400（白名单 fail-closed；走 send_raw，不触发 200 断言）
     let (status, body) = ctx

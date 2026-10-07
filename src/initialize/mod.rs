@@ -5304,9 +5304,32 @@ async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow::Result<()>
             if existing.as_deref() == Some(m.perms) {
                 continue;
             }
+            // 自动修正（批次十三，用户拍板）：menu_id 被占且 perms 不符 = 占位垃圾行
+            //（实证：存量库 4148 被历史 e2e 菜单测试孤儿占用 ⇒ 迁移 INSERT OR IGNORE
+            // 静默失效，大屏管理菜单从未落库，垃圾行还入了菜单树）。内容字段整行
+            // 对齐 seed；visible 保持现值（页面行随后由翻转兜底收敛到显示态）。
+            // e2e 垃圾行零引用（无 role_menu/子菜单），整行 UPDATE 安全。
+            db.execute_raw(Statement::from_string(
+                backend,
+                format!(
+                    "UPDATE sys_menu SET menu_name = '{}', parent_id = {}, order_num = {}, \
+                     path = '{}', component = '{}', menu_type = '{}', perms = '{}', \
+                     icon = '{}', del_flag = '0' WHERE menu_id = {}",
+                    m.menu_name,
+                    m.parent_id,
+                    m.order_num,
+                    m.path,
+                    m.component,
+                    m.menu_type,
+                    m.perms,
+                    m.icon,
+                    m.menu_id
+                ),
+            ))
+            .await?;
             tracing::warn!(
-                "menu_id={} 已被其他菜单占用（perms={existing:?}）——G-01/G-02 菜单 \
-                 （预期 perms={}）补建跳过；请清理占位菜单后重启",
+                "menu_id={} 原被占位菜单占用（perms={existing:?}），已自动修正为 G-01/G-02 \
+                 菜单（预期 perms={}）——批次十三自动修正",
                 m.menu_id,
                 m.perms,
             );
@@ -5335,6 +5358,21 @@ async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow::Result<()>
             ),
         )
         .await?;
+    }
+    // role_menu 补授（批次十三，用户拍板：平台普通角色 role 2 全量授权 4140-4148）。
+    // 对齐菜单 148/3950 惯例（新业务菜单默认授予 role 2）；超管经 isAdmin 特判无需授权行。
+    // 幂等：INSERT OR IGNORE（方言感知由 flow_insert 承担）；写权限仍受三层守卫
+    // （菜单 perms 契约 + report.designer/flow.designer 能力位 + 租户过滤）。
+    if sso_table_exists(db, "sys_role_menu").await? {
+        for m in MENUS {
+            // 幂等由 flow_insert 方言前后缀承担（SQLite OR IGNORE / PG ON CONFLICT）
+            flow_insert(
+                db,
+                &format!("sys_role_menu (role_id, menu_id) VALUES (2, {})", m.menu_id),
+            )
+            .await?;
+        }
+        tracing::info!("role 2 已补授 G-01/G-02 菜单 4140-4148（批次十三）");
     }
     tracing::info!("流程/报表菜单已补建（4140-4148，G-01/G-02 存量库兜底）");
     Ok(())
