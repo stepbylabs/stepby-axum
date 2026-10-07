@@ -298,6 +298,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3 SaaS 治理模块失败: {}", e))?;
 
+        // 3.5f' 治理参数项缺行补齐（批次十四）：CONFIGS 注册表驱动 INSERT OR IGNORE——
+        // 根治"G-11 八键从未 seed、UploadConfigService 纯 UPDATE 写入静默失效"
+        // （详见 governance::CONFIG_DEFAULTS 头注）。幂等：行在零影响。
+        ensure_governance_config_rows(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化治理参数项缺行补齐失败: {}", e))?;
+
         // 3.5g 多租户 Phase 3.5g 存量库兜底：与迁移
         // m20260925_000005_tenant_unique_scope 等价（启动不跑 Migrator::up）——
         // 剩余唯一域租户化 2 项（sys_flow_task 业务唯一、sys_scim_group.external_id）。
@@ -3161,6 +3168,54 @@ async fn ensure_tenant_saas_governance(db: &DatabaseConnection) -> anyhow::Resul
     }
 
     tracing::info!("多租户 Phase 3 SaaS 治理模块已就绪（幂等确保完成）");
+    Ok(())
+}
+
+/// 治理参数项**缺行补齐**（批次十四，注册表驱动）：按 `governance::CONFIG_DEFAULTS`
+/// 三元组 INSERT OR IGNORE 全部 `CONFIGS` 键，治理列（scope/tenant_editable/
+/// visible_to_tenant）由 `Coverage` 单一事实源生成。
+///
+/// 为何必须有本兜底：`ensure_tenant_saas_governance` 的 seed 段**只 UPDATE 既有行、
+/// 不 INSERT 新行**，而 G-11 的 8 个 `sys.upload.*` 键从未在任何迁移 seed ⇒ 存量库
+/// 无行，且 `UploadConfigService` 写入是**纯 UPDATE** ⇒ 0 行更新不报错 = OSS 管理
+/// 页保存静默失效（接口 200 实际未落库，重启回落 config.toml——集成测试用迁移齐全
+/// 的隔离库故从未暴露）。
+///
+/// 幂等：行在零影响（INSERT OR IGNORE）；**只补缺行，绝不动既有 config_value**——
+/// 平台运维已调过的值不被覆盖；治理列交给上方 3.5f 的收敛 UPDATE（本函数补的行
+/// 在同一次启动内即被收敛到注册表声明的姿态）。
+async fn ensure_governance_config_rows(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_config").await? {
+        return Ok(());
+    }
+    let now = flow_now(db);
+    for (key, name, value) in governance::CONFIG_DEFAULTS {
+        // Coverage → 治理列三元组（与 3.5f 收敛 UPDATE 同源，单一事实源）
+        let coverage = governance::item(key)
+            .map(|i| i.coverage)
+            .unwrap_or(governance::Coverage::Locked);
+        flow_insert(
+            db,
+            &format!(
+                "sys_config (config_name, config_key, config_value, config_type, create_by, \
+                 create_time, remark, scope, tenant_editable, visible_to_tenant) VALUES \
+                 ('{}', '{}', '{}', 'Y', 'admin', {}, \
+                 '治理注册表缺行补齐（批次十四）', '{}', '{}', '{}')",
+                name,
+                key,
+                value,
+                now,
+                coverage.scope(),
+                coverage.tenant_editable(),
+                coverage.visible_to_tenant(),
+            ),
+        )
+        .await?;
+    }
+    tracing::info!(
+        "治理参数项缺行补齐完成（扫描 {} 项，INSERT OR IGNORE 幂等——批次十四）",
+        governance::CONFIG_DEFAULTS.len()
+    );
     Ok(())
 }
 

@@ -307,6 +307,93 @@ pub const CONFIGS: &[Item] = &[
 /// [`crate::service` 层按此键读 sys_config 缓存]）——常量化避免键名散落。
 pub const SYS_LOGIN_BLACK_IP_LIST: &str = "sys.login.blackIPList";
 
+/// 参数项的**出厂缺省三元组**（键, 显示名, config_value）——覆盖 `CONFIGS` 全部键。
+///
+/// 为何必须有本表（批次十四实证）：`ensure_tenant_saas_governance` 的治理收敛
+/// **只 UPDATE 既有行的治理列、不 INSERT 新行**，而 G-11 的 8 个 `sys.upload.*`
+/// 键从未在任何迁移 seed ⇒ 存量库无行，且 `UploadConfigService` 写入是纯 UPDATE
+/// ⇒ **0 行更新不报错 = OSS 管理页保存静默失效**（接口 200 实际未落库）。
+/// 启动收敛（`initialize::ensure_governance_config_rows`）按本表 INSERT OR IGNORE
+/// 补齐缺行后，该类缺口根治；未来新增参数项必须在此登记（单测双向锁死）。
+///
+/// 语义约定：
+/// - 空串 = 跟随 `config.toml` 出厂缺省（读路径回落）——凭据类键（api_key/secret_key
+///   等）缺省恒空串，**绝不把样例凭据 seed 进库**；
+/// - config_value 的运行期真相仍是 DB 行，本表只决定"缺行时的初始姿态"。
+pub const CONFIG_DEFAULTS: &[(&str, &str, &str)] = &[
+    (
+        "ip_location.auto_update_enabled",
+        "IP 库自动更新开关",
+        "false",
+    ),
+    (
+        "ip_location.maxmind_account_id",
+        "MaxMind Account ID(加密)",
+        "",
+    ),
+    (
+        "ip_location.maxmind_license_key",
+        "MaxMind License Key(加密)",
+        "",
+    ),
+    ("ip_location.update_source", "IP 库更新源", "p3terx"),
+    ("sys.account.captchaEnabled", "账号自助-验证码开关", "true"),
+    ("sys.account.registerUser", "账号自助-注册开关", "false"),
+    (
+        "sys.ai.allowed_tables",
+        "AI 可查询表白名单",
+        "sys_user,sys_dept,sys_role,sys_post,sys_config,sys_dict_type,sys_dict_data",
+    ),
+    ("sys.ai.api_key", "AI API Key", ""),
+    (
+        "sys.ai.base_url",
+        "AI base_url",
+        "https://api.openai.com/v1",
+    ),
+    ("sys.ai.enabled", "AI 助手总开关", "false"),
+    ("sys.ai.model", "AI 模型名", "gpt-4o-mini"),
+    ("sys.ai.provider", "AI LLM 提供方", "openai"),
+    (
+        "sys.audit.alarm.fail_rate_threshold",
+        "异常操作告警-失败率阈值(%)",
+        "30",
+    ),
+    (
+        "sys.audit.alarm.fail_threshold",
+        "异常操作告警-失败次数阈值",
+        "5",
+    ),
+    (
+        "sys.audit.alarm.window_minutes",
+        "异常操作告警-时间窗口(分钟)",
+        "5",
+    ),
+    ("sys.fieldPerm.enabled", "字段级权限开关", "false"),
+    ("sys.login.blackIPList", "用户登录-黑名单列表", ""),
+    (
+        "sys.upload.backend",
+        "上传存储后端（local/s3 热切换，空=跟随 config.toml）",
+        "",
+    ),
+    ("sys.upload.s3.access_key", "S3 AccessKey", ""),
+    ("sys.upload.s3.bucket", "S3 Bucket", ""),
+    ("sys.upload.s3.endpoint", "S3 Endpoint", ""),
+    (
+        "sys.upload.s3.path_style",
+        "S3 路径风格寻址（true/false，空=跟随 config.toml）",
+        "",
+    ),
+    ("sys.upload.s3.public_endpoint", "S3 公开访问前缀", ""),
+    ("sys.upload.s3.region", "S3 Region", ""),
+    ("sys.upload.s3.secret_key", "S3 SecretKey", ""),
+    (
+        "sys.user.forceFirstLoginChangePwd",
+        "用户首登强制改密开关",
+        "false",
+    ),
+    ("sys.user.initPassword", "用户管理-账号初始密码", "123456"),
+];
+
 /// 全量治理项（能力位在前、参数项在后；各自内部按 key 字典序）。
 pub fn all() -> impl Iterator<Item = &'static Item> {
     FEATURES.iter().chain(CONFIGS.iter())
@@ -475,6 +562,23 @@ mod tests {
                 "{} 非能力位，不应有 perms 解锁清单",
                 c.key
             );
+        }
+    }
+
+    /// **CONFIG_DEFAULTS 双向一致锁**（批次十四）：缺省三元组的键集必须与
+    /// `CONFIGS` 键集完全相等——新增参数项漏登缺省值 ⇒ 启动收敛不补行 ⇒
+    /// 复现"G-11 八键存量库无行、纯 UPDATE 写入静默失效"缺陷；多登死键同理。
+    #[test]
+    fn test_config_defaults_cover_all_configs() {
+        let reg: std::collections::BTreeSet<&str> = CONFIGS.iter().map(|c| c.key).collect();
+        let defs: std::collections::BTreeSet<&str> =
+            CONFIG_DEFAULTS.iter().map(|(k, _, _)| *k).collect();
+        assert_eq!(
+            reg, defs,
+            "CONFIG_DEFAULTS 与 CONFIGS 键集不一致——新增参数项必须同步登记 (key, name, value)"
+        );
+        for (k, name, _) in CONFIG_DEFAULTS {
+            assert!(!name.is_empty(), "{k} 的显示名不得为空");
         }
     }
 
