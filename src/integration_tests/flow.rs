@@ -1250,6 +1250,8 @@ async fn test_flow_engine_open_round_is_biz_type_agnostic() {
                         node_name: "自定义节点",
                         task_type: "single",
                         assignees: &[1, 2],
+                        weights: &[],
+                        node_threshold: None,
                         due_at: Some(now),
                         from_status: Some("draft"),
                         comment: Some("generic engine"),
@@ -1585,4 +1587,573 @@ async fn test_flow_find_by_biz_round_is_tenant_scoped() {
         .exec(&ctx.state.db)
         .await
         .expect("清理 task 失败");
+}
+
+// ==================== G-02 M2：四模式推进 + 委派 + 减签 ====================
+
+/// 直查某 task 行状态（绕过 todo 视图——cancelled/discarded 行不在待办列表）
+async fn m2_task_status(ctx: &TestContext, task_id: i64) -> String {
+    use sea_orm::ConnectionTrait;
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            format!("SELECT status FROM sys_flow_task WHERE task_id = {task_id}"),
+        ))
+        .await
+        .expect("查询 task status 失败")
+        .expect("task 行应存在");
+    row.try_get::<String>("", "status")
+        .expect("status 列读取失败")
+}
+
+/// 为 or_sign/weighted 用例手工追加一个兄弟 pending 行（模拟多审批人节点）；
+/// 返回新行 task_id。审批人 uid 由调用方保证启用存在。
+async fn m2_insert_sibling_pending(ctx: &TestContext, doc_id: i64, uid: i64, weight: i64) -> i64 {
+    use sea_orm::ConnectionTrait;
+    let res = ctx
+        .state
+        .db
+        .execute_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            format!(
+                "INSERT INTO sys_flow_task (biz_type, biz_id, round_no, node_seq, node_name,                  assignee_id, task_type, status, title, applicant_id, applicant_name, weight,                  threshold, tenant_id, create_time)                  SELECT 'demo_doc', {doc_id}, t.round_no, t.node_seq, t.node_name, {uid},                  t.task_type, 'pending', t.title, t.applicant_id, t.applicant_name, {weight},                  t.threshold, t.tenant_id, CURRENT_TIMESTAMP                  FROM sys_flow_task t WHERE t.biz_type = 'demo_doc' AND t.biz_id = {doc_id}                  LIMIT 1"
+            ),
+        ))
+        .await
+        .expect("插入兄弟 pending 行失败");
+    res.last_insert_id() as i64
+}
+
+/// 链路：or_sign 任一通过 → 兄弟 pending 取消 → 节点完成即办结
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_or_sign_mode_full_chain() {
+    let ctx = TestContext::new().await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_orsign", "or_sign").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+
+    // 兄弟 pending 行（独立用户 9002；dedupe 后 demo or_sign 链只有 admin 一行）
+    let sibling = m2_insert_sibling_pending(&ctx, doc_id, 9002, 1).await;
+
+    // admin approve → or_sign 任一通过 → 兄弟行 cancelled + 单据办结（单节点链）
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{task1}/action"),
+            serde_json::json!({ "action": "approve" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    assert_eq!(
+        m2_task_status(&ctx, task1).await,
+        "approved",
+        "or_sign 主行应为 approved"
+    );
+    assert_eq!(
+        m2_task_status(&ctx, sibling).await,
+        "cancelled",
+        "or_sign 兄弟 pending 应随节点完成被取消"
+    );
+
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
+    let doc = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc_id))
+        .expect("我发起的列表应含该单据");
+    assert_eq!(
+        doc["status"], "approved",
+        "or_sign 单人通过即办结，实际: {doc}"
+    );
+}
+
+/// 链路：weighted 权重和 ≥ threshold 才推进；不达标保持 pending
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_weighted_mode_threshold() {
+    use sea_orm::ConnectionTrait;
+    let ctx = TestContext::new().await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_weighted", "weighted").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+
+    // demo weighted 链：DeptLeader(w1) + Role admin(w2)，同身份取 max → admin 行 w=2, threshold=2
+    // 场景 A：降权到 1 → approve 后权重和 1 < 2 → 单据仍 pending（不推进）
+    ctx.state
+        .db
+        .execute_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            format!("UPDATE sys_flow_task SET weight = 1 WHERE task_id = {task1}"),
+        ))
+        .await
+        .expect("降权失败");
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{task1}/action"),
+            serde_json::json!({ "action": "approve" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
+    let doc = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc_id))
+        .expect("我发起的列表应含该单据");
+    assert_eq!(
+        doc["status"], "pending",
+        "权重和 1 < 门槛 2 时不得推进，实际: {doc}"
+    );
+
+    // 场景 B：补票跨行聚合——插入 w=2 兄弟行（第二审批人），其 approve 后
+    // 权重和 1+2=3 ≥ 2 → 节点完成 → 单节点链办结
+    ctx.post_json(
+        "/system/user",
+        serde_json::json!({
+            "deptId": 103,
+            "userName": "it_flow_w2",
+            "nickName": "加权第二票",
+            "email": "stepby@tzkj.net",
+            "phonenumber": "13800009999",
+            "password": "Stepby@12345",
+            "status": "0",
+            "roleIds": [2]
+        }),
+    )
+    .await;
+    let v = ctx.get_json("/system/user/list?userName=it_flow_w2").await;
+    let w2_uid = v["rows"][0]["userId"].as_i64().expect("应查到第二票用户");
+    let w2_token = super::login(
+        &ctx.app,
+        super::next_peer_ip(),
+        "it_flow_w2",
+        "Stepby@12345",
+    )
+    .await;
+    let w2_task = m2_insert_sibling_pending(&ctx, doc_id, w2_uid, 2).await;
+    let v = ry_post_json(
+        &ctx,
+        &w2_token,
+        &format!("/system/flow/task/{w2_task}/action"),
+        serde_json::json!({ "action": "approve", "comment": "第二票达标" }),
+    )
+    .await;
+    ctx.assert_ok(&v);
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
+    let doc = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc_id))
+        .expect("我发起的列表应含该单据");
+    assert_eq!(
+        doc["status"], "approved",
+        "权重 1+2 ≥ 门槛 2 应办结，实际: {doc}"
+    );
+}
+
+/// 链路：delegate 委派（delegate_from 落库 + 受托人推进全链 + 边界拒绝）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_delegate_chain() {
+    use sea_orm::ConnectionTrait;
+    let ctx = TestContext::new().await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+
+    // 建受托用户
+    ctx.post_json(
+        "/system/user",
+        serde_json::json!({
+            "deptId": 103,
+            "userName": "it_flow_dlg",
+            "nickName": "受托人",
+            "email": "stepby@tzkj.net",
+            "phonenumber": "13800007777",
+            "password": "Stepby@12345",
+            "status": "0",
+            "roleIds": [2]
+        }),
+    )
+    .await;
+    let v = ctx.get_json("/system/user/list?userName=it_flow_dlg").await;
+    let dlg_uid = v["rows"][0]["userId"]
+        .as_i64()
+        .expect("应查到受托人 userId");
+    let admin_uid: i64 = {
+        let row = ctx
+            .state
+            .db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT user_id FROM sys_user WHERE user_name = 'admin'".to_string(),
+            ))
+            .await
+            .expect("查 admin 失败")
+            .expect("admin 应存在");
+        row.try_get::<i64>("", "user_id").expect("user_id 列")
+    };
+
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_delegate", "single").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+
+    // 边界 1：自委派 → 400
+    let (status, _) = ctx
+        .send_raw(token_request(
+            &ctx,
+            &ctx.token,
+            Method::POST,
+            &format!("/system/flow/task/{task1}/action"),
+            Some(serde_json::json!({ "action": "delegate", "toUserId": admin_uid })),
+        ))
+        .await;
+    assert_eq!(status, 400, "自委派应 400");
+
+    // 边界 2：委派给提交人 → 400（禁自审）
+    let stepby_uid: i64 = {
+        let row = ctx
+            .state
+            .db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT user_id FROM sys_user WHERE user_name = 'stepby'".to_string(),
+            ))
+            .await
+            .expect("查 stepby 失败")
+            .expect("stepby 应存在");
+        row.try_get::<i64>("", "user_id").expect("user_id 列")
+    };
+    let (status, _) = ctx
+        .send_raw(token_request(
+            &ctx,
+            &ctx.token,
+            Method::POST,
+            &format!("/system/flow/task/{task1}/action"),
+            Some(serde_json::json!({ "action": "delegate", "toUserId": stepby_uid })),
+        ))
+        .await;
+    assert_eq!(status, 400, "委派给提交人应 400");
+
+    // 委派成功：assignee 换受托人 + delegate_from = admin + 行仍 pending
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{task1}/action"),
+            serde_json::json!({ "action": "delegate", "toUserId": dlg_uid }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(m2_task_status(&ctx, task1).await, "pending");
+    {
+        let row = ctx
+            .state
+            .db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT assignee_id, delegate_from FROM sys_flow_task WHERE task_id = {task1}"
+                ),
+            ))
+            .await
+            .expect("查 task 失败")
+            .expect("task 应存在");
+        assert_eq!(
+            row.try_get::<i64>("", "assignee_id").expect("assignee"),
+            dlg_uid,
+            "委派后 assignee 应为受托人"
+        );
+        let from: i64 = row
+            .try_get::<i64>("", "delegate_from")
+            .expect("delegate_from");
+        assert!(
+            from == admin_uid,
+            "delegate_from 应为转出人 admin，实际 {from}"
+        );
+    }
+
+    // 受托人登录 → approve → 推进第二级（admin）→ 办结
+    let dlg_token = super::login(
+        &ctx.app,
+        super::next_peer_ip(),
+        "it_flow_dlg",
+        "Stepby@12345",
+    )
+    .await;
+    let v = ry_post_json(
+        &ctx,
+        &dlg_token,
+        &format!("/system/flow/task/{task1}/action"),
+        serde_json::json!({ "action": "approve", "comment": "受托审批" }),
+    )
+    .await;
+    ctx.assert_ok(&v);
+    let task2 = admin_todo_task_for(&ctx, doc_id, Some(2)).await;
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{task2}/action"),
+            serde_json::json!({ "action": "approve" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
+    let doc = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc_id))
+        .expect("我发起的列表应含该单据");
+    assert_eq!(doc["status"], "approved", "委派链全通应办结，实际: {doc}");
+}
+
+/// 链路：减签三场景 —— ①清空 pending 后 settle 收敛办结 ②已投票减签 discarded
+/// ③减到节点无有效审批人 → 400（threshold 归零防线）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_flow_countersign_del_chain() {
+    let ctx = TestContext::new().await;
+    let stepby_token = super::login(&ctx.app, ctx.peer_ip, "stepby", "admin123").await;
+
+    // 建两个会签用户
+    for (name, phone) in [
+        ("it_flow_csd1", "13800008881"),
+        ("it_flow_csd2", "13800008882"),
+    ] {
+        ctx.post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": name,
+                "nickName": "会签用户",
+                "email": "stepby@tzkj.net",
+                "phonenumber": phone,
+                "password": "Stepby@12345",
+                "status": "0",
+                "roleIds": [2]
+            }),
+        )
+        .await;
+    }
+    let mut cs_uids = Vec::new();
+    for name in ["it_flow_csd1", "it_flow_csd2"] {
+        let v = ctx
+            .get_json(&format!("/system/user/list?userName={name}"))
+            .await;
+        cs_uids.push(v["rows"][0]["userId"].as_i64().expect("应查到会签用户"));
+    }
+    let cs_token1 = super::login(
+        &ctx.app,
+        super::next_peer_ip(),
+        "it_flow_csd1",
+        "Stepby@12345",
+    )
+    .await;
+
+    // ========== 场景 ①：加签两人 → admin approve（不完成）→ 逐个减签 → settle 收敛办结 ==========
+    let doc_id = submit_as_ry(&ctx, &stepby_token, "it_flow_csd_chain", "countersign").await;
+    let task1 = admin_todo_task_for(&ctx, doc_id, Some(1)).await;
+    for uid in &cs_uids {
+        let v = ctx
+            .post_json(
+                &format!("/system/flow/task/{task1}/countersign-add"),
+                serde_json::json!({ "toUserId": uid }),
+            )
+            .await;
+        ctx.assert_ok(&v);
+    }
+    // admin 先批（u1/u2 仍 pending → 节点不完成）
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{task1}/action"),
+            serde_json::json!({ "action": "approve" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    // 减签 u1（pending → cancelled）
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{task1}/countersign-del"),
+            serde_json::json!({ "toUserId": cs_uids[0] }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
+    let doc = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc_id))
+        .expect("我发起的列表应含该单据");
+    assert_eq!(
+        doc["status"], "pending",
+        "仍剩 u2 pending，减签 u1 后不应收敛，实际: {doc}"
+    );
+    // 减签 u2（pending → cancelled）→ 无 pending 且有 approved（admin）→ settle 收敛办结
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{task1}/countersign-del"),
+            serde_json::json!({ "toUserId": cs_uids[1] }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
+    let doc = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc_id))
+        .expect("我发起的列表应含该单据");
+    assert_eq!(
+        doc["status"], "approved",
+        "清空 pending 后 settle 应收敛办结，实际: {doc}"
+    );
+
+    // ========== 场景 ②：已投票减签 → discarded（投票事实保留，聚合排除）==========
+    let doc2 = submit_as_ry(&ctx, &stepby_token, "it_flow_csd_discard", "countersign").await;
+    let t2 = admin_todo_task_for(&ctx, doc2, Some(1)).await;
+    // 加签 u1（返回的新行即 u1 自己的待办行）
+    ctx.post_json(
+        &format!("/system/flow/task/{t2}/countersign-add"),
+        serde_json::json!({ "toUserId": cs_uids[0] }),
+    )
+    .await;
+    // u1 行从其待办查询（加签响应的 task 为原行，不是新行）
+    let todo1 = ry_get_json(&ctx, &cs_token1, "/system/flow/todo?pageNum=1&pageSize=50").await;
+    let u1_task = todo1["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["bizId"].as_i64() == Some(doc2))
+        .and_then(|r| r["taskId"].as_i64())
+        .expect("u1 应有该单据待办");
+    // u1 先投票（approved）
+    let v = ry_post_json(
+        &ctx,
+        &cs_token1,
+        &format!("/system/flow/task/{u1_task}/action"),
+        serde_json::json!({ "action": "approve", "comment": "u1 先批" }),
+    )
+    .await;
+    ctx.assert_ok(&v);
+    // 减签已投票的 u1 → discarded
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{t2}/countersign-del"),
+            serde_json::json!({ "toUserId": cs_uids[0] }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        m2_task_status(&ctx, t2).await,
+        "pending",
+        "admin 行仍 pending，单据不应收敛"
+    );
+    // 用 SQL 直查 u1 行状态应为 discarded（task_id 由 assignee 定位）
+    {
+        use sea_orm::ConnectionTrait;
+        let row = ctx
+            .state
+            .db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT status FROM sys_flow_task WHERE biz_type = 'demo_doc' AND biz_id = {doc2} AND assignee_id = {}",
+                    cs_uids[0]
+                ),
+            ))
+            .await
+            .expect("查 u1 行失败")
+            .expect("u1 行应存在");
+        assert_eq!(
+            row.try_get::<String>("", "status").expect("status 列"),
+            "discarded",
+            "已投票减签应置 discarded"
+        );
+    }
+    // admin approve → 节点完成（discarded 不阻塞）→ 办结
+    let v = ctx
+        .post_json(
+            &format!("/system/flow/task/{t2}/action"),
+            serde_json::json!({ "action": "approve" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ry_get_json(
+        &ctx,
+        &stepby_token,
+        "/system/flow/mine?pageNum=1&pageSize=50",
+    )
+    .await;
+    let doc = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["docId"].as_i64() == Some(doc2))
+        .expect("我发起的列表应含该单据");
+    assert_eq!(
+        doc["status"], "approved",
+        "discarded 行不应阻塞节点完成，实际: {doc}"
+    );
+
+    // ========== 场景 ③：减到节点无有效审批人 → 400（threshold 归零防线）==========
+    let doc3 = submit_as_ry(&ctx, &stepby_token, "it_flow_csd_last", "countersign").await;
+    let t3 = admin_todo_task_for(&ctx, doc3, Some(1)).await;
+    let admin_uid: i64 = {
+        use sea_orm::ConnectionTrait;
+        let row = ctx
+            .state
+            .db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT user_id FROM sys_user WHERE user_name = 'admin'".to_string(),
+            ))
+            .await
+            .expect("查 admin 失败")
+            .expect("admin 应存在");
+        row.try_get::<i64>("", "user_id").expect("user_id 列")
+    };
+    // 单行 countersign（admin 唯一审批人）→ 减签自己行 → effective_after = 0 → 400
+    let (status, _) = ctx
+        .send_raw(token_request(
+            &ctx,
+            &ctx.token,
+            Method::POST,
+            &format!("/system/flow/task/{t3}/countersign-del"),
+            Some(serde_json::json!({ "toUserId": admin_uid })),
+        ))
+        .await;
+    assert_eq!(
+        status, 400,
+        "减到节点无有效审批人必须 400 拦截，实际: {status}"
+    );
 }

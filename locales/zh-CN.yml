@@ -109,7 +109,10 @@ error:
     no_assignee: 无法解析出有效审批人，请联系管理员检查审批策略
     user_not_found: 用户不存在
     user_disabled: 目标用户已停用，无法转办
-    mode_invalid: 审批模式不合法（single/countersign）
+    mode_invalid: 审批模式不合法（single/countersign/or_sign/weighted）
+    delegate_self_forbidden: 不能把任务委派给自己
+    countersign_del_not_found: 被减签人不在当前审批节点
+    countersign_del_last_assignee: 移除后将导致节点无有效审批人，已拦截
     leave_type_invalid: 请假类型不合法（annual/sick/personal）
     title_blank: 单据标题不能为空白
     task_not_found: 审批任务不存在
@@ -510,6 +513,7 @@ error:
     channel_type_invalid: "消息渠道类型无效: %{channel_type}（支持: email/sms/site）"
     sms_config_invalid: '短信渠道配置无效'
     sms_send_failed: '短信投递失败，已转入待重试'
+    sms_template_code_required: '云厂商短信渠道必须由配置了云端模板 code（sms_template_code）的模板投递'
     channel_in_use: "消息渠道「%{channel_name}」已被消息模板引用，无法删除"
     channel_id_invalid: 消息渠道 ID 不合法
     config_json_invalid: 渠道配置 JSON 无效

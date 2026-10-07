@@ -39,12 +39,16 @@ pub fn flow_nodes() -> Vec<NodeSpec> {
             node_name: "部门主管审批",
             policies: vec![ApproverPolicy::DeptLeader],
             quorum: Quorum::Any,
+            or_sign: false,
+            policy_weights: vec![],
         },
         NodeSpec {
             node_seq: 2,
             node_name: "管理员审批",
             policies: vec![ApproverPolicy::Role { role_key: "admin" }],
             quorum: Quorum::Any,
+            or_sign: false,
+            policy_weights: vec![],
         },
     ]
 }
@@ -339,6 +343,8 @@ impl {{ table.className }}Service {
                             node_name: &node_name,
                             task_type: &task_type,
                             assignees: &assignees,
+                            weights: &[],
+                            node_threshold: None,
                             due_at,
                             from_status: Some(from_status.as_str()),
                             comment: None,

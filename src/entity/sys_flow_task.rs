@@ -43,9 +43,9 @@ pub struct Model {
     pub node_name: Option<String>,
     /// 审批人 user_id（提交时按策略快照，不重算）
     pub assignee_id: i64,
-    /// 任务类型（single=单审 / countersign=会签）
+    /// 任务类型（single=单审 / countersign=会签 / or_sign=或签 / weighted=加权票）
     pub task_type: String,
-    /// 状态（pending/approved/rejected/cancelled/transferred）
+    /// 状态（pending/approved/rejected/cancelled/transferred/discarded）
     pub status: String,
     /// 单据标题（提交时快照，跨类型聚合列表展示用）
     pub title: Option<String>,
@@ -76,6 +76,12 @@ pub struct Model {
     )]
     #[ts(as = "Option<String>")]
     pub last_reminded_at: Option<NaiveDateTime>,
+    /// 审批人权重快照（weighted 行生效，提交时定格；其余类型恒 1，G-02 M2）
+    pub weight: i64,
+    /// 节点门槛快照（weighted 行：权重和 ≥ threshold 即节点通过；其余类型 NULL，G-02 M2）
+    pub threshold: Option<i64>,
+    /// 委派转出人（delegate 动作记录原审批人；处理完回不到 A，G-02 M2）
+    pub delegate_from: Option<i64>,
     /// 多租户前向兼容预留（默认 0，不参与过滤）
     pub tenant_id: i64,
     pub create_by: Option<String>,

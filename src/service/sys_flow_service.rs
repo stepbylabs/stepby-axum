@@ -223,13 +223,15 @@ pub enum ApproverPolicy {
     User { user_id: i64 },
 }
 
-/// 会签/或签判定
+/// 会签/或签/加权判定（G-02 M2 扩展：四模式对齐 flow_graph::MultiMode）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Quorum {
     /// 全部通过才算节点通过
     All,
     /// 任一通过即节点通过
     Any,
+    /// 加权票：已通过行的权重和 ≥ threshold 即节点通过（权重提交时快照进 task 行）
+    Weighted { threshold: i64 },
 }
 
 /// 单个审批节点规格
@@ -239,12 +241,33 @@ pub struct NodeSpec {
     pub node_name: &'static str,
     pub policies: Vec<ApproverPolicy>,
     pub quorum: Quorum,
+    /// 节点是否为**或签**（多审批人任一通过即节点通过，兄弟 pending 行取消）；
+    /// 仅与 [`Quorum::Any`] 搭配（G-02 M2）
+    pub or_sign: bool,
+    /// 与 `policies` 平行的策略级权重（weighted 节点生效；同策略解析出的全部用户共享；
+    /// 空 = 全 1）。非 weighted 节点忽略（G-02 M2）
+    pub policy_weights: Vec<i64>,
 }
 
-/// 示例单据的审批链
+impl NodeSpec {
+    /// 引擎 task_type 映射（对齐 flow_graph::MultiMode 四模式）
+    pub fn task_type(&self) -> &'static str {
+        match self.quorum {
+            Quorum::All => "countersign",
+            Quorum::Weighted { .. } => "weighted",
+            Quorum::Any if self.or_sign => "or_sign",
+            Quorum::Any => "single",
+        }
+    }
+}
+
+/// 示例单据的审批链（G-02 M2：四模式演示——single/countersign/or_sign/weighted）
 ///
 /// - single：两级单审（部门主管 → 管理员）
 /// - countersign：一级会签（部门主管 与 管理员 全部通过，Quorum::All）
+/// - or_sign：一级或签（部门主管 或 管理员 任一通过即节点通过，兄弟 pending 取消）
+/// - weighted：一级加权票（部门主管权重 1 / 管理员权重 2，阈值 2——管理员单票即过，
+///   仅主管通过不达标需管理员跟进）
 pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
     match flow_mode {
         "countersign" => vec![NodeSpec {
@@ -255,6 +278,30 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
                 ApproverPolicy::Role { role_key: "admin" },
             ],
             quorum: Quorum::All,
+            or_sign: false,
+            policy_weights: vec![],
+        }],
+        "or_sign" => vec![NodeSpec {
+            node_seq: 1,
+            node_name: "主管或管理员任一通过",
+            policies: vec![
+                ApproverPolicy::DeptLeader,
+                ApproverPolicy::Role { role_key: "admin" },
+            ],
+            quorum: Quorum::Any,
+            or_sign: true,
+            policy_weights: vec![],
+        }],
+        "weighted" => vec![NodeSpec {
+            node_seq: 1,
+            node_name: "加权票（阈值 2）",
+            policies: vec![
+                ApproverPolicy::DeptLeader,
+                ApproverPolicy::Role { role_key: "admin" },
+            ],
+            quorum: Quorum::Weighted { threshold: 2 },
+            or_sign: false,
+            policy_weights: vec![1, 2],
         }],
         _ => vec![
             NodeSpec {
@@ -262,12 +309,16 @@ pub fn demo_nodes(flow_mode: &str) -> Vec<NodeSpec> {
                 node_name: "部门主管审批",
                 policies: vec![ApproverPolicy::DeptLeader],
                 quorum: Quorum::Any,
+                or_sign: false,
+                policy_weights: vec![],
             },
             NodeSpec {
                 node_seq: 2,
                 node_name: "管理员审批",
                 policies: vec![ApproverPolicy::Role { role_key: "admin" }],
                 quorum: Quorum::Any,
+                or_sign: false,
+                policy_weights: vec![],
             },
         ],
     }
@@ -307,9 +358,9 @@ fn validate_leave_type(value: &str, _ctx: &()) -> garde::Result {
     }
 }
 
-/// flow_mode 枚举白名单（非法值 400，不静默回退——对齐"显式报错不静默跳过"原则）
+/// flow_mode 枚举白名单（G-02 M2 扩为四模式；非法值 400，不静默回退）
 fn validate_flow_mode(value: &str, _ctx: &()) -> garde::Result {
-    if matches!(value, "single" | "countersign") {
+    if matches!(value, "single" | "countersign" | "or_sign" | "weighted") {
         Ok(())
     } else {
         Err(garde::Error::new(crate::tr!("error.flow.mode_invalid")))
@@ -320,11 +371,11 @@ fn validate_flow_mode(value: &str, _ctx: &()) -> garde::Result {
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowActionDto {
-    /// 动作（approve/reject/withdraw/transfer）
+    /// 动作（approve/reject/withdraw/transfer/delegate）
     pub action: String,
     /// 审批意见
     pub comment: Option<String>,
-    /// 转办目标 user_id（仅 transfer 必填）
+    /// 转办/委派目标 user_id（仅 transfer/delegate 必填）
     pub to_user_id: Option<i64>,
 }
 
@@ -439,10 +490,14 @@ pub struct OpenRoundSpec<'a> {
     pub node_seq: i32,
     /// 首节点名称
     pub node_name: &'a str,
-    /// 节点任务类型：`single`（单审）/ `countersign`（会签）
+    /// 节点任务类型：`single`（单审）/ `countersign`（会签）/ `or_sign`（或签）/ `weighted`（加权票）
     pub task_type: &'a str,
     /// 快照审批人（已由 `resolve_node_assignees` 解析，引擎不再查库）
     pub assignees: &'a [i64],
+    /// 与 `assignees` 平行的权重快照（weighted 节点生效；空/缺位 = 1，G-02 M2）
+    pub weights: &'a [i64],
+    /// weighted 节点门槛快照（权重和 ≥ threshold 即节点通过；NULL = 非 weighted，G-02 M2）
+    pub node_threshold: Option<i64>,
     /// SLA 到期时间（可空）
     pub due_at: Option<NaiveDateTime>,
     /// 流水 `from_status`（首提交 `draft`；重提交为提交前状态）
@@ -549,28 +604,68 @@ pub async fn resolve_node_assignees(
     applicant_id: i64,
     applicant_dept_id: Option<i64>,
 ) -> Result<Vec<i64>, ServiceError> {
-    let mut ids: Vec<i64> = Vec::new();
-    for p in &spec.policies {
+    let pairs = resolve_node_assignee_pairs(conn, spec, applicant_id, applicant_dept_id).await?;
+    Ok(pairs.into_iter().map(|(uid, _)| uid).collect())
+}
+
+/// 解析节点审批人并**携带权重**（G-02 M2）：weighted 节点按 `policy_weights`
+/// 与策略对位取权重（同策略解析出的全部用户共享该权重）；其余节点恒 1。
+///
+/// 与 [`resolve_node_assignees`] 共用去重/自审守卫（`dedupe_and_guard`），不复制不漂移。
+pub async fn resolve_node_assignee_pairs(
+    conn: &impl ConnectionTrait,
+    spec: &NodeSpec,
+    applicant_id: i64,
+    applicant_dept_id: Option<i64>,
+) -> Result<Vec<(i64, i64)>, ServiceError> {
+    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    for (idx, p) in spec.policies.iter().enumerate() {
+        let weight = spec
+            .policy_weights
+            .get(idx)
+            .copied()
+            .filter(|w| *w > 0)
+            .unwrap_or(1);
         for uid in resolve_policy(conn, p, applicant_dept_id).await? {
-            if !ids.contains(&uid) {
-                ids.push(uid);
+            pairs.push((uid, weight));
+        }
+    }
+    let pairs = dedupe_and_guard(pairs, applicant_id);
+    if pairs.is_empty() {
+        // 全链自审 → 显式拒绝（保持 V2 §6-4 原错误语义：防单据卡死）
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.flow.self_approve_chain"
+        )));
+    }
+    Ok(pairs)
+}
+
+/// 去重（同一审批人多重身份**取较大权重**——一人一票，权重取最高身份，避免
+/// "主管与角色兼任"场景下权重被首策略覆盖而不可达门槛）+ 自审剔除守卫（V2 §6-4）：
+/// 提交人出现 → 剔除；剔除后仍有他人 → 回退 admin 补位（权重 1）；
+/// 剔除后为空 → 该节点唯一审批人就是提交人（全链自审）→ 返回空（调用层显式 400）。
+fn dedupe_and_guard(pairs: Vec<(i64, i64)>, applicant_id: i64) -> Vec<(i64, i64)> {
+    let mut seen: Vec<(i64, i64)> = Vec::new();
+    for (uid, w) in pairs {
+        match seen.iter_mut().find(|(u, _)| *u == uid) {
+            Some((_, w0)) => {
+                if w > *w0 {
+                    *w0 = w;
+                }
             }
+            None => seen.push((uid, w)),
         }
     }
-    if ids.contains(&applicant_id) {
-        // 提交人出现在审批人列 → 剔除；剔除后仍有他人 → 回退 admin 补位（节点可跑）；
-        // 剔除后为空 → 该节点唯一审批人就是提交人（全链自审）→ **拒绝提交**（防单据卡死，V2 §6-4）
-        ids.retain(|id| *id != applicant_id);
-        if ids.is_empty() {
-            return Err(ServiceError::bad_request(&crate::tr!(
-                "error.flow.self_approve_chain"
-            )));
+    if seen.iter().any(|(uid, _)| *uid == applicant_id) {
+        seen.retain(|(uid, _)| *uid != applicant_id);
+        if seen.is_empty() {
+            return Vec::new();
         }
-        if !ids.contains(&1) {
-            ids.push(1);
+        if !seen.iter().any(|(uid, _)| *uid == 1) {
+            seen.push((1, 1));
         }
     }
-    Ok(ids)
+    seen
 }
 
 /// 审批工作流 Service
@@ -621,14 +716,17 @@ impl SysFlowService {
             .first()
             .cloned()
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.mode_invalid")))?;
-        let assignees = resolve_node_assignees(&self.db, &first, applicant_id, dept_id).await?;
+        let assignee_pairs =
+            resolve_node_assignee_pairs(&self.db, &first, applicant_id, dept_id).await?;
+        let weights: Vec<i64> = assignee_pairs.iter().map(|(_, w)| *w).collect();
+        let assignees: Vec<i64> = assignee_pairs.iter().map(|(u, _)| *u).collect();
 
         let now = crate::common::datetime::now_naive();
         let due_at = now + chrono::Duration::hours(self.config.flow.timeout_hours);
-        let node_task_type = if first.quorum == Quorum::All {
-            "countersign"
-        } else {
-            "single"
+        let node_task_type = first.task_type();
+        let node_threshold = match first.quorum {
+            Quorum::Weighted { threshold } => Some(threshold),
+            _ => None,
         };
         // 事务闭包要求 'static：克隆捕获字段，避免借用外层局部变量
         let first_node_seq = first.node_seq;
@@ -685,6 +783,8 @@ impl SysFlowService {
                             node_name: &first_node_name,
                             task_type: node_task_type,
                             assignees: &assignees,
+                            weights: &weights,
+                            node_threshold,
                             due_at: Some(due_at),
                             from_status: Some("draft"),
                             comment: dto.reason.as_deref(),
@@ -736,6 +836,14 @@ impl SysFlowService {
                 self.transfer(operator_id, task_id, to, dto.comment.as_deref())
                     .await
             }
+            // G-02 M2：委派（处理完回不到 A；delegate_from 落库审计）
+            "delegate" => {
+                let to = dto.to_user_id.ok_or_else(|| {
+                    ServiceError::bad_request(&crate::tr!("error.flow.to_user_required"))
+                })?;
+                self.delegate(operator_id, task_id, to, dto.comment.as_deref())
+                    .await
+            }
             _ => Err(ServiceError::bad_request(&crate::tr!(
                 "error.flow.action_invalid"
             ))),
@@ -754,10 +862,12 @@ impl SysFlowService {
 
         // 业务类型必须已注册（W-19）：推进/终止都要用注册项的链与投影回写。
         // 必须在**任何写入之前**判定——否则 task 行已被条件更新为 approved/rejected，
-        // 却在取注册项时失败，会留下"任务已动、流水与单据未动"的半应用状态。
+        // 却在取注册项时失败，会留下"任务已动、流水与单据未动"的半应用状态
+        // （回归锁：test_flow_act_unregistered_biz_type_fails_closed）。
         let reg = biz_type::find(&task.biz_type).ok_or_else(|| {
             ServiceError::internal(&crate::tr!("error.flow.biz_type_unregistered"))
         })?;
+        let _ = &reg;
 
         // 条件更新（并发安全 + 幂等；V3-E1 崩塌点 2 修正后的正确落点）
         let new_task_status = if approve { "approved" } else { "rejected" };
@@ -815,7 +925,41 @@ impl SysFlowService {
             return Ok(outcome);
         }
 
-        // 同意：聚合判定当前节点（会签 All / 或签 Any）
+        // 同意：聚合判定 + 推进/办结（G-02 M2 抽为 settle_node，与减签收敛共用）
+        let to_status = self.settle_node(&task, now, &mut outcome).await?;
+
+        self.write_log(
+            &task.biz_type,
+            task.biz_id,
+            task.round_no,
+            Some(task.node_seq),
+            "approve",
+            Some("pending"),
+            Some(to_status),
+            Some(operator_id),
+            None,
+            dto.comment.as_deref(),
+            now,
+            task.tenant_id,
+        )
+        .await?;
+
+        outcome.task = self.task_by_id(task_id).await?;
+        Ok(outcome)
+    }
+
+    /// 节点聚合判定 + 推进/办结（G-02 M2：approve 与 countersign_del 共用推进收敛）
+    ///
+    /// 返回本单 to_status：`"pending"`（节点未完成，单据仍 pending）或 `"approved"`（办结）。
+    /// 为何共用：减签清空 pending 后必须**重新聚合收敛**——否则"多行会签部分已批、
+    /// 剩余被减签"的单据将永久卡死（无 pending 行、也无新动作触发推进）。
+    /// 推进/办结的一切写入均为条件安全（条件更新/幂等流水），重复调用无副作用。
+    async fn settle_node(
+        &self,
+        task: &sys_flow_task::Model,
+        now: NaiveDateTime,
+        outcome: &mut FlowActOutcome,
+    ) -> Result<&'static str, ServiceError> {
         // 租户精确收敛（W-2 建议②）：同轮 task 行写入同一租户，带 `Some(tid)` 可杜绝
         // 把他租户同 (biz_type,biz_id,round_no) 的 approved 行计入本节点 ⇒ 防误判完成。
         let rows = self
@@ -831,8 +975,67 @@ impl SysFlowService {
             .iter()
             .filter(|r| r.node_seq == task.node_seq)
             .collect();
+        // G-02 M2 四模式聚合。countersign 判定由"all approved"**安全放宽**为
+        // "无 pending 且有 approved"——驳回时整单已终止（V4-E4），同节点行只会是
+        // pending/approved/cancelled/discarded；加减签产生的 cancelled/discarded
+        // 行不再阻塞节点完成 = 设计文档"已投票减签记 discarded 并 threshold-1"语义
+        // （All 门槛 = 有效行数，置 discarded 即减一），无需数值 threshold 列。
+        // 前置防线（countersign_del 入口）保证节点至少剩一名有效审批人，杜绝全清空误判。
         let node_done = match task.task_type.as_str() {
-            "countersign" => same_node.iter().all(|r| r.status == "approved"),
+            "countersign" => {
+                !same_node.iter().any(|r| r.status == "pending")
+                    && same_node.iter().any(|r| r.status == "approved")
+            }
+            "weighted" => {
+                let approved_weight: i64 = same_node
+                    .iter()
+                    .filter(|r| r.status == "approved")
+                    .map(|r| r.weight)
+                    .sum();
+                let reached = match task.threshold {
+                    Some(t) if t > 0 => approved_weight >= t,
+                    // fail-closed：门槛快照缺失/非法 → 不判定完成（warn 留痕待人工）
+                    _ => {
+                        tracing::warn!(
+                            "weighted 节点门槛快照缺失或非法（biz={}/{}, round={}, node={}），不判定完成",
+                            task.biz_type,
+                            task.biz_id,
+                            task.round_no,
+                            task.node_seq
+                        );
+                        false
+                    }
+                };
+                if reached {
+                    // 达标 → 兄弟 pending 行取消（未投票者的待办随节点完成收敛）
+                    self.task_repo()
+                        .cancel_pending_by_node(
+                            &task.biz_type,
+                            task.biz_id,
+                            task.round_no,
+                            task.node_seq,
+                            Some(task.tenant_id),
+                        )
+                        .await?;
+                }
+                reached
+            }
+            "or_sign" => {
+                let any = same_node.iter().any(|r| r.status == "approved");
+                if any {
+                    // 或签：任一通过 → 兄弟 pending 行取消（剩余待办不再悬挂）
+                    self.task_repo()
+                        .cancel_pending_by_node(
+                            &task.biz_type,
+                            task.biz_id,
+                            task.round_no,
+                            task.node_seq,
+                            Some(task.tenant_id),
+                        )
+                        .await?;
+                }
+                any
+            }
             _ => same_node.iter().any(|r| r.status == "approved"),
         };
 
@@ -842,9 +1045,11 @@ impl SysFlowService {
             // 当前节点完成 → 找下一个节点或办结。
             // 链与投影均来自业务类型注册项（W-19）：引擎不感知任何单据表，
             // 故新登记类型（含 gen_table 生成的审批单据）无需改引擎即可推进。
-            // 注册项已在入口处判定（在任何写入之前）。
-            let chain = (reg.chain)(&self.db, task.biz_id).await?;
+            let reg = biz_type::find(&task.biz_type).ok_or_else(|| {
+                ServiceError::internal(&crate::tr!("error.flow.biz_type_unregistered"))
+            })?;
             // 部门快照：适配层给出优先（demo = 单据 `dept_id`）；缺失时回退申请人当前部门
+            let chain = (reg.chain)(&self.db, task.biz_id).await?;
             let dept_id = match chain.dept_id {
                 Some(d) => Some(d),
                 None => sys_user::Entity::find_by_id(task.applicant_id)
@@ -857,15 +1062,21 @@ impl SysFlowService {
             let next = specs.iter().find(|s| s.node_seq > task.node_seq);
             match next {
                 Some(next_spec) => {
-                    // 推进下一节点（按提交人部门解析，快照）
-                    let assignees =
-                        resolve_node_assignees(&self.db, next_spec, task.applicant_id, dept_id)
-                            .await?;
+                    // 推进下一节点（按提交人部门解析，快照；G-02 M2：weighted 行带权重/门槛）
+                    let assignee_pairs = resolve_node_assignee_pairs(
+                        &self.db,
+                        next_spec,
+                        task.applicant_id,
+                        dept_id,
+                    )
+                    .await?;
+                    let weights: Vec<i64> = assignee_pairs.iter().map(|(_, w)| *w).collect();
+                    let assignees: Vec<i64> = assignee_pairs.iter().map(|(u, _)| *u).collect();
                     let due_at = now + chrono::Duration::hours(self.config.flow.timeout_hours);
-                    let next_task_type = if next_spec.quorum == Quorum::All {
-                        "countersign"
-                    } else {
-                        "single"
+                    let next_task_type = next_spec.task_type();
+                    let next_threshold = match next_spec.quorum {
+                        Quorum::Weighted { threshold } => Some(threshold),
+                        _ => None,
                     };
                     let db = &self.db;
                     let next_name = next_spec.node_name.to_string();
@@ -873,22 +1084,33 @@ impl SysFlowService {
                     let task_biz_type = task.biz_type.clone();
                     let task_title = task.title.clone();
                     let task_applicant_name = task.applicant_name.clone();
+                    // 事务闭包要求 'static：task 是引用参数，使用到的字段提前值化（避免借用逃逸）
+                    let task_tenant_id = task.tenant_id;
+                    let task_biz_id = task.biz_id;
+                    let task_round_no = task.round_no;
+                    let task_applicant_id = task.applicant_id;
                     db.transaction::<_, (), ServiceError>(|txn| {
                         let assignees = assignees.clone();
+                        let weights = weights.clone();
+                        let task_biz_type = task_biz_type.clone();
+                        let task_title = task_title.clone();
+                        let task_applicant_name = task_applicant_name.clone();
                         Box::pin(async move {
-                            for uid in &assignees {
+                            for (idx, uid) in assignees.iter().enumerate() {
                                 let am = sys_flow_task::ActiveModel {
-                                    tenant_id: Set(task.tenant_id),
+                                    tenant_id: Set(task_tenant_id),
                                     biz_type: Set(task_biz_type.clone()),
-                                    biz_id: Set(task.biz_id),
-                                    round_no: Set(task.round_no),
+                                    biz_id: Set(task_biz_id),
+                                    round_no: Set(task_round_no),
                                     node_seq: Set(next_seq),
                                     node_name: Set(Some(next_name.clone())),
                                     assignee_id: Set(*uid),
                                     task_type: Set(next_task_type.to_string()),
                                     status: Set("pending".to_string()),
+                                    weight: Set(weights.get(idx).copied().unwrap_or(1)),
+                                    threshold: Set(next_threshold),
                                     title: Set(task_title.clone()),
-                                    applicant_id: Set(task.applicant_id),
+                                    applicant_id: Set(task_applicant_id),
                                     applicant_name: Set(task_applicant_name.clone()),
                                     due_at: Set(Some(due_at)),
                                     ..Default::default()
@@ -943,24 +1165,7 @@ impl SysFlowService {
             }
         }
 
-        self.write_log(
-            &task.biz_type,
-            task.biz_id,
-            task.round_no,
-            Some(task.node_seq),
-            "approve",
-            Some("pending"),
-            Some(to_status),
-            Some(operator_id),
-            None,
-            dto.comment.as_deref(),
-            now,
-            task.tenant_id,
-        )
-        .await?;
-
-        outcome.task = self.task_by_id(task_id).await?;
-        Ok(outcome)
+        Ok(to_status)
     }
 
     /// 撤回（发起人，按单据维度）：docId → 当前轮 pending task → 撤回（V4-E4 task 行状态机）
@@ -1122,6 +1327,189 @@ impl SysFlowService {
     }
 
     // ---------- 加签（W-3 / 方案 §7.6） ----------
+
+    // ---------- 委派（G-02 M2，方案 §3.3） ----------
+
+    /// 委派：把自己的待办交给 B 处理（**处理完回不到 A**——assignee 换 B 后状态机不变，
+    /// `delegate_from` 记录转出人供审计）
+    ///
+    /// 与转办（transfer）同型校验（禁自委派 / 禁委派给提交人 / 目标必须启用）；
+    /// 差异仅在流水 `action = delegate` 与 `delegate_from` 落库。M3 图驱动接入后按节点
+    /// `actions` 白名单收窄（当前 demo 链默认开放，与 transfer 同级——D2 禁的是运行时
+    /// 重算审批策略，委派/转办均为有人发起的一次性显式运营动作，不违反 D2）。
+    pub async fn delegate(
+        &self,
+        operator_id: i64,
+        task_id: i64,
+        to_user_id: i64,
+        comment: Option<&str>,
+    ) -> Result<FlowActOutcome, ServiceError> {
+        let task = self.load_task_for_act(task_id, operator_id).await?;
+        if to_user_id == operator_id {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.delegate_self_forbidden"
+            )));
+        }
+        if to_user_id == task.applicant_id {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.self_approve_forbidden"
+            )));
+        }
+        // 目标用户必须启用且未删除（对齐 transfer）
+        let target = sys_user::Entity::find_by_id(to_user_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.flow.user_not_found")))?;
+        if target.status.as_deref() != Some("0") || target.del_flag.as_deref() == Some("2") {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.user_disabled"
+            )));
+        }
+        let affected = self
+            .task_repo()
+            .delegate_if_pending(task_id, to_user_id, operator_id)
+            .await?;
+        if affected == 0 {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.task_not_pending"
+            )));
+        }
+        let now = crate::common::datetime::now_naive();
+        self.write_log(
+            &task.biz_type,
+            task.biz_id,
+            task.round_no,
+            Some(task.node_seq),
+            "delegate",
+            Some("pending"),
+            Some("pending"),
+            Some(operator_id),
+            Some(to_user_id),
+            comment,
+            now,
+            task.tenant_id,
+        )
+        .await?;
+        Ok(FlowActOutcome {
+            task: self.task_by_id(task_id).await?,
+            notify_assignees: vec![to_user_id],
+            notify_finished: None,
+        })
+    }
+
+    /// 减签：从当前节点移除一名会签审批人（G-02 M2，与 W-3 加签配对）
+    ///
+    /// 语义（方案 §3.3）：
+    /// - 目标人**未投票**（pending）→ 行置 `cancelled`（直接删）；
+    /// - 目标人**已投票**（approved）→ 行置 `discarded`，聚合判定排除之（等价
+    ///   "threshold-1"：All 门槛 = 有效行数，无需数值门槛列）；
+    /// - **前置防线**：移除后节点仍须 ≥1 名有效审批人（pending/approved），否则 400
+    ///   （防"threshold 归零/节点清空"造成单据卡死——"threshold 归零"边界的正确处理）。
+    pub async fn countersign_del(
+        &self,
+        operator_id: i64,
+        is_pat: bool,
+        task_id: i64,
+        to_user_id: i64,
+        comment: Option<&str>,
+    ) -> Result<FlowActOutcome, ServiceError> {
+        if is_pat {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.pat_forbidden"
+            )));
+        }
+        let task = self.load_task_for_act(task_id, operator_id).await?;
+        let rows = self
+            .task_repo()
+            .find_by_biz_round(
+                &task.biz_type,
+                task.biz_id,
+                task.round_no,
+                Some(task.tenant_id),
+            )
+            .await?;
+        let node_rows: Vec<&sys_flow_task::Model> = rows
+            .iter()
+            .filter(|r| r.node_seq == task.node_seq)
+            .collect();
+        // 目标行必须与本任务同轮同节点
+        let target_row = node_rows
+            .iter()
+            .copied()
+            .find(|r| r.assignee_id == to_user_id)
+            .ok_or_else(|| {
+                ServiceError::bad_request(&crate::tr!("error.flow.countersign_del_not_found"))
+            })?;
+        // 前置防线：移除后节点仍须 ≥1 名有效审批人（pending/approved）
+        let effective_after = node_rows
+            .iter()
+            .filter(|r| r.task_id != target_row.task_id)
+            .filter(|r| r.status == "pending" || r.status == "approved")
+            .count();
+        if effective_after == 0 {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.flow.countersign_del_last_assignee"
+            )));
+        }
+        let (from_status, to_status) = match target_row.status.as_str() {
+            "pending" => {
+                let affected = self
+                    .task_repo()
+                    .cancel_row_if_pending(target_row.task_id)
+                    .await?;
+                if affected == 0 {
+                    return Err(ServiceError::bad_request(&crate::tr!(
+                        "error.flow.task_not_pending"
+                    )));
+                }
+                ("pending", "cancelled")
+            }
+            "approved" => {
+                let affected = self
+                    .task_repo()
+                    .discard_row_if_approved(target_row.task_id)
+                    .await?;
+                if affected == 0 {
+                    return Err(ServiceError::bad_request(&crate::tr!(
+                        "error.flow.task_not_pending"
+                    )));
+                }
+                ("approved", "discarded")
+            }
+            _ => {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.flow.countersign_del_not_found"
+                )));
+            }
+        };
+        let now = crate::common::datetime::now_naive();
+        self.write_log(
+            &task.biz_type,
+            task.biz_id,
+            task.round_no,
+            Some(task.node_seq),
+            "countersign_del",
+            Some(from_status),
+            Some(to_status),
+            Some(operator_id),
+            Some(to_user_id),
+            comment,
+            now,
+            task.tenant_id,
+        )
+        .await?;
+        // G-02 M2：减签后**重新聚合收敛**（共用 settle_node）——清空 pending 后
+        // 节点若已满足完成条件（有 approved 无 pending），必须立即推进/办结，
+        // 否则单据永久卡死。settle 的全部写入条件安全，未完成时为纯读 + 幂等。
+        let mut outcome = FlowActOutcome {
+            task: task.clone(),
+            notify_assignees: vec![],
+            notify_finished: None,
+        };
+        let _to_status = self.settle_node(&task, now, &mut outcome).await?;
+        outcome.task = self.task_by_id(task_id).await?;
+        Ok(outcome)
+    }
 
     /// 加签：对当前待办所在节点追加一名会签审批人
     ///
@@ -1298,14 +1686,16 @@ impl SysFlowService {
             .first()
             .cloned()
             .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.flow.mode_invalid")))?;
-        let assignees =
-            resolve_node_assignees(&self.db, &first, doc.applicant_id, doc.dept_id).await?;
+        let assignee_pairs =
+            resolve_node_assignee_pairs(&self.db, &first, doc.applicant_id, doc.dept_id).await?;
+        let weights: Vec<i64> = assignee_pairs.iter().map(|(_, w)| *w).collect();
+        let assignees: Vec<i64> = assignee_pairs.iter().map(|(u, _)| *u).collect();
         let now = crate::common::datetime::now_naive();
         let due_at = now + chrono::Duration::hours(self.config.flow.timeout_hours);
-        let node_task_type = if first.quorum == Quorum::All {
-            "countersign"
-        } else {
-            "single"
+        let node_task_type = first.task_type();
+        let node_threshold = match first.quorum {
+            Quorum::Weighted { threshold } => Some(threshold),
+            _ => None,
         };
         // 事务闭包要求 'static：把捕获的字段提前克隆为拥有值（避免借用外层局部变量）
         let first_node_seq = first.node_seq;
@@ -1320,6 +1710,7 @@ impl SysFlowService {
         let db = &self.db;
         db.transaction::<_, (), ServiceError>(|txn| {
             let assignees = assignees.clone();
+            let weights = weights.clone();
             let doc_title = doc_title_snap.clone();
             let doc_status = doc_status_snap.clone();
             let comment_owned = comment_owned.clone();
@@ -1339,6 +1730,8 @@ impl SysFlowService {
                         node_name: &first_node_name,
                         task_type: node_task_type,
                         assignees: &assignees,
+                        weights: &weights,
+                        node_threshold,
                         due_at: Some(due_at),
                         from_status: Some(doc_status.as_str()),
                         comment: comment_owned.as_deref(),
@@ -2065,7 +2458,7 @@ pub async fn engine_open_round(
     txn: &DatabaseTransaction,
     spec: OpenRoundSpec<'_>,
 ) -> Result<(), ServiceError> {
-    for uid in spec.assignees {
+    for (idx, uid) in spec.assignees.iter().enumerate() {
         let task_am = sys_flow_task::ActiveModel {
             tenant_id: Set(spec.tenant_id),
             biz_type: Set(spec.biz_type.to_string()),
@@ -2076,6 +2469,14 @@ pub async fn engine_open_round(
             assignee_id: Set(*uid),
             task_type: Set(spec.task_type.to_string()),
             status: Set("pending".to_string()),
+            // G-02 M2：weighted 行快照权重与门槛（缺位/非法回退 1；非 weighted threshold=NULL）
+            weight: Set(spec
+                .weights
+                .get(idx)
+                .copied()
+                .filter(|w| *w > 0)
+                .unwrap_or(1)),
+            threshold: Set(spec.node_threshold),
             title: Set(Some(spec.title.to_string())),
             applicant_id: Set(spec.applicant_id),
             applicant_name: Set(spec.applicant_name.map(|s| s.to_string())),

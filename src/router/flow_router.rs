@@ -39,6 +39,11 @@ pub fn flow_routes() -> Router<Arc<AppState>> {
             "/system/flow/task/{taskId}/countersign-add",
             post(flow_handler::countersign_add),
         )
+        // 减签：从当前节点移除一名会签审批人（G-02 M2）
+        .route(
+            "/system/flow/task/{taskId}/countersign-del",
+            post(flow_handler::countersign_del),
+        )
         // 管理视图（权限键 system:flow:list）
         .route("/system/flow/list", get(flow_handler::list))
         // 导出（W-11）：与列表同权限键、同可见范围

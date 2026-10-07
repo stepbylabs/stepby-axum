@@ -38,6 +38,8 @@ pub struct Model {
     pub subject: Option<String>,
     /// 内容
     pub content: Option<String>,
+    /// 短信投递原始渲染参数 JSON 快照（云厂商重试还原用，G-07 扩展）
+    pub sms_params: Option<String>,
     /// 状态（0=成功 1=失败 2=待重试）
     pub status: Option<String>,
     /// 已重试次数

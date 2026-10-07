@@ -109,7 +109,10 @@ error:
     no_assignee: Cannot resolve any valid approver, please ask the admin to check the approval policy
     user_not_found: User not found
     user_disabled: Target user is disabled, cannot transfer
-    mode_invalid: Invalid approval mode (single/countersign)
+    mode_invalid: Invalid approval mode (single/countersign/or_sign/weighted)
+    delegate_self_forbidden: Cannot delegate the task to yourself
+    countersign_del_not_found: The target user is not at the current approval node
+    countersign_del_last_assignee: Removing would leave the node with no valid approver; blocked
     leave_type_invalid: Invalid leave type (annual/sick/personal)
     title_blank: Document title cannot be blank
     task_not_found: Approval task not found
@@ -510,6 +513,7 @@ error:
     channel_type_invalid: "Invalid message channel type: %{channel_type} (supported: email/sms/site)"
     sms_config_invalid: 'Invalid SMS channel config'
     sms_send_failed: 'SMS delivery failed, moved to retry'
+    sms_template_code_required: 'Cloud SMS channels require a template with a cloud provider code (sms_template_code)'
     channel_in_use: "Message channel \"%{channel_name}\" is referenced by message templates and cannot be deleted"
     channel_id_invalid: Invalid message channel ID
     config_json_invalid: Invalid channel configuration JSON

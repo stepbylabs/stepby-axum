@@ -207,6 +207,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20261007_000003_flow_definition::Migration),
             Box::new(m20261007_000004_report_dataset::Migration),
             Box::new(m20261007_000005_flow_report_menus::Migration),
+            Box::new(m20261007_000006_flow_task_action::Migration),
+            Box::new(m20261007_000007_sms_cloud_columns::Migration),
         ]
     }
 }
