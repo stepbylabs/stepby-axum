@@ -2170,7 +2170,9 @@ fn default_common_max_size() -> usize {
 }
 
 fn default_common_chunk_max_total_size() -> usize {
-    64 * 1024 * 1024
+    // 批次十八：64MB → 1GB（用户拍板）。内存语义：complete 拼接为整对象载入内存，
+    // 进程峰值 = 总上限 × 并发许可(2) = 2GB——部署机内存预留见 audit 后记十五。
+    1024 * 1024 * 1024
 }
 
 fn default_chunk_session_ttl_secs() -> u64 {

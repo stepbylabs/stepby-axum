@@ -6,7 +6,7 @@
 //! 扫描 → 经 `StorageBackend::save` 写最终存储。刻意**不使用 S3 multipart 直传**：
 //! multipart Complete 前无法对整对象做扫描（违反"merge 后整扫"约束），且会绕过
 //! `save_upload_bytes` 的统一校验链。代价是大文件需占用服务端暂存盘与内存
-//! （总上限 [`UploadConfig::common_chunk_max_total_size`]，默认 64MB）——
+//! （总上限 [`UploadConfig::common_chunk_max_total_size`]，默认 1GB）——
 //! 更大文件的流式校验重构另行立项。
 //!
 //! 三约束（深审定稿）：
@@ -52,6 +52,10 @@ pub struct ChunkSession {
     pub ext: String,
     /// 分片总数
     pub total_parts: u32,
+    /// 文件总大小（字节；init 记录——merge 预分配容量用，避免 1GB 级多次 realloc）
+    /// #[serde(default)] 兼容旧会话载荷（TTL 2h 内的升级窗口）
+    #[serde(default)]
+    pub total_size: u64,
     /// 已收分片索引（0-based）
     pub received: BTreeSet<u32>,
     /// 上传者租户（分片目录隔离维度；init 冻结，complete 校验归属）
@@ -184,8 +188,9 @@ pub fn validate_init(
 
 /// merge 纯逻辑：按索引序读分片文件拼接为完整字节
 ///
-/// 内存语义：总上限（默认 64MB）× 并发许可（2）为进程内存峰值上界；
-/// 超上限的流式校验重构另行立项（见模块注释）。
+/// 内存语义：总上限（默认 1GB，批次十八 64MB→1GB）× 并发许可（2）为进程内存峰值
+/// 上界（约 2GB，部署机内存预留见 audit 后记十五）；超上限的流式校验重构另行立项。
+/// 预分配 `total_size` 容量：1GB 级拼接避免 Vec 多次倍增 realloc（峰值瞬时 1.5×）。
 pub async fn merge_parts(
     dir: &std::path::Path,
     session: &ChunkSession,
@@ -197,7 +202,11 @@ pub async fn merge_parts(
             total = session.total_parts
         )));
     }
-    let mut parts: Vec<u8> = Vec::new();
+    // 预分配（total_size 缺省 0 = 旧会话载荷，退化为逐次扩容的既有行为）；
+    // 硬上界 clamp 防会话载荷被篡改谎报 total_size 触发一次性巨量分配（防御纵深）
+    const MERGE_PREALLOC_CAP: u64 = 1024 * 1024 * 1024; // = 当前默认总上限 1GB
+    let mut parts: Vec<u8> =
+        Vec::with_capacity(session.total_size.min(MERGE_PREALLOC_CAP) as usize);
     for idx in 0..session.total_parts {
         let path = dir.join(part_file_name(idx));
         let bytes = tokio::fs::read(&path).await.map_err(|_| {
@@ -236,7 +245,7 @@ mod tests {
             common_url_prefix: "/uploads/file".to_string(),
             common_allowed_exts: vec!["png".to_string(), "zip".to_string(), "pdf".to_string()],
             common_max_size: 10 * 1024 * 1024,
-            common_chunk_max_total_size: 64 * 1024 * 1024,
+            common_chunk_max_total_size: 1024 * 1024 * 1024,
             chunk_session_ttl_secs: 7200,
             s3: Default::default(),
         }
@@ -268,13 +277,14 @@ mod tests {
     #[test]
     fn test_validate_init_rejects_oversize_and_parts() {
         let cfg = base_cfg();
-        // 总超限（> 64MB）
-        assert!(validate_init("big.zip", 8, 65 * 1024 * 1024, 0, 10 * 1024 * 1024, &cfg).is_err());
+        // 总超限（> 1GB）
+        assert!(
+            validate_init("big.zip", 8, 1025 * 1024 * 1024, 0, 10 * 1024 * 1024, &cfg).is_err()
+        );
         // 零分片 / 超分片数
         assert!(validate_init("a.zip", 0, 100, 0, 10 * 1024 * 1024, &cfg).is_err());
         assert!(validate_init("a.zip", 10_001, 100, 0, 10 * 1024 * 1024, &cfg).is_err());
-        // 单片推导大小 > body limit（8 片 × 9MB 总 65MB 场景已被上一条拦截；
-        // 此处构造总大小合法但片数过少导致单片超限）
+        // 单片推导大小 > body limit（构造总大小合法但片数过少导致单片超限）
         assert!(validate_init("a.zip", 1, 20 * 1024 * 1024, 0, 10 * 1024 * 1024, &cfg).is_err());
     }
 
@@ -302,6 +312,8 @@ mod tests {
             file_name: "a.zip".to_string(),
             ext: "zip".to_string(),
             total_parts: 3,
+            // 批次十八：total_size 新字段——serde default 兼容旧载荷（下方 parse 验证）
+            total_size: 11 * 1024 * 1024,
             received: BTreeSet::from([2, 0]),
             tenant_id: 5,
         };
@@ -309,10 +321,19 @@ mod tests {
         let parsed = ChunkSession::parse(&raw).unwrap();
         assert_eq!(parsed.received, BTreeSet::from([0, 2]));
         assert_eq!(parsed.tenant_id, 5);
+        // total_size 往返 + 预分配容量来源
+        assert_eq!(parsed.total_size, 11 * 1024 * 1024);
         // 键含租户维度
         assert_eq!(ChunkSession::store_key(5, "abc"), "upload_session:5:abc");
         // 损坏数据 parse 返回 Err（不 panic）
         assert!(ChunkSession::parse("not-json").is_err());
+        // 旧会话载荷（无 total_size 字段）→ serde default 兼容
+        let legacy = serde_json::json!({
+            "file_name": "a.zip", "ext": "zip", "total_parts": 2,
+            "received": [0, 1], "tenant_id": 0
+        });
+        let parsed_legacy = ChunkSession::parse(&legacy.to_string()).unwrap();
+        assert_eq!(parsed_legacy.total_size, 0);
         s.received.insert(1);
         assert_eq!(s.received.len(), 3);
     }
@@ -325,6 +346,7 @@ mod tests {
             file_name: "a.bin".to_string(),
             ext: "bin".to_string(),
             total_parts: 3,
+            total_size: 8, // AAA+BBB+CC = 8 字节（预分配容量来源）
             received: BTreeSet::from([0, 1, 2]),
             tenant_id: 0,
         };
