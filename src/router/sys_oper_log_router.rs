@@ -32,6 +32,10 @@ pub fn oper_log_routes() -> Router<Arc<AppState>> {
             get(sys_oper_log_handler::verify_chain),
         )
         .route(
+            "/monitor/operlog/archive/{anchorId}",
+            get(sys_oper_log_handler::archive_download),
+        )
+        .route(
             "/monitor/operlog/{operIds}",
             delete(sys_oper_log_handler::remove),
         )

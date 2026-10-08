@@ -566,6 +566,13 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/monitor/operlog/list", "monitor:operlog:list"),
     // 防篡改链校验（审计巡检）：复用操作日志 query 权限；全量跨租户校验，权限门控兜底
     ("GET", "/monitor/operlog/verify-chain", "monitor:operlog:query"),
+    // 归档下载（批次十九链感知保留）：平台专属前缀 monitor:operlogArchive:，
+    // PLATFORM_ONLY_PERM_PREFIXES 收口租户授权 + handler 内 tenant_id=0 双保险
+    (
+        "GET",
+        "/monitor/operlog/archive/{anchorId}",
+        "monitor:operlogArchive:download",
+    ),
     ("DELETE", "/monitor/operlog/{operIds}", "monitor:operlog:remove"),
     ("DELETE", "/monitor/operlog/clean", "monitor:operlog:remove"),
     ("POST", "/monitor/operlog/export", "monitor:operlog:export"),
@@ -1679,6 +1686,8 @@ mod tests {
             ("GET", "/monitor/operlog/compliance-report"),
             ("GET", "/monitor/operlog/alarm-status"),
             ("GET", "/monitor/operlog/stats-by-type"),
+            ("GET", "/monitor/operlog/verify-chain"),
+            ("GET", "/monitor/operlog/archive/{anchorId}"),
             // sys_logininfor_router
             ("GET", "/monitor/logininfor/list"),
             ("GET", "/monitor/logininfor/stats"),

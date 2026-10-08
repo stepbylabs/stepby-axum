@@ -116,3 +116,4 @@ pub mod m20261007_000010_flow_report_role_menus;
 pub mod m20261007_000011_config_seed_and_menu_hygiene;
 pub mod m20261007_000012_flow_graph_doc;
 pub mod m20261007_000013_flow_task_actions_json;
+pub mod m20261008_000001_log_archive_anchor;

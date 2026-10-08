@@ -28,6 +28,7 @@ pub mod sys_flow_task;
 pub mod sys_frontend_error;
 pub mod sys_job;
 pub mod sys_job_log;
+pub mod sys_log_archive_anchor;
 pub mod sys_logininfor;
 pub mod sys_menu;
 pub mod sys_msg_channel;

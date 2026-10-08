@@ -1365,6 +1365,11 @@ fn registrable_domain(host: &str) -> String {
 ///
 /// 保留天数由 `retention_days` 控制（默认 `LOG_RETENTION_DAYS`=90 天），
 /// 供每日归档任务 `cleanup_expired_logs` 读取（cron: "0 0 3 * * *"）。
+///
+/// 批次十九（福哥拍板）：`retention_mode` 三档（项目准则③：开关取「模式」而非裸 bool）——
+/// - `delete`（**默认**，= 现状零漂移）：删除前登记链锚点（防篡改链互斥修复）；
+/// - `archive`：删除前导出 JSONL 到出厂存储档 + 锚点关联对象 key（合规留痕）；
+/// - `keep`：永不清理（合规全留部署；容量交给部署方，大屏聚合已有时间窗兜底）。
 #[derive(Clone, Deserialize)]
 pub struct SysLogConfig {
     /// 操作日志 / 登录日志保留天数（默认 90 天）
@@ -1372,12 +1377,55 @@ pub struct SysLogConfig {
     /// 每日定时清理早于（当前时间 - retention_days）的日志，避免日志表无限增长。
     #[serde(default = "default_sys_log_retention_days")]
     pub retention_days: i64,
+    /// 保留模式（默认 delete = 现状行为；非法取值回落 delete 并 WARN，fail-safe）
+    #[serde(default = "default_sys_log_retention_mode")]
+    pub retention_mode: String,
+}
+
+/// 日志保留模式（批次十九）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogRetentionMode {
+    /// 删除前登记链锚点（默认）
+    Delete,
+    /// 删除前导出 JSONL 到出厂存储档 + 锚点关联
+    Archive,
+    /// 永不清理
+    Keep,
+}
+
+impl LogRetentionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Delete => "delete",
+            Self::Archive => "archive",
+            Self::Keep => "keep",
+        }
+    }
+}
+
+impl SysLogConfig {
+    /// 解析保留模式；非法取值回落 `Delete`（= 现状行为，fail-safe 不静默失效）
+    pub fn retention_mode(&self) -> LogRetentionMode {
+        match self.retention_mode.as_str() {
+            "delete" => LogRetentionMode::Delete,
+            "archive" => LogRetentionMode::Archive,
+            "keep" => LogRetentionMode::Keep,
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "[sys_log].retention_mode 取值非法（允许 delete|archive|keep），已回落 delete（= 现状行为）"
+                );
+                LogRetentionMode::Delete
+            }
+        }
+    }
 }
 
 impl fmt::Debug for SysLogConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SysLogConfig")
             .field("retention_days", &self.retention_days)
+            .field("retention_mode", &self.retention_mode)
             .finish()
     }
 }
@@ -1386,12 +1434,17 @@ impl Default for SysLogConfig {
     fn default() -> Self {
         Self {
             retention_days: default_sys_log_retention_days(),
+            retention_mode: default_sys_log_retention_mode(),
         }
     }
 }
 
 fn default_sys_log_retention_days() -> i64 {
     crate::common::constants::LOG_RETENTION_DAYS
+}
+
+fn default_sys_log_retention_mode() -> String {
+    "delete".to_string()
 }
 
 /// `permission_deny_by_default` 的缺省值：`true`（fail-closed，W-1）

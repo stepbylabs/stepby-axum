@@ -483,6 +483,10 @@ error:
     id_invalid: 日志 ID 不合法
     anonymous: 匿名
     chain_disabled: 操作日志防篡改链未启用
+    anchor_not_found: 清理锚点不存在
+    archive_not_ready: 该锚点未关联归档对象（delete 模式清理不产生归档）
+    archive_object_missing: 归档对象不存在或已被清理
+    archive_platform_only: 审计归档属平台合规数据，仅平台管理员可下载
   report_board:
     not_found: 看板不存在
     name_exists: 同名看板已存在
@@ -517,9 +521,11 @@ error:
     channel_not_found: 消息渠道不存在
     channel_disabled: 消息渠道已停用，不可使用
     channel_code_duplicate: 消息渠道编码已存在
-    channel_type_invalid: "消息渠道类型无效: %{channel_type}（支持: email/sms/site）"
+    channel_type_invalid: "消息渠道类型无效: %{channel_type}（支持: email/sms/site/wecom_robot/dingtalk_robot）"
     sms_config_invalid: '短信渠道配置无效'
     sms_send_failed: '短信投递失败，已转入待重试'
+    robot_config_invalid: 'IM 机器人渠道配置无效（config_json 需含 webhookUrl，钉钉可加 secret）'
+    robot_send_failed: 'IM 机器人投递失败，已转入待重试'
     sms_template_code_required: '云厂商短信渠道必须由配置了云端模板 code（sms_template_code）的模板投递'
     channel_in_use: "消息渠道「%{channel_name}」已被消息模板引用，无法删除"
     channel_id_invalid: 消息渠道 ID 不合法

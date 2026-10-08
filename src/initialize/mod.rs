@@ -388,6 +388,12 @@ impl AppInitializer {
         // B4 强制首登改密兜底：must_change_pwd 列 + admin 标记 + 强改开关 config 种子
         ensure_user_must_change_pwd_column(&db).await?;
 
+        // 3.10 批次十九链感知保留兜底：sys_log_archive_anchor 表 + F 按钮 4180 种子
+        //      （单一事实源 = 迁移 init_log_archive_anchor；存量库启动不跑 Migrator）
+        migration::migrations::m20261008_000001_log_archive_anchor::init_log_archive_anchor(&db)
+            .await?;
+        tracing::info!("链感知保留：sys_log_archive_anchor 表与审计归档按钮已就绪（幂等兜底）");
+
         // 4. 初始化共享态存储（[cache].mode：auto 按 [redis].url 裁决；local 纯 SQL；redis 现状）
         let cache_mode = settings.cache.resolve_mode(&settings.redis.url);
         // 非法 mode 取值（resolve_mode 已回落 auto 裁决）在此 WARN——拒绝"配错静默生效"

@@ -126,6 +126,7 @@ pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "monitor:log:",
     "monitor:slowSql:",
     "monitor:health:",
+    "monitor:operlogArchive:",
     "system:backup:",
     "system:rateLimit:",
     "system:aiConfig:",
@@ -539,10 +540,15 @@ mod tests {
     #[test]
     fn platform_only_prefixes_match_migration_lists() {
         // 最新全量治理点（必须含**全部**平台专属前缀）
+        // 批次十九：新增 `monitor:operlogArchive:` ⇒ 最新全量迁移推进到
+        // `m20261008_000001_log_archive_anchor`（12 项），`m000013` 随之降级为历史迁移。
         const LATEST_SRC: &str = include_str!(
-            "../../migration/src/migrations/m20260926_000013_platform_only_tenant_menu.rs"
+            "../../migration/src/migrations/m20261008_000001_log_archive_anchor.rs"
         );
         // 历史迁移（其项必须仍在常量中，防"常量删了但迁移还留着"的漂移）
+        const M000013_SRC: &str = include_str!(
+            "../../migration/src/migrations/m20260926_000013_platform_only_tenant_menu.rs"
+        );
         const M000007_SRC: &str = include_str!(
             "../../migration/src/migrations/m20260926_000007_platform_only_ratelimit.rs"
         );
@@ -557,8 +563,28 @@ mod tests {
         for p in PLATFORM_ONLY_PERM_PREFIXES {
             assert!(
                 LATEST_SRC.contains(p),
-                "平台专属前缀 `{p}` 未出现在最新迁移清单（m20260926_000013）—— 新增前缀必须\
+                "平台专属前缀 `{p}` 未出现在最新迁移清单（m20261008_000001）—— 新增前缀必须\
                  同步该迁移的完整清单，否则走迁移的新库不会剔除对应菜单（假入口）"
+            );
+        }
+        // ①' 历史迁移 m000013（11 项）的项必须都还在常量中
+        for p in [
+            "system:tenant:domain:",
+            "system:tenantMenu:",
+            "tool:gen:",
+            "tool:httpDebug:",
+            "monitor:cache:",
+            "monitor:log:",
+            "monitor:slowSql:",
+            "monitor:health:",
+            "system:backup:",
+            "system:rateLimit:",
+            "system:aiConfig:",
+        ] {
+            assert!(M000013_SRC.contains(p), "m000013 清单项 `{p}` 丢失");
+            assert!(
+                PLATFORM_ONLY_PERM_PREFIXES.contains(&p),
+                "m000013 使用了未在 PLATFORM_ONLY_PERM_PREFIXES 声明的前缀 `{p}`"
             );
         }
         // ①' 历史迁移 m000007（9 项）的项必须都还在常量中

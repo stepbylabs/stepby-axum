@@ -215,6 +215,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261007_000011_config_seed_and_menu_hygiene::Migration),
             Box::new(m20261007_000012_flow_graph_doc::Migration),
             Box::new(m20261007_000013_flow_task_actions_json::Migration),
+            Box::new(m20261008_000001_log_archive_anchor::Migration),
         ]
     }
 }

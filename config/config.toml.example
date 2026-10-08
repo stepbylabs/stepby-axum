@@ -158,6 +158,18 @@ sql_logging = false
 # 仅影响 stdout，文件日志恒为纯文本）
 json_stdout = false
 
+[sys_log]
+# 日志保留策略（批次十九，启动时只读配置；整段缺省 = retention_days=90 / retention_mode=delete，
+# 与存量部署零行为差异——兼容口径：新增可选段，无需迁移）
+# retention_days = 90
+# 保留模式（项目准则③：取「模式」而非裸 bool）：
+#   delete  = 删除前登记链锚点（默认；防篡改 HMAC 链在保留期清理下保持可校验）
+#   archive = 删除前先导出 JSONL 到出厂存储档（[upload] 档位）+ 锚点关联对象，
+#             平台管理员经 GET /monitor/operlog/archive/{anchorId} 下载（合规留痕）
+#   keep    = 永不清理（合规全留部署；容量交给部署方，审计大屏聚合已有时间窗兜底）
+# 非法取值回落 delete 并启动 WARN（fail-safe，拒绝静默失效）
+# retention_mode = "delete"
+
 [upload]
 # 存储后端类型（F1）：local（本地文件系统，默认） | s3（S3 兼容对象存储 MinIO/AWS/OSS/COS）
 # 切换 s3 后，前端无需改动，URL 由后端返回对象存储公开地址

@@ -483,6 +483,10 @@ error:
     id_invalid: Invalid log ID
     anonymous: Anonymous
     chain_disabled: Operation log tamper-proof chain is not enabled
+    anchor_not_found: Cleanup anchor not found
+    archive_not_ready: This anchor has no archive object (delete-mode cleanup produces none)
+    archive_object_missing: Archive object not found or already removed
+    archive_platform_only: Audit archives are platform compliance data, downloadable by platform admins only
   report_board:
     not_found: Report board not found
     name_exists: A board with the same name already exists
@@ -517,9 +521,11 @@ error:
     channel_not_found: Message channel does not exist
     channel_disabled: Message channel is disabled and cannot be used
     channel_code_duplicate: Message channel code already exists
-    channel_type_invalid: "Invalid message channel type: %{channel_type} (supported: email/sms/site)"
+    channel_type_invalid: "Invalid message channel type: %{channel_type} (supported: email/sms/site/wecom_robot/dingtalk_robot)"
     sms_config_invalid: 'Invalid SMS channel config'
     sms_send_failed: 'SMS delivery failed, moved to retry'
+    robot_config_invalid: 'Invalid IM robot channel config (config_json requires webhookUrl; dingtalk may add secret)'
+    robot_send_failed: 'IM robot delivery failed, moved to retry'
     sms_template_code_required: 'Cloud SMS channels require a template with a cloud provider code (sms_template_code)'
     channel_in_use: "Message channel \"%{channel_name}\" is referenced by message templates and cannot be deleted"
     channel_id_invalid: Invalid message channel ID
