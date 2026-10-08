@@ -11,8 +11,9 @@
 use chrono::NaiveDateTime;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Clone, Debug, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, DeriveEntityModel, Serialize, Deserialize, ToSchema)]
 #[sea_orm(table_name = "sys_log_archive_anchor")]
 #[serde(rename_all = "camelCase")]
 pub struct Model {

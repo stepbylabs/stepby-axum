@@ -564,10 +564,17 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 操作日志 =====
     ("GET", "/monitor/operlog/list", "monitor:operlog:list"),
-    // 防篡改链校验（审计巡检）：复用操作日志 query 权限；全量跨租户校验，权限门控兜底
-    ("GET", "/monitor/operlog/verify-chain", "monitor:operlog:query"),
-    // 归档下载（批次十九链感知保留）：平台专属前缀 monitor:operlogArchive:，
-    // PLATFORM_ONLY_PERM_PREFIXES 收口租户授权 + handler 内 tenant_id=0 双保险
+    // 防篡改链校验（审计巡检）：批次十九收尾收紧为平台专属——校验返回全平台链
+    // 统计（跨租户全局串联），租户可见即泄漏面；按钮 4181 平台专属前缀
+    ("GET", "/monitor/operlog/verify-chain", "monitor:operlogArchive:verify"),
+    // 归档锚点列表 + 归档下载（批次十九链感知保留）：平台专属前缀
+    // monitor:operlogArchive:，PLATFORM_ONLY_PERM_PREFIXES 收口租户授权 +
+    // handler 内 tenant_id=0 双保险
+    (
+        "GET",
+        "/monitor/operlog/archive-anchors",
+        "monitor:operlogArchive:verify",
+    ),
     (
         "GET",
         "/monitor/operlog/archive/{anchorId}",
@@ -1687,6 +1694,7 @@ mod tests {
             ("GET", "/monitor/operlog/alarm-status"),
             ("GET", "/monitor/operlog/stats-by-type"),
             ("GET", "/monitor/operlog/verify-chain"),
+            ("GET", "/monitor/operlog/archive-anchors"),
             ("GET", "/monitor/operlog/archive/{anchorId}"),
             // sys_logininfor_router
             ("GET", "/monitor/logininfor/list"),

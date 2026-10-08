@@ -484,6 +484,7 @@ error:
     anonymous: Anonymous
     chain_disabled: Operation log tamper-proof chain is not enabled
     anchor_not_found: Cleanup anchor not found
+    verify_platform_only: Chain verification is a platform compliance capability, platform admins only
     archive_not_ready: This anchor has no archive object (delete-mode cleanup produces none)
     archive_object_missing: Archive object not found or already removed
     archive_platform_only: Audit archives are platform compliance data, downloadable by platform admins only

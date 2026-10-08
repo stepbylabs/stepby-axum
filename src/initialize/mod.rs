@@ -388,7 +388,7 @@ impl AppInitializer {
         // B4 强制首登改密兜底：must_change_pwd 列 + admin 标记 + 强改开关 config 种子
         ensure_user_must_change_pwd_column(&db).await?;
 
-        // 3.10 批次十九链感知保留兜底：sys_log_archive_anchor 表 + F 按钮 4180 种子
+        // 3.10 批次十九链感知保留兜底：sys_log_archive_anchor 表 + F 按钮 9180/9181 种子
         //      （单一事实源 = 迁移 init_log_archive_anchor；存量库启动不跑 Migrator）
         migration::migrations::m20261008_000001_log_archive_anchor::init_log_archive_anchor(&db)
             .await?;
