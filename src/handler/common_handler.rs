@@ -732,14 +732,19 @@ pub async fn serve_upload(
         return Err(AppError::forbidden(&crate::tr!("error.common.forbidden")));
     }
 
-    let bytes = state
-        .resolve_storage()
-        .await?
-        .read(&dir, tenant_id, key)
-        .await?
-        .ok_or_else(|| {
-            AppError::not_found(&crate::tr!("error.common_handler.resource_not_found"))
-        })?;
+    // 批次十八影响面修复：档位判定从启动期路由装配移到请求期——运行档为非静态
+    // 后端（s3，文件由对象存储公开 URL 直出）时，/uploads/* 请求回落出厂本地后端
+    // 读存量文件（读幂等，无"写新配置删旧对象"撕裂风险；s3-only 部署回落仍为 s3
+    // → 404，与原先不挂载路由行为等价）
+    let backend = state.resolve_storage().await?;
+    let backend = if backend.supports_static() {
+        backend
+    } else {
+        state.storage.clone()
+    };
+    let bytes = backend.read(&dir, tenant_id, key).await?.ok_or_else(|| {
+        AppError::not_found(&crate::tr!("error.common_handler.resource_not_found"))
+    })?;
 
     let content_type = crate::storage::content_type_for(key).unwrap_or("application/octet-stream");
     let mut headers = HeaderMap::new();
