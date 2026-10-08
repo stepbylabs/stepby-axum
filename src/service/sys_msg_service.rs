@@ -50,7 +50,8 @@ use crate::service::sys_user_pref_service::{PrefChannel, allows_delivery, now_hm
 use crate::utils::parse_id_list;
 
 /// 渠道类型白名单（与实体/迁移保持一致）
-const CHANNEL_TYPES: &[&str] = &["email", "sms", "site"];
+/// 批次十八：+wecom_robot / dingtalk_robot（IM 群机器人——G-15b 小程序的更优替代）
+const CHANNEL_TYPES: &[&str] = &["email", "sms", "site", "wecom_robot", "dingtalk_robot"];
 /// 默认最大重试次数
 const DEFAULT_MAX_RETRY: i32 = 3;
 
@@ -736,6 +737,22 @@ impl SysMsgService {
                     ))
                 })
             }
+            // 批次十八：IM 机器人渠道连通性测试 = 配置解析 fail-closed（webhookUrl 形态/
+            // secret 可选）；真实可达性由"测试发送"真投递验证（与 sms probe 同语义）
+            "wecom_robot" | "dingtalk_robot" => {
+                crate::service::im_robot_provider::ImRobotConfig::from_config_json(
+                    channel.config_json.as_ref().map(|e| e.0.as_str()),
+                )
+                .map(|_| ())
+                .map_err(|e| {
+                    tracing::warn!(
+                        "IM 机器人渠道 {} 连通性测试：配置无效: {}",
+                        channel.channel_code,
+                        e
+                    );
+                    ServiceError::bad_request(&crate::tr!("error.msg.robot_config_invalid"))
+                })
+            }
             _ => Err(ServiceError::bad_request(&crate::tr!(
                 "error.msg.channel_type_invalid"
             ))),
@@ -1158,6 +1175,52 @@ impl SysMsgService {
                 }
                 tracing::info!("消息渠道 site 站内信投递（系统内记录）: to={}", to_addr);
                 Ok(())
+            }
+            // 批次十八（G-15b 更优替代）：IM 群机器人——模板渲染后的 content 组装为
+            // text 消息 POST 到群 webhook；errcode != 0 / HTTP 失败 → Err（走重试链）。
+            // to_addr 对群机器人无意义（忽略）；config_json 存 webhookUrl [+ 钉钉 secret]。
+            "wecom_robot" | "dingtalk_robot" => {
+                let raw_cfg = channel.config_json.as_ref().map(|e| e.0.as_str());
+                let robot_cfg =
+                    crate::service::im_robot_provider::ImRobotConfig::from_config_json(raw_cfg)
+                        .map_err(|e| {
+                            tracing::error!(
+                                "IM 机器人渠道 {} 配置无效: {}",
+                                channel.channel_code,
+                                e
+                            );
+                            ServiceError::bad_request(&crate::tr!("error.msg.robot_config_invalid"))
+                        })?;
+                let result = if channel.channel_type == "wecom_robot" {
+                    crate::service::im_robot_provider::WeComRobotProvider::new()
+                        .send(&robot_cfg, content)
+                        .await
+                } else {
+                    crate::service::im_robot_provider::DingTalkRobotProvider::new()
+                        .send(&robot_cfg, content)
+                        .await
+                };
+                match result {
+                    Ok(()) => {
+                        tracing::info!(
+                            "IM 机器人投递成功渠道={} type={}",
+                            channel.channel_code,
+                            channel.channel_type
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "IM 机器人投递失败渠道={} type={}: {}",
+                            channel.channel_code,
+                            channel.channel_type,
+                            e
+                        );
+                        Err(ServiceError::internal(&crate::tr!(
+                            "error.msg.robot_send_failed"
+                        )))
+                    }
+                }
             }
             _ => Err(ServiceError::bad_request(&crate::tr!(
                 "error.msg.channel_type_invalid"
