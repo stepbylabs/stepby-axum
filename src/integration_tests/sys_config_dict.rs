@@ -309,3 +309,116 @@ async fn test_dict_data_chain() {
         .await;
     ctx.assert_ok(&v);
 }
+
+/// E-04 参数治理 UI 后端守卫（批次十九收尾立项）：
+/// ① 平台改治理三列生效（列表 VO 回读）；
+/// ② 平台改 scope 而未传标志位 → 按新 scope 推导（治理一致性语义）；
+/// ③ Locked 键改 scope → resolve_governance fail-closed 强制回 platform_only/'0'/'0'；
+/// ④ governance-locked 清单端点（平台 200 + 含已知锁定键；租户 403）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_config_governance_ui_guard() {
+    let ctx = TestContext::new().await;
+
+    // ① 平台新增参数并指定治理属性（platform_default = 下发租户可覆盖可见）
+    let v = ctx
+        .post_json(
+            "/system/config",
+            serde_json::json!({
+                "configName": "it_gov_参数",
+                "configKey": "it.gov.key",
+                "configValue": "v1",
+                "configType": "N",
+                "scope": "platform_default",
+                "tenantEditable": "1",
+                "visibleToTenant": "1"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let list = ctx
+        .get_json("/system/config/list?pageNum=1&pageSize=50&configKey=it.gov.key")
+        .await;
+    let row = list["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["configKey"].as_str() == Some("it.gov.key"))
+        .expect("应能找到 it.gov.key 行");
+    assert_eq!(row["scope"].as_str(), Some("platform_default"), "平台指定 scope 应落库，实际: {row}");
+    assert_eq!(row["tenantEditable"].as_str(), Some("1"), "tenantEditable 应落库，实际: {row}");
+    assert_eq!(row["visibleToTenant"].as_str(), Some("1"), "visibleToTenant 应落库，实际: {row}");
+    let config_id = row["configId"].as_i64().expect("configId 应为数字");
+
+    // ② 平台改治理属性（platform_default → platform_only）：Locked 语义外的键应生效
+    let v = ctx
+        .put_json(
+            "/system/config",
+            serde_json::json!({
+                "configId": config_id,
+                "configName": "it_gov_参数",
+                "configKey": "it.gov.key",
+                "configValue": "v1",
+                "configType": "N",
+                "scope": "platform_only"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json(&format!("/system/config/list?pageNum=1&pageSize=50&configKey=it.gov.key"))
+        .await;
+    let row = v["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["configKey"].as_str() == Some("it.gov.key"))
+        .expect("行应存在");
+    // 显式改 scope 未传标志位 → 按新 scope 推导（platform_only → '0'/'0'）
+    assert_eq!(row["scope"].as_str(), Some("platform_only"), "scope 应更新，实际: {row}");
+    assert_eq!(row["tenantEditable"].as_str(), Some("0"), "标志位应随 scope 推导，实际: {row}");
+    assert_eq!(row["visibleToTenant"].as_str(), Some("0"), "标志位应随 scope 推导，实际: {row}");
+
+    // ③ Locked 键改 scope → resolve_governance fail-closed 强制回 platform_only/'0'/'0'
+    //    （取注册表已知锁定键 ip_location.update_source）
+    let locked_list = ctx.get_json("/system/config/list?pageNum=1&pageSize=100&configKey=ip_location.update_source").await;
+    let locked_row = locked_list["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["configKey"].as_str() == Some("ip_location.update_source"))
+        .expect("迁移种子应含 ip_location.update_source");
+    let locked_id = locked_row["configId"].as_i64().expect("configId");
+    let v = ctx
+        .put_json(
+            "/system/config",
+            serde_json::json!({
+                "configId": locked_id,
+                "configName": locked_row["configName"],
+                "configKey": "ip_location.update_source",
+                "configValue": locked_row["configValue"],
+                "configType": "Y",
+                "scope": "platform_default",
+                "tenantEditable": "1",
+                "visibleToTenant": "1"
+            }),
+        )
+        .await;
+    // Locked 键：resolve_governance 强制 platform_only/'0'/'0'（保存成功但治理属性不被下放）
+    ctx.assert_ok(&v);
+    let v = ctx.get_json(&format!("/system/config/{locked_id}")).await;
+    assert_eq!(
+        v["data"]["scope"].as_str(),
+        Some("platform_only"),
+        "Locked 键 scope 应强制 platform_only，实际: {v}"
+    );
+    assert_eq!(v["data"]["tenantEditable"].as_str(), Some("0"), "Locked 键 editable 强制 0，实际: {v}");
+
+    // ④ governance-locked 清单端点：平台 200 + 含锁定键；clean up
+    let v = ctx.get_json("/system/config/governance-locked").await;
+    let keys = v["data"].as_array().expect("data 应为数组");
+    assert!(
+        keys.iter().any(|k| k.as_str() == Some("ip_location.update_source")),
+        "锁定清单应含 ip_location.update_source，实际: {v}"
+    );
+    let _ = ctx.delete_json(&format!("/system/config/{config_id}")).await;
+}

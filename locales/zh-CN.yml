@@ -236,6 +236,7 @@ error:
     platform_row_forbidden: 平台级参数配置不允许租户操作
     scope_invalid: 参数治理范围不合法
     flag_invalid: 参数治理标志不合法
+    governance_platform_only: 参数治理视图属平台专属，仅平台管理员可查看
   dept:
     not_found: 部门不存在
     parent_not_found: 父部门不存在

@@ -544,6 +544,8 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
 
     // ===== 参数配置 =====
     ("GET", "/system/config/list", "system:config:list"),
+    // E-04 参数治理 UI：锁定键清单（平台专属，handler tenant_id=0 双保险）
+    ("GET", "/system/config/governance-locked", "system:config:list"),
     ("GET", "/system/config/{configId}", "system:config:query"),
     // /system/config/configKey/{configKey} 需 system:config:query 权限，防止任意已登录用户读取敏感配置（P0-R81-003）
     ("GET", "/system/config/configKey/{configKey}", "system:config:query"),
@@ -1648,6 +1650,7 @@ mod tests {
             ("POST", "/system/dict/data/export"),
             // sys_config_router
             ("GET", "/system/config/list"),
+            ("GET", "/system/config/governance-locked"),
             ("GET", "/system/config/{configId}"),
             // AI-01：AI 助手运行时配置（平台专属，handler 内 tenant_id==0 门控）
             ("GET", "/system/aiConfig"),
