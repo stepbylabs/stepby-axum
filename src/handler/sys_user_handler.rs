@@ -1250,11 +1250,18 @@ pub async fn avatar_upload(
         && old_filename != filename
     {
         // 旧头像文件位于同一租户目录内（URL 形如 /uploads/{tid}/avatar/xxx.png）
-        let result = state
-            .storage
-            .delete(&upload_cfg.avatar_dir, operator.tenant_id(), old_filename)
-            .await;
-        if let Err(e) = &result {
+        // 批次十八影响面修复：必须走 resolve_storage()——直用 state.storage 会绕过
+        // ArcSwap 热切换层，切档后删除落在旧后端（写新配置删旧对象撕裂纪律的教科书场景）。
+        // resolve 失败时保持原 best-effort 语义：warn + 跳过删除，不影响上传主流程
+        let delete_result = match state.resolve_storage().await {
+            Ok(backend) => {
+                backend
+                    .delete(&upload_cfg.avatar_dir, operator.tenant_id(), old_filename)
+                    .await
+            }
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = &delete_result {
             tracing::warn!(
                 error = %e,
                 old_filename = %old_filename,

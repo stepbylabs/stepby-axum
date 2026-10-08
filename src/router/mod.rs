@@ -343,14 +343,13 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 /// 上传文件预览路由（`GET /uploads/{tid}/{kind}/{filename}`）
 ///
 /// 取代此前的 `ServeDir` 无鉴权静态直出：
-/// - 仅本地存储后端（`supports_static()`）挂载；S3 后端由对象存储公开 URL 直出
 /// - 请求先经 cookie→Authorization 桥接（浏览器 `<img>` 无法自定义请求头，但前端 token
 ///   已存入 Cookie `Admin-Token`），再走 `auth_middleware` 强制鉴权
 /// - 作用域严格限定本路由，避免全局 cookie 鉴权扩大 CSRF 攻击面
+/// - 批次十八影响面修复：**无条件挂载**——原启动期 `supports_static()` 分支导致
+///   s3 档启动后切回 local 档时新上传的本地文件无法预览（路由已定型无法运行时增删）。
+///   档位判定移入 serve_upload 请求期（resolve_storage 动态解析），切换即时生效
 fn uploads_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    if !state.storage.supports_static() {
-        return Router::new();
-    }
     Router::new()
         .route(
             "/uploads/{*path}",
