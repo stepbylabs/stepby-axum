@@ -610,3 +610,56 @@ async fn it_opl_archive_mode_exports_and_downloads() {
         "散段删除后 verify 应 valid（b2 幸存续接 + b4/b5... 新行），实际: {v}"
     );
 }
+
+/// 批次十九收尾六：跨批次删除的锚点选择（e2e 实测断链 #48846 复现）——
+/// 写 5 行 → 删倒数第 2 链行（第一次调用）→ 删倒数第 3 链行（第二次调用）→
+/// 幸存末链行 verify 必须 valid。旧规则（deleted_at 最晚优先）会因第二次删除的
+/// deleted_at 更晚而误选链序较小的锚点 → broken；链序键（last_oper_id 最大）
+/// 恒选 R 的真实前驱（R 写链时刻的链尾）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_opl_chain_cross_batch_removal() {
+    use sea_orm::ColumnTrait;
+    use sea_orm::EntityTrait;
+    use sea_orm::QueryFilter;
+    use sea_orm::QueryOrder;
+
+    let ctx = TestContext::new().await;
+    for _ in 0..5 {
+        create_oper_log(&ctx).await;
+    }
+    // 直查链行（降级 NULL 行不参与链、不产生锚点段，动态取末 3 个链行构造）
+    let mut chained: Vec<i64> = crate::entity::sys_oper_log::Entity::find()
+        .filter(crate::entity::sys_oper_log::Column::ChainHash.is_not_null())
+        .order_by_asc(crate::entity::sys_oper_log::Column::OperId)
+        .all(&ctx.state.db)
+        .await
+        .expect("直查链行")
+        .into_iter()
+        .map(|r| r.oper_id)
+        .collect();
+    // 只保留本用例创建的尾部区间，避免同进程并行用例的行干扰判定
+    chained.sort_unstable();
+    assert!(
+        chained.len() >= 3,
+        "至少 3 个链行才能构造跨批次删除场景，实际: {chained:?}"
+    );
+    let n = chained.len();
+    let (l2, l1, r) = (chained[n - 3], chained[n - 2], chained[n - 1]);
+    // 跨批次删除：先删链序较大的 l1（真实前驱），后删链序较小的 l2（deleted_at 更晚）
+    ctx.state
+        .oper_log_service
+        .delete_oper_logs(vec![l1], None)
+        .await
+        .expect("第一次删除（l1）应成功");
+    ctx.state
+        .oper_log_service
+        .delete_oper_logs(vec![l2], None)
+        .await
+        .expect("第二次删除（l2）应成功");
+    let v = ctx.get_json("/monitor/operlog/verify-chain").await;
+    assert_eq!(
+        v["data"]["valid"].as_bool(),
+        Some(true),
+        "跨批次删除后 verify 应 valid（R={r} 的种子应取链序最大被删行 l1={l1}），实际: {v}"
+    );
+}
