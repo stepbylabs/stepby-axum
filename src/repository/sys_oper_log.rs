@@ -20,6 +20,19 @@ use crate::repository::base::BaseRepository;
 /// NaiveTime::MIN 等价于 00:00:00，是 const 上下文可用的常量。
 const MIDNIGHT: chrono::NaiveTime = chrono::NaiveTime::MIN;
 
+/// 被删窗口统计（锚点登记前置查询结果，批次十九）
+#[derive(Debug, Clone)]
+pub struct DeleteWindowStats {
+    /// 窗口内全行数（含 chain_hash 为 NULL 的行）
+    pub total_rows: i64,
+    /// 窗口内首个链行 oper_id（None = 段内无链行，删除不影响链）
+    pub first_chain_oper_id: Option<i64>,
+    /// 窗口内最后一个链行 oper_id
+    pub last_chain_oper_id: Option<i64>,
+    /// 窗口内最后一个链行的 chain_hash（verify 续接种子）
+    pub last_chain_hash: Option<String>,
+}
+
 /// 操作日志 Repository
 #[derive(Clone)]
 pub struct SysOperLogRepository {
@@ -158,47 +171,135 @@ impl SysOperLogRepository {
     ///
     /// 用于保留期清理：仅删除 oper_time < (now - days) 的记录，
     /// 保留最近 N 天日志用于审计。
+    ///
+    /// 批次十九：条件构造收敛到 [`Self::cutoff_condition`]（删除与锚点登记共用同一
+    /// 条件），执行体收敛到 [`Self::delete_by_condition`]；事务内锚点+删除编排见
+    /// service `register_anchor_and_delete`。
     pub async fn delete_older_than(
         &self,
         cutoff: NaiveDateTime,
         tenant_scope: Option<i64>,
     ) -> Result<DeleteResult, DbErr> {
-        let mut query = SysOperLog::delete_many().filter(Column::OperTime.lt(cutoff));
+        let cond = Self::cutoff_condition(cutoff, tenant_scope);
+        self.delete_by_condition(self.base.db(), cond).await
+    }
+
+    /// 构造"早于 cutoff"删除条件（含租户过滤语义：本租户 + 代管目标为本租户）
+    pub fn cutoff_condition(cutoff: NaiveDateTime, tenant_scope: Option<i64>) -> Condition {
+        let mut cond = Condition::all().add(Column::OperTime.lt(cutoff));
         if let Some(t) = tenant_scope {
-            query = query.filter(
+            cond = cond.add(
                 Condition::any()
                     .add(Column::TenantId.eq(t))
                     .add(Column::TargetTenantId.eq(t)),
             );
         }
-        query.exec(self.base.db()).await
+        cond
     }
 
-    /// 按时间范围删除操作日志（物理删除 [begin, end] 区间内日志，边界含端点）
+    /// 构造"时间区间"删除条件（单侧可空；含租户过滤语义）
+    pub fn range_condition(
+        begin: Option<NaiveDateTime>,
+        end: Option<NaiveDateTime>,
+        tenant_scope: Option<i64>,
+    ) -> Condition {
+        let mut cond = Condition::all();
+        if let Some(b) = begin {
+            cond = cond.add(Column::OperTime.gte(b));
+        }
+        if let Some(e) = end {
+            cond = cond.add(Column::OperTime.lte(e));
+        }
+        if let Some(t) = tenant_scope {
+            cond = cond.add(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        cond
+    }
+
+    /// 按条件物理删除（供删除路径与锚点登记编排共用，支持事务连接）
+    pub async fn delete_by_condition<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        cond: Condition,
+    ) -> Result<DeleteResult, DbErr> {
+        SysOperLog::delete_many().filter(cond).exec(conn).await
+    }
+
+    /// 被删窗口统计：全行数 + 段内链行（chain_hash 非 NULL）边界
+    ///
+    /// 锚点登记前置查询——verify 只关心链行序列；NULL 行删除不影响链，
+    /// 但计入 `total_rows` 统计口径。
+    pub async fn delete_window_stats<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        cond: Condition,
+    ) -> Result<DeleteWindowStats, DbErr> {
+        let total_rows_u64 = SysOperLog::find()
+            .filter(cond.clone())
+            .count(conn)
+            .await?;
+        let total_rows = i64::try_from(total_rows_u64).unwrap_or(i64::MAX);
+        let first_chain = SysOperLog::find()
+            .filter(cond.clone())
+            .filter(Column::ChainHash.is_not_null())
+            .order_by_asc(Column::OperId)
+            .select_only()
+            .column(Column::OperId)
+            .into_tuple::<i64>()
+            .one(conn)
+            .await?;
+        let last_chain = SysOperLog::find()
+            .filter(cond.clone())
+            .filter(Column::ChainHash.is_not_null())
+            .order_by_desc(Column::OperId)
+            .select_only()
+            .column(Column::OperId)
+            .column(Column::ChainHash)
+            .into_tuple::<(i64, String)>()
+            .one(conn)
+            .await?;
+        Ok(DeleteWindowStats {
+            total_rows,
+            first_chain_oper_id: first_chain,
+            last_chain_oper_id: last_chain.as_ref().map(|(id, _)| *id),
+            last_chain_hash: last_chain.map(|(_, h)| h),
+        })
+    }
+
+    /// 分批拉取被删窗口内的全行（归档导出用，按 oper_id 升序）
+    pub async fn fetch_archive_batch<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        cond: Condition,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<Model>, DbErr> {
+        SysOperLog::find()
+            .filter(cond)
+            .order_by_asc(Column::OperId)
+            .offset(offset)
+            .limit(limit)
+            .all(conn)
+            .await
+    }
+
+    /// 按时间范围删除操作日志（物理删除 [begin, end] 区间的日志，边界含端点）
     ///
     /// `begin` / `end` 均可为空：为空表示该侧不设边界（例如仅清理早于 `end` 的日志）。
     /// 供操作日志「按时间范围清理」接口（`DELETE /monitor/operlog/clean?params[beginTime]=&params[endTime]=`）使用。
+    /// 批次十九：条件收敛到 [`Self::range_condition`]，事务内锚点编排见 service。
     pub async fn delete_by_time_range(
         &self,
         begin: Option<NaiveDateTime>,
         end: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
     ) -> Result<DeleteResult, DbErr> {
-        let mut query = SysOperLog::delete_many();
-        if let Some(t) = tenant_scope {
-            query = query.filter(
-                Condition::any()
-                    .add(Column::TenantId.eq(t))
-                    .add(Column::TargetTenantId.eq(t)),
-            );
-        }
-        if let Some(b) = begin {
-            query = query.filter(Column::OperTime.gte(b));
-        }
-        if let Some(e) = end {
-            query = query.filter(Column::OperTime.lte(e));
-        }
-        query.exec(self.base.db()).await
+        let cond = Self::range_condition(begin, end, tenant_scope);
+        self.delete_by_condition(self.base.db(), cond).await
     }
 
     /// 插入操作日志
@@ -270,9 +371,14 @@ impl SysOperLogRepository {
     ///
     /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户操作日志与目标资源属于本租户的
     /// 代管日志（与 `find_page_filtered` 语义一致）；`None`（平台操作者）→ 全量不过滤。
+    ///
+    /// `window_start`：统计窗口下界（`oper_time >=`）；`None` = 全历史。
+    /// 批次十九 P2：大屏四路聚合统一加时间窗（默认 7 天，与前端 7/14/30 选择器对齐），
+    /// 聚合数据量从"全表"收敛到"窗口内"，不再随保留窗总量线性恶化。
     pub async fn stats_by_business_type(
         &self,
         tenant_scope: Option<i64>,
+        window_start: Option<NaiveDateTime>,
     ) -> Result<Vec<(Option<i32>, i64)>, DbErr> {
         use sea_orm::sea_query::Expr;
         let mut query = SysOperLog::find()
@@ -285,6 +391,9 @@ impl SysOperLogRepository {
                     .add(Column::TenantId.eq(t))
                     .add(Column::TargetTenantId.eq(t)),
             );
+        }
+        if let Some(w) = window_start {
+            query = query.filter(Column::OperTime.gte(w));
         }
         let rows: Vec<(Option<i32>, i64)> = query
             .group_by(Column::BusinessType)
@@ -300,10 +409,12 @@ impl SysOperLogRepository {
     /// 返回 Vec<(oper_name, count)>，按 count 降序，限制 N 条。
     ///
     /// 多租户：与 `stats_by_business_type` 同租户过滤语义（`tenant_scope`）。
+    /// `window_start`：统计窗口下界（None = 全历史），语义见 `stats_by_business_type`。
     pub async fn stats_top_operators(
         &self,
         limit: u64,
         tenant_scope: Option<i64>,
+        window_start: Option<NaiveDateTime>,
     ) -> Result<Vec<(String, i64)>, DbErr> {
         use sea_orm::sea_query::Expr;
         let mut query = SysOperLog::find()
@@ -317,6 +428,9 @@ impl SysOperLogRepository {
                     .add(Column::TenantId.eq(t))
                     .add(Column::TargetTenantId.eq(t)),
             );
+        }
+        if let Some(w) = window_start {
+            query = query.filter(Column::OperTime.gte(w));
         }
         let rows: Vec<(String, i64)> = query
             .group_by(Column::OperName)
@@ -418,32 +532,43 @@ impl SysOperLogRepository {
     /// 返回 (total, success, fail)。
     ///
     /// 多租户：`tenant_scope = Some(tid)` → 仅统计本租户（含代管目标为本租户）日志；
-    /// `None`（平台操作者）→ 全量不过滤。
-    pub async fn stats_summary(&self, tenant_scope: Option<i64>) -> Result<(i64, i64, i64), DbErr> {
-        let mut base = SysOperLog::find();
+    /// `None`（平台操作者）→ 全量不过滤。`window_start`：统计窗口下界（None = 全历史）。
+    ///
+    /// 批次十九 P1：原实现为三次独立 `COUNT`（total / success / fail 三次全索引遍历，
+    /// RTT 3→1）——合并为单条 `COUNT + SUM(CASE ...)`，SUM 空表返回 NULL 用
+    /// `COALESCE` 收 0（三方言通用）。
+    pub async fn stats_summary(
+        &self,
+        tenant_scope: Option<i64>,
+        window_start: Option<NaiveDateTime>,
+    ) -> Result<(i64, i64, i64), DbErr> {
+        use sea_orm::sea_query::Expr;
+        let mut query = SysOperLog::find()
+            .select_only()
+            .column_as(Expr::col(Column::OperId).count(), "total")
+            .column_as(
+                Expr::cust("COALESCE(SUM(CASE WHEN status = '0' THEN 1 ELSE 0 END), 0)"),
+                "success",
+            )
+            .column_as(
+                Expr::cust("COALESCE(SUM(CASE WHEN status = '1' THEN 1 ELSE 0 END), 0)"),
+                "fail",
+            );
         if let Some(t) = tenant_scope {
-            base = base.filter(
+            query = query.filter(
                 Condition::any()
                     .add(Column::TenantId.eq(t))
                     .add(Column::TargetTenantId.eq(t)),
             );
         }
-        let total = base
-            .clone()
-            .count(self.base.db())
-            .await
-            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
-        let success = base
-            .clone()
-            .filter(Column::Status.eq("0"))
-            .count(self.base.db())
-            .await
-            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
-        let fail = base
-            .filter(Column::Status.eq("1"))
-            .count(self.base.db())
-            .await
-            .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?;
+        if let Some(w) = window_start {
+            query = query.filter(Column::OperTime.gte(w));
+        }
+        let (total, success, fail) = query
+            .into_tuple::<(i64, i64, i64)>()
+            .one(self.base.db())
+            .await?
+            .unwrap_or((0, 0, 0));
         Ok((total, success, fail))
     }
 
@@ -479,10 +604,12 @@ impl SysOperLogRepository {
     /// 展示层统一走 module_title() 翻译。
     ///
     /// 多租户：与 `stats_by_business_type` 同租户过滤语义（`tenant_scope`）。
+    /// `window_start`：统计窗口下界（None = 全历史），语义见 `stats_by_business_type`。
     pub async fn stats_top_modules(
         &self,
         limit: u64,
         tenant_scope: Option<i64>,
+        window_start: Option<NaiveDateTime>,
     ) -> Result<Vec<(String, i64)>, DbErr> {
         use sea_orm::sea_query::Expr;
         let mut query = SysOperLog::find()
@@ -496,6 +623,9 @@ impl SysOperLogRepository {
                     .add(Column::TenantId.eq(t))
                     .add(Column::TargetTenantId.eq(t)),
             );
+        }
+        if let Some(w) = window_start {
+            query = query.filter(Column::OperTime.gte(w));
         }
         let rows: Vec<(String, i64)> = query
             .group_by(Column::Title)
@@ -905,19 +1035,19 @@ mod tests {
             .unwrap();
 
         // 平台（None）全量：4 条，成功 3 / 失败 1
-        let (total, success, fail) = repo.stats_summary(None).await.unwrap();
+        let (total, success, fail) = repo.stats_summary(None, None).await.unwrap();
         assert_eq!((total, success, fail), (4, 3, 1));
 
         // 租户 7：自身 2 条 + 平台代管 1 条 = 3 条，成功 2 / 失败 1
-        let (total, success, fail) = repo.stats_summary(Some(7)).await.unwrap();
+        let (total, success, fail) = repo.stats_summary(Some(7), None).await.unwrap();
         assert_eq!((total, success, fail), (3, 2, 1));
 
         // 租户 9：仅自身 1 条成功（看不到租户 7 的日志）
-        let (total, success, fail) = repo.stats_summary(Some(9)).await.unwrap();
+        let (total, success, fail) = repo.stats_summary(Some(9), None).await.unwrap();
         assert_eq!((total, success, fail), (1, 1, 0));
 
         // 业务类型分布同样按租户收敛（租户 7 共 3 条）
-        let rows = repo.stats_by_business_type(Some(7)).await.unwrap();
+        let rows = repo.stats_by_business_type(Some(7), None).await.unwrap();
         assert_eq!(rows.iter().map(|(_, c)| *c).sum::<i64>(), 3);
     }
 }

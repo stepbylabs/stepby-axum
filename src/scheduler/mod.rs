@@ -239,13 +239,27 @@ impl JobScheduler {
         // 日志保留期清理任务：每日凌晨 3:00 执行（cron: "0 0 3 * * *"）
         // 删除 (当前时间 - sys_log.retention_days) 天前的操作日志和登录日志，
         // 避免日志表无限增长导致生产崩溃（M2，保留天数可配置，默认 90）
+        // 批次十九（链感知保留）：retention_mode 三档——delete（默认，锚点+删除）/
+        // archive（导出 JSONL + 锚点 + 删除）/ keep（清理空转）。归档导出用**出厂档**
+        // 存储后端（toml [upload] 构造；s3 凭据运行时热改场景晚一天生效，可接受——
+        // cleanup 每日一次，非用户交互路径，不引入 resolve_storage 的 state 依赖）。
         // FIX-Cron: tokio-cron-scheduler 0.15.1 强制要求 6 字段（含秒）cron 表达式，
         // 5 字段的 "0 3 * * *" 会触发 ParseSchedule 错误，改为 "0 0 3 * * *"（秒=0 分=0 时=3）
         let cleanup_config = config.clone();
+        let archive_storage: Option<std::sync::Arc<dyn crate::storage::StorageBackend>> =
+            crate::storage::new_backend(&config.upload).ok();
         let cleanup_job = Job::new_async("0 0 3 * * *", move |_uuid, _l| {
             let db = db.clone();
             let config = cleanup_config.clone();
+            let archive_storage = archive_storage.clone();
             Box::pin(async move {
+                let mode = config.sys_log.retention_mode();
+                if mode == crate::config::settings::LogRetentionMode::Keep {
+                    tracing::info!(
+                        "内置任务 cleanup_expired_logs：retention_mode=keep（显式保留档），本轮跳过"
+                    );
+                    return;
+                }
                 tracing::info!("内置任务 cleanup_expired_logs 开始执行：清理过期日志");
 
                 // 清理操作日志
@@ -256,12 +270,18 @@ impl JobScheduler {
 
                 let retention_days = config.sys_log.retention_days;
 
-                match oper_log_service.cleanup_old_logs(retention_days).await {
+                // oper_log：链感知删除（锚点登记 + Archive 档导出），物理删除由
+                // service 内部事务编排保证"锚点先行"
+                match oper_log_service
+                    .cleanup_old_logs(retention_days, mode, archive_storage.clone())
+                    .await
+                {
                     Ok(affected) => {
                         tracing::info!(
-                            "cleanup_expired_logs: 清理操作日志 {} 条（保留 {} 天）",
+                            "cleanup_expired_logs: 清理操作日志 {} 条（保留 {} 天，模式 {}）",
                             affected,
-                            retention_days
+                            retention_days,
+                            mode.as_str()
                         );
                     }
                     Err(e) => {
@@ -269,6 +289,7 @@ impl JobScheduler {
                     }
                 }
 
+                // logininfor：无防篡改链，直接按保留期删除
                 match logininfor_service.cleanup_old_logs(retention_days).await {
                     Ok(affected) => {
                         tracing::info!(
@@ -1602,7 +1623,16 @@ fn register_builtin_tasks(db: DatabaseConnection) {
                 const RETENTION_DAYS: i64 = crate::common::constants::LOG_RETENTION_DAYS;
                 let mut messages = Vec::new();
 
-                match oper_log_service.cleanup_old_logs(RETENTION_DAYS).await {
+                // sys_job 触发路径无 config 上下文：按默认档 delete + 无归档存储执行
+                // （锚点登记恒生效——手动触发清理同样不能破坏防篡改链）
+                match oper_log_service
+                    .cleanup_old_logs(
+                        RETENTION_DAYS,
+                        crate::config::settings::LogRetentionMode::Delete,
+                        None,
+                    )
+                    .await
+                {
                     Ok(affected) => {
                         let msg = format!("Cleaned {} oper_log records", affected);
                         tracing::info!("{}", msg);

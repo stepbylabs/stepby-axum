@@ -7,10 +7,12 @@
 //! - POST   /monitor/operlog/export        导出操作日志列表
 
 use axum::extract::{Form, Path, Query, State};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use std::sync::Arc;
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
+use crate::common::error::ServiceError;
 use crate::common::excel::{CellValue, ExcelColumn, export_to_excel_with_fields};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_oper_log::Model as SysOperLogModel;
@@ -392,12 +394,14 @@ fn default_page_size() -> u64 {
 /// GET /monitor/operlog/stats
 /// 审计大屏综合统计（汇总数据 + 业务类型分布 + 操作人 Top10 + 最近 N 天趋势）
 ///
-/// 查询参数 `days` 控制每日趋势统计的天数，默认 30 天
+/// 查询参数 `days` 同时控制全部分类的统计窗口，默认 7 天（批次十九 P2：与前端
+/// 大屏 7/14/30 选择器对齐；此前仅 daily 有窗、其余全历史聚合，口径割裂且随
+/// oper_log 总量线性变慢）
 #[utoipa::path(
     get,
     path = "/monitor/operlog/stats",
     params(
-        ("days" = Option<i64>, Query, description = "每日趋势统计天数（默认 30）")
+        ("days" = Option<i64>, Query, description = "统计窗口天数（默认 7）")
     ),
     responses(
         (status = 200, description = "查询成功", body = AjaxResult<AuditStatsVo>),
@@ -410,7 +414,7 @@ pub async fn stats(
     operator: Operator,
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<AjaxResult<AuditStatsVo>, AppError> {
-    let days = params.days.unwrap_or(30).clamp(1, 365);
+    let days = params.days.unwrap_or(7).clamp(1, 365);
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let vo = state
         .oper_log_service
@@ -577,13 +581,15 @@ pub async fn alarm_status(
 /// GET /monitor/operlog/verify-chain
 /// 校验操作日志防篡改 HMAC 链完整性（全量，跨租户）
 ///
-/// 从链首逐节点重算 HMAC-SHA256 并与库内 chain_hash 比对，首个不匹配即报断裂位置。
-/// 审计员日常巡检 / 入侵排查接口：`valid = true` 表示库内留痕未被篡改或删除。
+/// 批次十九（链感知保留）：从链首逐节点重算 HMAC-SHA256 并与库内 chain_hash 比对，
+/// 首个不匹配即报断裂位置；被保留期清理 / 手动清理物理删除的区间由锚点
+/// （sys_log_archive_anchor）登记的被删尾行 hash 续接校验——`gap_count > 0` 且
+/// `valid = true` 表示存在清理缺口但整体校验通过，仅真篡改报 `valid = false`。
 #[utoipa::path(
     get,
     path = "/monitor/operlog/verify-chain",
     responses(
-        (status = 200, description = "校验完成（valid=false 时携带断裂位置）", body = crate::common::AjaxResult<crate::service::sys_oper_log_service::ChainVerifyVo>),
+        (status = 200, description = "校验完成（valid=false 时携带断裂位置；gap_count>0 表示含清理缺口）", body = crate::common::AjaxResult<crate::service::sys_oper_log_service::ChainVerifyVo>),
         (status = 400, description = "链能力未启用"),
         (status = 500, description = "服务器错误"),
     ),
@@ -599,4 +605,58 @@ pub async fn verify_chain(
     // 因此不收敛 tenant_scope——端点已由 monitor:operlog:query 权限门控。
     let vo = state.oper_log_service.verify_chain().await?;
     Ok(AjaxResult::success(vo))
+}
+
+/// GET /monitor/operlog/archive/{anchorId}
+/// 下载清理锚点关联的归档对象（JSONL，批次十九链感知保留）
+///
+/// 多租户与权限（全局铁律）：
+/// - 归档数据是**全租户混合**的平台合规资产（cleanup 平台视角删除），仅平台管理员
+///   （tenant_id = 0）可下载，租户操作者一律 403；
+/// - perms `monitor:operlogArchive:download` 已登记 `PLATFORM_ONLY_PERM_PREFIXES`
+///   （租户角色授权剔除机制自动收口），路由由 PERM_ROUTE_TABLE 门控。
+#[utoipa::path(
+    get,
+    path = "/monitor/operlog/archive/{anchorId}",
+    params(
+        ("anchorId" = i64, Path, description = "清理锚点 ID")
+    ),
+    responses(
+        (status = 200, description = "下载成功", content_type = "application/octet-stream"),
+        (status = 400, description = "该锚点未关联归档对象（delete 模式清理）"),
+        (status = 403, description = "非平台管理员"),
+        (status = 404, description = "锚点或归档对象不存在"),
+    ),
+    tag = "monitor-operlog"
+)]
+pub async fn archive_download(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path(anchor_id): Path<i64>,
+) -> Result<Response, AppError> {
+    if operator.tenant_id() != 0 {
+        return Err(AppError::from(ServiceError::forbidden(&crate::tr!(
+            "error.oper_log.archive_platform_only"
+        ))));
+    }
+    let storage = state.resolve_storage().await?;
+    let (key, bytes) = state
+        .oper_log_service
+        .read_archive_object(anchor_id, &storage)
+        .await?;
+
+    let content_disposition = format!("attachment; filename=\"{}\"", key.replace('"', ""));
+    let mut response = Response::new(bytes.into());
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition).unwrap_or_else(|_| {
+            HeaderValue::from_static("attachment; filename=oper-log-archive.jsonl")
+        }),
+    );
+    Ok(response)
 }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
-use sea_orm::{DatabaseConnection, Set};
+use sea_orm::{DatabaseConnection, EntityTrait, NotSet, QueryOrder, Set, TransactionTrait};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
@@ -21,12 +21,33 @@ use utoipa::{IntoParams, ToSchema};
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
+use crate::config::settings::LogRetentionMode;
+use crate::entity::sys_log_archive_anchor::{
+    ActiveModel as AnchorActiveModel, Entity as SysLogArchiveAnchor,
+};
 use crate::entity::sys_oper_log::{
     ActiveModel as SysOperLogActiveModel, Column as OperLogColumn, Model as SysOperLogModel,
 };
+use crate::repository::base::BaseRepository;
 use crate::repository::sys_oper_log::SysOperLogRepository;
+use crate::service::oper_log_chain_seed::{
+    GENESIS_SEED, ChainAnchorSnapshot, PrevSeed, resolve_prev_seed,
+};
 use crate::shared_store::SharedStore;
 use crate::utils::retry::{RetryPolicy, retry_async};
+
+/// 归档导出单卷字节上限（工程基线 D2"资源硬上限 + 背压"）：超出即中止清理并保留
+/// 数据（fail-closed），提示改用外部归档工具或调大保留期——禁止无界内存导出。
+const ARCHIVE_MAX_BYTES: usize = 512 * 1024 * 1024;
+
+/// 归档导出分批行数（每批 SELECT 行数，控制单批内存峰值）
+const ARCHIVE_BATCH_ROWS: u64 = 5000;
+
+/// 归档对象存储目录（平台租户 0 归属；local 档落 `uploads/0/audit-archive/`）。
+///
+/// ⚠️ 必须带 `uploads/` 根前缀：`resolve_upload_dir` 对无父段的裸目录名会把根
+/// 回落为 cwd（→ `<cwd>/0/audit-archive`，污染工作区且脱离 uploads 隔离语义）。
+const ARCHIVE_STORAGE_DIR: &str = "uploads/audit-archive";
 
 /// 操作日志写入的有界重试策略（R5-RATE-29）：3 次尝试 / 100ms 间隔。
 ///
@@ -462,11 +483,42 @@ impl SysOperLogService {
     ///
     /// 供定时任务 cleanup_expired_logs 调用（P0-R81-019）。
     /// 默认保留 90 天，避免操作日志无限增长导致生产崩溃。
-    pub async fn cleanup_old_logs(&self, days: i64) -> Result<u64, ServiceError> {
+    ///
+    /// 批次十九（链感知保留，福哥拍板）：`mode` 三档（`[sys_log].retention_mode`）——
+    /// - `Keep`：显式保留档，清理空转（容量交给部署方，聚合性能由大屏时间窗兜底）；
+    /// - `Delete`：删除前登记锚点（链行边界 + 被删尾行 hash），verify-chain 语义保持；
+    /// - `Archive`：删除前导出被删行 JSONL 到存储后端（出厂档）+ 锚点关联对象 key。
+    pub async fn cleanup_old_logs(
+        &self,
+        days: i64,
+        mode: LogRetentionMode,
+        archive_storage: Option<std::sync::Arc<dyn crate::storage::StorageBackend>>,
+    ) -> Result<u64, ServiceError> {
+        if mode == LogRetentionMode::Keep {
+            return Ok(0);
+        }
         let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
         // 后台定时清理无操作人上下文，按平台视角（None）全量清理
-        let result = self.oper_log_repo.delete_older_than(cutoff, None).await?;
-        Ok(result.rows_affected)
+        let cond = SysOperLogRepository::cutoff_condition(cutoff, None);
+        self.register_anchor_and_delete(cond, mode, archive_storage)
+            .await
+    }
+
+    /// 按显式 cutoff 清理（[`Self::cleanup_old_logs`] 的泛化形态）。
+    ///
+    /// 集成测试黄金路径与运维工具可直接指定时间切点；生产调度走 days 版本。
+    pub async fn cleanup_before(
+        &self,
+        cutoff: chrono::NaiveDateTime,
+        mode: LogRetentionMode,
+        archive_storage: Option<std::sync::Arc<dyn crate::storage::StorageBackend>>,
+    ) -> Result<u64, ServiceError> {
+        if mode == LogRetentionMode::Keep {
+            return Ok(0);
+        }
+        let cond = SysOperLogRepository::cutoff_condition(cutoff, None);
+        self.register_anchor_and_delete(cond, mode, archive_storage)
+            .await
     }
 
     /// 按时间范围清理操作日志（物理删除 [begin, end] 区间的日志，边界含端点）
@@ -474,6 +526,10 @@ impl SysOperLogService {
     /// 供 `DELETE /monitor/operlog/clean?params[beginTime]=&params[endTime]=` 使用：
     /// 传入 `begin_time` / `end_time`（`%Y-%m-%d`）显式清理指定时间段的日志。
     /// 单侧不传时该侧不设边界。解析失败返回 `ServiceError::bad_request`。
+    ///
+    /// 批次十九：手动区间清理**同样锚点登记**（防篡改链互斥修复的另一半——手动
+    /// clean 删中间段与 cleanup 删尾段一样会断链）。归档导出仅挂在 cleanup job 的
+    /// Archive 档（管理员显式区间清理视为知情操作，不重复归档）。
     pub async fn clean_oper_logs_by_range(
         &self,
         begin_time: Option<String>,
@@ -488,23 +544,193 @@ impl SysOperLogService {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,
         };
+        let cond = SysOperLogRepository::range_condition(begin, end, tenant_scope);
+        self.register_anchor_and_delete(cond, LogRetentionMode::Delete, None)
+            .await
+    }
+
+    /// 链感知删除编排：锚点登记 + 物理删除（同一事务原子提交）
+    ///
+    /// 步骤：
+    /// 1. 事务外窗口统计（条件指向过去时间，无并发写入竞态）；
+    /// 2. `Archive` 模式：事务外导出 JSONL（导出失败 fail-closed 中止，数据保留）；
+    /// 3. 事务内：先写锚点行、后执行删除——锚点失败回滚（无锚点不可删，否则断链），
+    ///    删除失败回滚（无孤儿锚点，否则 verify 会把幸存行误判为断裂）。
+    ///
+    /// `archive_storage`：Archive 档导出后端（scheduler 注入出厂档；`None` + Archive
+    /// = 配置矛盾，fail-closed 拒绝清理）。
+    async fn register_anchor_and_delete(
+        &self,
+        cond: sea_orm::Condition,
+        mode: LogRetentionMode,
+        archive_storage: Option<std::sync::Arc<dyn crate::storage::StorageBackend>>,
+    ) -> Result<u64, ServiceError> {
+        let db = self.oper_log_repo.base().db();
+        let stats = self
+            .oper_log_repo
+            .delete_window_stats(db, cond.clone())
+            .await
+            .map_err(|e| ServiceError::internal(&format!("清理窗口统计失败: {}", e)))?;
+        if stats.total_rows == 0 {
+            return Ok(0);
+        }
+
+        // Archive 档导出（事务外）：需要存储后端；缺失即配置矛盾，拒绝删除
+        let mut archive_key: Option<String> = None;
+        if mode == LogRetentionMode::Archive {
+            let storage = archive_storage.ok_or_else(|| {
+                ServiceError::internal(
+                    "retention_mode=archive 但清理任务未注入存储后端（配置矛盾，fail-closed）",
+                )
+            })?;
+            archive_key = Some(self.export_archive_jsonl(&storage, &cond).await?);
+        }
+
+        let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(db.clone());
+        let tx = db
+            .begin()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("开启清理事务失败: {}", e)))?;
+
+        // 锚点登记：仅当段内存在链行（chain_hash 非 NULL）——纯 NULL 行删除不影响链
+        if let (Some(first), Some(last_id), Some(last_hash)) = (
+            stats.first_chain_oper_id,
+            stats.last_chain_oper_id,
+            stats.last_chain_hash,
+        ) {
+            let anchor = AnchorActiveModel {
+                anchor_id: NotSet,
+                first_oper_id: Set(first),
+                last_oper_id: Set(last_id),
+                last_chain_hash: Set(last_hash),
+                deleted_count: Set(stats.total_rows),
+                mode: Set(mode.as_str().to_string()),
+                archive_object_key: Set(archive_key.clone()),
+                deleted_at: Set(crate::common::datetime::now_naive()),
+            };
+            anchor_repo
+                .insert_conn(&tx, anchor)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("清理锚点登记失败: {}", e)))?;
+        }
+
         let result = self
             .oper_log_repo
-            .delete_by_time_range(begin, end, tenant_scope)
-            .await?;
+            .delete_by_condition(&tx, cond)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("过期日志删除失败: {}", e)))?;
+        tx.commit()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("清理事务提交失败: {}", e)))?;
+
+        tracing::info!(
+            deleted = result.rows_affected,
+            mode = mode.as_str(),
+            anchored = stats.first_chain_oper_id.is_some(),
+            archive_key = archive_key.as_deref().unwrap_or("-"),
+            "oper_log 清理完成（链感知锚点已登记）"
+        );
         Ok(result.rows_affected)
+    }
+
+    /// 导出被删窗口全行为 JSONL（逐行 serde 序列化，分批查询控制内存峰值）
+    ///
+    /// 对象 key：`anchor_{first}_{last}_{ts}.jsonl`；单卷超 [`ARCHIVE_MAX_BYTES`]
+    /// 即 fail-closed（错误上抛，清理中止，数据保留）。
+    async fn export_archive_jsonl(
+        &self,
+        storage: &std::sync::Arc<dyn crate::storage::StorageBackend>,
+        cond: &sea_orm::Condition,
+    ) -> Result<String, ServiceError> {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut first_oper_id: Option<i64> = None;
+        let mut last_oper_id: Option<i64> = None;
+        let mut offset: u64 = 0;
+        loop {
+            let rows = self
+                .oper_log_repo
+                .fetch_archive_batch(self.oper_log_repo.base().db(), cond.clone(), offset, ARCHIVE_BATCH_ROWS)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("归档导出读取失败: {}", e)))?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in &rows {
+                if first_oper_id.is_none() {
+                    first_oper_id = Some(row.oper_id);
+                }
+                last_oper_id = Some(row.oper_id);
+                serde_json::to_writer(&mut buf, row)
+                    .map_err(|e| ServiceError::internal(&format!("归档序列化失败: {}", e)))?;
+                buf.push(b'\n');
+            }
+            offset += rows.len() as u64;
+            if buf.len() > ARCHIVE_MAX_BYTES {
+                return Err(ServiceError::internal(
+                    "待归档数据超出单卷上限（512MB），清理已中止（fail-closed，数据保留）",
+                ));
+            }
+            if (rows.len() as u64) < ARCHIVE_BATCH_ROWS {
+                break;
+            }
+        }
+        let (first, last) = (
+            first_oper_id.ok_or_else(|| ServiceError::internal("归档窗口为空"))?,
+            last_oper_id.unwrap_or_default(),
+        );
+        let key = format!(
+            "anchor_{first}_{last}_{}.jsonl",
+            chrono::Local::now().format("%Y%m%d%H%M%S")
+        );
+        storage
+            .save(ARCHIVE_STORAGE_DIR, 0, &key, "", &buf)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("归档对象写入失败: {}", e)))?;
+        Ok(key)
+    }
+
+    /// 归档对象读取（平台专属下载端点后端，字节流）
+    pub async fn read_archive_object(
+        &self,
+        anchor_id: i64,
+        storage: &std::sync::Arc<dyn crate::storage::StorageBackend>,
+    ) -> Result<(String, Vec<u8>), ServiceError> {
+        let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(self.base_db().clone());
+        let anchor = anchor_repo
+            .find_by_id(anchor_id)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("锚点查询失败: {}", e)))?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.oper_log.anchor_not_found")))?;
+        let key = anchor.archive_object_key.ok_or_else(|| {
+            ServiceError::bad_request(&crate::tr!("error.oper_log.archive_not_ready"))
+        })?;
+        let bytes = storage
+            .read(ARCHIVE_STORAGE_DIR, 0, &key)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("归档对象读取失败: {}", e)))?
+            .ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!("error.oper_log.archive_object_missing"))
+            })?;
+        Ok((key, bytes))
+    }
+
+    fn base_db(&self) -> &sea_orm::DatabaseConnection {
+        self.oper_log_repo.base().db()
     }
 
     /// 审计大屏统计：按业务类型聚合
     ///
     /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    /// `window_start`：统计窗口下界（None = 全历史）——大屏链路统一传窗口，见
+    /// `get_audit_stats`；仪表盘 stats-by-type 链路保持全历史。
     pub async fn stats_by_business_type(
         &self,
         tenant_scope: Option<i64>,
+        window_start: Option<chrono::NaiveDateTime>,
     ) -> Result<Vec<AuditBusinessTypeStat>, ServiceError> {
         let rows = self
             .oper_log_repo
-            .stats_by_business_type(tenant_scope)
+            .stats_by_business_type(tenant_scope, window_start)
             .await?;
         Ok(rows
             .into_iter()
@@ -526,7 +752,7 @@ impl SysOperLogService {
     ) -> Result<OperLogTypeStatsVo, ServiceError> {
         let rows = self
             .oper_log_repo
-            .stats_by_business_type(tenant_scope)
+            .stats_by_business_type(tenant_scope, None)
             .await?;
         let mut vo = OperLogTypeStatsVo {
             insert: 0,
@@ -550,10 +776,11 @@ impl SysOperLogService {
         &self,
         limit: u64,
         tenant_scope: Option<i64>,
+        window_start: Option<chrono::NaiveDateTime>,
     ) -> Result<Vec<AuditOperatorStat>, ServiceError> {
         let rows = self
             .oper_log_repo
-            .stats_top_operators(limit, tenant_scope)
+            .stats_top_operators(limit, tenant_scope, window_start)
             .await?;
         Ok(rows
             .into_iter()
@@ -572,10 +799,11 @@ impl SysOperLogService {
         &self,
         limit: u64,
         tenant_scope: Option<i64>,
+        window_start: Option<chrono::NaiveDateTime>,
     ) -> Result<Vec<AuditModuleStat>, ServiceError> {
         let rows = self
             .oper_log_repo
-            .stats_top_modules(limit, tenant_scope)
+            .stats_top_modules(limit, tenant_scope, window_start)
             .await?;
         Ok(rows
             .into_iter()
@@ -669,11 +897,16 @@ impl SysOperLogService {
     /// 审计大屏统计：汇总数据
     ///
     /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    /// `window_start`：统计窗口下界（None = 全历史）。
     pub async fn stats_summary(
         &self,
         tenant_scope: Option<i64>,
+        window_start: Option<chrono::NaiveDateTime>,
     ) -> Result<AuditSummary, ServiceError> {
-        let (total, success, fail) = self.oper_log_repo.stats_summary(tenant_scope).await?;
+        let (total, success, fail) = self
+            .oper_log_repo
+            .stats_summary(tenant_scope, window_start)
+            .await?;
         Ok(AuditSummary {
             total,
             success,
@@ -681,23 +914,37 @@ impl SysOperLogService {
         })
     }
 
+    /// 统计窗口起点（与 repository stats_daily 的公式严格一致）：
+    /// today - (days-1) 的 0 点，保证 summary/分布/Top 与 daily 覆盖同一日期区间
+    fn stats_window_start(days: i64) -> chrono::NaiveDateTime {
+        let today = crate::common::datetime::today_utc();
+        (today - chrono::Duration::days(days - 1)).and_time(chrono::NaiveTime::MIN)
+    }
+
     /// 综合审计统计（一次性返回所有大屏数据）
     ///
     /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    ///
+    /// 批次十九 P2（福哥拍板）：summary / 业务类型分布 / Top 操作人 / Top 模块统一
+    /// 加 `days` 时间窗（与前端大屏 7/14/30 选择器同源），聚合数据量从"全表"收敛
+    /// 到"窗口内"——保留期（`[sys_log].retention_days`）封顶总量后，窗口进一步把
+    /// 聚合复杂度与窗口数据量挂钩，不再随保留窗总量线性上升。窗口起点公式与
+    /// `stats_daily` 严格一致（today - (days-1) 的 0 点）。
     pub async fn get_audit_stats(
         &self,
         days: i64,
         tenant_scope: Option<i64>,
     ) -> Result<AuditStatsVo, ServiceError> {
+        let window_start = Self::stats_window_start(days);
         // 批次十八性能修复：五路聚合查询并行化（原串行 sum → 并行 max）。
         // oper_log 随 e2e/生产持续增长（SQLite GROUP BY 全表扫 + 临时 B-tree），
         // 串行总耗时线性恶化并打破审计大屏 e2e 的 networkidle 窗口（F4 偶发 30s
         // goto 超时实证）；五查询相互独立，tokio::join! 语义不变。
         let (summary, business_types, top_operators, top_modules, daily) = tokio::join!(
-            self.stats_summary(tenant_scope),
-            self.stats_by_business_type(tenant_scope),
-            self.stats_top_operators(10, tenant_scope),
-            self.stats_top_modules(10, tenant_scope),
+            self.stats_summary(tenant_scope, Some(window_start)),
+            self.stats_by_business_type(tenant_scope, Some(window_start)),
+            self.stats_top_operators(10, tenant_scope, Some(window_start)),
+            self.stats_top_modules(10, tenant_scope, Some(window_start)),
             self.stats_daily(days, tenant_scope),
         );
         Ok(AuditStatsVo {
@@ -720,15 +967,25 @@ impl SysOperLogService {
     /// - generated_at / period_from / period_to：报告周期元数据
     ///
     /// `tenant_scope`：租户操作者 → `Some(tid)` 仅统计本租户；平台 → `None` 全量。
+    ///
+    /// 批次十九：报告口径与审计大屏同步窗口化——原来 summary 全历史 / daily 窗口
+    /// 的割裂口径统一为 days 窗口（报告周期语义本就是窗口）。
     pub async fn get_compliance_report(
         &self,
         days: i64,
         tenant_scope: Option<i64>,
     ) -> Result<ComplianceReportVo, ServiceError> {
-        let summary = self.stats_summary(tenant_scope).await?;
-        let business_types = self.stats_by_business_type(tenant_scope).await?;
-        let top_operators = self.stats_top_operators(10, tenant_scope).await?;
-        let top_modules = self.stats_top_modules(10, tenant_scope).await?;
+        let window_start = Self::stats_window_start(days);
+        let summary = self.stats_summary(tenant_scope, Some(window_start)).await?;
+        let business_types = self
+            .stats_by_business_type(tenant_scope, Some(window_start))
+            .await?;
+        let top_operators = self
+            .stats_top_operators(10, tenant_scope, Some(window_start))
+            .await?;
+        let top_modules = self
+            .stats_top_modules(10, tenant_scope, Some(window_start))
+            .await?;
         let daily = self.stats_daily(days, tenant_scope).await?;
         let anomaly_models = self
             .oper_log_repo
@@ -979,27 +1236,65 @@ impl SysOperLogService {
             .await
             .map_err(|e| ServiceError::internal(&format!("读取操作日志链失败: {}", e)))?;
 
-        let mut prev = String::new();
+        // 批次十九：锚点快照（链感知保留）——verify 从"链首起验"升级为
+        // "锚点链 + 幸存链整体重算"。被物理删除的区间（cleanup / 手动 clean）
+        // 由锚点登记被删尾行 hash；判定规则见 oper_log_chain_seed 模块文档。
+        let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(self.base_db().clone());
+        let anchor_rows = anchor_repo
+            .find_many(
+                SysLogArchiveAnchor::find()
+                    .order_by_asc(crate::entity::sys_log_archive_anchor::Column::AnchorId),
+            )
+            .await
+            .map_err(|e| ServiceError::internal(&format!("读取清理锚点失败: {}", e)))?;
+        let anchors: Vec<ChainAnchorSnapshot> = anchor_rows
+            .into_iter()
+            .map(|a| ChainAnchorSnapshot {
+                first_oper_id: a.first_oper_id,
+                last_oper_id: a.last_oper_id,
+                last_chain_hash: a.last_chain_hash,
+                deleted_at: a.deleted_at,
+            })
+            .collect();
+        let gap_count = anchors.len() as i64;
+
+        let mut prev = String::from(GENESIS_SEED);
+        let mut prev_oper_id: Option<i64> = None;
         for m in &rows {
             let Some(stored) = m.chain_hash.as_deref() else {
                 // 查询已过滤 NULL，理论不可达；防御性跳过
                 continue;
             };
+            // 种子判定：当前行真实前驱 = 幸存前驱行（Carry）或被删尾行（Anchor）
+            let seed_str: String = match resolve_prev_seed(
+                prev_oper_id,
+                m.oper_id,
+                // oper_time 理论必有；缺失时按"删除前已存在"处理（保守方向：误报
+                // broken 而非漏报篡改）
+                m.oper_time.unwrap_or(chrono::NaiveDateTime::MIN),
+                &anchors,
+            ) {
+                PrevSeed::Carry => prev.clone(),
+                PrevSeed::Anchor(h) => h,
+            };
             let payload = ChainPayload::from_model(m);
             let payload_hash = payload_hex_digest(&payload);
-            let expected = compute_chain_hash(&ctx.key, &prev, m.oper_id, &payload_hash);
+            let expected = compute_chain_hash(&ctx.key, &seed_str, m.oper_id, &payload_hash);
             if expected != stored {
                 return Ok(ChainVerifyVo {
                     checked: rows.len() as i64,
                     broken_at_oper_id: Some(m.oper_id),
+                    gap_count,
                     valid: false,
                 });
             }
             prev = stored.to_string();
+            prev_oper_id = Some(m.oper_id);
         }
         Ok(ChainVerifyVo {
             checked: rows.len() as i64,
             broken_at_oper_id: None,
+            gap_count,
             valid: true,
         })
     }
@@ -1015,7 +1310,10 @@ pub struct ChainVerifyVo {
     pub checked: i64,
     /// 首个校验失败节点的 oper_id（`valid = true` 时为 null）
     pub broken_at_oper_id: Option<i64>,
-    /// 链是否完整
+    /// 清理缺口段数（= 锚点行数；批次十九链感知保留——这些区间已被物理删除，
+    /// 由锚点登记的被删尾行 hash 续接校验，不影响 valid 判定）
+    pub gap_count: i64,
+    /// 链是否完整（`valid = true` 且 `gap_count > 0` = 存在清理缺口但校验通过）
     pub valid: bool,
 }
 
