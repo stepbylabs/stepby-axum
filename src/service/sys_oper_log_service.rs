@@ -689,17 +689,23 @@ impl SysOperLogService {
         days: i64,
         tenant_scope: Option<i64>,
     ) -> Result<AuditStatsVo, ServiceError> {
-        let summary = self.stats_summary(tenant_scope).await?;
-        let business_types = self.stats_by_business_type(tenant_scope).await?;
-        let top_operators = self.stats_top_operators(10, tenant_scope).await?;
-        let top_modules = self.stats_top_modules(10, tenant_scope).await?;
-        let daily = self.stats_daily(days, tenant_scope).await?;
+        // 批次十八性能修复：五路聚合查询并行化（原串行 sum → 并行 max）。
+        // oper_log 随 e2e/生产持续增长（SQLite GROUP BY 全表扫 + 临时 B-tree），
+        // 串行总耗时线性恶化并打破审计大屏 e2e 的 networkidle 窗口（F4 偶发 30s
+        // goto 超时实证）；五查询相互独立，tokio::join! 语义不变。
+        let (summary, business_types, top_operators, top_modules, daily) = tokio::join!(
+            self.stats_summary(tenant_scope),
+            self.stats_by_business_type(tenant_scope),
+            self.stats_top_operators(10, tenant_scope),
+            self.stats_top_modules(10, tenant_scope),
+            self.stats_daily(days, tenant_scope),
+        );
         Ok(AuditStatsVo {
-            summary,
-            business_types,
-            top_operators,
-            top_modules,
-            daily,
+            summary: summary?,
+            business_types: business_types?,
+            top_operators: top_operators?,
+            top_modules: top_modules?,
+            daily: daily?,
         })
     }
 
