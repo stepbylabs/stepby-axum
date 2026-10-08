@@ -53,8 +53,7 @@ pub fn resolve_prev_seed(
     let between: Vec<&ChainAnchorSnapshot> = anchors
         .iter()
         .filter(|a| {
-            a.last_oper_id < row_oper_id
-                && prev_row_oper_id.is_none_or(|p| a.first_oper_id > p)
+            a.last_oper_id < row_oper_id && prev_row_oper_id.is_none_or(|p| a.first_oper_id > p)
         })
         .collect();
     let Some(latest) = between
@@ -79,7 +78,6 @@ pub const GENESIS_SEED: &str = "";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
 
     fn anchor(first: i64, last: i64, hash: &str, deleted_at: &str) -> ChainAnchorSnapshot {
         ChainAnchorSnapshot {

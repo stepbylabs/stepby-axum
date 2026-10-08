@@ -542,9 +542,8 @@ mod tests {
         // 最新全量治理点（必须含**全部**平台专属前缀）
         // 批次十九：新增 `monitor:operlogArchive:` ⇒ 最新全量迁移推进到
         // `m20261008_000001_log_archive_anchor`（12 项），`m000013` 随之降级为历史迁移。
-        const LATEST_SRC: &str = include_str!(
-            "../../migration/src/migrations/m20261008_000001_log_archive_anchor.rs"
-        );
+        const LATEST_SRC: &str =
+            include_str!("../../migration/src/migrations/m20261008_000001_log_archive_anchor.rs");
         // 历史迁移（其项必须仍在常量中，防"常量删了但迁移还留着"的漂移）
         const M000013_SRC: &str = include_str!(
             "../../migration/src/migrations/m20260926_000013_platform_only_tenant_menu.rs"
