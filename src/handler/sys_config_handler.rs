@@ -69,9 +69,11 @@ pub async fn governance_locked_keys(
     operator: Operator,
 ) -> Result<AjaxResult<Vec<String>>, AppError> {
     if operator.tenant_id() != 0 {
-        return Err(AppError::from(crate::common::error::ServiceError::forbidden(
-            &crate::tr!("error.config.governance_platform_only"),
-        )));
+        return Err(AppError::from(
+            crate::common::error::ServiceError::forbidden(&crate::tr!(
+                "error.config.governance_platform_only"
+            )),
+        ));
     }
     let _ = state; // AppState 一致性签名；清单为编译期常量
     Ok(AjaxResult::success(

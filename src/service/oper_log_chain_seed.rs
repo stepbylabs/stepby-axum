@@ -11,13 +11,19 @@
 //!    a.first_oper_id > P.oper_id }（P 不存在即链首时，仅要求 last_oper_id < R.oper_id；
 //!    锚点段为连续区间删除，幸存行不可能落在段内，故该判定与删除时序无关地成立）；
 //! 2. A 为空 ⇒ R 的前驱就是 P（或链首空种子）——`Carry`；
-//! 3. A 非空时取 `deleted_at` 最晚的 A*：
+//! 3. A 非空时取 **`last_oper_id` 最大**的 A*（链序最靠近 R 的被删段尾行）：
+//!    - 正确性证明：R 的真实前驱 = R 写链时刻的链尾 L；链行序与 oper_id 同序
+//!      （写侧乱序检测强制），故 L 被删时必为「R 之前被删行」中 oper_id 最大者——
+//!      与各段删除动作的先后（deleted_at）无关。跨批次删除场景（同段分两次调用、
+//!      deleted_at 与链序相反）下 deleted_at 键会选错锚点 → 误报 broken
+//!      （e2e 实测断链 #48846，批次十九收尾六修正）；deleted_at 仅作同 id 防御 tiebreak。
 //!    - `A*.deleted_at < R.oper_time` ⇒ R 写入时删除已完成，写侧"查前驱"续接的是
 //!      幸存行 P（或链首空种子）——`Carry`；
 //!    - 否则 R 在删除时已存在，其真实前驱是被删尾行——`Anchor(A*.last_chain_hash)`。
 //!
-//! 已知边界：删除与写入高频交错的极端时序下，"取 deleted_at 最晚"判据可能误报
-//! broken——**误报方向保守**（不会漏报真篡改），verify 语义为尽力重算，文档已注明。
+//! 已知边界：Carry/Anchor 的时间判定以 oper_time 近似真实写链时刻（毫秒级偏差），
+//! 写入与删除毫秒级交错时可能误报 broken——**误报方向保守**（不会漏报真篡改），
+//! verify 语义为尽力重算，文档已注明。锚点选择本身（本文件职责）在链序键下无此边界。
 //! `sys_flow_log` 等声明"永不清理"的表不经过此逻辑。
 
 use chrono::NaiveDateTime;
@@ -58,14 +64,12 @@ pub fn resolve_prev_seed(
         .collect();
     let Some(latest) = between
         .iter()
-        .max_by_key(|a| (a.deleted_at, a.last_oper_id))
+        .max_by_key(|a| (a.last_oper_id, a.deleted_at))
     else {
         return PrevSeed::Carry;
     };
     if latest.deleted_at < row_oper_time {
         // R 写入时该删除已完成：写侧"查前驱"续接的是幸存前驱（或链首空种子）。
-        // tiebreak：同批多段锚点 deleted_at 相同时取 last_oper_id 最大者（紧邻 R
-        // 的被删段才是 R 的真实前驱——散段批量删除场景，批次十九收尾）。
         PrevSeed::Carry
     } else {
         PrevSeed::Anchor(latest.last_chain_hash.clone())
@@ -133,19 +137,33 @@ mod tests {
         assert_eq!(seed, PrevSeed::Carry);
     }
 
-    /// 多个锚点夹在 P 与 R 之间：取 deleted_at 最晚者判定
+    /// 多个锚点夹在 P 与 R 之间：取 last_oper_id 最大者（链序最靠近 R 的被删段尾行）
     #[test]
-    fn multiple_anchors_use_latest_deleted_at() {
+    fn multiple_anchors_use_largest_last_oper_id() {
         let anchors = [
             anchor(50, 60, "h60", "2026-10-07 03:00:00"),
             anchor(61, 70, "h70", "2026-10-08 03:00:00"),
         ];
-        // R=71 在两次删除之前已存在 → 前驱是最后被删段尾行 h70
+        // R=71 在两次删除之前已存在 → 前驱是链序最大被删段尾行 h70
         let seed = resolve_prev_seed(Some(49), 71, t("2026-10-06 09:00:00"), &anchors);
         assert_eq!(seed, PrevSeed::Anchor("h70".into()));
         // R=71 在两次删除之后写入 → 写侧续接幸存前驱
         let seed = resolve_prev_seed(Some(49), 71, t("2026-10-08 06:00:00"), &anchors);
         assert_eq!(seed, PrevSeed::Carry);
+    }
+
+    /// 跨批次删除且 deleted_at 与链序相反（e2e 实测断链 #48846 复现，批次十九收尾六）：
+    /// 先删链序较大的段 [61,65]（deleted_at 较早），后删链序较小的段 [50,60]
+    /// （deleted_at 较晚）；R=71 写链于两次删除之前，真实前驱 = 链序最大被删行 65。
+    /// 旧规则（deleted_at 最晚优先）会误选 h60 → broken；链序键修正后选 h65。
+    #[test]
+    fn cross_batch_deletion_chain_order_wins_over_deleted_at() {
+        let anchors = [
+            anchor(50, 60, "h60", "2026-10-08 03:00:01"),
+            anchor(61, 65, "h65", "2026-10-08 03:00:00"),
+        ];
+        let seed = resolve_prev_seed(Some(49), 71, t("2026-10-08 02:00:00"), &anchors);
+        assert_eq!(seed, PrevSeed::Anchor("h65".into()));
     }
 
     /// 锚点在 P 之前（与当前行无关）：不参与判定
