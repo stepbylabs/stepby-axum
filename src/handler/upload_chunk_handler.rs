@@ -63,6 +63,10 @@ pub struct ChunkProgressVo {
     pub total_parts: u32,
     /// 是否全部收齐（true = 可 complete）
     pub complete: bool,
+    /// 已收分片索引列表（仅 session 断点续传查询端点返回——客户端据此只补传缺失片；
+    /// 批次十八修复：此前仅返回数量，"仅补传缺失"的续传承诺无法落地）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_indexes: Option<Vec<u32>>,
 }
 
 /// POST /common/upload/chunk/init —— 创建分片会话
@@ -87,6 +91,8 @@ pub async fn chunk_init(
         file_name: dto.file_name.clone(),
         ext,
         total_parts: dto.total_parts,
+        // 批次十八：记录总大小——merge 预分配容量来源（防 1GB 级多次 realloc）
+        total_size: dto.total_size,
         received: Default::default(),
         tenant_id: operator.tenant_id(),
     };
@@ -197,6 +203,7 @@ pub async fn chunk_part(
         received: session.received.len() as u32,
         total_parts: session.total_parts,
         complete: session.received.len() == session.total_parts as usize,
+        received_indexes: None,
     }))
 }
 
@@ -224,6 +231,8 @@ pub async fn chunk_session(
         received: session.received.len() as u32,
         total_parts: session.total_parts,
         complete: session.received.len() == session.total_parts as usize,
+        // 断点续传核心：返回已收索引列表，客户端据此只补传缺失片
+        received_indexes: Some(session.received.into_iter().collect()),
     }))
 }
 
@@ -268,6 +277,8 @@ pub async fn chunk_complete(
         .await?;
 
     // 统一校验链 + 落最终存储（白名单/magic bytes/UUID 命名/backend.save）
+    // 批次十八：kind 用 CommonChunked——大小上限走 common_chunk_max_total_size（1GB），
+    // 否则合并对象 >common_max_size(10MB) 必被拒（G-10 死能力缺陷，curl 复现实证）
     let storage = state.resolve_storage().await?;
     let saved = crate::common::upload::save_upload_bytes(
         storage.as_ref(),
@@ -276,7 +287,7 @@ pub async fn chunk_complete(
         Some(&session.file_name),
         cfg,
         operator.tenant_id(),
-        crate::common::upload::UploadKind::Common,
+        crate::common::upload::UploadKind::CommonChunked,
     )
     .await?;
 

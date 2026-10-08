@@ -182,7 +182,7 @@ async fn test_chunk_upload_error_branches() {
         .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "危险扩展名应 400");
 
-    // 2. 超总上限（65MB > 64MB 默认）→ 400
+    // 2. 超总上限（1025MB > 1GB 默认，批次十八 64MB→1GB）→ 400
     let (st, _) = ctx
         .send_raw(ctx.request(
             Method::POST,
@@ -190,7 +190,7 @@ async fn test_chunk_upload_error_branches() {
             Some(serde_json::json!({
                 "fileName": "big.zip",
                 "totalParts": 7,
-                "totalSize": 68157441
+                "totalSize": 1074790401
             })),
         ))
         .await;

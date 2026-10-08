@@ -28,6 +28,10 @@ pub enum UploadKind {
     Common,
     /// 头像（avatar_dir / avatar_allowed_exts / avatar_max_size）
     Avatar,
+    /// 分片合并对象（批次十八：目录/白名单/URL 前缀同 Common，但大小上限用
+    /// `common_chunk_max_total_size`——1GB 级合并对象若套用 common_max_size(10MB)
+    /// 会被统一校验链拒绝，分片能力沦为死能力。此前 64MB 时代 >10MB 分片同样必拒）
+    CommonChunked,
 }
 
 impl UploadKind {
@@ -36,6 +40,12 @@ impl UploadKind {
             UploadKind::Common => (
                 &cfg.common_allowed_exts,
                 cfg.common_max_size,
+                &cfg.common_dir,
+                &cfg.common_url_prefix,
+            ),
+            UploadKind::CommonChunked => (
+                &cfg.common_allowed_exts,
+                cfg.common_chunk_max_total_size,
                 &cfg.common_dir,
                 &cfg.common_url_prefix,
             ),
@@ -1053,6 +1063,43 @@ mod tests {
         .expect("txt 应成功");
         assert_eq!(file.ext, "txt");
         assert!(file.new_filename.ends_with(".txt"));
+    }
+
+    #[tokio::test]
+    async fn save_upload_bytes_chunked_allows_over_common_max() {
+        // 批次十八回归点：CommonChunked 上限 = common_chunk_max_total_size，
+        // 合并对象 >common_max_size(10MB) 不再被统一校验链拒绝（G-10 死能力缺陷实证修复）
+        let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
+        let mut cfg = UploadConfig::default();
+        cfg.common_max_size = 10 * 1024 * 1024;
+        cfg.common_chunk_max_total_size = 64 * 1024 * 1024; // 故意 ≠ 10MB，验证走 chunk 档
+        let mut bytes = vec![b'P', b'K', 0x03, 0x04];
+        bytes.resize(11 * 1024 * 1024, 0xAB);
+        let saved = save_upload_bytes(
+            &backend,
+            &bytes,
+            Some("zip"),
+            Some("big.zip"),
+            &cfg,
+            0,
+            UploadKind::CommonChunked,
+        )
+        .await
+        .expect("11MB 合并对象在 CommonChunked 档应通过");
+        assert_eq!(saved.size as usize, bytes.len());
+        // 同样字节在 Common 档必须仍被拒（上限语义未串档）
+        let err = save_upload_bytes(
+            &backend,
+            &bytes,
+            Some("zip"),
+            Some("big.zip"),
+            &cfg,
+            0,
+            UploadKind::Common,
+        )
+        .await
+        .expect_err("Common 档 10MB 上限应仍拒绝");
+        let _ = err;
     }
 
     // ---------- 测试辅助 ----------
