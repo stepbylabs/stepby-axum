@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
-use sea_orm::{DatabaseConnection, EntityTrait, NotSet, PaginatorTrait, QueryOrder, QuerySelect, Set, TransactionTrait};
+use sea_orm::{
+    DatabaseConnection, EntityTrait, NotSet, PaginatorTrait, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
@@ -31,7 +34,7 @@ use crate::entity::sys_oper_log::{
 use crate::repository::base::BaseRepository;
 use crate::repository::sys_oper_log::SysOperLogRepository;
 use crate::service::oper_log_chain_seed::{
-    GENESIS_SEED, ChainAnchorSnapshot, PrevSeed, resolve_prev_seed,
+    ChainAnchorSnapshot, GENESIS_SEED, PrevSeed, resolve_prev_seed,
 };
 use crate::shared_store::SharedStore;
 use crate::utils::retry::{RetryPolicy, retry_async};
@@ -727,7 +730,12 @@ impl SysOperLogService {
         loop {
             let rows = self
                 .oper_log_repo
-                .fetch_archive_batch(self.oper_log_repo.base().db(), cond.clone(), offset, ARCHIVE_BATCH_ROWS)
+                .fetch_archive_batch(
+                    self.oper_log_repo.base().db(),
+                    cond.clone(),
+                    offset,
+                    ARCHIVE_BATCH_ROWS,
+                )
                 .await
                 .map_err(|e| ServiceError::internal(&format!("归档导出读取失败: {}", e)))?;
             if rows.is_empty() {
@@ -775,11 +783,10 @@ impl SysOperLogService {
         page_num: u64,
         page_size: u64,
     ) -> Result<(Vec<crate::entity::sys_log_archive_anchor::Model>, u64), ServiceError> {
-        let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(self.base_db().clone());
         let page_size = page_size.clamp(1, 100);
         let page_num = page_num.max(1);
-        let selector =
-            SysLogArchiveAnchor::find().order_by_desc(crate::entity::sys_log_archive_anchor::Column::AnchorId);
+        let selector = SysLogArchiveAnchor::find()
+            .order_by_desc(crate::entity::sys_log_archive_anchor::Column::AnchorId);
         let total = selector
             .clone()
             .count(self.base_db())
@@ -805,7 +812,9 @@ impl SysOperLogService {
             .find_by_id(anchor_id)
             .await
             .map_err(|e| ServiceError::internal(&format!("锚点查询失败: {}", e)))?
-            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.oper_log.anchor_not_found")))?;
+            .ok_or_else(|| {
+                ServiceError::not_found(&crate::tr!("error.oper_log.anchor_not_found"))
+            })?;
         let key = anchor.archive_object_key.ok_or_else(|| {
             ServiceError::bad_request(&crate::tr!("error.oper_log.archive_not_ready"))
         })?;

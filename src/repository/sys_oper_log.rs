@@ -238,10 +238,7 @@ impl SysOperLogRepository {
         conn: &C,
         cond: Condition,
     ) -> Result<DeleteWindowStats, DbErr> {
-        let total_rows_u64 = SysOperLog::find()
-            .filter(cond.clone())
-            .count(conn)
-            .await?;
+        let total_rows_u64 = SysOperLog::find().filter(cond.clone()).count(conn).await?;
         let total_rows = i64::try_from(total_rows_u64).unwrap_or(i64::MAX);
         let first_chain = SysOperLog::find()
             .filter(cond.clone())

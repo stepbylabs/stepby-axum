@@ -1070,9 +1070,11 @@ mod tests {
         // 批次十八回归点：CommonChunked 上限 = common_chunk_max_total_size，
         // 合并对象 >common_max_size(10MB) 不再被统一校验链拒绝（G-10 死能力缺陷实证修复）
         let backend = MockBackend(Arc::new(Mutex::new(Vec::new())));
-        let mut cfg = UploadConfig::default();
-        cfg.common_max_size = 10 * 1024 * 1024;
-        cfg.common_chunk_max_total_size = 64 * 1024 * 1024; // 故意 ≠ 10MB，验证走 chunk 档
+        let cfg = UploadConfig {
+            common_max_size: 10 * 1024 * 1024,
+            common_chunk_max_total_size: 64 * 1024 * 1024, // 故意 ≠ 10MB，验证走 chunk 档
+            ..Default::default()
+        };
         let mut bytes = vec![b'P', b'K', 0x03, 0x04];
         bytes.resize(11 * 1024 * 1024, 0xAB);
         let saved = save_upload_bytes(
