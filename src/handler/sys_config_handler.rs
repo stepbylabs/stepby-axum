@@ -49,6 +49,38 @@ pub async fn list(
     Ok(TableDataInfo::new(total, rows))
 }
 
+/// GET /system/config/governance-locked
+/// 平台锁定（Coverage::Locked）参数键清单（E-04 参数治理 UI 辅助数据）
+///
+/// 前端编辑对话框据此禁用锁定键的治理控件（后端 resolve_governance 恒强制
+/// platform_only/'0'/'0' 兜底）。治理视图=平台专属：租户的列表行恒为
+/// tenant_private，无锁定语义，故仅平台操作者可取（tenant_id=0 双保险）。
+#[utoipa::path(
+    get,
+    path = "/system/config/governance-locked",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<Vec<String>>),
+        (status = 403, description = "非平台操作者"),
+    ),
+    tag = "system-config"
+)]
+pub async fn governance_locked_keys(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+) -> Result<AjaxResult<Vec<String>>, AppError> {
+    if operator.tenant_id() != 0 {
+        return Err(AppError::from(crate::common::error::ServiceError::forbidden(
+            &crate::tr!("error.config.governance_platform_only"),
+        )));
+    }
+    let _ = state; // AppState 一致性签名；清单为编译期常量
+    Ok(AjaxResult::success(
+        crate::service::sys_config_service::platform_locked_keys()
+            .map(|s| s.to_string())
+            .collect(),
+    ))
+}
+
 /// GET /system/config/configKey/{configKey}
 /// 按 config_key 查询参数值（需 system:config:query 权限，由 permission_middleware 强制校验，P0-R81-003）
 #[utoipa::path(

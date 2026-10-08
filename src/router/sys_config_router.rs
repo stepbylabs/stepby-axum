@@ -46,6 +46,10 @@ pub fn config_routes() -> Router<Arc<AppState>> {
             get(sys_config_handler::get_config_by_key),
         )
         .route(
+            "/system/config/governance-locked",
+            get(sys_config_handler::governance_locked_keys),
+        )
+        .route(
             "/system/config/refreshCache",
             delete(sys_config_handler::refresh_cache),
         )

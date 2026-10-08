@@ -236,6 +236,7 @@ error:
     platform_row_forbidden: Platform-level configuration cannot be operated by tenants
     scope_invalid: Invalid configuration governance scope
     flag_invalid: Invalid configuration governance flag
+    governance_platform_only: Config governance view is platform-only
   dept:
     not_found: Department does not exist
     parent_not_found: Parent department does not exist
