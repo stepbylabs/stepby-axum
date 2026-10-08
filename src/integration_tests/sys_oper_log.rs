@@ -560,4 +560,42 @@ async fn it_opl_archive_mode_exports_and_downloads() {
         axum::http::StatusCode::BAD_REQUEST,
         "delete 档锚点下载应 400（archive_not_ready），实际: {status}"
     );
+
+    // 锚点列表端点（平台 admin）：应含 2 条锚点（archive + delete），倒序最新在前
+    let v = ctx.get_json("/monitor/operlog/archive-anchors?pageNum=1&pageSize=20").await;
+    assert_eq!(v["total"].as_i64(), Some(2), "锚点列表 total 应为 2，实际: {v}");
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    assert_eq!(rows.len(), 2, "锚点列表应返回 2 行");
+    assert_eq!(
+        rows[0]["mode"].as_str(),
+        Some("delete"),
+        "倒序首行应为最新 delete 档锚点，实际: {v}"
+    );
+    assert!(rows[0]["lastChainHash"].as_str().is_some(), "行应含 lastChainHash");
+
+    // 批量删除散段锚点化（批次十九收尾——remove 路径补漏）：写 3 行 →
+    // service 层删 [第1, 第3]（散段）→ 2 个锚点 + 幸存行 verify valid
+    let b1 = create_oper_log(&ctx).await;
+    let b2 = create_oper_log(&ctx).await;
+    let b3 = create_oper_log(&ctx).await;
+    ctx.state
+        .oper_log_service
+        .delete_oper_logs(vec![b1, b3], None)
+        .await
+        .expect("散段批量删除应成功");
+    let anchors3 = crate::entity::sys_log_archive_anchor::Entity::find()
+        .all(&ctx.state.db)
+        .await
+        .expect("直查锚点表");
+    assert_eq!(
+        anchors3.len(),
+        4,
+        "散段删除应新增 2 个锚点（1+1）+此前 2 个，实际: {anchors3:?}"
+    );
+    let v = ctx.get_json("/monitor/operlog/verify-chain").await;
+    assert_eq!(
+        v["data"]["valid"].as_bool(),
+        Some(true),
+        "散段删除后 verify 应 valid（b2 幸存续接 + b4/b5... 新行），实际: {v}"
+    );
 }

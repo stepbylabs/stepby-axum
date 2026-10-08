@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
-use sea_orm::{DatabaseConnection, EntityTrait, NotSet, QueryOrder, Set, TransactionTrait};
+use sea_orm::{DatabaseConnection, EntityTrait, NotSet, PaginatorTrait, QueryOrder, QuerySelect, Set, TransactionTrait};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
@@ -441,14 +441,92 @@ impl SysOperLogService {
     ///
     /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户（含代管目标为本租户）日志；
     /// `None`（平台）→ 不过滤。
+    ///
+    /// 批次十九收尾（链感知保留）：**批量删除是第三个物理删除路径**（此前漏网——
+    /// e2e 批量删除用例实测制造断链 #48021）。编排：待删链行按"链行序相邻且中间
+    /// 无幸存链行"切连续段，**每段一个锚点**（散段删除需多锚点：单锚点会让不同
+    /// 幸存行的种子判定错配），事务内先锚点们后删除原子提交。
     pub async fn delete_oper_logs(
         &self,
-        oper_ids: Vec<i64>,
+        mut oper_ids: Vec<i64>,
         tenant_scope: Option<i64>,
     ) -> Result<(), ServiceError> {
+        if oper_ids.is_empty() {
+            return Ok(());
+        }
+        oper_ids.sort_unstable();
+        oper_ids.dedup();
+        let db = self.base_db().clone();
+        let (min_id, max_id) = (
+            *oper_ids.first().expect("非空已判"),
+            *oper_ids.last().expect("非空已判"),
+        );
+
+        // 待删链行与范围内全部链行（含幸存）——段切分基准
+        let all_chain = self
+            .oper_log_repo
+            .find_chain_rows_in_range(&db, min_id, max_id)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("链行范围查询失败: {}", e)))?;
+        let id_set: std::collections::HashSet<i64> = oper_ids.iter().copied().collect();
+
+        // 散段切分：链行序遍历，遇幸存链行即断段
+        let mut segments: Vec<(i64, i64, String)> = Vec::new(); // (first, last, last_hash)
+        let mut cur: Option<(i64, i64, String)> = None;
+        for (oid, hash) in &all_chain {
+            if id_set.contains(oid) {
+                match &mut cur {
+                    None => cur = Some((*oid, *oid, hash.clone())),
+                    Some((_, last, last_hash)) => {
+                        *last = *oid;
+                        *last_hash = hash.clone();
+                    }
+                }
+            } else if let Some(seg) = cur.take() {
+                segments.push(seg);
+            }
+        }
+        if let Some(seg) = cur {
+            segments.push(seg);
+        }
+
+        // 无链行 ⇒ 删除不影响链，直接删（仍走事务保持路径一致）
+        let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(db.clone());
+        let now = crate::common::datetime::now_naive();
+        let tx = db
+            .begin()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("开启删除事务失败: {}", e)))?;
+        for (first, last, last_hash) in &segments {
+            let anchor = AnchorActiveModel {
+                anchor_id: NotSet,
+                first_oper_id: Set(*first),
+                last_oper_id: Set(*last),
+                last_chain_hash: Set(last_hash.clone()),
+                deleted_count: Set(0), // 批量删除按行数统计口径无意义，置 0（锚点语义仅链行边界）
+                mode: Set("manual".to_string()),
+                archive_object_key: Set(None),
+                deleted_at: Set(now),
+            };
+            anchor_repo
+                .insert_conn(&tx, anchor)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("删除锚点登记失败: {}", e)))?;
+        }
         self.oper_log_repo
-            .delete_by_ids(oper_ids, tenant_scope)
-            .await?;
+            .delete_by_ids_conn(&tx, &oper_ids, tenant_scope)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("批量删除失败: {}", e)))?;
+        tx.commit()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("删除事务提交失败: {}", e)))?;
+        if !segments.is_empty() {
+            tracing::info!(
+                segments = segments.len(),
+                ids = oper_ids.len(),
+                "批量删除完成（散段锚点已登记）"
+            );
+        }
         Ok(())
     }
 
@@ -687,6 +765,33 @@ impl SysOperLogService {
             .await
             .map_err(|e| ServiceError::internal(&format!("归档对象写入失败: {}", e)))?;
         Ok(key)
+    }
+
+    /// 归档锚点分页列表（批次十九收尾：归档下载 UI 的数据源，平台专属）
+    ///
+    /// 返回 (锚点行, 总数)；按 anchor_id 倒序（最新清理在前）。
+    pub async fn list_archive_anchors(
+        &self,
+        page_num: u64,
+        page_size: u64,
+    ) -> Result<(Vec<crate::entity::sys_log_archive_anchor::Model>, u64), ServiceError> {
+        let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(self.base_db().clone());
+        let page_size = page_size.clamp(1, 100);
+        let page_num = page_num.max(1);
+        let selector =
+            SysLogArchiveAnchor::find().order_by_desc(crate::entity::sys_log_archive_anchor::Column::AnchorId);
+        let total = selector
+            .clone()
+            .count(self.base_db())
+            .await
+            .map_err(|e| ServiceError::internal(&format!("锚点计数失败: {}", e)))?;
+        let rows = selector
+            .offset((page_num - 1) * page_size)
+            .limit(page_size)
+            .all(self.base_db())
+            .await
+            .map_err(|e| ServiceError::internal(&format!("锚点查询失败: {}", e)))?;
+        Ok((rows, total))
     }
 
     /// 归档对象读取（平台专属下载端点后端，字节流）

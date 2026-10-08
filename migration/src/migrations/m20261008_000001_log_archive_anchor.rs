@@ -27,7 +27,7 @@
 //!   删除路径本身平台视角（cleanup）或带 tenant_scope（手动 clean），行为不变；
 //! - 归档数据含全租户日志 = 平台合规数据 → 归档下载端点用新平台专属前缀
 //!   `monitor:operlogArchive:`（PLATFORM_ONLY_PERM_PREFIXES 登记，租户授权剔除
-//!   机制自动收口），F 按钮 4180 挂操作日志菜单（parent 500）。
+//!   机制自动收口），F 按钮 9180/9181（高位段，规避 e2e 动态菜单自增撞号——4180/4181 曾被 e2e 菜单用例占用致 INSERT OR IGNORE 静默失效） 挂操作日志菜单（parent 500）。
 //!
 //! 存量库兜底：`init_log_archive_anchor`（单一事实源，up() 与 initialize 共用——
 //! 建表 IF NOT EXISTS + 种按钮 INSERT IGNORE 三方言幂等）。
@@ -119,7 +119,8 @@ pub async fn init_log_archive_anchor<C: ConnectionTrait>(db: &C) -> Result<(), D
     };
     let menus_sql = format!(
         "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
-        (4180, '审计归档下载', 500, 4, '#', '', '', '', '1', '0', 'F', '0', '0', 'monitor:operlogArchive:download', '#', 'admin', {now}, '链感知保留：归档对象下载（平台专属，monitor:operlogArchive: 前缀）', '0')"
+        (9180, '审计归档下载', 500, 4, '#', '', '', '', '1', '0', 'F', '0', '0', 'monitor:operlogArchive:download', '#', 'admin', {now}, '链感知保留：归档对象下载（平台专属，monitor:operlogArchive: 前缀）', '0'), \
+        (9181, '链完整性校验', 500, 5, '#', '', '', '', '1', '0', 'F', '0', '0', 'monitor:operlogArchive:verify', '#', 'admin', {now}, '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')"
     );
     let menu_sql = match backend {
         sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", menus_sql),
@@ -177,7 +178,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared("DELETE FROM sys_menu WHERE menu_id = 4180")
+            .execute_unprepared("DELETE FROM sys_menu WHERE menu_id IN (9180, 9181)")
             .await?;
         manager
             .get_connection()

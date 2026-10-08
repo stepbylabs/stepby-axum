@@ -57,11 +57,16 @@ pub fn resolve_prev_seed(
                 && prev_row_oper_id.is_none_or(|p| a.first_oper_id > p)
         })
         .collect();
-    let Some(latest) = between.iter().max_by_key(|a| a.deleted_at) else {
+    let Some(latest) = between
+        .iter()
+        .max_by_key(|a| (a.deleted_at, a.last_oper_id))
+    else {
         return PrevSeed::Carry;
     };
     if latest.deleted_at < row_oper_time {
-        // R 写入时该删除已完成：写侧"查前驱"续接的是幸存前驱（或链首空种子）
+        // R 写入时该删除已完成：写侧"查前驱"续接的是幸存前驱（或链首空种子）。
+        // tiebreak：同批多段锚点 deleted_at 相同时取 last_oper_id 最大者（紧邻 R
+        // 的被删段才是 R 的真实前驱——散段批量删除场景，批次十九收尾）。
         PrevSeed::Carry
     } else {
         PrevSeed::Anchor(latest.last_chain_hash.clone())

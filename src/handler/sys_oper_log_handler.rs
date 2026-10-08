@@ -17,6 +17,7 @@ use crate::common::excel::{CellValue, ExcelColumn, export_to_excel_with_fields};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_oper_log::Model as SysOperLogModel;
 use crate::middleware::Operator;
+use utoipa::IntoParams;
 use crate::service::sys_oper_log_service::{
     AlarmStatusVo, AuditStatsVo, ComplianceReportVo, OperLogQueryDto, OperLogTypeStatsVo,
 };
@@ -597,14 +598,65 @@ pub async fn alarm_status(
 )]
 pub async fn verify_chain(
     State(state): State<Arc<AppState>>,
-    // 链校验固定全量跨租户执行（子集校验会因缺失前驱误报断裂），
-    // 仅要求登录态提取器存在性校验，不使用操作者上下文
-    _operator: Operator,
+    operator: Operator,
 ) -> Result<AjaxResult<crate::service::sys_oper_log_service::ChainVerifyVo>, AppError> {
-    // 链哈希跨租户串联，校验固定全量执行（子集校验会因缺失前驱误报断裂），
-    // 因此不收敛 tenant_scope——端点已由 monitor:operlog:query 权限门控。
+    // 批次十九收尾：verify-chain 收紧为平台专属——链哈希跨租户全局串联，校验结果
+    // （checked 全平台链节点数）对租户即泄漏面。路由已挂平台专属前缀 perm
+    // （monitor:operlogArchive:verify，租户授权剔除自动收口），handler 内 tenant_id=0
+    // 双保险；前端按钮按 perms 显示，无"菜单可见请求 403"假入口。
+    if operator.tenant_id() != 0 {
+        return Err(AppError::from(ServiceError::forbidden(&crate::tr!(
+            "error.oper_log.verify_platform_only"
+        ))));
+    }
     let vo = state.oper_log_service.verify_chain().await?;
     Ok(AjaxResult::success(vo))
+}
+
+/// GET /monitor/operlog/archive-anchors
+/// 归档锚点分页列表（批次十九收尾：归档下载 UI 的数据源）
+///
+/// 平台专属（同归档下载：全租户混合合规数据 + handler 内 tenant_id=0 双保险）。
+#[utoipa::path(
+    get,
+    path = "/monitor/operlog/archive-anchors",
+    params(
+        ("pageNum" = Option<u64>, Query, description = "页码（默认 1）"),
+        ("pageSize" = Option<u64>, Query, description = "页大小（默认 20，上限 100）")
+    ),
+    responses(
+        (status = 200, description = "查询成功", body = TableDataInfo<crate::entity::sys_log_archive_anchor::Model>),
+        (status = 403, description = "非平台管理员"),
+        (status = 500, description = "服务器错误"),
+    ),
+    tag = "monitor-operlog"
+)]
+pub async fn archive_anchors(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Query(params): Query<AnchorListQuery>,
+) -> Result<TableDataInfo<crate::entity::sys_log_archive_anchor::Model>, AppError> {
+    if operator.tenant_id() != 0 {
+        return Err(AppError::from(ServiceError::forbidden(&crate::tr!(
+            "error.oper_log.archive_platform_only"
+        ))));
+    }
+    let page_num = params.page_num.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(20);
+    let (rows, total) = state
+        .oper_log_service
+        .list_archive_anchors(page_num, page_size)
+        .await?;
+    Ok(TableDataInfo::new(total, rows))
+}
+
+/// 归档锚点列表查询参数
+#[derive(Debug, Clone, serde::Deserialize, IntoParams)]
+pub struct AnchorListQuery {
+    /// 页码（默认 1）
+    pub page_num: Option<u64>,
+    /// 页大小（默认 20，上限 100）
+    pub page_size: Option<u64>,
 }
 
 /// GET /monitor/operlog/archive/{anchorId}

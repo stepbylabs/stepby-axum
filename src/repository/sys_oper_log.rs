@@ -287,6 +287,47 @@ impl SysOperLogRepository {
             .await
     }
 
+    /// 查 [min_id, max_id] 范围内全部链行 (oper_id, chain_hash) 升序
+    ///
+    /// 批量删除的散段切分基准（批次十九收尾）：锚点段按"链行序相邻且中间无幸存
+    /// 链行"切分——范围查询取全集后内存切分，避免逐段查询。
+    pub async fn find_chain_rows_in_range<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        min_id: i64,
+        max_id: i64,
+    ) -> Result<Vec<(i64, String)>, DbErr> {
+        SysOperLog::find()
+            .filter(Column::OperId.gte(min_id))
+            .filter(Column::OperId.lte(max_id))
+            .filter(Column::ChainHash.is_not_null())
+            .order_by_asc(Column::OperId)
+            .select_only()
+            .column(Column::OperId)
+            .column(Column::ChainHash)
+            .into_tuple::<(i64, String)>()
+            .all(conn)
+            .await
+    }
+
+    /// 按 oper_id 集合物理删除（事务连接版；锚点编排见 service delete_oper_logs）
+    pub async fn delete_by_ids_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        oper_ids: &[i64],
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut cond = Condition::all().add(Column::OperId.is_in(oper_ids.iter().copied()));
+        if let Some(t) = tenant_scope {
+            cond = cond.add(
+                Condition::any()
+                    .add(Column::TenantId.eq(t))
+                    .add(Column::TargetTenantId.eq(t)),
+            );
+        }
+        SysOperLog::delete_many().filter(cond).exec(conn).await
+    }
+
     /// 按时间范围删除操作日志（物理删除 [begin, end] 区间的日志，边界含端点）
     ///
     /// `begin` / `end` 均可为空：为空表示该侧不设边界（例如仅清理早于 `end` 的日志）。

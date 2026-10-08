@@ -484,6 +484,7 @@ error:
     anonymous: 匿名
     chain_disabled: 操作日志防篡改链未启用
     anchor_not_found: 清理锚点不存在
+    verify_platform_only: 链完整性校验属平台合规能力，仅平台管理员可执行
     archive_not_ready: 该锚点未关联归档对象（delete 模式清理不产生归档）
     archive_object_missing: 归档对象不存在或已被清理
     archive_platform_only: 审计归档属平台合规数据，仅平台管理员可下载
