@@ -12,7 +12,7 @@ use std::sync::Arc;
 use garde::Validate;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -371,17 +371,30 @@ impl ReportDatasetService {
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         self.ensure_designer_write(operator_tid).await?;
+        if dataset_ids.is_empty() {
+            return Ok(());
+        }
+        // B-1：批量软删收敛进单事务——中途失败不得留下"部分已删部分未删"的半成品。
+        // 逐条 update 无事务时，第 N 条失败会前 N-1 条已生效且无法回滚。
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
         for id in dataset_ids {
-            let raw = ReportDatasetEntity::find_by_id(id).one(&self.db).await?;
+            let raw = ReportDatasetEntity::find_by_id(id).one(&txn).await?;
             if let Some(m) = raw.filter(|mm| mm.del_flag.as_deref() == Some("0")) {
                 self.ensure_access(m.tenant_id, operator_tid)?;
                 let mut am: ReportDatasetActiveModel = m.into();
                 am.del_flag = Set(Some("1".to_string()));
                 am.update_by = Set(Some(operator.to_string()));
                 am.update_time = Set(Some(crate::common::datetime::now_naive()));
-                am.update(&self.db).await?;
+                am.update(&txn).await?;
             }
         }
+        txn.commit()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("提交事务失败: {e}")))?;
         Ok(())
     }
 

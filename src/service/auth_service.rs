@@ -773,7 +773,10 @@ impl AuthService {
         }
 
         // 验证通过：清除失败计数（best-effort，失败不阻断登录）
-        let _ = store.del(&[fail_key]).await;
+        // 清除失败会使下次失败累计在旧计数上，更早触发锁定 → 需可观测
+        if let Err(e) = store.del(&[fail_key]).await {
+            tracing::warn!(error = %e, "TOTP 失败计数清除失败，后续失败可能提前触发账号锁定")
+        }
         Ok(())
     }
 

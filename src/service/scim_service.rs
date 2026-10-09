@@ -248,11 +248,31 @@ impl ScimService {
             .query_all_raw(Statement::from_sql_and_values(backend, list_sql, values))
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
-        let mut resources = Vec::with_capacity(rows.len());
-        for row in rows {
-            let uid = row.try_get::<i64>("", "user_id").unwrap_or(0);
-            if let Ok(Some(m)) = sys_user::Entity::find_by_id(uid).one(self.db()).await {
-                resources.push(self.to_scim_user(&m, base_url));
+        // B-3：原实现逐条 `find_by_id(uid).one(db)` 回查完整行 = N+1（每页 count 条 → count 次往返）。
+        // 改为一次 `is_in(user_ids)` 批量查回，再按原始顺序重排（SQL 已 ORDER BY user_id，
+        // 这里保持同一顺序以免资源顺序漂移——SCIM 客户端可能依赖稳定分页序号）。
+        let uids: Vec<i64> = rows
+            .iter()
+            .map(|r| r.try_get::<i64>("", "user_id").unwrap_or(0))
+            .filter(|uid| *uid != 0)
+            .collect();
+        let mut by_id: std::collections::HashMap<i64, sys_user::Model> =
+            std::collections::HashMap::with_capacity(uids.len());
+        if !uids.is_empty() {
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+            let models = sys_user::Entity::find()
+                .filter(sys_user::Column::UserId.is_in(uids.clone()))
+                .all(self.db())
+                .await
+                .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
+            for m in models {
+                by_id.insert(m.user_id, m);
+            }
+        }
+        let mut resources = Vec::with_capacity(uids.len());
+        for uid in &uids {
+            if let Some(m) = by_id.get(uid) {
+                resources.push(self.to_scim_user(m, base_url));
             }
         }
         Ok(ScimListResponse {

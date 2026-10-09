@@ -32,10 +32,19 @@ impl SysOauthClientRepository {
 
     /// 按内部主键查询（排除软删）
     pub async fn find_by_pk(&self, sso_client_id: i64) -> Result<Option<Model>, DbErr> {
+        self.find_by_pk_conn(self.base.db(), sso_client_id).await
+    }
+
+    /// 按内部主键查询（事务上下文版本）：`conn` 可为 `DatabaseTransaction`。
+    pub async fn find_by_pk_conn<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        sso_client_id: i64,
+    ) -> Result<Option<Model>, DbErr> {
         SysOauthClient::find()
             .filter(Column::SsoClientId.eq(sso_client_id))
             .filter(Column::DelFlag.ne("2"))
-            .one(self.base.db())
+            .one(conn)
             .await
     }
 
@@ -115,12 +124,24 @@ impl SysOauthClientRepository {
     /// 软删除（v2-K7/P1-5：对齐 sys_* 规范，del_flag='2'；物理删除会留下孤儿授权记录与
     /// "重建同名 client 继承旧授权"的静默授权风险）
     pub async fn soft_delete_by_ids(&self, ids: Vec<i64>) -> Result<(), DbErr> {
+        self.soft_delete_by_ids_conn(self.base.db(), ids).await
+    }
+
+    /// 软删除（事务上下文版本）：`conn` 可为 `DatabaseTransaction`。
+    ///
+    /// 与 `soft_delete_by_ids` 语义完全一致，仅执行连接不同——用于
+    /// `delete_clients` 这类"级联清理 + 软删"必须原子化的场景（B-1）。
+    pub async fn soft_delete_by_ids_conn<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        ids: Vec<i64>,
+    ) -> Result<(), DbErr> {
         let now = crate::common::datetime::now_naive();
         SysOauthClient::update_many()
             .col_expr(Column::DelFlag, Expr::value("2"))
             .col_expr(Column::UpdateTime, Expr::value(now))
             .filter(Column::SsoClientId.is_in(ids))
-            .exec(self.base.db())
+            .exec(conn)
             .await?;
         Ok(())
     }

@@ -24,6 +24,8 @@
 use base64::Engine as _;
 use sea_orm::DatabaseConnection;
 use sea_orm::Set;
+// B-1：delete_clients 需在单事务内完成级联（begin/commit），故引入 TransactionTrait
+use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use ts_rs::TS;
@@ -2294,29 +2296,73 @@ impl SsoService {
                 "error.sso.batch_id_invalid"
             )));
         }
-        for id in &ids {
-            if let Some(m) = self.client_repo.find_by_pk(*id).await? {
+
+        // B-1：ORM 步骤（归属校验 / 取待吊销用户集 / 物理删同意记录 / 软删客户端）
+        // 全部收敛进**单个事务**——中途失败不得留下"同意记录已清但客户端仍在"的
+        // 半成品（原实现无事务，物理删同意记录后 soft_delete 失败即产生该不一致）。
+        //
+        // store（Redis/DB 共享态）侧的令牌吊销**不可回滚**，故必须推迟到事务提交
+        // 之后执行：若事务失败则 store 不动（安全）；若提交后吊销失败，最坏是令牌
+        // 多活至 TTL（可重试、可接受），绝不会出现"数据已回滚但令牌已被吊销"的镜像
+        // 不一致。这里用事务内收集 + 提交后执行两阶段表达该顺序。
+        let client_repo = self.client_repo.clone();
+        let consent_repo = self.consent_repo.clone();
+
+        // 事务提交后待吊销的 (user_id, client_id) 集合
+        let mut pending_revocations: Vec<(i64, String)> = Vec::new();
+        {
+            let txn = client_repo
+                .base()
+                .db()
+                .begin()
+                .await
+                .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
+
+            for id in &ids {
+                let Some(m) = client_repo.find_by_pk_conn(&txn, *id).await? else {
+                    // 不存在按幂等跳过（与批量删除语义一致：不存在的 id 不报错）
+                    continue;
+                };
                 // v5-N2 Phase 2：写归属校验（跨租户资源按 404 语义拒绝）
                 if !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id) {
+                    // txn 未提交，Drop 时自动回滚
                     return Err(ServiceError::not_found(&crate::tr!(
                         "error.sso.client_not_found"
                     )));
                 }
-                // 2. 级联吊销该客户端全部已授权用户的 SSO 令牌
-                // v5 第九轮修正：原误用 revoke_user_sso_tokens（**全量**吊销该用户
-                // 所有客户端的 AT）——删客户端 A 不应波及用户对客户端 B 的有效会话；
-                // 改为按 client 粒度（仅删 client_id 匹配的绑定与 online）
-                let user_ids = self.consent_repo.user_ids_by_client(&m.client_id).await?;
+                // 2. 事务内取该客户端全部已授权用户（与随后删除的记录集严格一致，
+                //    避免原实现"先读后删"跨调用竞态导致的错位）
+                let user_ids = consent_repo
+                    .user_ids_by_client_conn(&txn, &m.client_id)
+                    .await?;
+                // 3. 事务内物理删同意记录（历史审计可走操作日志）
+                consent_repo
+                    .delete_by_client_conn(&txn, &m.client_id)
+                    .await?;
+                // 记录待吊销项（提交后执行）
                 for uid in user_ids {
-                    self.revoke_user_client_tokens(store, uid, &m.client_id)
-                        .await;
+                    pending_revocations.push((uid, m.client_id.clone()));
                 }
-                // 3. 清理同意记录（物理删，历史审计可走操作日志）
-                self.consent_repo.delete_by_client(&m.client_id).await?;
             }
+
+            // 4. 事务内软删（del_flag='2'，client_id 唯一约束不释放，防重建撞名，v2-K4）
+            client_repo
+                .soft_delete_by_ids_conn(&txn, ids.clone())
+                .await?;
+
+            txn.commit()
+                .await
+                .map_err(|e| ServiceError::internal(&format!("提交事务失败: {e}")))?;
         }
-        // 4. 软删
-        self.client_repo.soft_delete_by_ids(ids).await?;
+
+        // ===== 事务已提交，以下为不可回滚的 store 侧级联吊销（best-effort 由实现内部保证）=====
+        // v5 第九轮修正：原误用 revoke_user_sso_tokens（**全量**吊销该用户所有客户端的
+        // AT）——删客户端 A 不应波及用户对客户端 B 的有效会话；
+        // 现按 client 粒度（仅删 client_id 匹配的绑定与 online）。
+        for (uid, client_id) in pending_revocations {
+            self.revoke_user_client_tokens(store, uid, &client_id).await;
+        }
+
         Ok(())
     }
 

@@ -69,19 +69,44 @@ impl SysOauthConsentRepository {
 
     /// 查询对某客户端存在**有效**授权的全部用户 ID（管理员删客户端时级联吊销其 SSO 令牌，v4-F2）
     pub async fn user_ids_by_client(&self, client_id: &str) -> Result<Vec<i64>, DbErr> {
+        self.user_ids_by_client_conn(self.base.db(), client_id)
+            .await
+    }
+
+    /// 查询对某客户端存在有效授权的全部用户 ID（事务上下文版本）。
+    ///
+    /// 用于 `delete_clients`：需在**同一事务内**先取出待吊销用户集合，
+    /// 再删除同意记录，避免"读到的用户集与删除的记录集"错位（B-1）。
+    pub async fn user_ids_by_client_conn<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        client_id: &str,
+    ) -> Result<Vec<i64>, DbErr> {
         let rows = Entity::find()
             .filter(Column::ClientId.eq(client_id))
             .filter(Column::DelFlag.ne("2"))
-            .all(self.base.db())
+            .all(conn)
             .await?;
         Ok(rows.into_iter().map(|m| m.user_id).collect())
     }
 
     /// 删除某 client 的全部授权记录（管理员删除客户端时级联清理，v2-K4）
     pub async fn delete_by_client(&self, client_id: &str) -> Result<(), DbErr> {
+        self.delete_by_client_conn(self.base.db(), client_id).await
+    }
+
+    /// 删除某 client 的全部授权记录（事务上下文版本）：`conn` 可为 `DatabaseTransaction`。
+    ///
+    /// 用于 `delete_clients` 的原子化级联（B-1）：物理删同意记录与软删客户端
+    /// 必须同事务，否则中途失败会留下"客户端仍在但授权记录已清"的不一致。
+    pub async fn delete_by_client_conn<C: sea_orm::ConnectionTrait>(
+        &self,
+        conn: &C,
+        client_id: &str,
+    ) -> Result<(), DbErr> {
         Entity::delete_many()
             .filter(Column::ClientId.eq(client_id))
-            .exec(self.base.db())
+            .exec(conn)
             .await?;
         Ok(())
     }

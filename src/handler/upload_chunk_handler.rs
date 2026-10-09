@@ -292,7 +292,10 @@ pub async fn chunk_complete(
     .await?;
 
     // 清理会话与暂存分片（先删会话键防重复 complete，再删文件）
-    let _ = state.store.del(&[key]).await;
+    // 删会话键失败会让分片会话残留至 TTL，期间重复 complete 可再次读已清目录 → 需可观测
+    if let Err(e) = state.store.del(std::slice::from_ref(&key)).await {
+        tracing::warn!(key = %key, error = %e, "分片上传会话键删除失败，分片会话将残留至 TTL 过期")
+    }
     cleanup_chunk_dir(&dir).await;
 
     tracing::info!(

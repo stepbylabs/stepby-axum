@@ -213,8 +213,11 @@ impl SysMenuService {
         if keys.is_empty() {
             return;
         }
-        // 批量删除（原 pipeline 语义——非事务允许部分成功；结果忽略，best-effort）
-        let _ = self.store.del(&keys).await;
+        // 批量删除（原 pipeline 语义——非事务允许部分成功；失败仅 warn）
+        // 失效失败会残留脏读直至 TTL 过期，故必须可观测（对齐 sys_config_service::del_cache_key）
+        if let Err(e) = self.store.del(&keys).await {
+            tracing::warn!(count = keys.len(), error = %e, "菜单权限缓存失效失败，可能产生脏读直至 TTL 过期")
+        }
     }
 
     /// 菜单列表（扁平，可加 menu_name/status 过滤）

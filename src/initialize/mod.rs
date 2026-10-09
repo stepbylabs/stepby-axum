@@ -4622,8 +4622,9 @@ async fn converge_tenant_grants_on_startup(db: &DatabaseConnection, store: &Arc<
         let pattern = format!("{}*", crate::common::constants::PERM_CACHE_PREFIX);
         if let Ok(keys) = store.scan(&pattern, None).await
             && !keys.is_empty()
+            && let Err(e) = store.del(&keys).await
         {
-            let _ = store.del(&keys).await;
+            tracing::warn!(count = keys.len(), error = %e, "启动期 perm cache 失效失败，授权变更可能不即时生效（残留至 TTL）")
         }
         tracing::warn!(
             tenants = tenants.len(),
@@ -4712,7 +4713,9 @@ pub(crate) async fn revoke_legacy_sso_at_tokens(store: &Arc<dyn SharedStore>) {
             Ok(()) => {
                 // 绑定转写成功后删除原 key：userinfo（只认绑定）与业务路由（认 blacklist）
                 // 双路径同时立即 401
-                let _ = store.del(std::slice::from_ref(key)).await;
+                if let Err(e) = store.del(std::slice::from_ref(key)).await {
+                    tracing::warn!(key = %key, error = %e, "SSO 旧令牌键清理失败，可能延迟 401（已写入 blacklist，安全语义不受影响）")
+                }
                 migrated += 1;
             }
             Err(e) => {

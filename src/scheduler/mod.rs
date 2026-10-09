@@ -112,6 +112,38 @@ pub struct JobScheduler {
     executing_jobs: Arc<std::sync::Mutex<HashMap<i64, bool>>>,
 }
 
+/// 内置任务构造 + 注册样板收敛（B-4）
+///
+/// 原 `register_builtin_scheduled_jobs` 里每个任务重复写：
+/// `Job::new_async(cron, cb).map_err(create)?` → `scheduler.add(job).await.map_err(add)?`。
+/// 本助手把两处错误映射收敛为单点，`name` 仅用于错误消息（中文任务名）。
+///
+/// 仅收敛「构造 + 注册」错误样板；任务闭包体原样保留（闭包内含大量业务理由注释，
+/// 表驱动化会丢失这些知识、收益为负——见 B-4 评审结论）。
+async fn add_builtin_job<F>(
+    scheduler: &TokioScheduler,
+    name: &str,
+    cron: &str,
+    callback: F,
+) -> Result<(), SchedulerError>
+where
+    F: FnMut(
+            uuid::Uuid,
+            TokioScheduler,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync
+        + 'static,
+{
+    let job = Job::new_async(cron, callback)
+        .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create {name}: {e}")))?;
+    scheduler
+        .add(job)
+        .await
+        .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to add {name}: {e}")))?;
+    Ok(())
+}
+
 impl JobScheduler {
     /// 创建并启动调度器
     ///
@@ -248,7 +280,7 @@ impl JobScheduler {
         let cleanup_config = config.clone();
         let archive_storage: Option<std::sync::Arc<dyn crate::storage::StorageBackend>> =
             crate::storage::new_backend(&config.upload).ok();
-        let cleanup_job = Job::new_async("0 0 3 * * *", move |_uuid, _l| {
+        add_builtin_job(scheduler, "log cleanup task", "0 0 3 * * *", move |_uuid, _l| {
             let db = db.clone();
             let config = cleanup_config.clone();
             let archive_storage = archive_storage.clone();
@@ -304,13 +336,7 @@ impl JobScheduler {
                 }
             })
         })
-        .map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to create log cleanup task: {}", e))
-        })?;
-
-        scheduler.add(cleanup_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to add log cleanup task: {}", e))
-        })?;
+        .await?;
 
         tracing::info!(
             "内置定时任务注册成功: cleanup_expired_logs (cron: '0 0 3 * * *', 保留 {} 天)",
@@ -327,24 +353,25 @@ impl JobScheduler {
             alert_store.clone(),
             alert_config.clone(),
         );
-        let alert_job = Job::new_async("30 * * * * *", move |_uuid, _l| {
-            let db = alert_db.clone();
-            let store = alert_store.clone();
-            let config = alert_config.clone();
-            Box::pin(async move {
-                match crate::service::sys_alert_service::alert_eval_once(db, store, config).await {
-                    Ok(summary) => tracing::info!("内置任务 alertEvalTask: {}", summary),
-                    Err(e) => tracing::error!("内置任务 alertEvalTask: 评估失败: {}", e),
-                }
-            })
-        })
-        .map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to add alert eval task: {}", e))
-        })?;
-
-        scheduler.add(alert_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to add alert eval task: {}", e))
-        })?;
+        add_builtin_job(
+            scheduler,
+            "alert eval task",
+            "30 * * * * *",
+            move |_uuid, _l| {
+                let db = alert_db.clone();
+                let store = alert_store.clone();
+                let config = alert_config.clone();
+                Box::pin(async move {
+                    match crate::service::sys_alert_service::alert_eval_once(db, store, config)
+                        .await
+                    {
+                        Ok(summary) => tracing::info!("内置任务 alertEvalTask: {}", summary),
+                        Err(e) => tracing::error!("内置任务 alertEvalTask: 评估失败: {}", e),
+                    }
+                })
+            },
+        )
+        .await?;
 
         tracing::info!(
             "内置定时任务注册成功: alertEvalTask (cron: '30 * * * * *', 每分钟评估启用告警规则)"
@@ -355,33 +382,26 @@ impl JobScheduler {
         // S1 安全态 DB 权威层，读路径有 expire_at 过滤 + 索引兜底保证正确性，但过期行
         // 此前无任何删除路径（随登出/强退无限累积）。比照 cleanup_expired_logs /
         // alertEvalTask 范式挂内置任务；redis 档键由 TTL 自过期，无需干预。
-        let revocation_job = Job::new_async("0 30 4 * * *", move |_uuid, _l| {
-            let db = revocation_db.clone();
-            Box::pin(async move {
-                match crate::shared_store::cleanup_expired_token_revocations(&db).await {
-                    Ok(n) if n > 0 => {
-                        tracing::info!("内置任务 tokenRevocationCleanup: 清理过期吊销行 {n} 行")
+        add_builtin_job(
+            scheduler,
+            "token revocation cleanup task",
+            "0 30 4 * * *",
+            move |_uuid, _l| {
+                let db = revocation_db.clone();
+                Box::pin(async move {
+                    match crate::shared_store::cleanup_expired_token_revocations(&db).await {
+                        Ok(n) if n > 0 => {
+                            tracing::info!("内置任务 tokenRevocationCleanup: 清理过期吊销行 {n} 行")
+                        }
+                        Ok(_) => tracing::debug!("内置任务 tokenRevocationCleanup: 无过期吊销行"),
+                        Err(e) => {
+                            tracing::error!("内置任务 tokenRevocationCleanup: 清理失败: {}", e)
+                        }
                     }
-                    Ok(_) => tracing::debug!("内置任务 tokenRevocationCleanup: 无过期吊销行"),
-                    Err(e) => {
-                        tracing::error!("内置任务 tokenRevocationCleanup: 清理失败: {}", e)
-                    }
-                }
-            })
-        })
-        .map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to add token revocation cleanup task: {}",
-                e
-            ))
-        })?;
-
-        scheduler.add(revocation_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to add token revocation cleanup task: {}",
-                e
-            ))
-        })?;
+                })
+            },
+        )
+        .await?;
 
         tracing::info!(
             "内置定时任务注册成功: tokenRevocationCleanup (cron: '0 30 4 * * *', 每日清理过期吊销行)"
@@ -390,122 +410,119 @@ impl JobScheduler {
         // 登录异常检测任务：每 5 分钟执行（cron: "0 */5 * * * *"）
         // 扫描最近 5 分钟 sys_logininfor 失败记录，按 IP 分组，count>=5 视为撞库攻击
         // 为每个异常 IP 创建 sys_notice 通知，同一 IP 30 分钟内不重复告警（Redis SETNX 去重）
-        let anomaly_job = Job::new_async("0 */5 * * * *", move |_uuid, _l| {
-            let db = anomaly_db.clone();
-            let store = anomaly_store.clone();
-            Box::pin(async move {
-                tracing::debug!(
-                    "内置任务 login_anomaly_detector 开始执行：扫描最近 5 分钟登录失败记录"
-                );
-
-                let logininfor_service =
-                    crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
-                let notice_service =
-                    crate::service::sys_notice_service::SysNoticeService::new(db.clone());
-
-                // 查询最近 5 分钟的失败登录，按 IP 分组，count >= 5 视为异常
-                const WINDOW_MINUTES: i64 = crate::common::constants::LOGIN_ANOMALY_WINDOW_MINS;
-                const FAIL_THRESHOLD: i64 = crate::common::constants::CREDENTIAL_STUFFING_THRESHOLD;
-                const DEDUP_TTL_SECS: u64 =
-                    (crate::common::constants::CREDENTIAL_STUFFING_DEDUP_MINS as u64) * 60; // 30 分钟
-
-                let since = crate::common::datetime::now_naive()
-                    - chrono::Duration::minutes(WINDOW_MINUTES);
-
-                let anomaly_ips = match logininfor_service
-                    .find_failed_group_by_ip(since, FAIL_THRESHOLD)
-                    .await
-                {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        tracing::error!("login_anomaly_detector: 查询失败登录分组失败: {}", e);
-                        return;
-                    }
-                };
-
-                if anomaly_ips.is_empty() {
+        add_builtin_job(
+            scheduler,
+            "login anomaly detection task",
+            "0 */5 * * * *",
+            move |_uuid, _l| {
+                let db = anomaly_db.clone();
+                let store = anomaly_store.clone();
+                Box::pin(async move {
                     tracing::debug!(
-                        "login_anomaly_detector: 最近 {} 分钟无异常 IP",
-                        WINDOW_MINUTES
+                        "内置任务 login_anomaly_detector 开始执行：扫描最近 5 分钟登录失败记录"
                     );
-                    return;
-                }
 
-                for (ip, count) in anomaly_ips {
-                    let dedup_key = format!("login_anomaly:{}", ip);
-                    // SETNX 去重：30 分钟内同一 IP 不重复创建告警
-                    // P3 修复: 区分存储错误与 key 已存在，共享态存储故障时仍创建告警（宁可重复也不漏报）
-                    let acquired = match store.set_nx_ex(&dedup_key, "1", DEDUP_TTL_SECS).await {
-                        Ok(true) => true,   // 成功获取去重锁
-                        Ok(false) => false, // key 已存在，跳过
-                        Err(e) => {
-                            tracing::warn!(
-                                "login_anomaly_detector: Redis 去重查询失败，仍创建告警: {}",
-                                e
-                            );
-                            true // 存储故障时仍创建告警（fail-open for alerting）
-                        }
-                    };
-
-                    if !acquired {
-                        tracing::debug!(
-                            "login_anomaly_detector: IP {} 在 {} 分钟内已告警，跳过",
-                            ip,
-                            DEDUP_TTL_SECS / 60
+                    let logininfor_service =
+                        crate::service::sys_logininfor_service::SysLogininforService::new(
+                            db.clone(),
                         );
-                        continue;
-                    }
+                    let notice_service =
+                        crate::service::sys_notice_service::SysNoticeService::new(db.clone());
 
-                    let dto = crate::service::sys_notice_service::NoticeAddDto {
-                        notice_title: crate::tr!("notice.login_anomaly.title", ip = ip),
-                        notice_type: "1".to_string(),
-                        notice_content: Some(crate::tr!(
-                            "notice.login_anomaly.content",
-                            minutes = WINDOW_MINUTES,
-                            ip = ip,
-                            count = count
-                        )),
-                        status: Some("0".to_string()),
-                        remark: Some(format!("auto-detected;ip={};count={}", ip, count)),
-                        notify_email: false,
-                    };
+                    // 查询最近 5 分钟的失败登录，按 IP 分组，count >= 5 视为异常
+                    const WINDOW_MINUTES: i64 = crate::common::constants::LOGIN_ANOMALY_WINDOW_MINS;
+                    const FAIL_THRESHOLD: i64 =
+                        crate::common::constants::CREDENTIAL_STUFFING_THRESHOLD;
+                    const DEDUP_TTL_SECS: u64 =
+                        (crate::common::constants::CREDENTIAL_STUFFING_DEDUP_MINS as u64) * 60; // 30 分钟
 
-                    match notice_service
-                        // 系统级（定时任务）无操作者租户上下文 → 平台租户 0
-                        .add_notice(dto, "system/scheduler", 0, None)
+                    let since = crate::common::datetime::now_naive()
+                        - chrono::Duration::minutes(WINDOW_MINUTES);
+
+                    let anomaly_ips = match logininfor_service
+                        .find_failed_group_by_ip(since, FAIL_THRESHOLD)
                         .await
                     {
-                        Ok(_) => {
-                            tracing::warn!(
-                                "login_anomaly_detector: 已为 IP {} 创建告警通知（失败 {} 次）",
-                                ip,
-                                count
-                            );
-                        }
+                        Ok(rows) => rows,
                         Err(e) => {
-                            tracing::error!(
-                                "login_anomaly_detector: 为 IP {} 创建告警失败: {}",
+                            tracing::error!("login_anomaly_detector: 查询失败登录分组失败: {}", e);
+                            return;
+                        }
+                    };
+
+                    if anomaly_ips.is_empty() {
+                        tracing::debug!(
+                            "login_anomaly_detector: 最近 {} 分钟无异常 IP",
+                            WINDOW_MINUTES
+                        );
+                        return;
+                    }
+
+                    for (ip, count) in anomaly_ips {
+                        let dedup_key = format!("login_anomaly:{}", ip);
+                        // SETNX 去重：30 分钟内同一 IP 不重复创建告警
+                        // P3 修复: 区分存储错误与 key 已存在，共享态存储故障时仍创建告警（宁可重复也不漏报）
+                        let acquired = match store.set_nx_ex(&dedup_key, "1", DEDUP_TTL_SECS).await
+                        {
+                            Ok(true) => true,   // 成功获取去重锁
+                            Ok(false) => false, // key 已存在，跳过
+                            Err(e) => {
+                                tracing::warn!(
+                                    "login_anomaly_detector: Redis 去重查询失败，仍创建告警: {}",
+                                    e
+                                );
+                                true // 存储故障时仍创建告警（fail-open for alerting）
+                            }
+                        };
+
+                        if !acquired {
+                            tracing::debug!(
+                                "login_anomaly_detector: IP {} 在 {} 分钟内已告警，跳过",
                                 ip,
-                                e
+                                DEDUP_TTL_SECS / 60
                             );
+                            continue;
+                        }
+
+                        let dto = crate::service::sys_notice_service::NoticeAddDto {
+                            notice_title: crate::tr!("notice.login_anomaly.title", ip = ip),
+                            notice_type: "1".to_string(),
+                            notice_content: Some(crate::tr!(
+                                "notice.login_anomaly.content",
+                                minutes = WINDOW_MINUTES,
+                                ip = ip,
+                                count = count
+                            )),
+                            status: Some("0".to_string()),
+                            remark: Some(format!("auto-detected;ip={};count={}", ip, count)),
+                            notify_email: false,
+                        };
+
+                        match notice_service
+                            // 系统级（定时任务）无操作者租户上下文 → 平台租户 0
+                            .add_notice(dto, "system/scheduler", 0, None)
+                            .await
+                        {
+                            Ok(_) => {
+                                tracing::warn!(
+                                    "login_anomaly_detector: 已为 IP {} 创建告警通知（失败 {} 次）",
+                                    ip,
+                                    count
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "login_anomaly_detector: 为 IP {} 创建告警失败: {}",
+                                    ip,
+                                    e
+                                );
+                            }
                         }
                     }
-                }
-            })
-        })
-        .map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to create login anomaly detection task: {}",
-                e
-            ))
-        })?;
-
-        scheduler.add(anomaly_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to add login anomaly detection task: {}",
-                e
-            ))
-        })?;
+                })
+            },
+        )
+        .await?;
 
         tracing::info!(
             "内置定时任务注册成功: login_anomaly_detector (cron: '0 */5 * * * *', 阈值 5 次/5 分钟)"
@@ -515,55 +532,49 @@ impl JobScheduler {
         // cron: "0 */1 * * * *"（秒=0，分钟=每 1 分钟）
         // 通过 SysMsgService::retry_pending 兜底投递失败的消息；重试耗尽置为失败由 service 内部处理。
         // 失败不阻断调度器和其他任务。
-        let msg_retry_job = Job::new_async("0 */1 * * * *", move |_uuid, _l| {
-            let db = msg_retry_db.clone();
-            let config = msg_retry_config.clone();
-            let store = msg_retry_store.clone();
-            Box::pin(async move {
-                tracing::debug!("内置任务 msg_send_retry 开始执行：重试待重试消息批次");
+        add_builtin_job(
+            scheduler,
+            "message send retry task",
+            "0 */1 * * * *",
+            move |_uuid, _l| {
+                let db = msg_retry_db.clone();
+                let config = msg_retry_config.clone();
+                let store = msg_retry_store.clone();
+                Box::pin(async move {
+                    tracing::debug!("内置任务 msg_send_retry 开始执行：重试待重试消息批次");
 
-                // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
-                // 无锁会导致重复投递消息（对齐 mmdb_auto_update 锁范式）
-                const MSG_RETRY_LOCK_KEY: &str = "lock:scheduler:msg_send_retry";
-                let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
-                    store.clone(),
-                    MSG_RETRY_LOCK_KEY,
-                    true,
-                    55,
-                    "msg_send_retry",
-                )
-                .await
-                else {
-                    return;
-                };
+                    // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
+                    // 无锁会导致重复投递消息（对齐 mmdb_auto_update 锁范式）
+                    const MSG_RETRY_LOCK_KEY: &str = "lock:scheduler:msg_send_retry";
+                    let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                        store.clone(),
+                        MSG_RETRY_LOCK_KEY,
+                        true,
+                        55,
+                        "msg_send_retry",
+                    )
+                    .await
+                    else {
+                        return;
+                    };
 
-                let msg_service = crate::service::sys_msg_service::SysMsgService::new(db, config);
+                    let msg_service =
+                        crate::service::sys_msg_service::SysMsgService::new(db, config);
 
-                match msg_service.retry_pending(MESSAGE_RETRY_BATCH, 0).await {
-                    Ok(n) => {
-                        if n > 0 {
-                            tracing::info!("msg_send_retry: 本次重试完成 {} 条待重试消息", n);
+                    match msg_service.retry_pending(MESSAGE_RETRY_BATCH, 0).await {
+                        Ok(n) => {
+                            if n > 0 {
+                                tracing::info!("msg_send_retry: 本次重试完成 {} 条待重试消息", n);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("msg_send_retry: 重试待重试消息失败: {}", e);
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("msg_send_retry: 重试待重试消息失败: {}", e);
-                    }
-                }
-            })
-        })
-        .map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to create message send retry task: {}",
-                e
-            ))
-        })?;
-
-        scheduler.add(msg_retry_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to add message send retry task: {}",
-                e
-            ))
-        })?;
+                })
+            },
+        )
+        .await?;
 
         tracing::info!(
             "内置定时任务注册成功: msg_send_retry (cron: '0 */1 * * * *', 单批次上限 {} 条)",
@@ -574,56 +585,49 @@ impl JobScheduler {
         // 通过 SysReportService::run_due_subscriptions 按各订阅自身的 cron 到期待执行，
         // 邮件经 MailerService、站内信写入 sys_msg_send_log，均复用既有投递语义。
         // 失败仅日志告警，不阻断调度器和其他任务。
-        let report_sub_job = Job::new_async("0 */1 * * * *", move |_uuid, _l| {
-            let db = report_db.clone();
-            let config = report_config.clone();
-            let store = report_sub_store.clone();
-            Box::pin(async move {
-                tracing::debug!("内置任务 report_sub_due 开始执行：扫描到期的报表订阅");
+        add_builtin_job(
+            scheduler,
+            "report subscription push task",
+            "0 */1 * * * *",
+            move |_uuid, _l| {
+                let db = report_db.clone();
+                let config = report_config.clone();
+                let store = report_sub_store.clone();
+                Box::pin(async move {
+                    tracing::debug!("内置任务 report_sub_due 开始执行：扫描到期的报表订阅");
 
-                // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
-                // 无锁会导致报表订阅重复推送（对齐 mmdb_auto_update 锁范式）
-                const REPORT_SUB_LOCK_KEY: &str = "lock:scheduler:report_sub_due";
-                let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
-                    store.clone(),
-                    REPORT_SUB_LOCK_KEY,
-                    true,
-                    55,
-                    "report_sub_due",
-                )
-                .await
-                else {
-                    return;
-                };
+                    // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
+                    // 无锁会导致报表订阅重复推送（对齐 mmdb_auto_update 锁范式）
+                    const REPORT_SUB_LOCK_KEY: &str = "lock:scheduler:report_sub_due";
+                    let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                        store.clone(),
+                        REPORT_SUB_LOCK_KEY,
+                        true,
+                        55,
+                        "report_sub_due",
+                    )
+                    .await
+                    else {
+                        return;
+                    };
 
-                let report_service =
-                    crate::service::sys_report_service::SysReportService::new(db, config);
+                    let report_service =
+                        crate::service::sys_report_service::SysReportService::new(db, config);
 
-                match report_service.run_due_subscriptions().await {
-                    Ok(n) => {
-                        if n > 0 {
-                            tracing::info!("report_sub_due: 本次共推送 {} 个到期的报表订阅", n);
+                    match report_service.run_due_subscriptions().await {
+                        Ok(n) => {
+                            if n > 0 {
+                                tracing::info!("report_sub_due: 本次共推送 {} 个到期的报表订阅", n);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("report_sub_due: 扫描推送报表订阅失败: {}", e);
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("report_sub_due: 扫描推送报表订阅失败: {}", e);
-                    }
-                }
-            })
-        })
-        .map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to create report subscription push task: {}",
-                e
-            ))
-        })?;
-
-        scheduler.add(report_sub_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!(
-                "Failed to add report subscription push task: {}",
-                e
-            ))
-        })?;
+                })
+            },
+        )
+        .await?;
 
         tracing::info!(
             "内置定时任务注册成功: report_sub_due (cron: '0 */1 * * * *', 按订阅自身 cron 到期推送)"
@@ -633,60 +637,62 @@ impl JobScheduler {
         // 会话 TTL + 10 分钟余量的分片目录（会话键 TTL 过期后的文件侧兜底——
         // 进程重启/清理失败等场景的孤儿文件不会无限堆积）。
         let chunk_cleanup_store = store.clone();
-        let chunk_cleanup_job = Job::new_async("0 */30 * * * *", move |_uuid, _l| {
-            let config = chunk_cleanup_config.clone();
-            let store = chunk_cleanup_store.clone();
-            Box::pin(async move {
-                const CHUNK_CLEANUP_LOCK_KEY: &str = "lock:scheduler:chunk_cleanup";
-                let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
-                    store.clone(),
-                    CHUNK_CLEANUP_LOCK_KEY,
-                    true,
-                    1500,
-                    "chunk_cleanup",
-                )
-                .await
-                else {
-                    return;
-                };
-                let ttl = config.upload.chunk_session_ttl_secs;
-                let stale_after = std::time::Duration::from_secs(ttl + 600);
-                let root = crate::common::upload::resolve_upload_dir("uploads").await;
-                let chunks_root = root.join("__chunks");
-                let mut removed = 0usize;
-                let Ok(tenant_dirs) = std::fs::read_dir(&chunks_root) else {
-                    return; // 无分片暂存区（从未使用过分片上传）
-                };
-                let now = std::time::SystemTime::now();
-                for tenant_entry in tenant_dirs.flatten() {
-                    let Ok(session_dirs) = std::fs::read_dir(tenant_entry.path()) else {
-                        continue;
+        add_builtin_job(
+            scheduler,
+            "chunk cleanup task",
+            "0 */30 * * * *",
+            move |_uuid, _l| {
+                let config = chunk_cleanup_config.clone();
+                let store = chunk_cleanup_store.clone();
+                Box::pin(async move {
+                    const CHUNK_CLEANUP_LOCK_KEY: &str = "lock:scheduler:chunk_cleanup";
+                    let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
+                        store.clone(),
+                        CHUNK_CLEANUP_LOCK_KEY,
+                        true,
+                        1500,
+                        "chunk_cleanup",
+                    )
+                    .await
+                    else {
+                        return;
                     };
-                    for session_entry in session_dirs.flatten() {
-                        let stale = session_entry
-                            .metadata()
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|mtime| now.duration_since(mtime).ok())
-                            .is_some_and(|age| age > stale_after);
-                        if stale && std::fs::remove_dir_all(session_entry.path()).is_ok() {
-                            removed += 1;
+                    let ttl = config.upload.chunk_session_ttl_secs;
+                    let stale_after = std::time::Duration::from_secs(ttl + 600);
+                    let root = crate::common::upload::resolve_upload_dir("uploads").await;
+                    let chunks_root = root.join("__chunks");
+                    let mut removed = 0usize;
+                    let Ok(tenant_dirs) = std::fs::read_dir(&chunks_root) else {
+                        return; // 无分片暂存区（从未使用过分片上传）
+                    };
+                    let now = std::time::SystemTime::now();
+                    for tenant_entry in tenant_dirs.flatten() {
+                        let Ok(session_dirs) = std::fs::read_dir(tenant_entry.path()) else {
+                            continue;
+                        };
+                        for session_entry in session_dirs.flatten() {
+                            let stale = session_entry
+                                .metadata()
+                                .and_then(|m| m.modified())
+                                .ok()
+                                .and_then(|mtime| now.duration_since(mtime).ok())
+                                .is_some_and(|age| age > stale_after);
+                            if stale && std::fs::remove_dir_all(session_entry.path()).is_ok() {
+                                removed += 1;
+                            }
                         }
+                        // 租户目录空了顺带清掉（保持暂存区扁平）
+                        let _ = std::fs::remove_dir(tenant_entry.path());
                     }
-                    // 租户目录空了顺带清掉（保持暂存区扁平）
-                    let _ = std::fs::remove_dir(tenant_entry.path());
-                }
-                if removed > 0 {
-                    tracing::info!("chunk_cleanup: 已清理过期分片目录 {removed} 个（TTL={ttl}s）");
-                }
-            })
-        })
-        .map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to create chunk cleanup task: {}", e))
-        })?;
-        scheduler.add(chunk_cleanup_job).await.map_err(|e| {
-            SchedulerError::SchedulerInternal(format!("Failed to add chunk cleanup task: {}", e))
-        })?;
+                    if removed > 0 {
+                        tracing::info!(
+                            "chunk_cleanup: 已清理过期分片目录 {removed} 个（TTL={ttl}s）"
+                        );
+                    }
+                })
+            },
+        )
+        .await?;
 
         tracing::info!(
             "内置定时任务注册成功: chunk_cleanup (cron: '0 */30 * * * *', 孤儿分片兜底清理)"
@@ -707,7 +713,7 @@ impl JobScheduler {
             let flow_scan_config = config.clone();
             let flow_cron = config.flow.timeout_scan_cron.clone();
             // 提前 fail-fast 校验 cron（mmdb_auto_update 范式）
-            let flow_job = Job::new_async(flow_cron.as_str(), move |_uuid, _l| {
+            add_builtin_job(scheduler, "flow timeout scan task", flow_cron.as_str(), move |_uuid, _l| {
                 let db = flow_scan_db.clone();
                 let config = flow_scan_config.clone();
                 let store = flow_scan_store.clone();
@@ -765,16 +771,7 @@ impl JobScheduler {
                     round_lock.release().await;
                 })
             })
-            .map_err(|e| {
-                SchedulerError::SchedulerInternal(format!(
-                    "Failed to create flow timeout scan task: {e}"
-                ))
-            })?;
-            scheduler.add(flow_job).await.map_err(|e| {
-                SchedulerError::SchedulerInternal(format!(
-                    "Failed to add flow timeout scan task: {e}"
-                ))
-            })?;
+            .await?;
             tracing::info!(
                 "内置定时任务注册成功: flow_timeout_scan (cron: '{}', 单批上限 {} 条, SLA {}h, 升级周期 {} 天, 整轮互斥锁: {})",
                 config.flow.timeout_scan_cron,

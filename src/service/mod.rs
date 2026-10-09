@@ -13,6 +13,7 @@
 
 pub mod acme_service;
 pub mod auth_service;
+pub mod dashboard_service;
 pub mod data_rule_service;
 pub mod event_outbox_service;
 pub mod flow_definition_service;

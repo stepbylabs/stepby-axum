@@ -57,13 +57,67 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
 fn scim_error_response(status: u16, e: ScimError) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (code, Json(serde_json::to_value(e).unwrap())).into_response()
+    // ScimError 的 Serialize 是 derive 生成的（字段均为 String），不会失败；
+    // 但为与成功路径保持同一 fail-closed 口径，仍走 scim_json_response 兜底。
+    scim_json_response(code, e, ScimError::new(500, "SCIM 错误响应序列化失败"))
 }
 
 /// 尊重 ScimError 自带的 HTTP status（字符串形式，解析失败回退 500）
 fn scim_error_response_for_app(e: ScimError) -> Response {
     let status = e.status.parse::<u16>().unwrap_or(500);
     scim_error_response(status, e)
+}
+
+/// 统一的 SCIM JSON 响应构造：序列化成功 → `status` + 载荷；
+/// 序列化失败 → 500 + `fallback`（符合 RFC 7644 §3.12 的错误体）。
+///
+/// 为什么不直接 `serde_json::to_value(x).unwrap()`：虽然对已实现 `Serialize`
+/// 的类型该调用实际不会失败，但一旦失败（自定义 `Serialize` 返回 `Err`、
+/// 或出现 `f64::NAN` 之类不可表示值）会在 handler 线程 panic，
+/// 绕过 SCIM 自有错误 JSON 契约、把 500 空响应抛给 IdP。
+/// `scim.enabled=true` 时 IdP 会持续重试，裸 panic 会污染日志且无法定位。
+fn scim_json_response<T, F>(status: StatusCode, resp: T, fallback: F) -> Response
+where
+    T: serde::Serialize,
+    F: serde::Serialize,
+{
+    match serde_json::to_value(resp) {
+        Ok(v) => (status, Json(v)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "SCIM 响应序列化失败，已降级为 500 错误体");
+            // 递归深度恒为 1：fallback 由 ScimError::new 构造（字段全为 String，序列化不会失败），
+            // 即便极端情况下仍失败，serde_json 也会返回 Err 而非 panic；此处再兜底为纯文本 JSON。
+            match serde_json::to_value(fallback) {
+                Ok(v) => (StatusCode::INTERNAL_SERVER_ERROR, Json(v)).into_response(),
+                Err(e2) => {
+                    tracing::error!(error = %e2, "SCIM 错误体序列化亦失败，返回最小 JSON");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "status": "500", "detail": "SCIM response serialization failed" })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+    }
+}
+
+/// 成功响应（200）+ SCIM JSON 体
+fn scim_ok<T: serde::Serialize>(resp: T) -> Response {
+    scim_json_response(
+        StatusCode::OK,
+        resp,
+        ScimError::new(500, "SCIM 响应序列化失败"),
+    )
+}
+
+/// 创建成功响应（201）+ SCIM JSON 体
+fn scim_created<T: serde::Serialize>(resp: T) -> Response {
+    scim_json_response(
+        StatusCode::CREATED,
+        resp,
+        ScimError::new(500, "SCIM 响应序列化失败"),
+    )
 }
 
 fn base_url_of(headers: &HeaderMap) -> String {
@@ -106,7 +160,7 @@ pub async fn list_users(
         .list_users(start_index, count, filter, &base)
         .await
     {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -134,7 +188,7 @@ pub async fn get_user(
     }
     let base = base_url_of(&headers);
     match state.scim_service.get_user(id, &base).await {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -175,11 +229,7 @@ pub async fn create_user(
                 }),
                 state.config.scim.tenant_id,
             );
-            (
-                StatusCode::CREATED,
-                Json(serde_json::to_value(resp).unwrap()),
-            )
-                .into_response()
+            scim_created(resp)
         }
         Err(e) => scim_error_response_for_app(e),
     }
@@ -211,7 +261,7 @@ pub async fn put_user(
     }
     let base = base_url_of(&headers);
     match state.scim_service.put_user(id, &body, &base).await {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -242,7 +292,7 @@ pub async fn patch_user(
     }
     let base = base_url_of(&headers);
     match state.scim_service.patch_user(id, &body, &base).await {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -332,7 +382,7 @@ pub async fn list_groups(
         .list_groups(start_index, count, filter, &base)
         .await
     {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -360,7 +410,7 @@ pub async fn get_group(
     }
     let base = base_url_of(&headers);
     match state.scim_group_service.get_group(id, &base).await {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -400,11 +450,7 @@ pub async fn create_group(
                 }),
                 state.config.scim.tenant_id,
             );
-            (
-                StatusCode::CREATED,
-                Json(serde_json::to_value(resp).unwrap()),
-            )
-                .into_response()
+            scim_created(resp)
         }
         Err(e) => scim_error_response_for_app(e),
     }
@@ -436,7 +482,7 @@ pub async fn put_group(
     }
     let base = base_url_of(&headers);
     match state.scim_group_service.put_group(id, &body, &base).await {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }
@@ -467,7 +513,7 @@ pub async fn patch_group(
     }
     let base = base_url_of(&headers);
     match state.scim_group_service.patch_group(id, &body, &base).await {
-        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(resp) => scim_ok(resp),
         Err(e) => scim_error_response_for_app(e),
     }
 }

@@ -1674,7 +1674,10 @@ impl SysTenantService {
         if keys.is_empty() {
             return;
         }
-        let _ = self.store.del(&keys).await;
+        // 缓存失效 best-effort：失败不阻断主流程，但必须可观测（残留脏读直至 TTL 过期）
+        if let Err(e) = self.store.del(&keys).await {
+            tracing::warn!(count = keys.len(), error = %e, "租户缓存失效失败，可能产生脏读直至 TTL 过期")
+        }
     }
 
     // ---------- 启停 / 删除 / 恢复 ----------
@@ -2579,8 +2582,10 @@ impl SysTenantService {
     }
 
     async fn redis_del(&self, key: &str) {
-        // 与原实现一致：删失败静默忽略（缓存失效，best-effort）
-        let _ = self.store.del(&[key.to_string()]).await;
+        // 缓存失效 best-effort：失败不阻断主流程，但必须可观测（残留脏读直至 TTL 过期）
+        if let Err(e) = self.store.del(&[key.to_string()]).await {
+            tracing::warn!(cache_key = %key, error = %e, "租户缓存失效失败，可能产生脏读直至 TTL 过期")
+        }
     }
 
     // ---------- 内部工具 ----------
