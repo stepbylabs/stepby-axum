@@ -38,8 +38,11 @@ permission_deny_by_default = true
 # ⚠️ 非法取值回落 auto 并打 WARN（fail-safe）；显式 redis 但 url 无效 → 拒绝启动
 #    （fail-closed）。切换详见 docs/optimization/ZERO-DEPENDENCY-DEPLOYMENT-PLAN-2026-10-01.md §4.5。
 # ⚠️ 也可用环境变量 CACHE_MODE=auto|local|redis 覆盖（容器场景无需改配置文件）。
+# [收尾十三] 默认 local：共享态（token/验证码/黑名单/分布式锁/幂等）纯 SQL 承载，
+# 零 Redis 依赖——单机开发/演示即开即用，无需 Docker。生产多实例部署改 mode = "redis"
+# 并配 REDIS_URL（S1 安全态双写 DB 权威层，档位切换无缝、无需迁移/重登）。
 [cache]
-mode = "auto"
+mode = "local"
 gc_interval_secs = 600   # local 档过期行 GC 周期（秒）
 
 [server]
@@ -97,7 +100,7 @@ dept_cte_max_depth = 30
 slow_sql_threshold_ms = 1000
 
 [redis]
-# 生产环境通过环境变量 REDIS_URL 注入
+# 生产环境通过环境变量 REDIS_URL 注入（cache.mode = "local" 时本 url 不生效、不建立连接）
 # 注意：当前使用 ConnectionManager（单连接多路复用），无需配置连接池大小
 url = "redis://CHANGE_ME@127.0.0.1:6379/0"
 
