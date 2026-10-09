@@ -347,7 +347,7 @@ pub async fn token(
                 peer.ip(),
                 &state.config.server.trusted_proxies,
             );
-            let db = state.db.clone();
+            let state = state.clone();
             let user_name = result.user_name.clone();
             // v5-N2 Phase 2：登录日志归属被登录用户的租户（tid 随授权用户带入）
             let tenant_id = result.tenant_id;
@@ -355,22 +355,12 @@ pub async fn token(
             let user_id = result.user_id;
             let cid = params.client_id.clone().unwrap_or_default();
             tokio::spawn(async move {
-                let now = crate::common::datetime::now_naive();
-                use sea_orm::{ActiveModelTrait, Set};
-                let am = crate::entity::sys_logininfor::ActiveModel {
-                    tenant_id: Set(tenant_id),
-                    user_id: Set(user_id),
-                    user_name: Set(Some(user_name)),
-                    ipaddr: Set(Some(ip)),
-                    login_location: Set(None),
-                    browser: Set(Some("SSO".to_string())),
-                    os: Set(Some("-".to_string())),
-                    status: Set(Some("0".to_string())),
-                    msg: Set(Some(format!("SSO 令牌签发: {cid}"))),
-                    login_time: Set(Some(now)),
-                    ..Default::default()
-                };
-                if let Err(e) = am.insert(&db).await {
+                // B-2：ORM 写入下沉至 SysLogininforService（handler 不再直接构造 ActiveModel）
+                if let Err(e) = state
+                    .logininfor_service
+                    .write_sso_issue_log(tenant_id, user_id, user_name, ip, cid)
+                    .await
+                {
                     tracing::warn!("SSO 令牌签发日志写入失败（best-effort）: {}", e);
                 }
             });

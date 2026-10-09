@@ -7,7 +7,7 @@
 use garde::Validate;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -328,10 +328,20 @@ impl FlowDefinitionService {
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         self.ensure_designer_write(operator_tid).await?;
+        if flow_ids.is_empty() {
+            return Ok(());
+        }
+        // B-1：批量软删收敛进单事务——逐条 update 无事务时，中途失败会留下
+        // "部分流程已软删、部分未删"的不一致（调用方无法感知已生效的条目）。
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
         for fid in flow_ids {
             if let Some(m) = FlowDefEntity::find_by_id(fid)
                 .filter(crate::entity::flow_definition::Column::DelFlag.eq("0"))
-                .one(&self.db)
+                .one(&txn)
                 .await?
             {
                 self.ensure_access(&m, operator_tid)?;
@@ -339,9 +349,12 @@ impl FlowDefinitionService {
                 am.del_flag = Set(Some("1".to_string()));
                 am.update_by = Set(Some(operator.to_string()));
                 am.update_time = Set(Some(crate::common::datetime::now_naive()));
-                am.update(&self.db).await?;
+                am.update(&txn).await?;
             }
         }
+        txn.commit()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("提交事务失败: {e}")))?;
         Ok(())
     }
 }

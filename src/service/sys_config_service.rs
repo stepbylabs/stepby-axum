@@ -243,7 +243,13 @@ impl SysConfigService {
             CONFIG_NULL_CACHE_TTL
         };
         let cache_value = value.unwrap_or(CONFIG_NULL_MARKER);
-        let _ = self.store.set_ex(cache_key, cache_value, ttl as u64).await;
+        if let Err(e) = self.store.set_ex(cache_key, cache_value, ttl as u64).await {
+            tracing::warn!(
+                cache_key = %cache_key,
+                error = %e,
+                "配置缓存写失败，本次读将回落查库（与 del_cache_key 的 best-effort 口径一致）"
+            )
+        }
     }
 
     /// DEL 单个缓存 key（best-effort，失败仅 warn）。

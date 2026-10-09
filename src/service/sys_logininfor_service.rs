@@ -9,14 +9,16 @@
 //! 不依赖任何 Web 框架类型（axum / tower / tower-http）
 
 use chrono::NaiveDateTime;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, Set};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
 use crate::common::page::{PageDomain, default_page_num, default_page_size};
 use crate::common::sort::{self, SortOrder};
-use crate::entity::sys_logininfor::{Column as LogininforColumn, Model as SysLogininforModel};
+use crate::entity::sys_logininfor::{
+    ActiveModel as LogininforAM, Column as LogininforColumn, Model as SysLogininforModel,
+};
 use crate::repository::sys_logininfor::SysLogininforRepository;
 
 // ==================== DTO ====================
@@ -94,6 +96,38 @@ impl SysLogininforService {
         Self {
             logininfor_repo: SysLogininforRepository::new(db),
         }
+    }
+
+    /// 写入一条 SSO 令牌签发登录日志（B-2：handler 层 ORM 下沉）
+    ///
+    /// 原 `sso_handler` 在 spawn 任务内直接构造 `ActiveModel` 并 `insert`，
+    /// 违反分层。此处收敛为服务方法，handler 只负责并发调度与 best-effort 容错。
+    ///
+    /// 参数与字段口径保持与原实现一致（browser="SSO"、os="-"、status="0"）。
+    pub async fn write_sso_issue_log(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        user_name: String,
+        ipaddr: String,
+        client_id: String,
+    ) -> Result<(), ServiceError> {
+        let now = crate::common::datetime::now_naive();
+        let mut am = LogininforAM {
+            ..Default::default()
+        };
+        am.tenant_id = Set(tenant_id);
+        am.user_id = Set(user_id);
+        am.user_name = Set(Some(user_name));
+        am.ipaddr = Set(Some(ipaddr));
+        am.login_location = Set(None);
+        am.browser = Set(Some("SSO".to_string()));
+        am.os = Set(Some("-".to_string()));
+        am.status = Set(Some("0".to_string()));
+        am.msg = Set(Some(format!("SSO 令牌签发: {client_id}")));
+        am.login_time = Set(Some(now));
+        self.logininfor_repo.insert(am).await?;
+        Ok(())
     }
 
     /// 分页查询登录日志

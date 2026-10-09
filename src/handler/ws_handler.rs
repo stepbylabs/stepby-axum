@@ -134,8 +134,11 @@ async fn incr_ws_conn_count(state: &AppState, user_id: i64) -> Result<u32, axum:
 /// 改经 `store.decr` 单次原子执行 DECR → 判断 ≤0 → DEL（Lua 语义封进实现层，无竞态）。
 async fn decr_ws_conn_count(state: &AppState, user_id: i64) {
     let key = format!("ws_conn:{}", user_id);
-    // best-effort：递减失败不阻断关闭流程，计数留待 24h TTL 自然过期
-    let _ = state.store.decr(&key).await;
+    // best-effort：递减失败不阻断关闭流程，计数留待 24h TTL 自然过期。
+    // 高频关闭路径故用 debug 级（失败不改变业务结果，仅影响在线数展示精度）。
+    if let Err(e) = state.store.decr(&key).await {
+        tracing::debug!(key = %key, error = %e, "WS 连接计数递减失败，将依赖 TTL 自然过期")
+    }
 }
 
 /// 重置所有用户的 WebSocket 连接计数（服务启动时调用）

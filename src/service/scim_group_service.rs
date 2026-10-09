@@ -181,6 +181,79 @@ impl ScimGroupService {
         })
     }
 
+    /// 批量装配 SCIM Group 资源（消除列表 N+1）
+    ///
+    /// 固定 3 次查询：组（IN）→ 成员（IN group_id）→ 用户（IN user_id），
+    /// 保持入参 `gids` 的顺序（即 SQL 的 ORDER BY group_id）；
+    /// 已软删（del_flag='2'）或缺失的组自动跳过，与旧逐条 `find_by_id` 行为一致。
+    async fn build_resources_batch(
+        &self,
+        gids: &[i64],
+        base_url: &str,
+    ) -> Result<Vec<ScimGroupResource>, ScimError> {
+        if gids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let groups = ScimGroup::find()
+            .filter(GroupCol::GroupId.is_in(gids.to_vec()))
+            .all(self.db())
+            .await
+            .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
+        let by_gid: std::collections::HashMap<i64, GroupModel> =
+            groups.into_iter().map(|g| (g.group_id, g)).collect();
+
+        // 一次查全部相关成员（含 group_id，用于回流分组）
+        let member_rows = GroupMember::find()
+            .filter(MemberCol::GroupId.is_in(gids.to_vec()))
+            .all(self.db())
+            .await
+            .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
+        let user_ids: Vec<i64> = member_rows.iter().map(|mr| mr.user_id).collect();
+        let users = if user_ids.is_empty() {
+            Vec::new()
+        } else {
+            sys_user::Entity::find()
+                .filter(sys_user::Column::UserId.is_in(user_ids))
+                .all(self.db())
+                .await
+                .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
+        };
+        let nick_by_uid: std::collections::HashMap<i64, String> = users
+            .into_iter()
+            .map(|u| (u.user_id, u.nick_name))
+            .collect();
+        let mut members_by_gid: std::collections::HashMap<i64, Vec<ScimGroupMemberRef>> =
+            std::collections::HashMap::new();
+        for mr in member_rows {
+            members_by_gid
+                .entry(mr.group_id)
+                .or_default()
+                .push(ScimGroupMemberRef {
+                    value: mr.user_id.to_string(),
+                    ref_: format!("{base_url}/scim/v2/Users/{}", mr.user_id),
+                    display: nick_by_uid.get(&mr.user_id).cloned(),
+                });
+        }
+
+        let mut out = Vec::with_capacity(gids.len());
+        for gid in gids {
+            if let Some(m) = by_gid.get(gid) {
+                out.push(ScimGroupResource {
+                    schemas: vec![SCIM_GROUP_SCHEMA.to_string()],
+                    id: m.group_id.to_string(),
+                    external_id: m.external_id.clone(),
+                    display_name: m.display_name.clone(),
+                    members: members_by_gid.remove(gid).unwrap_or_default(),
+                    meta: crate::service::scim_service::ScimMeta {
+                        resource_type: "Group".to_string(),
+                        location: format!("{base_url}/scim/v2/Groups/{}", m.group_id),
+                    },
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// filter 白名单：displayName eq / externalId eq（同 Users 语义）
     /// 返回 (列名, 原始值)；值由调用方参数化绑定（不再做字符串转义）。
     fn parse_group_filter(filter: &str) -> Option<(&'static str, String)> {
@@ -260,13 +333,13 @@ impl ScimGroupService {
             .query_all_raw(Statement::from_sql_and_values(backend, list_sql, values))
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
-        let mut resources = Vec::with_capacity(rows.len());
-        for row in rows {
-            let gid = row.try_get::<i64>("", "group_id").unwrap_or(0);
-            if let Ok(Some(m)) = ScimGroup::find_by_id(gid).one(self.db()).await {
-                resources.push(self.to_scim_group(&m, base_url).await?);
-            }
-        }
+        // 批量装配（消除 N+1）：1 次 IN 查组 → 1 次 IN 查成员 → 1 次 IN 查用户
+        let gids: Vec<i64> = rows
+            .iter()
+            .map(|r| r.try_get::<i64>("", "group_id").unwrap_or(0))
+            .filter(|gid| *gid != 0)
+            .collect();
+        let resources = self.build_resources_batch(&gids, base_url).await?;
         Ok(ScimGroupListResponse {
             schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
             total_results: total,

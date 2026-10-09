@@ -1557,6 +1557,21 @@ impl SysUserService {
         Ok(rows.into_iter().collect())
     }
 
+    /// 越权防护（B-3）：`rows` 为「该批资源实际存在行的 tenant_id 列表」。
+    /// 逐条 `find_by_id` 的 N+1 已由各 repo 的批量方法消除，此处只做判定。
+    /// 语义与旧逐条版本一致：不存在的 ID 不在 `rows` 中（跳过不报错），
+    /// 只要存在**任一** 异租户行即 403（fail-closed）。
+    fn assert_tenant_allowed(operator_tid: i64, tenant_ids: &[i64]) -> Result<(), ServiceError> {
+        for tid in tenant_ids {
+            if !crate::common::tenant::tenant_allowed(operator_tid, *tid) {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// 越权防护：批量角色 ID 必须与 operator 同租户（operator_tid=0 平台管理员放行）
     async fn ensure_roles_tenant_allowed(
         &self,
@@ -1566,17 +1581,9 @@ impl SysUserService {
         let Some(ids) = role_ids else {
             return Ok(());
         };
-        for role_id in ids {
-            let Some(role) = self.role_repo.base().find_by_id(*role_id).await? else {
-                continue;
-            };
-            if !crate::common::tenant::tenant_allowed(operator_tid, role.tenant_id) {
-                return Err(ServiceError::forbidden(&crate::tr!(
-                    "error.common.forbidden"
-                )));
-            }
-        }
-        Ok(())
+        // B-3：一次批量查询取回租户集合，替代逐条 find_by_id
+        let tids = self.role_repo.tenant_ids_by_ids(ids).await?;
+        Self::assert_tenant_allowed(operator_tid, &tids)
     }
 
     /// 越权防护：批量部门 ID（主/兼职）必须与 operator 同租户（operator_tid=0 平台管理员放行）
@@ -1588,17 +1595,9 @@ impl SysUserService {
         let Some(ids) = dept_ids else {
             return Ok(());
         };
-        for dept_id in ids {
-            let Some(dept) = self.dept_repo.base().find_by_id(*dept_id).await? else {
-                continue;
-            };
-            if !crate::common::tenant::tenant_allowed(operator_tid, dept.tenant_id) {
-                return Err(ServiceError::forbidden(&crate::tr!(
-                    "error.common.forbidden"
-                )));
-            }
-        }
-        Ok(())
+        // B-3：一次批量查询取回租户集合，替代逐条 find_by_id
+        let tids = self.dept_repo.tenant_ids_by_ids(ids).await?;
+        Self::assert_tenant_allowed(operator_tid, &tids)
     }
 
     /// 越权防护：批量岗位 ID 必须与 operator 同租户（operator_tid=0 平台管理员放行）
@@ -1617,17 +1616,9 @@ impl SysUserService {
         let Some(ids) = post_ids else {
             return Ok(());
         };
-        for post_id in ids {
-            let Some(post) = self.post_repo.base().find_by_id(*post_id).await? else {
-                continue;
-            };
-            if !crate::common::tenant::tenant_allowed(operator_tid, post.tenant_id) {
-                return Err(ServiceError::forbidden(&crate::tr!(
-                    "error.common.forbidden"
-                )));
-            }
-        }
-        Ok(())
+        // B-3：一次批量查询取回租户集合，替代逐条 find_by_id
+        let tids = self.post_repo.tenant_ids_by_ids(ids).await?;
+        Self::assert_tenant_allowed(operator_tid, &tids)
     }
 
     pub async fn add_user(
@@ -2206,16 +2197,44 @@ impl SysUserService {
         // C-2：批量垂直越权校验（事务前统一执行，全部通过后才进入事务）
         //      与 delete_user 的 check_vertical_auth_by_user_id 行为一致，
         //      避免 handler 层 for 循环调用 delete_user 时漏校验的安全漏洞。
-        for target_user_id in &user_ids {
-            self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
-                .await?;
-            // 越权防护：租户管理员不得跨租户删除用户（按 id 列表删除必须逐个收敛归属）
-            if let Some(target) = self.user_repo.base().find_by_id(*target_user_id).await?
-                && !crate::common::tenant::tenant_allowed(operator_tid, target.tenant_id)
-            {
-                return Err(ServiceError::forbidden(&crate::tr!(
-                    "error.common.forbidden"
-                )));
+        //
+        // N+1 消除（B-3）：operator 角色 / target 用户 / target 角色关联各查 1 次，
+        // 全部在内存中比对；语义与原逐条调用完全等价（超管仍短路豁免）。
+        {
+            let mut target_roles_by_uid: std::collections::HashMap<i64, Vec<i64>> =
+                std::collections::HashMap::new();
+            if operator_user_id != SUPER_ADMIN_USER_ID {
+                target_roles_by_uid = self
+                    .user_role_repo
+                    .find_role_ids_by_user_ids(&user_ids)
+                    .await?;
+            }
+            // 一次 IN 查回所有目标用户（user_id → tenant_id，用于租户归属校验；
+            // 不过滤软删，与旧逐条 find_by_id 语义一致）
+            let target_tids: std::collections::HashMap<i64, i64> = self
+                .user_repo
+                .tenant_ids_by_user_ids(&user_ids)
+                .await?
+                .into_iter()
+                .collect();
+            for target_user_id in &user_ids {
+                // 垂直越权：复用 role_ids 版本的判定（超管已在上面短路）
+                if operator_user_id != SUPER_ADMIN_USER_ID {
+                    let role_ids = target_roles_by_uid
+                        .get(target_user_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    self.check_vertical_auth_by_role_ids(operator_user_id, &role_ids)
+                        .await?;
+                }
+                // 越权防护：租户管理员不得跨租户删除用户（按 id 列表删除必须逐个收敛归属）
+                if let Some(tid) = target_tids.get(target_user_id)
+                    && !crate::common::tenant::tenant_allowed(operator_tid, *tid)
+                {
+                    return Err(ServiceError::forbidden(&crate::tr!(
+                        "error.common.forbidden"
+                    )));
+                }
             }
         }
 

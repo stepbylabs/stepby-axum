@@ -178,4 +178,21 @@ impl SysPostRepository {
     pub async fn update(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.update(model).await
     }
+
+    /// B-3：批量取给定岗位 ID 中**实际存在**行的 `tenant_id` 列表。
+    ///
+    /// 供 `sys_user_service::ensure_posts_tenant_allowed` 的租户归属校验使用，
+    /// 替代逐条 `find_by_id` 的 N+1。不存在的 id 不出现在结果中（调用方跳过）。
+    pub async fn tenant_ids_by_ids(&self, ids: &[i64]) -> Result<Vec<i64>, DbErr> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysPost::find()
+            .select_only()
+            .column(Column::TenantId)
+            .filter(Column::PostId.is_in(ids.to_vec()))
+            .into_tuple::<i64>()
+            .all(self.base.db())
+            .await
+    }
 }
