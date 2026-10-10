@@ -237,6 +237,11 @@ pub async fn get_names(
         *groups.entry(prefix.to_string()).or_insert(0) += 1;
     }
 
+    // 仅保留白名单前缀组：getKeys/清理接口按 ALLOWED_CACHE_PREFIXES 校验（防通配符滥用），
+    // getNames 若不过滤会列出点击后必 400 的"死行"（前端行点击仅拿到拦截器统一报错，
+    // 行本身不可操作=假入口）。口径与 get_keys/清理接口的 validate_cache_prefix 单点收敛。
+    groups.retain(|name, _| ALLOWED_CACHE_PREFIXES.iter().any(|p| name.starts_with(p)));
+
     let list: Vec<SysCache> = groups
         .into_iter()
         .map(|(name, count)| SysCache {
@@ -684,6 +689,27 @@ mod tests {
         assert!(validate_cache_prefix("dict:user").is_ok());
         assert!(validate_cache_prefix("sys_config:site_name").is_ok());
         assert!(validate_cache_prefix("online:").is_ok());
+    }
+
+    #[test]
+    fn get_names_retains_only_whitelisted_prefix_groups() {
+        // 模拟 get_names 分组结果：白名单组 + 非白名单组（如 rate_limit:/pwd_ver:）
+        let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (name, count) in [
+            ("dict:", 3),
+            ("sys_config:", 2),
+            ("rate_limit:", 5),
+            ("pwd_ver:", 1),
+            ("sso:at:", 4),
+        ] {
+            groups.insert(name.to_string(), count);
+        }
+        groups.retain(|name, _| ALLOWED_CACHE_PREFIXES.iter().any(|p| name.starts_with(p)));
+        assert!(groups.contains_key("dict:"));
+        assert!(groups.contains_key("sys_config:"));
+        assert!(groups.contains_key("sso:at:"));
+        assert!(!groups.contains_key("rate_limit:"));
+        assert!(!groups.contains_key("pwd_ver:"));
     }
 
     #[test]
