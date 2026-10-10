@@ -829,4 +829,5 @@ alert:
     op_invalid: "非法操作符: %{value}"
     value_type_invalid: "非法值类型: %{value}"
     fixed_value_required: "固定值类型必须提供规则值"
+    in_value_required: "in 操作符必须提供逗号分隔的值列表"
     not_found: "规则不存在"
