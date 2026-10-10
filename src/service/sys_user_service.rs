@@ -588,7 +588,21 @@ pub struct UserVo {
 #[ts(export, rename_all = "camelCase")]
 pub struct UserAuthRoleVo {
     pub user: SysUserModel,
-    pub roles: Vec<SysRoleModel>,
+    pub roles: Vec<SysRoleWithFlagVo>,
+}
+
+/// 授权角色行（SysRoleModel 平铺 + flag 已授权标记，对齐前端 SysRoleWithFlag）：
+/// 前端 authRole 页依赖每行 flag 做「已授权角色预勾选」——此前 roles 裸返回
+/// SysRoleModel（无 flag、user 亦无 roleIds）导致预勾选在真实 UI 中完全失效。
+#[derive(Debug, Clone, serde::Serialize, TS, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename_all = "camelCase")]
+pub struct SysRoleWithFlagVo {
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub role: SysRoleModel,
+    /// 当前用户是否已持有该角色（sys_user_role 存在关联行）
+    pub flag: bool,
 }
 
 /// 个人信息视图对象（对齐前端 GET /system/user/profile 响应）
@@ -2734,8 +2748,22 @@ impl SysUserService {
             return Err(ServiceError::not_found(&crate::tr!("error.user.not_found")));
         }
 
-        // 查询全部未删除角色（通过 Repository，按租户过滤；前端根据 user.roleIds 自行标记已勾选）
+        // 查询全部未删除角色（通过 Repository，按租户过滤），并按 sys_user_role
+        // 关联行填充 flag（已授权标记）——前端 authRole 页按 row.flag 预勾选
         let all_roles: Vec<SysRoleModel> = self.role_repo.find_active_all(tenant_scope).await?;
+        let user_role_ids = self
+            .user_role_repo
+            .find_role_ids_by_user_ids(&[user_id])
+            .await?
+            .remove(&user_id)
+            .unwrap_or_default();
+        let roles_with_flag: Vec<SysRoleWithFlagVo> = all_roles
+            .into_iter()
+            .map(|role| SysRoleWithFlagVo {
+                flag: user_role_ids.contains(&role.role_id),
+                role,
+            })
+            .collect();
 
         // M1 脱敏影响面补齐（字段级权限 M2 登记）：authRole VO 内嵌 user 的
         // phonenumber/email 按三口径掩码（本人查自己 / 超管 → 原值；其它 → 掩码）。
@@ -2749,7 +2777,7 @@ impl SysUserService {
 
         Ok(UserAuthRoleVo {
             user,
-            roles: all_roles,
+            roles: roles_with_flag,
         })
     }
 

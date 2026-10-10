@@ -1321,7 +1321,8 @@ pub struct AuthRoleResult {
     pub code: i32,
     pub msg: String,
     pub user: crate::entity::sys_user::Model,
-    pub roles: Vec<SysRoleModel>,
+    /// 角色行带 flag（已授权标记，对齐前端 SysRoleWithFlag 预勾选契约）
+    pub roles: Vec<crate::service::sys_user_service::SysRoleWithFlagVo>,
 }
 
 /// 头像上传响应（对齐前端 UserProfileAvatarResult extends AjaxResult）
