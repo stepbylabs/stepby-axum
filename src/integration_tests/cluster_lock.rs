@@ -88,3 +88,71 @@ async fn test_round_lock_not_needed_short_circuits() {
         .expect("短路档不得占用真实锁");
     b.release().await;
 }
+
+/// **Drop 兜底释放**（批次三十）：未显式 `release()` 直接 `drop` ⇒ 锁必须被释放，
+/// 同 key 的其他实例可立即获取（不必等 TTL）。
+///
+/// 场景等价：内置任务闭包体内 panic / 提前 return，闭包尾部 `release().await` 被跳过——
+/// 修复前锁会一直持有到 TTL 到期（flow 300s / chunk_cleanup 1500s），期间整轮被静默跳过。
+///
+/// 可证伪性：若 `Drop for ClusterLock` 缺失（或未 spawn 释放），第二段 B 抢锁将因
+/// 锁未释放而 None ⇒ 变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_round_lock_drop_releases_without_explicit_release() {
+    let ctx = TestContext::new().await;
+    let store: Arc<dyn SharedStore> = ctx.state.store.clone();
+    let key = "lock:it:round:drop-release";
+
+    // A 抢锁后**不调用 release**，直接丢出作用域触发 Drop。
+    // TTL 给足（300s）以确保"B 能抢到"只能归因于 Drop 兜底，而非 TTL 过期。
+    {
+        let _a = ClusterLock::acquire(store.clone(), key, true, 300, "inst-a")
+            .await
+            .expect("A 首次抢锁应成功");
+        // 作用域结束时 `_a` drop ⇒ spawn 异步释放
+    }
+
+    // Drop 中 release 走 spawn，给运行时一个调度窗口
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let b = ClusterLock::acquire(store.clone(), key, true, 30, "inst-b")
+        .await
+        .expect("Drop 兜底应已释放锁（无需等 TTL）");
+    assert!(b.is_held(), "B 应真实持锁");
+    b.release().await;
+}
+
+/// Drop 兜底与显式 release **并存无冲突**（CAS 幂等）：先显式释放、后 Drop
+/// 不应报错、不应误删后续持有者的锁。
+///
+/// 可证伪性：若 Drop 的释放不加 CAS（裸 DEL），会误删 B 的锁 ⇒ B 持锁期间 C 能抢到。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_round_lock_drop_after_explicit_release_is_safe() {
+    let ctx = TestContext::new().await;
+    let store: Arc<dyn SharedStore> = ctx.state.store.clone();
+    let key = "lock:it:round:drop-idempotent";
+
+    let a = ClusterLock::acquire(store.clone(), key, true, 300, "inst-a")
+        .await
+        .expect("A 抢锁应成功");
+    a.release().await; // 显式释放（token 已删）
+
+    // A 仍在作用域内；B 抢锁成功
+    let b = ClusterLock::acquire(store.clone(), key, true, 300, "inst-b")
+        .await
+        .expect("A 释放后 B 应能持有");
+    assert!(b.is_held());
+
+    // 此时 drop A（其 Drop 将 CAS 删除 A 的 token —— 已不存在 ⇒ 0 行，不得误删 B 的锁）
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // B 的锁必须仍在：C 抢锁应被拒
+    let c = ClusterLock::acquire(store.clone(), key, true, 30, "inst-c").await;
+    assert!(
+        c.is_none(),
+        "A 的 Drop 释放不得误删 B 持有的锁（CAS 幂等性）"
+    );
+
+    b.release().await;
+}
