@@ -384,18 +384,24 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 management = true
 
 # ==================== 定时任务调度器（集群模式）====================
-# 治理对象：**内置定时任务**（flow_timeout_scan / mmdb_auto_update）的"整轮跨实例互斥"。
+# 治理对象：**内置定时任务**（flow_timeout_scan / mmdb_auto_update /
+# msg_send_retry / report_sub_due / chunk_cleanup）的"整轮跨实例互斥"。
 # 开关取「模式」而非裸 bool（项目准则③）；默认 `auto` = 沿用各任务历史开关，
 # **对存量部署零行为变更**。
 #
-#   auto   （默认）flow 沿用 [flow].scan_lock_enabled；mmdb 保持加锁 ⇒ 现状
-#   single 明确单实例部署 ⇒ 内置任务一律不加锁（省一次 Redis NX 往返）
+#   auto   （默认）flow 沿用 [flow].scan_lock_enabled；其余四个任务保持加锁 ⇒ 现状
+#   single 明确单实例部署 ⇒ 内置任务一律不加锁（省一次共享态存储 NX 往返；
+#          **单实例部署应显式置此项**——否则 Redis/SQLite 抖动时内置任务会被
+#          fail-closed 跳过，见下）
 #   leader 多实例选主 ⇒ 内置任务一律加锁（仅持锁实例执行整轮）
 #   all    每个实例都执行（幂等型任务）⇒ 内置任务一律不加锁
 #
 # ⚠️ 非法取值在启动时回落 `auto` 并告警（fail-safe）。
 # ⚠️ **边界**：`sys_job` 的逐任务防重入锁 `lock:scheduler:{job_id}` 属"同一任务防重入"，
 #    单实例同样需要，**不随本开关关闭**。
+# ⚠️ **fail-closed 语义**：加锁档（auto/leader）下共享态存储不可用时，加锁任务会
+#    **跳过本轮**（避免多实例重复执行），下一轮 cron 重试。单实例部署建议显式
+#    `cluster_mode = "single"` 以消除这层无谓依赖。
 # replicas：本部署的**实例（副本）数**，仅供启动期告警（不参与运行时判定）。
 #    `replicas > 1` 且 `cluster_mode = auto` ⇒ 启动打 WARN，提示改 `leader`。
 #    默认 1 = 单实例（现状）。副本数无法在进程内可靠探测，故要求部署方显式声明。

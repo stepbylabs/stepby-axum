@@ -218,14 +218,15 @@ fn default_tenant_management() -> bool {
 
 /// 定时任务调度器配置（`[scheduler]` 段）
 ///
-/// 治理的是**内置定时任务**（`flow_timeout_scan` / `mmdb_auto_update`）的
+/// 治理的是**内置定时任务**（`flow_timeout_scan` / `mmdb_auto_update` /
+/// `msg_send_retry` / `report_sub_due` / `chunk_cleanup`）的
 /// "整轮跨实例互斥"。策略收敛为**模式**（项目准则③），语义与边界见
 /// `crate::scheduler::cluster`（`sys_job` 的逐任务防重入锁**不**受本开关影响）。
 #[derive(Clone, Debug, Deserialize)]
 pub struct SchedulerConfig {
     /// 集群模式：`auto`（**默认**，沿用各任务历史开关 = 现状）| `single` | `leader` | `all`
     ///
-    /// - `auto`：`flow` 沿用 `[flow].scan_lock_enabled`；`mmdb` 保持加锁（历史行为）⇒ **默认零行为变更**
+    /// - `auto`：`flow` 沿用 `[flow].scan_lock_enabled`；其余四个任务保持加锁（历史行为）⇒ **默认零行为变更**
     /// - `single`：明确单实例部署 ⇒ 内置任务一律不加锁
     /// - `leader`：多实例选主 ⇒ 内置任务一律加锁
     /// - `all`：每个实例都执行（幂等型任务）⇒ 内置任务一律不加锁

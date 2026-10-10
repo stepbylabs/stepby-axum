@@ -247,11 +247,24 @@ impl JobScheduler {
             cluster_mode.requires_round_lock(config.flow.scan_lock_enabled);
         // mmdb 改造前**始终**加锁 ⇒ legacy_enabled 传 true，保证 auto 下保持现状
         let mmdb_round_lock_needed = cluster_mode.requires_round_lock(true);
+        // §5.55 收散点（批次三十补完）：`msg_send_retry` / `report_sub_due` / `chunk_cleanup`
+        // 这三个内置任务的整轮互斥锁此前**硬编码 true**，游离于 `cluster_mode` 治理之外——
+        // 单实例部署方即使显式置 `cluster_mode = "single"`，共享态存储（Redis）一旦抖动
+        // 仍会 fail-closed 跳过这三个任务（实测 49 条 ERROR：timed out / broken pipe /
+        // redis command timeout / Connection pool timed out）。现与 flow/mmdb 完全对齐：
+        // 三个任务改造前均**始终加锁**，故 legacy_enabled 传 true ⇒ `auto` 保持现状（零行为变更），
+        // `single`/`all` 不加锁，`leader` 加锁。
+        let msg_retry_round_lock_needed = cluster_mode.requires_round_lock(true);
+        let report_sub_round_lock_needed = cluster_mode.requires_round_lock(true);
+        let chunk_cleanup_round_lock_needed = cluster_mode.requires_round_lock(true);
         tracing::info!(
             cluster_mode = cluster_mode.as_str(),
             replicas = config.scheduler.replicas,
             flow_round_lock = flow_round_lock_needed,
             mmdb_round_lock = mmdb_round_lock_needed,
+            msg_retry_round_lock = msg_retry_round_lock_needed,
+            report_sub_round_lock = report_sub_round_lock_needed,
+            chunk_cleanup_round_lock = chunk_cleanup_round_lock_needed,
             "调度器集群模式已解析（内置任务整轮互斥锁；sys_job 逐任务防重入锁不受本开关影响）"
         );
         // WF-2 加固（批次 4）：**显式声明多副本**却仍用 `auto` ⇒ 告警。
@@ -543,13 +556,14 @@ impl JobScheduler {
                 Box::pin(async move {
                     tracing::debug!("内置任务 msg_send_retry 开始执行：重试待重试消息批次");
 
-                    // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
-                    // 无锁会导致重复投递消息（对齐 mmdb_auto_update 锁范式）
+                    // §5.55 收散点（批次三十补完）：内置任务纳入 cluster_mode 治理——多实例部署下
+                    // 无锁会导致重复投递消息（对齐 mmdb_auto_update 锁范式）。改造前始终加锁，
+                    // 故 `auto` 传 true 保持现状；`single`/`all` 不加锁，`leader` 加锁。
                     const MSG_RETRY_LOCK_KEY: &str = "lock:scheduler:msg_send_retry";
                     let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
                         store.clone(),
                         MSG_RETRY_LOCK_KEY,
-                        true,
+                        msg_retry_round_lock_needed,
                         55,
                         "msg_send_retry",
                     )
@@ -596,13 +610,14 @@ impl JobScheduler {
                 Box::pin(async move {
                     tracing::debug!("内置任务 report_sub_due 开始执行：扫描到期的报表订阅");
 
-                    // §5.55 收散点：内置任务纳入 cluster_mode 治理——多实例部署下
-                    // 无锁会导致报表订阅重复推送（对齐 mmdb_auto_update 锁范式）
+                    // §5.55 收散点（批次三十补完）：内置任务纳入 cluster_mode 治理——多实例部署下
+                    // 无锁会导致报表订阅重复推送（对齐 mmdb_auto_update 锁范式）。改造前始终加锁，
+                    // 故 `auto` 传 true 保持现状；`single`/`all` 不加锁，`leader` 加锁。
                     const REPORT_SUB_LOCK_KEY: &str = "lock:scheduler:report_sub_due";
                     let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
                         store.clone(),
                         REPORT_SUB_LOCK_KEY,
-                        true,
+                        report_sub_round_lock_needed,
                         55,
                         "report_sub_due",
                     )
@@ -645,11 +660,13 @@ impl JobScheduler {
                 let config = chunk_cleanup_config.clone();
                 let store = chunk_cleanup_store.clone();
                 Box::pin(async move {
+                    // §5.55 收散点（批次三十补完）：孤儿分片清理纳入 cluster_mode 治理。
+                    // 改造前始终加锁，故 `auto` 传 true 保持现状；`single`/`all` 不加锁，`leader` 加锁。
                     const CHUNK_CLEANUP_LOCK_KEY: &str = "lock:scheduler:chunk_cleanup";
                     let Some(_lock) = crate::scheduler::cluster::ClusterLock::acquire(
                         store.clone(),
                         CHUNK_CLEANUP_LOCK_KEY,
-                        true,
+                        chunk_cleanup_round_lock_needed,
                         1500,
                         "chunk_cleanup",
                     )
