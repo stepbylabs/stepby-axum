@@ -117,3 +117,4 @@ pub mod m20261007_000011_config_seed_and_menu_hygiene;
 pub mod m20261007_000012_flow_graph_doc;
 pub mod m20261007_000013_flow_task_actions_json;
 pub mod m20261008_000001_log_archive_anchor;
+pub mod m20261010_000001_fix_ai_history_menu_parent;

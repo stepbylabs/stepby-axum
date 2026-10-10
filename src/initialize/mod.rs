@@ -522,6 +522,11 @@ impl AppInitializer {
         ensure_report_menus_visible(&db)
             .await
             .map_err(|e| anyhow::anyhow!("翻转报表菜单可见性失败: {}", e))?;
+        // 4.5c-g 批次三十一：「AI 问数历史」菜单脱离父级 C 页面（存量库兜底，
+        //      等价迁移 m20261010_000001；幂等）——修复子页面永不渲染（显示父级大屏）
+        ensure_ai_history_menu_parent(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("修复 AI 问数历史菜单父级失败: {}", e))?;
         // 4.5c-f G-02 M3：流程定义设计器上线翻转菜单可见性（4140，存量库兜底，
         //      等价迁移 m20261007_000009；幂等）
         ensure_flow_designer_menu_visible(&db)
@@ -5474,6 +5479,26 @@ async fn ensure_flow_designer_menu_visible(db: &DatabaseConnection) -> anyhow::R
     db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "UPDATE sys_menu SET visible = '0' WHERE menu_id = 4140 AND visible = '1'".to_string(),
+    ))
+    .await?;
+    Ok(())
+}
+
+/// 台账（批次三十一，存量库兜底，等价迁移 m20261010_000001）：
+/// 「AI 问数历史」(4116) 原挂在菜单 120「审计大屏」之下，而 120 自身是
+/// menu_type='C' 且带 component 的页面菜单——C 型菜单带 children 时，
+/// 前端注册嵌套路由需父组件以 `<router-view>` 承接，而 audit-dashboard/index.vue
+/// 无 router-view ⇒ 子页面永不渲染，访问 /monitor/audit-dashboard/aiHistory
+/// 实际显示审计大屏（静默失效，不报错不 404）。修复：4116 改挂「系统监控」(2)
+/// 平级，与同域其它 14 项页面菜单结构一致。幂等：仅当仍挂在 120 下时修正。
+async fn ensure_ai_history_menu_parent(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_menu SET parent_id = 2, path = 'aiHistory' WHERE menu_id = 4116 AND parent_id = 120"
+            .to_string(),
     ))
     .await?;
     Ok(())

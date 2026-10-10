@@ -66,6 +66,20 @@ pub struct DataRuleDto {
     pub role_ids: Option<Vec<i64>>,
 }
 
+/// 规则清单视图对象（列表返回 = 规则行 + 已绑定角色集）
+///
+/// 管理端编辑需回显"当前绑定了哪些角色"——原实现只返回 `sys_data_rule::Model`
+/// （无 role_ids），前端编辑弹窗角色多选恒为空，管理员误以为未绑定，
+/// 一旦改动即触发 upsert 全量覆盖、静默删除原有绑定。故列表必须带 role_ids。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataRuleVo {
+    #[serde(flatten)]
+    pub rule: sys_data_rule::Model,
+    /// 已绑定角色 ID 集（无绑定时为空数组，非 null）
+    pub role_ids: Vec<i64>,
+}
+
 impl DataRuleService {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
@@ -103,9 +117,12 @@ impl DataRuleService {
                 "error.dataRule.fixed_value_required"
             )));
         }
-        if dto.value_type == "in" && dto.rule_value.is_none() {
+        // op=in 需要逗号分隔的值列表（求值期空列表会静默跳过该规则 → 数据面口径漂移）。
+        // 原实现误写为 `value_type == "in"`——value_type 白名单不含 "in"（见 VALUE_TYPES），
+        // 该分支永不触发，规则可在 op=in 且无值时落库并在求值期被静默丢弃。
+        if dto.op == "in" && dto.rule_value.as_deref().unwrap_or("").trim().is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(
-                "error.dataRule.fixed_value_required"
+                "error.dataRule.in_value_required"
             )));
         }
         Ok(())
@@ -117,7 +134,7 @@ impl DataRuleService {
         operator_tid: i64,
         page: u64,
         size: u64,
-    ) -> Result<(Vec<sys_data_rule::Model>, u64), ServiceError> {
+    ) -> Result<(Vec<DataRuleVo>, u64), ServiceError> {
         use sea_orm::QuerySelect;
         let mut sel = sys_data_rule::Entity::find().filter(sys_data_rule::Column::DelFlag.eq("0"));
         if operator_tid != 0 {
@@ -130,7 +147,27 @@ impl DataRuleService {
             .limit(size)
             .all(self.db.as_ref())
             .await?;
-        Ok((items, total))
+        // 批量取绑定（单次 IN 查询，避免逐行 N+1）；按规则聚合角色集
+        let rule_ids: Vec<i64> = items.iter().map(|r| r.rule_id).collect();
+        let mut bindings: std::collections::HashMap<i64, Vec<i64>> =
+            std::collections::HashMap::new();
+        if !rule_ids.is_empty() {
+            let rows = sys_role_data_rule::Entity::find()
+                .filter(sys_role_data_rule::Column::RuleId.is_in(rule_ids))
+                .all(self.db.as_ref())
+                .await?;
+            for b in rows {
+                bindings.entry(b.rule_id).or_default().push(b.role_id);
+            }
+        }
+        let vos = items
+            .into_iter()
+            .map(|rule| {
+                let role_ids = bindings.remove(&rule.rule_id).unwrap_or_default();
+                DataRuleVo { rule, role_ids }
+            })
+            .collect();
+        Ok((vos, total))
     }
 
     /// 新建/更新（rule_id 缺省 = 新建；tenant_id 按操作者归属）
@@ -402,5 +439,30 @@ mod tests {
         assert!(DataRuleService::validate_dto(&dto("union", "fixed", Some("1"))).is_err());
         assert!(DataRuleService::validate_dto(&dto("eq", "magic", Some("1"))).is_err());
         assert!(DataRuleService::validate_dto(&dto("eq", "fixed", None)).is_err());
+    }
+
+    /// op=in 必须有非空值列表（历史缺陷：校验误写成 value_type=="in"，永不触发，
+    /// 规则可在 op=in 且无值时落库，求值期被静默跳过 → 数据面口径漂移）
+    #[test]
+    fn validate_in_op_requires_value_list() {
+        let dto = |op: &str, vt: &str, rv: Option<&str>| DataRuleDto {
+            rule_id: None,
+            rule_name: "t".into(),
+            table_name: "sys_user".into(),
+            field_name: "create_by".into(),
+            op: op.into(),
+            value_type: vt.into(),
+            rule_value: rv.map(|s| s.into()),
+            status: None,
+            role_ids: None,
+        };
+        // in + 非 fixed 类型（此前完全绕过校验）+ 无值 → 必须拒绝
+        assert!(DataRuleService::validate_dto(&dto("in", "current_tenant", None)).is_err());
+        // in + 空白值 → 拒绝
+        assert!(DataRuleService::validate_dto(&dto("in", "fixed", Some("   "))).is_err());
+        // in + 有值 → 通过
+        assert!(DataRuleService::validate_dto(&dto("in", "fixed", Some("1,2,3"))).is_ok());
+        // 非 in 操作符不受此约束（current_tenant 无值仍合法）
+        assert!(DataRuleService::validate_dto(&dto("eq", "current_tenant", None)).is_ok());
     }
 }

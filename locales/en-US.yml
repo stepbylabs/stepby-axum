@@ -831,4 +831,5 @@ alert:
     op_invalid: "Invalid operator: %{value}"
     value_type_invalid: "Invalid value type: %{value}"
     fixed_value_required: "fixed value type requires a rule value"
+    in_value_required: "in operator requires a comma-separated value list"
     not_found: "Rule not found"

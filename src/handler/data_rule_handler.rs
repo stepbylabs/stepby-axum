@@ -6,9 +6,8 @@
 //! - DELETE /system/dataRule/{id} 软删（清关联即时收敛）
 
 use crate::common::{AppError, TableDataInfo};
-use crate::entity::sys_data_rule;
 use crate::middleware::Operator;
-use crate::service::data_rule_service::{DataRuleDto, DataRuleService};
+use crate::service::data_rule_service::{DataRuleDto, DataRuleService, DataRuleVo};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -26,7 +25,7 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     Query(q): Query<DataRuleListQuery>,
-) -> Result<TableDataInfo<sys_data_rule::Model>, AppError> {
+) -> Result<TableDataInfo<DataRuleVo>, AppError> {
     let tid = operator.tenant_id();
     let page = q.page.unwrap_or(1).max(1);
     let size = q.size.unwrap_or(20).clamp(1, 100);
