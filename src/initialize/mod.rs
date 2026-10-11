@@ -408,6 +408,10 @@ impl AppInitializer {
         }
         // Redis 档保留一条原生连接仅供 rate_limit 的 Lua 令牌桶使用（与 local 档互斥，None = fail-closed）
         let mut redis_conn: Option<redis::aio::ConnectionManager> = None;
+        // 批三十八：命令超时配置化——启动期一次性注入（默认 3 = R8-CONC-013 原常量）。
+        // 注入必须在 match 之前：auth 闸门超时包装器在 local 档同样生效（LocalStore 的
+        // auth_gate_check 也被同一 timeout 包裹，批三十八实证 local 档超时源自 SQLite 负载尖峰）。
+        db::redis::set_redis_cmd_timeout_secs(settings.redis.cmd_timeout_secs);
         let store: Arc<dyn SharedStore> = match cache_mode {
             CacheMode::Redis => {
                 let conn = db::init_redis(&settings.redis).await?;

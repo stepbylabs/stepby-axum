@@ -29,7 +29,7 @@ pub async fn cmd_timeout<F, T>(fut: F) -> Result<T, redis::RedisError>
 where
     F: std::future::Future<Output = Result<T, redis::RedisError>>,
 {
-    let secs = crate::db::redis::REDIS_CMD_TIMEOUT_SECS;
+    let secs = crate::db::redis::redis_cmd_timeout_secs();
     match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
         Ok(res) => res,
         Err(_) => Err(redis::RedisError::from((

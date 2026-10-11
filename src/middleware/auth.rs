@@ -94,7 +94,7 @@ pub async fn auth_middleware(
     // R11：命令级超时（REDIS_CMD_TIMEOUT_SECS=3s，store 内部亦管超时，此处外层兜底），
     // fail-closed：超时返回 503 拒绝请求
     let gate = tokio::time::timeout(
-        Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
+        Duration::from_secs(crate::db::redis::redis_cmd_timeout_secs()),
         state
             .store
             .auth_gate_check(&token_hash, &claims.sub, claims.tid),
@@ -104,7 +104,9 @@ pub async fn auth_middleware(
         tracing::error!(
             request_id = %request_id,
             user_id = %claims.sub,
-            "Redis 黑名单/pwd_ver 查询超时（fail-closed 拒绝请求）"
+            // 批三十八：文案改档位无关——local 档下 store 为 SQL 承载（超时源为 DB 负载尖峰），
+            // 旧文案「Redis 黑名单/pwd_ver」在 local 档具误导性
+            "auth 闸门查询超时（fail-closed 拒绝请求；redis 档=Redis 查询/local 档=业务库查询）"
         );
         AppError::new(503, crate::tr!("error.auth.auth_unavailable"))
     })?
@@ -238,7 +240,7 @@ async fn load_tenant_runtime_state(
     }
     // R11：命令级超时（store 内部亦管超时，此处外层兜底），fail-closed 503
     let gate = match tokio::time::timeout(
-        Duration::from_secs(crate::db::redis::REDIS_CMD_TIMEOUT_SECS),
+        Duration::from_secs(crate::db::redis::redis_cmd_timeout_secs()),
         state.store.auth_gate_check(token_hash, uid, tenant_id),
     )
     .await

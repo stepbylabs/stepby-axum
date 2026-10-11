@@ -16,7 +16,21 @@ use redis::aio::ConnectionManager;
 /// `set_read_timeout` / `set_write_timeout`（这两个方法仅存在于同步 `Connection`）。
 /// 异步命令超时通过 `tokio::time::timeout` 包裹 `query_async` 调用实现。
 /// 此常量作为调用方包裹超时的统一参数，避免各处硬编码。
-pub(crate) const REDIS_CMD_TIMEOUT_SECS: u64 = 3;
+/// 批三十八：由 `[redis] cmd_timeout_secs` 启动时注入（默认 3 = 本原值，零行为变更）。
+/// 全局态理由：该超时被 6 个模块经 `cmd_timeout` 引用，签名级穿透侵入过大；
+/// AtomicU64 在启动期一次性写入（无运行期写点），读侧为单次 load，无竞争语义。
+pub(crate) static REDIS_CMD_TIMEOUT_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(3);
+
+/// 启动期注入（仅 initialize 调用一次；防运行期改写导致连接池内超时不一致）。
+pub(crate) fn set_redis_cmd_timeout_secs(secs: u64) {
+    REDIS_CMD_TIMEOUT_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 读当前命令超时（cmd_timeout 统一消费点）。
+pub(crate) fn redis_cmd_timeout_secs() -> u64 {
+    REDIS_CMD_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Redis 连接建立超时（秒）。
 ///
@@ -68,7 +82,7 @@ pub async fn init_redis(config: &RedisConfig) -> anyhow::Result<ConnectionManage
 
     // 测试连接（用 tokio::time::timeout 包裹，R8-CONC-013：防止 PING 挂起）
     let pong: String = tokio::time::timeout(
-        Duration::from_secs(REDIS_CMD_TIMEOUT_SECS),
+        Duration::from_secs(redis_cmd_timeout_secs()),
         redis::cmd("PING").query_async(&mut conn),
     )
     .await
@@ -83,7 +97,7 @@ pub async fn init_redis(config: &RedisConfig) -> anyhow::Result<ConnectionManage
     tracing::info!(
         "Redis 连接成功 (PING -> {}, cmd_timeout={}s)",
         pong,
-        REDIS_CMD_TIMEOUT_SECS
+        redis_cmd_timeout_secs()
     );
 
     Ok(conn)

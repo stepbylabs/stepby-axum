@@ -1950,6 +1950,16 @@ fn default_db_slow_sql_threshold_ms() -> u64 {
 #[derive(Clone, Deserialize)]
 pub struct RedisConfig {
     pub url: String,
+    /// Redis 命令级超时（秒）。默认 3 = R8-CONC-013 原常量语义（零行为变更）；
+    /// Docker Desktop 端口代理/WSL2 磁盘停顿等环境下负载尖峰可调高（如 5），
+    /// 减少误杀（fail-closed 503 抖动）——超时护栏与 fail-closed 语义不变。
+    /// 批三十八配置化（原 REDIS_CMD_TIMEOUT_SECS 常量）。
+    #[serde(default = "default_redis_cmd_timeout_secs")]
+    pub cmd_timeout_secs: u64,
+}
+
+fn default_redis_cmd_timeout_secs() -> u64 {
+    3
 }
 
 /// 手动实现 Debug 以脱敏 url（含 Redis 密码）
@@ -2804,7 +2814,10 @@ impl Settings {
                 dept_cte_max_depth: 30,
                 slow_sql_threshold_ms: 1000,
             },
-            redis: RedisConfig { url: redis_url },
+            redis: RedisConfig {
+                url: redis_url,
+                cmd_timeout_secs: 3,
+            },
             jwt: JwtConfig {
                 secret: jwt_secret,
                 expire_hours: jwt_expire_hours,
@@ -3054,6 +3067,7 @@ mod tests {
             },
             redis: RedisConfig {
                 url: "redis://localhost:6379".to_string(),
+                cmd_timeout_secs: 3,
             },
             jwt: JwtConfig {
                 secret: "placeholder-strong-secret-0123456789abcdef".to_string(),
@@ -3498,6 +3512,7 @@ mod tests {
             },
             redis: RedisConfig {
                 url: "redis://:redispass@host:6379".to_string(),
+                cmd_timeout_secs: 3,
             },
             jwt: JwtConfig {
                 secret: "a-very-long-jwt-secret-key-for-testing-32+chars".to_string(),
@@ -3681,6 +3696,7 @@ mod tests {
     fn test_redis_config_debug_redacts_url() {
         let redis_config = RedisConfig {
             url: "redis://:mypassword@localhost:6379/0".to_string(),
+            cmd_timeout_secs: 3,
         };
         let debug_str = format!("{:?}", redis_config);
         assert!(
