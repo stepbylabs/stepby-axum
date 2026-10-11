@@ -156,6 +156,21 @@ pub(crate) async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow
         .await?;
     }
 
+    // ---- 菜单卫生孪生（等价迁移 m20261007_000011 第 2 项，幂等）----
+    // 上面的插入逐字段镜像 m20260925_000002（含 3800-3804 域名按钮组），而该组已被
+    // m20261007_000011 软删（与 3950 下 3900 组重复、且是平台专属能力 ⇒ 3800 组属
+    // 假入口）。缺此孪生时兜底路径会复活 3800-3804（schema 等价性总锁实测发现）。
+    // role_menu 授权无需处理：3.5h 的平台专属剔除（role_id = 2 + 租户角色）覆盖。
+    if sso_table_exists(db, "sys_menu").await? {
+        db.execute_raw(Statement::from_string(
+            backend,
+            "UPDATE sys_menu SET del_flag = '2' \
+             WHERE menu_id IN (3800, 3801, 3802, 3803, 3804) AND del_flag = '0'"
+                .to_string(),
+        ))
+        .await?;
+    }
+
     tracing::info!("多租户 Phase 2 模块已就绪（幂等确保完成）");
     Ok(())
 }

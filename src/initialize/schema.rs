@@ -78,6 +78,18 @@ pub(crate) async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyho
     // 与 m20261006_000001 迁移同源（pub fn 单一事实源）；存量库启动不跑 Migrator 时由本段兜底。
     migration::migrations::m20261006_000001_ai_config_and_history::init_ai_config_and_history(db)
         .await?;
+    // §5.57 token 观测列兜底（等价迁移 m20261006_000003）：存量库 ai_chat_history
+    // 幂等补三列（SQLite 无 IF NOT EXISTS——按错误忽略，列已存在属正常情况）。
+    // ⚠️ 必须在 init_ai_config_and_history **之后**执行：极老存量库的 ai_chat_history
+    // 由上一行刚建出（m20261006_000001 同源 DDL 不含 token 列）；若提前执行（如放在
+    // 更早的 ensure_data_rule_tables 里）表尚未创建、ALTER 报错被吞 ⇒ 回填成死代码
+    // （schema 等价性总锁实测发现）。
+    for col in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        let ddl = format!("ALTER TABLE ai_chat_history ADD COLUMN {col} BIGINT NULL");
+        if let Err(e) = db.execute_raw(Statement::from_string(backend, ddl)).await {
+            tracing::debug!("ai_chat_history.{col} 列补建跳过（可能已存在）: {}", e);
+        }
+    }
     tracing::info!(
         "AI 助手：ai_chat_history 表与 sys.ai.* 配置种子已就绪（幂等，管理页可改热生效）"
     );
@@ -259,6 +271,26 @@ pub(crate) async fn ensure_user_country_code_column(db: &DatabaseConnection) -> 
         tracing::info!("sys_user.country_code 列已存在，无需 ALTER");
     }
 
+    Ok(())
+}
+
+/// 幂等确保 `sys_role` 含 `custom_sql` 列（等价迁移 m20260819_000005_add_role_custom_sql，
+/// 自定义数据权限的白名单列条件片段）。
+/// 缺此兜底时：极老存量库（该迁移之前）实体 SELECT 带 custom_sql ⇒ 角色
+/// 列表/编辑/数据权限解析全链 500（schema 等价性总锁实测发现）。
+pub(crate) async fn ensure_role_custom_sql_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_role").await? {
+        return Ok(());
+    }
+    if sso_has_column(db, "sys_role", "custom_sql").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "ALTER TABLE sys_role ADD COLUMN custom_sql TEXT".to_string(),
+    ))
+    .await?;
+    tracing::info!("sys_role.custom_sql 列已补建（存量库兜底，等价 m20260819_000005）");
     Ok(())
 }
 
@@ -532,14 +564,9 @@ pub(crate) async fn ensure_data_rule_tables(db: &DatabaseConnection) -> anyhow::
         format!("{insert_prefix}{menu_cols} VALUES {menu_rows}{insert_suffix}"),
     ))
     .await?;
-    // §5.57 token 观测列兜底（等价迁移 m20261006_000003）：存量库 ai_chat_history
-    // 幂等补三列（SQLite 无 IF NOT EXISTS——按错误忽略，列已存在属正常情况）
-    for col in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-        let ddl = format!("ALTER TABLE ai_chat_history ADD COLUMN {col} BIGINT NULL");
-        if let Err(e) = db.execute_raw(Statement::from_string(backend, ddl)).await {
-            tracing::debug!("ai_chat_history.{col} 列补建跳过（可能已存在）: {}", e);
-        }
-    }
+    // 注：ai_chat_history 的 §5.57 token 观测列回填已移至 ensure_shared_store_tables
+    // （init_ai_config_and_history 之后）——本函数在编排中先于该表创建执行，
+    // 放在这里时 ALTER 必然报 no such table 且被吞掉（死代码，总锁实测发现）。
     tracing::info!("data_rule 表/菜单已就绪（幂等确保完成）");
     Ok(())
 }
