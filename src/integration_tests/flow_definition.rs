@@ -222,6 +222,9 @@ async fn test_flow_definition_crud_chain() {
         ))
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "软删后 info 必须 404");
+
+    // teardown：物理清理本用例创建的 flow_definition（含软删行），防 it_ 残留累积
+    super::cleanup_flow_defs(&ctx, &["it_def_leave"]).await;
 }
 
 /// graph_json fail-closed：非法图（断链）直投 API → 400
@@ -333,6 +336,9 @@ async fn test_flow_designer_tenant_gating() {
         .await
         .expect_err("租户 off 档删除必须被拒");
     assert_eq!(err.code, 403, "flow.designer off 档租户删除必须 403");
+
+    // teardown：物理清理平台侧创建的流程定义（it_gd_tenant 被 403 拒绝，未落库）
+    super::cleanup_flow_defs(&ctx, &["it_gd_platform"]).await;
 }
 
 /// report.designer 守卫（service 层真实 DB 链路，与 flow 同构）：
