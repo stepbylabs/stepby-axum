@@ -386,36 +386,45 @@ pub(crate) async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbE
     }
 
     // site 渠道 + flow_* 模板（与迁移 4.7/4.8 同构；channel_code/template_code UNIQUE 幂等）
-    flow_insert(
-        db,
-        &format!(
-            "sys_msg_channel (channel_name, channel_code, channel_type, config_json, status, remark, create_by, create_time, del_flag) VALUES \
-             ('站内信', 'site', 'site', NULL, '0', '审批/系统站内提醒', 'admin', {now}, '0')"
-        ),
-    )
-    .await?;
-    let templates: &[(&str, &str, &str, &str)] = &[
-        (
-            "审批待办提醒",
-            "flow_todo",
-            "您有新的审批待办",
-            "单据「{{{{title}}}}」等待您审批，请及时处理。",
-        ),
-        (
-            "审批超时提醒",
-            "flow_timeout",
-            "审批待办已超时",
-            "单据「{{{{title}}}}」已超过办理时限，请尽快处理。",
-        ),
-        (
-            "审批驳回通知",
-            "flow_reject",
-            "您的单据已被驳回",
-            "您提交的单据「{{{{title}}}}」已被驳回，请查看审批意见。",
-        ),
-    ];
-    for (name, code, subject, content) in templates {
+    // ⚠️ msg 两表由 m20260818_000002_msg_module 迁移负责建表（极老存量库可能没有），
+    // 与 ensure_msg_template_seeds 同口径：表不存在则跳过种子（schema 等价性总锁实测发现）。
+    let has_channel = sso_table_exists(db, "sys_msg_channel")
+        .await
+        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+    let has_template = sso_table_exists(db, "sys_msg_template")
+        .await
+        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+    if has_channel && has_template {
         flow_insert(
+            db,
+            &format!(
+                "sys_msg_channel (channel_name, channel_code, channel_type, config_json, status, remark, create_by, create_time, del_flag) VALUES \
+                 ('站内信', 'site', 'site', NULL, '0', '审批/系统站内提醒', 'admin', {now}, '0')"
+            ),
+        )
+        .await?;
+        let templates: &[(&str, &str, &str, &str)] = &[
+            (
+                "审批待办提醒",
+                "flow_todo",
+                "您有新的审批待办",
+                "单据「{{{{title}}}}」等待您审批，请及时处理。",
+            ),
+            (
+                "审批超时提醒",
+                "flow_timeout",
+                "审批待办已超时",
+                "单据「{{{{title}}}}」已超过办理时限，请尽快处理。",
+            ),
+            (
+                "审批驳回通知",
+                "flow_reject",
+                "您的单据已被驳回",
+                "您提交的单据「{{{{title}}}}」已被驳回，请查看审批意见。",
+            ),
+        ];
+        for (name, code, subject, content) in templates {
+            flow_insert(
             db,
             &format!(
                 "sys_msg_template (template_name, template_code, channel_code, template_subject, template_content, status, remark, create_by, create_time, del_flag) VALUES \
@@ -423,6 +432,7 @@ pub(crate) async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbE
             ),
         )
         .await?;
+        }
     }
     Ok(())
 }

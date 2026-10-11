@@ -50,6 +50,66 @@ pub(crate) async fn ensure_ai_menu(db: &DatabaseConnection) -> anyhow::Result<()
 /// ② 三个目录内 order 重排（消除 order=8/10/11 多处重复导致的显示顺序不稳定）；
 /// ③ icon 语义修正（peoples/connection/documentation 等多处复用改贴切图标）。
 /// 全部为幂等 UPDATE/INSERT，重复执行无副作用。
+/// 菜单-only 迁移兜底（与迁移 m20260818_000001_add_log_monitor_menu /
+/// m20260819_000002_http_debugger_menu / m20260819_000006_observability_menu 等价，全幂等）：
+/// 补建 实时日志(135) / HTTP 调试器(3410) / 运行监控(3550) / 清空按钮(3551) 四行菜单。
+///
+/// 为何必须有本兜底：这四个菜单的迁移**只建菜单行**（页面后端零专属表依赖），
+/// 此前无 ensure 孪生 ⇒ 极老存量库（m20260818 之前）四个功能页面假功能
+/// （schema 等价性总锁实测发现）。3.5d-6 的菜单结构优化兜底只 UPDATE 既有行，
+/// 故本兜底必须**先于** `ensure_menu_structure_optimize` 执行，让 order/icon 收敛到终态。
+/// 幂等：menu_id 已存在则 INSERT OR IGNORE 跳过。
+/// ⚠️ 不补 `sys_role_menu` 授权：这些 perms 前缀（monitor:log / tool:httpDebug /
+/// monitor:slowSql）属平台专属（`PLATFORM_ONLY_PERM_PREFIXES`），m20260926_000005/000006
+/// 已把 role_id=2 的授权回收，补授权会与迁移终态漂移。
+pub(crate) async fn ensure_menu_only_migration_menus(
+    db: &DatabaseConnection,
+) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    let insert_prefix = match backend {
+        DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
+        DatabaseBackend::Postgres => "INSERT INTO ",
+        DatabaseBackend::MySql => "INSERT IGNORE INTO ",
+        _ => "INSERT INTO ",
+    };
+    let insert_suffix = if backend == DatabaseBackend::Postgres {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let now_expr = match backend {
+        DatabaseBackend::Sqlite => {
+            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        }
+        _ => "NOW()".to_string(),
+    };
+    let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
+    for body in [
+        format!(
+            "{menu_cols} VALUES (135, '实时日志', 2, 9, 'logtail', 'monitor/logtail/index', '', '', '1', '0', 'C', '0', '0', 'monitor:log:list', 'log', 'admin', {now_expr}, '在线查看应用实时日志（自动刷新，支持级别/关键字过滤）', '0')"
+        ),
+        format!(
+            "{menu_cols} VALUES (3410, 'HTTP 调试器', 3, 9, 'http-debugger', 'tool/http-debugger/index', '', '', '1', '0', 'C', '0', '0', 'tool:httpDebug:list', 'send', 'admin', {now_expr}, '在线 HTTP 转发调试（服务端代理 + SSRF 防护）', '0')"
+        ),
+        format!(
+            "{menu_cols} VALUES (3550, '运行监控', 2, 10, 'observability', 'monitor/observability/index', '', '', '1', '0', 'C', '0', '0', 'monitor:slowSql:list', 'monitor', 'admin', {now_expr}, '可观测性：慢请求 / 错误聚合 / Redis 指标', '0')"
+        ),
+        format!(
+            "{menu_cols} VALUES (3551, '清空', 3550, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'monitor:slowSql:list', 'delete', 'admin', {now_expr}, '清空慢请求 / 错误日志缓冲', '0')"
+        ),
+    ] {
+        db.execute_raw(Statement::from_string(
+            backend,
+            format!("{insert_prefix}{body}{insert_suffix}"),
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> anyhow::Result<()> {
     let backend = db.get_database_backend();
 

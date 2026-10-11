@@ -37,6 +37,29 @@ pub async fn init_ai_config_and_history(db: &DatabaseConnection) -> Result<(), D
         };
         manager.get_connection().execute_unprepared(&sql).await?;
     }
+    // AI 管理页菜单（与 up() 内联种子同款，单一事实源补齐）：此前 init fn 只补
+    // 配置种子不补菜单 ⇒ 存量库（表已兜底建出）缺 4102/4116 ⇒ AI 配置/历史页假功能
+    // （schema 等价性总锁实测发现）。4115（冗余按钮行）不补：m20261007_000011 已软删。
+    let menu_bodies = [
+        format!(
+            "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
+            (4102, 'AI 助手配置', 1, 14, 'aiConfig', 'system/aiConfig/index', '', '', '1', '0', 'C', '0', '0', 'system:aiConfig:edit', 'ai', 'admin', {now}, 'AI 助手 LLM 接入配置（平台专属）', '0')"
+        ),
+        format!(
+            "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
+            (4116, 'AI 问数历史', 120, 3, 'aiHistory', 'monitor/aiHistory/index', '', '', '1', '0', 'C', '0', '0', 'monitor:aiHistory:list', 'history', 'admin', {now}, 'AI 问数历史管理视图（平台跨租户/租户管理员本租户）', '0')"
+        ),
+    ];
+    for body in menu_bodies {
+        let sql = match manager.get_connection().get_database_backend() {
+            sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", body),
+            sea_orm::DatabaseBackend::Postgres => {
+                format!("INSERT INTO {} ON CONFLICT DO NOTHING", body)
+            }
+            _ => format!("INSERT IGNORE INTO {}", body),
+        };
+        manager.get_connection().execute_unprepared(&sql).await?;
+    }
     Ok(())
 }
 

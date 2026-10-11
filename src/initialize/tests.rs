@@ -594,7 +594,6 @@ mod dept_leader_backfill_tests {
 mod scim_group_backfill_tests {
     use super::*;
     use sea_orm::Database;
-
     /// 存量库最小 DDL（sys_user_role **无 source 列**——模拟迁移 000008 之前的存量结构）
     const MIN_EXISTING_TABLES: &[&str] = &[
         "CREATE TABLE sys_user_role (user_id BIGINT, role_id BIGINT, PRIMARY KEY (user_id, role_id))",
@@ -684,5 +683,656 @@ mod scim_group_backfill_tests {
             .try_get::<i64>("", "c")
             .unwrap();
         assert_eq!(role_menu, 4, "role_menu 授权应恰 4 条");
+    }
+}
+
+#[cfg(test)]
+mod schema_equivalence_lock_tests {
+    //! 「迁移 ↔ initialize 兜底」schema 等价性总锁。
+    //!
+    //! 架构约定：存量库启动**不跑 `Migrator::up`**，靠 `initialize` 的 ensure_* 幂等兜底
+    //! 把 schema/种子收敛到与最新迁移**等价**。本模块用两个隔离临时 SQLite 把这条约定
+    //! 变成可证伪断言：
+    //!
+    //! - 库 A（迁移侧）：全新空库 → 仅 `Migrator::up`（全部迁移）。
+    //! - 库 B（兜底侧）：全新空库 → 仅跑到**兜底约定起点**的迁移（模拟最老存量库，
+    //!   见 `FALLBACK_BASELINE_MIGRATION`）→ 按 mod.rs `run()` 原始顺序执行全部兜底
+    //!   （`run_all_initialize_fallbacks`，即 `AppInitializer::run` 的「最小可调用形态」）。
+    //!
+    //! 然后逐表对比 `PRAGMA table_info` 指纹（列名/归一化类型/notnull/pk）：
+    //! - 表名集合差异必须逐一登记在显式白名单（`MIGRATION_ONLY_TABLES` /
+    //!   `FALLBACK_ONLY_TABLES`）并附理由——白名单不是豁免，而是「已判定为合理」的台账；
+    //! - 未登记的任何结构差异（缺表/缺列/类型实质冲突）直接红。
+    //!
+    //! 若有人新增迁移而未同步兜底（或反之），本测试必红，迫使作者在
+    //! 「补兜底 / 登记白名单」之间做出显式决定，杜绝静默漂移。
+    use super::*;
+    use crate::config::UploadConfig;
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 兜底约定起点：首个带「存量库启动不跑 Migrator::up，需 ensure_* 兜底」注释的
+    /// 等价迁移是 m20260806_000002_add_task_operator_id（ensure_task_operator_id_column），
+    /// 故基线取其前一条（m20260806_000001，纯索引迁移，schema 与其前一条相同）。
+    /// 在该基线之上的所有 schema/种子差异都必须由 ensure_* 兜底或显式白名单解释。
+    const FALLBACK_BASELINE_MIGRATION: &str = "m20260806_000001_add_log_time_indexes";
+
+    /// 库 A 有而库 B 无的表：**纯迁移管理表**白名单（显式命名 + 理由）。
+    /// 判定标准：initialize 侧对该模块有**显式让位证据**——相关兜底均以
+    /// `sso_table_exists` 守卫跳过（「由 migration 负责建表」口径），
+    /// 即架构已裁决该模块的存量库补齐走迁移而非兜底。
+    /// ⚠️ 若下表新增成员而无对应让位守卫，说明存在真漂移（存量库 500）。
+    const MIGRATION_ONLY_TABLES: &[&str] = &[
+        // 消息模块（m20260818_000002_msg_module）：ensure_flow_seeds /
+        // ensure_msg_template_seeds / ensure_sms_cloud_columns 均以表存在性守卫让位。
+        "sys_msg_channel",
+        "sys_msg_template",
+        "sys_msg_send_log",
+        // SSO/OAuth 模块（m20260819_000001 / m20260922_000001）：全部 sso 兜底
+        // （ensure_sso_v4_columns / ensure_sso_rs256_keys / ensure_sso_consent_unique /
+        //   ensure_oauth_client_key_id_column / ensure_oauth_client_prev_secret_column）
+        // 均以 sso_table_exists 守卫让位（「SSO 表尚未创建，跳过（由 migration 负责建表）」）。
+        "sys_oauth_client",
+        "sys_oauth_consent",
+        "sys_oauth_provider",
+        "sys_oauth_user",
+        // 报表模块（m20260819_000003）：G-01 只兜新增的 report_dataset/report_dashboard，
+        // 老报表两表归迁移管理。
+        "sys_report",
+        "sys_report_sub",
+        // 用户偏好（m20260819_000004）：无兜底，migration 管理。
+        "sys_user_pref",
+        // WebHook 模块（m20260820_000002）：ensure_webhook_subscription_unify 列兜底与
+        // ensure_perf_indexes 索引兜底均以表存在性守卫让位。
+        "sys_web_hook",
+        "sys_web_hook_log",
+        // 前端错误（m20260821_000001）：ensure_frontend_error_device_type 表不存在即跳过。
+        "sys_frontend_error",
+    ];
+
+    /// 库 B 有而库 A 无的表：**兜底超集**白名单（显式命名 + 理由）。
+    /// 兜底侧建出的表而全量迁移没有——通常是历史兼容遗留。
+    const FALLBACK_ONLY_TABLES: &[&str] = &[];
+
+    /// 列级差异白名单：确证合理的「兜底超集」列（迁移侧缺失、由兜底每次启动幂等补齐）。
+    /// (表, 列) —— 理由注释必须随行给出。
+    const COLUMN_SUPERSET_OK: &[(&str, &str)] = &[
+        // sys_user.password_version：迁移 m20261001_000001_shared_store 建三表但未含该列；
+        // ensure_user_password_version_column 每次启动幂等补列（全新部署路径同样执行，
+        // 行为不依赖迁移侧提供）——属兜底超集（合理）而非漂移。
+        ("sys_user", "password_version"),
+    ];
+
+    /// 进程内自增序号：保证临时库路径唯一（与 repository/test_support 同款防撞）。
+    static LOCK_DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// 唯一临时 sqlite 文件库
+    async fn fresh_db(tag: &str) -> (DatabaseConnection, std::path::PathBuf) {
+        let pid = std::process::id();
+        let seq = LOCK_DB_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let p =
+            std::env::temp_dir().join(format!("stepby_schema_lock_{tag}_{pid}_{seq}_{nanos}.db"));
+        let url = format!("sqlite://{}?mode=rwc", p.to_string_lossy());
+        (Database::connect(&url).await.unwrap(), p)
+    }
+
+    /// `AppInitializer::run()` 的最小可调用形态：按 mod.rs `run()` 的**原始顺序**
+    /// 调用全部会动 schema/种子的兜底。与 `run()` 的刻意差异（均不产 schema/种子）：
+    /// logger / 能力位注入（进程级全局态，测试禁触）、SharedStore/Redis/scheduler/
+    /// storage/AppState 组装、三个仅告警的自检、以及需要 SharedStore 的数据治理收敛。
+    /// 覆盖完整性由 `fallback_harness_covers_all_ensure_calls_in_run` 静态锁保证。
+    async fn run_all_initialize_fallbacks(db: &DatabaseConnection) -> anyhow::Result<()> {
+        let upload_cfg = UploadConfig::default();
+        // 3.1 G18：sys_user.country_code
+        ensure_user_country_code_column(db).await?;
+        // 3.1.1 v5-N2 Phase 2：sys_user.tenant_id
+        ensure_user_tenant_id_column(db).await?;
+        // 3.1.3 v5-D12：sys_user.scim_external_id（mod.rs 内联兜底，逐字同口径）
+        if !sso_has_column(db, "sys_user", "scim_external_id").await? {
+            db.execute_raw(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE sys_user ADD COLUMN scim_external_id VARCHAR(255)".to_string(),
+            ))
+            .await?;
+        }
+        // 3.1.4 v5-D5：sys_oauth_client.sector_identifier_uri（表由 migration 管理，缺表安全跳过）
+        if sso_table_exists(db, "sys_oauth_client").await?
+            && !sso_has_column(db, "sys_oauth_client", "sector_identifier_uri").await?
+        {
+            db.execute_raw(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE sys_oauth_client ADD COLUMN sector_identifier_uri VARCHAR(255)"
+                    .to_string(),
+            ))
+            .await?;
+        }
+        // 3.1.2：sys_dept.leader_user_id（真实运行验证发现的存量库漂移）
+        if sso_table_exists(db, "sys_dept").await?
+            && !sso_has_column(db, "sys_dept", "leader_user_id").await?
+        {
+            db.execute_raw(Statement::from_string(
+                db.get_database_backend(),
+                "ALTER TABLE sys_dept ADD COLUMN leader_user_id BIGINT".to_string(),
+            ))
+            .await?;
+        }
+        // 3.1.2b 主管回填（审批链前置条件）
+        ensure_platform_dept_leaders(db).await?;
+        // 3.2 P0-2：sys_task.operator_id
+        ensure_task_operator_id_column(db).await?;
+        // 3.3 Tier-S #2：sys_oper_log.oper_diff
+        ensure_oper_log_diff_column(db).await?;
+        // 3.4 Tier-S #3：data_rule 两表 + sys_pat
+        ensure_data_rule_tables(db).await?;
+        ensure_sys_pat_table(db).await?;
+        // 3.5 PAT 管理菜单
+        ensure_sys_pat_menu(db).await?;
+        // 3.5b 审批工作流模块（等价 m20260923_000002）
+        ensure_flow_module(db).await?;
+        // 3.5c SCIM Group + 多部门任职（等价 m20260924_000008/000009）
+        ensure_scim_group_module(db).await?;
+        // 3.5d 多租户 Phase 2（等价 m20260925_000001/000002）
+        ensure_multitenant_module(db).await?;
+        // 3.5d-2 租户自助域名菜单（等价 m20260926_000011）
+        ensure_domain_self_service_menu(db).await?;
+        // 3.5d-3 备份权限粒度化菜单（等价 m20260926_000012）
+        ensure_backup_permission_menus(db).await?;
+        // 3.5d-4 前端错误 device_type（等价 m20260928_000002）
+        ensure_frontend_error_device_type(db).await?;
+        // 3.5d-5 数据看板菜单去重（等价 m20260928_000003）
+        ensure_dashboard_menu_dedupe(db).await?;
+        // 3.5d-6' 菜单-only 迁移兜底（135/3410/3550/3551）
+        ensure_menu_only_migration_menus(db).await?;
+        // 3.5d-6 菜单信息架构优化（等价 m20260928_000004）
+        ensure_menu_structure_optimize(db).await?;
+        // 3.5d-8 AI 助手菜单
+        ensure_ai_menu(db).await?;
+        // 3.5d-4(3) 租户自建导航菜单（等价 m20260926_000014）
+        ensure_tenant_nav_menu(db).await?;
+        // 3.5e 多租户 Phase 3（等价 m20260925_000003）
+        ensure_tenant_phase3(db).await?;
+        // 3.5f 多租户 SaaS 治理（等价 m20260925_000004）
+        ensure_tenant_saas_governance(db).await?;
+        // 3.5f' 治理参数项缺行补齐（批次十四）
+        ensure_governance_config_rows(db).await?;
+        // 3.5g 唯一域租户化（等价 m20260925_000005）
+        ensure_tenant_unique_scope(db).await?;
+        // 3.5h 租户角色菜单治理
+        ensure_tenant_role_menu_governance(db).await?;
+        // 3.5i 存量上传路径回填（数据级；默认 local 档）
+        ensure_legacy_upload_paths(db, &upload_cfg).await?;
+        // 3.5j 台账 P0-2：sys_role.is_system
+        ensure_role_is_system_column(db).await?;
+        // 3.5j-b 台账：sys_role.custom_sql（等价 m20260819_000005）
+        ensure_role_custom_sql_column(db).await?;
+        // 3.5k 台账 F-8：sys_logininfor.user_id
+        ensure_logininfor_user_id_column(db).await?;
+        // 3.5.5 gen_table_column Rust 命名（等价 m20260926_000009）
+        ensure_gen_column_rust_naming(db).await?;
+        // 3.5.6 sys_tenant_package.features（等价 m20260926_000010）
+        ensure_tenant_package_features(db).await?;
+        // 3.5.7 WebAuthn 凭据表（等价 m20260927_000002）
+        ensure_sys_user_credential_table(db).await?;
+        // 3.6 SSO v4 列（等价 m20260923_000001；空 enc_key = 迁移期 fail-open 同口径）
+        ensure_sso_v4_columns(db, "").await?;
+        // 3.9 共享态存储持久层（等价 m20261001_000001）
+        ensure_shared_store_tables(db).await?;
+        ensure_user_password_version_column(db).await?;
+        ensure_user_must_change_pwd_column(db).await?;
+        // 3.10 链感知保留（等价 m20261008_000001）
+        migration::migrations::m20261008_000001_log_archive_anchor::init_log_archive_anchor(db)
+            .await?;
+        // 4.2 SSO 限流分档（等价 m20260924_000001）
+        ensure_sso_rate_limit_tiers(db).await?;
+        // 4.3 运行期敏感凭据回填（空 enc_key = 跳过，与迁移期 fail-open 一致；数据级）
+        ensure_runtime_secrets_encrypted(db, "").await;
+        // 4.4 SSO consent 唯一索引（等价 m20260924_000002）
+        ensure_sso_consent_unique(db).await?;
+        // 4.5 RS256 列补齐（等价 m20260924_000003/000004；空 enc_key 跳过密钥生成）
+        ensure_sso_rs256_keys(db, "").await?;
+        // 4.5b key_id 列（等价 m20260926_000004）
+        ensure_oauth_client_key_id_column(db).await?;
+        // 4.5c previous_client_secret_hash 列（等价 m20260927_000001）
+        ensure_oauth_client_prev_secret_column(db).await?;
+        // 4.5c-b sys_job_log.duration_ms（等价 m20261007_000001）
+        ensure_job_log_duration_column(db).await?;
+        // 4.5c-c 消息模板 seed（G-16）
+        ensure_msg_template_seeds(db).await?;
+        // 4.5c-d OSS 配置菜单（等价 m20261007_000002）
+        ensure_upload_config_menu(db).await?;
+        // 4.5c-e flow_definition + report 两表 + 菜单（等价 m20261007_000003/4/5）
+        ensure_flow_definition_table(db).await?;
+        ensure_report_tables(db).await?;
+        ensure_flow_report_menus(db).await?;
+        ensure_report_menus_visible(db).await?;
+        ensure_ai_history_menu_parent(db).await?;
+        ensure_flow_designer_menu_visible(db).await?;
+        ensure_flow_task_action_columns(db).await?;
+        ensure_flow_graph_doc_table(db).await?;
+        ensure_sms_cloud_columns(db).await?;
+        // 4.5d 性能索引（等价 m20261002_000001）
+        ensure_perf_indexes(db).await?;
+        // 4.5e 审计合规域（等价 m20261003_000001）
+        ensure_audit_change_tables(db).await?;
+        // 4.5f Webhook 事件域（等价 m20261003_000002）
+        ensure_webhook_event_tables(db).await?;
+        // 4.5g 告警规则（等价 m20261003_000003）
+        ensure_alert_rule_tables(db).await?;
+        // 4.5h Webhook 订阅双轨收敛（等价 m20261003_000004）
+        ensure_webhook_subscription_unify(db).await?;
+        // 4.5i 字段级权限（等价 m20261003_000005）
+        ensure_role_field_perm_tables(db).await?;
+        // 4.5j 报表看板（等价 m20261003_000006）
+        ensure_report_board_tables(db).await?;
+        Ok(())
+    }
+
+    /// 归一化列类型：仅收编**经真实 diff 确证等价**的写法族（SQLite 类型亲和规则）。
+    /// 归一化依据（SQLite affinity 判定：含 INT → INTEGER；含 CHAR/TEXT → TEXT；否则 NUMERIC；
+    /// 且 SQLite 不强制 VARCHAR/CHAR 长度——迁移侧 m20260719_000001 的 WARN 即此口径）：
+    /// - INTEGER ↔ BIGINT：同属 INTEGER 亲和，sea-orm 同映射 i64
+    ///   （观测对：sys_task.operator_id / sys_job_log.duration_ms / *_expire_at 等）；
+    /// - CHAR(N) ↔ VARCHAR(N)：同属 TEXT 亲和，无长度强制
+    ///   （观测对：sys_data_rule.del_flag/status）；
+    /// - DATETIME ↔ DATETIME_TEXT ↔ TIMESTAMP：值恒为 sea-orm 渲染的非数值时间字符串，
+    ///   NUMERIC/TEXT 亲和对其存取行为一致（观测对：sys_data_rule/sys_user_credential 时间列）。
+    ///
+    /// 不在族内的写法差异（如 VARCHAR(N) vs TEXT、缺列）一律视为漂移。
+    fn normalize_col_type(ty: &str) -> String {
+        let up = ty.trim().to_ascii_uppercase();
+        let collapsed: String = up.split_whitespace().collect::<Vec<_>>().join(" ");
+        match collapsed.as_str() {
+            "DATETIME" | "DATETIME_TEXT" | "TIMESTAMP" => "DATETIME".to_string(),
+            _ if collapsed.starts_with("CHAR") => format!("VARCHAR{}", &collapsed[4..]),
+            _ if collapsed.contains("INT") => "INTEGER".to_string(),
+            _ => collapsed,
+        }
+    }
+
+    /// 每表列指纹：(列名, 归一化类型, notnull, pk) 排序串
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct ColFp {
+        name: String,
+        ty: String,
+        notnull: bool,
+        pk: bool,
+    }
+
+    async fn load_schema(db: &DatabaseConnection) -> anyhow::Result<BTreeMap<String, Vec<ColFp>>> {
+        let backend = DatabaseBackend::Sqlite;
+        let tables = db
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT name FROM sqlite_master WHERE type='table' \
+                 AND name NOT LIKE 'sqlite_%' AND name != 'seaql_migrations'"
+                    .to_string(),
+            ))
+            .await?;
+        let mut map = BTreeMap::new();
+        for t in tables {
+            let name: String = t.try_get("", "name")?;
+            let cols = db
+                .query_all_raw(Statement::from_string(
+                    backend,
+                    format!("PRAGMA table_info({name})"),
+                ))
+                .await?;
+            let mut fps = Vec::new();
+            for c in &cols {
+                let ty = normalize_col_type(&c.try_get::<String>("", "type").unwrap_or_default());
+                let pk = c.try_get::<i64>("", "pk").unwrap_or(0) != 0;
+                let mut notnull = c.try_get::<i64>("", "notnull").unwrap_or(0) != 0;
+                // 单列 INTEGER PRIMARY KEY 是 rowid 别名：显式 NULL 会自动生成 rowid，
+                // PRAGMA notnull 位不影响行为（观测对：sys_user_credential.cred_id /
+                // sys_data_rule.rule_id 迁移与兜底对同一逻辑列 notnull 标记不同）。
+                // 复合主键不受此豁免（NOT NULL 真实生效）。
+                let pk_cols = cols
+                    .iter()
+                    .filter(|x| x.try_get::<i64>("", "pk").unwrap_or(0) != 0)
+                    .count();
+                if pk && pk_cols == 1 && ty == "INTEGER" {
+                    notnull = false;
+                }
+                fps.push(ColFp {
+                    name: c.try_get::<String>("", "name")?,
+                    ty,
+                    notnull,
+                    pk,
+                });
+            }
+            fps.sort();
+            map.insert(name, fps);
+        }
+        Ok(map)
+    }
+
+    /// 单值键集查询：sql 须返回一列字符串
+    async fn key_set(db: &DatabaseConnection, sql: &str) -> anyhow::Result<BTreeSet<String>> {
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                sql.to_string(),
+            ))
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.try_get::<String>("", "k").unwrap_or_default())
+            .collect())
+    }
+
+    /// 种子差异白名单：与 MIGRATION_ONLY_TABLES **共退让**的模块菜单。
+    /// 这些菜单所属模块的表均为纯迁移管理（见 MIGRATION_ONLY_TABLES 理由）：
+    /// 表与菜单同进同退——极老存量库补齐该模块须整模块跑迁移，只补菜单
+    /// 反而制造「入口可见但页面 500」的假入口。键形如 "menu_id:perms"。
+    fn seed_diff_whitelisted(table: &str, key: &str) -> bool {
+        if table != "sys_menu" {
+            return false;
+        }
+        let id: i64 = key
+            .split(':')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(-1);
+        // 消息模块：140 目录 + 141-143 页面 + 3101-3123 按钮
+        // OAuth 模块：145 目录 + 146-147 页面 + 3261-3268 按钮
+        // 报表模块：151 目录 + 152-153 页面 + 3431-3445 按钮
+        // WebHook 模块：157 目录 + 158-159 页面 + 3531-3544 按钮
+        // 前端错误模块：160 页面 + 1061 按钮
+        (140..=143).contains(&id)
+            || (145..=147).contains(&id)
+            || (151..=153).contains(&id)
+            || (157..=159).contains(&id)
+            || (3101..=3123).contains(&id)
+            || (3261..=3268).contains(&id)
+            || (3431..=3445).contains(&id)
+            || (3531..=3544).contains(&id)
+            || id == 160
+            || id == 1061
+    }
+
+    /// 总锁：迁移侧 vs 兜底侧的表集合 + 每表列指纹 + 种子键集 全量对比
+    #[tokio::test]
+    async fn schema_equivalence_lock() {
+        // ---- 库 A：迁移侧（全部迁移） ----
+        let (db_a, path_a) = fresh_db("migr").await;
+        migration::Migrator::up(&db_a, None)
+            .await
+            .expect("迁移侧建库失败");
+
+        // ---- 库 B：兜底侧（基线迁移 + initialize 兜底） ----
+        let (db_b, path_b) = fresh_db("fallback").await;
+        // 基线 = 兜底约定起点（含）之前的全部迁移
+        let mut baseline = 0u32;
+        for m in migration::Migrator::migrations() {
+            baseline += 1;
+            if m.name() == FALLBACK_BASELINE_MIGRATION {
+                break;
+            }
+        }
+        assert!(
+            baseline > 0,
+            "兜底基线迁移未找到: {FALLBACK_BASELINE_MIGRATION}"
+        );
+        migration::Migrator::up(&db_b, Some(baseline))
+            .await
+            .expect("兜底侧基线建库失败");
+        run_all_initialize_fallbacks(&db_b)
+            .await
+            .expect("initialize 兜底 harness 执行失败（存量库启动路径在真实环境会同样失败）");
+
+        // ---- 指纹提取与对比 ----
+        let sa = load_schema(&db_a).await.unwrap();
+        let sb = load_schema(&db_b).await.unwrap();
+        let mut report = String::new();
+        let mut problems = 0usize;
+
+        // 1) 表集合差异（白名单须逐一登记）
+        let only_a: Vec<&String> = sa.keys().filter(|t| !sb.contains_key(*t)).collect();
+        let only_b: Vec<&String> = sb.keys().filter(|t| !sa.contains_key(*t)).collect();
+        for t in &only_a {
+            if MIGRATION_ONLY_TABLES.contains(&t.as_str()) {
+                report.push_str(&format!("[表] {t}: 仅迁移侧（已登记白名单）\n"));
+            } else {
+                problems += 1;
+                report.push_str(&format!(
+                    "[表] {t}: 仅迁移侧，兜底缺失且未登记 MIGRATION_ONLY_TABLES —— 存量库将 500，须补兜底或登记白名单\n"
+                ));
+            }
+        }
+        for t in &only_b {
+            if FALLBACK_ONLY_TABLES.contains(&t.as_str()) {
+                report.push_str(&format!("[表] {t}: 仅兜底侧（已登记白名单）\n"));
+            } else {
+                problems += 1;
+                report.push_str(&format!(
+                    "[表] {t}: 仅兜底侧，迁移缺失且未登记 FALLBACK_ONLY_TABLES —— 须对齐迁移或登记白名单\n"
+                ));
+            }
+        }
+
+        // 2) 共有表的列指纹差异
+        let mut col_diffs = 0usize;
+        for (t, fa) in &sa {
+            let Some(fb) = sb.get(t) else { continue };
+            let set_a: BTreeSet<&ColFp> = fa.iter().collect();
+            let set_b: BTreeSet<&ColFp> = fb.iter().collect();
+            for fp in set_a.difference(&set_b) {
+                if COLUMN_SUPERSET_OK.contains(&(t, fp.name.as_str())) {
+                    report.push_str(&format!(
+                        "[列] {t}.{}: 仅兜底侧（已登记列级超集白名单）\n",
+                        fp.name
+                    ));
+                    continue;
+                }
+                col_diffs += 1;
+                problems += 1;
+                report.push_str(&format!(
+                    "[列] {t}.{}: 仅迁移侧（迁移侧指纹 {fp:?}）—— 存量库实体 SELECT 将 500\n",
+                    fp.name
+                ));
+            }
+            for fp in set_b.difference(&set_a) {
+                if COLUMN_SUPERSET_OK.contains(&(t, fp.name.as_str())) {
+                    report.push_str(&format!(
+                        "[列] {t}.{}: 仅兜底侧（已登记列级超集白名单）\n",
+                        fp.name
+                    ));
+                    continue;
+                }
+                col_diffs += 1;
+                problems += 1;
+                report.push_str(&format!(
+                    "[列] {t}.{}: 仅兜底侧（兜底侧指纹 {fp:?}）—— 迁移与兜底 DDL 漂移\n",
+                    fp.name
+                ));
+            }
+        }
+
+        // 3) 种子等价：兜底侧 seed 的主要表，A/B 键集必须一致。
+        // sys_menu 仅比对**未软删**行（del_flag='0'：软删菜单非功能入口，
+        // 且 A 侧存在 m20261007_000011 软删 4115 的记账行，B 不应有）。
+        // 「迁移侧有兜底无」的差集须为空或全部命中 SEED_MENU_MODULE_DEFER_OK。
+        let mut seed_problems = 0usize;
+        let mut seed_report = String::new();
+        for (table, sql, desc) in [
+            (
+                "sys_menu",
+                "SELECT menu_id || ':' || perms AS k FROM sys_menu WHERE del_flag = '0'",
+                "菜单（menu_id+perms）",
+            ),
+            (
+                "sys_dict_type",
+                "SELECT dict_type AS k FROM sys_dict_type",
+                "字典类型",
+            ),
+            (
+                "sys_dict_data",
+                "SELECT dict_type || ':' || dict_value AS k FROM sys_dict_data",
+                "字典数据（type+value）",
+            ),
+            (
+                "sys_config",
+                "SELECT config_key AS k FROM sys_config",
+                "参数配置",
+            ),
+            (
+                "sys_webhook_event",
+                "SELECT event_key AS k FROM sys_webhook_event",
+                "Webhook 事件",
+            ),
+            (
+                "sys_msg_template",
+                "SELECT template_code AS k FROM sys_msg_template",
+                "消息模板",
+            ),
+        ] {
+            if !sa.contains_key(table) || !sb.contains_key(table) {
+                continue;
+            }
+            let ka = key_set(&db_a, sql).await.unwrap();
+            let kb = key_set(&db_b, sql).await.unwrap();
+            let miss_b: Vec<_> = ka
+                .difference(&kb)
+                .filter(|k| !seed_diff_whitelisted(table, k))
+                .collect();
+            let miss_a: Vec<_> = kb.difference(&ka).collect();
+            if !miss_b.is_empty() || !miss_a.is_empty() {
+                seed_problems += miss_b.len() + miss_a.len();
+                seed_report.push_str(&format!(
+                    "[种子] {desc}（{table}）: 迁移侧有兜底无 {miss_b:?}；兜底侧有迁移无 {miss_a:?}\n"
+                ));
+            }
+        }
+
+        assert_eq!(
+            problems,
+            0,
+            "迁移侧 ↔ initialize 兜底侧 schema 漂移 {problems} 处（表集合差异 {}+{}，列指纹差异 {col_diffs}）：\n\
+             ===== 真实 diff 报告 =====\n{report}\n\
+             处理规则：补齐兜底（首选）或将确证合理的差异显式登记入 MIGRATION_ONLY_TABLES / FALLBACK_ONLY_TABLES 并附理由",
+            only_a.len(),
+            only_b.len()
+        );
+        assert_eq!(
+            seed_problems, 0,
+            "种子等价性破坏 {seed_problems} 处：\n{seed_report}"
+        );
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    /// 覆盖静态锁：`mod.rs` `run()` 中出现的每个 `ensure_*(` 调用都必须被
+    /// `run_all_initialize_fallbacks` 覆盖。防止 harness 与生产编排漂移——
+    /// 新增兜底函数接入 run() 后若未纳入本测试，此处必红。
+    #[test]
+    fn fallback_harness_covers_all_ensure_calls_in_run() {
+        // 经 concat! 间接引用：`include_str!(` 的尾部 `tr!(` 会被 i18n key 扫描正则
+        // （tr!\s*\(\s*"…"）误捕为 key "mod.rs"（all_tr_keys_exist_in_both_locale_files 实测）。
+        let source = include_str!(concat!("mod.rs"));
+        let mut called = BTreeSet::new();
+        let bytes = source.as_bytes();
+        let mut i = 0;
+        while let Some(pos) = source[i..].find("ensure_") {
+            let abs = i + pos;
+            let mut j = abs;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            let name = &source[abs..j];
+            // 仅统计后随 '(' 的标识符（真实调用形态），注释散文中的 ensure_* 不计
+            if name.len() > "ensure_".len() && source[j..].trim_start().starts_with('(') {
+                called.insert(name.to_string());
+            }
+            i = j.max(abs + 1);
+        }
+        assert!(
+            !called.is_empty(),
+            "mod.rs 解析结果为空——解析逻辑与源码形态失配，须修复本测试"
+        );
+        // harness 覆盖的 ensure_* 名单（与 run_all_initialize_fallbacks 内的调用一一对应）
+        // 显式豁免（非 schema/种子兜底，与数据库结构无关）：
+        // - ensure_sqlite_parent_dir：纯文件系统兜底（为 sqlite 文件建父目录），无 SQL 执行。
+        const NON_SCHEMA_EXEMPT: &[&str] = &["ensure_sqlite_parent_dir"];
+        let harness_covers: &[&str] = &[
+            "ensure_user_country_code_column",
+            "ensure_user_tenant_id_column",
+            "ensure_platform_dept_leaders",
+            "ensure_task_operator_id_column",
+            "ensure_oper_log_diff_column",
+            "ensure_data_rule_tables",
+            "ensure_sys_pat_table",
+            "ensure_sys_pat_menu",
+            "ensure_flow_module",
+            "ensure_scim_group_module",
+            "ensure_multitenant_module",
+            "ensure_domain_self_service_menu",
+            "ensure_backup_permission_menus",
+            "ensure_frontend_error_device_type",
+            "ensure_dashboard_menu_dedupe",
+            "ensure_menu_structure_optimize",
+            "ensure_menu_only_migration_menus",
+            "ensure_ai_menu",
+            "ensure_tenant_nav_menu",
+            "ensure_tenant_phase3",
+            "ensure_tenant_saas_governance",
+            "ensure_governance_config_rows",
+            "ensure_tenant_unique_scope",
+            "ensure_tenant_role_menu_governance",
+            "ensure_legacy_upload_paths",
+            "ensure_role_is_system_column",
+            "ensure_role_custom_sql_column",
+            "ensure_logininfor_user_id_column",
+            "ensure_gen_column_rust_naming",
+            "ensure_tenant_package_features",
+            "ensure_sys_user_credential_table",
+            "ensure_sso_v4_columns",
+            "ensure_shared_store_tables",
+            "ensure_user_password_version_column",
+            "ensure_user_must_change_pwd_column",
+            "ensure_sso_rate_limit_tiers",
+            "ensure_runtime_secrets_encrypted",
+            "ensure_sso_consent_unique",
+            "ensure_sso_rs256_keys",
+            "ensure_oauth_client_key_id_column",
+            "ensure_oauth_client_prev_secret_column",
+            "ensure_job_log_duration_column",
+            "ensure_msg_template_seeds",
+            "ensure_upload_config_menu",
+            "ensure_flow_definition_table",
+            "ensure_report_tables",
+            "ensure_flow_report_menus",
+            "ensure_report_menus_visible",
+            "ensure_ai_history_menu_parent",
+            "ensure_flow_designer_menu_visible",
+            "ensure_flow_task_action_columns",
+            "ensure_flow_graph_doc_table",
+            "ensure_sms_cloud_columns",
+            "ensure_perf_indexes",
+            "ensure_audit_change_tables",
+            "ensure_webhook_event_tables",
+            "ensure_alert_rule_tables",
+            "ensure_webhook_subscription_unify",
+            "ensure_role_field_perm_tables",
+            "ensure_report_board_tables",
+        ];
+        let missing: Vec<_> = called
+            .iter()
+            .filter(|n| {
+                !harness_covers.contains(&n.as_str()) && !NON_SCHEMA_EXEMPT.contains(&n.as_str())
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "mod.rs run() 中存在未被 schema 等价性总锁覆盖的兜底调用 {missing:?}——\
+             请将其纳入 run_all_initialize_fallbacks（保持 run() 原始顺序），\
+             若确认与 schema/种子无关须在此说明并同步更新本清单"
+        );
     }
 }

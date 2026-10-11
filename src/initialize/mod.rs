@@ -132,7 +132,11 @@ impl AppInitializer {
 
         // 3.1.4 v5-D5：幂等确保 sys_oauth_client 含 sector_identifier_uri 列
         //（pairwise sector 聚合；m20260924_000007 由 migration 负责全新库）
-        if !sso_has_column(&db, "sys_oauth_client", "sector_identifier_uri").await? {
+        // ⚠️ 须先探测表存在：极老存量库（m20260922_sso_module 之前）无 SSO 表，
+        // 无守卫时 ALTER 直接 no such table 启动崩（schema 等价性总锁实测发现）。
+        if sso_table_exists(&db, "sys_oauth_client").await?
+            && !sso_has_column(&db, "sys_oauth_client", "sector_identifier_uri").await?
+        {
             db.execute_raw(Statement::from_string(
                 db.get_database_backend(),
                 "ALTER TABLE sys_oauth_client ADD COLUMN sector_identifier_uri VARCHAR(255)"
@@ -255,6 +259,13 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("数据看板菜单去重失败: {}", e))?;
 
+        // 3.5d-6' 菜单-only 迁移兜底：135/3410/3550/3551 四行菜单（与迁移
+        //      m20260818_000001 / m20260819_000002 / m20260819_000006 等价）。
+        //      必须先于下方菜单结构优化兜底执行（后者只 UPDATE 既有行）。
+        ensure_menu_only_migration_menus(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化菜单-only 迁移兜底失败: {}", e))?;
+
         // 3.5d-6 菜单信息架构优化兜底：与迁移 m20260928_000004_optimize_menu_structure
         // 等价（启动不跑 Migrator::up）——3950「租户服务」目录 + 自助页收编 +
         // order 重排（消除重复 order）+ icon 语义修正，全部幂等。
@@ -332,6 +343,12 @@ impl AppInitializer {
         ensure_role_is_system_column(&db)
             .await
             .map_err(|e| anyhow::anyhow!("初始化 sys_role.is_system 兜底失败: {}", e))?;
+
+        // 3.5j-b 台账：sys_role.custom_sql 列（存量库兜底，等价迁移 m20260819_000005）。
+        // 缺此兜底时：实体 SELECT 带 custom_sql → 角色列表/编辑/数据权限解析全站 500。
+        ensure_role_custom_sql_column(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化 sys_role.custom_sql 兜底失败: {}", e))?;
 
         // 3.5k 台账 F-8 存量库兜底：sys_logininfor.user_id 列 + 索引 + 存量回填。
         // 缺此兜底时：实体 SELECT 带 user_id 列 → 登录日志列表查询 500。
