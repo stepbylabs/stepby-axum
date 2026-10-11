@@ -441,6 +441,103 @@ async fn build_isolated_state_with(
     )
 }
 
+/// 按用例内记录的 flow_code **精确**清理流程定义侧数据（teardown helper，防 it_ 残留累积）。
+///
+/// 删除顺序（先子后父）：sys_flow_task / sys_flow_log（biz_type='flow_graph_doc'，
+/// biz_id 经 flow_code 关联的图单据收敛）→ flow_graph_doc → flow_definition（含软删行）。
+///
+/// 只删 `flow_codes` 中精确列出的码——严禁模糊前缀删除（并行用例/并行测试进程互不波及）。
+pub(crate) async fn cleanup_flow_defs(ctx: &TestContext, flow_codes: &[&str]) {
+    assert!(
+        !flow_codes.is_empty(),
+        "cleanup_flow_defs 需至少一个 flow_code"
+    );
+    let db = &ctx.state.db;
+    let backend = DatabaseBackend::Sqlite;
+    let placeholders = vec!["?"; flow_codes.len()].join(", ");
+    let params = flow_codes
+        .iter()
+        .map(|c| sea_orm::Value::from(c.to_string()));
+
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!(
+            "DELETE FROM sys_flow_task WHERE biz_type = 'flow_graph_doc' \
+             AND biz_id IN (SELECT doc_id FROM flow_graph_doc WHERE flow_code IN ({placeholders}))"
+        ),
+        params.clone(),
+    ))
+    .await
+    .expect("清理图驱动待办失败");
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!(
+            "DELETE FROM sys_flow_log WHERE biz_type = 'flow_graph_doc' \
+             AND biz_id IN (SELECT doc_id FROM flow_graph_doc WHERE flow_code IN ({placeholders}))"
+        ),
+        params.clone(),
+    ))
+    .await
+    .expect("清理图驱动流水失败");
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!("DELETE FROM flow_graph_doc WHERE flow_code IN ({placeholders})"),
+        params.clone(),
+    ))
+    .await
+    .expect("清理图驱动单据失败");
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!("DELETE FROM flow_definition WHERE flow_code IN ({placeholders})"),
+        params,
+    ))
+    .await
+    .expect("清理流程定义失败");
+}
+
+/// 按用例内记录的 doc_id **精确**清理示例审批单据（demo_doc 链路 teardown helper）。
+///
+/// 删除顺序（先子后父）：sys_flow_task / sys_flow_log（biz_type='demo_doc'，
+/// 含 countersign 加签/转办产生的兄弟行）→ flow_demo_doc。
+///
+/// 只删传入的 doc_id——严禁按标题/前缀模糊删除（并行用例互不波及）。
+pub(crate) async fn cleanup_flow_demo_docs(ctx: &TestContext, doc_ids: &[i64]) {
+    assert!(
+        !doc_ids.is_empty(),
+        "cleanup_flow_demo_docs 需至少一个 doc_id"
+    );
+    let db = &ctx.state.db;
+    let backend = DatabaseBackend::Sqlite;
+    let placeholders = vec!["?"; doc_ids.len()].join(", ");
+    let params = doc_ids.iter().map(|id| sea_orm::Value::BigInt(Some(*id)));
+
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!(
+            "DELETE FROM sys_flow_task WHERE biz_type = 'demo_doc' AND biz_id IN ({placeholders})"
+        ),
+        params.clone(),
+    ))
+    .await
+    .expect("清理示例单据待办失败");
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!(
+            "DELETE FROM sys_flow_log WHERE biz_type = 'demo_doc' AND biz_id IN ({placeholders})"
+        ),
+        params.clone(),
+    ))
+    .await
+    .expect("清理示例单据流水失败");
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        format!("DELETE FROM flow_demo_doc WHERE doc_id IN ({placeholders})"),
+        params,
+    ))
+    .await
+    .expect("清理示例单据失败");
+}
+
 /// 构造一个带 ConnectInfo 的 POST /login 请求（login handler 需要 peer addr）。
 fn login_request(peer_ip: IpAddr, body: &str) -> Request<Body> {
     let mut req = Request::builder()

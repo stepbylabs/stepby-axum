@@ -139,6 +139,8 @@ async fn test_flow_single_mode_full_chain() {
     let timeline = v["data"]["timeline"].as_array().expect("timeline 应为数组");
     assert_eq!(timeline.len(), 3, "应有三条流水（提交+两级同意）");
     assert_eq!(timeline[0]["action"], "submit");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 2：驳回终止 + 重新提交（round_no + 1）
@@ -187,6 +189,8 @@ async fn test_flow_reject_then_resubmit() {
         "重新提交后应为 round 2，实际: {v}"
     );
     assert_eq!(v["data"]["status"], "pending");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 3：撤回（发起人按单据维度）→ withdrawn → 可重新提交
@@ -244,6 +248,8 @@ async fn test_flow_withdraw() {
     .await;
     ctx.assert_ok(&v);
     assert_eq!(v["data"]["status"], "pending");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 4：会签节点 —— task_type 由 Quorum 决定（与实际审批人数无关，V7 系修正）
@@ -297,6 +303,8 @@ async fn test_flow_countersign_mode() {
         .find(|r| r["docId"].as_i64() == Some(doc_id))
         .expect("列表应含该单据");
     assert_eq!(doc["status"], "approved", "会签全部通过后应办结");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 5：水平越权 —— 非 assignee（stepby）对 admin 的待办发起审批 → 403
@@ -322,6 +330,8 @@ async fn test_flow_horizontal_forbidden() {
         axum::http::StatusCode::FORBIDDEN,
         "非 assignee 审批应 403，实际: {status}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 6：全链自审拒绝 —— admin 提交时链路审批人仅为 admin 本人 → 400
@@ -415,6 +425,8 @@ async fn test_flow_transfer_back_to_applicant_rejected() {
         .iter()
         .any(|r| r["bizId"].as_i64() == Some(doc_id));
     assert!(!leaked, "转办被拒后提交人不应出现该单据待办，实际: {v}");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 9：并发双审 —— 3 个并发审批同一 pending 任务，恰 1 个 200、其余 400（条件更新幂等，V4-E1/V3-E1）
@@ -469,6 +481,8 @@ async fn test_flow_concurrent_approve_exactly_one_wins() {
         .iter()
         .find(|r| r["bizId"].as_i64() == Some(doc_id) && r["nodeSeq"].as_i64() == Some(2));
     assert!(node2.is_some(), "并发赢家应推进到第二级，实际: {v}");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 10：PAT 边界（V7-E1 方案 S / W-14）—— 审批写动作禁 PAT，只读放行
@@ -587,6 +601,8 @@ async fn test_flow_pat_boundary() {
             .any(|r| r["taskId"].as_i64() == Some(task1)),
         "PAT 被拒后 task {task1} 应仍为 pending 待办，实际: {v}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 11：管理视图 data_scope 的仓储层可见范围过滤（W-5 / 方案 §7.6「部门树 + 本人」）
@@ -664,6 +680,8 @@ async fn test_flow_doc_scope_filtering() {
         .await
         .expect("解析超管 data_scope 失败");
     assert_eq!(scope, FlowDocScope::All, "超管应解析为全量");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 12：离岗自动转办（W-4）—— 停用待办持有人后自动转办 + 系统归因流水
@@ -775,6 +793,8 @@ async fn test_flow_user_disabled_auto_transfer() {
         Some(1),
         "自动转办目标应为 admin(1)，实际: {auto_transfer}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 13：加签（W-3）—— 当前节点追加会签人，节点由单审升级为会签（须全部通过）
@@ -910,6 +930,8 @@ async fn test_flow_countersign_add() {
         doc["status"], "approved",
         "会签通过并二级同意后应办结，实际: {doc}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 14：已办视图（W-8）—— 仅收录本人**裁决类**动作流水
@@ -970,6 +992,8 @@ async fn test_flow_done_view() {
             .any(|r| r["bizId"].as_i64() == Some(doc_id)),
         "非审批人的已办列表不应含该单据，实际: {v}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 15：超时扫描幂等（W-13）—— 直调 scan 两轮，第二轮由 SETNX 去重跳过
@@ -1038,6 +1062,8 @@ async fn test_flow_timeout_scan_idempotent() {
         remind["operatorId"].is_null(),
         "超时提醒为系统动作，operatorId 应为 null，实际: {remind}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 16：升级提醒（W-7）—— 首次提醒后超 N 天未处理 → 升级提醒部门主管，且重置 N 天周期
@@ -1169,6 +1195,8 @@ async fn test_flow_timeout_escalation() {
         escalate_log["operatorId"].is_null(),
         "升级提醒为系统动作，operatorId 应为 null，实际: {escalate_log}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 17：审批单据 Excel 导出（W-11）—— 内容正确 + 可见范围与列表一致
@@ -1208,6 +1236,8 @@ async fn test_flow_export_excel() {
         rows.iter().skip(1).any(|r| r.contains(&doc_id.to_string())),
         "导出应含单据编号 {doc_id}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路 18（W-19）：通用审批引擎**不绑定单据类型**——任意 `biz_type` 均可开轮
@@ -1675,6 +1705,8 @@ async fn test_flow_or_sign_mode_full_chain() {
         doc["status"], "approved",
         "or_sign 单人通过即办结，实际: {doc}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路：weighted 权重和 ≥ threshold 才推进；不达标保持 pending
@@ -1771,6 +1803,8 @@ async fn test_flow_weighted_mode_threshold() {
         doc["status"], "approved",
         "权重 1+2 ≥ 门槛 2 应办结，实际: {doc}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路：delegate 委派（delegate_from 落库 + 受托人推进全链 + 边界拒绝）
@@ -1926,6 +1960,8 @@ async fn test_flow_delegate_chain() {
         .find(|r| r["docId"].as_i64() == Some(doc_id))
         .expect("我发起的列表应含该单据");
     assert_eq!(doc["status"], "approved", "委派链全通应办结，实际: {doc}");
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id]).await;
 }
 
 /// 链路：减签三场景 —— ①清空 pending 后 settle 收敛办结 ②已投票减签 discarded
@@ -2157,4 +2193,6 @@ async fn test_flow_countersign_del_chain() {
         status, 400,
         "减到节点无有效审批人必须 400 拦截，实际: {status}"
     );
+
+    super::cleanup_flow_demo_docs(&ctx, &[doc_id, doc2, doc3]).await;
 }

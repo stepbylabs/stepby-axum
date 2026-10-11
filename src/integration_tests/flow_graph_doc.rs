@@ -172,6 +172,8 @@ async fn test_graph_doc_conditional_true_two_nodes() {
             .any(|r| r["bizId"].as_i64() == Some(doc_id)),
         "办结后待办应清空: {v}"
     );
+
+    super::cleanup_flow_defs(&ctx, &["it_graph_true"]).await;
 }
 
 /// 链路②：条件假（days=1）→ 默认边直达办结（单节点）
@@ -227,6 +229,8 @@ async fn test_graph_doc_conditional_false_default_edge() {
             .any(|r| r["bizId"].as_i64() == Some(doc_id)),
         "办结后待办应清空: {v}"
     );
+
+    super::cleanup_flow_defs(&ctx, &["it_graph_short"]).await;
 }
 
 /// fail-closed：字段快照缺条件字段（图引用 days 而提交未带）→ 400
@@ -251,6 +255,8 @@ async fn test_graph_doc_missing_field_rejected() {
         status, 400,
         "字段快照缺条件字段必须 400（fail-closed，不静默选边）"
     );
+
+    super::cleanup_flow_defs(&ctx, &["it_graph_miss"]).await;
 }
 
 /// fail-closed：flow_code 未发布/不存在 → 404
@@ -345,4 +351,6 @@ async fn test_graph_doc_action_whitelist_denies_delegate() {
         ))
         .await;
     assert_eq!(status, 403, "未勾 delegate 必须被白名单拦截: {status}");
+
+    super::cleanup_flow_defs(&ctx, &["it_graph_actions"]).await;
 }
