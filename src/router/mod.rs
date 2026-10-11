@@ -418,7 +418,7 @@ async fn api_not_found() -> impl axum::response::IntoResponse {
 /// 构建 CORS 层（从配置读取 Origin 白名单）
 ///
 /// - allow_methods: GET/POST/PUT/DELETE/OPTIONS
-/// - allow_headers: authorization/content-type/accept
+/// - allow_headers: authorization/content-type/accept/idempotency-key
 /// - allow_credentials: true（支持 Cookie 传递）
 /// - allow_origin: 从 config.toml 的 server.cors_origins 读取
 fn build_cors_layer(server_config: &ServerConfig) -> CorsLayer {
