@@ -121,12 +121,16 @@ pub async fn security_headers(
         // - default-src 'self'：仅允许同源资源
         // - script-src 'self'：仅允许同源外链脚本（构建产物）
         // - style-src 'self' 'unsafe-inline'：保留 inline 以兼容 Element Plus 动态样式（低风险）
-        // - img-src 'self' data:：允许 data URI 图片（头像裁剪等场景）
-        // - connect-src 'self'：仅允许同源 API 请求
+        // - img-src 'self' data: blob:：允许 data URI 与 blob URL 图片。
+        //   blob: 必需——vue-cropper 1.1.4 在现代浏览器将工作图/预览图设为
+        //   URL.createObjectURL 产物（checkOrientationImage → toBlob），缺失时
+        //   头像裁剪器工作图与预览全部被拦，裁剪/上传 UI 结构性不可用
+        //   （批三十七 e2e F129 实证 CSP violation）。blob URL 受同源作用域约束，
+        //   无法用于加载外部资源，风险可控。
         insert_if_absent(
             headers,
             "content-security-policy",
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'",
         );
     }
     // Cache-Control：根据资源类型区分缓存策略
