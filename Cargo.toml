@@ -1,6 +1,7 @@
 [package]
 name = "stepby-axum"
 version = "0.2.0"
+license = "MIT"
 edition = "2024"
 # 新增 export_ts 二进制后，`cargo run` 面临 stepby-axum / export_ts 两个 bin 歧义。
 # 显式指定默认运行主服务二进制，避免回归。导出类型请用 `cargo ts`（见 .cargo/config.toml alias）。
