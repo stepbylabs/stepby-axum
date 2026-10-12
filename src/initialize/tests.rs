@@ -916,6 +916,8 @@ mod schema_equivalence_lock_tests {
         ensure_archive_menus(db).await?;
         // 4.5c-i 批五十六：皮肤/主题键治理修正（legacy 三元组守卫；幂等）
         ensure_skin_governance(db).await?;
+        // 4.5c-j 批六十：菜单 4122 终态收敛（等价迁移 m20261006_000002 种子；幂等）
+        ensure_data_rule_menu_alignment(db).await?;
         ensure_flow_designer_menu_visible(db).await?;
         ensure_flow_task_action_columns(db).await?;
         ensure_flow_graph_doc_table(db).await?;
@@ -1316,6 +1318,7 @@ mod schema_equivalence_lock_tests {
             "ensure_ai_history_menu_parent",
             "ensure_archive_menus",
             "ensure_skin_governance",
+            "ensure_data_rule_menu_alignment",
             "ensure_flow_designer_menu_visible",
             "ensure_flow_task_action_columns",
             "ensure_flow_graph_doc_table",

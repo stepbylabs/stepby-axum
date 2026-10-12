@@ -555,6 +555,11 @@ impl AppInitializer {
         ensure_skin_governance(&db)
             .await
             .map_err(|e| anyhow::anyhow!("修正皮肤主题键治理失败: {}", e))?;
+        // 4.5c-j 批六十：菜单 4122（规则删除）终态收敛（等价迁移 m20261006_000002 种子；
+        //      修复迁移登记前手工创建的畸形挂载——挂 4121 字段权限保存下）
+        ensure_data_rule_menu_alignment(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("收敛数据权限规则菜单失败: {}", e))?;
         // 4.5c-f G-02 M3：流程定义设计器上线翻转菜单可见性（4140，存量库兜底，
         //      等价迁移 m20261007_000009；幂等）
         ensure_flow_designer_menu_visible(&db)

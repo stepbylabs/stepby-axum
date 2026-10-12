@@ -676,7 +676,8 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
     if !sso_table_exists(db, "sys_menu").await? {
         return Ok(());
     }
-    /// 菜单 seed 行（与迁移 m20261007_000005 的 MENUS 同构）
+    /// 菜单 seed 行（与迁移 m20261007_000005 的 MENUS 同构；b60 起 remark 一并镜像，
+    /// 消除兜底通用文案与迁移种子逐菜单文案的种子源漂移）
     struct MenuSeedRow {
         menu_id: i64,
         menu_name: &'static str,
@@ -687,6 +688,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
         component: &'static str,
         perms: &'static str,
         icon: &'static str,
+        remark: &'static str,
     }
     const MENUS: &[MenuSeedRow] = &[
         MenuSeedRow {
@@ -699,6 +701,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "flow/designer/index",
             perms: "flow:definition:list",
             icon: "form",
+            remark: "G-02 可视化流程定义管理页（M2 前端上线时翻转可见）",
         },
         MenuSeedRow {
             menu_id: 4141,
@@ -710,6 +713,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "",
             perms: "flow:definition:query",
             icon: "#",
+            remark: "流程定义详情查询按钮",
         },
         MenuSeedRow {
             menu_id: 4142,
@@ -721,6 +725,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "",
             perms: "flow:definition:add",
             icon: "#",
+            remark: "流程定义新增按钮",
         },
         MenuSeedRow {
             menu_id: 4143,
@@ -732,6 +737,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "",
             perms: "flow:definition:edit",
             icon: "#",
+            remark: "流程定义编辑按钮",
         },
         MenuSeedRow {
             menu_id: 4144,
@@ -743,6 +749,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "",
             perms: "flow:definition:publish",
             icon: "#",
+            remark: "流程定义发布按钮（生成新版本并切换 is_latest）",
         },
         MenuSeedRow {
             menu_id: 4145,
@@ -754,6 +761,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "",
             perms: "flow:definition:remove",
             icon: "#",
+            remark: "流程定义删除按钮",
         },
         MenuSeedRow {
             menu_id: 4146,
@@ -765,6 +773,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "report/dataset/index",
             perms: "report:dataset:list",
             icon: "chart",
+            remark: "G-01 受控数据集管理页（M2 前端上线时翻转可见）",
         },
         MenuSeedRow {
             menu_id: 4147,
@@ -776,6 +785,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "",
             perms: "report:dataset:edit",
             icon: "#",
+            remark: "数据集新增/编辑/删除/试跑按钮（含 preview，权限合并模型）",
         },
         MenuSeedRow {
             menu_id: 4148,
@@ -787,6 +797,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "report/view/index",
             perms: "report:dashboard:view",
             icon: "dashboard",
+            remark: "G-01 大屏查看/保存/删除入口（save/view 同权限键，M2 前端上线时翻转可见）",
         },
     ];
     let backend = db.get_database_backend();
@@ -807,12 +818,15 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             // 静默失效，大屏管理菜单从未落库，垃圾行还入了菜单树）。内容字段整行
             // 对齐 seed；visible 保持现值（页面行随后由翻转兜底收敛到显示态）。
             // e2e 垃圾行零引用（无 role_menu/子菜单），整行 UPDATE 安全。
+            // b60：UPDATE 补齐 query/route_name/is_frame/is_cache/remark 五列——
+            // 原实现遗漏导致修正行残留 NULL/垃圾值（seed diff 实证 4148 五列 None）。
             db.execute_raw(Statement::from_string(
                 backend,
                 format!(
                     "UPDATE sys_menu SET menu_name = '{}', parent_id = {}, order_num = {}, \
-                     path = '{}', component = '{}', menu_type = '{}', perms = '{}', \
-                     icon = '{}', del_flag = '0' WHERE menu_id = {}",
+                     path = '{}', component = '{}', query = '', route_name = '', \
+                     is_frame = '1', is_cache = '0', menu_type = '{}', perms = '{}', \
+                     icon = '{}', remark = '{}', del_flag = '0' WHERE menu_id = {}",
                     m.menu_name,
                     m.parent_id,
                     m.order_num,
@@ -821,6 +835,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
                     m.menu_type,
                     m.perms,
                     m.icon,
+                    m.remark,
                     m.menu_id
                 ),
             ))
@@ -842,7 +857,7 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
                  create_by, create_time, remark, del_flag) VALUES \
                  ({}, '{}', {}, {}, '{}', '{}', '', '', \
                  '1', '0', '{}', '1', '0', '{}', '{}', 'admin', {}, \
-                 'G-01/G-02 菜单权限承载（存量库兜底）', '0')",
+                 '{}', '0')",
                 m.menu_id,
                 m.menu_name,
                 m.parent_id,
@@ -852,9 +867,39 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
                 m.menu_type,
                 m.perms,
                 m.icon,
-                now
+                now,
+                m.remark
             ),
         )
+        .await?;
+    }
+    // b60：历史行 remark 收敛——旧版兜底 INSERT 用通用文案，与迁移 m20261007_000005
+    // 逐菜单 remark 漂移（seed diff 实证 4140-4147 八处）。仅收敛仍为旧通用文案的行
+    // （不碰运营手调的其他 remark），幂等可重复执行。
+    for m in MENUS {
+        db.execute_raw(Statement::from_string(
+            backend,
+            format!(
+                "UPDATE sys_menu SET remark = '{}' WHERE menu_id = {} AND \
+                 remark = 'G-01/G-02 菜单权限承载（存量库兜底）'",
+                m.remark, m.menu_id
+            ),
+        ))
+        .await?;
+    }
+    // b60：批次十三自动修正行残留修复——旧版修正 UPDATE 未含 query/route_name/
+    // is_frame/is_cache/remark 五列（seed diff 实证 4148 五列 NULL）。仅修 NULL 残留
+    // （perms 已相符的行走 continue 分支，上述两条收敛均不命中），幂等可重复执行。
+    for m in MENUS {
+        db.execute_raw(Statement::from_string(
+            backend,
+            format!(
+                "UPDATE sys_menu SET query = '', route_name = '', is_frame = '1', \
+                 is_cache = '0', remark = '{}' WHERE menu_id = {} AND \
+                 (query IS NULL OR route_name IS NULL OR is_frame IS NULL OR is_cache IS NULL)",
+                m.remark, m.menu_id
+            ),
+        ))
         .await?;
     }
     // role_menu 补授（批次十三，用户拍板：平台普通角色 role 2 全量授权 4140-4148）。
@@ -873,6 +918,31 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
         tracing::info!("role 2 已补授 G-01/G-02 菜单 4140-4148（批次十三）");
     }
     tracing::info!("流程/报表菜单已补建（4140-4148，G-01/G-02 存量库兜底）");
+    Ok(())
+}
+
+/// 台账（b60，存量库终态收敛，等价迁移 `m20261006_000002` 种子）：
+/// 菜单 4122（规则删除按钮）在迁移登记前被手工创建于错误位置（挂在 4121
+/// 「字段权限保存」按钮之下，语义错位），迁移 INSERT OR IGNORE 对已占 menu_id
+/// 静默跳过 ⇒ 存量库永续保留畸形结构。此处向迁移种子终态收敛：
+/// parent_id 4121→4117（数据权限规则页）、order_num 4→3、path ''→'#'、remark 清空。
+/// perms 不变（system:dataRule:remove，role_menu 授权行零影响）。幂等：值已对齐零写入。
+pub(crate) async fn ensure_data_rule_menu_alignment(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    let affected = db
+        .execute_raw(Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE sys_menu SET parent_id = 4117, order_num = 3, path = '#', remark = '' \
+             WHERE menu_id = 4122 AND (parent_id != 4117 OR order_num != 3 \
+             OR path != '#' OR remark IS NOT NULL AND remark != '')"
+                .to_string(),
+        ))
+        .await?;
+    if affected.rows_affected() > 0 {
+        tracing::info!("菜单 4122（规则删除）已收敛至迁移种子终态（挂 4117，b60）");
+    }
     Ok(())
 }
 
