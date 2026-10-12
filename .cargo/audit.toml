@@ -1,0 +1,6 @@
+# cargo-audit 配置（批五十一：RUSTSEC-2023-0071 风险裁决；schema=cargo-audit 0.22.x）
+# security.yml 与本地 cargo audit 读取。advisory-db 更新需 github.com（受限网络用
+# cargo audit --no-fetch --stale 以本地库扫描，库上次同步 2026-08-24）。
+
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
