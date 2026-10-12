@@ -91,6 +91,10 @@ jobs:
         run: cargo test --workspace
         env:
           DATABASE_URL: "sqlite::memory:"
+          # 2 核 runner 高并发下"写后读"类用例存在负载型偶发（run 38278563900：
+          # switch_states/oper_log 归档/ip_location 等 6 例，本地并行不可复现）——
+          # 钳制并行度换确定性（与 RUN-RECIPE §3.36 内存纪律同源的负载管理）。
+          RUST_TEST_THREADS: "4"
 
       - name: Check generated TS types are up-to-date
         # ts-rs 在编译期按 .cargo/config.toml 的 TS_RS_EXPORT_DIR 写入 stepby-vue

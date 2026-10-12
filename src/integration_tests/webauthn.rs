@@ -29,6 +29,18 @@ use crate::entity::sys_user_credential;
 
 const FEATURE: &str = "auth.webauthn";
 
+/// 自含 webauthn 配置的测试上下文：能力位 on + 显式 rp_id/origin。
+/// 部署态 config.toml 常带 rp_id/origin 而入库模板/CI env-only 缺失 ⇒
+/// 服务端 503「WebAuthn 未配置」（GitHub run 38278563900 实证）——
+/// 用例前置必须自含，不得依赖部署态（批六十一）。
+async fn webauthn_ctx() -> TestContext {
+    TestContext::new_with(&[(FEATURE, "on")], |s| {
+        s.webauthn.rp_id = "localhost".to_string();
+        s.webauthn.origin = TEST_ORIGIN.to_string();
+    })
+    .await
+}
+
 /// 构造带鉴权头 + ConnectInfo 的请求（复用 TestContext 的隔离约定）
 fn authed_request(
     ctx: &TestContext,
@@ -157,7 +169,7 @@ async fn test_webauthn_feature_off_returns_404_on_all_endpoints() {
 /// ② 能力位 on ⇒ register/start 返回含 challenge 的创建选项（契约断言）
 #[tokio::test]
 async fn test_register_start_returns_options_with_challenge() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
     let v = ctx
         .post_json(
             "/system/user/webauthn/register/start",
@@ -193,7 +205,7 @@ async fn test_register_start_returns_options_with_challenge() {
 /// ③ register/finish 传垃圾 ⇒ 400
 #[tokio::test]
 async fn test_register_finish_garbage_returns_400() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
     let (status, v) = ctx
         .send_raw(authed_request(
             &ctx,
@@ -213,7 +225,7 @@ async fn test_register_finish_garbage_returns_400() {
 /// ④ login/start 未知用户 / 无凭据用户 ⇒ 与密码登录失败**同形**（防用户名枚举）
 #[tokio::test]
 async fn test_login_start_is_indistinguishable_from_login_failure() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
 
     // 基线：密码登录失败（不存在的用户）——与 C-1 反枚举口径同源
     let mut pw = Request::builder()
@@ -266,7 +278,7 @@ async fn test_login_start_is_indistinguishable_from_login_failure() {
 /// ⑤ 凭据列表（空 → 1）与归属校验（只能删自己的；删他人 ⇒ 404 且不生效）
 #[tokio::test]
 async fn test_credentials_list_and_ownership_on_delete() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
 
     // 初始列表为空
     let v = ctx.get_json("/system/user/webauthn/credentials").await;
@@ -402,7 +414,7 @@ async fn start_login_assertion(
 /// ⑥ 注册快乐路径：软认证器真签名 ⇒ 200 且凭据真实落库
 #[tokio::test]
 async fn test_register_happy_path_with_soft_authenticator() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
     let v = ctx.get_json("/system/user/webauthn/credentials").await;
     assert_eq!(
         v["data"].as_array().map(Vec::len),
@@ -433,7 +445,7 @@ async fn test_register_happy_path_with_soft_authenticator() {
 /// ⑦ 登录快乐路径：软认证器签名 ⇒ 真实可用 JWT（再打通受保护接口 /getInfo）
 #[tokio::test]
 async fn test_login_happy_path_with_soft_authenticator() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
     let auth = SoftAuthenticator::new();
     soft_register(&ctx, &auth, "soft-key").await;
 
@@ -488,7 +500,7 @@ async fn test_login_happy_path_with_soft_authenticator() {
 /// ⑧ 负路径（安全）：断言重放 / signCount 回退 / 篡改认证器数据 / 篡改 challenge ⇒ 401
 #[tokio::test]
 async fn test_login_replay_counter_and_tampering_rejected() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
     let auth = SoftAuthenticator::new();
     soft_register(&ctx, &auth, "soft-key").await;
 
@@ -565,7 +577,7 @@ async fn test_login_replay_counter_and_tampering_rejected() {
 /// ⑨ 反例：错误 origin / 错误 rp_id 的断言 ⇒ 被拒
 #[tokio::test]
 async fn test_login_wrong_origin_or_rp_id_rejected() {
-    let ctx = TestContext::new_with_features(&[(FEATURE, "on")]).await;
+    let ctx = webauthn_ctx().await;
     let auth = SoftAuthenticator::new();
     soft_register(&ctx, &auth, "soft-key").await;
 
