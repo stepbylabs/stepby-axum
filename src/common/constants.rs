@@ -33,6 +33,9 @@ pub const SECS_PER_MIN: i64 = 60;
 /// 日志保留天数（定时清理任务用）
 pub const LOG_RETENTION_DAYS: i64 = 90;
 
+/// 前端错误/性能埋点保留天数（观测数据短保留；批五十四：接入 cleanup_expired_logs）
+pub const FRONTEND_ERROR_RETENTION_DAYS: i64 = 7;
+
 /// 登录异常检测窗口（分钟）：扫描最近 N 分钟的登录失败记录
 pub const LOGIN_ANOMALY_WINDOW_MINS: i64 = 5;
 
