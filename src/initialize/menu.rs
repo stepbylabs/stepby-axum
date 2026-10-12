@@ -930,4 +930,59 @@ pub(crate) async fn ensure_ai_history_menu_parent(db: &DatabaseConnection) -> an
     Ok(())
 }
 
+/// 「审计归档下载」(4180) 与「链完整性校验」(4181) 按钮菜单兜底（批五十六）
+///
+/// 批次十九（链感知保留）的两个 F 型功能按钮 2026-10-08 以菜单管理页手工创建、
+/// 未登记种子——种子漂移审计实证全新部署缺失两个功能入口。迁移
+/// m20261012_000001 补种；本兜底为存量库幂等镜像（仅当 menu_id 缺失时插入，
+/// 对齐 ensure_ai_history_menu_parent 先例）。role_menu 授权为部署决策不随种子。
+pub(crate) async fn ensure_archive_menus(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "INSERT OR IGNORE INTO sys_menu \
+         (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, \
+          is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, \
+          remark, del_flag) \
+         VALUES \
+         (4180, '审计归档下载', 500, 4, '#', '', '', '', '1', '0', 'F', '0', '0', \
+          'monitor:operlogArchive:download', '#', 'admin', CURRENT_TIMESTAMP, \
+          '链感知保留：归档对象下载（平台专属，monitor:operlogArchive: 前缀）', '0'), \
+         (4181, '链完整性校验', 500, 5, '#', '', '', '', '1', '0', 'F', '0', '0', \
+          'monitor:operlogArchive:verify', '#', 'admin', CURRENT_TIMESTAMP, \
+          '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')"
+            .to_string(),
+    ))
+    .await?;
+    Ok(())
+}
+
+/// 皮肤/主题键治理修正兜底（批五十六，等价迁移 m20261012_000001 的存量库交付路径）
+///
+/// 背景：**存量库启动跳过 Migrator::up**（initialize/mod.rs:45 实证）——迁移只服务
+/// 全新库，存量库的一切数据修正必须走兜底。skinName/sideTheme 的 init 迁移未指定
+/// 治理列（列默认 fail-closed platform_only），与功能 72「租户覆盖 platform_default 键」
+/// 的产品语义冲突（全新库该测试必失败）。
+///
+/// 守卫：仅当三列恰为 legacy 缺省三元组（platform_only/0/0）时翻转为
+/// platform_default/1/1——迁移已应用的库与管理员后续治理变更零影响；
+/// 管理员若刻意回设完整 legacy 三元组会被再翻转（产品语义归 skin 可覆盖，留档）。
+pub(crate) async fn ensure_skin_governance(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_config").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_config SET scope = 'platform_default', tenant_editable = '1', \
+         visible_to_tenant = '1' \
+         WHERE config_key IN ('sys.index.skinName', 'sys.index.sideTheme') AND tenant_id = 0 \
+         AND scope = 'platform_only' AND tenant_editable = '0' AND visible_to_tenant = '0'"
+            .to_string(),
+    ))
+    .await?;
+    Ok(())
+}
+
 use super::*;

@@ -701,10 +701,20 @@ impl SysConfigService {
 
         let now = crate::common::datetime::now_naive();
         let mut am: SysConfigActiveModel = existing.into();
-        am.config_name = Set(dto.config_name);
+        // 部分更新语义（批五十六扩展，对齐治理列 2026-09-26 修复）：Option 未提交（None）
+        // = 保留现值，显式 Some("")= 清空。此前无条件 Set 使"只改 remark 的常规编辑"
+        // 抹掉 config_name / config_value / config_type —— e2e F10 实证
+        // sys.index.skinName 的 config_name 被清空（编辑表单不含该列）。
+        if let Some(v) = dto.config_name.clone() {
+            am.config_name = Set(Some(v));
+        }
         am.config_key = Set(dto.config_key.clone());
-        am.config_value = Set(dto.config_value);
-        am.config_type = Set(dto.config_type);
+        if let Some(v) = dto.config_value.clone() {
+            am.config_value = Set(Some(v));
+        }
+        if let Some(v) = dto.config_type.clone() {
+            am.config_type = Set(Some(v));
+        }
         if operator_tid == 0 {
             // 平台操作者可管理治理列。
             //
@@ -747,7 +757,11 @@ impl SysConfigService {
         }
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
-        am.remark = Set(dto.remark);
+        // remark 同部分更新语义（None=保留）——F10 只改 remark 的 PUT 此前会连带
+        // 抹掉未提交的 config_name；本行原无条件 Set 是remark/config_name 双漂移根因
+        if let Some(v) = dto.remark.clone() {
+            am.remark = Set(Some(v));
+        }
 
         // 参数变更 + 审计留痕同事务：edit_config 原为无事务直更，接入变更留痕后
         // 引入事务保证「变更与留痕」原子性——record_change 失败令业务一并回滚，

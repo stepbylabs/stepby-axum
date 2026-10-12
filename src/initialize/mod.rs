@@ -545,6 +545,16 @@ impl AppInitializer {
         ensure_ai_history_menu_parent(&db)
             .await
             .map_err(|e| anyhow::anyhow!("修复 AI 问数历史菜单父级失败: {}", e))?;
+        // 4.5c-h 批五十六：归档按钮菜单补种（4180/4181，存量库兜底，
+        //      等价迁移 m20261012_000001；幂等）——批次十九手工创建未登记种子的修复
+        ensure_archive_menus(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("补种归档按钮菜单失败: {}", e))?;
+        // 4.5c-i 批五十六：皮肤/主题键治理修正（存量库兜底，等价迁移 m20261012_000001；
+        //      带 legacy 三元组守卫——迁移已应用或管理员已治理则零影响）
+        ensure_skin_governance(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("修正皮肤主题键治理失败: {}", e))?;
         // 4.5c-f G-02 M3：流程定义设计器上线翻转菜单可见性（4140，存量库兜底，
         //      等价迁移 m20261007_000009；幂等）
         ensure_flow_designer_menu_visible(&db)
