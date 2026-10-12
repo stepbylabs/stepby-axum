@@ -100,6 +100,24 @@ impl SysMsgSendLogRepository {
             .await
     }
 
+    /// 保留期清理：删除 send_time 早于 cutoff 的已完成投递记录（批五十七）
+    ///
+    /// send_time IS NULL（待发送/重试中）的记录永不清理；
+    /// tenant_scope=Some(t) 仅清理该租户；None（平台兜底清理）→ 全量。
+    pub async fn delete_older_than(
+        &self,
+        cutoff: NaiveDateTime,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysMsgSendLog::delete_many()
+            .filter(Column::SendTime.is_not_null())
+            .filter(Column::SendTime.lt(cutoff));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
+    }
+
     /// 清空发送记录（可选 limit 上限，防误删全表；limit=None 时清空全部）
     ///
     /// tenant_scope=Some(t) 时仅清理该租户记录（mass-clean 必须按租户过滤）。

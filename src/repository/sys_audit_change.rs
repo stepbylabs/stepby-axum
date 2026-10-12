@@ -31,6 +31,22 @@ impl SysAuditChangeRepository {
         &self.base
     }
 
+    /// 保留期清理：删除 operated_at 早于 cutoff 的留痕行（批五十七）
+    ///
+    /// 无防篡改链（变更留痕为写后只读快照域），直删安全；
+    /// tenant_scope=Some(t) 仅清理该租户；None（平台兜底清理）→ 全量。
+    pub async fn delete_older_than(
+        &self,
+        cutoff: NaiveDateTime,
+        tenant_scope: Option<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        let mut query = SysAuditChange::delete_many().filter(Column::OperatedAt.lt(cutoff));
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        query.exec(self.base.db()).await
+    }
+
     /// 插入一条变更留痕（支持事务上下文）
     pub async fn insert_conn<C: ConnectionTrait>(
         &self,
