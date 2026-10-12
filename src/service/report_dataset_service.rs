@@ -814,7 +814,7 @@ async fn infer_columns(
     let upper = sql_template.to_ascii_uppercase();
     let sel_pos = upper
         .find("SELECT")
-        .ok_or_else(|| ServiceError::bad_request("SQL 模板必须以 SELECT 开头"))?;
+        .ok_or_else(|| ServiceError::bad_request(&crate::tr!("error.report.sql_must_select")))?;
     let from_pos = upper[sel_pos..].find(" FROM ").map(|i| sel_pos + i);
     let proj = match from_pos {
         Some(fp) => &sql_template[sel_pos + 6..fp],

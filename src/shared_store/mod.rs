@@ -58,6 +58,11 @@ pub use local_store::LocalStore;
 pub use redis_store::RedisStore;
 
 /// 共享态存储错误（实现层统一错误；调用方按既有口径 map 到 `ServiceError`/`AppError`）
+///
+/// i18n 豁免：Display 串仅进日志（如 `monitor_cache_handler::map_scan_error` 写
+/// `tracing::error!` 后返回翻译键 `error.common.cache_failed`；`sys_tenant_service`
+/// 的运行时键写入仅 `tracing::warn!`）——本枚举不直达 HTTP 响应体；
+/// 且 thiserror `#[error]` 于 Display 上下文运行，无 locale 作用域，不适配 t!。
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// 后端操作失败（Redis 命令错误 / SQL 错误）

@@ -6,6 +6,7 @@ error:
     disabled: AI 助手未启用，请联系管理员在系统配置中开启
     pat_forbidden: AI 助手不支持访问令牌（PAT）调用，请使用登录会话
     capability_off: 当前租户未开通 AI 助手能力
+    config_missing: 请先填写 base_url 与 api_key
   fieldperm:
     disabled: 字段级权限功能未开启（平台开关或租户套餐能力位未启用）
     table_not_allowed: 业务表不在字段级权限白名单内
@@ -433,6 +434,8 @@ error:
     name_exists: 任务名称已存在
     group_mismatch: 任务组名不匹配
     id_invalid: 任务 ID 不合法
+    stats_window_overflow: 报表窗口日期计算溢出
+    stats_window_parse: 报表窗口日期解析失败
   scheduler:
     operation_failed: 调度器操作失败，请联系管理员
   report:
@@ -454,6 +457,7 @@ error:
     param_missing: 缺少必填参数
     query_timeout: 数据集查询超时
     sql_invalid: SQL 模板校验失败
+    sql_must_select: SQL 模板必须以 SELECT 开头
   report_sub:
     id_empty: 订阅 ID 不能为空
     not_found: 订阅不存在
