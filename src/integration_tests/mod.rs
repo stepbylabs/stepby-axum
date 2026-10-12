@@ -282,6 +282,12 @@ async fn build_isolated_state_with(
             "JWT_SECRET",
             "a-very-long-jwt-secret-key-for-testing-32+chars",
         );
+        // CONFIG_ENC_KEY：MaxMind 凭据等敏感配置的加密存储密钥（env-only 回退时缺失
+        // ⇒ ip_location config 接口 500「拒绝以明文存储凭据」，run 38289607542 实证）。
+        std::env::set_var(
+            "CONFIG_ENC_KEY",
+            "test-config-enc-key-for-integration-tests-32+chars",
+        );
     }
 
     let mut settings = Settings::from_file(&manifest_config_path())
