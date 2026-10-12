@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
+use sea_orm::ConnectionTrait;
 use sea_orm::{DatabaseConnection, Set};
 use tokio::sync::RwLock;
 use tokio_cron_scheduler::{Job, JobScheduler as TokioScheduler};
@@ -345,6 +346,55 @@ impl JobScheduler {
                     }
                     Err(e) => {
                         tracing::error!("cleanup_expired_logs: 清理登录日志失败: {}", e);
+                    }
+                }
+
+                // frontend_error：前端错误/性能埋点按独立短保留期清理（批五十四）
+                //
+                // 背景：service 层 clean() 此前为死方法（零调用点）——e2e 实测 10 天堆积
+                // 12 万行（97% 为 web vitals info 级埋点），表单调膨胀。观测数据与
+                // 错误信号分离短保留（默认 7 天，[sys_log].frontend_error_retention_days）。
+                let frontend_error_service =
+                    crate::service::sys_frontend_error_service::SysFrontendErrorService::new(
+                        db.clone(),
+                    );
+                let fe_retention = config.sys_log.frontend_error_retention_days;
+                match frontend_error_service.clean(fe_retention, None).await {
+                    Ok(affected) => {
+                        tracing::info!(
+                            "cleanup_expired_logs: 清理前端错误/埋点 {} 条（保留 {} 天）",
+                            affected,
+                            fe_retention
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("cleanup_expired_logs: 清理前端错误/埋点失败: {}", e);
+                    }
+                }
+
+                // sys_shared_kv：过期键物理清扫（批五十四）
+                //
+                // 背景：local 档共享态以本表承载，`is_expired` 仅在读路径过滤、
+                // 过期行无任何清扫（e2e 实测 10 天 3387 行 100% 过期堆积——rate_limit
+                // config 缓存键为主）；redis 档 TTL 由 Redis 天然过期、本表零写入，
+                // 清扫为 no-op（多档统一执行，无档位分支）。
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                match db
+                    .execute_raw(sea_orm::Statement::from_sql_and_values(
+                        db.get_database_backend(),
+                        "DELETE FROM sys_shared_kv WHERE expire_at IS NOT NULL AND expire_at < ?",
+                        [now_ms.into()],
+                    ))
+                    .await
+                {
+                    Ok(res) => {
+                        tracing::info!(
+                            "cleanup_expired_logs: 清扫 sys_shared_kv 过期键 {} 条",
+                            res.rows_affected()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("cleanup_expired_logs: 清扫 sys_shared_kv 过期键失败: {}", e);
                     }
                 }
             })

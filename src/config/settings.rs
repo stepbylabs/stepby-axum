@@ -1381,6 +1381,12 @@ pub struct SysLogConfig {
     /// 保留模式（默认 delete = 现状行为；非法取值回落 delete 并 WARN，fail-safe）
     #[serde(default = "default_sys_log_retention_mode")]
     pub retention_mode: String,
+    /// 前端错误/性能埋点（sys_frontend_error）保留天数（默认 7 天）
+    ///
+    /// 观测数据（web vitals 每页访问 5 条 info 级）与错误信号分离短保留——
+    /// e2e 实测 10 天堆积 12 万行（97% vitals info），接入同一每日清理任务。
+    #[serde(default = "default_frontend_error_retention_days")]
+    pub frontend_error_retention_days: i64,
 }
 
 /// 日志保留模式（批次十九）
@@ -1427,6 +1433,10 @@ impl fmt::Debug for SysLogConfig {
         f.debug_struct("SysLogConfig")
             .field("retention_days", &self.retention_days)
             .field("retention_mode", &self.retention_mode)
+            .field(
+                "frontend_error_retention_days",
+                &self.frontend_error_retention_days,
+            )
             .finish()
     }
 }
@@ -1436,12 +1446,17 @@ impl Default for SysLogConfig {
         Self {
             retention_days: default_sys_log_retention_days(),
             retention_mode: default_sys_log_retention_mode(),
+            frontend_error_retention_days: default_frontend_error_retention_days(),
         }
     }
 }
 
 fn default_sys_log_retention_days() -> i64 {
     crate::common::constants::LOG_RETENTION_DAYS
+}
+
+fn default_frontend_error_retention_days() -> i64 {
+    crate::common::constants::FRONTEND_ERROR_RETENTION_DAYS
 }
 
 fn default_sys_log_retention_mode() -> String {
