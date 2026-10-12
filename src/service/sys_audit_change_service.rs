@@ -297,6 +297,13 @@ pub struct SysAuditChangeService {
 }
 
 impl SysAuditChangeService {
+    /// 保留期清理：删除 days 天前的留痕行（批五十七；无防篡改链，直删安全）
+    pub async fn clean_expired(&self, days: i64) -> Result<u64, ServiceError> {
+        let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
+        let result = self.repo.delete_older_than(cutoff, None).await?;
+        Ok(result.rows_affected)
+    }
+
     pub fn new(db: DatabaseConnection) -> Self {
         Self {
             repo: SysAuditChangeRepository::new(db),

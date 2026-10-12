@@ -1025,6 +1025,13 @@ impl SysMsgService {
         Ok(())
     }
 
+    /// 保留期清理：删除 days 天前已完成投递的发送记录（批五十七）
+    pub async fn clean_send_logs_expired(&self, days: i64) -> Result<u64, ServiceError> {
+        let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
+        let result = self.send_log_repo.delete_older_than(cutoff, None).await?;
+        Ok(result.rows_affected)
+    }
+
     /// 清空发送记录（按操作者租户维度，禁止跨租户 mass-clean）
     pub async fn clean_send_logs(
         &self,

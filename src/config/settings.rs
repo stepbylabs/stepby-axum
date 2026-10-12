@@ -1387,6 +1387,12 @@ pub struct SysLogConfig {
     /// e2e 实测 10 天堆积 12 万行（97% vitals info），接入同一每日清理任务。
     #[serde(default = "default_frontend_error_retention_days")]
     pub frontend_error_retention_days: i64,
+    /// 变更留痕（sys_audit_change）保留天数（默认 180，审计合规域）
+    #[serde(default = "default_audit_change_retention_days")]
+    pub audit_change_retention_days: i64,
+    /// 消息发送记录（sys_msg_send_log）保留天数（默认 90，投递日志）
+    #[serde(default = "default_msg_send_log_retention_days")]
+    pub msg_send_log_retention_days: i64,
 }
 
 /// 日志保留模式（批次十九）
@@ -1437,6 +1443,14 @@ impl fmt::Debug for SysLogConfig {
                 "frontend_error_retention_days",
                 &self.frontend_error_retention_days,
             )
+            .field(
+                "audit_change_retention_days",
+                &self.audit_change_retention_days,
+            )
+            .field(
+                "msg_send_log_retention_days",
+                &self.msg_send_log_retention_days,
+            )
             .finish()
     }
 }
@@ -1447,6 +1461,8 @@ impl Default for SysLogConfig {
             retention_days: default_sys_log_retention_days(),
             retention_mode: default_sys_log_retention_mode(),
             frontend_error_retention_days: default_frontend_error_retention_days(),
+            audit_change_retention_days: default_audit_change_retention_days(),
+            msg_send_log_retention_days: default_msg_send_log_retention_days(),
         }
     }
 }
@@ -1457,6 +1473,14 @@ fn default_sys_log_retention_days() -> i64 {
 
 fn default_frontend_error_retention_days() -> i64 {
     crate::common::constants::FRONTEND_ERROR_RETENTION_DAYS
+}
+
+fn default_audit_change_retention_days() -> i64 {
+    crate::common::constants::AUDIT_CHANGE_RETENTION_DAYS
+}
+
+fn default_msg_send_log_retention_days() -> i64 {
+    crate::common::constants::MSG_SEND_LOG_RETENTION_DAYS
 }
 
 fn default_sys_log_retention_mode() -> String {

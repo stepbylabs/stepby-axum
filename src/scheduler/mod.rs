@@ -372,6 +372,47 @@ impl JobScheduler {
                     }
                 }
 
+                // sys_audit_change：变更留痕按合规保留期清理（批五十七）
+                //
+                // 无防篡改链（写后只读快照域），直删安全；默认 180 天
+                // （[sys_log].audit_change_retention_days）。
+                let audit_change_service =
+                    crate::service::sys_audit_change_service::SysAuditChangeService::new(db.clone());
+                let ac_retention = config.sys_log.audit_change_retention_days;
+                match audit_change_service.clean_expired(ac_retention).await {
+                    Ok(affected) => {
+                        tracing::info!(
+                            "cleanup_expired_logs: 清理变更留痕 {} 条（保留 {} 天）",
+                            affected,
+                            ac_retention
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("cleanup_expired_logs: 清理变更留痕失败: {}", e);
+                    }
+                }
+
+                // sys_msg_send_log：已完成投递记录按保留期清理（批五十七；
+                // send_time IS NULL 的待发送/重试中记录永不清理），默认 90 天
+                // （[sys_log].msg_send_log_retention_days）。
+                let msg_service = crate::service::sys_msg_service::SysMsgService::new(
+                    db.clone(),
+                    config.clone(),
+                );
+                let msl_retention = config.sys_log.msg_send_log_retention_days;
+                match msg_service.clean_send_logs_expired(msl_retention).await {
+                    Ok(affected) => {
+                        tracing::info!(
+                            "cleanup_expired_logs: 清理消息发送记录 {} 条（保留 {} 天）",
+                            affected,
+                            msl_retention
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("cleanup_expired_logs: 清理消息发送记录失败: {}", e);
+                    }
+                }
+
                 // sys_shared_kv：过期键物理清扫（批五十四）
                 //
                 // 背景：local 档共享态以本表承载，`is_expired` 仅在读路径过滤、
