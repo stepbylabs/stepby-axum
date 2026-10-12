@@ -270,9 +270,14 @@ async fn test_docs_disabled_serves_no_openapi() {
         );
     }
 
-    // ---------- 对照组（默认开启，来自本机 config.toml docs_enabled=true）：
+    // ---------- 对照组（docs_enabled=true 显式自含——产品默认 fail-closed false，
+    //            本机部署态 config.toml 为 true，env-only 回退默认曾致对照组 404，
+    //            run 38289607542 实证）：
     //            /api-docs/openapi.json 返回真 OpenAPI 文档 ----------
-    let ctx_on = TestContext::new().await;
+    let ctx_on = TestContext::new_with(&[], |s| {
+        s.server.docs_enabled = true;
+    })
+    .await;
     let (status, body) = ctx_on
         .send_raw(ctx_on.request(Method::GET, "/api-docs/openapi.json", None))
         .await;
