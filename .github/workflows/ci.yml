@@ -100,7 +100,7 @@ jobs:
         # ts-rs 在编译期按 .cargo/config.toml 的 TS_RS_EXPORT_DIR 写入 stepby-vue
         # 的 src/types/api/generated；若有 diff 说明后端类型改动后未同步前端，阻断合并。
         run: |
-          git -C ../stepby-vue diff --exit-code -- src/types/api/generated || {
+          git -C "$GITHUB_WORKSPACE/stepby-vue" diff --exit-code -- src/types/api/generated || {
             echo "::error::Generated TS types are out of sync with backend."
             echo "Run 'cargo build' in stepby-axum to regenerate, then commit stepby-vue."
             exit 1
