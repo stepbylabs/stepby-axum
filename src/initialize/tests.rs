@@ -912,6 +912,10 @@ mod schema_equivalence_lock_tests {
         ensure_flow_report_menus(db).await?;
         ensure_report_menus_visible(db).await?;
         ensure_ai_history_menu_parent(db).await?;
+        // 4.5c-h 批五十六：归档按钮菜单补种（等价迁移 m20261012_000001；幂等）
+        ensure_archive_menus(db).await?;
+        // 4.5c-i 批五十六：皮肤/主题键治理修正（legacy 三元组守卫；幂等）
+        ensure_skin_governance(db).await?;
         ensure_flow_designer_menu_visible(db).await?;
         ensure_flow_task_action_columns(db).await?;
         ensure_flow_graph_doc_table(db).await?;
@@ -1310,6 +1314,8 @@ mod schema_equivalence_lock_tests {
             "ensure_flow_report_menus",
             "ensure_report_menus_visible",
             "ensure_ai_history_menu_parent",
+            "ensure_archive_menus",
+            "ensure_skin_governance",
             "ensure_flow_designer_menu_visible",
             "ensure_flow_task_action_columns",
             "ensure_flow_graph_doc_table",
