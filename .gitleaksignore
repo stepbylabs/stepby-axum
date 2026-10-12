@@ -1,0 +1,14 @@
+# 批六十一：gitleaks 逐条定性豁免（全部为占位/示例假数据，零真实凭据；
+# 指纹格式 file:line:rule 不含 commit，覆盖全部历史提交）
+# docs/auth-spec.md:298 —— JWT 文档示例（截断串 eyJ...，非真实 token）
+docs/auth-spec.md:298:generic-api-key
+# docs/testing-guide.md:515 —— curl 命令行示例（localhost 无凭据）
+docs/testing-guide.md:515:curl-auth-header
+# ai_config.rs:81 —— 脱敏单测假数据（sk-ai01-mask-test-*，mask 测试专用）
+src/integration_tests/ai_config.rs:81:generic-api-key
+# jwt/claims.rs:210/449 —— validate_secrets 拒占位密钥的单测断言数据
+src/jwt/claims.rs:210:generic-api-key
+src/jwt/claims.rs:449:generic-api-key
+# settings.rs:3112/3753 —— Default/测试配置占位（placeholder-strong-secret-*）
+src/config/settings.rs:3112:generic-api-key
+src/config/settings.rs:3753:generic-api-key
