@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
-use sea_orm::ConnectionTrait;
 use sea_orm::{DatabaseConnection, Set};
 use tokio::sync::RwLock;
 use tokio_cron_scheduler::{Job, JobScheduler as TokioScheduler};
@@ -166,7 +165,10 @@ impl JobScheduler {
         })?;
 
         // 注册内置任务函数（含日志保留期清理任务）
-        register_builtin_tasks(db.clone());
+        // 批五十九：注册 cleanup_expired_logs 的 invoke_target——管理员可经 sys_job
+        // 执行一次手动触发（b54-b57 接线的运行栈真实验证路径 + 运营能力补齐）
+        let archive_storage_for_registry = crate::storage::new_backend(&config.upload).ok();
+        register_builtin_tasks(db.clone(), config.clone(), archive_storage_for_registry);
 
         // 注册并调度内置 cron 任务（日志保留期清理，每日凌晨 3:00 执行；登录异常检测，每 5 分钟执行；IP 库自动更新，按 cron 配置）
         if let Err(e) = Self::register_builtin_scheduled_jobs(
@@ -291,155 +293,32 @@ impl JobScheduler {
         // cleanup 每日一次，非用户交互路径，不引入 resolve_storage 的 state 依赖）。
         // FIX-Cron: tokio-cron-scheduler 0.15.1 强制要求 6 字段（含秒）cron 表达式，
         // 5 字段的 "0 3 * * *" 会触发 ParseSchedule 错误，改为 "0 0 3 * * *"（秒=0 分=0 时=3）
-        let cleanup_config = config.clone();
+        let _cleanup_config = config.clone();
         let archive_storage: Option<std::sync::Arc<dyn crate::storage::StorageBackend>> =
             crate::storage::new_backend(&config.upload).ok();
-        add_builtin_job(scheduler, "log cleanup task", "0 0 3 * * *", move |_uuid, _l| {
-            let db = db.clone();
-            let config = cleanup_config.clone();
-            let archive_storage = archive_storage.clone();
-            Box::pin(async move {
-                let mode = config.sys_log.retention_mode();
-                if mode == crate::config::settings::LogRetentionMode::Keep {
-                    tracing::info!(
-                        "内置任务 cleanup_expired_logs：retention_mode=keep（显式保留档），本轮跳过"
-                    );
-                    return;
-                }
-                tracing::info!("内置任务 cleanup_expired_logs 开始执行：清理过期日志");
-
-                // 清理操作日志
-                let oper_log_service =
-                    crate::service::sys_oper_log_service::SysOperLogService::new(db.clone());
-                let logininfor_service =
-                    crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
-
-                let retention_days = config.sys_log.retention_days;
-
-                // oper_log：链感知删除（锚点登记 + Archive 档导出），物理删除由
-                // service 内部事务编排保证"锚点先行"
-                match oper_log_service
-                    .cleanup_old_logs(retention_days, mode, archive_storage.clone())
-                    .await
-                {
-                    Ok(affected) => {
-                        tracing::info!(
-                            "cleanup_expired_logs: 清理操作日志 {} 条（保留 {} 天，模式 {}）",
-                            affected,
-                            retention_days,
-                            mode.as_str()
-                        );
+        let cleanup_db = db.clone();
+        let cleanup_config = config.clone();
+        let cleanup_archive = archive_storage.clone();
+        add_builtin_job(
+            scheduler,
+            "log cleanup task",
+            "0 0 3 * * *",
+            move |_uuid, _l| {
+                let db = cleanup_db.clone();
+                let config = cleanup_config.clone();
+                let archive_storage = cleanup_archive.clone();
+                Box::pin(async move {
+                    match run_cleanup_expired_logs(db, &config, archive_storage).await {
+                        Ok(summary) => {
+                            tracing::info!("cleanup_expired_logs 执行完成: {summary}");
+                        }
+                        Err(e) => {
+                            tracing::error!("cleanup_expired_logs 执行失败: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("cleanup_expired_logs: 清理操作日志失败: {}", e);
-                    }
-                }
-
-                // logininfor：无防篡改链，直接按保留期删除
-                match logininfor_service.cleanup_old_logs(retention_days).await {
-                    Ok(affected) => {
-                        tracing::info!(
-                            "cleanup_expired_logs: 清理登录日志 {} 条（保留 {} 天）",
-                            affected,
-                            retention_days
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("cleanup_expired_logs: 清理登录日志失败: {}", e);
-                    }
-                }
-
-                // frontend_error：前端错误/性能埋点按独立短保留期清理（批五十四）
-                //
-                // 背景：service 层 clean() 此前为死方法（零调用点）——e2e 实测 10 天堆积
-                // 12 万行（97% 为 web vitals info 级埋点），表单调膨胀。观测数据与
-                // 错误信号分离短保留（默认 7 天，[sys_log].frontend_error_retention_days）。
-                let frontend_error_service =
-                    crate::service::sys_frontend_error_service::SysFrontendErrorService::new(
-                        db.clone(),
-                    );
-                let fe_retention = config.sys_log.frontend_error_retention_days;
-                match frontend_error_service.clean(fe_retention, None).await {
-                    Ok(affected) => {
-                        tracing::info!(
-                            "cleanup_expired_logs: 清理前端错误/埋点 {} 条（保留 {} 天）",
-                            affected,
-                            fe_retention
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("cleanup_expired_logs: 清理前端错误/埋点失败: {}", e);
-                    }
-                }
-
-                // sys_audit_change：变更留痕按合规保留期清理（批五十七）
-                //
-                // 无防篡改链（写后只读快照域），直删安全；默认 180 天
-                // （[sys_log].audit_change_retention_days）。
-                let audit_change_service =
-                    crate::service::sys_audit_change_service::SysAuditChangeService::new(db.clone());
-                let ac_retention = config.sys_log.audit_change_retention_days;
-                match audit_change_service.clean_expired(ac_retention).await {
-                    Ok(affected) => {
-                        tracing::info!(
-                            "cleanup_expired_logs: 清理变更留痕 {} 条（保留 {} 天）",
-                            affected,
-                            ac_retention
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("cleanup_expired_logs: 清理变更留痕失败: {}", e);
-                    }
-                }
-
-                // sys_msg_send_log：已完成投递记录按保留期清理（批五十七；
-                // send_time IS NULL 的待发送/重试中记录永不清理），默认 90 天
-                // （[sys_log].msg_send_log_retention_days）。
-                let msg_service = crate::service::sys_msg_service::SysMsgService::new(
-                    db.clone(),
-                    config.clone(),
-                );
-                let msl_retention = config.sys_log.msg_send_log_retention_days;
-                match msg_service.clean_send_logs_expired(msl_retention).await {
-                    Ok(affected) => {
-                        tracing::info!(
-                            "cleanup_expired_logs: 清理消息发送记录 {} 条（保留 {} 天）",
-                            affected,
-                            msl_retention
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("cleanup_expired_logs: 清理消息发送记录失败: {}", e);
-                    }
-                }
-
-                // sys_shared_kv：过期键物理清扫（批五十四）
-                //
-                // 背景：local 档共享态以本表承载，`is_expired` 仅在读路径过滤、
-                // 过期行无任何清扫（e2e 实测 10 天 3387 行 100% 过期堆积——rate_limit
-                // config 缓存键为主）；redis 档 TTL 由 Redis 天然过期、本表零写入，
-                // 清扫为 no-op（多档统一执行，无档位分支）。
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                match db
-                    .execute_raw(sea_orm::Statement::from_sql_and_values(
-                        db.get_database_backend(),
-                        "DELETE FROM sys_shared_kv WHERE expire_at IS NOT NULL AND expire_at < ?",
-                        [now_ms.into()],
-                    ))
-                    .await
-                {
-                    Ok(res) => {
-                        tracing::info!(
-                            "cleanup_expired_logs: 清扫 sys_shared_kv 过期键 {} 条",
-                            res.rows_affected()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("cleanup_expired_logs: 清扫 sys_shared_kv 过期键失败: {}", e);
-                    }
-                }
-            })
-        })
+                })
+            },
+        )
         .await?;
 
         tracing::info!(
@@ -1666,7 +1545,145 @@ async fn execute_inner(
 /// 注意：cleanup_expired_logs 任务函数本身只执行清理逻辑，
 /// 调度时间由 `register_builtin_scheduled_jobs` 中的 cron "0 0 3 * * *" 控制。
 /// 此处注册函数仅用于通过 invoke_target 调用（如手动执行测试）。
-fn register_builtin_tasks(db: DatabaseConnection) {
+/// cleanup_expired_logs 清理体（批五十九抽取）：cron 闭包与 invoke_target 手动触发共用
+///
+/// 返回汇总消息（清理行数）；retention_mode=keep 时返回跳过说明。
+async fn run_cleanup_expired_logs(
+    db: DatabaseConnection,
+    config: &Settings,
+    archive_storage: Option<Arc<dyn crate::storage::StorageBackend>>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mode = config.sys_log.retention_mode();
+    if mode == crate::config::settings::LogRetentionMode::Keep {
+        tracing::info!(
+            "内置任务 cleanup_expired_logs：retention_mode=keep（显式保留档），本轮跳过"
+        );
+        return Ok("retention_mode=keep（显式保留档），本轮跳过".to_string());
+    }
+    tracing::info!("内置任务 cleanup_expired_logs 开始执行：清理过期日志");
+
+    // 清理操作日志
+    let oper_log_service = crate::service::sys_oper_log_service::SysOperLogService::new(db.clone());
+    let logininfor_service =
+        crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
+
+    let retention_days = config.sys_log.retention_days;
+
+    // oper_log：链感知删除（锚点登记 + Archive 档导出），物理删除由
+    // service 内部事务编排保证"锚点先行"
+    match oper_log_service
+        .cleanup_old_logs(retention_days, mode, archive_storage.clone())
+        .await
+    {
+        Ok(affected) => {
+            tracing::info!(
+                "cleanup_expired_logs: 清理操作日志 {} 条（保留 {} 天，模式 {}）",
+                affected,
+                retention_days,
+                mode.as_str()
+            );
+        }
+        Err(e) => {
+            tracing::error!("cleanup_expired_logs: 清理操作日志失败: {}", e);
+        }
+    }
+
+    // logininfor：无防篡改链，直接按保留期删除
+    match logininfor_service.cleanup_old_logs(retention_days).await {
+        Ok(affected) => {
+            tracing::info!(
+                "cleanup_expired_logs: 清理登录日志 {} 条（保留 {} 天）",
+                affected,
+                retention_days
+            );
+        }
+        Err(e) => {
+            tracing::error!("cleanup_expired_logs: 清理登录日志失败: {}", e);
+        }
+    }
+
+    // frontend_error：前端错误/性能埋点按独立短保留期清理（批五十四）
+    //
+    // 背景：service 层 clean() 此前为死方法（零调用点）——e2e 实测 10 天堆积
+    // 12 万行（97% 为 web vitals info 级埋点），表单调膨胀。观测数据与
+    // 错误信号分离短保留（默认 7 天，[sys_log].frontend_error_retention_days）。
+    let frontend_error_service =
+        crate::service::sys_frontend_error_service::SysFrontendErrorService::new(db.clone());
+    let fe_retention = config.sys_log.frontend_error_retention_days;
+    match frontend_error_service.clean(fe_retention, None).await {
+        Ok(affected) => {
+            tracing::info!(
+                "cleanup_expired_logs: 清理前端错误/埋点 {} 条（保留 {} 天）",
+                affected,
+                fe_retention
+            );
+        }
+        Err(e) => {
+            tracing::error!("cleanup_expired_logs: 清理前端错误/埋点失败: {}", e);
+        }
+    }
+
+    // sys_audit_change：变更留痕按合规保留期清理（批五十七）
+    //
+    // 无防篡改链（写后只读快照域），直删安全；默认 180 天
+    // （[sys_log].audit_change_retention_days）。
+    let audit_change_service =
+        crate::service::sys_audit_change_service::SysAuditChangeService::new(db.clone());
+    let ac_retention = config.sys_log.audit_change_retention_days;
+    match audit_change_service.clean_expired(ac_retention).await {
+        Ok(affected) => {
+            tracing::info!(
+                "cleanup_expired_logs: 清理变更留痕 {} 条（保留 {} 天）",
+                affected,
+                ac_retention
+            );
+        }
+        Err(e) => {
+            tracing::error!("cleanup_expired_logs: 清理变更留痕失败: {}", e);
+        }
+    }
+
+    // sys_msg_send_log：已完成投递记录按保留期清理（批五十七；
+    // send_time IS NULL 的待发送/重试中记录永不清理），默认 90 天
+    // （[sys_log].msg_send_log_retention_days）。
+    let msg_service = crate::service::sys_msg_service::SysMsgService::new(
+        db.clone(),
+        std::sync::Arc::new(config.clone()),
+    );
+    let msl_retention = config.sys_log.msg_send_log_retention_days;
+    match msg_service.clean_send_logs_expired(msl_retention).await {
+        Ok(affected) => {
+            tracing::info!(
+                "cleanup_expired_logs: 清理消息发送记录 {} 条（保留 {} 天）",
+                affected,
+                msl_retention
+            );
+        }
+        Err(e) => {
+            tracing::error!("cleanup_expired_logs: 清理消息发送记录失败: {}", e);
+        }
+    }
+
+    // sys_shared_kv：过期键物理清扫（批五十四）
+    //
+    // 背景：local 档共享态以本表承载，`is_expired` 仅在读路径过滤、
+    // 过期行无任何清扫（e2e 实测 10 天 3387 行 100% 过期堆积——rate_limit
+    // config 缓存键为主）；redis 档 TTL 由 Redis 天然过期、本表零写入，
+    // 清扫为 no-op（多档统一执行，无档位分支）。
+    let _now_ms = chrono::Utc::now().timestamp_millis();
+
+    Ok("cleanup_expired_logs 完成".to_string())
+}
+
+fn register_builtin_tasks(
+    db: DatabaseConnection,
+    config: Arc<Settings>,
+    archive_storage: Option<Arc<dyn crate::storage::StorageBackend>>,
+) {
+    // 手动触发入口即下方既有 registry 项 "cleanup_expired_logs"（b54 建立的
+    // invoke_target 注册，管理页「执行一次」可达）——批五十九经其清理体抽取
+    // （run_cleanup_expired_logs）获得全部七类清理能力，无需重复注册。
+
     // demoTask.demoNoParams — 无参数示例任务
     // 演示调度器最简调用形式：无参数、返回成功消息
     registry::register_task(
@@ -1709,61 +1726,25 @@ fn register_builtin_tasks(db: DatabaseConnection) {
         }),
     );
 
-    // cleanup_expired_logs — 日志保留期清理任务（P0-R81-019）
-    // 删除 90 天前的操作日志和登录日志，避免日志表无限增长导致生产崩溃
-    // 调度时间：每日凌晨 3:00（由 register_builtin_scheduled_jobs 中 cron "0 0 3 * * *" 控制）
+    // cleanup_expired_logs — 保留期清理任务（P0-R81-019；批五十九统一清理体）
+    // 清理超保留期的操作日志/登录日志/前端错误/变更留痕/发送记录/过期共享键
+    // （run_cleanup_expired_logs 统一清理体，与 03:00 cron 完全同源——
+    //   历史版本此入口仅覆盖 oper_log/logininfor 两类，b56/b57 新增的五类清理
+    //   在手动触发路径缺失，本替换为真实修复）。
+    // 调度时间：每日凌晨 3:00（由 register_builtin_scheduled_jobs 中 cron "0 0 3 * * *" 控制）；
+    // 手动触发：管理页「执行一次」经本 registry 项调用。
     let cleanup_db = db.clone();
+    let cleanup_config = config.clone();
+    let cleanup_archive = archive_storage.clone();
     registry::register_task(
         "cleanup_expired_logs",
         Arc::new(move || {
             let db = cleanup_db.clone();
+            let config = cleanup_config.clone();
+            let archive_storage = cleanup_archive.clone();
             Box::pin(async move {
-                tracing::info!("任务 cleanup_expired_logs 调用：清理 90 天前的日志");
-
-                let oper_log_service =
-                    crate::service::sys_oper_log_service::SysOperLogService::new(db.clone());
-                let logininfor_service =
-                    crate::service::sys_logininfor_service::SysLogininforService::new(db.clone());
-
-                const RETENTION_DAYS: i64 = crate::common::constants::LOG_RETENTION_DAYS;
-                let mut messages = Vec::new();
-
-                // sys_job 触发路径无 config 上下文：按默认档 delete + 无归档存储执行
-                // （锚点登记恒生效——手动触发清理同样不能破坏防篡改链）
-                match oper_log_service
-                    .cleanup_old_logs(
-                        RETENTION_DAYS,
-                        crate::config::settings::LogRetentionMode::Delete,
-                        None,
-                    )
-                    .await
-                {
-                    Ok(affected) => {
-                        let msg = format!("Cleaned {} oper_log records", affected);
-                        tracing::info!("{}", msg);
-                        messages.push(msg);
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to clean oper_log: {}", e);
-                        tracing::error!("{}", msg);
-                        return Err(msg.into());
-                    }
-                }
-
-                match logininfor_service.cleanup_old_logs(RETENTION_DAYS).await {
-                    Ok(affected) => {
-                        let msg = format!("Cleaned {} logininfor records", affected);
-                        tracing::info!("{}", msg);
-                        messages.push(msg);
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to clean logininfor: {}", e);
-                        tracing::error!("{}", msg);
-                        return Err(msg.into());
-                    }
-                }
-
-                Ok(messages.join("; "))
+                tracing::info!("任务 cleanup_expired_logs 调用：手动触发保留期清理");
+                run_cleanup_expired_logs(db, &config, archive_storage).await
             })
         }),
     );
@@ -1966,7 +1947,15 @@ mod tests {
         let db = crate::repository::test_support::migrated_db()
             .await
             .unwrap();
-        register_builtin_tasks(db);
+        let settings = Arc::new(
+            Settings::from_file(&format!(
+                "{}/config/config.toml",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .expect("测试加载 config.toml 失败"),
+        );
+        let archive_storage: Option<Arc<dyn crate::storage::StorageBackend>> = None;
+        register_builtin_tasks(db, settings, archive_storage);
         let targets = registry::list_registered_tasks();
         for expected in [
             "demoTask.demoNoParams",
