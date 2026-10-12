@@ -14,8 +14,18 @@
 [advisories]
 # yanked 版本仅告警（传递依赖可能存在 yanked，告警不阻断 CI）
 yanked = "warn"
-# 忽略的漏洞 ID 列表（如需忽略某已知漏洞，按需追加，如 "RUSTSEC-2024-XXXX"）
-ignore = []
+# 忽略的漏洞 ID（记录式豁免：每条须附理由与复评条件，随依赖升级定期复核）
+ignore = [
+    # rsa 0.9.10（最新 stable）无补丁：Marvin Attack 时序侧信道（上游 patched=[] 是有意的，
+    # 跟踪 RustCrypto/RSA#626）。本仓经 jsonwebtoken（JWT RS256）引入——上游无安全升级前
+    # 无可行消除路径；缓解：RS256 密钥仅用于签名验签、非长期存储密钥，待上游
+    # constant-time 实现落地后立即解除本豁免并升级。
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin Attack 无上游补丁（jsonwebtoken 传递引入），跟踪 RSA#626，升级即解除" },
+    # atomic-polyfill 1.0.3 unmaintained：phonenumber(build)→postcard→heapless 传递引入，
+    # 仅构建期数据序列化使用、无运行时安全面；上游无替代升级路径（heapless 0.7 锁定），
+    # heapless/postcard 大版本升级时复核。
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill unmaintained（phonenumber 构建期传递引入），随 heapless 升级复核" },
+]
 
 [licenses]
 # 允许的许可证白名单；不在白名单内即报 error
@@ -35,6 +45,10 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "MPL-2.0",
+    # bzip2-1.0.6：libbz2-rs-sys（rust_xlsxwriter xlsx 压缩链），bzip2 原始许可，宽松可分发
+    "bzip2-1.0.6",
+    # CDLA-Permissive-2.0：webpki-roots/webpki-root-certs（rustls 证书根数据集），宽松数据许可
+    "CDLA-Permissive-2.0",
 ]
 # 许可证识别置信度阈值（0.0~1.0）
 confidence-threshold = 0.8

@@ -70,6 +70,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run gitleaks
-        uses: zricethezdev/gitleaks-action@v2
+        # zricethezdev/gitleaks-action 已迁移至 gitleaks org（旧仓库 404，run 38275497480 实证）
+        uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

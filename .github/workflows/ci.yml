@@ -65,6 +65,19 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
 
+      # build.rs（rust-embed）编译期强制要求 frontend-dist/（embedded 前端资源）。
+      # 此处真实构建前端产物并复制，与本地 embedded 构建链（build:embedded → cp dist）
+      # 完全同源——占位空目录会让测试覆盖不到嵌入资源，属假实现，禁用。
+      - name: Build frontend dist (embedded assets)
+        run: |
+          npm install -g pnpm
+          cd ../stepby-vue
+          pnpm install --frozen-lockfile
+          npm run build:embedded
+          cd "$GITHUB_WORKSPACE"
+          rm -rf frontend-dist && mkdir -p frontend-dist
+          cp -r ../stepby-vue/dist/. frontend-dist/
+
       - name: Fetch dependencies
         run: cargo fetch
 
@@ -163,6 +176,7 @@ jobs:
           DATABASE_URL: postgres://test:test@postgres:5432/stepby
           REDIS_URL: redis://redis:6379/0
           JWT_SECRET: ci-only-secret-for-compose-validation-0123456789
+          POSTGRES_PASSWORD: test
           REDIS_PASSWORD: test
           MYSQL_ROOT_PASSWORD: test
           MYSQL_PASSWORD: test
