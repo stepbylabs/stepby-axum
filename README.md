@@ -1,9 +1,10 @@
 ﻿# Stepby Axum
 
+![Release](https://img.shields.io/badge/release-v0.2.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Rust](https://img.shields.io/badge/Rust-1.8x-orange?logo=rust)
+![Rust](https://img.shields.io/badge/Rust-1.96%2B-orange?logo=rust)
 ![Axum](https://img.shields.io/badge/axum-web%20framework-green)
-![Tests](https://img.shields.io/badge/tests-1054%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1349%20passing-brightgreen)
 ![Build](https://img.shields.io/badge/build-passing-success)
 
 Stepby 开源中后台管理系统的后端服务，基于 **Rust（axum + sea-orm + tokio）** 构建，提供完整的 RESTful API。配套前端仓库：[stepby-vue](https://github.com/stepbylabs/stepby-vue)。
@@ -31,14 +32,29 @@ Stepby 开源中后台管理系统的后端服务，基于 **Rust（axum + sea-o
 
 ### 审批工作流
 
-- 两级审批、超时自动扫描
+- 流程定义版本化与发布不可变、聚合判定单点收敛
+- 加签 / 减签 / 委派，操作后自动重新收敛
+- 图驱动单据（flow_graph_doc）、超时自动扫描
 - 提醒通知与防打扰机制
+
+### AI 助手
+
+- LLM 接入双源配置：`sys.ai.*` 运行时键覆盖 `config.toml [ai]`，热生效
+- AI 问数：受控 NL2SQL，表级白名单防注入，跨租户隔离
+- 问数历史留痕（审计大屏域）
 
 ### 审计合规
 
 - 操作日志差异对比（变更前后明细）
-- 审计大屏可视化
-- 合规报告导出
+- 审计变更留痕、审计大屏可视化、合规报告导出
+- 审计日志归档：锚点编排 + 链完整性校验 + 归档下载
+- 七类日志保留期自动清理（cron 与手动触发同源）
+
+### 细粒度权限
+
+- 数据权限规则（挂角色生效，查询期显式注入）
+- 字段级权限矩阵（全量覆盖语义）
+- PAT（Personal Access Token）、敏感操作独立限流
 
 ### SharedStore 双档共享态
 
@@ -97,7 +113,7 @@ flowchart LR
 ### 编译
 
 ```bash
-# 后端（Rust 1.8x）
+# 后端（Rust 1.96+，跟随 stable channel）
 cargo build --release
 
 # 前端（Node 20+，pnpm 兼容），见 stepby-vue 仓库
@@ -127,10 +143,14 @@ docker compose up -d
 ## 🧪 测试
 
 ```bash
-cargo test --lib    # 1054 个单元测试通过
+cargo test --lib    # 1349 个单元测试通过
 ```
 
-前端 E2E（Playwright，75 个功能 / 三段）位于前端仓库 `tests/e2e/main.mjs`，详见 [stepby-vue](https://github.com/stepbylabs/stepby-vue)。
+前端 E2E（Playwright，135 个功能 / 1173 项断言）位于前端仓库 `tests/e2e/main.mjs`，详见 [stepby-vue](https://github.com/stepbylabs/stepby-vue)。
+
+## 📦 版本
+
+变更历史见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v0.2.0**（2026-10-12）。
 
 ## 📄 License
 
