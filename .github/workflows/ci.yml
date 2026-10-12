@@ -71,12 +71,12 @@ jobs:
       - name: Build frontend dist (embedded assets)
         run: |
           npm install -g pnpm
-          cd ../stepby-vue
+          cd "$GITHUB_WORKSPACE/stepby-vue"
           pnpm install --frozen-lockfile
           npm run build:embedded
           cd "$GITHUB_WORKSPACE"
           rm -rf frontend-dist && mkdir -p frontend-dist
-          cp -r ../stepby-vue/dist/. frontend-dist/
+          cp -r "$GITHUB_WORKSPACE/stepby-vue/dist/." frontend-dist/
 
       - name: Fetch dependencies
         run: cargo fetch
@@ -182,10 +182,12 @@ jobs:
           MYSQL_PASSWORD: test
         run: |
           set -e
+          # 仅校验本仓自包含编排（docker-compose.yml / .dev.yml）。
+          # docker-compose.prod.yml include 根仓 deploy/docker-compose.db.yml
+          # （跨仓文件，单仓上下文不可解析）——其校验由根仓编排版 CI 承担。
           files=(
             docker-compose.yml
             docker-compose.dev.yml
-            docker-compose.prod.yml
           )
           for f in "${files[@]}"; do
             echo "== docker compose -f $f config --quiet =="
