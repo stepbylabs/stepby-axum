@@ -222,7 +222,9 @@ impl AiConfigService {
     pub async fn test_connectivity(&self) -> Result<String, ServiceError> {
         let effective = self.get_effective().await?;
         if effective.base_url.is_empty() || effective.api_key.is_empty() {
-            return Err(ServiceError::bad_request("请先填写 base_url 与 api_key"));
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.ai.config_missing"
+            )));
         }
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))

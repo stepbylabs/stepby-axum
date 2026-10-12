@@ -6,6 +6,7 @@ error:
     disabled: AI assistant is disabled. Ask an administrator to enable it in configuration
     pat_forbidden: AI assistant does not accept Personal Access Tokens (PAT). Use an interactive login session
     capability_off: AI assistant capability is not enabled for this tenant
+    config_missing: base_url and api_key are required
   fieldperm:
     disabled: Field-level permission is not enabled (platform switch or tenant package capability is off)
     table_not_allowed: The business table is not in the field-level permission whitelist
@@ -433,6 +434,8 @@ error:
     name_exists: Job name already exists
     group_mismatch: Job group name mismatch
     id_invalid: Invalid job ID
+    stats_window_overflow: Report stats window date calculation overflowed
+    stats_window_parse: Report stats window start date could not be resolved
   scheduler:
     operation_failed: Scheduler operation failed, please contact the administrator
   report:
@@ -454,6 +457,7 @@ error:
     param_missing: Missing required parameters
     query_timeout: Dataset query timed out
     sql_invalid: SQL template validation failed
+    sql_must_select: SQL template must start with SELECT
   report_sub:
     id_empty: Subscription ID must not be empty
     not_found: Subscription does not exist

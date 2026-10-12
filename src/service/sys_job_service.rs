@@ -871,13 +871,17 @@ impl SysJobService {
         let today_local = chrono::Local::now().date_naive();
         let window_start_local = today_local
             .checked_sub_signed(chrono::Duration::days((days - 1) as i64))
-            .ok_or_else(|| ServiceError::bad_request("报表窗口日期计算溢出"))?;
+            .ok_or_else(|| {
+                ServiceError::bad_request(&crate::tr!("error.job.stats_window_overflow"))
+            })?;
         let begin_utc = window_start_local
             .and_time(chrono::NaiveTime::MIN)
             .and_local_timezone(chrono::Local)
             .single()
             .map(|dt| dt.with_timezone(&chrono::Utc).naive_utc())
-            .ok_or_else(|| ServiceError::bad_request("报表窗口日期解析失败"))?;
+            .ok_or_else(|| {
+                ServiceError::bad_request(&crate::tr!("error.job.stats_window_parse"))
+            })?;
 
         let rows = self
             .job_log_repo

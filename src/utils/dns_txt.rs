@@ -35,6 +35,11 @@ const TXT_VALUE_LOG_MAX: usize = 128;
 const UDP_RECV_BUF: usize = 4096;
 
 /// DNS 查询错误（超时 / 传输 / 报文 / 服务器 rcode）
+///
+/// i18n 豁免：Display 串仅进日志（消费方 `sys_tenant_domain_service` 以
+/// `tracing::warn!(error = %e, ...)` 记录后返回统一翻译键
+/// `error.tenant.domain_verify_failed`）——本枚举不直达 HTTP 响应体；
+/// 且 thiserror `#[error]` 于 Display 上下文运行，无 locale 作用域，不适配 t!。
 #[derive(Debug, thiserror::Error)]
 pub enum DnsError {
     /// 所有解析器均在超时时间内未应答
