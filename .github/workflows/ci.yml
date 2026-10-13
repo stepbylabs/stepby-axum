@@ -47,11 +47,11 @@ jobs:
 
     steps:
       - name: Checkout (backend source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # ts-rs 类型漂移检查需要 ../stepby-vue 工作区（TS_RS_EXPORT_DIR 相对解析）
       - name: Checkout stepby-vue (TS types target)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: stepbylabs/stepby-vue
           ref: main
@@ -154,7 +154,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -173,7 +173,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate docker-compose files
         env:

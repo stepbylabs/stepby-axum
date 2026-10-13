@@ -44,13 +44,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # build.rs（rust-embed）编译期强制要求 frontend-dist/——真实构建前端产物并复制
       # （与本地 embedded 链同源；cross 容器只挂载 Cargo.toml 所在目录，
       # frontend-dist 位于项目内可自动挂载，见 build.rs 注释）
       - name: Checkout stepby-vue (embedded assets source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: stepbylabs/stepby-vue
           ref: main
@@ -144,12 +144,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Dockerfile 的 cargo build 同样触发 build.rs 的 frontend-dist 强制校验——
       # 在 build 上下文内真实构建并复制前端产物
       - name: Checkout stepby-vue (embedded assets source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: stepbylabs/stepby-vue
           ref: main
@@ -229,7 +229,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (CHANGELOG source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
