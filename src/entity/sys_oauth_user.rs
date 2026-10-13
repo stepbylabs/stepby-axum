@@ -1,0 +1,102 @@
+//! sys_oauth_user 实体定义（第三方身份与本地账号绑定表）
+//!
+//! 唯一约束 (provider, provider_user_id)：同一第三方身份只绑定一份。
+//! user_id 指向 sys_user 主键，实现 OAuth 登录时映射到本地账号。
+
+use chrono::NaiveDateTime;
+use sea_orm::Set;
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+use utoipa::ToSchema;
+
+use crate::common::datetime;
+
+/// 注意：不 derive(Debug)，改用手动实现以脱敏 access_token/refresh_token 字段
+#[derive(Clone, PartialEq, DeriveEntityModel, Serialize, Deserialize, TS, ToSchema)]
+#[sea_orm(table_name = "sys_oauth_user")]
+#[serde(rename_all = "camelCase")]
+#[ts(
+    export,
+    rename = "SysOauthUser",
+    export_to = "SysOauthUser.ts",
+    rename_all = "camelCase"
+)]
+#[schema(as = SysOauthUser)]
+pub struct Model {
+    /// 多租户归属（Phase 2 立项铺开，迁移 m20260925_000001；0=平台租户）
+    pub tenant_id: i64,
+    #[sea_orm(primary_key)]
+    pub oauth_id: i64,
+    /// 绑定的本地用户 ID
+    pub user_id: i64,
+    /// 提供商编码
+    pub provider: String,
+    /// 第三方用户唯一标识（sub / OAuth2 id）
+    pub provider_user_id: String,
+    pub nickname: Option<String>,
+    pub avatar: Option<String>,
+    pub email: Option<String>,
+    /// 第三方 access_token（G-14 通用层：EncryptedString 列类型，取存自动加解密
+    /// ——enc3 信封，密钥源 runtime_master_key；密文列不可 LIKE/等值查询）
+    pub access_token: Option<crate::common::encrypted_value::EncryptedString>,
+    /// 第三方 refresh_token（同上，EncryptedString 加密列）
+    pub refresh_token: Option<crate::common::encrypted_value::EncryptedString>,
+    /// 令牌过期时间
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub expires_at: Option<NaiveDateTime>,
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub last_login_time: Option<NaiveDateTime>,
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub create_time: Option<NaiveDateTime>,
+    #[serde(
+        serialize_with = "datetime::serialize_opt",
+        deserialize_with = "datetime::deserialize_opt"
+    )]
+    #[ts(as = "Option<String>")]
+    pub update_time: Option<NaiveDateTime>,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+
+/// 手动实现 Debug 以脱敏 access_token/refresh_token，防止第三方令牌泄漏到日志
+impl std::fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("sys_oauth_user::Model")
+            .field("oauth_id", &self.oauth_id)
+            .field("user_id", &self.user_id)
+            .field("provider", &self.provider)
+            .field("provider_user_id", &self.provider_user_id)
+            .field("nickname", &self.nickname)
+            .field("avatar", &self.avatar)
+            .field("email", &self.email)
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("last_login_time", &self.last_login_time)
+            .field("create_time", &self.create_time)
+            .field("update_time", &self.update_time)
+            .finish()
+    }
+}
+
+crate::impl_timestamped_active_model!();

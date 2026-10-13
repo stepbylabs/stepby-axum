@@ -1,0 +1,7 @@
+[alias]
+# 独立重新生成前端 ts-rs 类型绑定（比整套 cargo test 更快，无需测试 harness）
+ts = "run --bin export_ts"
+
+[env]
+TS_RS_EXPORT_DIR = { value = "../stepby-vue/src/types/api/generated", relative = true }
+TS_RS_LARGE_INT = "number"

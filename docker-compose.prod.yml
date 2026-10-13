@@ -1,0 +1,105 @@
+# stepby-axum 生产环境编排（后端独立 + 共享数据库）
+#
+# 用途：
+#   后端独立部署编排：仅包含后端应用服务，数据库（postgres/redis）通过
+#   `include` 复用 deploy/docker-compose.db.yml（单一来源，避免重复定义漂移）。
+#   全栈部署（前端 + 后端 + 迁移）请使用 deploy/docker-compose.prod.yml。
+#
+# 部署方式：
+#   1. 准备环境变量（敏感字段从环境变量注入，不要写入文件）：
+#      export DATABASE_URL=postgres://user:strong_pass@postgres:5432/stepby
+#      export REDIS_URL=redis://:strong_redis_pass@redis:6379/0   # redis 已 requirepass，URL 必须带密码
+#      export JWT_SECRET=<至少 32 字符的强随机密钥>
+#      export JWT_EXPIRE_HOURS=6
+#      export POSTGRES_PASSWORD=<数据库密码>
+#      export REDIS_PASSWORD=<Redis 密码>   # 与 REDIS_URL 中口令一致；缺省即 fail-fast
+#
+#   2. 启动：
+#      docker compose -f docker-compose.prod.yml up -d
+#
+#   3. 查看日志：
+#      docker compose -f docker-compose.prod.yml logs -f app
+#
+#   4. 升级（拉取新镜像后滚动重启）：
+#      docker compose -f docker-compose.prod.yml up -d --no-deps --build app
+#
+#   5. 停止：
+#      docker compose -f docker-compose.prod.yml down
+#
+# 安全说明：
+# - 默认仅暴露 app 服务的 8080 端口到宿主机，数据库端口不对外暴露
+# - 数据库密码 / JWT 密钥必须从环境变量注入，本文件中仅为占位符
+# - 建议在反向代理（Nginx/Caddy）层配置 TLS 终止和 rate limiting
+#
+# 说明：postgres/redis 服务定义在 deploy/docker-compose.db.yml，
+#       与全栈编排共享同一份定义，保证版本与配置一致。
+
+include:
+  - ../deploy/docker-compose.db.yml
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stepby-backend:prod
+    container_name: stepby-backend-prod
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      # 必填：从环境变量注入，未设置时容器无法启动（fail-fast，避免 CHANGE_ME 占位值偷偷连接）
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set, e.g. postgres://user:pass@host:5432/db}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL must be set, e.g. redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a strong secret >= 32 chars}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-6}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      # 可选：跨域白名单（逗号分隔），未设置时由反向代理处理 CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # 存储后端：local | s3
+      UPLOAD_BACKEND: ${UPLOAD_BACKEND:-local}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-}
+      # 配置加密主密钥（>=32 字符）
+      CONFIG_ENC_KEY: ${CONFIG_ENC_KEY:-}
+      # 邮件 SMTP 密码（可选）
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      # 权限 fail-closed（生产推荐 true）
+      PERMISSION_DENY_BY_DEFAULT: ${PERMISSION_DENY_BY_DEFAULT:-true}
+      # 监控指标鉴权 token
+      STEPBY_METRICS_TOKEN: ${STEPBY_METRICS_TOKEN:-}
+      TZ: Asia/Shanghai
+      RUST_LOG: info
+    volumes:
+      # 上传文件持久化（头像/附件），重建容器后不丢失
+      - stepby_prod_uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - stepby_prod_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    # 资源限制（按需调整，避免单容器耗尽宿主资源）
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+volumes:
+  stepby_prod_uploads:

@@ -1,0 +1,209 @@
+# Stepby Axum Release 流水线（单仓版）
+#
+# 触发条件：推送语义化版本 tag（v*）。
+#
+# 产物（附到 GitHub Release）：
+#   - stepby-backend-linux-x86_64-<tag>.tar.gz    (stepby-axum + migration 二进制)
+#   - stepby-backend-linux-aarch64-<tag>.tar.gz   (cross + musl 静态链接)
+#   - stepby-backend-windows-x86_64-<tag>.tar.gz
+#
+# Release 正文取仓库内 CHANGELOG.md（Keep a Changelog 维护，与 tag 同源）。
+# 质量门禁（fmt/clippy/test）由 ci.yml 完成；本流水线专注可分发产物。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend:
+    name: Build backend (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+          - os: windows-latest
+            target: windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # build.rs（rust-embed）编译期强制要求 frontend-dist/——真实构建前端产物并复制
+      # （与本地 embedded 链同源；cross 容器只挂载 Cargo.toml 所在目录，
+      # frontend-dist 位于项目内可自动挂载，见 build.rs 注释）
+      - name: Checkout stepby-vue (embedded assets source)
+        uses: actions/checkout@v4
+        with:
+          repository: stepbylabs/stepby-vue
+          ref: main
+          path: stepby-vue
+
+      - name: Build frontend dist (embedded assets)
+        # NODE_OPTIONS 必须清空：Windows/受限环境下 safe-delete 守卫会因
+        # NODE_OPTIONS 携带的参数触发失败（本地铁律 NODE_OPTIONS="" 唯一解）
+        # shell: bash——windows runner 默认 pwsh，rm -rf 非法（run 38339693376 实证）
+        env:
+          NODE_OPTIONS: ''
+        shell: bash
+        run: |
+          npm install -g pnpm
+          cd stepby-vue
+          pnpm install --frozen-lockfile
+          npm run build:embedded
+          cd ..
+          rm -rf frontend-dist && mkdir -p frontend-dist
+          cp -r stepby-vue/dist/. frontend-dist/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Build release (workspace)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.target }}" == "linux-aarch64" ]]; then
+            # ubuntu-24.04-arm 为原生 ARM64 主机：host 工具链直出 gnu 产物
+            # （cross 方案在 ARM runner 装到 x86_64 工具链不可运行，run 38301384519 实证）
+            cargo build --release --workspace
+          else
+            cargo build --release --workspace
+          fi
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          # 原生构建产物统一落在 target/release
+          REL="target/release"
+          out="release/"
+          mkdir -p "$out/bin"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "$REL/stepby-axum.exe" "$out/bin/"
+            cp "$REL/migration.exe" "$out/bin/"
+          else
+            cp "$REL/stepby-axum" "$out/bin/"
+            cp "$REL/migration" "$out/bin/"
+          fi
+          # 零配置单文件是默认形态：SQLite + local SharedStore，双击即跑；
+          # PostgreSQL/MySQL/Redis 档通过环境变量切换（见 README 快速开始）。
+          cat > "$out/README.md" <<EOF
+          # Stepby backend ($TAG)
+
+          预编译发布产物（预构建二进制）。
+
+          ## 二进制
+          - \`bin/stepby-axum\`  —— 后端服务（默认 0.0.0.0:8080）
+          - \`bin/migration\`     —— 数据库迁移（仅 up，前向）
+
+          ## 运行
+          零配置：直接运行 \`bin/stepby-axum\`（自动创建 SQLite 库与 data/secret.key）。
+          默认账号 admin / admin123（首次登录强制改密）。
+
+          ## 生产环境变量（按需注入）
+          - \`DATABASE_URL\`：postgres://... / mysql://... / sqlite://...（缺省 SQLite 零配置）
+          - \`REDIS_URL\`：多实例横向扩展时提供（缺省 local 共享态）
+          - \`JWT_SECRET\`：生产必改（≥ 32 字符）
+          - 存储档 \`UPLOAD_BACKEND\`（local/s3）等见仓库 README 配置说明
+          EOF
+          tar -C release -czf "stepby-backend-${{ matrix.target }}-$TAG.tar.gz" bin README.md
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.target }}
+          path: stepby-backend-${{ matrix.target }}-${{ github.ref_name }}.tar.gz
+          if-no-files-found: error
+
+  docker-images:
+    name: Build container image (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Dockerfile 的 cargo build 同样触发 build.rs 的 frontend-dist 强制校验——
+      # 在 build 上下文内真实构建并复制前端产物
+      - name: Checkout stepby-vue (embedded assets source)
+        uses: actions/checkout@v4
+        with:
+          repository: stepbylabs/stepby-vue
+          ref: main
+          path: stepby-vue
+
+      - name: Build frontend dist (embedded assets)
+        env:
+          NODE_OPTIONS: ''
+        run: |
+          npm install -g pnpm
+          cd stepby-vue
+          pnpm install --frozen-lockfile
+          npm run build:embedded
+          cd ..
+          rm -rf frontend-dist && mkdir -p frontend-dist
+          cp -r stepby-vue/dist/. frontend-dist/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: false
+          tags: stepby-backend:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Publish GitHub Release
+    needs: [backend, docker-images]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (CHANGELOG source)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-assets
+          merge-multiple: true
+          # 只取三平台产物；docker buildx 的 build 记录 artifact（.dockerbuild）
+          # 无需下载（run 38342281397：其 blob 下载瞬时故障重试耗尽致 Publish 失败）
+          pattern: backend-*
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Stepby ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          files: |
+            dist-assets/stepby-backend-*.tar.gz
+          draft: false

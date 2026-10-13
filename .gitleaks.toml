@@ -1,0 +1,23 @@
+# gitleaks 自定义配置（批六十一）：扩展默认规则 + 全局 allowlist。
+# 全部条目经逐条定性（本地 gitleaks v8.30.1 实跑 + 代码行核对）为占位/示例假数据，
+# 零真实凭据；用 regex 豁免（而非 file:line 指纹）以免疫行号漂移。
+[extend]
+useDefault = true
+
+[allowlist]
+description = "批六一定性豁免：文档示例与测试占位数据（零真实凭据）"
+regexTarget = "match"
+regexes = [
+  # docs/auth-spec.md JWT 文档示例（截断串，非真实 token）
+  '''eyJhbGciOiJIUzI1NiJ9\.\.\.''',
+  # ai_config.rs 脱敏单测假数据（mask 测试专用）
+  '''sk-ai01-mask-test-''',
+  # jwt/claims.rs 与 settings.rs 测试占位（validate_secrets 拒占位密钥的断言数据）
+  '''placeholder-strong-secret-''',
+  '''attacker-key-0123456789''',
+  '''a-valid-strong-jwt-secret-key-''',
+]
+paths = [
+  # testing-guide.md curl 命令行示例（localhost，无凭据）
+  '''^docs/testing-guide\.md$''',
+]

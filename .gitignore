@@ -1,0 +1,72 @@
+/target
+/frontend-dist
+*.db
+*.rdb
+verify-embedded/
+
+# 敏感配置
+config/config.toml
+config/config.toml.prod
+.env
+
+# 数据
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.py
+data/*.json
+data/__pycache__/
+data/screenshots/
+data/screenshots_*/
+data/gen_test_output/
+data/GeoLite2-*.mmdb
+data/*.mmdb
+data/*.xdb
+*.xdb
+
+# 日志
+logs/
+backend*.log
+build-*.log
+server*.log
+backend.err
+*.sql
+
+# 上传
+uploads/
+
+# 调试/临时产物
+probe_tmp/
+build_out.txt
+fmt_after.txt
+
+/graphify-out/
+
+# ts-rs 默认导出目录残留（正式导出目录为 ../stepby-vue/src/types/api/generated，见 .cargo/config.toml）
+/bindings/
+
+# 本地运行服务日志（Start-Process 重定向产物）
+/_srv.log
+/_srv_err.log
+
+/_fg.log
+/_fge.log
+
+# 本地测试工具（RustFS 二进制/数据，不入库；获取与运行方式见 src/storage/s3.rs 的 s3_backend_roundtrip_live 测试注释）
+/test-tools/
+_full_t.log
+_ik.log
+_full2.log
+check_tests.log
+t5.log
+_fg*.log
+_srv*.log
+_start_server.py
+_warn*.log
+_snippet.txt
+_e.log
+_d.log
+
+# e2e 批跑后端运行日志（会话产物，不入库）
+tests_e2e_backend*.log
+data/*.db.bak*

@@ -1,0 +1,261 @@
+[package]
+name = "stepby-axum"
+version = "0.2.0"
+license = "MIT"
+edition = "2024"
+# 新增 export_ts 二进制后，`cargo run` 面临 stepby-axum / export_ts 两个 bin 歧义。
+# 显式指定默认运行主服务二进制，避免回归。导出类型请用 `cargo ts`（见 .cargo/config.toml alias）。
+default-run = "stepby-axum"
+
+# G-13b：OpenTelemetry OTLP 导出（可选编译特性，默认关——单二进制形态零影响；
+# 集群/K8s 形态需要分布式追踪时 `cargo build --features otlp` 启用，并通过
+# OTEL_EXPORTER_OTLP_ENDPOINT 环境变量指定 Collector 地址，未设置则零出站）
+[features]
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
+[dependencies]
+# 项目内共享 crate：治理项注册表（单一事实源，与 migration 共用；刻意零第三方依赖）
+governance = { path = "governance" }
+
+# 数据库迁移：全新库自动初始化（AppInitializer 检测空库后执行 Migrator::up，run_migrator_if_fresh_db）
+migration = { path = "migration" }
+
+# Web 框架
+axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
+
+# ORM（§5.52 DP-02：1.1 → 2.0 升级——2.0 的 SeaQuery/raw 分层使全局 SQL 拦截
+# 在 AST 层安全可行，为 DP-01 结构化数据权限规则引擎的结构性前置）
+sea-orm = { version = "2.0", features = [
+    "runtime-tokio-rustls",
+    "sqlx-mysql",
+    "sqlx-postgres",
+    "sqlx-sqlite",
+    "macros",
+    "with-chrono",
+] }
+
+# AI 模块（NL2SQL）：受控执行 LLM 生成 SQL 的行列访问（与 sea-orm 内部 sqlx 同源）
+# sqlx 0.9 feature 拆分：runtime-tokio + tls-rustls 分列（原 runtime-tokio-rustls 组合取消）
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "sqlite",
+    "mysql",
+    "postgres",
+    "json",
+] }
+
+# 异步 trait 宏（SeaORM ActiveModelBehavior 需要）
+async-trait = "0.1"
+
+# 异步运行时
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "time"] }
+
+# JWT
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+# v5-D2：RSA-2048 keypair 生成（client 级 RS256 签名密钥）与公钥组件导出（JWKS）
+rsa = "0.9"
+
+# 中间件
+tower = "0.5"
+tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip", "fs", "timeout"] }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# 日志文件按日轮转（P0-67 未修复项）
+tracing-appender = "0.2"
+# G-13b 可选依赖（feature `otlp` 启用；版本组对 0.28 系）
+opentelemetry = { version = "0.28", optional = true }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.29", optional = true }
+# log::LevelFilter：MySQL 连接池 after_connect 路径下 sea-orm 慢语句日志配置的类型（db/pool.rs）
+log = "0.4"
+
+# 时间
+chrono = { version = "0.4", features = ["serde"] }
+
+# 工具
+uuid = { version = "1", features = ["v4"] }
+toml = "1"
+argon2 = { version = "0.6", features = ["rand_core"] }
+md-5 = "0.11"
+sha1 = "0.11"
+percent-encoding = "2"
+sha2 = "0.11"
+hex = "0.4"
+
+# 错误处理
+anyhow = "1"
+# thiserror：为自定义错误类型自动派生 std::error::Error 和 Display
+thiserror = "2"
+
+# 校验
+# garde：统一校验框架（T-01 迁移后 validator 已移除）。
+# 0.23 起内置 garde::i18n 模块（I18n trait + with_i18n），用于校验错误消息本地化。
+garde = { version = "0.23", features = ["full"] }
+
+# 国际化（T-05）：编译期嵌入 locales/*.yml，t! 宏按请求 locale 翻译文案
+rust-i18n = "4"
+
+# Redis
+redis = { version = "1.3", features = ["tokio-comp", "connection-manager"] }
+
+# 验证码
+captcha = "1.0"
+
+# 环境变量
+dotenvy = "0.15"
+
+# 异步 Future 工具（事务闭包 boxed()）
+futures = "0.3"
+
+# 正则表达式（手机号格式校验、XSS 净化模式）
+regex = "1"
+
+# 手机号多地区化（方案 D，G18）：google-libphonenumber Rust 移植，按国家/地区校验手机号
+# 已在 Cargo.lock 中作为传递依赖存在（0.3.10），此处显式声明为直接依赖，无需联网拉取。
+phonenumber = "0.3"
+
+# HTML 白名单净化（通知公告内容入库前过滤 XSS，替代手写正则方案）
+ammonia = "4"
+
+# 定时任务调度
+# tokio-cron-scheduler 内部依赖 croner，项目直接使用 croner 做 cron 表达式验证和下次执行时间计算，
+# 避免引入额外的 cron crate 造成两个 cron 解析库共存
+tokio-cron-scheduler = "0.15"
+croner = "4"
+
+# HTTP 响应缓存层（P3-6）：进程内 TTL 缓存，仅缓存白名单幂等只读 GET 接口的响应体
+# future 特性启用 async API（Cache::get / Cache::insert），用于 axum 中间件异步读写
+moka = { version = "0.12", features = ["future"] }
+
+# Excel 导出（T-10：启用 constant_memory 流式模式，大数据量内存 O(1)）
+rust_xlsxwriter = { version = "0.99", features = ["constant_memory"] }
+
+# Excel 导入解析（B3：用户批量导入，读取 xlsx 工作表）
+calamine = "0.36"
+
+# 系统监控（CPU/内存/磁盘信息采集）
+sysinfo = "0.39"
+
+# TypeScript 类型自动生成（通过 #[derive(TS)] 导出 .ts 文件）
+ts-rs = { version = "12", features = ["chrono-impl", "no-serde-warnings"] }
+
+# OpenAPI 文档自动生成（utoipa）
+# 注：不使用 utoipa-swagger-ui（其 build.rs 需从 GitHub 下载资源），
+# 改为通过 CDN 加载 Swagger UI 前端资源，由 docs.rs 提供 HTML 页面
+utoipa = { version = "6", features = ["axum_extras", "chrono"] }
+
+# IP 归属地查询（基于 MaxMindDB 离线数据库）
+maxminddb = "0.32"
+
+# 原子可替换引用（用于 mmdb 热加载）
+arc-swap = "1"
+
+# HTTP 客户端（用于下载 mmdb 文件、S3/MinIO 对象存储 SigV4 请求）
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "form"] }
+
+# URL 解析（S3/MinIO endpoint 的 host/authority 提取）
+url = "2"
+
+# XML 解析（S3 ListObjectsV2 响应）
+# 0.41 修复 RUSTSEC-2026-0194/0195（quick-xml 重复属性/命名空间 DoS），并已在依赖树中
+quick-xml = { version = "0.42", features = ["serialize"] }
+
+# tar.gz 解压（解压 MaxMind 下载包）
+flate2 = "1"
+tar = "0.4"
+
+# AES-256-GCM 加密（用于 License Key 加密存储）
+aes-gcm = "0.11"
+
+# 随机数生成（AES-GCM nonce 生成）
+rand = "0.8"
+# rand_os：rand 0.10（加密随机/p256 0.14 的 rand_core 0.10 线）；rsa 0.9 锁死 rand 0.8 线，故双版本共存
+rand_os = { package = "rand", version = "0.10", features = ["std_rng", "sys_rng"] }
+
+# 密钥派生（P1）：PBKDF2-HMAC-SHA256，用于敏感配置加密的加盐 KDF（替代无盐 SHA256）
+# 使用 pbkdf2 的泛型 pbkdf2::<Hmac<Sha256>> 函数，无需启用 simple 特性
+pbkdf2 = "0.13"
+hmac = "0.13"
+
+# 模板引擎（代码生成模块使用）
+tera = "2"
+
+# ZIP 压缩（代码生成模块生成代码包下载）
+zip = "8"
+
+# TOTP 多因子认证
+# - qr：启用二维码生成（get_qr_png / get_qr）
+# - gen_secret：启用 Secret::generate_secret()（CSPRNG 生成 160bit secret）
+# - otpauth：启用 otpauth:// URL 生成（get_url），qr feature 已传递依赖
+totp-rs = { version = "6", features = ["qr", "gen_secret", "otpauth"] }
+
+# Base32 解码（TOTP secret 编码）
+base32 = "0.5"
+
+# Base64 编解码（TOTP QR 码 Data URL）
+base64 = "0.23"
+
+# WebAuthn / Passkey（纯 Rust：ciborium + coset + p256，无 openssl）
+# 开关：能力位 `auth.webauthn`（默认 off，登录面能力，不向租户解锁 perm）。
+# 必须启用 `send` feature：否则 `PasskeyStore` trait 以 `async_trait(?Send)` 生成，
+# 其返回的 future 非 Send，无法在 axum handler（要求 Send）中被 await（编译期报错）。
+passkey-server = { version = "0.1.4", features = ["send"] }
+
+# 邮件发送（SMTP）
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# 前端静态资源嵌入（编译时将 stepby-vue/dist 嵌入到二进制，发布单可执行文件）
+# 通过 #[derive(RustEmbed)] 派生 Embed trait，运行时通过 EmbeddedAssets::get(path) 读取
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+# MIME 类型推断（rust-embed 的 mime-guess feature 已传递依赖，此处显式声明便于直接使用）
+mime_guess = "2"
+
+[workspace]
+# `governance`：治理项注册表（单一事实源），由本 crate 与 `migration` 共同依赖。
+# 单独成 crate 的原因见 `governance/src/lib.rs` 头部说明（migration 无法依赖 lib）。
+members = ["governance", "migration"]
+# `fuzz`：cargo-fuzz 独立工程（nightly 覆盖率导向 fuzz），刻意**不**参与主 workspace
+# 构建（其 Cargo.toml 亦自带独立 `[workspace]`）。见 fuzz/README.md 与夜间的 fuzz workflow。
+exclude = ["fuzz"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# 性能基准测试（R6-BE-ENG-21 / AGENTS.md D11：criterion 真实基准替换占位）
+# 运行方式：
+#   cargo bench                                          # 运行全部基准（完整采样，耗时较长）
+#   cargo bench -- --measurement-time 1                  # 快速跑一轮（每基准采样 1 秒）
+#   cargo bench --bench hot_paths -- --sample-size 20    # 仅跑 hot_paths 并缩小样本数
+# 覆盖面见 benches/hot_paths.rs 顶部注释；报告输出到 target/criterion/report/index.html
+[[bench]]
+name = "hot_paths"
+harness = false
+
+[dev-dependencies]
+# 用于引入 MigratorTrait（测试直接调用 Migrator::up），仅测试使用
+sea-orm-migration = { version = "2.0", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+# WebSocket 实时通知链路集成测试：真实 TCP + WS 客户端握手/收包（补 M7 0% 覆盖）
+tokio-tungstenite = "0.30"
+# WS 客户端测试需要 futures Stream/Sink 扩展方法
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+p256 = "0.14"
+coset = "0.4.2"
+# criterion：criterion 基准框架（benches/hot_paths.rs，AGENTS.md D11 真实基准）
+criterion = "0.8.2"

@@ -1,0 +1,839 @@
+# en-US messages
+# Mirrors zh-CN.yml keys. Fallback chain: en-US -> zh-CN.
+
+error:
+  ai:
+    disabled: AI assistant is disabled. Ask an administrator to enable it in configuration
+    pat_forbidden: AI assistant does not accept Personal Access Tokens (PAT). Use an interactive login session
+    capability_off: AI assistant capability is not enabled for this tenant
+    config_missing: base_url and api_key are required
+  fieldperm:
+    disabled: Field-level permission is not enabled (platform switch or tenant package capability is off)
+    table_not_allowed: The business table is not in the field-level permission whitelist
+  common:
+    success: Operation successful
+    not_found: Data not found
+    db_acquire: Failed to acquire database connection
+    bad_format: Invalid data format
+    invalid_param: Invalid request parameter
+    id_invalid: Invalid ID parameter
+    duplicate: Duplicate data, please check unique fields
+    db_failed: Database operation failed, please contact the administrator
+    tx_failed: Database transaction failed, please contact the administrator
+    session_expired: Session expired, please log in again
+    session_invalid: Invalid session, please log in again
+    token_failed: Failed to generate token
+    process_failed: Data processing failed
+    password_encrypt_failed: Password encryption failed
+    io_error: System IO error
+    cache_auth_failed: Cache authentication failed
+    cache_failed: Cache service unavailable, please contact the administrator
+    internal: Internal system error, please contact the administrator
+    validate_failed: Parameter validation failed
+    parse_failed: Failed to parse request parameters
+    time_format_invalid: "Invalid time format: %{s}"
+    batch_size_exceeded: "Batch operation size cannot exceed %{max}"
+    clear_field_unknown: "clearFields contains a non-clearable field: %{field}"
+    clear_field_conflict: "Field %{field} was both submitted with a value and declared for clearing; choose one"
+    forbidden: Access to this resource is forbidden
+  upload_scan:
+    rejected: The uploaded file did not pass the security scan and was rejected
+    unavailable: File security scanning service is unavailable, please try again later
+  auth:
+    ua_blocked: This login client signature is not allowed; please sign in with a browser
+    ip_blacklisted: Login is not allowed from this network environment
+    captcha_expired: Captcha expired or does not exist
+    captcha_wrong: Incorrect captcha
+    captcha_gen_failed: Captcha generation failed, please try again later
+    login_failed: Incorrect username or password
+    account_deleted: Account deleted, please contact the administrator
+    account_disabled: Account disabled, please contact the administrator
+    tenant_disabled: Tenant has been disabled
+    tenant_grace: Tenant has expired (read-only during grace period)
+    account_locked: Account locked, please try again later
+    register_exists: Username already exists
+    register_disabled: Registration is not enabled, please contact the administrator
+    old_password_wrong: Incorrect old password
+    unauthorized: Unauthorized, please log in first
+    forbidden: Access denied
+    auth_unavailable: Authentication service temporarily unavailable, please try again later
+    rate_limited: Too many requests, please try again later
+    password_locked: Too many failed password attempts, please try again in 5 minutes
+    password_verify_failed: Password verification failed, please try again later
+    logout_failed: Logout processing failed, please try again
+    totp_required: Two-factor verification required
+    totp_invalid: Incorrect verification code
+    token_missing: Request missing token, please log in again
+    duplicate_request: Duplicate idempotent request, please do not resubmit
+    idempotency_key_empty: Idempotency-Key header cannot be empty
+    idempotency_key_invalid: Idempotency-Key contains invalid characters, only letters, digits, hyphens, and underscores are allowed
+    idempotency_key_non_ascii: Idempotency-Key header contains non-ASCII characters
+    idempotency_key_too_long: "Idempotency-Key length cannot exceed %{max} characters"
+    login_info_missing: Cannot retrieve login info, please log in again
+    password_changed: Password has been changed, please log in again
+    permission_denied: No permission to access this resource
+    token_invalid: Invalid token format, expected Bearer <token>
+    token_revoked: Session has been revoked, please log in again
+    user_id_parse_failed: Failed to parse user ID
+    captcha_uuid_invalid: Invalid captcha UUID format
+  oauth:
+    provider_not_found: Login provider not found
+    provider_type_invalid: Invalid login provider type
+    enabled_invalid: "enabled must be 0 (disabled) or 1 (enabled)"
+    client_id_required: client_id is required
+    provider_code_exists: Provider code already exists
+    provider_disabled: This login method is disabled
+    code_missing: Missing authorization code (code)
+    state_invalid: Authorization state is invalid or expired, please retry login
+    token_exchange_failed: Failed to exchange code for token, please try again
+    userinfo_failed: Failed to fetch third-party user info
+    userinfo_missing_id: Third-party provider returned no user identifier
+    no_binding: This third-party account is not bound to any local account
+    auto_create_disabled: Local account auto-creation is not enabled, please log in and bind
+    auto_create_failed: Failed to auto-create local account, contact administrator
+    bind_taken: This third-party account is already bound to another local account
+    email_conflict: Third-party email already exists as local account, please log in with local account to bind
+    username_occupied: "Generated local username %{name} is taken, cannot auto-create"
+    provider_id_invalid: Invalid provider ID
+    handoff_invalid: Binding credential is invalid or expired, please retry third-party login
+    password_wrong: Local account password verification failed
+    unbind_self_last: "Unbind rejected: only one account source (local/third-party) remains for this account"
+    unknown_error: Third-party login failed, please try again
+    local_user_not_found: Local account does not exist or is disabled
+    failure_title: Third-party login failed
+  flow:
+    dept_missing: Cannot determine the applicant's department, please complete user department info
+    dept_not_found: The applicant's department does not exist
+    leader_missing: This department has no leader set (leader_user_id); the "Dept Leader" approval cannot start
+    role_not_found: Approval role not found
+    role_no_active_user: No active user under the approval role
+    no_assignee: Cannot resolve any valid approver, please ask the admin to check the approval policy
+    user_not_found: User not found
+    user_disabled: Target user is disabled, cannot transfer
+    mode_invalid: Invalid approval mode (single/countersign/or_sign/weighted)
+    delegate_self_forbidden: Cannot delegate the task to yourself
+    countersign_del_not_found: The target user is not at the current approval node
+    countersign_del_last_assignee: Removing would leave the node with no valid approver; blocked
+    leave_type_invalid: Invalid leave type (annual/sick/personal)
+    title_blank: Document title cannot be blank
+    task_not_found: Approval task not found
+    doc_not_found: Approval document not found
+    task_not_pending: This approval task has been processed or expired, please refresh
+    action_invalid: Unsupported approval action
+    to_user_required: Transfer requires a target user
+    transfer_to_self: Cannot transfer to yourself
+    self_approve_forbidden: You cannot approve a document submitted by yourself
+    self_approve_chain: The approval chain cannot consist solely of the applicant (self-approval is forbidden); adjust the policy or let someone else submit
+    not_assignee: Only the current assignee can operate this task
+    withdraw_only_applicant: Only the applicant can withdraw this document
+    pat_forbidden: Approval must be performed in a personal login session; personal access tokens (PAT) are not allowed
+    countersign_duplicate: This approver is already at the current approval node; no duplicate countersign is needed
+    biz_type_unregistered: The business document type is not registered in the approval engine (biz_type::REGISTRY), so the approval cannot advance
+    def_not_found: Flow definition not found
+    def_designer_disabled: Tenant has not enabled the flow designer capability (package flow.designer tier insufficient; full required to edit)
+    def_code_duplicate: Flow code already exists
+    def_id_required: Missing flow definition ID
+    def_published_immutable: Published version is immutable; publish a new version instead
+    graph_invalid: Flow graph validation failed
+    graph_doc_not_found: Graph-driven document not found
+    graph_not_published: Flow does not exist or is not published (published version required)
+    graph_fields_invalid: Fields snapshot must be a JSON object
+    graph_no_approve: Route contains no approval node; cannot start approval
+    action_not_allowed: Node does not allow action %{action}; rejected
+  sso:
+    platform_protected: Platform root department cannot be modified via tenant API
+    ancestors_invalid: Invalid department ancestors data, cannot resolve tenant
+    disabled: Single sign-on (SSO) is not enabled
+    client_not_found: Client not found
+    client_disabled: This client is disabled
+    client_id_required: client_id is required
+    client_id_exists: client_id already exists
+    client_name_required: Client name is required
+    redirect_uris_empty: At least one redirect URI is required
+    redirect_uri_invalid: Invalid redirect URI, must be an absolute http(s) URL
+    redirect_uri_not_allowed: redirect_uri is not in the whitelist
+    scope_invalid: Requested scope contains unauthorized values
+    response_type_unsupported: Only response_type=code is supported
+    pkce_required: PKCE is required (code_challenge with method=S256)
+    pkce_method_unsupported: Only PKCE method S256 is supported
+    openid_scope_required: scope must include openid
+    not_login: Login required to authorize
+    code_invalid: Authorization code is invalid or expired
+    client_auth_failed: Client authentication failed
+    grant_type_unsupported: Unsupported grant_type
+    rt_invalid: Refresh token is invalid or expired
+    login_required: Re-authentication is required
+    consent_required: User consent is required
+    pkce_verify_failed: PKCE verification failed
+    token_failed: Token issuance failed
+    access_token_invalid: Access token is invalid
+    batch_id_invalid: Invalid client id
+    redirect_uri_dup: Duplicate redirect URI
+    client_id_reserved: client_id is a reserved identifier
+    secret_encrypt_failed: Failed to encrypt client secret, check the server master key config
+    access_denied: You denied the authorization request
+    logo_uri_invalid: logo_uri must be an http(s) absolute URL of at most 500 characters
+    consent_ticket_invalid: Consent ticket is invalid or expired, please restart the authorization
+  file:
+    delete_failed: Failed to delete file
+    delete_task_failed: Delete task failed
+    empty: Uploaded file is empty
+    field_not_found: file field not found
+    invalid_name: Invalid file name
+    list_failed: Failed to read directory
+    list_task_failed: Read directory task failed
+    multipart_parse_failed: "Failed to parse multipart: %{e}"
+    read_failed: "Failed to read file content: %{e}"
+    too_large: "File size cannot exceed %{max}MB"
+    unknown_ext: Cannot recognize file extension
+    unsupported_type: "Unsupported file type: %{ext}"
+  storage:
+    unsupported_backend: "Unsupported storage backend: %{backend} (supported: local / s3)"
+    s3_missing_config: "S3 storage missing required config (access_key/secret_key/endpoint/bucket)"
+    s3_invalid_endpoint: "Invalid S3 endpoint"
+    s3_client_build_failed: "Failed to initialize S3 client"
+    s3_request_failed: "S3 request failed, check object storage availability"
+    s3_status: "S3 returned status %{status}: %{detail}"
+    s3_list_failed: "Failed to list S3 objects"
+  password:
+    complexity_common: Password is too common, please use a more complex password
+    complexity_digit: Password must contain at least 1 digit
+    complexity_letter: Password must contain at least 1 letter
+  user:
+    not_found: User does not exist
+    not_found_by_id: "User ID=%{id} does not exist"
+    name_duplicate: Username cannot be duplicated
+    phone_invalid: Invalid phone number format (please check the country/region code)
+    admin_disable_forbidden: Cannot disable the super administrator
+    admin_role_forbidden: Cannot modify the super administrator's role bindings
+    admin_post_forbidden: Cannot modify the super administrator's post bindings
+    admin_delete_forbidden: Cannot delete the super administrator
+    admin_pwd_forbidden: Cannot modify the super administrator's password
+    same_password: The new password cannot be the same as the old one
+    password_missing: User password field is missing
+    higher_role_forbidden: Cannot operate on users with higher priority roles
+    operator_id_parse_failed: Operator user ID parse failed
+    id_empty: User ID cannot be empty
+    email_invalid: Invalid email format
+    sex_invalid: Invalid sex value (only 0=male / 1=female / 2=unknown are allowed)
+    status_invalid: Invalid user status (only 0=normal / 1=disabled are allowed)
+    import_login_required: Login name is required
+    import_login_length: Login name must be 2-30 characters long
+    import_login_format: Login name only allows letters, digits, and underscores
+    import_nick_required: Nickname is required
+    import_dept_not_found: "Department \"%{name}\" does not exist"
+    import_duplicate_in_file: Duplicate login name within the file
+    pwd_reset_token_invalidate_failed: Password reset succeeded, but old token invalidation marking failed
+    pwd_change_token_invalidate_failed: Password changed, but old token invalidation marking failed
+    erasure_disabled: User anonymization capability is not enabled
+    erasure_platform_only: Only platform administrators can anonymize users
+    erasure_forbidden: Platform users and the super administrator cannot be anonymized
+    erasure_revoke_failed: Failed to mark sessions invalid before anonymization; aborted (fail-closed)
+  config:
+    not_found: Configuration not found
+    key_exists: Configuration key already exists
+    id_invalid: Invalid config ID
+    governance_forbidden: This configuration is governed by the platform and cannot be modified by tenants
+    platform_row_forbidden: Platform-level configuration cannot be operated by tenants
+    scope_invalid: Invalid configuration governance scope
+    flag_invalid: Invalid configuration governance flag
+    governance_platform_only: Config governance view is platform-only
+  dept:
+    not_found: Department does not exist
+    parent_not_found: Parent department does not exist
+    parent_deleted: Parent department has been deleted
+    parent_self_forbidden: Parent department cannot be itself
+    has_children: Has child departments, cannot delete
+    assigned_to_role: Department is assigned to roles, cannot delete
+    has_users: Department has users, cannot delete
+    ids_empty: deptIds/orderNums is empty after parsing
+    level_too_deep: Department hierarchy too deep, cycle check failed
+    id_not_found: "Department ID=%{id} does not exist"
+    ids_count_mismatch: deptIds and orderNums count mismatch
+  menu:
+    not_found: Menu does not exist
+    parent_not_found: Parent menu does not exist
+    parent_deleted: Parent menu has been deleted
+    perm_exists: Permission key already exists
+    parent_self_forbidden: Parent menu cannot be itself
+    has_children: Has child menus, cannot delete
+    assigned_to_role: Menu is assigned to roles, cannot delete
+    ids_empty: menuIds/orderNums is empty after parsing
+    level_too_deep: Menu hierarchy too deep, cycle check failed
+    id_not_found: "Menu ID=%{id} does not exist"
+    ids_count_mismatch: menuIds and orderNums count mismatch
+  rate_limit:
+    not_found: Rate limit configuration not found
+    pattern_exists: Route pattern already exists
+    id_invalid: Invalid config ID
+    service_unavailable: Rate limit service temporarily unavailable
+    too_many_requests: Too many requests, please try again later
+  monitor:
+    session_not_found: Session does not exist or has expired
+    session_not_owned: You can only manage your own sessions
+    session_invalid: Session data invalid
+    admin_force_logout_forbidden: Cannot force logout the super administrator
+    batch_logout_empty: Please select sessions to force logout
+  post:
+    not_found: Post does not exist
+    code_exists: Post code already exists
+    id_invalid: Invalid post ID
+    assigned_to_user: "Post %{id} is assigned to users, cannot delete"
+  task:
+    not_found: Task does not exist
+    id_invalid: Invalid task ID
+  gen:
+    time_format: Invalid time format
+    int_default: Integer default value is not a valid number
+    int_default_invalid: "Integer default value %{value} is not a valid number"
+    decimal_default: Decimal default value is not a valid number
+    decimal_default_invalid: "Decimal default value %{value} is not a valid number"
+    table_not_found: Code generation business table does not exist
+    invalid_table_name_with_value: "Invalid table name: %{name}"
+    table_name_start: Table name must start with a letter
+    create_table_failed: Failed to create table
+    create_table_failed_with_err: "Failed to create table: %{err}"
+    table_id_not_found: "Table ID=%{id} does not exist"
+    table_not_imported: "Table %{name} not imported"
+    table_no_columns: "Table %{name} does not exist or has no columns"
+    table_select_required: Please select tables to import
+    table_id_invalid: Invalid table ID
+    table_name_invalid: Invalid table name
+    table_select_for_gen_required: Please select tables to generate
+    zip_write_failed: ZIP write failed
+    zip_finish_failed: ZIP finish failed
+    template_load_failed: Tera template load failed
+    path_empty_component: Path component contains invalid empty string
+    record_not_found: Record does not exist
+    flow_biz_type_unregistered: "Business type \"%{biz_type}\" is not registered: add it to sys_flow_service::biz_type::ALL and REGISTRY before submitting"
+    flow_status_not_submittable: "Status \"%{status}\" is not submittable (only draft/rejected/withdrawn)"
+    flow_nodes_empty: "Approval chain is empty: configure at least one approval node"
+    flow_only_applicant_can_submit: Only the original applicant can resubmit this document
+    flow_tenant_mismatch: The document tenant differs from the applicant tenant; submission is forbidden
+    field_length_invalid: "%{field} length must be between 1-64"
+    field_start_invalid: "%{field} must start with letter or underscore"
+    field_char_invalid: "%{field} can only contain letters, digits, underscores"
+    bool_default_invalid: "Boolean default value %{value} must be true/false/0/1"
+    table_already_imported: "Table %{name} already imported, do not import again"
+    table_no_columns_or_not_exist: "Table %{name} does not exist or has no columns"
+    table_already_in_gen: "Table %{name} already exists in gen_table, do not create again"
+    table_already_in_db: "Table %{name} already exists in database, do not create again"
+    column_name_duplicate: "Column name %{name} duplicated"
+    column_type_length_required: "Column %{name} type %{ty} requires length"
+    column_decimal_scale_required: "Column %{name} type Decimal requires scale"
+    column_decimal_scale_invalid: "Column %{name} scale %{scale} must be less than length %{length}"
+    column_auto_inc_no_pk: "Column %{name} set auto increment but no primary key"
+    column_auto_inc_not_int: "Column %{name} set auto increment but type %{ty} is not integer"
+    template_render_failed: "Template render failed (%{name}): %{msg}"
+    path_component_invalid: "Path component contains invalid characters (.. / \\ not allowed): %{name}"
+    batch_tables_exceeded: "At most %{max} tables can be generated at once"
+  common_handler:
+    field_not_found_file: file field not found
+    field_not_found_avatar: avatarfile field not found
+    file_empty: Uploaded file is empty
+    file_ext_unknown: Cannot recognize file extension
+    image_format_unknown: Unrecognized image format, only jpg/jpeg/png/gif supported
+    filename_invalid: Invalid file name
+    resource_path_invalid: Invalid resource path
+    file_not_found: File does not exist
+    resource_not_found: Resource does not exist
+    upload_success: Upload successful
+    chunk_session_invalid: Invalid chunk session ID
+    chunk_session_missing: Chunk session not found or expired, please restart the upload
+    chunk_store_unavailable: Shared-state store temporarily unavailable, please retry later
+    chunk_index_missing: Missing partIndex field
+    chunk_part_missing: Part {index} is missing, please re-upload it
+    chunk_parts_missing: Parts incomplete ({received}/{total} received), cannot merge
+    chunk_parts_invalid: Invalid part count (1-10000), or part size inconsistent with total size
+    chunk_part_too_large: Part size exceeds body limit {limit}MB, reduce part size or increase part count
+    chunk_total_too_large: File total size exceeds chunked-upload limit {max}MB
+    chunk_busy: Merge tasks are busy, please retry later
+  excel:
+    fields_empty: Export field list is empty or no matching fields
+    build_task_failed: Excel build task failed
+    sheet_create_failed: Failed to create worksheet
+    header_write_failed: Failed to write header
+    data_write_failed: Failed to write data
+    generate_failed: Failed to generate Excel
+    import_parse_failed: "Failed to parse Excel file: %{e}. Please fill in the downloaded template and keep the header row unchanged"
+  ip_location:
+    source_invalid: Update source must be maxmind or p3terx
+    unknown_source_type: "Unknown update source type: %{s}"
+    maxmind_credentials_required: Switching to maxmind source requires Account ID and License Key
+    private_ip: Private IP
+    update_unavailable: IP database update service temporarily unavailable, please try again later
+    update_in_progress: An IP database update task is already in progress, please try again later
+  cache:
+    name_wildcard_forbidden: Cache name cannot contain wildcards
+    info_fetch_failed: Failed to fetch cache info
+    key_count_failed: Failed to get key count
+    value_query_failed: Failed to query cache value
+    key_clear_failed: Failed to clear cache key
+    key_scan_failed: Failed to scan cache keys
+    key_batch_delete_failed: Failed to batch delete cache keys
+    flushdb_disabled: "This endpoint is disabled: FLUSHDB would clear business keys such as blacklist/online/login_fail. Use clearCacheName to clear by prefix"
+    prefix_not_allowed: "Cache prefix not allowed: %{prefix}, supported: %{allowed}"
+    key_prefix_required: "Cache key must start with %{name}"
+    key_count_remark: "%{count} keys"
+    type_not_previewable: "[%{type} type cache, preview not supported]"
+    memory_usage_failed: Failed to scan cache key memory usage
+  monitor_server:
+    duration_format: "%{days}d %{hours}h %{minutes}m"
+  backup:
+    id_invalid: Invalid backup ID
+    db_url_invalid: Database URL format is invalid
+    mkdir_failed: Failed to create backup directory
+    mkdir_task_join_failed: Create backup directory task join failed
+    filename_invalid: Invalid backup file name
+    sqlite3_failed: sqlite3 invocation failed
+    write_task_join_failed: Write task join failed
+    write_failed: Failed to write backup file
+    process_start_failed: Failed to start backup process
+    process_exec_failed: Backup process execution failed
+    record_not_found: Backup record does not exist
+    tenant_scope_denied: You are not allowed to access this backup record (tenants can only access their own tenant-export packages)
+    restore_status_invalid: Only successful backups can be restored
+    too_frequent: Backup operation too frequent, please try again later
+    restore_in_progress: A restore task is already in progress, please try again later
+    service_unavailable: Backup service temporarily unavailable, please try again later
+    filename_invalid_restore: Backup file name is invalid
+    file_exist_check_join_failed: File existence check task join failed
+    file_not_found: Backup file does not exist
+    restore_process_start_failed: Failed to start restore process
+    restore_process_exec_failed: Restore process execution failed
+    delete_file_task_failed: Delete backup file task failed
+    download_status_invalid: Only successful backups can be downloaded
+    read_file_task_failed: Read file task failed
+    read_backup_file_failed: Failed to read backup file
+    unsupported_db_type: "Unsupported database type: %{url}"
+    db_backup_failed: Database backup failed
+    tenant_not_found: Tenant not found; cannot export data package
+    tenant_export_serialize_failed: Failed to serialize tenant data package
+    tenant_export_restore_unsupported: Tenant data package cannot be restored (only full database backups can)
+    process_timeout: "Backup process timed out (%{secs} seconds)"
+    process_nonzero_exit: "Backup process returned non-zero status: %{err}"
+    db_restore_failed: Database restore failed
+    restore_process_timeout: "Restore process timed out (%{secs} seconds)"
+    restore_process_nonzero_exit: "Restore process returned non-zero status: %{err}"
+    sqlite3_backup_failed: "sqlite3 backup failed: %{err}"
+    sqlite3_branch_unreachable: SQLite backup should be handled above; this branch is unreachable (please check code logic)
+    mysql_restore_branch_unreachable: MySQL restore should go through run_mysql_restore branch (please check code logic)
+  server:
+    info_fetch_failed: Server info collection failed
+    pool_stats_failed: Failed to fetch database pool stats
+  dict:
+    type_not_found: Dict type does not exist
+    type_exists: Dict type already exists
+    data_not_found: Dict data does not exist
+    id_invalid: Invalid dict ID
+    data_id_invalid: Invalid dict data ID
+    platform_row_forbidden: Platform-level dict cannot be operated by tenants
+    platform_type_exists: Dict type conflicts with a platform type and cannot be created by tenants
+  job:
+    cron_invalid: Invalid cron expression
+    name_exists: Job name already exists
+    group_mismatch: Job group name mismatch
+    id_invalid: Invalid job ID
+    stats_window_overflow: Report stats window date calculation overflowed
+    stats_window_parse: Report stats window start date could not be resolved
+  scheduler:
+    operation_failed: Scheduler operation failed, please contact the administrator
+  report:
+    id_empty: Report ID must not be empty
+    not_found: Report does not exist
+    code_duplicate: "Report code「%{code}」already exists"
+    type_invalid: "Invalid report type, only login_stats / user_stats / msg_stats / custom are supported, current value: %{value}"
+    config_json_invalid: Report config must be a valid JSON
+    delete_sub_failed: Failed to delete subscriptions of the report
+    busy: Report query concurrency limit reached, please retry later
+    dashboard_code_duplicate: Dashboard code already exists
+    dashboard_not_found: Dashboard does not exist
+    dataset_code_duplicate: Dataset code already exists
+    dataset_disabled: Dataset is disabled and cannot be previewed
+    dataset_id_required: Missing dataset ID
+    dataset_not_found: Dataset does not exist
+    designer_disabled: Tenant has not enabled the report designer capability (package report.designer tier insufficient; full required to edit)
+    layout_invalid: Invalid dashboard layout_json (must be an object with schemaVersion in 1-10)
+    param_missing: Missing required parameters
+    query_timeout: Dataset query timed out
+    sql_invalid: SQL template validation failed
+    sql_must_select: SQL template must start with SELECT
+  report_sub:
+    id_empty: Subscription ID must not be empty
+    not_found: Subscription does not exist
+    report_not_found: Referenced report does not exist
+    cron_invalid: Invalid cron expression (must be 6 fields, including seconds)
+    push_channel_none: At least one push channel must be enabled (email or site message)
+    email_invalid: Invalid recipient email format
+    user_ids_invalid: Invalid target user IDs
+  web_hook:
+    id_invalid: Invalid webhook ID
+    not_found: Webhook configuration does not exist
+    log_not_found: Delivery log does not exist
+    url_invalid: Invalid callback URL (only http/https allowed, SSRF check not passed)
+    event_invalid: Invalid subscribed event type
+    name_empty: Webhook name must not be empty
+    event_empty: Subscribe to at least one event type
+    event_key_unknown: Event key %{key} is not in the event catalog
+    event_disabled: Event is disabled (delisted from catalog); subscribe and test-send are rejected
+  alert:
+    rule_not_found: Alert rule does not exist
+    metric_invalid: Invalid metric identifier
+    metric_fetch_failed: Failed to collect metric, please retry later
+    comparator_invalid: Invalid comparator (only gt/lt/ge/le allowed)
+    enabled_invalid: Invalid enabled status (only 0/1 allowed)
+    channel_unsupported: Notification channel type not supported (site/email only)
+    no_recipient: Admin email not configured, unable to send email notification
+  oper_log:
+    id_invalid: Invalid log ID
+    anonymous: Anonymous
+    chain_disabled: Operation log tamper-proof chain is not enabled
+    anchor_not_found: Cleanup anchor not found
+    verify_platform_only: Chain verification is a platform compliance capability, platform admins only
+    archive_not_ready: This anchor has no archive object (delete-mode cleanup produces none)
+    archive_object_missing: Archive object not found or already removed
+    archive_platform_only: Audit archives are platform compliance data, downloadable by platform admins only
+  report_board:
+    not_found: Report board not found
+    name_exists: A board with the same name already exists
+    name_invalid: Board name must be 1-64 characters
+    enabled_invalid: Enabled value invalid (only 0/1 allowed)
+    config_invalid: "Invalid board config: %{reason}"
+    source_unknown: "Unknown data source: %{key}"
+    range_invalid: Invalid time range (only 7d/30d allowed)
+  audit_change:
+    not_found: Audit change record not found
+    export_empty: No audit change records match the export criteria
+  frontend_error:
+    not_found: Frontend error record not found
+  login_log:
+    id_invalid: Invalid log ID
+    admin_unlock_forbidden: Cannot unlock the super administrator account
+  mail:
+    from_invalid: Invalid sender email address
+    to_invalid: Invalid recipient email address
+    build_failed: Failed to build email
+    smtp_not_initialized: SMTP client not initialized
+    send_failed: Failed to send email
+    send_timeout: Email send timed out (SMTP unresponsive)
+  log:
+    list_task_failed: Log file listing task failed
+    list_failed: Failed to read log file list
+    invalid_name: Invalid log file name
+    tail_task_failed: Log read task failed
+    file_not_found: The specified log file does not exist
+    tail_failed: Failed to read log file
+  msg:
+    channel_not_found: Message channel does not exist
+    channel_disabled: Message channel is disabled and cannot be used
+    channel_code_duplicate: Message channel code already exists
+    channel_type_invalid: "Invalid message channel type: %{channel_type} (supported: email/sms/site/wecom_robot/dingtalk_robot)"
+    sms_config_invalid: 'Invalid SMS channel config'
+    sms_send_failed: 'SMS delivery failed, moved to retry'
+    robot_config_invalid: 'Invalid IM robot channel config (config_json requires webhookUrl; dingtalk may add secret)'
+    robot_send_failed: 'IM robot delivery failed, moved to retry'
+    sms_template_code_required: 'Cloud SMS channels require a template with a cloud provider code (sms_template_code)'
+    channel_in_use: "Message channel \"%{channel_name}\" is referenced by message templates and cannot be deleted"
+    channel_id_invalid: Invalid message channel ID
+    config_json_invalid: Invalid channel configuration JSON
+    mail_disabled: Email service is not enabled, cannot send email
+    template_not_found: Message template does not exist
+    template_disabled: Message template is disabled and cannot be used
+    template_code_duplicate: Message template code already exists
+    template_id_invalid: Invalid message template ID
+    log_not_found: Send log does not exist
+    log_id_invalid: Invalid send log ID
+  notice:
+    not_found: Notice does not exist
+    id_invalid: Invalid notice ID
+    user_email_query_failed: Failed to query user email
+    notice_type_invalid: "notice_type must be 1 (notice) or 2 (announcement), current value: %{value}"
+    status_invalid: "status must be 0 (normal) or 1 (closed), current value: %{value}"
+  pref:
+    value_invalid: "Message preference field %{field} is invalid (must be '0' or '1')"
+    time_invalid: "Do-not-disturb field %{field} has invalid time format (expected HH:MM): %{value}"
+  tenant:
+    name_required: Tenant name is required
+    name_duplicate: Tenant name already exists
+    not_found: Tenant does not exist
+    status_invalid: "status must be 0 (active) or 1 (disabled), current value: %{value}"
+    has_users: "Tenant still has %{count} user(s), cannot delete"
+    platform_protected: Platform root department cannot be modified via tenant API
+    disabled: Tenant has been disabled, login denied
+    platform_only: This operation is restricted to platform administrators
+    management_disabled: Tenant management is disabled (single-machine mode). Set [tenant].management = true in the configuration to enable it.
+    code_invalid: "Invalid tenant code (2-32 chars of lowercase letters/digits/underscore/hyphen, starting with a letter or digit)"
+    code_duplicate: Tenant code is already taken, please choose another
+    package_not_found: The specified package does not exist or is disabled
+    account_quota_exceeded: "Tenant account quota reached (%{max}), cannot add user"
+    expired: Tenant has expired beyond the grace period, login denied
+    expired_readonly: Tenant has expired (read-only during grace period), please renew before writing
+    not_deleted: Tenant is not in the recycle bin
+    admin_user_conflict: "Tenant admin username is already taken (%{user_name})"
+    admin_init_failed: Failed to initialize the tenant administrator, please retry
+    menu_outside_package: "Menu %{menu_id} is not included in the current tenant package and cannot be granted"
+    menu_platform_only: "Menu %{menu_id} is a platform-only capability (codegen / cache monitor / domain management) and cannot be granted to tenant roles"
+    menu_filter_uncovered: "Permission %{perms} cannot be granted to tenant roles (platform-only capability, or its table is not tenant-filtered)"
+    feature_invalid: "Invalid value %{mode} for capability %{key} (unregistered key or mode not in the allowed set)"
+    feature_platform_disabled: "Capability %{key} is not enabled in the platform [features] config; tenant packages cannot enable it"
+    domain_platform_only: Domain management is restricted to platform administrators (to allow tenant self-service, enable the tenant.domain_self_service capability)
+    domain_cross_tenant: You are not allowed to access or modify another tenant's domain bindings
+    domain_subdomain_platform_only: Subdomains are allocated by the platform; tenant self-service can only bind custom domains (DNS TXT verification required)
+    domain_invalid: "Invalid domain (lowercase letters/digits/hyphen, at least two labels of 1-63 chars each)"
+    domain_conflict: The domain is already taken (including historical bindings), please choose another
+    domain_not_found: Domain binding does not exist
+    domain_not_verified: The domain has not passed DNS TXT verification and cannot be set as primary
+    domain_verify_failed: DNS TXT verification failed, please confirm the DNS record has taken effect
+    domain_primary_forbidden: The tenant already has a primary domain; use the set-primary API to switch
+    host_mismatch: The current domain does not belong to the tenant of the logged-in account; access denied
+    nav_l3_disabled: Tenant-built navigation is available only after the platform enables the nav.l3 capability
+    nav_l3_readonly: The capability is in view-only mode (nav.l3 = view_only); navigation settings cannot be modified
+    nav_cross_tenant: You are not allowed to access or modify another tenant's navigation settings
+    nav_tenant_required: A platform operator must explicitly specify tenantId
+    nav_ref_menu_invalid: The referenced menu does not exist, is disabled, or is not a directory/page (buttons cannot be navigation nodes)
+    nav_ref_platform_only: This menu belongs to a platform-only capability and cannot be added to tenant navigation
+    nav_ref_outside_package: This menu is outside the tenant's package scope and cannot be added to navigation
+    nav_ref_duplicate: This menu is already in the tenant navigation and cannot be mounted twice
+    nav_parent_invalid: Invalid parent (must be another navigation node of the same tenant, without cycles or excessive depth)
+    nav_status_invalid: "status must be 0 (normal) or 1 (disabled)"
+    nav_has_children: This navigation node still has children; delete them first
+    nav_not_found: Navigation entry not found
+  pat:
+    name_required: Token name is required
+    name_too_long: Token name is too long (max 100 characters)
+    scopes_empty: Token scopes cannot be empty
+    scopes_invalid: "Invalid permission key format: %{value}"
+    count_exceeded: "Per-user token limit reached (%{max})"
+    not_found: Token does not exist
+    forbidden_pat_usage: Access tokens cannot be used to manage tokens themselves
+    create_failed: Failed to generate token
+  ak:
+    invalid_signature: Signature verification failed
+    timestamp_out_of_window: "Timestamp is outside the allowed window (±300 seconds)"
+    nonce_reused: Nonce (X-CA-Nonce) has already been used; possible replay attack
+    ak_not_found: Access Key does not exist or is not enabled
+    ak_revoked: The token owning this access key has been revoked
+    expired: The token owning this access key has expired
+    owner_disabled: The owner account of this access key has been deleted or disabled
+    not_enabled: AK/SK is not enabled for this token; rotation unavailable
+    rate_limited: Too many operations, please try again later
+    store_unavailable: Service temporarily unavailable, please try again later
+  websocket:
+    connected: WebSocket connected
+  role:
+    not_found: Role does not exist
+    perm_key_exists: Role permission key cannot be duplicated
+    admin_perm_key_forbidden: Cannot modify super admin role permission key
+    admin_delete_forbidden: Cannot delete super admin role
+    admin_disable_forbidden: Cannot disable super admin role
+    admin_data_scope_forbidden: Cannot modify super admin role data scope
+    user_id_empty: User ID cannot be empty
+    id_empty: Role ID cannot be empty
+    assigned_to_user: "Role %{id} is assigned to users, cannot delete"
+    not_found_by_id: "Role %{id} does not exist"
+  job_log:
+    id_invalid: Invalid log ID
+  totp:
+    user_id_parse_failed: Failed to parse user ID
+    not_enabled: TOTP is not enabled
+    secret_invalid: Invalid TOTP secret
+    code_invalid: Verification code is incorrect or expired
+    password_hash_invalid: Password hash format error
+    password_wrong: Password is incorrect
+    secret_decode_failed: TOTP secret decoding failed
+    secret_gen_failed: Failed to generate secret
+    totp_build_failed: Failed to build TOTP
+    qr_gen_failed: Failed to generate QR code
+    redis_write_failed: Failed to write to Redis
+    user_query_failed: Failed to query user
+    redis_delete_failed: Failed to delete from Redis
+    status_check_failed: TOTP status check service is temporarily unavailable, please try again later
+    enc_key_missing: Encryption key not configured (CONFIG_ENC_KEY), cannot encrypt/decrypt TOTP secret
+    encrypt_failed: Failed to encrypt TOTP secret
+    decrypt_failed: Failed to decrypt TOTP secret
+    login_required: Please provide the TOTP verification code to complete two-factor authentication
+    login_locked: Too many failed TOTP attempts, please try again in 10 minutes
+    already_enabled: TOTP is already enabled. Please disable it first before re-binding
+    pending_expired: The binding session has expired. Please re-fetch the QR code and try again
+  webauthn:
+    disabled: WebAuthn (Passkey) is not enabled
+    config_missing: WebAuthn is not configured (missing rp_id / origin), service unavailable
+    invalid_response: Invalid WebAuthn response
+    session_expired: The WebAuthn session has expired. Please try again
+    duplicate_credential: This authenticator is already registered
+    duplicate_name: A passkey with the same name already exists
+    credential_not_found: Passkey not found
+    user_unavailable: The current account is unavailable
+    user_id_invalid: Invalid user identity
+    internal: WebAuthn service internal error
+  upload:
+    write_task_failed: File write task failed
+    write_failed: Failed to write uploaded file
+    file_read_task_failed: File read task failed
+    file_read_failed: Failed to read file
+    delete_task_failed: File delete task failed
+    delete_failed: Failed to delete file
+
+msg:
+  flow:
+    todo_created: You have a new approval task to handle
+  success:
+    default: Operation succeeded
+    operation: Operation succeeded
+    query: Query succeeded
+    add: Added successfully
+    edit: Updated successfully
+    delete: Deleted successfully
+    clear: Cleared successfully
+    unlock: Unlocked successfully
+    register: Registered successfully
+    logout: Logged out successfully
+    sort: Sorted successfully
+    restore: Restored successfully
+    force_logout: Force logged out successfully
+    reset: Reset successfully
+    refresh: Refreshed successfully
+    status_change: Status updated successfully
+    execute: Executed successfully
+    user_import: Successfully imported %{n} users
+    save: Saved successfully
+    erasure_done: User has been anonymized (irreversible)
+    reload: Hot-reloaded successfully
+    password_reset: Password reset successfully
+    password_change: Password changed successfully
+    assign_role: Roles assigned successfully
+    cancel_auth: Authorization revoked successfully
+    auth: Authorized successfully
+    import: Imported successfully
+    sync: Synced successfully
+    webauthn_registered: Passkey registered successfully
+    webauthn_deleted: Passkey deleted
+    add_user: "Added user %{name} successfully"
+    add_role: "Added role %{name} successfully"
+    add_dept: "Added department %{name} successfully"
+    add_menu: "Added menu %{name} successfully"
+    ip_location_update: "IP database updated successfully (source: %{source}, size: %{size} bytes)"
+    test: Connection test passed
+    oauth_login: Third-party login successful
+    oauth_bind: Bound successfully
+    oauth_unbind: Unbound successfully
+  report:
+    push_title: Report push
+  cache:
+    no_match: No matching cache
+    key_not_found: Cache key does not exist
+    cleared: "Cleared successfully, deleted %{count} keys"
+  export:
+    progress: "Exported %{count} rows"
+    oper_log_task: "Operation log export"
+  scheduler:
+    job_failed: "Task execution failed: %{err}"
+    job_duration: "%{msg} (elapsed %{ms}ms)"
+    invoke_target_not_found: "Invoke target not found: %{target}"
+    job_timeout: "Task execution timeout (>%{secs}s)"
+    demoNoParams_success: demoNoParams sample task executed successfully (no business logic, demo only)
+    demoParams_success: "demoParams sample task executed successfully, param: %{param} (no business logic, param demo)"
+    demoMultipleParams_success: demoMultipleParams sample task executed successfully (no business logic, multi-param demo)
+    cleanup_oper_log: "Cleaned %{count} operation log(s)"
+    cleanup_oper_log_failed: "Failed to clean operation logs: %{err}"
+    cleanup_login_log: "Cleaned %{count} login log(s)"
+    cleanup_login_log_failed: "Failed to clean login logs: %{err}"
+
+# H-3: Login log audit messages (used by write_login_log for granular audit reasons;
+# user-facing error messages use error.auth.* to avoid username enumeration)
+log:
+  auth:
+    ip_rate_limited: IP request rate limited
+    password_locked: Too many failed password attempts
+    captcha_wrong: Incorrect captcha
+    captcha_expired: Captcha expired
+    login_failed: User does not exist or password incorrect
+    account_deleted: Account deleted
+    account_disabled: Account disabled
+    login_success: Login successful
+    permission_denied: "Permission denied: missing required permission %{perm}"
+    totp_failed: Incorrect TOTP verification code
+    totp_locked: Too many failed TOTP attempts, temporarily locked
+    ua_blocked: Login client signature rejected by risk-control policy
+    ip_blacklisted: Login source IP hit the blacklist (sys.login.blackIPList)
+    geo_alert: "Impossible-travel alert: region changed from %{prev} to %{now}"
+    tenant_disabled: Tenant has been disabled
+    tenant_grace: Tenant has expired (read-only during grace period)
+  oauth:
+    login_success: "Third-party login successful (%{provider})"
+    login_failed: "Third-party login failed (%{provider})"
+    bind_success: "Third-party account bound successfully (%{provider})"
+    unbind_success: "Unbound successfully (%{provider})"
+
+# Common status text (used in Excel exports, status display, etc.)
+common:
+  status:
+    normal: Normal
+    disabled: Disabled
+    anomaly: Anomaly
+    success: Success
+    failed: Failed
+  enabled: Enabled
+  disabled: Disabled
+  yes: "Yes"
+  no: "No"
+  # Platform tenant display name (§27.13.2 online-user tiered view: tenant name for tenantId=0)
+  platform_tenant: Platform
+  job:
+    misfire_default: Default Policy
+    misfire_immediate: Execute Immediately
+    misfire_once: Execute Once
+    misfire_give_up: Give Up
+    concurrent_allow: Allowed
+    concurrent_forbid: Forbidden
+
+# Excel export worksheet names (visible to users after download)
+excel:
+  tip_import_xlsx: Only .xlsx files are supported
+  sheet:
+    config: Configuration
+    user: User Data
+    user_import: User Import
+    role: Role Data
+    dict_type: Dict Type
+    dict_data: Dict Data
+    oper_log: Operation Log
+    post: Post Data
+    logininfor: Login Log
+    job: Scheduled Tasks
+    job_log: Job Log
+    rate_limit: Rate Limit
+    web_hook: WebHooks
+    web_hook_log: Delivery Logs
+    flow_doc: Approval Documents
+    alert_rule: Alert Rules
+    ai_history: AI Query History
+
+# System notice title/content (triggered by scheduler, visible in notification center)
+notice:
+  login_anomaly:
+    title: "Login Anomaly Alert - IP %{ip}"
+    content: "IP %{ip} failed login %{count} times within the last %{minutes} minutes, suspected credential stuffing attack, please investigate."
+  email:
+    footer: "This email is automatically sent by the stepby system. Please do not reply."
+
+# WebSocket system messages (connection success prompt, etc.)
+websocket:
+  connected: WebSocket connected
+
+# Alert rule engine evaluation result texts (sys_alert_service evaluation detail shown to frontend)
+alert:
+  evaluate:
+    fired: Metric %{metric} current value %{value} %{comparator} threshold %{threshold}, alert triggered
+    not_fired: Metric %{metric} current value %{value}, condition not met (%{comparator} %{threshold})
+    silent: Rule is within the silence window (%{minutes} minutes), notification skipped this time
+    no_channel: Threshold hit but no valid notification channel configured, only recorded
+
+  dataRule:
+    name_invalid: "Rule name must be 1-64 chars"
+    identifier_invalid: "Invalid %{label} (lowercase/digit/underscore only, must not start with digit): %{value}"
+    op_invalid: "Invalid operator: %{value}"
+    value_type_invalid: "Invalid value type: %{value}"
+    fixed_value_required: "fixed value type requires a rule value"
+    in_value_required: "in operator requires a comma-separated value list"
+    not_found: "Rule not found"

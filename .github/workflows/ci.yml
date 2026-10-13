@@ -1,0 +1,199 @@
+# Stepby Axum CI 流水线（单仓版）
+#
+# 触发条件：push 到 main/master 分支，或针对 main/master 的 Pull Request
+#
+# Jobs:
+# 1. backend           —— Rust：fmt check / clippy -D warnings / test --workspace（SQLite 内存 + Redis service）
+#                         + ts-rs 生成类型漂移检查（需要 stepby-vue 做导出目标）
+# 2. migration-matrix  —— 多数据库 migration 测试（SQLite / PostgreSQL 17 / MySQL 8.0）
+# 3. compose-config    —— docker compose 编排语法与变量解析校验
+#
+# 说明：
+# - 本文件为 stepby-axum 单仓自治版（发布于 stepbylabs 组织），与根仓编排版 ci.yml 等价门禁
+# - 集成测试依赖 Redis（init_redis 默认 127.0.0.1:6379 无密码），由 services 提供独立容器
+# - ts-rs 类型导出目录相对解析到 ../stepby-vue，故显式 checkout 前端仓做漂移断言
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==================== 后端：Rust ====================
+  backend:
+    name: Backend (Rust)
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout (backend source)
+        uses: actions/checkout@v4
+
+      # ts-rs 类型漂移检查需要 ../stepby-vue 工作区（TS_RS_EXPORT_DIR 相对解析）
+      - name: Checkout stepby-vue (TS types target)
+        uses: actions/checkout@v4
+        with:
+          repository: stepbylabs/stepby-vue
+          ref: main
+          path: stepby-vue
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # build.rs（rust-embed）编译期强制要求 frontend-dist/（embedded 前端资源）。
+      # 此处真实构建前端产物并复制，与本地 embedded 构建链（build:embedded → cp dist）
+      # 完全同源——占位空目录会让测试覆盖不到嵌入资源，属假实现，禁用。
+      - name: Build frontend dist (embedded assets)
+        run: |
+          npm install -g pnpm
+          cd "$GITHUB_WORKSPACE/stepby-vue"
+          pnpm install --frozen-lockfile
+          npm run build:embedded
+          cd "$GITHUB_WORKSPACE"
+          rm -rf frontend-dist && mkdir -p frontend-dist
+          cp -r "$GITHUB_WORKSPACE/stepby-vue/dist/." frontend-dist/
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Format check
+        run: cargo fmt -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test (SQLite in-memory)
+        run: cargo test --workspace
+        env:
+          DATABASE_URL: "sqlite::memory:"
+          # 2 核 runner 高并发下"写后读"类用例存在负载型偶发（run 38278563900：
+          # switch_states/oper_log 归档/ip_location 等 6 例，本地并行不可复现）——
+          # 钳制并行度换确定性（与 RUN-RECIPE §3.36 内存纪律同源的负载管理）。
+          RUST_TEST_THREADS: "4"
+
+      - name: Check generated TS types are up-to-date
+        # ts-rs 在编译期按 .cargo/config.toml 的 TS_RS_EXPORT_DIR 写入 stepby-vue
+        # 的 src/types/api/generated；若有 diff 说明后端类型改动后未同步前端，阻断合并。
+        run: |
+          git -C "$GITHUB_WORKSPACE/stepby-vue" diff --exit-code -- src/types/api/generated || {
+            echo "::error::Generated TS types are out of sync with backend."
+            echo "Run 'cargo build' in stepby-axum to regenerate, then commit stepby-vue."
+            exit 1
+          }
+
+  # ==================== 多数据库 Migration 测试 ====================
+  migration-matrix:
+    name: Migration (${{ matrix.db }})
+    needs: backend
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - db: sqlite
+            database_url: "sqlite::memory:"
+          - db: postgres
+            database_url: postgres://stepby:stepby123@127.0.0.1:5432/stepby
+          - db: mysql
+            database_url: mysql://stepby:stepby123@127.0.0.1:3306/stepby
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: stepby
+          POSTGRES_PASSWORD: stepby123
+          POSTGRES_DB: stepby
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stepby -d stepby"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root123
+          MYSQL_DATABASE: stepby
+          MYSQL_USER: stepby
+          MYSQL_PASSWORD: stepby123
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -proot123"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run migration
+        run: cargo run -p migration
+        env:
+          DATABASE_URL: ${{ matrix.database_url }}
+
+  # ==================== Docker Compose 配置校验 ====================
+  compose-config:
+    name: Compose config validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose files
+        env:
+          DATABASE_URL: postgres://test:test@postgres:5432/stepby
+          REDIS_URL: redis://redis:6379/0
+          JWT_SECRET: ci-only-secret-for-compose-validation-0123456789
+          POSTGRES_PASSWORD: test
+          REDIS_PASSWORD: test
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_PASSWORD: test
+        run: |
+          set -e
+          # 仅校验本仓自包含编排（docker-compose.yml / .dev.yml）。
+          # docker-compose.prod.yml include 根仓 deploy/docker-compose.db.yml
+          # （跨仓文件，单仓上下文不可解析）——其校验由根仓编排版 CI 承担。
+          files=(
+            docker-compose.yml
+            docker-compose.dev.yml
+          )
+          for f in "${files[@]}"; do
+            echo "== docker compose -f $f config --quiet =="
+            docker compose -f "$f" config --quiet
+          done

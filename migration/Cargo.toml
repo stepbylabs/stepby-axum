@@ -1,0 +1,26 @@
+# stepby-axum/migration/Cargo.toml
+
+[package]
+name = "migration"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+# 项目内共享 crate：治理项注册表（单一事实源，与 stepby-axum 共用）。
+# 此前 migration crate 无法依赖 lib，只能保留同值本地副本 + 人工两处同步；
+# 抽为独立零依赖 crate 后复制路径在物理上消失。
+governance = { path = "../governance" }
+
+# 数据库迁移（版本与主 crate 的 sea-orm 2.0 对齐——§5.52 DP-02）
+# 注：sea-orm-migration 2.0 仍保留 runtime-tokio-rustls 组合 feature（与 sqlx 根 crate 不同）
+sea-orm-migration = { version = "2.0", features = [
+    "runtime-tokio-rustls",
+    "sqlx-mysql",
+    "sqlx-postgres",
+    "sqlx-sqlite",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+chrono = "0.4"
+dotenvy = "0.15"
