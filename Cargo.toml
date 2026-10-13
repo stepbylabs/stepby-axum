@@ -194,7 +194,7 @@ hmac = "0.13"
 tera = "2"
 
 # ZIP 压缩（代码生成模块生成代码包下载）
-zip = "8"
+zip = "9"
 
 # TOTP 多因子认证
 # - qr：启用二维码生成（get_qr_png / get_qr）
