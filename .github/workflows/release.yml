@@ -181,9 +181,51 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  smoke:
+    name: Smoke test (linux-x86_64 binary)
+    needs: [backend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-linux-x86_64
+          path: pkg
+
+      - name: Unpack
+        run: |
+          mkdir smoke
+          tar -xzf pkg/stepby-backend-linux-x86_64-*.tar.gz -C smoke
+          chmod +x smoke/bin/stepby-axum
+
+      # 用户视角交付验证：零配置（SQLite 自动建库）起服 → /health → 嵌入前端 →
+      # captcha 端点。登录完整流程含验证码交互，由 e2e 全量覆盖（产物默认
+      # captchaEnabled=true 属安全语义，防暴力破解）。
+      - name: Start zero-config and verify health / embedded SPA / captcha
+        run: |
+          ./smoke/bin/stepby-axum > server.log 2>&1 &
+          SRV=$!
+          cleanup() { kill $SRV 2>/dev/null || true; }
+          trap cleanup EXIT
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/health > /dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then echo "::error::服务 30s 内未就绪"; tail -50 server.log; exit 1; fi
+          echo "-- /health:"; curl -sf http://127.0.0.1:8080/health; echo ""
+          curl -sf http://127.0.0.1:8080/health | grep -q '"status":"UP"' || { echo "::error::health 非 UP"; tail -50 server.log; exit 1; }
+          echo "-- GET / (embedded SPA):"
+          code_type=$(curl -sf -o /dev/null -w "%{http_code} %{content_type}" http://127.0.0.1:8080/)
+          echo "$code_type"
+          echo "$code_type" | grep -q "200 text/html" || { echo "::error::嵌入前端不可用"; tail -50 server.log; exit 1; }
+          echo "-- /captchaImage:"
+          curl -sf http://127.0.0.1:8080/captchaImage | grep -q '"captchaEnabled":true' || { echo "::error::captcha 端点异常"; tail -50 server.log; exit 1; }
+          echo "SMOKE OK"
+
   release:
     name: Publish GitHub Release
-    needs: [backend, docker-images]
+    needs: [backend, docker-images, smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (CHANGELOG source)
@@ -198,6 +240,12 @@ jobs:
           # 无需下载（run 38342281397：其 blob 下载瞬时故障重试耗尽致 Publish 失败）
           pattern: backend-*
 
+      - name: Generate checksums (sha256, supply-chain practice)
+        run: |
+          cd dist-assets
+          sha256sum stepby-backend-*.tar.gz > checksums.txt
+          cat checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -206,4 +254,5 @@ jobs:
           body_path: CHANGELOG.md
           files: |
             dist-assets/stepby-backend-*.tar.gz
+            dist-assets/checksums.txt
           draft: false

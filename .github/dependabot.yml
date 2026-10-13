@@ -1,0 +1,22 @@
+# Dependabot 依赖自动更新（批六十二：机制性防方言债/漏洞债复发）
+#
+# 说明：
+# - cargo/github-actions 周更 PR 会触发 CI 全绿门禁后才可合并（质量闭环）
+# - npm 生态以 pnpm 为主，dependabot 的 npm 生态覆盖 package.json 直接依赖；
+#   传递依赖漏洞由 pnpm-workspace.yaml overrides + 定期 lockfile 升级管理
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - ci

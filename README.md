@@ -1,11 +1,11 @@
-﻿# Stepby Axum
+# Stepby Axum
 
 ![Release](https://img.shields.io/badge/release-v0.2.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Rust](https://img.shields.io/badge/Rust-1.96%2B-orange?logo=rust)
 ![Axum](https://img.shields.io/badge/axum-web%20framework-green)
 ![Tests](https://img.shields.io/badge/tests-1349%20passing-brightgreen)
-![Build](https://img.shields.io/badge/build-passing-success)
+[![CI](https://github.com/stepbylabs/stepby-axum/actions/workflows/ci.yml/badge.svg)](https://github.com/stepbylabs/stepby-axum/actions/workflows/ci.yml)
 
 Stepby 开源中后台管理系统的后端服务，基于 **Rust（axum + sea-orm + tokio）** 构建，提供完整的 RESTful API。配套前端仓库：[stepby-vue](https://github.com/stepbylabs/stepby-vue)。
 
