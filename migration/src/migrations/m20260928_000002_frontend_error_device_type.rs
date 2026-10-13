@@ -24,18 +24,27 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .alter_table(
-                Table::alter()
-                    .table(Alias::new("sys_frontend_error"))
-                    .add_column_if_not_exists(
-                        ColumnDef::new(Alias::new("device_type"))
-                            .string_len(16)
-                            .null(),
-                    )
-                    .to_owned(),
-            )
-            .await
+        // 方言规避：sea-orm 在 MySQL 后端会把 add_column_if_not_exists 直译为
+        // `ADD COLUMN IF NOT EXISTS`（MySQL 8.0 不支持该语法，run 38328469439 实证）
+        // ——改用"先查列存在再 ALTER"既定范式（与 ensure_user_tenant_id_column 同款）。
+        if !manager
+            .has_column("sys_frontend_error", "device_type")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Alias::new("sys_frontend_error"))
+                        .add_column(
+                            ColumnDef::new(Alias::new("device_type"))
+                                .string_len(16)
+                                .null(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

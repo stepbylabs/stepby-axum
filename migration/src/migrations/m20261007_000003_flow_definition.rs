@@ -9,6 +9,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::IndexDdlExt;
+
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -21,6 +23,11 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let backend = manager.get_connection().get_database_backend();
+        // 方言映射：PG 无 DATETIME 类型（run 38328469439/本地 PG 实证）⇒ TIMESTAMP
+        let ts_type = match backend {
+            sea_orm::DatabaseBackend::Postgres => "TIMESTAMP",
+            _ => "DATETIME",
+        };
         // TEXT 列方言：SQLite/PG = TEXT；MySQL = LONGTEXT
         let text_type = match backend {
             sea_orm::DatabaseBackend::MySql => "LONGTEXT",
@@ -43,9 +50,9 @@ impl MigrationTrait for Migration {
              is_latest CHAR(1) NOT NULL DEFAULT '1',\
              status CHAR(1) NOT NULL DEFAULT '0',\
              create_by VARCHAR(64),\
-             create_time DATETIME,\
+             create_time {ts_type},\
              update_by VARCHAR(64),\
-             update_time DATETIME,\
+             update_time {ts_type},\
              remark VARCHAR(500),\
              del_flag CHAR(1) DEFAULT '0')",
             pk = match backend {
@@ -60,11 +67,17 @@ impl MigrationTrait for Migration {
             .await?;
         // 唯一索引：(tenant_id, flow_code, version) 与 (tenant_id, flow_code, is_latest) 唯一
         //（is_latest 同 code 只允许一条 '1'；SQLite 无部分唯一索引差异——用唯一索引 + '0' 填充策略）
+        // MySQL 不支持 CREATE INDEX IF NOT EXISTS（run 38328469439 实证）——
+        // 方言分支：MySQL 发裸语句，重复场景由迁移一次性语义 + "已存在"容错兜底。
+        let ine = match manager.get_connection().get_database_backend() {
+            sea_orm::DatabaseBackend::MySql => "",
+            _ => "IF NOT EXISTS ",
+        };
         let idx_sqls = [
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_flow_def_code_ver ON flow_definition (tenant_id, flow_code, version)",
+            format!("CREATE UNIQUE INDEX {ine}uq_flow_def_code_ver ON flow_definition (tenant_id, flow_code, version)"),
         ];
         for idx in idx_sqls {
-            manager.get_connection().execute_unprepared(idx).await?;
+            manager.get_connection().execute_index_ddl_ic(&idx).await?;
         }
         // 幂等 seed：一条演示定义（draft 状态，version=1，is_latest='1'）
         let graph = r#"{"nodes":[{"id":"start","type":"start"},{"id":"a1","type":"approve","name":"部门主管审批","assignees":["dept_leader"],"quorum":"any"},{"id":"a2","type":"approve","name":"管理员审批","assignees":["role:admin"],"quorum":"any"},{"id":"end","type":"end"}],"edges":[{"from":"start","to":"a1"},{"from":"a1","to":"a2"},{"from":"a2","to":"end"}]}"#;
