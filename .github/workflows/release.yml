@@ -168,7 +168,7 @@ jobs:
           cp -r stepby-vue/dist/. frontend-dist/
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build backend image
         uses: docker/build-push-action@v6
