@@ -133,21 +133,21 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U stepby"
+          --health-cmd "pg_isready -U stepby -d stepby"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: stepby123
+          MYSQL_ROOT_PASSWORD: root123
+          MYSQL_DATABASE: stepby
           MYSQL_USER: stepby
           MYSQL_PASSWORD: stepby123
-          MYSQL_DATABASE: stepby
         ports:
           - 3306:3306
         options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -ustepby -pstepby123"
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -proot123"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5

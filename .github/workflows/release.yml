@@ -57,6 +57,10 @@ jobs:
           path: stepby-vue
 
       - name: Build frontend dist (embedded assets)
+        # NODE_OPTIONS 必须清空：Windows/受限环境下 safe-delete 守卫会因
+        # NODE_OPTIONS 携带的参数触发失败（本地铁律 NODE_OPTIONS="" 唯一解）
+        env:
+          NODE_OPTIONS: ''
         run: |
           npm install -g pnpm
           cd stepby-vue
@@ -80,9 +84,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ matrix.target }}" == "linux-aarch64" ]]; then
-            # ARM64 走 musl 目标：静态链接、无动态依赖、产物体积小
-            cargo install cross --locked
-            cross build --release --target aarch64-unknown-linux-musl --workspace
+            # ubuntu-24.04-arm 为原生 ARM64 主机：host 工具链直出 gnu 产物
+            # （cross 方案在 ARM runner 装到 x86_64 工具链不可运行，run 38301384519 实证）
+            cargo build --release --workspace
           else
             cargo build --release --workspace
           fi
@@ -92,11 +96,8 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ github.ref_name }}"
-          if [[ "${{ matrix.target }}" == "linux-aarch64" ]]; then
-            REL="target/aarch64-unknown-linux-musl/release"
-          else
-            REL="target/release"
-          fi
+          # 原生构建产物统一落在 target/release
+          REL="target/release"
           out="release/"
           mkdir -p "$out/bin"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
@@ -153,6 +154,8 @@ jobs:
           path: stepby-vue
 
       - name: Build frontend dist (embedded assets)
+        env:
+          NODE_OPTIONS: ''
         run: |
           npm install -g pnpm
           cd stepby-vue
