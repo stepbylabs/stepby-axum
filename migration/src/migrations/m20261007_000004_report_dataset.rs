@@ -9,6 +9,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::IndexDdlExt;
+
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -21,6 +23,11 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let backend = manager.get_connection().get_database_backend();
+        // 方言映射：PG 无 DATETIME 类型（run 38328469439/本地 PG 实证）⇒ TIMESTAMP
+        let ts_type = match backend {
+            sea_orm::DatabaseBackend::Postgres => "TIMESTAMP",
+            _ => "DATETIME",
+        };
         let text_type = match backend {
             sea_orm::DatabaseBackend::MySql => "LONGTEXT",
             _ => "TEXT",
@@ -43,9 +50,9 @@ impl MigrationTrait for Migration {
              status CHAR(1) NOT NULL DEFAULT '0',\
              remark VARCHAR(500),\
              create_by VARCHAR(64),\
-             create_time DATETIME,\
+             create_time {ts_type},\
              update_by VARCHAR(64),\
-             update_time DATETIME,\
+             update_time {ts_type},\
              del_flag CHAR(1) DEFAULT '0')"
         );
         manager
@@ -64,9 +71,9 @@ impl MigrationTrait for Migration {
              status CHAR(1) NOT NULL DEFAULT '0',\
              remark VARCHAR(500),\
              create_by VARCHAR(64),\
-             create_time DATETIME,\
+             create_time {ts_type},\
              update_by VARCHAR(64),\
-             update_time DATETIME,\
+             update_time {ts_type},\
              del_flag CHAR(1) DEFAULT '0')"
         );
         manager
@@ -74,12 +81,17 @@ impl MigrationTrait for Migration {
             .execute_unprepared(&dashboard_sql)
             .await?;
 
+        // MySQL 不支持 CREATE INDEX IF NOT EXISTS（run 38328469439 实证）——方言分支同上。
+        let ine = match manager.get_connection().get_database_backend() {
+            sea_orm::DatabaseBackend::MySql => "",
+            _ => "IF NOT EXISTS ",
+        };
         let idx_sqls = [
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_report_dataset_code ON report_dataset (tenant_id, dataset_code)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_report_dashboard_code ON report_dashboard (tenant_id, dashboard_code)",
+            format!("CREATE UNIQUE INDEX {ine}uq_report_dataset_code ON report_dataset (tenant_id, dataset_code)"),
+            format!("CREATE UNIQUE INDEX {ine}uq_report_dashboard_code ON report_dashboard (tenant_id, dashboard_code)"),
         ];
         for idx in idx_sqls {
-            manager.get_connection().execute_unprepared(idx).await?;
+            manager.get_connection().execute_index_ddl_ic(&idx).await?;
         }
         Ok(())
     }

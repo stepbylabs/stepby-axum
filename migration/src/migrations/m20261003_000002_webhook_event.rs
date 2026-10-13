@@ -427,16 +427,21 @@ impl MigrationTrait for Migration {
         // ==================== 3. 索引（单一事实源；幂等） ====================
         // 加列之后执行：uk_sys_pat_access_key 依赖 access_key 列已存在。
         // sys_webhook_event 刚建表必存在；sys_pat 不存在（极老存量库）时跳过。
-        // MySQL 经 IndexDdlExt 容错"索引已存在"。
+        // MySQL 不支持 CREATE INDEX IF NOT EXISTS（run 38328469439 实证）——
+        // 方言分支：MySQL 发裸语句，重复场景由 IndexDdlExt 容错"已存在"兜底。
         for (idx_name, table, cols, unique) in WEBHOOK_INDEXES {
             if !table_exists(manager, table).await? {
                 continue;
             }
             let unique_kw = if *unique { "UNIQUE " } else { "" };
+            let ine = match manager.get_connection().get_database_backend() {
+                sea_orm::DatabaseBackend::MySql => "",
+                _ => "IF NOT EXISTS ",
+            };
             manager
                 .get_connection()
                 .execute_index_ddl_ic(&format!(
-                    "CREATE {unique_kw}INDEX IF NOT EXISTS {idx_name} ON {table} ({cols})"
+                    "CREATE {unique_kw}INDEX {ine}{idx_name} ON {table} ({cols})"
                 ))
                 .await?;
         }

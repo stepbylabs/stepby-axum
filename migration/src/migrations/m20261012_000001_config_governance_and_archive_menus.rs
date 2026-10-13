@@ -51,8 +51,8 @@ impl MigrationTrait for Migration {
         .await?;
 
         // 2. 归档按钮菜单补种（F 型按钮，挂「操作日志」500 之下；逐列复刻生产行）
-        db.execute_unprepared(
-            "INSERT OR IGNORE INTO sys_menu \
+        // 幂等前缀按方言分支（INSERT OR IGNORE 为 SQLite 专属——run 38328469439 实证）
+        let seed_body = "\
              (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, \
               is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, \
               remark, del_flag) \
@@ -62,9 +62,17 @@ impl MigrationTrait for Migration {
               '链感知保留：归档对象下载（平台专属，monitor:operlogArchive: 前缀）', '0'), \
              (4181, '链完整性校验', 500, 5, '#', '', '', '', '1', '0', 'F', '0', '0', \
               'monitor:operlogArchive:verify', '#', 'admin', CURRENT_TIMESTAMP, \
-              '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')",
-        )
-        .await?;
+              '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')";
+        let seed_sql = match manager.get_connection().get_database_backend() {
+            sea_orm::DatabaseBackend::Sqlite => {
+                format!("INSERT OR IGNORE INTO sys_menu {seed_body}")
+            }
+            sea_orm::DatabaseBackend::Postgres => {
+                format!("INSERT INTO sys_menu {seed_body} ON CONFLICT DO NOTHING")
+            }
+            _ => format!("INSERT IGNORE INTO sys_menu {seed_body}"),
+        };
+        db.execute_unprepared(&seed_sql).await?;
 
         Ok(())
     }

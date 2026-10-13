@@ -42,10 +42,12 @@ impl MigrationTrait for Migration {
             .await?;
 
         // 2. 语义回填：平台租户（tid=0）的 admin 角色标记为系统角色
+        // 注：用 TRUE 而非 1——PostgreSQL boolean 列不接受 integer 赋值
+        //（CI migration-matrix run 38328469439 实证）；MySQL/SQLite 均兼容 TRUE 字面量。
         manager
             .get_connection()
             .execute_unprepared(
-                "UPDATE sys_role SET is_system = 1 WHERE tenant_id = 0 AND role_key = 'admin' \
+                "UPDATE sys_role SET is_system = TRUE WHERE tenant_id = 0 AND role_key = 'admin' \
                  AND del_flag = '0'",
             )
             .await?;

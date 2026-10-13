@@ -10,6 +10,8 @@
 
 use sea_orm_migration::prelude::*;
 
+use crate::IndexDdlExt;
+
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -27,6 +29,16 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => "BIGSERIAL PRIMARY KEY",
             _ => "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
         };
+        // 方言映射（run 38328469439/本地 MySQL8+PG 实证）：
+        // - TEXT 列在 MySQL 8 严格模式下禁 DEFAULT 值 ⇒ fields_json 改可空（应用层恒写值）
+        // - PG 无 DATETIME 类型 ⇒ 统一 TIMESTAMP（MySQL/SQLite 兼容）
+        let (fields_json_col, ts_type) = match backend {
+            sea_orm::DatabaseBackend::MySql => ("fields_json TEXT NULL,", "DATETIME"),
+            sea_orm::DatabaseBackend::Postgres => {
+                ("fields_json TEXT NOT NULL DEFAULT '{}',", "TIMESTAMP")
+            }
+            _ => ("fields_json TEXT NOT NULL DEFAULT '{}',", "DATETIME"),
+        };
         manager
             .get_connection()
             .execute_unprepared(&format!(
@@ -37,26 +49,31 @@ impl MigrationTrait for Migration {
                  flow_id BIGINT NOT NULL,\
                  flow_code VARCHAR(64) NOT NULL,\
                  title VARCHAR(200) NOT NULL,\
-                 fields_json TEXT NOT NULL DEFAULT '{{}}',\
+                 {fields_json_col}\
                  status VARCHAR(16) NOT NULL DEFAULT 'pending',\
                  current_round INT NOT NULL DEFAULT 1,\
                  current_node_seq INT NULL,\
-                 submitted_at DATETIME NULL,\
-                 finished_at DATETIME NULL,\
+                 submitted_at {ts_type} NULL,\
+                 finished_at {ts_type} NULL,\
                  create_by VARCHAR(64) DEFAULT '',\
-                 create_time DATETIME NULL,\
+                 create_time {ts_type} NULL,\
                  update_by VARCHAR(64) DEFAULT '',\
-                 update_time DATETIME NULL,\
+                 update_time {ts_type} NULL,\
                  del_flag VARCHAR(1) DEFAULT '0'\
                  )"
             ))
             .await?;
+        // MySQL 不支持 CREATE INDEX IF NOT EXISTS（run 38328469439 实证）——方言分支同上。
+        let ine = match manager.get_connection().get_database_backend() {
+            sea_orm::DatabaseBackend::MySql => "",
+            _ => "IF NOT EXISTS ",
+        };
         manager
             .get_connection()
-            .execute_unprepared(
-                "CREATE INDEX IF NOT EXISTS idx_flow_graph_doc_tenant \
-                 ON flow_graph_doc (tenant_id, status)",
-            )
+            .execute_index_ddl_ic(&format!(
+                "CREATE INDEX {ine}idx_flow_graph_doc_tenant \
+                 ON flow_graph_doc (tenant_id, status)"
+            ))
             .await?;
         Ok(())
     }
