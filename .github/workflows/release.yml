@@ -194,6 +194,9 @@ jobs:
         with:
           path: dist-assets
           merge-multiple: true
+          # 只取三平台产物；docker buildx 的 build 记录 artifact（.dockerbuild）
+          # 无需下载（run 38342281397：其 blob 下载瞬时故障重试耗尽致 Publish 失败）
+          pattern: backend-*
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
