@@ -76,7 +76,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tracing-appender = "0.2"
 # G-13b 可选依赖（feature `otlp` 启用；版本组对 0.28 系）
 opentelemetry = { version = "0.28", optional = true }
-opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic"], optional = true }
 tracing-opentelemetry = { version = "0.29", optional = true }
 # log::LevelFilter：MySQL 连接池 after_connect 路径下 sea-orm 慢语句日志配置的类型（db/pool.rs）
