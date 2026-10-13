@@ -1345,3 +1345,63 @@ mod schema_equivalence_lock_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod rate_limit_guard_tests {
+    use super::*;
+    use crate::config::settings::RateLimitMode;
+
+    /// 多实例 + 限流档位自检的**可证伪**回归锁（M-8）。
+    ///
+    /// 语义：`[scheduler].replicas > 1` 且 `[rate_limit].mode = "local"` ⇒ 进程内令牌桶
+    /// 各副本独立计数，攻击者轮询不同副本即可把配额放大 N 倍，自检必须"报出来"。
+    ///
+    /// 四象限全覆盖——任一角写反/写漏即红：
+    /// ① 多实例 + local ⇒ **命中**（真实缺口）；
+    /// ② 多实例 + redis ⇒ 不命中（分布式桶共享配额，正确配置不告警）；
+    /// ③ 单实例 + local ⇒ 不命中（默认部署，零行为变更）；
+    /// ④ 单实例 + redis ⇒ 不命中（显式升级，合法）。
+    #[test]
+    fn rate_limit_local_multi_instance_guard_matrix() {
+        // ① 多实例 + local ⇒ 命中
+        assert!(
+            rate_limit_local_multi_instance_misconfigured(3, RateLimitMode::Local),
+            "多副本 + local 档必须命中（配额可被放大 N 倍）"
+        );
+        // ② 多实例 + redis ⇒ 不命中
+        assert!(
+            !rate_limit_local_multi_instance_misconfigured(3, RateLimitMode::Redis),
+            "多副本 + redis 档不应命中（分布式令牌桶共享配额）"
+        );
+        // ③ 单实例 + local ⇒ 不命中（默认部署零行为变更）
+        assert!(
+            !rate_limit_local_multi_instance_misconfigured(1, RateLimitMode::Local),
+            "单实例 + local 档不应命中（默认部署，零行为变更）"
+        );
+        // ④ 单实例 + redis ⇒ 不命中
+        assert!(
+            !rate_limit_local_multi_instance_misconfigured(1, RateLimitMode::Redis),
+            "单实例 + redis 档不应命中"
+        );
+    }
+
+    /// 默认档位（`SchedulerConfig::default().replicas = 1` + `RateLimitSettings::default().mode() = local`）
+    /// ⇒ 守卫**不得**触发，锁住"缺省值 = 现状 = 安全态"这一铁律
+    /// （新增开关/守卫不得改变存量部署行为）。
+    #[test]
+    fn default_config_does_not_trigger_rate_limit_guard() {
+        use crate::config::settings::{RateLimitSettings, SchedulerConfig};
+        let scheduler = SchedulerConfig::default();
+        let rate_limit = RateLimitSettings::default();
+        assert_eq!(scheduler.replicas, 1, "默认副本数必须为 1");
+        assert_eq!(
+            rate_limit.mode(),
+            RateLimitMode::Local,
+            "默认限流档位必须为 local（= 现状）"
+        );
+        assert!(
+            !rate_limit_local_multi_instance_misconfigured(scheduler.replicas, rate_limit.mode()),
+            "默认配置（单实例 + local）不得触发多实例限流告警"
+        );
+    }
+}

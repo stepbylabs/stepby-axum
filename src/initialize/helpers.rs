@@ -1,7 +1,7 @@
 // stepby-axum/src/initialize/helpers.rs
 
 use crate::config::Settings;
-use crate::config::settings::CacheMode;
+use crate::config::settings::{CacheMode, RateLimitMode};
 use sea_orm::{DatabaseBackend, DatabaseConnection};
 
 /// §4.2 分级守卫：共享态档位与部署形态不匹配时的启动期告警（只告警不阻断）。
@@ -46,7 +46,46 @@ pub(crate) fn init_cache_mode_guards(
     }
 }
 
-/// 启动打印 **WebAuthn / Passkey** 的有效姿态（`[features].auth.webauthn` + `[webauthn]`）。
+/// 多实例部署 + 限流档位不匹配的启动期自检（只告警不阻断；返回是否命中，便于单测证伪）。
+///
+/// 语义与 WF-2（`[scheduler].replicas` + `cluster_mode = "auto"`，见 `scheduler/mod.rs`）
+/// 与 §4.2（`[cache].mode = "local"` + 多实例，见 [`init_cache_mode_guards`]）**同源**：
+/// `[rate_limit].mode = "local"`（默认）是**进程内**令牌桶，多副本时各实例独立计数，
+/// 攻击者轮询不同副本即可把配额放大 N 倍（长期登记的 **M-8** 限制）。
+///
+/// `replicas` 由部署方如实声明（默认 `1`）——`replicas > 1` 且档位仍为 `local` ⇒ 打 **WARN**
+/// （拒绝静默放大，与"放开必有守卫 / 拒绝静默失效"准则一致）；`replicas <= 1`（默认）⇒
+/// 不触发，对存量单实例部署**零行为变更**（缺省值 = 现状 = 安全态）。
+///
+/// 修复指引：多实例部署置 `[rate_limit].mode = "redis"`（或环境变量 `RATE_LIMIT_MODE=redis`），
+/// 由 Redis 分布式令牌桶共享同一配额；Redis 命令失败时 fail-closed 返回 503。
+pub(crate) fn init_rate_limit_guards(settings: &Settings) -> bool {
+    if rate_limit_local_multi_instance_misconfigured(
+        settings.scheduler.replicas,
+        settings.rate_limit.mode(),
+    ) {
+        tracing::warn!(
+            replicas = settings.scheduler.replicas,
+            "[rate_limit].mode = local 但 [scheduler].replicas > 1：进程内令牌桶各副本独立计数，\
+             攻击者轮询不同副本即可把配额放大 N 倍（M-8）⇒ 多实例部署请置 \
+             [rate_limit].mode = \"redis\"（或环境变量 RATE_LIMIT_MODE=redis）"
+        );
+        return true;
+    }
+    false
+}
+
+/// 纯判定（可单测证伪）：多副本 + `local` 档 = 限流配额可被放大 N 倍。
+///
+/// 抽为纯函数的原因与 `tenant_host_chain_self_check` 一致——"只写日志的检查无法证伪"，
+/// 判定与副作用分离后可用单测锁住四象限（单实例/多实例 × local/redis）。
+pub(crate) fn rate_limit_local_multi_instance_misconfigured(
+    replicas: u32,
+    mode: RateLimitMode,
+) -> bool {
+    replicas > 1 && mode == RateLimitMode::Local
+}
+
 ///
 /// 治理意义与 `[acme]` / `[events]` 同源：能力位是"放开登录面能力"的唯一入口，
 /// 且 `rp_id` / `origin` 是 WebAuthn 的**信任锚**，配错即认证恒失败。故：

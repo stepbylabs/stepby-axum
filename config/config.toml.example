@@ -542,6 +542,8 @@ cooldown_secs = 60        # 打开后的冷却秒数，到期放行一次探测�
 #    与限流配置查询失败的既有口径一致。单实例部署若无特殊需要，保持 local 即可。
 # ⚠️ 非法 mode 取值回落 local 并打 WARN（fail-safe，不拒绝启动）。
 # ⚠️ 也可用环境变量 RATE_LIMIT_MODE=local|redis 覆盖（容器场景无需改配置文件）。
+# ⚠️ 启动期自检（2026-10-13 新增）：`[scheduler].replicas > 1` 且 mode = "local" 时启动打 WARN
+#    （进程内桶在多副本下会放大配额，拒绝静默失效）——多副本部署请同时置 replicas 与 mode=redis。
 [rate_limit]
 mode = "local"           # local（默认，= 现状）| redis
 key_ttl_secs = 300       # Redis 桶键 TTL（秒，夹在 60..=86400）；
@@ -602,6 +604,8 @@ fail_closed = true       # 扫描器不可用时：true（默认）= 拒绝上�
 
 # ── 运维提示：sys_config 运行时开关（captchaEnabled/registerUser 等）──────────
 # 这些开关存于数据库 sys_config 表（不在本文件），管理端「参数设置」页修改后自动刷新缓存、立即生效。
+# ⚠️ 安全默认：`sys.account.captchaEnabled` 种子值为 **true**（登录验证码默认开启 = 防撞库的企业级安全默认，
+#    与 RuoYi 上游一致）；如需在自动化环境关闭，改 sys_config 该行值为 false（管理端「参数设置」页）。
 # 管理端页面保存即自动失效缓存并生效（edit_config 内置 invalidate）；仅当绕过管理端直接改库（脚本/DBA）时才需手动刷新：（双层 cache-aside：config:def:{key} / config:{tid}:{key}，TTL 300s）：
 #   curl -X DELETE -H "Authorization: Bearer <admin_token>" http://<host>:8080/prod-api/system/config/refreshCache
 # 或在管理端「参数设置」页随意保存一次触发 refresh_cache。

@@ -98,6 +98,12 @@ impl AppInitializer {
         // （不判定/不记账/每次都尝试发送）；on 时对 `[acme]` / `[events]` 的出站推送生效。
         init_outbound_breaker(&settings);
 
+        // 2.6 多实例部署 + 限流档位自检（与 WF-2 / §4.2「部署形态 vs 配置」同族）：
+        // `[scheduler].replicas > 1` 且 `[rate_limit].mode = "local"` ⇒ 打 WARN——
+        // 进程内令牌桶在多副本下各实例独立计数，攻击者轮询不同副本即可把配额放大 N 倍（M-8）。
+        // 默认 `replicas = 1` 不触发，对存量单实例部署零行为变更。
+        init_rate_limit_guards(&settings);
+
         // 3. 初始化数据库
         let db = db::init_database(&settings.database, settings.log.sql_logging).await?;
 
