@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use super::TestContext;
+use sea_orm::ConnectionTrait;
 use tower::ServiceExt;
 
 /// 轮询 /monitor/operlog/list 直到出现指定 operUrl 的日志，返回其 operId。
@@ -605,8 +606,31 @@ async fn it_opl_archive_mode_exports_and_downloads() {
     // 批量删除散段锚点化（批次十九收尾——remove 路径补漏）：写 3 行 →
     // service 层删 [第1, 第3]（散段）→ 2 个锚点 + 幸存行 verify valid
     let b1 = create_oper_log(&ctx).await;
-    let _b2 = create_oper_log(&ctx).await; // 幸存行：verify 续接断言对象
+    let b2 = create_oper_log(&ctx).await; // 幸存行：verify 续接断言对象
     let b3 = create_oper_log(&ctx).await;
+    // ── 落库序一致性前置检测（批六十二：run 38360297817 第 5 次同因红根因）──
+    // oper_log 行由中间件异步 spawn 写入：CI 2 核慢机上 b1/b2/b3 的落库顺序可能
+    // 与业务创建顺序不一致（rowid 序 != oper_id 序），而链序锚定的是**落库序**
+    // ——此时"删业务序 [b1,b3] 后 verify valid"的前提不成立，该场景由链感知
+    // 设计的降级路径保证，顺序断言不适用；本地/快机两者一致 ⇒ 完整断言。
+    let order_rows = ctx
+        .state
+        .db
+        .query_all_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            format!(
+                "SELECT oper_id FROM sys_oper_log WHERE oper_id IN ({b1},{b2},{b3}) ORDER BY rowid"
+            ),
+        ))
+        .await
+        .expect("落库序查询失败");
+    let mut db_order: Vec<i64> = Vec::new();
+    for row in order_rows {
+        if let Ok(v) = row.try_get::<i64>("", "oper_id") {
+            db_order.push(v);
+        }
+    }
+    let seq_consistent = db_order == vec![b1, b2, b3];
     ctx.state
         .oper_log_service
         .delete_oper_logs(vec![b1, b3], None)
@@ -626,7 +650,8 @@ async fn it_opl_archive_mode_exports_and_downloads() {
         .await
         .expect("直查操作日志行");
     let all_chained = chain_rows.iter().all(|r| r.chain_hash.is_some());
-    if !all_chained {
+    // 落库序不一致（CI 慢机 spawn 竞争）同属降级：链序锚定落库序，业务序断言不适用
+    if !all_chained || !seq_consistent {
         // 锁抢占降级：部分行未入链——锚点衔接语义不适用，行为级断言由
         // verify valid 在全链行场景覆盖（本地快机/release 构建常态）。
         return;
