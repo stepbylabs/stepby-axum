@@ -181,7 +181,7 @@ tar = "0.4"
 aes-gcm = "0.11"
 
 # 随机数生成（AES-GCM nonce 生成）
-rand = "0.8"
+rand = "0.10"
 # rand_os：rand 0.10（加密随机/p256 0.14 的 rand_core 0.10 线）；rsa 0.9 锁死 rand 0.8 线，故双版本共存
 rand_os = { package = "rand", version = "0.10", features = ["std_rng", "sys_rng"] }
 

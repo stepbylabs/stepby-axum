@@ -5667,7 +5667,6 @@ dependencies = [
  "phonenumber",
  "quick-xml 0.42.0",
  "rand 0.10.3",
- "rand 0.8.8",
  "redis",
  "regex",
  "reqwest 0.13.5",
