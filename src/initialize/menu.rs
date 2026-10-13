@@ -1000,6 +1000,25 @@ pub(crate) async fn ensure_ai_history_menu_parent(db: &DatabaseConnection) -> an
     Ok(())
 }
 
+/// 菜单软删标记归一（批六十四）：把历史遗留的 `del_flag = '1'` 收敛为应用约定值 `'2'`。
+///
+/// 背景：应用层 `delete_menu` 写 `'2'`，详情/删除守卫以 `== "2"` 判定"已删"；而
+/// `m20261007_000011`（批十四菜单卫生）对 3800-3804/4115 写的是 `'1'`——应用从不写入、
+/// 无代码消费。列表过滤 `= '0'` ⇒ 二者均隐藏（无可见影响），但 `get_menu_by_id` 对
+/// `'1'` 不返回 404 ⇒ "已删"菜单可被直连 API 取回。本兜底为存量库幂等镜像
+/// （迁移 `m20261013_000001` 为新库路径）。
+pub(crate) async fn ensure_menu_del_flag_normalized(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_menu").await? {
+        return Ok(());
+    }
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "UPDATE sys_menu SET del_flag = '2' WHERE del_flag = '1'".to_string(),
+    ))
+    .await?;
+    Ok(())
+}
+
 /// 「审计归档下载」(4180) 与「链完整性校验」(4181) 按钮菜单兜底（批五十六）
 ///
 /// 批次十九（链感知保留）的两个 F 型功能按钮 2026-10-08 以菜单管理页手工创建、

@@ -571,6 +571,11 @@ impl AppInitializer {
         ensure_flow_designer_menu_visible(&db)
             .await
             .map_err(|e| anyhow::anyhow!("翻转流程设计器菜单可见性失败: {}", e))?;
+        // 4.5c-k 批六十四：菜单软删标记归一（del_flag '1' → '2'，存量库兜底，
+        //      等价迁移 m20261013_000001；幂等 UPDATE）
+        ensure_menu_del_flag_normalized(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("归一菜单软删标记失败: {}", e))?;
         // 4.5c-f G-02 M2：sys_flow_task 动作矩阵扩展列（weight/threshold/delegate_from，
         //      存量库兜底，等价迁移 m20261007_000006；has_column 守卫幂等）
         ensure_flow_task_action_columns(&db)

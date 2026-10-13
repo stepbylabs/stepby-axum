@@ -218,6 +218,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261008_000001_log_archive_anchor::Migration),
             Box::new(m20261010_000001_fix_ai_history_menu_parent::Migration),
             Box::new(m20261012_000001_config_governance_and_archive_menus::Migration),
+            Box::new(m20261013_000001_normalize_menu_del_flag::Migration),
         ]
     }
 }

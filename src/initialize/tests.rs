@@ -919,6 +919,8 @@ mod schema_equivalence_lock_tests {
         // 4.5c-j 批六十：菜单 4122 终态收敛（等价迁移 m20261006_000002 种子；幂等）
         ensure_data_rule_menu_alignment(db).await?;
         ensure_flow_designer_menu_visible(db).await?;
+        // 4.5c-k 批六十四：菜单软删标记归一（等价迁移 m20261013_000001；幂等）
+        ensure_menu_del_flag_normalized(db).await?;
         ensure_flow_task_action_columns(db).await?;
         ensure_flow_graph_doc_table(db).await?;
         ensure_sms_cloud_columns(db).await?;
@@ -1320,6 +1322,7 @@ mod schema_equivalence_lock_tests {
             "ensure_skin_governance",
             "ensure_data_rule_menu_alignment",
             "ensure_flow_designer_menu_visible",
+            "ensure_menu_del_flag_normalized",
             "ensure_flow_task_action_columns",
             "ensure_flow_graph_doc_table",
             "ensure_sms_cloud_columns",
@@ -1403,5 +1406,52 @@ mod rate_limit_guard_tests {
             !rate_limit_local_multi_instance_misconfigured(scheduler.replicas, rate_limit.mode()),
             "默认配置（单实例 + local）不得触发多实例限流告警"
         );
+    }
+}
+
+#[cfg(test)]
+mod menu_del_flag_normalize_tests {
+    use super::*;
+    use sea_orm::ConnectionTrait;
+
+    /// 批六十四：菜单软删标记归一（`del_flag='1'` → `'2'`）——可证伪回归锁。
+    ///
+    /// 语义：应用层 `delete_menu` 写 `'2'`、守卫以 `== "2"` 判定"已删"，而历史遗留
+    /// （m20261007_000011 批十四菜单卫生）写的是 `'1'`。归一后"已删"表示单值化，
+    /// 详情/删除守卫对历史软删行同样生效。任一处写反（归一值/WHERE 条件）即红。
+    #[tokio::test]
+    async fn normalizes_legacy_del_flag_one_to_two() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .expect("建库失败");
+        let backend = db.get_database_backend();
+
+        // 造一条 del_flag='1' 遗留行（迁移已归一为 '2'，此处回退模拟存量库遗留态）
+        db.execute_raw(Statement::from_string(
+            backend,
+            "UPDATE sys_menu SET del_flag = '1' WHERE menu_id = 4115".to_string(),
+        ))
+        .await
+        .expect("造数失败");
+
+        ensure_menu_del_flag_normalized(&db)
+            .await
+            .expect("归一失败");
+
+        let row = db
+            .query_one_raw(Statement::from_string(
+                backend,
+                "SELECT del_flag FROM sys_menu WHERE menu_id = 4115".to_string(),
+            ))
+            .await
+            .expect("查询失败")
+            .expect("行不存在");
+        let flag: String = row.try_get("", "del_flag").unwrap_or_default();
+        assert_eq!(flag, "2", "遗留 del_flag='1' 应归一为 '2'");
+
+        // 幂等：再跑一次不改变结果、不报错
+        ensure_menu_del_flag_normalized(&db)
+            .await
+            .expect("二次归一失败");
     }
 }

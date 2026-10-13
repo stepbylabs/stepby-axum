@@ -180,6 +180,11 @@ pub async fn error_log_clear(
 #[derive(Debug, Clone, Serialize, ToSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RedisStats {
+    /// 共享态存储档位（`redis` | `local`）——**服务端单点判定**下发，
+    /// 前端据此决定 Redis 专属指标是"展示数值"还是"不适用（—）"。
+    /// local 档无 Redis，uptime/memory/clients/hit 等字段恒空；此前前端把这些空值
+    /// 渲染成 `0s`/`0 B`/`0`（把"不适用"误呈现为"真实的 0"），本字段消除该误导。
+    pub store_kind: String,
     /// 进程运行秒数（uptime_in_seconds）
     pub uptime_seconds: String,
     /// 已连接客户端数（connected_clients）
@@ -233,6 +238,7 @@ pub async fn redis_stats(
             }
         }
         return Ok(AjaxResult::success(RedisStats {
+            store_kind: state.store.kind().to_string(),
             db_size: map.get("kv_entries").cloned().unwrap_or_default(),
             ..RedisStats::default()
         }));
@@ -258,6 +264,7 @@ pub async fn redis_stats(
         .unwrap_or_default();
 
     Ok(AjaxResult::success(RedisStats {
+        store_kind: state.store.kind().to_string(),
         uptime_seconds: get("uptime_in_seconds"),
         connected_clients: get("connected_clients"),
         used_memory_bytes: get("used_memory"),
