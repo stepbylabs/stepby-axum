@@ -222,6 +222,19 @@ impl DingTalkRobotProvider {
 mod tests {
     use super::*;
 
+    /// 本地 listener 用例专用客户端：显式 `.no_proxy()`。
+    ///
+    /// 环境若设置了 `HTTP_PROXY`/`HTTPS_PROXY`（企业代理 / 本机调试代理），reqwest 会把
+    /// 发往 `127.0.0.1` 的请求也交给代理，导致本地 listener 连接失败（CI 无代理不暴露此坑）。
+    /// 生产构造 `::new()` 仍**尊重**环境代理（企业出站可能需经代理），仅测试注入绕开。
+    fn local_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("reqwest Client 构建不变量")
+    }
+
     // ---------- 纯函数 ----------
 
     #[test]
@@ -319,10 +332,12 @@ mod tests {
             r#"{{"webhookUrl":"http://{addr}/cgi-bin/webhook/send?key=K1"}}"#
         )))
         .unwrap();
-        WeComRobotProvider::new()
-            .send(&cfg, "审批待办：e2e")
-            .await
-            .expect("企微机器人投递应成功");
+        WeComRobotProvider {
+            http: local_client(),
+        }
+        .send(&cfg, "审批待办：e2e")
+        .await
+        .expect("企微机器人投递应成功");
 
         let body_str = handle.join().unwrap();
         let body_json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
@@ -359,10 +374,12 @@ mod tests {
             r#"{{"webhookUrl":"http://{addr}/cgi-bin/webhook/send?key=BAD"}}"#
         )))
         .unwrap();
-        let err = WeComRobotProvider::new()
-            .send(&cfg, "x")
-            .await
-            .expect_err("errcode!=0 应 Err");
+        let err = WeComRobotProvider {
+            http: local_client(),
+        }
+        .send(&cfg, "x")
+        .await
+        .expect_err("errcode!=0 应 Err");
         assert!(err.contains("94000"), "应携带 errcode: {err}");
         drop(handle);
     }
@@ -400,10 +417,12 @@ mod tests {
             r#"{{"webhookUrl":"http://{addr}/robot/send?access_token=T1","secret":"SEC-TEST"}}"#
         )))
         .unwrap();
-        DingTalkRobotProvider::new()
-            .send(&cfg, "钉钉待办")
-            .await
-            .expect("钉钉加签投递应成功");
+        DingTalkRobotProvider {
+            http: local_client(),
+        }
+        .send(&cfg, "钉钉待办")
+        .await
+        .expect("钉钉加签投递应成功");
 
         let request_line = handle.join().unwrap();
         assert!(

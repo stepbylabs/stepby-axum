@@ -587,6 +587,19 @@ impl Default for TencentSmsProvider {
 mod tests {
     use super::*;
 
+    /// 本地 listener 用例专用客户端：显式 `.no_proxy()`。
+    ///
+    /// 环境若设置了 `HTTP_PROXY`/`HTTPS_PROXY`，reqwest 会把发往 `127.0.0.1` 的请求也交给
+    /// 代理，导致本地 listener 连接失败（CI 无代理不暴露此坑）。生产构造 `::new()` 仍**尊重**
+    /// 环境代理（企业出站可能需经代理），仅测试注入绕开。
+    fn local_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("reqwest Client 构建不变量")
+    }
+
     #[test]
     fn cloud_config_parse_fail_closed() {
         // 非 cloud 形态拒绝
@@ -669,7 +682,9 @@ mod tests {
             r#"{{"provider":"aliyun","endpoint":"http://{addr}","access_key_id":"testAK","access_key_secret":"testSK","sign_name":"测试签名"}}"#
         )))
         .unwrap();
-        let provider = AliyunSmsProvider::new();
+        let provider = AliyunSmsProvider {
+            http: local_client(),
+        };
         let biz = provider
             .send_templated(
                 &cfg,
@@ -761,7 +776,9 @@ mod tests {
             r#"{{"provider":"tencent","endpoint":"http://{addr}","access_key_id":"AKIDtest","access_key_secret":"testSK","sign_name":"测试签名","sdk_app_id":"1400000001","region":"ap-shanghai"}}"#
         )))
         .unwrap();
-        let provider = TencentSmsProvider::new();
+        let provider = TencentSmsProvider {
+            http: local_client(),
+        };
         let req_id = provider
             .send_templated(
                 &cfg,
@@ -895,7 +912,9 @@ mod tests {
             r#"{{"gateway_url":"http://{addr}/send","auth_header":"X-Api-Key","auth_value":"secret-key","phone_field":"mobile","content_field":"text"}}"#
         )))
         .unwrap();
-        let provider = GenericHttpProvider::new();
+        let provider = GenericHttpProvider {
+            http: local_client(),
+        };
         let result = provider.send(&cfg, "13800000000", "您好").await.unwrap();
         assert!(result.contains("HTTP 200"), "result={result}");
 
@@ -928,7 +947,9 @@ mod tests {
             r#"{{"gateway_url":"http://{addr}/send"}}"#
         )))
         .unwrap();
-        let provider = GenericHttpProvider::new();
+        let provider = GenericHttpProvider {
+            http: local_client(),
+        };
         let err = provider.send(&cfg, "138", "x").await.unwrap_err();
         assert!(err.contains("500"), "err={err}");
     }
