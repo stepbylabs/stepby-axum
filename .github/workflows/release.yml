@@ -59,8 +59,10 @@ jobs:
       - name: Build frontend dist (embedded assets)
         # NODE_OPTIONS 必须清空：Windows/受限环境下 safe-delete 守卫会因
         # NODE_OPTIONS 携带的参数触发失败（本地铁律 NODE_OPTIONS="" 唯一解）
+        # shell: bash——windows runner 默认 pwsh，rm -rf 非法（run 38339693376 实证）
         env:
           NODE_OPTIONS: ''
+        shell: bash
         run: |
           npm install -g pnpm
           cd stepby-vue
