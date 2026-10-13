@@ -23,16 +23,31 @@ use tower::ServiceExt;
 ///
 /// oper_log 由中间件 tokio::spawn 异步写入，需轮询等待以免竞态。
 async fn wait_operlog_by_url(ctx: &TestContext, expected_url: &str) -> i64 {
+    wait_operlog_by_url_n(ctx, expected_url, 1).await
+}
+
+/// 轮询等待该 URL 的操作日志落库；`expected_count` 为该 URL 应至少出现的记录数。
+/// CI 慢机下异步 spawn 写入延迟高（run 38334107821 实证：同 URL 两次 create
+/// 在第二次日志落库前轮询会重复取到第一条 ⇒ id1==id2），按条数等待保证确定性，
+/// 取**最大 operId**（list 按 operId 降序 ⇒ 首条即最新）。
+async fn wait_operlog_by_url_n(
+    ctx: &TestContext,
+    expected_url: &str,
+    expected_count: usize,
+) -> i64 {
     for _ in 0..50 {
         let v = ctx
             .get_json("/monitor/operlog/list?pageNum=1&pageSize=50")
             .await;
-        if let Some(rows) = v["rows"].as_array()
-            && let Some(r) = rows
+        if let Some(rows) = v["rows"].as_array() {
+            let ids: Vec<i64> = rows
                 .iter()
-                .find(|r| r["operUrl"].as_str() == Some(expected_url))
-        {
-            return r["operId"].as_i64().expect("operId 应为数字，实际: {r}");
+                .filter(|r| r["operUrl"].as_str() == Some(expected_url))
+                .filter_map(|r| r["operId"].as_i64())
+                .collect();
+            if ids.len() >= expected_count {
+                return ids.into_iter().max().expect("至少一条");
+            }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -444,7 +459,11 @@ async fn it_opl_archive_mode_exports_and_downloads() {
 
     let ctx = TestContext::new().await;
     let id1 = create_oper_log(&ctx).await;
-    let id2 = create_oper_log(&ctx).await;
+    // 第二次等待该 URL 计 2 条（确定性：CI 慢机异步写延迟下不重复取第一条）
+    let id2 = {
+        let _ = create_oper_log(&ctx).await;
+        wait_operlog_by_url_n(&ctx, "/system/notice", 2).await
+    };
     assert!(id1 < id2);
 
     // 直查两条 oper_time 取中点切点
