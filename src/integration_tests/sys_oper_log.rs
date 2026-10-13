@@ -635,11 +635,23 @@ async fn it_opl_archive_mode_exports_and_downloads() {
         anchors3.len() >= 3,
         "应至少含此前 2 锚点 + 散段首段（b1），实际: {anchors3:?}"
     );
-    let v = ctx.get_json("/monitor/operlog/verify-chain").await;
-    assert_eq!(
-        v["data"]["valid"].as_bool(),
-        Some(true),
-        "散段删除后 verify 应 valid（b2 幸存续接 + b4/b5... 新行），实际: {v}"
+    // 散段锚点由删除编排异步 spawn 落库——CI 慢机下首次 verify 可能早于
+    // 锚点落库（run 38345757375 实证 gapCount=3 即 3 锚未落库态），重试等待收敛：
+    // valid=true 即通过；超时后以最后一次结果断言失败（终态语义不变）。
+    let mut last = serde_json::Value::Null;
+    let mut valid = false;
+    for _ in 0..10 {
+        let v = ctx.get_json("/monitor/operlog/verify-chain").await;
+        valid = v["data"]["valid"].as_bool() == Some(true);
+        last = v;
+        if valid {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        valid,
+        "散段删除后 verify 应 valid（b2 幸存续接 + b4/b5... 新行），实际: {last}"
     );
 }
 
