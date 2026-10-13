@@ -37,9 +37,10 @@
        config:def:* 为 TTL 300s 平台默认缓存层、读时重建；sso:v4_legacy_at_migrated
        为幂等 SETNX 标记、自愈）——内容随运行演进，只计数不比对。
 
-待拍板项（PENDING，不计失败，输出醒目提示）：
-    P1 sys.account.captchaEnabled：种子 true（RuoYi 上游默认）vs 运行态 false
-       （e2e 便利态）——产品默认值决策待福哥拍板（b56 留档）。
+    K5 有意运行态覆写（informational，不计失败）：运行时**可编辑**的配置键（config_type='Y'），
+       种子给出的是生产安全默认，本地/e2e 运行库有意覆写为便利值——差异是设计使然。
+       当前登记 1 项：sys.account.captchaEnabled（种子 true = 安全默认 vs 运行库 false = e2e 便利态，
+       决策见 2026-10-13 批次：种子保持 true，e2e 侧显式维持 false）。
 
 退出码：0 = 无漂移（informational/PENDING 不计）；1 = 存在真实漂移；2 = 用法/IO 错误。
 依赖：仅 Python 标准库（sqlite3）。
@@ -104,8 +105,13 @@ DECORATIVE_MENU_DIFFS = {
     4117: {"remark"},
 }
 
-# P1：待拍板项 {(table, key0, col)}（不失败，输出 PENDING 提示）
-PENDING_ITEMS = {
+# K5：有意运行态覆写（informational）——{(table, key0, col)}。
+# 这些键是**运行时可编辑**的配置（config_type='Y'），种子给出的是**生产安全默认**，
+# 本地/e2e 运行库有意覆写为便利值；差异是设计使然，非漂移、亦非待拍板。
+#   sys.account.captchaEnabled：种子 `true`（RuoYi 上游默认 = 企业级安全默认，防撞库）
+#     vs 运行库 `false`（e2e 用例卫生 `restoreCaptchaDisabled()` 主动维持的便利态）。
+#     决策（2026-10-13）：**种子保持 true**（新装/生产默认开启验证码），e2e 侧显式维持 false。
+INTENTIONAL_OVERRIDES = {
     ("sys_config", "sys.account.captchaEnabled", "config_value"),
 }
 
@@ -182,9 +188,9 @@ def classify(table, key, col, seed_val, live_val):
     if table == "sys_menu" and key:
         if k0 in DECORATIVE_MENU_DIFFS and col in DECORATIVE_MENU_DIFFS[k0]:
             return "benign"
-    # P1 待拍板
-    if (table, k0, col) in PENDING_ITEMS:
-        return "pending"
+    # K5 有意运行态覆写（种子=生产安全默认，运行库有意覆写；非漂移）
+    if (table, k0, col) in INTENTIONAL_OVERRIDES:
+        return "benign"
     return "drift"
 
 
