@@ -513,6 +513,15 @@ rp_id = ""               # 留空 ⇒ 从 [server].cors_origins 首个来源的 
 rp_name = "Stepby"        # 浏览器 passkey 提示中展示的依赖方名称
 origin = ""              # 留空 ⇒ 取 [server].cors_origins 首个来源
 state_ttl_secs = 300     # 挑战 / 会话临时态 TTL（秒，至少 1）
+#
+# ⚠️ origin 是 WebAuthn 的**信任锚**，必须等于**前端页面的真实服务源**（含 scheme + host + 端口）。
+#    它决定浏览器 clientDataJSON.origin 的比对基准；不一致 ⇒ register/finish 一律 400
+#    「WebAuthn 响应无效」（服务端会打 WARN 记录期望/实到来源，见 map_passkey_error）。
+#    典型陷阱：SPA 由后端同源托管（如 E2E 的 :8080），而 cors_origins 首个来源是 Vite dev
+#    源（:5173）⇒ 推导出的 origin 与页面源不符。此时**显式**配置 origin，或用环境变量覆盖。
+# ⚠️ 容器/CI/E2E 可用环境变量覆盖（无需改本文件）：
+#      WEBAUTHN_ORIGIN=http://localhost:8080   # 显式非空才覆盖；空白忽略（fail-safe）
+#      WEBAUTHN_RP_ID=localhost                # 同上
 
 # ==================== 出站韧性（熔断） ====================
 # #10：`[acme]` 与 `[events]` 都是 fire-and-forget POST。目标端点下线时，**每个事件**都会

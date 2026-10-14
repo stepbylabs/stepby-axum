@@ -2616,7 +2616,8 @@ impl Settings {
     ///
     /// 覆盖项：DATABASE_URL / REDIS_URL / JWT_SECRET / JWT_EXPIRE_HOURS /
     /// SERVER_HOST / SERVER_PORT / CORS_ORIGINS（可选，逗号分隔）/
-    /// MAIL_PASSWORD / CONFIG_ENC_KEY
+    /// MAIL_PASSWORD / CONFIG_ENC_KEY / …（另见下方 SCIM_* / PAT_* /
+    /// WEBAUTHN_ORIGIN / WEBAUTHN_RP_ID 等）
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("DATABASE_URL") {
             self.database.url = v;
@@ -2785,6 +2786,25 @@ impl Settings {
             && n > 0
         {
             self.pat.max_per_user = n;
+        }
+        // WebAuthn 信任锚（WEBAUTHN_ORIGIN / WEBAUTHN_RP_ID）：容器/CI/E2E 场景自含注入，
+        // 无需改（且不得改）gitignore 的本机 config.toml。
+        //
+        // ⚠️ origin 必须是**前端页面的真实服务源**（WebAuthn 的信任锚）。E2E 由后端在
+        //    :8080 同源托管 SPA，而 [server].cors_origins 首个来源通常是 Vite dev 源
+        //    （:5173）——若 origin 仍从 cors_origins 推导，浏览器 clientDataJSON.origin
+        //    （:8080）与配置 origin（:5173）不一致，register/finish 必 400「响应无效」。
+        //    本覆盖让 CI 用 WEBAUTHN_ORIGIN 显式对齐服务源，消除该环境陷阱。
+        // 仅当显式非空时覆盖；空串忽略（保持配置文件 / 推导语义，fail-safe 不静默失效）。
+        if let Ok(v) = std::env::var("WEBAUTHN_ORIGIN")
+            && !v.trim().is_empty()
+        {
+            self.webauthn.origin = v;
+        }
+        if let Ok(v) = std::env::var("WEBAUTHN_RP_ID")
+            && !v.trim().is_empty()
+        {
+            self.webauthn.rp_id = v;
         }
     }
 
@@ -3772,5 +3792,60 @@ mod tests {
         let mut s5 = make_test_settings();
         s5.jwt.secret = "example_secret_key_012345678901234567890".to_string();
         assert!(s5.validate_secrets().is_err(), "example 弱模式应被拒绝");
+    }
+
+    /// WEBAUTHN_ORIGIN / WEBAUTHN_RP_ID 环境覆盖（容器/CI/E2E 自含，无需改 gitignore 的本机配置）。
+    ///
+    /// 可证伪：① 显式非空 ⇒ 覆盖文件值；② 空白/空串 ⇒ **忽略**（fail-safe，不把信任锚清空
+    /// 致请求期 503）。环境变量为进程级——本仓**仅本用例**读写 `WEBAUTHN_*`，且断言前后
+    /// 成对存取还原，无跨用例竞争（与既有 SCIM_* 集成测试同纪律）。
+    #[test]
+    fn test_webauthn_env_override() {
+        let old_origin = std::env::var("WEBAUTHN_ORIGIN").ok();
+        let old_rp_id = std::env::var("WEBAUTHN_RP_ID").ok();
+
+        let mut s = make_test_settings();
+        s.webauthn.origin = "http://from-file.example".to_string();
+        s.webauthn.rp_id = "from-file.example".to_string();
+
+        // ① 显式非空 ⇒ 覆盖
+        // SAFETY: 单测内成对设置/还原；仅本用例读写该两变量。
+        unsafe {
+            std::env::set_var("WEBAUTHN_ORIGIN", "http://localhost:8080");
+            std::env::set_var("WEBAUTHN_RP_ID", "localhost");
+        }
+        s.apply_env_overrides();
+        assert_eq!(
+            s.webauthn.origin, "http://localhost:8080",
+            "显式 origin 应覆盖文件值"
+        );
+        assert_eq!(s.webauthn.rp_id, "localhost", "显式 rp_id 应覆盖文件值");
+
+        // ② 空白/空串 ⇒ 忽略（保持上次值，不静默清空信任锚）
+        unsafe {
+            std::env::set_var("WEBAUTHN_ORIGIN", "   ");
+            std::env::set_var("WEBAUTHN_RP_ID", "");
+        }
+        s.apply_env_overrides();
+        assert_eq!(
+            s.webauthn.origin, "http://localhost:8080",
+            "空白 origin 应忽略（保持上次值）"
+        );
+        assert_eq!(
+            s.webauthn.rp_id, "localhost",
+            "空 rp_id 应忽略（保持上次值）"
+        );
+
+        // 还原进程环境
+        unsafe {
+            match old_origin {
+                Some(v) => std::env::set_var("WEBAUTHN_ORIGIN", v),
+                None => std::env::remove_var("WEBAUTHN_ORIGIN"),
+            }
+            match old_rp_id {
+                Some(v) => std::env::set_var("WEBAUTHN_RP_ID", v),
+                None => std::env::remove_var("WEBAUTHN_RP_ID"),
+            }
+        }
     }
 }

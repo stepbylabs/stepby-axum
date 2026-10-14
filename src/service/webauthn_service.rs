@@ -680,11 +680,30 @@ fn map_passkey_error(e: PasskeyError) -> ServiceError {
         PasskeyError::PasskeyNotFound => {
             ServiceError::not_found(&crate::tr!("error.webauthn.credential_not_found"))
         }
+        // 来源失配（WebAuthn 信任锚不一致）——**可运维诊断的关键分支**：
+        // 浏览器 clientDataJSON.origin 与配置 origin 不符即到此（典型成因：E2E 由后端在
+        // :8080 同源托管 SPA，而 [webauthn].origin 从 cors_origins 推导成了 Vite dev 源
+        // :5173）。响应仍统一为 400「响应无效」（不向客户端泄露信任锚），但**服务端必须留痕**
+        // 期望/实到来源 + 处置指引，否则运维只能看到无语境的 400（历史误判为"算法缺陷"即此因）。
+        PasskeyError::OriginMismatch { expected, got } => {
+            tracing::warn!(
+                expected = %expected,
+                got = %got,
+                "WebAuthn 来源失配：配置 origin 与页面服务源不一致 —— 请核对 [webauthn].origin / \
+                 环境变量 WEBAUTHN_ORIGIN 是否等于前端页面真实来源"
+            );
+            ServiceError::bad_request(&crate::tr!("error.webauthn.invalid_response"))
+        }
         PasskeyError::DatabaseError(_) | PasskeyError::InternalError(_) => {
             tracing::error!(error = %e, "WebAuthn 内部错误");
             ServiceError::internal(&crate::tr!("error.webauthn.internal"))
         }
-        _ => ServiceError::bad_request(&crate::tr!("error.webauthn.invalid_response")),
+        // 其余校验类失败（挑战失配 / rp_id 哈希 / 签名 / 操作类型…）统一 400；
+        // 留一条 DEBUG 级上下文便于本地排障（响应不泄露细节）。
+        other => {
+            tracing::debug!(error = %other, "WebAuthn 响应校验失败（返回统一 400）");
+            ServiceError::bad_request(&crate::tr!("error.webauthn.invalid_response"))
+        }
     }
 }
 
@@ -700,5 +719,58 @@ fn map_login_finish_error(e: PasskeyError) -> ServiceError {
             ServiceError::internal(&crate::tr!("error.webauthn.internal"))
         }
         _ => login_failed(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `map_passkey_error` 契约锁（可证伪）——重点是**来源失配**这一最易误判的分支。
+    ///
+    /// 背景：E2E 由后端在 :8080 同源托管 SPA，而 `[webauthn].origin` 若从 `cors_origins`
+    /// 推导成了 Vite dev 源（:5173），浏览器 clientDataJSON.origin（:8080）与配置不符 ⇒
+    /// 库返回 `OriginMismatch`。历史因该分支落入 `_` 兜底且**无日志**，被误判为
+    /// "算法缺陷（缺 RS256）"。本测试钉死：来源失配 ⇒ 统一 400（不泄露信任锚），
+    /// 且不会被误判为 500/401。
+    #[test]
+    fn origin_mismatch_maps_to_uniform_400() {
+        let e = map_passkey_error(PasskeyError::OriginMismatch {
+            expected: "http://localhost:5173".to_string(),
+            got: "http://localhost:8080".to_string(),
+        });
+        assert_eq!(e.code, 400, "来源失配应返回统一 400（不泄露信任锚）");
+    }
+
+    /// 其余校验类失败（挑战失配 / rp_id 哈希 / 签名 / 操作类型）同样统一 400。
+    #[test]
+    fn other_validation_failures_map_to_400() {
+        for e in [
+            PasskeyError::InvalidChallenge,
+            PasskeyError::RpIdHashMismatch,
+            PasskeyError::InvalidOperationType,
+            PasskeyError::InvalidSignature("bad".to_string()),
+            PasskeyError::UserPresentFlagNotSet,
+        ] {
+            assert_eq!(map_passkey_error(e).code, 400);
+        }
+    }
+
+    /// 会话过期 ⇒ 400；凭据不存在 ⇒ 404；内部错误 ⇒ 500（错误分级不回归）。
+    #[test]
+    fn error_grading_is_stable() {
+        assert_eq!(
+            map_passkey_error(PasskeyError::RegistrationSessionExpired).code,
+            400
+        );
+        assert_eq!(
+            map_passkey_error(PasskeyError::LoginSessionExpired).code,
+            400
+        );
+        assert_eq!(map_passkey_error(PasskeyError::PasskeyNotFound).code, 404);
+        assert_eq!(
+            map_passkey_error(PasskeyError::InternalError("x".to_string())).code,
+            500
+        );
     }
 }
