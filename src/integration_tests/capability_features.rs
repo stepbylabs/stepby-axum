@@ -304,7 +304,7 @@ async fn test_convergence_revokes_ungrantable_even_without_menu_whitelist() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_ui_entry_flags_are_delivered_and_follow_capability() {
     // ---------- ① 默认姿态：能力位全 off、[ui] 默认（auto / off） ----------
-    let ctx = TestContext::new().await;
+    let ctx = TestContext::new_with(&[("auth.webauthn", "off")], |_| {}).await;
     let info = ctx.get_json("/getInfo").await;
     assert!(
         info["showTenantColumn"].is_boolean(),

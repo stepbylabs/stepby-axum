@@ -125,8 +125,10 @@ async fn insert_credential(ctx: &TestContext, user_id: i64, credential_id: &str)
 /// ① 能力位 off（默认）⇒ 6 条端点全部 404
 #[tokio::test]
 async fn test_webauthn_feature_off_returns_404_on_all_endpoints() {
-    // 默认能力集（平台层未注入任何覆盖）= 全 off = 现状
-    let ctx = TestContext::new().await;
+    // 批六十四质量工程：显式钳 off——用例语义是"关闭态 404"，不得依赖部署态
+    // config.toml（e2e 激活 passkeys 后该文件 features 开启，TestContext::new()
+    // 读部署态导致 on 泄漏实证）。对齐批六十一"前置必须自含"纪律。
+    let ctx = TestContext::new_with(&[(FEATURE, "off")], |_| {}).await;
 
     let self_routes = [
         (
