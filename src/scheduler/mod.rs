@@ -1165,7 +1165,7 @@ impl ExecutingFlagGuard {
     /// - `enforce_concurrent`: 是否强制并发禁止（concurrent='1' 时为 true）
     ///
     /// 返回：
-    /// - `Some(guard)`: 获取执行权成功（已标记 executing_jobs[job_id]=true）
+    /// - `Some(guard)`: 获取执行权成功（已标记 `executing_jobs[job_id]=true`）
     /// - `None`: 已有任务在执行中（仅 enforce_concurrent=true 时返回）
     fn try_acquire(
         flags: Arc<std::sync::Mutex<HashMap<i64, bool>>>,

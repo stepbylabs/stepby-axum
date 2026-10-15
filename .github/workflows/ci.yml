@@ -87,6 +87,11 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Doc check (deny rustdoc warnings)
+        # b70：intra-doc 断链 / 未闭合 HTML 标签 / 公有文档链私有项共 107 条历史存量
+        # 清零后设常驻门禁——文档面与代码面同一质量基线（开源项目文档即交付物）。
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
+
       - name: Test (SQLite in-memory)
         run: cargo test --workspace
         env:

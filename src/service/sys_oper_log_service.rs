@@ -234,10 +234,10 @@ pub struct OperLogQueryDto {
     pub business_type: Option<i32>,
     pub oper_name: Option<String>,
     pub status: Option<String>,
-    /// 开始时间（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 开始时间（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 结束时间（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
     /// 游标（keyset 深分页）：上一页最后一条 oper_id。存在时启用深分页（PK < last_id），
@@ -602,7 +602,7 @@ impl SysOperLogService {
             .await
     }
 
-    /// 按时间范围清理操作日志（物理删除 [begin, end] 区间的日志，边界含端点）
+    /// 按时间范围清理操作日志（物理删除 `[begin, end]` 区间的日志，边界含端点）
     ///
     /// 供 `DELETE /monitor/operlog/clean?params[beginTime]=&params[endTime]=` 使用：
     /// 传入 `begin_time` / `end_time`（`%Y-%m-%d`）显式清理指定时间段的日志。

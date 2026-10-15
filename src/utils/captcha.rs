@@ -23,7 +23,7 @@ pub struct CaptchaResult {
 /// - captcha 1.0 关键变化：
 ///   - add_chars(n) 返回 &mut Self（不再返回 String），通过 chars_as_string() 获取明文
 ///   - view(w, h) 需要指定宽高
-///   - as_base64() 直接返回 Option<String>（无需手动 base64 编码）
+///   - as_base64() 直接返回 `Option<String>`（无需手动 base64 编码）
 ///   - Noise::new(strength) 需要强度参数
 ///
 /// 已知 bug 修复：captcha 1.0 的 `add_char()` 在字体不支持某字符的 PNG 时静默跳过

@@ -1001,7 +1001,7 @@ impl SysFlowService {
 
     /// 提交**图驱动**单据（批次十六）：任一**已发布**流程定义（`is_latest='1'` +
     /// `status='1'`）都可作为审批流——提交时静态路由成线性链，字段快照冻结进单据
-    /// （推进时由 [`biz_type::graph_chain`] 重放同路径，确定性）。
+    /// （推进时由 `biz_type::graph_chain` 重放同路径，确定性）。
     ///
     /// 与 `submit_demo` 的差异：审批链不再来自 `demo_nodes` 硬编码，而来自设计器
     /// 画的图（G-02 M3 的"按图推进"闭环）；条件边按 `fields` 求值（fail-closed）。

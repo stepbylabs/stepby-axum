@@ -7,7 +7,7 @@
 //!
 //! 错误模型：SCIM 使用 RFC 7644 自有错误 JSON（status/detail），**不走全局 AppError**——
 //! 所有失败都直接构造为 HTTP Response 返回，因此 handler 返回 `Response` 而非
-//! `Result<Response, AppError>`（编译修复：Response 无法 Into<AppError>）。
+//! `Result<Response, AppError>`（编译修复：Response 无法 `Into<AppError>`）。
 
 use axum::Json;
 use axum::extract::{Path, Query, State};

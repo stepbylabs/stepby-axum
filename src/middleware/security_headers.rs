@@ -28,7 +28,7 @@ fn is_swagger_path(uri: &Uri) -> bool {
     path == "/swagger-ui" || path == "/swagger-ui/index.html"
 }
 
-/// 判断请求路径是否为带 hash 的静态资源（/static/js/xxx-[hash].js、/static/css/xxx-[hash].css）
+/// 判断请求路径是否为带 hash 的静态资源（`/static/js/xxx-[hash].js`、`/static/css/xxx-[hash].css`）
 /// 这类资源使用内容 hash 命名，可长期缓存以提升性能
 fn is_hashed_static_asset(uri: &Uri) -> bool {
     let path = uri.path();

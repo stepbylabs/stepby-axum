@@ -371,7 +371,7 @@ impl SysFrontendErrorService {
         Ok(result.rows_affected)
     }
 
-    /// 按时间范围清理（物理删除 [begin, end] 区间，任一侧可为空）
+    /// 按时间范围清理（物理删除 `[begin, end]` 区间，任一侧可为空）
     ///
     /// 多租户：`tenant_scope = Some(tid)` → 仅清理本租户记录；`None`（平台）→ 全量。
     pub async fn clean_by_range(

@@ -1,7 +1,7 @@
 //! ts-rs TypeScript 绑定导出的**独立触发入口**（无需运行整套 `cargo test`）。
 //!
 //! 用法（二选一）：
-//!   cargo ts                        # 见 .cargo/config.toml 的 [alias]
+//!   cargo ts                        # 见 .cargo/config.toml 的 `[alias]`
 //!   cargo run --bin export_ts
 //!
 //! 输出目录由 `.cargo/config.toml` 的 `[env] TS_RS_EXPORT_DIR` 提供，

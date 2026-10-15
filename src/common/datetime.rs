@@ -105,7 +105,7 @@ where
     parse_flexible(&s).map_err(serde::de::Error::custom)
 }
 
-/// 序列化 Option<NaiveDateTime>，None 输出为 null
+/// 序列化 `Option<NaiveDateTime>`，None 输出为 null
 pub fn serialize_opt<S>(dt: &Option<NaiveDateTime>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -116,7 +116,7 @@ where
     }
 }
 
-/// 反序列化 Option<NaiveDateTime>，支持 null/空字符串/有效日期
+/// 反序列化 `Option<NaiveDateTime>`，支持 null/空字符串/有效日期
 pub fn deserialize_opt<'de, D>(deserializer: D) -> Result<Option<NaiveDateTime>, D::Error>
 where
     D: Deserializer<'de>,

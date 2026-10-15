@@ -145,7 +145,7 @@ impl SysUserRepository {
 
     /// 批量查询 user_id → tenant_id（**不过滤软删**）
     ///
-    /// 与 [`find_tenant_ids_by_user_ids`] 的区别：本方法不过滤 `del_flag`，
+    /// 与 `find_tenant_ids_by_user_ids` 的区别：本方法不过滤 `del_flag`，
     /// 供批量删除前「租户归属收敛」校验使用（对齐旧逐条 `find_by_id` 的语义，
     /// 即便目标是已软删行也须校验归属）。
     pub async fn tenant_ids_by_user_ids(&self, user_ids: &[i64]) -> Result<Vec<(i64, i64)>, DbErr> {

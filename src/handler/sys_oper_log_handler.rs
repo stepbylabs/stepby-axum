@@ -98,7 +98,7 @@ pub async fn remove(
 /// 操作日志清理保留最近 N 天（仅删除早于该天数的日志，保证审计合规）
 const OPER_LOG_CLEAN_RETAIN_DAYS: i64 = 30;
 
-/// 操作日志清理查询参数（兼容前端 addDateRange 嵌套格式 params[beginTime]/params[endTime]）
+/// 操作日志清理查询参数（兼容前端 addDateRange 嵌套格式 `params[beginTime]`/`params[endTime]`）
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct OperLogCleanQuery {
@@ -115,7 +115,7 @@ pub struct OperLogCleanQuery {
 ///
 /// - 不传时间参数：仅删除 OPER_LOG_CLEAN_RETAIN_DAYS（30）天前的日志，保留最近同天数用于审计
 ///   （修复 P0-R81-010：原端点物理删除全部日志，违反审计合规）。
-/// - 传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`）：按时间范围清理 [begin, end] 区间日志。
+/// - 传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`）：按时间范围清理 `[begin, end]` 区间日志。
 #[utoipa::path(
     delete,
     path = "/monitor/operlog/clean",

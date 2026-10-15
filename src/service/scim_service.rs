@@ -13,7 +13,7 @@
 //!   不物理删——审计与外键引用保留，与 sys_user 软删规范一致。
 //!
 //! 字段映射：userName ↔ user_name（关联键，IdP 保证唯一）；displayName ↔
-//! nick_name；emails[0].value ↔ email；active ↔ status('0'/'1')。
+//! nick_name；`emails[0].value` ↔ email；active ↔ `status('0'/'1')`。
 //! externalId 不落库：IdP 侧以 userName 关联（避免为单一集成加列）。
 
 use crate::entity::sys_user;
@@ -90,7 +90,7 @@ impl ScimError {
     }
 }
 
-/// v5-D12 Group：实现 std Error（SeaORM `transaction` 泛型约束 E: Error + From<DbErr>，
+/// v5-D12 Group：实现 std Error（SeaORM `transaction` 泛型约束 `E: Error + From<DbErr>`，
 /// 使 SCIM 事务闭包可直接以 ScimError 为错误类型）
 impl std::fmt::Display for ScimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

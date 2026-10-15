@@ -4,7 +4,7 @@
 //! 职责：
 //! - 告警规则 CRUD（metric / comparator 白名单校验）
 //! - 指标采集（真实数据源，见 [`SysAlertService::metric_value`] 逐项说明）
-//! - 评估引擎 [`evaluate_all`]：遍历启用规则 → 取指标 → 比较 → 静默期判定 →
+//! - 评估引擎 `evaluate_all`：遍历启用规则 → 取指标 → 比较 → 静默期判定 →
 //!   抢占触发权 → 消息中心发送 → 记录 last_fired_at
 //!   （存量库表结构兜底由 `initialize/mod.rs::ensure_alert_rule_tables` 负责，
 //!   单一事实源为迁移 `m20261003_000003_alert_rule`，本层不再重复持有 DDL）

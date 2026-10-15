@@ -285,10 +285,10 @@ pub struct WebHookLogQueryDto {
     pub event_type: Option<String>,
     /// 0=成功 1=失败
     pub status: Option<String>,
-    /// 创建时间范围-起（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 创建时间范围-起（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 创建时间范围-止（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 创建时间范围-止（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
 }
@@ -1636,7 +1636,7 @@ impl SysWebHookService {
     /// 事件目录停用/启用（system:webhook:event:edit）
     ///
     /// 语义边界：`enabled = '0'` 仅下架目录展示并拒绝新订阅
-    /// （[`Self::validate_subscribed_events`]）与测试发送（[`Self::test_send`]）；
+    /// （`Self::validate_subscribed_events`）与测试发送（[`Self::test_send`]）；
     /// 事件派发（emit_event）以 hook 订阅关系为准、不查目录 enabled——
     /// 存量 hook 不因目录停用而中断。
     pub async fn change_event_enabled(&self, id: i64, enabled: &str) -> Result<(), ServiceError> {
@@ -1790,7 +1790,7 @@ fn truncate_utf8(s: &str, cap: usize) -> String {
 /// - `tenant_id`：事件所属租户（P0 跨租户泄漏修复新增，**必传且严禁硬编码 0**）。
 ///   调用点从操作者上下文（`Operator::tenant_id()` / 登录主机租户）或事件主体
 ///   租户（payload 内 `tenantId`，两者应一致）取得；启用回调**仅匹配同租户**
-///   （与 [`SysWebHookService::dispatch_event`] 共用 [`filter_groups_by_tenant`]，
+///   （与 [`SysWebHookService::dispatch_event`] 共用 `filter_groups_by_tenant`，
 ///   严格同口径），A 租户事件不会推给 B 租户回调。
 ///
 /// 行为：查启用回调 → 同租户过滤 → `subscribed_events` 过滤（空/NULL = 订阅全部，

@@ -22,7 +22,7 @@
 //! - [`RedisStore::revoke_all_for_user`]：`service/sso_service.rs:2510-2572`
 //!   `revoke_user_sso_tokens` 语义（SMEMBERS 两个集合 + EXISTS 悬空自愈 +
 //!   逐键删除绑定与 online + DEL 整个索引键），返回真实吊销数。
-//! - [`RedisStore::set_add`] / [`set_rem`] / [`set_members`]：SADD+EXPIRE /
+//! - [`RedisStore::set_add`] / [`SharedStore::set_rem`] / [`SharedStore::set_members`]：SADD+EXPIRE /
 //!   SREM / SMEMBERS（原 sso_service 签发点与吊销点的裸命令收敛进 trait）。
 //!
 //! # S1 双写（本档关键新语义，v5.1 方案）
@@ -43,8 +43,8 @@ use crate::shared_store::{AuthGate, LockHandle, SharedStore, StoreError};
 
 /// 强退/踢线三键 Lua（原样复制自 `handler/monitor_online_handler.rs:44-49` FORCE_LOGOUT_SCRIPT）
 ///
-/// KEYS[1] = blacklist:{token_hash}, KEYS[2] = online:{token_hash},
-/// KEYS[3] = sso:at:{token_hash}（平台会话无该 key，DEL no-op 无害）；ARGV[1] = 黑名单 TTL
+/// `KEYS[1]` = blacklist:{token_hash}, `KEYS[2]` = online:{token_hash},
+/// `KEYS[3]` = sso:at:{token_hash}（平台会话无该 key，DEL no-op 无害）；`ARGV[1]` = 黑名单 TTL
 const FORCE_LOGOUT_SCRIPT: &str = r#"
 redis.call("SETEX", KEYS[1], ARGV[1], "1")
 redis.call("DEL", KEYS[2])

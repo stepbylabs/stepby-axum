@@ -24,7 +24,7 @@
 //! # 键族语义对照
 //! - `sso:user_at:{uid}` / `sso:user_rt:{uid}` / `sso:sess:{uid}`：local 档无 Set 类型
 //!   → 以 **JSON 数组字符串** 存于 `sys_shared_kv`（读改写封装在本文件
-//!   [`LocalStore::set_add`] / [`set_rem`] / [`set_members`]，与 Redis 档 SMEMBERS 语义对齐）；
+//!   [`LocalStore::set_add`] / [`SharedStore::set_rem`] / [`SharedStore::set_members`]，与 Redis 档 SMEMBERS 语义对齐）；
 //! - `blacklist:{hash}` / `sso:at:{hash}` 的阻断语义统一由 `sys_token_revocation` 承载
 //!   （source 归类，见 [`LocalStore::auth_gate_check`]）；
 //! - `tenant:state:{tid}` / `tenant:exp:{tid}` 由 `sys_tenant` 现场投影求值

@@ -5,7 +5,7 @@
 //! 依赖方向：Handler → Service → Repository → SeaORM
 //!
 //! 模块组织：
-//! - base.rs: 通用 BaseRepository<E> 泛型基类
+//! - base.rs: 通用 `BaseRepository<E>` 泛型基类
 //! - sys_*.rs: 各实体专用 Repository，扩展 BaseRepository 并添加实体特有查询
 
 pub mod base;

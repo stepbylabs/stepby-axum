@@ -325,7 +325,7 @@ impl SysOperLogRepository {
         SysOperLog::delete_many().filter(cond).exec(conn).await
     }
 
-    /// 按时间范围删除操作日志（物理删除 [begin, end] 区间的日志，边界含端点）
+    /// 按时间范围删除操作日志（物理删除 `[begin, end]` 区间的日志，边界含端点）
     ///
     /// `begin` / `end` 均可为空：为空表示该侧不设边界（例如仅清理早于 `end` 的日志）。
     /// 供操作日志「按时间范围清理」接口（`DELETE /monitor/operlog/clean?params[beginTime]=&params[endTime]=`）使用。

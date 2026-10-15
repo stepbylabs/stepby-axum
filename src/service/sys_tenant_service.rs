@@ -2096,7 +2096,7 @@ impl SysTenantService {
     /// （窗口截止于该租户下次登录闸门重写或管理员变更）。本函数在启动时从 `sys_tenant`
     /// 表全量重建投影键，**消除该窗口**（local 档直接查库求值，天然不受影响，无需调用）。
     ///
-    /// 逐租户复用 [`Self::sync_runtime_keys`]（状态/宽限/到期映射单点），幂等可重入；
+    /// 逐租户复用 `Self::sync_runtime_keys`（状态/宽限/到期映射单点），幂等可重入；
     /// 单键写入失败仅 warn 不中断（与 sync 既有口径一致），返回处理的租户数。
     pub async fn rebuild_all_runtime_keys(&self) -> u64 {
         use sea_orm::{ConnectionTrait, Statement};

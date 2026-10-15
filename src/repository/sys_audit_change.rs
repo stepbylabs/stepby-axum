@@ -59,7 +59,7 @@ impl SysAuditChangeRepository {
     /// 多条件分页查询
     ///
     /// 过滤：table_name / row_pk / action 精确，operator_name 模糊（含转义），
-    /// 时间范围 [begin, end] 闭区间；`tenant_scope = Some(tid)` 时仅返回本租户记录。
+    /// 时间范围 `[begin, end]` 闭区间；`tenant_scope = Some(tid)` 时仅返回本租户记录。
     ///
     /// `sort`：动态排序（白名单已在 service 层解析）；None 回退默认 operated_at DESC。
     #[allow(clippy::too_many_arguments)]

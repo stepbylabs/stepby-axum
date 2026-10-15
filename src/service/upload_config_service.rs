@@ -7,7 +7,7 @@
 //!
 //! 生效边界（第一档：**凭据/参数动态化，backend 档位重启生效**）：
 //! - `config.toml [upload].backend = "s3"` 且运行时覆盖齐全时，上传/删除链路
-//!   经 [`Self::resolve_s3_backend`] 按运行时配置构建（指纹缓存复用）；
+//!   经 `Self::resolve_s3_backend` 按运行时配置构建（指纹缓存复用）；
 //! - `backend = "local"` 无凭据概念，不受影响；
 //! - 档位本身（local ↔ s3）仍以 config.toml 为准（重启生效）——档位切换属
 //!   低频运维动作，不为此引入热切换复杂度（第二档 ArcSwap 另行评估）。

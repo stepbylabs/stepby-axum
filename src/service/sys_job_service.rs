@@ -2,7 +2,7 @@
 //! 定时任务 Service 层
 //!
 //! 职责：CRUD 业务逻辑 + 调度器委托（启停/执行）
-//! 依赖：SysJobRepository + SysJobLogRepository + Arc<JobScheduler>
+//! 依赖：SysJobRepository + SysJobLogRepository + `Arc<JobScheduler>`
 //! 约束：不依赖 axum / tower / tower-http
 
 use std::sync::Arc;
@@ -186,10 +186,10 @@ pub struct JobLogQueryDto {
     pub job_name: Option<String>,
     pub job_group: Option<String>,
     pub status: Option<String>,
-    /// 开始时间（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 开始时间（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 结束时间（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
 }

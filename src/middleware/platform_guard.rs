@@ -98,7 +98,7 @@ fn tenant_visible_feature(method: &Method, path: &str) -> Option<(&'static str, 
 }
 
 /// 平台专属接口守卫：仅 `tid == 0`（平台操作者）放行，其余（含租户管理员）403；
-/// **但**命中 [`TENANT_VISIBLE_ROUTES`] 且对应平台层能力位**达到所需档位**时放行租户操作者。
+/// **但**命中 `TENANT_VISIBLE_ROUTES` 且对应平台层能力位**达到所需档位**时放行租户操作者。
 ///
 /// 仅用于 `/monitor/cache/*`、`/tool/gen/*`、`/system/backup/*` 等平台专属路由；挂载方式：
 /// `.route_layer(axum::middleware::from_fn(platform_only_guard))`

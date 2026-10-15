@@ -264,7 +264,7 @@ pub async fn try_acquire_redis(
 /// 全局限流中间件
 ///
 /// 流程：
-/// 1. 从请求扩展中提取 ConnectInfo<SocketAddr>，获取客户端 IP
+/// 1. 从请求扩展中提取 `ConnectInfo<SocketAddr>`，获取客户端 IP
 /// 2. 复用 auth_handler::extract_client_ip 的可信代理白名单逻辑提取真实客户端 IP
 ///    （trusted_proxies 为空时仅信任直连 IP，不信任 XFF，防止伪造绕过限流）
 /// 3. 从请求扩展中提取 `Claims.tid` 作为租户维度（无 claims → 0，平台维度兜底）

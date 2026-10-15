@@ -4,9 +4,9 @@
 //! 聚合运营可观测能力，全部为**进程内真实实现**（零新增外部依赖），
 //! 通过全局静态共享，供 HTTP 中间件写入、`/monitor/*` handler 与 `/metrics` 输出读取：
 //!
-//! - [`slow`](slow)：慢请求（及慢 SQL）有界环形缓冲 + 聚合（/monitor/slow-sql/*）
-//! - [`error_log`](error_log)：Tracing Layer 采集 ERROR 日志错误总线（/monitor/error-log/*）
-//! - [`metrics`](metrics)：轻量 Prometheus 文本指标（HTTP counter + histogram）
+//! - [`slow`]：慢请求（及慢 SQL）有界环形缓冲 + 聚合（/monitor/slow-sql/*）
+//! - [`error_log`]：Tracing Layer 采集 ERROR 日志错误总线（/monitor/error-log/*）
+//! - [`metrics`]：轻量 Prometheus 文本指标（HTTP counter + histogram）
 //!
 //! handler 通过 `state.observability` 或各类 `global()` 访问同一底层实例。
 

@@ -41,10 +41,10 @@ pub struct TaskQueryDto {
     pub task_type: Option<String>,
     pub status: Option<String>,
     pub operator: Option<String>,
-    /// 开始时间（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 开始时间（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 结束时间（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
 }

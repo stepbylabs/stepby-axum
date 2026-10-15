@@ -4,7 +4,7 @@
 //! 分层设计：
 //! - ServiceError：Service 层错误（纯业务，不依赖 Web 框架）
 //! - AppError：Handler 层错误（含 IntoResponse 实现，依赖 axum）
-//! - AppError 实现 From<ServiceError>，Handler 层通过 ? 自动转换
+//! - AppError 实现 `From<ServiceError>`，Handler 层通过 ? 自动转换
 //!
 //! thiserror 集成：
 //! - ServiceError / AppError 使用 `#[derive(thiserror::Error)]` 自动派生

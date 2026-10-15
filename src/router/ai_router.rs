@@ -1,6 +1,6 @@
 //! AI 助手路由（NL2SQL v4.1）
 //!
-//! - POST /ai/chat   自然语言问数据（ai:chat，能力位 ai.copilot + [ai].enabled 双门控）
+//! - POST /ai/chat   自然语言问数据（ai:chat，能力位 ai.copilot + `[ai].enabled` 双门控）
 //! - GET  /ai/tables  可查询的白名单表 schema（ai:chat）
 //!
 //! 权限映射见 `middleware/permission.rs`（`("/POST", "/ai/chat", "ai:chat")`），

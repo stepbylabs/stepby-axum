@@ -240,10 +240,14 @@ strip = true
 
 # 性能基准测试（R6-BE-ENG-21 / AGENTS.md D11：criterion 真实基准替换占位）
 # 运行方式：
-#   cargo bench                                          # 运行全部基准（完整采样，耗时较长）
-#   cargo bench -- --measurement-time 1                  # 快速跑一轮（每基准采样 1 秒）
-#   cargo bench --bench hot_paths -- --sample-size 20    # 仅跑 hot_paths 并缩小样本数
-# 覆盖面见 benches/hot_paths.rs 顶部注释；报告输出到 target/criterion/report/index.html
+#   cargo bench --bench hot_paths                         # 运行全部基准（完整采样，耗时较长）
+#   cargo bench --bench hot_paths -- --measurement-time 1 # 快速跑一轮（每基准采样 1 秒）
+#   cargo bench --bench hot_paths -- --sample-size 20     # 缩小样本数
+# ⚠️ 不要用裸 `cargo bench` / `cargo bench --benches`：cargo 会把 criterion 参数透传给
+# lib 单测目标（"Running unittests src\lib.rs"），libtest harness 不识别
+# --measurement-time 直接报 "Unrecognized option" 失败（b70 实证）；必须 --bench hot_paths
+# 精确选中 bench 目标。覆盖面见 benches/hot_paths.rs 顶部注释；
+# 报告输出到 target/criterion/report/index.html
 [[bench]]
 name = "hot_paths"
 harness = false

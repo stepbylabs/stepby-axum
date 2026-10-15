@@ -867,7 +867,7 @@ pub(crate) async fn ensure_tenant_unique_scope(db: &DatabaseConnection) -> anyho
 ///    而平台普通角色只有 config/dict 的 list/query，缺 add/edit/remove 按钮 perms →
 ///    存量租户自建字典类型 / 覆盖 `platform_default` 键 / 自建 `tenant_private` 键的
 ///    写入链路一律 403（链路断裂）。新建租户已由 `SysTenantService::add` 并入
-///    [`TENANT_SELF_SERVICE_PERMS`]，存量租户在此回填：
+///    `TENANT_SELF_SERVICE_PERMS`，存量租户在此回填：
 ///    - **最小补齐**：仅补缺失授权，不回收①以外的任何已有授权；
 ///    - 候选角色 = 非平台租户（`tenant_id <> 0`）、未删除、且已持有 dict/config
 ///      **列表**菜单的"管理型角色"（只读角色不会因此获得写权限）；

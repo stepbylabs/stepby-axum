@@ -2428,7 +2428,7 @@ pub struct AiConfig {
     /// LLM 提供方（当前实现 OpenAI 兼容协议：OpenAI / DeepSeek / Ollama / vLLM 等）
     #[serde(default = "default_ai_provider")]
     pub provider: String,
-    /// OpenAI 兼容 base_url（如 https://api.openai.com/v1、http://localhost:11434/v1）
+    /// OpenAI 兼容 base_url（如 `https://api.openai.com/v1`、`http://localhost:11434/v1`）
     #[serde(default)]
     pub base_url: String,
     /// API Key（生产环境建议 AI_API_KEY 环境变量注入，不落盘）

@@ -8,7 +8,7 @@ use ts_rs::TS;
 use utoipa::ToSchema;
 
 /// 普通接口响应（对齐前端 AjaxResult）
-/// JSON: { "code": 200, "msg": "操作成功", "data": <T> }
+/// JSON: { "code": 200, "msg": "操作成功", "data": `<T>` }
 ///
 /// 注：泛型类型不直接 export（ts-rs 12 不支持导出泛型 TS 文件），
 /// 仅 derive TS 以便其他具体类型引用时能正确推导。
@@ -58,7 +58,7 @@ impl<T> AjaxResult<T> {
         }
     }
 
-    /// 链式附加请求追踪 ID（G-13a：错误出口 [`AppError::into_response`] 调用）
+    /// 链式附加请求追踪 ID（G-13a：错误出口 `AppError::into_response` 调用）
     pub fn with_trace_id(mut self, trace_id: String) -> Self {
         self.trace_id = Some(trace_id);
         self

@@ -1058,7 +1058,7 @@ fn is_pat_management_path(path: &str) -> bool {
         || path.starts_with("/monitor/pat")
 }
 
-/// 租户管理开关（[tenant].management = false，单机模式）作用路径判定。
+/// 租户管理开关（`[tenant].management` = false，单机模式）作用路径判定。
 ///
 /// **语义演进（§5.21，2026-10-05）**：单机部署不存在租户概念 ⇒ `/system/tenant`
 /// 前缀下的**全部**租户语义端点一律 403（含超管）——覆盖平台侧管理面

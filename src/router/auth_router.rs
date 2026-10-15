@@ -15,7 +15,7 @@
 //! - POST /unlockscreen
 //!
 //! 注意：auth_middleware 由 router/mod.rs 统一挂载到 protected 分组，
-//! 此处仅返回 Router<Arc<AppState>>，不挂载中间件。
+//! 此处仅返回 `Router<Arc<AppState>>`，不挂载中间件。
 //!
 //! 设计说明（嵌入式部署 SPA 路由冲突修复）：
 //! - 前端 SPA 路由 /login 和 /register 与后端 POST API 路径冲突

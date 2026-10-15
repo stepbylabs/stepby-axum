@@ -5,11 +5,11 @@
 //! - POST /login         登录（token 在顶层）
 //! - POST /logout        登出（标准 AjaxResult）
 //! - GET  /getInfo       获取用户信息（字段在顶层）
-//! - GET  /getRouters    获取路由树（标准 AjaxResult<Vec<RouterVo>>）
+//! - GET  /getRouters    获取路由树（标准 `AjaxResult<Vec<RouterVo>>`）
 //!
 //! 响应格式说明：
 //! - CaptchaResult / LoginResult / GetInfoResult：业务字段在响应体顶层（对齐前端 extends AjaxResult）
-//! - logout / getRouters：使用标准 AjaxResult<T> 包装
+//! - logout / getRouters：使用标准 `AjaxResult<T>` 包装
 
 use std::sync::Arc;
 

@@ -16,7 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-/// 直方图采样桶边界（秒）。默认 [5ms,10,25,50,100,250,500,1000ms]。
+/// 直方图采样桶边界（秒）。默认 `[5ms,10,25,50,100,250,500,1000ms]`。
 pub const DURATION_BUCKETS_S: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
 
 /// Web Vitals 直方图采样桶边界（秒）。边界对齐 perf-budget.json 运行时预算：
@@ -45,7 +45,7 @@ struct LabelSet {
 struct DurationSeries {
     count: u64,
     sum_secs: f64,
-    /// 长度 = BUCKET_COUNT，`buckets[i]` = 观测值 <= bounds[i] 的条数
+    /// 长度 = BUCKET_COUNT，`buckets[i]` = 观测值 <= `bounds[i]` 的条数
     buckets: Vec<u64>,
 }
 impl Default for DurationSeries {
@@ -501,7 +501,7 @@ impl MetricsRegistry {
     /// G-09：记录一次定时任务执行（job_name/status/duration_ms）
     ///
     /// status："0"=成功 / "1"=失败（与 sys_job_log.status 口径一致，白名单外忽略防标签基数膨胀）。
-    /// 由 [`crate::scheduler::execute_with_logging`] 每次任务执行后记录一次。
+    /// 由 `crate::scheduler::execute_with_logging` 每次任务执行后记录一次。
     pub fn record_job_execution(&self, job_name: &str, status: &str, duration_ms: u64) {
         if status != "0" && status != "1" {
             return;

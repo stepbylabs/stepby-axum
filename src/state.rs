@@ -26,8 +26,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 
 /// 应用全局共享状态
-/// 通过 Axum State<Arc<AppState>> 注入到所有 handler
-/// 注：AppState 本身无需 Clone，因始终通过 Arc<AppState> 共享
+/// 通过 Axum `State<Arc<AppState>>` 注入到所有 handler
+/// 注：AppState 本身无需 Clone，因始终通过 `Arc<AppState>` 共享
 pub struct AppState {
     /// 数据库连接池
     pub db: DatabaseConnection,

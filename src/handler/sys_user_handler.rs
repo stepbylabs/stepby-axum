@@ -1107,7 +1107,7 @@ pub async fn auth_role(
 }
 
 /// GET /system/user/deptTree
-/// 部门下拉树（对齐前端 deptTreeSelect，返回 AjaxResult<Vec<TreeSelectVo>>）
+/// 部门下拉树（对齐前端 deptTreeSelect，返回 `AjaxResult<Vec<TreeSelectVo>>`）
 #[utoipa::path(
     get,
     path = "/system/user/deptTree",
@@ -1138,7 +1138,7 @@ pub async fn dept_tree_select(
 /// 查询用户授权角色信息（对齐前端 UserAuthRoleResult，user/roles 在顶层）
 ///
 /// 返回结构与 AjaxResult 不同：user 和 roles 字段直接挂在响应根对象上，
-/// 故使用自定义 AuthRoleResult 而非 AjaxResult<UserAuthRoleVo>。
+/// 故使用自定义 AuthRoleResult 而非 `AjaxResult<UserAuthRoleVo>`。
 #[utoipa::path(
     get,
     path = "/system/user/authRole/{userId}",
@@ -1314,7 +1314,7 @@ pub struct UserFormResult {
 /// 用户授权角色查询响应（对齐前端 UserAuthRoleResult extends AjaxResult）
 ///
 /// user 和 roles 字段直接挂在响应根对象上（非 data 字段），
-/// 故需自定义类型而非使用 AjaxResult<T>。
+/// 故需自定义类型而非使用 `AjaxResult<T>`。
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthRoleResult {

@@ -299,7 +299,7 @@ pub fn db_pool_gauges(db: &sea_orm::DatabaseConnection) -> (&'static str, u64, u
 /// 获取数据库连接池统计信息
 ///
 /// 实现（sea-orm 1.x 真实 API）：
-/// - 底层 sqlx 池仅能通过 [`DatabaseConnection`] 的公开 getter 取得
+/// - 底层 sqlx 池仅能通过 `DatabaseConnection` 的公开 getter 取得
 ///   （`get_sqlite_connection_pool` / `get_mysql_connection_pool` / `get_postgres_connection_pool`，
 ///   方言不匹配时会 panic，且 `pool` 字段为 pub(crate) 无法直接访问）；
 /// - 池统计取 sqlx 原生指标：`Pool::size()`（总连接）、`Pool::num_idle()`（空闲），

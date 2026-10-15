@@ -531,10 +531,10 @@ pub struct UserQueryDto {
     pub user_name: Option<String>,
     pub phonenumber: Option<String>,
     pub status: Option<String>,
-    /// 开始时间（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 开始时间（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 结束时间（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
     /// 游标（keyset 深分页）：上一页最后一条 user_id。存在时启用深分页（PK < last_id），

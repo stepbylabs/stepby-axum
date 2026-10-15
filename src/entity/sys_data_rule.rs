@@ -22,7 +22,7 @@ pub struct Model {
     pub rule_id: i64,
     /// 规则名（展示用）
     pub rule_name: String,
-    /// 目标表名（录入正则白名单 ^[a-z_][a-z0-9_]*$）
+    /// 目标表名（录入正则白名单 `^[a-z_][a-z0-9_]*$`）
     pub table_name: String,
     /// 目标列名（同上白名单）
     pub field_name: String,

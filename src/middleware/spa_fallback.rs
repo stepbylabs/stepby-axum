@@ -28,7 +28,7 @@ use crate::embedded_assets;
 
 /// Sec-Fetch-Mode header name（http crate 未内置常量，需手动声明）
 ///
-/// Fetch Metadata Request Headers 规范：https://developer.mozilla.org/en-US/docs/Glossary/Fetch_metadata_request_header
+/// Fetch Metadata Request Headers 规范：<https://developer.mozilla.org/en-US/docs/Glossary/Fetch_metadata_request_header>
 /// 浏览器自动设置，JavaScript 无法伪造。
 const SEC_FETCH_MODE: HeaderName = HeaderName::from_static("sec-fetch-mode");
 

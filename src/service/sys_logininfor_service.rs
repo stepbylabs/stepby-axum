@@ -44,10 +44,10 @@ pub struct LogininforQueryDto {
     pub user_name: Option<String>,
     /// 登录状态（"0"=成功 "1"=失败，精确查询）
     pub status: Option<String>,
-    /// 开始时间（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 开始时间（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 结束时间（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
     /// 游标（keyset 深分页）：上一页最后一条 info_id。存在时启用深分页（PK < last_id），
@@ -266,7 +266,7 @@ impl SysLogininforService {
         Ok(result.rows_affected)
     }
 
-    /// 按时间范围清理登录日志（物理删除 [begin, end] 区间的日志，边界含端点）
+    /// 按时间范围清理登录日志（物理删除 `[begin, end]` 区间的日志，边界含端点）
     ///
     /// 供 `DELETE /monitor/logininfor/clean?params[beginTime]=&params[endTime]=` 使用：
     /// 传入 `begin_time` / `end_time`（`%Y-%m-%d`）显式清理指定时间段的日志。

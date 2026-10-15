@@ -452,7 +452,7 @@ impl TencentSmsProvider {
         }
     }
 
-    /// 发送模板短信（腾讯云 SendSms；SendStatusSet[0].Code == "Ok" 即受理成功）
+    /// 发送模板短信（腾讯云 SendSms；`SendStatusSet[0].Code` == "Ok" 即受理成功）
     pub async fn send_templated(
         &self,
         cfg: &CloudSmsConfig,

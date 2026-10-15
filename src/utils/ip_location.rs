@@ -60,13 +60,13 @@ struct Names {
 /// 持有 maxminddb Reader（已读取到内存），线程安全，支持热加载。
 /// 若 mmdb 文件不存在则 reader 为 None，所有查询返回空字符串。
 ///
-/// 热加载实现：reader 字段使用 ArcSwapOption<Arc<Reader<Vec<u8>>>>
-/// - 查询时通过 load() 获取当前 Arc<Reader>（无锁读）
-/// - reload() 时通过 store() 原子替换为新 Arc<Reader>
+/// 热加载实现：reader 字段使用 `ArcSwapOption<Arc<Reader<Vec<u8>>>>`
+/// - 查询时通过 load() 获取当前 `Arc<Reader>`（无锁读）
+/// - reload() 时通过 store() 原子替换为新 `Arc<Reader>`
 /// - 多线程并发查询与热加载互不阻塞
 ///
 /// 双库混合模式：
-/// - xdb_reader 字段使用 ArcSwapOption<XdbReader>
+/// - xdb_reader 字段使用 `ArcSwapOption<XdbReader>`
 /// - 查询时优先查 xdb（国内 IP 精度更高），未命中再查 mmdb
 /// - xdb 文件不存在或格式错误时 xdb_reader 为 None，自动降级为 mmdb-only
 pub struct IpLocator {

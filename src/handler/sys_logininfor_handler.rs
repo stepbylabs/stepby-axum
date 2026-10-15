@@ -137,7 +137,7 @@ pub async fn unlock(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.unlock")))
 }
 
-/// 登录日志清理查询参数（兼容前端 addDateRange 嵌套格式 params[beginTime]/params[endTime]）
+/// 登录日志清理查询参数（兼容前端 addDateRange 嵌套格式 `params[beginTime]`/`params[endTime]`）
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct LogininforCleanQuery {
@@ -153,7 +153,7 @@ pub struct LogininforCleanQuery {
 /// 清空登录日志（可选按时间范围清理）
 ///
 /// - 不传时间参数：清空全部登录日志（物理删除）。
-/// - 传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`）：仅清理 [begin, end] 区间的日志。
+/// - 传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`）：仅清理 `[begin, end]` 区间的日志。
 #[utoipa::path(
     delete,
     path = "/monitor/logininfor/clean",

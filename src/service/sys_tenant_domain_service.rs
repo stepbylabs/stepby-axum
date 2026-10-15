@@ -10,7 +10,7 @@
 //!   `find_by_domain_any`（含软删行）；
 //! - 域名类型 `domain_type`：`'0'` 子域名（平台分配，免 DNS 验证）/ `'1'` 自定义域名
 //!   （需 DNS TXT 验证 `_stepby-verify.{domain}` = verify_token）；
-//! - **操作者范围由能力位 `tenant.domain_self_service` 决定**（见 [`DomainScope`]）：
+//! - **操作者范围由能力位 `tenant.domain_self_service` 决定**（见 `DomainScope`）：
 //!   - 关闭态（默认 = 现状）：域名管理整体平台专属，租户操作者一律 **403**；
 //!   - 开启态（平台 `[features]` ∩ 租户套餐两层均非 `off`）：**平台操作者**可管理全部租户域名；
 //!     **租户操作者**仅可管理本租户域名，且只能**新增自定义域名**（子域名由平台分配，
@@ -171,7 +171,7 @@ pub struct TenantDomainVo {
     /// '0' 待验证 / '1' 已验证 / '2' 验证失败
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify_status: Option<String>,
-    /// DNS TXT 校验 token（归属租户与平台可见——`list` 已按 [`DomainScope`] 行级收窄，
+    /// DNS TXT 校验 token（归属租户与平台可见——`list` 已按 `DomainScope` 行级收窄，
     /// 租户只会拿到本租户行，且租户需据它配置 TXT 记录）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify_token: Option<String>,
@@ -347,7 +347,7 @@ impl SysTenantDomainService {
 
     // ---------- 查询 ----------
 
-    /// 域名列表（范围见 [`DomainScope`]）：
+    /// 域名列表（范围见 `DomainScope`）：
     /// - 平台操作者（tid=0）：可按 `tenant_id` 过滤，不过滤则全量；
     /// - 租户操作者（tid≠0，能力位开启）：**仅本租户**；显式传入他租户 id 一律 **403**
     ///   （显式越权不静默降级为"忽略参数"）；
@@ -377,7 +377,7 @@ impl SysTenantDomainService {
 
     // ---------- 写操作 ----------
 
-    /// 新增域名绑定（范围见 [`DomainScope`]）
+    /// 新增域名绑定（范围见 `DomainScope`）
     ///
     /// 租户操作者额外两条守卫（缺一不可）：
     /// ① 归属租户必须等于自身（`dto.tenant_id` 由前端传入，不可信）；

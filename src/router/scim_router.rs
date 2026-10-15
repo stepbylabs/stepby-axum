@@ -4,7 +4,7 @@
 //!
 //! §5.55 收散点：公开段补全局 rate_limit 中间件——SCIM 端点自校验 Bearer
 //! 不走平台 auth 闸门，此前是全应用唯一无任何限流的公开端点族（暴破/
-//! 资源耗尽面）；限流键按客户端 IP，配置沿用 [rate_limit] 全局档。
+//! 资源耗尽面）；限流键按客户端 IP，配置沿用 `[rate_limit]` 全局档。
 
 use crate::handler::scim_handler;
 use crate::middleware::rate_limit_middleware;

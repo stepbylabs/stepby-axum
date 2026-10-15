@@ -345,10 +345,10 @@ pub struct SendLogQueryDto {
     pub template_code: Option<String>,
     pub channel_code: Option<String>,
     pub status: Option<String>,
-    /// 发送时间范围-起（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 发送时间范围-起（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 发送时间范围-止（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 发送时间范围-止（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
 }

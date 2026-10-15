@@ -4,7 +4,7 @@
 //! 分层设计：
 //! - garde 校验消息：通过 [`garde::i18n::I18n`] trait 实现（[`ZhCn`]），
 //!   由 [`validate`] 统一入口按当前 locale 经 `with_i18n` 执行校验
-//! - 业务/通用文案：rust-i18n（t! 宏），经 [`tr`] 按当前 locale 翻译
+//! - 业务/通用文案：rust-i18n（t! 宏），经 `t!` 宏按当前 locale 翻译
 //! - 模块标题等少量"动态 key"：[`MODULE_TITLES`] 表 + [`module_title`]（本地查表，无 YAML）
 //!
 //! locale 传递：locale_middleware 读取 `Accept-Language` → 协商 → 经

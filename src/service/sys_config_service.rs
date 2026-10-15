@@ -107,10 +107,10 @@ pub struct ConfigQueryDto {
     pub config_name: Option<String>,
     pub config_key: Option<String>,
     pub config_type: Option<String>,
-    /// 开始时间（兼容前端 addDateRange 嵌套格式 params[beginTime]）
+    /// 开始时间（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
-    /// 结束时间（兼容前端 addDateRange 嵌套格式 params[endTime]）
+    /// 结束时间（兼容前端 addDateRange 嵌套格式 `params[endTime]`）
     #[serde(alias = "params[endTime]", default)]
     pub end_time: Option<String>,
 }
@@ -527,7 +527,7 @@ impl SysConfigService {
     /// 生效行解析：租户覆盖行优先，回落平台默认行（`find_effective_by_key`）。
     /// 脱敏规则（治理列为准、`is_sensitive_key` 降级为兜底）：
     /// - 租户操作者读取平台 `visible_to_tenant != '1'` 的行（含全部 platform_only）→ 脱敏 `***`；
-    /// - 其余情况走 [is_sensitive_key] 兜底（密钥类 key 名启发式，兼容历史数据）。
+    /// - 其余情况走 `is_sensitive_key` 兜底（密钥类 key 名启发式，兼容历史数据）。
     pub async fn get_config_by_key(
         &self,
         config_key: &str,
@@ -869,9 +869,9 @@ impl SysConfigService {
     ///
     /// H-4：扫描并清除所有 config 缓存键。best-effort，Redis 错误仅记日志不影响业务。
     ///
-    /// §27.8 两层缓存：前缀 [`CONFIG_CACHE_PREFIX`]（`config:`）是**两层共同前缀**，
+    /// §27.8 两层缓存：前缀 `CONFIG_CACHE_PREFIX`（`config:`）是**两层共同前缀**，
     /// 既可命中租户覆盖层（`config:{tid}:{key}`），也可命中平台默认层（`config:def:{key}`，
-    /// 由 [`CONFIG_DEFAULT_CACHE_PREFIX`] 构造），故一次 `config:*` 扫描即覆盖两层。
+    /// 由 `CONFIG_DEFAULT_CACHE_PREFIX` 构造），故一次 `config:*` 扫描即覆盖两层。
     pub async fn refresh_cache(&self) -> Result<(), ServiceError> {
         let pattern = format!("{}*", CONFIG_CACHE_PREFIX);
         // 第九批：改用 **不截断** 扫描。本函数语义是"清除**所有** config 缓存键"，

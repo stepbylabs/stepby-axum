@@ -143,7 +143,7 @@ pub async fn remove(
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
 
-/// 清理查询参数（兼容前端 addDateRange 嵌套格式 params[beginTime]/params[endTime]）
+/// 清理查询参数（兼容前端 addDateRange 嵌套格式 `params[beginTime]`/`params[endTime]`）
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct FrontendErrorCleanQuery {

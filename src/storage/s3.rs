@@ -299,7 +299,7 @@ struct Contents {
     size: u64,
 }
 
-/// 提取 URL 的 authority（host[:port]），带证书/端口容错
+/// 提取 URL 的 authority（`host[:port]`），带证书/端口容错
 fn parse_authority(base: &str) -> Option<String> {
     let parsed = url::Url::parse(base).ok()?;
     let host = parsed.host_str()?.to_lowercase();

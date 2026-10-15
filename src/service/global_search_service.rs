@@ -7,7 +7,7 @@
 //!   menu(sys_menu: menu_name) / job(sys_job: job_name) /
 //!   config(sys_config: config_key,config_name) / notice(sys_notice: notice_title) /
 //!   task(sys_task: task_name) / template(sys_msg_template: template_name)
-//! - 租户隔离：所有含 tenant_id 列的实体按 [`tenant_scope`] 注入条件
+//! - 租户隔离：所有含 tenant_id 列的实体按 `tenant_scope` 注入条件
 //!   （None = 平台操作者不过滤，Some(tid) = 仅本租户），与 dashboard_stats 口径一致；
 //!   sys_menu 为全局菜单无租户列，不做过滤。
 //! - 逻辑删除过滤：实体带 del_flag 列的统一排除 '2'（已删除）。
