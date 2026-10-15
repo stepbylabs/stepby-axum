@@ -365,9 +365,15 @@ pub async fn token(
                 }
             });
             // RFC 6749 §5.1：token 响应必须携带 Cache-Control: no-store
-            with_no_store(
-                (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
-            )
+            // 批六十六：序列化失败必须走统一错误契约——handler 内 panic 会中断整条连接
+            //（无状态码、无留痕），故转为 500 并 error 日志。
+            with_no_store(match serde_json::to_value(&result) {
+                Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+                Err(e) => {
+                    tracing::error!("SSO token 响应序列化失败: {}", e);
+                    AppError::internal(&crate::tr!("error.common.internal")).into_response()
+                }
+            })
         }
         // RFC 6749 §5.2：invalid_client → 401 + WWW-Authenticate: Basic（v2-C2）；
         // server_error（DB 故障等）→ 500；其余协议错误保持 400

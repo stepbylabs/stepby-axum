@@ -695,7 +695,12 @@ impl GenTableService {
     ) -> Result<GenTableModel, ServiceError> {
         let mut models = self.import_tables(&[table_name], operator).await?;
         // import_tables 保证成功时每张表均有记录；单表必有 1 条
-        Ok(models.pop().unwrap())
+        // 批六十六：import_tables 契约失败时返回统一错误而非 panic——
+        // panic 会中断 request task（无状态码、无留痕），违背"错误响应契约统一"硬基线。
+        match models.pop() {
+            Some(m) => Ok(m),
+            None => Err(ServiceError::internal(&crate::tr!("error.common.internal"))),
+        }
     }
 
     /// 批量导入表（单事务原子：任一张表失败则整体回滚）

@@ -15,6 +15,9 @@ pub mod monitor_log_handler;
 pub mod monitor_observability_handler;
 pub mod monitor_online_handler;
 pub mod monitor_server_handler;
+/// 生产代码防 panic 守卫（批六十六）：handler 不得 `.unwrap()`
+#[cfg(test)]
+pub mod no_panic_guard;
 pub mod report_dataset_handler;
 pub mod scim_handler;
 pub mod sso_handler;
