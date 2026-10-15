@@ -718,7 +718,9 @@ mod helpers;
 mod ledger;
 mod menu;
 mod oauth_sso;
-mod schema;
+// pub(crate)：shared_store::local_store 测试复用生产同源建表（ensure_shared_store_tables），
+// 保证测试库 DDL 与启动兜底永不漂移（单一事实源）。
+pub(crate) mod schema;
 mod scim;
 mod tenant;
 

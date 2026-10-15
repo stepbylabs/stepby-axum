@@ -998,6 +998,451 @@ enum IncrErr {
 mod tests {
     use super::*;
 
+    /// 独立临时库构造（sqlite::memory: 在 sea-orm 连接池下会多连接多库，必须落盘文件）。
+    /// 建表用生产同源 `ensure_shared_store_tables`（CREATE IF NOT EXISTS 幂等）；
+    /// auth_gate 测试额外自建最小 sys_user / sys_tenant 投影表（仅含被查列）。
+    async fn new_store() -> (LocalStore, DatabaseConnection, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("lstore_test_{}.db", uuid::Uuid::new_v4().simple()));
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            path.to_string_lossy().replace('\\', "/")
+        );
+        let db = sea_orm::Database::connect(&url)
+            .await
+            .expect("连接临时测试库失败");
+        crate::initialize::schema::create_shared_store_tables(&db)
+            .await
+            .expect("建共享态三表失败");
+        (LocalStore::new(db.clone()), db, path)
+    }
+
+    /// auth_gate_check 依赖的最小 sys_user / sys_tenant 表（仅被查列，方言 SQLite）
+    async fn ensure_auth_projection_tables(db: &DatabaseConnection) {
+        for ddl in [
+            "CREATE TABLE IF NOT EXISTS sys_user (
+                user_id BIGINT NOT NULL PRIMARY KEY,
+                password_version BIGINT NULL
+            )",
+            "CREATE TABLE IF NOT EXISTS sys_tenant (
+                tenant_id BIGINT NOT NULL PRIMARY KEY,
+                status VARCHAR(8) NULL,
+                expire_time DATETIME NULL
+            )",
+        ] {
+            db.execute_raw(Statement::from_string(
+                db.get_database_backend(),
+                ddl.to_string(),
+            ))
+            .await
+            .expect("建 auth 投影表失败");
+        }
+    }
+
+    fn past_exp() -> i64 {
+        now_secs() - 3600
+    }
+
+    #[tokio::test]
+    async fn kv_get_set_overwrite_and_ttl_expiry_lifecycle() {
+        let (s, _db, path) = new_store().await;
+        // 未知名 None
+        assert_eq!(s.get("k:life").await.unwrap(), None);
+        // 写入 + 读取
+        s.set_ex("k:life", "v1", 100).await.unwrap();
+        assert_eq!(s.get("k:life").await.unwrap().as_deref(), Some("v1"));
+        // SETEX 语义：无条件覆盖值
+        s.set_ex("k:life", "v2", 100).await.unwrap();
+        assert_eq!(s.get("k:life").await.unwrap().as_deref(), Some("v2"));
+        // ttl=0 → 立即过期：读为 None 且惰性删除（行消失）
+        s.set_ex("k:dead", "x", 0).await.unwrap();
+        assert_eq!(s.get("k:dead").await.unwrap(), None);
+        assert_eq!(
+            s.get("k:dead").await.unwrap(),
+            None,
+            "第二次读仍为 None（行已删）"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn set_nx_ex_preemption_semantics() {
+        let (s, _db, path) = new_store().await;
+        assert!(
+            s.set_nx_ex("k:nx", "first", 100).await.unwrap(),
+            "首次抢占成功"
+        );
+        assert!(
+            !s.set_nx_ex("k:nx", "second", 100).await.unwrap(),
+            "未过期行占用中，抢占失败"
+        );
+        assert_eq!(
+            s.get("k:nx").await.unwrap().as_deref(),
+            Some("first"),
+            "失败不覆盖"
+        );
+        // 已过期行被惰性抢占：ttl=0 过期后 NX 可再抢占
+        s.set_ex("k:nx2", "old", 0).await.unwrap();
+        assert!(
+            s.set_nx_ex("k:nx2", "new", 100).await.unwrap(),
+            "过期行可抢占"
+        );
+        assert_eq!(s.get("k:nx2").await.unwrap().as_deref(), Some("new"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn consume_is_atomic_take_and_delete() {
+        let (s, _db, path) = new_store().await;
+        assert_eq!(s.consume("k:cons").await.unwrap(), None, "键不存在");
+        s.set_ex("k:cons", "ticket", 100).await.unwrap();
+        assert_eq!(
+            s.consume("k:cons").await.unwrap().as_deref(),
+            Some("ticket")
+        );
+        assert_eq!(s.consume("k:cons").await.unwrap(), None, "一次性：取后即删");
+        // 过期行：值不返回但顺带清理
+        s.set_ex("k:cons2", "stale", 0).await.unwrap();
+        assert_eq!(s.consume("k:cons2").await.unwrap(), None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn del_and_get_many_batch_semantics() {
+        let (s, _db, path) = new_store().await;
+        for (k, v) in [("b:a", "1"), ("b:b", "2"), ("b:c", "3")] {
+            s.set_ex(k, v, 100).await.unwrap();
+        }
+        let r = s
+            .get_many(&["b:a".into(), "b:x".into(), "b:b".into()])
+            .await
+            .unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].as_deref(), Some("1"));
+        assert_eq!(r[1], None, "缺键为 None 洞");
+        assert_eq!(r[2].as_deref(), Some("2"));
+        assert_eq!(
+            s.del(&["b:a".into(), "b:b".into(), "b:zz".into()])
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(s.del(&[]).await.unwrap(), 0, "空入参零删除");
+        assert_eq!(s.get("b:a").await.unwrap(), None);
+        assert_eq!(
+            s.get("b:c").await.unwrap().as_deref(),
+            Some("3"),
+            "未列入 del 的键存活"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn incr_with_ttl_and_decr_connection_counter_semantics() {
+        let (s, _db, path) = new_store().await;
+        assert_eq!(
+            s.incr_with_ttl("k:cnt", 100).await.unwrap(),
+            1,
+            "首次自增=1"
+        );
+        assert_eq!(s.incr_with_ttl("k:cnt", 100).await.unwrap(), 2);
+        assert_eq!(s.incr_with_ttl("k:cnt", 100).await.unwrap(), 3);
+        // decr：连接计数语义，减到 0 删行
+        assert_eq!(s.decr("k:cnt").await.unwrap(), 2);
+        assert_eq!(s.decr("k:cnt").await.unwrap(), 1);
+        assert_eq!(s.decr("k:cnt").await.unwrap(), 0);
+        assert_eq!(s.get("k:cnt").await.unwrap(), None, "减到 ≤0 行删除");
+        assert_eq!(s.decr("k:cnt").await.unwrap(), -1, "空键 decr = -1 不落行");
+        // 非整数值 decr → Corrupted（fail-fast，不静默当 0）
+        s.set_ex("k:str", "abc", 100).await.unwrap();
+        assert!(matches!(
+            s.decr("k:str").await,
+            Err(StoreError::Corrupted(_))
+        ));
+        // 过期行 decr = 空键语义
+        s.set_ex("k:exp", "5", 0).await.unwrap();
+        assert_eq!(s.decr("k:exp").await.unwrap(), -1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn lock_acquire_release_renew_cas() {
+        let (s, _db, path) = new_store().await;
+        let h1 = s
+            .lock_acquire("sched:lock", 100)
+            .await
+            .unwrap()
+            .expect("首抢成功");
+        assert!(
+            s.lock_acquire("sched:lock", 100).await.unwrap().is_none(),
+            "被持有时第二个获取者失败"
+        );
+        assert!(s.lock_renew(&h1, 100).await.unwrap(), "持有人续期成功");
+        // 伪造他人 token：CAS 不得放行
+        let fake = LockHandle {
+            key: h1.key.clone(),
+            token: "not-owner".into(),
+        };
+        assert!(
+            !s.lock_renew(&fake, 100).await.unwrap(),
+            "错误 token 续期被拒"
+        );
+        // 他人 token 的 release 是幂等 no-op（0 行删除），不影响真持有人的锁
+        s.lock_release(&fake).await.unwrap();
+        assert!(
+            s.lock_renew(&h1, 100).await.unwrap(),
+            "错误 token 的 release 不影响真持有人的锁"
+        );
+        s.lock_release(&h1).await.unwrap();
+        assert!(!s.lock_renew(&h1, 100).await.unwrap(), "释放后续期 = false");
+        assert!(
+            s.lock_acquire("sched:lock", 100).await.unwrap().is_some(),
+            "释放后可重抢"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn auth_gate_revocation_max_semantics_and_sso_source() {
+        let (s, db, path) = new_store().await;
+        ensure_auth_projection_tables(&db).await;
+        let now = now_secs();
+        // 基线：无吊销、无用户行、平台租户（tid=0）⇒ 全 None/false
+        let g = s.auth_gate_check("h0", "1", 0).await.unwrap();
+        assert!(!g.blacklisted && !g.sso_at_bound && g.pwd_ver.is_none());
+        // logout 吊销 → blacklisted
+        s.revocation_add("h1", now + 1000, "logout").await.unwrap();
+        let g = s.auth_gate_check("h1", "1", 0).await.unwrap();
+        assert!(g.blacklisted, "logout 登记必须拦截");
+        // max 语义：更小的 exp 不降级已有行
+        s.revocation_add("h1", now + 10, "sso_legacy_at")
+            .await
+            .unwrap();
+        let g = s.auth_gate_check("h1", "1", 0).await.unwrap();
+        assert!(
+            g.blacklisted,
+            "已有更大 exp 时小 exp 幂等跳过，source 不被改写"
+        );
+        // sso_legacy_at → 只 sso_at_bound，不 blacklisted
+        s.revocation_add("h2", now + 1000, "sso_legacy_at")
+            .await
+            .unwrap();
+        let g = s.auth_gate_check("h2", "1", 0).await.unwrap();
+        assert!(!g.blacklisted && g.sso_at_bound, "SSO 旧 AT 绑定归类正确");
+        // 过期吊销行不再拦截
+        s.revocation_add("h3", past_exp(), "logout").await.unwrap();
+        let g = s.auth_gate_check("h3", "1", 0).await.unwrap();
+        assert!(!g.blacklisted, "吊销行过期后失效");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn auth_gate_pwd_ver_and_tenant_projection() {
+        let (s, db, path) = new_store().await;
+        ensure_auth_projection_tables(&db).await;
+        let backend = db.get_database_backend();
+        // 用户 7：password_version NULL；用户 8：=3
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO sys_user (user_id, password_version) VALUES (7, NULL), (8, 3)",
+            vec![],
+        ))
+        .await
+        .unwrap();
+        // 租户 10：启用 + 无到期（Active）；租户 11：停用 '1'；租户 12：已到期 8 天前（超宽限 → Disabled）
+        let past = chrono::DateTime::from_timestamp(now_secs() - 8 * 24 * 3600, 0)
+            .expect("时间戳合法")
+            .naive_utc();
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO sys_tenant (tenant_id, status, expire_time) VALUES (10, '0', NULL), (11, '1', NULL), (12, '0', ?)",
+            vec![past.into()],
+        ))
+        .await
+        .unwrap();
+        let g = s.auth_gate_check("h", "7", 0).await.unwrap();
+        assert_eq!(g.pwd_ver, None, "NULL password_version = 未设置（None）");
+        // 显式 0：正常投影
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO sys_user (user_id, password_version) VALUES (9, 0)",
+            vec![],
+        ))
+        .await
+        .unwrap();
+        let g = s.auth_gate_check("h", "9", 0).await.unwrap();
+        assert_eq!(g.pwd_ver, Some(0), "显式 0 投影为 Some(0)");
+        let g = s.auth_gate_check("h", "8", 0).await.unwrap();
+        assert_eq!(g.pwd_ver, Some(3));
+        let g = s.auth_gate_check("h", "999", 0).await.unwrap();
+        assert_eq!(g.pwd_ver, None, "用户行不存在 = None");
+        let g = s.auth_gate_check("h", "abc", 0).await.unwrap();
+        assert_eq!(g.pwd_ver, None, "非数值 uid fail-safe 为 None");
+        // 租户投影
+        let g = s.auth_gate_check("h", "7", 10).await.unwrap();
+        assert_eq!(
+            g.tenant_state.as_deref(),
+            Some("0"),
+            "启用且无到期 = Active"
+        );
+        assert_eq!(g.tenant_expire, Some(0), "无到期 = 0 = 永不过期");
+        let g = s.auth_gate_check("h", "7", 11).await.unwrap();
+        assert_eq!(g.tenant_state.as_deref(), Some("2"), "停用租户 = Disabled");
+        let g = s.auth_gate_check("h", "7", 12).await.unwrap();
+        assert_eq!(
+            g.tenant_state.as_deref(),
+            Some("2"),
+            "超 7 天宽限 = Disabled"
+        );
+        let g = s.auth_gate_check("h", "7", 99).await.unwrap();
+        assert_eq!(
+            g.tenant_state, None,
+            "租户行缺失 = None（eval 端视为 Active）"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn pwd_ver_incr_transactional_semantics() {
+        let (s, db, path) = new_store().await;
+        ensure_auth_projection_tables(&db).await;
+        let backend = db.get_database_backend();
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO sys_user (user_id, password_version) VALUES (5, NULL)",
+            vec![],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(s.pwd_ver_incr("5").await.unwrap(), 1, "NULL 视为 0 后 +1");
+        assert_eq!(s.pwd_ver_incr("5").await.unwrap(), 2);
+        assert_eq!(s.pwd_ver_incr("5").await.unwrap(), 3);
+        // 行不存在：保守按 new=1 返回且不 panic
+        assert_eq!(s.pwd_ver_incr("424242").await.unwrap(), 1);
+        // 非数值 uid → 显式 Err（不静默）
+        assert!(s.pwd_ver_incr("not-a-number").await.is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn set_add_rem_members_and_revoke_all_for_user() {
+        let (s, _db, path) = new_store().await;
+        // 集合语义：add 去重、rem 幂等、空集删键
+        s.set_add("sso:user_at:u1", "h1", 100).await.unwrap();
+        s.set_add("sso:user_at:u1", "h1", 100).await.unwrap();
+        s.set_add("sso:user_at:u1", "h2", 100).await.unwrap();
+        let mut members = s.set_members("sso:user_at:u1").await.unwrap();
+        members.sort();
+        assert_eq!(members, vec!["h1", "h2"], "重复 add 去重");
+        s.set_rem("sso:user_at:u1", "h1").await.unwrap();
+        assert_eq!(s.set_members("sso:user_at:u1").await.unwrap(), vec!["h2"]);
+        s.set_rem("sso:user_at:u1", "not-member").await.unwrap();
+        s.set_rem("sso:user_at:missing", "x").await.unwrap();
+        s.set_rem("sso:user_at:u1", "h2").await.unwrap();
+        assert_eq!(
+            s.get("sso:user_at:u1").await.unwrap(),
+            None,
+            "空集合键自动消失"
+        );
+        assert_eq!(
+            s.set_members("sso:user_at:u1").await.unwrap(),
+            Vec::<String>::new()
+        );
+        // revoke_all_for_user：AT + RT 双侧，悬空成员自愈跳过
+        s.set_add("sso:user_at:u2", "a1", 100).await.unwrap();
+        s.set_add("sso:user_at:u2", "a2", 100).await.unwrap();
+        s.set_add("sso:user_rt:u2", "r1", 100).await.unwrap();
+        s.set_ex("sso:at:a1", "bound", 100).await.unwrap(); // a1 绑定存在
+        s.set_ex("sso:rt:r1", "bound", 100).await.unwrap(); // r1 绑定存在
+        // a2 悬空（绑定不存在）→ 自愈跳过
+        let n = s.revoke_all_for_user("u2").await.unwrap();
+        assert_eq!(n, 2, "真吊销数 = 绑定存在的成员数（AT a1 + RT r1）");
+        assert_eq!(s.get("sso:at:a1").await.unwrap(), None, "AT 绑定已删");
+        assert_eq!(s.get("online:a1").await.unwrap(), None, "online 键同生共死");
+        assert_eq!(s.get("sso:rt:r1").await.unwrap(), None, "RT 绑定已删");
+        assert_eq!(
+            s.get("sso:user_at:u2").await.unwrap(),
+            None,
+            "AT 索引键已删"
+        );
+        assert_eq!(
+            s.get("sso:user_rt:u2").await.unwrap(),
+            None,
+            "RT 索引键已删"
+        );
+        // 无集合用户：0 且不报错
+        assert_eq!(s.revoke_all_for_user("ghost").await.unwrap(), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn scan_pattern_truncation_and_expired_exclusion() {
+        let (s, _db, path) = new_store().await;
+        for k in ["s:a1", "s:a2", "s:a3", "t:b1"] {
+            s.set_ex(k, "v", 100).await.unwrap();
+        }
+        s.set_ex("s:expired", "v", 0).await.unwrap();
+        let mut keys = s.scan("s:a*", None).await.unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["s:a1", "s:a2", "s:a3"], "glob 匹配 + 过期排除");
+        assert_eq!(s.scan("s:a*", Some(2)).await.unwrap().len(), 2, "max 截断");
+        assert_eq!(
+            s.scan("s:a*", Some(0)).await.unwrap(),
+            Vec::<String>::new(),
+            "max=0 空集"
+        );
+        assert_eq!(
+            s.scan("t:b1", None).await.unwrap(),
+            vec!["t:b1"],
+            "无通配符退化为点查"
+        );
+        assert_eq!(
+            s.scan("t:missing", None).await.unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            s.scan("s:expired", None).await.unwrap(),
+            Vec::<String>::new(),
+            "过期行不扫出"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ping_info_summary_count_table() {
+        let (s, _db, path) = new_store().await;
+        s.ping().await.unwrap();
+        s.set_ex("i:1", "v", 100).await.unwrap();
+        s.lock_acquire("i:lock", 100).await.unwrap();
+        s.revocation_add("i:rev", now_secs() + 100, "logout")
+            .await
+            .unwrap();
+        let info = s.info_summary().await.unwrap();
+        assert!(info.contains("mode=local"), "kind 标识：{info}");
+        assert!(info.contains("kv_entries=1"), "{info}");
+        assert!(info.contains("shared_locks=1"), "{info}");
+        assert!(info.contains("revocations=1"), "{info}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn revoke_session_blacklists_and_clears_online_and_sso_at() {
+        let (s, db, path) = new_store().await;
+        // auth_gate_check 复核需要 sys_user 投影表
+        ensure_auth_projection_tables(&db).await;
+        s.set_ex("online:h9", "meta", 100).await.unwrap();
+        s.set_ex("sso:at:h9", "bound", 100).await.unwrap();
+        s.revoke_session("h9", 1000).await.unwrap();
+        // 闸门复核：blacklist 拦截 + 两个会话键消失
+        let g = s.auth_gate_check("h9", "1", 0).await.unwrap();
+        assert!(g.blacklisted, "强退后 blacklist 生效");
+        assert_eq!(s.get("online:h9").await.unwrap(), None);
+        assert_eq!(s.get("sso:at:h9").await.unwrap(), None);
+        // 幂等：重复 revoke 不炸（max 语义跳过）
+        s.revoke_session("h9", 1000).await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn test_is_expired() {
         let now = now_secs();

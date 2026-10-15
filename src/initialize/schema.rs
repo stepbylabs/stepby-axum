@@ -27,10 +27,11 @@ pub(crate) fn ensure_sqlite_parent_dir(url: &str) {
 /// - `sys_shared_lock`：调度锁（单语句 CAS）；
 /// - `sys_token_revocation`：S1 吊销权威层（blacklist + 历史 SSO AT 阻断，source 区分）。
 ///
-/// `CREATE TABLE IF NOT EXISTS` 三方言均合法；索引经 `ensure_tenant_index` 方言兜底
-/// （MySQL 不支持 `IF NOT EXISTS` 子句，information_schema 判存在后建——与迁移
-/// IndexDdlExt 容错思路一致）。全部幂等，重复执行无副作用。
-pub(crate) async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+/// 共享态存储**三表纯 DDL**（不含 AI 配置种子等衍生兜底）：sys_shared_kv /
+/// sys_shared_lock / sys_token_revocation + 两个 GC 扫描索引。
+/// 单独抽出供 `shared_store::local_store` 测试复用——测试库建表与生产兜底
+/// **同一 DDL 源**，杜绝测试脚手架与生产 schema 漂移。幂等，可重复执行。
+pub(crate) async fn create_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
     let backend = db.get_database_backend();
     // 主键为 VARCHAR：SQLite/MySQL 直接 PRIMARY KEY；PG VARCHAR PK 通用，无需自增列
     for ddl in [
@@ -73,6 +74,17 @@ pub(crate) async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyho
     tracing::info!(
         "共享态存储三表已就绪（sys_shared_kv / sys_shared_lock / sys_token_revocation）"
     );
+    Ok(())
+}
+
+/// 共享态存储三表 + AI 助手表/种子的启动幂等兜底（完整形态）。
+///
+/// `CREATE TABLE IF NOT EXISTS` 三方言均合法；索引经 `ensure_tenant_index` 方言兜底
+/// （MySQL 不支持 `IF NOT EXISTS` 子句，information_schema 判存在后建——与迁移
+/// IndexDdlExt 容错思路一致）。全部幂等，重复执行无副作用。
+pub(crate) async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    create_shared_store_tables(db).await?;
 
     // ===== AI 助手（AI-01/AI-02，§5.39）：ai_chat_history 表 + sys.ai.* 配置种子兜底 =====
     // 与 m20261006_000001 迁移同源（pub fn 单一事实源）；存量库启动不跑 Migrator 时由本段兜底。
