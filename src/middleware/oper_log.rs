@@ -119,6 +119,12 @@ fn safe_truncate(s: &str, max_bytes: usize) -> String {
 
 /// 操作日志记录中间件
 ///
+/// 机器遥测上报通道（不入操作日志：已有专属存储与审计面）。
+/// 匹配 normalize_api_prefix 之后的路由模板；精确枚举而非前缀通配，避免误伤业务写接口。
+fn is_telemetry_path(path: &str) -> bool {
+    matches!(path, "/monitor/frontendError/report")
+}
+
 /// 仅对 POST/PUT/DELETE 请求记录日志，GET 请求直接放行。
 pub async fn oper_log_middleware(
     State(state): State<Arc<AppState>>,
@@ -137,6 +143,16 @@ pub async fn oper_log_middleware(
 
     // 仅记录写操作
     if !is_write_method(method.clone()) {
+        return next.run(req).await;
+    }
+
+    // b69 审计降噪：机器遥测通道不入操作日志。
+    // `/monitor/frontendError/report`（前端 vitals/错误批量上报）每次页面导航都会 POST 数次，
+    // 全部落入 oper_log 后把「操作审计」刷成遥测流水（实证：本机库最近 100 条中 97 条是该
+    // 上报，10 万总量大头同源）——真实失败审计信号（400/403/404 探针与业务错误）被淹没。
+    // 遥测已有专属存储与审计面（sys_frontend_error 表 + 前端错误列表/统计页），此处排除属
+    // **重复记录治理**而非功能裁剪：上报链路本身不变。
+    if is_telemetry_path(&matched_path) {
         return next.run(req).await;
     }
 
@@ -978,6 +994,18 @@ fn sanitize_value(v: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_telemetry_path_exact_match() {
+        // b69 审计降噪：仅精确匹配遥测上报通道
+        assert!(is_telemetry_path("/monitor/frontendError/report"));
+        // 前缀相近的业务写接口不得误伤
+        assert!(!is_telemetry_path("/monitor/frontendError/clean"));
+        assert!(!is_telemetry_path("/monitor/frontendError/1"));
+        assert!(!is_telemetry_path("/monitor/frontendError"));
+        assert!(!is_telemetry_path("/system/user"));
+        assert!(!is_telemetry_path(""));
+    }
 
     #[test]
     fn test_mask_phone_normal() {
