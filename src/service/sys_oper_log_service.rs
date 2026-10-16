@@ -793,7 +793,7 @@ impl SysOperLogService {
             .await
             .map_err(|e| ServiceError::internal(&format!("锚点计数失败: {}", e)))?;
         let rows = selector
-            .offset((page_num - 1) * page_size)
+            .offset(crate::common::page::offset_of(page_num, page_size))
             .limit(page_size)
             .all(self.base_db())
             .await

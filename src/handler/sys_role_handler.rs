@@ -262,8 +262,12 @@ pub async fn edit(
     Json(dto): Json<RoleEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     // 多租户 Phase 3：记录被操作角色所属租户，供审计 target_tenant_id（平台代管场景）
-    if let Ok(vo) = state.role_service.get_role_by_id(dto.role_id, None).await {
-        target_tenant.set(vo.role.tenant_id);
+    // b71 吞错治理：归属预读失败必须留痕，不得静默回落到操作者租户。
+    match state.role_service.get_role_by_id(dto.role_id, None).await {
+        Ok(vo) => target_tenant.set(vo.role.tenant_id),
+        Err(e) => {
+            tracing::warn!(role_id = dto.role_id, error = %e, "审计归属预读失败，target_tenant_id 回落操作者租户")
+        }
     }
     // 提前取出目标角色 ID（dto 将被 edit_role 按值消费）
     let target_role_id = dto.role_id;
@@ -324,19 +328,19 @@ pub async fn remove(
     // R8-API-008：调用批量原子事务方法，保证部分失败时回滚
     // 多租户 Phase 3：解析被删角色所属租户，全部可解析且唯一时记录审计 target_tenant_id
     // （跨多个租户或存在解析失败时保持 NULL，避免误标归属）
+    //
+    // b71 N+1 治理：与用户批量删除同族——原先逐 ID 调 `get_role_by_id`（每次附带菜单/权限
+    // 装配）只为读 tenant_id；改走 service 的批量口径单条 `is_in` 查询。
     {
-        let mut resolved: Vec<i64> = Vec::new();
-        let mut all_resolved = true;
-        for rid in &role_ids {
-            match state.role_service.get_role_by_id(*rid, None).await {
-                Ok(vo) => {
-                    if !resolved.contains(&vo.role.tenant_id) {
-                        resolved.push(vo.role.tenant_id);
-                    }
-                }
-                Err(_) => all_resolved = false,
-            }
-        }
+        let tid_map = state.role_service.tenant_ids_by_role_ids(&role_ids).await?;
+        let distinct_ids: std::collections::HashSet<i64> = role_ids.iter().copied().collect();
+        let all_resolved = distinct_ids.iter().all(|id| tid_map.contains_key(id));
+        let mut resolved: Vec<i64> = distinct_ids
+            .iter()
+            .filter_map(|id| tid_map.get(id).copied())
+            .collect();
+        resolved.sort_unstable();
+        resolved.dedup();
         if all_resolved && resolved.len() == 1 {
             target_tenant.set(resolved[0]);
         }

@@ -221,12 +221,17 @@ pub async fn edit(
     Json(dto): Json<DeptEditDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     // 多租户 Phase 3：记录被操作部门所属租户，供审计 target_tenant_id（平台代管场景）
-    if let Ok(dept) = state
+    // b71 吞错治理：归属预读失败不得静默——审计留痕会落到操作者租户（平台代管场景下即"归属张冠李戴"）。
+    // 取舍保留（不因此阻断主操作），但必须 WARN 留痕。
+    match state
         .dept_service
         .get_dept_by_id(dto.dept_id, None, None)
         .await
     {
-        target_tenant.set(dept.tenant_id);
+        Ok(dept) => target_tenant.set(dept.tenant_id),
+        Err(e) => {
+            tracing::warn!(dept_id = dto.dept_id, error = %e, "审计归属预读失败，target_tenant_id 回落操作者租户")
+        }
     }
     state
         .dept_service
@@ -256,8 +261,12 @@ pub async fn remove(
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     // 多租户 Phase 3：记录被删部门所属租户，供审计 target_tenant_id（平台代管场景）
-    if let Ok(dept) = state.dept_service.get_dept_by_id(dept_id, None, None).await {
-        target_tenant.set(dept.tenant_id);
+    // b71 吞错治理：归属预读失败必须留痕（见 edit 端点同注释）。
+    match state.dept_service.get_dept_by_id(dept_id, None, None).await {
+        Ok(dept) => target_tenant.set(dept.tenant_id),
+        Err(e) => {
+            tracing::warn!(dept_id, error = %e, "审计归属预读失败，target_tenant_id 回落操作者租户")
+        }
     }
     state
         .dept_service

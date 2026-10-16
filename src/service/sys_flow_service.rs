@@ -766,15 +766,22 @@ async fn resolve_policy(
                 .filter(sys_user_role::Column::RoleId.eq(role.role_id))
                 .all(conn)
                 .await?;
-            let mut ids: Vec<i64> = Vec::new();
-            for ur in urs {
-                if let Some(u) = sys_user::Entity::find_by_id(ur.user_id).one(conn).await? {
-                    // 仅启用且未删除的用户可作为审批人
-                    if u.status.as_deref() == Some("0") && u.del_flag.as_deref() != Some("2") {
-                        ids.push(u.user_id);
-                    }
-                }
-            }
+            // b71 N+1 治理：原实现循环逐个 find_by_id，角色用户多时每次审批提交放大 N 次查询；
+            // 改为一次 is_in 批查后内存过滤（仅启用且未删除的用户可作为审批人，语义不变）
+            let user_ids: Vec<i64> = urs.iter().map(|ur| ur.user_id).collect();
+            let users = if user_ids.is_empty() {
+                Vec::new()
+            } else {
+                sys_user::Entity::find()
+                    .filter(sys_user::Column::UserId.is_in(user_ids))
+                    .all(conn)
+                    .await?
+            };
+            let ids: Vec<i64> = users
+                .into_iter()
+                .filter(|u| u.status.as_deref() == Some("0") && u.del_flag.as_deref() != Some("2"))
+                .map(|u| u.user_id)
+                .collect();
             if ids.is_empty() {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.flow.role_no_active_user"
@@ -2538,7 +2545,7 @@ impl SysFlowService {
                     continue;
                 }
                 let now2 = crate::common::datetime::now_naive();
-                let _ = self
+                if let Err(e) = self
                     .write_log(
                         &task.biz_type,
                         task.biz_id,
@@ -2553,8 +2560,20 @@ impl SysFlowService {
                         now2,
                         task.tenant_id,
                     )
-                    .await;
-                let _ = self.task_repo().touch_reminded(task.task_id, now2).await;
+                    .await
+                {
+                    tracing::warn!(task_id = task.task_id, error = %e, "超时提醒流水写入失败");
+                }
+                // b71 吞错治理：`last_reminded_at` 是提醒去重的**唯一事实源**——写入失败若被
+                // 静默丢弃（原 `let _ =`），下一轮扫描会再次命中同一任务，向审批人无限重复
+                // 推送，且日志零线索。语义保持不变（不阻断本轮），但故障必须留痕。
+                if let Err(e) = self.task_repo().touch_reminded(task.task_id, now2).await {
+                    tracing::warn!(
+                        task_id = task.task_id,
+                        error = %e,
+                        "超时提醒去重位写入失败：下一轮扫描可能对同一任务重复提醒"
+                    );
+                }
                 let title = task.title.clone().unwrap_or_default();
                 self.send_flow_audit(task.assignee_id, "flow_timeout", &title)
                     .await;
@@ -2580,7 +2599,7 @@ impl SysFlowService {
                 if acquired {
                     let now2 = crate::common::datetime::now_naive();
                     // 升级提醒写流水（系统归因 operator_id=NULL）+ 重写 last_reminded_at 重置周期
-                    let _ = self
+                    if let Err(e) = self
                         .write_log(
                             &task.biz_type,
                             task.biz_id,
@@ -2595,8 +2614,19 @@ impl SysFlowService {
                             now2,
                             task.tenant_id,
                         )
-                        .await;
-                    let _ = self.task_repo().touch_reminded(task.task_id, now2).await;
+                        .await
+                    {
+                        tracing::warn!(task_id = task.task_id, error = %e, "升级提醒流水写入失败");
+                    }
+                    // b71 吞错治理：升级提醒同样重写去重位（决定下一个 N 天周期），
+                    // 与首次提醒共用同一留痕口径。
+                    if let Err(e) = self.task_repo().touch_reminded(task.task_id, now2).await {
+                        tracing::warn!(
+                            task_id = task.task_id,
+                            error = %e,
+                            "升级提醒去重位写入失败：下一轮扫描可能对同一任务重复提醒"
+                        );
+                    }
                     let title = task.title.clone().unwrap_or_default();
                     self.send_flow_audit(target, "flow_timeout", &title).await;
                     outcome.notify.push((target, title));
@@ -2628,13 +2658,15 @@ impl SysFlowService {
             .doc_repo()
             .find_page_by_status("pending", 0, limit)
             .await?;
+        // b71 N+1 治理：A 类判定由"逐 pending 单据点查待办"（limit 次往返）收敛为一次批查；
+        // 判定口径不变（该单据是否至少还有一条 pending 待办）。
+        let doc_ids: Vec<i64> = pending_docs.iter().map(|d| d.doc_id).collect();
+        let docs_with_pending = self
+            .task_repo()
+            .find_pending_biz_ids(BIZ_TYPE_DEMO, &doc_ids)
+            .await?;
         for doc in pending_docs {
-            let has_pending = self
-                .task_repo()
-                .find_first_pending_by_biz(BIZ_TYPE_DEMO, doc.doc_id, None)
-                .await?
-                .is_some();
-            if !has_pending {
+            if !docs_with_pending.contains(&doc.doc_id) {
                 drift += 1;
                 tracing::warn!(
                     doc_id = doc.doc_id,
@@ -2648,25 +2680,32 @@ impl SysFlowService {
         // 仅巡检**内置示例单据**：引擎不感知其它业务类型的单据表（W-19），
         // 拿 `flow_demo_doc` 判非 demo 任务必然假阳性。
         let pending_tasks = self.task_repo().find_pending_page(0, limit).await?;
+        // b71 N+1 治理：B 类判定原为"逐 pending 待办点查单据"。改为两轮——
+        // ① 按 (biz_type, biz_id) 去重收集候选（去重口径与判次顺序不变）；
+        // ② 一次批查单据状态后内存判定。漂移计数与 WARN 文案、遍历顺序均保持原样。
         let mut checked: std::collections::HashSet<(String, i64)> =
             std::collections::HashSet::new();
-        for task in pending_tasks {
+        let mut candidates: Vec<(i64, i64)> = Vec::new();
+        for task in &pending_tasks {
             if task.biz_type != biz_type::DEMO_DOC {
                 continue;
             }
-            if !checked.insert((task.biz_type.clone(), task.biz_id)) {
-                continue;
+            if checked.insert((task.biz_type.clone(), task.biz_id)) {
+                candidates.push((task.task_id, task.biz_id));
             }
-            let doc_pending = self
-                .doc_repo()
-                .find_by_id(task.biz_id)
-                .await?
-                .is_some_and(|d| d.status == "pending");
+        }
+        let biz_ids: Vec<i64> = candidates.iter().map(|(_, biz_id)| *biz_id).collect();
+        let doc_statuses = self.doc_repo().find_statuses_by_ids(&biz_ids).await?;
+        for (task_id, biz_id) in candidates {
+            // 单据行不存在同样计为漂移（与改造前 `find_by_id → None` 口径一致）
+            let doc_pending = doc_statuses
+                .get(&biz_id)
+                .is_some_and(|status| status == "pending");
             if !doc_pending {
                 drift += 1;
                 tracing::warn!(
-                    biz_id = task.biz_id,
-                    task_id = task.task_id,
+                    biz_id,
+                    task_id,
                     "flow 一致性漂移 B：存在 pending 待办但单据非 pending（幽灵待办）"
                 );
             }

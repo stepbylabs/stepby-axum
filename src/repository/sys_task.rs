@@ -90,6 +90,14 @@ impl SysTaskRepository {
         SysTask::find_by_id(task_id).one(self.base.db()).await
     }
 
+    /// 按 ID 批查（b71 N+1 治理：delete_tasks 的租户校验由循环逐个 find_by_id 收敛为一次批查）
+    pub async fn find_by_ids(&self, task_ids: Vec<i64>) -> Result<Vec<Model>, DbErr> {
+        SysTask::find()
+            .filter(Column::TaskId.is_in(task_ids))
+            .all(self.base.db())
+            .await
+    }
+
     /// 插入一条记录
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

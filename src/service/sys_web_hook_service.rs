@@ -36,6 +36,27 @@ use crate::repository::sys_web_hook::SysWebHookRepository;
 use crate::repository::sys_web_hook_log::SysWebHookLogRepository;
 use crate::repository::sys_webhook_event::SysWebhookEventRepository;
 
+// ==================== 出站投递并发闸（AGENTS.md 工程硬基线 #2）====================
+
+/// WebHook 出站投递的**进程级**并发上限。
+///
+/// `dispatch_event` / `emit` 原实现对每个命中回调 `tokio::spawn` **无界**并发：一份
+/// "订阅全部事件"（`subscribed_events = NULL`）的回调配置 × 登录风暴，即可把并发出站
+/// 连接放大到不可控规模（fd 耗尽 / 接收方被打爆 / 本进程 DNS 与内存风暴）。
+/// 现按本仓既有 `report_dataset_service::DATASET_GATE` 范式加全局信号量限流。
+const WEBHOOK_DELIVERY_PERMITS: usize = 16;
+
+/// 取全局投递闸。
+///
+/// 饱和时的取舍是**等待而非丢弃**：WebHook 事件是不可重放的出站事实，排队才是正确
+/// 背压语义（与数据集试跑的 fail-closed 429 相反，那里丢的是可重来的用户请求）。
+/// 单条投递自带 `timeout_secs`（clamp [`MAX_TIMEOUT_SECS`]）⇒ 许可必然归还，不会泄漏停摆。
+fn webhook_delivery_gate() -> Arc<tokio::sync::Semaphore> {
+    static GATE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::const_new(WEBHOOK_DELIVERY_PERMITS)))
+        .clone()
+}
+
 // ==================== 事件常量 ====================
 
 /// 登录成功事件（存量 event_types 订阅口径，保留兼容）
@@ -1341,7 +1362,17 @@ impl SysWebHookService {
                 // 投递事件名统一目录口径（方案 C）；映射表外事件 mapped == 原样，scim 等无损
                 let event_type = mapped.clone();
                 let payload = payload.clone();
+                let gate = webhook_delivery_gate();
                 tokio::spawn(async move {
+                    // 出站并发闸：许可用尽即排队（背压），不丢弃事件
+                    let Ok(_permit) = gate.acquire_owned().await else {
+                        tracing::warn!(
+                            hook_id = hook.id,
+                            event = %event_type,
+                            "WebHook 投递闸已关闭，跳过本次出站投递"
+                        );
+                        return;
+                    };
                     // 新建一个与 Service 等价的投递器（复用同一 http 客户端与 DB）
                     let svc = SysWebHookService::with_shared(db2, hc);
                     if let Err(e) = svc
@@ -1401,7 +1432,17 @@ impl SysWebHookService {
                 let db2 = db.clone();
                 let event_key = event_key.clone();
                 let payload = payload.clone();
+                let gate = webhook_delivery_gate();
                 tokio::spawn(async move {
+                    // 与 dispatch_event 共用同一全局投递闸（两条派发轨道不得各有上限）
+                    let Ok(_permit) = gate.acquire_owned().await else {
+                        tracing::warn!(
+                            hook_id = hook.id,
+                            event = %event_key,
+                            "WebHook 投递闸已关闭，跳过本次目录事件投递"
+                        );
+                        return;
+                    };
                     let svc = SysWebHookService::with_shared(db2, hc);
                     if let Err(e) = svc
                         .deliver(&hook, &event_key, &payload, Some(LOG_SOURCE_DISPATCH))
@@ -1555,15 +1596,34 @@ impl SysWebHookService {
             )));
         }
         let mut ok_count = 0usize;
+        // b71 三项同点治理（retry_logs 此前为该族唯一遗漏点）：
+        // ① N+1：hook 快照由循环逐个 `find_by_id` 收敛为一次 `find_by_ids` 批查；
+        // ② 吞错：原 `_ =>` 分支把**数据库故障**与"hook 已删除"折叠成同一条兜底路径，
+        //    故障时静默改用记录快照 URL + **无密钥**投递——接收方按签名校验必然拒收，
+        //    接口却回报成功（fail-open）。现在 DB 故障经 `?` 显式上抛；
+        // ③ 谎报成功：原实现丢弃 `deliver` 结果并无条件 `ok_count += 1`，与紧邻注释
+        //    "成功以交付结果为准"自相矛盾——返回的是"尝试数"而非"成功数"，运维据此
+        //    会误判链路已恢复。现在只计 `DeliveryResult.ok`，失败逐条 WARN 留痕。
+        let hook_ids: Vec<i64> = failed.iter().filter_map(|l| l.hook_id).collect();
+        let hooks: std::collections::HashMap<i64, SysWebHookModel> = if hook_ids.is_empty() {
+            Default::default()
+        } else {
+            self.hook_repo
+                .find_by_ids(&hook_ids)
+                .await?
+                .into_iter()
+                .map(|h| (h.id, h))
+                .collect()
+        };
         for log in failed {
-            // 依据记录快照构造虚拟 hook 重新投递（hook 可能已删除）
+            // 依据记录快照构造虚拟 hook 重新投递（hook 可能已删除：删除态历史密钥不可恢复，
+            // 按原样以无密钥投递，语义与改造前一致）
             // G-14：EncryptedString 读取已自动 unseal——虚拟 hook 直接持有
             // Option<EncryptedString>（deliver 签名点统一从 .0 取明文）
-            let (target_url, secret) =
-                match self.hook_repo.find_by_id(log.hook_id.unwrap_or(-1)).await {
-                    Ok(Some(h)) => (h.target_url.clone(), h.secret),
-                    _ => (log.target_url.clone(), None),
-                };
+            let (hook_id, target_url, secret) = match log.hook_id.and_then(|id| hooks.get(&id)) {
+                Some(h) => (h.id, h.target_url.clone(), h.secret.clone()),
+                None => (log.hook_id.unwrap_or(-1), log.target_url.clone(), None),
+            };
             let payload: serde_json::Value = log
                 .payload
                 .as_deref()
@@ -1572,7 +1632,7 @@ impl SysWebHookService {
             let hook = SysWebHookModel {
                 // 投递用临时构造（不入库）：tenant_id 沿用原记录，保证重试产物归属不变
                 tenant_id: log.tenant_id,
-                id: log.hook_id.unwrap_or(-1),
+                id: hook_id,
                 hook_name: log.hook_name.clone().unwrap_or_default(),
                 event_types: String::new(),
                 subscribed_events: None,
@@ -1588,11 +1648,22 @@ impl SysWebHookService {
                 update_time: None,
                 del_flag: "0".to_string(),
             };
-            let _ = self
-                .deliver(&hook, &log.event_type, &payload, Some(LOG_SOURCE_RETRY))
-                .await;
             // deliver 内部会再写一条新记录；成功以交付结果为准
-            ok_count += 1;
+            match self
+                .deliver(&hook, &log.event_type, &payload, Some(LOG_SOURCE_RETRY))
+                .await
+            {
+                Ok(r) if r.ok => ok_count += 1,
+                Ok(r) => tracing::warn!(
+                    retry_of_log = log.id,
+                    status_code = r.status_code,
+                    error = ?r.error,
+                    "WebHook 重试投递未成功"
+                ),
+                Err(e) => {
+                    tracing::warn!(retry_of_log = log.id, error = %e, "WebHook 重试投递异常");
+                }
+            }
         }
         Ok(ok_count)
     }

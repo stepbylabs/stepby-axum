@@ -420,6 +420,35 @@ impl ScimService {
         Ok(self.to_scim_user(&saved, base_url))
     }
 
+    /// b71 吞错/口径一致性治理：externalId 的**长度 + 唯一性**统一校验面（RFC 7644 要求
+    /// PUT 与 PATCH 对同一字段遵守同一约束）。
+    ///
+    /// 修掉两个真缺陷：
+    /// ① PATCH 原写 `if let Ok(Some(other)) = …await`——**数据库故障被折叠成"不重复"**，
+    ///    故障期间唯一性校验静默通过（fail-open），IdP 侧 externalId 映射会被写成重复值，
+    ///    后续按 externalId 反查的用户同步将互相覆盖；
+    /// ② PUT 完全不校验 externalId（既不查重复也不限长度）——同一字段两条写入口径不一致，
+    ///    经 PUT 可写入 >255 长度（DB 报错）或重复值（静默入库）。
+    async fn ensure_external_id_available(
+        &self,
+        ext: Option<&str>,
+        self_id: i64,
+    ) -> Result<(), ScimError> {
+        let Some(ext) = ext else { return Ok(()) };
+        if ext.len() > 255 {
+            return Err(ScimError::new(400, "externalId 长度须 ≤255"));
+        }
+        let taken = sys_user::Entity::find()
+            .filter(sys_user::Column::ScimExternalId.eq(ext))
+            .one(self.db())
+            .await
+            .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
+        if taken.is_some_and(|u| u.user_id != self_id) {
+            return Err(ScimError::new(409, "externalId 已存在"));
+        }
+        Ok(())
+    }
+
     /// PUT /Users/{id}：全量更新（userName 不可变；未提供的可选字段置空）
     pub async fn put_user(
         &self,
@@ -450,12 +479,14 @@ impl ScimService {
             .to_string(),
         ));
         // v5-D12：PUT 同步 externalId（未提供时置空——全量语义）
-        am.scim_external_id = Set(body
+        let put_ext = body
             .get("externalId")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string));
+            .filter(|s| !s.is_empty());
+        // b71：PUT 侧补上 PATCH 同口径的长度 + 唯一性校验（原先完全裸写）
+        self.ensure_external_id_available(put_ext, id).await?;
+        am.scim_external_id = Set(put_ext.map(str::to_string));
         am.update_time = Set(Some(crate::common::datetime::now_naive()));
         am.update_by = Set(Some("scim".to_string()));
         let saved = am
@@ -509,20 +540,8 @@ impl ScimService {
                 }
                 "externalId" => {
                     let ext = value.as_str().map(str::trim).filter(|s| !s.is_empty());
-                    if let Some(e) = ext {
-                        if e.len() > 255 {
-                            return Err(ScimError::new(400, "externalId 长度须 ≤255"));
-                        }
-                        // 唯一性（排除自身）
-                        if let Ok(Some(other)) = sys_user::Entity::find()
-                            .filter(sys_user::Column::ScimExternalId.eq(e))
-                            .one(self.db())
-                            .await
-                            && other.user_id != id
-                        {
-                            return Err(ScimError::new(409, "externalId 已存在"));
-                        }
-                    }
+                    // b71：唯一性/长度校验统一走 fail-closed 的 helper（原 `if let Ok(…)` 吞 DB 故障）
+                    self.ensure_external_id_available(ext, id).await?;
                     am.scim_external_id = Set(ext.map(str::to_string));
                 }
                 "" => {
@@ -545,22 +564,10 @@ impl ScimService {
                         .and_then(|v| v.as_str())
                         .map(str::trim)
                     {
-                        if ext.len() > 255 {
-                            return Err(ScimError::new(400, "externalId 长度须 ≤255"));
-                        }
-                        if let Ok(Some(other)) = sys_user::Entity::find()
-                            .filter(sys_user::Column::ScimExternalId.eq(ext))
-                            .one(self.db())
-                            .await
-                            && other.user_id != id
-                        {
-                            return Err(ScimError::new(409, "externalId 已存在"));
-                        }
-                        am.scim_external_id = Set(if ext.is_empty() {
-                            None
-                        } else {
-                            Some(ext.to_string())
-                        });
+                        // b71：与 PUT / path-op 同口径的 fail-closed 校验（空串=清除，不校验）
+                        let ext_opt = (!ext.is_empty()).then_some(ext);
+                        self.ensure_external_id_available(ext_opt, id).await?;
+                        am.scim_external_id = Set(ext_opt.map(str::to_string));
                     }
                 }
                 other => {

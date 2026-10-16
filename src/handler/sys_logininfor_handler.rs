@@ -111,9 +111,13 @@ pub async fn unlock(
     Path(user_name): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     // 超管保护（P0-R81-006）：禁止解锁超级管理员账号（M-2 + M-3 Major：使用常量替代硬编码）
-    // 防止通过解锁接口重置超管的登录失败计数
-    if let Ok(Some(user)) = state.user_service.get_user_by_username(&user_name).await
-        && user.user_id == SUPER_ADMIN_USER_ID
+    // 防止通过解锁接口重置超管的登录失败计数。
+    // b71 吞错治理：原写法 `if let Ok(Some(user)) = …await` 把**数据库故障**折叠成"不是超管"，
+    // 令这道守卫在 DB 抖动时静默失效（fail-open）——守卫所依赖的读取必须 fail-closed。
+    let target = state.user_service.get_user_by_username(&user_name).await?;
+    if target
+        .as_ref()
+        .is_some_and(|u| u.user_id == SUPER_ADMIN_USER_ID)
     {
         return Err(AppError::new(
             403,

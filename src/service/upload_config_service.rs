@@ -353,7 +353,19 @@ impl UploadConfigService {
     pub async fn restore_backend_if_switched(
         &self,
     ) -> Option<Arc<dyn crate::storage::StorageBackend>> {
-        let effective = self.effective_backend_mode().await.ok()?;
+        // b71 吞错治理：回落出厂档的取舍不变（启动不因读档失败而中断），但读库失败必须留痕
+        // ——原 `.ok()?` 让"配置表读不出来"与"档位就是出厂档"在日志里完全同形。
+        let effective = match self.effective_backend_mode().await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "G-11 启动恢复：读取有效档位失败，回落出厂档 {}（非档位本身问题）",
+                    self.startup_backend_mode
+                );
+                return None;
+            }
+        };
         if effective == self.startup_backend_mode {
             return None;
         }

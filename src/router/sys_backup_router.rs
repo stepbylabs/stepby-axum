@@ -33,6 +33,7 @@ use crate::state::AppState;
 pub fn backup_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/system/backup/list", get(sys_backup_handler::list))
+        // b71 契约审计：GET 详情零前端调用（同路径 DELETE 在用），保留 REST 完整性 → router/mod.rs 清单 ①
         .route(
             "/system/backup/{backupId}",
             get(sys_backup_handler::get_info).delete(sys_backup_handler::remove),

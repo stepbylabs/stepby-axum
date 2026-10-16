@@ -57,6 +57,7 @@ pub fn web_hook_routes() -> Router<Arc<AppState>> {
             "/monitor/webHook/log/{ids}/retry",
             post(sys_web_hook_handler::log_retry),
         )
+        // b71 契约审计：GET 详情零前端调用（同路径 DELETE/retry 在用），保留 REST 完整性 → router/mod.rs 清单 ①
         .route(
             "/monitor/webHook/log/{id}",
             get(sys_web_hook_handler::log_info).delete(sys_web_hook_handler::log_remove),

@@ -34,6 +34,7 @@ mod i18n_keys;
 mod ip_location;
 mod menu_perm_contract;
 mod monitor;
+mod monitor_alert;
 mod monitor_extra;
 mod platform_guard;
 mod report_dataset;

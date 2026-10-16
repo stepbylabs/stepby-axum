@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use garde::Validate;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
@@ -375,22 +376,46 @@ impl ReportDatasetService {
             return Ok(());
         }
         // B-1：批量软删收敛进单事务——中途失败不得留下"部分已删部分未删"的半成品。
-        // 逐条 update 无事务时，第 N 条失败会前 N-1 条已生效且无法回滚。
+        // b71 N+1 治理：原循环逐条 find_by_id + update（2N 次往返），收敛为事务内
+        // 一次 is_in 批查 + 按入参顺序逐条 ensure_access（报错顺序不变）+ 单条批量 UPDATE。
         let txn = self
             .db
             .begin()
             .await
             .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
+        let rows = ReportDatasetEntity::find()
+            .filter(ReportDatasetColumn::DatasetId.is_in(dataset_ids.clone()))
+            .all(&txn)
+            .await?;
+        let mut by_id: std::collections::HashMap<i64, ReportDatasetModel> =
+            rows.into_iter().map(|m| (m.dataset_id, m)).collect();
+        let mut deletable: Vec<i64> = Vec::new();
         for id in dataset_ids {
-            let raw = ReportDatasetEntity::find_by_id(id).one(&txn).await?;
-            if let Some(m) = raw.filter(|mm| mm.del_flag.as_deref() == Some("0")) {
+            if let Some(m) = by_id
+                .remove(&id)
+                .filter(|mm| mm.del_flag.as_deref() == Some("0"))
+            {
                 self.ensure_access(m.tenant_id, operator_tid)?;
-                let mut am: ReportDatasetActiveModel = m.into();
-                am.del_flag = Set(Some("1".to_string()));
-                am.update_by = Set(Some(operator.to_string()));
-                am.update_time = Set(Some(crate::common::datetime::now_naive()));
-                am.update(&txn).await?;
+                deletable.push(id);
             }
+        }
+        if !deletable.is_empty() {
+            ReportDatasetEntity::update_many()
+                .col_expr(
+                    ReportDatasetColumn::DelFlag,
+                    Expr::value(Some("1".to_string())),
+                )
+                .col_expr(
+                    ReportDatasetColumn::UpdateBy,
+                    Expr::value(Some(operator.to_string())),
+                )
+                .col_expr(
+                    ReportDatasetColumn::UpdateTime,
+                    Expr::value(Some(crate::common::datetime::now_naive())),
+                )
+                .filter(ReportDatasetColumn::DatasetId.is_in(deletable))
+                .exec(&txn)
+                .await?;
         }
         txn.commit()
             .await
@@ -639,20 +664,51 @@ impl ReportDatasetService {
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         self.ensure_designer_write(operator_tid).await?;
+        if dashboard_ids.is_empty() {
+            return Ok(());
+        }
+        // b71：与同文件 `remove_dataset` 同族收散点（该批只改了 dataset 侧，dashboard 为遗漏项）。
+        // 一次修两件事：① 循环逐条 find_by_id + update（2N 次往返）→ 事务内一次 is_in 批查 +
+        // 单条批量 UPDATE；② 原实现**根本没有事务**，中途失败会留下"部分看板已软删、部分未删"
+        // 的半成品且调用方无感知——补上与 dataset 侧一致的 B-1 单事务口径。
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
+        let rows = ReportDashboardEntity::find()
+            .filter(ReportDashboardColumn::DashboardId.is_in(dashboard_ids.clone()))
+            .filter(ReportDashboardColumn::DelFlag.eq("0"))
+            .all(&txn)
+            .await?;
+        let mut by_id: std::collections::HashMap<i64, ReportDashboardModel> =
+            rows.into_iter().map(|m| (m.dashboard_id, m)).collect();
+        let mut deletable: Vec<i64> = Vec::new();
         for id in dashboard_ids {
-            if let Some(m) = ReportDashboardEntity::find_by_id(id)
-                .filter(ReportDashboardColumn::DelFlag.eq("0"))
-                .one(&self.db)
-                .await?
-            {
+            if let Some(m) = by_id.remove(&id) {
                 self.ensure_access(m.tenant_id, operator_tid)?;
-                let mut am: ReportDashboardActiveModel = m.into();
-                am.del_flag = Set(Some("1".to_string()));
-                am.update_by = Set(Some(operator.to_string()));
-                am.update_time = Set(Some(crate::common::datetime::now_naive()));
-                am.update(&self.db).await?;
+                deletable.push(id);
             }
         }
+        if !deletable.is_empty() {
+            let now = crate::common::datetime::now_naive();
+            ReportDashboardEntity::update_many()
+                .col_expr(
+                    ReportDashboardColumn::DelFlag,
+                    Expr::value(Some("1".to_string())),
+                )
+                .col_expr(
+                    ReportDashboardColumn::UpdateBy,
+                    Expr::value(Some(operator.to_string())),
+                )
+                .col_expr(ReportDashboardColumn::UpdateTime, Expr::value(Some(now)))
+                .filter(ReportDashboardColumn::DashboardId.is_in(deletable))
+                .exec(&txn)
+                .await?;
+        }
+        txn.commit()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("提交事务失败: {e}")))?;
         Ok(())
     }
 }

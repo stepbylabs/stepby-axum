@@ -474,8 +474,11 @@ impl TencentSmsProvider {
             serde_json::Value::Object(m) => {
                 let mut keys: Vec<&String> = m.keys().collect();
                 keys.sort();
+                // `filter_map` 而非 `get(..).unwrap()`：键集与 map 同源，今天不可能落空，
+                // 但这里是**请求路径**，留一条 unwrap 就等于留一个未来改动引爆的 panic 面
                 keys.iter()
-                    .map(|k| match m.get(*k).unwrap() {
+                    .filter_map(|k| m.get(*k))
+                    .map(|v| match v {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     })

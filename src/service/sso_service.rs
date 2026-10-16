@@ -1671,7 +1671,20 @@ impl SsoService {
     /// 返回 `Some(url)` 的前提：客户端存在且启用、`logo_uri` 非空、且通过 SSRF 校验
     /// （协议/主机解析）。任何一步不满足一律 `None`（宁可不显示 logo，也不去拉不可信地址）。
     pub async fn client_logo_source(&self, client_id: &str) -> Option<String> {
-        let client = self.client_repo.find_by_client_id(client_id).await.ok()??;
+        // b71 吞错治理：档位语义保持不变（logo 是装饰性元素，任何不满足一律不外链），
+        // 但**数据库故障**必须与"客户端不存在/未启用"可区分——原 `.ok()??` 把读库失败
+        // 折叠成"无 logo"，故障期间运维在日志里看不到任何信号。
+        let client = match self.client_repo.find_by_client_id(client_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    client_id,
+                    error = %e,
+                    "同意页 logo 代理：读取 SSO 客户端失败（本次不外链 logo，非配置问题）"
+                );
+                return None;
+            }
+        }?;
         if client.enabled != "1" {
             return None;
         }
@@ -1827,29 +1840,41 @@ impl SsoService {
     /// v5-D2：JWKS 文档——聚合全部启用客户端的 RS256 公钥（kid = client_id）。
     /// HS256 客户端不发布公钥（对称密钥经注册通道分发），本端点仅含 RS256 条目；
     /// 全部为 HS256 时返回空 keys（与 jwks_uri OPTIONAL 语义一致，不影响 RP）。
-    pub async fn jwks(&self) -> serde_json::Value {
+    ///
+    /// b71 吞错治理：原实现 `if let Ok(clients) = …await` 把**数据库故障**折叠成"无客户端"，
+    /// 于是故障期间对外发布 `{"keys":[]}` 这份**语法合法但内容错误**的 JWKS——RP 会用它
+    /// 校验 RS256 id_token 并全部拒签（且因文档合法而可能缓存一段时间），比直接 5xx 让 RP
+    /// 沿用缓存更危险。现改为错误上抛（5xx ⇒ RP 保留上一份 JWKS）。
+    pub async fn jwks(&self) -> Result<serde_json::Value, ServiceError> {
         let mut keys: Vec<serde_json::Value> = Vec::new();
-        if let Ok(clients) = self.client_repo.find_all_enabled().await {
-            for c in clients {
-                if c.id_token_alg != "RS256" {
-                    continue;
-                }
-                let Some(pem_enc) = &c.rsa_private_key else {
-                    continue;
-                };
-                let pem = crate::utils::crypto::unseal_sensitive_value(pem_enc, &self.enc_key);
-                // D9：kid 优先取登记密钥指纹，为空回退 client_id（存量行为不变）
-                let kid = c
-                    .key_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(c.client_id.as_str());
-                if let Ok(jwk) = rsa_public_jwk(&pem, kid) {
-                    keys.push(jwk);
+        let clients = self.client_repo.find_all_enabled().await.map_err(|e| {
+            tracing::warn!("JWKS 聚合读取客户端失败: {e}");
+            ServiceError::internal(&crate::tr!("error.sso.jwks_unavailable"))
+        })?;
+        for c in clients {
+            if c.id_token_alg != "RS256" {
+                continue;
+            }
+            let Some(pem_enc) = &c.rsa_private_key else {
+                continue;
+            };
+            let pem = crate::utils::crypto::unseal_sensitive_value(pem_enc, &self.enc_key);
+            // D9：kid 优先取登记密钥指纹，为空回退 client_id（存量行为不变）
+            let kid = c
+                .key_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(c.client_id.as_str());
+            // b71：单个客户端密钥解析失败只跳过该 kid（不因一处脏数据让整份 JWKS 5xx），
+            // 但必须留痕——静默跳过会让 RP 拿到缺 kid 的文档，排障时无从下手。
+            match rsa_public_jwk(&pem, kid) {
+                Ok(jwk) => keys.push(jwk),
+                Err(e) => {
+                    tracing::warn!(client_id = %c.client_id, kid = %kid, error = %e, "JWKS 跳过无法解析的客户端公钥")
                 }
             }
         }
-        serde_json::json!({ "keys": keys })
+        Ok(serde_json::json!({ "keys": keys }))
     }
 
     // -------------------- userinfo --------------------
@@ -2021,7 +2046,7 @@ impl SsoService {
     ) -> Result<(Vec<SsoClientVo>, u64), ServiceError> {
         let page_num = q.page_num.unwrap_or(1).max(1);
         let page_size = q.page_size.unwrap_or(10).clamp(1, 100);
-        let offset = (page_num - 1) * page_size;
+        let offset = crate::common::page::offset_of(page_num, page_size);
         let (rows, total) = self
             .client_repo
             .find_page_filtered(

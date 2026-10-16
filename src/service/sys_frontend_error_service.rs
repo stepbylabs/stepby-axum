@@ -420,3 +420,65 @@ impl SysFrontendErrorService {
         Ok(FrontendErrorStatsVo { by_source, daily })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 多字节按**字符**截断（按字节截会在汉字中间切片 panic 或产出乱码）。
+    #[test]
+    fn truncate_counts_characters_not_bytes() {
+        assert_eq!(truncate("abcde", 3), "abc");
+        assert_eq!(truncate("中文测试消息", 2), "中文");
+        assert_eq!(truncate("中文测试消息", 100), "中文测试消息");
+        assert_eq!(truncate("", 5), "");
+        // 混合：emoji 的组合序列按 char 计（此处钉住实现口径 = Unicode Scalar Value）
+        assert_eq!(truncate("a中b", 2), "a中");
+    }
+
+    /// 枚举白名单归一：命中取值、未命中回兜底、带空白先 trim。
+    #[test]
+    fn normalize_enum_allows_only_whitelisted_values() {
+        assert_eq!(
+            normalize_enum("error", ALLOWED_LEVELS, "error", MAX_LEVEL_LEN),
+            "error"
+        );
+        assert_eq!(
+            normalize_enum("  warning ", ALLOWED_LEVELS, "error", MAX_LEVEL_LEN),
+            "warning"
+        );
+        // 白名单外一律回落（不允许任意字符串入库污染分级面）
+        assert_eq!(
+            normalize_enum("ERROR", ALLOWED_LEVELS, "error", MAX_LEVEL_LEN),
+            "error"
+        );
+        assert_eq!(
+            normalize_enum("fatal", ALLOWED_LEVELS, "error", MAX_LEVEL_LEN),
+            "error"
+        );
+        assert_eq!(
+            normalize_enum("", ALLOWED_LEVELS, "error", MAX_LEVEL_LEN),
+            "error"
+        );
+        assert_eq!(
+            normalize_enum("unknown", ALLOWED_SOURCES, "console", MAX_SOURCE_LEN),
+            "console"
+        );
+    }
+
+    /// 可选字段：空白视为缺失（None），非空白按字符截断。
+    #[test]
+    fn opt_truncate_treats_blank_as_absent() {
+        assert_eq!(opt_truncate(&None, 10), None);
+        assert_eq!(opt_truncate(&Some(String::new()), 10), None);
+        assert_eq!(opt_truncate(&Some("   ".to_string()), 10), None);
+        assert_eq!(
+            opt_truncate(&Some("  hello  ".to_string()), 10),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            opt_truncate(&Some("中文测试消息".to_string()), 2),
+            Some("中文".to_string())
+        );
+    }
+}

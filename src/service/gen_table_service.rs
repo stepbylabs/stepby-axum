@@ -1535,26 +1535,11 @@ impl GenTableService {
         table: &GenTableModel,
         columns: &[GenTableColumnModel],
     ) -> Result<PreviewCodeVo, ServiceError> {
-        let mut tera = Tera::default();
-
-        // 先注册过滤器（Tera 2.0 在 add_raw_templates 时会编译模板，
-        // 必须在添加模板之前注册过滤器，否则会报 "Unknown filter" 错误）
-        tera.register_filter("pascal_case", pascal_case_filter);
-        tera.register_filter("camel_case", camel_case_filter);
-        tera.register_filter("upper_camel", upper_camel_filter);
-
-        // 注册内嵌模板
-        tera.add_raw_templates(vec![
-            ("entity.rs", ENTITY_TEMPLATE),
-            ("repository.rs", REPOSITORY_TEMPLATE),
-            ("service.rs", SERVICE_TEMPLATE),
-            ("handler.rs", HANDLER_TEMPLATE),
-            ("router.rs", ROUTER_TEMPLATE),
-            ("api.ts", API_TS_TEMPLATE),
-            ("index.vue", INDEX_VUE_TEMPLATE),
-            ("migration.sql", MIGRATION_SQL_TEMPLATE),
-        ])
-        .map_err(|_| ServiceError::internal(&crate::tr!("error.gen.template_load_failed")))?;
+        // 模板注册表为进程级单例（b71：8 份模板是 `include_str!` 编译期常量，
+        // 原实现每次请求重新解析编译一遍；过滤器与模板的注册次序见 `build_gen_tera`）
+        let tera = GEN_TERA
+            .as_ref()
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.gen.template_load_failed")))?;
 
         // 构建上下文
         let mut ctx = tera::Context::new();
@@ -1776,6 +1761,36 @@ const API_TS_TEMPLATE: &str = include_str!("../../templates/api.tera");
 const INDEX_VUE_TEMPLATE: &str = include_str!("../../templates/index.tera");
 /// SQL 迁移脚本模板
 const MIGRATION_SQL_TEMPLATE: &str = include_str!("../../templates/migration.tera");
+
+/// 构造代码生成器模板注册表。
+///
+/// 过滤器必须**先于**模板注册：Tera 2.0 在 `add_raw_templates` 时即编译模板，
+/// 晚注册过滤器会报 "Unknown filter"。
+fn build_gen_tera() -> TeraResult<Tera> {
+    let mut tera = Tera::default();
+    tera.register_filter("pascal_case", pascal_case_filter);
+    tera.register_filter("camel_case", camel_case_filter);
+    tera.register_filter("upper_camel", upper_camel_filter);
+    tera.add_raw_templates(vec![
+        ("entity.rs", ENTITY_TEMPLATE),
+        ("repository.rs", REPOSITORY_TEMPLATE),
+        ("service.rs", SERVICE_TEMPLATE),
+        ("handler.rs", HANDLER_TEMPLATE),
+        ("router.rs", ROUTER_TEMPLATE),
+        ("api.ts", API_TS_TEMPLATE),
+        ("index.vue", INDEX_VUE_TEMPLATE),
+        ("migration.sql", MIGRATION_SQL_TEMPLATE),
+    ])?;
+    Ok(tera)
+}
+
+/// b71 性能治理：8 份模板全为 `include_str!` 编译期常量，原实现**每次请求**
+/// （`gen_code` / `preview` / `batchGenCode` / ZIP 下载）重新解析编译一遍。
+/// 提为进程级单例后只编译一次；渲染期只读（`Tera::render` 取 `&self`）。
+///
+/// 缓存的是 `TeraResult`：编译失败被**固化**为持续 500（走既有
+/// `error.gen.template_load_failed` 契约），而不是把构建期问题升级成请求路径 panic。
+static GEN_TERA: std::sync::LazyLock<TeraResult<Tera>> = std::sync::LazyLock::new(build_gen_tera);
 
 #[cfg(test)]
 mod gen_table_sql_tests {

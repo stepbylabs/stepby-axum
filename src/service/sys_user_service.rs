@@ -358,16 +358,33 @@ pub struct ProfileUpdateDto {
 /// - TW：中国台湾 09 开头 10 位
 /// - GB：英国 1-9 开头 10 位（不含国际前缀）
 /// - JP：日本 070/080/090 开头 11 位
-static REGION_PHONE_PATTERNS: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
-    vec![
-        ("CN", r"^1[3-9]\d{9}$"),
-        ("HK", r"^([5-9]\d{7})$"),
-        ("US", r"^\d{10}$"),
-        ("MO", r"^6\d{7}$"),
-        ("TW", r"^09\d{8}$"),
-        ("GB", r"^[1-9]\d{9}$"),
-        ("JP", r"^0[789]0\d{8}$"),
-    ]
+///
+/// 此处只存**源码态 pattern**（便于评审与 diff），编译产物见 [`REGION_PHONE_REGEXES`]。
+const REGION_PHONE_PATTERNS: [(&str, &str); 7] = [
+    ("CN", r"^1[3-9]\d{9}$"),
+    ("HK", r"^([5-9]\d{7})$"),
+    ("US", r"^\d{10}$"),
+    ("MO", r"^6\d{7}$"),
+    ("TW", r"^09\d{8}$"),
+    ("GB", r"^[1-9]\d{9}$"),
+    ("JP", r"^0[789]0\d{8}$"),
+];
+
+/// b71 性能治理：pattern 是编译期常量，原实现每次校验都 `Regex::new` 一遍
+/// （千行 xlsx 导入 × 7 条 = 上万次正则编译）。提为 `LazyLock` 单次编译全局复用。
+///
+/// `expect` 是编程错误哨兵而非请求路径 panic 面：常量表内的 pattern 全部语法合法，
+/// 一旦有人改坏，首个用例即红，不会带病上线。
+static REGION_PHONE_REGEXES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    REGION_PHONE_PATTERNS
+        .iter()
+        .map(|(cc, pat)| {
+            (
+                *cc,
+                Regex::new(pat).expect("地区手机号正则为编译期常量，编译失败即编程错误"),
+            )
+        })
+        .collect()
 });
 
 /// 按国家/地区校验手机号（方案 D，G18：多地区化）
@@ -402,14 +419,10 @@ fn is_valid_phone(phone: &str, country: &str) -> bool {
         return num.is_valid();
     }
     // 2) 回退正则分流表（覆盖常见地区，crate 解析失败或地区未识别时仍可用）
-    for (cc, pat) in REGION_PHONE_PATTERNS.iter() {
-        if *cc == country
-            && let Ok(re) = Regex::new(pat)
-        {
-            return re.is_match(phone);
-        }
-    }
-    false
+    REGION_PHONE_REGEXES
+        .iter()
+        .find(|(cc, _)| *cc == country)
+        .is_some_and(|(_, re)| re.is_match(phone))
 }
 
 // ==================== 批量导入纯函数（B3，可独立单测） ====================
@@ -471,8 +484,10 @@ pub fn validate_import_row(row: &ImportUserRow) -> Result<(), String> {
     if login.len() < 2 || login.len() > 30 {
         return Err(crate::tr!("error.user.import_login_length").to_string());
     }
-    let login_re = Regex::new(r"^[a-zA-Z0-9_]+$").expect("登录名正则编译失败");
-    if !login_re.is_match(login) {
+    // b71 性能治理：原实现每行导入 Regex::new（千行导入即千次编译），提为 LazyLock 单次编译
+    static LOGIN_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_]+$").expect("登录名正则编译失败"));
+    if !LOGIN_RE.is_match(login) {
         return Err(crate::tr!("error.user.import_login_format").to_string());
     }
     if row.nick_name.trim().is_empty() {
@@ -2838,26 +2853,33 @@ impl SysUserService {
 
         // 部门名(trim) → (dept_id, tenant_id)（仅取未删除且精确同名）
         // 多租户 Phase 2：租户归属单一来源 = sys_dept.tenant_id，随部门一次读回避免逐行查库
+        //
+        // b71 N+1 治理：原实现"每个部门名一次 LIKE 点查"（千行导入 = 千次往返）。改为
+        // 一次加载未删除部门全量后内存精确匹配——匹配口径不变（两侧 trim 后全等），
+        // 同名部门沿用"先到先赢"（原 `find` 取 DB 返回序首个，现取扫描序首个）。
         let mut dept_map: HashMap<String, (i64, i64)> = HashMap::new();
-        for name in &dept_names {
-            if let Some(dept) = self
-                .dept_repo
-                .find_by_name_like(name)
-                .await?
-                .into_iter()
-                .find(|d| d.dept_name.trim() == name.trim() && d.del_flag.as_deref() != Some("2"))
-            {
-                dept_map.insert(name.clone(), (dept.dept_id, dept.tenant_id));
+        if !dept_names.is_empty() {
+            let depts = self.dept_repo.find_active_all(None).await?;
+            for dept in depts {
+                let trimmed = dept.dept_name.trim();
+                if dept_names.contains(trimmed) {
+                    dept_map
+                        .entry(trimmed.to_string())
+                        .or_insert((dept.dept_id, dept.tenant_id));
+                }
             }
         }
 
-        // 登录名 → 是否已存在（复用既有的"含软删除"查询，避免恢复后冲突）
-        let mut existing_users: HashMap<String, SysUserModel> = HashMap::new();
-        for name in &login_names {
-            if let Some(u) = self.user_repo.find_active_by_user_name(name).await? {
-                existing_users.insert(u.user_name.clone(), u);
-            }
-        }
+        // 登录名 → 是否已存在（未删除口径，del_flag = '0'，与逐行点查历史语义一致）
+        // b71 N+1 治理：一次 `is_in` 批查替代逐登录名点查
+        let login_name_list: Vec<String> = login_names.iter().cloned().collect();
+        let existing_users: HashMap<String, SysUserModel> = self
+            .user_repo
+            .find_active_by_user_names(&login_name_list)
+            .await?
+            .into_iter()
+            .map(|u| (u.user_name.clone(), u))
+            .collect();
 
         // 阶段 3：逐行做唯一性/部门/状态解析，生成待插入 DTO 或累积错误
         // update_support=true 时，已存在的用户走更新（仅更新资料字段，不重置密码/角色）
@@ -3283,6 +3305,84 @@ mod tests {
 
         let bad_email = row("wangwu", "王五", "", "", "not-an-email", "", "0");
         assert!(validate_import_row(&bad_email).is_err());
+    }
+
+    /// 地区手机号分流表逐区回归锁（b71 `REGION_PHONE_REGEXES` LazyLock 重构的行为等价证明）。
+    ///
+    /// 为什么必须**直接钉表**：`is_valid_phone` 优先走 phonenumber crate，crate 能解析的
+    /// 地区/号码根本不会进到这里（见下方 `is_valid_phone` 用例），因此"表内容与区号的错配"
+    /// ——例如把 HK 的模式挂到 MO 上——不会被任何上层用例发现，而它会静默改变兜底判定。
+    /// 这里逐区验证编译后的正则本身：合法样例收、异区/错形拒。
+    #[test]
+    fn region_phone_regex_table_maps_each_region_to_its_own_pattern() {
+        // (地区, 合法样例, 应拒样例)
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            ("CN", &["13800138000"], &["12345678901", "1380013800"]),
+            ("HK", &["51234567", "98765432"], &["41234567", "512345671"]),
+            ("US", &["5551234567"], &["55512345678", "5551234"]),
+            ("MO", &["61234567"], &["51234567", "612345678"]),
+            ("TW", &["0912345678"], &["912345678", "09123456789"]),
+            ("GB", &["7123456789"], &["0712345678", "71234567"]),
+            (
+                "JP",
+                &["09012345678", "07012345678"],
+                &["0901234567", "901234567"],
+            ),
+        ];
+        let table: std::collections::HashMap<&str, &regex::Regex> = REGION_PHONE_REGEXES
+            .iter()
+            .map(|(cc, re)| (*cc, re))
+            .collect();
+        // 表规模与常量表一致（防止漏挂/重复挂）
+        assert_eq!(
+            table.len(),
+            REGION_PHONE_PATTERNS.len(),
+            "编译表应与 pattern 常量表同尺寸"
+        );
+        for (cc, accepts, rejects) in cases {
+            let re = table
+                .get(cc)
+                .unwrap_or_else(|| panic!("分流表缺少地区 {cc}"));
+            for phone in *accepts {
+                assert!(re.is_match(phone), "{cc} 正则为编译期常量，应接受 {phone}");
+            }
+            for phone in *rejects {
+                assert!(!re.is_match(phone), "{cc} 正则应拒绝错形号码 {phone}");
+            }
+        }
+        // 异区串档必须各自把关：同一串数字在不同区判定不同（证明未按错模式）
+        assert!(table["HK"].is_match("51234567"));
+        assert!(!table["MO"].is_match("51234567"), "MO 只收 6 开头");
+        assert!(table["MO"].is_match("61234567"));
+    }
+
+    /// crate 优先、表兜底的**实际分工**（如实钉住现状，别假设表是主路径）：
+    /// - phonenumber 能解析的地区+号码 → 由 crate 判定，其口径**宽于**正则表
+    ///   （CN 固话 `02112345678` 合法，而 CN 兜底正则只覆盖 1[3-9] 手机号段）；
+    /// - 未收录地区（crate 解析不出 Id、表内也无模式）→ fail-closed 判不合法；
+    /// - crate 解析不了的号码形态（含字母/符号）→ 才落到正则表，同样拒。
+    #[test]
+    fn region_phone_validation_is_crate_first_and_fail_closed_on_unknown_region() {
+        assert!(is_valid_phone("13800138000", "CN"));
+        assert!(
+            is_valid_phone("02112345678", "CN"),
+            "crate 视上海固话为合法 CN 号码——宽于 CN 兜底正则，此为既定分工而非缺陷"
+        );
+        assert!(!is_valid_phone("12345678901", "CN"));
+        assert!(
+            !is_valid_phone("13800138000", "ZZ"),
+            "未知地区应 fail-closed"
+        );
+        assert!(!is_valid_phone("", "CN"));
+        assert!(!is_valid_phone("++++++++++/", "CN"));
+        // 大小写：`validate_phone_by_region` 入口统一 to_uppercase，表按大写码匹配
+        assert!(is_valid_phone("13800138000", "CN"));
+        assert!(
+            validate_phone_by_region(&Some("13800138000".into()), &Some("cn".into())).is_ok(),
+            "小写地区码应在入口被归一后正常校验"
+        );
+        assert!(validate_phone_by_region(&None, &Some("CN".into())).is_ok());
+        assert!(validate_phone_by_region(&Some("1".into()), &None).is_err());
     }
 
     // ---------- 字段级权限 M1：PII 掩码三口径（纯函数单测） ----------

@@ -607,3 +607,90 @@ async fn test_webhook_event_enabled_chain() {
     ctx.delete_json(&format!("/monitor/webHook/{}", carrier_id))
         .await;
 }
+
+/// 重试推送必须回报**真实投递结果**（b71 谎报成功 + 吞错回归锁）。
+///
+/// 可证伪性：
+/// - 修复前 `retry_logs` 丢弃 `deliver` 返回并**无条件** `ok_count += 1`，接口回报的是
+///   "尝试数"而非"成功数"——目标不可达也算成功（与紧邻注释"成功以交付结果为准"自相矛盾），
+///   运维据此会误判链路已恢复。本测试对不可达目标断言 `count == 0`，旧实现必红。
+/// - 修复前 hook 快照读取的**数据库故障**被 `_ =>` 折叠成"改用记录快照 URL + 无密钥"继续投递
+///   （签名丢失 → 接收方必然拒收，而接口报成功，fail-open）；现在故障经 `?` 显式上抛。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_webhook_retry_reports_real_delivery_result() {
+    let ctx = TestContext::new().await;
+
+    // 目标端口关闭（公网 IP 字面量以通过 SSRF 双层校验），timeoutSecs=2 保证快速失败不挂起
+    let v = ctx
+        .post_json(
+            "/monitor/webHook",
+            serde_json::json!({
+                "hookName": "itrty_重试真实性载体",
+                "eventTypes": "login_success",
+                "targetUrl": "http://8.8.8.8:59999/webhook",
+                "contentType": "json",
+                "timeoutSecs": 2,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    // 新增接口不回传 id（与 test_web_hook_chain 同口径按名称查回）
+    let v = ctx
+        .get_json("/monitor/webHook/list?hookName=itrty_重试真实性载体")
+        .await;
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    assert_eq!(rows.len(), 1, "应查到 1 条新回调，实际: {v}");
+    let hook_id = rows[0]["id"].as_i64().expect("id 应为数字");
+
+    // 1. 先制造一条失败留痕（不可达目标 → ok=false，status='1'）
+    let v = ctx
+        .post_json(
+            &format!("/monitor/webHook/{hook_id}/test"),
+            serde_json::json!({ "eventType": "login_success" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"]["ok"].as_bool(),
+        Some(false),
+        "不可达目标的测试推送应判失败：{v}"
+    );
+    let log_id = v["data"]["logId"]
+        .as_i64()
+        .expect("test 应返回已落库的 logId");
+
+    // 2. 重试该失败记录：目标仍不可达 ⇒ 成功数必须为 0（旧实现在此返回 1）
+    let v = ctx
+        .post_json(
+            &format!("/monitor/webHook/log/{log_id}/retry"),
+            serde_json::Value::Null,
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"]["count"].as_i64(),
+        Some(0),
+        "不可达目标的重试不得计为成功（应回报真实投递成功数）：{v}"
+    );
+
+    // 3. 重试确实发生了（新增一条留痕），只是结果为失败——区分"未投递"与"投递未成功"
+    let v = ctx
+        .get_json(&format!(
+            "/monitor/webHook/log/list?hookId={hook_id}&pageSize=10"
+        ))
+        .await;
+    let logs = v["rows"].as_array().expect("rows 应为数组");
+    assert!(
+        logs.len() >= 2,
+        "重试应产生第二条投递留痕，实际条数={}：{logs:?}",
+        logs.len()
+    );
+
+    // 清理（删除回调级联清理留痕）
+    let v = ctx
+        .delete_json(&format!("/monitor/webHook/{hook_id}"))
+        .await;
+    ctx.assert_ok(&v);
+}

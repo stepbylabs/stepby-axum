@@ -143,12 +143,16 @@ pub async fn edit(
     ValidatedJson(dto): ValidatedJson<PostEditDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     // 多租户 Phase 3：记录被操作岗位所属租户，供审计 target_tenant_id（平台代管场景）
-    if let Ok(post) = state
+    // b71 吞错治理：归属预读失败必须留痕，不得静默回落到操作者租户。
+    match state
         .post_service
         .get_post_by_id(dto.post_id, operator.tenant_id())
         .await
     {
-        target_tenant.set(post.tenant_id);
+        Ok(post) => target_tenant.set(post.tenant_id),
+        Err(e) => {
+            tracing::warn!(post_id = dto.post_id, error = %e, "审计归属预读失败，target_tenant_id 回落操作者租户")
+        }
     }
     state
         .post_service

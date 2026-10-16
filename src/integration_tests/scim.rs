@@ -378,11 +378,109 @@ async fn test_scim_external_id_and_events() {
         serde_json::json!("idp-abc-002")
     );
 
+    // ⑤-b 建第二个用户承载"已被占用"的 externalId，供 PUT/PATCH 冲突回归锁使用
+    let (status, _, body) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users",
+        "application/json",
+        &serde_json::json!({"userName": "scim.ext03", "externalId": "idp-abc-003"}).to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let uid2 = json_of(&body)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    // ⑤-c **PUT 冲突必须 409**（b71 回归锁：PUT 原先完全不校验 externalId，
+    // 同一字段 PATCH 查重、PUT 裸写 ⇒ 经 PUT 可写入重复映射，后续按 externalId
+    // 反查的同步会互相覆盖）
+    let (status, _, body) = raw_put(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Users/{uid}"),
+        &serde_json::json!({"userName": "scim.ext01", "externalId": "idp-abc-003"}).to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "PUT 写入他人已占用的 externalId 应 409：{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // ⑤-d PUT 超长 externalId → 400（PATCH 早已有此校验，PUT 补齐同口径）
+    let long_ext = "x".repeat(256);
+    let (status, _, _) = raw_put(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Users/{uid}"),
+        &serde_json::json!({"userName": "scim.ext01", "externalId": long_ext}).to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "externalId 超 255 应 400");
+
+    // ⑤-e PUT 保持**自己**的 externalId 必须放行（helper 的 self_id 排除不得误报 409）
+    let (status, _, body) = raw_put(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Users/{uid}"),
+        &serde_json::json!({"userName": "scim.ext01", "externalId": "idp-abc-002"}).to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PUT 写回自身 externalId 不应被判重复：{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // ⑤-f PATCH（无 path 的 replace，value 内含 externalId）冲突同样 409
+    let patch_conflict = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "value": {"externalId": "idp-abc-003"}}]
+    })
+    .to_string();
+    let (status, _, _) = raw_request(
+        &ctx.app,
+        ctx.peer_ip,
+        Method::PATCH,
+        &format!("/scim/v2/Users/{uid}"),
+        Some(("application/json", &patch_conflict)),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "PATCH no-path 写入他人 externalId 应 409"
+    );
+
     // ⑥ DELETE（deprovision，触发 scim_user_deactivated 事件——无订阅时火后即忘不阻断）
     let (status, _, _) = raw_delete(
         &ctx.app,
         ctx.peer_ip,
         &format!("/scim/v2/Users/{uid}"),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // ⑥-b 清理⑤-b 的占用承载用户（用例自清理，不留存量 externalId）
+    let (status, _, _) = raw_delete(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Users/{uid2}"),
         &scim_headers(),
     )
     .await;

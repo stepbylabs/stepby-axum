@@ -219,7 +219,11 @@ impl SysHttpDebugService {
                 break;
             }
 
-            let loc = loc.expect("已判非空");
+            // b71：原 `expect("已判非空")` 依赖上方 redirectable 组合逻辑保证非空（逻辑距离远），
+            // 改为模式匹配降级——组合逻辑一旦改动即 break 重试循环，不再构成请求路径 panic 面
+            let Some(loc) = loc.filter(|s| !s.is_empty()) else {
+                break;
+            };
             let next = base_url
                 .join(&loc)
                 .map_err(|e| ServiceError::bad_request(&e.to_string()))?;

@@ -1,4 +1,43 @@
 // stepby-axum/src/router/mod.rs
+//
+// ==================== 零前端调用端点保留清单（b71 契约审计） ====================
+//
+// b71 前后端契约审计（全部已注册路由 × 前端 `src/api/**` + `src/views/**` +
+// `src/plugins/**` 调用面比对）确认以下端点当前**没有前端调用方**。
+// 经评估**全部保留**，理由分三类；每条在本清单与**各自注册处注释**双向登记
+// （注册处注释以 `b71 契约审计` 起头，可 grep 对账）。
+//
+// 判据口径（首轮清单曾把 4 条写错，本版按实测订正）：
+// - **按"路径 + 方法"判定**，不按路径判定——`/system/backup/{id}` 这类 REST 路径
+//   的 GET 详情无调用方，但同路径的 DELETE/PUT **在前端在用**，写成"无前端调用"是错的；
+// - 端点必须**确实注册**——首轮误列的 `GET /system/user`（空路径只注册 POST/PUT）与
+//   `/system/post/optionselect`（不存在，与 `dict/type/optionselect` 混淆）已删除；
+// - 必须有**真实调用方**就不进清单——`GET /tool/gen/batchGenCode`
+//   （`api/tool/gen.ts:131` → `views/tool/gen/index.vue:331` 批量下载 ZIP）与
+//   `GET /common/download/resource`（`plugins/download.ts:51`）已删除。
+//
+// ① REST 完整性 + 测试级消费方（删除需重写集成/e2e 测试并削弱权限边界覆盖，
+//    且本系统带 ak_sign 开放 API 面，外部消费者可能存在）：
+//   - GET  /system/backup/{backupId}        （同路径 DELETE 前端在用；详情面留 API）
+//   - GET  /system/audit-change/{id}        （变更留痕详情；前端只有 list/export）
+//   - GET  /system/task/{taskId}            （同路径 DELETE 前端在用）
+//   - GET  /tool/report-board/{boardId}     （同路径 PUT/DELETE 前端在用）
+//   - GET  /monitor/frontendError/{id}      （同路径 DELETE 前端在用）
+//   - GET  /monitor/webHook/log/{logId}     （同路径 DELETE/retry 前端在用）
+// ② RuoYi 模板兼容（保留开放 API 兼容面）：
+//   - GET  /system/dept/treeselect          （前端用 /system/dept/list 自行组树；
+//                                            menu/dict 侧的 treeselect/optionselect 前端在用，不在此列）
+// ③ 后端编排能力预留（管理/运维脚本可用，UI 暂无入口）：
+//   - POST /system/msg/send                     （直接发送，UI 走模板发送面）
+//   - POST /system/msg/log/markPending/{logIds} （标记待重试）
+//   - POST /system/msg/log/retryPending/{batch} （待重试批次批量重试）
+//   - POST /system/uploadConfig/switchBackend   （存储后端切换编排）
+//   - POST /system/flow/task/{taskId}/countersign-del
+//                                               （减签：加签已有 UI，减签暂走 API）
+//   - POST /report/dataset/{datasetId}/sql      （SQL 预检，编辑专用）
+//
+// 处置纪律：后续批次若删除上述任一端点，必须同步清理 handler/service/docs.rs/
+// 集成测试/e2e 断言全链（参照 b70 死代码清理三层标准），并回写本清单与注册处注释。
 
 pub mod ai_router;
 pub mod auth_router;

@@ -502,6 +502,24 @@ impl SysRoleService {
         }
     }
 
+    /// 批量 role_id → tenant_id（仅取"存在且未软删"的行）。
+    ///
+    /// b71 N+1 治理：批量删除角色的**审计归属预解析**原先逐 ID 调 [`Self::get_role_by_id`]
+    /// （每次还装配菜单/权限集合），而该处真正需要的只有租户列。改走仓储 `find_by_ids`
+    /// 单条 `is_in` 查询。口径与 `get_role_by_id` 一致：`del_flag = '2'` 视为不存在。
+    pub async fn tenant_ids_by_role_ids(
+        &self,
+        role_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, ServiceError> {
+        Ok(self
+            .role_repo
+            .find_by_ids(role_ids)
+            .await?
+            .into_iter()
+            .map(|r| (r.role_id, r.tenant_id))
+            .collect())
+    }
+
     /// 查询角色详情（含 menu_ids）
     ///
     /// P0-6：`operator_user_id` 传入时校验角色在数据范围内（不在则 404，避免暴露存在性）。

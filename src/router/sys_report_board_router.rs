@@ -36,6 +36,7 @@ pub fn report_board_routes() -> Router<Arc<AppState>> {
             post(sys_report_board_handler::board_add),
         )
         // GET 详情 / PUT 更新 / DELETE 删除（同 {boardId} 段）
+        // b71 契约审计：GET 详情零前端调用（同路径 PUT/DELETE 在用），保留 REST 完整性 → router/mod.rs 清单 ①
         .route(
             "/tool/report-board/{boardId}",
             get(sys_report_board_handler::board_info)

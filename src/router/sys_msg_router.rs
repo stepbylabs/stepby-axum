@@ -86,6 +86,7 @@ pub fn msg_routes() -> Router<Arc<AppState>> {
             delete(sys_msg_handler::send_log_clean),
         )
         // POST /system/msg/send 直接发送
+        // b71 契约审计：编排预留，零前端调用（UI 走模板发送面）→ router/mod.rs 清单 ③
         .route("/system/msg/send", post(sys_msg_handler::send))
         // POST /system/msg/log/retry/{logIds} 重试指定发送记录
         .route(
@@ -93,11 +94,13 @@ pub fn msg_routes() -> Router<Arc<AppState>> {
             post(sys_msg_handler::retry_logs),
         )
         // POST /system/msg/log/retryPending/{batch} 触发待重试批次批量重试
+        // b71 契约审计：编排预留，零前端调用 → router/mod.rs 清单 ③
         .route(
             "/system/msg/log/retryPending/{batch}",
             post(sys_msg_handler::retry_pending),
         )
         // POST /system/msg/log/markPending/{logIds} 将发送记录标记为待重试
+        // b71 契约审计：编排预留，零前端调用 → router/mod.rs 清单 ③
         .route(
             "/system/msg/log/markPending/{logIds}",
             post(sys_msg_handler::mark_pending_retry),

@@ -144,6 +144,7 @@ error:
     platform_protected: 平台根部门不允许通过租户接口操作
     ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户
     disabled: 单点登录（SSO）未启用
+    jwks_unavailable: 无法读取 SSO 客户端列表，JWKS 暂时不可用（请稍后重试；RP 将沿用上一份 JWKS）
     client_not_found: 客户端不存在
     client_disabled: 该客户端已停用
     client_id_required: client_id 不能为空

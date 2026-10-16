@@ -11,9 +11,13 @@
 //! 分层约束：不依赖任何 Web 框架类型（axum / tower / tower-http），
 //! 数据访问委托 Repository 层，状态/错误使用 ServiceError。
 //!
-//! 投递语义：
+//! 投递语义（b71 文档订正：本段原写"sms / site 渠道当前无实现，记录日志后视为模拟成功"，
+//! 该结论早于真实派发链路落地，与下方实现自相矛盾）：
 //! - email 渠道：实际经 MailerService（全局 SMTP 配置）发送
-//! - sms / site 渠道：当前无外部网关/站内投递实现，记录日志后视为模拟成功
+//! - sms 渠道：按渠道配置派发**真实 provider**（generic HTTP 网关 / 阿里云 / 腾讯云），
+//!   网关回执落库；配置无效 → 400，投递失败 → 显式报错并计入重试链路
+//! - site 渠道：站内信的投递即 `sys_msg_send_log` 记录本身（消息中心按收件人读取），
+//!   投递前尊重用户消息偏好与免打扰窗口（opt-out / 免打扰时段跳过）
 //! - 发送失败时记录 status='2'（待重试），由 retry_logs / retry_pending 重试，
 //!   重试耗尽（retry_count >= max_retry_count）后置为 status='1'（失败）
 
@@ -1174,11 +1178,21 @@ impl SysMsgService {
                 let Ok(user_id) = to_addr.trim().parse::<i64>() else {
                     return Ok(());
                 };
-                if let Ok(Some(pref)) = self.pref_repo.find_by_user_id(user_id).await
-                    && !allows_delivery(PrefChannel::Sysmsg, &pref, &now_hm_str())
-                {
-                    tracing::info!("站内信被用户消息偏好/免打扰拦截: to={}", to_addr);
-                    return Ok(());
+                // b71 吞错治理：原 `if let Ok(Some(pref)) = …await` 把**数据库故障**折叠成
+                // "无偏好 ⇒ 允许投递"。保留"读不到偏好就按默认口径投递"的可用性取舍
+                // （站内信是系统内记录，静默丢弃同样失真），但故障必须 WARN 留痕，
+                // 否则免打扰在 DB 抖动期间被违反且无从排障。
+                match self.pref_repo.find_by_user_id(user_id).await {
+                    Ok(Some(pref)) => {
+                        if !allows_delivery(PrefChannel::Sysmsg, &pref, &now_hm_str()) {
+                            tracing::info!("站内信被用户消息偏好/免打扰拦截: to={}", to_addr);
+                            return Ok(());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(user_id, error = %e, "站内信偏好读取失败，按默认口径投递（免打扰可能未生效）");
+                    }
                 }
                 tracing::info!("消息渠道 site 站内信投递（系统内记录）: to={}", to_addr);
                 Ok(())

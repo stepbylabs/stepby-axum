@@ -33,14 +33,16 @@
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Set, Statement,
-    TransactionTrait, Value,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
+    QueryFilter, Set, Statement, TransactionTrait, Value,
 };
 
 use crate::common::tenant::{
     TENANT_EXPIRE_GRACE_DAYS, TENANT_STATE_ACTIVE, TENANT_STATE_DISABLED, TENANT_STATE_GRACE,
 };
-use crate::entity::sys_shared_kv::{ActiveModel as KvActive, Entity as KvEntity};
+use crate::entity::sys_shared_kv::{
+    ActiveModel as KvActive, Column as KvColumn, Entity as KvEntity, Model as KvModel,
+};
 use crate::entity::sys_token_revocation::{ActiveModel as RevActive, Entity as RevEntity};
 use crate::shared_store::{AuthGate, LockHandle, SharedStore, StoreError, glob_match};
 
@@ -466,17 +468,28 @@ impl SharedStore for LocalStore {
         Ok(res.rows_affected())
     }
 
-    /// 批量读：逐键点查（量小：SSO 双键等 ≤ 4 键；过期视为 None，不做惰性删除避免读放大写）
+    /// 批量读：单条 `IN` 批查（b71：取代逐键点查——本文件 `delete_many` 已是同一形状）。
+    /// 语义不变：缺失键 → None；已过期 → None（不做惰性删除，避免读放大写）；顺序跟随入参。
     async fn get_many(&self, keys: &[String]) -> Result<Vec<Option<String>>, StoreError> {
-        let mut out = Vec::with_capacity(keys.len());
-        for k in keys {
-            let row = KvEntity::find_by_id(k)
-                .one(&self.db)
-                .await
-                .map_err(|e| StoreError::backend(&e))?;
-            out.push(row.filter(|m| !is_expired(m.expire_at)).map(|m| m.kv_value));
+        if keys.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(out)
+        let rows: Vec<KvModel> = KvEntity::find()
+            .filter(KvColumn::KvKey.is_in(keys.iter().cloned()))
+            .all(&self.db)
+            .await
+            .map_err(|e| StoreError::backend(&e))?;
+        let by_key: std::collections::HashMap<&str, &KvModel> =
+            rows.iter().map(|m| (m.kv_key.as_str(), m)).collect();
+        Ok(keys
+            .iter()
+            .map(|k| {
+                by_key
+                    .get(k.as_str())
+                    .filter(|m| !is_expired(m.expire_at))
+                    .map(|m| m.kv_value.clone())
+            })
+            .collect())
     }
 
     /// 原子自增 + 首次 TTL（RATE_LIMIT_SCRIPT 语义：INCR 结果 1 时 EXPIRE；已有键不重置 TTL）

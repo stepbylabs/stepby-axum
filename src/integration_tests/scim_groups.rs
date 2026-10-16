@@ -455,3 +455,101 @@ async fn test_scim_group_membership_cleanup_on_deprovision() {
     let grants_left = user_role_ids_with_source(&db, uid, &scim_src).await;
     assert!(grants_left.is_empty(), "deprovision 应撤销 scim 来源授权");
 }
+
+/// 成员存在性**批查**的负路径（b71 `parse_member_ids` N+1 改造回归锁）。
+///
+/// 该改造把"逐个 `find_by_id` 点查"换成"一次 `is_in` 批查 + 集合判定"，必须仍然：
+/// ① 拒绝不存在成员并 400；② 按**入参顺序**报告首个缺失者（detail 含具体 id）；
+/// ③ 合法在前、缺失在后时整体拒绝且报的是缺失者（防"命中即放行"的实现漂移）；
+/// ④ 全合法时成功（证明前两轮不是批查实现把一切判为缺失）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scim_group_members_reject_unknown_users_in_input_order() {
+    let ctx = scim_ctx().await;
+
+    // 先真实 provision 一个可用成员（作为"合法在前"的那个）
+    let user_body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": "scim.grp.neg.ok",
+        "name": { "displayName": "负路径可用成员" },
+    });
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users",
+        &user_body.to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "provision 应成功: {status} {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let uid = json_of(&resp)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<i64>()
+        .expect("用户 id");
+
+    // ① 全部为不存在成员 → 报告**首个**缺失 id
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "displayName": "负路径组A",
+        "members": [{ "value": "990001" }, { "value": "990002" }],
+    });
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Groups",
+        &body.to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "不存在成员建组应 400: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let detail = json_of(&resp)["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        detail.contains("990001"),
+        "应报告首个缺失成员 id，实际 detail={detail}"
+    );
+
+    // ② 合法在前、缺失在后 → 仍整体拒绝，且报缺失者
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "displayName": "负路径组B",
+        "members": [{ "value": uid.to_string() }, { "value": "990003" }],
+    });
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Groups",
+        &body.to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "混合成员含缺失者应整体拒绝: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let detail = json_of(&resp)["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        detail.contains("990003"),
+        "应报告缺失成员 id 而非合法者，实际 detail={detail}"
+    );
+
+    // ③ 全合法 → 201
+    let gid = create_group_via_api(&ctx, "负路径组C", &[uid]).await;
+    assert!(gid > 0, "合法成员建组应返回有效 gid");
+}

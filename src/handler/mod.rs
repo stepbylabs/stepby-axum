@@ -4,6 +4,9 @@ pub mod auth_handler;
 pub mod common_handler;
 pub mod common_search_handler;
 pub mod data_rule_handler;
+/// 安全/一致性守卫的读取失败不得静默放行总锁（批七十一）
+#[cfg(test)]
+pub mod fail_closed_guard;
 pub mod file_handler;
 pub mod flow_definition_handler;
 pub mod flow_handler;

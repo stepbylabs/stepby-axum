@@ -648,29 +648,43 @@ impl JobScheduler {
                     let stale_after = std::time::Duration::from_secs(ttl + 600);
                     let root = crate::common::upload::resolve_upload_dir("uploads").await;
                     let chunks_root = root.join("__chunks");
-                    let mut removed = 0usize;
-                    let Ok(tenant_dirs) = std::fs::read_dir(&chunks_root) else {
-                        return; // 无分片暂存区（从未使用过分片上传）
-                    };
-                    let now = std::time::SystemTime::now();
-                    for tenant_entry in tenant_dirs.flatten() {
-                        let Ok(session_dirs) = std::fs::read_dir(tenant_entry.path()) else {
-                            continue;
+                    // b71：目录扫描/删除为阻塞 fs（read_dir/remove_dir_all），慢盘或大目录时
+                    // 会阻塞 Tokio worker——包 spawn_blocking（与 monitor_log_handler 同模式）
+                    let removed = tokio::task::spawn_blocking(move || -> usize {
+                        let mut removed = 0usize;
+                        // 无分片暂存区（从未使用过分片上传）时返回 0
+                        let Ok(tenant_dirs) = std::fs::read_dir(&chunks_root) else {
+                            return 0;
                         };
-                        for session_entry in session_dirs.flatten() {
-                            let stale = session_entry
-                                .metadata()
-                                .and_then(|m| m.modified())
-                                .ok()
-                                .and_then(|mtime| now.duration_since(mtime).ok())
-                                .is_some_and(|age| age > stale_after);
-                            if stale && std::fs::remove_dir_all(session_entry.path()).is_ok() {
-                                removed += 1;
+                        let now = std::time::SystemTime::now();
+                        for tenant_entry in tenant_dirs.flatten() {
+                            let Ok(session_dirs) = std::fs::read_dir(tenant_entry.path()) else {
+                                continue;
+                            };
+                            for session_entry in session_dirs.flatten() {
+                                let stale = session_entry
+                                    .metadata()
+                                    .and_then(|m| m.modified())
+                                    .ok()
+                                    .and_then(|mtime| now.duration_since(mtime).ok())
+                                    .is_some_and(|age| age > stale_after);
+                                if stale && std::fs::remove_dir_all(session_entry.path()).is_ok() {
+                                    removed += 1;
+                                }
                             }
+                            // 租户目录空了顺带清掉（保持暂存区扁平）
+                            let _ = std::fs::remove_dir(tenant_entry.path());
                         }
-                        // 租户目录空了顺带清掉（保持暂存区扁平）
-                        let _ = std::fs::remove_dir(tenant_entry.path());
-                    }
+                        removed
+                    })
+                    .await;
+                    let removed = match removed {
+                        Ok(n) => n,
+                        Err(e) => {
+                            tracing::warn!("chunk_cleanup: spawn_blocking join 失败: {e}");
+                            0
+                        }
+                    };
                     if removed > 0 {
                         tracing::info!(
                             "chunk_cleanup: 已清理过期分片目录 {removed} 个（TTL={ttl}s）"
@@ -1347,7 +1361,16 @@ async fn execute_with_logging(
             tracing::debug!("任务 {} 禁止并发，跳过本次执行", job.job_name);
             // 释放分布式锁（本实例并发跳过，允许其他实例或其他周期执行）
             // P0-6/30 改进：使用 CAS 释放，避免误删其他实例持有的锁
-            let _ = store.lock_release(&lock_handle).await;
+            // b71 吞错治理：释放失败必须留痕——未释放的锁要等 TTL 才自动过期，
+            // 期间该任务在所有实例上都被跳过；原 `let _ =` 让这种"任务静默停摆 N 分钟"
+            // 在日志里完全没有信号。
+            if let Err(e) = store.lock_release(&lock_handle).await {
+                tracing::warn!(
+                    job = %job.job_name,
+                    error = %e,
+                    "并发跳过后的分布式锁释放失败：该任务将冻结到锁 TTL 自然过期"
+                );
+            }
             return;
         }
     };

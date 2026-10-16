@@ -45,15 +45,32 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 /// 截断为 100 行导致的导出数据错误。
 pub const EXPORT_MAX_ROWS: u64 = 50000;
 
+/// 手写分页点位的 offset 计算——**全仓 offset 推导的单一事实源**。
+///
+/// `PageDomain` 覆盖不到的场景（service 直接收 `page_num/page_size` 形参、SCIM 的
+/// `startIndex/count`、归档锚点列表等）一律走本函数，不得再各写一份算式。
+///
+/// 口径（与 [`PageDomain::offset`] 完全一致）：
+/// - `page_num = 0` 归一到第 1 页（避免"第 0 页 = 第 1 页"的语义歧义，见 P2）；
+/// - 乘法 `saturating_mul` 后再钳到 [`i64::MAX`]：超大页码在 debug 构建会 panic、release
+///   构建会回绕成任意 offset（等价于随机跳页），两者都是可被单个查询参数触发的可用性缺陷；
+///   再钳上界是因为下游 raw SQL 分页边界存在 `offset as i64` 转换（如
+///   `repository::sys_notice_read`），饱和到 `u64::MAX` 会翻成负数让数据库报错——
+///   而"深到不存在的页"正确语义是返回空集。
+/// - `limit` 由调用方负责封顶（[`MAX_PAGE_SIZE`] 或业务自有上限），本函数不重复钳制，
+///   以免出现"offset 按封顶值算、LIMIT 按原值算"的错位跳行。
+pub fn offset_of(page_num: u64, limit: u64) -> u64 {
+    let page_num = if page_num == 0 { 1 } else { page_num };
+    page_num
+        .saturating_sub(1)
+        .saturating_mul(limit)
+        .min(i64::MAX as u64)
+}
+
 impl PageDomain {
     /// 计算 offset（0-based）
     pub fn offset(&self) -> u64 {
-        // 使用已封顶的 limit()（page_size.min(MAX_PAGE_SIZE)），并对乘法做 saturating，
-        // 防止超大 page_size/page_num 触发 u64 整数溢出（release 回绕 / debug panic，构成 DoS 面）
-        // P2：page_num=0 防御性归一到第 1 页（原 saturating_sub 得 0，与第 1 页 offset 相同，
-        // 前端误传 0 会重复返回第一页，语义不明确）
-        let page_num = if self.page_num == 0 { 1 } else { self.page_num };
-        page_num.saturating_sub(1).saturating_mul(self.limit())
+        offset_of(self.page_num, self.limit())
     }
 
     /// 获取 limit（即 page_size，已限制上限）
@@ -305,15 +322,40 @@ mod tests {
     }
 
     #[test]
-    fn page_domain_offset_saturates_on_overflow() {
-        // page_num/page_size 极大 → saturating_mul 不 panic，返回 u64::MAX
+    fn page_domain_offset_clamps_to_i64_max_on_overflow() {
+        // b71 单一事实源治理：上界钳到 `i64::MAX` 而非饱和到 `u64::MAX`——
+        // 下游 raw SQL 分页边界存在 `offset as i64` 转换（repository::sys_notice_read），
+        // u64 饱和值会翻成负数让数据库报错，而"深到不存在的页"正确语义是返回空集。
         let d = PageDomain {
             page_num: u64::MAX,
             page_size: u64::MAX,
             ..PageDomain::default()
         };
-        // limit 先封顶 100，(MAX-1)*100 saturating
-        assert_eq!(d.offset(), u64::MAX.saturating_sub(1).saturating_mul(100));
+        assert_eq!(d.offset(), i64::MAX as u64);
+        assert!(
+            i64::try_from(d.offset()).is_ok(),
+            "offset 必须可无损转 i64（否则拼进 SQL 会变负数）"
+        );
+    }
+
+    /// `offset_of` 四象限 + 与 `PageDomain::offset` 同口径（防止两处算式漂移）
+    #[test]
+    fn offset_of_matrix_and_parity_with_page_domain() {
+        assert_eq!(offset_of(1, 10), 0);
+        assert_eq!(offset_of(4, 25), 75);
+        assert_eq!(offset_of(0, 10), 0, "page_num=0 应归一到第 1 页");
+        assert_eq!(offset_of(3, 0), 0, "limit=0 不得产生非零 offset");
+        assert_eq!(offset_of(u64::MAX, 100), i64::MAX as u64);
+        assert_eq!(offset_of(u64::MAX, u64::MAX), i64::MAX as u64);
+        // 手写点位与 PageDomain 必须给出同一个 offset
+        for (num, size) in [(1u64, 10u64), (7, 20), (0, 10), (999, 3), (u64::MAX, 100)] {
+            let d = PageDomain {
+                page_num: num,
+                page_size: size,
+                ..PageDomain::default()
+            };
+            assert_eq!(d.offset(), offset_of(num, d.limit()));
+        }
     }
 
     #[test]

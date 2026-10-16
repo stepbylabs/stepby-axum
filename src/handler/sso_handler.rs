@@ -133,18 +133,20 @@ pub async fn discovery(
     responses(
         (status = 200, description = "JWKS（聚合启用 RS256 客户端公钥）", body = serde_json::Value),
         (status = 404, description = "SSO 未启用"),
+        (status = 500, description = "客户端列表读取失败（b71：不再降级发布空 keys，见 sso_service::jwks）"),
     ),
     security(()),
     tag = "sso"
 )]
-pub async fn jwks(State(state): State<Arc<AppState>>) -> Response {
+pub async fn jwks(State(state): State<Arc<AppState>>) -> Result<Response, AppError> {
     if !state.config.sso.enabled {
-        return oidc_error_response(
+        return Ok(oidc_error_response(
             StatusCode::NOT_FOUND,
             &OidcError::new("not_found", crate::tr!("error.sso.disabled")),
-        );
+        ));
     }
-    with_no_store((StatusCode::OK, Json(state.sso_service.jwks().await)).into_response())
+    let doc = state.sso_service.jwks().await?;
+    Ok(with_no_store((StatusCode::OK, Json(doc)).into_response()))
 }
 
 /// GET /sso/authorize

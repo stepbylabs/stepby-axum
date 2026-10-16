@@ -194,6 +194,23 @@ impl SysUserRepository {
             .await
     }
 
+    /// 按登录名**批查**未删除用户（del_flag = '0'，与 [`Self::find_active_by_user_name`] 同口径）。
+    ///
+    /// b71 N+1 治理：xlsx 导入的阶段 2 原为"每个登录名一次点查"（千行导入 = 千次往返）。
+    pub async fn find_active_by_user_names(
+        &self,
+        user_names: &[String],
+    ) -> Result<Vec<Model>, DbErr> {
+        if user_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysUser::find()
+            .filter(Column::UserName.is_in(user_names))
+            .filter(Column::DelFlag.eq("0"))
+            .all(self.base.db())
+            .await
+    }
+
     /// 按用户 ID 查询未删除用户（del_flag = '0'），OAuth 绑定校验用
     pub async fn find_active_by_user_id(&self, user_id: i64) -> Result<Option<Model>, DbErr> {
         SysUser::find()

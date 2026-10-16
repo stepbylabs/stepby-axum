@@ -154,20 +154,30 @@ impl ScimGroupService {
             .all(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
-        let mut members = Vec::with_capacity(member_rows.len());
-        for mr in member_rows {
-            let display = sys_user::Entity::find_by_id(mr.user_id)
-                .one(self.db())
+        // b71 N+1 治理：原实现循环逐个 find_by_id 取昵称，且 DB 错误被 `.ok()` 静默吞掉
+        // （成员昵称静默缺失、故障不可观测）。改为一次 is_in 批查 + 错误显式上抛；
+        // 用户行缺失（已删除）时 display=None，与 RFC 7644 的可选 display 语义一致。
+        let user_ids: Vec<i64> = member_rows.iter().map(|mr| mr.user_id).collect();
+        let nick_names: std::collections::HashMap<i64, String> = if user_ids.is_empty() {
+            Default::default()
+        } else {
+            sys_user::Entity::find()
+                .filter(sys_user::Column::UserId.is_in(user_ids))
+                .all(self.db())
                 .await
-                .ok()
-                .flatten()
-                .map(|u| u.nick_name);
-            members.push(ScimGroupMemberRef {
+                .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
+                .into_iter()
+                .map(|u| (u.user_id, u.nick_name))
+                .collect()
+        };
+        let members = member_rows
+            .iter()
+            .map(|mr| ScimGroupMemberRef {
                 value: mr.user_id.to_string(),
                 ref_: format!("{base_url}/scim/v2/Users/{}", mr.user_id),
-                display,
-            });
-        }
+                display: nick_names.get(&mr.user_id).cloned(),
+            })
+            .collect();
         Ok(ScimGroupResource {
             schemas: vec![SCIM_GROUP_SCHEMA.to_string()],
             id: m.group_id.to_string(),
@@ -281,7 +291,9 @@ impl ScimGroupService {
     ) -> Result<ScimGroupListResponse, ScimError> {
         use sea_orm::Statement;
         let backend = self.db().get_database_backend();
-        let start = start_index.max(1);
+        // 上界钳制到 `i64::MAX`：下方 OFFSET 以字面量拼进 SQL，而 Postgres 要求
+        // `OFFSET` ∈ [0, 9223372036854775807]，超大 `startIndex` 会让整条查询报错 → 500。
+        let start = start_index.clamp(1, i64::MAX as u64);
         let count = count.clamp(1, 200);
         // Postgres 需 $n 占位符，Sqlite/MySQL 用 ?（值均参数化绑定，杜绝拼接注入）
         let ph = |i: usize| -> String {
@@ -375,14 +387,22 @@ impl ScimGroupService {
                 ids.push(uid);
             }
         }
-        for uid in &ids {
-            let exists = sys_user::Entity::find_by_id(*uid)
-                .one(self.db())
+        // b71 N+1 治理：成员存在性由循环逐个 find_by_id 收敛为一次 `is_in` 批查；
+        // 报错文案与"按 ids 原序报告首个缺失成员"的语义保持不变。
+        if !ids.is_empty() {
+            let alive: std::collections::HashSet<i64> = sys_user::Entity::find()
+                .filter(sys_user::Column::UserId.is_in(ids.clone()))
+                .all(self.db())
                 .await
                 .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
-                .filter(|u| u.del_flag.as_deref() != Some("2"));
-            if exists.is_none() {
-                return Err(ScimError::new(400, format!("member user not found: {uid}")));
+                .into_iter()
+                .filter(|u| u.del_flag.as_deref() != Some("2"))
+                .map(|u| u.user_id)
+                .collect();
+            for uid in &ids {
+                if !alive.contains(uid) {
+                    return Err(ScimError::new(400, format!("member user not found: {uid}")));
+                }
             }
         }
         Ok(ids)
@@ -567,11 +587,19 @@ impl ScimGroupService {
                         let value = op.get("value").cloned().unwrap_or(serde_json::Value::Null);
                         match (op_name.as_str(), path.as_str()) {
                             ("add", "members") => {
+                                // b71：绑定集合按组一次加载（原每个成员各重读一遍 GroupBinding）
+                                let targets = member_target_ids(txn, current.group_id).await?;
                                 for uid in parse_member_values(&value)? {
                                     validate_member(txn, uid).await?;
                                     insert_member(txn, current.group_id, uid, now).await?;
-                                    grant_member(txn, current.group_id, &current.mapping_type, uid)
-                                        .await?;
+                                    grant_member(
+                                        txn,
+                                        current.group_id,
+                                        &current.mapping_type,
+                                        uid,
+                                        &targets,
+                                    )
+                                    .await?;
                                 }
                             }
                             ("remove", "members") => {
@@ -684,7 +712,7 @@ impl ScimGroupService {
         let total = q.clone().count(self.db()).await.map_err(db_err_500)?;
         let rows = q
             .order_by_asc(GroupCol::GroupId)
-            .offset((page.saturating_sub(1)) * page_size)
+            .offset(crate::common::page::offset_of(page, page_size))
             .limit(page_size)
             .all(self.db())
             .await
@@ -727,17 +755,30 @@ impl ScimGroupService {
             .all(self.db())
             .await
             .map_err(db_err_500)?;
-        let mut members = Vec::with_capacity(member_rows.len());
-        for mr in member_rows {
-            let u = sys_user::Entity::find_by_id(mr.user_id)
-                .one(self.db())
+        // b71 N+1 治理：成员用户一次 is_in 批查（原循环逐个 find_by_id），保持
+        // 「成员用户不存在 → 404」与 member_rows 原序语义不变
+        let user_ids: Vec<i64> = member_rows.iter().map(|mr| mr.user_id).collect();
+        let users: std::collections::HashMap<i64, sys_user::Model> = if user_ids.is_empty() {
+            Default::default()
+        } else {
+            sys_user::Entity::find()
+                .filter(sys_user::Column::UserId.is_in(user_ids))
+                .all(self.db())
                 .await
                 .map_err(db_err_500)?
+                .into_iter()
+                .map(|u| (u.user_id, u))
+                .collect()
+        };
+        let mut members = Vec::with_capacity(member_rows.len());
+        for mr in member_rows {
+            let u = users
+                .get(&mr.user_id)
                 .ok_or_else(|| ScimError::new(404, format!("成员用户不存在: {}", mr.user_id)))?;
             members.push(ScimGroupAdminMember {
                 user_id: u.user_id,
-                user_name: u.user_name,
-                nick_name: u.nick_name,
+                user_name: u.user_name.clone(),
+                nick_name: u.nick_name.clone(),
             });
         }
         let bindings = GroupBinding::find()
@@ -787,14 +828,38 @@ impl ScimGroupService {
         // 绑定目标存在性校验
         if let Some(targets) = &binding_target_ids {
             let effective_type = mapping_type.as_deref().unwrap_or(&m.mapping_type);
+            // b71 N+1 治理：目标存在性校验由循环逐个 find_by_id 改为一次 is_in 批查
+            // + 逐目标校验（错误文案、校验顺序与租户越权防护语义全部保持不变）
+            let roles: std::collections::HashMap<i64, crate::entity::sys_role::Model> =
+                if effective_type == MAPPING_ROLE && !targets.is_empty() {
+                    crate::entity::sys_role::Entity::find()
+                        .filter(crate::entity::sys_role::Column::RoleId.is_in(targets.clone()))
+                        .all(self.db())
+                        .await
+                        .map_err(db_err_500)?
+                        .into_iter()
+                        .map(|r| (r.role_id, r))
+                        .collect()
+                } else {
+                    Default::default()
+                };
+            let depts: std::collections::HashMap<i64, crate::entity::sys_dept::Model> =
+                if effective_type == MAPPING_DEPT && !targets.is_empty() {
+                    crate::entity::sys_dept::Entity::find()
+                        .filter(crate::entity::sys_dept::Column::DeptId.is_in(targets.clone()))
+                        .all(self.db())
+                        .await
+                        .map_err(db_err_500)?
+                        .into_iter()
+                        .map(|d| (d.dept_id, d))
+                        .collect()
+                } else {
+                    Default::default()
+                };
             for t in targets {
                 match effective_type {
                     MAPPING_ROLE => {
-                        let role = crate::entity::sys_role::Entity::find_by_id(*t)
-                            .one(self.db())
-                            .await
-                            .map_err(db_err_500)?
-                            .filter(|r| r.del_flag.as_deref() != Some("2"));
+                        let role = roles.get(t).filter(|r| r.del_flag.as_deref() != Some("2"));
                         let Some(role) = role else {
                             return Err(ScimError::new(400, format!("角色不存在: {t}")));
                         };
@@ -808,11 +873,7 @@ impl ScimGroupService {
                         }
                     }
                     MAPPING_DEPT => {
-                        let dept = crate::entity::sys_dept::Entity::find_by_id(*t)
-                            .one(self.db())
-                            .await
-                            .map_err(db_err_500)?;
-                        let Some(dept) = dept else {
+                        let Some(dept) = depts.get(t) else {
                             return Err(ScimError::new(400, format!("部门不存在: {t}")));
                         };
                         // 同理：跨租户部门绑定同样是越权（组→部门映射会改本租户用户的兼职归属）
@@ -1050,73 +1111,115 @@ fn is_unique_violation(e: &sea_orm::DbErr) -> bool {
         || s.contains("Duplicate")
 }
 
+/// 组的授权目标集合（b71 N+1 治理：从 `grant_member` 内移出，改由调用方**按组一次加载**；
+/// 原实现每个成员都重读同一批 `sys_scim_group_binding` 行）。
+async fn member_target_ids<C: ConnectionTrait>(
+    txn: &C,
+    group_id: i64,
+) -> Result<Vec<i64>, ScimError> {
+    Ok(GroupBinding::find()
+        .filter(BindingCol::GroupId.eq(group_id))
+        .all(txn)
+        .await
+        .map_err(db_err_500)?
+        .into_iter()
+        .map(|b| b.target_id)
+        .collect())
+}
+
+/// 组成员 grant 的批形态：一次 `is_in` 存在性查询取出该用户已持有的目标，只为缺失目标插入。
+///
+/// b71 N+1 治理：原实现（`grant_member` / `grant_single`）对每个目标单独 `.one(txn)` 点查，
+/// 绑定 diff 场景放大为 `目标数 × 成员数` 次查询。语义保持不变：
+/// **已存在的行（admin 手授或其它组来源）一律跳过、不覆盖来源**；未知 `mapping_type` 静默跳过
+/// （与旧 `grant_single` 一致，`grant_member` 侧的显式报错由自身守卫保留）。
+async fn grant_member_targets<C: ConnectionTrait>(
+    txn: &C,
+    group_id: i64,
+    mapping_type: &str,
+    user_id: i64,
+    targets: &[i64],
+) -> Result<(), ScimError> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let src = scim_source(group_id);
+    match mapping_type {
+        MAPPING_ROLE => {
+            let held: std::collections::HashSet<i64> = SysUserRole::find()
+                .filter(UserRoleCol::UserId.eq(user_id))
+                .filter(UserRoleCol::RoleId.is_in(targets))
+                .all(txn)
+                .await
+                .map_err(db_err_500)?
+                .into_iter()
+                .map(|r| r.role_id)
+                .collect();
+            for role_id in targets.iter().filter(|t| !held.contains(t)) {
+                let am = UserRoleAM {
+                    user_id: Set(user_id),
+                    role_id: Set(*role_id),
+                    source: Set(src.clone()),
+                };
+                if let Err(e) = SysUserRole::insert(am).exec(txn).await
+                    && !is_unique_violation(&e)
+                {
+                    return Err(db_err_500(e));
+                }
+            }
+        }
+        MAPPING_DEPT => {
+            let held: std::collections::HashSet<i64> = SysUserDept::find()
+                .filter(UserDeptCol::UserId.eq(user_id))
+                .filter(UserDeptCol::DeptId.is_in(targets))
+                .all(txn)
+                .await
+                .map_err(db_err_500)?
+                .into_iter()
+                .map(|d| d.dept_id)
+                .collect();
+            for dept_id in targets.iter().filter(|t| !held.contains(t)) {
+                let am = UserDeptAM {
+                    id: sea_orm::NotSet,
+                    user_id: Set(user_id),
+                    dept_id: Set(*dept_id),
+                    source: Set(src.clone()),
+                    create_time: Set(Some(crate::common::datetime::now_naive())),
+                };
+                if let Err(e) = SysUserDept::insert(am).exec(txn).await
+                    && !is_unique_violation(&e)
+                {
+                    return Err(db_err_500(e));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// 组成员 grant（联动引擎核心）：
 /// - role 组：绑定角色逐个 upsert sys_user_role(source='scim:{gid}')；
 ///   行已存在（admin/其它组来源）→ 跳过（不覆盖）
 /// - dept 组：绑定部门 upsert sys_user_dept(source='scim:{gid}')；已有
 ///   admin 行同部门 → 跳过（人工优先）
+///
+/// `targets` 由调用方按组一次加载（见 [`member_target_ids`]）；未知 mappingType 且
+/// 确有绑定时才报错（与改造前的循环体语义逐字一致）。
 async fn grant_member<C: ConnectionTrait>(
     txn: &C,
     group_id: i64,
     mapping_type: &str,
     user_id: i64,
+    targets: &[i64],
 ) -> Result<(), ScimError> {
-    let bindings = GroupBinding::find()
-        .filter(BindingCol::GroupId.eq(group_id))
-        .all(txn)
-        .await
-        .map_err(db_err_500)?;
-    let src = scim_source(group_id);
-    for b in bindings {
-        match mapping_type {
-            MAPPING_ROLE => {
-                let exists = SysUserRole::find()
-                    .filter(UserRoleCol::UserId.eq(user_id))
-                    .filter(UserRoleCol::RoleId.eq(b.target_id))
-                    .one(txn)
-                    .await
-                    .map_err(db_err_500)?;
-                if exists.is_none() {
-                    let am = UserRoleAM {
-                        user_id: Set(user_id),
-                        role_id: Set(b.target_id),
-                        source: Set(src.clone()),
-                    };
-                    if let Err(e) = SysUserRole::insert(am).exec(txn).await
-                        && !is_unique_violation(&e)
-                    {
-                        return Err(db_err_500(e));
-                    }
-                }
-            }
-            MAPPING_DEPT => {
-                let exists = SysUserDept::find()
-                    .filter(UserDeptCol::UserId.eq(user_id))
-                    .filter(UserDeptCol::DeptId.eq(b.target_id))
-                    .one(txn)
-                    .await
-                    .map_err(db_err_500)?;
-                if exists.is_none() {
-                    let am = UserDeptAM {
-                        id: sea_orm::NotSet,
-                        user_id: Set(user_id),
-                        dept_id: Set(b.target_id),
-                        source: Set(src.clone()),
-                        create_time: Set(Some(crate::common::datetime::now_naive())),
-                    };
-                    if let Err(e) = SysUserDept::insert(am).exec(txn).await
-                        && !is_unique_violation(&e)
-                    {
-                        return Err(db_err_500(e));
-                    }
-                }
-            }
-            other => {
-                return Err(ScimError::new(500, format!("未知 mappingType: {other}")));
-            }
-        }
+    if !targets.is_empty() && !matches!(mapping_type, MAPPING_ROLE | MAPPING_DEPT) {
+        return Err(ScimError::new(
+            500,
+            format!("未知 mappingType: {mapping_type}"),
+        ));
     }
-    Ok(())
+    grant_member_targets(txn, group_id, mapping_type, user_id, targets).await
 }
 
 /// 组成员 revoke（只撤本组 source 行；admin 手授与其它组来源不动）
@@ -1156,10 +1259,12 @@ async fn diff_members<C: ConnectionTrait>(
         .await
         .map_err(db_err_500)?;
     let current_ids: Vec<i64> = current.iter().map(|m| m.user_id).collect();
+    // b71：绑定集合一次加载，供全部新增成员复用
+    let targets = member_target_ids(txn, group_id).await?;
     for uid in new_members {
         if !current_ids.contains(uid) {
             insert_member(txn, group_id, *uid, now).await?;
-            grant_member(txn, group_id, mapping_type, *uid).await?;
+            grant_member(txn, group_id, mapping_type, *uid, &targets).await?;
         }
     }
     for uid in &current_ids {
@@ -1192,23 +1297,30 @@ async fn apply_bindings_diff<C: ConnectionTrait>(
         .await
         .map_err(db_err_500)?;
     // 新增目标：插入绑定 + 全成员 grant
+    //
+    // b71 N+1 治理：原实现按 `目标 × 成员` 逐个点查再插入（T×M 次查询）；改为先收集本轮
+    // 新增目标，再**按成员**做一次 `is_in` 批量存在性查询（M 次查询 + 仅缺失项插入）。
+    // "已存在行跳过、不覆盖来源"的语义不变。
+    let mut added: Vec<i64> = Vec::new();
     for t in new_targets {
-        if !current_ids.contains(t) {
-            let am = BindingAM {
-                id: sea_orm::NotSet,
-                group_id: Set(group_id),
-                target_id: Set(*t),
-                create_time: Set(Some(crate::common::datetime::now_naive())),
-            };
-            if let Err(e) = GroupBinding::insert(am).exec(txn).await
-                && !is_unique_violation(&e)
-            {
-                return Err(db_err_500(e));
-            }
-            for m in &members {
-                grant_single(txn, group_id, mapping_type, m.user_id, *t).await?;
-            }
+        if current_ids.contains(t) {
+            continue;
         }
+        let am = BindingAM {
+            id: sea_orm::NotSet,
+            group_id: Set(group_id),
+            target_id: Set(*t),
+            create_time: Set(Some(crate::common::datetime::now_naive())),
+        };
+        if let Err(e) = GroupBinding::insert(am).exec(txn).await
+            && !is_unique_violation(&e)
+        {
+            return Err(db_err_500(e));
+        }
+        added.push(*t);
+    }
+    for m in &members {
+        grant_member_targets(txn, group_id, mapping_type, m.user_id, &added).await?;
     }
     // 移除目标：全成员 revoke 该目标（仅本组 source）+ 删绑定
     for t in &current_ids {
@@ -1240,63 +1352,6 @@ async fn apply_bindings_diff<C: ConnectionTrait>(
                 .await
                 .map_err(db_err_500)?;
         }
-    }
-    Ok(())
-}
-
-/// 单目标 grant（绑定 diff 专用；与 grant_member 同语义但限定单 target）
-async fn grant_single<C: ConnectionTrait>(
-    txn: &C,
-    group_id: i64,
-    mapping_type: &str,
-    user_id: i64,
-    target_id: i64,
-) -> Result<(), ScimError> {
-    let src = scim_source(group_id);
-    match mapping_type {
-        MAPPING_ROLE => {
-            let exists = SysUserRole::find()
-                .filter(UserRoleCol::UserId.eq(user_id))
-                .filter(UserRoleCol::RoleId.eq(target_id))
-                .one(txn)
-                .await
-                .map_err(db_err_500)?;
-            if exists.is_none() {
-                let am = UserRoleAM {
-                    user_id: Set(user_id),
-                    role_id: Set(target_id),
-                    source: Set(src),
-                };
-                if let Err(e) = SysUserRole::insert(am).exec(txn).await
-                    && !is_unique_violation(&e)
-                {
-                    return Err(db_err_500(e));
-                }
-            }
-        }
-        MAPPING_DEPT => {
-            let exists = SysUserDept::find()
-                .filter(UserDeptCol::UserId.eq(user_id))
-                .filter(UserDeptCol::DeptId.eq(target_id))
-                .one(txn)
-                .await
-                .map_err(db_err_500)?;
-            if exists.is_none() {
-                let am = UserDeptAM {
-                    id: sea_orm::NotSet,
-                    user_id: Set(user_id),
-                    dept_id: Set(target_id),
-                    source: Set(src),
-                    create_time: Set(Some(crate::common::datetime::now_naive())),
-                };
-                if let Err(e) = SysUserDept::insert(am).exec(txn).await
-                    && !is_unique_violation(&e)
-                {
-                    return Err(db_err_500(e));
-                }
-            }
-        }
-        _ => {}
     }
     Ok(())
 }

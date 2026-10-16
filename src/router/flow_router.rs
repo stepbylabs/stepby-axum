@@ -44,6 +44,7 @@ pub fn flow_routes() -> Router<Arc<AppState>> {
             post(flow_handler::countersign_add),
         )
         // 减签：从当前节点移除一名会签审批人（G-02 M2）
+        // b71 契约审计：编排预留，零前端调用（加签有 UI，减签暂走 API）→ router/mod.rs 清单 ③
         .route(
             "/system/flow/task/{taskId}/countersign-del",
             post(flow_handler::countersign_del),

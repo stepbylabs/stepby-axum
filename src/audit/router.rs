@@ -19,5 +19,6 @@ pub fn audit_change_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/system/audit-change/list", get(handler::list))
         .route("/system/audit-change/export", get(handler::export))
+        // b71 契约审计：GET 详情零前端调用（前端只有 list/export），保留 REST 完整性 → router/mod.rs 清单 ①
         .route("/system/audit-change/{id}", get(handler::get_info))
 }

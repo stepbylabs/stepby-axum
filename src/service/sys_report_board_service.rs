@@ -461,10 +461,15 @@ impl SysReportBoardService {
         }
         // 租户维度：None = 平台操作者（不过滤），Some(tid) = 仅本租户
         let tenant = crate::common::tenant::tenant_scope(operator_tid);
+        // b71 吞错治理：本族 5 个数据源里 4 个原先把 DB 故障折叠成空数组/0（`unwrap_or_default`
+        // / `unwrap_or(0)`），看板因此把"数据库挂了"渲染成"用户零增长/零消息"——真实故障与
+        // 数据下滑不可区分，且零日志线索。现在故障一律上抛（`resolve_source` 本就返回 Result，
+        // 调用方与前端错误通道不变）。`online_count` 保留既有"Redis 故障降级为 0 + WARN"设计：
+        // 它不是静默，是显式记录在案的降级。
         let items = match source_key {
-            "login_trend" => self.src_login_trend(range_days, tenant, true).await,
-            "login_fail_trend" => self.src_login_trend(range_days, tenant, false).await,
-            "user_growth" => self.src_user_growth(range_days, tenant).await,
+            "login_trend" => self.src_login_trend(range_days, tenant, true).await?,
+            "login_fail_trend" => self.src_login_trend(range_days, tenant, false).await?,
+            "user_growth" => self.src_user_growth(range_days, tenant).await?,
             "online_count" => self.src_online_count(tenant).await,
             "today_anomaly_ips" => {
                 let (_, zh, en) = SOURCES
@@ -477,12 +482,16 @@ impl SysReportBoardService {
                     value: self
                         .logininfor_service
                         .count_today_failed_ips(tenant)
-                        .await
-                        .unwrap_or(0),
+                        .await?,
                 }]
             }
-            "msg_delivery" => self.src_msg_delivery(tenant).await,
-            _ => Vec::new(), // 白名单已挡住，理论不可达
+            "msg_delivery" => self.src_msg_delivery(tenant).await?,
+            other => {
+                // 白名单已挡住，理论不可达；不可达时显式报错而非静默返回空数据
+                return Err(ServiceError::internal(&format!(
+                    "数据源 {other} 未接入实现"
+                )));
+            }
         };
         Ok(SourceDataVo {
             source_key: source_key.to_string(),
@@ -497,11 +506,11 @@ impl SysReportBoardService {
         days: i64,
         tenant: Option<i64>,
         sum_only: bool,
-    ) -> Vec<SourcePoint> {
-        self.logininfor_service
+    ) -> Result<Vec<SourcePoint>, ServiceError> {
+        Ok(self
+            .logininfor_service
             .daily_stats(days, tenant)
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|d| {
                 let value = if sum_only { d.success + d.fail } else { d.fail };
@@ -510,12 +519,16 @@ impl SysReportBoardService {
                     value,
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// 用户增长（每日新增用户数；与 dashboard/报表快照 user_stats 同口径：
     /// del_flag != '2' 的 sys_user 按 create_time 日期分组，缺数日期补 0）
-    async fn src_user_growth(&self, days: i64, tenant: Option<i64>) -> Vec<SourcePoint> {
+    async fn src_user_growth(
+        &self,
+        days: i64,
+        tenant: Option<i64>,
+    ) -> Result<Vec<SourcePoint>, ServiceError> {
         let today = crate::common::datetime::today_utc();
         let start_date = today - Duration::days(days - 1);
         let begin = start_date.and_time(NaiveTime::MIN);
@@ -526,7 +539,7 @@ impl SysReportBoardService {
         if let Some(tid) = tenant {
             query = query.filter(UserColumn::TenantId.eq(tid));
         }
-        let rows = query.all(&self.db).await.unwrap_or_default();
+        let rows = query.all(&self.db).await?;
 
         let mut map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for u in &rows {
@@ -534,7 +547,7 @@ impl SysReportBoardService {
                 *map.entry(ct.format("%Y-%m-%d").to_string()).or_insert(0) += 1;
             }
         }
-        (0..days)
+        Ok((0..days)
             .map(|i| {
                 let key = (start_date + Duration::days(i))
                     .format("%Y-%m-%d")
@@ -544,7 +557,7 @@ impl SysReportBoardService {
                     label: key,
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// 当前在线用户数（与 dashboard `count_online_sessions` 同口径：
@@ -633,7 +646,10 @@ impl SysReportBoardService {
 
     /// 消息投递状态分布（与报表快照 msg_stats 同口径：sys_msg_send_log 按
     /// status 计数——0=成功 1=失败 2=待重试；出租户不过滤）
-    async fn src_msg_delivery(&self, tenant: Option<i64>) -> Vec<SourcePoint> {
+    async fn src_msg_delivery(
+        &self,
+        tenant: Option<i64>,
+    ) -> Result<Vec<SourcePoint>, ServiceError> {
         let count_by = |status: &'static str| {
             let mut q = SysMsgSendLog::find();
             if let Some(tid) = tenant {
@@ -642,13 +658,13 @@ impl SysReportBoardService {
             q.filter(MsgLogColumn::Status.eq(status)).count(&self.db)
         };
         let (success, failed, pending) = (
-            count_by("0").await.unwrap_or(0) as i64,
-            count_by("1").await.unwrap_or(0) as i64,
-            count_by("2").await.unwrap_or(0) as i64,
+            count_by("0").await? as i64,
+            count_by("1").await? as i64,
+            count_by("2").await? as i64,
         );
         let label =
             |i: usize| crate::common::i18n::pick(MSG_STATUS_LABELS[i].0, MSG_STATUS_LABELS[i].1);
-        vec![
+        Ok(vec![
             SourcePoint {
                 label: label(0).to_string(),
                 value: success,
@@ -661,7 +677,7 @@ impl SysReportBoardService {
                 label: label(2).to_string(),
                 value: pending,
             },
-        ]
+        ])
     }
 }
 

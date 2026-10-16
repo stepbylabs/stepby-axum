@@ -498,17 +498,17 @@ pub async fn edit(
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     // 多租户 Phase 3：记录被操作用户所属租户，供审计 target_tenant_id（平台代管场景）
     // 安全审查轮修复：user.updated 事件的租户口径 = **事件主体租户**（目标用户所属租户）
-    // 而非操作者租户——平台管理员（tid=0）代管编辑租户用户时，事件应投递给该租户的回调组
-    let event_tenant_id = state
-        .user_service
-        .get_user_by_id(dto.user_id)
-        .await
-        .ok()
-        .map(|vo| vo.user.tenant_id)
-        .unwrap_or(operator.tenant_id());
-    if let Ok(vo) = state.user_service.get_user_by_id(dto.user_id).await {
-        target_tenant.set(vo.user.tenant_id);
-    }
+    // 而非操作者租户——平台管理员（tid=0）代管编辑租户用户时，事件应投递给该租户的回调组。
+    //
+    // b71 同族收散点（一处读取供两个消费者，且改 fail-closed）：
+    // ① 原实现对**同一用户连查两次**（事件租户一次 + 审计归属一次），纯浪费一轮往返；
+    // ② 两处都把读取失败折叠成"回落操作者租户"——于是平台代管场景下 `user.updated` 事件
+    //    可能被投给**另一个租户**的回调组（跨租户信息投递），而审计留痕也张冠李戴。
+    //    读取失败时后续 `edit_user` 本就会失败，故 fail-closed 不改变用户可见结果，
+    //    只是把"错误归属的事件"从可能变成不可能。
+    let target_vo = state.user_service.get_user_by_id(dto.user_id).await?;
+    let event_tenant_id = target_vo.user.tenant_id;
+    target_tenant.set(event_tenant_id);
     // 提前取出目标用户 ID（dto 将被 edit_user 按值消费）
     let target_user_id = dto.user_id;
     state
@@ -582,19 +582,23 @@ pub async fn remove(
     // 批量 ID 调用新增的 delete_users 事务方法（原子性保证）
     // 多租户 Phase 3：解析被删用户所属租户，全部可解析且唯一时记录审计 target_tenant_id
     // （跨多个租户或存在解析失败时保持 NULL，避免误标归属）
+    //
+    // b71 N+1 治理：这段**只为读一个 tenant_id** 的审计归属预解析，原先逐 ID 调
+    // `get_user_by_id`（每次 = 用户+角色集+部门+oauth 绑定+兼职 ≈5 次往返），
+    // 100 个 ID 的批量删除要先打 ≈500 次查询。改走 service 既有的批量口径
+    // （`tenant_ids_by_user_ids` 单条 `is_in` SELECT user_id,tenant_id）。
+    // "可解析"判定不变：`get_user_by_id` 对 del_flag='2' 返回 not_found，
+    // 而批量方法过滤 del_flag='0'，两者对"存在行"的定义一致。
     {
-        let mut resolved: Vec<i64> = Vec::new();
-        let mut all_resolved = true;
-        for uid in &user_ids {
-            match state.user_service.get_user_by_id(*uid).await {
-                Ok(vo) => {
-                    if !resolved.contains(&vo.user.tenant_id) {
-                        resolved.push(vo.user.tenant_id);
-                    }
-                }
-                Err(_) => all_resolved = false,
-            }
-        }
+        let tid_map = state.user_service.tenant_ids_by_user_ids(&user_ids).await?;
+        let distinct_ids: std::collections::HashSet<i64> = user_ids.iter().copied().collect();
+        let all_resolved = distinct_ids.iter().all(|id| tid_map.contains_key(id));
+        let mut resolved: Vec<i64> = distinct_ids
+            .iter()
+            .filter_map(|id| tid_map.get(id).copied())
+            .collect();
+        resolved.sort_unstable();
+        resolved.dedup();
         if all_resolved && resolved.len() == 1 {
             target_tenant.set(resolved[0]);
         }
@@ -761,9 +765,16 @@ pub async fn anonymize_user(
     target_tenant: TargetTenant,
     Path(user_id): Path<i64>,
 ) -> Result<AjaxResult<UserErasureReport>, AppError> {
-    // 审计 target_tenant_id：记录被匿名化用户的租户归属（平台代管场景）
-    if let Ok(vo) = state.user_service.get_user_by_id(user_id).await {
-        target_tenant.set(vo.user.tenant_id);
+    // 审计 target_tenant_id：记录被匿名化用户的租户归属（平台代管场景）。
+    // b71：改为"容忍缺失 + 必须留痕"而非 fail-closed——erasure 的**幂等契约**是二次调用
+    // 返回 200 + 零计数报告，而 `get_user_by_id` 对已匿名化用户返回 not_found；
+    // 若在此上抛会把合法的幂等重放变成 404（集成测试 test_erasure_full_executes_and_is_idempotent 实测抓到）。
+    // 但归属预读失败不得静默：平台代管留痕会回落操作者租户，必须 WARN 可追。
+    match state.user_service.get_user_by_id(user_id).await {
+        Ok(vo) => target_tenant.set(vo.user.tenant_id),
+        Err(e) => {
+            tracing::warn!(user_id, error = %e, "匿名化审计归属预读未命中（幂等重放/已匿名化属预期路径），target_tenant_id 回落操作者租户")
+        }
     }
     let report = state
         .user_erasure_service

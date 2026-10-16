@@ -35,6 +35,7 @@ pub fn config_routes() -> Router<Arc<AppState>> {
             "/system/uploadConfig/test",
             post(upload_config_handler::test_config),
         )
+        // b71 契约审计：编排预留，零前端调用（存储后端切换走 API）→ router/mod.rs 清单 ③
         .route(
             "/system/uploadConfig/switchBackend",
             post(upload_config_handler::switch_backend),

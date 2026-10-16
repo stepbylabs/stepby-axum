@@ -144,6 +144,7 @@ error:
     platform_protected: Platform root department cannot be modified via tenant API
     ancestors_invalid: Invalid department ancestors data, cannot resolve tenant
     disabled: Single sign-on (SSO) is not enabled
+    jwks_unavailable: Unable to load SSO client list, JWKS temporarily unavailable (retry later; relying parties keep the previous JWKS)
     client_not_found: Client not found
     client_disabled: This client is disabled
     client_id_required: client_id is required

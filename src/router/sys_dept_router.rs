@@ -28,6 +28,7 @@ pub fn dept_routes() -> Router<Arc<AppState>> {
             get(sys_dept_handler::list_exclude),
         )
         // GET /system/dept/treeselect 部门下拉树
+        // b71 契约审计：RuoYi 兼容面，零前端调用（前端用 /system/dept/list 自行组树）→ router/mod.rs 清单 ②
         .route("/system/dept/treeselect", get(sys_dept_handler::treeselect))
         // POST /system/dept 新增部门
         .route("/system/dept", post(sys_dept_handler::add))

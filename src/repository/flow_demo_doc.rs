@@ -144,6 +144,24 @@ impl FlowDemoDocRepository {
             .collect())
     }
 
+    /// 批版状态读取：`doc_id → status`（b71 N+1 治理：一致性巡检 B 原先对每条 pending
+    /// 待办单独 [`Self::find_by_id`]；口径不变——单据不存在即不在集内，判"非 pending"）。
+    pub async fn find_statuses_by_ids(
+        &self,
+        doc_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, String>, DbErr> {
+        if doc_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        Ok(FlowDemoDoc::find()
+            .filter(Column::DocId.is_in(doc_ids))
+            .all(self.base.db())
+            .await?
+            .into_iter()
+            .map(|m| (m.doc_id, m.status))
+            .collect())
+    }
+
     /// 插入
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

@@ -143,7 +143,7 @@ impl DataRuleService {
         let total = sel.clone().count(self.db.as_ref()).await?;
         let items = sel
             .order_by_desc(sys_data_rule::Column::RuleId)
-            .offset((page.saturating_sub(1)) * size)
+            .offset(crate::common::page::offset_of(page, size))
             .limit(size)
             .all(self.db.as_ref())
             .await?;

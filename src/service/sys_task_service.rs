@@ -349,10 +349,11 @@ impl SysTaskService {
     ///
     /// 多租户越权防护：任一所选任务跨越操作者租户即整体拒绝（平台操作者放行）。
     pub async fn delete_tasks(&self, ids: Vec<i64>, operator_tid: i64) -> Result<(), ServiceError> {
-        for id in &ids {
-            if let Some(task) = self.task_repo.find_by_id(*id).await?
-                && !crate::common::tenant::tenant_allowed(operator_tid, task.tenant_id)
-            {
+        // b71 N+1 治理：原循环逐个 find_by_id 仅做租户校验（N 次查询），收敛为一次 is_in 批查。
+        // 语义不变：存在的任务逐一校验租户归属，任一越权即整体拒绝；不存在的 id 放行（物理删除本就无行）。
+        let tasks = self.task_repo.find_by_ids(ids.clone()).await?;
+        for task in &tasks {
+            if !crate::common::tenant::tenant_allowed(operator_tid, task.tenant_id) {
                 return Err(ServiceError::forbidden(&crate::tr!(
                     "error.common.forbidden"
                 )));

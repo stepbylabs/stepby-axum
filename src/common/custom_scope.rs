@@ -180,11 +180,14 @@ fn parse_single(fragment: &str) -> Result<CustomCondition, ParseError> {
         }
     }
 
-    let re = regex::Regex::new(
-        r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=|!=|>=|<=|LIKE|>|<)\s*('(?:''|[^'])*'|-?[0-9]+)\s*$",
-    )
-    .expect("静态正则");
-    let caps = re
+    // b71 性能治理：原实现每次调用 Regex::new（每请求热路径），提为 LazyLock 单次编译
+    static SIMPLE_COND_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=|!=|>=|<=|LIKE|>|<)\s*('(?:''|[^'])*'|-?[0-9]+)\s*$",
+        )
+        .expect("静态正则")
+    });
+    let caps = SIMPLE_COND_RE
         .captures(trimmed)
         .ok_or_else(|| ParseError("不符合 `column op value` 简单文法".into()))?;
 

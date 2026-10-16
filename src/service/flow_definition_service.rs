@@ -4,6 +4,8 @@
 //! 白名单校验器**复验**（防绕过前端直投 API）。
 //! M2 接入点：`FlowGraph` → `NodeSpec` 转换喂给 `sys_flow_service` 推进内核。
 
+use std::collections::HashMap;
+
 use garde::Validate;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
@@ -14,7 +16,9 @@ use utoipa::ToSchema;
 
 use crate::common::error::ServiceError;
 use crate::common::flow_graph::FlowGraph;
-use crate::entity::flow_definition::{ActiveModel as FlowDefActiveModel, Entity as FlowDefEntity};
+use crate::entity::flow_definition::{
+    ActiveModel as FlowDefActiveModel, Column as FlowDefColumn, Entity as FlowDefEntity,
+};
 use crate::entity::prelude::FlowDefinitionModel;
 
 /// 能力位键（governance 注册表 `flow.designer`：off | view | full，默认 off）
@@ -333,24 +337,46 @@ impl FlowDefinitionService {
         }
         // B-1：批量软删收敛进单事务——逐条 update 无事务时，中途失败会留下
         // "部分流程已软删、部分未删"的不一致（调用方无法感知已生效的条目）。
+        // b71 N+1 治理（与 `report_dataset_service::remove_dataset` 同族收散点，原为该批遗漏项）：
+        // 循环逐条 find_by_id + update（2N 次往返）收敛为事务内一次 is_in 批查 +
+        // 按入参顺序逐条 ensure_access（越权报错顺序不变）+ 单条批量 UPDATE。
         let txn = self
             .db
             .begin()
             .await
             .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
+        let rows = FlowDefEntity::find()
+            .filter(FlowDefColumn::FlowId.is_in(flow_ids.clone()))
+            .filter(FlowDefColumn::DelFlag.eq("0"))
+            .all(&txn)
+            .await?;
+        let mut by_id: HashMap<i64, FlowDefinitionModel> =
+            rows.into_iter().map(|m| (m.flow_id, m)).collect();
+        let mut deletable: Vec<i64> = Vec::new();
         for fid in flow_ids {
-            if let Some(m) = FlowDefEntity::find_by_id(fid)
-                .filter(crate::entity::flow_definition::Column::DelFlag.eq("0"))
-                .one(&txn)
-                .await?
-            {
+            if let Some(m) = by_id.remove(&fid) {
                 self.ensure_access(&m, operator_tid)?;
-                let mut am: FlowDefActiveModel = m.into();
-                am.del_flag = Set(Some("1".to_string()));
-                am.update_by = Set(Some(operator.to_string()));
-                am.update_time = Set(Some(crate::common::datetime::now_naive()));
-                am.update(&txn).await?;
+                deletable.push(fid);
             }
+        }
+        if !deletable.is_empty() {
+            let now = crate::common::datetime::now_naive();
+            FlowDefEntity::update_many()
+                .col_expr(
+                    FlowDefColumn::DelFlag,
+                    sea_orm::sea_query::Expr::value(Some("1".to_string())),
+                )
+                .col_expr(
+                    FlowDefColumn::UpdateBy,
+                    sea_orm::sea_query::Expr::value(Some(operator.to_string())),
+                )
+                .col_expr(
+                    FlowDefColumn::UpdateTime,
+                    sea_orm::sea_query::Expr::value(Some(now)),
+                )
+                .filter(FlowDefColumn::FlowId.is_in(deletable))
+                .exec(&txn)
+                .await?;
         }
         txn.commit()
             .await

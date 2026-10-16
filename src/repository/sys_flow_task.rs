@@ -121,6 +121,32 @@ impl SysFlowTaskRepository {
         query.order_by_asc(Column::TaskId).one(self.base.db()).await
     }
 
+    /// 批版存在性探测：给定业务类型下，**哪些** `biz_id` 至少还有一条 pending 待办。
+    ///
+    /// b71 N+1 治理：一致性巡检 A 原先对每个 pending 单据单独
+    /// [`Self::find_first_pending_by_biz`]（limit 个单据 = limit 次往返）。语义等价：
+    /// 同一 `biz_id` 命中即入集，不要求"首条"（原实现只判存在性，取首条仅为省行）。
+    pub async fn find_pending_biz_ids(
+        &self,
+        biz_type: &str,
+        biz_ids: &[i64],
+    ) -> Result<std::collections::HashSet<i64>, DbErr> {
+        if biz_ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        Ok(SysFlowTask::find()
+            .filter(Column::BizType.eq(biz_type))
+            .filter(Column::BizId.is_in(biz_ids))
+            .filter(Column::Status.eq("pending"))
+            .select_only()
+            .column(Column::BizId)
+            .into_tuple::<i64>()
+            .all(self.base.db())
+            .await?
+            .into_iter()
+            .collect())
+    }
+
     /// 条件更新（并发安全 + 幂等）：仅当行仍为 pending 时生效，返回影响行数
     pub async fn update_status_if_pending(
         &self,

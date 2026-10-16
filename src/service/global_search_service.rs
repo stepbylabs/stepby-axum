@@ -405,3 +405,58 @@ async fn search_template(
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(title: &str) -> GlobalSearchItem {
+        GlobalSearchItem {
+            item_type: "user".to_string(),
+            id: 1,
+            title: title.to_string(),
+            subtitle: String::new(),
+            url: "/x".to_string(),
+        }
+    }
+
+    /// LIKE 通配符剥离（防"一个 `%` 打穿全表扫描"）+ 首尾空白归一。
+    #[test]
+    fn sanitize_q_strips_like_wildcards_and_whitespace() {
+        assert_eq!(sanitize_q("  zhang san "), "zhang san");
+        assert_eq!(sanitize_q("%"), "");
+        assert_eq!(sanitize_q("%%%"), "");
+        assert_eq!(sanitize_q("_"), "");
+        // 通配符在中间也被剥离（否则 `a%b` 会命中 aXb 这类非预期行）
+        assert_eq!(sanitize_q("a%b_c"), "abc");
+        // 内部空白保留（搜索词本身可以含空格）
+        assert_eq!(sanitize_q("zhang  san"), "zhang  san");
+        assert_eq!(sanitize_q(""), "");
+    }
+
+    /// 前缀命中优先，且大小写不敏感；非前缀项保持原有相对次序。
+    #[test]
+    fn sort_prefix_first_puts_exact_prefix_hits_first_case_insensitively() {
+        let mut items = vec![item("张三研发"), item("abc"), item("ABCd"), item("zzz")];
+        sort_prefix_first(&mut items, "abc");
+        assert_eq!(
+            items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+            vec!["abc", "ABCd", "张三研发", "zzz"],
+            "前缀命中（含大小写变体）应前置，其余保持原序"
+        );
+    }
+
+    /// 空结果与全不命中都必须稳定（排序是稳定语义的一部分，不能重排乱序）。
+    #[test]
+    fn sort_prefix_first_is_stable_when_nothing_matches() {
+        let mut items = vec![item("x1"), item("x2"), item("x3")];
+        sort_prefix_first(&mut items, "nomatch");
+        assert_eq!(
+            items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+            vec!["x1", "x2", "x3"]
+        );
+        let mut empty: Vec<GlobalSearchItem> = Vec::new();
+        sort_prefix_first(&mut empty, "abc");
+        assert!(empty.is_empty());
+    }
+}

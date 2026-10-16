@@ -28,6 +28,7 @@ pub fn report_routes() -> Router<Arc<AppState>> {
             get(report_dataset_handler::dataset_info),
         )
         // SQL 明文回填（编辑专用；edit 权限键在 permission.rs 把关）
+        // b71 契约审计：编辑专用 SQL 预检，零前端调用 → router/mod.rs 清单 ③
         .route(
             "/report/dataset/{datasetId}/sql",
             post(report_dataset_handler::dataset_sql),

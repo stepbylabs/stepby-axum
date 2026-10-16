@@ -21,13 +21,22 @@ impl std::fmt::Display for GuardViolation {
 }
 
 /// 剥离 SQL 注释（`--` 行注释与 `/* */` 块注释），防止注释截断绕过关键字检查
+///
+/// b71 panic 修复：原实现块注释跳过循环按字节步进后回切 `sql[i..]`，注释内含多字节字符
+/// （如 `/* 中文 */`）时 i 落在字符中间、切片必 panic——NL2SQL 守卫的请求路径真实缺陷。
+/// 改为全程字节扫描（`*`/`/`/`-`/`'` 均为 ASCII，字节判定等价）+ `str::get` 边界安全解码。
 fn strip_comments(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let bytes = sql.as_bytes();
     let mut i = 0;
     let mut in_single = false;
     while i < bytes.len() {
-        let ch = sql[i..].chars().next().unwrap();
+        // 边界安全解码：i 落在多字节字符中间（按不变量本不应发生）时跳过该字节继续，
+        // 不 panic（str::get 对非边界返回 None）
+        let Some(ch) = sql.get(i..).and_then(|s| s.chars().next()) else {
+            i += 1;
+            continue;
+        };
         if in_single {
             out.push(ch);
             if ch == '\'' {
@@ -42,14 +51,14 @@ fn strip_comments(sql: &str) -> String {
             i += ch.len_utf8();
             continue;
         }
-        if sql[i..].starts_with("--") {
+        if bytes[i] == b'-' && bytes.get(i + 1) == Some(&b'-') {
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
             continue;
         }
-        if sql[i..].starts_with("/*") {
-            while i < bytes.len() && !sql[i..].starts_with("*/") {
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
                 i += 1;
             }
             i = (i + 2).min(bytes.len());
@@ -77,7 +86,10 @@ fn extract_tables(sql_lower: &str) -> Vec<String> {
             if !name.is_empty() && !is_sql_keyword(&name) {
                 tables.push(name);
             }
-            rest = &after[1.min(after.len())..];
+            // b71 panic 修复：原 `&after[1.min(after.len())..]` 在 FROM/JOIN 后紧跟多字节字符
+            // （如 `FROM 中文表`）时非字符边界切片必 panic——改为跳过首字符的完整 UTF-8 长度
+            let skip = after.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+            rest = &after[skip..];
         }
     }
     tables
