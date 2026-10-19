@@ -183,10 +183,8 @@ impl MigrationTrait for Migration {
                 conn.execute_unprepared(&format!("DROP INDEX IF EXISTS idx_{table}_tid_time"))
                     .await?;
             } else {
-                conn.execute_unprepared(&format!(
-                    "DROP INDEX idx_{table}_tid_time ON {table}"
-                ))
-                .await?;
+                conn.execute_unprepared(&format!("DROP INDEX idx_{table}_tid_time ON {table}"))
+                    .await?;
             }
         }
         for table in TABLES {

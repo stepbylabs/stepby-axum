@@ -39,8 +39,8 @@ pub(crate) async fn ensure_user_role_source_column(db: &DatabaseConnection) -> R
 
 /// 幂等确保 `sys_user_dept` 兼职中间表存在（多部门任职，DDL 与迁移 m20260924_000009 逐字对齐）。
 ///
-/// CREATE TABLE IF NOT EXISTS 三方言幂等；索引 SQLite/PG 支持 IF NOT EXISTS，
-/// MySQL 跳过交由 migration 补齐（与 ensure_sys_pat_table 同策略）。
+/// CREATE TABLE IF NOT EXISTS 三方言幂等；索引三方言统一经 `migration::ensure_index_ddl`
+/// 先探测后建（旧写法「MySQL 跳过交由 migration」在存量库上等于索引永不补齐，R-12）。
 pub(crate) async fn ensure_user_dept_table(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
     let (id_pk, bigint_type, dt_type) = match backend {
@@ -69,15 +69,12 @@ pub(crate) async fn ensure_user_dept_table(db: &DatabaseConnection) -> Result<()
         ),
     )
     .await?;
-    if !matches!(backend, DatabaseBackend::MySql) {
-        for ddl in [
-            "CREATE UNIQUE INDEX IF NOT EXISTS uk_user_dept ON sys_user_dept (user_id, dept_id)",
-            "CREATE INDEX IF NOT EXISTS idx_user_dept_dept ON sys_user_dept (dept_id)",
-        ] {
-            if let Err(e) = flow_exec(db, ddl).await {
-                tracing::debug!("sys_user_dept 索引创建跳过（可能已存在）: {}", e);
-            }
-        }
+    // 索引经 ensure_index_ddl 三方言补齐（旧写法对 MySQL 整段跳过 = 唯一约束缺失，R-12）
+    for ddl in [
+        "CREATE UNIQUE INDEX uk_user_dept ON sys_user_dept (user_id, dept_id)",
+        "CREATE INDEX idx_user_dept_dept ON sys_user_dept (dept_id)",
+    ] {
+        migration::ensure_index_ddl(db, ddl).await?;
     }
     Ok(())
 }
@@ -143,16 +140,13 @@ pub(crate) async fn ensure_scim_group_tables(db: &DatabaseConnection) -> Result<
     )
     .await?;
 
-    // 索引：SQLite/PG 支持 IF NOT EXISTS；MySQL 跳过交由 migration（照 ensure_flow_indexes）
-    if !matches!(backend, DatabaseBackend::MySql) {
-        for ddl in [
-            "CREATE UNIQUE INDEX IF NOT EXISTS uk_scim_group_external_id ON sys_scim_group (external_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uk_scim_group_binding ON sys_scim_group_binding (group_id, target_id)",
-        ] {
-            if let Err(e) = flow_exec(db, ddl).await {
-                tracing::debug!("SCIM Group 索引创建跳过（可能已存在）: {}", e);
-            }
-        }
+    // 索引：三方言统一经 ensure_index_ddl 补齐（旧写法 MySQL 整段跳过，
+    // uk_scim_group_external_id 因此在存量 MySQL 库上不存在——R-12）
+    for ddl in [
+        "CREATE UNIQUE INDEX uk_scim_group_external_id ON sys_scim_group (external_id)",
+        "CREATE UNIQUE INDEX uk_scim_group_binding ON sys_scim_group_binding (group_id, target_id)",
+    ] {
+        migration::ensure_index_ddl(db, ddl).await?;
     }
     Ok(())
 }

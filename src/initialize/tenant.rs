@@ -85,7 +85,9 @@ pub(crate) async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow
         }
         for (table, index_name, columns) in &idx_defs {
             if let Err(e) = ensure_tenant_index(db, table, index_name, columns, false).await {
-                tracing::debug!("租户索引 {index_name} 创建跳过: {}", e);
+                // ensure_tenant_index 现在只在真失败时报错（已存在会被探测跳过），
+                // 因此这里不能用 debug 淹没：口径同 §Phase3 / 性能索引兜底
+                tracing::warn!("租户索引 {index_name} 创建失败（不阻断启动，请人工核查）: {e}");
             }
         }
     }
@@ -1349,9 +1351,8 @@ pub(crate) async fn tenant_scalar_count(
         .unwrap_or(0))
 }
 
-/// 方言感知的幂等索引创建：SQLite/PostgreSQL 直接 `CREATE INDEX IF NOT EXISTS`；
-/// MySQL 不支持该子句，先查 information_schema.statistics 判存在，缺失才建
-/// （补齐此前"MySQL 跳过、依赖 migration 补齐"的方言缺口——存量库不跑 migration）。
+/// 方言感知的幂等索引创建：三方言统一委托 `migration::ensure_index_ddl`
+/// （先按方言探测存在性、必要时用 SAVEPOINT 隔离单条语句）。
 /// `unique = true` 时建 `CREATE UNIQUE INDEX`。
 pub(crate) async fn ensure_tenant_index(
     db: &DatabaseConnection,
@@ -1360,37 +1361,17 @@ pub(crate) async fn ensure_tenant_index(
     columns: &str,
     unique: bool,
 ) -> anyhow::Result<()> {
-    let backend = db.get_database_backend();
-    let kind = if unique { "UNIQUE " } else { "" };
-    match backend {
-        DatabaseBackend::MySql => {
-            let exists = db
-                .query_all_raw(Statement::from_string(
-                    backend,
-                    format!(
-                        "SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='{table}' AND index_name='{index_name}' LIMIT 1"
-                    ),
-                ))
-                .await?;
-            if !exists.is_empty() {
-                return Ok(());
-            }
-            db.execute_raw(Statement::from_string(
-                backend,
-                format!("CREATE {kind}INDEX {index_name} ON {table} ({columns})"),
-            ))
-            .await?;
-            Ok(())
-        }
-        _ => {
-            db.execute_raw(Statement::from_string(
-                backend,
-                format!("CREATE {kind}INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"),
-            ))
-            .await?;
-            Ok(())
-        }
-    }
+    // 关键字必须是完整 token：`CREATE {kind}INDEX …` 的插值形态会让统一执行器的
+    // 解析器认不出（退化成不探测），所以这里分两条完整字面量拼（ddl_dialect_discipline
+    // 判据 D 静态盯着这一点）。
+    let sql = if unique {
+        format!("CREATE UNIQUE INDEX {index_name} ON {table} ({columns})")
+    } else {
+        format!("CREATE INDEX {index_name} ON {table} ({columns})")
+    };
+    migration::ensure_index_ddl(db, &sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("索引 {index_name} 创建失败: {e}"))
 }
 
 /// v4 §13-F1：历史 JWT 型 SSO 访问令牌一次性转写吊销（幂等 + 精准识别）。

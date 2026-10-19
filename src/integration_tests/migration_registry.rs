@@ -285,7 +285,10 @@ fn test_migration_registry_lock_is_not_vacuous() {
 
     // ④ `down()` 存在性判据必须真能区分"写了"与"只在注释里提到"（否则 R-10 锁恒真）
     let with_down = "// 说明\n#[async_trait]\nimpl MigrationTrait for Migration {\n    async fn down(&self, _m: &SchemaManager) -> Result<(), DbErr> {\n        Ok(())\n    }\n}\n";
-    assert!(down_impl_present(with_down), "实现了 down() 却被判为缺失 ⇒ 判据恒假");
+    assert!(
+        down_impl_present(with_down),
+        "实现了 down() 却被判为缺失 ⇒ 判据恒假"
+    );
     let prose_only = "// async fn down(&self) 未实现\n//! `async fn down(` 见上\n";
     assert!(
         !down_impl_present(prose_only),

@@ -442,31 +442,15 @@ pub(crate) async fn ensure_sso_consent_unique(db: &DatabaseConnection) -> anyhow
         db.execute_raw(Statement::from_string(backend, sql.to_string()))
             .await?;
     }
-    // 唯一索引：MySQL 不支持 CREATE INDEX IF NOT EXISTS（MariaDB 专属子句），
-    // 剥离子句后执行并容错"索引已存在"（1061 Duplicate key name / 42P07 / already exists）
-    let idx_sql = match backend {
-        DatabaseBackend::MySql => {
-            "CREATE UNIQUE INDEX uq_sso_consent_user_client \
-             ON sys_oauth_consent (user_id, client_id)"
-        }
-        _ => {
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_sso_consent_user_client \
-             ON sys_oauth_consent (user_id, client_id)"
-        }
-    };
-    if let Err(e) = db
-        .execute_raw(Statement::from_string(backend, idx_sql.to_string()))
-        .await
-    {
-        let msg = e.to_string();
-        if !(msg.contains("Duplicate key name")
-            || msg.contains("42P07")
-            || msg.contains("already exists"))
-        {
-            return Err(e.into());
-        }
-        tracing::debug!("uq_sso_consent_user_client 已存在，跳过");
-    }
+    // 唯一索引：统一走 `migration::ensure_index_ddl`（先按方言探测存在性、必要时
+    // SAVEPOINT 隔离）。吞错误文案的旧写法在 PG 上是结构性错误——sea-orm 一条迁移
+    // 一个事务，事务里首错即 aborted，吞掉首错等于废掉本函数后续所有语句（批七十七 R-11）。
+    migration::ensure_index_ddl(
+        db,
+        "CREATE UNIQUE INDEX uq_sso_consent_user_client \
+         ON sys_oauth_consent (user_id, client_id)",
+    )
+    .await?;
     Ok(())
 }
 

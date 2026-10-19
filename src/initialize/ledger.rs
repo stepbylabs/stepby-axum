@@ -24,8 +24,8 @@ pub(crate) async fn ensure_audit_change_tables(db: &DatabaseConnection) -> anyho
     // 1) 建表（引用迁移 create_table_sql，三方言分支收敛于迁移文件）
     flow_exec(db, mig::create_table_sql(backend)).await?;
 
-    // 2) 三个审计查询索引（引用迁移 AUDIT_INDEXES；ensure_tenant_index 内部三方言幂等：
-    //    MySQL 先查 information_schema.statistics 判存在，PG/SQLite 直接 IF NOT EXISTS）
+    // 2) 三个审计查询索引（引用迁移 AUDIT_INDEXES；ensure_tenant_index 委托
+    //    migration::ensure_index_ddl：三方言都先探测存在性再建，不分岔、不吞错）
     for (name, table, cols) in mig::AUDIT_INDEXES {
         ensure_tenant_index(db, table, name, cols, false).await?;
     }

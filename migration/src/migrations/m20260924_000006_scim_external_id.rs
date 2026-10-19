@@ -44,8 +44,7 @@ impl MigrationTrait for Migration {
             _ => "DROP INDEX IF EXISTS idx_sys_user_scim_external_id".to_string(),
         };
         conn.execute_unprepared(&drop_idx).await?;
-        conn
-            .execute_unprepared("ALTER TABLE sys_user DROP COLUMN scim_external_id")
+        conn.execute_unprepared("ALTER TABLE sys_user DROP COLUMN scim_external_id")
             .await?;
         Ok(())
     }

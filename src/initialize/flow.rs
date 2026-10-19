@@ -197,26 +197,22 @@ pub(crate) async fn ensure_platform_dept_leaders(db: &DatabaseConnection) -> any
     Ok(res.rows_affected())
 }
 
-/// 幂等建 flow 索引（SQLite/PostgreSQL 支持 IF NOT EXISTS；MySQL 跳过交由迁移补齐，参照 ensure_sys_pat_table）
+/// 幂等建 flow 索引（三方言统一经 `migration::ensure_index_ddl`，见 R-11/R-12 注释）
 pub(crate) async fn ensure_flow_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {
-    let backend = db.get_database_backend();
-    if backend == DatabaseBackend::MySql {
-        tracing::debug!("flow 索引创建跳过（MySQL 无 IF NOT EXISTS，交由 migration）");
-        return Ok(());
-    }
     let indexes = [
-        "CREATE UNIQUE INDEX IF NOT EXISTS uk_flow_task_biz ON sys_flow_task (biz_type, biz_id, round_no, node_seq, assignee_id)",
-        "CREATE INDEX IF NOT EXISTS idx_flow_task_assignee ON sys_flow_task (assignee_id, status)",
-        "CREATE INDEX IF NOT EXISTS idx_flow_task_due ON sys_flow_task (status, due_at)",
-        "CREATE INDEX IF NOT EXISTS idx_flow_log_biz ON sys_flow_log (biz_type, biz_id, round_no)",
+        "CREATE UNIQUE INDEX uk_flow_task_biz ON sys_flow_task (biz_type, biz_id, round_no, node_seq, assignee_id)",
+        "CREATE INDEX idx_flow_task_assignee ON sys_flow_task (assignee_id, status)",
+        "CREATE INDEX idx_flow_task_due ON sys_flow_task (status, due_at)",
+        "CREATE INDEX idx_flow_log_biz ON sys_flow_log (biz_type, biz_id, round_no)",
         // W-12：已办视图（operator_id + acted_at）覆盖索引，避免全表扫描
-        "CREATE INDEX IF NOT EXISTS idx_flow_log_operator ON sys_flow_log (operator_id, acted_at)",
-        "CREATE INDEX IF NOT EXISTS idx_flow_doc_applicant ON flow_demo_doc (applicant_id, status)",
+        "CREATE INDEX idx_flow_log_operator ON sys_flow_log (operator_id, acted_at)",
+        "CREATE INDEX idx_flow_doc_applicant ON flow_demo_doc (applicant_id, status)",
     ];
     for stmt in indexes {
-        // 容错：个别存量库索引名冲突等异常不阻断启动（与 sys_pat 索引兜底同策略）
-        if let Err(e) = flow_exec(db, stmt).await {
-            tracing::debug!("flow 索引创建跳过（可能已存在）: {}", e);
+        // 真失败（表缺失/列缺失/权限）只告警不阻断启动，但必须可见——旧的 debug 级
+        // "可能已存在"容错会把这类错误一起吞掉（批七十七 R-11）
+        if let Err(e) = migration::ensure_index_ddl(db, stmt).await {
+            tracing::warn!("flow 索引创建失败（不阻断启动）: {}", e);
         }
     }
     Ok(())
@@ -493,27 +489,14 @@ pub(crate) async fn ensure_flow_definition_table(db: &DatabaseConnection) -> any
     );
     db.execute_raw(Statement::from_string(backend, create_sql))
         .await?;
-    // 唯一索引 (tenant_id, flow_code, version)：MySQL 不支持 IF NOT EXISTS，容错"已存在"
-    let idx_sql = match backend {
-        DatabaseBackend::MySql => {
-            "CREATE UNIQUE INDEX uq_flow_def_code_ver ON flow_definition (tenant_id, flow_code, version)"
-        }
-        _ => {
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_flow_def_code_ver ON flow_definition (tenant_id, flow_code, version)"
-        }
-    };
-    if let Err(e) = db
-        .execute_raw(Statement::from_string(backend, idx_sql.to_string()))
-        .await
-    {
-        let msg = e.to_string();
-        if !(msg.contains("Duplicate key name")
-            || msg.contains("42P07")
-            || msg.contains("already exists"))
-        {
-            return Err(e.into());
-        }
-    }
+    // 统一走 `migration::ensure_index_ddl`（先按方言探测存在性、必要时 SAVEPOINT 隔离）。
+    // 此前是"拼 IF NOT EXISTS + 按错误文案吞掉"的本地副本：MySQL 无 IF NOT EXISTS 子句
+    // 所以靠吞错兜，而 PG 事务里首错即 aborted，吞掉它等于废掉后续所有语句（批七十七 R-11）。
+    migration::ensure_index_ddl(
+        db,
+        "CREATE UNIQUE INDEX uq_flow_def_code_ver ON flow_definition (tenant_id, flow_code, version)",
+    )
+    .await?;
     // demo_v2 种子（与迁移同构，幂等）
     let graph = r#"{"nodes":[{"id":"start","type":"start"},{"id":"a1","type":"approve","name":"部门主管审批","assignees":["dept_leader"],"quorum":"any"},{"id":"a2","type":"approve","name":"管理员审批","assignees":["role:admin"],"quorum":"any"},{"id":"end","type":"end"}],"edges":[{"from":"start","to":"a1"},{"from":"a1","to":"a2"},{"from":"a2","to":"end"}]}"#;
     let now = flow_now(db);
@@ -569,12 +552,10 @@ pub(crate) async fn ensure_flow_graph_doc_table(db: &DatabaseConnection) -> anyh
         ),
     ))
     .await?;
-    db.execute_raw(Statement::from_string(
-        backend,
-        "CREATE INDEX IF NOT EXISTS idx_flow_graph_doc_tenant \
-         ON flow_graph_doc (tenant_id, status)"
-            .to_string(),
-    ))
+    migration::ensure_index_ddl(
+        db,
+        "CREATE INDEX idx_flow_graph_doc_tenant ON flow_graph_doc (tenant_id, status)",
+    )
     .await?;
     tracing::info!("flow_graph_doc 表已补建（批次十六图驱动单据，存量库兜底）");
     Ok(())

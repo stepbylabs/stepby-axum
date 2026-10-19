@@ -28,7 +28,7 @@ pub struct Migrator;
 
 // 修复预先存在的问题：m20260806_000001_add_log_time_indexes 已创建但漏注册，索引从未生效
 
-use sea_orm_migration::sea_orm::DatabaseBackend;
+use sea_orm_migration::sea_orm::{DatabaseBackend, Statement, Value};
 use std::borrow::Cow;
 
 /// 将 SQL 中的 PostgreSQL 风格 `$N` 占位符按目标方言转换：
@@ -68,41 +68,214 @@ pub fn adapt_placeholders(backend: DatabaseBackend, sql: &str) -> Cow<'_, str> {
 ///
 /// `CREATE [UNIQUE] INDEX IF NOT EXISTS` 是 SQLite / PostgreSQL / MariaDB 支持的语法，
 /// MySQL 8.0 不支持（MariaDB 专属扩展）。因此迁移中的索引 DDL 统一去掉
-/// `IF NOT EXISTS`，改由本 trait 执行并容错"索引已存在"类错误，保证跨方言幂等：
-/// - MySQL   1061: `Duplicate key name 'xxx'`
-/// - PostgreSQL 42P07: `relation "xxx" already exists`
-/// - SQLite: `index xxx already exists`
+/// `IF NOT EXISTS`，改由本 trait 做**跨方言幂等**执行。
 ///
-/// 仅用于索引类 DDL（表/数据类 DDL 不适用，避免误吞 `Table already exists` 等错误）。
+/// ## 为什么不能"先执行、再按错误文案吞掉"（批七十七 R-11 根因）
+///
+/// 旧实现是 `execute_unprepared(sql)` 之后判断错误串里有没有
+/// `Duplicate key name` / `42P07` / `already exists`，有就当成功。三库实测证明这套
+/// 只在 MySQL 上成立：**PostgreSQL 的事务里任何一条语句失败，整笔事务就进入 aborted
+/// 状态**，之后每条语句都只能拿到 `current transaction is aborted`，而 sea-orm 是
+/// **一条迁移一个事务**。于是"吞掉首错"实际把这条迁移剩下的所有语句一起废掉，
+/// 报出来的还是与首错无关的二级错——回滚后重放正是在这里断的
+/// （`m20260925_000003` 的 `uk_sys_tenant_migration_map_old`：它的表按 §29.7 故意不随
+/// down 删除，索引因此残留，重放时首错即"索引已存在"）。
+///
+/// 现在的两条真判据：
+/// 1. **先探测再执行**（sqlite `sqlite_master` / pg `pg_indexes` / mysql
+///    `information_schema.statistics`），已存在就直接跳过，压根不发会失败的语句；
+/// 2. 确实要发时用 `SAVEPOINT` 把它隔开，失败就 `ROLLBACK TO SAVEPOINT`，
+///    事务保持可用（PG 上唯一正确的"容忍单条语句失败"做法），错误仍原样上抛，
+///    由调用方决定是否只告警不阻断。
+///
+/// 仅用于索引类 DDL（表/数据类 DDL 不适用）。
 #[async_trait::async_trait]
 pub trait IndexDdlExt {
-    /// 执行索引类 DDL；若错误为"索引已存在"则视为成功，其余错误原样上抛。
+    /// 幂等执行索引类 DDL；索引已存在则跳过，其余错误原样上抛（不吞文案）。
     async fn execute_index_ddl_ic(&self, sql: &str) -> Result<(), DbErr>;
+}
+
+/// 本执行器单条语句用的 SAVEPOINT 名（同一连接内顺序执行，不会重入）。
+const IDX_SAVEPOINT: &str = "stepby_idx_ddl_sp";
+
+/// 从 `CREATE [UNIQUE] INDEX [IF NOT EXISTS] <name> ON <table> (...)` 里取出
+/// `(索引名, 表名)`；形态不符返回 `None`（调用方此时直接执行原语句，不自作主张）。
+///
+/// 表名取最后一段：`db`.`sys_user` / `sys_user` 都归一成 `sys_user`，
+/// 因为 MySQL 的探测按 `table_schema = DATABASE()` 限定，前缀反而会查不到。
+pub fn parse_index_ddl(sql: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = sql.split_whitespace().collect();
+    let up: Vec<String> = parts.iter().map(|t| t.to_ascii_uppercase()).collect();
+    let create_at = up.iter().position(|t| t == "CREATE")?;
+    let index_at = up
+        .iter()
+        .skip(create_at + 1)
+        .position(|t| t == "INDEX")
+        .map(|p| p + create_at + 1)?;
+    let mut name_at = index_at + 1;
+    if name_at + 2 < up.len()
+        && up[name_at] == "IF"
+        && up[name_at + 1] == "NOT"
+        && up[name_at + 2] == "EXISTS"
+    {
+        name_at += 3;
+    }
+    let name = clean_ident(parts.get(name_at)?)?;
+    let on_at = up
+        .iter()
+        .skip(name_at + 1)
+        .position(|t| t == "ON")
+        .map(|p| p + name_at + 1)?;
+    // 库前缀与引号由 clean_ident 归一（先分段后剥引号）；不带空格的 `tbl(col)`
+    // 写法由 table_ident 取 `(` 之前的部分
+    let table = table_ident(parts.get(on_at + 1)?)?;
+    Some((name, table))
+}
+
+/// 表名令牌 → 标识符。`ON sys_pat(token_hash)` 这种列清单不带空格的写法在兜底段里
+/// 是真实形态（活库 smoke 实测：解析不出来就退化成"直接执行"，MySQL 撞 1061），
+/// 所以先按 `(` 截断再走 `clean_ident`。
+fn table_ident(tok: &str) -> Option<String> {
+    clean_ident(tok.split('(').next()?)
+}
+
+/// 剥出干净的标识符：先按 `.` 取最后一段（`db`.`tbl` 要归一成 `tbl`，
+/// MySQL 侧探测按 `table_schema = DATABASE()` 限定，带库前缀反而查不到），
+/// 再剥两侧的引号族（反引号 / 双引号 / 单引号）与尾随逗号。
+///
+/// 顺序很重要：先 trim 再 split 会把 "`stepby`.`sys_role`" 变成 "`sys_role"
+/// （两端反引号被整体 trim 掉后，中间的反引号留在了段首）——本函数的测试里抓到了它。
+fn clean_ident(tok: &str) -> Option<String> {
+    let s = tok.trim().trim_end_matches(',');
+    let last = s.rsplit('.').next().unwrap_or(s);
+    let s2 = last.trim_matches(|c| c == '`' || c == '"' || c == '\'');
+    if s2.is_empty() || s2.contains('(') || s2.contains('.') {
+        None
+    } else {
+        Some(s2.to_string())
+    }
 }
 
 #[async_trait::async_trait]
 impl IndexDdlExt for SchemaManagerConnection<'_> {
     async fn execute_index_ddl_ic(&self, sql: &str) -> Result<(), DbErr> {
-        match self.execute_unprepared(sql).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("Duplicate key name")
-                    || msg.contains("42P07")
-                    || msg.contains("already exists")
-                {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            }
+        // 迁移侧：sea-orm 一条迁移一个事务，必须用 SAVEPOINT 隔离（见 ensure_index_ddl_in_tx）
+        ensure_index_ddl_in_tx(self, sql).await
+    }
+}
+
+/// 索引 DDL 的**唯一**幂等实现（批七十七 R-11）：先按方言探测存在性，已存在就跳过。
+///
+/// 泛型到 `ConnectionTrait` 是为了两个入口共用一份探测代码：
+/// - 迁移侧：`SchemaManagerConnection`（经 `IndexDdlExt`，走 `ensure_index_ddl_in_tx`）；
+/// - 启动兜底侧：`DatabaseConnection`（`initialize::menu|flow|oauth_sso|schema|scim|tenant`
+///   此前各自内联一份"执行后按错误文案吞掉"的副本——同构四份，且每一份都可能被 PG
+///   事务语义反噬）。
+///
+/// **本函数用于自动提交上下文**（兜底段每条语句自成事务，失败不污染后续语句），
+/// 因此不发 SAVEPOINT：PG 在事务块外执行 `SAVEPOINT` 会直接报
+/// `SAVEPOINT can only be used in transaction blocks`（批七十七活库 smoke 实测）。
+/// 需要事务隔离的调用方请用 [`ensure_index_ddl_in_tx`]。
+pub async fn ensure_index_ddl<C>(conn: &C, sql: &str) -> Result<(), DbErr>
+where
+    C: ConnectionTrait,
+{
+    ensure_index_ddl_impl(conn, sql, false).await
+}
+
+/// 事务内形态（迁移路径）：探测 → SAVEPOINT 隔离 → 失败回滚到保存点、错误原样上抛。
+pub async fn ensure_index_ddl_in_tx<C>(conn: &C, sql: &str) -> Result<(), DbErr>
+where
+    C: ConnectionTrait,
+{
+    ensure_index_ddl_impl(conn, sql, true).await
+}
+
+async fn ensure_index_ddl_impl<C>(conn: &C, sql: &str, in_tx: bool) -> Result<(), DbErr>
+where
+    C: ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    let Some((index, table)) = parse_index_ddl(sql) else {
+        // 形态不认识：不猜，直接执行，让真实错误暴露出来
+        // （判据 D 静态盯着兜底段的写法必须可解析，见 integration_tests/ddl_dialect_discipline）
+        return conn.execute_unprepared(sql).await.map(|_| ());
+    };
+    if index_exists(conn, backend, &table, &index).await? {
+        return Ok(());
+    }
+    if backend == DatabaseBackend::MySql || !in_tx {
+        // MySQL 的 DDL 自带隐式提交，而隐式提交会**抹掉会话里所有 SAVEPOINT**：
+        // `SAVEPOINT` → `CREATE INDEX` → `RELEASE SAVEPOINT` 三连在 MySQL 8.0.46 上以
+        // `ERROR 1305 SAVEPOINT stepby_idx_ddl_sp does not exist` 失败（活库 smoke 实测
+        // ——此前"SAVEPOINT 对 MySQL 无害"的注释是未验证的推断）。
+        // 非事务上下文（兜底段）同理：既没有需要保住的事务，SAVEPOINT 还会直接被 PG 拒。
+        return conn.execute_unprepared(sql).await.map(|_| ());
+    }
+    // PG / SQLite 且确在事务内：这一条失败会污染事务（PG 首错即 aborted），
+    // 用 SAVEPOINT 把它隔开，失败回滚到保存点后原样上抛，事务仍然可用
+    conn.execute_unprepared(&format!("SAVEPOINT {IDX_SAVEPOINT}"))
+        .await?;
+    match conn.execute_unprepared(sql).await {
+        Ok(_) => conn
+            .execute_unprepared(&format!("RELEASE SAVEPOINT {IDX_SAVEPOINT}"))
+            .await
+            .map(|_| ()),
+        Err(e) => {
+            let _ = conn
+                .execute_unprepared(&format!("ROLLBACK TO SAVEPOINT {IDX_SAVEPOINT}"))
+                .await;
+            let _ = conn
+                .execute_unprepared(&format!("RELEASE SAVEPOINT {IDX_SAVEPOINT}"))
+                .await;
+            Err(e)
         }
     }
 }
 
+/// 三方言索引存在性探测（索引名走绑定参数；MySQL 侧表名是迁移内常量标识符，
+/// 与同仓 `ensure_column` 的探测口径一致地内联）。
+///
+/// 判据用 `SELECT 1 … LIMIT 1` + 结果集是否为空，不取 `COUNT(*)`：数值列的解码类型在
+/// 方言间不一致（MySQL 的 `COUNT` 是无符号宽度），一旦取不到值就 `unwrap_or(0)` 静默
+/// 退化成「索引不存在」。
+///
+/// 本批真正被活库 smoke 照出来的静默退化在另一侧：解析器不认 `ON sys_pat(token_hash)`
+/// （列清单不带空格）→ 探测整段被跳过 → 真 MySQL 8.0 上重复建索引撞 1061。两处一并收口，
+/// 并由 `integration_tests/ddl_dialect_discipline.rs` 判据 D 静态盯着解析面。
+async fn index_exists<C>(
+    conn: &C,
+    backend: DatabaseBackend,
+    table: &str,
+    index: &str,
+) -> Result<bool, DbErr>
+where
+    C: ConnectionTrait,
+{
+    // 每支自己拼到最终 SQL（含本方言的占位符形态），不再借 `adapt_placeholders`：
+    // 「哪支用 $1、哪支用 ?」在源码里一目了然，dialect_audit 也不需要为此留豁免。
+    // 表名内联只发生在 MySQL 支，且取值恒为迁移/兜底段里的常量标识符（与同仓
+    // `ensure_column`、`sso_table_exists` 的探测口径一致）；索引名三库都走绑定参数。
+    let sql = match backend {
+        DatabaseBackend::Sqlite => {
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = $1 LIMIT 1".to_string()
+        }
+        DatabaseBackend::Postgres => {
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1 LIMIT 1"
+                .to_string()
+        }
+        DatabaseBackend::MySql => format!(
+            "SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = '{table}' AND index_name = ? LIMIT 1"
+        ),
+        _ => unreachable!("unknown backend"),
+    };
+    let stmt =
+        Statement::from_sql_and_values(backend, sql, vec![Value::String(Some(index.to_string()))]);
+    Ok(!conn.query_all_raw(stmt).await?.is_empty())
+}
+
 /// 数据库迁移管理器
 
-#[async_trait::async_trait]
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
@@ -257,4 +430,100 @@ impl MigratorTrait for Migrator {
 /// `initialize::tests::seed_time_writes_use_single_utc_source` 钉住"落库路径禁 `Local::now()`"。
 pub fn seed_now_expr() -> String {
     format!("'{}'", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_index_ddl;
+
+    #[test]
+    fn parse_index_ddl_取到三方言调用点的索引与表() {
+        let cases = [
+            (
+                "CREATE UNIQUE INDEX uk_sys_tenant_migration_map_old ON sys_tenant_migration_map (old_tid)",
+                "uk_sys_tenant_migration_map_old",
+                "sys_tenant_migration_map",
+            ),
+            (
+                "CREATE INDEX idx_sys_tenant_menu_tid ON sys_tenant_menu (tenant_id)",
+                "idx_sys_tenant_menu_tid",
+                "sys_tenant_menu",
+            ),
+            (
+                // 小写形态（历史调用点里存在）
+                "create index idx_a on sys_user (user_name)",
+                "idx_a",
+                "sys_user",
+            ),
+            (
+                // 反引号 + 库前缀（MySQL 探测按 DATABASE() 限定，表名必须剥前缀）
+                "CREATE UNIQUE INDEX `uk_b` ON `stepby`.`sys_role` (`role_key`)",
+                "uk_b",
+                "sys_role",
+            ),
+            (
+                // 调用方自己写了 IF NOT EXISTS 也要能解析
+                "CREATE UNIQUE INDEX IF NOT EXISTS uk_c ON sys_config (config_key)",
+                "uk_c",
+                "sys_config",
+            ),
+            (
+                // 多行缩进书写
+                "CREATE UNIQUE INDEX uk_d ON sys_dict_type (\n    tenant_id, dict_type\n)",
+                "uk_d",
+                "sys_dict_type",
+            ),
+            (
+                // 列清单不带空格（sys_pat(token_hash)）：兜底段的真实写法。
+                // 曾经解析不出来 → 退化成"不探测直接执行" → MySQL 存量库撞 1061
+                "CREATE UNIQUE INDEX uk_sys_pat_token_hash ON sys_pat(token_hash)",
+                "uk_sys_pat_token_hash",
+                "sys_pat",
+            ),
+            (
+                "CREATE INDEX idx_sys_user_credential_user_id ON sys_user_credential(user_id)",
+                "idx_sys_user_credential_user_id",
+                "sys_user_credential",
+            ),
+            (
+                // 反引号 + 不带空格
+                "CREATE UNIQUE INDEX `uk_e` ON `sys_oauth_consent`(user_id, client_id)",
+                "uk_e",
+                "sys_oauth_consent",
+            ),
+        ];
+        for (sql, want_idx, want_tbl) in cases {
+            let got = parse_index_ddl(sql)
+                .unwrap_or_else(|| panic!("解析失败：{sql}（幂等探测将退化成不探测）"));
+            assert_eq!(got.0, want_idx, "索引名解析错：{sql}");
+            assert_eq!(got.1, want_tbl, "表名解析错：{sql}");
+        }
+    }
+
+    #[test]
+    fn parse_index_ddl_形态不符必须返回_none_而不是猜() {
+        // 非索引 DDL：不得被当成索引语句去探测
+        assert!(
+            parse_index_ddl("ALTER TABLE sys_user ADD COLUMN scim_external_id VARCHAR(64)")
+                .is_none()
+        );
+        assert!(
+            parse_index_ddl("CREATE TABLE IF NOT EXISTS sys_tenant (tenant_id BIGINT)").is_none()
+        );
+        assert!(parse_index_ddl("DROP INDEX uk_x ON sys_role").is_none());
+        assert!(parse_index_ddl("").is_none());
+        // ON 缺位（少写 ON 的畸形语句）不得把列名当表名
+        assert!(parse_index_ddl("CREATE INDEX idx_e (a, b)").is_none());
+    }
+
+    #[test]
+    fn parse_index_ddl_不被列清单里的相似词骗走() {
+        // 列名里带 on/index 关键字时，第一个 ON 才是真正的表分隔符
+        let (i, t) =
+            parse_index_ddl("CREATE INDEX idx_f ON sys_logininfor (login_time, user_id)").unwrap();
+        assert_eq!((i.as_str(), t.as_str()), ("idx_f", "sys_logininfor"));
+        // 列名恰好叫 on（PG 允许带引号）时，`(ON)` 整 token 不等于 ON，不会被误判
+        let (i2, t2) = parse_index_ddl("CREATE INDEX idx_g ON sys_menu (meta, (ON))").unwrap();
+        assert_eq!((i2.as_str(), t2.as_str()), ("idx_g", "sys_menu"));
+    }
 }

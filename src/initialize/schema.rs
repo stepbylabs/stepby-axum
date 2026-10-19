@@ -79,9 +79,9 @@ pub(crate) async fn create_shared_store_tables(db: &DatabaseConnection) -> anyho
 
 /// 共享态存储三表 + AI 助手表/种子的启动幂等兜底（完整形态）。
 ///
-/// `CREATE TABLE IF NOT EXISTS` 三方言均合法；索引经 `ensure_tenant_index` 方言兜底
-/// （MySQL 不支持 `IF NOT EXISTS` 子句，information_schema 判存在后建——与迁移
-/// IndexDdlExt 容错思路一致）。全部幂等，重复执行无副作用。
+/// `CREATE TABLE IF NOT EXISTS` 三方言均合法；索引经 `ensure_tenant_index`（内部委托
+/// `migration::ensure_index_ddl`：按方言探测存在性、必要时 SAVEPOINT 隔离）三方言同一条
+/// 路径补齐。全部幂等，重复执行无副作用。
 pub(crate) async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyhow::Result<()> {
     let backend = db.get_database_backend();
     create_shared_store_tables(db).await?;
@@ -91,16 +91,20 @@ pub(crate) async fn ensure_shared_store_tables(db: &DatabaseConnection) -> anyho
     migration::migrations::m20261006_000001_ai_config_and_history::init_ai_config_and_history(db)
         .await?;
     // §5.57 token 观测列兜底（等价迁移 m20261006_000003）：存量库 ai_chat_history
-    // 幂等补三列（SQLite 无 IF NOT EXISTS——按错误忽略，列已存在属正常情况）。
+    // 幂等补三列（逐列 has_column 探测后 ALTER，真失败硬上抛——见下方 R-11 注释）。
     // ⚠️ 必须在 init_ai_config_and_history **之后**执行：极老存量库的 ai_chat_history
     // 由上一行刚建出（m20261006_000001 同源 DDL 不含 token 列）；若提前执行（如放在
     // 更早的 ensure_data_rule_tables 里）表尚未创建、ALTER 报错被吞 ⇒ 回填成死代码
     // （schema 等价性总锁实测发现）。
     for col in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-        let ddl = format!("ALTER TABLE ai_chat_history ADD COLUMN {col} BIGINT NULL");
-        if let Err(e) = db.execute_raw(Statement::from_string(backend, ddl)).await {
-            tracing::debug!("ai_chat_history.{col} 列补建跳过（可能已存在）: {}", e);
+        // R-11 同族收口：列补建改为「先探测后 ALTER + 硬失败」。旧写法无条件执行再
+        // debug 级吞错，真失败（类型/权限/方言差异）与「列已存在」混成一条 debug，
+        // 事后只能靠 token 回填变死代码反推（本文件 §5.57 注释记过一次）。
+        if sso_has_column(db, "ai_chat_history", col).await? {
+            continue;
         }
+        let ddl = format!("ALTER TABLE ai_chat_history ADD COLUMN {col} BIGINT NULL");
+        db.execute_raw(Statement::from_string(backend, ddl)).await?;
     }
     tracing::info!(
         "AI 助手：ai_chat_history 表与 sys.ai.* 配置种子已就绪（幂等，管理页可改热生效）"
@@ -581,8 +585,8 @@ pub(crate) async fn ensure_data_rule_tables(db: &DatabaseConnection) -> anyhow::
 /// 幂等确保 `sys_pat` 表存在（Tier-S #3：个人访问令牌）
 ///
 /// `CREATE TABLE IF NOT EXISTS` 在 SQLite/PostgreSQL/MySQL 三方言下均合法且幂等。
-/// 索引创建：SQLite/PostgreSQL 支持 `CREATE INDEX IF NOT EXISTS`，直接执行；MySQL 不支持该子句，
-/// 交由 migration（seaorm `if_not_exists`）在支持 MySQL 的部署中补齐，此处对 MySQL 跳过。
+/// 索引创建：三方言统一经 `migration::ensure_index_ddl` 先探测后建（MySQL 8.0 既没有
+/// `CREATE INDEX IF NOT EXISTS` 子句、也不会"交由 migration 补齐"——存量库不跑 Migrator）。
 /// 主键 `pat_id` 用 VARCHAR 由应用生成 uuid，规避自增列跨方言差异。
 pub(crate) async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Result<()> {
     let backend = db.get_database_backend();
@@ -609,20 +613,13 @@ pub(crate) async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Res
     db.execute_raw(Statement::from_string(backend, create_sql))
         .await?;
 
-    if !matches!(backend, DatabaseBackend::MySql) {
-        // token_hash 唯一索引 + user_id 普通索引（SQLite/PostgreSQL 支持 IF NOT EXISTS）
-        for ddl in [
-            "CREATE UNIQUE INDEX IF NOT EXISTS uk_sys_pat_token_hash ON sys_pat(token_hash)",
-            "CREATE INDEX IF NOT EXISTS idx_sys_pat_user_id ON sys_pat(user_id)",
-        ] {
-            // 并发/已存在时忽略失败（表与索引已由 migration 建好属正常情况）
-            if let Err(e) = db
-                .execute_raw(Statement::from_string(backend, ddl.to_string()))
-                .await
-            {
-                tracing::debug!("sys_pat 索引创建跳过（可能已存在）: {}", e);
-            }
-        }
+    for ddl in [
+        "CREATE UNIQUE INDEX uk_sys_pat_token_hash ON sys_pat(token_hash)",
+        "CREATE INDEX idx_sys_pat_user_id ON sys_pat(user_id)",
+    ] {
+        // 经 ensure_index_ddl 先探测再建：MySQL 无 IF NOT EXISTS 子句（1064），
+        // 旧写法"MySQL 整段跳过"在存量库=索引永不补齐（R-12）
+        migration::ensure_index_ddl(db, ddl).await?;
     }
 
     tracing::info!("sys_pat 表已就绪（幂等确保完成）");
@@ -638,7 +635,8 @@ pub(crate) async fn ensure_sys_pat_table(db: &DatabaseConnection) -> anyhow::Res
 ///
 /// 幂等：`CREATE TABLE IF NOT EXISTS` 三方言均合法；主键按方言声明自增（SQLite
 /// `INTEGER PRIMARY KEY AUTOINCREMENT` / MySQL `BIGINT AUTO_INCREMENT` / PG `BIGSERIAL`）。
-/// 索引：SQLite/PG 支持 `CREATE INDEX IF NOT EXISTS`，MySQL 不支持该子句，交由 migration 补齐。
+/// 索引：三方言统一经 `migration::ensure_index_ddl`（此前「MySQL 跳过」让只靠兜底段
+/// 建表的 MySQL 库长期没有 credential_id 唯一约束——批七十七 R-12 已修）。
 pub(crate) async fn ensure_sys_user_credential_table(
     db: &DatabaseConnection,
 ) -> anyhow::Result<()> {
@@ -670,19 +668,13 @@ pub(crate) async fn ensure_sys_user_credential_table(
     db.execute_raw(Statement::from_string(backend, create_sql))
         .await?;
 
-    if !matches!(backend, DatabaseBackend::MySql) {
-        for ddl in [
-            "CREATE UNIQUE INDEX IF NOT EXISTS uk_sys_user_credential_credential_id ON sys_user_credential(credential_id)",
-            "CREATE INDEX IF NOT EXISTS idx_sys_user_credential_user_id ON sys_user_credential(user_id)",
-        ] {
-            // 并发/已存在时忽略失败（表与索引已由 migration 建好属正常情况）
-            if let Err(e) = db
-                .execute_raw(Statement::from_string(backend, ddl.to_string()))
-                .await
-            {
-                tracing::debug!("sys_user_credential 索引创建跳过（可能已存在）: {}", e);
-            }
-        }
+    // 凭据表索引：与 sys_pat 同口径经 ensure_index_ddl 补齐三方言（旧写法对 MySQL
+    // 整段跳过，存量库的 credential_id 唯一约束因此长期缺失——R-12）
+    for ddl in [
+        "CREATE UNIQUE INDEX uk_sys_user_credential_credential_id ON sys_user_credential(credential_id)",
+        "CREATE INDEX idx_sys_user_credential_user_id ON sys_user_credential(user_id)",
+    ] {
+        migration::ensure_index_ddl(db, ddl).await?;
     }
 
     tracing::info!("sys_user_credential 表已就绪（幂等确保完成）");
@@ -720,8 +712,8 @@ pub(crate) async fn ensure_frontend_error_device_type(
 /// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，缺索引仅影响
 /// 查询性能（列表分页/过滤全表扫描），故创建失败只告警不阻断（与 Phase 3 索引兜底
 /// 同策略）。表不存在时（如对应模块建表迁移未应用过的极老存量库）跳过对应索引。
-/// 方言：经 `ensure_tenant_index` 收敛——SQLite/PG 直接 `CREATE INDEX IF NOT EXISTS`，
-/// MySQL 先查 information_schema 判存在，缺失才建。
+/// 方言：经 `ensure_tenant_index` 收敛（内部委托 `migration::ensure_index_ddl`——
+/// 三方言都先探测存在性再建，不再按方言分岔、也不按错误文案吞掉）。
 pub(crate) async fn ensure_perf_indexes(db: &DatabaseConnection) -> anyhow::Result<()> {
     let targets: &[(&str, &str, &str)] = &[
         ("flow_demo_doc", "idx_flow_doc_tenant", "tenant_id"),
@@ -811,14 +803,15 @@ pub(crate) async fn ensure_logininfor_user_id_column(
         "ALTER TABLE sys_logininfor ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0".to_string(),
     ))
     .await?;
-    if let Err(e) = db
-        .execute_raw(Statement::from_string(
-            backend,
-            "CREATE INDEX idx_sys_logininfor_user ON sys_logininfor (user_id)".to_string(),
-        ))
-        .await
+    // 统一走 `migration::ensure_index_ddl`（先按方言探测、必要时 SAVEPOINT 隔离），
+    // 不再靠吞错误文案——PG 事务里首错即 aborted，吞掉首错会废掉本函数后续所有语句
+    // （批七十七 R-11；本处保留"单个索引失败只告警不阻断启动"的原有语义）。
+    if let Err(e) = migration::ensure_index_ddl(
+        db,
+        "CREATE INDEX idx_sys_logininfor_user ON sys_logininfor (user_id)",
+    )
+    .await
     {
-        // 索引已存在（MySQL 1061 / PG 42P07 / SQLite already exists）不影响后续
         tracing::warn!("sys_logininfor user_id 索引创建跳过: {}", e);
     }
     let updated = db

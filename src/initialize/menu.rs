@@ -579,7 +579,10 @@ pub(crate) async fn ensure_report_tables(db: &DatabaseConnection) -> anyhow::Res
     );
     db.execute_raw(Statement::from_string(backend, dashboard_sql))
         .await?;
-    // 唯一索引：MySQL 不支持 IF NOT EXISTS，容错"已存在"
+    // 唯一索引：统一走 `migration::ensure_index_ddl`（先探测、必要时 SAVEPOINT 隔离）。
+    // 此前这里是"拼 IF NOT EXISTS + 按错误文案吞掉"的本地副本：MySQL 没有 IF NOT EXISTS
+    // 子句所以靠吞错兜，而 PG 一旦语句失败整笔事务 aborted，吞掉首错等于废掉后面所有语句
+    // （批七十七 R-11 根因，四份同构副本一并收口成一份实现）。
     for (idx_name, table, cols) in [
         (
             "uq_report_dataset_code",
@@ -592,24 +595,8 @@ pub(crate) async fn ensure_report_tables(db: &DatabaseConnection) -> anyhow::Res
             "(tenant_id, dashboard_code)",
         ),
     ] {
-        let idx_sql = match backend {
-            DatabaseBackend::MySql => {
-                format!("CREATE UNIQUE INDEX {idx_name} ON {table} {cols}")
-            }
-            _ => format!("CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} ON {table} {cols}"),
-        };
-        if let Err(e) = db
-            .execute_raw(Statement::from_string(backend, idx_sql))
-            .await
-        {
-            let msg = e.to_string();
-            if !(msg.contains("Duplicate key name")
-                || msg.contains("42P07")
-                || msg.contains("already exists"))
-            {
-                return Err(e.into());
-            }
-        }
+        let idx_sql = format!("CREATE UNIQUE INDEX {idx_name} ON {table} {cols}");
+        migration::ensure_index_ddl(db, &idx_sql).await?;
     }
     tracing::info!("report_dataset / report_dashboard 表已补建（G-01 存量库兜底）");
     Ok(())

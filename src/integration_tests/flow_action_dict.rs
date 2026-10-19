@@ -415,7 +415,11 @@ fn test_flow_action_lock_is_not_vacuous() {
         seeded6.contains("submit") && seeded6.contains("auto_approve"),
         "兜底种子值抽取失败：{seeded6:?}（类型标注行会把抽取带偏）"
     );
-    assert_eq!(seeded6.len(), 2, "类型标注元组被当成数据行计入：{seeded6:?}");
+    assert_eq!(
+        seeded6.len(),
+        2,
+        "类型标注元组被当成数据行计入：{seeded6:?}"
+    );
     // 对照组：单引号/嵌套括号密集时仍只取到字典值
     let blk6b = r#"let action_rows: &[(i64, &str)] = &[(900, "a(b", "tricky_val")];"#;
     assert_eq!(
