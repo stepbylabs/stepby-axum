@@ -178,9 +178,17 @@ WebHook/消息/OAuth/SCIM/flow/租户/报表/PAT/前端错误采集/代码生成
 默认角色、默认菜单树、系统字典、系统配置。存量库（已有 `seaql_migrations`）启动时
 自动跳过迁移，由 AppInitializer 的 ensure_* 幂等兜底负责演进兼容。
 
-> 历史说明：2026-09-30 前 deployment 流程为 `cd migration && cargo run`——该方式已失效
-> （migration crate 无 bin target），且当时迁移文件分散 87 个；现已重组为
-> `migration/src/migrations/` 子目录集中维护并在全新库启动时自动执行。
+> 也可以脱离服务单独执行迁移（批六十一补齐 bin target、批七十六加回滚通道）：
+> `DATABASE_URL=<连接串> cargo run -p migration [步数]` 前滚，
+> `cargo run -p migration -- --down [步数]` 回滚；位置参数是"本次最多推进/退回的迁移条数"，
+> 存量库逐条定位不幂等的对象时靠它把范围收窄。CI 的 `migration-matrix` 对
+> SQLite / MySQL / PostgreSQL 三库各跑四趟：前滚 → 全量回滚 → 再前滚 → 活库方言 smoke
+> （`cargo test --lib live_db_smoke -- --ignored`，见 `src/integration_tests/live_db_smoke.rs`）。
+>
+> ⚠ **SQLite 的回滚不是真逆操作**：3 条迁移的 `down()` 里 `DROP COLUMN` 因 SQLite 3.35
+> 之前不支持该语法而被 warn+skip（方言事实，不是缺陷）。所以 SQLite 上的回滚演练只保证
+> "能退回去且不报错"，**不能当作生产数据迁移的回滚预案**；需要真回滚能力的部署请用
+> MySQL / PostgreSQL（这两者的 up→down→up 已实测 schema 与迁移计数完全收敛）。
 
 ---
 
@@ -545,7 +553,7 @@ docker-compose up -d
 - [ ] Redis 已设置密码并禁用危险命令
 
 ### 数据
-- [ ] 数据库迁移已执行（`cargo run` in `migration/`）
+- [ ] 数据库迁移已执行（全新库由启动自动迁移；手工核对用 `cargo run -p migration`）
 - [ ] 默认 admin 密码已修改
 - [ ] `data/GeoLite2-City.mmdb` 已下载（可选但推荐）
 

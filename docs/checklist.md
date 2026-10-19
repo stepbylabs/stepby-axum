@@ -347,6 +347,11 @@
 
 - [ ] `DATABASE_URL="..." cargo run -p migration` 输出 `迁移完成`
 - [ ] 数据库 `seaql_migrations` 表记录迁移状态
+- [ ] 回滚通道可用：`DATABASE_URL="..." cargo run -p migration -- --down` 输出 `回滚完成`
+      （SQLite 的 `down()` 对 `DROP COLUMN` 是 warn+skip，回滚后 schema 不等价——
+      见 `docs/deployment.md` §3.4 的警告；需要真回滚预案请用 MySQL/PostgreSQL）
+- [ ] 活库方言 smoke（改了任何 SQL/DDL 方言分支时必跑）：
+      `STEPBY_SMOKE_DATABASE_URL="..." cargo test -j 4 --lib live_db_smoke -- --ignored`
 
 ### 7.6 日志验证
 
