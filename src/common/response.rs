@@ -74,6 +74,26 @@ impl<T: Serialize> IntoResponse for AjaxResult<T> {
     }
 }
 
+/// **传输层拒绝**的统一错误体（C.8）：HTTP 状态与 `body.code` 恒等，msg 为本地化文本。
+///
+/// 用在"请求还没进到业务层就被拒"的出口：408（超时层）、414/431（`middleware::uri_limit`）。
+///
+/// 为何**刻意不走** [`crate::common::http_status::map_status`]：`legacy` 档（默认档）的
+/// 已知码表里没有 408/414/431，`map_status(414, Legacy)` 返回的是 **200**——那会把
+/// "网关与监控能按真实状态码告警"这一维直接洗掉，而这些请求本就没产生业务码。
+/// 传输层拒绝因此与档位约定解耦：两档都给真实 HTTP 状态。
+/// 该取舍由 `uri_limit::tests::transport_rejection_status_is_convention_independent` 钉住。
+pub fn transport_error(status: StatusCode, msg: String) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "code": status.as_u16(),
+            "msg": msg,
+        })),
+    )
+        .into_response()
+}
+
 /// 下拉树节点（对齐前端 TreeSelect 类型）
 ///
 /// 用于菜单下拉树、部门下拉树等场景。字段挂在响应根对象上：

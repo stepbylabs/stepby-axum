@@ -40,6 +40,99 @@ async fn it_com_health_check() {
         !v["data"]["version"].as_str().unwrap_or("").is_empty(),
         "version 不应为空，实际: {v}"
     );
+    // b72 B3 关闭态契约锁：默认 off ⇒ 外部探针字段**必须缺省**（响应体与改造前等价，
+    // 公开端点不泄露"本部署有哪些外部依赖"，也不会真的去连 SMTP/OSS）。
+    assert!(
+        v["data"].get("external").is_none(),
+        "off 档不应出现 external 字段，实际: {v}"
+    );
+    assert!(
+        v["data"].get("externalStatus").is_none(),
+        "off 档不应出现 externalStatus 字段，实际: {v}"
+    );
+}
+
+/// 外部依赖探活 `basic` 档（AGENTS #5）：字段形状 + 档位登记清单 + **不改核心 status**。
+///
+/// 探针结论本身随环境而变（本机可能没配 SMTP/OSS），故这里锁的是**契约形状**而不是
+/// 具体状态：数量与顺序必须等于 `BASIC_PROBES`，状态必须落在公开字面量集合内，
+/// 且核心 `status` 仍为 UP（可选依赖不得把业务正常的实例判成故障）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_com_health_external_probes_basic_mode() {
+    use crate::handler::health_probes::{BASIC_PROBES, PROBE_STATUSES};
+
+    let ctx = TestContext::new_with(&[], |s| {
+        s.health.external_probes = "basic".to_string();
+    })
+    .await;
+
+    let v = ctx.get_json("/health").await;
+    assert_eq!(v["data"]["status"].as_str(), Some("UP"), "实际: {v}");
+    let probes = v["data"]["external"]
+        .as_array()
+        .unwrap_or_else(|| panic!("basic 档应出现 external 数组，实际: {v}"));
+    assert_eq!(
+        probes.len(),
+        BASIC_PROBES.len(),
+        "external 条数必须等于登记清单，实际: {v}"
+    );
+    let names: Vec<&str> = probes.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        BASIC_PROBES.to_vec(),
+        "external 顺序必须按登记清单固定（编排脚本据此比对）"
+    );
+    for p in probes {
+        let st = p["status"].as_str().unwrap_or_default();
+        assert!(
+            PROBE_STATUSES.contains(&st),
+            "探针状态必须是公开字面量之一，实际: {st} / {p}"
+        );
+        assert!(
+            p["detail"].as_str().is_some(),
+            "每条探针都要有可读说明（UP/SKIPPED/DOWN 都不例外），实际: {p}"
+        );
+        // 脱敏契约：说明文本绝不含凭据键值（纵深防御，即使依赖库回显也不进公开端点）
+        let detail = p["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for forbidden in ["password=", "bearer", "secret=", "token="] {
+            assert!(
+                !detail.contains(forbidden),
+                "detail 泄露凭据形态 `{forbidden}`：{detail}"
+            );
+        }
+        // b73：绝对文件系统路径也不得出现——`/health` 挂在 public.rs（免鉴权 200），
+        // 曾实测 storage 探针把上传目录的完整路径写进 detail（= 把部署目录结构给未认证访问者）。
+        // **本判据故意与 `common::redact::fold_abs_paths` 不同源**：这是出口侧的独立探针，
+        // 复用 sanitizer 自己的正则会让"sanitizer 失效"与"探针通过"同时成立（自证清白＝虚锁）。
+        // 因此这里比 sanitizer **更宽**（任意 ≥3 段 POSIX 路径都算泄露），并由
+        // `handler::api_contract_guard` 锁住"全仓只允许一处实现 + 本处独立探针"。
+        static FS_PATH_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?:^|\s)(?:/[A-Za-z0-9._-]+){3,}|[A-Za-z]:[\\/][A-Za-z0-9._-]")
+                .expect("静态正则")
+        });
+        let raw_detail = p["detail"].as_str().unwrap_or_default();
+        assert!(
+            !FS_PATH_RE.is_match(raw_detail),
+            "detail 泄露文件系统绝对路径（公开端点信息暴露）：{raw_detail}"
+        );
+    }
+    let overall = v["data"]["externalStatus"].as_str().unwrap_or_default();
+    assert!(
+        ["UP", "DEGRADED", "DOWN"].contains(&overall),
+        "externalStatus 聚合值非法，实际: {overall}"
+    );
+    // 组件级指标（AGENTS #4）：探针计数必须进全局注册表的出站指标系列。
+    // 直接读注册体而非再发一次 /metrics HTTP 请求：后者已有 file_common 的用例覆盖，
+    // 且文本切片断言在中文/多字节边界上脆断（此处只需 series 是否存在）。
+    let rendered = crate::observability::metrics::MetricsRegistry::global().render_prometheus();
+    assert!(
+        rendered.contains("stepby_outbound_requests_total{component=\"probe:"),
+        "外部探针必须落组件级出站指标；实际含 probe 行数：{}",
+        rendered.lines().filter(|l| l.contains("probe:")).count()
+    );
 }
 
 /// 验证码默认关闭态：测试 harness 强制 captchaEnabled=false，

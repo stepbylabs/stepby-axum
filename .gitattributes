@@ -1,0 +1,34 @@
+# 换行归一（批七十五 B10 补）：仓内 blob 一直是 LF（`git show HEAD:<path>` 实测 CRLF=0），
+# `.editorconfig` 也声明 `end_of_line = lf`，但本机 `core.autocrlf=true` 且此前没有本文件
+# ⇒ Windows 上重新 checkout 会把源码写成 CRLF。这不是风格问题：
+# `templates/*.tera` 由 rust-embed 在编译期原样嵌入，跨行 `contains` 断言与 `*.sh` 脚本
+# 于是随平台给出不同结论（本轮实测 `test_generated_code_is_clippy_clean_by_construction`
+# 在 CRLF 工作树下报红，LF 工作树下通过）。本文件把口径钉成"检出即 LF"。
+* text=auto eol=lf
+
+# Windows 批处理保留 CRLF（cmd.exe 对 LF 的兼容最差）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：禁止任何换行/编码改写
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.bmp binary
+*.webp binary
+*.svg text eol=lf
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.db binary
+*.sqlite binary
+*.mmdb binary
+*.xlsx binary
+*.docx binary

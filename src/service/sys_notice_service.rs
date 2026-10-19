@@ -489,10 +489,16 @@ impl SysNoticeService {
         _state: &AppState,
         tenant_id: i64,
     ) -> Result<Vec<(i64, String)>, ServiceError> {
-        use crate::entity::sys_user::{self, Column as UserColumn};
+        use crate::entity::sys_user::{Column as UserColumn, Entity as UserEntity};
         use sea_orm::*;
         let db = self.db();
-        let mut query = sys_user::Entity::find()
+        // **列投影**（b74 §一.16）：群发只需要 `(user_id, email)`，而未投影的 `find()`
+        // 会把整行读进内存——含 `password` 的 argon2 摘要。凭据摘要没有任何理由出现在
+        // 通知链路的内存里（一旦该路径将来加日志/序列化，就是凭据外泄面）。
+        let mut query = UserEntity::find()
+            .select_only()
+            .column(UserColumn::UserId)
+            .column(UserColumn::Email)
             .filter(UserColumn::Status.eq("0"))
             .filter(UserColumn::DelFlag.eq("0"))
             .filter(UserColumn::Email.is_not_null())
@@ -500,14 +506,17 @@ impl SysNoticeService {
         if let Some(tid) = crate::common::tenant::tenant_scope(tenant_id) {
             query = query.filter(UserColumn::TenantId.eq(tid));
         }
-        let users = query.all(db).await.map_err(|_| {
-            ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed"))
-        })?;
-        let pairs: Vec<(i64, String)> = users
+        let pairs: Vec<(i64, String)> = query
+            .into_tuple::<(i64, Option<String>)>()
+            .all(db)
+            .await
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!("error.notice.user_email_query_failed"))
+            })?
             .into_iter()
-            .filter_map(|u| {
-                let email = u.email.filter(|e| !e.is_empty())?;
-                Some((u.user_id, email))
+            .filter_map(|(uid, email)| match email {
+                Some(e) if !e.is_empty() => Some((uid, e)),
+                _ => None,
             })
             .collect();
         Ok(pairs)

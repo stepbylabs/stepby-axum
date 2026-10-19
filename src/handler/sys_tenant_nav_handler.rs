@@ -18,8 +18,7 @@ use std::sync::Arc;
 use crate::common::{AjaxResult, AppError};
 use crate::middleware::{Operator, TargetTenant};
 use crate::service::sys_tenant_nav_service::{
-    SysTenantMenuVo, SysTenantNavService, TenantNavAddDto, TenantNavEditDto, TenantNavMenuOptionVo,
-    TenantNavQueryDto,
+    SysTenantMenuVo, TenantNavAddDto, TenantNavEditDto, TenantNavMenuOptionVo, TenantNavQueryDto,
 };
 use crate::state::AppState;
 
@@ -156,7 +155,3 @@ pub async fn remove(
     target_tenant.set(tid);
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
-
-/// 供 router 挂载的类型自检（避免 unused import 告警）
-#[allow(dead_code)]
-fn _type_assert(_s: &SysTenantNavService) {}

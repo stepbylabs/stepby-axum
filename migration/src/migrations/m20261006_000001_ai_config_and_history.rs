@@ -23,11 +23,8 @@ use sea_orm_migration::sea_orm::Statement;
 pub async fn init_ai_config_and_history(db: &DatabaseConnection) -> Result<(), DbErr> {
     let manager = SchemaManager::new(db);
     create_ai_chat_history(&manager).await?;
-    let now = match manager.get_connection().get_database_backend() {
-        sea_orm::DatabaseBackend::MySql => "NOW()",
-        _ => "CURRENT_TIMESTAMP",
-    };
-    for body in ai_config_seed_bodies(now) {
+    let now = crate::seed_now_expr();
+    for body in ai_config_seed_bodies(&now) {
         let sql = match manager.get_connection().get_database_backend() {
             sea_orm::DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO {}", body),
             sea_orm::DatabaseBackend::Postgres => {
@@ -230,10 +227,7 @@ pub fn ai_config_seed_bodies(now_expr: &str) -> Vec<String> {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let now = match manager.get_connection().get_database_backend() {
-            sea_orm::DatabaseBackend::MySql => "NOW()".to_string(),
-            _ => "CURRENT_TIMESTAMP".to_string(),
-        };
+        let now = crate::seed_now_expr();
         create_ai_chat_history(manager).await?;
         for body in ai_config_seed_bodies(&now) {
             let sql = match manager.get_connection().get_database_backend() {

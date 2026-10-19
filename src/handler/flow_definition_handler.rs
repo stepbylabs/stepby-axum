@@ -52,11 +52,12 @@ pub async fn definition_list(
     operator: Operator,
     Query(query): Query<FlowDefQuery>,
 ) -> Result<TableDataInfo<FlowDefVo>, AppError> {
+    let (offset, limit) = crate::common::page::page_args(query.page_num, query.page_size);
     let (rows, total) = state
         .flow_definition_service
         .get_page(
-            (query.page_num - 1) * query.page_size,
-            query.page_size,
+            offset,
+            limit,
             query.flow_code.as_deref(),
             operator.tenant_id(),
         )

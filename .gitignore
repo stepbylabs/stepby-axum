@@ -70,3 +70,23 @@ _d.log
 # e2e 批跑后端运行日志（会话产物，不入库）
 tests_e2e_backend*.log
 data/*.db.bak*
+# 根级一次性会话脚本（_fix_menus.py / _gc_priv6.py / _probe.mjs 这类）——
+# 只服务于当次会话，且历史上出过"硬编码远端 token 被留在脚本里"的情况，一律不入库。
+/_*.py
+/_*.ps1
+/_*.mjs
+/_*.cjs
+/_*.sh
+
+# 一次性改造/取证脚本（批七十六 R-8 口径：这类脚本必须有归宿，不能长期留在版本库视野里）
+# 判据取"文件名形态"而非逐个枚举——patch_/verify_/wire_/split_/data_fix_/seed_diff_*_r*/_tmp_
+# 都是历轮会话里"跑完即弃"的中转脚本；交付物一律走 scripts/ 或 src/ 的正名。
+/patch_*.py
+/verify_*.py
+/wire_*.py
+/split_*.py
+/data_fix_*.py
+/seed_diff_r*.py
+/commit_msg*.txt
+/_m.txt
+/scripts/_tmp_*.py

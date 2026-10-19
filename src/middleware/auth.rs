@@ -125,8 +125,8 @@ pub async fn auth_middleware(
         )));
     }
 
-    // v4-F1 过渡阻断（历史越权止血，见 docs/optimization/topic-sso-multitenant-v4-final-2026-09-23.md
-    // §13-F1）：该 JWT 的哈希命中 `sso:at:{hash}` 绑定 → 是历史阶段由 SSO token 端点签发的平台
+    // v4-F1 过渡阻断（历史越权止血，落地裁决记录见
+    // docs/optimization/all-topics-open-items-2026-09-26.md 的 §13-F1 条目）：该 JWT 的哈希命中 `sso:at:{hash}` 绑定 → 是历史阶段由 SSO token 端点签发的平台
     // 同构 JWT → 其持有者本应只被允许调 /sso/userinfo，必须拒绝进入业务路由。
     // SSO 令牌只应被 /sso/userinfo 消费（该端点自行校验绑定，不经过本中间件）。
     // 【移除条件】A 形态（不透明 access_token）上线且历史令牌全部过期（一个 JWT TTL 周期）后，
@@ -199,12 +199,18 @@ async fn authenticate_pat(
             "error.auth.token_revoked"
         )));
     };
-    // best-effort 更新最近使用时间（失败仅记 debug，不影响请求）
+    // best-effort 更新最近使用时间：走统一后台任务范式（超时 + panic 隔离 + 失败留痕与计数），
+    // 丢弃 JoinHandle 是有意 detached，但结局必须可观测（AGENTS B.6）
     let svc = state.pat_service.clone();
     let pat_id = v.pat_id.clone();
-    tokio::spawn(async move {
-        svc.touch_last_used(&pat_id).await;
-    });
+    crate::common::background::spawn_tracked(
+        "pat_touch_last_used",
+        crate::common::background::LIGHT_DB_BUDGET,
+        Some(state.observability.metrics.clone()),
+        async move {
+            svc.touch_last_used(&pat_id).await;
+        },
+    );
     // Phase 3：PAT 同样受租户生命周期闸门约束（否则租户停用后凭 PAT 仍可长期访问）
     let pat_tid = v.tenant_id;
     Ok(Claims {

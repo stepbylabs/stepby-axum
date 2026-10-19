@@ -8,11 +8,15 @@
 
 用法：
     # 1) 先用第二实例构建纯种子库（全新空 SQLite，启动即写种子）：
+    #    ⚠️ 必须先 `touch data/seed-check.db`——sqlx 的 SqliteConnectOptions 默认
+    #    **不创建文件**（create_if_not_exists 未开），直接指一个不存在的路径会在建池时
+    #    报 code 14 "unable to open database file" 而退出（批七十六实测踩到）。
+    #    touch data/seed-check.db
     #    DATABASE_URL=sqlite://./data/seed-check.db SERVER_PORT=8094 cargo run
-    #    （后端起来即种子写完，Ctrl-C 退出即可）
-    # 2) 比对：
+    #    （后端起来即种子写完，Ctrl-C 退出即可；全新库会跑完整 Migrator::up）
+    # 2) 比对（**两个参数都必须给**，单参数会让 seed 与 live 指到同一个文件）：
     #    python scripts/seed_diff.py data/seed-check.db data/stepby.db
-    #    python scripts/seed_diff.py data/seed-check.db   # live 缺省 data/stepby.db
+    #    同文件调用被硬拒绝（退出码 2）：自比自恒得"零漂移"，属最坏的一种假绿。
 
 比对口径三规则（b54-b57 实证沉淀）：
     R1 审计列豁免：create_time / update_time / update_by 为运行态审计列，不参与比对。
@@ -63,8 +67,12 @@ BUSINESS_KEY = {
     "sys_dict_data": ("dict_type", "dict_value"),
     "sys_msg_channel": ("channel_code",),
     "sys_oauth_provider": ("provider_code",),
+    # b72：限流档位表按 route_pattern 才是业务身份（中间件精确模板匹配 + `*` 兜底）。
+    # 敏感度分档 18 行由 initialize 兜底追加 ⇒ 自增 PK 在两库必然错位（种子库从空库
+    # 顺序写、运行库在既有行之后追加），按 PK 比对会报 19 处"假漂移"（b72 实测：
+    # 两库 route_pattern 集合与 capacity/refill/enabled 逐条一致，零真实漂移）。
+    "sys_rate_limit": ("route_pattern",),
 }
-
 # K1：双源合并语义（sys 行空→回落 config.toml，行级差异 = toml 合法物化）
 DUAL_SOURCE_PREFIXES = {
     "sys_config": ("sys.ai.",),
@@ -78,6 +86,9 @@ SURROGATE_PK = {
     "sys_dict_data": "dict_code",
     "sys_msg_channel": "channel_id",
     "sys_oauth_provider": "provider_id",
+    # b72：与 BUSINESS_KEY["sys_rate_limit"] 配对——按 route_pattern 对齐后，
+    # 自增 id 在两库必然错位（补种顺序不同），K3 判定为合法演进。
+    "sys_rate_limit": "id",
 }
 
 # K4：运行态列（账号态随运行演进：口令升级 argon2id/头像上传/登录时间/资料修改）
@@ -257,6 +268,18 @@ def main(argv):
         if not os.path.isfile(p):
             print(f"[seed_diff] 数据库文件不存在: {p}")
             return 2
+
+    # 单参数用法会把 live 缺省成 data/stepby.db——若 seed 也传同一个文件，比对就是
+    # 拿库跟自己比，**恒得"零漂移"的假绿**（批七十六实测踩到：单参数跑出 PASS 0 漂移）。
+    # 同文件必须硬失败并说明怎么建纯种子库，而不是给一个看起来通过的结果。
+    if os.path.realpath(seed_path) == os.path.realpath(live_path):
+        print(
+            "[seed_diff] 种子库与运行库是同一个文件（%s）⇒ 校验没有跑，不得当成通过。\n"
+            "  先建纯种子库：DATABASE_URL=sqlite://./data/seed-check.db SERVER_PORT=8094 cargo run\n"
+            "  再比对：python scripts/seed_diff.py data/seed-check.db data/stepby.db"
+            % seed_path
+        )
+        return 2
 
     seed = sqlite3.connect(f"file:{seed_path}?mode=ro", uri=True)
     live = sqlite3.connect(f"file:{live_path}?mode=ro", uri=True)

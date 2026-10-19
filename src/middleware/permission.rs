@@ -1967,11 +1967,27 @@ mod tests {
 
     /// 扫描 `src/router` 中注册于 `protected` 子树内的全部 `.route(...)`，返回 (METHOD, path)
     ///
-    /// axum 的 `Router` 不支持运行时枚举，故以源码解析代替：
-    /// ① 从 `router/mod.rs` 的 `let protected = Router::new() ... .merge(<mod>::<fn>())` 取目标函数；
-    /// ② 从对应文件的函数体做花括号配平截取；
-    /// ③ 对每个 `.route(` 取括号内首字符串字面量为路径，取 `get/post/put/delete/patch` 为方法。
+    /// axum 的 `Router` 不支持运行时枚举，故以源码解析代替 ⇒ 解析口径见
+    /// [`scan_protected_routes_detailed`]（① `router/mod.rs` 取 `.merge()` 目标；
+    /// ② 函数体花括号配平截取；③ 括号内首字符串字面量为路径、`get/post/put/delete/patch` 为方法）。
+    /// 薄封装：判据全部在 [`scan_protected_routes_detailed`]，本函数只摊平。
+    /// **不得**另写第二个 router 解析器——两处解析口径必然漂移（b74 §3.1 反向锁即复用此管线）。
     fn scan_protected_routes() -> Vec<(String, String)> {
+        scan_protected_routes_detailed()
+            .into_iter()
+            .flat_map(|(_, _, _, routes)| routes)
+            .collect()
+    }
+
+    /// 同上，但**按 router 构建函数分组**保留归属信息，返回
+    /// `(module, fn 名, 该函数是否挂 platform_only_guard, [(METHOD, path)])`。
+    ///
+    /// 为什么要"按函数分组"：`platform_only_guard` 是以 `.route_layer(...)` 挂在
+    /// **某个 Router 构建函数**的链尾，作用域即该函数产出的路由集合。只有拿到函数粒度，
+    /// 才能问"挂了守卫的这些路径，它们的 perms 前缀是否都登记进了
+    /// `PLATFORM_ONLY_PERM_PREFIXES`"（B3 反向锁）。按整文件判定会把同文件里
+    /// **未受守卫**的路由一并算进来，得出比真实约束更宽的集合 ⇒ 误红或漏红。
+    fn scan_protected_routes_detailed() -> Vec<(String, String, bool, Vec<(String, String)>)> {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/router");
         let mod_rs =
             std::fs::read_to_string(format!("{dir}/mod.rs")).expect("读取 router/mod.rs 失败");
@@ -2014,7 +2030,7 @@ mod tests {
             targets.len()
         );
 
-        let mut out: Vec<(String, String)> = Vec::new();
+        let mut out: Vec<(String, String, bool, Vec<(String, String)>)> = Vec::new();
         let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
         for (module, func) in targets {
             // module 含 '/' 说明是 src/ 下的跨目录模块（如 audit/router），
@@ -2027,6 +2043,9 @@ mod tests {
             .unwrap_or_else(|e| panic!("读取 {module}.rs 失败: {e}"));
             let body = extract_fn_body(&src, &func)
                 .unwrap_or_else(|| panic!("在 {module}.rs 中未找到函数 {func}"));
+            // 守卫挂载判定只看**函数体**（含 `.route_layer(...platform_only_guard)`）
+            let guarded = body.contains("platform_only_guard");
+            let mut routes: Vec<(String, String)> = Vec::new();
             let mut r = body.as_str();
             while let Some(i) = r.find(".route(") {
                 let from_call = &r[i + ".route(".len() - 1..];
@@ -2041,10 +2060,11 @@ mod tests {
                     "{module}::{func} 路由 {path} 未识别到 HTTP 方法: {args}"
                 );
                 for m in methods {
-                    out.push((m, path.clone()));
+                    routes.push((m, path.clone()));
                 }
                 r = &from_call[consumed..];
             }
+            out.push((module, func, guarded, routes));
         }
         out
     }
@@ -2278,5 +2298,129 @@ mod tests {
         // 方法混淆不应命中
         assert_eq!(get_required_perm("GET", "/system/tenant/menu"), None);
         assert_eq!(get_required_perm("POST", "/system/tenant/menu/list"), None);
+    }
+
+    // ==================== 批七十四 B3：平台专属归属的**反向**形状锁 ====================
+    //
+    // 既有契约锁（menu_perm_contract / PROTECTED_ROUTES）只能证明"登记的都是对的"，
+    // 证明不了"该登记的都登记了"。告警规则族正是从锁的背面漏出去：请求层整组挂了
+    // `platform_only_guard`（租户一律 403），但 `PLATFORM_ONLY_PERM_PREFIXES` 漏登记
+    // ⇒ `is_grantable_perm` 判"可授" ⇒ 菜单 4110 随 `common` 模板复制给租户管理员
+    // ⇒ 租户看得见"告警规则"、点进去必然 403（AGENTS 落地准则 2 点名的假入口）。
+    // 本组锁把"守卫挂载 ⇒ 必须进注册表"这个方向钉死。
+
+    /// 反向锁①：**挂了 `platform_only_guard` 的路由，其 perms 必须被注册表判为平台专属**。
+    ///
+    /// 判据按 (方法, 路径模板) **逐字**反查 `PERM_ROUTE_TABLE`（复用 `get_required_perm`），
+    /// 不用路径字符串前缀匹配——后者会把 `/monitor/logininfor/*` 误归进 `/monitor/log` 组
+    /// （本批 §3.0 剔除过的同类工具错误），一旦误归类，锁会因"看起来已覆盖"而漏红。
+    ///
+    /// 归属判定**直接复用运行时的同一个谓词** `is_platform_only_perm`，不在锁里二次推导
+    /// "perms 前缀"：注册表本身是前缀表，自行截段既脆弱（首轮实测就把
+    /// `monitor:alert:list` 截成 `monitor:`，三个族被压成一种 ⇒ 判据退化）又等于造出
+    /// 第二份判据（AGENTS 单一事实源）。
+    #[test]
+    fn guarded_platform_routes_have_registered_perm_prefixes() {
+        let detail = scan_protected_routes_detailed();
+        let mut unregistered: Vec<String> = Vec::new();
+        let mut unmapped: Vec<String> = Vec::new();
+        let mut guarded_perms: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut guarded_route_count = 0usize;
+
+        for (module, func, guarded, routes) in &detail {
+            if !*guarded {
+                continue;
+            }
+            for (method, path) in routes {
+                guarded_route_count += 1;
+                match get_required_perm(method, path) {
+                    Some(perm) => {
+                        guarded_perms.insert(perm);
+                        if !crate::common::tenant::is_platform_only_perm(perm) {
+                            unregistered.push(format!(
+                                "{module}::{func} {method} {path} ⇒ perm={perm} 未被注册表判为平台专属"
+                            ));
+                        }
+                    }
+                    None => unmapped.push(format!("{module}::{func} {method} {path}")),
+                }
+            }
+        }
+
+        // 控制组（防"解析器退化 ⇒ 空集合 ⇒ 虚锁"）：守卫面必须真实被看见。
+        // 这些下标取自本轮实测；若哪天 router 组织形式变了导致扫描数骤降，本行先红，
+        // 而不是让上面那条判据在"0 条待检"上绿过去（同 §3.9 的"看不见目标必须响亮失败"）。
+        assert!(
+            guarded_route_count >= 20 && guarded_perms.len() >= 20,
+            "platform_only_guard 扫描面异常（路由 {guarded_route_count} 条 / perms {} 种），\
+             反向锁①即将空转 ⇒ 请先修 scan_protected_routes_detailed 的解析口径",
+            guarded_perms.len()
+        );
+        assert!(
+            guarded_perms
+                .iter()
+                .any(|p| p.starts_with("monitor:alert:")),
+            "反向锁①必须覆盖到告警规则族（本轮真缺陷的回归对象）；实际 perms 集合：{guarded_perms:?}"
+        );
+
+        assert!(
+            unregistered.is_empty(),
+            "以下路由在请求层被 platform_only_guard 封为平台专属（租户一律 403），\
+             但其 perms 未登记进 PLATFORM_ONLY_PERM_PREFIXES ⇒ is_grantable_perm 判可授、\
+             菜单随 common 模板流入租户 ⇒ 假入口：\n{}",
+            unregistered.join("\n")
+        );
+        assert!(
+            unmapped.is_empty(),
+            "以下平台专属路由在 PERM_ROUTE_TABLE 中查不到 perms（仅需登录），\
+             反向锁对它**无从判定** ⇒ 请登记 perms 或显式加入仅登录白名单并说明理由：\n{}",
+            unmapped.join("\n")
+        );
+    }
+
+    /// 反向锁②：注册表里每条前缀必须**确有其键**（防止条目腐化成死条款/错别字）。
+    #[test]
+    fn platform_only_prefixes_are_all_live() {
+        let perms: std::collections::BTreeSet<&str> =
+            super::PERM_ROUTE_TABLE.iter().map(|(_, _, p)| *p).collect();
+        let mut dead: Vec<&str> = Vec::new();
+        for prefix in crate::common::tenant::PLATFORM_ONLY_PERM_PREFIXES {
+            if !perms.iter().any(|p| p.starts_with(prefix)) {
+                dead.push(*prefix);
+            }
+        }
+        assert!(
+            dead.is_empty(),
+            "PLATFORM_ONLY_PERM_PREFIXES 中以下前缀在 PERM_ROUTE_TABLE 里找不到任何 perms，\
+             属死条款或拼写漂移（该条判据实际不生效）：{dead:?}"
+        );
+    }
+
+    /// 自检：反向锁①的判据必须**能红**——告警族 perms 在"去掉 `monitor:alert:` 的注册表"
+    /// 下必须被判为非平台专属（证明本锁不是恒真断言，同 view_reachability_selftest 的纪律）。
+    #[test]
+    fn reverse_lock_is_falsifiable() {
+        let alert_perms: Vec<&str> = super::PERM_ROUTE_TABLE
+            .iter()
+            .filter(|(_, _, p)| p.starts_with("monitor:alert:"))
+            .map(|(_, _, p)| *p)
+            .collect();
+        assert!(
+            !alert_perms.is_empty(),
+            "告警族在 PERM_ROUTE_TABLE 中无条目 ⇒ 本自检失去约束对象"
+        );
+        // 合成"注册表漏登记"态：只留三条无关前缀
+        let stripped: &[&str] = &["system:tenant:domain:", "tool:gen:", "monitor:cache:"];
+        for perm in &alert_perms {
+            assert!(
+                !stripped.iter().any(|p| perm.starts_with(p)),
+                "合成实验失败：去掉 monitor:alert: 后 {perm} 仍被判已登记 ⇒ 反向锁①恒真，无判据力"
+            );
+            // 同时确认真实注册表**确实**覆盖了它（否则上一行只是在测空气）
+            assert!(
+                crate::common::tenant::is_platform_only_perm(perm),
+                "{perm} 未被真实注册表判为平台专属 ⇒ B3 修复未落地"
+            );
+        }
     }
 }

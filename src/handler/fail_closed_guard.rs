@@ -18,22 +18,19 @@
 
 #[cfg(test)]
 mod fail_closed_mod {
-    use std::path::Path;
 
     /// 取生产码**语句**：`#[cfg(test)]` 之前、并剔除 `//` 行。
     /// b71 治理点的注释会引用被禁的旧写法作为说明（"原写 `if let Ok(..)`"），
-    /// 不排除注释就会把"文档"误判成"回归"。
+    /// 不排除注释就会把"文档"误判成"回归"。采集口径见 [`crate::common::prod_scan`]。
     fn prod_src(rel: &str) -> String {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取 {rel} 失败: {e}"));
-        let prod = match src.find("#[cfg(test)]") {
-            Some(idx) => &src[..idx],
-            None => src.as_str(),
-        };
-        prod.lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        crate::common::prod_scan::prod_file(
+            rel,
+            &crate::common::prod_scan::Scan {
+                comments: crate::common::prod_scan::Comments::Drop,
+                ..Default::default()
+            },
+        )
+        .text()
     }
 
     /// 断言生产码语句中**不存在**某段旧写法
@@ -138,6 +135,115 @@ mod fail_closed_mod {
             "src/service/sys_msg_service.rs",
             "if let Ok(Some(pref)) = self.pref_repo.find_by_user_id",
             "站内信偏好（免打扰）读取失败不得静默当作允许投递",
+        );
+    }
+
+    /// 采集 `src` 下全部 `.rs`（跳过 `target`/`integration_tests`）：改走
+    /// [`crate::common::prod_scan::rel_paths`]。此处原本自带一份 `collect_rs`，
+    /// 且目录不可读时 `return` 一个空集——那会让本锁在目录改名后**静默空转全绿**，
+    /// 正是 B9 要根除的形态；共享实现改成 panic（空采集面不是通过）。
+    fn src_rs() -> Vec<String> {
+        crate::common::prod_scan::rel_paths("src")
+    }
+
+    /// 取 spawn 调用之后的判定窗口：最多 `SPAN_LINES` 行，且**止于下一个 `tokio::spawn(`**
+    /// ——避免"隔壁已加守卫的任务"把本条未守卫任务洗白（形状锁最怕假阴性通过）。
+    fn spawn_window(prod: &str, call_idx: usize) -> String {
+        const SPAN_LINES: usize = 60;
+        let start_line = prod[..call_idx].lines().count() - 1;
+        let all: Vec<&str> = prod.lines().collect();
+        let mut end = (start_line + SPAN_LINES).min(all.len());
+        for (offset, line) in all.iter().enumerate().skip(start_line + 1) {
+            if line.contains("tokio::spawn(") {
+                end = end.min(offset);
+                break;
+            }
+        }
+        all[start_line..end].join("\n")
+    }
+
+    /// b72（AGENTS B.6 异步任务统一范式）：生产码的 `tokio::spawn` 必须满足——
+    /// **panic 隔离**（`catch_unwind`/`AssertUnwindSafe`）**且** **超时**（`timeout(`，
+    /// 或走 `common::background::{spawn_tracked,run_tracked}` 由其内含），
+    /// 或落在 `EXEMPT` 显式豁免表内并写明取证理由。
+    ///
+    /// 两个条件都要（而非"之一"）的理由：只隔离 panic 仍可能无限堆积卡死任务；只加超时但
+    /// panic 未隔离则任务静默死亡、连失败痕迹都没有。豁免存在的必要性：调度器 job 包装与
+    /// 锁续期是**长驻循环**，外层套固定超时会砍断合法长任务——它们的超时由内部机制负责
+    /// （job 侧 `execute_with_logging` 尊作业超时、续期侧 `lock_renew` 有存储超时），
+    /// 但 panic 隔离仍在原位。
+    ///
+    /// 与常驻脚本 `scripts/rust_hygiene_scan.py` 的 `spawn_unguarded` 类互为印证：脚本出跨批次差值，
+    /// 本锁做提交门禁。b72 实测起点是 **13 处裸 spawn**（`ai/handler` 4、`auth`、`ak_sign`、
+    /// `sso_handler`、`ws_handler`、`scheduler` Drop 兜底、`webhook` 派发 2 等），已全部收口或定性豁免。
+    #[test]
+    fn background_spawn_tasks_are_guarded_or_explicitly_exempted() {
+        const EXEMPT: &[(&str, &str, &str)] = &[
+            (
+                "src/common/background.rs",
+                "tokio::spawn(async move {",
+                "守卫实现自身的内层派生（timeout + catch_unwind 就在本函数体内）",
+            ),
+            (
+                "src/service/sys_web_hook_service.rs",
+                "let Ok(_permit) = gate.acquire_owned().await",
+                "出站投递：per-hook `timeout_secs`（clamp MAX_TIMEOUT_SECS）负责超时；panic 时 SemaphorePermit \
+                 随任务栈展开归还（不泄漏闸门）；结局落 web_hook_log 审计 + deliver() 记录组件指标",
+            ),
+            (
+                "src/scheduler/mod.rs",
+                "let result = AssertUnwindSafe(execute_with_logging(",
+                "调度器 job 包装：panic 已隔离；超时由 execute_with_logging 内部按作业配置负责，\
+                 外层再套固定超时会截断合法的长任务",
+            ),
+            (
+                "src/scheduler/mod.rs",
+                "AssertUnwindSafe(store.lock_renew(&lock_handle, LOCK_TTL_SECS))",
+                "分布式锁续期循环：panic 已隔离（逐次迭代捕获，避免续期任务整体死亡导致锁提前失效）；\
+                 长驻循环不得套外层超时，单次续期超时由 SharedStore 负责",
+            ),
+        ];
+        let mut violations = Vec::new();
+        let mut checked = 0usize;
+        for rel in src_rs() {
+            if rel.contains("integration_tests") || rel == "src/handler/fail_closed_guard.rs" {
+                continue;
+            }
+            let prod = prod_src(&rel);
+            for (idx, _) in prod.match_indices("tokio::spawn(") {
+                checked += 1;
+                let block = spawn_window(&prod, idx);
+                // 走 background helper 即视为两项齐备（超时与 panic 隔离都发生在 helper 内部，
+                // 调用点文本看不到 catch_unwind）
+                let via_helper = block.contains("run_tracked(") || block.contains("spawn_tracked(");
+                let panic_guarded =
+                    block.contains("catch_unwind") || block.contains("AssertUnwindSafe");
+                let time_guarded = block.contains("timeout(");
+                if via_helper || (panic_guarded && time_guarded) {
+                    continue;
+                }
+                let exempted = EXEMPT
+                    .iter()
+                    .any(|(f, needle, _)| *f == rel && block.contains(needle));
+                if !exempted {
+                    violations.push(format!(
+                        "{}:L{}（panic 隔离={panic_guarded}，超时={time_guarded}）",
+                        rel,
+                        prod[..idx].lines().count()
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked >= 8,
+            "本锁的扫描面本身要有效：实测只见证到 {checked} 处 tokio::spawn（b72 基线 ≥8），\
+             说明文件遍历或 prod_src 口径出了问题，而非代码变干净了"
+        );
+        assert!(
+            violations.is_empty(),
+            "以下生产码 tokio::spawn 未同时满足「panic 隔离 + 超时」，也不在豁免表：{violations:?}\n\
+             （AGENTS B.6：异步任务必须「超时 + 重试上限 + 失败审计」；请改用 \
+             common::background::spawn_tracked，或在 EXEMPT 内登记取证理由）"
         );
     }
 }

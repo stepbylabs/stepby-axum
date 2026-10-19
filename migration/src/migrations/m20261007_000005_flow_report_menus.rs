@@ -164,12 +164,7 @@ const MENUS: &[MenuSeed] = &[
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let backend = manager.get_connection().get_database_backend();
-        let now_expr = match backend {
-            sea_orm::DatabaseBackend::Sqlite => {
-                format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-            }
-            _ => "NOW()".to_string(),
-        };
+        let now_expr = crate::seed_now_expr();
         for m in MENUS {
             let sql = idempotent_insert(
                 backend,

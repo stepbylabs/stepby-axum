@@ -96,10 +96,10 @@ pub async fn list(
     Query(params): Query<FileListQuery>,
 ) -> Result<AjaxResult<FileListResponse>, AppError> {
     let upload_cfg = &state.config.upload;
-    // 安全（R10）：page_num 设上界 10000，防止 (page_num-1)*page_size 在 u64 乘法时溢出
-    // 导致 debug panic / release 回绕后返回错误切片范围
-    let page_num = params.page_num.clamp(1, 10_000);
-    let page_size = params.page_size.clamp(1, 100);
+    // 分页点位统一走 `page::page_args`（offset 与 limit 成对推导，溢出与封顶由单一事实源
+    // 负责）：此前本处用 `clamp(1, 10_000)` 手挡 `(page_num-1)*page_size` 的 u64 乘法溢出，
+    // 那只是把同一条不变式复制了一份到这里。
+    let (offset, page_size) = crate::common::page::page_args(params.page_num, params.page_size);
 
     // 统一走存储后端列举（local 读目录 / s3 ListObjectsV2），URL 由后端生成；
     // 目录带操作者租户维度，仅可见本租户文件
@@ -155,13 +155,11 @@ pub async fn list(
     // 按修改时间倒序
     files.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
     let total = files.len() as u64;
-    let start = ((page_num - 1) * page_size) as usize;
-    let end = (start + page_size as usize).min(files.len());
-    let rows = if start < files.len() {
-        files.drain(start..end).collect()
-    } else {
-        Vec::new()
-    };
+    // 内存切片：`offset` 已由单一事实源饱和到 `i64::MAX`，这里只需保证区间合法
+    // （深到不存在的页 ⇒ start==end==len ⇒ drain 返回空集，与 DB 分页语义一致）
+    let start = (offset as usize).min(files.len());
+    let end = start.saturating_add(page_size as usize).min(files.len());
+    let rows = files.drain(start..end).collect();
 
     Ok(AjaxResult::success(FileListResponse { rows, total }))
 }
@@ -189,11 +187,14 @@ pub async fn upload(
     let mut file_ext: Option<String> = None;
 
     // P0-3 OOM 修复：流式限长读取，不再整读内存后校验大小
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed")))?
-    {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        // 与 `common_handler`/`sys_user_handler` 同口径：错误原因进响应体（multer 的
+        // Display 只有边界/字段形态，不含路径与凭据），同时留 WARN 便于排障。
+        // 原先本处 `|_|` 把错误丢掉、而文案写着 `%{e}` ⇒ 用户原样看到 "%{e}"
+        // （批七十五 i18n 占位符对账锁抓回）
+        tracing::warn!("解析 multipart 失败: {e}");
+        AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e))
+    })? {
         if field.name() == Some("file") {
             let (bytes, ext, original) =
                 crate::common::upload::read_field_limited(&mut field, upload_cfg.common_max_size)

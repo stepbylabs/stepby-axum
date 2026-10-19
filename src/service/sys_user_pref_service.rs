@@ -12,7 +12,6 @@
 use garde::Validate;
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
-use std::collections::HashSet;
 use utoipa::ToSchema;
 
 use crate::common::error::ServiceError;
@@ -201,46 +200,16 @@ impl SysUserPrefService {
 
     // ==================== Enforcement 判定 ====================
 
-    /// 判定某用户当前是否应接收指定渠道的通知（结合免打扰窗口）
+    /// 免打扰窗口当前是否生效（dnd_enabled='1' 且给定时刻落在 [start, end) 内）
     ///
-    /// 无偏好记录（缺省行）一律视为可接收（全量开启），保证默认行为不被破坏。
-    /// 未启用免打扰或启用了但当前不在时间窗内 → 判定为可接收。
-    pub async fn can_receive(
-        &self,
-        user_id: i64,
-        channel: PrefChannel,
-    ) -> Result<bool, ServiceError> {
-        let row = self.pref_repo.find_by_user_id(user_id).await?;
-        Ok(match row {
-            None => true,
-            Some(p) => channel.allows(&p) && !Self::dnd_active(&p),
-        })
-    }
-
-    /// 批量判定：返回其中「应接收」的 user_id 集合（含无偏好记录的缺省允许）
-    ///
-    /// 供管理员批量为大量用户投递（如公告邮件）时一次查询判断，避免逐用户 N 次查询。
-    pub async fn filter_receivable(
-        &self,
-        user_ids: &[i64],
-        channel: PrefChannel,
-    ) -> Result<HashSet<i64>, ServiceError> {
-        let rows = self.pref_repo.find_by_user_ids(user_ids).await?;
-        let mut allowed: HashSet<i64> = user_ids.iter().copied().collect();
-        for p in &rows {
-            if !channel.allows(p) || Self::dnd_active(p) {
-                allowed.remove(&p.user_id);
-            }
-        }
-        Ok(allowed)
-    }
-
-    /// 免打扰窗口当前是否生效（dnd_enabled='1' 且当前时刻落在 [start, end) 内）
-    fn dnd_active(p: &PrefModel) -> bool {
+    /// b74：这是 DND 判据的**唯一实现**，由 [`allows_delivery`] 复用。此前它与
+    /// `allows_delivery` 里的内联条件各写一份（同一判据两处实现，改动必然漂移），
+    /// 而 `can_receive` / `filter_receivable` 两个包装又零调用者 ⇒ 三个符号一起收口。
+    fn dnd_active(p: &PrefModel, now_hm: &str) -> bool {
         p.dnd_enabled == "1"
             && !p.dnd_start.is_empty()
             && !p.dnd_end.is_empty()
-            && is_in_dnd_window(&p.dnd_start, &p.dnd_end, &now_hm_str())
+            && is_in_dnd_window(&p.dnd_start, &p.dnd_end, now_hm)
     }
 }
 
@@ -274,11 +243,7 @@ pub fn now_hm_str() -> String {
 /// 供各投递路径（通知公告邮件、站内信）直接复用，避免在多处重复实现 DND 判定。
 /// `now_hm` 形如 `"HH:MM"`（如需服务器当前时刻可用 [`now_hm_str`]）。
 pub fn allows_delivery(channel: PrefChannel, p: &PrefModel, now_hm: &str) -> bool {
-    channel.allows(p)
-        && !(p.dnd_enabled == "1"
-            && !p.dnd_start.is_empty()
-            && !p.dnd_end.is_empty()
-            && is_in_dnd_window(&p.dnd_start, &p.dnd_end, now_hm))
+    channel.allows(p) && !SysUserPrefService::dnd_active(p, now_hm)
 }
 
 /// 判断时刻 `now` 是否落在免打扰窗口 [start, end) 内

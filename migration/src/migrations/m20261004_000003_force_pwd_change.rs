@@ -124,10 +124,7 @@ pub fn admin_marker_bodies() -> Vec<String> {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let now = match manager.get_connection().get_database_backend() {
-            sea_orm::DatabaseBackend::MySql => "NOW()".to_string(),
-            _ => "CURRENT_TIMESTAMP".to_string(),
-        };
+        let now = crate::seed_now_expr();
         let (newly_added, config_bodies) = upsert_force_pwd_change_columns(manager, &now).await?;
 
         if newly_added {

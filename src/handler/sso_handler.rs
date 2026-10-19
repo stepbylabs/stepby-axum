@@ -356,16 +356,21 @@ pub async fn token(
             // 台账 F-8：登录日志以不可变主键强关联用户
             let user_id = result.user_id;
             let cid = params.client_id.clone().unwrap_or_default();
-            tokio::spawn(async move {
-                // B-2：ORM 写入下沉至 SysLogininforService（handler 不再直接构造 ActiveModel）
-                if let Err(e) = state
-                    .logininfor_service
-                    .write_sso_issue_log(tenant_id, user_id, user_name, ip, cid)
-                    .await
-                {
-                    tracing::warn!("SSO 令牌签发日志写入失败（best-effort）: {}", e);
-                }
-            });
+            crate::common::background::spawn_tracked(
+                "sso_issue_login_log",
+                crate::common::background::LIGHT_DB_BUDGET,
+                Some(crate::observability::metrics::MetricsRegistry::global()),
+                async move {
+                    // B-2：ORM 写入下沉至 SysLogininforService（handler 不再直接构造 ActiveModel）
+                    if let Err(e) = state
+                        .logininfor_service
+                        .write_sso_issue_log(tenant_id, user_id, user_name, ip, cid)
+                        .await
+                    {
+                        tracing::warn!("SSO 令牌签发日志写入失败（best-effort）: {}", e);
+                    }
+                },
+            );
             // RFC 6749 §5.1：token 响应必须携带 Cache-Control: no-store
             // 批六十六：序列化失败必须走统一错误契约——handler 内 panic 会中断整条连接
             //（无状态码、无留痕），故转为 500 并 error 日志。
@@ -597,7 +602,11 @@ pub async fn client_logo(
         None => {
             let Some(url) = state.sso_service.client_logo_source(&client_id).await else {
                 // 无 logo / 未通过 SSRF 校验：404 让前端回落到首字母头像（不显示空白）
-                return StatusCode::NOT_FOUND.into_response();
+                // C.8：状态码不变，body 不再是空体——与同函数"未开启代理"分支同形状
+                return oidc_error_response(
+                    StatusCode::NOT_FOUND,
+                    &OidcError::new("not_found", crate::tr!("error.sso.logo_unavailable")),
+                );
             };
             let _: Result<(), _> = state
                 .store
@@ -614,11 +623,25 @@ pub async fn client_logo(
         .build()
     {
         Ok(c) => c,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => {
+            return oidc_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &OidcError::new("server_error", crate::tr!("error.sso.logo_proxy_failed")),
+            );
+        }
     };
+    // b74（AGENTS B.4）：logo 代理是免鉴权端点上的**真实出网**，其健康度必须独立成桶
+    // （故障面与 oauth_token/oauth_userinfo 不同：那是 IdP 的 API，这是客户端自配的图片地址）。
+    // 本函数出口 5 条 ⇒ 用 RAII 守卫，不手写计数。
+    let mut outbound = crate::observability::metrics::OutboundGuard::start("sso_logo");
     let resp = match client.get(&url).send().await {
         Ok(r) if r.status().is_success() => r,
-        _ => return StatusCode::NOT_FOUND.into_response(),
+        _ => {
+            return oidc_error_response(
+                StatusCode::NOT_FOUND,
+                &OidcError::new("not_found", crate::tr!("error.sso.logo_unavailable")),
+            );
+        }
     };
     let content_type = resp
         .headers()
@@ -633,16 +656,28 @@ pub async fn client_logo(
     // 只放行图片类型：防止把本端点当通用内容代理
     if !content_type.starts_with("image/") {
         tracing::warn!(url = %url, content_type = %content_type, "同意页 logo 代理：响应非 image/*，拒绝");
-        return StatusCode::NOT_FOUND.into_response();
+        return oidc_error_response(
+            StatusCode::NOT_FOUND,
+            &OidcError::new("not_found", crate::tr!("error.sso.logo_unavailable")),
+        );
     }
     let bytes = match resp.bytes().await {
         Ok(b) if b.len() <= MAX_LOGO_BYTES => b,
         Ok(_) => {
             tracing::warn!(url = %url, "同意页 logo 代理：体积超限，拒绝");
-            return StatusCode::NOT_FOUND.into_response();
+            return oidc_error_response(
+                StatusCode::NOT_FOUND,
+                &OidcError::new("not_found", crate::tr!("error.sso.logo_unavailable")),
+            );
         }
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => {
+            return oidc_error_response(
+                StatusCode::NOT_FOUND,
+                &OidcError::new("not_found", crate::tr!("error.sso.logo_unavailable")),
+            );
+        }
     };
+    outbound.succeeded();
     let mut out = bytes.into_response();
     if let Ok(ct) = HeaderValue::from_str(&content_type) {
         out.headers_mut()

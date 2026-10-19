@@ -162,6 +162,12 @@ impl SysHttpDebugService {
         }
 
         // ===== 5. 手动安全跟随重定向链 =====
+        // b74（AGENTS B.4）：调试器是**用户指定目标**的出网面，故障面与任何内置依赖都不同，
+        // 单独成桶。计数口径：**一次 execute = 一次出站事件**（重定向链是同一个用户动作的
+        // 组成部分，拆成多笔会让"链上第 3 跳被 SSRF 挡下"混进总量）；结局在响应体读完后
+        // 才判成功，因此传输失败、构建失败、链中拒绝、体读取失败一律记 `error`。
+        // 参数/SSRF 预校验阶段的拒绝**不计数**（那时还没有出网）。
+        let mut outbound = crate::observability::metrics::OutboundGuard::start("http_debug");
         let start = Instant::now();
         let mut redirected: u32 = 0;
         let mut response;
@@ -271,6 +277,7 @@ impl SysHttpDebugService {
                 pick("读取响应体失败：", "Failed to read response body: ")
             ))
         })?;
+        outbound.succeeded();
         let size_bytes = bytes.len() as u64;
         let body = decode_body(&bytes, MAX_BODY_BYTES);
 

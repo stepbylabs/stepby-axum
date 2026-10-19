@@ -566,9 +566,7 @@ pub struct FlowPageQuery {
 }
 
 fn page_args(query: &FlowPageQuery) -> (u64, u64) {
-    let size = query.page_size.unwrap_or(10).clamp(1, 100);
-    let num = std::cmp::max(query.page_num.unwrap_or(1), 1);
-    ((num - 1) * size, size)
+    crate::common::page::page_args(query.page_num.unwrap_or(1), query.page_size.unwrap_or(10))
 }
 
 /// 提交/重提交结果：单据 + 首轮待通知的审批人列表（通知由调用方执行）
@@ -767,20 +765,29 @@ async fn resolve_policy(
                 .all(conn)
                 .await?;
             // b71 N+1 治理：原实现循环逐个 find_by_id，角色用户多时每次审批提交放大 N 次查询；
-            // 改为一次 is_in 批查后内存过滤（仅启用且未删除的用户可作为审批人，语义不变）
+            // 改为一次 is_in 批查后内存过滤（仅启用且未删除的用户可作为审批人，语义不变）。
+            // 列投影（b74 §一.16 同族）：审批人判定只用 (user_id, status, del_flag)，
+            // 未投影会把 `password`（argon2 摘要）读进审批链路内存
             let user_ids: Vec<i64> = urs.iter().map(|ur| ur.user_id).collect();
             let users = if user_ids.is_empty() {
                 Vec::new()
             } else {
                 sys_user::Entity::find()
+                    .select_only()
+                    .column(sys_user::Column::UserId)
+                    .column(sys_user::Column::Status)
+                    .column(sys_user::Column::DelFlag)
                     .filter(sys_user::Column::UserId.is_in(user_ids))
+                    .into_tuple::<(i64, Option<String>, Option<String>)>()
                     .all(conn)
                     .await?
             };
             let ids: Vec<i64> = users
                 .into_iter()
-                .filter(|u| u.status.as_deref() == Some("0") && u.del_flag.as_deref() != Some("2"))
-                .map(|u| u.user_id)
+                .filter(|(_, status, del_flag)| {
+                    status.as_deref() == Some("0") && del_flag.as_deref() != Some("2")
+                })
+                .map(|(user_id, _, _)| user_id)
                 .collect();
             if ids.is_empty() {
                 return Err(ServiceError::bad_request(&crate::tr!(

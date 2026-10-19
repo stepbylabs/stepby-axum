@@ -109,6 +109,10 @@ pub async fn scan_bytes(cfg: &UploadScanConfig, filename: &str, bytes: &[u8]) ->
         req = req.bearer_auth(cfg.token.trim());
     }
 
+    // b74（AGENTS B.4）：扫描服务是外部依赖，请求数/耗时/结局必须进指标。本函数出口多，
+    // 手写计数必漏 ⇒ RAII 守卫。计数口径：**只有真的发出请求才计数**（本地校验、客户端
+    // 构建失败都不算一次出站）；`Rejected`（扫描器判定恶意）算 `ok`——那是扫描器的正常工作结果。
+    let mut outbound = crate::observability::metrics::OutboundGuard::start("upload_scan");
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -119,10 +123,16 @@ pub async fn scan_bytes(cfg: &UploadScanConfig, filename: &str, bytes: &[u8]) ->
                 };
             }
             match parse_verdict(&body) {
-                Ok(true) => ScanOutcome::Clean,
-                Ok(false) => ScanOutcome::Rejected {
-                    detail: verdict_detail(&body),
-                },
+                Ok(true) => {
+                    outbound.succeeded();
+                    ScanOutcome::Clean
+                }
+                Ok(false) => {
+                    outbound.succeeded();
+                    ScanOutcome::Rejected {
+                        detail: verdict_detail(&body),
+                    }
+                }
                 Err(e) => ScanOutcome::Unavailable { reason: e },
             }
         }

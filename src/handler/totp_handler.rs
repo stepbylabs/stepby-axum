@@ -376,8 +376,8 @@ pub async fn disable(
         )));
     }
 
-    // 1. 验证密码（从数据库查询用户密码并校验）
-    use argon2::{Argon2, PasswordHash, PasswordVerifier};
+    // 1. 验证密码（从数据库查询用户密码并校验；参数实现在 `utils::password`，此处只解析）
+    use argon2::PasswordHash;
     let user_vo = state
         .user_service
         .get_user_by_id(user_id)
@@ -392,12 +392,12 @@ pub async fn disable(
             "error.totp.password_wrong"
         )));
     }
-    let parsed_hash = PasswordHash::new(password_hash)
+    // 先解析一次：存储侧哈希串本身不可解析属**服务端数据问题**（500），不能伪装成"密码错误"
+    PasswordHash::new(password_hash)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.password_hash_invalid")))?;
-    if Argon2::default()
-        .verify_password(req.password.as_bytes(), &parsed_hash)
-        .is_err()
-    {
+    // 校验走 `utils::password` 统一入口——Argon2 参数的唯一实现点与凭据校验指标的唯一记录点。
+    // 这里刻意再解析一遍：解析是微秒级，相比 Argon2 的几十毫秒可忽略，换来"参数只有一处"。
+    if !crate::utils::password::verify_password(&req.password, password_hash) {
         let _ = state
             .store
             .incr_with_ttl(&fail_key, TOTP_FAIL_TTL_SECS)

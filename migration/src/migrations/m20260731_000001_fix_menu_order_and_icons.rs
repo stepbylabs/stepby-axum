@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260731_000001_fix_menu_order_and_icons.rs
+// stepby-axum/migration/src/migrations/m20260731_000001_fix_menu_order_and_icons.rs
 //! 第十六次迁移：修复菜单 order_num 冲突 + 工作台置顶 + 4 组 icon 重复
 //!
 //! 背景：

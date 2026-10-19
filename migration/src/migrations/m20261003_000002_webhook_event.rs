@@ -54,13 +54,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT（种子数据按唯一约束去重）
@@ -366,12 +363,15 @@ pub const WEBHOOK_MENU_ROWS: &[(i64, &str, i64, i64, &str, &str, &str)] = &[
     ),
 ];
 
-/// 菜单按钮角色关联（role_id=2 超管角色）
+/// 菜单按钮角色关联（role_id=2 平台普通角色 common）
 pub const WEBHOOK_MENU_ROLE_ID: i64 = 2;
 
 /// 菜单按钮 INSERT 语句体（不含幂等前缀，语义同上）
 ///
-/// 返回顺序：菜单 3562 → role_menu(2,3562) → 菜单 3563 → role_menu(2,3563)。
+/// 返回顺序：菜单 3562 → role_menu(2,3562) → 菜单 3563 **无 role_menu**。
+/// b73 轮 15：授权行按 [`governance::common_role_may_grant`] 过滤——3563「测试发送」
+/// 会构造**真实出站投递**（`system:webhook:test-send`），属越权面，不再默认授予 common
+/// （§8.2 只读姿态）；3562 事件目录查询为 `:list` 只读，照常授予。
 pub fn webhook_menu_seed_bodies(now_expr: &str) -> Vec<String> {
     let mut bodies = Vec::with_capacity(WEBHOOK_MENU_ROWS.len() * 2);
     for (menu_id, name, parent_id, order_num, perms, icon, remark) in WEBHOOK_MENU_ROWS {
@@ -379,9 +379,11 @@ pub fn webhook_menu_seed_bodies(now_expr: &str) -> Vec<String> {
             "{WEBHOOK_MENU_COLS} VALUES \
             ({menu_id}, '{name}', {parent_id}, {order_num}, '', '', '', '', '1', '0', 'F', '0', '0', '{perms}', '{icon}', 'admin', {now_expr}, '{remark}', '0')"
         ));
-        bodies.push(format!(
-            "sys_role_menu (role_id, menu_id) VALUES ({WEBHOOK_MENU_ROLE_ID}, {menu_id})"
-        ));
+        if governance::common_role_may_grant(*menu_id, "F", perms) {
+            bodies.push(format!(
+                "sys_role_menu (role_id, menu_id) VALUES ({WEBHOOK_MENU_ROLE_ID}, {menu_id})"
+            ));
+        }
     }
     bodies
 }

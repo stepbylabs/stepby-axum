@@ -6,7 +6,11 @@ error:
     disabled: AI assistant is disabled. Ask an administrator to enable it in configuration
     pat_forbidden: AI assistant does not accept Personal Access Tokens (PAT). Use an interactive login session
     capability_off: AI assistant capability is not enabled for this tenant
+    busy: AI inference is at capacity (too many concurrent questions). Please retry shortly
     config_missing: base_url and api_key are required
+  ip:
+    xdb_missing: ip2region database file not found. Download it from the IP Location page or place the file manually, then retry
+    mmdb_missing: GeoLite2 database file not found. Download it from the IP Location page or place the file manually, then retry
   fieldperm:
     disabled: Field-level permission is not enabled (platform switch or tenant package capability is off)
     table_not_allowed: The business table is not in the field-level permission whitelist
@@ -31,6 +35,10 @@ error:
     internal: Internal system error, please contact the administrator
     validate_failed: Parameter validation failed
     parse_failed: Failed to parse request parameters
+    uri_too_long: "Request URI is too long; it must not exceed %{limit} bytes, please narrow the query"
+    route_not_found: The requested resource does not exist
+    header_too_long: "Request headers are too large; they must not exceed %{limit} bytes, please trim cookies or headers"
+    request_timeout: "Request timed out, please retry later"
     time_format_invalid: "Invalid time format: %{s}"
     batch_size_exceeded: "Batch operation size cannot exceed %{max}"
     clear_field_unknown: "clearFields contains a non-clearable field: %{field}"
@@ -78,7 +86,7 @@ error:
     captcha_uuid_invalid: Invalid captcha UUID format
   oauth:
     provider_not_found: Login provider not found
-    provider_type_invalid: Invalid login provider type
+    provider_type_invalid: "Invalid login provider type: %{provider_type}"
     enabled_invalid: "enabled must be 0 (disabled) or 1 (enabled)"
     client_id_required: client_id is required
     provider_code_exists: Provider code already exists
@@ -145,6 +153,8 @@ error:
     ancestors_invalid: Invalid department ancestors data, cannot resolve tenant
     disabled: Single sign-on (SSO) is not enabled
     jwks_unavailable: Unable to load SSO client list, JWKS temporarily unavailable (retry later; relying parties keep the previous JWKS)
+    logo_unavailable: Client logo is unavailable (no logo, upstream refused it, or content type is not an image)
+    logo_proxy_failed: Failed to build the logo proxy client, please retry later
     client_not_found: Client not found
     client_disabled: This client is disabled
     client_id_required: client_id is required
@@ -237,7 +247,7 @@ error:
     governance_forbidden: This configuration is governed by the platform and cannot be modified by tenants
     platform_row_forbidden: Platform-level configuration cannot be operated by tenants
     scope_invalid: Invalid configuration governance scope
-    flag_invalid: Invalid configuration governance flag
+    flag_invalid: "Invalid configuration governance flag for parameter %{field} (only 0 or 1 accepted)"
     governance_platform_only: Config governance view is platform-only
   dept:
     not_found: Department does not exist
@@ -343,11 +353,12 @@ error:
     chunk_session_missing: Chunk session not found or expired, please restart the upload
     chunk_store_unavailable: Shared-state store temporarily unavailable, please retry later
     chunk_index_missing: Missing partIndex field
-    chunk_part_missing: Part {index} is missing, please re-upload it
-    chunk_parts_missing: Parts incomplete ({received}/{total} received), cannot merge
+    chunk_index_out_of_range: Chunk index %{index} is out of the declared range [0, %{max}], please restart the upload
+    chunk_part_missing: Part %{index} is missing, please re-upload it
+    chunk_parts_missing: Parts incomplete (%{received}/%{total} received), cannot merge
     chunk_parts_invalid: Invalid part count (1-10000), or part size inconsistent with total size
-    chunk_part_too_large: Part size exceeds body limit {limit}MB, reduce part size or increase part count
-    chunk_total_too_large: File total size exceeds chunked-upload limit {max}MB
+    chunk_part_too_large: Part size exceeds body limit %{limit}MB, reduce part size or increase part count
+    chunk_total_too_large: File total size exceeds chunked-upload limit %{max}MB
     chunk_busy: Merge tasks are busy, please retry later
   excel:
     fields_empty: Export field list is empty or no matching fields
@@ -619,8 +630,6 @@ error:
     not_enabled: AK/SK is not enabled for this token; rotation unavailable
     rate_limited: Too many operations, please try again later
     store_unavailable: Service temporarily unavailable, please try again later
-  websocket:
-    connected: WebSocket connected
   role:
     not_found: Role does not exist
     perm_key_exists: Role permission key cannot be duplicated
@@ -674,6 +683,16 @@ error:
     file_read_failed: Failed to read file
     delete_task_failed: File delete task failed
     delete_failed: Failed to delete file
+
+  dataRule:
+    name_invalid: "Rule name must be 1-64 chars"
+    identifier_invalid: "Invalid %{label} (lowercase/digit/underscore only, must not start with digit): %{value}"
+    op_invalid: "Invalid operator: %{value}"
+    value_type_invalid: "Invalid value type: %{value}"
+    fixed_value_required: "fixed value type requires a rule value"
+    in_value_required: "in operator requires a comma-separated value list"
+    value_too_long: "Rule value is too long (max 500 chars)"
+    not_found: "Rule not found"
 
 msg:
   flow:
@@ -829,12 +848,3 @@ alert:
     not_fired: Metric %{metric} current value %{value}, condition not met (%{comparator} %{threshold})
     silent: Rule is within the silence window (%{minutes} minutes), notification skipped this time
     no_channel: Threshold hit but no valid notification channel configured, only recorded
-
-  dataRule:
-    name_invalid: "Rule name must be 1-64 chars"
-    identifier_invalid: "Invalid %{label} (lowercase/digit/underscore only, must not start with digit): %{value}"
-    op_invalid: "Invalid operator: %{value}"
-    value_type_invalid: "Invalid value type: %{value}"
-    fixed_value_required: "fixed value type requires a rule value"
-    in_value_required: "in operator requires a comma-separated value list"
-    not_found: "Rule not found"

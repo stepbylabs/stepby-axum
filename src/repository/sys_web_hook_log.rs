@@ -62,6 +62,22 @@ impl SysWebHookLogRepository {
             .await
     }
 
+    /// 统计 `since` 之后某状态的投递条数（外部依赖探活的**被动**口径，AGENTS #5）。
+    ///
+    /// 只数不取行：`/health` 探针绝不允许把投递日志（含 payload）整批载入内存。
+    /// 返回值仅供服务端内部换算成 UP/DEGRADED 布尔信号，**不**原样出现在响应体里
+    /// （公开端点泄露活动量 = 侧信道）。
+    pub async fn count_by_status_since(
+        &self,
+        status: &str,
+        since: NaiveDateTime,
+    ) -> Result<u64, DbErr> {
+        let query = SysWebHookLog::find()
+            .filter(Column::Status.eq(status))
+            .filter(Column::CreateTime.gte(since));
+        query.count(self.base.db()).await
+    }
+
     /// 分页查询记录（hook_id/event_type/status 过滤；create_time 范围）
     ///
     /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；

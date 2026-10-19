@@ -59,6 +59,17 @@ impl SysWebHookRepository {
         }))
     }
 
+    /// 统计启用回调数（**与 [`Self::find_all_enabled`] 逐字同口径**：`status='0'` 且未删除）。
+    ///
+    /// 给 `/health` 外部探活用：只数不取行，避免公开端点探针把回调目录（含密钥字段）
+    /// 整表载入内存。口径一旦与派发查询分叉，探活结论就不再代表"实际会不会投递"。
+    pub async fn count_enabled(&self) -> Result<u64, DbErr> {
+        let query = SysWebHook::find()
+            .filter(Column::Status.eq("0"))
+            .filter(Column::DelFlag.ne("2"));
+        query.count(self.base.db()).await
+    }
+
     /// 分页查询回调（hook_name/event_types/status 过滤，未删除）
     ///
     /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；

@@ -142,3 +142,79 @@ async fn test_backup_chain() {
         "空 id 删除应返回 400，实际: {status}"
     );
 }
+
+/// b73 启动期收敛「卡在 running」的备份日志：只有**超过 2×子进程超时 + 余量**的行才被判失败。
+///
+/// 可证伪性：
+/// - 阈值算错（用 `now` 而非 `now - 660s`）⇒ "本进程正在跑的备份"会被误判失败 ⇒ 新鲜行断言变红；
+/// - 收敛体没写终态（只记日志不改状态）⇒ 旧行仍是 running ⇒ 第一条断言变红；
+/// - 幂等性破坏（重复调用反复改写）⇒ 第二次调用计数非 0 ⇒ 末条断言变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backup_running_rows_reconciled_only_when_stale() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, EntityTrait, Statement};
+
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+
+    // 造两行 running：一行 6 天前（进程早已不在），一行刚刚（合法在途）。
+    // create_time 与生产写入口径一致（naive UTC 文本），故比较基准必须同为 naive UTC。
+    let naive = |d: chrono::Duration| {
+        (chrono::Utc::now() + d)
+            .naive_utc()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    };
+    for (name, ts) in [
+        ("reconcile_stale.db", naive(chrono::Duration::days(-6))),
+        ("reconcile_fresh.db", naive(chrono::Duration::seconds(-5))),
+    ] {
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            format!(
+                "INSERT INTO sys_backup_log \
+                 (file_name, file_path, file_size, backup_type, status, create_time, tenant_id) \
+                 VALUES ('{name}', 'uploads/{name}', 0, 'manual', 'running', '{ts}', 0)"
+            ),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let svc = crate::service::SysBackupService::new(db.clone(), ctx.state.config.clone());
+    let reconciled = svc.reconcile_interrupted_backups().await.unwrap();
+    assert!(
+        reconciled >= 1,
+        "6 天前的 running 行必须被收敛为 failed，实际收敛 {reconciled} 条"
+    );
+
+    let rows = crate::entity::sys_backup_log::Entity::find()
+        .all(db)
+        .await
+        .unwrap();
+    let stale = rows
+        .iter()
+        .find(|r| r.file_name == "reconcile_stale.db")
+        .expect("stale 行必须仍在库（收敛只改状态、不删行，保留可追溯）");
+    assert_eq!(stale.status, "failed", "stale running 行必须判为 failed");
+    assert!(
+        stale
+            .error_msg
+            .as_deref()
+            .unwrap_or_default()
+            .contains("running"),
+        "error_msg 必须写明原判据（运维要能看出这是启动期收敛而非备份自身报错），实际: {:?}",
+        stale.error_msg
+    );
+    let fresh = rows
+        .iter()
+        .find(|r| r.file_name == "reconcile_fresh.db")
+        .expect("fresh 行应存在");
+    assert_eq!(
+        fresh.status, "running",
+        "刚刚创建的 running 行**不得**被误判（本进程可能正在备份，阈值必须远大于子进程超时）"
+    );
+
+    // 幂等：再跑一次不重复改写（fresh 仍在阈值保护内）
+    let again = svc.reconcile_interrupted_backups().await.unwrap();
+    assert_eq!(again, 0, "二次调用必须零命中（幂等），实际 {again}");
+}

@@ -45,6 +45,35 @@ permission_deny_by_default = true
 mode = "local"
 gc_interval_secs = 600   # local 档过期行 GC 周期（秒）
 
+# ---------------------------------------------------------------------------
+# 健康检查（/health）——**外部依赖**探活档位（AGENTS.md 硬基线 #5，批七十二新增段）
+# ---------------------------------------------------------------------------
+# 兼容口径：本段为**新增可选段**，缺省即下方取值；存量 config.toml 无此段 ⇒ 行为与
+# 新增前逐字节等价（无需迁移、无需改动其它段）。
+#
+# external_probes = "off"（**默认 = 现状**）：/health 只探测 DB + 共享态存储，
+#   响应体**不含** external / externalStatus 字段，不发起任何外部出站请求。
+# external_probes = "basic"：额外逐个探测外部依赖并把结果聚合进 /health——
+#   mail（SMTP 只握手不发信）、ai（GET {base_url}/models，零 token 成本，**不会**调用
+#   completion 而产生费用）、storage（s3 → ListObjectsV2；local → 上传目录写-删往返，
+#   可判出"卷挂成只读"这类真实故障）、webhook（**被动**：启用回调数 + 近 24h 失败留痕，
+#   绝不对使用者回调地址发起 POST——避免把公开端点变成 SSRF 跳板）、ip_geo（归属地库是否已加载）。
+#
+# ⚠️ 开启须知：/health 是**免鉴权公开端点**，开启后其响应会暴露"本部署存在哪些外部依赖、
+#    各自连通状态与耗时"（明细已脱敏：剔除 URL userinfo 与 password=/token=/secret=/bearer
+#    之后的凭据值，折叠空白并截断 200 字符，不含收件人/租户/投递日志内容）。不需要公开
+#    这些信息的部署请保持 off，或在反向代理层限制 /health 来源。
+# ⚠️ 外部依赖异常**不会**把核心 status 打成非 UP（AI/邮件/回调是可选依赖，误红会让编排层
+#    把一个业务正常的实例摘流）。需要"外部依赖挂了就不接流量"请按 externalStatus 自行判定。
+# ⚠️ 外部探针与核心探针**分档缓存**：核心 5s（R6-PERF-23）不变，外部默认 30s，且同一时刻
+#    只有一轮真实探测在跑（轮次互斥 + 双检锁），避免高频编排探针把 SMTP/OSS 打爆。
+# ⚠️ 非法取值回落 off 并打 WARN（fail-safe，不静默开启出站探测）。
+# 启动时也会跑一轮（basic 档，不阻断启动；不可达依赖以 WARN 留痕）。
+[health]
+external_probes = "off"
+probe_timeout_ms = 1500       # 单探针超时（毫秒，夹在 200..=10000）
+probe_cache_ttl_secs = 30     # 外部探针结果缓存 TTL（秒，夹在 5..=3600）
+
 [server]
 host = "0.0.0.0"
 port = 8080
@@ -72,6 +101,29 @@ docs_enabled = true
 #   ⚠️ 前端 `request.ts` 成功/失败两个分支均识别 body.code（含 1003 TOTP 流程），
 #      故切到 restful 不会造成"后端改契约、前端不认"的断链。
 http_status_convention = "legacy"
+# 批七十四 B2：请求行（路径 + 查询串）长度上限，单位字节
+#   默认 16384（16 KiB）。`DefaultBodyLimit` 只作用于**请求体**，查询串此前无任何上限
+#     （实测 59KB 查询串照样 200 进业务层）；本项把 hyper 隐性承担的限制显式化。
+#   合法请求在本仓最长约 1KB 量级（分页 + 排序 + 时间范围 + 多值筛选），16KiB 有 15 倍余量。
+#   超限返回 414 + 统一错误体（`{"code":414,"msg":…}`）；日志**只记长度**，不记查询串内容
+#     （查询串常含 token / 验证码 / 用户输入）。
+#   取 0 = 完全不设限（等价批七十四之前的行为），供确有超长 URL 的集成方显式回退。
+#   实现与判据对账：`src/middleware/uri_limit.rs`
+max_uri_bytes = 16384
+# 批七十五 B7：请求头净字节上限（名 + 值逐条求和），单位字节
+#   默认 65536（64 KiB）。现状由 hyper 隐式承担：头**条数**封 100 条、整个请求头块受
+#     读缓冲上界 417792 字节（约 408 KiB）约束，但没有"按字节"这一维的独立档位；
+#     本项把这一维显式化并收到更紧的档（合法请求的头在本仓约 4KiB 量级：JWT + Cookie
+#     + UA/Origin/Referer，64KiB 有 16 倍余量）。
+#   超限返回 431 + 统一错误体（`{"code":431,"msg":…}`）；日志**只记字节数与条数**，
+#     绝不记头的值（Authorization / Cookie 都是凭据）。
+#   取 0 = 完全不设限（回到只有 hyper 上界的现状），供巨型 Cookie / 长证书链的集成方回退。
+#   ⚠️ 效力边界：本闸跑在 hyper **解析之后**，挡的是"过大请求头进入业务层"
+#     （trace/span 与操作日志归属预读会逐份复制头），不是解析器层的内存上限；
+#     `axum::serve` 不暴露 ServeConfig，故条数一维刻意不再另设开关（避免与 hyper 的
+#     100 并存造成"两边都能改但行为不一致"）。
+#   实现与判据对账：`src/middleware/uri_limit.rs`
+max_header_bytes = 65536
 
 [database]
 # 生产环境通过环境变量 DATABASE_URL 注入，不要将真实密码写入配置文件
@@ -178,6 +230,14 @@ json_stdout = false
 #   keep    = 永不清理（合规全留部署；容量交给部署方，审计大屏聚合已有时间窗兜底）
 # 非法取值回落 delete 并启动 WARN（fail-safe，拒绝静默失效）
 # retention_mode = "delete"
+# 启动期补跑错过的保留期清理（b73，启动时只读——改后需重启）
+#   清理 cron 固定在每日 03:00，而发布/重启窗口几乎总在凌晨之外 ⇒ 错过即**整日无补偿**，
+#   日志表按保留期无限增长（实测连续错过两日后，sys_frontend_error 有 3 万余行超期未清）。
+#   开启时按共享态标记 retention:last_success_at 判定：缺失/不可解析/距今超 20 小时
+#   ⇒ 启动后补跑一轮（多副本共库经抢占键收敛到单实例执行）。
+#   归类说明：它只决定"启动那一次是否补跑"，不改变每日 cron 行为；删除口径仍完全由
+#   retention_mode 与各 *_retention_days 决定（keep 档下补跑亦为空转跳过），故默认 true 不构成新增删除风险。
+# retention_catchup_on_start = true
 
 [upload]
 # 存储后端类型（F1）：local（本地文件系统，默认） | s3（S3 兼容对象存储 MinIO/AWS/OSS/COS）
@@ -634,4 +694,9 @@ api_key = ""
 model = "gpt-4o-mini"
 max_rows = 100
 timeout_secs = 30
+# 推理并发上限（b72，AGENTS A.2「重资源入口默认带并发上限 + 背压」）。缺省 4，取值被收敛到 [1, 256]。
+# ⚠ 本键**只读于启动时**，且不进 sys.ai.* 热更面（与上方六键不同）：闸门上限在首次请求时
+#   由 OnceLock 固化，若允许管理端热改就会出现"界面改了、闸门还是老值"的行为分裂（AGENTS C.7）。
+#   改后需重启生效。闸满直接 429（error.ai.busy，可重来的用户请求），不做排队。
+max_concurrency = 4
 allowed_tables = ["sys_user", "sys_dept", "sys_role", "sys_post", "sys_config", "sys_dict_type", "sys_dict_data", "sys_notice", "sys_job", "sys_logininfor", "sys_oper_log", "sys_tenant"]

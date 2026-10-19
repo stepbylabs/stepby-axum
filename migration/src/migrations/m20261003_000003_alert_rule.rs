@@ -206,9 +206,20 @@ pub fn alert_menu_seed_bodies(now_expr: &str) -> Vec<String> {
         if *menu_type == "C" {
             for (role_id, granted_menu_id) in ALERT_MENU_ROLE_GRANTS {
                 if *granted_menu_id == *menu_id {
-                    bodies.push(format!(
-                        "sys_role_menu (role_id, menu_id) VALUES ({role_id}, {granted_menu_id})"
-                    ));
+                    // `common`（role_id=2）一律走 governance 策略体：AGENTS 铁律「兜底一律走
+                    // `common_role_grant_select_body`，禁止裸 `VALUES (2, id)`」——本函数被
+                    // `initialize::ensure_alert_rule_tables` 当作**单一事实源**逐条执行，
+                    // 属每次启动都跑的发放路径，裸形态会绕过策略子句（批七十四 B3 实证：
+                    // 它把平台专属菜单 4110 反复发回租户管理员模板源）。
+                    // 非 common 角色（如超管 role_id=1）不走该策略体：策略语义只约束
+                    // "可下放给租户管理员的模板"，对超管发放无关。
+                    if *role_id == governance::COMMON_ROLE_ID {
+                        bodies.push(governance::common_role_grant_select_body(&[*menu_id]));
+                    } else {
+                        bodies.push(format!(
+                            "sys_role_menu (role_id, menu_id) VALUES ({role_id}, {granted_menu_id})"
+                        ));
+                    }
                 }
             }
         }
@@ -231,13 +242,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-/// 当前时间表达式（跨数据库兼容；SQLite 无 NOW()，落库时取本地时间字面量）
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT（SQLite: INSERT OR IGNORE / PG: ON CONFLICT DO NOTHING / MySQL: INSERT IGNORE）

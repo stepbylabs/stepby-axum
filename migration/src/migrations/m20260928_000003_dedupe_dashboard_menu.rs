@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260928_000003_dedupe_dashboard_menu.rs
+// stepby-axum/migration/src/migrations/m20260928_000003_dedupe_dashboard_menu.rs
 //! 数据看板菜单去重（用户实测缺陷：菜单树出现两个「数据看板」）。
 //!
 //! 根因：m20260729_000001 先在**顶级**（parent_id=0）注册了「数据看板」

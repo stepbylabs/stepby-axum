@@ -987,6 +987,8 @@ impl SysOauthService {
         code: &str,
         redirect_uri: &str,
     ) -> Result<TokenPayload, ServiceError> {
+        // b72（AGENTS #4）：IdP 令牌交换出站遥测（RAII 守卫，多 `?` 出口路径全覆盖）
+        let mut tel = crate::observability::metrics::OutboundGuard::start("oauth_token");
         // G-14：EncryptedString 读取（find_by_code）时已自动解密，直取明文
         let params = [
             ("client_id", provider.client_id.as_str()),
@@ -1059,6 +1061,7 @@ impl SysOauthService {
                 crate::common::datetime::now_naive() + chrono::Duration::seconds(secs as i64)
             });
 
+        tel.succeeded();
         Ok(TokenPayload {
             access_token,
             refresh_token,
@@ -1072,6 +1075,8 @@ impl SysOauthService {
         provider: &SysOauthProviderModel,
         access_token: &str,
     ) -> Result<OauthIdentity, ServiceError> {
+        // b72（AGENTS #4）：IdP userinfo 出站遥测（与令牌交换分开计组件，二者故障面不同）
+        let mut tel = crate::observability::metrics::OutboundGuard::start("oauth_userinfo");
         let mut req = self
             .http
             .get(&provider.user_info_url)
@@ -1108,6 +1113,7 @@ impl SysOauthService {
                 "error.oauth.userinfo_failed"
             )));
         }
+        tel.succeeded();
         Ok(OauthIdentity::from_json(&value))
     }
 

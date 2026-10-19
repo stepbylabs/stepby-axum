@@ -36,6 +36,17 @@ pub struct HealthStatus {
     /// 共享态存储连通性："UP" / "DOWN"
     /// redis 档 = Redis PING；local 档该字段反映共享态存储（业务库）连通性
     pub redis: String,
+    /// 外部依赖聚合状态："UP" / "DEGRADED" / "DOWN"
+    ///
+    /// **仅 `[health].external_probes != off` 时出现**（默认 off ⇒ 字段缺省，响应体与
+    /// 改造前逐字节等价）。刻意**不**并入 [`Self::status`]：AI/邮件/回调是可选依赖，
+    /// 它们不可达不该让编排层把一个业务正常的实例摘流；需要据此摘流的部署自行判定
+    /// 本字段。聚合口径见 [`crate::handler::health_probes::aggregate_status`]。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_status: Option<String>,
+    /// 逐个外部依赖的探测明细（名称 + 状态 + 耗时 + **脱敏**说明）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external: Option<Vec<crate::handler::health_probes::ExternalProbeVo>>,
 }
 
 /// GET /health
@@ -45,11 +56,15 @@ pub struct HealthStatus {
 /// R6-PERF-23：增加 5 秒 TTL 缓存，防止 K8s/Consul 高频探针（每秒 N 次）
 /// 直接打爆 DB ping 和 Redis PING。缓存过期前所有请求直接返回上次结果，
 /// 牺牲最多 5 秒状态延迟换取后端依赖保护。
+///
+/// 批七十二 B3（AGENTS #5）：可选聚合**外部依赖**探针（邮件/AI/存储/WebHook/IP 库）。
+/// 外部探针与核心探针**分档缓存**（默认 30s vs 5s）、同档位内互斥成轮，
+/// 且在 `off` 档位下根本不会被调用 —— 详见 [`crate::handler::health_probes`]。
 #[utoipa::path(
     get,
     path = "/health",
     responses(
-        (status = 200, description = "健康检查结果（DB/Redis 连通性）", body = AjaxResult<HealthStatus>),
+        (status = 200, description = "健康检查结果（DB/Redis 连通性，可选外部依赖明细）", body = AjaxResult<HealthStatus>),
     ),
     security(()),
     tag = "monitor-health"
@@ -57,13 +72,27 @@ pub struct HealthStatus {
 pub async fn health(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<HealthStatus>, AppError> {
+    let mut status = core_status(&state).await;
+    if let Some(probes) = crate::handler::health_probes::external_probes(&state).await {
+        status.external_status =
+            Some(crate::handler::health_probes::aggregate_status(&probes).to_string());
+        status.external = Some(probes);
+    }
+    Ok(AjaxResult::success(status))
+}
+
+/// 核心探测（DB + 共享态存储），带 5 秒 TTL 缓存。
+///
+/// 缓存体**不含**外部探针字段（保持 `None`）：外部探针有自己的 30 秒 TTL，
+/// 两者命中/刷新彼此独立，否则外部档位的缓存到期会被核心 5 秒 TTL 反复"重置"。
+async fn core_status(state: &Arc<AppState>) -> HealthStatus {
     // 先查缓存：未过期则直接返回
     {
         let cache = health_cache().read().await;
         if let Some((ts, status)) = cache.as_ref()
             && ts.elapsed() < HEALTH_CACHE_TTL
         {
-            return Ok(AjaxResult::success(status.clone()));
+            return status.clone();
         }
     }
 
@@ -102,6 +131,9 @@ pub async fn health(
         version: env!("CARGO_PKG_VERSION").to_string(),
         db: db_status,
         redis: redis_status,
+        // 核心缓存恒不带外部探针字段（外部档位有独立 TTL，见 health_probes）
+        external_status: None,
+        external: None,
     };
 
     // 更新缓存（即使写入失败也不影响本次响应）
@@ -110,13 +142,28 @@ pub async fn health(
         *cache = Some((Instant::now(), status.clone()));
     }
 
-    Ok(AjaxResult::success(status))
+    status
 }
 
 // ==================== Prometheus 指标端点 ====================
 
-/// 进程启动时间（OnceLock 懒初始化，首次调用 /metrics 时记录）
+/// 进程启动时刻（由 [`mark_process_start`] 在 `router::build_app` 装配时打点）
+///
+/// 缺陷史（b72 e2e F135 实测红）：此前只在**首次 `/metrics` 抓取**时才
+/// `START_TIME.get_or_init(Instant::now)` ⇒ "uptime" 实际是"距第一次抓取多久"，
+/// 冷启动后的第一抓恒为 `0`，早于首抓的存活时间被整个吞掉；探针/看板据此会把
+/// 一个已经跑了几分钟的实例读成"刚起 0 秒"。打点搬到路由装配点即恢复字面语义。
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// 打点进程启动时刻（幂等：重复调用不会重置已记录的起点）
+pub fn mark_process_start() {
+    START_TIME.get_or_init(Instant::now);
+}
+
+/// 当前 uptime 秒数（未打点时按此刻兜底，绝不再返回"从首抓起算"的假 0）
+fn uptime_seconds() -> u64 {
+    START_TIME.get_or_init(Instant::now).elapsed().as_secs()
+}
 
 /// GET /metrics
 ///
@@ -129,6 +176,11 @@ static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 /// - stepby_db_pool_size / idle / busy：连接池容量指标（G-12，取值与
 ///   /monitor/db-pool 共用 [`crate::handler::monitor_server_handler::db_pool_gauges`]；
 ///   sea-orm 2.0 已公开方言 getter，无 sqlx 池的变体诚实降级为 0）
+/// - stepby_outbound_requests_total / _duration_seconds：**组件级**出站与后台任务指标
+///   （component 维度：`mail` / `sms` / `im_robot` / `webhook` / `ai` / `oauth_token` /
+///   `oauth_userinfo` / `storage:{kind}:{op}` / `bg:{label}` / `probe:{name}`…，
+///   outcome 维度：ok / error / timeout / rejected / panic），AGENTS #4 的落地面；
+///   `probe:*` 由 [`crate::handler::health_probes`] 在每次外部依赖探活后写入
 ///
 /// 无 Grafana/Prometheus 时仍可 `curl http://localhost:8080/metrics` 查看文本格式指标。
 #[utoipa::path(
@@ -161,8 +213,7 @@ pub async fn metrics(
         }
     }
 
-    let start = START_TIME.get_or_init(Instant::now);
-    let uptime = start.elapsed().as_secs();
+    let uptime = uptime_seconds();
     let (rss, vms) = process_memory();
     let db_backend_name = db_backend_name(&state.db);
     let db_connected = db_is_connected(&state.db).await;

@@ -19,7 +19,13 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // 逐列 has_column 守卫：存量库不跑 Migrator::up，而兜底路径可能已按存在性补过列
+        // ⇒ 版本号没登记时，无守卫的 ADD COLUMN 会以 `duplicate column name: prompt_tokens`
+        // 硬失败（2026-10-18 存量库逐条前推实测）。口径同 m20261007_000006 / flow.rs 兜底。
         for col in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            if manager.has_column("ai_chat_history", col).await? {
+                continue;
+            }
             manager
                 .alter_table(
                     Table::alter()
@@ -34,6 +40,9 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         for col in ["total_tokens", "completion_tokens", "prompt_tokens"] {
+            if !manager.has_column("ai_chat_history", col).await? {
+                continue;
+            }
             manager
                 .alter_table(
                     Table::alter()

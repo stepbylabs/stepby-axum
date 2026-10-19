@@ -651,9 +651,6 @@ pub struct SysWebHookService {
     event_repo: SysWebhookEventRepository,
     /// 出站 HTTP 客户端（禁自动重定向，SSRF 在保存时已校验，投递直连）
     http: reqwest::Client,
-    /// 进程内跳板：方便单元测试注入替换出站转发（可选）
-    #[allow(dead_code)]
-    http_client_override: Option<Arc<reqwest::Client>>,
     db: DatabaseConnection,
 }
 
@@ -670,7 +667,6 @@ impl SysWebHookService {
             log_repo: SysWebHookLogRepository::new(db.clone()),
             event_repo: SysWebhookEventRepository::new(db.clone()),
             http,
-            http_client_override: None,
             db,
         }
     }
@@ -1278,6 +1274,15 @@ impl SysWebHookService {
             )
             .await?;
 
+        // b72（AGENTS #4 组件级指标内建）：出站投递的请求数/耗时/结局在**唯一一处**记录。
+        // 注意 `finish_log` 失败走 `?` 提前返回、不计入本指标——那是"审计写入故障"而非
+        // "出站投递故障"，混记会让 webhook 健康度被 DB 抖动冒充（口径失真比缺指标更糟）。
+        crate::observability::metrics::MetricsRegistry::global().record_outbound(
+            "webhook",
+            if stored_status == "0" { "ok" } else { "error" },
+            cost_ms as f64 / 1000.0,
+        );
+
         Ok(DeliveryResult {
             ok: stored_status == "0",
             status_code: status_code.unwrap_or(0),
@@ -1329,66 +1334,79 @@ impl SysWebHookService {
         let http = Arc::new(self.http.clone());
         let event_type = event_type.to_string();
 
-        tokio::spawn(async move {
-            // 先按租户分组加载启用回调，再仅取事件所属租户组并在内存中过滤匹配事件
-            let groups = match hook_repo.find_all_enabled().await {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::warn!(event = %event_type, error = %e, "WebHook 事件分发：加载启用回调失败");
+        // 派发主体走统一后台任务范式（超时 + panic 隔离 + 失败留痕计数）。
+        // 预算只覆盖"查启用回调 + fan-out"这段，不含出站投递本身：
+        // 投递的超时由每条回调自己的 `timeout_secs`（clamp MAX_TIMEOUT_SECS）负责，见下方内层任务。
+        tokio::spawn(crate::common::background::run_tracked(
+            "webhook_dispatch",
+            crate::common::background::LIGHT_DB_BUDGET,
+            Some(crate::observability::metrics::MetricsRegistry::global()),
+            async move {
+                // 先按租户分组加载启用回调，再仅取事件所属租户组并在内存中过滤匹配事件
+                let groups = match hook_repo.find_all_enabled().await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!(event = %event_type, error = %e, "WebHook 事件分发：加载启用回调失败");
+                        return;
+                    }
+                };
+                // 方案 C：存量事件名映射为目录键（映射表外原样），统一按 subscribed_events 匹配
+                // 租户口径：与 emit 共用 filter_groups_by_tenant（单一事实源，防口径漂移）
+                let mapped = map_legacy_event_key(&event_type).to_string();
+                let matched: Vec<_> = filter_groups_by_tenant(groups, tenant_id)
+                    .into_iter()
+                    .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &mapped))
+                    .collect();
+                if matched.is_empty() {
                     return;
                 }
-            };
-            // 方案 C：存量事件名映射为目录键（映射表外原样），统一按 subscribed_events 匹配
-            // 租户口径：与 emit 共用 filter_groups_by_tenant（单一事实源，防口径漂移）
-            let mapped = map_legacy_event_key(&event_type).to_string();
-            let matched: Vec<_> = filter_groups_by_tenant(groups, tenant_id)
-                .into_iter()
-                .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &mapped))
-                .collect();
-            if matched.is_empty() {
-                return;
-            }
-            // 事件 payload 注入租户上下文，接收方据此判定归属
-            let payload = {
-                let mut p = payload;
-                if let serde_json::Value::Object(ref mut m) = p {
-                    m.insert("tenantId".to_string(), serde_json::json!(tenant_id));
-                }
-                p
-            };
-            for hook in matched {
-                let hc = http.clone();
-                let db2 = db.clone();
-                // 投递事件名统一目录口径（方案 C）；映射表外事件 mapped == 原样，scim 等无损
-                let event_type = mapped.clone();
-                let payload = payload.clone();
-                let gate = webhook_delivery_gate();
-                tokio::spawn(async move {
-                    // 出站并发闸：许可用尽即排队（背压），不丢弃事件
-                    let Ok(_permit) = gate.acquire_owned().await else {
-                        tracing::warn!(
-                            hook_id = hook.id,
-                            event = %event_type,
-                            "WebHook 投递闸已关闭，跳过本次出站投递"
-                        );
-                        return;
-                    };
-                    // 新建一个与 Service 等价的投递器（复用同一 http 客户端与 DB）
-                    let svc = SysWebHookService::with_shared(db2, hc);
-                    if let Err(e) = svc
-                        .deliver(&hook, &event_type, &payload, Some(LOG_SOURCE_DISPATCH))
-                        .await
-                    {
-                        tracing::warn!(
-                            hook_id = hook.id,
-                            event = %event_type,
-                            error = %e,
-                            "WebHook 出站投递失败"
-                        );
+                // 事件 payload 注入租户上下文，接收方据此判定归属
+                let payload = {
+                    let mut p = payload;
+                    if let serde_json::Value::Object(ref mut m) = p {
+                        m.insert("tenantId".to_string(), serde_json::json!(tenant_id));
                     }
-                });
-            }
-        });
+                    p
+                };
+                for hook in matched {
+                    let hc = http.clone();
+                    let db2 = db.clone();
+                    // 投递事件名统一目录口径（方案 C）；映射表外事件 mapped == 原样，scim 等无损
+                    let event_type = mapped.clone();
+                    let payload = payload.clone();
+                    let gate = webhook_delivery_gate();
+                    // 投递任务**有意不走** `background::spawn_tracked`：其超时由每条回调自身的
+                    // `timeout_secs`（clamp `MAX_TIMEOUT_SECS`）负责，套固定预算会误杀慢回调；
+                    // panic 时 `Permit` 随任务栈展开自动归还（不泄漏闸门）；结局已落 `web_hook_log`
+                    // 审计 + `deliver()` 内记录 `stepby_outbound_requests_total{component="webhook"}`。
+                    // （豁免登记见 `handler/fail_closed_guard.rs::background_tasks_use_shared_helper`）
+                    tokio::spawn(async move {
+                        // 出站并发闸：许可用尽即排队（背压），不丢弃事件
+                        let Ok(_permit) = gate.acquire_owned().await else {
+                            tracing::warn!(
+                                hook_id = hook.id,
+                                event = %event_type,
+                                "WebHook 投递闸已关闭，跳过本次出站投递"
+                            );
+                            return;
+                        };
+                        // 新建一个与 Service 等价的投递器（复用同一 http 客户端与 DB）
+                        let svc = SysWebHookService::with_shared(db2, hc);
+                        if let Err(e) = svc
+                            .deliver(&hook, &event_type, &payload, Some(LOG_SOURCE_DISPATCH))
+                            .await
+                        {
+                            tracing::warn!(
+                                hook_id = hook.id,
+                                event = %event_type,
+                                error = %e,
+                                "WebHook 出站投递失败"
+                            );
+                        }
+                    });
+                }
+            },
+        ));
     }
 
     /// 事件目录派发（subscribed_events 口径；火后即忘，供 [`emit_event`] 调用）
@@ -1410,54 +1428,62 @@ impl SysWebHookService {
         let http = Arc::new(self.http.clone());
         let event_key = event_key.to_string();
 
-        tokio::spawn(async move {
-            let groups = match hook_repo.find_all_enabled().await {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::warn!(event = %event_key, error = %e, "WebHook 目录事件派发：加载启用回调失败");
+        // 与 dispatch_event 同范式（超时 + panic 隔离 + 失败留痕计数），共用 LIGHT_DB_BUDGET；
+        // 内层出站投递的超时由每条回调自己的 `timeout_secs` 负责，不在本预算内
+        tokio::spawn(crate::common::background::run_tracked(
+            "webhook_emit",
+            crate::common::background::LIGHT_DB_BUDGET,
+            Some(crate::observability::metrics::MetricsRegistry::global()),
+            async move {
+                let groups = match hook_repo.find_all_enabled().await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!(event = %event_key, error = %e, "WebHook 目录事件派发：加载启用回调失败");
+                        return;
+                    }
+                };
+                // 租户口径：先与 dispatch_event 共用 filter_groups_by_tenant 精确同租户过滤，
+                // 再取订阅了该 event_key 的启用回调（subscribed_events 空豁免）
+                let matched: Vec<_> = filter_groups_by_tenant(groups, tenant_id)
+                    .into_iter()
+                    .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &event_key))
+                    .collect();
+                if matched.is_empty() {
                     return;
                 }
-            };
-            // 租户口径：先与 dispatch_event 共用 filter_groups_by_tenant 精确同租户过滤，
-            // 再取订阅了该 event_key 的启用回调（subscribed_events 空豁免）
-            let matched: Vec<_> = filter_groups_by_tenant(groups, tenant_id)
-                .into_iter()
-                .filter(|h| hook_matches_subscribed(h.subscribed_events.as_deref(), &event_key))
-                .collect();
-            if matched.is_empty() {
-                return;
-            }
-            for hook in matched {
-                let hc = http.clone();
-                let db2 = db.clone();
-                let event_key = event_key.clone();
-                let payload = payload.clone();
-                let gate = webhook_delivery_gate();
-                tokio::spawn(async move {
-                    // 与 dispatch_event 共用同一全局投递闸（两条派发轨道不得各有上限）
-                    let Ok(_permit) = gate.acquire_owned().await else {
-                        tracing::warn!(
-                            hook_id = hook.id,
-                            event = %event_key,
-                            "WebHook 投递闸已关闭，跳过本次目录事件投递"
-                        );
-                        return;
-                    };
-                    let svc = SysWebHookService::with_shared(db2, hc);
-                    if let Err(e) = svc
-                        .deliver(&hook, &event_key, &payload, Some(LOG_SOURCE_DISPATCH))
-                        .await
-                    {
-                        tracing::warn!(
-                            hook_id = hook.id,
-                            event = %event_key,
-                            error = %e,
-                            "WebHook 目录事件出站投递失败"
-                        );
-                    }
-                });
-            }
-        });
+                for hook in matched {
+                    let hc = http.clone();
+                    let db2 = db.clone();
+                    let event_key = event_key.clone();
+                    let payload = payload.clone();
+                    let gate = webhook_delivery_gate();
+                    // 同 dispatch_event 内层投递的豁免理由（per-hook 超时 / permit 自动归还 / web_hook_log 留痕）
+                    tokio::spawn(async move {
+                        // 与 dispatch_event 共用同一全局投递闸（两条派发轨道不得各有上限）
+                        let Ok(_permit) = gate.acquire_owned().await else {
+                            tracing::warn!(
+                                hook_id = hook.id,
+                                event = %event_key,
+                                "WebHook 投递闸已关闭，跳过本次目录事件投递"
+                            );
+                            return;
+                        };
+                        let svc = SysWebHookService::with_shared(db2, hc);
+                        if let Err(e) = svc
+                            .deliver(&hook, &event_key, &payload, Some(LOG_SOURCE_DISPATCH))
+                            .await
+                        {
+                            tracing::warn!(
+                                hook_id = hook.id,
+                                event = %event_key,
+                                error = %e,
+                                "WebHook 目录事件出站投递失败"
+                            );
+                        }
+                    });
+                }
+            },
+        ));
     }
 
     /// 用共享 http 客户端构造投递器（供事件分发内部使用）
@@ -1467,9 +1493,26 @@ impl SysWebHookService {
             log_repo: SysWebHookLogRepository::new(db.clone()),
             event_repo: SysWebhookEventRepository::new(db.clone()),
             http: (*http).clone(),
-            http_client_override: None,
             db,
         }
+    }
+
+    // ==================== 外部依赖探活（AGENTS #5，被动口径） ====================
+
+    /// 启用回调数（`/health` 探针用；口径同事件派发扫描）
+    pub async fn count_enabled_hooks(&self) -> Result<u64, sea_orm::DbErr> {
+        self.hook_repo.count_enabled().await
+    }
+
+    /// `since` 之后的**失败**投递留痕条数（`/health` 探针的被动健康信号）。
+    ///
+    /// 探针绝不对回调目标发起真实 POST：那等于用免鉴权公开端点驱动任意出站请求
+    /// （SSRF 面 + 骚扰使用者接收端）。投递健康一律以 `web_hook_log` 事实为准。
+    pub async fn count_failed_deliveries_since(
+        &self,
+        since: chrono::NaiveDateTime,
+    ) -> Result<u64, sea_orm::DbErr> {
+        self.log_repo.count_by_status_since("1", since).await
     }
 
     // ==================== 推送记录管理 ====================

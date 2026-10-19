@@ -148,3 +148,119 @@ fn all_tr_keys_exist_in_both_locale_files() {
             .join("\n")
     );
 }
+
+// ==================== 批七十五 B7：中间件层拒绝的文案必须真的走协商 ====================
+
+use super::TestContext;
+use axum::body::Body;
+use axum::extract::connect_info::ConnectInfo;
+use axum::http::{Method, Request};
+use std::net::SocketAddr;
+
+/// 发一条请求，返回 `(HTTP 状态, body.msg)`。`lang` 为 `None` 时**不带** Accept-Language。
+async fn get_msg(
+    ctx: &TestContext,
+    uri: &str,
+    lang: Option<&str>,
+    extra: Option<(&str, &str)>,
+) -> (u16, String) {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("authorization", format!("Bearer {}", ctx.token));
+    if let Some(l) = lang {
+        builder = builder.header("accept-language", l);
+    }
+    if let Some((name, value)) = extra {
+        builder = builder.header(name, value);
+    }
+    let mut req = builder.body(Body::empty()).expect("构造请求失败");
+    let peer: SocketAddr = (ctx.peer_ip, 4321).into();
+    req.extensions_mut().insert(ConnectInfo(peer));
+    let (status, v) = ctx.send_raw(req).await;
+    (
+        status.as_u16(),
+        v["msg"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+/// 中间件层拒绝（414 请求行 / 431 请求头）的 msg 必须**随 Accept-Language 切换**。
+///
+/// 为什么必须测这一面：`router/mod.rs` 注释声明守卫"挂在 locale 之内 ⇒ 错误文案能吃到
+/// 协商后的 locale"，而批七十五之前**没有任何载体**证明它——层级挪一格（或 `tr!` 在
+/// task-local 之外求值）就会变成"英文用户永远收到中文"，而所有单测照常绿。
+/// 同批把 404 兜底与 408 超时体两处**硬编码中文**出口也改走 `tr!` +
+/// `common::response::transport_error`；它们的键存在性由上面的
+/// `all_tr_keys_exist_in_both_locale_files` 总锁覆盖，
+/// 而"这一面在真机上本地化"由本用例的 414/431 两支证明（同一层级、同一机制）。
+///
+/// ⚠️ 刻意**不测**未匹配路径的 404 兜底：未匹配请求落哪一层由
+/// `embedded_assets::is_embedded_mode()` 决定（嵌入模式返回 SPA HTML 200，分离模式才返回
+/// JSON 404），而集成测试跑在哪一档取决于构建形态与环境变量——批七十五实测本用例的
+/// `/system/definitely-no-such-endpoint-b75` 得 **200**，正是这个模式差异，不是缺陷。
+/// 拿一个随构建形态漂移的出口做断言，只会造出一口"环境耦合假失败"的锁。
+///
+/// 三侧判据：① en 得英文且非裸 key；② zh 得中文；③ **对照组**——缺 Accept-Language 必须
+/// 落回 `fallback = "zh-CN"`（`lib.rs` 的 `i18n!` 声明），而不是裸 key 或空串。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn middleware_rejection_messages_follow_negotiated_locale() {
+    let ctx = TestContext::new().await;
+    let long_query = "x".repeat(40_000);
+    let long_header = "z".repeat(70_000);
+
+    // 两个中间件层拒绝出口（都在业务层之前，无需构造数据，且与嵌入/分离模式无关）
+    let cases: &[(&str, u16, Option<(&str, &str)>)] = &[
+        (&format!("/system/user/list?title={long_query}"), 414, None),
+        (
+            "/system/user/list?pageNum=1",
+            431,
+            Some(("x-huge", &long_header)),
+        ),
+    ];
+
+    for (uri, expect_http, extra) in cases {
+        let (http, en) = get_msg(&ctx, uri, Some("en-US"), *extra).await;
+        assert_eq!(http, *expect_http, "{uri} 应落 {expect_http}，实际 {http}");
+        let (zh_http, zh) = get_msg(&ctx, uri, Some("zh-CN"), *extra).await;
+        assert_eq!(
+            zh_http, *expect_http,
+            "{uri} 应落 {expect_http}，实际 {zh_http}"
+        );
+        let (none_http, none) = get_msg(&ctx, uri, None, *extra).await;
+        assert_eq!(
+            none_http, *expect_http,
+            "{uri} 应落 {expect_http}，实际 {none_http}"
+        );
+
+        for (label, msg) in [("en", &en), ("zh", &zh), ("缺省", &none)] {
+            assert!(
+                !msg.is_empty() && !msg.contains("error."),
+                "{expect_http} 的 {label} 文案是裸 key 或空串（键未落在正确的节下）: {msg:?}"
+            );
+        }
+        assert_ne!(
+            en, zh,
+            "{expect_http} 的中英文案完全相同 ⇒ locale 协商对这道闸没生效\
+             （守卫挂在 locale 之外）：en={en:?} zh={zh:?}"
+        );
+        // 对照组：不带 Accept-Language 必须落回 fallback 档（= zh-CN，见 lib.rs 的 i18n! 声明）
+        assert_eq!(
+            none, zh,
+            "{expect_http} 缺 Accept-Language 时应回退 fallback 档（zh-CN），\
+             实际 none={none:?} zh={zh:?}"
+        );
+    }
+
+    // 超长输入与巨型头值都不得被回显进错误体（查询串常含 token、头里就是凭据，C.9）
+    let (_, en) = get_msg(
+        &ctx,
+        &format!("/system/user/list?title={long_query}"),
+        Some("en-US"),
+        Some(("x-huge", &long_header)),
+    )
+    .await;
+    assert!(
+        !en.contains(&"x".repeat(32)) && !en.contains(&"z".repeat(32)),
+        "错误体回显了用户超长输入或头值: {en}"
+    );
+}

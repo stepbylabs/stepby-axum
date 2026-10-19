@@ -51,13 +51,11 @@ pub(crate) async fn flow_insert(db: &DatabaseConnection, body: &str) -> Result<(
     flow_exec(db, sql).await
 }
 
-/// flow 种子用当前时间表达式（与迁移 now_expr 同构）
-pub(crate) fn flow_now(db: &DatabaseConnection) -> String {
-    if db.get_database_backend() == DatabaseBackend::Sqlite {
-        format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-    } else {
-        "NOW()".to_string()
-    }
+/// flow 种子用当前时间表达式（批七十四 B1：归口到 `migration::seed_now_expr`，
+/// 与迁移侧 40 份 `now_expr` 副本共用同一个函数对象 ⇒ 不再可能出现"换库换口径 /
+/// 种子挂钟 vs 运行 UTC"的分裂。本函数保留仅为既有调用点可读性，**不得**再自行拼时间。）
+pub(crate) fn flow_now(_db: &DatabaseConnection) -> String {
+    crate::common::datetime::seed_now_expr()
 }
 
 /// 幂等确保审批工作流三张表存在（三方言 DDL 与迁移逐字对齐）
@@ -303,11 +301,9 @@ pub(crate) async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbE
             )
             .await?;
         }
-        flow_insert(
-            db,
-            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})"),
-        )
-        .await?;
+        // common 授权走策略体（b73 轮 15 单一事实源）：本段 3600/3601 页面与 3611
+        // `system:flow:list` 只读按钮均放行 ⇒ 与改造前等价；今后往本表加写按钮将被拒发。
+        flow_insert(db, &governance::common_role_grant_select_body(&[*menu_id])).await?;
     }
 
     // 字典 70/71/72 段（与迁移 4.4-4.6 同构）
@@ -357,7 +353,17 @@ pub(crate) async fn ensure_flow_seeds(db: &DatabaseConnection) -> Result<(), DbE
         (713, "撤回", "withdraw", "Withdraw"),
         (714, "转办", "transfer", "Transfer"),
         (715, "超时提醒", "timeout_remind", "Timeout Remind"),
-        (716, "自动通过", "auto_approve", "Auto Approve"),
+        // 批七十六 R-4：原 716（"自动通过"/auto_approve）摘除。引擎无该动作写入点，
+        // 且"节点唯一审批人=提交人"在 sys_flow_service.rs:852 显式 400 拒绝（不做自动通过）
+        // ⇒ 它是与既有设计相矛盾的预留值。存量库由迁移 m20261019_000001 删除同一行。
+        // 兜底侧与迁移侧的一致性现由 `integration_tests::flow_action_dict` **双向**锁定：
+        // 引擎动作 ⊆ 字典值（R-1，漏种即红）且字典值 ⊆ 引擎动作（R-4，塞预留值即红）。
+        // 批七十六 R-1：引擎实际可写入的另三个动作（委派 / 加签 / 减签）。
+        // 与迁移 m20261018_000001_flow_action_dict 逐字同构；两侧同时被
+        // `integration_tests::flow_action_dict` 的"引擎字面量 ⊆ 字典值"总锁约束。
+        (717, "委托", "delegate", "Delegate"),
+        (718, "加签", "countersign_add", "Approver Added"),
+        (719, "减签", "countersign_del", "Approver Removed"),
     ];
     for (code, label, value, label_en) in action_rows {
         flow_insert(

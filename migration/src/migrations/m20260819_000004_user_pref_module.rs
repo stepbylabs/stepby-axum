@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260819_000004_user_pref_module.rs
+// stepby-axum/migration/src/migrations/m20260819_000004_user_pref_module.rs
 //! 个人中心：消息偏好 + 免打扰 模块迁移
 //!
 //! 新增单表（跨 sqlite/postgres/mysql 兼容，参考 m20260818_000002_msg_module）：

@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260924_000010_common_role_readonly.rs
+// stepby-axum/migration/src/migrations/m20260924_000010_common_role_readonly.rs
 //! 普通角色（role_id=2）权限收紧为只读白名单——§8.2 安全发现修复（福哥拍板推荐方案）。
 //!
 //! 背景：m20250711_000001_init 的 insert_sys_role_menu 把全部菜单（含 50+ 条写权限
@@ -33,32 +33,18 @@ impl MigrationName for Migration {
     }
 }
 
-/// F 按钮中的只读权限后缀（与 deep-e2e M9 前置 readOnlyPerms 正则同语义）
-const READONLY_PERMS_SUFFIX: [&str; 4] = [":list", ":query", ":view", ":center"];
-
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // 判据自 b73 轮 15 起取自 governance 单一事实源（本地 `READONLY_PERMS_SUFFIX`
+        // 副本删除）：迁移、后续新迁移的种子生成、initialize 兜底三处共用同一谓词，
+        // "两处手抄迟早漂移"的复制路径在物理上消失。
+        // 本迁移执行时 4131/4140+ 等例外菜单尚未创建，例外子句命中 0 行 ⇒ 与改造前
+        // 逐字段等价（例外由各自的迁移/兜底发放，终态由 m20261017_000001 收敛）。
         let conn = manager.get_connection();
-        // 1. 清空 common 的既有菜单关联（声明式目标状态下的全量重分配）
-        conn.execute_unprepared("DELETE FROM sys_role_menu WHERE role_id = 2")
-            .await?;
-        // 2. 重插目标集合：未删除的 M/C 页面 + F 按钮中的只读权限
-        //    del_flag='0' 与 API /system/menu/list 的过滤对齐（软删菜单不入授权，
-        //    避免 116 vs 83 的脏差异——get_menu_list 同样只返回 del_flag='0'）
-        let suffix_clause = READONLY_PERMS_SUFFIX
-            .iter()
-            .map(|s| format!("perms LIKE '%{}'", s))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let sql = format!(
-            r#"INSERT INTO sys_role_menu (role_id, menu_id)
-               SELECT 2, menu_id FROM sys_menu
-               WHERE del_flag = '0'
-                 AND (menu_type IN ('M', 'C')
-                  OR (menu_type = 'F' AND ({suffix_clause})))"#
-        );
-        conn.execute_unprepared(&sql).await?;
+        let (delete, insert) = governance::common_role_realign_sql();
+        conn.execute_unprepared(&delete).await?;
+        conn.execute_unprepared(&insert).await?;
         Ok(())
     }
 

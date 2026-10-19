@@ -4,6 +4,8 @@
 //! - 渠道连通性测试 channel/test
 //! - 消息模板 CRUD（列表/新增/详情/修改/删除 + 异常路径）
 //! - 发送记录生命周期（send → 日志查询 → retry → markPending → retryPending → clean → 删除单条）
+//! - markPending 交回队列语义（只认失败终态 + 重算额度，见
+//!   `test_msg_mark_pending_requeues_failed_log`）
 //!
 //! 说明：admin 为超管会短路 permission 中间件，直接经 TestContext 接口即可，无需权限头。
 //! 为避免真实 SMTP/外部网关，全部使用 type=sms 的渠道（dispatch 模拟成功，status='0'）。
@@ -36,6 +38,24 @@ fn raw_req(
     req.extensions_mut()
         .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
     req
+}
+
+/// 读取某条发送记录的最新行（列表接口按 toAddr 精确过滤，再按 logId 定位）。
+/// 找不到即 panic —— 重试状态机的断言必须建立在"行确实存在"之上。
+async fn log_row(ctx: &TestContext, to_addr: &str, log_id: i64) -> serde_json::Value {
+    let v = ctx
+        .get_json(&format!(
+            "/system/msg/log/list?toAddr={to_addr}&pageNum=1&pageSize=20"
+        ))
+        .await;
+    v["rows"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|r| r["logId"].as_i64() == Some(log_id))
+                .cloned()
+        })
+        .unwrap_or_else(|| panic!("应查到 logId={log_id} 的发送记录，实际: {v}"))
 }
 
 /// 消息渠道全链路（分页列表 → 新增 → 详情 → 修改 → 删除）。
@@ -471,40 +491,46 @@ async fn test_msg_template_crud_chain() {
 async fn test_msg_send_log_lifecycle() {
     let ctx = TestContext::new().await;
 
-    // 前置：本地短信网关（真实 HTTP listener，验证 G-07 完整投递链）
+    // 前置：本地短信网关（真实 HTTP listener，验证 G-07 完整投递链）。
+    // 服务**两次**请求（第 2 次给步骤 4 的 retry 用），否则 retry 的投递会连不上而
+    // 变成待重试态，后续 markPending/retryPending 的判定点就不可预测了。
+    // ⚠️ 用共享缓冲而非 `join()` 取回：`join` 会等到第 2 次连接才返回，而那次连接
+    //    发生在步骤 4——join 在前就是死锁（本批实测踩到，测试挂死 15 分钟）。
     let gateway = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let gateway_addr = gateway.local_addr().unwrap();
-    let gateway_handle = std::thread::spawn(move || {
-        use std::io::{BufRead, BufReader, Write};
-        let (stream, _) = gateway.accept().unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line.trim().is_empty() {
-                break;
-            }
-        }
-        let len_line = String::new();
-        // 重新读已消费的请求体长度不可行——简化：读取 content-length 在头里已消费，
-        // 改为循环读头时记录 content-length（上面循环已丢）——直接再读一行兜底不可靠。
-        // 因此本网关在响应后由断言侧校验 dispatch 状态即可。
-        let _ = len_line;
-        let mut body = String::new();
-        // 读取剩余字节（POST body）
-        let mut buf = [0u8; 4096];
-        if let Ok(n) = std::io::Read::read(&mut reader, &mut buf) {
-            body = String::from_utf8_lossy(&buf[..n]).to_string();
-        }
-        let resp = "HTTP/1.1 200 OK
+    let gateway_bodies = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    {
+        let sink = std::sync::Arc::clone(&gateway_bodies);
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            for _ in 0..2 {
+                let (stream, _) = gateway.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                // 读取剩余字节（POST body）
+                let mut body = String::new();
+                let mut buf = [0u8; 4096];
+                if let Ok(n) = std::io::Read::read(&mut reader, &mut buf) {
+                    body = String::from_utf8_lossy(&buf[..n]).to_string();
+                }
+                // 先入账再应答：调用方拿到 2xx 时该次请求体必定已在缓冲里
+                sink.lock().unwrap().push_str(&body);
+                let resp = "HTTP/1.1 200 OK
 Content-Length: 2
 Connection: close
 
 ok";
-        let mut w = stream;
-        w.write_all(resp.as_bytes()).unwrap();
-        body
-    });
+                let mut w = stream;
+                w.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+    }
 
     // 前置：sms 渠道（configJson 带本地网关 URL）+ sms 模板
     let v = ctx
@@ -560,8 +586,8 @@ ok";
         Some("0"),
         "sms 真实投递应成功 status='0'，实际: {v}"
     );
-    // 网关应收到真实 POST body（G-07 投递链实证）
-    let gateway_body = gateway_handle.join().unwrap();
+    // 网关应收到真实 POST body（G-07 投递链实证）：应答已发出 ⇒ 缓冲必已入账
+    let gateway_body = gateway_bodies.lock().unwrap().clone();
     assert!(
         gateway_body.contains("13800000000"),
         "网关应收到手机号字段，body={gateway_body}"
@@ -587,8 +613,21 @@ ok";
         Some(1),
         "retry 应返回处理条数，实际: {v}"
     );
+    // 第二次投递确实打到网关（本步之后该行仍是 '0'，步骤 5/6 的判定点才成立）
+    let bodies_after_retry = gateway_bodies.lock().unwrap().clone();
+    assert_eq!(
+        bodies_after_retry.matches("13800000000").count(),
+        2,
+        "send 与 retry 应各产生一次真实网关请求，实际缓冲={bodies_after_retry}"
+    );
+    let row_after_retry = log_row(&ctx, "13800000000", log_id).await;
+    assert_eq!(
+        row_after_retry["status"].as_str(),
+        Some("0"),
+        "网关应答 2xx 时 retry 后仍应是成功态，实际: {row_after_retry}"
+    );
 
-    // 5. 标记待重试 → status='2'
+    // 5. 标记待重试：**成功记录不得被交回队列**（批七十六防线，防重复投递）
     let v = ctx
         .post_json(
             &format!("/system/msg/log/markPending/{}", log_id),
@@ -598,18 +637,35 @@ ok";
     ctx.assert_ok(&v);
     assert_eq!(
         v["data"].as_u64(),
-        Some(1),
-        "markPending 应返回标记条数，实际: {v}"
+        Some(0),
+        "markPending 对 status='0' 成功记录应跳过（返回 0），实际: {v}"
+    );
+    // 复核：该行仍是成功态
+    let v = ctx
+        .get_json("/system/msg/log/list?toAddr=13800000000&pageNum=1&pageSize=10")
+        .await;
+    let row = v["rows"]
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["logId"].as_i64() == Some(log_id)))
+        .expect("应查到刚发送的记录");
+    assert_eq!(
+        row["status"].as_str(),
+        Some("0"),
+        "成功记录不应被 markPending 改判，实际: {row}"
     );
 
-    // 6. retryPending 处理待重试批次（status='2' 记录被消费，返回 >=1）
+    // 6. retryPending 处理待重试批次：此刻**没有**待重试记录（第 5 步被拦下），
+    //    所以必须返回 0——这条断言是第 5 步防线的可证伪对照（若 markPending
+    //    仍无条件置 '2'，这里会变成 >=1 并把成功消息重发一遍）。
+    //    待重试批次的正向消费在 test_msg_mark_pending_requeues_failed_log 里取证。
     let v = ctx
         .post_json("/system/msg/log/retryPending/10", serde_json::json!({}))
         .await;
     ctx.assert_ok(&v);
-    assert!(
-        v["data"].as_u64().unwrap_or(0) >= 1,
-        "retryPending 应至少处理 1 条待重试记录，实际: {v}"
+    assert_eq!(
+        v["data"].as_u64(),
+        Some(0),
+        "无待重试记录时 retryPending 应处理 0 条，实际: {v}"
     );
 
     // 7. 清空发送记录
@@ -667,6 +723,146 @@ ok";
         status,
         StatusCode::BAD_REQUEST,
         "非法 ID 重试应 400，实际: {status}"
+    );
+}
+
+/// 批七十六：markPending 的交回队列语义（只认失败终态，且必须重算重试额度）。
+///
+/// 用"端口已关闭"的真实网关让投递必然失败，把行推到耗尽终态，再验三步闭环：
+/// - 待重试('2')/成功('0') 行都不被重复标记（`status='1'` 过滤 = 防重复投递防线）；
+/// - 失败终态('1') 行被交回：返回 1、状态回到 '2'、**retry_count 归零**
+///   （`find_pending_retry` 只取 retry_count<max 的行，不归零就等于把死信换成死循环）；
+/// - 交回的行真的被批次消费（retryPending 返回 ≥1），链路闭合可跑通。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_msg_mark_pending_requeues_failed_log() {
+    let ctx = TestContext::new().await;
+
+    // 死网关：绑定取号后立即 drop → 端口无人监听，dispatch 必然连接被拒（真实失败，非模拟）
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_addr = dead.local_addr().unwrap();
+    drop(dead);
+
+    let v = ctx
+        .post_json(
+            "/system/msg/channel",
+            serde_json::json!({
+                "channelName": "it_msg_死网关渠道",
+                "channelCode": "it_msg_dead_ch",
+                "channelType": "sms",
+                "status": "0",
+                "configJson": format!("{{\"gateway_url\":\"http://{dead_addr}/send\"}}")
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .post_json(
+            "/system/msg/template",
+            serde_json::json!({
+                "templateName": "it_msg_死网关模板",
+                "templateCode": "it_msg_dead_tpl",
+                "channelCode": "it_msg_dead_ch",
+                "templateSubject": "【it_msg】死链 {{name}}",
+                "templateContent": "验证码 {{code}}",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    let to_addr = "13711000000";
+    let v = ctx
+        .post_json(
+            "/system/msg/send",
+            serde_json::json!({
+                "templateCode": "it_msg_dead_tpl",
+                "channelCode": "it_msg_dead_ch",
+                "toAddr": to_addr,
+                "params": { "name": "Carol", "code": "111111" }
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let log_id = v["data"]["logId"].as_i64().expect("send 应返回 logId");
+
+    // 1. 投递失败 → 待重试 '2'（retry_count 从 0 起算）
+    let row = log_row(&ctx, to_addr, log_id).await;
+    assert_eq!(
+        row["status"].as_str(),
+        Some("2"),
+        "死网关首次投递应落待重试，实际: {row}"
+    );
+
+    // 2. 待重试行重复标记必须被跳过（幂等：不重算额度、不产生第二条队列）
+    let v = ctx
+        .post_json(
+            &format!("/system/msg/log/markPending/{}", log_id),
+            serde_json::json!({}),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"].as_u64(),
+        Some(0),
+        "待重试('2')行不应被 markPending 重复标记，实际: {v}"
+    );
+
+    // 3. 跑满重试额度 → 失败终态 '1'（DEFAULT_MAX_RETRY=3，逐轮 +1）
+    let mut exhausted = false;
+    for round in 1..=4 {
+        let v = ctx
+            .post_json("/system/msg/log/retryPending/10", serde_json::json!({}))
+            .await;
+        ctx.assert_ok(&v);
+        let row = log_row(&ctx, to_addr, log_id).await;
+        if row["status"].as_str() == Some("1") {
+            exhausted = true;
+            assert!(
+                row["retryCount"].as_i64().unwrap_or(0) >= 3,
+                "进入失败终态应已耗尽额度，实际: {row}"
+            );
+            break;
+        }
+        assert!(
+            row["retryCount"].as_i64().unwrap_or(0) >= round,
+            "每轮 retryPending 应让 retry_count 递增，round={round} 实际: {row}"
+        );
+    }
+    assert!(exhausted, "重试耗尽后应进入失败终态 status='1'");
+
+    // 4. markPending 交回队列：恰 1 条，状态回 '2' 且额度重算
+    let v = ctx
+        .post_json(
+            &format!("/system/msg/log/markPending/{}", log_id),
+            serde_json::json!({}),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"].as_u64(),
+        Some(1),
+        "失败终态行应被交回队列，实际: {v}"
+    );
+    let row = log_row(&ctx, to_addr, log_id).await;
+    assert_eq!(
+        row["status"].as_str(),
+        Some("2"),
+        "交回后应回到待重试，实际: {row}"
+    );
+    assert_eq!(
+        row["retryCount"].as_i64(),
+        Some(0),
+        "交回后必须重算重试额度（否则调度器永不取它），实际: {row}"
+    );
+
+    // 5. 调度侧真的消费得动（闭环可跑通，不是"标了就完"）
+    let v = ctx
+        .post_json("/system/msg/log/retryPending/10", serde_json::json!({}))
+        .await;
+    ctx.assert_ok(&v);
+    assert!(
+        v["data"].as_u64().unwrap_or(0) >= 1,
+        "交回的行应被批次消费，实际: {v}"
     );
 }
 

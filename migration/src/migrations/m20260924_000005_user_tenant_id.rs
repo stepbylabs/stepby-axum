@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260924_000005_user_tenant_id.rs
+// stepby-axum/migration/src/migrations/m20260924_000005_user_tenant_id.rs
 //! v5-N2 Phase 2（第一步）：sys_user 增 tenant_id 列，登录 JWT 的 tid 从恒 0
 //! 升级为真实数据链路（登录查库带出）。
 //!

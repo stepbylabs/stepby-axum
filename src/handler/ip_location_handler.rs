@@ -270,6 +270,19 @@ pub async fn reload(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<()>, AppError> {
+    // "文件不存在"是运维状态而不是服务内部故障：本端点的 utoipa 契约早就声明了 400，
+    // 原实现却把 anyhow 的错误串洗成 500「系统内部错误，请联系管理员」——客户端拿不到
+    // 可执行的下一步，后端日志还平白多一条 ERROR 噪声（本轮 e2e 功能18/19 实测形状）。
+    // 具体路径只进日志，不进响应体（C.9 最小暴露；页面上的状态接口本就展示 xdbPath/mmdbPath）。
+    let mmdb_path = state.config.ip_location.mmdb_path.clone();
+    if !std::path::Path::new(&mmdb_path).exists() {
+        tracing::warn!(
+            path = %mmdb_path,
+            operator = %operator.username(),
+            "mmdb 热加载被拒：文件不存在"
+        );
+        return Err(AppError::bad_request(&crate::tr!("error.ip.mmdb_missing")));
+    }
     tracing::info!("IP 库热加载触发：operator={}", operator.username());
     state.ip_location_service.reload().await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.reload")))
@@ -290,6 +303,16 @@ pub async fn reload_xdb(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<()>, AppError> {
+    // 与 reload（mmdb）同口径：缺文件 ⇒ 显式 400 + 可读文案，路径仅入日志。
+    let xdb_path = state.config.ip_location.xdb_path.clone();
+    if !std::path::Path::new(&xdb_path).exists() {
+        tracing::warn!(
+            path = %xdb_path,
+            operator = %operator.username(),
+            "ip2region xdb 热加载被拒：文件不存在"
+        );
+        return Err(AppError::bad_request(&crate::tr!("error.ip.xdb_missing")));
+    }
     tracing::info!("ip2region xdb 热加载触发：operator={}", operator.username());
     state.ip_location_service.reload_xdb().await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.reload")))

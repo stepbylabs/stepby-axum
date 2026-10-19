@@ -56,7 +56,22 @@ async fn async_main() -> anyhow::Result<()> {
     let job_scheduler = state.job_scheduler.clone();
 
     // 构建应用路由（叠加全局中间件）
+    // 外部依赖探活的启动检查（AGENTS #5 前半件）：state 即将被 router 消费，
+    // 先克隆 Arc；`off` 档位下 [`startup_probe`] 内部直接返回，不发起任何出站请求。
+    let probe_state = state.clone();
     let app = router::build_app(state);
+    if probe_state.config.health.external_probe_mode()
+        != stepby_axum::config::settings::ExternalProbeMode::Off
+    {
+        stepby_axum::common::background::spawn_tracked(
+            "health_startup_probe",
+            std::time::Duration::from_secs(30),
+            Some(probe_state.observability.metrics.clone()),
+            async move {
+                stepby_axum::handler::health_probes::startup_probe(&probe_state).await;
+            },
+        );
+    }
 
     // 启动 HTTP 服务
     // BUILD_TIMESTAMP / GIT_HASH / GIT_DIRTY 由 build.rs 注入，便于日志溯源构建版本

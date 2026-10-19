@@ -3,7 +3,7 @@
 //!
 //! # 基准覆盖面
 //!
-//! 全部为**真实业务纯函数**（无 mock、无 IO），按调用频次选取四类热路径：
+//! 全部为**真实业务纯函数**（无 mock、无 IO），按调用频次选取五类热路径：
 //!
 //! 1. `utils::masking`（业务展示口径脱敏，M1 字段级权限）——user 列表每行
 //!    每敏感字段调用一次，QPS 直接相关：
@@ -22,6 +22,15 @@
 //!      （目录外事件名原样返回）；
 //!    - `convert_legacy_event_types`：典型（混合遗留/目录事件、含空白尾逗号）
 //!      + 边界（空串 = 订阅全部，返回 `None`）。
+//! 5. `utils::password`（凭据校验成本基线，批七十四 B6）——Argon2id 参数是**有意的**
+//!    CPU 成本，参数或依赖漂移会直接改变登录延迟，而 HTTP 耗时桶把它与"查库 + 限流"
+//!    混在一起看不见：
+//!    - `argon2id_encrypt/typical`（注册/改密/重置）+ `argon2id_verify/typical`
+//!      （登录/TOTP 二次确认）；
+//!    - `argon2id_verify/long_password`（长口令边界）+
+//!      `argon2id_verify/wrong_password`（错误口令必须与正确口令同耗时＝恒定时间比较的数值证据）；
+//!    - `md5_legacy_verify/typical`（存量旧哈希路径，比 Argon2 快三个数量级，
+//!      单独一条让"升级链路停摆、存量占比回升"在曲线上可见）。
 //!
 //! # 运行方式
 //!
@@ -50,6 +59,7 @@ use stepby_axum::service::sys_web_hook_service::{
     convert_legacy_event_types, map_legacy_event_key,
 };
 use stepby_axum::utils::masking::{mask_email, mask_id_card, mask_keep, mask_phone};
+use stepby_axum::utils::password::{encrypt_password, verify_password};
 
 // ==================== 输入素材（真实业务口径字面量） ====================
 
@@ -187,11 +197,68 @@ fn bench_webhook(c: &mut Criterion) {
     g.finish();
 }
 
+// ==================== 5. password_verify：凭据校验成本基线（批七十四 B6）====================
+
+/// 基准口令（复杂度策略放行的一类典型形态：长度≥8 + 字母 + 数字）
+const PWD_TYPICAL: &str = "S3cretPassw0rd";
+/// 旧 MD5 + 固定盐 `stepby_admin` 的存量哈希（= md5(PWD_TYPICAL + "stepby_admin")）。
+/// 硬编码而非现算：`verify_legacy_md5` 是私有函数，基准不为此改可见性（本文件约定）。
+const HASH_MD5_LEGACY: &str = "781a42098e2df3ed392e3c14426d773c";
+
+/// Argon2id 参数是**有意的** CPU 成本（m=19456KiB / t=2 / p=1）。
+/// 本组存在的理由：参数或依赖一漂移，登录延迟就变，而 `/metrics` 的 HTTP 桶把"查库 +
+/// 限流 + Argon2"混在一起看不出来；只有这条基线能把"校验本身变慢/变弱"单独钉住。
+///
+/// 采样刻意取小：单次操作在几十毫秒量级，默认 5s 测量会把整轮 bench 拖到分钟级。
+///
+/// **b74 实测基线**（release，`--warm-up-time 1 --measurement-time 2`，本机）：
+/// `argon2id_verify/typical` **17.7ms**（16.7–18.8）、`long_password` 19.0ms、
+/// `wrong_password` 17.6ms（与正确口令**同耗时**＝恒定时间比较的数值证据）、
+/// `md5_legacy_verify` **1.28µs**（比 Argon2 快四个数量级）。
+/// 与现网 `sys_oper_log.cost_time` 观测到的 `/unlockscreen` 3482–4282ms 存在**两个数量级缺口**
+/// （候选解释：debug 构建、跑批高负载、同一请求内多次校验）。缺口本身不是本基线要回答的，
+/// 而是有了这条基线才能回答：`stepby_credential_verify_duration_seconds`（B6 新增指标族）
+/// 给出校验自身的耗时，与 cost_time 一比就能定位时间到底花在哪一段。
+fn bench_password_verify(c: &mut Criterion) {
+    let mut g = c.benchmark_group("password_verify");
+    g.sample_size(10);
+    g.measurement_time(std::time::Duration::from_secs(2));
+
+    let hashed = encrypt_password(PWD_TYPICAL).expect("基准前置：加密应成功");
+
+    // 写路径（注册 / 改密 / 重置）：每次一个 Argon2 派生
+    g.bench_function("argon2id_encrypt/typical", |b| {
+        b.iter(|| encrypt_password(black_box(PWD_TYPICAL)).expect("加密应成功"))
+    });
+    // 读路径（登录 / TOTP 二次确认）：与写路径同成本，但调用频次高一个量级
+    g.bench_function("argon2id_verify/typical", |b| {
+        b.iter(|| verify_password(black_box(PWD_TYPICAL), black_box(hashed.as_str())))
+    });
+    // 边界：口令长度拉到策略上限（派生成本与口令长度基本无关，这里钉的是"不随长度暴涨"）
+    let long_pwd = format!("{PWD_TYPICAL}{}", "x".repeat(64));
+    let long_hash = encrypt_password(&long_pwd).expect("长口令加密应成功");
+    g.bench_function("argon2id_verify/long_password", |b| {
+        b.iter(|| verify_password(black_box(&long_pwd), black_box(long_hash.as_str())))
+    });
+    // 存量兼容路径：还没升级到 Argon2 的旧 MD5 哈希——实测 1.28µs vs 17.7ms，
+    // **快四个数量级**。单独一条是为了让"存量占比回升"（升级链路停摆）在曲线上可见
+    g.bench_function("md5_legacy_verify/typical", |b| {
+        b.iter(|| verify_password(black_box(PWD_TYPICAL), black_box(HASH_MD5_LEGACY)))
+    });
+    // 错误口令必须与正确口令同耗时（恒定时间比较；若显著更快就是时序侧信道的数值证据）
+    g.bench_function("argon2id_verify/wrong_password", |b| {
+        b.iter(|| verify_password(black_box("Wrong12345Pass"), black_box(hashed.as_str())))
+    });
+
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_masking,
     bench_ak_sign,
     bench_sort,
-    bench_webhook
+    bench_webhook,
+    bench_password_verify
 );
 criterion_main!(benches);

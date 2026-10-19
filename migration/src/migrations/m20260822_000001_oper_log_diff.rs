@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260822_000001_oper_log_diff.rs
+// stepby-axum/migration/src/migrations/m20260822_000001_oper_log_diff.rs
 //! 操作日志字段级变更差异（Tier-S #2）迁移
 //!
 //! 在 sys_oper_log 表新增 oper_diff 列（TEXT 类型，可空）。

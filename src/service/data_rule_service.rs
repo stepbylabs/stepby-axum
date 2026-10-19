@@ -32,6 +32,9 @@ fn is_valid_identifier(name: &str) -> bool {
 }
 
 const OPS: &[&str] = &["eq", "ne", "like", "gt", "lt", "ge", "le", "in"];
+/// `rule_value` 长度上限（**字符**）。判据与文案同源的锁见
+/// `tests::validate_rule_value_length_bound`。
+const RULE_VALUE_MAX: usize = 500;
 const VALUE_TYPES: &[&str] = &[
     "fixed",
     "current_user",
@@ -125,6 +128,16 @@ impl DataRuleService {
                 "error.dataRule.in_value_required"
             )));
         }
+        // b74 B2：`rule_value` 必须有长度上限。它不进 `like_escape`（那里的 100 字符兜底
+        // 是给**不受信查询输入**用的；规则值里的 `%` 是管理员有意写的通配符，转义等于砍掉
+        // like 规则能力）。但它会在求值期拼成 `LIKE '%<值>%'` 打在无索引列上 ⇒
+        // 无上限 = 一次保存换来每次查询的 CPU 消耗。上限取 500 字符：够写业务规则
+        // （含 op=in 的逗号列表），又不足以构成病态模式。
+        if dto.rule_value.as_deref().unwrap_or("").chars().count() > RULE_VALUE_MAX {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.dataRule.value_too_long"
+            )));
+        }
         Ok(())
     }
 
@@ -178,7 +191,12 @@ impl DataRuleService {
         operator: &str,
     ) -> Result<i64, ServiceError> {
         Self::validate_dto(&dto)?;
-        let now = chrono::Local::now().naive_local();
+        // 落库时间统一走 `common::datetime::now_naive()`（UTC）。本行原为
+        // `chrono::Local::now().naive_local()`（批七十四 B1 实测）⇒ dev 库
+        // `sys_data_rule` 6 行 create_time 比同库 `sys_post` 等表快整 8 小时，
+        // 即"同一库内两种时间口径并存"；且部署到 UTC- 时区后差异反向，
+        // `db_state_audit` 的未来时间检查看不见（负偏移盲区，见台账 §3.2-3）。
+        let now = crate::common::datetime::now_naive();
         let rule_id = match dto.rule_id {
             None => {
                 let am = sys_data_rule::ActiveModel {
@@ -464,5 +482,79 @@ mod tests {
         assert!(DataRuleService::validate_dto(&dto("in", "fixed", Some("1,2,3"))).is_ok());
         // 非 in 操作符不受此约束（current_tenant 无值仍合法）
         assert!(DataRuleService::validate_dto(&dto("eq", "current_tenant", None)).is_ok());
+    }
+
+    /// 批七十四 B2：`rule_value` 长度上限 500 **字符**（不是字节）。
+    ///
+    /// 求值期会把它拼成 `LIKE '%<值>%'` 打在无索引列上——一次保存换来每次查询的
+    /// CPU 消耗，故必须有上限；但 `op=like` 的规则值允许含管理员有意写的 `%`，
+    /// 不能走 `like_escape` 的 100 字符兜底（那等于砍掉 like 规则能力）。
+    /// 判据取 `chars().count()`：中文规则值按字计，既不过严（按字节会把 167 个汉字
+    /// 当超限拒绝）也不放松（按字节可塞 500 个多字节字符）。
+    /// 批七十四 B2：`rule_value` 必须有长度上限（`RULE_VALUE_MAX` **字符**，不是字节）。
+    ///
+    /// 求值期会把它拼成 `LIKE '%<值>%'` 打在无索引列上——一次保存换来每次查询的 CPU
+    /// 消耗，故必须有上限；但 `op=like` 的规则值允许含管理员有意写的 `%`，不能走
+    /// `like_escape` 的 100 字符兜底（那等于砍掉 like 规则能力）。
+    /// 判据取 `chars().count()`：按字节会把 167 个汉字当超限拒掉（过严），
+    /// 又能塞进 500 个多字节字符（过松）。
+    #[test]
+    fn validate_rule_value_length_bound() {
+        let dto = |rv: String| DataRuleDto {
+            rule_id: None,
+            rule_name: "t".into(),
+            table_name: "sys_user".into(),
+            field_name: "create_by".into(),
+            op: "like".into(),
+            value_type: "fixed".into(),
+            rule_value: Some(rv),
+            status: None,
+            role_ids: None,
+        };
+        // 上界内侧：恰好等于上限必须放行（防"为安全把合法值也挡掉"）
+        assert!(DataRuleService::validate_dto(&dto("x".repeat(RULE_VALUE_MAX))).is_ok());
+        // 越界 1 个字符即拒（上限是硬闸，不是量级提醒）
+        assert!(DataRuleService::validate_dto(&dto("x".repeat(RULE_VALUE_MAX + 1))).is_err());
+        // 按字符而非字节：满额汉字合法、再多 1 个字非法
+        let cn = "规则".repeat(RULE_VALUE_MAX / 2);
+        assert_eq!(cn.chars().count(), RULE_VALUE_MAX);
+        assert!(
+            cn.len() > RULE_VALUE_MAX,
+            "本用例必须是多字节串，才能证明判据按字符计"
+        );
+        assert!(DataRuleService::validate_dto(&dto(cn.clone())).is_ok());
+        assert!(DataRuleService::validate_dto(&dto(format!("{cn}尾"))).is_err());
+        // 错误键与状态码：400 + 专用键（不得回落成泛化"参数校验失败"）
+        let err = DataRuleService::validate_dto(&dto("x".repeat(RULE_VALUE_MAX + 1)))
+            .expect_err("越界必须拒绝");
+        assert_eq!(err.code, 400);
+        // 上限数字必须与两份文案同源：改了常量没改 yml = "提示说 500、实际放行 600"（C.7）
+        // 同时运行期消息必须**逐字等于**其中一份文案——否则"两边都是 translation missing"
+        // 也能让 `assert_eq!(err.message, tr!(...))` 恒真（虚锁，本批 §一.16 同款教训）。
+        let mut texts: Vec<String> = Vec::new();
+        for f in ["locales/zh-CN.yml", "locales/en-US.yml"] {
+            let text = std::fs::read_to_string(f).expect("语言文件应存在");
+            let line = text
+                .lines()
+                .find(|l| l.trim_start().starts_with("value_too_long:"))
+                .unwrap_or_else(|| panic!("{f} 缺 error.dataRule.value_too_long 键"));
+            assert!(
+                line.contains(&RULE_VALUE_MAX.to_string()),
+                "{f} 文案里的上限与代码常量 {RULE_VALUE_MAX} 不一致: {line}"
+            );
+            texts.push(
+                line.split_once(':')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"')
+                    .to_string(),
+            );
+        }
+        assert!(
+            texts.contains(&err.message),
+            "运行期消息未逐字命中任何一份文案（键可能未被 rust_i18n 解析）: {:?} vs {texts:?}",
+            err.message
+        );
     }
 }

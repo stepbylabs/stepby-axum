@@ -104,7 +104,6 @@ fn now_secs() -> i64 {
 }
 
 /// redis 档共享态存储（Redis 当期安全 + DB 权威层双写 + 启动回填）
-#[allow(dead_code)]
 pub struct RedisStore {
     /// Redis 连接管理器（内部自动重连；方法内 clone 后使用）
     conn: ConnectionManager,
@@ -113,8 +112,7 @@ pub struct RedisStore {
 }
 
 impl RedisStore {
-    /// 构造（未接线期 #[allow(dead_code)] 预防告警；接线后可移除）
-    #[allow(dead_code)]
+    /// 构造（local/redis 两档由 initialize 的存储工厂接线）
     pub fn new(conn: ConnectionManager, db: DatabaseConnection) -> Self {
         Self { conn, db }
     }

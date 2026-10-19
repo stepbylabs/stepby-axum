@@ -116,6 +116,12 @@ pub fn spawn_emit(
         };
         // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
         if !crate::common::breaker::try_acquire(&url) {
+            // 本地闸门挡下 ⇒ 没有出网，按 `rejected` 记（与 `ai/handler` 闸满拒绝同口径）
+            crate::observability::metrics::MetricsRegistry::global().record_outbound(
+                "acme",
+                "rejected",
+                0.0,
+            );
             tracing::debug!(
                 event,
                 host = %crate::common::breaker::host_of(&url),
@@ -123,6 +129,8 @@ pub fn spawn_emit(
             );
             return;
         }
+        // b74（AGENTS B.4）：ACME 是外部依赖且本函数有 4 条提前出口，手写计数必漏 ⇒ RAII 守卫
+        let mut outbound = crate::observability::metrics::OutboundGuard::start("acme");
         let mut req = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -155,6 +163,9 @@ pub fn spawn_emit(
                 false
             }
         };
+        if sent_ok {
+            outbound.succeeded();
+        }
         crate::common::breaker::record(&url, sent_ok);
     });
 }

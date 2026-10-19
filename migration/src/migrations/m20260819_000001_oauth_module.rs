@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260819_000001_oauth_module.rs
+// stepby-axum/migration/src/migrations/m20260819_000001_oauth_module.rs
 //! 第三方登录 / OAuth2 / OIDC 模块迁移
 //!
 //! 新增两张表（跨 sqlite/postgres/mysql 兼容，参考 m20260818_000002_msg_module）：
@@ -35,14 +35,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-/// 当前时间表达式（跨数据库兼容）
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT

@@ -120,3 +120,7 @@ pub mod m20261008_000001_log_archive_anchor;
 pub mod m20261010_000001_fix_ai_history_menu_parent;
 pub mod m20261012_000001_config_governance_and_archive_menus;
 pub mod m20261013_000001_normalize_menu_del_flag;
+pub mod m20261017_000001_common_role_grant_erosion;
+pub mod m20261017_000002_platform_only_alert;
+pub mod m20261018_000001_flow_action_dict;
+pub mod m20261019_000001_flow_action_dict_drop_reserved;

@@ -471,8 +471,12 @@ impl ReportDatasetService {
         let (sql_bound, values) =
             bind_named_params(&m.sql_template, &param_names, &dto.params, backend);
 
-        // LIMIT 100 硬顶（模板无括号/注释/子查询——校验器保证；直接追加 LIMIT 子句）
-        let limited = format!("{sql_bound} LIMIT {PREVIEW_ROW_LIMIT}");
+        // LIMIT 100 硬顶（模板无括号/注释/子查询——校验器保证；直接追加 LIMIT 子句）。
+        // ⚠️ 追加前必须剥掉末尾分号：校验器**放行** `SELECT … ;` 形态，而直接拼接会得到
+        // `SELECT … ; LIMIT 100`——驱动视角是两条语句，请求期整体失败（批七十五 B4 变异
+        // 实测：SQLite/sqlx 报多语句、MySQL·PG 报语法错，三档一律 500）。保存侧校验通过、
+        // 试跑侧永久 500 的"口径漂移"就是本缺陷的用户可见面。
+        let limited = preview_limited_sql(&sql_bound);
         let stmt = sea_orm::Statement::from_sql_and_values(backend, &limited, values);
         // 超时保护
         let query_fut = self.db.query_all_raw(stmt);
@@ -484,20 +488,20 @@ impl ReportDatasetService {
         .map_err(|_| ServiceError::internal(&crate::tr!("error.report.query_timeout")))?
         .map_err(ServiceError::from)?;
 
-        let mut columns: Vec<String> = Vec::new();
+        // 列名提取（G-01 M3 优化）：临时视图探针取真实列名（表达式列含数据库默认命名）；
+        // 探针失败（方言差异/权限）回退词法推断——fail-open 但结果恒为合法列名清单，
+        // 下游 try_get 失败容忍为 Null。
+        // ⚠️ 必须在遍历行**之前**做：此前它挂在 `idx == 0` 分支里，于是"合法但当前 0 行"
+        // 的查询（新表、筛选无命中）拿到空 columns ⇒ 设计器字段选择器整块空，
+        // 还把空清单当采样结果写进 columns_meta 缓存（批七十五 B4）。
+        let columns = match probe_columns_via_temp_view(&self.db, &m.sql_template).await {
+            Some(c) => c,
+            None => infer_columns(&m.sql_template, &self.db)
+                .await
+                .unwrap_or_else(|_| vec!["col1".to_string()]),
+        };
         let mut out_rows: Vec<serde_json::Value> = Vec::new();
-        for (idx, row) in rows.iter().enumerate() {
-            if idx == 0 {
-                // 列名提取（G-01 M3 优化）：临时视图探针取真实列名（表达式列含数据库
-                // 默认命名）；探针失败（方言差异/权限）回退词法推断——fail-open 但结果
-                // 恒为合法列名清单，下游 try_get 失败容忍为 Null
-                columns = match probe_columns_via_temp_view(&self.db, &m.sql_template).await {
-                    Some(c) => c,
-                    None => infer_columns(&m.sql_template, &self.db)
-                        .await
-                        .unwrap_or_else(|_| vec!["col1".to_string()]),
-                };
-            }
+        for row in &rows {
             let mut obj = serde_json::Map::new();
             for col in &columns {
                 let v = row
@@ -713,6 +717,16 @@ impl ReportDatasetService {
     }
 }
 
+/// preview 的 `LIMIT` 硬顶拼接（本文件**唯一**的"往模板后追加子句"点）。
+///
+/// 收成一个具名函数是为了让形状锁能按"变量绑定"判定：追加点写成
+/// `format!("{sql_bound} LIMIT …")` 这种直接拼接时，锁会红（见
+/// `dataset_sql_append_lock_catches_synthetic_unnormalized_append`）。
+fn preview_limited_sql(sql_bound: &str) -> String {
+    let body = crate::common::dataset_sql::strip_trailing_semicolon(sql_bound);
+    format!("{body} LIMIT {PREVIEW_ROW_LIMIT}")
+}
+
 /// 把 `:name` 命名占位符替换为方言占位符并生成绑定值
 /// （SQLite/MySQL = `?`，PG = `$n`）
 fn bind_named_params(
@@ -902,4 +916,193 @@ async fn infer_columns(
         cols.push("col1".to_string());
     }
     Ok(cols)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::prod_scan::{self, Scan};
+
+    const FILE: &str = "src/service/report_dataset_service.rs";
+    const NORMALIZER: &str = "strip_trailing_semicolon";
+
+    /// 一个"往 SQL 后追加子句"的拼接点：行号 + 它插值的槽位内容。
+    #[derive(Debug)]
+    struct AppendSite {
+        line_no: usize,
+        text: String,
+        /// ` LIMIT ` **之前**的插值槽（`{body}` → `"body"`，`{}` → `""`）
+        slots: Vec<String>,
+    }
+
+    /// 采集追加点（生产码行视图，注释已按口径置空）。
+    fn append_sites(lines: &[String]) -> Vec<AppendSite> {
+        let mut out = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            let Some(pos) = line.find(" LIMIT ") else {
+                continue;
+            };
+            if !line.contains("format!") {
+                continue;
+            }
+            let head = &line[..pos];
+            let mut slots = Vec::new();
+            let bytes = head.as_bytes();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if bytes[i] == b'{'
+                    && bytes.get(i + 1) != Some(&b'{')
+                    && let Some(close) = head[i + 1..].find('}')
+                {
+                    let inner = head[i + 1..i + 1 + close].to_string();
+                    // `{x:?}` 之类的格式串取变量名部分
+                    slots.push(inner.split(':').next().unwrap_or_default().to_string());
+                    i += close + 2;
+                    continue;
+                }
+                i += 1;
+            }
+            out.push(AppendSite {
+                line_no: idx + 1,
+                text: line.clone(),
+                slots,
+            });
+        }
+        out
+    }
+
+    /// 判据：追加点必须先归一语句终止符。两种合规形态——
+    /// ① 该行自带 `strip_trailing_semicolon`（就地归一）；
+    /// ② 它插值的每个具名槽都由一条 `let 名称 = … strip_trailing_semicolon(…)` 绑定。
+    /// 裸 `{}` 位置槽无法归因 ⇒ 只允许形态①。
+    fn violations(lines: &[String]) -> Vec<String> {
+        let mut bad = Vec::new();
+        for site in append_sites(lines) {
+            if site.text.contains(NORMALIZER) {
+                continue;
+            }
+            let attributed = !site.slots.is_empty()
+                && site.slots.iter().all(|slot| {
+                    let let_prefix = format!("let {slot} ");
+                    let let_mut = format!("let mut {slot} ");
+                    !slot.is_empty()
+                        && lines.iter().any(|l| {
+                            let t = l.trim_start();
+                            (t.starts_with(let_prefix.as_str()) || t.starts_with(let_mut.as_str()))
+                                && t.contains(NORMALIZER)
+                        })
+                });
+            if !attributed {
+                bad.push(format!("第 {} 行: {}", site.line_no, site.text.trim()));
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn preview_appends_limit_only_through_the_terminator_normalizer() {
+        let file = prod_scan::prod_file(FILE, &Scan::default());
+        let sites = append_sites(&file.lines);
+        // 体量探针：本文件必须真的有一个追加点。为 0 说明函数被删/改名，
+        // 那时"零违规"毫无意义（恒绿锁）。
+        assert!(
+            !sites.is_empty(),
+            "{FILE} 里必须存在 LIMIT 追加点（否则本锁空转）"
+        );
+        let bad = violations(&file.lines);
+        assert!(
+            bad.is_empty(),
+            "SQL 追加子句前必须剥末尾分号，否则拼出的是两条语句，请求期整体失败\
+             （B4 实测三档方言一律 500）：\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// 变异证伪 + 对照组：合成源码必须被抓到，合规形态必须放过，注释不得误伤。
+    #[test]
+    fn dataset_sql_append_lock_catches_synthetic_unnormalized_append() {
+        #[derive(Debug)]
+        enum Expect {
+            Violation,
+            Clean,
+            /// 采集口径把它当注释/非代码 ⇒ 连追加点都不该识别出来
+            NotCode,
+        }
+        let cases: &[(&str, Expect)] = &[
+            // ① B4 缺陷本体：直接拼绑定后的 SQL
+            (
+                "    let limited = format!(\"{sql_bound} LIMIT {PREVIEW_ROW_LIMIT}\");",
+                Expect::Violation,
+            ),
+            // ② 位置槽无法归因
+            (
+                "    let limited = format!(\"{} LIMIT 100\", sql_bound);",
+                Expect::Violation,
+            ),
+            // ③ 槽名有 let 绑定，但绑定没走归一函数（换成别的"看似归一"的清洗同样违规）
+            (
+                "    let body = sql_bound.trim();\n    let limited = format!(\"{body} LIMIT 100\");",
+                Expect::Violation,
+            ),
+            // ④ 合规：具名槽由归一函数绑定
+            (
+                "    let body = crate::common::dataset_sql::strip_trailing_semicolon(sql);\n    \
+                 let limited = format!(\"{body} LIMIT 100\");",
+                Expect::Clean,
+            ),
+            // ⑤ 合规：就地归一（位置槽 + 行内归一函数）
+            (
+                "    let limited = format!(\"{} LIMIT 100\", \
+                 crate::common::dataset_sql::strip_trailing_semicolon(sql));",
+                Expect::Clean,
+            ),
+            // ⑥ 注释里的违规形态不是代码：采集口径置空注释，否则文档串会误伤锁
+            (
+                "    // let q = format!(\"{sql_bound} LIMIT 100\"); 历史缺陷说明",
+                Expect::NotCode,
+            ),
+        ];
+        for (src, expect) in cases {
+            let lines = prod_scan::normalize(src, &Scan::default());
+            let sites = append_sites(&lines);
+            let bad = violations(&lines);
+            match expect {
+                Expect::NotCode => assert!(
+                    sites.is_empty(),
+                    "注释不应被识别为追加点: {src}\n实际: {sites:?}"
+                ),
+                Expect::Clean => {
+                    assert!(!sites.is_empty(), "用例应至少被识别为一个追加点: {src}");
+                    assert!(
+                        bad.is_empty(),
+                        "合规形态被误判为违规（锁会挡住正确写法）: {src}\n实际: {bad:?}"
+                    );
+                }
+                Expect::Violation => {
+                    assert!(!sites.is_empty(), "用例应至少被识别为一个追加点: {src}");
+                    assert!(
+                        !bad.is_empty(),
+                        "违规形态未被抓到 ⇒ 本锁是虚锁: {src}\n行: {lines:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// helper 的行为锁：分号被剥、硬顶恒为 `PREVIEW_ROW_LIMIT`、无分号模板正文不被吞。
+    #[test]
+    fn preview_limited_sql_keeps_the_hard_cap_inside_the_statement_body() {
+        assert_eq!(
+            preview_limited_sql("SELECT user_id FROM sys_user WHERE status = ?;"),
+            "SELECT user_id FROM sys_user WHERE status = ? LIMIT 100"
+        );
+        assert_eq!(
+            preview_limited_sql("SELECT user_id FROM sys_user"),
+            "SELECT user_id FROM sys_user LIMIT 100"
+        );
+        assert!(
+            preview_limited_sql("SELECT 1;").ends_with(&format!("LIMIT {PREVIEW_ROW_LIMIT}")),
+            "硬顶常量必须真的落到语句尾部"
+        );
+    }
 }

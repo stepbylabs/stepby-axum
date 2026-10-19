@@ -1533,7 +1533,7 @@ git commit -m "feat: 添加应用入口 main.rs（通过 AppInitializer 编排�
 - Create: `stepby-axum/migration/Cargo.toml`
 - Create: `stepby-axum/migration/src/lib.rs`
 - Create: `stepby-axum/migration/src/main.rs`
-- Create: `stepby-axum/migration/src/m20250711_000001_init.rs`
+- Create: `stepby-axum/migration/src/migrations/m20250711_000001_init.rs`（现址；历史步骤原文写的是 `migration/src/` 旧径）
 
 - [ ] **Step 1: 编写 migration/Cargo.toml**
 
@@ -1572,7 +1572,7 @@ impl MigratorTrait for Migrator {
 - [ ] **Step 3: 编写 migration/src/m20250711_000001_init.rs**
 
 ```rust
-// stepby-axum/migration/src/m20250711_000001_init.rs
+// stepby-axum/migration/src/migrations/m20250711_000001_init.rs
 
 use sea_orm_migration::prelude::*;
 

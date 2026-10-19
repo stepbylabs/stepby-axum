@@ -173,6 +173,18 @@ pub async fn chunk_part(
         })?;
     let mut session = ChunkSession::parse(&raw)?;
 
+    // 序号必须落在会话声明的 [0, total_parts) 内（批七十五 B2）。
+    // 越界序号会照常写盘并塞进 `received`，于是 `received.len()` 与"0..total_parts 是否齐"
+    // 不再对应：merge 的"已收 N/M"判据永久无法满足（会话在 TTL 内不可完成，客户端只能
+    // 从头再传），而任何已认证用户都能用递增序号无限占盘——这是资源上限缺失，不只是脏数据。
+    if index >= session.total_parts {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.common_handler.chunk_index_out_of_range",
+            index = index,
+            max = session.total_parts.saturating_sub(1)
+        )));
+    }
+
     // 分片落暂存区（本地盘；目录不存在则创建）
     let root = resolve_upload_dir("uploads").await;
     let dir = chunk_dir(&root, operator.tenant_id(), &session_id);
@@ -326,7 +338,7 @@ pub async fn chunk_abort(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     AxumPath(session_id): AxumPath<String>,
-) -> Result<axum::Json<serde_json::Value>, AppError> {
+) -> Result<AjaxResult<()>, AppError> {
     validate_session_id(&session_id)?;
     let _ = state
         .store
@@ -334,5 +346,5 @@ pub async fn chunk_abort(
         .await;
     let root = resolve_upload_dir("uploads").await;
     cleanup_chunk_dir(&chunk_dir(&root, operator.tenant_id(), &session_id)).await;
-    Ok(axum::Json(serde_json::json!({ "code": 200, "msg": "ok" })))
+    Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }

@@ -145,11 +145,17 @@ pub async fn ak_sign_middleware(
         .record_ak_request(&path, outcome, started.elapsed().as_secs_f64());
 
     let (verified, body_bytes) = inner?;
-    // best-effort 更新 PAT 最近使用时间（失败忽略，与 Bearer 链路同口径）
+    // best-effort 更新 PAT 最近使用时间（与 Bearer 链路同范式：超时 + panic 隔离 + 失败留痕计数）
     let pat_id = verified.pat_id.clone();
-    tokio::spawn(async move {
-        state.pat_service.touch_last_used(&pat_id).await;
-    });
+    let svc = state.pat_service.clone();
+    crate::common::background::spawn_tracked(
+        "ak_touch_last_used",
+        crate::common::background::LIGHT_DB_BUDGET,
+        Some(state.observability.metrics.clone()),
+        async move {
+            svc.touch_last_used(&pat_id).await;
+        },
+    );
 
     parts.extensions.insert(AkIdentity {
         pat_id: verified.pat_id,

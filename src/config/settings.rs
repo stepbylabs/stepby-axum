@@ -141,6 +141,13 @@ pub struct Settings {
     /// 存量部署（`[redis].url` 有效）在 auto 下自动落到 redis 档 ⇒ **默认零行为变更**。
     #[serde(default)]
     pub cache: CacheConfig,
+    /// 健康检查配置（`[health]` 段）：**外部依赖**探活档位。
+    ///
+    /// 默认 `off` ⇒ `/health` 只探测 DB + 共享态存储（与改造前**逐字节等价**，
+    /// 响应体不含 `external` 字段）；`basic` 才聚合邮件/AI/存储/WebHook/IP 库探针
+    /// （AGENTS #5「外部依赖健康检查接入 /health」）。
+    #[serde(default)]
+    pub health: HealthConfig,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -177,6 +184,7 @@ impl fmt::Debug for Settings {
             .field("risk_control", &self.risk_control)
             .field("upload_scan", &self.upload_scan)
             .field("cache", &self.cache)
+            .field("health", &self.health)
             .finish()
     }
 }
@@ -938,6 +946,107 @@ impl CacheConfig {
     }
 }
 
+// ==================== 外部依赖探活（[health]） ====================
+
+/// 外部依赖探活档位字面量（默认项在前 ⇒ 缺省即现状）
+pub const EXTERNAL_PROBE_MODES: &[&str] = &["off", "basic"];
+
+/// 外部依赖探活档位（`[health].external_probes`；项目准则③：取「模式」而非裸 bool）。
+///
+/// 扩档留路：后续如需 `full`（逐个探针带耗时直方图 + 失败重试），只加枚举项不改契约。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalProbeMode {
+    /// **默认 = 现状**：`/health` 不发起任何外部依赖探测，响应体不含 `external` 字段。
+    #[default]
+    Off,
+    /// 聚合探测已登记的外部依赖（邮件 SMTP / AI provider / 对象存储 / WebHook 留痕 / IP 库），
+    /// 每探针独立超时 + 进程级结果缓存，失败**不**改变核心 `status` 语义（见
+    /// [`crate::handler::health_probes`]）。
+    Basic,
+}
+
+impl ExternalProbeMode {
+    /// 解析配置串（大小写无关、两端 trim）；未登记取值一律回落 [`Self::Off`] 并打 WARN。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "basic" => Self::Basic,
+            "off" => Self::Off,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    fallback = "off",
+                    allowed = ?EXTERNAL_PROBE_MODES,
+                    "配置 [health].external_probes 取值非法，已回落 off（/health 不探测外部依赖）"
+                );
+                Self::Off
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Basic => "basic",
+        }
+    }
+}
+
+/// 健康检查配置（`[health]` 段）：核心 DB/共享态探测不受本段影响（始终执行）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct HealthConfig {
+    /// `off`（**默认**，现状等价）| `basic`；非法值回落 off 并 WARN（fail-safe）
+    #[serde(default = "default_external_probes")]
+    pub external_probes: String,
+    /// 单个外部探针超时（毫秒，默认 1500；夹在 `200..=10000`）
+    #[serde(default = "default_probe_timeout_ms")]
+    pub probe_timeout_ms: u64,
+    /// 外部探针结果缓存 TTL（秒，默认 30；夹在 `5..=3600`）。
+    ///
+    /// 与核心探测的 5 秒 TTL **分档**：外部依赖（SMTP 握手、OSS ListObjects）比 DB ping
+    /// 贵得多，高频编排探针不应把它们拖成每 5 秒一轮。
+    #[serde(default = "default_probe_cache_ttl_secs")]
+    pub probe_cache_ttl_secs: u64,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            external_probes: default_external_probes(),
+            probe_timeout_ms: default_probe_timeout_ms(),
+            probe_cache_ttl_secs: default_probe_cache_ttl_secs(),
+        }
+    }
+}
+
+fn default_external_probes() -> String {
+    ExternalProbeMode::default().as_str().to_string()
+}
+
+fn default_probe_timeout_ms() -> u64 {
+    1500
+}
+
+fn default_probe_cache_ttl_secs() -> u64 {
+    30
+}
+
+impl HealthConfig {
+    /// 解析后的档位（非法值已由 [`ExternalProbeMode::parse`] 打 WARN 并回落 `off`）
+    pub fn external_probe_mode(&self) -> ExternalProbeMode {
+        ExternalProbeMode::parse(&self.external_probes)
+    }
+
+    /// 单探针超时：夹在 `200ms..=10s`（0 = 立即超时；过大 = 拖住 /health 响应）
+    pub fn probe_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.probe_timeout_ms.clamp(200, 10_000))
+    }
+
+    /// 外部探针缓存 TTL：夹在 `5s..=1h`
+    pub fn probe_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.probe_cache_ttl_secs.clamp(5, 3600))
+    }
+}
+
 // ==================== 风控集成点（[risk_control]） ====================
 
 /// 登录面「工具型 UA」处置档位字面量（顺序：默认项在前 ⇒ "默认为现状"）
@@ -1393,6 +1502,20 @@ pub struct SysLogConfig {
     /// 消息发送记录（sys_msg_send_log）保留天数（默认 90，投递日志）
     #[serde(default = "default_msg_send_log_retention_days")]
     pub msg_send_log_retention_days: i64,
+    /// 启动期是否补跑"错过的"保留期清理（默认 `true`；b73）
+    ///
+    /// 清理 cron 固定在 03:00，而发布/重启窗口几乎总在凌晨之外 ⇒ 错过即**整日无补偿**
+    /// （dev 机实测连续错过 2 天后，`sys_frontend_error` 有 30529 行超保留期仍在库）。
+    /// 开启时按 SharedStore 里的 `retention:last_success_at` 标记判断是否需要补跑一轮，
+    /// 多副本共库经抢占键收敛到单实例执行。
+    ///
+    /// 归类（AGENTS C.7）：**启动时只读**（改后需重启）——它只影响"启动那一次是否补跑"，
+    /// 不改变每日 cron 的行为。清理动作本身仍完全受 `retention_mode` / 各 `*_retention_days`
+    /// 约束（`keep` 档下补跑也是空转跳过），因此默认 `true` 不构成新的删除风险；
+    /// 集成测试基线把它钳制为 `false`（避免每个 TestContext 启动都跑一轮清理，见
+    /// `integration_tests/mod.rs` 的钳制表）。
+    #[serde(default = "default_retention_catchup_on_start")]
+    pub retention_catchup_on_start: bool,
 }
 
 /// 日志保留模式（批次十九）
@@ -1463,8 +1586,17 @@ impl Default for SysLogConfig {
             frontend_error_retention_days: default_frontend_error_retention_days(),
             audit_change_retention_days: default_audit_change_retention_days(),
             msg_send_log_retention_days: default_msg_send_log_retention_days(),
+            retention_catchup_on_start: default_retention_catchup_on_start(),
         }
     }
+}
+
+/// 启动期补跑保留期清理的缺省值（b73）：`true` = 修复默认生效。
+///
+/// 不构成新增删除风险——补跑调用的就是每日那一轮，删除口径完全由 `retention_mode`
+/// 与各 `*_retention_days` 决定（`keep` 档下补跑亦为空转跳过）。
+fn default_retention_catchup_on_start() -> bool {
+    true
 }
 
 fn default_sys_log_retention_days() -> i64 {
@@ -1887,6 +2019,28 @@ pub struct ServerConfig {
     /// 前端 `request.ts` 错误分支已同样识别 `body.code`（含 1003），故切换不会造成断链。
     #[serde(default = "default_http_status_convention")]
     pub http_status_convention: String,
+    /// 请求行（路径 + 查询串）长度上限，单位字节。**0 = 完全不设限**（= 批七十四之前的现状）。
+    ///
+    /// 默认 16384：`DefaultBodyLimit` 只作用于请求体，查询串此前无任何上限
+    /// （集成实测 59KB 查询串照样 200 进业务层）。合法请求在本仓最长约 1KB 量级，
+    /// 16KiB 有 15 倍余量；确需超长 URL 的集成方显式设 0 回退。
+    /// 详见 `src/middleware/uri_limit.rs`（判据与该常量的对账锁在同文件单测）。
+    #[serde(default = "default_max_uri_bytes")]
+    pub max_uri_bytes: u64,
+    /// 请求头净字节上限（名 + 值逐条求和），**0 = 完全不设限**。
+    ///
+    /// 默认 65536（64 KiB）。现状由 hyper 隐式承担：头**条数**封 100、整个请求头块
+    /// 受读缓冲上界 417792 字节（约 408 KiB）约束，但**没有按字节的独立档位**；
+    /// 本仓合法请求的头实测在 4 KiB 量级（JWT + Cookie + UA/Origin/Referer），
+    /// 64 KiB 有 16 倍余量，同时把"能解析成功但过大"的请求在进入业务层前挡掉
+    /// （过大请求头会被 trace/span、oper_log 归属预读等路径逐份复制，属自伤面）。
+    ///
+    /// ⚠️ 边界必须说清：这道闸跑在 hyper **解析之后**，不是解析器层上限
+    /// （`axum::serve` 不暴露 `ServeConfig`，见 `src/main.rs` 的 Slowloris 说明）；
+    /// 头**条数**一维刻意不再另设开关，以免与 hyper 的 100 并存造成 C.7 的
+    /// "两边都能改但行为不一致"。判据与对账锁见 `src/middleware/uri_limit.rs`。
+    #[serde(default = "default_max_header_bytes")]
+    pub max_header_bytes: u64,
 }
 
 /// P2-33 默认档：`legacy`（= 现状零变更）。取值单一事实源在
@@ -2443,6 +2597,15 @@ pub struct AiConfig {
     /// LLM 请求超时（秒）
     #[serde(default = "default_ai_timeout_secs")]
     pub timeout_secs: u64,
+    /// 推理并发上限（b72，AGENTS A.2「重资源入口默认带并发上限」）。
+    ///
+    /// **启动时只读**（改后需重启）：刻意**不**进 `sys_config` 运行态热更面，避免出现
+    /// "管理端能改但闸门上次的值还在"的行为分裂（AGENTS C.7 配置归类明确）。
+    /// 缺省 4：单进程 4 路并发推理已足够覆盖人机交互节奏；超出即 429（`error.ai.busy`），
+    /// 语义是"可重来的用户请求被拒"，与 WebHook 出站事实"排队不丢弃"相反。
+    /// 取值 0 或超界由 `ai::gate` 收敛到 `[1, 256]`（0 会等价永久拒绝，属配置错误而非意图）。
+    #[serde(default = "default_ai_max_concurrency")]
+    pub max_concurrency: usize,
     /// 允许查询的表白名单（AI 生成 SQL 只能触及这些表；超出即拒绝）
     #[serde(default = "default_ai_allowed_tables")]
     pub allowed_tables: Vec<String>,
@@ -2459,6 +2622,11 @@ fn default_ai_max_rows() -> u32 {
 }
 fn default_ai_timeout_secs() -> u64 {
     30
+}
+/// 推理并发上限缺省值——直接取 `ai::gate::DEFAULT_MAX_CONCURRENCY`，
+/// 避免"serde 缺省"与"Rust Default 缺省"两处各写一个数字而漂移
+fn default_ai_max_concurrency() -> usize {
+    crate::ai::gate::DEFAULT_MAX_CONCURRENCY
 }
 fn default_ai_allowed_tables() -> Vec<String> {
     vec![
@@ -2487,6 +2655,7 @@ impl Default for AiConfig {
             model: default_ai_model(),
             max_rows: default_ai_max_rows(),
             timeout_secs: default_ai_timeout_secs(),
+            max_concurrency: crate::ai::gate::DEFAULT_MAX_CONCURRENCY,
             allowed_tables: default_ai_allowed_tables(),
         }
     }
@@ -2565,6 +2734,17 @@ fn default_mail_from_name() -> String {
 
 fn default_mail_starttls() -> bool {
     false
+}
+
+/// 请求行长度上限的默认档（16 KiB）。判据与余量对账见 `src/middleware/uri_limit.rs`。
+pub(crate) fn default_max_uri_bytes() -> u64 {
+    16384
+}
+
+/// 请求头净字节上限的默认档（64 KiB）。口径、hyper 上界与余量对账见
+/// `src/middleware/uri_limit.rs` 与 `ServerConfig::max_header_bytes` 文档。
+pub fn default_max_header_bytes() -> u64 {
+    65536
 }
 
 fn default_docs_enabled() -> bool {
@@ -2664,6 +2844,24 @@ impl Settings {
             if !origins.is_empty() {
                 self.server.cors_origins = origins;
             }
+        }
+        // 可信反代网段（MT-4）：容器/ Helm 形态下镜像里不带 config.toml（.dockerignore 排除，
+        // 否则启动崩溃），而 deploy/README.md 第 7.1 节把"必须配置 trusted_proxies"列为上线硬要求
+        // ——没有 env 注入口时该要求在交付形态里根本不可满足，租户域名链路会静默回落平台租户。
+        // 逗号分隔 CIDR；空值不覆盖（保留配置文件值），与 CORS_ORIGINS 同口径。
+        if let Ok(v) = std::env::var("TRUSTED_PROXIES") {
+            let proxies: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !proxies.is_empty() {
+                self.server.trusted_proxies = proxies;
+            }
+        }
+        // Swagger / 文档面开关：同上映射手动关闭的逃生舱（默认 fail-closed，见 default_docs_enabled）
+        if let Ok(v) = std::env::var("DOCS_ENABLED") {
+            self.server.docs_enabled = v.eq_ignore_ascii_case("true") || v == "1";
         }
         // 邮件 SMTP 密码通过环境变量注入（避免明文写入配置文件）
         if let Ok(v) = std::env::var("MAIL_PASSWORD") {
@@ -2860,6 +3058,8 @@ impl Settings {
                 trusted_proxies: vec![],
                 docs_enabled: false,
                 http_status_convention: default_http_status_convention(),
+                max_uri_bytes: default_max_uri_bytes(),
+                max_header_bytes: default_max_header_bytes(),
             },
             database: DatabaseConfig {
                 url: database_url,
@@ -2913,6 +3113,7 @@ impl Settings {
             upload_scan: UploadScanConfig::default(),
             config_version: 1,
             cache: CacheConfig::default(),
+            health: HealthConfig::default(),
         };
 
         // 零配置引导：JWT_SECRET 缺省时生成/复用 data/secret.key（仅 from_env_only 路径）
@@ -3111,6 +3312,8 @@ mod tests {
                 trusted_proxies: vec![],
                 docs_enabled: false,
                 http_status_convention: default_http_status_convention(),
+                max_uri_bytes: default_max_uri_bytes(),
+                max_header_bytes: default_max_header_bytes(),
             },
             database: DatabaseConfig {
                 url: "postgres://user:pass@host:5432/db".to_string(),
@@ -3162,6 +3365,7 @@ mod tests {
             upload_scan: UploadScanConfig::default(),
             config_version: 1,
             cache: CacheConfig::default(),
+            health: HealthConfig::default(),
         }
     }
 
@@ -3261,6 +3465,76 @@ mod tests {
         );
     }
 
+    /// 模板一致性回归：config.toml.example 的 `[server].max_uri_bytes` 必须显式存在
+    /// 且与内置默认对齐（批七十四 B2 开关规范⑥"配置模板与注释同步"的落地载体）。
+    ///
+    /// 双向锁：① 模板缺键 ⇒ 红（新配置项漏进模板，用户看不到它存在）；
+    /// ② 模板值与 `default_max_uri_bytes()` 漂移 ⇒ 红（模板写了 8192、代码默认 16384，
+    ///   "管理端显示一个值、缺省行为是另一个值"即 C.7 行为分裂）。
+    #[test]
+    fn test_max_uri_bytes_template_matches_default() {
+        let template = std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
+        assert!(
+            template
+                .lines()
+                .any(|l| l.trim_start().starts_with("max_uri_bytes")),
+            "config.toml.example 必须显式写出 [server].max_uri_bytes（含注释与 0=不设限回退口径）"
+        );
+        let s: Settings = toml::from_str(&template).expect("模板应可解析");
+        assert_eq!(
+            s.server.max_uri_bytes,
+            default_max_uri_bytes(),
+            "[server].max_uri_bytes 模板示例必须与内置默认一致"
+        );
+        // 缺键路径同样必须是默认档（serde default 生效，而非回落 0=不设限）
+        let without_key: ServerConfig = toml::from_str(
+            "host = \"0.0.0.0\"\nport = 8080\ncors_origins = [\"http://localhost:5173\"]\n",
+        )
+        .expect("ServerConfig 除必填三项外均有缺省");
+        assert_eq!(
+            without_key.max_uri_bytes,
+            default_max_uri_bytes(),
+            "缺 max_uri_bytes 时必须取默认上限，绝不能缺省为 0（= 不设限）"
+        );
+    }
+
+    /// 模板一致性回归（批七十五 B7）：`[server].max_header_bytes` 与内置默认双向钉住。
+    /// 与 `test_max_uri_bytes_template_matches_default` 同判据，同一族开关不得只有一半有载体。
+    #[test]
+    fn test_max_header_bytes_template_matches_default() {
+        let template = std::fs::read_to_string("config/config.toml.example").expect("模板应存在");
+        assert!(
+            template
+                .lines()
+                .any(|l| l.trim_start().starts_with("max_header_bytes")),
+            "config.toml.example 必须显式写出 [server].max_header_bytes（含注释与 0=不设限回退口径）"
+        );
+        let s: Settings = toml::from_str(&template).expect("模板应可解析");
+        assert_eq!(
+            s.server.max_header_bytes,
+            default_max_header_bytes(),
+            "[server].max_header_bytes 模板示例必须与内置默认一致"
+        );
+        let without_key: ServerConfig = toml::from_str(
+            "host = \"0.0.0.0\"\nport = 8080\ncors_origins = [\"http://localhost:5173\"]\n",
+        )
+        .expect("ServerConfig 除必填三项外均有缺省");
+        assert_eq!(
+            without_key.max_header_bytes,
+            default_max_header_bytes(),
+            "缺 max_header_bytes 时必须取默认上限，绝不能缺省为 0（= 不设限）"
+        );
+        // 显式写 0 必须被尊重（回退口径），不得被"夹"回默认档
+        let off: ServerConfig = toml::from_str(
+            "host = \"0.0.0.0\"\nport = 8080\ncors_origins = []\nmax_header_bytes = 0\n",
+        )
+        .expect("模板应可解析");
+        assert_eq!(
+            off.max_header_bytes, 0,
+            "0 = 不设限是集成方的回退开关，缺省逻辑不得覆盖显式 0"
+        );
+    }
+
     /// v5-D9：同意票档位解析与 TTL 夹取（默认 = 现状；非法值 fail-safe 回落 `off`）。
     #[test]
     fn test_sso_consent_ticket_mode_parse_and_clamp() {
@@ -3335,6 +3609,71 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 1, "至少应校验 config/config.toml.example");
+    }
+
+    /// b72 B3：外部依赖探活档位（**默认 = off = 现状**；非法值 fail-safe 回落 off）
+    /// + 超时/TTL 夹取（0 与超大值都不允许把 /health 打成自杀式探针）
+    #[test]
+    fn test_external_probe_mode_parse_and_clamp() {
+        assert_eq!(ExternalProbeMode::parse("basic"), ExternalProbeMode::Basic);
+        assert_eq!(
+            ExternalProbeMode::parse("  BASIC "),
+            ExternalProbeMode::Basic
+        );
+        assert_eq!(ExternalProbeMode::parse("off"), ExternalProbeMode::Off);
+        for bad in ["", "on", "true", "1", "full", "always"] {
+            assert_eq!(
+                ExternalProbeMode::parse(bad),
+                ExternalProbeMode::Off,
+                "{bad:?} 非法取值必须回落 off（默认 = 现状），不得静默开启出站探测"
+            );
+        }
+        assert_eq!(ExternalProbeMode::default(), ExternalProbeMode::Off);
+        assert_eq!(EXTERNAL_PROBE_MODES.len(), 2);
+        for raw in EXTERNAL_PROBE_MODES {
+            assert_eq!(ExternalProbeMode::parse(raw).as_str(), *raw);
+        }
+        // 缺省配置：档位 off + 超时/TTL 走默认值
+        let d = HealthConfig::default();
+        assert_eq!(d.external_probe_mode(), ExternalProbeMode::Off);
+        assert_eq!(d.probe_timeout(), std::time::Duration::from_millis(1500));
+        assert_eq!(d.probe_ttl(), std::time::Duration::from_secs(30));
+        // 夹取：过小/过大都收敛到安全区间
+        let small = HealthConfig {
+            external_probes: "basic".into(),
+            probe_timeout_ms: 0,
+            probe_cache_ttl_secs: 0,
+        };
+        assert_eq!(small.probe_timeout(), std::time::Duration::from_millis(200));
+        assert_eq!(small.probe_ttl(), std::time::Duration::from_secs(5));
+        let big = HealthConfig {
+            external_probes: "basic".into(),
+            probe_timeout_ms: 999_999,
+            probe_cache_ttl_secs: 999_999,
+        };
+        assert_eq!(
+            big.probe_timeout(),
+            std::time::Duration::from_millis(10_000)
+        );
+        assert_eq!(big.probe_ttl(), std::time::Duration::from_secs(3600));
+        assert_eq!(big.external_probe_mode(), ExternalProbeMode::Basic);
+    }
+
+    /// 入库模板必须把外部探活钉死在 `off`：`/health` 是免鉴权公开端点，
+    /// 模板手滑写成 `basic` = 新部署一上线就开始对外发探测包（默认值即安全态）。
+    #[test]
+    fn test_shipped_config_template_pins_external_probes_off() {
+        let content = std::fs::read_to_string("config/config.toml.example").expect("读取模板失败");
+        let value: toml::Value =
+            toml::from_str(&content).unwrap_or_else(|e| panic!("模板 TOML 解析失败: {e}"));
+        assert_eq!(
+            value
+                .get("health")
+                .and_then(|h| h.get("external_probes"))
+                .and_then(|v| v.as_str()),
+            Some("off"),
+            "config.toml.example 必须显式 [health] external_probes = \"off\""
+        );
     }
 
     /// M-8 收口：限流档位解析（**默认 = 现状 local**；非法值 fail-safe 回落 local）+ TTL 夹取
@@ -3556,6 +3895,8 @@ mod tests {
                 trusted_proxies: vec![],
                 docs_enabled: false,
                 http_status_convention: default_http_status_convention(),
+                max_uri_bytes: default_max_uri_bytes(),
+                max_header_bytes: default_max_header_bytes(),
             },
             database: DatabaseConfig {
                 url: "postgres://user:supersecret@host:5432/db".to_string(),
@@ -3616,6 +3957,7 @@ mod tests {
             upload_scan: UploadScanConfig::default(),
             config_version: 1,
             cache: CacheConfig::default(),
+            health: HealthConfig::default(),
         };
 
         let debug_str = format!("{:?}", settings);
@@ -3845,6 +4187,68 @@ mod tests {
             match old_rp_id {
                 Some(v) => std::env::set_var("WEBAUTHN_RP_ID", v),
                 None => std::env::remove_var("WEBAUTHN_RP_ID"),
+            }
+        }
+    }
+
+    /// MT-4 回归锁：`trusted_proxies` / `docs_enabled` 必须有环境变量注入口。
+    /// 背景：镜像不带 config.toml（.dockerignore 排除，否则启动崩溃），而上线检查表把
+    /// "必须配置 trusted_proxies"当作硬要求 —— 没有注入口时这条要求在容器/Helm 形态下
+    /// 不可满足，多租户域名链路会静默回落平台租户（无报错、无日志信号）。
+    #[test]
+    fn test_trusted_proxies_and_docs_env_override() {
+        let old_proxies = std::env::var("TRUSTED_PROXIES").ok();
+        let old_docs = std::env::var("DOCS_ENABLED").ok();
+
+        let mut s = make_test_settings();
+        s.server.trusted_proxies = vec!["192.168.0.0/24".to_string()];
+        s.server.docs_enabled = false;
+
+        // ① 逗号分隔多值 ⇒ 全部收下并 trim
+        // SAFETY: 单测内成对设置/还原；仅本用例读写这两个变量。
+        unsafe {
+            std::env::set_var("TRUSTED_PROXIES", " 10.244.0.0/16 , 172.17.0.0/16 ");
+            std::env::set_var("DOCS_ENABLED", "true");
+        }
+        s.apply_env_overrides();
+        assert_eq!(
+            s.server.trusted_proxies,
+            vec!["10.244.0.0/16".to_string(), "172.17.0.0/16".to_string()],
+            "TRUSTED_PROXIES 应覆盖文件值并按逗号切分 trim"
+        );
+        assert!(s.server.docs_enabled, "DOCS_ENABLED=true 应打开文档面");
+
+        // ② 空串/空白 ⇒ 不静默清空（与 CORS_ORIGINS 同口径：清空必须由配置文件表达）
+        unsafe {
+            std::env::set_var("TRUSTED_PROXIES", " , ");
+            std::env::set_var("DOCS_ENABLED", "false");
+        }
+        s.apply_env_overrides();
+        assert_eq!(
+            s.server.trusted_proxies.len(),
+            2,
+            "空白 TRUSTED_PROXIES 不得清空已生效的白名单"
+        );
+        assert!(!s.server.docs_enabled, "DOCS_ENABLED=false 应关闭文档面");
+
+        // ③ 垃圾值 ⇒ 按 fail-closed 视为关闭，而不是"解析失败保持原值"
+        unsafe {
+            std::env::set_var("DOCS_ENABLED", "yes-please");
+        }
+        s.apply_env_overrides();
+        assert!(
+            !s.server.docs_enabled,
+            "非 true/1 的取值一律视为关闭（默认 fail-closed）"
+        );
+
+        unsafe {
+            match old_proxies {
+                Some(v) => std::env::set_var("TRUSTED_PROXIES", v),
+                None => std::env::remove_var("TRUSTED_PROXIES"),
+            }
+            match old_docs {
+                Some(v) => std::env::set_var("DOCS_ENABLED", v),
+                None => std::env::remove_var("DOCS_ENABLED"),
             }
         }
     }

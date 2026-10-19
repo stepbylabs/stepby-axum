@@ -758,7 +758,8 @@ impl SysMsgService {
                 })
             }
             _ => Err(ServiceError::bad_request(&crate::tr!(
-                "error.msg.channel_type_invalid"
+                "error.msg.channel_type_invalid",
+                channel_type = channel.channel_type.as_str()
             ))),
         }
     }
@@ -1093,8 +1094,17 @@ impl SysMsgService {
                             ServiceError::bad_request(&crate::tr!("error.msg.sms_config_invalid"))
                         })?;
                         let provider = crate::service::sms_provider::GenericHttpProvider::new();
+                        // b72（AGENTS #4）：短信属外部依赖，必须有组件级指标（generic/aliyun/tencent
+                        // 三家共用 `component="sms"`，按渠道 kind 无法区分结局，故只区分 outcome）
+                        let sms_started = std::time::Instant::now();
                         let gateway_id =
                             provider.send(&cfg, to_addr, content).await.map_err(|e| {
+                                crate::observability::metrics::MetricsRegistry::global()
+                                    .record_outbound(
+                                        "sms",
+                                        "error",
+                                        sms_started.elapsed().as_secs_f64(),
+                                    );
                                 tracing::error!(
                                     "短信投递失败渠道={} to={}: {}",
                                     channel.channel_code,
@@ -1103,6 +1113,11 @@ impl SysMsgService {
                                 );
                                 ServiceError::internal(&crate::tr!("error.msg.sms_send_failed"))
                             })?;
+                        crate::observability::metrics::MetricsRegistry::global().record_outbound(
+                            "sms",
+                            "ok",
+                            sms_started.elapsed().as_secs_f64(),
+                        );
                         tracing::info!(
                             "短信投递受理成功渠道={} to={} 网关回执={}",
                             channel.channel_code,
@@ -1133,6 +1148,7 @@ impl SysMsgService {
                                 })?;
                         let params: serde_json::Value =
                             serde_json::from_str(&ctx.params_json).unwrap_or(serde_json::json!({}));
+                        let cloud_started = std::time::Instant::now();
                         let result = match kind {
                             crate::service::sms_provider::SmsProviderKind::Aliyun => {
                                 crate::service::sms_provider::AliyunSmsProvider::new()
@@ -1147,6 +1163,12 @@ impl SysMsgService {
                         };
                         match result {
                             Ok(receipt) => {
+                                crate::observability::metrics::MetricsRegistry::global()
+                                    .record_outbound(
+                                        "sms",
+                                        "ok",
+                                        cloud_started.elapsed().as_secs_f64(),
+                                    );
                                 tracing::info!(
                                     "云厂商短信受理成功渠道={} provider={:?} to={} code={} 回执={}",
                                     channel.channel_code,
@@ -1157,6 +1179,12 @@ impl SysMsgService {
                                 );
                             }
                             Err(e) => {
+                                crate::observability::metrics::MetricsRegistry::global()
+                                    .record_outbound(
+                                        "sms",
+                                        "error",
+                                        cloud_started.elapsed().as_secs_f64(),
+                                    );
                                 tracing::error!(
                                     "云厂商短信投递失败渠道={} to={}: {}",
                                     channel.channel_code,
@@ -1212,6 +1240,8 @@ impl SysMsgService {
                             );
                             ServiceError::bad_request(&crate::tr!("error.msg.robot_config_invalid"))
                         })?;
+                // b72（AGENTS #4）：IM 群机器人属外部 HTTP 依赖，同样纳入组件级指标
+                let robot_started = std::time::Instant::now();
                 let result = if channel.channel_type == "wecom_robot" {
                     crate::service::im_robot_provider::WeComRobotProvider::new()
                         .send(&robot_cfg, content)
@@ -1223,6 +1253,11 @@ impl SysMsgService {
                 };
                 match result {
                     Ok(()) => {
+                        crate::observability::metrics::MetricsRegistry::global().record_outbound(
+                            "im_robot",
+                            "ok",
+                            robot_started.elapsed().as_secs_f64(),
+                        );
                         tracing::info!(
                             "IM 机器人投递成功渠道={} type={}",
                             channel.channel_code,
@@ -1231,6 +1266,11 @@ impl SysMsgService {
                         Ok(())
                     }
                     Err(e) => {
+                        crate::observability::metrics::MetricsRegistry::global().record_outbound(
+                            "im_robot",
+                            "error",
+                            robot_started.elapsed().as_secs_f64(),
+                        );
                         tracing::error!(
                             "IM 机器人投递失败渠道={} type={}: {}",
                             channel.channel_code,
@@ -1244,7 +1284,8 @@ impl SysMsgService {
                 }
             }
             _ => Err(ServiceError::bad_request(&crate::tr!(
-                "error.msg.channel_type_invalid"
+                "error.msg.channel_type_invalid",
+                channel_type = channel.channel_type.as_str()
             ))),
         }
     }
@@ -1460,7 +1501,8 @@ impl SysMsgService {
         Ok(processed)
     }
 
-    /// 将指定 log_id 置为待重试状态（前端「触发重试」按钮）
+    /// 把指定 log_id 交回重试队列（前端「标记待重试」按钮）：
+    /// 仅失败终态行生效，成功行由仓储层的 `status='1'` 过滤跳过（防重复投递）。
     pub async fn mark_pending_retry(
         &self,
         log_ids: &[i64],

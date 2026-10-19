@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000010_tenant_package_features.rs
+// stepby-axum/migration/src/migrations/m20260926_000010_tenant_package_features.rs
 //! 租户套餐能力位（Feature Flags）列：三层开关的**中间层**落地。
 //!
 //! 对应项目定位「大而全 + 用户可选可配置」的落地准则 ②：

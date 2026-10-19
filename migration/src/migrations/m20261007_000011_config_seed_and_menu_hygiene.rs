@@ -57,12 +57,7 @@ const UPLOAD_KEYS: &[(&str, &str)] = &[
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let backend = manager.get_connection().get_database_backend();
-        let now = match backend {
-            sea_orm::DatabaseBackend::Sqlite => {
-                format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-            }
-            _ => "NOW()".to_string(),
-        };
+        let now = crate::seed_now_expr();
 
         // 1. sys.upload.* 八键（治理列 = Coverage::Locked 三元组，对齐 governance 注册表）
         for (key, name) in UPLOAD_KEYS {

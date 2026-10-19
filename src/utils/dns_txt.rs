@@ -61,11 +61,11 @@ pub enum DnsError {
 /// 逐台解析器尝试，每台超时均为 `timeout`；NXDOMAIN 视为"无记录"返回空列表（不算失败）。
 /// 全部解析器失败则返回最后一次错误。
 pub async fn lookup_txt(name: &str, timeout: Duration) -> Result<Vec<String>, DnsError> {
-    let resolvers = resolver_list();
+    let resolvers = resolver_cache();
     let id = rand::random::<u16>();
     let query = build_query(name, id);
     let mut last_err: Option<DnsError> = None;
-    for resolver in &resolvers {
+    for resolver in resolvers {
         match lookup_one(resolver, &query, id, timeout).await {
             Ok(values) => return Ok(values),
             Err(e) => {
@@ -280,6 +280,11 @@ async fn resolve_addr(resolver: &str) -> Result<SocketAddr, DnsError> {
 }
 
 /// 解析器列表（环境变量 → /etc/resolv.conf → 公共兜底）
+///
+/// b72：原实现在**每次** `lookup_txt` 里做一次同步 `read_to_string`——`lookup_txt` 是
+/// `async fn`，那会在 Tokio worker 上阻塞（虽然文件很小，但形态错误且重复）。
+/// 环境变量与 `/etc/resolv.conf` 在进程生命周期内都不会热改（改环境需重启），
+/// 故提为 `LazyLock` 一次求值；首次 DNS 查询承担该次 IO，之后零成本。
 fn resolver_list() -> Vec<String> {
     if let Ok(raw) = std::env::var("TENANT_DNS_RESOLVERS") {
         let list: Vec<String> = raw.split(',').filter_map(normalize_resolver).collect();
@@ -294,6 +299,12 @@ fn resolver_list() -> Vec<String> {
         return from_conf;
     }
     DEFAULT_RESOLVERS.iter().map(|s| s.to_string()).collect()
+}
+
+/// [`resolver_list`] 的进程级缓存入口（一次求值，见该函数的 b72 说明）
+fn resolver_cache() -> &'static [String] {
+    static RESOLVERS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(resolver_list);
+    &RESOLVERS
 }
 
 /// 规范化单个解析器条目：裸 IP 补默认端口 53，带端口原样保留

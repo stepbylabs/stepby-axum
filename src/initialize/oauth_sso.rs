@@ -632,7 +632,11 @@ pub(crate) async fn ensure_sso_rate_limit_tiers(db: &DatabaseConnection) -> anyh
         if exists {
             continue;
         }
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        // 落库时间必须走 UTC 口径（`now_naive()`），不得用本机挂钟：
+        // 批七十四 B1 实测本行原为 `chrono::Local::now()` ⇒ 同一库内 SSO 限流档的
+        // create_time 比运行期写入的其余行快 8 小时，`db_state_audit` 的"未来时间"
+        // 检查看不到它（该检查仅在 UTC+ 时区暴露问题，见台账 §3.2-3 负偏移盲区）。
+        let now = crate::common::datetime::now_naive().format("%Y-%m-%d %H:%M:%S");
         let insert_sql = format!(
             "INSERT INTO sys_rate_limit (route_pattern, capacity, refill_per_second, enabled, description, create_by, create_time, update_by, update_time) \
              VALUES ('{pattern}', {capacity}, {refill}, TRUE, '{description}', 'admin', '{now}', 'admin', '{now}')"

@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260928_000004_optimize_menu_structure.rs
+// stepby-axum/migration/src/migrations/m20260928_000004_optimize_menu_structure.rs
 //! 菜单信息架构优化（用户实测反馈：目录结构混乱 / icon 语义重复 / 排序冲突）。
 //!
 //! 三类修正（全部幂等，可重复执行）：

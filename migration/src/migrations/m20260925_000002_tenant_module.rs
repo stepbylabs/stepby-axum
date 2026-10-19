@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260925_000002_tenant_module.rs
+// stepby-axum/migration/src/migrations/m20260925_000002_tenant_module.rs
 //! 多租户 Phase 2（立项实施）——租户管理模块菜单。
 //!
 //! 菜单：3700 段全新号（见 menu-id-registry.md：新增大模块 3700 起步进 100）。
@@ -31,13 +31,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT

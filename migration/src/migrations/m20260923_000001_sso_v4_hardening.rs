@@ -1,5 +1,8 @@
-// stepby-axum/migration/src/m20260923_000001_sso_v4_hardening.rs
-//! SSO v4 安全加固迁移（对应 docs/optimization/topic-sso-multitenant-v4-final-2026-09-23.md）
+// stepby-axum/migration/src/migrations/m20260923_000001_sso_v4_hardening.rs
+//! SSO v4 安全加固迁移
+//!
+//! 方案与整改台账：docs/optimization/topic-multitenant-sso-audit-2026-09-23.md 与
+//! docs/optimization/all-topics-open-items-2026-09-26.md（原 v4 终稿正文已不在库内，不得凭记忆复述）
 //!
 //! 1. sys_oauth_client：
 //!    - 新增 `update_by`（审计：最后修改人，v4-R7）

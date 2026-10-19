@@ -26,70 +26,74 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let now = match manager.get_connection().get_database_backend() {
-            sea_orm::DatabaseBackend::MySql => "NOW()",
-            _ => "CURRENT_TIMESTAMP",
-        };
+        let now = crate::seed_now_expr();
 
-        manager
-            .create_table(
-                Table::create()
-                    .table(Alias::new("sys_data_rule"))
-                    .col(
-                        ColumnDef::new(Alias::new("rule_id"))
-                            .big_integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(Alias::new("rule_name"))
-                            .string_len(64)
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Alias::new("table_name"))
-                            .string_len(64)
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Alias::new("field_name"))
-                            .string_len(64)
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(Alias::new("op")).string_len(8).not_null())
-                    .col(
-                        ColumnDef::new(Alias::new("value_type"))
-                            .string_len(24)
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(Alias::new("rule_value")).string_len(255))
-                    .col(
-                        ColumnDef::new(Alias::new("status"))
-                            .char_len(1)
-                            .not_null()
-                            .default("0"),
-                    )
-                    .col(
-                        ColumnDef::new(Alias::new("del_flag"))
-                            .char_len(1)
-                            .not_null()
-                            .default("0"),
-                    )
-                    .col(
-                        ColumnDef::new(Alias::new("tenant_id"))
-                            .big_integer()
-                            .not_null()
-                            .default(0),
-                    )
-                    .col(ColumnDef::new(Alias::new("create_by")).string_len(64))
-                    .col(ColumnDef::new(Alias::new("create_time")).date_time())
-                    .col(ColumnDef::new(Alias::new("update_by")).string_len(64))
-                    .col(ColumnDef::new(Alias::new("update_time")).date_time())
-                    .col(ColumnDef::new(Alias::new("remark")).string_len(255))
-                    .to_owned(),
-            )
-            .await?;
+        // 存量库兜底（initialize 的数据权限域）会先把表建出来但不登记 seaql_migrations
+        // 版本 ⇒ 无守卫的 create_table 在真正 Migrator::up 时以
+        // `table "sys_data_rule" already exists` 硬失败（2026-10-18 存量库 98/121 处实测）。
+        // 口径同 m20260926_000009 的 `manager.has_table(...)`。
+        if !manager.has_table("sys_data_rule").await? {
+            manager
+                .create_table(
+                    Table::create()
+                        .table(Alias::new("sys_data_rule"))
+                        .col(
+                            ColumnDef::new(Alias::new("rule_id"))
+                                .big_integer()
+                                .not_null()
+                                .auto_increment()
+                                .primary_key(),
+                        )
+                        .col(
+                            ColumnDef::new(Alias::new("rule_name"))
+                                .string_len(64)
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(Alias::new("table_name"))
+                                .string_len(64)
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(Alias::new("field_name"))
+                                .string_len(64)
+                                .not_null(),
+                        )
+                        .col(ColumnDef::new(Alias::new("op")).string_len(8).not_null())
+                        .col(
+                            ColumnDef::new(Alias::new("value_type"))
+                                .string_len(24)
+                                .not_null(),
+                        )
+                        .col(ColumnDef::new(Alias::new("rule_value")).string_len(255))
+                        .col(
+                            ColumnDef::new(Alias::new("status"))
+                                .char_len(1)
+                                .not_null()
+                                .default("0"),
+                        )
+                        .col(
+                            ColumnDef::new(Alias::new("del_flag"))
+                                .char_len(1)
+                                .not_null()
+                                .default("0"),
+                        )
+                        .col(
+                            ColumnDef::new(Alias::new("tenant_id"))
+                                .big_integer()
+                                .not_null()
+                                .default(0),
+                        )
+                        .col(ColumnDef::new(Alias::new("create_by")).string_len(64))
+                        .col(ColumnDef::new(Alias::new("create_time")).date_time())
+                        .col(ColumnDef::new(Alias::new("update_by")).string_len(64))
+                        .col(ColumnDef::new(Alias::new("update_time")).date_time())
+                        .col(ColumnDef::new(Alias::new("remark")).string_len(255))
+                        .to_owned(),
+                )
+                .await?;
+        }
+        // 索引放在守卫**外面**：兜底可能建了表却没建索引，索引仍需补齐（幂等由版本机制保证）
         manager
             .create_index(
                 Index::create()
@@ -101,28 +105,30 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_table(
-                Table::create()
-                    .table(Alias::new("sys_role_data_rule"))
-                    .col(
-                        ColumnDef::new(Alias::new("role_id"))
-                            .big_integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Alias::new("rule_id"))
-                            .big_integer()
-                            .not_null(),
-                    )
-                    .primary_key(
-                        Index::create()
-                            .col(Alias::new("role_id"))
-                            .col(Alias::new("rule_id")),
-                    )
-                    .to_owned(),
-            )
-            .await?;
+        if !manager.has_table("sys_role_data_rule").await? {
+            manager
+                .create_table(
+                    Table::create()
+                        .table(Alias::new("sys_role_data_rule"))
+                        .col(
+                            ColumnDef::new(Alias::new("role_id"))
+                                .big_integer()
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(Alias::new("rule_id"))
+                                .big_integer()
+                                .not_null(),
+                        )
+                        .primary_key(
+                            Index::create()
+                                .col(Alias::new("role_id"))
+                                .col(Alias::new("rule_id")),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
 
         // 菜单：C 页面 + 三个 F 按钮（perms 与 P1 契约测试口径一致）
         let menus_sql = format!(

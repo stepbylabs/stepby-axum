@@ -440,6 +440,9 @@ impl IpLocationService {
             .user_agent("stepby-backend/0.1")
             .build()?;
 
+        // b74（AGENTS B.4）：两家镜像是**不同故障面**（P3TERX 为公共镜像、MaxMind 需账号凭据），
+        // 分开打标签；本函数有 `?`/`bail!` 多条出口 ⇒ RAII 守卫。
+        let mut outbound = crate::observability::metrics::OutboundGuard::start("ip_geo:p3terx");
         let response = client
             .get(P3TERX_URL)
             .send()
@@ -461,6 +464,7 @@ impl IpLocationService {
                 bytes.len()
             );
         }
+        outbound.succeeded();
 
         let sha256 = calculate_sha256(&bytes);
         tracing::info!("P3TERX 下载完成: {} bytes, SHA256={}", bytes.len(), sha256);
@@ -484,6 +488,10 @@ impl IpLocationService {
             .user_agent("stepby-backend/0.1")
             .build()?;
 
+        // b74（AGENTS B.4）：MaxMind 与 P3TERX 是不同故障面，各自成桶（见上处注释）。
+        // `succeeded()` 打在**取到响应体之后、解压之前**：解压失败是本地格式问题，
+        // 记进出站指标会把"归档解析坏了"冒充"上游挂了"。
+        let mut outbound = crate::observability::metrics::OutboundGuard::start("ip_geo:maxmind");
         let response = client
             .get(MAXMIND_URL)
             .basic_auth(account_id, Some(license_key))
@@ -505,6 +513,7 @@ impl IpLocationService {
             .bytes()
             .await
             .map_err(|e| anyhow::anyhow!("failed to read MaxMind response body: {}", e))?;
+        outbound.succeeded();
 
         // 解压 tar.gz 并提取 .mmdb 文件
         let mmdb_bytes = extract_mmdb_from_tar_gz(&bytes)

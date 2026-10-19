@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260727_000001_add_workbench_shortcuts_help_menus.rs
+// stepby-axum/migration/src/migrations/m20260727_000001_add_workbench_shortcuts_help_menus.rs
 //! 第十二次迁移：新增"个人工作台"、"快捷键中心"、"帮助中心"三个低成本高价值菜单
 //!
 //! 背景：
@@ -51,14 +51,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-/// 当前时间表达式（跨数据库兼容）
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT

@@ -25,6 +25,13 @@ const MIDNIGHT: chrono::NaiveTime = chrono::NaiveTime::MIN;
 pub struct DeleteWindowStats {
     /// 窗口内全行数（含 chain_hash 为 NULL 的行）
     pub total_rows: i64,
+    /// 窗口内**参与链**的行数（chain_hash 非 NULL）
+    ///
+    /// 用途：与 [`SysOperLogRepository::count_chain_rows_in_range`] 比对即知"窗口首尾链行之间是否
+    /// 夹着不会被删的幸存链行"——相等 ⇒ 删除集天然连续（单锚点成立，平台保留期清理
+    /// 的典型形态）；不等 ⇒ 必须逐段登记（租户维度窗口，批七十四 B5 同族修复）。
+    /// 用两次 COUNT 而不是先加载行来做这个判定，热路径（平台清理几十万行）零额外内存。
+    pub chained_rows: i64,
     /// 窗口内首个链行 oper_id（None = 段内无链行，删除不影响链）
     pub first_chain_oper_id: Option<i64>,
     /// 窗口内最后一个链行 oper_id
@@ -147,43 +154,6 @@ impl SysOperLogRepository {
         Ok((rows, total))
     }
 
-    /// 批量删除操作日志（物理删除）
-    ///
-    /// 多租户：`tenant_scope = Some(tid)` → 仅删除本租户日志与目标资源属于本租户的代管日志
-    /// （与 `find_page_filtered` 可见性一致）；`None`（平台）→ 不过滤。
-    pub async fn delete_by_ids(
-        &self,
-        oper_ids: Vec<i64>,
-        tenant_scope: Option<i64>,
-    ) -> Result<DeleteResult, DbErr> {
-        let mut query = SysOperLog::delete_many().filter(Column::OperId.is_in(oper_ids));
-        if let Some(t) = tenant_scope {
-            query = query.filter(
-                Condition::any()
-                    .add(Column::TenantId.eq(t))
-                    .add(Column::TargetTenantId.eq(t)),
-            );
-        }
-        query.exec(self.base.db()).await
-    }
-
-    /// 删除 N 天前的操作日志（按 oper_time 过滤，物理删除）
-    ///
-    /// 用于保留期清理：仅删除 oper_time < (now - days) 的记录，
-    /// 保留最近 N 天日志用于审计。
-    ///
-    /// 批次十九：条件构造收敛到 [`Self::cutoff_condition`]（删除与锚点登记共用同一
-    /// 条件），执行体收敛到 [`Self::delete_by_condition`]；事务内锚点+删除编排见
-    /// service `register_anchor_and_delete`。
-    pub async fn delete_older_than(
-        &self,
-        cutoff: NaiveDateTime,
-        tenant_scope: Option<i64>,
-    ) -> Result<DeleteResult, DbErr> {
-        let cond = Self::cutoff_condition(cutoff, tenant_scope);
-        self.delete_by_condition(self.base.db(), cond).await
-    }
-
     /// 构造"早于 cutoff"删除条件（含租户过滤语义：本租户 + 代管目标为本租户）
     pub fn cutoff_condition(cutoff: NaiveDateTime, tenant_scope: Option<i64>) -> Condition {
         let mut cond = Condition::all().add(Column::OperTime.lt(cutoff));
@@ -229,7 +199,7 @@ impl SysOperLogRepository {
         SysOperLog::delete_many().filter(cond).exec(conn).await
     }
 
-    /// 被删窗口统计：全行数 + 段内链行（chain_hash 非 NULL）边界
+    /// 被删窗口统计：全行数 + 链行数 + 段内链行（chain_hash 非 NULL）边界
     ///
     /// 锚点登记前置查询——verify 只关心链行序列；NULL 行删除不影响链，
     /// 但计入 `total_rows` 统计口径。
@@ -240,6 +210,12 @@ impl SysOperLogRepository {
     ) -> Result<DeleteWindowStats, DbErr> {
         let total_rows_u64 = SysOperLog::find().filter(cond.clone()).count(conn).await?;
         let total_rows = i64::try_from(total_rows_u64).unwrap_or(i64::MAX);
+        let chained_rows_u64 = SysOperLog::find()
+            .filter(cond.clone())
+            .filter(Column::ChainHash.is_not_null())
+            .count(conn)
+            .await?;
+        let chained_rows = i64::try_from(chained_rows_u64).unwrap_or(i64::MAX);
         let first_chain = SysOperLog::find()
             .filter(cond.clone())
             .filter(Column::ChainHash.is_not_null())
@@ -261,10 +237,51 @@ impl SysOperLogRepository {
             .await?;
         Ok(DeleteWindowStats {
             total_rows,
+            chained_rows,
             first_chain_oper_id: first_chain,
             last_chain_oper_id: last_chain.as_ref().map(|(id, _)| *id),
             last_chain_hash: last_chain.map(|(_, h)| h),
         })
+    }
+
+    /// 链行 oper_id 区间 `[min_id, max_id]` 内的链行数（**全局**，含不会被删的幸存行）
+    ///
+    /// 与 [`Self::delete_window_stats`] 的 `chained_rows` 比对即判定"删除集是否天然连续"，
+    /// 不等价于加载行——平台保留期清理一次可涉及几十万行，热路径不得为判定读全量。
+    pub async fn count_chain_rows_in_range<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        min_id: i64,
+        max_id: i64,
+    ) -> Result<i64, DbErr> {
+        let n = SysOperLog::find()
+            .filter(Column::OperId.gte(min_id))
+            .filter(Column::OperId.lte(max_id))
+            .filter(Column::ChainHash.is_not_null())
+            .count(conn)
+            .await?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// 窗口（cond，已含租户谓词）内**待删链行** `(oper_id, chain_hash)` 升序
+    ///
+    /// 仅在"区间内夹着幸存链行"（`chained_rows != count_chain_rows_in_range`）时才需要
+    /// 加载全量做逐段登记；租户维度窗口天然远小于全库。
+    pub async fn find_chained_rows_in_window<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        cond: Condition,
+    ) -> Result<Vec<(i64, String)>, DbErr> {
+        SysOperLog::find()
+            .filter(cond)
+            .filter(Column::ChainHash.is_not_null())
+            .order_by_asc(Column::OperId)
+            .select_only()
+            .column(Column::OperId)
+            .column(Column::ChainHash)
+            .into_tuple::<(i64, String)>()
+            .all(conn)
+            .await
     }
 
     /// 分批拉取被删窗口内的全行（归档导出用，按 oper_id 升序）
@@ -288,6 +305,12 @@ impl SysOperLogRepository {
     ///
     /// 批量删除的散段切分基准（批次十九收尾）：锚点段按"链行序相邻且中间无幸存
     /// 链行"切分——范围查询取全集后内存切分，避免逐段查询。
+    ///
+    /// **刻意不带租户过滤**（与 `find_prev_chain_hash` / `find_chained_ascending` 同类，
+    /// 已按类登记在 `scripts/tenant-audit-allow.json` 的 R1 白名单，由 R9 调用点锁补偿）：
+    /// 哈希链跨租户全局串联，段边界必须看见他租幸存行，否则会把"中间隔着他租链行"
+    /// 误判成相邻段。租户语义由**调用方**保证——`min_id/max_id` 必须由授权集
+    /// （[`Self::filter_ids_in_scope`]）导出，不得直接取调用方请求集（批七十四 B5）。
     pub async fn find_chain_rows_in_range<C: ConnectionTrait>(
         &self,
         conn: &C,
@@ -307,37 +330,70 @@ impl SysOperLogRepository {
             .await
     }
 
+    /// 本租户可见性谓词（含"平台代管目标为本租户"的行）；`None` = 平台 ⇒ 不加过滤。
+    ///
+    /// 单独成函数并被 [`Self::apply_tenant_scope`] 复用，是因为批量删除路径需要
+    /// **两处使用同一个谓词**：先筛"本次真正可删的 id"（决定锚点段），再执行 DELETE。
+    /// 若两处各写一遍，一旦漂移就会出现"锚点按请求全集登记、删除按租户范围执行"的
+    /// 跨租户写副作用（批七十四 B5 实测缺陷，见 service `delete_oper_logs`）。
+    fn tenant_scope_condition(tenant_scope: Option<i64>) -> Option<Condition> {
+        tenant_scope.map(|t| {
+            Condition::any()
+                .add(Column::TenantId.eq(t))
+                .add(Column::TargetTenantId.eq(t))
+        })
+    }
+
+    /// 把租户谓词挂到已有条件上（`None` 时原样返回，避免拼出空括号）。
+    fn apply_tenant_scope(cond: Condition, tenant_scope: Option<i64>) -> Condition {
+        match Self::tenant_scope_condition(tenant_scope) {
+            Some(c) => cond.add(c),
+            None => cond,
+        }
+    }
+
+    /// 返回 `oper_ids` 中**当前操作者确实可删**的那一部分。
+    ///
+    /// 存在理由：链感知批量删除需要先在**全链行范围**上切连续段（链跨租户全局串联，
+    /// 段边界必须看见幸存行），但锚点只能为"真的要删掉的行"登记。本方法把"请求集"
+    /// 收敛为"授权集"，使锚点段与 DELETE 的影响面逐条一致。
+    pub async fn filter_ids_in_scope<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        oper_ids: &[i64],
+        tenant_scope: Option<i64>,
+    ) -> Result<Vec<i64>, DbErr> {
+        if oper_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cond = Self::apply_tenant_scope(
+            Condition::all().add(Column::OperId.is_in(oper_ids.iter().copied())),
+            tenant_scope,
+        );
+        SysOperLog::find()
+            .filter(cond)
+            .select_only()
+            .column(Column::OperId)
+            .into_tuple::<i64>()
+            .all(conn)
+            .await
+    }
+
     /// 按 oper_id 集合物理删除（事务连接版；锚点编排见 service delete_oper_logs）
+    ///
+    /// 租户谓词与 [`Self::filter_ids_in_scope`] **同源**（同一 `apply_tenant_scope`），
+    /// 保证"为哪些行登记锚点"与"删掉哪些行"不可能不一致。
     pub async fn delete_by_ids_conn<C: ConnectionTrait>(
         &self,
         conn: &C,
         oper_ids: &[i64],
         tenant_scope: Option<i64>,
     ) -> Result<DeleteResult, DbErr> {
-        let mut cond = Condition::all().add(Column::OperId.is_in(oper_ids.iter().copied()));
-        if let Some(t) = tenant_scope {
-            cond = cond.add(
-                Condition::any()
-                    .add(Column::TenantId.eq(t))
-                    .add(Column::TargetTenantId.eq(t)),
-            );
-        }
+        let cond = Self::apply_tenant_scope(
+            Condition::all().add(Column::OperId.is_in(oper_ids.iter().copied())),
+            tenant_scope,
+        );
         SysOperLog::delete_many().filter(cond).exec(conn).await
-    }
-
-    /// 按时间范围删除操作日志（物理删除 `[begin, end]` 区间的日志，边界含端点）
-    ///
-    /// `begin` / `end` 均可为空：为空表示该侧不设边界（例如仅清理早于 `end` 的日志）。
-    /// 供操作日志「按时间范围清理」接口（`DELETE /monitor/operlog/clean?params[beginTime]=&params[endTime]=`）使用。
-    /// 批次十九：条件收敛到 [`Self::range_condition`]，事务内锚点编排见 service。
-    pub async fn delete_by_time_range(
-        &self,
-        begin: Option<NaiveDateTime>,
-        end: Option<NaiveDateTime>,
-        tenant_scope: Option<i64>,
-    ) -> Result<DeleteResult, DbErr> {
-        let cond = Self::range_condition(begin, end, tenant_scope);
-        self.delete_by_condition(self.base.db(), cond).await
     }
 
     /// 插入操作日志

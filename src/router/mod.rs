@@ -29,12 +29,20 @@
 //                                            menu/dict 侧的 treeselect/optionselect 前端在用，不在此列）
 // ③ 后端编排能力预留（管理/运维脚本可用，UI 暂无入口）：
 //   - POST /system/msg/send                     （直接发送，UI 走模板发送面）
-//   - POST /system/msg/log/markPending/{logIds} （标记待重试）
-//   - POST /system/msg/log/retryPending/{batch} （待重试批次批量重试）
+//   - POST /system/msg/log/retryPending/{batch} （待重试批次批量重试；调度器每轮
+//                                                已自动执行同一 service.retry_pending，
+//                                                UI 无"批次"概念可选）
 //   - POST /system/uploadConfig/switchBackend   （存储后端切换编排）
+//
+// 批七十六出清单（三条从 ③ 转为前端在用，注册处注释同步改写）：
 //   - POST /system/flow/task/{taskId}/countersign-del
-//                                               （减签：加签已有 UI，减签暂走 API）
-//   - POST /report/dataset/{datasetId}/sql      （SQL 预检，编辑专用）
+//                                               （审批页会签节点行「减签」按钮，
+//                                                 api/flow.ts countersignDelFlowTask）
+//   - POST /report/dataset/{datasetId}/sql      （数据集编辑对话框明文回填，
+//                                                 api/report.ts getDatasetSql）
+//   - POST /system/msg/log/markPending/{logIds} （发送记录页多选工具条「标记待重试」，
+//                                                 api/system/msg.ts markPendingSendLog；
+//                                                 同批修掉"无条件置 2"的重复投递缺陷）
 //
 // 处置纪律：后续批次若删除上述任一端点，必须同步清理 handler/service/docs.rs/
 // 集成测试/e2e 断言全链（参照 b70 死代码清理三层标准），并回写本清单与注册处注释。
@@ -105,7 +113,6 @@ use crate::middleware::spa_fallback_middleware;
 use crate::middleware::tenant_host_middleware;
 use crate::observability::monitoring_middleware;
 use crate::state::AppState;
-use axum::Json as AxumJson;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
@@ -135,6 +142,10 @@ const REQUEST_TIMEOUT_SECS: u64 = 120;
 ///   → DefaultBodyLimit → Compression（最内层），其后进入 api 路由的 tenant_host →
 ///   （protected 的 spa_fallback → auth → rate_limit → idempotency → permission → oper_log → response_cache）
 pub fn build_app(state: Arc<AppState>) -> Router {
+    // 进程启动打点（b72）：路由装配 = 进程启动路径（main 与集成测试 TestContext 都经过这里），
+    // `/metrics` 的 stepby_uptime_seconds 由此起算；旧实现等到首次抓取才计时 ⇒ 首抓恒 0。
+    crate::handler::health::mark_process_start();
+
     // 受鉴权保护的业务路由
     let protected = Router::new()
         .merge(auth_router::protected_auth_routes())
@@ -323,6 +334,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         tracing::info!("前端分离模式：未匹配路由返回 JSON 404（开发模式）");
     }
 
+    // `uri_length_guard` 要读 `[server].max_uri_bytes`，而 `state` 下一行就被 `with_state` 消费
+    let uri_state = Arc::clone(&state);
     let app = app.with_state(state);
 
     // 叠加全局中间件（顺序：后添加的先执行）
@@ -351,17 +364,19 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // Slowloris / 慢速攻击防护：限制单个请求处理总时长（REQUEST_TIMEOUT_SECS），
         // 超时则中断连接，防止慢速攻击耗尽连接池。
         // §5.55 收散点：408 补 JSON body——tower_http TimeoutLayer 只能返回裸状态码（API 限制），
-        // 改用 tower::timeout + HandleErrorLayer 组合生成与错误响应契约对齐的 JSON body
+        // 改用 tower::timeout + HandleErrorLayer 组合生成与错误响应契约对齐的 JSON body。
+        // 批七十五 B7：msg 改走 i18n 键（此前是**硬编码中文**，en 用户收到的 408 是中文——
+        // 与 C.8"错误契约统一"直接冲突）；body 形状收进 `common::response::transport_error`，
+        // 与 414/431 同源（HTTP 状态 == body.code，且刻意不经 map_status）。
+        // 层级可行性：locale 中间件写在本层**之外**（`.layer` 后添加的先执行），
+        // 故超时时 `crate::tr!` 已能吃到协商好的 locale。
         .layer(
             ServiceBuilder::new()
                 .layer(axum::error_handling::HandleErrorLayer::new(
                     |_: axum::BoxError| async {
-                        (
+                        crate::common::response::transport_error(
                             StatusCode::REQUEST_TIMEOUT,
-                            AxumJson(serde_json::json!({
-                                "code": 408,
-                                "msg": "请求超时，请稍后重试"
-                            })),
+                            crate::tr!("error.common.request_timeout"),
                         )
                     },
                 ))
@@ -373,6 +388,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // 注意：位于全局 layer，故 /health、/metrics 等公开端点同样被统计。
         .layer(axum::middleware::from_fn(monitoring_middleware))
         .layer(axum::middleware::from_fn(request_id_middleware))
+        // 请求行 / 请求头长度上限（批七十四 B2 起，批七十五 B7 扩到请求头）：挂在 locale
+        // **之内**（写在 locale 之前 ⇒ locale 已协商完，414/431 的 msg 是本地化的——这一条
+        // 由 `integration_tests::i18n_keys::middleware_rejection_messages_follow_negotiated_locale`
+        // 在真机上取证，不再只是注释），挂在 request_id **之外**（写在其后 ⇒ 被拒请求
+        // 不生成 trace_id）。后者是刻意取舍：这类请求本就是异常流量，且超长 URL 不应
+        // 被复制进任何链路标识；拒绝本身以 414/431 计入全局 HTTP 指标，可观测性不缺席。
+        // `DefaultBodyLimit` 只管请求体，管不到查询串，也管不到请求头。
+        .layer(axum::middleware::from_fn_with_state(
+            uri_state,
+            crate::middleware::uri_limit::uri_length_guard,
+        ))
         // locale 中间件（T-05）：Accept-Language → 协商 → task-local 注入（包裹全部内层，handler/AppError 均可读）
         .layer(axum::middleware::from_fn(locale_middleware))
         // 安全响应头中间件（最外层，确保所有响应都带安全头）
@@ -439,13 +465,15 @@ fn extract_cookie_token(headers: &axum::http::HeaderMap, name: &str) -> Option<S
 /// §5.55 收散点：原 L277-280 / L390-393 两份手写字面量收敛为本单一实现
 /// （此前属裸 json! 旁路、与 AppError 契约关系未声明；现文案与既有
 /// `error.common.not_found` 键对齐的语义一致，保持 404 专指"路径不存在"）。
-async fn api_not_found_fallback() -> impl axum::response::IntoResponse {
-    (
+///
+/// 批七十五 B7：改走 `common::response::transport_error` + i18n 键
+/// `error.common.route_not_found`。此前 msg 是**硬编码中文**，英文用户拿到的是
+/// "请求的资源不存在"——同一族缺陷（408/414/431/404 四个中间件级出口）在本批一次收齐，
+/// 由 `transport_error` 做成唯一形状、由 i18n 键查锁保证两语种都有文案。
+async fn api_not_found_fallback() -> axum::response::Response {
+    crate::common::response::transport_error(
         axum::http::StatusCode::NOT_FOUND,
-        axum::Json(serde_json::json!({
-            "code": 404,
-            "msg": "请求的资源不存在"
-        })),
+        crate::tr!("error.common.route_not_found"),
     )
 }
 

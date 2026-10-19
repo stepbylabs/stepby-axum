@@ -226,6 +226,53 @@ async fn test_chunk_upload_error_branches() {
         .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "缺片 complete 应 400: {v}");
 
+    // 3.5 越界分片序号（批七十五 B2）：闸门必须双侧
+    //     ①畸形入参 ⇒ 400 且 received **不涨**（否则越界序号会写盘并挤占计数，
+    //       使 merge 的"已收 N/M"判据永久无法满足，会话在 TTL 内不可完成）；
+    //     ②对照组 ⇒ 合法末片必须照常 200（只写①的话，"这个入口永远拒收"也能过）。
+    let (st, v) = send_multipart(
+        &ctx,
+        Method::POST,
+        "/common/upload/chunk/part",
+        chunk_part_body(boundary, &sid, 999, b"ZZZ"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "越界分片序号必须 400: {v}");
+    let msg = v["msg"].as_str().unwrap_or_default().to_string();
+    assert!(
+        !msg.contains("%{") && !msg.contains("error."),
+        "越界序号的错误文案必须已把占位符渲染成实际数字，实际: {msg}"
+    );
+    assert!(
+        msg.contains("999"),
+        "文案必须带上被拒绝的实际序号（排障可用性），实际: {msg}"
+    );
+    let (_, sv) = ctx
+        .send_raw(ctx.request(
+            Method::GET,
+            &format!("/common/upload/chunk/session/{sid}"),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        sv["data"]["received"].as_u64(),
+        Some(1),
+        "越界序号不得进入 received（会话仍只承认合法的 0 号片）: {sv}"
+    );
+    let (st, v) = send_multipart(
+        &ctx,
+        Method::POST,
+        "/common/upload/chunk/part",
+        chunk_part_body(boundary, &sid, 1, b"BBB"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "合法末片不得被闸门误伤: {v}");
+    assert_eq!(
+        v["data"]["complete"].as_bool(),
+        Some(true),
+        "收齐后 complete 标记必须为真: {v}"
+    );
+
     // 4. abort：清理后 session 查询 → 400（会话不存在）
     let (st, _) = ctx
         .send_raw(ctx.request(Method::DELETE, &format!("/common/upload/chunk/{sid}"), None))
@@ -303,6 +350,65 @@ async fn test_switch_backend_chain() {
     // 4. masked 回显生效档位（local）
     let v = ctx.get_json("/system/uploadConfig").await;
     assert_eq!(v["data"]["backendMode"], "local", "回显应为生效档位: {v}");
+
+    // 4b. 回显必须跟随**覆盖值**而不是出厂快照（b74 §一.6，C.7"显示 8、实际 4"同型缺陷）。
+    //     直接把 `sys.upload.backend` 写成 s3（绕开 fail-closed 的切换编排，模拟"已持久化
+    //     的覆盖档"），GET 必须报 s3；改回原值后必须报回 local。
+    //     改造前此处恒回显 startup_backend_mode ⇒ 这一支必然红。
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    // 嵌套 async fn（不是 async 闭包）：闭包返回借用 ctx 的 future 过不了类型检查，
+    // 同 b74 轮 24 终态锁里 `probe(db)` 的处理方式
+    async fn set_backend(ctx: &TestContext, val: &str) {
+        crate::entity::sys_config::Entity::update_many()
+            .col_expr(
+                crate::entity::sys_config::Column::ConfigValue,
+                sea_orm::sea_query::Expr::value(val),
+            )
+            .filter(crate::entity::sys_config::Column::ConfigKey.eq("sys.upload.backend"))
+            .exec(&ctx.state.db)
+            .await
+            .expect("写 sys.upload.backend 失败");
+        // 档位读的是 config 缓存 ⇒ 必须让缓存失效，否则测的是缓存而不是库
+        ctx.state
+            .config_service
+            .refresh_cache()
+            .await
+            .expect("刷新配置缓存失败");
+    }
+    let prev: Option<String> = {
+        let row = crate::entity::sys_config::Entity::find()
+            .filter(crate::entity::sys_config::Column::ConfigKey.eq("sys.upload.backend"))
+            .one(&ctx.state.db)
+            .await
+            .expect("读 sys.upload.backend 失败");
+        row.and_then(|r| r.config_value)
+    };
+    set_backend(&ctx, "s3").await;
+    let v = ctx.get_json("/system/uploadConfig").await;
+    assert_eq!(
+        v["data"]["backendMode"], "s3",
+        "回显必须跟随生效档位（改前恒回显出厂档 ⇒ 显示与行为分裂）: {v}"
+    );
+    match prev {
+        Some(old) => set_backend(&ctx, &old).await,
+        None => {
+            crate::entity::sys_config::Entity::delete_many()
+                .filter(crate::entity::sys_config::Column::ConfigKey.eq("sys.upload.backend"))
+                .exec(&ctx.state.db)
+                .await
+                .expect("清理测试写入失败");
+            ctx.state
+                .config_service
+                .refresh_cache()
+                .await
+                .expect("刷新缓存失败");
+        }
+    }
+    let v = ctx.get_json("/system/uploadConfig").await;
+    assert_eq!(
+        v["data"]["backendMode"], "local",
+        "恢复原值后回显应回到 local: {v}"
+    );
 
     // 5. 切档后上传链路仍通（热层 local 后端接管）
     let boundary = "it-switch-boundary";

@@ -327,14 +327,9 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3.5g 唯一域租户化模块失败: {}", e))?;
 
-        // 3.5h 多租户 Phase 3.5h 存量库兜底：租户角色菜单治理（一剔一补）——
-        // 剔除平台专属域名管理菜单；补齐 config/dict 的 add/edit/remove 自助按钮。
-        // 缺此兜底时：存量租户自建字典 / config 覆盖与自建键 403（链路断裂），
-        // 且租户侧残留"菜单可见但请求 403"的假入口（仅补缺失授权、幂等）。
-        ensure_tenant_role_menu_governance(&db)
-            .await
-            .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3.5h 租户角色菜单治理失败: {}", e))?;
-
+        // 3.5h 原为"租户角色菜单治理（一剔一补）"，**已下移到全部菜单兜底之后**
+        // （见 4.5j 之后）——收回必须晚于发放，否则被兜底洗回。理由与实证写在彼处。
+        //
         // 3.5i 存量库兜底：租户文件隔离前的**扁平**上传路径回填（幂等）——
         // 隔离前 `sys_user.avatar` 形如 `/uploads/avatar/{key}`（缺 {tid} 段），
         // 隔离后 `GET /uploads/*` 按 `{tid}/{kind}/{key}` 三段校验 → 段数不足直接 400，
@@ -470,6 +465,14 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化 SSO 限流分档失败: {}", e))?;
 
+        // 4.2a b72（AGENTS C.10）：敏感操作独立限流档位（改密/TOTP/WebAuthn/PAT AK 轮换/
+        //      secret 轮换/会话吊销/备份恢复/匿名化/批量导入等）。此前这些写操作只有
+        //      全局 `*`（100 突发 / 10·s⁻¹）兜底——那是"别打爆服务"的量级，不是
+        //      "别把凭据爆破成功"的量级。幂等：只补缺失 route_pattern，不覆盖管理员调过的值。
+        ensure_sensitive_rate_limit_tiers(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化敏感操作限流分档失败: {}", e))?;
+
         // 4.2b §5.17 启动期能力位授权收敛（幂等；**失败不阻断启动**）：
         //      平台层 `[features]` on→off（改配置重启）后，存量"曾经可授予"的角色菜单
         //      授权**无回收触发点**（收敛只在套餐变更时跑）——此处按有效能力集
@@ -477,6 +480,18 @@ impl AppInitializer {
         //      "菜单可见但请求 403"假入口的数据层残留（展示层由 getRouters
         //      `prune_capability_gated_menus` 兜底）。
         converge_tenant_grants_on_startup(&db, &store).await;
+
+        // 4.2c b73：收敛「卡在 running」的备份日志（幂等；**失败不阻断启动**）。
+        //      create_backup 先插 running 占位行、子进程结束后写终态；进程在子进程运行期间
+        //      被杀（发布重启 / OOM）⇒ 该行永久停在 running，备份页显示一个"永远在跑"的备份，
+        //      运维无从判断结局（dev 库实测 3 条，最早一条已挂 6 天）。阈值远大于子进程
+        //      超时（2×300s+60s），故不会误判本进程的合法在途任务；只改状态不删行，保留可追溯。
+        if let Err(e) = crate::service::SysBackupService::new(db.clone(), settings.clone())
+            .reconcile_interrupted_backups()
+            .await
+        {
+            tracing::warn!("启动期收敛中断备份日志失败（不阻断启动，下次启动重试）: {e}");
+        }
 
         // 4.3 v5-E6：运行期敏感凭据存量明文回填（幂等；CONFIG_ENC_KEY 未配置时跳过，
         //     与 id_token_secret 迁移期 fail-open 策略一致）
@@ -638,6 +653,25 @@ impl AppInitializer {
             .await
             .map_err(|e| anyhow::anyhow!("初始化报表看板兜底失败: {}", e))?;
 
+        // 4.5z 多租户 Phase 3.5h 存量库兜底：租户角色菜单治理（一剔一补）。
+        // 剔除平台专属菜单（域名管理 / 代码生成 / 缓存监控 / 备份 / 告警规则 …）；
+        // 补齐 config/dict 的 add/edit/remove 自助按钮。
+        // 缺此兜底时：存量租户自建字典 / config 覆盖与自建键 403（链路断裂），
+        // 且租户侧残留"菜单可见但请求 403"的假入口（仅补缺失授权、幂等）。
+        //
+        // **为什么必须位于全部 `ensure_*` 菜单兜底之后（批七十四 B3 结构修复）**：
+        // 本步 ① 是**收回**（`DELETE … role_id = 2 OR tenant_id <> 0`），而
+        // `ensure_alert_rule_tables`（发 `(2, 4110)`）、`ensure_archive_menus`、
+        // `ensure_role_field_perm_tables`、`ensure_report_board_tables` 等在其**原位置之后**
+        // 发放 `sys_role_menu`。留在原序（3.5h）即"先删后补"⇒ 平台专属菜单每次启动
+        // 都被兜底洗回 role 2（role 2 是新建租户管理员的菜单模板源），注册表形同虚设。
+        // 实证：登记 `monitor:alert:` 后按原序跑完整 initialize，4110 仍在 role 2。
+        // 收回类治理必须拥有**最终决定权**——这是顺序不变式，由
+        // `initialize::tests::governance_runs_after_all_menu_granting_fallbacks` 钉住。
+        ensure_tenant_role_menu_governance(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("初始化多租户 Phase 3.5h 租户角色菜单治理失败: {}", e))?;
+
         // 5. 提前创建 IP 归属地查询器和 IP 库管理 Service
         // 原因：scheduler 需要在闭包内调用 IpLocationService::update_now，
         // 而 IpLocator 又需要被 AppState 共享，故提前创建后同时注入 scheduler 和 AppState
@@ -718,6 +752,7 @@ mod helpers;
 mod ledger;
 mod menu;
 mod oauth_sso;
+mod rate_limit;
 // pub(crate)：shared_store::local_store 测试复用生产同源建表（ensure_shared_store_tables），
 // 保证测试库 DDL 与启动兜底永不漂移（单一事实源）。
 pub(crate) mod schema;
@@ -732,6 +767,7 @@ pub(crate) use helpers::*;
 pub(crate) use ledger::*;
 pub(crate) use menu::*;
 pub(crate) use oauth_sso::*;
+pub(crate) use rate_limit::*;
 pub(crate) use schema::*;
 pub(crate) use scim::*;
 pub(crate) use tenant::*;

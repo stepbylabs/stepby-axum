@@ -113,10 +113,7 @@ pub async fn init_log_archive_anchor<C: ConnectionTrait>(db: &C) -> Result<(), D
     };
     db.execute_unprepared(ddl).await?;
 
-    let now = match backend {
-        sea_orm::DatabaseBackend::MySql => "NOW()",
-        _ => "CURRENT_TIMESTAMP",
-    };
+    let now = crate::seed_now_expr();
     let menus_sql = format!(
         "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
         (9180, '审计归档下载', 500, 4, '#', '', '', '', '1', '0', 'F', '0', '0', 'monitor:operlogArchive:download', '#', 'admin', {now}, '链感知保留：归档对象下载（平台专属，monitor:operlogArchive: 前缀）', '0'), \

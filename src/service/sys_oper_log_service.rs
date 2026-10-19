@@ -34,7 +34,7 @@ use crate::entity::sys_oper_log::{
 use crate::repository::base::BaseRepository;
 use crate::repository::sys_oper_log::SysOperLogRepository;
 use crate::service::oper_log_chain_seed::{
-    ChainAnchorSnapshot, GENESIS_SEED, PrevSeed, resolve_prev_seed,
+    ChainAnchorSnapshot, GENESIS_SEED, PrevSeed, resolve_prev_seed, segment_chain_runs,
 };
 use crate::shared_store::SharedStore;
 use crate::utils::retry::{RetryPolicy, retry_async};
@@ -449,6 +449,12 @@ impl SysOperLogService {
     /// e2e 批量删除用例实测制造断链 #48021）。编排：待删链行按"链行序相邻且中间
     /// 无幸存链行"切连续段，**每段一个锚点**（散段删除需多锚点：单锚点会让不同
     /// 幸存行的种子判定错配），事务内先锚点们后删除原子提交。
+    ///
+    /// **不变式（批七十四 B5）**：锚点段只能为"本次确实会被 DELETE 影响"的行登记。
+    /// 段切分需要在**全链行范围**上看见幸存行（链跨租户全局串联，边界判定必须完整），
+    /// 但待删集合必须先经 `filter_ids_in_scope` 收敛到授权集——否则租户传他租 id 时
+    /// 删除 0 行却仍写入"已删除"锚点，等于伪造他租日志的防篡改状态。
+    /// 回归锁见 `integration_tests::sys_oper_log::it_opl_delete_anchor_follows_tenant_scope`。
     pub async fn delete_oper_logs(
         &self,
         mut oper_ids: Vec<i64>,
@@ -460,6 +466,23 @@ impl SysOperLogService {
         oper_ids.sort_unstable();
         oper_ids.dedup();
         let db = self.base_db().clone();
+
+        // **先收敛为"授权集"再切锚点段**（批七十四 B5 修的真缺陷）：
+        // 原实现直接用调用方传入的 oper_ids 求 min/max、切段并登记锚点，而 DELETE
+        // 却带 tenant_scope 过滤 ⇒ 租户操作者传入**他租的 oper_id** 时，删除被正确挡住
+        // （0 行），锚点却照样按请求集 INSERT。锚点是 verify-chain 补缺口的种子，
+        // 于是"删不掉任何行"反而**伪造了他租日志的防篡改状态**（跨租户写副作用 +
+        // 审计完整性可被低权者污染）。
+        // 谓词与 delete_by_ids_conn 同源（同一 apply_tenant_scope）⇒ 两者影响面不可能漂移。
+        let oper_ids = self
+            .oper_log_repo
+            .filter_ids_in_scope(&db, &oper_ids, tenant_scope)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("可删集合筛选失败: {}", e)))?;
+        if oper_ids.is_empty() {
+            // 请求的 id 全不在本租户范围内：既不删、也**不登记任何锚点**
+            return Ok(());
+        }
         let (min_id, max_id) = (
             *oper_ids.first().expect("非空已判"),
             *oper_ids.last().expect("非空已判"),
@@ -471,27 +494,9 @@ impl SysOperLogService {
             .find_chain_rows_in_range(&db, min_id, max_id)
             .await
             .map_err(|e| ServiceError::internal(&format!("链行范围查询失败: {}", e)))?;
+        // 散段切分：与按时间范围清理路径**同一纯函数**（判据不得两处各写一遍）
         let id_set: std::collections::HashSet<i64> = oper_ids.iter().copied().collect();
-
-        // 散段切分：链行序遍历，遇幸存链行即断段
-        let mut segments: Vec<(i64, i64, String)> = Vec::new(); // (first, last, last_hash)
-        let mut cur: Option<(i64, i64, String)> = None;
-        for (oid, hash) in &all_chain {
-            if id_set.contains(oid) {
-                match &mut cur {
-                    None => cur = Some((*oid, *oid, hash.clone())),
-                    Some((_, last, last_hash)) => {
-                        *last = *oid;
-                        *last_hash = hash.clone();
-                    }
-                }
-            } else if let Some(seg) = cur.take() {
-                segments.push(seg);
-            }
-        }
-        if let Some(seg) = cur {
-            segments.push(seg);
-        }
+        let segments = segment_chain_runs(&all_chain, &id_set);
 
         // 无链行 ⇒ 删除不影响链，直接删（仍走事务保持路径一致）
         let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(db.clone());
@@ -538,26 +543,22 @@ impl SysOperLogService {
     /// 修复 P0-R81-010：原 clean_oper_logs 物理删除全部日志，违反审计合规。
     /// 现仅删除 `days` 天前的日志，默认 30 天。
     /// 配合 handler 层 tracing::warn! 记录操作者信息。
+    ///
+    /// **批七十五 B3（链完整性）**：本路径原先直接 `delete_older_than` 裸物理删除，
+    /// 与同端点的"带时间参数"分支（`delete_by_range` → `register_anchor_and_delete`）
+    /// 行为不一致——删了链行却不登记锚点，verify-chain 会用错种子：先误报 broken，
+    /// 而 broken 之后短路使**断点之后的真篡改永久不可见**。这是批七十四 B5 的同族第三例
+    /// （前两例：批量删除的请求集未收敛成授权集、租户档时间范围只登记一条整区间锚点）。
+    /// 现在两个分支共用同一编排，锚点谓词与删除谓词来自同一个 `cond`，不可能漂移。
     pub async fn clean_oper_logs(
         &self,
         days: i64,
         tenant_scope: Option<i64>,
     ) -> Result<u64, ServiceError> {
         let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
-        let result = self
-            .oper_log_repo
-            .delete_older_than(cutoff, tenant_scope)
-            .await?;
-        Ok(result.rows_affected)
-    }
-
-    /// 清空全部操作日志（物理删除，保留向后兼容）
-    ///
-    /// 注意：此方法会物理删除全部日志，仅在数据迁移/特殊维护场景使用。
-    /// 推荐使用 `clean_oper_logs(days)` 进行保留期清理。
-    pub async fn clean_all_oper_logs(&self) -> Result<(), ServiceError> {
-        self.oper_log_repo.clean_all().await?;
-        Ok(())
+        let cond = SysOperLogRepository::cutoff_condition(cutoff, tenant_scope);
+        self.register_anchor_and_delete(cond, LogRetentionMode::Delete, None)
+            .await
     }
 
     /// 清理 N 天前的操作日志（按 oper_time 过滤，保留最近 N 天）
@@ -635,11 +636,13 @@ impl SysOperLogService {
     /// 步骤：
     /// 1. 事务外窗口统计（条件指向过去时间，无并发写入竞态）；
     /// 2. `Archive` 模式：事务外导出 JSONL（导出失败 fail-closed 中止，数据保留）；
-    /// 3. 事务内：先写锚点行、后执行删除——锚点失败回滚（无锚点不可删，否则断链），
-    ///    删除失败回滚（无孤儿锚点，否则 verify 会把幸存行误判为断裂）。
+    /// 3. 事务内：**逐段**先写锚点行、后执行删除——锚点失败回滚（无锚点不可删，
+    ///    否则断链），删除失败回滚（无孤儿锚点，否则 verify 会把幸存行误判为断裂）。
+    ///    段判据与 `delete_oper_logs` 同源（`segment_chain_runs`），见下方"锚点段计算"注释。
     ///
     /// `archive_storage`：Archive 档导出后端（scheduler 注入出厂档；`None` + Archive
-    /// = 配置矛盾，fail-closed 拒绝清理）。
+    /// = 配置矛盾，fail-closed 拒绝清理）。多段时各锚点指向**同一** JSONL
+    /// （导出按窗口全量，段只是链相邻性边界，不是归档分卷）。
     async fn register_anchor_and_delete(
         &self,
         cond: sea_orm::Condition,
@@ -667,23 +670,63 @@ impl SysOperLogService {
             archive_key = Some(self.export_archive_jsonl(&storage, &cond).await?);
         }
 
+        // 锚点段计算：**段内不得含幸存链行**（批七十四 B5 同族修复，判据与批量删除
+        // 路径同源 = `segment_chain_runs`）。
+        // 连续性用两次 COUNT 比对判定，不为判定加载全量行（平台保留期清理一次可
+        // 涉及几十万行，属热路径）：
+        // - `chained_rows == 区间链行数` ⇒ 区间内链行**全部**会被删 ⇒ 天然单段（改造前行为）；
+        // - 不等 ⇒ 区间内夹着不会被删的幸存链行（租户维度窗口必然如此）⇒ 必须逐段。
+        //   单段冒充连续区间的后果不是"少一条锚点"而是**用错种子**：幸存行的真实前驱
+        //   是被删掉的边界行，而 `resolve_prev_seed` 只在"段内无幸存行"时才敢用锚点，
+        //   前提被踩破 ⇒ 误报 broken，且 verify 遇错即短路 ⇒ 断点之后的真篡改永久不可见。
+        // `deleted_count` 记**本次清理操作影响的全行数**（窗口级统计口径）：多段时同一
+        // 操作各段重复登记该值，跨段求和无意义（与 archive_object_key 指向同一整窗口
+        // JSONL 同理）。
+        let segments: Vec<(i64, i64, String)> = match (
+            stats.first_chain_oper_id,
+            stats.last_chain_oper_id,
+            stats.last_chain_hash.clone(),
+        ) {
+            (Some(first), Some(last), Some(hash)) => {
+                let in_range = self
+                    .oper_log_repo
+                    .count_chain_rows_in_range(db, first, last)
+                    .await
+                    .map_err(|e| ServiceError::internal(&format!("区间链行计数失败: {}", e)))?;
+                if in_range == stats.chained_rows {
+                    vec![(first, last, hash)]
+                } else {
+                    let deleted = self
+                        .oper_log_repo
+                        .find_chained_rows_in_window(db, cond.clone())
+                        .await
+                        .map_err(|e| ServiceError::internal(&format!("待删链行读取失败: {}", e)))?;
+                    let all = self
+                        .oper_log_repo
+                        .find_chain_rows_in_range(db, first, last)
+                        .await
+                        .map_err(|e| ServiceError::internal(&format!("链行范围查询失败: {}", e)))?;
+                    let ids: std::collections::HashSet<i64> =
+                        deleted.iter().map(|(id, _)| *id).collect();
+                    segment_chain_runs(&all, &ids)
+                }
+            }
+            // 纯 NULL 行删除不影响链 ⇒ 不登记锚点（与改造前一致）
+            _ => Vec::new(),
+        };
+
         let anchor_repo = BaseRepository::<SysLogArchiveAnchor>::new(db.clone());
         let tx = db
             .begin()
             .await
             .map_err(|e| ServiceError::internal(&format!("开启清理事务失败: {}", e)))?;
 
-        // 锚点登记：仅当段内存在链行（chain_hash 非 NULL）——纯 NULL 行删除不影响链
-        if let (Some(first), Some(last_id), Some(last_hash)) = (
-            stats.first_chain_oper_id,
-            stats.last_chain_oper_id,
-            stats.last_chain_hash,
-        ) {
+        for (first, last, last_hash) in &segments {
             let anchor = AnchorActiveModel {
                 anchor_id: NotSet,
-                first_oper_id: Set(first),
-                last_oper_id: Set(last_id),
-                last_chain_hash: Set(last_hash),
+                first_oper_id: Set(*first),
+                last_oper_id: Set(*last),
+                last_chain_hash: Set(last_hash.clone()),
                 deleted_count: Set(stats.total_rows),
                 mode: Set(mode.as_str().to_string()),
                 archive_object_key: Set(archive_key.clone()),
@@ -707,7 +750,7 @@ impl SysOperLogService {
         tracing::info!(
             deleted = result.rows_affected,
             mode = mode.as_str(),
-            anchored = stats.first_chain_oper_id.is_some(),
+            segments = segments.len(),
             archive_key = archive_key.as_deref().unwrap_or("-"),
             "oper_log 清理完成（链感知锚点已登记）"
         );
@@ -1821,9 +1864,19 @@ mod tests {
         db: &DatabaseConnection,
         oper_id: i64,
     ) -> crate::entity::sys_oper_log::Model {
+        insert_log_row_tenant(db, oper_id, 0).await
+    }
+
+    /// [`Self::insert_log_row`] 的租户维度版：`tenant_id` 可控，用于构造
+    /// "他租链行在被删窗口内幸存"的交叉链场景（批七十四 B5 同族核查）。
+    async fn insert_log_row_tenant(
+        db: &DatabaseConnection,
+        oper_id: i64,
+        tenant_id: i64,
+    ) -> crate::entity::sys_oper_log::Model {
         crate::entity::sys_oper_log::Entity::insert(crate::entity::sys_oper_log::ActiveModel {
             oper_id: sea_orm::Set(oper_id),
-            tenant_id: sea_orm::Set(0),
+            tenant_id: sea_orm::Set(tenant_id),
             title: sea_orm::Set(Some("module.test".into())),
             oper_name: sea_orm::Set(Some("admin".into())),
             oper_time: sea_orm::Set(Some(
@@ -1919,5 +1972,328 @@ mod tests {
         let vo = svc.verify_chain().await.unwrap();
         assert!(!vo.valid, "链哈希被篡改后校验必须失败");
         assert_eq!(vo.broken_at_oper_id, Some(2), "断点必须定位在被篡改节点");
+    }
+
+    /// 批七十四 B5 同族核查：**租户维度的按时间范围清理**必须逐段登记锚点。
+    ///
+    /// 平台档（`tenant_scope = None`）窗口删除天然覆盖区间内全部链行 ⇒ 单锚点成立；
+    /// 租户档只删本租户行，**他租链行在窗口内幸存** ⇒ 单锚点把"部分删除"说成
+    /// "整段 [first..last] 删除"，verify 的 `resolve_prev_seed` 判据
+    /// （`anchor.first > 幸存前驱`）永不成立 ⇒ 幸存行只能用"上一幸存行 hash"续接，
+    /// 而其真实前驱是被删掉的他租边界行 ⇒ **误报 broken**。verify 遇错即短路返回，
+    /// 断点之后的真篡改从此不可见——等于把防篡改能力整体废掉。
+    #[tokio::test]
+    async fn tenant_range_cleanup_anchors_each_deleted_chain_run() {
+        use sea_orm::EntityTrait;
+        use sea_orm::QueryOrder;
+        const TA: i64 = 7_780_001;
+        const TB: i64 = 7_780_002;
+
+        let (db, svc) = chain_fixture().await;
+        let ctx = svc.chain.as_ref().unwrap();
+        // 交替换租 5 行：1(A) 2(B) 3(A) 4(B) 5(A)，同一日 oper_time
+        let mut rows = Vec::new();
+        for id in 1..=5i64 {
+            let tenant = if id % 2 == 1 { TA } else { TB };
+            rows.push(insert_log_row_tenant(&db, id, tenant).await);
+        }
+        for m in &rows {
+            let p = ChainPayload::from_model(m);
+            svc.attach_chain_hash(ctx, m.oper_id, &p)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(
+            svc.verify_chain().await.unwrap().valid,
+            "前置：5 行成链后校验必须通过"
+        );
+
+        // 租户 A 清理整月窗口 ⇒ 只删 1/3/5，B 的 2/4 在窗口内幸存
+        let affected = svc
+            .clean_oper_logs_by_range(
+                Some("2026-10-01".to_string()),
+                Some("2026-10-31".to_string()),
+                Some(TA),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected, 3, "只应删除本租户 3 行");
+
+        // 幸存行 2/4 必须仍能续接（真实前驱 1/3 已被删，靠**逐段锚点**续接）
+        let vo = svc.verify_chain().await.unwrap();
+        assert_eq!(vo.checked, 2, "幸存链行应为 2/4");
+        assert!(
+            vo.valid,
+            "租户窗口清理后幸存行续接必须 valid（单锚点会误报 broken），实际断点: {:?}",
+            vo.broken_at_oper_id
+        );
+
+        // 被删链行 1、3、5 之间各被一个幸存链行隔断 ⇒ 必须是 3 段，且 deleted_count 不重不漏
+        let anchors = crate::entity::sys_log_archive_anchor::Entity::find()
+            .order_by_asc(crate::entity::sys_log_archive_anchor::Column::AnchorId)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            anchors.len(),
+            3,
+            "散段必须逐段登记（单锚点=伪造相邻性），实际: {anchors:?}"
+        );
+        let ids: Vec<(i64, i64)> = anchors
+            .iter()
+            .map(|a| (a.first_oper_id, a.last_oper_id))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![(1, 1), (3, 3), (5, 5)],
+            "每段边界应恰为一个被删链行"
+        );
+        assert_eq!(
+            anchors.iter().map(|a| a.deleted_count).collect::<Vec<_>>(),
+            vec![3, 3, 3],
+            "deleted_count 是**本次清理操作**的窗口级统计（多段各记同一总数，跨段求和无意义）"
+        );
+    }
+
+    // ---------- 批七十五 B3：物理删除只能出自锚点编排（形状锁） ----------
+
+    /// 允许对 `sys_oper_log` 执行物理删除的**唯一**两个函数体。
+    ///
+    /// 二者都在同一事务/同一 `cond` 里"先登记锚点、后删除"，因此"删了行但没登记锚点"
+    /// 在这两条路径上结构上不可能发生。批七十四 B5 修掉两例、本批 `/clean` 分支又冒出
+    /// 第三例，说明"靠人记得走编排"不成立——所以把它做成机械判据。
+    const OPER_LOG_DELETE_ORCHESTRATIONS: &[&str] =
+        &["register_anchor_and_delete", "delete_oper_logs"];
+
+    /// 行首函数头 ⇒ 函数名（`pub`/`pub(crate)`/`async` 前缀都认；与 b74 顺序锁同口径）
+    fn enc_fn_name(line: &str) -> Option<String> {
+        let t = line.trim_start();
+        let idx = t.find("fn ")?;
+        let prefix = &t[..idx];
+        if !prefix
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ' ' || c == '(' || c == ')')
+        {
+            return None;
+        }
+        let rest = &t[idx + 3..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// 从**字段声明**推导"哪些接收者是 oper_log 仓储"（`oper_log_repo: SysOperLogRepository`）。
+    ///
+    /// 为什么按类型而不是按方法名：`delete_by_ids_conn` / `delete_by_condition` 这类名字
+    /// 在 GenTable、Notice、OAuth 等仓储上**同名**（本锁首版就是按方法名匹配的，结果把
+    /// 三处删自己表的正常调用报成"绕过 oper_log 锚点"）。按名字判据的唯一后果是逼人改名
+    /// 绕锁——那是把判据调松的另一种写法。按类型推导则要求：字段改名后本锁的**正探针**
+    /// （必须看见编排内的合法调用）会掉到 0 而当场红，不会静默失明。
+    fn oper_log_receivers(files: &[(String, Vec<String>)]) -> std::collections::BTreeSet<String> {
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = RE.get_or_init(|| {
+            regex::Regex::new(
+                r"([a-z_][a-z0-9_]*)\s*:\s*(?:std::sync::)?(?:Arc<)?SysOperLogRepository",
+            )
+            .expect("正则必须可编译")
+        });
+        let mut out = std::collections::BTreeSet::new();
+        for (_, lines) in files {
+            for l in lines {
+                for cap in re.captures_iter(l) {
+                    out.insert(cap[1].to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// 判据：调用 oper_log 仓储删除方法、且**不在**允许编排函数体内的，全部报出。
+    ///
+    /// 返回 `(违规清单, 已归属到 oper_log 的删除调用数)`——第二个值给正探针用。
+    fn deletes_outside_anchor_orchestration(
+        files: &[(String, Vec<String>)],
+        methods: &[String],
+        receivers: &std::collections::BTreeSet<String>,
+    ) -> (Vec<String>, usize) {
+        let mut out = Vec::new();
+        let mut attributed = 0usize;
+        for (rel, lines) in files {
+            let mut cur: Option<String> = None;
+            for (i, l) in lines.iter().enumerate() {
+                if let Some(name) = enc_fn_name(l) {
+                    cur = Some(name);
+                }
+                for m in methods {
+                    if !l.contains(&format!(".{m}(")) {
+                        continue;
+                    }
+                    // 接收者窗口：当前行 + 上一条非空行（链式调用常把 `self.oper_log_repo`
+                    // 单独写在一行上）
+                    let prev = (0..i)
+                        .rev()
+                        .filter_map(|k| lines.get(k))
+                        .find(|p| !p.trim().is_empty());
+                    let window = match prev {
+                        Some(p) => format!("{p}{l}"),
+                        None => l.clone(),
+                    };
+                    if !receivers.iter().any(|r| window.contains(r.as_str())) {
+                        continue;
+                    }
+                    attributed += 1;
+                    let ok = cur
+                        .as_ref()
+                        .is_some_and(|f| OPER_LOG_DELETE_ORCHESTRATIONS.contains(&f.as_str()));
+                    if !ok {
+                        out.push(format!(
+                            "{rel}:{} 在 `{}` 里对 oper_log 调用了 `.{m}()`（物理删除只能出自锚点编排 \
+                             {:?}）",
+                            i + 1,
+                            cur.clone().unwrap_or_else(|| "<顶层>".to_string()),
+                            OPER_LOG_DELETE_ORCHESTRATIONS
+                        ));
+                    }
+                }
+            }
+        }
+        (out, attributed)
+    }
+
+    /// 从仓储源码**枚举**删除方法名——新增一个 `pub async fn delete_*` 会自动进入命题，
+    /// 不必有人记得回来改这张锁（清单手写＝迟早漂移）。
+    fn oper_log_repo_delete_methods() -> Vec<String> {
+        let text = crate::common::prod_scan::prod_file(
+            "src/repository/sys_oper_log.rs",
+            &crate::common::prod_scan::Scan {
+                strip_test_code: false,
+                ..Default::default()
+            },
+        )
+        .text();
+        let mut out: Vec<String> = text
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim_start();
+                let rest = t.strip_prefix("pub async fn ")?;
+                let rest = rest.strip_prefix("delete_")?;
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                Some(format!("delete_{name}"))
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn oper_log_physical_deletes_happen_only_inside_anchor_orchestrations() {
+        let methods = oper_log_repo_delete_methods();
+        assert!(
+            !methods.is_empty(),
+            "仓储删除方法枚举结果为空——采集面或命题失效，本锁即将空转（不是通过）"
+        );
+        // 批七十五 B3 顺带根除的三处裸删除入口（可证死 + 危险）不得复活
+        for dead in ["delete_by_ids", "delete_older_than", "delete_by_time_range"] {
+            assert!(
+                !methods.iter().any(|m| m == dead),
+                "`{dead}` 是**无锚点**的裸物理删除入口且已无调用方，必须删除而不是留成装饰：{methods:?}"
+            );
+        }
+        let scanned = crate::common::prod_scan::prod_files(&crate::common::prod_scan::Scan {
+            exclude: &["src/repository/sys_oper_log.rs"],
+            ..Default::default()
+        });
+        crate::common::prod_scan::require_volume(&scanned, 80, 20_000, "oper_log 删除编排锁");
+        let files: Vec<(String, Vec<String>)> =
+            scanned.into_iter().map(|f| (f.rel, f.lines)).collect();
+        let receivers = oper_log_receivers(&files);
+        assert!(
+            !receivers.is_empty(),
+            "无法从字段声明推导出 oper_log 仓储的接收者名（`x: SysOperLogRepository`）——\
+             本锁即将失明，不是通过"
+        );
+        let (bad, attributed) = deletes_outside_anchor_orchestration(&files, &methods, &receivers);
+        // 正探针：编排内的合法删除必须真的被看见。掉到 0 意味着字段改名/调用形态变化
+        // 让本锁什么都看不见——那才是最危险的失效形态（与 §测试门禁"每个 0 都要有非零对账"同源）
+        assert!(
+            attributed >= 2,
+            "本锁只归属到 {attributed} 处 oper_log 删除调用（实测应 ≥2：`delete_oper_logs` 与 \
+             `register_anchor_and_delete` 各一处）——采集或推导失效"
+        );
+        assert!(
+            bad.is_empty(),
+            "存在绕过锚点编排的 oper_log 物理删除（删了链行却没登记锚点 ⇒ verify 用错种子、\
+             误报 broken 后短路使断点之后的真篡改永久不可见）:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// 控制组：本锁必须能失败，且不得误报编排内的合法调用或**别人的同名方法**。
+    #[test]
+    fn anchor_orchestration_lock_catches_synthetic_bypass() {
+        let methods = vec![
+            "delete_by_condition".to_string(),
+            "delete_by_ids".to_string(),
+        ];
+        let receivers: std::collections::BTreeSet<String> =
+            ["oper_log_repo".to_string()].into_iter().collect();
+        let mk = |text: &str| -> Vec<(String, Vec<String>)> {
+            vec![(
+                "src/synth.rs".to_string(),
+                crate::common::prod_scan::normalize(
+                    text,
+                    &crate::common::prod_scan::Scan::default(),
+                ),
+            )]
+        };
+        // ① 编排之外新增一处 oper_log 删除 ⇒ 必须报
+        let rogue = concat!(
+            "impl S {\n",
+            "    pub async fn clean_thing(&self) -> Result<(), E> {\n",
+            "        self.oper_log_repo\n",
+            "            .delete_by_condition(&tx, cond).await\n",
+            "    }\n",
+            "}\n",
+        );
+        let (hits, attributed) =
+            deletes_outside_anchor_orchestration(&mk(rogue), &methods, &receivers);
+        assert_eq!(hits.len(), 1, "绕过编排的删除必须被抓到: {hits:?}");
+        assert_eq!(attributed, 1, "跨行链式调用的接收者必须被归属上");
+        // ② 写在编排函数体内 ⇒ 不报（判据不是"禁止删除"）
+        let inside = rogue.replace(
+            "pub async fn clean_thing(",
+            "pub async fn register_anchor_and_delete(",
+        );
+        let (hits2, attr2) =
+            deletes_outside_anchor_orchestration(&mk(&inside), &methods, &receivers);
+        assert!(hits2.is_empty(), "编排内的合法删除不得被报: {hits2:?}");
+        assert_eq!(attr2, 1, "编排内的调用同样要被归属（否则正探针会虚高）");
+        // ③ **别的仓储**上的同名方法不得被报（本锁首版按方法名匹配，正是错在这里）
+        let other_repo = concat!(
+            "pub async fn delete_tables(&self) {\n",
+            "    self.gen_table_repo.delete_by_ids_conn(txn, ids).await;\n",
+            "    self.gen_table_repo.delete_by_ids(ids).await;\n",
+            "}\n",
+        );
+        let (hits3, attr3) =
+            deletes_outside_anchor_orchestration(&mk(other_repo), &methods, &receivers);
+        assert!(
+            hits3.is_empty() && attr3 == 0,
+            "oper_log 之外的同名删除调用不得被归属或被报，否则下一个人会为了过锁去改方法名: {hits3:?}"
+        );
+        // ④ 注释里的形态不误伤
+        let commented = "// self.oper_log_repo.delete_by_condition(&tx, cond).await\nlet x = 1;\n";
+        let (hits4, _) = deletes_outside_anchor_orchestration(&mk(commented), &methods, &receivers);
+        assert!(
+            hits4.is_empty(),
+            "注释里的被禁形态不得被当成代码（prod_scan 的 Blank 口径责任）"
+        );
     }
 }

@@ -117,6 +117,14 @@ pub fn eval_tenant_runtime_state(
 /// 能力位门控才可下放**的能力（`system:tenant:domain:` / `system:tenantMenu:`，两者都由
 /// 服务层按 `tenant_id` 收窄，关闭态租户一律 403）。两者共用同一套治理机制
 /// （授权拒绝 / 复制剔除 / 启动治理剔除+回填）⇒ 关闭态无假入口、开启态可下放。
+/// - `system:aiConfig:`：AI 配置与推理（平台侧模型凭据与全平台对话留痕，无租户维度）
+/// - `monitor:alert:`：告警规则（批七十四 B3 补登记）。**请求层早已整组封平台专属**
+///   （`router/monitor_alert_router.rs` 给 `/monitor/alert/*` 挂 `platform_only_guard`），
+///   但注册表漏了这一族 ⇒ `is_grantable_perm` 判"可授"，而菜单 4110 又发给了 `common`
+///   （新租户默认管理员的**模板源**）⇒ 租户操作者看得见"告警规则"菜单、点进去
+///   `GET /monitor/alert/list` 必然 403，正是"菜单可见但请求 403"的假入口，
+///   且绕开三层开关收敛（授权层放行、请求层拒绝）。
+///   指标面为 cpu/mem/disk/全局登录失败（非租户维度）⇒ 真要下放须先做租户级指标采集，另立项。
 pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "system:tenant:domain:",
     "system:tenantMenu:",
@@ -127,6 +135,7 @@ pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "monitor:slowSql:",
     "monitor:health:",
     "monitor:operlogArchive:",
+    "monitor:alert:",
     "system:backup:",
     "system:rateLimit:",
     "system:aiConfig:",
@@ -259,6 +268,24 @@ pub const TENANT_FILTER_MATRIX: &[(&str, &str, TenantFilterTier)] = &[
         TenantFilterTier::Covered,
     ),
     ("system:backup:", "sys_backup_log", TenantFilterTier::Tier2),
+    // 以下三条为批七十四 B3 反向对账补登记：**判据不变，只补事实源**——
+    // 三条的集合读路径早已按 `tenant_scope`/`operator_tid` 收窄（逐条实测见台账 §3.1），
+    // 此前只是没写进矩阵，导致"矩阵里没有 ⇒ 归类不明"的审计盲区。
+    (
+        "system:dataRule:",
+        "sys_data_rule",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "system:audit-change:",
+        "sys_audit_change",
+        TenantFilterTier::Covered,
+    ),
+    (
+        "system:oauth:client:",
+        "sys_oauth_client",
+        TenantFilterTier::Covered,
+    ),
 ];
 
 /// 查表：按最长前缀匹配返回 (承载表, 档位)（`system:tenant:domain:` 等更长前缀优先）。
@@ -540,11 +567,13 @@ mod tests {
     #[test]
     fn platform_only_prefixes_match_migration_lists() {
         // 最新全量治理点（必须含**全部**平台专属前缀）
-        // 批次十九：新增 `monitor:operlogArchive:` ⇒ 最新全量迁移推进到
-        // `m20261008_000001_log_archive_anchor`（12 项），`m000013` 随之降级为历史迁移。
+        // 批七十四 B3：新增 `monitor:alert:` ⇒ 最新全量迁移推进到
+        // `m20261017_000002_platform_only_alert`（13 项），`m000001` 随之降级为历史迁移。
         const LATEST_SRC: &str =
-            include_str!("../../migration/src/migrations/m20261008_000001_log_archive_anchor.rs");
+            include_str!("../../migration/src/migrations/m20261017_000002_platform_only_alert.rs");
         // 历史迁移（其项必须仍在常量中，防"常量删了但迁移还留着"的漂移）
+        const M000001_SRC: &str =
+            include_str!("../../migration/src/migrations/m20261008_000001_log_archive_anchor.rs");
         const M000013_SRC: &str = include_str!(
             "../../migration/src/migrations/m20260926_000013_platform_only_tenant_menu.rs"
         );
@@ -562,8 +591,31 @@ mod tests {
         for p in PLATFORM_ONLY_PERM_PREFIXES {
             assert!(
                 LATEST_SRC.contains(p),
-                "平台专属前缀 `{p}` 未出现在最新迁移清单（m20261008_000001）—— 新增前缀必须\
-                 同步该迁移的完整清单，否则走迁移的新库不会剔除对应菜单（假入口）"
+                "平台专属前缀 `{p}` 未出现在最新迁移清单（LATEST_SRC = \
+                 m20261017_000002_platform_only_alert）—— 新增前缀必须同步开一个携带\
+                 完整清单的新迁移并把 LATEST_SRC 推进过去，否则走迁移的新库不会剔除\
+                 对应菜单（假入口）"
+            );
+        }
+        // ①' 历史迁移 m000001（批次十九，12 项）的项必须都还在常量中
+        for p in [
+            "system:tenant:domain:",
+            "system:tenantMenu:",
+            "tool:gen:",
+            "tool:httpDebug:",
+            "monitor:cache:",
+            "monitor:log:",
+            "monitor:slowSql:",
+            "monitor:health:",
+            "monitor:operlogArchive:",
+            "system:backup:",
+            "system:rateLimit:",
+            "system:aiConfig:",
+        ] {
+            assert!(M000001_SRC.contains(p), "m000001 清单项 `{p}` 丢失");
+            assert!(
+                PLATFORM_ONLY_PERM_PREFIXES.contains(&p),
+                "m000001 使用了未在 PLATFORM_ONLY_PERM_PREFIXES 声明的前缀 `{p}`"
             );
         }
         // ①' 历史迁移 m000013（11 项）的项必须都还在常量中
@@ -666,5 +718,149 @@ mod tests {
         );
         // 空前缀集：产出空串（调用方不应据此拼出非法 SQL）
         assert_eq!(perms_like_clause(&[], |_| "?".to_string()), "");
+    }
+
+    // ============ 批七十四 B3：矩阵 ↔ 台账文档 **双向**对账锁 ============
+    //
+    // `TENANT_FILTER_MATRIX` 的文档注释一直声称"与 tier2-filter-matrix-2026-09-25.md
+    // 同步维护（单测保证双向一致）"，但全仓**没有**这条单测（本轮实测：该常量的消费点
+    // 只有 `features.rs` 的 tier2 判定与本文件的查表函数）。属"注释声明了一条不存在的锁"——
+    // 读者会以为漂移会被 CI 拦住，实际不会。本锁补齐该承诺。
+    //
+    // 对账口径：**前缀集合 ⊆ 双向 + 档位逐条一致**。承载表/接入点两列不参与
+    // （代码里是 `sys_dict_type/sys_dict_data`，文档写成 `sys_dict_type / sys_dict_data`
+    // 且夹带中文说明——散文格式强判必然漂，那不是契约）。
+    #[test]
+    fn matrix_matches_ledger_doc() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/optimization/tier2-filter-matrix-2026-09-25.md");
+        let text = std::fs::read_to_string(&doc)
+            .unwrap_or_else(|e| panic!("读取矩阵台账 {} 失败: {e}", doc.display()));
+        let start = text
+            .find("## 2. 矩阵")
+            .expect("台账文档缺少「## 2. 矩阵」小节 ⇒ 对账面无从定位（不是通过）");
+        let end = text[start..]
+            .find("## 3. ")
+            .map(|i| start + i)
+            .expect("台账文档「## 2」之后没有「## 3」⇒ 小节边界无法确定（不是通过）");
+        let seg = &text[start..end];
+
+        // 文档行：| `prefix` | 承载表 | 档位 | 接入点 |
+        // 一个单元格可并写多个前缀（`system:pat:/monitor:pat:`），按 '/' 拆分后逐个收。
+        let mut doc_rows: Vec<(String, String)> = Vec::new();
+        for line in seg.lines() {
+            let line = line.trim();
+            if !line.starts_with('|') || line.contains("perms 前缀") || line.contains("---") {
+                continue;
+            }
+            let cells: Vec<&str> = line.split('|').map(|c| c.trim()).collect();
+            if cells.len() < 4 {
+                continue;
+            }
+            let tier = cells[3].replace('*', "").trim().to_string();
+            if tier != "Covered" && tier != "Tier2" {
+                continue; // 非矩阵行（说明段/表头残留）
+            }
+            for token in cells[1].split('/') {
+                let prefix = token.trim().trim_matches('`').trim().to_string();
+                if prefix.ends_with(':') && prefix.contains(':') {
+                    doc_rows.push((prefix, tier.clone()));
+                }
+            }
+        }
+
+        // 控制组：两侧都必须**真看见**内容，否则本锁退化成"0 == 0"的虚锁。
+        assert!(
+            doc_rows.len() >= 25,
+            "台账文档 §2 表格只解析出 {} 行 ⇒ 文档格式变了或小节定位失效，对账没有真跑",
+            doc_rows.len()
+        );
+        assert!(
+            TENANT_FILTER_MATRIX.len() >= 25,
+            "代码矩阵仅 {} 条 ⇒ 与本批实测基线不符，请先核对常量是否被误删",
+            TENANT_FILTER_MATRIX.len()
+        );
+
+        let mut only_in_doc: Vec<String> = Vec::new();
+        let mut tier_mismatch: Vec<String> = Vec::new();
+        for (prefix, doc_tier) in &doc_rows {
+            match TENANT_FILTER_MATRIX
+                .iter()
+                .find(|(p, _, _)| *p == prefix.as_str())
+            {
+                None => only_in_doc.push(prefix.clone()),
+                Some((_, _, tier)) => {
+                    let code_tier = match tier {
+                        TenantFilterTier::Covered => "Covered",
+                        TenantFilterTier::Tier2 => "Tier2",
+                    };
+                    if code_tier != *doc_tier {
+                        tier_mismatch.push(format!("{prefix}: 文档={doc_tier} 代码={code_tier}"));
+                    }
+                }
+            }
+        }
+        let only_in_code: Vec<&str> = TENANT_FILTER_MATRIX
+            .iter()
+            .filter(|(p, _, _)| !doc_rows.iter().any(|(dp, _)| dp == p))
+            .map(|(p, _, _)| *p)
+            .collect();
+
+        assert!(
+            only_in_doc.is_empty(),
+            "台账文档有、代码矩阵无：{only_in_doc:?} ⇒ 文档声称已接入，事实源没有（必须二选一定性）"
+        );
+        assert!(
+            only_in_code.is_empty(),
+            "代码矩阵有、台账文档无：{only_in_code:?} ⇒ 新增前缀未同步文档（AGENTS 开关规范⑥）"
+        );
+        assert!(
+            tier_mismatch.is_empty(),
+            "档位两侧不一致：{tier_mismatch:?}"
+        );
+    }
+
+    /// 反向锁：矩阵里**每一条**前缀都必须能被 `tenant_filter_lookup` 按最长前缀命中自身
+    /// （防止出现"更长前缀把短前缀吃掉"导致 tier2 判定失效——`system:tenant:` 与
+    /// `system:tenant:domain:` 同挂时，后者必须胜出）。
+    #[test]
+    fn matrix_lookup_prefers_longest_prefix() {
+        for (prefix, table, tier) in TENANT_FILTER_MATRIX {
+            let (hit_table, hit_tier) = tenant_filter_lookup(prefix)
+                .unwrap_or_else(|| panic!("{prefix} 查表落空 ⇒ 自身前缀都不命中，判据失效"));
+            assert_eq!(
+                (hit_table, hit_tier),
+                (*table, *tier),
+                "{prefix} 被更长前缀抢占或档位漂移（矩阵内部前缀包含关系已改变 tier2 判定）"
+            );
+        }
+    }
+
+    /// 平台专属注册表与矩阵的**交集必须有明确语义**：登记为平台专属的前缀若同时出现在
+    /// 矩阵中，必须是 Tier2 或被能力位解锁清单覆盖的部分下放前缀（`system:backup:`），
+    /// 否则等于两处各说各话。
+    #[test]
+    fn platform_only_registry_and_matrix_agree() {
+        let overlapping: Vec<&str> = PLATFORM_ONLY_PERM_PREFIXES
+            .iter()
+            .copied()
+            .filter(|p| TENANT_FILTER_MATRIX.iter().any(|(mp, _, _)| mp == p))
+            .collect();
+        // 本轮实测交集：`system:tenant:domain:` / `system:tenantMenu:`（Covered，服务层已按
+        // tenant_scope 收窄，但默认整面不下放）与 `system:backup:`（Tier2）。
+        // 交集**允许存在**（下放与否由能力位决定，与"表是否接过滤"正交），
+        // 但必须逐条在册——新增交集项未审视即红，逼后来者定性。
+        const ALLOWED: [&str; 3] = [
+            "system:tenant:domain:",
+            "system:tenantMenu:",
+            "system:backup:",
+        ];
+        for p in &overlapping {
+            assert!(
+                ALLOWED.contains(p),
+                "平台专属前缀 {p} 新落入矩阵交集，需先定性：它是「表已接租户过滤但默认不下放」\
+                 还是「tier2 未接」？两者在授权层的语义不同，不得默认并存"
+            );
+        }
     }
 }

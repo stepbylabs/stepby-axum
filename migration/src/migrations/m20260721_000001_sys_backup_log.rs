@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260721_000001_sys_backup_log.rs
+// stepby-axum/migration/src/migrations/m20260721_000001_sys_backup_log.rs
 //! 数据备份日志表迁移
 //!
 //! 新增表：sys_backup_log - 数据备份/恢复操作日志

@@ -61,10 +61,18 @@ mod single_source_sql_tests {
     }
 
     /// 审计菜单种子：语句体与重构前手抄 SQL 逐字符等价（NOW() 形态下）
+    ///
+    /// b73 轮 15：4002「变更导出」的 role_menu 授权按 common 只读策略**不再发放**
+    /// （菜单行照旧）。对照组：4000/4001 的授权必须仍在——若策略判据失效（例如
+    /// 例外表被清空或后缀集合写错），本用例的两处 `assert_eq!` 会同时变红。
     #[test]
     fn audit_menu_seed_bodies_match_legacy_sql() {
         let bodies = audit_mig::audit_menu_seed_bodies("NOW()");
-        assert_eq!(bodies.len(), 6, "3 菜单行 + 3 role_menu 行");
+        assert_eq!(
+            bodies.len(),
+            5,
+            "3 菜单行 + 2 role_menu 行（4002 按策略拒发）"
+        );
         assert_eq!(
             bodies[0],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES (4000, '变更留痕', 108, 4, 'auditChange', 'system/auditChange/index', '', '', '1', '0', 'C', '0', '0', 'system:audit-change:list', 'log', 'admin', NOW(), '业务数据变更留痕审计（前后快照 + 字段差异）', '0', 'menu.audit_change')"
@@ -85,9 +93,9 @@ mod single_source_sql_tests {
             bodies[4],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES (4002, '变更导出', 4000, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:audit-change:export', '#', 'admin', NOW(), '', '0', NULL)"
         );
-        assert_eq!(
-            bodies[5],
-            "sys_role_menu (role_id, menu_id) VALUES (2, 4002)"
+        assert!(
+            !bodies.iter().any(|b| b.contains("(2, 4002)")),
+            "4002 导出授权复活——common 只读策略被绕过"
         );
     }
 
@@ -207,11 +215,18 @@ mod single_source_sql_tests {
         }
     }
 
-    /// webhook 菜单按钮：3562/3563 + role_menu(2,·)，语句体与重构前手抄逐字符等价
+    /// webhook 菜单按钮：3562 授予、3563 按策略拒发；语句体与重构前手抄逐字符等价
+    ///
+    /// b73 轮 15：3563「测试发送」构造**真实出站投递**，属越权面，不再默认授予 common。
+    /// 对照组：3562 的 `:list` 授权仍在（判据若整体失效，两处断言同时变红）。
     #[test]
     fn webhook_menu_seed_bodies_match_legacy_sql() {
         let bodies = webhook_mig::webhook_menu_seed_bodies("NOW()");
-        assert_eq!(bodies.len(), 4);
+        assert_eq!(
+            bodies.len(),
+            3,
+            "2 菜单行 + 1 role_menu 行（3563 按策略拒发）"
+        );
         assert_eq!(
             bodies[0],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES (3562, '事件目录', 158, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:event:list', 'list', 'admin', NOW(), 'WebHook 事件目录查询', '0')"
@@ -224,13 +239,13 @@ mod single_source_sql_tests {
             bodies[2],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES (3563, '测试发送', 158, 2, '', '', '', '', '1', '0', 'F', '0', '0', 'system:webhook:test-send', 'message', 'admin', NOW(), '按事件样例构造真实测试发送', '0')"
         );
-        assert_eq!(
-            bodies[3],
-            "sys_role_menu (role_id, menu_id) VALUES (2, 3563)"
+        assert!(
+            !bodies.iter().any(|b| b.contains("(2, 3563)")),
+            "3563 测试发送授权复活——common 只读策略被绕过"
         );
     }
 
-    /// 告警菜单种子：4110-4114 集合一致；仅页面 4110 授予 role_menu(2,·)
+    /// 告警菜单种子：4110-4114 集合一致；仅页面 4110 授予 role_menu，且**必须走策略体**
     #[test]
     fn alert_menu_seed_bodies_match_legacy_sql() {
         let bodies = alert_mig::alert_menu_seed_bodies("NOW()");
@@ -239,9 +254,17 @@ mod single_source_sql_tests {
             bodies[0],
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES (4110, '告警规则', 2, 60, 'alert', 'monitor/alert/index', '', '', '1', '0', 'C', '0', '0', 'monitor:alert:list', 'alert', 'admin', NOW(), '告警规则引擎菜单', '0')"
         );
+        // 批七十四 B3：本条被 `ensure_alert_rule_tables` 每次启动执行 ⇒ 属"兜底发放"，
+        // 按 AGENTS 铁律必须套 governance 策略子句，不得是裸 `VALUES (2, id)`。
         assert_eq!(
             bodies[1],
-            "sys_role_menu (role_id, menu_id) VALUES (2, 4110)"
+            governance::common_role_grant_select_body(&[4110]),
+            "common 授权未走 governance 策略体（裸 VALUES 会绕过策略子句）"
+        );
+        assert!(
+            !bodies[1].contains("VALUES (2"),
+            "告警种子残留裸 common 授权形态：{}",
+            bodies[1]
         );
         // 按钮 4111-4114 不授予 role_menu（与迁移/兜底原行为一致）
         let joined = bodies.join("\n");
@@ -682,7 +705,14 @@ mod scim_group_backfill_tests {
             .unwrap()
             .try_get::<i64>("", "c")
             .unwrap();
-        assert_eq!(role_menu, 4, "role_menu 授权应恰 4 条");
+        // b73 轮 15：common 授权改由 governance 策略体发放 ⇒ 只保留页面 148 与
+        // `:query` 按钮 3622；3620（组绑定编辑）/3621（组删除）改的是"组→角色/部门"
+        // 映射，等同间接为他人提权，属越权面不再默认授予 common（§8.2 只读姿态）。
+        // 对照组：148/3622 仍在 ⇒ 拒发来自策略判据而非"授权整体丢失"。
+        assert_eq!(
+            role_menu, 2,
+            "role_menu 授权应恰 2 条（148 页面 + 3622 查询）"
+        );
     }
 }
 
@@ -863,8 +893,8 @@ mod schema_equivalence_lock_tests {
         ensure_governance_config_rows(db).await?;
         // 3.5g 唯一域租户化（等价 m20260925_000005）
         ensure_tenant_unique_scope(db).await?;
-        // 3.5h 租户角色菜单治理
-        ensure_tenant_role_menu_governance(db).await?;
+        // 3.5h 租户角色菜单治理 —— **已下移到全部菜单兜底之后**（见 4.5z），
+        // 与 mod.rs `run()` 同序；收回必须晚于发放，否则被兜底洗回 role 2。
         // 3.5i 存量上传路径回填（数据级；默认 local 档）
         ensure_legacy_upload_paths(db, &upload_cfg).await?;
         // 3.5j 台账 P0-2：sys_role.is_system
@@ -890,6 +920,8 @@ mod schema_equivalence_lock_tests {
             .await?;
         // 4.2 SSO 限流分档（等价 m20260924_000001）
         ensure_sso_rate_limit_tiers(db).await?;
+        // 4.2a b72（AGENTS C.10）敏感操作独立限流档位（数据级兜底，幂等：只补缺失键）
+        ensure_sensitive_rate_limit_tiers(db).await?;
         // 4.3 运行期敏感凭据回填（空 enc_key = 跳过，与迁移期 fail-open 一致；数据级）
         ensure_runtime_secrets_encrypted(db, "").await;
         // 4.4 SSO consent 唯一索引（等价 m20260924_000002）
@@ -938,6 +970,8 @@ mod schema_equivalence_lock_tests {
         ensure_role_field_perm_tables(db).await?;
         // 4.5j 报表看板（等价 m20261003_000006）
         ensure_report_board_tables(db).await?;
+        // 4.5z 租户角色菜单治理（与 mod.rs 同序：收回必须晚于全部发放类兜底）
+        ensure_tenant_role_menu_governance(db).await?;
         Ok(())
     }
 
@@ -1236,6 +1270,426 @@ mod schema_equivalence_lock_tests {
         let _ = std::fs::remove_file(&path_b);
     }
 
+    /// b73 轮 15 终态形状锁：**迁移路径**（新装部署）的 common 授权必须逐条落在策略内。
+    ///
+    /// 库 A = 全新空库 + 完整 `Migrator::up`，即开源用户 `cargo run` 首次建库的真实姿态。
+    /// 三条断言各自可证伪：
+    /// 1. **反向侵蚀锁**：common 持有的 F 按钮授权，若不命中只读后缀，其 menu_id 必须
+    ///    出现在例外表内。今后任何新菜单迁移/兜底再"习惯性"把写按钮授给 common，本用例立即红。
+    /// 2. **例外有效性**：例外表每个 id 必须真实存在、确为 F、perms 非只读后缀——
+    ///    防止把只读按钮冗余登记成例外（豁免表膨胀），也防止 id 拼错使策略静默空转。
+    /// 3. **已知越权面回收 + 对照组**：6 条实测越权授权必须不在；同时页面 148 与
+    ///    `:query` 按钮 3622 必须仍在（证明"不在"来自策略判定而非授权整体丢失）。
+    #[tokio::test]
+    async fn migration_path_common_role_grants_follow_policy() {
+        let (db, path) = fresh_db("common_policy").await;
+        migration::Migrator::up(&db, None)
+            .await
+            .expect("迁移侧建库失败（common 策略终态锁）");
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT rm.menu_id AS menu_id, m.menu_type AS menu_type, m.perms AS perms \
+                 FROM sys_role_menu rm JOIN sys_menu m ON m.menu_id = rm.menu_id \
+                 WHERE rm.role_id = 2 AND m.del_flag = '0'"
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        let granted: Vec<(i64, String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get::<i64>("", "menu_id").unwrap_or_default(),
+                    r.try_get::<String>("", "menu_type").unwrap_or_default(),
+                    r.try_get::<String>("", "perms").unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert!(
+            granted.len() > 50,
+            "common 授权行过少（{}）——迁移种子未落库，本用例失去意义",
+            granted.len()
+        );
+
+        let readonly = governance::COMMON_ROLE_READONLY_PERM_SUFFIXES;
+        let is_readonly = |p: &str| readonly.iter().any(|s| p.ends_with(s));
+        let exception_ids = governance::common_role_write_exception_ids();
+
+        // 1. 反向侵蚀锁
+        let erosion: Vec<String> = granted
+            .iter()
+            .filter(|(id, mt, perms)| {
+                mt == "F" && !is_readonly(perms) && !exception_ids.contains(id)
+            })
+            .map(|(id, _, perms)| format!("{id}:{perms}"))
+            .collect();
+        assert!(
+            erosion.is_empty(),
+            "common 角色持有未登记的写权限授权（种子侵蚀复发）：{erosion:?}；\
+             修复方式：让该菜单的种子授权走 governance::common_role_grant_select_body，\
+             或（确属本人作用域/能力位封顶时）在 COMMON_ROLE_WRITE_EXCEPTIONS 带理由登记"
+        );
+
+        // 2. 例外有效性（逐条回库核验）
+        for (id, reason) in governance::COMMON_ROLE_WRITE_EXCEPTIONS {
+            let hit = granted.iter().find(|(gid, _, _)| gid == id);
+            let meta = db
+                .query_all_raw(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    format!("SELECT menu_type AS t, perms AS p FROM sys_menu WHERE menu_id = {id}"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                meta.len(),
+                1,
+                "例外 {id} 在 sys_menu 无对应行（{reason}）——空转豁免"
+            );
+            let mtype: String = meta[0].try_get("", "t").unwrap_or_default();
+            let perms: String = meta[0].try_get("", "p").unwrap_or_default();
+            assert_eq!(
+                mtype, "F",
+                "例外 {id} 应为写权限按钮，实际 menu_type={mtype}（{reason}）"
+            );
+            assert!(
+                !is_readonly(&perms),
+                "例外 {id} 的 perms {perms} 本就被只读后缀放行，登记属冗余豁免（{reason}）"
+            );
+            assert!(
+                hit.is_some(),
+                "例外 {id}（{perms}）未被授权——发放点未走策略体或策略子句未展开例外"
+            );
+        }
+
+        // 3. 已知越权面回收 + 对照组仍在
+        for id in [3561i64, 3563, 3564, 3620, 3621, 4002] {
+            assert!(
+                !granted.iter().any(|(gid, _, _)| *gid == id),
+                "common 仍持有越权授权 menu_id={id}——窄撤销迁移或策略过滤未生效"
+            );
+        }
+        for id in [148i64, 3622, 3560, 3700] {
+            assert!(
+                granted.iter().any(|(gid, _, _)| *gid == id),
+                "对照组 menu_id={id}（页面 / 只读按钮）应仍授予 common——缺失说明授权整体丢失"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// b73 轮 15 源码形状锁：`initialize` 兜底里不得再出现裸 `sys_role_menu … VALUES (2, id)`
+    ///
+    /// 兜底是**存量库**的交付机制，裸 VALUES 形态绕过策略 ⇒ 越权授权在每次启动复活。
+    /// 唯一合法写法是 `governance::common_role_grant_select_body`（DB 侧套用判据）。
+    /// 参数化补授（租户自助 perms 回填，目标角色非 common 的写按钮）不在此列，
+    /// 故匹配串取"字面 `(2` 前缀"而非通用 VALUES。
+    ///
+    /// **批七十四 B3 扩面（原锁有别名盲区）**：原实现只扫 `initialize` 的 4 个文件，
+    /// 而 `ensure_alert_rule_tables` 把种子 SQL 委托给 `migration` crate 的
+    /// `alert_menu_seed_bodies()` —— 裸 `VALUES (2, 4110)` 就在**那一侧**，
+    /// 于是"每次启动都跑的发放语句"完全落在锁的扫描面之外（隔一层函数调用即洗白，
+    /// 与 §一.10 `routeParamNumber.guard` 只匹配同行 `Number(` 是同一种缺陷）。
+    /// 故本轮：① 补齐 `initialize` 全部文件；② 对 `migration` crate 的**种子体函数**
+    /// 单列判据；③ 对 migration 历史一次性迁移的裸授权数取**棘轮**（只许降）。
+    #[test]
+    fn fallback_grants_never_use_bare_common_role_values() {
+        const BARE: &str = "sys_role_menu (role_id, menu_id) VALUES (2";
+        // ① initialize 侧：全部兜底源文件（本轮实测清单，漏列文件由下面总数锁兜住）
+        for (file, src) in [
+            ("menu.rs", include_str!(concat!("menu.rs"))),
+            ("scim.rs", include_str!(concat!("scim.rs"))),
+            ("flow.rs", include_str!(concat!("flow.rs"))),
+            ("tenant.rs", include_str!(concat!("tenant.rs"))),
+            ("ledger.rs", include_str!(concat!("ledger.rs"))),
+            ("schema.rs", include_str!(concat!("schema.rs"))),
+            ("mod.rs", include_str!(concat!("mod.rs"))),
+        ] {
+            let bare = src.matches(BARE).count();
+            assert_eq!(
+                bare, 0,
+                "{file} 存在 {bare} 处裸 common 授权 VALUES 形态，绕过 governance 策略体"
+            );
+        }
+
+        // ② 兜底可达的 migration 种子体：**必须真调用**再检查产出文本。
+        //    文本扫描对这一类无效——告警种子原形是
+        //    `format!("… VALUES ({role_id}, {granted_menu_id})")`，源码里没有字面 `(2`，
+        //    所以 ① 那套字符串判据**天生看不见**它（这才是 B3 盲区的真正成因：
+        //    不是"漏扫了 ledger.rs"，而是"裸形态被 format! 模板化后任何字符串锁都抓不到"）。
+        //    唯一可靠的判据是把单一事实源**跑一遍**，再判它吐出的语句。
+        let alert_bodies = migration::m20261003_000003_alert_rule::alert_menu_seed_bodies("NOW()");
+        assert_eq!(
+            alert_bodies
+                .iter()
+                .filter(|b| b.contains("(2, 4110)"))
+                .count(),
+            0,
+            "告警种子产出的仍是裸 common 授权 VALUES 形态（会被 ensure_alert_rule_tables 每次启动执行）：{:?}",
+            alert_bodies
+        );
+        assert!(
+            alert_bodies
+                .iter()
+                .any(|b| b.contains("sys_role_menu") && b.contains("FROM sys_menu")),
+            "告警种子的 common 授权未走 governance 策略体（应形如 SELECT 2, menu_id FROM sys_menu WHERE …）"
+        );
+
+        // ③ migration crate 历史一次性迁移：取**棘轮**而非硬 0（本轮实测 47 处属 `up()`
+        //    一次性授权，逐条改写属独立工程，不得混入本项；但新增必须走策略体 ⇒ 只许下降）。
+        let mig_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migration/src/migrations");
+        let mut total = 0usize;
+        let mut files = 0usize;
+        let mut entries: Vec<_> = std::fs::read_dir(&mig_dir)
+            .unwrap_or_else(|e| panic!("迁移目录不可读 {}：{e}", mig_dir.display()))
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            files += 1;
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            total += text.matches(BARE).count();
+        }
+        // 控制组：目录必须真被读到（否则 0 == 0 的"通过"毫无判据力）
+        assert!(
+            files >= 60,
+            "迁移目录只读到 {files} 个 .rs ⇒ 扫描面失效，棘轮空转（不是通过）"
+        );
+        assert!(
+            total <= 47,
+            "migration crate 裸 common 授权现有 {total} 处，超过棘轮基线 47 ⇒ 只许下降"
+        );
+    }
+
+    /// 批七十四 B3 结构锁：**收回类治理必须晚于所有发放 `sys_role_menu` 的兜底**。
+    ///
+    /// 机理：`ensure_tenant_role_menu_governance` ① 是 `DELETE … role_id = 2 OR tenant_id <> 0`，
+    /// 而若干 `ensure_*` 兜底**发放** `sys_role_menu`。若治理在前、发放在后，则平台专属菜单
+    /// 每次启动都被洗回模板源 role 2 ⇒ 注册表形同虚设（本轮实证：登记 `monitor:alert:` 后
+    /// 按原序跑完 initialize，4110 仍在 role 2）。这不是"顺序偏好"而是**不变式**。
+    #[test]
+    fn governance_runs_after_all_menu_granting_fallbacks() {
+        let mod_src = include_str!(concat!("mod.rs"));
+        let gov_pos = mod_src
+            .find("ensure_tenant_role_menu_governance(&db)")
+            .expect("run() 中不再调用租户角色菜单治理 ⇒ 结构锁失去约束对象（不是通过）");
+
+        // 发放类兜底 = 其函数体出现 sys_role_menu 的 ensure_*
+        let grant_sources: [(&str, &str); 5] = [
+            ("ledger.rs", include_str!(concat!("ledger.rs"))),
+            ("menu.rs", include_str!(concat!("menu.rs"))),
+            ("flow.rs", include_str!(concat!("flow.rs"))),
+            ("scim.rs", include_str!(concat!("scim.rs"))),
+            ("tenant.rs", include_str!(concat!("tenant.rs"))),
+        ];
+        let mut granting_fns: Vec<String> = Vec::new();
+        for (file, src) in grant_sources {
+            // 逐个 ensure_* 函数切段：边界取"下一个 `async fn` 出现处"（而非字面
+            // `\nasync fn `——多数函数声明带 `pub(crate) ` 前缀，按字面行匹配会让第一段
+            // 吞掉整个文件，导致后续函数一律漏检；本轮首跑实测只数出 2 个即此因）。
+            let starts: Vec<usize> = src
+                .match_indices("async fn ensure_")
+                .map(|(i, _)| i)
+                .collect();
+            for (idx, &start) in starts.iter().enumerate() {
+                let end = starts.get(idx + 1).copied().unwrap_or(src.len());
+                let seg = &src[start..end];
+                let name_end = seg
+                    .find('(')
+                    .unwrap_or_else(|| panic!("{file} 中 ensure_* 函数名未闭合"));
+                let name = seg["async fn ".len()..name_end].to_string();
+                if seg.contains("sys_role_menu") {
+                    granting_fns.push(format!("{file}::{name}"));
+                }
+            }
+        }
+        assert!(
+            granting_fns.len() >= 5,
+            "只识别出 {} 个发放 sys_role_menu 的兜底函数 ⇒ 判据扫描面失效（不是通过）",
+            granting_fns.len()
+        );
+
+        let mut violations: Vec<String> = Vec::new();
+        for entry in &granting_fns {
+            let name = entry.split("::").nth(1).unwrap_or(entry);
+            // 治理自身不计（它既剔也补）
+            if name == "ensure_tenant_role_menu_governance" {
+                continue;
+            }
+            if let Some(pos) = mod_src.find(&format!("{name}(&db)"))
+                && pos > gov_pos
+            {
+                violations.push(format!("{entry} 在 mod.rs:{pos} 晚于治理 {gov_pos}"));
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "以下发放类兜底排在收回类治理**之后**，会把平台专属菜单洗回 role 2（假入口复活）：\n{}",
+            violations.join("\n")
+        );
+
+        // 同一不变式也必须钉在**测试 harness** 上：`run_all_initialize_fallbacks` 自称
+        // "按 mod.rs run() 的原始顺序"，但它自成一套调用序列——本轮首跑即实测到 harness
+        // 仍是"治理(3.5h) 在前、告警(4.5e) 在后"的旧序。既有覆盖锁只判**集合**、不判**顺序**，
+        // 于是"测试验的序"与"生产跑的序"可以静默相反 ⇒ 行为测试全绿也证不了生产正确。
+        let harness = include_str!(concat!("tests.rs"));
+        let harness_gov = harness
+            .find("ensure_tenant_role_menu_governance(db).await?")
+            .expect("harness 不再调用治理 ⇒ 本判据失去约束对象");
+        let mut harness_violations: Vec<String> = Vec::new();
+        for entry in &granting_fns {
+            let name = entry.split("::").nth(1).unwrap_or(entry);
+            if name == "ensure_tenant_role_menu_governance" {
+                continue;
+            }
+            if let Some(pos) = harness.find(&format!("{name}(db).await?"))
+                && pos > harness_gov
+            {
+                harness_violations.push(format!("{entry} 在 harness 晚于治理 {harness_gov}"));
+            }
+        }
+        assert!(
+            harness_violations.is_empty(),
+            "harness 的发放类兜底晚于收回类治理，与 mod.rs 不同序：\n{}",
+            harness_violations.join("\n")
+        );
+    }
+
+    /// 批七十四 B3 **终态行为锁**：跑完两条真实交付路径后，`common`（role_id=2，
+    /// 新建租户管理员的菜单模板源）**不得持有任一平台专属菜单**，且告警页面 4110 必不在。
+    ///
+    /// 为什么必须测到"终态"而不满足于源码形状：本轮实证链条是
+    /// 注册表 → 授权判定 → 模板复制 → **兜底发放** 四层，前三层都有静态锁，
+    /// 而第四层（`ensure_alert_rule_tables` 把 4110 发回 role 2）把整条治理洗成空转。
+    /// 只有落到库上数行，才能证明"假入口真的没了"。
+    ///
+    /// 两条路径各自代表一种真实部署姿态：
+    /// - **A 新装**：全新空库 + 完整 `Migrator::up`（开源用户首次 `cargo run`）；
+    /// - **B 存量升级**：基线迁移 + `run_all_initialize_fallbacks`（启动不跑 Migrator::up
+    ///   的既有约定，即 4.5z 治理在兜底末尾执行的新序）。
+    ///
+    /// 对照组（B3 的"不在"必须来自判据、而非授权整体丢失）：页面 148 与只读按钮 3622
+    /// 必须仍在 role 2 —— 与 b73 轮 15 的对照组同口径。
+    #[tokio::test]
+    async fn common_role_never_holds_platform_only_menus_on_either_path() {
+        /// 数库断言（写成 async fn 而非闭包：异步闭包的引用生命周期推不出来）
+        async fn probe(db: &DatabaseConnection) {
+            let rows = db
+                .query_all_raw(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    "SELECT rm.menu_id AS menu_id, m.perms AS perms \
+                     FROM sys_role_menu rm JOIN sys_menu m ON m.menu_id = rm.menu_id \
+                     WHERE rm.role_id = 2 AND m.del_flag = '0'"
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+            let granted: Vec<(i64, String)> = rows
+                .iter()
+                .map(|r| {
+                    (
+                        r.try_get::<i64>("", "menu_id").unwrap_or_default(),
+                        r.try_get::<String>("", "perms").unwrap_or_default(),
+                    )
+                })
+                .collect();
+            assert!(
+                granted.len() > 50,
+                "role 2 授权行仅 {} 条 ⇒ 种子未落库，本用例失去约束对象（不是通过）",
+                granted.len()
+            );
+            let leaked: Vec<String> = granted
+                .iter()
+                .filter(|(_, perms)| crate::common::tenant::is_platform_only_perm(perms))
+                .map(|(id, perms)| format!("{id}:{perms}"))
+                .collect();
+            assert!(
+                leaked.is_empty(),
+                "common 仍持有平台专属菜单 ⇒ 租户管理员模板会继承假入口：{leaked:?}"
+            );
+            assert!(
+                !granted.iter().any(|(id, _)| *id == 4110),
+                "告警页面 4110 仍在 role 2 ⇒ B3 未生效（真缺陷回归）"
+            );
+            for id in [148i64, 3622] {
+                assert!(
+                    granted.iter().any(|(gid, _)| *gid == id),
+                    "对照组 menu_id={id} 缺失 ⇒ '平台专属不在'来自授权整体丢失而非判据生效"
+                );
+            }
+        }
+
+        // ---- 路径 A：新装（完整迁移）----
+        let (db_a, path_a) = fresh_db("b3_migr").await;
+        migration::Migrator::up(&db_a, None)
+            .await
+            .expect("迁移侧建库失败（B3 终态锁 A）");
+        probe(&db_a).await;
+        let _ = std::fs::remove_file(&path_a);
+
+        // ---- 路径 B：存量升级（基线迁移 + 全部兜底）----
+        let (db_b, path_b) = fresh_db("b3_fallb").await;
+        let mut baseline = 0u32;
+        for m in migration::Migrator::migrations() {
+            baseline += 1;
+            if m.name() == FALLBACK_BASELINE_MIGRATION {
+                break;
+            }
+        }
+        assert!(
+            baseline > 0,
+            "兜底基线迁移未找到: {FALLBACK_BASELINE_MIGRATION}"
+        );
+        migration::Migrator::up(&db_b, Some(baseline))
+            .await
+            .expect("兜底侧基线建库失败（B3 终态锁 B）");
+        run_all_initialize_fallbacks(&db_b)
+            .await
+            .expect("initialize 兜底 harness 执行失败（B3 终态锁 B）");
+        probe(&db_b).await;
+        let _ = std::fs::remove_file(&path_b);
+
+        // ---- 对照组 C：**只发放、不收回** ⇒ 4110 必须**在** role 2 ----
+        // 这一条才证明上面两条"不在"来自治理判据，而不是"从来就没发过"。
+        // 同时它复现了 B3 修复前的真实故障姿态（治理跑在告警兜底之前）。
+        let (db_c, path_c) = fresh_db("b3_grant").await;
+        let mut baseline_c = 0u32;
+        for m in migration::Migrator::migrations() {
+            baseline_c += 1;
+            if m.name() == FALLBACK_BASELINE_MIGRATION {
+                break;
+            }
+        }
+        migration::Migrator::up(&db_c, Some(baseline_c))
+            .await
+            .expect("对照组基线建库失败");
+        crate::initialize::ledger::ensure_alert_rule_tables(&db_c)
+            .await
+            .expect("告警兜底执行失败（对照组）");
+        let c_rows = db_c
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT rm.menu_id AS menu_id FROM sys_role_menu rm \
+                 WHERE rm.role_id = 2 AND rm.menu_id = 4110"
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !c_rows.is_empty(),
+            "对照组失效：仅跑告警兜底时 4110 **未**发给 role 2 ⇒ 发放路径本就不产生该授权，\
+             上面两条'不在'的断言是在测空气（须重查判据）"
+        );
+        let _ = std::fs::remove_file(&path_c);
+    }
+
     /// 覆盖静态锁：`mod.rs` `run()` 中出现的每个 `ensure_*(` 调用都必须被
     /// `run_all_initialize_fallbacks` 覆盖。防止 harness 与生产编排漂移——
     /// 新增兜底函数接入 run() 后若未纳入本测试，此处必红。
@@ -1305,6 +1759,7 @@ mod schema_equivalence_lock_tests {
             "ensure_user_password_version_column",
             "ensure_user_must_change_pwd_column",
             "ensure_sso_rate_limit_tiers",
+            "ensure_sensitive_rate_limit_tiers",
             "ensure_runtime_secrets_encrypted",
             "ensure_sso_consent_unique",
             "ensure_sso_rs256_keys",

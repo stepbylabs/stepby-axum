@@ -124,6 +124,21 @@ impl SysBackupLogRepository {
         Ok(rows.into_iter().skip(keep).map(|r| r.backup_id).collect())
     }
 
+    /// 查出「卡在 running」且创建时间早于 `before` 的备份日志（b73 启动期收敛用）。
+    ///
+    /// 为什么需要：`create_backup` 先插一条 `status='running'` 的占位行，再由子进程写终态。
+    /// 进程被杀（发布重启 / OOM / Ctrl-C）时该行**永久停在 running**——备份列表页显示一个
+    /// 永远在跑的备份，运维无法判断结局，且 `find_excess_success_ids` 的轮转口径也绕开它。
+    /// 阈值由调用方给出（须显著大于备份子进程超时，见 `sys_backup_service::BACKUP_TIMEOUT`），
+    /// 以免误判**另一个实例正在执行**的备份（多副本共用一库时仍可能读到在跑的行）。
+    pub async fn find_stale_running(&self, before: NaiveDateTime) -> Result<Vec<Model>, DbErr> {
+        SysBackupLog::find()
+            .filter(Column::Status.eq("running"))
+            .filter(Column::CreateTime.lt(before))
+            .all(self.base.db())
+            .await
+    }
+
     /// 插入一条记录
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await

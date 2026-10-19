@@ -135,6 +135,27 @@ impl MailerService {
         self.enabled && self.transporter.is_some()
     }
 
+    /// 外部依赖探活（AGENTS #5，`/health` 聚合用）：**只握手、不发信**。
+    ///
+    /// `lettre` 的 `test_connection` 建立连接、读取服务欢迎语后即结束，**不投递任何
+    /// 邮件、不需要收件人**，因此可以被周期探针反复调用而无副作用（对比 `send` 会真的
+    /// 发信）。超时由调用方统一施加（见 `handler::health_probes`）。
+    ///
+    /// 错误文本可能含 SMTP 主机名（运维需要），但 lettre 不会回显凭据；调用方仍会过
+    /// 一遍脱敏（[`crate::handler::health_probes::sanitize_detail`]）作为纵深防御。
+    pub async fn probe(&self) -> Result<(), ServiceError> {
+        let Some(transport) = &self.transporter else {
+            return Err(ServiceError::internal(
+                "SMTP 客户端未构建（mail.enabled=false 或 host/from_email 缺失）",
+            ));
+        };
+        transport
+            .test_connection()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("SMTP 握手失败: {e}")))?;
+        Ok(())
+    }
+
     /// 解析发件人 Mailbox
     ///
     /// 注：方法名以 `from_` 开头但需要读取 self 配置，故保留 self 借用，不遵循 `From` trait 命名约定。
@@ -185,16 +206,47 @@ impl MailerService {
 
         // P1 修复：SMTP 发送加 10s 超时保护。原实现直接 await，SMTP 服务器
         // 无响应/网络黑洞时会无限挂起，拖住调用方请求（如公告创建链路）。
-        tokio::time::timeout(
+        //
+        // b72（AGENTS #4/#9）：改为 match 以区分 timeout 与协议错误两种结局——
+        // ① 组件指标按 outcome 分类（`component="mail"`），使 SMTP 故障可与"邮件功能关闭"区分；
+        // ② 原实现 `map_err(|_| …)` 把 SMTP 的**真实错误**整体丢弃，运维只能看到"发送失败"，
+        //    现在把错误源打进 WARN（**只打错误文本，不打收件地址**——邮箱属 PII，沿用既有脱敏口径）。
+        let started = std::time::Instant::now();
+        let outcome = match tokio::time::timeout(
             crate::common::constants::MAIL_SEND_TIMEOUT,
             transporter.send(email),
         )
         .await
-        .map_err(|_| {
-            tracing::warn!("邮件发送超时（>10s）: to={}, subject={}", to_email, subject);
-            ServiceError::internal(&crate::tr!("error.mail.send_timeout"))
-        })?
-        .map_err(|_| ServiceError::internal(&crate::tr!("error.mail.send_failed")))?;
+        {
+            Err(_) => {
+                crate::observability::metrics::MetricsRegistry::global().record_outbound(
+                    "mail",
+                    "timeout",
+                    started.elapsed().as_secs_f64(),
+                );
+                tracing::warn!("邮件发送超时（>10s）: subject={subject}");
+                return Err(ServiceError::internal(&crate::tr!(
+                    "error.mail.send_timeout"
+                )));
+            }
+            Ok(Err(e)) => {
+                crate::observability::metrics::MetricsRegistry::global().record_outbound(
+                    "mail",
+                    "error",
+                    started.elapsed().as_secs_f64(),
+                );
+                tracing::warn!("SMTP 投递失败: {e}（subject={subject}）");
+                return Err(ServiceError::internal(&crate::tr!(
+                    "error.mail.send_failed"
+                )));
+            }
+            Ok(Ok(_resp)) => "ok",
+        };
+        crate::observability::metrics::MetricsRegistry::global().record_outbound(
+            "mail",
+            outcome,
+            started.elapsed().as_secs_f64(),
+        );
 
         tracing::info!("邮件发送成功: to={}, subject={}", to_email, subject);
         Ok(())

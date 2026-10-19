@@ -42,7 +42,6 @@ use crate::entity::sys_oauth_user::{Column as OAuthUserColumn, Entity as SysOaut
 use crate::entity::sys_pat::{Column as PatColumn, Entity as SysPat};
 use crate::entity::sys_user::{ActiveModel as SysUserActiveModel, Model as SysUserModel};
 use crate::repository::sys_user::SysUserRepository;
-use crate::service::sso_service::SsoService;
 use crate::shared_store::SharedStore;
 
 /// 能力位键（`governance::FEATURES` 单一事实源）。
@@ -101,34 +100,29 @@ pub struct UserErasureReport {
 
 /// 用户匿名化 Service。
 ///
-/// 依赖：`sys_user` 仓储、共享态存储（会话失效标记 + SSO 令牌全量吊销）、`SsoService`
-/// （构造保留，SSO 吊销已收敛为 `store.revoke_all_for_user`；字段暂留兼容既有构造方）、
-/// 以及由 `config [features]` 净化解析出的**平台层能力集**（与启动注入同口径）。
+/// 依赖：`sys_user` 仓储、共享态存储（会话失效标记 + SSO 令牌全量吊销）、以及由
+/// `config [features]` 净化解析出的**平台层能力集**（与启动注入同口径）。
+///
+/// b74 收口：原先还持有 `SsoService` 字段但**从不读取**（SSO 吊销早已收敛为
+/// `store.revoke_all_for_user`），注释称"兼容既有构造方"而构造方只有 `state.rs` 一处
+/// ⇒ 属假依赖，已删。
 #[derive(Clone)]
 pub struct UserErasureService {
     db: DatabaseConnection,
     store: Arc<dyn SharedStore>,
     user_repo: SysUserRepository,
-    #[allow(dead_code)] // 吊销口径已收敛至 store.revoke_all_for_user；字段保留兼容既有构造方
-    sso_service: SsoService,
     /// 平台层能力集（构造时按 `config.features` 净化解析；与 `initialize::init_feature_flags`
     /// 同源同口径，仅**不读进程级 OnceLock**，从而支持每实例（含集成测试）独立配置）。
     features: FeatureSet,
 }
 
 impl UserErasureService {
-    pub fn new(
-        db: DatabaseConnection,
-        store: Arc<dyn SharedStore>,
-        sso_service: SsoService,
-        config: Arc<Settings>,
-    ) -> Self {
+    pub fn new(db: DatabaseConnection, store: Arc<dyn SharedStore>, config: Arc<Settings>) -> Self {
         let features = FeatureSet::sanitized(config.features.0.clone());
         Self {
             user_repo: SysUserRepository::new(db.clone()),
             db,
             store,
-            sso_service,
             features,
         }
     }

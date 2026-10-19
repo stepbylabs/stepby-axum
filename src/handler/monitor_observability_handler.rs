@@ -280,12 +280,12 @@ pub async fn redis_stats(
 
 // ==================== 工具函数 ====================
 
-/// 由 page_num/page_size 计算 skip/take（page_num 从 1 起，最小为 1）
+/// 由 page_num/page_size 计算 skip/take（内存环形缓冲分页，观测类接口自有 200 行上限）
+///
+/// 溢出与封顶全部委托 [`crate::common::page::page_args_capped`]：本处的 `as usize` 之前
+/// 曾有 `(page_num - 1) as usize` 的独立算式，`offset_of` 的饱和语义一旦被它绕过就
+/// 只剩"靠 clamp 侥幸"，故收成一个调用。
 fn page_slice(page_num: u64, page_size: u64) -> (usize, usize) {
-    let page_num = page_num.max(1);
-    let page_size = page_size.clamp(1, 200) as usize;
-    (
-        ((page_num - 1) as usize).saturating_mul(page_size),
-        page_size,
-    )
+    let (offset, limit) = crate::common::page::page_args_capped(page_num, page_size, 200);
+    (offset.min(usize::MAX as u64) as usize, limit as usize)
 }

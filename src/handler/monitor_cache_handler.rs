@@ -365,6 +365,9 @@ pub async fn get_keys(
     State(state): State<Arc<AppState>>,
     Path(cache_name): Path<String>,
 ) -> Result<AjaxResult<Vec<String>>, AppError> {
+    // 解码只做一次，且由框架做：`Path<String>` 已把 `%3A` 还原成 `:`（与 get_value /
+    // clear_cache_name 同一口径）。这里再解一次会让"双重编码的手误"（`%253A`）被洗成
+    // 合法前缀 ⇒ 管理员以为在查 `sys_config%3A`，实际清的是 `sys_config:`，静默打偏。
     // 校验缓存前缀白名单
     validate_cache_prefix(&cache_name)?;
     let pattern = format!("{}*", cache_name);

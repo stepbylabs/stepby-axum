@@ -1,5 +1,6 @@
 // stepby-axum/src/common/mod.rs
 
+pub mod background;
 pub mod clear_fields;
 pub mod constants;
 pub mod custom_scope;
@@ -17,6 +18,12 @@ pub mod http_status;
 pub mod i18n;
 pub mod image;
 pub mod page;
+// 形状锁共用的生产码采集器：**只在测试构建存在**（`pub(crate)` 供各锁模块的 tests 使用）。
+// 采集口径（`#[cfg(test)]` 截断、注释行处理、自豁免、体量下限）收在这一个文件里，
+// 理由与六份旧实现的口径对照见该模块文档。
+#[cfg(test)]
+pub(crate) mod prod_scan;
+pub mod redact;
 pub mod response;
 pub mod risk_control;
 pub mod sort;

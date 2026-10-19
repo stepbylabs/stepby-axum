@@ -86,7 +86,8 @@
 - [ ] `stepby-axum/migration/Cargo.toml` 存在
 - [ ] `stepby-axum/migration/src/lib.rs` 存在
 - [ ] `stepby-axum/migration/src/main.rs` 存在
-- [ ] `stepby-axum/migration/src/m20250711_000001_init.rs` 存在
+- [ ] `stepby-axum/migration/src/migrations/m20250711_000001_init.rs` 存在
+      （迁移文件在批五十前后从 `migration/src/` 归拢到 `migration/src/migrations/`，检查单一直未跟着改，实测三处引用指向不存在的路径）
 
 ### 2.3 禁止存在的文件
 

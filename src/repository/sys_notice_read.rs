@@ -65,20 +65,18 @@ impl SysNoticeReadRepository {
             ..Default::default()
         };
         let insert = SysNoticeRead::insert(am);
-        // MySQL 不支持无列 ON CONFLICT DO NOTHING，需显式冲突主键列。
-        // on_conflict_do_nothing 返回 TryInsert：Conflicted（已存在被忽略）是**正常路径**
-        // （§5.53 迁移初版误把 RecordNotInserted 当错误上抛 → 400"数据重复"——链路测试实证）
-        match db.get_database_backend() {
-            DatabaseBackend::MySql => {
-                let _ = insert
-                    .on_conflict_do_nothing_on([Column::NoticeId, Column::UserId])
-                    .exec(db)
-                    .await?;
-            }
-            _ => {
-                let _ = insert.on_conflict_do_nothing().exec(db).await?;
-            }
-        }
+        // 统一用**显式冲突目标列**（b73 轮 13 实证缺陷订正）：
+        // 无目标版 `on_conflict_do_nothing()` 在 SQLite 上不注入 ON CONFLICT 子句，重复标记
+        // 直接撞 UNIQUE(notice_id, user_id) → 400「数据重复，请检查唯一字段」+ WARN。
+        // 本仓同族的批量路径（mark_read_batch）早已因此改用带目标列版本（§5.53），
+        // 但单条路径漏改——链路测试 6b「重复标记必须幂等」把这条补齐。
+        // 带目标列版本三方言均正确生成（MySQL 走 ON DUPLICATE KEY polyfill），
+        // 且目标列与表上的 UNIQUE(notice_id, user_id) 严格对应，不会掩盖其他约束冲突。
+        // Conflicted（已存在被忽略）是**正常路径**，不得当错误上抛。
+        let _ = insert
+            .on_conflict_do_nothing_on([Column::NoticeId, Column::UserId])
+            .exec(db)
+            .await?;
         Ok(())
     }
 

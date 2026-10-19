@@ -558,12 +558,7 @@ pub(crate) async fn ensure_data_rule_tables(db: &DatabaseConnection) -> anyhow::
     } else {
         ""
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
     let menu_rows = format!(
         "(4117, '数据权限规则', 1, 15, 'dataRule', 'system/dataRule/index', '', '', '1', '0', 'C', '0', '0', 'system:dataRule:list', 'rule', 'admin', {now_expr}, 'DP-01 结构化数据权限规则', '0'), \

@@ -67,14 +67,12 @@ fn is_unique_conflict(e: &DbErr) -> bool {
 }
 
 /// local 档共享态存储（与业务同库，S1/S2 天然持久且多实例可共享）
-#[allow(dead_code)]
 pub struct LocalStore {
     db: DatabaseConnection,
 }
 
 impl LocalStore {
-    /// 构造（未接线期 #[allow(dead_code)] 预防告警；接线后可移除）
-    #[allow(dead_code)]
+    /// 构造（local/redis 两档由 initialize 的存储工厂接线）
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }

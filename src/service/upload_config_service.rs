@@ -72,7 +72,10 @@ pub struct UploadConfigMaskedVo {
     pub bucket: String,
     pub path_style: bool,
     pub public_endpoint: String,
-    /// config.toml 档位（local/s3）——覆盖仅在该档位为 s3 时生效
+    /// **当前生效档位**（local/s3）：`sys.upload.backend` 覆盖优先，缺省回落 config.toml 出厂档。
+    ///
+    /// 必须与写路径/探针用的档位同源（[`UploadConfigService::effective_backend_mode`]）——回显出厂档
+    /// 会让管理页显示与实际行为分裂（C.7）。
     pub backend_mode: String,
 }
 
@@ -188,7 +191,10 @@ impl UploadConfigService {
             bucket: effective.bucket.clone(),
             path_style: effective.path_style,
             public_endpoint: effective.public_endpoint.clone(),
-            backend_mode: self.startup_backend_mode.clone(),
+            // C.7 回显与生效同源（b74 §一.6）：此前回显 `startup_backend_mode`（出厂档快照），
+            // 而写路径与 `/health` 探针用 `effective_backend_mode()` ⇒ 管理员热切换 s3↔local 后
+            // "页面显示出厂档、实际跑覆盖档"，与 AGENTS 点名的"显示 8、实际 4"是同一种行为分裂。
+            backend_mode: self.effective_backend_mode().await?,
         })
     }
 

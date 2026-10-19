@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260806_000001_add_log_time_indexes.rs
+// stepby-axum/migration/src/migrations/m20260806_000001_add_log_time_indexes.rs
 //! 第三十一次迁移：补充日志表时间/状态索引（R10 性能优化）
 //!
 //! 新增索引（按 P0 优先级）：

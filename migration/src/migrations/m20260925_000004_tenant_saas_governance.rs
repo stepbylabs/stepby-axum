@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260925_000004_tenant_saas_governance.rs
+// stepby-axum/migration/src/migrations/m20260925_000004_tenant_saas_governance.rs
 //! 多租户 Phase 3.5f：SaaS 治理（config 治理列 + 唯一域租户化 + 审计目标租户）。
 //!
 //! 对应文档 §27.8（config 治理）/ §27.9（隔离缺口：审计目标租户）/ §29.7 P2

@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000002_platform_only_menu_regrant.rs
+// stepby-axum/migration/src/migrations/m20260926_000002_platform_only_menu_regrant.rs
 //! 台账 F-4 / F-5（原则 B）：平台专属能力菜单退出租户与平台普通角色可授集合。
 //!
 //! 背景（`docs/optimization/multitenant-pending-items-ledger-2026-09-25.md` §1.2）：

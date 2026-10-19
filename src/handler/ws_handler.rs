@@ -207,10 +207,16 @@ impl Drop for WsConnGuard {
         if self.armed {
             let state = self.state.clone();
             let user_id = self.user_id;
-            // Drop 不能 await，spawn 异步任务执行 DECR
-            tokio::spawn(async move {
-                decr_ws_conn_count(&state, user_id).await;
-            });
+            // Drop 不能 await，spawn 异步任务执行 DECR（走统一范式：超时 + panic 隔离 + 失败计数）
+            // 计数漏减会让"在线连接数"长期偏高，因此结局必须可观测
+            crate::common::background::spawn_tracked(
+                "ws_conn_decr",
+                crate::common::background::LIGHT_DB_BUDGET,
+                Some(crate::observability::metrics::MetricsRegistry::global()),
+                async move {
+                    decr_ws_conn_count(&state, user_id).await;
+                },
+            );
         }
     }
 }

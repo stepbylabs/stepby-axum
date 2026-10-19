@@ -95,12 +95,16 @@ pub fn msg_routes() -> Router<Arc<AppState>> {
         )
         // POST /system/msg/log/retryPending/{batch} 触发待重试批次批量重试
         // b71 契约审计：编排预留，零前端调用 → router/mod.rs 清单 ③
+        // （批七十六复核维持原判：调度器每轮已自动执行同一 service.retry_pending，
+        //   见 scheduler/mod.rs 的 MESSAGE_RETRY_BATCH；HTTP 形态只是人工提前触发，
+        //   做成按钮反而与自动链路重复且无"批次"概念可选。）
         .route(
             "/system/msg/log/retryPending/{batch}",
             post(sys_msg_handler::retry_pending),
         )
-        // POST /system/msg/log/markPending/{logIds} 将发送记录标记为待重试
-        // b71 契约审计：编排预留，零前端调用 → router/mod.rs 清单 ③
+        // POST /system/msg/log/markPending/{logIds} 把失败终态记录交回重试队列
+        // 批七十六：前端发送记录页多选工具条已接（system:msg:log:retry 同权限键），
+        // 不再属于 router/mod.rs 清单 ③
         .route(
             "/system/msg/log/markPending/{logIds}",
             post(sys_msg_handler::mark_pending_retry),

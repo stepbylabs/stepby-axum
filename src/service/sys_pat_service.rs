@@ -433,7 +433,13 @@ impl SysPatService {
     /// best-effort 更新最近使用时间（供中间件 spawn 调用，失败忽略）
     pub async fn touch_last_used(&self, pat_id: &str) {
         if let Err(e) = self.pat_repo.touch_last_used(pat_id).await {
-            tracing::debug!("更新 PAT last_used_at 失败（忽略）: {}", e);
+            // b72：由 debug 升为 warn——last_used_at 是 PAT 生命周期与异常检测的输入
+            // （"长期未用仍有效"的凭据靠它收敛），静默失败会让该字段悄悄说谎。
+            // 本调用点已在受守卫后台任务内（`middleware/auth.rs` / `ak_sign.rs`），不影响请求线程。
+            tracing::warn!(
+                "更新 PAT last_used_at 失败（已忽略，字段将停留在上次值）: {}",
+                e
+            );
         }
     }
 
@@ -666,9 +672,7 @@ fn resolve_expiry(
 }
 
 fn page_args(page_num: u64, page_size: u64) -> (u64, u64) {
-    let size = page_size.clamp(1, 100);
-    let num = page_num.max(1);
-    ((num - 1) * size, size)
+    crate::common::page::page_args(page_num, page_size)
 }
 
 fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> Option<String> {

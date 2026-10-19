@@ -489,6 +489,196 @@ pub fn keys_with_coverage(coverage: Coverage) -> impl Iterator<Item = &'static s
         .map(|i| i.key)
 }
 
+// ---------------------------------------------------- 普通角色（common）授权策略
+
+/// 平台普通角色 `role_id = 2`（`role_key = common`）——种子授权的唯一目标角色。
+pub const COMMON_ROLE_ID: i64 = 2;
+
+/// common 角色 F 按钮中的**只读权限后缀**（§8.2 安全发现的判据，b73 轮 15 提为单一事实源）。
+///
+/// 为何必须集中于此：`m20260924_000010_common_role_readonly` 把 common 收紧为
+/// "页面可见 + 只读按钮"之后，**后续新增菜单的迁移与 `initialize` 兜底**仍沿用 RuoYi
+/// 上游习惯把写权限按钮（`:add/:edit/:remove/:export/:save/:publish/:test-send/:revoke`）
+/// 一并授权 ⇒ 种子逐批复潮。纯种子库实测 12 处（`monitor:pat:revoke` /
+/// `system:webhook:test-send` / `system:webhook:event:edit` /
+/// `system:scimgroup:edit|remove` / `system:audit-change:export` /
+/// `tool:reportBoard:save` / `flow:definition:add|edit|publish|remove` /
+/// `report:dataset:edit`），见 `docs/optimization/quality-batch-73-2026-10-17.md`。
+/// **授权点散落而判据只有一处，侵蚀是必然而非偶然**，故所有 common 授权点必须共用本判据。
+pub const COMMON_ROLE_READONLY_PERM_SUFFIXES: [&str; 4] = [":list", ":query", ":view", ":center"];
+
+/// 写权限按钮**刻意**授予 common 角色的例外登记（`(menu_id, 理由)`）。
+///
+/// 例外必须逐条带理由：common 同时是"新建租户默认管理员角色"的**菜单模板复制源**
+/// （见 `sys_tenant_service::tenant_role_menu_ids` 与
+/// `initialize::ensure_tenant_role_menu_governance` 文档），所以"新业务菜单默认授予
+/// common"是产品决策而非疏漏——但只有**作用域限于本人**或**由能力位（默认 off）封顶**
+/// 的写权限才可登记；越权面（吊销他人令牌 / 改出站投递配置 / 改 SCIM 组映射 /
+/// 导出审计留痕）一律不得登记。
+pub const COMMON_ROLE_WRITE_EXCEPTIONS: &[(i64, &str)] = &[
+    (
+        4131,
+        "看板保存作用于**本人**看板（`sys_report_board.user_id` 属主，v1 仅本人可读写），非越权面",
+    ),
+    (
+        4142,
+        "批次十三 用户拍板：G-01/G-02 菜单 4140-4148 全量授予 common（common 为租户角色菜单模板源）；\
+         写权限仍受 `flow.designer` / `report.designer` 能力位（默认 off）+ 租户过滤三层守卫",
+    ),
+    (4143, "同 4142（批次十三 拍板：流程定义编辑受能力位封顶）"),
+    (4144, "同 4142（批次十三 拍板：流程定义发布受能力位封顶）"),
+    (4145, "同 4142（批次十三 拍板：流程定义删除受能力位封顶）"),
+    (4147, "同 4142（批次十三 拍板：数据集编辑受能力位封顶）"),
+];
+
+/// 例外 menu_id 集合（供 SQL 子句与锁测试共用）。
+pub fn common_role_write_exception_ids() -> Vec<i64> {
+    COMMON_ROLE_WRITE_EXCEPTIONS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// 方言相关的幂等插入片段（`sys_role_menu` 主键为 `(role_id, menu_id)`，重复插入即跳过）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    Sqlite,
+    Postgres,
+    MySql,
+}
+
+impl Dialect {
+    fn insert_prefix(self) -> &'static str {
+        match self {
+            Dialect::Sqlite => "INSERT OR IGNORE INTO ",
+            Dialect::Postgres => "INSERT INTO ",
+            Dialect::MySql => "INSERT IGNORE INTO ",
+        }
+    }
+
+    fn conflict_suffix(self) -> &'static str {
+        match self {
+            Dialect::Postgres => " ON CONFLICT DO NOTHING",
+            Dialect::Sqlite | Dialect::MySql => "",
+        }
+    }
+}
+
+/// SQL 侧的 common 授权判定子句（作用于 `sys_menu` 行），与 [`common_role_may_grant`] 等价。
+///
+/// 三方言通用：只用 `IN` 与 `LIKE` 后缀匹配，不含方言特有函数；`perms` 均为小写、
+/// 无 collation 歧义（与 `m20260924_000010` 原实现一致）。例外 menu_id 由
+/// [`COMMON_ROLE_WRITE_EXCEPTIONS`] 展开为 `menu_id IN (…)`，两侧同源。
+pub fn common_role_grant_where() -> String {
+    let suffix = COMMON_ROLE_READONLY_PERM_SUFFIXES
+        .iter()
+        .map(|s| format!("perms LIKE '%{s}'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let exceptions = common_role_write_exception_ids();
+    let exception_clause = if exceptions.is_empty() {
+        String::new()
+    } else {
+        let list = exceptions
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" OR menu_id IN ({list})")
+    };
+    format!("(menu_type IN ('M', 'C') OR (menu_type = 'F' AND ({suffix})){exception_clause})")
+}
+
+/// Rust 侧的 common 授权判定，供生成种子语句时预判（与 SQL 侧同源，不得各写各的）。
+///
+/// 平台专属 perms 的剔除由 `ensure_tenant_role_menu_governance`（能力位感知）负责，
+/// 本谓词只管"读 / 写"维度——两者正交，不得在此混入前缀判断。
+pub fn common_role_may_grant(menu_id: i64, menu_type: &str, perms: &str) -> bool {
+    if COMMON_ROLE_WRITE_EXCEPTIONS
+        .iter()
+        .any(|(id, _)| *id == menu_id)
+    {
+        return true;
+    }
+    match menu_type {
+        "M" | "C" => true,
+        "F" => COMMON_ROLE_READONLY_PERM_SUFFIXES
+            .iter()
+            .any(|s| perms.ends_with(s)),
+        _ => false,
+    }
+}
+
+/// common 授权补种的**语句体**（不含幂等前缀/冲突后缀，交给调用方的方言助手拼接）。
+///
+/// 形如 `sys_role_menu (role_id, menu_id) SELECT 2, menu_id FROM sys_menu WHERE …`，
+/// 可直接喂给迁移侧 `execute_idempotent_insert` 与兜底侧 `flow_insert`——两处都已
+/// 负责 `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` / `INSERT IGNORE` 方言差异。
+///
+/// 语义：授权结果由 DB 侧套用 [`common_role_grant_where`] ⇒ 调用方即便传入写权限按钮
+/// 的 `menu_id`，也**不会**产生越权授权（策略落在数据层，而非依赖调用方自觉）。
+/// 幂等：`(role_id, menu_id)` 主键冲突跳过，重复执行 0 行。
+pub fn common_role_grant_select_body(menu_ids: &[i64]) -> String {
+    let id_list = menu_ids
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "sys_role_menu (role_id, menu_id) SELECT {}, menu_id FROM sys_menu \
+         WHERE del_flag = '0' AND menu_id IN ({}) AND {}",
+        COMMON_ROLE_ID,
+        id_list,
+        common_role_grant_where()
+    )
+}
+
+/// 为**刚补种的菜单**按策略幂等授权 common 角色（`initialize` 兜底唯一合法写法）。
+///
+/// = 方言前后缀 + [`common_role_grant_select_body`]。
+pub fn common_role_backfill_sql(dialect: Dialect, menu_ids: &[i64]) -> String {
+    format!(
+        "{}{}{}",
+        dialect.insert_prefix(),
+        common_role_grant_select_body(menu_ids),
+        dialect.conflict_suffix()
+    )
+}
+
+/// common 角色的**声明式目标态重排**（与 `m20260924_000010` 同语义），返回 `(DELETE, INSERT)`。
+///
+/// ⚠️ 只允许**一次性**路径（迁移）使用，启动兜底**禁止**调用：common 是可被管理员编辑的
+/// 普通角色（实测 `PUT /system/role` 对 role_id=2 生效），每次启动重排会静默摧毁
+/// 管理员在角色授权页的自定义授权。存量库的既有越权行由运维在管理端收紧，
+/// 本项目的存量回收纪律见 AGENTS《开关类能力设计规范》第 6 条。
+pub fn common_role_realign_sql() -> (String, String) {
+    (
+        format!("DELETE FROM sys_role_menu WHERE role_id = {COMMON_ROLE_ID}"),
+        format!(
+            "INSERT INTO sys_role_menu (role_id, menu_id) \
+             SELECT {COMMON_ROLE_ID}, menu_id FROM sys_menu \
+             WHERE del_flag = '0' AND {}",
+            common_role_grant_where()
+        ),
+    )
+}
+
+/// **窄撤销**：只删除 common 上"违反策略"的授权行，不重排、不触碰合规授权。
+///
+/// 与 [`common_role_realign_sql`] 的区别是本函数**只减不增**，因此可用于升级路径：
+/// 全量重排会连带删掉管理员在授权页手工勾选的合规项，窄撤销只回收策略判定的越权面
+/// （写权限 F 按钮 + 已软删菜单），管理员为页面/只读按钮做的授权一律保留。
+/// 幂等：第二次执行影响 0 行。
+///
+/// 同样**禁止**挂到启动兜底（每次启动都会回收管理员事后手工勾选的写按钮）。
+pub fn common_role_erosion_sql() -> String {
+    format!(
+        "DELETE FROM sys_role_menu WHERE role_id = {COMMON_ROLE_ID} AND menu_id IN (\
+         SELECT menu_id FROM sys_menu WHERE NOT (del_flag = '0' AND {}))",
+        common_role_grant_where()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,5 +904,191 @@ mod tests {
                 f.key
             );
         }
+    }
+
+    // ------------------------------------------------ common 授权策略锁
+
+    /// 策略矩阵：M/C 恒可见；F 只读后缀放行；F 写权限拒绝；例外 menu_id 放行。
+    ///
+    /// 可证伪性：把 `:center` 从只读集合删除、或把某个写后缀误加进只读集合，
+    /// 本用例立即变红（对照组：同一条写权限 perms 挂在例外 id 上必须放行，
+    /// 证明放行来自 id 例外而非判据失效）。
+    #[test]
+    fn test_common_role_policy_matrix() {
+        let readonly = [
+            ("system:config:list", true),
+            ("system:user:query", true),
+            ("monitor:server:view", true),
+            ("system:user:profile", false),
+            ("tool:gen:preview", false),
+            ("monitor:cache:list", true),
+        ];
+        for (perms, want) in readonly {
+            assert_eq!(
+                common_role_may_grant(900_001, "F", perms),
+                want,
+                "F 按钮 {perms} 的只读判定应为 {want}"
+            );
+        }
+        // 目录/页面：无论 perms 为何都放行（页面可见由 getRouters 与能力位再剪枝）
+        for mt in ["M", "C"] {
+            assert!(common_role_may_grant(900_002, mt, ""));
+            assert!(common_role_may_grant(900_003, mt, "system:user:remove"));
+        }
+        // 未知菜单类型一律拒绝（fail-closed，防"新增类型即自动放行"）
+        for mt in ["", "F ", "X", "B"] {
+            assert!(!common_role_may_grant(900_004, mt, "system:user:list"));
+        }
+        // 写权限：非例外 id 拒绝；同一 perms 在例外 id 上放行（例外来自 id，不来自判据）
+        assert!(!common_role_may_grant(900_005, "F", "system:user:remove"));
+        let first_exception = COMMON_ROLE_WRITE_EXCEPTIONS[0];
+        assert!(common_role_may_grant(
+            first_exception.0,
+            "F",
+            "system:user:remove"
+        ));
+    }
+
+    /// 例外登记表自洽：id 唯一、为正、理由非空且不是占位（防止"为消除红灯而登记空理由"）
+    #[test]
+    fn test_common_role_write_exceptions_are_reasoned() {
+        let mut seen: HashSet<i64> = HashSet::new();
+        for (id, reason) in COMMON_ROLE_WRITE_EXCEPTIONS {
+            assert!(*id > 0, "例外 menu_id 非法：{id}");
+            assert!(seen.insert(*id), "例外 menu_id 重复登记：{id}");
+            assert!(
+                reason.trim().len() >= 8,
+                "例外 {id} 的理由过短（{reason}）——例外必须自带可复核依据"
+            );
+            // 例外只适用于写权限按钮：其 id 不得同时是只读后缀能放行的（那是冗余登记）
+            assert!(
+                !COMMON_ROLE_READONLY_PERM_SUFFIXES
+                    .iter()
+                    .any(|s| reason.ends_with(s)),
+                "例外 {id} 的理由形似权限后缀，应为说明文字"
+            );
+        }
+        assert!(
+            !COMMON_ROLE_WRITE_EXCEPTIONS.is_empty(),
+            "例外表为空说明批次十三 拍板被静默丢弃"
+        );
+    }
+
+    /// SQL 子句与 Rust 谓词同源：子句必须展开全部只读后缀与全部例外 id（缺一即两侧判据漂移）
+    #[test]
+    fn test_common_role_grant_where_expands_both_sources() {
+        let sql = common_role_grant_where();
+        assert!(sql.contains("menu_type IN ('M', 'C')"), "{sql}");
+        for s in COMMON_ROLE_READONLY_PERM_SUFFIXES {
+            // 必须**带闭引号**：`'%:list` 少了结尾 `'` 会让整条语句引号失配，
+            // 后续 `:query` 被 SQLite 当作命名参数 ⇒ sqlx 直接报
+            // "unsupported SQL parameter format"（b73 轮 15 实测由 initialize 兜底测试抓回）
+            assert!(
+                sql.contains(&format!("perms LIKE '%{s}'")),
+                "子句缺只读后缀 {s}（或引号未闭合）: {sql}"
+            );
+        }
+        assert_eq!(
+            sql.matches('\'').count() % 2,
+            0,
+            "单引号数量必须成对，否则 SQL 语法/参数解析失败: {sql}"
+        );
+        for id in common_role_write_exception_ids() {
+            assert!(
+                sql.contains("menu_id IN (") && sql.contains(&id.to_string()),
+                "子句缺例外 id {id}"
+            );
+        }
+        // 例外为空的退化态仍必须是合法 SQL（防"空 IN ()"语法错误）
+        assert!(
+            common_role_write_exception_ids().is_empty() || sql.contains(" OR menu_id IN ("),
+            "存在例外登记却未展开 IN 子句: {sql}"
+        );
+        assert!(
+            !sql.contains("IN ()"),
+            "空 IN 子句会触发 SQL 语法错误: {sql}"
+        );
+    }
+
+    /// 兜底补授 SQL 形状锁：必须是 `INSERT … SELECT`（DB 侧套用策略），
+    /// 且禁止退回裸 `VALUES (2, id)` 形态——后者正是本次治理根除的侵蚀入口。
+    #[test]
+    fn test_common_role_backfill_sql_shape() {
+        for (dialect, expect_prefix, expect_suffix) in [
+            (Dialect::Sqlite, "INSERT OR IGNORE INTO ", ""),
+            (Dialect::Postgres, "INSERT INTO ", " ON CONFLICT DO NOTHING"),
+            (Dialect::MySql, "INSERT IGNORE INTO ", ""),
+        ] {
+            let sql = common_role_backfill_sql(dialect, &[3560, 3561]);
+            assert!(
+                sql.starts_with(expect_prefix),
+                "{dialect:?} 前缀不符: {sql}"
+            );
+            assert!(sql.ends_with(expect_suffix), "{dialect:?} 后缀不符: {sql}");
+            assert!(sql.contains("SELECT 2, menu_id FROM sys_menu"), "{sql}");
+            assert!(sql.contains("menu_id IN (3560, 3561)"), "{sql}");
+            assert!(sql.contains("del_flag = '0'"), "{sql}");
+            assert!(
+                sql.contains(&common_role_grant_where()),
+                "{dialect:?} 未套用策略子句: {sql}"
+            );
+            assert!(
+                !sql.contains("VALUES (2,"),
+                "{dialect:?} 退回裸 VALUES 形态，绕过策略: {sql}"
+            );
+            assert!(
+                !sql.contains("IN ()"),
+                "空 IN 子句会触发 SQL 语法错误: {sql}"
+            );
+            assert_eq!(
+                sql.matches('\'').count() % 2,
+                0,
+                "{dialect:?} 单引号未成对: {sql}"
+            );
+        }
+        // 语句体必须是"裸 body"（无前后缀），否则调用方的方言助手会二次拼接出非法 SQL
+        let body = common_role_grant_select_body(&[3560, 3561]);
+        assert!(
+            body.starts_with("sys_role_menu (role_id, menu_id) SELECT"),
+            "{body}"
+        );
+        for frag in ["INSERT", "ON CONFLICT", "IGNORE"] {
+            assert!(!body.contains(frag), "语句体不应含 {frag} 片段: {body}");
+        }
+    }
+
+    /// 声明式重排 SQL 形状锁（迁移专用）：DELETE 只作用 common，INSERT 套用策略子句
+    #[test]
+    fn test_common_role_realign_sql_shape() {
+        let (delete, insert) = common_role_realign_sql();
+        assert_eq!(delete, "DELETE FROM sys_role_menu WHERE role_id = 2");
+        assert!(insert.starts_with("INSERT INTO sys_role_menu (role_id, menu_id)"));
+        assert!(insert.contains("del_flag = '0'"), "{insert}");
+        assert!(
+            insert.contains(&common_role_grant_where()),
+            "重排语句未套用策略子句: {insert}"
+        );
+        assert!(!insert.contains("DELETE"), "INSERT 语句不得夹带 DELETE");
+    }
+
+    /// 窄撤销 SQL 形状锁：只删 common、且**只删违反策略的行**（只减不增 ⇒ 升级路径安全）
+    ///
+    /// 可证伪性：若有人把子句写成"删除全部 common 授权"（漏掉 `NOT (…)` 包裹），
+    /// 本用例会因缺少策略子句而红；若把 role 过滤写丢，会因缺少 `role_id = 2` 而红。
+    #[test]
+    fn test_common_role_erosion_sql_shape() {
+        let sql = common_role_erosion_sql();
+        assert!(
+            sql.starts_with("DELETE FROM sys_role_menu WHERE role_id = 2 AND menu_id IN ("),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "NOT (del_flag = '0' AND {})",
+                common_role_grant_where()
+            )),
+            "窄撤销未套用策略子句: {sql}"
+        );
+        assert!(!sql.contains("INSERT"), "窄撤销只减不增: {sql}");
     }
 }

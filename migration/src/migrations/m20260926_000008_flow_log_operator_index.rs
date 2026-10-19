@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000008_flow_log_operator_index.rs
+// stepby-axum/migration/src/migrations/m20260926_000008_flow_log_operator_index.rs
 //! 台账 W-12：为「已办视图」（W-8）补索引 `idx_flow_log_operator (operator_id, acted_at)`。
 //!
 //! ## 背景

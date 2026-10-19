@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260717_000001_add_indexes.rs
+// stepby-axum/migration/src/migrations/m20260717_000001_add_indexes.rs
 //! 第三次迁移：补充高频查询字段索引
 //!
 //! 新增索引：

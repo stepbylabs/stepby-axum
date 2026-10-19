@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260818_000001_add_log_monitor_menu.rs
+// stepby-axum/migration/src/migrations/m20260818_000001_add_log_monitor_menu.rs
 //! 新增「实时日志」监控菜单（menu_id=135）
 //!
 //! 背景：
@@ -33,14 +33,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-/// 当前时间表达式（跨数据库兼容）
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT

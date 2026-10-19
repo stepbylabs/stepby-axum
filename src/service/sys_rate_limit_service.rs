@@ -137,6 +137,21 @@ const SORTABLE_COLUMNS: &[(&str, RateLimitColumn)] = &[
     ("update_time", RateLimitColumn::UpdateTime),
 ];
 
+/// 某路由解析出的**限流档位**（配置 + 分桶口径）。
+///
+/// `own_tier` 语义：`true` = DB 中存在 `route_pattern == 本路由` 且启用的行（该接口有
+/// 自己的档位）；`false` = 回落 `*` 全局默认。中间件据此选择桶：
+/// - `true` ⇒ 桶键含路由模板（各档位彼此隔离）；
+/// - `false` ⇒ 沿用 `rate_limit:{tid}:{ip}` 共享桶（与改造前**逐字节等价**）。
+///
+/// 为什么必须分流：本表此前所有档位共用同一个 (租户,IP) 桶，桶参数取"当前这一次请求
+/// 命中的行"——于是 5 次/20s 的敏感操作档位会把同客户端的无关接口一起掐断（b72 实证）。
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitTier {
+    pub config: RateLimitConfig,
+    pub own_tier: bool,
+}
+
 /// API 限流配置 Service
 ///
 /// 数据访问通过 Repository 层委托：
@@ -149,7 +164,7 @@ pub struct SysRateLimitService {
     rate_limit_repo: SysRateLimitRepository,
     store: Arc<dyn SharedStore>,
     /// M-2：进程内缓存（route → (config, fetched_at)），短 TTL 减少共享存储往返
-    local_cache: Mutex<HashMap<String, (RateLimitConfig, Instant)>>,
+    local_cache: Mutex<HashMap<String, (RateLimitTier, Instant)>>,
 }
 
 impl SysRateLimitService {
@@ -357,7 +372,17 @@ impl SysRateLimitService {
         Ok(())
     }
 
-    /// 获取指定路由的限流配置（中间件调用）
+    /// 获取指定路由的限流配置（中间件调用；只需参数时用本方法，需要分桶口径用
+    /// [`Self::resolve_tier_for_route`]）。
+    pub async fn get_config_for_route(&self, route: &str) -> Result<RateLimitConfig, ServiceError> {
+        Ok(self.resolve_tier_for_route(route).await?.config)
+    }
+
+    /// 解析指定路由的**限流档位**（配置 + 该路由是否拥有独立档位）。
+    ///
+    /// `has_own_tier` 是分桶口径的关键：限流桶必须按档位隔离，否则"敏感操作 5 次/20s"
+    /// 这类紧档位会把同客户端的无关接口一起掐断（b72 e2e 实证：租户恢复(桶 5)之后
+    /// 的域名 verify 直接 429）。见 `middleware::rate_limit` 的分桶说明。
     ///
     /// M-2 缓存层次：local_cache (10s) → Redis (300s) → DB
     /// 流程：
@@ -369,7 +394,7 @@ impl SysRateLimitService {
     ///
     /// 注意：本方法不会返回错误（中间件无法处理错误），任何异常都降级到默认配置。
     /// 中间件调用方应使用 `unwrap_or_default()` 或 `.unwrap_or(RateLimitConfig::default())`。
-    pub async fn get_config_for_route(&self, route: &str) -> Result<RateLimitConfig, ServiceError> {
+    pub async fn resolve_tier_for_route(&self, route: &str) -> Result<RateLimitTier, ServiceError> {
         let key = Self::cache_key(route);
 
         // 0. M-2：先查进程内 local_cache（短 TTL，命中则直接返回，避免 Redis 往返）
@@ -393,33 +418,38 @@ impl SysRateLimitService {
         if let Some(val) = cached
             && let Ok(cached_config) = serde_json::from_str::<RateLimitConfigCached>(&val)
         {
-            let cfg: RateLimitConfig = cached_config.into();
+            let tier: RateLimitTier = cached_config.into();
             // M-2：回填 local_cache（best-effort）
             // H-1：Mutex 中毒时恢复 Guard，块作用域确保 await 前 drop
             {
                 let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
-                cache.insert(route.to_string(), (cfg, Instant::now()));
+                cache.insert(route.to_string(), (tier, Instant::now()));
             }
             // R-2：惰性清理已过期的 local_cache 条目
             self.cleanup_local_cache();
-            return Ok(cfg);
+            return Ok(tier);
         }
         // 反序列化失败或缓存未命中，继续查 DB（缓存损坏时后续会覆盖）
 
         // 2. 查 DB：先精确匹配 route_pattern=route（且 enabled=true），未命中则用 "*"
-        let model = self
+        //    `own_tier` 记录**是否命中了本路由自己的档位**——中间件据此决定分桶口径：
+        //    独立档位必须独立成桶，否则"敏感操作 5 次/20s"这类紧档位会与同客户端的
+        //    无关接口共用一个桶并互相掐断（b72 e2e 实证：租户恢复后域名 verify 429）。
+        let own = self
             .rate_limit_repo
             .find_by_route_pattern(route)
             .await?
             .filter(|m| m.enabled);
 
-        let model = match model {
-            Some(m) => Some(m),
-            None => self
-                .rate_limit_repo
-                .find_by_route_pattern(GLOBAL_DEFAULT_PATTERN)
-                .await?
-                .filter(|m| m.enabled),
+        let (model, own_tier) = match own {
+            Some(m) => (Some(m), true),
+            None => (
+                self.rate_limit_repo
+                    .find_by_route_pattern(GLOBAL_DEFAULT_PATTERN)
+                    .await?
+                    .filter(|m| m.enabled),
+                false,
+            ),
         };
 
         let config = match model {
@@ -429,10 +459,11 @@ impl SysRateLimitService {
             },
             None => RateLimitConfig::default(),
         };
+        let tier = RateLimitTier { config, own_tier };
 
         // 3. 缓存到共享存储（best-effort，失败仅记日志不影响业务）
         //    R8-CONC-013：命令级超时已内建于 store 实现层（快速降级，不挂起请求）
-        let cached_config = RateLimitConfigCached::from(&config);
+        let cached_config = RateLimitConfigCached::from(&tier);
         if let Ok(val) = serde_json::to_string(&cached_config)
             && let Err(e) = self
                 .store
@@ -446,12 +477,12 @@ impl SysRateLimitService {
         // H-1：Mutex 中毒时恢复 Guard，块作用域确保无跨 await 持有
         {
             let mut cache = self.local_cache.lock().unwrap_or_else(|e| e.into_inner());
-            cache.insert(route.to_string(), (config, Instant::now()));
+            cache.insert(route.to_string(), (tier, Instant::now()));
         }
         // R-2：惰性清理已过期的 local_cache 条目
         self.cleanup_local_cache();
 
-        Ok(config)
+        Ok(tier)
     }
 
     /// 导出限流配置（全量查询不分页）
@@ -481,22 +512,31 @@ impl SysRateLimitService {
 struct RateLimitConfigCached {
     capacity: u32,
     refill_per_second: f64,
+    /// b72：该路由是否拥有独立档位（分桶口径）。`#[serde(default)]` 保证升级期
+    /// 存量缓存条目（无此字段）按 `false` 解读 = 沿用共享桶 = 与升级前行为一致，
+    /// 最长 300s（Redis TTL）后自愈为正确口径。
+    #[serde(default)]
+    own_tier: bool,
 }
 
-impl From<&RateLimitConfig> for RateLimitConfigCached {
-    fn from(config: &RateLimitConfig) -> Self {
+impl From<&RateLimitTier> for RateLimitConfigCached {
+    fn from(tier: &RateLimitTier) -> Self {
         Self {
-            capacity: config.capacity,
-            refill_per_second: config.refill_per_second,
+            capacity: tier.config.capacity,
+            refill_per_second: tier.config.refill_per_second,
+            own_tier: tier.own_tier,
         }
     }
 }
 
-impl From<RateLimitConfigCached> for RateLimitConfig {
+impl From<RateLimitConfigCached> for RateLimitTier {
     fn from(c: RateLimitConfigCached) -> Self {
         Self {
-            capacity: c.capacity,
-            refill_per_second: c.refill_per_second,
+            config: RateLimitConfig {
+                capacity: c.capacity,
+                refill_per_second: c.refill_per_second,
+            },
+            own_tier: c.own_tier,
         }
     }
 }

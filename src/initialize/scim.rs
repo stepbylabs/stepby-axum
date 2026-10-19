@@ -180,8 +180,6 @@ pub(crate) async fn ensure_scim_group_menu(db: &DatabaseConnection) -> Result<()
         ),
     )
     .await?;
-    flow_insert(db, "sys_role_menu (role_id, menu_id) VALUES (2, 148)").await?;
-
     // 2.2 F 按钮权限
     let btn_rows: &[(&i64, &str, &str)] = &[
         (&3620, "组绑定编辑", "system:scimgroup:edit"),
@@ -197,12 +195,15 @@ pub(crate) async fn ensure_scim_group_menu(db: &DatabaseConnection) -> Result<()
             ),
         )
         .await?;
-        flow_insert(
-            db,
-            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})"),
-        )
-        .await?;
     }
+    // common 授权（菜单行写入**之后**统一补，SELECT 侧才看得见本轮新行）：
+    // b73 轮 15 起走 governance 策略体——148 页面与 3622 `:query` 放行，
+    // 3620/3621（改/删 SCIM 组→角色映射，等同间接给他人提权）不再默认授予 common。
+    flow_insert(
+        db,
+        &governance::common_role_grant_select_body(&[148, 3620, 3621, 3622]),
+    )
+    .await?;
     Ok(())
 }
 

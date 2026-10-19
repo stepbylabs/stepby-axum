@@ -45,14 +45,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-/// 当前时间表达式（跨数据库兼容）
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT
@@ -204,7 +200,11 @@ pub const AUDIT_MENU_ROWS: &[AuditMenuRow] = &[
 /// 兜底 flow_insert 各自拼接，语义等价）
 ///
 /// 返回顺序与原迁移/兜底写库顺序一致：每行先 sys_menu 再 sys_role_menu
-/// （4000 → role_menu(2,4000) → 4001 → role_menu → 4002 → role_menu）。
+/// （4000 → role_menu(2,4000) → 4001 → role_menu → 4002 **无 role_menu**）。
+///
+/// b73 轮 15：`sys_role_menu` 行按 [`governance::common_role_may_grant`] 过滤——
+/// 4002「变更留痕导出」是写/外泄面权限（`system:audit-change:export`），不再默认授予
+/// common 角色（§8.2 只读姿态）。菜单行本身照常发放，perms 契约与授权页不受影响。
 pub fn audit_menu_seed_bodies(now_expr: &str) -> Vec<String> {
     let mut bodies = Vec::with_capacity(AUDIT_MENU_ROWS.len() * 2);
     for (
@@ -229,9 +229,11 @@ pub fn audit_menu_seed_bodies(now_expr: &str) -> Vec<String> {
             "{AUDIT_MENU_COLS} VALUES \
             ({menu_id}, '{name}', {parent_id}, {order_num}, '{path}', '{component}', '', '', '1', '0', '{menu_type}', '0', '0', '{perms}', '{icon}', 'admin', {now_expr}, '{remark}', '0', {i18n_sql})"
         ));
-        bodies.push(format!(
-            "sys_role_menu (role_id, menu_id) VALUES ({AUDIT_MENU_ROLE_ID}, {menu_id})"
-        ));
+        if governance::common_role_may_grant(*menu_id, menu_type, perms) {
+            bodies.push(format!(
+                "sys_role_menu (role_id, menu_id) VALUES ({AUDIT_MENU_ROLE_ID}, {menu_id})"
+            ));
+        }
     }
     bodies
 }
@@ -258,12 +260,17 @@ impl MigrationTrait for Migration {
         }
 
         // ==================== 3. sys_oper_log 加 chain_hash 列（DDL 单一事实源） ====================
-        // 三方言 ADD COLUMN 通用语法；迁移幂等由 Migrator 版本机制保证（每库只执行一次）；
-        // 存量库（不跑 Migrator::up）由 initialize/mod.rs 兜底函数按列存在性检查补列。
-        conn.execute_unprepared(&format!(
-            "ALTER TABLE sys_oper_log ADD COLUMN {OPER_LOG_CHAIN_HASH_DDL}"
-        ))
-        .await?;
+        // 三方言 ADD COLUMN 通用语法。**必须带列存在性守卫**：存量库启动时不跑 Migrator::up
+        // （initialize/mod.rs:45），而审计兜底 ledger.rs 会"缺列才补"，于是存在
+        // **列已补上、seaql_migrations 版本号却没登记**的库；这类库后来真跑 Migrator::up 时，
+        // 无守卫的 ALTER 直接 `duplicate column name: chain_hash` 硬失败（2026-10-18 实测，
+        // 存量库停在 88/121 处即挂）。口径与 m20261004_000003 等"先 has_column 再 ADD"一致。
+        if !manager.has_column("sys_oper_log", "chain_hash").await? {
+            conn.execute_unprepared(&format!(
+                "ALTER TABLE sys_oper_log ADD COLUMN {OPER_LOG_CHAIN_HASH_DDL}"
+            ))
+            .await?;
+        }
 
         // ==================== 4. 菜单元数据（单一事实源，段位 4000） ====================
         let now = now_expr(manager);

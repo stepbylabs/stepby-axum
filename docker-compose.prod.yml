@@ -72,7 +72,7 @@ services:
       # 权限 fail-closed（生产推荐 true）
       PERMISSION_DENY_BY_DEFAULT: ${PERMISSION_DENY_BY_DEFAULT:-true}
       # 监控指标鉴权 token
-      STEPBY_METRICS_TOKEN: ${STEPBY_METRICS_TOKEN:-}
+      MONITOR_METRICS_TOKEN: ${MONITOR_METRICS_TOKEN:-}
       TZ: Asia/Shanghai
       RUST_LOG: info
     volumes:

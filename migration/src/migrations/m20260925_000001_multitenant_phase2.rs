@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260925_000001_multitenant_phase2.rs
+// stepby-axum/migration/src/migrations/m20260925_000001_multitenant_phase2.rs
 //! 多租户 Phase 2（立项实施）：存量 27 张业务/审计表统一铺开 tenant_id。
 //!
 //! 立项定案（2026-09-25 福哥拍板"现在立项"，按文档 §5.3 推荐方案落定）：
@@ -173,16 +173,28 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
         let sqlite_or_pg = is_sqlite(manager) || is_postgres(manager);
-        for table in TABLES {
-            // MySQL 无 DROP INDEX IF EXISTS，语法为 DROP INDEX <idx> ON <table>
+        // R-10 首次全量回滚实测（MySQL 1091 Can't DROP 'idx_sys_dept_tid_time'）：
+        // 组合索引 `idx_<表>_tid_time` 只在 up() 第 3 段的 BIG_TABLES 三张表上建过，
+        // 旧 down() 却对全部 27 张 TABLES 无条件删它 ⇒ 回滚链在 sys_dept 当场中断。
+        // 现在删除动作与 up() 的三个分段一一对应：单列 tid 索引↔TABLES、
+        // 组合索引↔BIG_TABLES、DROP COLUMN↔TABLES。
+        for (table, _time_col) in BIG_TABLES {
             if sqlite_or_pg {
                 conn.execute_unprepared(&format!("DROP INDEX IF EXISTS idx_{table}_tid_time"))
                     .await?;
+            } else {
+                conn.execute_unprepared(&format!(
+                    "DROP INDEX idx_{table}_tid_time ON {table}"
+                ))
+                .await?;
+            }
+        }
+        for table in TABLES {
+            // MySQL 无 DROP INDEX IF EXISTS，语法为 DROP INDEX <idx> ON <table>
+            if sqlite_or_pg {
                 conn.execute_unprepared(&format!("DROP INDEX IF EXISTS idx_{table}_tid"))
                     .await?;
             } else {
-                conn.execute_unprepared(&format!("DROP INDEX idx_{table}_tid_time ON {table}"))
-                    .await?;
                 conn.execute_unprepared(&format!("DROP INDEX idx_{table}_tid ON {table}"))
                     .await?;
             }

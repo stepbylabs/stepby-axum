@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000006_platform_only_prefix_full.rs
+// stepby-axum/migration/src/migrations/m20260926_000006_platform_only_prefix_full.rs
 //! 台账 §8.7-B / 2026-09-26 复核缺陷修复：**按完整平台专属前缀清单全量剔除菜单**。
 //!
 //! ## 缺陷（本轮复核实证）

@@ -34,6 +34,19 @@ pub fn now_naive() -> NaiveDateTime {
     Utc::now().naive_local()
 }
 
+/// 种子/兜底**拼 SQL 字面量**时的当前时间表达式（批七十四 B1 归口）。
+///
+/// 定义在 `migration::seed_now_expr`（本函数只是再导出，使 app 侧与迁移侧共用
+/// **同一个函数对象**，杜绝"两份判据"）：三方言统一返回带引号的 **UTC** 字面量。
+/// 改造前 `src/initialize/` 有 5 份同构 helper（`flow_now` 等）、`migration` 有 40 份
+/// `now_expr` 副本，且一律用 `chrono::Local::now()` ⇒ **种子行带本机挂钟、运行行带 UTC**，
+/// 同一库两种口径并存；`seed_diff` 里长期被记成 "informational" 的
+/// `sys_user.login_date` 8 小时差异即是其症状（不是运行态演进，是口径分裂）。
+///
+/// 与 [`now_naive`] 的分工：本函数产 SQL 片段（给种子 INSERT 用），`now_naive()` 产
+/// `NaiveDateTime`（给 sea-orm `Set(...)` 用）——两者同为 UTC 语义，是同一口径的两种形态。
+pub use migration::seed_now_expr;
+
 /// 当前 UTC 日期（按"天"边界使用：清理截止、今日统计、注册周期等）。
 ///
 /// 与 [`now_naive`] 同为 UTC 语义，确保"天"边界与 UTC 存储数据一致。
@@ -212,6 +225,287 @@ macro_rules! impl_timestamped_active_model {
 
 #[cfg(test)]
 mod tests {
+    /// 落库时间列的真实写入形态（ActiveModel 赋值 或 INSERT/UPDATE 文本含时间列）。
+    /// 单独成函数：控制组要能脱离文件系统**直接**验证判据本身。
+    fn db_time_write_re() -> regex::Regex {
+        regex::Regex::new(
+        r"(?s)(_time|_date)\s*:\s*Set\(|(INSERT INTO|UPDATE\s+\w+\s+SET)[\s\S]{0,400}?(create_time|update_time|oper_time|login_time)",
+    )
+    .expect("落库时间列正则编译失败")
+    }
+
+    /// 函数起始（含 `pub` / `pub(crate)` / `async` 变体），用于把源码切成函数窗口。
+    /// **窗口止于下一个函数**（同 b72 spawn 扫描器口径）：否则隔壁合法用法会洗白违规项。
+    fn fn_start_re() -> regex::Regex {
+        regex::Regex::new(r"(?m)^\s{0,4}(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+            .expect("函数起始正则编译失败")
+    }
+    // ==================== 批七十四 B1：落库时间口径的单一事实源锁 ====================
+
+    /// 去注释：剥掉行首 `//` / `///` / `//!` 与块注释内容（简化为行级判断）。
+    /// **为什么必须先剥**：本批修法在源码里留下了大量"原为 `chrono::Local::now()`"的
+    /// 说明文字，不剥注释的锁会把自己的文档报成违规（假红 ⇒ 人们很快会把锁放宽，
+    /// 那才是真正的失效）。
+    fn strip_comments(text: &str) -> String {
+        crate::common::prod_scan::normalize(
+            text,
+            &crate::common::prod_scan::Scan {
+                strip_test_code: false,
+                comments: crate::common::prod_scan::Comments::DropBlocks,
+                ..Default::default()
+            },
+        )
+        .join("\n")
+    }
+
+    /// 采集改走共享扫描器（批七十五 B9）；语义与本锁原实现一致（递归、跳过 `target`、排序）。
+    fn collect_rs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        crate::common::prod_scan::walk_rs(dir)
+    }
+
+    /// 种子/兜底**写库路径**禁止出现本机挂钟；三方言统一由 `seed_now_expr` 产 UTC 字面量。
+    ///
+    /// 改造前的规模（本轮实测，非估算）：`migration/src/migrations/*.rs` 里
+    /// **40 份**同构 `now_expr`（36 个 `fn now_expr` + 4 处 `up()` 内联 `match backend`），
+    /// `src/initialize/` 里 **8 处**内联 + `flow_now` 一份，全部写 `chrono::Local::now()`；
+    /// 另 `data_rule_service.rs:181` 用 `Local::now().naive_local()` 写 `create_time`。
+    /// ⇒ 同一库内"种子行=本机挂钟 / 运行行=UTC"两种口径并存，`seed_diff` 里
+    /// `sys_user.login_date` 的 8 小时差异长期被误记为 informational。
+    ///
+    /// **本轮（存量库逐条前推迁移时）补的第二半**：只禁 `Local::now()` 的判据漏掉了
+    /// "分支里自产 `NOW()` / `CURRENT_TIMESTAMP`"这一族（6 个迁移、共 7 处，
+    /// `m20261004_000002/3`、`m20261006_000001`(×2)/`000002`、`m20261008_000001`）。
+    /// MySQL/PG 的 `NOW()` 取的是**会话时区**挂钟，与 `seed_now_expr` 的 UTC 字面量不同源
+    /// ⇒ 台账 §3.5 说的"换库即换口径"这条漂移当时并没被消掉，因为源码里根本没有
+    /// `Local::now()` 这个串。DDL 里的 `DEFAULT CURRENT_TIMESTAMP`（不带引号、不作分支值）
+    /// 不在本判据内：那是"默认值兜底"的方言差异，台账已如实登记，写路径恒显式赋值。
+    #[test]
+    fn seed_paths_never_use_local_clock() {
+        /// 自建方言时间来源：匹配分支里产出的 `NOW()` / `CURRENT_TIMESTAMP` 字面量。
+        /// 抽成函数是为了让**真扫描与控制组走同一条判据**（本仓反复自曝的"锁与自己的
+        /// 对照组不同源"缺陷，这里不留第二个机会）。
+        fn dialect_time_source(line: &str) -> bool {
+            line.contains("=> \"NOW()\"") || line.contains("=> \"CURRENT_TIMESTAMP\"")
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dirs = [root.join("migration/src"), root.join("src/initialize")];
+        let mut hits: Vec<String> = Vec::new();
+        let mut dhits: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
+        for dir in dirs {
+            let files = collect_rs(&dir);
+            assert!(
+                !files.is_empty(),
+                "{} 下没读到 .rs ⇒ 本锁没有跑，不是通过",
+                dir.display()
+            );
+            for f in files {
+                scanned += 1;
+                let text = strip_comments(&std::fs::read_to_string(&f).unwrap_or_default());
+                for (i, line) in text.lines().enumerate() {
+                    if line.contains("Local::now()") {
+                        hits.push(format!("{}:{} {}", f.display(), i + 1, line.trim()));
+                    }
+                    if dialect_time_source(line) {
+                        dhits.push(format!("{}:{} {}", f.display(), i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        // 控制组：扫描面必须真的看见过内容（文件数下标取本轮实测）
+        assert!(
+            scanned >= 60,
+            "只扫了 {scanned} 个文件 ⇒ 目录定位失效，本锁即将空转（不是通过）"
+        );
+        // 控制组（双向）：新判据必须抓到合成违规，且不得把唯一事实源的委托形态抓成违规
+        let synth = "let now = match backend {\n    MySql => \"NOW()\",\n    _ => \"CURRENT_TIMESTAMP\",\n};";
+        assert_eq!(
+            synth.lines().filter(|l| dialect_time_source(l)).count(),
+            2,
+            "方言时间判据抓不到合成违规 ⇒ 那个 0 是虚零"
+        );
+        let delegated = "let now = crate::seed_now_expr();";
+        assert_eq!(
+            delegated.lines().filter(|l| dialect_time_source(l)).count(),
+            0,
+            "委托形态被误判 ⇒ 唯一事实源自己会报红，判据写坏了"
+        );
+        assert!(
+            dhits.is_empty(),
+            "种子路径自建方言时间来源（NOW()/CURRENT_TIMESTAMP 取会话时区挂钟），换库即换口径：
+{}",
+            dhits.join(
+                "
+"
+            )
+        );
+        assert!(
+            hits.is_empty(),
+            "种子/兜底写库路径仍使用本机挂钟，落库时间口径将随服务器时区漂移：
+{}",
+            hits.join(
+                "
+"
+            )
+        );
+
+        // 唯一来源必须是 UTC：口径写错时全仓一起错，故单独钉一行。
+        // **不用花括号配平切函数体**——`format!("'{}'", …)` 里的 `{}` 会把切分点提前，
+        // 取到半截函数体（本轮首跑即因此报"未取 UTC"）；改用"止于下一个函数"的窗口，
+        // 与 b72 spawn 扫描器、b74 顺序锁同一口径。
+        let mig_lib = strip_comments(
+            &std::fs::read_to_string(root.join("migration/src/lib.rs")).unwrap_or_default(),
+        );
+        let sig_at = mig_lib
+            .find("pub fn seed_now_expr() -> String")
+            .expect("seed_now_expr 不存在 ⇒ 单一事实源已被删除或改名，本锁失去约束对象");
+        let after = &mig_lib[sig_at..];
+        let body_end = ["\npub fn ", "\nfn ", "\nimpl ", "\npub use "]
+            .iter()
+            .filter_map(|n| after[1..].find(n).map(|p| p + 1))
+            .min()
+            .unwrap_or(after.len());
+        let body = &after[..body_end];
+        assert!(
+            body.contains("Utc::now()"),
+            "seed_now_expr 未取 UTC（函数体窗口：{body}）⇒ 换库/换时区即换口径"
+        );
+        assert!(
+            !body.contains("Local::now()") && !body.contains("NOW()"),
+            "seed_now_expr 仍含本机挂钟或方言 NOW() 分支（函数体窗口：{body}）"
+        );
+
+        // 合成违规必须被抓（证明上面那条不是恒真断言）
+        let synth = "let now = chrono::Local::now().format(\"%Y-%m-%d %H:%M:%S\");
+";
+        assert!(
+            strip_comments(synth)
+                .lines()
+                .any(|l| l.contains("Local::now()")),
+            "合成违规未被抓到 ⇒ 判据失效（本锁是虚锁）"
+        );
+        // 而注释里的同款文本不得被抓（防止把文档报成违规）
+        assert!(
+            !strip_comments("// let now = chrono::Local::now();").contains("Local::now()"),
+            "注释未被剥除 ⇒ 本锁会因自己的说明文字假红，很快被人放宽"
+        );
+    }
+
+    /// **充分判据**：任何"函数体内既取本机挂钟、又写持久化时间列"的形态必须显式在册。
+    ///
+    /// 为什么还要这一把（`seed_paths_never_use_local_clock` 之外）：
+    /// `db_state_audit.py` 的"未来时间"检查只在**本机比 UTC 快**的时区（dev 机 UTC+8）
+    /// 暴露口径分裂；部署到 UTC-5 时同一缺陷写成"过去 5 小时"，该检查看不见
+    /// ⇒ **静态锁才是充分判据**，运行时检查只是补充（登记于此，防下批误以为"没 WARN=没问题"）。
+    ///
+    /// 判据只认**真实落库形态**（`*_time/*_date: Set(…)` 或 INSERT/UPDATE 文本里的时间列），
+    /// 不用宽泛的"出现 login_time 字样"——后者会把在线会话显示串（与
+    /// `monitor_online_handler.rs` 的 `and_local_timezone(Local)` 成对还原）误报成缺陷。
+    #[test]
+    fn local_clock_never_feeds_persisted_time_columns() {
+        // EXEMPT：函数内确有本机挂钟，但该值**不进时间列**（逐条带理由）
+        const EXEMPT: &[(&str, &str, &str)] = &[
+            (
+                "src/service/sys_backup_service.rs",
+                "create_backup",
+                "`Local::now()` 仅用于备份**文件名**时间戳（人类可读、随运维所在时区）；\
+                 同函数 :322/:332 的 create_time/update_time 已显式取 `now_naive()`（UTC）",
+            ),
+            (
+                "src/service/sys_backup_service.rs",
+                "export_tenant_package",
+                "同上：`Local::now()` 仅拼导出包文件名；导出载荷里的 exportedAt 与\
+                 落库 create_time 均取 `now_naive()`（UTC）",
+            ),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let files = collect_rs(&root.join("src"));
+        let db_write = db_time_write_re();
+        let fn_start = fn_start_re();
+        let mut hits: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
+        for f in &files {
+            let rel = f
+                .strip_prefix(root)
+                .unwrap_or(f.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            // 测试面不约束（用例里造"未来/过去"时间是刻意的）
+            if rel.contains("integration_tests") || rel.ends_with("/tests.rs") {
+                continue;
+            }
+            scanned += 1;
+            let raw = std::fs::read_to_string(f).unwrap_or_default();
+            // 只约束**生产代码路径**：截掉 `#[cfg(test)]` 之后的内容。
+            // 不这么做的话，本锁自己的控制组字面量（同一函数里既有 `Local::now()` 又有
+            // `create_time: Set(`）会命中它自己 —— 首轮实测正是如此（锁抓到自己是好信号，
+            // 但判据范围必须与"生产落库路径"这一命题一致）。
+            let without_tests = match raw.find("#[cfg(test)]") {
+                Some(i) => raw[..i].to_string(),
+                None => raw.clone(),
+            };
+            let text = strip_comments(&without_tests);
+            let starts: Vec<(usize, String)> = fn_start
+                .find_iter(&text)
+                .map(|m| {
+                    let name = fn_start
+                        .captures(m.as_str())
+                        .and_then(|c| c.get(1))
+                        .map(|x| x.as_str().to_string())
+                        .unwrap_or_default();
+                    (m.start(), name)
+                })
+                .collect();
+            for (i, (pos, name)) in starts.iter().enumerate() {
+                let end = starts.get(i + 1).map(|(p, _)| *p).unwrap_or(text.len());
+                let body = &text[*pos..end];
+                if body.contains("Local::now()") && db_write.is_match(body) {
+                    if EXEMPT
+                        .iter()
+                        .any(|(ef, en, _)| *ef == rel.as_str() && *en == name.as_str())
+                    {
+                        continue;
+                    }
+                    hits.push(format!("{rel} :: fn {name}"));
+                }
+            }
+        }
+        assert!(
+            scanned >= 200,
+            "只扫了 {scanned} 个 src 文件 ⇒ 扫描面失效（不是通过）"
+        );
+        assert!(
+            hits.is_empty(),
+            "以下函数把**本机挂钟**与**持久化时间列**写在同一处，落库口径将随服务器时区漂移\
+             （UTC- 时区下 db_state_audit 的未来时间检查看不见）：\n{}\n\
+             修法：改 `common::datetime::now_naive()`；若该挂钟确实只用于文件名/显示，\
+             在 EXEMPT 表逐条带理由登记。",
+            hits.join("\n")
+        );
+
+        // 控制组一：合成违规必须被抓（证明判据不是恒真）
+        let synth = "async fn fake(db: &X) {
+    let now = chrono::Local::now().naive_local();
+    let am = ActiveModel { create_time: Set(Some(now)) };
+}
+";
+        assert!(
+            synth.contains("Local::now()") && db_write.is_match(synth),
+            "合成违规未被判为落库+挂钟同处 ⇒ 判据失效，本锁是虚锁"
+        );
+        // 控制组二：合法用法**不得**被误报（显示串、文件名与 DB 时间分写的形态）
+        let ok_display = "fn show() -> String {
+    chrono::Local::now().format(\"%H:%M\").to_string()
+}
+";
+        assert!(
+            !db_write.is_match(ok_display),
+            "纯显示函数被误判 ⇒ 会逼人放宽判据"
+        );
+    }
+
     use super::*;
 
     #[test]

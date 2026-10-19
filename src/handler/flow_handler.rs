@@ -27,7 +27,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 
-use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::common::{AjaxResult, AppError, TableDataInfo, ValidatedJson};
 use crate::entity::flow_demo_doc::Model as FlowDemoDocModel;
 use crate::entity::flow_graph_doc::Model as FlowGraphDocModel;
 use crate::entity::sys_flow_task::Model as SysFlowTaskModel;
@@ -278,7 +278,9 @@ pub async fn submit_demo(
 pub async fn submit_graph(
     State(state): State<Arc<AppState>>,
     operator: Operator,
-    Json(dto): Json<FlowGraphSubmitDto>,
+    // 批七十四 B2：服务层只对 `title` 做了非空判断，`flow_code`/`title` 的 garde 长度上限
+    // 此前从未执行（超长串会原样进 `flow_code` 等值查询与单据标题落库）。
+    ValidatedJson(dto): ValidatedJson<FlowGraphSubmitDto>,
 ) -> Result<AjaxResult<FlowGraphDocModel>, AppError> {
     let user_id = parse_user_id(operator.user_id())?;
     let outcome = state

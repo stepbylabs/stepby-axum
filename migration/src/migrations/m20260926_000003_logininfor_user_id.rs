@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000003_logininfor_user_id.rs
+// stepby-axum/migration/src/migrations/m20260926_000003_logininfor_user_id.rs
 //! 台账 F-8（§2.4 建议采纳）：sys_logininfor 增 `user_id` 列 + 索引 + 存量回填。
 //!
 //! 背景：登录日志表原只有 `user_name`（可变、可重名于历史数据），审计域"强关联"要求
@@ -50,8 +50,16 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        conn.execute_unprepared(&format!("DROP INDEX IF EXISTS {IDX_LOGININFOR_USER}"))
-            .await?;
+        // R-10 回滚演练修（MySQL 1064）：`DROP INDEX IF EXISTS` 只有 PG/SQLite 认，
+        // MySQL 要 `DROP INDEX <idx> ON <table>`。up() 侧本来就走三方言分支，
+        // down() 却写成了单方言——回滚链正是在这里断的。
+        let drop_idx = match conn.get_database_backend() {
+            sea_orm::DatabaseBackend::MySql => {
+                format!("DROP INDEX {IDX_LOGININFOR_USER} ON sys_logininfor")
+            }
+            _ => format!("DROP INDEX IF EXISTS {IDX_LOGININFOR_USER}"),
+        };
+        conn.execute_unprepared(&drop_idx).await?;
         conn.execute_unprepared("ALTER TABLE sys_logininfor DROP COLUMN user_id")
             .await?;
         Ok(())

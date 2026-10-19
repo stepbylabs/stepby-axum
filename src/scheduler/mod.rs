@@ -168,7 +168,12 @@ impl JobScheduler {
         // 批五十九：注册 cleanup_expired_logs 的 invoke_target——管理员可经 sys_job
         // 执行一次手动触发（b54-b57 接线的运行栈真实验证路径 + 运营能力补齐）
         let archive_storage_for_registry = crate::storage::new_backend(&config.upload).ok();
-        register_builtin_tasks(db.clone(), config.clone(), archive_storage_for_registry);
+        register_builtin_tasks(
+            db.clone(),
+            config.clone(),
+            archive_storage_for_registry,
+            store.clone(),
+        );
 
         // 注册并调度内置 cron 任务（日志保留期清理，每日凌晨 3:00 执行；登录异常检测，每 5 分钟执行；IP 库自动更新，按 cron 配置）
         if let Err(e) = Self::register_builtin_scheduled_jobs(
@@ -176,12 +181,15 @@ impl JobScheduler {
             db.clone(),
             store.clone(),
             ip_location_service,
-            config,
+            config.clone(),
         )
         .await
         {
             tracing::warn!("内置定时任务调度注册失败（不阻断启动）: {}", e);
         }
+
+        // b73：错过 03:00 窗口的补跑（发布/重启几乎总在凌晨之外，漏跑即整日无补偿）
+        catch_up_retention_if_stale(db.clone(), config.clone(), store.clone()).await;
 
         Ok(Self {
             scheduler: Arc::new(scheduler),
@@ -299,6 +307,7 @@ impl JobScheduler {
         let cleanup_db = db.clone();
         let cleanup_config = config.clone();
         let cleanup_archive = archive_storage.clone();
+        let cleanup_store = store.clone();
         add_builtin_job(
             scheduler,
             "log cleanup task",
@@ -307,8 +316,9 @@ impl JobScheduler {
                 let db = cleanup_db.clone();
                 let config = cleanup_config.clone();
                 let archive_storage = cleanup_archive.clone();
+                let store = cleanup_store.clone();
                 Box::pin(async move {
-                    match run_cleanup_expired_logs(db, &config, archive_storage).await {
+                    match run_cleanup_expired_logs(db, &config, archive_storage, store).await {
                         Ok(summary) => {
                             tracing::info!("cleanup_expired_logs 执行完成: {summary}");
                         }
@@ -1279,16 +1289,22 @@ impl JobLockGuard {
             self.armed = false;
             let store = self.store.clone();
             let handle = self.handle.clone();
-            tokio::spawn(async move {
-                // best-effort：释放失败仅告警（锁在 TTL 到期后自然失效）
-                if let Err(e) = store.lock_release(&handle).await {
-                    tracing::warn!(
-                        lock_key = %handle.key,
-                        error = %e,
-                        "分布式锁释放失败（将在 TTL 到期后自然失效）"
-                    );
-                }
-            });
+            // Drop 兜底路径：走统一后台任务范式（超时 + panic 隔离 + 失败留痕计数）
+            crate::common::background::spawn_tracked(
+                "lock_release_on_drop",
+                crate::common::background::LIGHT_DB_BUDGET,
+                Some(crate::observability::metrics::MetricsRegistry::global()),
+                async move {
+                    // best-effort：释放失败仅告警（锁在 TTL 到期后自然失效）
+                    if let Err(e) = store.lock_release(&handle).await {
+                        tracing::warn!(
+                            lock_key = %handle.key,
+                            error = %e,
+                            "分布式锁释放失败（将在 TTL 到期后自然失效）"
+                        );
+                    }
+                },
+            );
         }
     }
 }
@@ -1568,10 +1584,160 @@ async fn execute_inner(
 /// 注意：cleanup_expired_logs 任务函数本身只执行清理逻辑，
 /// 调度时间由 `register_builtin_scheduled_jobs` 中的 cron "0 0 3 * * *" 控制。
 /// 此处注册函数仅用于通过 invoke_target 调用（如手动执行测试）。
-/// cleanup_expired_logs 清理体（批五十九抽取）：cron 闭包与 invoke_target 手动触发共用
+/// 保留期清理「上次成功」标记键（SharedStore，TTL 7 天）。
+///
+/// 为什么需要标记（b73 实测）：清理 cron 固定在 **03:00**，而发布/重启窗口几乎总落在凌晨之外——
+/// dev 机连续错过 2 天后，`sys_frontend_error` 有 30529 行已超 7 天保留期仍在库。
+/// "错过就没有下一次补偿"属结构性缺口：没有标记就无从判断是否跑过。
+pub(crate) const RETENTION_LAST_RUN_KEY: &str = "retention:last_success_at";
+/// 启动补跑判定阈值（小时）。取 **20 < 24**：既能在错过整日后补上，又不会在
+/// "今天 03:00 刚跑过"的清晨重启里重复删一轮（重复删除本身幂等，但会白耗一轮 IO）。
+const RETENTION_CATCHUP_AFTER_HOURS: i64 = 20;
+/// 标记 TTL（秒）——大于补跑阈值即可，留 7 天为长停机房重启后仍能识别"很久没跑过"。
+const RETENTION_MARKER_TTL_SECS: u64 = 7 * 24 * 3600;
+/// 多副本共库时"谁来补跑"的抢占键 TTL（秒）：仅抢到锁的实例执行，其余静默跳过。
+const RETENTION_CATCHUP_CLAIM_TTL_SECS: u64 = 600;
+/// 启动补跑的预算上限：清理体内部各步已各自容错，这里只保证"卡死可观测"（AGENTS B.6）。
+const RETENTION_CATCHUP_BUDGET: Duration = Duration::from_secs(600);
+
+// 三个阈值之间的**结构不变式**用编译期断言钳住（比运行时测试更强：写错就编不过）。
+// ① 补跑阈值必须 < 24h，否则"今天 03:00 刚跑过"的清晨重启会再扫一轮全表；
+// ② 标记 TTL 必须 > 补跑阈值，否则标记先过期 ⇒ 每次启动都判定"很久没跑过"。
+const _: () = assert!(
+    RETENTION_CATCHUP_AFTER_HOURS < 24,
+    "补跑阈值必须小于 24 小时，否则清晨重启会重复清理"
+);
+const _: () = assert!(
+    RETENTION_MARKER_TTL_SECS > (RETENTION_CATCHUP_AFTER_HOURS as u64) * 3600,
+    "标记 TTL 必须大于补跑阈值，否则标记先过期导致每轮启动都补跑"
+);
+
+/// 补跑判定（纯函数，便于矩阵单测）：标记文本 + "当前时间" ⇒ 是否需要补跑。
+///
+/// 缺失 / 不可解析 ⇒ `true`（fail-safe 偏向多跑一轮，删除幂等无害）；
+/// 可解析且距今 `< RETENTION_CATCHUP_AFTER_HOURS` 小时 ⇒ `false`。
+fn retention_catchup_needed(marker: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match marker.and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()) {
+        Some(at) => {
+            at.with_timezone(&chrono::Utc) + chrono::Duration::hours(RETENTION_CATCHUP_AFTER_HOURS)
+                <= now
+        }
+        None => true,
+    }
+}
+
+/// 启动期保留期清理补跑判定（b73，AGENTS B.6「漏跑必须可观测并可自愈」）。
+///
+/// 判据：`retention:last_success_at` 标记缺失 / 不可解析 / 超过
+/// [`RETENTION_CATCHUP_AFTER_HOURS`] 小时 ⇒ 需要补跑。**读失败按"需要补跑"处理**
+/// （fail-safe 偏向多跑一轮：删除幂等，而漏跑会让积压无限增长）。
+///
+/// 多副本共库：先以 `set_nx_ex` 抢占 `retention:last_success_at:catchup_claim`，抢不到的实例直接跳过，
+/// 避免 N 个实例同时扫全表。整体受 `[sys_log].retention_catchup_on_start` 门控
+/// （启动只读；集成测试基线钳制为 false，防每个 TestContext 启动都跑一轮清理）。
+async fn catch_up_retention_if_stale(
+    db: DatabaseConnection,
+    config: Arc<Settings>,
+    store: Arc<dyn crate::shared_store::SharedStore>,
+) {
+    if !config.sys_log.retention_catchup_on_start {
+        return;
+    }
+    let last = match store.get(RETENTION_LAST_RUN_KEY).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("读取保留期清理标记失败（按需要补跑处理）: {e}");
+            None
+        }
+    };
+    let need = retention_catchup_needed(last.as_deref(), chrono::Utc::now());
+    if !need {
+        return;
+    }
+    let claim_key = format!("{RETENTION_LAST_RUN_KEY}:catchup_claim");
+    let claimed = match store
+        .set_nx_ex(&claim_key, "1", RETENTION_CATCHUP_CLAIM_TTL_SECS)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // 抢占接口本身故障 ⇒ 跳过补跑（等下次启动或 03:00 cron）——
+            // 补跑是"锦上添花"的自愈路径，不得在共享态异常时再压一轮全表扫描
+            tracing::warn!("保留期清理补跑抢占失败（本轮跳过）: {e}");
+            return;
+        }
+    };
+    if !claimed {
+        tracing::info!("保留期清理补跑已由其它实例抢占，本实例跳过");
+        return;
+    }
+    tracing::warn!(
+        last_run = last.as_deref().unwrap_or("<无标记>"),
+        "错过 03:00 调度窗口，启动期补跑一轮保留期清理"
+    );
+    let archive = crate::storage::new_backend(&config.upload).ok();
+    let task_store = store.clone();
+    crate::common::background::spawn_tracked(
+        "retention_catchup",
+        RETENTION_CATCHUP_BUDGET,
+        Some(crate::observability::metrics::MetricsRegistry::global()),
+        async move {
+            if let Err(e) = run_cleanup_expired_logs(db, &config, archive, task_store).await {
+                tracing::error!("启动期保留期清理补跑失败: {e}");
+            }
+        },
+    );
+}
+
+/// cleanup_expired_logs 清理体（批五十九抽取）：cron 闭包、invoke_target 手动触发、
+/// 启动期补跑（b73）**三径同源**——同一实现、同一结局留痕。
 ///
 /// 返回汇总消息（清理行数）；retention_mode=keep 时返回跳过说明。
-async fn run_cleanup_expired_logs(
+pub(crate) async fn run_cleanup_expired_logs(
+    db: DatabaseConnection,
+    config: &Settings,
+    archive_storage: Option<Arc<dyn crate::storage::StorageBackend>>,
+    store: Arc<dyn crate::shared_store::SharedStore>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let started = std::time::Instant::now();
+    let outcome = cleanup_expired_logs_inner(db, config, archive_storage).await;
+    let cost_ms = started.elapsed().as_millis() as u64;
+    match &outcome {
+        Ok(summary) => {
+            crate::observability::metrics::MetricsRegistry::global().record_job_execution(
+                "cleanup_expired_logs",
+                "success",
+                cost_ms,
+            );
+            // 标记"本轮已完成"：供下次启动判断是否需要补跑。写失败不致命——
+            // 最坏结果是下次多补跑一轮（删除幂等），故 best-effort + WARN 留痕。
+            if let Err(e) = store
+                .set_ex(
+                    RETENTION_LAST_RUN_KEY,
+                    &chrono::Utc::now().to_rfc3339(),
+                    RETENTION_MARKER_TTL_SECS,
+                )
+                .await
+            {
+                tracing::warn!("保留期清理标记写入失败（下次启动可能多补跑一轮，幂等无害）: {e}");
+            }
+            tracing::info!("cleanup_expired_logs 结局留痕: {summary}（耗时 {cost_ms} ms）");
+        }
+        Err(e) => {
+            // 失败**不写标记** ⇒ 下次启动必然补跑（失败可见、可自愈）
+            crate::observability::metrics::MetricsRegistry::global().record_job_execution(
+                "cleanup_expired_logs",
+                "failed",
+                cost_ms,
+            );
+            tracing::error!("cleanup_expired_logs 执行失败（未写标记，下次启动将补跑）: {e}");
+        }
+    }
+    outcome
+}
+
+/// 清理体本体（被 [`run_cleanup_expired_logs`] 包装以统一留痕）。
+async fn cleanup_expired_logs_inner(
     db: DatabaseConnection,
     config: &Settings,
     archive_storage: Option<Arc<dyn crate::storage::StorageBackend>>,
@@ -1702,6 +1868,7 @@ fn register_builtin_tasks(
     db: DatabaseConnection,
     config: Arc<Settings>,
     archive_storage: Option<Arc<dyn crate::storage::StorageBackend>>,
+    store: Arc<dyn crate::shared_store::SharedStore>,
 ) {
     // 手动触发入口即下方既有 registry 项 "cleanup_expired_logs"（b54 建立的
     // invoke_target 注册，管理页「执行一次」可达）——批五十九经其清理体抽取
@@ -1759,15 +1926,17 @@ fn register_builtin_tasks(
     let cleanup_db = db.clone();
     let cleanup_config = config.clone();
     let cleanup_archive = archive_storage.clone();
+    let cleanup_store = store.clone();
     registry::register_task(
         "cleanup_expired_logs",
         Arc::new(move || {
             let db = cleanup_db.clone();
             let config = cleanup_config.clone();
             let archive_storage = cleanup_archive.clone();
+            let store = cleanup_store.clone();
             Box::pin(async move {
                 tracing::info!("任务 cleanup_expired_logs 调用：手动触发保留期清理");
-                run_cleanup_expired_logs(db, &config, archive_storage).await
+                run_cleanup_expired_logs(db, &config, archive_storage, store).await
             })
         }),
     );
@@ -1963,6 +2132,56 @@ mod tests {
         assert!(!flags.lock().unwrap().contains_key(&5));
     }
 
+    // ---------- b73 保留期清理补跑判定 ----------
+
+    /// 补跑判定的四角矩阵：无标记 / 垃圾标记 / 新鲜标记 / 过期标记。
+    ///
+    /// 可证伪性：把"缺失 ⇒ 需要补跑"改成 `false`（永不补跑）即红第一例——那正是本次要修的
+    /// "错过 03:00 就整日无补偿"；把阈值比较方向写反即红后两例。
+    #[test]
+    fn retention_catchup_needed_matrix() {
+        use chrono::{DateTime, TimeZone, Utc};
+        let now: DateTime<Utc> = Utc.with_ymd_and_hms(2026, 10, 17, 10, 0, 0).unwrap();
+
+        // ① 无标记（全新库 / 标记 TTL 过期）⇒ 必须补跑
+        assert!(
+            retention_catchup_needed(None, now),
+            "无标记必须判为需要补跑（否则首轮永不清理）"
+        );
+        // ② 标记不可解析（跨版本格式漂移 / 被手工写坏）⇒ 同样补跑，不得静默跳过
+        assert!(
+            retention_catchup_needed(Some("not-a-timestamp"), now),
+            "垃圾标记必须判为需要补跑（fail-safe 偏向多跑一轮，删除幂等）"
+        );
+        // ③ 2 小时前刚成功 ⇒ 不补跑（避免清晨重启重复扫全表）
+        let fresh = (now - chrono::Duration::hours(2)).to_rfc3339();
+        assert!(
+            !retention_catchup_needed(Some(&fresh), now),
+            "新鲜标记不得触发补跑"
+        );
+        // ④ 超过阈值（25 小时）⇒ 补跑（这正是 dev 机连续错过两日 03:00 的真实形态）
+        let stale = (now - chrono::Duration::hours(25)).to_rfc3339();
+        assert!(
+            retention_catchup_needed(Some(&stale), now),
+            "超阈值标记必须触发补跑"
+        );
+        // ⑤ 阈值边界内一侧（19h）不补跑、外侧（21h）补跑——钳住 20h 这个取值本身
+        let near_below = (now - chrono::Duration::hours(19)).to_rfc3339();
+        let near_above = (now - chrono::Duration::hours(21)).to_rfc3339();
+        assert!(!retention_catchup_needed(Some(&near_below), now));
+        assert!(retention_catchup_needed(Some(&near_above), now));
+    }
+
+    /// 标记键与抢占键不得同名（同名会让"上次成功"写进抢占键、补跑判定永远读不到）。
+    /// 阈值之间的结构不变式不在此重复断言——已由模块级 `const _: () = assert!(…)` 编译期钳住。
+    #[test]
+    fn retention_marker_and_claim_keys_are_distinct() {
+        assert_ne!(
+            RETENTION_LAST_RUN_KEY,
+            format!("{RETENTION_LAST_RUN_KEY}:catchup_claim")
+        );
+    }
+
     // ---------- register_builtin_tasks ----------
 
     #[tokio::test]
@@ -1978,7 +2197,10 @@ mod tests {
             .expect("测试加载 config.toml 失败"),
         );
         let archive_storage: Option<Arc<dyn crate::storage::StorageBackend>> = None;
-        register_builtin_tasks(db, settings, archive_storage);
+        // b73：手动触发路径与 cron 同源，需共享态（写"上次成功"标记）⇒ 用 LocalStore 承载
+        let store: Arc<dyn crate::shared_store::SharedStore> =
+            Arc::new(crate::shared_store::LocalStore::new(db.clone()));
+        register_builtin_tasks(db, settings, archive_storage, store);
         let targets = registry::list_registered_tasks();
         for expected in [
             "demoTask.demoNoParams",

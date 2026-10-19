@@ -19,12 +19,7 @@ pub(crate) async fn ensure_ai_menu(db: &DatabaseConnection) -> anyhow::Result<()
     } else {
         ""
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
     db.execute_raw(
         Statement::from_string(
@@ -80,12 +75,7 @@ pub(crate) async fn ensure_menu_only_migration_menus(
     } else {
         ""
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag)";
     for body in [
         format!(
@@ -131,10 +121,7 @@ pub(crate) async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> a
             DatabaseBackend::Postgres => "INSERT INTO",
             _ => unreachable!("unknown backend"),
         };
-        let now = match backend {
-            DatabaseBackend::Sqlite => "'2026-09-28 00:00:00'".to_string(),
-            _ => "NOW()".to_string(),
-        };
+        let now = crate::common::datetime::seed_now_expr();
         db.execute_raw(Statement::from_string(
             backend,
             format!(
@@ -143,20 +130,8 @@ pub(crate) async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> a
             ),
         ))
         .await?;
-        let rm_prefix = match backend {
-            DatabaseBackend::Postgres => {
-                "INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, 3950) ON CONFLICT DO NOTHING"
-            }
-            DatabaseBackend::Sqlite => {
-                "INSERT OR IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, 3950)"
-            }
-            DatabaseBackend::MySql => {
-                "INSERT IGNORE INTO sys_role_menu (role_id, menu_id) VALUES (2, 3950)"
-            }
-            _ => unreachable!("unknown backend"),
-        };
-        db.execute_raw(Statement::from_string(backend, rm_prefix.to_string()))
-            .await?;
+        // 目录 3950 授予 common（b73 轮 15：统一走策略体，方言前后缀由 flow_insert 承担）
+        flow_insert(db, &governance::common_role_grant_select_body(&[3950])).await?;
     }
 
     // ---- ② 自助页收编 + order 重排 + icon 修正（幂等 UPDATE 清单）----
@@ -292,12 +267,7 @@ pub(crate) async fn ensure_domain_self_service_menu(db: &DatabaseConnection) -> 
     } else {
         ""
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
     let body_rows = [
         format!(
@@ -353,12 +323,7 @@ pub(crate) async fn ensure_backup_permission_menus(db: &DatabaseConnection) -> a
     } else {
         ""
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
     let body_rows = [
         format!(
@@ -406,12 +371,7 @@ pub(crate) async fn ensure_tenant_nav_menu(db: &DatabaseConnection) -> anyhow::R
     } else {
         ""
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
     let body_rows = [
         format!(
@@ -506,24 +466,14 @@ pub(crate) async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Resu
             tracing::info!("已登记 PAT 吊销按钮 (menu_id=3561)");
         }
 
-        // role_id=2（普通角色）授权，与迁移对齐；超管无需授权即可见全部菜单
-        for mid in [3560i64, 3561] {
-            if count_scalar(
-                db,
-                format!(
-                    "SELECT COUNT(*) AS c FROM sys_role_menu WHERE role_id=2 AND menu_id={mid}"
-                ),
-            )
-            .await?
-                == 0
-            {
-                db.execute_raw(Statement::from_string(
-                    backend,
-                    format!("INSERT INTO sys_role_menu (role_id, menu_id) VALUES (2, {mid})"),
-                ))
-                .await?;
-            }
-        }
+        // role_id=2（普通角色）授权，与迁移对齐；超管无需授权即可见全部菜单。
+        // b73 轮 15：改走 governance 策略体（SELECT 侧过滤）——3560 页面放行，
+        // 3561 `monitor:pat:revoke` 属"吊销他人令牌"越权面 ⇒ 不再默认授予普通角色。
+        flow_insert(
+            db,
+            &governance::common_role_grant_select_body(&[3560, 3561]),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -907,15 +857,19 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
     // 幂等：INSERT OR IGNORE（方言感知由 flow_insert 承担）；写权限仍受三层守卫
     // （菜单 perms 契约 + report.designer/flow.designer 能力位 + 租户过滤）。
     if sso_table_exists(db, "sys_role_menu").await? {
-        for m in MENUS {
-            // 幂等由 flow_insert 方言前后缀承担（SQLite OR IGNORE / PG ON CONFLICT）
-            flow_insert(
-                db,
-                &format!("sys_role_menu (role_id, menu_id) VALUES (2, {})", m.menu_id),
-            )
-            .await?;
-        }
-        tracing::info!("role 2 已补授 G-01/G-02 菜单 4140-4148（批次十三）");
+        // b73 轮 15：本表的写按钮（4142-4145 / 4147）已逐条登记进
+        // `governance::COMMON_ROLE_WRITE_EXCEPTIONS`，故策略体与"全量授权"拍板**当前等价**；
+        // 但今后往 MENUS 里加未登记的写按钮会被策略拒发，而不是静默越权放行。
+        flow_insert(
+            db,
+            &governance::common_role_grant_select_body(
+                &MENUS.iter().map(|m| m.menu_id).collect::<Vec<_>>(),
+            ),
+        )
+        .await?;
+        tracing::info!(
+            "role 2 已按策略补授 G-01/G-02 菜单 4140-4148（批次十三拍板 + b73 单一事实源）"
+        );
     }
     tracing::info!("流程/报表菜单已补建（4140-4148，G-01/G-02 存量库兜底）");
     Ok(())
@@ -1029,9 +983,13 @@ pub(crate) async fn ensure_archive_menus(db: &DatabaseConnection) -> anyhow::Res
     if !sso_table_exists(db, "sys_menu").await? {
         return Ok(());
     }
-    db.execute_raw(Statement::from_string(
-        db.get_database_backend(),
-        "INSERT OR IGNORE INTO sys_menu \
+    let backend = db.get_database_backend();
+    // 幂等前缀必须按方言分支：`INSERT OR IGNORE` 是 **SQLite 专属语法**，在 PostgreSQL 上
+    // 直接语法错误 ⇒ 启动兜底失败 ⇒ 进程退出 ⇒ 容器无限重启（批七十五在 PG 上首次真实拉起
+    // compose 全栈时命中：`补种归档按钮菜单失败: syntax error at or near "OR"`）。
+    // 同一条种子的迁移侧（m20261012_000001）早已分支过，兜底这侧漏了 —— 两处是镜像关系，
+    // 改一处必须同步另一处。
+    let seed_body = "\
          (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, \
           is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, \
           remark, del_flag) \
@@ -1041,10 +999,17 @@ pub(crate) async fn ensure_archive_menus(db: &DatabaseConnection) -> anyhow::Res
           '链感知保留：归档对象下载（平台专属，monitor:operlogArchive: 前缀）', '0'), \
          (4181, '链完整性校验', 500, 5, '#', '', '', '', '1', '0', 'F', '0', '0', \
           'monitor:operlogArchive:verify', '#', 'admin', CURRENT_TIMESTAMP, \
-          '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')"
-            .to_string(),
-    ))
-    .await?;
+          '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')";
+    let seed_sql = match backend {
+        DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO sys_menu {seed_body}"),
+        DatabaseBackend::Postgres => {
+            format!("INSERT INTO sys_menu {seed_body} ON CONFLICT DO NOTHING")
+        }
+        DatabaseBackend::MySql => format!("INSERT IGNORE INTO sys_menu {seed_body}"),
+        _ => format!("INSERT INTO sys_menu {seed_body}"),
+    };
+    db.execute_raw(Statement::from_string(backend, seed_sql))
+        .await?;
     Ok(())
 }
 

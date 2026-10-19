@@ -109,6 +109,10 @@ async fn search_user(
 ) -> Result<Vec<GlobalSearchItem>, sea_orm::DbErr> {
     use sys_user::Column as Col;
     let mut query = sys_user::Entity::find()
+        .select_only()
+        .column(Col::UserId)
+        .column(Col::UserName)
+        .column(Col::NickName)
         .filter(Col::DelFlag.ne("2"))
         .filter(
             sea_orm::Condition::any()
@@ -118,18 +122,21 @@ async fn search_user(
     if let Some(tid) = tenant_scope {
         query = query.filter(Col::TenantId.eq(tid));
     }
+    // 列投影（b74 §一.16 同族）：搜索条目只要 `(id, 账号, 昵称)`，
+    // 未投影会把 `password`（argon2 摘要）读进全局搜索链路
     let rows = query
         .order_by_asc(Col::UserId)
         .limit(PER_DOMAIN_CAP)
+        .into_tuple::<(i64, String, String)>()
         .all(db)
         .await?;
     Ok(rows
         .into_iter()
-        .map(|m| GlobalSearchItem {
+        .map(|(id, user_name, nick_name)| GlobalSearchItem {
             item_type: "user".to_string(),
-            id: m.user_id,
-            title: m.user_name,
-            subtitle: m.nick_name,
+            id,
+            title: user_name,
+            subtitle: nick_name,
             url: "/system/user".to_string(),
         })
         .collect())

@@ -26,6 +26,27 @@ pub struct AiChatDto {
     pub question: String,
 }
 
+/// b72（AGENTS A.2 资源硬上限 + 背压）：占用一个推理许可。
+///
+/// 闸满 ⇒ 记 `stepby_outbound_requests_total{component="ai",outcome="rejected"}` + WARN + 429
+/// （`error.ai.busy`）。`/ai/chat` 与 `/ai/replay` **共用本函数**，两条入口的背压口径不得分叉。
+///
+/// 上限取 `[ai].max_concurrency`（启动只读，改后需重启）：刻意不读 `sys.ai.*` 运行态热配置，
+/// 否则会出现"管理端改了上限、闸门仍是首次建闸的值"的行为分裂（AGENTS C.7 配置归类明确）。
+fn admit_inference(state: &AppState) -> Result<tokio::sync::OwnedSemaphorePermit, AppError> {
+    crate::ai::gate::inference_gate(state.config.ai.max_concurrency)
+        .try_admit()
+        .ok_or_else(|| {
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_outbound("ai", "rejected", 0.0);
+            tracing::warn!(
+                limit = state.config.ai.max_concurrency,
+                "AI 推理并发闸已满，请求被拒（429）"
+            );
+            AppError::new(429, tr!("error.ai.busy"))
+        })
+}
+
 /// POST /ai/chat —— 自然语言问数据
 pub async fn chat(
     State(state): State<Arc<AppState>>,
@@ -49,6 +70,9 @@ pub async fn chat(
     }
     // 4. 角色层：ai:chat 由 permission_middleware fail-closed 校验（路由映射已登记）。
 
+    // 4.5 b72（AGENTS A.2）：推理并发闸，闸满立即 429（口径见 [`admit_inference`]）
+    let _inference_permit = admit_inference(&state)?;
+
     let service = AiService::new(state.db.clone(), effective.clone());
     let started = std::time::Instant::now();
     let uid: i64 = operator.user_id().parse().unwrap_or(0);
@@ -60,23 +84,28 @@ pub async fn chat(
             let eff = effective.clone();
             let q = dto.question.clone();
             let emsg = e.to_string();
-            tokio::spawn(async move {
-                let svc = AiService::new(db, eff);
-                svc.save_history(
-                    tid,
-                    uid,
-                    &q,
-                    "",
-                    &[],
-                    &[],
-                    0,
-                    started.elapsed().as_millis(),
-                    false,
-                    Some(&emsg),
-                    None,
-                )
-                .await;
-            });
+            crate::common::background::spawn_tracked(
+                "ai_save_history",
+                crate::common::background::LIGHT_DB_BUDGET,
+                Some(crate::observability::metrics::MetricsRegistry::global()),
+                async move {
+                    let svc = AiService::new(db, eff);
+                    svc.save_history(
+                        tid,
+                        uid,
+                        &q,
+                        "",
+                        &[],
+                        &[],
+                        0,
+                        started.elapsed().as_millis(),
+                        false,
+                        Some(&emsg),
+                        None,
+                    )
+                    .await;
+                },
+            );
             return Err(AppError::bad_request(&format!("AI 查询失败: {e}")));
         }
     };
@@ -85,23 +114,28 @@ pub async fn chat(
         let eff = effective.clone();
         let q = dto.question.clone();
         let oc = outcome.clone();
-        tokio::spawn(async move {
-            let svc = AiService::new(db, eff);
-            svc.save_history(
-                tid,
-                uid,
-                &q,
-                &oc.sql,
-                &oc.tables,
-                &oc.columns,
-                oc.rows.len(),
-                started.elapsed().as_millis(),
-                true,
-                None,
-                oc.token_usage,
-            )
-            .await;
-        });
+        crate::common::background::spawn_tracked(
+            "ai_save_history",
+            crate::common::background::LIGHT_DB_BUDGET,
+            Some(crate::observability::metrics::MetricsRegistry::global()),
+            async move {
+                let svc = AiService::new(db, eff);
+                svc.save_history(
+                    tid,
+                    uid,
+                    &q,
+                    &oc.sql,
+                    &oc.tables,
+                    &oc.columns,
+                    oc.rows.len(),
+                    started.elapsed().as_millis(),
+                    true,
+                    None,
+                    oc.token_usage,
+                )
+                .await;
+            },
+        );
     }
 
     Ok(Json(json!({
@@ -397,6 +431,8 @@ pub async fn replay(
     if tid != 0 && !fs.is_on(FEATURE_AI_COPILOT) {
         return Err(AppError::forbidden(&tr!("error.ai.capability_off")));
     }
+    // 重放同样是一次真实推理 ⇒ 与 chat 共用同一个并发闸（不得一条有闸一条没有）
+    let _inference_permit = admit_inference(&state)?;
     let uid: i64 = operator.user_id().parse().unwrap_or(0);
     let service = AiService::new(state.db.clone(), effective.clone());
     let started = std::time::Instant::now();
@@ -407,23 +443,28 @@ pub async fn replay(
             let eff = effective.clone();
             let q = format!("重放#{id}", id = dto.history_id);
             let emsg = e.to_string();
-            tokio::spawn(async move {
-                let svc = AiService::new(db, eff);
-                svc.save_history(
-                    tid,
-                    uid,
-                    &q,
-                    "",
-                    &[],
-                    &[],
-                    0,
-                    started.elapsed().as_millis(),
-                    false,
-                    Some(&emsg),
-                    None,
-                )
-                .await;
-            });
+            crate::common::background::spawn_tracked(
+                "ai_save_history",
+                crate::common::background::LIGHT_DB_BUDGET,
+                Some(crate::observability::metrics::MetricsRegistry::global()),
+                async move {
+                    let svc = AiService::new(db, eff);
+                    svc.save_history(
+                        tid,
+                        uid,
+                        &q,
+                        "",
+                        &[],
+                        &[],
+                        0,
+                        started.elapsed().as_millis(),
+                        false,
+                        Some(&emsg),
+                        None,
+                    )
+                    .await;
+                },
+            );
             return Err(AppError::bad_request(&format!("重放失败: {e}")));
         }
     };
@@ -432,23 +473,28 @@ pub async fn replay(
         let eff = effective.clone();
         let q = outcome.answer.clone();
         let oc = outcome.clone();
-        tokio::spawn(async move {
-            let svc = AiService::new(db, eff);
-            svc.save_history(
-                tid,
-                uid,
-                &q,
-                &oc.sql,
-                &oc.tables,
-                &oc.columns,
-                oc.rows.len(),
-                started.elapsed().as_millis(),
-                true,
-                None,
-                oc.token_usage,
-            )
-            .await;
-        });
+        crate::common::background::spawn_tracked(
+            "ai_save_history",
+            crate::common::background::LIGHT_DB_BUDGET,
+            Some(crate::observability::metrics::MetricsRegistry::global()),
+            async move {
+                let svc = AiService::new(db, eff);
+                svc.save_history(
+                    tid,
+                    uid,
+                    &q,
+                    &oc.sql,
+                    &oc.tables,
+                    &oc.columns,
+                    oc.rows.len(),
+                    started.elapsed().as_millis(),
+                    true,
+                    None,
+                    oc.token_usage,
+                )
+                .await;
+            },
+        );
     }
     Ok(Json(json!({
         "code": 200,

@@ -261,7 +261,11 @@ impl DashboardService {
                     .unwrap_or(0)
             },
             async {
+                // 列投影（b74 §一.16 同族）：趋势聚合只用 create_time，未投影会把
+                // `password`（argon2 摘要）读进仪表盘链路的内存
                 let mut query = sys_user::Entity::find()
+                    .select_only()
+                    .column(UserCol::CreateTime)
                     .filter(UserCol::DelFlag.ne("2"))
                     .filter(UserCol::CreateTime.gte(month_begin));
                 if let Some(tid) = tenant_scope {
@@ -269,6 +273,7 @@ impl DashboardService {
                 }
                 query
                     .order_by_asc(UserCol::CreateTime)
+                    .into_tuple::<Option<chrono::NaiveDateTime>>()
                     .all(db)
                     .await
                     .unwrap_or_default()
@@ -279,11 +284,9 @@ impl DashboardService {
         let mut create_trend: Vec<UserCreateTrendItem> = Vec::new();
         let mut trend_map: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
-        for u in &recent_users {
-            if let Some(ct) = u.create_time {
-                let date_str = ct.format("%Y-%m-%d").to_string();
-                *trend_map.entry(date_str).or_insert(0) += 1;
-            }
+        for ct in recent_users.iter().flatten() {
+            let date_str = ct.format("%Y-%m-%d").to_string();
+            *trend_map.entry(date_str).or_insert(0) += 1;
         }
         for i in 0..30i64 {
             let date = month_ago + Duration::days(i);

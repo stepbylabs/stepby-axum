@@ -106,12 +106,99 @@ pub trait StorageBackend: Send + Sync {
 /// - 其它值：报错提示支持项
 pub fn new_backend(cfg: &UploadConfig) -> Result<Arc<dyn StorageBackend>, AppError> {
     match cfg.backend.as_str() {
-        "local" => Ok(Arc::new(LocalBackend {})),
-        "s3" => S3Backend::try_new(&cfg.s3).map(|b| Arc::new(b) as Arc<dyn StorageBackend>),
+        "local" => Ok(TracedBackend::wrap(Arc::new(LocalBackend {}))),
+        "s3" => S3Backend::try_new(&cfg.s3)
+            .map(|b| TracedBackend::wrap(Arc::new(b) as Arc<dyn StorageBackend>)),
         other => Err(AppError::bad_request(&crate::tr!(
             "error.storage.unsupported_backend",
             backend = other
         ))),
+    }
+}
+
+/// b72（AGENTS #4 组件级指标内建）：对象存储后端的**遥测装饰器**。
+///
+/// 为什么在构造点装饰，而不是改实现或改调用点：
+/// - 改实现：`local` / `s3` 两份方法体各写一遍计数，桶边界与 outcome 口径必然随时间漂移；
+/// - 改调用点：上传链 / 预览 / 删除 / 连通性测试共 8+ 处，漏一处就是一个静默盲区。
+///
+/// 装饰器让「每种后端 × 每个操作」的请求数、耗时、成败在**唯一一处**产生，调用方零改动；
+/// 指标名与 SSO/AK/出站家族同构（`stepby_outbound_*{component="storage:<kind>"}`）。
+struct TracedBackend {
+    inner: Arc<dyn StorageBackend>,
+}
+
+impl TracedBackend {
+    fn wrap(inner: Arc<dyn StorageBackend>) -> Arc<dyn StorageBackend> {
+        Arc::new(Self { inner })
+    }
+
+    async fn observed<T>(
+        &self,
+        op: &'static str,
+        fut: impl std::future::Future<Output = Result<T, AppError>> + Send,
+    ) -> Result<T, AppError> {
+        let started = std::time::Instant::now();
+        let out = fut.await;
+        crate::observability::metrics::MetricsRegistry::global().record_outbound(
+            // 标签带 op：`storage:local:save` / `storage:s3:delete` …
+            // 只按后端分桶会让"list 慢、save 快"这类真实故障形态被平均掉，失去定位能力
+            &format!("storage:{}:{}", self.inner.kind(), op),
+            if out.is_ok() { "ok" } else { "error" },
+            started.elapsed().as_secs_f64(),
+        );
+        out
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for TracedBackend {
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+
+    fn supports_static(&self) -> bool {
+        self.inner.supports_static()
+    }
+
+    async fn save(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        key: &str,
+        url_prefix: &str,
+        bytes: &[u8],
+    ) -> Result<String, AppError> {
+        self.observed(
+            "save",
+            self.inner.save(dir, tenant_id, key, url_prefix, bytes),
+        )
+        .await
+    }
+
+    async fn read(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        self.observed("read", self.inner.read(dir, tenant_id, key))
+            .await
+    }
+
+    async fn delete(&self, dir: &str, tenant_id: i64, key: &str) -> Result<(), AppError> {
+        self.observed("delete", self.inner.delete(dir, tenant_id, key))
+            .await
+    }
+
+    async fn list(
+        &self,
+        dir: &str,
+        tenant_id: i64,
+        url_prefix: &str,
+    ) -> Result<Vec<StorageObject>, AppError> {
+        self.observed("list", self.inner.list(dir, tenant_id, url_prefix))
+            .await
     }
 }
 

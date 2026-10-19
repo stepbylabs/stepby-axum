@@ -132,3 +132,67 @@ async fn it_ret_msg_send_log_clean_expired() {
         "新鲜记录必须保留"
     );
 }
+
+/// b73：清理体成功后必须写「上次成功」标记——它是启动补跑判定的**唯一依据**。
+///
+/// 为什么值得单独锁：错过 03:00 的补跑逻辑完全依赖这个键；键没写 ⇒ 每次启动都补跑（白扫全表），
+/// 键写了但格式不是 RFC3339 ⇒ 判定侧解析失败被当作"无标记"（同样每轮补跑）。
+/// 两种退化都不会报错，只会静默多做功——正是"没有断言就看不见"的形态。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_ret_cleanup_writes_last_success_marker() {
+    let ctx = TestContext::new().await;
+    let key = crate::scheduler::RETENTION_LAST_RUN_KEY;
+
+    // 前置：隔离库启动时不得已有标记（否则"首轮必补"的语义无从验证）
+    let before = ctx.state.store.get(key).await.unwrap();
+    assert!(
+        before.is_none(),
+        "隔离库初始不得已有清理标记，实际: {before:?}"
+    );
+
+    let archive: Option<std::sync::Arc<dyn crate::storage::StorageBackend>> = None;
+    let summary = crate::scheduler::run_cleanup_expired_logs(
+        ctx.state.db.clone(),
+        &ctx.state.config,
+        archive,
+        ctx.state.store.clone(),
+    )
+    .await
+    .expect("清理体必须执行成功（隔离库无过期数据也应正常收尾）");
+
+    let after = ctx.state.store.get(key).await.unwrap();
+    let marker = after.expect("清理成功后必须写标记，否则每次启动都会补跑一轮");
+    // 必须是 RFC3339：判定侧按 rfc3339 解析，格式漂移 = 静默当作"无标记"
+    let parsed = chrono::DateTime::parse_from_rfc3339(&marker);
+    assert!(
+        parsed.is_ok(),
+        "标记必须是 RFC3339 文本（判定侧唯一可解析格式），实际: {marker}"
+    );
+    assert!(
+        parsed.unwrap().with_timezone(&chrono::Utc)
+            > chrono::Utc::now() - chrono::Duration::minutes(5),
+        "标记必须写的是「刚刚完成」的时间，实际: {marker}"
+    );
+    // 运行态表计数不阻断（K4 口径），只确认清理确实跑过一轮并留下可读结论
+    assert!(
+        !summary.is_empty(),
+        "清理体必须返回汇总消息供日志/审计，实际: {summary}"
+    );
+
+    // 二次调用：标记必须被**刷新**而不是追加新键（键名是单一事实源，写歪就永远读不到）
+    ctx.state.store.set_ex(key, "sentinel", 60).await.unwrap();
+    crate::scheduler::run_cleanup_expired_logs(
+        ctx.state.db.clone(),
+        &ctx.state.config,
+        None,
+        ctx.state.store.clone(),
+    )
+    .await
+    .unwrap();
+    let third = ctx.state.store.get(key).await.unwrap();
+    assert_ne!(
+        third.as_deref(),
+        Some("sentinel"),
+        "清理必须覆盖同一个键刷新标记（键名漂移=判定侧永远读不到，会退化成每轮都补跑）"
+    );
+}

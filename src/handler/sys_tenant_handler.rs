@@ -18,7 +18,7 @@ use crate::common::{AjaxResult, AppError};
 use crate::middleware::{Operator, TargetTenant};
 use crate::service::event_outbox_service as outbox;
 use crate::service::sys_tenant_service::{
-    PackageFeaturesUpdateDto, PackageFeaturesVo, SysTenantService, TenantAddDto, TenantEditDto,
+    PackageFeaturesUpdateDto, PackageFeaturesVo, TenantAddDto, TenantEditDto,
     TenantPackageOptionVo, TenantQueryDto, TenantStatusDto, TenantVo,
 };
 use crate::state::AppState;
@@ -327,7 +327,3 @@ pub async fn set_package_features(
         .await?;
     Ok(AjaxResult::success(vo))
 }
-
-/// 供 router 挂载的类型自检（避免 unused import 告警）
-#[allow(dead_code)]
-fn _type_assert(_s: &SysTenantService) {}

@@ -6,6 +6,8 @@
 //! **绝不拼接用户输入**。本模块是写入侧 fail-closed 校验器：
 //! - 仅允许**单条 SELECT**；拒绝 DML/DDL/TCL（INSERT/UPDATE/DELETE/DROP/CREATE/...）；
 //! - 拒绝多语句（`;` 分隔的第二条语句）、拒绝注释截断（`--` / `/* */`）；
+//!   **末尾单个分号刻意放行**（管理员从 SQL 客户端复制的语句通常带它）⇒ 任何要往模板
+//!   后面**追加子句**的执行侧必须先过 [`strip_trailing_semicolon`]，否则拼出的是两条语句；
 //! - 拒绝 UNION（防止借 UNION 偷带任意子查询）、拒绝子查询括号嵌套（首版从简）；
 //! - 占位符仅 `:param` 命名形态，参数名限标识符字符，且与 params_schema 声明一致（调用方核对）；
 //! - **只读兜底**：DB 连接账号建议收窄为只读（部署文档级），纵深防御。
@@ -95,6 +97,32 @@ pub fn validate_select_template(sql: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(params)
+}
+
+/// 剥掉语句末尾的分号（及其前面残留的空白），供**往模板后面追加子句**的调用方使用。
+///
+/// ## 为什么必须存在（批七十五 B4）
+///
+/// [`validate_select_template`] **刻意允许**模板以一个末尾分号结束（见
+/// `test_trailing_semi_allowed`——管理员从 SQL 客户端复制出来的语句通常带分号）。
+/// 而 preview 要往模板后追加 `LIMIT` 硬顶。两处口径不收敛时拼出
+/// `SELECT … ; LIMIT 100`——这在驱动侧是**两条语句**，分号之后的内容不再属于第一条。
+/// 实测（变异运行，批七十五台账 §B4）：三档方言一律 500（SQLite 经 sqlx 拒绝多语句，
+/// 报 `{"code":500,"msg":"数据库操作失败，请联系管理员"}`；MySQL/PG 为语法错）。
+/// 后果是"**只要模板带末尾分号，试跑永久 500**"——数据集设计器整条链路不可用，
+/// 而保存侧却显示"校验通过"，用户无从知道差了一个分号。
+///
+/// 归一函数与校验器放在同一模块：校验器是"允许什么形态"的单一事实源，
+/// "允许过的形态能不能被安全地再拼接"必须由同一处回答，否则又会各自漂移。
+///
+/// 只在末尾分号上动手：字面量里的 `';'` 位于字符串内部，语句体不以它结束
+/// （见 `strip_trailing_semicolon_strips_only_the_terminator` 的对照组）。
+pub fn strip_trailing_semicolon(sql: &str) -> &str {
+    let trimmed = sql.trim();
+    match trimmed.strip_suffix(';') {
+        Some(body) => body.trim_end(),
+        None => trimmed,
+    }
 }
 
 /// 去掉字符串字面量内容（保留结构），供关键字扫描使用（防 `SELECT 'DELETE FROM x'` 误报/漏报）
@@ -193,6 +221,75 @@ mod tests {
     #[test]
     fn test_trailing_semi_allowed() {
         assert!(validate_select_template("SELECT 1 FROM sys_user WHERE 1 = :v;").is_ok());
+    }
+
+    // ==================== 批七十五 B4：校验器口径 ↔ 追加子句口径 配对 ====================
+
+    /// 归一只能动"末尾终止符"，不得动正文。
+    #[test]
+    fn strip_trailing_semicolon_strips_only_the_terminator() {
+        assert_eq!(
+            strip_trailing_semicolon("SELECT 1 FROM t;"),
+            "SELECT 1 FROM t"
+        );
+        assert_eq!(
+            strip_trailing_semicolon("SELECT 1 FROM t ;\n  "),
+            "SELECT 1 FROM t",
+            "分号前的空白与其后的换行都属终止符的一部分"
+        );
+        // 对照组 1：无分号的合法模板必须逐字符不变（否则归一在吞正文）
+        let plain = "SELECT user_id, user_name FROM sys_user WHERE status = :status";
+        assert_eq!(strip_trailing_semicolon(plain), plain);
+        // 对照组 2：字面量里的分号不是语句终止符
+        assert_eq!(
+            strip_trailing_semicolon("SELECT ';' AS sep FROM t"),
+            "SELECT ';' AS sep FROM t"
+        );
+        // 归一后仍须通过校验器（归一不得把合法模板变成非法）
+        assert!(
+            validate_select_template(strip_trailing_semicolon("SELECT 1 FROM sys_user;")).is_ok()
+        );
+    }
+
+    /// **口径配对锁**：校验器放行的每一种模板形态，追加 `LIMIT` 后都必须是
+    /// "一条语句、且 LIMIT 落在语句体内"。这正是 B4 缺陷的一般化表述。
+    #[test]
+    fn every_template_the_validator_allows_can_take_an_appended_clause() {
+        let templates = [
+            "SELECT user_id FROM sys_user WHERE status = :status",
+            "SELECT user_id FROM sys_user WHERE status = :status;",
+            "SELECT user_id FROM sys_user WHERE status = :status ;",
+            "SELECT ';' AS sep, user_id FROM sys_user",
+        ];
+        for sql in templates {
+            validate_select_template(sql).unwrap_or_else(|e| panic!("{sql} 应通过校验: {e}"));
+            let body = strip_trailing_semicolon(sql);
+            let limited = format!("{body} LIMIT 100");
+            let outside_strings = strip_string_literals(&limited);
+            assert!(
+                !outside_strings.contains(';'),
+                "归一后不得残留终止符，否则追加的 LIMIT 会落进第二条语句: {limited}"
+            );
+            assert!(
+                limited.ends_with("LIMIT 100"),
+                "LIMIT 必须是语句体的一部分: {limited}"
+            );
+
+            // 控制组（证明本锁不是装饰）：**不归一**时，追加的 LIMIT 确实落在终止符
+            // 之后——驱动侧那是"第二条语句"，请求期直接失败（B4 实测：三档方言一律 500）。
+            if sql.trim_end().ends_with(';') {
+                let raw = format!("{sql} LIMIT 100");
+                let tail = strip_string_literals(&raw)
+                    .rsplit(';')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                assert!(
+                    tail.contains("LIMIT 100"),
+                    "控制组失效：不归一后 LIMIT 仍应落在分号之后，否则本判据测不到东西: {raw}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,8 @@
-// stepby-axum/migration/src/m20260924_000001_sso_rate_limit_tiers.rs
-//! v5-S1：SSO/OIDC 公开端点限流分档（docs/optimization/topic-sso-multitenant-final-audit-2026-09-23.md §8.1-S1）
+// stepby-axum/migration/src/migrations/m20260924_000001_sso_rate_limit_tiers.rs
+//! v5-S1：SSO/OIDC 公开端点限流分档
+//!
+//! 判据与落地记录：docs/optimization/topic-multitenant-sso-audit-2026-09-23.md「一、剩余规划项 S1–S4」的 S1
+//!（原「终稿」文档正文已不在库内，此处不再引用其章节号）
 //!
 //! 背景：SSO 公开端点此前仅由 route_pattern='*' 全局默认档（100 突发 / 10 rps）覆盖，
 //! 与业务面共用一档——token 兑换（机器对机器）与 userinfo（RP 每次会话校验都调用）
@@ -59,21 +62,10 @@ const TIERS: &[(&str, u32, f64, &str)] = &[
     ),
 ];
 
-fn is_sqlite(manager: &SchemaManager<'_>) -> bool {
-    matches!(
-        manager.get_connection().get_database_backend(),
-        sea_orm_migration::sea_orm::DatabaseBackend::Sqlite
-    )
-}
-
-/// 当前时间表达式（跨数据库兼容）
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 #[async_trait::async_trait]

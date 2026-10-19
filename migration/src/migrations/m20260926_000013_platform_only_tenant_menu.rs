@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000013_platform_only_tenant_menu.rs
+// stepby-axum/migration/src/migrations/m20260926_000013_platform_only_tenant_menu.rs
 //! 批次 3（MT-1）：**`system:tenantMenu:` 纳入平台专属前缀**并按完整清单剔除。
 //!
 //! ## 为什么必须登记为"平台专属前缀"

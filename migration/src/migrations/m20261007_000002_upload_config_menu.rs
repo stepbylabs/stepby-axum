@@ -28,12 +28,7 @@ fn idempotent_insert(backend: sea_orm::DatabaseBackend, body: &str) -> String {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let now_expr = match manager.get_connection().get_database_backend() {
-            sea_orm::DatabaseBackend::Sqlite => {
-                format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-            }
-            _ => "NOW()".to_string(),
-        };
+        let now_expr = crate::seed_now_expr();
         let backend = manager.get_connection().get_database_backend();
         let menu_sql = idempotent_insert(
             backend,

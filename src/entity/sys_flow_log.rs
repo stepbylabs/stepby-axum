@@ -1,7 +1,10 @@
 //! sys_flow_log 实体定义（审批流水：语义级动作时间线，业务凭证）
 //!
-//! action: submit=提交, approve=同意, reject=驳回, withdraw=撤回,
-//!         transfer=转办, timeout_remind=超时提醒, auto_approve=自动通过
+//! action: submit=提交, approve=同意, reject=驳回, withdraw=撤回, transfer=转办,
+//!         delegate=委托, countersign_add=加签, countersign_del=减签,
+//!         timeout_remind=超时提醒 —— 这 9 个就是引擎全部可写入值，与字典
+//!         `sys_flow_action` 由 `integration_tests::flow_action_dict` **双向**锁定；
+//!         原预留值 auto_approve（字典 716）已由迁移 m20261019_000001 摘除（台账 R-4）
 //! operator_id: NULL = 系统动作（对齐 sys_task.operator_id=None 语义，不伪造 user_id）
 //!
 //! 重要：本表是审批凭证，**永不纳入** `LOG_RETENTION_DAYS` 日志清理（cleanup_expired_logs
@@ -37,7 +40,8 @@ pub struct Model {
     pub round_no: i32,
     /// 节点序号（提交/撤回等单据级动作为 NULL）
     pub node_seq: Option<i32>,
-    /// 动作（submit/approve/reject/withdraw/transfer/timeout_remind/auto_approve）
+    /// 动作（submit/approve/reject/withdraw/transfer/delegate/countersign_add/
+    /// countersign_del/timeout_remind 九值即引擎全集，与字典 sys_flow_action 双向锁定）
     pub action: String,
     /// 变更前状态
     pub from_status: Option<String>,

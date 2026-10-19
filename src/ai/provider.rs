@@ -124,6 +124,9 @@ impl AiProvider for OpenAiCompatibleProvider {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionResult> {
+        // b72（AGENTS #4）：LLM 出站遥测。本函数有 5 条失败出口（未配置 base_url/api_key、
+        // 发送失败、非 2xx、解析失败、缺 choices 字段），故用 RAII 守卫保证"任何路径都记一次"。
+        let mut tel = crate::observability::metrics::OutboundGuard::start("ai");
         if self.base_url.is_empty() {
             anyhow::bail!("AI base_url 未配置（config [ai].base_url）");
         }
@@ -170,6 +173,7 @@ impl AiProvider for OpenAiCompatibleProvider {
             completion_tokens: u.completion_tokens.unwrap_or(0),
             total_tokens: u.total_tokens.unwrap_or(0),
         });
+        tel.succeeded();
         Ok(CompletionResult {
             text: content,
             usage,

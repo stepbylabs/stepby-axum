@@ -496,13 +496,15 @@ pub async fn retry_pending(
 }
 
 /// POST /system/msg/log/markPending/{logIds}
-/// 将指定发送记录标记为待重试（前端「标记重试」按钮）
+/// 把指定发送记录交回重试队列：仅 status='1'（失败终态）行会被改判，
+/// 成功行跳过（防重复投递），并同步把 retry_count 归零（否则调度器仍按
+/// retry_count<max 过滤，行会永远停在待重试）。返回**实际交回队列的条数**。
 #[utoipa::path(
     post,
     path = "/system/msg/log/markPending/{logIds}",
     params(("logIds" = String, Path, description = "发送记录 ID 列表（逗号分隔）")),
     responses(
-        (status = 200, description = "标记成功", body = AjaxResult<u64>),
+        (status = 200, description = "返回实际交回重试队列的条数（成功行不计入）", body = AjaxResult<u64>),
     ),
     tag = "system-msg"
 )]

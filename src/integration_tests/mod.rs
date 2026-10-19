@@ -28,14 +28,17 @@ mod data_rule;
 mod data_scope_tenant;
 mod file_common;
 mod flow;
+mod flow_action_dict;
 mod flow_definition;
 mod flow_graph_doc;
 mod i18n_keys;
 mod ip_location;
 mod menu_perm_contract;
+mod migration_registry;
 mod monitor;
 mod monitor_alert;
 mod monitor_extra;
+mod path_param_decode;
 mod platform_guard;
 mod report_dataset;
 mod response_cache;
@@ -306,6 +309,14 @@ async fn build_isolated_state_with(
     settings.sso = crate::config::SsoConfig::default();
     settings.pat = crate::config::PatConfig::default();
     settings.ui = crate::config::UiConfig::default();
+    // b72（AGENTS 开关规范⑧登记）：`[health].external_probes` 若被本机翻成 `basic`，
+    // /health 用例会多出 external 字段并真的去连 SMTP/OSS ⇒ 必须钳制为 off 基线。
+    settings.health = crate::config::settings::HealthConfig::default();
+    // b73（AGENTS 开关规范⑧登记）：`[sys_log].retention_catchup_on_start` 生产默认 true，
+    // 但 JobScheduler 在每个 TestContext 里都会构建 ⇒ 若本机 config 把它留着开，
+    // 每个用例启动都会补跑一轮全表清理（拖慢测试 + 把"启动期补跑"WARN 刷进测试窗口日志，
+    // 干扰 WARN 对账）。测试基线一律钳 false；需要验证补跑判定的用例在 configure 内显式翻 true。
+    settings.sys_log.retention_catchup_on_start = false;
 
     // v5-D12：测试环境统一开启 SCIM（Bearer 固定测试值）——其它测试不请求 /scim/*
     // 故无干扰；SCIM 用例依赖此配置。
@@ -358,9 +369,33 @@ async fn build_isolated_state_with(
         .expect("字段级权限 M2 兜底失败");
 
     // 3. 初始化 Redis，清空隔离 DB，关闭验证码开关，放大限流容量
-    let redis = init_redis(&settings.redis)
-        .await
-        .expect("连接测试 Redis 失败（请确认本机 Redis 可达，默认 127.0.0.1:6379）");
+    // 建连与下方 FLUSHDB 同口径重试：全量 4 线程 + 运行中后端共享同一 Docker Redis
+    // 端口代理，PING 偶发超过 cmd_timeout（b74 轮 30 实测挂此，隔离单跑恒绿）。
+    // 真不可达时三次照样红，不是把失败洗成通过。
+    let redis = {
+        let mut ok = None;
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match init_redis(&settings.redis).await {
+                Ok(r) => {
+                    ok = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                }
+            }
+        }
+        ok.unwrap_or_else(|| {
+            panic!(
+                "连接测试 Redis 失败（已重试 3 次，请确认本机 Redis 可达，默认 127.0.0.1:6379）: {}",
+                last_err.unwrap()
+            )
+        })
+    };
     let mut conn = redis.clone();
     // FLUSHDB 偶发因并行资源竞争瞬时失败（全量 4 线程 + 运行中后端共享 redis 实例），
     // 短间隔重试 2 次吸收抖动（实测单跑恒绿、偶发全量挂于此）。

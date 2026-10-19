@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260927_000001_oauth_client_prev_secret.rs
+// stepby-axum/migration/src/migrations/m20260927_000001_oauth_client_prev_secret.rs
 //! SSO D9（原「定案不做」→ 按准则⑥改为**默认关的过渡期机制**）：
 //! `sys_oauth_client` 增 `previous_client_secret_hash` 列，支撑 `client_secret` **零停机轮换**。
 //!

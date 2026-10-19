@@ -292,12 +292,8 @@ impl AppState {
             config.config_enc_key.clone(),
             vec![config.jwt.audience.clone(), config.jwt.issuer.clone()],
         );
-        let user_erasure_service = UserErasureService::new(
-            db.clone(),
-            store.clone(),
-            sso_service.clone(),
-            config.clone(),
-        );
+        let user_erasure_service =
+            UserErasureService::new(db.clone(), store.clone(), config.clone());
 
         // WebAuthn / Passkey Service（能力位 `auth.webauthn` 门控；默认 off ⇒ 端点 404）。
         // 复用同一 tenant_service：passkey 登录的租户闸门与密码登录口径单点。

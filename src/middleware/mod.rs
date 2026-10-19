@@ -13,6 +13,8 @@ pub mod response_cache;
 pub mod security_headers;
 pub mod spa_fallback;
 pub mod tenant_host;
+/// 请求行（URI + 查询串）长度上限（批七十四 B2）
+pub mod uri_limit;
 
 pub use ak_sign::{AkIdentity, ak_protected_routes, ak_sign_middleware};
 pub use auth::{Operator, auth_middleware};
@@ -20,7 +22,10 @@ pub use idempotency::idempotency_middleware;
 pub use locale::{locale_middleware, negotiate};
 pub use oper_log::{TargetTenant, oper_log_middleware};
 pub use permission::permission_middleware;
-pub use rate_limit::{RateLimitConfig, RateLimiter, rate_limit_bucket_key, rate_limit_middleware};
+pub use rate_limit::{
+    RateLimitConfig, RateLimiter, rate_limit_bucket_key, rate_limit_middleware,
+    rate_limit_route_bucket_key,
+};
 pub use request_id::{RequestId, request_id_middleware};
 pub use response_cache::{ResponseCache, response_cache_middleware};
 pub use security_headers::security_headers;

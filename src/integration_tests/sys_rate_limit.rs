@@ -313,3 +313,178 @@ async fn test_rate_limit_mode_switch_local_vs_redis() {
     );
     assert_eq!(body["code"], 429, "限流业务码应为 429，实际: {body}");
 }
+
+/// b72（AGENTS C.10）：敏感操作独立限流档位必须**真的被解析到**。
+///
+/// 这是"静默回落 `*`"的唯一机械证伪手段：`route_pattern` 与 `MatchedPath` 模板差一个字符
+/// （漏 `{id}`、写成 `:id`、多一段前缀）时，中间件不会报错、不会变红，只会永远走全局兜底
+/// ——配置看起来"已限流"，实际形同虚设。故逐条按**运行时查表口径**对账。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sensitive_operations_resolve_own_buckets() {
+    let ctx = TestContext::new().await;
+    // 本套件的 TestContext 不走完整 `initialize::run`（只按需调用 ensure_*），
+    // 故这里显式执行播种——与生产启动路径同一个函数，断言的是"真播种 + 真查表"。
+    let inserted = crate::initialize::ensure_sensitive_rate_limit_tiers(&ctx.state.db)
+        .await
+        .expect("敏感操作限流播种失败");
+    assert_eq!(
+        inserted,
+        crate::initialize::SENSITIVE_LIMIT_TIERS.len(),
+        "首次播种应插入全部档位；说明矩阵与表内容不一致或播种非幂等"
+    );
+    // 幂等复跑必须 0 插入（管理员调过的值不得被启动流程覆盖）
+    let again = crate::initialize::ensure_sensitive_rate_limit_tiers(&ctx.state.db)
+        .await
+        .expect("二次播种应幂等成功");
+    assert_eq!(again, 0, "重复播种必须零插入（幂等），实际插入 {again} 条");
+    ctx.state.rate_limit_service.invalidate_all_cache().await;
+    // 未注册路径 ⇒ 必然回落全局默认，作为"更宽"的参照系
+    let global = ctx
+        .state
+        .rate_limit_service
+        .get_config_for_route("/definitely/not/registered/anywhere")
+        .await
+        .expect("全局默认档位读取失败");
+    let mut verified = 0usize;
+    for (pattern, capacity, refill, _) in crate::initialize::SENSITIVE_LIMIT_TIERS {
+        let cfg = ctx
+            .state
+            .rate_limit_service
+            .get_config_for_route(pattern)
+            .await
+            .unwrap_or_else(|e| panic!("{pattern} 限流配置读取失败: {e}"));
+        assert_eq!(
+            cfg.capacity, *capacity as u32,
+            "{pattern} 未命中独立档位（期望 capacity={capacity}，实际 {}）——\
+             疑为路由模板不一致而静默回落全局 `*`",
+            cfg.capacity
+        );
+        assert!(
+            (cfg.refill_per_second - *refill).abs() < f64::EPSILON,
+            "{pattern} refill_per_second 应为 {refill}，实际 {}",
+            cfg.refill_per_second
+        );
+        assert!(
+            cfg.capacity < global.capacity,
+            "{pattern} 独立档位必须严格严于全局默认（{} < {}）",
+            cfg.capacity,
+            global.capacity
+        );
+        verified += 1;
+    }
+    assert!(
+        verified >= 15,
+        "本批应至少对账 15 条敏感档位，实际 {verified} 条（矩阵被裁剪需同步更新本锁）"
+    );
+}
+
+/// 端到端：敏感写端点桶耗尽后必须 429 + Retry-After（证明中间件确实挂在业务路由上，
+/// 而不是只在配置表里"存在"）。请求体故意留空——限流发生在业务处理**之前**，
+/// 因此结局只反映闸门，不受参数校验影响。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_update_pwd_bucket_exhaustion_returns_429() {
+    let ctx = TestContext::new().await;
+    crate::initialize::ensure_sensitive_rate_limit_tiers(&ctx.state.db)
+        .await
+        .expect("敏感操作限流播种失败");
+    // 配置有 10s 进程内 / 300s Redis 缓存，播种后必须失效才能读到新档位
+    ctx.state.rate_limit_service.invalidate_all_cache().await;
+    // 档位 capacity=5：前 5 次放行（业务码可能是 400/200，但不是 429）
+    for i in 1..=5 {
+        let (status, body) = ctx
+            .send_raw(ctx.request(Method::PUT, "/system/user/profile/updatePwd", None))
+            .await;
+        assert_ne!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "第 {i} 次改密请求应落在独立桶容量内，却被限流: {body}"
+        );
+    }
+    let (status, body) = ctx
+        .send_raw(ctx.request(Method::PUT, "/system/user/profile/updatePwd", None))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "改密连续第 6 次必须触发独立限流（防在线爆破），实际: {status} {body}"
+    );
+    assert_eq!(body["code"], 429, "限流业务码应为 429，实际: {body}");
+}
+
+/// b72 跨档位隔离端到端锁：打满一个独立档位之后，**其它接口必须照常放行**。
+///
+/// 旧形态（复现即红）：限流桶只有 `(租户, IP)` 一个维度、参数取"本次请求命中的行"，
+/// 于是 5 次/20s 的改密档位会把同客户端的无关接口一起掐断——b72 敏感操作分档落地后
+/// e2e 功能 71 实跑直接红（租户恢复 → 域名 verify 429），本用例把该根因钉成回归锁。
+/// 修法见 `middleware::rate_limit::rate_limit_route_bucket_key`：独立档位各自成桶，
+/// 回落 `*` 的流量仍共用总闸（与改造前逐字节等价）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_own_tier_exhaustion_does_not_starve_other_routes() {
+    let ctx = TestContext::new().await;
+    crate::initialize::ensure_sensitive_rate_limit_tiers(&ctx.state.db)
+        .await
+        .expect("敏感操作限流播种失败");
+    // 测试 harness 把 `*` 钉成 1e6/1e6（防并行用例自我节流，mod.rs:407）——那会让"共享桶
+    // 被紧档位污染"在毫秒级补充下看不出来，本锁就成虚锁。这里**还原生产量级**（100/10，
+    // 与入库种子/data/stepby.db 实测一致），使"串桶外溢"必须真的发生才能通过。
+    ctx.state
+        .db
+        .execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "UPDATE sys_rate_limit SET capacity=100, refill_per_second=10.0 WHERE route_pattern='*'"
+                .to_string(),
+        ))
+        .await
+        .expect("还原全局档位失败");
+    ctx.state.rate_limit_service.invalidate_all_cache().await;
+
+    // 1) 打满改密独立档位（capacity=5）：第 6 次必须 429（档位真的在生效）
+    let mut sixth = None;
+    for i in 1..=6 {
+        let (status, body) = ctx
+            .send_raw(ctx.request(
+                Method::PUT,
+                "/system/user/profile/updatePwd",
+                Some(serde_json::json!({"oldPassword": "x", "newPassword": "yyyyyyyy"})),
+            ))
+            .await;
+        if i == 6 {
+            sixth = Some((status, body));
+        }
+    }
+    let (status, body) = sixth.expect("循环必然产生第 6 次响应");
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "改密第 6 次应被自己的档位限流，实际: {status} {body}"
+    );
+
+    // 2) 关键断言：同客户端的其它接口完全不受牵连（旧形态此处 429）
+    for _ in 0..20 {
+        let (status, body) = ctx
+            .send_raw(ctx.request(Method::GET, "/system/user/list?pageNum=1&pageSize=10", None))
+            .await;
+        assert_ne!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "无关接口不得被紧档位掐断（跨档位串桶缺陷形态），实际: {status} {body}"
+        );
+        assert_eq!(body["code"], 200, "用户列表应正常返回，实际: {body}");
+    }
+
+    // 3) 另一个独立档位（PAT AK 轮换）也各自成桶：改密档位的耗尽不得外溢。
+    //    用**不存在的 patId** ⇒ 只走校验分支、无任何凭据状态变化（绝不动 admin 口令，
+    //    否则会连带打挂并行运行的其它用例如登录）。
+    let (status, body) = ctx
+        .send_raw(ctx.request(
+            Method::POST,
+            "/system/pat/999999/rotate-ak",
+            Some(serde_json::json!({})),
+        ))
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "AK 轮换档位应有自己的桶，实际: {status} {body}"
+    );
+}

@@ -47,14 +47,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-/// 当前时间表达式（跨数据库兼容）
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT
@@ -179,6 +175,9 @@ pub const REPORT_BOARD_MENU_ROWS: &[ReportBoardMenuRow] = &[
 /// 兜底 flow_insert 各自拼接，语义等价）
 ///
 /// 返回顺序与写库顺序一致：4130 → role_menu(2,4130) → 4131 → role_menu(2,4131)。
+/// b73 轮 15：授权行改由 [`governance::common_role_may_grant`] 决定——4131 的
+/// `tool:reportBoard:save` 虽是写后缀，但作用域是**本人**看板（属主列 user_id，
+/// v1 仅本人可读写），已登记进 `COMMON_ROLE_WRITE_EXCEPTIONS`，故仍发放。
 pub fn report_board_menu_seed_bodies(now_expr: &str) -> Vec<String> {
     let mut bodies = Vec::with_capacity(REPORT_BOARD_MENU_ROWS.len() * 2);
     for (
@@ -203,9 +202,11 @@ pub fn report_board_menu_seed_bodies(now_expr: &str) -> Vec<String> {
             "{REPORT_BOARD_MENU_COLS} VALUES \
             ({menu_id}, '{name}', {parent_id}, {order_num}, '{path}', '{component}', '', '', '1', '0', '{menu_type}', '0', '0', '{perms}', '{icon}', 'admin', {now_expr}, '{remark}', '0', {i18n_sql})"
         ));
-        bodies.push(format!(
-            "sys_role_menu (role_id, menu_id) VALUES ({REPORT_BOARD_MENU_ROLE_ID}, {menu_id})"
-        ));
+        if governance::common_role_may_grant(*menu_id, menu_type, perms) {
+            bodies.push(format!(
+                "sys_role_menu (role_id, menu_id) VALUES ({REPORT_BOARD_MENU_ROLE_ID}, {menu_id})"
+            ));
+        }
     }
     bodies
 }

@@ -143,10 +143,16 @@ impl SysPatRepository {
         if user_ids.is_empty() {
             return Ok(Vec::new());
         }
+        // 列投影（b74 §一.16 同族）：只需要 `(user_id, user_name)`，不得把含 `password`
+        // 的整行读进群发/列表链路的内存
         let rows = sys_user::Entity::find()
+            .select_only()
+            .column(sys_user::Column::UserId)
+            .column(sys_user::Column::UserName)
             .filter(sys_user::Column::UserId.is_in(user_ids.iter().copied()))
+            .into_tuple::<(i64, String)>()
             .all(self.base.db())
             .await?;
-        Ok(rows.into_iter().map(|u| (u.user_id, u.user_name)).collect())
+        Ok(rows)
     }
 }

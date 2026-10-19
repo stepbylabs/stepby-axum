@@ -133,7 +133,16 @@ pub fn resolve_upload_root(upload_config: &crate::config::UploadConfig) -> PathB
 
     // 4. 兜底：创建 CWD + root 并返回（确保目录存在，避免保存与服务路径不一致）
     if let Some(fallback) = candidates.first() {
-        std::fs::create_dir_all(fallback).ok();
+        // b72：原实现 `.ok()` 把"兜底目录建不出来"折叠成"看起来已就绪"，
+        // 于是真正的失败推迟到写文件时、且报错与根因无关。此处只加留痕，
+        // 不改返回值（保持"返回候选路径、由写入方抛清晰错误"的既有契约）。
+        if let Err(e) = std::fs::create_dir_all(fallback) {
+            tracing::warn!(
+                path = %crate::common::redact::fold_abs_paths(&fallback.display().to_string()),
+                error = %e,
+                "上传兜底目录创建失败（后续写入将以明确错误失败，不再静默）"
+            );
+        }
         return fallback.clone();
     }
     root

@@ -348,10 +348,13 @@ impl IntoResponse for AppError {
         );
 
         // R8-CONC-016：若存在错误链 source，记录根因到 tracing（不暴露给客户端）
+        //
+        // C.9：日志同样只打折叠后的文本——绝对路径进日志与进响应体是同一判据
+        // （日志会被采集进第三方平台/工单，不比对未认证读者安全）。
         if let Some(ref src) = self.source {
             tracing::error!(
                 code = self.code,
-                message = %self.message,
+                message = %crate::common::redact::fold_abs_paths(&self.message),
                 error = %src,
                 "AppError 含错误链 source（根因已记录，不暴露给客户端）"
             );
@@ -360,7 +363,19 @@ impl IntoResponse for AppError {
         // G-13a：错误响应 body 附带请求追踪 ID（与响应头 X-Request-Id 同源同值）。
         // request_id 经 task-local（CURRENT_REQUEST_ID）从中间件传播到本出口；
         // 不在请求作用域内（后台任务/定时器产生的错误）则缺省不输出。
-        let mut body = AjaxResult::<()>::error(self.code, &self.message);
+        //
+        // C.9 边界锁（b74 轮 27）：**所有**错误体出口折叠文件系统绝对路径。
+        // 此前这道折叠只住在 `/health` 探针的 `sanitize_detail` 里，而"错误文案进响应体"
+        // 是同一类未认证可见面（`/health` 免鉴权、错误体则任何接口都免鉴权可见）；
+        // 判据与探针同源（`common::redact`），两处各写一遍必然漂移。
+        // 口径：只吃目录结构，不吃 URL/端口与单段 API 片段 ⇒ 排障信息不受损。
+        let message = crate::common::redact::fold_abs_paths(&self.message);
+        if message != self.message {
+            // 折叠发生过 ⇒ 留一条日志（同样只打折叠后的文本），否则运维只看到被改过的
+            // 文案、无从知道"原文里本来有路径"这件事本身可能就是缺陷信号。
+            tracing::warn!(code = self.code, %message, "错误文案含绝对路径，已在出口折叠（源头应改报 file_name）");
+        }
+        let mut body = AjaxResult::<()>::error(self.code, &message);
         if let Some(trace_id) = crate::middleware::request_id::current_request_id() {
             body = body.with_trace_id(trace_id);
         }

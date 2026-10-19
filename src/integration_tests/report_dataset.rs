@@ -3,6 +3,8 @@
 //! - SQL 白名单 fail-closed：INSERT 模板 → 400
 //! - 租户隔离：dataset 行归属租户 2 时，平台（tenant 0）操作者 ensure_access → 403
 //!   （tenant_allowed 单向语义：平台操作租户行 = 越权，与 e2e 功能 74 同口径）
+//! - **批七十五 B4**：模板末尾分号与 `LIMIT` 硬顶的口径配对（带分号的模板必须仍能试跑并截到 100 行）；
+//!   合法但 0 行的查询必须仍给出真实列名、且不得把空采样写进 `columns_meta`
 //!
 //! 账号：admin（平台，tenant 0，持 report:dataset:* 全部权限）。
 
@@ -58,6 +60,22 @@ async fn put_json(
 async fn get_json(ctx: &TestContext, token: &str, uri: &str) -> serde_json::Value {
     ctx.send_json(token_request(ctx, token, Method::GET, uri, None))
         .await
+}
+
+/// 直接对运行库计数（用于给"硬顶是否真的生效"准备**非零探针面**）
+async fn count_rows(ctx: &TestContext, table: &str) -> i64 {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            format!("SELECT COUNT(*) AS n FROM {table}"),
+        ))
+        .await
+        .expect("计数查询失败")
+        .expect("COUNT 必有一行");
+    row.try_get::<i64>("", "n").expect("n 列应为整数")
 }
 
 /// 链路：合法数据集 CRUD 全链 + 白名单拒绝 + preview
@@ -254,5 +272,171 @@ async fn test_report_dataset_crud_chain() {
     assert_eq!(
         status, 404,
         "删除后 info 应 not_found（数据集不存在），实际: {status} {body}"
+    );
+}
+
+/// 批七十五 B4：模板以 `;` 结束时，试跑必须既**不报错**又**仍然截到 100 行**。
+///
+/// 缺陷本体：校验器刻意放行末尾分号（`dataset_sql::test_trailing_semi_allowed`），
+/// 而 preview 直接 `format!("{sql} LIMIT 100")` ⇒ `SELECT … ; LIMIT 100` 在驱动侧是
+/// **两条语句**。变异运行实测：三档方言一律 500（SQLite/sqlx 报多语句，返回
+/// `{"code":500,"msg":"数据库操作失败，请联系管理员"}`；MySQL/PG 报语法错）。
+/// 用户可见面是"保存时校验通过、试跑永久失败，且看不出只差一个分号"。
+///
+/// 对照组：同一查询**不带**分号必须给出完全相同的截断结果——归一不得改变合法模板语义。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_report_dataset_preview_trailing_semicolon_keeps_hard_cap() {
+    let ctx = TestContext::new().await;
+    let admin_token = ctx.token.clone();
+
+    // 非零探针面：模板扫的表行数必须大于硬顶，否则"截到 100 行"这件事证不出来
+    let total = count_rows(&ctx, "sys_menu").await;
+    assert!(
+        total > 100,
+        "探针面不足：sys_menu 只有 {total} 行（需 > 100），本用例无法证明 LIMIT 生效"
+    );
+
+    let cases = [
+        (
+            "it_ds_semi",
+            "SELECT menu_id FROM sys_menu WHERE menu_id > 0;",
+        ),
+        (
+            "it_ds_nosemi",
+            "SELECT menu_id FROM sys_menu WHERE menu_id > 0",
+        ),
+    ];
+    for (code, template) in cases {
+        let v = post_json(
+            &ctx,
+            &admin_token,
+            "/report/dataset",
+            serde_json::json!({
+                "datasetCode": code,
+                "datasetName": format!("集成测试·分号硬顶 {code}"),
+                "sqlTemplate": template,
+                "status": "0"
+            }),
+        )
+        .await;
+        ctx.assert_ok(&v);
+        let dataset_id = v["data"]["datasetId"].as_i64().expect("应返回 datasetId");
+
+        let v = post_json(
+            &ctx,
+            &admin_token,
+            "/report/dataset/preview",
+            serde_json::json!({ "datasetId": dataset_id, "params": {} }),
+        )
+        .await;
+        ctx.assert_ok(&v);
+        let rows = v["data"]["rows"].as_array().expect("rows 应为数组");
+        assert_eq!(
+            rows.len(),
+            100,
+            "[{template}] LIMIT 硬顶必须截到 100 行，实际 {}（总行数 {total}）——\
+             返回总数即说明追加的子句落进了分号之后的第二条语句、整体没生效",
+            rows.len()
+        );
+        assert_eq!(
+            v["data"]["truncated"],
+            serde_json::Value::Bool(true),
+            "[{template}] 触顶时 truncated 必须为真，实际: {}",
+            v["data"]["truncated"]
+        );
+        assert_eq!(
+            v["data"]["columns"]
+                .as_array()
+                .expect("columns 应为数组")
+                .len(),
+            1,
+            "[{template}] 列采样应恰为 menu_id 一列"
+        );
+    }
+}
+
+/// 批七十五 B4（第二支）：**合法但当前 0 行**的查询必须仍给出真实列名，
+/// 且不得把空采样写进 `columns_meta`。
+///
+/// 缺陷本体：列名提取挂在 `for (idx, row) … if idx == 0` 里 ⇒ 空结果集一次都不进分支，
+/// `columns` 为空 ⇒ 设计器字段选择器整块空，且空清单被当采样结果缓存回写。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_report_dataset_preview_zero_rows_still_yields_columns() {
+    use sea_orm::EntityTrait;
+
+    let ctx = TestContext::new().await;
+    let admin_token = ctx.token.clone();
+
+    let v = post_json(
+        &ctx,
+        &admin_token,
+        "/report/dataset",
+        serde_json::json!({
+            "datasetCode": "it_ds_empty",
+            "datasetName": "集成测试·空结果列采样",
+            "sqlTemplate": "SELECT user_id, user_name FROM sys_user WHERE status = :status;",
+            "paramsSchema": [{"name": "status", "type": "string", "required": true}],
+            "status": "0"
+        }),
+    )
+    .await;
+    ctx.assert_ok(&v);
+    let dataset_id = v["data"]["datasetId"].as_i64().expect("应返回 datasetId");
+
+    let v = post_json(
+        &ctx,
+        &admin_token,
+        "/report/dataset/preview",
+        serde_json::json!({ "datasetId": dataset_id, "params": { "status": "__no_such_status__" } }),
+    )
+    .await;
+    ctx.assert_ok(&v);
+    // 前提核对：这次查询确实返回 0 行（否则本用例什么都没测）
+    assert_eq!(
+        v["data"]["rows"].as_array().expect("rows 应为数组").len(),
+        0,
+        "构造前提失效：该参数值应查不到行，实际: {}",
+        v["data"]["rows"]
+    );
+    let cols: Vec<&str> = v["data"]["columns"]
+        .as_array()
+        .expect("columns 应为数组")
+        .iter()
+        .map(|c| c.as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        cols,
+        vec!["user_id", "user_name"],
+        "0 行也必须返回真实列名（列名与行数无关）"
+    );
+    assert_eq!(
+        v["data"]["truncated"],
+        serde_json::Value::Bool(false),
+        "空结果不得误报触顶"
+    );
+
+    // 回写的缓存必须是**非空**采样（此前空清单会被写进 columns_meta 并长期污染设计器）
+    let model = crate::entity::report_dataset::Entity::find_by_id(dataset_id)
+        .one(&ctx.state.db)
+        .await
+        .expect("查询数据集失败")
+        .expect("数据集应存在");
+    let meta = model
+        .columns_meta
+        .as_deref()
+        .unwrap_or_default()
+        .to_string();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&meta).expect("columns_meta 应为合法 JSON");
+    let cached: Vec<&str> = parsed["columns"]
+        .as_array()
+        .expect("columns_meta.columns 应为数组")
+        .iter()
+        .map(|c| c.as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        cached,
+        vec!["user_id", "user_name"],
+        "0 行试跑不得把空列清单写入 columns_meta，实际缓存: {meta}"
     );
 }

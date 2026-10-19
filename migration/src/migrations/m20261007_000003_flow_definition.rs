@@ -33,12 +33,7 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::MySql => "LONGTEXT",
             _ => "TEXT",
         };
-        let now_expr = match backend {
-            sea_orm::DatabaseBackend::Sqlite => {
-                format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-            }
-            _ => "NOW()".to_string(),
-        };
+        let now_expr = crate::seed_now_expr();
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS flow_definition (\
              flow_id {pk},\

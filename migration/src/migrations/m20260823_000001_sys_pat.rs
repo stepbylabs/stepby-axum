@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260823_000001_sys_pat.rs
+// stepby-axum/migration/src/migrations/m20260823_000001_sys_pat.rs
 //! Tier-S #3：个人访问令牌（PAT）模块迁移
 //!
 //! 1. 建表 sys_pat（跨 sqlite/postgres/mysql 兼容，幂等 CREATE TABLE IF NOT EXISTS）：
@@ -35,13 +35,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 async fn execute_idempotent_insert(manager: &SchemaManager<'_>, body: &str) -> Result<(), DbErr> {
@@ -126,20 +123,18 @@ impl MigrationTrait for Migration {
             ({PAGE_MENU_ID}, 'API 令牌', {PARENT_DIR_ID}, 11, 'pat', 'monitor/pat/index', '', '', '1', '0', 'C', '0', '0', 'monitor:pat:list', 'key', 'admin', {now}, '个人访问令牌统一管理（查看 / 吊销）', '0', 'menu.pat')"
         );
         execute_idempotent_insert(manager, &page_sql).await?;
-        execute_idempotent_insert(
-            manager,
-            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {PAGE_MENU_ID})"),
-        )
-        .await?;
 
         let btn_sql = format!(
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key) VALUES \
             ({BTN_MENU_ID}, '吊销', {PAGE_MENU_ID}, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'monitor:pat:revoke', 'delete', 'admin', {now}, '吊销指定用户的访问令牌', '0', '')"
         );
         execute_idempotent_insert(manager, &btn_sql).await?;
+        // common 授权按策略发放（b73 轮 15 单一事实源）：C 页面 3560 放行；
+        // F 按钮 3561 `monitor:pat:revoke` 是"吊销**他人**令牌"的越权面 ⇒ 不发 common
+        // （§8.2 只读姿态；超管经 isAdmin 特判无需授权行）。
         execute_idempotent_insert(
             manager,
-            &format!("sys_role_menu (role_id, menu_id) VALUES (2, {BTN_MENU_ID})"),
+            &governance::common_role_grant_select_body(&[PAGE_MENU_ID, BTN_MENU_ID]),
         )
         .await?;
 

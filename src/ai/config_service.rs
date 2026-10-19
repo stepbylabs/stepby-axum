@@ -138,6 +138,9 @@ impl AiConfigService {
             model,
             max_rows: self.startup.max_rows,
             timeout_secs: self.startup.timeout_secs,
+            // b72：并发上限**不透传 sys.ai.* 热更值**（本字段无对应热键，恒为启动配置），
+            // 与 `ai::gate` 的"闸门上限启动只读"口径保持一致，避免管理端出现改不动的假入口
+            max_concurrency: self.startup.max_concurrency,
             allowed_tables,
         })
     }
@@ -234,6 +237,10 @@ impl AiConfigService {
             "{}/chat/completions",
             effective.base_url.trim_end_matches('/')
         );
+        // b74（AGENTS B.4）：管理端"测试连接"是**独立故障面**（显式动作、会产生 token 费用），
+        // 与业务推理（component="ai"）、探针（component="probe:ai"）分开计数，
+        // 否则"探针慢/推理拒签"会被这个低频动作平均掉。
+        let mut outbound = crate::observability::metrics::OutboundGuard::start("ai_config_test");
         let started = std::time::Instant::now();
         let resp = client
             .post(&url)
@@ -249,12 +256,53 @@ impl AiConfigService {
         let ms = started.elapsed().as_millis();
         let status = resp.status().as_u16();
         if status == 200 {
+            outbound.succeeded();
             Ok(format!("连通正常（模型 {}，{ms}ms）", effective.model))
         } else {
             let body = resp.text().await.unwrap_or_default();
             Err(ServiceError::bad_request(&format!(
                 "连通异常 status={status}: {}",
                 body.chars().take(120).collect::<String>()
+            )))
+        }
+    }
+
+    /// 外部依赖探活（AGENTS #5，接入 `/health`）：**零 token 成本**的可达性判定。
+    ///
+    /// 与 [`Self::test_connectivity`] 的分工必须清楚：后者是管理端"保存并测试"的显式
+    /// 动作，会发一次最小 completion（**产生 token 费用**），不能接进周期探针；本方法
+    /// 只 `GET {base_url}/models`（OpenAI 兼容端点的标准元数据接口，与本项目硬编码
+    /// `{base_url}/chat/completions` 的同一档位假设），2xx 即判可达。
+    ///
+    /// 返回 `Ok(None)` = 依赖未启用/未配置 ⇒ 探针语义为 SKIPPED（可选依赖没配不是故障）。
+    /// 失败信息只带状态码与耗时：供应商响应体可能含其内部信息，不进公开端点。
+    pub async fn probe_reachability(&self) -> Result<Option<String>, ServiceError> {
+        let effective = self.get_effective().await?;
+        if !effective.enabled
+            || effective.base_url.trim().is_empty()
+            || effective.api_key.trim().is_empty()
+        {
+            return Ok(None);
+        }
+        let url = format!("{}/models", effective.base_url.trim_end_matches('/'));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| ServiceError::internal(&format!("client 构建失败: {e}")))?;
+        let started = std::time::Instant::now();
+        let resp = client
+            .get(&url)
+            .bearer_auth(&effective.api_key)
+            .send()
+            .await
+            .map_err(|e| ServiceError::bad_request(&format!("AI provider 不可达: {e}")))?;
+        let ms = started.elapsed().as_millis();
+        let code = resp.status().as_u16();
+        if resp.status().is_success() {
+            Ok(Some(format!("连通正常（HTTP {code}，{ms}ms）")))
+        } else {
+            Err(ServiceError::bad_request(&format!(
+                "AI provider 返回 HTTP {code}（{ms}ms）"
             )))
         }
     }

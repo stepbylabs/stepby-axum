@@ -38,7 +38,7 @@ use serde::Serialize;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
-use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::common::{AjaxResult, AppError, TableDataInfo, ValidatedJson};
 use crate::middleware::Operator;
 use crate::middleware::tenant_host::HostTenant;
 use crate::service::auth_service::LoginVo;
@@ -462,7 +462,8 @@ pub async fn my_bindings(
 pub async fn bind_oauth(
     State(state): State<Arc<AppState>>,
     operator: Operator,
-    Json(dto): Json<BindOauthDto>,
+    // `ValidatedJson` 而非裸 `Json`：否则 `BindOauthDto.handoff` 的长度规则永不执行（见该字段注释）
+    ValidatedJson(dto): ValidatedJson<BindOauthDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     let user_id = parse_user_id(operator.user_id())?;
     let binding = state

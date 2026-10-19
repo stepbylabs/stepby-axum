@@ -24,7 +24,7 @@ use axum::extract::{Path, Query, State};
 use std::sync::Arc;
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
-use crate::common::{AjaxResult, AppError, TableDataInfo};
+use crate::common::{AjaxResult, AppError, TableDataInfo, ValidatedJson};
 use crate::entity::sys_report::Model as SysReportModel;
 use crate::entity::sys_report_sub::Model as SysReportSubModel;
 use crate::middleware::Operator;
@@ -180,7 +180,9 @@ pub async fn report_status(
     State(state): State<Arc<AppState>>,
     Path(report_id): Path<i64>,
     operator: Operator,
-    axum::Json(mut dto): axum::Json<ReportStatusDto>,
+    // 批七十四 B2：裸 `Json` 使 `status` 的 `length(1,1)` 永不执行——服务层直接把入参
+    // 写进 `sys_report.status`（无二次校验），空串/任意长串都会落库。
+    ValidatedJson(mut dto): ValidatedJson<ReportStatusDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     dto.report_id = report_id;
     state
@@ -361,7 +363,8 @@ pub async fn sub_status(
     State(state): State<Arc<AppState>>,
     Path(sub_id): Path<i64>,
     operator: Operator,
-    axum::Json(mut dto): axum::Json<SubStatusDto>,
+    // 与 `report_status` 同理：裸 `Json` 会让 `status` 长度规则形同虚设
+    ValidatedJson(mut dto): ValidatedJson<SubStatusDto>,
 ) -> Result<AjaxResult<()>, AppError> {
     dto.sub_id = sub_id;
     state

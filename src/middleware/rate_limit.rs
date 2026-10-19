@@ -10,8 +10,10 @@
 // - 未登录 / 无 claims 请求（登录页、公开页）回退到平台维度（tid=0），确保可用
 //
 // 多租户（Phase 3）说明：
-// - 维度键形如 `rate_limit:{tid}:{ip}`，与既有 Redis key 命名风格（`rate_limit:config:{route}`）一致；
-//   迁移到 Redis 实现时可直接沿用该 key 布局，无需再造命名。
+// - 维度键：回落 `*` 的路由用 `rate_limit:{tid}:{ip}`（一个客户端一份总闸），
+//   拥有独立档位的路由用 `rate_limit:{tid}:{ip}#{route}`（b72 修复，见
+//   [`rate_limit_route_bucket_key`]）；均与既有 Redis key 命名风格
+//   （`rate_limit:config:{route}`）同前缀 ⇒ 监控台键分组口径不变。
 // - tid 取自 auth 中间件注入的 `Claims.tid`（中间件链中 auth 先于 rate_limit 执行）；
 //   `Claims.tid = 0` 表示平台租户维度，同时承担「无 claims 兜底」语义。
 // - 配额（capacity / refill_per_second）仍来自平台级 `sys_rate_limit` 表（按请求路径匹配，
@@ -72,8 +74,25 @@ pub struct RateLimitConfig {
 /// - `tid` 为请求者租户（取自 `Claims.tid`）；无 claims 时传 `0`（平台维度兜底）
 /// - 命名与既有 Redis key 风格（`rate_limit:config:{route}`）保持一致，
 ///   便于后续迁移到 Redis 计数实现时沿用同一 key 布局
+/// - 本键**只**用于回落 `*` 全局默认的路由（即绝大多数接口），语义与改造前逐字节等价：
+///   一个客户端一份总闸
 pub fn rate_limit_bucket_key(tenant_id: i64, ip: &str) -> String {
     format!("rate_limit:{tenant_id}:{ip}")
+}
+
+/// 构造**独立档位**路由的限流维度键：`rate_limit:{tid}:{ip}#{route}`
+///
+/// 为什么必须另起一把键（b72 缺陷修复）：`sys_rate_limit` 的行是"按路由分档"的，
+/// 但桶此前只有 `(租户, IP)` 一个维度，桶参数取"本次请求命中的行"——于是
+/// **紧档位会污染共享桶**：一次"租户恢复"（桶 5 / 每 20s 一个额度）之后，同客户端的
+/// 域名 verify、列表查询等无关接口一起 429（b71 之后由 b72 敏感操作分档实跑 e2e 暴露，
+/// 功能 71 两条断言直接红）。"独立限流"（AGENTS C.10）只有在**独立成桶**时才成立。
+///
+/// 分隔符用 `#` 而非 `:`：`ip` 可能是 IPv6（含冒号），`:` 分隔的键无法机械区分
+/// 段边界；`#` 后的整段就是路由模板，键仍归 `rate_limit:` 前缀 ⇒
+/// 监控台的键分组（`monitor_cache_handler`）口径不变。
+pub fn rate_limit_route_bucket_key(tenant_id: i64, ip: &str, route: &str) -> String {
+    format!("rate_limit:{tenant_id}:{ip}#{route}")
 }
 
 impl Default for RateLimitConfig {
@@ -269,7 +288,8 @@ pub async fn try_acquire_redis(
 ///    （trusted_proxies 为空时仅信任直连 IP，不信任 XFF，防止伪造绕过限流）
 /// 3. 从请求扩展中提取 `Claims.tid` 作为租户维度（无 claims → 0，平台维度兜底）
 /// 4. 从数据库读取限流配置（带 Redis 缓存，5 分钟过期），失败时 fail-closed 返回 503
-/// 5. 调用令牌桶 try_acquire（键为 `rate_limit:{tid}:{ip}`），放行或返回 429
+/// 5. 调用令牌桶 try_acquire（回落 `*` ⇒ `rate_limit:{tid}:{ip}`；独立档位 ⇒
+///    `rate_limit:{tid}:{ip}#{route}`，见 [`rate_limit_route_bucket_key`]），放行或返回 429
 pub async fn rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -291,8 +311,6 @@ pub async fn rate_limit_middleware(
         .get::<crate::jwt::Claims>()
         .map(|c| c.tid)
         .unwrap_or(0);
-    let bucket_key = rate_limit_bucket_key(tenant_id, &ip);
-
     // 从数据库读取限流配置（带 Redis 缓存）
     // 查询逻辑：先精确匹配 route_pattern=oper_url，未命中则使用 "*" 全局默认
     // 安全（P0-11）：fail-closed，Redis/DB 故障时返回 503 而非静默降级到 DEFAULT_CONFIG，
@@ -306,16 +324,25 @@ pub async fn rate_limit_middleware(
         .map(axum::extract::MatchedPath::as_str)
         .unwrap_or_else(|| req.uri().path())
         .to_string();
-    let config = match state
+    let tier = match state
         .rate_limit_service
-        .get_config_for_route(&oper_url)
+        .resolve_tier_for_route(&oper_url)
         .await
     {
-        Ok(c) => c,
+        Ok(t) => t,
         Err(e) => {
             tracing::error!("限流配置查询失败（fail-closed）: {}", e);
             return rate_limit_unavailable_response();
         }
+    };
+    let config = tier.config;
+
+    // 分桶口径（b72 缺陷修复，见 [`rate_limit_route_bucket_key`] 文档）：
+    // 拥有独立档位的路由各自成桶；回落 `*` 的路由沿用 (租户,IP) 共享总闸（= 改造前行为）。
+    let bucket_key = if tier.own_tier {
+        rate_limit_route_bucket_key(tenant_id, &ip, &oper_url)
+    } else {
+        rate_limit_bucket_key(tenant_id, &ip)
     };
 
     let (allowed, retry_after) = match state.config.rate_limit.mode() {
@@ -480,6 +507,52 @@ mod tests {
             rate_limit_bucket_key(42, "10.0.0.9"),
             "rate_limit:42:10.0.0.9"
         );
+        // 独立档位桶：`#` 后整段是路由模板；前缀仍为 rate_limit:（监控台分组不变）
+        assert_eq!(
+            rate_limit_route_bucket_key(0, "1.2.3.4", "/system/user/resetPwd"),
+            "rate_limit:0:1.2.3.4#/system/user/resetPwd"
+        );
+    }
+
+    /// b72 缺陷回归锁：**同客户端的不同档位必须互不掐断**。
+    ///
+    /// 旧形态（复现即红）：桶只有 `(tid,ip)` 一个维度、参数取"本次请求命中的行"，
+    /// 于是 5 次/20s 的敏感操作档位会把同客户端的无关接口一起打成 429
+    /// （e2e 功能 71 实测：租户恢复 → 域名 verify 429）。
+    /// 修法是按档位分桶，本测试锁的是"键空间隔离"这一根因，而非某条接口的表象。
+    #[test]
+    fn test_own_tier_buckets_are_isolated_per_route() {
+        let tight = RateLimitConfig {
+            capacity: 2,
+            refill_per_second: 0.05,
+        };
+        let loose = RateLimitConfig {
+            capacity: 100,
+            refill_per_second: 10.0,
+        };
+        let limiter = RateLimiter::new();
+        let restore =
+            rate_limit_route_bucket_key(7, "1.2.3.4", "/system/tenant/restore/{tenantId}");
+        let verify = rate_limit_route_bucket_key(7, "1.2.3.4", "/system/tenant/domain/{id}/verify");
+
+        // 紧档位打满 ⇒ 第三条被拒
+        assert!(limiter.try_acquire_with_retry_after(&restore, tight).0);
+        assert!(limiter.try_acquire_with_retry_after(&restore, tight).0);
+        assert!(
+            !limiter.try_acquire_with_retry_after(&restore, tight).0,
+            "紧档位自身必须限流（否则 C.10 的独立限流形同虚设）"
+        );
+        // 关键：无关路由（不同桶）不受牵连，仍按自己的档位放行
+        for _ in 0..50 {
+            assert!(
+                limiter.try_acquire_with_retry_after(&verify, loose).0,
+                "无关接口不得被紧档位掐断（旧缺陷形态）"
+            );
+        }
+        // 共享总闸桶与档位桶也是两套键空间（回落 `*` 的流量不会被独立档位污染）
+        let shared = rate_limit_bucket_key(7, "1.2.3.4");
+        assert!(limiter.try_acquire_with_retry_after(&shared, loose).0);
+        assert_ne!(shared, restore);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260721_000002_sys_task.rs
+// stepby-axum/migration/src/migrations/m20260721_000002_sys_task.rs
 //! 任务进度中心表迁移
 //!
 //! 新增表：sys_task - 长任务进度跟踪（导出/导入/备份等）

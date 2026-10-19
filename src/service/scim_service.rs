@@ -39,6 +39,34 @@ pub struct ScimUser {
     pub meta: ScimMeta,
 }
 
+/// SCIM User 装配输入（`sys_user` 的**投影六列**形态，b74 §一.16）
+///
+/// 存在的理由：列表路径原先 `sys_user::Entity::find().all()` 取整行，把 `password`
+/// （argon2 摘要）读进内存只为渲染 6 个协议字段。投影形态让"取哪些列"由类型说出来，
+/// 批量路径不再有机会碰凭据列。
+#[derive(Debug, Clone)]
+pub struct ScimUserFields {
+    pub user_id: i64,
+    pub external_id: Option<String>,
+    pub user_name: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub active: bool,
+}
+
+impl From<&sys_user::Model> for ScimUserFields {
+    fn from(m: &sys_user::Model) -> Self {
+        Self {
+            user_id: m.user_id,
+            external_id: m.scim_external_id.clone(),
+            user_name: m.user_name.clone(),
+            display_name: m.nick_name.clone(),
+            email: m.email.clone(),
+            active: m.status.as_deref() == Some("0"),
+        }
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct ScimName {
     #[serde(rename = "displayName")]
@@ -138,7 +166,12 @@ impl ScimService {
     }
 
     /// Model → SCIM User（location 由调用方传入 base_url）
-    fn to_scim_user(&self, m: &sys_user::Model, base_url: &str) -> ScimUser {
+    /// SCIM User 装配所需字段（列投影形态，b74 §一.16）
+    ///
+    /// 批量列表路径用它而不是 `sys_user::Model`：未投影会把 `password`（argon2 摘要）
+    /// 读进 SCIM 服务内存，而 SCIM 协议面从不返回该字段——没有任何功能理由。
+    /// 单行路径（GET/POST/PUT 的 Model 已在手上）经 `From<&Model>` 转换，语义逐字不变。
+    fn to_scim_user(&self, m: &ScimUserFields, base_url: &str) -> ScimUser {
         let mut emails = Vec::new();
         // let-chains 合并（clippy collapsible_if；项目已在用 let-chains 语法）
         if let Some(v) = &m.email
@@ -152,13 +185,13 @@ impl ScimService {
         ScimUser {
             schemas: vec![SCIM_USER_SCHEMA.to_string()],
             id: m.user_id.to_string(),
-            external_id: m.scim_external_id.clone(),
+            external_id: m.external_id.clone(),
             user_name: m.user_name.clone(),
             name: ScimName {
-                display_name: m.nick_name.clone(),
+                display_name: m.display_name.clone(),
             },
             emails,
-            active: m.status.as_deref() == Some("0"),
+            active: m.active,
             meta: ScimMeta {
                 resource_type: "User".to_string(),
                 location: format!("{base_url}/scim/v2/Users/{}", m.user_id),
@@ -256,17 +289,43 @@ impl ScimService {
             .map(|r| r.try_get::<i64>("", "user_id").unwrap_or(0))
             .filter(|uid| *uid != 0)
             .collect();
-        let mut by_id: std::collections::HashMap<i64, sys_user::Model> =
+        let mut by_id: std::collections::HashMap<i64, ScimUserFields> =
             std::collections::HashMap::with_capacity(uids.len());
         if !uids.is_empty() {
-            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+            // 列投影（b74 §一.16）：渲染 SCIM 资源只需要六列，`password` 不得进本链路内存
             let models = sys_user::Entity::find()
+                .select_only()
+                .column(sys_user::Column::UserId)
+                .column(sys_user::Column::ScimExternalId)
+                .column(sys_user::Column::UserName)
+                .column(sys_user::Column::NickName)
+                .column(sys_user::Column::Email)
+                .column(sys_user::Column::Status)
                 .filter(sys_user::Column::UserId.is_in(uids.clone()))
+                .into_tuple::<(
+                    i64,
+                    Option<String>,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                )>()
                 .all(self.db())
                 .await
                 .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
-            for m in models {
-                by_id.insert(m.user_id, m);
+            for (user_id, external_id, user_name, display_name, email, status) in models {
+                by_id.insert(
+                    user_id,
+                    ScimUserFields {
+                        user_id,
+                        external_id,
+                        user_name,
+                        display_name,
+                        email,
+                        active: status.as_deref() == Some("0"),
+                    },
+                );
             }
         }
         let mut resources = Vec::with_capacity(uids.len());
@@ -295,7 +354,7 @@ impl ScimService {
                     && crate::common::tenant::tenant_allowed(self.tenant_id, u.tenant_id)
             })
             .ok_or_else(|| ScimError::new(404, "User not found"))?;
-        Ok(self.to_scim_user(&m, base_url))
+        Ok(self.to_scim_user(&ScimUserFields::from(&m), base_url))
     }
 
     /// POST /Users：provision 创建。密码为随机不可知值（IdP 管理凭据，
@@ -417,7 +476,7 @@ impl ScimService {
                 .await
                 .map_err(ScimError::from)?
         };
-        Ok(self.to_scim_user(&saved, base_url))
+        Ok(self.to_scim_user(&ScimUserFields::from(&saved), base_url))
     }
 
     /// b71 吞错/口径一致性治理：externalId 的**长度 + 唯一性**统一校验面（RFC 7644 要求
@@ -493,7 +552,7 @@ impl ScimService {
             .update(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
-        Ok(self.to_scim_user(&saved, base_url))
+        Ok(self.to_scim_user(&ScimUserFields::from(&saved), base_url))
     }
 
     /// PATCH /Users/{id}：局部更新（RFC 7644 §3.5.2）——仅支持 op=replace，
@@ -581,7 +640,7 @@ impl ScimService {
             .update(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
-        Ok(self.to_scim_user(&saved, base_url))
+        Ok(self.to_scim_user(&ScimUserFields::from(&saved), base_url))
     }
 
     /// DELETE /Users/{id}：deprovision = 停用（status='1'），不物理删（审计保留）。

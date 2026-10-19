@@ -250,6 +250,52 @@ impl SysBackupService {
         }
     }
 
+    /// 启动期收敛「卡在 running」的备份日志（b73，AGENTS B.6「失败审计」的数据面收口）。
+    ///
+    /// 形态：`create_backup` / 租户自导出先插 `status='running'` 占位行，子进程结束后写终态。
+    /// 进程在子进程运行期间被杀（发布重启 / OOM / 会话回收）⇒ 该行**永久停留 running**：
+    /// 备份列表页显示一个永远在跑的备份，运维无从判断结局，`find_excess_success_ids` 轮转也绕开它。
+    ///
+    /// 阈值取 `BACKUP_TIMEOUT_SECS` 的两倍再加一分钟：子进程自身已有 5 分钟超时，
+    /// 超过 2×超时 + 余量仍为 running 的行**不可能是本进程的合法在途任务**。
+    /// **多副本共库的口径**：另一实例真在跑的备份理论上可能落在此窗口内，故阈值必须远大于单次备份
+    /// 预算（不得调小），且只写 `error_msg` 说明是"启动期收敛"，不删行——保留可追溯性。
+    ///
+    /// 幂等：只处理 `status='running'`，二次调用零命中；失败上抛（由调用方 best-effort 留痕）。
+    pub async fn reconcile_interrupted_backups(&self) -> Result<u64, ServiceError> {
+        let stale_before = crate::common::datetime::now_naive()
+            - chrono::Duration::seconds((BACKUP_TIMEOUT_SECS * 2 + 60) as i64);
+        let rows = self
+            .backup_repo
+            .find_stale_running(stale_before)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("查询中断备份日志失败: {e}")))?;
+        let total = rows.len() as u64;
+        for row in rows {
+            let backup_id = row.backup_id;
+            let mut am: SysBackupLogActiveModel = row.into();
+            am.status = Set("failed".to_string());
+            am.error_msg = Set(Some(format!(
+                "备份进程未回写终态（超 {} 分钟仍为 running），已由启动期收敛判为失败；\
+                 若产物文件存在可手动校验后登记",
+                (BACKUP_TIMEOUT_SECS * 2 + 60) / 60
+            )));
+            self.backup_repo.update(am).await.map_err(|e| {
+                ServiceError::internal(&format!(
+                    "收敛中断备份日志失败 (backup_id={backup_id}): {e}"
+                ))
+            })?;
+        }
+        if total > 0 {
+            tracing::warn!(
+                count = total,
+                "启动期收敛：{} 条备份日志卡在 running，已判为 failed（进程中断导致结局未知）",
+                total
+            );
+        }
+        Ok(total)
+    }
+
     /// 创建数据库备份
     ///
     /// 流程：

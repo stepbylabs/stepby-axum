@@ -7,7 +7,12 @@
 //! - `client_secret_hash` 存明文密钥的 SHA-256 hex（明文仅创建时返回一次，绝不落库）；
 //! - `id_token_secret` 为 HS256 对称签名密钥，仅服务端签发 ID Token 使用，永不出现在出参；
 //! - `redirect_uris` / `scopes` / `grant_types` 为 JSON 数组字符串；redirect_uri 采用精确匹配白名单；
-//! - `tenant_id` 多租户前向兼容预留（默认 0，本轮不参与查询过滤）。
+//! - `tenant_id` **已参与查询过滤**（v5-N2 Phase 2）：集合读路径经
+//!   `sso_service.rs:2059` 的 `tenant_scope(operator_tid)` 收窄，单条读写路径经
+//!   `tenant_allowed(operator_tid, m.tenant_id)` 归属校验（`:2075/2231/2352/2409/2452/2486`）。
+//!   平台创建的资源 `tenant_id = 0`，对租户不可见。
+//!   （批七十四 B3 订正：此前本行写"前向兼容预留，本轮不参与查询过滤"，属**文档低估实现**——
+//!   会让人以为必须保持平台全量，进而把 `system:oauth:client:` 误判成归类不明。）
 //!
 //! 出参不直接序列化本 Model（含两处密钥），由 Service 层 `SsoClientVo` 脱敏后返回。
 

@@ -79,11 +79,24 @@ pub struct MetricsRegistry {
     ak_failures: RwLock<HashMap<String, u64>>,
     /// AK 开放 API 耗时直方图（path → 系列，桶边界复用 DURATION_BUCKETS_S）
     ak_durations: RwLock<HashMap<String, DurationSeries>>,
+    /// 批七十四 B6：凭据校验计数（algorithm, outcome）→ 次数。
+    /// algorithm：`argon2id` / `md5-legacy` / `unknown`（空哈希或哈希串不可解析）；
+    /// outcome：`ok` / `mismatch` / `empty_hash` / `malformed_hash`。
+    credential_counters: RwLock<HashMap<(String, String), u64>>,
+    /// 批七十四 B6：凭据校验耗时直方图（algorithm → 系列，桶边界复用 DURATION_BUCKETS_S）。
+    /// 存在的理由：Argon2 的 m/t/p 是**有意的** CPU 成本，参数或依赖一漂移就会悄悄改变
+    /// 登录延迟；没有观测面时只能等用户报"登录变慢"（B6 的"可观测"半边）。
+    credential_durations: RwLock<HashMap<String, DurationSeries>>,
     /// G-09：定时任务执行计数（job_name, status）→ 次数。
     /// status："0"=成功 / "1"=失败（与 sys_job_log.status 口径一致）。
     job_counters: RwLock<HashMap<(String, String), u64>>,
     /// G-09：定时任务耗时直方图（job_name → 系列，桶边界 JOB_DURATION_BUCKETS_S）
     job_durations: RwLock<HashMap<String, JobDurationSeries>>,
+    /// b72（AGENTS #4 组件级指标）：出站依赖 / 后台任务计数（component,outcome）→ 次数。
+    /// outcome：`ok` / `error` / `timeout` / `panic` / `rejected`（背压或闸门拒绝）
+    outbound_counters: RwLock<HashMap<(String, String), u64>>,
+    /// b72：出站依赖 / 后台任务耗时直方图（component → 系列）
+    outbound_durations: RwLock<HashMap<String, OutboundDurationSeries>>,
     /// 告警指标源：最近 5xx 响应时间戳环形缓冲（真实记录点 =
     /// [`MetricsRegistry::record`]，由 monitoring_middleware 每请求调用）。
     ///
@@ -121,6 +134,13 @@ struct JobDurationSeries {
     buckets: Vec<u64>,
 }
 
+/// b72：出站依赖 / 后台任务耗时直方图系列。
+///
+/// 复用 [`JOB_DURATION_BUCKETS_S`]（0.1s~300s）而非 HTTP 的 5ms~1s 桶：
+/// SMTP/S3/LLM 推理这类调用天然在秒级~分钟级，用 HTTP 桶会把全部样本挤进 `+Inf`，
+/// 直方图失去区分度（"有指标"不等于"指标可用"）。
+type OutboundDurationSeries = JobDurationSeries;
+
 impl JobDurationSeries {
     fn new() -> Self {
         Self {
@@ -143,8 +163,12 @@ impl Default for MetricsRegistry {
             ak_counters: RwLock::new(HashMap::new()),
             ak_failures: RwLock::new(HashMap::new()),
             ak_durations: RwLock::new(HashMap::new()),
+            credential_counters: RwLock::new(HashMap::new()),
+            credential_durations: RwLock::new(HashMap::new()),
             job_counters: RwLock::new(HashMap::new()),
             job_durations: RwLock::new(HashMap::new()),
+            outbound_counters: RwLock::new(HashMap::new()),
+            outbound_durations: RwLock::new(HashMap::new()),
             recent_5xx: Mutex::new(VecDeque::new()),
         }
     }
@@ -152,6 +176,50 @@ impl Default for MetricsRegistry {
 
 /// 全局共享实例
 static GLOBAL: OnceLock<Arc<MetricsRegistry>> = OnceLock::new();
+
+/// b72：出站遥测的 **RAII 守卫**，用于有多个 `?` 提前返回的出站函数（LLM 推理 / IdP 令牌交换）。
+///
+/// 为什么用它而不是在每个出口写一次 `record_outbound`：这类函数常有 5~6 条失败出口
+/// （未配置 / 发送失败 / 非 2xx / 解析失败 / 字段缺失），逐出口埋点**必然漏**且新增分支不会提醒；
+/// 守卫在 `Drop` 时按"是否显式 `succeeded()`"定性，保证任何路径都计数一次。
+///
+/// 用法（伪码，非可编译示例）：
+/// ```text
+/// let mut tel = OutboundGuard::start("ai");
+/// …? ;
+/// tel.succeeded();
+/// Ok(value)
+/// ```
+pub struct OutboundGuard {
+    component: &'static str,
+    started: std::time::Instant,
+    ok: bool,
+}
+
+impl OutboundGuard {
+    pub fn start(component: &'static str) -> Self {
+        Self {
+            component,
+            started: std::time::Instant::now(),
+            ok: false,
+        }
+    }
+
+    /// 标记本次出站**成功**（不调用则按 `error` 记录）
+    pub fn succeeded(&mut self) {
+        self.ok = true;
+    }
+}
+
+impl Drop for OutboundGuard {
+    fn drop(&mut self) {
+        MetricsRegistry::global().record_outbound(
+            self.component,
+            if self.ok { "ok" } else { "error" },
+            self.started.elapsed().as_secs_f64(),
+        );
+    }
+}
 
 impl MetricsRegistry {
     /// 获取全局共享实例
@@ -289,6 +357,97 @@ impl MetricsRegistry {
             Err(p) => p.into_inner(),
         };
         gauges.insert(device.to_string(), value.min(100.0));
+    }
+
+    /// 凭据校验指标（批七十四 B6）：`utils::password` 每次校验记录一次。
+    ///
+    /// - 计数：`stepby_credential_verify_total{algorithm,outcome}`
+    /// - 耗时：`stepby_credential_verify_duration_seconds{algorithm}`
+    ///
+    /// 为什么值得单独一族（而不是只靠 `/auth/login` 的 HTTP 直方图）：HTTP 桶把"查库 +
+    /// 限流 + Argon2"混在一个耗时里，**Argon2 参数漂移看不出来**（登录 120ms→300ms 会被
+    /// 当成"数据库慢了"）。这一族只包校验本身，`{algorithm}` 还能看见存量旧 MD5 哈希的
+    /// 残余占比（升级进度）。
+    pub fn record_credential_verify(&self, algorithm: &str, outcome: &str, duration_secs: f64) {
+        {
+            let mut counters = match self.credential_counters.write() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *counters
+                .entry((algorithm.to_string(), outcome.to_string()))
+                .or_insert(0) += 1;
+        }
+        let mut durations = match self.credential_durations.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let series = durations.entry(algorithm.to_string()).or_default();
+        series.count += 1;
+        series.sum_secs += duration_secs;
+        for (i, bound) in DURATION_BUCKETS_S.iter().enumerate() {
+            if duration_secs <= *bound {
+                series.buckets[i] += 1;
+            }
+        }
+    }
+
+    /// 渲染凭据校验指标（Prometheus 文本格式）
+    fn render_credential_prometheus(&self) -> String {
+        let mut s = String::new();
+        let counters = match self.credential_counters.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let durations = match self.credential_durations.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        s.push_str("# HELP stepby_credential_verify_total 凭据校验次数（algorithm,outcome）\n");
+        s.push_str("# TYPE stepby_credential_verify_total counter\n");
+        let mut keys: Vec<(&(String, String), u64)> =
+            counters.iter().map(|(k, v)| (k, *v)).collect();
+        keys.sort();
+        for ((algorithm, outcome), c) in &keys {
+            s.push_str(&format!(
+                "stepby_credential_verify_total{{algorithm=\"{}\",outcome=\"{}\"}} {}\n",
+                escape_label(algorithm),
+                escape_label(outcome),
+                c
+            ));
+        }
+        s.push_str("# HELP stepby_credential_verify_duration_seconds 凭据校验耗时分布（秒）\n");
+        s.push_str("# TYPE stepby_credential_verify_duration_seconds histogram\n");
+        let mut algos: Vec<&String> = durations.keys().collect();
+        algos.sort();
+        for algorithm in &algos {
+            if let Some(series) = durations.get(*algorithm) {
+                for (i, bound) in DURATION_BUCKETS_S.iter().enumerate() {
+                    s.push_str(&format!(
+                        "stepby_credential_verify_duration_seconds_bucket{{algorithm=\"{}\",le=\"{}\"}} {}\n",
+                        escape_label(algorithm),
+                        bound,
+                        series.buckets[i]
+                    ));
+                }
+                s.push_str(&format!(
+                    "stepby_credential_verify_duration_seconds_bucket{{algorithm=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape_label(algorithm),
+                    series.count
+                ));
+                s.push_str(&format!(
+                    "stepby_credential_verify_duration_seconds_sum{{algorithm=\"{}\"}} {}\n",
+                    escape_label(algorithm),
+                    series.sum_secs
+                ));
+                s.push_str(&format!(
+                    "stepby_credential_verify_duration_seconds_count{{algorithm=\"{}\"}} {}\n",
+                    escape_label(algorithm),
+                    series.count
+                ));
+            }
+        }
+        s
     }
 
     /// AK 开放 API 指标：`ak_sign` 中间件每请求记录一次
@@ -599,6 +758,100 @@ impl MetricsRegistry {
         s
     }
 
+    /// b72（AGENTS #4/#6）：记录一次出站依赖调用或后台受守卫任务的结局。
+    ///
+    /// - `component`：`mail` / `sms` / `webhook` / `storage` / `ai` / `im_robot` / `oauth`
+    ///   以及后台任务的 `bg:<label>`（前缀区分，避免与依赖名混淆）
+    /// - `outcome`：`ok` / `error` / `timeout` / `panic` / `rejected`
+    ///
+    /// 计数与耗时**总是成对写入**（与 `render_prometheus` 的"以直方图标签集为准"口径一致），
+    /// 否则 Prometheus 侧会出现 `_count` 与 `_total` 对不上的孤儿系列。
+    pub fn record_outbound(&self, component: &str, outcome: &str, duration_secs: f64) {
+        {
+            let mut counters = match self.outbound_counters.write() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *counters
+                .entry((component.to_string(), outcome.to_string()))
+                .or_insert(0) += 1;
+        }
+        let mut durations = match self.outbound_durations.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let series = durations
+            .entry(component.to_string())
+            .or_insert_with(OutboundDurationSeries::new);
+        series.count += 1;
+        series.sum_secs += duration_secs;
+        for (i, bound) in JOB_DURATION_BUCKETS_S.iter().enumerate() {
+            if duration_secs <= *bound {
+                series.buckets[i] += 1;
+            }
+        }
+    }
+
+    /// 渲染出站依赖 / 后台任务指标（Prometheus 文本格式）
+    fn render_outbound_prometheus(&self) -> String {
+        let mut s = String::new();
+        let counters = match self.outbound_counters.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        s.push_str("# HELP stepby_outbound_requests_total 出站依赖/后台任务调用计数（component,outcome）\n");
+        s.push_str("# TYPE stepby_outbound_requests_total counter\n");
+        let mut keys: Vec<&(String, String)> = counters.keys().collect();
+        keys.sort();
+        for (component, outcome) in keys {
+            if let Some(c) = counters.get(&(component.clone(), outcome.clone())) {
+                s.push_str(&format!(
+                    "stepby_outbound_requests_total{{component=\"{}\",outcome=\"{}\"}} {}\n",
+                    escape_label(component),
+                    escape_label(outcome),
+                    c
+                ));
+            }
+        }
+
+        let durations = match self.outbound_durations.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        s.push_str("# HELP stepby_outbound_duration_seconds 出站依赖/后台任务耗时分布（秒）\n");
+        s.push_str("# TYPE stepby_outbound_duration_seconds histogram\n");
+        let mut dur_keys: Vec<&String> = durations.keys().collect();
+        dur_keys.sort();
+        for component in &dur_keys {
+            if let Some(series) = durations.get(*component) {
+                for (i, bound) in JOB_DURATION_BUCKETS_S.iter().enumerate() {
+                    s.push_str(&format!(
+                        "stepby_outbound_duration_seconds_bucket{{component=\"{}\",le=\"{}\"}} {}\n",
+                        escape_label(component),
+                        bound,
+                        series.buckets[i]
+                    ));
+                }
+                s.push_str(&format!(
+                    "stepby_outbound_duration_seconds_bucket{{component=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape_label(component),
+                    series.count
+                ));
+                s.push_str(&format!(
+                    "stepby_outbound_duration_seconds_sum{{component=\"{}\"}} {}\n",
+                    escape_label(component),
+                    series.sum_secs
+                ));
+                s.push_str(&format!(
+                    "stepby_outbound_duration_seconds_count{{component=\"{}\"}} {}\n",
+                    escape_label(component),
+                    series.count
+                ));
+            }
+        }
+        s
+    }
+
     /// 渲染 Prometheus 文本格式的 HTTP 业务指标
     pub fn render_prometheus(&self) -> String {
         let mut s = String::new();
@@ -675,11 +928,14 @@ impl MetricsRegistry {
         // v5-D7：SSO 协议事件计数
         s.push_str(&self.render_sso_prometheus());
         // AK 开放 API：请求总量 / 验签失败 / 耗时直方图
+        s.push_str(&self.render_credential_prometheus());
         s.push_str(&self.render_ak_prometheus());
         // FCP-010：Web Vitals（前端性能退化告警数据源）
         s.push_str(&self.render_vitals_prometheus());
         // G-09：定时任务执行计数 / 耗时直方图
         s.push_str(&self.render_job_prometheus());
+        // b72：出站依赖 / 后台任务指标（AGENTS #4 组件级内建）
+        s.push_str(&self.render_outbound_prometheus());
         s
     }
 }

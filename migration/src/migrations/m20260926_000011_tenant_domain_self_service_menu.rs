@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000011_tenant_domain_self_service_menu.rs
+// stepby-axum/migration/src/migrations/m20260926_000011_tenant_domain_self_service_menu.rs
 //! 批次 1c：**租户自助域名管理**页面菜单（能力位 `tenant.domain_self_service` 的③层入口）。
 //!
 //! ## 为什么需要独立页面
@@ -43,13 +43,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 幂等 INSERT

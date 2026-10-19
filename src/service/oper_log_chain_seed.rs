@@ -9,7 +9,10 @@
 //! 判定规则（`resolve_prev_seed`）：设当前重算行为 R、前一幸存链行为 P：
 //! 1. 取 P 与 R 之间的锚点集合 A = { a : a.last_oper_id < R.oper_id 且
 //!    a.first_oper_id > P.oper_id }（P 不存在即链首时，仅要求 last_oper_id < R.oper_id；
-//!    锚点段为连续区间删除，幸存行不可能落在段内，故该判定与删除时序无关地成立）；
+//!    **前提**：锚点段内不含幸存链行——该前提**不是天然成立**，由登记侧
+//!    [`segment_chain_runs`] 断段保证（两条物理删除路径共用同一判据）；批七十四 B5
+//!    实测：租户维度时间范围清理只删本租户行，窗口内他租链行幸存，当时的单锚点
+//!    登记踩破此前提 ⇒ 幸存行误报 broken 且 verify 短路后真篡改不可见）；
 //! 2. A 为空 ⇒ R 的前驱就是 P（或链首空种子）——`Carry`；
 //! 3. A 非空时取 **`last_oper_id` 最大**的 A*（链序最靠近 R 的被删段尾行）：
 //!    - 正确性证明：R 的真实前驱 = R 写链时刻的链尾 L；链行序与 oper_id 同序
@@ -78,6 +81,45 @@ pub fn resolve_prev_seed(
 
 /// 链首空种子（写侧创世行用空 prev 计算，verify 对称）
 pub const GENESIS_SEED: &str = "";
+
+/// 把"本次确实会被删除的链行"按链行序切成**连续段**：`(段首, 段尾, 段尾 hash)`。
+///
+/// `all_chain`：**全局**链行 `(oper_id, chain_hash)` 升序（含不在删除集里的幸存行）；
+/// `deleted`：本次授权后真实待删的 oper_id 集合。
+///
+/// 为什么必须"见幸存行才断段"：[`resolve_prev_seed`] 的判定 1 依赖前提
+/// **"锚点段内不含幸存链行"**（模块文档 §1 括注）。前提破了就不是"少一条锚点"
+/// 而是**用错种子**——幸存行只能用上一幸存行 hash 续接，而它的真实前驱可能正是
+/// 被删掉的边界行 ⇒ verify 误报 broken，且 verify 遇错即短路返回，断点之后的
+/// 真篡改从此不可见（防篡改能力整体失效，方向不保守）。
+///
+/// 两条物理删除路径共用本函数（单一事实源）：按 id 批量删除（`delete_oper_logs`）
+/// 与按时间范围清理（`register_anchor_and_delete`）——后者的删除集在**租户维度**
+/// 被裁剪，窗口内他租链行必然幸存（批七十四 B5 同族实测缺陷）。
+pub fn segment_chain_runs(
+    all_chain: &[(i64, String)],
+    deleted: &std::collections::HashSet<i64>,
+) -> Vec<(i64, i64, String)> {
+    let mut segments: Vec<(i64, i64, String)> = Vec::new();
+    let mut cur: Option<(i64, i64, String)> = None;
+    for (oid, hash) in all_chain {
+        if deleted.contains(oid) {
+            match &mut cur {
+                None => cur = Some((*oid, *oid, hash.clone())),
+                Some((_, last, last_hash)) => {
+                    *last = *oid;
+                    *last_hash = hash.clone();
+                }
+            }
+        } else if let Some(seg) = cur.take() {
+            segments.push(seg);
+        }
+    }
+    if let Some(seg) = cur {
+        segments.push(seg);
+    }
+    segments
+}
 
 #[cfg(test)]
 mod tests {
@@ -173,5 +215,112 @@ mod tests {
         // P=20 幸存（在锚点段之后），R=21
         let seed = resolve_prev_seed(Some(20), 21, t("2026-10-06 09:00:00"), &anchors);
         assert_eq!(seed, PrevSeed::Carry);
+    }
+
+    // ==================== segment_chain_runs（锚点登记侧的段切分判据） ====================
+
+    fn chain_ids(rows: &[(i64, i64, String)]) -> Vec<(i64, i64)> {
+        rows.iter().map(|(f, l, _)| (*f, *l)).collect()
+    }
+
+    fn set(ids: &[i64]) -> std::collections::HashSet<i64> {
+        ids.iter().copied().collect()
+    }
+
+    /// 全段被删（平台保留期清理的典型形态）⇒ 收敛为 1 段，段尾 hash 取**最后一个**被删行
+    #[test]
+    fn contiguous_deletion_collapses_to_one_run() {
+        let all = vec![
+            (1, "h1".to_string()),
+            (2, "h2".to_string()),
+            (3, "h3".to_string()),
+        ];
+        let segs = segment_chain_runs(&all, &set(&[1, 2, 3]));
+        assert_eq!(chain_ids(&segs), vec![(1, 3)], "相邻被删行必须合并为一段");
+        assert_eq!(
+            segs[0].2, "h3",
+            "段尾 hash 必须是被删尾行的 hash（续接种子）"
+        );
+    }
+
+    /// 幸存行隔断（租户维度窗口：他租链行留在原地）⇒ 必须断成多段，
+    /// 且**段内不得含幸存行**（resolve_prev_seed 判定 1 的前提）
+    #[test]
+    fn surviving_rows_split_runs() {
+        let all = vec![
+            (1, "h1".to_string()),
+            (2, "h2".to_string()),
+            (3, "h3".to_string()),
+            (4, "h4".to_string()),
+            (5, "h5".to_string()),
+        ];
+        // 删 1/3/5，2/4 幸存 ⇒ 三段，各段边界都是"仅含被删行"
+        let segs = segment_chain_runs(&all, &set(&[1, 3, 5]));
+        assert_eq!(
+            chain_ids(&segs),
+            vec![(1, 1), (3, 3), (5, 5)],
+            "幸存行必须断段，否则锚点声称的区间夹着幸存行"
+        );
+        assert_eq!(
+            segs.iter().map(|s| s.2.clone()).collect::<Vec<_>>(),
+            vec!["h1", "h3", "h5"],
+            "每段种子应为该段自身尾行"
+        );
+    }
+
+    /// 首尾不完整（部分删除）：只删中间连续段 ⇒ 1 段，不产生"覆盖幸存行"的假段
+    #[test]
+    fn middle_only_deletion_yields_single_bounded_run() {
+        let all = vec![
+            (10, "h10".to_string()),
+            (11, "h11".to_string()),
+            (12, "h12".to_string()),
+            (13, "h13".to_string()),
+        ];
+        let segs = segment_chain_runs(&all, &set(&[11, 12]));
+        assert_eq!(chain_ids(&segs), vec![(11, 12)]);
+        assert_eq!(segs[0].2, "h12");
+    }
+
+    /// 空集双向边界：无链行 / 删除集为空 ⇒ 不得凭空造段
+    /// （对照组：B5 修复的"0 行删除仍登记锚点"就是这条边界被踩破）
+    #[test]
+    fn empty_inputs_produce_no_segments() {
+        let all = vec![(1, "h1".to_string()), (2, "h2".to_string())];
+        assert!(
+            segment_chain_runs(&all, &set(&[])).is_empty(),
+            "删除集为空不得登记任何段"
+        );
+        assert!(
+            segment_chain_runs(&[], &set(&[1, 2])).is_empty(),
+            "范围内无链行时不得登记任何段"
+        );
+    }
+
+    /// 段切分与 `resolve_prev_seed` 的**闭环**：按本函数产出的段登记锚点后，
+    /// 幸存行必须能各自取到"自己的真实前驱"（跨段不得串种子）
+    #[test]
+    fn segmented_anchors_seed_each_survivor_with_its_true_predecessor() {
+        // 链：1(A) 2(B) 3(A) 4(B) 5(A)，A 清理删 1/3/5 ⇒ 段 [1,1] [3,3] [5,5]
+        let anchors = [
+            anchor(1, 1, "h1", "2026-10-08 03:00:00"),
+            anchor(3, 3, "h3", "2026-10-08 03:00:00"),
+            anchor(5, 5, "h5", "2026-10-08 03:00:00"),
+        ];
+        let when = t("2026-10-01 09:00:00"); // 全部写于删除之前
+        // 幸存首行 2：前驱 = 被删 1
+        assert_eq!(
+            resolve_prev_seed(None, 2, when, &anchors),
+            PrevSeed::Anchor("h1".into())
+        );
+        // 幸存行 4（P=2）：前驱 = 被删 3，**不得**取 h5（链序更大的段）或 h1
+        assert_eq!(
+            resolve_prev_seed(Some(2), 4, when, &anchors),
+            PrevSeed::Anchor("h3".into())
+        );
+        // 反证：若把三段合并成单锚点 [1,5]（修复前的登记形态），
+        // 行 2 无锚点可用（last=5 不小于 2）⇒ Carry 空种子 ⇒ 必然误报 broken
+        let merged = [anchor(1, 5, "h5", "2026-10-08 03:00:00")];
+        assert_eq!(resolve_prev_seed(None, 2, when, &merged), PrevSeed::Carry);
     }
 }

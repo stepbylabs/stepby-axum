@@ -21,6 +21,11 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // 存量库兜底可能已补列而不登记版本 ⇒ 无守卫 ADD COLUMN 会 duplicate column 硬失败
+        // （与本批 chain_hash / prompt_tokens / actions_json 同族，逐列 has_column 口径）。
+        if manager.has_column("sys_job_log", "duration_ms").await? {
+            return Ok(());
+        }
         manager
             .alter_table(
                 Table::alter()
@@ -37,6 +42,9 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("sys_job_log", "duration_ms").await? {
+            return Ok(());
+        }
         manager
             .alter_table(
                 Table::alter()

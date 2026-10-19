@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260926_000001_role_is_system.rs
+// stepby-axum/migration/src/migrations/m20260926_000001_role_is_system.rs
 //! 台账 P0-2：sys_role 增 `is_system` 系统标记列（超管判定与可变 role_key 解耦）。
 //!
 //! 背景（`docs/optimization/multitenant-pending-items-ledger-2026-09-25.md` §1.1 P0-2）：

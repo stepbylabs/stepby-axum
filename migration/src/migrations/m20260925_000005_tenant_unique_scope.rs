@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260925_000005_tenant_unique_scope.rs
+// stepby-axum/migration/src/migrations/m20260925_000005_tenant_unique_scope.rs
 //! 多租户 Phase 3.5g：剩余唯一域租户化（flow_task 业务唯一、scim_group external_id）。
 //!
 //! 承接 `m20260925_000004_tenant_saas_governance`（该迁移租户化了 role/user-scim/

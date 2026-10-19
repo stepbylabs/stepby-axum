@@ -10,7 +10,10 @@
 //!
 //! 说明：`TS::export_all` 会**递归导出该类型的全部依赖**，故此处只需列出各「根」
 //! VO/DTO；新增带 `#[ts(export)]` 的类型后，若它不是任何已列出类型的依赖，
-//! 需在此登记一行——但 `cargo test`（derive 自动生成 export_bindings_* 测试）始终是零漂移兜底。
+//! **必须**在此登记一行，否则 `cargo ts` 静默漏导（批七十六实测：漏了 16 个，
+//! 占声明总数 20%，其中 `SysFlowLog` 改完实体注释后 `cargo ts` 跑完类型仍是旧的）。
+//! `cargo test` 的 derive 兜底只能保证"跑测试的那台机器"零漂移，不能替代本清单
+//! ⇒ 判据已机械化为常驻门禁 `scripts/ts_export_audit.py`（声明集 ⊆ 实出集）。
 use ts_rs::{Config, TS};
 
 /// 对每个类型调用 `export_all`，收集并汇总失败项，最终据此决定退出码。
@@ -98,6 +101,37 @@ fn main() {
         stepby_axum::entity::sys_scim_group_binding::Model,
         stepby_axum::entity::sys_scim_group_member::Model,
         stepby_axum::entity::sys_user_dept::Model,
+        // ---- entity：批七十六补齐的 16 个「声明了 export_to 却不是任何已列类型的依赖」
+        //      的类型。此前 `cargo ts` 只导 64/80，这些 .ts 只能靠 `cargo test` 兜底刷新，
+        //      于是"改了实体注释/字段 → cargo ts 跑完类型仍是旧的"（本轮实测踩在
+        //      SysFlowLog.ts 上）。判据与常驻门禁见 `scripts/ts_export_audit.py`。
+        stepby_axum::entity::flow_definition::Model,
+        stepby_axum::entity::flow_demo_doc::Model,
+        stepby_axum::entity::flow_graph_doc::Model,
+        stepby_axum::entity::report_dashboard::Model,
+        stepby_axum::entity::report_dataset::Model,
+        stepby_axum::entity::sys_alert_rule::Model,
+        stepby_axum::entity::sys_audit_change::Model,
+        stepby_axum::entity::sys_flow_log::Model,
+        stepby_axum::entity::sys_flow_task::Model,
+        stepby_axum::entity::sys_report_board::Model,
+        stepby_axum::entity::sys_tenant_domain::Model,
+        stepby_axum::entity::sys_tenant_menu::Model,
+        stepby_axum::entity::sys_tenant_migration_map::Model,
+        // ---- service：批七十六补齐的另外 3 个 ----
+        stepby_axum::service::sys_pat_service::OpenProfileVo,
+        stepby_axum::service::sys_pat_service::RotateAkResult,
+        stepby_axum::service::sys_web_hook_service::WebhookEventVo,
+        // ---- 批七十六补齐：`#[ts(export)]` 但**没写 export_to**（按类型名落盘）的 6 个 ----
+        //      这类形态更隐蔽：文件名不在源码里，grep `export_to` 数不出来，
+        //      于是既不被清单覆盖、也不被"声明集"看见——`scripts/ts_export_audit.py`
+        //      把它们并入声明集后才露出来（前端 6 个 api/*.ts 至今在 import 它们）。
+        stepby_axum::ai::config_service::AiConfigMaskedVo,
+        stepby_axum::service::upload_config_service::UploadConfigMaskedVo,
+        stepby_axum::service::sys_tenant_domain_service::TenantDomainVo,
+        stepby_axum::service::sys_tenant_domain_service::TenantDomainVerifyVo,
+        stepby_axum::service::sys_tenant_nav_service::SysTenantMenuVo,
+        stepby_axum::service::sys_tenant_nav_service::TenantNavMenuOptionVo,
         // ---- service：SSO / OIDC Provider（应用私有 API） ----
         stepby_axum::service::sso_service::SsoClientVo,
         stepby_axum::service::sso_service::SsoClientQueryDto,

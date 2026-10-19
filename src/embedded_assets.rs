@@ -297,19 +297,3 @@ fn is_static_asset(path: &str) -> bool {
     .iter()
     .any(|ext| lower.ends_with(ext))
 }
-
-/// 列出嵌入的所有文件（仅用于调试）
-#[cfg(debug_assertions)]
-#[allow(dead_code)]
-pub fn list_embedded_files() -> Vec<String> {
-    // 开发模式下从文件系统列出
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("frontend-dist") {
-        for entry in entries.flatten() {
-            if let Ok(name) = entry.file_name().into_string() {
-                files.push(name);
-            }
-        }
-    }
-    files
-}

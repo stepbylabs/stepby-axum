@@ -67,6 +67,28 @@ pub fn offset_of(page_num: u64, limit: u64) -> u64 {
         .min(i64::MAX as u64)
 }
 
+/// 分页点位的成对推导：`(offset, limit)`——**limit 必须先封顶，再按封顶值算 offset**。
+///
+/// 存在的理由：`offset` 与 `LIMIT` 分别由两处代码算出时，会出现"offset 按封顶值算、
+/// LIMIT 按原值算"的**错位跳行**（同一页码在两处各自成立、拼起来是错的）。收成一个
+/// 返回值成对的函数，这类漂移在结构上不可能发生。
+///
+/// 默认上限 [`MAX_PAGE_SIZE`]；有业务自有上限的调用方走 [`page_args_capped`]，
+/// 不得回头手算 `(num - 1) * size`（由
+/// `tests::no_handrolled_page_offset_anywhere` 机械钉住）。
+pub fn page_args(page_num: u64, page_size: u64) -> (u64, u64) {
+    page_args_capped(page_num, page_size, MAX_PAGE_SIZE)
+}
+
+/// [`page_args`] 的显式上限形态。
+///
+/// `max_page_size` 是**调用方的业务上限**（观测类接口按 200 出数），必须 ≥ 1：
+/// 传 0 会让 `clamp(1, 0)` 反转成 panic，所以这里按 `max(1)` 归一而非依赖 clamp 的入参不变式。
+pub fn page_args_capped(page_num: u64, page_size: u64, max_page_size: u64) -> (u64, u64) {
+    let limit = page_size.clamp(1, max_page_size.max(1));
+    (offset_of(page_num, limit), limit)
+}
+
 impl PageDomain {
     /// 计算 offset（0-based）
     pub fn offset(&self) -> u64 {
@@ -432,5 +454,123 @@ mod tests {
         d.sanitize_order_fields();
         assert_eq!(d.order_by_column.as_deref(), Some("createTime"));
         assert_eq!(d.is_asc.as_deref(), Some("desc"));
+    }
+
+    // ---------- 批七十五 B1：分页点位单一事实源的形状锁 ----------
+
+    /// 判据（纯函数，真实码与控制组共用）：行内出现 `(某个分页变量 - 1)` 即视为手算 offset。
+    ///
+    /// **按变量名收口而不是按算式收口**：`(x - 1) * y` 在时间窗、列宽、`count >= n` 的
+    /// `.gt(min_count - 1)` 等等场景里都是合法算术（实测仓内有 6 处这类形态），把它们一律
+    /// 判红只会逼下一个作者把违规写成一连串别名绕开判据。因此只认名字里含 `page`/`num` 的
+    /// 括号内变量——这正好覆盖 `(page_num - 1) * page_size`、`((num - 1) * size, size)`、
+    /// `((page_num - 1) as usize).saturating_mul(...)` 三种真实形态。
+    fn raw_page_offset_hit(line: &str) -> bool {
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = RE.get_or_init(|| {
+            // 允许字段访问形态（`query.page_num`）：真实代码就是这么写的，
+            // 只认裸标识符会让判据对最常见的手算形态失明
+            regex::Regex::new(
+                r"\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*-\s*1\s*\)",
+            )
+            .expect("正则必须可编译")
+        });
+        for cap in re.captures_iter(line) {
+            let name = cap[1].to_lowercase();
+            if name.contains("page") || name.contains("num") {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn no_handrolled_page_offset_anywhere() {
+        use crate::common::prod_scan::{Scan, prod_files};
+        let files = prod_files(&Scan::default());
+        // 采集面地板（实测全仓 .rs 上百个）：扫描器塌了必须红，不能"扫不到=没有违规"
+        crate::common::prod_scan::require_volume(&files, 80, 20_000, "分页点位形状锁");
+        let mut hits = Vec::new();
+        for f in &files {
+            for (i, line) in f.lines.iter().enumerate() {
+                if raw_page_offset_hit(line) {
+                    hits.push(format!("{}:{} {}", f.rel, i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "分页 offset 必须由 [`offset_of`]/[`page_args`] 推导，不得手算 `(页码 - 1) * 每页`；\
+             手算形态各自缺不同的那半条不变式（下溢 / 乘法回绕 / 绕过 i64::MAX 钳制 / limit 未封顶），\
+             批七十五实测其中两处可被单个查询参数触发 500：\n{}",
+            hits.join("\n")
+        );
+    }
+
+    /// 控制组：判据必须**能**失败，且不得误伤合法算术。
+    ///
+    /// 反例集里的每条都是"看起来像但不该报"或"应该报但形状不同"，缺任何一侧都可能让
+    /// 上面的总锁退化成装饰。
+    #[test]
+    fn page_offset_guard_catches_synthetic_violations_and_spares_legit_math() {
+        // 必须被抓到的四种真实形态
+        for src in [
+            "let off = (page_num - 1) * page_size;",
+            "let (a, b) = ((num - 1) * size, size);",
+            "((page_num - 1) as usize).saturating_mul(page_size),",
+            "    (query.page_num - 1) * query.page_size,",
+        ] {
+            assert!(raw_page_offset_hit(src), "手算分页形态必须被抓到: {src}");
+        }
+        // 不得误伤：走单一事实源、以及与分页无关的同形算术
+        for src in [
+            "let off = crate::common::page::offset_of(page_num, limit);",
+            "let (off, lim) = page_args(params.page_num, params.page_size);",
+            "page_num.saturating_sub(1).saturating_mul(limit)",
+            "let start = today - Duration::days(days - 1);",
+            ".gt(min_count - 1)",
+            "let w = (cols - 1) * gap;",
+            "depts[(i - 1) as usize]",
+        ] {
+            assert!(!raw_page_offset_hit(src), "合法写法不得被报: {src}");
+        }
+        // 采集面自身的语义也要对得上：注释里出现的模式串不算违规
+        let commented = [
+            "    // 曾有 `(page_num - 1) as usize` 的独立算式".to_string(),
+            "    let x = 1;".to_string(),
+        ];
+        assert!(
+            !commented
+                .iter()
+                .any(|l| raw_page_offset_hit(l) && !l.trim_start().starts_with("//")),
+            "prod_scan 的 Blank 口径必须已把注释行清空"
+        );
+    }
+
+    /// `page_args` 与 `offset_of` 必须**同源**：limit 先封顶、offset 再按封顶值算。
+    ///
+    /// 这条判据盯的是"两处各自 clamp"会造成的错位跳行——两处的值各自合理、拼起来是错的。
+    #[test]
+    fn page_args_pairs_offset_with_clamped_limit() {
+        assert_eq!(page_args(1, 10), (0, 10));
+        assert_eq!(page_args(3, 10), (20, 10));
+        // pageSize 超上限：limit 封到 MAX_PAGE_SIZE，offset 必须按**封顶后**的值算
+        assert_eq!(page_args(4, 999_999), (3 * MAX_PAGE_SIZE, MAX_PAGE_SIZE));
+        // pageNum=0：归一到第 1 页，且不得下溢
+        assert_eq!(page_args(0, 10), (0, 10));
+        // 超大页码：饱和到 i64::MAX（深页的正确语义是空集，而不是让 DB 报错）
+        assert_eq!(page_args(u64::MAX, 10), (i64::MAX as u64, 10));
+        // 业务自有上限档位
+        assert_eq!(page_args_capped(3, 150, 200), (300, 150));
+        assert_eq!(page_args_capped(3, 1500, 200), (2 * 200, 200));
+        // pageSize=0 不得算出非零 offset（clamp 到 1）
+        assert_eq!(page_args(7, 0), (6, 1));
+        // max_page_size=0 是调用方的笔误：不得让 clamp(1, 0) panic
+        assert_eq!(page_args_capped(2, 50, 0), (1, 1));
+        // 与 offset_of 的闭环：同一入参必须同值
+        for (n, s) in [(1u64, 10u64), (5, 100), (0, 7), (u64::MAX, 100)] {
+            let (off, lim) = page_args(n, s);
+            assert_eq!(off, offset_of(n, lim), "offset 与 limit 必须成对同源");
+        }
     }
 }

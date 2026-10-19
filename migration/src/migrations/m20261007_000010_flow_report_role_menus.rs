@@ -31,14 +31,18 @@ fn idempotent_insert(backend: sea_orm::DatabaseBackend, body: &str) -> String {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let backend = manager.get_connection().get_database_backend();
-        for menu_id in [4140, 4141, 4142, 4143, 4144, 4145, 4146, 4147, 4148] {
-            let sql = idempotent_insert(
-                backend,
-                &format!("sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})"),
-            );
-            manager.get_connection().execute_unprepared(&sql).await?;
-        }
+        // b73 轮 15：改走 governance 策略体（SELECT 侧过滤）。与批次十三"全量授权"拍板
+        // 当前等价——本段写按钮 4142-4145 / 4147 已逐条登记进 COMMON_ROLE_WRITE_EXCEPTIONS，
+        // 其余为 M/C 页面或 `:query` 只读按钮；今后往本段加未登记的写按钮将被拒发。
+        manager
+            .get_connection()
+            .execute_unprepared(&idempotent_insert(
+                manager.get_connection().get_database_backend(),
+                &governance::common_role_grant_select_body(&[
+                    4140, 4141, 4142, 4143, 4144, 4145, 4146, 4147, 4148,
+                ]),
+            ))
+            .await?;
         Ok(())
     }
 

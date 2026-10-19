@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260730_000001_remove_duplicate_health_file_menus.rs
+// stepby-axum/migration/src/migrations/m20260730_000001_remove_duplicate_health_file_menus.rs
 //! 第十五次迁移：清理重复的 health/file 菜单记录
 //!
 //! 背景：

@@ -6,7 +6,7 @@
 
 use sea_orm::*;
 
-use crate::entity::sys_user_pref::{ActiveModel, Column, Entity as SysUserPref, Model};
+use crate::entity::sys_user_pref::{Column, Entity as SysUserPref, Model};
 use crate::repository::base::BaseRepository;
 
 /// 用户消息偏好 Repository
@@ -94,14 +94,6 @@ impl SysUserPrefRepository {
         ];
         let stmt = Statement::from_sql_and_values(backend, sql, values);
         db.execute_raw(stmt).await?;
-        Ok(())
-    }
-
-    /// 便捷插入（供单元测试/扩展使用；不使用 BaseRepository::insert 以规避 MySQL 主键局限）
-    pub async fn insert_raw(&self, model: Model) -> Result<(), DbErr> {
-        let db = self.base.db();
-        let am: ActiveModel = model.into();
-        SysUserPref::insert(am).exec(db).await?;
         Ok(())
     }
 }

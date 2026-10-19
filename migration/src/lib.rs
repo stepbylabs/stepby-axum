@@ -1,16 +1,21 @@
 // stepby-axum/migration/src/lib.rs
 //! migration 子 crate 库入口
 //!
-//! Migrator 实现 MigratorTrait，聚合全部迁移（86 个，按里程碑时间序）。
+//! Migrator 实现 MigratorTrait，聚合全部迁移（按里程碑时间序；条数以
+//! `migrations/mod.rs` 与本文件 Vec 为准，二者一致性由
+//! `src/integration_tests/migration_registry.rs` 机械锁定——本行**不写死条数**，
+//! 因为写死的数字已经烂过一次：注释停留在 86 时实际是 119）。
 //! 2026-09-30 目录重组：迁移文件移入 migrations/ 子目录集中维护，
 //! MigrationTrait::name() 未变，seaql_migrations 记录与存量库完全兼容（零影响）。
 //! 本文件另承载跨迁移共享的 DDL/seed 工具（IndexDdlExt / adapt_placeholders / now_expr 等），
 //! 各迁移文件通过 `use crate::*` 引用。
 //!
 //! 新增迁移流程：
-//! 1. 在 migrations/ 下新建 m<yyyymmdd>_<seq>_<slug>.rs（impl MigrationTrait）；
+//! 1. 在 migrations/ 下新建 `m<yyyymmdd>_<seq>_<slug>.rs`（impl MigrationTrait）；
 //! 2. 在 migrations/mod.rs 登记（pub mod）；
-//! 3. 在本文件 Migrator Vec 末尾追加 Box::new(<mod名>::Migration)。
+//! 3. 在本文件 Migrator Vec 末尾追加 `Box::new(<mod名>::Migration)`；
+//! 4. 跑 `cargo test migration_registry`——漏登记直接判红（历史上
+//!    `m20260806_000001_add_log_time_indexes` 就因漏登记导致索引从未生效）。
 use sea_orm_migration::prelude::*;
 
 pub mod migrations;
@@ -219,6 +224,37 @@ impl MigratorTrait for Migrator {
             Box::new(m20261010_000001_fix_ai_history_menu_parent::Migration),
             Box::new(m20261012_000001_config_governance_and_archive_menus::Migration),
             Box::new(m20261013_000001_normalize_menu_del_flag::Migration),
+            Box::new(m20261017_000001_common_role_grant_erosion::Migration),
+            Box::new(m20261017_000002_platform_only_alert::Migration),
+            Box::new(m20261018_000001_flow_action_dict::Migration),
+            Box::new(m20261019_000001_flow_action_dict_drop_reserved::Migration),
         ]
     }
+}
+
+/// 种子/迁移写库的**唯一**时间表达式（批七十四 B1 归口）。
+///
+/// ## 为什么三方言统一返回 UTC 字面量
+///
+/// 改造前本逻辑在 `migration/src/migrations/*.rs` 里有 **36 份**逐字同构的副本
+/// （`grep -rln "fn now_expr" | wc -l` = 36），外加 `src/initialize/` 里 5 份同构 helper
+/// （`flow_now` 等）——同一逻辑的两批副本，改一处必然漏其余。每份都写成
+/// "SQLite 用 `chrono::Local::now()` 预计算串 / MySQL+PG 用 `NOW()`"，于是同时存在两处漂移：
+///
+/// 1. **口径漂移**：运行期写入口径是 `common::datetime::now_naive()` =
+///    `Utc::now().naive_local()`（全仓 202 处），而种子用**本机挂钟**（dev 机 UTC+8）
+///    ⇒ 同一库内两种时间并存。实测：`sys_data_rule` 6 行 `create_time` 晚于 UTC now
+///    整 8 小时；`seed_diff` 里 `sys_user.login_date: seed='2026-10-18 02:38:59' →
+///    live='2026-10-17 18:37:19'` 长期被记成 "informational"，**它不是运行态演进，是口径分裂**。
+/// 2. **方言漂移**：MySQL/PG 的 `NOW()` 取**会话时区**挂钟，与 SQLite 分支的字符串不同源
+///    ⇒ 换库即换口径。
+///
+/// 带引号的日期时间字面量在 SQLite / MySQL / PostgreSQL **三方言均合法**，无需分支；
+/// 统一取 UTC 后两条漂移同时消失，且"一份判据"使形状锁可以只扫一个函数。
+///
+/// 展示与调度侧使用 `Local` 是**合法**的（本地日界统计、HTTP `Last-Modified` 头、
+/// 备份文件名、在线会话显示串等），本函数只约束**落库时间**；由
+/// `initialize::tests::seed_time_writes_use_single_utc_source` 钉住"落库路径禁 `Local::now()`"。
+pub fn seed_now_expr() -> String {
+    format!("'{}'", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"))
 }

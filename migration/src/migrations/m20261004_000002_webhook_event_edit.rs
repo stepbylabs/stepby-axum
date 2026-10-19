@@ -13,7 +13,8 @@
 //! ## 口径
 //!
 //! 菜单种子对齐 m20261003_000002 范式（3564 挂「回调配置」页面 menu_id=158 下，
-//! 授予超管角色 role_id=2）；`pub fn` 供 `initialize/mod.rs` 兜底引用（单一事实源）。
+//! 授权目标为平台普通角色 role_id=2，实际发放由 `governance::common_role_may_grant`
+//! 决定）；`pub fn` 供 `initialize/mod.rs` 兜底引用（单一事实源）。
 
 use sea_orm_migration::prelude::*;
 
@@ -52,27 +53,30 @@ pub const WEBHOOK_EVENT_EDIT_ROW: (i64, &str, i64, i64, &str, &str, &str) = (
 
 /// 菜单按钮 INSERT 语句体（不含幂等前缀，迁移与兜底共用）
 ///
-/// 返回顺序：菜单 3564 → role_menu(2,3564)。
+/// 返回顺序：菜单 3564（role_menu 授权按策略过滤）。
+/// b73 轮 15：`system:webhook:event:edit` 是写权限，按 [`governance::common_role_may_grant`]
+/// 不再默认授予 common（§8.2 只读姿态；出站目录停用属平台运维面，非越权例外）。
 pub fn webhook_event_edit_menu_bodies(now_expr: &str) -> Vec<String> {
     let (menu_id, name, parent_id, order_num, perms, icon, remark) = WEBHOOK_EVENT_EDIT_ROW;
-    vec![
+    let mut bodies = vec![
         format!(
             "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag) VALUES \
             ({menu_id}, '{name}', {parent_id}, {order_num}, '', '', '', '', '1', '0', 'F', '0', '0', '{perms}', '{icon}', 'admin', {now_expr}, '{remark}', '0')"
         ),
-        format!("sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})"),
-    ]
+    ];
+    if governance::common_role_may_grant(menu_id, "F", perms) {
+        bodies.push(format!(
+            "sys_role_menu (role_id, menu_id) VALUES (2, {menu_id})"
+        ));
+    }
+    bodies
 }
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let now = match manager.get_connection().get_database_backend() {
-            sea_orm::DatabaseBackend::MySql => "NOW()",
-            sea_orm::DatabaseBackend::Postgres => "NOW()",
-            _ => "CURRENT_TIMESTAMP",
-        };
-        for body in webhook_event_edit_menu_bodies(now) {
+        let now = crate::seed_now_expr();
+        for body in webhook_event_edit_menu_bodies(&now) {
             execute_idempotent_insert(manager, &body).await?;
         }
         Ok(())

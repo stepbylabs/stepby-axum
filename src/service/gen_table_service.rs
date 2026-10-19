@@ -1324,17 +1324,17 @@ impl GenTableService {
     /// 3. 重新生成 gen_table_column 记录
     pub async fn synch_db(&self, table_name: &str, operator: &str) -> Result<(), ServiceError> {
         let table = self.repo.find_by_name(table_name).await?.ok_or_else(|| {
-            ServiceError::not_found(&format!(
-                "{}: {table_name}",
-                crate::tr!("error.gen.table_not_imported")
+            ServiceError::not_found(&crate::tr!(
+                "error.gen.table_not_imported",
+                name = table_name
             ))
         })?;
 
         let columns: Vec<DbColumnInfo> = self.repo.find_db_columns(table_name).await?;
         if columns.is_empty() {
-            return Err(ServiceError::not_found(&format!(
-                "{}: {table_name}",
-                crate::tr!("error.gen.table_no_columns")
+            return Err(ServiceError::not_found(&crate::tr!(
+                "error.gen.table_no_columns",
+                name = table_name
             )));
         }
 
@@ -1431,9 +1431,9 @@ impl GenTableService {
     /// 生成代码（返回 ZIP 文件字节流）
     pub async fn gen_code(&self, table_name: &str) -> Result<Vec<u8>, ServiceError> {
         let table = self.repo.find_by_name(table_name).await?.ok_or_else(|| {
-            ServiceError::not_found(&format!(
-                "{}: {table_name}",
-                crate::tr!("error.gen.table_not_imported")
+            ServiceError::not_found(&crate::tr!(
+                "error.gen.table_not_imported",
+                name = table_name
             ))
         })?;
         let columns = self.repo.find_columns_by_table_id(table.table_id).await?;

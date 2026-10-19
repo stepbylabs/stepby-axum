@@ -161,13 +161,18 @@ impl ScimGroupService {
         let nick_names: std::collections::HashMap<i64, String> = if user_ids.is_empty() {
             Default::default()
         } else {
+            // 列投影（b74 §一.16 同族）：成员装配只需要昵称，未投影会把 `password`
+            // （argon2 摘要）读进 SCIM 链路内存
             sys_user::Entity::find()
+                .select_only()
+                .column(sys_user::Column::UserId)
+                .column(sys_user::Column::NickName)
                 .filter(sys_user::Column::UserId.is_in(user_ids))
+                .into_tuple::<(i64, String)>()
                 .all(self.db())
                 .await
                 .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
                 .into_iter()
-                .map(|u| (u.user_id, u.nick_name))
                 .collect()
         };
         let members = member_rows
@@ -219,19 +224,21 @@ impl ScimGroupService {
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
         let user_ids: Vec<i64> = member_rows.iter().map(|mr| mr.user_id).collect();
-        let users = if user_ids.is_empty() {
+        let users: Vec<(i64, String)> = if user_ids.is_empty() {
             Vec::new()
         } else {
+            // 列投影（b74 §一.16 同族）：见上方同名注释——批量装配同样不得读整行
             sys_user::Entity::find()
+                .select_only()
+                .column(sys_user::Column::UserId)
+                .column(sys_user::Column::NickName)
                 .filter(sys_user::Column::UserId.is_in(user_ids))
+                .into_tuple::<(i64, String)>()
                 .all(self.db())
                 .await
                 .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
         };
-        let nick_by_uid: std::collections::HashMap<i64, String> = users
-            .into_iter()
-            .map(|u| (u.user_id, u.nick_name))
-            .collect();
+        let nick_by_uid: std::collections::HashMap<i64, String> = users.into_iter().collect();
         let mut members_by_gid: std::collections::HashMap<i64, Vec<ScimGroupMemberRef>> =
             std::collections::HashMap::new();
         for mr in member_rows {
@@ -390,14 +397,25 @@ impl ScimGroupService {
         // b71 N+1 治理：成员存在性由循环逐个 find_by_id 收敛为一次 `is_in` 批查；
         // 报错文案与"按 ids 原序报告首个缺失成员"的语义保持不变。
         if !ids.is_empty() {
+            // 存在性判定下推到 SQL + 只投影 user_id：原实现把整行（含 `password`）
+            // 读进内存再内存过滤，两件事都不必要。
+            // NULL 安全：`del_flag` 可为 NULL，SQL 的 `<> '2'` 对 NULL 求值为 NULL（会漏掉
+            // 存量 NULL 行），而旧内存判定 `as_deref() != Some("2")` 把 NULL 视为存活 ⇒
+            // 必须显式补 `IS NULL` 分支，否则语义漂移。
             let alive: std::collections::HashSet<i64> = sys_user::Entity::find()
+                .select_only()
+                .column(sys_user::Column::UserId)
                 .filter(sys_user::Column::UserId.is_in(ids.clone()))
+                .filter(
+                    sea_orm::Condition::any()
+                        .add(sys_user::Column::DelFlag.ne("2"))
+                        .add(sys_user::Column::DelFlag.is_null()),
+                )
+                .into_tuple::<i64>()
                 .all(self.db())
                 .await
                 .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?
                 .into_iter()
-                .filter(|u| u.del_flag.as_deref() != Some("2"))
-                .map(|u| u.user_id)
                 .collect();
             for uid in &ids {
                 if !alive.contains(uid) {
@@ -758,27 +776,34 @@ impl ScimGroupService {
         // b71 N+1 治理：成员用户一次 is_in 批查（原循环逐个 find_by_id），保持
         // 「成员用户不存在 → 404」与 member_rows 原序语义不变
         let user_ids: Vec<i64> = member_rows.iter().map(|mr| mr.user_id).collect();
-        let users: std::collections::HashMap<i64, sys_user::Model> = if user_ids.is_empty() {
+        let users: std::collections::HashMap<i64, (String, String)> = if user_ids.is_empty() {
             Default::default()
         } else {
+            // 列投影（b74 §一.16 同族）：详情装配只用 (user_name, nick_name)
             sys_user::Entity::find()
+                .select_only()
+                .column(sys_user::Column::UserId)
+                .column(sys_user::Column::UserName)
+                .column(sys_user::Column::NickName)
                 .filter(sys_user::Column::UserId.is_in(user_ids))
+                .into_tuple::<(i64, String, String)>()
                 .all(self.db())
                 .await
                 .map_err(db_err_500)?
                 .into_iter()
-                .map(|u| (u.user_id, u))
+                .map(|(uid, name, nick)| (uid, (name, nick)))
                 .collect()
         };
         let mut members = Vec::with_capacity(member_rows.len());
         for mr in member_rows {
-            let u = users
+            let (user_name, nick_name) = users
                 .get(&mr.user_id)
+                .cloned()
                 .ok_or_else(|| ScimError::new(404, format!("成员用户不存在: {}", mr.user_id)))?;
             members.push(ScimGroupAdminMember {
-                user_id: u.user_id,
-                user_name: u.user_name.clone(),
-                nick_name: u.nick_name.clone(),
+                user_id: mr.user_id,
+                user_name,
+                nick_name,
             });
         }
         let bindings = GroupBinding::find()

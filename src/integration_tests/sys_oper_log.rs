@@ -732,3 +732,208 @@ async fn it_opl_chain_cross_batch_removal() {
         "跨批次删除后 verify 应 valid（R={r} 的种子应取链序最大被删行 l1={l1}），实际: {v}"
     );
 }
+
+// ==================== 批七十四 B5：锚点登记必须跟住删除的租户影响面 ====================
+
+/// 直接落一条**带链**操作日志（不经中间件，用于构造可控的租户归属与链参与态）。
+///
+/// `chain_hash` 写成 64 字符十六进制（零填充 seq），保证该行参与段切分——
+/// `find_chain_rows_in_range` 只看 `chain_hash IS NOT NULL`，NULL 行既不产锚点段
+/// 也无法证明本不变式。返回自增 `oper_id`（插入序即链序）。
+async fn insert_chained_log(
+    ctx: &TestContext,
+    tenant_id: i64,
+    target_tenant_id: Option<i64>,
+    seq: i64,
+) -> i64 {
+    use sea_orm::ActiveValue::{NotSet, Set};
+    use sea_orm::EntityTrait;
+    let model = crate::entity::sys_oper_log::ActiveModel {
+        tenant_id: Set(tenant_id),
+        target_tenant_id: Set(target_tenant_id),
+        oper_id: NotSet,
+        title: Set(Some(format!("it_opl_anchor_scope_{seq}"))),
+        business_type: Set(Some(3)),
+        method: Set(Some("integration_test".to_string())),
+        request_method: Set(Some("DELETE".to_string())),
+        operator_type: Set(Some(1)),
+        oper_name: Set(Some(format!("it_tenant_{tenant_id}"))),
+        dept_name: NotSet,
+        oper_url: Set(Some("/it/opl/anchor-scope".to_string())),
+        oper_ip: NotSet,
+        oper_location: NotSet,
+        oper_param: NotSet,
+        oper_before: NotSet,
+        oper_diff: NotSet,
+        json_result: NotSet,
+        status: Set(Some("0".to_string())),
+        error_msg: NotSet,
+        oper_time: Set(Some(crate::common::datetime::now_naive())),
+        cost_time: Set(Some(1)),
+        chain_hash: Set(Some(format!("{:0>64x}", seq))),
+    };
+    crate::entity::sys_oper_log::Entity::insert(model)
+        .exec(&ctx.state.db)
+        .await
+        .expect("插入带链操作日志失败")
+        .last_insert_id
+}
+
+/// 某 oper_id 是否仍在库（物理删除后应为 false）
+async fn oper_log_exists(ctx: &TestContext, oper_id: i64) -> bool {
+    use sea_orm::ColumnTrait;
+    use sea_orm::EntityTrait;
+    use sea_orm::QueryFilter;
+    crate::entity::sys_oper_log::Entity::find()
+        .filter(crate::entity::sys_oper_log::Column::OperId.eq(oper_id))
+        .one(&ctx.state.db)
+        .await
+        .expect("直查操作日志失败")
+        .is_some()
+}
+
+/// 全部锚点行（按 anchor_id 升序，便于逐条断言段边界）
+async fn anchor_rows(ctx: &TestContext) -> Vec<crate::entity::sys_log_archive_anchor::Model> {
+    use sea_orm::EntityTrait;
+    use sea_orm::QueryOrder;
+    crate::entity::sys_log_archive_anchor::Entity::find()
+        .order_by_asc(crate::entity::sys_log_archive_anchor::Column::AnchorId)
+        .all(&ctx.state.db)
+        .await
+        .expect("直查锚点表失败")
+}
+
+/// B5 不变式：**批量删除登记的锚点段，必须逐条等于本次 DELETE 真实影响到的链行**。
+///
+/// 修复前实测缺陷：`delete_oper_logs` 用**调用方请求集**求 min/max 并切段登记锚点，
+/// 而 DELETE 带 `tenant_scope` 过滤 ⇒ 租户操作者传入他租 `oper_id` 时删除 0 行、
+/// 锚点照样 INSERT。锚点是 verify-chain 补缺口的种子（"这段链已被合法删除"），
+/// 于是低权者一次越权调用就能**凭空伪造他租日志的防篡改状态**——
+/// 既有跨租户写副作用，又污染审计完整性，且被污染的链后续再也查不出真篡改。
+///
+/// 四支判据（缺一即"闸门可以恒不删/恒乱登记"）：
+/// ① 纯越权请求 ⇒ 0 锚点 + 他租行仍在（负路径）；
+/// ② 混合请求 ⇒ 只为本租行登记 1 段，他租行不产段（逐条收敛，不是整批放行/整批拒绝）；
+/// ③ 平台（`tenant_scope=None`）删他租行 ⇒ **照常出网生效**并登记锚点（对照组：闸门不得把合法请求也挡掉）；
+/// ④ 代管行（`tenant_id=0, target_tenant_id=A`）⇒ A 可删（谓词 OR 分支未被过度收紧）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_opl_delete_anchor_follows_tenant_scope() {
+    const TA: i64 = 7_770_001; // 用例专属租户 A
+    const TB: i64 = 7_770_002; // 用例专属租户 B
+
+    let ctx = TestContext::new().await;
+    let a1 = insert_chained_log(&ctx, TA, None, 1).await;
+    let a2 = insert_chained_log(&ctx, TA, None, 2).await;
+    let b1 = insert_chained_log(&ctx, TB, None, 3).await;
+    let managed = insert_chained_log(&ctx, 0, Some(TA), 4).await;
+    assert!(
+        a1 < a2 && a2 < b1 && b1 < managed,
+        "自增 oper_id 应随插入序递增，实际: a1={a1} a2={a2} b1={b1} managed={managed}"
+    );
+    assert!(
+        anchor_rows(&ctx).await.is_empty(),
+        "前置：新库不应有锚点行，实际: {:?}",
+        anchor_rows(&ctx).await
+    );
+
+    // ① 纯越权：租户 A 传他租 B 的 id ⇒ 既不删行，也**必须 0 锚点**
+    ctx.state
+        .oper_log_service
+        .delete_oper_logs(vec![b1], Some(TA))
+        .await
+        .expect("越权删除应正常返回（授权集为空 ⇒ 无副作用）");
+    let anchors = anchor_rows(&ctx).await;
+    assert!(
+        anchors.is_empty(),
+        "①越权删除不得登记任何锚点，实际: {anchors:?}"
+    );
+    assert!(
+        oper_log_exists(&ctx, b1).await,
+        "①他租行必须仍在库（删除被正确挡下）"
+    );
+
+    // ② 混合请求 [a1, b1]：只删 a1、只登记 a1 一段；b1 不得成段
+    ctx.state
+        .oper_log_service
+        .delete_oper_logs(vec![a1, b1], Some(TA))
+        .await
+        .expect("混合请求应成功（本租部分照常执行）");
+    let anchors = anchor_rows(&ctx).await;
+    assert_eq!(
+        anchors.len(),
+        1,
+        "②混合请求只应登记 1 条锚点（他租 id 不得成段），实际: {anchors:?}"
+    );
+    assert_eq!(anchors[0].first_oper_id, a1, "②锚点段首应为 a1");
+    assert_eq!(anchors[0].last_oper_id, a1, "②锚点段尾应为 a1");
+    assert_eq!(
+        anchors[0].mode, "manual",
+        "②锚点档应为 manual（批量删除路径）"
+    );
+    assert_eq!(
+        anchors[0].last_chain_hash,
+        format!("{:0>64x}", 1),
+        "②锚点应记录 a1 的 chain_hash（续接种子）"
+    );
+    assert!(
+        !oper_log_exists(&ctx, a1).await,
+        "②本租户被请求行应已物理删除"
+    );
+    assert!(
+        oper_log_exists(&ctx, a2).await,
+        "②未被请求的本租户行必须仍在"
+    );
+    assert!(
+        oper_log_exists(&ctx, b1).await,
+        "②他租行必须仍在（混合请求不得连带删除）"
+    );
+
+    // ③ 对照组：平台（tenant_scope=None）删他租行必须**照常生效**并登记锚点
+    //    （缺这一支，实现可以是"这个入口永远不删任何行"）
+    ctx.state
+        .oper_log_service
+        .delete_oper_logs(vec![b1], None)
+        .await
+        .expect("平台删除应成功");
+    let anchors = anchor_rows(&ctx).await;
+    assert_eq!(
+        anchors.len(),
+        2,
+        "③平台删除应新增 1 条锚点，实际: {anchors:?}"
+    );
+    let b1_anchor = anchors
+        .iter()
+        .find(|a| a.first_oper_id == b1)
+        .expect("③应存在以 b1 为段首的锚点");
+    assert_eq!(b1_anchor.last_oper_id, b1, "③b1 单独成段");
+    assert!(
+        !oper_log_exists(&ctx, b1).await,
+        "③平台删除应真实影响他租行（闸门不得误伤合法请求）"
+    );
+
+    // ④ 代管归属：target_tenant_id=TA 的平台行对 TA 可见可删（谓词 OR 分支）
+    ctx.state
+        .oper_log_service
+        .delete_oper_logs(vec![managed], Some(TA))
+        .await
+        .expect("租户删除代管目标为本租户的日志应成功");
+    assert!(
+        !oper_log_exists(&ctx, managed).await,
+        "④代管行应被本租户删除"
+    );
+    assert_eq!(
+        anchor_rows(&ctx).await.len(),
+        3,
+        "④代管行删除应登记锚点（影响面与锚点同步）"
+    );
+    // 锚点段集合必须**恰好**等于已删链行集合（多一段=凭空伪造，少一段=续接种子丢失）
+    let mut segs: Vec<(i64, i64)> = anchor_rows(&ctx)
+        .await
+        .iter()
+        .map(|a| (a.first_oper_id, a.last_oper_id))
+        .collect();
+    segs.sort_unstable();
+    let mut want: Vec<(i64, i64)> = vec![(a1, a1), (b1, b1), (managed, managed)];
+    want.sort_unstable();
+    assert_eq!(segs, want, "锚点段应与被删链行逐条一致");
+}

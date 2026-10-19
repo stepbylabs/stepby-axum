@@ -237,23 +237,39 @@ pub async fn export(
         None
     };
 
-    let rows = state
+    // b74（死面接线，同 §一.8）：任务一旦创建就必须落**终态**。此前查询失败直接 `?` 上抛，
+    // sys_task 行永远停在 status="running"（任务中心显示"进行中"、db_state_audit 的
+    // 状态机卡死判据长期报 WARN）；`fail_task` / `update_progress` 两个方法因此也零调用者。
+    let rows = match state
         .oper_log_service
         .export_oper_logs(
             query,
             crate::common::tenant::tenant_scope(operator.tenant_id()),
         )
-        .await?;
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            if let Some(tid) = task_id {
+                let _ = state
+                    .task_service
+                    .fail_task(
+                        tid,
+                        crate::common::redact::fold_abs_paths(&e.to_string()),
+                        &state,
+                    )
+                    .await;
+            }
+            return Err(AppError::from(e));
+        }
+    };
 
-    // 完成任务进度
+    // 取数完成 = 半程（建任务时 total 取 100，即百分比口径）：此前进度只有 0 → 100 一跳，
+    // 大导出期间任务中心与 WS 都看不到中间态
     if let Some(tid) = task_id {
         let _ = state
             .task_service
-            .complete_task(
-                tid,
-                Some(crate::tr!("msg.export.progress", count = rows.len())),
-                &state,
-            )
+            .update_progress(tid, 50, Some(100), &state)
             .await;
     }
 
@@ -354,7 +370,7 @@ pub async fn export(
         },
     ];
 
-    export_to_excel_with_fields(
+    let resp = match export_to_excel_with_fields(
         &crate::tr!("excel.sheet.oper_log"),
         "oper_log",
         &columns,
@@ -363,6 +379,37 @@ pub async fn export(
         false,
     )
     .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            if let Some(tid) = task_id {
+                let _ = state
+                    .task_service
+                    .fail_task(
+                        tid,
+                        crate::common::redact::fold_abs_paths(&e.to_string()),
+                        &state,
+                    )
+                    .await;
+            }
+            // 该失败已经是 AppError，不再二次 `AppError::from`（clippy 判为无转换的恒等包装）
+            return Err(e);
+        }
+    };
+
+    // 终态改在**工作簿真的生成之后**落：原实现取数完就置 success，生成失败时任务显示
+    // "成功"而用户拿不到文件（终态与事实相反）
+    if let Some(tid) = task_id {
+        let _ = state
+            .task_service
+            .complete_task(
+                tid,
+                Some(crate::tr!("msg.export.progress", count = rows.len())),
+                &state,
+            )
+            .await;
+    }
+    Ok(resp)
 }
 
 /// 操作日志导出 DTO（在原查询参数基础上增加 fields 字段选择）

@@ -1,0 +1,10 @@
+# cargo-audit 配置（批五十一：RUSTSEC-2023-0071 风险裁决）
+# 本文件被 security.yml 的 cargo-deny/cargo-audit job 与本地 `cargo audit` 读取。
+# 注意：advisory-db 更新需访问 github.com（本机网络受限时用 `cargo audit --no-fetch --stale`
+# 以本地库扫描，库上次同步 2026-08-24）。
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 Marvin Attack（解密时序侧信道）：本项目全仓无 RSA 解密使用（grep .decrypt 仅 AES-GCM），唯一 RSA 用点为 SSO OIDC 的 RS256 私钥签名（sso_service.rs，from_pkcs8/PublicKeyParts——签名非 Marvin 攻击向量）。上游无 0.9.x 修复版（0.10 仍为 RC），升级需等 stable。触发条件（攻击者可高频精测私钥解密时序）在本系统不存在。" },
+]
+

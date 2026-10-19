@@ -80,6 +80,32 @@ async fn test_notice_chain() {
         .await;
     ctx.assert_ok(&v);
 
+    // 6b. **重复标记同一条已读必须幂等成功**（b73 轮 13 线上实证缺陷：UI 上"已读"按钮重复点击、
+    //     两个标签页同时标记、或先经 listTop 自动标记后再点，都会二次命中 (notice_id,user_id)
+    //     唯一约束 → 旧实现返回 400「数据重复，请检查唯一字段」并打 WARN 污染日志。
+    //     标记已读是"状态设定"型操作，重复执行不得改变结果、也不得报错。）
+    let v = ctx
+        .post_json(
+            &format!("/system/notice/markRead?noticeId={}", notice_id),
+            serde_json::json!({}),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    // 6c. 重复标记后，已读记录仍只有一条（幂等不能变成"多写一行"）
+    let v = ctx
+        .get_json(&format!(
+            "/system/notice/readUsers/list?noticeId={}&pageNum=1&pageSize=10",
+            notice_id
+        ))
+        .await;
+    let read_rows = v["rows"].as_array().expect("readUsers rows 应为数组");
+    let mine = read_rows
+        .iter()
+        .filter(|r| r["userName"].as_str() == Some("admin"))
+        .count();
+    assert_eq!(mine, 1, "重复标记后 admin 的已读记录应恰为 1 条，实际: {v}");
+
     // 7. 批量标记已读（Query 参数 ids，逗号分隔）
     let v = ctx
         .post_json(

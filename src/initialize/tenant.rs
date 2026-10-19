@@ -102,22 +102,18 @@ pub(crate) async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow
     } else {
         ""
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
     let menu_cols = "sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark, del_flag, i18n_key)";
+    // common（role_id=2）授权统一由策略体在菜单行写入**之后**补发（b73 轮 15 单一事实源）：
+    // 3700 页面 / 3701 `:query` / 3800 `:list` 放行；3802 `:verify` 属写动作 ⇒ 拒发
+    // （3800-3804 已被 m20261007_000011 软删，此处 del_flag='0' 过滤天然跳过）。
     let body_rows = [
         format!(
             "{menu_cols} VALUES (3700, '租户管理', 1, 8, 'tenant', 'system/tenant/index', '', '', '1', '0', 'C', '0', '0', 'system:tenant:list', 'peoples', 'admin', {now_expr}, '多租户管理（dept 树根=租户）', '0', 'menu.tenant')"
         ),
-        "sys_role_menu (role_id, menu_id) VALUES (2, 3700)".to_string(),
         format!(
             "{menu_cols} VALUES (3701, '租户查询', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:query', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
-        "sys_role_menu (role_id, menu_id) VALUES (2, 3701)".to_string(),
         format!(
             "{menu_cols} VALUES (3702, '租户新增', 3700, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:add', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
@@ -128,25 +124,24 @@ pub(crate) async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow
             "{menu_cols} VALUES (3704, '租户删除', 3700, 4, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
         // ---- 域名绑定（多租户 Phase 3 域名链路，menu_id 段位 3800-3804，父 3700）----
-        // 授予约定与 3700/3701 一致：运维查看（list）与验证（verify）授予平台普通角色（role_id=2），
-        // 新增/修改/删除仅平台操作者（operator_tid=0）可用，故不授予普通角色。
+        // 授予约定与 3700/3701 一致：运维查看（list）授予平台普通角色（role_id=2），
+        // 新增/修改/删除/验证仅平台操作者（operator_tid=0）可用，故不授予普通角色。
         format!(
             "{menu_cols} VALUES (3800, '域名查询', 3700, 5, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:list', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
-        "sys_role_menu (role_id, menu_id) VALUES (2, 3800)".to_string(),
         format!(
             "{menu_cols} VALUES (3801, '域名新增', 3700, 6, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:add', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
         format!(
             "{menu_cols} VALUES (3802, '域名验证', 3700, 7, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:verify', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
-        "sys_role_menu (role_id, menu_id) VALUES (2, 3802)".to_string(),
         format!(
             "{menu_cols} VALUES (3803, '域名修改', 3700, 8, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:edit', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
         format!(
             "{menu_cols} VALUES (3804, '域名删除', 3700, 9, '', '', '', '', '1', '0', 'F', '0', '0', 'system:tenant:domain:remove', '#', 'admin', {now_expr}, '', '0', NULL)"
         ),
+        governance::common_role_grant_select_body(&[3700, 3701, 3800, 3802]),
     ];
     for body in body_rows {
         db.execute_raw(Statement::from_string(
@@ -249,12 +244,7 @@ pub(crate) async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Res
             "?".to_string()
         }
     };
-    let now_expr = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("'{}'", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-        }
-        _ => "NOW()".to_string(),
-    };
+    let now_expr = crate::common::datetime::seed_now_expr();
 
     // ---- 1. 幂等建表（与迁移 m20260925_000003 DDL 逐列一致）----
     db.execute_raw(Statement::from_string(

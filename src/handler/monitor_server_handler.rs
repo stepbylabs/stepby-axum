@@ -87,7 +87,6 @@ pub struct JvmInfo {
 /// 系统信息
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct SysInfo {
     /// 服务器名称
     pub computer_name: String,

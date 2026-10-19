@@ -147,11 +147,23 @@ impl SysMsgSendLogRepository {
         stmt.exec(self.base.db()).await.map(|d| d.rows_affected)
     }
 
-    /// 按 ID 列表批量置为待重试 status='2'（触发重试）
+    /// 按 ID 列表把**失败终态**（status='1'）记录交回重试队列（status='2' 且重算额度）。
+    ///
+    /// 状态域：0=成功 1=失败（重试耗尽）2=待重试。两个条件都是必要的：
+    /// - 带 `status='1'` 过滤：批量入口的选中集常混有成功行，无条件置 '2' 会被
+    ///   `find_pending_retry` 重新投递，造成**对已成功收件人的重复短信/邮件**；
+    ///   单条 retry_logs 仍允许对任意记录显式重发（操作员点在某一行上的主动动作）。
+    /// - 同时把 `retry_count` 归零：失败终态行必然 retry_count>=max，而
+    ///   `find_pending_retry` 只取 retry_count<max 的行——只改 status 会让它
+    ///   永远停在"待重试"（既不发送也不再判定失败），等于把死信换成死循环。
+    ///
+    /// 因此 rows_affected 即"真正被交回队列的条数"，可直接提示用户。
     pub async fn mark_pending_retry(&self, log_ids: &[i64]) -> Result<UpdateResult, DbErr> {
         SysMsgSendLog::update_many()
             .col_expr(Column::Status, Expr::value("2"))
+            .col_expr(Column::RetryCount, Expr::value(0i32))
             .filter(Column::LogId.is_in(log_ids.to_vec()))
+            .filter(Column::Status.eq("1"))
             .exec(self.base.db())
             .await
     }

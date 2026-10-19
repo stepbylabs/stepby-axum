@@ -35,17 +35,10 @@ fn is_postgres(manager: &SchemaManager<'_>) -> bool {
     )
 }
 
-/// 获取当前时间 SQL 表达式（数据库兼容）
-///
-/// SQLite 的 `datetime('now')` 在 `execute_unprepared` 中可能与 SQL 字符串的单引号冲突，
-/// 因此 SQLite 使用预计算的时间字符串；MySQL/PostgreSQL 使用 `NOW()` 函数。
-fn now_expr(manager: &SchemaManager<'_>) -> String {
-    if is_sqlite(manager) {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        format!("'{}'", now)
-    } else {
-        "NOW()".to_string()
-    }
+/// 种子时间表达式（批七十四 B1：归口到 `crate::seed_now_expr`，三方言统一 UTC 字面量）。
+/// 本函数只是委托，**不得**在此另拼时间 ⇒ 换库/换时区不再换口径。
+fn now_expr(_manager: &SchemaManager<'_>) -> String {
+    crate::seed_now_expr()
 }
 
 /// 插入按钮权限菜单（参数化查询，避免 SQL 注入）

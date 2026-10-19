@@ -6,7 +6,11 @@ error:
     disabled: AI 助手未启用，请联系管理员在系统配置中开启
     pat_forbidden: AI 助手不支持访问令牌（PAT）调用，请使用登录会话
     capability_off: 当前租户未开通 AI 助手能力
+    busy: AI 推理并发已满（同时提问人数过多），请稍后重试
     config_missing: 请先填写 base_url 与 api_key
+  ip:
+    xdb_missing: ip2region 库文件不存在，请先在「IP 归属地」页下载或手动放置该文件后重试
+    mmdb_missing: GeoLite2 库文件不存在，请先在「IP 归属地」页下载或手动放置该文件后重试
   fieldperm:
     disabled: 字段级权限功能未开启（平台开关或租户套餐能力位未启用）
     table_not_allowed: 业务表不在字段级权限白名单内
@@ -31,6 +35,10 @@ error:
     internal: 系统内部错误，请联系管理员
     validate_failed: 参数校验失败
     parse_failed: 请求参数解析失败
+    uri_too_long: "请求地址过长，不能超过 %{limit} 字节，请缩小查询条件"
+    route_not_found: 请求的资源不存在
+    header_too_long: "请求头过大，不能超过 %{limit} 字节，请精简 Cookie 或请求头"
+    request_timeout: "请求处理超时，请稍后重试"
     time_format_invalid: "时间格式不正确: %{s}"
     batch_size_exceeded: "批量操作数量不能超过%{max}"
     clear_field_unknown: "清空声明包含不可清空的字段: %{field}"
@@ -78,7 +86,7 @@ error:
     captcha_uuid_invalid: 验证码 UUID 格式无效
   oauth:
     provider_not_found: 登录提供商不存在
-    provider_type_invalid: 登录提供商类型无效
+    provider_type_invalid: 登录提供商类型无效：%{provider_type}
     enabled_invalid: "enabled 必须为 0(停用) 或 1(启用)"
     client_id_required: client_id 不能为空
     provider_code_exists: 提供商编码已存在
@@ -145,6 +153,8 @@ error:
     ancestors_invalid: 部门 ancestors 数据异常，无法解析归属租户
     disabled: 单点登录（SSO）未启用
     jwks_unavailable: 无法读取 SSO 客户端列表，JWKS 暂时不可用（请稍后重试；RP 将沿用上一份 JWKS）
+    logo_unavailable: 客户端图标不可用（无 logo、源站拒绝或类型不符），前端请回落默认头像
+    logo_proxy_failed: 客户端图标代理失败（HTTP 客户端不可用），前端请回落默认头像
     client_not_found: 客户端不存在
     client_disabled: 该客户端已停用
     client_id_required: client_id 不能为空
@@ -237,7 +247,7 @@ error:
     governance_forbidden: 该参数受平台治理约束，租户不可修改
     platform_row_forbidden: 平台级参数配置不允许租户操作
     scope_invalid: 参数治理范围不合法
-    flag_invalid: 参数治理标志不合法
+    flag_invalid: 参数治理标志不合法（%{field} 仅接受 0 或 1）
     governance_platform_only: 参数治理视图属平台专属，仅平台管理员可查看
   dept:
     not_found: 部门不存在
@@ -343,11 +353,12 @@ error:
     chunk_session_missing: 分片会话不存在或已过期，请重新发起上传
     chunk_store_unavailable: 共享态存储暂不可用，请稍后重试
     chunk_index_missing: 缺少 partIndex 字段
-    chunk_part_missing: 分片 {index} 缺失，请重新上传该分片
-    chunk_parts_missing: 分片未收齐（已收 {received}/{total}），不能合并
+    chunk_index_out_of_range: 分片序号 %{index} 超出会话声明范围 [0, %{max}]，请重新发起上传
+    chunk_part_missing: 分片 %{index} 缺失，请重新上传该分片
+    chunk_parts_missing: 分片未收齐（已收 %{received}/%{total}），不能合并
     chunk_parts_invalid: 分片数量非法（1-10000），或单片大小与总大小不一致
-    chunk_part_too_large: 单片大小超过请求体上限 {limit}MB，请减小单片或增大分片数
-    chunk_total_too_large: 文件总大小超过分片上传上限 {max}MB
+    chunk_part_too_large: 单片大小超过请求体上限 %{limit}MB，请减小单片或增大分片数
+    chunk_total_too_large: 文件总大小超过分片上传上限 %{max}MB
     chunk_busy: 合并任务繁忙，请稍后重试
   cache:
     name_wildcard_forbidden: 缓存名称不允许包含通配符
@@ -673,6 +684,16 @@ error:
     delete_task_failed: 文件删除任务失败
     delete_failed: 删除文件失败
 
+  dataRule:
+    name_invalid: "规则名不能为空且不超过 64 字"
+    identifier_invalid: "%{label}不合法（仅小写字母/数字/下划线，且不以数字开头）: %{value}"
+    op_invalid: "非法操作符: %{value}"
+    value_type_invalid: "非法值类型: %{value}"
+    fixed_value_required: "固定值类型必须提供规则值"
+    in_value_required: "in 操作符必须提供逗号分隔的值列表"
+    value_too_long: "规则值过长（上限 500 字）"
+    not_found: "规则不存在"
+
 msg:
   flow:
     todo_created: 您有新的审批待办，请及时处理
@@ -827,12 +848,3 @@ alert:
     not_fired: 指标 %{metric} 当前值 %{value}，未命中条件（%{comparator} %{threshold}）
     silent: 规则处于静默期内（%{minutes} 分钟），跳过本次通知
     no_channel: 命中阈值但未配置有效通知渠道，仅记录触发
-
-  dataRule:
-    name_invalid: "规则名不能为空且不超过 64 字"
-    identifier_invalid: "%{label}不合法（仅小写字母/数字/下划线，且不以数字开头）: %{value}"
-    op_invalid: "非法操作符: %{value}"
-    value_type_invalid: "非法值类型: %{value}"
-    fixed_value_required: "固定值类型必须提供规则值"
-    in_value_required: "in 操作符必须提供逗号分隔的值列表"
-    not_found: "规则不存在"

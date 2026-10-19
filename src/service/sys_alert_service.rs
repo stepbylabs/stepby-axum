@@ -691,7 +691,8 @@ impl SysAlertService {
             // 批次十八：IM 群机器人——群即收件人（to_addr 占位空串，dispatch 分支忽略）
             "wecom_robot" | "dingtalk_robot" => Ok(String::new()),
             _ => Err(ServiceError::bad_request(&crate::tr!(
-                "error.msg.channel_type_invalid"
+                "error.msg.channel_type_invalid",
+                channel_type = channel.channel_type.as_str()
             ))),
         }
     }

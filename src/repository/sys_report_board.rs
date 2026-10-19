@@ -115,12 +115,4 @@ impl SysReportBoardRepository {
             .await?;
         Ok(res.rows_affected)
     }
-
-    /// 原始插入（供单元测试/工具使用）
-    #[allow(dead_code)]
-    pub async fn insert_raw(&self, model: Model) -> Result<(), DbErr> {
-        let am: ActiveModel = model.into();
-        SysReportBoard::insert(am).exec(self.base.db()).await?;
-        Ok(())
-    }
 }

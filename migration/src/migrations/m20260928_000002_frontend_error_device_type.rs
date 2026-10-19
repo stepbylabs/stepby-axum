@@ -1,4 +1,4 @@
-// stepby-axum/migration/src/m20260928_000002_frontend_error_device_type.rs
+// stepby-axum/migration/src/migrations/m20260928_000002_frontend_error_device_type.rs
 //! FCP-011：`sys_frontend_error` 增加 `device_type` 列（Web Vitals 移动端分桶）。
 //!
 //! 前端上报器（frontendErrorReporter.ts）按 UA/视口推断设备类型
