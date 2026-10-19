@@ -17,7 +17,7 @@
 //! 恒真防护见 `test_flow_action_lock_is_not_vacuous`：抽取器与比较器都在合成样本上
 //! 验过"能抓到缺失"，不是只比两个硬编码常量。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use super::TestContext;
@@ -27,6 +27,96 @@ fn repo_file(rel: &str) -> String {
     // 读不到就硬失败：校验没跑不得当成通过（house 口径）
     std::fs::read_to_string(&p)
         .unwrap_or_else(|e| panic!("读取 {p:?} 失败，字典覆盖总锁无法执行: {e}"))
+}
+
+/// 从 initialize 的 `action_rows` 里取 `动作值 → 中文标签`。
+/// 元组形如 `(715, "超时提醒", "timeout_remind", "Timeout Remind")`：
+/// 一行的第 1 个引号串是标签，第 2 个是值（第 3 个是英文 remark，不参与比对）。
+fn seed_label_pairs(block: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in block.lines() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        let quoted: Vec<String> = t
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if quoted.len() >= 2 {
+            out.insert(quoted[1].clone(), quoted[0].clone());
+        }
+    }
+    out
+}
+
+/// 读取前端 zh-CN 文案里 `flow.action` 的标签表（跨仓比对用，zh-CN/system.ts 中
+/// `action: {` 块全文件唯一，已在 b77 实测确认）。
+///
+/// `../stepby-vue` 缺席（只 checkout 后端仓）时返回 `None`：本地不该因此变红；
+/// CI 的 backend job 与工作区都是两仓并列（ts-rs 导出同理），跨仓维度在那里是硬约束。
+fn vue_flow_action_labels() -> Option<BTreeMap<String, String>> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../stepby-vue/src/i18n/locales/zh-CN/system.ts");
+    let src = std::fs::read_to_string(&p).ok()?;
+    let mut out = BTreeMap::new();
+    let mut inside = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if !inside {
+            inside = t == "action: {";
+            continue;
+        }
+        if t.starts_with('}') {
+            break;
+        }
+        let Some((key, rest)) = t.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let key_ok = !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        let val = rest.trim().trim_end_matches(',').trim();
+        let unq = val
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .or_else(|| val.strip_prefix('"').and_then(|s| s.strip_suffix('"')));
+        if let (true, Some(v)) = (key_ok, unq) {
+            out.insert(key.to_string(), v.to_string());
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// 漂移判据（抽成纯函数，便于在合成样本上证伪）：引擎全集里的每个动作，
+/// 字典种子必须有中文标签、前端 i18n 必须有同名键，且两处标签逐字相等。
+fn label_drift(
+    actions: &BTreeSet<String>,
+    dict: &BTreeMap<String, String>,
+    ui: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut drift = Vec::new();
+    for value in actions {
+        let Some(want) = dict.get(value) else {
+            drift.push(format!("{value}: 字典种子没有中文标签行"));
+            continue;
+        };
+        match ui.get(value) {
+            None => drift.push(format!(
+                "{value}: 前端 i18n flow.action 缺键（UI 会显示原始键名）"
+            )),
+            Some(got) if got != want => {
+                drift.push(format!("{value}: 字典标签「{want}」≠ 前端 i18n「{got}」"));
+            }
+            Some(_) => {}
+        }
+    }
+    drift
 }
 
 /// 在 char 数组里查找 `needle`（纯 ASCII）的所有出现位置（char 下标）。
@@ -315,6 +405,27 @@ async fn test_flow_action_dict_covers_engine_actions() {
             "迁移侧 {value} 的中文标签应为「{zh}」（与前端 i18n flow.action 对齐）"
         );
     }
+
+    // 4) 跨仓标签同源（批七十七 R-17）：字典是运维/导出侧真值，UI 时间线走 i18n——
+    //    "两套真值并存"本身就是 b76 记录的漂移土壤，所以这里去读**真实文案文件**逐动作
+    //    比对，而不是再硬编码第三份期望值（硬编码只能证明"我抄对了"）。
+    match vue_flow_action_labels() {
+        Some(ui) => {
+            let dict = seed_label_pairs(&init_block);
+            let drift = label_drift(&actions, &dict, &ui);
+            assert!(
+                drift.is_empty(),
+                "sys_flow_action 标签与前端 i18n flow.action 漂移：\n{}",
+                drift.join("\n")
+            );
+        }
+        None => {
+            println!(
+                "SKIP 跨仓标签比对：../stepby-vue 不可读（只 checkout 后端仓的场景）；\
+                 CI backend job 两仓并列，在那里该项是硬约束"
+            );
+        }
+    }
 }
 
 /// 恒真防护：抽取器与比较器都要在合成样本上"抓得到问题"，否则上面的锁可能是虚锁。
@@ -426,5 +537,61 @@ fn test_flow_action_lock_is_not_vacuous() {
         seed_dict_values(blk6b).into_iter().collect::<Vec<_>>(),
         vec!["tricky_val".to_string()],
         "实参切分在第 2 元被括号打乱 ⇒ 抽取器不稳健"
+    );
+
+    // ⑦ 跨仓标签锁（R-17）的两半都必须可证伪：抽取器抓对 (值→标签)，
+    //    比较器必须分别抓出"缺键""标签不等""种子没有标签行"三类漂移，且对照组放过。
+    let blk7 = "// (999, \"示例\", \"not_a_row\", \"X\")\n(710, \"提交\", \"submit\", \"To Submit\"),\n(715, \"超时提醒\", \"timeout_remind\", \"Timeout Remind\"),";
+    let dict7 = seed_label_pairs(blk7);
+    assert_eq!(
+        dict7.get("submit").map(String::as_str),
+        Some("提交"),
+        "seed_label_pairs 取错元素（第 1 引号串应是标签、第 2 应是值）"
+    );
+    assert_eq!(
+        dict7.len(),
+        2,
+        "注释行被当成数据行计入：{dict7:?}（注释里的示例元组会伪造标签对齐）"
+    );
+    let actions7: BTreeSet<String> = ["submit", "timeout_remind"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut ui7 = BTreeMap::new();
+    ui7.insert("submit".to_string(), "提交".to_string());
+    // ⑦-a 前端缺键 ⇒ 必须判出一条"缺键"漂移
+    let drift_missing_key = label_drift(&actions7, &dict7, &ui7);
+    assert_eq!(
+        drift_missing_key.len(),
+        1,
+        "前端 i18n 缺键没被判出（虚锁）：{drift_missing_key:?}"
+    );
+    assert!(
+        drift_missing_key[0].contains("timeout_remind") && drift_missing_key[0].contains("缺键"),
+        "缺键漂移描述不对：{drift_missing_key:?}"
+    );
+    // ⑦-b 标签不等 ⇒ 必须判出一条"≠"漂移
+    ui7.insert("timeout_remind".to_string(), "超时通知".to_string());
+    let drift_wrong = label_drift(&actions7, &dict7, &ui7);
+    assert_eq!(drift_wrong.len(), 1, "标签不等没被判出：{drift_wrong:?}");
+    assert!(
+        drift_wrong[0].contains('≠'),
+        "标签不等漂移描述不对：{drift_wrong:?}"
+    );
+    // ⑦-c 字典种子缺标签行 ⇒ 必须判出
+    let mut dict_no_label = dict7.clone();
+    dict_no_label.remove("submit");
+    assert!(
+        label_drift(&actions7, &dict_no_label, &ui7)
+            .iter()
+            .any(|d| d.contains("submit") && d.contains("标签行")),
+        "种子缺标签行没被判出"
+    );
+    // ⑦-d 对照组：两处逐字一致时必须为零漂移（否则真库上恒红）
+    ui7.insert("timeout_remind".to_string(), "超时提醒".to_string());
+    assert_eq!(
+        label_drift(&actions7, &dict7, &ui7).len(),
+        0,
+        "对照组（两处逐字一致）被误判 ⇒ 判据在真库上会恒红"
     );
 }
