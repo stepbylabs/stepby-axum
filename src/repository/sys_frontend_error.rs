@@ -38,6 +38,11 @@ impl SysFrontendErrorRepository {
 
     /// 多条件分页查询（level/source/device_type 精确，name 模糊，时间范围，按 id 倒序）
     ///
+    /// `exclude_source`：来源**排除**列表（`NOT IN`）。与 `source` 互补——
+    /// 表里 99.9% 是 `source='vital'` 的 Web Vitals 采样（实测 101 272 / 101 342），
+    /// 而 `source` 只能等值命中，导致「前端错误」页首屏被性能采样占满、
+    /// 想只看异常必须逐个来源查 8 次。这里给一个反向条件，让页面能"默认排除采样"。
+    ///
     /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
     /// `None` 时回退默认 `id DESC`。
     #[allow(clippy::too_many_arguments)]
@@ -47,6 +52,7 @@ impl SysFrontendErrorRepository {
         limit: u64,
         level: Option<&str>,
         source: Option<&str>,
+        exclude_source: Option<&[String]>,
         name: Option<&str>,
         device_type: Option<&str>,
         begin_time: Option<NaiveDateTime>,
@@ -69,6 +75,10 @@ impl SysFrontendErrorRepository {
         }
         if let Some(s) = source {
             query = query.filter(Column::Source.eq(s));
+        }
+        // 排除来源：空切片视同不过滤（避免生成 `NOT IN ()` 这种非法/全真条件）
+        if let Some(ex) = exclude_source.filter(|v| !v.is_empty()) {
+            query = query.filter(Column::Source.is_not_in(ex.iter().cloned()));
         }
         if let Some(n) = name {
             query = query.filter(Column::Name.like(format!("%{}%", like_escape(n))));

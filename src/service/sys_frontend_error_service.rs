@@ -50,6 +50,26 @@ const ALLOWED_LEVELS: &[&str] = &["error", "warning", "info"];
 /// 允许的设备类型集合（FCP-011 分桶；超出置 None，防枚举膨胀）
 const ALLOWED_DEVICE_TYPES: &[&str] = &["mobile", "tablet", "desktop"];
 
+/// 归一化 `exclude_source`（逗号分隔）→ 白名单内的去重来源列表。
+///
+/// - 空串/全空白/全非法 ⇒ `None`（不过滤），避免生成 `NOT IN ()` 这类"全真或非法"条件；
+/// - 只保留 `ALLOWED_SOURCES` 内的值（与上报侧归一化同源，防止拼错就静默失效）；
+/// - 大小写与空白容忍（`VITAL , other` ⇒ `["vital","other"]`）。
+fn normalize_exclude_sources(raw: Option<&str>) -> Option<Vec<String>> {
+    let raw = raw?;
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split(',') {
+        let p = part.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            continue;
+        }
+        if ALLOWED_SOURCES.contains(&p.as_str()) && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 // ==================== DTO ====================
 
 /// 单条上报项（前端 errorReporter / web-vitals 采集后批量提交）
@@ -103,6 +123,14 @@ pub struct FrontendErrorQueryDto {
     pub is_asc: Option<String>,
     pub level: Option<String>,
     pub source: Option<String>,
+    /// 来源**排除**列表（逗号分隔，如 `vital` 或 `vital,other`）。
+    ///
+    /// 为什么需要它：本表是"异常 + 性能埋点"统一表，实测 101 342 行里
+    /// **101 272 行（99.93%）是 `source='vital'` 的 Web Vitals 采样**。
+    /// `source` 只能等值命中 ⇒ 「前端错误」页首屏全是 `LCP=…`，
+    /// 想只看异常得把 8 个来源逐个查一遍。这个字段让页面能"默认排除采样"。
+    /// 只接受 `ALLOWED_SOURCES` 内的值（非法值丢弃，防枚举膨胀）。
+    pub exclude_source: Option<String>,
     pub name: Option<String>,
     /// 设备类型分桶筛选（FCP-011）：mobile / tablet / desktop
     pub device_type: Option<String>,
@@ -318,6 +346,7 @@ impl SysFrontendErrorService {
                 page.limit(),
                 query.level.as_deref(),
                 query.source.as_deref(),
+                normalize_exclude_sources(query.exclude_source.as_deref()).as_deref(),
                 query.name.as_deref(),
                 query.device_type.as_deref(),
                 begin,
@@ -424,6 +453,36 @@ impl SysFrontendErrorService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `exclude_source` 归一化：只留白名单、去重、容忍空白与大小写。
+    ///
+    /// 为什么这条必须钉住：它是页面"默认排除性能采样"的唯一开关。若拼错/传了非法值就
+    /// 静默变成 `None`（不过滤），页面会悄悄退回"首屏全是 LCP 采样"的老样子，
+    /// 而没有任何报错——正是本项目一直在防的"判据静默失效"。
+    #[test]
+    fn normalize_exclude_sources_filters_and_dedupes() {
+        // 正常单值
+        assert_eq!(
+            normalize_exclude_sources(Some("vital")),
+            Some(vec!["vital".to_string()])
+        );
+        // 多值 + 空白 + 大小写
+        assert_eq!(
+            normalize_exclude_sources(Some(" VITAL , other ")),
+            Some(vec!["vital".to_string(), "other".to_string()])
+        );
+        // 重复值只留一个
+        assert_eq!(
+            normalize_exclude_sources(Some("vital,vital")),
+            Some(vec!["vital".to_string()])
+        );
+        // 非法值全丢弃 ⇒ 不过滤（与"没传"同义，避免 NOT IN () 这种非法条件）
+        assert_eq!(normalize_exclude_sources(Some("not-a-source")), None);
+        assert_eq!(normalize_exclude_sources(Some(" , , ")), None);
+        // 缺省/空串 ⇒ 不过滤
+        assert_eq!(normalize_exclude_sources(None), None);
+        assert_eq!(normalize_exclude_sources(Some("")), None);
+    }
 
     /// 多字节按**字符**截断（按字节截会在汉字中间切片 panic 或产出乱码）。
     #[test]
