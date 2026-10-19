@@ -113,11 +113,17 @@ flowchart LR
 ### 编译
 
 ```bash
-# 后端（Rust 1.96+，跟随 stable channel）
+# 一体化构建（推荐）：先出前端产物并镜像复制到 frontend-dist/，再编后端
+# 三仓并列在同一根目录下时，一条命令覆盖 embedded → frontend-dist → prod → cargo
+powershell -File ../scripts/build-all.ps1 -Release -Jobs 4
+
+# 仅编后端（Rust 1.96+，跟随 stable channel）：rust-embed 在编译期嵌入
+# stepby-axum/frontend-dist/，该目录必须是本次前端产物，否则产出的是
+# "新后端 + 旧界面"且不会有任何提示（详见 docs/deployment.md §3.3）
 cargo build --release
 
 # 前端（Node 20+，pnpm 兼容），见 stepby-vue 仓库
-npm install && npm run build:prod
+pnpm install && pnpm build:prod
 ```
 
 ## ⚙️ 配置

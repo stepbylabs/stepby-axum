@@ -6,8 +6,8 @@
   python _start_server.py server8.log
 
 路径全部按脚本所在目录（仓库根）推导，可用环境变量覆盖:
-  STEPBY_BACKEND_EXE   可执行文件路径（默认 <仓库根>/target/debug/stepby-axum.exe）
-  YEBOT_BACKEND_CWD   工作目录（默认 <仓库根>，config 相对路径依赖此目录）
+  STEPBY_BACKEND_EXE  可执行文件路径（默认 <仓库根>/target/debug/stepby-axum.exe）
+  STEPBY_BACKEND_CWD  工作目录（默认 <仓库根>，config 相对路径依赖此目录）
 
 前置: cargo build 已产出 debug exe；redis 等依赖已就绪。
 完成后用 netstat -ano | findstr :8080 核对 PID 与日志确认就绪。
@@ -20,7 +20,7 @@ DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROU
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 EXE = os.environ.get('STEPBY_BACKEND_EXE', os.path.join(ROOT, 'target', 'debug', 'stepby-axum.exe'))
-CWD = os.environ.get('YEBOT_BACKEND_CWD', ROOT)
+CWD = os.environ.get('STEPBY_BACKEND_CWD', ROOT)
 LOG = os.path.join(ROOT, sys.argv[1] if len(sys.argv) > 1 else 'server.log')
 
 env = os.environ.copy()

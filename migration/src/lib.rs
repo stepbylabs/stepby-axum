@@ -254,23 +254,33 @@ where
 {
     // 每支自己拼到最终 SQL（含本方言的占位符形态），不再借 `adapt_placeholders`：
     // 「哪支用 $1、哪支用 ?」在源码里一目了然，dialect_audit 也不需要为此留豁免。
-    // 表名内联只发生在 MySQL 支，且取值恒为迁移/兜底段里的常量标识符（与同仓
-    // `ensure_column`、`sso_table_exists` 的探测口径一致）；索引名三库都走绑定参数。
-    let sql = match backend {
-        DatabaseBackend::Sqlite => {
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = $1 LIMIT 1".to_string()
-        }
-        DatabaseBackend::Postgres => {
+    // 三库的标识符**一律走绑定参数**（R-14 收口）：MySQL 支此前把表名 `format!` 内联，
+    // 取值恒为源码内常量、当下没有注入面，但"恒为常量"是靠纪律而非类型维持的——
+    // 一旦有人把用户可控字符串传进来，这里就是一处 SQL 拼接。绑定参数没有这个前提。
+    // SQLite/PG 的索引名在库/模式内唯一，无需表名谓词；MySQL 的 information_schema
+    // 跨库聚合，必须带 `table_schema = DATABASE()` + `table_name`。
+    let (sql, values) = match backend {
+        DatabaseBackend::Sqlite => (
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = $1 LIMIT 1".to_string(),
+            vec![Value::String(Some(index.to_string()))],
+        ),
+        DatabaseBackend::Postgres => (
             "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1 LIMIT 1"
-                .to_string()
-        }
-        DatabaseBackend::MySql => format!(
-            "SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = '{table}' AND index_name = ? LIMIT 1"
+                .to_string(),
+            vec![Value::String(Some(index.to_string()))],
+        ),
+        DatabaseBackend::MySql => (
+            "SELECT 1 FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1"
+                .to_string(),
+            vec![
+                Value::String(Some(table.to_string())),
+                Value::String(Some(index.to_string())),
+            ],
         ),
         _ => unreachable!("unknown backend"),
     };
-    let stmt =
-        Statement::from_sql_and_values(backend, sql, vec![Value::String(Some(index.to_string()))]);
+    let stmt = Statement::from_sql_and_values(backend, sql, values);
     Ok(!conn.query_all_raw(stmt).await?.is_empty())
 }
 

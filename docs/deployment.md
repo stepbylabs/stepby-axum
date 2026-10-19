@@ -147,6 +147,23 @@ cargo build
 
 **生产环境（Release 构建）**
 
+> **先决条件：`frontend-dist/` 必须是本次前端构建的产物。** 后端用 rust-embed 在
+> **编译期**把 `stepby-axum/frontend-dist/` 整个目录打进二进制（见 `src/embedded_assets.rs`）。
+> 目录缺失时 `build.rs` 会 panic（提示明确，不会静默）；但**目录存在而内容过期时不会有任何
+> 提示**——构建照样成功，产出的却是"新后端 + 旧界面"，只有对比页面资源哈希才能发现
+> （2026-10-19 批七十七实测踩中：单独跑 `cargo build --release` 时 `frontend-dist/` 还是
+> 上一轮的 chunk 名，二进制里嵌的 `index-Pk3JL6bv.js` 与刚构建的 `index-DrifpurU.js` 不是同一版）。
+> 因此 release 构建一律走根仓编排脚本，它按
+> `build:embedded → 镜像复制 dist→frontend-dist（先清空）→ build:prod → cargo build`
+> 的固定顺序执行，并核对两侧文件数一致：
+>
+> ```bash
+> powershell -File scripts/build-all.ps1 -Release -Jobs 4   # 三仓并列在同一根目录下
+> ```
+>
+> 只有在确认 `frontend-dist/` 已是最新时，才可以单独 `cargo build --release` 省时
+> （`scripts/build-all.ps1 -Release -SkipFrontend` 就是为这个场景准备的）。
+
 ```bash
 cargo build --release
 ```

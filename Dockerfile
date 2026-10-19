@@ -40,6 +40,11 @@ COPY . .
 
 # 编译 release 版本（默认只构建根包 stepby-axum；migration 是独立工具二进制，
 # 不是 stepby-axum 的依赖，cargo build 不会自动构建它，需显式指定 -p migration）
+#
+# 前端产物前提：本镜像没有 node 阶段，rust-embed 编译期嵌入的 `frontend-dist/` 完全来自
+# 上面的 `COPY . .`——构建镜像前必须先在宿主机刷新它（`scripts/build-all.ps1`，或
+# `pnpm --dir stepby-vue build:embedded` 后镜像复制）。目录缺失会由 build.rs panic（响亮）；
+# 目录存在但内容是上一轮则**不会有任何提示**，产出"新后端 + 旧界面"的镜像（见 docs/deployment.md §3.3）。
 RUN cargo build --release
 # 显式构建 migration 独立二进制（用于数据库迁移），否则 target/release/migration 不会产出
 RUN cargo build --release -p migration

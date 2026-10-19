@@ -24,11 +24,10 @@ data/*.mmdb
 data/*.xdb
 *.xdb
 
-# 日志
+# 日志（此前只列了 backend*/build-*/server* 三个前缀，启动器换个日志名就漏出去
+# 变成未跟踪噪声——实测 smoke_release_b77.log 即如此，直接收拢成通用规则）
 logs/
-backend*.log
-build-*.log
-server*.log
+*.log
 backend.err
 *.sql
 
