@@ -49,11 +49,17 @@ jobs:
       # build.rs（rust-embed）编译期强制要求 frontend-dist/——真实构建前端产物并复制
       # （与本地 embedded 链同源；cross 容器只挂载 Cargo.toml 所在目录，
       # frontend-dist 位于项目内可自动挂载，见 build.rs 注释）
+      #
+      # 取**同名标签**而不是 main：后端产物里嵌的是前端 dist，用 main 会得到" tagged 后端 +
+      # 当时恰好领先的 main 前端"这一对错配的组合（v0.3.0 本机打包时实测到：main 已含发布后的
+      # 下一批改动，而发布物必须是标签那一对）。代价是**推送顺序有要求**：必须先推 stepby-vue 的
+      # 同名标签，再推 stepby-axum 的标签，否则这里 checkout 不到 ref 而整条流水线红
+      # （红是对的——发布本来就是两个仓的原子动作；见 docs/RELEASE-PACKAGING.md 与两仓 README）。
       - name: Checkout stepby-vue (embedded assets source)
         uses: actions/checkout@v4
         with:
           repository: stepbylabs/stepby-vue
-          ref: main
+          ref: ${{ github.ref_name }}
           path: stepby-vue
 
       - name: Build frontend dist (embedded assets)
@@ -147,12 +153,12 @@ jobs:
         uses: actions/checkout@v4
 
       # Dockerfile 的 cargo build 同样触发 build.rs 的 frontend-dist 强制校验——
-      # 在 build 上下文内真实构建并复制前端产物
+      # 在 build 上下文内真实构建并复制前端产物（同名标签，理由见 backend job 内同一处注释）
       - name: Checkout stepby-vue (embedded assets source)
         uses: actions/checkout@v4
         with:
           repository: stepbylabs/stepby-vue
-          ref: main
+          ref: ${{ github.ref_name }}
           path: stepby-vue
 
       - name: Build frontend dist (embedded assets)
@@ -215,6 +221,14 @@ jobs:
           if [ -z "$ok" ]; then echo "::error::服务 30s 内未就绪"; tail -50 server.log; exit 1; fi
           echo "-- /health:"; curl -sf http://127.0.0.1:8080/health; echo ""
           curl -sf http://127.0.0.1:8080/health | grep -q '"status":"UP"' || { echo "::error::health 非 UP"; tail -50 server.log; exit 1; }
+          # 产物自报的版本必须等于本次标签——这是"这份包就是这个版本"的唯一机读证据。
+          # 版本取自 env!("CARGO_PKG_VERSION")（handler/health.rs），所以它同时钉住
+          # "Cargo.toml 版本 ↔ 标签"这条链：任何一处漏改，资产就会在这里判红而不是静默发出去。
+          # 响应是 AjaxResult<HealthStatus> ⇒ version 在 data 之下，但这里是**子串** grep，
+          # 嵌套不影响匹配（本机脚本用 Invoke-RestMethod，必须显式取 .data.version，否则拿到空串）。
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          curl -sf http://127.0.0.1:8080/health | grep -q "\"version\":\"$TAG_VER\"" || { echo "::error::health version 不是 $TAG_VER"; tail -50 server.log; exit 1; }
+          echo "    ok  /health version=$TAG_VER"
           echo "-- GET / (embedded SPA):"
           code_type=$(curl -sf -o /dev/null -w "%{http_code} %{content_type}" http://127.0.0.1:8080/)
           echo "$code_type"
