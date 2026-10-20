@@ -411,6 +411,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261017_000002_platform_only_alert::Migration),
             Box::new(m20261018_000001_flow_action_dict::Migration),
             Box::new(m20261019_000001_flow_action_dict_drop_reserved::Migration),
+            Box::new(m20261021_000001_notice_read_user_index::Migration),
         ]
     }
 }

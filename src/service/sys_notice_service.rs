@@ -913,22 +913,47 @@ impl SysNoticeService {
         operator_tid: i64,
     ) -> Result<u64, ServiceError> {
         let tenant_scope = crate::common::tenant::tenant_scope(operator_tid);
-        let unread = self
-            .notice_repo
-            .find_id_tenant_pairs(&Self::unread_filter(tenant_scope, user_id))
-            .await?;
-        if unread.is_empty() {
-            return Ok(0);
-        }
-        let marked = unread.len() as u64;
-        let mut by_tenant: std::collections::BTreeMap<i64, Vec<i64>> =
-            std::collections::BTreeMap::new();
-        for (notice_id, tid) in unread {
-            by_tenant.entry(tid).or_default().push(notice_id);
-        }
-        for (tid, ids) in by_tenant {
-            self.read_repo.mark_read_batch(ids, user_id, tid).await?;
-        }
+        let filter = Self::unread_filter(tenant_scope, user_id);
+        let notice_repo = self.notice_repo.clone();
+        let read_repo = self.read_repo.clone();
+        // 读未读集合与写已读记录必须同一事务：两步之间公告被删除时，非事务实现会把
+        // 指向已删公告的读记录写进去（b80 台账 §6 立案）。返回的 marked 是**实际选中**
+        // 的未读行数，与角标同源；写入走 `ON CONFLICT DO NOTHING`，并发重复标记仍幂等。
+        let marked = self
+            .db()
+            .clone()
+            .transaction::<_, u64, ServiceError>(move |txn| {
+                let filter = filter.clone();
+                let notice_repo = notice_repo.clone();
+                let read_repo = read_repo.clone();
+                async move {
+                    let unread = notice_repo.find_id_tenant_pairs_conn(&filter, txn).await?;
+                    if unread.is_empty() {
+                        return Ok(0);
+                    }
+                    let marked = unread.len() as u64;
+                    let mut by_tenant: std::collections::BTreeMap<i64, Vec<i64>> =
+                        std::collections::BTreeMap::new();
+                    for (notice_id, tid) in unread {
+                        by_tenant.entry(tid).or_default().push(notice_id);
+                    }
+                    for (tid, ids) in by_tenant {
+                        read_repo
+                            .mark_read_batch_conn(txn, ids, user_id, tid)
+                            .await?;
+                    }
+                    Ok(marked)
+                }
+                .boxed()
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(se) => se,
+                sea_orm::TransactionError::Connection(db_err) => {
+                    tracing::error!(error = %db_err, "mark_all_unread_read 事务连接错误");
+                    ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                }
+            })?;
         Ok(marked)
     }
 

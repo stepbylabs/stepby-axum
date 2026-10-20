@@ -4,6 +4,7 @@
  * CWD 必须为仓库根（main.rs 硬编码 config/config.toml）。
  */
 import { execFileSync, spawn } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 
 // 路径按脚本所在目录推导：写死盘符/工作目录的启动器，仓库一搬家就指向别人的树
@@ -55,13 +56,26 @@ if (await up()) {
 
 // 与 _start_server.py 同口径：debug 构建默认"前端分离模式"（未匹配路由返回 JSON 404），
 // e2e 的 SPA 深链/SSO 同意页必须走嵌入式前端，否则 8080 直连渲染不出登录表单。
+// 可选日志留存：全量 e2e 期间后端 WARN/ERROR 是"系统日志"通道的重要一半，
+// `stdio: 'ignore'` 会让它们随控制台消失（b81 实测：M6 登录假失败时无后端侧证据可查）。
+// detached 子进程持有 fd，启动器退出后仍继续写；不设该变量时行为与原来完全一致。
+const logPath = process.env.STEPBY_BACKEND_LOG || ''
+let logFd = null
+if (logPath) {
+  fs.mkdirSync(path.dirname(path.resolve(ROOT, logPath)), { recursive: true })
+  logFd = fs.openSync(path.resolve(ROOT, logPath), 'a')
+}
 const child = spawn(EXE, [], {
   cwd: ROOT,
   detached: true,
-  stdio: 'ignore',
+  stdio: logFd === null ? 'ignore' : ['ignore', logFd, logFd],
   env: { ...process.env, EMBEDDED_FRONTEND: process.env.EMBEDDED_FRONTEND ?? 'true' },
 })
 child.unref()
+if (logFd !== null) {
+  fs.closeSync(logFd)
+  console.log(`BACKEND_LOG=${path.resolve(ROOT, logPath)}`)
+}
 
 for (let i = 0; i < 45; i++) {
   await new Promise((r) => setTimeout(r, 2000))

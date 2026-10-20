@@ -309,16 +309,9 @@ fn validate_report_type(report_type: &str) -> Result<(), ServiceError> {
     }
 }
 
-/// 解析 cron 表达式（6 字段，含秒），复用与 scheduler 一致的校验规则
+/// 解析 cron 表达式（6 字段，含秒），复用与 scheduler 同一入口（含 Quartz 归一）。
 fn parse_cron(cron: &str) -> Result<croner::Cron, String> {
-    use croner::parser::CronParser;
-    let c = CronParser::builder()
-        .seconds(croner::parser::Seconds::Required)
-        .dom_and_dow(true)
-        .build()
-        .parse(cron)
-        .map_err(|e| format!("{}", e))?;
-    Ok(c)
+    crate::common::cron_compat::parse_cron(cron)
 }
 
 /// 判断订阅是否到期：上次执行后至少已过一个 cron 触发点；首次执行为 true

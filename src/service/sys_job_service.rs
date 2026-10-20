@@ -243,8 +243,9 @@ impl JobVo {
 /// 成功时返回 `Some("YYYY-MM-DD HH:MM:SS")`
 /// 失败时返回 None
 pub fn calc_next_valid_time(cron_str: &str) -> Option<String> {
-    use std::str::FromStr;
-    match croner::Cron::from_str(cron_str) {
+    // 与调度器装载同一解析入口（含 Quartz 归一 + `Seconds::Required`）：
+    // 此前后者用默认 `Cron::from_str` 接受 5 字段，API 放行但调度器装载失败（b81 §10 N-23）。
+    match crate::common::cron_compat::parse_cron(cron_str) {
         Ok(cron) => cron
             .find_next_occurrence(&chrono::Utc::now(), false)
             .ok()
@@ -1008,6 +1009,16 @@ mod tests {
     fn test_calc_next_valid_time_invalid() {
         let result = calc_next_valid_time("invalid cron expression");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_calc_next_valid_time_matches_scheduler_contract() {
+        // 种子 crons（Quartz 风格）在 API 侧也必须算得出下次时间，否则"启用任务"会先被
+        // 本 service 的 `calc_next_valid_time(...).is_none()` 分支拒绝，与调度器能力不一致。
+        assert!(calc_next_valid_time("0/10 * * * * ?").is_some());
+        assert!(calc_next_valid_time("0 0 3 * * ?").is_some());
+        // 5 字段在调度器装载侧必失败，API 侧不得再放行（口径单一事实源）。
+        assert!(calc_next_valid_time("0 3 * * *").is_none());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod background;
 pub mod clear_fields;
 pub mod constants;
+pub mod cron_compat;
 pub mod custom_scope;
 pub mod data_scope;
 pub mod dataset_sql;

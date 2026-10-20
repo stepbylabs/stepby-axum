@@ -184,12 +184,25 @@ impl SysNoticeRepository {
         &self,
         filter: &NoticeFilter<'_>,
     ) -> Result<Vec<(i64, i64)>, DbErr> {
+        self.find_id_tenant_pairs_conn(filter, self.base.db()).await
+    }
+
+    /// [`Self::find_id_tenant_pairs`] 的**事务内版本**
+    ///
+    /// 「全部已读」必须把"读未读集合"与"写已读记录"放在同一事务：两步之间公告被删除时，
+    /// 旧实现会把指向已删公告的读记录写进去（b80 台账 §6 立案）。连接由调用方的事务给出，
+    /// 判据仍是同一个 `base_query`，不另写一份谓词。
+    pub async fn find_id_tenant_pairs_conn<C: ConnectionTrait>(
+        &self,
+        filter: &NoticeFilter<'_>,
+        conn: &C,
+    ) -> Result<Vec<(i64, i64)>, DbErr> {
         Self::base_query(filter)
             .select_only()
             .column(Column::NoticeId)
             .column(Column::TenantId)
             .into_tuple::<(i64, i64)>()
-            .all(self.base.db())
+            .all(conn)
             .await
     }
 

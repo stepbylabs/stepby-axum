@@ -135,8 +135,11 @@ where
         + Sync
         + 'static,
 {
-    let job = Job::new_async(cron, callback)
-        .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create {name}: {e}")))?;
+    let job = Job::new_async(
+        crate::common::cron_compat::normalize_quartz_cron(cron).as_str(),
+        callback,
+    )
+    .map_err(|e| SchedulerError::SchedulerInternal(format!("Failed to create {name}: {e}")))?;
     scheduler
         .add(job)
         .await
@@ -805,7 +808,9 @@ impl JobScheduler {
         // - 锁 TTL 30 分钟（mmdb 下载约 60-100MB，耗时 1-5 分钟，留充足余量）
         // - 调用 IpLocationService::update_now(None) 执行下载+校验+热加载
         // - 失败不阻断调度器和其他任务
-        let mmdb_cron = ip_location_service.auto_update_cron().to_string();
+        let mmdb_cron = crate::common::cron_compat::normalize_quartz_cron(
+            ip_location_service.auto_update_cron(),
+        );
         let mmdb_store = store.clone();
         let mmdb_service = ip_location_service.clone();
 
@@ -956,13 +961,16 @@ impl JobScheduler {
     /// - 注册到调度器
     /// - 记录 uuid 到 running_jobs
     pub async fn add_job(&self, job: &SysJobModel) -> Result<uuid::Uuid, SchedulerError> {
-        let cron_str = job.cron_expression.as_deref().unwrap_or("");
-        if cron_str.is_empty() {
+        let raw_cron = job.cron_expression.as_deref().unwrap_or("");
+        if raw_cron.trim().is_empty() {
             return Err(SchedulerError::InvalidCron("cron 表达式为空".to_string()));
         }
+        // 种子任务沿用 Quartz 风格（`0/10 * * * * ?`）；croner 拒绝单值步长。
+        // 归一必须发生在**装载**这一侧，否则 validate 通过、new_async 仍失败（b81 §10 N-23）。
+        let cron_str = crate::common::cron_compat::normalize_quartz_cron(raw_cron);
 
         // 校验 cron 合法性
-        validate_cron(cron_str)?;
+        validate_cron(&cron_str)?;
 
         let job_id = job.job_id;
         let job_clone = job.clone();
@@ -971,7 +979,7 @@ impl JobScheduler {
         let executing_jobs = self.executing_jobs.clone();
 
         // 创建调度任务
-        let sched_job = Job::new_async(cron_str, move |_uuid, _l| {
+        let sched_job = Job::new_async(cron_str.as_str(), move |_uuid, _l| {
             let job = job_clone.clone();
             let db = db.clone();
             let store = store.clone();
@@ -1149,13 +1157,10 @@ fn flow_scan_should_register(enabled: bool, timeout_scan_cron: &str) -> bool {
 /// 而默认的 `Cron::from_str` 接受 5 字段格式。为保持校验与实际调度行为一致，
 /// 这里也使用 `Seconds::Required` 构建解析器，提前拒绝 5 字段表达式。
 fn validate_cron(cron_str: &str) -> Result<(), SchedulerError> {
-    use croner::parser::CronParser;
-    let cron = CronParser::builder()
-        .seconds(croner::parser::Seconds::Required)
-        .dom_and_dow(true)
-        .build()
-        .parse(cron_str)
-        .map_err(|e| SchedulerError::InvalidCron(format!("{}", e)))?;
+    // 解析口径与装载完全同源：`common::cron_compat::parse_cron` 内含 Quartz 归一
+    // 并使用 `Seconds::Required + dom_and_dow(true)`（b81 §10 N-23）。
+    let cron =
+        crate::common::cron_compat::parse_cron(cron_str).map_err(SchedulerError::InvalidCron)?;
     // 触发一次 next_occurrence 计算以尽早暴露无效模式（如 2月30日）
     use chrono::Utc;
     cron.find_next_occurrence(&Utc::now(), false).map_err(|e| {
@@ -2096,6 +2101,16 @@ mod tests {
             validate_cron("0 3 * * *"),
             Err(SchedulerError::InvalidCron(_))
         ));
+    }
+
+    #[test]
+    fn test_validate_cron_accepts_quartz_seed_style() {
+        // 种子任务 `sys_job` 的 `0/10 * * * * ?` 是 Quartz 风格：归一后必须能装载。
+        // b81 实测：修复前 change_status 只改 DB，add_job 报 invalid step syntax，
+        // 任务永远不会被调度（WARN "DB 已更新为运行，重启后生效" 是假承诺）。
+        assert!(validate_cron("0/10 * * * * ?").is_ok());
+        assert!(validate_cron("0/15 * * * * ?").is_ok());
+        assert!(validate_cron("0/20 * * * * ?").is_ok());
     }
 
     // ---------- SchedulerError ----------

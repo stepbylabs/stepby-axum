@@ -703,11 +703,13 @@ pub(crate) async fn ensure_frontend_error_device_type(
     Ok(())
 }
 
-/// E2-a 性能索引兜底（等价迁移 `m20261002_000001_perf_indexes` + `m20261004_000001_alert_rule_index`，幂等）：
+/// E2-a 性能索引兜底（等价迁移 `m20261002_000001_perf_indexes` + `m20261004_000001_alert_rule_index`
+/// + b81 `m20261021_000001_notice_read_user_index`，幂等）：
 /// - `idx_flow_doc_tenant ON flow_demo_doc (tenant_id)`
 /// - `idx_web_hook_log_status ON sys_web_hook_log (status)`
 /// - `idx_web_hook_log_event_type ON sys_web_hook_log (event_type)`
 /// - `idx_alert_rule_enabled ON sys_alert_rule (enabled)`
+/// - `idx_sys_notice_read_user_tenant_notice ON sys_notice_read (user_id, tenant_id, notice_id)`
 ///
 /// 为何必须有本兜底：embedded/存量库按架构约定**不跑 `Migrator::up`**，缺索引仅影响
 /// 查询性能（列表分页/过滤全表扫描），故创建失败只告警不阻断（与 Phase 3 索引兜底
@@ -724,6 +726,11 @@ pub(crate) async fn ensure_perf_indexes(db: &DatabaseConnection) -> anyhow::Resu
             "event_type",
         ),
         ("sys_alert_rule", "idx_alert_rule_enabled", "enabled"),
+        (
+            "sys_notice_read",
+            "idx_sys_notice_read_user_tenant_notice",
+            "user_id, tenant_id, notice_id",
+        ),
     ];
     for (table, index, cols) in targets {
         if !sso_table_exists(db, table).await? {
@@ -734,7 +741,9 @@ pub(crate) async fn ensure_perf_indexes(db: &DatabaseConnection) -> anyhow::Resu
             tracing::warn!("性能索引 {index} 创建失败（不阻断启动，请人工核查）: {e}");
         }
     }
-    tracing::info!("性能索引兜底完成（flow_demo_doc / sys_web_hook_log / sys_alert_rule，幂等）");
+    tracing::info!(
+        "性能索引兜底完成（flow_demo_doc / sys_web_hook_log / sys_alert_rule / sys_notice_read，幂等）"
+    );
     Ok(())
 }
 

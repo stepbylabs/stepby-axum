@@ -93,11 +93,25 @@ impl SysNoticeReadRepository {
         user_id: i64,
         tenant_id: i64,
     ) -> Result<(), DbErr> {
+        self.mark_read_batch_conn(self.base.db(), notice_ids, user_id, tenant_id)
+            .await
+    }
+
+    /// [`Self::mark_read_batch`] 的**事务内版本**
+    ///
+    /// 供「全部已读」与"读未读集合"共用同一事务；单条已读路径仍走非事务版本
+    /// （一次 INSERT 本身即原子）。
+    pub async fn mark_read_batch_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        notice_ids: Vec<i64>,
+        user_id: i64,
+        tenant_id: i64,
+    ) -> Result<(), DbErr> {
         if notice_ids.is_empty() {
             return Ok(());
         }
         let now = crate::common::datetime::now_naive();
-        let db = self.base.db();
 
         let models: Vec<ActiveModel> = notice_ids
             .iter()
@@ -118,7 +132,7 @@ impl SysNoticeReadRepository {
         // Conflicted（部分/全部已存在被忽略）是正常路径，不得当错误上抛
         let _ = insert
             .on_conflict_do_nothing_on([Column::NoticeId, Column::UserId])
-            .exec(db)
+            .exec(conn)
             .await?;
         Ok(())
     }
