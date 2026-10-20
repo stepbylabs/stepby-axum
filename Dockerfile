@@ -4,6 +4,22 @@
 FROM rust:1.96-bookworm AS builder
 WORKDIR /app
 
+# 工具链钉死（必须紧跟 WORKDIR，在任何 cargo 之前）：`rust-toolchain.toml` 写的是
+# `channel = "stable"`，而本镜像安装的工具链叫 `1.96.1-x86_64-unknown-linux-gnu`（不叫 stable）。
+# 不覆盖时，rustup 会在**每次构建**里先去下载最新 stable——依赖网络、破坏可复现性，
+# 且让"基础镜像钉 1.96"这句形同虚设。实测（--network none 双向）：
+#   不加本行 ⇒ `error: could not download ... channel-rust-stable.toml.sha256` 构建直接红；
+#   加本行   ⇒ cargo 1.96.1 正常解析，离线也能编。
+# 目录 override 的优先级高于 rust-toolchain.toml（rustup 的解析顺序：+ 参数 > RUSTUP_TOOLCHAIN
+# > 目录 override > rust-toolchain.toml > default），所以能压住那份文件而不必改它——
+# 文件仍按"跟随 stable、最低 1.96"服务本地开发机。
+# patch 号从镜像现取而非写死：基础镜像升到 1.96.2 时这里自动跟随，不会变成第二个漂移点。
+RUN set -eu; \
+    T="$(rustup toolchain list | sed -n 's/ .*//p' | head -1)"; \
+    test -n "$T"; \
+    rustup override set "$T"; \
+    rustup show active-toolchain
+
 # 依赖缓存层：先复制 Cargo.toml/Cargo.lock，模拟空 src 预编译依赖
 # 这样在源码改动时，只要 Cargo.toml/Cargo.lock 未变，依赖缓存层即可复用，避免完整依赖重编译
 # migration 是 workspace 子 crate，需一并复制其 Cargo.toml 以解析 workspace 依赖图
