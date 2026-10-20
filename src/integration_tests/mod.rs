@@ -78,6 +78,7 @@ mod sys_web_hook;
 mod tenant_binding_guard;
 mod tenant_domain_self_service;
 mod tenant_index_plan;
+mod tenant_nav_mount;
 mod tenant_scope;
 mod tool_gen;
 mod totp;

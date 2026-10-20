@@ -90,6 +90,25 @@ impl SysTenantMenuRepository {
         Ok(query.count(self.base.db()).await? > 0)
     }
 
+    /// 该租户对 `ref_menu_id` 的**软删行**（曾被卸载、如今要重新挂载的那一行）
+    ///
+    /// 为什么必须有这一步：唯一索引 `uk_sys_tenant_menu (tenant_id, ref_menu_id)`
+    /// **不含 del_flag**，而 [`Self::exists_ref`] 只看 `del_flag='0'` ⇒ "卸载后重新挂载"
+    /// 这条真实流程会绕过重复检查直接 INSERT，撞唯一索引返回 500（b80 P-A 实测缺陷）。
+    /// 一个 `(tenant_id, ref_menu_id)` 上至多一行，故取 `one()`。
+    pub async fn find_revivable_ref(
+        &self,
+        tenant_id: i64,
+        ref_menu_id: i64,
+    ) -> Result<Option<Model>, DbErr> {
+        SysTenantMenu::find()
+            .filter(Column::TenantId.eq(tenant_id))
+            .filter(Column::RefMenuId.eq(ref_menu_id))
+            .filter(Column::DelFlag.eq("2"))
+            .one(self.base.db())
+            .await
+    }
+
     /// 某 L3 节点的直接子节点数（删除前的引用保护）
     pub async fn count_children(&self, tenant_id: i64, l3_id: i64) -> Result<u64, DbErr> {
         SysTenantMenu::find()

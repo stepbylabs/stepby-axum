@@ -239,43 +239,18 @@ impl SysNoticeReadRepository {
         Ok((rows, total))
     }
 
-    /// 统计指定公告的已读用户数
-    pub async fn count_read_users(
-        &self,
-        notice_id: i64,
-        tenant_scope: Option<i64>,
-    ) -> Result<u64, DbErr> {
-        let mut q = SysNoticeRead::find().filter(Column::NoticeId.eq(notice_id));
-        if let Some(tid) = tenant_scope {
-            q = q.filter(Column::TenantId.eq(tid));
-        }
-        q.count(self.base.db()).await
-    }
-
-    /// 查询用户已读的公告 ID 集合
-    pub async fn find_read_notice_ids(
-        &self,
-        user_id: i64,
-        tenant_scope: Option<i64>,
-    ) -> Result<Vec<i64>, DbErr> {
-        let mut q = SysNoticeRead::find().filter(Column::UserId.eq(user_id));
-        if let Some(tid) = tenant_scope {
-            q = q.filter(Column::TenantId.eq(tid));
-        }
-        let rows: Vec<Model> = q.all(self.base.db()).await?;
-        Ok(rows.into_iter().map(|r| r.notice_id).collect())
-    }
-
     /// 查询"这批公告里，当前用户已读了哪些"（b79 P3：列表/顶部公告的逐行已读态）
     ///
+    /// 规模收敛：只按 `notice_id IN (本页)` 查询，避免热路径随用户历史已读数线性膨胀
+    /// （列表/未读数的**集合级**判定已改由 `SysNoticeRepository::base_query` 的半连接承担）。
     /// 与 `find_read_notice_ids` 的差别是**收敛边界**：后者按用户拉全量已读 ID，
     /// 只能用于"跨页全部已读"这类一次性后台动作；列表接口每页最多 100 行，
     /// 用 `IN (本页 ID)` 把查询钉在页规模内，避免热路径随用户历史已读数线性膨胀。
     ///
-    /// 多租户：`tenant_scope` 与同屏的 `count_unread`（铃铛未读数）**同一个谓词、同一张表**——
-    /// 两者若一方按操作者租户、另一方不按，同一屏上就会出现"角标说 0 未读、行却全显示未读"
+    /// 多租户：`tenant_scope` 与同屏的未读数（`SysNoticeRepository::count_by_filter`）**同一个谓词、
+    /// 同一张表**——两者若一方按操作者租户、另一方不按，同一屏上就会出现"角标说 0 未读、行却全显示未读"
     /// 的自相矛盾（b79 P3 立案的原始症状正是这种矛盾）。写侧 `mark_read` 落的是
-    /// **父公告的 `tenant_id`**（`sys_notice_service.rs:749`），而列表侧公告本身已由
+    /// **父公告的 `tenant_id`**（`sys_notice_service.rs` 的 mark_read），而列表侧公告本身已由
     /// `tenant_scope(operator_tid)` 筛过，故租户操作者可见公告的读记录恒等于其操作者租户；
     /// 平台操作者（`tenant_id=0` ⇒ `tenant_scope` 返回 `None`）两侧都不加过滤，代管视角照常。
     pub async fn find_read_notice_ids_in(
@@ -297,129 +272,10 @@ impl SysNoticeReadRepository {
         Ok(rows.into_iter().map(|r| r.notice_id).collect())
     }
 
-    /// 统计用户未读公告数（总数 - 已读数）
+    /// 删除指定公告的所有已读记录（事务内版本；公告删除必须与清理已读记录同事务，P0-76）
     ///
-    /// 优化（DB-13）：原实现两次 COUNT 查询，合并为单次带子查询的查询，DB 往返减半。
-    ///
-    /// 安全（P0-10）：使用参数化占位符（Postgres 用 $1，其他用 ?）替代 format! 拼接，
-    /// 即使 user_id 来源不可信也不会产生 SQL 注入。
-    pub async fn count_unread(
-        &self,
-        user_id: i64,
-        tenant_scope: Option<i64>,
-    ) -> Result<u64, DbErr> {
-        use sea_orm::ConnectionTrait;
-        let backend = self.base.db().get_database_backend();
-        // 单次查询：公告总数（status='0'）减去该用户已读数
-        // tenant_scope=Some(t) 时两处子查询均附加 tenant_id 过滤（按租户维度统计）
-        // 参数化：Postgres 使用 $n 占位符，Sqlite/MySQL 使用 ? 占位符
-        let (sql, values): (String, Vec<Value>) = match (backend, tenant_scope) {
-            (DatabaseBackend::Postgres, Some(t)) => (
-                "SELECT (SELECT COUNT(*) FROM sys_notice WHERE status = '0' AND tenant_id = $1) - \
-                 (SELECT COUNT(*) FROM sys_notice_read WHERE user_id = $2 AND tenant_id = $1) AS unread"
-                    .to_string(),
-                vec![t.into(), user_id.into()],
-            ),
-            (DatabaseBackend::Postgres, None) => (
-                "SELECT (SELECT COUNT(*) FROM sys_notice WHERE status = '0') - \
-                 (SELECT COUNT(*) FROM sys_notice_read WHERE user_id = $1) AS unread"
-                    .to_string(),
-                vec![user_id.into()],
-            ),
-            (_, Some(t)) => (
-                "SELECT (SELECT COUNT(*) FROM sys_notice WHERE status = '0' AND tenant_id = ?) - \
-                 (SELECT COUNT(*) FROM sys_notice_read WHERE user_id = ? AND tenant_id = ?) AS unread"
-                    .to_string(),
-                vec![t.into(), user_id.into(), t.into()],
-            ),
-            (_, None) => (
-                "SELECT (SELECT COUNT(*) FROM sys_notice WHERE status = '0') - \
-                 (SELECT COUNT(*) FROM sys_notice_read WHERE user_id = ?) AS unread"
-                    .to_string(),
-                vec![user_id.into()],
-            ),
-        };
-        let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, values);
-        let row = self.base.db().query_one_raw(stmt).await?;
-        let unread: i64 = row
-            .and_then(|r| r.try_get_by_index::<i64>(0).ok())
-            .unwrap_or(0);
-        Ok(std::cmp::max(unread, 0) as u64)
-    }
-
-    /// 删除指定公告的所有已读记录（公告删除时级联清理）
-    pub async fn delete_by_notice_ids(&self, notice_ids: Vec<i64>) -> Result<DeleteResult, DbErr> {
-        SysNoticeRead::delete_many()
-            .filter(Column::NoticeId.is_in(notice_ids))
-            .exec(self.base.db())
-            .await
-    }
-
-    /// 标记用户所有未读公告为已读（"全部已读"功能）
-    ///
-    /// 实现策略：先查询所有状态正常的公告 ID（status='0'），再查询用户已读的公告 ID，
-    /// 计算 diff 后批量 INSERT OR IGNORE。比"全量 INSERT OR IGNORE"更高效：
-    /// - 仅插入未读记录，避免对已读记录做无效 INSERT
-    /// - 已读数量可能很大（历史累积），但未读通常远小于已读
-    ///
-    /// 安全：使用参数化查询，user_id 来源可信（Operator 提取），无注入风险。
-    ///
-    /// 多租户：tenant_scope=Some(t) 时仅处理该租户公告；平台操作者（None）按公告实际
-    /// 所属租户分组写入，保证已读记录 tenant_id 与父公告一致。
-    pub async fn mark_all_unread_read(
-        &self,
-        user_id: i64,
-        tenant_scope: Option<i64>,
-    ) -> Result<u64, DbErr> {
-        use crate::entity::sys_notice::{Column as NoticeColumn, Entity as SysNotice};
-        use sea_orm::QuerySelect;
-
-        // 1. 查询状态正常的公告 (notice_id, tenant_id)
-        let mut nq = SysNotice::find();
-        nq = nq.filter(NoticeColumn::Status.eq("0"));
-        if let Some(t) = tenant_scope {
-            nq = nq.filter(NoticeColumn::TenantId.eq(t));
-        }
-        let all_notices: Vec<(i64, i64)> = nq
-            .select_only()
-            .column(NoticeColumn::NoticeId)
-            .column(NoticeColumn::TenantId)
-            .into_tuple::<(i64, i64)>()
-            .all(self.base.db())
-            .await?;
-
-        if all_notices.is_empty() {
-            return Ok(0);
-        }
-
-        // 2. 查询用户已读的公告 ID
-        let read_notice_ids = self.find_read_notice_ids(user_id, tenant_scope).await?;
-
-        // 3. 计算未读公告 (notice_id, tenant_id)
-        let read_set: std::collections::HashSet<i64> = read_notice_ids.into_iter().collect();
-        let unread: Vec<(i64, i64)> = all_notices
-            .into_iter()
-            .filter(|(id, _)| !read_set.contains(id))
-            .collect();
-
-        if unread.is_empty() {
-            return Ok(0);
-        }
-
-        let marked_count = unread.len() as u64;
-        // 4. 按公告所属租户分组批量插入未读记录（依赖唯一约束 + 冲突忽略）
-        let mut by_tenant: std::collections::BTreeMap<i64, Vec<i64>> =
-            std::collections::BTreeMap::new();
-        for (notice_id, tid) in unread {
-            by_tenant.entry(tid).or_default().push(notice_id);
-        }
-        for (tid, ids) in by_tenant {
-            self.mark_read_batch(ids, user_id, tid).await?;
-        }
-        Ok(marked_count)
-    }
-
-    /// 删除指定公告的所有已读记录（使用指定连接，用于事务内调用）
+    /// 刻意只提供 `_conn` 版本：无事务的独立删除会把"公告已删 / 已读记录残留"的窗口
+    /// 暴露成可提交状态（b80 清理掉的那份重复实现正是这种无调用点的第二入口）。
     pub async fn delete_by_notice_ids_conn<C: ConnectionTrait>(
         &self,
         conn: &C,

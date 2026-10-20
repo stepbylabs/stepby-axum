@@ -19,7 +19,7 @@ use crate::entity::sys_notice::{
     ActiveModel as SysNoticeActiveModel, Column as NoticeColumn, Model as SysNoticeModel,
 };
 use crate::entity::sys_user_pref::Model as PrefModel;
-use crate::repository::sys_notice::SysNoticeRepository;
+use crate::repository::sys_notice::{NoticeFilter, SysNoticeRepository};
 use crate::repository::sys_notice_read::{NoticeReadUserVo, SysNoticeReadRepository};
 use crate::repository::sys_user_pref::SysUserPrefRepository;
 use crate::service::sys_user_pref_service::{PrefChannel, allows_delivery, now_hm_str};
@@ -30,16 +30,19 @@ use crate::utils::sanitize_html;
 /// P3 修复: 通知公告枚举值白名单校验
 /// notice_type: "1"=通知, "2"=公告
 /// status: "0"=正常, "1"=关闭（可选字段，None 时跳过）
+///
+/// 合法值来自 [`NOTICE_TYPE_VALUES`] / [`NOTICE_STATUS_VALUES`]——**写侧（新增/修改）与
+/// 查询侧（`?status=` 过滤）共用同一份常量**，否则「表单里能选的值」与「列表里能滤的值」
+/// 会各自漂移（b80：查询侧此前根本没有 status 谓词，前端 `queryParams.status` 被 serde 静默丢弃）。
 fn validate_notice_enum(notice_type: &str, status: Option<&str>) -> Result<(), ServiceError> {
-    if notice_type != "1" && notice_type != "2" {
+    if !NOTICE_TYPE_VALUES.contains(&notice_type) {
         return Err(ServiceError::bad_request(&crate::tr!(
             "error.notice.notice_type_invalid",
             value = notice_type
         )));
     }
     if let Some(s) = status
-        && s != "0"
-        && s != "1"
+        && !NOTICE_STATUS_VALUES.contains(&s)
     {
         return Err(ServiceError::bad_request(&crate::tr!(
             "error.notice.status_invalid",
@@ -48,6 +51,66 @@ fn validate_notice_enum(notice_type: &str, status: Option<&str>) -> Result<(), S
     }
     Ok(())
 }
+
+/// 公告状态合法值（`sys_notice.status`）；`NOTICE_STATUS_NORMAL` 是"用户可见面"
+const NOTICE_STATUS_NORMAL: &str = "0";
+const NOTICE_STATUS_VALUES: &[&str] = &[NOTICE_STATUS_NORMAL, "1"];
+/// 公告类型合法值（`sys_notice.notice_type`）
+const NOTICE_TYPE_VALUES: &[&str] = &["1", "2"];
+
+/// 查询串里的枚举位归一：空/缺省 ⇒ `None`（不过滤）；命中白名单 ⇒ 该值；其余 ⇒ `reject(v)`
+///
+/// 为什么不能"非法值当没填"：那会让 `?status=9` 静默返回全量，UI 上表现为"筛选生效了但
+/// 列表一条没少"——与 b74 抓到的"编译通过但永不执行"同一族。为什么不能"非法值也拦掉"：
+/// 空串是 EP `clearable` 选择框清空后的真实产出，拦它等于把正常清空变成报错。
+/// 返回 `&'static str` 而非 `String`：白名单值本身是常量，避免下游 `NoticeFilter` 借用 DTO。
+///
+/// `reject` 取闭包而非键名参数：`tr!` 的键必须是**字面量**（编译期展开），传 `&str` 变量
+/// 直接编译不过——这正好把"每个查询位都有自己的文案键"钉在调用处。
+fn parse_enum_query(
+    raw: Option<&str>,
+    allowed: &'static [&'static str],
+    reject: impl Fn(&str) -> ServiceError,
+) -> Result<Option<&'static str>, ServiceError> {
+    let Some(v) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    allowed
+        .iter()
+        .copied()
+        .find(|a| *a == v)
+        .map(Some)
+        .ok_or_else(|| reject(v))
+}
+
+/// `?status=` 查询位解析（文案键与写侧 `validate_notice_enum` 同一个）
+fn parse_status_query(raw: Option<&str>) -> Result<Option<&'static str>, ServiceError> {
+    parse_enum_query(raw, NOTICE_STATUS_VALUES, |v| {
+        ServiceError::bad_request(&crate::tr!("error.notice.status_invalid", value = v))
+    })
+}
+
+/// `?isRead=` ⇒ 已读态谓词：缺省/空 ⇒ 不过滤；`"1"` ⇒ 仅已读；`"0"` ⇒ 仅未读；其余 ⇒ 400
+///
+/// 取 `'0'/'1'` 而非 `true/false`：与仓内其余"状态位查询参数"（`status`、`noticeType`、
+/// 字典值）同形，前端字典组件直接可用。
+fn parse_is_read_query(raw: Option<&str>) -> Result<Option<bool>, ServiceError> {
+    let reject =
+        |v: &str| ServiceError::bad_request(&crate::tr!("error.notice.is_read_invalid", value = v));
+    match parse_enum_query(raw, NOTICE_READ_VALUES, reject)? {
+        None => Ok(None),
+        // 白名单只有 "0"/"1"，其余分支不可能到达（parse_enum_query 已拒），
+        // 但仍不写 `unreachable!`：将来往 NOTICE_READ_VALUES 加值时必须在这里显式表态
+        Some(v) if v == NOTICE_READ_UNREAD => Ok(Some(false)),
+        Some(v) if v == NOTICE_READ_READ => Ok(Some(true)),
+        Some(v) => Err(reject(v)),
+    }
+}
+
+/// `?isRead=` 合法值：未读 / 已读
+const NOTICE_READ_UNREAD: &str = "0";
+const NOTICE_READ_READ: &str = "1";
+const NOTICE_READ_VALUES: &[&str] = &[NOTICE_READ_UNREAD, NOTICE_READ_READ];
 
 // ==================== DTO ====================
 
@@ -69,6 +132,20 @@ pub struct NoticeQueryDto {
     pub notice_title: Option<String>,
     pub notice_type: Option<String>,
     pub create_by: Option<String>,
+    /// 状态精确过滤（`"0"` 正常 / `"1"` 关闭；缺省不过滤）
+    ///
+    /// b80 新增。前端 `views/system/notice/index.vue` 的 `queryParams.status` 与
+    /// `NoticeQueryParams.status` 类型早已存在，但 DTO 没有这个字段 ⇒ serde 静默丢弃，
+    /// 该筛选是**假控件**（选了值、请求照发、列表一条不少）。
+    #[serde(default)]
+    pub status: Option<String>,
+    /// 已读态过滤（`"0"` 仅未读 / `"1"` 仅已读；缺省不过滤）
+    ///
+    /// b80 新增，取代通知中心的"前端过滤当前页"：后者只能过滤**当前页**，
+    /// 分页 total 仍是全量 ⇒ "只看未读"翻页会翻到空页、且总数与筛选结果矛盾。
+    /// 判定与铃铛未读数共用同一谓词（`SysNoticeRepository::base_query`）。
+    #[serde(default)]
+    pub is_read: Option<String>,
     /// 开始时间（兼容前端 addDateRange 嵌套格式 `params[beginTime]`）
     #[serde(alias = "params[beginTime]", default)]
     pub begin_time: Option<String>,
@@ -249,11 +326,16 @@ impl SysNoticeService {
 
     /// 分页查询通知公告
     ///
-    /// 支持 notice_title 模糊、notice_type 精确、create_by 精确、时间范围筛选
+    /// 支持 notice_title 模糊、notice_type 精确、create_by 精确、status 精确、时间范围筛选，
+    /// 以及 b80 新增的**服务端已读态筛选**（`isRead`，按 `user_id` 的已读记录半连接）。
+    ///
+    /// `user_id` 用于已读态：`isRead` 缺省时不参与 SQL；给了就必须给出真实操作者 ID，
+    /// 否则"未读"会退化成"全量"（这是另一条静默失效路径，故由参数而非默认值表达）。
     pub async fn get_notice_page(
         &self,
         query: NoticeQueryDto,
         operator_tid: i64,
+        user_id: i64,
     ) -> Result<(Vec<SysNoticeModel>, u64), ServiceError> {
         let page = PageDomain::from(&query);
         let offset = page.offset();
@@ -272,20 +354,26 @@ impl SysNoticeService {
             Some(s) => Some(crate::common::datetime::parse_query_date(s)?),
             None => None,
         };
+        // 枚举位先过白名单：非法值 400（不得静默当成"未填"，否则前端的筛选又变成一个
+        // "选了值、发了请求、列表一条没少"的假控件——status 原本的处境正是如此）
+        let status = parse_status_query(query.status.as_deref())?;
+        let read = parse_is_read_query(query.is_read.as_deref())?;
+
+        let filter = NoticeFilter {
+            tenant_scope: crate::common::tenant::tenant_scope(operator_tid),
+            title: query.notice_title.as_deref(),
+            notice_type: query.notice_type.as_deref(),
+            create_by: query.create_by.as_deref(),
+            status,
+            begin,
+            end,
+            read,
+            user_id,
+        };
 
         let (rows, total) = self
             .notice_repo
-            .find_page_filtered(
-                offset,
-                limit,
-                query.notice_title.as_deref(),
-                query.notice_type.as_deref(),
-                query.create_by.as_deref(),
-                begin,
-                end,
-                crate::common::tenant::tenant_scope(operator_tid),
-                sort,
-            )
+            .find_page_filtered(offset, limit, &filter, sort)
             .await?;
         Ok((rows, total))
     }
@@ -698,7 +786,7 @@ impl SysNoticeService {
         operator_tid: i64,
         user_id: i64,
     ) -> Result<(Vec<NoticeRowVo>, u64), ServiceError> {
-        let (rows, total) = self.get_notice_page(query, operator_tid).await?;
+        let (rows, total) = self.get_notice_page(query, operator_tid, user_id).await?;
         Ok((
             self.attach_read_state(rows, user_id, operator_tid).await?,
             total,
@@ -794,24 +882,54 @@ impl SysNoticeService {
         Ok(())
     }
 
+    /// 「我可见的未读公告」谓词——未读角标与跨页「全部已读」的**同一个**事实源
+    ///
+    /// 三条判据因此结构上不可能互相矛盾：
+    /// `count_unread` = 本谓词的行数；`list?isRead=0` 的 total = 本谓词的行数；
+    /// `mark_all_unread_read` 标记的集合 = 本谓词命中的行。
+    /// 改造前角标用"总数 − 已读数"的**算术差**，一旦某条已读公告被置为关闭（status='1'），
+    /// 它仍留在已读数里却不再留在总数里 ⇒ 差值被低估、`max(0)` 再把负数洗成 0（b80 修）。
+    fn unread_filter(tenant_scope: Option<i64>, user_id: i64) -> NoticeFilter<'static> {
+        NoticeFilter {
+            tenant_scope,
+            status: Some(NOTICE_STATUS_NORMAL),
+            read: Some(false),
+            user_id,
+            ..Default::default()
+        }
+    }
+
     /// 标记用户所有未读公告为已读（"全部已读"功能）
     ///
     /// 与 mark_read_all 的区别：
     /// - mark_read_all 需要传入具体 notice IDs，前端只能拿到当前页的 ID
-    /// - mark_all_unread_read 服务端查询所有未读并标记，确保跨页未读也被清除
+    /// - mark_all_unread_read 服务端按 `unread_filter` 取未读集合并标记，跨页未读也被清除
     ///
     /// 返回标记的条数（用于响应消息展示）。tenant_scope 由 operator 推导：
-    /// 租户操作者仅处理本租户公告，平台操作者按公告实际租户分组写入。
+    /// 租户操作者仅处理本租户公告，平台操作者按公告实际租户分组写入（读记录租户随父公告）。
     pub async fn mark_all_unread_read(
         &self,
         user_id: i64,
         operator_tid: i64,
     ) -> Result<u64, ServiceError> {
-        let count = self
-            .read_repo
-            .mark_all_unread_read(user_id, crate::common::tenant::tenant_scope(operator_tid))
+        let tenant_scope = crate::common::tenant::tenant_scope(operator_tid);
+        let unread = self
+            .notice_repo
+            .find_id_tenant_pairs(&Self::unread_filter(tenant_scope, user_id))
             .await?;
-        Ok(count)
+        if unread.is_empty() {
+            return Ok(0);
+        }
+        let marked = unread.len() as u64;
+        let mut by_tenant: std::collections::BTreeMap<i64, Vec<i64>> =
+            std::collections::BTreeMap::new();
+        for (notice_id, tid) in unread {
+            by_tenant.entry(tid).or_default().push(notice_id);
+        }
+        for (tid, ids) in by_tenant {
+            self.read_repo.mark_read_batch(ids, user_id, tid).await?;
+        }
+        Ok(marked)
     }
 
     /// 查询公告已读用户列表（分页）
@@ -906,11 +1024,208 @@ impl SysNoticeService {
         Ok((rows, total))
     }
 
+    /// 统计可见公告总数（`status='0'`，不按已读/类型/标题筛选）
+    ///
+    /// 与 [`Self::count_unread`] 同一个谓词族（只差 `read` 轴），供通知中心顶部卡片
+    /// 做"全部 / 未读 / 已读"三个数的自洽减法——列表接口的 `total` 会随筛选变化，不能当分母。
+    pub async fn count_visible(&self, operator_tid: i64) -> Result<u64, ServiceError> {
+        Ok(self
+            .notice_repo
+            .count_by_filter(&NoticeFilter {
+                tenant_scope: crate::common::tenant::tenant_scope(operator_tid),
+                status: Some(NOTICE_STATUS_NORMAL),
+                ..Default::default()
+            })
+            .await?)
+    }
+
     /// 统计用户未读公告数（按租户维度）
+    ///
+    /// 直接数 `unread_filter` 命中的行数——与 `list?isRead=0` 的 total、
+    /// `mark_all_unread_read` 标记的条数三者同源（b80：改造前是两条 COUNT 的算术差，
+    /// 已读公告被关闭时会被低估）。
     pub async fn count_unread(&self, user_id: i64, operator_tid: i64) -> Result<u64, ServiceError> {
         Ok(self
-            .read_repo
-            .count_unread(user_id, crate::common::tenant::tenant_scope(operator_tid))
+            .notice_repo
+            .count_by_filter(&Self::unread_filter(
+                crate::common::tenant::tenant_scope(operator_tid),
+                user_id,
+            ))
             .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 从两份 yml 里取某个 `error.notice.*` 文案（用于"运行期消息必须逐字命中真实文案"，
+    /// 否则 `assert_eq!(err.message, tr!(同一个键))` 在键缺失时两边都等于键名 ⇒ 恒真虚锁，
+    /// 见 b74 `data_rule_service` 同款教训）
+    fn locale_texts(key_leaf: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for f in ["locales/zh-CN.yml", "locales/en-US.yml"] {
+            let text = std::fs::read_to_string(f).unwrap_or_else(|e| panic!("{f} 读取失败: {e}"));
+            let line = text
+                .lines()
+                .find(|l| l.trim_start().starts_with(&format!("{key_leaf}:")))
+                .unwrap_or_else(|| panic!("{f} 缺 error.notice.{key_leaf} 键"));
+            out.push(
+                line.split_once(':')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"')
+                    .to_string(),
+            );
+        }
+        out
+    }
+
+    /// 取 status 查询位的解析结果（意外拒绝直接 panic，拒绝路径由别的用例专判）
+    fn status_of(v: Option<&str>) -> Option<&'static str> {
+        parse_status_query(v).unwrap_or_else(|e| panic!("status={v:?} 意外被拒: {}", e.message))
+    }
+
+    #[test]
+    fn enum_query_parser_treats_absent_and_blank_as_no_filter() {
+        // 缺省、空串、纯空白都必须是"不过滤"——EP `clearable` 选择框清空后真实产出空串，
+        // 把它当非法值拒掉等于让"清空筛选"变成报错（"为安全把合法值也挡掉"也是缺陷）
+        assert_eq!(status_of(None), None);
+        for blank in ["", "  ", "\t"] {
+            assert_eq!(
+                status_of(Some(blank)),
+                None,
+                "空白输入 {blank:?} 应视为未填"
+            );
+            assert!(
+                parse_is_read_query(Some(blank))
+                    .unwrap_or_else(|e| panic!("isRead={blank:?} 意外被拒: {}", e.message))
+                    .is_none(),
+                "空白 isRead 应视为未填"
+            );
+        }
+    }
+
+    #[test]
+    fn enum_query_parser_accepts_exactly_the_whitelist() {
+        for v in NOTICE_STATUS_VALUES {
+            assert_eq!(status_of(Some(v)), Some(*v), "白名单内的 {v} 必须放行");
+        }
+        // 已读位：'0'⇒仅未读、'1'⇒仅已读（方向写反会让"只看未读"显示全量，且恒绿）
+        assert_eq!(
+            parse_is_read_query(Some(NOTICE_READ_UNREAD)).ok().flatten(),
+            Some(false)
+        );
+        assert_eq!(
+            parse_is_read_query(Some(NOTICE_READ_READ)).ok().flatten(),
+            Some(true)
+        );
+        // 首尾空白容忍（表单值常带），但 'true' 这类字面量不在白名单
+        assert_eq!(parse_is_read_query(Some(" 1 ")).ok().flatten(), Some(true));
+        for bogus in ["true", "TRUE", "2", "-1", "abc", "0.5"] {
+            assert!(
+                parse_is_read_query(Some(bogus)).is_err(),
+                "非法 isRead={bogus:?} 必须拒绝，不得静默当成未填"
+            );
+        }
+        // 白名单值本身不得被自己拒掉（控制组：证明上一条的红来自值而非实现）
+        for ok in NOTICE_READ_VALUES {
+            assert!(
+                parse_is_read_query(Some(ok)).is_ok(),
+                "isRead={ok:?} 应放行"
+            );
+        }
+    }
+
+    #[test]
+    fn enum_query_rejection_message_is_readable_and_echoes_value() {
+        // 契约（C.8）：400 + 可读 msg + 回显用户给的值；msg 不得是原始键名
+        let err = parse_status_query(Some("9")).expect_err("白名单外必须拒绝");
+        assert_eq!(err.code, 400);
+        assert!(!err.message.is_empty(), "错误消息不得为空");
+        assert!(
+            !err.message.contains("error."),
+            "消息里出现了原始 i18n 键（键未解析）: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains('9'),
+            "消息必须回显非法值: {}",
+            err.message
+        );
+
+        let key = "is_read_invalid";
+        let err = parse_is_read_query(Some("zzz")).expect_err("白名单外必须拒绝");
+        assert_eq!(err.code, 400);
+        assert!(
+            !err.message.contains("error."),
+            "消息里出现了原始键: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("zzz"),
+            "消息必须回显非法值: {}",
+            err.message
+        );
+        // 逐字命中两份文案之一（去掉 %{value} 占位后的前缀必须原样出现在消息里）
+        let hit = locale_texts(key).into_iter().any(|tpl| {
+            err.message.starts_with(
+                tpl.split_once("%{")
+                    .map_or(tpl.as_str(), |x| x.0)
+                    .trim_end(),
+            )
+        });
+        assert!(hit, "运行期消息未逐字命中 yml 文案前缀: {}", err.message);
+    }
+
+    #[test]
+    fn query_and_write_whitelists_agree_on_every_non_blank_value() {
+        // 单一事实源判据：同一个**非空** status 值，查询侧放行 ⇔ 写侧放行。
+        // 若两处各写一份字面量，就会出现"表单能存、列表滤不出来"或反之（b80 的起点缺陷）
+        for v in ["0", "1", "2", "9", "x", "true"] {
+            let query_ok = parse_status_query(Some(v)).is_ok();
+            let write_ok = validate_notice_enum("1", Some(v)).is_ok();
+            assert_eq!(query_ok, write_ok, "status={v:?} 查询侧与写侧判定不一致");
+        }
+        // 刻意的**不对称**：查询串里的空值 = 用户清空了筛选（放行且不过滤）；
+        // 写侧的空串 = 载荷脏（拒）。把它俩强行写成一致必然坏掉一侧的真实行为
+        assert!(
+            parse_status_query(Some("")).is_ok(),
+            "查询侧空值必须视为未填"
+        );
+        assert!(
+            validate_notice_enum("1", Some("")).is_err(),
+            "写侧空串必须拒（否则脏值落库）"
+        );
+    }
+
+    #[test]
+    fn unread_filter_wires_every_axis() {
+        // 未读角标与"跨页全部已读"的唯一谓词。任一字段接错都会让两者与列表悄悄分家，
+        // 而这条分家**不会报错**（只会数错），所以必须由构造级判据钉住
+        let f = SysNoticeService::unread_filter(Some(7), 42);
+        assert_eq!(
+            f.tenant_scope,
+            Some(7),
+            "租户谓词必须透传（否则数到别租户公告）"
+        );
+        assert_eq!(
+            f.status,
+            Some(NOTICE_STATUS_NORMAL),
+            "未读面只数正常状态公告"
+        );
+        assert_eq!(
+            f.read,
+            Some(false),
+            "未读面必须是『未读』而非『已读』或不过滤"
+        );
+        assert_eq!(f.user_id, 42, "已读半连接必须绑定当前用户");
+        // 平台视角（tenant_scope=None）保留 None，不得折成 Some(0)——那会把可见集合缩到租户 0
+        let p = SysNoticeService::unread_filter(None, 1);
+        assert_eq!(p.tenant_scope, None);
+        // 时间/标题等无关轴必须为空，否则"全部已读"会跟着筛选条件漏标记
+        assert!(f.title.is_none() && f.begin.is_none() && f.end.is_none());
+        assert!(f.notice_type.is_none() && f.create_by.is_none());
     }
 }

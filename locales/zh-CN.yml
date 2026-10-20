@@ -561,6 +561,7 @@ error:
     user_email_query_failed: 查询用户邮箱失败
     notice_type_invalid: "notice_type 必须为 1(通知) 或 2(公告)，当前值: %{value}"
     status_invalid: "status 必须为 0(正常) 或 1(关闭)，当前值: %{value}"
+    is_read_invalid: "isRead 必须为 0(未读) 或 1(已读)，当前值: %{value}"
   pref:
     value_invalid: "消息偏好字段 %{field} 取值非法（须为 0 或 1）"
     time_invalid: "免打扰时间字段 %{field} 格式非法（须为 HH:MM），当前值: %{value}"

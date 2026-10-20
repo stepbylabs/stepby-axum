@@ -190,18 +190,26 @@ pub async fn remove(
 pub struct NoticeTopVo {
     #[serde(flatten)]
     pub base: AjaxResult<Vec<NoticeRowVo>>,
+    /// 未读数（可见面 = `status='0'` 且未读，与 `list?isRead=0&status=0` 的 total 同源）
     pub unread_count: u64,
+    /// 可见公告总数（`status='0'`，不分页、不按已读/类型筛选）
+    ///
+    /// b80 新增：通知中心顶部三张卡片要同时显示"全部 / 未读 / 已读"，而列表的 `total`
+    /// 会随筛选变化（'未读' 档下它就是未读数）——拿它减 unreadCount 会得到"已读 0"。
+    /// 计数随本请求一起下发（同一次往返、同一谓词），比让前端再发一次计数请求更省，
+    /// 也比让前端自己减更不易漂移。
+    pub total_count: u64,
 }
 
 crate::impl_into_response!(NoticeTopVo);
 
 /// GET /system/notice/listTop
-/// 首页顶部公告列表（通知铃铛用，带未读数）
+/// 首页顶部公告列表（通知铃铛用，带未读数与可见总数）
 #[utoipa::path(
     get,
     path = "/system/notice/listTop",
     responses(
-        (status = 200, description = "顶部公告列表 + 当前用户未读数", body = NoticeTopVo),
+        (status = 200, description = "顶部公告列表 + 当前用户未读数 + 可见总数", body = NoticeTopVo),
         (status = 500, description = "服务器错误"),
     ),
     tag = "system-notice"
@@ -215,14 +223,20 @@ pub async fn list_top(
         .notice_service
         .get_notice_top_with_read(operator.tenant_id(), user_id)
         .await?;
+    // 计数失败**不得**回落成 0：未读数为 0 会被渲染成"全部已读"的安全态并把
+    // "全部已读"按钮禁用——查询出错与真的没有未读，对用户是两个相反的结论。
     let unread_count = state
         .notice_service
         .count_unread(user_id, operator.tenant_id())
-        .await
-        .unwrap_or(0);
+        .await?;
+    let total_count = state
+        .notice_service
+        .count_visible(operator.tenant_id())
+        .await?;
     Ok(NoticeTopVo {
         base: AjaxResult::success(rows),
         unread_count,
+        total_count,
     })
 }
 

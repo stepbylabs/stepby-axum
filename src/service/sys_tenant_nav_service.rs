@@ -442,7 +442,7 @@ impl SysTenantNavService {
         // 2) 引用菜单必须在该租户的 L2 套餐白名单内
         self.ensure_ref_in_package(target_tid, dto.ref_menu_id)
             .await?;
-        // 3) 同一租户不得重复挂载
+        // 3) 同一租户不得重复挂载（只有**活跃行**才算重复）
         if self
             .nav_repo
             .exists_ref(target_tid, dto.ref_menu_id, None)
@@ -452,11 +452,36 @@ impl SysTenantNavService {
                 "error.tenant.nav_ref_duplicate"
             )));
         }
+        // 3b) 该行是否"曾被卸载（软删）"。必须早于父级校验取出来：复活路径的父级校验
+        //     要把**自己**排除在外（否则"复活到一个以自己为父的行"会被判成环）
+        let pending = self
+            .nav_repo
+            .find_revivable_ref(target_tid, dto.ref_menu_id)
+            .await?;
         // 4) 父级校验（0 / 本租户 L3 行；非停用；深度受限）
         let parent_id = dto.parent_id.unwrap_or(0);
         if parent_id != 0 {
-            self.ensure_parent_valid(target_tid, parent_id, None)
+            self.ensure_parent_valid(target_tid, parent_id, pending.as_ref().map(|p| p.l3_id))
                 .await?;
+        }
+
+        // 5) **复活软删行**，而不是再插一条。
+        //
+        // 唯一索引 `uk_sys_tenant_menu (tenant_id, ref_menu_id)` 不含 del_flag，而重复检查
+        // 只看 del_flag='0' ⇒ 改造前"卸载后重新挂载"会绕过检查直接 INSERT，撞索引返回 500
+        // （b80 P-A 实测：`/options` 把该菜单标成 `selected=false` 供用户点，点下去必炸）。
+        // 语义上这是一次"重新挂载"，历史行（create_by/create_time）应保留，只覆盖导航属性。
+        if let Some(dead) = pending {
+            let mut active: L3ActiveModel = dead.into_active_model();
+            active.parent_id = Set(parent_id);
+            active.order_num = Set(order_num_payload(dto.order_num));
+            active.visible = Set(Some(visible_payload(dto.visible.as_deref().unwrap_or("0"))));
+            active.status = Set(Some("0".to_string()));
+            active.del_flag = Set(Some("0".to_string()));
+            active.update_by = Set(Some(operator.to_string()));
+            active.update_time = Set(Some(now_naive()));
+            let saved = self.nav_repo.update(active).await?;
+            return Ok(to_vo(&saved, Some(&ref_menu)));
         }
 
         let l3_id = self.nav_repo.next_l3_id().await?;
