@@ -1,10 +1,10 @@
 # Stepby Axum
 
-![Release](https://img.shields.io/badge/release-v0.2.0-blue)
+![Release](https://img.shields.io/badge/release-v0.3.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Rust](https://img.shields.io/badge/Rust-1.96%2B-orange?logo=rust)
 ![Axum](https://img.shields.io/badge/axum-web%20framework-green)
-![Tests](https://img.shields.io/badge/tests-1349%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1554%20passing-brightgreen)
 [![CI](https://github.com/stepbylabs/stepby-axum/actions/workflows/ci.yml/badge.svg)](https://github.com/stepbylabs/stepby-axum/actions/workflows/ci.yml)
 
 Stepby 开源中后台管理系统的后端服务，基于 **Rust（axum + sea-orm + tokio）** 构建，提供完整的 RESTful API。配套前端仓库：[stepby-vue](https://github.com/stepbylabs/stepby-vue)。
@@ -149,14 +149,40 @@ docker compose up -d
 ## 🧪 测试
 
 ```bash
-cargo test --lib    # 1349 个单元测试通过
+cargo test --lib    # 1554 个单元测试通过（另有 1 条 #[ignore] 的活库方言 smoke）
 ```
 
-前端 E2E（Playwright，135 个功能 / 1173 项断言）位于前端仓库 `tests/e2e/main.mjs`，详见 [stepby-vue](https://github.com/stepbylabs/stepby-vue)。
+其中 `integration_tests::` 子集 305 条走隔离临时库 + teardown，依赖本机 Redis（`127.0.0.1:6379` 无密码）。
+
+前端 E2E（Playwright，144 个功能 / 1260 项断言）位于前端仓库 `tests/e2e/main.mjs`，详见 [stepby-vue](https://github.com/stepbylabs/stepby-vue)。
+
+## 🚀 预编译产物
+
+每个版本在 [Releases](https://github.com/stepbylabs/stepby-axum/releases) 附三份后端包 + `checksums.txt`（sha256）：
+
+| 资产 | 内含 |
+|---|---|
+| `stepby-backend-linux-x86_64-v<版本>.tar.gz` | `bin/stepby-axum` + `bin/migration` + `README.md` |
+| `stepby-backend-linux-aarch64-v<版本>.tar.gz` | 同上（ARM64） |
+| `stepby-backend-windows-x86_64-v<版本>.tar.gz` | `bin/stepby-axum.exe` + `bin/migration.exe` + `README.md` |
+
+解压后**零配置直接运行** `bin/stepby-axum`：自动创建 SQLite 库与 `data/secret.key`，前端资源已编进二进制，
+浏览器打开 `http://localhost:8080` 即为完整系统。默认账号 `admin / admin123`（首次登录强制改密）。
+PostgreSQL / MySQL / Redis 档通过 `DATABASE_URL`、`REDIS_URL` 环境变量切换，见上文配置表。
+
+校验下载完整性：
+
+```bash
+sha256sum -c checksums.txt
+```
+
+产物由 `.github/workflows/release.yml` 在推送 `v*` 标签时构建；Actions 额度不可用时，可在本机用
+`scripts/package-release.ps1 -Release -Tag v<版本>` 产出同一资产集（命名与结构逐字段一致），再用
+`gh release upload` 挂到 Release。
 
 ## 📦 版本
 
-变更历史见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v0.2.0**（2026-10-12）。
+变更历史见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v0.3.0**（2026-10-20）。
 
 ## 📄 License
 
