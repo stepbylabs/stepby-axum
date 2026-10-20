@@ -1796,17 +1796,41 @@ async fn cleanup_expired_logs_inner(
     // 背景：service 层 clean() 此前为死方法（零调用点）——e2e 实测 10 天堆积
     // 12 万行（97% 为 web vitals info 级埋点），表单调膨胀。观测数据与
     // 错误信号分离短保留（默认 7 天，[sys_log].frontend_error_retention_days）。
+    //
+    // 分档（批七十九）：这张表 99.93% 是性能采样（实测 101 272 / 101 342），而性能回归
+    // 往往要隔几个月回头对基线——按错误的短保留期清它，等于把基线当垃圾清掉。
+    // 因此 `[sys_log].frontend_vital_retention_days` 可单独给采样一档。
+    // **未配置时走改造前那一条无条件删除**（同一函数、同一谓词），存量部署零行为变化；
+    // 只有真分档才拆成两条互斥删除（IN / NOT IN 并集覆盖全表，不漏清也不重复清）。
     let frontend_error_service =
         crate::service::sys_frontend_error_service::SysFrontendErrorService::new(db.clone());
     let fe_retention = config.sys_log.frontend_error_retention_days;
-    match frontend_error_service.clean(fe_retention, None).await {
-        Ok(affected) => {
-            tracing::info!(
-                "cleanup_expired_logs: 清理前端错误/埋点 {} 条（保留 {} 天）",
-                affected,
-                fe_retention
-            );
-        }
+    let vital_retention = config.sys_log.frontend_vital_retention_days();
+    let frontend_cleanup = match vital_retention {
+        None => frontend_error_service.clean(fe_retention, None).await,
+        Some(vital_days) => frontend_error_service
+            .clean_split_vital(vital_days, fe_retention, None)
+            .await
+            .map(|(vitals, others)| vitals + others),
+    };
+    match frontend_cleanup {
+        Ok(affected) => match vital_retention {
+            None => {
+                tracing::info!(
+                    "cleanup_expired_logs: 清理前端错误/埋点 {} 条（保留 {} 天）",
+                    affected,
+                    fe_retention
+                );
+            }
+            Some(vital_days) => {
+                tracing::info!(
+                    "cleanup_expired_logs: 清理前端错误/埋点 {} 条（性能采样保留 {} 天，其余保留 {} 天）",
+                    affected,
+                    vital_days,
+                    fe_retention
+                );
+            }
+        },
         Err(e) => {
             tracing::error!("cleanup_expired_logs: 清理前端错误/埋点失败: {}", e);
         }

@@ -230,6 +230,20 @@ json_stdout = false
 #   keep    = 永不清理（合规全留部署；容量交给部署方，审计大屏聚合已有时间窗兜底）
 # 非法取值回落 delete 并启动 WARN（fail-safe，拒绝静默失效）
 # retention_mode = "delete"
+# 各域独立保留天数（批五十四 / 批五十七已落地，但模板此前未列出——运维看不出"可以分域调"，
+# 按开关规范⑦补齐。缺省值即代码里的缺省，写不写都等价）
+#   frontend_error_retention_days = 7     前端异常与性能埋点（sys_frontend_error）
+#   audit_change_retention_days = 180     变更留痕（sys_audit_change，审计合规域）
+#   msg_send_log_retention_days = 90      消息发送记录（sys_msg_send_log；send_time 为空的行永不清）
+# 性能采样独立一档（批七十九，**可选**：整段不写 = 沿用 frontend_error_retention_days，
+# 与改造前走同一条无条件删除，存量部署零行为变化）
+#   sys_frontend_error 是统一埋点表，实测 99.93% 是 Web Vitals 采样（101 272 / 101 342）。
+#   按错误的 7 天清它，等于把性能基线当垃圾清掉——而回归往往要隔几个月回头对基线才发现。
+#   给采样单独一档即可（如 30 或 90），错误信号仍按短保留。
+#   两档谓词互斥且并集覆盖全表（source IN ('vital') / NOT IN ('vital')），不存在漏清或重复删；
+#   取值 ≤0 视为非法 ⇒ 启动 WARN 后回落单档（fail-safe，拒绝静默失效）。
+#   归类：启动时只读（热改会出现"管理端显示一个数、清理按另一个数"的行为分裂）。
+# frontend_vital_retention_days = 30
 # 启动期补跑错过的保留期清理（b73，启动时只读——改后需重启）
 #   清理 cron 固定在每日 03:00，而发布/重启窗口几乎总在凌晨之外 ⇒ 错过即**整日无补偿**，
 #   日志表按保留期无限增长（实测连续错过两日后，sys_frontend_error 有 3 万余行超期未清）。

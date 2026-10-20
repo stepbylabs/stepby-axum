@@ -319,6 +319,14 @@ async fn build_isolated_state_with(
     // 每个用例启动都会补跑一轮全表清理（拖慢测试 + 把"启动期补跑"WARN 刷进测试窗口日志，
     // 干扰 WARN 对账）。测试基线一律钳 false；需要验证补跑判定的用例在 configure 内显式翻 true。
     settings.sys_log.retention_catchup_on_start = false;
+    // b79（AGENTS 开关规范⑧登记）：前端埋点的保留期两档同样是"部署态开关"。
+    // `frontend_vital_retention_days` 缺省 None = 与错误档同档（= 改造前单档行为）；
+    // 本机 config 若留着 30，"清理掉多少行"就随机器漂移，保留期用例的预期也会跟着散架。
+    // 一律钳回 Default；需要分档的用例在自己的 configure 里显式设置（见
+    // `retention_cleanup::it_ret_frontend_vital_split_*`）。
+    settings.sys_log.frontend_error_retention_days =
+        crate::config::settings::SysLogConfig::default().frontend_error_retention_days;
+    settings.sys_log.frontend_vital_retention_days = None;
 
     // v5-D12：测试环境统一开启 SCIM（Bearer 固定测试值）——其它测试不请求 /scim/*
     // 故无干扰；SCIM 用例依赖此配置。

@@ -33,6 +33,9 @@ const MAX_USER_AGENT_LEN: usize = 512;
 const MAX_LEVEL_LEN: usize = 16;
 const MAX_SOURCE_LEN: usize = 32;
 
+/// 性能采样来源（Web Vitals：LCP/FCP/CLS…）。保留期分档与页面默认排除都以它为准，
+/// 因此收敛成一个常量，避免"清理按一个字面、查询按另一个字面"这种静默失配。
+pub const SOURCE_VITAL: &str = "vital";
 /// 允许的来源集合（超出归一化为 other，防枚举膨胀）
 /// 对齐前端 errorHub.ErrorSource（api/download/vue/global/unhandledrejection/resource/other）+ Web Vitals 的 vital。
 const ALLOWED_SOURCES: &[&str] = &[
@@ -42,7 +45,7 @@ const ALLOWED_SOURCES: &[&str] = &[
     "global",
     "unhandledrejection",
     "resource",
-    "vital",
+    SOURCE_VITAL,
     "other",
 ];
 /// 允许的级别集合（超出归一化为 info）
@@ -398,6 +401,44 @@ impl SysFrontendErrorService {
         let cutoff = crate::common::datetime::now_naive() - chrono::Duration::days(days);
         let result = self.repo.delete_older_than(cutoff, tenant_scope).await?;
         Ok(result.rows_affected)
+    }
+
+    /// 按「性能采样 / 其余」两档清理保留期（批七十九）。
+    ///
+    /// 两档谓词 `source IN (vital)` 与 `source NOT IN (vital)` **互斥且并集覆盖全表**，
+    /// 所以合起来与改造前那一次无条件删除清得一样干净——不存在"分档后漏清某类来源"，
+    /// 也不存在同一行被删两次。
+    ///
+    /// 多租户与 [`Self::clean`] 同口径：`tenant_scope = Some(tid)` 仅清本租户，
+    /// `None`（平台）不过滤。读侧与写侧共用同一个谓词参数，不做二次推导。
+    ///
+    /// 返回 `(vitals 行数, 其余行数)`。
+    pub async fn clean_split_vital(
+        &self,
+        vital_days: i64,
+        other_days: i64,
+        tenant_scope: Option<i64>,
+    ) -> Result<(u64, u64), ServiceError> {
+        use crate::repository::sys_frontend_error::SourceFilter;
+        let vital = [SOURCE_VITAL.to_string()];
+        let now = crate::common::datetime::now_naive();
+        let vitals = self
+            .repo
+            .delete_older_than_sources(
+                now - chrono::Duration::days(vital_days),
+                tenant_scope,
+                SourceFilter::Only(&vital),
+            )
+            .await?;
+        let others = self
+            .repo
+            .delete_older_than_sources(
+                now - chrono::Duration::days(other_days),
+                tenant_scope,
+                SourceFilter::Except(&vital),
+            )
+            .await?;
+        Ok((vitals, others))
     }
 
     /// 按时间范围清理（物理删除 `[begin, end]` 区间，任一侧可为空）

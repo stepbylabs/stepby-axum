@@ -637,6 +637,7 @@ error:
     admin_delete_forbidden: 不允许删除超级管理员角色
     admin_disable_forbidden: 不允许停用超级管理员角色
     admin_data_scope_forbidden: 不允许修改超级管理员角色的数据权限
+    data_scope_invalid: 数据范围取值无效（仅允许 1=全部 / 2=自定义 / 3=本部门 / 4=本部门及以下 / 5=仅本人）
     user_id_empty: 用户 ID 不能为空
     id_empty: 角色 ID 不能为空
     assigned_to_user: "角色 %{id} 已分配给用户，不允许删除"

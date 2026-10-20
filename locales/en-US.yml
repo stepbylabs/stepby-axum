@@ -637,6 +637,7 @@ error:
     admin_delete_forbidden: Cannot delete super admin role
     admin_disable_forbidden: Cannot disable super admin role
     admin_data_scope_forbidden: Cannot modify super admin role data scope
+    data_scope_invalid: Invalid data scope (1=all, 2=custom, 3=own dept, 4=dept and below, 5=self only)
     user_id_empty: User ID cannot be empty
     id_empty: Role ID cannot be empty
     assigned_to_user: "Role %{id} is assigned to users, cannot delete"

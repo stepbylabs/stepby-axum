@@ -23,7 +23,7 @@ use crate::entity::sys_notice::Model as SysNoticeModel;
 use crate::middleware::Operator;
 use crate::repository::sys_notice_read::NoticeReadUserVo;
 use crate::service::sys_notice_service::{
-    NoticeAddDto, NoticeEditDto, NoticeQueryDto, NoticeReadUserQueryDto,
+    NoticeAddDto, NoticeEditDto, NoticeQueryDto, NoticeReadUserQueryDto, NoticeRowVo,
 };
 use crate::state::AppState;
 use crate::utils::parse_id_list;
@@ -35,7 +35,7 @@ use crate::utils::parse_id_list;
     path = "/system/notice/list",
     params(NoticeQueryDto),
     responses(
-        (status = 200, description = "查询成功", body = TableDataInfo<SysNoticeModel>),
+        (status = 200, description = "查询成功", body = TableDataInfo<NoticeRowVo>),
         (status = 500, description = "服务器错误"),
     ),
     tag = "system-notice"
@@ -44,10 +44,11 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
     Query(query): Query<NoticeQueryDto>,
-) -> Result<TableDataInfo<SysNoticeModel>, AppError> {
+) -> Result<TableDataInfo<NoticeRowVo>, AppError> {
+    let user_id: i64 = parse_operator_id(&operator)?;
     let (rows, total) = state
         .notice_service
-        .get_notice_page(query, operator.tenant_id())
+        .get_notice_page_with_read(query, operator.tenant_id(), user_id)
         .await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -188,7 +189,7 @@ pub async fn remove(
 #[serde(rename_all = "camelCase")]
 pub struct NoticeTopVo {
     #[serde(flatten)]
-    pub base: AjaxResult<Vec<SysNoticeModel>>,
+    pub base: AjaxResult<Vec<NoticeRowVo>>,
     pub unread_count: u64,
 }
 
@@ -209,11 +210,11 @@ pub async fn list_top(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<NoticeTopVo, AppError> {
+    let user_id: i64 = parse_operator_id(&operator)?;
     let rows = state
         .notice_service
-        .get_notice_top(operator.tenant_id())
+        .get_notice_top_with_read(operator.tenant_id(), user_id)
         .await?;
-    let user_id: i64 = parse_operator_id(&operator)?;
     let unread_count = state
         .notice_service
         .count_unread(user_id, operator.tenant_id())

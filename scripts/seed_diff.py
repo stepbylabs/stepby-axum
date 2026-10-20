@@ -54,6 +54,15 @@ import os
 import sqlite3
 import sys
 
+# 中文 Windows 上 stdout 默认 GBK：本脚本的输出里全是 `⇒`、`①`、破折号这类字符，
+# 打完就 UnicodeEncodeError 裸栈 ⇒ "哪几条漂移"被编码异常吃掉，退出码与真失败不可区分
+# （同 run-gates.py §7.11 那条，b79 在 seed_diff 的 FATAL 分支上再次实测到）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - 换不了编码（重定向到管道等）不影响判据
+        pass
+
 # ---------------------------------------------------------------- 比对配置
 
 # R1：审计列豁免（两库时间/操作人必然不同；sys_webhook_event 用蛇形复数变体）
@@ -256,7 +265,72 @@ def count_live_rows(con, table):
         return -1
 
 
+# 纯种子库的"真的有内容"下限：schema 面（表数）+ 三张哨兵表存在且非空。
+# 下限取 40 而非 67：不同部署档位建的表数会变，但"第二实例根本没起来"那种情况是 **0 张表**，
+# 任何合理下限都能抓住（b79 实测：cargo run 因运行中的后端占着 exe 而失败 ⇒ seed-check.db 是
+# 0 字节空文件 ⇒ 公共表 0 张 ⇒ 漂移 0 ⇒ 旧版本打 PASS，属"没跑冒充干净"）。
+MIN_SEED_TABLES = 40
+SEED_SENTINELS = ("sys_menu", "sys_user", "sys_config")
+
+
+def seed_db_verdict(s_tables, seed):
+    """种子库不合格时返回一句原因（不合格 ⇒ 本次对账**不作数**），合格返回 None。"""
+    if len(s_tables) < MIN_SEED_TABLES:
+        return f"种子库只有 {len(s_tables)} 张表（下限 {MIN_SEED_TABLES}）"
+    missing = [t for t in SEED_SENTINELS if t not in s_tables]
+    if missing:
+        return f"种子库缺哨兵表 {missing}"
+    empty = [t for t in SEED_SENTINELS if count_live_rows(seed, t) <= 0]
+    if empty:
+        return f"种子库哨兵表 {empty} 零行（initialize 没跑完？）"
+    return None
+
+
+def seed_selftest():
+    """合成双向：不合格的种子库必须拒绝，合格的必须放行（正控）。"""
+    import tempfile
+
+    checks = []
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.db")
+        con = sqlite3.connect(p)
+        con.execute("CREATE TABLE sys_menu (menu_id int)")
+        con.close()
+        c = sqlite3.connect(p)
+        reason = seed_db_verdict({"sys_menu"}, c)
+        checks.append(("只有 1 张表 ⇒ 必须拒绝", reason is not None and "1 张表" in reason))
+        many = {f"t{i}" for i in range(MIN_SEED_TABLES)}
+        checks.append(("表数够但缺哨兵 ⇒ 必须拒绝", seed_db_verdict(many, c) is not None))
+        c.close()
+
+        p2 = os.path.join(d, "ok.db")
+        c2 = sqlite3.connect(p2)
+        for i in range(MIN_SEED_TABLES):
+            c2.execute(f'CREATE TABLE "t{i}" (x int)')
+        for t in SEED_SENTINELS:
+            c2.execute(f"CREATE TABLE {t} (x int)")
+            c2.execute(f"INSERT INTO {t} VALUES (1)")
+        c2.commit()
+        checks.append(("表数够 + 哨兵齐 + 有行 ⇒ 必须放行（正控）", seed_db_verdict(
+            {t for (t,) in c2.execute("SELECT name FROM sqlite_master WHERE type='table'")} , c2) is None))
+        # 哨兵存在但零行 ⇒ 必须拒绝（这是"库建了、种子没写"那一半）
+        c2.execute("DELETE FROM sys_menu")
+        c2.commit()
+        checks.append(("哨兵零行 ⇒ 必须拒绝", seed_db_verdict({"sys_menu"}, c2) is not None))
+        c2.close()
+    bad = [name for name, ok in checks if not ok]
+    if bad:
+        print("[seed_diff] SYNTH_FAIL:")
+        for name in bad:
+            print(f"  · {name}")
+        return 1
+    print(f"[seed_diff] SYNTH_OK 种子库发现面 {len(checks)} 条双向（空库/缺哨兵/零行必须拒，合格库必须放行）")
+    return 0
+
+
 def main(argv):
+    if "--selftest" in argv:
+        return seed_selftest()
     if len(argv) not in (2, 3):
         print(__doc__)
         return 2
@@ -286,6 +360,22 @@ def main(argv):
 
     s_tables = list_tables(seed)
     l_tables = list_tables(live)
+    # **先证明"种子库真的建起来了"**，再证明"漂移有几条"。
+    # 旧版本缺这一步：第二实例没建成时 seed-check.db 是 0 字节空文件 ⇒ 公共表 0 张 ⇒
+    # 按 R3"运行库有、种子无 = 运行数据不计失败"的口径，漂移恒为 0 ⇒ **打 PASS**。
+    # 这一条红不是"种子丢了"，而是"校验没有跑"，所以必须用 2（UNRUN）而不是 0。
+    bad_seed = seed_db_verdict(s_tables, seed)
+    if bad_seed:
+        print(
+            "[seed_diff] [FATAL] 种子库不合格：%s ⇒ 本次对账**不作数**。\n"
+            "  常见原因：第二实例没跑起来（例如后端正占着 target/debug/stepby-axum.exe，"
+            "cargo 报 `failed to remove file`）却继续比了那个空文件。\n"
+            "  重建：touch data/seed-check.db && DATABASE_URL=sqlite://./data/seed-check.db "
+            "SERVER_PORT=8094 cargo run（确认它退出码是 124/被掐，不是 101），\n"
+            "  再比对：python scripts/seed_diff.py data/seed-check.db data/stepby.db"
+            % bad_seed
+        )
+        return 2
     skip_seaql = {t for t in s_tables | l_tables if t == "seaql_migrations"}
 
     common = sorted((s_tables & l_tables) - skip_seaql)

@@ -1496,6 +1496,21 @@ pub struct SysLogConfig {
     /// e2e 实测 10 天堆积 12 万行（97% vitals info），接入同一每日清理任务。
     #[serde(default = "default_frontend_error_retention_days")]
     pub frontend_error_retention_days: i64,
+    /// 性能采样（`source = vital`）的**独立**保留天数（默认 `None` = 沿用上一档）
+    ///
+    /// 为什么分档：`sys_frontend_error` 是统一埋点表，实测 vitals 占 99.93%
+    /// （101 272 / 101 342，b78）。单一 7 天保留期意味着**性能趋势只能看 7 天**——
+    /// 页面变慢的回归往往在两三个月后才发现，那时基线已被当垃圾清掉；
+    /// 而错误信号必须短保留（合规 + 排障信噪比）。两类数据的价值半衰期本就不同。
+    ///
+    /// 兼容口径（AGENTS A.3）：缺省 `None` ⇒ 取 `frontend_error_retention_days`，
+    /// 与改造前**同一档同一 SQL 语义**，存量部署零行为变化；取值 ≤0 视作非法 ⇒
+    /// WARN 后回落到上一档（fail-safe，不静默失效）。
+    ///
+    /// 归类（AGENTS C.7）：**启动时只读**，与其余 `*_retention_days` 同档（热改会造成
+    /// "管理端显示一个数、清理按另一个数"的行为分裂）。
+    #[serde(default)]
+    pub frontend_vital_retention_days: Option<i64>,
     /// 变更留痕（sys_audit_change）保留天数（默认 180，审计合规域）
     #[serde(default = "default_audit_change_retention_days")]
     pub audit_change_retention_days: i64,
@@ -1555,6 +1570,26 @@ impl SysLogConfig {
             }
         }
     }
+
+    /// 性能采样档：未配置即沿用错误档（= 改造前行为），非法值 WARN 后同样回落。
+    ///
+    /// 返回 `None` 表示"两档相同"——调度层据此走**一次删除**（与改造前完全同一条件），
+    /// 只有真分档才拆成两次按 source 的删除。
+    pub fn frontend_vital_retention_days(&self) -> Option<i64> {
+        match self.frontend_vital_retention_days {
+            None => None,
+            Some(d) if d > 0 && d != self.frontend_error_retention_days => Some(d),
+            Some(d) if d > 0 => None,
+            Some(invalid) => {
+                tracing::warn!(
+                    value = invalid,
+                    "[sys_log].frontend_vital_retention_days 必须为正整数（天），已回落到 \
+                     [sys_log].frontend_error_retention_days（= 改造前单档行为）"
+                );
+                None
+            }
+        }
+    }
 }
 
 impl fmt::Debug for SysLogConfig {
@@ -1565,6 +1600,10 @@ impl fmt::Debug for SysLogConfig {
             .field(
                 "frontend_error_retention_days",
                 &self.frontend_error_retention_days,
+            )
+            .field(
+                "frontend_vital_retention_days",
+                &self.frontend_vital_retention_days,
             )
             .field(
                 "audit_change_retention_days",
@@ -1584,6 +1623,7 @@ impl Default for SysLogConfig {
             retention_days: default_sys_log_retention_days(),
             retention_mode: default_sys_log_retention_mode(),
             frontend_error_retention_days: default_frontend_error_retention_days(),
+            frontend_vital_retention_days: None,
             audit_change_retention_days: default_audit_change_retention_days(),
             msg_send_log_retention_days: default_msg_send_log_retention_days(),
             retention_catchup_on_start: default_retention_catchup_on_start(),
@@ -3296,6 +3336,52 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[sys_log].frontend_vital_retention_days` 的档位解析（批七十九）。
+    ///
+    /// 四种输入各自钉住一种退化：缺省必须走单档（否则"默认值=现状"不成立）；
+    /// 与错误档相等时必须短路成单档（否则平白多一条 SQL 与一次全表扫）；
+    /// 非法值必须回落而**不能**按 0 或负数档执行——`Duration::days(0)` 的条件是
+    /// "早于此刻"，等于把整表埋点删光。一个笔误的负数造成数据销毁，不是配置不好看。
+    #[test]
+    fn sys_log_frontend_vital_retention_bucket_resolution() {
+        let default = SysLogConfig::default();
+        assert_eq!(
+            default.frontend_vital_retention_days(),
+            None,
+            "缺省必须等价于改造前的单档清理"
+        );
+
+        let same = SysLogConfig {
+            frontend_vital_retention_days: Some(
+                SysLogConfig::default().frontend_error_retention_days,
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            same.frontend_vital_retention_days(),
+            None,
+            "两档取值相同时等价于单档，不必拆成两条删除"
+        );
+
+        let split = SysLogConfig {
+            frontend_vital_retention_days: Some(30),
+            ..Default::default()
+        };
+        assert_eq!(split.frontend_vital_retention_days(), Some(30));
+
+        for invalid in [0i64, -1, -365] {
+            let bad = SysLogConfig {
+                frontend_vital_retention_days: Some(invalid),
+                ..Default::default()
+            };
+            assert_eq!(
+                bad.frontend_vital_retention_days(),
+                None,
+                "非法值 {invalid} 必须回落单档，绝不能按 0/负数条件清表"
+            );
+        }
+    }
 
     /// 构造一个通过校验的基准 Settings（jwt.secret 为合法强密钥），供测试复用
     fn make_test_settings() -> Settings {

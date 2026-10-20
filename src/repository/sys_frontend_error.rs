@@ -14,6 +14,18 @@ use crate::common::sort::SortOrder;
 use crate::entity::sys_frontend_error::{ActiveModel, Column, Entity as SysFrontendError, Model};
 use crate::repository::base::BaseRepository;
 
+/// 保留期清理的来源口径（批七十九：性能采样与错误信号分档保留）
+///
+/// 刻意用枚举而不是 `include: bool`：布尔传反就是把"只清性能采样"执行成
+/// "清掉所有错误日志"，而这类物理删除不可回滚。
+#[derive(Debug, Clone, Copy)]
+pub enum SourceFilter<'a> {
+    /// 仅这些来源
+    Only(&'a [String]),
+    /// 除这些来源之外
+    Except(&'a [String]),
+}
+
 /// 前端异常 Repository
 #[derive(Clone)]
 pub struct SysFrontendErrorRepository {
@@ -151,6 +163,36 @@ impl SysFrontendErrorRepository {
             query = query.filter(Column::TenantId.eq(t));
         }
         query.exec(self.base.db()).await
+    }
+
+    /// 按时间 + 来源集合删除（保留期分档，批七十九），返回受影响行数。
+    ///
+    /// 多租户与其它删除口径同义：`tenant_scope = Some(tid)` → 仅本租户；`None`（平台）→ 不过滤。
+    ///
+    /// 空来源集合直接返回 0 且不执行删除：`IN ()` 是非法 SQL，而 `NOT IN ()` 在多数方言里
+    /// 恒真（会把整表当成"其余"清掉）——两种都比不清更糟，因此在入口拦掉而不是交给查询层。
+    pub async fn delete_older_than_sources(
+        &self,
+        cutoff: NaiveDateTime,
+        tenant_scope: Option<i64>,
+        filter: SourceFilter<'_>,
+    ) -> Result<u64, DbErr> {
+        let sources: &[String] = match filter {
+            SourceFilter::Only(v) | SourceFilter::Except(v) => v,
+        };
+        if sources.is_empty() {
+            return Ok(0);
+        }
+        let mut query = SysFrontendError::delete_many().filter(Column::CreateTime.lt(cutoff));
+        query = match filter {
+            SourceFilter::Only(v) => query.filter(Column::Source.is_in(v.iter().cloned())),
+            SourceFilter::Except(v) => query.filter(Column::Source.is_not_in(v.iter().cloned())),
+        };
+        if let Some(t) = tenant_scope {
+            query = query.filter(Column::TenantId.eq(t));
+        }
+        let result = query.exec(self.base.db()).await?;
+        Ok(result.rows_affected)
     }
 
     /// 按时间范围删除（边界含端点，任一侧可为空）

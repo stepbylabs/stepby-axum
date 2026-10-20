@@ -106,6 +106,43 @@ async fn test_notice_chain() {
         .count();
     assert_eq!(mine, 1, "重复标记后 admin 的已读记录应恰为 1 条，实际: {v}");
 
+    // 6d. **逐行已读态必须由服务端给出**（b79 P3：前端 store 与通知中心一直按
+    //     `row.isRead` 渲染，而 list/listTop 返回的是裸 model ⇒ 该字段从未存在，
+    //     刷新后 readIds 重建为空、全部退回"未读"，与同一时刻服务端算出的
+    //     `unreadCount=0` 互相矛盾。M87 真机取证：markReadAll 返回 200，刷新后仍是「未读」。）
+    let v = ctx
+        .get_json("/system/notice/list?pageNum=1&pageSize=50")
+        .await;
+    let all_rows = v["rows"].as_array().expect("rows 应为数组");
+    let marked = all_rows
+        .iter()
+        .find(|r| r["noticeId"].as_i64() == Some(notice_id))
+        .expect("列表里应能找到刚新增的公告");
+    assert_eq!(
+        marked["isRead"].as_bool(),
+        Some(true),
+        "已标记的公告必须带 isRead=true（字段缺失即为本次缺陷的复现），实际: {marked}"
+    );
+    // 对照组：同一页里**没标记过**的公告必须是 false——否则实现可以是"isRead 恒真"
+    let unmarked: Vec<&serde_json::Value> = all_rows
+        .iter()
+        .filter(|r| {
+            r["noticeId"].as_i64() != Some(notice_id) && r["isRead"].as_bool() == Some(false)
+        })
+        .collect();
+    assert!(
+        !unmarked.is_empty(),
+        "未标记的公告应显示 isRead=false（对照组，防恒真实现），实际页大小={}",
+        all_rows.len()
+    );
+    // 顶部公告同样逐行带已读态（铃铛与通知中心共用同一个 store.readIds 来源）
+    let v = ctx.get_json("/system/notice/listTop").await;
+    let top = v["data"].as_array().expect("listTop data 应为数组");
+    assert!(
+        top.iter().all(|r| r["isRead"].is_boolean()),
+        "listTop 每一行都必须是布尔 isRead，实际: {top:?}"
+    );
+
     // 7. 批量标记已读（Query 参数 ids，逗号分隔）
     let v = ctx
         .post_json(
@@ -123,6 +160,20 @@ async fn test_notice_chain() {
     assert!(
         v["data"].is_number(),
         "markAllUnreadRead 应返回标记条数，实际: {v}"
+    );
+
+    // 8b. "全部已读"之后，列表侧的逐行态必须随之翻转（同一事实源，不得两套口径）
+    let v = ctx
+        .get_json("/system/notice/list?pageNum=1&pageSize=50")
+        .await;
+    let after = v["rows"].as_array().expect("rows 应为数组");
+    assert!(
+        !after.is_empty() && after.iter().all(|r| r["isRead"].as_bool() == Some(true)),
+        "全部标记已读后所有行应为 isRead=true，实际: {:?}",
+        after
+            .iter()
+            .map(|r| (r["noticeId"].clone(), r["isRead"].clone()))
+            .collect::<Vec<_>>()
     );
 
     // 9. 修改通知公告

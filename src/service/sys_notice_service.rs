@@ -9,7 +9,7 @@
 use futures::future::FutureExt;
 use garde::Validate;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
@@ -166,6 +166,27 @@ pub struct NoticeMarkReadDto {
 pub struct NoticeMarkReadAllDto {
     /// 公告 ID 列表（逗号分隔）
     pub ids: String,
+}
+
+/// 公告行视图对象：公告本体 + **当前操作者的已读态**（b79 P3）
+///
+/// 为什么需要这一层：前端 `store/modules/notice.ts` 与 `views/system/notice-center/index.vue`
+/// 一直按 `row.isRead` 渲染未读标签并把已读态合并进共享 store，而 `/system/notice/list`
+/// 与 `/listTop` 返回的是裸 `SysNoticeModel`——**该字段从未存在过**。后果不是"少个字段"，
+/// 而是整条已读链路只在内存里成立：刷新后 `readIds` 由 `listTop.isRead` 重建 ⇒ 空集合 ⇒
+/// 全部退回"未读"，而同一时刻铃铛的 `unreadCount` 是服务端 `count_unread` 算出来的 0，
+/// 两个界面互相矛盾（M87 真机取证：`markReadAll` 返回 200，刷新后行文本仍是「未读」）。
+///
+/// `flatten` 保证既有消费方（按 `noticeId`/`noticeTitle` 取数的页面与测试）零改动，
+/// 新增字段只有 `isRead` 一个。
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeRowVo {
+    /// 公告本体（字段与改造前逐字段等价）
+    #[serde(flatten)]
+    pub notice: SysNoticeModel,
+    /// 当前操作者是否已读该公告（`sys_notice_read` 的 (notice_id, user_id) 行）
+    pub is_read: bool,
 }
 
 // ==================== 辅助函数 ====================
@@ -658,6 +679,59 @@ impl SysNoticeService {
             .find_top_notices(10, crate::common::tenant::tenant_scope(operator_tid))
             .await?;
         Ok(rows)
+    }
+
+    /// 顶部公告 + 当前操作者逐行已读态（`GET /system/notice/listTop` 的实际响应体）
+    pub async fn get_notice_top_with_read(
+        &self,
+        operator_tid: i64,
+        user_id: i64,
+    ) -> Result<Vec<NoticeRowVo>, ServiceError> {
+        let rows = self.get_notice_top(operator_tid).await?;
+        self.attach_read_state(rows, user_id, operator_tid).await
+    }
+
+    /// 分页公告 + 当前操作者逐行已读态（`GET /system/notice/list` 的实际响应体）
+    pub async fn get_notice_page_with_read(
+        &self,
+        query: NoticeQueryDto,
+        operator_tid: i64,
+        user_id: i64,
+    ) -> Result<(Vec<NoticeRowVo>, u64), ServiceError> {
+        let (rows, total) = self.get_notice_page(query, operator_tid).await?;
+        Ok((
+            self.attach_read_state(rows, user_id, operator_tid).await?,
+            total,
+        ))
+    }
+
+    /// 把"这一页里我读过哪些"贴到行上。
+    ///
+    /// 读侧谓词与列表侧**同源**：入参 `rows` 与已读查询套的是**同一个** `tenant_scope(operator_tid)`
+    /// （AGENTS 全局铁律 1：先读后派生写的编排里，读侧与写侧必须共用同一租户谓词），
+    /// 已读查询另用 `notice_id IN (本页)` 把规模钉在页内 ⇒ 一次查询、不可能带回本页之外的公告。
+    async fn attach_read_state(
+        &self,
+        rows: Vec<SysNoticeModel>,
+        user_id: i64,
+        operator_tid: i64,
+    ) -> Result<Vec<NoticeRowVo>, ServiceError> {
+        let ids: Vec<i64> = rows.iter().map(|r| r.notice_id).collect();
+        let read = self
+            .read_repo
+            .find_read_notice_ids_in(
+                user_id,
+                crate::common::tenant::tenant_scope(operator_tid),
+                &ids,
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let is_read = read.contains(&r.notice_id);
+                NoticeRowVo { notice: r, is_read }
+            })
+            .collect())
     }
 
     /// 标记公告已读（已读记录归属随父公告租户）

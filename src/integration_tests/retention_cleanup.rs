@@ -8,7 +8,7 @@
 //! 行（实体 ActiveModel），清理断言按标记行精确核对，不触碰其他数据。
 
 use chrono::{Duration, NaiveDateTime, Utc};
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use super::TestContext;
 
@@ -194,5 +194,176 @@ async fn it_ret_cleanup_writes_last_success_marker() {
         third.as_deref(),
         Some("sentinel"),
         "清理必须覆盖同一个键刷新标记（键名漂移=判定侧永远读不到，会退化成每轮都补跑）"
+    );
+}
+
+// ==================== 批七十九：前端埋点按来源分档保留 ====================
+
+/// 插入一行前端埋点并回改到 N 天前。
+///
+/// 必须回改：`ActiveModelBehavior::before_save` 对 insert 无条件把 create_time 写成当前时间，
+/// 直插指定历史值会被静默覆盖（那样所有"过期"断言都变成"新鲜"，测试恒绿）。
+async fn frontend_error_insert(
+    db: &sea_orm::DatabaseConnection,
+    source: &str,
+    level: &str,
+    name: &str,
+    days_ago: i64,
+    tenant_id: i64,
+) {
+    use crate::entity::sys_frontend_error::{ActiveModel, Column, Entity};
+    let am = ActiveModel {
+        id: sea_orm::ActiveValue::NotSet,
+        tenant_id: Set(tenant_id),
+        level: Set(level.to_string()),
+        source: Set(source.to_string()),
+        name: Set(Some(name.to_string())),
+        message: Set(Some("it-retention-probe".to_string())),
+        stack: Set(None),
+        page_url: Set(None),
+        user_agent: Set(None),
+        device_type: Set(None),
+        view_width: Set(None),
+        view_height: Set(None),
+        value: Set(None),
+        user_name: Set(None),
+        create_time: Set(None),
+    };
+    let saved = am.insert(db).await.expect("插入前端埋点行应成功");
+    let past = now_naive() - Duration::days(days_ago);
+    Entity::update_many()
+        .col_expr(Column::CreateTime, sea_orm::sea_query::Expr::value(past))
+        .filter(Column::Id.eq(saved.id))
+        .exec(db)
+        .await
+        .expect("回写历史时间应成功");
+}
+
+/// 按名字前缀取回本测试自己插的行（不触碰隔离库里的其它数据）
+async fn frontend_error_names(db: &sea_orm::DatabaseConnection, prefix: &str) -> Vec<String> {
+    use crate::entity::sys_frontend_error::{Column, Entity};
+    Entity::find()
+        .filter(Column::Name.like(format!("{prefix}%")))
+        .all(db)
+        .await
+        .expect("查询前端埋点行应成功")
+        .into_iter()
+        .filter_map(|r| r.name)
+        .collect()
+}
+
+/// 分档生效：采样按 30 天保留、错误按 7 天清，**走调度体的真实分派路径**。
+///
+/// 为什么值得单锁：两档的选择发生在 `SysLogConfig::frontend_vital_retention_days()`
+/// （含"与错误档相等就不分档"的短路）。写反的后果是"配置显示 30 天、数据按 7 天删"——
+/// 没有任何日志或错误会提示，运维只能在基线消失后事后发现。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_ret_frontend_vital_split_keeps_vitals_longer() {
+    let ctx = TestContext::new().await;
+    let db = ctx.state.db.clone();
+    let marker = "it-ret-vsplit";
+    frontend_error_insert(&db, "vital", "info", &format!("{marker}-vital"), 20, 0).await;
+    frontend_error_insert(&db, "api", "error", &format!("{marker}-error"), 20, 0).await;
+
+    let mut cfg = (*ctx.state.config).clone();
+    cfg.sys_log.frontend_error_retention_days = 7;
+    cfg.sys_log.frontend_vital_retention_days = Some(30);
+    crate::scheduler::run_cleanup_expired_logs(db.clone(), &cfg, None, ctx.state.store.clone())
+        .await
+        .expect("分档清理必须执行成功");
+
+    let names = frontend_error_names(&db, marker).await;
+    assert!(
+        names.contains(&format!("{marker}-vital")),
+        "20 天前的性能采样在 30 天档下必须幸存，实际残留: {names:?}"
+    );
+    assert!(
+        !names.contains(&format!("{marker}-error")),
+        "20 天前的错误埋点在 7 天档下必须被清（分档不得把错误信号也一起留着），实际: {names:?}"
+    );
+}
+
+/// 未配第二档 = 与改造前逐行等价（两类来源都按错误档清）。
+///
+/// 这是"默认值=现状"的可证伪单测：若 None 分支误走了 `Except(vital)`，采样会被留下；
+/// 若误走了 `Only(vital)`，错误信号会被留下。两种退化都只在这一条里能被发现。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_ret_frontend_vital_default_is_single_bucket() {
+    let ctx = TestContext::new().await;
+    let db = ctx.state.db.clone();
+    let marker = "it-ret-vsingle";
+    frontend_error_insert(&db, "vital", "info", &format!("{marker}-vital"), 20, 0).await;
+    frontend_error_insert(&db, "api", "error", &format!("{marker}-error"), 20, 0).await;
+
+    let mut cfg = (*ctx.state.config).clone();
+    cfg.sys_log.frontend_error_retention_days = 7;
+    cfg.sys_log.frontend_vital_retention_days = None;
+    crate::scheduler::run_cleanup_expired_logs(db.clone(), &cfg, None, ctx.state.store.clone())
+        .await
+        .expect("单档清理必须执行成功");
+
+    let names = frontend_error_names(&db, marker).await;
+    assert!(
+        names.is_empty(),
+        "缺省档必须与改造前一致：两类来源都按 7 天清光，实际残留: {names:?}"
+    );
+}
+
+/// 采样档比错误档短时同样成立（分档不是"只许更长"的单向开关）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_ret_frontend_vital_split_can_keep_vitals_shorter() {
+    let ctx = TestContext::new().await;
+    let db = ctx.state.db.clone();
+    let marker = "it-ret-vshort";
+    frontend_error_insert(&db, "vital", "info", &format!("{marker}-vital"), 5, 0).await;
+    frontend_error_insert(&db, "resource", "warning", &format!("{marker}-error"), 5, 0).await;
+
+    let svc = crate::service::sys_frontend_error_service::SysFrontendErrorService::new(db.clone());
+    let (vitals, others) = svc
+        .clean_split_vital(3, 7, None)
+        .await
+        .expect("分档清理应成功");
+    let names = frontend_error_names(&db, marker).await;
+    assert_eq!(vitals, 1, "5 天前的采样在 3 天档下应删 1 条，实际 {vitals}");
+    assert_eq!(
+        others, 0,
+        "5 天前的非采样行在 7 天档下不应被删，实际 {others}"
+    );
+    assert_eq!(names, vec![format!("{marker}-error")], "只剩非采样行");
+}
+
+/// 多租户：`tenant_scope` 在分档路径上仍然是硬边界（铁律一）。
+///
+/// 两档删除都带同一个租户谓词；漏掉一个就是"租户 A 的清理动作删到租户 B 的数据"。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_ret_frontend_vital_split_respects_tenant_scope() {
+    let ctx = TestContext::new().await;
+    let db = ctx.state.db.clone();
+    let marker = "it-ret-vtenant";
+    frontend_error_insert(&db, "vital", "info", &format!("{marker}-t1-vital"), 20, 1).await;
+    frontend_error_insert(&db, "api", "error", &format!("{marker}-t1-error"), 20, 1).await;
+    frontend_error_insert(&db, "vital", "info", &format!("{marker}-t2-vital"), 20, 2).await;
+    frontend_error_insert(&db, "api", "error", &format!("{marker}-t2-error"), 20, 2).await;
+
+    let svc = crate::service::sys_frontend_error_service::SysFrontendErrorService::new(db.clone());
+    let (vitals, others) = svc
+        .clean_split_vital(7, 7, Some(1))
+        .await
+        .expect("本租户分档清理应成功");
+    assert_eq!(
+        vitals + others,
+        2,
+        "只应清掉租户 1 的两行，实际 {vitals}+{others}"
+    );
+
+    let names = frontend_error_names(&db, marker).await;
+    assert!(
+        names.contains(&format!("{marker}-t2-vital"))
+            && names.contains(&format!("{marker}-t2-error")),
+        "租户 2 的行必须一条不动，实际: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("-t1-")),
+        "租户 1 的两行都应被清掉，实际: {names:?}"
     );
 }

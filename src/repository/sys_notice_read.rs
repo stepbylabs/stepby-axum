@@ -6,6 +6,7 @@
 use chrono::NaiveDateTime;
 use sea_orm::*;
 use serde::Serialize;
+use std::collections::HashSet;
 use utoipa::ToSchema;
 
 use crate::entity::sys_notice_read::{ActiveModel, Column, Entity as SysNoticeRead, Model};
@@ -258,6 +259,37 @@ impl SysNoticeReadRepository {
         tenant_scope: Option<i64>,
     ) -> Result<Vec<i64>, DbErr> {
         let mut q = SysNoticeRead::find().filter(Column::UserId.eq(user_id));
+        if let Some(tid) = tenant_scope {
+            q = q.filter(Column::TenantId.eq(tid));
+        }
+        let rows: Vec<Model> = q.all(self.base.db()).await?;
+        Ok(rows.into_iter().map(|r| r.notice_id).collect())
+    }
+
+    /// 查询"这批公告里，当前用户已读了哪些"（b79 P3：列表/顶部公告的逐行已读态）
+    ///
+    /// 与 `find_read_notice_ids` 的差别是**收敛边界**：后者按用户拉全量已读 ID，
+    /// 只能用于"跨页全部已读"这类一次性后台动作；列表接口每页最多 100 行，
+    /// 用 `IN (本页 ID)` 把查询钉在页规模内，避免热路径随用户历史已读数线性膨胀。
+    ///
+    /// 多租户：`tenant_scope` 与同屏的 `count_unread`（铃铛未读数）**同一个谓词、同一张表**——
+    /// 两者若一方按操作者租户、另一方不按，同一屏上就会出现"角标说 0 未读、行却全显示未读"
+    /// 的自相矛盾（b79 P3 立案的原始症状正是这种矛盾）。写侧 `mark_read` 落的是
+    /// **父公告的 `tenant_id`**（`sys_notice_service.rs:749`），而列表侧公告本身已由
+    /// `tenant_scope(operator_tid)` 筛过，故租户操作者可见公告的读记录恒等于其操作者租户；
+    /// 平台操作者（`tenant_id=0` ⇒ `tenant_scope` 返回 `None`）两侧都不加过滤，代管视角照常。
+    pub async fn find_read_notice_ids_in(
+        &self,
+        user_id: i64,
+        tenant_scope: Option<i64>,
+        notice_ids: &[i64],
+    ) -> Result<HashSet<i64>, DbErr> {
+        if notice_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut q = SysNoticeRead::find()
+            .filter(Column::UserId.eq(user_id))
+            .filter(Column::NoticeId.is_in(notice_ids.iter().copied()));
         if let Some(tid) = tenant_scope {
             q = q.filter(Column::TenantId.eq(tid));
         }

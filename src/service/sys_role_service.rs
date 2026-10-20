@@ -553,6 +553,23 @@ impl SysRoleService {
     }
 
     /// 新增角色（事务：插入角色 + 批量插入菜单关联）
+    /// 写入侧数据范围档位守卫（`add_role` / `edit_role` / `update_data_scope` 三条路径共用）。
+    ///
+    /// 判据单一事实源 = [`crate::common::data_scope::is_valid_data_scope`]。读取侧的 `_ =>` 兜底
+    /// 只保证"不越权"，不保证"显示与行为一致"：非法档位若允许落库，管理端显示 `9`、
+    /// 实际过滤却是"本部门"，且 `min_data_scope` 取最小值会让 `0` 覆盖同用户其他角色的合法档。
+    /// `None` = 新增缺省 / 编辑不改，由调用方回落 `"1"`，此处不判。
+    fn ensure_data_scope(raw: Option<&String>) -> Result<(), ServiceError> {
+        if let Some(v) = raw
+            && !crate::common::data_scope::is_valid_data_scope(v)
+        {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.role.data_scope_invalid"
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn add_role(
         &self,
         dto: RoleAddDto,
@@ -560,6 +577,7 @@ impl SysRoleService {
         operator_tid: i64,
     ) -> Result<SysRoleModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        Self::ensure_data_scope(dto.data_scope.as_ref())?;
 
         // role_key 查重（**租户内唯一**，与唯一索引 uk_sys_role_tenant_key 语义对齐，台账 P0-3）：
         // 查重范围 = 角色归属租户（新角色归属操作者租户，见下方 am.tenant_id），
@@ -669,6 +687,7 @@ impl SysRoleService {
         operator_tid: i64,
     ) -> Result<SysRoleModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        Self::ensure_data_scope(dto.data_scope.as_ref())?;
 
         // 查询角色是否存在
         let existing = self
@@ -1123,6 +1142,7 @@ impl SysRoleService {
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        Self::ensure_data_scope(Some(&dto.data_scope))?;
 
         // 超管保护
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
