@@ -180,6 +180,25 @@
   页状态判据自检、逐条 verdict 差集、测试数据态审计、出站请求密度棘轮、写端点触达对账）全部接入
   `run-gates.py` 与 `preflight-check.sh §7`；判据自身均带合成双向用例与变异证伪凭证
 
+### 升级指引
+
+- **数据库**：迁移全部前向，且本版起具备回滚通道
+  `DATABASE_URL=<连接串> cargo run -p migration -- --down [步数]`（逐条步进，未知 flag 退出码 2）；
+  启动期 `ensure_*` 兜底只补缺失项，不覆盖管理员调过的值。
+- **新增配置键（默认值 = 现状，存量部署零行为变化）**：`[health].external_probes = "off"`（off 档
+  `/health` 响应体与 0.2.0 逐字段等价）、`[sys_log].frontend_vital_retention_days`（缺省与错误日志
+  同一谓词）、`[sys_log].retention_catchup_on_start = true`（删除幂等，漏跑补偿）。
+- **两处"默认即新行为"需要知晓**：`[server].max_uri_bytes = 16384`——超长请求行/查询串现在返回 414
+  而不再无声通过（写 `0` 可显式关闭）；`[ai].max_concurrency = 4`——AI 推理闸满立即
+  429 + `Retry-After`（`/ai/chat` 与 `/ai/replay` 共用同一道闸）。
+- **`sys_rate_limit` 行数增加**：敏感操作档位共 56 条，播种只补缺失 `route_pattern`，
+  管理员已调过的值不被覆盖。
+- **`common` 角色（role_id=2）的越权写权限由窄撤销迁移收回**：此前多批习惯性发放的写按钮已按
+  `governance::COMMON_ROLE_*` 单一判据回收；依赖这些按钮的自定义角色需管理员重新授权
+  （回收语句只挂在一次性迁移上，启动兜底不再回收）。
+- **前端构建要求 Node ≥ 22.13**（`engines` + `engine-strict`），CI 与 Dockerfile 统一 Node 22、
+  pnpm 11；低于该版本会在安装期直接 fail-fast 而不是留下看不懂的原生模块错误。
+
 ## [0.2.0] - 2026-10-12
 
 自 0.1.0 开源基线以来的累计发布：审批工作流引擎深化、AI 问数助手、可视化大屏、
