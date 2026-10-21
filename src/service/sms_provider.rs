@@ -126,23 +126,40 @@ pub trait SmsProvider: Send + Sync {
     }
 }
 
+/// 出站客户端取出：构建失败（宿主缺系统信任库且内嵌根证书也不可用）时以**请求期错误**
+/// 呈现给上层重试链，而不是在构造期炸掉进程。判据来源见 [`crate::common::outbound_client`]
+/// （批八十一：v0.3.0 冒烟在 debian:*-slim 上实测照出的启动期 panic）。
+fn http_of<'a>(
+    http: &'a Option<reqwest::Client>,
+    label: &str,
+) -> Result<&'a reqwest::Client, String> {
+    http.as_ref()
+        .ok_or_else(|| format!("{label} 出站不可用：宿主缺少系统信任库且内嵌根证书不可用"))
+}
+
 /// 通用 HTTP 网关 Provider（首版内置）
 ///
 /// 契约：`POST {gateway_url}`，JSON body = `{phone_field, content_field, ...extra_fields}`，
 /// 可选鉴权头 `auth_header: auth_value`。2xx 视为投递受理成功。
 pub struct GenericHttpProvider {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
 }
 
 impl GenericHttpProvider {
     pub fn new() -> Self {
         Self {
-            // §5.35（B.6 超时铁律）：出站必带超时，防网关无响应挂死 worker
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("sms http client 构建失败（不可恢复的编程错误）"),
+            http: crate::common::outbound_client::build(
+                "sms:generic",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(15),
+            )
+            .map(Some)
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    "sms:generic 出站 http client 构建失败，本条短信按发送失败进入重试链: {e}"
+                );
+                None
+            }),
         }
     }
 }
@@ -161,8 +178,8 @@ impl SmsProvider for GenericHttpProvider {
         phone: &str,
         content: &str,
     ) -> Result<String, String> {
-        let mut req = self
-            .http
+        let http = http_of(&self.http, "sms")?;
+        let mut req = http
             .post(&cfg.gateway_url)
             .json(&cfg.build_body(phone, content));
         if !cfg.auth_header.is_empty() {
@@ -334,17 +351,24 @@ fn pop_encode(s: &str) -> String {
 
 /// 阿里云短信 Provider（Dysmsapi RPC 签名，真实 HTTP）
 pub struct AliyunSmsProvider {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
 }
 
 impl AliyunSmsProvider {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("aliyun sms http client 构建失败（不可恢复的编程错误）"),
+            http: crate::common::outbound_client::build(
+                "sms:aliyun",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(15),
+            )
+            .map(Some)
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    "sms:aliyun 出站 http client 构建失败，本条短信按发送失败进入重试链: {e}"
+                );
+                None
+            }),
         }
     }
 
@@ -394,8 +418,8 @@ impl AliyunSmsProvider {
         let signature = Self::sign(&params_list, &cfg.access_key_secret);
         params_list.push(("Signature".into(), signature));
 
-        let resp = self
-            .http
+        let http = http_of(&self.http, "sms:aliyun")?;
+        let resp = http
             .post(&cfg.endpoint)
             .form(&params_list)
             .send()
@@ -438,17 +462,24 @@ impl Default for AliyunSmsProvider {
 
 /// 腾讯云短信 Provider（TC3-HMAC-SHA256 签名，真实 HTTP）
 pub struct TencentSmsProvider {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
 }
 
 impl TencentSmsProvider {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("tencent sms http client 构建失败（不可恢复的编程错误）"),
+            http: crate::common::outbound_client::build(
+                "sms:tencent",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(15),
+            )
+            .map(Some)
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    "sms:tencent 出站 http client 构建失败，本条短信按发送失败进入重试链: {e}"
+                );
+                None
+            }),
         }
     }
 
@@ -534,8 +565,8 @@ impl TencentSmsProvider {
             cfg.access_key_id, date
         );
 
-        let resp = self
-            .http
+        let http = http_of(&self.http, "sms:tencent")?;
+        let resp = http
             .post(&cfg.endpoint)
             .header("Content-Type", "application/json; charset=utf-8")
             .header("Host", &host)
@@ -686,7 +717,7 @@ mod tests {
         )))
         .unwrap();
         let provider = AliyunSmsProvider {
-            http: local_client(),
+            http: Some(local_client()),
         };
         let biz = provider
             .send_templated(
@@ -780,7 +811,7 @@ mod tests {
         )))
         .unwrap();
         let provider = TencentSmsProvider {
-            http: local_client(),
+            http: Some(local_client()),
         };
         let req_id = provider
             .send_templated(
@@ -916,7 +947,7 @@ mod tests {
         )))
         .unwrap();
         let provider = GenericHttpProvider {
-            http: local_client(),
+            http: Some(local_client()),
         };
         let result = provider.send(&cfg, "13800000000", "您好").await.unwrap();
         assert!(result.contains("HTTP 200"), "result={result}");
@@ -951,7 +982,7 @@ mod tests {
         )))
         .unwrap();
         let provider = GenericHttpProvider {
-            http: local_client(),
+            http: Some(local_client()),
         };
         let err = provider.send(&cfg, "138", "x").await.unwrap_err();
         assert!(err.contains("500"), "err={err}");

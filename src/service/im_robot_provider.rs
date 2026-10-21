@@ -125,8 +125,19 @@ fn parse_errcode(body: &str) -> Result<(), String> {
 }
 
 /// 企业微信群机器人 Provider
+/// 出站客户端取出：构建失败（宿主缺系统信任库且内嵌根证书也不可用）时以**请求期错误**
+/// 呈现给重试链，而不是在构造期炸掉进程。判据来源见 [`crate::common::outbound_client`]
+/// （批八十一：v0.3.0 冒烟在 debian:*-slim 上实测照出的启动期 panic 同族）。
+fn http_of<'a>(
+    http: &'a Option<reqwest::Client>,
+    label: &str,
+) -> Result<&'a reqwest::Client, String> {
+    http.as_ref()
+        .ok_or_else(|| format!("{label} 出站不可用：宿主缺少系统信任库且内嵌根证书不可用"))
+}
+
 pub struct WeComRobotProvider {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
 }
 
 impl Default for WeComRobotProvider {
@@ -138,17 +149,23 @@ impl Default for WeComRobotProvider {
 impl WeComRobotProvider {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("reqwest Client 构建不变量（合法 builder 参数）"),
+            http: crate::common::outbound_client::build(
+                "im_robot:wecom",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
+            )
+            .map(Some)
+            .unwrap_or_else(|e| {
+                tracing::error!("im_robot:wecom 出站 http client 构建失败，本条机器人消息按发送失败进入重试链: {e}");
+                None
+            }),
         }
     }
 
     /// 投递 text 消息。成功 Ok(())；HTTP 失败 / errcode != 0 均 Err（交由重试链）
     pub async fn send(&self, cfg: &ImRobotConfig, content: &str) -> Result<(), String> {
-        let resp = self
-            .http
+        let http = http_of(&self.http, "im_robot:wecom")?;
+        let resp = http
             .post(&cfg.webhook_url)
             .json(&build_robot_body(content))
             .send()
@@ -168,7 +185,7 @@ impl WeComRobotProvider {
 
 /// 钉钉自定义机器人 Provider
 pub struct DingTalkRobotProvider {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
 }
 
 impl Default for DingTalkRobotProvider {
@@ -180,10 +197,16 @@ impl Default for DingTalkRobotProvider {
 impl DingTalkRobotProvider {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("reqwest Client 构建不变量（合法 builder 参数）"),
+            http: crate::common::outbound_client::build(
+                "im_robot:dingtalk",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
+            )
+            .map(Some)
+            .unwrap_or_else(|e| {
+                tracing::error!("im_robot:dingtalk 出站 http client 构建失败，本条机器人消息按发送失败进入重试链: {e}");
+                None
+            }),
         }
     }
 
@@ -199,8 +222,8 @@ impl DingTalkRobotProvider {
             }
             None => cfg.webhook_url.clone(),
         };
-        let resp = self
-            .http
+        let http = http_of(&self.http, "im_robot:dingtalk")?;
+        let resp = http
             .post(url)
             .json(&build_robot_body(content))
             .send()
@@ -333,7 +356,7 @@ mod tests {
         )))
         .unwrap();
         WeComRobotProvider {
-            http: local_client(),
+            http: Some(local_client()),
         }
         .send(&cfg, "审批待办：e2e")
         .await
@@ -375,7 +398,7 @@ mod tests {
         )))
         .unwrap();
         let err = WeComRobotProvider {
-            http: local_client(),
+            http: Some(local_client()),
         }
         .send(&cfg, "x")
         .await
@@ -418,7 +441,7 @@ mod tests {
         )))
         .unwrap();
         DingTalkRobotProvider {
-            http: local_client(),
+            http: Some(local_client()),
         }
         .send(&cfg, "钉钉待办")
         .await

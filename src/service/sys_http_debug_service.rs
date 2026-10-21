@@ -110,7 +110,12 @@ pub struct HttpDebugVo {
 /// 在线 HTTP 调试器 Service
 pub struct SysHttpDebugService {
     /// 出站 HTTP 客户端：禁自动重定向（由 `execute` 手动逐跳跟随并做 SSRF 校验）
-    http: reqwest::Client,
+    ///
+    /// Option 的原因与终态处理见 [`crate::common::outbound_client`]（批八十一：
+    /// 宿主没有系统信任库时构造会失败，这不是编程错误，不该炸掉调用它的请求）。
+    /// 取不到时按**传输失败**回 `HttpDebugVo::transport_error`——这个功能本来就是
+    /// "帮人看一次出站请求为什么不成"，缺信任库正是它该如实报告的一种。
+    http: Option<reqwest::Client>,
 }
 
 impl Default for SysHttpDebugService {
@@ -122,13 +127,17 @@ impl Default for SysHttpDebugService {
 impl SysHttpDebugService {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                // 连接被拒等快速失败；TLS 校验默认开启（rustls）
-                .connect_timeout(Duration::from_secs(10))
-                .user_agent("stepby-http-debugger/1.0")
-                .build()
-                .expect("reqwest client 初始化失败"),
+            http: crate::common::outbound_client::build_with("http_debug", |b| {
+                b.redirect(reqwest::redirect::Policy::none())
+                    // 连接被拒等快速失败；TLS 校验默认开启（rustls）
+                    .connect_timeout(Duration::from_secs(10))
+                    .user_agent("stepby-http-debugger/1.0")
+            })
+            .map(Some)
+            .unwrap_or_else(|e| {
+                tracing::error!("http 调试器出站 client 构建失败: {e}");
+                None
+            }),
         }
     }
 
@@ -167,6 +176,17 @@ impl SysHttpDebugService {
         // 组成部分，拆成多笔会让"链上第 3 跳被 SSRF 挡下"混进总量）；结局在响应体读完后
         // 才判成功，因此传输失败、构建失败、链中拒绝、体读取失败一律记 `error`。
         // 参数/SSRF 预校验阶段的拒绝**不计数**（那时还没有出网）。
+        // 缺客户端同理归在"预校验"侧：一次都没发出去，记成 error 会把部署态问题混进出站故障率。
+        let Some(http) = self.http.as_ref() else {
+            return Ok(HttpDebugVo::transport_error(
+                format!(
+                    "{}{}",
+                    pick("请求发送失败：", "Request failed: "),
+                    "宿主缺少系统信任库且内嵌根证书不可用"
+                ),
+                Instant::now(),
+            ));
+        };
         let mut outbound = crate::observability::metrics::OutboundGuard::start("http_debug");
         let start = Instant::now();
         let mut redirected: u32 = 0;
@@ -175,8 +195,7 @@ impl SysHttpDebugService {
         loop {
             // 说明：reqwest 的 RequestBuilder 是一次性消费形态，因此这里每跳重建请求并重放
             // 自定义头与 body（重定向下跳仍需保留用户头，故不能在首次构建时固化）。
-            let mut rb = self
-                .http
+            let mut rb = http
                 .request(
                     reqwest::Method::from_bytes(current_method.as_bytes()).expect("method 已校验"),
                     base_url.as_str(),
@@ -200,7 +219,7 @@ impl SysHttpDebugService {
                 }
             };
 
-            response = match self.http.execute(req).await {
+            response = match http.execute(req).await {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(HttpDebugVo::transport_error(

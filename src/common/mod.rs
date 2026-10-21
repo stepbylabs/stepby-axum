@@ -18,6 +18,8 @@ pub mod flow_graph;
 pub mod http_status;
 pub mod i18n;
 pub mod image;
+// 出站 HTTP 客户端构造的单一事实源（系统信任库缺失时回落内嵌根证书，构造期绝不 panic）
+pub mod outbound_client;
 pub mod page;
 // 形状锁共用的生产码采集器：**只在测试构建存在**（`pub(crate)` 供各锁模块的 tests 使用）。
 // 采集口径（`#[cfg(test)]` 截断、注释行处理、自豁免、体量下限）收在这一个文件里，
