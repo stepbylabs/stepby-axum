@@ -26,7 +26,7 @@
 //! **reqwest 自己那份** `rustls::ClientConfig`。类型不同版本 ⇒ 不认识 ⇒ 退化成
 //! `TlsBackend::UnknownPreconfigured`（构造期不报错，第一次 TLS 握手才失败）。所以
 //! `rustls` / `webpki-roots` 显式写进 Cargo.toml，并由
-//! [`fallback_client_builds`] 在构造期判住，而不是赌版本对齐。
+//! `fallback_client_builds`（本文件 `#[cfg(test)]` 用例，rustdoc 链不到私有 test 项）在构造期判住，而不是赌版本对齐。
 
 use std::time::Duration;
 

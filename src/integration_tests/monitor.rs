@@ -12,7 +12,7 @@
 //! - admin 是超管（`*:*:*`），所有受保护端点均可访问。
 //! - 不依赖本地日志文件是否存在：日志文件列表只断言响应结构，错误分支选确定性路径。
 
-use super::TestContext;
+use super::{TestContext, login};
 use axum::http::{Method, StatusCode};
 
 /// 缓存监控全链路：概览 → 名称列表 → 键列表 → 值 → 清理。
@@ -198,6 +198,168 @@ async fn test_online_users_list_and_force_logout() {
         StatusCode::NOT_FOUND,
         "强退不存在会话应 404，实际: {status}"
     );
+}
+
+/// 自助会话入口的属主隔离（b82）：`GET /monitor/my-session/list` 只返回本人会话。
+///
+/// 缺陷原形：该端点把 `userName` 改写成操作人用户名后，复用管理员列表的 `contains` 模糊
+/// 匹配 ⇒ 短名账号（`it_adm`）能在「我的登录设备」里看到长名账号（`it_admx`）的会话，
+/// 连带暴露对方实时 `tokenId`、内网 IP、浏览器与登录时刻。`DELETE my-session/{hash}`
+/// 有 user_id 属主校验拦着，所以是**信息泄漏**而非冒用——但展示层与写层判定口径不一致
+/// 本身就是铁律 1 说的"散落两处必然漂移"。
+///
+/// 判据三侧（缺一即虚锁）：
+/// ① 泄漏方向：短名账号的自助列表不得出现任何非本人行；
+/// ② **正控**：两条夹具会话必须先在管理员视图里同时在线——否则 ① 靠"列表本来就空"蒙绿；
+/// ③ 对照组 + 写侧：长名账号同样只看得到自己，且短名账号借自助入口踢长名会话仍 403。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_my_session_list_is_owner_exact() {
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::SocketAddr;
+
+    let ctx = TestContext::new().await;
+
+    let bearer_get = |bearer: &str, uri: &str| {
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("authorization", format!("Bearer {bearer}"))
+            .body(Body::empty())
+            .expect("构造请求失败");
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
+        req
+    };
+
+    // 夹具：两个用户名互为前缀的普通用户（role_id=2 已关联全部菜单种子）
+    for (idx, uname) in ["it_adm", "it_admx"].iter().enumerate() {
+        let v = ctx
+            .post_json(
+                "/system/user",
+                serde_json::json!({
+                    "deptId": 103,
+                    "userName": uname,
+                    "nickName": format!("属主隔离夹具{}", idx),
+                    "email": "stepby@tzkj.net",
+                    "phonenumber": format!("1380000611{}", idx),
+                    "sex": "0",
+                    "password": "Stepby@12345",
+                    "status": "0",
+                    "roleIds": [2]
+                }),
+            )
+            .await;
+        ctx.assert_ok(&v);
+    }
+    let adm_token = login(&ctx.app, ctx.peer_ip, "it_adm", "Stepby@12345").await;
+    let admx_token = login(&ctx.app, ctx.peer_ip, "it_admx", "Stepby@12345").await;
+    assert!(
+        !adm_token.is_empty() && !admx_token.is_empty(),
+        "两条夹具登录都应拿到 token"
+    );
+
+    // ② 正控：管理员视图（contains 搜索，本来就该同时命中两条）证明会话确实都在线
+    let v = ctx.get_json("/monitor/online/list?userName=it_adm").await;
+    let online_names: Vec<String> = v["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r["userName"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(
+        online_names.contains(&"it_adm".to_string())
+            && online_names.contains(&"it_admx".to_string()),
+        "正控失败：两条夹具会话未同时在线，后续『看不到』不成立，实际: {online_names:?}"
+    );
+
+    // ① 短名账号的自助列表：本人必须在列，且一行他人都不许有
+    let (status, v) = ctx
+        .send_raw(bearer_get(&adm_token, "/monitor/my-session/list"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "自助列表应 200，实际: {v}");
+    let adm_rows = v["rows"].as_array().cloned().unwrap_or_default();
+    assert!(
+        adm_rows
+            .iter()
+            .any(|r| r["userName"].as_str() == Some("it_adm")),
+        "本人会话必须在列（不得靠空列表蒙绿），实际: {v}"
+    );
+    let leaked: Vec<String> = adm_rows
+        .iter()
+        .filter(|r| r["userName"].as_str() != Some("it_adm"))
+        .map(|r| r["userName"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "自助列表混入他人会话（前缀同名泄漏）: {leaked:?}"
+    );
+
+    // ③ 对照组：长名账号同样只看得到自己（把它的 tokenHash 摘出来给下一步用）
+    let (_, v2) = ctx
+        .send_raw(bearer_get(&admx_token, "/monitor/my-session/list"))
+        .await;
+    let admx_rows = v2["rows"].as_array().cloned().unwrap_or_default();
+    let admx_foreign: Vec<String> = admx_rows
+        .iter()
+        .filter(|r| r["userName"].as_str() != Some("it_admx"))
+        .map(|r| r["userName"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        admx_foreign.is_empty(),
+        "长名账号的自助列表混入他人会话: {admx_foreign:?}"
+    );
+    let admx_hash = admx_rows
+        .iter()
+        .find(|r| r["userName"].as_str() == Some("it_admx"))
+        .and_then(|r| r["tokenId"].as_str())
+        .expect("长名账号应能看到自己的会话行")
+        .to_string();
+
+    // ④ 写侧不变宽：借自助入口踢他人会话必须 403（属主校验不得随展示层修复被放宽）
+    let del_req = {
+        let mut req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/monitor/my-session/{admx_hash}"))
+            .header("authorization", format!("Bearer {adm_token}"))
+            .body(Body::empty())
+            .expect("构造请求失败");
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
+        req
+    };
+    let (status, v) = ctx.send_raw(del_req).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "踢他人会话必须 403，实际: {status} {v}"
+    );
+
+    // 收尾：长名会话自助注销自己 ⇒ 200，且再用它请求 ⇒ 401（自助语义可用）
+    let (status, v) = ctx
+        .send_raw({
+            let mut req = Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/monitor/my-session/{admx_hash}"))
+                .header("authorization", format!("Bearer {admx_token}"))
+                .body(Body::empty())
+                .expect("构造请求失败");
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
+            req
+        })
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "本人注销自己的会话应 200，实际: {v}"
+    );
+    let (status, _) = ctx
+        .send_raw(bearer_get(&admx_token, "/monitor/my-session/list"))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "注销后该令牌再请求应 401");
 }
 
 /// 服务器信息端点（sysinfo 采集，只断言结构存在性）。

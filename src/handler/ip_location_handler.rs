@@ -221,6 +221,40 @@ pub async fn update_now(
 ) -> Result<AjaxResult<UpdateResult>, AppError> {
     let force_source = query.source.filter(|s| !s.is_empty());
 
+    // 入参闸门排在抢锁与下载之前（b82，两处都是实测缺陷）：
+    // ① 非法 `source` 原先一路送进 service 的 `anyhow` ⇒ HTTP 500「系统内部错误，请联系管理员」，
+    //    而兄弟端点 `PUT /config` 对同一个值给的是 400 + 可读文案——同一个参数两套契约，
+    //    运维看到 500 会去翻服务端日志，而不是改自己写错的 URL（违反 C.8 错误响应契约统一）；
+    // ② `maxmind` 缺凭据属"配置没填"这一类调用方可自行修复的前置条件，同样不该以 500 呈现，
+    //    更不该为一次注定失败的请求先抢走 10 分钟的更新锁。
+    // 归一化口径与 `save_config` 一致（小写比较），避免"配置认得、更新不认"的分裂行为。
+    let cfg = state.ip_location_service.read_config().await?;
+    let effective_source = match force_source.as_deref() {
+        Some(raw) => {
+            let norm = raw.to_lowercase();
+            if norm != "maxmind" && norm != "p3terx" {
+                return Err(AppError::bad_request(&crate::tr!(
+                    "error.ip_location.source_invalid"
+                )));
+            }
+            norm
+        }
+        None => cfg.update_source.clone(),
+    };
+    if effective_source == "maxmind"
+        && (cfg.maxmind_account_id.is_empty() || cfg.maxmind_license_key.is_empty())
+    {
+        return Err(AppError::bad_request(&crate::tr!(
+            "error.ip_location.maxmind_credentials_required"
+        )));
+    }
+    // 仅在需要覆盖默认源时把归一化后的值传下去（缺省仍由 service 读配置，行为不变）
+    let force_source = if force_source.is_some() {
+        Some(effective_source.as_str())
+    } else {
+        None
+    };
+
     tracing::info!(
         "IP 库更新触发：operator={}, force_source={:?}",
         operator.username(),
@@ -242,10 +276,7 @@ pub async fn update_now(
         )));
     };
 
-    let result = state
-        .ip_location_service
-        .update_now(force_source.as_deref())
-        .await;
+    let result = state.ip_location_service.update_now(force_source).await;
 
     // 释放锁（CAS：仅当 fencing token 匹配时删除；best-effort）
     if let Err(e) = state.store.lock_release(&lock_handle).await {

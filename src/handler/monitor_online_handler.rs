@@ -111,6 +111,34 @@ pub async fn list(
     operator: Operator,
     Query(query): Query<OnlineQueryDto>,
 ) -> Result<TableDataInfo<SysUserOnline>, AppError> {
+    list_sessions(&state, operator.tenant_id(), &query, None).await
+}
+
+/// 自助入口（`/monitor/my-session/*`）的**属主约束**。
+///
+/// 旧实现把 `query.user_name` 改写成操作人用户名后复用管理员列表的 `contains` 模糊匹配，
+/// 于是"用户名是他人前缀"的账号在「我的登录设备」里能看到**他人**会话（含实时 tokenId、
+/// 内网 IP、浏览器、登录时刻）——tokenId 虽不足以冒用，但把别人的活跃会话暴露给同租户
+/// 乃至平台外的低权账号，属归属判定散落的必然漂移。
+///
+/// 判据按 `user_id` 精确匹配；降级路径（sys_logininfor 不带 user_id 列）按用户名**精确**
+/// 匹配。**两条路径必须共用本约束**——只修主路径等于给降级分支留了同一个洞（同 AGENTS
+/// 铁律 1"读侧与写侧共用同一谓词"）。
+#[derive(Debug, Clone)]
+struct SessionOwner {
+    user_id: i64,
+    user_name: String,
+}
+
+/// 会话列表实现体（`/monitor/online/list` 与 `/monitor/my-session/list` 共用）。
+///
+/// `owner = Some(_)` 时只保留本人会话；`None` 时为管理员视图（可按 userName 模糊搜索）。
+async fn list_sessions(
+    state: &Arc<AppState>,
+    operator_tid: i64,
+    query: &OnlineQueryDto,
+    owner: Option<SessionOwner>,
+) -> Result<TableDataInfo<SysUserOnline>, AppError> {
     // 1. SCAN online:* 获取所有在线会话 key（截断版，上限保持 5000）
     let keys = match state.store.scan("online:*", Some(5000)).await {
         Ok(k) => k,
@@ -119,7 +147,7 @@ pub async fn list(
                 "共享态存储 SCAN online:* 失败，降级到 sys_logininfor 查询: {}",
                 e
             );
-            return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
+            return fallback_to_logininfor(state, query, operator_tid, owner.as_ref()).await;
         }
     };
 
@@ -135,7 +163,7 @@ pub async fn list(
                 "共享态存储批量读取 online 失败，降级到 sys_logininfor 查询: {}",
                 e
             );
-            return fallback_to_logininfor(&state, &query, operator.tenant_id()).await;
+            return fallback_to_logininfor(state, query, operator_tid, owner.as_ref()).await;
         }
     };
 
@@ -178,9 +206,15 @@ pub async fn list(
     };
 
     // 3.2 租户过滤 + 构建列表
-    let operator_tid = operator.tenant_id();
     let mut online_list: Vec<SysUserOnline> = Vec::new();
     for (token_hash, session) in sessions {
+        // 自助入口：先按属主收敛（user_id 相等；解析不出 user_id 的令牌一律不放行，
+        // fail-closed——宁可让自己看不到自己，也不能让前缀同名互相可见）
+        if let Some(o) = owner.as_ref()
+            && (o.user_id <= 0 || session.user_id != o.user_id)
+        {
+            continue;
+        }
         // 会话租户归属：新会话取 JSON 字段；旧会话按 user_id 兜底
         let session_tid = if session.tenant_id != 0 {
             session.tenant_id
@@ -247,7 +281,7 @@ pub async fn list(
     }
 
     // 3.3 租户名填充（缺失租户行留空，前端按 tenantId 展示）
-    fill_tenant_names(&state, &mut online_list).await;
+    fill_tenant_names(state, &mut online_list).await;
 
     // M-4：按 login_time 倒序排序，确保最新登录的用户排在前面（与 ify-admin 前端期望一致）
     online_list.sort_by_key(|item| std::cmp::Reverse(item.login_time));
@@ -290,6 +324,7 @@ async fn fallback_to_logininfor(
     state: &AppState,
     query: &OnlineQueryDto,
     operator_tid: i64,
+    owner: Option<&SessionOwner>,
 ) -> Result<TableDataInfo<SysUserOnline>, AppError> {
     let rows = state
         .logininfor_service
@@ -313,6 +348,13 @@ async fn fallback_to_logininfor(
 
     let mut online_list: Vec<SysUserOnline> = Vec::new();
     for r in rows.iter() {
+        // 降级路径无 user_id 列，用**精确**用户名等值（登录记录已按 operator 租户范围取），
+        // 与主路径的 user_id 判定同语义：不得退回 `contains`，否则属主约束在这条分支失效
+        if let Some(o) = owner
+            && r.user_name.as_deref() != Some(o.user_name.as_str())
+        {
+            continue;
+        }
         let tid = r
             .user_name
             .as_ref()
@@ -632,8 +674,8 @@ pub struct BatchLogoutItem {
 /// 该接口要求 `monitor:online:list` 权限，普通用户必 403（功能不可用）；而菜单
 /// `monitor:session:list` 在后端权限映射中不存在。
 ///
-/// 本端点：仅登录（is_login_only_path），**强制**按当前登录用户名过滤，
-/// 前端传入的 userName 一律忽略——用户只能看到自己的会话。
+/// 本端点：仅登录（is_login_only_path），**强制**只返回本人会话，
+/// 前端传入的 userName 一律忽略——判定见 `SessionOwner`（按 user_id 精确，非模糊同名）。
 #[utoipa::path(
     get,
     path = "/monitor/my-session/list",
@@ -649,8 +691,17 @@ pub async fn my_session_list(
     operator: Operator,
     Query(mut query): Query<OnlineQueryDto>,
 ) -> Result<TableDataInfo<SysUserOnline>, AppError> {
-    query.user_name = Some(operator.username().to_string()); // 强制本人过滤，忽略入参
-    list(State(state), operator, Query(query)).await
+    // 入参 userName 不参与筛选：属主约束由 SessionOwner 给出（旧写法把它塞进 contains
+    // 模糊匹配，前缀同名账号互相可见）
+    // 入参 userName 不参与筛选：属主约束由 SessionOwner 给出（旧写法把它塞进 contains
+    // 模糊匹配，前缀同名账号互相可见——b82 变异证伪实测：还原旧写法后 `it_adm` 的自助列表
+    // 里出现 `["it_admx"]`，新用例当场红在 leaked 断言）
+    query.user_name = None;
+    let owner = SessionOwner {
+        user_id: operator.user_id().parse::<i64>().unwrap_or(0),
+        user_name: operator.username().to_string(),
+    };
+    list_sessions(&state, operator.tenant_id(), &query, Some(owner)).await
 }
 
 /// DELETE /monitor/my-session/{tokenHash}（v5-N5：自助注销本人会话）

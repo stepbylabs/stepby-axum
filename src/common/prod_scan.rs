@@ -149,10 +149,7 @@ pub fn rel_paths(dir_rel: &str) -> Vec<String> {
 /// 把源码文本按 [`Scan`] 口径归一成行集（纯函数，便于控制组直接喂合成源码）。
 pub fn normalize(text: &str, cfg: &Scan<'_>) -> Vec<String> {
     let body = if cfg.strip_test_code {
-        match text.find("#[cfg(test)]") {
-            Some(idx) => &text[..idx],
-            None => text,
-        }
+        cut_at_test_attr(text)
     } else {
         text
     };
@@ -185,6 +182,30 @@ pub fn normalize(text: &str, cfg: &Scan<'_>) -> Vec<String> {
 
 fn is_line_comment(l: &str) -> bool {
     l.trim_start().starts_with("//")
+}
+
+/// 找**代码里**的 `#[cfg(test)]` 并在此截断；注释行里的同名文字不是截断点。
+///
+/// 原来这里是一句 `text.find("#[cfg(test)]")`——在**整份原文**上找第一个字面量，
+/// 于是一行模块文档 `//! …本文件 \`#[cfg(test)]\` 用例…` 就把整份生产代码从扫描器视野里删掉了。
+/// b82 实测代价：`src/common/outbound_client.rs` 的 `build_with` 两处构造点变成 0 处，
+/// 两把出站指标锁报的是"登记表条目已腐化"（指向完全错误的方向），
+/// 而全仓 11 个文件在注释里写着这个字面量——`src/common/mod.rs` 的第 25 行注释
+/// 让**每一把**用默认口径的锁只看得到它的 24 行，且历来如此、无人报错。
+/// 这正是本文件自己立项的理由（第 13 行那张表："同一形态在两把锁里一边可见一边不可见"）。
+fn cut_at_test_attr(text: &str) -> &str {
+    let mut offset = 0usize;
+    // `split_inclusive` 保留分隔符 ⇒ 偏移量逐字节精确（CRLF 也不会让截点漂移一行里的一个字节）
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        let t = bare.trim_start();
+        let in_comment = t.starts_with("//") || t.starts_with("/*") || t.starts_with('*');
+        if !in_comment && let Some(off) = bare.find("#[cfg(test)]") {
+            return &text[..offset + off];
+        }
+        offset += line.len();
+    }
+    text
 }
 
 /// 按口径采集 [`Scan::roots`] 下的文件（路径排序后返回，保证多轮结果可比）。
@@ -283,6 +304,90 @@ mod selftests {
             ..cfg
         };
         assert_eq!(normalize(src, &drop).len(), 3);
+    }
+
+    /// 注释里出现 `#[cfg(test)]` **不得**成为截断点（b82 实测缺陷，两侧都要钉）：
+    /// 早截 ⇒ 生产码从扫描器视野消失，锁报"登记表条目已腐化"把人往错方向支使；
+    /// 完全不截 ⇒ 测试码混进生产视图，死码抑制冒充合规。
+    #[test]
+    fn comment_mentioning_cfg_test_is_not_the_cut_point() {
+        let src = "//! 说明：`#[cfg(test)]` 用例住在本文件。\nfn prod() { build_client(); }\n#[cfg(test)]\nmod tests {\n    fn t() { build_client(); }\n}\n";
+        let view = normalize(src, &Scan::default()).join("\n");
+        assert!(
+            view.contains("fn prod()"),
+            "模块文档里写了那个字面量就把整份生产码丢掉 ⇒ 采集面静默归零（本用例即回归锁）"
+        );
+        assert!(
+            !view.contains("mod tests"),
+            "真正的属性仍必须截断——修注释不能把刀钝掉"
+        );
+        // 对照：块注释与 `*` 续行同样不是截断点
+        let block = "/* 见 #[cfg(test)] */\nfn prod2() {}\n#[cfg(test)]\nmod t2 {}\n";
+        let v2 = normalize(block, &Scan::default()).join("\n");
+        assert!(v2.contains("fn prod2()"), "块注释里的字面量也不许当刀");
+        assert!(!v2.contains("mod t2"));
+    }
+
+    /// CRLF 行的字节偏移必须逐字节精确：早一个字节会咬掉属性名，晚一个字节会把 `\n` 混进生产视图。
+    #[test]
+    fn cut_offsets_are_byte_exact_under_crlf() {
+        let src = "fn a() {}\r\n#[cfg(test)]\r\nmod t {}\r\n";
+        let body = cut_at_test_attr(src);
+        assert_eq!(body, "fn a() {}\r\n", "截点必须正好落在属性之前");
+        assert!(
+            normalize(src, &Scan::default())
+                .join("\n")
+                .contains("fn a() {}"),
+            "生产函数必须在视图里"
+        );
+    }
+
+    /// 真实文件侧的对账：b82 那次事故的红字面就是这两处构造点从实测里消失了。
+    /// 这里钉的是"锁的输入没坏"，与锁自己的判据（`outbound_metrics_guard`）分属两层。
+    #[test]
+    fn real_files_keep_their_production_body() {
+        let oc = prod_file(
+            "src/common/outbound_client.rs",
+            &Scan {
+                comments: Comments::Drop,
+                ..Default::default()
+            },
+        );
+        let view = oc.lines.join("\n");
+        assert!(
+            view.contains("pub fn build_with("),
+            "outbound_client.rs 的模块文档（第 29 行）里写着 `#[cfg(test)]`——它一度让 \
+             `build_with` 从生产视图里整体消失"
+        );
+        let sites = oc
+            .lines
+            .iter()
+            .filter(|l| l.contains("Client::builder("))
+            .count();
+        assert_eq!(
+            sites, 2,
+            "主路径 + 回退路径两处构造点必须都数得到（登记表按重数对账，少一处就是一条假腐化）"
+        );
+    }
+
+    /// **把既有限制钉成断言**：刀口取"第一个真属性"，所以文件里靠后出现的 `#[cfg(test)]`
+    /// 之后的生产声明一并看不见。`src/common/mod.rs` 实测：第 26 行是 `pub(crate) mod prod_scan`，
+    /// 其后的 `pub mod redact/response/…/webhook` 等声明不在生产视图内。
+    /// 这条不是"证明它是对的"，而是"改它必须显式改这里"——把截断换成括号配对删块会同时改变
+    /// 十余把锁的输入，属另立批次的影响面，不能顺手动（见台账 b82 §15 N-23）。
+    #[test]
+    fn first_attribute_wins_limitation_is_pinned() {
+        let md = prod_file("src/common/mod.rs", &Scan::default());
+        let view = md.lines.join("\n");
+        assert!(
+            view.contains("pub mod outbound_client;"),
+            "刀口之前的声明必须看得见"
+        );
+        assert!(
+            !view.contains("pub mod webhook;"),
+            "刀口之后的声明当前不可见——这是既有限制；若本断言转红，说明有人把截断改成了\
+             删块，此时必须同步复核所有用默认口径的锁并更新台账 N-23"
+        );
     }
 
     #[test]

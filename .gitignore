@@ -28,6 +28,10 @@ data/*.xdb
 # 变成未跟踪噪声——实测 smoke_release_b77.log 即如此，直接收拢成通用规则）
 logs/
 *.log
+# run-detached 的旁证文件（监管 PID / 子进程 PID / 退出码），`*.log` 盖不住这三个后缀
+*.log.pid
+*.log.child.pid
+*.log.exit
 backend.err
 *.sql
 
