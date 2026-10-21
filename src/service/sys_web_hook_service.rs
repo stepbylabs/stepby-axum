@@ -650,18 +650,29 @@ pub struct SysWebHookService {
     /// 事件目录 Repository（订阅校验 / 事件样例查询）
     event_repo: SysWebhookEventRepository,
     /// 出站 HTTP 客户端（禁自动重定向，SSRF 在保存时已校验，投递直连）
-    http: reqwest::Client,
+    ///
+    /// Option 的原因是宿主事实而非编程错误：`debian:*-slim` 一类最小镜像没有系统信任库，
+    /// `Client::builder().build()` 会失败，而本服务挂在 AppState 构造里＝启动路径——
+    /// 原先的 `.expect("reqwest client 初始化失败")` 会让整个后端起不来
+    /// （批八十一，v0.3.0 冒烟实测；构造与回落见 [`crate::common::outbound_client`]）。
+    /// 取不到客户端时按**传输失败**同一终态处理（审计行、指标、DeliveryResult 形状都不变），
+    /// 而不是新开一个结局类。
+    http: Option<reqwest::Client>,
     db: DatabaseConnection,
 }
 
 impl SysWebHookService {
     pub fn new(db: DatabaseConnection) -> Self {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .user_agent("stepby-webhook/1.0")
-            .build()
-            .expect("reqwest client 初始化失败");
+        let http = crate::common::outbound_client::build_with("webhook", |b| {
+            b.redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(10))
+                .user_agent("stepby-webhook/1.0")
+        })
+        .map(Some)
+        .unwrap_or_else(|e| {
+            tracing::error!("webhook 出站 http client 构建失败，回调投递将按传输失败留痕: {e}");
+            None
+        });
         Self {
             hook_repo: SysWebHookRepository::new(db.clone()),
             log_repo: SysWebHookLogRepository::new(db.clone()),
@@ -1207,31 +1218,38 @@ impl SysWebHookService {
         let saved = self.log_repo.insert(log_am).await?;
         let log_id = saved.id;
 
-        // 出站请求
-        let mut builder = self
-            .http
-            .post(&hook.target_url)
-            .timeout(timeout)
-            .header("content-type", content_type_header(&hook.content_type))
-            .header("user-agent", "stepby-webhook/1.0")
-            .header("X-Webhook-Event", event_type);
-        // G-14：EncryptedString 读取已自动 unseal，直接取明文签名
-        let signature = sign_payload(
-            hook.secret
-                .as_ref()
-                .map(|e| e.0.as_str())
-                .unwrap_or_default(),
-            &body,
-        );
-        if !signature.is_empty() {
-            builder = builder.header("X-Webhook-Signature", format!("sha256={}", signature));
-        }
-
-        let resp = {
-            let req = builder.body(body.clone()).build().map_err(|e| {
-                ServiceError::bad_request(&format!("WebHook 出站请求构建失败: {e}"))
-            })?;
-            self.http.execute(req).await
+        // 出站请求。构造请求本身就需要客户端，所以缺客户端时**在这一条语句里**就归入
+        // "传输失败"终态（Err(String) ⇒ stored_status=1 + error_msg），下面照常 finish_log 回填。
+        // 刻意不在插入日志行之后提前 return：那会把这行永久留在 status="0"（进行中），
+        // 那是数据面上真实的卡死态（db_state_audit 会报，且与"投递失败"混在一起更难查）。
+        // 也不 panic：宿主没有系统信任库是运维事实，不是编程错误
+        // （构造与内嵌根证书回落见 [`crate::common::outbound_client`]）。
+        let resp: Result<reqwest::Response, String> = match self.http.as_ref() {
+            None => Err("WebHook 出站不可用：宿主缺少系统信任库且内嵌根证书不可用".to_string()),
+            Some(http) => {
+                let mut builder = http
+                    .post(&hook.target_url)
+                    .timeout(timeout)
+                    .header("content-type", content_type_header(&hook.content_type))
+                    .header("user-agent", "stepby-webhook/1.0")
+                    .header("X-Webhook-Event", event_type);
+                // G-14：EncryptedString 读取已自动 unseal，直接取明文签名
+                let signature = sign_payload(
+                    hook.secret
+                        .as_ref()
+                        .map(|e| e.0.as_str())
+                        .unwrap_or_default(),
+                    &body,
+                );
+                if !signature.is_empty() {
+                    builder =
+                        builder.header("X-Webhook-Signature", format!("sha256={}", signature));
+                }
+                let req = builder.body(body.clone()).build().map_err(|e| {
+                    ServiceError::bad_request(&format!("WebHook 出站请求构建失败: {e}"))
+                })?;
+                http.execute(req).await.map_err(|e| e.to_string())
+            }
         };
 
         let (stored_status, status_code, response, error_msg) = match resp {
@@ -1253,12 +1271,7 @@ impl SysWebHookService {
                     },
                 )
             }
-            Err(e) => (
-                "1".to_string(),
-                None,
-                Some(String::new()),
-                Some(e.to_string()),
-            ),
+            Err(e) => ("1".to_string(), None, Some(String::new()), Some(e)),
         };
         let cost_ms = start.elapsed().as_millis() as i32;
 
@@ -1331,7 +1344,15 @@ impl SysWebHookService {
     pub fn dispatch_event(&self, event_type: &str, payload: serde_json::Value, tenant_id: i64) {
         let hook_repo = self.hook_repo.clone();
         let db = self.db.clone();
-        let http = Arc::new(self.http.clone());
+        // 客户端整体不可用 ⇒ 本次派发一条都不出。记 `rejected`（未发起出站）而不是 `error`
+        // （发了但失败），与 ai 闸门的口径一致：把"没尝试"混进"尝试失败"会虚增出站故障率。
+        let Some(http) = self.http.clone() else {
+            tracing::error!("webhook 出站不可用，本次事件不派发: event={event_type}");
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_outbound("webhook", "rejected", 0.0);
+            return;
+        };
+        let http = Arc::new(http);
         let event_type = event_type.to_string();
 
         // 派发主体走统一后台任务范式（超时 + panic 隔离 + 失败留痕计数）。
@@ -1425,7 +1446,13 @@ impl SysWebHookService {
     fn emit(&self, event_key: &str, payload: serde_json::Value, tenant_id: i64) {
         let hook_repo = self.hook_repo.clone();
         let db = self.db.clone();
-        let http = Arc::new(self.http.clone());
+        let Some(http) = self.http.clone() else {
+            tracing::error!("webhook 出站不可用，本次事件不投递: event={event_key}");
+            crate::observability::metrics::MetricsRegistry::global()
+                .record_outbound("webhook", "rejected", 0.0);
+            return;
+        };
+        let http = Arc::new(http);
         let event_key = event_key.to_string();
 
         // 与 dispatch_event 同范式（超时 + panic 隔离 + 失败留痕计数），共用 LIGHT_DB_BUDGET；
@@ -1492,7 +1519,7 @@ impl SysWebHookService {
             hook_repo: SysWebHookRepository::new(db.clone()),
             log_repo: SysWebHookLogRepository::new(db.clone()),
             event_repo: SysWebhookEventRepository::new(db.clone()),
-            http: (*http).clone(),
+            http: Some((*http).clone()),
             db,
         }
     }

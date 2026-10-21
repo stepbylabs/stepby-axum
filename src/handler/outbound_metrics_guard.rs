@@ -62,6 +62,24 @@ mod outbound_metrics_guard_lock {
             "new",
             Disposition::SameFile(r#"OutboundGuard::start("ai")"#),
         ),
+        // 批八十一：出站客户端构造收进 common::outbound_client（系统信任库缺失时回落内嵌
+        // 根证书，构造期绝不 panic——v0.3.0 冒烟在 debian:*-slim 上实测照出的启动期 panic）。
+        // 原先散在 sms_provider/im_robot_provider/sys_oauth_service 的 6 个构造点因此消失，
+        // 结局计数仍留在各自调用方（本锁按"构造点"登记，故这里指向两个真实消费方：
+        // 两处 `Client::builder()` = 主路径 + 回退路径，重数必须与实测一致）。
+        (
+            "src/common/outbound_client.rs",
+            "build_with",
+            Disposition::Caller(
+                "src/service/sys_oauth_service.rs",
+                r#"OutboundGuard::start("oauth_token")"#,
+            ),
+        ),
+        (
+            "src/common/outbound_client.rs",
+            "build_with",
+            Disposition::Caller("src/service/sys_msg_service.rs", r#""sms""#),
+        ),
         (
             "src/common/upload_scan.rs",
             "scan_bytes",
@@ -83,16 +101,6 @@ mod outbound_metrics_guard_lock {
             Disposition::ThisFn(r#"OutboundGuard::start("outbox")"#),
         ),
         (
-            "src/service/im_robot_provider.rs",
-            "new",
-            Disposition::Caller("src/service/sys_msg_service.rs", r#""im_robot""#),
-        ),
-        (
-            "src/service/im_robot_provider.rs",
-            "new",
-            Disposition::Caller("src/service/sys_msg_service.rs", r#""im_robot""#),
-        ),
-        (
             "src/service/ip_location_service.rs",
             "download_from_p3terx",
             Disposition::ThisFn(r#"OutboundGuard::start("ip_geo:p3terx")"#),
@@ -101,36 +109,6 @@ mod outbound_metrics_guard_lock {
             "src/service/ip_location_service.rs",
             "download_from_maxmind",
             Disposition::ThisFn(r#"OutboundGuard::start("ip_geo:maxmind")"#),
-        ),
-        (
-            "src/service/sms_provider.rs",
-            "new",
-            Disposition::Caller("src/service/sys_msg_service.rs", r#""sms""#),
-        ),
-        (
-            "src/service/sms_provider.rs",
-            "new",
-            Disposition::Caller("src/service/sys_msg_service.rs", r#""sms""#),
-        ),
-        (
-            "src/service/sms_provider.rs",
-            "new",
-            Disposition::Caller("src/service/sys_msg_service.rs", r#""sms""#),
-        ),
-        (
-            "src/service/sys_http_debug_service.rs",
-            "new",
-            Disposition::SameFile(r#"OutboundGuard::start("http_debug")"#),
-        ),
-        (
-            "src/service/sys_oauth_service.rs",
-            "new",
-            Disposition::SameFile(r#"OutboundGuard::start("oauth_token")"#),
-        ),
-        (
-            "src/service/sys_web_hook_service.rs",
-            "new",
-            Disposition::SameFile(r#""webhook""#),
         ),
         (
             "src/storage/s3.rs",

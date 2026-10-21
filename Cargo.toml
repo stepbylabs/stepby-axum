@@ -165,6 +165,18 @@ arc-swap = "1"
 
 # HTTP 客户端（用于下载 mmdb 文件、S3/MinIO 对象存储 SigV4 请求）
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "form"] }
+# 内嵌根证书回落（common/outbound_client.rs）：宿主没有系统信任库时（debian:*-slim、
+# distroless 之外的最小镜像等）rustls 的 platform-verifier 会直接构建失败。刻意**显式列**
+# 这两个依赖而不是借 reqwest 的传递依赖——借来的版本随 reqwest 升级漂移，而这里的类型必须与
+# reqwest 的 `tls_backend_preconfigured(rustls::ClientConfig)` downcast 目标同版本才认。
+# provider 只取 aws-lc-rs（与 reqwest 的 `rustls` feature 同源）：同时启用 ring 会让
+# `ClientConfig::builder()` 因"多个默认 provider"退化为需要显式安装，属静默故障面。
+rustls = { version = "0.23", default-features = false, features = [
+    "aws-lc-rs",
+    "std",
+    "tls12",
+] }
+webpki-roots = "1.0"
 
 # URL 解析（S3/MinIO endpoint 的 host/authority 提取）
 url = "2"

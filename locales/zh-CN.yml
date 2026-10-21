@@ -94,6 +94,7 @@ error:
     code_missing: 缺少授权码 (code)
     state_invalid: 授权状态无效或已过期，请重新发起登录
     token_exchange_failed: 授权码换取令牌失败，请稍后再试
+    tls_unavailable: 第三方登录暂时不可用（本服务出站 TLS 未就绪），请联系管理员
     userinfo_failed: 获取第三方用户信息失败
     userinfo_missing_id: 第三方未返回用户唯一标识
     no_binding: 该第三方账号尚未绑定本地账号

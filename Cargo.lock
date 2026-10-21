@@ -5675,6 +5675,7 @@ dependencies = [
  "rust-embed",
  "rust-i18n",
  "rust_xlsxwriter",
+ "rustls",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -5701,6 +5702,7 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
+ "webpki-roots",
  "zip",
 ]
 

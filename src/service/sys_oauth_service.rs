@@ -364,7 +364,11 @@ pub struct SysOauthService {
     user_repo: SysUserRepository,
     user_role_repo: SysUserRoleRepository,
     user_service: SysUserService,
-    http: reqwest::Client,
+    /// 出站客户端可能在**宿主没有系统信任库**时构建失败（见 [`crate::common::outbound_client`]）。
+    /// 原先这里是 `reqwest::Client` + `.expect(...)`，而本结构体挂在 AppState 构造里＝启动路径，
+    /// 于是"零配置单文件"在 debian:*-slim 这类镜像上直接 panic 退出（v0.3.0 冒烟实测照出）。
+    /// 改成 Option 后：**服务照常启动**，出站不可用只让第三方登录这条链在请求期给出明确错误。
+    http: Option<reqwest::Client>,
 }
 
 impl SysOauthService {
@@ -378,12 +382,29 @@ impl SysOauthService {
             // §5.35（逐文件审计 S-B-1）：出站 Client 必须带超时——零超时会在
             // IdP/上游无响应时挂死 worker（AGENTS.md B.6 超时重试铁律）；
             // connect_timeout 5s 快速失败 + 总超时 30s 上限。
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("oauth 出站 http client 构建失败（不可恢复的编程错误）"),
+            http: crate::common::outbound_client::build(
+                "oauth",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(30),
+            )
+            .map(Some)
+            .unwrap_or_else(|e| {
+                tracing::error!("oauth 出站 http client 构建失败，第三方登录将返回明确错误: {e}");
+                None
+            }),
         }
+    }
+
+    /// 出站客户端；不可用时给出**有恢复指引的错误**而不是 panic。
+    ///
+    /// 语义取 500（`internal`）不取 400：不是调用方请求有问题，是本服务的出站能力不具备。
+    /// 用户可见文案刻意不写"装 ca-certificates"这类部署细节——`/oauth/*` 是免鉴权面，
+    /// 未认证访客不该从这里读到本机的运维待办（AGENTS C.9 的判据是"能推断出什么"）；
+    /// 细节在上面那条 error 日志里。
+    fn http_client(&self) -> Result<&reqwest::Client, ServiceError> {
+        self.http
+            .as_ref()
+            .ok_or_else(|| ServiceError::internal(&crate::tr!("error.oauth.tls_unavailable")))
     }
 
     // ==================== 提供商配置 ====================
@@ -998,7 +1019,7 @@ impl SysOauthService {
             ("grant_type", "authorization_code"),
         ];
         let resp = self
-            .http
+            .http_client()?
             .post(&provider.token_url)
             .form(&params)
             .send()
@@ -1078,7 +1099,7 @@ impl SysOauthService {
         // b72（AGENTS #4）：IdP userinfo 出站遥测（与令牌交换分开计组件，二者故障面不同）
         let mut tel = crate::observability::metrics::OutboundGuard::start("oauth_userinfo");
         let mut req = self
-            .http
+            .http_client()?
             .get(&provider.user_info_url)
             .bearer_auth(access_token);
         // github 需要 User-Agent + Accept

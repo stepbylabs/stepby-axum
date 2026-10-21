@@ -94,6 +94,7 @@ error:
     code_missing: Missing authorization code (code)
     state_invalid: Authorization state is invalid or expired, please retry login
     token_exchange_failed: Failed to exchange code for token, please try again
+    tls_unavailable: Third-party login is temporarily unavailable (this server's outbound TLS is not ready), please contact the administrator
     userinfo_failed: Failed to fetch third-party user info
     userinfo_missing_id: Third-party provider returned no user identifier
     no_binding: This third-party account is not bound to any local account
