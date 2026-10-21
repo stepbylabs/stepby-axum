@@ -97,6 +97,17 @@
 
 ### 修复
 
+- **最小镜像里后端根本起不来（发布产物级缺陷）**：`SysOauthService::new` / `SysWebHookService::new`
+  挂在 AppState 构造里，出站 `reqwest::Client` 以 `.expect("不会失败")` 构建。宿主没有系统信任库时
+  （`debian:bookworm-slim` 实测 `ca-certificates` 为 un、`/etc/ssl/certs` 不存在）rustls 的
+  platform-verifier 取不到根证书 ⇒ 构造返回 Err ⇒ **启动即 panic**，于是"零配置单文件"产物在这类
+  宿主上前端/接口/定时任务全不可用。出站客户端构造收进 `common::outbound_client` 单一事实源：
+  主路径用系统信任库，失败时回落到**内嵌 Mozilla 根证书**（能力不砍、校验强度不降、WARN 留痕），
+  8 处构造点取不到客户端时按各自既有终态降级——webhook 仍写审计行并记 `rejected`（未发起出站不混进
+  `error`）、oauth 回 500 + `error.oauth.tls_unavailable`、调试器回 `transport_error`。
+  本项由 v0.3.0 本机打包的 arm64 容器冒烟实测照出（`thread 'main' panicked at
+  src/service/sys_oauth_service.rs:385`），非推断。
+
 - **UI 上传的文件整体丢失**：axios 实例顶层默认 `Content-Type: application/json` 使 `FormData` 被
   `transformRequest` JSON 化，真实上线字节只有 `{"file":{"uid":…}}`，`POST /system/file/upload` 报
   `Invalid boundary`（该默认头自首个提交起污染全部经 `service` 的上传）；改为上传载荷一律压制
