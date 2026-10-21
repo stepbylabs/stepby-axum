@@ -913,164 +913,98 @@ node tests/main.mjs --headless
 - **源码检查优先**：UI 交互测试（对话框打开/按钮点击）受 tree-sidebar 布局遮挡、API 响应延迟等因素影响，源码检查（`page.evaluate` + `fetch(script.src)`）更可靠
 - **嵌入式前端**：测试默认使用 `http://localhost:8080`（嵌入式模式），需确保 `frontend-dist` 已同步最新构建
 
-### 10.11 深度 E2E 测试套件（75 模块）
+### 10.11 深度 E2E 测试套件（住在前端仓 `stepby-vue/tests/e2e/`）
 
-> 测试脚本：`tests/deep-e2e.mjs`（Playwright 驱动，深度覆盖每个前端界面的每个功能）
-> 当前统计：75 模块 / 939 测试项 / 通过率 100%（v0.3.2，2026-07-30 验证）
-> 架构：入口脚本 `deep-e2e.mjs` + 模块注册表 `e2e/run/registry.mjs` + 运行器 `e2e/run/runner.mjs` + 共享库 `e2e/lib/`
+> **单一事实源**：套件代码在 `stepby-vue/tests/e2e/`，跑批配方与判据口径在
+> `stepby-vue/tests/e2e/RUN-RECIPE.md`。本节**不抄模块数 / 测试项数 / 分片边界 / 通过率**——
+> 抄一次漂一次。本节原先写的是"75 模块 / 939 测试项 / `--domain=` 按业务域过滤 /
+> `tests/deep-e2e.mjs`（相对本仓）/ `e2e/lib/` 三阶段重构"，逐项与代码不符：路径不在本仓、
+> `e2e/lib/` 与 `SPLIT-PLAN.md` 从未落地、模块早已超过 75、**`--domain` 从来没有实现过**。
+> 现行口径一律现打：
+>
+> ```bash
+> cd stepby-vue
+> node tests/e2e/deep-e2e.mjs --plan     # 分片边界 + 编号 1..max 连续性自检（不启浏览器、免凭据）
+> ```
 
 #### 运行方式
 
-```powershell
-# PowerShell 环境变量设置（请替换为实际测试账号）
-$env:STEPBY_TEST_USER='<your-test-username>'
-$env:STEPBY_TEST_PASS='<your-test-password>'
-$env:STEPBY_BASE_URL='http://localhost:8080'
+```bash
+# 凭据必填：test-config.mjs 在 import 期 fail-fast，缺失即退出（不会回落到任何弱默认）
+export STEPBY_TEST_USER='<your-test-username>'
+export STEPBY_TEST_PASS='<your-test-password>'
+export STEPBY_BASE_URL='http://localhost:8080'
 
-# 全量深度测试（75 模块）
-node tests/deep-e2e.mjs --headless
-
-# 范围测试（如 M67-M75）
-node tests/deep-e2e.mjs --headless --range=67-75
-
-# 单模块测试（如模块 9：权限隔离）
-node tests/deep-e2e.mjs --headless --feature=9
-
-# 按业务域过滤（system + monitor）
-node tests/deep-e2e.mjs --headless --domain=system,monitor
-
-# 排除指定模块（跳过 M13 注册页和 M29 权限矩阵）
-node tests/deep-e2e.mjs --headless --except=13,29
-
-# 有头模式（可视化调试，默认）
-node tests/deep-e2e.mjs
+node tests/e2e/deep-e2e.mjs                  # 全量（默认无头）
+node tests/e2e/deep-e2e.mjs --range=67-75    # 范围
+node tests/e2e/deep-e2e.mjs --feature=9      # 单模块
+node tests/e2e/deep-e2e.mjs --except=13,29   # 排除模块
+node tests/e2e/deep-e2e.mjs --headed         # 有头，人工观察用
 ```
 
-#### CLI 参数一览
+#### CLI 参数一览（`deep-e2e.mjs`）
 
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| `--headless` | 无头模式（CI 环境） | `--headless` |
-| `--feature=N` | 仅运行指定模块 | `--feature=9` |
-| `--module N` | 空格分隔指定模块ID | `--module 9` |
-| `--range=N-M` | 模块范围过滤 | `--range=67-75` |
-| `--domain=a,b` | 按业务域过滤 | `--domain=system,monitor` |
-| `--except=N,M` | 排除指定模块 | `--except=13,29` |
+| 参数 | 说明 |
+|------|------|
+| `--headless` | 无头（已是默认安全档，写与不写同效） |
+| `--headed` | 有头模式 |
+| `--feature=N` | 仅跑单模块 |
+| `--range=A-B` | 模块范围过滤 |
+| `--except=13,29` | 排除指定模块 |
+| `--plan` | 打印分片口径并校验编号连续；不启浏览器、免凭据 |
+| `--update-skip-baseline` | 写 SKIP 棘轮基线，**只允许全量单轮**使用（分段跑批用 ⇒ EXIT=2） |
 
-#### 业务域分类（--domain 参数可选值）
+> **没有 `--domain=`**。注册表只有 `id → 模块函数`，不存在"模块 → 业务域"元数据。
+> 此前它把值写进 `CONFIG.domainFilter`，而全树没有任何读点 ⇒ 加了旗标等于没加、照样跑全量，
+> 文档还把那张"业务域分类表"当成事实。b83 起该旗标**响亮拒绝并 EXIT=2**，死字段删除，
+> 并由根仓 `scripts/e2e_flag_discipline.py`（R1 承诺的旗标必须有读点 / R2 `CONFIG` 写点必须有
+> 读处 / R3 `--selftest` 派发恰好一处）常驻钉住这一族；`run-gates.py` 的 `flagsynth`+`flagdisc`、
+> 根仓 `ci.yml` 的 `doc-gates` 都已接线。
 
-| 域 | 说明 | 模块 |
-|----|------|------|
-| `system` | 系统管理 | M1, M12, M14, M23, M43, M51, M55-M58, M62, M66, M70 |
-| `monitor` | 系统监控 | M2, M44-M45, M47-M48, M53, M71 |
-| `tool` | 系统工具 | M3, M49-M50, M59-M60, M65, M72-M73 |
-| `auth` | 认证授权 | M9, M13, M29, M39, M41, M67 |
-| `profile` | 个人中心 | M4, M6, M42, M46, M61, M64, M68-M69 |
-| `forms` | 表单通用 | M15-M19, M26-M27 |
-| `cross-cutting` | 横切关注点 | M7, M10-M11, M20, M22, M24-M25, M28, M30-M31, M33-M38, M40, M52, M74-M75 |
-| `errors` | 错误页面 | M8, M21, M32, M54, M63 |
-| `dashboard` | 仪表盘 | M5 |
-
-#### 脚本架构（v0.2.7 重构）
+#### 脚本结构（实测目录，非规划）
 
 ```
-tests/
-├── deep-e2e.mjs              # 入口脚本：定义 testModule1-75 + 调用 runMain()
-├── e2e/
-│   ├── lib/                  # 共享库（第一阶段）
-│   │   ├── config.mjs        # CONFIG + CLI 参数解析 + shouldRunModule（已抽取，待第三阶段集成启用）
-│   │   ├── result.mjs        # results/record/writeReport/getExitCode（已抽取，待第三阶段集成启用）
-│   │   └── index.mjs         # 统一 re-export（已抽取，待第三阶段集成启用）
-│   └── run/                  # 注册表与运行器（第二阶段）
-│       ├── registry.mjs      # 75 模块元数据 + bindModules() + filterByDomain()
-│       └── runner.mjs        # 主入口逻辑（浏览器→登录→执行→报告）
-└── SPLIT-PLAN.md             # 拆分方案文档
+stepby-vue/tests/e2e/
+├── deep-e2e.mjs              # 入口 + 全部 testModuleN（注册表在文件内，`--plan` 校验连续性）
+├── main.mjs                  # 主套件入口（features 注册表自检钉住"编号连续 + 无重复 + 用例数===最大编号"）
+├── e2e/run/runner.mjs        # 运行器：起浏览器 → 登录 → 逐模块执行 → 数据集/报告落盘
+├── e2e/run/auth.mjs          # 登录与令牌
+├── modules/*.mjs             # 从入口拆出的广度模块（用例迁移中，新模块优先落这里）
+├── capture-kit.mjs           # 断言与捕获工具；**点击落地取证通道**也在这一层
+├── run-detached.mjs          # 不可分段长套件的脱离启动器（`--log` / `--wait=<pidfile>` / `.exit`）
+└── *-audit.mjs、*-coverage.mjs、*-storm.mjs … # 判据脚本，见下
 ```
 
-#### 75 个测试模块说明
+`--selftest` 是这一族脚本的统一形状：合成夹具双向（该报的必须报、不该报的必须不报），
+不依赖浏览器与运行库，因此可以进 CI 与每轮门禁。**条数由脚本自己打印**，文档不抄。
 
-| 模块 | 名称 | 测试项数 | 覆盖内容 |
-|------|------|---------|---------|
-| M1 | 系统管理页面深度测试 | 73 | 用户/角色/菜单/部门/岗位/字典/参数/通知中心/通知公告/日志 CRUD、搜索表单、表格列、对话框、详情抽屉 |
-| M2 | 监控页面深度测试 | 52 | 在线用户/缓存管理/服务器监控/缓存监控/登录日志/操作日志/审计大屏/IP 库管理/备份管理 |
-| M3 | 系统工具页面深度测试 | 23 | 表单构建器（三栏布局）、代码生成器（导入/创建/预览对话框）、接口文档（Swagger iframe） |
-| M4 | 帮助中心页面深度测试 | 25 | 关于系统（版本/依赖/技术栈）、更新日志（时间线）、快捷键中心、帮助中心（FAQ/联系） |
-| M5 | Dashboard 和工作台深度测试 | 27 | 数据看板（统计卡片/图表/快捷入口/查看全部跳转）、个人工作台、首页 |
-| M6 | 个人中心深度测试 | 8 | 基本资料 Tab、修改密码表单、TOTP Tab |
-| M7 | 带参数路由页面测试 | 13 | 代码生成编辑（tableId）、定时任务日志（jobId）、用户分配角色（userId）、角色分配用户（roleId） |
-| M8 | 错误页面和特殊页面测试 | 20 | 401/403/404/500/网络错误/隐私政策/锁屏页 |
-| M9 | 权限隔离深度测试（stepby 用户） | 9 | 菜单加载、参数设置/字典管理新增按钮隐藏、在线用户/登录日志访问、写操作 API 403 |
-| M10 | i18n 完整性深度扫描 | 3 | 切换英文、中文残留扫描（0 处）、控制台错误 |
-| M11 | 暗色模式深度测试 | 5 | 切换暗色模式、系统管理/监控页面无硬编码白色背景 |
-| M12 | CRUD 操作深度测试 | 10 | 岗位/字典/参数/通知 新增对话框表单字段验证 |
-| M13 | 注册页测试 | 7 | 注册表单（用户名/密码/确认密码/验证码）、注册按钮、返回登录链接、页面标题 |
-| M14 | 字典数据详情页测试 | 7 | 字典数据详情页加载、表格列、搜索表单、新增/关闭按钮、新增字典数据对话框 |
-| M15 | 遗漏对话框深度测试 | 14 | 任务详情/图标选择/代码类型/树节点/选择用户对话框触发与渲染 |
-| M16 | 搜索筛选功能深度测试 | 9 | 用户/角色/部门/岗位/字典/参数/通知 搜索表单输入与重置 |
-| M17 | Tab 切换深度测试 | 10 | 在线用户/登录日志(我的登录)/关于系统/缓存监控/个人中心/表单构建器面板切换 |
-| M18 | 行内编辑删除+确认对话框测试 | 7 | 岗位/字典/参数/通知 行内修改按钮(el-link)、删除确认弹窗 |
-| M19 | 分页+导出+表单校验测试 | 10 | 分页器跳转/每页条数切换、导出下载、表单必填校验 |
-| M20 | 布局功能深度测试 | 15 | 头像下拉菜单/通知铃铛/主题切换/语言切换/尺寸切换/布局设置抽屉/备份入口 |
-| M21 | 缺失页面深度测试 | 8 | 404 页面/用户详情/角色分配用户页/路由参数传递 |
-| M22 | 组件功能深度测试 | 16 | 命令面板/头部搜索/收藏夹/语言切换/尺寸切换/备份页面 |
-| M23 | 用户操作流程深度测试 | 14 | 登录/登出/修改密码/TOTP 设置/头像上传流程 |
-| M24 | 批量操作 & 文件操作深度测试 | 9 | 批量删除/批量导出/文件上传/头像上传 |
-| M25 | 权限指令 & 锁屏 & 错误边界深度测试 | 16 | v-hasPermi 指令/锁屏页/错误边界/EmptyState 组件 |
-| M26 | 完整 CRUD 端到端流程测试 | 8 | 岗位 新增→列表验证→编辑→删除 完整流程、取消操作、唯一性校验 |
-| M27 | 表单字段级校验规则测试 | 8 | cron 表达式必填/字典类型必填/用户名密码格式/邮箱格式校验 |
-| M28 | 实时通信与动态数据测试 | 17 | 通知面板 hover/通知列表/通知详情/标记已读/WebSocket 连接 |
-| M29 | 权限矩阵完整测试 | 19 | admin/stepby 用户权限对比、菜单可见性、按钮可见性、API 403 |
-| M30 | i18n + 暗色模式全页面扫描 | 8 | 全页面中文残留扫描/暗色模式 CSS 变量扫描 |
-| M31 | 文件操作与导入导出实际流程测试 | 11 | 用户导出/角色导出/头像上传/备份导出实际下载验证 |
-| M32 | 错误处理与边界场景测试 | 15 | 404 路由/会话过期/token 无效/网络错误/权限拒绝 |
-| M33 | 可访问性 (Accessibility) 深度测试 | 8 | ARIA 标签/焦点样式/键盘导航/语义化 HTML |
-| M34 | 性能测试 | 12 | 页面加载时间/内存使用/资源加载/FCP/LCP |
-| M35 | 键盘快捷键测试 | 7 | 全局快捷键/表格快捷键/对话框快捷键/Tab 导航 |
-| M36 | 标签页 (TagsView) 管理测试 | 9 | 多标签生成/标签关闭/右键菜单/标签固定/批量关闭 |
-| M37 | 响应式布局测试 | 8 | 移动端/平板/桌面断点/侧边栏折叠/表格响应式 |
-| M38 | 数据可视化测试 | 7 | Dashboard 图表/审计大屏/ECharts 渲染/图表交互 |
-| M39 | 会话管理测试 | 8 | 多标签会话/会话超时/登录状态保持/多用户切换 |
-| M40 | 打印功能测试 | 10 | 用户管理打印按钮/打印数据源/多页面打印/window.open 拦截 |
-| M41 | 锁屏解锁完整流程测试 | 12 | 头像下拉触发锁屏/锁屏页面渲染/密码输入框/错误密码不解锁/正确密码解锁/解锁后页面恢复 |
-| M42 | TOTP 设置/禁用完整流程测试 | 14 | 个人中心 MFA Tab/TOTP 卡片渲染/状态检测/生成密钥/二维码/验证码输入/复制密钥/错误验证码/禁用表单切换 |
-| M43 | 通知中心完整流程测试 | 10 | 通知铃铛(#header-notice)/面板展开/Tab 分类/列表渲染/更多链接/通知公告页表格/新增按钮 |
-| M44 | 备份管理测试 | 6 | /monitor/backup 页面加载/创建备份按钮/备份列表/恢复按钮/下载按钮 |
-| M45 | 缓存管理测试 | 6 | /monitor/cache 页面加载/键列表/统计信息/清空按钮/刷新按钮 |
-| M46 | 用户偏好设置测试 | 12 | 个人中心基本资料 Tab/表单字段/头像组件(左侧卡片)/布局设置抽屉/主题切换/侧边栏样式 |
-| M47 | 监控模块完整测试 | 14 | 在线用户(强退)/定时任务(状态切换/执行一次)/健康检查(CPU/内存/磁盘)/缓存监控 |
-| M48 | 限流管理测试 | 6 | /monitor/rateLimit 页面加载/规则列表/新增按钮/维度选择/状态切换 |
-| M49 | 代码生成器测试 | 6 | /tool/gen 页面加载/表列表/导入表/生成按钮/预览按钮 |
-| M50 | 表单构建器测试 | 7 | /tool/build 页面加载/左侧组件面板/中间画布/右侧属性面板/组件数量/操作栏 |
-| M51 | IP 库管理测试 | 4 | /system/ipLibrary 页面加载/列表/导入按钮 |
-| M52 | 指令深度（水印/复制/脱敏）测试 | 10 | v-watermark 样式标签/水印渲染/v-copyText 复制触发/v-desensitize 手机/IP 脱敏/全局注册 |
-| M53 | 任务进度管理测试 | 18 | /monitor/task 页面加载/搜索表单（任务类型/状态/操作者/创建时间）/搜索重置按钮/批量删除按钮/表格列数/数据行数/进度条/状态标签/空状态组件/搜索后页面正常/重置后页面正常/分页组件 |
-| M54 | 错误页面完整测试 | 8 | 401/403/500/network-error 页面加载/标题/导航按钮 |
-| M55 | 菜单管理 CRUD 深度测试 | 13 | 菜单新增/编辑对话框/表单字段/权限标识/父菜单树/展开折叠按钮（索引点击 radio 切换菜单类型） |
-| M56 | 部门管理 CRUD 深度测试 | 10 | 部门新增/编辑对话框/表单字段/负责人/联系电话/邮箱/排序 |
-| M57 | 角色管理 CRUD 深度测试 | 15 | 角色新增/编辑/权限字符（placeholder 定位）/菜单权限树/全选/全不选 checkbox/数据权限/备注/导出按钮 |
-| M58 | 用户管理 CRUD 深度测试 | 17 | 用户新增/编辑/部门 select（归属部门 label）/岗位 select/角色分配/密码字段/导出按钮/搜索表单 |
-| M59 | 代码生成器深度交互 | 11 | 导入表对话框/预览按钮/生成按钮/删除按钮/搜索表单/表格列 |
-| M60 | 表单构建器深度交互 | 13 | 左侧组件面板/中间画布/右侧属性面板/导出按钮/组件数量/操作栏/面板 Tab 切换 |
-| M61 | 个人中心提交测试 | 11 | 基本资料/修改密码/保存按钮/关闭按钮/昵称/邮箱/手机号/性别 radio |
-| M62 | 授权操作端到端 | 9 | 角色授权用户/用户授权角色/添加用户按钮/取消授权/批量取消授权/关闭按钮 |
-| M63 | 隐私政策页面测试 | 5 | 隐私政策页标题/章节/页脚（页面不可访问时跳过） |
-| M64 | 头像上传完整流程测试 | 9 | 个人中心头像容器/对话框打开/vue-cropper 裁剪器/缩放按钮/旋转按钮/预览区域/上传按钮/控制台错误 |
-| M65 | Swagger API 文档交互测试 | 6 | iframe 存在/src 设置/内容加载/后端 swagger-ui 可访问/OpenAPI JSON 可访问（路径数验证） |
-| M66 | 通知已读用户列表深度测试 | 10 | 通知列表加载/已读用户按钮/对话框打开/标题/列表表格/用户行数/表格列数/分页组件/关闭按钮 |
-| M67 | 登录页 UI 完整测试 | 9 | 表单容器/账号输入框/密码输入框/登录按钮/空表单校验/错误密码提示/记住密码复选框/语言切换/Logo |
-| M68 | 密码修改校验测试 | 8 | Tab 切换/旧密码输入框/新密码输入框/确认密码输入框/保存按钮/空表单校验/新旧密码相同校验/确认密码不一致校验 |
-| M69 | 基本资料提交测试 | 8 | Tab 可见/昵称输入框/手机号输入框/邮箱输入框/性别选择/保存按钮/无效手机号校验/无效邮箱校验/有效数据保存 |
-| M70 | 用户/字典详情页深度测试 | 10 | 用户详情页加载/表单/字段数量/返回按钮；字典详情页加载/表单/字段数量/返回按钮 |
-| M71 | 操作日志/任务详情对话框 | 10 | 操作日志详情按钮/对话框/内容/代码块/关闭按钮；定时任务详情按钮/对话框/内容/关闭按钮 |
-| M72 | 表单构建器子组件深度 | 10 | 页面加载/左侧组件面板/点击组件到画布/属性面板/图标选择对话框/图标搜索框/图标网格/清空画布 |
-| M73 | 代码生成器表单深度 | 8 | 表格列表/编辑按钮/编辑页面/基本信息Tab/表单字段数/字段信息Tab/生成信息Tab/返回列表 |
-| M74 | 全局交互功能深度 | 11 | 命令面板打开/搜索框/搜索结果/HeaderSearch按钮/HeaderSearch结果/主题色按钮/主题色面板/标签页可见/右键菜单/右键菜单项 |
-| M75 | 数据导出与文件下载 | 11 | 用户导出按钮/确认框/触发；角色导出按钮/触发；岗位导出按钮/触发；文件管理页加载/上传按钮/文件列表 |
+#### 配套判据脚本（收口必跑，口径详见 RUN-RECIPE）
+
+- `build-freshness.mjs`：产物新鲜度 + "服务的就是这份产物"，接在四个浏览器入口的启动路径上；
+- `backend-log-audit.mjs` / `oper-log-audit.mjs`：后端日志逐条登记、审计失败操作逐条定性（`--gate` 必填）；
+- `endpoint-coverage.mjs`：未触达写端点必须逐条登记理由，基线与本轮同断面；
+- `request-storm.mjs`：出站请求**每导航均值**棘轮；
+- `test-data-audit.mjs`：测试自己造出的数据态（清理盲区、终态、孤儿）；
+- `click-failure-audit.mjs`：点击落地失败取证（未被后续同键成功救回的形状必须逐条登记）；
+- `deep-verdict-diff.mjs`：同产物两轮全量日志的逐条 verdict 差集（抓"判据与环境耦合"）；
+- 汇总：根仓 `python scripts/run-gates.py`（PASS / FAIL / UNRUN 三态，UNRUN 同样让整体非零）。
+
+#### 75 个测试模块说明（旧版清单，已停用）
+
+> 原先这里逐模块抄了一遍"名称 / 测试项数 / 覆盖内容"。它与注册表是两份事实，且早已漂移
+> （模块数、项数都对不上）。**现行清单以 `deep-e2e.mjs` 的注册表为准**，需要看某一模块做什么
+> 请直接读该 `testModuleN` 函数或跑 `--feature=N`；跨模块的业务域归类不存在（见上）。
 
 #### 关键测试技术
 
 - **Tour 遮罩处理**：登录后通过 `localStorage.setItem('stepby-layout-tour', 'completed')` 禁用新手引导，已显示的遮罩通过 Escape 键关闭
-- **三阶段点击策略**：`clickButton` 函数依次尝试普通点击 → force click → evaluate 触发 click，绕过 Tour 遮罩和遮挡元素
+- **点击策略（b83 订正，禁 force）**：`clickButton` 依次尝试 普通点击 → **重收引导遮罩后再点一次** →
+  `page.evaluate` 触发 DOM `click()`。中间那一档替换掉了原先的 **force click**：force 按坐标点，
+  事件打在遮罩上却算一次成功点击（假绿），而"请求数=0"同时满足"闸门生效"与"按钮失灵"两种相反状态。
+  现在 `force: true` 在全 `tests/e2e`（含 `modules/`）**必须 0 处**，由静态守卫
+  `stepby-vue/src/utils/e2eClickPolicy.guard.test.ts` 钉住；DOM 兜底是否真的 dispatch 成功，
+  由 `capture-kit.mjs` 的**点击落地取证通道**（`_Frame.prototype` + `_ElementHandle.prototype` 补丁 +
+  `markClickLanded`）逐条落盘，判据脚本 `click-failure-audit.mjs` 对"未被救回的失败"零容忍。
 - **403/401 错误过滤**：通过 `page.on('response')` 追踪 403/401 响应 URL，过滤 `/register` 探测和权限隔离测试产生的预期错误
 - **嵌入式模式适配**：M9 写操作权限测试通过 `basePaths = ['', '/dev-api']` 依次尝试，适配嵌入式模式（同源）和开发模式（/dev-api 代理）
 - **控制台错误过滤**：过滤 favicon、manifest、chrome-extension、rbicon.woff2、CSP 字体加载、ResizeObserver loop、IMG 资源加载（头像未设置）等无害错误
@@ -1113,22 +1047,22 @@ tests/
 3. 测试账号已创建（通过 `STEPBY_TEST_USER` / `STEPBY_TEST_PASS` 环境变量配置）
 4. 数据库已初始化（含定时任务 jobId=1、代码生成 tableId=4、角色 roleId=144）
 
-#### 测试报告
+#### 测试报告与数据集（b83 按实测文件名订正）
 
-测试完成后生成 JSON 详细报告：`tests/deep-e2e-report.json`
+原先这里写的是 `tests/deep-e2e-report.json` 并附一份 `{total:939, passRate}` 样例——**该文件
+不存在**，runner 早已不产它。现行落盘全在 `stepby-vue/tests/e2e/screenshots/`：
 
-```json
-{
-  "timestamp": "2026-07-30T...",
-  "total": 939,
-  "passed": 939,
-  "failed": 0,
-  "passRate": "100.0%",
-  "results": [
-    { "module": 1, "name": "用户管理页面加载", "passed": true, "detail": "" }
-  ]
-}
-```
+| 文件 | 生产者 | 谁在判它 |
+|------|--------|---------|
+| `deep-e2e-reqstats.json` | 每轮汇总（按动作聚合的出网请求分布 + `navs` 分母 + `full/windowStart/windowEnd`） | `request-storm.mjs`（密度棘轮）、`endpoint-coverage.mjs`（触达源之一）、`backend-log-audit.mjs`（窗口自证） |
+| `deep-e2e-clickfails.json` / `main-clickfails.json` | 两套件各自的点击落地数据集 | `click-failure-audit.mjs`（两路**并集**） |
+| `deep-e2e-failures-<ts>.json` | 失败断言清单 | 人工取证 |
+| `deep-e2e-net-<ts>.json` | HTTP≥400 请求清单 | 与负路径断言逐条对账 |
+| `deep-e2e-partial-<ts>.json` | HTTP 200 但响应体带失败明细的批量接口 | `capture-kit::detectPartialFailure` |
+| `<script>-clickfails.incremental.json` / 各 `.incremental` | **分段**跑批的产物 | 一律**不得**当全量输入（判据要求 `full: true`，否则 EXIT=2） |
+
+结论数字（模块数 / 通过数 / SKIP 数）只在**运行日志正文**与 `run-gates.py` 汇总里看，
+文档不抄数；棘轮基线必须与产生它的那一轮**同批**重生成。
 
 #### 已修复的测试问题（v0.2.1 ~ v0.2.3）
 
@@ -1137,7 +1071,7 @@ tests/
 | 验证码图片 `data:image/gif;base64,undefined` | 后端 `captchaEnabled=false` 时 `res.img` 为空，前端未校验直接拼接 | `login.vue` 和 `register.vue` 的 `getCode()` 增加 `res.img` 非空校验 |
 | 嵌入式模式登录失败 | 误用 `build:prod`（`VITE_APP_BASE_API='/prod-api'`）构建嵌入式前端 | 改用 `build:embedded`（`VITE_APP_BASE_API=''`）同源访问 |
 | M9 写操作权限测试 status=200 | 测试使用 `/dev-api/system/user`，嵌入式模式下 404 | 依次尝试 `''` 和 `'/dev-api'` 两个 base path |
-| Tour 遮罩拦截按钮点击 | `stepby-tour-mask` overlay 覆盖全屏 | 登录后设置 localStorage + Escape 键关闭 + 三阶段点击策略 |
+| Tour 遮罩拦截按钮点击 | `stepby-tour-mask` overlay 覆盖全屏 | 登录后设置 localStorage + Escape 键关闭 + 点击回退策略（该策略当时含 force 档，**b83 已整族禁用**，见"关键测试技术"） |
 | `/register` 探测产生 403 | 前端 `checkRegisterEnabled()` 单独探测 `/register` | 从 `/captchaImage` 响应读取 `registerEnabled` 字段 |
 | 通知中心详情对话框不显示 | `handleViewDetail` 打开对话框后调用 `handleMarkRead`，后者检测到 `currentNotice.noticeId === row.noticeId` 后立即关闭对话框 | 拆分 `handleMarkRead`（不关闭对话框）和 `handleDialogMarkRead`（对话框内标记后关闭），消除竞态 |
 | `sanitizeHtml is not a function` | `notice-center/index.vue` 缺少 `sanitizeHtml` 导入 | 添加 `import { sanitizeHtml } from '@/utils/index'` |
@@ -1269,7 +1203,7 @@ tests/
 | main.mjs 文件头注释过时 | 写 "前端启动在 http://localhost:81" 和 "admin/admin123 账号可用" | 更新为环境变量注入说明 |
 | config.toml.prod 缺少安全警告 | SQLite + 无密码 Redis 作为生产默认值无风险提示 | 添加安全警告注释，明确生产必须通过环境变量切换 |
 | config.toml.prod 缺少通用上传配置 | 缺 `common_allowed_exts` / `common_max_size` 字段 | 补齐字段，与 config.toml.example 保持一致 |
-| testing-guide.md 测试项数量矛盾 | 第 904 行写 951，第 1108 行 JSON 示例写 939 | 统一为 939 |
+| testing-guide.md 测试项数量矛盾 | 第 904 行写 951，第 1108 行 JSON 示例写 939 | 当时"统一为 939"——**这个修法本身是错的**：抄一个数字并不能让它变真。b83 已把两处计数与整份 JSON 样例一并删除，现行口径一律现打（`--plan` / 运行日志正文），文档不抄数 |
 | testing-guide.md 谎报 CONFIG 已同步 | 表格声称"config.mjs 与 test-config.mjs 同步"，实际默认值仍不同（8080 vs 5173） | 修正为如实描述：环境变量回退已增加，但默认值差异仍存，e2e/lib/config.mjs 为死代码 |
 
 #### v0.3.2 事务安全与资源泄漏修复（2026-07-30，第七轮循环）

@@ -33,18 +33,21 @@ pub struct AiChatDto {
 ///
 /// 上限取 `[ai].max_concurrency`（启动只读，改后需重启）：刻意不读 `sys.ai.*` 运行态热配置，
 /// 否则会出现"管理端改了上限、闸门仍是首次建闸的值"的行为分裂（AGENTS C.7 配置归类明确）。
-fn admit_inference(state: &AppState) -> Result<tokio::sync::OwnedSemaphorePermit, AppError> {
-    crate::ai::gate::inference_gate(state.config.ai.max_concurrency)
-        .try_admit()
-        .ok_or_else(|| {
-            crate::observability::metrics::MetricsRegistry::global()
-                .record_outbound("ai", "rejected", 0.0);
-            tracing::warn!(
-                limit = state.config.ai.max_concurrency,
-                "AI 推理并发闸已满，请求被拒（429）"
-            );
-            AppError::new(429, tr!("error.ai.busy"))
-        })
+fn admit_inference(state: &AppState) -> Result<crate::ai::gate::InferencePermit, AppError> {
+    let gate = crate::ai::gate::inference_gate(state.config.ai.max_concurrency);
+    gate.try_admit().ok_or_else(|| {
+        crate::observability::metrics::MetricsRegistry::global()
+            .record_outbound("ai", "rejected", 0.0);
+        tracing::warn!(
+            limit = state.config.ai.max_concurrency,
+            "AI 推理并发闸已满，请求被拒（429）"
+        );
+        let err = AppError::new(429, tr!("error.ai.busy"));
+        match gate.retry_after_secs() {
+            Some(secs) => err.with_retry_after(secs),
+            None => err,
+        }
+    })
 }
 
 /// POST /ai/chat —— 自然语言问数据

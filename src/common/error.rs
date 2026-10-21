@@ -33,6 +33,11 @@ use thiserror::Error;
 pub struct ServiceError {
     pub code: i32,
     pub message: String,
+    /// "稍后再试"类响应的 `Retry-After` 秒数（`None` = 不发该头，与改造前逐字段等价）。
+    ///
+    /// 为什么住在 Service 层：锁定窗口由服务层判定（失败计数 + 键 TTL 都在这里），
+    /// Handler 层拿不到"还剩多少秒"。放在 Handler 层等于让每个出口自己猜一个数。
+    pub retry_after: Option<u64>,
 }
 
 impl ServiceError {
@@ -40,7 +45,14 @@ impl ServiceError {
         Self {
             code,
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    /// 附加 `Retry-After`（经 `From<ServiceError>` 原样传到 AppError 出口）。
+    pub fn with_retry_after(mut self, secs: u64) -> Self {
+        self.retry_after = Some(secs);
+        self
     }
 
     /// 401 未认证
@@ -230,6 +242,13 @@ pub struct AppError {
     /// 通过 `with_source` 链式构造，IntoResponse 时若 source 存在则记 tracing::error
     #[source]
     pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    /// "稍后再试"类响应的 `Retry-After` 秒数（`None` = 不发该头，与改造前逐字段等价）。
+    ///
+    /// 为什么要有这一层：`ai/gate.rs` 的注释与 AGENTS.md A.2 都宣称"闸满立即 429 +
+    /// `Retry-After`"，而本类型此前**没有任何 header 注入点**（`IntoResponse` 末端是
+    /// `(status, Json(body))`），全仓唯一发这个头的地方是限流中间件自己拼 Response。
+    /// 文档与实现分裂的代价是：客户端只能靠猜来退避。
+    pub retry_after: Option<u64>,
 }
 
 impl AppError {
@@ -238,7 +257,14 @@ impl AppError {
             code,
             message: message.into(),
             source: None,
+            retry_after: None,
         }
+    }
+
+    /// 附加 `Retry-After` 头（秒数）。仅改变响应头，不改 body 契约（C.8 不破）。
+    pub fn with_retry_after(mut self, secs: u64) -> Self {
+        self.retry_after = Some(secs);
+        self
     }
 
     /// 链式附加错误链 source（R8-CONC-016）
@@ -283,6 +309,7 @@ impl From<ServiceError> for AppError {
             code: err.code,
             message: err.message,
             source: None,
+            retry_after: err.retry_after,
         }
     }
 }
@@ -379,7 +406,16 @@ impl IntoResponse for AppError {
         if let Some(trace_id) = crate::middleware::request_id::current_request_id() {
             body = body.with_trace_id(trace_id);
         }
-        (http_status, Json(body)).into_response()
+        let mut resp = (http_status, Json(body)).into_response();
+        // `Retry-After` 只在显式给出时写头（缺省不发 ⇒ 存量响应逐字节不变）。
+        // 值取整秒且下限 1：0 会让客户端读成"立即可重试"，与"仍在窗口内"自相矛盾。
+        if let Some(secs) = self.retry_after
+            && let Ok(v) = axum::http::HeaderValue::from_str(&secs.max(1).to_string())
+        {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, v);
+        }
+        resp
     }
 }
 
@@ -646,5 +682,51 @@ mod tests {
         let err = AppError::new(500, "内部错误").with_source(std::io::Error::other("root"));
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// `Retry-After` 通道：缺省**不得**发头（存量响应逐字段等价），显式给出才发。
+    ///
+    /// 这条双向缺一不可——只测"给了就有"，等于允许实现变成"所有 429 都发一个猜出来的数"，
+    /// 而中间件那条 429（`rate_limit.rs`）的窗口口径与此不同，混发会让客户端读到假退避。
+    #[test]
+    fn retry_after_header_absent_by_default_and_present_when_set() {
+        let plain = AppError::new(429, "操作过于频繁").into_response();
+        assert!(
+            plain.headers().get("retry-after").is_none(),
+            "未显式给出时不得发 Retry-After（默认=现状）"
+        );
+        let hinted = AppError::new(429, "锁定中")
+            .with_retry_after(120)
+            .into_response();
+        assert_eq!(
+            hinted
+                .headers()
+                .get("retry-after")
+                .map(|v| v.to_str().unwrap()),
+            Some("120")
+        );
+        assert_eq!(hinted.status(), StatusCode::TOO_MANY_REQUESTS);
+        // 下限 1：0 会被客户端读成"立即可重试"，与"仍在窗口内"矛盾
+        let zero = AppError::new(429, "锁定中")
+            .with_retry_after(0)
+            .into_response();
+        assert_eq!(
+            zero.headers()
+                .get("retry-after")
+                .map(|v| v.to_str().unwrap()),
+            Some("1")
+        );
+    }
+
+    /// ServiceError → AppError 必须把退避提示带过去（? 操作符是本类型的主用法；
+    /// 委托漏了这个字段，服务层算出的"还剩多少秒"会在跨越层界时静默归零）。
+    #[test]
+    fn service_error_delegation_carries_retry_after() {
+        let svc = ServiceError::new(429, "TOTP 验证失败次数过多").with_retry_after(57);
+        let app: AppError = svc.into();
+        assert_eq!((app.code, app.retry_after), (429, Some(57)));
+        // 未附加时保持 None（委托不得凭空造出一个默认退避时长）
+        let plain: AppError = ServiceError::new(400, "参数错误").into();
+        assert_eq!(plain.retry_after, None);
     }
 }

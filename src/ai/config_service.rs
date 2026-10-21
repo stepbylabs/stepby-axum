@@ -10,7 +10,6 @@
 //! - base_url 变更时走 `common::ssrf` 校验（防 DNS rebinding/私网穿透）；
 //! - 平台专属（handler 层 `tenant_id == 0` 门控）。
 
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::Serialize;
 use std::sync::Arc;
 use ts_rs::TS;
@@ -166,17 +165,13 @@ impl AiConfigService {
         })
     }
 
-    /// 六键 UPDATE（直接 SQL——键固定且平台专属；写后 refreshCache 热生效）
+    /// 六键 UPDATE（写后 refreshCache 热生效）。
+    ///
+    /// SQL 本体收敛到 `SysConfigService::set_platform_value`（b83）：本处原写死
+    /// `DatabaseBackend::Sqlite` 并把 `update_time` 交给 `CURRENT_TIMESTAMP`，
+    /// 前者在 PG 部署下语法失败、后者在 SQLite/MySQL/PG 三库落不同时区。
     async fn write_key(&self, key: &str, value: &str) -> Result<(), ServiceError> {
-        self.db
-            .execute_raw(Statement::from_sql_and_values(
-                DatabaseBackend::Sqlite,
-                "UPDATE sys_config SET config_value = ?, update_time = CURRENT_TIMESTAMP WHERE config_key = ?",
-                [value.into(), key.into()],
-            ))
-            .await
-            .map_err(|e| ServiceError::internal(&format!("写入 {key} 失败: {e}")))?;
-        Ok(())
+        self.config_service.set_platform_value(key, value).await
     }
 
     /// 管理页更新：SSRF 校验 base_url + api_key seal + 六键写入 + 缓存失效

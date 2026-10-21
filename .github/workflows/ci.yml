@@ -123,10 +123,15 @@ jobs:
         include:
           - db: sqlite
             database_url: "sqlite::memory:"
+            # 活库 smoke 做 up→down→up 与兜底重放，**必须用文件库**：
+            # `sqlite::memory:` 在连接池下每条连接各是一个空库，跨连接看不到 schema。
+            smoke_url: "sqlite://target/ci-smoke.db?mode=rwc"
           - db: postgres
             database_url: postgres://stepby:stepby123@127.0.0.1:5432/stepby
+            smoke_url: postgres://stepby:stepby123@127.0.0.1:5432/stepby
           - db: mysql
             database_url: mysql://stepby:stepby123@127.0.0.1:3306/stepby
+            smoke_url: mysql://stepby:stepby123@127.0.0.1:3306/stepby
 
     services:
       postgres:
@@ -170,6 +175,20 @@ jobs:
       - name: Run migration
         run: cargo run -p migration
         env:
+          DATABASE_URL: ${{ matrix.database_url }}
+
+      - name: Live dialect smoke（兜底幂等 + 回滚重放 + 占位符探针）
+        # b83 接线。本环自 b77 就存在，却**从来没有载体**：`#[ignore]` 让默认
+        # `cargo test` 不跑它，而本 job 原来只跑 `cargo run -p migration`（只前滚）。
+        # "写了没接线=没写"的第三次实证——本机第一次把它连上真 PG 就照出两处过期：
+        #   ① "前滚后应为 121 条"的硬编码常量，b82 加了一条迁移后就悄悄过期（现改注册表派生）；
+        #   ② `?` 占位符在 PG 上语法失败（sea-orm 不翻译，见 src/common/sql_dialect.rs 取证）。
+        run: |
+          set -e
+          mkdir -p target
+          cargo test -j 4 --lib live_db_smoke -- --ignored --nocapture
+        env:
+          STEPBY_SMOKE_DATABASE_URL: ${{ matrix.smoke_url }}
           DATABASE_URL: ${{ matrix.database_url }}
 
   # ==================== Docker Compose 配置校验 ====================

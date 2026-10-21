@@ -77,9 +77,14 @@ impl LocalStore {
         Self { db }
     }
 
-    /// 以本库方言构造参数化语句（占位符统一写 `?`，sea-orm 负责 PG 端 `$n` 转译）
+    /// 以本库方言构造参数化语句（占位符统一写 `?`）。
+    ///
+    /// **订正**：此处原文档写"sea-orm 负责 PG 端 `$n` 转译"，那是错的——sea-orm 2.0.4 只在
+    /// `Display`（调试打印）里做 `inject_parameters`，执行路径把 SQL 原样交给 sqlx
+    /// （取证与源码位置见 `crate::common::sql_dialect` 模块头）。PG 下 `?` 是语法错误，
+    /// 而本方法是 local 档全部 31 条裸 SQL 的唯一出口，所以转译必须在这里做。
     fn stmt(&self, sql: &str, values: Vec<Value>) -> Statement {
-        Statement::from_sql_and_values(self.db.get_database_backend(), sql, values)
+        crate::common::sql_dialect::stmt_vec(self.db.get_database_backend(), sql, values)
     }
 
     /// UPSERT `sys_shared_kv`：先 SELECT 后 UPDATE/INSERT（跨方言通用写法）；
@@ -504,6 +509,29 @@ impl SharedStore for LocalStore {
         Err(StoreError::Backend(format!(
             "incr_with_ttl 并发冲突重试耗尽: {key}"
         )))
+    }
+
+    /// 剩余存活秒数。过期行按"键不存在"处理并惰性删除，与 `get` **同一判定口径**
+    /// （两处不同源会出现"get 说没有、ttl 说还剩 5 秒"的自相矛盾响应）。
+    async fn ttl(&self, key: &str) -> Result<Option<i64>, StoreError> {
+        match KvEntity::find_by_id(key)
+            .one(&self.db)
+            .await
+            .map_err(|e| StoreError::backend(&e))?
+        {
+            Some(m) if is_expired(m.expire_at) => {
+                let _ = self
+                    .db
+                    .execute_raw(self.stmt(
+                        "DELETE FROM sys_shared_kv WHERE kv_key = ?",
+                        vec![key.to_owned().into()],
+                    ))
+                    .await;
+                Ok(None)
+            }
+            Some(m) => Ok(m.expire_at.map(|t| (t - now_secs()).max(0))),
+            None => Ok(None),
+        }
     }
 
     /// 原子自减（**连接计数专用**：ws_conn:{uid} 关闭侧递减，其它键族禁用——
@@ -1173,6 +1201,47 @@ mod tests {
         // 过期行 decr = 空键语义
         s.set_ex("k:exp", "5", 0).await.unwrap();
         assert_eq!(s.decr("k:exp").await.unwrap(), -1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `ttl` 的四态（它是 `Retry-After` 的事实源）：不存在 / 带 TTL / 永不过期 / 已过期。
+    ///
+    /// "永不过期"与"不存在"都返回 `None`，但**必须可用 `get` 区分**——若实现把两者混成
+    /// "行不存在"，锁定键会被判成"窗口已结束"，用户刚被锁就能再试（漏放行）。
+    /// 过期行必须与 `get` 同口径（惰性删除），否则出现"get 说没有、ttl 说还剩 5 秒"。
+    #[tokio::test]
+    async fn ttl_distinguishes_present_absent_and_eternal() {
+        let (s, _db, path) = new_store().await;
+        assert_eq!(s.ttl("ttl:nope").await.unwrap(), None, "键不存在 = None");
+
+        s.set_ex("ttl:short", "v", 100).await.unwrap();
+        let left = s
+            .ttl("ttl:short")
+            .await
+            .unwrap()
+            .expect("带 TTL 的键必须报剩余秒数");
+        assert!(
+            (90..=100).contains(&left),
+            "剩余秒数应贴着写入值，实测 {left}"
+        );
+
+        // 永不过期（expire_at = NULL）：值仍可读，只是"没有倒计时"
+        s.upsert_kv("ttl:eternal", "v", None).await.unwrap();
+        assert_eq!(s.ttl("ttl:eternal").await.unwrap(), None);
+        assert_eq!(
+            s.get("ttl:eternal").await.unwrap().as_deref(),
+            Some("v"),
+            "None 不得被读成\"键不存在\""
+        );
+
+        // 已过期：None，且行被惰性清掉（与 get 同源判定）
+        s.set_ex("ttl:dead", "v", 0).await.unwrap();
+        assert_eq!(s.ttl("ttl:dead").await.unwrap(), None);
+        assert_eq!(s.get("ttl:dead").await.unwrap(), None);
+        // incr_with_ttl 起的窗口同样可读回（锁定计数走这条路）
+        s.incr_with_ttl("ttl:cnt", 600).await.unwrap();
+        let win = s.ttl("ttl:cnt").await.unwrap().expect("计数键应有剩余窗口");
+        assert!((540..=600).contains(&win), "锁定窗口剩余值异常：{win}");
         let _ = std::fs::remove_file(path);
     }
 

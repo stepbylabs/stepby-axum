@@ -112,21 +112,26 @@ impl SysRoleFieldPermRepository {
             .await?;
 
         // 2) 重建 hidden 行（冲突忽略：并发保存时 UNIQUE 冲突静默跳过）。
-        //    create_time 由 SQL 表达式提供（三方言）：表列 NOT NULL 无默认，
-        //    缺列会被 INSERT OR IGNORE/IGNORE **静默吞掉**（NOT NULL 违规同被忽略），
-        //    故必须在语句中显式提供。
+        //    create_time **必须由应用侧显式绑定**，两个理由各踩过一次：
+        //    ① 表列 NOT NULL 无默认，缺列会被 INSERT OR IGNORE/INSERT IGNORE **静默吞掉**
+        //       （NOT NULL 违规同被忽略）⇒ 必须有第四列。
+        //    ② b83 实测原实现的三个方言分支给了三个不同时间来源：PG `NOW()`=会话时区
+        //       （compose 给 PG 容器设 TZ=Asia/Shanghai）、MySQL `NOW()`=会话时区、
+        //       SQLite `datetime('now')`=UTC ⇒ 同一列同一语义三种口径。
+        //       统一走 `common::datetime::now_naive()`（全仓落库时间的唯一事实源）。
         if !hidden_fields.is_empty() {
             let backend = db.get_database_backend();
+            let now = crate::common::datetime::now_naive();
             // 列清单与时间表达式固定来自代码（无用户可控拼接面）；值经参数化绑定
             let insert_sql = match backend {
                 DatabaseBackend::Postgres => {
-                    "INSERT INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES ($1, $2, $3, NOW()) ON CONFLICT DO NOTHING"
+                    "INSERT INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING"
                 }
                 DatabaseBackend::Sqlite => {
-                    "INSERT OR IGNORE INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES (?, ?, ?, datetime('now'))"
+                    "INSERT OR IGNORE INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES (?, ?, ?, ?)"
                 }
                 DatabaseBackend::MySql => {
-                    "INSERT IGNORE INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES (?, ?, ?, NOW())"
+                    "INSERT IGNORE INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES (?, ?, ?, ?)"
                 }
                 _ => unreachable!("unknown backend"),
             };
@@ -134,7 +139,7 @@ impl SysRoleFieldPermRepository {
                 let stmt = Statement::from_sql_and_values(
                     backend,
                     insert_sql,
-                    vec![role_id.into(), table_key.into(), field.into()],
+                    vec![role_id.into(), table_key.into(), field.into(), now.into()],
                 );
                 txn.execute_raw(stmt).await?;
             }

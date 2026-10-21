@@ -39,6 +39,21 @@ use sea_orm::ConnectionTrait;
 ///
 /// 三方言 `DELETE ... WHERE expire_at <= <epoch>` 语法一致；时间戳为服务端 i64 整数
 /// （无注入面），故直接拼接而非参数绑定。
+/// 锁定类响应的 `Retry-After` 剩余秒数（失败计数键族共用：TOTP verify / TOTP enable / 登录链）。
+///
+/// 三条口径都是设计而非巧合：
+/// 1. **读提示失败绝不改变结论**。是否锁定由调用方的 `get` 判定，本函数只补一个头，
+///    因此 `Err`/`None` 一律回落到窗口上限（保守侧），绝不放行、也绝不发 0。
+/// 2. 下限 1 秒：`ttl` 可能返回 0（即将过期），0 会被客户端读成"立即可重试"。
+/// 3. 上限 `window_secs`：跨实例时钟偏移让 `expire_at` 落在未来时，宁可多提示也不给出
+///    一个比窗口还长的承诺（那会把 5 分钟的窗口说成 500 分钟）。
+pub async fn lockout_retry_after_secs(store: &dyn SharedStore, key: &str, window_secs: u64) -> u64 {
+    match store.ttl(key).await {
+        Ok(Some(secs)) => (secs.max(0) as u64).clamp(1, window_secs.max(1)),
+        _ => window_secs.max(1),
+    }
+}
+
 pub async fn cleanup_expired_token_revocations(
     db: &sea_orm::DatabaseConnection,
 ) -> Result<u64, sea_orm::DbErr> {
@@ -161,6 +176,18 @@ pub trait SharedStore: Send + Sync {
 
     /// 原子自增（首次自增时设置 TTL；登录失败锁定/IP 限流计数——原 INCR+EXPIRE Lua 语义）
     async fn incr_with_ttl(&self, key: &str, ttl_secs: u64) -> Result<i64, StoreError>;
+
+    /// 剩余存活秒数（`Retry-After` 的事实源；原 INCR+EXPIRE 语义里"TTL 从首次自增起算"）。
+    ///
+    /// 返回口径（调用方**必须**按"取不到就回落到配置窗口上限"处理，不得因读不到而放行）：
+    /// - `Ok(Some(n))`：键存在且带过期，剩余 `n` 秒（`n` 可能为 0，表示即将过期）；
+    /// - `Ok(None)`：键不存在，或键存在但**永不过期**（`expire_at = NULL` / Redis TTL = -1）；
+    /// - `Err`：后端读失败。锁定判定本身已由 `get` 完成，这里只补一个提示值，
+    ///   因此读失败**不改变**拒绝结论，只是把提示退回窗口上限（保守侧）。
+    ///
+    /// redis 档 = `TTL` 命令（-1 永不过期 / -2 不存在，两档都归一到 `None`）；
+    /// local 档 = 读 `sys_shared_kv.expire_at` 与服务端时钟作差（与 `is_expired` 同一口径）。
+    async fn ttl(&self, key: &str) -> Result<Option<i64>, StoreError>;
 
     /// 原子自减（**连接计数专用**：`ws_conn:{uid}` 连接关闭侧递减，其它键族禁用——
     /// 本方法不携带 TTL 语义，且减到 ≤0 即删键）。

@@ -747,6 +747,28 @@ impl TestContext {
         self.send_json(self.request(Method::GET, uri, None)).await
     }
 
+    /// 发送并**同时取回响应头**（`Retry-After` 这类"契约住在头里"的判据必须能读它）。
+    ///
+    /// 为什么单独一个方法：`send_raw` 只回 `(status, body)`，而 `AppError` 现在有 header 通道
+    /// （b83）——如果判据读不到头，`Retry-After` 写没写、写了几秒，全都无法被证明。
+    pub async fn send_with_headers(
+        &self,
+        req: Request<Body>,
+    ) -> (
+        axum::http::StatusCode,
+        axum::http::HeaderMap,
+        serde_json::Value,
+    ) {
+        let resp = self.app.clone().oneshot(req).await.expect("请求执行失败");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("读取响应体失败");
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, headers, v)
+    }
+
     pub async fn post_json(&self, uri: &str, body: serde_json::Value) -> serde_json::Value {
         self.send_json(self.request(Method::POST, uri, Some(body)))
             .await

@@ -8,7 +8,11 @@
 //!
 //! 取舍口径（与既有闸门刻意不同）：
 //! - **拒绝而非排队**：推理请求是"可重来的人类请求"，与 WebHook 出站事实（不可重放 ⇒ 排队）
-//!   相反。让用户等 60s 不如立刻 429 + `Retry-After`，前端可提示"稍后再问"。
+//!   相反。让用户等 60s 不如立刻 429，前端可提示"稍后再问"。
+//!   `Retry-After` 由**已完成推理的占用均值**给出（`InferenceGate::retry_after_secs`）；
+//!   冷启动还没有任何样本时**不发该头**——闸没有窗口语义，猜一个数等于把猜测当承诺。
+//!   （b83 前此处只写着"429 + Retry-After"，而 `AppError` 根本没有 header 通道，
+//!   这条承诺从未成立。）
 //! - **进程级、启动只读**：上限来自 `[ai].max_concurrency`（启动时读取，改后需重启，
 //!   与 AGENTS C.7 的配置归类一致）。首个请求完成初始化（`OnceLock`），此后不再接受
 //!   不同值——避免"两个入口各自看到不同上限"的口径分裂。
@@ -16,6 +20,7 @@
 //!   因此不存在"持许可卡死"的泄漏路径；闸内的 panic 也由 handler 上层 `Result` 流转，
 //!   permit 随栈展开自动释放。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Semaphore;
@@ -27,6 +32,40 @@ pub const DEFAULT_MAX_CONCURRENCY: usize = 4;
 pub struct InferenceGate {
     sem: Arc<Semaphore>,
     limit: usize,
+    /// 已完成推理的占用时长均值（毫秒，EWMA α=1/4）。闸满时的 `Retry-After` 由它给出。
+    ///
+    /// 为什么用观测值而不是常量：闸没有窗口语义，"什么时候有位"取决于**正在跑的那几次要多久**。
+    /// 写死一个数（哪怕 1s）就是把猜的数当承诺；均值会随模型/机器自调，冷启动无样本时干脆不发头。
+    hold_ms_ewma: Arc<AtomicU64>,
+}
+
+/// 一次准入的凭据：持有 `OwnedSemaphorePermit`，drop 即归还额度并记一次占用时长。
+///
+/// 用 RAII 而非"调用方手动记录"：`/ai/chat` 与 `/ai/replay` 的 `Result` 链上有多条 `?` 出口，
+/// 手写记录必然漏（b72 `OutboundGuard` 同一条教训）。
+pub struct InferencePermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    started: std::time::Instant,
+    hold_ms_ewma: Arc<AtomicU64>,
+}
+
+impl Drop for InferencePermit {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        // EWMA：new = (3*old + sample) / 4。首样本时 old=0 ⇒ 结果 = sample/4，
+        // 故用 compare_exchange 把"无样本"直接播种成首个观测值。
+        let prev = self.hold_ms_ewma.load(Ordering::Acquire);
+        if prev == 0 {
+            self.hold_ms_ewma.store(ms.max(1), Ordering::Release);
+        } else {
+            // `.max(1)` 是必须的：亚毫秒推理会把均值一路衰减到 0，而 0 在本类型里的含义是
+            // "还没有任何观测"⇒ 退避提示会凭空消失（自己造的 fail-open）。
+            self.hold_ms_ewma.store(
+                ((prev.saturating_mul(3).saturating_add(ms)) / 4).max(1),
+                Ordering::Release,
+            );
+        }
+    }
 }
 
 impl InferenceGate {
@@ -36,6 +75,7 @@ impl InferenceGate {
         Self {
             sem: Arc::new(Semaphore::new(clamped)),
             limit: clamped,
+            hold_ms_ewma: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -46,10 +86,25 @@ impl InferenceGate {
 
     /// 尝试占用一个许可；闸满返回 `None`（调用方转 429）。
     ///
-    /// 返回 `OwnedSemaphorePermit`（持 `Arc<Semaphore>` 而非借用）：调用方可以把它
-    /// 从"取许可"的函数里带出来，跨过整段推理生命周期，permit drop 即归还额度。
-    pub fn try_admit(self: &Arc<Self>) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        self.sem.clone().try_acquire_owned().ok()
+    /// 返回 `InferencePermit`（内含 `OwnedSemaphorePermit`）：调用方可以把它从"取许可"的
+    /// 函数里带出来，跨过整段推理生命周期，drop 即归还额度并留下一次占用时长观测。
+    pub fn try_admit(self: &Arc<Self>) -> Option<InferencePermit> {
+        let permit = self.sem.clone().try_acquire_owned().ok()?;
+        Some(InferencePermit {
+            _permit: permit,
+            started: std::time::Instant::now(),
+            hold_ms_ewma: self.hold_ms_ewma.clone(),
+        })
+    }
+
+    /// 闸满时给客户端的退避提示秒数。**没有任何完成样本时返回 `None`**（宁可不发头，
+    /// 也不把猜出来的数当承诺）；有样本时取 EWMA 上取整、下限 1 秒。
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        let ewma_ms = self.hold_ms_ewma.load(Ordering::Acquire);
+        if ewma_ms == 0 {
+            return None;
+        }
+        Some(ewma_ms.div_ceil(1000).max(1))
     }
 }
 
@@ -90,6 +145,47 @@ mod tests {
         assert_eq!(InferenceGate::new(0).limit(), 1);
         assert_eq!(InferenceGate::new(usize::MAX).limit(), 256);
         assert_eq!(InferenceGate::new(7).limit(), 7);
+    }
+
+    /// `Retry-After` 的两个分支：**没有观测时不得发头**，有观测时给实测均值（上取整、下限 1s）。
+    #[test]
+    fn retry_after_absent_until_first_observation() {
+        let gate = Arc::new(InferenceGate::new(2));
+        assert_eq!(
+            gate.retry_after_secs(),
+            None,
+            "冷启动没有样本时必须不发 Retry-After（猜的数不能当承诺）"
+        );
+        let p = gate.try_admit().expect("额度内应放行");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(p);
+        assert_eq!(
+            gate.retry_after_secs(),
+            Some(1),
+            "20ms 占用应报 1 秒（div_ceil + 下限 1）"
+        );
+        // 包一层不改变闸语义：占满仍拒、释放仍放行
+        let a = gate.try_admit().expect("第 1 个");
+        let b = gate.try_admit().expect("第 2 个");
+        assert!(gate.try_admit().is_none(), "第 3 个必须被拒");
+        drop(a);
+        assert!(gate.try_admit().is_some(), "释放后必须重新放行");
+        drop(b);
+    }
+
+    /// 亚毫秒推理不得把均值衰减成 0——0 的含义是"还没有观测"，衰减到 0 会让退避提示凭空消失。
+    #[test]
+    fn sub_millisecond_holds_never_erase_the_observation() {
+        let gate = Arc::new(InferenceGate::new(1));
+        for _ in 0..12 {
+            let p = gate.try_admit().expect("单次循环内应先占再放");
+            drop(p); // 立即 drop ⇒ 样本≈0ms
+        }
+        assert_eq!(
+            gate.retry_after_secs(),
+            Some(1),
+            "连续亚毫秒占用后仍必须有提示值（下限 1 秒）"
+        );
     }
 
     /// 单例只认首个上限（配置为启动只读，运行期不得被不同调用点改写）

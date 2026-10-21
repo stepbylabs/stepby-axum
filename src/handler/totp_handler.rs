@@ -209,9 +209,18 @@ pub async fn verify(
     if let Some(count) = fail_count
         && count >= MAX_TOTP_VERIFY_FAIL
     {
-        return Err(AppError::bad_request(&crate::tr!(
-            "error.totp.login_locked"
-        )));
+        // b83（AGENTS C.8/C.10）：文案本身就是"请 10 分钟后再试"⇒ 这是"稍后再试"，
+        // 不是"你的请求有问题"。此前用 400 呈现，客户端与监控都无法区分
+        // "参数错"与"被锁定"，只能靠猜来退避。剩余秒数取键的真实 TTL（读不到回落窗口上限）。
+        let retry = crate::shared_store::lockout_retry_after_secs(
+            state.store.as_ref(),
+            &fail_key,
+            TOTP_FAIL_TTL_SECS,
+        )
+        .await;
+        return Err(
+            AppError::new(429, crate::tr!("error.totp.login_locked")).with_retry_after(retry)
+        );
     }
 
     // 2. 已启用检查：已启用用户必须走 disable 后再重新绑定，防止 MFA 被接管
@@ -371,9 +380,16 @@ pub async fn disable(
     if let Some(count) = fail_count
         && count >= MAX_TOTP_VERIFY_FAIL
     {
-        return Err(AppError::bad_request(&crate::tr!(
-            "error.totp.login_locked"
-        )));
+        // 与 verify 分支同口径（同一计数键、同一窗口）：429 + Retry-After，不再以 400 呈现。
+        let retry = crate::shared_store::lockout_retry_after_secs(
+            state.store.as_ref(),
+            &fail_key,
+            TOTP_FAIL_TTL_SECS,
+        )
+        .await;
+        return Err(
+            AppError::new(429, crate::tr!("error.totp.login_locked")).with_retry_after(retry)
+        );
     }
 
     // 1. 验证密码（从数据库查询用户密码并校验；参数实现在 `utils::password`，此处只解析）

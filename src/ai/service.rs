@@ -314,7 +314,7 @@ impl AiService {
         let backend = self.db.get_database_backend();
         let row = self
             .db
-            .query_one_raw(Statement::from_sql_and_values(
+            .query_one_raw(crate::common::sql_dialect::stmt(
                 backend,
                 "SELECT question, sql_text FROM ai_chat_history WHERE id = ? AND tenant_id = ? AND user_id = ?",
                 [history_id.into(), tenant_id.into(), user_id.into()],
@@ -366,10 +366,10 @@ impl AiService {
         usage: Option<crate::ai::provider::TokenUsage>,
     ) {
         let backend = self.db.get_database_backend();
-        let stmt = Statement::from_sql_and_values(
+        let stmt = crate::common::sql_dialect::stmt(
             backend,
             "INSERT INTO ai_chat_history (tenant_id, user_id, question, sql_text, tables_used, columns_json, rows_count, duration_ms, success, error_msg, prompt_tokens, completion_tokens, total_tokens, create_time) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 tenant_id.into(),
                 user_id.into(),
@@ -386,6 +386,10 @@ impl AiService {
                 usage.map(|u| u.prompt_tokens).into(),
                 usage.map(|u| u.completion_tokens).into(),
                 usage.map(|u| u.total_tokens).into(),
+                // b83：原交给 `CURRENT_TIMESTAMP`（SQLite 落 UTC、MySQL/PG 落会话时区，
+                // compose 给 PG 设 TZ=Asia/Shanghai ⇒ 同语句差 8 小时）。历史表要与
+                // 保留期清理、列表排序同口径，一律走 `now_naive()` 这一份事实源。
+                crate::common::datetime::now_naive().into(),
             ],
         );
         if let Err(e) = self.db.execute_raw(stmt).await {
@@ -406,7 +410,7 @@ impl AiService {
         let offset = (page.saturating_sub(1)).saturating_mul(size);
         let total_row = self
             .db
-            .query_one_raw(Statement::from_sql_and_values(
+            .query_one_raw(crate::common::sql_dialect::stmt(
                 backend,
                 "SELECT COUNT(*) AS c FROM ai_chat_history WHERE tenant_id = ? AND user_id = ?",
                 [tenant_id.into(), user_id.into()],
@@ -417,7 +421,7 @@ impl AiService {
             .unwrap_or(0);
         let rows = self
             .db
-            .query_all_raw(Statement::from_sql_and_values(
+            .query_all_raw(crate::common::sql_dialect::stmt(
                 backend,
                 "SELECT id, question, sql_text, tables_used, rows_count, duration_ms, success, error_msg, create_time \
                  FROM ai_chat_history WHERE tenant_id = ? AND user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -470,7 +474,7 @@ impl AiService {
         };
         let total_row = self
             .db
-            .query_one_raw(Statement::from_sql_and_values(
+            .query_one_raw(crate::common::sql_dialect::stmt(
                 backend,
                 format!("SELECT COUNT(*) AS c FROM ai_chat_history {where_sql}").as_str(),
                 binds.clone(),
@@ -481,7 +485,7 @@ impl AiService {
             .unwrap_or(0);
         let rows = self
             .db
-            .query_all_raw(Statement::from_sql_and_values(
+            .query_all_raw(crate::common::sql_dialect::stmt(
                 backend,
                 format!(
                     "SELECT id, tenant_id, user_id, question, sql_text, tables_used, rows_count, duration_ms, success, error_msg, create_time \
@@ -543,7 +547,7 @@ impl AiService {
         let backend = self.db.get_database_backend();
         let res = self
             .db
-            .execute_raw(Statement::from_sql_and_values(
+            .execute_raw(crate::common::sql_dialect::stmt(
                 backend,
                 "DELETE FROM ai_chat_history WHERE id = ? AND tenant_id = ? AND user_id = ?",
                 [id.into(), tenant_id.into(), user_id.into()],

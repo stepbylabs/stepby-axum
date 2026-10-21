@@ -392,6 +392,178 @@ mod tests {
         );
     }
 
+    /// **裸 SQL 里的时间来源**（b83 补的第三族）：DML 文本内直接写 `CURRENT_TIMESTAMP` /
+    /// `NOW()` 一律禁止。SQLite 落 **UTC**，MySQL/PG 落**会话时区**——
+    /// `deploy/docker-compose.db.yml` 给 PG 容器设 `TZ: Asia/Shanghai`，本机实测同一条语句
+    /// 差 8 小时（`CURRENT_TIMESTAMP` = 18:05+08，而 UTC 侧 10:05）。
+    ///
+    /// 与 `seed_paths_never_use_local_clock` 的分工（两把都要，缺一不可）：那把吃的是
+    /// `match` 分支自产方言时间的形态（`=> "NOW()"`），**看不见拼在 SQL 字面量里的**这一族。
+    /// b83 实测该族有 7 处在册外长期存在：`ai/config_service.rs:174`、`ai/service.rs:372`、
+    /// `upload_config_service.rs`（两处 write_key + 一处 persist）、`initialize/menu.rs` 两处，
+    /// 全部已改为显式绑定 `now_naive()`。
+    ///
+    /// **不在本判据内**：DDL 的 `DEFAULT CURRENT_TIMESTAMP`（仅当 INSERT 省略该列才生效）。
+    /// 这类列里唯一真实存在的是 `sys_notice_read.read_time`，由
+    /// `notice_read_inserts_always_set_read_time` 单独证明生产写路径恒显式赋值——
+    /// "默认值不会被用到"必须是判据，不能是注释里的断言。
+    #[test]
+    fn naked_sql_time_source_banned_across_production_code() {
+        fn sql_time_literal(line: &str) -> bool {
+            let is_dml = ["INSERT ", "UPDATE ", "DELETE ", "SELECT "]
+                .iter()
+                .any(|k| line.contains(k));
+            let has_db_clock = line.contains("CURRENT_TIMESTAMP") || line.contains("NOW()");
+            // DDL 默认值走另一条锁（见模块注释），这里必须放过，否则判据会因为
+            // 迁移里的建表语句假红——而"假红的锁"很快就被放宽成没有锁。
+            is_dml && has_db_clock && !line.contains("DEFAULT CURRENT_TIMESTAMP")
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut hits: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
+        for dir in [root.join("src"), root.join("migration/src")] {
+            for f in collect_rs(&dir) {
+                let rel = f
+                    .strip_prefix(root)
+                    .unwrap_or(f.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                // 本文件是判据自己的家：控制组字面量必然含被禁形态（同 prod_scan 的 SCANNER_SELF）
+                if rel.ends_with("src/common/datetime.rs")
+                    || rel.contains("integration_tests")
+                    || rel.ends_with("/tests.rs")
+                {
+                    continue;
+                }
+                scanned += 1;
+                let raw = std::fs::read_to_string(f).unwrap_or_default();
+                // 采集走共享管道，且**注释置空但保留行号**（`Comments::Blank`）：
+                // 用 DropBlocks 会让上报行号与真实文件错位（本轮首跑实测偏移 33 行），
+                // 而"照着行号去改"是这把锁唯一的用法。
+                let lines = crate::common::prod_scan::normalize(
+                    &raw,
+                    &crate::common::prod_scan::Scan {
+                        strip_test_code: true,
+                        comments: crate::common::prod_scan::Comments::Blank,
+                        ..Default::default()
+                    },
+                );
+                for (i, line) in lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| sql_time_literal(l))
+                {
+                    hits.push(format!("{}:{} {}", rel, i + 1, line.trim()));
+                }
+            }
+        }
+        // 采集面探针：扫不到文件必须响亮失败，"没跑"不得读成"干净"
+        assert!(
+            scanned >= 400,
+            "只扫了 {scanned} 个生产文件 ⇒ 采集面定位失效，本锁即将空转（不是通过）"
+        );
+
+        // 双向：合成违规必须被抓
+        assert!(
+            sql_time_literal(
+                "                \"UPDATE sys_config SET config_value = ?, update_time = CURRENT_TIMESTAMP WHERE config_key = ?\","
+            ),
+            "拼在 SQL 字面量里的 CURRENT_TIMESTAMP 未被抓到 ⇒ 本锁是虚锁"
+        );
+        assert!(
+            sql_time_literal("let sql = \"INSERT INTO t (a, create_time) VALUES (?, NOW())\";"),
+            "MySQL 方言 NOW() 同族形态未被抓到 ⇒ 判据只覆盖了半个族"
+        );
+        // 双向：三类合法形态不得误报
+        assert!(
+            !sql_time_literal("read_time  DATETIME DEFAULT CURRENT_TIMESTAMP,"),
+            "DDL 默认值被误判 ⇒ 该列属另一条锁的口径"
+        );
+        assert!(
+            !sql_time_literal(
+                "crate::common::sql_dialect::stmt(backend, \"UPDATE t SET update_time = ?\", [v.into()])"
+            ),
+            "已改绑参数的正确形态被误判 ⇒ 判据会把修法本身报成违规"
+        );
+        assert!(
+            !sql_time_literal("// 历史上这里曾写 CURRENT_TIMESTAMP，现已收敛"),
+            "注释被 strip_comments 剥除后仍含被禁形态 ⇒ 剥注环节失效"
+        );
+
+        assert!(
+            hits.is_empty(),
+            "生产裸 SQL 把时间来源交给数据库会话时区（换库即换口径，见本测试注释）：
+{}",
+            hits.join(
+                "
+"
+            )
+        );
+    }
+
+    /// `sys_notice_read.read_time` 的 DDL 带 `DEFAULT CURRENT_TIMESTAMP`（三档都建了）。
+    /// 该默认值只在"INSERT 省略 read_time"时生效，而 PG/MySQL 下它取**会话时区**——
+    /// 所以"生产写路径恒显式赋值"必须由代码逐点证明，不能停在注释里的断言。
+    #[test]
+    fn notice_read_inserts_always_set_read_time() {
+        /// 取一段 `ActiveModel { … }` 文本，判断它是否显式赋了 read_time。
+        /// 抽成函数是为了让**真扫描与对照组走同一条判据**（本仓反复自曝的"锁与对照组
+        /// 不同源"缺陷形态，这里不留第二个机会）。
+        fn model_sets_read_time(body: &str) -> bool {
+            body.contains("read_time: Set(")
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = root.join("src/repository/sys_notice_read.rs");
+        let raw = std::fs::read_to_string(&repo).expect("sys_notice_read 仓储文件必须存在");
+        let prod = match raw.find("#[cfg(test)]") {
+            Some(i) => &raw[..i],
+            None => raw.as_str(),
+        };
+        // 逐个写模型取窗口（止于下一个 `};`），逐点判"有没有赋 read_time"
+        let mut models: Vec<String> = Vec::new();
+        let mut from = 0usize;
+        while let Some(rel_at) = prod[from..].find("ActiveModel {") {
+            let start = from + rel_at;
+            let end = prod[start..]
+                .find("};")
+                .map(|p| start + p + 2)
+                .unwrap_or(prod.len());
+            models.push(prod[start..end].to_string());
+            from = end;
+        }
+        assert!(
+            !models.is_empty(),
+            "sys_notice_read 里一个写模型都没找到 ⇒ 本锁失去约束对象（不是通过）"
+        );
+        let missing: Vec<&str> = models
+            .iter()
+            .filter(|m| !model_sets_read_time(m))
+            .map(|m| m.as_str())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "有 {} 个 sys_notice_read 写模型省略了 read_time ⇒ 该列将落到 DDL 默认值 \
+             CURRENT_TIMESTAMP（PG/MySQL 取会话时区，与全仓 UTC 口径分裂）：
+{}",
+            missing.len(),
+            missing.join(
+                "
+"
+            )
+        );
+        // 双向：合成缺失形态必须被同一条判据抓到
+        assert!(
+            !model_sets_read_time("ActiveModel { notice_id: Set(1), user_id: Set(2), }"),
+            "合成缺失形态未被抓到 ⇒ 上面的通过是恒真断言"
+        );
+        assert!(
+            model_sets_read_time("ActiveModel { read_time: Set(Some(now)), }"),
+            "合规形态被判缺 ⇒ 判据方向写反"
+        );
+    }
+
     /// **充分判据**：任何"函数体内既取本机挂钟、又写持久化时间列"的形态必须显式在册。
     ///
     /// 为什么还要这一把（`seed_paths_never_use_local_clock` 之外）：

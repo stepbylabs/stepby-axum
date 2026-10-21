@@ -260,7 +260,7 @@ impl SharedStore for RedisStore {
         // S1 双写：DB 列同步（失败仅 WARN；uid 必为数值 user_id，parse 失败属异常仅告警跳过）
         match uid.parse::<i64>() {
             Ok(uid_i64) => {
-                let stmt = Statement::from_sql_and_values(
+                let stmt = crate::common::sql_dialect::stmt(
                     self.db.get_database_backend(),
                     "UPDATE sys_user SET password_version = password_version + 1 WHERE user_id = ?",
                     [uid_i64.into()],
@@ -374,6 +374,17 @@ impl SharedStore for RedisStore {
             .await
             .map_err(|e| StoreError::backend(&e))?;
         Ok(n)
+    }
+
+    /// 剩余存活秒数：`TTL` 命令。`-1`（永不过期）与 `-2`（键不存在）都归一成 `None`，
+    /// 与 local 档口径一致（调用方只见"有秒数"或"不知道"两种结局）。
+    async fn ttl(&self, key: &str) -> Result<Option<i64>, StoreError> {
+        let mut redis = self.conn.clone();
+        let raw: i64 =
+            crate::utils::redis::cmd_timeout(redis::cmd("TTL").arg(key).query_async(&mut redis))
+                .await
+                .map_err(|e| StoreError::backend(&e))?;
+        Ok(if raw < 0 { None } else { Some(raw) })
     }
 
     /// 原子自减（连接计数专用）：CONN_DECR_SCRIPT 原样搬运；键不存在返回 -1（Redis DECR 语义）
@@ -636,7 +647,7 @@ impl RedisStore {
         // ① 吊销权威层 → blacklist 键
         let mut rev_count: usize = 0;
         match db
-            .query_all_raw(Statement::from_sql_and_values(
+            .query_all_raw(crate::common::sql_dialect::stmt(
                 backend,
                 "SELECT token_hash, expire_at FROM sys_token_revocation WHERE expire_at > ?",
                 [now.into()],

@@ -316,3 +316,101 @@ async fn test_totp_validation_errors() {
         "非法验证码 disable 应 400，实际: {status}"
     );
 }
+
+/// b83（N-24）：TOTP 失败锁定必须以 **429 + `Retry-After`** 呈现，且窗口内**连正确码也不放行**。
+///
+/// 三条判据各管一件事：
+/// ① 状态码：文案是"请 10 分钟后再试"，语义是"稍后再试"（AGENTS C.8/C.10），不是参数错。
+///    改造前 verify/disable 分支是 400、登录链是 1003（也映射 400），而密码锁定早就是 429
+///    ⇒ 同一语义三种码，客户端与监控都没法按码聚合。
+/// ② `Retry-After`：值来自 `SharedStore::ttl`（读不到才回落窗口上限）。集成测试固定走
+///    redis 档，所以这一条同时是 `RedisStore::ttl` 的唯一载体——不是顺带，是刻意。
+/// ③ 锁定期间正确码必须仍然失败：否则 429 只是一句提示，不是闸门（防暴力枚举的存在理由）。
+///
+/// 收尾删掉 `totp:verify_fail:*`：admin 是全套件共用账号，留着计数会让本进程后续
+/// TOTP 用例在 10 分钟内全部撞锁（那种"上一把用例把下一把洗红"最难查）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_totp_verify_lockout_is_429_with_retry_after() {
+    ensure_config_enc_key();
+    let ctx = TestContext::new().await;
+
+    let v = ctx
+        .post_json("/system/user/totp/setup", serde_json::json!({}))
+        .await;
+    let secret = v["data"]["secret"]
+        .as_str()
+        .expect("setup 应返回 secret")
+        .to_string();
+    let correct = generate_totp_code(&secret);
+
+    // 1. 打满阈值（`MAX_TOTP_VERIFY_FAIL = 5`）：每一次都仍是 400（参数级失败）
+    for i in 0..5i32 {
+        let (status, _h, body) = ctx
+            .send_with_headers(ctx.request(
+                Method::POST,
+                "/system/user/totp/verify",
+                Some(serde_json::json!({ "code": wrong_code(&correct), "secret": secret })),
+            ))
+            .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "第 {} 次错误码应是 400（验证码错，不是频率锁），实际 {status}，body {body}",
+            i + 1
+        );
+        assert_ne!(body["code"], 200, "错误码 verify 不应成功，body {body}");
+    }
+
+    // 2. 第 6 次即使带**正确码**也必须被拒，且是 429 + Retry-After + body.code=429
+    let (status, headers, body) = ctx
+        .send_with_headers(ctx.request(
+            Method::POST,
+            "/system/user/totp/verify",
+            Some(serde_json::json!({ "code": correct, "secret": secret })),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        "锁定态必须 429（b83 前是 400），实际 {status}，body {body}"
+    );
+    assert_eq!(
+        body["code"], 429,
+        "body.code 必须与 HTTP 状态同值（C.8 契约），实际 {body}"
+    );
+    let msg = body["msg"].as_str().unwrap_or_default().to_string();
+    assert!(
+        msg.contains("TOTP"),
+        "文案必须是 TOTP 锁定而不是通用限流（若是 `error.rate_limit.*` 说明撞上的是\
+         路由级限流中间件，本用例的 429 就不是被测行为），实际: {msg}"
+    );
+    let retry = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("锁定响应必须带数字 Retry-After，头={headers:?}，body {body}"));
+    assert!(
+        (1..=600).contains(&retry),
+        "Retry-After 必须落在窗口 1..=600 秒内（取键的真实剩余 TTL），实际 {retry}"
+    );
+
+    // 3. 闸门而不是提示：状态仍未启用，说明正确码没有被这次请求消费掉
+    let v = ctx.get_json("/system/user/totp/status").await;
+    assert_eq!(
+        v["data"]["enabled"], false,
+        "锁定期间正确码不得生效，实际: {v}"
+    );
+
+    // 4. 复原：清掉失败计数键族（见函数头说明）
+    let keys = ctx
+        .state
+        .store
+        .scan("totp:verify_fail:*", None)
+        .await
+        .expect("scan 失败计数键");
+    ctx.state.store.del(&keys).await.expect("清理失败计数键");
+    assert!(
+        !keys.is_empty(),
+        "清理面扫到 0 个键 ⇒ 失败计数键族命名变了，本用例的复原形同虚设"
+    );
+}

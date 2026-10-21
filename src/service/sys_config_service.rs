@@ -25,7 +25,7 @@
 
 use futures::future::FutureExt;
 use garde::Validate;
-use sea_orm::{DatabaseConnection, Set, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseConnection, Set, TransactionTrait};
 use serde::Deserialize;
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
@@ -217,6 +217,36 @@ impl SysConfigService {
             config_repo: SysConfigRepository::new(db),
             store,
         }
+    }
+
+    /// 平台设置类**定点写**（AI 六键 / 上传七键 / 存储档位）——同一语义的 SQL 全仓只此一份。
+    ///
+    /// 为什么收敛到这里（b83 实测的两处并存缺陷）：
+    /// 1. `ai/config_service.rs` 与 `upload_config_service.rs` 各抄一份 UPDATE，前者把后端
+    ///    **写死成 `DatabaseBackend::Sqlite`**，PG 部署下 `?` 直接语法失败
+    ///    （判据取证见 `crate::common::sql_dialect` 模块头）。
+    /// 2. 两份都把 `update_time = CURRENT_TIMESTAMP` 交给数据库：SQLite 落 **UTC**，
+    ///    MySQL/PG 落**会话时区**——`deploy/docker-compose.db.yml` 给 PG 容器设了
+    ///    `TZ: Asia/Shanghai`，本机实测同一语句差 8 小时（18:05 对 10:05）。
+    ///    同一列两种口径，正是 N-16 的机制性根源。
+    ///
+    /// 现在：真实后端 + 方言占位符 + 显式 `now_naive()`（与全仓时间写入同一事实源）。
+    /// 缓存失效仍由调用方负责（这两个服务各自有自己的 refreshCache 口径，本函数不越权）。
+    pub async fn set_platform_value(&self, key: &str, value: &str) -> Result<(), ServiceError> {
+        let db = self.config_repo.base().db();
+        let backend = db.get_database_backend();
+        db.execute_raw(crate::common::sql_dialect::stmt(
+            backend,
+            "UPDATE sys_config SET config_value = ?, update_time = ? WHERE config_key = ?",
+            [
+                value.to_string().into(),
+                crate::common::datetime::now_naive().into(),
+                key.to_string().into(),
+            ],
+        ))
+        .await
+        .map_err(|e| ServiceError::internal(&format!("写入 {key} 失败: {e}")))?;
+        Ok(())
     }
 
     // ==================== 缓存层（两层）====================

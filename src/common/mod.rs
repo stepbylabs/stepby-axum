@@ -30,6 +30,7 @@ pub mod redact;
 pub mod response;
 pub mod risk_control;
 pub mod sort;
+pub mod sql_dialect;
 pub mod ssrf;
 pub mod tenant;
 pub mod upload;

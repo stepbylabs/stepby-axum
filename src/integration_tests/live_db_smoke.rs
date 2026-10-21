@@ -187,9 +187,19 @@ async fn live_dialect_migration_and_fallback_lifecycle() {
         .await
         .expect("[smoke] Migrator::up 前置建库失败");
     let up_count = applied_count(&db).await;
+    // 期望值从注册表派生，**不写死数字**（b83 实测：本机 PG 上跑本环时硬失败在
+    // "应为 121、实际 122"——b82 加了 `m20261021_000001_notice_read_user_index` 之后
+    // 没人再跑过本环，常量就悄悄过期了。写死数字的判据每加一条迁移就红一次，
+    // 而它红了以后人人都会改成"新数字"，等于没有判据）。
+    let registered = <Migrator as MigratorTrait>::migrations().len();
     assert_eq!(
-        up_count, 121,
-        "[smoke] 前滚后已应用迁移应为 121，实际 {up_count}"
+        up_count, registered,
+        "[smoke] 前滚后已应用迁移数应等于注册表条数（注册表 {registered} 条，库内 {up_count} 条）\
+         ⇒ 有迁移在该方言上没落库，或注册表与 _seaql_migrations 漂移"
+    );
+    assert!(
+        registered >= 100,
+        "[smoke] 注册表只有 {registered} 条 ⇒ 采集面塌了，这个相等断言即将空转"
     );
 
     // ---- 2. 兜底段：每次启动都重复执行，必须幂等且真的把索引补齐 ----
@@ -244,6 +254,50 @@ async fn live_dialect_migration_and_fallback_lifecycle() {
         missing_3.is_empty(),
         "[smoke] 回滚重放后兜底段没能补齐索引: {missing_3:?}"
     );
+
+    // ---- 6. 占位符方言探针（b83：PG 不吃 `?`，而 sea-orm 不翻译）----
+    //  正控：经 `common::sql_dialect::stmt` 的语句在三档都能真实执行（修法的端到端证据）。
+    //  对照：**只有 PG 档**要求未转换的 `?` 必须失败。缺了这条对照，"三档都成功"
+    //       什么都没证明——它可能只是因为连的根本不是 PG（本机实测：
+    //       `PREPARE … = ?` ⇒ syntax error，`PREPARE … = $1` ⇒ 成功）。
+    {
+        let bind = || vec![sea_orm::Value::String(Some("sys.ai.enabled".to_string()))];
+        let translated = crate::common::sql_dialect::stmt(
+            backend,
+            "SELECT COUNT(*) FROM sys_config WHERE config_key = ?",
+            bind(),
+        );
+        let rows = db.query_all_raw(translated).await.unwrap_or_else(|e| {
+            panic!("[smoke] 经 sql_dialect::stmt 的查询在 {backend:?} 上失败：{e}")
+        });
+        assert_eq!(
+            rows.len(),
+            1,
+            "[smoke] COUNT 查询应恰好返回 1 行，实际 {}",
+            rows.len()
+        );
+
+        if matches!(backend, DatabaseBackend::Postgres) {
+            let raw = Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) FROM sys_config WHERE config_key = ?",
+                bind(),
+            );
+            let err = db.query_all_raw(raw).await.expect_err(
+                "[smoke] PG 上未转换的 `?` 竟然执行成功 ⇒ 本批定性的前提被推翻\
+                     （sea-orm 或 PG 行为变了），`common::sql_dialect` 与 \
+                     `scripts/pg_placeholder_scan.py` 的判据必须重新定性",
+            );
+            let text = err.to_string();
+            assert!(
+                text.contains('?') || text.to_lowercase().contains("syntax"),
+                "[smoke] PG 的 `?` 失败文案与预期形态不符，实际：{text}"
+            );
+            println!("[smoke] 占位符探针：PG 档 `?` 如期失败（对照成立），sql_dialect 档成功");
+        } else {
+            println!("[smoke] 占位符探针：{backend:?} 档 `?` 原生可用，正控通过");
+        }
+    }
 
     println!(
         "[smoke] 通过：{up_count} 条迁移 up→down→up 收敛，{} 个索引在 4 轮兜底后都存在，种子恰好 1 行",

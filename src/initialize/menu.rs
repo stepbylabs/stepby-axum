@@ -976,17 +976,25 @@ pub(crate) async fn ensure_archive_menus(db: &DatabaseConnection) -> anyhow::Res
     // compose 全栈时命中：`补种归档按钮菜单失败: syntax error at or near "OR"`）。
     // 同一条种子的迁移侧（m20261012_000001）早已分支过，兜底这侧漏了 —— 两处是镜像关系，
     // 改一处必须同步另一处。
-    let seed_body = "\
+    // b83：`create_time` 原交给 `CURRENT_TIMESTAMP`——SQLite 落 UTC、MySQL/PG 落会话时区
+    // （compose 给 PG 容器设 TZ=Asia/Shanghai，实测差 8 小时）。种子与迁移是镜像关系，
+    // 两处必须同一口径，故显式绑定应用侧 UTC 时钟（`common::datetime::now_naive`）。
+    let now = crate::common::datetime::now_naive()
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let seed_body = format!(
+        "\
          (menu_id, menu_name, parent_id, order_num, path, component, query, route_name, \
           is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, \
           remark, del_flag) \
          VALUES \
          (4180, '审计归档下载', 500, 4, '#', '', '', '', '1', '0', 'F', '0', '0', \
-          'monitor:operlogArchive:download', '#', 'admin', CURRENT_TIMESTAMP, \
+          'monitor:operlogArchive:download', '#', 'admin', '{now}', \
           '链感知保留：归档对象下载（平台专属，monitor:operlogArchive: 前缀）', '0'), \
          (4181, '链完整性校验', 500, 5, '#', '', '', '', '1', '0', 'F', '0', '0', \
-          'monitor:operlogArchive:verify', '#', 'admin', CURRENT_TIMESTAMP, \
-          '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')";
+          'monitor:operlogArchive:verify', '#', 'admin', '{now}', \
+          '批次十九收尾：verify-chain 收紧平台专属（原复用 monitor:operlog:query，租户可见即泄漏全平台链统计）', '0')"
+    );
     let seed_sql = match backend {
         DatabaseBackend::Sqlite => format!("INSERT OR IGNORE INTO sys_menu {seed_body}"),
         DatabaseBackend::Postgres => {

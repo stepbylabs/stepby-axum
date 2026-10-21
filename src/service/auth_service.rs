@@ -707,10 +707,20 @@ impl AuthService {
                 user.user_id,
             )
             .await;
-            return Err(ServiceError::new(
-                1003,
-                crate::tr!("error.totp.login_locked"),
-            ));
+            // b83（AGENTS C.8/C.10 + N-24）：与密码锁定分支（下方 429）同语义同码。
+            // 此前同一文案键 `error.totp.login_locked` 在本文件是 1003（映射 400）、
+            // 在 totp_handler 是 400、而文案写"请 10 分钟后再试"——三处两种码，
+            // 客户端无法按状态码判"被锁定 vs 参数错"，监控也无法按 429 聚合频率类失败。
+            let retry = crate::shared_store::lockout_retry_after_secs(
+                store.as_ref(),
+                &fail_key,
+                TOTP_FAIL_TTL as u64,
+            )
+            .await;
+            return Err(
+                ServiceError::new(429, crate::tr!("error.totp.login_locked"))
+                    .with_retry_after(retry),
+            );
         }
 
         let code = totp_code.unwrap_or("");
@@ -846,10 +856,16 @@ impl AuthService {
                 0,
             )
             .await;
-            return Err(ServiceError::new(
-                429,
-                crate::tr!("error.auth.password_locked"),
-            ));
+            return Err(
+                ServiceError::new(429, crate::tr!("error.auth.password_locked")).with_retry_after(
+                    crate::shared_store::lockout_retry_after_secs(
+                        store.as_ref(),
+                        &fail_key,
+                        LOGIN_FAIL_TTL as u64,
+                    )
+                    .await,
+                ),
+            );
         }
         Ok(())
     }
@@ -1834,7 +1850,7 @@ impl AuthService {
     async fn read_pwd_ver_from_db(&self, user_id: i64) -> Result<Option<u64>, sea_orm::DbErr> {
         let db = self.logininfor_repo.base().db();
         let row = db
-            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            .query_one_raw(crate::common::sql_dialect::stmt(
                 db.get_database_backend(),
                 "SELECT password_version FROM sys_user WHERE user_id = ?",
                 [user_id.into()],

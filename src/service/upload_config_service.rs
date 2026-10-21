@@ -18,7 +18,6 @@
 //! - endpoint 变更走 `common::ssrf` 校验（防 DNS rebinding/私网穿透，对齐 ai base_url）；
 //! - 平台专属（handler 层 `tenant_id == 0` 门控，对齐 sys.ai.*）。
 
-use sea_orm::ConnectionTrait;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::Arc;
@@ -203,25 +202,12 @@ impl UploadConfigService {
     /// 方言注意：`Statement::from_sql_and_values` 的占位符风格随 backend 变化
     /// （PG 为 `$n`），SQL 必须按 backend 分支——不能照抄 ai/config_service 的
     /// Sqlite 固定标注（该处在 PG 下会因占位符风格错配而失败，本处一并修正口径）。
+    ///
+    /// b83 订正：本文件原按 backend 手写 `$1`/`?` 两支、`ai/config_service` 写死 Sqlite，
+    /// 两份还都把 `update_time` 交给 `CURRENT_TIMESTAMP`（三库落不同时区）。现已统一走
+    /// `SysConfigService::set_platform_value`——方言占位符与时间口径各只有一处事实源。
     async fn write_key(&self, key: &str, value: &str) -> Result<(), ServiceError> {
-        let backend = self.db.get_database_backend();
-        let sql = match backend {
-            sea_orm::DatabaseBackend::Postgres => {
-                "UPDATE sys_config SET config_value = $1, update_time = CURRENT_TIMESTAMP WHERE config_key = $2"
-            }
-            _ => {
-                "UPDATE sys_config SET config_value = ?, update_time = CURRENT_TIMESTAMP WHERE config_key = ?"
-            }
-        };
-        self.db
-            .execute_raw(sea_orm::Statement::from_sql_and_values(
-                backend,
-                sql,
-                [value.into(), key.into()],
-            ))
-            .await
-            .map_err(|e| ServiceError::internal(&format!("写入 {key} 失败: {e}")))?;
-        Ok(())
+        self.config_service.set_platform_value(key, value).await
     }
 
     /// 管理页更新：SSRF 校验 endpoint + secret_key/access_key seal + 七键写入 +
@@ -333,23 +319,9 @@ impl UploadConfigService {
 
     /// 档位持久化（写 sys.upload.backend + refreshCache）
     pub async fn persist_backend_mode(&self, mode: &str) -> Result<(), ServiceError> {
-        let backend = self.db.get_database_backend();
-        let sql = match backend {
-            sea_orm::DatabaseBackend::Postgres => {
-                "UPDATE sys_config SET config_value = $1, update_time = CURRENT_TIMESTAMP WHERE config_key = $2"
-            }
-            _ => {
-                "UPDATE sys_config SET config_value = ?, update_time = CURRENT_TIMESTAMP WHERE config_key = ?"
-            }
-        };
-        self.db
-            .execute_raw(sea_orm::Statement::from_sql_and_values(
-                backend,
-                sql,
-                [mode.into(), KEY_BACKEND_MODE.into()],
-            ))
-            .await
-            .map_err(|e| ServiceError::internal(&format!("写入 {KEY_BACKEND_MODE} 失败: {e}")))?;
+        self.config_service
+            .set_platform_value(KEY_BACKEND_MODE, mode)
+            .await?;
         self.config_service.refresh_cache().await?;
         Ok(())
     }
