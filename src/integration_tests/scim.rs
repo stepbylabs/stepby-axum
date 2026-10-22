@@ -24,14 +24,10 @@ fn scim_headers() -> [(&'static str, &'static str); 2] {
 }
 
 async fn scim_ctx() -> TestContext {
-    unsafe {
-        std::env::set_var("SCIM_ENABLED", "true");
-        std::env::set_var(
-            "SCIM_BEARER_TOKEN",
-            "scim-test-bearer-token-0123456789abcdef",
-        );
-    }
-    // build_isolated_state 内已统一开启 SCIM（见 mod.rs），TestContext::new 即可
+    // SCIM 的开启与 Bearer 由 harness 统一给定（`integration_tests/mod.rs` 里
+    // `settings.scim.enabled/bearer_token`），**不得**再用进程级 `set_var` 翻档：
+    // 环境是进程共享的，这里写一次就等于给所有并行用例的 `Settings::from_file` 改了档
+    // （AGENTS《开关规范》⑧；b85 的 `env_discipline` 锁把这类站点全部拦下）。
     TestContext::new().await
 }
 

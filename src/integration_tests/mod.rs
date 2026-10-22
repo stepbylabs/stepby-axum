@@ -28,6 +28,7 @@ mod common_search;
 mod data_rule;
 mod data_scope_tenant;
 mod ddl_dialect_discipline;
+mod env_discipline;
 mod file_common;
 mod flow;
 mod flow_action_dict;
@@ -286,20 +287,33 @@ async fn build_isolated_state_with(
     // 幂等初始化测试日志，便于并行测试中查看底层错误（DbErr 等）
     init_test_tracing();
 
-    // validate_secrets 拒绝占位密钥，这里通过环境变量注入一个合法强密钥（≥32 字符）。
-    // set_var 为 unsafe（进程级环境，所有测试写入同一常量值，无实际竞争）。
-    unsafe {
-        std::env::set_var(
-            "JWT_SECRET",
-            "a-very-long-jwt-secret-key-for-testing-32+chars",
-        );
-        // CONFIG_ENC_KEY：MaxMind 凭据等敏感配置的加密存储密钥（env-only 回退时缺失
-        // ⇒ ip_location config 接口 500「拒绝以明文存储凭据」，run 38289607542 实证）。
-        std::env::set_var(
-            "CONFIG_ENC_KEY",
-            "test-config-enc-key-for-integration-tests-32+chars",
-        );
-    }
+    // ---- 进程环境的装载必须"要么全有、要么全无" ----
+    // `dotenvy` 是**逐行**写环境变量的，而 `Settings::from_file` 在同一条语句里读环境并校验。
+    // 原先 `dotenv()` 排在本函数末尾：本进程第一个用例看不到 .env（恒绿），之后的用例看到的是
+    // **装载到一半**的 .env——实测 `.env` 里 `SSO_ENABLED`（第 36 行）比 `SSO_ISSUER`（第 38 行）
+    // 先进环境，于是并发轮里随机几个用例在校验处抛
+    // 「SSO_ENABLED=true 时必须显式配置 SSO_ISSUER」（b85 提交后复跑实测 3 条 login 用例红、
+    // `--test-threads=1` 恒绿）。`call_once` 让后到的线程**阻塞等装载完成**，读侧不再看到中间态；
+    // 同时把两处 `set_var` 也收进同一个块（AGENTS《开关规范》⑧：禁止用例依赖进程级 set_var）。
+    static TEST_ENV: std::sync::Once = std::sync::Once::new();
+    TEST_ENV.call_once(|| {
+        // validate_secrets 拒绝占位密钥，这里通过环境变量注入一个合法强密钥（≥32 字符）。
+        // 进程级环境，所有测试写入同一常量值，无实际竞争。
+        unsafe {
+            std::env::set_var(
+                "JWT_SECRET",
+                "a-very-long-jwt-secret-key-for-testing-32+chars",
+            );
+            // CONFIG_ENC_KEY：MaxMind 凭据等敏感配置的加密存储密钥（env-only 回退时缺失
+            // ⇒ ip_location config 接口 500「拒绝以明文存储凭据」，run 38289607542 实证）。
+            std::env::set_var(
+                "CONFIG_ENC_KEY",
+                "test-config-enc-key-for-integration-tests-32+chars",
+            );
+        }
+        // 测试 harness 不经过 main.rs，dotenvy 未加载——显式加载（CWD = workspace root，.env 可达）
+        let _ = dotenvy::dotenv();
+    });
 
     let mut settings = Settings::from_file(&manifest_config_path())
         .expect("加载 config/config.toml 失败（请确认 cwd 或 CARGO_MANIFEST_DIR 正确）");
@@ -357,8 +371,7 @@ async fn build_isolated_state_with(
     let slot = acquire_redis_slot().await;
     let db_path = unique_temp_db_path();
     settings.database.url = format!("sqlite://{}?mode=rwc", db_path);
-    // 测试 harness 不经过 main.rs，dotenvy 未加载——显式加载（CWD = workspace root，.env 可达）
-    let _ = dotenvy::dotenv();
+    // （.env 已在 `TEST_ENV.call_once` 里装载完毕，见函数开头那条注释）
     // redis 密码从环境注入（.env 的 REDIS_PASSWORD；docker --requirepass 展开），
     // 无密码环境（REDIS_PASSWORD 未设）保持原行为
     let redis_auth = match std::env::var("REDIS_PASSWORD") {

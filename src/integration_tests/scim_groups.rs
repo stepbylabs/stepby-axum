@@ -26,13 +26,7 @@ fn scim_headers() -> [(&'static str, &'static str); 2] {
 }
 
 async fn scim_ctx() -> TestContext {
-    unsafe {
-        std::env::set_var("SCIM_ENABLED", "true");
-        std::env::set_var(
-            "SCIM_BEARER_TOKEN",
-            "scim-test-bearer-token-0123456789abcdef",
-        );
-    }
+    // 同 scim.rs：SCIM 档位与 Bearer 由 harness 统一给定，禁止进程级 `set_var`（AGENTS 开关规范⑧）。
     TestContext::new().await
 }
 

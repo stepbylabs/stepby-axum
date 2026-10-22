@@ -16,18 +16,11 @@ use super::TestContext;
 use axum::http::Method;
 use totp_rs::{Algorithm, Builder, Secret};
 
-/// 注入 CONFIG_ENC_KEY（≥32 字符），供 TOTP secret 加解密使用。
-///
-/// 与 mod.rs 中 JWT_SECRET 的注入方式一致：进程级环境变量，全部测试写入同一常量，
-/// 无实际竞争；settings 通过 `apply_env_overrides` 在构造时读取。
-fn ensure_config_enc_key() {
-    unsafe {
-        std::env::set_var(
-            "CONFIG_ENC_KEY",
-            "it-test-config-enc-key-0123456789abcdef-32chars",
-        );
-    }
-}
+// `CONFIG_ENC_KEY` 由 harness 在 `TEST_ENV.call_once` 里统一注入（见 `mod.rs`）。
+// 这里原先还有一次 `ensure_config_enc_key()` 写**另一个**值——环境是进程共享的，
+// 两个值互相覆盖 ⇒ 上一个用例用 A 密钥加密的 TOTP secret，下一个用例起的应用实例
+// 可能读到 B 密钥而解不开。注释写着"全部测试写入同一常量，无实际竞争"，而两个常量
+// 本就不同（b85 的 `env_discipline` 锁 + `Once` 装载块把这类站点全部拦下）。
 
 /// 根据 Base32 secret 生成当前 TOTP 验证码（与 totp_handler 使用完全相同的参数）。
 fn generate_totp_code(secret: &str) -> String {
@@ -56,7 +49,6 @@ fn wrong_code(correct: &str) -> String {
 /// TOTP 全链路：status → setup → verify → status → disable → status。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_totp_setup_verify_disable_chain() {
-    ensure_config_enc_key();
     let ctx = TestContext::new().await;
 
     // 1. 初始状态：未启用
@@ -211,7 +203,6 @@ async fn test_totp_setup_verify_disable_chain() {
 /// TOTP 参数校验错误分支（确定性，无需依赖外部）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_totp_validation_errors() {
-    ensure_config_enc_key();
     let ctx = TestContext::new().await;
 
     // 1. 未 setup 直接 verify → 400（pending_expired）
@@ -331,7 +322,6 @@ async fn test_totp_validation_errors() {
 /// TOTP 用例在 10 分钟内全部撞锁（那种"上一把用例把下一把洗红"最难查）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_totp_verify_lockout_is_429_with_retry_after() {
-    ensure_config_enc_key();
     let ctx = TestContext::new().await;
 
     let v = ctx

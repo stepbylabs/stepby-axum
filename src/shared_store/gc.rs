@@ -66,7 +66,8 @@ impl SharedGcSummary {
 /// 抽出来的原因不是复用：`<=` 写成 `<` 时，行落在恰好等于 `now` 的那一秒上会被读路径
 /// 判过期、却被 GC 判未过期 ⇒ 永久留下一行"读说没了、库里还在"的僵尸，而这种偏移在真实
 /// 时钟上几乎造不出夹具（执行体内部的 `now` 不可控）。于是判据落到两侧：本函数被
-/// [`gc_sql_predicates_match_reader_side`] 钉住**语句文本**，`local_store::is_expired` 的
+/// `gc_sql_predicates_match_reader_side`（本模块 `#[cfg(test)]` 用例）钉住**语句文本**，
+/// `local_store::is_expired` 的
 /// 同一边界由它自己的用例钉住——两侧对齐才叫"同源"，单靠集成测试的远端边界判不出来。
 pub fn gc_delete_statements(now_epoch: i64) -> (String, String) {
     (
