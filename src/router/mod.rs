@@ -105,6 +105,7 @@ use crate::middleware::idempotency_middleware;
 use crate::middleware::locale_middleware;
 use crate::middleware::oper_log_middleware;
 use crate::middleware::permission_middleware;
+use crate::middleware::pwd_gate_middleware;
 use crate::middleware::rate_limit_middleware;
 use crate::middleware::request_id_middleware;
 use crate::middleware::response_cache::{ResponseCache, response_cache_middleware};
@@ -214,6 +215,13 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route_layer(from_fn_with_state(state.clone(), oper_log_middleware))
         // permission_middleware 使用 route_layer（路由匹配后执行，可访问 MatchedPath）
         .route_layer(from_fn_with_state(state.clone(), permission_middleware))
+        // 批八十四 项 A：强改密服务端闸门。
+        // 层序（外→内）：auth → rate_limit → idempotency → **pwd_gate** → permission → oper_log → cache。
+        // 刻意排在 permission **之前**（即更外层）：处于"必须改密"状态的用户访问业务接口时，
+        // 应当拿到 403「请先修改口令」这条**有恢复指引**的文案，而不是被 RBAC 报成
+        // 「无权限」——后者会把人支使去找管理员开权限，实际缺的是改一次密码。
+        // 白名单复用 permission::is_login_only_path（同一张表），闸门关闭时零库查询。
+        .route_layer(from_fn_with_state(state.clone(), pwd_gate_middleware))
         // idempotency_middleware 幂等性校验（R5-IDEMP-33）：基于 Idempotency-Key 头去重
         // 执行顺序：auth → rate_limit → idempotency → permission → oper_log → cache
         // 仅对 POST/PUT/DELETE 生效，缺失 Idempotency-Key 头时放行（可选特性）

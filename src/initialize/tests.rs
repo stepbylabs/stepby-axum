@@ -915,6 +915,7 @@ mod schema_equivalence_lock_tests {
         ensure_shared_store_tables(db).await?;
         ensure_user_password_version_column(db).await?;
         ensure_user_must_change_pwd_column(db).await?;
+        ensure_user_pwd_expire_policy(db).await?;
         // 3.10 链感知保留（等价 m20261008_000001）
         migration::migrations::m20261008_000001_log_archive_anchor::init_log_archive_anchor(db)
             .await?;
@@ -1758,6 +1759,7 @@ mod schema_equivalence_lock_tests {
             "ensure_shared_store_tables",
             "ensure_user_password_version_column",
             "ensure_user_must_change_pwd_column",
+            "ensure_user_pwd_expire_policy",
             "ensure_sso_rate_limit_tiers",
             "ensure_sensitive_rate_limit_tiers",
             "ensure_runtime_secrets_encrypted",
@@ -1908,5 +1910,308 @@ mod menu_del_flag_normalize_tests {
         ensure_menu_del_flag_normalized(&db)
             .await
             .expect("二次归一失败");
+    }
+}
+
+#[cfg(test)]
+mod pwd_expire_policy_backfill_tests {
+    //! 批八十四 项 A 的**存量库兜底**判据：旧键名就地改名、种子真的落库、回填只在建列时发生。
+    //!
+    //! 立这条的动因是 e2e M91 实测抓到的静默失效：`sys_config` 种子走 `INSERT OR IGNORE`
+    //! 且两版键名**共用 `config_id=9011`** ⇒ 跑过旧版的存量库里 9011 被旧键占着，
+    //! 新键那条被忽略、参数面从此看不见这个能力，而启动日志一个字都不报。
+    //! "键名换了但没迁移"正是本仓配置版本化基线明令禁止的那一类。
+    use super::*;
+    use sea_orm::{ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Statement};
+
+    const MIN_SYS_USER: &str =
+        "CREATE TABLE sys_user (user_id INTEGER PRIMARY KEY, user_name TEXT, create_time DATETIME)";
+    // 列结构对齐真实 sys_config 的**约束面**（ UNIQUE(tenant_id, config_key) 是本批事故的主角，
+    // 缺了它这个夹具就测不出改名撞键）
+    const MIN_SYS_CONFIG: &str = "CREATE TABLE sys_config (config_id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL DEFAULT 0, config_name TEXT, config_key TEXT, config_value TEXT, config_type TEXT, create_by TEXT, create_time DATETIME, remark TEXT, UNIQUE (tenant_id, config_key))";
+
+    async fn exec(db: &DatabaseConnection, sql: &str) {
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("建夹具失败: {e}\n{sql}"));
+    }
+
+    async fn one(db: &DatabaseConnection, sql: &str) -> sea_orm::QueryResult {
+        db.query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
+        .await
+        .expect("查询失败")
+        .pop()
+        .expect("必须有这一行——没有就说明判据在拿空集当通过")
+    }
+
+    /// 造"跑过改名前那一版"的库：有旧键（值被管理员改成 15）、没有 pwd_update_time 列
+    async fn legacy_db() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        exec(&db, MIN_SYS_USER).await;
+        exec(&db, MIN_SYS_CONFIG).await;
+        exec(
+            &db,
+            "INSERT INTO sys_user (user_id, user_name, create_time) VALUES (1, 'admin', '2020-01-02 03:04:05')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_by, create_time, remark) \
+             VALUES (9011, '口令有效期天数', 'sys.user.passwordExpireDays', '15', 'Y', 'admin', '2020-01-02 03:04:05', '旧版键名')",
+        )
+        .await;
+        db
+    }
+
+    /// ① 改名必须发生在种子**之前**：旧键消失、新键出现、管理员改过的值 15 原样保留
+    #[tokio::test]
+    async fn legacy_key_is_renamed_in_place_and_value_survives() {
+        let db = legacy_db().await;
+        ensure_user_pwd_expire_policy(&db).await.expect("兜底失败");
+
+        let old_rows: i64 = one(
+            &db,
+            "SELECT COUNT(*) AS c FROM sys_config WHERE config_key = 'sys.user.passwordExpireDays'",
+        )
+        .await
+        .try_get("", "c")
+        .unwrap();
+        assert_eq!(
+            old_rows, 0,
+            "旧键名必须已被就地改名（留着就是两份同义键并存）"
+        );
+
+        let row = one(&db, "SELECT config_value, config_id FROM sys_config WHERE config_key = 'sys.user.pwdExpireDays'").await;
+        let val: String = row.try_get("", "config_value").unwrap();
+        let id: i64 = row.try_get("", "config_id").unwrap();
+        assert_eq!(
+            val, "15",
+            "改名必须保住管理员已改的值（种子不得覆盖成默认 0）"
+        );
+        assert_eq!(id, 9011, "改名应原地更新同一行，不新插一条");
+
+        // 闸门键此前不存在 ⇒ 种子必须补出来，且种的是关闭态
+        let gate: String = one(
+            &db,
+            "SELECT config_value FROM sys_config WHERE config_key = 'sys.user.pwdChangeGate'",
+        )
+        .await
+        .try_get("", "config_value")
+        .unwrap();
+        assert_eq!(gate, "off", "闸门键必须被种子补齐且为关闭态");
+    }
+
+    /// ② 建列 + 回填只在新建列时发生；二次启动幂等且不得把口令年龄洗成"刚刚"
+    #[tokio::test]
+    async fn column_backfill_runs_once_and_is_idempotent() {
+        let db = legacy_db().await;
+        ensure_user_pwd_expire_policy(&db)
+            .await
+            .expect("首次兜底失败");
+
+        let age: String = one(
+            &db,
+            "SELECT pwd_update_time FROM sys_user WHERE user_id = 1",
+        )
+        .await
+        .try_get("", "pwd_update_time")
+        .unwrap();
+        assert_eq!(
+            age, "2020-01-02 03:04:05",
+            "存量行必须按 create_time 代理回填，不能取当前时刻"
+        );
+
+        // 模拟"管理员改了口令"后的时间戳，二次启动不得被回填覆盖
+        exec(
+            &db,
+            "UPDATE sys_user SET pwd_update_time = '2026-10-01 00:00:00' WHERE user_id = 1",
+        )
+        .await;
+        ensure_user_pwd_expire_policy(&db)
+            .await
+            .expect("二次兜底失败");
+        let age2: String = one(
+            &db,
+            "SELECT pwd_update_time FROM sys_user WHERE user_id = 1",
+        )
+        .await
+        .try_get("", "pwd_update_time")
+        .unwrap();
+        assert_eq!(
+            age2, "2026-10-01 00:00:00",
+            "列已存在时不得重跑回填（把口令年龄洗成刚改过 = 策略看不见真实年龄）"
+        );
+
+        let dup: i64 = one(
+            &db,
+            "SELECT COUNT(*) AS c FROM sys_config WHERE config_key = 'sys.user.pwdExpireDays'",
+        )
+        .await
+        .try_get("", "c")
+        .unwrap();
+        assert_eq!(dup, 1, "二次启动不得种出第二行");
+    }
+
+    /// ③ 启动事故回归锁：新键默认行**已被治理补齐建出来**时，改名不得撞
+    ///    `UNIQUE(tenant_id, config_key)` 打死 initialize，且管理员改过的值必须搬过去。
+    ///    这是 b84 实测把服务起不来逼出来的那一条：`UPDATE ... SET config_key=新名`
+    ///    看着幂等，实际与 `治理参数项缺行补齐`（启动序在前）直接对撞。
+    #[tokio::test]
+    async fn rename_survives_pre_existing_target_row() {
+        let db = legacy_db().await;
+        exec(
+            &db,
+            "INSERT INTO sys_config (config_id, tenant_id, config_name, config_key, config_value, config_type, create_by, create_time, remark)              VALUES (9500, 0, '口令有效期天数', 'sys.user.pwdExpireDays', '0', 'Y', 'admin', '2026-01-01 00:00:00', '治理补齐建的默认行')",
+        )
+        .await;
+        ensure_user_pwd_expire_policy(&db)
+            .await
+            .expect("兜底不得因唯一键冲突打断启动（启动被打死 = 整套判据都没有机会跑）");
+
+        let legacy_left: i64 = one(
+            &db,
+            "SELECT COUNT(*) AS c FROM sys_config WHERE config_key = 'sys.user.passwordExpireDays'",
+        )
+        .await
+        .try_get("", "c")
+        .unwrap();
+        assert_eq!(legacy_left, 0, "旧键必须被收敛掉，否则参数面两行同义键并存");
+        let row = one(&db, "SELECT config_id, config_value FROM sys_config WHERE config_key = 'sys.user.pwdExpireDays'").await;
+        let id: i64 = row.try_get("", "config_id").unwrap();
+        let val: String = row.try_get("", "config_value").unwrap();
+        assert_eq!(id, 9500, "保留既有行（治理补齐那条），不新插一条同义行");
+        assert_eq!(
+            val, "15",
+            "管理员在旧键上改过的值必须搬进新键，不得被默认值 0 洗掉"
+        );
+    }
+
+    /// ④ 按租户逐行收敛：租户层若也有旧行，不得与平台层的新行互相撞键
+    #[tokio::test]
+    async fn rename_is_per_tenant_not_only_platform_layer() {
+        let db = legacy_db().await;
+        exec(
+            &db,
+            "INSERT INTO sys_config (config_id, tenant_id, config_name, config_key, config_value, config_type, create_by, create_time, remark)              VALUES (9600, 7, '口令有效期天数', 'sys.user.passwordExpireDays', '45', 'Y', 'admin', '2026-01-01 00:00:00', '租户层旧行')",
+        )
+        .await;
+        ensure_user_pwd_expire_policy(&db)
+            .await
+            .expect("含租户层旧行时兜底也必须跑通");
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT tenant_id, config_value FROM sys_config WHERE config_key = 'sys.user.pwdExpireDays' ORDER BY tenant_id".to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "两层各一行（读侧与写侧共用同一租户谓词）");
+        let t7: String = rows[1].try_get("", "config_value").unwrap();
+        assert_eq!(t7, "45", "租户层已改值不得被平台层默认洗掉");
+    }
+
+    /// ⑤ 全新库（连 sys_user 都没有）必须安全跳过而不是报错——兜底排在迁移之前的启动序里
+    #[tokio::test]
+    async fn empty_db_skips_quietly() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        ensure_user_pwd_expire_policy(&db)
+            .await
+            .expect("空库应静默跳过");
+        let cols: i64 = one(
+            &db,
+            "SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='sys_user'",
+        )
+        .await
+        .try_get("", "c")
+        .unwrap();
+        assert_eq!(cols, 0, "兜底不得凭空建 sys_user 表（那是迁移的职责）");
+    }
+
+    /// ⑥ 存量库上由治理注册表**兜底先建行**的那两个键，remark 必须归一到种子文案；
+    ///    管理员自己写过的说明一律不动（对照组）。
+    ///
+    /// 立这条的实证：本机运行库 seed_diff 报出 2 处真实漂移——兜底建的行 remark 是
+    /// 通用文案"治理注册表缺行补齐（批次十四）"，而 `off / deny_write / deny_all`
+    /// 三档的**语义只写在种子的 remark 里** ⇒ 存量部署的参数管理页看不出区别（读不出
+    /// 说明就会配错，属真实能力缺口，不只是文案漂移）。新库走迁移种子不受影响，
+    /// 所以这一支在集成测试（新库）里永远看不见——只能由这条存量库夹具钉住。
+    #[tokio::test]
+    async fn backfilled_remark_converges_but_admin_text_survives() {
+        use migration::migrations::m20261022_000001_pwd_expire_policy as pwd_expire;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        exec(&db, MIN_SYS_USER).await;
+        exec(&db, MIN_SYS_CONFIG).await;
+        exec(
+            &db,
+            "INSERT INTO sys_user (user_id, user_name, create_time) VALUES (1, 'admin', '2020-01-02 03:04:05')",
+        )
+        .await;
+        // 治理兜底建行的实测形状：config_id 与种子不同（14820）、remark 是通用文案
+        exec(
+            &db,
+            &format!(
+                "INSERT INTO sys_config (config_id, tenant_id, config_name, config_key, config_value, config_type, create_by, create_time, remark) \
+                 VALUES (14820, 0, '口令有效期天数', 'sys.user.pwdExpireDays', '30', 'Y', 'admin', '2020-01-02 03:04:05', '{}')",
+                governance::GOVERNANCE_BACKFILL_REMARK
+            ),
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO sys_config (config_id, tenant_id, config_name, config_key, config_value, config_type, create_by, create_time, remark) \
+             VALUES (14821, 0, '强改密服务端闸门', 'sys.user.pwdChangeGate', 'off', 'Y', 'admin', '2020-01-02 03:04:05', '管理员自己写的说明')",
+        )
+        .await;
+
+        ensure_user_pwd_expire_policy(&db).await.expect("兜底失败");
+
+        let r1: String = one(
+            &db,
+            "SELECT remark FROM sys_config WHERE config_key='sys.user.pwdExpireDays'",
+        )
+        .await
+        .try_get("", "remark")
+        .unwrap();
+        assert_eq!(
+            r1,
+            pwd_expire::PWD_EXPIRE_DAYS_REMARK,
+            "兜底建的行必须归一到种子说明（同一常量 = 单一事实源，两处各写一份就会静默不归一）"
+        );
+        let v1: String = one(
+            &db,
+            "SELECT config_value FROM sys_config WHERE config_key='sys.user.pwdExpireDays'",
+        )
+        .await
+        .try_get("", "config_value")
+        .unwrap();
+        assert_eq!(v1, "30", "归一只动说明，不得改管理员设过的值");
+
+        let r2: String = one(
+            &db,
+            "SELECT remark FROM sys_config WHERE config_key='sys.user.pwdChangeGate'",
+        )
+        .await
+        .try_get("", "remark")
+        .unwrap();
+        assert_eq!(
+            r2, "管理员自己写的说明",
+            "UPDATE 谓词限定 remark=兜底文案 ⇒ 人工说明必须原样保留"
+        );
+
+        let n: i64 = one(&db, "SELECT COUNT(*) AS c FROM sys_config")
+            .await
+            .try_get("", "c")
+            .unwrap();
+        assert_eq!(
+            n, 2,
+            "种子那条撞 UNIQUE(tenant_id, config_key) 必须被忽略，不得多插一行"
+        );
     }
 }

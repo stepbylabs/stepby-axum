@@ -148,6 +148,19 @@ pub struct Settings {
     /// （AGENTS #5「外部依赖健康检查接入 /health」）。
     #[serde(default)]
     pub health: HealthConfig,
+    /// 配置文件里**没有被任何已知字段消费**的顶层条目（由 serde `flatten` 收集）。
+    ///
+    /// 存在的唯一目的：把"段名拼错 ⇒ 整段功能静默按默认值运行"从不可见变成启动 WARN
+    /// （`initialize::init_unknown_config_keys`）。它**不是**配置项：
+    /// - 不得据此改变任何行为（fail-safe：未知键一律忽略，与改造前逐字节等价）；
+    /// - 事实源就是 serde 自己的字段集，因此**没有第二份清单可漂移**
+    ///   （手写一份"已知段名"表正是 AGENTS 反复禁止的"单一事实源"反面）。
+    ///
+    /// 已知边界：只覆盖**顶层**条目；已知段里拼错的**子键**仍被 serde 静默忽略
+    /// （要覆盖子键需给 30 个结构体各加一个 flatten 兜底，属另立批次的改造面；
+    /// 模板侧的双向漂移由根仓 `scripts/config_parity_scan.py` 对账，不靠运行时）。
+    #[serde(default, flatten)]
+    pub unknown_keys: std::collections::BTreeMap<String, toml::Value>,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -185,6 +198,11 @@ impl fmt::Debug for Settings {
             .field("upload_scan", &self.upload_scan)
             .field("cache", &self.cache)
             .field("health", &self.health)
+            // 只打**键名**：未知键的值可能是误写进配置的凭据，不得进日志/Debug 输出
+            .field(
+                "unknown_keys",
+                &self.unknown_keys.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -3154,6 +3172,7 @@ impl Settings {
             config_version: 1,
             cache: CacheConfig::default(),
             health: HealthConfig::default(),
+            unknown_keys: Default::default(),
         };
 
         // 零配置引导：JWT_SECRET 缺省时生成/复用 data/secret.key（仅 from_env_only 路径）
@@ -3452,6 +3471,7 @@ mod tests {
             config_version: 1,
             cache: CacheConfig::default(),
             health: HealthConfig::default(),
+            unknown_keys: Default::default(),
         }
     }
 
@@ -4044,6 +4064,7 @@ mod tests {
             config_version: 1,
             cache: CacheConfig::default(),
             health: HealthConfig::default(),
+            unknown_keys: Default::default(),
         };
 
         let debug_str = format!("{:?}", settings);
@@ -4337,5 +4358,63 @@ mod tests {
                 None => std::env::remove_var("DOCS_ENABLED"),
             }
         }
+    }
+
+    /// `Settings::unknown_keys`（`#[serde(flatten)]` 收集）的三态：
+    /// ① 入库模板自身必须**一个都没有**（复制模板就收到 WARN = 模板有缺陷）；
+    /// ② 未识别的顶层条目（拼错的段名、裸键）必须被抓到，且已知字段照常解析
+    ///    （fail-safe：忽略并告警，绝不因历史遗留键拒绝启动）；
+    /// ③ 已知段里的**子键**拼错不在本通道覆盖范围——这是结构性限制，
+    ///    写成断言而不是注释，是为了让"以为运行时能查出所有漂移"这个误读当场失效
+    ///    （模板侧的双向漂移由根仓 `scripts/config_parity_scan.py` 判，不靠运行时）。
+    #[test]
+    fn unknown_config_keys_capture_typos_but_not_subkeys() {
+        let content = std::fs::read_to_string("config/config.toml.example")
+            .expect("入库模板必须存在（cargo test 的 CWD = crate 根）");
+        let base: Settings = toml::from_str(&content).expect("入库模板应可反序列化为 Settings");
+        assert!(
+            base.unknown_keys.is_empty(),
+            "入库模板不得留下未识别的顶层条目，实得 {:?}",
+            base.unknown_keys.keys().collect::<Vec<_>>()
+        );
+
+        // ②a 段名拼错：`[sso]` 写成 `[oidc]` ⇒ 整段配置静默失效，此前无人可见
+        let typo = format!("{content}\n[oidc]\nenabled = true\n");
+        let s: Settings = toml::from_str(&typo).expect("未识别段不得导致解析失败");
+        assert_eq!(
+            s.unknown_keys.keys().collect::<Vec<_>>(),
+            vec!["oidc"],
+            "未识别的顶层段必须被抓到"
+        );
+        assert!(
+            !s.sso.enabled,
+            "未识别段不得改变已知字段：[sso] 仍按模板值（false）运行"
+        );
+
+        // ②b 顶层裸键（必须写在**任何 [table] 之前**——TOML 里写在段头之后的散键属于那个段，
+        // 这一形状正是 ③ 那一支限制的来源）
+        let stray = content.replace(
+            "config_version = 1",
+            "config_version = 1\nstray_top_key = 1",
+        );
+        assert_ne!(stray, content, "夹具替换必须真的生效，否则本断言是虚锁");
+        let s2: Settings = toml::from_str(&stray).expect("未识别裸键不得导致解析失败");
+        assert!(
+            s2.unknown_keys.contains_key("stray_top_key"),
+            "顶层裸键必须被抓到，实得 {:?}",
+            s2.unknown_keys.keys().collect::<Vec<_>>()
+        );
+
+        // ③ 已知段里的子键拼错 ⇒ 本通道看不见（限制必须被钉住，不得只在注释里声明）
+        let subtypo = content.replace(
+            "consent_ticket_ttl_secs = 300",
+            "consent_ticket_ttl_secs = 300\nconcent_ticket_ttl_secs = 999",
+        );
+        assert_ne!(subtypo, content, "夹具替换必须真的生效，否则本断言是虚锁");
+        let s3: Settings = toml::from_str(&subtypo).expect("子键拼错不得导致解析失败");
+        assert!(
+            s3.unknown_keys.is_empty(),
+            "已知段里的子键不进本通道（覆盖它需给每个结构体加 flatten 兜底，属另立批次）"
+        );
     }
 }

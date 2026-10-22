@@ -102,8 +102,9 @@ SURROGATE_PK = {
 
 # K4：运行态列（账号态随运行演进：口令升级 argon2id/头像上传/登录时间/资料修改）
 RUNTIME_COLUMNS = {
-    "sys_user": {"password", "password_version", "must_change_pwd", "login_date",
-                 "country_code", "avatar"},
+    # pwd_update_time：由建列回填 + 每条改密路径写入，值必然随运行变化（且两处建库时刻不同）
+    "sys_user": {"password", "password_version", "must_change_pwd", "pwd_update_time",
+                 "login_date", "country_code", "avatar"},
 }
 
 # K4：运行态表（缓存/标记语义，内容随运行演进，只计数不比对）

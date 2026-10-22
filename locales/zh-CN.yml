@@ -241,6 +241,8 @@ error:
     erasure_platform_only: 仅平台管理员可执行用户匿名化
     erasure_forbidden: 不允许匿名化平台用户或超级管理员
     erasure_revoke_failed: 匿名化前会话失效标记写入失败，已中止（fail-closed）
+    password_expired: 口令已过期，请先修改口令后再继续使用
+    password_change_required: 初始口令尚未修改，请先在「个人中心 - 安全设置」修改口令
   config:
     not_found: 参数配置不存在
     key_exists: 参数键名已存在

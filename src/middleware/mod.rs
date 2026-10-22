@@ -7,6 +7,7 @@ pub mod locale;
 pub mod oper_log;
 pub mod permission;
 pub mod platform_guard;
+pub mod pwd_gate;
 pub mod rate_limit;
 pub mod request_id;
 pub mod response_cache;
@@ -22,6 +23,7 @@ pub use idempotency::idempotency_middleware;
 pub use locale::{locale_middleware, negotiate};
 pub use oper_log::{TargetTenant, oper_log_middleware};
 pub use permission::permission_middleware;
+pub use pwd_gate::pwd_gate_middleware;
 pub use rate_limit::{
     RateLimitConfig, RateLimiter, rate_limit_bucket_key, rate_limit_middleware,
     rate_limit_route_bucket_key,

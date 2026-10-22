@@ -218,6 +218,32 @@ pub(crate) fn init_feature_flags(settings: &Settings) {
     }
 }
 
+/// 配置文件里**未被任何已知字段消费**的顶层条目 ⇒ 启动 WARN（不改变任何行为）。
+///
+/// 立案：`[sso]` 被拼成 `[oidc]` 时，整段配置静默按默认值运行——"配了但没生效"是最难查
+/// 的一类故障，而此前没有任何通道能看见它。刻意**不**用 `deny_unknown_fields`：
+/// 那会让存量部署因历史遗留键直接拒绝启动（fail-closed 在这里是错的方向）；
+/// 也不手写一份"已知段名"清单——事实源就是 serde 自己的字段集
+/// （`Settings::unknown_keys` 由 `#[serde(flatten)]` 收集，无第二份可漂移的副本）。
+///
+/// 只 WARN、不拒绝、不回落：未知条目一律按忽略处理（与改造前逐字节等价）。
+/// 已知边界：只覆盖**顶层**条目；已知段里拼错的**子键**仍被静默忽略
+/// （覆盖它需给 30 个结构体各加一个 flatten 兜底，属另立批次的改造面；
+/// 模板侧的双向漂移由根仓 `scripts/config_parity_scan.py` 对账，不靠运行时）。
+/// 只打**键名**不打值：未知条目本身可能就是误写进配置的凭据（AGENTS C.9 日志脱敏）。
+pub(crate) fn init_unknown_config_keys(settings: &Settings) {
+    if settings.unknown_keys.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        keys = ?settings.unknown_keys.keys().collect::<Vec<_>>(),
+        "配置文件里有 {} 个未被识别的顶层条目 ⇒ **本次运行一律忽略、不生效**。\
+         最常见成因是段名拼错（例如 `[oidc]` 应为 `[sso]`、`[youjian]` 应为 `[mail]`）\
+         ⇒ 整段配置静默回落默认值；请对照 config/config.toml.example 校正",
+        settings.unknown_keys.len(),
+    );
+}
+
 /// 启动打印 ACME 证书需求输出的**有效姿态**（`[acme]` 段）。
 ///
 /// 治理意义与能力位同理：这是"把租户域名清单推出本进程"的唯一出口，必须让运维一眼看到

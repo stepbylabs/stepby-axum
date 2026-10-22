@@ -981,3 +981,56 @@ impl SysConfigService {
         Ok(rows)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `is_sensitive_key` 是**兜底**启发式（主判据是治理列），它的错误方向有两个，
+    //! 都必须被钉住：把密钥放出来（泄露面）与把策略值当密钥藏起来（不可运维面）。
+    //! 本批 e2e M91 撞上的正是第二个：`sys.user.passwordExpireDays` 因为含 `password`
+    //! 子串而被掩成 `***`，管理员在参数管理页看不到自己设的有效期。
+    use super::SysConfigService;
+
+    /// ① 真密钥必须掩（含历史命名族），这条红了就等于开了泄露面
+    #[test]
+    fn secret_keys_are_masked() {
+        for k in [
+            "sys.user.initPassword",
+            "sys.upload.s3.secret_key",
+            "sys.sso.client_secret",
+            "sys.ai.api_key",
+            "sys.mail.password",
+            "sys.private_key",
+            "sys.token_ttl",
+        ] {
+            assert!(
+                SysConfigService::is_sensitive_key(k),
+                "{k} 是密钥族，必须脱敏"
+            );
+        }
+    }
+
+    /// ② 数值/枚举**策略键**不得被掩——掩了就是"能力存在但运维看不见"。
+    ///    对照组与 ① 同形（同一函数、同一判据、相反期望），缺任一条另一条都可以恒真。
+    #[test]
+    fn policy_keys_are_not_masked() {
+        for k in [
+            "sys.user.pwdExpireDays",
+            "sys.user.pwdChangeGate",
+            "sys.user.forceFirstLoginChangePwd",
+            "sys.login.maxRetryCount",
+            "sys.config.encryptionEnabled",
+        ] {
+            assert!(
+                !SysConfigService::is_sensitive_key(k),
+                "{k} 是策略值而非密钥，掩成 *** 会让参数面不可运维"
+            );
+        }
+    }
+
+    /// ③ 中文文案位也在这条兜底通道里（历史上参数名可以是中文）
+    #[test]
+    fn chinese_secret_words_are_masked() {
+        assert!(SysConfigService::is_sensitive_key("sys.user.登录密钥"));
+        assert!(SysConfigService::is_sensitive_key("sys.x.凭据"));
+    }
+}

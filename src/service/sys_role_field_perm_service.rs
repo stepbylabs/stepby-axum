@@ -818,6 +818,7 @@ mod tests {
             status: None,
             del_flag: None,
             must_change_pwd: None,
+            pwd_update_time: None,
             login_ip: None,
             login_date: None,
             create_by: None,

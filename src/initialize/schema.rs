@@ -174,6 +174,85 @@ pub(crate) async fn ensure_user_must_change_pwd_column(
     Ok(())
 }
 
+/// 口令有效期与服务端强改密闸门兜底（等价迁移 `m20261022_000001_pwd_expire_policy`，幂等）：
+/// 1. `sys_user.pwd_update_time`（DATETIME NULL）缺列时补建，**仅本次建列时**回填存量口令年龄
+///    （先取 `create_time` 代理，仍 NULL 的取建列时刻）——存量库重跑不得反复回填；
+/// 2. `sys_config` 两键种子 `sys.user.pwdExpireDays='0'` / `sys.user.pwdChangeGate='off'`
+///    （幂等 INSERT，不 UPDATE——尊重管理员已改值）。
+///
+/// 种子体与回填体一律取 `migration::…::config_bodies/backfill_bodies`（**同一份文本**），
+/// 本函数只负责方言差异与幂等探测——抄第二份就必然漂移。
+pub(crate) async fn ensure_user_pwd_expire_policy(db: &DatabaseConnection) -> anyhow::Result<()> {
+    use migration::migrations::m20261022_000001_pwd_expire_policy as pwd_expire;
+
+    if !sso_table_exists(db, "sys_user").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    if !sso_has_column(db, "sys_user", "pwd_update_time").await? {
+        // 方言差异只在这一处：PG 没有 `DATETIME` 这个类型名（MySQL/SQLite 有）。
+        // 写进 `schema_equivalence_lock` 的列指纹由 `normalize_col_type` 折叠成 DATETIME
+        // （`DATETIME ↔ TIMESTAMP` 同族，见该函数注释），所以这里换名不破坏等价性判据。
+        let ty = match backend {
+            DatabaseBackend::Postgres => "TIMESTAMP",
+            _ => "DATETIME",
+        };
+        db.execute_raw(Statement::from_string(
+            backend,
+            format!("ALTER TABLE sys_user ADD COLUMN pwd_update_time {ty}"),
+        ))
+        .await?;
+        let now = flow_now(db);
+        for body in pwd_expire::backfill_bodies(&now) {
+            db.execute_raw(Statement::from_string(backend, body))
+                .await?;
+        }
+        tracing::info!(
+            "sys_user.pwd_update_time 列已补建并回填存量口令年龄（批八十四 项 A 存量库兜底）"
+        );
+    }
+    if sso_table_exists(db, "sys_config").await? {
+        // 旧键名就地改名**必须排在种子之前**：两版键名共用 config_id=9011，
+        // 而种子走 INSERT OR IGNORE —— 不先改名，新键那条会被静默忽略，
+        // 参数面从此看不见这个能力（存量库走的是兜底路径，不跑 Migrator::up）。
+        // 收敛逻辑与迁移侧**同一个函数**（含"新行已存在则搬值再删旧行"那一支——
+        // 裸改名会撞 UNIQUE(tenant_id, config_key) 并把 initialize 打死，b84 实测事故）
+        pwd_expire::rename_legacy_keys(db).await?;
+        let now = flow_now(db);
+        for body in pwd_expire::config_bodies(&now) {
+            flow_insert(db, &body).await?;
+        }
+        // 说明文案归一（b84 seed_diff 实测的存量库缺口）：这两个键在存量库上由治理注册表
+        // 兜底**先**建行（`ensure_governance_config_rows`，remark 是那句通用兜底文案），
+        // 于是上面那条 INSERT OR IGNORE 被忽略 ⇒ 参数管理页里看不到
+        // `off / deny_write / deny_all` 的档位语义——三档的区别只写在这句 remark 里，
+        // 读不出说明就会配错，属真实能力缺口而不只是文案漂移。
+        // ⚠️ 谓词限定"remark 仍是兜底文案"：管理员自己改过的说明**一律不动**。
+        for (key, remark) in [
+            (
+                pwd_expire::PWD_EXPIRE_DAYS_CONFIG_KEY,
+                pwd_expire::PWD_EXPIRE_DAYS_REMARK,
+            ),
+            (
+                pwd_expire::PWD_CHANGE_GATE_CONFIG_KEY,
+                pwd_expire::PWD_CHANGE_GATE_REMARK,
+            ),
+        ] {
+            db.execute_raw(crate::common::sql_dialect::stmt(
+                backend,
+                "UPDATE sys_config SET remark = ? WHERE config_key = ? AND remark = ?",
+                [
+                    remark.into(),
+                    key.into(),
+                    governance::GOVERNANCE_BACKFILL_REMARK.into(),
+                ],
+            ))
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// v5-N2 Phase 2（第一步）：幂等确保 `sys_user` 含 `tenant_id` 列（登录 JWT 的 tid
 /// 数据源）。与 `ensure_user_country_code_column` 同源方案：表不存在跳过；列不存在
 /// 则 `ALTER TABLE sys_user ADD COLUMN tenant_id BIGINT NOT NULL DEFAULT 0`。

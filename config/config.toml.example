@@ -3,13 +3,24 @@
 # 使用方法：
 # 1. 复制本文件为 config.toml：cp config/config.toml.example config/config.toml
 # 2. 修改下方占位符为真实值
-# 3. 生产环境建议通过环境变量注入敏感字段（环境变量优先级高于配置文件）：
+# 3. 生产环境建议通过环境变量注入敏感字段（环境变量优先级高于配置文件）。
+#    ⚠️ 只有"密钥类"字段走环境变量（刻意**不**在本文件出现键名，避免诱导部署方写死凭据）：
 #    - DATABASE_URL：数据库连接串
 #    - REDIS_URL：Redis 连接串
 #    - JWT_SECRET：JWT 签名密钥（至少 32 字符）
+#    - JWT_PREVIOUS_SECRETS：密钥轮换过渡期旧签名密钥（逗号分隔，仅验签）
 #    - JWT_EXPIRE_HOURS：JWT 过期小时数
-#    - SERVER_HOST：监听地址
-#    - SERVER_PORT：监听端口
+#    - CONFIG_ENC_KEY：sys_config 敏感列信封加密主密钥（≥32 字符；IP 库凭据加密依赖它）
+#    - CONFIG_ENC_KEY_PREVIOUS：轮换过渡期旧信封密钥（仅解密 enc3:k0 存量，迁移完可清空）
+#    - SCIM_BEARER_TOKEN：SCIM IdP↔本系统服务器对服务器凭据（[scim].enabled=true 时必填）
+#    - MAIL_PASSWORD：SMTP 密码
+#    - AI_API_KEY：AI provider API Key
+#    - MONITOR_METRICS_TOKEN：/metrics 抓取凭据（留空 = 匿名可抓，生产强烈建议设置）
+#    - S3_ACCESS_KEY / S3_SECRET_KEY：对象存储凭据（亦可用 `--env UPLOAD__S3__*` 形式）
+#    非密钥类覆盖（SERVER_HOST / SERVER_PORT / CACHE_MODE / RATE_LIMIT_MODE / RUST_LOG /
+#    DOCS_ENABLED / SSO_* / SCIM_* / WEBAUTHN_* / CORS_ORIGINS / TRUSTED_PROXIES /
+#    PERMISSION_DENY_BY_DEFAULT / PAT_MAX_PER_USER / UPLOAD_BACKEND / LOG_RETENTION_DAYS /
+#    S3_*）在各段自己的注释里就近说明——搜本文件里的"环境变量"即可。
 #
 # 注意：config.toml 已被 .gitignore 排除，不会进入版本控制。
 
@@ -38,9 +49,13 @@ permission_deny_by_default = true
 # ⚠️ 非法取值回落 auto 并打 WARN（fail-safe）；显式 redis 但 url 无效 → 拒绝启动
 #    （fail-closed）。切换详见 docs/optimization/ZERO-DEPENDENCY-DEPLOYMENT-PLAN-2026-10-01.md §4.5。
 # ⚠️ 也可用环境变量 CACHE_MODE=auto|local|redis 覆盖（容器场景无需改配置文件）。
-# [收尾十三] 默认 local：共享态（token/验证码/黑名单/分布式锁/幂等）纯 SQL 承载，
+# [收尾十三] 本模板**起步值 = local**（注意：代码缺省是 auto，这是有意的一处例外，
+# 不是漂移）：共享态（token/验证码/黑名单/分布式锁/幂等）纯 SQL 承载，
 # 零 Redis 依赖——单机开发/演示即开即用，无需 Docker。生产多实例部署改 mode = "redis"
 # 并配 REDIS_URL（S1 安全态双写 DB 权威层，档位切换无缝、无需迁移/重登）。
+# 为什么起步取 local 而不是 auto：auto 的裁决依赖 [redis].url 是否有效，
+# 复制本模板的部署 url 仍是占位符 ⇒ auto 会回落 local，取值等价；显式写 local 让
+# "本部署零外部依赖"这件事在配置文件里可读，而不是要靠运行时推断。
 [cache]
 mode = "local"
 gc_interval_secs = 600   # local 档过期行 GC 周期（秒）
@@ -136,6 +151,12 @@ max_connections = 10
 min_connections = 1
 connect_timeout = 10
 idle_timeout = 600
+# 连接最大生命周期（秒，默认 1800 = 30 分钟）——避免长连接因 MySQL wait_timeout /
+#   网络中间件探活失效而出现静默断开。
+max_lifetime_secs = 1800
+# 从池中获取连接的等待超时（秒，默认 10）——超时返回错误（业务层转 503），
+#   而非无限阻塞协程（池打满时"慢死"比"快速失败"更难定位）。
+acquire_timeout_secs = 10
 # 语句级超时（秒，默认 60；0 = 显式关闭）——R9-ERR-004：
 #   PostgreSQL: statement_timeout + idle_in_transaction_session_timeout（覆盖全部语句）；
 #   MySQL:      SET SESSION max_execution_time（⚠️ 引擎限制，仅覆盖 SELECT）；
@@ -168,6 +189,9 @@ cmd_timeout_secs = 3
 secret = "CHANGE_ME_TO_A_STRONG_SECRET_KEY_AT_LEAST_32_CHARS"
 expire_hours = 24
 issuer = "stepby"
+# JWT 受众（aud claim）——SEC-001：防同一密钥签发的 token 跨服务复用。
+# 缺省 "stepby"；同一套密钥为多个服务签发 token 时，每个服务必须写自己的受众。
+audience = "stepby"
 # 密钥轮换过渡期：旧签名密钥（**仅用于验签回退，永不用于签发**）。
 # 零停机轮换：① 生成新密钥 → 把当前密钥移入本列表、secret 换成新密钥 → 滚动发布；
 #             ② 过渡期内新 token 用新密钥签发、旧 token 用旧密钥验签（用户无感，不被登出）；
@@ -215,6 +239,10 @@ error_capacity = 500
 level = "info"
 # SQL 日志（生产环境建议关闭，避免泄露敏感信息）
 sql_logging = false
+# 日志文件输出目录（默认 "logs"）——配置后日志同时输出到 stdout 与文件（按日轮转，
+#   文件层恒为纯文本、grep 友好）。相对路径按**进程工作目录**解析（不是配置文件所在目录），
+#   容器/ systemd 场景建议写绝对路径；管理端「服务日志」页读的是同一个目录（logger.rs）。
+file_path = "logs"
 # stdout 输出 JSON 结构化日志（容器/日志采集场景开启；默认 false = 人类可读纯文本。
 # 仅影响 stdout，文件日志恒为纯文本）
 json_stdout = false
@@ -300,6 +328,16 @@ public_endpoint = "http://127.0.0.1:9000"
 # 文件不存在时所有查询返回空字符串，不影响业务流程
 # 下载地址：https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
 mmdb_path = "data/GeoLite2-City.mmdb"
+# ip2region xdb 数据库文件路径（相对路径，可选）——国内 IP 精度到县级行政区划
+xdb_path = "data/ip2region.xdb"
+# 是否启用 ip2region **双库混合模式**：启用后国内 IP 优先查 xdb，未命中再查 mmdb。
+# 默认 false = 只查 mmdb（现状）；xdb 文件缺失时该路查询自动回落，不影响业务流程。
+xdb_enabled = false
+# mmdb 自动更新 cron（6 字段含秒，默认每周二凌晨 4:00）；空字符串 = 不注册该内置任务。
+# 双开关（scheduler/mod.rs）：本值非空 **且** sys_config 热键 `ip_location.auto_update_enabled`
+#   为开 ⇒ 才会更新（后者由「IP 库管理」页维护，默认关）；
+# 多实例共跑由 Redis 锁 lock:scheduler:mmdb_auto_update 收敛到单实例（TTL 30 分钟）。
+auto_update_cron = "0 0 4 * * 2"
 
 [mail]
 # 邮件 SMTP 配置（可选，未配置时邮件相关功能降级为仅 sys_notice 入库）
@@ -316,8 +354,8 @@ username = ""
 password = ""
 # 发件人邮箱地址（通常与 username 相同）
 from_email = ""
-# 发件人显示名称
-from_name = "stepby 系统"
+# 发件人显示名称（与代码缺省一致；中文部署可自行改成 "stepby 系统"）
+from_name = "stepby System"
 # 是否使用 STARTTLS（端口 587 时通常为 true，端口 465 SSL 直连时为 false）
 starttls = false
 
@@ -339,6 +377,10 @@ issuer = ""
 code_ttl_secs = 60             # 授权码有效期（默认 60s，短 TTL 一次性使用；v5 第八轮与代码默认对齐）
 id_token_ttl_secs = 3600       # ID Token 有效期（默认 1h）
 access_token_ttl_secs = 3600   # SSO 访问令牌（不透明）有效期（默认 1h，v4-P0-A）
+# refresh_token 有效期（秒，默认 30 天）——v5-D3：RT 也是不透明令牌（与 AT 同构，
+#   SHA-256 后落 sso:rt:{hash}），**轮换式**使用：每次刷新旧 RT 立即作废并签发新 RT；
+#   登出 / 强退 / 改密 ⇒ 全量吊销（改密同时失效密码版本号，见 sys.user.pwdExpireDays）。
+refresh_token_ttl_secs = 2592000
 
 # ——— 批次 4：三个**默认关闭**的可选端点/行为（准则⑥：不整块砍掉，提供开关）———
 # introspection_enabled：开启后提供 RFC 7662 令牌内省 `POST /sso/introspect`。
@@ -372,6 +414,19 @@ userinfo_cache_ttl_secs = 0
 consent_ticket = "off"
 # 同意票据有效期（秒，默认 300；夹取 60..=1800）
 consent_ticket_ttl_secs = 300
+
+# ==================== SCIM 2.0 用户目录同步（v5-D12，RFC 7644 最小可用子集）====================
+# 整个 [scim] 段可省略（全部走结构体缺省）；下列取值与代码缺省一一对应。
+# 默认关闭（关闭态即安全态）：enabled = false 时 /scim/v2/* 端点不注册。
+# 开启前置（validate() fail-closed，配错直接**拒绝启动**，不留"开了但没配好"的假入口）：
+#   ① SCIM_BEARER_TOKEN 环境变量注入 IdP↔本系统的服务器对服务器凭据（≥32 随机字符，
+#      与用户 JWT 无关）；**刻意不落本文件**——凭据随配置文件进版本库是最常见的泄露面。
+#   ② SCIM_TENANT_ID 指定该凭据 provisioning 出的用户/组归属哪个租户（0 = 平台租户，
+#      全局 provisioning、不按租户过滤）；读路径按同一租户谓词过滤（多租户铁律：
+#      provisioning 写侧与查询读侧共用 SCIM_TENANT_ID，不存在"写到 A 租、查的是 B 租"）。
+# 本系统内的 SCIM 组管理走常规 RBAC（/system/scimGroup/*），与本段无关。
+[scim]
+enabled = false
 
 # ==================== 审批工作流（m20260923_000002 flow_module）====================
 # 整个 [flow] 段可省略（全部走结构体缺省）；下列取值与代码缺省一一对应。

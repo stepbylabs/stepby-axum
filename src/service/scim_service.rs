@@ -430,6 +430,11 @@ impl ScimService {
             nick_name: Set(display),
             email: Set(if email.is_empty() { None } else { Some(email) }),
             password: Set(Some(hashed)),
+            // 批八十四 项 A：同 OAuth 自动建号口径——口令由 `random_urlsafe_pub(24)` 生成、
+            // 只用于满足"必须有哈希"的列约束，**交付给 IdP 的是 SCIM 侧自己管理的凭据**，
+            // 本系统内无人知道这个口令 ⇒ 不记 pwd_update_time（NULL=无本地口令年龄=不过期），
+            // 否则 expireDays 一开就把 IdP 托管账号锁在无法自助解除的闸门里。
+            // 豁免登记：common/pwd_policy.rs 的写站点锁按函数名 create_user 校验。
             status: Set(Some(if active { "0" } else { "1" }.to_string())),
             del_flag: Set(Some("0".to_string())),
             user_type: Set(Some("00".to_string())),

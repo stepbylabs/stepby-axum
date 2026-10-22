@@ -301,11 +301,30 @@ pub const CONFIGS: &[Item] = &[
     // 治理列不收敛属"登记漂移"；Locked 平台锁定——租户不得自行开启强改）
     cfg("sys.user.forceFirstLoginChangePwd", Coverage::Locked),
     cfg("sys.user.initPassword", Coverage::Locked),
+    // 批八十四 项 A：口令有效期天数（0=永不过期=现状）与强改密服务端闸门档位
+    // （off=现状）。两者共同决定"多少人会被拦"，属平台级安全姿态，租户不得自行放宽
+    // ⇒ 与 forceFirstLoginChangePwd 同档 Locked（platform_only、不可见、不可改）。
+    // ⚠️ 本表必须按 key **字典序**排列（`test_registry_ordering_and_uniqueness` 硬失败），
+    //   故新键插在 initPassword 之后而不是"接着上一批写"。
+    cfg("sys.user.pwdChangeGate", Coverage::Locked),
+    cfg("sys.user.pwdExpireDays", Coverage::Locked),
 ];
 
 /// `sys.login.blackIPList` 的运行时消费键（登录链路 IP 黑名单，
 /// [`crate::service` 层按此键读 sys_config 缓存]）——常量化避免键名散落。
 pub const SYS_LOGIN_BLACK_IP_LIST: &str = "sys.login.blackIPList";
+
+/// 治理注册表兜底补行时写入的 `remark` 固定文案（**单一事实源**）。
+///
+/// 为什么值得单独成常量：`initialize::ensure_governance_config_rows` 用它建行，而各参数项
+/// 自己的存量库兜底（如 `pwd_expire`）要判断"这行的说明文案还是不是兜底文案"以便归一
+/// ——两处各写一份字面量，改一处就会让归一逻辑**静默失效**（归一只会发生在
+/// `remark = 兜底文案` 的行上，文案不一致 = 一条都不归一，而没有任何报错）。
+///
+/// 背景（b84 seed_diff 实测）：存量库上"新登记的参数项"由本兜底先建行，于是参数管理页
+/// 里它的说明是这句通用文案，而不是迁移种子写的档位语义（对 `off|deny_write|deny_all`
+/// 这种"读不出来说明就会配错"的键，这是真实的能力缺口，不只是文案漂移）。
+pub const GOVERNANCE_BACKFILL_REMARK: &str = "治理注册表缺行补齐（批次十四）";
 
 /// 参数项的**出厂缺省三元组**（键, 显示名, config_value）——覆盖 `CONFIGS` 全部键。
 ///
@@ -390,6 +409,18 @@ pub const CONFIG_DEFAULTS: &[(&str, &str, &str)] = &[
         "sys.user.forceFirstLoginChangePwd",
         "用户首登强制改密开关",
         "false",
+    ),
+    (
+        "sys.user.pwdExpireDays",
+        "口令有效期天数",
+        // 默认 0 = 永不过期 = 现状（开关规范①：缺省值必须等价于"功能不存在"）
+        "0",
+    ),
+    (
+        "sys.user.pwdChangeGate",
+        "强改密服务端闸门",
+        // 默认 off：只下发标志、不服务端拦截（= 本批之前的行为）
+        "off",
     ),
     ("sys.user.initPassword", "用户管理-账号初始密码", "123456"),
 ];

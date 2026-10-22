@@ -1351,6 +1351,9 @@ impl SysTenantService {
                         del_flag: Set(Some("0".to_string())),
                         // B4：租户管理员由创建流程分发密码（非系统初始密码），不标待改
                         must_change_pwd: Set(Some("0".to_string())),
+                        // 批八十四 项 A：口令已作为知识交付（随租户初始化下发给租户管理员），
+                        // 因此**要**记口令年龄——不记就等于这个账号永不过期。
+                        pwd_update_time: Set(Some(now)),
                         login_ip: Set(None),
                         login_date: Set(None),
                         create_by: Set(Some(operator_owned.clone())),

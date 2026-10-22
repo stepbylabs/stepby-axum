@@ -1452,23 +1452,52 @@ impl AuthService {
         // （初始密码未修改）即触发；个人改密成功由 update_user_password 统一清除标志，
         // 此处自然归 false。开关关闭时该标志仍下发（前端软提示），但不会驱动强改流程。
         let is_default_modify_pwd = user.must_change_pwd.as_deref() == Some("1");
-        // is_password_expired：密码是否过期（当前无密码过期策略，固定为 false）
-        let is_password_expired = false;
+        // is_password_expired：口令是否过期（批八十四 项 A：由 `false` 常量改为真实判定）。
+        // 判据 = `sys.user.pwdExpireDays`（0=永不过期=现状）× `sys_user.pwd_update_time`
+        // （口令最后一次"作为知识交付给用户"的时刻；随机不可知口令的账号该列为 NULL ⇒ 不过期）。
+        // 这一位**只报事实**，是否据此强制由下面的总闸 `forceFirstLoginChangePwd` 决定，
+        // 因此运维可以先开天数观察下发情况，再开强闸门禁（三段台阶，默认全关）。
+        let expire_days = crate::common::pwd_policy::parse_expire_days(
+            self.config_service
+                .get_config_value_by_key_cached(
+                    crate::common::pwd_policy::PWD_EXPIRE_DAYS_CONFIG_KEY,
+                    Some(operator_tid),
+                )
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
+        );
+        let is_password_expired = crate::common::pwd_policy::password_expired(
+            crate::common::datetime::now_naive(),
+            user.pwd_update_time,
+            expire_days,
+        );
         // B4：must_change_password（服务端判定，对齐 showTenantColumn 单点范式）——
         // 强改开关 `sys.user.forceFirstLoginChangePwd`（默认 false）开启 **且**
-        // （初始密码未修改 || 密码过期）时置 true，前端据此强制跳转改密页。
+        // （初始密码未修改 || 口令过期）时置 true，前端据此强制跳转改密页；
+        // 服务端是否据此**拦截**另由 `sys.user.pwdChangeGate` 决定
+        // （middleware/pwd_gate.rs，与这里共用 `common::pwd_policy` 判据，不抄第二份口径）。
         // 开关查询失败按关闭态处理（fail-safe：不明确的姿态不拦截用户）。
         let force_pwd_change_enabled = match self
             .config_service
-            .get_config_value_by_key_cached("sys.user.forceFirstLoginChangePwd", Some(operator_tid))
+            .get_config_value_by_key_cached(
+                crate::common::pwd_policy::FORCE_PWD_CHANGE_CONFIG_KEY,
+                Some(operator_tid),
+            )
             .await
         {
             // 显式 "true" 才开启（fail-safe：缺省/失败/任意其它值一律按关闭态，不误拦用户）
             Ok(Some(val)) => val.eq_ignore_ascii_case("true"),
             _ => false,
         };
-        let must_change_password =
-            force_pwd_change_enabled && (is_default_modify_pwd || is_password_expired);
+        let must_change_password = crate::common::pwd_policy::must_change_password(
+            force_pwd_change_enabled,
+            user.must_change_pwd.as_deref(),
+            crate::common::datetime::now_naive(),
+            user.pwd_update_time,
+            expire_days,
+        );
         // 「所属租户」归属列展示决策：`[ui].show_tenant_column`（默认 auto）在服务端解析，
         // 结合操作者租户上下文算出布尔下发（`auto` ⇒ 仅平台操作者可见 = 历史行为）。
         // ⚠️ 单机模式（`[tenant].management = false`）**强制隐藏**：单机部署不存在

@@ -46,6 +46,17 @@ pub struct Model {
     /// 个人中心改密成功即清除；仅当 config 开关 `sys.user.forceFirstLoginChangePwd`
     /// 开启时驱动前端强制改密流程（标志计算见 auth_service.is_default_modify_pwd）
     pub must_change_pwd: Option<String>,
+    /// 口令**最后一次真实变更**的时刻（批八十四 项 A，迁移 `m20261022_000001`）。
+    ///
+    /// 为什么不能复用 `update_time`：`impl_timestamped_active_model!` 在**任何**更新上刷新它
+    /// （改昵称、传头像、软删都动），拿它当口令年龄等于"改一次资料就把过期时钟归零"。
+    /// 写入路径见 `service::pwd_policy::PWD_UPDATE_TIME_WRITE_SITES`；
+    /// `upgrade_password_hash`（MD5→Argon2 静默换哈希、口令未变）**刻意不刷新**。
+    /// 对外不下发（与 `password` 同口径 `skip_serializing`）：过期判定由服务端在 `/getInfo`
+    /// 算成 `isPasswordExpired` / `mustChangePassword` 两个布尔后下发，前端只消费不推断。
+    #[serde(skip_serializing, deserialize_with = "datetime::deserialize_opt")]
+    #[ts(skip)]
+    pub pwd_update_time: Option<NaiveDateTime>,
     pub login_ip: Option<String>,
     #[serde(
         serialize_with = "datetime::serialize_opt",
@@ -98,6 +109,10 @@ impl fmt::Debug for Model {
             .field("password", &"<redacted>")
             .field("status", &self.status)
             .field("del_flag", &self.del_flag)
+            // 强改密姿态两字段进 Debug（排障要判"为什么这个人被拦"）：只打印标志与时刻，
+            // 不含口令任何派生物；哈希仍由上一行的 <redacted> 通道守住。
+            .field("must_change_pwd", &self.must_change_pwd)
+            .field("pwd_update_time", &self.pwd_update_time)
             .field("login_ip", &self.login_ip)
             .field("login_date", &self.login_date)
             .field("create_by", &self.create_by)
@@ -137,6 +152,7 @@ mod tests {
             status: Some("0".to_string()),
             del_flag: Some("0".to_string()),
             must_change_pwd: Some("0".to_string()),
+            pwd_update_time: None,
             login_ip: Some("127.0.0.1".to_string()),
             login_date: None,
             create_by: Some("admin".to_string()),

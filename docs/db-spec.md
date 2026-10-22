@@ -192,6 +192,8 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 | 6 | `email` | varchar(50) | NULL | '' | 用户邮箱 |
 | 7 | `phonenumber` | varchar(11) | NULL | '' | 手机号码 |
 | 8 | `sex` | char(1) | NULL | '0' | 用户性别（0男 1女 2未知） |
+| 8a | `country_code` | varchar(16) | NULL | NULL | 手机号地区码（方案 D/G18，NULL 视为 CN） |
+| 8b | `tenant_id` | bigint | NOT NULL | 0 | 归属租户（登录 JWT 的 tid 数据源；0 = 平台） |
 | 9 | `avatar` | varchar(100) | NULL | '' | 头像地址 |
 | 10 | `password` | varchar(100) | NULL | '' | 密码（Argon2id 哈希，旧数据可能为 MD5 格式） |
 | 11 | `status` | char(1) | NULL | '0' | 帐号状态（0正常 1停用） |
@@ -203,6 +205,10 @@ status        char(1)      DEFAULT '0'   COMMENT '状态（0正常 1停用）', 
 | 17 | `update_by` | varchar(64) | NULL | '' | 更新者 |
 | 18 | `update_time` | datetime | NULL | NULL | 更新时间 |
 | 19 | `remark` | varchar(500) | NULL | NULL | 备注 |
+| 20 | `must_change_pwd` | char(1) | NULL | '0' | 强制首登改密标志（B4，m20261004_000003；'1'=初始口令未改） |
+| 21 | `pwd_update_time` | datetime | NULL | NULL | **口令最后一次真实变更时刻**（批八十四 m20261022_000001）：只写"口令作为知识交付给了某个知道它的人"的路径（建号下发/自设/管理员重置）；`upgrade_password_hash`（哈希升级、口令未变）与 OAuth/SCIM 的随机不可知口令**不写**（NULL=无本地口令年龄=永不过期）；不能复用 `update_time`——`impl_timestamped_active_model!` 在任何更新上都会刷新它 |
+| 22 | `scim_external_id` | varchar(64) | NULL | NULL | SCIM externalId（唯一性由复合索引 `(tenant_id, scim_external_id)` 承担） |
+| 23 | `password_version` | bigint | NOT NULL | 0 | 凭据纪元（由 `initialize` 兜底补列，非迁移列；改密/重置即 ++，旧 token 立即失效） |
 
 **索引：**
 - 主键：`PRIMARY KEY (user_id)`

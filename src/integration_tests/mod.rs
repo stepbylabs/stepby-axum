@@ -42,6 +42,7 @@ mod monitor_alert;
 mod monitor_extra;
 mod path_param_decode;
 mod platform_guard;
+mod pwd_expiry;
 mod report_dataset;
 mod response_cache;
 mod retention_cleanup;
@@ -312,6 +313,11 @@ async fn build_isolated_state_with(
     settings.sso = crate::config::SsoConfig::default();
     settings.pat = crate::config::PatConfig::default();
     settings.ui = crate::config::UiConfig::default();
+    // b84（AGENTS 开关规范⑧登记）：`[scim]` 首次进入库模板（显式写出 `enabled = false`）。
+    // 本机 config 若把它翻成 true，`Settings::from_file` 里的 validate_secrets 会因缺
+    // SCIM_BEARER_TOKEN 直接返回 Err ⇒ 每个 TestContext 都在"加载 config/config.toml 失败"
+    // 上 panic；即便凭据齐备，/scim/v2/* 也会被注册进测试路由 ⇒ 结果随部署态漂移。
+    settings.scim = crate::config::settings::ScimConfig::default();
     // b72（AGENTS 开关规范⑧登记）：`[health].external_probes` 若被本机翻成 `basic`，
     // /health 用例会多出 external 字段并真的去连 SMTP/OSS ⇒ 必须钳制为 off 基线。
     settings.health = crate::config::settings::HealthConfig::default();

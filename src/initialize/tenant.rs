@@ -775,11 +775,12 @@ pub(crate) async fn ensure_governance_config_rows(db: &DatabaseConnection) -> an
                 "sys_config (config_name, config_key, config_value, config_type, create_by, \
                  create_time, remark, scope, tenant_editable, visible_to_tenant) VALUES \
                  ('{}', '{}', '{}', 'Y', 'admin', {}, \
-                 '治理注册表缺行补齐（批次十四）', '{}', '{}', '{}')",
+                 '{}', '{}', '{}', '{}')",
                 name,
                 key,
                 value,
                 now,
+                governance::GOVERNANCE_BACKFILL_REMARK,
                 coverage.scope(),
                 coverage.tenant_editable(),
                 coverage.visible_to_tenant(),

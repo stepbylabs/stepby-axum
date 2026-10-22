@@ -56,7 +56,14 @@
 
 - 用户注册接口（`/register`）—— 前端规范中有此接口但非核心流程
 - 锁屏解锁接口（`/unlockscreen`）—— 前端锁屏功能
-- 初始密码/密码过期提示（`isDefaultModifyPwd` / `isPasswordExpired`）—— 非核心鉴权
+- ~~初始密码/密码过期提示（`isDefaultModifyPwd` / `isPasswordExpired`）—— 非核心鉴权~~
+  **批八十四已交付**（本行原为"非目标"，长期与实现不符）：两位均由服务端真实计算下发——
+  `isDefaultModifyPwd` = `sys_user.must_change_pwd='1'`；
+  `isPasswordExpired` = `sys.user.pwdExpireDays > 0` 且 `pwd_update_time` 距今满 N 天
+  （`pwd_update_time` 为 NULL 的账号 = 口令非本系统交付 ⇒ 恒不过期）。
+  另有服务端闸门 `sys.user.pwdChangeGate = off | deny_write | deny_all`（默认 off = 现状），
+  开启后处于"必须改密"状态的账号访问业务接口一律 403（白名单复用 `is_login_only_path`），
+  见 `docs/pwd-policy` 段与 `src/middleware/pwd_gate.rs`。
 - token 刷新机制（refresh_token）—— 本设计不含此机制，保持一致
 - Casbin 复杂 RBAC —— Casbin 方案偏重，本阶段用 perms 标识做轻量权限拦截
 

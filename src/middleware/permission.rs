@@ -237,7 +237,7 @@ pub async fn permission_middleware(
 /// - 使用 AssertUnwindSafe + catch_unwind 防 panic 击溃 worker
 /// - tokio::time::timeout 5s 保护，避免日志写入卡死导致 spawn 任务累积
 /// - 部门名称在 spawn 内查询（与 oper_log_middleware 一致）
-fn spawn_permission_denied_audit(
+pub(crate) fn spawn_permission_denied_audit(
     state: &Arc<AppState>,
     claims: &Claims,
     method: &axum::http::Method,
@@ -953,7 +953,7 @@ pub(crate) fn all_required_perm_keys() -> std::collections::BTreeSet<&'static st
 ///
 /// 维护约定：若某路由确为"仅登录"（无需 RBAC），必须同时在此登记，
 /// 否则开启 `deny_by_default` 后该接口会被误拦截（403）。
-fn is_login_only_path(method: &str, path: &str) -> bool {
+pub(crate) fn is_login_only_path(method: &str, path: &str) -> bool {
     matches!(
         (method, path),
         // ===== 登录态相关（protected_auth_routes，需 auth 无需 RBAC）=====

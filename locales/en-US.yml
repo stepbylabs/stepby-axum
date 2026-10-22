@@ -241,6 +241,8 @@ error:
     erasure_platform_only: Only platform administrators can anonymize users
     erasure_forbidden: Platform users and the super administrator cannot be anonymized
     erasure_revoke_failed: Failed to mark sessions invalid before anonymization; aborted (fail-closed)
+    password_expired: Your password has expired; please change it before continuing
+    password_change_required: The initial password has not been changed; please set a new password in Profile - Security Settings
   config:
     not_found: Configuration not found
     key_exists: Configuration key already exists

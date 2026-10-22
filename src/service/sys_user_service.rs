@@ -1721,8 +1721,13 @@ impl SysUserService {
                 // R6-VAL-16/17：已归一化 + 枚举校验（见函数头部 helper）
                 user_am.sex = Set(normalized_sex.clone());
                 user_am.password = Set(Some(hashed.clone()));
+                // 批八十四 项 A：口令年龄起点。凡"把口令作为知识交付给了某个知道它的人"
+                // （管理员设的初始口令 / 用户自设 / 管理员重置下发）都必须刷新，
+                // 否则那一次变更对过期策略不可见（有效期形同虚设且无人报红——
+                // 由 common::pwd_policy::tests::password_write_sites_must_record_pwd_age 钉住）。
+                user_am.pwd_update_time = Set(Some(now));
                 // B4 一致化（§5.23）：管理员经表单设置初始密码 ⇒ 标记首登待改——
-                // 与导入路径（L2301）同口径；开关 forceFirstLoginChangePwd=false 时
+                // 与导入路径（import_users 插入分支）同口径；开关 forceFirstLoginChangePwd=false 时
                 // 仅软提示（mustChangePassword 布场 false），开启则强改。
                 user_am.must_change_pwd = Set(Some("1".to_string()));
                 user_am.status = Set(normalized_status.clone().or_else(|| Some("0".to_string())));
@@ -2405,6 +2410,8 @@ impl SysUserService {
             })??;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(hashed));
+        // 批八十四 项 A：管理员重置 = 新口令交付给"下一个知道它的人"，口令年龄归零重算
+        am.pwd_update_time = Set(Some(crate::common::datetime::now_naive()));
         // B4（m20261004_000003）：管理员重置密码 = 下发新初始密码，
         // 标志置回 '1'（用户下次登录被强制改密——开关开启时）
         am.must_change_pwd = Set(Some("1".to_string()));
@@ -2474,6 +2481,8 @@ impl SysUserService {
             })??;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(hashed));
+        // 批八十四 项 A：用户自设新口令 ⇒ 口令年龄从此刻起算
+        am.pwd_update_time = Set(Some(crate::common::datetime::now_naive()));
         // B4（m20261004_000003）：个人改密成功即清除强制首登改密标志
         // （所有个人改密路径统一经由本函数，标志自然收敛）
         am.must_change_pwd = Set(Some("0".to_string()));
@@ -2685,6 +2694,9 @@ impl SysUserService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.user.not_found")))?;
         let mut am: SysUserActiveModel = existing.into();
         am.password = Set(Some(new_hashed.to_string()));
+        // 批八十四 项 A：**刻意不**刷新 pwd_update_time——本函数只在登录时把 MD5 哈希
+        // 原地升级成 Argon2，用户输入的口令一个字没变。在这里刷新等于"登录一次就把
+        // 过期时钟归零"，有效期对老用户永久失效。豁免由 pwd_policy 的写站点锁按函数名登记。
         self.user_repo.update(am).await?;
         Ok(())
     }
@@ -3057,6 +3069,12 @@ impl SysUserService {
                                     email: Set(p.email),
                                     sex: Set(p.sex),
                                     password: Set(Some(hashed.clone())),
+                                    // 批八十四 项 A：导入用的是 `sys.user.initPassword` 共享初始口令
+                                    // （管理员下发、用户可知）⇒ 与 add_user 完全同口径：标记待改 +
+                                    // 记口令年龄。此前注释声称"同口径"却没写 must_change_pwd，
+                                    // 强改密开关对导入账号静默不生效（假入口的反方向缺口）。
+                                    must_change_pwd: Set(Some("1".to_string())),
+                                    pwd_update_time: Set(Some(now)),
                                     status: Set(Some(p.status)),
                                     del_flag: Set(Some("0".to_string())),
                                     create_by: Set(Some(created_by.clone())),
@@ -3476,6 +3494,7 @@ mod tests {
             status: Some("0".to_string()),
             del_flag: Some("0".to_string()),
             must_change_pwd: Some("0".to_string()),
+            pwd_update_time: None,
             login_ip: None,
             login_date: None,
             create_by: None,

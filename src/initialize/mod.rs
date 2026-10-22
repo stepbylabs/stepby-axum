@@ -73,6 +73,10 @@ impl AppInitializer {
 
         tracing::info!("=== stepby-axum 初始化中 ===");
 
+        // 2.0 配置文件里**未被识别的顶层条目**（段名拼错 = 整段静默回落默认值）⇒ 启动 WARN。
+        // 必须排在日志初始化之后（否则这条告警落不进日志），且不改变任何行为（详见 helpers）。
+        init_unknown_config_keys(&settings);
+
         // 2.1 能力位注入（三层开关的最外层：平台 config「能开什么」）。
         // 必须在任何服务/中间件读取 `common::features::platform_features()` **之前**完成，
         // 否则一律按"全关"处理——虽仍 fail-closed，但会让 `[features]` 里配置的开关静默失效。
@@ -402,6 +406,9 @@ impl AppInitializer {
         ensure_user_password_version_column(&db).await?;
         // B4 强制首登改密兜底：must_change_pwd 列 + admin 标记 + 强改开关 config 种子
         ensure_user_must_change_pwd_column(&db).await?;
+        // 批八十四 项 A：口令有效期事实列 + 两个热键种子（默认全关闭态 = 现状零变化）。
+        // 排在 must_change_pwd 之后：同一张表、同一族能力，种子体由迁移侧单一事实源给出。
+        ensure_user_pwd_expire_policy(&db).await?;
 
         // 3.10 批次十九链感知保留兜底：sys_log_archive_anchor 表 + F 按钮 9180/9181 种子
         //      （单一事实源 = 迁移 init_log_archive_anchor；存量库启动不跑 Migrator）

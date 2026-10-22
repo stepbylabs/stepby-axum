@@ -1229,6 +1229,11 @@ impl SysOauthService {
                 user_am.avatar = Set(avatar.clone());
                 user_am.user_type = Set(Some("10".to_string())); // OAuth 自动注册用户
                 user_am.password = Set(Some(hashed.clone()));
+                // 批八十四 项 A：**不**写 pwd_update_time（保持 NULL）。
+                // 这里的口令是随机生成、只进哈希、**任何人都不知道**的占位凭据（登录走第三方）。
+                // 若给它记年龄，`sys.user.pwdExpireDays` 一开就会把这些账号判过期，
+                // 而白名单里的自助改密要求旧口令 ⇒ 用户无法自助解除 ⇒ 在 deny_* 档下被永久锁死。
+                // "闸门只能拦能自己走出去的状态"——由 pwd_policy 写站点锁按函数名登记豁免。
                 user_am.status = Set(Some("0".to_string()));
                 user_am.del_flag = Set(Some("0".to_string()));
                 user_am.create_by = Set(Some(format!("oauth:{}", pcode)));

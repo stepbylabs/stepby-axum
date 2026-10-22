@@ -381,6 +381,13 @@ impl SysUserRepository {
                 Column::Password,
                 Column::Status,
                 Column::DelFlag,
+                // 实体声明的列必须在这份枚举里齐全：这条枚举只在"字段级权限隐列"分支
+                // 用于 `select_only`，漏一列 = `Model::from_query_result` 少字段 ⇒
+                // `GET /system/user/list` 在该租户设了隐藏字段时 500（不是少显示一列，是整页报错）。
+                // `must_change_pwd` 此前长期缺席（实体有、枚举无），随批八十四新增的
+                // `pwd_update_time` 一并补齐；由 `sys_user` 的列枚举↔实体字段对账锁守住。
+                Column::MustChangePwd,
+                Column::PwdUpdateTime,
                 Column::LoginIp,
                 Column::LoginDate,
                 Column::CreateBy,

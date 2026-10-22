@@ -125,3 +125,4 @@ pub mod m20261017_000002_platform_only_alert;
 pub mod m20261018_000001_flow_action_dict;
 pub mod m20261019_000001_flow_action_dict_drop_reserved;
 pub mod m20261021_000001_notice_read_user_index;
+pub mod m20261022_000001_pwd_expire_policy;
