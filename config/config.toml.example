@@ -58,7 +58,10 @@ permission_deny_by_default = true
 # "本部署零外部依赖"这件事在配置文件里可读，而不是要靠运行时推断。
 [cache]
 mode = "local"
-gc_interval_secs = 600   # local 档过期行 GC 周期（秒）
+gc_interval_secs = 600   # local 档过期行 GC 周期（秒）：首轮在启动时立即执行，此后每 N 秒一轮
+                         # 0 = 显式关闭（自行安排清库时用）；区间外的值夹到 30..=86400 并打 WARN
+                         # 清理对象是 sys_shared_kv / sys_shared_lock 里 expire_at 已过期的行；
+                         # expire_at IS NULL 的键族（密码版本号等由业务显式删除的）永不被碰
 
 # ---------------------------------------------------------------------------
 # 健康检查（/health）——**外部依赖**探活档位（AGENTS.md 硬基线 #5，批七十二新增段）

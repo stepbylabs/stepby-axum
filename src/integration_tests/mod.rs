@@ -17,6 +17,7 @@
 //! 若 Redis 不可用，`init_redis` 会在超时后返回错误，测试将以清晰信息失败。
 
 mod ai_config;
+mod ai_history_http;
 mod ak_sign;
 mod auth;
 mod capability_features;
@@ -40,6 +41,7 @@ mod migration_registry;
 mod monitor;
 mod monitor_alert;
 mod monitor_extra;
+mod oauth_unbind_http;
 mod path_param_decode;
 mod platform_guard;
 mod pwd_expiry;
@@ -48,6 +50,7 @@ mod response_cache;
 mod retention_cleanup;
 mod scim;
 mod scim_groups;
+mod shared_store_gc;
 mod sso;
 mod switch_modes;
 mod switch_states;

@@ -1271,6 +1271,147 @@ async fn test_sso_d3_refresh_rotation_and_revoke() {
     );
 }
 
+/// 批八十五 项 E：刷新链路上的认证强度声明（`acr` / `amr`）必须一路保持真实。
+///
+/// 缺陷形状（已修）：`RefreshBinding` 没有 TOTP 位，`token_refresh` 用 `CodeBinding`
+/// 重建身份快照时把 `totp_enabled` 写死 `false`，而 `acr`/`amr` 正是按那一位派生
+/// ⇒ **TOTP 用户在第一次静默刷新后声明从 `mfa`/`[pwd,totp]` 静默降为 `pwd`/`[pwd]`**。
+/// 按 acr 判定强度的 RP 会拿到一个"更弱但其实没变"的错误事实。
+///
+/// 判据形状（缺任一都不成立）：
+/// ① 正向：启用 TOTP ⇒ 首签 `mfa`、**一次刷新后仍是 `mfa`**、**二次刷新（RT→RT 链）仍是 `mfa`**
+///    （只断一跳的话，"刷新时从库里重查"这类实现也能蒙过，而缺陷恰在 RT 绑定不带这一位）；
+/// ② 对照组：未启用 TOTP ⇒ 首签与两次刷新恒为 `pwd`（否则"写死 mfa"也能让 ① 全绿）；
+/// ③ 主体身份取自 id_token 的 `sub`（= user_id，非 pairwise 客户端），不硬编码用户主键
+///    ——键由真实签发路径给出，绑定测试用户与共享态键之间不会有第二份口径。
+///
+/// `totp:enabled:{uid}` 生产码写入的是 AES-256-GCM 密文，但 [`SsoService`] 只判
+/// "键是否存在"（值不被消费，见 sso_service 的 issue_code_redirect 注释），
+/// 故测试写入哨兵串即可复现"该用户已启用 TOTP"这一事实，不伪造任何解密材料。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sso_refresh_preserves_acr_claim() {
+    let ctx = sso_ctx().await;
+    let (cid, secret) = add_client_full(
+        &ctx,
+        "0",
+        "it_sso_acrkeep",
+        &[REDIRECT_URI],
+        Some(&["authorization_code", "refresh_token"]),
+    )
+    .await;
+
+    let refresh_form = |rt: &str| {
+        format!(
+            "grant_type=refresh_token&client_id={}&client_secret={}&refresh_token={}",
+            urlenc(&cid),
+            urlenc(&secret),
+            urlenc(rt)
+        )
+    };
+    /// token 端点响应 → (acr, amr 拼接串, RT)
+    async fn post_refresh(ctx: &TestContext, form: &str) -> (String, String, String) {
+        let (status, _, body) = raw_post(
+            &ctx.app,
+            ctx.peer_ip,
+            "/sso/token",
+            "application/x-www-form-urlencoded",
+            form,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "refresh 应 200: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let tr = json_of(&body);
+        let cl = decode_jwt_payload(tr["id_token"].as_str().expect("刷新应重签 id_token"));
+        (
+            cl["acr"].as_str().unwrap_or_default().to_string(),
+            cl["amr"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default(),
+            tr["refresh_token"]
+                .as_str()
+                .expect("应轮换出新的 RT")
+                .to_string(),
+        )
+    }
+
+    // ── ② 对照组：未启用 TOTP，三跳恒 pwd ──
+    let code = obtain_code(&ctx, &cid, "openid profile").await;
+    let (tr, _) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    let id0 = decode_jwt_payload(tr["id_token"].as_str().expect("id_token"));
+    let uid = id0["sub"].as_str().expect("sub = user_id").to_string();
+    assert_eq!(
+        id0["acr"].as_str(),
+        Some("pwd"),
+        "对照：未启用 TOTP 首签应 pwd"
+    );
+    assert_eq!(
+        id0["amr"][0].as_str(),
+        Some("pwd"),
+        "对照：amr 首项应为 pwd"
+    );
+    assert_eq!(
+        id0["amr"].as_array().map(|a| a.len()),
+        Some(1),
+        "对照：amr 不得含 totp"
+    );
+    let (acr_r1, amr_r1, rt1) =
+        post_refresh(&ctx, &refresh_form(tr["refresh_token"].as_str().unwrap())).await;
+    let (acr_r2, amr_r2, _) = post_refresh(&ctx, &refresh_form(&rt1)).await;
+    for (tag, acr, amr) in [("刷新 1", &acr_r1, &amr_r1), ("刷新 2", &acr_r2, &amr_r2)] {
+        assert_eq!(acr, "pwd", "对照：未启用 TOTP 的{tag}仍应 pwd，实际 {acr}");
+        assert_eq!(
+            amr, "pwd",
+            "对照：未启用 TOTP 的{tag} amr 应只有 pwd，实际 {amr}"
+        );
+    }
+
+    // ── ① 正向：启用 TOTP 后同一主体三跳恒 mfa ──
+    // 哨兵值不被生产码消费（只判存在），故无需伪造密文。
+    ctx.state
+        .store
+        .set_ex(&format!("totp:enabled:{uid}"), "it-sentinel", 3600)
+        .await
+        .expect("写入 TOTP enabled 键失败");
+
+    let code = obtain_code(&ctx, &cid, "openid profile").await;
+    let (tr, _) = exchange_token(&ctx, &code, &cid, &secret, true).await;
+    let id0 = decode_jwt_payload(tr["id_token"].as_str().expect("id_token"));
+    assert_eq!(
+        id0["acr"].as_str(),
+        Some("mfa"),
+        "已启用 TOTP 首签应为 mfa（否则本用例的后半段无约束力），实际: {id0}"
+    );
+    assert_eq!(
+        id0["amr"].as_array().map(|a| a.len()),
+        Some(2),
+        "首签 amr 应为 [pwd,totp]，实际: {id0}"
+    );
+    let (acr_r1, amr_r1, rt1) =
+        post_refresh(&ctx, &refresh_form(tr["refresh_token"].as_str().unwrap())).await;
+    let (acr_r2, amr_r2, _) = post_refresh(&ctx, &refresh_form(&rt1)).await;
+    for (tag, acr, amr) in [("刷新 1", &acr_r1, &amr_r1), ("刷新 2", &acr_r2, &amr_r2)] {
+        assert_eq!(
+            acr, "mfa",
+            "批八十五 项 E：TOTP 用户{tag}后不得静默降级为 pwd，实际 {acr}"
+        );
+        assert_eq!(
+            amr, "pwd,totp",
+            "{tag}后 amr 必须保持 [pwd,totp]，实际 {amr}"
+        );
+    }
+}
+
 /// v4 §7：token 请求必须携带与 authorize 完全一致的 redirect_uri（缺失 → 400 invalid_grant）
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sso_v4_token_redirect_uri_mandatory() {

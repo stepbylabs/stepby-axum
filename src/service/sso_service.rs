@@ -279,6 +279,31 @@ pub(crate) struct RefreshBinding {
     /// 时放行——redis 档键 TTL 与 local 档 expire_at 列仍负责物理过期，兜底不缺失。
     #[serde(default)]
     exp_at: Option<i64>,
+    /// 认证强度快照（批八十五 项 E）：**必须随绑定持久化**，不得在刷新重建时补一个常量。
+    ///
+    /// 立项原因是实测的缺陷：本结构原先没有这一位，`refresh` 用 `RefreshBinding` 重建
+    /// `CodeBinding` 时把 `totp_enabled` 写死 `false`，而 id_token 的 `acr`/`amr`（v5-E5，
+    /// 见本文件下方签发处）正是按那一位派生的 ⇒ **TOTP 用户在第一次静默刷新后，认证强度
+    /// 声明从 `mfa`/`[pwd,totp]` 静默降为 `pwd`/`[pwd]`**——按 acr 判定强度的 RP 会拿到
+    /// 一个"更弱但其实没变"的错误事实（要么误放行弱认证，要么误拒强认证用户）。
+    ///
+    /// `#[serde(default)]` = false 是**存量绑定的现状**且方向诚实：旧绑定里我们不知道
+    /// 有没有 TOTP，宁可不声明 mfa，也不得凭空造一个强认证声明出来。
+    #[serde(default)]
+    totp_enabled: bool,
+}
+
+/// id_token 的认证强度声明（v5-E5，RFC 8176 `acr` / OIDC `amr`）——单点事实源。
+///
+/// 抽成函数的原因不是复用，而是**判据要能真判到这一支**：逻辑写在 `if/else` 里时，测试只能
+/// 复刻同一份 `if/else` 自证（恒等式当证据）。批八十五 项 E 的缺陷正落在这条链的上游
+/// （快照没随 RT 走），所以 acr/amr 的取值必须由生产码自己给出、由单测直接驱动。
+fn auth_strength(totp_enabled: bool) -> (&'static str, &'static [&'static str]) {
+    if totp_enabled {
+        ("mfa", &["pwd", "totp"])
+    } else {
+        ("pwd", &["pwd"])
+    }
 }
 
 /// authorize 请求参数（由 handler 从 query 解出后传入）
@@ -1211,6 +1236,8 @@ impl SsoService {
             tid: binding.tid,
             // 绝对过期时刻随绑定写入：RT 轮换消费时比对即得「原 TTL 自动过期」等价语义
             exp_at: Some(chrono::Utc::now().timestamp() + rt_ttl as i64),
+            // 认证强度快照必须一路带着走（批八十五 项 E，见 RefreshBinding::totp_enabled 注释）
+            totp_enabled: binding.totp_enabled,
         };
         let json = serde_json::to_string(&rt_binding)
             .map_err(|_| OidcError::new("server_error", crate::tr!("error.sso.token_failed")))?;
@@ -1485,7 +1512,9 @@ impl SsoService {
             nick_name: rt_binding.nick_name.clone(),
             email: rt_binding.email.clone(),
             access_token_hash: String::new(),
-            totp_enabled: false,
+            // 认证强度**从绑定里取**，不是写死 false（批八十五 项 E）。写死时 refresh 后的
+            // id_token 恒 `acr=pwd`，TOTP 用户的 mfa 声明在第一次静默刷新即丢失。
+            totp_enabled: rt_binding.totp_enabled,
             tid: rt_binding.tid,
             redirect_uri: String::new(),
             scope: rt_binding.scope.clone(),
@@ -1782,13 +1811,11 @@ impl SsoService {
         // v5-E5：认证强度声明（RFC 8176 acr / OIDC amr）——authorize 时点快照
         // 用户 TOTP 启用状态：启用 → acr="mfa"、amr=["pwd","totp"]；否则 acr="pwd"、
         // amr=["pwd"]。RP 据此判断认证强度（如要求 mfa 才放行敏感操作）。
-        if binding.totp_enabled {
-            claims.insert("acr".into(), serde_json::json!("mfa"));
-            claims.insert("amr".into(), serde_json::json!(["pwd", "totp"]));
-        } else {
-            claims.insert("acr".into(), serde_json::json!("pwd"));
-            claims.insert("amr".into(), serde_json::json!(["pwd"]));
-        }
+        // 取值由 [`auth_strength`] 单点给出（批八十五）：判据要能真判到这一支，
+        // 而不是在测试里复刻一份 if/else 再自证。
+        let (acr, amr) = auth_strength(binding.totp_enabled);
+        claims.insert("acr".into(), serde_json::json!(acr));
+        claims.insert("amr".into(), serde_json::json!(amr));
         // v5-N2 Phase 1：租户 ID（tid）——多租户立项后 RP 可按租户区分用户主体
         claims.insert("tid".into(), serde_json::json!(binding.tid));
         let payload = serde_json::Value::Object(claims);
@@ -3196,6 +3223,85 @@ mod tests {
             vec!["openid", "profile", "email"]
         );
         assert!(split_scope("").is_empty());
+    }
+
+    /// 批八十五 项 E：认证强度快照必须能穿过"签发 RT → 序列化 → 刷新反序列化"这一整圈。
+    ///
+    /// 缺陷形状是 `RefreshBinding` 根本没有这一位，重建 `CodeBinding` 时写死 `false`，
+    /// 而 `acr`/`amr` 就按那一位派生 ⇒ TOTP 用户第一次静默刷新后声明降为 `pwd`。
+    /// 本判据把"序列化 → 反序列化 → 还原"三步真跑一遍，不测中间某个纯函数。
+    #[test]
+    fn refresh_binding_carries_totp_snapshot() {
+        let mut rt = RefreshBinding {
+            client_id: "client-a".into(),
+            user_id: 42,
+            username: "u".into(),
+            nick_name: String::new(),
+            email: String::new(),
+            scope: vec!["openid".into()],
+            auth_time: 1_700_000_000,
+            tid: 7,
+            exp_at: Some(1_700_003_600),
+            totp_enabled: true,
+        };
+        let json = serde_json::to_string(&rt).expect("RT 绑定应可序列化");
+        let back: RefreshBinding = serde_json::from_str(&json).expect("RT 绑定应可反序列化");
+        assert!(back.totp_enabled, "mfa 快照不得在序列化一圈后丢失");
+
+        // 对照组：未启用 TOTP 时必须**保持**未启用（不得为了"看起来强"而造声明）
+        rt.totp_enabled = false;
+        let back2: RefreshBinding =
+            serde_json::from_str(&serde_json::to_string(&rt).expect("序列化")).expect("反序列化");
+        assert!(!back2.totp_enabled, "非 mfa 用户不该被凭空升格");
+
+        // 跨版本兼容：本字段之前的存量绑定 JSON 里没有这一位。
+        // 用"解析后删键再序列化"造旧格式，而不是对 JSON 文本做 replace——后者会留下
+        // `"…,,"` 这类语法残骸（本条反证的第一版就是这么坏的：`trailing comma` 让
+        // 反序列化直接抛错，测的不再是"旧格式能不能读"，而是我自己的字符串算术）。
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).expect("夹具应可解析");
+        let removed = legacy
+            .as_object_mut()
+            .expect("RT 绑定应为对象")
+            .remove("totp_enabled");
+        assert!(
+            removed.is_some(),
+            "夹具里必须真有这一位可删，否则反证是空的"
+        );
+        let legacy = serde_json::to_string(&legacy).expect("旧格式序列化");
+        assert!(!legacy.contains("totp_enabled"), "旧格式必须确实没有这一位");
+        let from_legacy: RefreshBinding = serde_json::from_str(&legacy)
+            .expect("旧格式 RT 绑定必须还能反序列化（升级期不能整批失效）");
+        assert!(
+            !from_legacy.totp_enabled,
+            "旧绑定缺省必须按现状 pwd 处理：宁可不声明 mfa，也不得凭空造强认证声明"
+        );
+    }
+
+    /// 快照丢失的代价落在 `acr`/`amr` 上，所以这一条直接判"RP 看到的事实"：
+    /// 声明由生产码 [`auth_strength`] 自己给出（不在测试里复刻 if/else，那是恒等式自证）。
+    #[test]
+    fn acr_claim_follows_restored_snapshot() {
+        let restored = RefreshBinding {
+            client_id: "c".into(),
+            user_id: 1,
+            username: "u".into(),
+            nick_name: String::new(),
+            email: String::new(),
+            scope: vec![],
+            auth_time: 0,
+            tid: 0,
+            exp_at: None,
+            totp_enabled: true,
+        };
+        let (acr, amr) = auth_strength(restored.totp_enabled);
+        assert_eq!((acr, amr), ("mfa", &["pwd", "totp"][..]));
+        // 反证：旧实现等价于把快照硬编码成 false，这条必须能把两种事实区分开
+        let (acr2, amr2) = auth_strength(false);
+        assert_eq!((acr2, amr2), ("pwd", &["pwd"][..]));
+        assert_ne!(
+            acr, acr2,
+            "mfa 与 pwd 必须可区分——若两者同值，上面两条断言都无意义"
+        );
     }
 
     /// v5-D9：同意票逐字比对——**一致即通过**、**任何实质差异即拒绝**（可证伪）。

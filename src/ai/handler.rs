@@ -408,7 +408,14 @@ pub async fn remove_my_history(
 
 /// POST /ai/replay —— 重放本人历史（AI-02 决策 2；三层校验同 chat，
 /// 历史 SQL 重新过 sql_guard——白名单/租户范围变更后重放被拒是预期语义）
+///
+/// `rename_all` 不是装饰：serde 缺省按 Rust 字段名（`history_id`）解线上键，而前端全站
+/// 用 camelCase（`views/ai/panel/index.vue` 发 `{historyId}`、`api/ai/index.ts` 也这么声明）。
+/// 少了这一行时**重放按钮必然 400 `error.common.parse_failed`**——b85 实测本仓 48 个
+/// `ValidatedJson/Query` DTO 里只有这一处漏了，所以它是漏网而非另一种约定。
+/// 由 `api_contract_guard::dto_wire_shape_hits` 常驻钉住（含"这个 DTO 必须在采集面里"的真实文件正控）。
 #[derive(Debug, Deserialize, garde::Validate)]
+#[serde(rename_all = "camelCase")]
 pub struct AiReplayDto {
     #[garde(range(min = 1))]
     pub history_id: i64,
@@ -434,7 +441,9 @@ pub async fn replay(
     if tid != 0 && !fs.is_on(FEATURE_AI_COPILOT) {
         return Err(AppError::forbidden(&tr!("error.ai.capability_off")));
     }
-    // 重放同样是一次真实推理 ⇒ 与 chat 共用同一个并发闸（不得一条有闸一条没有）
+    // 重放**不调 LLM**（`service.replay` 只重跑库里存的 SQL），但仍占一个推理额度：
+    // 它与 chat 打的是同一个 DB 与同一族结果集，放开它等于给"批量重跑历史"留一条无闸通道。
+    // 与 chat 共用同一个闸（不得一条有闸一条没有）。
     let _inference_permit = admit_inference(&state)?;
     let uid: i64 = operator.user_id().parse().unwrap_or(0);
     let service = AiService::new(state.db.clone(), effective.clone());

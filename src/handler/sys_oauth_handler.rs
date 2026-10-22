@@ -483,7 +483,8 @@ pub async fn bind_oauth(
     params(UnbindQuery),
     responses(
         (status = 200, description = "解绑成功", body = AjaxResult<serde_json::Value>),
-        (status = 400, description = "provider 非法或未绑定"),
+        (status = 400, description = "provider 参数缺失或无法反序列化"),
+        (status = 404, description = "该 provider 未绑定到当前账号（error.oauth.no_binding）"),
         (status = 401, description = "未授权"),
     ),
     tag = "oauth"

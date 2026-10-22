@@ -60,6 +60,12 @@ impl AppInitializer {
         // 1. 加载配置（含 .env 环境变量覆盖）
         let settings = Arc::new(Settings::from_file(config_path)?);
 
+        // 1.05 轮换过渡期旧密钥**紧跟配置加载**注入（批八十五 项 D）：crypto 侧原先自己
+        // `env::var("CONFIG_ENC_KEY_PREVIOUS")`，于是配置文件里的 `config_enc_key_previous`
+        // 永不参与解密（字段有、强度校验有、消费点没有）。现在与 Settings 单点对齐，
+        // 且必须排在任何解密调用之前——OnceLock 首写优先，晚注入等于没注入。
+        crate::utils::crypto::set_runtime_previous_key(settings.config_enc_key_previous.clone());
+
         // 1.1 零配置引导：data 目录自建（SQLite 落盘 / secret.key 引导密钥的宿主目录）。
         // 失败不阻断——SQLite 初始化会再报真实错误；有 config.toml 的存量部署目录已存在（幂等）。
         if let Err(e) = std::fs::create_dir_all("data") {
@@ -73,9 +79,10 @@ impl AppInitializer {
 
         tracing::info!("=== stepby-axum 初始化中 ===");
 
-        // 2.0 配置文件里**未被识别的顶层条目**（段名拼错 = 整段静默回落默认值）⇒ 启动 WARN。
+        // 2.0 配置文件里**未被识别的条目**（段名拼错 = 整段静默回落默认值；b85 项 B 起
+        // 还含已知段里拼错的子键 = 该旋钮静默回落默认值）⇒ 启动 WARN。
         // 必须排在日志初始化之后（否则这条告警落不进日志），且不改变任何行为（详见 helpers）。
-        init_unknown_config_keys(&settings);
+        init_unknown_config_paths(&settings);
 
         // 2.1 能力位注入（三层开关的最外层：平台 config「能开什么」）。
         // 必须在任何服务/中间件读取 `common::features::platform_features()` **之前**完成，
@@ -507,6 +514,8 @@ impl AppInitializer {
         // G-14：注入 EncryptedString 列类型的运行时密钥（加密通用层密钥源；
         // 首写优先，重复初始化 no-op）
         crate::utils::crypto::set_runtime_master_key(settings.config_enc_key.clone());
+        // 轮换过渡期旧密钥的注入点在 1.05（必须早于任何解密调用），这里不再重复以免误读
+        // "首写优先"的实际生效值。
 
         // 4.4 v5-E1：consent 组合唯一索引（存量库兜底：清软删行/去重/建索引，
         //     与迁移 m20260924_000002_sso_consent_unique 等价）

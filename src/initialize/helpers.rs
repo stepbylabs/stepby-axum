@@ -218,29 +218,30 @@ pub(crate) fn init_feature_flags(settings: &Settings) {
     }
 }
 
-/// 配置文件里**未被任何已知字段消费**的顶层条目 ⇒ 启动 WARN（不改变任何行为）。
+/// 配置文件里**未被任何已知字段消费**的条目 ⇒ 启动 WARN（不改变任何行为）。
 ///
 /// 立案：`[sso]` 被拼成 `[oidc]` 时，整段配置静默按默认值运行——"配了但没生效"是最难查
 /// 的一类故障，而此前没有任何通道能看见它。刻意**不**用 `deny_unknown_fields`：
-/// 那会让存量部署因历史遗留键直接拒绝启动（fail-closed 在这里是错的方向）；
-/// 也不手写一份"已知段名"清单——事实源就是 serde 自己的字段集
-/// （`Settings::unknown_keys` 由 `#[serde(flatten)]` 收集，无第二份可漂移的副本）。
+/// 那会让存量部署因历史遗留键直接拒绝启动（fail-closed 在这里是错的方向）。
+///
+/// 批八十五 项 B（台账 N-40）把覆盖面从"仅顶层"扩到**已知段里的子键**：
+/// b84 的实现靠 `Settings::unknown_keys`（`#[serde(flatten)]` 只收顶层余料），子键拼错
+/// 仍然静默。现在事实源是 `config_parity_scan.py --emit-schema` 从结构体生成的路径表，
+/// 判据 = 配置文档 ⊖ 路径表（实现见 `config::config_paths`）。
 ///
 /// 只 WARN、不拒绝、不回落：未知条目一律按忽略处理（与改造前逐字节等价）。
-/// 已知边界：只覆盖**顶层**条目；已知段里拼错的**子键**仍被静默忽略
-/// （覆盖它需给 30 个结构体各加一个 flatten 兜底，属另立批次的改造面；
-/// 模板侧的双向漂移由根仓 `scripts/config_parity_scan.py` 对账，不靠运行时）。
-/// 只打**键名**不打值：未知条目本身可能就是误写进配置的凭据（AGENTS C.9 日志脱敏）。
-pub(crate) fn init_unknown_config_keys(settings: &Settings) {
-    if settings.unknown_keys.is_empty() {
+/// 只打**路径名**不打值：未知条目本身可能就是误写进配置的凭据（AGENTS C.9 日志脱敏）。
+pub(crate) fn init_unknown_config_paths(settings: &Settings) {
+    if settings.unknown_config_paths.is_empty() {
         return;
     }
     tracing::warn!(
-        keys = ?settings.unknown_keys.keys().collect::<Vec<_>>(),
-        "配置文件里有 {} 个未被识别的顶层条目 ⇒ **本次运行一律忽略、不生效**。\
-         最常见成因是段名拼错（例如 `[oidc]` 应为 `[sso]`、`[youjian]` 应为 `[mail]`）\
-         ⇒ 整段配置静默回落默认值；请对照 config/config.toml.example 校正",
-        settings.unknown_keys.len(),
+        paths = ?settings.unknown_config_paths,
+        "配置文件里有 {} 个未被识别的条目 ⇒ **本次运行一律忽略、不生效**。\
+         两类成因：① 段名拼错（例如 `[oidc]` 应为 `[sso]`、`[youjian]` 应为 `[mail]`）\
+         ⇒ 整段静默回落默认值；② 已知段里的子键拼错（例如 `introsction_enabled`）\
+         ⇒ 该旋钮静默回落默认值。请对照 config/config.toml.example 校正",
+        settings.unknown_config_paths.len(),
     );
 }
 

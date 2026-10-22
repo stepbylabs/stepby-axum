@@ -38,6 +38,11 @@ pub struct Settings {
     pub config_enc_key: String,
     /// 密钥轮换过渡期旧密钥（G-14，可选）：解密 `enc3:k0` 信封用（启动回填把
     /// 存量 v1/v2/k0 统一迁移到 `enc3:k1` 后即可清空）。空 = 无轮换期（现状）。
+    ///
+    /// 配置文件键与环境变量 `CONFIG_ENC_KEY_PREVIOUS` **两通道都生效**（批八十五 项 D）：
+    /// 消费点在 `utils::crypto::runtime_previous_key`，值由 `AppInitializer::run` 的 1.05
+    /// 步从本字段注入。此前 crypto 自己读 env，导致配置文件这一路**只被校验、从不被消费**
+    /// （"配了但没生效"）；由 crypto.rs 的 `previous_key_has_exactly_one_read_port` 钉住不得回退。
     #[serde(default)]
     pub config_enc_key_previous: String,
     /// 权限未映射路由的默认处置策略（权限 fail-closed 加固，B3 / W-1）
@@ -148,19 +153,22 @@ pub struct Settings {
     /// （AGENTS #5「外部依赖健康检查接入 /health」）。
     #[serde(default)]
     pub health: HealthConfig,
-    /// 配置文件里**没有被任何已知字段消费**的顶层条目（由 serde `flatten` 收集）。
+    /// 配置文件里**没有被任何已知字段消费**的点分路径（由 `config_paths::unknown_config_paths`
+    /// 在 `from_toml_text` 里算出，见该模块文档头）。
     ///
-    /// 存在的唯一目的：把"段名拼错 ⇒ 整段功能静默按默认值运行"从不可见变成启动 WARN
-    /// （`initialize::init_unknown_config_keys`）。它**不是**配置项：
+    /// 存在的唯一目的：把"段名拼错 ⇒ 整段静默按默认值运行"和"段里子键拼错 ⇒ 该旋钮静默
+    /// 按默认值运行"两类故障都变成启动 WARN（`initialize::init_unknown_config_keys`）。
+    /// 它**不是**配置项：
+    /// - `#[serde(skip)]`：既不参与反序列化（事实源是"路径表 ⊖ 配置文档"，不是 serde 的
+    ///   字段集），也不参与任何序列化出口（配置快照/导出不得带上它）；
     /// - 不得据此改变任何行为（fail-safe：未知键一律忽略，与改造前逐字节等价）；
-    /// - 事实源就是 serde 自己的字段集，因此**没有第二份清单可漂移**
-    ///   （手写一份"已知段名"表正是 AGENTS 反复禁止的"单一事实源"反面）。
-    ///
-    /// 已知边界：只覆盖**顶层**条目；已知段里拼错的**子键**仍被 serde 静默忽略
-    /// （要覆盖子键需给 30 个结构体各加一个 flatten 兜底，属另立批次的改造面；
-    /// 模板侧的双向漂移由根仓 `scripts/config_parity_scan.py` 对账，不靠运行时）。
-    #[serde(default, flatten)]
-    pub unknown_keys: std::collections::BTreeMap<String, toml::Value>,
+    /// - **只存键名、不存值**：未知条目本身可能就是误写进配置的凭据（AGENTS C.9 日志脱敏），
+    ///   所以这里刻意不持有 `toml::Value`（b84 的 `unknown_keys: BTreeMap<String, toml::Value>`
+    ///   把值留在了进程里，虽未打印，但"值不出函数"是更硬的边界）；
+    /// - 由 `from_env_only()` 与集成测试夹具构造时恒为空（没有配置文件 ⇒ 没有未知键可报），
+    ///   因此该字段不会影响任何测试语义（无需进 ⑧ 钳制表）。
+    #[serde(skip)]
+    pub unknown_config_paths: Vec<String>,
 }
 
 /// 手动实现 Debug 以脱敏 config_enc_key
@@ -198,11 +206,8 @@ impl fmt::Debug for Settings {
             .field("upload_scan", &self.upload_scan)
             .field("cache", &self.cache)
             .field("health", &self.health)
-            // 只打**键名**：未知键的值可能是误写进配置的凭据，不得进日志/Debug 输出
-            .field(
-                "unknown_keys",
-                &self.unknown_keys.keys().collect::<Vec<_>>(),
-            )
+            // 只打**路径名**：未知键的值可能是误写进配置的凭据，不得进日志/Debug 输出
+            .field("unknown_config_paths", &self.unknown_config_paths)
             .finish()
     }
 }
@@ -913,7 +918,19 @@ pub struct CacheConfig {
     /// `auto`（默认）| `local` | `redis`；非法值启动回落 auto 并 WARN（fail-safe）
     #[serde(default = "default_cache_mode")]
     pub mode: String,
-    /// local 档 `sys_shared_kv` / `sys_token_revocation` 过期行 GC 周期（秒，默认 600）
+    /// local 档 `sys_shared_kv` / `sys_shared_lock` 过期行 GC 周期（秒，默认 600）
+    ///
+    /// 批八十五 项 C 起这一位**有读点**：`main.rs` 在 local 档启动
+    /// `shared_store::gc::spawn_shared_store_gc`（首轮立即执行 ⇒ 停机很久后重启即补一次）。
+    /// 三档语义（实现在 `shared_store::gc::resolve_gc_interval`，形状锁在该模块单测里）：
+    /// - `0` = **显式关闭**（运维自带 cron 清库的逃生舱，启动打 INFO 说明"只增不删"）；
+    /// - `30..=86400` = 原样生效；
+    /// - 区间外的值 = 夹到边界并打 WARN（fail-safe，不静默改成默认值）。
+    ///
+    /// redis 档不启动 GC（键由 TTL 自过期，这两张表在 redis 档不被写；S1 权威层
+    /// `sys_token_revocation` 另有每日 04:30 的内置清理任务）。
+    ///
+    /// 取值属**启动只读**（AGENTS C.7：热改后闸门仍是首次建闸值，会行为分裂）。
     #[serde(default = "default_cache_gc_interval")]
     pub gc_interval_secs: u64,
 }
@@ -2826,8 +2843,7 @@ impl Settings {
         for (idx, cand) in candidates.iter().enumerate() {
             match std::fs::read_to_string(cand) {
                 Ok(content) => {
-                    let mut settings: Settings = toml::from_str(&content)
-                        .map_err(|e| anyhow::anyhow!("解析配置文件 {} 失败: {}", cand, e))?;
+                    let mut settings = Self::from_toml_text(&content, cand)?;
                     settings.apply_env_overrides();
                     settings.validate_secrets()?;
                     if idx != 0 {
@@ -2848,6 +2864,21 @@ impl Settings {
             path
         );
         Self::from_env_only()
+    }
+
+    /// 反序列化配置文件文本，并**同时**算出"未被任何已知字段消费的路径"。
+    ///
+    /// 抽成函数不是为了复用，而是让**接线本身可测**：判据算得出未知键、却没人把它填进
+    /// `Settings`，是 b83 项 E 那一族"算了不接=没算"的形状。现在 `from_file` 只能经这里
+    /// 构造 Settings（由 `from_file_routes_through_from_toml_text` 钉住），未知键通道
+    /// 就不可能静默断开。
+    ///
+    /// `source` 只进错误文案（原实现把文件名拼在 `toml::from_str` 的错误里）。
+    fn from_toml_text(content: &str, source: &str) -> anyhow::Result<Self> {
+        let mut settings: Settings = toml::from_str(content)
+            .map_err(|e| anyhow::anyhow!("解析配置文件 {} 失败: {}", source, e))?;
+        settings.unknown_config_paths = crate::config::config_paths::unknown_config_paths(content);
+        Ok(settings)
     }
 
     /// 用环境变量覆盖可注入字段（敏感配置与部署相关参数）
@@ -3172,7 +3203,7 @@ impl Settings {
             config_version: 1,
             cache: CacheConfig::default(),
             health: HealthConfig::default(),
-            unknown_keys: Default::default(),
+            unknown_config_paths: Vec::new(),
         };
 
         // 零配置引导：JWT_SECRET 缺省时生成/复用 data/secret.key（仅 from_env_only 路径）
@@ -3471,7 +3502,7 @@ mod tests {
             config_version: 1,
             cache: CacheConfig::default(),
             health: HealthConfig::default(),
-            unknown_keys: Default::default(),
+            unknown_config_paths: Vec::new(),
         }
     }
 
@@ -4064,7 +4095,7 @@ mod tests {
             config_version: 1,
             cache: CacheConfig::default(),
             health: HealthConfig::default(),
-            unknown_keys: Default::default(),
+            unknown_config_paths: Vec::new(),
         };
 
         let debug_str = format!("{:?}", settings);
@@ -4360,31 +4391,35 @@ mod tests {
         }
     }
 
-    /// `Settings::unknown_keys`（`#[serde(flatten)]` 收集）的三态：
+    /// `Settings::from_toml_text` 的未知键通道（b84 立顶层、b85 项 B 补子键）三态：
     /// ① 入库模板自身必须**一个都没有**（复制模板就收到 WARN = 模板有缺陷）；
     /// ② 未识别的顶层条目（拼错的段名、裸键）必须被抓到，且已知字段照常解析
     ///    （fail-safe：忽略并告警，绝不因历史遗留键拒绝启动）；
-    /// ③ 已知段里的**子键**拼错不在本通道覆盖范围——这是结构性限制，
-    ///    写成断言而不是注释，是为了让"以为运行时能查出所有漂移"这个误读当场失效
-    ///    （模板侧的双向漂移由根仓 `scripts/config_parity_scan.py` 判，不靠运行时）。
+    /// ③ 已知段里的**子键**拼错也必须被抓到——b84 时这一支还是"结构性限制"并被钉成
+    ///    "看不见"（当时的判据是 `assert!(s3.unknown_keys.is_empty())`），本批**改的是限制本身**
+    ///    （台账 N-40）：从"serde flatten 只收顶层余料"换成"配置文档 ⊖ 生成物路径表"，
+    ///    所以断言方向跟着翻过来。翻回旧实现时这一条必须红，否则它就成了虚锁。
+    ///
+    /// 夹具替换一律 `assert_ne!` 证其生效（`replace` 打空 = 断言恒真）。
     #[test]
-    fn unknown_config_keys_capture_typos_but_not_subkeys() {
-        let content = std::fs::read_to_string("config/config.toml.example")
+    fn unknown_config_paths_cover_sections_top_level_keys_and_subkeys() {
+        let source = "config/config.toml.example";
+        let content = std::fs::read_to_string(source)
             .expect("入库模板必须存在（cargo test 的 CWD = crate 根）");
-        let base: Settings = toml::from_str(&content).expect("入库模板应可反序列化为 Settings");
+        let base = Settings::from_toml_text(&content, source).expect("入库模板应可反序列化");
         assert!(
-            base.unknown_keys.is_empty(),
-            "入库模板不得留下未识别的顶层条目，实得 {:?}",
-            base.unknown_keys.keys().collect::<Vec<_>>()
+            base.unknown_config_paths.is_empty(),
+            "入库模板不得留下未识别条目，实得 {:?}",
+            base.unknown_config_paths
         );
 
         // ②a 段名拼错：`[sso]` 写成 `[oidc]` ⇒ 整段配置静默失效，此前无人可见
         let typo = format!("{content}\n[oidc]\nenabled = true\n");
-        let s: Settings = toml::from_str(&typo).expect("未识别段不得导致解析失败");
+        let s = Settings::from_toml_text(&typo, "typo").expect("未识别段不得导致解析失败");
         assert_eq!(
-            s.unknown_keys.keys().collect::<Vec<_>>(),
-            vec!["oidc"],
-            "未识别的顶层段必须被抓到"
+            s.unknown_config_paths,
+            vec!["oidc".to_string()],
+            "未识别的顶层段必须被抓到（报段名一条，不是逐子键刷屏）"
         );
         assert!(
             !s.sso.enabled,
@@ -4392,29 +4427,105 @@ mod tests {
         );
 
         // ②b 顶层裸键（必须写在**任何 [table] 之前**——TOML 里写在段头之后的散键属于那个段，
-        // 这一形状正是 ③ 那一支限制的来源）
+        // 这一形状正是 b84 当年"子键看不见"的来源）
         let stray = content.replace(
             "config_version = 1",
             "config_version = 1\nstray_top_key = 1",
         );
         assert_ne!(stray, content, "夹具替换必须真的生效，否则本断言是虚锁");
-        let s2: Settings = toml::from_str(&stray).expect("未识别裸键不得导致解析失败");
+        let s2 = Settings::from_toml_text(&stray, "stray").expect("未识别裸键不得导致解析失败");
         assert!(
-            s2.unknown_keys.contains_key("stray_top_key"),
+            s2.unknown_config_paths
+                .contains(&"stray_top_key".to_string()),
             "顶层裸键必须被抓到，实得 {:?}",
-            s2.unknown_keys.keys().collect::<Vec<_>>()
+            s2.unknown_config_paths
         );
 
-        // ③ 已知段里的子键拼错 ⇒ 本通道看不见（限制必须被钉住，不得只在注释里声明）
+        // ③ 已知段里的子键拼错 ⇒ **本批起看得见**（断言方向与 b84 相反）
         let subtypo = content.replace(
             "consent_ticket_ttl_secs = 300",
             "consent_ticket_ttl_secs = 300\nconcent_ticket_ttl_secs = 999",
         );
         assert_ne!(subtypo, content, "夹具替换必须真的生效，否则本断言是虚锁");
-        let s3: Settings = toml::from_str(&subtypo).expect("子键拼错不得导致解析失败");
+        let s3 = Settings::from_toml_text(&subtypo, "subtypo").expect("子键拼错不得导致解析失败");
         assert!(
-            s3.unknown_keys.is_empty(),
-            "已知段里的子键不进本通道（覆盖它需给每个结构体加 flatten 兜底，属另立批次）"
+            s3.unknown_config_paths
+                .iter()
+                .any(|p| p == "sso.concent_ticket_ttl_secs"),
+            "已知段里拼错的子键必须点名（这正是 N-40 要补的通道），实得 {:?}",
+            s3.unknown_config_paths
         );
+        // 对照组真受约束：未拼错的其余部分**不得**被一起报出来（否则通道是"恒报"而非"判错"）
+        assert_eq!(
+            s3.unknown_config_paths,
+            vec!["sso.concent_ticket_ttl_secs".to_string()],
+            "除这一条子键之外，模板其余键必须全部已知"
+        );
+    }
+
+    /// 接线锁（b85 项 B）：`from_file` 必须经 `from_toml_text` 构造 Settings。
+    ///
+    /// 为什么需要一把读文本的形状锁：未知键通道的**填充点只在那一个函数里**。哪天
+    /// `from_file` 改回自己 `toml::from_str`，`unknown_config_paths` 就恒为空——启动 WARN
+    /// 照常打"没有未知键"，而 `config_paths` 的十一条单测全绿（它们测纯函数，不测接线）。
+    /// 这正是 b83 项 E 那一族"算了不接=没算"。
+    ///
+    /// 三组反脆弱缺一不可：① 切片器取不到函数体必须返回 None（空串会让两条断言同时
+    /// **vacuous 通过**）；② 合成违规必须被切片器抓到（证明它不是恒 None）；
+    /// ③ `from_toml_text` 本体确实含 `toml::from_str`（证明 from_file 那条不是"字符串
+    /// 永远匹配不上"的假绿）。
+    #[test]
+    fn from_file_routes_through_from_toml_text() {
+        let text = include_str!("settings.rs");
+        let body = fn_body(text, "pub fn from_file(").expect("from_file 函数体必须取到");
+        assert!(
+            body.contains("Self::from_toml_text("),
+            "from_file 必须经 from_toml_text 构造（否则未知键通道静默断开）"
+        );
+        assert!(
+            !body.contains("toml::from_str"),
+            "from_file 里不得再出现 toml::from_str，实得函数体：{body}"
+        );
+
+        let synth = "pub fn probe() {\n    let x = toml::from_str(s);\n}\n";
+        assert!(
+            fn_body(synth, "pub fn probe(")
+                .expect("合成函数体必须取到")
+                .contains("toml::from_str"),
+            "切片器必须能抓到合成违规（抓不到 = 本锁是恒真的虚锁）"
+        );
+        assert!(
+            fn_body(synth, "pub fn no_such_fn(").is_none(),
+            "切片器对不存在的函数必须返回 None，不得给空串（空串会让上面两条同时 vacuous 通过）"
+        );
+
+        let helper = fn_body(text, "fn from_toml_text(").expect("from_toml_text 函数体必须取到");
+        assert!(
+            helper.contains("toml::from_str") && helper.contains("unknown_config_paths("),
+            "填充点必须真的在 from_toml_text 里（算出并写回字段），实得：{helper}"
+        );
+    }
+
+    /// 按花括号配对取函数体：从 `head` 命中处扫到该函数的闭合 `}`。
+    ///
+    /// 返回 `None` 表示没找到该函数头或括号不配对——调用方**必须** expect，不得 `unwrap_or("")`
+    /// （见上一用例的注释）。
+    fn fn_body(text: &str, head: &str) -> Option<String> {
+        let at = text.find(head)?;
+        let open = text[at..].find('{')?;
+        let mut depth = 0usize;
+        for (i, ch) in text[at + open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(text[at + open..at + open + i + 1].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 }

@@ -40,24 +40,64 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn extract_tr_keys(crate_root: &Path) -> BTreeSet<String> {
     let mut files = Vec::new();
     collect_rs_files(&crate_root.join("src"), &mut files);
-    let re = regex::Regex::new(r#"tr!\s*\(\s*"([a-z0-9_.]+)""#).expect("正则编译失败");
     let mut keys = BTreeSet::new();
     for f in &files {
         let Ok(content) = std::fs::read_to_string(f) else {
             continue;
         };
-        // 跳过注释行：doc/行注释中的 tr!("...") 是用法示例（如 i18n.rs 宏文档），
-        // 不是真实调用；仅扫描代码行避免误报示例 key
-        let code_lines = content.lines().filter(|l| {
-            let t = l.trim_start();
-            !(t.starts_with("//"))
-        });
-        let code = code_lines.collect::<Vec<_>>().join("\n");
-        for cap in re.captures_iter(&code) {
-            keys.insert(cap[1].to_string());
-        }
+        keys.extend(tr_keys_in_text(&content));
     }
     keys
+}
+
+/// 文本级提取（纯函数，供真实树与合成控制组共用）。
+///
+/// 前缀字符类（行首或"非标识符字符"）不是洁癖：`include_str!("settings.rs")` 里含一个字面的 `tr!("`，
+/// 不锚定就会把 `settings.rs` 当成一个 i18n 键——b85 给自己写文本锁时正好踩中，
+/// 红出来是一条"zh-CN.yml 缺失 key: settings.rs"的**假 i18n 缺陷**，
+/// 而按字面提示去补 yml 就是把判据签成与事实一致（AGENTS《门禁全景》⑨）。
+fn tr_keys_in_text(text: &str) -> BTreeSet<String> {
+    let re = regex::Regex::new(r#"(?m)(^|[^A-Za-z0-9_])tr!\s*\(\s*"([a-z0-9_.]+)""#)
+        .expect("正则编译失败");
+    let mut keys = BTreeSet::new();
+    // 跳过注释行：doc/行注释中的 tr!("...") 是用法示例（如 i18n.rs 宏文档），
+    // 不是真实调用；仅扫描代码行避免误报示例 key
+    let code_lines = text.lines().filter(|l| {
+        let t = l.trim_start();
+        !(t.starts_with("//"))
+    });
+    let code = code_lines.collect::<Vec<_>>().join("\n");
+    for cap in re.captures_iter(&code) {
+        keys.insert(cap[2].to_string());
+    }
+    keys
+}
+
+/// 提取器自身的三支双向：真实调用必收、`include_str!` 形态必不收、
+/// `crate::tr!` 前缀形态必收且只收一条（前两条分别防"误报成 i18n 缺陷"与"漏采"）。
+#[test]
+fn tr_key_extractor_ignores_include_str_macro() {
+    let hit = tr_keys_in_text("fn h() { let _ = tr!(\"error.ai.busy\"); }");
+    assert!(
+        hit.contains("error.ai.busy"),
+        "真实 tr! 调用必须被采集，实得 {hit:?}"
+    );
+    let fake = tr_keys_in_text(
+        "fn t() { let text = include_str!(\"settings.rs\"); assert!(text.len() > 0); }",
+    );
+    assert!(
+        fake.is_empty(),
+        "include_str! 不得被当成 tr! 调用，实得 {fake:?}"
+    );
+    let mixed = tr_keys_in_text(
+        "fn t2() { let s = include_str!(\"a.rs\"); let k = crate::tr!(\"sys.upload.backend\"); }",
+    );
+    assert!(
+        mixed.contains("sys.upload.backend") && mixed.len() == 1,
+        "crate::tr! 必须仍被采集且只此一条，实得 {mixed:?}"
+    );
+    let doc = tr_keys_in_text("/// 用法示例：`tr!(\"error.common.not_found\")`\nfn t3() {}");
+    assert!(doc.is_empty(), "文档注释里的示例不得进采集面，实得 {doc:?}");
 }
 
 /// 解析 locales/*.yml，返回全部 key path 集合（如 "error.msg.channel_not_found"）。

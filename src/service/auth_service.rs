@@ -396,7 +396,9 @@ impl AuthService {
         let webauthn_enabled = self.webauthn_capability_on();
         if !captcha_enabled {
             return Ok(CaptchaVo {
-                captcha_enabled: false,
+                // 字段简写 = 直接用算出来的那一个值，不再重述一遍常量
+                //（重述的 `false` 与上方分支条件分叉时不会有任何编译错误）
+                captcha_enabled,
                 img: String::new(),
                 uuid: String::new(),
                 register_enabled,
@@ -426,7 +428,7 @@ impl AuthService {
             })?;
 
         Ok(CaptchaVo {
-            captcha_enabled: true,
+            captcha_enabled,
             img: captcha.img_base64,
             uuid: captcha.uuid,
             register_enabled,

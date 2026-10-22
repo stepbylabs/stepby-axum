@@ -59,6 +59,21 @@ async fn async_main() -> anyhow::Result<()> {
     // 外部依赖探活的启动检查（AGENTS #5 前半件）：state 即将被 router 消费，
     // 先克隆 Arc；`off` 档位下 [`startup_probe`] 内部直接返回，不发起任何出站请求。
     let probe_state = state.clone();
+
+    // local 档共享态过期行 GC（批八十五 项 C）：`[cache].gc_interval_secs` 此前**没有读点**，
+    // 于是 `sys_shared_kv`/`sys_shared_lock` 的过期行只增不删（读路径有 is_expired 过滤，
+    // 正确性无碍，但单机部署无人清库会无限累积）。redis 档不启动——键由 TTL 自过期，
+    // 这两张表在 redis 档根本不被写。周期取启动只读（AGENTS C.7）。
+    if stepby_axum::config::settings::CacheMode::Local
+        == state.config.cache.resolve_mode(&state.config.redis.url)
+    {
+        let gc_metrics = state.observability.metrics.clone();
+        stepby_axum::shared_store::gc::spawn_shared_store_gc(
+            state.db.clone(),
+            state.config.cache.gc_interval_secs,
+            Some(gc_metrics),
+        );
+    }
     let app = router::build_app(state);
     if probe_state.config.health.external_probe_mode()
         != stepby_axum::config::settings::ExternalProbeMode::Off

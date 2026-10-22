@@ -352,6 +352,134 @@ mod api_contract_mod {
             .collect()
     }
 
+    // ==================== 判据 5（批八十五）：DTO 的线上字段名必须显式声明 ====================
+
+    /// 被 `ValidatedJson<T>` / `ValidatedQuery<T>` / `ValidatedForm<T>` 消费的 DTO 名。
+    ///
+    /// 取"提取点实际消费到的"而不是"所有 derive(Deserialize) 的结构"：只有走这三个提取器的
+    /// DTO 才与本仓前端的 camelCase 约定直接相遇（其余结构要么是响应体、要么是内部类型）。
+    ///
+    /// **路径必须取最后一段**：`ValidatedJson<config_service::AiConfigUpdateDto>` 是全仓唯一
+    /// 的限定名写法（`ai/handler.rs:214`）。按"标识符字符"截会截出模块名 `config_service`
+    /// ——那个"DTO"当然定位不到定义，于是本条既误报一项、又**静默漏掉真正的 DTO**。
+    fn validated_extractor_dtos(
+        files: &[(String, Vec<String>)],
+    ) -> std::collections::BTreeSet<String> {
+        const MARKS: [&str; 3] = ["ValidatedJson<", "ValidatedQuery<", "ValidatedForm<"];
+        let mut out = std::collections::BTreeSet::new();
+        for (_, lines) in files {
+            for l in lines {
+                for mark in MARKS {
+                    let mut rest = l.as_str();
+                    while let Some(pos) = rest.find(mark) {
+                        let tail = &rest[pos + mark.len()..];
+                        let path: String = tail
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                            .collect();
+                        let name = path.rsplit("::").next().unwrap_or("");
+                        if !name.is_empty() && name != "T" {
+                            out.insert(name.to_string());
+                        }
+                        rest = tail;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 结构体的"线上形状"：`(所在文件, 容器属性块折叠文本, 体内逻辑行)`；找不到定义返回 `None`。
+    ///
+    /// 属性块**向上**收集连续的 `#[...]`（`#[serde(rename_all)]` 就写在 `pub struct` 前一行），
+    /// 且必须用 `logical_lines`：属性换行书写时物理行是残片，按物理行匹配会认不出 `rename_all`
+    /// ——那正是批七十五 B5 立过的"格式即豁免"形状。
+    fn struct_wire_shape(
+        files: &[(String, Vec<String>)],
+        name: &str,
+    ) -> Option<(String, String, Vec<String>)> {
+        for (rel, lines) in files {
+            let logical = logical_lines(lines);
+            for (pos, (_, l)) in logical.iter().enumerate() {
+                if struct_name_of(l).as_deref() != Some(name) {
+                    continue;
+                }
+                let mut attrs = String::new();
+                let mut k = pos;
+                while k > 0 {
+                    let prev = logical[k - 1].1.trim().to_string();
+                    if prev.starts_with("#[") {
+                        attrs = format!("{prev} {attrs}");
+                        k -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                let mut body: Vec<String> = Vec::new();
+                for (_, bl) in logical.iter().skip(pos + 1) {
+                    let bt = bl.trim();
+                    if bt == "}" {
+                        break;
+                    }
+                    body.push(bt.to_string());
+                }
+                return Some((rel.clone(), attrs, body));
+            }
+        }
+        None
+    }
+
+    /// 字段名（`pub xxx: T` / `xxx: T` 的行首标识符），非字段行返回 `None`。
+    fn field_name_of(line: &str) -> Option<String> {
+        let head = line.split(':').next()?.trim();
+        let head = head.strip_prefix("pub ").unwrap_or(head).trim();
+        let owned = head.strip_prefix("pub(crate) ").unwrap_or(head).trim();
+        if owned.is_empty()
+            || !owned
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return None;
+        }
+        Some(owned.to_string())
+    }
+
+    /// 违规 = 字段名含下划线，而线上名没有任何声明（既无容器级 `rename_all`，也无字段级
+    /// `rename` / `alias`）。serde 缺省按 Rust 字段名解键 ⇒ camelCase 的调用方**必然 400**。
+    fn dto_wire_shape_hits(files: &[(String, Vec<String>)]) -> Vec<String> {
+        let mut hits = Vec::new();
+        for name in validated_extractor_dtos(files) {
+            let Some((rel, attrs, body)) = struct_wire_shape(files, name.as_str()) else {
+                hits.push(format!(
+                    "{name}：被 Validated* 消费却定位不到结构体定义（采集面漏项，判据覆盖不到它）"
+                ));
+                continue;
+            };
+            let container_declared = attrs.contains("rename_all");
+            let mut pending_serde = false;
+            for ln in &body {
+                if ln.starts_with("#[") {
+                    if ln.starts_with("#[serde(") && (ln.contains("rename") || ln.contains("alias"))
+                    {
+                        pending_serde = true;
+                    }
+                    continue;
+                }
+                let Some(field) = field_name_of(ln) else {
+                    pending_serde = false;
+                    continue;
+                };
+                if field.contains('_') && !container_declared && !pending_serde {
+                    hits.push(format!(
+                        "{rel}::{name} 字段 `{field}` 未声明线上名（serde 按 snake_case 解键，camelCase 调用方必然 400 parse_failed）"
+                    ));
+                }
+                pending_serde = false;
+            }
+        }
+        hits
+    }
+
     /// 行首（允许 `pub` / `async` / `pub(crate)` 修饰）的 `fn NAME` ⇒ `NAME`
     fn fn_def_name(line: &str) -> Option<String> {
         let t = line.trim_start();
@@ -1201,6 +1329,184 @@ mod api_contract_mod {
                 "src/handler/other.rs".to_string()
             ],
             "复制的第二处必须被抓到（否则本锁只证明「第一处存在」）"
+        );
+    }
+
+    /// 判据 5 本体（批八十五）：DTO 的线上字段名必须显式声明。
+    ///
+    /// 立案实证：`AiReplayDto { pub history_id: i64 }` 没有 `rename_all`，而
+    /// `views/ai/panel/index.vue` 发 `{historyId}` ⇒ **AI 面板的"重放"按钮自上线起每次都
+    /// 400 `error.common.parse_failed`**，而两套件从没点过它（该端点登记的理由还写着"需要真实
+    /// AI provider 凭据"，实际 `AiService::replay` 只重跑库里存的 SQL、一次网络都不发）。
+    /// 全仓 48 个被 `Validated*` 消费的 DTO 里只有这一处漏了 camelCase，也就是说：
+    /// 这条约定此前**只存在于其它 47 个文件的写法里**，没有任何判据钉住，所以"漏一个"是静默的。
+    #[test]
+    fn dto_field_wire_names_must_be_declared() {
+        let files = src_line_files();
+        let dtos = validated_extractor_dtos(&files);
+        // 非零探针：采集面为空时"0 违规"毫无意义（同 `live_garde_dtos > 40` 那条纪律）
+        assert!(
+            dtos.len() > 40,
+            "被 Validated* 消费的 DTO 数异常偏小（实际 {}），提取器识别或遍历失效",
+            dtos.len()
+        );
+        let hits = dto_wire_shape_hits(&files);
+        assert!(
+            hits.is_empty(),
+            "存在未声明线上名的 snake_case 字段:\n{}",
+            hits.join("\n")
+        );
+        // 真实文件正控（AGENTS《门禁全景》⑬：锁的输入非空与锁的结论是两件事）：
+        // 本批修掉的那个 DTO 必须**在采集面里**且被定位到——否则上面那个 0 可能是"没扫到它"。
+        assert!(
+            dtos.contains("AiReplayDto"),
+            "AiReplayDto 被 ValidatedJson 消费，必须在本锁采集面里（不在=采集面漏项，这条锁是虚锁）"
+        );
+        let shape = struct_wire_shape(&files, "AiReplayDto");
+        let Some((rel, attrs, body)) = shape else {
+            panic!("AiReplayDto 定义定位失败：判据读不到它的形状，那个 0 不算证据");
+        };
+        assert_eq!(rel, "src/ai/handler.rs", "定位到的文件应当是 ai handler");
+        assert!(
+            attrs.contains("rename_all"),
+            "AiReplayDto 必须带容器级 rename_all（属性块实得：{attrs}）"
+        );
+        assert!(
+            body.iter().any(|l| l.contains("history_id")),
+            "体内必须看得到 history_id 字段（体实得：{body:?}）"
+        );
+    }
+
+    /// 控制组：四种"看着像违规"的合规写法必须不报，三种真违规形状必须报。
+    /// 没有这一组，判据可以退化成"一律报"或"一律不报"而自检照样绿（AGENTS《门禁全景》⑥）。
+    #[test]
+    fn dto_wire_shape_guard_catches_synthetic_violations() {
+        // ① 裸 snake_case 字段 ⇒ 必须报
+        let s1 = r#"
+pub struct BadDto {
+    #[garde(range(min = 1))]
+    pub history_id: i64,
+}
+async fn h(ValidatedJson(dto): ValidatedJson<BadDto>) {}
+"#;
+        assert_eq!(
+            dto_wire_shape_hits(&[("src/x.rs".to_string(), prod_lines(s1))]).len(),
+            1,
+            "① 未声明线上名的 snake 字段必须被抓到"
+        );
+        // ② 容器级 camelCase ⇒ 不报（正控：同一字段只是加了声明）
+        let s2 = r#"
+#[serde(rename_all = "camelCase")]
+pub struct GoodDto {
+    pub history_id: i64,
+}
+async fn g(ValidatedJson(dto): ValidatedJson<GoodDto>) {}
+"#;
+        assert!(
+            dto_wire_shape_hits(&[("src/y.rs".to_string(), prod_lines(s2))]).is_empty(),
+            "② 容器级 rename_all 必须视为已声明"
+        );
+        // ③ 逐字段 rename ⇒ 不报
+        let s3 = r#"
+pub struct AliasDto {
+    #[serde(rename = "historyId")]
+    pub history_id: i64,
+}
+async fn a(ValidatedQuery(dto): ValidatedQuery<AliasDto>) {}
+"#;
+        assert!(
+            dto_wire_shape_hits(&[("src/z.rs".to_string(), prod_lines(s3))]).is_empty(),
+            "③ 字段级 rename 必须视为已声明（且 ValidatedQuery 也要在判据面里）"
+        );
+        // ④ 逐字段 alias（双向接受）⇒ 不报
+        let s4 = r#"
+pub struct BothDto {
+    #[serde(alias = "history_id")]
+    pub history_id: i64,
+}
+async fn b(ValidatedJson(dto): ValidatedJson<BothDto>) {}
+"#;
+        assert!(
+            dto_wire_shape_hits(&[("src/w.rs".to_string(), prod_lines(s4))]).is_empty(),
+            "④ 字段级 alias 必须视为已声明"
+        );
+        // ⑤ 字段名本来就没有下划线 ⇒ 不报（防把整族 DTO 都误伤）
+        let s5 = r#"
+pub struct PlainDto {
+    pub question: String,
+}
+async fn p(ValidatedJson(dto): ValidatedJson<PlainDto>) {}
+"#;
+        assert!(
+            dto_wire_shape_hits(&[("src/v.rs".to_string(), prod_lines(s5))]).is_empty(),
+            "⑤ 无下划线字段不得误报"
+        );
+        // ⑥ 属性**换行书写**不得让 DTO 带着 rename_all 却被判违规（格式不得决定判定）
+        let s6 = r#"
+#[serde(
+    rename_all = "camelCase"
+)]
+pub struct WrappedDto {
+    pub job_group: String,
+}
+async fn w(ValidatedJson(dto): ValidatedJson<WrappedDto>) {}
+"#;
+        assert!(
+            dto_wire_shape_hits(&[("src/u.rs".to_string(), prod_lines(s6))]).is_empty(),
+            "⑥ 跨行属性里的 rename_all 必须被认出来"
+        );
+        // ⑦ 消费了却找不到定义 ⇒ 必须点名（不得静默跳过：跳过=这项永不判）
+        let s7 = r#"
+async fn m(ValidatedJson(dto): ValidatedJson<GhostDto>) {}
+"#;
+        let hits7 = dto_wire_shape_hits(&[("src/t.rs".to_string(), prod_lines(s7))]);
+        assert!(
+            hits7.len() == 1 && hits7[0].contains("GhostDto"),
+            "⑦ 定位不到定义的 DTO 必须响亮报，实际: {hits7:?}"
+        );
+        // ⑧ 泛型形参 `T` 不是 DTO（提取器自身的 impl 会命中，误收就是每个文件一条假阳性）
+        let s8 = r#"
+impl<T, S> FromRequest<S> for ValidatedJson<T>
+where T: DeserializeOwned + garde::Validate<Context = ()> {
+    type Rejection = AppError;
+}
+"#;
+        assert!(
+            validated_extractor_dtos(&[("src/s.rs".to_string(), prod_lines(s8))]).is_empty(),
+            "⑧ 泛型形参 T 不得被当成 DTO"
+        );
+        // ⑨ 同一 DTO 多处消费只判一次（否则一处违规报 N 遍，人会把重复当成"多处缺陷"）
+        let s9 = r#"
+pub struct TwiceDto {
+    pub page_num: i64,
+}
+async fn t1(ValidatedJson(dto): ValidatedJson<TwiceDto>) {}
+async fn t2(ValidatedJson(dto): ValidatedJson<TwiceDto>) {}
+"#;
+        assert_eq!(
+            dto_wire_shape_hits(&[("src/r.rs".to_string(), prod_lines(s9))]).len(),
+            1,
+            "⑨ 同一 DTO 必须只报一条"
+        );
+        // ⑩ 限定名 `mod::Dto` 必须按**最后一段**取 DTO（本仓有一处就这么写）。
+        //    截成模块名的后果是双向的：一边误报"定位不到定义"，一边把真 DTO 静默放出门采集面。
+        let s10 = r#"
+pub struct QdDto {
+    pub base_url: String,
+}
+async fn q(ValidatedJson(dto): ValidatedJson cfg::QdDto) {}
+"#;
+        let s10 = s10.replace("ValidatedJson cfg::QdDto", "ValidatedJson<cfg::QdDto>");
+        let files10 = vec![("src/q.rs".to_string(), prod_lines(&s10))];
+        let names10 = validated_extractor_dtos(&files10);
+        assert!(
+            names10.contains("QdDto") && !names10.contains("cfg"),
+            "⑩ 限定名必须解析成 DTO 本体，实得 {names10:?}"
+        );
+        assert_eq!(
+            dto_wire_shape_hits(&files10).len(),
+            1,
+            "⑩ 限定名背后的真 DTO 必须仍被判定（这里它是违规的）"
         );
     }
 }

@@ -25,6 +25,7 @@
 //! - `consume`（GETDEL）与 `set_nx_ex`（SETNX）是两种不可合并的原子语义；
 //! - 新增任何共享态用途必须先归入本 trait 方法集，**禁止直接 `redis.clone()` 裸调用**。
 
+pub mod gc;
 pub mod local_store;
 pub mod redis_store;
 

@@ -214,27 +214,37 @@ pub fn runtime_master_key() -> &'static str {
     RUNTIME_MASTER_KEY.get().map(String::as_str).unwrap_or("")
 }
 
-/// 轮换过渡期旧密钥（`CONFIG_ENC_KEY_PREVIOUS`，OnceLock 进程级缓存）
+/// 轮换过渡期旧密钥（进程级 OnceLock；AppInitializer 启动时注入
+/// `settings.config_enc_key_previous`）
 ///
-/// 仅在解密 `enc3:k0` 信封时使用；未配置返回 `None`（对应数据解密失败，
-/// 由 [`unseal_sensitive_value`] 的宽松读路径兜底）。crypto.rs 保持纯函数
-/// 姿态的妥协点：轮换密钥是进程级 env 配置，为避免 20+ 解密调用点签名
-/// 变更在此集中读取（仅 enc3:k0 一条路径触达，其余路径零 env 访问）。
-fn previous_master_key() -> Option<&'static str> {
-    static PREV: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    PREV.get_or_init(|| {
-        std::env::var("CONFIG_ENC_KEY_PREVIOUS")
-            .ok()
-            .filter(|v| !v.is_empty())
-    })
-    .as_deref()
+/// 批八十五 项 D 收口（台账 N-37 同类）：这里**原先**是 `std::env::var("CONFIG_ENC_KEY_PREVIOUS")`，
+/// 于是"配置文件里写的 `config_enc_key_previous`"永远不会参与解密——Settings 侧有字段、
+/// 有强度校验（`validate_secrets`）、有环境变量覆盖，唯独消费点只看 env。那正是本仓反复立案的
+/// "配了但没生效"形态（两个读取口，其中一个静默无效）。
+/// 现在与 `config_enc_key` 同构：**env 只是 Settings 的注入口，不是第二事实源**。
+static RUNTIME_PREVIOUS_KEY: OnceLock<String> = OnceLock::new();
+
+/// 注入轮换过渡期旧密钥（启动期调用一次；首写优先，与 [`set_runtime_master_key`] 同口径）。
+///
+/// 空串**不写入**：空 = "没有轮换期"，必须保持 [`runtime_previous_key`] 返回 `None`
+/// 的既有语义（`enc3:k0` 存量在无旧密钥时解密失败并给出可指引的错误）。
+pub fn set_runtime_previous_key(key: String) {
+    if key.is_empty() {
+        return;
+    }
+    let _ = RUNTIME_PREVIOUS_KEY.set(key);
 }
 
-/// 解密敏感配置值（轮换旧密钥自动取 `CONFIG_ENC_KEY_PREVIOUS` 环境变量）
+/// 读取轮换过渡期旧密钥（未注入 ⇒ `None`）
+pub fn runtime_previous_key() -> Option<&'static str> {
+    RUNTIME_PREVIOUS_KEY.get().map(String::as_str)
+}
+
+/// 解密敏感配置值（轮换旧密钥自动取启动注入值，见 [`runtime_previous_key`]）
 ///
 /// 见 [`decrypt_config_value_with_previous`]；本函数为常规入口。
 pub fn decrypt_config_value(stored_value: &str, master_key: &str) -> anyhow::Result<String> {
-    decrypt_config_value_with_previous(stored_value, master_key, previous_master_key())
+    decrypt_config_value_with_previous(stored_value, master_key, runtime_previous_key())
 }
 
 /// 解密敏感配置值（显式注入轮换旧密钥——测试友好，避免 env 并行污染）
@@ -249,7 +259,8 @@ pub fn decrypt_config_value(stored_value: &str, master_key: &str) -> anyhow::Res
 /// # 参数
 /// - `stored_value`：存储的值（可能带 `enc3:` / `enc2:` / `enc:` 前缀，也可能为明文）
 /// - `master_key`：当前主密钥
-/// - `previous`：轮换过渡期旧密钥（`enc3:k0` 解密用；生产路径传 env 读取结果）
+/// - `previous`：轮换过渡期旧密钥（`enc3:k0` 解密用；生产路径传 [`runtime_previous_key`]，
+///   即启动期从 Settings 注入的那一把）
 ///
 /// # 返回
 /// 解密后的明文，失败返回 anyhow::Error
@@ -278,7 +289,8 @@ pub fn decrypt_config_value_with_previous(
             PREVIOUS_KEY_ID => previous.ok_or_else(|| {
                 anyhow::anyhow!(
                     "v3 信封 key_id={PREVIOUS_KEY_ID}（轮换过渡期旧密钥），\
-                     但 CONFIG_ENC_KEY_PREVIOUS 未配置，无法解密——请恢复旧密钥环境变量后重试"
+                     但旧密钥未配置，无法解密——请恢复 config_enc_key_previous \
+                     （或环境变量 CONFIG_ENC_KEY_PREVIOUS）后重启"
                 )
             })?,
             other => anyhow::bail!("未知的 v3 key_id: {other}"),
@@ -472,6 +484,115 @@ mod crypto_tests {
         // ③ 未知 key_id → 拒绝
         let bad = format!("{ENCRYPTED_PREFIX_V3}k9:{payload}");
         assert!(decrypt_config_value_with_previous(&bad, current, Some(previous)).is_err());
+    }
+
+    /// 轮换旧密钥的**唯一**读取口 = 启动注入（Settings → crypto），不再是 crypto 自己读 env。
+    ///
+    /// 立案（批八十五 项 D）：`Settings.config_enc_key_previous` 有字段、有 `validate_secrets`
+    /// 强度校验、有 `CONFIG_ENC_KEY_PREVIOUS` 环境变量覆盖，但消费点 `previous_master_key()`
+    /// 直接 `env::var` ⇒ **配置文件里写的旧密钥永远不参与解密**。本用例走的是隐式路径
+    /// （`decrypt_config_value`，即 20+ 个生产调用点用的那一个），因此它判的是"注入值真的
+    /// 被消费"，不是"显式传参能传进去"（后者由 `test_v3_previous_key_rotation` 判）。
+    ///
+    /// OnceLock 首写优先、进程态不可逆 ⇒ 本模块所有用例只准用这一个常量
+    /// （与 `common/encrypted_value.rs` 里 `KEY` 的同款约束一致）。
+    const INJECTED_PREV: &str = "injected-previous-master-key-for-b85";
+
+    #[test]
+    fn runtime_injected_previous_key_is_consumed_by_the_implicit_path() {
+        set_runtime_previous_key(INJECTED_PREV.to_string());
+        // ① 注入值即读取值（空串不得写入，见 ③）
+        assert_eq!(
+            runtime_previous_key(),
+            Some(INJECTED_PREV),
+            "启动注入后隐式路径必须看到同一把密钥"
+        );
+
+        let current = "current-master-key-for-injection-test";
+        let plaintext = "rotated-away-via-settings";
+        let payload = encrypt_v2(plaintext, INJECTED_PREV)
+            .strip_prefix(ENCRYPTED_PREFIX_V2)
+            .expect("v2 信封应带前缀")
+            .to_string();
+        let k0 = format!("{ENCRYPTED_PREFIX_V3}{PREVIOUS_KEY_ID}:{payload}");
+
+        // ② 隐式路径（生产调用点）必须能解——这一条在改造前是**失败**的：
+        //    只有 env 里有旧密钥时才能解，配置文件里的那把进不了这里。
+        assert_eq!(
+            decrypt_config_value(&k0, current).expect("注入值应被隐式路径消费"),
+            plaintext
+        );
+        // 对照组真受约束：用另一把密钥造的 k0 信封必须解不开（证明 ② 不是"任何密钥都能解"）
+        let other_payload = encrypt_v2(plaintext, "a-completely-different-previous-key")
+            .strip_prefix(ENCRYPTED_PREFIX_V2)
+            .expect("v2 信封应带前缀")
+            .to_string();
+        let k0_other = format!("{ENCRYPTED_PREFIX_V3}{PREVIOUS_KEY_ID}:{other_payload}");
+        assert!(
+            decrypt_config_value(&k0_other, current).is_err(),
+            "非注入密钥造的 k0 信封不得被解开，否则上一条断言是恒真"
+        );
+
+        // ③ 空串不得覆盖已注入值（空 = 没有轮换期，语义上是"不写"而不是"写空"）
+        set_runtime_previous_key(String::new());
+        assert_eq!(runtime_previous_key(), Some(INJECTED_PREV));
+    }
+
+    /// 形状锁：crypto.rs 的**生产码**里不得再出现旧密钥的 env 读取口。
+    ///
+    /// 为什么需要它：注入点存在但没人调（`initialize` 里那行被删）、或某处又偷偷加回
+    /// `env::var`，两种回退都**不会**让上面那条用例变红——前者在测试进程里仍由测试自己
+    /// 注入，后者只要注入先发生就照解不误。所以判据必须直接看源码形态。
+    ///
+    /// 三条反脆弱缺一不可：合成违规必须被抓（否则判据恒真）、不存在的函数名必须返回
+    /// `None` 而不是空串、采集面必须有体量下限（读不到文件 ≠ 没有违规）。
+    #[test]
+    fn previous_key_has_exactly_one_read_port() {
+        use crate::common::prod_scan;
+
+        const PAT: &str = "env::var(\"CONFIG_ENC_KEY_PREVIOUS\")";
+        let cfg = prod_scan::Scan::default();
+        let file = prod_scan::prod_file("src/utils/crypto.rs", &cfg);
+        // 实测生产码 187 行有效（`#[cfg(test)]` 之后的夹具不计），地板取 120：
+        // 现状腰斩即说明采集面腐化，而不是"违规消失了"。
+        assert!(
+            file.nonempty_lines() > 120,
+            "crypto.rs 只读到 {} 行有效码，采集面坏了，本判据不作数",
+            file.nonempty_lines()
+        );
+        let hits: Vec<&String> = file.lines.iter().filter(|l| l.contains(PAT)).collect();
+        assert!(
+            hits.is_empty(),
+            "crypto.rs 生产码里仍有旧密钥的第二读取口（应只由 initialize 1.05 注入）：{hits:?}"
+        );
+
+        // 合成违规必须被抓（判据不能是"永远匹配不上"的假绿）
+        let synth = prod_scan::normalize(
+            "let k = std::env::var(\"CONFIG_ENC_KEY_PREVIOUS\").ok();\n",
+            &prod_scan::Scan::default(),
+        );
+        assert!(
+            synth.iter().any(|l| l.contains(PAT)),
+            "扫描器必须抓到合成违规，实得 {synth:?}"
+        );
+        // 注释里的同形状文本不得算成违规（刀口只能落在代码上）
+        let commented = prod_scan::normalize(
+            "// 曾经写 std::env::var(\"CONFIG_ENC_KEY_PREVIOUS\")，b85 起改成启动注入\n",
+            &prod_scan::Scan::default(),
+        );
+        assert!(
+            !commented.iter().any(|l| l.contains(PAT)),
+            "注释形态不得决定判据，实得 {commented:?}"
+        );
+
+        // 注：initialize 的注入点本身用文本核对——它是"唯一读取口"的另一半。
+        let init = prod_scan::prod_file("src/initialize/mod.rs", &cfg);
+        assert!(
+            init.lines
+                .iter()
+                .any(|l| l.contains("set_runtime_previous_key(settings.config_enc_key_previous")),
+            "启动注入语句必须存在且取的是 Settings 字段（否则配置文件那一进不了解密路径）"
+        );
     }
 
     #[test]
