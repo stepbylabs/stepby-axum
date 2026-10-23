@@ -251,6 +251,8 @@ error:
     platform_row_forbidden: 平台级参数配置不允许租户操作
     scope_invalid: 参数治理范围不合法
     flag_invalid: 参数治理标志不合法（%{field} 仅接受 0 或 1）
+    value_domain_invalid: '参数值不合法，仅允许：%{allowed}'
+    key_retired: 该参数键已退役（无任何运行时消费者），不再支持新建或修改
     governance_platform_only: 参数治理视图属平台专属，仅平台管理员可查看
   dept:
     not_found: 部门不存在

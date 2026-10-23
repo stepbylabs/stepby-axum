@@ -16,6 +16,11 @@
 //! 即：**全新部署的库该键恒为 platform_only，功能 72 在新库必失败**——种子与
 //! 产品语义冲突，以本迁移落定 `platform_default`/可覆盖/可见。
 //!
+//! 后续（批八十六，仅记账不回改本迁移）：`sys.index.skinName` 已作为**零消费者死键**
+//! 由 `m20261022_000002_retire_dead_config_keys` 删除，e2e 功能 72 的覆盖载体随之改为
+//! `sys.index.sideTheme`（该键同期从死键转为 `Coverage::Free` 真实旋钮）。
+//! 上面这段是批五十六时点的诚实叙述，保留原文。
+//!
 //! # 2. 归档按钮菜单补种（批次十九手工遗漏）
 //!
 //! 「审计归档下载」(4180, perms=monitor:operlogArchive:download) 与「链完整性校验」

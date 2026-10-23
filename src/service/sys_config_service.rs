@@ -233,6 +233,9 @@ impl SysConfigService {
     /// 现在：真实后端 + 方言占位符 + 显式 `now_naive()`（与全仓时间写入同一事实源）。
     /// 缓存失效仍由调用方负责（这两个服务各自有自己的 refreshCache 口径，本函数不越权）。
     pub async fn set_platform_value(&self, key: &str, value: &str) -> Result<(), ServiceError> {
+        // 批八十六：内部写通道同样过值域/退役闸（此前只有 HTTP 两条写路径有校验，
+        // 编排型调用（AI / OSS 配置服务）绕过 service 的 add/edit 就等于绕过闸门）
+        Self::ensure_value_writable(key, Some(value))?;
         let db = self.config_repo.base().db();
         let backend = db.get_database_backend();
         db.execute_raw(crate::common::sql_dialect::stmt(
@@ -366,6 +369,37 @@ impl SysConfigService {
         governance::item(config_key)
             .map(|i| i.coverage == governance::Coverage::Locked)
             .unwrap_or(false)
+    }
+
+    /// **写入前置闸门：退役键拒绝 + 值域校验**（批八十六 N-1 / N-2）。
+    ///
+    /// 两条判据都取 `governance` 注册表，service 层不写字面集合（两处各写一份必漂，
+    /// 同 [`governance::GOVERNANCE_BACKFILL_REMARK`] 那条纪律）：
+    ///
+    /// 1. **退役键**（[`governance::RETIRED_CONFIG_KEYS`]）一律 400。这一条与
+    ///    "启动兜底删除死行"是**一对**：只有写入通道被堵住，兜底才不可能反复摧毁
+    ///    管理员事后建立的行（AGENTS《开关规范》禁止挂启动兜底做回收的正是后一种形态）。
+    ///    删除（`delete_configs`）不在本闸管辖内——清理死行永远应当被允许。
+    /// 2. **值域**：注册表声明了 `value_domain` 的键，取值必须逐字命中，否则 400
+    ///    并在文案里给出允许清单（《开关规范》②"档位可发现"的值域版）。
+    ///    未登记的键（租户自建 `tenant_private` 业务配置）不受约束——注册表只管它登记过的键。
+    ///
+    /// `value` 为 `None` 表示"本次提交不改值"（部分更新语义），自然不校验值域。
+    fn ensure_value_writable(config_key: &str, value: Option<&str>) -> Result<(), ServiceError> {
+        if governance::is_retired_config_key(config_key) {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.config.key_retired"
+            )));
+        }
+        if let Some(v) = value
+            && !governance::is_value_allowed(config_key, v)
+        {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.config.value_domain_invalid",
+                allowed = governance::value_domain_hint(config_key)
+            )));
+        }
+        Ok(())
     }
 
     /// 归一化治理标志位（'0'/'1'），非法值显式报错（不静默降级）。
@@ -621,6 +655,9 @@ impl SysConfigService {
     ) -> Result<SysConfigModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
+        // 批八十六 N-1/N-2：退役键不得新建、带值域键的取值必须命中集合
+        Self::ensure_value_writable(&dto.config_key, dto.config_value.as_deref())?;
+
         // 唯一性校验：复合唯一域 (tenant_id, config_key)，同租户内键名唯一
         let existing = self
             .config_repo
@@ -689,9 +726,15 @@ impl SysConfigService {
     ) -> Result<SysConfigModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
 
+        // 批八十六 N-1/N-2：按**提交后的键与值**判定（改名到退役键同样要拦）
+        Self::ensure_value_writable(&dto.config_key, dto.config_value.as_deref())?;
+
         let existing = self
             .get_config_by_id(dto.config_id, Some(operator_tid))
             .await?;
+        // 旧键已退役 ⇒ 该行本就属于待清理的死面，不允许"改一改继续留着"
+        //（与启动兜底删除配对：写入被堵死后，兜底只会清掉历史遗留，不可能碰管理员新建的行）
+        Self::ensure_value_writable(&existing.config_key, None)?;
         // 多租户越权防护：只能修改本租户参数（平台操作者放行；租户不得改平台行）
         if !crate::common::tenant::tenant_allowed(operator_tid, existing.tenant_id) {
             return Err(ServiceError::forbidden(&crate::tr!(
@@ -1032,5 +1075,58 @@ mod tests {
     fn chinese_secret_words_are_masked() {
         assert!(SysConfigService::is_sensitive_key("sys.user.登录密钥"));
         assert!(SysConfigService::is_sensitive_key("sys.x.凭据"));
+    }
+
+    /// ④ 写入闸门（批八十六 N-1/N-2）：值域与退役键。
+    ///
+    /// 与 ⑤ 是**一对**双向判据：只判"该拒的拒了"，实现可以是"一律拒绝"——
+    /// 那既能让本条全绿，又能把"租户自建参数"这项既有能力砍掉。
+    #[test]
+    fn write_gate_rejects_out_of_domain_and_retired_keys() {
+        // 值域内（含每一项，逐一判而不是只判首项——防止"只认第一个值"的实现）
+        for v in governance::SIDE_THEME_DOMAIN {
+            assert!(
+                SysConfigService::ensure_value_writable("sys.index.sideTheme", Some(v)).is_ok(),
+                "合法值 {v} 不得被拒"
+            );
+        }
+        // 值域外：大小写变体、尾随空格、空串、历史死值
+        for bad in [
+            "Theme-Auto",
+            "theme-dark ",
+            "",
+            "skin-blue",
+            "theme-default",
+        ] {
+            assert!(
+                SysConfigService::ensure_value_writable("sys.index.sideTheme", Some(bad)).is_err(),
+                "值域外的 {bad:?} 必须被拒"
+            );
+        }
+        // `None` = 部分更新语义"本次不改值"，不得当成"改成了空"而拒
+        assert!(SysConfigService::ensure_value_writable("sys.index.sideTheme", None).is_ok());
+        // 退役键：无论带值还是不带值（改名场景）都必须拒
+        for k in governance::RETIRED_CONFIG_KEYS {
+            assert!(SysConfigService::ensure_value_writable(k, Some("anything")).is_err());
+            assert!(SysConfigService::ensure_value_writable(k, None).is_err());
+        }
+    }
+
+    /// ⑤ 写入闸门的对照组：无值域项与未登记键一律放行。
+    #[test]
+    fn write_gate_allows_unconstrained_keys() {
+        // 在册但无值域的键（绝大多数治理项）：任意值都可写
+        for k in [
+            "sys.account.captchaEnabled",
+            "sys.user.pwdExpireDays",
+            "ip_location.update_source",
+        ] {
+            assert!(
+                SysConfigService::ensure_value_writable(k, Some("whatever")).is_ok(),
+                "{k} 未声明值域，闸门不得拦"
+            );
+        }
+        // 未登记键（租户自建 tenant_private 业务配置）：注册表不管它
+        assert!(SysConfigService::ensure_value_writable("tenant.custom.any", Some("x")).is_ok());
     }
 }

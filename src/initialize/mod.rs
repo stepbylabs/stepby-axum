@@ -587,11 +587,15 @@ impl AppInitializer {
         ensure_archive_menus(&db)
             .await
             .map_err(|e| anyhow::anyhow!("补种归档按钮菜单失败: {}", e))?;
-        // 4.5c-i 批五十六：皮肤/主题键治理修正（存量库兜底，等价迁移 m20261012_000001；
-        //      带 legacy 三元组守卫——迁移已应用或管理员已治理则零影响）
-        ensure_skin_governance(&db)
+        // 4.5c-i 批八十六：sideTheme 数据缺省/说明归一（历史字面量守卫；幂等，等价迁移 m20261022_000002）
+        ensure_side_theme_defaults(&db)
             .await
-            .map_err(|e| anyhow::anyhow!("修正皮肤主题键治理失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("归一侧边栏主题缺省失败: {}", e))?;
+        // 4.5c-i' 批八十六：退役参数键死行清理（等价迁移 m20261022_000002；
+        //      与 service 写入闸门配对，第一次启动后每轮影响 0 行——理由见函数文档）
+        ensure_dead_config_keys_retired(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("清理退役参数键失败: {}", e))?;
         // 4.5c-j 批六十：菜单 4122（规则删除）终态收敛（等价迁移 m20261006_000002 种子；
         //      修复迁移登记前手工创建的畸形挂载——挂 4121 字段权限保存下）
         ensure_data_rule_menu_alignment(&db)

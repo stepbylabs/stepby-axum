@@ -251,6 +251,8 @@ error:
     platform_row_forbidden: Platform-level configuration cannot be operated by tenants
     scope_invalid: Invalid configuration governance scope
     flag_invalid: "Invalid configuration governance flag for parameter %{field} (only 0 or 1 accepted)"
+    value_domain_invalid: 'Invalid configuration value, only %{allowed} are accepted'
+    key_retired: This configuration key has been retired (no runtime consumer) and cannot be created or modified
     governance_platform_only: Config governance view is platform-only
   dept:
     not_found: Department does not exist

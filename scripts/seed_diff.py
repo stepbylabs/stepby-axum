@@ -13,6 +13,10 @@
     #    报 code 14 "unable to open database file" 而退出（批七十六实测踩到）。
     #    touch data/seed-check.db
     #    DATABASE_URL=sqlite://./data/seed-check.db SERVER_PORT=8094 cargo run
+    #    ⚠️ 文件**已存在**时必须先 `rm data/seed-check.db` 再 touch：对已有的库，Migrator::up
+    #    会被"存量库"那条判定跳过（src/initialize/mod.rs:45），touch 只刷新 mtime、schema 停在旧态，
+    #    于是比对报的是**陈旧夹具的假漂移**（批八十七实测 4 处，全部由夹具造成）。
+    #    本工具第二道闸会拒绝这种夹具，但拒绝不等于修好——重建才是动作。
     #    （后端起来即种子写完，Ctrl-C 退出即可；全新库会跑完整 Migrator::up）
     # 2) 比对（**两个参数都必须给**，单参数会让 seed 与 live 指到同一个文件）：
     #    python scripts/seed_diff.py data/seed-check.db data/stepby.db
@@ -287,6 +291,58 @@ def seed_db_verdict(s_tables, seed):
     return None
 
 
+# 种子夹具的**新鲜度**：表数与哨兵只证明"库建起来了"，不证明"它是当前码建的"。
+# b87 实测：上一批复用的 data/seed-check.db 有 121 条迁移账本（仓内已 124 条）、sys_user 没有
+# pwd_update_time、还留着 b86 已退役的 sys.index.skinName ⇒ 它是在 b84 之前建好、之后被某个实例
+# 以"存量库"身份打开过（mtime 因此刷新，schema 却停在旧态）。于是 seed_diff 报出 **4 处漂移**
+# （skinName 种子有/运行库无、sideTheme 的 config_value 与 remark、sys_user 缺列），
+# 而全部由夹具造成——用同一个 exe 重建夹具后 `漂移 0 / 豁免 89 / PENDING 0` 与 b86 同数。
+# 这一族比 b79 那条"空库恒得零漂移"更危险：它报的是**看起来可修的假漂移**，
+# 照着提示去"改种子侧"就是把正确的生产码改掉（前言 ⑨：错误提示把人支使去把事实签反）。
+# 只判种子侧，**不判运行库**：运行库走的是"存量库跳过 Migrator::up、由 initialize 兜底交付"这条路，
+# 账本停在旧版本是它的正常形态（AGENTS 项目定位那条），拿同一把尺量它等于天天误报。
+MIG_LEDGER_TABLE = "seaql_migrations"
+MIN_ON_DISK_MIGRATIONS = 100
+
+
+def migrations_dir(explicit=None):
+    """默认从**脚本位置**反推本仓根（AGENTS 门禁表前言 ②：判据默认输入不得写死副本树）。"""
+    if explicit:
+        return explicit
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(here, "..", "migration", "src", "migrations"))
+
+
+def on_disk_migrations(dir_path):
+    names = set()
+    for f in os.listdir(dir_path):
+        if f.endswith(".rs") and f.startswith("m") and f != "mod.rs":
+            names.add(f[:-3])
+    return names
+
+
+def seed_migration_verdict(seed, on_disk, dir_path):
+    """种子库必须已应用仓内全部迁移；不合格返回一句原因，合格返回 None。"""
+    if not os.path.isdir(dir_path):
+        return f"迁移目录读不到（{dir_path}）⇒ 无法证明种子夹具新鲜"
+    if len(on_disk) < MIN_ON_DISK_MIGRATIONS:
+        return (
+            f"仓内迁移只数出 {len(on_disk)} 个（下限 {MIN_ON_DISK_MIGRATIONS}）"
+            f"⇒ 采集面坏了，不得据此判种子库新鲜"
+        )
+    try:
+        applied = {r[0] for r in seed.execute(f"SELECT version FROM {MIG_LEDGER_TABLE}")}
+    except sqlite3.Error:
+        return f"种子库没有 {MIG_LEDGER_TABLE} 账本表（第二实例没跑 Migrator::up？）"
+    gap = sorted(on_disk - applied)
+    if gap:
+        return (
+            f"种子库缺 {len(gap)}/{len(on_disk)} 条仓内已存在的迁移未应用"
+            f"（最后三条：{gap[-3:]}）⇒ 夹具早于当前码"
+        )
+    return None
+
+
 def seed_selftest():
     """合成双向：不合格的种子库必须拒绝，合格的必须放行（正控）。"""
     import tempfile
@@ -319,13 +375,51 @@ def seed_selftest():
         c2.commit()
         checks.append(("哨兵零行 ⇒ 必须拒绝", seed_db_verdict({"sys_menu"}, c2) is not None))
         c2.close()
+
+        # ---- 种子夹具**新鲜度**（b87：陈旧夹具报出 4 处假漂移，逐条都能"照着修"）----
+        mig_dir = os.path.join(d, "migrations")
+        os.makedirs(mig_dir)
+        names = [f"m2026{i:04d}_x" for i in range(MIN_ON_DISK_MIGRATIONS)]
+        for n in names:
+            open(os.path.join(mig_dir, n + ".rs"), "w", encoding="utf-8").close()
+        open(os.path.join(mig_dir, "mod.rs"), "w", encoding="utf-8").close()
+        disk = on_disk_migrations(mig_dir)
+        checks.append(
+            (f"合成采集面恰好 {MIN_ON_DISK_MIGRATIONS} 个且 mod.rs 不参与",
+             len(disk) == MIN_ON_DISK_MIGRATIONS and "mod" not in disk)
+        )
+        p3 = os.path.join(d, "mig.db")
+        c3 = sqlite3.connect(p3)
+        checks.append(("没有迁移账本表 ⇒ 必须拒绝",
+                       seed_migration_verdict(c3, disk, mig_dir) is not None))
+        c3.execute(f"CREATE TABLE {MIG_LEDGER_TABLE} (version text)")
+        c3.executemany(f"INSERT INTO {MIG_LEDGER_TABLE} VALUES (?)", [(n,) for n in names[:-1]])
+        c3.commit()
+        r = seed_migration_verdict(c3, disk, mig_dir)
+        checks.append(("缺最后一条迁移 ⇒ 必须拒绝并点名该条", r is not None and names[-1] in r))
+        c3.execute(f"INSERT INTO {MIG_LEDGER_TABLE} VALUES (?)", (names[-1],))
+        c3.commit()
+        checks.append(("账本覆盖全部仓内迁移 ⇒ 必须放行（正控）",
+                       seed_migration_verdict(c3, disk, mig_dir) is None))
+        c3.close()
+        checks.append(("迁移目录读不到 ⇒ 必须拒绝（不得读成'没有缺口'）",
+                       seed_migration_verdict(sqlite3.connect(":memory:"), disk,
+                                              os.path.join(d, "nope")) is not None))
+        checks.append(("采集面低于下限 ⇒ 必须拒绝（扫不全 ≠ 没缺口）",
+                       seed_migration_verdict(sqlite3.connect(":memory:"), {"m1", "m2"}, mig_dir) is not None))
+        # 真实树正控：本仓迁移目录必须数出足量条目——采集面腐化时上面几双向全部失去意义
+        real_dir = migrations_dir()
+        real_disk = on_disk_migrations(real_dir) if os.path.isdir(real_dir) else set()
+        checks.append((f"真实仓采集面 ≥ {MIN_ON_DISK_MIGRATIONS}（实得 {len(real_disk)}）且不含 mod",
+                       len(real_disk) >= MIN_ON_DISK_MIGRATIONS and "mod" not in real_disk))
     bad = [name for name, ok in checks if not ok]
     if bad:
         print("[seed_diff] SYNTH_FAIL:")
         for name in bad:
             print(f"  · {name}")
         return 1
-    print(f"[seed_diff] SYNTH_OK 种子库发现面 {len(checks)} 条双向（空库/缺哨兵/零行必须拒，合格库必须放行）")
+    print(f"[seed_diff] SYNTH_OK 种子库发现面 {len(checks)} 条双向"
+          "（空库/缺哨兵/零行必须拒，合格库必须放行；夹具陈旧：无账本表/缺迁移/目录读不到/采集面低于下限必须拒，全覆盖必须放行）")
     return 0
 
 
@@ -373,12 +467,31 @@ def main(argv):
             "cargo 报 `failed to remove file`）却继续比了那个空文件。\n"
             "  重建：touch data/seed-check.db && DATABASE_URL=sqlite://./data/seed-check.db "
             "SERVER_PORT=8094 cargo run（确认它退出码是 124/被掐，不是 101），\n"
-            "  再比对：python scripts/seed_diff.py data/seed-check.db data/stepby.db"
+            "  再比对：python scripts/seed_diff.py data/seed-check.db data/stepby.db\n"
+            "  ⚠ 若该文件**已存在**，必须先删掉再建——下一道陈旧闸会说明为什么。"
             % bad_seed
         )
         return 2
+    # 第二道夹具闸：表数与哨兵只证明"库建起来了"，迁移账本才证明"它是当前码建的"。
+    # **只判种子侧**：运行库走的是"存量库跳过 Migrator::up、由 initialize 兜底交付"那条路
+    # （AGENTS 项目定位一节），它的账本停在旧版本是常态，拿同一把尺量它等于每轮误报。
+    mig_dir = migrations_dir()
+    bad_mig = seed_migration_verdict(seed, on_disk_migrations(mig_dir), mig_dir)
+    if bad_mig:
+        print(
+            "[seed_diff] [FATAL] 种子夹具陈旧：%s ⇒ 本次对账**不作数**。\n"
+            "  陈旧夹具报出的漂移是**看起来可修的假信号**（b87 实测 4 处：已退役的\n"
+            "     sys.index.skinName '种子有/运行库无'、sys.index.sideTheme 的 config_value 与 remark、\n"
+            "     sys_user 缺 pwd_update_time）——照着提示去'把种子侧改回来'就是把正确的生产码改掉。\n"
+            "  重建必须**先删掉旧文件**：对已存在的库，Migrator::up 会被'存量库'那条判定跳过\n"
+            "     （src/initialize/mod.rs:45），所以 touch 一个陈旧文件只会刷新它的 mtime，schema 仍停在旧态。\n"
+            "     rm data/seed-check.db && DATABASE_URL=sqlite://./data/seed-check.db?mode=rwc "
+            "SERVER_PORT=8094 cargo run\n"
+            "  再比对：python scripts/seed_diff.py data/seed-check.db data/stepby.db"
+            % bad_mig
+        )
+        return 2
     skip_seaql = {t for t in s_tables | l_tables if t == "seaql_migrations"}
-
     common = sorted((s_tables & l_tables) - skip_seaql)
     print(f"[seed_diff] seed={seed_path} live={live_path}")
     print(f"[seed_diff] 公共表 {len(common)} 张（比对）；"

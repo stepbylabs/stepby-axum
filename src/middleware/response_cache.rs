@@ -179,7 +179,9 @@ mod tests {
         let cache = ResponseCache::default();
         assert!(cache.is_whitelisted("/system/dict/type/optionselect"));
         // 白名单已被收紧（仅保留纯静态下拉），可变资源接口不应命中缓存
-        assert!(!cache.is_whitelisted("/system/config/configKey/sys.index.skinName"));
+        // （样本取**在册真旋钮** sys.index.sideTheme：拿一个已退役、库里根本没有行的键
+        //   当样本，测的是空气——URL 形状相同但那条请求永远不会再发生）
+        assert!(!cache.is_whitelisted("/system/config/configKey/sys.index.sideTheme"));
         assert!(!cache.is_whitelisted("/system/dict/data/type/sys_user_sex"));
     }
 

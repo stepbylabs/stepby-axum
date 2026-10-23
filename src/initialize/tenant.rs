@@ -715,6 +715,15 @@ pub(crate) async fn ensure_tenant_saas_governance(db: &DatabaseConnection) -> an
         // 三元组由共享注册表的 `Coverage` 单一事实源给出 ⇒ **新增治理域无需改本函数**
         // （此前是两个硬编码 SQL 分支，新增一档就要再来一个分支）。
         // 只改治理列，**绝不动 `config_value`**：平台运维已调过的值不被启动流程覆盖。
+        //
+        // ⚠️ **必须限定 `tenant_id = 0`**（批八十六补）：注册表声明的是**平台层**姿态，
+        // 而租户覆盖行/自建行的治理列由服务层写路径固定为 `tenant_private`
+        // （`sys_config_service::add_config` 的 else 分支）。此前全库注册表只有
+        // `Coverage::Locked` 一项都不可能被租户写入（写入即 403），"无 tenant_id 条件"
+        // 这支条件在结构上碰不到；批八十六把 `sys.index.sideTheme` 登记成第一个
+        // `Coverage::Free` 参数项后，同一 key 的租户覆盖行会在每次启动被洗成
+        // `platform_default`——租户覆盖行伪装成平台默认行，读侧与治理侧当场分裂。
+        // 判据由 `ensure_governance_convergence_is_platform_layer_only` 钉住。
         for coverage in [
             governance::Coverage::Locked,
             governance::Coverage::Free,
@@ -731,7 +740,7 @@ pub(crate) async fn ensure_tenant_saas_governance(db: &DatabaseConnection) -> an
                 backend,
                 format!(
                     "UPDATE sys_config SET scope = '{}', tenant_editable = '{}', \
-                     visible_to_tenant = '{}' WHERE config_key IN ({})",
+                     visible_to_tenant = '{}' WHERE config_key IN ({}) AND tenant_id = 0",
                     coverage.scope(),
                     coverage.tenant_editable(),
                     coverage.visible_to_tenant(),

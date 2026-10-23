@@ -947,8 +947,9 @@ mod schema_equivalence_lock_tests {
         ensure_ai_history_menu_parent(db).await?;
         // 4.5c-h 批五十六：归档按钮菜单补种（等价迁移 m20261012_000001；幂等）
         ensure_archive_menus(db).await?;
-        // 4.5c-i 批五十六：皮肤/主题键治理修正（legacy 三元组守卫；幂等）
-        ensure_skin_governance(db).await?;
+        // 4.5c-i 批八十六：sideTheme 缺省/说明归一 + 退役键死行清理（等价迁移 m20261022_000002）
+        ensure_side_theme_defaults(db).await?;
+        ensure_dead_config_keys_retired(db).await?;
         // 4.5c-j 批六十：菜单 4122 终态收敛（等价迁移 m20261006_000002 种子；幂等）
         ensure_data_rule_menu_alignment(db).await?;
         ensure_flow_designer_menu_visible(db).await?;
@@ -1776,7 +1777,8 @@ mod schema_equivalence_lock_tests {
             "ensure_report_menus_visible",
             "ensure_ai_history_menu_parent",
             "ensure_archive_menus",
-            "ensure_skin_governance",
+            "ensure_side_theme_defaults",
+            "ensure_dead_config_keys_retired",
             "ensure_data_rule_menu_alignment",
             "ensure_flow_designer_menu_visible",
             "ensure_menu_del_flag_normalized",
@@ -2212,6 +2214,233 @@ mod pwd_expire_policy_backfill_tests {
         assert_eq!(
             n, 2,
             "种子那条撞 UNIQUE(tenant_id, config_key) 必须被忽略，不得多插一行"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dead_config_key_retire_tests {
+    //! 批八十六 项 N-1 的两条交付路径：**全新库走窄迁移**、**存量库走启动兜底**。
+    //!
+    //! 为什么两条都要判：§5.23 那次只写了注释说"数据保留"，于是假入口留在参数页；
+    //! 而若只判迁移，存量库（启动不跑 `Migrator::up`）的清理通道坏掉也无人知道——
+    //! 正是本仓反复踩过的"新库对、老库错"这一族（同 G-11 八键缺行、pwd 键名改名）。
+    use super::*;
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    /// 夹具建库后追加语句的小助手（本模块走**真实迁移库**，列结构无需自建最小表）。
+    async fn exec_sql(db: &DatabaseConnection, sql: &str) {
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("造夹具失败: {e}\n{sql}"));
+    }
+
+    async fn count(db: &DatabaseConnection, sql: &str) -> i64 {
+        db.query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
+        .await
+        .expect("查询失败")
+        .pop()
+        .expect("COUNT 查询必须返回一行——返回空集说明判据在拿「查不到」当「等于零」")
+        .try_get("", "c")
+        .unwrap_or_default()
+    }
+
+    async fn text(db: &DatabaseConnection, sql: &str) -> String {
+        db.query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
+        .await
+        .expect("查询失败")
+        .pop()
+        .expect("必须有这一行——没有就说明夹具没建起来")
+        .try_get("", "v")
+        .unwrap_or_default()
+    }
+
+    const SIDE_PLATFORM: &str = "SELECT config_value AS v FROM sys_config WHERE config_key = 'sys.index.sideTheme' AND tenant_id = 0";
+    const REMARK_PLATFORM: &str = "SELECT remark AS v FROM sys_config WHERE config_key = 'sys.index.sideTheme' AND tenant_id = 0";
+    const LIVE_KEYS: &str = "SELECT COUNT(*) AS c FROM sys_config WHERE config_key IN \
+         ('sys.account.captchaEnabled','sys.user.initPassword','sys.login.blackIPList')";
+
+    /// ① 全新库：窄迁移必须已经把两个退役键清干净，并把 sideTheme 归一到真旋钮缺省。
+    #[tokio::test]
+    async fn fresh_database_has_no_dead_keys_and_knob_is_normalized() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .expect("建库失败");
+
+        for key in governance::RETIRED_CONFIG_KEYS {
+            let c = count(
+                &db,
+                &format!("SELECT COUNT(*) AS c FROM sys_config WHERE config_key = '{key}'"),
+            )
+            .await;
+            assert_eq!(
+                c, 0,
+                "全新库里退役键 {key} 的行必须已被窄迁移清除（留在参数页即假入口）"
+            );
+        }
+
+        assert_eq!(
+            text(&db, SIDE_PLATFORM).await,
+            governance::SIDE_THEME_DOMAIN[0],
+            "init 迁移那个从未被消费的 theme-dark 必须归一到 theme-auto（= 改造前现状）"
+        );
+        assert_eq!(
+            text(&db, REMARK_PLATFORM).await,
+            governance::SIDE_THEME_REMARK,
+            "合法取值必须写进说明，管理员在参数页就读得见"
+        );
+        // 治理姿态由注册表 seed：Free ⇒ platform_default/1/1（e2e F72 覆盖载体的前提）
+        assert_eq!(
+            text(
+                &db,
+                "SELECT scope AS v FROM sys_config WHERE config_key = 'sys.index.sideTheme' AND tenant_id = 0",
+            )
+            .await,
+            "platform_default",
+            "Free 参数项的平台层治理姿态必须由注册表给出"
+        );
+    }
+
+    /// ② 存量库：兜底补齐三件事（归一值 / 归一说明 / 删死行），且**幂等**、
+    ///    不碰管理员事后改的值、不碰在册键（对照组）。
+    #[tokio::test]
+    async fn stock_database_fallback_sweeps_dead_rows_idempotently() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .expect("建库失败");
+        // 造"跑过 b86 之前那一版"的形状：窄迁移没执行过，死行还在，sideTheme 仍是历史缺省
+        exec_sql(
+            &db,
+            "INSERT INTO sys_config (tenant_id, config_name, config_key, config_value, config_type, create_by, remark) \
+             VALUES (0, '主框架页-默认皮肤主题名称', 'sys.index.skinName', 'skin-blue', 'Y', 'admin', '蓝色 skin-blue')",
+        )
+        .await;
+        exec_sql(
+            &db,
+            "INSERT INTO sys_config (tenant_id, config_name, config_key, config_value, config_type, create_by, remark) \
+             VALUES (7, '租户皮肤覆盖', 'sys.index.skinName', 'skin-e2e-1', 'Y', 'admin', '租户覆盖行')",
+        )
+        .await;
+        exec_sql(
+            &db,
+            "INSERT INTO sys_config (tenant_id, config_name, config_key, config_value, config_type, create_by, remark) \
+             VALUES (0, '登录背景图', 'sys.login.background', '/uploads/demo-bg.svg', 'Y', 'demo', '演示登录背景图配置')",
+        )
+        .await;
+        exec_sql(
+            &db,
+            &format!(
+                "UPDATE sys_config SET config_value = '{}', remark = '{}' \
+                 WHERE config_key = 'sys.index.sideTheme' AND tenant_id = 0",
+                governance::SIDE_THEME_LEGACY_VALUE,
+                governance::SIDE_THEME_LEGACY_REMARK
+            ),
+        )
+        .await;
+
+        ensure_side_theme_defaults(&db).await.expect("归一兜底失败");
+        ensure_dead_config_keys_retired(&db)
+            .await
+            .expect("清理兜底失败");
+
+        for key in governance::RETIRED_CONFIG_KEYS {
+            assert_eq!(
+                count(
+                    &db,
+                    &format!("SELECT COUNT(*) AS c FROM sys_config WHERE config_key = '{key}'")
+                )
+                .await,
+                0,
+                "退役键 {key} 的平台行与租户覆盖行都必须被清掉"
+            );
+        }
+        assert_eq!(
+            text(&db, SIDE_PLATFORM).await,
+            governance::SIDE_THEME_DOMAIN[0],
+            "存量库的历史缺省必须归一"
+        );
+        // 对照组：在册键一行都不能少（清理语句若误含在册键，本条立刻红）
+        let live_before = count(&db, LIVE_KEYS).await;
+        assert!(
+            live_before >= 3,
+            "夹具里必须在册键齐备（判据的输入非空才算真跑过）：实际 {live_before}"
+        );
+
+        // 幂等 + 尊重管理员：改成合法但非缺省的值，再跑一次不得被洗回 theme-auto
+        exec_sql(
+            &db,
+            "UPDATE sys_config SET config_value = 'theme-light' \
+             WHERE config_key = 'sys.index.sideTheme' AND tenant_id = 0",
+        )
+        .await;
+        ensure_side_theme_defaults(&db).await.expect("二次归一失败");
+        ensure_dead_config_keys_retired(&db)
+            .await
+            .expect("二次清理失败");
+        assert_eq!(
+            text(&db, SIDE_PLATFORM).await,
+            "theme-light",
+            "守卫取「仍是历史字面量」⇒ 管理员改过的值不得被启动流程洗回缺省"
+        );
+        assert_eq!(
+            count(&db, LIVE_KEYS).await,
+            live_before,
+            "二次执行不得影响任何在册键"
+        );
+    }
+
+    /// ③ 治理收敛只作用于平台层：同 key 的租户覆盖行不得被洗成 platform_default。
+    ///
+    /// 这是 sideTheme 成为**第一个** `Coverage::Free` 参数项后才够得着的一支：
+    /// 此前注册表清一色 Locked，而 Locked 键租户根本写不进来（`ensure_tenant_can_write`
+    /// 直接 403），"UPDATE 不带 tenant_id 条件"在结构上碰不到任何行；补上 Free 项之后，
+    /// 不带条件的收敛会在每次启动把租户覆盖行的治理列伪装成平台默认行——读侧按
+    /// `(tenant_id, key)` 取行、治理侧按 `scope` 判权限，当场分裂。
+    #[tokio::test]
+    async fn governance_convergence_touches_platform_layer_only() {
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .expect("建库失败");
+        exec_sql(
+            &db,
+            "INSERT INTO sys_config (tenant_id, config_name, config_key, config_value, config_type, \
+             create_by, scope, tenant_editable, visible_to_tenant) \
+             VALUES (7, '租户侧边栏主题覆盖', 'sys.index.sideTheme', 'theme-dark', 'Y', 'admin', \
+             'tenant_private', '1', '1')",
+        )
+        .await;
+
+        ensure_tenant_saas_governance(&db)
+            .await
+            .expect("治理收敛兜底失败");
+
+        assert_eq!(
+            text(
+                &db,
+                "SELECT scope AS v FROM sys_config WHERE config_key = 'sys.index.sideTheme' AND tenant_id = 7",
+            )
+            .await,
+            "tenant_private",
+            "租户覆盖行的治理列由服务层固定，启动收敛不得越层改写"
+        );
+        // 对照组：平台行仍按注册表收敛（否则这条判据可以是"什么都不做"）
+        assert_eq!(
+            text(
+                &db,
+                "SELECT scope AS v FROM sys_config WHERE config_key = 'sys.index.sideTheme' AND tenant_id = 0",
+            )
+            .await,
+            "platform_default",
+            "平台层必须照常收敛"
         );
     }
 }

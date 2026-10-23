@@ -1008,27 +1008,51 @@ pub(crate) async fn ensure_archive_menus(db: &DatabaseConnection) -> anyhow::Res
     Ok(())
 }
 
-/// 皮肤/主题键治理修正兜底（批五十六，等价迁移 m20261012_000001 的存量库交付路径）
+/// 侧边栏主题缺省归一（批八十六 N-1，等价迁移 m20261022_000002 的存量库交付路径）
 ///
-/// 背景：**存量库启动跳过 Migrator::up**（initialize/mod.rs:45 实证）——迁移只服务
-/// 全新库，存量库的一切数据修正必须走兜底。skinName/sideTheme 的 init 迁移未指定
-/// 治理列（列默认 fail-closed platform_only），与功能 72「租户覆盖 platform_default 键」
-/// 的产品语义冲突（全新库该测试必失败）。
+/// 背景：**存量库启动跳过 `Migrator::up`**（initialize/mod.rs:45 实证）——迁移只服务
+/// 全新库，存量库的一切数据修正必须走兜底。
 ///
-/// 守卫：仅当三列恰为 legacy 缺省三元组（platform_only/0/0）时翻转为
-/// platform_default/1/1——迁移已应用的库与管理员后续治理变更零影响；
-/// 管理员若刻意回设完整 legacy 三元组会被再翻转（产品语义归 skin 可覆盖，留档）。
-pub(crate) async fn ensure_skin_governance(db: &DatabaseConnection) -> anyhow::Result<()> {
+/// 本函数取代原 `ensure_skin_governance`（批五十六）。那一半职责已经不需要兜底：
+/// sideTheme 如今回到注册表并登记为 `Coverage::Free`，治理列三元组由
+/// `ensure_tenant_saas_governance` 的注册表驱动收敛 UPDATE 无条件给出（且只作用于
+/// `tenant_id = 0`），比原函数"仅当恰为 legacy 三元组才翻转"的守卫更强；
+/// 而原函数指向的 `sys.index.skinName` 已退役，留着它 = 每次启动试图洗一个不存在的行。
+///
+/// 这里只剩**数据缺省与说明文案**的归一，两条都按"仍是历史字面量"守卫 ⇒ 幂等，
+/// 且绝不覆盖管理员在真旋钮上线后改过的值。语句文本取
+/// [`governance::side_theme_normalize_sql`]（与窄迁移同一事实源，两份文本必漂）。
+pub(crate) async fn ensure_side_theme_defaults(db: &DatabaseConnection) -> anyhow::Result<()> {
+    if !sso_table_exists(db, "sys_config").await? {
+        return Ok(());
+    }
+    let backend = db.get_database_backend();
+    for sql in governance::side_theme_normalize_sql() {
+        db.execute_raw(Statement::from_string(backend, sql)).await?;
+    }
+    Ok(())
+}
+
+/// 退役参数键死行清理（批八十六 N-1，等价迁移 m20261022_000002 的存量库交付路径）
+///
+/// **为什么这条允许挂启动兜底**（AGENTS《开关规范》禁止的是"回收类语句挂启动兜底
+/// 反复摧毁管理员授权"）：`governance::RETIRED_CONFIG_KEYS` 里的键**没有任何运行时
+/// 消费者**，而服务层写入闸门（`sys_config_service::ensure_value_writable`）已把这
+/// 两个键名拒绝在 add/edit/内部写三条通道之外——升级后不可能再出现"管理员有意建立的
+/// 同名行"，因此本兜底只可能清掉历史遗留，第一次启动之后每轮影响 0 行。
+/// 两条腿缺一即不成立：只有 DELETE 而没有写入闸门 = 反复摧毁；只有闸门而没有 DELETE
+/// = 存量库的假入口永久留在参数页。
+///
+/// 执行序位置：排在 `ensure_governance_config_rows`（3.5f'，注册表补行）之后
+/// ——与"收回必须晚于任何发放"那条不变式同一口径，即使有人日后把退役键误补回注册表，
+/// 本语句也会在同一次启动里把它删掉并因 `test_retire_and_normalize_sql_shape` 而红。
+pub(crate) async fn ensure_dead_config_keys_retired(db: &DatabaseConnection) -> anyhow::Result<()> {
     if !sso_table_exists(db, "sys_config").await? {
         return Ok(());
     }
     db.execute_raw(Statement::from_string(
         db.get_database_backend(),
-        "UPDATE sys_config SET scope = 'platform_default', tenant_editable = '1', \
-         visible_to_tenant = '1' \
-         WHERE config_key IN ('sys.index.skinName', 'sys.index.sideTheme') AND tenant_id = 0 \
-         AND scope = 'platform_only' AND tenant_editable = '0' AND visible_to_tenant = '0'"
-            .to_string(),
+        governance::dead_config_keys_retire_sql(),
     ))
     .await?;
     Ok(())

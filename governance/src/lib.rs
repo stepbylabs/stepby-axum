@@ -111,6 +111,18 @@ pub struct Item {
     /// 能力位在各档解锁的平台专属 perms：`(所需最低档, perms 清单)`。
     /// 非能力位项恒为空切片。逐条枚举，禁止前缀通配。
     pub unlocked: &'static [(&'static str, &'static [&'static str])],
+    /// 参数项的**合法取值集合**（无序、不表达开放度）；空切片 = 该键不做值域校验。
+    ///
+    /// 为什么与 [`Item::modes`] 是两个字段而不是复用：`modes` 的契约是
+    /// "下标越大越开放 + `converge` 取 min(rank) + `default_mode` 必须等于首项"，
+    /// 而主题名这类取值之间**没有开放度序**（`theme-dark` 不比 `theme-light` 更危险），
+    /// 复用会让 `test_modes_are_safe_monotonic` 与 `test_configs_have_no_modes`
+    /// 各自被稀释成"半边规则有人管"（b85 N-2 立案的正是这一族结构缺口）。
+    ///
+    /// 消费点：`service::sys_config_service` 的三条写路径（add / edit / set_platform_value）
+    /// 一律走 [`value_domain`] 判定，**不得**在 service 层另写字面值集合——两处各写一份
+    /// 必然漂移（同 `GOVERNANCE_BACKFILL_REMARK` 那条纪律）。
+    pub value_domain: &'static [&'static str],
 }
 
 /// 构造能力位项（默认档恒为 [`OFF`]，覆盖策略恒为 [`Coverage::Ceiling`]）。
@@ -126,10 +138,13 @@ const fn feat(
         default_mode: OFF,
         coverage: Coverage::Ceiling,
         unlocked,
+        // 能力位的取值集合由 `modes` 表达，值域字段恒空（两者不得同时非空，
+        // 由 `test_modes_and_value_domain_are_exclusive` 钉住）
+        value_domain: &[],
     }
 }
 
-/// 构造参数项（无档位；`Free` / `Ceiling` 由调用方按需选择）。
+/// 构造参数项（无档位、无值域；`Free` / `Ceiling` 由调用方按需选择）。
 const fn cfg(key: &'static str, coverage: Coverage) -> Item {
     Item {
         key,
@@ -138,6 +153,28 @@ const fn cfg(key: &'static str, coverage: Coverage) -> Item {
         default_mode: "",
         coverage,
         unlocked: &[],
+        value_domain: &[],
+    }
+}
+
+/// 构造**带值域**的参数项（取值必须命中 `domain` 之一，否则服务层 400）。
+///
+/// 用于"值本身是枚举但无开放度序"的键（主题名、方言名等）——这类键若不做值域校验，
+/// 参数页可以写进一个前端不认识的串而界面只是静默回落，管理员无从判断"改没改上"
+/// （假入口的反面：真入口 + 假生效）。
+const fn cfg_domain(
+    key: &'static str,
+    coverage: Coverage,
+    domain: &'static [&'static str],
+) -> Item {
+    Item {
+        key,
+        kind: Kind::Config,
+        modes: &[],
+        default_mode: "",
+        coverage,
+        unlocked: &[],
+        value_domain: domain,
     }
 }
 
@@ -250,6 +287,49 @@ pub const FEATURES: &[Item] = &[
     ),
 ];
 
+/// `sys.index.sideTheme` 的合法取值（**单一事实源**，前端与服务层都取本集合）。
+///
+/// 三项与设置抽屉/主题编辑器的三个可选项一一对应（`theme-auto` = 跟随系统暗色，
+/// `theme-dark` / `theme-light` = 固定档）。取 `auto` 排在首项并在
+/// [`CONFIG_DEFAULTS`] 里作为缺省，是因为**改造前前端实际生效的就是 `theme-auto`**
+/// （`src/settings.ts` 的出厂缺省）——《开关规范》① 要求新开关缺省 = 现状 = 零行为变化，
+/// 而不是照抄 init 迁移里那个从未被任何代码消费过的 `theme-dark`。
+pub const SIDE_THEME_DOMAIN: &[&str] = &["theme-auto", "theme-dark", "theme-light"];
+
+/// 值域首项被 [`side_theme_normalize_sql`] 直接下标取用（缺省归一的目标值），
+/// 空集合会在启动期 panic ⇒ **编译期**钳住下限（同 b74 Argon2 下限那条纪律：
+/// 结构不变式不靠测试兜，测试可以不跑，构建不能失败不了）。
+const _: () = assert!(SIDE_THEME_DOMAIN.len() >= 3);
+
+/// `sys.index.sideTheme` 的**目标态说明文案**（值域写进说明，让管理员在参数页就读得见）。
+pub const SIDE_THEME_REMARK: &str = "侧边栏主题，仅接受 theme-auto / theme-dark / theme-light";
+
+/// 该键在 init 迁移里的**历史说明文案**（存量行归一的守卫字面量）。
+///
+/// 为什么要有常量：归一只允许发生在"说明仍是历史那句"的行上——迁移与启动兜底两处各写
+/// 一份字面量，改一处就会让归一**静默失效**（同 [`GOVERNANCE_BACKFILL_REMARK`] 的理由）。
+pub const SIDE_THEME_LEGACY_REMARK: &str = "深色主题 theme-dark，浅色主题 theme-light";
+
+/// 该键在 init 迁移里的**历史 seed 值**（从未被任何代码消费过的死缺省）。
+///
+/// 归一守卫同样按字面量取"仍是历史缺省"的行：把 `theme-dark` 归一到 `theme-auto`
+/// 是为了让"改造前用户看到的效果"与"改造后默认效果"一致（现状保持），而不是替管理员
+/// 做审美决定；管理员在真旋钮上线后改过的值一律不动。
+pub const SIDE_THEME_LEGACY_VALUE: &str = "theme-dark";
+
+/// **已退役参数键**（批八十六 N-1）：曾经 seed 过、如今既无消费者也不该在参数页出现。
+///
+/// 与"移出注册表"的区别：`CONFIGS` 只决定治理列 seed，行本身还留在库里 ⇒ 参数页可见可编辑
+/// 而零生效（假入口）。退役 = **行也要消失**：全新库走一次性窄迁移
+/// `m20261022_000002_retire_dead_config_keys`，存量库走等价兜底
+/// `initialize::menu::ensure_dead_config_keys_retired`（存量库启动不跑 `Migrator::up`，
+/// 只有兜底才能把已上线部署的假入口也清掉）。
+///
+/// 双向锁 [`test_retired_keys_are_not_registered`] 钉住"退役键不得同时出现在 `CONFIGS`"——
+/// 否则一边补行、一边删行，每启动一次互相抵消（同一形状在 b74 轮 24 的发放/收回顺序
+/// 不变式里已经付出过一次代价）。
+pub const RETIRED_CONFIG_KEYS: &[&str] = &["sys.index.skinName", "sys.login.background"];
+
 /// **参数项注册表**（按 key 字典序）。
 ///
 /// 定位：`sys_config` 治理列的 **seed 单一事实源**。运行期真相仍在 DB 行
@@ -277,9 +357,18 @@ pub const CONFIGS: &[Item] = &[
     cfg("sys.audit.alarm.window_minutes", Coverage::Locked),
     // ---- sys.fieldPerm.*（平台锁定：字段级权限 M2 第一层平台开关，默认 false = 关闭态即安全态）----
     cfg("sys.fieldPerm.enabled", Coverage::Locked),
-    // ---- sys.index.*（§5.23 移除：sideTheme/skinName 为 RuoYi 遗产死键——前端主题
-    //      走 localStorage（settings store），后端零消费者，参数页修改不生效；
-    //      sys.login.background 同理。历史 seed 行保留（数据不删），仅退出治理注册表）----
+    // ---- sys.index.*（批八十六 N-1 收口 §5.23 的"只做了注册表那一半"）----
+    // §5.23 当时把 sideTheme/skinName 一起移出注册表，理由是"后端零消费者、参数页改了不生效"，
+    // 但**没有删数据**——于是参数页三行仍可见可编辑而无人消费，正是《开关规范》§5.15-5.17
+    // 定义的假入口。本批的收口是把它拆成两半：
+    //   · sideTheme 补上真实消费链（前端登录后按租户层取值应用为侧边栏主题缺省），
+    //     并回到注册表取 `Coverage::Free`——该档的定义原文就是"值本身无有序档位，如主题名"；
+    //     值域登记进 [`SIDE_THEME_DOMAIN`]，由服务层三条写路径统一校验（不在集合内 400），
+    //     这样"参数页能改但改成前端不认识的字面串、界面无任何反馈"不再可能；
+    //   · skinName 与 sys.login.background 没有任何消费者（前端主题走 localStorage、
+    //     登录页无背景图配置面），按"数据也要退出可见面"收口：一次性窄迁移 DELETE +
+    //     存量库等价兜底（见 [`RETIRED_CONFIG_KEYS`]），且禁止再挂启动兜底发放。
+    cfg_domain("sys.index.sideTheme", Coverage::Free, SIDE_THEME_DOMAIN),
     // ---- sys.login.* ----
     cfg("sys.login.blackIPList", Coverage::Locked),
     // ---- sys.upload.backend（G-11 第二档：backend 档位热切换持久化——
@@ -388,6 +477,12 @@ pub const CONFIG_DEFAULTS: &[(&str, &str, &str)] = &[
         "5",
     ),
     ("sys.fieldPerm.enabled", "字段级权限开关", "false"),
+    (
+        "sys.index.sideTheme",
+        "主框架页-侧边栏主题",
+        // 缺省取 theme-auto = 改造前前端实际生效值（开关规范①：缺省 = 现状 = 零行为变化）
+        "theme-auto",
+    ),
     ("sys.login.blackIPList", "用户登录-黑名单列表", ""),
     (
         "sys.upload.backend",
@@ -453,6 +548,81 @@ pub fn is_known_mode(key: &str, value: &str) -> bool {
         Some(i) if i.modes.is_empty() => true,
         Some(i) => i.modes.contains(&value),
     }
+}
+
+/// 取某键声明的**值域**（无序集合）；未登记或无值域项返回空切片。
+pub fn value_domain(key: &str) -> &'static [&'static str] {
+    item(key).map(|i| i.value_domain).unwrap_or(&[])
+}
+
+/// 写入路径的值域判定：`true` = 允许写入。
+///
+/// 与 [`is_known_mode`] 的 fail-closed 方向**刻意相反**，理由是两问法不同：
+/// - `is_known_mode` 问"这个档够不够格放行某项能力"——答不出必须按"不够"处理（安全默认）；
+/// - 本函数问"这个值允不允许落库"——注册表只约束**登记过的键**，未登记键（租户自建的
+///   `tenant_private` 业务配置）没有值域概念，一律放行；把它 fail-closed 成拒绝，
+///   等于用治理注册表砍掉"租户自定义参数"这项既有能力。
+///
+/// 有值域项 ⇒ 取值必须逐字命中（不 trim、不改大小写）：主题名一类的值最终会写进
+/// CSS 类名，"看着一样"的变体（`Theme-Auto`）在运行时是另一个类，收下只会把问题
+/// 推迟成"界面静默回落"。
+pub fn is_value_allowed(key: &str, value: &str) -> bool {
+    let domain = value_domain(key);
+    domain.is_empty() || domain.contains(&value)
+}
+
+/// 值域的**人读清单**（错误文案用，如 `theme-auto / theme-dark / theme-light`）。
+pub fn value_domain_hint(key: &str) -> String {
+    value_domain(key).join(" / ")
+}
+
+/// 键是否已退役（不再接受写入；行由窄迁移 + 存量库兜底清除）。
+pub fn is_retired_config_key(key: &str) -> bool {
+    RETIRED_CONFIG_KEYS.contains(&key)
+}
+
+/// **死行清理语句**（单一事实源）：退役键的 `sys_config` 行删除。
+///
+/// 为什么把 SQL 文本放进本 crate 而不是各写一份：这条语句有**两个执行载体**——
+/// 全新库走一次性窄迁移 `m20261022_000002_retire_dead_config_keys`，存量库走启动兜底
+/// `initialize::menu::ensure_dead_config_keys_retired`（存量库启动不跑 `Migrator::up`）。
+/// 两份文本各自演化，就会出现"新库清干净了、老库还留着假入口"，而两侧各自看都像成功。
+///
+/// 不带 `tenant_id` 条件：退役键没有任何运行时消费者，租户层同名行（历史上由
+/// 「租户覆盖 platform_default 键」的用例造出来）同样属于死面，一并清除。
+pub fn dead_config_keys_retire_sql() -> String {
+    let keys: Vec<String> = RETIRED_CONFIG_KEYS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect();
+    format!(
+        "DELETE FROM sys_config WHERE config_key IN ({})",
+        keys.join(", ")
+    )
+}
+
+/// **sideTheme 存量缺省归一语句**（单一事实源，两个载体同上）。
+///
+/// 两条语句都按"仍是历史字面量"守卫，因此幂等且绝不覆盖管理员改过的值：
+/// - ① 值：`theme-dark`（init 迁移那个从未被消费的死缺省）→ [`SIDE_THEME_DOMAIN`] 首项
+///   `theme-auto`（= 改造前前端真正生效的值，保持现状）；
+/// - ② 说明：[`SIDE_THEME_LEGACY_REMARK`] → [`SIDE_THEME_REMARK`]（把值域写进说明，
+///   管理员在参数页就读得到合法取值）。
+///
+/// `tenant_id = 0` 限定平台层：租户覆盖行的值由租户自己决定，启动流程无权改动。
+pub fn side_theme_normalize_sql() -> [String; 2] {
+    [
+        format!(
+            "UPDATE sys_config SET config_value = '{}' WHERE config_key = 'sys.index.sideTheme' \
+             AND tenant_id = 0 AND config_value = '{}'",
+            SIDE_THEME_DOMAIN[0], SIDE_THEME_LEGACY_VALUE
+        ),
+        format!(
+            "UPDATE sys_config SET remark = '{}' WHERE config_key = 'sys.index.sideTheme' \
+             AND tenant_id = 0 AND remark = '{}'",
+            SIDE_THEME_REMARK, SIDE_THEME_LEGACY_REMARK
+        ),
+    ]
 }
 
 /// **按覆盖策略收敛取值**：返回「不比 `platform` 更开放」的那一档。
@@ -784,6 +954,19 @@ mod tests {
                 c.key
             );
         }
+        // 这条锁原本读作"参数项没有值域校验"，因而被当成"参数值域归谁管"的挡箭牌
+        //（b85 N-2 立案）。自批八十六起它只禁止**有序档位**语义出现在参数项上：
+        // 参数项可以带 `value_domain`（无序集合，见 [`test_value_domain_is_single_source`]），
+        // 因为"主题名之间没有开放度序"与"这个值合不合法"是两件事，不得挤进同一个字段。
+        let with_domain: Vec<&str> = CONFIGS
+            .iter()
+            .filter(|c| !c.value_domain.is_empty())
+            .map(|c| c.key)
+            .collect();
+        assert!(
+            with_domain.contains(&"sys.index.sideTheme"),
+            "带值域的参数项必须真实存在（否则 value_domain 通道是死码）：实际 {with_domain:?}"
+        );
     }
 
     /// **CONFIG_DEFAULTS 双向一致锁**（批次十四）：缺省三元组的键集必须与
@@ -854,8 +1037,12 @@ mod tests {
         assert_eq!(mode_rank("nav.l3", "full"), Some(2));
         assert_eq!(mode_rank("nav.l3", "bogus"), None);
         assert_eq!(mode_rank("not.registered", "off"), None);
-        // 参数项无档位 ⇒ 任何档位串都返回 None
-        assert_eq!(mode_rank("sys.index.skinName", "off"), None);
+        // 参数项无档位 ⇒ 任何档位串都返回 None（sideTheme 是 Free 参数项，同样无档位）
+        assert_eq!(mode_rank("sys.index.sideTheme", "off"), None);
+        // 退役键不得回到注册表（否则一边 seed 一边 DELETE，每启动互相抵消）
+        for k in RETIRED_CONFIG_KEYS {
+            assert!(item(k).is_none(), "退役键 {k} 不得再出现在注册表");
+        }
     }
 
     /// **可证伪收敛锁**：`Ceiling` 下请求值永远无法抬到平台之上。
@@ -876,7 +1063,8 @@ mod tests {
         assert_eq!(converge("nav.l3", "full", "full"), Some("full"));
         // ⑥ 未登记 / 无档位项 ⇒ None（调用方必须回落平台值）
         assert_eq!(converge("not.registered", "off", "off"), None);
-        assert_eq!(converge("sys.index.skinName", "dark", "light"), None);
+        // Free 参数项无档位 ⇒ None（调用方回落平台值；值域另由 is_value_allowed 管）
+        assert_eq!(converge("sys.index.sideTheme", "dark", "light"), None);
         // ⑦ 单档能力位（off|on）同样受天花板约束
         assert_eq!(
             converge("backup.tenant_self_export", "off", "on"),
@@ -897,14 +1085,140 @@ mod tests {
         assert!(is_known_mode("nav.l3", "off"));
         assert!(!is_known_mode("nav.l3", "bogus"));
         assert!(!is_known_mode("not.registered", "off"));
-        // 无档位项（参数项）：值域由业务规则另行约束，此处不拦
-        //（§5.23 后无档位键仅剩 Locked 项——skinName 等死键已移出注册表）
+        // 无档位项（参数项）：值域由 `value_domain` 另行约束，此处不拦
+        //（批八十六：sideTheme 有值域但无档位，is_known_mode 对它仍放行）
         assert!(is_known_mode(
             "sys.account.captchaEnabled",
             "any-value-passes"
         ));
-        // 被移出的死键按"未登记"处理（fail-closed）
-        assert!(!is_known_mode("sys.index.skinName", "any-theme-name"));
+        assert!(is_known_mode("sys.index.sideTheme", "any-value-passes"));
+    }
+
+    /// **值域单一事实源锁**（批八十六 N-2）：`value_domain` 与 `modes` 互斥、
+    /// 出厂缺省必须落在值域内、判定方向按"只约束登记键"。
+    ///
+    /// 可证伪性：
+    /// - 若有人把主题档位误写成 `modes`（有序档位），`converge` 会对 Free 项返回
+    ///   `None` 而服务层又按值域拒绝 ⇒ 同一份数据两套规则，互斥锁当场红；
+    /// - 若有人把 `CONFIG_DEFAULTS` 的缺省改成不在值域里的串（如照抄历史 `theme-dark`
+    ///   又同时改掉值域），全新库一起来就带着一个"服务层拒绝写入的当前值"，
+    ///   第二支断言当场红——这正是"缺省值必须等价于现状"唯一能被机械检查的形态；
+    /// - 第三支防"把值域校验 fail-closed 到未登记键"（会砍掉租户自建参数能力）。
+    #[test]
+    fn test_value_domain_is_single_source() {
+        // ① modes 与 value_domain 互斥（一个值不能同时被"档位收敛"和"值域成员"两套规则管）
+        for i in all() {
+            assert!(
+                i.modes.is_empty() || i.value_domain.is_empty(),
+                "{} 同时声明了 modes（有序档位）与 value_domain（无序值域）",
+                i.key
+            );
+        }
+        // ② 出厂缺省必须落在值域内
+        let mut domain_keys = 0;
+        for c in CONFIGS {
+            if c.value_domain.is_empty() {
+                continue;
+            }
+            domain_keys += 1;
+            let (_, _, default) = CONFIG_DEFAULTS
+                .iter()
+                .find(|(k, _, _)| *k == c.key)
+                .unwrap_or_else(|| panic!("带值域的键 {} 未登记 CONFIG_DEFAULTS", c.key));
+            assert!(
+                c.value_domain.contains(default),
+                "{} 的出厂缺省 {default} 不在值域 {:?} 内",
+                c.key,
+                c.value_domain
+            );
+        }
+        assert!(
+            domain_keys >= 1,
+            "值域项采集面不得为空（判据空转即失去意义）"
+        );
+        // ③ 判定方向：登记键逐字命中；未登记键放行；不做归一
+        assert!(is_value_allowed("sys.index.sideTheme", "theme-auto"));
+        assert!(is_value_allowed("sys.index.sideTheme", "theme-light"));
+        assert!(!is_value_allowed("sys.index.sideTheme", "Theme-Auto"));
+        assert!(!is_value_allowed("sys.index.sideTheme", "theme-dark "));
+        assert!(!is_value_allowed("sys.index.sideTheme", ""));
+        assert!(is_value_allowed("some.tenant_private_key", "anything"));
+        assert!(is_value_allowed("sys.account.captchaEnabled", "anything"));
+        assert_eq!(
+            value_domain_hint("sys.index.sideTheme"),
+            SIDE_THEME_DOMAIN.join(" / ")
+        );
+        assert_eq!(value_domain_hint("not.registered"), "");
+    }
+
+    /// 退役键清单自证（批八十六 N-1）：非空、不与注册表重叠、且写入通道确实被拦。
+    #[test]
+    fn test_retired_keys_are_not_registered() {
+        assert!(
+            !RETIRED_CONFIG_KEYS.is_empty(),
+            "退役清单为空意味着兜底与窄迁移都不干活（判据空转）"
+        );
+        for k in RETIRED_CONFIG_KEYS {
+            assert!(item(k).is_none(), "退役键 {k} 不得同时登记在注册表");
+            assert!(is_retired_config_key(k), "{k} 必须被判定为退役");
+            assert!(!k.is_empty());
+        }
+        // 反证：在册键不得被判成退役（否则启动兜底会删掉真在用的行）
+        assert!(!is_retired_config_key("sys.index.sideTheme"));
+        assert!(!is_retired_config_key("sys.account.captchaEnabled"));
+    }
+
+    /// **两条数据面语句的形状锁**（批八十六）：清理与归一 SQL 由本 crate 单源生成，
+    /// 迁移与启动兜底只是两个执行载体，因此"语句到底删谁/改谁"必须在这里钉死。
+    ///
+    /// 可证伪性：若有人往 [`RETIRED_CONFIG_KEYS`] 里塞一个在册键，① 立即红
+    /// （那等于"每次启动删掉一个真在用的参数行"）；若归一语句丢了守卫条件，② 红
+    /// （那等于每次启动把管理员改过的主题值洗回缺省）。
+    #[test]
+    fn test_retire_and_normalize_sql_shape() {
+        // ① 清理语句：只删退役键，且绝不含任何在册键
+        let retire = dead_config_keys_retire_sql();
+        assert!(
+            retire.starts_with("DELETE FROM sys_config WHERE config_key IN ("),
+            "{retire}"
+        );
+        for k in RETIRED_CONFIG_KEYS {
+            assert!(retire.contains(&format!("'{k}'")), "清理语句漏掉退役键 {k}");
+        }
+        for c in CONFIGS {
+            assert!(
+                !retire.contains(&format!("'{}'", c.key)),
+                "清理语句不得触及在册参数项 {}",
+                c.key
+            );
+        }
+        // ② 归一语句：恰好两条，各自带 tenant_id=0 与"仍是历史字面量"守卫
+        let normalize = side_theme_normalize_sql();
+        assert_eq!(
+            normalize.len(),
+            2,
+            "值归一 + 说明归一，多一条或少一条都判红"
+        );
+        for sql in &normalize {
+            assert!(sql.contains("tenant_id = 0"), "{sql} 必须限定平台层");
+            assert!(sql.contains("sys.index.sideTheme"), "{sql} 必须限定目标键");
+            assert!(
+                sql.contains(&format!("= '{}'", SIDE_THEME_LEGACY_VALUE))
+                    || sql.contains(&format!("= '{}'", SIDE_THEME_LEGACY_REMARK)),
+                "{sql} 必须按历史字面量守卫，否则每次启动覆盖管理员的选择"
+            );
+            assert!(
+                !sql.to_lowercase().contains("update_time"),
+                "数据卫生收敛不冒充管理员操作，不得改 update_time"
+            );
+        }
+        // ③ 归一目标值必须在值域内（否则一次收敛就把旋钮拧到服务层拒绝写入的值上）
+        let normalized_value = SIDE_THEME_DOMAIN[0];
+        assert!(
+            is_value_allowed("sys.index.sideTheme", normalized_value),
+            "归一目标值 {normalized_value} 必须落在值域内"
+        );
+        assert!(normalize[0].contains(normalized_value));
     }
 
     /// **档位安全单调锁**：`modes` 是"下标越大越开放"的有序档位集合。
@@ -1121,5 +1435,142 @@ mod tests {
             "窄撤销未套用策略子句: {sql}"
         );
         assert!(!sql.contains("INSERT"), "窄撤销只减不增: {sql}");
+    }
+
+    /// 跨语言对账：前端镜像 `SIDE_THEME_OPTIONS` 必须与服务端值域**集合相等**（批八十六）。
+    ///
+    /// 为什么 F45 的真浏览器判据不够：它把平台值改成 `theme-dark` 后验侧栏 class 真的变了，
+    /// 判的是"这一个值能跨边界生效"。而真正危险的漂移方向是**后端加一档、前端镜像没跟上**——
+    /// 那种状态下服务层放行 `theme-blue`、前端按自己的字面量认不出来 ⇒ "管理员改了参数、
+    /// 界面毫无反馈"，正是本批 N-1 要消灭的死键形态，而 F45 看不见它（它不遍历整个集合）。
+    /// 与 `common::tenant::matrix_matches_ledger_doc` 走同一条通道：读另一侧仓库的文本、比事实。
+    #[test]
+    fn side_theme_domain_matches_frontend_mirror() {
+        let mirror = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stepby-vue/src/utils/sideTheme.ts");
+        let text = std::fs::read_to_string(&mirror).unwrap_or_else(|e| {
+            panic!(
+                "读不到前端镜像 {}：{e}（判据源缺失必须响亮失败，不得静默跳过）",
+                mirror.display()
+            )
+        });
+
+        let frontend = quoted_items(&text, "SIDE_THEME_OPTIONS = [");
+        assert!(
+            frontend.len() >= 3,
+            "从前端镜像解析出的档位少于 3 个 ⇒ 解析通道腐化或镜像被清空，不能读成\"没有漂移\"：{frontend:?}"
+        );
+        let mut server: Vec<String> = SIDE_THEME_DOMAIN.iter().map(|s| (*s).to_string()).collect();
+        let mut fe = frontend.clone();
+        server.sort();
+        fe.sort();
+        assert_eq!(
+            server, fe,
+            "侧边栏主题值域两侧不等（后端 {server:?} / 前端 {fe:?}）"
+        );
+
+        assert!(
+            text.contains("export const SIDE_THEME_CONFIG_KEY = 'sys.index.sideTheme'"),
+            "前端消费的键名必须逐字等于注册表登记的那一个"
+        );
+
+        // 出厂缺省同样对账：注册表缺省 = 《开关规范》① 的"缺省 = 现状"，
+        // 而"现状"就是前端 settings.ts 的实际值——两侧不等说明有一侧在骗人。
+        let settings = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stepby-vue/src/settings.ts");
+        let st = std::fs::read_to_string(&settings)
+            .unwrap_or_else(|e| panic!("读不到 {}：{e}", settings.display()));
+        let frontend_default = single_quoted_after(&st, "sideTheme:")
+            .unwrap_or_else(|| panic!("settings.ts 里 sideTheme 的值取不到单引号字面量"));
+        let registered_default = CONFIG_DEFAULTS
+            .iter()
+            .find(|(k, ..)| *k == "sys.index.sideTheme")
+            .unwrap_or_else(|| panic!("注册表里没有 sys.index.sideTheme 的缺省条目"))
+            .2;
+        assert_eq!(
+            registered_default, frontend_default,
+            "平台缺省与前端出厂值不等（注册表 {registered_default} / 前端 {frontend_default}）"
+        );
+    }
+
+    /// 活性正控：上面那条用的解析通道必须真的看得出漂移，且 marker 缺失时拿到空集
+    /// （"解析不到"与"解析出相等集合"必须可区分——同 AGENTS 前言 ⑥/⑬）。
+    #[test]
+    fn side_theme_mirror_parser_is_falsifiable() {
+        let base = "export const SIDE_THEME_OPTIONS = ['theme-auto', 'theme-dark', 'theme-light'] as const";
+        let mut ok = quoted_items(base, "SIDE_THEME_OPTIONS = [");
+        ok.sort();
+        assert_eq!(
+            ok,
+            vec![
+                "theme-auto".to_string(),
+                "theme-dark".to_string(),
+                "theme-light".to_string()
+            ]
+        );
+
+        let dropped = "export const SIDE_THEME_OPTIONS = ['theme-auto', 'theme-light'] as const";
+        let added = "export const SIDE_THEME_OPTIONS = ['theme-auto', 'theme-dark', 'theme-light', 'theme-blue'] as const";
+        let server: Vec<String> = SIDE_THEME_DOMAIN.iter().map(|s| (*s).to_string()).collect();
+        for mutated in [dropped, added] {
+            let mut fe = quoted_items(mutated, "SIDE_THEME_OPTIONS = [");
+            fe.sort();
+            let mut srv = server.clone();
+            srv.sort();
+            assert_ne!(
+                fe, srv,
+                "档位集合变了却仍与后端相等 ⇒ 比较式是恒真的：{fe:?}"
+            );
+        }
+
+        // 反证：marker 不存在 ⇒ 空集（不得退化成"把整篇文本当数组"）
+        assert!(quoted_items("没有这个常量", "SIDE_THEME_OPTIONS = [").is_empty());
+        // 反证：注释里的同名裸串不得当成数组项（无引号 ⇒ 不采集）
+        assert_eq!(
+            quoted_items("// theme-auto\nexport const A = ['x'] as const", "A = ["),
+            vec!["x".to_string()]
+        );
+        // 单值取用的边界
+        assert_eq!(
+            single_quoted_after("sideTheme: 'theme-auto',", "sideTheme:").as_deref(),
+            Some("theme-auto")
+        );
+        assert_eq!(single_quoted_after("sideTheme: string", "sideTheme:"), None);
+    }
+
+    /// 取 `marker` 之后第一个 `]` 之前的所有**引号内**字面量（顺序保留，不做去重）。
+    fn quoted_items(text: &str, marker: &str) -> Vec<String> {
+        let at = match text.find(marker) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let rest = &text[at + marker.len()..];
+        let body = rest.split(']').next().unwrap_or("");
+        let chars: Vec<char> = body.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '\'' || chars[i] == '"' {
+                let quote = chars[i];
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != quote {
+                    j += 1;
+                }
+                if j < chars.len() {
+                    out.push(chars[i + 1..j].iter().collect());
+                    i = j + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// 取 `marker` 之后第一个引号字面量（60 字符窗口内）；取不到返回 `None`（不猜）。
+    fn single_quoted_after(text: &str, marker: &str) -> Option<String> {
+        let at = text.find(marker)?;
+        let head: String = text[at + marker.len()..].chars().take(60).collect();
+        quoted_items(&head, "").into_iter().next()
     }
 }
