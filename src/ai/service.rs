@@ -102,7 +102,7 @@ impl AiService {
                         })
                         .collect::<Result<Vec<_>, sea_orm::DbErr>>()?
                 }
-                _ => unreachable!("unknown backend"),
+                backend => unreachable!("unknown backend: {backend:?}"),
             };
             if !cols.is_empty() {
                 out.push(TableSchema {
@@ -245,7 +245,7 @@ impl AiService {
                 }
                 (columns, data)
             }
-            _ => unreachable!("unknown backend"),
+            backend => unreachable!("unknown backend: {backend:?}"),
         };
         let rows_json = rows
             .into_iter()

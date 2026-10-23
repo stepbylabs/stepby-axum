@@ -19,7 +19,7 @@ pub(crate) async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> an
         DatabaseBackend::MySql => format!(
             "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=DATABASE() LIMIT 1"
         ),
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     Ok(!db
         .query_all_raw(Statement::from_string(backend, sql))

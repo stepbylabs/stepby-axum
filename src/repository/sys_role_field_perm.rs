@@ -133,7 +133,7 @@ impl SysRoleFieldPermRepository {
                 DatabaseBackend::MySql => {
                     "INSERT IGNORE INTO sys_role_field_perm (role_id, table_key, field_key, create_time) VALUES (?, ?, ?, ?)"
                 }
-                _ => unreachable!("unknown backend"),
+                backend => unreachable!("unknown backend: {backend:?}"),
             };
             for field in hidden_fields {
                 let stmt = Statement::from_sql_and_values(

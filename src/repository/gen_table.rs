@@ -355,7 +355,7 @@ impl GenTableRepository {
                     );
                     (sql, count_sql, data_vals, vals)
                 }
-                _ => unreachable!("unknown backend"),
+                backend => unreachable!("unknown backend: {backend:?}"),
             };
 
         let rows = DbTableInfo::find_by_statement(Statement::from_sql_and_values(

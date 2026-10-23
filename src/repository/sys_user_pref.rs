@@ -79,7 +79,7 @@ impl SysUserPrefRepository {
                     announce_notify=VALUES(announce_notify), dnd_enabled=VALUES(dnd_enabled), \
                     dnd_start=VALUES(dnd_start), dnd_end=VALUES(dnd_end), update_time=VALUES(update_time)"
             }
-            _ => unreachable!("unknown backend"),
+            backend => unreachable!("unknown backend: {backend:?}"),
         };
         let values: Vec<Value> = vec![
             user_id.into(),

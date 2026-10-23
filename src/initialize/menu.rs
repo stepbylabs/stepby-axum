@@ -119,7 +119,7 @@ pub(crate) async fn ensure_menu_structure_optimize(db: &DatabaseConnection) -> a
             DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO",
             DatabaseBackend::MySql => "INSERT IGNORE INTO",
             DatabaseBackend::Postgres => "INSERT INTO",
-            _ => unreachable!("unknown backend"),
+            backend => unreachable!("unknown backend: {backend:?}"),
         };
         let now = crate::common::datetime::seed_now_expr();
         db.execute_raw(Statement::from_string(
@@ -260,7 +260,7 @@ pub(crate) async fn ensure_domain_self_service_menu(db: &DatabaseConnection) -> 
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -316,7 +316,7 @@ pub(crate) async fn ensure_backup_permission_menus(db: &DatabaseConnection) -> a
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -364,7 +364,7 @@ pub(crate) async fn ensure_tenant_nav_menu(db: &DatabaseConnection) -> anyhow::R
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -417,7 +417,7 @@ pub(crate) async fn ensure_sys_pat_menu(db: &DatabaseConnection) -> anyhow::Resu
         DatabaseBackend::MySql => {
             "SELECT 1 FROM information_schema.tables WHERE table_name='sys_menu' AND table_schema=DATABASE() LIMIT 1".to_string()
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     if !db
         .query_all_raw(Statement::from_string(backend, exists_sql))

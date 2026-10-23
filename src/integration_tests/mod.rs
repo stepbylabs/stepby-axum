@@ -2,8 +2,10 @@
 //! 集成测试（端到端验证核心业务链路）
 //!
 //! 设计要点（隔离、可重复、无副作用、可并行）：
-//! - 每个测试使用独立的临时 sqlite 文件（唯一路径），由 `migrator::Migrator::up` 建表 + 种子数据，
-//!   不触碰开发/生产数据库。
+//! - 每个测试使用独立的临时 sqlite 文件，路径**向磁盘认领**（`create_new`，已存在即换下一个序号），
+//!   由 `migrator::Migrator::up` 建表 + 种子数据，不触碰开发/生产数据库。
+//!   本进程第一个用例还会回收历史遗留的本族文件（`it_hygiene` 记录立项事故与四条卫生锁）：
+//!   `mode=rwc` 会原样打开同名旧库，而 pid 会被回收 ⇒ "唯一路径"必须由磁盘作证而不是由计数器作证。
 //! - 每个测试使用独立的 Redis DB 索引（1..=15，跨进程文件锁仲裁独占），`FLUSHDB` 清空，
 //!   避免并行测试/并行测试进程互相干扰。
 //! - 每个测试使用独立的 peer IP（10.77.x.y），隔离全局内存限流令牌桶，避免并行测试触发 429。
@@ -36,6 +38,7 @@ mod flow_definition;
 mod flow_graph_doc;
 mod i18n_keys;
 mod ip_location;
+mod it_hygiene;
 mod live_db_smoke;
 mod menu_perm_contract;
 mod migration_registry;
@@ -112,6 +115,9 @@ use tower::ServiceExt;
 
 use crate::config::Settings;
 use crate::db::{init_database, init_redis};
+use crate::repository::test_support::{
+    IT_DB_PREFIX, claim_harness_db_path_loop, sweep_stale_harness_dbs,
+};
 use crate::scheduler::JobScheduler;
 use crate::service::IpLocationService;
 use crate::state::AppState;
@@ -138,8 +144,9 @@ fn init_test_tracing() {
     });
 }
 
-/// 测试专用临时 sqlite 文件序号（保证同进程内路径唯一，规避 Windows 时钟粒度下
-/// `SystemTime::now().as_nanos()` 并发返回相同值导致两个测试共用同一 DB 文件）。
+/// 测试专用临时 sqlite 文件序号（同进程内单调）。**跨进程的唯一性不靠它**——由
+/// [`unique_temp_db_path`] 用 `create_new` 向磁盘要（b88：原先这里与函数注释都写成"保证不残留/
+/// 不撞文件"，而实测既没有删除通道、pid 又会被回收 ⇒ 注释与事实相反）。
 static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_peer_ip() -> IpAddr {
@@ -242,13 +249,21 @@ async fn acquire_redis_slot() -> RedisSlot {
     }
 }
 
-/// 生成同进程内必然唯一的临时 sqlite 文件路径（pid + 单调序号），
-/// 保证隔离、不残留旧 schema/数据、并行测试不撞文件。
+// 隔离测试库的**文件卫生**（路径认领、回收、判据）统一住在 `crate::repository::test_support`，
+// 这里只留集成 harness 的调用点。立此单一事实源的直接原因是 b88 实测到两条通道都漏过：
+// ① 路径只由"pid + 计数"决定，而 `?mode=rwc` 存在即原样打开 ⇒ 跨轮串库（一整轮 5 条红的成因）；
+// ② 全仓**没有任何删除通道**，两个家族合计遗留 **77,014 个文件 / 77.99 GB**
+//    （`stepby_it_` 66,515 / 66.84 GB + `stepby_repo_test_` 10,499 / 11.15 GB）。
+// 事故取证、四条卫生锁与三条腿盘上变异见 `it_hygiene`；台账 b88 §13。
+
+/// 生成**向磁盘要唯一性**的隔离 sqlite 路径：`create_new` 已存在即失败，换下一个序号重试。
+///
+/// 原先只保证"本进程内唯一"（pid + 计数），而 Windows 会回收 pid ⇒ 跨轮撞上同名文件时
+/// 这一轮用的是上一轮的库（旧种子、被别的用例改过的 admin 口令、上一轮留下的行）。
 fn unique_temp_db_path() -> String {
-    let pid = std::process::id();
-    let seq = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let p = std::env::temp_dir().join(format!("stepby_it_{}_{}.db", pid, seq));
-    p.to_string_lossy().to_string()
+    claim_harness_db_path_loop(IT_DB_PREFIX, &TEMP_DB_COUNTER)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// 构造隔离的 `(Arc<AppState>, RedisSlot)`：
@@ -317,6 +332,10 @@ async fn build_isolated_state_with(
 
     let mut settings = Settings::from_file(&manifest_config_path())
         .expect("加载 config/config.toml 失败（请确认 cwd 或 CARGO_MANIFEST_DIR 正确）");
+
+    // 每个进程只回收一次（回收是卫生工作，不进任何用例的判定路径）。
+    static IT_SWEEP: std::sync::Once = std::sync::Once::new();
+    IT_SWEEP.call_once(sweep_stale_harness_dbs);
 
     // ---- 测试基线与**部署态**解耦（W-1 / 方案 §5.20）----
     // 本机 config/config.toml 是部署态文件：运维可改单机模式 / 关 SSO / 改 UI 展示……

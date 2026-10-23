@@ -282,7 +282,7 @@ impl SysFrontendErrorRepository {
                  FROM sys_frontend_error WHERE create_time >= ? AND level='error'{tenant_clause} \
                  GROUP BY d ORDER BY d ASC"
             ),
-            _ => unreachable!("unknown backend"),
+            backend => unreachable!("unknown backend: {backend:?}"),
         };
         let rows = db
             .query_all_raw(Statement::from_sql_and_values(backend, sql, values))

@@ -32,7 +32,7 @@ async fn run_migrator_if_fresh_db(db: &DatabaseConnection) -> anyhow::Result<()>
         DatabaseBackend::MySql => {
             "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'seaql_migrations'"
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let row = db
         .query_one_raw(Statement::from_string(backend, sql.to_string()))

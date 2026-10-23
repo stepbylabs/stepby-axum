@@ -138,8 +138,7 @@ fn split_and_fragments(input: &str) -> Vec<String> {
                     .unwrap_or(false);
                 let after_is_space = input
                     .get(i + 4..i + 5)
-                    .map(|s| s.chars().next().unwrap().is_whitespace())
-                    .unwrap_or(false);
+                    .is_some_and(|s| s.starts_with(char::is_whitespace));
                 if word_is_and && after_is_space {
                     conn.push(input[start..i].to_string());
                     i += 5;

@@ -390,7 +390,7 @@ fn db_backend_name(db: &sea_orm::DatabaseConnection) -> &'static str {
         DatabaseBackend::Sqlite => "sqlite",
         DatabaseBackend::MySql => "mysql",
         DatabaseBackend::Postgres => "postgres",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     }
 }
 

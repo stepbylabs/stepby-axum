@@ -46,12 +46,14 @@ pub fn to_pg_placeholders(sql: &str) -> String {
         if in_literal {
             out.push(c);
             if c == '\'' {
-                match chars.peek() {
-                    // '' = 字面量内的转义单引号，继续留在字面量里
-                    Some('\'') => {
-                        out.push(chars.next().unwrap());
-                    }
-                    _ => in_literal = false,
+                // '' = 字面量内的转义单引号，继续留在字面量里；单个 `'` 才结束字面量。
+                // 批八十八把这里的 `chars.next().unwrap()` 换成 `next_if_eq`：`peek` 与
+                // `next` 之间没有任何改动迭代器的语句，取到 `None` 结构上不可能，
+                // 但"不可能"要靠类型吃掉，不能靠读者同意（全仓生产码 `unwrap()` 已归零）。
+                if chars.next_if_eq(&'\'').is_some() {
+                    out.push('\'');
+                } else {
+                    in_literal = false;
                 }
             }
             continue;

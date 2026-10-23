@@ -311,7 +311,7 @@ pub(crate) async fn ensure_user_country_code_column(db: &DatabaseConnection) -> 
                 .await?;
             !rows.is_empty()
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
 
     if !table_exists {
@@ -352,7 +352,7 @@ pub(crate) async fn ensure_user_country_code_column(db: &DatabaseConnection) -> 
                 .await?;
             !rows.is_empty()
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
 
     if !has_column {
@@ -427,7 +427,7 @@ pub(crate) async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> a
                 .await?;
             !rows.is_empty()
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
 
     if !table_exists {
@@ -468,7 +468,7 @@ pub(crate) async fn ensure_task_operator_id_column(db: &DatabaseConnection) -> a
                 .await?;
             !rows.is_empty()
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
 
     if !has_column {
@@ -523,7 +523,7 @@ pub(crate) async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyh
                 .await?;
             !rows.is_empty()
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
 
     if !table_exists {
@@ -564,7 +564,7 @@ pub(crate) async fn ensure_oper_log_diff_column(db: &DatabaseConnection) -> anyh
                 .await?;
             !rows.is_empty()
         }
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
 
     if !has_column {
@@ -594,7 +594,7 @@ pub(crate) async fn ensure_data_rule_tables(db: &DatabaseConnection) -> anyhow::
         DatabaseBackend::Sqlite => "rule_id INTEGER PRIMARY KEY AUTOINCREMENT",
         DatabaseBackend::MySql => "rule_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
         DatabaseBackend::Postgres => "rule_id BIGSERIAL PRIMARY KEY",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let create_rule = format!(
         "CREATE TABLE IF NOT EXISTS sys_data_rule (
@@ -724,7 +724,7 @@ pub(crate) async fn ensure_sys_user_credential_table(
         DatabaseBackend::Sqlite => "cred_id INTEGER PRIMARY KEY AUTOINCREMENT",
         DatabaseBackend::MySql => "cred_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
         DatabaseBackend::Postgres => "cred_id BIGSERIAL PRIMARY KEY",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let dt = match backend {
         DatabaseBackend::Postgres => "TIMESTAMP",

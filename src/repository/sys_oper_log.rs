@@ -594,7 +594,7 @@ impl SysOperLogRepository {
                  FROM sys_oper_log WHERE oper_time >= ?{tenant_clause} \
                  GROUP BY d ORDER BY d ASC"
             ),
-            _ => unreachable!("unknown backend"),
+            backend => unreachable!("unknown backend: {backend:?}"),
         };
 
         let rows = db

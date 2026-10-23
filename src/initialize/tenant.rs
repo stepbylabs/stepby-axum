@@ -97,7 +97,7 @@ pub(crate) async fn ensure_multitenant_module(db: &DatabaseConnection) -> anyhow
         DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
         DatabaseBackend::Postgres => "INSERT INTO ",
         DatabaseBackend::MySql => "INSERT IGNORE INTO ",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let insert_suffix = if backend == DatabaseBackend::Postgres {
         " ON CONFLICT DO NOTHING"
@@ -963,7 +963,7 @@ pub(crate) async fn ensure_tenant_role_menu_governance(
             DatabaseBackend::Sqlite => "INSERT OR IGNORE INTO ",
             DatabaseBackend::Postgres => "INSERT INTO ",
             DatabaseBackend::MySql => "INSERT IGNORE INTO ",
-            _ => unreachable!("unknown backend"),
+            backend => unreachable!("unknown backend: {backend:?}"),
         };
         let conflict_suffix = if backend == DatabaseBackend::Postgres {
             " ON CONFLICT DO NOTHING"

@@ -136,7 +136,7 @@ async fn index_present(db: &DatabaseConnection, table: &str, index: &str) -> boo
         DatabaseBackend::MySql => format!(
             "SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name='{table}' AND index_name='{index}' LIMIT 1"
         ),
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     !db.query_all_raw(Statement::from_string(backend, sql))
         .await

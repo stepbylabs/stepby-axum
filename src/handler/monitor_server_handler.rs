@@ -274,7 +274,7 @@ pub fn db_pool_gauges(db: &sea_orm::DatabaseConnection) -> (&'static str, u64, u
         sea_orm::DatabaseBackend::Sqlite => "sqlite",
         sea_orm::DatabaseBackend::MySql => "mysql",
         sea_orm::DatabaseBackend::Postgres => "postgres",
-        _ => unreachable!("unknown backend"),
+        backend => unreachable!("unknown backend: {backend:?}"),
     };
     let (pool_size, num_idle) = match &db.inner {
         DatabaseConnectionType::SqlxSqlitePoolConnection(_) => {
