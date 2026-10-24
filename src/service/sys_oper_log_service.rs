@@ -34,7 +34,7 @@ use crate::entity::sys_oper_log::{
 use crate::repository::base::BaseRepository;
 use crate::repository::sys_oper_log::SysOperLogRepository;
 use crate::service::oper_log_chain_seed::{
-    ChainAnchorSnapshot, GENESIS_SEED, PrevSeed, resolve_prev_seed, segment_chain_runs,
+    ChainAnchorSnapshot, GENESIS_SEED, PrevSeed, chain_range, resolve_prev_seed, segment_chain_runs,
 };
 use crate::shared_store::SharedStore;
 use crate::utils::retry::{RetryPolicy, retry_async};
@@ -483,10 +483,16 @@ impl SysOperLogService {
             // 请求的 id 全不在本租户范围内：既不删、也**不登记任何锚点**
             return Ok(());
         }
-        let (min_id, max_id) = (
-            *oper_ids.first().expect("非空已判"),
-            *oper_ids.last().expect("非空已判"),
-        );
+        // 区间端点由**值**导出（`chain_range`），不取 `first()/last()`：
+        // 授权集来自 `filter_ids_in_scope` 那一查（无 ORDER BY ⇒ 顺序由 DB 扫描序决定），
+        // 首尾不保证是两端。传反的 min/max 会让 `find_chain_rows_in_range` 的
+        // `gte AND lte` **恒空** ⇒ 一段锚点都不登记而 DELETE 照跑 ⇒ 链上留下无人认领的
+        // 缺口（b89 项 3；取证与单元锁见 `oper_log_chain_seed::chain_range`）。
+        let Some((min_id, max_id)) = chain_range(&oper_ids) else {
+            // 上面已判空集提前返回；这里取不到只可能是空集，**不得**用 expect/unwrap
+            // 把"区间取不到"变成 panic（工程基线：宁可整条路径不做，也不留下半截副作用）。
+            return Ok(());
+        };
 
         // 待删链行与范围内全部链行（含幸存）——段切分基准
         let all_chain = self

@@ -230,6 +230,31 @@ impl ReportDatasetService {
         }
     }
 
+    /// 设计器读面守卫（b89 项 6 补的第二半；与 [`Self::ensure_designer_write`] 同一把尺）。
+    ///
+    /// 原状：读面无守卫 ⇒ `off` 档租户照常列表/预览/看大屏，写按钮却 403。
+    /// 这既让能力位在读面上形同虚设，也让 `getRouters` 的整面剪退化成"仅显示层隐藏"
+    /// （《开关规范》③ 明确禁止）。
+    async fn ensure_designer_read(&self, operator_tid: i64) -> Result<(), ServiceError> {
+        if operator_tid == 0 {
+            return Ok(());
+        }
+        let features =
+            crate::service::sys_tenant_service::tenant_features_conn(&self.db, operator_tid)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("tenant features: {e}")))?;
+        if crate::common::features::designer_read_allowed(
+            operator_tid,
+            features.mode(DESIGNER_FEATURE_KEY),
+        ) {
+            Ok(())
+        } else {
+            Err(ServiceError::forbidden(&crate::tr!(
+                "error.report.designer_off"
+            )))
+        }
+    }
+
     // ==================== 数据集 ====================
 
     pub async fn get_dataset_page(
@@ -238,6 +263,7 @@ impl ReportDatasetService {
         limit: u64,
         operator_tid: i64,
     ) -> Result<(Vec<DatasetVo>, u64), ServiceError> {
+        self.ensure_designer_read(operator_tid).await?;
         let mut select = ReportDatasetEntity::find().filter(ReportDatasetColumn::DelFlag.eq("0"));
         if let Some(t) = crate::common::tenant::tenant_scope(operator_tid) {
             select = select.filter(ReportDatasetColumn::TenantId.eq(t));
@@ -257,6 +283,7 @@ impl ReportDatasetService {
         dataset_id: i64,
         operator_tid: i64,
     ) -> Result<DatasetVo, ServiceError> {
+        self.ensure_designer_read(operator_tid).await?;
         let m = ReportDatasetEntity::find_by_id(dataset_id)
             .filter(ReportDatasetColumn::DelFlag.eq("0"))
             .one(&self.db)
@@ -269,11 +296,15 @@ impl ReportDatasetService {
     }
 
     /// 取 SQL 模板明文（编辑回填专用；仅持 report:dataset:edit 者可达——权限在路由键层把关）
+    ///
+    /// 按**写面**守卫：这一支的用途就是"编辑对话框回填 SQL"，路由键也挂 `report:dataset:edit`
+    /// （b89 项 6：读面/写面的分类以路由键为准，不按方法名前缀猜）。
     pub async fn get_dataset_sql(
         &self,
         dataset_id: i64,
         operator_tid: i64,
     ) -> Result<String, ServiceError> {
+        self.ensure_designer_write(operator_tid).await?;
         let m = ReportDatasetEntity::find_by_id(dataset_id)
             .filter(ReportDatasetColumn::DelFlag.eq("0"))
             .one(&self.db)
@@ -429,6 +460,7 @@ impl ReportDatasetService {
         dto: DatasetPreviewDto,
         operator_tid: i64,
     ) -> Result<DatasetPreviewVo, ServiceError> {
+        self.ensure_designer_read(operator_tid).await?;
         let m = ReportDatasetEntity::find_by_id(dto.dataset_id)
             .filter(ReportDatasetColumn::DelFlag.eq("0"))
             .one(&self.db)
@@ -468,8 +500,13 @@ impl ReportDatasetService {
 
         // 参数绑定：:name → ? 占位符（按方言）+ 值序列
         let backend = self.db.get_database_backend();
-        let (sql_bound, values) =
-            bind_named_params(&m.sql_template, &param_names, &dto.params, backend);
+        let (sql_bound, values) = bind_named_params(&m.sql_template, &dto.params, backend)
+            .map_err(|detail| {
+                ServiceError::bad_request(&format!(
+                    "{}: {detail}",
+                    crate::tr!("error.report.param_type_invalid")
+                ))
+            })?;
 
         // LIMIT 100 硬顶（模板无括号/注释/子查询——校验器保证；直接追加 LIMIT 子句）。
         // ⚠️ 追加前必须剥掉末尾分号：校验器**放行** `SELECT … ;` 形态，而直接拼接会得到
@@ -553,6 +590,7 @@ impl ReportDatasetService {
         limit: u64,
         operator_tid: i64,
     ) -> Result<(Vec<DashboardVo>, u64), ServiceError> {
+        self.ensure_designer_read(operator_tid).await?;
         let mut select =
             ReportDashboardEntity::find().filter(ReportDashboardColumn::DelFlag.eq("0"));
         if let Some(t) = crate::common::tenant::tenant_scope(operator_tid) {
@@ -573,6 +611,7 @@ impl ReportDatasetService {
         dashboard_id: i64,
         operator_tid: i64,
     ) -> Result<DashboardVo, ServiceError> {
+        self.ensure_designer_read(operator_tid).await?;
         let m = ReportDashboardEntity::find_by_id(dashboard_id)
             .filter(ReportDashboardColumn::DelFlag.eq("0"))
             .one(&self.db)
@@ -728,13 +767,22 @@ fn preview_limited_sql(sql_bound: &str) -> String {
 }
 
 /// 把 `:name` 命名占位符替换为方言占位符并生成绑定值
-/// （SQLite/MySQL = `?`，PG = `$n`）
+/// （SQLite/MySQL = `?`，PG = `$n`）。
+///
+/// `Err(明细)` = 该参数的值**无法**映射成 SQL 标量（数组 / 对象 / 无法解析的数值 / 缺失）。
+///
+/// 立案（b89 项 4）：原实现把这些形状一律落成 `Value::String(None)`（= SQL NULL）。
+/// 调用方传 `{"flag": true}` 得到的是 `WHERE flag = NULL` ⇒ **空结果 + HTTP 200 + 零提示**：
+/// 错的是返回的数据而不是请求，而"数据集试跑"这一面的用户正是拿它判断 SQL 对不对的人，
+/// 空集会被读成"库里确实没这条数据"。JSON `null` 仍按 SQL NULL 绑定（模板作者写
+/// `IS NULL` 语义时使用），但**只有 null 这一种**映射到 NULL。
+/// 参数缺失在更早的核对里就 400（`error.report.param_missing`）；这里返回 Err 是第二道，
+/// 免得调用方漏判时又退回"洗成 NULL"的老形状。
 fn bind_named_params(
     sql_template: &str,
-    param_names: &[String],
     params: &std::collections::HashMap<String, serde_json::Value>,
     backend: sea_orm::DatabaseBackend,
-) -> (String, Vec<sea_orm::Value>) {
+) -> Result<(String, Vec<sea_orm::Value>), String> {
     let mut out = String::with_capacity(sql_template.len() + 16);
     let mut values: Vec<sea_orm::Value> = Vec::new();
     let bytes = sql_template.as_bytes();
@@ -767,17 +815,29 @@ fn bind_named_params(
                 }
                 if end > start {
                     let name = &sql_template[start..end];
-                    let raw = params.get(name).cloned().unwrap_or(serde_json::Value::Null);
+                    let raw = match params.get(name) {
+                        Some(v) => v.clone(),
+                        None => return Err(format!("{name}（取值缺失）")),
+                    };
                     let v: sea_orm::Value = match raw {
                         serde_json::Value::Number(n) => {
                             if let Some(iv) = n.as_i64() {
                                 iv.into()
+                            } else if let Some(fv) = n.as_f64() {
+                                fv.into()
                             } else {
-                                n.as_f64().unwrap_or(0.0).into()
+                                // 原先是 `as_f64().unwrap_or(0.0)`：把"解析不出数值"洗成 0
+                                // 送进 WHERE ⇒ 结果集换了而请求照样 200。
+                                return Err(format!("{name}（数值 {n} 无法解析）"));
                             }
                         }
                         serde_json::Value::String(sv) => sv.into(),
-                        _ => sea_orm::Value::String(None),
+                        serde_json::Value::Bool(b) => sea_orm::Value::Bool(Some(b)),
+                        // 唯一的 NULL 通道：JSON null 显式表达"这一位就是 SQL NULL"
+                        serde_json::Value::Null => sea_orm::Value::String(None),
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                            return Err(format!("{name}（数组/对象不能直接绑定）"));
+                        }
                     };
                     values.push(v);
                     match backend {
@@ -799,8 +859,7 @@ fn bind_named_params(
             }
         }
     }
-    let _ = param_names;
-    (out, values)
+    Ok((out, values))
 }
 
 /// 列名推断：对模板 `SELECT a, b FROM t` 的**顶层投影列清单**做词法提取
@@ -1104,5 +1163,119 @@ mod tests {
             preview_limited_sql("SELECT 1;").ends_with(&format!("LIMIT {PREVIEW_ROW_LIMIT}")),
             "硬顶常量必须真的落到语句尾部"
         );
+    }
+
+    /// b89 项 4 回归锁：绑定只看**能否映射成标量**，映射不了必须点名参数，
+    /// 不得静默洗成 NULL（洗成 NULL 的请求照样 200，错的是返回的数据）。
+    fn params(
+        pairs: &[(&str, serde_json::Value)],
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    /// 四类标量各绑各的形状；`null` 是**唯一**允许落成 SQL NULL 的一档
+    #[test]
+    fn bind_named_params_maps_scalars_and_keeps_null_explicit() {
+        use sea_orm::DatabaseBackend;
+        let p = params(&[
+            ("id", serde_json::json!(7)),
+            ("ratio", serde_json::json!(1.5)),
+            ("name", serde_json::json!("bob")),
+            ("flag", serde_json::json!(true)),
+            ("maybe", serde_json::json!(null)),
+        ]);
+        let (sql, values) = bind_named_params(
+            "SELECT 1 FROM t WHERE a = :id AND b = :ratio AND c = :name AND d = :flag AND e = :maybe",
+            &p,
+            DatabaseBackend::Sqlite,
+        )
+        .expect("标量必须全部可绑定");
+        assert_eq!(
+            sql,
+            "SELECT 1 FROM t WHERE a = ? AND b = ? AND c = ? AND d = ? AND e = ?"
+        );
+        assert_eq!(values.len(), 5, "五个占位符必须五个绑定");
+        assert!(
+            matches!(values[0], sea_orm::Value::BigInt(Some(7))),
+            "整数应绑成 BigInt，实际 {:?}",
+            values[0]
+        );
+        assert!(
+            matches!(values[3], sea_orm::Value::Bool(Some(true))),
+            "布尔必须绑成 Bool，而不是 NULL（本项缺陷的原形）"
+        );
+        assert!(
+            matches!(values[4], sea_orm::Value::String(None)),
+            "JSON null 仍按 SQL NULL 绑定"
+        );
+    }
+
+    /// PG 走 `$n` 且序号**按出现顺序**递增（同一名字出现两次 ⇒ 两个序号、两份值）
+    #[test]
+    fn bind_named_params_numbers_postgres_placeholders_per_occurrence() {
+        use sea_orm::DatabaseBackend;
+        let p = params(&[("lo", serde_json::json!(1)), ("hi", serde_json::json!(9))]);
+        let (sql, values) = bind_named_params(
+            "SELECT 1 FROM t WHERE a > :lo AND a < :hi AND b <> :lo",
+            &p,
+            DatabaseBackend::Postgres,
+        )
+        .expect("标量必须全部可绑定");
+        assert_eq!(sql, "SELECT 1 FROM t WHERE a > $1 AND a < $2 AND b <> $3");
+        assert_eq!(values.len(), 3, "重复出现的名字不得合并序号");
+    }
+
+    /// 数组 / 对象 / 缺失 ⇒ Err 且**点名是哪个参数**（只报"绑定失败"等于没报）
+    #[test]
+    fn bind_named_params_rejects_unmappable_values_and_names_them() {
+        use sea_orm::DatabaseBackend;
+        for (label, value, want_in_msg) in [
+            ("数组", serde_json::json!([1, 2]), "ids"),
+            ("对象", serde_json::json!({"a": 1}), "ids"),
+        ] {
+            let p = params(&[("ids", value)]);
+            let err = bind_named_params(
+                "SELECT 1 FROM t WHERE id IN (:ids)",
+                &p,
+                DatabaseBackend::Sqlite,
+            )
+            .expect_err(&format!("{label}不得被洗成 NULL"));
+            assert!(
+                err.contains(want_in_msg),
+                "{label} 的错误必须点名参数 {want_in_msg}，实际：{err}"
+            );
+        }
+        // 缺失：调用方本应在更早的核对里 400，这里是第二道，不得退回静默 NULL
+        let err = bind_named_params(
+            "SELECT 1 FROM t WHERE id = :ids",
+            &std::collections::HashMap::new(),
+            DatabaseBackend::Sqlite,
+        )
+        .expect_err("缺失参数不得静默绑成 NULL");
+        assert!(err.contains("ids"), "必须点名缺哪个参数：{err}");
+    }
+
+    /// 引用名之外的字符串**不算**占位符（引号里的 `:not_a_param` 必须原样保留）
+    ///
+    /// 这条是采集面的对照组：掩码器一旦把引号内文本当占位符替换，绑定数就会超过参数数，
+    /// "绑了没人用的值"与"该绑的没绑"在同一份 SQL 上同时发生。
+    #[test]
+    fn bind_named_params_ignores_colons_inside_string_literals() {
+        use sea_orm::DatabaseBackend;
+        let p = params(&[("id", serde_json::json!(3))]);
+        let (sql, values) = bind_named_params(
+            "SELECT 'a :not_a_param b' FROM t WHERE id = :id",
+            &p,
+            DatabaseBackend::Sqlite,
+        )
+        .expect("引号内的冒号不参与绑定");
+        assert!(
+            sql.contains("'a :not_a_param b'"),
+            "字面量必须逐字保留，实际：{sql}"
+        );
+        assert_eq!(values.len(), 1, "只该有一个绑定，实际 {}", values.len());
     }
 }

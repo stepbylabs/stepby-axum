@@ -329,6 +329,12 @@ pub async fn import_data(
     Query(query): Query<ImportQuery>,
     mut multipart: Multipart,
 ) -> Result<AjaxResult<ImportResultVo>, AppError> {
+    // 全局并发上限（A-2）：导入是**逐行 upsert**，行图由上传文件决定 ⇒ 单个请求的
+    // 写放大没有上界（`MAX_IMPORT_SIZE` 只封文件字节，不封行数成本），
+    // 多路同时导入会把连接池占满。上限 4 的理由见 `resource_gate::HeavyEntry::UserImport`。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::UserImport,
+    )?;
     // 从 multipart 提取 file 字段并限定长度读取
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_name: Option<String> = None;

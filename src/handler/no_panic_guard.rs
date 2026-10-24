@@ -260,6 +260,168 @@ mod no_panic_mod {
         );
     }
 
+    // ==================== 非后端族的 unreachable! 归因（批八十九 项 5）====================
+
+    /// `unreachable!(…)` 的整体标记（用 `concat!` 拼装，免得本判据在自己的源码里看到被禁形态）。
+    const ANY_ARM_MARK: &str = concat!("unreachable!", "(");
+
+    /// 行集里的**非后端族**兜底臂（后端族由 [`ARM_MARK`] 那一把管，两条互不重叠）。
+    fn find_generic_arms(lines: &[String]) -> Vec<(usize, String)> {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(ANY_ARM_MARK) && !l.contains("unknown backend"))
+            .map(|(i, l)| (i + 1, l.trim().to_string()))
+            .collect()
+    }
+
+    /// 兜底臂模式里**绑定的名字**：`x =>` 允许，`x @ Pattern =>` 也允许
+    /// （后者是"只想点名整个值、不关心变体内部"时的写法，本批 `mode @ CacheMode::Auto` 就是）。
+    fn arm_binding(pat: &str) -> Option<String> {
+        let pat = pat.trim();
+        if pat == "_" {
+            return None;
+        }
+        if is_plain_ident(pat) {
+            return Some(pat.to_string());
+        }
+        if let Some((head, rest)) = pat.split_once('@') {
+            let head = head.trim();
+            if is_plain_ident(head) && !rest.trim().is_empty() {
+                return Some(head.to_string());
+            }
+        }
+        None
+    }
+
+    /// 单条非后端族兜底臂的归因判据（与后端族同一取向：**到达时必须说得出到达的是什么**）。
+    fn generic_unreachable_violation(arm: &str) -> Option<String> {
+        let arm = arm.trim();
+        let Some((pat, body)) = arm.split_once("=>") else {
+            return Some(format!(
+                "裸 `unreachable!(…)` 不在带绑定的臂上 ⇒ 到达时只留下一句 internal error，说不出是哪个变体: {arm}"
+            ));
+        };
+        let Some(binding) = arm_binding(pat) else {
+            return Some(format!(
+                "兜底臂的模式 `{}` 没有绑定名字 ⇒ panic 无法点名到达的值: {arm}",
+                pat.trim()
+            ));
+        };
+        let dbg = format!("{{{binding}:?}}");
+        let alt = format!("{{{binding}:#?}}");
+        if !body.contains(&dbg) && !body.contains(&alt) {
+            return Some(format!(
+                "panic 文案没有以 Debug 内插它绑定的 `{binding}`（应写成 {dbg}）: {arm}"
+            ));
+        }
+        None
+    }
+
+    /// **每一处**生产码 `unreachable!` 都必须点名它拒绝的值。
+    ///
+    /// 立案（b89 项 5）：`initialize/mod.rs` 的两条 `[cache].mode` 兜底臂原先写的是
+    /// `unreachable!("resolve_mode 已裁决")` 与裸 `unreachable!()`——文案那句"已裁决"
+    /// 不含任何变量，真到达时（比如日后新增一档 `mixed`）日志里只有
+    /// `internal error: entered unreachable code`，归因等于零。b88 给后端族立的
+    /// "不可消除的 panic 至少必须可归因"这条纪律，词汇表当时只覆盖 `unknown backend` 一族，
+    /// 于是**同一形状的另外两处一直是绿的**——同一件事两把尺，正是本仓反复立案的形状。
+    /// 现把两族并成一把：后端族走 [`fallback_arm_violation`]，其余走 [`generic_unreachable_violation`]，
+    /// 两条**互不重叠**（按 `unknown backend` 分流），所以合起来就是"全部"。
+    #[test]
+    fn every_production_unreachable_names_its_value() {
+        let files = prod_surface();
+        require_volume(&files, 80, 20_000, "非后端族 unreachable 归因锁采集面");
+        let mut arms = 0usize;
+        let mut backend_arms = 0usize;
+        let mut violations = Vec::new();
+        for f in &files {
+            for (ln, text) in find_generic_arms(&f.lines) {
+                arms += 1;
+                if let Some(why) = generic_unreachable_violation(&text) {
+                    violations.push(format!("  {}:{ln}  {why}", f.rel));
+                }
+            }
+            backend_arms += find_fallback_arms(&f.lines).len();
+        }
+        println!(
+            "[unreachable] 生产码兜底臂：后端族 {backend_arms} 处 / 其他族 {arms} 处 / 不可归因 {} 处",
+            violations.len()
+        );
+        assert!(
+            backend_arms >= 20,
+            "后端族只数到 {backend_arms} 处（地板 20）——与 [`backend_fallback_arms_must_name_the_backend`] \
+             同一把尺；掉下来只能是采集面腐化"
+        );
+        assert!(
+            arms >= 2,
+            "非后端族兜底臂只数到 {arms} 处（地板 2）——本轮真实树有 2 处（`initialize/mod.rs` 两条档位臂）。 \
+             数到 0 只能是采集面塌了，不是\"panic 被消灭了\"（前言 ⑥）"
+        );
+        assert!(
+            violations.is_empty(),
+            "生产码里每一处 unreachable! 都必须以 Debug 内插它绑定的值：\n{}",
+            violations.join("\n")
+        );
+    }
+
+    /// 判据自身双向：合规形态放行、四种不可归因形态各自被抓，正控与反证条数都进断言。
+    #[test]
+    fn generic_unreachable_judge_is_falsifiable() {
+        let cases: &[(&str, bool)] = &[
+            // 真实树在用（本批改后）⇒ 必须放行
+            (
+                r#"mode @ CacheMode::Auto => unreachable!("auto 已裁决: {mode:?}"),"#,
+                true,
+            ),
+            (r#"m => unreachable!("不该到这里: {m:#?}"),"#, true),
+            // 四种"到达了却说不出是谁"⇒ 必须各自被抓
+            (r#"unreachable!(),"#, false),
+            (r#"CacheMode::Auto => unreachable!(),"#, false),
+            (r#"_ => unreachable!("不可能的档位"),"#, false),
+            (
+                r#"mode @ CacheMode::Auto => unreachable!("auto 已裁决"),"#,
+                false,
+            ),
+            // 名字写错（内插了没绑定的变量）也必须被抓
+            (
+                r#"mode @ CacheMode::Auto => unreachable!("auto 已裁决: {other:?}"),"#,
+                false,
+            ),
+        ];
+        let mut ok = 0usize;
+        let mut caught = 0usize;
+        let mut misses = Vec::new();
+        for (arm, compliant) in cases {
+            let violation = generic_unreachable_violation(arm);
+            match (*compliant, violation) {
+                (true, None) => ok += 1,
+                (true, Some(why)) => misses.push(format!("合规形态被误判: {arm} ⇒ {why}")),
+                (false, None) => misses.push(format!("不可归因形态没被抓: {arm}")),
+                (false, Some(_)) => caught += 1,
+            }
+        }
+        println!(
+            "[unreachable] 合成夹具 {}/{} 通过（正控 {ok} / 反证 {caught}）",
+            ok + caught,
+            cases.len()
+        );
+        assert!(misses.is_empty(), "判据自身判错：\n{}", misses.join("\n"));
+        assert!(ok >= 2, "正控（必须放行）只剩 {ok} 条，低于 2");
+        assert!(caught >= 5, "反证（必须被抓）只剩 {caught} 条，低于 5");
+        // 两条尺的分流必须互斥：后端族那条文案不得被本判据重复点名（重复计数会让地板失真）
+        let backend_arm = r#"backend => unreachable!("unknown backend: {backend:?}"),"#;
+        assert!(
+            !backend_arm_contains_generic(backend_arm),
+            "分流判据坏了：后端族形态同时被两把尺数到 ⇒ 总数与违规数都会失真"
+        );
+    }
+
+    /// 分流判据（与 [`find_generic_arms`] 同一条件，抽出来供自检直接对撞一条后端族文本）。
+    fn backend_arm_contains_generic(arm: &str) -> bool {
+        arm.contains(ANY_ARM_MARK) && !arm.contains("unknown backend")
+    }
+
     /// 全 `src` 生产码视图（`unwrap()` 守卫与兜底臂归因**共用同一份采集口径**——
     /// 两份实现必漂，这是本仓立过至少四次的案）。
     ///

@@ -121,9 +121,66 @@ pub fn segment_chain_runs(
     segments
 }
 
+/// 从**授权后真实待删集合**导出链行区间 `(最小, 最大)`（空集返回 `None`）。
+///
+/// 立案（b89 项 3）：`delete_oper_logs` 原先写 `oper_ids.first()` / `.last()` 求区间。
+/// 调用方确实对**请求集**排过序，但请求集在中间被 `filter_ids_in_scope` 换成**授权集**，
+/// 而那一查没有 `ORDER BY` ⇒ 返回顺序由 DB 的扫描序决定（SQLite 常按 rowid 升序、
+/// PostgreSQL / MySQL 未定义）。传反的 `min_id > max_id` 时
+/// `find_chain_rows_in_range` 的 `gte(min) AND lte(max)` **恒空** ⇒ 一段锚点都不登记，
+/// 而 DELETE 照样执行 ⇒ "行被物理删除、链上留下无人认领的缺口"，verify-chain 要么误报
+/// broken、要么被短路（批七十四 B5 那条不变式的另一半：区间必须真的是区间的两端）。
+///
+/// 取 min/max 而不是"依赖上游排序"，让这条不变式**结构上不可能再破**——
+/// 与"顺序由注释声明"相反，这里由函数签名保证。
+pub fn chain_range(ids: &[i64]) -> Option<(i64, i64)> {
+    let min = ids.iter().min().copied()?;
+    let max = ids.iter().max().copied()?;
+    Some((min, max))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// b89 项 3：区间由值导出，与输入顺序无关（这正是 `first()/last()` 写法会破的地方）
+    #[test]
+    fn chain_range_is_order_independent() {
+        let sorted = [7i64, 9, 11, 13];
+        let shuffled = [13i64, 7, 11, 9];
+        assert_eq!(chain_range(&sorted), Some((7, 13)));
+        assert_eq!(
+            chain_range(&shuffled),
+            Some((7, 13)),
+            "乱序输入必须得到同一区间 ⇒ 判据不得依赖上游排序"
+        );
+    }
+
+    /// 单元素与重复元素
+    #[test]
+    fn chain_range_handles_single_and_duplicate() {
+        assert_eq!(chain_range(&[42]), Some((42, 42)));
+        assert_eq!(chain_range(&[42, 42, 42]), Some((42, 42)));
+        assert_eq!(chain_range(&[-5i64, 0, 3]), Some((-5, 3)));
+    }
+
+    /// 空集必须返回 None（调用方据此**不做任何事**，而不是拿 0 当区间端点）
+    #[test]
+    fn chain_range_empty_is_none_not_zero() {
+        assert_eq!(chain_range(&[]), None);
+    }
+
+    /// 反脆弱：把实现改回"取首尾"的缺陷形状必须被抓（同序相关的那一对）
+    #[test]
+    fn chain_range_is_falsifiable() {
+        let unsorted = [13i64, 7, 11, 9];
+        let first_last = (unsorted[0], unsorted[unsorted.len() - 1]);
+        assert!(
+            first_last.0 > first_last.1,
+            "夹具必须真的'首大于尾'，否则本锁什么都没检验"
+        );
+        assert_eq!(chain_range(&unsorted), Some((7, 13)), "区间必须是真区间");
+    }
 
     fn anchor(first: i64, last: i64, hash: &str, deleted_at: &str) -> ChainAnchorSnapshot {
         ChainAnchorSnapshot {

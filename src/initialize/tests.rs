@@ -1470,7 +1470,204 @@ mod schema_equivalence_lock_tests {
         );
     }
 
-    /// 批七十四 B3 结构锁：**收回类治理必须晚于所有发放 `sys_role_menu` 的兜底**。
+    /// b89 项 2 结构锁：`SELECT <role>, menu_id FROM sys_menu` 形态也不得自己拼。
+    ///
+    /// 这条锁补的是 b74 B3 那条锁的**第二个盲区**：原 needle 是字面
+    /// `sys_role_menu (role_id, menu_id) VALUES (2`，而 `ensure_multitenant_module` 的
+    /// Phase 3.5h 能力位回填写的是 `SELECT 2, menu_id …`——同一件事换一种 SQL 形状就绕过去
+    /// 了。实测后果：平台能力位一开，「备份下载 3625 / 数据包导出 3626 / 租户导航
+    /// 3628-3630 / 租户域名 3901-3904」这 **9 个写按钮**会被发给 common（`role_id=2` 是新建
+    /// 租户管理员的菜单模板源），而它们与 `COMMON_ROLE_WRITE_EXCEPTIONS` 的交集是 0。
+    ///
+    /// 判据形状取自 AGENTS 那条纪律：**真调用单一事实源、检查它吐出的语句文本**，
+    /// 而不是继续加字符串 needle —— 字符串锁永远落后于"下一种写法"。
+    #[test]
+    fn fallback_grants_select_shape_must_route_through_governance() {
+        // ① initialize 侧：兜底里不得再出现手写的 `… SELECT …, menu_id FROM sys_menu`
+        const SELECT_SHAPE: &str = "sys_role_menu (role_id, menu_id) SELECT";
+        let sources: [(&str, &str); 10] = [
+            // 采集面**由磁盘反查**（下面 for name in &on_disk）：b73 那把锁的注释写着"漏列文件由
+            // 总数锁兜住"，而总数锁判的是 migration 侧裸 VALUES 条数 ⇒ initialize 侧新增文件
+            // 从来没人管（本轮实测磁盘上有 10 个非测试 .rs，老锁只列 7 个）。名字枚举永远落后于
+            // 事实一种写法，所以让磁盘说话：面里缺一个文件就当场点名。
+            ("menu.rs", include_str!(concat!("menu.rs"))),
+            ("scim.rs", include_str!(concat!("scim.rs"))),
+            ("flow.rs", include_str!(concat!("flow.rs"))),
+            ("tenant.rs", include_str!(concat!("tenant.rs"))),
+            ("ledger.rs", include_str!(concat!("ledger.rs"))),
+            ("schema.rs", include_str!(concat!("schema.rs"))),
+            ("mod.rs", include_str!(concat!("mod.rs"))),
+            ("helpers.rs", include_str!(concat!("helpers.rs"))),
+            ("oauth_sso.rs", include_str!(concat!("oauth_sso.rs"))),
+            ("rate_limit.rs", include_str!(concat!("rate_limit.rs"))),
+        ];
+        assert_eq!(sources.len(), 10, "采集面必须等于 initialize 全部兜底文件");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("initialize");
+        let on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| {
+                panic!("initialize 目录读不到 ⇒ 采集面反查失去输入：{dir:?}（{e}）")
+            })
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".rs") && name != "tests.rs")
+            .collect();
+        assert!(
+            on_disk.len() >= sources.len(),
+            "磁盘上只有 {} 个兜底文件，比采集面还少 ⇒ 面里列了不存在的文件（采集面腐化）：{on_disk:?}",
+            on_disk.len()
+        );
+        for name in &on_disk {
+            assert!(
+                sources.iter().any(|(file, _)| file == name),
+                "initialize/{name} 在磁盘上但不在本锁采集面里 ⇒ 它写的任何裸授权都不受约束"
+            );
+        }
+        for (file, src) in sources {
+            let hand = src.matches(SELECT_SHAPE).count();
+            assert_eq!(
+                hand, 0,
+                "{file} 里有 {hand} 处手写 common 授权 SELECT 形态 ⇒ 绕过 governance 策略体，\
+                 必须改走 common_role_grant_select_body / _by_perms"
+            );
+        }
+
+        // ② 单一事实源真跑一遍：两条 body 都必须带策略谓词，且 role 取 COMMON_ROLE_ID
+        let by_perms = governance::common_role_grant_select_body_by_perms("$1, $2");
+        let by_ids = governance::common_role_grant_select_body(&[4110]);
+        let policy = governance::common_role_grant_where();
+        for (name, body) in [("by_perms", &by_perms), ("by_ids", &by_ids)] {
+            assert!(
+                body.contains(&policy),
+                "{name} 产出的语句没带上 common 授权策略谓词：{body}"
+            );
+            assert!(
+                body.contains(&format!(
+                    "SELECT {}, menu_id FROM sys_menu",
+                    governance::COMMON_ROLE_ID
+                )),
+                "{name} 的角色 id 不是 COMMON_ROLE_ID：{body}"
+            );
+            assert!(
+                body.contains("del_flag = '0'"),
+                "{name} 必须只授未删除菜单：{body}"
+            );
+        }
+        assert!(
+            by_perms.contains("$1, $2"),
+            "by_perms 必须原样使用调用方给的占位符列表（参数化不能进 governance）：{by_perms}"
+        );
+        assert!(
+            by_perms.contains("perms IN ($1, $2)") && by_ids.contains("menu_id IN (4110)"),
+            "两条 body 的选择轴不得互相顶替：{by_perms} / {by_ids}"
+        );
+        // 例外必须真在产出里（否则 4142-4145 这类拍板过的写按钮会被静默收回）
+        for (id, _) in governance::COMMON_ROLE_WRITE_EXCEPTIONS {
+            assert!(
+                by_perms.contains(&id.to_string()),
+                "写权限例外 {id} 未出现在产出的策略子句里 ⇒ 判据与例外表已脱钩：{by_perms}"
+            );
+        }
+
+        // ③ 反证：判据必须真抓得住缺陷形状（本批立案时 tenant.rs 的原形），且不误报合规形状
+        let defect = "INSERT OR IGNORE INTO sys_role_menu (role_id, menu_id) \
+                      SELECT 2, menu_id FROM sys_menu WHERE del_flag = '0' AND perms IN (?)";
+        assert!(
+            defect.contains(SELECT_SHAPE),
+            "反证夹具必须能被本锁的形状串抓到，否则这把锁是空转的"
+        );
+        assert!(
+            !defect.contains(&policy),
+            "反证夹具不得自带策略谓词（否则第 ② 段的断言等于没判）"
+        );
+        assert!(
+            by_perms.contains(&format!("perms IN ($1, $2) AND {policy}")),
+            "by_perms 必须在 perms 选择轴**之后**接上策略谓词（这正是裸 SELECT 缺的那一段）：{by_perms}"
+        );
+    }
+
+    /// b89 项 2 行为锁：能力位全开跑完 initialize 后，common 不得持有平台专属写按钮。
+    ///
+    /// ②③ 那两段判的是"语句形状与产出文本"，这一把判的是**终态**——两条路方向相反：
+    /// 形状锁挡住"绕过策略体的新写法"，终态锁挡住"策略体本身被改松"。
+    #[test]
+    fn common_role_never_gains_non_exception_write_buttons_when_features_unlocked() {
+        // 与 ①' 回填清单同源：unlocked_capability_perms 在**全开档**下给出的 perms。
+        // 全开档由注册表自己派生（每个能力位取 `modes` 末项＝最开放的一档），不手写第二份
+        // 清单——否则注册表新增能力位时这条锁会静默少约束一项（AGENTS「扫描面由事实派生」）。
+        let all_on = crate::common::features::FeatureSet::sanitized(
+            crate::common::features::KNOWN_FEATURES
+                .iter()
+                .filter_map(|def| {
+                    def.modes
+                        .last()
+                        .map(|top| (def.key.to_string(), (*top).to_string()))
+                }),
+        );
+        assert!(
+            !all_on.overrides().is_empty(),
+            "全开档夹具一个覆盖项都没有 ⇒ 注册表档位为空，本锁失去约束对象（不是通过）"
+        );
+        // 全开档的解锁面必须**等于注册表登记的全部 unlocked**（数量由事实派生，不记数字）：
+        // 注册表新增一个下放项而本锁的夹具没跟上 ⇒ 这里立刻点名，而不是悄悄少约束一项。
+        let mut expected: Vec<&'static str> = Vec::new();
+        for def in crate::common::features::KNOWN_FEATURES {
+            for (_, perms) in def.unlocked {
+                for p in *perms {
+                    if !expected.contains(p) {
+                        expected.push(p);
+                    }
+                }
+            }
+        }
+        assert!(
+            !expected.is_empty(),
+            "注册表里一条下放项都没有 ⇒ Phase 3.5h 回填面空转，本锁失去约束对象（不是通过）"
+        );
+        let unlocked = crate::common::features::unlocked_capability_perms(&all_on);
+        for p in &expected {
+            assert!(
+                unlocked.contains(p),
+                "全开档必须解锁 {p}（注册表已登记）；取不到就是采集面坏了"
+            );
+        }
+        assert_eq!(
+            unlocked.len(),
+            expected.len(),
+            "全开档解锁数与注册表登记数不一致（多＝凭空下放，少＝档不足）"
+        );
+        // 这三条是本批立案时实测被裸 SELECT 发出去的写按钮，必须仍然**不在** common 可得集合里
+        for perm in [
+            "system:backup:download",
+            "system:tenantMenu:add",
+            "system:tenant:domain:remove",
+        ] {
+            assert!(
+                unlocked.contains(&perm),
+                "夹具前提失效：{perm} 本应属能力位解锁面（否则这条锁什么也没约束）"
+            );
+            let menu_type = "F";
+            assert!(
+                !governance::common_role_may_grant(
+                    // menu_id 取一个不在例外表里的值：判据对写按钮只看后缀与例外 id
+                    999_999, menu_type, perm
+                ),
+                "{perm} 是写按钮且不在 COMMON_ROLE_WRITE_EXCEPTIONS ⇒ common 不得可授"
+            );
+        }
+        // 对照组：拍板过的例外必须真的可授（否则上面那段可以靠"全都不可授"蒙绿）
+        let exception_perm = governance::COMMON_ROLE_WRITE_EXCEPTIONS
+            .iter()
+            .find(|(id, _)| *id == 4142)
+            .map(|(_, p)| *p)
+            .expect("例外表应含 4142");
+        assert!(
+            governance::common_role_may_grant(4142, "F", exception_perm),
+            "写权限例外 4142 必须可授（本批不得顺手把它收回）"
+        );
+    }
+
     ///
     /// 机理：`ensure_tenant_role_menu_governance` ① 是 `DELETE … role_id = 2 OR tenant_id <> 0`，
     /// 而若干 `ensure_*` 兜底**发放** `sys_role_menu`。若治理在前、发放在后，则平台专属菜单

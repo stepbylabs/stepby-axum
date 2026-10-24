@@ -165,6 +165,9 @@ acquire_timeout_secs = 10
 #   MySQL:      SET SESSION max_execution_time（⚠️ 引擎限制，仅覆盖 SELECT）；
 #   SQLite:     本地嵌入库无服务端语句超时，本项不生效（busy_timeout=5s 兜底）。
 #   报表类长查询请按需调大或置 0 关闭。
+#   ⚠️ 生效值有**上限 3600 秒**（超出按 3600 夹取，换算只走 DatabaseConfig::statement_timeout_ms）。
+#   这不是性能档位，而是防脏值：两个方言的会话变量各自有类型上限，越界后炸的是**每一次建连接**
+#   （SET SESSION / GUC 报错 ⇒ 连接池全灭 ⇒ 全站 503），而不是启动期一句拒绝配置。
 statement_timeout_secs = 60
 # data_scope 部门递归 CTE 深度上限（默认 30）——防 sys_dept.parent_id 脏数据
 # 成环时 PostgreSQL 无限递归（写入侧另有防环校验，本值为纵深防御第二道防线）。
@@ -489,6 +492,15 @@ scan_lock_ttl_secs = 300       # 扫描锁 TTL（秒）；须大于单轮扫描�
 # 租户自建导航 L3（默认 off）：off | view_only | full
 #   view_only = 仅可查看平台预置的 L3 导航；full = 可在套餐∩角色授权范围内自建导航项
 "nav.l3" = "off"
+# 设计器类能力位 `flow.designer` / `report.designer`（默认 off）：off | view | full
+#   off  = **整面拒绝**（读面与写面一起关）；批八十九 项 6 起读面也有守卫，
+#          此前只封写面 ⇒ `off` 档租户照常列表/预览/看大屏，能力位在读面上形同虚设；
+#   view = 只读放行（列表/详情/预览），写按钮由 `getRouters` 剪除、端点侧 403；
+#   full = 读 + 写。
+#   ⚠️ 三处必须同尺：`governance::DESIGNER_CAPABILITY_PERM_PREFIXES`（面内前缀）是
+#   `designer_tier_hides_menu`（导航剪除）与 `designer_tier_allows_endpoint`（端点守卫）
+#   的同一份事实源——"看得见"与"打得通"分家就是假入口（《开关规范》③④）。
+#   下放对象是租户套餐 `sys_tenant_package.features`，平台侧本项是天花板。
 # GDPR 被遗忘权 / 用户匿名化（默认 off）：off | precheck | full
 #   off      = 端点表现为 404（关闭态即安全态）；
 #   precheck = 仅允许**只读预检**（dry-run，返回将被置换的字段与受影响关系计数，不写库）；

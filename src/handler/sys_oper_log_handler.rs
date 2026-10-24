@@ -526,6 +526,11 @@ pub async fn compliance_report(
     operator: Operator,
     Query(params): Query<AuditStatsQuery>,
 ) -> Result<AjaxResult<ComplianceReportVo>, AppError> {
+    // 全局并发上限（AGENTS A-2 背压）：合规报表按窗口全量读 + 逐条脱敏，
+    // 成本随天数线性放大且由调用方选窗口 ⇒ 闸满立即 429，不排队（人类可重来）。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::ComplianceReport,
+    )?;
     let days = params.days.unwrap_or(30).clamp(1, 365);
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let vo = state
@@ -733,6 +738,11 @@ pub async fn archive_download(
     operator: Operator,
     Path(anchor_id): Path<i64>,
 ) -> Result<Response, AppError> {
+    // 归档下载单卷上限 512 MB（`ARCHIVE_MAX_BYTES`），但"上限"只封单次体积、
+    // 不封并发：多路同时读盘会互相把吞吐吃光。A-2 要求的是另一半——全局并发闸。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::ArchiveDownload,
+    )?;
     if operator.tenant_id() != 0 {
         return Err(AppError::from(ServiceError::forbidden(&crate::tr!(
             "error.oper_log.archive_platform_only"

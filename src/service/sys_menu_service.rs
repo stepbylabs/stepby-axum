@@ -201,23 +201,12 @@ impl SysMenuService {
         }
     }
 
-    /// 失效所有用户权限缓存（菜单变更时，best-effort）
+    /// 失效所有用户权限缓存（菜单变更时）。
     ///
-    /// 使用 SCAN 遍历所有 perm:user:* 键并批量删除，避免 KEYS 命令阻塞 Redis。
+    /// 委托 `common::perm_cache` 的**唯一实现**（角色/租户/启动收敛三条路径同源）；
+    /// 立案理由（原先四份实现里两份在 `scan` 失败时静默 return）见该模块文档。
     pub async fn invalidate_all_perm_cache(&self) {
-        let pattern = format!("{}*", PERM_CACHE_PREFIX);
-        // 全量扫描（原 cursor 循环至游标归零的语义）；失败即中止（best-effort，与原 Err(_) => break 一致）
-        let Ok(keys) = self.store.scan(&pattern, None).await else {
-            return;
-        };
-        if keys.is_empty() {
-            return;
-        }
-        // 批量删除（原 pipeline 语义——非事务允许部分成功；失败仅 warn）
-        // 失效失败会残留脏读直至 TTL 过期，故必须可观测（对齐 sys_config_service::del_cache_key）
-        if let Err(e) = self.store.del(&keys).await {
-            tracing::warn!(count = keys.len(), error = %e, "菜单权限缓存失效失败，可能产生脏读直至 TTL 过期")
-        }
+        crate::common::perm_cache::invalidate_all_perm_cache(&self.store, "菜单").await;
     }
 
     /// 菜单列表（扁平，可加 menu_name/status 过滤）

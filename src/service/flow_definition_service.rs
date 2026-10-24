@@ -113,7 +113,7 @@ impl FlowDefinitionService {
     ///
     /// - 平台操作者（tid=0）不受能力位限制（与 nav.l3 / report.designer 同语义）；
     /// - 租户操作者需**有效档位 = `full`**（`view` 只读：列表/详情/版本对比可用、
-    ///   写面 403；`off`/非法值 fail-closed 拒绝）；
+    ///   写面 403；`off`/非法值整面 fail-closed 拒绝——读面见 [`Self::ensure_designer_read`]）；
     /// - 有效能力集 = 平台 `[features]` 天花板 ∩ 租户套餐（`tenant_features_conn`）。
     async fn ensure_designer_write(&self, operator_tid: i64) -> Result<(), ServiceError> {
         if operator_tid == 0 {
@@ -135,6 +135,31 @@ impl FlowDefinitionService {
         }
     }
 
+    /// 设计器读面守卫（b89 项 6 补的第二半；与 [`Self::ensure_designer_write`] 同一把尺）。
+    ///
+    /// 原状：读面**无守卫**，`off` 档租户照常列表/看详情，写按钮却 403 ⇒
+    /// "能力位只封了写、没封读"，与注册表里 `off（默认）：关闭态即安全态` 的语义不符，
+    /// 也让 `getRouters` 那侧的整面剪除变成"仅显示层隐藏"（《开关规范》③ 禁止的形态）。
+    async fn ensure_designer_read(&self, operator_tid: i64) -> Result<(), ServiceError> {
+        if operator_tid == 0 {
+            return Ok(());
+        }
+        let features =
+            crate::service::sys_tenant_service::tenant_features_conn(&self.db, operator_tid)
+                .await
+                .map_err(|e| ServiceError::internal(&format!("tenant features: {e}")))?;
+        if crate::common::features::designer_read_allowed(
+            operator_tid,
+            features.mode(DESIGNER_FEATURE_KEY),
+        ) {
+            Ok(())
+        } else {
+            Err(ServiceError::forbidden(&crate::tr!(
+                "error.flow.def_designer_off"
+            )))
+        }
+    }
+
     /// 分页查询（租户过滤；del_flag='0'）
     pub async fn get_page(
         &self,
@@ -143,6 +168,7 @@ impl FlowDefinitionService {
         flow_code: Option<&str>,
         operator_tid: i64,
     ) -> Result<(Vec<FlowDefVo>, u64), ServiceError> {
+        self.ensure_designer_read(operator_tid).await?;
         let mut select =
             FlowDefEntity::find().filter(crate::entity::flow_definition::Column::DelFlag.eq("0"));
         if let Some(t) = crate::common::tenant::tenant_scope(operator_tid) {
@@ -170,6 +196,7 @@ impl FlowDefinitionService {
         flow_id: i64,
         operator_tid: i64,
     ) -> Result<FlowDefVo, ServiceError> {
+        self.ensure_designer_read(operator_tid).await?;
         let m = FlowDefEntity::find_by_id(flow_id)
             .filter(crate::entity::flow_definition::Column::DelFlag.eq("0"))
             .one(&self.db)

@@ -181,6 +181,10 @@ fn uptime_seconds() -> u64 {
 ///   `oauth_userinfo` / `storage:{kind}:{op}` / `bg:{label}` / `probe:{name}`…，
 ///   outcome 维度：ok / error / timeout / rejected / panic），AGENTS #4 的落地面；
 ///   `probe:*` 由 [`crate::handler::health_probes`] 在每次外部依赖探活后写入
+/// - stepby_resource_gate_permits / _available_permits / _decisions_total：重资源入口
+///   （整库备份、数据包导出、合规报表、归档下载、批量导入）的**背压可观测面**
+///   （b89，[`crate::common::resource_gate`]；采集面由 `HeavyEntry::ALL` 派生，
+///   没有这一组时"备份有时候点不动"只能靠用户报上来）
 ///
 /// 无 Grafana/Prometheus 时仍可 `curl http://localhost:8080/metrics` 查看文本格式指标。
 #[utoipa::path(
@@ -278,6 +282,9 @@ pub async fn metrics(
 
     // 共享态存储运行指标（按档位适配展示；best-effort：失败则不输出该组指标）
     s.push_str(&collect_shared_store_prometheus(&state).await);
+
+    // b89：重资源入口闸口指标（上限/可用/结局三条量，采集面 = HeavyEntry::ALL）
+    s.push_str(&crate::common::resource_gate::render_prometheus());
 
     Ok(s)
 }

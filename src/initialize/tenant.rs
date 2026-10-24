@@ -970,14 +970,15 @@ pub(crate) async fn ensure_tenant_role_menu_governance(
         } else {
             ""
         };
+        // b89 项 2：语句体改由 governance 的单一事实源产出（DB 侧套 common 授权策略）。
+        // 缺它时"能力位一开 ⇒ 备份下载/租户导航/域名写按钮进 common"是结构上必然的，
+        // 而 common 是新租户管理员的菜单模板源，等于把平台面复制到每一个新租户。
         let granted = db
             .execute_raw(Statement::from_sql_and_values(
                 backend,
                 format!(
-                    "{insert_prefix}sys_role_menu (role_id, menu_id) \
-                     SELECT 2, menu_id FROM sys_menu \
-                     WHERE del_flag = '0' AND perms IN ({ph_list})\
-                     {conflict_suffix}"
+                    "{insert_prefix}{}{conflict_suffix}",
+                    governance::common_role_grant_select_body_by_perms(&ph_list)
                 ),
                 unlocked_perms
                     .iter()
@@ -1496,14 +1497,9 @@ pub(crate) async fn converge_tenant_grants_on_startup(
     }
 
     if total_removed > 0 {
-        // 授权集合已变化 ⇒ perm cache 必须失效（best-effort，对齐 menu_service 同名语义）
-        let pattern = format!("{}*", crate::common::constants::PERM_CACHE_PREFIX);
-        if let Ok(keys) = store.scan(&pattern, None).await
-            && !keys.is_empty()
-            && let Err(e) = store.del(&keys).await
-        {
-            tracing::warn!(count = keys.len(), error = %e, "启动期 perm cache 失效失败，授权变更可能不即时生效（残留至 TTL）")
-        }
+        // 授权集合已变化 ⇒ perm cache 必须失效。走 `common::perm_cache` 的唯一实现：
+        // 原先这一段自带第四份 SCAN+DEL，且 `scan` 失败时整段静默跳过（无任何日志）。
+        crate::common::perm_cache::invalidate_all_perm_cache(store, "启动收敛").await;
         tracing::warn!(
             tenants = tenants.len(),
             removed = total_removed,

@@ -3,7 +3,9 @@
 //!   remove（软删）→ info 404
 //! - graph_json fail-closed：非法图直投 API → 400（后端复验兜底，防绕过前端）
 //! - 设计器能力位守卫（`flow.designer` / `report.designer`，批次十二接入端点消费）：
-//!   租户（套餐 features 未开通）写面 403 fail-closed + 读面放行；
+//!   租户（套餐 features 未开通）**整面** 403 fail-closed——写面 `ensure_designer_write`、
+//!   读面 `ensure_designer_read`（b89 项 6 补齐；原先读面无守卫，于是"看得见、读得通、
+//!   写不了"，能力位在读面形同虚设，且与 `getRouters` 的整面剪除不一致）；
 //!   平台操作者（tid=0）不受能力位限制（与 nav.l3 同语义）。
 //!   三档语义矩阵（off/view/full × 平台/租户）由 `common::features` 纯函数单测锁定，
 //!   此处锁真实 DB 链路（套餐行 → tenant_features_conn → 守卫）的 fail-closed 姿态。
@@ -285,7 +287,7 @@ async fn insert_off_package_tenant(ctx: &TestContext) {
 }
 
 /// flow.designer 守卫（service 层真实 DB 链路）：
-/// 租户（off 档）写面 403 fail-closed + 读面放行；平台（tid=0）写面放行
+/// 租户（off 档）写面与读面均 403 fail-closed；平台（tid=0）两侧放行
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_flow_designer_tenant_gating() {
     let ctx = TestContext::new().await;
@@ -306,10 +308,22 @@ async fn test_flow_designer_tenant_gating() {
         .expect_err("租户 off 档写面必须被拒");
     assert_eq!(err.code, 403, "flow.designer off 档租户写面必须 403");
 
-    // 租户读面：放行（列表可见本租户空集）
-    let (rows, total) = svc.get_page(0, 10, None, 9052).await.expect("读面应放行");
-    assert_eq!(total, 0);
-    assert!(rows.is_empty());
+    // 租户读面：off 档同样 403（b89 项 6；原实现读面无守卫 ⇒ 空集也算"通"）
+    let err = svc
+        .get_page(0, 10, None, 9052)
+        .await
+        .expect_err("flow.designer off 档租户读面必须被拒");
+    assert_eq!(err.code, 403, "flow.designer off 档租户读面必须 403");
+    let err = svc
+        .get_by_id(1, 9052)
+        .await
+        .expect_err("flow.designer off 档租户详情必须被拒");
+    assert_eq!(err.code, 403, "flow.designer off 档租户详情必须 403");
+    // 对照组：平台（tid=0）读面不受能力位限制——守卫只封租户，不封平台
+    let (_rows, _total) = svc
+        .get_page(0, 10, None, 0)
+        .await
+        .expect("平台读面必须放行");
 
     // 平台（tid=0）不受能力位限制：写面放行
     let dto = FlowDefUpsertDto {
@@ -342,7 +356,7 @@ async fn test_flow_designer_tenant_gating() {
 }
 
 /// report.designer 守卫（service 层真实 DB 链路，与 flow 同构）：
-/// 租户（off 档）写面 403 fail-closed + 读面放行；平台（tid=0）写面放行
+/// 租户（off 档）写面与读面均 403 fail-closed；平台（tid=0）两侧放行
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_report_designer_tenant_gating() {
     let ctx = TestContext::new().await;
@@ -365,10 +379,17 @@ async fn test_report_designer_tenant_gating() {
         .expect_err("租户 off 档写面必须被拒");
     assert_eq!(err.code, 403, "report.designer off 档租户写面必须 403");
 
-    // 租户读面：放行
-    let (rows, total) = svc.get_dataset_page(0, 10, 9052).await.expect("读面应放行");
-    assert_eq!(total, 0);
-    assert!(rows.is_empty());
+    // 租户读面：off 档同样 403（b89 项 6 补的守卫）
+    let err = svc
+        .get_dataset_page(0, 10, 9052)
+        .await
+        .expect_err("report.designer off 档租户读面必须被拒");
+    assert_eq!(err.code, 403, "report.designer off 档租户读面必须 403");
+    // 对照组：平台（tid=0）读面放行
+    let (_rows, _total) = svc
+        .get_dataset_page(0, 10, 0)
+        .await
+        .expect("平台读面必须放行");
 
     // 平台（tid=0）不受能力位限制：写面放行（大屏写面同一守卫）
     let dto = DatasetUpsertDto {

@@ -57,6 +57,15 @@ mod outbound_metrics_guard_lock {
             "probe_reachability",
             Disposition::Caller("src/handler/health_probes.rs", r#"record_outbound"#),
         ),
+        // 批八十九项 E1：`new()` 现在有**两处**构造——`.builder().build()` 主路径与
+        // `unwrap_or_else` 里的 `Client::new()` 兜底路径（构建失败不再退到"无超时默认客户端"）。
+        // 两条路径的**结局同一个**：请求都由 `complete_detailed` 那一条发送路径发出，
+        // 计数仍由该函数里的 `OutboundGuard::start("ai")` 记，所以重数登记为 2 而不是新增口径。
+        (
+            "src/ai/provider.rs",
+            "new",
+            Disposition::SameFile(r#"OutboundGuard::start("ai")"#),
+        ),
         (
             "src/ai/provider.rs",
             "new",

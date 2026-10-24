@@ -208,6 +208,74 @@ fn cut_at_test_attr(text: &str) -> &str {
     text
 }
 
+/// 由**声明侧**派生"整个文件只在测试构建里编译"的模块相对路径集合（`/` 分隔）。
+///
+/// 立案（b89 项 5）：`src/common/mod.rs` 写着 `#[cfg(test)] pub mod fuzz_invariants;`、
+/// `src/repository/mod.rs` 写着 `#[cfg(test)] pub mod test_support;`——这两个文件**自身没有**
+/// `#[cfg(test)]` 刀口，于是默认口径把整份**测试码**当成生产码视图。今天的后果是"误红方向"
+/// （有人在测试里写 `unwrap()` 会被判成"生产代码禁止 unwrap"，把人支使去改一处本来合法的断言，
+/// 前言 ⑨ 那一族），而判据一旦扩词汇表（本批加了 `unreachable!` 归因锁），这一面就会
+/// 把测试断言当成生产缺陷点名。
+///
+/// 排除只认两种形状，且方向取"宁可多算生产码"：属性行**逐字符**等于 `#[cfg(test)]`，
+/// 且下一个非空非注释行是 `(pub )? mod NAME;`。`#[cfg(all(test, feature = "x"))]`、
+/// `#[cfg(not(test))]` 与**无属性**的 `mod NAME;` 一律不排除（b84 在产物新鲜度闸上是同一条纪律）。
+/// 声明为 `#[cfg(test)]` 的模块在生产二进制里**结构上不存在**（不存在 ⇒ 编译不过），
+/// 所以这一侧的排除没有"把真生产文件静默剔出采集面"这条路。
+pub fn test_only_module_files(roots: &[&str]) -> std::collections::HashSet<String> {
+    let root = repo_root();
+    test_only_module_files_under(&root, roots)
+}
+
+/// 上面那层的实现（把 crate 根提成参数，合成夹具才能用临时树证明"三种形状各自排除/不排除"，
+/// 而不是只在真实树上取一次数）。
+fn test_only_module_files_under(root: &Path, roots: &[&str]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for r in roots {
+        for p in walk_rs(&root.join(r)) {
+            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            // 只有这三种文件承载 `mod` 声明
+            if fname != "mod.rs" && fname != "lib.rs" && fname != "main.rs" {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue; // 声明侧读不到 ⇒ 不排除（保守方向），由调用方的体量下限负责响亮失败
+            };
+            let dir = p.parent().unwrap_or(root);
+            let mut pending = false;
+            for line in text.split('\n') {
+                let t = line.trim();
+                if t == "#[cfg(test)]" {
+                    pending = true;
+                    continue;
+                }
+                if t.is_empty() || t.starts_with("//") {
+                    continue;
+                }
+                let decl = t
+                    .strip_prefix("pub mod ")
+                    .or_else(|| t.strip_prefix("mod "))
+                    .and_then(|rest| rest.strip_suffix(';'))
+                    .map(|m| m.trim());
+                if pending {
+                    if let Some(name) = decl.filter(|m| !m.is_empty()) {
+                        for cand in [format!("{name}.rs"), format!("{name}/mod.rs")] {
+                            let full = dir.join(&cand);
+                            if full.is_file()
+                                && let Ok(rel) = full.strip_prefix(root)
+                            {
+                                out.insert(rel.to_string_lossy().replace('\\', "/"));
+                            }
+                        }
+                    }
+                    pending = false;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 按口径采集 [`Scan::roots`] 下的文件（路径排序后返回，保证多轮结果可比）。
 ///
 /// 每个根都必须至少产出一个 `.rs`：根路径写错（目录改名/挪位）时采集面静默变空，
@@ -228,6 +296,13 @@ pub fn prod_files(cfg: &Scan<'_>) -> Vec<ProdFile> {
     paths.sort();
     paths.dedup();
 
+    // 只在"只看生产码"的口径下剔除测试专用模块（`strip_test_code = false` 时必须看得见它们）
+    let test_only = if cfg.strip_test_code {
+        test_only_module_files(cfg.roots)
+    } else {
+        std::collections::HashSet::new()
+    };
+
     let mut out = Vec::new();
     for p in paths {
         let rel = p
@@ -239,6 +314,9 @@ pub fn prod_files(cfg: &Scan<'_>) -> Vec<ProdFile> {
             continue;
         }
         if !cfg.include_integration_tests && rel.starts_with("src/integration_tests/") {
+            continue;
+        }
+        if test_only.contains(&rel) {
             continue;
         }
         let text = std::fs::read_to_string(&p)
@@ -502,5 +580,89 @@ mod selftests {
             "地板判据必须能失败，否则它只是个装饰"
         );
         require_volume(&files, 1, 1, "控制组正例");
+    }
+
+    /// b89 项 5：测试专用模块不得进生产码视图，但**开关关掉时必须看得见**
+    /// （单向门=假绿方向：一旦"排除"写成无条件，`strip_test_code = false` 的那几把锁
+    /// 也会跟着少掉两个文件而无人报错）。
+    #[test]
+    fn test_only_modules_leave_the_production_view_but_stay_visible() {
+        let set = test_only_module_files(&["src"]);
+        for rel in [
+            "src/common/fuzz_invariants.rs",
+            "src/repository/test_support.rs",
+        ] {
+            assert!(
+                set.contains(rel),
+                "{rel} 由 `#[cfg(test)] mod` 声明 ⇒ 必须被判成测试专用模块（真实树上两处声明本轮实测）"
+            );
+        }
+        // 对照组：无属性的 `pub mod` 必须**不**在集合里（按名字排除就是 b84 立过的那条捷径）
+        for rel in ["src/common/webhook.rs", "src/repository/base.rs"] {
+            assert!(
+                !set.contains(rel),
+                "{rel} 是无属性声明的生产模块，不得被排除：{set:?}"
+            );
+        }
+        let prod_view = prod_files(&Scan::default());
+        for f in &prod_view {
+            assert!(
+                !set.contains(f.rel.as_str()),
+                "生产码视图里出现了测试专用模块 {}",
+                f.rel
+            );
+        }
+        let full_view = prod_files(&Scan {
+            strip_test_code: false,
+            ..Default::default()
+        });
+        assert!(
+            full_view
+                .iter()
+                .any(|f| f.rel == "src/common/fuzz_invariants.rs"),
+            "`strip_test_code = false` 必须仍能看见测试专用模块（{} 个文件里没有它 ⇒ 单向门）",
+            full_view.len()
+        );
+    }
+
+    /// 派生的**形状**判据必须可证伪：三种写法各自该排除/不该排除，用临时树跑。
+    /// 只在真实树上取一次数等于"本轮恰好没有该排除的模块"也算通过（前言 ⑥）。
+    #[test]
+    fn test_only_derivation_is_falsifiable_on_shapes() {
+        let root = std::env::temp_dir().join(format!(
+            "stepby_prod_scan_derive_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("临时树建不出来就无法证明派生在形状上工作");
+        let write = |name: &str, text: &str| {
+            std::fs::write(src.join(name), text).expect("临时夹具写入失败");
+        };
+        write("gated.rs", "fn a() {}\n");
+        write("allattr.rs", "fn a() {}\n");
+        write("nottest.rs", "fn a() {}\n");
+        write("bare.rs", "fn a() {}\n");
+        write(
+            "mod.rs",
+            "#[cfg(test)]\npub mod gated;\n\
+             #[cfg(all(test, feature = \"x\"))]\nmod allattr;\n\
+             #[cfg(not(test))]\nmod nottest;\n\
+             mod bare;\n",
+        );
+        let set = test_only_module_files_under(&root, &["src"]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            set.contains("src/gated.rs"),
+            "逐字符等于 `#[cfg(test)]` 的声明必须排除其模块：{set:?}"
+        );
+        for rel in ["src/allattr.rs", "src/nottest.rs", "src/bare.rs"] {
+            assert!(
+                !set.contains(rel),
+                "{rel} 的声明形状不构成'只在测试里编译'，不得排除（宁可多算生产码）：{set:?}"
+            );
+        }
     }
 }

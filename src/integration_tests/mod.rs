@@ -50,6 +50,7 @@ mod path_param_decode;
 mod platform_guard;
 mod pwd_expiry;
 mod report_dataset;
+mod resource_gate;
 mod response_cache;
 mod retention_cleanup;
 mod scim;
@@ -786,6 +787,20 @@ impl TestContext {
 
     pub async fn get_json(&self, uri: &str) -> serde_json::Value {
         self.send_json(self.request(Method::GET, uri, None)).await
+    }
+
+    /// 发送并按**文本**取回响应体。
+    ///
+    /// 为什么单独一个方法：`send_raw` 把非 JSON 体统一解析成 `Value::Null`，
+    /// 于是 `/metrics`（`text/plain`）这类"结论写在正文里"的端点只能判状态码——
+    /// 指标族接没接进渲染，判据看不见（写了没接线 = 没写）。
+    pub async fn send_text(&self, req: Request<Body>) -> (axum::http::StatusCode, String) {
+        let resp = self.app.clone().oneshot(req).await.expect("请求执行失败");
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("读取响应体失败");
+        (status, String::from_utf8_lossy(&body).into_owned())
     }
 
     /// 发送并**同时取回响应头**（`Retry-After` 这类"契约住在头里"的判据必须能读它）。

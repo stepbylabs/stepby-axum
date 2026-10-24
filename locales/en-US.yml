@@ -18,6 +18,7 @@ error:
     success: Operation successful
     not_found: Data not found
     db_acquire: Failed to acquire database connection
+    resource_busy: This operation is already running (%{entry}); please retry in about %{retry_after} seconds
     bad_format: Invalid data format
     invalid_param: Invalid request parameter
     id_invalid: Invalid ID parameter
@@ -140,6 +141,7 @@ error:
     biz_type_unregistered: The business document type is not registered in the approval engine (biz_type::REGISTRY), so the approval cannot advance
     def_not_found: Flow definition not found
     def_designer_disabled: Tenant has not enabled the flow designer capability (package flow.designer tier insufficient; full required to edit)
+    def_designer_off: Tenant has not enabled the flow designer capability (package flow.designer is off; list and detail are unavailable too)
     def_code_duplicate: Flow code already exists
     def_id_required: Missing flow definition ID
     def_published_immutable: Published version is immutable; publish a new version instead
@@ -470,8 +472,10 @@ error:
     dataset_id_required: Missing dataset ID
     dataset_not_found: Dataset does not exist
     designer_disabled: Tenant has not enabled the report designer capability (package report.designer tier insufficient; full required to edit)
+    designer_off: Tenant has not enabled the report designer capability (package report.designer is off; list, preview and dashboards are unavailable too)
     layout_invalid: Invalid dashboard layout_json (must be an object with schemaVersion in 1-10)
     param_missing: Missing required parameters
+    param_type_invalid: Unsupported parameter type (only numbers, strings, booleans or null can be bound)
     query_timeout: Dataset query timed out
     sql_invalid: SQL template validation failed
     sql_must_select: SQL template must start with SELECT
@@ -483,6 +487,7 @@ error:
     push_channel_none: At least one push channel must be enabled (email or site message)
     email_invalid: Invalid recipient email format
     user_ids_invalid: Invalid target user IDs
+    user_ids_foreign: Target users must be existing, non-deleted users within this tenant (site-message recipients are resolved in the subscription's own tenant)
   web_hook:
     id_invalid: Invalid webhook ID
     not_found: Webhook configuration does not exist

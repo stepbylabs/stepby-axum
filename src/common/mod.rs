@@ -21,6 +21,8 @@ pub mod image;
 // 出站 HTTP 客户端构造的单一事实源（系统信任库缺失时回落内嵌根证书，构造期绝不 panic）
 pub mod outbound_client;
 pub mod page;
+// `perm:user:*` 缓存失效的唯一实现（四条触发路径同源，见该模块文档的"四份实现"立案）
+pub mod perm_cache;
 pub mod pwd_policy;
 // 形状锁共用的生产码采集器：**只在测试构建存在**（`pub(crate)` 供各锁模块的 tests 使用）。
 // 采集口径（`#[cfg(test)]` 截断、注释行处理、自豁免、体量下限）收在这一个文件里，
@@ -30,6 +32,8 @@ pub(crate) mod prod_scan;
 pub mod redact;
 pub mod response;
 pub mod risk_control;
+// 重资源入口的全局并发闸门（AGENTS 工程基线 A-2「资源硬上限 + 背压」）
+pub mod resource_gate;
 pub mod sort;
 pub mod sql_dialect;
 pub mod ssrf;

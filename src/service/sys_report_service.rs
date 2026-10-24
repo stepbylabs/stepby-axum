@@ -413,6 +413,8 @@ const SUB_SORTABLE_COLUMNS: &[(&str, SubColumn)] = &[
 pub struct SysReportService {
     report_repo: SysReportRepository,
     sub_repo: SysReportSubRepository,
+    /// 订阅接收人的租户收敛判定用（`find_tenant_ids_by_user_ids` 是唯一读侧通道）
+    user_repo: crate::repository::sys_user::SysUserRepository,
     mailer: MailerService,
     logininfor_service: SysLogininforService,
     /// G-16：站内信推送改走统一投递内核（模板渲染 + dispatch + 重试链），不再直插 send_log
@@ -424,6 +426,7 @@ impl SysReportService {
         Self {
             report_repo: SysReportRepository::new(db.clone()),
             sub_repo: SysReportSubRepository::new(db.clone()),
+            user_repo: crate::repository::sys_user::SysUserRepository::new(db.clone()),
             mailer: MailerService::new(config.clone()),
             logininfor_service: SysLogininforService::new(db.clone()),
             msg_service: crate::service::sys_msg_service::SysMsgService::new(db, config),
@@ -813,6 +816,39 @@ impl SysReportService {
 
     /// 校验订阅：报表存在 + cron 合法 + 至少一种渠道 + 收件人合法
     #[allow(clippy::too_many_arguments)]
+    /// 订阅接收人的租户收敛判定（纯函数——**写侧校验与投递侧过滤共用同一谓词**）。
+    ///
+    /// 立案原因（b89 项 1）：`receive_user_ids` 此前只校验"非空可解析"，投递时逐个
+    /// `to_addr = uid` 落 `sys_msg_send_log`，接收人从未按报表/订阅的租户收敛 ⇒ 租户 A
+    /// 在订阅里填租户 B 的用户 ID，就把 A 的聚合报表内容投进了 B 的站内信（且 B 从未订阅）。
+    /// 这与 b74 B5 立的"先读后派生写的编排里，读侧与写侧必须共用同一租户谓词"是同一条纪律。
+    ///
+    /// 判定口径三条，逐条都有理由：
+    /// - `owned` 来自 `find_tenant_ids_by_user_ids`（已排 `del_flag='2'`）：**查无此人即拒**，
+    ///   不"跳过就当没这回事"——把内容投进一个不存在/已删的收件箱，比 400 更难排查；
+    /// - 归属用 `tenant_allowed(sub 的 tenant_id, 用户 tenant_id)`，平台（0）代管照常放行；
+    /// - 入参去重：`1,1,2` 过去会投两封，去重属派生写的幂等修复。
+    pub(crate) fn partition_recipients(
+        ids: &[i64],
+        owned: &[(i64, i64)],
+        tenant_id: i64,
+    ) -> (Vec<i64>, Vec<i64>) {
+        let mut allowed: Vec<i64> = Vec::new();
+        let mut rejected: Vec<i64> = Vec::new();
+        for id in ids {
+            if allowed.contains(id) || rejected.contains(id) {
+                continue;
+            }
+            match owned.iter().find(|(uid, _)| uid == id) {
+                Some((_, tid)) if crate::common::tenant::tenant_allowed(tenant_id, *tid) => {
+                    allowed.push(*id)
+                }
+                _ => rejected.push(*id),
+            }
+        }
+        (allowed, rejected)
+    }
+
     async fn validate_sub(
         &self,
         report_id: &i64,
@@ -857,6 +893,14 @@ impl SysReportService {
             if ids.is_empty() {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.report_sub.user_ids_invalid"
+                )));
+            }
+            // 接收人必须落在本订阅的租户范围内（平台代管 operator_tid=0 时照常放行）
+            let owned = self.user_repo.find_tenant_ids_by_user_ids(&ids).await?;
+            let (_, rejected) = Self::partition_recipients(&ids, &owned, operator_tid);
+            if !rejected.is_empty() {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.report_sub.user_ids_foreign"
                 )));
             }
         }
@@ -1103,6 +1147,27 @@ impl SysReportService {
                 .as_deref()
                 .map(parse_id_list::<i64>)
                 .unwrap_or_default();
+            // 投递侧再收敛一次（与写侧共用 `partition_recipients`）：订阅落库后用户可能已被
+            // 删除或迁租，存量 `receive_user_ids` 不得继续把本报表内容投进别租的收件箱。
+            // 剔出的必须留痕——静默少发会让"为什么没收到"变成不可复盘的问题。
+            let (deliverable, dropped) = if user_ids.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                let owned = self
+                    .user_repo
+                    .find_tenant_ids_by_user_ids(&user_ids)
+                    .await?;
+                Self::partition_recipients(&user_ids, &owned, sub.tenant_id)
+            };
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    "报表订阅站内信接收人已不在本租户范围（或已删除），跳过投递 sub_id={}, tenant_id={}, users={:?}",
+                    sub.sub_id,
+                    sub.tenant_id,
+                    dropped
+                );
+            }
+            let user_ids = deliverable;
             // 模板可用性预检：缺失/停用只 warn 一次，避免逐用户刷屏（send 侧 404 语义不变）
             let params_tpl = std::collections::HashMap::from([
                 ("report_name".to_string(), report.report_name.clone()),
@@ -1329,5 +1394,73 @@ mod tests {
     fn test_parse_ids_service() {
         assert_eq!(SysReportService::parse_ids("1,2, 3"), vec![1, 2, 3]);
         assert_eq!(SysReportService::parse_ids(""), Vec::<i64>::new());
+    }
+
+    // ==================== b89 项 1：订阅接收人的租户收敛（跨租户投递回归锁） ====================
+
+    /// 本租户在册用户必须照常放行——否则这条判据变成"永远拒"，下一批就会去放宽它
+    #[test]
+    fn partition_recipients_keeps_own_tenant_users() {
+        let owned = vec![(11, 7), (12, 7)];
+        let (ok, bad) = SysReportService::partition_recipients(&[11, 12], &owned, 7);
+        assert_eq!(ok, vec![11, 12]);
+        assert!(bad.is_empty(), "本租户用户不得被剔出：{bad:?}");
+    }
+
+    /// 他租用户必须剔出（这正是立案的缺陷形状：A 的报表投进 B 的收件箱）
+    #[test]
+    fn partition_recipients_rejects_foreign_tenant_users() {
+        let owned = vec![(11, 7), (12, 8)];
+        let (ok, bad) = SysReportService::partition_recipients(&[11, 12], &owned, 7);
+        assert_eq!(ok, vec![11]);
+        assert_eq!(bad, vec![12]);
+    }
+
+    /// 查无此人（含已软删——仓储侧已排）必须剔出而不是"当没这回事"投出去
+    #[test]
+    fn partition_recipients_rejects_unknown_users() {
+        let owned = vec![(11, 7)];
+        let (ok, bad) = SysReportService::partition_recipients(&[11, 999], &owned, 7);
+        assert_eq!(ok, vec![11]);
+        assert_eq!(bad, vec![999]);
+    }
+
+    /// 平台代管（tid=0）必须照常放行——把代管判成越权等于砍掉平台交付能力
+    #[test]
+    fn partition_recipients_allows_platform_operator() {
+        let owned = vec![(11, 7), (12, 8)];
+        let (ok, bad) = SysReportService::partition_recipients(&[11, 12], &owned, 0);
+        assert_eq!(ok, vec![11, 12]);
+        assert!(bad.is_empty());
+    }
+
+    /// 重复 ID 只投一次（派生写的幂等）
+    #[test]
+    fn partition_recipients_deduplicates() {
+        let owned = vec![(11, 7)];
+        let (ok, bad) = SysReportService::partition_recipients(&[11, 11, 11], &owned, 7);
+        assert_eq!(ok, vec![11]);
+        assert!(bad.is_empty());
+    }
+
+    /// 归属表为空时不得读成"没有接收人 ⇒ 无需拒绝"：全部剔出
+    #[test]
+    fn partition_recipients_with_empty_ownership_rejects_everything() {
+        let (ok, bad) = SysReportService::partition_recipients(&[11, 12], &[], 7);
+        assert!(ok.is_empty());
+        assert_eq!(bad, vec![11, 12]);
+    }
+
+    /// 守恒正控：两侧并集必须等于去重后的入参集——"少投了"与"投错了"同样不可接受
+    #[test]
+    fn partition_recipients_is_exhaustive() {
+        let owned = vec![(11, 7), (12, 8), (13, 7)];
+        let ids = [11, 12, 13, 14, 11];
+        let (ok, mut bad) = SysReportService::partition_recipients(&ids, &owned, 7);
+        let mut union = ok.clone();
+        union.append(&mut bad);
+        union.sort_unstable();
+        assert_eq!(union, vec![11, 12, 13, 14]);
+        assert_eq!(ok.len(), 2);
     }
 }

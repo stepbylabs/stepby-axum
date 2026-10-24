@@ -109,7 +109,30 @@ pub fn mode_reaches(features: &FeatureSet, key: &str, required_mode: &str) -> bo
 ///   与 `nav.l3` 的"平台跳过能力位"同语义）；
 /// - 租户操作者仅 `full` 档可写（`view` 只读、`off` 关闭、非法值 fail-closed 拒绝）。
 pub fn designer_write_allowed(operator_tid: i64, mode: &str) -> bool {
-    operator_tid == 0 || mode == "full"
+    operator_tid == 0 || governance::designer_tier_allows_endpoint(mode, true)
+}
+
+/// 设计器类能力位的**读面**档位判定（与 [`designer_write_allowed`] 共用 governance 那一把尺）。
+///
+/// 立案（b89 项 6）：读面原先**没有任何守卫**，于是 `off` 档租户照常能列表/看详情，
+/// 而写按钮一律 403——《开关规范》③"禁止只做前端隐藏而不做服务端守卫"的反面形态
+/// （这里是"只做了写面守卫、漏了读面"，效果等于能力位在读面上形同虚设）。
+/// 取向与注册表那句 `off（默认）：关闭态即安全态` 一致：**off ⇒ 整面拒绝**，
+/// `view` 只读放行，非法值 fail-closed。
+pub fn designer_read_allowed(operator_tid: i64, mode: &str) -> bool {
+    operator_tid == 0 || governance::designer_tier_allows_endpoint(mode, false)
+}
+
+/// 某 perms 对应的菜单节点在该能力集下**是否应当从导航里剪除**（纯函数，`getRouters` 消费）。
+///
+/// 与端点守卫同一把尺（governance 的两个函数），所以"看得见"与"打得通"不可能再分家：
+/// `off` ⇒ 整面剪除；`view` ⇒ 只剪写按钮（消除"按钮在、点了 403"）；`full` ⇒ 不剪。
+/// 不在任何设计器面内的 perms ⇒ 一律不剪（平台专属面由 `is_grantable_perm_with_features` 管）。
+pub fn designer_menu_hidden(perms: &str, features: &FeatureSet) -> bool {
+    let Some(key) = governance::designer_capability_for(perms) else {
+        return false;
+    };
+    governance::designer_tier_hides_menu(features.mode(key), perms)
 }
 
 /// 构造 `perms NOT IN ($1, $2, …)` 片段（调用方按方言提供占位符；清单为空时返回 `None`）。
@@ -356,6 +379,149 @@ mod tests {
         assert!(designer_write_allowed(7, "full"), "full 档写面放行");
         assert!(!designer_write_allowed(7, "bogus"), "非法档位 fail-closed");
         assert!(!designer_write_allowed(7, ""), "空档位 fail-closed");
+    }
+
+    /// 设计器**读面**档位矩阵（b89 项 6 新立：`off` 整面拒绝、`view` 放行、`full` 放行）
+    #[test]
+    fn test_designer_read_allowed_matrix() {
+        for mode in ["off", "view", "full", "bogus", ""] {
+            assert!(
+                designer_read_allowed(0, mode),
+                "平台 tid=0 在 {mode} 档读面必须放行"
+            );
+        }
+        assert!(
+            !designer_read_allowed(7, "off"),
+            "off 档读面必须拒绝（关闭态 = 功能不存在，不是'只读可用'）"
+        );
+        assert!(designer_read_allowed(7, "view"), "view 档读面放行");
+        assert!(designer_read_allowed(7, "full"), "full 档读面放行");
+        assert!(!designer_read_allowed(7, "bogus"), "非法档位 fail-closed");
+        assert!(!designer_read_allowed(7, ""), "空档位 fail-closed");
+    }
+
+    /// 设计器**菜单可见性**矩阵：可见性与端点必须同一把尺（两侧各写一遍必漂）
+    ///
+    /// ⚠ 每个用例必须**同时**给另一个设计器能力位显式 `full`。只喂单键是错的尺：
+    /// 注册表默认全 off（见 [`test_registry_defaults_are_all_off`]），于是"面外 perms
+    /// 不得被剪"那条反证会被**它自己能力位的默认档**剪红——b89 实测红在
+    /// `report:dataset:list 不属于 flow.designer 的面`，而前缀表当时是对的。
+    /// 反证的作用域由"另一个能力位正开着"构成，否则它约束的是默认值而不是越面剪除。
+    #[test]
+    fn test_designer_menu_hidden_matches_endpoint_tier() {
+        let set = |pairs: [(&str, &str); 2]| {
+            FeatureSet::sanitized(
+                pairs
+                    .iter()
+                    .map(|(k, m)| ((*k).to_string(), (*m).to_string())),
+            )
+        };
+        for (key, read_perm, write_perm, other_key, other_perm) in [
+            (
+                "flow.designer",
+                "flow:definition:list",
+                "flow:definition:add",
+                "report.designer",
+                "report:dataset:list",
+            ),
+            (
+                "report.designer",
+                "report:dataset:list",
+                "report:dataset:edit",
+                "flow.designer",
+                "flow:definition:list",
+            ),
+            (
+                "report.designer",
+                "report:dashboard:view",
+                "report:dashboard:publish",
+                "flow.designer",
+                "flow:definition:add",
+            ),
+        ] {
+            // off ⇒ 整面剪除（读写都剪）
+            assert!(
+                designer_menu_hidden(read_perm, &set([(key, "off"), (other_key, "full")])),
+                "{read_perm} 在 off 档必须剪除（否则就是'菜单可见但端点 403'的假入口）"
+            );
+            assert!(
+                designer_menu_hidden(write_perm, &set([(key, "off"), (other_key, "full")])),
+                "{write_perm} 在 off 档必须剪除"
+            );
+            // view ⇒ 只剪写按钮（消除"按钮在、点了 403"）
+            assert!(
+                !designer_menu_hidden(read_perm, &set([(key, "view"), (other_key, "full")])),
+                "{read_perm} 在 view 档必须可见（读面放行）"
+            );
+            assert!(
+                designer_menu_hidden(write_perm, &set([(key, "view"), (other_key, "full")])),
+                "{write_perm} 在 view 档必须剪除（写面 403，不该留着按钮）"
+            );
+            // full ⇒ 都可见
+            assert!(
+                !designer_menu_hidden(read_perm, &set([(key, "full"), (other_key, "off")]))
+                    && !designer_menu_hidden(write_perm, &set([(key, "full"), (other_key, "off")])),
+                "full 档整面可见"
+            );
+            // 反证：另一个设计器能力位**开着**时，其面内 perms 不得被本能力位越面剪除
+            // （前缀表写串就会在这里红）
+            assert!(
+                !designer_menu_hidden(other_perm, &set([(key, "off"), (other_key, "full")])),
+                "{other_perm} 属于 {other_key} 的面；{key} 关档不得越面剪除"
+            );
+            // 反证的第二向：本能力位开着时，另一面**关档**也不得反向连坐
+            assert!(
+                !designer_menu_hidden(read_perm, &set([(key, "full"), (other_key, "off")])),
+                "{read_perm} 在 {key}=full 且 {other_key}=off 时必须可见（反向越面剪除）"
+            );
+        }
+        // 设计器之外的 perms 一律不剪（平台专属面另有判据，两者正交）
+        let off_flow = set([("flow.designer", "off"), ("report.designer", "full")]);
+        for perm in [
+            "system:user:list",
+            "monitor:online:list",
+            "tool:reportBoard:save",
+        ] {
+            assert!(
+                !designer_menu_hidden(perm, &off_flow),
+                "{perm} 不在任何设计器面内，不得被剪（误剪会把正常功能做成隐形）"
+            );
+        }
+    }
+
+    /// 前缀表自足：每个登记的设计器能力位必须**真在注册表里**且**确有面内 perms**
+    /// （登记了却没人用的前缀 = 剪除判据空转；用了没登记的能力位 = 剪不到）
+    #[test]
+    fn test_designer_prefix_table_is_live() {
+        for (key, prefixes) in governance::DESIGNER_CAPABILITY_PERM_PREFIXES {
+            let def = feature_def(key).unwrap_or_else(|| panic!("{key} 未登记进注册表"));
+            assert!(
+                def.modes.contains(&"full") && def.modes.contains(&"view"),
+                "{key} 必须是三档设计器能力位（off|view|full），实际 {:?}",
+                def.modes
+            );
+            assert!(
+                !prefixes.is_empty(),
+                "{key} 的面内前缀为空 ⇒ 剪除判据在这一面上空转"
+            );
+            for p in *prefixes {
+                assert!(
+                    p.ends_with(':'),
+                    "前缀 {p} 必须以冒号结尾（防半截前缀越面）"
+                );
+                assert_eq!(
+                    governance::designer_capability_for(&format!("{p}list")),
+                    Some(*key),
+                    "{p}list 必须归属 {key}"
+                );
+            }
+        }
+        // 反证：面外 perms 必须判 None（否则剪除会连坐无关菜单）
+        assert_eq!(
+            governance::designer_capability_for("system:user:list"),
+            None
+        );
+        assert_eq!(governance::designer_capability_for("flow:task:list"), None);
     }
 
     /// 注册表自洽：默认模式必须是合法模式，且**恒为 off**（"关闭态即安全态"）

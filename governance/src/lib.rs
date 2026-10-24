@@ -682,6 +682,77 @@ pub fn private_keys() -> impl Iterator<Item = &'static str> {
         .map(|i| i.key)
 }
 
+// ---------------------------------------------- 设计器能力位 ↔ 面内 perms 前缀
+
+/// 设计器类能力位 ↔ **该面内的 perms 前缀**（`getRouters` 剪除与端点守卫的唯一事实源）。
+///
+/// 立案（b89 项 6）：`flow.designer` / `report.designer` 在注册表里 `unlocked = &[]`——
+/// 这些 perms 不是"平台专属下放项"，所以 `is_grantable_perm_with_features` 对它们**恒真**，
+/// 于是 `getRouters` 从不剪除设计器菜单；而服务层只守卫**写面**（读面在 `off` 档照常 200）。
+/// 净效果：租户在 `off` 档看得见整套设计器菜单，点任何写按钮一律 403——
+/// 这正是《开关规范》③④ 定义的"菜单可见但请求 403"假入口，同时能力位在读面上形同虚设。
+///
+/// 为什么不复用 `unlocked`：那一列的语义是"平台专属 perm 的下放"（受
+/// `features` 测试"白名单必须 is_platform_only_perm"双向锁约束），把业务 perms 塞进去
+/// 会把那把锁的方向判据改掉。这里另立一列，专管"这个能力位**封顶哪些菜单/端点**"。
+pub const DESIGNER_CAPABILITY_PERM_PREFIXES: &[(&str, &[&str])] = &[
+    ("flow.designer", &["flow:definition:"]),
+    ("report.designer", &["report:dataset:", "report:dashboard:"]),
+];
+
+/// 某 perms 落在哪个设计器能力位的面内（返回能力位 key；不在任何设计器面内 ⇒ `None`）。
+///
+/// 取**最长前缀**匹配（同 `platform_only_prefixes_are_all_live` 那一族的口径）：
+/// 前缀之间若出现包含关系，短的不得把长的洗掉。
+pub fn designer_capability_for(perms: &str) -> Option<&'static str> {
+    let mut best: Option<(usize, &'static str)> = None;
+    for (key, prefixes) in DESIGNER_CAPABILITY_PERM_PREFIXES {
+        for p in *prefixes {
+            if perms.starts_with(p) && best.is_none_or(|(len, _)| p.len() > len) {
+                best = Some((p.len(), key));
+            }
+        }
+    }
+    best.map(|(_, key)| key)
+}
+
+/// 该 perms 是不是**写面**（读面后缀沿用 [`COMMON_ROLE_READONLY_PERM_SUFFIXES`] 单一事实源）。
+///
+/// 为什么共用而不是再列一张读面表：`view` 档的语义就是"只读面开放"，而"只读"在本仓
+/// 已经有一份判据（common 授权策略用的那四个后缀）。两处各写一遍必然漂（本仓立过至少四次），
+/// 漂了的结果是 `view` 档下某个写按钮被当成读面放行。
+pub fn perm_is_write_face(perms: &str) -> bool {
+    !COMMON_ROLE_READONLY_PERM_SUFFIXES
+        .iter()
+        .any(|s| perms.ends_with(s))
+}
+
+/// 设计器面内**可见性**判定（纯函数，`getRouters` 剪除与端点守卫共用一份规则）。
+///
+/// - `mode == "full"` ⇒ 读写都可见；
+/// - `mode == "view"` ⇒ 只读面可见，写面剪除（消除"按钮在、点了 403"）；
+/// - 其余（`off` / 未登记 / 非法）⇒ 整面剪除，与"读面端点 403"同向（关闭态 = 功能不存在）。
+///
+/// 方向必须与 [`designer_tier_allows_endpoint`] 一致，否则又回到"菜单与端点两套口径"。
+pub fn designer_tier_hides_menu(mode: &str, perms: &str) -> bool {
+    match mode {
+        "full" => false,
+        "view" => perm_is_write_face(perms),
+        _ => true,
+    }
+}
+
+/// 设计器面内**端点**放行判定（与 [`designer_tier_hides_menu`] 同源，取反即"拒绝"）。
+///
+/// `is_write` 由调用方按端点语义给出（同一能力位下，列表/详情是读、新增/发布是写）。
+pub fn designer_tier_allows_endpoint(mode: &str, is_write: bool) -> bool {
+    match mode {
+        "full" => true,
+        "view" => !is_write,
+        _ => false,
+    }
+}
+
 /// 某覆盖策略对应的键清单（seed 按组生成 SQL 时使用）。
 pub fn keys_with_coverage(coverage: Coverage) -> impl Iterator<Item = &'static str> {
     CONFIGS
@@ -834,6 +905,29 @@ pub fn common_role_grant_select_body(menu_ids: &[i64]) -> String {
     )
 }
 
+/// 按 **perms 粒度**补种 common 授权的语句体（`initialize` Phase 3.5h 能力位回填唯一合法写法）。
+///
+/// 立案（b89 项 2）：`initialize/tenant.rs` 的 Phase 3.5h 回填过去自己拼
+/// `… SELECT 2, menu_id FROM sys_menu WHERE del_flag='0' AND perms IN (…)`，**不套策略** ⇒
+/// 平台能力位一开就把「备份下载 / 数据包导出 / 租户导航增删改 / 租户域名增删改验证」这 9 个
+/// 写按钮发给 common（`role_id=2` 是新租户管理员角色的菜单模板源），而这 9 条与
+/// `COMMON_ROLE_WRITE_EXCEPTIONS` 的交集是 **0**。b74 立过的盲区在这里是第二个形状：
+/// 字符串锁的 needle 只覆盖 `VALUES (2`，看不见 `SELECT 2,`。
+///
+/// 与 [`common_role_grant_select_body`] 共用同一个 [`common_role_grant_where`] 谓词 ⇒
+/// "common 能被授什么"仍然只有一份判据。取 `ph_list`（`$1, $2…` / `?, ?…`）为入参而不是
+/// perms 明文：这一支的 perms 走绑定变量，占位符形态由各方言的 `ph()` 决定，
+/// governance 不参与拼占位符，但**必须**拼策略。
+pub fn common_role_grant_select_body_by_perms(ph_list: &str) -> String {
+    format!(
+        "sys_role_menu (role_id, menu_id) SELECT {}, menu_id FROM sys_menu \
+         WHERE del_flag = '0' AND perms IN ({}) AND {}",
+        COMMON_ROLE_ID,
+        ph_list,
+        common_role_grant_where()
+    )
+}
+
 /// 为**刚补种的菜单**按策略幂等授权 common 角色（`initialize` 兜底唯一合法写法）。
 ///
 /// = 方言前后缀 + [`common_role_grant_select_body`]。
@@ -884,6 +978,96 @@ pub fn common_role_erosion_sql() -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// 设计器面内读写分类（b89 项 6 新立的单一事实源）
+    #[test]
+    fn test_designer_face_read_write_split() {
+        for p in [
+            "flow:definition:list",
+            "flow:definition:query",
+            "report:dataset:list",
+            "report:dashboard:view",
+            "system:user:center",
+        ] {
+            assert!(
+                !perm_is_write_face(p),
+                "{p} 以只读后缀结尾，必须判读面（后缀表是 COMMON_ROLE_READONLY_PERM_SUFFIXES）"
+            );
+        }
+        for p in [
+            "flow:definition:add",
+            "flow:definition:publish",
+            "report:dataset:edit",
+            "system:backup:download",
+        ] {
+            assert!(perm_is_write_face(p), "{p} 必须判写面");
+        }
+    }
+
+    /// 归属取最长前缀；面外 perms 必须 None（判据不得连坐）
+    #[test]
+    fn test_designer_capability_lookup_is_longest_prefix_and_scoped() {
+        assert_eq!(
+            designer_capability_for("flow:definition:list"),
+            Some("flow.designer")
+        );
+        assert_eq!(
+            designer_capability_for("report:dashboard:view"),
+            Some("report.designer")
+        );
+        for p in [
+            "system:user:list",
+            "flow:task:list",
+            "tool:reportBoard:save",
+            "",
+        ] {
+            assert_eq!(designer_capability_for(p), None, "{p} 不在设计器面内");
+        }
+        // 每条登记前缀都必须真被某个已知 perms 命中（登记了却没人用 ⇒ 剪除判据空转）
+        for (key, prefixes) in DESIGNER_CAPABILITY_PERM_PREFIXES {
+            for p in *prefixes {
+                assert_eq!(
+                    designer_capability_for(&format!("{p}list")).as_deref(),
+                    Some(*key)
+                );
+            }
+        }
+    }
+
+    /// 档位 ↔ 可见性 ↔ 端点三侧必须同源（off 整面、view 只读、full 全开、非法 fail-closed）
+    #[test]
+    fn test_designer_tiers_are_monotonic_across_both_views() {
+        for mode in ["off", "bogus", "", "auto"] {
+            assert!(
+                designer_tier_hides_menu(mode, "flow:definition:list"),
+                "{mode} 档读面菜单必须剪除"
+            );
+            assert!(
+                !designer_tier_allows_endpoint(mode, false)
+                    && !designer_tier_allows_endpoint(mode, true),
+                "{mode} 档两侧端点都必须拒绝（fail-closed）"
+            );
+        }
+        assert!(!designer_tier_hides_menu("view", "flow:definition:list"));
+        assert!(designer_tier_hides_menu("view", "flow:definition:add"));
+        assert!(designer_tier_allows_endpoint("view", false));
+        assert!(!designer_tier_allows_endpoint("view", true));
+        for p in ["flow:definition:list", "flow:definition:add"] {
+            assert!(!designer_tier_hides_menu("full", p));
+        }
+        assert!(designer_tier_allows_endpoint("full", true));
+        // 菜单与端点必须**同向**：同一 perms 在任一档下不能一个可见、一个被拒
+        for mode in ["off", "view", "full", "bogus"] {
+            for p in ["flow:definition:list", "flow:definition:edit"] {
+                let visible = !designer_tier_hides_menu(mode, p);
+                let allowed = designer_tier_allows_endpoint(mode, perm_is_write_face(p));
+                assert_eq!(
+                    visible, allowed,
+                    "{mode} 档 {p} 的可见性与端点放行不一致（两套口径必漂）"
+                );
+            }
+        }
+    }
 
     /// 注册表自洽：两张表各自按 key 字典序、key 全局唯一、非空
     #[test]
@@ -1448,12 +1632,17 @@ mod tests {
     fn side_theme_domain_matches_frontend_mirror() {
         let mirror = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../stepby-vue/src/utils/sideTheme.ts");
-        let text = std::fs::read_to_string(&mirror).unwrap_or_else(|e| {
+        let raw = std::fs::read_to_string(&mirror).unwrap_or_else(|e| {
             panic!(
                 "读不到前端镜像 {}：{e}（判据源缺失必须响亮失败，不得静默跳过）",
                 mirror.display()
             )
         });
+        // 刀口只能落在代码上（前言 ⑬ 的 JS 侧断面，b89 实测照出）：这份文件为了说明"契约由
+        // 哪个 marker 读取"，把 `SIDE_THEME_OPTIONS = [` 与键名**原样写进了 JSDoc**，
+        // 于是按 marker 定位的解析通道读到了注释正文——它比代码先出现，把刀口挪进注释，
+        // 报出来的是"值域两侧不等"这种把人往"改档位集合"方向支使的话，而坏的是判据自己的输入。
+        let text = mask_js_comments(&raw);
 
         let frontend = quoted_items(&text, "SIDE_THEME_OPTIONS = [");
         assert!(
@@ -1478,8 +1667,10 @@ mod tests {
         // 而"现状"就是前端 settings.ts 的实际值——两侧不等说明有一侧在骗人。
         let settings = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../stepby-vue/src/settings.ts");
-        let st = std::fs::read_to_string(&settings)
-            .unwrap_or_else(|e| panic!("读不到 {}：{e}", settings.display()));
+        let st = mask_js_comments(
+            &(std::fs::read_to_string(&settings)
+                .unwrap_or_else(|e| panic!("读不到 {}：{e}", settings.display()))),
+        );
         let frontend_default = single_quoted_after(&st, "sideTheme:")
             .unwrap_or_else(|| panic!("settings.ts 里 sideTheme 的值取不到单引号字面量"));
         let registered_default = CONFIG_DEFAULTS
@@ -1536,6 +1727,56 @@ mod tests {
             Some("theme-auto")
         );
         assert_eq!(single_quoted_after("sideTheme: string", "sideTheme:"), None);
+
+        // ===== b89 实测形状：marker 原文写进注释时，刀口必须仍然落在代码上 =====
+        // 这一段是"本批为什么会红在判据自己的输入上"的最小复现（与 sideTheme.ts 里那段说明
+        // 注释同形）：注释里逐字出现了两个 marker，而**注释比代码先出现**。
+        let doc_mentions_marker = r#"/** 判据按 `quoted_items(text, "SIDE_THEME_OPTIONS = [")` 与逐字匹配
+ *  `export const SIDE_THEME_CONFIG_KEY = 'sys.index.sideTheme'` 取数，本区文字必须逐字不变 */
+export const SIDE_THEME_OPTIONS = ['theme-auto', 'theme-dark', 'theme-light'] as const
+"#;
+        let masked = quoted_items(
+            &mask_js_comments(doc_mentions_marker),
+            "SIDE_THEME_OPTIONS = [",
+        );
+        assert_eq!(
+            masked,
+            vec![
+                "theme-auto".to_string(),
+                "theme-dark".to_string(),
+                "theme-light".to_string()
+            ],
+            "掩码之后必须仍然只读代码里那一份集合"
+        );
+        // 反证（防"掩码其实是恒等变换"）：同一份文本**不掩码**时必须读出**别的**集合，
+        // 否则上面那条断言什么都没约束（前言 ⑥：反脆弱必须配"改动确实生效"的正控）。
+        let unmasked = quoted_items(doc_mentions_marker, "SIDE_THEME_OPTIONS = [");
+        assert_ne!(
+            unmasked, masked,
+            "不掩码与掩码结果相同 ⇒ 说明注释里根本没有 marker，本用例的夹具形状已失效"
+        );
+        assert!(
+            unmasked.iter().any(|s| s == "sys.index.sideTheme"),
+            "未掩码时必须真的把注释里的引号字面量当成数组项（这才是事故形状）：{unmasked:?}"
+        );
+        // 掩码的边界：字符串字面量里的 `//` 不是注释（URL 不得被吃掉），而真注释必须被吃掉。
+        let with_url = "const u = 'https://example.com/a/b' // 这一句是说明\nconst k = 'x'";
+        let masked_url = mask_js_comments(with_url);
+        assert!(
+            masked_url.contains("https://example.com/a/b"),
+            "字符串里的 // 被当成注释起点 ⇒ URL 被删：{masked_url}"
+        );
+        assert!(
+            !masked_url.contains("这一句是说明"),
+            "行注释没被掩掉 ⇒ 注释文本仍会决定刀口：{masked_url}"
+        );
+        // 掩码误删的方向必须是**响亮失败**：整段声明被注释掉时 marker 取不到 ⇒ 空集，
+        // 而调用点的 `frontend.len() >= 3` 下限会把空集变成 panic（不得退化成"集合相等 ⇒ 通过"）。
+        let eaten = mask_js_comments("// export const SIDE_THEME_OPTIONS = ['x']\nconst other = 1");
+        assert!(
+            quoted_items(&eaten, "SIDE_THEME_OPTIONS = [").is_empty(),
+            "被注释掉的声明仍被解析出条目 ⇒ 空集这条响亮失败通道坏了：{eaten:?}"
+        );
     }
 
     /// 取 `marker` 之后第一个 `]` 之前的所有**引号内**字面量（顺序保留，不做去重）。
@@ -1572,5 +1813,80 @@ mod tests {
         let at = text.find(marker)?;
         let head: String = text[at + marker.len()..].chars().take(60).collect();
         quoted_items(&head, "").into_iter().next()
+    }
+
+    /// 剔掉 JS/TS 的注释文本（行注释 `//…`、块注释 `/* … */` 含 JSDoc），**字符串/模板字面量里的
+    /// `//` 不算注释**（`'https://x/y'` 这类真值必须留在采集面里，否则镜像锁会把 URL 当注释吃掉）。
+    ///
+    /// 为什么要有它（b89 实测照出，前言 ⑬ 的 JS 侧断面）：`SIDE_THEME_OPTIONS` 那份文件里写着
+    /// 一段"本区必须逐字保持这两个 marker"的说明注释，marker 原文因此**先于代码出现**，
+    /// 按 marker 定位的解析通道就从代码挪进注释正文，报出"两侧值域不等"这种指错方向的话。
+    ///
+    /// 掩码的误删方向：**只会删掉真代码里的 `//`，而 JS 里裸的 `//` 只能出现在注释里**
+    /// （字符串/模板字面量已由状态机排除；正则字面量内的 `/` 按语法必须转义，因此结构上凑不出
+    /// 裸 `//`）。所以唯一会删掉声明的形状是"整段被注释掉"，那时 marker 取不到 ⇒
+    /// [`quoted_items`] 返回空集 ⇒ 调用点的 `frontend.len() >= 3` 下限当场 panic
+    /// （由 [`side_theme_mirror_parser_is_falsifiable`] 的"被注释掉的声明必须得空集"钉住）。
+    /// 空集不会被读成"没有漂移"，所以这条通道的失败形态是响亮失败，不是假绿。
+    fn mask_js_comments(text: &str) -> String {
+        let cs: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        // 0 代码 / 1 行注释 / 2 块注释 / 3 `'` / 4 `"` / 5 反引号模板
+        let mut st = 0u8;
+        let mut i = 0usize;
+        while i < cs.len() {
+            let c = cs[i];
+            let n = cs.get(i + 1).copied();
+            match st {
+                1 => {
+                    if c == '\n' {
+                        st = 0;
+                        out.push(c);
+                    }
+                }
+                2 => {
+                    if c == '\n' {
+                        out.push(c);
+                    } else if c == '*' && n == Some('/') {
+                        st = 0;
+                        i += 1;
+                    }
+                }
+                3 | 4 | 5 => {
+                    out.push(c);
+                    if c == '\\' {
+                        if let Some(x) = n {
+                            out.push(x);
+                            i += 1;
+                        }
+                    } else if (c == '\'' && st == 3)
+                        || (c == '"' && st == 4)
+                        || (c == '`' && st == 5)
+                    {
+                        st = 0;
+                    }
+                }
+                _ => {
+                    if c == '/' && n == Some('/') {
+                        st = 1;
+                        i += 1;
+                    } else if c == '/' && n == Some('*') {
+                        st = 2;
+                        i += 1;
+                    } else {
+                        out.push(c);
+                        if c == '\'' {
+                            st = 3;
+                        } else if c == '"' {
+                            st = 4;
+                        } else if c == '`' {
+                            st = 5;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
     }
 }

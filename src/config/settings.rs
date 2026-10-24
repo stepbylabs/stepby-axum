@@ -2153,8 +2153,12 @@ pub struct DatabaseConfig {
     /// - SQLite：本地嵌入库无服务端语句超时概念，`busy_timeout=5s` 已兜底锁等待，
     ///   本项对 SQLite 不生效。
     ///
-    /// 报表类长查询请按需调大或关闭（0）。连接池初始化时快照到
-    /// [`crate::db::limits`]，仓库层零签名穿透读取。
+    /// 报表类长查询请按需调大或关闭（0）。本项**只在连接池建立时按方言落地**
+    /// （PostgreSQL 连接参数 / MySQL `after_connect` 会话变量，见 `db::pool`），
+    /// 不经 `crate::db::limits` 快照读取——那里曾有一份同名 getter 而全仓无消费点，
+    /// b89 已删除（"注释说仓库层在读、其实没人读"正是本仓立案过两次的形状）。
+    /// 生效值另有**上限 3600 秒**（换算只走 `DatabaseConfig::statement_timeout_ms` 这一个出口，
+    /// 理由与越界后的失败形态见 `DB_STATEMENT_TIMEOUT_MAX_SECS`）；`0` 仍是显式关闭。
     #[serde(default = "default_db_statement_timeout_secs")]
     pub statement_timeout_secs: u64,
     /// data_scope 部门递归 CTE 深度上限（默认 30）
@@ -2213,6 +2217,39 @@ fn default_db_dept_cte_max_depth() -> u32 {
 
 fn default_db_slow_sql_threshold_ms() -> u64 {
     1000
+}
+
+/// 语句级超时的**上限**（秒）——配得更大按本值夹取。
+///
+/// 立这条闸的理由不是"报表该跑多久"，而是两条方言路径的变量类型**各有天花板**，而越界的
+/// 失败形态是"每次建连接都报错"，不是启动期拒绝：
+/// - MySQL `max_execution_time` 单位**毫秒**、上限 `4294967295`；
+/// - PostgreSQL `statement_timeout` 同样按毫秒的整数上限。
+///
+/// 于是把 `statement_timeout_secs` 写成 `u64::MAX` 这类脏值 ⇒ `SET SESSION` / GUC 越界
+/// ⇒ 连接池**全灭** ⇒ 全站 503，而归因链上没有任何一处写着"配置"。真需要更长的语句请
+/// 显式配 `0`（关闭），路由层 120s 兜底超时仍在（见 `db::pool` 的 MySQL 引擎限制说明）。
+const DB_STATEMENT_TIMEOUT_MAX_SECS: u64 = 3600;
+
+impl DatabaseConfig {
+    /// 语句级超时的毫秒数 —— 两条方言路径（PG 连接参数 / MySQL `after_connect` 会话变量）
+    /// **唯一**的换算出口（b89 项 E6 补）。
+    ///
+    /// 改造前两处各自写 `timeout_secs.saturating_mul(1000)`，而"防脏值"这件事做在
+    /// `db::limits` 那份**没有任何消费点**的快照里（`.min(3600)` 算完就丢），真正下发的
+    /// 那两条路径反倒没做 —— 同一件事在两处相反，正是本仓反复立案的"写了没接线=没写"。
+    ///
+    /// `0` 保持 `0`（显式关闭，与字段文档同义；把它夹到 1 秒等于把"关闭"读成"最严"）；
+    /// 其余取 `min(3600)` 后换算成毫秒。
+    pub fn statement_timeout_ms(&self) -> u64 {
+        if self.statement_timeout_secs == 0 {
+            0
+        } else {
+            self.statement_timeout_secs
+                .min(DB_STATEMENT_TIMEOUT_MAX_SECS)
+                .saturating_mul(1000)
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -4147,6 +4184,67 @@ mod tests {
             "Database URL password leaked in Debug"
         );
         assert!(debug_str.contains("<redacted>"));
+    }
+
+    /// b89 项 E6：语句级超时的**换算与夹取只有一个出口**，且 `0` 的语义必须是"关闭"而不是"最严"。
+    ///
+    /// 立案：改造前 PG 与 MySQL 两条路径各自写 `secs.saturating_mul(1000)` 原值下发，
+    /// 而 `.min(3600)` 那份夹取住在 `db::limits` 的快照里——**全仓无人读**。脏值（`u64::MAX`）
+    /// 越界之后失败的形态不是启动期拒绝，而是每次 `SET SESSION max_execution_time` /
+    /// PG GUC 都报错 ⇒ 连接池全灭 ⇒ 全站 503，归因链上看不见"配置"两个字。
+    ///
+    /// 断言只调**真实方法**，不在测试里重算一遍夹取式（重算等于把自己的算术当证据）。
+    #[test]
+    fn test_statement_timeout_ms_bounds_absurd_values_and_keeps_zero_as_off() {
+        let base = DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 20,
+            min_connections: 5,
+            connect_timeout: 8,
+            idle_timeout: 600,
+            max_lifetime_secs: 1800,
+            acquire_timeout_secs: 10,
+            statement_timeout_secs: 60,
+            dept_cte_max_depth: 30,
+            slow_sql_threshold_ms: 1000,
+        };
+        assert_eq!(base.statement_timeout_ms(), 60_000, "默认档 60s ⇒ 60000ms");
+        assert_eq!(
+            DatabaseConfig {
+                statement_timeout_secs: 0,
+                ..base.clone()
+            }
+            .statement_timeout_ms(),
+            0,
+            "0 必须原样是 0（显式关闭）。夹成 1000ms 等于把'关闭'读成'最严档'"
+        );
+        assert_eq!(
+            DatabaseConfig {
+                statement_timeout_secs: 3_600,
+                ..base.clone()
+            }
+            .statement_timeout_ms(),
+            3_600_000,
+            "区间内的值不得被改动"
+        );
+        assert_eq!(
+            DatabaseConfig {
+                statement_timeout_secs: 3_601,
+                ..base.clone()
+            }
+            .statement_timeout_ms(),
+            3_600_000,
+            "超出上限必须夹到 3600s"
+        );
+        assert_eq!(
+            DatabaseConfig {
+                statement_timeout_secs: u64::MAX,
+                ..base
+            }
+            .statement_timeout_ms(),
+            3_600_000,
+            "u64::MAX 这类脏值必须收敛到上限——否则它炸在每次建连接时，而不是启动期"
+        );
     }
 
     /// v5-D11：userinfo 缓存 TTL **默认 0（关闭 = 改造前行为）** 且**硬上限 300s**。

@@ -18,6 +18,7 @@ error:
     success: 操作成功
     not_found: 数据不存在
     db_acquire: 数据库连接获取失败
+    resource_busy: "该操作正在进行中（%{entry}），请稍后重试（约 %{retry_after} 秒后）"
     bad_format: 数据格式不正确
     invalid_param: 请求参数无效
     id_invalid: 参数 ID 不合法
@@ -140,6 +141,7 @@ error:
     biz_type_unregistered: 业务单据类型未在审批引擎注册（biz_type::REGISTRY），无法推进审批
     def_not_found: 流程定义不存在
     def_designer_disabled: 租户未开通流程设计器能力（套餐 flow.designer 档位不足，需 full 才可编辑）
+    def_designer_off: 租户未开通流程设计器能力（套餐 flow.designer 为 off，列表与详情同样不可用）
     def_code_duplicate: 流程编码已存在
     def_id_required: 缺少流程定义 ID
     def_published_immutable: 已发布版本不可修改图定义，请发布新版本
@@ -470,8 +472,10 @@ error:
     dataset_id_required: 缺少数据集 ID
     dataset_not_found: 数据集不存在
     designer_disabled: 租户未开通报表设计器能力（套餐 report.designer 档位不足，需 full 才可编辑）
+    designer_off: 租户未开通报表设计器能力（套餐 report.designer 为 off，列表/预览/大屏同样不可用）
     layout_invalid: 大屏布局 layout_json 不合法（需为对象且 schemaVersion 在 1-10）
     param_missing: 缺少必填参数
+    param_type_invalid: 参数类型不支持（仅可绑定数字、字符串、布尔或 null）
     query_timeout: 数据集查询超时
     sql_invalid: SQL 模板校验失败
     sql_must_select: SQL 模板必须以 SELECT 开头
@@ -483,6 +487,7 @@ error:
     push_channel_none: 至少开启一种推送渠道（邮件或站内信）
     email_invalid: 收件邮箱格式不正确
     user_ids_invalid: 目标用户 ID 不合法
+    user_ids_foreign: 目标用户不存在、已删除或不属于本租户（站内信接收人必须是本租户的在用用户）
   web_hook:
     id_invalid: 回调 ID 不合法
     not_found: 回调配置不存在

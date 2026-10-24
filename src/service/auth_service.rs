@@ -2196,7 +2196,14 @@ fn is_capability_gated_menu(
     // 平台专属下放项：租户用户按有效能力集判定（与授权门禁同源）
     match tenant_features {
         None => false,
-        Some(f) => !crate::common::features::is_grantable_perm_with_features(perms, f),
+        Some(f) => {
+            // 设计器面（b89 项 6）：`off` 整面剪除、`view` 只剪写按钮——判据与端点守卫
+            // 共用 governance 那一把尺，所以"看得见"与"打得通"不会分家。
+            if crate::common::features::designer_menu_hidden(perms, f) {
+                return true;
+            }
+            !crate::common::features::is_grantable_perm_with_features(perms, f)
+        }
     }
 }
 

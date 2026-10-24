@@ -1664,23 +1664,13 @@ impl SysTenantService {
         Ok(())
     }
 
-    /// 失效所有用户权限缓存（best-effort，对齐 `sys_menu_service` 同名语义：
-    /// SCAN 遍历 `perm:user:*` 批量删除，避免 KEYS 阻塞；失败仅记日志）。
+    /// 失效所有用户权限缓存（本服务收敛删除了 `sys_role_menu` 行 ⇒ perms 下发变化）。
     ///
-    /// 触发面：本服务收敛删除了 `sys_role_menu` 行（角色授权集合变化 ⇒ perms 下发变化）。
+    /// 委托 `common::perm_cache` 的**唯一实现**（菜单/角色/启动收敛三条路径同源）；
+    /// 本函数原先自带一份 SCAN+DEL 并注释"对齐 `sys_menu_service` 同名语义"——
+    /// 与被对齐的那两份**行为并不相同**（它们失败时一条日志都不打），立案见该模块文档。
     async fn invalidate_all_perm_cache(&self) {
-        let pattern = format!("{}*", crate::common::constants::PERM_CACHE_PREFIX);
-        let Ok(keys) = self.store.scan(&pattern, None).await else {
-            tracing::warn!("权限缓存失效：SCAN {} 失败（best-effort 忽略）", pattern);
-            return;
-        };
-        if keys.is_empty() {
-            return;
-        }
-        // 缓存失效 best-effort：失败不阻断主流程，但必须可观测（残留脏读直至 TTL 过期）
-        if let Err(e) = self.store.del(&keys).await {
-            tracing::warn!(count = keys.len(), error = %e, "租户缓存失效失败，可能产生脏读直至 TTL 过期")
-        }
+        crate::common::perm_cache::invalidate_all_perm_cache(&self.store, "租户").await;
     }
 
     // ---------- 启停 / 删除 / 恢复 ----------

@@ -459,12 +459,12 @@ impl AppInitializer {
                 tracing::info!("共享态档位：local（业务同库承载，无 Redis 依赖）");
                 Arc::new(crate::shared_store::LocalStore::new(db.clone()))
             }
-            CacheMode::Auto => unreachable!("resolve_mode 已裁决"),
+            mode @ CacheMode::Auto => unreachable!("auto 已由 resolve_mode 裁决: {mode:?}"),
         };
         match cache_mode {
             CacheMode::Redis => tracing::info!("共享态档位：redis（安全态双写 DB 权威层）"),
             CacheMode::Local => {}
-            CacheMode::Auto => unreachable!(),
+            mode @ CacheMode::Auto => unreachable!("档位日志分支不得收到 auto: {mode:?}"),
         }
 
         // 4.0a §4.2 分级守卫：local 档 + 多实例 / 显式 local + Redis 配置被忽略 的启动告警

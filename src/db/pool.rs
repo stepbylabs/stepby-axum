@@ -40,7 +40,8 @@ pub async fn init_database(
     })?;
     tracing::info!("数据库类型: {}", db_type.name());
 
-    // 进程级限制快照（语句超时 / 递归 CTE 深度），仓库层经 db::limits 读取
+    // 进程级限制快照（递归 CTE 深度），仓库层经 db::limits 读取；
+    // 语句级超时不经本通道——它按方言在下方直接落到连接参数（PG 连接参数 / MySQL after_connect）
     limits::init(config);
 
     // SQLite 并发优化（关键）：
@@ -84,7 +85,7 @@ pub async fn init_database(
         // sqlx after_connect 钩子 → 走原生 MySqlPoolOptions 建池后包装回 sea-orm
         return connect_mysql_with_statement_timeout(
             &opt,
-            config.statement_timeout_secs,
+            config.statement_timeout_ms(),
             config.slow_sql_threshold_ms,
         )
         .await;
@@ -111,15 +112,15 @@ pub async fn init_database(
 /// 语句超时与慢日志必须合并在同一个闭包内，否则后设者顶掉先设者。
 ///
 /// 配置 `statement_timeout_secs = 0` / `slow_sql_threshold_ms = 0` 分别显式关闭对应能力。
+/// 毫秒数一律取 `DatabaseConfig::statement_timeout_ms()`（已按上限夹取，唯一换算出口）。
 fn apply_postgres_options(opt: &mut ConnectOptions, config: &DatabaseConfig) {
-    let timeout_secs = config.statement_timeout_secs;
+    let timeout_ms = config.statement_timeout_ms();
     let slow = slow_sql_logging_settings(config.slow_sql_threshold_ms);
-    let timeout_ms = timeout_secs.saturating_mul(1000);
     let stmt_ms = timeout_ms.to_string();
     let idle_txn_ms = timeout_ms.to_string();
     opt.map_sqlx_postgres_opts(move |mut pg_opts| {
         // PgConnectOptions 的 options/log_slow_statements 均为消耗式 builder（self → Self）
-        if timeout_secs > 0 {
+        if timeout_ms > 0 {
             pg_opts = pg_opts.options([
                 ("statement_timeout", stmt_ms.as_str()),
                 ("idle_in_transaction_session_timeout", idle_txn_ms.as_str()),
@@ -131,9 +132,9 @@ fn apply_postgres_options(opt: &mut ConnectOptions, config: &DatabaseConfig) {
         }
         pg_opts
     });
-    if timeout_secs > 0 {
+    if timeout_ms > 0 {
         tracing::info!(
-            timeout_secs,
+            timeout_ms,
             "PostgreSQL 语句级超时已启用（statement_timeout + idle_in_transaction_session_timeout）"
         );
     } else {
@@ -145,7 +146,9 @@ fn apply_postgres_options(opt: &mut ConnectOptions, config: &DatabaseConfig) {
 /// 连接建立后执行 `SET SESSION max_execution_time = <ms>`（after_connect 钩子）。
 ///
 /// ⚠️ 引擎限制：`max_execution_time` 仅覆盖 SELECT；写语句无服务端语句超时，
-/// 路由层 120s 兜底超时仍生效。配置 `statement_timeout_secs = 0` 表示显式关闭。
+/// 路由层 120s 兜底超时仍生效。`timeout_ms = 0` 表示显式关闭（配置里写 `statement_timeout_secs = 0`）。
+/// 该毫秒数由 `DatabaseConfig::statement_timeout_ms()` 给出——**上限夹取在这个唯一出口里做**，
+/// 本函数不再自行换算：脏值（如 `u64::MAX`）越过的不是启动期，而是每一次 `SET SESSION`。
 ///
 /// G-12：慢 SQL 日志经 `MySqlConnectOptions::log_slow_statements` 接线，
 /// 独立于 `sql_logging` 开关（与 SQLite/PostgreSQL 统一口径）。
@@ -155,7 +158,7 @@ fn apply_postgres_options(opt: &mut ConnectOptions, config: &DatabaseConfig) {
 /// 原样复用。
 async fn connect_mysql_with_statement_timeout(
     opt: &ConnectOptions,
-    timeout_secs: u64,
+    timeout_ms: u64,
     slow_sql_threshold_ms: u64,
 ) -> anyhow::Result<DatabaseConnection> {
     use sea_orm::SqlxMySqlConnector;
@@ -178,14 +181,13 @@ async fn connect_mysql_with_statement_timeout(
         None => sqlx_opts = sqlx_opts.log_slow_statements(log::LevelFilter::Off, Duration::ZERO),
     }
 
-    let pool = if timeout_secs == 0 {
+    let pool = if timeout_ms == 0 {
         tracing::info!("语句级超时已通过配置显式关闭（statement_timeout_secs=0）");
         pool_opts.connect_with(sqlx_opts).await
     } else {
-        let timeout_ms = timeout_secs.saturating_mul(1000);
         let set_sql = format!("SET SESSION max_execution_time = {}", timeout_ms);
         tracing::info!(
-            timeout_secs,
+            timeout_ms,
             "MySQL 语句级超时已启用（max_execution_time，仅覆盖 SELECT）"
         );
         pool_opts
@@ -211,4 +213,80 @@ async fn connect_mysql_with_statement_timeout(
 
     tracing::info!("数据库连接成功");
     Ok(SqlxMySqlConnector::from_sqlx_mysql_pool(pool))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::prod_scan::{Scan, prod_file, require_volume};
+
+    /// 判"两条方言路径是否都经唯一出口取毫秒数"的**纯函数**：真实树与合成夹具共用同一份实现
+    /// （两份实现必漂，AGENTS 前言 ㉘）。
+    ///
+    /// 入参应是**已按生产口径归一**的行集（`prod_scan` 负责：注释行置空、`#[cfg(test)]` 之后截断），
+    /// 否则本判据的字面量会匹配到自己这一行而恒绿（前言 ㉙ 的"反查判据读整份文件"同一课）。
+    fn conversion_sites(lines: &[String]) -> (usize, usize, Vec<usize>) {
+        let mut via_getter = 0;
+        let mut raw_field = 0;
+        let mut local_mul: Vec<usize> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            via_getter += line.matches("config.statement_timeout_ms()").count();
+            raw_field += line.matches("config.statement_timeout_secs").count();
+            if line.contains(".saturating_mul(1000)") {
+                local_mul.push(i + 1);
+            }
+        }
+        (via_getter, raw_field, local_mul)
+    }
+
+    /// 接线锁：秒→毫秒的换算只准住在 `DatabaseConfig::statement_timeout_ms()` 里。
+    /// 上限夹取一旦能被绕过，脏配置炸的就是"每一次建连接"，而不是启动期一句拒绝。
+    #[test]
+    fn statement_timeout_flows_only_through_the_single_getter() {
+        let file = prod_file("src/db/pool.rs", &Scan::default());
+        require_volume(std::slice::from_ref(&file), 1, 50, "db/pool 的生产视图");
+        let (via_getter, raw_field, local_mul) = conversion_sites(&file.lines);
+        assert!(
+            via_getter >= 2,
+            "MySQL after_connect 与 PG 连接参数两处都必须经 statement_timeout_ms() 取毫秒数，实测 {via_getter} 处"
+        );
+        assert_eq!(
+            raw_field, 0,
+            "生产码不得再直接读 config.statement_timeout_secs（绕过上限夹取的那条路就是本锁的洞）"
+        );
+        assert!(
+            local_mul.is_empty(),
+            "不得再有本地秒→毫秒换算（会漂成两份口径）：行号 {local_mul:?}"
+        );
+    }
+
+    /// 刀口活性：坏形状必须被抓、合规形状必须不报（只期望抛错等于没测，前言 ⑥）。
+    #[test]
+    fn wiring_judge_is_falsifiable() {
+        let bad: Vec<String> = [
+            "    let timeout_ms = timeout_secs.saturating_mul(1000);",
+            "        connect_mysql_with_statement_timeout(&opt, config.statement_timeout_secs,",
+            "    let timeout_ms = config.statement_timeout_ms();",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let (via_getter, raw_field, local_mul) = conversion_sites(&bad);
+        assert_eq!(raw_field, 1, "裸读配置字段必须数到一条");
+        assert_eq!(local_mul, vec![1], "本地换算必须数到，且上报的行号对得上");
+        assert_eq!(via_getter, 1, "合规出口本身不该被算成违规");
+
+        let good: Vec<String> = [
+            "    let timeout_ms = config.statement_timeout_ms();",
+            "            config.statement_timeout_ms(),",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let (g, r, m) = conversion_sites(&good);
+        assert_eq!(
+            (g, r, m.len()),
+            (2, 0, 0),
+            "两处都经唯一出口 ⇒ 不得报任何东西"
+        );
+    }
 }

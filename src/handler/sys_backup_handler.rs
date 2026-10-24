@@ -90,6 +90,11 @@ pub async fn create(
 ) -> Result<AjaxResult<BackupCreateVo>, AppError> {
     // P1 修复：手动备份限流（60s 最小间隔），防反复触发耗尽磁盘空间
     acquire_rate_lock(&state, &format!("backup:create:{}", operator.user_id()), 60).await?;
+    // 全局并发上限（A-2）：上面的锁只封"同一人 60 秒一次"，两个管理员同时点照样各起一路
+    // pg_dump/mysqldump/sqlite3 子进程——整库 dump 是 CPU+IO+磁盘三重成本，故取 1。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BackupCreate,
+    )?;
 
     let vo = state
         .backup_service
@@ -130,6 +135,10 @@ pub async fn export_tenant(
         60,
     )
     .await?;
+    // 数据包导出与自助导出**共用一路闸**（同一类成本：整租户 JSON 流式落盘，2 permits）
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BackupExport,
+    )?;
 
     let vo = state
         .backup_service
@@ -170,6 +179,11 @@ pub async fn self_export(
         60,
     )
     .await?;
+    // 与平台版 tenant-export 同一路闸：成本同类，分闸等于把上限翻倍（b72 F71 那条
+    // "同一族入口混桶会互相饿死"的反面形态——这里是"同一族必须同桶"）
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BackupExport,
+    )?;
 
     let vo = state
         .backup_service

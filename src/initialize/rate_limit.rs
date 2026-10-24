@@ -24,7 +24,7 @@ use sea_orm::{
 };
 
 use crate::common::datetime;
-use crate::entity::sys_rate_limit::{ActiveModel, Entity};
+use crate::entity::sys_rate_limit::{ActiveModel, Column, Entity};
 
 /// 敏感操作独立限流档位矩阵（路由模板须与 `src/router/*.rs` 注册逐字一致）。
 ///
@@ -386,14 +386,24 @@ pub const SENSITIVE_LIMIT_TIERS: &[(&str, i32, f64, &str)] = &[
 /// 只补**缺失**的 `route_pattern`：已存在则保持现值（运行态优先，管理员在管理端调过的
 /// 配额不得被启动流程悄悄改回去）。返回新插入条数，供启动日志与测试断言。
 pub async fn ensure_sensitive_rate_limit_tiers(db: &DatabaseConnection) -> anyhow::Result<usize> {
+    // 先读后派生写：一次 IN 查询取回"已存在的 route_pattern 集合"，替代逐条点查。
+    // b89 由 `rust_hygiene_scan` 在新采集面上抓回这一处 N+1（19 条 = 19 次往返）。
+    // 谓词形状与改造前**逐字相同**（`route_pattern ∈ 矩阵`，无租户过滤——本表是平台级
+    // 限流档位表），所以读侧与写侧共用同一集合，不引入新的作用域口径。
+    let patterns: Vec<String> = SENSITIVE_LIMIT_TIERS
+        .iter()
+        .map(|(p, _, _, _)| (*p).to_string())
+        .collect();
+    let existing: std::collections::HashSet<String> = Entity::find()
+        .filter(Column::RoutePattern.is_in(patterns))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|m| m.route_pattern)
+        .collect();
     let mut inserted = 0usize;
     for (pattern, capacity, refill, description) in SENSITIVE_LIMIT_TIERS {
-        if Entity::find()
-            .filter(crate::entity::sys_rate_limit::Column::RoutePattern.eq(*pattern))
-            .one(db)
-            .await?
-            .is_some()
-        {
+        if existing.contains(*pattern) {
             continue;
         }
         let now = datetime::now_naive();

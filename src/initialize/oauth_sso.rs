@@ -264,13 +264,22 @@ pub(crate) async fn sso_startup_self_check(db: &DatabaseConnection, settings: &S
         }
         let sql =
             format!("SELECT COUNT(*) AS c FROM sys_oauth_client WHERE client_id = '{reserved}'");
-        if let Ok(Some(row)) = db.query_one_raw(Statement::from_string(backend, sql)).await {
-            let count = row.try_get::<i64>("", "c").unwrap_or(0);
-            if count > 0 {
-                tracing::warn!(
-                    "SSO 启动自检：存在与平台 JWT 命名空间撞名的 client_id='{reserved}'，请尽快整改（v4 §1.3）"
-                );
+        // 自检本身不影响启动，但"查不了"与"查了没有撞名"必须可区分：原形状是
+        // `if let Ok(Some(row)) = …await` ⇒ 查询失败时这条自检静默不执行，
+        // 而日志上"没有 WARN"读起来和"检查通过"一模一样（b89 项 13 的判据形状）。
+        match db.query_one_raw(Statement::from_string(backend, sql)).await {
+            Ok(Some(row)) => {
+                let count = row.try_get::<i64>("", "c").unwrap_or(0);
+                if count > 0 {
+                    tracing::warn!(
+                        "SSO 启动自检：存在与平台 JWT 命名空间撞名的 client_id='{reserved}'，请尽快整改（v4 §1.3）"
+                    );
+                }
             }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                "SSO 启动自检：查询 sys_oauth_client 撞名 client_id 失败，本项未核对（不影响启动）: {e}"
+            ),
         }
     }
 }
@@ -291,7 +300,8 @@ pub(crate) async fn sso_startup_self_check(db: &DatabaseConnection, settings: &S
 /// - **仅告警不阻断**（与 3.7 SSO 自检同口径：存量部署允许先启动后整改）；
 /// - 数据隔离**不因此失效**：JWT `tid` 经 `common::tenant::tenant_scope` 仍强制过滤，
 ///   降级仅失去"按 host 判定租户 / host×tid 一致性校验"，不产生跨租户数据泄漏；
-/// - 表缺失 / 查询失败一律静默返回（本函数绝不影响启动）。
+/// - 表缺失 ⇒ 静默返回（无表即无域名绑定，属正常态）；查询失败 ⇒ **WARN 后返回**
+///   （b89 项 13：自检"没跑成"必须与"跑了且没问题"可区分，否则日志里两种结局同形）。
 ///
 /// 返回值：**已告警时**返回可解析的域名绑定数（`Some(count)`），否则 `None`。
 /// "可解析"口径与 `find_active_by_domain` 一致（`del_flag='0' + status='0' + verify_status='1'`）。
@@ -315,21 +325,27 @@ pub(crate) async fn tenant_host_chain_self_check(
     // 才是**确定**的静默失效；未验证/已停用的绑定不参与解析，不应产生误报。
     let sql = "SELECT COUNT(*) AS c FROM sys_tenant_domain \
                WHERE del_flag = '0' AND status = '0' AND verify_status = '1'";
-    if let Ok(Some(row)) = db
+    match db
         .query_one_raw(Statement::from_string(db.get_database_backend(), sql))
         .await
     {
-        let count = row.try_get::<i64>("", "c").unwrap_or(0);
-        if count > 0 {
-            tracing::warn!(
-                active_domains = count,
-                "域名链路自检：server.trusted_proxies 为空但已存在 {count} 条**可解析**的租户域名绑定\
-                 （启用 + 已校验）⇒ host→租户 解析将**静默失效**（header 一律不采信）。请在生产反代\
-                 环境中把网关 IP 段写入 server.trusted_proxies（台账 MT-4 / E-2；数据隔离不受影响，\
-                 仅失去 host 维度）。"
-            );
-            return Some(count);
+        Ok(Some(row)) => {
+            let count = row.try_get::<i64>("", "c").unwrap_or(0);
+            if count > 0 {
+                tracing::warn!(
+                    active_domains = count,
+                    "域名链路自检：server.trusted_proxies 为空但已存在 {count} 条**可解析**的租户域名绑定\
+                     （启用 + 已校验）⇒ host→租户 解析将**静默失效**（header 一律不采信）。请在生产反代\
+                     环境中把网关 IP 段写入 server.trusted_proxies（台账 MT-4 / E-2；数据隔离不受影响，\
+                     仅失去 host 维度）。"
+                );
+                return Some(count);
+            }
         }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            "域名链路自检：查询 sys_tenant_domain 失败，本项未核对（不影响启动）: {e}"
+        ),
     }
     None
 }

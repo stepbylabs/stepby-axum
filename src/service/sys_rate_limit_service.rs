@@ -463,14 +463,21 @@ impl SysRateLimitService {
 
         // 3. 缓存到共享存储（best-effort，失败仅记日志不影响业务）
         //    R8-CONC-013：命令级超时已内建于 store 实现层（快速降级，不挂起请求）
+        //    序列化失败**不是**不可能事件：`refill_per_second: f64` 来自 DB，
+        //    NaN/Infinity 时 `serde_json` 直接返回 Err（原 `if let Ok(val)` 把这一支
+        //    连同后面的写入一起静默跳过 ⇒ 缓存永不写而日志一条没有，b89 项 13）。
         let cached_config = RateLimitConfigCached::from(&tier);
-        if let Ok(val) = serde_json::to_string(&cached_config)
-            && let Err(e) = self
-                .store
-                .set_ex(&key, &val, RATE_LIMIT_CACHE_TTL as u64)
-                .await
-        {
-            tracing::warn!("缓存限流配置到 Redis 失败 (key={}): {}", key, e);
+        match serde_json::to_string(&cached_config) {
+            Ok(val) => {
+                if let Err(e) = self
+                    .store
+                    .set_ex(&key, &val, RATE_LIMIT_CACHE_TTL as u64)
+                    .await
+                {
+                    tracing::warn!("缓存限流配置到 Redis 失败 (key={}): {}", key, e);
+                }
+            }
+            Err(e) => tracing::warn!("序列化限流配置失败，本轮跳过缓存写入 (key={}): {}", key, e),
         }
 
         // M-2：回填 local_cache（best-effort，即使 Redis 写入失败也回填本地，下次请求仍可命中）

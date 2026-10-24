@@ -102,10 +102,23 @@ impl OpenAiCompatibleProvider {
             api_key: api_key.to_string(),
             model: model.to_string(),
             timeout_secs,
+            // 超时**两处都挂**（客户端级 + 每请求级），因为原先这里是
+            // `.build().unwrap_or_default()`：构建失败（TLS/代理环境异常）时
+            // `Default::default()` 给的是一个**没有任何超时**的客户端 ⇒ 上游挂住
+            // 就整条 AI 链路无限等待（本仓 fail-closed 取向禁止"取不到就换默认"）。
+            // 退回默认客户端这件事本身可以接受（请求照样能发），但超时必须是
+            // 结构上存在的——所以补了 `complete_detailed` 里的 `.timeout(...)`。
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(|e| {
+                    tracing::error!(
+                        error = %e,
+                        timeout_secs,
+                        "AI provider HTTP 客户端构建失败，已退回默认客户端并按请求级超时兜底"
+                    );
+                    reqwest::Client::new()
+                }),
         }
     }
 }
@@ -151,6 +164,8 @@ impl AiProvider for OpenAiCompatibleProvider {
         let resp = self
             .client
             .post(&url)
+            // 请求级超时（与客户端级同值，取 max(1) 防"配 0 = 永不超时"的挂死形态）
+            .timeout(std::time::Duration::from_secs(self.timeout_secs.max(1)))
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()
@@ -178,5 +193,66 @@ impl AiProvider for OpenAiCompatibleProvider {
             text: content,
             usage,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::prod_scan::{ProdFile, Scan, prod_file};
+
+    const FILE: &str = "src/ai/provider.rs";
+
+    /// 把行集拼成"无空白"文本：`.build()` 与 `.unwrap_or_default()` 分行写也算同一句链式调用
+    /// （真实缺陷形状就是分行的，逐行匹配看不见它）。
+    fn unbounded_build_sites(lines: &[String]) -> usize {
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.chars().filter(|c| !c.is_whitespace()))
+            .collect();
+        let needle: String = concat!(".build()", ".unwrap_or_default()").to_string();
+        joined.matches(&needle).count()
+    }
+
+    /// b89 项 E1：客户端构建失败不得退回"无超时默认客户端"，且必须有两处超时
+    /// （客户端级 + 请求级）。这条锁的是**兜底路径的形状**，不是 happy path。
+    #[test]
+    fn provider_must_never_build_an_unbounded_http_client() {
+        let ProdFile { lines, .. } = prod_file(FILE, &Scan::default());
+        let bad = unbounded_build_sites(&lines);
+        assert_eq!(
+            bad, 0,
+            "{FILE} 里出现 `.build().unwrap_or_default()`（{bad} 处）：构建失败时得到的是\
+             **没有任何超时**的客户端，上游挂住就无限等待"
+        );
+        let text = lines.join("\n");
+        let timeouts = text.matches(".timeout(").count();
+        assert!(
+            timeouts >= 2,
+            "{FILE} 只数到 {timeouts} 处 `.timeout(`——客户端级与请求级必须各一处\
+             （请求级是构建失败时的唯一兜底）"
+        );
+    }
+
+    /// 判据自身双向：缺陷形状必须被抓、合规形状必须不抓（否则上一条测试等于没判）
+    #[test]
+    fn unbounded_build_detector_is_falsifiable() {
+        let defect = vec![
+            "client: reqwest::Client::builder()".to_string(),
+            "    .timeout(d)".to_string(),
+            "    .build()".to_string(),
+            "    .unwrap_or_default(),".to_string(),
+        ];
+        assert_eq!(
+            unbounded_build_sites(&defect),
+            1,
+            "分行写的链式调用必须被抓到（逐行匹配的写法在这里会漏）"
+        );
+        let ok = vec![
+            "client: reqwest::Client::builder()".to_string(),
+            "    .timeout(d)".to_string(),
+            "    .build()".to_string(),
+            "    .unwrap_or_else(|e| { tracing::error!(%e); reqwest::Client::new() }),".to_string(),
+        ];
+        assert_eq!(unbounded_build_sites(&ok), 0, "合规的响亮兜底不得误报");
     }
 }
