@@ -75,15 +75,23 @@ pub struct IpLocator {
 }
 
 impl IpLocator {
+    /// 日志只用文件名：绝对路径属 AGENTS C.9 的敏感字段，不得进日志
+    fn file_label(path: &str) -> String {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unreadable>")
+            .to_string()
+    }
+
     /// 创建 IpLocator，若 mmdb 文件不存在则返回 None（所有查询返回空字符串）
     pub fn new(mmdb_path: &str) -> Self {
         let reader = match Reader::open_readfile(mmdb_path) {
             Ok(r) => Some(Arc::new(r)),
-            Err(e) => {
+            Err(_) => {
                 tracing::warn!(
-                    "加载 mmdb 文件 {} 失败，IP 归属地查询将返回空: {}",
-                    mmdb_path,
-                    e
+                    file = %Self::file_label(mmdb_path),
+                    "加载 mmdb 文件失败，IP 归属地查询将返回空"
                 );
                 None
             }
@@ -101,7 +109,15 @@ impl IpLocator {
     pub fn new_with_xdb(mmdb_path: &str, xdb_path: &str, xdb_enabled: bool) -> Self {
         let locator = Self::new(mmdb_path);
         if xdb_enabled {
-            locator.reload_xdb(xdb_path).ok();
+            // 失败必须留痕：降级为 mmdb-only 会让国内 IP 精度下降，只在 /health 里
+            // 看到一个 SKIPPED 不足以定位（原实现 .ok() 把原因整个丢掉）
+            if let Err(e) = locator.reload_xdb(xdb_path) {
+                tracing::warn!(
+                    file = %Self::file_label(xdb_path),
+                    reason = %e,
+                    "xdb 加载失败，已降级为 mmdb-only（国内 IP 精度下降）"
+                );
+            }
         }
         locator
     }
@@ -140,10 +156,10 @@ impl IpLocator {
         match XdbReader::from_file(xdb_path) {
             Some(new_reader) => {
                 self.xdb_reader.store(Some(Arc::new(new_reader)));
-                tracing::info!("xdb 文件热加载成功: {}", xdb_path);
+                tracing::info!(file = %Self::file_label(xdb_path), "xdb 文件热加载成功");
                 Ok(())
             }
-            None => anyhow::bail!("加载 xdb 文件 {} 失败（文件不存在或格式错误）", xdb_path),
+            None => anyhow::bail!("加载 xdb 文件失败（文件不存在或格式错误）"),
         }
     }
 

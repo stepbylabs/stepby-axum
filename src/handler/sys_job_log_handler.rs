@@ -138,6 +138,9 @@ pub async fn clean(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<()>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BulkDelete,
+    )?;
     state
         .job_service
         .clean_job_logs(operator.tenant_id())

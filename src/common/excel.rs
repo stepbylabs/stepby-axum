@@ -165,6 +165,11 @@ pub async fn export_to_excel_with_fields<T>(
 where
     T: Clone + Send + Sync + 'static,
 {
+    // 16 条导出端点共用的唯一构造点：并发上限只能在这里收一次，
+    // 逐个 handler 接线会留下 16 个可漏点（且新加导出端点默认无闸）。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::ExcelExport,
+    )?;
     // locale 在异步上下文读取（task-local 在 spawn 逃逸后失效），捕获后传入阻塞任务
     // C-i18n：捕获 locale 字符串而非 bool，在 build_xlsx 内通过 LOCALE.scope 注入，
     // 使 getter 内的 crate::tr! 能正确按当前 locale 返回对应语言（修复英文用户导出 Excel 状态值显示中文的问题）

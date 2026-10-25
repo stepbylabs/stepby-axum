@@ -208,6 +208,9 @@ pub async fn report_preview(
     operator: Operator,
     Path(report_id): Path<i64>,
 ) -> Result<AjaxResult<ReportSnapshotVo>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::ReportSnapshot,
+    )?;
     let vo = state
         .report_service
         .preview_report(report_id, operator.tenant_id())
@@ -390,6 +393,9 @@ pub async fn sub_run(
     operator: Operator,
     Path(sub_id): Path<i64>,
 ) -> Result<AjaxResult<PushSummaryVo>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::ReportSnapshot,
+    )?;
     let vo = state
         .report_service
         .run_sub_now(sub_id, operator.tenant_id())

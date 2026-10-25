@@ -830,6 +830,21 @@ impl TestContext {
             .await
     }
 
+    /// 以**指定来源 IP** 发 POST。用于区分同一上下文里先后两次登录各自派发的 WebHook 事件：
+    /// `new()` 的上下文登录是 `tokio::spawn` 火后即忘，负载高时可能在用例插入 hook 之后
+    /// 才读到 hook 表（b90 实测同一 hook 上出现两条 login.success）。
+    pub async fn post_json_from(
+        &self,
+        ip: IpAddr,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut req = self.request(Method::POST, uri, Some(body));
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((ip, 4321))));
+        self.send_json(req).await
+    }
+
     pub async fn put_json(&self, uri: &str, body: serde_json::Value) -> serde_json::Value {
         self.send_json(self.request(Method::PUT, uri, Some(body)))
             .await

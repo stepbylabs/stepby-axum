@@ -199,6 +199,9 @@ pub async fn evaluate(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<AjaxResult<AlertEvaluateResult>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::AlertEvaluate,
+    )?;
     let result = state.alert_service.evaluate_one(id).await?;
     Ok(AjaxResult::success(result))
 }

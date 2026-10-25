@@ -36,6 +36,26 @@ const SENSITIVE_KEY_MARKS: &[&str] = &["password", "pwd", "secret", "token"];
 /// 敏感值打码占位符
 const MASK: &str = "***";
 
+/// 审计快照序列化：失败不再静默落 `{}`（那会让"变更内容"永久丢失且无任何信号）。
+///
+/// 这里刻意不回退成原始 Debug 文本：审计表列形状是 JSON，塞非 JSON 会污染下游解析；
+/// 正确动作是留痕（表名/主键/哪一侧）并让一条 WARN 可被日志判据看见。
+fn snapshot_json(value: &Value, table: &str, pk: &str, side: &str) -> String {
+    match serde_json::to_string(value) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                table = table,
+                pk = pk,
+                side = side,
+                error = %e,
+                "审计快照序列化失败，该侧变更内容不可追溯"
+            );
+            "{}".to_string()
+        }
+    }
+}
+
 /// 记录一条业务数据变更留痕（审计合规域入口）。
 ///
 /// 由业务写路径在**既有事务内**调用（`conn` 传事务句柄），变更记录与业务写入
@@ -85,10 +105,8 @@ pub async fn record_change<C: ConnectionTrait>(
     // 4. 序列化快照（INSERT 时 before 为 None、DELETE 时 after 为 None 由调用方保证）
     let before_json = before
         .as_ref()
-        .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()));
-    let after_json = after
-        .as_ref()
-        .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()));
+        .map(|v| snapshot_json(v, table, pk, "before"));
+    let after_json = after.as_ref().map(|v| snapshot_json(v, table, pk, "after"));
 
     let mut am = AuditChangeActiveModel {
         table_name: Set(table.to_string()),

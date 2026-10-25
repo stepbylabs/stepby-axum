@@ -170,6 +170,9 @@ pub async fn clean(
     operator: Operator,
     Query(query): Query<FrontendErrorCleanQuery>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BulkDelete,
+    )?;
     // 多租户：租户操作者仅清理本租户记录；平台（tenant_id=0）全量
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let affected = if query.begin_time.is_some() || query.end_time.is_some() {

@@ -240,6 +240,9 @@ pub async fn remove(
     tag = "system-config"
 )]
 pub async fn refresh_cache(State(state): State<Arc<AppState>>) -> Result<AjaxResult<()>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::CacheMaintenance,
+    )?;
     state.config_service.refresh_cache().await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.refresh")))
 }

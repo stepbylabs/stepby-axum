@@ -397,6 +397,9 @@ pub async fn log_clean(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BulkDelete,
+    )?;
     let (expired, cleaned) = state
         .web_hook_service
         .clean_logs(operator.tenant_id())

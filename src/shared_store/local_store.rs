@@ -361,14 +361,19 @@ impl SharedStore for LocalStore {
             .map_err(|e| StoreError::backend(&e))?
         {
             Some(m) if is_expired(m.expire_at) => {
-                // 惰性清理：读时发现已过期即删除（等价 Redis 键自然过期后消失）
-                let _ = self
+                // 惰性清理：读时发现已过期即删除（等价 Redis 键自然过期后消失）。
+                // 删除失败只记 debug：本函数已返回 None，语义正确；把失败升成 WARN 会在
+                // 数据库短暂不可用时把每次读都刷成告警。键名不落日志（可能含会话标识）。
+                if let Err(e) = self
                     .db
                     .execute_raw(self.stmt(
                         "DELETE FROM sys_shared_kv WHERE kv_key = ?",
                         vec![key.to_owned().into()],
                     ))
-                    .await;
+                    .await
+                {
+                    tracing::debug!(error = %e, "过期共享键惰性删除失败（下次读取会重试）");
+                }
                 Ok(None)
             }
             Some(m) => Ok(Some(m.kv_value)),

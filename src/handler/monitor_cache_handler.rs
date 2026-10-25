@@ -460,6 +460,9 @@ pub async fn clear_cache_name(
     State(state): State<Arc<AppState>>,
     Path(cache_name): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::CacheMaintenance,
+    )?;
     // 校验缓存前缀白名单
     validate_cache_prefix(&cache_name)?;
     let pattern = format!("{}*", cache_name);

@@ -366,6 +366,9 @@ pub async fn batch_gen_code(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BatchGenCodeParams>,
 ) -> Result<Response, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BatchGenCode,
+    )?;
     // 解析 tables 参数（逗号分隔）
     let table_names: Vec<String> = params
         .tables

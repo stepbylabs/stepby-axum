@@ -121,3 +121,59 @@ async fn compliance_report_rejects_when_gate_is_full_then_recovers() {
         "释放后可用量必须回到 2（指标口径与闸口径同源）:\n{text}"
     );
 }
+
+/// 第二个入口的端到端形状：证明扩员不是只改了枚举（`ReportSnapshot` 无任何测试占用，
+/// 因此可以安全地把两路许可全部占住）。释放后同一个请求必须穿过闸门落到业务层
+/// （报表不存在 ⇒ 400/404 都算诚实结局），而不是恢复成 200。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn report_preview_rejects_when_gate_is_full_then_reaches_business_layer() {
+    let ctx = TestContext::new().await;
+    let entry = HeavyEntry::ReportSnapshot;
+    let uri = "/system/report/999999/preview";
+
+    let (status, _headers, body) = ctx
+        .send_with_headers(ctx.request(Method::POST, uri, None))
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "空闸时预览必须能进入业务层（不存在的报表由业务层给 400/404）: {body}"
+    );
+
+    let held = (
+        try_enter(entry).expect("第一路必须进得去"),
+        try_enter(entry).expect("第二路必须进得去"),
+    );
+    let (status, headers, body) = ctx
+        .send_with_headers(ctx.request(Method::POST, uri, None))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "闸满必须 429，实际 {status}（body: {body}）"
+    );
+    assert!(
+        headers
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| !v.is_empty()),
+        "429 必须带非空 Retry-After，实际头: {headers:?}"
+    );
+    assert!(
+        body["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("report:snapshot"),
+        "拒绝文案必须点名是哪个入口忙，实际: {body}"
+    );
+
+    drop(held);
+    let (status, _headers, body) = ctx
+        .send_with_headers(ctx.request(Method::POST, uri, None))
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "释放后必须回到业务结局，而不是继续 429: {body}"
+    );
+}

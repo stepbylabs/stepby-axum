@@ -405,6 +405,9 @@ pub async fn send_log_clean(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<u64>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BulkDelete,
+    )?;
     let count = state
         .msg_service
         .clean_send_logs(None, operator.tenant_id())
@@ -488,6 +491,9 @@ pub async fn retry_pending(
     operator: Operator,
     Path(batch): Path<u64>,
 ) -> Result<AjaxResult<u64>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::MsgOutbound,
+    )?;
     let count = state
         .msg_service
         .retry_pending(batch, operator.tenant_id())

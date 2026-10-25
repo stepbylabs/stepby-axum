@@ -35,6 +35,9 @@ pub async fn execute(
     operator: Operator,
     Json(dto): Json<HttpDebugDto>,
 ) -> Result<AjaxResult<HttpDebugVo>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::HttpDebugExecute,
+    )?;
     tracing::info!(
         user = operator.username(),
         method = %dto.method,

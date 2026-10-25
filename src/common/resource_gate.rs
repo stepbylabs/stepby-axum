@@ -71,7 +71,26 @@ pub enum HeavyEntry {
     ArchiveDownload,
     /// 用户批量导入（每行一次 upsert，行图由调用方给）
     UserImport,
+    /// 报表快照（预览与订阅立即执行共用：窗口聚合 + 多表 COUNT + JSON 快照）
+    ReportSnapshot,
+    /// 告警规则单条评估（Redis SCAN + 全表 COUNT + sysinfo + 出站通知）
+    AlertEvaluate,
+    /// 管理员任意 URL 出站调试（目标由调用方给，出站连接数与响应体都被放大）
+    HttpDebugExecute,
+    /// Excel 导出（16 条端点统一收口在 `common::excel` 的唯一构造点）
+    ExcelExport,
+    /// 日志/记录清空（6 条端点：长 DELETE + 防篡改锚点写 + WAL 膨胀）
+    BulkDelete,
+    /// 缓存维护（`refreshCache` / `clearCacheName`：无上限 SCAN）
+    CacheMaintenance,
+    /// 批量代码生成（最多 20 表模板渲染 + 内存 ZIP）
+    BatchGenCode,
+    /// 待重试消息批量重投（出站事实 + 写库）
+    MsgOutbound,
 }
+
+/// 成员数（数组长度与 `ALL` 共用；新增变体必须同时改这里，否则类型检查会失败）。
+const ENTRY_COUNT: usize = 13;
 
 /// 闸满后给客户端的退避提示（秒）。取 30 的理由：这一族单次耗时在 10 秒～数分钟，
 /// 30 秒既不会让人立刻重试打在同一次运行上，也不至于长到像"服务坏了"。
@@ -82,12 +101,20 @@ impl HeavyEntry {
     ///
     /// 这张表**不只是测试夹具**：[`render_prometheus`] 以它为采集面，所以漏一个成员
     /// 会让那条入口在 `/metrics` 里静默缺席（有闸、没观测 = 运维看不见背压）。
-    pub const ALL: [HeavyEntry; 5] = [
+    pub const ALL: [HeavyEntry; ENTRY_COUNT] = [
         HeavyEntry::BackupCreate,
         HeavyEntry::BackupExport,
         HeavyEntry::ComplianceReport,
         HeavyEntry::ArchiveDownload,
         HeavyEntry::UserImport,
+        HeavyEntry::ReportSnapshot,
+        HeavyEntry::AlertEvaluate,
+        HeavyEntry::HttpDebugExecute,
+        HeavyEntry::ExcelExport,
+        HeavyEntry::BulkDelete,
+        HeavyEntry::CacheMaintenance,
+        HeavyEntry::BatchGenCode,
+        HeavyEntry::MsgOutbound,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -97,6 +124,14 @@ impl HeavyEntry {
             HeavyEntry::ComplianceReport => "operlog:compliance-report",
             HeavyEntry::ArchiveDownload => "operlog:archive-download",
             HeavyEntry::UserImport => "user:import",
+            HeavyEntry::ReportSnapshot => "report:snapshot",
+            HeavyEntry::AlertEvaluate => "alert:evaluate",
+            HeavyEntry::HttpDebugExecute => "tool:http-debug",
+            HeavyEntry::ExcelExport => "export:excel",
+            HeavyEntry::BulkDelete => "db:bulk-delete",
+            HeavyEntry::CacheMaintenance => "cache:maintenance",
+            HeavyEntry::BatchGenCode => "gen:batch-code",
+            HeavyEntry::MsgOutbound => "msg:outbound",
         }
     }
 
@@ -117,6 +152,25 @@ impl HeavyEntry {
             HeavyEntry::ArchiveDownload => 2,
             // 逐行 upsert：写放大线性于行数，四路并发足以让连接池只剩 0 个空闲连接
             HeavyEntry::UserImport => 4,
+            // 窗口聚合 + 多表 COUNT + JSON 快照：预览与订阅执行同成本，两路共享一桶
+            HeavyEntry::ReportSnapshot => 2,
+            // Redis SCAN + 全表 COUNT + sysinfo + 出站：调度器本身是单序列，两路是手点的上限
+            HeavyEntry::AlertEvaluate => 2,
+            // 管理员任意 URL 出站：两路并发足以覆盖正常排障，又不至于把出站连接池占满
+            HeavyEntry::HttpDebugExecute => 2,
+            // 16 条导出端点共用一个唯一构造点。取 8 是自洽性判据允许的天花板：
+            // 单次最多 5 万行 + 阻塞线程池，8 路仍是硬上限；取 1~2 会让并行集成测试
+            // （flow / 日志 / 任务 / 登录四条导出链）互相 429，把门禁变成时序决定。
+            HeavyEntry::ExcelExport => 8,
+            // 6 条清空端点：长 DELETE + 锚点写 + WAL。四条集成测试会并发清理小表，
+            // 取 4 既挡住"多个管理员同时清全库"，又不引入假失败。
+            HeavyEntry::BulkDelete => 4,
+            // 无上限 SCAN：串行化，避免多个管理员同时扫全库键空间
+            HeavyEntry::CacheMaintenance => 2,
+            // 模板渲染 + 内存 ZIP：单路
+            HeavyEntry::BatchGenCode => 1,
+            // 批量出站重投：不可重放事实，但入口是人类触发 ⇒ 只允许一路
+            HeavyEntry::MsgOutbound => 1,
         }
     }
 
@@ -127,12 +181,28 @@ impl HeavyEntry {
             HeavyEntry::ComplianceReport => 2,
             HeavyEntry::ArchiveDownload => 3,
             HeavyEntry::UserImport => 4,
+            HeavyEntry::ReportSnapshot => 5,
+            HeavyEntry::AlertEvaluate => 6,
+            HeavyEntry::HttpDebugExecute => 7,
+            HeavyEntry::ExcelExport => 8,
+            HeavyEntry::BulkDelete => 9,
+            HeavyEntry::CacheMaintenance => 10,
+            HeavyEntry::BatchGenCode => 11,
+            HeavyEntry::MsgOutbound => 12,
         }
     }
 
     /// 本入口的闸（首次调用建闸，之后复用同一 `Arc`）。
     fn gate(self) -> Arc<Semaphore> {
-        static SLOTS: [OnceLock<Arc<Semaphore>>; 5] = [
+        static SLOTS: [OnceLock<Arc<Semaphore>>; ENTRY_COUNT] = [
+            const { OnceLock::new() },
+            const { OnceLock::new() },
+            const { OnceLock::new() },
+            const { OnceLock::new() },
+            const { OnceLock::new() },
+            const { OnceLock::new() },
+            const { OnceLock::new() },
+            const { OnceLock::new() },
             const { OnceLock::new() },
             const { OnceLock::new() },
             const { OnceLock::new() },
@@ -173,14 +243,30 @@ pub fn try_enter(entry: HeavyEntry) -> Result<OwnedSemaphorePermit, AppError> {
 ///
 /// 为什么不用 `Mutex<HashMap>`：入口集合是**编译期封闭**的，运行期不可能出现新键 ⇒
 /// 定长数组既免去锁，也让"每个入口都有计数器"这件事由类型保证而不是靠代码路径。
-static ADMITTED: [AtomicU64; 5] = [
+static ADMITTED: [AtomicU64; ENTRY_COUNT] = [
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
 ];
-static REJECTED: [AtomicU64; 5] = [
+static REJECTED: [AtomicU64; ENTRY_COUNT] = [
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
+    const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
     const { AtomicU64::new(0) },
@@ -191,7 +277,7 @@ static REJECTED: [AtomicU64; 5] = [
 /// 记一次闸口决策，返回**自增前**的读数（测试据此判"确实前进了"而不去比绝对值——
 /// 绝对值在并行用例里由别人决定，`fetch_add` 的返回值是这条通道唯一的事实量）。
 fn record_decision(entry: HeavyEntry, admitted: bool) -> u64 {
-    let table: &[AtomicU64; 5] = if admitted { &ADMITTED } else { &REJECTED };
+    let table: &[AtomicU64; ENTRY_COUNT] = if admitted { &ADMITTED } else { &REJECTED };
     table[entry.index()].fetch_add(1, Ordering::Relaxed)
 }
 
@@ -235,7 +321,7 @@ pub fn render_prometheus() -> String {
 /// 做成吃参数的纯函数，是为了让"哪个 outcome 名配哪张表"这件事**可以在测试里造出
 /// 可区分的数**来证——全局计数器两边都可能是 0，拿它做对照等于没对照（AGENTS ⑥ 的
 /// "反脆弱必须配真能转红的用例"）。
-fn render_decisions(tables: &[(&str, &[AtomicU64; 5])]) -> String {
+fn render_decisions(tables: &[(&str, &[AtomicU64; ENTRY_COUNT])]) -> String {
     let mut s = String::new();
     s.push_str(
         "# HELP stepby_resource_gate_decisions_total 重资源入口取闸结局计数（admitted/rejected）\n",
@@ -277,7 +363,7 @@ fn rejected(entry: HeavyEntry) -> AppError {
 /// 当前可用许可数（**只用于观测与测试**：判据要能证明"闸真的在建"，而不是只证明
 /// "代码里写了个 Semaphore"）。
 ///
-/// ⚠️ 只有 `ComplianceReport` 这一入口允许被测试占满——其余四个在别的集成测试里是
+/// ⚠️ 只有 `ComplianceReport` 与 `ReportSnapshot` 允许被测试占满——其余入口在别的集成测试里是
 /// **真实业务链路**（`sys_backup.rs` 真跑 `POST /system/backup`），测试占住许可会让那条
 /// 链路偶发 429，即"门禁绿红由并行时序决定"（AGENTS 前言 ㉒ 那一族）。因此下面那组
 /// 单元测试一律用**局部** `Semaphore` 证形状，不去动全局闸。
@@ -293,7 +379,15 @@ mod tests {
     /// 表自洽：成员齐全、label 唯一、上限在 1..=8（0 会永久拒绝、过大等于没闸）
     #[test]
     fn heavy_entry_table_is_self_consistent() {
-        assert_eq!(HeavyEntry::ALL.len(), 5, "成员表必须与枚举一一对应");
+        assert_eq!(
+            HeavyEntry::ALL.len(),
+            ENTRY_COUNT,
+            "成员表必须与枚举一一对应"
+        );
+        assert_eq!(
+            ENTRY_COUNT, 13,
+            "成员数变了 ⇒ 槽位/计数表/接线反查都要同步扩"
+        );
         for (i, entry) in HeavyEntry::ALL.iter().copied().enumerate() {
             assert_eq!(
                 entry.index(),
@@ -413,7 +507,8 @@ mod tests {
     /// 同一个 `ALL` 既要"被观测到"，也要"被接到 handler 上"。
     #[test]
     fn heavy_entries_are_wired_into_handlers_before_their_work() {
-        // (label, 变体名, handler 文件, 重活调用点)
+        // (label, 变体名, handler 文件, 重活调用点)。同一入口可有多行（同一闸桶、
+        // 多条接线点）：报表快照、清空族、缓存维护各有多处入口。
         let registry: &[(&str, &str, &str, &str)] = &[
             (
                 "backup:create",
@@ -445,15 +540,116 @@ mod tests {
                 "src/handler/sys_user_handler.rs",
                 "import_users(",
             ),
+            (
+                "report:snapshot",
+                "HeavyEntry::ReportSnapshot",
+                "src/handler/sys_report_handler.rs",
+                "preview_report(",
+            ),
+            (
+                "report:snapshot",
+                "HeavyEntry::ReportSnapshot",
+                "src/handler/sys_report_handler.rs",
+                "run_sub_now(",
+            ),
+            (
+                "alert:evaluate",
+                "HeavyEntry::AlertEvaluate",
+                "src/handler/monitor_alert_handler.rs",
+                "evaluate_one(",
+            ),
+            (
+                "tool:http-debug",
+                "HeavyEntry::HttpDebugExecute",
+                "src/handler/sys_http_debug_handler.rs",
+                ".execute(dto)",
+            ),
+            (
+                "export:excel",
+                "HeavyEntry::ExcelExport",
+                "src/common/excel.rs",
+                "spawn_blocking(",
+            ),
+            (
+                "db:bulk-delete",
+                "HeavyEntry::BulkDelete",
+                "src/handler/sys_oper_log_handler.rs",
+                "clean_oper_logs_by_range(",
+            ),
+            (
+                "db:bulk-delete",
+                "HeavyEntry::BulkDelete",
+                "src/handler/sys_logininfor_handler.rs",
+                "clean_logininfors_by_range(",
+            ),
+            (
+                "db:bulk-delete",
+                "HeavyEntry::BulkDelete",
+                "src/handler/sys_job_log_handler.rs",
+                "clean_job_logs(",
+            ),
+            (
+                "db:bulk-delete",
+                "HeavyEntry::BulkDelete",
+                "src/handler/sys_frontend_error_handler.rs",
+                "clean_by_range(",
+            ),
+            (
+                "db:bulk-delete",
+                "HeavyEntry::BulkDelete",
+                "src/handler/sys_msg_handler.rs",
+                "clean_send_logs(",
+            ),
+            (
+                "db:bulk-delete",
+                "HeavyEntry::BulkDelete",
+                "src/handler/sys_web_hook_handler.rs",
+                "clean_logs(",
+            ),
+            (
+                "cache:maintenance",
+                "HeavyEntry::CacheMaintenance",
+                "src/handler/sys_config_handler.rs",
+                "config_service.refresh_cache(",
+            ),
+            (
+                "cache:maintenance",
+                "HeavyEntry::CacheMaintenance",
+                "src/handler/monitor_cache_handler.rs",
+                "delete_keys(&state, &keys)",
+            ),
+            (
+                "gen:batch-code",
+                "HeavyEntry::BatchGenCode",
+                "src/handler/tool_gen_handler.rs",
+                ".batch_gen_code(&table_names)",
+            ),
+            (
+                "msg:outbound",
+                "HeavyEntry::MsgOutbound",
+                "src/handler/sys_msg_handler.rs",
+                ".retry_pending(batch,",
+            ),
         ];
-        // 正向 + 反向：ALL 与登记表必须逐成员对上（缺哪一侧都由这一条点名）
+        // 正向 + 反向：ALL 与登记表必须逐成员对上（缺哪一侧都由这一条点名）。
+        // 同一入口多行接线，按 label 去重后再比。
         let all_labels: Vec<&str> = HeavyEntry::ALL.iter().map(|e| e.label()).collect();
-        let registry_labels: Vec<&str> = registry.iter().map(|(label, ..)| *label).collect();
+        let registry_labels: Vec<&str> = registry
+            .iter()
+            .map(|(label, ..)| *label)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let gaps = wiring_gap_messages(&all_labels, &registry_labels);
         assert!(
             gaps.is_empty(),
             "接线反查表与 `HeavyEntry::ALL` 不闭合：\n{}",
             gaps.join("\n")
+        );
+        assert_eq!(
+            registry_labels.len(),
+            HeavyEntry::ALL.len(),
+            "去重后的接线入口数必须等于成员数（同一入口多行接线在去重后只算一个）"
         );
         let mut files = std::collections::BTreeSet::new();
         for (_label, gate_needle, file, work_needle) in registry {
@@ -477,8 +673,8 @@ mod tests {
         }
         assert_eq!(
             files.len(),
-            3,
-            "反查必须覆盖三个 handler 文件（少了就是有人把接线挪出了视野）"
+            15,
+            "反查必须覆盖全部 15 个接线文件（少了就是有人把接线挪出了视野）"
         );
     }
 
@@ -513,7 +709,7 @@ mod tests {
         // 否则上面那几条会在两张空表上恒成立
         assert_eq!(
             HeavyEntry::ALL.len(),
-            5,
+            ENTRY_COUNT,
             "`ALL` 的成员数变了 ⇒ 这条正控的口径要跟着改，不能默认成立"
         );
     }
@@ -661,15 +857,7 @@ mod tests {
     /// 若有人把两段渲染复制后只改 label（配反），本用例当场红。
     #[test]
     fn decision_pairing_is_per_outcome_table() {
-        let mk = |base: u64| {
-            [
-                AtomicU64::new(base),
-                AtomicU64::new(base + 1),
-                AtomicU64::new(base + 2),
-                AtomicU64::new(base + 3),
-                AtomicU64::new(base + 4),
-            ]
-        };
+        let mk = |base: u64| std::array::from_fn(|i| AtomicU64::new(base + i as u64));
         let admitted = mk(10);
         let rejected = mk(90);
         let text = render_decisions(&[("admitted", &admitted), ("rejected", &rejected)]);

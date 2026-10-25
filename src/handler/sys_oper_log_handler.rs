@@ -131,6 +131,9 @@ pub async fn clean(
     operator: Operator,
     Query(query): Query<OperLogCleanQuery>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BulkDelete,
+    )?;
     // 多租户：租户操作者仅清理本租户日志；平台（tenant_id=0）全量
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     // 传入时间范围时执行按时间清理，否则回退保留期清理（保留最近 30 天）

@@ -8,8 +8,18 @@
 //! `build_unify_update_sql`（单一事实源，兜底片段与迁移同款）。
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use std::net::IpAddr;
 
 use super::TestContext;
+
+/// 本用例触发登录所用的来源 IP：**刻意与 `TestContext::new()` 的上下文登录不同**。
+///
+/// 根因（b90 实测）：`new()` 会用 `peer_ip` 登录一次以取得 token，登录处理器把
+/// `login.success` 交给 `tokio::spawn` 火后即忘；负载高时该任务可能在本用例插入 hook
+/// **之后**才查询 hook 表，于是同一个 hook 上出现两条 login.success（整跑门禁时
+/// `left: 2 / right: 1`，隔离复跑恒绿）。按来源 IP 计数既保留"一次登录只派发一次"
+/// 的回归锁，又不依赖后台任务的调度时机。
+const TRIGGER_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 42));
 
 /// 查询 sys_web_hook 单列值的辅助（sqlite）
 async fn query_subscribed_events(ctx: &TestContext, id: i64) -> Option<String> {
@@ -81,10 +91,39 @@ async fn count_logs(ctx: &TestContext, hook_id: i64, event_type: &str) -> usize 
         .count()
 }
 
+/// 只统计**本用例来源 IP** 派发的那一次（见 [`TRIGGER_IP`] 的根因说明）。
+async fn count_logs_from_ip(
+    ctx: &TestContext,
+    hook_id: i64,
+    event_type: &str,
+    ip: IpAddr,
+) -> usize {
+    let v = ctx
+        .get_json(&format!(
+            "/monitor/webHook/log/list?hookId={hook_id}&pageSize=50"
+        ))
+        .await;
+    let want = ip.to_string();
+    v["rows"]
+        .as_array()
+        .expect("log rows 应为数组")
+        .iter()
+        .filter(|r| r["eventType"].as_str() == Some(event_type))
+        .filter(|r| {
+            r["payload"]
+                .as_str()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .and_then(|p| p["ip"].as_str().map(|s| s == want))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 /// 触发一次真实登录（成功路径）→ 派发 login.success
 async fn trigger_login(ctx: &TestContext) {
     let v = ctx
-        .post_json(
+        .post_json_from(
+            TRIGGER_IP,
             "/login",
             serde_json::json!({
                 "username": "admin",
@@ -97,15 +136,16 @@ async fn trigger_login(ctx: &TestContext) {
     assert_eq!(v["code"], 200, "登录应成功，实际: {v}");
 }
 
-/// 轮询等待事件派发留痕出现（异步 fire-and-forget，最多 ~8s）
-async fn wait_for_log(ctx: &TestContext, hook_id: i64, event_type: &str) {
+/// 轮询等待**本用例来源 IP** 的留痕出现（异步 fire-and-forget，最多 ~8s）：
+/// 上下文登录的迟到事件不得提前满足这条等待。
+async fn wait_for_log_from_ip(ctx: &TestContext, hook_id: i64, event_type: &str, ip: IpAddr) {
     for _ in 0..40 {
-        if count_logs(ctx, hook_id, event_type).await > 0 {
+        if count_logs_from_ip(ctx, hook_id, event_type, ip).await > 0 {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    panic!("等待事件 {event_type} 留痕超时（hook {hook_id}）");
+    panic!("等待事件 {event_type}（来源 {ip}）留痕超时（hook {hook_id}）");
 }
 
 /// 方案 C 全链路：存量形态收敛 + 登录事件单次派发 + 空订阅无损。
@@ -164,14 +204,14 @@ async fn test_webhook_unify_and_login_dispatched_once() {
     // ---- 3. 触发登录成功事件 ----
     trigger_login(&ctx).await;
 
-    // ① login.success 命中存量订阅（映射后新口径匹配）
-    wait_for_log(&ctx, hook_login, "login.success").await;
-    // ② 双发删除回归锁：该 hook 的 login.success 留痕**恰好 1 条**，
-    //    且不存在旧事件名 login_success（若双发未删干净，会出现第二条同事件
-    //    或旧名留痕）
+    // ① login.success 命中存量订阅（映射后新口径匹配）——按本用例来源 IP 等待，
+    //    上下文登录的迟到事件不算数
+    wait_for_log_from_ip(&ctx, hook_login, "login.success", TRIGGER_IP).await;
+    // ② 双发删除回归锁：该 hook 上**本用例那次登录**的 login.success 留痕恰好 1 条，
+    //    且不存在旧事件名 login_success（若双发未删干净，会出现第二条同事件或旧名留痕）
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     assert_eq!(
-        count_logs(&ctx, hook_login, "login.success").await,
+        count_logs_from_ip(&ctx, hook_login, "login.success", TRIGGER_IP).await,
         1,
         "登录成功事件必须只派发一次（方案 C 双发删除）"
     );
@@ -181,7 +221,7 @@ async fn test_webhook_unify_and_login_dispatched_once() {
         "不得再以旧事件名 login_success 派发"
     );
     // ③ 空 event_types（NULL = 全部）hook 同样命中 → 存量「空 = 全部」语义无损
-    wait_for_log(&ctx, hook_all, "login.success").await;
+    wait_for_log_from_ip(&ctx, hook_all, "login.success", TRIGGER_IP).await;
 
     // ---- 4. 清理（逻辑删除 + 级联清留痕）----
     ctx.delete_json(&format!("/monitor/webHook/{hook_login}"))

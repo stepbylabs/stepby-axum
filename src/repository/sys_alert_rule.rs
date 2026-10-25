@@ -134,18 +134,6 @@ impl SysAlertRuleRepository {
         Ok(res.rows_affected)
     }
 
-    /// 仅更新 last_fired_at / updated_at（无静默条件，测试与特殊场景用）
-    pub async fn update_last_fired(&self, id: i64, fired_at: NaiveDateTime) -> Result<(), DbErr> {
-        let res = SysAlertRule::update_many()
-            .col_expr(Column::LastFiredAt, Expr::value(fired_at))
-            .col_expr(Column::UpdatedAt, Expr::value(fired_at))
-            .filter(Column::Id.eq(id))
-            .exec(self.base.db())
-            .await?;
-        let _ = res.rows_affected;
-        Ok(())
-    }
-
     /// 插入告警规则
     pub async fn insert(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.insert(model).await
