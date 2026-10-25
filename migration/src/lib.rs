@@ -414,6 +414,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261021_000001_notice_read_user_index::Migration),
             Box::new(m20261022_000001_pwd_expire_policy::Migration),
             Box::new(m20261022_000002_retire_dead_config_keys::Migration),
+            Box::new(m20261026_000001_observability_clear_perm::Migration),
         ]
     }
 }

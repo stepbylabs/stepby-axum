@@ -17,6 +17,12 @@ use std::net::SocketAddr;
 
 use super::TestContext;
 
+/// `retryPending` 挂 `HeavyEntry::MsgOutbound`（`permits=1`：防两个管理员同时触发批量出站重投）。
+/// 本文件有两个用例都会打这条入口，并行跑时后到者会收到 429（b93 全量实测：
+/// `test_msg_send_log_lifecycle` 的 retryPending 被闸满拒成业务失败）。闸是产品护栏，
+/// 不因测试放宽；用例侧用同一把锁把这条入口串起来（与既有 `CONVENTION_TEST_MUTEX` 同取向）。
+static MSG_OUTBOUND_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 构造带鉴权头 + ConnectInfo 的原始请求（用于 send_raw 断言非 200 状态码）。
 fn raw_req(
     ctx: &TestContext,
@@ -489,6 +495,7 @@ async fn test_msg_template_crud_chain() {
 /// 发送记录生命周期：send → 查询日志 → retry → markPending → retryPending → clean → 删除单条 + 非法 ID 400。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_msg_send_log_lifecycle() {
+    let _outbound = MSG_OUTBOUND_TEST_LOCK.lock().await;
     let ctx = TestContext::new().await;
 
     // 前置：本地短信网关（真实 HTTP listener，验证 G-07 完整投递链）。
@@ -735,6 +742,7 @@ ok";
 /// - 交回的行真的被批次消费（retryPending 返回 ≥1），链路闭合可跑通。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_msg_mark_pending_requeues_failed_log() {
+    let _outbound = MSG_OUTBOUND_TEST_LOCK.lock().await;
     let ctx = TestContext::new().await;
 
     // 死网关：绑定取号后立即 drop → 端口无人监听，dispatch 必然连接被拒（真实失败，非模拟）

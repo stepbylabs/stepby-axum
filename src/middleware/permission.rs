@@ -633,16 +633,16 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/monitor/db-pool", "monitor:health:list"),
 
     // ===== 可观测性监控（慢请求 / 错误聚合 / Redis 指标）=====
-    // 慢请求面板（列表 + 聚合 + 清空）共用一个查看权限，运算符粒度与面板按钮一致。
+    // 慢请求面板（列表 + 聚合 + 清空）：查看共用 list，清空走写权限 remove（b93 N-92-1）。
     // 注意：MatchedPath 模板中连字符 "-" 原样保留（axum 不做 shell 转义）。
     ("GET", "/monitor/slow-sql/list", "monitor:slowSql:list"),
     ("GET", "/monitor/slow-sql/stats", "monitor:slowSql:list"),
-    ("DELETE", "/monitor/slow-sql/clear", "monitor:slowSql:list"),
-    // 错误聚合面板（列表 + 统计 + 清空）与慢请求同属"运行监控"单一面板，
-    // 共用查看权限 monitor:slowSql:list（m20260819_000006 观察面板 perms）
+    ("DELETE", "/monitor/slow-sql/clear", "monitor:slowSql:remove"),
+    // 错误聚合面板（列表 + 统计 + 清空）与慢请求同属"运行监控"单一面板：
+    // 查看共用 monitor:slowSql:list，清空与慢请求共用写权限 monitor:slowSql:remove。
     ("GET", "/monitor/error-log/list", "monitor:slowSql:list"),
     ("GET", "/monitor/error-log/stats", "monitor:slowSql:list"),
-    ("DELETE", "/monitor/error-log/clear", "monitor:slowSql:list"),
+    ("DELETE", "/monitor/error-log/clear", "monitor:slowSql:remove"),
     // Redis 运行指标：与缓存监控同权（monitor:cache:list），复用缓存菜单入口
     ("GET", "/monitor/redis/stats", "monitor:cache:list"),
 
@@ -1274,7 +1274,7 @@ mod tests {
         );
         assert_eq!(
             get_required_perm("DELETE", "/monitor/slow-sql/clear"),
-            Some("monitor:slowSql:list")
+            Some("monitor:slowSql:remove")
         );
         assert_eq!(
             get_required_perm("GET", "/monitor/error-log/list"),
@@ -1286,7 +1286,7 @@ mod tests {
         );
         assert_eq!(
             get_required_perm("DELETE", "/monitor/error-log/clear"),
-            Some("monitor:slowSql:list")
+            Some("monitor:slowSql:remove")
         );
         assert_eq!(
             get_required_perm("GET", "/monitor/redis/stats"),
@@ -1299,6 +1299,60 @@ mod tests {
         assert_eq!(
             get_required_perm("GET", "/monitor/server"),
             Some("monitor:health:list")
+        );
+    }
+
+    /// 破坏性 clear/clean 端点**不得挂读权限**（b93 N-92-1 的形状锁）。
+    ///
+    /// 判据直接读 `governance::COMMON_ROLE_READONLY_PERM_SUFFIXES`（与 common 授权策略、
+    /// 能力位 view 档共用同一份读面定义），而不是在测试里再抄一份后缀表。
+    fn destructive_clear_perm_violations<'a>(
+        table: &'a [(&'a str, &'a str, &'a str)],
+    ) -> Vec<(&'a str, &'a str, &'a str)> {
+        table
+            .iter()
+            .copied()
+            .filter(|(method, path, perm)| {
+                *method == "DELETE"
+                    && (path.contains("/clear") || path.contains("/clean"))
+                    && governance::COMMON_ROLE_READONLY_PERM_SUFFIXES
+                        .iter()
+                        .any(|suffix| perm.ends_with(suffix))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn destructive_clear_routes_must_not_use_read_only_perms() {
+        // 真实表必须 0 违规；采集面自证：clear/clean 端点确实被数到了
+        let real = destructive_clear_perm_violations(super::PERM_ROUTE_TABLE);
+        assert!(
+            real.is_empty(),
+            "以下 DELETE clear/clean 端点仍挂在读权限下（只读观察者可以清空数据）：{real:?}"
+        );
+        let clear_clean_count = super::PERM_ROUTE_TABLE
+            .iter()
+            .filter(|(m, p, _)| *m == "DELETE" && (p.contains("/clear") || p.contains("/clean")))
+            .count();
+        assert!(
+            clear_clean_count >= 6,
+            "采集面异常：只数到 {clear_clean_count} 个 DELETE clear/clean 端点（下限 6）"
+        );
+
+        // 正向：读权限 + clear 必须被点名；反向：写权限、非 DELETE 均不得误报
+        let synthetic = [
+            ("DELETE", "/monitor/x/clear", "monitor:x:list"),
+            ("DELETE", "/monitor/y/clean", "monitor:y:query"),
+            ("DELETE", "/monitor/x/clear", "monitor:x:remove"),
+            ("GET", "/monitor/x/clear", "monitor:x:list"),
+        ];
+        assert_eq!(
+            destructive_clear_perm_violations(&synthetic),
+            vec![
+                ("DELETE", "/monitor/x/clear", "monitor:x:list"),
+                ("DELETE", "/monitor/y/clean", "monitor:y:query"),
+            ],
+            "形状锁必须抓住读权限的两支、放过写权限与非 DELETE 两支"
         );
     }
 

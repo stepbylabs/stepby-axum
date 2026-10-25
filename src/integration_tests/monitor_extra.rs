@@ -14,8 +14,10 @@
 //! - 每个测试独占 Redis DB，登录即写入 `online:{token_hash}`，可被列表/缓存链路复用。
 //! - 可观测性缓冲为进程内每个 AppState 独立实例，测试内 clear 后为全空，可确定性断言空数组。
 
-use super::TestContext;
+use super::{TestContext, login};
+use crate::entity::{sys_menu, sys_role_menu};
 use axum::http::{Method, StatusCode};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 /// 在线用户分页查询：rows/total 结构 + 当前 admin 会话 + 字段完整性。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -168,6 +170,157 @@ async fn it_mon_observability_error_log() {
         .await;
     let rows = v["rows"].as_array().expect("rows 应为数组，实际: {v}");
     assert!(rows.is_empty(), "清空后错误日志应为空数组，实际: {v}");
+}
+
+/// b93 N-92-1：可观测「清空」是写操作，只读观察者不得清空。
+///
+/// 立据：两个 DELETE clear 端点原与列表共用读权限 `monitor:slowSql:list`，菜单 F 按钮 3551
+/// 也发读权限 ⇒ 任何"只读"角色都能清空运维缓冲（同域其余 clear/clean 端点全部挂写权限）。
+/// 本用例用**真实角色 + 真实登录令牌**取证，而不是合成超管令牌（合成令牌会绕过 RBAC 采集面）：
+/// 1) 种子契约：3551 = `monitor:slowSql:remove`，页面 3550 仍是读权限，common(role 2) 不持有 3551；
+/// 2) 只授页面 3550 的用户：list/stats 照常 200，两个 clear 都 403；
+/// 3) 对照组：同一角色补授 3551 后清空成功 ⇒ 403 来自该权限键，不是端点恒 403。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_mon_observability_clear_requires_write_perm() {
+    let ctx = TestContext::new().await;
+
+    // 1. 种子契约：两个菜单的权限键与 common 授权终态
+    let db = &ctx.state.db;
+    let page = sys_menu::Entity::find_by_id(3550)
+        .one(db)
+        .await
+        .expect("查询 sys_menu 3550 失败")
+        .expect("页面菜单 3550 应存在");
+    assert_eq!(
+        page.perms.as_deref(),
+        Some("monitor:slowSql:list"),
+        "页面菜单 3550 应只发查看权限"
+    );
+    let btn = sys_menu::Entity::find_by_id(3551)
+        .one(db)
+        .await
+        .expect("查询 sys_menu 3551 失败")
+        .expect("清空按钮 3551 应存在");
+    assert_eq!(
+        btn.perms.as_deref(),
+        Some("monitor:slowSql:remove"),
+        "清空按钮 3551 必须是写权限（与两个 DELETE clear 端点同键）"
+    );
+    let common_granted = sys_role_menu::Entity::find()
+        .filter(sys_role_menu::Column::RoleId.eq(2))
+        .filter(sys_role_menu::Column::MenuId.eq(3551))
+        .one(db)
+        .await
+        .expect("查询 sys_role_menu 失败")
+        .is_some();
+    assert!(
+        !common_granted,
+        "common(role 2) 是租户管理员菜单模板源，不得持有平台专属的写权限按钮 3551"
+    );
+
+    // 2. 只读角色：只授页面菜单 3550（拿到 monitor:slowSql:list）
+    let role_key = "it_obs_readonly";
+    let v = ctx
+        .post_json(
+            "/system/role",
+            serde_json::json!({
+                "roleName": "可观测只读",
+                "roleKey": role_key,
+                "roleSort": 98,
+                "status": "0",
+                "menuIds": [3550]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json(&format!("/system/role/list?roleKey={role_key}"))
+        .await;
+    let role_id = v["rows"][0]["roleId"]
+        .as_i64()
+        .expect("应能查到新建的只读角色");
+
+    let uname = "it_obs_readonly";
+    let v = ctx
+        .post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": uname,
+                "nickName": "可观测只读用户",
+                "email": "stepby@tzkj.net",
+                "phonenumber": "13800009997",
+                "sex": "0",
+                "password": "Stepby@12345",
+                "status": "0",
+                "roleIds": [role_id]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let token = login(&ctx.app, ctx.peer_ip, uname, "Stepby@12345").await;
+
+    // 3. 读接口照常可用（证明该用户确实有查看权限，403 不是"没登录/没权限"）
+    for uri in [
+        "/monitor/slow-sql/list?pageNum=1&pageSize=10",
+        "/monitor/slow-sql/stats",
+        "/monitor/error-log/list?pageNum=1&pageSize=10",
+        "/monitor/error-log/stats",
+    ] {
+        let (status, v) = ctx.send_raw_with_token(Method::GET, uri, &token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "只读用户应能查看 {uri}，实际 {status} {v}"
+        );
+        assert_eq!(
+            v["code"], 200,
+            "只读用户查看 {uri} 业务码应为 200，实际: {v}"
+        );
+    }
+
+    // 4. 清空必须 403（两个端点共用写权限键）
+    for uri in ["/monitor/slow-sql/clear", "/monitor/error-log/clear"] {
+        let (status, v) = ctx.send_raw_with_token(Method::DELETE, uri, &token).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "只读用户不得清空 {uri}，实际 {status} {v}"
+        );
+        assert_eq!(
+            v["code"], 403,
+            "只读用户清空 {uri} 业务码应为 403，实际: {v}"
+        );
+    }
+
+    // 5. 对照组：补授 3551 后同一账号清空成功（证明 403 精确来自该权限键）
+    let v = ctx
+        .put_json(
+            "/system/role",
+            serde_json::json!({
+                "roleId": role_id,
+                "roleName": "可观测只读+清空",
+                "menuIds": [3550, 3551]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    for uri in ["/monitor/slow-sql/clear", "/monitor/error-log/clear"] {
+        let (status, v) = ctx.send_raw_with_token(Method::DELETE, uri, &token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "补授写权限后清空 {uri} 应成功，实际 {status} {v}"
+        );
+        assert_eq!(
+            v["code"], 200,
+            "补授写权限后清空 {uri} 业务码应为 200，实际: {v}"
+        );
+        assert!(
+            v["data"]["cleared"].is_number(),
+            "清空 {uri} 应返回 cleared 数量，实际: {v}"
+        );
+    }
 }
 
 /// 可观测性-Redis 运行指标：INFO 解析的字符串字段（脱敏，不含配置/密码段）。

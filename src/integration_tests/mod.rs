@@ -785,6 +785,27 @@ impl TestContext {
         (status, v)
     }
 
+    /// 以**指定 token** 发请求并返回原始状态码 + JSON。
+    ///
+    /// 用于「同一进程内的受限角色」用例：`send_raw` 固定带 admin token，而权限类判据
+    /// 必须由**真实登录得到的非超管令牌**取证（合成令牌会绕过 RBAC 采集面）。
+    pub async fn send_raw_with_token(
+        &self,
+        method: Method,
+        uri: &str,
+        token: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("构造请求失败");
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((self.peer_ip, 4321))));
+        self.send_raw(req).await
+    }
+
     pub async fn get_json(&self, uri: &str) -> serde_json::Value {
         self.send_json(self.request(Method::GET, uri, None)).await
     }

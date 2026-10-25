@@ -246,11 +246,16 @@ mod tests {
         );
     }
 
-    /// 全局档位：默认 legacy（读默认值，不写全局 ⇒ 与并行用例互不干扰）；
-    /// `encode`/`decode` 互逆性单独可证伪；set 后的读回行为在 `error.rs` 的状态码用例中
-    /// 以互斥锁保护后验证。
+    /// 全局档位：默认 legacy；`encode`/`decode` 互逆性单独可证伪。
+    ///
+    /// 读全局的用例**必须持同一把互斥锁**：`error.rs` 的 restful 用例在本进程内真实
+    /// 写入过全局，只声明"本用例不写"不等于"读不到别人写的中间态"——b93 电池实测
+    /// 并行轮在本函数读到 `Restful`（`left: Restful / right: Legacy`），隔离单跑恒绿。
     #[test]
     fn test_global_convention_default_and_encoding() {
+        let _guard = CONVENTION_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // 纯函数：编码/解码互逆，未知编码回落 legacy
         for c in [HttpStatusConvention::Legacy, HttpStatusConvention::Restful] {
             assert_eq!(decode(encode(c)), c, "encode/decode 必须互逆");
@@ -261,7 +266,7 @@ mod tests {
             0,
             "legacy 必须编码为 0（原子量默认值）"
         );
-        // 默认档：原子量初值 0 ⇒ 未初始化时必须是 legacy（= 现状）
+        // 原子量初值 0 ⇒ 未初始化时必须是 legacy（= 现状）；持锁后所有写入方都已复位
         assert_eq!(convention(), HttpStatusConvention::Legacy);
     }
 

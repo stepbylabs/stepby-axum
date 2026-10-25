@@ -88,7 +88,7 @@ pub(crate) async fn ensure_menu_only_migration_menus(
             "{menu_cols} VALUES (3550, '运行监控', 2, 10, 'observability', 'monitor/observability/index', '', '', '1', '0', 'C', '0', '0', 'monitor:slowSql:list', 'monitor', 'admin', {now_expr}, '可观测性：慢请求 / 错误聚合 / Redis 指标', '0')"
         ),
         format!(
-            "{menu_cols} VALUES (3551, '清空', 3550, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'monitor:slowSql:list', 'delete', 'admin', {now_expr}, '清空慢请求 / 错误日志缓冲', '0')"
+            "{menu_cols} VALUES (3551, '清空', 3550, 1, '', '', '', '', '1', '0', 'F', '0', '0', 'monitor:slowSql:remove', 'delete', 'admin', {now_expr}, '清空慢请求 / 错误日志缓冲', '0')"
         ),
     ] {
         db.execute_raw(Statement::from_string(
@@ -97,6 +97,14 @@ pub(crate) async fn ensure_menu_only_migration_menus(
         ))
         .await?;
     }
+    // 存量库的 3551 建于写权限拆分之前（perms=monitor:slowSql:list）：只改这行的 perms 字面量，
+    // 不发/不收任何角色授权（回收只允许挂在一次性迁移 m20261026_000001）。按旧字面量守卫 ⇒ 幂等。
+    db.execute_raw(Statement::from_string(
+        backend,
+        "UPDATE sys_menu SET perms = 'monitor:slowSql:remove' WHERE menu_id = 3551 AND perms = 'monitor:slowSql:list'"
+            .to_string(),
+    ))
+    .await?;
     Ok(())
 }
 
