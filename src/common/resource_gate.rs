@@ -579,6 +579,15 @@ mod tests {
                 "evaluate_one(",
             ),
             (
+                // b92 N-90-2：同一条闸的**定时/registry 执行点**。调度器与手动触发都走
+                // `alert_eval_once`，取闸必须排在 `service.evaluate_all()` 之前，
+                // 否则闸满时整表评估已经开始（与 b91 导出前置点的形态同源）。
+                "alert:evaluate",
+                "HeavyEntry::AlertEvaluate",
+                "src/service/sys_alert_service.rs",
+                "service.evaluate_all()",
+            ),
+            (
                 "tool:http-debug",
                 "HeavyEntry::HttpDebugExecute",
                 "src/handler/sys_http_debug_handler.rs",
@@ -701,8 +710,8 @@ mod tests {
         }
         assert_eq!(
             files.len(),
-            16,
-            "反查必须覆盖全部 16 个接线文件（少了就是有人把接线挪出了视野）"
+            17,
+            "反查必须覆盖全部 17 个接线文件（少了就是有人把接线挪出了视野）"
         );
     }
 

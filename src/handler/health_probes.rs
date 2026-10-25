@@ -479,7 +479,15 @@ pub async fn startup_probe(state: &Arc<AppState>) {
     if state.config.health.external_probe_mode() == ExternalProbeMode::Off {
         return;
     }
-    let probes = external_probes(state).await.unwrap_or_default();
+    // b92：`None` 只可能来自"探针轮次等待超时且没有陈旧缓存"——这不是"零个外部依赖"，
+    // 把两者都打成"健康检查完成"会让启动日志在什么都没探到时显示成功形状。
+    let probes = match external_probes(state).await {
+        Some(probes) => probes,
+        None => {
+            tracing::warn!("启动探活：本轮探活结果不可用（探针轮次未取到结果），不阻断启动");
+            return;
+        }
+    };
     let down: Vec<&str> = probes
         .iter()
         .filter(|p| p.status == "DOWN")
@@ -539,6 +547,37 @@ mod health_probes_mod {
                 "探针 `{name}` 已登记但 probe_inner 无对应分支（假健康）"
             );
         }
+    }
+
+    /// b92：探针结果不可用（`None`）不得被吞成空集合后打印"健康检查完成"——
+    /// 那是把"什么都没探到"写成了成功形状（b90 §4 的同一条纪律）。
+    #[test]
+    fn startup_probe_never_reports_completion_when_round_is_unavailable() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handler/health_probes.rs");
+        let src = std::fs::read_to_string(&path).expect("读取本文件失败");
+        let prod = match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => &src,
+        };
+        let start = prod
+            .find("pub async fn startup_probe(")
+            .expect("startup_probe 被删了 ⇒ 启动探活没有载体");
+        let body = &prod[start..];
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("startup_probe 函数体边界找不到（本锁的对照失效）")];
+        assert!(
+            !body.contains(".unwrap_or_default()"),
+            "探活结果不可用不得被吞成空集合后打'完成'"
+        );
+        assert!(
+            body.contains("Some(probes) => probes"),
+            "必须显式区分 Some/None 两种结局"
+        );
+        assert!(
+            body.contains("本轮探活结果不可用"),
+            "None 分支必须留痕（WARN 文案缺失 ⇒ 失败藏在成功形状里）"
+        );
     }
 
     /// 状态字面量即公开契约（与核心 db/redis 的大写口径一致，漂移即红）

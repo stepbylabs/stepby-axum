@@ -785,12 +785,35 @@ pub async fn alert_eval_once(
     store: Arc<dyn SharedStore>,
     config: Arc<Settings>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // b92 N-90-2：调度器与 registry 手动执行都走这里，必须与单条手动评估共用同一把闸。
+    // 闸满 ⇒ 本轮跳过（下一分钟重试，规则不丢），但 WARN + 决策指标都要留痕——
+    // 静默跳过会让"告警为什么没触发"永远查不到成因。
+    let _gate = match crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::AlertEvaluate,
+    ) {
+        Ok(permit) => permit,
+        Err(err) => {
+            tracing::warn!(
+                entry = crate::common::resource_gate::HeavyEntry::AlertEvaluate.label(),
+                action = "alert_eval_once",
+                code = err.code,
+                error = %err.message,
+                "告警评估闸已满：本轮跳过，下一轮重试（规则不丢）"
+            );
+            return Ok(alert_eval_busy_summary().to_string());
+        }
+    };
     let service = SysAlertService::new(db, store, config);
     let (evaluated, fired) = service.evaluate_all().await?;
     if evaluated == 0 {
         return Ok("无启用告警规则，本轮评估跳过".to_string());
     }
     Ok(format!("评估告警规则 {evaluated} 条，触发 {fired} 条"))
+}
+
+/// 闸满时的可行动文案（单测钉住：必须点名入口、说明会重试、并保证规则不丢）。
+fn alert_eval_busy_summary() -> &'static str {
+    "告警评估闸已满（alert:evaluate）：本轮跳过，下一轮重试（规则不丢）"
 }
 
 /// 注册 registry 任务函数（invoke_target = `alertEvalTask.run`）
@@ -819,7 +842,7 @@ pub fn register_alert_eval_task(
 
 #[cfg(test)]
 mod tests {
-    use super::compare;
+    use super::{alert_eval_busy_summary, compare};
 
     #[test]
     fn comparator_gt_lt() {
@@ -842,5 +865,56 @@ mod tests {
         // 非法比较器一律不命中（创建/更新入口另有白名单校验，此处为纵深防御）
         assert!(!compare("==", 5.0, 4.0));
         assert!(!compare("", 5.0, 4.0));
+    }
+
+    /// b92 N-90-2：定时/registry 评估必须与手动评估共用 `alert:evaluate` 闸，
+    /// 且取闸要排在真正评估之前（否则"闸满时整表评估照常开始"）。
+    #[test]
+    fn alert_eval_once_takes_the_gate_before_evaluating() {
+        fn gate_before_work(src: &str) -> bool {
+            match (src.find("try_enter("), src.find("service.evaluate_all()")) {
+                (Some(gate), Some(work)) => gate < work,
+                _ => false,
+            }
+        }
+
+        let text = crate::common::prod_scan::prod_file(
+            "src/service/sys_alert_service.rs",
+            &crate::common::prod_scan::Scan::default(),
+        )
+        .text();
+        let start = text
+            .find("pub async fn alert_eval_once(")
+            .expect("alert_eval_once 被删了 ⇒ 定时告警评估链路断裂");
+        let body = &text[start..];
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("alert_eval_once 函数体边界找不到（本锁的对照失效）")];
+
+        assert!(
+            body.contains("try_enter(") && body.contains("HeavyEntry::AlertEvaluate"),
+            "评估入口必须取 alert:evaluate 闸"
+        );
+        assert!(
+            body.contains("let _gate ="),
+            "许可必须在整个评估轮次内持有（`let _ =` 会立即释放，等于没限流）"
+        );
+        assert!(
+            gate_before_work(body),
+            "取闸必须排在 service.evaluate_all() 之前，否则闸满时整表评估已经开始"
+        );
+        // 顺序反例必须能被同一条纯函数抓到
+        assert!(
+            !gate_before_work("service.evaluate_all().await; try_enter(AlertEvaluate);"),
+            "顺序反例不得被误判为合规"
+        );
+
+        let summary = alert_eval_busy_summary();
+        assert!(
+            summary.contains("alert:evaluate")
+                && summary.contains("下一轮")
+                && summary.contains("规则不丢"),
+            "闸满文案必须可行动（点名入口 + 重试时机 + 不丢规则），实际: {summary}"
+        );
     }
 }
