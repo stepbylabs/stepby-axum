@@ -253,15 +253,24 @@ pub async fn export(
     {
         Ok(rows) => rows,
         Err(e) => {
-            if let Some(tid) = task_id {
-                let _ = state
+            if let Some(tid) = task_id
+                && let Err(err) = state
                     .task_service
                     .fail_task(
                         tid,
                         crate::common::redact::fold_abs_paths(&e.to_string()),
                         &state,
                     )
-                    .await;
+                    .await
+            {
+                // b91：终态更新本身失败必须留痕——否则任务中心永远停在 running，
+                // 而 db_state_audit 的卡死判据只能看到症状、看不到成因。
+                tracing::warn!(
+                    task_id = tid,
+                    action = "fail_task",
+                    error = %crate::common::redact::fold_abs_paths(&err.to_string()),
+                    "导出失败终态未能落库（任务会停在 running）"
+                );
             }
             return Err(AppError::from(e));
         }
@@ -269,11 +278,18 @@ pub async fn export(
 
     // 取数完成 = 半程（建任务时 total 取 100，即百分比口径）：此前进度只有 0 → 100 一跳，
     // 大导出期间任务中心与 WS 都看不到中间态
-    if let Some(tid) = task_id {
-        let _ = state
+    if let Some(tid) = task_id
+        && let Err(err) = state
             .task_service
             .update_progress(tid, 50, Some(100), &state)
-            .await;
+            .await
+    {
+        tracing::warn!(
+            task_id = tid,
+            action = "update_progress",
+            error = %crate::common::redact::fold_abs_paths(&err.to_string()),
+            "导出进度更新失败（任务中心不会显示中间态）"
+        );
     }
 
     let columns = [
@@ -385,15 +401,22 @@ pub async fn export(
     {
         Ok(resp) => resp,
         Err(e) => {
-            if let Some(tid) = task_id {
-                let _ = state
+            if let Some(tid) = task_id
+                && let Err(err) = state
                     .task_service
                     .fail_task(
                         tid,
                         crate::common::redact::fold_abs_paths(&e.to_string()),
                         &state,
                     )
-                    .await;
+                    .await
+            {
+                tracing::warn!(
+                    task_id = tid,
+                    action = "fail_task",
+                    error = %crate::common::redact::fold_abs_paths(&err.to_string()),
+                    "导出失败终态未能落库（任务会停在 running）"
+                );
             }
             // 该失败已经是 AppError，不再二次 `AppError::from`（clippy 判为无转换的恒等包装）
             return Err(e);
@@ -402,15 +425,22 @@ pub async fn export(
 
     // 终态改在**工作簿真的生成之后**落：原实现取数完就置 success，生成失败时任务显示
     // "成功"而用户拿不到文件（终态与事实相反）
-    if let Some(tid) = task_id {
-        let _ = state
+    if let Some(tid) = task_id
+        && let Err(err) = state
             .task_service
             .complete_task(
                 tid,
                 Some(crate::tr!("msg.export.progress", count = rows.len())),
                 &state,
             )
-            .await;
+            .await
+    {
+        tracing::warn!(
+            task_id = tid,
+            action = "complete_task",
+            error = %crate::common::redact::fold_abs_paths(&err.to_string()),
+            "导出成功终态未能落库（任务中心会停在 running）"
+        );
     }
     Ok(resp)
 }
@@ -771,4 +801,60 @@ pub async fn archive_download(
         }),
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::prod_scan::{Scan, prod_file};
+
+    /// 生产码视图里"任务状态被 `let _ =` 静默吞掉"的行号（缺陷形状，b90 之前四处）。
+    fn silent_state_drop_lines(text: &str) -> Vec<usize> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("let _ = state"))
+            .map(|(i, _)| i + 1)
+            .collect()
+    }
+
+    /// b91：导出任务一旦创建就必须落终态。`fail_task` / `complete_task` / `update_progress`
+    /// 的 Err 此前被 `let _ =` 吞掉 ⇒ 任务停在 running，而 db_state_audit 只能看到卡死症状。
+    /// 本锁同时钉"不得回到静默形状"与"四处调用仍在采集面里"（否则 0 处静默是空集算术）。
+    #[test]
+    fn task_transitions_must_not_be_silently_ignored() {
+        let text = prod_file("src/handler/sys_oper_log_handler.rs", &Scan::default()).text();
+        let hits = silent_state_drop_lines(&text);
+        assert!(
+            hits.is_empty(),
+            "任务状态更新不得再用 `let _ =` 吞掉，命中行: {hits:?}"
+        );
+        assert!(
+            text.matches(".task_service").count() >= 5,
+            "采集面里必须能看到创建 + 四处终态调用（少了就是判据读错了文件）"
+        );
+        assert_eq!(
+            text.matches("action = \"fail_task\"").count(),
+            2,
+            "两条失败出口都必须留痕"
+        );
+        assert_eq!(
+            text.matches("action = \"update_progress\"").count(),
+            1,
+            "进度更新失败必须留痕"
+        );
+        assert_eq!(
+            text.matches("action = \"complete_task\"").count(),
+            1,
+            "成功终态失败必须留痕"
+        );
+
+        // 合成双向：缺陷形状必须被抓、合规写法必须不报（否则"真实树 0 处"可能只是判据失灵）
+        assert_eq!(
+            silent_state_drop_lines("let _ = state\n    .task_service"),
+            vec![1]
+        );
+        assert!(
+            silent_state_drop_lines("if let Err(err) = state\n    .task_service").is_empty(),
+            "合规写法不得误报"
+        );
+    }
 }

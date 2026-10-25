@@ -247,12 +247,12 @@ pub async fn tail(
     let log_dir = resolve_log_root(&state.config.log.file_path);
 
     // 读取尾部 + 过滤移入 spawn_blocking（文件 IO 阻塞工作移出 async 上下文）
-    let (rows, size) = tokio::task::spawn_blocking({
+    let rows = tokio::task::spawn_blocking({
         let dir = log_dir.clone();
         let file_name = file_name.clone();
         let level_filter = level_filter.clone();
         let keyword = keyword.clone();
-        move || -> std::io::Result<(Vec<LogLine>, u64)> {
+        move || -> std::io::Result<Vec<LogLine>> {
             let path = dir.join(&file_name);
             // 双保险：拼接后仍须位于日志根目录内（白名单正则已排除路径穿越）
             if !path.starts_with(&dir) {
@@ -317,7 +317,7 @@ pub async fn tail(
                 })
                 .collect();
 
-            Ok((rows, size))
+            Ok(rows)
         }
     })
     .await
@@ -330,7 +330,6 @@ pub async fn tail(
         }
     })?;
 
-    let _ = size;
     Ok(AjaxResult::success(LogTailResponse {
         file_name,
         total: rows.len() as u64,

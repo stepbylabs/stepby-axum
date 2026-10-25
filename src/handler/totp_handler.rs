@@ -276,22 +276,22 @@ pub async fn verify(
 
     if totp.check_current(&req.code).is_none() {
         // 失败计数（best-effort：incr_with_ttl 原子 INCR + 首次 EXPIRE，失败不阻断）
-        let _ = state
+        if let Err(err) = state
             .store
             .incr_with_ttl(&fail_key, TOTP_FAIL_TTL_SECS)
             .await
-            .unwrap_or(0);
+        {
+            tracing::warn!(error = ?err, "TOTP 失败计数写入失败（防暴力限流降级）");
+        }
         return Err(AppError::bad_request(&crate::tr!(
             "error.totp.code_invalid"
         )));
     }
 
     // 5. 删除 pending，加密写入 enabled（启用 TOTP）
-    let _ = state
-        .store
-        .del(std::slice::from_ref(&pending_key))
-        .await
-        .unwrap_or(0);
+    if let Err(err) = state.store.del(std::slice::from_ref(&pending_key)).await {
+        tracing::debug!(error = ?err, "TOTP pending 键删除失败（键会随 TTL 过期，不阻断启用）");
+    }
     let encrypted_enabled = crate::utils::crypto::encrypt_config_value(&secret_str, master_key)
         .map_err(|_| AppError::internal(&crate::tr!("error.totp.encrypt_failed")))?;
     state
@@ -414,11 +414,13 @@ pub async fn disable(
     // 校验走 `utils::password` 统一入口——Argon2 参数的唯一实现点与凭据校验指标的唯一记录点。
     // 这里刻意再解析一遍：解析是微秒级，相比 Argon2 的几十毫秒可忽略，换来"参数只有一处"。
     if !crate::utils::password::verify_password(&req.password, password_hash) {
-        let _ = state
+        if let Err(err) = state
             .store
             .incr_with_ttl(&fail_key, TOTP_FAIL_TTL_SECS)
             .await
-            .unwrap_or(0);
+        {
+            tracing::warn!(error = ?err, "TOTP 失败计数写入失败（防暴力限流降级）");
+        }
         return Err(AppError::bad_request(&crate::tr!(
             "error.totp.password_wrong"
         )));
@@ -461,11 +463,13 @@ pub async fn disable(
 
     if totp.check_current(&req.code).is_none() {
         // P0-4：失败计数（防暴力枚举；best-effort，失败不阻断）
-        let _ = state
+        if let Err(err) = state
             .store
             .incr_with_ttl(&fail_key, TOTP_FAIL_TTL_SECS)
             .await
-            .unwrap_or(0);
+        {
+            tracing::warn!(error = ?err, "TOTP 失败计数写入失败（防暴力限流降级）");
+        }
         return Err(AppError::bad_request(&crate::tr!(
             "error.totp.code_invalid"
         )));
@@ -481,4 +485,52 @@ pub async fn disable(
     tracing::info!(user_id = user_id, "用户关闭 TOTP 多因子认证");
 
     Ok(AjaxResult::success(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::prod_scan::{Scan, prod_file};
+
+    fn silent_state_drop_lines(text: &str) -> Vec<usize> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("let _ = state"))
+            .map(|(i, _)| i + 1)
+            .collect()
+    }
+
+    /// b91：TOTP 的三处失败计数是防暴力的 best-effort 写。写失败不阻断业务是对的，
+    /// 但**必须留痕**——否则限流降级时运维只会看到"验证码总是错"，看不到存储故障。
+    /// pending 删除失败只记 DEBUG（键会随 TTL 过期，不构成安全面）。
+    #[test]
+    fn totp_best_effort_writes_must_leave_a_trace() {
+        let text = prod_file("src/handler/totp_handler.rs", &Scan::default()).text();
+        let hits = silent_state_drop_lines(&text);
+        assert!(hits.is_empty(), "TOTP 写失败不得静默，命中行: {hits:?}");
+        assert_eq!(
+            text.matches("TOTP 失败计数写入失败").count(),
+            3,
+            "三处失败计数都必须留痕（少一处就是有一条分支降级无人知）"
+        );
+        assert_eq!(
+            text.matches("TOTP pending 键删除失败").count(),
+            1,
+            "pending 删除失败必须留 DEBUG 痕"
+        );
+        assert!(
+            text.matches("incr_with_ttl(&fail_key").count() >= 3,
+            "采集面里必须能看到三处失败计数调用"
+        );
+        assert!(
+            text.contains(".del(std::slice::from_ref(&pending_key))"),
+            "采集面里必须能看到 pending 删除调用"
+        );
+
+        // 合成双向
+        assert_eq!(
+            silent_state_drop_lines("let _ = state\n    .store"),
+            vec![1]
+        );
+        assert!(silent_state_drop_lines("if let Err(err) = state\n    .store").is_empty());
+    }
 }

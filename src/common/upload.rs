@@ -211,7 +211,18 @@ pub async fn resolve_upload_dir(dir: &str) -> PathBuf {
 
     // 兜底：创建 CWD + root 并返回 CWD + root + subdir
     if let Some(fallback) = candidates.first() {
-        tokio::fs::create_dir_all(fallback).await.ok();
+        if let Err(err) = tokio::fs::create_dir_all(fallback).await {
+            // 路径只打最后一段（C.9：日志不得带绝对路径）；后续写入会返回具体错误，
+            // 这里补的是"为什么写不进去"的成因，而不是把失败提前吞掉。
+            tracing::warn!(
+                dir = %fallback
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                error = %err,
+                "上传目录兜底创建失败（后续写入会返回具体错误）"
+            );
+        }
         return fallback.join(&subdir);
     }
     dir_path
@@ -576,6 +587,34 @@ mod tests {
     const PDF_MAGIC: &[u8] = b"%PDF-1.7";
     const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
     const ZIP_MAGIC: &[u8] = &[0x50, 0x4B, 0x03, 0x04];
+
+    /// b91：上传目录的兜底创建失败不得 `.ok()` 静默。后续写入本来就会失败，但"目录建不出来"
+    /// 这条成因必须留在日志里（路径只打最后一段，C.9），否则运维只看到"上传失败"。
+    #[test]
+    fn fallback_dir_creation_failure_must_leave_a_trace() {
+        let text = crate::common::prod_scan::prod_file(
+            "src/common/upload.rs",
+            &crate::common::prod_scan::Scan::default(),
+        )
+        .text();
+        assert!(
+            !text.contains("create_dir_all(fallback).await.ok()"),
+            "目录兜底创建失败不得用 .ok() 静默吞掉"
+        );
+        assert!(
+            text.contains("上传目录兜底创建失败"),
+            "采集面里必须能看到兜底创建失败的留痕点"
+        );
+        // 合成双向：缺陷形状必须被抓、合规形状不得误报
+        assert!(
+            "tokio::fs::create_dir_all(fallback).await.ok();"
+                .contains("create_dir_all(fallback).await.ok()")
+        );
+        assert!(
+            !"if let Err(err) = tokio::fs::create_dir_all(fallback).await {"
+                .contains("create_dir_all(fallback).await.ok()")
+        );
+    }
 
     // ---------- UploadKind 配置选择 ----------
 

@@ -239,6 +239,26 @@ pub fn try_enter(entry: HeavyEntry) -> Result<OwnedSemaphorePermit, AppError> {
     }
 }
 
+/// 前置拒绝（**不取许可**）：只在闸已经为空时提前拒绝，把"闸满时重活根本不该开始"
+/// 挡在入口（b91 N-90-1：导出族的 DB 全量读发生在构造点取闸之前）。
+///
+/// 与 [`try_enter`] 的分工：这里不持有许可，因此不拉长任何请求的占用时间，也不改变
+/// 既有闸位的并发语义；真正的许可仍由重活前的 `try_enter` 获取。竞态窗口内的请求可能
+/// 通过前置检查、随后在真实取闸处被拒——两者都是同一把闸的 fail-closed 结局。
+pub fn precheck(entry: HeavyEntry) -> Result<(), AppError> {
+    if precheck_verdict(entry.available()) {
+        Ok(())
+    } else {
+        record_decision(entry, false);
+        Err(rejected(entry))
+    }
+}
+
+/// [`precheck`] 的纯判据（自检用：不碰全局闸，避免并行用例互顶）。
+fn precheck_verdict(available: usize) -> bool {
+    available > 0
+}
+
 /// 决策计数（`admitted` / `rejected` 两个结局各一张表，按下标 = [`HeavyEntry::index`]）。
 ///
 /// 为什么不用 `Mutex<HashMap>`：入口集合是**编译期封闭**的，运行期不可能出现新键 ⇒
@@ -571,6 +591,14 @@ mod tests {
                 "spawn_blocking(",
             ),
             (
+                // b91 N-90-1：同一条闸的**前置拒绝点**（不持有许可，只把闸满的请求挡在
+                // DB 全量读之前）。构造点那一行仍是许可持有段，两行缺一都不算闭合。
+                "export:excel",
+                "HeavyEntry::ExcelExport",
+                "src/middleware/export_gate.rs",
+                "next.run(req)",
+            ),
+            (
                 "db:bulk-delete",
                 "HeavyEntry::BulkDelete",
                 "src/handler/sys_oper_log_handler.rs",
@@ -673,8 +701,27 @@ mod tests {
         }
         assert_eq!(
             files.len(),
-            15,
-            "反查必须覆盖全部 15 个接线文件（少了就是有人把接线挪出了视野）"
+            16,
+            "反查必须覆盖全部 16 个接线文件（少了就是有人把接线挪出了视野）"
+        );
+    }
+
+    /// b91 N-90-1：导出路由的前置拒绝。判据只读"可用数"的纯函数，**不去占全局闸**——
+    /// 占满 `ExcelExport` 会让并行导出用例偶发 429（本文件 `available_permits` 的注释与
+    /// AGENTS 前言 ㉒ 都禁止这种"门禁绿红由并行度决定"的写法）。
+    #[test]
+    fn precheck_rejects_with_the_same_429_contract_without_taking_a_permit() {
+        assert!(precheck_verdict(1), "还有可用许可时必须放行");
+        assert!(!precheck_verdict(0), "闸满必须拒绝");
+
+        // 拒绝响应与 try_enter 共用 rejected()：状态码 / Retry-After / 点名入口三件套。
+        let err = rejected(HeavyEntry::ExcelExport);
+        assert_eq!(err.code, 429);
+        assert_eq!(err.retry_after, Some(RETRY_AFTER_SECS));
+        assert!(
+            err.message.contains("export:excel"),
+            "拒绝文案必须点名入口，实际: {}",
+            err.message
         );
     }
 

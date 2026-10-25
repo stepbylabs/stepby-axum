@@ -122,6 +122,30 @@ async fn compliance_report_rejects_when_gate_is_full_then_recovers() {
     );
 }
 
+/// b91 N-90-1：导出路由挂上前置背压层之后，空闸时必须照常返回 xlsx。
+///
+/// 只判"闸门没把功能关掉"这一半；429 的形状与 `try_enter` 共用同一个 `rejected()`，
+/// 由 `precheck_rejects_with_the_same_429_contract_without_taking_a_permit` 锁。
+/// 刻意**不占满** `ExcelExport`：并行跑着的导出用例（flow / 日志 / 任务 / 登录四条链）
+/// 会因此偶发 429，正是本文件头注释与 AGENTS 前言 ㉒ 禁止的"绿红由并行度决定"。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_route_is_not_broken_by_the_precheck_layer() {
+    let ctx = TestContext::new().await;
+    let (status, headers, body) = ctx
+        .send_with_headers(ctx.request(Method::GET, "/system/ai/history/admin/export", None))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "前置闸不得挡住正常导出（非 200 说明把功能关掉了，不是背压）: {body}"
+    );
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "导出响应必须是 xlsx，实际头: {headers:?}"
+    );
+}
+
 /// 第二个入口的端到端形状：证明扩员不是只改了枚举（`ReportSnapshot` 无任何测试占用，
 /// 因此可以安全地把两路许可全部占住）。释放后同一个请求必须穿过闸门落到业务层
 /// （报表不存在 ⇒ 400/404 都算诚实结局），而不是恢复成 200。

@@ -2,6 +2,7 @@
 
 pub mod ak_sign;
 pub mod auth;
+pub mod export_gate;
 pub mod idempotency;
 pub mod locale;
 pub mod oper_log;
@@ -19,6 +20,7 @@ pub mod uri_limit;
 
 pub use ak_sign::{AkIdentity, ak_protected_routes, ak_sign_middleware};
 pub use auth::{Operator, auth_middleware};
+pub use export_gate::export_gate_middleware;
 pub use idempotency::idempotency_middleware;
 pub use locale::{locale_middleware, negotiate};
 pub use oper_log::{TargetTenant, oper_log_middleware};

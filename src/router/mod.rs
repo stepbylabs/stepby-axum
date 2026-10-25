@@ -101,6 +101,7 @@ use crate::config::settings::ServerConfig;
 use crate::docs;
 use crate::embedded_assets;
 use crate::middleware::auth_middleware;
+use crate::middleware::export_gate_middleware;
 use crate::middleware::idempotency_middleware;
 use crate::middleware::locale_middleware;
 use crate::middleware::oper_log_middleware;
@@ -117,7 +118,7 @@ use crate::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
-use axum::middleware::from_fn_with_state;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::get;
 use std::sync::Arc;
 use std::time::Duration;
@@ -208,6 +209,12 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // 安全理由：白名单仅含纯静态元数据接口（字典类型下拉 optionselect），缓存内容
         //   对不同登录用户完全一致，归属无用户差异，不泄露个人信息；
         //   首个请求仍走 auth+permission 校验与真实 DB 查询，续访问命中缓存直接返回。
+        // b91 N-90-1：导出族前置背压。route_layer 的**第一条**是最内层 ⇒ 它在
+        // auth → rate_limit → idempotency → pwd_gate → permission → oper_log → cache
+        // 全部通过之后、handler 之前执行；闸已满时 429 在 DB 全量读之前返回。
+        // 真正的 `export:excel` 许可仍由 `common::excel` 构造点获取并覆盖 xlsx 构建段
+        // （本层刻意不持有许可，理由见 middleware/export_gate.rs 模块文档）。
+        .route_layer(from_fn(export_gate_middleware))
         .route_layer(from_fn_with_state(
             ResponseCache::default(),
             response_cache_middleware,
