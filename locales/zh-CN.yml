@@ -282,6 +282,7 @@ error:
     level_too_deep: 菜单层级过深，防环校验失败
     id_not_found: "菜单 ID=%{id} 不存在"
     ids_count_mismatch: menuIds 与 orderNums 数量不一致
+    perm_format_invalid: "权限标识 %{perm} 非法：只允许字母、数字、冒号、下划线与连字符，禁止通配符 *"
   rate_limit:
     not_found: 限流配置不存在
     pattern_exists: 路由前缀已存在
@@ -511,6 +512,8 @@ error:
   oper_log:
     id_invalid: 日志 ID 不合法
     anonymous: 匿名
+    range_both_required: 按时间范围清理必须同时提供开始日期与结束日期
+    range_invalid: 开始日期不得晚于结束日期
     chain_disabled: 操作日志防篡改链未启用
     anchor_not_found: 清理锚点不存在
     verify_platform_only: 链完整性校验属平台合规能力，仅平台管理员可执行

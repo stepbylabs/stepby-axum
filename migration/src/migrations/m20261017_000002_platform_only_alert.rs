@@ -30,7 +30,8 @@
 //! 与 `m20260926_000013` / `m20261008_000001` 同款**按完整前缀清单**剔除（避免
 //! m000002/m000005 那种"只列本批新增项导致漏剔"）。清单必须与
 //! `src/common/tenant.rs::PLATFORM_ONLY_PERM_PREFIXES` 逐项一致，由单测
-//! `platform_only_prefixes_match_migration_lists` 编译期断言（`LATEST_SRC` 指向本迁移）。
+//! `platform_only_prefixes_match_migration_lists` 锁双向一致（b95 起 `LATEST_SRC`
+//! 已推进到 `m20261026_000003_platform_only_menu_manage`，本迁移为历史清单）。
 //!
 //! 本迁移**不做能力位感知**（迁移期无能力位上下文）——只保证"默认整面不下放"；
 //! 开启态回填由启动治理 ①' 负责。

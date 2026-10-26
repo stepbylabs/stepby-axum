@@ -282,6 +282,7 @@ error:
     level_too_deep: Menu hierarchy too deep, cycle check failed
     id_not_found: "Menu ID=%{id} does not exist"
     ids_count_mismatch: menuIds and orderNums count mismatch
+    perm_format_invalid: "Invalid permission key %{perm}: only letters, digits, colon, underscore and hyphen are allowed; wildcard * is forbidden"
   rate_limit:
     not_found: Rate limit configuration not found
     pattern_exists: Route pattern already exists
@@ -511,6 +512,8 @@ error:
   oper_log:
     id_invalid: Invalid log ID
     anonymous: Anonymous
+    range_both_required: Range cleanup requires both a start date and an end date
+    range_invalid: Start date must not be later than end date
     chain_disabled: Operation log tamper-proof chain is not enabled
     anchor_not_found: Cleanup anchor not found
     verify_platform_only: Chain verification is a platform compliance capability, platform admins only

@@ -361,3 +361,194 @@ async fn test_role_auth_user_chain() {
     let v = ctx.delete_json(&format!("/system/role/{}", role_id)).await;
     ctx.assert_ok(&v);
 }
+
+/// 角色授权三条写路径的**横向越权**回归锁（b95）。
+///
+/// 旧实现的缺口是"人同租 ≠ 角色同租"：`selectAll/cancelAll/cancel` 只校验目标
+/// 用户属于操作者租户，却没校验**角色**的归属，于是租户操作者可以把平台角色
+/// （`tenant_id=0`）或他租角色挂到本租用户身上，或反向解除他租角色的授权。
+/// 本用例用合成 `tid=5` 令牌（超管主体、`*:*:*`，从而 403 只可能来自租户校验）
+/// 覆盖三条路径的拒绝面，并用同租角色做正控。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_role_auth_user_cross_tenant_role_is_rejected() {
+    use crate::jwt::JwtUtils;
+    use axum::body::Body;
+    use axum::extract::connect_info::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+    use std::net::SocketAddr;
+
+    const TID: i64 = 5;
+    const OTHER_TID: i64 = 6;
+    const ROLE_SAME: i64 = 99_001;
+    const ROLE_PLATFORM: i64 = 99_002;
+    const ROLE_OTHER: i64 = 99_003;
+    const UID_SAME: i64 = 99_011;
+
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+
+    for (role_id, tenant_id) in [
+        (ROLE_SAME, TID),
+        (ROLE_PLATFORM, 0),
+        (ROLE_OTHER, OTHER_TID),
+    ] {
+        crate::entity::sys_role::ActiveModel {
+            role_id: Set(role_id),
+            role_name: Set(format!("it_role_xtenant_{role_id}")),
+            role_key: Set(format!("it_role_xtenant_key_{role_id}")),
+            role_sort: Set(50),
+            data_scope: Set(Some("1".to_string())),
+            status: Set("0".to_string()),
+            tenant_id: Set(tenant_id),
+            is_system: Set(false),
+            del_flag: Set(Some("0".to_string())),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("插入角色失败");
+    }
+    crate::entity::sys_user::ActiveModel {
+        user_id: Set(UID_SAME),
+        user_name: Set("it_role_xtenant_user".to_string()),
+        nick_name: Set("IT-ROLE-XTENANT".to_string()),
+        tenant_id: Set(TID),
+        status: Set(Some("0".to_string())),
+        del_flag: Set(Some("0".to_string())),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("插入租户用户失败");
+
+    // 合成租户令牌：主体仍是超管（穿过 RBAC），Operator::tenant_id() = 5
+    let (token, _claims) = JwtUtils::generate_token("1", "admin", &ctx.state.config.jwt, 0, TID)
+        .expect("签发合成租户令牌失败");
+    let put = |uri: &str, body: serde_json::Value| {
+        let mut req = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("构造请求失败");
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
+        req
+    };
+
+    // ① 正控：同租角色 + 同租用户 ⇒ 授权成功，且随后可取消
+    let v = ctx
+        .send_json(put(
+            &format!(
+                "/system/role/authUser/selectAll?roleId={}&userIds={}",
+                ROLE_SAME, UID_SAME
+            ),
+            serde_json::json!({}),
+        ))
+        .await;
+    assert_eq!(v["code"], 200, "同租授权应成功，实际: {v}");
+    let bound = crate::entity::sys_user_role::Entity::find()
+        .filter(crate::entity::sys_user_role::Column::UserId.eq(UID_SAME))
+        .filter(crate::entity::sys_user_role::Column::RoleId.eq(ROLE_SAME))
+        .one(db)
+        .await
+        .unwrap();
+    assert!(bound.is_some(), "正控：同租授权必须真的落库");
+
+    // ② 三条路径 × 平台角色 / 他租角色：一律 403，且不得留下 sys_user_role 行
+    for role_id in [ROLE_PLATFORM, ROLE_OTHER] {
+        for (label, uri, body) in [
+            (
+                "selectAll",
+                format!(
+                    "/system/role/authUser/selectAll?roleId={}&userIds={}",
+                    role_id, UID_SAME
+                ),
+                serde_json::json!({}),
+            ),
+            (
+                "cancelAll",
+                format!(
+                    "/system/role/authUser/cancelAll?roleId={}&userIds={}",
+                    role_id, UID_SAME
+                ),
+                serde_json::json!({}),
+            ),
+            (
+                "cancel",
+                "/system/role/authUser/cancel".to_string(),
+                serde_json::json!({ "roleId": role_id, "userId": UID_SAME }),
+            ),
+        ] {
+            let (status, v) = ctx.send_raw(put(&uri, body)).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{label} 用跨租角色 {role_id} 必须 403，实际: {status} {v}"
+            );
+            let leaked = crate::entity::sys_user_role::Entity::find()
+                .filter(crate::entity::sys_user_role::Column::UserId.eq(UID_SAME))
+                .filter(crate::entity::sys_user_role::Column::RoleId.eq(role_id))
+                .one(db)
+                .await
+                .unwrap();
+            assert!(
+                leaked.is_none(),
+                "{label} 被拒后不得留下 user_id={UID_SAME} role_id={role_id} 的绑定"
+            );
+        }
+    }
+
+    // ③ 同租角色仍可取消（证明拒绝面只在"角色跨租"，不是把功能整体关掉）
+    let v = ctx
+        .send_json(put(
+            "/system/role/authUser/cancel",
+            serde_json::json!({ "roleId": ROLE_SAME, "userId": UID_SAME }),
+        ))
+        .await;
+    assert_eq!(v["code"], 200, "同租取消应成功，实际: {v}");
+
+    // ④ 读面同样有租户边界：角色详情与角色菜单树不得用猜到的 role_id 读他租角色。
+    //    （写面关了而读面开着，等于把"授权集合"送出去。）
+    let get = |uri: &str| {
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("构造 GET 请求失败");
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
+        req
+    };
+    let (status, v) = ctx
+        .send_raw(get(&format!(
+            "/system/menu/roleMenuTreeselect/{}",
+            ROLE_SAME
+        )))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "同租角色的菜单树必须可读（角色授权页依赖它），实际 {status} {v}"
+    );
+    assert!(
+        v["menus"].as_array().is_some_and(|menus| !menus.is_empty()),
+        "菜单树不得为空（空树会让保存时把角色授权清掉）: {v}"
+    );
+    for role_id in [ROLE_PLATFORM, ROLE_OTHER] {
+        for uri in [
+            format!("/system/menu/roleMenuTreeselect/{role_id}"),
+            format!("/system/role/{role_id}"),
+        ] {
+            let (status, v) = ctx.send_raw(get(&uri)).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "跨租角色读面必须 403（role_id={role_id}，{uri}），实际 {status} {v}"
+            );
+        }
+    }
+}

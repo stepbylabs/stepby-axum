@@ -21,6 +21,8 @@ pub mod image;
 // 出站 HTTP 客户端构造的单一事实源（系统信任库缺失时回落内嵌根证书，构造期绝不 panic）
 pub mod outbound_client;
 pub mod page;
+// 权限键格式的单一事实源（菜单写面与种子契约测试共用）
+pub mod perm_format;
 // `perm:user:*` 缓存失效的唯一实现（四条触发路径同源，见该模块文档的"四份实现"立案）
 pub mod perm_cache;
 pub mod pwd_policy;

@@ -261,6 +261,55 @@ async fn it_opl_field_level_diff() {
     }
 }
 
+/// 区间清理的两个边界必须同时给：单侧缺省会被解释成"从该侧起的全部"，
+/// 只给 begin 等于删到今天、只给 end 等于删掉全部历史。HTTP 级锁住
+/// "400 且一行不删"，并给出"两端空白串 = 未提供（走 30 天保留期）"的对照组。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_operlog_clean_partial_range_is_rejected_and_keeps_rows() {
+    let ctx = TestContext::new().await;
+    let oper_id = create_oper_log(&ctx).await;
+
+    for uri in [
+        "/monitor/operlog/clean?beginTime=2020-01-01",
+        "/monitor/operlog/clean?endTime=2030-12-31",
+    ] {
+        let (status, v) = ctx.send_raw(ctx.request(Method::DELETE, uri, None)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "单侧时间范围必须 400，实际: {status} {v}"
+        );
+        assert_ne!(v["code"], 200, "单侧时间范围业务码不得为 200，实际: {v}");
+    }
+
+    // 两端空白串视同未提供 ⇒ 走 30 天保留期，绝不能退化成"清空全部"
+    let (status, v) = ctx
+        .send_raw(ctx.request(
+            Method::DELETE,
+            "/monitor/operlog/clean?beginTime=&endTime=",
+            None,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "空白范围应回落保留期清理: {v}");
+    assert_eq!(
+        v["data"]["affected"], 0,
+        "刚写入的行不得被保留期清理删掉: {v}"
+    );
+
+    // 三条被拒/空范围路径之后，目标行必须仍在
+    let v = ctx
+        .get_json("/monitor/operlog/list?pageNum=1&pageSize=50")
+        .await;
+    assert!(
+        v["rows"]
+            .as_array()
+            .expect("rows 数组")
+            .iter()
+            .any(|r| r["operId"].as_i64() == Some(oper_id)),
+        "拒绝路径不得删除任何日志行，实际: {v}"
+    );
+}
+
 /// 操作日志批量删除（正常 + 非法 id）+ 清空 + 导出。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn it_opl_delete_clean_export() {

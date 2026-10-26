@@ -541,6 +541,22 @@ impl SysRoleService {
         Ok(RoleVo { role, menu_ids })
     }
 
+    /// 带**租户边界**的角色详情（b95）：数据范围只回答"这个人能看到哪些角色"，
+    /// 不回答"这个角色属于哪个租户"。读面（角色详情 / 角色菜单树）都必须叠这条，
+    /// 否则租户操作者用猜到的 role_id 就能读到他租角色的 menu_ids。
+    ///
+    /// 平台操作者（`tid=0`）经 `tenant_allowed` 放行全部租户（平台代管）。
+    pub async fn get_role_by_id_scoped(
+        &self,
+        role_id: i64,
+        operator_user_id: Option<i64>,
+        operator_tid: i64,
+    ) -> Result<RoleVo, ServiceError> {
+        self.ensure_role_in_operator_tenant(operator_tid, role_id)
+            .await?;
+        self.get_role_by_id(role_id, operator_user_id).await
+    }
+
     /// 新增角色（事务：插入角色 + 批量插入菜单关联）
     /// 写入侧数据范围档位守卫（`add_role` / `edit_role` / `update_data_scope` 三条路径共用）。
     ///
@@ -1396,6 +1412,7 @@ impl SysRoleService {
         &self,
         dto: CancelAuthUserDto,
         operator_user_id: i64,
+        operator_tid: i64,
     ) -> Result<(), ServiceError> {
         // 超管角色保护：禁止操作超管角色的授权绑定
         if dto.role_id == SUPER_ADMIN_ROLE_ID {
@@ -1403,6 +1420,12 @@ impl SysRoleService {
                 "error.user.admin_role_forbidden"
             )));
         }
+
+        // 横向越权：角色与目标用户都必须属于操作者租户（平台操作者 tid=0 放行全部）
+        self.ensure_role_in_operator_tenant(operator_tid, dto.role_id)
+            .await?;
+        self.ensure_user_in_operator_tenant(operator_tid, dto.user_id)
+            .await?;
 
         // 垂直越权校验：operator 不得对持有更高优先级角色的用户执行取消授权
         self.check_vertical_auth_by_user_id(operator_user_id, dto.user_id)
@@ -1443,6 +1466,10 @@ impl SysRoleService {
             )));
         }
 
+        // 横向越权：角色本身必须先属于操作者租户（否则租户可操作系统角色/他租角色）
+        self.ensure_role_in_operator_tenant(operator_tid, dto.role_id)
+            .await?;
+
         // 垂直越权校验：批量检查每个目标用户
         for target_user_id in &user_ids {
             self.check_vertical_auth_by_user_id(operator_user_id, *target_user_id)
@@ -1458,6 +1485,31 @@ impl SysRoleService {
             .await?;
         // 批量用户角色绑定变更，全量失效权限缓存
         self.invalidate_all_perm_cache().await;
+        Ok(())
+    }
+
+    /// 校验目标角色与操作者同租户（横向越权防护）。
+    /// 平台操作者（tid=0）经 `tenant_allowed` 放行全部租户。
+    ///
+    /// 只校验目标用户是不够的：`selectAll` 的语义是"把这个角色挂给这些人"，
+    /// 角色若属平台层（`tenant_id=0`）或他租，租户操作者就能借授权把自己人
+    /// 提升为平台角色的持有者——人没跨租，权限跨了。
+    async fn ensure_role_in_operator_tenant(
+        &self,
+        operator_tid: i64,
+        role_id: i64,
+    ) -> Result<(), ServiceError> {
+        let role = self
+            .role_repo
+            .base()
+            .find_by_id(role_id)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.role.not_found")))?;
+        if !crate::common::tenant::tenant_allowed(operator_tid, role.tenant_id) {
+            return Err(ServiceError::forbidden(&crate::tr!(
+                "error.common.forbidden"
+            )));
+        }
         Ok(())
     }
 
@@ -1508,6 +1560,12 @@ impl SysRoleService {
                 "error.role.user_id_empty"
             )));
         }
+
+        // 横向越权：不得把平台角色/他租角色授予本租用户。
+        // 目标用户同租只证明"人"没跨租，不证明"角色"没跨租；缺它就是
+        // "把平台角色挂给租户用户"的提权通道。
+        self.ensure_role_in_operator_tenant(operator_tid, dto.role_id)
+            .await?;
 
         // 垂直越权校验：批量检查每个目标用户
         for target_user_id in &user_ids {

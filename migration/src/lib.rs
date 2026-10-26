@@ -416,6 +416,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261022_000002_retire_dead_config_keys::Migration),
             Box::new(m20261026_000001_observability_clear_perm::Migration),
             Box::new(m20261026_000002_report_dashboard_write_perm::Migration),
+            Box::new(m20261026_000003_platform_only_menu_manage::Migration),
         ]
     }
 }

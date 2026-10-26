@@ -125,6 +125,12 @@ pub fn eval_tenant_runtime_state(
 ///   `GET /monitor/alert/list` 必然 403，正是"菜单可见但请求 403"的假入口，
 ///   且绕开三层开关收敛（授权层放行、请求层拒绝）。
 ///   指标面为 cpu/mem/disk/全局登录失败（非租户维度）⇒ 真要下放须先做租户级指标采集，另立项。
+/// - `system:menu:`（批九十五补登记）：菜单**定义**是全局表（`sys_menu` 无 tenant_id），
+///   租户一旦可写就能改 perms（`*:*:*` 直接命中超管短路）或把平台专属菜单挂进自己的
+///   授权面，影响所有租户 ⇒ 菜单定义面（列表/详情/增删改/排序）整组挂 `platform_only_guard`。
+///   **角色授权用的只读菜单树不在此列**：租户管理员给本租角色分配菜单必须读它，
+///   服务层按可授予面过滤后开放（见 `router/sys_menu_router.rs` 的拆分口径）——
+///   一刀切会把角色页的树静默变空，保存时清空角色授权。
 pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "system:tenant:domain:",
     "system:tenantMenu:",
@@ -139,6 +145,9 @@ pub const PLATFORM_ONLY_PERM_PREFIXES: &[&str] = &[
     "system:backup:",
     "system:rateLimit:",
     "system:aiConfig:",
+    // 菜单定义是**全局表**（`sys_menu` 无 tenant_id）：租户一旦可写菜单，就能改 perms
+    // 或把平台专属菜单挂进自己的授权面。菜单管理因此与租户管理同属平台面。
+    "system:menu:",
 ];
 
 /// 判断 perms 是否属于平台专属能力（前缀匹配，大小写敏感——perms 统一小写）
@@ -569,8 +578,11 @@ mod tests {
         // 最新全量治理点（必须含**全部**平台专属前缀）
         // 批七十四 B3：新增 `monitor:alert:` ⇒ 最新全量迁移推进到
         // `m20261017_000002_platform_only_alert`（13 项），`m000001` 随之降级为历史迁移。
-        const LATEST_SRC: &str =
-            include_str!("../../migration/src/migrations/m20261017_000002_platform_only_alert.rs");
+        // 批九十五：新增 `system:menu:`（菜单定义是全局表）⇒ 最新全量迁移推进到
+        // `m20261026_000003_platform_only_menu_manage`（14 项）。
+        const LATEST_SRC: &str = include_str!(
+            "../../migration/src/migrations/m20261026_000003_platform_only_menu_manage.rs"
+        );
         // 历史迁移（其项必须仍在常量中，防"常量删了但迁移还留着"的漂移）
         const M000001_SRC: &str =
             include_str!("../../migration/src/migrations/m20261008_000001_log_archive_anchor.rs");
@@ -592,7 +604,7 @@ mod tests {
             assert!(
                 LATEST_SRC.contains(p),
                 "平台专属前缀 `{p}` 未出现在最新迁移清单（LATEST_SRC = \
-                 m20261017_000002_platform_only_alert）—— 新增前缀必须同步开一个携带\
+                 m20261026_000003_platform_only_menu_manage）—— 新增前缀必须同步开一个携带\
                  完整清单的新迁移并把 LATEST_SRC 推进过去，否则走迁移的新库不会剔除\
                  对应菜单（假入口）"
             );

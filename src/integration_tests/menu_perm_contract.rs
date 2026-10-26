@@ -21,14 +21,10 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use std::net::SocketAddr;
 
-/// 权限标识格式合法性校验：仅允许字母/数字/下划线/连字符 与 冒号（形如 `module:entity:action`；
+/// 权限标识格式合法性校验与菜单写面共用同一把尺（`common::perm_format`）：
+/// 仅允许字母/数字/下划线/连字符 与 冒号（形如 `module:entity:action`；
 /// 连字符用于与路由路径同名的权限键，如 `system:webhook:test-send`）。
-fn is_well_formed_perm(perm: &str) -> bool {
-    !perm.is_empty()
-        && perm
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-')
-}
+use crate::common::perm_format::is_well_formed_perm;
 
 /// 菜单数据卫生契约（批次十四）：C 型页面菜单**必须**携带 component——
 /// 无 component 的 C 页面是"点击 404 死入口"（实证：4115 曾被污染为 C 型无

@@ -192,10 +192,11 @@ pub async fn get_info_by_id(
     Path(role_id): Path<i64>,
 ) -> Result<AjaxResult<RoleVo>, AppError> {
     // P0-6：传入 operator_user_id 校验角色在数据范围内（此前可读取任意角色详情含 menu_ids）
+    // b95：再按操作者租户校验归属——数据范围与租户边界是两道不同的闸
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
     let vo = state
         .role_service
-        .get_role_by_id(role_id, operator_user_id)
+        .get_role_by_id_scoped(role_id, operator_user_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success(vo))
 }
@@ -499,7 +500,7 @@ pub async fn auth_user_cancel(
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
     state
         .role_service
-        .cancel_auth_user(dto, operator_user_id)
+        .cancel_auth_user(dto, operator_user_id, operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.cancel_auth"

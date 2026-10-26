@@ -129,3 +129,4 @@ pub mod m20261022_000001_pwd_expire_policy;
 pub mod m20261022_000002_retire_dead_config_keys;
 pub mod m20261026_000001_observability_clear_perm;
 pub mod m20261026_000002_report_dashboard_write_perm;
+pub mod m20261026_000003_platform_only_menu_manage;

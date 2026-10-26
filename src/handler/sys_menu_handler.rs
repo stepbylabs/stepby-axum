@@ -60,8 +60,14 @@ pub async fn list(
 )]
 pub async fn treeselect(
     State(state): State<Arc<AppState>>,
+    operator: Operator,
 ) -> Result<AjaxResult<Vec<TreeSelectVo>>, AppError> {
-    let tree = state.menu_service.get_menu_tree_select().await?;
+    // 租户操作者只看到**可授予**的菜单（与角色保存前门禁同一把尺）；
+    // 平台操作者全量。只读树不挂平台守卫（租户角色页要用），见 router 文档。
+    let tree = state
+        .menu_service
+        .get_menu_tree_select_scoped(operator.tenant_id())
+        .await?;
     Ok(AjaxResult::success(tree))
 }
 
@@ -89,11 +95,16 @@ pub async fn role_menu_treeselect(
 ) -> Result<RoleMenuTreeResult, AppError> {
     // P0-6：传入 operator_user_id 校验角色在数据范围内（与 role get_info 一致）
     let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    // b95：数据范围不等于租户边界——再按操作者租户校验角色归属，
+    // 否则租户操作者能读他租角色的 menu_ids（横向读泄漏）。
     let role_vo = state
         .role_service
-        .get_role_by_id(role_id, operator_user_id)
+        .get_role_by_id_scoped(role_id, operator_user_id, operator.tenant_id())
         .await?;
-    let menus = state.menu_service.get_menu_tree_select().await?;
+    let menus = state
+        .menu_service
+        .get_menu_tree_select_scoped(operator.tenant_id())
+        .await?;
     Ok(RoleMenuTreeResult {
         code: 200,
         msg: crate::tr!("msg.success.default"),

@@ -250,6 +250,37 @@ impl SysMenuService {
         Ok(tree)
     }
 
+    /// 菜单下拉树（租户感知，b95）。
+    ///
+    /// 平台操作者（`caller_tid == 0`）返回全量定义；租户操作者只返回**可授予**的菜单：
+    /// 判据与角色保存前的 `ensure_menus_filter_coverage` 共用
+    /// [`crate::common::features::is_grantable_perm_with_features`]，
+    /// 所以"勾得上的"就是"存得下的"。平台专属（如 `system:menu:*`）与 tier2 未覆盖的
+    /// perms 一律剪除；目录因子节点全被剪而变空时一并移除（叶子保留）。
+    ///
+    /// 这条方法只服务角色授权页的只读树（`treeselect` / `roleMenuTreeselect`）——
+    /// 菜单**定义面**仍是平台专属（路由层 `platform_only_guard`）。
+    pub async fn get_menu_tree_select_scoped(
+        &self,
+        caller_tid: i64,
+    ) -> Result<Vec<TreeSelectVo>, ServiceError> {
+        let list = self.menu_repo.find_active_all().await?;
+        let list = if caller_tid == 0 {
+            list
+        } else {
+            let features = crate::service::sys_tenant_service::tenant_features_conn(
+                self.menu_repo.base().db(),
+                caller_tid,
+            )
+            .await?;
+            // 必须先组装树再剪：剪平铺列表时 `children` 恒为空，目录节点看不出
+            // "子节点被剪光了"，会以空目录的形态留在下拉树里（假入口）。
+            let tree = prune_ungrantable_menus(build_tree(&list, 0), &features);
+            return Ok(tree.into_iter().map(menu_model_tree_to_select).collect());
+        };
+        Ok(build_menu_tree_select(&list, 0))
+    }
+
     /// 批量更新菜单排序（对齐前端 updateSort 接口）
     ///
     /// menu_ids 和 order_nums 按位置一一对应，逐条更新 order_num 字段。
@@ -366,6 +397,7 @@ impl SysMenuService {
             dto.component.clone(),
             dto.path.clone(),
         );
+        ensure_menu_perm_format(perms_val.as_deref())?;
 
         let now = crate::common::datetime::now_naive();
         let mut am = SysMenuActiveModel {
@@ -502,6 +534,7 @@ impl SysMenuService {
             dto.component.clone().or(existing.component.clone()),
             dto.path.clone().or(existing.path.clone()),
         );
+        ensure_menu_perm_format(perms_val.as_deref())?;
 
         let now = crate::common::datetime::now_naive();
         // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
@@ -910,6 +943,23 @@ impl SysMenuService {
     }
 }
 
+/// 菜单写面的权限键格式闸：拒绝通配符/空白/斜杠等非法字符。
+///
+/// `sys_menu.perms` 是 RBAC 的唯一授予来源，运行时只做字符串匹配；`*:*:*` 会直接命中
+/// 超管短路（`middleware/permission.rs`），所以绝不能让菜单编辑写入它。
+fn ensure_menu_perm_format(perms: Option<&str>) -> Result<(), ServiceError> {
+    let Some(perm) = perms.filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    if crate::common::perm_format::is_well_formed_perm(perm) {
+        return Ok(());
+    }
+    Err(ServiceError::bad_request(&crate::tr!(
+        "error.menu.perm_format_invalid",
+        perm = perm
+    )))
+}
+
 /// 按 menu_type 分支处理 perms / component / path 字段
 ///
 /// - M（目录）：perms 置空，component 置空
@@ -926,6 +976,46 @@ fn apply_menu_type_rules(
         "F" => (perms, None, None),
         _ => (perms, component, path),
     }
+}
+
+/// 剪除租户**不可授予**的菜单（b95）：判据与角色保存前门禁同源。
+///
+/// 只剪"有 perms 且不可授予"的节点；无 perms 的目录保留，但子节点全被剪光的目录
+/// 一并移除（与 `prune_capability_gated_menus` 的空目录语义一致）。
+fn prune_ungrantable_menus(
+    menus: Vec<SysMenuModel>,
+    features: &crate::common::features::FeatureSet,
+) -> Vec<SysMenuModel> {
+    menus
+        .into_iter()
+        .filter_map(|mut menu| {
+            let blocked = menu
+                .perms
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .is_some_and(|p| {
+                    !crate::common::features::is_grantable_perm_with_features(p, features)
+                });
+            if blocked {
+                return None;
+            }
+            let had_children = menu.children.is_some();
+            let children = menu
+                .children
+                .take()
+                .map(|c| prune_ungrantable_menus(c, features))
+                .unwrap_or_default();
+            if had_children && children.is_empty() {
+                return None;
+            }
+            menu.children = if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            };
+            Some(menu)
+        })
+        .collect()
 }
 
 /// 将扁平菜单列表组装为 TreeSelect 树结构
@@ -978,4 +1068,16 @@ fn menu_model_to_tree_select(m: &SysMenuModel) -> TreeSelectVo {
         disabled: m.status.as_deref() != Some("0"),
         children: vec![],
     }
+}
+
+/// 已组装好的模型树 → TreeSelect（保留层级；租户过滤路径专用）。
+fn menu_model_tree_to_select(m: SysMenuModel) -> TreeSelectVo {
+    let mut vo = menu_model_to_tree_select(&m);
+    vo.children = m
+        .children
+        .unwrap_or_default()
+        .into_iter()
+        .map(menu_model_tree_to_select)
+        .collect();
+    vo
 }

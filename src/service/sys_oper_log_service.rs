@@ -609,11 +609,13 @@ impl SysOperLogService {
             .await
     }
 
-    /// 按时间范围清理操作日志（物理删除 `[begin, end]` 区间的日志，边界含端点）
+    /// 按时间范围清理操作日志（物理删除 `[begin, end]` 区间的日志，`end` 含当日）
     ///
     /// 供 `DELETE /monitor/operlog/clean?params[beginTime]=&params[endTime]=` 使用：
     /// 传入 `begin_time` / `end_time`（`%Y-%m-%d`）显式清理指定时间段的日志。
-    /// 单侧不传时该侧不设边界。解析失败返回 `ServiceError::bad_request`。
+    /// **两个边界必须同时提供**：单侧缺省会被 `range_condition` 解释成"从该侧起的全部"，
+    /// 只给 `begin` 等于删到今天、只给 `end` 等于删掉全部历史——两者都不是调用方
+    /// 能表达的意图，属破坏性操作的输入必须整批可判定。解析失败返回 `bad_request`。
     ///
     /// 批次十九：手动区间清理**同样锚点登记**（防篡改链互斥修复的另一半——手动
     /// clean 删中间段与 cleanup 删尾段一样会断链）。归档导出仅挂在 cleanup job 的
@@ -624,15 +626,30 @@ impl SysOperLogService {
         end_time: Option<String>,
         tenant_scope: Option<i64>,
     ) -> Result<u64, ServiceError> {
-        let begin = match begin_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
-            _ => None,
+        let (Some(begin_raw), Some(end_raw)) = (
+            begin_time.as_deref().filter(|s| !s.trim().is_empty()),
+            end_time.as_deref().filter(|s| !s.trim().is_empty()),
+        ) else {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.oper_log.range_both_required"
+            )));
         };
-        let end = match end_time.as_deref() {
-            Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
-            _ => None,
-        };
-        let cond = SysOperLogRepository::range_condition(begin, end, tenant_scope);
+        let begin = crate::common::datetime::parse_query_date(begin_raw)?;
+        // `end` 是本地日，清理"到 10-02"必须含 10-02 全天；库内是 UTC 瞬间，
+        // 故取次日零点（不含）为上界，而不是把 end 当日零点当上界（那会漏掉
+        // end 当天零点之后的全部行，却返回"成功清理"）。
+        let end_exclusive =
+            crate::common::datetime::parse_query_date(end_raw)? + chrono::Duration::days(1);
+        if begin >= end_exclusive {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.oper_log.range_invalid"
+            )));
+        }
+        let cond = SysOperLogRepository::range_condition(
+            Some(begin),
+            Some(end_exclusive - chrono::Duration::nanoseconds(1)),
+            tenant_scope,
+        );
         self.register_anchor_and_delete(cond, LogRetentionMode::Delete, None)
             .await
     }
@@ -1903,6 +1920,31 @@ mod tests {
             .unwrap()
     }
 
+    /// [`Self::insert_log_row_tenant`] 的时间维度版：`oper_time` 可控，用于构造
+    /// "区间边界含不含当日"这类必须在真实时刻上验证的清理场景。
+    async fn insert_log_row_at(
+        db: &DatabaseConnection,
+        oper_id: i64,
+        oper_time: chrono::NaiveDateTime,
+    ) -> crate::entity::sys_oper_log::Model {
+        crate::entity::sys_oper_log::Entity::insert(crate::entity::sys_oper_log::ActiveModel {
+            oper_id: sea_orm::Set(oper_id),
+            tenant_id: sea_orm::Set(0),
+            title: sea_orm::Set(Some("module.test".into())),
+            oper_name: sea_orm::Set(Some("admin".into())),
+            oper_time: sea_orm::Set(Some(oper_time)),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        crate::entity::sys_oper_log::Entity::find_by_id(oper_id)
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn chain_in_order_write_links_and_verifies() {
         let (db, svc) = chain_fixture().await;
@@ -2060,6 +2102,75 @@ mod tests {
             vec![3, 3, 3],
             "deleted_count 是**本次清理操作**的窗口级统计（多段各记同一总数，跨段求和无意义）"
         );
+    }
+
+    /// 区间清理的两个边界**必须同时给**：单侧缺省不是"开放区间"，而是
+    /// `range_condition` 里的"无该侧上/下界" ⇒ 只给 begin 会删到今天、
+    /// 只给 end 会删掉全部历史。破坏性操作的畸形输入必须整批拒绝且一行不动。
+    #[tokio::test]
+    async fn range_cleanup_rejects_partial_bounds_without_deleting() {
+        use sea_orm::{EntityTrait, PaginatorTrait};
+
+        let (db, svc) = chain_fixture().await;
+        insert_log_row(&db, 1).await;
+
+        for (begin, end, label) in [
+            (Some("2026-10-04".to_string()), None, "只给开始"),
+            (None, Some("2026-10-04".to_string()), "只给结束"),
+            (Some(String::new()), Some("   ".to_string()), "两端空白串"),
+            (
+                Some("2026-10-05".to_string()),
+                Some("2026-10-04".to_string()),
+                "起止倒置",
+            ),
+        ] {
+            let err = svc
+                .clean_oper_logs_by_range(begin, end, None)
+                .await
+                .expect_err(label);
+            assert_eq!(err.code, 400, "{label} 必须 400，实际: {err:?}");
+            let remaining = crate::entity::sys_oper_log::Entity::find()
+                .count(&db)
+                .await
+                .unwrap();
+            assert_eq!(remaining, 1, "{label} 被拒后不得删除任何行");
+        }
+    }
+
+    /// `end` 是本地日：清理"到 10-04"必须含 10-04 全天。
+    ///
+    /// 旧实现把 end 当日**零点**当上界（`lte(end)`），于是 end 当天零点之后的行
+    /// 全部幸存，而接口返回"清理成功"——用户以为删掉了整个区间，实际上只删了一瞬。
+    #[tokio::test]
+    async fn range_cleanup_includes_the_whole_end_day() {
+        use sea_orm::EntityTrait;
+
+        let (db, svc) = chain_fixture().await;
+        // 以服务端自己的本地日换算为锚，避免测试机时区参与判定
+        let day_start = crate::common::datetime::parse_query_date("2026-10-04").unwrap();
+        let h = chrono::Duration::hours;
+        insert_log_row_at(&db, 1, day_start + h(1)).await; // 当日 01:00
+        insert_log_row_at(&db, 2, day_start + h(12)).await; // 当日 12:00
+        insert_log_row_at(&db, 3, day_start + h(23)).await; // 当日 23:00
+        insert_log_row_at(&db, 4, day_start + h(25)).await; // 次日 01:00（必须幸存）
+
+        let affected = svc
+            .clean_oper_logs_by_range(
+                Some("2026-10-04".to_string()),
+                Some("2026-10-04".to_string()),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected, 3, "end 当日全天的 3 行都必须被删");
+        let ids: Vec<i64> = crate::entity::sys_oper_log::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.oper_id)
+            .collect();
+        assert_eq!(ids, vec![4], "次日行必须幸存，实际: {ids:?}");
     }
 
     // ---------- 批七十五 B3：物理删除只能出自锚点编排（形状锁） ----------

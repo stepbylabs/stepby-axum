@@ -22,8 +22,15 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Method, Request, StatusCode};
 
 /// 平台专属端点（harness 可端到端覆盖的最小 DB/Redis 只读端点）
-const PLATFORM_ONLY_ENDPOINTS: [&str; 2] =
-    ["/monitor/cache", "/tool/gen/list?pageNum=1&pageSize=10"];
+///
+/// `/system/menu/list` 是 b95 新纳入平台面的全局定义（`sys_menu` 无 tenant_id），
+/// 与缓存/代码生成同一层守卫。**只读菜单树不在清单里**：角色授权页要用它，
+/// 服务层按租户过滤可授予面（`it_tenant_menu_tree_is_scoped_not_blocked` 钉住）。
+const PLATFORM_ONLY_ENDPOINTS: [&str; 3] = [
+    "/monitor/cache",
+    "/tool/gen/list?pageNum=1&pageSize=10",
+    "/system/menu/list",
+];
 
 /// 用当前测试进程的 JWT 配置签发一份指定 `tid` 的合成令牌。
 fn token_with_tid(ctx: &TestContext, tid: i64) -> String {
@@ -85,4 +92,86 @@ async fn it_tenant_operator_forbidden_on_platform_only_endpoints() {
             "租户操作者访问 {uri} 业务码应 403，实际 {v}"
         );
     }
+}
+
+/// 展示层也必须与请求层同口径：租户的 getRouters 不得再出现菜单管理。
+///
+/// 否则会留下"菜单可见但请求必 403"的假入口（AGENTS 开关规范③/④）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_tenant_router_tree_prunes_menu_management() {
+    let ctx = TestContext::new().await;
+    let tenant_token = token_with_tid(&ctx, 5);
+    let (status, v) = ctx
+        .send_raw(auth_get(&ctx, &tenant_token, "/getRouters"))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "租户 getRouters 应 200，实际 {status} {v}"
+    );
+
+    fn collect_paths(nodes: &[serde_json::Value], out: &mut Vec<String>) {
+        for node in nodes {
+            if let Some(path) = node["path"].as_str() {
+                out.push(path.to_string());
+            }
+            if let Some(children) = node["children"].as_array() {
+                collect_paths(children, out);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    collect_paths(v["data"].as_array().expect("data 应为数组"), &mut paths);
+    assert!(
+        !paths.iter().any(|p| p == "/system/menu" || p == "menu"),
+        "租户 getRouters 不得含菜单管理（平台专属），实际路径: {paths:?}"
+    );
+}
+
+/// 只读菜单树对租户**放行但要收窄**（b95）。
+///
+/// 角色授权页必须能读菜单树，所以这两个端点不能挂平台守卫；但保存前的门禁会拒绝
+/// 平台专属 perms，因此树里也必须先不出现它们——否则就是"勾得上、存不下"的假入口。
+/// 目录因子节点全被剪而变空时一并移除（菜单管理 / 缓存监控 的父目录可能随之为空）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_tenant_menu_tree_is_scoped_not_blocked() {
+    const MENU_ROLE: i64 = 101; // system:role:list —— 租户可授予
+    const MENU_ADMIN: i64 = 102; // system:menu:list —— b95 起平台专属
+    const MENU_CACHE: i64 = 113; // monitor:cache:list —— 平台专属
+
+    let ctx = TestContext::new().await;
+    let tenant_token = token_with_tid(&ctx, 5);
+    let (status, v) = ctx
+        .send_raw(auth_get(&ctx, &tenant_token, "/system/menu/treeselect"))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "租户读角色授权用菜单树必须放行（403 会让角色页把授权清空），实际 {status} {v}"
+    );
+
+    fn collect_ids(nodes: &[serde_json::Value], out: &mut Vec<i64>) {
+        for node in nodes {
+            if let Some(id) = node["id"].as_i64() {
+                out.push(id);
+            }
+            if let Some(children) = node["children"].as_array() {
+                collect_ids(children, out);
+            }
+        }
+    }
+    let mut ids = Vec::new();
+    collect_ids(v["data"].as_array().expect("data 应为数组"), &mut ids);
+    assert!(
+        ids.contains(&MENU_ROLE),
+        "可授予的角色菜单必须在租户树里，实际: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&MENU_ADMIN),
+        "菜单管理（系统:menu:*）是平台专属，不得出现在租户可勾选树里: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&MENU_CACHE),
+        "缓存监控是平台专属，不得出现在租户可勾选树里: {ids:?}"
+    );
 }

@@ -4,6 +4,7 @@
 //! - 部门：列表 / 排除节点 / 下拉树 / 详情 / 新增 → 修改 → 排序 → 删除
 
 use super::TestContext;
+use axum::http::{Method, StatusCode};
 
 /// 菜单模块全链路。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -87,6 +88,51 @@ async fn test_menu_chain() {
         v["data"]["menuName"].as_str(),
         Some("集成测试菜单改"),
         "修改后的 menuName 应生效，实际: {v}"
+    );
+
+    // 7b. 权限键格式闸：通配符会命中超管短路，必须在写面拒绝（新增与修改两条路径）。
+    let wildcard_menu = serde_json::json!({
+        "parentId": 1,
+        "menuName": "非法通配菜单",
+        "orderNum": 100,
+        "path": "it-wildcard",
+        "component": "system/itWildcard/index",
+        "menuType": "C",
+        "visible": "0",
+        "status": "0",
+        "perms": "*:*:*"
+    });
+    let (status, v) = ctx
+        .send_raw(ctx.request(Method::POST, "/system/menu", Some(wildcard_menu)))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "通配权限键应 400，实际: {v}"
+    );
+    let (status, v) = ctx
+        .send_raw(ctx.request(
+            Method::PUT,
+            "/system/menu",
+            Some(serde_json::json!({
+                "menuId": menu_id,
+                "parentId": 1,
+                "menuName": "集成测试菜单改",
+                "menuType": "C",
+                "perms": "*:*:*"
+            })),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "修改为通配权限键应 400，实际: {v}"
+    );
+    let v = ctx.get_json(&format!("/system/menu/{}", menu_id)).await;
+    assert_eq!(
+        v["data"]["perms"].as_str(),
+        Some("system:itMenu:list"),
+        "被拒绝的通配写入不得改动原 perms，实际: {v}"
     );
 
     // 8. 菜单排序

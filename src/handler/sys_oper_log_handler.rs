@@ -115,13 +115,16 @@ pub struct OperLogCleanQuery {
 ///
 /// - 不传时间参数：仅删除 OPER_LOG_CLEAN_RETAIN_DAYS（30）天前的日志，保留最近同天数用于审计
 ///   （修复 P0-R81-010：原端点物理删除全部日志，违反审计合规）。
-/// - 传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`）：按时间范围清理 `[begin, end]` 区间日志。
+/// - 同时传入 `params[beginTime]`/`params[endTime]`（`%Y-%m-%d`，两端均必填）：
+///   按时间范围清理 `[begin, end]` 区间日志（`end` 含当日）。只给一侧 ⇒ 400。
+/// - 两个参数都为空串视同"未提供"，走上面的保留期清理（前端表单未选日期时会这样回传）。
 #[utoipa::path(
     delete,
     path = "/monitor/operlog/clean",
     params(OperLogCleanQuery),
     responses(
         (status = 200, description = "清空成功", body = AjaxResult<serde_json::Value>),
+        (status = 400, description = "时间范围参数不完整"),
         (status = 500, description = "服务器错误"),
     ),
     tag = "monitor-operlog"
@@ -136,8 +139,14 @@ pub async fn clean(
     )?;
     // 多租户：租户操作者仅清理本租户日志；平台（tenant_id=0）全量
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
+    // 参数判定与 service 侧同一口径：空白串不算"提供"，否则
+    // `params[beginTime]=&params[endTime]=` 会被当成区间模式（旧实现会走到
+    // range_condition(None, None) ⇒ 清空全部本租户日志）。
+    let has_range = [&query.begin_time, &query.end_time]
+        .iter()
+        .any(|v| v.as_deref().is_some_and(|s| !s.trim().is_empty()));
     // 传入时间范围时执行按时间清理，否则回退保留期清理（保留最近 30 天）
-    let affected = if query.begin_time.is_some() || query.end_time.is_some() {
+    let affected = if has_range {
         tracing::warn!(
             "操作日志清理（按时间范围）：begin={:?} end={:?}，操作者 = {}",
             query.begin_time,
