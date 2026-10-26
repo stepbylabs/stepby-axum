@@ -401,6 +401,20 @@ impl Operator {
         &self.0.sub
     }
 
+    /// 操作人用户 ID 的**严格解析**（b96 单一事实源）。
+    ///
+    /// `sub` 由本服务签发时恒为数值用户 ID（`user_id.to_string()`），解析失败意味着
+    /// 令牌形状异常（伪造/跨系统令牌）。此时必须 fail-closed 返回 401，**不得**回落成
+    /// `Option::None`：服务层把 `None` 定义为"无操作人上下文 ⇒ 不做数据范围过滤"，
+    /// 那会让一次畸形令牌直接变成越权读（fail-open）。handler 层一律走本方法，
+    /// 由形状锁 `handler_layer_never_parses_operator_sub_directly` 常驻钉住。
+    pub fn user_id_i64(&self) -> Result<i64, AppError> {
+        self.0
+            .sub
+            .parse::<i64>()
+            .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.user_id_parse_failed")))
+    }
+
     /// 用户认证时刻（JWT iat，UTC 秒；v3 P1'-1：consent 批准路径的 auth_time 数据源）
     pub fn iat(&self) -> usize {
         self.0.iat
@@ -503,5 +517,111 @@ mod tests {
         assert_eq!(operator.user_id(), "42");
         assert_eq!(operator.username(), "alice");
         assert_eq!(operator.tenant_id(), 0, "v5-N2 Phase 1：tid 默认平台租户 0");
+    }
+
+    fn claims_with_sub(sub: &str) -> Claims {
+        Claims {
+            sub: sub.to_string(),
+            username: "alice".to_string(),
+            exp: 0,
+            iat: 0,
+            iss: "stepby".to_string(),
+            aud: "stepby".to_string(),
+            jti: "jti-sub".to_string(),
+            pwd_ver: 0,
+            pat_scopes: None,
+            tid: 7,
+        }
+    }
+
+    /// 严格解析：数值 sub 正常返回，畸形 sub 必须 401（fail-closed）。
+    ///
+    /// 可证伪：把实现改回 `.parse().ok()`（返回 Option）时本用例编译失败/或若改成
+    /// `unwrap_or(0)`，第二条断言会拿到 Ok(0) 而变红——两种退化都绕不过去。
+    #[test]
+    fn operator_user_id_parse_is_strict_and_fails_closed() {
+        let ok = Operator(claims_with_sub("42"));
+        assert_eq!(ok.user_id_i64().expect("数值 sub 应解析成功"), 42);
+
+        let bad = Operator(claims_with_sub("alice@example.com"));
+        let err = bad.user_id_i64().expect_err("非数值 sub 必须拒绝");
+        assert_eq!(err.code, 401, "畸形 sub 必须 401，实际 {err}");
+        assert!(
+            !err.message.is_empty(),
+            "401 必须带可解析的提示（i18n 键缺失会暴露为空串）"
+        );
+    }
+
+    /// 形状锁的检测器（正反两向都要能判）：只认**代码**里的两种裸解析形状。
+    fn direct_sub_parse_hits(text: &str) -> Vec<(usize, String)> {
+        let needle_parse = concat!("user_id().", "parse");
+        let needle_fn = concat!("fn parse_", "user_id");
+        text.lines()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let code = line.split("//").next().unwrap_or("");
+                if code.contains(needle_parse) || code.contains(needle_fn) {
+                    Some((i + 1, line.trim().to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sub_parse_detector_is_falsifiable() {
+        let synthetic = "fn parse_user_id(sub: &str) -> i64 { 0 }\nlet a = operator.user_id().parse::<i64>().ok();\n// operator.user_id().parse in comment\nlet b = operator.user_id_i64()?;";
+        let hits = direct_sub_parse_hits(synthetic);
+        assert_eq!(
+            hits.len(),
+            2,
+            "合成违规必须被抓到 2 处（注释与合规写法不得计入），实际 {hits:?}"
+        );
+        assert!(
+            direct_sub_parse_hits("let ok = operator.user_id_i64()?;").is_empty(),
+            "合规写法不得误报"
+        );
+    }
+
+    /// 常驻形状锁：handler 层不得再出现"裸解析 sub 并回落 None"的形状。
+    ///
+    /// 立据：`None` 在数据范围服务里表示"无操作人上下文 ⇒ 不过滤"（fail-open）。
+    /// 采集面自证（文件数下限）防止"扫不到文件"被读成"零违规"。
+    #[test]
+    fn handler_layer_never_parses_operator_sub_directly() {
+        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    collect(&p, out);
+                } else if p.extension().is_some_and(|e| e == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handler");
+        let mut files = Vec::new();
+        collect(&root, &mut files);
+        assert!(
+            files.len() >= 20,
+            "采集面异常：src/handler 应至少 20 个 .rs，实际 {}（扫不到 ≠ 干净）",
+            files.len()
+        );
+        let mut hits = Vec::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("读取 handler 源码失败");
+            for (line, snippet) in direct_sub_parse_hits(&text) {
+                hits.push(format!("{}:{line} {snippet}", f.display()));
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "handler 层出现裸解析操作者 sub（fail-open 形状）：\n{}",
+            hits.join("\n")
+        );
     }
 }

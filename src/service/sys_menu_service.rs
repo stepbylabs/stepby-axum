@@ -13,7 +13,7 @@ use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use utoipa::{IntoParams, ToSchema};
@@ -250,13 +250,13 @@ impl SysMenuService {
         Ok(tree)
     }
 
-    /// 菜单下拉树（租户感知，b95）。
+    /// 菜单下拉树（租户感知，b95；b96 起叠加套餐白名单）。
     ///
-    /// 平台操作者（`caller_tid == 0`）返回全量定义；租户操作者只返回**可授予**的菜单：
-    /// 判据与角色保存前的 `ensure_menus_filter_coverage` 共用
-    /// [`crate::common::features::is_grantable_perm_with_features`]，
-    /// 所以"勾得上的"就是"存得下的"。平台专属（如 `system:menu:*`）与 tier2 未覆盖的
-    /// perms 一律剪除；目录因子节点全被剪而变空时一并移除（叶子保留）。
+    /// 平台操作者（`caller_tid == 0`）返回全量定义；租户操作者只返回**可授予且套餐内**的菜单，
+    /// 两个判据分别与角色保存前的 `ensure_menus_filter_coverage`（能力位/平台专属）和
+    /// `ensure_menus_in_package`（套餐白名单）**同源**，所以"勾得上的"就是"存得下的"
+    /// （b95 遗留边界：树里曾出现"可授予但不在套餐内"的节点，保存时才 400）。
+    /// 目录因子节点全被剪而变空时一并移除（叶子保留）。
     ///
     /// 这条方法只服务角色授权页的只读树（`treeselect` / `roleMenuTreeselect`）——
     /// 菜单**定义面**仍是平台专属（路由层 `platform_only_guard`）。
@@ -268,14 +268,18 @@ impl SysMenuService {
         let list = if caller_tid == 0 {
             list
         } else {
-            let features = crate::service::sys_tenant_service::tenant_features_conn(
-                self.menu_repo.base().db(),
-                caller_tid,
-            )
-            .await?;
+            let db = self.menu_repo.base().db();
+            let features =
+                crate::service::sys_tenant_service::tenant_features_conn(db, caller_tid).await?;
+            // 套餐白名单：`None` = 不限制（平台租户 / 无套餐 / 套餐无 menu_ids）。
+            // 与保存侧 `ensure_menus_in_package` 同一份实现，避免两处口径漂移。
+            let whitelist =
+                crate::service::sys_tenant_service::package_menu_whitelist_conn(db, caller_tid)
+                    .await?;
             // 必须先组装树再剪：剪平铺列表时 `children` 恒为空，目录节点看不出
             // "子节点被剪光了"，会以空目录的形态留在下拉树里（假入口）。
-            let tree = prune_ungrantable_menus(build_tree(&list, 0), &features);
+            let tree =
+                prune_unassignable_menus(build_tree(&list, 0), &features, whitelist.as_ref());
             return Ok(tree.into_iter().map(menu_model_tree_to_select).collect());
         };
         Ok(build_menu_tree_select(&list, 0))
@@ -978,13 +982,17 @@ fn apply_menu_type_rules(
     }
 }
 
-/// 剪除租户**不可授予**的菜单（b95）：判据与角色保存前门禁同源。
+/// 剪除租户**不可授予或不在套餐白名单内**的菜单（b95 / b96）。
 ///
-/// 只剪"有 perms 且不可授予"的节点；无 perms 的目录保留，但子节点全被剪光的目录
-/// 一并移除（与 `prune_capability_gated_menus` 的空目录语义一致）。
-fn prune_ungrantable_menus(
+/// 两条判据分别与保存前门禁同源：`is_grantable_perm_with_features`（能力位 / 平台专属）
+/// 与 `package_menu_whitelist_conn`（套餐白名单）。只剪"有 perms 且不可授予"的节点；
+/// 无 perms 的目录保留，但子节点全被剪光的目录一并移除（与 `prune_capability_gated_menus`
+/// 的空目录语义一致）。白名单存在时，节点自身 id 不在白名单内同样剪除——保存侧会把
+/// 勾选的每个 id（含目录）交给 `ensure_menus_in_package` 校验，树里多留一个就多一次必然 400。
+fn prune_unassignable_menus(
     menus: Vec<SysMenuModel>,
     features: &crate::common::features::FeatureSet,
+    whitelist: Option<&HashSet<i64>>,
 ) -> Vec<SysMenuModel> {
     menus
         .into_iter()
@@ -996,16 +1004,22 @@ fn prune_ungrantable_menus(
                 .is_some_and(|p| {
                     !crate::common::features::is_grantable_perm_with_features(p, features)
                 });
-            if blocked {
+            let in_wl = whitelist.is_none_or(|w| w.contains(&menu.menu_id));
+            if blocked || !in_wl {
                 return None;
             }
             let had_children = menu.children.is_some();
             let children = menu
                 .children
                 .take()
-                .map(|c| prune_ungrantable_menus(c, features))
+                .map(|c| prune_unassignable_menus(c, features, whitelist))
                 .unwrap_or_default();
-            if had_children && children.is_empty() {
+            // 只清理**空目录**：菜单节点（C）的 perms 在自己身上，按钮被全部剪掉
+            // 仍可单独授予页面访问；把它一起丢掉会让"只读角色"拿不到任何页面
+            // （b96 实测：套餐白名单只列 1,101 时，101 的按钮全被剪 ⇒ 旧规则把 101 也丢了，
+            // 整棵树变成空数组）。
+            let is_directory = menu.menu_type.as_deref() == Some(menu_kind::DIR);
+            if had_children && children.is_empty() && is_directory {
                 return None;
             }
             menu.children = if children.is_empty() {

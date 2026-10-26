@@ -39,12 +39,6 @@ fn default_range() -> String {
     "7d".to_string()
 }
 
-/// 解析 Operator 携带的 user_id（JWT sub，字符串）为 i64
-fn parse_user_id(sub: &str) -> Result<i64, AppError> {
-    sub.parse::<i64>()
-        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))
-}
-
 /// GET /tool/report-board/list — 本人看板清单
 #[utoipa::path(
     get,
@@ -59,7 +53,7 @@ pub async fn board_list(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<Vec<BoardVo>>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let vos = state.report_board_service.list(user_id).await?;
     Ok(AjaxResult::success(vos))
 }
@@ -81,7 +75,7 @@ pub async fn board_add(
     operator: Operator,
     Json(dto): Json<BoardCreateDto>,
 ) -> Result<AjaxResult<BoardVo>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let vo = state
         .report_board_service
         .create(user_id, operator.tenant_id(), dto)
@@ -106,7 +100,7 @@ pub async fn board_info(
     operator: Operator,
     Path(board_id): Path<i64>,
 ) -> Result<AjaxResult<BoardVo>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let vo = state.report_board_service.get(board_id, user_id).await?;
     Ok(AjaxResult::success(vo))
 }
@@ -131,7 +125,7 @@ pub async fn board_edit(
     Path(board_id): Path<i64>,
     Json(dto): Json<BoardUpdateDto>,
 ) -> Result<AjaxResult<BoardVo>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let vo = state
         .report_board_service
         .update(board_id, user_id, dto)
@@ -156,7 +150,7 @@ pub async fn board_remove(
     operator: Operator,
     Path(board_id): Path<i64>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     state.report_board_service.delete(board_id, user_id).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
 }

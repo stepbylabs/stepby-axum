@@ -175,3 +175,170 @@ async fn it_tenant_menu_tree_is_scoped_not_blocked() {
         "缓存监控是平台专属，不得出现在租户可勾选树里: {ids:?}"
     );
 }
+
+/// 租户角色授权树必须与保存侧**同一把尺**：套餐白名单外的菜单不得出现在树里。
+///
+/// b95 遗留边界：树只按可授予性过滤，未按套餐白名单裁剪 ⇒ 租户管理员能看到并勾选
+/// "可授予但不在套餐内"的菜单，保存时才 400（一次性交互失败，且理由不在页面上）。
+/// 本用例把读侧（treeselect）与写侧（POST /system/role 的 `ensure_menus_in_package`）
+/// 放在同一个夹具里对账：
+/// - 读侧：树含白名单内的 `system:role:list` 及其祖先目录，不含白名单外的 `system:user:list`；
+/// - 写侧：勾白名单外菜单 ⇒ 403（`ensure_menus_in_package`）；勾白名单内菜单 ⇒ 200。
+///
+/// 可证伪：若 `get_menu_tree_select_scoped` 忽略白名单，第一条断言会把 outside_id 读进来；
+/// 若保存侧校验被摘掉，第二条的 400 会变成 200。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_role_assign_tree_respects_package_whitelist() {
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    const TID: i64 = 9061;
+    const PACKAGE_ID: i64 = 9261;
+    const ROLE_KEY_IN: &str = "it_pkg_whitelist_in";
+    const ROLE_KEY_OUT: &str = "it_pkg_whitelist_out";
+
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+
+    async fn menu_id_by_perms(db: &sea_orm::DatabaseConnection, perms: &str) -> i64 {
+        crate::entity::sys_menu::Entity::find()
+            .filter(crate::entity::sys_menu::Column::Perms.eq(perms))
+            .filter(crate::entity::sys_menu::Column::DelFlag.eq("0"))
+            .one(db)
+            .await
+            .expect("查询菜单失败")
+            .unwrap_or_else(|| panic!("种子应含 perms = {perms} 的菜单"))
+            .menu_id
+    }
+    let inside_id = menu_id_by_perms(db, "system:role:list").await;
+    let outside_id = menu_id_by_perms(db, "system:user:list").await;
+
+    // 白名单 = 目标菜单 + 其全部祖先（目录不在白名单里会让整棵子树被剪掉，夹具必须自洽）
+    let mut allow = Vec::new();
+    let mut cursor = Some(inside_id);
+    while let Some(id) = cursor {
+        allow.push(id);
+        cursor = crate::entity::sys_menu::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("查询祖先菜单失败")
+            .and_then(|m| m.parent_id)
+            .filter(|p| *p != 0);
+    }
+    allow.sort_unstable();
+    allow.dedup();
+    let menu_ids: String = allow
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    crate::entity::sys_tenant_package::ActiveModel {
+        package_id: Set(PACKAGE_ID),
+        package_name: Set(format!("IT-PKG-{PACKAGE_ID}")),
+        menu_ids: Set(Some(menu_ids)),
+        features: Set(None),
+        default_account_count: Set(Some(0)),
+        status: Set(Some("0".to_string())),
+        del_flag: Set(Some("0".to_string())),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("插入 sys_tenant_package 失败");
+    crate::entity::sys_tenant::ActiveModel {
+        tenant_id: Set(TID),
+        tenant_code: Set(format!("it_pkg_{TID}")),
+        tenant_name: Set(format!("IT-PKG-{TID}")),
+        package_id: Set(Some(PACKAGE_ID)),
+        status: Set(Some("0".to_string())),
+        del_flag: Set(Some("0".to_string())),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("插入 sys_tenant 失败");
+
+    let token = token_with_tid(&ctx, TID);
+
+    // 读侧：树 ⊆ 套餐白名单
+    let (status, v) = ctx
+        .send_raw(auth_get(&ctx, &token, "/system/menu/treeselect"))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "租户读授权树应 200，实际 {status} {v}"
+    );
+    fn collect_ids(nodes: &[serde_json::Value], out: &mut Vec<i64>) {
+        for node in nodes {
+            if let Some(id) = node["id"].as_i64() {
+                out.push(id);
+            }
+            if let Some(children) = node["children"].as_array() {
+                collect_ids(children, out);
+            }
+        }
+    }
+    let mut ids = Vec::new();
+    collect_ids(v["data"].as_array().expect("data 应为数组"), &mut ids);
+    assert!(
+        ids.contains(&inside_id),
+        "套餐白名单内的菜单必须在租户树里（inside={inside_id}），实际: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&outside_id),
+        "套餐白名单外的菜单不得出现在租户树里（outside={outside_id}），实际: {ids:?}"
+    );
+
+    // 写侧：与读侧同一把尺
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/system/role")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "roleName": "白名单外角色",
+                "roleKey": ROLE_KEY_OUT,
+                "roleSort": 98,
+                "status": "0",
+                "menuIds": [outside_id]
+            })
+            .to_string(),
+        ))
+        .expect("构造请求失败");
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4322))));
+    let (status, v) = ctx.send_raw(req).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "勾选套餐白名单外的菜单必须被拒（403），实际 {status} {v}"
+    );
+
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/system/role")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "roleName": "白名单内角色",
+                "roleKey": ROLE_KEY_IN,
+                "roleSort": 99,
+                "status": "0",
+                "menuIds": [inside_id]
+            })
+            .to_string(),
+        ))
+        .expect("构造请求失败");
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4323))));
+    let (status, v) = ctx.send_raw(req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "勾选套餐白名单内的菜单必须成功（读侧与写侧同尺），实际 {status} {v}"
+    );
+    assert_eq!(v["code"], 200, "业务码应为 200，实际 {v}");
+}

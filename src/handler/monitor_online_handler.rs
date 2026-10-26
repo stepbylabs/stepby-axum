@@ -698,7 +698,7 @@ pub async fn my_session_list(
     // 里出现 `["it_admx"]`，新用例当场红在 leaked 断言）
     query.user_name = None;
     let owner = SessionOwner {
-        user_id: operator.user_id().parse::<i64>().unwrap_or(0),
+        user_id: operator.user_id_i64()?,
         user_name: operator.username().to_string(),
     };
     list_sessions(&state, operator.tenant_id(), &query, Some(owner)).await

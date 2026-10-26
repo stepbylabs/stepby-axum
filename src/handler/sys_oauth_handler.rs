@@ -415,7 +415,7 @@ pub async fn my_bindings(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<Vec<MyBindingVo>>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let bindings = state.oauth_service.list_my_bindings(user_id).await?;
     // 名称映射按操作者所属租户取可见集（平台操作者 tid=0 ⇒ 仅平台级 provider）
     let enabled = state
@@ -465,7 +465,7 @@ pub async fn bind_oauth(
     // `ValidatedJson` 而非裸 `Json`：否则 `BindOauthDto.handoff` 的长度规则永不执行（见该字段注释）
     ValidatedJson(dto): ValidatedJson<BindOauthDto>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let binding = state
         .oauth_service
         .bind_oauth(dto, user_id, &state.store, operator.tenant_id())
@@ -494,7 +494,7 @@ pub async fn unbind_oauth(
     operator: Operator,
     Query(query): Query<UnbindQuery>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     state
         .oauth_service
         .unbind_oauth(&query.provider, user_id)
@@ -503,12 +503,6 @@ pub async fn unbind_oauth(
 }
 
 // ==================== 辅助函数 ====================
-
-/// 解析 Operator 中携带的 user_id（sub claim，字符串）为 i64
-fn parse_user_id(sub: &str) -> Result<i64, AppError> {
-    sub.parse::<i64>()
-        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))
-}
 
 /// 计算回调 host 与 scheme（优先 X-Forwarded-*，兼容反向代理部署）
 ///

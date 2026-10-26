@@ -37,12 +37,6 @@ use crate::service::sys_flow_service::{
 };
 use crate::state::AppState;
 
-/// 解析 Operator 携带的 user_id（JWT sub，字符串）为 i64
-fn parse_user_id(sub: &str) -> Result<i64, AppError> {
-    sub.parse::<i64>()
-        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))
-}
-
 /// WS 定向推送"新待办"（严禁全局广播：待办含他人单据标题，V4-V4E5）
 fn ws_notify_todo(state: &AppState, assignee_id: i64, title: &str) {
     state.broadcast_to_user(
@@ -95,7 +89,7 @@ pub async fn todo(
     operator: Operator,
     Query(query): Query<FlowPageQuery>,
 ) -> Result<TableDataInfo<SysFlowTaskModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let (rows, total) = state.flow_service.todo_page(user_id, query).await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -117,7 +111,7 @@ pub async fn pending_count(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<axum::response::Response, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let count = state.flow_service.pending_count(user_id).await?;
     let body = AjaxResult::success(count);
     let mut resp = (StatusCode::OK, Json(body)).into_response();
@@ -144,7 +138,7 @@ pub async fn mine(
     operator: Operator,
     Query(query): Query<FlowPageQuery>,
 ) -> Result<TableDataInfo<FlowDemoDocModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let (rows, total) = state.flow_service.mine_page(user_id, query).await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -168,7 +162,7 @@ pub async fn done(
     operator: Operator,
     Query(query): Query<FlowPageQuery>,
 ) -> Result<TableDataInfo<FlowDoneVo>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let (rows, total) = state.flow_service.done_page(user_id, query).await?;
     Ok(TableDataInfo::new(total, rows))
 }
@@ -192,7 +186,7 @@ pub async fn list(
     // 多租户：租户操作者仅见本租户单据；平台操作者全量（tenant_id=0 → None）
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     // 数据权限（W-5）：按操作者 data_scope 解析单据可见范围（部门树 + 本人；超管全量）
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let doc_scope = state.flow_service.resolve_doc_scope(user_id).await?;
     let (rows, total) = state
         .flow_service
@@ -218,7 +212,7 @@ pub async fn task_detail(
     operator: Operator,
     Path(task_id): Path<i64>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let is_manager = is_flow_manager(&state, user_id).await?;
     let detail = state
         .flow_service
@@ -243,7 +237,7 @@ pub async fn submit_demo(
     operator: Operator,
     Json(dto): Json<FlowSubmitDto>,
 ) -> Result<AjaxResult<FlowDemoDocModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     crate::common::i18n::validate(&dto)?;
     let outcome = state
         .flow_service
@@ -282,7 +276,7 @@ pub async fn submit_graph(
     // 此前从未执行（超长串会原样进 `flow_code` 等值查询与单据标题落库）。
     ValidatedJson(dto): ValidatedJson<FlowGraphSubmitDto>,
 ) -> Result<AjaxResult<FlowGraphDocModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let outcome = state
         .flow_service
         .submit_graph(user_id, operator.username(), dto)
@@ -314,7 +308,7 @@ pub async fn resubmit_demo(
     operator: Operator,
     Path(doc_id): Path<i64>,
 ) -> Result<AjaxResult<FlowDemoDocModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let outcome = state
         .flow_service
         .resubmit_demo(user_id, operator.is_pat(), doc_id, None)
@@ -346,7 +340,7 @@ pub async fn withdraw_demo(
     operator: Operator,
     Path(doc_id): Path<i64>,
 ) -> Result<AjaxResult<SysFlowTaskModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let outcome = state
         .flow_service
         .withdraw_by_doc(user_id, operator.is_pat(), doc_id, None)
@@ -377,7 +371,7 @@ pub async fn export(
 ) -> Result<axum::response::Response, AppError> {
     use crate::common::excel::{CellValue, ExcelColumn, export_to_excel_with_fields};
 
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let doc_scope = state.flow_service.resolve_doc_scope(user_id).await?;
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let query = FlowPageQuery {
@@ -495,7 +489,7 @@ pub async fn countersign_add(
     Path(task_id): Path<i64>,
     Json(dto): Json<FlowCountersignDto>,
 ) -> Result<AjaxResult<SysFlowTaskModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     crate::common::i18n::validate(&dto)?;
     let outcome = state
         .flow_service
@@ -531,7 +525,7 @@ pub async fn countersign_del(
     Path(task_id): Path<i64>,
     Json(dto): Json<FlowCountersignDto>,
 ) -> Result<AjaxResult<SysFlowTaskModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     crate::common::i18n::validate(&dto)?;
     let outcome = state
         .flow_service
@@ -559,7 +553,7 @@ pub async fn act(
     Path(task_id): Path<i64>,
     Json(dto): Json<FlowActionDto>,
 ) -> Result<AjaxResult<SysFlowTaskModel>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let outcome = state
         .flow_service
         .act(user_id, operator.is_pat(), task_id, dto)

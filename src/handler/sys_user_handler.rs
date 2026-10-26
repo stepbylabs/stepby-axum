@@ -104,10 +104,7 @@ pub async fn list(
 ) -> Result<TableDataInfo<UserVo>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
-    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
-        tracing::warn!(sub = %operator.user_id(), "用户列表: JWT sub 解析失败，拒绝访问");
-        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-    })?;
+    let operator_user_id = operator.user_id_i64()?;
     // M2 字段级权限：裁剪判定单一入口（三层开关收敛；关闭态恒空集合 = 零行为变化）
     let hidden_user_fields = state
         .field_perm_service
@@ -146,10 +143,7 @@ pub async fn export(
     Form(query): Form<UserQueryDto>,
 ) -> Result<Response, AppError> {
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问
-    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
-        tracing::warn!(sub = %operator.user_id(), "用户导出: JWT sub 解析失败，拒绝访问");
-        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-    })?;
+    let operator_user_id = operator.user_id_i64()?;
     // M2 字段级权限：导出与列表同口径裁剪（判定单一入口；关闭态恒空集合 = 零行为变化）
     let hidden_user_fields = state
         .field_perm_service
@@ -416,7 +410,7 @@ pub async fn get_info_by_id(
     Path(user_id): Path<i64>,
 ) -> Result<UserFormResult, AppError> {
     // P0-6：传入 operator_user_id 校验目标用户在数据范围内（此前可越权读取他人 PII）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let vo = state
         .user_service
         .get_user_form_data(
@@ -1140,7 +1134,7 @@ pub async fn dept_tree_select(
 ) -> Result<AjaxResult<Vec<TreeSelectVo>>, AppError> {
     // P0-6 / 多租户：走 dept_service 统一入口，同时应用 data_scope 与租户过滤
     // （此前调用 user_service.get_dept_tree 无任何过滤，可枚举全平台部门）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let tree = state
         .dept_service
         .build_dept_tree_select(

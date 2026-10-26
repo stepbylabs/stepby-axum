@@ -94,7 +94,7 @@ pub async fn role_menu_treeselect(
     Path(role_id): Path<i64>,
 ) -> Result<RoleMenuTreeResult, AppError> {
     // P0-6：传入 operator_user_id 校验角色在数据范围内（与 role get_info 一致）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     // b95：数据范围不等于租户边界——再按操作者租户校验角色归属，
     // 否则租户操作者能读他租角色的 menu_ids（横向读泄漏）。
     let role_vo = state

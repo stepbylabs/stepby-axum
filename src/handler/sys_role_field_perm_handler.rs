@@ -121,7 +121,7 @@ pub async fn get_field_hidden(
     let hidden: Vec<String> = state
         .field_perm_service
         .hidden_fields(
-            operator.user_id().parse::<i64>().ok(),
+            Some(operator.user_id_i64()?),
             operator.tenant_id(),
             &query.table_key,
         )

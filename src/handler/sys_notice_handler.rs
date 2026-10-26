@@ -356,7 +356,7 @@ pub async fn list_read_users(
     Query(query): Query<NoticeReadUserQueryDto>,
 ) -> Result<TableDataInfo<NoticeReadUserVo>, AppError> {
     // M1 脱敏影响面补齐：phonenumber 按三口径掩码（operator_user_id 参与本人行判定）
-    let operator_user_id = operator.user_id().parse::<i64>().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let (rows, total) = state
         .notice_service
         .get_read_users_page(query, operator_user_id, operator.tenant_id())

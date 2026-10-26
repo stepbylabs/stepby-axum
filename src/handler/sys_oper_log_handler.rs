@@ -230,7 +230,7 @@ pub async fn export(
     };
 
     // 长任务进度跟踪：行数较大时创建 sys_task 记录（P0-2：记录操作人 user_id 用于定向推送）
-    let operator_id = operator.user_id().parse::<i64>().ok();
+    let operator_id = Some(operator.user_id_i64()?);
     let task_id = if fields.is_some() {
         // 字段选择导出场景才走任务进度（普通全量导出走原有同步路径）
         let dto = crate::service::sys_task_service::TaskCreateDto {
@@ -239,12 +239,24 @@ pub async fn export(
             total: 100,
             operator_id,
         };
-        let task = state
+        // b96：任务记录创建失败不再静默 `.ok()`——导出仍走同步路径，但"任务中心没有
+        // 这条导出"必须有痕可查（b90 §4：失败之后谁能看见什么）。只记任务类型与错误，
+        // 不落操作人/筛选条件（可能含 PII）。
+        match state
             .task_service
             .create_task(dto, "system", operator.tenant_id(), &state)
             .await
-            .ok();
-        task.map(|t| t.task_id)
+        {
+            Ok(task) => Some(task.task_id),
+            Err(e) => {
+                tracing::warn!(
+                    task_type = "operlog_export",
+                    error = %e,
+                    "操作日志导出任务记录创建失败，本次导出继续走同步路径（任务中心无进度条目）"
+                );
+                None
+            }
+        }
     } else {
         None
     };

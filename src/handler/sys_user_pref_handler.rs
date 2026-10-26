@@ -14,12 +14,6 @@ use crate::middleware::Operator;
 use crate::service::sys_user_pref_service::{PrefUpdateDto, PrefVo};
 use crate::state::AppState;
 
-/// 解析 Operator 携带的 user_id（JWT sub，字符串）为 i64
-fn parse_user_id(sub: &str) -> Result<i64, AppError> {
-    sub.parse::<i64>()
-        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))
-}
-
 /// GET /system/profile/pref — 查询当前用户消息偏好
 #[utoipa::path(
     get,
@@ -34,7 +28,7 @@ pub async fn get_pref(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<PrefVo>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let vo = state.user_pref_service.get(user_id).await?;
     Ok(AjaxResult::success(vo))
 }
@@ -56,7 +50,7 @@ pub async fn update_pref(
     operator: Operator,
     Json(dto): Json<PrefUpdateDto>,
 ) -> Result<AjaxResult<PrefVo>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let vo = state
         .user_pref_service
         .update(user_id, operator.tenant_id(), dto)

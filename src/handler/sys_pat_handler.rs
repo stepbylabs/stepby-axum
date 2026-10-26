@@ -24,12 +24,6 @@ use crate::middleware::Operator;
 use crate::service::sys_pat_service::{CreatePatDto, CreatePatResult, PatVo, RotateAkResult};
 use crate::state::AppState;
 
-/// 解析 Operator.user_id（JWT sub）为 i64
-fn parse_user_id(sub: &str) -> Result<i64, AppError> {
-    sub.parse::<i64>()
-        .map_err(|_| AppError::unauthorized(&crate::tr!("error.auth.login_info_missing")))
-}
-
 /// 分页查询参数
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
@@ -74,7 +68,7 @@ pub async fn list_mine(
     operator: Operator,
     Query(q): Query<PatPageQuery>,
 ) -> Result<TableDataInfo<PatVo>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let (rows, total) = state
         .pat_service
         .list_mine(user_id, q.page_num, q.page_size)
@@ -95,7 +89,7 @@ pub async fn scope_options(
     State(state): State<Arc<AppState>>,
     operator: Operator,
 ) -> Result<AjaxResult<Vec<String>>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let opts = state.pat_service.scope_options(user_id).await?;
     Ok(AjaxResult::success(opts))
 }
@@ -116,7 +110,7 @@ pub async fn create(
     operator: Operator,
     Json(dto): Json<CreatePatDto>,
 ) -> Result<AjaxResult<CreatePatResult>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     let result = state
         .pat_service
         .create(
@@ -148,7 +142,7 @@ pub async fn revoke_mine(
     operator: Operator,
     Path(pat_id): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     state.pat_service.revoke_mine(&pat_id, user_id).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }
@@ -250,7 +244,7 @@ pub async fn rotate_ak(
     operator: Operator,
     Path(pat_id): Path<String>,
 ) -> Result<AjaxResult<RotateAkResult>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     enforce_ak_sensitive_limit(&state, user_id, "rotate").await?;
     let result = state
         .pat_service
@@ -278,7 +272,7 @@ pub async fn revoke_ak(
     operator: Operator,
     Path(pat_id): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let user_id = parse_user_id(operator.user_id())?;
+    let user_id = operator.user_id_i64()?;
     enforce_ak_sensitive_limit(&state, user_id, "revoke").await?;
     state.pat_service.revoke_ak(&pat_id, user_id).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))

@@ -73,10 +73,7 @@ pub async fn list(
 ) -> Result<TableDataInfo<SysRoleModel>, AppError> {
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
-    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
-        tracing::warn!(sub = %operator.user_id(), "角色列表: JWT sub 解析失败，拒绝访问");
-        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-    })?;
+    let operator_user_id = operator.user_id_i64()?;
     let (rows, total) = state
         .role_service
         .get_role_page(
@@ -109,10 +106,7 @@ pub async fn export(
 ) -> Result<Response, AppError> {
     // 数据权限（P0-R81-004）：导出需应用与 list 相同的 data_scope 过滤，防止越权导出
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问
-    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
-        tracing::warn!(sub = %operator.user_id(), "角色导出: JWT sub 解析失败，拒绝访问");
-        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-    })?;
+    let operator_user_id = operator.user_id_i64()?;
     let rows = state
         .role_service
         .export_roles(
@@ -193,7 +187,7 @@ pub async fn get_info_by_id(
 ) -> Result<AjaxResult<RoleVo>, AppError> {
     // P0-6：传入 operator_user_id 校验角色在数据范围内（此前可读取任意角色详情含 menu_ids）
     // b95：再按操作者租户校验归属——数据范围与租户边界是两道不同的闸
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let vo = state
         .role_service
         .get_role_by_id_scoped(role_id, operator_user_id, operator.tenant_id())
@@ -441,7 +435,7 @@ pub async fn allocated_user_list(
     Query(query): Query<AuthUserQueryDto>,
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
     // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部已授权用户）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let (rows, total) = state
         .role_service
@@ -468,7 +462,7 @@ pub async fn unallocated_user_list(
     Query(query): Query<AuthUserQueryDto>,
 ) -> Result<TableDataInfo<SysUserModel>, AppError> {
     // P0-6：传入 operator_user_id 应用数据范围过滤（此前可枚举全部用户）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let tenant_scope = crate::common::tenant::tenant_scope(operator.tenant_id());
     let (rows, total) = state
         .role_service

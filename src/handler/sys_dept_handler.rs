@@ -42,10 +42,7 @@ pub async fn list(
     // 数据权限（P0-R81-004）：传入 operator_user_id 进行 data_scope 过滤
     // P1 修复: fail-closed — JWT sub 解析失败时拒绝访问，防止绕过数据权限过滤
     // P2 修复: 错误消息改用 i18n key，避免硬编码中文
-    let operator_user_id: i64 = operator.user_id().parse::<i64>().map_err(|_| {
-        tracing::warn!(sub = %operator.user_id(), "部门列表: JWT sub 解析失败，拒绝访问");
-        AppError::unauthorized(&crate::tr!("error.common.session_invalid"))
-    })?;
+    let operator_user_id = operator.user_id_i64()?;
     let list = state
         .dept_service
         .list_depts(
@@ -101,7 +98,7 @@ pub async fn list_exclude(
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<Vec<SysDeptModel>>, AppError> {
     // P0-6：传入 operator_user_id 应用 data_scope 过滤（此前未过滤可枚举全部部门）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let list = state
         .dept_service
         .list_exclude(
@@ -131,7 +128,7 @@ pub async fn treeselect(
     operator: Operator,
 ) -> Result<AjaxResult<Vec<TreeSelectVo>>, AppError> {
     // P0-6：传入 operator_user_id 应用 data_scope 过滤（此前未过滤可枚举全部部门树）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let tree = state
         .dept_service
         .build_dept_tree_select(
@@ -162,7 +159,7 @@ pub async fn get_info(
     Path(dept_id): Path<i64>,
 ) -> Result<AjaxResult<SysDeptModel>, AppError> {
     // P0-6：传入 operator_user_id 校验部门在数据范围内（不在则 404）
-    let operator_user_id: Option<i64> = operator.user_id().parse().ok();
+    let operator_user_id = Some(operator.user_id_i64()?);
     let dept = state
         .dept_service
         .get_dept_by_id(

@@ -2167,7 +2167,11 @@ pub(crate) fn prune_capability_gated_menus(
                 })
                 .unwrap_or_default();
             if had_children && children.is_empty() {
-                return None;
+                // 只剪**空目录**：C 菜单的 perms 在自己身上，按钮全被能力位剪掉
+                // 仍应保留页面入口（否则"只能看不能改"的角色会连页面一起丢）。
+                if menu.menu_type.as_deref() == Some(crate::common::constants::menu_type::DIR) {
+                    return None;
+                }
             }
             menu.children = if children.is_empty() {
                 None
@@ -2952,6 +2956,46 @@ mod tests {
         let mut dir = make_menu(1, 0, "M", "ai", None, "1", "0", "0", "0", None);
         dir.children = Some(vec![ai_menu()]);
         assert!(prune_capability_gated_menus(vec![dir], false, true, None).is_empty());
+    }
+
+    /// 菜单（C）的按钮被能力位全部剪掉时，菜单本身必须保留：
+    /// 页面访问由 C 自己的 perms 决定，按钮只是写操作授权。
+    ///
+    /// 可证伪：把"子节点全空 ⇒ 剪"重新套到 C 上，本用例会从 1 层返回 0 层。
+    #[test]
+    fn test_prune_capability_keeps_menu_whose_buttons_are_all_gated() {
+        let mut page = with_perms(
+            make_menu(
+                100,
+                1,
+                "C",
+                "user",
+                Some("system/user/index"),
+                "1",
+                "0",
+                "0",
+                "0",
+                None,
+            ),
+            "system:user:list",
+        );
+        page.children = Some(vec![with_perms(
+            make_menu(1001, 100, "F", "", None, "1", "0", "0", "0", None),
+            "system:backup:list", // 平台专属下放项：默认租户能力集下不可授予
+        )]);
+        let mut dir = make_menu(1, 0, "M", "system", None, "1", "0", "0", "0", None);
+        dir.children = Some(vec![page]);
+
+        let pruned =
+            prune_capability_gated_menus(vec![dir], true, true, Some(&FeatureSet::default()));
+        assert_eq!(pruned.len(), 1, "目录应保留（其下有可用页面）");
+        let kept_pages = pruned[0].children.as_ref().expect("目录应有子节点");
+        assert_eq!(kept_pages.len(), 1, "C 菜单必须保留，即使按钮全被剪掉");
+        assert_eq!(kept_pages[0].menu_id, 100);
+        assert!(
+            kept_pages[0].children.is_none(),
+            "被剪光的按钮不应留下空数组"
+        );
     }
 
     #[test]
