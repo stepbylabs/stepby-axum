@@ -70,7 +70,7 @@ pub async fn remove(
     operator: Operator,
     Path(oper_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids: Vec<i64> = parse_id_list::<i64>(&oper_ids);
+    let ids: Vec<i64> = parse_id_list::<i64>(&oper_ids)?;
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(

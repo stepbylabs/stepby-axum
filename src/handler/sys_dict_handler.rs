@@ -282,7 +282,7 @@ pub async fn dict_type_remove(
     operator: Operator,
     Path(dict_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids: Vec<i64> = parse_id_list::<i64>(&dict_ids);
+    let ids: Vec<i64> = parse_id_list::<i64>(&dict_ids)?;
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.dict.id_invalid")));
@@ -451,7 +451,7 @@ pub async fn dict_data_remove(
     operator: Operator,
     Path(dict_codes): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids: Vec<i64> = parse_id_list::<i64>(&dict_codes);
+    let ids: Vec<i64> = parse_id_list::<i64>(&dict_codes)?;
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(

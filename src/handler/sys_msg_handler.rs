@@ -151,7 +151,7 @@ pub async fn channel_remove(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids = crate::service::SysMsgService::parse_ids(&ids);
+    let ids = crate::service::SysMsgService::parse_ids(&ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(
             "error.msg.channel_id_invalid"
@@ -310,7 +310,7 @@ pub async fn template_remove(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids = crate::service::SysMsgService::parse_ids(&ids);
+    let ids = crate::service::SysMsgService::parse_ids(&ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(
             "error.msg.template_id_invalid"
@@ -372,7 +372,7 @@ pub async fn send_log_remove(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids = crate::service::SysMsgService::parse_ids(&ids);
+    let ids = crate::service::SysMsgService::parse_ids(&ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(
             "error.msg.log_id_invalid"
@@ -456,7 +456,7 @@ pub async fn retry_logs(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<u64>, AppError> {
-    let ids = crate::service::SysMsgService::parse_ids(&ids);
+    let ids = crate::service::SysMsgService::parse_ids(&ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(
             "error.msg.log_id_invalid"
@@ -519,7 +519,7 @@ pub async fn mark_pending_retry(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<u64>, AppError> {
-    let ids = crate::service::SysMsgService::parse_ids(&ids);
+    let ids = crate::service::SysMsgService::parse_ids(&ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(
             "error.msg.log_id_invalid"

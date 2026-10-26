@@ -17,6 +17,7 @@ use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
 use crate::service::flow_definition_service::{FlowDefUpsertDto, FlowDefVo};
 use crate::state::AppState;
+use crate::utils::parse_id_list;
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
@@ -171,10 +172,7 @@ pub async fn definition_remove(
     operator: Operator,
     Path(flow_ids): Path<String>,
 ) -> Result<AjaxResult<&'static str>, AppError> {
-    let ids: Vec<i64> = flow_ids
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
+    let ids: Vec<i64> = parse_id_list(&flow_ids)?;
     state
         .flow_definition_service
         .remove(ids, operator.username(), operator.tenant_id())

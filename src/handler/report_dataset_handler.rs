@@ -15,6 +15,7 @@ use crate::service::report_dataset_service::{
     DashboardUpsertDto, DatasetPreviewDto, DatasetUpsertDto,
 };
 use crate::state::AppState;
+use crate::utils::parse_id_list;
 
 /// GET /report/dataset/list
 #[utoipa::path(
@@ -109,10 +110,7 @@ pub async fn dataset_remove(
     operator: Operator,
     Path(dataset_ids): Path<String>,
 ) -> Result<AjaxResult<&'static str>, AppError> {
-    let ids: Vec<i64> = dataset_ids
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
+    let ids: Vec<i64> = parse_id_list(&dataset_ids)?;
     state
         .report_dataset_service
         .remove_dataset(ids, operator.username(), operator.tenant_id())
@@ -246,10 +244,7 @@ pub async fn dashboard_remove(
     operator: Operator,
     Path(dashboard_ids): Path<String>,
 ) -> Result<AjaxResult<&'static str>, AppError> {
-    let ids: Vec<i64> = dashboard_ids
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
+    let ids: Vec<i64> = parse_id_list(&dashboard_ids)?;
     state
         .report_dataset_service
         .remove_dashboard(ids, operator.username(), operator.tenant_id())

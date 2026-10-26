@@ -262,8 +262,8 @@ impl SysMenuService {
         crate::common::i18n::validate(&dto)?;
 
         // 解析逗号分隔的 menu_ids 和 order_nums
-        let menu_ids: Vec<i64> = parse_id_list::<i64>(&dto.menu_ids);
-        let order_nums: Vec<i32> = parse_id_list::<i32>(&dto.order_nums);
+        let menu_ids: Vec<i64> = parse_id_list::<i64>(&dto.menu_ids)?;
+        let order_nums: Vec<i32> = parse_id_list::<i32>(&dto.order_nums)?;
 
         if menu_ids.is_empty() || order_nums.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(

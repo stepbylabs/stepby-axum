@@ -1436,7 +1436,7 @@ impl SysRoleService {
             )));
         }
 
-        let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids);
+        let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids)?;
         if user_ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.role.user_id_empty"
@@ -1502,7 +1502,7 @@ impl SysRoleService {
             )));
         }
 
-        let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids);
+        let user_ids: Vec<i64> = parse_id_list::<i64>(&dto.user_ids)?;
         if user_ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.role.user_id_empty"

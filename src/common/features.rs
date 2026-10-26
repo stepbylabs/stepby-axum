@@ -434,7 +434,7 @@ mod tests {
             (
                 "report.designer",
                 "report:dashboard:view",
-                "report:dashboard:publish",
+                "report:dashboard:edit",
                 "flow.designer",
                 "flow:definition:add",
             ),

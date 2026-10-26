@@ -160,7 +160,7 @@ pub async fn remove(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
-    let id_list: Vec<i64> = parse_id_list::<i64>(&ids);
+    let id_list: Vec<i64> = parse_id_list::<i64>(&ids)?;
 
     if id_list.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(

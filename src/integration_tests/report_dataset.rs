@@ -8,10 +8,10 @@
 //!
 //! 账号：admin（平台，tenant 0，持 report:dataset:* 全部权限）。
 
-use super::TestContext;
+use super::{TestContext, login};
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
-use axum::http::{Method, Request};
+use axum::http::{Method, Request, StatusCode};
 use std::net::SocketAddr;
 
 fn token_request(
@@ -439,4 +439,238 @@ async fn test_report_dataset_preview_zero_rows_still_yields_columns() {
         vec!["user_id", "user_name"],
         "0 行试跑不得把空列清单写入 columns_meta，实际缓存: {meta}"
     );
+}
+
+/// b94：报告大屏写权限拆分 + ID 列表严格解析（同一链路取证）。
+///
+/// 判据四段：
+/// 1. 种子契约：4148=view、4149=edit、4150=remove；common(role 2) 不持有写按钮；
+/// 2. 只读角色：list/info 200，save/delete 403；
+/// 3. 补授 edit：save 200，delete 仍 403（证明两个写键互相独立）；
+/// 4. 补授 remove 后：畸形 ID（`<id>,abc`）必须 400 且看板仍在（旧解析器会静默删掉前半段）；
+///    合法 ID 200 且 info 转 404。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_report_dashboard_write_perm_and_strict_id_list() {
+    use crate::entity::{sys_menu, sys_role_menu};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+
+    // 1. 种子契约
+    for (menu_id, perm) in [
+        (4148_i64, "report:dashboard:view"),
+        (4149_i64, "report:dashboard:edit"),
+        (4150_i64, "report:dashboard:remove"),
+    ] {
+        let m = sys_menu::Entity::find_by_id(menu_id)
+            .one(db)
+            .await
+            .expect("查询 sys_menu 失败")
+            .unwrap_or_else(|| panic!("菜单 {menu_id} 应存在"));
+        assert_eq!(
+            m.perms.as_deref(),
+            Some(perm),
+            "菜单 {menu_id} 的权限键应为 {perm}"
+        );
+    }
+    for menu_id in [4149_i64, 4150] {
+        let granted = sys_role_menu::Entity::find()
+            .filter(sys_role_menu::Column::RoleId.eq(2))
+            .filter(sys_role_menu::Column::MenuId.eq(menu_id))
+            .one(db)
+            .await
+            .expect("查询 sys_role_menu 失败")
+            .is_some();
+        assert!(
+            !granted,
+            "common(role 2) 不得持有大屏写按钮 {menu_id}（写权限必须显式授权）"
+        );
+    }
+
+    // 2. admin 建一个大屏作为被删对象
+    let v = ctx
+        .post_json(
+            "/report/dashboard",
+            serde_json::json!({
+                "dashboardCode": "it_b94_board",
+                "dashboardName": "b94 权限用例",
+                "layoutJson": {"schemaVersion": 2, "charts": []},
+                "status": "0"
+            }),
+        )
+        .await;
+    let dashboard_id = v["data"]["dashboardId"]
+        .as_i64()
+        .expect("新建大屏应返回 dashboardId");
+
+    // 3. 只授页面菜单 4148 的只读角色
+    let role_key = "it_report_viewer";
+    let v = ctx
+        .post_json(
+            "/system/role",
+            serde_json::json!({
+                "roleName": "大屏只读",
+                "roleKey": role_key,
+                "roleSort": 97,
+                "status": "0",
+                "menuIds": [4148]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json(&format!("/system/role/list?roleKey={role_key}"))
+        .await;
+    let role_id = v["rows"][0]["roleId"].as_i64().expect("应能查到只读角色");
+
+    let uname = "it_report_viewer";
+    let v = ctx
+        .post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": uname,
+                "nickName": "大屏只读用户",
+                "email": "stepby@tzkj.net",
+                "phonenumber": "13800009996",
+                "sex": "0",
+                "password": "Stepby@12345",
+                "status": "0",
+                "roleIds": [role_id]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let token = login(&ctx.app, ctx.peer_ip, uname, "Stepby@12345").await;
+
+    // 读接口 200（证明不是没登录/没权限）
+    for uri in [
+        "/report/dashboard/list".to_string(),
+        format!("/report/dashboard/{dashboard_id}"),
+    ] {
+        let (status, v) = ctx.send_raw_with_token(Method::GET, &uri, &token).await;
+        assert_eq!(status, StatusCode::OK, "只读用户应能读取 {uri}: {v}");
+        assert_eq!(v["code"], 200, "只读用户读取 {uri} 业务码应为 200: {v}");
+    }
+
+    // 写接口 403
+    let save_body = serde_json::json!({
+        "dashboardId": dashboard_id,
+        "dashboardCode": "it_b94_board",
+        "dashboardName": "b94 权限用例（只读改名）",
+        "layoutJson": {"schemaVersion": 2, "charts": []},
+        "status": "0"
+    });
+    let (status, v) = ctx
+        .send_raw(token_request(
+            &ctx,
+            &token,
+            Method::POST,
+            "/report/dashboard",
+            Some(save_body.clone()),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "只读角色保存大屏必须 403: {v}"
+    );
+    let (status, v) = ctx
+        .send_raw_with_token(
+            Method::DELETE,
+            &format!("/report/dashboard/{dashboard_id}"),
+            &token,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "只读角色删除大屏必须 403: {v}"
+    );
+
+    // 4. 补授 edit：保存 200，删除仍 403
+    let v = ctx
+        .put_json(
+            "/system/role",
+            serde_json::json!({
+                "roleId": role_id,
+                "roleName": "大屏只读+编辑",
+                "menuIds": [4148, 4149]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let (status, v) = ctx
+        .send_raw(token_request(
+            &ctx,
+            &token,
+            Method::POST,
+            "/report/dashboard",
+            Some(save_body),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "补授 edit 后保存应成功: {v}");
+    let (status, v) = ctx
+        .send_raw_with_token(
+            Method::DELETE,
+            &format!("/report/dashboard/{dashboard_id}"),
+            &token,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "只有 edit 时删除仍须 403: {v}"
+    );
+
+    // 5. 补授 remove：畸形 ID 400 且对象仍在；合法删除 200
+    let v = ctx
+        .put_json(
+            "/system/role",
+            serde_json::json!({
+                "roleId": role_id,
+                "roleName": "大屏读写删",
+                "menuIds": [4148, 4149, 4150]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let (status, v) = ctx
+        .send_raw_with_token(
+            Method::DELETE,
+            &format!("/report/dashboard/{dashboard_id},abc"),
+            &token,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "畸形 ID 列表必须 400（旧解析器会静默删掉前半段）: {v}"
+    );
+    let (status, v) = ctx
+        .send_raw_with_token(
+            Method::GET,
+            &format!("/report/dashboard/{dashboard_id}"),
+            &token,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "畸形删除不得产生任何副作用: {v}");
+
+    let (status, v) = ctx
+        .send_raw_with_token(
+            Method::DELETE,
+            &format!("/report/dashboard/{dashboard_id}"),
+            &token,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "补授 remove 后合法删除应成功: {v}");
+    let (status, _) = ctx
+        .send_raw_with_token(
+            Method::GET,
+            &format!("/report/dashboard/{dashboard_id}"),
+            &token,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "软删后详情应为 404");
 }

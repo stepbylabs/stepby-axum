@@ -367,7 +367,7 @@ pub async fn remove(
     State(state): State<Arc<AppState>>,
     Path(backup_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids: Vec<i64> = parse_id_list::<i64>(&backup_ids);
+    let ids: Vec<i64> = parse_id_list::<i64>(&backup_ids)?;
 
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(

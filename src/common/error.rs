@@ -221,6 +221,22 @@ impl From<anyhow::Error> for ServiceError {
     }
 }
 
+/// ID 列表解析错误 → 统一 400。
+///
+/// 原始输入不进入文案（可能含畸形串/控制字符）；调用方需要知道的是"整批无效"，
+/// 而不是哪一段被静默丢掉——旧行为正是后者导致"删除一部分却返回成功"。
+impl From<crate::utils::ParseIdListError> for ServiceError {
+    fn from(err: crate::utils::ParseIdListError) -> Self {
+        match err {
+            crate::utils::ParseIdListError::TooMany => ServiceError::bad_request(&crate::tr!(
+                "error.common.id_list_too_many",
+                max = crate::utils::MAX_ID_LIST_LEN
+            )),
+            _ => ServiceError::bad_request(&crate::tr!("error.common.id_list_invalid")),
+        }
+    }
+}
+
 // ==================== Handler 层错误（含 IntoResponse） ====================
 
 /// Handler 层错误类型（含 HTTP 响应转换）
@@ -342,6 +358,7 @@ impl_app_error_from!(
     crate::jwt::JwtError,
     argon2::password_hash::Error,
     anyhow::Error,
+    crate::utils::ParseIdListError,
 );
 
 impl IntoResponse for AppError {

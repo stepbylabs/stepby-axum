@@ -611,7 +611,7 @@ pub(crate) async fn ensure_report_tables(db: &DatabaseConnection) -> anyhow::Res
 }
 
 /// 台账（G-01/G-02 M1，存量库兜底，等价迁移 `m20261007_000005`）：
-/// 流程定义与报表数据集/大屏的菜单权限承载（menu_id 4140-4148）。
+/// 流程定义与报表数据集/大屏的菜单权限承载（menu_id 4140-4150）。
 ///
 /// 契约测试 `menu_perm_contract` 要求后端 PERM_ROUTE_TABLE 每个权限键 ⊆ sys_menu.perms，
 /// 存量库缺菜单行则普通角色永远无法被授予这些能力。页面菜单 `visible='1'`（隐藏，
@@ -742,7 +742,31 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
             component: "report/view/index",
             perms: "report:dashboard:view",
             icon: "dashboard",
-            remark: "G-01 大屏查看/保存/删除入口（save/view 同权限键，M2 前端上线时翻转可见）",
+            remark: "G-01 大屏查看入口（写权限见「大屏编辑」「大屏删除」按钮）",
+        },
+        MenuSeedRow {
+            menu_id: 4149,
+            menu_name: "大屏编辑",
+            parent_id: 4148,
+            order_num: 1,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "report:dashboard:edit",
+            icon: "#",
+            remark: "大屏新增/保存按钮（写权限）",
+        },
+        MenuSeedRow {
+            menu_id: 4150,
+            menu_name: "大屏删除",
+            parent_id: 4148,
+            order_num: 2,
+            menu_type: "F",
+            path: "",
+            component: "",
+            perms: "report:dashboard:remove",
+            icon: "#",
+            remark: "大屏删除按钮（写权限）",
         },
     ];
     let backend = db.get_database_backend();
@@ -847,10 +871,21 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
         ))
         .await?;
     }
+    // b94：4148 的旧 remark 声称"save/view 同权限键"，与写权限拆分后的终态不符。
+    // 只收敛仍为旧文案的行（不碰运营手调的其他 remark），与迁移 m20261026_000002 同口径。
+    db.execute_raw(Statement::from_string(
+        backend,
+        "UPDATE sys_menu SET remark = 'G-01 大屏查看入口（写权限见「大屏编辑」「大屏删除」按钮）' \
+         WHERE menu_id = 4148 AND remark = 'G-01 大屏查看/保存/删除入口（save/view 同权限键，M2 前端上线时翻转可见）'"
+            .to_string(),
+    ))
+    .await?;
     // role_menu 补授（批次十三，用户拍板：平台普通角色 role 2 全量授权 4140-4148）。
     // 对齐菜单 148/3950 惯例（新业务菜单默认授予 role 2）；超管经 isAdmin 特判无需授权行。
     // 幂等：INSERT OR IGNORE（方言感知由 flow_insert 承担）；写权限仍受三层守卫
     // （菜单 perms 契约 + report.designer/flow.designer 能力位 + 租户过滤）。
+    // b94：4149/4150 是新增写按钮，不在 `COMMON_ROLE_WRITE_EXCEPTIONS` 内 ⇒
+    // `common_role_grant_select_body` 不会发放给 role 2（唯一例外需显式理由）。
     if sso_table_exists(db, "sys_role_menu").await? {
         // b73 轮 15：本表的写按钮（4142-4145 / 4147）已逐条登记进
         // `governance::COMMON_ROLE_WRITE_EXCEPTIONS`，故策略体与"全量授权"拍板**当前等价**；
@@ -863,10 +898,10 @@ pub(crate) async fn ensure_flow_report_menus(db: &DatabaseConnection) -> anyhow:
         )
         .await?;
         tracing::info!(
-            "role 2 已按策略补授 G-01/G-02 菜单 4140-4148（批次十三拍板 + b73 单一事实源）"
+            "role 2 已按策略补授 G-01/G-02 菜单 4140-4150（批次十三拍板 + b73 单一事实源；写按钮 4149/4150 被策略拒发）"
         );
     }
-    tracing::info!("流程/报表菜单已补建（4140-4148，G-01/G-02 存量库兜底）");
+    tracing::info!("流程/报表菜单已补建（4140-4150，G-01/G-02 存量库兜底）");
     Ok(())
 }
 

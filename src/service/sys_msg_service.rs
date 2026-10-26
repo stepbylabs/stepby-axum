@@ -1547,9 +1547,9 @@ impl SysMsgService {
         self.retry_logs(ids, operator_tid).await
     }
 
-    /// 解析逗号分隔 id 列表
-    pub fn parse_ids(ids: &str) -> Vec<i64> {
-        parse_id_list::<i64>(ids)
+    /// 解析逗号分隔 id 列表（严格：任一项非法即 400，不静默丢弃）
+    pub fn parse_ids(ids: &str) -> Result<Vec<i64>, ServiceError> {
+        Ok(parse_id_list::<i64>(ids)?)
     }
 }
 

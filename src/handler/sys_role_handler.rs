@@ -312,7 +312,7 @@ pub async fn remove(
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<serde_json::Value>, AppError> {
     // 支持逗号分隔的批量删除
-    let role_ids: Vec<i64> = parse_id_list::<i64>(&ids);
+    let role_ids: Vec<i64> = parse_id_list::<i64>(&ids)?;
 
     if role_ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.role.id_empty")));

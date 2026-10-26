@@ -217,7 +217,7 @@ pub async fn delete_table(
     State(state): State<Arc<AppState>>,
     Path(table_ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids: Vec<i64> = parse_id_list::<i64>(&table_ids);
+    let ids: Vec<i64> = parse_id_list::<i64>(&table_ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(
             "error.gen.table_id_invalid"

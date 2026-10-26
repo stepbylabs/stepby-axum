@@ -393,8 +393,8 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("POST", "/report/dataset/{datasetId}/sql", "report:dataset:edit"),
     ("GET", "/report/dashboard/list", "report:dashboard:view"),
     ("GET", "/report/dashboard/{dashboardId}", "report:dashboard:view"),
-    ("POST", "/report/dashboard", "report:dashboard:view"),
-    ("DELETE", "/report/dashboard/{dashboardId}", "report:dashboard:view"),
+    ("POST", "/report/dashboard", "report:dashboard:edit"),
+    ("DELETE", "/report/dashboard/{dashboardId}", "report:dashboard:remove"),
     ("GET", "/system/role/list", "system:role:list"),
     ("GET", "/system/role/optionselect", "system:role:query"),
     ("GET", "/system/role/{id}", "system:role:query"),
@@ -1353,6 +1353,91 @@ mod tests {
                 ("DELETE", "/monitor/y/clean", "monitor:y:query"),
             ],
             "形状锁必须抓住读权限的两支、放过写权限与非 DELETE 两支"
+        );
+    }
+
+    // ===== 非 GET 路由不得挂在只读权限下（b94） =====
+    //
+    // b93 只锁了 DELETE /clear|/clean；报告大屏的 POST/DELETE 写面仍挂在
+    // `report:dashboard:view` 下（同类缺陷换一个模块就复发）。这里把判据扩到全部
+    // 非 GET 路由，并显式登记两类**语义上确实是读**的例外：
+    // - 导出族（`/export`）：只读数据、资源闸限并发；
+    // - HTTP 调试器：平台专属诊断能力，页面唯一动作就是转发请求（SSRF 防护 +
+    //   无本地状态），用页面权限即可，拆写权限反而会造出一个"页面可见但按钮 403"的假入口。
+    const NON_GET_READ_PERM_ALLOW: &[(&str, &str)] = &[
+        ("POST", "/monitor/webHook/export"),
+        ("POST", "/monitor/webHook/log/export"),
+        ("POST", "/monitor/alert/export"),
+        ("POST", "/system/flow/export"),
+        ("POST", "/tool/http-debug/execute"),
+    ];
+
+    fn non_get_read_perm_violations<'a>(
+        table: &'a [(&'a str, &'a str, &'a str)],
+    ) -> Vec<(&'a str, &'a str, &'a str)> {
+        table
+            .iter()
+            .copied()
+            .filter(|(method, path, perm)| {
+                *method != "GET"
+                    && governance::COMMON_ROLE_READONLY_PERM_SUFFIXES
+                        .iter()
+                        .any(|suffix| perm.ends_with(suffix))
+                    && !NON_GET_READ_PERM_ALLOW
+                        .iter()
+                        .any(|(m, p)| m == method && p == path)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn non_get_routes_must_not_use_read_only_perms() {
+        let real = non_get_read_perm_violations(super::PERM_ROUTE_TABLE);
+        assert!(
+            real.is_empty(),
+            "以下非 GET 写路由仍挂在读权限下（只读观察者可改/删数据）：{real:?}"
+        );
+
+        // 采集面自证：非 GET + 读权限的端点必须恰好等于显式例外表（多一条=未分类写面，
+        // 少一条=例外表腐化）。报告大屏修复后应为 5 条。
+        let non_get_read_count = super::PERM_ROUTE_TABLE
+            .iter()
+            .filter(|(m, _, perm)| {
+                *m != "GET"
+                    && governance::COMMON_ROLE_READONLY_PERM_SUFFIXES
+                        .iter()
+                        .any(|suffix| perm.ends_with(suffix))
+            })
+            .count();
+        assert_eq!(
+            non_get_read_count,
+            NON_GET_READ_PERM_ALLOW.len(),
+            "非 GET 读权限端点数与例外表不一致（新增写面未分类，或例外表有腐化条目）"
+        );
+        for (method, path) in NON_GET_READ_PERM_ALLOW {
+            assert!(
+                super::PERM_ROUTE_TABLE
+                    .iter()
+                    .any(|(m, p, _)| m == method && p == path),
+                "例外表条目 {method} {path} 不在真实路由表中（条目腐化）"
+            );
+        }
+
+        // 双向：读权限 + 写路径必须被点名；写权限、导出例外、GET 均不得误报
+        let synthetic = [
+            ("POST", "/report/dashboard", "report:dashboard:view"),
+            ("DELETE", "/report/dashboard/{id}", "report:dashboard:view"),
+            ("POST", "/report/dashboard", "report:dashboard:edit"),
+            ("POST", "/monitor/webHook/export", "system:webHook:query"),
+            ("GET", "/report/dashboard", "report:dashboard:view"),
+        ];
+        assert_eq!(
+            non_get_read_perm_violations(&synthetic),
+            vec![
+                ("POST", "/report/dashboard", "report:dashboard:view"),
+                ("DELETE", "/report/dashboard/{id}", "report:dashboard:view"),
+            ],
+            "形状锁必须抓住写面读权限两支、放过写权限/导出例外/GET 三支"
         );
     }
 

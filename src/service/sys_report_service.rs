@@ -433,9 +433,9 @@ impl SysReportService {
         }
     }
 
-    /// 解析逗号分隔 id 列表
-    pub fn parse_ids(ids: &str) -> Vec<i64> {
-        parse_id_list::<i64>(ids)
+    /// 解析逗号分隔 id 列表（严格：任一项非法即 400，不静默丢弃）
+    pub fn parse_ids(ids: &str) -> Result<Vec<i64>, ServiceError> {
+        Ok(parse_id_list::<i64>(ids)?)
     }
 
     // ==================== 报表定义 ====================
@@ -889,6 +889,7 @@ impl SysReportService {
             let ids = receive_user_ids
                 .as_deref()
                 .map(parse_id_list::<i64>)
+                .transpose()?
                 .unwrap_or_default();
             if ids.is_empty() {
                 return Err(ServiceError::bad_request(&crate::tr!(
@@ -1146,6 +1147,7 @@ impl SysReportService {
                 .receive_user_ids
                 .as_deref()
                 .map(parse_id_list::<i64>)
+                .transpose()?
                 .unwrap_or_default();
             // 投递侧再收敛一次（与写侧共用 `partition_recipients`）：订阅落库后用户可能已被
             // 删除或迁租，存量 `receive_user_ids` 不得继续把本报表内容投进别租的收件箱。
@@ -1392,8 +1394,12 @@ mod tests {
 
     #[test]
     fn test_parse_ids_service() {
-        assert_eq!(SysReportService::parse_ids("1,2, 3"), vec![1, 2, 3]);
-        assert_eq!(SysReportService::parse_ids(""), Vec::<i64>::new());
+        assert_eq!(
+            SysReportService::parse_ids("1,2, 3").unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(SysReportService::parse_ids("").unwrap(), Vec::<i64>::new());
+        assert!(SysReportService::parse_ids("1,abc").is_err());
     }
 
     // ==================== b89 项 1：订阅接收人的租户收敛（跨租户投递回归锁） ====================

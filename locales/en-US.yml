@@ -42,6 +42,8 @@ error:
     request_timeout: "Request timed out, please retry later"
     time_format_invalid: "Invalid time format: %{s}"
     batch_size_exceeded: "Batch operation size cannot exceed %{max}"
+    id_list_invalid: "Invalid ID list (comma-separated integers with no empty items)"
+    id_list_too_many: "ID list exceeds the limit (maximum %{max} items)"
     clear_field_unknown: "clearFields contains a non-clearable field: %{field}"
     clear_field_conflict: "Field %{field} was both submitted with a value and declared for clearing; choose one"
     forbidden: Access to this resource is forbidden

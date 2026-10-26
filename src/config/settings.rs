@@ -2259,6 +2259,7 @@ pub struct RedisConfig {
     /// Docker Desktop 端口代理/WSL2 磁盘停顿等环境下负载尖峰可调高（如 5），
     /// 减少误杀（fail-closed 503 抖动）——超时护栏与 fail-closed 语义不变。
     /// 批三十八配置化（原 REDIS_CMD_TIMEOUT_SECS 常量）。
+    /// b94：该值同时作为 ConnectionManager 的 response_timeout（库默认 500ms 会截短本项）。
     #[serde(default = "default_redis_cmd_timeout_secs")]
     pub cmd_timeout_secs: u64,
 }

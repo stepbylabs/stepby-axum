@@ -42,6 +42,8 @@ error:
     request_timeout: "请求处理超时，请稍后重试"
     time_format_invalid: "时间格式不正确: %{s}"
     batch_size_exceeded: "批量操作数量不能超过%{max}"
+    id_list_invalid: "ID 列表格式不正确（须为逗号分隔的整数，且不得含空项）"
+    id_list_too_many: "ID 列表超过上限（最多 %{max} 项）"
     clear_field_unknown: "清空声明包含不可清空的字段: %{field}"
     clear_field_conflict: "字段 %{field} 同时提交了值与清空声明，请择一"
     forbidden: 无权限访问该资源

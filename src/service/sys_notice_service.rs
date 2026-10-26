@@ -854,7 +854,7 @@ impl SysNoticeService {
         user_id: i64,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
-        let notice_ids: Vec<i64> = parse_id_list::<i64>(ids);
+        let notice_ids: Vec<i64> = parse_id_list::<i64>(ids)?;
         if notice_ids.is_empty() {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.notice.id_invalid"

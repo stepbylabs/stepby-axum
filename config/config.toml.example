@@ -185,6 +185,8 @@ url = "redis://CHANGE_ME@127.0.0.1:6379/0"
 # Redis 命令级超时（秒，批三十八配置化，原 R8-CONC-013 常量 3）。
 # 默认 3：正常命令 10ms 量级足够；Docker Desktop 端口代理/WSL2 磁盘停顿等环境负载尖峰可调 5，
 # 减少误杀 fail-closed 503（超时护栏与 fail-closed 语义不变）。
+# 该值同时注入连接管理器的 response_timeout（redis-rs 默认仅 500ms，会把本项截短），
+# 因此调高在这里是真实生效的；建连超时仍由 REDIS_CONN_TIMEOUT_SECS=5 单独约束。
 
 cmd_timeout_secs = 3
 

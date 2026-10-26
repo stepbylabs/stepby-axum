@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use crate::config::RedisConfig;
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 
 /// Redis 命令读/写超时（秒）。
 ///
@@ -41,6 +41,24 @@ pub(crate) fn redis_cmd_timeout_secs() -> u64 {
 /// 由调用方降级，绝不让调用线程无限阻塞。
 pub(crate) const REDIS_CONN_TIMEOUT_SECS: u64 = 5;
 
+/// 连接管理器超时配置（与 `[redis]` 的配置同源）。
+///
+/// **为什么必须显式设置**：redis-rs 1.7 的 `ConnectionManagerConfig::default()` 把
+/// `response_timeout` 定为 **500ms**、`connection_timeout` 定为 1s。不设置时，命令会在
+/// 500ms 就被库内部判死并返回 io `timed out`，应用层 `cmd_timeout` 配的 3s（或运维调到的 5s）
+/// **永远走不到**——`config.toml` 里"负载尖峰可调高减少 fail-closed 503"这句因此不成立
+/// （b94 实测：全量并行测试下登录的 TOTP 状态 GET 偶发 503，日志
+/// `共享态后端操作失败: timed out`，隔离单跑恒绿）。这里把两条超时对齐到应用配置：
+/// 命令预算 = `cmd_timeout_secs`，建连预算 = `REDIS_CONN_TIMEOUT_SECS`。
+fn connection_manager_config(
+    response_timeout_secs: u64,
+    connection_timeout_secs: u64,
+) -> ConnectionManagerConfig {
+    ConnectionManagerConfig::new()
+        .set_response_timeout(Some(Duration::from_secs(response_timeout_secs)))
+        .set_connection_timeout(Some(Duration::from_secs(connection_timeout_secs)))
+}
+
 /// 初始化 Redis 连接池（ConnectionManager，自动重连）
 ///
 /// 安全：连接失败时详情写 tracing 日志，对外返回通用文案，
@@ -54,11 +72,14 @@ pub async fn init_redis(config: &RedisConfig) -> anyhow::Result<ConnectionManage
         anyhow::anyhow!("Redis 配置错误，请检查 REDIS_URL")
     })?;
 
+    let manager_config =
+        connection_manager_config(redis_cmd_timeout_secs(), REDIS_CONN_TIMEOUT_SECS);
+
     // 连接建立阶段超时护栏（R8-CONC-013 补充）：不可达地址最多等待 REDIS_CONN_TIMEOUT_SECS 秒，
     // 超时即返回错误，避免调用线程无限挂起。
     let mut conn = match tokio::time::timeout(
         Duration::from_secs(REDIS_CONN_TIMEOUT_SECS),
-        ConnectionManager::new(client),
+        ConnectionManager::new_with_config(client, manager_config),
     )
     .await
     {
@@ -101,4 +122,37 @@ pub async fn init_redis(config: &RedisConfig) -> anyhow::Result<ConnectionManage
     );
 
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 形状锁：连接管理器的两条超时必须取自应用配置，而不是 redis-rs 的默认值
+    /// （500ms / 1s）。否则 `[redis] cmd_timeout_secs` 只能调小不能调大，
+    /// 模板里"负载尖峰调高"的语义就是假的。
+    #[test]
+    fn connection_manager_timeouts_follow_application_config() {
+        let cfg = connection_manager_config(5, 7);
+        assert_eq!(cfg.response_timeout(), Some(Duration::from_secs(5)));
+        assert_eq!(cfg.connection_timeout(), Some(Duration::from_secs(7)));
+
+        // 活性正控：换了入参必须跟着变，防止有人把它写成常量。
+        let other = connection_manager_config(2, 9);
+        assert_eq!(other.response_timeout(), Some(Duration::from_secs(2)));
+        assert_ne!(cfg.response_timeout(), other.response_timeout());
+    }
+
+    /// 默认档不得被库的 500ms 悄悄截断：至少与 `REDIS_CONN_TIMEOUT_SECS` 区分开，
+    /// 并覆盖配置默认值 3s。
+    #[test]
+    fn default_command_budget_is_not_the_library_default() {
+        let cfg = connection_manager_config(3, REDIS_CONN_TIMEOUT_SECS);
+        assert_eq!(cfg.response_timeout(), Some(Duration::from_secs(3)));
+        assert_ne!(cfg.response_timeout(), Some(Duration::from_millis(500)));
+        assert_eq!(
+            cfg.connection_timeout(),
+            Some(Duration::from_secs(REDIS_CONN_TIMEOUT_SECS))
+        );
+    }
 }

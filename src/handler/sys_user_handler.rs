@@ -572,7 +572,7 @@ pub async fn remove(
         .map_err(|_| AppError::internal(&crate::tr!("error.user.operator_id_parse_failed")))?;
 
     // R8-API-002：解析逗号分隔的 ID 列表
-    let user_ids: Vec<i64> = parse_id_list::<i64>(&ids);
+    let user_ids: Vec<i64> = parse_id_list::<i64>(&ids)?;
     if user_ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.user.id_empty")));
     }
@@ -1107,7 +1107,7 @@ pub async fn auth_role(
     let role_ids: Vec<i64> = if dto.role_ids.is_empty() {
         vec![]
     } else {
-        parse_id_list::<i64>(&dto.role_ids)
+        parse_id_list::<i64>(&dto.role_ids)?
     };
     state
         .user_service

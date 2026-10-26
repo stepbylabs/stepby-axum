@@ -148,7 +148,7 @@ pub async fn report_remove(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids = crate::utils::parse_id_list::<i64>(&ids);
+    let ids = crate::utils::parse_id_list::<i64>(&ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!("error.report.id_empty")));
     }
@@ -332,7 +332,7 @@ pub async fn sub_remove(
     operator: Operator,
     Path(ids): Path<String>,
 ) -> Result<AjaxResult<()>, AppError> {
-    let ids = crate::utils::parse_id_list::<i64>(&ids);
+    let ids = crate::utils::parse_id_list::<i64>(&ids)?;
     if ids.is_empty() {
         return Err(AppError::bad_request(&crate::tr!(
             "error.report_sub.id_empty"
