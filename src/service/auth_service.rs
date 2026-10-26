@@ -57,6 +57,26 @@ const MAX_LOGIN_IP_COUNT: i64 = 20;
 /// IP 限流计数 TTL（秒，1 分钟）
 const LOGIN_IP_TTL: i64 = 60;
 
+/// 读取失败计数（SharedStore 里以十进制字符串存）的**fail-closed**语义。
+///
+/// 三种结局各自有理由：
+/// - 键不存在 ⇒ 0（首次失败，正常起点）；
+/// - 可解析的非负数值 ⇒ 原值；
+/// - **不可解析或为负 ⇒ 上限**：这两种值本服务从不写入，`0`/`None` 在这里恰是 fail-open
+///   方向（等于"从未失败过"，只要把计数改成非数字就能重置锁定窗口），
+///   所以一律按"已锁定"处理；键自身的 TTL 会让异常态自行收敛，不需要人工介入。
+///
+/// 返回 `(计数, 是否为异常值)`：第二个分量只用于让调用方留 WARN，不参与控制流。
+fn fail_count_from_store(raw: Option<String>, max: i64) -> (i64, bool) {
+    match raw {
+        None => (0, false),
+        Some(s) => match s.trim().parse::<i64>() {
+            Ok(n) if n >= 0 => (n, false),
+            _ => (max, true),
+        },
+    }
+}
+
 // ==================== DTO / Vo 定义 ====================
 
 /// 校验验证码会话 UUID 格式（ERR-29 防注入）
@@ -690,17 +710,19 @@ impl AuthService {
         const MAX_TOTP_FAIL: i64 = 5;
         const TOTP_FAIL_TTL: i64 = 600;
         let fail_key = format!("totp:login_fail:{}", ctx.username);
-        let fail_count: Option<i64> = store
-            .get(&fail_key)
-            .await
-            .map_err(|e| {
+        let (fail_count, malformed) = fail_count_from_store(
+            store.get(&fail_key).await.map_err(|e| {
                 tracing::error!(error = %e, "TOTP 失败计数查询失败（fail-closed 503）");
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-            })?
-            .and_then(|s| s.parse::<i64>().ok());
-        if let Some(count) = fail_count
-            && count >= MAX_TOTP_FAIL
-        {
+            })?,
+            MAX_TOTP_FAIL,
+        );
+        if malformed {
+            tracing::warn!(
+                "TOTP 失败计数存储值不可解析（或为负），按已锁定处理（fail-closed，TTL 后自动收敛）"
+            );
+        }
+        if fail_count >= MAX_TOTP_FAIL {
             self.write_login_log_best_effort(
                 ctx,
                 "1",
@@ -838,17 +860,19 @@ impl AuthService {
     ) -> Result<(), ServiceError> {
         let fail_key = format!("login_fail:{}", ctx.username);
         // R11：命令级超时由 store 内部统一管理（fail-closed 503）
-        let fail_count: Option<i64> = store
-            .get(&fail_key)
-            .await
-            .map_err(|e| {
+        let (fail_count, malformed) = fail_count_from_store(
+            store.get(&fail_key).await.map_err(|e| {
                 tracing::error!("登录失败计数查询失败（fail-closed）: {}", e);
                 ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
-            })?
-            .and_then(|s| s.parse::<i64>().ok());
-        if let Some(count) = fail_count
-            && count >= MAX_LOGIN_FAIL_COUNT
-        {
+            })?,
+            MAX_LOGIN_FAIL_COUNT,
+        );
+        if malformed {
+            tracing::warn!(
+                "登录失败计数存储值不可解析（或为负），按已锁定处理（fail-closed，TTL 后自动收敛）"
+            );
+        }
+        if fail_count >= MAX_LOGIN_FAIL_COUNT {
             // 用户尚未识别（失败计数发生在查库前）→ 平台租户 0 / user_id 0（平台级审计）
             self.write_login_log_best_effort(
                 ctx,
@@ -3494,5 +3518,42 @@ mod tests {
             2,
             "自父行必须回退，102 仍在根目录之下"
         );
+    }
+
+    /// 失败计数读取：缺失/正常值照常，异常值必须 fail-closed（按已锁定处理）。
+    ///
+    /// 可证伪：把实现改回 `.and_then(|s| s.parse().ok())` 后，"非数字"与"负数"两条
+    /// 会拿到 0 而变红——那正是 b97 之前的状态（畸形计数 = 重置锁定窗口）。
+    #[test]
+    fn fail_counter_parse_is_fail_closed_on_garbage() {
+        let max = MAX_LOGIN_FAIL_COUNT;
+        assert_eq!(
+            fail_count_from_store(None, max),
+            (0, false),
+            "键缺失 = 首次"
+        );
+        assert_eq!(fail_count_from_store(Some("3".into()), max), (3, false));
+        assert_eq!(
+            fail_count_from_store(Some(" 4\n".into()), max),
+            (4, false),
+            "写入侧可能有空白包裹，trim 后必须照常解析"
+        );
+        assert_eq!(
+            fail_count_from_store(Some("not-a-number".into()), max),
+            (max, true),
+            "非数字必须按已锁定处理（fail-closed），不得读成 0"
+        );
+        assert_eq!(
+            fail_count_from_store(Some("-100".into()), max),
+            (max, true),
+            "负数本服务从不写入，必须按已锁定处理"
+        );
+        assert_eq!(
+            fail_count_from_store(Some("9".into()), max),
+            (9, false),
+            "超上限的合法数值由比较式判定，读取层不得夹取"
+        );
+        // 对照：空串既不是 None 也不是数值 ⇒ 同一 fail-closed 分支
+        assert_eq!(fail_count_from_store(Some(String::new()), max), (max, true));
     }
 }

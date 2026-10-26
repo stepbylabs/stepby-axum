@@ -78,7 +78,7 @@ pub async fn chat(
 
     let service = AiService::new(state.db.clone(), effective.clone());
     let started = std::time::Instant::now();
-    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    let uid = operator.user_id_i64()?;
     // AI-02：成功/失败都留痕（spawn 不阻塞响应；写入失败仅日志）
     let outcome = match service.chat(&dto.question, tid).await {
         Ok(o) => o,
@@ -248,7 +248,7 @@ pub async fn list_my_history(
     Query(q): Query<AiHistoryPageDto>,
 ) -> Result<Json<Value>, AppError> {
     let tid = operator.tenant_id();
-    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    let uid = operator.user_id_i64()?;
     let effective = state.ai_config_service.get_effective().await?;
     let service = AiService::new(state.db.clone(), effective);
     let (items, total) = service
@@ -394,7 +394,7 @@ pub async fn remove_my_history(
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> Result<Json<Value>, AppError> {
     let tid = operator.tenant_id();
-    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    let uid = operator.user_id_i64()?;
     let effective = state.ai_config_service.get_effective().await?;
     let service = AiService::new(state.db.clone(), effective);
     let deleted = service
@@ -445,7 +445,7 @@ pub async fn replay(
     // 它与 chat 打的是同一个 DB 与同一族结果集，放开它等于给"批量重跑历史"留一条无闸通道。
     // 与 chat 共用同一个闸（不得一条有闸一条没有）。
     let _inference_permit = admit_inference(&state)?;
-    let uid: i64 = operator.user_id().parse().unwrap_or(0);
+    let uid = operator.user_id_i64()?;
     let service = AiService::new(state.db.clone(), effective.clone());
     let started = std::time::Instant::now();
     let outcome = match service.replay(dto.history_id, tid, uid).await {

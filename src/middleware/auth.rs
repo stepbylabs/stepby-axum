@@ -406,8 +406,8 @@ impl Operator {
     /// `sub` 由本服务签发时恒为数值用户 ID（`user_id.to_string()`），解析失败意味着
     /// 令牌形状异常（伪造/跨系统令牌）。此时必须 fail-closed 返回 401，**不得**回落成
     /// `Option::None`：服务层把 `None` 定义为"无操作人上下文 ⇒ 不做数据范围过滤"，
-    /// 那会让一次畸形令牌直接变成越权读（fail-open）。handler 层一律走本方法，
-    /// 由形状锁 `handler_layer_never_parses_operator_sub_directly` 常驻钉住。
+    /// 那会让一次畸形令牌直接变成越权读（fail-open）。**全 `src` 生产码**一律走本方法，
+    /// 由形状锁 `production_code_never_parses_operator_sub_directly` 常驻钉住。
     pub fn user_id_i64(&self) -> Result<i64, AppError> {
         self.0
             .sub
@@ -584,43 +584,27 @@ mod tests {
         );
     }
 
-    /// 常驻形状锁：handler 层不得再出现"裸解析 sub 并回落 None"的形状。
+    /// 常驻形状锁：**全 `src` 生产码**不得再出现"裸解析 sub 并回落 None"的形状。
     ///
     /// 立据：`None` 在数据范围服务里表示"无操作人上下文 ⇒ 不过滤"（fail-open）。
-    /// 采集面自证（文件数下限）防止"扫不到文件"被读成"零违规"。
+    /// b96 立这把锁时采集面只有 `src/handler/**`，而 `src/ai/handler.rs` 在 `src/ai/` 下
+    /// ⇒ 四处 `operator.user_id().parse().unwrap_or(0)` 从来不在视野里（b97 实测）。
+    /// 采集面改由 `prod_scan` 派生（`#[cfg(test)]` 刀口 + 测试专用模块剔除），
+    /// 体量下限由 `require_volume` 硬判——"扫不到文件"必须响亮失败，不得读成零违规。
     #[test]
-    fn handler_layer_never_parses_operator_sub_directly() {
-        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in rd.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    collect(&p, out);
-                } else if p.extension().is_some_and(|e| e == "rs") {
-                    out.push(p);
-                }
-            }
-        }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handler");
-        let mut files = Vec::new();
-        collect(&root, &mut files);
-        assert!(
-            files.len() >= 20,
-            "采集面异常：src/handler 应至少 20 个 .rs，实际 {}（扫不到 ≠ 干净）",
-            files.len()
-        );
+    fn production_code_never_parses_operator_sub_directly() {
+        use crate::common::prod_scan::{Scan, prod_files, require_volume};
+        let files = prod_files(&Scan::default());
+        require_volume(&files, 350, 50_000, "操作者 sub 裸解析锁（全 src 生产码）");
         let mut hits = Vec::new();
         for f in &files {
-            let text = std::fs::read_to_string(f).expect("读取 handler 源码失败");
-            for (line, snippet) in direct_sub_parse_hits(&text) {
-                hits.push(format!("{}:{line} {snippet}", f.display()));
+            for (line, snippet) in direct_sub_parse_hits(&f.text()) {
+                hits.push(format!("{}:{line} {snippet}", f.rel));
             }
         }
         assert!(
             hits.is_empty(),
-            "handler 层出现裸解析操作者 sub（fail-open 形状）：\n{}",
+            "生产码出现裸解析操作者 sub（fail-open 形状）：\n{}",
             hits.join("\n")
         );
     }

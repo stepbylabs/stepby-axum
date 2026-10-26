@@ -505,8 +505,10 @@ impl AiService {
             .map(|r| {
                 serde_json::json!({
                     "id": r.try_get::<i64>("", "id").unwrap_or(0),
-                    "tenantId": r.try_get::<i64>("", "tenantId").unwrap_or(0),
-                    "userId": r.try_get::<i64>("", "userId").unwrap_or(0),
+                    // 列名是 `tenant_id` / `user_id`（见上面的 SELECT）；按 camelCase 去取会恒得 0，
+                    // 而 `unwrap_or(0)` 把"取不到列"洗成合法值 ⇒ 前端两列对每行都显示 0（b97 实测）。
+                    "tenantId": r.try_get::<i64>("", "tenant_id").unwrap_or(0),
+                    "userId": r.try_get::<i64>("", "user_id").unwrap_or(0),
                     "question": r.try_get::<String>("", "question").unwrap_or_default(),
                     "sql": r.try_get::<String>("", "sql_text").unwrap_or_default(),
                     "tables": r.try_get::<String>("", "tables_used").unwrap_or_default(),
@@ -554,5 +556,55 @@ impl AiService {
             ))
             .await?;
         Ok(res.rows_affected() > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::Database;
+
+    /// 管理视图的 `tenantId` / `userId` 必须取自真实列名 `tenant_id` / `user_id`。
+    ///
+    /// 立据（b97）：原实现按 **camelCase** 去 `try_get` 列，而 SELECT 选的是 snake_case
+    /// ⇒ 两列恒为 0，前端「租户 / 用户」两列对每一行都显示 0；`try_get(...).unwrap_or(0)`
+    /// 把"取不到列"洗成了一个合法值，所以断言必须落在**真实值**上（0 恰好也是缺省值）。
+    #[tokio::test]
+    async fn admin_history_maps_tenant_and_user_from_snake_case_columns() {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("内存库建连");
+        db.execute_unprepared(
+            "CREATE TABLE ai_chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                question TEXT NOT NULL DEFAULT '',
+                sql_text TEXT NOT NULL DEFAULT '',
+                tables_used TEXT NOT NULL DEFAULT '',
+                rows_count INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                success TEXT NOT NULL DEFAULT '1',
+                error_msg TEXT,
+                create_time TEXT NOT NULL DEFAULT ''
+            )",
+        )
+        .await
+        .expect("建表");
+        db.execute_unprepared(
+            "INSERT INTO ai_chat_history (tenant_id, user_id, question, rows_count, create_time) \
+             VALUES (7, 9, 'q', 3, '2026-10-26 00:00:00')",
+        )
+        .await
+        .expect("插入夹具");
+
+        let svc = AiService::new(db, AiConfig::default());
+        let (items, total) = svc.list_admin_history(0, None, 1, 10).await.expect("查询");
+        assert_eq!(total, 1);
+        assert_eq!(items[0]["tenantId"], 7, "必须取自 tenant_id 列");
+        assert_eq!(items[0]["userId"], 9, "必须取自 user_id 列");
+        assert_eq!(items[0]["question"], "q");
+        assert_eq!(items[0]["rowsCount"], 3);
+        assert_eq!(items[0]["success"], true);
     }
 }

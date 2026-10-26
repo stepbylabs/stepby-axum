@@ -148,6 +148,28 @@ where
 }
 
 impl JobScheduler {
+    /// 构造归档/导出用的存储后端；失败时**留痕**而不是静默 `None`。
+    ///
+    /// `None` 的语义是"归档不可用"：保留期清理的 archive 档会 fail-closed 报错、
+    /// 依赖归档的导出任务直接失败。此前三处调用点都写 `.ok()`，把构造原因
+    /// （未知 backend / S3 凭据或 endpoint 缺失）整个丢掉——运维只看到"配置矛盾"
+    /// 或"任务失败"，看不到**为什么**（b97）。错误串只含 i18n 文案与 backend 名，
+    /// 不含凭据或绝对路径（C.9），可直接带出。
+    ///
+    /// 前台上传链不受这里影响：它走 `resolve_storage` 现场构造并把错误回给请求方。
+    fn storage_for_archive(config: &Settings) -> Option<Arc<dyn crate::storage::StorageBackend>> {
+        match crate::storage::new_backend(&config.upload) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "存储后端构造失败：归档/导出类后台任务将不可用（前台上传链不受影响）"
+                );
+                None
+            }
+        }
+    }
+
     /// 创建并启动调度器
     ///
     /// 内部流程：
@@ -170,7 +192,7 @@ impl JobScheduler {
         // 注册内置任务函数（含日志保留期清理任务）
         // 批五十九：注册 cleanup_expired_logs 的 invoke_target——管理员可经 sys_job
         // 执行一次手动触发（b54-b57 接线的运行栈真实验证路径 + 运营能力补齐）
-        let archive_storage_for_registry = crate::storage::new_backend(&config.upload).ok();
+        let archive_storage_for_registry = Self::storage_for_archive(&config);
         register_builtin_tasks(
             db.clone(),
             config.clone(),
@@ -306,7 +328,7 @@ impl JobScheduler {
         // 5 字段的 "0 3 * * *" 会触发 ParseSchedule 错误，改为 "0 0 3 * * *"（秒=0 分=0 时=3）
         let _cleanup_config = config.clone();
         let archive_storage: Option<std::sync::Arc<dyn crate::storage::StorageBackend>> =
-            crate::storage::new_backend(&config.upload).ok();
+            Self::storage_for_archive(&config);
         let cleanup_db = db.clone();
         let cleanup_config = config.clone();
         let cleanup_archive = archive_storage.clone();
@@ -1680,7 +1702,7 @@ async fn catch_up_retention_if_stale(
         last_run = last.as_deref().unwrap_or("<无标记>"),
         "错过 03:00 调度窗口，启动期补跑一轮保留期清理"
     );
-    let archive = crate::storage::new_backend(&config.upload).ok();
+    let archive = JobScheduler::storage_for_archive(&config);
     let task_store = store.clone();
     crate::common::background::spawn_tracked(
         "retention_catchup",

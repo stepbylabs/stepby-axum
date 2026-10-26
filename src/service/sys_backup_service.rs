@@ -1022,15 +1022,45 @@ impl SysBackupService {
         if !raw_paths.is_empty() {
             let backup_dir = PathBuf::from(BACKUP_DIR);
             tokio::task::spawn_blocking(move || {
-                let dir_canonical = backup_dir.canonicalize().ok();
+                let dir_canonical = match backup_dir.canonicalize() {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        // 目录不可解析时**一个文件都删不掉**，而记录仍会被清理（见下方 delete_by_ids）
+                        // ⇒ 必须留痕，否则磁盘上留下的是一批无人知晓的孤儿文件（b97）。
+                        tracing::warn!(
+                            error = %e,
+                            "备份目录不可解析：本轮跳过全部文件删除（数据库记录仍会被清理）"
+                        );
+                        None
+                    }
+                };
                 for path in &raw_paths {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("<非 UTF-8 文件名>");
                     // 二次校验路径在备份目录内（canonicalize 在阻塞线程中执行）
-                    if let Ok(canonical) = path.canonicalize()
-                        && let Some(ref dir_canonical) = dir_canonical
-                        && canonical.starts_with(dir_canonical)
-                        && let Err(e) = std::fs::remove_file(&canonical)
-                    {
-                        tracing::warn!("删除备份文件失败 {}: {}", canonical.display(), e);
+                    match path.canonicalize() {
+                        Ok(canonical) => {
+                            if !dir_canonical
+                                .as_ref()
+                                .is_some_and(|d| canonical.starts_with(d))
+                            {
+                                tracing::warn!(
+                                    file = %name,
+                                    "备份文件不在备份目录内，拒绝删除（记录仍会被清理）"
+                                );
+                            } else if let Err(e) = std::fs::remove_file(&canonical) {
+                                tracing::warn!(file = %name, error = %e, "删除备份文件失败");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                file = %name,
+                                error = %e,
+                                "备份文件不存在或不可解析，跳过删除"
+                            );
+                        }
                     }
                 }
             })

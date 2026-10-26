@@ -619,7 +619,11 @@ impl PasskeyStore for WebauthnService {
         let state: PasskeyState = serde_json::from_str(&raw)
             .map_err(|e| PasskeyError::InternalError(format!("state parse failed: {e}")))?;
         if state.expires_at <= now_ms() {
-            self.delete_state(id).await.ok();
+            // 过期 state 的删除是 best-effort（键本身还有 TTL 兜底），但失败必须留痕：
+            // 静默 `.ok()` 会让"存储侧一直删不掉"永远不可见（b97）。
+            if let Err(e) = self.delete_state(id).await {
+                tracing::warn!(error = %e, "WebAuthn 过期 state 清理失败（键将按 TTL 自然过期）");
+            }
             return Ok(None);
         }
         Ok(Some(state))
