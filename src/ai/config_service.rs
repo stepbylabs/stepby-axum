@@ -116,11 +116,29 @@ impl AiConfigService {
         let allowed_tables_raw = self
             .effective_string(KEY_ALLOWED_TABLES, &self.startup.allowed_tables.join(","))
             .await?;
-        let allowed_tables: Vec<String> = allowed_tables_raw
+        // 白名单表名会被拼进 `PRAGMA table_info(...)` / information_schema 语句
+        // （SQLite 的 PRAGMA 不支持绑定参数）⇒ 这里按标识符形状过滤。非法条目
+        // 直接剔除（收窄可查询面是安全方向），但必须留痕——否则"面板里少了一张
+        // 表"将无从归因。管理端保存路径另有 400 拒绝（见 `update`）。
+        let mut allowed_tables: Vec<String> = Vec::new();
+        let mut invalid_tables: Vec<&str> = Vec::new();
+        for s in allowed_tables_raw
             .split(',')
-            .map(|s| s.trim().to_string())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
-            .collect();
+        {
+            if crate::common::sql_dialect::is_valid_identifier(s) {
+                allowed_tables.push(s.to_string());
+            } else {
+                invalid_tables.push(s);
+            }
+        }
+        if !invalid_tables.is_empty() {
+            tracing::warn!(
+                invalid = ?invalid_tables,
+                "AI 配置 allowed_tables 含非法标识符，已忽略这些条目"
+            );
+        }
         // api_key：sys.ai.api_key 存的是信封密文（enc2: 前缀）——unseal 回明文；
         // 键缺失/空回落 startup（env/config.toml 注入）
         let api_key = match self.raw(KEY_API_KEY).await? {
@@ -184,6 +202,19 @@ impl AiConfigService {
             crate::common::ssrf::validate_host_resolution(url.host_str().unwrap_or_default(), port)
                 .await
                 .map_err(|e| ServiceError::bad_request(&format!("base_url 主机不可用: {e}")))?;
+        }
+        // 表名要拼进语句，保存时就把非法形状挡在门外——且必须排在任何 `write_key`
+        // **之前**：六键是逐条写的，校验放在写了一半之后就会留下半应用配置。
+        if let Some(bad) = dto
+            .allowed_tables
+            .iter()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty() && !crate::common::sql_dialect::is_valid_identifier(s))
+        {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.ai.allowed_table_invalid",
+                name = bad
+            )));
         }
         self.write_key(KEY_ENABLED, if dto.enabled { "true" } else { "false" })
             .await?;

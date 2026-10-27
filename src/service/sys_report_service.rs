@@ -1127,11 +1127,17 @@ impl SysReportService {
         let now = now_naive();
         let mut emails_sent = 0u64;
         let mut site_msgs = 0u64;
+        // 投递尝试次数（b98）：只用于"全部失败"判定。没有尝试（渠道都关、收件人为空）
+        // 仍算一次已完成；**有尝试且 0 成功**才不得推进 last_run_time——旧实现无论成败
+        // 都写 last_run_time，调度器于是把"这轮一封都没发出去"记成"本轮已成功执行"，
+        // 下一个 cron 周期到来前不会再重试。
+        let mut delivery_attempts = 0u64;
 
         // 邮件推送：逐封发送（MailerService 未启用时自动降级为 no-op）
         if sub.push_email == "1" {
             let emails = split_emails(&sub.receive_email);
             for email in &emails {
+                delivery_attempts += 1;
                 match self.mailer.send_text(email, &title, &text_body).await {
                     Ok(()) => emails_sent += 1,
                     Err(e) => tracing::warn!("报表订阅邮件发送失败 to={}: {}", email, e.message),
@@ -1190,6 +1196,7 @@ impl SysReportService {
                             params: params_tpl.clone(),
                         };
                         // 对齐 flow 站内提醒范式：operator="system"、operator_tid=0（平台触发）
+                        delivery_attempts += 1;
                         match self.msg_service.send(dto, "system", 0).await {
                             Ok(log) => {
                                 // "0"=投递成功 / "2"=待重试（已受理，重试链兜底）均计数；
@@ -1223,6 +1230,15 @@ impl SysReportService {
                     );
                 }
             }
+        }
+
+        // 全部尝试都失败 ⇒ 本轮不算"已执行"：不推进 last_run_time（否则调度器
+        // 下一个 cron 周期到来前不会再重试，一封没发出去却记成成功）。
+        if delivery_attempts > 0 && emails_sent + site_msgs == 0 {
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.report_sub.push_all_failed",
+                attempts = delivery_attempts
+            )));
         }
 
         // 更新上次成功执行时间

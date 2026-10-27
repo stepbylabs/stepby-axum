@@ -8,6 +8,7 @@ error:
     capability_off: 当前租户未开通 AI 助手能力
     busy: AI 推理并发已满（同时提问人数过多），请稍后重试
     config_missing: 请先填写 base_url 与 api_key
+    allowed_table_invalid: "白名单表名不合法：%{name}（只允许字母、数字与下划线，且不能以数字开头）"
   ip:
     xdb_missing: ip2region 库文件不存在，请先在「IP 归属地」页下载或手动放置该文件后重试
     mmdb_missing: GeoLite2 库文件不存在，请先在「IP 归属地」页下载或手动放置该文件后重试
@@ -491,6 +492,7 @@ error:
     email_invalid: 收件邮箱格式不正确
     user_ids_invalid: 目标用户 ID 不合法
     user_ids_foreign: 目标用户不存在、已删除或不属于本租户（站内信接收人必须是本租户的在用用户）
+    push_all_failed: "报表订阅推送全部失败（尝试 %{attempts} 次、成功 0 次）：未推进上次执行时间，将在下个周期重试"
   web_hook:
     id_invalid: 回调 ID 不合法
     not_found: 回调配置不存在

@@ -99,6 +99,17 @@ pub fn stmt_vec(backend: DatabaseBackend, sql: &str, values: Vec<Value>) -> Stat
     stmt(backend, sql, values)
 }
 
+/// SQL 标识符形态：`[A-Za-z_][A-Za-z0-9_]*`。
+///
+/// 只用于**无法参数化**的位置（SQLite `PRAGMA table_info(...)`）以及"名字必须拼进
+/// 语句之前"的边界校验（AI 白名单表名等）。凡能用绑定参数的地方一律用参数化——
+/// 本函数不能替代参数化，它只是把"拼名字"这件事的可输入面钉成一组安全字符。
+pub fn is_valid_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     //! 覆盖意图：改写规则的四条边界（顺序、字面量、转义引号、幂等）+ 三档后端的透传方向，
@@ -106,6 +117,28 @@ mod tests {
     //! 出现时必须由判据红出来，而不是被静默改坏成一条语义不同的 SQL。
 
     use super::*;
+
+    /// 标识符判据双向：合法表名（含大写/下划线/数字尾巴）放行，一切能改变语句结构
+    /// 的形态（引号/分号/空格/注释符/点号/非 ASCII）必须拒绝。
+    #[test]
+    fn identifier_shape_is_strict_and_falsifiable() {
+        for ok in ["sys_user", "_tmp", "A1", "t_2"] {
+            assert!(is_valid_identifier(ok), "{ok} 应判定为合法标识符");
+        }
+        for bad in [
+            "",
+            "1abc",
+            "sys-user",
+            "sys_user;",
+            "sys_user ",
+            "sys.user",
+            "sys_user--",
+            "sys_user'",
+            "用户表",
+        ] {
+            assert!(!is_valid_identifier(bad), "{bad:?} 不得判定为合法标识符");
+        }
+    }
 
     #[test]
     fn rewrites_in_positional_order() {

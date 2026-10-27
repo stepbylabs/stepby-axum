@@ -2707,7 +2707,11 @@ pub struct AiConfig {
     /// 单次查询返回行数上限（同时是注入 SQL 的 LIMIT）
     #[serde(default = "default_ai_max_rows")]
     pub max_rows: u32,
-    /// LLM 请求超时（秒）
+    /// LLM 请求与受控 SQL 执行超时（秒）
+    ///
+    /// b98 起同一预算也约束 NL2SQL 的执行段：守卫能拒绝越权与超大 LIMIT，但挡不住
+    /// "合法 SELECT 的慢聚合/笛卡尔"，没有这一层时 SQLite 完全无界（PG/MySQL 只剩
+    /// 数据库侧 60s 语句超时）。
     #[serde(default = "default_ai_timeout_secs")]
     pub timeout_secs: u64,
     /// 推理并发上限（b72，AGENTS A.2「重资源入口默认带并发上限」）。

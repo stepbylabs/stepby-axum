@@ -142,6 +142,56 @@ async fn test_ai_config_update_hot_reload() {
     assert_eq!(eff.allowed_tables, vec!["sys_user", "sys_dept"]);
 }
 
+/// 白名单表名非法必须 400，且**不得留下半应用配置**（b98）。
+///
+/// 这些名字会进入 `PRAGMA table_info(...)` 等无法参数化的位置。校验必须排在
+/// 任何 `write_key` 之前：六键是逐条写的，先写 enabled/provider 再拒绝，会让
+/// "保存失败"的页面底下偷偷生效了一半。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ai_config_rejects_invalid_allowed_table_without_partial_write() {
+    let ctx = TestContext::new().await;
+    let svc = &ctx.state.ai_config_service;
+    let before = svc.get_effective().await.unwrap();
+
+    let (status, body) = ctx
+        .send_raw(admin_req(
+            &ctx,
+            Method::PUT,
+            "/system/aiConfig",
+            Some(serde_json::json!({
+                "enabled": true,
+                "provider": "openai",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKey": "sk-invalid-table",
+                "model": "gpt-4o-mini",
+                "allowedTables": ["sys_user", "sys_user; DROP TABLE sys_user"]
+            })),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非法表名必须 400，实际 {status} / {body}"
+    );
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(!msg.trim().is_empty(), "拒绝文案不得为空: {body}");
+    assert!(
+        !msg.contains("error.ai.allowed_table_invalid"),
+        "i18n 键未被解析（页面会显示原始键名）: {body}"
+    );
+
+    // 半应用配置判据：enabled / 白名单都必须保持本用例开始前的值
+    let after = svc.get_effective().await.unwrap();
+    assert_eq!(
+        after.enabled, before.enabled,
+        "被拒绝的保存不得改动 enabled（校验必须排在首个 write_key 之前）"
+    );
+    assert_eq!(
+        after.allowed_tables, before.allowed_tables,
+        "被拒绝的保存不得改动白名单"
+    );
+}
+
 /// SSRF：私网/环网 base_url 被拒绝（metadata 端点 169.254.169.254）
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_ai_config_ssrf_rejects_private_base_url() {

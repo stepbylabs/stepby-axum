@@ -601,6 +601,34 @@ mod tests {
         assert_eq!(matrix[1][1], "", "None → Empty 应输出空白，而非误导默认值");
     }
 
+    /// CSV 导出走"前缀单引号"中和，xlsx 侧不中和——因为它写的是**字符串单元格**，
+    /// 公式只由 `write_formula` 产生。这条锁把"文本里以 `=` 开头不会变成公式"钉成
+    /// 运行时事实：`read_xlsx_rows` 把公式错误与字符串都折叠成文本，看不出差别，
+    /// 所以这里直接用 calamine 断言单元格的数据类型是 `Data::String`。
+    #[test]
+    fn text_cells_starting_with_formula_prefix_stay_literal() {
+        const LITERAL: &str = "=HYPERLINK(\"http://evil\",\"x\")";
+        let cols = vec![ExcelColumn {
+            key: "v",
+            header: ("值", "Value"),
+            getter: |_: &SampleRow| CellValue::Text(LITERAL.into()),
+        }];
+        let rows = vec![SampleRow {
+            user_id: 1,
+            user_name: "x".into(),
+            dept_id: None,
+        }];
+        let bytes = build_xlsx_inner("data", &cols, &rows, None).expect("构建 xlsx 失败");
+        let mut wb = Xlsx::new(Cursor::new(&bytes)).expect("xlsx 解析失败");
+        let range = wb.worksheet_range("data").expect("工作表读取失败");
+        let cell = range.get_value((1, 0)).expect("数据单元格必须存在");
+        assert!(
+            matches!(cell, calamine::Data::String(_)),
+            "以 = 开头的文本必须落成字符串单元格，不得变成公式（预期 Data::String，实际 {cell:?}）"
+        );
+        assert_eq!(import_cell_to_string(cell), LITERAL);
+    }
+
     #[test]
     fn build_xlsx_inner_field_selection_and_errors() {
         let cols = test_columns();

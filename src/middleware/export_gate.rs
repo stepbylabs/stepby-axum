@@ -13,9 +13,9 @@
 //! 正是 AGENTS 前言 ㉒ 禁止的形态）。竞态窗口内通过的请求会在构造点被同一把闸拒绝，
 //! 两种结局都是 fail-closed，没有"放行到无上限"的分支。
 //!
-//! 路径判据取"以 `/export` 结尾"而不是 16 条硬编码：新增导出端点沿用既有命名即自动
-//! 进闸；不沿用命名的会被 `export_path_predicate_covers_registered_routes` 从路由源码
-//! 里逐条抓出来（判据的采集面由事实派生，不是名字清单）。
+//! 路径判据取"以 `/export` 结尾"而不是硬编码清单：新增导出端点沿用既有命名即自动
+//! 进闸；不沿用命名的会被 `export_path_predicate_covers_registered_routes` 从全部生产
+//! `.route("…")` 注册里逐条抓出来（判据的采集面由事实派生，不是名字清单）。
 
 use crate::common::error::AppError;
 use crate::common::resource_gate::{HeavyEntry, precheck};
@@ -39,37 +39,50 @@ pub async fn export_gate_middleware(req: Request, next: Next) -> Result<Response
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    /// 路由表是**唯一采集面**：从 `src/router/*.rs` 里把每个 `/export` 字面量抓出来，
-    /// 逐条过判据；少于 16 条即拒绝判据（扫不全 ≠ 没缺口）。
+    /// 路由表是**唯一采集面**：从**全部生产 `.rs`** 的 `.route("…")` 注册里抓 `/export`，
+    /// 逐条过判据；少于 17 条即拒绝判据（扫不全 ≠ 没缺口）。
+    ///
+    /// 采集面为什么不是 `src/router/*.rs`：b98 新增的 `/system/audit-change/export`
+    /// 注册在 `src/audit/router.rs`——按目录枚举的旧采集面看不见它，而"新增导出端点
+    /// 沿用命名即自动进闸"这条承诺正是靠这份采集面兑现的。
     #[test]
     fn export_path_predicate_covers_registered_routes() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/router");
+        use crate::common::prod_scan::{Scan, prod_files};
         let mut paths = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect("router 目录必须可读（采集面坏了）")
-        {
-            let path = entry.expect("读目录项失败").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).expect("router 文件必须可读");
-            for part in text.split('"') {
-                if part.starts_with('/') && part.ends_with("/export") {
-                    paths.push(part.to_string());
+        for f in prod_files(&Scan::default()) {
+            let text = f.text();
+            for (idx, _) in text.match_indices(".route(") {
+                // 两种合法排版：`.route("/x", …)` 与 rustfmt 折行后的
+                // `.route(\n    "/x",\n    …\n)`。只认前一种会漏掉 8 条多行注册
+                // （本仓实测 17 条导出路由里 8 条是折行形态）——判据的采集面
+                // 必须跟着代码的真实写法走，不能只认自己方便的那种。
+                let rest = text[idx + ".route(".len()..].trim_start();
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = rest.find('"') else { continue };
+                let p = &rest[..end];
+                if p.ends_with("/export") {
+                    paths.push(p.to_string());
                 }
             }
         }
         paths.sort();
         paths.dedup();
         assert!(
-            paths.len() >= 16,
-            "导出路由采集面只有 {} 条（<16 ⇒ 扫描器走偏，不得据此判通过）: {paths:?}",
+            paths.len() >= 17,
+            "导出路由采集面只有 {} 条（<17 ⇒ 扫描器走偏，不得据此判通过）: {paths:?}",
             paths.len()
         );
         for p in &paths {
             assert!(is_export_path(p), "导出路由不在前置闸采集面: {p}");
         }
+        // 采集面必须真的伸到 `src/router/` 之外（否则下限一改就退回旧盲区）。
+        assert!(
+            paths.iter().any(|p| p == "/system/audit-change/export"),
+            "`src/audit/router.rs` 的导出端点不在采集面里: {paths:?}"
+        );
 
         // 反证：相似但非导出路径不得被误伤（后缀判据只认 `/export` 整段）
         for p in [

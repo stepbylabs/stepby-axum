@@ -50,60 +50,58 @@ impl AiService {
     }
 
     /// 白名单表的 schema 描述（跨三库：SQLite PRAGMA / PG & MySQL information_schema）
+    ///
+    /// 表名一律**不拼进语句**：PG/MySQL 走绑定参数；SQLite 的 `PRAGMA table_info(...)`
+    /// 不支持绑定，因此先过 `is_valid_identifier`。配置层（读取与保存）也做了同一校验，
+    /// 这里再校验一次是**执行边界的兜底**——`AiService` 在 crate 内可被任意构造，
+    /// 不能假设调用方一定走过配置校验。
     pub async fn build_schema(&self) -> Result<Vec<TableSchema>> {
         let backend = self.db.get_database_backend();
         let mut out = Vec::new();
         for table in &self.config.allowed_tables {
-            let cols = match backend {
+            if !crate::common::sql_dialect::is_valid_identifier(table) {
+                tracing::warn!(
+                    table = %table,
+                    "AI 白名单表名不是合法标识符，已跳过该表的 schema 构建"
+                );
+                continue;
+            }
+            let rows = match backend {
                 DbBackend::Sqlite => {
                     let stmt =
                         Statement::from_string(backend, format!("PRAGMA table_info({table})"));
-                    let rows = self.db.query_all_raw(stmt).await?;
-                    rows.iter()
-                        .map(|r| {
-                            Ok((
-                                r.try_get::<String>("", "name").unwrap_or_default(),
-                                r.try_get::<String>("", "type").unwrap_or_default(),
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, sea_orm::DbErr>>()?
+                    self.db.query_all_raw(stmt).await?
                 }
                 DbBackend::Postgres => {
-                    let stmt = Statement::from_string(
+                    // `table_schema = current_schema()` 不可省：information_schema.columns 是
+                    // 全库视图，同名表在别的 schema 里也有行 ⇒ 不限定会把两套列混成一份 schema
+                    // 喂给 LLM（MySQL 分支的 `DATABASE()` 是同一口径）。
+                    let stmt = Statement::from_sql_and_values(
                         backend,
-                        format!(
-                            "SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name = '{table}' ORDER BY ordinal_position"
-                        ),
+                        "SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name = $1 AND table_schema = current_schema() ORDER BY ordinal_position",
+                        [table.as_str().into()],
                     );
-                    let rows = self.db.query_all_raw(stmt).await?;
-                    rows.iter()
-                        .map(|r| {
-                            Ok((
-                                r.try_get::<String>("", "name").unwrap_or_default(),
-                                r.try_get::<String>("", "type").unwrap_or_default(),
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, sea_orm::DbErr>>()?
+                    self.db.query_all_raw(stmt).await?
                 }
                 DbBackend::MySql => {
-                    let stmt = Statement::from_string(
+                    let stmt = Statement::from_sql_and_values(
                         backend,
-                        format!(
-                            "SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name = '{table}' AND table_schema = DATABASE() ORDER BY ordinal_position"
-                        ),
+                        "SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_name = ? AND table_schema = DATABASE() ORDER BY ordinal_position",
+                        [table.as_str().into()],
                     );
-                    let rows = self.db.query_all_raw(stmt).await?;
-                    rows.iter()
-                        .map(|r| {
-                            Ok((
-                                r.try_get::<String>("", "name").unwrap_or_default(),
-                                r.try_get::<String>("", "type").unwrap_or_default(),
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, sea_orm::DbErr>>()?
+                    self.db.query_all_raw(stmt).await?
                 }
                 backend => unreachable!("unknown backend: {backend:?}"),
             };
+            let cols = rows
+                .iter()
+                .map(|r| {
+                    Ok((
+                        r.try_get::<String>("", "name").unwrap_or_default(),
+                        r.try_get::<String>("", "type").unwrap_or_default(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, sea_orm::DbErr>>()?;
             if !cols.is_empty() {
                 out.push(TableSchema {
                     name: table.clone(),
@@ -114,7 +112,7 @@ impl AiService {
         Ok(out)
     }
 
-    fn system_prompt(&self, schema: &[TableSchema], caller_tid: i64) -> String {
+    fn system_prompt(schema: &[TableSchema], caller_tid: i64) -> String {
         let mut schema_text = String::new();
         for t in schema {
             schema_text.push_str(&format!(
@@ -129,21 +127,24 @@ impl AiService {
         }
         let tenant_rule = if caller_tid != 0 {
             format!(
-                "6. 你生成的 SQL **必须**包含 `WHERE tenant_id = {caller_tid}` 过滤条件（多租户数据隔离，不可省略）。"
+                "你生成的 SQL **必须**对 FROM/JOIN 的每一个表引用都写 `<别名>.tenant_id = {caller_tid}`（无别名时用表名）；\
+                 禁用子查询、UNION 与 OR（守卫会拒绝），多表请用 JOIN；不要用括号把该过滤条件包起来。"
             )
         } else {
-            "6. 调用者是平台操作者，可查询全部租户数据（无需 tenant_id 条件）。".to_string()
+            "调用者是平台操作者，可查询全部租户数据（无需 tenant_id 条件）；仍禁用子查询、UNION 与 OR。"
+                .to_string()
         };
         format!(
             "你是后台管理系统的只读数据查询助手（NL2SQL）。把用户的自然语言问题转换为一条 SQL 查询。\n\
              规则：\n\
-             1. 只能生成一条 SELECT 语句，禁止任何写操作/多语句/注释。\n\
+             1. 只能生成一条顶层 SELECT 语句，禁止任何写操作/多语句/注释，禁止子查询与 UNION。\n\
              2. 只允许使用下列白名单表及其列，禁止查询其它任何表。\n\
              3. 输出格式：先给出 SQL（用 ```sql ``` 代码块包裹），再用一两句话说明查询意图。除 SQL 外不要输出其它代码。\n\
              4. 优先 SELECT 明确列而非 *；结果集尽量精简。\n\
              5. 时间字段为 TEXT/DATETIME 格式（YYYY-MM-DD HH:MM:SS）。\n\
              6. {tenant_rule}\n\
-             7. 日期比较使用字符串比较即可（如 create_time >= '2026-01-01'）。\n\n\
+             7. 日期比较使用字符串比较即可（如 create_time >= '2026-01-01'）。\n\
+             8. 禁止调用有副作用或放大资源的函数（如 pg_read_file、load_file、sleep、randomblob）。\n\n\
              白名单表：\n{schema_text}"
         )
     }
@@ -180,16 +181,29 @@ impl AiService {
     async fn execute_rows(&self, sql: &str) -> Result<(Vec<String>, Vec<Value>)> {
         use sqlx::{Column, Row};
         // SAFETY §5.52（sqlx 0.9 SqlSafeStr 审计）：sql 为 LLM 生成且已过 sql_guard
-        // 四重守卫（只读 SELECT/表白名单/租户过滤/LIMIT）——该守卫正是本模块的
+        // 四重守卫（只读 SELECT/表白名单/逐表租户谓词/LIMIT 收敛）——该守卫正是本模块的
         // 安全边界，AssertSqlSafe 为官方人工审计豁免通道。
         let backend = self.db.get_database_backend();
         let sql_owned = sql.to_string();
+        // 执行预算：`[ai].timeout_secs` 同时约束 LLM 请求与受控 SQL 执行。守卫挡得住
+        // 越权与超大 LIMIT，但挡不住"合法 SELECT 的笛卡尔/聚合慢查询"——没有这一层，
+        // PG/MySQL 只会受 60s 的语句超时约束，SQLite 更是完全无界。超时后 future 被
+        // 丢弃，sqlx 会关闭该连接（PG/MySQL 服务端随之取消），请求侧不再等待。
+        let budget = std::time::Duration::from_secs(self.config.timeout_secs.max(1));
+        macro_rules! fetch_rows {
+            ($pool:expr) => {{
+                let fut = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone())).fetch_all($pool);
+                tokio::time::timeout(budget, fut)
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("查询超时（已等待 {} 秒）", budget.as_secs())
+                    })??
+            }};
+        }
         let (columns, rows): (Vec<String>, Vec<Vec<Value>>) = match backend {
             DbBackend::Sqlite => {
                 let pool = self.db.get_sqlite_connection_pool();
-                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone()))
-                    .fetch_all(pool)
-                    .await?;
+                let rows = fetch_rows!(pool);
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -207,9 +221,7 @@ impl AiService {
             }
             DbBackend::Postgres => {
                 let pool = self.db.get_postgres_connection_pool();
-                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone()))
-                    .fetch_all(pool)
-                    .await?;
+                let rows = fetch_rows!(pool);
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -227,9 +239,7 @@ impl AiService {
             }
             DbBackend::MySql => {
                 let pool = self.db.get_mysql_connection_pool();
-                let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.clone()))
-                    .fetch_all(pool)
-                    .await?;
+                let rows = fetch_rows!(pool);
                 let columns: Vec<String> = rows
                     .first()
                     .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
@@ -275,7 +285,7 @@ impl AiService {
         if schema.is_empty() {
             anyhow::bail!("白名单表 schema 为空（请检查 [ai].allowed_tables）");
         }
-        let system_prompt = self.system_prompt(&schema, caller_tid);
+        let system_prompt = Self::system_prompt(&schema, caller_tid);
         // §5.57 token 观测：complete_detailed 返回文本 + provider 上报的用量（None=未上报）
         let completion = self.provider().complete_detailed(&system_prompt, q).await?;
         let answer = completion.text;
@@ -563,6 +573,31 @@ impl AiService {
 mod tests {
     use super::*;
     use sea_orm::Database;
+
+    /// 提示词自身也要可复核：规则编号不得重复（b98 修掉"6. 6."），
+    /// 且租户规则必须把"逐表谓词 / 禁子查询与 UNION 与 OR"说清——LLM 是
+    /// 守卫的上游，提示词与守卫口径不一致时，用户会反复收到"未通过安全校验"。
+    #[test]
+    fn system_prompt_numbers_rules_uniquely_and_matches_guard_policy() {
+        let schema = vec![TableSchema {
+            name: "sys_user".into(),
+            columns: vec![("user_id".into(), "INTEGER".into())],
+        }];
+        let tenant = AiService::system_prompt(&schema, 7);
+        assert!(!tenant.contains("6. 6."), "规则编号不得重复: {tenant}");
+        assert!(tenant.contains("6. 你生成的 SQL"), "租户规则必须编号为 6");
+        assert!(
+            tenant.contains("`<别名>.tenant_id = 7`"),
+            "必须给出逐表谓词写法"
+        );
+        assert!(
+            tenant.contains("禁用子查询、UNION 与 OR"),
+            "提示词必须与守卫口径一致"
+        );
+        let platform = AiService::system_prompt(&schema, 0);
+        assert!(!platform.contains("6. 6."));
+        assert!(platform.contains("无需 tenant_id 条件"));
+    }
 
     /// 管理视图的 `tenantId` / `userId` 必须取自真实列名 `tenant_id` / `user_id`。
     ///

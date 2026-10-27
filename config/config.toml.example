@@ -779,6 +779,8 @@ base_url = "https://api.openai.com/v1"
 api_key = ""
 model = "gpt-4o-mini"
 max_rows = 100
+# LLM 请求与受控 SQL 执行超时（秒）：b98 起同一预算也约束 NL2SQL 执行段
+#（守卫挡越权/超大 LIMIT，挡不住合法慢查询；SQLite 没有数据库侧语句超时兜底）。
 timeout_secs = 30
 # 推理并发上限（b72，AGENTS A.2「重资源入口默认带并发上限 + 背压」）。缺省 4，取值被收敛到 [1, 256]。
 # ⚠ 本键**只读于启动时**，且不进 sys.ai.* 热更面（与上方六键不同）：闸门上限在首次请求时
@@ -786,3 +788,6 @@ timeout_secs = 30
 #   改后需重启生效。闸满直接 429（error.ai.busy，可重来的用户请求），不做排队。
 max_concurrency = 4
 allowed_tables = ["sys_user", "sys_dept", "sys_role", "sys_post", "sys_config", "sys_dict_type", "sys_dict_data", "sys_notice", "sys_job", "sys_logininfor", "sys_oper_log", "sys_tenant"]
+# ⚠ 表名必须是合法 SQL 标识符（字母/下划线开头，只含字母、数字、下划线）：
+#   它们会进入 `PRAGMA table_info(...)` 等无法参数化的位置。非法条目在读取时被忽略
+#   并打 WARN（收窄可查询面），管理页保存时直接 400（不留半应用配置）。

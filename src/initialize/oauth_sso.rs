@@ -5,29 +5,36 @@ use crate::shared_store::SharedStore;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use std::sync::Arc;
 
-/// 幂等检查表是否存在（三方言）
+/// 占位符形态（Postgres `$n`，Sqlite/MySQL `?`）
+fn ph(backend: DatabaseBackend, i: usize) -> String {
+    if backend == DatabaseBackend::Postgres {
+        format!("${i}")
+    } else {
+        "?".to_string()
+    }
+}
+
+/// 幂等检查表是否存在（三方言；表名/列名全部参数化，SQLite 的库表清单同样可绑定）
 pub(crate) async fn sso_table_exists(db: &DatabaseConnection, table: &str) -> anyhow::Result<bool> {
     let backend = db.get_database_backend();
 
     let sql = match backend {
-        DatabaseBackend::Sqlite => {
-            format!("SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}'")
+        DatabaseBackend::Sqlite => "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        DatabaseBackend::Postgres => {
+            "SELECT 1 FROM information_schema.tables WHERE table_name = $1 AND table_schema=current_schema() LIMIT 1"
         }
-        DatabaseBackend::Postgres => format!(
-            "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=current_schema() LIMIT 1"
-        ),
-        DatabaseBackend::MySql => format!(
-            "SELECT 1 FROM information_schema.tables WHERE table_name='{table}' AND table_schema=DATABASE() LIMIT 1"
-        ),
+        DatabaseBackend::MySql => {
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ? AND table_schema=DATABASE() LIMIT 1"
+        }
         backend => unreachable!("unknown backend: {backend:?}"),
     };
     Ok(!db
-        .query_all_raw(Statement::from_string(backend, sql))
+        .query_all_raw(Statement::from_sql_and_values(backend, sql, [table.into()]))
         .await?
         .is_empty())
 }
 
-/// 幂等检查列是否存在（三方言）
+/// 幂等检查列是否存在（三方言；SQLite 只有 PRAGMA 一条路，先钉标识符形状）
 pub(crate) async fn sso_has_column(
     db: &DatabaseConnection,
     table: &str,
@@ -36,6 +43,9 @@ pub(crate) async fn sso_has_column(
     let backend = db.get_database_backend();
     let rows = match backend {
         DatabaseBackend::Sqlite => {
+            if !crate::common::sql_dialect::is_valid_identifier(table) {
+                anyhow::bail!("非法表名（SQLite PRAGMA 不支持参数绑定）: {table}");
+            }
             db.query_all_raw(Statement::from_string(
                 backend,
                 format!("PRAGMA table_info({table})"),
@@ -48,9 +58,15 @@ pub(crate) async fn sso_has_column(
             } else {
                 "table_schema=DATABASE()"
             };
-            db.query_all_raw(Statement::from_string(
+            let sql = format!(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = {} AND column_name = {} AND {schema} LIMIT 1",
+                ph(backend, 1),
+                ph(backend, 2)
+            );
+            db.query_all_raw(Statement::from_sql_and_values(
                 backend,
-                format!("SELECT 1 FROM information_schema.columns WHERE table_name='{table}' AND column_name='{column}' AND {schema} LIMIT 1"),
+                sql.as_str(),
+                [table.into(), column.into()],
             ))
             .await?
         }
@@ -262,12 +278,22 @@ pub(crate) async fn sso_startup_self_check(db: &DatabaseConnection, settings: &S
         if reserved.is_empty() {
             continue;
         }
-        let sql =
-            format!("SELECT COUNT(*) AS c FROM sys_oauth_client WHERE client_id = '{reserved}'");
+        let sql = format!(
+            "SELECT COUNT(*) AS c FROM sys_oauth_client WHERE client_id = {}",
+            ph(backend, 1)
+        );
         // 自检本身不影响启动，但"查不了"与"查了没有撞名"必须可区分：原形状是
         // `if let Ok(Some(row)) = …await` ⇒ 查询失败时这条自检静默不执行，
         // 而日志上"没有 WARN"读起来和"检查通过"一模一样（b89 项 13 的判据形状）。
-        match db.query_one_raw(Statement::from_string(backend, sql)).await {
+        // 绑定而非拼接：audience/issuer 来自配置，配置里一个单引号就能让语句变形。
+        match db
+            .query_one_raw(Statement::from_sql_and_values(
+                backend,
+                sql.as_str(),
+                [reserved.into()],
+            ))
+            .await
+        {
             Ok(Some(row)) => {
                 let count = row.try_get::<i64>("", "c").unwrap_or(0);
                 if count > 0 {
@@ -425,12 +451,19 @@ pub(crate) async fn ensure_sso_rs256_keys(
                 continue;
             }
         };
+        // 私钥密文原先把单引号手工翻倍后拼进 SQL——手写转义只要有一处漏（或将来
+        // 改成别的引号规则）就是注入；绑定参数让"值里有什么字符"与语句结构无关。
         let update_sql = format!(
-            "UPDATE sys_oauth_client SET rsa_private_key = '{}' WHERE sso_client_id = {pk}",
-            sealed.replace('\'', "''")
+            "UPDATE sys_oauth_client SET rsa_private_key = {} WHERE sso_client_id = {}",
+            ph(backend, 1),
+            ph(backend, 2)
         );
-        db.execute_raw(Statement::from_string(backend, update_sql))
-            .await?;
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            update_sql.as_str(),
+            [sealed.into(), pk.into()],
+        ))
+        .await?;
         tracing::info!("v5-D2 已为存量客户端生成 RS256 密钥 client_id={cid}");
     }
     Ok(())
@@ -555,12 +588,19 @@ pub(crate) async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, en
                     }
                 }
             };
+            // 表/列/主键名取自上面的常量 TARGETS，值一律绑定：手写 `replace('\'', "''")`
+            // 只要有一处漏（或将来引号规则变化）就是注入，且密文里出现引号并不罕见。
             let update_sql = format!(
-                "UPDATE {table} SET {col} = '{}' WHERE {pk} = {pk_val}",
-                sealed.replace('\'', "''")
+                "UPDATE {table} SET {col} = {} WHERE {pk} = {}",
+                ph(backend, 1),
+                ph(backend, 2)
             );
             if let Err(e) = db
-                .execute_raw(Statement::from_string(backend, update_sql))
+                .execute_raw(Statement::from_sql_and_values(
+                    backend,
+                    update_sql.as_str(),
+                    [sealed.into(), pk_val.into()],
+                ))
                 .await
             {
                 tracing::error!("v5-E6 回填更新失败 {table}.{col} pk={pk_val}: {}", e);

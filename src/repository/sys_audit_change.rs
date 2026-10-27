@@ -14,6 +14,24 @@ use crate::common::sort::SortOrder;
 use crate::entity::sys_audit_change::{Column, Entity as SysAuditChange, Model};
 use crate::repository::base::BaseRepository;
 
+/// 审计留痕导出行（列投影，**不含 before/after 快照**）。
+///
+/// CSV 只输出八列元信息，而 `before_data` / `after_data` 是整行 JSON 快照（业务
+/// 表有多宽就多大）。原实现走整表 `Model`，在 `EXPORT_MAX_ROWS = 50000` 上限下
+/// 能把数百 MB 的 JSON 读进内存——这些字节 `build_csv` 一个都不用，属"闸住的是
+/// 构建段、内存在 DB 读时就已经爆掉"的形态。列投影让导出内存只随八列增长。
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+pub struct AuditChangeExportRow {
+    pub id: i64,
+    pub operator_id: Option<i64>,
+    pub operator_name: Option<String>,
+    pub table_name: String,
+    pub row_pk: String,
+    pub action: String,
+    pub changed_fields: String,
+    pub operated_at: NaiveDateTime,
+}
+
 /// 审计变更 Repository
 #[derive(Clone)]
 pub struct SysAuditChangeRepository {
@@ -102,6 +120,9 @@ impl SysAuditChangeRepository {
 
     /// 导出全量查询（与 `find_page_filtered` 同过滤口径，不截断分页；
     /// 上限由调用方以 limit = EXPORT_MAX_ROWS 控制）
+    ///
+    /// 返回列投影 [`AuditChangeExportRow`]：**不加载 before/after 快照大字段**。
+    /// 排序/过滤列与分页路径共用 `Self::build_filtered`，保证口径一致。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_all_filtered(
         &self,
@@ -113,7 +134,7 @@ impl SysAuditChangeRepository {
         begin_time: Option<NaiveDateTime>,
         end_time: Option<NaiveDateTime>,
         tenant_scope: Option<i64>,
-    ) -> Result<Vec<Model>, DbErr> {
+    ) -> Result<Vec<AuditChangeExportRow>, DbErr> {
         let query = Self::build_filtered(
             table_name,
             row_pk,
@@ -122,10 +143,22 @@ impl SysAuditChangeRepository {
             begin_time,
             end_time,
             tenant_scope,
-        );
+        )
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::OperatorId,
+            Column::OperatorName,
+            Column::TableName,
+            Column::RowPk,
+            Column::Action,
+            Column::ChangedFields,
+            Column::OperatedAt,
+        ])
+        .order_by_desc(Column::Id)
+        .limit(limit);
         query
-            .order_by_desc(Column::Id)
-            .limit(limit)
+            .into_model::<AuditChangeExportRow>()
             .all(self.base.db())
             .await
     }

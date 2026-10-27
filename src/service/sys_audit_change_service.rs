@@ -23,7 +23,7 @@ use crate::entity::sys_audit_change::{
 };
 // 动作常量随 service 一并 re-export，业务调用点免探 entity 路径
 pub use crate::entity::sys_audit_change::{ACTION_DELETE, ACTION_INSERT, ACTION_UPDATE};
-use crate::repository::sys_audit_change::SysAuditChangeRepository;
+use crate::repository::sys_audit_change::{AuditChangeExportRow, SysAuditChangeRepository};
 
 // ==================== 变更留痕写入（供业务 service 在事务内调用） ====================
 
@@ -389,7 +389,7 @@ impl SysAuditChangeService {
         &self,
         query: AuditChangeQueryDto,
         tenant_scope: Option<i64>,
-    ) -> Result<Vec<Model>, ServiceError> {
+    ) -> Result<Vec<AuditChangeExportRow>, ServiceError> {
         let begin = match query.begin_time.as_deref() {
             Some(s) if !s.is_empty() => Some(crate::common::datetime::parse_query_date(s)?),
             _ => None,

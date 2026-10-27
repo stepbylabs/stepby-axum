@@ -608,6 +608,14 @@ mod tests {
                 "next.run(req)",
             ),
             (
+                // b98：审计留痕 CSV 导出不走 xlsx 构造点，`precheck` 只早拒不占许可
+                // ⇒ 必须自己持有同一把闸，否则这条链路的并发导出完全不受预算约束。
+                "export:excel",
+                "HeavyEntry::ExcelExport",
+                "src/audit/handler.rs",
+                "export_changes(",
+            ),
+            (
                 "db:bulk-delete",
                 "HeavyEntry::BulkDelete",
                 "src/handler/sys_oper_log_handler.rs",
@@ -710,8 +718,8 @@ mod tests {
         }
         assert_eq!(
             files.len(),
-            17,
-            "反查必须覆盖全部 17 个接线文件（少了就是有人把接线挪出了视野）"
+            18,
+            "反查必须覆盖全部 18 个接线文件（少了就是有人把接线挪出了视野）"
         );
     }
 

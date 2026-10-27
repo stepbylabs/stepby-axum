@@ -640,3 +640,146 @@ async fn test_report_sub_recipients_are_tenant_scoped() {
         .await;
     ctx.assert_ok(&v);
 }
+
+/// 订阅推送**全部失败**时不得推进 `last_run_time`（b98）。
+///
+/// 旧实现无论投递成败都在末尾写 `last_run_time`，调度器于是把"这轮一封都没发出去"
+/// 记成"本轮已成功执行"，下一个 cron 周期到来前不会再重试；运维看到的
+/// "上次执行时间"是成功时间，而收件箱里什么都没有。
+///
+/// 取证方式：把 `site` 渠道停用 ⇒ 每个接收人的 `msg_service.send` 都返回 Err；
+/// ① 手动触发必须非 200 且 `last_run_time` 保持 NULL；
+/// ② 恢复渠道后同一订阅必须成功、写入时间（证明拒绝面只在"全失败"，
+///    不是把订阅推送整体关掉）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_subscription_all_delivery_failed_does_not_advance_last_run_time() {
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    const SUB_ID: i64 = 95_001;
+    const UID: i64 = 95_002;
+
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+
+    // 站内推送模板（缺它时 run_subscription 会整段跳过、attempts=0，测不到本判据）
+    let v = ctx
+        .post_json(
+            "/system/msg/template",
+            serde_json::json!({
+                "templateName": "it_rpt_failrun 模板",
+                "templateCode": "report_push",
+                "channelCode": "site",
+                "templateSubject": "报表推送：{{report_name}}",
+                "templateContent": "{{content}}",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    let report_id = create_custom_report(&ctx, "it_rpt_failrun", "it_rpt_failrun_name").await;
+
+    crate::entity::sys_user::ActiveModel {
+        user_id: Set(UID),
+        user_name: Set(format!("it_rpt_failrun_{UID}")),
+        nick_name: Set("IT-RPT-FAILRUN".to_string()),
+        tenant_id: Set(0),
+        status: Set(Some("0".to_string())),
+        del_flag: Set(Some("0".to_string())),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("插入接收人失败");
+
+    crate::entity::sys_report_sub::ActiveModel {
+        sub_id: Set(SUB_ID),
+        tenant_id: Set(0),
+        report_id: Set(report_id),
+        sub_name: Set("it_rpt_failrun_sub".to_string()),
+        cron: Set("0 0 3 1 1 *".to_string()),
+        push_email: Set("0".to_string()),
+        receive_email: Set(None),
+        push_sys_msg: Set("1".to_string()),
+        receive_user_ids: Set(Some(UID.to_string())),
+        status: Set("0".to_string()),
+        last_run_time: Set(None),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("插入订阅失败");
+
+    // 停用 site 渠道 ⇒ 每次 send 都在"渠道已停用"处失败
+    let site = crate::entity::sys_msg_channel::Entity::find()
+        .filter(crate::entity::sys_msg_channel::Column::ChannelCode.eq("site"))
+        .filter(crate::entity::sys_msg_channel::Column::TenantId.eq(0))
+        .one(db)
+        .await
+        .expect("查 site 渠道失败")
+        .expect("种子必须有 site 渠道");
+    crate::entity::sys_msg_channel::ActiveModel {
+        channel_id: Set(site.channel_id),
+        status: Set(Some("1".to_string())),
+        ..Default::default()
+    }
+    .update(db)
+    .await
+    .expect("停用 site 渠道失败");
+
+    let (status, v) = ctx
+        .send_raw(ctx.request(
+            Method::POST,
+            &format!("/system/report/sub/{}/run", SUB_ID),
+            Some(serde_json::json!({})),
+        ))
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "全部投递失败不得返回 200，实际: {v}"
+    );
+    assert_ne!(v["code"], 200, "全部投递失败不得返回业务成功码，实际: {v}");
+
+    let after_fail = crate::entity::sys_report_sub::Entity::find_by_id(SUB_ID)
+        .one(db)
+        .await
+        .unwrap()
+        .expect("订阅必须仍在");
+    assert!(
+        after_fail.last_run_time.is_none(),
+        "全部失败不得推进 last_run_time（否则下一个周期前不再重试），实际: {:?}",
+        after_fail.last_run_time
+    );
+
+    // 恢复渠道 ⇒ 同一订阅必须成功并写入执行时间
+    crate::entity::sys_msg_channel::ActiveModel {
+        channel_id: Set(site.channel_id),
+        status: Set(Some("0".to_string())),
+        ..Default::default()
+    }
+    .update(db)
+    .await
+    .expect("恢复 site 渠道失败");
+
+    let v = ctx
+        .post_json(
+            &format!("/system/report/sub/{}/run", SUB_ID),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(
+        v["data"]["siteMsgs"].as_i64(),
+        Some(1),
+        "恢复后必须投 1 封，实际: {v}"
+    );
+    let after_ok = crate::entity::sys_report_sub::Entity::find_by_id(SUB_ID)
+        .one(db)
+        .await
+        .unwrap()
+        .expect("订阅必须仍在");
+    assert!(
+        after_ok.last_run_time.is_some(),
+        "成功执行后必须写入 last_run_time"
+    );
+}

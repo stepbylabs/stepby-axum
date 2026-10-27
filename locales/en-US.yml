@@ -8,6 +8,7 @@ error:
     capability_off: AI assistant capability is not enabled for this tenant
     busy: AI inference is at capacity (too many concurrent questions). Please retry shortly
     config_missing: base_url and api_key are required
+    allowed_table_invalid: "Invalid allowlisted table name: %{name} (letters, digits and underscores only; must not start with a digit)"
   ip:
     xdb_missing: ip2region database file not found. Download it from the IP Location page or place the file manually, then retry
     mmdb_missing: GeoLite2 database file not found. Download it from the IP Location page or place the file manually, then retry
@@ -491,6 +492,7 @@ error:
     email_invalid: Invalid recipient email format
     user_ids_invalid: Invalid target user IDs
     user_ids_foreign: Target users must be existing, non-deleted users within this tenant (site-message recipients are resolved in the subscription's own tenant)
+    push_all_failed: "Report subscription delivery failed for every attempt (%{attempts} attempts, 0 succeeded): last-run time was not advanced and the next cycle will retry"
   web_hook:
     id_invalid: Invalid webhook ID
     not_found: Webhook configuration does not exist
