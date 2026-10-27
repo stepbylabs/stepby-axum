@@ -441,6 +441,14 @@ error:
     sqlite3_backup_failed: "sqlite3 备份失败: %{err}"
     sqlite3_branch_unreachable: SQLite 备份应在上文处理，不应到达此分支（请检查代码逻辑）
     mysql_restore_branch_unreachable: MySQL 恢复应走 run_mysql_restore 独立分支（请检查代码逻辑）
+    dump_empty: 备份文件为空（可能是备份进程中断或磁盘写满），已拒绝操作
+    dump_size_mismatch: "备份文件大小与登记不一致（登记 %{expected} 字节，实际 %{actual} 字节），可能已被截断或替换，已拒绝操作"
+    sqlite_dump_invalid: "备份内容无法解析为有效的 SQLite 脚本: %{err}"
+    sqlite_dump_corrupt: "备份重建后的数据库完整性校验失败: %{detail}"
+    sqlite_dump_incomplete: "备份缺少核心表（%{tables}），不是本系统的完整备份，已拒绝恢复"
+    sqlite_restore_swap_failed: "SQLite 原子替换失败（在线库未被改动）: %{err}"
+    sqlite_path_unsupported: 备份目录路径同时包含单双引号，无法安全传给 sqlite3，请调整数据目录
+    restore_sqlite_tmp_cleanup_failed: SQLite 恢复临时文件清理失败（不影响恢复结论）
   server:
     info_fetch_failed: 服务器信息采集失败
     pool_stats_failed: 数据库连接池统计获取失败

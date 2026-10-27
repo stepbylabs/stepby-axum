@@ -55,6 +55,29 @@ pub const BACKUP_TYPE_TENANT_EXPORT: &str = "tenant_export";
 /// `restore` 恢复记录（无落盘文件）不参与轮转；手动删除接口不受影响。
 const RETAIN_SUCCESS_BACKUPS: usize = 10;
 
+/// 恢复失败原因的落库上限（字符）。
+///
+/// psql/mysql 的 stderr 是"每条失败语句一行"，大库恢复失败时可达几十 KB；
+/// 无上限会把 `error_msg` 撑大并随列表接口回显。按字符截断（不是字节）以免
+/// 在 UTF-8 中间切断。
+const RESTORE_ERROR_MAX_CHARS: usize = 4000;
+
+/// SQLite 恢复临时库文件名前缀（与业务文件隔离；陈旧清理只认这个前缀）。
+const SQLITE_RESTORE_TEMP_PREFIX: &str = ".stepby-restore-";
+
+/// SQLite 恢复校验的核心表：重建后的临时库必须全部含有。
+///
+/// 这一条挡的是"看起来成功、其实什么都没有"的三类备份：截断的 dump
+/// （`BEGIN` 未 `COMMIT` ⇒ CLI 静默回滚、退出码 0）、空文件、以及别的系统的
+/// SQLite 备份。只做 `integrity_check` 不够——空库同样 `ok`。
+const SQLITE_RESTORE_REQUIRED_TABLES: &[&str] = &["sys_user", "sys_menu"];
+
+/// 陈旧 SQLite 恢复临时文件的年龄阈值（秒）。
+///
+/// 恢复中途进程被杀会留下完整临时库（可能数百 MB）。下次恢复开头只清理
+/// 超过该阈值的文件：正在进行的另一实例（多副本共库）不会被误删。
+const SQLITE_RESTORE_TEMP_STALE_SECS: u64 = 2 * 60 * 60;
+
 // ==================== DTO ====================
 
 /// 备份日志分页查询 DTO
@@ -179,6 +202,198 @@ fn parse_db_conn_info(url: &str) -> Result<(String, String, String, String, Stri
     Ok((host, port, user, pass, db))
 }
 
+// ==================== 子进程参数与备份可恢复性判据 ====================
+
+/// `pg_dump` 参数（纯函数：可恢复性契约由单测钉住）。
+///
+/// `--clean --if-exists` 是**可恢复性**的一半：默认 dump 只有 `CREATE TABLE`，
+/// 回放到非空库会在第一条 `relation "x" already exists` 失败；带上 DROP 后
+/// 新备份才能恢复到既有库，对空库则是一串无害 no-op。
+fn pg_dump_args(host: &str, port: &str, user: &str, db: &str, file: &str) -> Vec<String> {
+    vec![
+        "--host".into(),
+        host.into(),
+        "--port".into(),
+        port.into(),
+        "--username".into(),
+        user.into(),
+        "--dbname".into(),
+        db.into(),
+        "--clean".into(),
+        "--if-exists".into(),
+        "--file".into(),
+        file.into(),
+    ]
+}
+
+/// `psql` 恢复参数（纯函数）。
+///
+/// `--single-transaction` + `ON_ERROR_STOP=1` 是**原子性**的两半：
+/// psql 默认遇错继续执行、**退出码仍为 0** ⇒ 旧实现会把"前一半语句失败、
+/// 后一半数据照常写入"记成恢复成功；两个开关合起来保证整份 dump 要么全部
+/// 生效、要么全部回滚，失败时退出码非零。
+fn pg_restore_args(host: &str, port: &str, user: &str, db: &str, file: &str) -> Vec<String> {
+    vec![
+        "--host".into(),
+        host.into(),
+        "--port".into(),
+        port.into(),
+        "--username".into(),
+        user.into(),
+        "--dbname".into(),
+        db.into(),
+        "--single-transaction".into(),
+        "--set=ON_ERROR_STOP=1".into(),
+        "--file".into(),
+        file.into(),
+    ]
+}
+
+/// `mysqldump` 参数（纯函数）。
+///
+/// - `--add-drop-table`：mysqldump 默认开启，但**显式写出**才能让"恢复可重放"
+///   这件事在源码里可读、可测（判据不依赖客户端版本的默认值）；
+/// - `--default-character-set=utf8mb4`：备份与恢复必须同字符集，否则中文数据
+///   在客户端默认 latin1 的机器上静默乱码。
+fn mysqldump_args(host: &str, port: &str, user: &str, db: &str, file: &str) -> Vec<String> {
+    vec![
+        "--host".into(),
+        host.into(),
+        "--port".into(),
+        port.into(),
+        "--user".into(),
+        user.into(),
+        "--single-transaction".into(),
+        "--routines".into(),
+        "--triggers".into(),
+        "--add-drop-table".into(),
+        "--default-character-set=utf8mb4".into(),
+        db.into(),
+        "--result-file".into(),
+        file.into(),
+    ]
+}
+
+/// `mysql` 恢复参数（纯函数）：字符集必须与 `mysqldump_args` 同源。
+fn mysql_restore_args(host: &str, port: &str, user: &str, db: &str) -> Vec<String> {
+    vec![
+        "--host".into(),
+        host.into(),
+        "--port".into(),
+        port.into(),
+        "--user".into(),
+        user.into(),
+        "--default-character-set=utf8mb4".into(),
+        db.into(),
+    ]
+}
+
+/// 备份文件大小校验：空文件与"与登记大小不一致"一律拒绝。
+///
+/// 两类都是真实事故形状：备份进程被杀留下半份、磁盘写满截断、文件被人替换。
+/// 恢复是**破坏性**操作，必须在触碰在线库之前拦住；下载同样要拦——把截断的
+/// 备份当成功件带离现场，等于把唯一可用的恢复材料也弄没了。
+///
+/// `recorded <= 0` 表示历史行没有可用的登记大小（早期 restore 记录），此时
+/// 只判空文件，不误杀。
+fn validate_backup_file_size(recorded: i64, actual: u64) -> Result<(), &'static str> {
+    if actual == 0 {
+        return Err("error.backup.dump_empty");
+    }
+    if recorded > 0 && actual != recorded as u64 {
+        return Err("error.backup.dump_size_mismatch");
+    }
+    Ok(())
+}
+
+/// 把校验失败翻译成用户可见错误（参数化文案由 i18n 负责）。
+fn backup_size_error(key: &str, recorded: i64, actual: u64) -> ServiceError {
+    if key == "error.backup.dump_empty" {
+        ServiceError::bad_request(&crate::tr!("error.backup.dump_empty"))
+    } else {
+        ServiceError::bad_request(&crate::tr!(
+            "error.backup.dump_size_mismatch",
+            expected = recorded,
+            actual = actual
+        ))
+    }
+}
+
+/// 按字符截断恢复错误信息（保留可读性，避免 UTF-8 中间截断）。
+fn truncate_restore_error(msg: &str) -> String {
+    let mut out: String = msg.chars().take(RESTORE_ERROR_MAX_CHARS).collect();
+    if msg.chars().count() > RESTORE_ERROR_MAX_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// sqlite3 **点命令**的路径引用。
+///
+/// 点命令按空白切分参数：`.backup C:\a b\c.db` 会把路径截成两段、静默备份到
+/// 错误位置。双引号内可保留单引号（Windows 路径常见），路径含双引号时改用
+/// 单引号；两种引号同时出现（Unix 合法文件名）拒绝执行，而不是拼一个可疑命令。
+///
+/// **反斜杠必须先归一**（b99 实证）：sqlite3 的引号解析器**在引号内仍处理
+/// 反斜杠转义**，`"C:\Users\..."` 会被读成 `C:Users...`（`\t` 之类变成控制字符），
+/// `.backup` 于是一个字节都没写进在线库却**退出码 0** —— 上层据此报"恢复成功"。
+/// Windows 接受正斜杠，统一转换；Unix 文件名允许反斜杠但点命令会吃掉它，
+/// 直接拒绝而不是猜一个目标路径。
+fn sqlite_dot_arg(path: &Path) -> Result<String, ServiceError> {
+    let mut raw = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        raw = raw.replace('\\', "/");
+    } else if raw.contains('\\') {
+        return Err(ServiceError::internal(&crate::tr!(
+            "error.backup.sqlite_path_unsupported"
+        )));
+    }
+    if !raw.contains('"') {
+        Ok(format!("\"{raw}\""))
+    } else if !raw.contains('\'') {
+        Ok(format!("'{raw}'"))
+    } else {
+        Err(ServiceError::internal(&crate::tr!(
+            "error.backup.sqlite_path_unsupported"
+        )))
+    }
+}
+
+/// 读取数据库的 `PRAGMA user_version`（替换的落地指纹）。
+///
+/// 为什么不用 `schema_version/page_count`：两者都不是内容指纹——b99 实测
+/// "写到别处"的那一轮直播库与临时库 `page_count` 完全相同，而 `schema_version`
+/// 会因连接活动正常漂移。`user_version` 是 DB 头里的一个 32 位字段，`.backup`
+/// 会逐页复制（已实测），且**合并式写入（WAL）下只有真正替换成功才会出现**。
+async fn sqlite_user_version(db: &Path) -> Result<i64, ServiceError> {
+    let out = run_sqlite_step(db, &["PRAGMA user_version;".to_string()], true, None).await?;
+    if !out.status.success() {
+        return Err(ServiceError::internal(&crate::tr!(
+            "error.backup.sqlite_restore_swap_failed",
+            err = truncate_restore_error(String::from_utf8_lossy(&out.stderr).trim())
+        )));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim().parse().map_err(|_| {
+        ServiceError::internal(&crate::tr!(
+            "error.backup.sqlite_restore_swap_failed",
+            err = truncate_restore_error(&format!("user_version 输出不可解析: {text:?}"))
+        ))
+    })
+}
+
+/// 写回 `PRAGMA user_version`（替换完成后把指纹还原成恢复前的值）。
+async fn sqlite_set_user_version(db: &Path, value: i64) -> Result<(), ServiceError> {
+    let out = run_sqlite_step(db, &[format!("PRAGMA user_version = {value};")], true, None).await?;
+    if !out.status.success() {
+        return Err(ServiceError::internal(&crate::tr!(
+            "error.backup.sqlite_restore_swap_failed",
+            err = truncate_restore_error(String::from_utf8_lossy(&out.stderr).trim())
+        )));
+    }
+    Ok(())
+}
+
 /// 获取备份目录绝对路径（不存在则创建）
 ///
 /// 注：此函数执行同步 IO，调用方需在 spawn_blocking 中使用
@@ -219,6 +434,262 @@ async fn validate_backup_path(file_name: &str) -> Result<PathBuf, ServiceError> 
         .map_err(|_| ServiceError::bad_request(&crate::tr!("error.backup.filename_invalid")))?;
     let file_path = canonical_dir.join(file_name);
     Ok(file_path)
+}
+
+// ==================== SQLite 恢复：临时库重建 + 校验 + 原子替换 ====================
+
+/// 运行一次 sqlite3 子进程（stdout/stderr 捕获，5 分钟超时，kill_on_drop）。
+///
+/// `safe=true` 时带 `-safe -bail`：**dump 是从磁盘读入的完整脚本，可能被人替换**，
+/// `-safe` 禁掉 `.shell` / `.system` 等点命令（否则一条伪造的备份文件就是一次
+/// 任意命令执行），`-bail` 让首个错误立即停止而不是继续执行后续语句。
+async fn run_sqlite_step(
+    db: &Path,
+    args: &[String],
+    safe: bool,
+    stdin: Option<std::process::Stdio>,
+) -> Result<std::process::Output, ServiceError> {
+    let mut cmd = Command::new("sqlite3");
+    if safe {
+        cmd.arg("-safe").arg("-bail");
+    }
+    cmd.arg(db)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(stdin) = stdin {
+        cmd.stdin(stdin);
+    }
+    let child = cmd
+        .spawn()
+        .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.sqlite3_failed")))?;
+    tokio::time::timeout(
+        Duration::from_secs(BACKUP_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| {
+        ServiceError::internal(&crate::tr!(
+            "error.backup.restore_process_timeout",
+            secs = BACKUP_TIMEOUT_SECS
+        ))
+    })?
+    .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed")))
+}
+
+/// 删除临时库三件套（主文件 + `-wal` + `-shm`），NotFound 视为已清理。
+async fn cleanup_sqlite_temp(temp: &Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut os = temp.as_os_str().to_os_string();
+        os.push(suffix);
+        let path = PathBuf::from(os);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                file = %path.file_name().unwrap_or_default().to_string_lossy(),
+                error = %e,
+                "{}",
+                crate::tr!("error.backup.restore_sqlite_tmp_cleanup_failed")
+            ),
+        }
+    }
+}
+
+/// 备份失败后删除半份产物：失败文件既不可下载也不可恢复（status=failed），
+/// 留在盘上只会占空间，并在"登记大小 vs 实际大小"的校验里制造后续噪声。
+async fn remove_partial_backup(path: &Path) {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            file = %path.file_name().unwrap_or_default().to_string_lossy(),
+            error = %e,
+            "备份失败后清理半份产物失败"
+        ),
+    }
+}
+
+/// 清理超过 [`SQLITE_RESTORE_TEMP_STALE_SECS`] 的陈旧恢复临时库。
+///
+/// 只认固定前缀与三种后缀，且只删"够旧"的：多副本部署下另一实例正在进行的
+/// 恢复不会被误删（它的临时库刚刚创建）。目录不可枚举只 WARN 不阻断——
+/// 这是卫生动作，不是判据。
+async fn sweep_stale_restore_temps(dir: &Path) {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(error = %e, "SQLite 恢复临时文件清理：目录不可枚举，跳过");
+            return;
+        }
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(SQLITE_RESTORE_TEMP_PREFIX)
+            || !(name.ends_with(".db") || name.ends_with(".db-wal") || name.ends_with(".db-shm"))
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age.as_secs() >= SQLITE_RESTORE_TEMP_STALE_SECS);
+        if !stale {
+            continue;
+        }
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!(file = %name, error = %e, "陈旧 SQLite 恢复临时文件删除失败")
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(count = removed, "已清理陈旧 SQLite 恢复临时文件");
+    }
+}
+
+/// 用 SQL 文本备份重建在线 SQLite 库（临时库 → 校验 → Backup API 原子替换）。
+///
+/// 为什么不能直接 `.read` 回放（旧实现）：
+/// 1. `.dump` 产物是 `CREATE TABLE`（无 `IF NOT EXISTS`/`DROP`）⇒ 对非空库第一条
+///    `table already exists` 就失败，**任何真实数据库的恢复都跑不通**（b99 实证）；
+/// 2. SQLite CLI 遇错默认继续执行 ⇒ 表不存在时先建、再写一半数据，留下半恢复状态；
+/// 3. `.read <path>` 还依赖点命令的空白切分，目录含空格时路径被截断。
+///
+/// 现方案：dump 经 **stdin** 喂给临时库（不经点命令解析、`-safe` 禁点命令），
+/// 校验 `integrity_check=ok` 且核心表齐全后，用 SQLite Backup API（`.backup`）
+/// 把临时库**原子替换**进在线库——目标库上的写事务保证读者要么看到旧内容、
+/// 要么看到新内容，不会看到半成品；任何一步失败在线库都未被改动。
+async fn restore_sqlite_from_dump(live_db: &Path, dump: &Path) -> Result<(), ServiceError> {
+    let dir = live_db.parent().unwrap_or_else(|| Path::new("."));
+    sweep_stale_restore_temps(dir).await;
+    let temp = dir.join(format!(
+        "{SQLITE_RESTORE_TEMP_PREFIX}{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let outcome: Result<(), ServiceError> = async {
+        // 1) 重建临时库。stdin 直接接文件句柄：dump 多大都不进内存。
+        let dump_file = std::fs::File::open(dump).map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed"))
+        })?;
+        let build = run_sqlite_step(
+            &temp,
+            &[],
+            true,
+            Some(std::process::Stdio::from(dump_file)),
+        )
+        .await?;
+        if !build.status.success() {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.backup.sqlite_dump_invalid",
+                err = truncate_restore_error(
+                    String::from_utf8_lossy(&build.stderr).trim()
+                )
+            )));
+        }
+
+        // 2) 校验：完整 + 核心表齐全。
+        //    截断的 dump（BEGIN 未 COMMIT）会被 SQLite 静默回滚、退出码 0，
+        //    所以"命令成功"不等于"库建对了"——必须查事实。
+        let names = SQLITE_RESTORE_REQUIRED_TABLES
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let check_sql = format!(
+            "PRAGMA integrity_check;\nSELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ({names});"
+        );
+        let check = run_sqlite_step(&temp, &[check_sql], true, None).await?;
+        let stdout = String::from_utf8_lossy(&check.stdout);
+        let mut lines = stdout.lines();
+        let integrity = lines.next().unwrap_or("").trim().to_string();
+        let table_count: i64 = lines
+            .next()
+            .and_then(|l| l.trim().parse().ok())
+            .unwrap_or(-1);
+        if !check.status.success() || integrity != "ok" {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.backup.sqlite_dump_corrupt",
+                detail = truncate_restore_error(&format!(
+                    "integrity_check={integrity}; stderr={}",
+                    String::from_utf8_lossy(&check.stderr).trim()
+                ))
+            )));
+        }
+        if table_count != SQLITE_RESTORE_REQUIRED_TABLES.len() as i64 {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.backup.sqlite_dump_incomplete",
+                tables = SQLITE_RESTORE_REQUIRED_TABLES.join(", ")
+            )));
+        }
+
+        // 3) 原子替换。`.backup` 必须在非 safe 模式执行（safe 模式禁用它），
+        //    输入只有下方这一条自造点命令，不含 dump 内容。
+        //    退出码 0 **不足以**证明替换落在在线库上（b99 实证：点命令把路径里的
+        //    反斜杠当转义吃掉时，它写到了别处仍返回 0）⇒ 在临时库写一枚
+        //    user_version 指纹，替换成功后在在线库读回，读不到就是没落地。
+        let original_uv = sqlite_user_version(live_db).await?;
+        let mut canary = (uuid::Uuid::new_v4().as_u128() & 0x7fff_ffff) as i64;
+        if canary == 0 || canary == original_uv {
+            canary = if original_uv == 1 { 2 } else { 1 };
+        }
+        let mark = run_sqlite_step(
+            &temp,
+            &[format!("PRAGMA user_version = {canary};")],
+            true,
+            None,
+        )
+        .await?;
+        if !mark.status.success() {
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.backup.sqlite_restore_swap_failed",
+                err = truncate_restore_error(String::from_utf8_lossy(&mark.stderr).trim())
+            )));
+        }
+        let live_arg = sqlite_dot_arg(live_db)?;
+        let swap = run_sqlite_step(
+            &temp,
+            &[".timeout 10000".to_string(), format!(".backup {live_arg}")],
+            false,
+            None,
+        )
+        .await?;
+        if !swap.status.success() {
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.backup.sqlite_restore_swap_failed",
+                err = truncate_restore_error(
+                    String::from_utf8_lossy(&swap.stderr).trim()
+                )
+            )));
+        }
+        let landed = sqlite_user_version(live_db).await?;
+        if landed != canary {
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.backup.sqlite_restore_swap_failed",
+                err = format!(
+                    "在线库未出现备份指纹（期望 user_version={canary}，实际 {landed}）——                     备份可能写到了别的路径"
+                )
+            )));
+        }
+        // 指纹还原（不影响恢复结论：user_version 不参与业务）。
+        if let Err(e) = sqlite_set_user_version(live_db, original_uv).await {
+            tracing::warn!(error = %e, "SQLite 恢复：user_version 还原失败（不影响数据）");
+        }
+        Ok(())
+    }
+    .await;
+
+    cleanup_sqlite_temp(&temp).await;
+    outcome
 }
 
 // ==================== Service 实现 ====================
@@ -348,10 +819,26 @@ impl SysBackupService {
         };
 
         let (status, error_msg) = match result {
+            // 退出码 0 但产物为空 ⇒ 不能记成功：这样的"备份"既不可恢复也不可下载，
+            // 却会占掉一个保留位并把最旧的可用备份轮转掉。
+            Ok(()) if file_size <= 0 => {
+                remove_partial_backup(&file_path).await;
+                tracing::error!(
+                    "备份产物为空 (backup_id={})，按失败处理（子进程退出码为 0）",
+                    backup_id
+                );
+                (
+                    "failed".to_string(),
+                    Some(crate::tr!("error.backup.dump_empty")),
+                )
+            }
             Ok(()) => ("success".to_string(), None),
             Err(e) => {
                 tracing::error!("备份失败 (backup_id={}): {}", backup_id, e);
-                ("failed".to_string(), Some(e.to_string()))
+                (
+                    "failed".to_string(),
+                    Some(truncate_restore_error(&e.to_string())),
+                )
             }
         };
 
@@ -553,33 +1040,41 @@ impl SysBackupService {
     ) -> Result<(), ServiceError> {
         let file_path_str = file_path.to_string_lossy().to_string();
 
-        // SQLite 单独处理（通过 stdout 捕获后写入文件）
+        // SQLite 单独处理：`.dump` 的 stdout **直接重定向到备份文件**。
+        // 旧实现把整个 dump 收进 `output.stdout`（Vec<u8>）再写盘——100MB 级库
+        // 每次备份都要先占一份等量内存。
         if kind == DbKind::Sqlite {
             let db_file = parse_sqlite_file_path(db_url)?;
-            let output = tokio::process::Command::new("sqlite3")
+            let stdout_file = std::fs::File::create(file_path)
+                .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.write_failed")))?;
+            let child = tokio::process::Command::new("sqlite3")
                 .arg(db_file)
                 .arg(".dump")
-                .stdout(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::from(stdout_file))
                 .stderr(std::process::Stdio::piped())
-                .output()
-                .await
+                .kill_on_drop(true)
+                .spawn()
                 .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.sqlite3_failed")))?;
+            let output = tokio::time::timeout(
+                Duration::from_secs(BACKUP_TIMEOUT_SECS),
+                child.wait_with_output(),
+            )
+            .await
+            .map_err(|_| {
+                ServiceError::internal(&crate::tr!(
+                    "error.backup.process_timeout",
+                    secs = BACKUP_TIMEOUT_SECS
+                ))
+            })?
+            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.process_exec_failed")))?;
             if !output.status.success() {
+                remove_partial_backup(file_path).await;
                 let err = String::from_utf8_lossy(&output.stderr).to_string();
                 return Err(ServiceError::internal(&crate::tr!(
                     "error.backup.sqlite3_backup_failed",
-                    err = err
+                    err = truncate_restore_error(&err)
                 )));
             }
-            // 使用 spawn_blocking 包装同步 fs::write，避免阻塞 Tokio worker
-            let file_path_owned = file_path.to_path_buf();
-            let stdout = output.stdout;
-            tokio::task::spawn_blocking(move || std::fs::write(&file_path_owned, &stdout))
-                .await
-                .map_err(|_| {
-                    ServiceError::internal(&crate::tr!("error.backup.write_task_join_failed"))
-                })?
-                .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.write_failed")))?;
             return Ok(());
         }
 
@@ -588,34 +1083,14 @@ impl SysBackupService {
             DbKind::Postgres => {
                 let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
                 let mut c = Command::new("pg_dump");
-                c.arg("--host")
-                    .arg(&host)
-                    .arg("--port")
-                    .arg(&port)
-                    .arg("--username")
-                    .arg(&user)
-                    .arg("--dbname")
-                    .arg(&db)
-                    .arg("--file")
-                    .arg(&file_path_str);
+                c.args(pg_dump_args(&host, &port, &user, &db, &file_path_str));
                 c.env("PGPASSWORD", pass);
                 c
             }
             DbKind::Mysql => {
                 let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
                 let mut c = Command::new("mysqldump");
-                c.arg("--host")
-                    .arg(&host)
-                    .arg("--port")
-                    .arg(&port)
-                    .arg("--user")
-                    .arg(&user)
-                    .arg("--single-transaction")
-                    .arg("--routines")
-                    .arg("--triggers")
-                    .arg(&db)
-                    .arg("--result-file")
-                    .arg(&file_path_str);
+                c.args(mysqldump_args(&host, &port, &user, &db, &file_path_str));
                 // B7：将密码经 MYSQL_PWD 环境变量传递，避免明文出现在进程命令行
                 // （`ps` / `/proc` 可见，属中危泄漏）。与下方 restore 分支及 Postgres
                 // 的 PGPASSWORD 同构。MySQL 8.0 客户端会打印一条
@@ -653,10 +1128,11 @@ impl SysBackupService {
         .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.process_exec_failed")))?;
 
         if !output.status.success() {
+            remove_partial_backup(file_path).await;
             let err = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(ServiceError::internal(&crate::tr!(
                 "error.backup.process_nonzero_exit",
-                err = err
+                err = truncate_restore_error(&err)
             )));
         }
         Ok(())
@@ -665,11 +1141,12 @@ impl SysBackupService {
     /// 恢复数据库备份
     ///
     /// 流程：
-    /// 1. 校验备份记录存在
+    /// 1. 校验备份记录存在、状态成功、不是租户数据包
     /// 2. 校验文件路径穿越（必须位于备份目录内）
-    /// 3. 调用对应工具子进程（psql/mysql/sqlite3 .read）
-    /// 4. 5 分钟超时保护
-    /// 5. 记录恢复日志（backup_type=restore）
+    /// 3. **校验文件非空且与登记大小一致**（截断/替换的备份在触碰在线库之前拦住）
+    /// 4. 调用对应工具子进程（psql 原子事务 / mysql 流式 / sqlite3 临时库重建+原子替换）
+    /// 5. 5 分钟超时保护
+    /// 6. 记录恢复日志（backup_type=restore，含真实文件大小与截断后的错误原因）
     pub async fn restore_backup(&self, backup_id: i64, operator: &str) -> Result<(), ServiceError> {
         let log = self
             .backup_repo
@@ -700,28 +1177,40 @@ impl SysBackupService {
             })?
             .to_string();
         let file_path = validate_backup_path(&base_name).await?;
-        let file_path_clone = file_path.clone();
-        let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
-            .await
-            .map_err(|_| {
-                ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed"))
-            })?;
-        if !exists {
-            return Err(ServiceError::not_found(&crate::tr!(
-                "error.backup.file_not_found"
-            )));
-        }
+        let file_path_for_meta = file_path.clone();
+        let actual_size = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&file_path_for_meta).map(|m| m.len())
+        })
+        .await
+        .map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed"))
+        })?
+        .map_err(|_| ServiceError::not_found(&crate::tr!("error.backup.file_not_found")))?;
 
         let db_url = self.config.database.url.clone();
         let kind = parse_db_kind(&db_url)?;
-        let result = self.run_restore_process(kind, &db_url, &file_path).await;
+        // 文件大小校验也走"记录恢复日志"的统一出口：恢复失败必须留痕，
+        // 否则运维只能从 oper_log 猜这次点的是哪份备份、为什么被拒。
+        let result = match validate_backup_file_size(log.file_size, actual_size) {
+            Ok(()) => self.run_restore_process(kind, &db_url, &file_path).await,
+            Err(key) => Err(backup_size_error(key, log.file_size, actual_size)),
+        };
 
         let now = crate::common::datetime::now_naive();
-        let (status, error_msg) = match result {
-            Ok(()) => ("success".to_string(), None),
+        // 失败时保留**原始错误码**回给客户端：早前这里统一包成 internal(500)，
+        // 于是"备份被截断/内容非法"这类 400 级可修正错误在界面上变成 500，
+        // 运维只能看到一串 `ServiceError(code=400, ...)` 的字符串化消息。
+        let (status, error_msg, failure) = match result {
+            Ok(()) => ("success".to_string(), None, None),
             Err(e) => {
-                tracing::error!("恢复失败 (backup_id={}): {}", backup_id, e);
-                ("failed".to_string(), Some(e.to_string()))
+                let message = truncate_restore_error(&e.message);
+                tracing::error!("恢复失败 (backup_id={}): {}", backup_id, message);
+                let returned = ServiceError {
+                    code: e.code,
+                    message: message.clone(),
+                    retry_after: e.retry_after,
+                };
+                ("failed".to_string(), Some(message), Some(returned))
             }
         };
 
@@ -729,7 +1218,9 @@ impl SysBackupService {
         let am = SysBackupLogActiveModel {
             file_name: Set(log.file_name.clone()),
             file_path: Set(log.file_path.clone()),
-            file_size: Set(log.file_size),
+            // 恢复行此前记的是"被恢复备份的登记大小"（早期版本为 0），
+            // 现统一记**本次实际读取的文件大小**：它与 decision 使用的元数据同源。
+            file_size: Set(actual_size as i64),
             backup_type: Set("restore".to_string()),
             status: Set(status.clone()),
             error_msg: Set(error_msg.clone()),
@@ -739,17 +1230,22 @@ impl SysBackupService {
         };
         self.backup_repo.insert(am).await?;
 
-        if status == "failed" {
-            return Err(ServiceError::internal(
-                error_msg
-                    .as_deref()
-                    .unwrap_or(&crate::tr!("error.backup.db_restore_failed")),
-            ));
+        if let Some(err) = failure {
+            return Err(err);
         }
+
         Ok(())
     }
 
     /// 执行恢复子进程
+    ///
+    /// 三种方言的可恢复性/原子性口径（b99 收口）：
+    /// - **SQLite**：dump 是 SQL 文本，不能直接回放到非空库 ⇒ 临时库重建 + 校验
+    ///   + Backup API 原子替换（见 [`restore_sqlite_from_dump`]）；
+    /// - **PostgreSQL**：`--single-transaction` + `ON_ERROR_STOP=1` ⇒ 要么全生效、
+    ///   要么全回滚（psql 默认遇错继续且退出码 0，会把半写记成成功）；
+    /// - **MySQL**：`mysql` 客户端默认遇错中止，dump 自带 `DROP TABLE IF EXISTS`
+    ///   （`mysqldump --add-drop-table` 默认开启）⇒ 可重放；输入流式喂入。
     async fn run_restore_process(
         &self,
         kind: DbKind,
@@ -767,16 +1263,7 @@ impl SysBackupService {
             DbKind::Postgres => {
                 let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
                 let mut c = Command::new("psql");
-                c.arg("--host")
-                    .arg(&host)
-                    .arg("--port")
-                    .arg(&port)
-                    .arg("--username")
-                    .arg(&user)
-                    .arg("--dbname")
-                    .arg(&db)
-                    .arg("--file")
-                    .arg(&file_path_str);
+                c.args(pg_restore_args(&host, &port, &user, &db, &file_path_str));
                 c.env("PGPASSWORD", pass);
                 c
             }
@@ -788,9 +1275,7 @@ impl SysBackupService {
             }
             DbKind::Sqlite => {
                 let db_file = parse_sqlite_file_path(db_url)?;
-                let mut c = Command::new("sqlite3");
-                c.arg(db_file).arg(format!(".read {}", file_path_str));
-                c
+                return restore_sqlite_from_dump(&db_file, file_path).await;
             }
         };
 
@@ -821,43 +1306,29 @@ impl SysBackupService {
             let err = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(ServiceError::internal(&crate::tr!(
                 "error.backup.restore_process_nonzero_exit",
-                err = err
+                err = truncate_restore_error(&err)
             )));
         }
         Ok(())
     }
 
-    /// MySQL 恢复子进程：通过 stdin 管道喂入 SQL 文件内容
+    /// MySQL 恢复子进程：把 dump 文件**流式**喂入 stdin。
     ///
     /// 安全设计（修复 C-1 命令注入）：
     /// - 不使用 `sh -c "mysql ... < file"` 拼接 shell 命令
     /// - 直接 `Command::new("mysql")` + 参数化传参，完全绕过 shell
     /// - SQL 文件内容通过 stdin pipe 传入，等价于 `< file` 重定向但无注入风险
-    /// - 使用 tokio::io::AsyncWriteExt 异步写入 stdin，避免阻塞 worker
+    ///
+    /// 内存口径（b99）：旧实现先 `std::fs::read` 整个 dump，注释却写着"分块写入，
+    /// 避免一次性占用过多内存"——**与事实相反**，峰值等于文件大小。现改为
+    /// `tokio::io::copy` 从文件读到 stdin，进程内存与 dump 大小无关。
     async fn run_mysql_restore(&self, db_url: &str, file_path: &Path) -> Result<(), ServiceError> {
-        use tokio::io::AsyncWriteExt;
-
         let (host, port, user, pass, db) = parse_db_conn_info(db_url)?;
 
-        // 在 spawn_blocking 中读取文件内容（同步 IO 不阻塞 worker）
-        let fp = file_path.to_path_buf();
-        let sql_bytes = tokio::task::spawn_blocking(move || std::fs::read(&fp))
-            .await
-            .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_file_task_failed")))?
-            .map_err(|_| {
-                ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed"))
-            })?;
-
         let mut cmd = Command::new("mysql");
-        cmd.arg("--host")
-            .arg(&host)
-            .arg("--port")
-            .arg(&port)
-            .arg("--user")
-            .arg(&user)
+        cmd.args(mysql_restore_args(&host, &port, &user, &db))
             // 安全：通过 MYSQL_PWD 环境变量传递密码，避免通过命令行参数泄漏到进程列表
             .env("MYSQL_PWD", &pass)
-            .arg(&db)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -866,34 +1337,52 @@ impl SysBackupService {
         let mut child = cmd.spawn().map_err(|_| {
             ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed"))
         })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            ServiceError::internal(&crate::tr!("error.backup.restore_process_start_failed"))
+        })?;
+        let mut file = tokio::fs::File::open(file_path).await.map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed"))
+        })?;
 
-        // 取出 stdin 并异步写入 SQL 内容
-        if let Some(mut stdin) = child.stdin.take() {
-            // 大文件分块写入，避免一次性占用过多内存
-            for chunk in sql_bytes.chunks(64 * 1024) {
-                stdin.write_all(chunk).await.map_err(|_| {
-                    ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed"))
-                })?;
-            }
-            // 显式关闭 stdin，通知 mysql 子进程输入结束
-            // P3 修复: shutdown 失败记录 warn 日志，便于排查上游写入错误
-            if let Err(e) = stdin.shutdown().await {
-                tracing::warn!(error = %e, "MySQL 恢复: stdin shutdown 失败（可能子进程已退出）");
-            }
-        }
+        // 写侧独立任务：子进程提前退出（SQL 错误）时 copy 会拿到 EPIPE，
+        // 结论以子进程退出码为准；写侧错误只在"子进程成功但没读完"时上报。
+        //
+        // panic 隔离（AGENTS B.6）：写侧只做 IO，理论上不会 panic，但任务一旦 panic，
+        // `JoinHandle` 只剩 `JoinError`（原因丢失）且"子进程还没读完"这一事实也会被
+        // 误读成执行失败。用 catch_unwind 把 panic 收敛成一条 io 错误，与 EPIPE 同路。
+        // 超时由上方的 `wait_with_output` 统一兜住，超时/异常时 `abort()` 掉本任务。
+        let writer = tokio::spawn(async move {
+            let copied = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+                let copied = tokio::io::copy(&mut file, &mut stdin).await;
+                drop(stdin);
+                copied
+            }))
+            .await;
+            copied.unwrap_or_else(|_| Err(std::io::Error::other("mysql restore writer panicked")))
+        });
 
-        let output = tokio::time::timeout(
+        let waited = tokio::time::timeout(
             Duration::from_secs(BACKUP_TIMEOUT_SECS),
             child.wait_with_output(),
         )
-        .await
-        .map_err(|_| {
-            ServiceError::internal(&crate::tr!(
-                "error.backup.restore_process_timeout",
-                secs = BACKUP_TIMEOUT_SECS
-            ))
-        })?
-        .map_err(|_| {
+        .await;
+        let output = match waited {
+            Err(_) => {
+                writer.abort();
+                return Err(ServiceError::internal(&crate::tr!(
+                    "error.backup.restore_process_timeout",
+                    secs = BACKUP_TIMEOUT_SECS
+                )));
+            }
+            Ok(Ok(output)) => output,
+            Ok(Err(_)) => {
+                writer.abort();
+                return Err(ServiceError::internal(&crate::tr!(
+                    "error.backup.restore_process_exec_failed"
+                )));
+            }
+        };
+        let copied = writer.await.map_err(|_| {
             ServiceError::internal(&crate::tr!("error.backup.restore_process_exec_failed"))
         })?;
 
@@ -901,7 +1390,13 @@ impl SysBackupService {
             let err = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(ServiceError::internal(&crate::tr!(
                 "error.backup.restore_process_nonzero_exit",
-                err = err
+                err = truncate_restore_error(&err)
+            )));
+        }
+        if copied.is_err() {
+            // 子进程成功但 dump 没读完 ⇒ 数据不完整，不能记成功
+            return Err(ServiceError::internal(&crate::tr!(
+                "error.backup.read_backup_file_failed"
             )));
         }
         Ok(())
@@ -1074,16 +1569,21 @@ impl SysBackupService {
         Ok(())
     }
 
-    /// 读取备份文件二进制内容（供 handler 下载）
+    /// 打开备份文件用于**流式下载**（返回文件句柄、实际大小、原始文件名）
     ///
     /// 批次 2：`operator_tid != 0`（租户操作者）时先做行级可见性校验——只能下载
     /// **本租户的 `tenant_export` 数据包**，整库备份（manual/auto/restore）一律 403。
     /// 请求层另需 `backup.visibility` 达 `full` 档（`view_only` 不放行下载面）。
-    pub async fn read_backup_file(
+    ///
+    /// b99：返回句柄而不是 `Vec<u8>`——备份是整库快照（可达 GB 级），
+    /// 旧实现每次下载都把整个文件读进内存再交给响应体，内存峰值等于文件大小。
+    /// 与恢复同口径校验"非空 + 与登记大小一致"：把被截断的备份当成功件带走，
+    /// 等于把唯一可用的恢复材料也弄没了。
+    pub async fn open_backup_file(
         &self,
         backup_id: i64,
         operator_tid: i64,
-    ) -> Result<(Vec<u8>, String), ServiceError> {
+    ) -> Result<(tokio::fs::File, u64, String), ServiceError> {
         let log = self.get_backup_by_id(backup_id, operator_tid).await?;
         if log.status != "success" {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -1098,24 +1598,21 @@ impl SysBackupService {
             })?
             .to_string();
         let file_path = validate_backup_path(&base_name).await?;
-        let file_path_clone = file_path.clone();
-        let exists = tokio::task::spawn_blocking(move || file_path_clone.exists())
-            .await
-            .map_err(|_| {
-                ServiceError::internal(&crate::tr!("error.backup.file_exist_check_join_failed"))
-            })?;
-        if !exists {
-            return Err(ServiceError::not_found(&crate::tr!(
-                "error.backup.file_not_found"
-            )));
+        let meta = tokio::fs::metadata(&file_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ServiceError::not_found(&crate::tr!("error.backup.file_not_found"))
+            } else {
+                ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed"))
+            }
+        })?;
+        let actual_size = meta.len();
+        if let Err(key) = validate_backup_file_size(log.file_size, actual_size) {
+            return Err(backup_size_error(key, log.file_size, actual_size));
         }
-        let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
-            std::fs::read(&file_path)
-        })
-        .await
-        .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_file_task_failed")))?
-        .map_err(|_| ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed")))?;
-        Ok((bytes, log.file_name))
+        let file = tokio::fs::File::open(&file_path).await.map_err(|_| {
+            ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed"))
+        })?;
+        Ok((file, actual_size, log.file_name))
     }
 }
 
@@ -1174,5 +1671,113 @@ mod tenant_visibility_tests {
         let err = SysBackupService::ensure_backup_visible(&row(0, BACKUP_TYPE_TENANT_EXPORT), TID)
             .expect_err("租户不得读平台租户的数据包行");
         assert_eq!(err.code, 403);
+    }
+}
+
+#[cfg(test)]
+mod backup_restore_contract_tests {
+    use super::*;
+
+    /// PG 备份必须自带 DROP：否则新备份无法恢复到既有库（b99 实证 SQLite 同族缺陷）。
+    #[test]
+    fn pg_dump_args_make_backup_restorable_on_non_empty_db() {
+        let args = pg_dump_args("db", "5432", "u", "app", "/b/x.sql");
+        assert!(args.contains(&"--clean".to_string()), "必须带 --clean");
+        assert!(
+            args.contains(&"--if-exists".to_string()),
+            "必须带 --if-exists"
+        );
+        assert_eq!(
+            args[args.len() - 2..],
+            ["--file".to_string(), "/b/x.sql".to_string()],
+            "文件参数必须成对且位置不变"
+        );
+    }
+
+    /// psql 默认遇错继续执行且退出码 0 ⇒ 旧实现会把半写记成成功。
+    #[test]
+    fn pg_restore_args_are_atomic_and_fail_closed() {
+        let args = pg_restore_args("db", "5432", "u", "app", "/b/x.sql");
+        assert!(
+            args.contains(&"--single-transaction".to_string()),
+            "恢复必须整份一个事务"
+        );
+        assert!(
+            args.contains(&"--set=ON_ERROR_STOP=1".to_string()),
+            "首个错误必须中止并返回非零"
+        );
+    }
+
+    /// MySQL 备份/恢复两端字符集必须同源，且 dump 必须能重放（DROP + CREATE）。
+    #[test]
+    fn mysql_args_align_charset_and_are_replayable() {
+        let dump = mysqldump_args("db", "3306", "u", "app", "/b/x.sql");
+        assert!(dump.contains(&"--add-drop-table".to_string()));
+        assert!(dump.contains(&"--default-character-set=utf8mb4".to_string()));
+        let restore = mysql_restore_args("db", "3306", "u", "app");
+        assert!(
+            restore.contains(&"--default-character-set=utf8mb4".to_string()),
+            "恢复侧漏掉字符集 ⇒ 中文静默乱码"
+        );
+    }
+
+    #[test]
+    fn backup_size_guard_rejects_empty_and_mismatch() {
+        assert_eq!(
+            validate_backup_file_size(100, 0),
+            Err("error.backup.dump_empty")
+        );
+        assert_eq!(
+            validate_backup_file_size(100, 99),
+            Err("error.backup.dump_size_mismatch")
+        );
+        assert_eq!(
+            validate_backup_file_size(100, 101),
+            Err("error.backup.dump_size_mismatch")
+        );
+        assert_eq!(validate_backup_file_size(100, 100), Ok(()));
+        // 历史行没有登记大小（0）时只判空文件，不误杀
+        assert_eq!(validate_backup_file_size(0, 5), Ok(()));
+    }
+
+    #[test]
+    fn restore_error_truncation_is_char_safe() {
+        let long: String = "错".repeat(RESTORE_ERROR_MAX_CHARS + 10);
+        let out = truncate_restore_error(&long);
+        assert_eq!(out.chars().count(), RESTORE_ERROR_MAX_CHARS + 1);
+        assert!(out.ends_with('…'));
+        let short = "普通错误";
+        assert_eq!(truncate_restore_error(short), short);
+    }
+
+    #[test]
+    fn sqlite_dot_arg_quotes_paths_with_spaces_and_quotes() {
+        assert_eq!(
+            sqlite_dot_arg(Path::new("C:/data/stepby.db")).unwrap(),
+            "\"C:/data/stepby.db\""
+        );
+        assert_eq!(
+            sqlite_dot_arg(Path::new("D:/a b/c.db")).unwrap(),
+            "\"D:/a b/c.db\""
+        );
+        // 含单引号：双引号包裹可保留单引号
+        assert_eq!(
+            sqlite_dot_arg(Path::new("D:/o'brien/db")).unwrap(),
+            "\"D:/o'brien/db\""
+        );
+        // 含双引号：改用单引号
+        assert_eq!(
+            sqlite_dot_arg(Path::new("D:/a\"b/db")).unwrap(),
+            "'D:/a\"b/db'"
+        );
+        // Windows 反斜杠必须归一为正斜杠：点命令解析器会在引号内把 `\` 当转义，
+        // `"C:\Users\..."` 会被读成 `C:Users...` 并静默写到别处（b99 实证）。
+        #[cfg(windows)]
+        assert_eq!(
+            sqlite_dot_arg(Path::new(r"D:\data\stepby.db")).unwrap(),
+            "\"D:/data/stepby.db\""
+        );
+        // 两种引号同时出现：拒绝而不是拼一个可疑命令
+        assert!(sqlite_dot_arg(Path::new("D:/a'b\"c/db")).is_err());
     }
 }

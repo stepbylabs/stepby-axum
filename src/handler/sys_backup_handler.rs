@@ -8,9 +8,11 @@
 //! - GET    /system/backup/download/{id}   下载备份文件
 //! - DELETE /system/backup/{backupIds}     批量删除备份日志及文件
 
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
@@ -268,10 +270,13 @@ pub async fn restore(
     }
     result?;
 
-    // 恢复成功后清理 Redis 业务缓存，避免缓存与恢复后的数据库数据不一致
-    // 清理范围：字典缓存(dict:*)、系统配置缓存(config:*)、限流配置缓存(rate_limit:config:*)
+    // 恢复成功后清理业务缓存，避免缓存与恢复后的数据库数据不一致
+    // 清理范围：字典(dict:*)、系统配置(config:*)、限流配置(rate_limit:config:*)、
+    //          用户权限(perm:user:*，走 perm_cache 单一实现——Redis 档下它是恢复前
+    //          DB 算出来的派生数据，恢复后继续命中会放行已不存在的权限)
     // 不清理：blacklist/online/pwd_ver/captcha 等会话/安全相关 key（清理会导致用户登出）
     clear_business_caches(&state).await;
+    crate::common::perm_cache::invalidate_all_perm_cache(&state.store, "备份恢复").await;
 
     // P0-H2 修复：同时清理限流服务的进程内 local_cache（10s TTL）
     // clear_business_caches 只清理 Redis 中的 rate_limit:config:*，但 SysRateLimitService
@@ -327,18 +332,33 @@ pub async fn download(
     operator: Operator,
     Path(backup_id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let (bytes, file_name) = state
+    // 流式下载：备份是整库快照（可达 GB 级），把整个文件读进内存再回包会让
+    // 每次下载的 RSS 峰值等于文件大小；这里只持有文件句柄，按 64KB 分块出流。
+    let (file, size, file_name) = state
         .backup_service
-        .read_backup_file(backup_id, operator.tenant_id())
+        .open_backup_file(backup_id, operator.tenant_id())
         .await?;
 
     let content_disposition = format!("attachment; filename=\"{}\"", file_name.replace('"', ""));
 
-    let mut response = Response::new(bytes.into());
+    let stream = futures::stream::try_unfold(file, |mut file| async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.truncate(n);
+        Ok::<_, std::io::Error>(Some((Bytes::from(buf), file)))
+    });
+    let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&size.to_string()).unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,

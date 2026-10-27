@@ -54,7 +54,7 @@ sqlx = { version = "0.9", default-features = false, features = [
 async-trait = "0.1"
 
 # 异步运行时
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "time", "fs"] }
 
 # JWT
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }

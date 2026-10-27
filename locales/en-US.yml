@@ -441,6 +441,14 @@ error:
     sqlite3_backup_failed: "sqlite3 backup failed: %{err}"
     sqlite3_branch_unreachable: SQLite backup should be handled above; this branch is unreachable (please check code logic)
     mysql_restore_branch_unreachable: MySQL restore should go through run_mysql_restore branch (please check code logic)
+    dump_empty: Backup file is empty (the backup process may have been interrupted or the disk was full); operation refused
+    dump_size_mismatch: "Backup file size does not match the recorded size (%{expected} bytes recorded, %{actual} bytes actual); the file may be truncated or replaced, operation refused"
+    sqlite_dump_invalid: "Backup content is not a valid SQLite script: %{err}"
+    sqlite_dump_corrupt: "Integrity check failed on the rebuilt backup database: %{detail}"
+    sqlite_dump_incomplete: "Backup is missing core tables (%{tables}); it is not a complete backup of this system, restore refused"
+    sqlite_restore_swap_failed: "SQLite atomic swap failed (the live database was not modified): %{err}"
+    sqlite_path_unsupported: Backup directory path contains both single and double quotes and cannot be passed to sqlite3 safely; please adjust the data directory
+    restore_sqlite_tmp_cleanup_failed: Failed to clean up the SQLite restore temporary file (does not affect the restore result)
   server:
     info_fetch_failed: Server info collection failed
     pool_stats_failed: Failed to fetch database pool stats
