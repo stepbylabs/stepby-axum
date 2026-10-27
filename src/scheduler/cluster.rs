@@ -194,16 +194,26 @@ impl Drop for ClusterLock {
             let Ok(rt) = tokio::runtime::Handle::try_current() else {
                 return;
             };
-            rt.spawn(async move {
-                // best-effort：释放失败仅告警（锁在 TTL 到期后自然失效）
-                if let Err(e) = store.lock_release(&handle).await {
-                    tracing::warn!(
-                        lock_key = %handle.key,
-                        error = %e,
-                        "整轮互斥锁释放失败（Drop 兜底；将在 TTL 到期后自然失效）"
-                    );
-                }
-            });
+            // b102：任务体套 `run_tracked`（超时 + panic 隔离 + `bg:clusterLockRelease` 指标）。
+            // 仍用捕获的 `rt` 而不是全局 `tokio::spawn`：Drop 可能发生在运行时收尾阶段，
+            // 保留原有"在哪个运行时上派生"的语义，只补上结局可观测性。
+            let store = store.clone();
+            let handle = handle.clone();
+            rt.spawn(crate::common::background::run_tracked(
+                "clusterLockRelease",
+                crate::common::background::LIGHT_DB_BUDGET,
+                Some(crate::observability::metrics::MetricsRegistry::global()),
+                async move {
+                    // best-effort：释放失败仅告警（锁在 TTL 到期后自然失效）
+                    if let Err(e) = store.lock_release(&handle).await {
+                        tracing::warn!(
+                            lock_key = %handle.key,
+                            error = %e,
+                            "整轮互斥锁释放失败（Drop 兜底；将在 TTL 到期后自然失效）"
+                        );
+                    }
+                },
+            ));
         }
     }
 }

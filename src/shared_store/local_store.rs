@@ -775,24 +775,26 @@ impl SharedStore for LocalStore {
         }
         if !at_hashes.is_empty() {
             self.del(std::slice::from_ref(&at_set_key)).await?;
-            tracing::info!(user_id = %uid, "已全量吊销用户 SSO access_token count={}", at_hashes.len());
+            // b102：打印实际吊销数，而非索引成员数（两者在悬空成员存在时不相等）
+            tracing::info!(user_id = %uid, "已全量吊销用户 SSO access_token count={}", count);
         }
 
         // RT 侧（对齐 sso_service.rs:2547-2571；RT 轮换链必须与 AT 同生命周期终止）
         let rt_set_key = format!("sso:user_rt:{uid}");
         let rt_hashes: Vec<String> = self.set_members(&rt_set_key).await?;
+        let mut rt_count: u64 = 0;
         for h in &rt_hashes {
             let rt_key = format!("sso:rt:{h}");
             if self.get(&rt_key).await?.is_some() {
                 self.del(&[rt_key]).await?;
-                count += 1;
+                rt_count += 1;
             }
         }
         if !rt_hashes.is_empty() {
             self.del(std::slice::from_ref(&rt_set_key)).await?;
-            tracing::info!(user_id = %uid, "已全量吊销用户 SSO refresh_token count={}", rt_hashes.len());
+            tracing::info!(user_id = %uid, "已全量吊销用户 SSO refresh_token count={}", rt_count);
         }
-        Ok(count)
+        Ok(count + rt_count)
     }
 
     /// 集合添加成员：JSON 数组 get→append→set_ex 读改写（对齐 Redis SADD+EXPIRE）。
@@ -1318,6 +1320,31 @@ mod tests {
         s.revocation_add("h3", past_exp(), "logout").await.unwrap();
         let g = s.auth_gate_check("h3", "1", 0).await.unwrap();
         assert!(!g.blacklisted, "吊销行过期后失效");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// b102 回归锁：SSO 登出必须走 `revocation_add`（权威层），不得用通用 `set_ex`。
+    ///
+    /// 缺陷实证：local 档下 `set_ex("blacklist:…")` 只写 `sys_shared_kv`，而 auth 中间件的
+    /// `auth_gate_check` 只读 `sys_token_revocation` ⇒ SSO 登出的拉黑对业务接口完全不可见
+    /// （redis 档则少了 DB 权威层双写，重启即复活）。反向控制：通用 set_ex 写的键
+    /// **必须**对闸门不可见，否则这条锁就抓不到"改回去"。
+    #[tokio::test]
+    async fn sso_blacklist_must_use_revocation_add_not_generic_set_ex() {
+        let (s, db, path) = new_store().await;
+        ensure_auth_projection_tables(&db).await;
+        let now = now_secs();
+        s.set_ex("blacklist:legacy", "1", 3600).await.unwrap();
+        let g = s.auth_gate_check("legacy", "1", 0).await.unwrap();
+        assert!(
+            !g.blacklisted,
+            "通用 set_ex 写黑名单不会进入权威层（这正是被修复的缺陷形状）"
+        );
+        s.revocation_add("fixed", now + 3600, "sso_logout")
+            .await
+            .unwrap();
+        let g = s.auth_gate_check("fixed", "1", 0).await.unwrap();
+        assert!(g.blacklisted, "revocation_add 必须对 auth 闸门可见");
         let _ = std::fs::remove_file(path);
     }
 

@@ -74,77 +74,84 @@ pub fn spawn_emit(cfg: EventsConfig, event: &'static str, data: serde_json::Valu
     let timeout = cfg.timeout();
     let secret = cfg.secret.clone();
     // 无 tokio 运行时（如单测 / 迁移进程）时静默跳过：此处不是错误路径，业务已成功
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+    if tokio::runtime::Handle::try_current().is_err() {
         tracing::debug!(event, "无 tokio 运行时，跳过领域事件推送");
         return;
-    };
-    handle.spawn(async move {
-        let body = build_envelope(event, data, crate::common::datetime::now_naive());
-        let bytes = match serde_json::to_vec(&body) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(event, error = %e, "领域事件载荷序列化失败（跳过本次推送）");
-                return;
-            }
-        };
-        let client = match reqwest::Client::builder().timeout(timeout).build() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(event, error = %e, "领域事件推送 HTTP 客户端构建失败");
-                return;
-            }
-        };
-        // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
-        if !crate::common::breaker::try_acquire(&url) {
-            // 本地闸门挡下 ⇒ 没有出网，按 `rejected` 记（与 acme 同口径）
-            crate::observability::metrics::MetricsRegistry::global()
-                .record_outbound("outbox", "rejected", 0.0);
-            tracing::debug!(
-                event,
-                host = %crate::common::breaker::host_of(&url),
-                "领域事件推送已被出站熔断跳过"
-            );
-            return;
-        }
-        // b74（AGENTS B.4）：出站结局必须进指标；本函数有 4 条提前出口 ⇒ RAII 守卫
-        let mut outbound = crate::observability::metrics::OutboundGuard::start("outbox");
-        let mut req = client
-            .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("X-Stepby-Event", event)
-            .body(bytes.clone());
-        if let Some(secret) = secret.as_deref().filter(|s| !s.is_empty()) {
-            req = req.header(
-                "X-Stepby-Signature",
-                format!(
-                    "sha256={}",
-                    crate::common::webhook::sign_hmac_sha256(secret, &bytes)
-                ),
-            );
-        }
-        let sent_ok = match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!(event, "领域事件已推送");
-                true
-            }
-            Ok(resp) => {
-                tracing::warn!(
+    }
+    // b102：与 ACME 推送同口径——超时 + panic 隔离 + `bg:outboxEmit` 结局指标；
+    // 裸 `handle.spawn` 既是"结局无人认领"，也不在形状锁的 `tokio::spawn(` 采集面上。
+    crate::common::background::spawn_tracked(
+        "outboxEmit",
+        timeout + std::time::Duration::from_secs(5),
+        Some(crate::observability::metrics::MetricsRegistry::global()),
+        async move {
+            let body = build_envelope(event, data, crate::common::datetime::now_naive());
+            let bytes = match serde_json::to_vec(&body) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(event, error = %e, "领域事件载荷序列化失败（跳过本次推送）");
+                    return;
+                }
+            };
+            let client = match reqwest::Client::builder().timeout(timeout).build() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(event, error = %e, "领域事件推送 HTTP 客户端构建失败");
+                    return;
+                }
+            };
+            // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
+            if !crate::common::breaker::try_acquire(&url) {
+                // 本地闸门挡下 ⇒ 没有出网，按 `rejected` 记（与 acme 同口径）
+                crate::observability::metrics::MetricsRegistry::global()
+                    .record_outbound("outbox", "rejected", 0.0);
+                tracing::debug!(
                     event,
-                    status = %resp.status(),
-                    "领域事件推送被拒（接收端非 2xx；业务不受影响）"
+                    host = %crate::common::breaker::host_of(&url),
+                    "领域事件推送已被出站熔断跳过"
                 );
-                false
+                return;
             }
-            Err(e) => {
-                tracing::warn!(event, error = %e, "领域事件推送失败（业务不受影响）");
-                false
+            // b74（AGENTS B.4）：出站结局必须进指标；本函数有 4 条提前出口 ⇒ RAII 守卫
+            let mut outbound = crate::observability::metrics::OutboundGuard::start("outbox");
+            let mut req = client
+                .post(&url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header("X-Stepby-Event", event)
+                .body(bytes.clone());
+            if let Some(secret) = secret.as_deref().filter(|s| !s.is_empty()) {
+                req = req.header(
+                    "X-Stepby-Signature",
+                    format!(
+                        "sha256={}",
+                        crate::common::webhook::sign_hmac_sha256(secret, &bytes)
+                    ),
+                );
             }
-        };
-        if sent_ok {
-            outbound.succeeded();
-        }
-        crate::common::breaker::record(&url, sent_ok);
-    });
+            let sent_ok = match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!(event, "领域事件已推送");
+                    true
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        event,
+                        status = %resp.status(),
+                        "领域事件推送被拒（接收端非 2xx；业务不受影响）"
+                    );
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(event, error = %e, "领域事件推送失败（业务不受影响）");
+                    false
+                }
+            };
+            if sent_ok {
+                outbound.succeeded();
+            }
+            crate::common::breaker::record(&url, sent_ok);
+        },
+    );
 }
 
 #[cfg(test)]

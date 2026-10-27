@@ -479,6 +479,7 @@ impl SharedStore for RedisStore {
     async fn revoke_all_for_user(&self, uid: &str) -> Result<u64, StoreError> {
         let mut redis = self.conn.clone();
         let mut count: u64 = 0;
+        let mut failed: u64 = 0;
 
         // AT 侧（对齐 sso_service.rs:2511-2544）
         let user_at_key = format!("{USER_AT_KEY_PREFIX}{uid}");
@@ -492,30 +493,49 @@ impl SharedStore for RedisStore {
         };
         for h in &at_hashes {
             let at_key = format!("{AT_KEY_PREFIX}{h}");
-            let exists: i64 = crate::utils::redis::cmd_timeout(
+            let exists: i64 = match crate::utils::redis::cmd_timeout(
                 redis::cmd("EXISTS").arg(&at_key).query_async(&mut redis),
             )
             .await
-            .unwrap_or(0);
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    failed += 1;
+                    tracing::error!(user_id = %uid, error = %e, "查询用户 SSO access_token 是否存在失败（跳过吊销）");
+                    continue;
+                }
+            };
             if exists == 1 {
-                // 绑定存在才算真吊销；悬空成员（绑定已自然过期）跳过自愈、不计数
-                let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
+                // 绑定存在才算真吊销；悬空成员（绑定已自然过期）跳过自愈、不计数。
+                // b102：DEL 失败不得计入 count——原实现"失败也 +1"，日志与实际状态相反。
+                match crate::utils::redis::cmd_timeout(
                     redis::cmd("DEL")
                         .arg(&at_key)
                         .arg(format!("online:{h}"))
-                        .query_async(&mut redis),
+                        .query_async::<i64>(&mut redis),
                 )
-                .await;
-                count += 1;
+                .await
+                {
+                    Ok(_) => count += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::error!(user_id = %uid, error = %e, "删除用户 SSO access_token 失败");
+                    }
+                }
             }
         }
         if !at_hashes.is_empty() {
             // 索引键整体删除（原实现 DEL user_at_key，非逐成员 SREM）
-            let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
-                redis::cmd("DEL").arg(&user_at_key).query_async(&mut redis),
+            if let Err(e) = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL")
+                    .arg(&user_at_key)
+                    .query_async::<i64>(&mut redis),
             )
-            .await;
-            tracing::info!(user_id = %uid, "已全量吊销用户 SSO access_token count={}", count);
+            .await
+            {
+                tracing::warn!(user_id = %uid, error = %e, "删除用户 SSO AT 索引失败（下次全量吊销会重试）");
+            }
+            tracing::info!(user_id = %uid, "已全量吊销用户 SSO access_token count={} failed={}", count, failed);
         }
 
         // RT 侧（对齐 sso_service.rs:2547-2571；RT 轮换链必须与 AT 同生命周期终止）
@@ -529,25 +549,46 @@ impl SharedStore for RedisStore {
         };
         for h in &rt_hashes {
             let rt_key = format!("{RT_KEY_PREFIX}{h}");
-            let exists: i64 = crate::utils::redis::cmd_timeout(
+            let exists: i64 = match crate::utils::redis::cmd_timeout(
                 redis::cmd("EXISTS").arg(&rt_key).query_async(&mut redis),
             )
             .await
-            .unwrap_or(0);
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    failed += 1;
+                    tracing::error!(user_id = %uid, error = %e, "查询用户 SSO refresh_token 是否存在失败（跳过吊销）");
+                    continue;
+                }
+            };
             if exists == 1 {
-                let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
-                    redis::cmd("DEL").arg(&rt_key).query_async(&mut redis),
+                match crate::utils::redis::cmd_timeout(
+                    redis::cmd("DEL")
+                        .arg(&rt_key)
+                        .query_async::<i64>(&mut redis),
                 )
-                .await;
-                count += 1;
+                .await
+                {
+                    Ok(_) => count += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::error!(user_id = %uid, error = %e, "删除用户 SSO refresh_token 失败");
+                    }
+                }
             }
         }
         if !rt_hashes.is_empty() {
-            let _: Result<i64, _> = crate::utils::redis::cmd_timeout(
-                redis::cmd("DEL").arg(&user_rt_key).query_async(&mut redis),
+            if let Err(e) = crate::utils::redis::cmd_timeout(
+                redis::cmd("DEL")
+                    .arg(&user_rt_key)
+                    .query_async::<i64>(&mut redis),
             )
-            .await;
-            tracing::info!(user_id = %uid, "已全量吊销用户 SSO refresh_token count={}", rt_hashes.len());
+            .await
+            {
+                tracing::warn!(user_id = %uid, error = %e, "删除用户 SSO RT 索引失败（下次全量吊销会重试）");
+            }
+            // b102：打印**实际吊销数**而非索引成员数（原实现失败也报满数）
+            tracing::info!(user_id = %uid, "已全量吊销用户 SSO refresh_token count={} failed={}", count, failed);
         }
         Ok(count)
     }

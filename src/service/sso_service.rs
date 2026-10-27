@@ -1995,11 +1995,41 @@ impl SsoService {
             Ok(v) => v,
             Err(_) => return Ok(None),
         };
-        // 黑名单校验：已登出的会话不再视为有效（best-effort：查询失败按未拉黑处理，与原一致）
+        // 会话闸门：黑名单 / 历史 SSO AT 阻断 / 口令版本 / 租户运行时，与 auth 中间件
+        // **同一事实源**（`auth_gate_check`）。b102：原实现直接 `get("blacklist:...")`，
+        // 在 local 档读的是 `sys_shared_kv` 而吊销权威层在 `sys_token_revocation`
+        // ⇒ SSO 授权对普通登出的拉黑完全失明；redis 档读失败又被 `unwrap_or(None)`
+        // 当成"未拉黑"（fail-open）。两档统一走语义方法，失败 fail-closed。
         let token_hash = crate::utils::crypto::token_hash(token);
-        let blacklist_key = format!("blacklist:{}", token_hash);
-        let blacklisted: Option<String> = store.get(&blacklist_key).await.unwrap_or(None);
-        if blacklisted.is_some() {
+        let uid = user_id.to_string();
+        let gate = tokio::time::timeout(
+            std::time::Duration::from_secs(crate::db::redis::redis_cmd_timeout_secs()),
+            store.auth_gate_check(&token_hash, &uid, claims.tid),
+        )
+        .await
+        .map_err(|_| {
+            tracing::error!(user_id, "SSO 会话闸门查询超时（fail-closed）");
+            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?
+        .map_err(|e| {
+            tracing::error!(user_id, error = %e, "SSO 会话闸门查询失败（fail-closed）");
+            ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+        })?;
+        if gate.blacklisted || gate.sso_at_bound {
+            return Ok(None);
+        }
+        if let Some(current_ver) = gate.pwd_ver
+            && current_ver > claims.pwd_ver
+        {
+            return Ok(None);
+        }
+        if claims.tid != 0
+            && crate::common::tenant::eval_tenant_runtime_state(
+                gate.tenant_state.as_deref(),
+                gate.tenant_expire.unwrap_or(0),
+                chrono::Utc::now().timestamp(),
+            ) == crate::common::tenant::TenantRuntimeState::Disabled
+        {
             return Ok(None);
         }
         // v3-P0-B：登记登录会话索引（`sso:sess:{uid}` = hash 集合），
@@ -2008,10 +2038,18 @@ impl SsoService {
             .saturating_sub(chrono::Utc::now().timestamp())
             .max(60);
         let sess_key = format!("{}{}", SESS_KEY_PREFIX, user_id);
-        // SADD + EXPIRE 合并走 trait 集合方法；best-effort（原两段式命令亦忽略失败）
-        let _: Result<(), _> = store
+        // SADD + EXPIRE 合并走 trait 集合方法。b102：失败必须留痕——索引缺成员会让
+        // `end_session` 的跨端拉黑漏掉这条会话（登录本身不因此失败，但静默失败不可接受）。
+        if let Err(e) = store
             .set_add(&sess_key, &token_hash, remaining as u64)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                user_id,
+                error = %e,
+                "登记 SSO 登录会话索引失败（跨端拉黑将漏掉本会话）"
+            );
+        }
         Ok(Some(SessionIdentity {
             user_id,
             username: claims.username,
@@ -2545,42 +2583,85 @@ impl SsoService {
         client_id: &str,
     ) {
         let user_at_key = format!("{}{}", USER_AT_KEY_PREFIX, user_id);
-        // 读索引失败按空集继续（best-effort，与原 SMEMBERS unwrap_or_default 等价）
-        let hashes: Vec<String> = store.set_members(&user_at_key).await.unwrap_or_default();
+        // b102：索引读失败不再静默按空集继续——撤权会整段漏掉，必须留痕（fail-visible）
+        let hashes: Vec<String> = match store.set_members(&user_at_key).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(user_id, client_id, error = %e, "读取用户 SSO AT 索引失败（按客户端撤权不完整）");
+                Vec::new()
+            }
+        };
+        let mut revoked = 0usize;
+        let mut failed = 0usize;
         for h in &hashes {
             let at_key = format!("{}{}", AT_KEY_PREFIX, h);
-            let matched = store
-                .get(&at_key)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|j| serde_json::from_str::<AccessBinding>(&j).ok())
-                .map(|b| b.client_id == client_id)
-                .unwrap_or(false);
+            let matched = match store.get(&at_key).await {
+                Ok(v) => v
+                    .and_then(|j| serde_json::from_str::<AccessBinding>(&j).ok())
+                    .map(|b| b.client_id == client_id)
+                    .unwrap_or(false),
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(user_id, client_id, error = %e, "读取 SSO AT 绑定失败（跳过该令牌）");
+                    false
+                }
+            };
             if matched {
-                let _: Result<u64, _> = store.del(&[at_key, format!("online:{}", h)]).await;
-                let _: Result<(), _> = store.set_rem(&user_at_key, h).await;
+                match store.del(&[at_key, format!("online:{}", h)]).await {
+                    Ok(_) => revoked += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::error!(user_id, client_id, error = %e, "删除 SSO AT 失败");
+                    }
+                }
+                if let Err(e) = store.set_rem(&user_at_key, h).await {
+                    tracing::warn!(user_id, client_id, error = %e, "移除 SSO AT 索引成员失败（悬空成员由下次全量吊销自愈）");
+                }
             }
         }
         // v5-D3 修正：按 client 粒度同步吊销 refresh_token（RT 轮换链终止）——
         // 否则撤权/删客户端/停用后 RT 仍可换出新 AT，级联吊销被架空
         let user_rt_key = format!("{}{}", USER_RT_KEY_PREFIX, user_id);
-        let rt_hashes: Vec<String> = store.set_members(&user_rt_key).await.unwrap_or_default();
+        let rt_hashes: Vec<String> = match store.set_members(&user_rt_key).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(user_id, client_id, error = %e, "读取用户 SSO RT 索引失败（按客户端撤权不完整）");
+                Vec::new()
+            }
+        };
         for h in &rt_hashes {
             let rt_key = format!("{}{}", RT_KEY_PREFIX, h);
-            let matched = store
-                .get(&rt_key)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|j| serde_json::from_str::<RefreshBinding>(&j).ok())
-                .map(|b| b.client_id == client_id)
-                .unwrap_or(false);
+            let matched = match store.get(&rt_key).await {
+                Ok(v) => v
+                    .and_then(|j| serde_json::from_str::<RefreshBinding>(&j).ok())
+                    .map(|b| b.client_id == client_id)
+                    .unwrap_or(false),
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(user_id, client_id, error = %e, "读取 SSO RT 绑定失败（跳过该令牌）");
+                    false
+                }
+            };
             if matched {
-                let _: Result<u64, _> = store.del(&[rt_key]).await;
-                let _: Result<(), _> = store.set_rem(&user_rt_key, h).await;
+                match store.del(&[rt_key]).await {
+                    Ok(_) => revoked += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::error!(user_id, client_id, error = %e, "删除 SSO RT 失败");
+                    }
+                }
+                if let Err(e) = store.set_rem(&user_rt_key, h).await {
+                    tracing::warn!(user_id, client_id, error = %e, "移除 SSO RT 索引成员失败（悬空成员由下次全量吊销自愈）");
+                }
             }
         }
+        tracing::info!(
+            user_id,
+            client_id,
+            count = revoked,
+            failed,
+            "按客户端吊销用户 SSO 令牌完成"
+        );
     }
 
     /// v4-P0-B：end_session 真实登出（RP-initiated Single Logout）。
@@ -2638,12 +2719,19 @@ impl SsoService {
             let hint_allows = hint_user.is_none() || hint_user == cookie_user;
             if hint_allows && (hint_user.is_some() || allow_cookie_logout) {
                 let token_hash = crate::utils::crypto::token_hash(token);
-                let ttl = (claims.exp as i64)
-                    .saturating_sub(chrono::Utc::now().timestamp())
-                    .max(60);
-                let _: Result<(), _> = store
-                    .set_ex(&format!("blacklist:{}", token_hash), "1", ttl as u64)
-                    .await;
+                // b102：改走 `revocation_add`（S1 语义：redis 档 SETEX + DB 权威层双写，
+                // local 档直接写 `sys_token_revocation`）。原先的裸 `set_ex("blacklist:…")`
+                // 在 local 档写进 `sys_shared_kv`，而 auth 闸门只读权威表 ⇒ 拉黑形同虚设；
+                // 写失败必须 fail-closed（与 `auth_service::logout` 同一口径）。
+                if let Err(e) = store
+                    .revocation_add(&token_hash, claims.exp as i64, "sso_logout")
+                    .await
+                {
+                    tracing::error!(user_id = ?cookie_user, error = %e, "SSO 登出黑名单写入失败（fail-closed）");
+                    return Err(ServiceError::internal(&crate::tr!(
+                        "error.auth.logout_failed"
+                    )));
+                }
                 if let Some(uid) = cookie_user {
                     self.revoke_user_sso_tokens(store, uid).await;
                 }
@@ -2668,22 +2756,54 @@ impl SsoService {
 
     /// 按用户拉黑其全部 IdP 登录会话（`sso:sess:{uid}` 索引 → 逐 hash 写 blacklist），
     /// 供 end_session 跨端登出；拉黑后清空索引。
+    ///
+    /// b102：逐条走 `revocation_add`（S1 双写，local 档写权威表而非 `sys_shared_kv`），
+    /// 并**按实际成功数**记账——原实现忽略每条写入结果却打印 `count=hashes.len()`，
+    /// 失败时留下"已拉黑 N 条"的假成功日志。
     async fn blacklist_user_sessions(&self, store: &Arc<dyn SharedStore>, user_id: i64) {
         let sess_key = format!("{}{}", SESS_KEY_PREFIX, user_id);
-        // 读索引失败按空集继续（best-effort，与原 SMEMBERS unwrap_or_default 等价）
-        let hashes: Vec<String> = store.set_members(&sess_key).await.unwrap_or_default();
+        let hashes: Vec<String> = match store.set_members(&sess_key).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    user_id,
+                    error = %e,
+                    "读取 SSO 登录会话索引失败（跨端拉黑不完整，索引保留以便下次重试）"
+                );
+                return;
+            }
+        };
+        if hashes.is_empty() {
+            return;
+        }
+        // 会话剩余寿命未知（索引与 JWT 同 TTL），拉黑 24h 足以覆盖任何在途会话
+        let exp_at = chrono::Utc::now().timestamp() + 86_400;
+        let mut revoked = 0usize;
+        let mut failed = 0usize;
         for h in &hashes {
-            // 会话剩余寿命未知（索引与 JWT 同 TTL），拉黑 24h 足以覆盖任何在途会话
-            let _: Result<(), _> = store.set_ex(&format!("blacklist:{}", h), "1", 86_400).await;
+            match store
+                .revocation_add(h, exp_at, "sso_session_blacklist")
+                .await
+            {
+                Ok(()) => revoked += 1,
+                Err(e) => {
+                    failed += 1;
+                    tracing::error!(user_id, error = %e, "拉黑 IdP 会话失败");
+                }
+            }
         }
-        if !hashes.is_empty() {
-            let _: Result<u64, _> = store.del(&[sess_key]).await;
-            tracing::info!(
-                "已拉黑用户 IdP 会话 user_id={} count={}",
-                user_id,
-                hashes.len()
-            );
+        // 索引只在全部成功时清空；有失败则保留，下次登出可重试（幂等）
+        if failed == 0
+            && let Err(e) = store.del(&[sess_key]).await
+        {
+            tracing::warn!(user_id, error = %e, "清理 SSO 登录会话索引失败（下次登出会重试）");
         }
+        tracing::info!(
+            user_id,
+            count = revoked,
+            failed,
+            "已拉黑用户 IdP 会话（failed>0 时索引保留）"
+        );
     }
 
     /// 验签 id_token_hint：

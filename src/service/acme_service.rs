@@ -86,88 +86,96 @@ pub fn spawn_emit(
     let timeout = cfg.timeout();
     let secret = cfg.secret.clone();
     // 无 tokio 运行时（如单测/迁移进程）时静默跳过：此处不是错误路径，业务已成功
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+    if tokio::runtime::Handle::try_current().is_err() {
         tracing::debug!("无 tokio 运行时，跳过 ACME 证书需求推送");
         return;
-    };
-    handle.spawn(async move {
-        let occurred_at = crate::common::datetime::now_naive();
-        let body = build_payload(
-            event,
-            &host,
-            tenant_id,
-            tenant_code.as_deref(),
-            &verify_status,
-            occurred_at,
-        );
-        let bytes = match serde_json::to_vec(&body) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "ACME 证书需求载荷序列化失败（跳过本次推送）");
-                return;
-            }
-        };
-        let client = match reqwest::Client::builder().timeout(timeout).build() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "ACME 推送 HTTP 客户端构建失败");
-                return;
-            }
-        };
-        // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
-        if !crate::common::breaker::try_acquire(&url) {
-            // 本地闸门挡下 ⇒ 没有出网，按 `rejected` 记（与 `ai/handler` 闸满拒绝同口径）
-            crate::observability::metrics::MetricsRegistry::global().record_outbound(
-                "acme",
-                "rejected",
-                0.0,
-            );
-            tracing::debug!(
+    }
+    // b102：改走统一守卫（超时 + panic 隔离 + `bg:acmeEmit` 结局指标）。
+    // 原实现裸 `handle.spawn`：任务 panic 只会被运行时吞掉，且形状锁只扫 `tokio::spawn(`
+    // ⇒ 这类别名派生点整片不在扫描面上。预算 = 单次 HTTP 超时 + 5s（留出熔断/序列化开销）。
+    crate::common::background::spawn_tracked(
+        "acmeEmit",
+        timeout + std::time::Duration::from_secs(5),
+        Some(crate::observability::metrics::MetricsRegistry::global()),
+        async move {
+            let occurred_at = crate::common::datetime::now_naive();
+            let body = build_payload(
                 event,
-                host = %crate::common::breaker::host_of(&url),
-                "ACME 证书需求推送已被出站熔断跳过"
+                &host,
+                tenant_id,
+                tenant_code.as_deref(),
+                &verify_status,
+                occurred_at,
             );
-            return;
-        }
-        // b74（AGENTS B.4）：ACME 是外部依赖且本函数有 4 条提前出口，手写计数必漏 ⇒ RAII 守卫
-        let mut outbound = crate::observability::metrics::OutboundGuard::start("acme");
-        let mut req = client
-            .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("X-Stepby-Event", event)
-            .body(bytes.clone());
-        if let Some(secret) = secret.as_deref().filter(|s| !s.is_empty()) {
-            req = req.header("X-Stepby-Signature", format!("sha256={}", sign(secret, &bytes)));
-        }
-        let sent_ok = match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!(event, host = %host, tenant_id, "ACME 证书需求已推送");
-                true
-            }
-            Ok(resp) => {
-                tracing::warn!(
+            let bytes = match serde_json::to_vec(&body) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ACME 证书需求载荷序列化失败（跳过本次推送）");
+                    return;
+                }
+            };
+            let client = match reqwest::Client::builder().timeout(timeout).build() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ACME 推送 HTTP 客户端构建失败");
+                    return;
+                }
+            };
+            // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
+            if !crate::common::breaker::try_acquire(&url) {
+                // 本地闸门挡下 ⇒ 没有出网，按 `rejected` 记（与 `ai/handler` 闸满拒绝同口径）
+                crate::observability::metrics::MetricsRegistry::global()
+                    .record_outbound("acme", "rejected", 0.0);
+                tracing::debug!(
                     event,
-                    host = %host,
-                    status = %resp.status(),
-                    "ACME 证书需求推送被拒（接收端非 2xx；业务不受影响）"
+                    host = %crate::common::breaker::host_of(&url),
+                    "ACME 证书需求推送已被出站熔断跳过"
                 );
-                false
+                return;
             }
-            Err(e) => {
-                tracing::warn!(
-                    event,
-                    host = %host,
-                    error = %e,
-                    "ACME 证书需求推送失败（业务不受影响；可用 deploy/README §7.1 的全量重推脚本对齐）"
+            // b74（AGENTS B.4）：ACME 是外部依赖且本函数有 4 条提前出口，手写计数必漏 ⇒ RAII 守卫
+            let mut outbound = crate::observability::metrics::OutboundGuard::start("acme");
+            let mut req = client
+                .post(&url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header("X-Stepby-Event", event)
+                .body(bytes.clone());
+            if let Some(secret) = secret.as_deref().filter(|s| !s.is_empty()) {
+                req = req.header(
+                    "X-Stepby-Signature",
+                    format!("sha256={}", sign(secret, &bytes)),
                 );
-                false
             }
-        };
-        if sent_ok {
-            outbound.succeeded();
-        }
-        crate::common::breaker::record(&url, sent_ok);
-    });
+            let sent_ok = match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!(event, host = %host, tenant_id, "ACME 证书需求已推送");
+                    true
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        event,
+                        host = %host,
+                        status = %resp.status(),
+                        "ACME 证书需求推送被拒（接收端非 2xx；业务不受影响）"
+                    );
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event,
+                        host = %host,
+                        error = %e,
+                        "ACME 证书需求推送失败（业务不受影响；可用 deploy/README §7.1 的全量重推脚本对齐）"
+                    );
+                    false
+                }
+            };
+            if sent_ok {
+                outbound.succeeded();
+            }
+            crate::common::breaker::record(&url, sent_ok);
+        },
+    );
 }
 
 #[cfg(test)]

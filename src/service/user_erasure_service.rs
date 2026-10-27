@@ -29,7 +29,10 @@
 
 use std::sync::Arc;
 
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    Set, TransactionTrait,
+};
 use serde::Serialize;
 use ts_rs::TS;
 use utoipa::ToSchema;
@@ -325,7 +328,14 @@ impl UserErasureService {
                 ServiceError::internal(&crate::tr!("error.user.erasure_revoke_failed"))
             })?;
 
-        // ② 字段置换（只改 ERASURE_FIELDS；释放全局唯一登录键，不可再登录）
+        // ②+④ 字段置换与 PAT 吊销同事务（b102）：原实现两次独立提交，用户行匿名化成功而
+        // PAT 更新失败时仍返回成功报告，匿名化用户的 PAT 继续可用（越权面）。两者同在
+        // 一个 DB 上，没有任何理由分开提交；SSO 吊销（外部共享态）留在事务之后。
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
         let now = crate::common::datetime::now_naive();
         let mut am: SysUserActiveModel = target.clone().into();
         am.user_name = Set(Self::anonymized_user_name(user_id));
@@ -341,39 +351,30 @@ impl UserErasureService {
         am.del_flag = Set(Some("2".to_string()));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
-        self.user_repo.update(am).await?;
+        am.update(&txn).await?;
+
+        // 立即吊销该用户全部 PAT（status '0' → '1'）。与计数同一口径：并列 tenant_id 过滤
+        // （纵深防御，防"未来 user_id 语义变化"时放大撤销面）。
+        let pat_revoked = SysPat::update_many()
+            .col_expr(PatColumn::Status, sea_orm::sea_query::Expr::value("1"))
+            .filter(PatColumn::UserId.eq(user_id))
+            .filter(PatColumn::TenantId.eq(target.tenant_id))
+            .filter(PatColumn::Status.eq("0"))
+            .exec(&txn)
+            .await?
+            .rows_affected;
+        txn.commit()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("提交事务失败: {e}")))?;
+        if pat_revoked > 0 {
+            tracing::info!(user_id, pat_revoked, "匿名化：PAT 已吊销");
+        }
 
         // ③ 吊销该用户全部 SSO access/refresh token 及其在线会话
         //    （原 sso_service::revoke_user_sso_tokens 语义已收敛为 store.revoke_all_for_user；
         //    best-effort 与原函数一致：失败仅记日志，DB 已匿名化 + pwd_ver 已失效当期会话）
         if let Err(e) = self.store.revoke_all_for_user(&user_id.to_string()).await {
             tracing::error!(user_id, error = %e, "匿名化：SSO 令牌全量吊销失败");
-        }
-
-        // ④ 立即吊销该用户全部 PAT（status '0' → '1'）；best-effort，失败仅告警。
-        //    次选时 DB 已匿名化、会话已失效，PAT 残留仅剩"令牌仍可用"的越权面，
-        //    故此处记录 error 便于人工介入，不阻断主流程。
-        match SysPat::update_many()
-            .col_expr(PatColumn::Status, sea_orm::sea_query::Expr::value("1"))
-            .filter(PatColumn::UserId.eq(user_id))
-            // 与计数同一口径：并列 tenant_id 过滤（纵深防御，防"未来 user_id 语义变化"时放大撤销面）
-            .filter(PatColumn::TenantId.eq(target.tenant_id))
-            .filter(PatColumn::Status.eq("0"))
-            .exec(self.db())
-            .await
-        {
-            Ok(res) => {
-                if res.rows_affected > 0 {
-                    tracing::info!(
-                        user_id,
-                        pat_revoked = res.rows_affected,
-                        "匿名化：PAT 已吊销"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!(user_id, error = %e, "匿名化：PAT 吊销失败（需人工介入）")
-            }
         }
 
         tracing::warn!(

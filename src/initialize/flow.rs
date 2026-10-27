@@ -197,18 +197,27 @@ pub(crate) async fn ensure_platform_dept_leaders(db: &DatabaseConnection) -> any
     Ok(res.rows_affected())
 }
 
+/// flow 模块的**非唯一**性能索引（幂等确保）。
+///
+/// 唯一索引**不得**列在这里：业务键唯一性由租户作用域索引 `uk_flow_task_tenant_biz`
+/// 承载（迁移 `m20260925_000005_tenant_unique_scope` + `ensure_tenant_unique_scope`
+/// 兜底），而旧全局唯一索引 `uk_flow_task_biz` 在每次启动的 3.5g 段会被**删掉**。
+/// 本段排在 3.5g 之前，此前把旧唯一索引也列在这里 ⇒ **每次启动先整表重建、再被删除**：
+/// b102 实测 `sys_flow_task` 涨大后这条 `CREATE UNIQUE INDEX` 超过 sqlx 慢语句阈值
+/// （日志 `19:26:18.789899Z slow statement … CREATE UNIQUE INDEX uk_flow_task_biz`），
+/// 生产大表上会是分钟级的启动期无用功，且期间多出一条本不该存在的全局唯一约束。
+pub(crate) const FLOW_INDEXES: &[&str] = &[
+    "CREATE INDEX idx_flow_task_assignee ON sys_flow_task (assignee_id, status)",
+    "CREATE INDEX idx_flow_task_due ON sys_flow_task (status, due_at)",
+    "CREATE INDEX idx_flow_log_biz ON sys_flow_log (biz_type, biz_id, round_no)",
+    // W-12：已办视图（operator_id + acted_at）覆盖索引，避免全表扫描
+    "CREATE INDEX idx_flow_log_operator ON sys_flow_log (operator_id, acted_at)",
+    "CREATE INDEX idx_flow_doc_applicant ON flow_demo_doc (applicant_id, status)",
+];
+
 /// 幂等建 flow 索引（三方言统一经 `migration::ensure_index_ddl`，见 R-11/R-12 注释）
 pub(crate) async fn ensure_flow_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {
-    let indexes = [
-        "CREATE UNIQUE INDEX uk_flow_task_biz ON sys_flow_task (biz_type, biz_id, round_no, node_seq, assignee_id)",
-        "CREATE INDEX idx_flow_task_assignee ON sys_flow_task (assignee_id, status)",
-        "CREATE INDEX idx_flow_task_due ON sys_flow_task (status, due_at)",
-        "CREATE INDEX idx_flow_log_biz ON sys_flow_log (biz_type, biz_id, round_no)",
-        // W-12：已办视图（operator_id + acted_at）覆盖索引，避免全表扫描
-        "CREATE INDEX idx_flow_log_operator ON sys_flow_log (operator_id, acted_at)",
-        "CREATE INDEX idx_flow_doc_applicant ON flow_demo_doc (applicant_id, status)",
-    ];
-    for stmt in indexes {
+    for stmt in FLOW_INDEXES.iter().copied() {
         // 真失败（表缺失/列缺失/权限）只告警不阻断启动，但必须可见——旧的 debug 级
         // "可能已存在"容错会把这类错误一起吞掉（批七十七 R-11）
         if let Err(e) = migration::ensure_index_ddl(db, stmt).await {

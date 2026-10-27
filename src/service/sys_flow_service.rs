@@ -1581,20 +1581,20 @@ impl SysFlowService {
                 "error.flow.biz_type_unregistered"
             )));
         }
-        let affected = self
-            .task_repo()
-            .cancel_pending_by_biz(&task.biz_type, task.biz_id, task.round_no)
-            .await?;
-        if affected == 0 {
-            return Err(ServiceError::bad_request(&crate::tr!(
-                "error.flow.task_not_pending"
-            )));
-        }
         let now = crate::common::datetime::now_naive();
-        self.write_log(
-            &task.biz_type,
-            task.biz_id,
-            task.round_no,
+        // b102：批量取消与流水必须同事务——原实现两步独立提交，流水写失败时
+        // 待办已全部 cancelled 而审批凭证缺失（撤回成了无审计的事实）。
+        let task_repo = self.task_repo();
+        let log_repo = self.log_repo();
+        let task_biz_type = task.biz_type.clone();
+        let task_biz_id = task.biz_id;
+        let task_round_no = task.round_no;
+        let task_tenant_id = task.tenant_id;
+        let log_am = flow_log_model(
+            task_tenant_id,
+            &task_biz_type,
+            task_biz_id,
+            task_round_no,
             None,
             "withdraw",
             Some("pending"),
@@ -1603,9 +1603,35 @@ impl SysFlowService {
             None,
             comment,
             now,
-            task.tenant_id,
-        )
-        .await?;
+        );
+        self.db
+            .transaction::<_, (), ServiceError>(|txn| {
+                let task_repo = task_repo.clone();
+                let log_repo = log_repo.clone();
+                let task_biz_type = task_biz_type.clone();
+                let log_am = log_am.clone();
+                Box::pin(async move {
+                    let affected = task_repo
+                        .cancel_pending_by_biz_conn(txn, &task_biz_type, task_biz_id, task_round_no)
+                        .await
+                        .map_err(db_to_svc)?;
+                    if affected == 0 {
+                        return Err(ServiceError::bad_request(&crate::tr!(
+                            "error.flow.task_not_pending"
+                        )));
+                    }
+                    log_repo
+                        .base()
+                        .insert_conn(txn, log_am)
+                        .await
+                        .map_err(db_to_svc)?;
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(tx_to_svc)?;
+        // 投影是派生列（事实源 = task 行），W-9 巡检可自愈；保留在事务外，
+        // 与审批主链的既有口径一致（不让派生写入放大事务持锁时间）。
         self.sync_projection(
             &task.biz_type,
             task.biz_id,
@@ -1656,17 +1682,39 @@ impl SysFlowService {
             )));
         }
 
-        let affected = self
-            .task_repo()
-            .transfer_if_pending(task_id, to_user_id)
+        let now = crate::common::datetime::now_naive();
+        // b102：改派与流水同事务（原实现改派成功而流水失败 ⇒ 换了持有人但查不到是谁改的）
+        let transferred = self
+            .transfer_pending_atomic(&task, to_user_id, Some(operator_id), comment, now)
             .await?;
-        if affected == 0 {
+        if !transferred {
             return Err(ServiceError::bad_request(&crate::tr!(
                 "error.flow.task_not_pending"
             )));
         }
-        let now = crate::common::datetime::now_naive();
-        self.write_log(
+        Ok(FlowActOutcome {
+            task: self.task_by_id(task_id).await?,
+            notify_assignees: vec![to_user_id],
+            notify_finished: None,
+        })
+    }
+
+    /// 改派 + 流水单事务（人为转办与离岗自动转办共用）。
+    ///
+    /// 返回 `false` = 条件更新 0 行（并发下已被处理），调用方按幂等跳过。
+    async fn transfer_pending_atomic(
+        &self,
+        task: &sys_flow_task::Model,
+        to_user_id: i64,
+        operator_id: Option<i64>,
+        comment: Option<&str>,
+        now: NaiveDateTime,
+    ) -> Result<bool, ServiceError> {
+        let task_repo = self.task_repo();
+        let log_repo = self.log_repo();
+        let task_id = task.task_id;
+        let log_am = flow_log_model(
+            task.tenant_id,
             &task.biz_type,
             task.biz_id,
             task.round_no,
@@ -1674,18 +1722,34 @@ impl SysFlowService {
             "transfer",
             Some("pending"),
             Some("pending"),
-            Some(operator_id),
+            operator_id,
             Some(to_user_id),
             comment,
             now,
-            task.tenant_id,
-        )
-        .await?;
-        Ok(FlowActOutcome {
-            task: self.task_by_id(task_id).await?,
-            notify_assignees: vec![to_user_id],
-            notify_finished: None,
-        })
+        );
+        self.db
+            .transaction::<_, bool, ServiceError>(|txn| {
+                let task_repo = task_repo.clone();
+                let log_repo = log_repo.clone();
+                let log_am = log_am.clone();
+                Box::pin(async move {
+                    let affected = task_repo
+                        .transfer_if_pending_conn(txn, task_id, to_user_id)
+                        .await
+                        .map_err(db_to_svc)?;
+                    if affected == 0 {
+                        return Ok(false);
+                    }
+                    log_repo
+                        .base()
+                        .insert_conn(txn, log_am)
+                        .await
+                        .map_err(db_to_svc)?;
+                    Ok(true)
+                })
+            })
+            .await
+            .map_err(tx_to_svc)
     }
 
     // ---------- 加签（W-3 / 方案 §7.6） ----------
@@ -2378,31 +2442,22 @@ impl SysFlowService {
             let target = self
                 .resolve_reassign_target(user_id, task.applicant_id)
                 .await?;
-            let affected = self
-                .task_repo()
-                .transfer_if_pending(task.task_id, target)
+            let now = crate::common::datetime::now_naive();
+            // b102：改派与流水同事务；`false` = 并发下已被处理（撤回/审批/他人转办），
+            // 跳过以保持幂等，不产生重复流水。
+            let transferred = self
+                .transfer_pending_atomic(
+                    &task,
+                    target,
+                    // 系统动作：无操作者（离岗转办由停用/删除用户触发，非人为审批动作）
+                    None,
+                    Some("用户离岗自动转办"),
+                    now,
+                )
                 .await?;
-            if affected == 0 {
-                // 并发下该行已被处理（撤回/审批/他人转办），跳过以保持幂等
+            if !transferred {
                 continue;
             }
-            let now = crate::common::datetime::now_naive();
-            self.write_log(
-                &task.biz_type,
-                task.biz_id,
-                task.round_no,
-                Some(task.node_seq),
-                "transfer",
-                Some("pending"),
-                Some("pending"),
-                // 系统动作：无操作者（离岗转办由停用/删除用户触发，非人为审批动作）
-                None,
-                Some(target),
-                Some("用户离岗自动转办"),
-                now,
-                task.tenant_id,
-            )
-            .await?;
             done.push(FlowReassignItem {
                 task_id: task.task_id,
                 to_user_id: target,
@@ -2801,22 +2856,20 @@ impl SysFlowService {
         now: NaiveDateTime,
         tenant_tid: i64,
     ) -> Result<sys_flow_log::Model, ServiceError> {
-        let am = sys_flow_log::ActiveModel {
-            // 运行期产物：流水归属上游单据/任务的租户
-            tenant_id: Set(tenant_tid),
-            biz_type: Set(biz_type.to_string()),
-            biz_id: Set(biz_id),
-            round_no: Set(round_no),
-            node_seq: Set(node_seq),
-            action: Set(action.to_string()),
-            from_status: Set(from_status.map(|s| s.to_string())),
-            to_status: Set(to_status.map(|s| s.to_string())),
-            operator_id: Set(operator_id),
-            to_user_id: Set(to_user_id),
-            comment: Set(comment.map(|c| c.to_string())),
-            acted_at: Set(Some(now)),
-            ..Default::default()
-        };
+        let am = flow_log_model(
+            tenant_tid,
+            biz_type,
+            biz_id,
+            round_no,
+            node_seq,
+            action,
+            from_status,
+            to_status,
+            operator_id,
+            to_user_id,
+            comment,
+            now,
+        );
         self.log_repo()
             .insert(am)
             .await
@@ -2933,6 +2986,40 @@ fn ensure_action_allowed(actions_json: Option<&str>, action: &str) -> Result<(),
 }
 
 /// DbErr → ServiceError（事务闭包内统一映射）
+/// 构造流水 ActiveModel（自由函数：事务闭包是 `'static`，不能借用 `&self`）
+#[allow(clippy::too_many_arguments)]
+pub(super) fn flow_log_model(
+    tenant_tid: i64,
+    biz_type: &str,
+    biz_id: i64,
+    round_no: i32,
+    node_seq: Option<i32>,
+    action: &str,
+    from_status: Option<&str>,
+    to_status: Option<&str>,
+    operator_id: Option<i64>,
+    to_user_id: Option<i64>,
+    comment: Option<&str>,
+    now: NaiveDateTime,
+) -> sys_flow_log::ActiveModel {
+    sys_flow_log::ActiveModel {
+        // 运行期产物：流水归属上游单据/任务的租户
+        tenant_id: Set(tenant_tid),
+        biz_type: Set(biz_type.to_string()),
+        biz_id: Set(biz_id),
+        round_no: Set(round_no),
+        node_seq: Set(node_seq),
+        action: Set(action.to_string()),
+        from_status: Set(from_status.map(|s| s.to_string())),
+        to_status: Set(to_status.map(|s| s.to_string())),
+        operator_id: Set(operator_id),
+        to_user_id: Set(to_user_id),
+        comment: Set(comment.map(|c| c.to_string())),
+        acted_at: Set(Some(now)),
+        ..Default::default()
+    }
+}
+
 pub(super) fn db_to_svc(e: DbErr) -> ServiceError {
     ServiceError::from(e)
 }

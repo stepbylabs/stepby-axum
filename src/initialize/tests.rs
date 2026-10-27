@@ -2641,3 +2641,47 @@ mod dead_config_key_retire_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod flow_index_scope_tests {
+    //! 形状锁（b102）：flow 兜底建索引段**不得**再创建被租户作用域取代的旧全局唯一索引。
+    //!
+    //! 立案事实：`uk_flow_task_biz` 已被 `uk_flow_task_tenant_biz` 取代
+    //! （迁移 `m20260925_000005_tenant_unique_scope` + `ensure_tenant_unique_scope`
+    //! 每次启动兜底删除旧索引），而 `ensure_flow_indexes`（3.5b）排在 3.5g **之前**
+    //! ⇒ 旧实现每轮启动先整表重建该唯一索引、再在 3.5g 删掉。`sys_flow_task` 涨大后
+    //! 这条 DDL 越过 sqlx 慢语句阈值被记成 WARN（`19:26:18.789899Z slow statement …
+    //! CREATE UNIQUE INDEX uk_flow_task_biz`），生产大表上就是启动期分钟级无用功，
+    //! 期间还多出一条本不该存在的全局唯一约束（跨租户同业务键会互相顶撞）。
+    use super::*;
+
+    #[test]
+    fn flow_fallback_ddls_must_not_resurrect_the_superseded_global_unique() {
+        assert!(
+            !FLOW_INDEXES.iter().any(|s| s.contains("uk_flow_task_biz")),
+            "ensure_flow_indexes 不得再创建 uk_flow_task_biz：它已被 uk_flow_task_tenant_biz \
+             取代，且 3.5g 每次启动都会删掉它（先建后删 = 每轮启动整表重建索引）"
+        );
+        // 反向：性能索引一条都不能少，否则"删空整段"也能让上面那条变绿
+        for name in [
+            "idx_flow_task_assignee",
+            "idx_flow_task_due",
+            "idx_flow_log_biz",
+            "idx_flow_log_operator",
+            "idx_flow_doc_applicant",
+        ] {
+            assert_eq!(
+                FLOW_INDEXES.iter().filter(|s| s.contains(name)).count(),
+                1,
+                "flow 兜底索引清单缺 {name}（或重复）：{FLOW_INDEXES:?}"
+            );
+        }
+        // 唯一的租户作用域索引必须仍在 3.5g 的兜底表里——两边同时被删才是真缺口
+        let tenant_scope_src = include_str!("tenant.rs");
+        assert!(
+            tenant_scope_src.contains("\"uk_flow_task_tenant_biz\"")
+                && tenant_scope_src.contains("\"uk_flow_task_biz\""),
+            "ensure_tenant_unique_scope 必须同时知道旧索引（删）与新索引（建）"
+        );
+    }
+}

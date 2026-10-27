@@ -174,6 +174,18 @@ impl SysFlowTaskRepository {
         task_id: i64,
         new_assignee_id: i64,
     ) -> Result<u64, DbErr> {
+        self.transfer_if_pending_conn(self.base.db(), task_id, new_assignee_id)
+            .await
+    }
+
+    /// 转办（指定连接版）：b102 起供服务层在**同一事务**内与流水写入一起提交，
+    /// 避免"改派成功、审计缺失"的半应用。谓词与 [`Self::transfer_if_pending`] 共用本实现。
+    pub async fn transfer_if_pending_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        task_id: i64,
+        new_assignee_id: i64,
+    ) -> Result<u64, DbErr> {
         let res = SysFlowTask::update_many()
             .col_expr(Column::AssigneeId, Expr::value(new_assignee_id))
             .col_expr(Column::Status, Expr::value("pending"))
@@ -185,7 +197,7 @@ impl SysFlowTaskRepository {
             )
             .filter(Column::TaskId.eq(task_id))
             .filter(Column::Status.eq("pending"))
-            .exec(self.base.db())
+            .exec(conn)
             .await?;
         Ok(res.rows_affected)
     }
@@ -237,6 +249,19 @@ impl SysFlowTaskRepository {
         biz_id: i64,
         round_no: i32,
     ) -> Result<u64, DbErr> {
+        self.cancel_pending_by_biz_conn(self.base.db(), biz_type, biz_id, round_no)
+            .await
+    }
+
+    /// 批量取消（指定连接版）：b102 起供服务层在**同一事务**内与流水写入一起提交。
+    /// 谓词与 [`Self::cancel_pending_by_biz`] 共用本实现（两条路径不得各写一份）。
+    pub async fn cancel_pending_by_biz_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        biz_type: &str,
+        biz_id: i64,
+        round_no: i32,
+    ) -> Result<u64, DbErr> {
         let res = SysFlowTask::update_many()
             .col_expr(Column::Status, Expr::value("cancelled"))
             .col_expr(Column::ActedAt, Expr::current_timestamp())
@@ -244,7 +269,7 @@ impl SysFlowTaskRepository {
             .filter(Column::BizId.eq(biz_id))
             .filter(Column::RoundNo.eq(round_no))
             .filter(Column::Status.eq("pending"))
-            .exec(self.base.db())
+            .exec(conn)
             .await?;
         Ok(res.rows_affected)
     }

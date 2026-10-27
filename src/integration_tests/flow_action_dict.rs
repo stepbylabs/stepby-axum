@@ -207,29 +207,58 @@ fn quoted_only(s: &str) -> Option<String> {
     inner.map(|v| v.to_string())
 }
 
+/// 向后找 `hit` 之前最近的函数定义名（用于识别转发站点）。
+///
+/// `write_log` 是统一写入口，其 `action` 形参由各调用点以字面量提供（那些点已在
+/// `write_log(` 这一路枚举）；它体内对 `flow_log_model` 的调用因此必然是变量实参，
+/// 不属于"运行期拼装动作值"。除此之外的任何非字面量实参都应让本锁显式失效。
+fn enclosing_fn_name(hay: &[char], hit: usize) -> Option<String> {
+    let window: String = hay[..hit].iter().collect();
+    let pos = window.rfind("fn ")?;
+    // 在 String 自身上切片：`hay` 是 char 序列，其下标与 String 的字节偏移不同口径。
+    let name: String = window[pos + 3..]
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
 /// 从 `sys_flow_service.rs` 源码穷举引擎可写入的 action 字面量集合。
 ///
-/// 返回 `(字面量集合, 非字面量第 5 实参集合)`。后者必须为空——若哪天动作值改成
+/// 返回 `(字面量集合, 非字面量实参集合)`。后者必须为空——若哪天动作值改成
 /// 运行期拼装的变量，静态穷举就不再是全量真值，锁必须显式失效而不是静默变虚锁。
 fn engine_actions(service_src: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     let chars: Vec<char> = service_src.chars().collect();
     let mut lits = BTreeSet::new();
     let mut non_lits = BTreeSet::new();
 
-    for hit in find_all(&chars, "write_log(") {
-        if is_definition(&chars, hit) {
-            continue;
-        }
-        let open = hit + "write_log(".chars().count();
-        let (args, closed) = split_top_level_args(&chars, open);
-        if closed && args.len() >= 5 {
-            // write_log(biz_type, biz_id, round_no, node_seq, action, …)
-            let a = args[4].trim().to_string();
+    // 两种写入口：`write_log(..., action, …)`（自有连接）与
+    // `flow_log_model(tenant, biz_type, biz_id, round, node_seq, action, …)`（事务内）。
+    // 两者共用同一套"必须是字面量"判据，否则新加的事务写点会绕过本锁。
+    for (needle, action_idx) in [("write_log(", 4usize), ("flow_log_model(", 5usize)] {
+        for hit in find_all(&chars, needle) {
+            if is_definition(&chars, hit) {
+                continue;
+            }
+            let open = hit + needle.chars().count();
+            let (args, closed) = split_top_level_args(&chars, open);
+            if !closed || args.len() <= action_idx {
+                continue;
+            }
+            let a = args[action_idx].trim().to_string();
             match quoted_only(&a) {
                 Some(v) => {
                     lits.insert(v);
                 }
                 None => {
+                    // write_log 体内的转发：动作值由调用点（已枚举）给出，不算拼装。
+                    if needle == "flow_log_model("
+                        && a == "action"
+                        && enclosing_fn_name(&chars, hit).as_deref() == Some("write_log")
+                    {
+                        continue;
+                    }
                     non_lits.insert(a.replace('\n', " "));
                 }
             }
@@ -593,5 +622,47 @@ fn test_flow_action_lock_is_not_vacuous() {
         label_drift(&actions7, &dict7, &ui7).len(),
         0,
         "对照组（两处逐字一致）被误判 ⇒ 判据在真库上会恒红"
+    );
+
+    // ⑧ 事务写入口 `flow_log_model(…, action, …)` 同样是引擎动作来源（b102：
+    //    撤回/改派改走事务内写流水后，只认 `write_log(` 的旧抽取器会把引擎全集
+    //    少算两枚）。三支各自独立：字面量必须抽到、`write_log` 体内的转发必须
+    //    豁免、**其它函数里的同名变量不得跟着豁免**（豁免一旦放宽成"叫 action
+    //    的实参一律放过"，新增的转发层就会静默绕过本锁）。实参名刻意取不同值，
+    //    否则 BTreeSet 会把两条同名登记去重，三支在结果上无法区分。
+    let synth8 = r#"
+        let log_am = flow_log_model(task.tenant_id, &t.biz_type, t.biz_id, t.round_no, None, "withdraw", None, now);
+        async fn write_log(&self, action: &str) {
+            let am = flow_log_model(tid, biz_type, biz_id, round_no, node_seq, action, None, now);
+        }
+        fn other_helper(&self, action_var: &str) {
+            let am = flow_log_model(tid, biz_type, biz_id, round_no, node_seq, action_var, None, now);
+        }
+        pub(super) fn flow_log_model(tenant_tid: i64, biz_type: &str, biz_id: i64,
+                                     round_no: i32, node_seq: Option<i32>, action: &str) {}
+    "#;
+    let (lits8, non_lits8) = engine_actions(synth8);
+    assert!(
+        lits8.contains("withdraw"),
+        "`flow_log_model` 的字面量动作没被抽到：{lits8:?}（撤回/改派会被漏判）"
+    );
+    assert!(
+        !lits8.contains("biz_type") && !lits8.contains("action"),
+        "函数定义行被当调用解析：抽到了形参名 {lits8:?}"
+    );
+    assert_eq!(
+        non_lits8.iter().cloned().collect::<Vec<_>>(),
+        vec!["action_var".to_string()],
+        "`write_log` 体内的转发必须豁免、其它函数里的变量必须登记：{non_lits8:?}"
+    );
+    // ⑧b 豁免以"最近的外层函数名"为条件，不得退化成"实参叫 action 就放过"
+    let synth8b = r#"fn other_helper(&self, action: &str) {
+        let am = flow_log_model(tid, biz_type, biz_id, round_no, node_seq, action, None, now);
+    }"#;
+    let (_, non_lits8b) = engine_actions(synth8b);
+    assert_eq!(
+        non_lits8b.iter().cloned().collect::<Vec<_>>(),
+        vec!["action".to_string()],
+        "`write_log` 之外的同名变量被一并豁免 ⇒ 新增转发层可绕过本锁：{non_lits8b:?}"
     );
 }

@@ -205,12 +205,30 @@ mod fail_closed_mod {
         ];
         let mut violations = Vec::new();
         let mut checked = 0usize;
+        // b102：采集面从字面量 `tokio::spawn(` 扩到**运行时句柄别名**。立项取证：
+        // acme 推送 / 领域事件出站 / ClusterLock 的 Drop 兜底三处写的是
+        // `handle.spawn(` 与 `rt.spawn(`，本锁一条都看不见（"有锁没采集面"）。
+        // 只认具名接收者（rt/handle/runtime/tokio_handle）——生产码里的
+        // `Command::spawn()` / `std::thread::Builder::spawn()` 不是任务派生，不得误伤。
+        const SPAWN_NEEDLES: &[&str] = &[
+            "tokio::spawn(",
+            "rt.spawn(",
+            "handle.spawn(",
+            "runtime.spawn(",
+            "tokio_handle.spawn(",
+        ];
         for rel in src_rs() {
             if rel.contains("integration_tests") || rel == "src/handler/fail_closed_guard.rs" {
                 continue;
             }
             let prod = prod_src(&rel);
-            for (idx, _) in prod.match_indices("tokio::spawn(") {
+            let mut hits: Vec<usize> = Vec::new();
+            for needle in SPAWN_NEEDLES {
+                hits.extend(prod.match_indices(needle).map(|(i, _)| i));
+            }
+            hits.sort_unstable();
+            hits.dedup();
+            for idx in hits {
                 checked += 1;
                 let block = spawn_window(&prod, idx);
                 // 走 background helper 即视为两项齐备（超时与 panic 隔离都发生在 helper 内部，
@@ -235,15 +253,15 @@ mod fail_closed_mod {
             }
         }
         assert!(
-            checked >= 8,
-            "本锁的扫描面本身要有效：实测只见证到 {checked} 处 tokio::spawn（b72 基线 ≥8），\
-             说明文件遍历或 prod_src 口径出了问题，而非代码变干净了"
+            checked >= 11,
+            "本锁的扫描面本身要有效：实测只见证到 {checked} 处任务派发（b72 基线 ≥8；\
+             b102 扩面后基线 ≥11），说明文件遍历或 prod_src 口径出了问题，而非代码变干净了"
         );
         assert!(
             violations.is_empty(),
-            "以下生产码 tokio::spawn 未同时满足「panic 隔离 + 超时」，也不在豁免表：{violations:?}\n\
+            "以下生产码任务派发（tokio::spawn 或运行时句柄别名）未同时满足「panic 隔离 + 超时」，也不在豁免表：{violations:?}\n\
              （AGENTS B.6：异步任务必须「超时 + 重试上限 + 失败审计」；请改用 \
-             common::background::spawn_tracked，或在 EXEMPT 内登记取证理由）"
+             common::background::spawn_tracked / run_tracked，或在 EXEMPT 内登记取证理由）"
         );
     }
 }

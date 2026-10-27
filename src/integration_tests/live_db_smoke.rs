@@ -39,8 +39,11 @@ use sea_orm::{ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, St
 
 /// 兜底段声明并必须真实存在的索引：(索引名, 表名)。
 /// 只断言「函数返回 Ok」会放过「静默跳过」，所以逐个回查数据字典。
-const EXPECTED_INDEXES: [(&str, &str); 19] = [
-    ("uk_flow_task_biz", "sys_flow_task"),
+///
+/// ⚠ `uk_flow_task_biz` **刻意不在表里**：它已被租户作用域唯一索引
+/// `uk_flow_task_tenant_biz` 取代（迁移 m20260925_000005 + 3.5g 兜底每次启动删除它），
+/// 兜底建索引段再声明它等于"每轮启动整表重建后立刻删掉"（b102 实测慢语句 WARN）。
+const EXPECTED_INDEXES: [(&str, &str); 18] = [
     ("idx_flow_task_assignee", "sys_flow_task"),
     ("idx_flow_task_due", "sys_flow_task"),
     ("idx_flow_log_biz", "sys_flow_log"),

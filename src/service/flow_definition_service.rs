@@ -312,18 +312,27 @@ impl FlowDefinitionService {
         })?;
         let now = crate::common::datetime::now_naive();
         let new_version = m.version + 1;
+        // b102：旧版本下线与新版本插入必须同事务——原实现两步各自提交，插入失败
+        // （如唯一索引 (tenant_id, flow_code, version) 冲突）会留下"无 latest"的定义
+        // 仍在服务（新建实例取不到最新版）。唯一索引在并发发布时提供第二个序列化点：
+        // 同版本号的两个插入只能成一条，另一条整体回滚。
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("开启事务失败: {e}")))?;
         // 同 code 历史 is_latest 全部归 '0'
         if let Some(old) = FlowDefEntity::find()
             .filter(crate::entity::flow_definition::Column::TenantId.eq(m.tenant_id))
             .filter(crate::entity::flow_definition::Column::FlowCode.eq(m.flow_code.as_str()))
             .filter(crate::entity::flow_definition::Column::IsLatest.eq("1"))
-            .one(&self.db)
+            .one(&txn)
             .await?
         {
             let mut old_am: FlowDefActiveModel = old.into();
             old_am.is_latest = Set("0".to_string());
             old_am.update_time = Set(Some(now));
-            old_am.update(&self.db).await?;
+            old_am.update(&txn).await?;
         }
         // 新版本行（从当前行复制图）
         let am = FlowDefActiveModel {
@@ -342,9 +351,10 @@ impl FlowDefinitionService {
             del_flag: Set(Some("0".to_string())),
             ..Default::default()
         };
-        let inserted = FlowDefEntity::insert(am)
-            .exec_with_returning(&self.db)
-            .await?;
+        let inserted = FlowDefEntity::insert(am).exec_with_returning(&txn).await?;
+        txn.commit()
+            .await
+            .map_err(|e| ServiceError::internal(&format!("提交事务失败: {e}")))?;
         Ok(FlowDefPublishVo {
             flow_id: inserted.flow_id,
             version: inserted.version,
