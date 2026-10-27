@@ -165,13 +165,32 @@ impl SysWebHookLogRepository {
             .await
     }
 
-    /// 全量清空记录（tenant_scope=Some(t) 时仅清理该租户，None 为平台全量）
-    pub async fn delete_all(&self, tenant_scope: Option<i64>) -> Result<DeleteResult, DbErr> {
-        let mut q = SysWebHookLog::delete_many();
-        if let Some(tid) = tenant_scope {
-            q = q.filter(Column::TenantId.eq(tid));
-        }
-        q.exec(self.base.db()).await
+    /// 保留期清理 + 全量清空的**原子组合**：两条 DELETE 同一事务，任一失败整体回滚。
+    ///
+    /// 返回 `(过期行数, 清空行数)`——分两条语句只为让管理端区分"按保留期清理"与
+    /// "彻底清空"两个计数；旧实现各自独立提交，第二条失败时用户看到"清理失败"
+    /// 而过期行已被删掉（半应用）。
+    pub async fn clean_retention_and_all(
+        &self,
+        cutoff: chrono::NaiveDateTime,
+        tenant_scope: Option<i64>,
+    ) -> Result<(u64, u64), DbErr> {
+        // 闭包内不得捕获 `&self`：`transaction` 要求回调的 future 为 'static，
+        // 故两条 DELETE 抽成**不依赖 self** 的自由函数（谓词仍单一事实源）。
+        self.base
+            .db()
+            .transaction::<_, (u64, u64), DbErr>(|txn| {
+                Box::pin(async move {
+                    let expired = delete_older_than_conn(txn, cutoff, tenant_scope).await?;
+                    let all = delete_all_conn(txn, tenant_scope).await?;
+                    Ok((expired, all))
+                })
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(db_err) => db_err,
+                sea_orm::TransactionError::Connection(db_err) => db_err,
+            })
     }
 
     /// 按指定 hook_id 物理删除（删除回调配置时级联清理记录）
@@ -197,19 +216,6 @@ impl SysWebHookLogRepository {
             .exec(txn)
             .await?;
         Ok(res.rows_affected)
-    }
-
-    /// 删除早于指定时间的记录（审计保留期清理；tenant_scope=Some(t) 时仅清理该租户）
-    pub async fn delete_older_than(
-        &self,
-        cutoff: chrono::NaiveDateTime,
-        tenant_scope: Option<i64>,
-    ) -> Result<DeleteResult, DbErr> {
-        let mut q = SysWebHookLog::delete_many().filter(Column::CreateTime.lt(cutoff));
-        if let Some(tid) = tenant_scope {
-            q = q.filter(Column::TenantId.eq(tid));
-        }
-        q.exec(self.base.db()).await
     }
 
     /// 更新补写响应详情（投递完成后回填 status_code/response/error_msg/cost_ms）
@@ -242,4 +248,29 @@ impl SysWebHookLogRepository {
     pub async fn update(&self, model: ActiveModel) -> Result<Model, DbErr> {
         self.base.update(model).await
     }
+}
+
+/// 事务内删除早于 `cutoff` 的记录（自由函数：`transaction` 回调不得捕获 `&self`）。
+pub(crate) async fn delete_older_than_conn<C: ConnectionTrait>(
+    txn: &C,
+    cutoff: chrono::NaiveDateTime,
+    tenant_scope: Option<i64>,
+) -> Result<u64, DbErr> {
+    let mut q = SysWebHookLog::delete_many().filter(Column::CreateTime.lt(cutoff));
+    if let Some(tid) = tenant_scope {
+        q = q.filter(Column::TenantId.eq(tid));
+    }
+    Ok(q.exec(txn).await?.rows_affected)
+}
+
+/// 事务内全量清空记录（自由函数：`transaction` 回调不得捕获 `&self`）。
+pub(crate) async fn delete_all_conn<C: ConnectionTrait>(
+    txn: &C,
+    tenant_scope: Option<i64>,
+) -> Result<u64, DbErr> {
+    let mut q = SysWebHookLog::delete_many();
+    if let Some(tid) = tenant_scope {
+        q = q.filter(Column::TenantId.eq(tid));
+    }
+    Ok(q.exec(txn).await?.rows_affected)
 }

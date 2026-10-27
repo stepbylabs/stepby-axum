@@ -1631,19 +1631,12 @@ impl SysWebHookService {
         let scope = crate::common::tenant::tenant_scope(operator_tid);
         let cutoff =
             crate::common::datetime::now_naive() - chrono::Duration::days(LOG_RETENTION_DAYS);
-        let expired = self
-            .log_repo
-            .delete_older_than(cutoff, scope)
+        // 两条 DELETE 同事务：任一失败整体回滚（旧实现各自提交，第二条失败时
+        // 管理端看到"清理失败"而过期行已被删掉）
+        self.log_repo
+            .clean_retention_and_all(cutoff, scope)
             .await
-            .map(|r| r.rows_affected)
-            .map_err(ServiceError::from)?;
-        let all = self
-            .log_repo
-            .delete_all(scope)
-            .await
-            .map(|r| r.rows_affected)
-            .map_err(ServiceError::from)?;
-        Ok((expired, all))
+            .map_err(ServiceError::from)
     }
 
     /// 重试失败记录（按已保存的 payload 重新投递到原目标）

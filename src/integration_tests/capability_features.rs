@@ -27,7 +27,7 @@ use super::TestContext;
 use crate::common::features::FEATURE_OFF;
 use crate::entity::{sys_role_menu, sys_tenant, sys_tenant_package};
 use crate::service::sys_tenant_service::{
-    PackageFeaturesUpdateDto, SysTenantService, effective_features_from_package,
+    PackageFeaturesUpdateDto, SysTenantService, TenantStatusDto, effective_features_from_package,
 };
 
 const TID: i64 = 9050;
@@ -265,16 +265,20 @@ async fn test_convergence_revokes_ungrantable_even_without_menu_whitelist() {
         "前置：域名菜单已授予租户角色"
     );
 
-    let package = sys_tenant_package::Entity::find_by_id(PACKAGE_ID)
-        .one(db)
-        .await
-        .expect("查询套餐失败")
-        .expect("套餐应存在");
+    // 走**真实入口**（套餐能力位变更），而不是直接调收敛自由函数：
+    // 收敛已移入 `set_package_features` 的写事务内，本用例同时钉住那条接线。
     ctx.state
         .tenant_service
-        .converge_tenant_role_menus(TID, &package)
+        .set_package_features(
+            PackageFeaturesUpdateDto {
+                package_id: PACKAGE_ID,
+                features: Default::default(),
+            },
+            "it_cap_admin",
+            0,
+        )
         .await
-        .expect("收敛应成功");
+        .expect("清空套餐能力位应成功（同事务内完成授权收敛）");
 
     assert!(
         !has_menu(db, ROLE_ID, menu_id).await,
@@ -514,6 +518,183 @@ async fn test_standalone_mode_hides_all_tenant_surfaces() {
             status,
             axum::http::StatusCode::FORBIDDEN,
             "单机模式平台侧租户语义端点应 403（含超管）: {path}，实际 {status}"
+        );
+    }
+}
+
+/// ⑥ 停用租户 ⇒ PAT 与状态**同一事务**撤销；重新启用不得让旧令牌复活
+///
+/// 可证伪：把 `change_status` 的 PAT 吊销挪回事务外（或删掉），第一条
+/// `pat_status == "1"` 就变红；把"重新启用"写成顺带恢复 PAT，最后一条变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_change_status_revokes_pats_with_the_status_change() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    const TID_STATUS: i64 = 9051;
+    const PAT_ID: &str = "it-cap-status-pat";
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+
+    sys_tenant::ActiveModel {
+        tenant_id: Set(TID_STATUS),
+        tenant_code: Set("it_cap_status".to_string()),
+        tenant_name: Set("IT-CAP-STATUS".to_string()),
+        package_id: Set(None),
+        status: Set(Some("0".to_string())),
+        del_flag: Set(Some("0".to_string())),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("插入租户失败");
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        format!(
+            "INSERT INTO sys_pat (tenant_id, pat_id, user_id, name, token_hash, token_prefix, \
+             scopes, status, create_by, create_time, update_time) \
+             VALUES ({TID_STATUS}, '{PAT_ID}', 1, 'it_cap', '{hash}', 'ybt_it', '[\"openid\"]', \
+             '0', 'admin', datetime('now'), datetime('now'))",
+            hash = crate::utils::crypto::token_hash(PAT_ID),
+        ),
+    ))
+    .await
+    .expect("插入 PAT 失败");
+
+    let tenant_status = |tid: i64| async move {
+        sys_tenant::Entity::find_by_id(tid)
+            .one(db)
+            .await
+            .expect("查询租户失败")
+            .expect("租户应存在")
+            .status
+            .unwrap_or_default()
+    };
+    let pat_status = || async {
+        crate::entity::sys_pat::Entity::find_by_id(PAT_ID.to_string())
+            .one(db)
+            .await
+            .expect("查询 PAT 失败")
+            .expect("PAT 应存在")
+            .status
+    };
+
+    let svc = &ctx.state.tenant_service;
+    svc.change_status(
+        TenantStatusDto {
+            tenant_id: TID_STATUS,
+            status: "1".to_string(),
+        },
+        "it_cap_admin",
+        0,
+    )
+    .await
+    .expect("停用租户应成功");
+    assert_eq!(tenant_status(TID_STATUS).await, "1", "租户应落停用态");
+    assert_eq!(
+        pat_status().await,
+        "1",
+        "停用必须与状态变更同事务吊销该租户全部 PAT（否则重新启用后旧令牌复活）"
+    );
+
+    svc.change_status(
+        TenantStatusDto {
+            tenant_id: TID_STATUS,
+            status: "0".to_string(),
+        },
+        "it_cap_admin",
+        0,
+    )
+    .await
+    .expect("重新启用应成功");
+    assert_eq!(tenant_status(TID_STATUS).await, "0", "租户应落正常态");
+    assert_eq!(
+        pat_status().await,
+        "1",
+        "重新启用不得复活已吊销令牌（撤销是永久的，需要重新签发）"
+    );
+}
+
+/// ⑦ 套餐能力位变更 ⇒ 该套餐下**全部租户**的授权在同一事务内收敛
+///
+/// 可证伪：若 `set_package_features` 只收敛第一个租户（或漏掉循环），
+/// 第二个租户的域名菜单不会被回收 ⇒ 本用例第二条断言变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_set_package_features_converges_every_tenant_of_the_package() {
+    const PKG: i64 = 9251;
+    const TENANTS: [(i64, &str); 2] = [(9052, "it_cap_multi_a"), (9053, "it_cap_multi_b")];
+    const ROLES: [i64; 2] = [9262, 9263];
+
+    let ctx = TestContext::new().await;
+    let db = &ctx.state.db;
+    sys_tenant_package::ActiveModel {
+        package_id: Set(PKG),
+        package_name: Set(format!("IT-CAP-MULTI-{PKG}")),
+        menu_ids: Set(None),
+        features: Set(Some(r#"{"tenant.domain_self_service":"full"}"#.to_string())),
+        default_account_count: Set(Some(0)),
+        status: Set(Some("0".to_string())),
+        del_flag: Set(Some("0".to_string())),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("插入套餐失败");
+    for (i, (tid, code)) in TENANTS.iter().enumerate() {
+        sys_tenant::ActiveModel {
+            tenant_id: Set(*tid),
+            tenant_code: Set((*code).to_string()),
+            tenant_name: Set(format!("IT-CAP-{tid}")),
+            package_id: Set(Some(PKG)),
+            status: Set(Some("0".to_string())),
+            del_flag: Set(Some("0".to_string())),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("插入租户失败");
+        crate::entity::sys_role::ActiveModel {
+            role_id: Set(ROLES[i]),
+            role_name: Set(format!("it_cap_multi_role_{}", ROLES[i])),
+            role_key: Set(format!("it_cap_multi_key_{}", ROLES[i])),
+            role_sort: Set(10),
+            data_scope: Set(Some("1".to_string())),
+            status: Set("0".to_string()),
+            tenant_id: Set(*tid),
+            is_system: Set(false),
+            del_flag: Set(Some("0".to_string())),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("插入角色失败");
+        grant_menu(db, ROLES[i], domain_menu_id(db).await).await;
+    }
+
+    let menu_id = domain_menu_id(db).await;
+    for role_id in ROLES {
+        assert!(
+            has_menu(db, role_id, menu_id).await,
+            "前置：两个租户的角色都应持有域名菜单"
+        );
+    }
+
+    ctx.state
+        .tenant_service
+        .set_package_features(
+            PackageFeaturesUpdateDto {
+                package_id: PKG,
+                features: Default::default(),
+            },
+            "it_cap_admin",
+            0,
+        )
+        .await
+        .expect("清空套餐能力位应成功");
+
+    for role_id in ROLES {
+        assert!(
+            !has_menu(db, role_id, menu_id).await,
+            "套餐能力位关闭必须收敛该套餐下**每一个**租户的授权（role {role_id} 未被收敛）"
         );
     }
 }

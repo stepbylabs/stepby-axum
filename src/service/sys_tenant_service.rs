@@ -935,19 +935,43 @@ impl SysTenantService {
         });
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now_naive()));
-        SysTenantPackage::update(am).exec(self.db()).await?;
-
-        let updated = self.load_package(dto.package_id).await?;
-        let tenant_ids: Vec<i64> = SysTenant::find()
-            .select_only()
-            .column(TenantColumn::TenantId)
-            .filter(TenantColumn::PackageId.eq(dto.package_id))
-            .filter(TenantColumn::DelFlag.eq("0"))
-            .into_tuple::<i64>()
-            .all(self.db())
+        // 套餐行与"该套餐下全部租户的授权收敛"同一事务：逐个租户收敛时任何一次失败
+        // 都必须整体回滚（旧实现先提交套餐再循环收敛，失败后前几个租户已被收窄、
+        // 其余仍持越权菜单，管理端却只看到一条错误）。
+        let package_id = dto.package_id;
+        let (updated, removed_menus) = self
+            .db()
+            .transaction::<_, (crate::entity::sys_tenant_package::Model, u64), sea_orm::DbErr>(
+                |txn| {
+                    Box::pin(async move {
+                        SysTenantPackage::update(am).exec(txn).await?;
+                        let updated = SysTenantPackage::find()
+                            .filter(PkgColumn::PackageId.eq(package_id))
+                            .filter(PkgColumn::DelFlag.eq("0"))
+                            .one(txn)
+                            .await?
+                            .ok_or_else(|| {
+                                sea_orm::DbErr::RecordNotFound("sys_tenant_package".to_string())
+                            })?;
+                        let tenant_ids: Vec<i64> = SysTenant::find()
+                            .select_only()
+                            .column(TenantColumn::TenantId)
+                            .filter(TenantColumn::PackageId.eq(package_id))
+                            .filter(TenantColumn::DelFlag.eq("0"))
+                            .into_tuple::<i64>()
+                            .all(txn)
+                            .await?;
+                        let mut removed = 0u64;
+                        for tid in tenant_ids {
+                            removed += converge_tenant_role_menus_conn(txn, tid, &updated).await?;
+                        }
+                        Ok((updated, removed))
+                    })
+                },
+            )
             .await?;
-        for tid in tenant_ids {
-            self.converge_tenant_role_menus(tid, &updated).await?;
+        if removed_menus > 0 {
+            self.invalidate_all_perm_cache().await;
         }
 
         Ok(Self::build_package_features_vo(&updated))
@@ -1577,14 +1601,19 @@ impl SysTenantService {
             None => None,
         };
 
-        self.db()
-            .transaction::<_, (), sea_orm::DbErr>(|txn| {
+        // 套餐收敛与租户行改写同一事务：收敛失败时租户不得停在"套餐已改小、角色仍持旧菜单"
+        // 的半应用态（旧实现先提交再收敛，收敛报错后管理端看到的是"编辑失败"但套餐已变）。
+        let removed_menus = self
+            .db()
+            .transaction::<_, u64, sea_orm::DbErr>(|txn| {
                 let tenant_repo = tenant_repo.clone();
                 let dept_repo = dept_repo.clone();
                 let am = am;
                 let before_snapshot = before_snapshot.clone();
                 let operator = operator_owned.clone();
                 let dept_sync = dept_sync;
+                let new_package = new_package.clone();
+                let tid = dto.tenant_id;
                 Box::pin(async move {
                     let model = tenant_repo.base().update_conn(txn, am).await?;
                     // 审计合规域：UPDATE 变更留痕（同事务提交/回滚）
@@ -1612,16 +1641,21 @@ impl SysTenantService {
                         )
                         .await?;
                     }
-                    Ok(())
+                    // 套餐收敛（改小套餐后必须收敛该租户角色授权，否则残留越权菜单，
+                    // §27.6 生效点③）。审计口径不变：converge 为套餐变更从属动作，
+                    // sys_tenant UPDATE 留痕已含 packageId 变更，授权明细不再重复留痕。
+                    match new_package.as_ref() {
+                        Some(pkg) => converge_tenant_role_menus_conn(txn, tid, pkg).await,
+                        None => Ok(0),
+                    }
                 })
             })
             .await?;
 
-        // 套餐收敛：改小套餐后必须收敛该租户角色授权，否则残留越权菜单（§27.6 生效点③）
-        // （审计口径：converge 为套餐变更从属动作，sys_tenant UPDATE 留痕已含
-        //   packageId 变更，授权明细不再重复留痕）
-        if let Some(pkg) = new_package {
-            self.converge_tenant_role_menus(dto.tenant_id, &pkg).await?;
+        // 授权行被删 ⇒ `perm:user:*` 缓存必须在 TTL 之前失效，否则最多 5 分钟窗口内
+        // 用户仍持旧 perms。放在提交之后：回滚时授权未变，不应提前清缓存。
+        if removed_menus > 0 {
+            self.invalidate_all_perm_cache().await;
         }
 
         // 运行时键：到期时间变化立即影响已登录会话（宽限/超期判定）
@@ -1636,32 +1670,6 @@ impl SysTenantService {
             .await?
             .pop()
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.tenant.not_found")))
-    }
-
-    /// 套餐变更收敛：删除该租户所有角色中「不在套餐白名单内」或「已不可授予」的菜单授权。
-    ///
-    /// 两个触发面：
-    /// - **白名单改小**（`menu_ids`）：裁剪超出套餐的菜单（`menu_ids` 为空 = 不限制，不裁剪）；
-    /// - **能力位关闭**（`features`，如关掉 `tenant.domain_self_service`）：回收原先随能力位
-    ///   下放的平台专属菜单。**此面与 `menu_ids` 无关**——即使套餐不限制菜单也必须收敛，
-    ///   否则残留授权形成"菜单可见但请求 403"的假入口。
-    ///
-    /// `pub(crate)`：集成测试直接驱动本收敛面（`capability_features` 模块）。
-    /// 收敛核心见 [`converge_tenant_role_menus_conn`]（单一事实源，启动期兜底共用）；
-    /// 本方法在其上追加**权限缓存失效**（授权行被删 ⇒ `perm:user:*` 缓存必须在
-    /// TTL 之前失效，否则最多 5 分钟窗口内用户仍持旧 perms）。
-    pub(crate) async fn converge_tenant_role_menus(
-        &self,
-        tenant_id: i64,
-        package: &crate::entity::sys_tenant_package::Model,
-    ) -> Result<(), ServiceError> {
-        let removed = converge_tenant_role_menus_conn(self.db(), tenant_id, package)
-            .await
-            .map_err(ServiceError::from)?;
-        if removed > 0 {
-            self.invalidate_all_perm_cache().await;
-        }
-        Ok(())
     }
 
     /// 失效所有用户权限缓存（本服务收敛删除了 `sys_role_menu` 行 ⇒ perms 下发变化）。
@@ -1697,7 +1705,24 @@ impl SysTenantService {
         am.status = Set(Some(dto.status.clone()));
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
-        self.tenant_repo.base().update(am).await?;
+        // 停用与 PAT 吊销同一事务：PAT 是库内凭据，撤权失败却照常返回成功 =
+        // "停用"只停了一半——租户被重新启用后旧令牌复活。共享态会话吊销无法入事务，
+        // 仍保留在提交之后（`sync_runtime_keys` + `revoke_tenant_sessions`）。
+        let tenant_repo = self.tenant_repo.clone();
+        let tid = dto.tenant_id;
+        let disabling = dto.status == "1";
+        self.db()
+            .transaction::<_, u64, sea_orm::DbErr>(|txn| {
+                let tenant_repo = tenant_repo.clone();
+                Box::pin(async move {
+                    tenant_repo.base().update_conn(txn, am).await?;
+                    if disabling {
+                        return revoke_tenant_pats_conn(txn, tid).await;
+                    }
+                    Ok(0)
+                })
+            })
+            .await?;
 
         self.sync_runtime_keys(dto.tenant_id, Some(dto.status.as_str()), tenant.expire_time)
             .await;
@@ -1834,6 +1859,10 @@ impl SysTenantService {
                         .filter(TenantMenuColumn::DelFlag.eq("0"))
                         .exec(txn)
                         .await?;
+
+                    // ⑥ PAT 即时吊销（同事务）：删掉的租户若在恢复后仍持有旧 PAT，
+                    //    等于"删除"只删了名录——凭据撤不掉就不许提交删除。
+                    revoke_tenant_pats_conn(txn, tid).await?;
                     Ok(roles)
                 }
                 .boxed()
@@ -2288,22 +2317,15 @@ impl SysTenantService {
         }
 
         // ⑤（P0-1-b / F-7）即时吊销该租户全部 PAT：status '0' → '1'
-        match SysPat::update_many()
-            .col_expr(PatColumn::Status, Expr::value("1"))
-            .filter(PatColumn::TenantId.eq(tenant_id))
-            .filter(PatColumn::Status.eq("0"))
-            .exec(self.db())
-            .await
-        {
-            Ok(res) => {
-                if res.rows_affected > 0 {
-                    tracing::info!(
-                        tenant_id,
-                        pat_revoked = res.rows_affected,
-                        "租户踢线：PAT 已吊销"
-                    );
-                }
+        //
+        // 这里的库内写是**兜底重试**：停用/删除两条主路径（`change_status` / `remove`）
+        // 已在各自事务内调用同一函数，撤权与状态变更同生共死；本函数作为可独立调用的
+        // 会话清扫入口保留一次幂等重试（已有 '1' 的行 update_many 命中 0 行）。
+        match revoke_tenant_pats_conn(self.db(), tenant_id).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(tenant_id, pat_revoked = n, "租户踢线：PAT 已吊销")
             }
+            Ok(_) => {}
             Err(e) => {
                 tracing::warn!(tenant_id, error = %e, "租户踢线：PAT 吊销失败（DB 异常）")
             }
@@ -2679,22 +2701,39 @@ fn generate_init_password() -> String {
     out
 }
 
+/// 即时吊销某租户全部 PAT（`status '0' → '1'`）——**唯一实现**。
+///
+/// 停用/删除两条主路径在**各自事务内**调用（撤权与状态变更同生共死）；`revoke_tenant_sessions`
+/// 作为可独立调用的会话清扫入口再调用一次（幂等：已吊销行不再命中）。凭据撤不掉意味着
+/// 租户被重新启用后旧 PAT 复活，故主路径不得把失败降级成 warn 后照常返回成功。
+pub(crate) async fn revoke_tenant_pats_conn(
+    conn: &impl ConnectionTrait,
+    tenant_id: i64,
+) -> Result<u64, DbErr> {
+    let res = SysPat::update_many()
+        .col_expr(PatColumn::Status, Expr::value("1"))
+        .filter(PatColumn::TenantId.eq(tenant_id))
+        .filter(PatColumn::Status.eq("0"))
+        .exec(conn)
+        .await?;
+    Ok(res.rows_affected)
+}
+
 /// **套餐授权收敛核心**（自由函数，单一事实源；方案 §5.17）。
 ///
-/// 删除该租户所有角色中「不在套餐白名单内」或「已不可授予」的菜单授权，
-/// 返回删除行数。两个收敛面（白名单改小 / 能力位关闭）语义详见
-/// [`SysTenantService::converge_tenant_role_menus`]。
+/// 删除该租户所有角色中「不在套餐白名单内」或「已不可授予」的菜单授权，返回删除行数。
+/// 两个收敛面（白名单改小 / 能力位关闭）语义见 `capability_features` 集成用例。
 ///
-/// 两个调用方：
-/// - [`SysTenantService::converge_tenant_role_menus`]（套餐变更 / 套餐能力位变更路径，
-///   追加 perm cache 失效）；
-/// - `initialize::converge_tenant_grants_on_startup`（**启动期兜底**：平台层
-///   `[features]` on→off 改配置重启后，存量授权无回收触发点——收敛只在套餐变更时跑，
-///   此处补全；幂等：无收敛面时零删除）。
+/// 三个调用方（**全部在写事务内**，收敛失败必须让套餐变更整体回滚）：
+/// - `SysTenantService::edit`（改小套餐）；
+/// - `SysTenantService::set_package_features`（能力位关闭）；
+/// - `initialize::converge_tenant_grants_on_startup`（启动期兜底：平台层 `[features]`
+///   on→off 改配置重启后，存量授权无回收触发点——此处补全；幂等：无收敛面时零删除）。
 ///
+/// 命中删除时由调用方在**提交之后**失效 perm 缓存（回滚时授权未变，不应提前清缓存）。
 /// 返回 `DbErr`（不映射 ServiceError）：启动兜底调用方按 anyhow 处理并 WARN continue。
 pub(crate) async fn converge_tenant_role_menus_conn(
-    db: &DatabaseConnection,
+    conn: &impl ConnectionTrait,
     tenant_id: i64,
     package: &crate::entity::sys_tenant_package::Model,
 ) -> Result<u64, DbErr> {
@@ -2708,7 +2747,7 @@ pub(crate) async fn converge_tenant_role_menus_conn(
         .column(MenuColumn::Perms)
         .filter(MenuColumn::DelFlag.eq("0"))
         .into_tuple::<(i64, Option<String>)>()
-        .all(db)
+        .all(conn)
         .await?;
     let ungradable_ids: Vec<i64> = menu_perms
         .into_iter()
@@ -2730,7 +2769,7 @@ pub(crate) async fn converge_tenant_role_menus_conn(
         .filter(RoleColumn::TenantId.eq(tenant_id))
         .filter(RoleColumn::DelFlag.eq("0"))
         .into_tuple::<i64>()
-        .all(db)
+        .all(conn)
         .await?;
     if role_ids.is_empty() {
         return Ok(0);
@@ -2743,7 +2782,7 @@ pub(crate) async fn converge_tenant_role_menus_conn(
     let deleted = SysRoleMenu::delete_many()
         .filter(RoleMenuColumn::RoleId.is_in(role_ids.clone()))
         .filter(predicate)
-        .exec(db)
+        .exec(conn)
         .await?;
     tracing::info!(
         tenant_id,
@@ -2815,6 +2854,67 @@ mod tests {
         assert!(
             crate::utils::password::password_strength_score(&pwd) >= 3,
             "初始密码须满足强度要求"
+        );
+    }
+
+    /// 停用/删除/套餐变更三族的**写面原子性**形状锁。
+    ///
+    /// 为什么是形状锁而不是运行时用例：把调用点从"事务内"挪回"事务外"，
+    /// 成功路径上的行为**逐字段一致**，任何不注故障的集成用例都照样全绿；
+    /// 而这条纪律的价值只存在于失败路径（PAT 撤不掉 / 收敛失败）。
+    /// 所以直接钉住调用点所在的上下文，并由 `revoke_tenant_sessions` 提供正控
+    /// （它用 `self.db()` 是有意的兜底重试——证明抽取器确实读到了真实函数体）。
+    #[test]
+    fn tenant_write_paths_keep_credential_and_grant_changes_inside_the_transaction() {
+        let src = include_str!("sys_tenant_service.rs");
+        let body = |name: &str| -> &str {
+            let needle = format!("async fn {name}(");
+            let start = src
+                .find(&needle)
+                .unwrap_or_else(|| panic!("形状锁的输入坏了：找不到 {name}"));
+            let rest = &src[start + needle.len()..];
+            let end = [
+                "\n    ///",
+                "\n    pub ",
+                "\n    pub(crate) ",
+                "\n    async fn ",
+                "\n    fn ",
+            ]
+            .iter()
+            .filter_map(|m| rest.find(m))
+            .min()
+            .unwrap_or_else(|| panic!("形状锁的输入坏了：{name} 没有可识别的成员边界"));
+            &rest[..end]
+        };
+        for (name, call) in [
+            ("change_status", "revoke_tenant_pats_conn(txn"),
+            ("remove", "revoke_tenant_pats_conn(txn"),
+            ("edit", "converge_tenant_role_menus_conn(txn"),
+            (
+                "set_package_features",
+                "converge_tenant_role_menus_conn(txn",
+            ),
+        ] {
+            let b = body(name);
+            assert!(
+                b.len() > 200,
+                "{name} 的函数体只有 {} 字节（抽取器失效）",
+                b.len()
+            );
+            assert!(
+                b.contains(call),
+                "{name} 必须在写事务内调用 `{call}`（撤权/收敛挪到事务外 = 失败时半应用）"
+            );
+            assert!(
+                !b.contains("revoke_tenant_pats_conn(self.db()")
+                    && !b.contains("converge_tenant_role_menus_conn(self.db()"),
+                "{name} 不得再有事务外版本（`self.db()`）的撤权/收敛调用"
+            );
+        }
+        // 正控：兜底清扫入口用 `self.db()` 是刻意的（锁的抽取器必须真读到函数体）
+        assert!(
+            body("revoke_tenant_sessions").contains("revoke_tenant_pats_conn(self.db()"),
+            "正控失败：`revoke_tenant_sessions` 的幂等重试调用点不见了（抽取器或代码形状变了）"
         );
     }
 

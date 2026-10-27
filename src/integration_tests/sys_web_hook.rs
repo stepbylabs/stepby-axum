@@ -694,3 +694,66 @@ async fn test_webhook_retry_reports_real_delivery_result() {
         .await;
     ctx.assert_ok(&v);
 }
+
+/// 清空推送记录：保留期清理 + 全量清空在**同一事务**内完成，且必须按租户作用域收敛。
+///
+/// 可证伪：
+/// - 若 `clean_logs` 退回"两条 DELETE 各自提交"，本用例在无故障注入下仍绿——
+///   所以另有一条形状锁（仓库层只有 `clean_retention_and_all` 一个入口）保证两条 DELETE
+///   都走同一个事务；本用例负责钉住**租户隔离**与两个计数的语义。
+/// - 若 `delete_all` 忘了带租户谓词，异租户那条记录会被一起删掉 ⇒ 最后一条断言变红。
+///
+/// 注意：`sys_web_hook_log` 的 `before_save` 会把 `create_time` 覆盖成"现在"（只追加日志的
+/// 既有语义），所以过期行只能用**原始 SQL** 种，不能用 ActiveModel——这一条是实测踩出来的。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_web_hook_log_clean_is_tenant_scoped_and_reports_both_counts() {
+    use crate::common::datetime::now_naive;
+    use crate::entity::sys_web_hook_log;
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Statement,
+    };
+
+    const TID: i64 = 9071;
+    const OTHER_TID: i64 = 9072;
+    let ctx = super::TestContext::new().await;
+    let db = &ctx.state.db;
+    let now = now_naive();
+    let old = now - chrono::Duration::days(60);
+    let fmt = |t: chrono::NaiveDateTime| t.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
+    for (id, tenant_id, create_time) in [
+        (1_i64, TID, fmt(old)),
+        (2, TID, fmt(now)),
+        (3, OTHER_TID, fmt(old)),
+    ] {
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            format!(
+                "INSERT INTO sys_web_hook_log (tenant_id, id, hook_id, hook_name, event_type,                  target_url, payload, status, status_code, response, error_msg, cost_ms, source,                  create_time) VALUES ({tenant_id}, {id}, NULL, 'it-clean', 'it.clean',                  'http://127.0.0.1:9/it', NULL, '1', NULL, NULL, 'it', 0, NULL, '{create_time}')"
+            ),
+        ))
+        .await
+        .expect("插入推送记录失败");
+    }
+
+    let (expired, all) = ctx
+        .state
+        .web_hook_service
+        .clean_logs(TID)
+        .await
+        .expect("清空推送记录应成功");
+    assert_eq!(expired, 1, "过期清理计数应为 1（只有本租户那条老记录）");
+    assert!(all >= 1, "全量清空应至少删掉本租户剩余的新记录，实际 {all}");
+
+    let left = sys_web_hook_log::Entity::find()
+        .filter(sys_web_hook_log::Column::TenantId.eq(TID))
+        .all(db)
+        .await
+        .expect("回查本租户记录失败");
+    assert!(left.is_empty(), "本租户推送记录应已清空，剩 {}", left.len());
+    let other = sys_web_hook_log::Entity::find()
+        .filter(sys_web_hook_log::Column::TenantId.eq(OTHER_TID))
+        .all(db)
+        .await
+        .expect("回查异租户记录失败");
+    assert_eq!(other.len(), 1, "异租户记录不得被本租户的清理动作删除");
+}
