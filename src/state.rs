@@ -25,6 +25,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 
+/// 一条活跃 WebSocket 连接的登记项
+///
+/// `tenant_id` 取握手 JWT 的 `tid`（与请求期租户判定同源）。公告类消息按它过滤：
+/// 平台操作者（tid=0）与租户用户各自只收到本租户的公告；跨租户推送在本仓
+/// 结构上不成立（b100 立，配套集成测试 `ws_broadcast_to_tenant_is_scoped`）。
+pub struct WsConn {
+    pub tenant_id: i64,
+    pub tx: mpsc::UnboundedSender<WsMessage>,
+}
+
 /// 应用全局共享状态
 /// 通过 Axum `State<Arc<AppState>>` 注入到所有 handler
 /// 注：AppState 本身无需 Clone，因始终通过 `Arc<AppState>` 共享
@@ -140,16 +150,19 @@ pub struct AppState {
     pub hot_storage: arc_swap::ArcSwapOption<HotStorageBackend>,
     /// WebSocket 全局广播通道（实时通知推送）
     pub ws_broadcast: broadcast::Sender<WsMessage>,
-    /// WebSocket 按用户定向通道注册表（user_id → 该用户全部活跃连接的发送端）
+    /// WebSocket 按用户定向通道注册表（user_id → 该用户全部活跃连接）
     ///
     /// 安全设计（P0-2 越权广播修复）：`forceLogout`、`taskProgress` 等含他人会话/身份
     /// 信息的消息不再经全局广播推送给所有在线客户端，而是通过本注册表**定向**投递到
     /// 目标用户的连接。全局广播（`broadcast`）仅保留给公告等公开消息。
     ///
+    /// 每条连接登记**握手时的租户**（b100）：公告发布/关闭/删除只推给同租户在线客户端。
+    /// 租户从 JWT `tid` 取（与 auth 中间件的租户判定同源），不在推送时回查数据库。
+    ///
     /// 注意：本注册表为进程内内存结构，仅覆盖当前实例的连接；多实例部署时定向消息
     /// 只投递到本实例内的目标用户连接（与限流/调度器一致的单实例语义），跨实例扩展
     /// 可后续改为 Redis Pub/Sub。
-    pub ws_users: RwLock<HashMap<i64, Vec<mpsc::UnboundedSender<WsMessage>>>>,
+    pub ws_users: RwLock<HashMap<i64, Vec<WsConn>>>,
     /// 应用可观测性句柄（慢请求缓冲 / 错误聚合总线 / Prometheus 指标）
     ///
     /// 由 `observability::Observability::global()` 提供（进程级全局共享），
@@ -171,18 +184,28 @@ impl AppState {
     }
 
     /// 注册一个用户的 WebSocket 连接发送端（连接建立时调用）
-    pub fn register_ws_user(&self, user_id: i64, tx: mpsc::UnboundedSender<WsMessage>) {
+    ///
+    /// `tenant_id` 为握手 JWT 的 `tid`；公告推送按它过滤（见 [`WsConn`]）。
+    pub fn register_ws_user(
+        &self,
+        user_id: i64,
+        tenant_id: i64,
+        tx: mpsc::UnboundedSender<WsMessage>,
+    ) {
         // 锁中毒容错：与 broadcast_to_user 同款范式（unwrap_or_else into_inner），
         // 避免某线程 panic 污染锁后，WS 注册/注销链路被放大为进程级连锁 panic（W-6/5-3）
         let mut users = self.ws_users.write().unwrap_or_else(|e| e.into_inner());
-        users.entry(user_id).or_default().push(tx);
+        users
+            .entry(user_id)
+            .or_default()
+            .push(WsConn { tenant_id, tx });
     }
 
     /// 注销一个用户的 WebSocket 连接发送端（连接关闭时调用）
     pub fn unregister_ws_user(&self, user_id: i64, tx: &mpsc::UnboundedSender<WsMessage>) {
         let mut users = self.ws_users.write().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = users.get_mut(&user_id) {
-            conns.retain(|t| !t.same_channel(tx));
+            conns.retain(|c| !c.tx.same_channel(tx));
             if conns.is_empty() {
                 users.remove(&user_id);
             }
@@ -200,13 +223,41 @@ impl AppState {
         // 避免某线程 panic 污染锁后，所有发送方（含审批超时扫描任务）连锁 panic（V6-E6/5-3）
         let users = self.ws_users.read().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = users.get(&user_id) {
-            for tx in conns {
+            for conn in conns {
                 // 对端已关闭时 send 返回 Err，忽略（连接关闭时会走 unregister 清理）
-                if tx.send(msg.clone()).is_err() {
+                if conn.tx.send(msg.clone()).is_err() {
                     tracing::debug!(user_id, "WebSocket 定向投递失败（连接已关闭）");
                 }
             }
         }
+    }
+
+    /// 向**指定租户**的全部活跃连接推送消息（公告实时链路，b100）
+    ///
+    /// 为什么不是全局广播：`sys_notice` 带 `tenant_id`，租户 A 的公告不该出现在
+    /// 租户 B 的通知铃铛里。此前 `broadcast()` 全仓零调用点（前端订阅 `notice`
+    /// 却永远收不到），本方法把"公告发布"接上，同时把越权面收在租户边界内。
+    ///
+    /// 返回投递到的连接数（0 = 该租户无在线用户，属正常路径）。
+    pub fn broadcast_to_tenant(
+        &self,
+        tenant_id: i64,
+        msg_type: &str,
+        data: serde_json::Value,
+    ) -> usize {
+        let msg = WsMessage::new(msg_type, data);
+        let users = self.ws_users.read().unwrap_or_else(|e| e.into_inner());
+        let mut delivered = 0usize;
+        for conns in users.values() {
+            for conn in conns.iter().filter(|c| c.tenant_id == tenant_id) {
+                if conn.tx.send(msg.clone()).is_ok() {
+                    delivered += 1;
+                } else {
+                    tracing::debug!(tenant_id, "WebSocket 租户广播投递失败（连接已关闭）");
+                }
+            }
+        }
+        delivered
     }
 
     /// 构建 AppState 时初始化全部 Service

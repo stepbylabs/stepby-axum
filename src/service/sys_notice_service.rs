@@ -58,6 +58,25 @@ const NOTICE_STATUS_VALUES: &[&str] = &[NOTICE_STATUS_NORMAL, "1"];
 /// 公告类型合法值（`sys_notice.notice_type`）
 const NOTICE_TYPE_VALUES: &[&str] = &["1", "2"];
 
+/// 公告实时推送载荷（WS `notice`）
+///
+/// `action` 是前后端的稳定契约（b100）：
+/// - `published`：新公告对用户可见 ⇒ 前端入通知中心并刷新铃铛
+/// - `updated`：已发布公告内容变化 ⇒ 只刷新铃铛，不产生新通知
+/// - `closed`：公告下架 ⇒ 只刷新铃铛
+/// - `deleted`：公告删除 ⇒ 只刷新铃铛
+///
+/// 只投递到公告所属租户的在线连接（`broadcast_to_tenant`）；载荷不含正文，
+/// 避免把可能含富文本的内容塞进浏览器原生通知。
+fn notice_push_payload(model: &SysNoticeModel, action: &str) -> serde_json::Value {
+    serde_json::json!({
+        "action": action,
+        "noticeId": model.notice_id,
+        "title": model.notice_title,
+        "noticeType": model.notice_type,
+    })
+}
+
 /// 查询串里的枚举位归一：空/缺省 ⇒ `None`（不过滤）；命中白名单 ⇒ 该值；其余 ⇒ `reject(v)`
 ///
 /// 为什么不能"非法值当没填"：那会让 `?status=9` 静默返回全量，UI 上表现为"筛选生效了但
@@ -457,6 +476,19 @@ impl SysNoticeService {
             })
             .await?;
 
+        // b100：已发布的公告立即推给同租户在线客户端（此前广播通道零生产者，
+        // 前端订阅 `notice` 却永远收不到，铃铛要等重连/刷新才更新）。
+        // 放在邮件群发之前：邮件是秒级出站，推送不该排队等它。
+        if model.status.as_deref() == Some(NOTICE_STATUS_NORMAL)
+            && let Some(st) = state
+        {
+            st.broadcast_to_tenant(
+                model.tenant_id,
+                "notice",
+                notice_push_payload(&model, "published"),
+            );
+        }
+
         // 邮件通知（可选）：仅在调用方传入 AppState 且 dto.notify_email=true 时发送
         if dto.notify_email
             && let Some(st) = state
@@ -632,11 +664,15 @@ impl SysNoticeService {
     }
 
     /// 修改通知公告
+    ///
+    /// `state` 用于把发布/下架/内容变更实时推给同租户在线客户端（None 时跳过推送，
+    /// 与 `add_notice` 的邮件参数同口径：调度器等无 AppState 场景不投递）。
     pub async fn edit_notice(
         &self,
         dto: NoticeEditDto,
         operator: &str,
         operator_tid: i64,
+        state: Option<&AppState>,
     ) -> Result<SysNoticeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         // P3 修复: 枚举值白名单校验，防止脏数据
@@ -651,6 +687,10 @@ impl SysNoticeService {
         // 未传正文/状态时保持现值，避免"只改标题"的 PUT 清空公告正文或隐藏公告
         let existing_content = existing.notice_content.clone();
         let existing_status = existing.status.clone();
+        // b100 推送判据：状态迁移与"已发布期间内容变化"都必须在 move 之前快照
+        let was_published = existing_status.as_deref() == Some(NOTICE_STATUS_NORMAL);
+        let existing_title_for_push = existing.notice_title.clone();
+        let existing_content_for_push = existing_content.clone();
         // 审计合规域：变更前快照（必须在 existing 被 move 进 ActiveModel 之前计算）
         let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
         let mut am: SysNoticeActiveModel = existing.into();
@@ -689,15 +729,43 @@ impl SysNoticeService {
                 })
             })
             .await?;
+
+        // b100：状态迁移/内容变更实时推送（同租户）
+        if let Some(st) = state {
+            let is_published = model.status.as_deref() == Some(NOTICE_STATUS_NORMAL);
+            let action = match (was_published, is_published) {
+                (false, true) => Some("published"),
+                (true, false) => Some("closed"),
+                (true, true)
+                    if model.notice_title != existing_title_for_push
+                        || model.notice_content != existing_content_for_push =>
+                {
+                    Some("updated")
+                }
+                // 未发布 → 未发布：用户本就看不见，不推送
+                // 已发布且内容未变：只改了 remark 等不可见面，不推送
+                _ => None,
+            };
+            if let Some(action) = action {
+                st.broadcast_to_tenant(
+                    model.tenant_id,
+                    "notice",
+                    notice_push_payload(&model, action),
+                );
+            }
+        }
         Ok(model)
     }
 
     /// 批量删除通知公告（物理删除，级联清理已读记录；事务内含 DELETE 审计留痕）
+    ///
+    /// `state` 用于在删除成功后通知同租户在线客户端刷新铃铛（None 时跳过）。
     pub async fn delete_notice(
         &self,
         notice_ids: Vec<i64>,
         operator: &str,
         operator_tid: i64,
+        state: Option<&AppState>,
     ) -> Result<(), ServiceError> {
         // 批量校验记录存在（单次 SELECT 替代 N 次）
         if notice_ids.is_empty() {
@@ -752,6 +820,19 @@ impl SysNoticeService {
                 .boxed()
             })
             .await?;
+        // b100：删除后通知受影响租户刷新铃铛（批量里可能含多租户：平台操作者代管删除）
+        if let Some(st) = state {
+            let mut tenants: Vec<i64> = existing.iter().map(|n| n.tenant_id).collect();
+            tenants.sort_unstable();
+            tenants.dedup();
+            for tenant_id in tenants {
+                st.broadcast_to_tenant(
+                    tenant_id,
+                    "notice",
+                    serde_json::json!({ "action": "deleted" }),
+                );
+            }
+        }
         Ok(())
     }
 

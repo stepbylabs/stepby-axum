@@ -138,7 +138,7 @@ pub async fn edit(
 ) -> Result<AjaxResult<()>, AppError> {
     state
         .notice_service
-        .edit_notice(dto, operator.username(), operator.tenant_id())
+        .edit_notice(dto, operator.username(), operator.tenant_id(), Some(&state))
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.edit")))
 }
@@ -179,7 +179,7 @@ pub async fn remove(
 
     state
         .notice_service
-        .delete_notice(ids, operator.username(), operator.tenant_id())
+        .delete_notice(ids, operator.username(), operator.tenant_id(), Some(&state))
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

@@ -284,7 +284,14 @@ pub async fn ws_handler(
         return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
 
-    info!(user_id = user_id, user_name = %user_name, conn_count = conn_count, "WebSocket 连接建立");
+    // b100：握手 JWT 的租户与到期时刻进入会话生命周期
+    // - tenant_id：公告类推送按租户过滤（平台操作者 tid=0 与租户用户互不越界）
+    // - exp：连接存活不得超过令牌有效期（此前握手只验一次，过期后连接仍会继续
+    //   接收 forceLogout / taskProgress 等定向消息）
+    let tenant_id = claims.tid;
+    let token_exp = i64::try_from(claims.exp).unwrap_or(i64::MAX);
+
+    info!(user_id = user_id, user_name = %user_name, conn_count = conn_count, tenant_id, "WebSocket 连接建立");
 
     // 若客户端通过 Sec-WebSocket-Protocol 发起握手，需回显子协议以满足浏览器要求
     let protocols = headers
@@ -300,7 +307,9 @@ pub async fn ws_handler(
         None => ws,
     };
 
-    Ok(upgrade.on_upgrade(move |socket| handle_ws(socket, state, user_id, user_name)))
+    Ok(upgrade.on_upgrade(move |socket| {
+        handle_ws(socket, state, user_id, user_name, tenant_id, token_exp)
+    }))
 }
 
 /// 处理单个 WebSocket 连接
@@ -308,8 +317,16 @@ pub async fn ws_handler(
 /// 安全设计：
 /// - C7-1 心跳超时：90 秒无 pong 响应则主动断开（3 次心跳周期）
 /// - C7-4 Close 帧：断开前发送 Close 帧，符合 RFC 6455
+/// - b100 会话到期：连接存活不得超过握手 JWT 的 `exp`，到点通知并断开
 /// - 连接计数：函数退出时自动 DECR（使用 RAII 模式确保执行）
-async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_name: String) {
+async fn handle_ws(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    user_id: i64,
+    user_name: String,
+    tenant_id: i64,
+    token_exp: i64,
+) {
     // P2 修复: RAII 守卫确保连接计数在任何退出路径（包括 Future 被 drop）都能 DECR
     let mut conn_guard = WsConnGuard::new(state.clone(), user_id);
 
@@ -320,14 +337,17 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
     // 含用户身份/会话信息的消息经此通道仅投递到目标用户，杜绝跨用户泄漏。
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<WsMessage>();
     // 注册到定向投递注册表（clone 一份进注册表，本地保留原件用于关闭时注销）
-    state.register_ws_user(user_id, user_tx.clone());
+    state.register_ws_user(user_id, tenant_id, user_tx.clone());
     // RAII：确保任何退出路径（包括 Future 被 drop/panic）都能从注册表注销，避免悬挂发送端
     let _user_channel_guard = WsUserChannelGuard::new(state.clone(), user_id, user_tx.clone());
 
     // 发送连接成功消息（P3 修复: 改用 tr!() 宏，遵循项目 i18n 规范）
+    // kind 是稳定契约（b100）：前端按它识别"连接成功"，不再比较本地化文案
+    // （旧做法在语言/文案漂移时会把它当普通系统消息塞进通知中心）。
     let welcome = WsMessage::new(
         "system",
         serde_json::json!({
+            "kind": "connected",
             "message": crate::tr!("websocket.connected"),
             "userId": user_id,
             "userName": user_name
@@ -344,6 +364,13 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
     let mut timeout_check = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     timeout_check.tick().await; // 跳过首次立即触发
 
+    // b100：会话到期定时器（与心跳分开，保证"到点即断"而不是"下一拍才断"）
+    let expiry = tokio::time::sleep(session_expiry_delay(
+        chrono::Utc::now().timestamp(),
+        token_exp,
+    ));
+    tokio::pin!(expiry);
+
     // 记录最后一次收到客户端消息的时间（用于超时检测）
     let mut last_msg_time = tokio::time::Instant::now();
     let heartbeat_timeout = Duration::from_secs(HEARTBEAT_TIMEOUT_SECS);
@@ -356,6 +383,20 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, user_id: i64, user_n
                 if sender.send(Message::Text(text.into())).await.is_err() {
                     break;
                 }
+            }
+            // 会话到期：先告知客户端原因，再断开（客户端据此提示重新登录）
+            _ = &mut expiry => {
+                warn!(user_id = user_id, "WebSocket 会话到期，主动断开");
+                let expired = WsMessage::new(
+                    "system",
+                    serde_json::json!({
+                        "kind": "sessionExpired",
+                        "message": crate::tr!("websocket.sessionExpired")
+                    }),
+                );
+                let _ = sender.send(Message::Text(expired.to_json().into())).await;
+                let _ = sender.send(Message::Close(None)).await;
+                break;
             }
             // 接收用户定向消息并转发给客户端（P0-2：forceLogout / taskProgress 等）
             Some(msg) = user_rx.recv() => {
@@ -448,4 +489,34 @@ impl Drop for WsUserChannelGuard {
 pub fn broadcast(state: &AppState, msg_type: &str, data: serde_json::Value) {
     let msg = WsMessage::new(msg_type, data);
     let _ = state.ws_broadcast.send(msg);
+}
+
+/// 会话到期还剩多久（秒）；已过期返回 0（立即断开）
+///
+/// 单独成纯函数：`handle_ws` 的到期分支由集成测试用 1 秒有效期的 token 真跑，
+/// 这里只钉边界（恰好到期 / 已过期 / 超远未来不得溢出）。
+fn session_expiry_delay(now_secs: i64, exp_secs: i64) -> Duration {
+    if exp_secs <= now_secs {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(u64::try_from(exp_secs - now_secs).unwrap_or(u64::MAX))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_expiry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn session_expiry_boundaries() {
+        assert_eq!(session_expiry_delay(100, 105), Duration::from_secs(5));
+        assert_eq!(session_expiry_delay(100, 100), Duration::ZERO);
+        assert_eq!(session_expiry_delay(100, 99), Duration::ZERO);
+        // 极端 exp 不得 panic / 回绕
+        assert_eq!(
+            session_expiry_delay(0, i64::MAX),
+            Duration::from_secs(u64::try_from(i64::MAX).unwrap_or(u64::MAX))
+        );
+    }
 }

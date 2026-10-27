@@ -97,6 +97,11 @@ pub async fn serve_embedded(req: Request) -> Response {
     let path = req.uri().path().to_string();
     let clean_path = path.trim_start_matches('/');
 
+    // 安全兜底：sourcemap 永不对外（见 is_denied_public_asset 的取证）
+    if is_denied_public_asset(clean_path) {
+        return (StatusCode::NOT_FOUND, "Not Found").into_response();
+    }
+
     // 优先尝试请求的路径
     if !clean_path.is_empty()
         && let Some(file) = EmbeddedAssets::get(clean_path)
@@ -200,6 +205,11 @@ async fn serve_from_fs(req: Request) -> Response {
     let path = req.uri().path().to_string();
     let clean_path = path.trim_start_matches('/');
 
+    // 安全兜底：sourcemap 永不对外（生产/开发两模式同一口径）
+    if is_denied_public_asset(clean_path) {
+        return (StatusCode::NOT_FOUND, "Not Found").into_response();
+    }
+
     // 优先尝试请求的路径
     if !clean_path.is_empty() {
         let file_path = format!("frontend-dist/{}", clean_path);
@@ -296,4 +306,34 @@ fn is_static_asset(path: &str) -> bool {
     ]
     .iter()
     .any(|ext| lower.ends_with(ext))
+}
+
+/// 禁止对外下发的静态资源（两种服务模式共用）
+///
+/// sourcemap 含完整前端源码（`sourcesContent`），而本模块的服务方式是
+/// **存在即下发**：只要 `frontend-dist/` 里有 `.map`，访客按入口 chunk 名加
+/// `.map` 即可下载（b100 实测 `/static/js/index-*.js.map` 返回 200/20MB，
+/// 与 vite 注释里"浏览器不会自动拉取 ⇒ 源码不暴露"只隔一次猜测）。
+/// embedded 构建已不再产出 map（vite.config.ts 按 mode 关闭），但历史产物、
+/// 手工拷贝、反代档 dist 的误拷都可能把它带进来 ⇒ 服务端必须自己拒绝，
+/// 不能把安全边界放在"构建侧不会生成"上。
+fn is_denied_public_asset(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".map")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sourcemap_is_never_public() {
+        assert!(is_denied_public_asset("static/js/index-CoIDG-sZ.js.map"));
+        assert!(is_denied_public_asset("STATIC/JS/INDEX-ABC.JS.MAP"));
+        // 正常产物不得误伤
+        assert!(!is_denied_public_asset("static/js/index-CoIDG-sZ.js"));
+        assert!(!is_denied_public_asset("static/css/index-abc.css"));
+        assert!(!is_denied_public_asset("index.html"));
+        assert!(!is_denied_public_asset("map.png"));
+        assert!(!is_denied_public_asset(""));
+    }
 }

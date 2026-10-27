@@ -126,6 +126,11 @@ async fn ws_upgrade_welcome_and_broadcast() {
     let welcome = recv_text(&mut ws, "欢迎").await;
     let v: serde_json::Value = serde_json::from_str(&welcome).expect("欢迎消息 JSON 解析失败");
     assert_eq!(v["type"], "system", "欢迎消息类型应为 system，实际: {v}");
+    // b100：前端按 kind 识别"连接成功"，不再比较本地化文案
+    assert_eq!(
+        v["data"]["kind"], "connected",
+        "欢迎消息必须带 kind=connected，实际: {v}"
+    );
     assert_eq!(v["data"]["userId"], env.user_id);
 
     // 2. 服务端全局广播 → 客户端应收到 notice 消息
@@ -281,4 +286,248 @@ async fn ws_connection_limit_enforced_and_reset_on_close() {
             .unwrap_or(0);
         assert_eq!(remaining, 0, "全部连接关闭后计数应归零，实际: {remaining}");
     }
+}
+
+// ==================== b100：公告实时推送 / 会话到期 ====================
+
+/// 签发一份「主体是 admin、租户指定」的合成令牌（与 platform_guard 测试同口径）。
+fn token_with_tid(env: &WsEnv, user_id: &str, tid: i64) -> String {
+    let (token, _claims) = crate::jwt::JwtUtils::generate_token(
+        user_id,
+        "tenant-admin",
+        &env.state.config.jwt,
+        0,
+        tid,
+    )
+    .expect("签发合成租户令牌失败");
+    token
+}
+
+/// 签发一份 1 秒后过期的令牌（用于会话到期断开的分支）。
+fn short_lived_token(env: &WsEnv, ttl_secs: i64) -> String {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let now = chrono::Utc::now().timestamp();
+    let claims = crate::jwt::Claims {
+        sub: "1".to_string(),
+        username: "admin".to_string(),
+        exp: usize::try_from(now + ttl_secs).expect("时间戳应可转 usize"),
+        iat: usize::try_from(now).expect("时间戳应可转 usize"),
+        iss: env.state.config.jwt.issuer.clone(),
+        aud: env.state.config.jwt.audience.clone(),
+        jti: uuid::Uuid::new_v4().to_string(),
+        pwd_ver: 0,
+        pat_scopes: None,
+        tid: 0,
+    };
+    let mut header = Header::new(Algorithm::HS256);
+    header.typ = Some("JWT".to_string());
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_secret(env.state.config.jwt.secret.as_bytes()),
+    )
+    .expect("签发短期令牌失败")
+}
+
+/// 断言在窗口内**收不到**任何帧（用于"另一租户不得收到"的负向判据）。
+async fn expect_no_frame(ws: &mut WsStream, label: &str) {
+    match timeout(Duration::from_millis(300), ws.next()).await {
+        Err(_) => {}
+        Ok(other) => panic!("{label}: 不应收到消息，实际 {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ws_broadcast_to_tenant_is_scoped() {
+    let env = setup().await;
+    // admin = 平台租户 0；另一连接 = 租户 42
+    let mut admin = connect(env.addr, &env.token).await;
+    let _ = recv_text(&mut admin, "admin 欢迎").await;
+    let tenant_token = token_with_tid(&env, "2", 42);
+    let mut tenant = connect(env.addr, &tenant_token).await;
+    let _ = recv_text(&mut tenant, "租户欢迎").await;
+
+    // 租户 42 的公告：只有租户 42 收到
+    let delivered = env.state.broadcast_to_tenant(
+        42,
+        "notice",
+        serde_json::json!({ "action": "published", "noticeId": 7 }),
+    );
+    assert_eq!(delivered, 1, "应只投递到租户 42 的 1 条连接");
+    let text = recv_text(&mut tenant, "租户公告").await;
+    let v: serde_json::Value = serde_json::from_str(&text).expect("租户公告 JSON 解析失败");
+    assert_eq!(v["type"], "notice");
+    assert_eq!(v["data"]["noticeId"], 7);
+    expect_no_frame(&mut admin, "平台连接不得收到租户公告").await;
+
+    // 平台公告（tid=0）：只有平台连接收到
+    let delivered = env.state.broadcast_to_tenant(
+        0,
+        "notice",
+        serde_json::json!({ "action": "published", "noticeId": 8 }),
+    );
+    assert_eq!(delivered, 1, "应只投递到平台租户的 1 条连接");
+    let text = recv_text(&mut admin, "平台公告").await;
+    let v: serde_json::Value = serde_json::from_str(&text).expect("平台公告 JSON 解析失败");
+    assert_eq!(v["data"]["noticeId"], 8);
+    expect_no_frame(&mut tenant, "租户连接不得收到平台公告").await;
+
+    admin.close(None).await.ok();
+    tenant.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn ws_notice_publish_edit_close_delete_reaches_tenant_only() {
+    use crate::service::sys_notice_service::{NoticeAddDto, NoticeEditDto};
+
+    let env = setup().await;
+    let mut admin = connect(env.addr, &env.token).await;
+    let _ = recv_text(&mut admin, "admin 欢迎").await;
+    let tenant_token = token_with_tid(&env, "2", 42);
+    let mut tenant = connect(env.addr, &tenant_token).await;
+    let _ = recv_text(&mut tenant, "租户欢迎").await;
+
+    // 1) 租户 42 发布公告 → 只推同租户
+    let model = env
+        .state
+        .notice_service
+        .add_notice(
+            NoticeAddDto {
+                notice_title: "维护通知".to_string(),
+                notice_type: "1".to_string(),
+                notice_content: Some("<p>今晚维护</p>".to_string()),
+                status: Some("0".to_string()),
+                remark: None,
+                notify_email: false,
+            },
+            "tenant-admin",
+            42,
+            Some(&env.state),
+        )
+        .await
+        .expect("新增公告应成功");
+
+    let text = recv_text(&mut tenant, "公告发布").await;
+    let v: serde_json::Value = serde_json::from_str(&text).expect("公告发布 JSON 解析失败");
+    assert_eq!(v["type"], "notice");
+    assert_eq!(v["data"]["action"], "published");
+    assert_eq!(v["data"]["noticeId"], model.notice_id);
+    assert_eq!(v["data"]["title"], "维护通知");
+    expect_no_frame(&mut admin, "平台连接不得收到租户公告发布").await;
+
+    // 2) 下架（0 → 1）→ action=closed
+    env.state
+        .notice_service
+        .edit_notice(
+            NoticeEditDto {
+                notice_id: model.notice_id,
+                notice_title: "维护通知".to_string(),
+                notice_type: "1".to_string(),
+                notice_content: Some("<p>今晚维护</p>".to_string()),
+                status: Some("1".to_string()),
+                remark: None,
+            },
+            "tenant-admin",
+            42,
+            Some(&env.state),
+        )
+        .await
+        .expect("下架公告应成功");
+    let text = recv_text(&mut tenant, "公告下架").await;
+    let v: serde_json::Value = serde_json::from_str(&text).expect("公告下架 JSON 解析失败");
+    assert_eq!(v["data"]["action"], "closed");
+
+    // 3) 已下架再编辑（仍是 1）→ 用户看不见，不得再推
+    env.state
+        .notice_service
+        .edit_notice(
+            NoticeEditDto {
+                notice_id: model.notice_id,
+                notice_title: "维护通知（改）".to_string(),
+                notice_type: "1".to_string(),
+                notice_content: Some("changed".to_string()),
+                status: Some("1".to_string()),
+                remark: None,
+            },
+            "tenant-admin",
+            42,
+            Some(&env.state),
+        )
+        .await
+        .expect("编辑已下架公告应成功");
+    expect_no_frame(&mut tenant, "未发布公告编辑不得推送").await;
+
+    // 4) 重新发布（1 → 0）→ action=published（新的可见事实）
+    env.state
+        .notice_service
+        .edit_notice(
+            NoticeEditDto {
+                notice_id: model.notice_id,
+                notice_title: "维护通知（改）".to_string(),
+                notice_type: "1".to_string(),
+                notice_content: Some("changed".to_string()),
+                status: Some("0".to_string()),
+                remark: None,
+            },
+            "tenant-admin",
+            42,
+            Some(&env.state),
+        )
+        .await
+        .expect("重新发布应成功");
+    let text = recv_text(&mut tenant, "公告重新发布").await;
+    let v: serde_json::Value = serde_json::from_str(&text).expect("公告重新发布 JSON 解析失败");
+    assert_eq!(v["data"]["action"], "published");
+
+    // 5) 删除 → action=deleted
+    env.state
+        .notice_service
+        .delete_notice(vec![model.notice_id], "tenant-admin", 42, Some(&env.state))
+        .await
+        .expect("删除公告应成功");
+    let text = recv_text(&mut tenant, "公告删除").await;
+    let v: serde_json::Value = serde_json::from_str(&text).expect("公告删除 JSON 解析失败");
+    assert_eq!(v["data"]["action"], "deleted");
+    expect_no_frame(&mut admin, "平台连接不得收到租户公告删除").await;
+
+    admin.close(None).await.ok();
+    tenant.close(None).await.ok();
+}
+
+#[tokio::test]
+async fn ws_session_expires_and_closes() {
+    let env = setup().await;
+    let token = short_lived_token(&env, 1);
+    let mut ws = connect(env.addr, &token).await;
+    let _welcome = recv_text(&mut ws, "欢迎").await;
+
+    // 到期后：先收到 system/sessionExpired，再收到 Close（5s 内）
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_expired = false;
+    loop {
+        let frame = timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            ws.next(),
+        )
+        .await
+        .expect("会话到期后 5s 内应收到消息/关闭帧")
+        .expect("连接不应在发送到期通知前消失")
+        .expect("读取帧失败");
+        match frame {
+            WsFrame::Text(text) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).expect("到期通知 JSON 解析失败");
+                if v["data"]["kind"] == "sessionExpired" {
+                    assert_eq!(v["type"], "system");
+                    saw_expired = true;
+                }
+            }
+            WsFrame::Close(_) => break,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_expired,
+        "关闭前必须先告知 sessionExpired（可归因，不是静默掉线）"
+    );
 }

@@ -867,6 +867,7 @@ notice:
 # WebSocket system messages (connection success prompt, etc.)
 websocket:
   connected: WebSocket connected
+  sessionExpired: Your session has expired. Please sign in again.
 
 # Alert rule engine evaluation result texts (sys_alert_service evaluation detail shown to frontend)
 alert:

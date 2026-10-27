@@ -867,6 +867,7 @@ notice:
 # WebSocket 系统消息（连接成功提示等）
 websocket:
   connected: WebSocket 连接成功
+  sessionExpired: 登录凭证已过期，请重新登录
 
 # 告警规则引擎评估结果文案（sys_alert_service 评估明细返回给前端展示）
 alert:
