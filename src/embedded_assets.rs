@@ -317,8 +317,53 @@ fn is_static_asset(path: &str) -> bool {
 /// embedded 构建已不再产出 map（vite.config.ts 按 mode 关闭），但历史产物、
 /// 手工拷贝、反代档 dist 的误拷都可能把它带进来 ⇒ 服务端必须自己拒绝，
 /// 不能把安全边界放在"构建侧不会生成"上。
+///
+/// b101：判定必须按**文件系统实际会打开的名字**，不能按 URL 字符串后缀。
+/// Windows 会去掉尾随的点与空格、把 `x.map::$DATA` 当成同名文件的默认数据流，
+/// 而 HTTP 路径层这三者是完全不同的串 —— 实测改造前 `.map` 返回 404，而
+/// `.map.` 与 `.map::$DATA` 都返回 200 且带出 map 正文。因此先做一次百分号解码，
+/// 再按「截 NTFS 流后缀 → 去尾随点/空格 → 小写」归一后判 `.map`。
 fn is_denied_public_asset(path: &str) -> bool {
-    path.to_ascii_lowercase().ends_with(".map")
+    is_map_asset(path) || is_map_asset(&percent_decode(path))
+}
+
+/// 单一名字的 `.map` 判定（Windows 打开名归一：NTFS 流后缀 / 尾随点与空格 / 大小写）
+fn is_map_asset(path: &str) -> bool {
+    // `:` 在合法静态资源名里不出现；截断它即同时覆盖 `file.map::$DATA` 与 `file.map:zone`
+    let no_stream = path.split(':').next().unwrap_or(path);
+    no_stream
+        .trim_end_matches(['.', ' '])
+        .to_ascii_lowercase()
+        .ends_with(".map")
+}
+
+/// 仅用于拒绝集合的百分号解码（结果绝不用于拼路径）
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push(hi * 16 + lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -335,5 +380,43 @@ mod tests {
         assert!(!is_denied_public_asset("index.html"));
         assert!(!is_denied_public_asset("map.png"));
         assert!(!is_denied_public_asset(""));
+    }
+
+    /// b101 实测的两种绕过：`.map.` 与 `.map::$DATA` 在改造前都返回 200 正文。
+    /// 判据按文件系统打开名归一后，URL 层的写法不再有第二种结局。
+    #[test]
+    fn sourcemap_denial_follows_windows_open_identity() {
+        for path in [
+            "static/js/index-a.js.map.",
+            "static/js/index-a.js.map..",
+            "static/js/index-a.js.map ",
+            "static/js/index-a.js.map::$DATA",
+            "static/js/index-a.js.map:zone.Identifier",
+            "static/js/index-a.js%2Emap",
+            "static/js/index-a.js%2emap.",
+            "static/js/index-a%2Ejs.map",
+        ] {
+            assert!(is_denied_public_asset(path), "必须拒绝：{path}");
+        }
+        // 不误伤：尾随点只在归一后参与判定，正常名字与"看起来像 map"的资源照常放行
+        for path in [
+            "static/js/index-a.js",
+            "static/js/index-a.js.map.png",
+            "static/js/vendor-map.js",
+            "static/js/map",
+            "index.html.",
+        ] {
+            assert!(!is_denied_public_asset(path), "不得误伤：{path}");
+        }
+    }
+
+    #[test]
+    fn percent_decode_is_lossless_for_valid_escapes_and_tolerates_garbage() {
+        assert_eq!(percent_decode("a%2Eb%2Fc"), "a.b/c");
+        assert_eq!(percent_decode("%2e%2E"), "..");
+        // 坏的转义按原文保留（多解一次不应吞字符），非 ASCII 字节走 lossy 但不会伪造 `.map`
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz.map"), "%zz.map");
+        assert!(percent_decode("%e4%b8%ad") == "中");
     }
 }
