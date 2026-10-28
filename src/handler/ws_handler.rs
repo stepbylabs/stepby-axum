@@ -506,6 +506,7 @@ fn session_expiry_delay(now_secs: i64, exp_secs: i64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::session_expiry_delay;
+    use crate::common::prod_scan::{self, ProdFile, Scan};
     use std::time::Duration;
 
     #[test]
@@ -518,5 +519,144 @@ mod tests {
             session_expiry_delay(0, i64::MAX),
             Duration::from_secs(u64::try_from(i64::MAX).unwrap_or(u64::MAX))
         );
+    }
+
+    // ==================== b117：全局广播的租户边界形状锁 ====================
+
+    /// 生产码里唯一允许出现的"全局广播"调用：`AppState::broadcast` 的转发实现本身。
+    ///
+    /// 这是**包装器**而不是业务调用。登记成 `(文件, 行内 needle)` 而不是整文件豁免，
+    /// 是为了让"包装器被改写成别的实现"时这条豁免因**未命中**而报撤销（同 §㉘）。
+    const GLOBAL_BROADCAST_ALLOWED: &[(&str, &str)] = &[(
+        "src/state.rs",
+        "ws_handler::broadcast(self, msg_type, data)",
+    )];
+
+    /// 在归一后的代码文本里找"真的在调用"的位置（`needle` 之后跳过空白必须是 `(`）。
+    ///
+    /// 少了这一步，`.broadcast` 的子串会把 `broadcast_to_user` / `broadcast_to_tenant`
+    /// 一起吃掉——而那正是唯一的合规写法（判据会把修好的代码判红）。
+    fn call_positions(text: &str, needle: &str) -> Vec<usize> {
+        text.match_indices(needle)
+            .map(|(i, _)| i)
+            .filter(|&i| text[i + needle.len()..].trim_start().starts_with('('))
+            .collect()
+    }
+
+    fn global_broadcast_hits(files: &[ProdFile]) -> Vec<String> {
+        let mut hits = Vec::new();
+        for f in files {
+            let text = f.text();
+            for needle in [".broadcast", "ws_handler::broadcast"] {
+                for idx in call_positions(&text, needle) {
+                    let line_no = text[..idx].matches('\n').count() + 1;
+                    let line = text.lines().nth(line_no - 1).unwrap_or("").trim();
+                    hits.push(format!("{}:{} {line}", f.rel, line_no));
+                }
+            }
+        }
+        hits
+    }
+
+    /// b117：生产码不得使用**无租户谓词**的全局广播。
+    ///
+    /// `ws_handler::broadcast` 把消息塞进 `ws_broadcast` 通道，而 `handle_ws` 对每条连接
+    /// 都订阅了这条通道 ⇒ 消息会投递给**所有租户**的在线客户端。b100 起公告推送改走
+    /// `broadcast_to_tenant`（按握手 JWT 的 `tid` 过滤），全局广播因此在生产码里零调用；
+    /// 但"零调用"只是今天的巧合——没有锁的话，下一个人写一句 `state.broadcast("notice", …)`
+    /// 就是一次跨租户泄漏，而且编译、单测、e2e 全绿（多租户门禁扫的是 DB 谓词，
+    /// 看不见 WS 推送面）。这条锁把"WS 推送也必须带租户谓词"补进同一族纪律。
+    #[test]
+    fn production_code_never_uses_the_unscoped_broadcast() {
+        let files = prod_scan::prod_files(&Scan::default());
+        prod_scan::require_volume(&files, 300, 40_000, "全局广播租户边界锁");
+
+        let hits = global_broadcast_hits(&files);
+        let unexpected: Vec<&String> = hits
+            .iter()
+            .filter(|hit| {
+                let Some((at, line)) = hit.split_once(' ') else {
+                    return true;
+                };
+                !GLOBAL_BROADCAST_ALLOWED.iter().any(|(rel, needle)| {
+                    at.starts_with(&format!("{rel}:")) && line.contains(needle)
+                })
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "以下生产码使用了无租户谓词的全局广播（会跨租户投递）：{unexpected:#?}\n\
+             请改用 `broadcast_to_tenant(tenant_id, …)` / `broadcast_to_user(user_id, …)`；\
+             确属公开消息的，须在本锁的 GLOBAL_BROADCAST_ALLOWED 里带理由逐条登记"
+        );
+
+        // 豁免必须仍命中：包装器被改写成别的实现时，这条登记要报撤销而不是静默失效
+        for (rel, needle) in GLOBAL_BROADCAST_ALLOWED {
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.starts_with(&format!("{rel}:")) && hit.contains(needle)),
+                "登记条目已腐化：{rel} 里找不到 `{needle}`（包装器实现变了，请重新核对豁免）"
+            );
+        }
+    }
+
+    /// b117：公告推送的三条路径（发布 / 编辑 / 删除）必须都走租户广播，
+    /// 且租户参数取自公告行——只把方法名改对、参数却传常量或 0 同样是跨租户面。
+    #[test]
+    fn notice_pushes_stay_inside_the_tenant_boundary() {
+        let f = prod_scan::prod_file("src/service/sys_notice_service.rs", &Scan::default());
+        prod_scan::require_volume(std::slice::from_ref(&f), 1, 300, "公告推送接线反查");
+        let text = f.text();
+
+        let pushes = call_positions(&text, "broadcast_to_tenant");
+        assert_eq!(
+            pushes.len(),
+            3,
+            "公告的发布 / 编辑 / 删除三条推送都必须走租户广播（实测 {} 处）",
+            pushes.len()
+        );
+        for idx in pushes {
+            let tail: String = text[idx..].chars().take(160).collect();
+            assert!(
+                tail.contains("tenant_id"),
+                "租户广播的租户参数必须取自公告行（片段：{tail}）"
+            );
+        }
+        assert!(
+            call_positions(&text, ".broadcast").is_empty(),
+            "公告推送不得回退到全局广播（那会让公告跨租户可见）"
+        );
+    }
+
+    /// 判据活性：缺陷形状必须被抓、合规写法必须不误报（两个方向都要有真受约束的样本）。
+    #[test]
+    fn unscoped_broadcast_lock_is_falsifiable() {
+        fn hits_in(src: &str) -> Vec<String> {
+            let f = ProdFile {
+                rel: "x.rs".to_string(),
+                lines: prod_scan::normalize(src, &Scan::default()),
+            };
+            global_broadcast_hits(&[f])
+        }
+
+        // 必须抓到：方法调用 / 带空格的调用 / 直达模块函数
+        assert_eq!(
+            hits_in("fn f(state: &AppState) { state.broadcast(\"x\", v); }").len(),
+            1
+        );
+        assert_eq!(
+            hits_in("fn f(state: &AppState) { state.broadcast (\"x\", v); }").len(),
+            1
+        );
+        assert_eq!(
+            hits_in("crate::handler::ws_handler::broadcast(&state, \"x\", v);").len(),
+            1
+        );
+
+        // 不得误报：定向投递（方法前缀只差一个下划线）、tokio 通道、整行注释
+        assert!(hits_in("state.broadcast_to_tenant(1, \"x\", v);").is_empty());
+        assert!(hits_in("state.broadcast_to_user(1, \"x\", v);").is_empty());
+        assert!(hits_in("let (tx, _rx) = tokio::sync::broadcast::channel(16);").is_empty());
+        assert!(hits_in("// state.broadcast() 在生产码里禁用\nfn f() {}").is_empty());
     }
 }
