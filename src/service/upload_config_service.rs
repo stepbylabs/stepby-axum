@@ -251,8 +251,11 @@ impl UploadConfigService {
             self.write_key(KEY_PUBLIC_ENDPOINT, v.trim()).await?;
         }
         // 热生效：失效 sys_config 缓存（cache-aside 下次读新值）+ 重置后端缓存
-        // （下次 resolve_s3_backend 按新指纹重建，旧实例 Arc 存活至在途请求结束）
-        self.config_service.refresh_cache().await?;
+        // （下次 resolve_s3_backend 按新指纹重建，旧实例 Arc 存活至在途请求结束）。
+        // 旁路语义：七键已写库，刷新失败不把"保存成功"变成 5xx。
+        self.config_service
+            .refresh_cache_best_effort("upload.config")
+            .await;
         *self.cached_backend.write().await = None;
         tracing::info!(
             operator_manual = true,
@@ -322,7 +325,10 @@ impl UploadConfigService {
         self.config_service
             .set_platform_value(KEY_BACKEND_MODE, mode)
             .await?;
-        self.config_service.refresh_cache().await?;
+        // 旁路语义同上方写路径：档位已落库，缓存失效失败只留痕（TTL 300s 内自愈）
+        self.config_service
+            .refresh_cache_best_effort("upload.backend_mode")
+            .await;
         Ok(())
     }
 

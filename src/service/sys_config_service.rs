@@ -938,34 +938,56 @@ impl SysConfigService {
         Ok(())
     }
 
-    /// 刷新缓存
+    /// 刷新缓存（**严格语义**：失败必须如实上报，不把"没删掉"说成"刷新成功"）
     ///
-    /// H-4：扫描并清除所有 config 缓存键。best-effort，Redis 错误仅记日志不影响业务。
+    /// 调用方分两类，口径**刻意不同**：
+    /// - 显式"刷新缓存"端点（`DELETE /system/config/refreshCache`）——刷新本身就是用户动作，
+    ///   scan/del 失败返回 `Err` 由 handler 映射为 5xx。此前的实现无论成败都 `Ok(())`
+    ///   （只打 WARN），于是界面弹"刷新成功"而 Redis 里的旧值一个没删，管理员会以为
+    ///   其它节点已经拿到新配置（假成功，AGENTS ㊶ ②）；
+    /// - 写路径后的旁路失效（AI / 上传配置写完顺手刷新）——主写已提交，旁路失败
+    ///   不该把"保存成功"变成 5xx，走 [`Self::refresh_cache_best_effort`]。
     ///
     /// §27.8 两层缓存：前缀 `CONFIG_CACHE_PREFIX`（`config:`）是**两层共同前缀**，
     /// 既可命中租户覆盖层（`config:{tid}:{key}`），也可命中平台默认层（`config:def:{key}`，
     /// 由 `CONFIG_DEFAULT_CACHE_PREFIX` 构造），故一次 `config:*` 扫描即覆盖两层。
-    pub async fn refresh_cache(&self) -> Result<(), ServiceError> {
+    ///
+    /// 返回实际删除的键数（0 是正常结局：本来就没有缓存键）。
+    pub async fn refresh_cache(&self) -> Result<u64, ServiceError> {
         let pattern = format!("{}*", CONFIG_CACHE_PREFIX);
         // 第九批：改用 **不截断** 扫描。本函数语义是"清除**所有** config 缓存键"，
         // 原 `scan_keys(.., 5000)` 超限即静默截断 ⇒ 超 5000 键时残留陈旧缓存，
         // 配置更新后部分键仍返回旧值（与"刷新缓存"的意图直接冲突）。
         // pattern 为固定前缀 `config:*`（非通配 `*`），无海量键 OOM 风险。
-        let keys = match self.store.scan(&pattern, None).await {
-            Ok(ks) => ks,
-            Err(e) => {
-                tracing::warn!("刷新配置缓存时扫描键失败: {}", e);
-                return Ok(());
-            }
-        };
+        let keys = self
+            .store
+            .scan(&pattern, None)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("扫描配置缓存键失败: {e}")))?;
         if keys.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         // 批量删除（原分批 pipeline 语义——del 单次多键等价；local 档逐键删除天然部分成功）
-        if let Err(e) = self.store.del(&keys).await {
-            tracing::warn!("刷新配置缓存时批量删除失败: {}", e);
+        let count = self
+            .store
+            .del(&keys)
+            .await
+            .map_err(|e| ServiceError::internal(&format!("删除配置缓存键失败: {e}")))?;
+        tracing::debug!(count, "配置缓存已刷新");
+        Ok(count)
+    }
+
+    /// 写路径后的旁路失效（best-effort：主写已提交，失败只留痕不阻断）
+    ///
+    /// `who` 只做日志归因，不分叉行为——两条调用路径的失效面必须同源（`config:*` 全量）。
+    pub async fn refresh_cache_best_effort(&self, who: &str) {
+        if let Err(e) = self.refresh_cache().await {
+            tracing::warn!(
+                who,
+                error = %e,
+                "配置缓存刷新失败：旧值可能残留至 TTL（主流程已提交，不阻断本次请求）"
+            );
         }
-        Ok(())
     }
 
     /// 导出参数配置（全量查询不分页；治理视图，§27.8）
@@ -1128,5 +1150,62 @@ mod tests {
         }
         // 未登记键（租户自建 tenant_private 业务配置）：注册表不管它
         assert!(SysConfigService::ensure_value_writable("tenant.custom.any", Some("x")).is_ok());
+    }
+
+    /// ⑥ 刷新缓存的**两种结局**（b105 收口"刷新成功但一个键都没删"的假成功）
+    ///
+    /// 一条用例同时钉住两档语义，缺任一条另一条都可以被"一律 Ok / 一律 Err"实现蒙过：
+    /// - 正常路径：只删 `config:*`（两层前缀），别的用途的键一个不动，返回真实删除数；
+    /// - 故障注入（关闭连接池 ⇒ scan 必然失败）：严格入口必须 `Err`（显式用户动作不得假成功），
+    ///   `refresh_cache_best_effort` 必须吞掉错误（主写已提交，不得把保存变成 5xx）。
+    #[tokio::test]
+    async fn refresh_cache_is_strict_for_explicit_calls_and_best_effort_for_side_effects() {
+        use crate::repository::test_support::migrated_db;
+        use crate::shared_store::{LocalStore, SharedStore};
+        use std::sync::Arc;
+
+        let db = migrated_db().await.expect("迁移后的临时库");
+        let store: Arc<dyn SharedStore> = Arc::new(LocalStore::new(db.clone()));
+        let svc = SysConfigService::new(db.clone(), store.clone());
+
+        for (k, v) in [
+            ("config:def:sys.index.sideTheme", "theme-dark"),
+            ("config:7:sys.index.sideTheme", "theme-light"),
+            ("perm:user:1", "keep"),
+            ("dict:7:sys_normal_disable", "keep"),
+        ] {
+            store.set_ex(k, v, 300).await.expect("预置缓存键");
+        }
+        let deleted = svc.refresh_cache().await.expect("正常路径必须成功");
+        assert_eq!(deleted, 2, "只应删除两层 config 前缀键");
+        for k in [
+            "config:def:sys.index.sideTheme",
+            "config:7:sys.index.sideTheme",
+        ] {
+            assert_eq!(store.get(k).await.expect("读取"), None, "{k} 必须被删");
+        }
+        // 对照组：别的用途的键不得被"刷新配置缓存"顺手清掉
+        for k in ["perm:user:1", "dict:7:sys_normal_disable"] {
+            assert_eq!(
+                store.get(k).await.expect("读取").as_deref(),
+                Some("keep"),
+                "{k} 不属于 config 前缀，不得被波及"
+            );
+        }
+
+        // 故障注入：连接池关闭后 scan 必然报错
+        db.close().await.expect("关闭连接池");
+        let err = svc
+            .refresh_cache()
+            .await
+            .expect_err("存储不可用时严格入口必须如实报错，不得回复'刷新成功'");
+        assert_eq!(err.code, 500, "应映射为 5xx: {}", err.message);
+        assert!(
+            err.message.contains("扫描配置缓存键失败"),
+            "错误文案必须点名失败阶段，实际: {}",
+            err.message
+        );
+        // best-effort 档不得 panic / 不得上抛（只留 WARN）
+        svc.refresh_cache_best_effort("test").await;
     }
 }

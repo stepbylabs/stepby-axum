@@ -238,8 +238,11 @@ impl AiConfigService {
                 .join(","),
         )
         .await?;
-        // 热生效：失效 sys_config 缓存（cache-aside 下次读新值）
-        self.config_service.refresh_cache().await?;
+        // 热生效：失效 sys_config 缓存（cache-aside 下次读新值）。
+        // 旁路语义：六键已写库，刷新失败不把"保存成功"变成 5xx（b105 收口假成功时拆出的两档）。
+        self.config_service
+            .refresh_cache_best_effort("ai.config")
+            .await;
         tracing::info!(
             operator_manual = true,
             "AI 助手配置已更新（sys.ai.* 六键，热生效）"

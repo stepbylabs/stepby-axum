@@ -229,13 +229,19 @@ pub async fn remove(
 /// DELETE /system/config/refreshCache
 /// 刷新参数缓存
 ///
-/// 当前后端参数查询直接走 DB，无 Redis 缓存层，此接口直接返回成功。
+/// 生效参数走**两层共享缓存**（平台默认层 `config:def:{key}` + 租户覆盖层
+/// `config:{tid}:{key}`，TTL 300s，见 `SysConfigService::get_config_value_by_key_cached`），
+/// 本接口扫描并删除全部 `config:*` 键，令其它节点/进程的下一次读取回落查库。
+///
+/// **不是 no-op**（旧文档写"直接走 DB、无缓存层"与实现相反）：scan/del 失败一律 5xx ——
+/// 这是显式用户动作，不能把"一个键都没删掉"答复成"刷新成功"。
 #[utoipa::path(
     delete,
     path = "/system/config/refreshCache",
     responses(
         (status = 200, description = "刷新成功", body = AjaxResult<serde_json::Value>),
-        (status = 500, description = "服务器错误"),
+        (status = 429, description = "缓存维护入口繁忙"),
+        (status = 500, description = "扫描或删除缓存键失败"),
     ),
     tag = "system-config"
 )]
@@ -243,7 +249,8 @@ pub async fn refresh_cache(State(state): State<Arc<AppState>>) -> Result<AjaxRes
     let _gate = crate::common::resource_gate::try_enter(
         crate::common::resource_gate::HeavyEntry::CacheMaintenance,
     )?;
-    state.config_service.refresh_cache().await?;
+    let deleted = state.config_service.refresh_cache().await?;
+    tracing::debug!(deleted, "参数缓存已刷新（显式请求）");
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.refresh")))
 }
 
