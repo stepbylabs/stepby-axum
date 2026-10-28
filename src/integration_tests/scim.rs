@@ -484,3 +484,98 @@ async fn test_scim_external_id_and_events() {
 }
 // v5-D12 Group：原 Groups 501 显式边界测试已随真实现移除——
 // Group CRUD/联动授权/删除语义的完整替代测试见 integration_tests/scim_groups.rs。
+
+/// b104：SCIM deprovision（DELETE / PATCH active=false / PUT active=false）必须**立即**
+/// 撤销该用户既有会话。
+///
+/// 立案：auth 中间件不查 `sys_user.status`，SCIM 停用此前只把 status 改成 '1'
+/// ⇒ IdP 那边显示"已停用"，而平台 JWT 与不透明 SSO AT 仍可用到各自 TTL 结束。
+/// 本用例用 admin 通道建一个**已知口令**的用户拿真实 JWT，再由 SCIM DELETE 停用，
+/// 旧令牌下一次请求必须 401（撤权走 `SharedStore::revoke_credentials`）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scim_deprovision_revokes_existing_sessions() {
+    let ctx = scim_ctx().await;
+
+    // ① 管理员建一个可登录用户（与 SCIM 同租户 0，find_active 可命中）
+    let v = ctx
+        .post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": "it_scim_revoke_user",
+                "nickName": "SCIM 撤权目标",
+                "email": "stepby@tzkj.net",
+                "phonenumber": "13800006666",
+                "password": "Stepby@12345",
+                "status": "0",
+                "roleIds": [2]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/system/user/list?userName=it_scim_revoke_user")
+        .await;
+    let user_id = v["rows"][0]["userId"]
+        .as_i64()
+        .expect("应查到目标用户 userId");
+
+    // ② 目标用户登录，令牌可用
+    let user_peer = super::next_peer_ip();
+    let token = super::login(&ctx.app, user_peer, "it_scim_revoke_user", "Stepby@12345").await;
+    let (status, _) = ctx
+        .send_raw(
+            Request::builder()
+                .method("GET")
+                .uri("/system/user/profile")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("构造请求失败"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "停用前令牌应可用");
+
+    // ③ SCIM deprovision（DELETE = 停用）
+    let (status, _, body) = raw_delete(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Users/{user_id}"),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "SCIM delete 应 204: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // ④ 旧令牌**立即**失效（修复前：仍 200，直到 JWT 自然过期）
+    let (status, _) = ctx
+        .send_raw(
+            Request::builder()
+                .method("GET")
+                .uri("/system/user/profile")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("构造请求失败"),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "SCIM deprovision 后旧令牌必须立即被拒（不能等到 TTL）"
+    );
+
+    // ⑤ 停用态不允许重新登录
+    let (status, _, _) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/login",
+        "application/json",
+        r#"{"username":"it_scim_revoke_user","password":"Stepby@12345","code":"","uuid":""}"#,
+        &[],
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "已停用账号不得登录");
+}

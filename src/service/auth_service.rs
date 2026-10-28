@@ -18,8 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use garde::Validate;
-// ConnectionTrait：read_pwd_ver_from_db 直读 DB（query_one/get_database_backend）需要
-use sea_orm::{ConnectionTrait, Set};
+use sea_orm::Set;
 use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Builder, Secret};
 use utoipa::ToSchema;
@@ -1183,19 +1182,29 @@ impl AuthService {
         // 1. JWT 签发（M-7：generate_token 同时返回 claims，避免后续重复 verify）
         //    P0-R81-007：签发时读取当前密码版本号写入 claim，
         //    auth 中间件据此判定 token 是否在密码变更前签发（旧 token 立即失效）。
-        //    pwd_ver 权威 = 两档共用的 DB 列（sys_user.password_version：redis 档 INCR 双写同步该列，
-        //    local 档原生即该列），登录签发直接读库，两档统一、权威一致（见 read_pwd_ver_from_db）。
-        //    读取失败视为 0（fail-open，仅影响旧 token 失效判断；store 不可用时中间件会 fail-closed 拒绝）。
+        //    b104：**必须经 SharedStore 读取**——那是闸门下一请求要比较的同一事实源
+        //    （redis 档 = `pwd_ver:{uid}`、local 档 = `sys_user.password_version`）。
+        //    此前直读 DB 列：redis 档双写失败一次后 DB 列永久落后，新令牌当场被闸门拒绝，
+        //    该账号此后每次登录都 401（见 `RedisStore::pwd_ver_incr` 的收敛订正）。
+        //    读取失败 fail-closed：签一个注定被拒的令牌比明确报错更糟。
         let user_id = user.user_id.to_string();
-        let pwd_ver: Option<u64> = self
-            .read_pwd_ver_from_db(user.user_id)
+        let pwd_ver: u64 = store
+            .pwd_ver_read(&user_id)
             .await
-            .unwrap_or(None);
+            .map_err(|e| {
+                tracing::error!(
+                    user_id = %user_id,
+                    error = %e,
+                    "登录签发：密码版本号读取失败（fail-closed 拒绝签发）"
+                );
+                ServiceError::new(503, crate::tr!("error.auth.auth_unavailable"))
+            })?
+            .unwrap_or(0);
         let (token, claims) = JwtUtils::generate_token(
             &user_id,
             ctx.username,
             jwt_config,
-            pwd_ver.unwrap_or(0),
+            pwd_ver,
             // v5-N2 Phase 2：登录查库带出真实 tid（当前存量用户恒 0 = 平台单租户）
             user.tenant_id,
         )?;
@@ -1894,29 +1903,6 @@ impl AuthService {
     }
 
     // ==================== 内部辅助方法 ====================
-
-    /// 登录签发期读取密码版本号（DB 直读，S1 权威层）：`SELECT password_version FROM sys_user WHERE user_id = ?`
-    ///
-    /// 为什么此读点不落 SharedStore：trait 只有 `pwd_ver_incr`（写）与 `auth_gate_check`
-    /// （需 token_hash，登录时无 token），没有独立的 pwd_ver 读方法。
-    /// v5.1 双写后 DB 列是两档共用的权威（redis 档 `pwd_ver_incr` 同步 INCR 该列，local 档
-    /// 原生即该列），故登录签发 JWT 时直接读库，两档统一、权威一致。
-    /// 行不存在 = None = 未设置（调用方按 0 处理，与原 `pwd_ver:{uid}` 键缺失语义等价）。
-    async fn read_pwd_ver_from_db(&self, user_id: i64) -> Result<Option<u64>, sea_orm::DbErr> {
-        let db = self.logininfor_repo.base().db();
-        let row = db
-            .query_one_raw(crate::common::sql_dialect::stmt(
-                db.get_database_backend(),
-                "SELECT password_version FROM sys_user WHERE user_id = ?",
-                [user_id.into()],
-            ))
-            .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let ver: Option<i64> = row.try_get("", "password_version")?;
-        Ok(ver.and_then(|v| u64::try_from(v.max(0)).ok()))
-    }
 
     /// 记录登录失败次数（原 INCR + EXPIRE Lua 原子语义由 store.incr_with_ttl 承载，防止计数永不过期）
     async fn record_login_failure(

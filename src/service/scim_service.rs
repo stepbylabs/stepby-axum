@@ -18,10 +18,12 @@
 
 use crate::entity::sys_user;
 use crate::repository::sys_user::SysUserRepository;
+use crate::shared_store::SharedStore;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
     EntityTrait, QueryFilter, Set, TransactionTrait, Value,
 };
+use std::sync::Arc;
 
 /// SCIM User 资源（响应体）
 #[derive(Debug, serde::Serialize)]
@@ -151,14 +153,35 @@ pub struct ScimService {
     /// v5-N2 Phase 3：SCIM 凭据归属租户。该凭据 provisioning 出的用户归属此租户，
     /// 读路径亦按此租户过滤（0 = 平台租户，读不过滤 + 写归属平台 0）。
     tenant_id: i64,
+    /// b104：停用（`active=false` / DELETE）后的凭据撤权出口
+    /// （`SharedStore::revoke_credentials` = pwd_ver 递增 + SSO 令牌全量吊销）。
+    store: Arc<dyn SharedStore>,
 }
 
 impl ScimService {
-    pub fn new(db: DatabaseConnection, tenant_id: i64) -> Self {
+    pub fn new(db: DatabaseConnection, tenant_id: i64, store: Arc<dyn SharedStore>) -> Self {
         Self {
             user_repo: SysUserRepository::new(db),
             tenant_id,
+            store,
         }
+    }
+
+    /// 停用后的凭据撤权（b104）。
+    ///
+    /// SCIM 是 IdP 的 deprovision 通道：**停用必须立即让旧会话失效**。auth 中间件不查
+    /// `sys_user.status`，只把 status 改成 '1' 等于把平台 JWT 与不透明 SSO 访问令牌
+    /// 留到各自 TTL 结束（PAT 侧另有 `verify_token` 回查属主，不受此影响）。
+    /// 失败上抛 SCIM 500：status 已落库，DELETE / PUT / PATCH 都是幂等操作，
+    /// IdP 重放同一请求即会重试撤权。
+    async fn revoke_after_deactivation(&self, user_id: i64) -> Result<(), ScimError> {
+        self.store
+            .revoke_credentials(&user_id.to_string())
+            .await
+            .map_err(|e| {
+                tracing::error!(user_id, error = %e, "SCIM 停用后会话吊销失败（fail-closed）");
+                ScimError::new(500, format!("会话吊销失败，请重试: {e}"))
+            })
     }
 
     fn db(&self) -> &DatabaseConnection {
@@ -557,6 +580,10 @@ impl ScimService {
             .update(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
+        // b104：PUT 把 active 置 false ⇒ 停用，必须立即撤权（见 revoke_after_deactivation）
+        if saved.status.as_deref() == Some("1") {
+            self.revoke_after_deactivation(id).await?;
+        }
         Ok(self.to_scim_user(&ScimUserFields::from(&saved), base_url))
     }
 
@@ -645,6 +672,12 @@ impl ScimService {
             .update(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
+        // b104：PATCH 把 active 置 false ⇒ 停用，必须立即撤权。
+        // 判据取**结果状态**而非"本次是否发生跃迁"：撤权失败时 status 已落库，
+        // 若按跃迁判，IdP 重试同一 PATCH 会跳过撤权 ⇒ 永久不撤。
+        if saved.status.as_deref() == Some("1") {
+            self.revoke_after_deactivation(id).await?;
+        }
         Ok(self.to_scim_user(&ScimUserFields::from(&saved), base_url))
     }
 
@@ -659,6 +692,9 @@ impl ScimService {
         am.update(self.db())
             .await
             .map_err(|e| ScimError::new(500, format!("数据库错误: {e}")))?;
+        // b104：deprovision 必须立即撤权——否则 IdP 那边"已停用"，而平台 JWT / SSO AT
+        // 仍可用到各自 TTL 结束（auth 中间件不查 sys_user.status）
+        self.revoke_after_deactivation(id).await?;
         Ok(())
     }
 

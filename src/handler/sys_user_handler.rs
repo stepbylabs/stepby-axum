@@ -551,6 +551,7 @@ pub async fn edit(
         (status = 200, description = "删除成功", body = AjaxResult<serde_json::Value>),
         (status = 400, description = "不允许删除超级管理员或 ID 不合法"),
         (status = 404, description = "用户不存在"),
+        (status = 500, description = "会话吊销失败，已取消删除（可重试）"),
     ),
     tag = "system-user"
 )]
@@ -604,40 +605,34 @@ pub async fn remove(
         }
     }
 
+    // b104：撤权必须排在删除**之前**——删除是破坏性且不可重放的操作（用户行已软删后
+    // 重试只会拿到 404），而 `pwd_ver` 递增与 SSO 令牌索引都以"用户行仍在"为前提。
+    // 原先的"先删后撤权 + 撤权失败 return Err"是一条走不通的路：错误已报出，用户已删除，
+    // 管理员重试得到 404，旧令牌却仍在 TTL 内可用。
+    // 预校验先跑一遍（超管保护 / 垂直越权 / 租户归属）：被拒绝的删除不得顺带把目标踢下线。
+    state
+        .user_service
+        .validate_delete_targets(&user_ids, operator_user_id, operator.tenant_id())
+        .await?;
+    for uid in &user_ids {
+        if let Err(e) = state.store.revoke_credentials(&uid.to_string()).await {
+            tracing::error!(
+                user_ids = ?user_ids,
+                user_id = *uid,
+                error = %e,
+                "删除用户前会话吊销失败（尚未执行删除；fail-closed 上抛，可重试）"
+            );
+            return Err(AppError::internal(&crate::tr!(
+                "error.user.delete_revoke_failed"
+            )));
+        }
+    }
+
     let deleted_user_ids = user_ids.clone();
     state
         .user_service
         .delete_users(user_ids, operator_user_id, operator.tenant_id())
         .await?;
-
-    // P0-5 修复：用户删除后失效其活动会话
-    // P0-R81-007 版本号机制：递增 pwd_ver，使被删除用户已签发的 JWT 在 auth 中间件被拒绝
-    // （auth.rs 检查存储当前版本 > claim.pwd_ver 则返回 401）。
-    // 版本号单调递增，无需 TTL；fail-closed：写入失败返回错误，避免旧 token 继续可用。
-    // 原 Redis pipeline 批量 INCR → 逐用户 `store.pwd_ver_incr`（内部含 Redis INCR +
-    // DB password_version 列双写，均已封装进实现）
-    if !deleted_user_ids.is_empty() {
-        for uid in &deleted_user_ids {
-            if let Err(e) = state.store.pwd_ver_incr(&uid.to_string()).await {
-                tracing::error!(
-                    user_ids = ?deleted_user_ids,
-                    error = %e,
-                    "删除用户后递增 pwd_ver 标记失败（fail-closed）"
-                );
-                return Err(AppError::internal(&crate::tr!(
-                    "error.user.pwd_reset_token_invalidate_failed"
-                )));
-            }
-        }
-        // v4 #18：删除用户同步吊销其全部 SSO 访问令牌（sso:at:* + online:*）——
-        // userinfo 只认绑定不校验 pwd_ver，不做联动则旧 AT 在 TTL 内仍可换取身份
-        // （原 sso_service::revoke_user_sso_tokens 语义已收敛为 store.revoke_all_for_user）
-        for uid in &deleted_user_ids {
-            if let Err(e) = state.store.revoke_all_for_user(&uid.to_string()).await {
-                tracing::warn!(user_id = *uid, error = %e, "删除用户后吊销 SSO 令牌失败");
-            }
-        }
-    }
 
     // v5-D12 Group：用户删除联动清理 SCIM 组成员记录与 scim 来源授权/兼职
     // （失败不阻断删除主流程——成员记录悬挂仅影响组详情展示，grant 引擎对
@@ -796,7 +791,8 @@ pub async fn anonymize_user(
     request_body = ChangeStatusDto,
     responses(
         (status = 200, description = "修改成功", body = AjaxResult<serde_json::Value>),
-        (status = 400, description = "参数错误、不允许停用超管或 Redis 写入失败"),
+        (status = 400, description = "参数错误或不允许停用超管"),
+        (status = 500, description = "状态已更新但会话吊销失败（可重试）"),
     ),
     tag = "system-user"
 )]
@@ -816,11 +812,14 @@ pub async fn change_status(
     // SharedStore 迁移后的 R2 级联修复：原"先 INCR pwd_ver → UPDATE DB → 失败 DECR 回滚"
     // 两阶段补偿随 `store.pwd_ver_incr` 内部双写（Redis INCR + DB password_version 列
     // 同步均在实现内）而简化——新顺序 = 先 UPDATE DB 用户状态，成功后递增版本号。
-    // 原 DECR 补偿随双写落库简化删除（Redis 与 DB 列一致性由实现单点维护）；
-    // pwd_ver_incr 失败仅 WARN——DB 列双写失败不破坏 Redis 当期安全。
+    //
+    // b104：撤权失败**不得静默**。auth 中间件不查 `sys_user.status`，"已停用"的账号
+    // 是否真的失去访问能力，完全取决于撤权那两条腿（pwd_ver 递增 + SSO 令牌吊销）。
+    // 现已收进 `update_user_status` 服务层（所有停用入口共用，失败上抛）——
+    // 放在服务层而不是 handler，是为了让编辑表单 / 批量导入 / 未来入口自动继承同一约束。
     let needs_pwd_changed = dto.status == "1";
 
-    // 步骤1：更新 DB 用户状态
+    // 步骤1：更新 DB 用户状态 + 撤权（服务层单一出口）
     state
         .user_service
         .update_user_status(
@@ -832,25 +831,9 @@ pub async fn change_status(
         )
         .await?;
 
-    // 步骤2：DB 成功后递增 pwd_ver + 吊销 SSO 令牌
+    // 步骤2：停用后的离岗联动（转办非阻断：停用已生效，失败仅告警）
     if needs_pwd_changed {
-        if let Err(e) = state.store.pwd_ver_incr(&dto.user_id.to_string()).await {
-            tracing::warn!(
-                user_id = dto.user_id,
-                error = %e,
-                "停用用户后递增 pwd_ver 失败（原 DECR 补偿随双写落库简化删除）"
-            );
-        }
-        // v4 #18：停用用户同步吊销其全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
-        if let Err(e) = state
-            .store
-            .revoke_all_for_user(&dto.user_id.to_string())
-            .await
-        {
-            tracing::warn!(user_id = dto.user_id, error = %e, "停用用户后吊销 SSO 令牌失败");
-        }
         // W-4：停用即离岗 → 其 pending 审批待办自动转办（部门主管 → admin 回退）
-        // 非阻断：停用已生效，转办失败仅告警（待办保持 pending，可由管理员人工转办）
         auto_reassign_flow_tasks(&state, dto.user_id).await;
     }
 
@@ -865,8 +848,9 @@ pub async fn change_status(
     request_body = UserPwdResetDto,
     responses(
         (status = 200, description = "重置成功", body = AjaxResult<serde_json::Value>),
-        (status = 400, description = "参数错误或 Redis 写入失败"),
+        (status = 400, description = "参数错误"),
         (status = 404, description = "用户不存在"),
+        (status = 500, description = "密码已重置但会话吊销失败（可重试）"),
     ),
     tag = "system-user"
 )]
@@ -885,8 +869,10 @@ pub async fn reset_pwd(
     // P0-C1 / P0-R81-007：版本号单调递增，无需 TTL（auth 中间件据此使旧 token 立即失效）。
     //
     // SharedStore 迁移后的 R2 级联修复（同 change_status）：先更新 DB 密码，成功后调
-    // `store.pwd_ver_incr`（内部含 Redis INCR + DB 列双写）；原 DECR 补偿随双写落库
-    // 简化删除；pwd_ver_incr 失败仅 WARN——DB 列双写失败不破坏 Redis 当期安全。
+    // `store.revoke_credentials`（版本号递增 + SSO 令牌吊销，单一出口）。
+    //
+    // b104：撤权失败改 fail-closed（原先仅 WARN 后返回"重置成功"——旧会话仍然可用）。
+    // 密码已落库；管理员重试同一请求（同一新口令）即会重试撤权，属可重放操作。
     //
     // 步骤1：更新 DB 密码
     state
@@ -899,18 +885,16 @@ pub async fn reset_pwd(
         )
         .await?;
 
-    // 步骤2：递增 pwd_ver（返回新版本号，本流程无需消费）+ 吊销 SSO 令牌
-    if let Err(e) = state.store.pwd_ver_incr(&user_id.to_string()).await {
-        tracing::warn!(
+    // 步骤2：撤权（pwd_ver 递增 + 吊销全部 SSO 令牌）
+    if let Err(e) = state.store.revoke_credentials(&user_id.to_string()).await {
+        tracing::error!(
             user_id,
             error = %e,
-            "重置密码后递增 pwd_ver 失败（原 DECR 补偿随双写落库简化删除）"
+            "重置密码后会话吊销失败（密码已落库，撤权未完成；fail-closed 上抛，可重试）"
         );
-    }
-
-    // v4 #18：重置密码同步吊销该用户全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
-    if let Err(e) = state.store.revoke_all_for_user(&user_id.to_string()).await {
-        tracing::warn!(user_id, error = %e, "重置密码后吊销 SSO 令牌失败");
+        return Err(AppError::internal(&crate::tr!(
+            "error.user.pwd_reset_token_invalidate_failed"
+        )));
     }
 
     Ok(AjaxResult::success_msg(&crate::tr!(
@@ -929,6 +913,7 @@ pub async fn reset_pwd(
     responses(
         (status = 200, description = "改密成功", body = AjaxResult<serde_json::Value>),
         (status = 400, description = "参数错误或旧密码错误"),
+        (status = 500, description = "密码已修改但会话吊销失败（请重新登录）"),
     ),
     tag = "system-user"
 )]
@@ -949,8 +934,11 @@ pub async fn update_profile_pwd(
     // P0-C1 / P0-R81-007：版本号机制使旧 token 立即失效。
     //
     // SharedStore 迁移后的 R2 级联修复（同 change_status）：先更新 DB 密码，成功后调
-    // `store.pwd_ver_incr`（内部含 Redis INCR + DB 列双写）；原 DECR 补偿随双写落库
-    // 简化删除；pwd_ver_incr 失败仅 WARN——DB 列双写失败不破坏 Redis 当期安全。
+    // `store.revoke_credentials`（版本号递增 + SSO 令牌吊销，单一出口）。
+    //
+    // b104：撤权失败改 fail-closed。本人的旧口令已经不存在，重试同一请求不再可行，
+    // 因此错误文案直接指向"重新登录"——但**不得**降级成成功提示：其它设备上被窃的
+    // 旧令牌是否已失效，正是这一步在保证。
     //
     // 步骤1：更新 DB 密码
     state
@@ -958,18 +946,16 @@ pub async fn update_profile_pwd(
         .update_user_password(user_id, pwd_dto)
         .await?;
 
-    // 步骤2：递增 pwd_ver（返回新版本号，本流程无需消费）+ 吊销 SSO 令牌
-    if let Err(e) = state.store.pwd_ver_incr(&user_id.to_string()).await {
-        tracing::warn!(
+    // 步骤2：撤权（pwd_ver 递增 + 吊销本人全部 SSO 令牌）
+    if let Err(e) = state.store.revoke_credentials(&user_id.to_string()).await {
+        tracing::error!(
             user_id,
             error = %e,
-            "改密后递增 pwd_ver 失败（原 DECR 补偿随双写落库简化删除）"
+            "改密后会话吊销失败（密码已落库，撤权未完成；fail-closed 上抛）"
         );
-    }
-
-    // v4 #18：改密同步吊销本人全部 SSO 访问令牌（pwd_ver 不约束不透明 AT）
-    if let Err(e) = state.store.revoke_all_for_user(&user_id.to_string()).await {
-        tracing::warn!(user_id, error = %e, "改密后吊销 SSO 令牌失败");
+        return Err(AppError::internal(&crate::tr!(
+            "error.user.pwd_change_token_invalidate_failed"
+        )));
     }
 
     Ok(AjaxResult::success_msg(&crate::tr!(

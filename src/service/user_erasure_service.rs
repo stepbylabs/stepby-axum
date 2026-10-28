@@ -316,15 +316,18 @@ impl UserErasureService {
         let (pat_count, sso_binding_count, online_session_count) =
             self.collect_counts(user_id, target.tenant_id).await;
 
-        // ① 会话失效标记（复用 delete_user / change_status 的既有机制）：
-        //    递增 `pwd_ver:{uid}`（store.pwd_ver_incr 内部含 Redis INCR + DB password_version
-        //    列双写），使已签发 JWT 在 auth 中间件被拒绝。
+        // ① 会话失效（复用 delete_user / change_status 的同一出口）：
+        //    `store.revoke_credentials` = 递增 `pwd_ver`（使已签发 JWT 在 auth 中间件被拒）
+        //    + 全量吊销该用户 SSO 令牌（userinfo 只认绑定、不校验 pwd_ver）。
         //    fail-closed：写入失败则中止（不留"密码已清空但旧会话仍可用"的窗口）。
+        //    b104：两条腿必须都在**破坏性写入之前**完成——匿名化后用户行已被改写，
+        //    任何"先匿名化再撤权、失败只记日志"的顺序都无法重放，且旧 AT 在 TTL 内仍可
+        //    换到身份（GDPR 语境下这是实质缺陷，不是理论窗口）。
         self.store
-            .pwd_ver_incr(&user_id.to_string())
+            .revoke_credentials(&user_id.to_string())
             .await
             .map_err(|e| {
-                tracing::error!(user_id, error = %e, "匿名化前递增 pwd_ver 失败（fail-closed 中止）");
+                tracing::error!(user_id, error = %e, "匿名化前会话吊销失败（fail-closed 中止）");
                 ServiceError::internal(&crate::tr!("error.user.erasure_revoke_failed"))
             })?;
 
@@ -368,13 +371,6 @@ impl UserErasureService {
             .map_err(|e| ServiceError::internal(&format!("提交事务失败: {e}")))?;
         if pat_revoked > 0 {
             tracing::info!(user_id, pat_revoked, "匿名化：PAT 已吊销");
-        }
-
-        // ③ 吊销该用户全部 SSO access/refresh token 及其在线会话
-        //    （原 sso_service::revoke_user_sso_tokens 语义已收敛为 store.revoke_all_for_user；
-        //    best-effort 与原函数一致：失败仅记日志，DB 已匿名化 + pwd_ver 已失效当期会话）
-        if let Err(e) = self.store.revoke_all_for_user(&user_id.to_string()).await {
-            tracing::error!(user_id, error = %e, "匿名化：SSO 令牌全量吊销失败");
         }
 
         tracing::warn!(

@@ -154,6 +154,33 @@ pub trait SharedStore: Send + Sync {
     /// 返回递增后的新版本号。
     async fn pwd_ver_incr(&self, uid: &str) -> Result<u64, StoreError>;
 
+    /// 读取当前密码版本号——**必须与 [`SharedStore::auth_gate_check`] 读同一事实源**。
+    ///
+    /// 登录签发 JWT 时写入 claim 的 `pwd_ver` 就是闸门下一请求要比对的版本号；两处若各读
+    /// 一个源（b104 前的现实：登录读 DB 列、redis 档闸门读 Redis 键），双写任一侧失败都会
+    /// 让新签发的令牌**当场被自己的闸门拒绝**——且 DB 列落后是永久的（`+1` 同步不会追平），
+    /// 该账号此后每次登录都 401，只能人工修库。
+    ///
+    /// 返回口径与闸门一致：`None` = 未设置（按 0 处理）/ 行不存在；损坏值同闸门按 `None`。
+    async fn pwd_ver_read(&self, uid: &str) -> Result<Option<u64>, StoreError>;
+
+    /// **凭据撤权的唯一出口**（改密 / 重置 / 停用 / 删除 / 匿名化）：先递增密码版本号，
+    /// 再全量吊销该用户的 SSO 访问令牌。
+    ///
+    /// 两条腿缺一不可、且**任一步失败都必须上抛**：
+    /// - `pwd_ver` 不约束不透明 SSO AT（userinfo 只认绑定），只递增版本号等于把 AT 留着；
+    /// - 只吊销 SSO AT 而不递增版本号，平台 JWT 会继续通过闸门——而 auth 中间件**不查**
+    ///   `sys_user.status`，"已停用"的账号因此仍可全功能访问。
+    ///
+    /// 调用方**不得**把失败降级成 WARN 后照常返回成功（b104 前四处如此）：那等于对管理员
+    /// 宣布"已停用/已改密"而旧会话仍然可用。失败后的重试必须由调用方保证可重放
+    /// （停用/重置可重复提交；删除/匿名化须把撤权排在破坏性写入**之前**）。
+    async fn revoke_credentials(&self, uid: &str) -> Result<(), StoreError> {
+        self.pwd_ver_incr(uid).await?;
+        self.revoke_all_for_user(uid).await?;
+        Ok(())
+    }
+
     // ══ S2 一次性/短期态 ══
 
     /// 读取（S2 会话绑定 / S3 cache-aside 通用 GET）

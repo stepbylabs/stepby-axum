@@ -419,6 +419,7 @@ impl AppState {
             scim_service: crate::service::scim_service::ScimService::new(
                 db.clone(),
                 config.scim.tenant_id,
+                store.clone(),
             ),
             scim_group_service: crate::service::scim_group_service::ScimGroupService::new(
                 db.clone(),

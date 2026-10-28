@@ -264,4 +264,105 @@ mod fail_closed_mod {
              common::background::spawn_tracked / run_tracked，或在 EXEMPT 内登记取证理由）"
         );
     }
+
+    /// b104：凭据撤权（`pwd_ver` 递增 + SSO 令牌全量吊销）不得降级为 WARN 后照常成功。
+    ///
+    /// 这一族的后果不在"日志里少一条"，而在**授权边界**：auth 中间件不查
+    /// `sys_user.status`，一个"已停用"的账号是否真的失去访问能力，完全取决于撤权那两步
+    /// 是否成功。b104 前 `change_status` / `reset_pwd` / `update_profile_pwd` 两处失败
+    /// 都只 WARN 后返回 200，等于对管理员宣布"已停用/已改密"而旧令牌仍在 TTL 内可用；
+    /// 批量删除更是"先删后撤权 + 失败上抛"——错误已报出、用户已删除、重试只会 404。
+    ///
+    /// 判据：① 业务侧只能经 `store.revoke_credentials`（单一出口）；
+    /// ② 每个出口调用点的失败分支都必须 `return Err`（不是 WARN 后继续）。
+    #[test]
+    fn credential_revocation_must_be_single_entry_and_fail_closed() {
+        use crate::common::prod_scan::{Scan, prod_files, require_volume};
+
+        let files = prod_files(&Scan::default());
+        require_volume(&files, 300, 40_000, "凭据撤权状锁");
+
+        // ① 单一出口：`shared_store/` 是定义与实现；`sso_service.rs` 是 SSO 登出这条
+        //    与平台凭据无关的独立语义（登出只吊销 SSO 令牌，不递增平台密码版本）。
+        let mut violations = Vec::new();
+        for f in &files {
+            if f.rel.starts_with("src/shared_store/") || f.rel == "src/service/sso_service.rs" {
+                continue;
+            }
+            for line in f.lines.iter().filter(|l| !l.trim().is_empty()) {
+                if line.contains(".pwd_ver_incr(") || line.contains(".revoke_all_for_user(") {
+                    violations.push(format!("{}: {}", f.rel, line.trim()));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "以下生产码绕过 SharedStore::revoke_credentials 直接调用撤权原语：{violations:?}\n\
+             （两条腿必须一起走：只递增版本号会留下不透明 SSO AT，只吊销 AT 会让平台 JWT 继续过闸门）"
+        );
+
+        // ② 每个出口调用点的失败分支必须上抛
+        fn assert_call_fail_closed(rel: &str, call: &str) -> usize {
+            let prod = prod_src(rel);
+            let mut hits = 0usize;
+            for (idx, _) in prod.match_indices(call) {
+                hits += 1;
+                let tail: String = prod[idx..].chars().take(500).collect();
+                // 两种合法形态：`if let Err(e) = … { … return Err(…) }` 与 `…map_err(…)?`
+                let fail_closed = tail.contains("return Err(") || tail.contains("map_err(");
+                assert!(
+                    fail_closed,
+                    "{rel} 的 `{call}` 失败分支必须上抛（撤权失败后照常返回成功 = 旧会话仍然可用），\
+                     实际片段：{tail}"
+                );
+            }
+            hits
+        }
+
+        let handler_hits =
+            assert_call_fail_closed("src/handler/sys_user_handler.rs", ".revoke_credentials(");
+        assert!(
+            handler_hits >= 3,
+            "用户写路径（重置 / 自助改密 / 删除）都必须在撤权失败时上抛，实测调用点 {handler_hits} 处"
+        );
+        let erasure_hits = assert_call_fail_closed(
+            "src/service/user_erasure_service.rs",
+            ".revoke_credentials(",
+        );
+        assert!(
+            erasure_hits >= 1,
+            "用户匿名化必须在破坏性写入前完成撤权，实测调用点 {erasure_hits} 处"
+        );
+        // 服务层的三条停用入口：`update_user_status`（changeStatus）、`edit_user`
+        // （编辑表单改 status）、`import_users`（updateSupport 更新行）
+        let service_hits =
+            assert_call_fail_closed("src/service/sys_user_service.rs", ".revoke_credentials(");
+        assert!(
+            service_hits >= 3,
+            "停用用户的三个服务层入口都必须撤权，实测调用点 {service_hits} 处"
+        );
+
+        // ③ SSO 登出的全量吊销同样不得 best-effort（与同流程的黑名单写入同口径）
+        let sso = prod_src("src/service/sso_service.rs");
+        assert_eq!(
+            sso.matches("revoke_user_sso_tokens(store, uid).await?")
+                .count(),
+            2,
+            "SSO 登出两个调用点都必须用 `?` 上抛（失败返回成功 = RT/AT 仍然有效）"
+        );
+
+        // ④ SCIM deprovision 的三条写路径（PUT / PATCH / DELETE）都必须撤权。
+        //    少一条 = 那条通道上的"IdP 已停用"只改了 status，旧 JWT 活到 TTL。
+        let scim = prod_src("src/service/scim_service.rs");
+        assert_eq!(
+            scim.matches("self.revoke_after_deactivation(id).await?")
+                .count(),
+            3,
+            "SCIM 的 PUT / PATCH / DELETE 三条停用路径都必须调用 revoke_after_deactivation"
+        );
+        assert!(
+            scim.contains(".revoke_credentials("),
+            "SCIM 撤权必须经 SharedStore::revoke_credentials（两条腿一起走）"
+        );
+    }
 }

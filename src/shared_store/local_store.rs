@@ -178,29 +178,9 @@ impl SharedStore for LocalStore {
         let sso_at_bound = revoked.as_deref() == Some("sso_legacy_at");
 
         // ② 密码版本（sys_user.password_version：启动兜底列保证存在；行不存在 = None = 未设置）
-        let pwd_ver: Option<u64> = match uid.parse::<i64>() {
-            Ok(id) => {
-                let row = self
-                    .db
-                    .query_one_raw(self.stmt(
-                        "SELECT password_version FROM sys_user WHERE user_id = ?",
-                        vec![id.into()],
-                    ))
-                    .await
-                    .map_err(|e| StoreError::backend(&e))?;
-                match row {
-                    Some(r) => r
-                        .try_get::<Option<i64>>("", "password_version")
-                        .map_err(|e| StoreError::backend(&e))?
-                        .map(|v| std::cmp::max(v, 0) as u64),
-                    None => None,
-                }
-            }
-            Err(_) => {
-                tracing::warn!(uid, "auth_gate_check：uid 非数值，pwd_ver 按 None 处理");
-                None
-            }
-        };
+        //    与登录签发共用 `pwd_ver_read`（同一事实源）——两处各写一份 SQL 属于
+        //    "同一语义两份实现必漂"，且漂移的后果是登录令牌被自己的闸门拒绝。
+        let pwd_ver = self.pwd_ver_read(uid).await?;
 
         // ③ 租户运行时（tid=0 平台租户不查询，两字段恒 None——对齐 middleware/auth.rs:95）
         //    投影逻辑对齐 sys_tenant_service.rs:1897-1914 sync_runtime_keys：
@@ -351,6 +331,29 @@ impl SharedStore for LocalStore {
             }
         };
         Ok(new)
+    }
+
+    /// 当前密码版本号（与 `auth_gate_check` 同一条 SELECT，登录签发也走这里）
+    async fn pwd_ver_read(&self, uid: &str) -> Result<Option<u64>, StoreError> {
+        let Ok(id) = uid.parse::<i64>() else {
+            tracing::warn!(uid, "pwd_ver_read：uid 非数值，按 None 处理");
+            return Ok(None);
+        };
+        let row = self
+            .db
+            .query_one_raw(self.stmt(
+                "SELECT password_version FROM sys_user WHERE user_id = ?",
+                vec![id.into()],
+            ))
+            .await
+            .map_err(|e| StoreError::backend(&e))?;
+        match row {
+            Some(r) => Ok(r
+                .try_get::<Option<i64>>("", "password_version")
+                .map_err(|e| StoreError::backend(&e))?
+                .map(|v| std::cmp::max(v, 0) as u64)),
+            None => Ok(None),
+        }
     }
 
     /// 读取（S2 会话绑定 / S3 cache-aside 通用 GET）：过期视为 None 并惰性删除
@@ -1429,6 +1432,24 @@ mod tests {
         assert_eq!(s.pwd_ver_incr("5").await.unwrap(), 1, "NULL 视为 0 后 +1");
         assert_eq!(s.pwd_ver_incr("5").await.unwrap(), 2);
         assert_eq!(s.pwd_ver_incr("5").await.unwrap(), 3);
+        // b104：登录签发与闸门必须读**同一事实源**（`pwd_ver_read` 是闸门那条 SELECT 的
+        // 唯一实现，本地档两处读同一个列；分叉写成两份 SQL 就会漂）
+        assert_eq!(s.pwd_ver_read("5").await.unwrap(), Some(3));
+        assert_eq!(
+            s.auth_gate_check("h", "5", 0).await.unwrap().pwd_ver,
+            Some(3),
+            "pwd_ver_read 与 auth_gate_check 必须给出同一个版本号"
+        );
+        assert_eq!(
+            s.pwd_ver_read("424242").await.unwrap(),
+            None,
+            "行不存在 = 未设置（与闸门口径一致）"
+        );
+        assert_eq!(
+            s.pwd_ver_read("not-a-number").await.unwrap(),
+            None,
+            "非数值 uid 按未设置处理（与闸门口径一致，不静默报错也无从比对）"
+        );
         // 行不存在：保守按 new=1 返回且不 panic
         assert_eq!(s.pwd_ver_incr("424242").await.unwrap(), 1);
         // 非数值 uid → 显式 Err（不静默）

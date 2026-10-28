@@ -240,12 +240,14 @@ error:
     import_nick_required: Nickname is required
     import_dept_not_found: "Department \"%{name}\" does not exist"
     import_duplicate_in_file: Duplicate login name within the file
-    pwd_reset_token_invalidate_failed: Password reset succeeded, but old token invalidation marking failed
-    pwd_change_token_invalidate_failed: Password changed, but old token invalidation marking failed
+    pwd_reset_token_invalidate_failed: Password was reset, but session revocation failed (old tokens may still be valid). Please retry.
+    pwd_change_token_invalidate_failed: Password was changed, but session revocation failed. Please sign in again; contact an administrator immediately if access persists.
+    status_change_revoke_failed: User status was updated, but session revocation failed (old tokens may still be valid). Please retry.
+    delete_revoke_failed: Session revocation failed; the delete was cancelled (no user was deleted). Please retry.
     erasure_disabled: User anonymization capability is not enabled
     erasure_platform_only: Only platform administrators can anonymize users
     erasure_forbidden: Platform users and the super administrator cannot be anonymized
-    erasure_revoke_failed: Failed to mark sessions invalid before anonymization; aborted (fail-closed)
+    erasure_revoke_failed: Failed to revoke sessions before anonymization; aborted (fail-closed)
     password_expired: Your password has expired; please change it before continuing
     password_change_required: The initial password has not been changed; please set a new password in Profile - Security Settings
   config:

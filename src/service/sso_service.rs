@@ -2567,11 +2567,22 @@ impl SsoService {
     /// [`SharedStore::revoke_all_for_user`] 实现（redis 档原样等价、local 档同库事务承载）。
     /// （v5 第九轮：客户端级联场景改用 revoke_user_client_tokens 按 client 粒度，
     /// 不再波及用户在其它客户端的有效会话。）
-    pub async fn revoke_user_sso_tokens(&self, store: &Arc<dyn SharedStore>, user_id: i64) {
-        // 失败仅记日志（原各 Redis 命令亦 best-effort，登出主流程不被阻断）
-        if let Err(e) = store.revoke_all_for_user(&user_id.to_string()).await {
-            tracing::error!("用户 SSO 令牌全量吊销失败 user_id={}: {}", user_id, e);
-        }
+    ///
+    /// b104：失败必须上抛——"登出成功但 RT/AT 仍然有效"与没登出同义；同一流程里
+    /// 黑名单写入早已 fail-closed，两处口径不得相反。
+    pub async fn revoke_user_sso_tokens(
+        &self,
+        store: &Arc<dyn SharedStore>,
+        user_id: i64,
+    ) -> Result<(), ServiceError> {
+        store
+            .revoke_all_for_user(&user_id.to_string())
+            .await
+            .map_err(|e| {
+                tracing::error!("用户 SSO 令牌全量吊销失败 user_id={}: {}", user_id, e);
+                ServiceError::internal(&crate::tr!("error.auth.logout_failed"))
+            })?;
+        Ok(())
     }
 
     /// 按客户端粒度吊销某用户的 SSO access_token（v4-R8 自助撤销授权的级联动作）：
@@ -2707,7 +2718,7 @@ impl SsoService {
 
         // 2. 副作用：吊销 SSO 令牌 + 跨端拉黑 IdP 登录会话
         if let Some(uid) = hint_user {
-            self.revoke_user_sso_tokens(store, uid).await;
+            self.revoke_user_sso_tokens(store, uid).await?;
             self.blacklist_user_sessions(store, uid).await;
         }
 
@@ -2733,7 +2744,7 @@ impl SsoService {
                     )));
                 }
                 if let Some(uid) = cookie_user {
-                    self.revoke_user_sso_tokens(store, uid).await;
+                    self.revoke_user_sso_tokens(store, uid).await?;
                 }
             }
         }

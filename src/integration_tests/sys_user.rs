@@ -497,3 +497,172 @@ async fn test_disable_enable_invalidates_token() {
     let v = ctx.delete_json(&format!("/system/user/{}", user_id)).await;
     ctx.assert_ok(&v);
 }
+/// 建一个可登录的普通用户并返回 user_id（b104 的两条版本号判据共用同一夹具形状）。
+async fn create_loginable_user(ctx: &TestContext, user_name: &str) -> i64 {
+    let v = ctx
+        .post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": user_name,
+                "nickName": "凭据撤权目标",
+                "email": "stepby@tzkj.net",
+                "phonenumber": "13800005555",
+                "password": "Stepby@12345",
+                "status": "0",
+                "roleIds": [2]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json(&format!("/system/user/list?userName={user_name}"))
+        .await;
+    v["rows"][0]["userId"]
+        .as_i64()
+        .expect("应查到目标用户 userId")
+}
+
+/// 以指定令牌访问个人中心，只取状态码（旧令牌失效判据只看得到什么结局）。
+async fn profile_status(ctx: &TestContext, token: &str) -> axum::http::StatusCode {
+    let (status, _) = ctx
+        .send_raw(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/system/user/profile")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .expect("构造请求失败"),
+        )
+        .await;
+    status
+}
+
+/// 直读 DB 权威层列（只本文件用；redis 档闸门读的是 `pwd_ver:{uid}`，两者对照才说明白问题）。
+async fn db_password_version(ctx: &TestContext, user_id: i64) -> i64 {
+    use sea_orm::ConnectionTrait;
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(crate::common::sql_dialect::stmt(
+            ctx.state.db.get_database_backend(),
+            "SELECT password_version FROM sys_user WHERE user_id = ?",
+            [user_id.into()],
+        ))
+        .await
+        .expect("查询 password_version 失败")
+        .expect("用户行应存在");
+    row.try_get::<i64>("", "password_version")
+        .expect("password_version 应为整数")
+}
+
+/// b104：登录签发读取的密码版本号必须与 auth 闸门**同一事实源**（redis 档 = `pwd_ver:{uid}`）。
+///
+/// 构造"闸门已递增、DB 列双写失败"的真实断面：只 SET Redis 键、不动 DB 列。
+/// 修复前登录读 DB 列（0）→ 新签发的令牌当场被闸门判为"改密前的旧令牌"（401），
+/// 而 DB 列永远追不上（`+1` 同步只维持落差、永不相遇）⇒ 该账号此后每次登录都失败，
+/// 只能人工修库。修复后新令牌携带闸门里的真实版本，登录链路恢复可用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_login_claim_follows_gate_authority_after_pwd_ver_bump() {
+    let ctx = TestContext::new().await;
+    let user_id = create_loginable_user(&ctx, "it_gate_ver_user").await;
+    let user_peer = super::next_peer_ip();
+
+    // 1. 首次登录（版本 0）：令牌可用
+    let token_a = super::login(&ctx.app, user_peer, "it_gate_ver_user", "Stepby@12345").await;
+    assert_eq!(
+        profile_status(&ctx, &token_a).await,
+        axum::http::StatusCode::OK
+    );
+
+    // 2. 只抬闸门事实源（模拟 redis 档 INCR 成功而 DB 列双写失败的断面）
+    let mut redis = ctx.redis();
+    let _: () = redis::cmd("SET")
+        .arg(format!("pwd_ver:{user_id}"))
+        .arg("1")
+        .query_async(&mut redis)
+        .await
+        .expect("写入闸门版本号失败");
+    assert_eq!(
+        db_password_version(&ctx, user_id).await,
+        0,
+        "本用例刻意让 DB 列落后于闸门"
+    );
+
+    // 3. 旧令牌立即失效（闸门 1 > claim 0）
+    assert_eq!(
+        profile_status(&ctx, &token_a).await,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "闸门版本高于旧令牌 claim 时必须拒绝"
+    );
+
+    // 4. 重新登录：新令牌必须携带闸门权威版本，可正常访问
+    let token_b = super::login(&ctx.app, user_peer, "it_gate_ver_user", "Stepby@12345").await;
+    assert_eq!(
+        profile_status(&ctx, &token_b).await,
+        axum::http::StatusCode::OK,
+        "登录签发的 pwd_ver 必须与闸门同源；读 DB 列会让新令牌当场被自己的闸门拒绝"
+    );
+}
+
+/// b104：`pwd_ver_incr` 的 DB 列必须**收敛到本次实时值**。
+///
+/// 原先写 `password_version + 1`：一次双写失败就让 DB 列永久落后 Redis（后续每次 +1
+/// 只维持落差），而登录签发曾经直读该列 ⇒ 该账号永久登录失败。本用例先把闸门值抬到 5
+/// （DB 仍 0），再走一次真实 `pwd_ver_incr`：DB 列必须变成 6；旧实现会给 1。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pwd_ver_db_column_converges_to_live_value() {
+    let ctx = TestContext::new().await;
+    let user_id = create_loginable_user(&ctx, "it_ver_converge_user").await;
+
+    let mut redis = ctx.redis();
+    let _: () = redis::cmd("SET")
+        .arg(format!("pwd_ver:{user_id}"))
+        .arg("5")
+        .query_async(&mut redis)
+        .await
+        .expect("写入闸门版本号失败");
+    assert_eq!(db_password_version(&ctx, user_id).await, 0);
+
+    let new = ctx
+        .state
+        .store
+        .pwd_ver_incr(&user_id.to_string())
+        .await
+        .expect("pwd_ver_incr 失败");
+    assert_eq!(new, 6, "闸门（Redis）递增后的实时值");
+    assert_eq!(
+        db_password_version(&ctx, user_id).await,
+        6,
+        "DB 列必须收敛到实时值（旧实现的 `+1` 会给 1，永久落后 5）"
+    );
+}
+
+/// b104：`PUT /system/user`（编辑用户）与 `/changeStatus` 是**两条**能把账号停用的入口。
+/// 经编辑表单把 status 置 '1' 后，旧令牌同样必须立即失效（同一撤权出口）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_edit_user_disable_invalidates_token() {
+    let ctx = TestContext::new().await;
+    let user_id = create_loginable_user(&ctx, "it_edit_disable_user").await;
+    let user_peer = super::next_peer_ip();
+    let token = super::login(&ctx.app, user_peer, "it_edit_disable_user", "Stepby@12345").await;
+    assert_eq!(
+        profile_status(&ctx, &token).await,
+        axum::http::StatusCode::OK,
+        "停用前令牌应可用"
+    );
+
+    let v = ctx
+        .put_json(
+            "/system/user",
+            serde_json::json!({ "userId": user_id, "status": "1" }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    assert_eq!(
+        profile_status(&ctx, &token).await,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "编辑停用后旧令牌必须立即失效（不能等到 TTL）"
+    );
+}

@@ -29,7 +29,8 @@
 //!
 //! - `revocation_add` / `revoke_session` 在 SETEX blacklist 之外**幂等落库**
 //!   `sys_token_revocation`（已有行取 expire_at 更大值）；`pwd_ver_incr` 在 INCR 之外
-//!   同步 `sys_user.password_version = password_version + 1`；
+//!   把 `sys_user.password_version` **单调收敛到本次实时值**（b104：原 `+1` 会让一次失败的
+//!   双写变成永久落差）；
 //! - DB 写失败**仅 tracing::warn 不返回错误**——Redis 已保证当期安全，落库只为档位切换；
 //! - 启动期调用 [`RedisStore::bootstrap_from_db`] 从 DB 权威层幂等回填 Redis
 //!   （吊销行 → blacklist 键；password_version 列 → pwd_ver 键），实现双档无缝切换。
@@ -247,7 +248,13 @@ impl SharedStore for RedisStore {
         Ok(())
     }
 
-    /// 密码版本号递增：INCR Redis（现状）+ DB `password_version` 列自增（S1 双写）
+    /// 密码版本号递增：INCR Redis（现状）+ DB `password_version` 列**收敛到实时值**（S1 双写）
+    ///
+    /// b104 订正：DB 侧原先写 `password_version + 1`，于是任何一次 DB 双写失败都会让 DB 列
+    /// **永久落后** Redis（后续每次 +1 只维持差距，永不相遇）。登录签发曾经直读 DB 列，
+    /// 落后即意味着新签发的令牌当场被闸门判为"改密前的旧令牌"——该账号每次登录都 401。
+    /// 现改为按本次 INCR 的实时值做**单调收敛**（只抬高不降低，方向与启动回填一致），
+    /// 下一次成功双写就把历史欠账一并补齐。
     async fn pwd_ver_incr(&self, uid: &str) -> Result<u64, StoreError> {
         let mut redis = self.conn.clone();
         let new: i64 = crate::utils::redis::cmd_timeout(
@@ -260,16 +267,17 @@ impl SharedStore for RedisStore {
         // S1 双写：DB 列同步（失败仅 WARN；uid 必为数值 user_id，parse 失败属异常仅告警跳过）
         match uid.parse::<i64>() {
             Ok(uid_i64) => {
+                let new = std::cmp::max(new, 0);
                 let stmt = crate::common::sql_dialect::stmt(
                     self.db.get_database_backend(),
-                    "UPDATE sys_user SET password_version = password_version + 1 WHERE user_id = ?",
-                    [uid_i64.into()],
+                    "UPDATE sys_user SET password_version = ? WHERE user_id = ? AND password_version < ?",
+                    [new.into(), uid_i64.into(), new.into()],
                 );
                 if let Err(e) = self.db.execute_raw(stmt).await {
                     tracing::warn!(
                         uid,
                         error = %e,
-                        "pwd_ver DB 列同步失败（Redis 已保证当期安全，仅告警）"
+                        "pwd_ver DB 列同步失败（Redis 已保证当期安全，仅告警；下次递增会收敛补齐）"
                     );
                 }
             }
@@ -278,6 +286,19 @@ impl SharedStore for RedisStore {
             }
         }
         Ok(std::cmp::max(new, 0) as u64)
+    }
+
+    /// 当前密码版本号（与 `auth_gate_check` 同一个键与同一条解析规则，登录签发也走这里）
+    async fn pwd_ver_read(&self, uid: &str) -> Result<Option<u64>, StoreError> {
+        let mut redis = self.conn.clone();
+        let v: Option<String> = crate::utils::redis::cmd_timeout(
+            redis::cmd("GET")
+                .arg(format!("pwd_ver:{uid}"))
+                .query_async(&mut redis),
+        )
+        .await
+        .map_err(|e| StoreError::backend(&e))?;
+        Ok(v.and_then(|s| s.parse::<u64>().ok()))
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>, StoreError> {

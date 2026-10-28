@@ -2066,6 +2066,24 @@ impl SysUserService {
             self.invalidate_perm_cache(dto.user_id).await;
         }
 
+        // b104：编辑表单可以直接把 status 改成 '1'（与 `changeStatus` 是**两条**入口）。
+        // 停用必须同样立即撤权——否则"保存成功"而旧会话仍可用到 TTL 结束
+        // （auth 中间件不查 `sys_user.status`）。判据取结果状态而非跃迁：
+        // 撤权失败时 status 已落库，按跃迁判会让重试跳过撤权。
+        if result.status.as_deref() == Some("1") {
+            self.store
+                .revoke_credentials(&dto.user_id.to_string())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        user_id = dto.user_id,
+                        error = %e,
+                        "编辑用户停用后会话吊销失败（fail-closed 上抛，可重试）"
+                    );
+                    ServiceError::internal(&crate::tr!("error.user.status_change_revoke_failed"))
+                })?;
+        }
+
         Ok(result)
     }
 
@@ -2196,6 +2214,69 @@ impl SysUserService {
         Ok(())
     }
 
+    /// 批量删除目标的**只读**预校验（b104）。
+    ///
+    /// 为什么单独成方法：handler 必须把"凭据撤权"排在删除**之前**（删除是破坏性且不可
+    /// 重放的操作——用户行已软删后重试会 404，而 `pwd_ver` 递增与 SSO 令牌索引都以用户行
+    /// 仍在为前提），但被拒绝的删除请求不得顺带把目标用户踢下线，所以撤权前要先跑完整
+    /// 校验。校验口径与 [`Self::delete_users`] **共用本方法**，不另写一套。
+    pub async fn validate_delete_targets(
+        &self,
+        user_ids: &[i64],
+        operator_user_id: i64,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
+        // 预校验：超管保护（事务外快速失败，避免无效事务开销）
+        if user_ids.contains(&SUPER_ADMIN_USER_ID) {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.user.admin_delete_forbidden"
+            )));
+        }
+
+        // C-2：批量垂直越权校验（全部通过后才进入事务）
+        //      与 delete_user 的 check_vertical_auth_by_user_id 行为一致，
+        //      避免 handler 层 for 循环调用 delete_user 时漏校验的安全漏洞。
+        //
+        // N+1 消除（B-3）：operator 角色 / target 用户 / target 角色关联各查 1 次，
+        // 全部在内存中比对；语义与原逐条调用完全等价（超管仍短路豁免）。
+        let mut target_roles_by_uid: std::collections::HashMap<i64, Vec<i64>> =
+            std::collections::HashMap::new();
+        if operator_user_id != SUPER_ADMIN_USER_ID {
+            target_roles_by_uid = self
+                .user_role_repo
+                .find_role_ids_by_user_ids(user_ids)
+                .await?;
+        }
+        // 一次 IN 查回所有目标用户（user_id → tenant_id，用于租户归属校验；
+        // 不过滤软删，与旧逐条 find_by_id 语义一致）
+        let target_tids: std::collections::HashMap<i64, i64> = self
+            .user_repo
+            .tenant_ids_by_user_ids(user_ids)
+            .await?
+            .into_iter()
+            .collect();
+        for target_user_id in user_ids {
+            // 垂直越权：复用 role_ids 版本的判定（超管已在上面短路）
+            if operator_user_id != SUPER_ADMIN_USER_ID {
+                let role_ids = target_roles_by_uid
+                    .get(target_user_id)
+                    .cloned()
+                    .unwrap_or_default();
+                self.check_vertical_auth_by_role_ids(operator_user_id, &role_ids)
+                    .await?;
+            }
+            // 越权防护：租户管理员不得跨租户删除用户（按 id 列表删除必须逐个收敛归属）
+            if let Some(tid) = target_tids.get(target_user_id)
+                && !crate::common::tenant::tenant_allowed(operator_tid, *tid)
+            {
+                return Err(ServiceError::forbidden(&crate::tr!(
+                    "error.common.forbidden"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// 批量删除用户（原子事务，R8-API-002 + R8-API-008）
     ///
     /// 所有用户删除操作包装在单个事务中：
@@ -2214,62 +2295,14 @@ impl SysUserService {
         operator_user_id: i64,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
-        // 预校验：超管保护（事务外快速失败，避免无效事务开销）
-        if user_ids.contains(&SUPER_ADMIN_USER_ID) {
-            return Err(ServiceError::bad_request(&crate::tr!(
-                "error.user.admin_delete_forbidden"
-            )));
-        }
+        self.validate_delete_targets(&user_ids, operator_user_id, operator_tid)
+            .await?;
 
         // 单个 ID 直接走 delete_user（保持原有事务行为，避免嵌套事务开销）
         if user_ids.len() == 1 {
             return self
                 .delete_user(user_ids[0], operator_user_id, operator_tid)
                 .await;
-        }
-
-        // C-2：批量垂直越权校验（事务前统一执行，全部通过后才进入事务）
-        //      与 delete_user 的 check_vertical_auth_by_user_id 行为一致，
-        //      避免 handler 层 for 循环调用 delete_user 时漏校验的安全漏洞。
-        //
-        // N+1 消除（B-3）：operator 角色 / target 用户 / target 角色关联各查 1 次，
-        // 全部在内存中比对；语义与原逐条调用完全等价（超管仍短路豁免）。
-        {
-            let mut target_roles_by_uid: std::collections::HashMap<i64, Vec<i64>> =
-                std::collections::HashMap::new();
-            if operator_user_id != SUPER_ADMIN_USER_ID {
-                target_roles_by_uid = self
-                    .user_role_repo
-                    .find_role_ids_by_user_ids(&user_ids)
-                    .await?;
-            }
-            // 一次 IN 查回所有目标用户（user_id → tenant_id，用于租户归属校验；
-            // 不过滤软删，与旧逐条 find_by_id 语义一致）
-            let target_tids: std::collections::HashMap<i64, i64> = self
-                .user_repo
-                .tenant_ids_by_user_ids(&user_ids)
-                .await?
-                .into_iter()
-                .collect();
-            for target_user_id in &user_ids {
-                // 垂直越权：复用 role_ids 版本的判定（超管已在上面短路）
-                if operator_user_id != SUPER_ADMIN_USER_ID {
-                    let role_ids = target_roles_by_uid
-                        .get(target_user_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    self.check_vertical_auth_by_role_ids(operator_user_id, &role_ids)
-                        .await?;
-                }
-                // 越权防护：租户管理员不得跨租户删除用户（按 id 列表删除必须逐个收敛归属）
-                if let Some(tid) = target_tids.get(target_user_id)
-                    && !crate::common::tenant::tenant_allowed(operator_tid, *tid)
-                {
-                    return Err(ServiceError::forbidden(&crate::tr!(
-                        "error.common.forbidden"
-                    )));
-                }
-            }
         }
 
         // 批量删除：单个事务包装所有操作
@@ -2546,6 +2579,24 @@ impl SysUserService {
         am.update_by = Set(Some(operator.to_string()));
         am.update_time = Set(Some(now));
         self.user_repo.update(am).await?;
+
+        // b104：停用即撤权（`pwd_ver` 递增 + SSO 令牌全量吊销，单一出口），放在服务层
+        // 而不是 handler —— 这是**所有**调用方都必须满足的授权边界（auth 中间件不查
+        // `sys_user.status`，只改 status 等于把旧令牌留到 TTL）。失败上抛：状态已落库，
+        // 重复提交同一请求（幂等）即会重试撤权。判据取结果状态而非跃迁（同 edit_user）。
+        if status == "1" {
+            self.store
+                .revoke_credentials(&user_id.to_string())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        user_id,
+                        error = %e,
+                        "停用用户后会话吊销失败（fail-closed 上抛，可重试）"
+                    );
+                    ServiceError::internal(&crate::tr!("error.user.status_change_revoke_failed"))
+                })?;
+        }
 
         Ok(())
     }
@@ -2993,6 +3044,13 @@ impl SysUserService {
         }
 
         // 阶段 4：事务内批量写入（插入新用户 + 更新已存在用户资料）
+        // b104：`update_support=true` 的更新分支会按行写入 status，**停用行必须在提交后撤权**
+        // （新插入的用户没有既有会话，无需撤权）。先把待撤权集合在事务外算好。
+        let deactivated_user_ids: Vec<i64> = to_update
+            .iter()
+            .filter(|(_, p)| p.status == "1")
+            .map(|(id, _)| *id)
+            .collect();
         // 密码 hash 为 CPU 密集型同步操作，先行一次阿甘 hash 经 spawn_blocking 完成，
         // 结果在事务内复用（所有新用户共享同一初始密码 hash），避免阻塞 Tokio worker。
         let password_for_hash = default_password.to_string();
@@ -3112,6 +3170,22 @@ impl SysUserService {
         };
         let (inserted_count, quota_errors) = inserted_count;
         error_list.extend(quota_errors);
+
+        // b104：导入把既有用户改成停用 ⇒ 撤权与单条入口同口径（失败上抛；导入是幂等覆盖，
+        // 重跑同一份文件即会重试）。新插入行不在本集合内——它们没有既有会话。
+        for uid in &deactivated_user_ids {
+            self.store
+                .revoke_credentials(&uid.to_string())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        user_id = *uid,
+                        error = %e,
+                        "批量导入停用用户后会话吊销失败（fail-closed 上抛，可重试）"
+                    );
+                    ServiceError::internal(&crate::tr!("error.user.status_change_revoke_failed"))
+                })?;
+        }
 
         Ok(ImportResultVo {
             success: inserted_count as u32,
