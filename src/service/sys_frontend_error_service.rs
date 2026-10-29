@@ -28,7 +28,6 @@ const MAX_ITEMS_PER_REPORT: usize = 100;
 const MAX_NAME_LEN: usize = 255;
 const MAX_MESSAGE_LEN: usize = 2000;
 const MAX_STACK_LEN: usize = 8000;
-const MAX_PAGE_URL_LEN: usize = 1000;
 const MAX_USER_AGENT_LEN: usize = 512;
 const MAX_LEVEL_LEN: usize = 16;
 const MAX_SOURCE_LEN: usize = 32;
@@ -214,6 +213,25 @@ fn opt_truncate(value: &Option<String>, max_chars: usize) -> Option<String> {
         .map(|s| truncate(s, max_chars))
 }
 
+/// 先脱敏再截断：截断在前会把"超长 URL 的尾巴"留下来、把要遮的值留在中间。
+fn opt_redact_truncate(value: &Option<String>, max_chars: usize) -> Option<String> {
+    value
+        .as_deref()
+        .map(crate::common::redact::redact_query_values)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate(&s, max_chars))
+}
+
+/// page_url 走更强的 URL 归一（丢弃凭据键与 hash、只保留参数名）。
+/// 边界兜底：客户端是用户可改的外部输入，前端脱敏只决定"大多数请求有多干净"。
+fn opt_sanitize_page_url(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(crate::common::redact::sanitize_telemetry_page_url)
+        .filter(|s| !s.is_empty())
+}
+
 // ==================== Service ====================
 
 /// 允许排序的前端异常列白名单（数据库列名 snake_case；前端 prop 经 camel_to_snake 归一后匹配）。
@@ -290,9 +308,10 @@ impl SysFrontendErrorService {
                         MAX_SOURCE_LEN,
                     )),
                     name: Set(opt_truncate(&it.name, MAX_NAME_LEN)),
-                    message: Set(opt_truncate(&it.message, MAX_MESSAGE_LEN)),
-                    stack: Set(opt_truncate(&it.stack, MAX_STACK_LEN)),
-                    page_url: Set(opt_truncate(&it.page_url, MAX_PAGE_URL_LEN)),
+                    // b132：遥测落库前脱敏（查询值遮蔽 / 凭据键丢弃），C.9 边界兜底
+                    message: Set(opt_redact_truncate(&it.message, MAX_MESSAGE_LEN)),
+                    stack: Set(opt_redact_truncate(&it.stack, MAX_STACK_LEN)),
+                    page_url: Set(opt_sanitize_page_url(&it.page_url)),
                     user_agent: Set(opt_truncate(&it.user_agent, MAX_USER_AGENT_LEN)),
                     device_type: Set(it
                         .device_type

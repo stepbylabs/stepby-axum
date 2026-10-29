@@ -238,3 +238,85 @@ async fn test_frontend_error_chain() {
         "未登录上报应 401，实际: {status} {_body}"
     );
 }
+
+/// b132：遥测落库前必须脱敏（查询值遮蔽、凭据键丢弃、message/stack 同口径）。
+///
+/// 立案证据（开发库实测）：`page_url` 39,039 行带查询串、`userName=` 命中 2,112 行——
+/// 列表页按用户名/手机号搜索时的一次 JS 错误就把用户输入持久化进管理端可查的遥测表。
+/// 前端已脱敏，但客户端是用户可改的外部输入 ⇒ 这一条钉的是**服务端边界兜底**。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_frontend_error_telemetry_is_sanitized_on_ingest() {
+    let ctx = TestContext::new().await;
+
+    let v = ctx
+        .post_json(
+            "/monitor/frontendError/report",
+            serde_json::json!({
+                "items": [{
+                    "level": "error",
+                    "source": "api",
+                    "name": "it_fe_pii_sanitize",
+                    "message": "GET /system/user/list?phonenumber=13800000000 failed",
+                    "stack": "at x (http://h/app.js?token=STACK_SECRET:1:1)",
+                    "pageUrl": "http://localhost:8080/system/user?pageNum=1&userName=it_fe_pii&code=SECRET_CODE#frag",
+                    "userAgent": "itest-ua"
+                }]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(v["data"]["reported"].as_i64(), Some(1), "上报应成功: {v}");
+
+    let v = ctx
+        .get_json("/monitor/frontendError/list?name=it_fe_pii_sanitize&pageSize=10")
+        .await;
+    let rows = v["rows"].as_array().expect("rows 应为数组");
+    assert_eq!(rows.len(), 1, "应查到 1 条脱敏记录，实际: {v}");
+    let row = &rows[0];
+
+    // 正向：路径保留、参数名保留（排障要知道是哪个页面、哪个参数）
+    let page_url = row["pageUrl"].as_str().unwrap_or_default();
+    assert_eq!(
+        page_url, "http://localhost:8080/system/user?pageNum=***&userName=***",
+        "pageUrl 应保留路径与参数名并遮蔽值，实际: {page_url}"
+    );
+
+    // 反向：任何原始值都不得残留（含凭据键、hash、搜索词）。
+    // 只扫三个会承载外部输入的字段——`name` 是本用例的标记，必须原样保留。
+    let whole = format!(
+        "{}{}{}",
+        page_url,
+        row["message"].as_str().unwrap_or_default(),
+        row["stack"].as_str().unwrap_or_default()
+    );
+    for leaked in [
+        "it_fe_pii",
+        "SECRET_CODE",
+        "13800000000",
+        "STACK_SECRET",
+        "code=",
+        "frag",
+    ] {
+        assert!(
+            !whole.contains(leaked),
+            "遥测记录仍残留原始值 {leaked}: {whole}"
+        );
+    }
+    // 文本里的查询值同样遮蔽（保留键名，值换 ***）
+    assert!(
+        row["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("phonenumber=***"),
+        "message 查询值应被遮蔽，实际: {}",
+        row["message"]
+    );
+    assert!(
+        row["stack"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("token=***"),
+        "stack 查询值应被遮蔽，实际: {}",
+        row["stack"]
+    );
+}
