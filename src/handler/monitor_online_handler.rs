@@ -246,18 +246,10 @@ async fn list_sessions(
             continue;
         }
 
-        // login_time: 解析 "%Y-%m-%d %H:%M:%S"（本地时区） → timestamp_millis
-        // 注意：session.login_time 由 chrono::Local::now() 生成（北京时间），
-        // 必须用 and_local_timezone(Local) 解析，否则 and_utc() 会让时间戳偏移 +8 小时
-        let login_time_millis =
-            chrono::NaiveDateTime::parse_from_str(&session.login_time, "%Y-%m-%d %H:%M:%S")
-                .map(|dt| {
-                    dt.and_local_timezone(chrono::Local)
-                        .single()
-                        .map(|t| t.timestamp_millis())
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
+        // login_time：`OnlineSession.login_time` 是 `chrono::Local::now()` 写下的**本地墙钟字符串**
+        // （auth_service / sso_service 两处 `record_login`），与库内 `sys_logininfor.login_time`
+        // （UTC naive）**不同源**——两处解析方式不同是语义差异，不是重复实现。
+        let login_time_millis = session_login_time_millis(&session.login_time);
 
         // loginLocation: 复用 ip_locator 查询（mmdb 不存在时返回空字符串）
         let login_location = state.ip_locator.locate(&session.ip);
@@ -289,6 +281,27 @@ async fn list_sessions(
     // C-03：在线用户为动态数据（非持久化），采用客户端分页模式
     let total = online_list.len() as u64;
     Ok(TableDataInfo::new(total, online_list))
+}
+
+/// `sys_logininfor.login_time`（**UTC naive**，由 `common::datetime::now_naive()` 写入）→ 毫秒时间戳。
+///
+/// b126 订正：降级路径原先按 `chrono::Local` 解析，把 UTC 值当成本地墙钟，东八区部署下
+/// 每个会话的展示时间都比真实登录时刻晚 8 小时。注意**不能**与本文件另一条
+/// `session_login_time_millis` 合并——那一路的字符串确实是本地墙钟。
+fn logininfor_time_millis(dt: chrono::NaiveDateTime) -> i64 {
+    dt.and_utc().timestamp_millis()
+}
+
+/// `OnlineSession.login_time`（`chrono::Local::now()` 的本地墙钟字符串）→ 毫秒时间戳。
+fn session_login_time_millis(raw: &str) -> i64 {
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .map(|dt| {
+            dt.and_local_timezone(chrono::Local)
+                .single()
+                .map(|t| t.timestamp_millis())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
 }
 
 /// 填充在线用户的 `tenantName`（平台租户由调用方置为 "平台"，此处只处理 tid≠0）
@@ -378,17 +391,7 @@ async fn fallback_to_logininfor(
             login_location: r.login_location.clone().unwrap_or_default(),
             browser: r.browser.clone().unwrap_or_default(),
             os: r.os.clone().unwrap_or_default(),
-            login_time: r
-                .login_time
-                .map(|dt| {
-                    // sys_logininfor.login_time 由 crate::common::datetime::now_naive() 写入（北京时间），
-                    // 必须用 and_local_timezone(Local) 解析，否则 and_utc() 会让时间戳偏移 +8 小时
-                    dt.and_local_timezone(chrono::Local)
-                        .single()
-                        .map(|t| t.timestamp_millis())
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default(),
+            login_time: r.login_time.map(logininfor_time_millis).unwrap_or_default(),
             tenant_id: tid,
             tenant_name: if tid == 0 {
                 crate::tr!("common.platform_tenant")
@@ -794,4 +797,96 @@ pub async fn my_session_logout(
     Ok(AjaxResult::success_msg(&crate::tr!(
         "msg.success.force_logout"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixed_naive() -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .expect("固定日期")
+            .and_hms_opt(0, 0, 0)
+            .expect("固定时刻")
+    }
+
+    /// 正控：UTC naive 必须按 UTC 解释（硬编码纪元值，与服务器时区无关）。
+    #[test]
+    fn logininfor_utc_naive_is_interpreted_as_utc() {
+        assert_eq!(logininfor_time_millis(fixed_naive()), 1_767_225_600_000);
+    }
+
+    /// 反证：不得把 UTC 值当本地墙钟（东八区会多 8 小时）。
+    /// 机器时区为 UTC 时两条结果相同，此断言自动不适用——该情形由形状锁兜住。
+    #[test]
+    fn logininfor_utc_naive_is_not_relabelled_as_local() {
+        let dt = fixed_naive();
+        let as_local = dt
+            .and_local_timezone(chrono::Local)
+            .single()
+            .map(|t| t.timestamp_millis())
+            .unwrap_or_default();
+        if as_local != dt.and_utc().timestamp_millis() {
+            assert_ne!(
+                logininfor_time_millis(dt),
+                as_local,
+                "UTC 存储值不得按本地时区解释"
+            );
+        }
+    }
+
+    /// 主路径对照：`OnlineSession.login_time` 是本地墙钟字符串，必须按本地解析。
+    /// 与上面的 UTC 判据同时成立 ⇒ 两处不是同一种时间。
+    #[test]
+    fn session_login_time_is_local_wall_clock() {
+        let expected = fixed_naive()
+            .and_local_timezone(chrono::Local)
+            .single()
+            .map(|t| t.timestamp_millis())
+            .unwrap_or_default();
+        assert_eq!(session_login_time_millis("2026-01-01 00:00:00"), expected);
+        assert_eq!(
+            session_login_time_millis("not-a-time"),
+            0,
+            "不可解析按 0（前端按缺失展示）"
+        );
+    }
+
+    /// 形状锁：降级路径必须经 `logininfor_time_millis`，且该函数体内不得出现 `Local`
+    /// （在 UTC 机器上行为判据抓不到"改回 and_local_timezone(Local)"的变异）。
+    /// needle 分段拼装，避免判据自己的字面量让检查恒真。
+    #[test]
+    fn fallback_path_uses_utc_conversion() {
+        let src = include_str!("monitor_online_handler.rs");
+        let fn_start = src
+            .find(concat!("fn logininfor_", "time_millis("))
+            .expect("logininfor_time_millis 必须存在");
+        let fn_tail = &src[fn_start..];
+        let fn_end = fn_tail.find("\n}\n").expect("函数体必须以顶格 } 结束");
+        let body = &fn_tail[..fn_end];
+        assert!(
+            body.contains(concat!("and_", "utc()")),
+            "库内 UTC naive 必须按 UTC 解释"
+        );
+        assert!(
+            !body.contains(concat!("Lo", "cal")),
+            "UTC 转换函数体内不得出现本地时区标识"
+        );
+
+        let fallback = concat!("login_time: r.", "login_time.map(");
+        let fallback_start = src.find(fallback).expect("降级路径必须显式转换 login_time");
+        let fallback_tail = &src[fallback_start..];
+        let line_end = fallback_tail.find(';').expect("调用应以分号结束");
+        assert!(
+            fallback_tail[..line_end].contains(concat!("logininfor_", "time_millis")),
+            "降级路径必须走 logininfor_time_millis"
+        );
+
+        assert!(
+            src.matches(concat!("session_login_", "time_millis("))
+                .count()
+                >= 2,
+            "主路径必须经 session_login_time_millis（定义 + 调用）"
+        );
+    }
 }

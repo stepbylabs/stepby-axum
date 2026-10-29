@@ -21,6 +21,7 @@
 //!
 //! 分层约束：不依赖 axum/tower；SharedStore / JwtConfig / SsoConfig 由调用方注入。
 
+use async_trait::async_trait;
 use base64::Engine as _;
 use sea_orm::DatabaseConnection;
 use sea_orm::Set;
@@ -39,7 +40,7 @@ use crate::entity::sys_oauth_client::{ActiveModel as ClientActiveModel, Model as
 use crate::jwt::claims::JwtUtils;
 use crate::repository::sys_oauth_client::SysOauthClientRepository;
 use crate::repository::sys_oauth_consent::SysOauthConsentRepository;
-use crate::shared_store::SharedStore;
+use crate::shared_store::{SharedStore, StoreError};
 
 /// 授权码 Redis key 前缀
 const CODE_KEY_PREFIX: &str = "sso:code:";
@@ -483,6 +484,59 @@ impl OidcError {
             description: description.into(),
         }
     }
+}
+
+/// 令牌吊销所需的共享态能力（`revoke_token` 只依赖这两件事）。
+///
+/// 单独抽 trait 是为了让"删除失败必须上抛"能被**注入式**判据证伪：`SharedStore` 有
+/// 三十余个方法，为测两条失败分支实现整张 trait，写出来的桩与生产行为没有关系，
+/// 还会随 trait 增长长期腐化。
+#[async_trait]
+trait TokenRevokeOps: Send + Sync {
+    async fn del(&self, keys: &[String]) -> Result<u64, StoreError>;
+    async fn set_rem(&self, key: &str, member: &str) -> Result<(), StoreError>;
+}
+
+#[async_trait]
+impl TokenRevokeOps for dyn SharedStore {
+    async fn del(&self, keys: &[String]) -> Result<u64, StoreError> {
+        SharedStore::del(self, keys).await
+    }
+    async fn set_rem(&self, key: &str, member: &str) -> Result<(), StoreError> {
+        SharedStore::set_rem(self, key, member).await
+    }
+}
+
+/// 吊销一个令牌：删除绑定键（AT 一并删在线会话），再从用户索引摘除。
+///
+/// **删除失败必须上抛**：调用方拿到 200 就会宣布"已吊销"，而绑定还在 = 令牌仍可用，
+/// 比吊销本身失败更坏。RFC 7009 允许客户端重试，且重试幂等——绑定已删时下一次调用
+/// 落到另一分支并因键不存在直接返回 Ok。
+///
+/// 索引摘除失败只留痕不上抛：绑定已删 ⇒ 该令牌确定失效，索引里留下的是悬空成员，
+/// `revoke_all_for_user` 的 EXISTS 悬空自愈会清掉；与 `revoke_user_client_tokens`
+/// 对 `set_rem` 失败的既有口径一致（两处若口径相反，运维只能按调用路径猜语义）。
+async fn purge_token<S: TokenRevokeOps + ?Sized>(
+    store: &S,
+    binding_key: String,
+    online_key: Option<String>,
+    index_key: Option<String>,
+    token_hash: &str,
+) -> Result<(), OidcError> {
+    let mut keys = vec![binding_key];
+    if let Some(online) = online_key {
+        keys.push(online);
+    }
+    store.del(&keys).await.map_err(|e| {
+        tracing::error!(error = %e, "SSO 令牌吊销失败：绑定未删除（令牌仍然可用）");
+        OidcError::new("server_error", crate::tr!("error.common.cache_failed"))
+    })?;
+    if let Some(index_key) = index_key
+        && let Err(e) = store.set_rem(&index_key, token_hash).await
+    {
+        tracing::warn!(error = %e, "SSO 令牌索引移除失败（绑定已删，悬空成员由全量吊销自愈）");
+    }
+    Ok(())
 }
 
 /// authorize 处理结果（供 handler 决定跳转 / 报错）
@@ -1584,12 +1638,16 @@ impl SsoService {
             let user_id = serde_json::from_str::<AccessBinding>(&json)
                 .map(|b| b.user_id)
                 .unwrap_or(0);
-            let _: Result<u64, _> = store.del(&[at_key, format!("online:{}", token_hash)]).await;
-            if user_id > 0 {
-                let _: Result<(), _> = store
-                    .set_rem(&format!("{}{}", USER_AT_KEY_PREFIX, user_id), &token_hash)
-                    .await;
-            }
+            // b126：删除失败必须上抛——此前 `let _: Result` 把它吞掉，客户端收到 200
+            // 而令牌仍然可用（与 `revoke_user_sso_tokens` 的 fail-closed 口径相反）。
+            purge_token(
+                store.as_ref(),
+                at_key,
+                Some(format!("online:{}", token_hash)),
+                (user_id > 0).then(|| format!("{}{}", USER_AT_KEY_PREFIX, user_id)),
+                &token_hash,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -1603,12 +1661,14 @@ impl SsoService {
             let user_id = serde_json::from_str::<RefreshBinding>(&json)
                 .map(|b| b.user_id)
                 .unwrap_or(0);
-            let _: Result<u64, _> = store.del(&[rt_key]).await;
-            if user_id > 0 {
-                let _: Result<(), _> = store
-                    .set_rem(&format!("{}{}", USER_RT_KEY_PREFIX, user_id), &token_hash)
-                    .await;
-            }
+            purge_token(
+                store.as_ref(),
+                rt_key,
+                None,
+                (user_id > 0).then(|| format!("{}{}", USER_RT_KEY_PREFIX, user_id)),
+                &token_hash,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -3867,5 +3927,162 @@ mod tests {
                 "error.sso.secret_encrypt_failed",
             );
         });
+    }
+
+    // ══ b126：吊销的删除失败不得假成功 ══
+
+    /// 记录调用并按标志位注入失败的吊销能力桩。
+    struct RecordingRevokeOps {
+        fail_del: bool,
+        fail_set_rem: bool,
+        dels: std::sync::Mutex<Vec<Vec<String>>>,
+        rems: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingRevokeOps {
+        fn new(fail_del: bool, fail_set_rem: bool) -> Self {
+            Self {
+                fail_del,
+                fail_set_rem,
+                dels: std::sync::Mutex::new(Vec::new()),
+                rems: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn del_keys(&self) -> Vec<Vec<String>> {
+            self.dels.lock().expect("记录锁可用").clone()
+        }
+
+        fn rems(&self) -> Vec<(String, String)> {
+            self.rems.lock().expect("记录锁可用").clone()
+        }
+    }
+
+    #[async_trait]
+    impl TokenRevokeOps for RecordingRevokeOps {
+        async fn del(&self, keys: &[String]) -> Result<u64, StoreError> {
+            self.dels.lock().expect("记录锁可用").push(keys.to_vec());
+            if self.fail_del {
+                Err(StoreError::Backend("injected del failure".into()))
+            } else {
+                Ok(keys.len() as u64)
+            }
+        }
+
+        async fn set_rem(&self, key: &str, member: &str) -> Result<(), StoreError> {
+            self.rems
+                .lock()
+                .expect("记录锁可用")
+                .push((key.to_string(), member.to_string()));
+            if self.fail_set_rem {
+                Err(StoreError::Backend("injected set_rem failure".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// 正控：AT 分支必须一次删掉绑定 + 在线会话两个键，并摘掉用户索引。
+    #[tokio::test]
+    async fn revoke_purge_deletes_binding_and_online_session_then_index() {
+        let ops = RecordingRevokeOps::new(false, false);
+        purge_token(
+            &ops,
+            "sso:at:h".into(),
+            Some("online:h".into()),
+            Some("sso:user_at:7".into()),
+            "h",
+        )
+        .await
+        .expect("正常路径必须成功");
+
+        assert_eq!(
+            ops.del_keys(),
+            vec![vec!["sso:at:h".to_string(), "online:h".to_string()]],
+            "AT 绑定与在线会话必须在同一次删除里一起清掉"
+        );
+        assert_eq!(
+            ops.rems(),
+            vec![("sso:user_at:7".to_string(), "h".to_string())]
+        );
+    }
+
+    /// 失败注入：绑定删除失败 ⇒ 必须返回 server_error，且**不得**继续摘索引
+    /// （继续摘等于把半程失败记录成"已完成"）。
+    #[tokio::test]
+    async fn revoke_purge_reports_error_when_binding_delete_fails() {
+        let ops = RecordingRevokeOps::new(true, false);
+        let err = purge_token(
+            &ops,
+            "sso:at:h".into(),
+            Some("online:h".into()),
+            Some("sso:user_at:7".into()),
+            "h",
+        )
+        .await
+        .expect_err("删除失败不得假成功");
+
+        assert_eq!(err.code, "server_error");
+        assert!(
+            ops.rems().is_empty(),
+            "绑定没删掉时不得继续摘索引，否则失败被半程掩盖"
+        );
+    }
+
+    /// 索引摘除失败**不上抛**：绑定已删 ⇒ 令牌确定失效，悬空成员由全量吊销自愈
+    /// （与 `revoke_user_client_tokens` 的既有口径一致）。
+    #[tokio::test]
+    async fn revoke_purge_tolerates_index_removal_failure_after_binding_deleted() {
+        let ops = RecordingRevokeOps::new(false, true);
+        purge_token(
+            &ops,
+            "sso:rt:h".into(),
+            None,
+            Some("sso:user_rt:7".into()),
+            "h",
+        )
+        .await
+        .expect("绑定已删 ⇒ 令牌已失效，索引失败不得改成 500");
+
+        assert_eq!(ops.del_keys(), vec![vec!["sso:rt:h".to_string()]]);
+        assert_eq!(ops.rems().len(), 1);
+    }
+
+    /// 形状锁：`revoke_token` 的 AT/RT 两条分支都必须走 `purge_token`，
+    /// **且结果必须用 `?` 传播**——只数调用点个数会被 `let _ = purge_token(…).await;`
+    /// 这种"调用但丢弃结局"的形态蒙过（本判据第一版实测如此，见台账 b126）。
+    /// 函数体内同时不得再出现 `let _: Result` 这一族"接收 store 结果又丢掉"的写法。
+    /// needle 一律分段拼装——判据自己的源码里出现连续字面量会让"文件里提到过"恒真。
+    #[test]
+    fn revoke_token_wires_both_branches_into_purge() {
+        let src = include_str!("sso_service.rs");
+        let start = src
+            .find(concat!("pub async fn revoke_", "token("))
+            .expect("revoke_token 必须存在");
+        let rest = &src[start..];
+        let end = rest
+            .find(concat!("pub async fn intro", "spect("))
+            .expect("introspect 必须紧随 revoke_token");
+        let body = &rest[..end];
+        let needle = concat!("purge_", "token(");
+
+        let mut cursor = 0usize;
+        let mut wired = 0usize;
+        while let Some(pos) = body[cursor..].find(needle) {
+            let abs = cursor + pos;
+            let tail = &body[abs..];
+            let semi = tail.find(';').expect("每个 purge_token 调用都应以分号收尾");
+            assert!(
+                tail[..semi].contains('?'),
+                "purge_token 的结果必须用 `?` 传播（不得 `let _ = …await;` 丢弃结局）"
+            );
+            wired += 1;
+            cursor = abs + needle.len();
+        }
+        assert_eq!(wired, 2, "AT/RT 两条分支都必须走 purge_token");
+        assert!(
+            !body.contains(concat!("let _: ", "Result<")),
+            "吊销段不得再用 `let _: Result` 吞掉共享态失败"
+        );
     }
 }
