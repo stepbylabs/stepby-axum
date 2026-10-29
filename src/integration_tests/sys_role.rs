@@ -552,3 +552,160 @@ async fn test_role_auth_user_cross_tenant_role_is_rejected() {
         }
     }
 }
+
+/// b131：角色批量删除的重复 id，与「批量授权」里重复的 userIds。
+///
+/// 两个形状都是**合法幂等入参**，修复前各自失败：
+/// - `DELETE /system/role/9,9` ⇒ 事务内第二轮读到刚软删的行 ⇒ 整批 404 + 零删除；
+/// - `PUT /system/role/authUser/selectAll?userIds=5,5` ⇒ 两个相同 ActiveModel 进
+///   `insert_many` ⇒ 撞 `UNIQUE(user_id, role_id)` ⇒ 400「数据重复」。
+///
+/// 判据各配对照组：删除用"单 id 照常 200"，授权用"再调一次仍 200 且只绑一行"。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_role_batch_and_auth_user_dedupe_repeated_ids() {
+    let ctx = TestContext::new().await;
+
+    // ===== ① 批量删除：重复 id 必须 200 且真的删掉 =====
+    let v = ctx
+        .post_json(
+            "/system/role",
+            serde_json::json!({
+                "roleName": "重复id删除角色",
+                "roleKey": "it_role_dup",
+                "roleSort": 95,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx.get_json("/system/role/list?roleKey=it_role_dup").await;
+    let dup_role_id = v["rows"][0]["roleId"].as_i64().expect("应查到新角色");
+
+    let v = ctx
+        .delete_json(&format!("/system/role/{dup_role_id},{dup_role_id}"))
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx.get_json("/system/role/list?roleKey=it_role_dup").await;
+    assert!(
+        v["rows"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "重复 id 的批量删除必须真的删掉，实际: {v}"
+    );
+
+    // 审计：恰一行 DELETE，且操作人可归因（b131 补的署名）
+    let v = ctx
+        .get_json(&format!(
+            "/system/audit-change/list?tableName=sys_role&rowPk={dup_role_id}&action=DELETE"
+        ))
+        .await;
+    assert_eq!(
+        v["total"].as_u64(),
+        Some(1),
+        "重复 id 只应留一条 DELETE 审计，实际: {v}"
+    );
+    assert_eq!(
+        v["rows"][0]["operatorName"].as_str(),
+        Some("admin"),
+        "角色删除留痕必须能归因到操作人（修复前为空），实际: {v}"
+    );
+
+    // ===== ② 批量授权：重复 userId 只绑一行 =====
+    let v = ctx
+        .post_json(
+            "/system/role",
+            serde_json::json!({
+                "roleName": "批量授权去重角色",
+                "roleKey": "it_role_selall",
+                "roleSort": 94,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/system/role/list?roleKey=it_role_selall")
+        .await;
+    let sel_role_id = v["rows"][0]["roleId"].as_i64().expect("应查到授权角色");
+
+    let v = ctx
+        .post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": "it_selall_user",
+                "nickName": "批量授权去重用户",
+                "email": "stepby@tzkj.net",
+                "phonenumber": "13800004444",
+                "password": "Stepby@12345",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/system/user/list?userName=it_selall_user")
+        .await;
+    let user_id = v["rows"][0]["userId"].as_i64().expect("应查到授权用户");
+
+    let uri =
+        format!("/system/role/authUser/selectAll?roleId={sel_role_id}&userIds={user_id},{user_id}");
+    let v = ctx.send_json(ctx_request_put(&ctx, &uri, None)).await;
+    ctx.assert_ok(&v);
+
+    // 已授权列表：该用户恰出现一次（重复 id 不得插两行）
+    let v = ctx
+        .get_json(&format!(
+            "/system/role/authUser/allocatedList?roleId={sel_role_id}"
+        ))
+        .await;
+    let occurrences = v["rows"]
+        .as_array()
+        .map(|rows| rows.iter().filter(|r| r["userId"] == user_id).count())
+        .unwrap_or(0);
+    assert_eq!(
+        occurrences, 1,
+        "重复 userId 只应绑定一行，实际 {occurrences} 行: {v}"
+    );
+
+    // 对照组：同一请求再打一次仍 200（幂等），且仍只绑一行
+    let v = ctx.send_json(ctx_request_put(&ctx, &uri, None)).await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json(&format!(
+            "/system/role/authUser/allocatedList?roleId={sel_role_id}"
+        ))
+        .await;
+    let occurrences = v["rows"]
+        .as_array()
+        .map(|rows| rows.iter().filter(|r| r["userId"] == user_id).count())
+        .unwrap_or(0);
+    assert_eq!(
+        occurrences, 1,
+        "重复调用后仍应只绑定一行（幂等），实际 {occurrences} 行: {v}"
+    );
+}
+
+/// 构造带鉴权头 + ConnectInfo 的 PUT 请求（本文件的授权链用例需要 PUT 空体 + Query 参数）。
+fn ctx_request_put(
+    ctx: &TestContext,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> axum::http::Request<axum::body::Body> {
+    use axum::body::Body;
+    use axum::extract::connect_info::ConnectInfo;
+    use axum::http::Request;
+    use std::net::SocketAddr;
+    let builder = Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header("authorization", format!("Bearer {}", ctx.token));
+    let mut req = match body {
+        Some(b) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string()))
+            .expect("构造请求失败"),
+        None => builder.body(Body::empty()).expect("构造请求失败"),
+    };
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from((ctx.peer_ip, 4321))));
+    req
+}

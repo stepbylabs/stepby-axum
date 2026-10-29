@@ -345,7 +345,7 @@ pub async fn remove(
     let deleted_role_ids = role_ids.clone();
     state
         .role_service
-        .delete_roles(role_ids, operator.tenant_id())
+        .delete_roles(role_ids, operator.username(), operator.tenant_id())
         .await?;
     // Webhook 事件目录（开放域）：删除事务已提交，派发 role.deleted（含批量 ID 列表）
     // P0 跨租户修复：tenant_id 取操作者租户（与 payload tenantId 同源），事件仅投递给同租户回调

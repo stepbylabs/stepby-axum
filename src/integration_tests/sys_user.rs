@@ -666,3 +666,131 @@ async fn test_edit_user_disable_invalidates_token() {
         "编辑停用后旧令牌必须立即失效（不能等到 TTL）"
     );
 }
+
+/// b131：用户表单里的 roleIds / postIds / deptIds 重复，与批量删除的重复 id。
+///
+/// 立案取证：`POST /system/user` 带 `postIds:[1,1]` 时两个相同 ActiveModel 进
+/// `insert_many` ⇒ 撞 `UNIQUE(user_id, post_id)`；`DELETE /system/user/1x,2x,1x`
+/// 则在事务第二轮读到刚软删的行 ⇒ 整批 404 且零删除。两类都是合法幂等入参。
+///
+/// 判据：
+/// ① 新增时三类关联各写两遍 ⇒ 200，且回读每类**恰一条**（不是"插进去了两行"）；
+/// ② 批量删除 `u1,u2,u1` ⇒ 200，两人都不在列表里；
+/// ③ 审计每个目标**恰一条** DELETE（去重后不得为同一行写两遍），且操作人可归因。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_user_bindings_and_batch_delete_dedupe_repeated_ids() {
+    let ctx = TestContext::new().await;
+
+    // 取一个非主部门的部门做兼职（主部门 103 会被"排除主部门"逻辑过滤掉）
+    let v = ctx.get_json("/system/dept/list").await;
+    let part_time_dept = v["data"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .filter_map(|r| r["deptId"].as_i64())
+                .find(|id| *id != 103)
+        })
+        .expect("种子部门里应存在非主部门");
+
+    // ① 三类关联都写两遍
+    let v = ctx
+        .post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": "it_dup_bind_user",
+                "nickName": "重复关联用户",
+                "email": "stepby@tzkj.net",
+                "phonenumber": "13800005555",
+                "password": "Stepby@12345",
+                "status": "0",
+                "postIds": [1, 1],
+                "roleIds": [2, 2],
+                "deptIds": [part_time_dept, part_time_dept]
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    let v = ctx
+        .get_json("/system/user/list?userName=it_dup_bind_user")
+        .await;
+    let user_a = v["rows"][0]["userId"].as_i64().expect("应查到新用户");
+    let dept_ids = v["rows"][0]["deptIds"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        dept_ids
+            .iter()
+            .filter(|d| d.as_i64() == Some(part_time_dept))
+            .count(),
+        1,
+        "重复兼职部门只应绑定一行，实际: {v}"
+    );
+
+    let v = ctx.get_json(&format!("/system/user/{user_a}")).await;
+    let post_ids = v["postIds"].as_array().cloned().unwrap_or_default();
+    assert_eq!(post_ids.len(), 1, "重复岗位只应绑定一行，实际: {v}");
+    let role_ids = v["roleIds"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        role_ids.iter().filter(|r| r.as_i64() == Some(2)).count(),
+        1,
+        "重复角色只应绑定一行，实际: {v}"
+    );
+
+    // 第二位用户（批量删除需要 ≥2 个去重后的目标才会走批量事务路径）
+    let v = ctx
+        .post_json(
+            "/system/user",
+            serde_json::json!({
+                "deptId": 103,
+                "userName": "it_dup_bind_user_b",
+                "nickName": "重复关联用户B",
+                "email": "stepby@tzkj.net",
+                "phonenumber": "13800006666",
+                "password": "Stepby@12345",
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/system/user/list?userName=it_dup_bind_user_b")
+        .await;
+    let user_b = v["rows"][0]["userId"].as_i64().expect("应查到第二位用户");
+
+    // ② 批量删除：u1,u2,u1（含重复）⇒ 200 且两人都真的删掉
+    let v = ctx
+        .delete_json(&format!("/system/user/{user_a},{user_b},{user_a}"))
+        .await;
+    ctx.assert_ok(&v);
+    for name in ["it_dup_bind_user", "it_dup_bind_user_b"] {
+        let v = ctx
+            .get_json(&format!("/system/user/list?userName={name}"))
+            .await;
+        assert!(
+            v["rows"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "批量删除（含重复 id）必须真的删掉 {name}，实际: {v}"
+        );
+    }
+
+    // ③ 审计：每个目标恰一条 DELETE，操作人可归因（批量路径修复前完全无留痕）
+    for uid in [user_a, user_b] {
+        let v = ctx
+            .get_json(&format!(
+                "/system/audit-change/list?tableName=sys_user&rowPk={uid}&action=DELETE"
+            ))
+            .await;
+        assert_eq!(
+            v["total"].as_u64(),
+            Some(1),
+            "用户 {uid} 应恰有一条 DELETE 审计，实际: {v}"
+        );
+        assert_eq!(
+            v["rows"][0]["operatorName"].as_str(),
+            Some("admin"),
+            "用户删除留痕必须能归因到操作人，实际: {v}"
+        );
+    }
+}

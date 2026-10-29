@@ -895,29 +895,70 @@ impl SysConfigService {
     pub async fn delete_configs(
         &self,
         config_ids: Vec<i64>,
+        operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        // b131：重复 id 是合法幂等入参；同时统一到审计与缓存失效的唯一输入
+        let config_ids = crate::common::batch_ids::dedupe_preserving_order(&config_ids);
         if config_ids.is_empty() {
             return Ok(());
         }
-        // H-4：删除前先查询 config_key（单次批量查询，避免 N+1），用于失效缓存
-        let models = self.config_repo.find_by_ids(config_ids.clone()).await?;
-        // 写治理：租户不得删除平台行（fail-closed 403，先于通用越权检查给出明确语义）
-        if operator_tid != 0 && models.iter().any(|m| m.tenant_id == 0) {
-            return Err(ServiceError::forbidden(&crate::tr!(
-                "error.config.platform_row_forbidden"
-            )));
-        }
-        // 多租户越权防护：任一所选参数跨越操作者租户即整体拒绝（平台操作者放行）
-        if models
-            .iter()
-            .any(|m| !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id))
-        {
-            return Err(ServiceError::forbidden(&crate::tr!(
-                "error.common.forbidden"
-            )));
-        }
-        self.config_repo.delete_by_ids(config_ids).await?;
+        // H-4：删除前先查询 config_key（单次批量查询，避免 N+1），用于失效缓存。
+        // b131：读-删-留痕收进同一事务——此前是「事务外读 + 无审计物理删」，
+        // 审计失败/漏写没有任何回滚点（同表 UPDATE 早就在事务内留痕）。
+        let config_repo = self.config_repo.clone();
+        let operator_owned = operator.to_string();
+        let models =
+            self.config_repo
+                .base()
+                .db()
+                .transaction::<_, Vec<SysConfigModel>, ServiceError>(|txn| {
+                    let config_ids = config_ids.clone();
+                    let operator_owned = operator_owned.clone();
+                    async move {
+                        // H-4：删除前先查询 config_key（单次批量查询，避免 N+1），用于失效缓存
+                        let models = config_repo
+                            .find_by_ids_conn(txn, config_ids.clone())
+                            .await?;
+                        // 写治理：租户不得删除平台行（fail-closed 403，先于通用越权检查给出明确语义）
+                        if operator_tid != 0 && models.iter().any(|m| m.tenant_id == 0) {
+                            return Err(ServiceError::forbidden(&crate::tr!(
+                                "error.config.platform_row_forbidden"
+                            )));
+                        }
+                        // 多租户越权防护：任一所选参数跨越操作者租户即整体拒绝（平台操作者放行）
+                        if models.iter().any(|m| {
+                            !crate::common::tenant::tenant_allowed(operator_tid, m.tenant_id)
+                        }) {
+                            return Err(ServiceError::forbidden(&crate::tr!(
+                                "error.common.forbidden"
+                            )));
+                        }
+                        config_repo.delete_by_ids_conn(txn, config_ids).await?;
+                        // 逐行写 DELETE 留痕（同事务提交/回滚，失败令删除一并回滚）
+                        for m in &models {
+                            crate::service::sys_audit_change_service::audit_delete(
+                                txn,
+                                "sys_config",
+                                &m.config_id.to_string(),
+                                m,
+                                None,
+                                Some(operator_owned.as_str()),
+                            )
+                            .await?;
+                        }
+                        Ok(models)
+                    }
+                    .boxed()
+                })
+                .await
+                .map_err(|e| match e {
+                    sea_orm::TransactionError::Transaction(se) => se,
+                    sea_orm::TransactionError::Connection(db_err) => {
+                        tracing::error!("参数删除事务连接错误: {}", db_err);
+                        ServiceError::internal(&crate::tr!("error.common.tx_failed"))
+                    }
+                })?;
         // 批量失效对应层的缓存：平台行 → def 层；租户行 → 该租户覆盖层
         // （原 pipeline 逐键 DEL 语义——非事务允许部分成功，del 多键等价）
         if !models.is_empty() {

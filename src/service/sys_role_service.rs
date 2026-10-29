@@ -854,7 +854,12 @@ impl SysRoleService {
     ///
     /// M-1 Major TOCTOU 修复：用户关联检查移入事务内，避免事务外预检查后
     /// 被其他事务插入新关联（TOCTOU）导致数据不一致。
-    pub async fn delete_role(&self, role_id: i64, operator_tid: i64) -> Result<(), ServiceError> {
+    pub async fn delete_role(
+        &self,
+        role_id: i64,
+        operator: &str,
+        operator_tid: i64,
+    ) -> Result<(), ServiceError> {
         // 超管保护
         if role_id == SUPER_ADMIN_ROLE_ID {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -889,6 +894,8 @@ impl SysRoleService {
         let role_menu_repo = self.role_menu_repo.clone();
         let role_field_perm_repo = self.role_field_perm_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
+        // b131：审计操作人改为真实署名（原实现传 None/None，删除留痕无法归因到人）
+        let operator_owned = operator.to_string();
         // M-1 Major TOCTOU 修复：将 count_by_role_id 检查移入事务内，
         // 使用 _conn 变体在事务上下文中重新检查，确保检查与删除原子执行。
         // 使用 DbErr::Custom 携带业务消息，事务返回后映射回 ServiceError::bad_request。
@@ -912,10 +919,14 @@ impl SysRoleService {
                     role_repo.base().update_conn(txn, am).await?;
 
                     // 1.5 审计合规域：DELETE 变更留痕（同事务提交/回滚，失败令业务一并回滚；
-                    //     delete_role 签名无操作人信息，操作人两列留空（列可空））
+                    //     b131 起按操作人用户名回查补齐署名）
                     let audit_operator =
-                        crate::service::sys_audit_change_service::resolve_operator(txn, None, None)
-                            .await;
+                        crate::service::sys_audit_change_service::resolve_operator(
+                            txn,
+                            None,
+                            Some(operator_owned.as_str()),
+                        )
+                        .await;
                     crate::service::sys_audit_change_service::record_change(
                         txn,
                         "sys_role",
@@ -970,8 +981,11 @@ impl SysRoleService {
     pub async fn delete_roles(
         &self,
         role_ids: Vec<i64>,
+        operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        // b131：重复 id 归一在循环之前——否则第二次读到上一轮刚软删的行，整批 404
+        let role_ids = crate::common::batch_ids::dedupe_preserving_order(&role_ids);
         // 预校验：超管保护（事务外快速失败）
         if role_ids.contains(&SUPER_ADMIN_ROLE_ID) {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -981,7 +995,7 @@ impl SysRoleService {
 
         // 单个 ID 直接走 delete_role（保持原有事务行为）
         if role_ids.len() == 1 {
-            return self.delete_role(role_ids[0], operator_tid).await;
+            return self.delete_role(role_ids[0], operator, operator_tid).await;
         }
 
         // 多租户越权防护（批量）：任一所选角色跨越操作者租户即整体拒绝（平台操作者放行）
@@ -1001,6 +1015,7 @@ impl SysRoleService {
         let role_field_perm_repo = self.role_field_perm_repo.clone();
         let user_role_repo = self.user_role_repo.clone();
         let db = self.db().clone();
+        let operator_owned = operator.to_string();
 
         let txn_result = db
             .transaction::<_, (), sea_orm::DbErr>(|txn| {
@@ -1039,6 +1054,18 @@ impl SysRoleService {
                             role_id,
                             100,
                         );
+
+                        // 3.5 审计合规域：DELETE 变更留痕（b131 批量路径补齐——与单条
+                        //     delete_role 同口径、同事务；必须先于 existing 被 move）
+                        crate::service::sys_audit_change_service::audit_delete(
+                            txn,
+                            "sys_role",
+                            &role_id.to_string(),
+                            &existing,
+                            None,
+                            Some(operator_owned.as_str()),
+                        )
+                        .await?;
 
                         // 4. 软删除 sys_role
                         let mut am: SysRoleActiveModel = existing.into();
@@ -1470,6 +1497,9 @@ impl SysRoleService {
                 "error.role.user_id_empty"
             )));
         }
+        // b131：`userIds=5,5` 是合法的幂等入参；不去重时逐条校验白打一遍，
+        // 后续 delete_by_role_and_users 的 IN 展开也会重复。归一到校验之前。
+        let user_ids = crate::common::batch_ids::dedupe_preserving_order(&user_ids);
 
         // 横向越权：角色本身必须先属于操作者租户（否则租户可操作系统角色/他租角色）
         self.ensure_role_in_operator_tenant(operator_tid, dto.role_id)
@@ -1565,6 +1595,10 @@ impl SysRoleService {
                 "error.role.user_id_empty"
             )));
         }
+
+        // b131：`userIds=5,5` 是合法幂等入参；不去重时逐条校验白打一遍，
+        // 且 `existing.contains` 过滤后仍会落下两个相同 uid ⇒ 撞唯一约束。
+        let user_ids = crate::common::batch_ids::dedupe_preserving_order(&user_ids);
 
         // 横向越权：不得把平台角色/他租角色授予本租用户。
         // 目标用户同租只证明"人"没跨租，不证明"角色"没跨租；缺它就是

@@ -801,3 +801,65 @@ async fn dict_type_rows(ctx: &TestContext, dict_type: &str) -> usize {
         .await;
     v["rows"].as_array().map(|a| a.len()).unwrap_or(0)
 }
+
+/// b131：参数配置批量删除的重复 id 与**变更留痕**。
+///
+/// 修复前 `DELETE /system/config/{id},{id}` 虽然不会报错（该路径是物理删、没有
+/// 存在性比对），但它是全仓唯一一个**完全无审计**的删除入口——同表的 UPDATE 早就在
+/// 事务内 `record_change`，删除却既不进事务也不留痕，"参数被谁删了什么"事后无从查证。
+/// 本用例同时钉两件事：① 重复 id 只留一条 DELETE 留痕（去重生效）；
+/// ② 留痕与操作人同批落库（事务内写入），不是"删完再补记"。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_config_batch_delete_dedupes_and_audits() {
+    let ctx = TestContext::new().await;
+
+    let v = ctx
+        .post_json(
+            "/system/config",
+            serde_json::json!({
+                "configName": "批量删除去重参数",
+                "configKey": "it.test.configDup",
+                "configValue": "it-value",
+                "configType": "Y",
+                "remark": "b131"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/system/config/list?configKey=it.test.configDup")
+        .await;
+    let config_id = v["rows"][0]["configId"]
+        .as_i64()
+        .expect("应查到新参数 configId");
+
+    // ① 重复 id：200 且行真的删掉
+    let v = ctx
+        .delete_json(&format!("/system/config/{config_id},{config_id}"))
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .get_json("/system/config/list?configKey=it.test.configDup")
+        .await;
+    assert!(
+        v["rows"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "重复 id 的批量删除必须真的删掉，实际: {v}"
+    );
+
+    // ② 审计：恰一行 DELETE，且操作人可归因（修复前 sys_config 删除零留痕）
+    let v = ctx
+        .get_json(&format!(
+            "/system/audit-change/list?tableName=sys_config&rowPk={config_id}&action=DELETE"
+        ))
+        .await;
+    assert_eq!(
+        v["total"].as_u64(),
+        Some(1),
+        "参数删除必须留且只留一条 DELETE 审计，实际: {v}"
+    );
+    assert_eq!(
+        v["rows"][0]["operatorName"].as_str(),
+        Some("admin"),
+        "参数删除留痕必须能归因到操作人，实际: {v}"
+    );
+}

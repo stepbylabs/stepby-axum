@@ -26,6 +26,23 @@
 //! - `{不存在的 id}` ⇒ 404（批量删除是"点名缺失"，与单条 DELETE 的幂等语义不同族）；
 //! - 空列表 ⇒ 200/Ok(0) 无操作；
 //! - 顺序保留：审计留痕与错误点名按**输入顺序**给出。
+//!
+//! ## b131：第二族同形缺陷（同一语义换了个面）
+//!
+//! b130 收的是「拿原始长度当分母」；b131 真机取证的是**逐行重查**与**批量插入**两面：
+//!
+//! ```text
+//! DELETE /system/post/974,974                     → 404 岗位不存在（零删除，974 就在库里）
+//! PUT    /system/role/authUser/selectAll?userIds=4783,4783
+//!                                                 → 400 数据重复（零绑定）
+//! ```
+//!
+//! 前者：第一轮软删了 974，第二轮按 id 重查读到 `del_flag='2'` ⇒ 整批回滚；
+//! 后者：同一 user_id 进 `insert_many` 两行 ⇒ 撞 `UNIQUE(user_id, role_id)`。
+//! 同一形状另有 `delete_users` / `delete_roles` / `delete_configs` / 用户表单的
+//! `post_ids` / 角色与兼职部门的幂等授权（`upsert_admin_*_conn`）。
+//! 判据 `batch_write_entries_dedupe_before_use` 按**函数体**反查每个消费点之前
+//! 是否已调用去重且遮蔽原名（表 `DEDUPE_USAGE_SITES`），合成双向钉住两个方向。
 
 use std::collections::HashSet;
 
@@ -242,6 +259,195 @@ mod tests {
         let v = dedupe_violations(&alias);
         assert_eq!(v.len(), 1, "去重未遮蔽原名必须被抓到：{v:?}");
         assert!(v[0].contains("遮蔽"), "违规要说明是哪种坏法：{}", v[0]);
+    }
+
+    /// b131：批量**写**入口的 id 列表归一（表 = 相对路径 / 函数名 / 消费点标记）。
+    ///
+    /// 消费点标记取该函数里第一次真正使用这批 id 的位置（循环头 / 插入构造 / 删除调用）：
+    /// 去重必须出现在它之前，否则"重复 id 已经被写进去一遍"。
+    /// 新增批量写入口时在这里登记一行——漏登记不会有人提醒，但新入口的重复 id 判据
+    /// （`integration_tests::batch_ids`）会红。
+    const DEDUPE_USAGE_SITES: &[(&str, &str, &str)] = &[
+        (
+            "src/service/sys_user_service.rs",
+            "delete_users",
+            "for user_id in user_ids",
+        ),
+        (
+            "src/service/sys_user_service.rs",
+            "validate_delete_targets",
+            "for target_user_id in &user_ids",
+        ),
+        (
+            "src/service/sys_user_service.rs",
+            "add_user",
+            "let models: Vec<SysUserPostActiveModel>",
+        ),
+        (
+            "src/service/sys_user_service.rs",
+            "edit_user",
+            "let models: Vec<SysUserPostActiveModel>",
+        ),
+        (
+            "src/service/sys_role_service.rs",
+            "delete_roles",
+            "for role_id in role_ids",
+        ),
+        (
+            "src/service/sys_role_service.rs",
+            "select_all_auth_users",
+            "let to_insert: Vec<i64> =",
+        ),
+        (
+            "src/service/sys_role_service.rs",
+            "cancel_all_auth_users",
+            "delete_by_role_and_users(",
+        ),
+        (
+            "src/service/sys_post_service.rs",
+            "delete_posts",
+            "for post_id in &post_ids_inner",
+        ),
+        (
+            "src/service/sys_config_service.rs",
+            "delete_configs",
+            "for m in &models",
+        ),
+        (
+            "src/repository/sys_user_role.rs",
+            "upsert_admin_grants_conn",
+            "SysUserRole::insert_many",
+        ),
+        (
+            "src/repository/sys_user_dept.rs",
+            "upsert_admin_depts_conn",
+            "SysUserDept::insert_many",
+        ),
+    ];
+
+    fn load_scan_files() -> Vec<(String, String)> {
+        let all = prod_files(&Scan::default());
+        require_volume(&all, 350, 40_000, "批量写入口去重形状锁");
+        all.iter().map(|f| (f.rel.clone(), f.text())).collect()
+    }
+
+    /// 返回违规描述；空集 = 通过。
+    fn usage_violations(files: &[(String, String)], sites: &[(&str, &str, &str)]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (rel, fname, marker) in sites {
+            let Some((_, text)) = files.iter().find(|(r, _)| r == rel) else {
+                out.push(format!(
+                    "{rel}: 采集面里找不到该文件（判据输入坏了，不是通过）"
+                ));
+                continue;
+            };
+            let mut found = false;
+            let mut from = 0usize;
+            while let Some(pos) = text[from..].find(marker).map(|p| from + p) {
+                from = pos + marker.len();
+                let Some(body_start) = enclosing_fn_start(text, pos) else {
+                    continue;
+                };
+                if fn_name_at(text, body_start) != *fname {
+                    continue;
+                }
+                found = true;
+                let body = &text[body_start..pos];
+                let line = text[..pos].matches('\n').count() + 1;
+                if !body.contains("dedupe_preserving_order(") {
+                    out.push(format!(
+                        "{rel}:{line} 函数 {fname} 在 {marker:?} 之前没有调用 dedupe_preserving_order(（重复 id 会撞唯一约束或把整批判成不存在）"
+                    ));
+                    continue;
+                }
+                if let Some(bad) = dedupe_shadow_violation(body) {
+                    out.push(format!(
+                        "{rel}:{line} 函数 {fname} 去重后没有遮蔽原名（{bad}），后续仍可能使用未去重的列表"
+                    ));
+                    continue;
+                }
+            }
+            if !found {
+                out.push(format!(
+                    "{rel}: 在函数 {fname} 里找不到消费点 {marker:?}——函数改名/重构后本锁的输入形状变了，必须同步登记表"
+                ));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn batch_write_entries_dedupe_before_use() {
+        let files = load_scan_files();
+        let v = usage_violations(&files, DEDUPE_USAGE_SITES);
+        assert!(
+            v.is_empty(),
+            "批量写入口必须先去重再消费（b131）：\n{}",
+            v.join("\n")
+        );
+        // 反脆弱：登记表本身必须仍指向真实存在的函数与消费点（上面已逐个核过），
+        // 且条数不低于登记表——防止"表被清空 ⇒ 零违规"这种空转。
+        assert_eq!(
+            DEDUPE_USAGE_SITES.len(),
+            11,
+            "登记表被改动却没有同步判据口径"
+        );
+    }
+
+    #[test]
+    fn batch_write_lock_catches_missing_and_late_dedupe() {
+        let sites: [(&str, &str, &str); 1] = [("src/service/demo.rs", "del", "for id in ids")];
+        let mk = |body: &str| {
+            vec![(
+                "src/service/demo.rs".to_string(),
+                format!(
+                    "impl S {{\n    pub async fn del(&self, ids: Vec<i64>) {{\n{body}    }}\n}}\n"
+                ),
+            )]
+        };
+
+        let missing = mk("        for id in ids {\n            r.delete(id).await?;\n        }\n");
+        let v = usage_violations(&missing, &sites);
+        assert_eq!(v.len(), 1, "没有去重的坏形状必须被抓到：{v:?}");
+        assert!(v[0].contains("demo.rs:3"), "违规要指到行号：{}", v[0]);
+        assert!(v[0].contains("del"), "违规要指到函数名：{}", v[0]);
+
+        let late = mk(
+            "        for id in ids {\n            r.delete(id).await?;\n        }\n        let ids = dedupe_preserving_order(&ids);\n",
+        );
+        assert_eq!(
+            usage_violations(&late, &sites).len(),
+            1,
+            "去重晚于消费点必须照常判红（顺序是判据的一部分）"
+        );
+
+        let alias = mk(
+            "        let seen = dedupe_preserving_order(&ids);\n        for id in ids {\n            r.delete(id).await?;\n        }\n",
+        );
+        let v = usage_violations(&alias, &sites);
+        assert_eq!(v.len(), 1, "去重未遮蔽原名必须被抓到：{v:?}");
+        assert!(v[0].contains("遮蔽"), "违规要说明是哪种坏法：{}", v[0]);
+
+        let good = mk(
+            "        let ids = dedupe_preserving_order(&ids);\n        for id in ids {\n            r.delete(id).await?;\n        }\n",
+        );
+        assert!(
+            usage_violations(&good, &sites).is_empty(),
+            "合规形状不得误报：{:?}",
+            usage_violations(&good, &sites)
+        );
+
+        // 消费点标记消失（函数被重构）不得当成通过
+        let reshaped = mk(
+            "        let ids = dedupe_preserving_order(&ids);\n        r.delete_all(&ids).await?;\n",
+        );
+        let v = usage_violations(&reshaped, &sites);
+        assert_eq!(v.len(), 1, "消费点找不到必须响亮失败：{v:?}");
+        assert!(
+            v[0].contains("找不到消费点"),
+            "要说清是输入形状变了：{}",
+            v[0]
+        );
     }
 
     /// 采集面自证：本锁读的是真实文件，不是自造字符串。

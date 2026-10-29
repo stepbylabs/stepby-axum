@@ -131,6 +131,8 @@ impl SysUserDeptRepository {
         user_id: i64,
         dept_ids: Vec<i64>,
     ) -> Result<(), DbErr> {
+        // b131：同一兼职部门写两遍会撞 UNIQUE(user_id, dept_id)；单点去重覆盖全部调用方
+        let dept_ids = crate::common::batch_ids::dedupe_preserving_order(&dept_ids);
         if dept_ids.is_empty() {
             return Ok(());
         }

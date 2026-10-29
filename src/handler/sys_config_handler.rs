@@ -221,7 +221,7 @@ pub async fn remove(
 
     state
         .config_service
-        .delete_configs(ids, operator.tenant_id())
+        .delete_configs(ids, operator.username(), operator.tenant_id())
         .await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
 }

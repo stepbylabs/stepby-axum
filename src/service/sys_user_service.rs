@@ -1793,17 +1793,19 @@ impl SysUserService {
 
                     // 3. 若 post_ids 非空，批量插入 sys_user_post（通过 Repository）
                     // SEC-005：补全用户-岗位关联写操作，与角色关联同事务保证原子性
-                    if let Some(ids) = post_ids
-                        && !ids.is_empty()
-                    {
-                        let models: Vec<SysUserPostActiveModel> = ids
-                            .into_iter()
-                            .map(|pid| SysUserPostActiveModel {
-                                user_id: Set(new_user.user_id),
-                                post_id: Set(pid),
-                            })
-                            .collect();
-                        user_post_repo.insert_many_conn(txn, models).await?;
+                    if let Some(ids) = post_ids {
+                        // b131：同一岗位写两遍会撞 UNIQUE(user_id, post_id)，先归一再去空
+                        let ids = crate::common::batch_ids::dedupe_preserving_order(&ids);
+                        if !ids.is_empty() {
+                            let models: Vec<SysUserPostActiveModel> = ids
+                                .into_iter()
+                                .map(|pid| SysUserPostActiveModel {
+                                    user_id: Set(new_user.user_id),
+                                    post_id: Set(pid),
+                                })
+                                .collect();
+                            user_post_repo.insert_many_conn(txn, models).await?;
+                        }
                     }
 
                     // 4. 多部门任职（幂等抢占式：防与 SCIM 组兼职绑定撞 UNIQUE(user_id, dept_id)）
@@ -2012,6 +2014,8 @@ impl SysUserService {
                     if let Some(ids) = post_ids {
                         // 先删除旧关联
                         user_post_repo.delete_by_user_id_conn(txn, user_id).await?;
+                        // b131：重复岗位 id 会撞 UNIQUE(user_id, post_id)，先归一再去空
+                        let ids = crate::common::batch_ids::dedupe_preserving_order(&ids);
                         // 若非空，再插入新关联
                         if !ids.is_empty() {
                             let models: Vec<SysUserPostActiveModel> = ids
@@ -2236,6 +2240,9 @@ impl SysUserService {
         operator_user_id: i64,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        // b131：本方法同时被 handler 在撤权前单独调用，入参同样可能重复；
+        // 去重后下面的按 id 查表与逐条校验才不会被同一目标重复打一遍。
+        let user_ids = crate::common::batch_ids::dedupe_preserving_order(user_ids);
         // 预校验：超管保护（事务外快速失败，避免无效事务开销）
         if user_ids.contains(&SUPER_ADMIN_USER_ID) {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -2254,18 +2261,18 @@ impl SysUserService {
         if operator_user_id != SUPER_ADMIN_USER_ID {
             target_roles_by_uid = self
                 .user_role_repo
-                .find_role_ids_by_user_ids(user_ids)
+                .find_role_ids_by_user_ids(&user_ids)
                 .await?;
         }
         // 一次 IN 查回所有目标用户（user_id → tenant_id，用于租户归属校验；
         // 不过滤软删，与旧逐条 find_by_id 语义一致）
         let target_tids: std::collections::HashMap<i64, i64> = self
             .user_repo
-            .tenant_ids_by_user_ids(user_ids)
+            .tenant_ids_by_user_ids(&user_ids)
             .await?
             .into_iter()
             .collect();
-        for target_user_id in user_ids {
+        for target_user_id in &user_ids {
             // 垂直越权：复用 role_ids 版本的判定（超管已在上面短路）
             if operator_user_id != SUPER_ADMIN_USER_ID {
                 let role_ids = target_roles_by_uid
@@ -2305,6 +2312,9 @@ impl SysUserService {
         operator_user_id: i64,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        // b131：重复 id 是合法的幂等入参（前端重复拼参 / 脚本重试），归一到存在性
+        // 校验之前——否则第二轮循环读到上一轮刚软删的行，整批 404 + 零删除。
+        let user_ids = crate::common::batch_ids::dedupe_preserving_order(&user_ids);
         self.validate_delete_targets(&user_ids, operator_user_id, operator_tid)
             .await?;
 
@@ -2356,7 +2366,20 @@ impl SysUserService {
                         .as_deref()
                         .map(|ext| crate::common::soft_delete_key::freed_key(ext, user_id, 255));
 
-                    // 4. 软删除 sys_user
+                    // 4. 审计合规域：DELETE 变更留痕（b131 批量路径补齐——与 delete_user
+                    //    单条路径同口径，同事务提交/回滚；操作人 ID 由回查补用户名）。
+                    //    必须先于 existing 被 move 进 ActiveModel。
+                    crate::service::sys_audit_change_service::audit_delete(
+                        txn,
+                        "sys_user",
+                        &user_id.to_string(),
+                        &existing,
+                        Some(operator_user_id),
+                        None,
+                    )
+                    .await?;
+
+                    // 5. 软删除 sys_user
                     let mut am: SysUserActiveModel = existing.into();
                     am.del_flag = Set(Some("2".to_string()));
                     am.user_name = Set(deleted_user_name);

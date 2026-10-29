@@ -235,6 +235,9 @@ impl SysUserRoleRepository {
         user_id: i64,
         role_ids: Vec<i64>,
     ) -> Result<(), DbErr> {
+        // b131：同一角色写两遍会生成两行相同 ActiveModel，撞 UNIQUE(user_id, role_id)。
+        // 本方法是管理端角色授权的唯一写入点，去重放在这里覆盖全部调用方。
+        let role_ids = crate::common::batch_ids::dedupe_preserving_order(&role_ids);
         if role_ids.is_empty() {
             return Ok(());
         }

@@ -206,6 +206,21 @@ impl SysConfigRepository {
             .await
     }
 
+    /// 按 id 批量查询（使用指定连接，用于事务内「先读后删+留痕」的原子窗口）
+    pub async fn find_by_ids_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        ids: Vec<i64>,
+    ) -> Result<Vec<Model>, DbErr> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysConfig::find()
+            .filter(Column::ConfigId.is_in(ids))
+            .all(conn)
+            .await
+    }
+
     /// 多条件分页查询（config_name 模糊，config_key 模糊，config_type 精确，时间范围）
     ///
     /// `sort`：动态排序（方案 B，白名单已在 service 层解析为 `SortOrder`）；
@@ -294,6 +309,18 @@ impl SysConfigRepository {
         SysConfig::delete_many()
             .filter(Column::ConfigId.is_in(config_ids))
             .exec(self.base.db())
+            .await
+    }
+
+    /// 按 id 批量物理删除（使用指定连接，供事务内与审计留痕同批提交）
+    pub async fn delete_by_ids_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        config_ids: Vec<i64>,
+    ) -> Result<DeleteResult, DbErr> {
+        SysConfig::delete_many()
+            .filter(Column::ConfigId.is_in(config_ids))
+            .exec(conn)
             .await
     }
 

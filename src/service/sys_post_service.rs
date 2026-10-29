@@ -353,6 +353,9 @@ impl SysPostService {
         operator: &str,
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
+        // b131：重复 id 归一到循环之前——否则第二轮 `find_active_by_id_conn` 读到
+        // 上一轮刚软删的行，整批 404 + 零删除（真机取证 `DELETE /system/post/974,974`）。
+        let post_ids = crate::common::batch_ids::dedupe_preserving_order(&post_ids);
         // 事务保证：预检 + 批量软删除原子化（预检移入事务内，消除 TOCTOU 竞态 C-05），审计留痕同事务
         let post_repo = self.post_repo.clone();
         let user_post_repo = self.user_post_repo.clone();
