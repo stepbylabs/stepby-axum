@@ -671,6 +671,9 @@ impl SysDictService {
     ) -> Result<(), ServiceError> {
         // 预查询所有 dict_type 字符串（事务外查询，事务内仅写）
         // 批量查询（单次 SELECT 替代 N 次），并校验全部存在
+        // b130：先去重保序再判缺失——`?ids=3,3` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let dict_ids = crate::common::batch_ids::dedupe_preserving_order(&dict_ids);
         let models = self.dict_type_repo.find_active_by_ids(&dict_ids).await?;
         if models.len() != dict_ids.len() {
             return Err(ServiceError::not_found(&crate::tr!(

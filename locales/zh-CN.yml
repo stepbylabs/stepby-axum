@@ -584,6 +584,7 @@ error:
     template_id_invalid: 消息模板 ID 不合法
     log_not_found: 发送日志不存在
     log_id_invalid: 发送日志 ID 不合法
+    retry_channel_missing: "发送记录 %{log_id} 的渠道不存在，整批未投递"
   notice:
     not_found: 通知公告不存在
     id_invalid: 通知公告 ID 不合法

@@ -584,6 +584,7 @@ error:
     template_id_invalid: Invalid message template ID
     log_not_found: Send log does not exist
     log_id_invalid: Invalid send log ID
+    retry_channel_missing: "Channel for send log %{log_id} does not exist; the whole batch was not delivered"
   notice:
     not_found: Notice does not exist
     id_invalid: Invalid notice ID

@@ -59,6 +59,21 @@ const CHANNEL_TYPES: &[&str] = &["email", "sms", "site", "wecom_robot", "dingtal
 /// 默认最大重试次数
 const DEFAULT_MAX_RETRY: i32 = 3;
 
+/// 重试批次里「投递渠道已不存在」的处理策略（b130 / N-129-B）。
+///
+/// 两个取值**刻意方向相反**，改动前先读这里：
+/// - [`AbortBatch`](OrphanChannelPolicy::AbortBatch)：显式点名 id 的批次（前端批量重试）。
+///   任一行前置不成立 ⇒ 整批 404 且**零投递**——用户要能看见"哪条前置坏了"，
+///   而不是拿到一个"部分成功"的 404（旧实现正是后者：前几条真发出去了，接口却报失败）。
+/// - [`FailRow`](OrphanChannelPolicy::FailRow)：调度器自选的待重试批次。那一行**永远投不出去**
+///   （渠道已删），若让它整批失败，调度器每轮都会在同一行上终止，队列**永不排空**。
+///   故该行落终态失败并写明原因，其余行照常投递。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrphanChannelPolicy {
+    AbortBatch,
+    FailRow,
+}
+
 /// 校验渠道类型是否在白名单内
 fn validate_channel_type(channel_type: &str) -> Result<(), ServiceError> {
     if CHANNEL_TYPES.contains(&channel_type) {
@@ -666,6 +681,9 @@ impl SysMsgService {
         if channel_ids.is_empty() {
             return Ok(());
         }
+        // b130：先去重保序再判缺失——`?ids=735,735` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let channel_ids = crate::common::batch_ids::dedupe_preserving_order(&channel_ids);
         let existing = self.channel_repo.find_by_ids(&channel_ids).await?;
         if existing.len() != channel_ids.len() {
             return Err(ServiceError::not_found(&crate::tr!(
@@ -939,6 +957,9 @@ impl SysMsgService {
         if template_ids.is_empty() {
             return Ok(());
         }
+        // b130：先去重保序再判缺失——`?ids=735,735` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let template_ids = crate::common::batch_ids::dedupe_preserving_order(&template_ids);
         let existing = self.template_repo.find_by_ids(&template_ids).await?;
         if existing.len() != template_ids.len() {
             return Err(ServiceError::not_found(&crate::tr!(
@@ -1011,6 +1032,9 @@ impl SysMsgService {
         if log_ids.is_empty() {
             return Ok(());
         }
+        // b130：先去重保序再判缺失——`?ids=735,735` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let log_ids = crate::common::batch_ids::dedupe_preserving_order(&log_ids);
         let existing = self.send_log_repo.find_by_ids(&log_ids).await?;
         if existing.len() != log_ids.len() {
             return Err(ServiceError::not_found(&crate::tr!(
@@ -1425,7 +1449,8 @@ impl SysMsgService {
                 "error.common.forbidden"
             )));
         }
-        self.retry_loaded_logs(logs).await
+        self.retry_loaded_logs(logs, OrphanChannelPolicy::AbortBatch)
+            .await
     }
 
     /// 对**已加载的行**逐条重试，认领版本号取行加载时的 `retry_count`。
@@ -1433,24 +1458,76 @@ impl SysMsgService {
     /// 为什么必须用加载时的快照而不是在循环里重读：`retry_pending` 的两步之间
     /// （`find_pending_retry` → 认领）正是最宽的并发窗口——重读会让两个调度实例
     /// 各自拿到"已经被对方推进过的"新版本、双双通过 CAS，重复投递照旧发生。
+    ///
+    /// b130（N-129-B）：渠道解析放在**任何认领与投递之前**做完全批解析。旧实现把
+    /// `find_by_code` 写在循环里 `?` 上抛 ⇒ 批内第 3 条的渠道已被删除时，前 2 条已经
+    /// 真实投递出去（`dispatch` 不可回滚），接口却回 404 且不返回 `processed`——
+    /// 用户无法判断哪些真的发出去了，这是**静默的部分成功**，比整批拒绝坏得多。
+    /// 解析通过后，投递用的就是同一份渠道快照（不再二次查询，避免两处口径漂移）。
+    ///
+    /// `orphan_policy` 的两个取值**刻意方向相反**（见该枚举的注释）：显式 id 的批次要
+    /// 原子拒绝，调度器自选的批次必须能排空——单行前置失效若让整批每轮都失败，
+    /// 队列会永久卡在那一行上，比部分成功更糟。
     async fn retry_loaded_logs(
         &self,
         logs: Vec<crate::entity::sys_msg_send_log::Model>,
+        orphan_policy: OrphanChannelPolicy,
     ) -> Result<u64, ServiceError> {
-        let mut processed = 0u64;
+        let mut resolved: Vec<(crate::entity::sys_msg_send_log::Model, _)> =
+            Vec::with_capacity(logs.len());
+        let mut orphans: Vec<crate::entity::sys_msg_send_log::Model> = Vec::new();
         for log in logs {
             let channel_code = log.channel_code.clone().unwrap_or_default();
-            let channel = self
+            match self
                 .channel_repo
                 .find_by_code(
                     &channel_code,
                     crate::common::tenant::tenant_scope(log.tenant_id),
                 )
                 .await?
-                .ok_or_else(|| {
-                    ServiceError::not_found(&crate::tr!("error.msg.channel_not_found"))
-                })?;
+            {
+                Some(channel) => resolved.push((log, channel)),
+                None => orphans.push(log),
+            }
+        }
 
+        match orphan_policy {
+            OrphanChannelPolicy::AbortBatch => {
+                if let Some(orphan) = orphans.first() {
+                    return Err(ServiceError::not_found(&crate::tr!(
+                        "error.msg.retry_channel_missing",
+                        log_id = orphan.log_id
+                    )));
+                }
+            }
+            OrphanChannelPolicy::FailRow => {
+                // 渠道已消失 = 这条**永远投不出去**：落终态失败并写明原因，
+                // 让批次能继续排空。用户补建渠道后可手动「标记待重试」把它交回队列。
+                for orphan in &orphans {
+                    let retry_count = orphan.retry_count.unwrap_or(0) + 1;
+                    let reason =
+                        crate::tr!("error.msg.retry_channel_missing", log_id = orphan.log_id);
+                    tracing::warn!(
+                        log_id = orphan.log_id,
+                        channel_code = orphan.channel_code.as_deref().unwrap_or(""),
+                        "重试批次的投递渠道已不存在：该行落终态失败，批内其它行照常重试"
+                    );
+                    self.send_log_repo
+                        .update(SysMsgSendLogActiveModel {
+                            log_id: Set(orphan.log_id),
+                            status: Set(Some("1".to_string())),
+                            retry_count: Set(Some(retry_count)),
+                            last_error: Set(Some(reason)),
+                            ..Default::default()
+                        })
+                        .await?;
+                }
+            }
+        }
+
+        let handled_orphans = orphans.len() as u64;
+        let mut processed = 0u64;
+        for (log, channel) in resolved {
             let subject = log.subject.clone().unwrap_or_default();
             let content = log.content.clone().unwrap_or_default();
             let now = crate::common::datetime::now_naive();
@@ -1530,7 +1607,7 @@ impl SysMsgService {
             self.send_log_repo.update(am).await?;
             processed += 1;
         }
-        Ok(processed)
+        Ok(processed + handled_orphans)
     }
 
     /// 把指定 log_id 交回重试队列（前端「标记待重试」按钮）：
@@ -1560,6 +1637,10 @@ impl SysMsgService {
     /// 待重试批次批量重试（定时任务调用）
     ///
     /// 查询 status='2' 且 retry_count < max_retry_count 的记录，最多 batch_limit 条，逐条重发。
+    ///
+    /// 返回值 = **本轮处理的条数**（真正投递的 + 因投递渠道已删除而落终态失败的）。
+    /// 后者必须计入：若只数"投递过几条"，一批全是死信时会打出 0，与"本轮无事可做"
+    /// 逐字节同形，而队列其实被清理过（b130）。
     pub async fn retry_pending(
         &self,
         batch_limit: u64,
@@ -1577,7 +1658,8 @@ impl SysMsgService {
         }
         // 直接把**这批快照行**交给重试体：不走 `retry_logs(ids)` 的二次加载，
         // 否则两次调度各自重读会拿到不同版本、双双通过认领（b129 台账 §1 C）。
-        self.retry_loaded_logs(pending).await
+        self.retry_loaded_logs(pending, OrphanChannelPolicy::FailRow)
+            .await
     }
 
     /// 解析逗号分隔 id 列表（严格：任一项非法即 400，不静默丢弃）
@@ -1710,7 +1792,9 @@ mod tests {",
             "retry_pending 不得二次加载（会丢掉快照版本号，两次调度双双通过认领）"
         );
         assert!(
-            p_body.contains("self.retry_loaded_logs(pending)"),
+            // 第二个实参是「渠道已消失」的策略，不是"重新加载"：真正的口径是
+            // **快照行原样传入**——`retry_logs(` 仍被禁，`find_by_ids` 不得出现在这里。
+            p_body.contains("self.retry_loaded_logs(pending,"),
             "retry_pending 必须把快照行直接交给重试体"
         );
     }

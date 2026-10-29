@@ -986,12 +986,8 @@ impl ScimGroupService {
         operator_tid: i64,
     ) -> Result<(), ScimError> {
         // 去重保序：`?ids=5,5` 只应拆一次，错误点名也不重复
-        let mut unique: Vec<i64> = Vec::with_capacity(ids.len());
-        for id in ids {
-            if !unique.contains(&id) {
-                unique.push(id);
-            }
-        }
+        // b130：换成 `common::batch_ids` 的唯一实现（原手写 `Vec::contains` 是 O(n²)）
+        let unique = crate::common::batch_ids::dedupe_preserving_order(&ids);
         self.db()
             .transaction::<_, (), ScimError>(|txn| {
                 Box::pin(async move {

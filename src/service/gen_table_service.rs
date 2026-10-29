@@ -1262,6 +1262,9 @@ impl GenTableService {
             return Ok(());
         }
         // 批量校验存在性（单次查询替代 N 次 find_by_id）
+        // b130：先去重保序再判缺失——`?ids=735,735` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let table_ids = crate::common::batch_ids::dedupe_preserving_order(&table_ids);
         let existing = self.repo.find_by_ids(table_ids.clone()).await?;
         if existing.len() != table_ids.len() {
             let existing_ids: std::collections::HashSet<i64> =

@@ -64,6 +64,53 @@ async fn log_row(ctx: &TestContext, to_addr: &str, log_id: i64) -> serde_json::V
         .unwrap_or_else(|| panic!("应查到 logId={log_id} 的发送记录，实际: {v}"))
 }
 
+/// 建一个 sms 渠道并返回 channelId（b130 用例共用）。
+///
+/// 网关指向 `127.0.0.1:1`（必然连接被拒）：用例只关心"有没有被投递过"，
+/// 用死端口让每次真实投递都留下确定结局，而不是靠超时抢时序。
+async fn create_sms_channel(ctx: &TestContext, code: &str) -> i64 {
+    let v = ctx
+        .post_json(
+            "/system/msg/channel",
+            serde_json::json!({
+                "channelName": format!("it_msg_{code}"),
+                "channelCode": code,
+                "channelType": "sms",
+                "configJson": r#"{"gateway_url":"http://127.0.0.1:1/send"}"#,
+                "status": "0"
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    v["data"]["channelId"].as_i64().expect("channelId 应为数字")
+}
+
+/// 渠道是否仍存在（详情 200 = 存在，404 = 已删）。
+async fn channel_exists(ctx: &TestContext, channel_id: i64) -> bool {
+    let (status, body) = ctx
+        .send_raw(raw_req(
+            ctx,
+            Method::GET,
+            &format!("/system/msg/channel/{}", channel_id),
+            None,
+        ))
+        .await;
+    match status {
+        StatusCode::OK => true,
+        StatusCode::NOT_FOUND => false,
+        other => panic!("详情应回 200/404，实际 {other}：{body}"),
+    }
+}
+
+/// 运行时唯一后缀：让本文件的用例可重跑、且与残留/并行夹具不撞唯一键。
+fn unique_suffix() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时间应晚于 UNIX_EPOCH")
+        .as_millis()
+        .to_string()
+}
+
 /// 消息渠道全链路（分页列表 → 新增 → 详情 → 修改 → 删除）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_msg_channel_crud_chain() {
@@ -958,4 +1005,335 @@ async fn test_msg_site_illegal_to_addr_silently_succeeds() {
         .delete_json(&format!("/system/msg/log/{}", log_id))
         .await;
     ctx.assert_ok(&v);
+}
+
+/// b130：批量删除的入参归一（重复 id 是**合法的幂等请求**，混入真缺失仍整批拒绝）。
+///
+/// 立案取证（台账 b130 §1）：`DELETE /system/msg/channel/735,735` 曾回
+/// 404「消息渠道不存在」而该行仍在——存在性校验拿**原始列表长度**跟查回行数比，
+/// 同一真实 id 写两遍（前端勾选重复拼参 / 脚本重试 / 幂等重放）就被判成"有行不存在"，
+/// 用户无法自行修复（行确实在，只能改客户端）。
+///
+/// 三条判据各自独立，缺一条这个用例就能被"永远 200"或"永远 404"的实现骗过：
+/// ① 重复 id ⇒ 200 且行**真的**被删（正向能力）；
+/// ② 真缺失混入 ⇒ 404 且**零删除**（b127 的"整批要么全做、要么一条不做"不得被去重顺手破坏）；
+/// ③ 对照组：单 id 删除照常 200（证明 ① 不是"这个入口根本不会拒绝"）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_msg_channel_batch_delete_dedupes_repeated_ids() {
+    let ctx = TestContext::new().await;
+    let suffix = unique_suffix();
+
+    // ① 重复 id：`735,735` 必须删掉那一行（曾整批拒绝且零删除）
+    let dup_id = create_sms_channel(&ctx, &format!("it_bdel_dup_{suffix}")).await;
+    let v = ctx
+        .delete_json(&format!("/system/msg/channel/{dup_id},{dup_id}"))
+        .await;
+    ctx.assert_ok(&v);
+    assert!(
+        !channel_exists(&ctx, dup_id).await,
+        "重复 id 的批量删除必须真的删掉（去重后长度一致才过存在性校验）"
+    );
+
+    // ② 真缺失混入：整批拒绝且一条都不删
+    let keep_id = create_sms_channel(&ctx, &format!("it_bdel_keep_{suffix}")).await;
+    let (status, body) = ctx
+        .send_raw(raw_req(
+            &ctx,
+            Method::DELETE,
+            &format!("/system/msg/channel/{keep_id},999999999"),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "批内有真缺失时必须 404，实际 {status}：{body}"
+    );
+    assert!(
+        body["msg"].as_str().unwrap_or_default().contains("不存在"),
+        "错误消息应说明渠道不存在，实际：{body}"
+    );
+    assert!(
+        channel_exists(&ctx, keep_id).await,
+        "批内混入缺失 id 时**一条都不许删**（去重不得把原子语义改坏）：{body}"
+    );
+
+    // ③ 对照组：单 id 删除照常成功（同一入口，证明 ① 的 200 是真删而不是"永远 200"）
+    let v = ctx
+        .delete_json(&format!("/system/msg/channel/{keep_id}"))
+        .await;
+    ctx.assert_ok(&v);
+    assert!(
+        !channel_exists(&ctx, keep_id).await,
+        "对照组：单 id 删除必须真的删掉"
+    );
+}
+
+/// b130（N-129-B）：批量重试的渠道解析必须在**任何认领与投递之前**整批校验。
+///
+/// 立案取证：`retry_loaded_logs` 把 `find_by_code` 写在投递循环里 `?` 上抛 ⇒
+/// 批内第 3 条的渠道已被删除时，前 2 条**已经真实投递出去**（dispatch 不可回滚），
+/// 接口却回 404 且不返回 `processed`——用户无法判断哪些真的发出去了。
+/// 这是"静默的部分成功"，比整批拒绝坏得多。
+///
+/// 判据的观察量选 `retry_count`：认领（`claim_retry`）成功即 +1 并写回，
+/// 所以 **0 就是"投递循环一次都没进"** 的运行时事实；对照组（单条重试）证明
+/// 这个记号在认领发生时确实会动——否则"retry_count=0"也能被"这个字段根本没人写"满足。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_msg_retry_batch_preflights_channels_before_any_delivery() {
+    let ctx = TestContext::new().await;
+    let suffix = unique_suffix();
+
+    // 两条记录都指向死网关（连接被拒 = 真实投递失败，行落 status='2' 待重试）
+    let ch_a = format!("it_pf_a_{suffix}");
+    let ch_b = format!("it_pf_b_{suffix}");
+    let tpl_a = format!("it_pf_a_tpl_{suffix}");
+    let tpl_b = format!("it_pf_b_tpl_{suffix}");
+    let mut ch_ids = Vec::new();
+    let mut tpl_ids = Vec::new();
+    for (ch, tpl) in [(&ch_a, &tpl_a), (&ch_b, &tpl_b)] {
+        ch_ids.push(create_sms_channel(&ctx, ch).await);
+        let v = ctx
+            .post_json(
+                "/system/msg/template",
+                serde_json::json!({
+                    "templateName": format!("it_msg_{tpl}"),
+                    "templateCode": tpl,
+                    "channelCode": ch,
+                    "templateSubject": "【it_pf】{{name}}",
+                    "templateContent": "内容 {{code}}",
+                    "status": "0"
+                }),
+            )
+            .await;
+        ctx.assert_ok(&v);
+        tpl_ids.push(
+            v["data"]["templateId"]
+                .as_i64()
+                .expect("templateId 应为数字"),
+        );
+    }
+    // id 一律取创建响应，不依赖 list 端点的过滤字段（那是另一个契约，与本判据无关）
+    let ch_b_id = ch_ids[1];
+    let tpl_b_id = tpl_ids[1];
+
+    let mut log_ids = Vec::new();
+    let mut to_addrs = Vec::new();
+    for (idx, tpl) in [&tpl_a, &tpl_b].into_iter().enumerate() {
+        let to = format!("1380000{:04}", idx);
+        let v = ctx
+            .post_json(
+                "/system/msg/send",
+                serde_json::json!({
+                    "templateCode": tpl,
+                    "toAddr": to,
+                    "params": { "name": "pf", "code": "1" }
+                }),
+            )
+            .await;
+        ctx.assert_ok(&v);
+        assert_eq!(
+            v["data"]["status"].as_str(),
+            Some("2"),
+            "死网关必须投递失败并入待重试，实际：{v}"
+        );
+        assert_eq!(
+            v["data"]["retryCount"].as_i64(),
+            Some(0),
+            "send 失败只入队、不算一次重试，实际：{v}"
+        );
+        log_ids.push(v["data"]["logId"].as_i64().expect("send 应返回 logId"));
+        to_addrs.push(to);
+    }
+    let (log_a, log_b) = (log_ids[0], log_ids[1]);
+
+    // 拆掉 B 的渠道：先删模板（否则 channel_in_use 400 拦住），再删渠道
+    let v = ctx
+        .delete_json(&format!("/system/msg/template/{tpl_b_id}"))
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .delete_json(&format!("/system/msg/channel/{ch_b_id}"))
+        .await;
+    ctx.assert_ok(&v);
+
+    // 批量重试（批内含一条渠道已消失的记录）⇒ 整批拒绝，且点名是哪条记录
+    let (status, body) = ctx
+        .send_raw(raw_req(
+            &ctx,
+            Method::POST,
+            &format!("/system/msg/log/retry/{log_a},{log_b}"),
+            Some(serde_json::json!({})),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "渠道缺失的批次必须整批 404，实际 {status}：{body}"
+    );
+    let msg = body["msg"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("渠道不存在"),
+        "错误消息应说明渠道不存在，实际：{body}"
+    );
+    assert!(
+        msg.contains(&log_b.to_string()),
+        "错误消息应点名是哪条记录的前置条件不成立（{log_b}），实际：{body}"
+    );
+
+    // 关键判据：A 一次都没被认领/投递（retry_count 是认领记号，仍是 0）
+    let row_a = log_row(&ctx, &to_addrs[0], log_a).await;
+    assert_eq!(
+        row_a["retryCount"].as_i64(),
+        Some(0),
+        "前置校验失败时**任何一条都不许被认领**（认领会 +1 并真实投递）：{row_a}"
+    );
+    assert_eq!(
+        row_a["status"].as_str(),
+        Some("2"),
+        "A 行应保持原待重试态，实际：{row_a}"
+    );
+
+    // 对照组：单条重试照常走到投递（死网关 ⇒ 仍失败），认领记号必须真的动
+    let v = ctx
+        .post_json(
+            &format!("/system/msg/log/retry/{log_a}"),
+            serde_json::json!({}),
+        )
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"].as_u64(),
+        Some(1),
+        "对照组的单条重试必须真的处理 1 条，实际：{v}"
+    );
+    let row_a2 = log_row(&ctx, &to_addrs[0], log_a).await;
+    assert_eq!(
+        row_a2["retryCount"].as_i64(),
+        Some(1),
+        "认领必须留下 retry_count+1 的记号——上一条断言（=0）依赖它可证伪：{row_a2}"
+    );
+    assert_eq!(
+        row_a2["status"].as_str(),
+        Some("2"),
+        "死网关下重试仍失败、仍保持待重试态，实际：{row_a2}"
+    );
+}
+
+/// b130：调度器自选的待重试批次**不得**被单行前置失效卡死（`OrphanChannelPolicy::FailRow`）。
+///
+/// 与上一条用例是同一缺陷的两个相反方向：显式 id 的批次要原子拒绝，而调度器批次若也整批
+/// 失败，那一行**永远**投不出去（渠道已删），每轮调度都会在同一行上终止 ⇒ 待重试队列
+/// 永不排空。正确语义是该行落终态失败（写明原因，用户补建渠道后可手动交回），其余行照常投递。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_msg_retry_pending_fails_orphan_row_without_blocking_batch() {
+    let _outbound = MSG_OUTBOUND_TEST_LOCK.lock().await;
+    let ctx = TestContext::new().await;
+    let suffix = unique_suffix();
+
+    let ch_a = format!("it_rp_a_{suffix}");
+    let ch_b = format!("it_rp_b_{suffix}");
+    let tpl_a = format!("it_rp_a_tpl_{suffix}");
+    let tpl_b = format!("it_rp_b_tpl_{suffix}");
+    let mut ch_ids = Vec::new();
+    let mut tpl_ids = Vec::new();
+    for (ch, tpl) in [(&ch_a, &tpl_a), (&ch_b, &tpl_b)] {
+        ch_ids.push(create_sms_channel(&ctx, ch).await);
+        let v = ctx
+            .post_json(
+                "/system/msg/template",
+                serde_json::json!({
+                    "templateName": format!("it_msg_{tpl}"),
+                    "templateCode": tpl,
+                    "channelCode": ch,
+                    "templateSubject": "【it_rp】{{name}}",
+                    "templateContent": "内容 {{code}}",
+                    "status": "0"
+                }),
+            )
+            .await;
+        ctx.assert_ok(&v);
+        tpl_ids.push(
+            v["data"]["templateId"]
+                .as_i64()
+                .expect("templateId 应为数字"),
+        );
+    }
+
+    let mut log_ids = Vec::new();
+    let mut to_addrs = Vec::new();
+    for (idx, tpl) in [&tpl_a, &tpl_b].into_iter().enumerate() {
+        let to = format!("1390000{:04}", idx);
+        let v = ctx
+            .post_json(
+                "/system/msg/send",
+                serde_json::json!({
+                    "templateCode": tpl,
+                    "toAddr": to,
+                    "params": { "name": "rp", "code": "1" }
+                }),
+            )
+            .await;
+        ctx.assert_ok(&v);
+        assert_eq!(
+            v["data"]["status"].as_str(),
+            Some("2"),
+            "死网关必入待重试：{v}"
+        );
+        log_ids.push(v["data"]["logId"].as_i64().expect("send 应返回 logId"));
+        to_addrs.push(to);
+    }
+    let (log_a, log_b) = (log_ids[0], log_ids[1]);
+
+    // 拆掉 B 的渠道（先删模板，否则 channel_in_use 拦住）
+    let v = ctx
+        .delete_json(&format!("/system/msg/template/{}", tpl_ids[1]))
+        .await;
+    ctx.assert_ok(&v);
+    let v = ctx
+        .delete_json(&format!("/system/msg/channel/{}", ch_ids[1]))
+        .await;
+    ctx.assert_ok(&v);
+
+    // 调度器入口：批内含一条渠道已消失的记录 ⇒ 该行落终态、其余行照常重试
+    let v = ctx
+        .post_json("/system/msg/log/retryPending/10", serde_json::json!({}))
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        v["data"].as_u64(),
+        Some(2),
+        "返回值是「本轮处理的条数」= 投递 1 条 + 落终态 1 条，实际：{v}"
+    );
+
+    let orphan = log_row(&ctx, &to_addrs[1], log_b).await;
+    assert_eq!(
+        orphan["status"].as_str(),
+        Some("1"),
+        "渠道已消失的行必须落**终态失败**（否则队列永不排空），实际：{orphan}"
+    );
+    assert_eq!(
+        orphan["retryCount"].as_i64(),
+        Some(1),
+        "落终态也要记一次已处理的重试，实际：{orphan}"
+    );
+    assert!(
+        orphan["lastError"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("渠道不存在"),
+        "失败原因必须写明渠道不存在（用户据此去补建），实际：{orphan}"
+    );
+
+    let delivered = log_row(&ctx, &to_addrs[0], log_a).await;
+    assert_eq!(
+        delivered["retryCount"].as_i64(),
+        Some(1),
+        "同一批里渠道正常的行必须照常被认领并投递，实际：{delivered}"
+    );
+    assert_eq!(
+        delivered["status"].as_str(),
+        Some("2"),
+        "死网关下仍失败、保持待重试（未达上限），实际：{delivered}"
+    );
 }

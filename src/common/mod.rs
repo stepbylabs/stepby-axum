@@ -1,6 +1,8 @@
 // stepby-axum/src/common/mod.rs
 
 pub mod background;
+// 批量操作入参归一（去重保序的唯一实现；重复 id 不得被判成"不存在"）
+pub mod batch_ids;
 pub mod clear_fields;
 pub mod constants;
 pub mod cron_compat;

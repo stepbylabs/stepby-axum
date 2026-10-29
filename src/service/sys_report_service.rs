@@ -569,6 +569,9 @@ impl SysReportService {
         if report_ids.is_empty() {
             return Ok(());
         }
+        // b130：先去重保序再判缺失——`?ids=735,735` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let report_ids = crate::common::batch_ids::dedupe_preserving_order(&report_ids);
         let existing = self.report_repo.find_by_ids(&report_ids).await?;
         if existing.len() != report_ids.len() {
             return Err(ServiceError::not_found(&crate::tr!(
@@ -807,6 +810,9 @@ impl SysReportService {
         if sub_ids.is_empty() {
             return Ok(());
         }
+        // b130：先去重保序再判缺失——`?ids=735,735` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let sub_ids = crate::common::batch_ids::dedupe_preserving_order(&sub_ids);
         let existing = self.sub_repo.find_by_ids(&sub_ids).await?;
         if existing.len() != sub_ids.len() {
             return Err(ServiceError::not_found(&crate::tr!(

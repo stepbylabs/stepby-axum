@@ -771,6 +771,9 @@ impl SysNoticeService {
         if notice_ids.is_empty() {
             return Ok(());
         }
+        // b130：先去重保序再判缺失——`?ids=735,735` 是完全合法的幂等请求，
+        // 用原始长度当分母会把它判成「不存在」并零删除（台账 b130 §1）。
+        let notice_ids = crate::common::batch_ids::dedupe_preserving_order(&notice_ids);
         let existing = self.notice_repo.find_by_ids(&notice_ids).await?;
         if existing.len() != notice_ids.len() {
             return Err(ServiceError::not_found(&crate::tr!(

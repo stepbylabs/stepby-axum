@@ -706,3 +706,98 @@ async fn test_config_retired_keys_and_value_domain() {
         .await;
     assert_eq!(v["code"], 404, "探针清理后应 404，实际: {v}");
 }
+
+/// b130：字典类型的批量删除同样按「去重保序」判缺失（`models.len()` 命名的那一族）。
+///
+/// 与 `sys_msg::test_msg_channel_batch_delete_dedupes_repeated_ids` 是**两个不同的接入面**：
+/// 那条覆盖 `existing.len()` 命名，这条覆盖 `models.len()` 命名，且各自验证
+/// "去重后真的按去重结果删"（形状锁只能判"去重调用在长度比较之前"，判不了下游用哪个变量）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dict_type_batch_delete_dedupes_repeated_ids() {
+    use axum::http::{Method, StatusCode};
+
+    let ctx = TestContext::new().await;
+    let unique = format!(
+        "it_bdel_dict_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("系统时间应晚于 UNIX_EPOCH")
+            .as_millis()
+    );
+
+    // 建两条类型；id 一律回查（该端点的新增响应不带 dictId）
+    let mut ids = Vec::new();
+    for suffix in ["a", "b"] {
+        let dict_type = format!("{unique}_{suffix}");
+        let v = ctx
+            .post_json(
+                "/system/dict/type",
+                serde_json::json!({
+                    "dictName": format!("批量删除用例{suffix}"),
+                    "dictType": dict_type,
+                    "status": "0",
+                    "remark": "b130"
+                }),
+            )
+            .await;
+        ctx.assert_ok(&v);
+        let v = ctx
+            .get_json(&format!("/system/dict/type/list?dictType={dict_type}"))
+            .await;
+        let row = v["rows"]
+            .as_array()
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or_else(|| panic!("应查到字典类型 {dict_type}，实际：{v}"));
+        ids.push((dict_type, row["dictId"].as_i64().expect("dictId 应为数字")));
+    }
+
+    // ① 重复 id ⇒ 200 且行真的被删（曾因原始长度当分母被判成"不存在"）
+    let (type_a, id_a) = ids[0].clone();
+    let v = ctx
+        .delete_json(&format!("/system/dict/type/{id_a},{id_a}"))
+        .await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        dict_type_rows(&ctx, &type_a).await,
+        0,
+        "重复 id 的批量删除必须真的删掉 {type_a}"
+    );
+
+    // ② 真缺失混入 ⇒ 404 且零删除
+    let (type_b, id_b) = ids[1].clone();
+    let (status, body) = ctx
+        .send_raw(ctx.request(
+            Method::DELETE,
+            &format!("/system/dict/type/{id_b},999999999"),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "批内有真缺失时必须 404，实际 {status}：{body}"
+    );
+    assert_eq!(
+        dict_type_rows(&ctx, &type_b).await,
+        1,
+        "批内混入缺失 id 时一条都不许删：{body}"
+    );
+
+    // ③ 收尾：单 id 删除照常生效（同一入口的对照组）
+    let v = ctx.delete_json(&format!("/system/dict/type/{id_b}")).await;
+    ctx.assert_ok(&v);
+    assert_eq!(
+        dict_type_rows(&ctx, &type_b).await,
+        0,
+        "对照组：单 id 删除必须真的删掉"
+    );
+}
+
+/// 按 `dictType` 回查行数（b130 批量删除用例：判"到底删没删"）。
+async fn dict_type_rows(ctx: &TestContext, dict_type: &str) -> usize {
+    let v = ctx
+        .get_json(&format!("/system/dict/type/list?dictType={dict_type}"))
+        .await;
+    v["rows"].as_array().map(|a| a.len()).unwrap_or(0)
+}
