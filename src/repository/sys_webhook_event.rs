@@ -58,6 +58,20 @@ impl SysWebhookEventRepository {
             .await
     }
 
+    /// 按 event_key 批量查询目录事件（订阅写入前的批量合法性闸门）
+    ///
+    /// 订阅校验一次最多 `MAX_SUBSCRIBED_EVENT_KEYS` 个键，逐键查询会把一次保存变成
+    /// N 次往返；目录键是精确匹配，`is_in` 与逐键 `eq` 结果集合相同。
+    pub async fn find_by_event_keys(&self, event_keys: &[String]) -> Result<Vec<Model>, DbErr> {
+        if event_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        SysWebhookEvent::find()
+            .filter(Column::EventKey.is_in(event_keys.to_vec()))
+            .all(&self.db)
+            .await
+    }
+
     /// 更新目录事件 enabled（目录下架展示并拒绝新订阅；派发链不查目录，存量 hook 不中断）
     ///
     /// 返回影响行数（0 = 事件不存在，由调用方转 404）。

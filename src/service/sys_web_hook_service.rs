@@ -715,6 +715,19 @@ impl SysWebHookService {
                 "error.web_hook.event_invalid"
             )));
         }
+        // 目录命中需 enabled='1'：停用事件（目录下架）拒绝新订阅；
+        // 存量豁免集（extra_allowed）不受目录 enabled 影响（方案 C 兼容口径）。
+        //
+        // 一次 `is_in` 批查后按**输入序**判定：错误仍然只报首个违规键（逐键查的旧语义，
+        // 空串在同一序位上依旧优先于"未知键"），但不再把一次保存变成 N 次往返。
+        // `is_in` 与逐键 `eq` 的集合结果相同（精确匹配），顺序由下面的循环自己控制。
+        let trimmed: Vec<String> = keys.iter().map(|k| k.trim().to_string()).collect();
+        let catalog = self.event_repo.find_by_event_keys(&trimmed).await?;
+        let enabled_keys: std::collections::HashSet<&str> = catalog
+            .iter()
+            .filter(|e| e.enabled == "1")
+            .map(|e| e.event_key.as_str())
+            .collect();
         for k in keys {
             let k = k.trim();
             if k.is_empty() {
@@ -722,17 +735,13 @@ impl SysWebHookService {
                     "error.web_hook.event_invalid"
                 )));
             }
-            // 目录命中需 enabled='1'：停用事件（目录下架）拒绝新订阅；
-            // 存量豁免集（extra_allowed）不受目录 enabled 影响（方案 C 兼容口径）。
-            let catalog_hit = self.event_repo.find_by_event_key(k).await?;
-            let in_catalog = matches!(catalog_hit.as_ref(), Some(e) if e.enabled == "1");
             let in_extra = extra_allowed
                 .iter()
                 .any(|e| e.trim().eq_ignore_ascii_case(k));
             if in_extra {
                 continue;
             }
-            if !in_catalog {
+            if !enabled_keys.contains(k) {
                 return Err(ServiceError::bad_request(&crate::tr!(
                     "error.web_hook.event_key_unknown",
                     key = k
@@ -2021,6 +2030,94 @@ mod tests {
             map_legacy_event_key(EVENT_LOGIN_SUCCESS)
         ));
         assert!(hook_matches_subscribed(None, "login.success"));
+    }
+
+    /// b127：订阅键校验走一次批查，但**语义逐条不变**。
+    ///
+    /// 旧实现每个键一次 `find_by_event_key`（上限 100 键 = 100 次往返）；批量化最容易
+    /// 悄悄改掉的是三件事：`extra_allowed` 的优先级（存量豁免不受目录 enabled 影响）、
+    /// 错误**按输入序**只报首个违规键、空串在同一序位上优先于"未知键"。
+    /// 这三条各自都能单独被改坏，所以分条断言而不是只判 `is_err()`。
+    #[tokio::test]
+    async fn subscribed_event_keys_are_validated_in_one_batch_preserving_input_order() {
+        use crate::entity::sys_webhook_event::{Column as ECol, Entity as EventCatalog};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let db = crate::repository::test_support::migrated_db()
+            .await
+            .unwrap();
+        let svc = SysWebHookService::new(db.clone());
+
+        // 停用一个种子事件：目录里存在但 enabled='0' 必须拒绝新订阅
+        let disabled = EventCatalog::find()
+            .filter(ECol::EventKey.eq("user.deleted"))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("迁移应已播种 user.deleted");
+        svc.event_repo
+            .update_enabled(disabled.id, "0")
+            .await
+            .unwrap();
+
+        // ① 启用键 + 空白：通过，且规范化后保持输入序
+        let ok = svc
+            .validate_subscribed_events(
+                &["  user.created ".to_string(), "login.success".to_string()],
+                &[],
+            )
+            .await
+            .expect("已启用键应通过");
+        assert_eq!(ok.as_deref(), Some(r#"["user.created","login.success"]"#));
+
+        // ② 停用键：拒绝且点名（不是一句泛化文案）
+        let err = svc
+            .validate_subscribed_events(&["user.deleted".to_string()], &[])
+            .await
+            .expect_err("停用键不得通过");
+        assert_eq!(err.code, 400);
+        assert!(err.message.contains("user.deleted"), "应点名停用键: {err}");
+
+        // ③ 存量豁免：大小写/空白容忍，且不受目录 enabled 影响（user.deleted 已停用仍放行）
+        let ok = svc
+            .validate_subscribed_events(
+                &[" USER.DELETED ".to_string(), "My_Custom".to_string()],
+                &["user.deleted".to_string(), "my_custom".to_string()],
+            )
+            .await
+            .expect("命中存量豁免应放行");
+        assert_eq!(ok.as_deref(), Some(r#"["USER.DELETED","My_Custom"]"#));
+
+        // ④ 多个未知键：只报输入序首个（逐键查的旧语义）
+        let err = svc
+            .validate_subscribed_events(&["nope.a".to_string(), "nope.b".to_string()], &[])
+            .await
+            .expect_err("未知键必须拒绝");
+        assert!(
+            err.message.contains("nope.a") && !err.message.contains("nope.b"),
+            "应只点名首个未知键: {err}"
+        );
+
+        // ⑤ 空串与未知键混合：报告哪一个由**序位**决定，不由错误种类决定
+        let err = svc
+            .validate_subscribed_events(&["nope.a".to_string(), String::new()], &[])
+            .await
+            .expect_err("含未知键必须拒绝");
+        assert!(err.message.contains("nope.a"), "首违规键是 nope.a: {err}");
+        let err = svc
+            .validate_subscribed_events(&[String::new(), "nope.a".to_string()], &[])
+            .await
+            .expect_err("含空键必须拒绝");
+        assert!(
+            !err.message.contains("nope.a"),
+            "空串在同一序位上优先，不得报后面的未知键: {err}"
+        );
+
+        // ⑥ 空列表 = 订阅全部
+        assert_eq!(
+            svc.validate_subscribed_events(&[], &[]).await.unwrap(),
+            None
+        );
     }
 
     #[test]

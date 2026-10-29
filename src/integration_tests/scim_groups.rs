@@ -547,3 +547,184 @@ async fn test_scim_group_members_reject_unknown_users_in_input_order() {
     let gid = create_group_via_api(&ctx, "负路径组C", &[uid]).await;
     assert!(gid > 0, "合法成员建组应返回有效 gid");
 }
+
+/// helper：经 SCIM API provision 一个用户并返回 user_id（管理端计数测试用）
+async fn provision_user_via_api(ctx: &TestContext, name: &str) -> i64 {
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": name,
+        "name": {"displayName": name},
+    });
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users",
+        &body.to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "provision 应 201: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    json_of(&resp)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<i64>()
+        .expect("用户 id")
+}
+
+/// helper：管理端组列表（管理员 JWT），返回原始响应体
+async fn admin_list_groups(ctx: &TestContext, query: &str) -> serde_json::Value {
+    let token = ctx.token.clone();
+    let (status, _, body) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/system/scimGroup/list?{query}"),
+        &[("authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "管理端列表应 200: {}",
+        String::from_utf8_lossy(&body)
+    );
+    json_of(&body)
+}
+
+/// b127：管理端列表的成员/绑定计数必须来自一次聚合，且零计数要显示 0 而不是缺省。
+///
+/// 旧实现每行 2 条 COUNT（100 行 = 200 次往返）；批量化后最容易改坏的是
+/// "GROUP BY 不返回零行分组" —— 那会让没有成员/绑定的组在页面上显示空白而不是 0。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scim_group_admin_list_counts_are_correct_for_every_group() {
+    let ctx = scim_ctx().await;
+    let uid1 = provision_user_via_api(&ctx, "scim.count.u1").await;
+    let uid2 = provision_user_via_api(&ctx, "scim.count.u2").await;
+
+    // 有 2 成员 + 1 条绑定
+    let with_data = create_group_via_api(&ctx, "计数组-有数据", &[uid1, uid2]).await;
+    let status = admin_put_bindings(&ctx, with_data, &[2]).await;
+    assert!(status.is_success(), "绑定应成功: {status}");
+    // 全空组：计数必须显式是 0
+    let empty = create_group_via_api(&ctx, "计数组-全空", &[]).await;
+
+    let body = admin_list_groups(&ctx, "pageNum=1&pageSize=100").await;
+    assert_eq!(body["code"], 200, "业务码应为 200: {body}");
+    let rows = body["rows"].as_array().expect("rows 应为数组");
+    let find = |gid: i64| {
+        rows.iter()
+            .find(|r| r["groupId"].as_i64() == Some(gid))
+            .unwrap_or_else(|| panic!("列表应包含组 {gid}: {body}"))
+            .clone()
+    };
+    let a = find(with_data);
+    assert_eq!(a["memberCount"].as_u64(), Some(2), "成员计数: {a}");
+    assert_eq!(a["bindingCount"].as_u64(), Some(1), "绑定计数: {a}");
+    let b = find(empty);
+    assert_eq!(b["memberCount"].as_u64(), Some(0), "零成员必须显示 0: {b}");
+    assert_eq!(b["bindingCount"].as_u64(), Some(0), "零绑定必须显示 0: {b}");
+
+    // 计数与详情同源：详情里的成员数/绑定数必须与列表一致（两处各算一遍就会漂）
+    let token = ctx.token.clone();
+    let (status, _, detail) = raw_get(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/system/scimGroup/{with_data}"),
+        &[("authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let d = json_of(&detail)["data"].clone();
+    assert_eq!(d["members"].as_array().map(|x| x.len()), Some(2));
+    assert_eq!(d["bindingTargetIds"].as_array().map(|x| x.len()), Some(1));
+}
+
+/// b127：管理端批量删除必须**要么全删、要么一条不删**，且缺失 id 要点名。
+///
+/// 旧实现逐条删、首错即中断：`DELETE {g1},{g2},<不存在>` 会先把 g1/g2 真删掉，
+/// 再因为第三个不存在而回 404 —— 使用者看到"失败"，而数据已经部分消失，
+/// 响应里也看不出哪几个已被删。这里用"名单里混一个不存在的 id"构造该形状。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scim_group_batch_delete_is_atomic_and_names_missing_ids() {
+    use crate::entity::sys_scim_group::{Entity as ScimGroup, Model as GroupModel};
+    use sea_orm::EntityTrait;
+
+    let ctx = scim_ctx().await;
+    let db = ctx.state.db.clone();
+    let del_flag_of = |gid: i64| {
+        let db = db.clone();
+        async move {
+            ScimGroup::find_by_id(gid)
+                .one(&db)
+                .await
+                .expect("查询组失败")
+                .map(|m: GroupModel| m.del_flag)
+                .expect("组行应保留（软删不物理删）")
+        }
+    };
+    let g1 = create_group_via_api(&ctx, "批量组1", &[]).await;
+    let g2 = create_group_via_api(&ctx, "批量组2", &[]).await;
+    let missing: i64 = 9_999_999_999;
+    let bearer = format!("Bearer {}", ctx.token);
+    let auth: [(&str, &str); 1] = [("authorization", bearer.as_str())];
+
+    // ① 混入不存在的 id ⇒ 整批拒绝，且前两个一条都不许少
+    let uri = format!("/system/scimGroup/{g1},{g2},{missing}");
+    let (status, _, body) = raw_delete(&ctx.app, ctx.peer_ip, &uri, &auth).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "含缺失 id 的整批必须拒绝: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let msg = json_of(&body)["msg"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        msg.contains(&missing.to_string()),
+        "错误文案必须点名缺失 id（否则使用者只能逐个试）: {msg}"
+    );
+    for gid in [g1, g2] {
+        assert_ne!(
+            del_flag_of(gid).await.as_deref(),
+            Some("2"),
+            "整批被拒时组 {gid} 不得被软删（旧实现此时已把它真删掉）"
+        );
+    }
+
+    // ② 对照组：同一批去掉缺失 id ⇒ 必须真的全删（证明闸不是"永远拒绝"）
+    let uri = format!("/system/scimGroup/{g1},{g2}");
+    let (status, _, body) = raw_delete(&ctx.app, ctx.peer_ip, &uri, &auth).await;
+    assert!(
+        status.is_success(),
+        "合法批次应成功: {status} {}",
+        String::from_utf8_lossy(&body)
+    );
+    for gid in [g1, g2] {
+        assert_eq!(
+            del_flag_of(gid).await.as_deref(),
+            Some("2"),
+            "组 {gid} 应已软删"
+        );
+    }
+
+    // ③ 重复 id 只拆一次（去重后仍成功，且不因二次拆除报错）
+    let g3 = create_group_via_api(&ctx, "批量组3", &[]).await;
+    let uri = format!("/system/scimGroup/{g3},{g3}");
+    let (status, _, body) = raw_delete(&ctx.app, ctx.peer_ip, &uri, &auth).await;
+    assert!(
+        status.is_success(),
+        "重复 id 批次应成功: {status} {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        del_flag_of(g3).await.as_deref(),
+        Some("2"),
+        "组 {g3} 应已软删"
+    );
+}

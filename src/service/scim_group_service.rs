@@ -38,11 +38,13 @@ use crate::entity::sys_user_role::{
     ActiveModel as UserRoleAM, Column as UserRoleCol, Entity as SysUserRole,
 };
 use crate::service::scim_service::ScimError;
+use sea_orm::sea_query::{Expr, ExprTrait};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    DatabaseTransaction, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    TransactionTrait, Value,
+    DatabaseTransaction, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select,
+    Set, TransactionTrait, Value,
 };
+use std::collections::HashMap;
 
 const SCIM_GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
 pub const MAPPING_ROLE: &str = "role";
@@ -735,28 +737,51 @@ impl ScimGroupService {
             .all(self.db())
             .await
             .map_err(db_err_500)?;
-        let mut out = Vec::with_capacity(rows.len());
-        for g in rows {
-            let member_count = GroupMember::find()
-                .filter(MemberCol::GroupId.eq(g.group_id))
-                .count(self.db())
+        // 计数一次聚合：原实现每行 2 条 COUNT（100 行 = 200 次往返），
+        // 且"行已查出、计数查询失败"会让整页 500——同一份事实读两遍不增加任何保证。
+        // `is_in` 只限扫描面（映射只按本页 id 取值，去掉它结果一样但会扫全表）——
+        // 别当它是可去的冗余：它守的是"分页查询别把全表成员行读回来"。
+        let group_ids: Vec<i64> = rows.iter().map(|g| g.group_id).collect();
+        let (member_counts, binding_counts) = if group_ids.is_empty() {
+            (HashMap::new(), HashMap::new())
+        } else {
+            (
+                group_counts(
+                    GroupMember::find()
+                        .select_only()
+                        .column(MemberCol::GroupId)
+                        .column_as(Expr::col(MemberCol::GroupId).count(), "cnt")
+                        .filter(MemberCol::GroupId.is_in(group_ids.clone()))
+                        .group_by(MemberCol::GroupId),
+                    self.db(),
+                )
                 .await
-                .map_err(db_err_500)?;
-            let binding_count = GroupBinding::find()
-                .filter(BindingCol::GroupId.eq(g.group_id))
-                .count(self.db())
+                .map_err(db_err_500)?,
+                group_counts(
+                    GroupBinding::find()
+                        .select_only()
+                        .column(BindingCol::GroupId)
+                        .column_as(Expr::col(BindingCol::GroupId).count(), "cnt")
+                        .filter(BindingCol::GroupId.is_in(group_ids))
+                        .group_by(BindingCol::GroupId),
+                    self.db(),
+                )
                 .await
-                .map_err(db_err_500)?;
-            out.push(ScimGroupAdminRow {
+                .map_err(db_err_500)?,
+            )
+        };
+        let out = rows
+            .into_iter()
+            .map(|g| ScimGroupAdminRow {
+                member_count: member_counts.get(&g.group_id).copied().unwrap_or(0),
+                binding_count: binding_counts.get(&g.group_id).copied().unwrap_or(0),
                 group_id: g.group_id,
                 display_name: g.display_name,
                 external_id: g.external_id,
                 mapping_type: g.mapping_type,
-                member_count,
-                binding_count,
                 create_time: g.create_time.map(|t| t.to_string()),
-            });
-        }
+            })
+            .collect();
         Ok((out, total))
     }
 
@@ -944,17 +969,65 @@ impl ScimGroupService {
         self.teardown(m.group_id).await
     }
 
-    /// 管理端批量删除：逐组复用 `admin_delete`（每组独立事务：软删 + 清成员/绑定 + 撤授权），
-    /// 任一组失败即整体返回错误（已完成删除的组不回滚，与字典批量删除语义一致）。
+    /// 管理端批量删除：**一个事务内先全量校验、再统一拆除**。
+    ///
+    /// 语义对齐 `sys_dict_service::delete_dict_types`（"任一不存在 ⇒ 整体拒绝、零删除"），
+    /// 但把校验也放进同一个事务，去掉"预校验后到拆除前"的竞态窗口。
+    ///
+    /// 旧实现是"逐条删、首错即中断"：删 5 个组时第 3 个不存在 ⇒ 前 2 个已真删（各自事务
+    /// 已提交）、接口却回 404，使用者看到"失败"而数据已部分消失，且无从知道是哪几个——
+    /// 这是**静默的部分成功**，比整批拒绝或整批成功都坏。
+    /// 失败文案点名缺失/越权的 id：批量里错一个却只说一句 "Group not found"，
+    /// 使用者只能逐个试。
     /// 上限校验（MAX_BATCH_DELETE_SIZE）由 handler 层完成。
     pub async fn admin_batch_delete(
         &self,
         ids: Vec<i64>,
         operator_tid: i64,
     ) -> Result<(), ScimError> {
+        // 去重保序：`?ids=5,5` 只应拆一次，错误点名也不重复
+        let mut unique: Vec<i64> = Vec::with_capacity(ids.len());
         for id in ids {
-            self.admin_delete(id, operator_tid).await?;
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
         }
+        self.db()
+            .transaction::<_, (), ScimError>(|txn| {
+                Box::pin(async move {
+                    let mut missing: Vec<i64> = Vec::new();
+                    for id in &unique {
+                        let visible = ScimGroup::find_by_id(*id)
+                            .one(txn)
+                            .await
+                            .map_err(db_err_500)?
+                            .is_some_and(|g| {
+                                g.del_flag.as_deref() != Some("2")
+                                    && crate::common::tenant::tenant_allowed(
+                                        operator_tid,
+                                        g.tenant_id,
+                                    )
+                            });
+                        if !visible {
+                            missing.push(*id);
+                        }
+                    }
+                    if !missing.is_empty() {
+                        missing.sort_unstable();
+                        let list = missing
+                            .iter()
+                            .map(|i| i.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        return Err(ScimError::new(404, format!("Group not found: {list}")));
+                    }
+                    for id in &unique {
+                        teardown_group(txn, *id).await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await?;
         Ok(())
     }
 
@@ -1042,6 +1115,22 @@ pub struct ScimGroupAdminRow {
 
 fn db_err_500(e: sea_orm::DbErr) -> ScimError {
     ScimError::new(500, format!("数据库错误: {e}"))
+}
+
+/// 把"按 group_id 分组计数"的查询收敛成 `group_id → 行数` 映射。
+///
+/// 缺省即 0 由调用方补：SQL 的 GROUP BY 不返回零行分组，而页面要显示 0 而不是空。
+async fn group_counts<E: EntityTrait>(
+    query: Select<E>,
+    db: &DatabaseConnection,
+) -> Result<HashMap<i64, u64>, sea_orm::DbErr> {
+    Ok(query
+        .into_tuple::<(i64, i64)>()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|(id, n)| (id, n.clamp(0, i64::MAX) as u64))
+        .collect())
 }
 
 /// 解析 members value（PATCH value 形态：[{value:"1"}] 或 ["1"]）
