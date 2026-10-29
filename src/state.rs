@@ -370,11 +370,11 @@ impl AppState {
             user_erasure_service,
             webauthn_service,
             user_pref_service: SysUserPrefService::new(db.clone()),
-            pat_service: SysPatService::new(db.clone(), menu_service.clone()),
+            pat_service: SysPatService::new(db.clone(), menu_service.clone(), store.clone()),
             role_service,
             menu_service,
             notice_service: SysNoticeService::new(db.clone()),
-            dept_service: SysDeptService::new(db.clone()),
+            dept_service: SysDeptService::new(db.clone(), store.clone()),
             // 多租户 Phase 3：租户服务需要共享态存储（运行时状态键 + 定向会话吊销）
             tenant_service,
             tenant_domain_service,

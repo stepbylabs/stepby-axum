@@ -24,6 +24,8 @@ error:
     invalid_param: Invalid request parameter
     id_invalid: Invalid ID parameter
     duplicate: Duplicate data, please check unique fields
+    concurrent_conflict: Another operation on the same object is in progress; please retry later
+    concurrent_guard_unavailable: Concurrency protection is unavailable; this operation was not executed, please retry later
     db_failed: Database operation failed, please contact the administrator
     tx_failed: Database transaction failed, please contact the administrator
     session_expired: Session expired, please log in again

@@ -1425,7 +1425,18 @@ impl SysMsgService {
                 "error.common.forbidden"
             )));
         }
+        self.retry_loaded_logs(logs).await
+    }
 
+    /// 对**已加载的行**逐条重试，认领版本号取行加载时的 `retry_count`。
+    ///
+    /// 为什么必须用加载时的快照而不是在循环里重读：`retry_pending` 的两步之间
+    /// （`find_pending_retry` → 认领）正是最宽的并发窗口——重读会让两个调度实例
+    /// 各自拿到"已经被对方推进过的"新版本、双双通过 CAS，重复投递照旧发生。
+    async fn retry_loaded_logs(
+        &self,
+        logs: Vec<crate::entity::sys_msg_send_log::Model>,
+    ) -> Result<u64, ServiceError> {
         let mut processed = 0u64;
         for log in logs {
             let channel_code = log.channel_code.clone().unwrap_or_default();
@@ -1464,6 +1475,25 @@ impl SysMsgService {
                 template_code: c,
                 params_json: log.sms_params.clone().unwrap_or_else(|| "{}".into()),
             });
+
+            // 原子认领（b129）：`dispatch` 是**真实外部投递**，不可回滚。两个并发重试原先都
+            // 从同一份快照出发 ⇒ 各投一次（重复短信/邮件）、两次回写同一个 retry_count
+            // （丢一次计数）、成功与失败结局互相覆盖。`claim_retry` 以 retry_count 为版本号
+            // 做条件更新，只有抢到的那一次才允许投递；抢不到说明同一条记录已被另一次
+            // 同版本重试认领 ⇒ 跳过本行，继续处理批内其它记录。
+            let expected_retry_count = log.retry_count.unwrap_or(0);
+            if !self
+                .send_log_repo
+                .claim_retry(log.log_id, expected_retry_count)
+                .await?
+            {
+                tracing::info!(
+                    log_id = log.log_id,
+                    "重试已被其他请求认领（retry_count 版本号已前移），跳过以避免重复外部投递"
+                );
+                continue;
+            }
+
             let (status, last_error, send_time, retry_count) = match self
                 .dispatch(&channel, &log.to_addr, &subject, &content, sms_ctx)
                 .await
@@ -1472,10 +1502,12 @@ impl SysMsgService {
                     "0".to_string(),
                     None,
                     Some(now),
-                    log.retry_count.unwrap_or(0),
+                    // 认领时已把 retry_count 加到 expected+1，这里写回同一个值，
+                    // 避免「先加一又写回旧值」把认领记号冲掉。
+                    expected_retry_count + 1,
                 ),
                 Err(e) => {
-                    let retry_count = log.retry_count.unwrap_or(0) + 1;
+                    let retry_count = expected_retry_count + 1;
                     let max = log.max_retry_count.unwrap_or(DEFAULT_MAX_RETRY);
                     let status = if retry_count >= max { "1" } else { "2" };
                     (
@@ -1540,11 +1572,12 @@ impl SysMsgService {
                 crate::common::tenant::tenant_scope(operator_tid),
             )
             .await?;
-        let ids: Vec<i64> = pending.iter().map(|l| l.log_id).collect();
-        if ids.is_empty() {
+        if pending.is_empty() {
             return Ok(0);
         }
-        self.retry_logs(ids, operator_tid).await
+        // 直接把**这批快照行**交给重试体：不走 `retry_logs(ids)` 的二次加载，
+        // 否则两次调度各自重读会拿到不同版本、双双通过认领（b129 台账 §1 C）。
+        self.retry_loaded_logs(pending).await
     }
 
     /// 解析逗号分隔 id 列表（严格：任一项非法即 400，不静默丢弃）
@@ -1620,5 +1653,65 @@ mod tests {
         let err =
             SysMsgService::validate_config_json(&Some("{not valid json".to_string())).unwrap_err();
         assert_eq!(err.code, 400);
+    }
+    /// 生产码切片（剔除本测试模块）：needle 若按全文匹配会被测试源码自己喂饱（AGENTS ㊴）。
+    fn production_src() -> &'static str {
+        let src = include_str!("sys_msg_service.rs");
+        let cut = src
+            .find(
+                "
+#[cfg(test)]
+mod tests {",
+            )
+            .expect("测试模块边界必须存在");
+        &src[..cut]
+    }
+
+    /// 接线反查：重试必须先按「加载时的快照版本」认领，再投递；批量路径不得二次加载。
+    #[test]
+    fn retry_paths_claim_from_the_loaded_snapshot() {
+        let src = production_src();
+        assert_eq!(
+            src.matches("retry_loaded_logs(").count(),
+            3,
+            "重试体只允许定义 1 处 + 两个入口各调用 1 处"
+        );
+        assert_eq!(
+            src.matches("claim_retry(").count(),
+            1,
+            "认领必须只有一处（在重试体内）"
+        );
+
+        // 重试体：认领必须排在真实投递之前，抢不到时跳过本行而不是继续投递
+        let start = src
+            .find("async fn retry_loaded_logs(")
+            .expect("retry_loaded_logs 必须存在");
+        let end = src[start..]
+            .find("/// 把指定 log_id 交回重试队列")
+            .expect("重试体与下一个函数的边界必须存在")
+            + start;
+        let body = &src[start..end];
+        let claim = body.find("claim_retry(").expect("必须调用 claim_retry");
+        let dispatch = body.find(".dispatch(").expect("必须存在真实投递");
+        assert!(claim < dispatch, "认领必须先于真实投递");
+        assert!(body.contains("continue;"), "抢不到认领必须跳过本行");
+
+        // 调度器入口：必须把 find_pending_retry 的快照直接交给重试体
+        let p_start = src
+            .find("pub async fn retry_pending(")
+            .expect("retry_pending 必须存在");
+        let p_end = src[p_start..]
+            .find("/// 解析逗号分隔 id 列表")
+            .expect("retry_pending 与下一个函数的边界必须存在")
+            + p_start;
+        let p_body = &src[p_start..p_end];
+        assert!(
+            !p_body.contains("self.retry_logs("),
+            "retry_pending 不得二次加载（会丢掉快照版本号，两次调度双双通过认领）"
+        );
+        assert!(
+            p_body.contains("self.retry_loaded_logs(pending)"),
+            "retry_pending 必须把快照行直接交给重试体"
+        );
     }
 }

@@ -97,6 +97,7 @@ mod user_pii_masking;
 mod webauthn;
 mod webhook_tenant;
 mod webhook_unify;
+mod write_guards;
 mod ws;
 
 use std::fs::OpenOptions;

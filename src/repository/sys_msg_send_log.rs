@@ -192,6 +192,38 @@ impl SysMsgSendLogRepository {
         self.base.update(model).await
     }
 
+    /// 原子认领一次重试：`retry_count` 从 `expected` 加到 `expected + 1`，只有真正加上的
+    /// 那个调用者才允许投递（返回 `true`）。
+    ///
+    /// 为什么用 `retry_count` 做版本号而不是新增「发送中」状态：状态机只有 0/1/2 三档，
+    /// 新增一档会同时改变列表筛选、统计口径与前端枚举；`retry_count` 本来就是「已重试次数」，
+    /// 用它做 CAS 不需要迁移、不需要新状态，且失败时保持单调递增。
+    ///
+    /// **刻意不按 `status` 过滤**：单条 `retry_logs` 允许对任意记录显式重发是既有契约
+    /// （操作员点在某一行上的主动动作；前端只在失败/待重试行给出入口，见
+    /// `views/system/message/log/index.vue::handleRetry`）。并发去重靠版本号即可——
+    /// 两个请求从同一份快照出发时只有一个能把 `retry_count` 从 `expected` 推到 `expected+1`。
+    pub async fn claim_retry(&self, log_id: i64, expected: i32) -> Result<bool, DbErr> {
+        // retry_count 可空：NULL 与 0 都要能被 `expected == 0` 认领（否则旧数据永远抢不到）。
+        let retry_cond = if expected == 0 {
+            sea_orm::Condition::any()
+                .add(Column::RetryCount.is_null())
+                .add(Column::RetryCount.eq(0))
+        } else {
+            sea_orm::Condition::all().add(Column::RetryCount.eq(expected))
+        };
+        let res = SysMsgSendLog::update_many()
+            .col_expr(
+                Column::RetryCount,
+                Expr::col(Column::RetryCount).if_null(0).add(1),
+            )
+            .filter(Column::LogId.eq(log_id))
+            .filter(retry_cond)
+            .exec(self.base.db())
+            .await?;
+        Ok(res.rows_affected == 1)
+    }
+
     /// 按 ID 列表批量查询记录（单次 SELECT，用于 retry 前校验）
     pub async fn find_by_ids(&self, log_ids: &[i64]) -> Result<Vec<Model>, DbErr> {
         if log_ids.is_empty() {

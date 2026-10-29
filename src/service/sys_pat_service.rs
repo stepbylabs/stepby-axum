@@ -15,6 +15,7 @@
 
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use ts_rs::TS;
 use utoipa::ToSchema;
 
@@ -24,6 +25,11 @@ use crate::config::PatConfig;
 use crate::entity::sys_pat::Model as PatModel;
 use crate::repository::sys_pat::SysPatRepository;
 use crate::service::SysMenuService;
+use crate::shared_store::SharedStore;
+
+/// 签发闸的租约时长（秒）。签发路径最坏是几次 DB 往返，30s 远超正常耗时；
+/// 这个数只用于「持锁进程崩溃」时止损，不是互斥窗口的长度依据（正常路径靠显式释放）。
+const PAT_CREATE_LOCK_TTL_SECS: u64 = 30;
 
 /// 令牌出参 VO（脱敏：不含 token_hash）
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, TS)]
@@ -165,13 +171,20 @@ pub struct OpenProfileVo {
 pub struct SysPatService {
     pat_repo: SysPatRepository,
     menu_service: SysMenuService,
+    /// 签发闸的共享态（见 `create` 的注释：配额判断与插入必须互斥）。
+    store: Arc<dyn SharedStore>,
 }
 
 impl SysPatService {
-    pub fn new(db: DatabaseConnection, menu_service: SysMenuService) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        menu_service: SysMenuService,
+        store: Arc<dyn SharedStore>,
+    ) -> Self {
         Self {
             pat_repo: SysPatRepository::new(db),
             menu_service,
+            store,
         }
     }
 
@@ -180,6 +193,30 @@ impl SysPatService {
     /// `enc_key`：CONFIG_ENC_KEY 主密钥（SK 信封加密用，与 oauth client_secret 同机制）。
     /// `dto.with_ak = true` 时同时生成 AK/SK：SK 明文仅本响应返回一次。
     pub async fn create(
+        &self,
+        user_id: i64,
+        tenant_id: i64,
+        username: &str,
+        dto: CreatePatDto,
+        config: &PatConfig,
+        enc_key: &str,
+    ) -> Result<CreatePatResult, ServiceError> {
+        // 「查当前有效数 → 与上限比较 → 插入」是三步一个决定：并发两次调用都读到 N-1 时
+        // 会各自插入，有效令牌数突破 `max_per_user`（台账 b129 §1 A）。
+        // 闸按 user_id 分片：不同用户互不阻塞；平台与租户路径对同一用户也落同一条键。
+        let key = crate::common::write_guard::pat_create_key(user_id);
+        crate::common::write_guard::with_write_guard(
+            self.store.as_ref(),
+            &key,
+            PAT_CREATE_LOCK_TTL_SECS,
+            || ServiceError::new(429, crate::tr!("error.common.concurrent_conflict")),
+            self.create_locked(user_id, tenant_id, username, dto, config, enc_key),
+        )
+        .await
+    }
+
+    /// `create` 的闸内实现。**只能**经 [`Self::create`] 调用——直接调用会绕过配额互斥。
+    async fn create_locked(
         &self,
         user_id: i64,
         tenant_id: i64,
@@ -790,5 +827,61 @@ mod tests {
             "SK 应为 base64url 字符集（无 + / =），实际: {sk}"
         );
         assert_ne!(generate_secret_key(), generate_secret_key());
+    }
+    /// 生产码切片（剔除本测试模块）：needle 若按全文匹配会被测试源码自己喂饱（AGENTS ㊴）。
+    fn production_src() -> &'static str {
+        let src = include_str!("sys_pat_service.rs");
+        let cut = src
+            .find(
+                "
+#[cfg(test)]
+mod tests {",
+            )
+            .expect("测试模块边界必须存在");
+        &src[..cut]
+    }
+
+    /// 接线反查：`create` 必须是唯一进入配额互斥闸的入口。
+    ///
+    /// 缺陷形状（b129 §1 A）是「查有效数 → 比上限 → 插入」三步无互斥；闸必须包住整段，
+    /// 而闸内实现只允许被 `create` 调用一次（多一处调用 = 多一条绕闸路径）。
+    #[test]
+    fn create_is_the_only_entry_into_the_quota_guard() {
+        let src = production_src();
+        assert_eq!(
+            src.matches("create_locked(").count(),
+            2,
+            "闸内实现只允许定义 + create 一处调用"
+        );
+        assert_eq!(
+            src.matches("with_write_guard(").count(),
+            1,
+            "配额闸只允许在 create 里抢一次"
+        );
+        assert_eq!(
+            src.matches("pat_create_key(").count(),
+            1,
+            "锁键必须由 pat_create_key 单点派生"
+        );
+
+        let start = src.find("pub async fn create(").expect("create 必须存在");
+        let end = src[start..]
+            .find("/// `create` 的闸内实现")
+            .expect("create 与闸内实现的边界必须存在")
+            + start;
+        let body = &src[start..end];
+        assert!(
+            body.len() > 400,
+            "create 函数体切片异常（长度 {}）",
+            body.len()
+        );
+        assert!(
+            body.contains("with_write_guard("),
+            "抢锁必须发生在 create 内"
+        );
+        assert!(
+            body.contains("pat_create_key(user_id)"),
+            "锁键必须按属主用户分片"
+        );
     }
 }

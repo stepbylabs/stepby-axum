@@ -24,6 +24,8 @@ error:
     invalid_param: 请求参数无效
     id_invalid: 参数 ID 不合法
     duplicate: 数据重复，请检查唯一字段
+    concurrent_conflict: 同一对象的另一次操作正在进行中，请稍后重试
+    concurrent_guard_unavailable: 并发保护暂不可用，本次操作未执行，请稍后重试
     db_failed: 数据库操作失败，请联系管理员
     tx_failed: 数据库事务失败，请联系管理员
     session_expired: 会话已过期，请重新登录

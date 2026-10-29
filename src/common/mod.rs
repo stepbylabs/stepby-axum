@@ -48,7 +48,9 @@ pub mod tenant;
 pub mod upload;
 pub mod upload_chunk;
 pub mod upload_scan;
+// 「读-判断-写」的跨方言互斥闸（唯一实现；行锁在 SQLite 方言不生效，见模块文档）
 pub mod webhook;
+pub mod write_guard;
 
 pub mod breaker;
 

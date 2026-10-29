@@ -59,6 +59,48 @@ const NAV_MENU_TYPES: [&str; 2] = [menu_kind::DIR, menu_kind::MENU];
 /// 停用态字面量（`sys_menu.status` / `sys_tenant_menu.status`）
 const STATUS_DISABLED: &str = "1";
 
+/// `l3_id` 主键冲突的最大尝试次数（含首次）
+///
+/// 取 3 而不是更大的数：冲突源于"两条并发挂载算出同一个 `MAX+1`"，一次重算即可拉开；
+/// 连撞三次说明不是并发窗口（例如调用方残留了陈旧行），继续重试只会拖长请求。
+const L3_ID_RETRY_LIMIT: u32 = 3;
+
+/// 主键 `l3_id` 冲突识别（sqlite / mysql / pg 三方言）
+///
+/// **只认主键**：本表另有 `uk_sys_tenant_menu (tenant_id, ref_menu_id)`，撞它重算段位
+/// 也救不回来（重复挂载是业务错误，应返回 400 而不是重试）⇒ 不归这里管。
+fn is_l3_id_pk_conflict(e: &sea_orm::DbErr) -> bool {
+    let s = e.to_string();
+    // sqlite: UNIQUE constraint failed: sys_tenant_menu.l3_id
+    (s.contains("UNIQUE") && s.contains("sys_tenant_menu.l3_id"))
+        // mysql: Duplicate entry '5001' for key 'sys_tenant_menu.PRIMARY'
+        || (s.contains("Duplicate entry") && s.contains("PRIMARY"))
+        // postgres: duplicate key value violates unique constraint "sys_tenant_menu_pkey"
+        || (s.contains("duplicate key value") && s.contains("sys_tenant_menu_pkey"))
+}
+
+/// 执行一次「算 `l3_id` → 插入」，**只在主键冲突时**重算重试（最多 [`L3_ID_RETRY_LIMIT`] 次）。
+///
+/// 抽成独立函数是为了让重试逻辑可被合成夹具直接测：并发窗口在串行测试里造不出来，
+/// 但「哪一种错误该重试」与「重试几次后放弃」都可以用构造的 `DbErr` 逐条证伪。
+async fn with_l3_id_retry<F, Fut, T>(mut attempt_once: F) -> Result<T, ServiceError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, sea_orm::DbErr>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match attempt_once().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < L3_ID_RETRY_LIMIT && is_l3_id_pk_conflict(&e) => {
+                tracing::info!(attempt, "l3_id 主键冲突（并发挂载）——重算下一个段位后重试");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 /// L3 导航管理的**操作者数据范围**（由能力位解析得出，是所有接口的唯一准入判据）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavScope {
@@ -484,22 +526,28 @@ impl SysTenantNavService {
             return Ok(to_vo(&saved, Some(&ref_menu)));
         }
 
-        let l3_id = self.nav_repo.next_l3_id().await?;
-        let model = L3ActiveModel {
-            l3_id: Set(l3_id),
-            tenant_id: Set(target_tid),
-            ref_menu_id: Set(dto.ref_menu_id),
-            parent_id: Set(parent_id),
-            order_num: Set(order_num_payload(dto.order_num)),
-            visible: Set(Some(visible_payload(dto.visible.as_deref().unwrap_or("0")))),
-            status: Set(Some("0".to_string())),
-            del_flag: Set(Some("0".to_string())),
-            create_by: Set(Some(operator.to_string())),
-            create_time: Set(Some(now_naive())),
-            update_by: Set(None),
-            update_time: Set(None),
-        };
-        let saved = self.nav_repo.insert(model).await?;
+        // b129 D：`l3_id` 是 `MAX+1` 派生值（非自增主键），两条并发挂载会算出同一个 id，
+        // 后者必撞主键。这里按**主键**冲突重算重试，把「算 id」与「写行」收敛成一次可重试的
+        // 决定；业务判重（同一 ref_menu 重复挂载）在循环之外，重试不会造成重复挂载。
+        let saved = with_l3_id_retry(|| async {
+            let l3_id = self.nav_repo.next_l3_id().await?;
+            let model = L3ActiveModel {
+                l3_id: Set(l3_id),
+                tenant_id: Set(target_tid),
+                ref_menu_id: Set(dto.ref_menu_id),
+                parent_id: Set(parent_id),
+                order_num: Set(order_num_payload(dto.order_num)),
+                visible: Set(Some(visible_payload(dto.visible.as_deref().unwrap_or("0")))),
+                status: Set(Some("0".to_string())),
+                del_flag: Set(Some("0".to_string())),
+                create_by: Set(Some(operator.to_string())),
+                create_time: Set(Some(now_naive())),
+                update_by: Set(None),
+                update_time: Set(None),
+            };
+            self.nav_repo.insert(model).await
+        })
+        .await?;
         Ok(to_vo(&saved, Some(&ref_menu)))
     }
 
@@ -752,5 +800,125 @@ fn to_vo(row: &L3Model, ref_menu: Option<&SysMenuModel>) -> SysTenantMenuVo {
         ref_menu_path: ref_menu.and_then(|m| m.path.clone()),
         ref_menu_perms: ref_menu.and_then(|m| m.perms.clone()),
         ref_menu_icon: ref_menu.and_then(|m| m.icon.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 三方言的主键冲突文案都必须被识别（真实报错形态取自各路驱动）。
+    #[test]
+    fn pk_conflict_classifier_matches_three_dialects() {
+        let cases = [
+            // sqlite（sea-orm `DbErr::Exec` 的 Display 会带出驱动原文）
+            "UNIQUE constraint failed: sys_tenant_menu.l3_id",
+            // mysql
+            "Duplicate entry '5001' for key 'sys_tenant_menu.PRIMARY'",
+            // postgres
+            "duplicate key value violates unique constraint \"sys_tenant_menu_pkey\"",
+        ];
+        for msg in cases {
+            let e = sea_orm::DbErr::Custom(msg.to_string());
+            assert!(is_l3_id_pk_conflict(&e), "应识别为主键冲突: {msg}");
+        }
+    }
+
+    /// 业务唯一键 `(tenant_id, ref_menu_id)` 冲突**不得**触发重试：重算段位也救不回来，
+    /// 重复挂载应在循环外由业务判重返回 400。这条腿是"只认主键"的反证。
+    #[test]
+    fn business_unique_violation_is_not_retried() {
+        let cases = [
+            "UNIQUE constraint failed: sys_tenant_menu.tenant_id, sys_tenant_menu.ref_menu_id",
+            "Duplicate entry '1-101' for key 'sys_tenant_menu.uk_sys_tenant_menu'",
+            "duplicate key value violates unique constraint \"uk_sys_tenant_menu\"",
+        ];
+        for msg in cases {
+            let e = sea_orm::DbErr::Custom(msg.to_string());
+            assert!(!is_l3_id_pk_conflict(&e), "业务唯一键冲突不得重试: {msg}");
+        }
+    }
+
+    /// 主键冲突 ⇒ 重算重试；第二次成功。
+    #[tokio::test]
+    async fn retry_helper_retries_pk_conflict_then_succeeds() {
+        let mut attempts = 0u32;
+        let out = with_l3_id_retry(|| {
+            attempts += 1;
+            let n = attempts;
+            async move {
+                if n == 1 {
+                    Err(sea_orm::DbErr::Custom(
+                        "UNIQUE constraint failed: sys_tenant_menu.l3_id".to_string(),
+                    ))
+                } else {
+                    Ok(5001i64 + n as i64)
+                }
+            }
+        })
+        .await
+        .expect("第二次应成功");
+        assert_eq!(attempts, 2, "应恰好重试一次");
+        assert_eq!(out, 5003);
+    }
+
+    /// 连续主键冲突 ⇒ 达到上限后放弃（不是无限重试）。
+    #[tokio::test]
+    async fn retry_helper_gives_up_after_limit() {
+        let mut attempts = 0u32;
+        let out = with_l3_id_retry(|| {
+            attempts += 1;
+            async move {
+                Err::<i64, _>(sea_orm::DbErr::Custom(
+                    "UNIQUE constraint failed: sys_tenant_menu.l3_id".to_string(),
+                ))
+            }
+        })
+        .await;
+        assert!(out.is_err(), "撞满上限必须上抛");
+        assert_eq!(attempts, L3_ID_RETRY_LIMIT, "尝试次数必须等于上限");
+    }
+
+    /// 非主键错误一次都不重试（避免把业务错误伪装成可重试）。
+    #[tokio::test]
+    async fn retry_helper_does_not_retry_other_errors() {
+        let mut attempts = 0u32;
+        let out = with_l3_id_retry(|| {
+            attempts += 1;
+            async move { Err::<i64, _>(sea_orm::DbErr::RecordNotFound("gone".to_string())) }
+        })
+        .await;
+        assert!(out.is_err());
+        assert_eq!(attempts, 1, "非主键错误只允许一次尝试");
+    }
+
+    /// 接线反查：`add` 的插入必须走 `with_l3_id_retry`，且 `next_l3_id()` 只能在它的
+    /// 闭包里出现（否则重算与插入又变回两步自由语句）。
+    ///
+    /// 刀口收窄到 `add` 的函数体：本文件自己的测试里也写着这两个 needle，
+    /// 按全文匹配会被测试源码喂饱（AGENTS ㊴）。
+    #[test]
+    fn add_wires_the_retry_helper() {
+        let src = include_str!("sys_tenant_nav_service.rs");
+        let start = src.find("pub async fn add(").expect("add 函数必须存在");
+        let end = src[start..]
+            .find("/// 修改 L3 导航行")
+            .expect("add 与下一个函数的边界必须存在")
+            + start;
+        let body = &src[start..end];
+        assert!(
+            body.len() > 800,
+            "add 函数体切片异常（长度 {}），边界可能已失效",
+            body.len()
+        );
+        assert!(
+            body.contains("with_l3_id_retry("),
+            "add 必须经 with_l3_id_retry 完成「算 id + 插入」"
+        );
+        assert!(body.contains("next_l3_id()"), "重算段位必须留在重试闭包内");
+        assert!(
+            body.matches("nav_repo.insert(").count() == 1,
+            "插入必须只有一处（在重试闭包内）"
+        );
     }
 }

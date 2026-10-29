@@ -121,8 +121,10 @@ impl SysTenantMenuRepository {
 
     /// 分配下一个 `l3_id`（段位 5000 起；`MAX(l3_id)+1`，无行时取 [`L3_ID_BASE`]）
     ///
-    /// 说明：本表 `l3_id` 为**非自增**主键（段位需可读可辨），并发写入由调用方的
-    /// 唯一键冲突兜底（重试一次）；L3 为低频人工配置，不引入独立序列。
+    /// 说明：本表 `l3_id` 为**非自增**主键（段位需可读可辨）。`MAX+1` 在读与写之间没有锁，
+    /// 并发挂载会算出同一个 id ⇒ **调用方必须按主键冲突重算重试**
+    /// （`service::sys_tenant_nav_service::add`，见 `L3_ID_RETRY_LIMIT`）。
+    /// L3 为低频人工配置，不引入独立序列。
     pub async fn next_l3_id(&self) -> Result<i64, DbErr> {
         let max: Option<i64> = SysTenantMenu::find()
             .select_only()

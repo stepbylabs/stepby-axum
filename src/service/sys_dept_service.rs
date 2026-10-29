@@ -114,15 +114,25 @@ pub struct SysDeptService {
     role_dept_repo: SysRoleDeptRepository,
     role_repo: SysRoleRepository,
     user_repo: SysUserRepository,
+    /// 部门树写闸的共享态（见 `edit_dept`：防环校验与写入必须在同一条闸内）。
+    store: std::sync::Arc<dyn crate::shared_store::SharedStore>,
 }
 
+/// 部门树写闸的租约时长（秒）。一次部门编辑最坏是若干次 DB 往返 + 子部门 ancestors 递归更新，
+/// 30s 远超正常耗时；这个数只用于持锁进程崩溃时止损（正常路径靠显式释放）。
+const DEPT_TREE_LOCK_TTL_SECS: u64 = 30;
+
 impl SysDeptService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        store: std::sync::Arc<dyn crate::shared_store::SharedStore>,
+    ) -> Self {
         Self {
             dept_repo: SysDeptRepository::new(db.clone()),
             role_dept_repo: SysRoleDeptRepository::new(db.clone()),
             role_repo: SysRoleRepository::new(db.clone()),
             user_repo: SysUserRepository::new(db),
+            store,
         }
     }
 
@@ -497,14 +507,50 @@ impl SysDeptService {
     /// 修改部门（校验父部门存在 + 防环，父部门变更时递归更新子部门 ancestors）
     ///
     /// 使用事务保证部门自身更新与子部门 ancestors 更新的原子性。
+    ///
+    /// **并发闸（b129）**：防环校验 `is_descendant` 原先在事务外、事务内不复核——两个管理员
+    /// 并发把 A 挂到 B、B 挂到 A 时各自都判「无环」，提交后成环：树从根不可达（两个部门在
+    /// 界面消失）、双方都因「有子部门」无法删除、`ancestors` 链污染被后续移动继承。
+    /// 闸按**目标部门所属租户**分片：平台代管（`tenant_id = 0` 的操作者）与租户自管对
+    /// 同一棵树必须落同一条锁，否则两条路径互不互斥。
     pub async fn edit_dept(
         &self,
         dto: DeptEditDto,
         operator: &str,
         operator_tid: i64,
     ) -> Result<SysDeptModel, ServiceError> {
+        // 载荷校验留在公开入口（契约锁 `api_contract_guard` 只认「本函数或转发目标」校验；
+        // 搬进闸内实现会让它判成"带活 garde 规则却从未被校验"）。且校验是纯函数，
+        // 放在抢锁之前：无效载荷不占用任何人的互斥窗口。
         crate::common::i18n::validate(&dto)?;
+        // 这次读只用于确定锁键。`tenant_id` 不可变（跨租户移动在锁内被拒绝），
+        // 真正的存在性与防环校验仍在锁内重做——不依赖这里的快照。
+        let lock_tid = self
+            .dept_repo
+            .base()
+            .find_by_id(dto.dept_id)
+            .await?
+            .map(|m| m.tenant_id)
+            .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.dept.not_found")))?;
+        let key = crate::common::write_guard::dept_tree_key(lock_tid);
+        crate::common::write_guard::with_write_guard(
+            self.store.as_ref(),
+            &key,
+            DEPT_TREE_LOCK_TTL_SECS,
+            || ServiceError::new(429, crate::tr!("error.common.concurrent_conflict")),
+            self.edit_dept_locked(dto, operator, operator_tid),
+        )
+        .await
+    }
 
+    /// [`Self::edit_dept`] 的闸内实现。**只能**经 `edit_dept` 调用——直接调用会绕过防环互斥。
+    async fn edit_dept_locked(
+        &self,
+        dto: DeptEditDto,
+        operator: &str,
+        operator_tid: i64,
+    ) -> Result<SysDeptModel, ServiceError> {
+        // 载荷已在 `edit_dept` 入口校验（见那里的注释），这里不再重复。
         // 查询现有部门
         let existing = self
             .dept_repo
@@ -939,4 +985,62 @@ async fn update_children_ancestors_conn<C: ConnectionTrait>(
     );
     conn.execute_raw(stmt).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// 生产码切片（剔除本测试模块）：needle 若按全文匹配会被测试源码自己喂饱（AGENTS ㊴）。
+    fn production_src() -> &'static str {
+        let src = include_str!("sys_dept_service.rs");
+        let cut = src
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("测试模块边界必须存在");
+        &src[..cut]
+    }
+
+    /// 接线反查：`edit_dept` 必须是唯一进入防环互斥闸的入口。
+    ///
+    /// 判据两侧都要：闸内实现只允许「定义 1 处 + `edit_dept` 调用 1 处」，
+    /// 且抢锁调用落在 `edit_dept` 的函数体里（不是别处顺手加的）。
+    #[test]
+    fn edit_dept_is_the_only_entry_into_the_tree_guard() {
+        let src = production_src();
+        assert_eq!(
+            src.matches("edit_dept_locked(").count(),
+            2,
+            "闸内实现只允许定义 + edit_dept 一处调用"
+        );
+        assert_eq!(
+            src.matches("with_write_guard(").count(),
+            1,
+            "防环闸只允许在 edit_dept 里抢一次"
+        );
+        assert_eq!(
+            src.matches("dept_tree_key(").count(),
+            1,
+            "锁键必须由 dept_tree_key 单点派生"
+        );
+
+        let start = src
+            .find("pub async fn edit_dept(")
+            .expect("edit_dept 必须存在");
+        let end = src[start..]
+            .find("/// [`Self::edit_dept`] 的闸内实现")
+            .expect("edit_dept 与闸内实现的边界必须存在")
+            + start;
+        let body = &src[start..end];
+        assert!(
+            body.len() > 400,
+            "edit_dept 函数体切片异常（长度 {}）",
+            body.len()
+        );
+        assert!(
+            body.contains("with_write_guard("),
+            "抢锁必须发生在 edit_dept 内"
+        );
+        assert!(
+            body.contains("dept_tree_key(lock_tid)"),
+            "锁键必须按目标部门所属租户分片"
+        );
+    }
 }
