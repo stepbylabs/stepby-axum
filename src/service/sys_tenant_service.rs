@@ -1767,10 +1767,10 @@ impl SysTenantService {
         let now = now_naive();
         let mut am: TenantActiveModel = tenant.clone().into();
         am.del_flag = Set(Some("2".to_string()));
-        am.tenant_code = Set(truncate_code_with_suffix(
+        am.tenant_code = Set(crate::common::soft_delete_key::freed_key(
             &tenant.tenant_code,
-            "_del_",
             tenant.tenant_id,
+            64,
         ));
         am.status = Set(Some("1".to_string()));
         am.update_by = Set(Some(operator.to_string()));
@@ -2672,8 +2672,17 @@ fn truncate_code_with_suffix(code: &str, suffix: &str, id: i64) -> String {
     format!("{base}{tail}")
 }
 
-/// 恢复 tenant_code：剥掉 `_del_{id}` / `_r_{id}` 让位后缀
+/// 恢复 tenant_code：剥掉让位后缀。
+///
+/// 现行格式与全仓一致 = `common::soft_delete_key::freed_key` 的 `{原名}_deleted_{id}`；
+/// `_del_{id}`（b128 之前 `remove` 写入）与 `_r_{id}`（恢复时二次冲突让位）是存量/另一语义，
+/// 一并兼容——只认**本租户自己的 id**，防止把 `acme_deleted_42` 误剥成 `acme`。
 fn restore_tenant_code(code: &str, tenant_id: i64) -> String {
+    if let Some((original, id)) = crate::common::soft_delete_key::split_freed_key(code)
+        && id == tenant_id
+    {
+        return original.to_string();
+    }
     for suffix in ["_del_", "_r_"] {
         let tail = format!("{suffix}{tenant_id}");
         if let Some(stripped) = code.strip_suffix(&tail) {
@@ -2836,15 +2845,24 @@ mod tests {
 
     #[test]
     fn test_code_suffix_roundtrip() {
-        let code = truncate_code_with_suffix("acme", "_del_", 42);
-        assert_eq!(code, "acme_del_42");
-        assert_eq!(restore_tenant_code(&code, 42), "acme");
+        // 现行格式 = 全仓统一的 freed_key（`_deleted_{id}`）——删除与恢复必须往返无损
+        let freed = crate::common::soft_delete_key::freed_key("acme", 42, 64);
+        assert_eq!(freed, "acme_deleted_42");
+        assert_eq!(restore_tenant_code(&freed, 42), "acme");
+        // 存量库兼容：b128 之前 `remove` 写的是 `_del_{id}`
+        let legacy = truncate_code_with_suffix("acme", "_del_", 42);
+        assert_eq!(legacy, "acme_del_42");
+        assert_eq!(restore_tenant_code(&legacy, 42), "acme");
+        // `_r_{id}` 是恢复期二次冲突让位，反解一次即可回到原名（不无限剥离）
         let code2 = truncate_code_with_suffix("acme_del_42", "_r_", 42);
         assert_eq!(restore_tenant_code(&code2, 42), "acme_del_42");
+        // 后缀里的 id 必须属于本租户，别的租户的尾巴不得剥掉
+        assert_eq!(restore_tenant_code("acme_deleted_7", 42), "acme_deleted_7");
         // 超长短码截断到 64 列上限
         let long = "a".repeat(80);
         let truncated = truncate_code_with_suffix(&long, "_del_", 7);
         assert!(truncated.len() <= 64);
+        assert!(crate::common::soft_delete_key::freed_key(&long, 7, 64).len() <= 64);
     }
 
     #[test]

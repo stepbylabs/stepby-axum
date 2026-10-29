@@ -579,3 +579,102 @@ async fn test_scim_deprovision_revokes_existing_sessions() {
     .await;
     assert_ne!(status, StatusCode::OK, "已停用账号不得登录");
 }
+
+/// b128：`uk_sys_user_name` 与 `uk_sys_user_tenant_scim` 都不看 `del_flag`。
+/// 管理端删除用户时若只改 `del_flag`，两条唯一键都永久被占 ⇒ IdP 用同一
+/// `userName` + `externalId` 重新下发会 409，而该账号在管理端已不可见（死路）。
+/// 判据：SCIM 建号（带 externalId）→ 管理端删除 → 回库确认两条键都已改名 →
+/// 同 userName + 同 externalId 重建必须 201。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_b128_user_can_be_recreated_with_same_name_and_external_id() {
+    use sea_orm::ConnectionTrait;
+    let ctx = scim_ctx().await;
+    let user_name = "it_b128_scim_user";
+    let ext = "it-b128-user-ext";
+    let body = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": user_name,
+        "externalId": ext,
+        "name": {"displayName": "b128 用户"}
+    })
+    .to_string();
+
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users",
+        "application/json",
+        &body,
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "SCIM 建号应 201: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let uid: i64 = json_of(&resp)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .parse()
+        .expect("用户 id 应为数字");
+
+    // 管理端删除（软删 + 释放两条唯一键）
+    let v = ctx.delete_json(&format!("/system/user/{uid}")).await;
+    ctx.assert_ok(&v);
+
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT user_name, scim_external_id, del_flag FROM sys_user WHERE user_id = ?",
+            [uid.into()],
+        ))
+        .await
+        .expect("回查用户失败")
+        .expect("软删行必须保留");
+    let freed_name: String = row.try_get("", "user_name").expect("user_name");
+    assert_eq!(
+        freed_name,
+        format!("{user_name}_deleted_{uid}"),
+        "软删行的 user_name 必须改名为释放键"
+    );
+    let freed_ext: String = row
+        .try_get("", "scim_external_id")
+        .expect("scim_external_id");
+    assert_eq!(
+        freed_ext,
+        format!("{ext}_deleted_{uid}"),
+        "软删行的 scim_external_id 必须改名为释放键（否则同 externalId 重下发恒 409）"
+    );
+    assert_eq!(
+        row.try_get::<String>("", "del_flag").ok().as_deref(),
+        Some("2"),
+        "删除是软删（审计保留）"
+    );
+
+    // 同 userName + 同 externalId 重新下发
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Users",
+        "application/json",
+        &body,
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "同 userName + externalId 重建应 201: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let new_uid: i64 = json_of(&resp)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .parse()
+        .expect("用户 id 应为数字");
+    assert_ne!(uid, new_uid, "重建必须是一行新记录");
+}

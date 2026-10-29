@@ -389,31 +389,42 @@ impl FlowDefinitionService {
             .await?;
         let mut by_id: HashMap<i64, FlowDefinitionModel> =
             rows.into_iter().map(|m| (m.flow_id, m)).collect();
-        let mut deletable: Vec<i64> = Vec::new();
+        // 软删行的 `flow_code` 必须改名释放 `uq_flow_def_code_ver (tenant_id, flow_code, version)`：
+        // 唯一索引不看 `del_flag`，而 `add()` 的查重只看 del_flag='0' ⇒ 删光某个 code 后
+        // 再建同名会撞索引报 500「数据重复」，管理端又看不到占用它的行（死路）。
+        // 每行的新值各不相同（含 id），无法用一条 UPDATE 批量设置。
+        let mut deletable: Vec<(i64, String)> = Vec::new();
         for fid in flow_ids {
             if let Some(m) = by_id.remove(&fid) {
                 self.ensure_access(&m, operator_tid)?;
-                deletable.push(fid);
+                let freed = crate::common::soft_delete_key::freed_key(&m.flow_code, fid, 64);
+                deletable.push((fid, freed));
             }
         }
         if !deletable.is_empty() {
             let now = crate::common::datetime::now_naive();
-            FlowDefEntity::update_many()
-                .col_expr(
-                    FlowDefColumn::DelFlag,
-                    sea_orm::sea_query::Expr::value(Some("1".to_string())),
-                )
-                .col_expr(
-                    FlowDefColumn::UpdateBy,
-                    sea_orm::sea_query::Expr::value(Some(operator.to_string())),
-                )
-                .col_expr(
-                    FlowDefColumn::UpdateTime,
-                    sea_orm::sea_query::Expr::value(Some(now)),
-                )
-                .filter(FlowDefColumn::FlowId.is_in(deletable))
-                .exec(&txn)
-                .await?;
+            for (fid, freed) in deletable {
+                FlowDefEntity::update_many()
+                    .col_expr(
+                        FlowDefColumn::DelFlag,
+                        sea_orm::sea_query::Expr::value(Some("1".to_string())),
+                    )
+                    .col_expr(
+                        FlowDefColumn::FlowCode,
+                        sea_orm::sea_query::Expr::value(freed),
+                    )
+                    .col_expr(
+                        FlowDefColumn::UpdateBy,
+                        sea_orm::sea_query::Expr::value(Some(operator.to_string())),
+                    )
+                    .col_expr(
+                        FlowDefColumn::UpdateTime,
+                        sea_orm::sea_query::Expr::value(now),
+                    )
+                    .filter(FlowDefColumn::FlowId.eq(fid))
+                    .exec(&txn)
+                    .await?;
+            }
         }
         txn.commit()
             .await

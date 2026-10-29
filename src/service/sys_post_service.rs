@@ -390,7 +390,11 @@ impl SysPostService {
                                 "error.common.forbidden"
                             )));
                         }
-                        let renamed = format!("{}_deleted_{}", existing.post_code, post_id);
+                        let renamed = crate::common::soft_delete_key::freed_key(
+                            &existing.post_code,
+                            *post_id,
+                            64,
+                        );
                         post_repo
                             .soft_delete_with_rename_conn(txn, *post_id, renamed)
                             .await?;

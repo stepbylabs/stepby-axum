@@ -715,20 +715,9 @@ impl SysDictService {
                 async move {
                     for (dict_id, dict_type, owner_tid) in &dict_types {
                         // 软删除字典类型并重命名 dict_type（REGRESS-003）
-                        // P0-H1 修复：dict_type 列为 VARCHAR(100)，重命名后缀可能超长导致 UPDATE 失败
-                        // 截断原始 dict_type 到安全长度，确保 {truncated}_deleted_{dict_id} ≤ 100
-                        // P0-8 修复：按字节切片可能落在 UTF-8 字符中间 panic，改为字符边界安全截断
-                        let suffix = format!("_deleted_{}", dict_id);
-                        let max_original_len = 100usize.saturating_sub(suffix.len());
-                        let mut truncated_original = dict_type.clone();
-                        if truncated_original.len() > max_original_len {
-                            let mut end = max_original_len;
-                            while end > 0 && !dict_type.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            truncated_original.truncate(end);
-                        }
-                        let renamed = format!("{}{}", truncated_original, suffix);
+                        // 列宽感知的单一是 [`soft_delete_key::freed_key`]（dict_type 为 VARCHAR(100)）
+                        let renamed =
+                            crate::common::soft_delete_key::freed_key(dict_type, *dict_id, 100);
                         dict_type_repo
                             .soft_delete_with_rename_conn(txn, *dict_id, renamed)
                             .await?;

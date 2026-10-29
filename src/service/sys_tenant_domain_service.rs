@@ -409,17 +409,27 @@ impl SysTenantDomainService {
         let domain = normalize_domain(&dto.domain);
         validate_domain(&domain)?;
 
-        // 全局唯一（含软删行：唯一索引不分软删，历史占用同样拦截）
-        if self
-            .domain_repo
-            .find_by_domain_any(&domain)
-            .await?
-            .is_some()
-        {
-            return Err(ServiceError::bad_request(&crate::tr!(
-                "error.tenant.domain_conflict"
-            )));
-        }
+        // 同域名的既有行（唯一索引 `uk_sys_tenant_domain_domain` **不含 del_flag**，
+        // 软删行同样占着键值）——三种情形三种结局，不能合并成一句"已占用"：
+        //   ① 活跃行 ⇒ 400 冲突（真的被占着）；
+        //   ② 软删行且**属于本租户** ⇒ 复活该行：否则"删错了就永久拿不回来"，
+        //      而管理端已看不到那行，用户只能改库（b128 立项缺陷）；
+        //   ③ 软删行属于**其他租户** ⇒ 仍 400：域名归属不因"上家删过"而释放
+        //      （反劫持口径，与 OAuth client_id 的 v2-K4 同族，不得放宽）。
+        let deleted_revivable = match self.domain_repo.find_by_domain_any(&domain).await? {
+            None => None,
+            Some(m) if m.del_flag.as_deref() != Some("2") => {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.tenant.domain_conflict"
+                )));
+            }
+            Some(m) if m.tenant_id != dto.tenant_id => {
+                return Err(ServiceError::bad_request(&crate::tr!(
+                    "error.tenant.domain_taken_by_other_tenant"
+                )));
+            }
+            Some(m) => Some(m),
+        };
 
         let existing_primary = self
             .domain_repo
@@ -461,6 +471,33 @@ impl SysTenantDomainService {
         };
 
         let now = now_naive();
+
+        // ② 同租户软删行复活：重置验证态与主域名标记（DNS 记录可能已改，必须重新验证），
+        // 保留原主键与 create_*（审计按主键归并到同一条绑定历史）。
+        if let Some(existing) = deleted_revivable {
+            let mut am: DomainActiveModel = existing.into();
+            am.domain_type = Set(domain_type.to_string());
+            am.is_primary = Set(Some(is_primary));
+            am.verify_status = Set(Some(verify_status));
+            am.verify_token = Set(verify_token);
+            am.verified_at = Set(verified_at);
+            am.status = Set(Some("0".to_string()));
+            am.del_flag = Set(Some("0".to_string()));
+            am.update_by = Set(Some(operator.to_string()));
+            am.update_time = Set(Some(now));
+            am.remark = Set(dto.remark.filter(|s| !s.trim().is_empty()));
+            let model = self.domain_repo.update(am).await?;
+            let mut name_map = HashMap::new();
+            name_map.insert(tenant.tenant_id, tenant.tenant_name);
+            tracing::info!(
+                tenant_id = dto.tenant_id,
+                domain = %domain,
+                domain_type,
+                "租户域名绑定已复活（同租户软删行）"
+            );
+            return Ok(to_vo(&model, &name_map));
+        }
+
         let am = DomainActiveModel {
             domain_id: NotSet,
             tenant_id: Set(dto.tenant_id),
@@ -702,7 +739,14 @@ impl SysTenantDomainService {
             return Err(cross_tenant_denied());
         }
 
-        self.domain_repo.soft_delete(domain_id, operator).await?;
+        // 改名释放 `uk_sys_tenant_domain_domain`（全局唯一、不含 del_flag）：手工删除即
+        // "放弃这个域名"，否则任何租户（含本租户日后重新绑定）都会被一条不可见的软删行挡住。
+        // 租户**级联软删**走 `sys_tenant_service::remove` 的批量语句，且刻意不改名——
+        // 那是回收站语义（`restore` 会把域名一并恢复），两者不是同一种删除。
+        let freed = crate::common::soft_delete_key::freed_key(&model.domain, domain_id, 255);
+        self.domain_repo
+            .soft_delete(domain_id, operator, &freed)
+            .await?;
         self.invalidate_domain_cache(&model.domain).await;
         // 状态迁移 `'1' → 已删`：该域名不再需要证书（接收端可据此吊销/清理）
         if model.verify_status.as_deref() == Some("1") {

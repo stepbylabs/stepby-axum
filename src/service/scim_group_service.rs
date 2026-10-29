@@ -1502,8 +1502,18 @@ async fn teardown_group(txn: &DatabaseTransaction, group_id: i64) -> Result<(), 
         .await
         .map_err(db_err_500)?
     {
+        // 释放唯一键 `uk_scim_group_external_id`（唯一索引不含 del_flag）：
+        // IdP 侧删组后常用**同一个 externalId** 重新下发，占用不放会让 create 恒 409"已存在"，
+        // 而该组在管理端又已不可见 —— 死路。改名规则与全仓一致（见 common::soft_delete_key）。
+        let freed_external_id = g
+            .external_id
+            .as_deref()
+            .map(|ext| crate::common::soft_delete_key::freed_key(ext, group_id, 255));
         let mut am: GroupAM = g.into();
         am.del_flag = Set(Some("2".to_string()));
+        if let Some(freed) = freed_external_id {
+            am.external_id = Set(Some(freed));
+        }
         am.update_time = Set(Some(now));
         am.update(txn).await.map_err(db_err_500)?;
     }

@@ -587,8 +587,22 @@ impl SysReportService {
         // E1-f：单事务包络——原实现逐条循环软删订阅 + 再软删报表，中途失败会留下
         // 「部分订阅已删、报表仍在/报表已删、部分订阅残留」的不一致状态。
         // 现将订阅级联软删（一次 IN 批量）与报表软删纳入同一事务，任一步失败整体回滚。
+        //
+        // b128：`report_code` 是**全局唯一**索引（`report_code VARCHAR(64) NOT NULL UNIQUE`，
+        // 唯一索引不看 del_flag），而 `exists_by_code` 只查未删除行 ⇒ 软删行会永久占着
+        // 编码，再次新建同 code 报「已存在」而管理端看不到占用者（死路）。软删同时改名释放；
+        // 每行新值不同（含主键），无法用一条批量 UPDATE。
+        let freed: Vec<(i64, String)> = existing
+            .iter()
+            .map(|r| {
+                (
+                    r.report_id,
+                    crate::common::soft_delete_key::freed_key(&r.report_code, r.report_id, 64),
+                )
+            })
+            .collect();
         let sub_repo = self.sub_repo.clone();
-        let report_repo = self.report_repo.clone();
+        let now = crate::common::datetime::now_naive();
         self.report_repo
             .base()
             .db()
@@ -598,9 +612,24 @@ impl SysReportService {
                     sub_repo
                         .soft_delete_by_report_ids_conn(txn, &report_ids)
                         .await?;
-                    report_repo
-                        .soft_delete_by_ids_conn(txn, &report_ids)
-                        .await?;
+                    for (rid, code) in freed {
+                        crate::entity::sys_report::Entity::update_many()
+                            .col_expr(
+                                crate::entity::sys_report::Column::DelFlag,
+                                sea_orm::sea_query::Expr::value("2"),
+                            )
+                            .col_expr(
+                                crate::entity::sys_report::Column::ReportCode,
+                                sea_orm::sea_query::Expr::value(code),
+                            )
+                            .col_expr(
+                                crate::entity::sys_report::Column::UpdateTime,
+                                sea_orm::sea_query::Expr::value(now),
+                            )
+                            .filter(crate::entity::sys_report::Column::ReportId.eq(rid))
+                            .exec(txn)
+                            .await?;
+                    }
                     Ok(())
                 }
                 .boxed()

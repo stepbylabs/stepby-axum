@@ -674,3 +674,103 @@ async fn test_report_dashboard_write_perm_and_strict_id_list() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "软删后详情应为 404");
 }
+
+/// b128：软删行占用唯一索引的整族缺陷——**删掉后无法重建同名**。
+///
+/// `report_code` / `dashboard_code` 是唯一索引（不看 `del_flag`），而创建前的查重只查
+/// 未删除行 ⇒ 修复前这里第二次建同名会撞索引，管理端收到的是一句通用「数据重复」，
+/// 而占用编码的那行在列表里根本看不到。判据按真实 HTTP 链路走：建 → 删 → 同名重建必须 200，
+/// 并直接回库确认软删行已改名（审计行仍在、唯一键已让位）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_b128_dataset_and_dashboard_can_be_recreated_with_same_code() {
+    use sea_orm::ConnectionTrait;
+    let ctx = TestContext::new().await;
+
+    // ---- 数据集 ----
+    let ds_code = "it_b128_ds";
+    let ds_payload = |name: &str| {
+        serde_json::json!({
+            "datasetCode": ds_code,
+            "datasetName": name,
+            "sqlTemplate": "SELECT 1 AS one",
+            "status": "0"
+        })
+    };
+    let v = ctx.post_json("/report/dataset", ds_payload("首次")).await;
+    ctx.assert_ok(&v);
+    let first_id = v["data"]["datasetId"].as_i64().expect("datasetId");
+
+    let v = ctx
+        .delete_json(&format!("/report/dataset/{first_id}"))
+        .await;
+    ctx.assert_ok(&v);
+
+    let v = ctx.post_json("/report/dataset", ds_payload("重建")).await;
+    ctx.assert_ok(&v);
+    let second_id = v["data"]["datasetId"].as_i64().expect("datasetId");
+    assert_ne!(first_id, second_id, "重建必须是一行新记录");
+
+    // 软删行仍在（审计保留）但编码已让位
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT dataset_code, del_flag FROM report_dataset WHERE dataset_id = ?",
+            [first_id.into()],
+        ))
+        .await
+        .expect("回查数据集失败")
+        .expect("软删行必须保留");
+    let freed: String = row.try_get("", "dataset_code").expect("code");
+    assert_eq!(
+        freed,
+        format!("{ds_code}_deleted_{first_id}"),
+        "软删行的 dataset_code 必须改名为释放键"
+    );
+
+    // ---- 大屏 ----
+    let board_code = "it_b128_board";
+    let board_payload = |name: &str| {
+        serde_json::json!({
+            "dashboardCode": board_code,
+            "dashboardName": name,
+            "layoutJson": {"schemaVersion": 2, "charts": []},
+            "status": "0"
+        })
+    };
+    let v = ctx
+        .post_json("/report/dashboard", board_payload("首次"))
+        .await;
+    ctx.assert_ok(&v);
+    let first_board = v["data"]["dashboardId"].as_i64().expect("dashboardId");
+
+    let v = ctx
+        .delete_json(&format!("/report/dashboard/{first_board}"))
+        .await;
+    ctx.assert_ok(&v);
+
+    let v = ctx
+        .post_json("/report/dashboard", board_payload("重建"))
+        .await;
+    ctx.assert_ok(&v);
+    let second_board = v["data"]["dashboardId"].as_i64().expect("dashboardId");
+    assert_ne!(first_board, second_board, "重建必须是一行新记录");
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT dashboard_code FROM report_dashboard WHERE dashboard_id = ?",
+            [first_board.into()],
+        ))
+        .await
+        .expect("回查大屏失败")
+        .expect("软删行必须保留");
+    let freed: String = row.try_get("", "dashboard_code").expect("code");
+    assert_eq!(
+        freed,
+        format!("{board_code}_deleted_{first_board}"),
+        "软删行的 dashboard_code 必须改名为释放键"
+    );
+}

@@ -2128,7 +2128,14 @@ impl SysUserService {
 
         // 释放唯一字段值，避免软删除后唯一索引冲突（uk_sys_user_name）
         // 软删除记录仍占用 user_name 唯一索引，导致无法重新创建同名用户
-        let deleted_user_name = format!("{}_deleted_{}", existing.user_name, user_id);
+        let deleted_user_name =
+            crate::common::soft_delete_key::freed_key(&existing.user_name, user_id, 30);
+        // 同一事务里一并释放 `uk_sys_user_tenant_scim`：SCIM 反配（软删）后 IdP 常用同一个
+        // externalId 重新下发，占用不放会让 create 恒 409"已存在"（该用户又已不可见）。
+        let deleted_scim_external_id = existing
+            .scim_external_id
+            .as_deref()
+            .map(|ext| crate::common::soft_delete_key::freed_key(ext, user_id, 255));
 
         // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
         let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
@@ -2143,6 +2150,9 @@ impl SysUserService {
                     let mut am: SysUserActiveModel = existing.into();
                     am.del_flag = Set(Some("2".to_string()));
                     am.user_name = Set(deleted_user_name);
+                    if let Some(ext) = deleted_scim_external_id {
+                        am.scim_external_id = Set(Some(ext));
+                    }
                     user_repo.base().update_conn(txn, am).await?;
 
                     // 1.5 审计合规域：DELETE 变更留痕（同事务提交/回滚，失败令业务一并回滚；
@@ -2339,12 +2349,20 @@ impl SysUserService {
                     //    事务内不再重复校验，依赖 sys_user_role 的外键约束保证一致性。
 
                     // 3. 释放唯一字段值（避免软删除后唯一索引冲突）
-                    let deleted_user_name = format!("{}_deleted_{}", existing.user_name, user_id);
+                    let deleted_user_name =
+                        crate::common::soft_delete_key::freed_key(&existing.user_name, user_id, 30);
+                    let deleted_scim_external_id = existing
+                        .scim_external_id
+                        .as_deref()
+                        .map(|ext| crate::common::soft_delete_key::freed_key(ext, user_id, 255));
 
                     // 4. 软删除 sys_user
                     let mut am: SysUserActiveModel = existing.into();
                     am.del_flag = Set(Some("2".to_string()));
                     am.user_name = Set(deleted_user_name);
+                    if let Some(ext) = deleted_scim_external_id {
+                        am.scim_external_id = Set(Some(ext));
+                    }
                     user_repo.base().update_conn(txn, am).await?;
 
                     // 5. 物理删除 sys_user_role 关联

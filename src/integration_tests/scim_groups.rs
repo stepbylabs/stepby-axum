@@ -728,3 +728,101 @@ async fn test_scim_group_batch_delete_is_atomic_and_names_missing_ids() {
         "组 {g3} 应已软删"
     );
 }
+
+/// b128：`uk_scim_group_tenant_external (tenant_id, external_id)` 不看 `del_flag`，
+/// IdP 删组后经常用**同一个 externalId** 重新下发 ⇒ 修复前 create 恒 409「已存在」，
+/// 而该组在管理端又已不可见（死路）。判据：建 → DELETE → 同 externalId 重建必须 201，
+/// 且软删行的 external_id 已改名让位（审计行保留）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_b128_group_can_be_recreated_with_same_external_id() {
+    use sea_orm::ConnectionTrait;
+    let ctx = scim_ctx().await;
+    let ext = "it-b128-ext-1";
+    let body = |name: &str| {
+        serde_json::json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+            "displayName": name,
+            "externalId": ext,
+            "members": []
+        })
+    };
+
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Groups",
+        &body("首次").to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "建组应 201: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let first: i64 = json_of(&resp)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .parse()
+        .expect("组 id 应为数字");
+
+    let (status, _, resp) = raw_delete(
+        &ctx.app,
+        ctx.peer_ip,
+        &format!("/scim/v2/Groups/{first}"),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "DELETE 应 204: {}",
+        String::from_utf8_lossy(&resp)
+    );
+
+    // 同一个 externalId 再下发一次 —— 修复前这里 409「已存在」
+    let (status, _, resp) = raw_post(
+        &ctx.app,
+        ctx.peer_ip,
+        "/scim/v2/Groups",
+        &body("重建").to_string(),
+        &scim_headers(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "同 externalId 重建应 201（软删行必须已让位）: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    let second: i64 = json_of(&resp)["id"]
+        .as_str()
+        .unwrap_or_default()
+        .parse()
+        .expect("组 id 应为数字");
+    assert_ne!(first, second, "重建必须是一行新记录");
+
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT external_id, del_flag FROM sys_scim_group WHERE group_id = ?",
+            [first.into()],
+        ))
+        .await
+        .expect("回查 SCIM 组失败")
+        .expect("软删行必须保留");
+    let freed: String = row.try_get("", "external_id").expect("external_id");
+    assert_eq!(
+        freed,
+        format!("{ext}_deleted_{first}"),
+        "软删行的 external_id 必须改名为释放键"
+    );
+    assert_eq!(
+        row.try_get::<String>("", "del_flag").ok().as_deref(),
+        Some("2"),
+        "删除是软删（审计保留）"
+    );
+}

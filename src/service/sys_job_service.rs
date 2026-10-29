@@ -627,7 +627,11 @@ impl SysJobService {
                             if status == "0" {
                                 running_jobs.push(*job_id);
                             }
-                            let renamed = format!("{}_deleted_{}", job.job_name, job_id);
+                            let renamed = crate::common::soft_delete_key::freed_key(
+                                &job.job_name,
+                                *job_id,
+                                64,
+                            );
                             job_repo
                                 .soft_delete_with_rename_conn(txn, *job_id, renamed)
                                 .await?;

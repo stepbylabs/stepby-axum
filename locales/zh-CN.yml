@@ -621,6 +621,7 @@ error:
     domain_subdomain_platform_only: 子域名由平台统一分配，租户自助仅可绑定自定义域名（需 DNS TXT 验证）
     domain_invalid: 域名格式非法（小写字母/数字/连字符，至少两级且每级 1-63 位）
     domain_conflict: 该域名已被占用（含历史绑定），请更换
+    domain_taken_by_other_tenant: 该域名曾被其他租户绑定并已删除，不可重新绑定；请联系管理员处理
     domain_not_found: 域名绑定不存在
     domain_not_verified: 域名尚未通过 DNS TXT 验证，不能设为主域名
     domain_verify_failed: 域名 DNS TXT 验证未通过，请确认解析记录已生效

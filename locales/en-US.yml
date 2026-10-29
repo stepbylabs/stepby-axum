@@ -621,6 +621,7 @@ error:
     domain_subdomain_platform_only: Subdomains are allocated by the platform; tenant self-service can only bind custom domains (DNS TXT verification required)
     domain_invalid: "Invalid domain (lowercase letters/digits/hyphen, at least two labels of 1-63 chars each)"
     domain_conflict: The domain is already taken (including historical bindings), please choose another
+    domain_taken_by_other_tenant: This domain was bound by another tenant and later deleted; it cannot be re-bound. Contact the administrator
     domain_not_found: Domain binding does not exist
     domain_not_verified: The domain has not passed DNS TXT verification and cannot be set as primary
     domain_verify_failed: DNS TXT verification failed, please confirm the DNS record has taken effect

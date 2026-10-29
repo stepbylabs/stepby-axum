@@ -24,7 +24,7 @@
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 
 use super::TestContext;
-use crate::entity::{sys_menu, sys_role_menu, sys_tenant_domain};
+use crate::entity::{sys_menu, sys_role_menu, sys_tenant, sys_tenant_domain};
 use crate::service::sys_tenant_domain_service::{
     SysTenantDomainService, TenantDomainAddDto, TenantDomainIdDto, TenantDomainStatusDto,
 };
@@ -198,4 +198,156 @@ async fn test_domain_platform_operator_unaffected_by_capability() {
     assert_eq!(row.verify_token.as_deref(), Some("it-1c-token"));
     // 平台操作者：不过滤也能查（全量视图）
     assert!(svc.list(None, 0).await.is_ok());
+}
+
+/// b128：`domain` 是**全局唯一**索引（不看 `del_flag`）。手工删除域名 = 放弃该域名，
+/// 若只软删，任何租户（含本租户日后重建）都只能去改库才能重新绑定。
+///
+/// 三条路径必须各不相同、且都不能是死路：
+/// ① 新删除 → 改名释放 → 同租户重建成功（新行）；
+/// ② 存量/回收站留下的**未改名**软删行 + 同租户 → 复活原行（复用主键）；
+/// ③ 未改名软删行属于**其他租户** → 仍 400（域名归属不因"上家删过"而释放）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_b128_domain_delete_releases_key_and_revives_same_tenant() {
+    let ctx = TestContext::new().await;
+    let svc: &SysTenantDomainService = &ctx.state.tenant_domain_service;
+    let db = &ctx.state.db;
+    let tenant = 9062;
+    let other_tenant = 9063;
+    // `add` 会校验归属租户存在且未删除 ⇒ 先把两个租户建出来
+    for (tid, code) in [(tenant, "it_b128_t9062"), (other_tenant, "it_b128_t9063")] {
+        sys_tenant::ActiveModel {
+            tenant_id: Set(tid),
+            tenant_code: Set(code.to_string()),
+            tenant_name: Set(format!("IT-B128-{tid}")),
+            package_id: Set(None),
+            status: Set(Some("0".to_string())),
+            del_flag: Set(Some("0".to_string())),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("插入租户失败");
+    }
+    let domain = "it-b128-domain.stepby.test";
+
+    // ① 建 → 删 → 再建同名（平台操作者 tid=0）
+    let first = svc
+        .add(
+            TenantDomainAddDto {
+                tenant_id: tenant,
+                domain: domain.to_string(),
+                domain_type: "1".to_string(),
+                is_primary: Some("1".to_string()),
+                remark: None,
+            },
+            "admin",
+            0,
+        )
+        .await
+        .expect("首次绑定应成功");
+    let first_id = first.domain_id;
+    svc.remove(first_id, "admin", 0)
+        .await
+        .expect("删除域名应成功");
+    // 软删行已改名（释放全局唯一键）
+    let row = sys_tenant_domain::Entity::find_by_id(first_id)
+        .one(db)
+        .await
+        .expect("回查失败")
+        .expect("软删行必须保留");
+    assert_eq!(
+        row.domain,
+        format!("{domain}_deleted_{first_id}"),
+        "软删行的 domain 必须改名释放唯一键"
+    );
+    let second = svc
+        .add(
+            TenantDomainAddDto {
+                tenant_id: tenant,
+                domain: domain.to_string(),
+                domain_type: "1".to_string(),
+                is_primary: Some("1".to_string()),
+                remark: None,
+            },
+            "admin",
+            0,
+        )
+        .await
+        .expect("删除后同租户重建同名域名必须成功");
+    assert_ne!(second.domain_id, first_id, "① 重建必须是一行新记录");
+
+    // ② 存量形态：手工造一条**未改名**的软删行（模拟 b128 之前的数据 / 租户回收站）
+    let legacy_domain = "it-b128-legacy.stepby.test";
+    let legacy_id = insert_domain(db, legacy_domain, tenant).await;
+    sys_tenant_domain::ActiveModel {
+        domain_id: Set(legacy_id),
+        del_flag: Set(Some("2".to_string())),
+        ..Default::default()
+    }
+    .update(db)
+    .await
+    .expect("造软删行失败");
+    let revived = svc
+        .add(
+            TenantDomainAddDto {
+                tenant_id: tenant,
+                domain: legacy_domain.to_string(),
+                domain_type: "1".to_string(),
+                is_primary: Some("0".to_string()),
+                remark: Some("复活".to_string()),
+            },
+            "admin",
+            0,
+        )
+        .await
+        .expect("同租户软删行必须可复活");
+    assert_eq!(revived.domain_id, legacy_id, "② 复活必须复用原主键");
+    let revived_row = sys_tenant_domain::Entity::find_by_id(legacy_id)
+        .one(db)
+        .await
+        .expect("回查失败")
+        .expect("复活后行必须在册");
+    assert_eq!(
+        revived_row.del_flag.as_deref(),
+        Some("0"),
+        "复活后必须回到在册"
+    );
+    assert_eq!(
+        revived.verify_status.as_deref(),
+        Some("0"),
+        "复活必须重置验证态（DNS 记录可能已改）"
+    );
+
+    // ③ 他租户的软删行仍占着全局唯一键 ⇒ 400，且文案点名"其他租户"
+    let other_domain = "it-b128-other.stepby.test";
+    let other_id = insert_domain(db, other_domain, other_tenant).await;
+    sys_tenant_domain::ActiveModel {
+        domain_id: Set(other_id),
+        del_flag: Set(Some("2".to_string())),
+        ..Default::default()
+    }
+    .update(db)
+    .await
+    .expect("造他租户软删行失败");
+    let err = svc
+        .add(
+            TenantDomainAddDto {
+                tenant_id: tenant,
+                domain: other_domain.to_string(),
+                domain_type: "1".to_string(),
+                is_primary: Some("0".to_string()),
+                remark: None,
+            },
+            "admin",
+            0,
+        )
+        .await
+        .expect_err("他租户软删行必须仍拦截（反劫持）");
+    assert_eq!(err.code, 400, "跨租户占用应 400: {err:?}");
+    assert!(
+        err.message.contains("其他租户"),
+        "文案必须点名占用方是其他租户（否则使用者不知道去找谁）：{}",
+        err.message
+    );
 }

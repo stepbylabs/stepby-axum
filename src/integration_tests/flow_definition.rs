@@ -425,3 +425,55 @@ async fn test_report_designer_tenant_gating() {
         .expect_err("租户 off 档大屏写面必须被拒");
     assert_eq!(err.code, 403, "report.designer off 档大屏写面必须 403");
 }
+
+/// b128：`uq_flow_def_code_ver (tenant_id, flow_code, version)` 不看 `del_flag`，
+/// 而新增时的查重只看未删除行 ⇒ 修复前把某个 code 的版本删光后再建同名会撞唯一索引，
+/// 报出来是一句通用「数据重复」。判据：建 → 删 → 同名重建必须 200，且软删行已改名让位。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_b128_flow_definition_can_be_recreated_with_same_code() {
+    use sea_orm::ConnectionTrait;
+    let ctx = TestContext::new().await;
+    let token = ctx.token.clone();
+    let code = "it_b128_flow";
+    let payload = |name: &str| {
+        serde_json::json!({
+            "flowCode": code,
+            "flowName": name,
+            "graphJson": valid_graph_json(),
+            "remark": "it"
+        })
+    };
+
+    let v = post_json(&ctx, &token, "/system/flow/definition", payload("首次")).await;
+    ctx.assert_ok(&v);
+    let first = v["data"]["flowId"].as_i64().expect("应返回 flowId");
+
+    let v = ctx
+        .delete_json(&format!("/system/flow/definition/{first}"))
+        .await;
+    ctx.assert_ok(&v);
+
+    let v = post_json(&ctx, &token, "/system/flow/definition", payload("重建")).await;
+    ctx.assert_ok(&v);
+    let second = v["data"]["flowId"].as_i64().expect("应返回 flowId");
+    assert_ne!(first, second, "重建必须是一行新记录");
+    assert_eq!(v["data"]["version"].as_i64(), Some(1), "重建即 version=1");
+
+    let row = ctx
+        .state
+        .db
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT flow_code, version, del_flag FROM flow_definition WHERE flow_id = ?",
+            [first.into()],
+        ))
+        .await
+        .expect("回查流程定义失败")
+        .expect("软删行必须保留");
+    let freed: String = row.try_get("", "flow_code").expect("code");
+    assert_eq!(
+        freed,
+        format!("{code}_deleted_{first}"),
+        "软删行的 flow_code 必须改名为释放键（否则 (tenant, code, 1) 永远被占）"
+    );
+}

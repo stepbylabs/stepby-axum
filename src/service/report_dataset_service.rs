@@ -420,33 +420,41 @@ impl ReportDatasetService {
             .await?;
         let mut by_id: std::collections::HashMap<i64, ReportDatasetModel> =
             rows.into_iter().map(|m| (m.dataset_id, m)).collect();
-        let mut deletable: Vec<i64> = Vec::new();
+        // (id, 原 code)：改名值必须逐行不同，故把原 code 一起带出来（上面已从 map 里移出）
+        let mut deletable: Vec<(i64, String)> = Vec::new();
         for id in dataset_ids {
             if let Some(m) = by_id
                 .remove(&id)
                 .filter(|mm| mm.del_flag.as_deref() == Some("0"))
             {
                 self.ensure_access(m.tenant_id, operator_tid)?;
-                deletable.push(id);
+                deletable.push((id, m.dataset_code));
             }
         }
         if !deletable.is_empty() {
-            ReportDatasetEntity::update_many()
-                .col_expr(
-                    ReportDatasetColumn::DelFlag,
-                    Expr::value(Some("1".to_string())),
-                )
-                .col_expr(
-                    ReportDatasetColumn::UpdateBy,
-                    Expr::value(Some(operator.to_string())),
-                )
-                .col_expr(
-                    ReportDatasetColumn::UpdateTime,
-                    Expr::value(Some(crate::common::datetime::now_naive())),
-                )
-                .filter(ReportDatasetColumn::DatasetId.is_in(deletable))
-                .exec(&txn)
-                .await?;
+            // 逐行 UPDATE 而非一次 `is_in`：软删必须**同时释放唯一键** `uq_report_dataset_code`
+            // （唯一索引不含 del_flag），而每行要写入的改名值各不相同 ⇒ 批量语句拼不出。
+            // 保留批量读（上方一次 is_in 批查）以维持"错误顺序按入参、无 2N 次往返"的既有语义。
+            let now = crate::common::datetime::now_naive();
+            for (id, code) in &deletable {
+                ReportDatasetEntity::update_many()
+                    .col_expr(
+                        ReportDatasetColumn::DelFlag,
+                        Expr::value(Some("1".to_string())),
+                    )
+                    .col_expr(
+                        ReportDatasetColumn::DatasetCode,
+                        Expr::value(crate::common::soft_delete_key::freed_key(code, *id, 64)),
+                    )
+                    .col_expr(
+                        ReportDatasetColumn::UpdateBy,
+                        Expr::value(Some(operator.to_string())),
+                    )
+                    .col_expr(ReportDatasetColumn::UpdateTime, Expr::value(now))
+                    .filter(ReportDatasetColumn::DatasetId.eq(*id))
+                    .exec(&txn)
+                    .await?;
+            }
         }
         txn.commit()
             .await
@@ -726,28 +734,36 @@ impl ReportDatasetService {
             .await?;
         let mut by_id: std::collections::HashMap<i64, ReportDashboardModel> =
             rows.into_iter().map(|m| (m.dashboard_id, m)).collect();
-        let mut deletable: Vec<i64> = Vec::new();
+        let mut deletable: Vec<(i64, String)> = Vec::new();
         for id in dashboard_ids {
             if let Some(m) = by_id.remove(&id) {
                 self.ensure_access(m.tenant_id, operator_tid)?;
-                deletable.push(id);
+                deletable.push((id, m.dashboard_code));
             }
         }
         if !deletable.is_empty() {
+            // 与 `remove_dataset` 同口径：软删同时释放 `uq_report_dashboard_code`
+            // （唯一索引不含 del_flag，逐行改名值不同 ⇒ 只能逐行 UPDATE，仍在同一事务内）
             let now = crate::common::datetime::now_naive();
-            ReportDashboardEntity::update_many()
-                .col_expr(
-                    ReportDashboardColumn::DelFlag,
-                    Expr::value(Some("1".to_string())),
-                )
-                .col_expr(
-                    ReportDashboardColumn::UpdateBy,
-                    Expr::value(Some(operator.to_string())),
-                )
-                .col_expr(ReportDashboardColumn::UpdateTime, Expr::value(Some(now)))
-                .filter(ReportDashboardColumn::DashboardId.is_in(deletable))
-                .exec(&txn)
-                .await?;
+            for (id, code) in &deletable {
+                ReportDashboardEntity::update_many()
+                    .col_expr(
+                        ReportDashboardColumn::DelFlag,
+                        Expr::value(Some("1".to_string())),
+                    )
+                    .col_expr(
+                        ReportDashboardColumn::DashboardCode,
+                        Expr::value(crate::common::soft_delete_key::freed_key(code, *id, 64)),
+                    )
+                    .col_expr(
+                        ReportDashboardColumn::UpdateBy,
+                        Expr::value(Some(operator.to_string())),
+                    )
+                    .col_expr(ReportDashboardColumn::UpdateTime, Expr::value(now))
+                    .filter(ReportDashboardColumn::DashboardId.eq(*id))
+                    .exec(&txn)
+                    .await?;
+            }
         }
         txn.commit()
             .await

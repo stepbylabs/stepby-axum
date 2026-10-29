@@ -880,7 +880,8 @@ impl SysRoleService {
 
         // 释放唯一字段值，避免软删除后唯一索引冲突（uk_sys_role_key）
         // 软删除记录仍占用 role_key 唯一索引，导致无法重新创建同 key 角色
-        let deleted_role_key = format!("{}_deleted_{}", existing.role_key, role_id);
+        let deleted_role_key =
+            crate::common::soft_delete_key::freed_key(&existing.role_key, role_id, 100);
 
         // 审计合规域：变更前快照（必须在 existing 被 move 进事务闭包之前计算）
         let before_snapshot = serde_json::to_value(&existing).unwrap_or(serde_json::Value::Null);
@@ -1033,7 +1034,11 @@ impl SysRoleService {
                         }
 
                         // 3. 释放唯一字段值（避免软删除后唯一索引冲突）
-                        let deleted_role_key = format!("{}_deleted_{}", existing.role_key, role_id);
+                        let deleted_role_key = crate::common::soft_delete_key::freed_key(
+                            &existing.role_key,
+                            role_id,
+                            100,
+                        );
 
                         // 4. 软删除 sys_role
                         let mut am: SysRoleActiveModel = existing.into();

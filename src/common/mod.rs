@@ -36,6 +36,11 @@ pub mod response;
 pub mod risk_control;
 // 重资源入口的全局并发闸门（AGENTS 工程基线 A-2「资源硬上限 + 背压」）
 pub mod resource_gate;
+// 软删释放唯一键的单一实现（列宽感知的 `{原名}_deleted_{id}`）
+pub mod soft_delete_key;
+// 软删唯一键策略登记表（仅测试期：schema 驱动双向对账 + 锚点活性）
+#[cfg(test)]
+pub(crate) mod soft_delete_policy;
 pub mod sort;
 pub mod sql_dialect;
 pub mod ssrf;

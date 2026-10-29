@@ -106,10 +106,21 @@ impl SysTenantDomainRepository {
         self.base.update(model).await
     }
 
-    /// 软删（del_flag='2'，并记录 update_by / update_time）
-    pub async fn soft_delete(&self, domain_id: i64, operator: &str) -> Result<u64, DbErr> {
+    /// 软删（del_flag='2'，并记录 update_by / update_time）。
+    ///
+    /// `freed_domain` 由 `common::soft_delete_key::freed_key` 生成：`domain` 是**全局唯一**索引
+    /// （不含 del_flag），只软删会让该域名永久不可再绑定（同租户复活分支之外全是死路）。
+    /// 改名与软删必须在同一条 UPDATE 里完成——分两步写的话，第二步失败会留下
+    /// "行仍活跃但域名已改"的更坏状态。
+    pub async fn soft_delete(
+        &self,
+        domain_id: i64,
+        operator: &str,
+        freed_domain: &str,
+    ) -> Result<u64, DbErr> {
         let res = SysTenantDomain::update_many()
             .col_expr(Column::DelFlag, Expr::value("2"))
+            .col_expr(Column::Domain, Expr::value(freed_domain))
             .col_expr(Column::UpdateBy, Expr::value(operator))
             .col_expr(
                 Column::UpdateTime,
