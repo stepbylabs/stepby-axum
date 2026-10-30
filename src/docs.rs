@@ -293,6 +293,8 @@ struct SwaggerAssets;
         // ==================== 健康检查 / 指标 ====================
         crate::handler::health::health,
         crate::handler::health::metrics,
+        // 管理端指标摘要（b138）：与 /metrics 同源，但走用户 JWT + monitor:health:list
+        crate::handler::health::metrics_summary,
         // ==================== 实时日志监控 ====================
         crate::handler::monitor_log_handler::files,
         crate::handler::monitor_log_handler::tail,
@@ -546,6 +548,8 @@ struct SwaggerAssets;
             crate::handler::monitor_server_handler::SysFileInfo,
             // 数据库连接池监控
             crate::handler::monitor_server_handler::DbPoolInfo,
+            // 管理端指标摘要（b138，与 /metrics 同源）
+            crate::handler::health::MetricsSummary,
             // ==================== 通用响应包装 ====================
             crate::common::TreeSelectVo,
             // ==================== 通用接口 ====================

@@ -106,7 +106,22 @@ pub(crate) struct EgressActor<'a> {
 }
 
 /// 纯函数：把主体与外带事实装配成一条 `oper_log` 记录（测试直接断言字段）。
+///
+/// b138：`oper_param` 与 `json_result` 必须过**中间件同款**脱敏与截断。
+/// 此前这两列直接 `Value::to_string()` 落库，于是同一张 `sys_oper_log` 有两条严格度不同的
+/// 写入路径：中间件那条会掩掉 password/token/phone/idCard/nickname/avatar，外带审计这条不会。
+/// 两处各写一份必然漂（AGENTS ㉘），故直接复用 `middleware::oper_log` 的实现：
+/// 先脱敏（解析成功则结构保持、逐字段掩码），再按 `MAX_LOG_FIELD_LEN` 截断（顺序与中间件一致）。
 pub(crate) fn compose_record(actor: EgressActor<'_>, event: EgressEvent) -> OperLogRecord {
+    let oper_param = crate::middleware::oper_log::sanitize_param(event.oper_param.to_string());
+    let json_result = {
+        let sanitized =
+            crate::middleware::oper_log::sanitize_response_body(&event.detail.to_string());
+        crate::middleware::oper_log::safe_truncate(
+            &sanitized,
+            crate::middleware::oper_log::MAX_LOG_FIELD_LEN,
+        )
+    };
     OperLogRecord {
         title: event.kind.title(),
         business_type: event.kind.business_type(),
@@ -121,10 +136,10 @@ pub(crate) fn compose_record(actor: EgressActor<'_>, event: EgressEvent) -> Oper
         oper_url: event.oper_url,
         oper_ip: actor.client_ip.to_string(),
         oper_location: actor.location.to_string(),
-        oper_param: event.oper_param.to_string(),
+        oper_param,
         oper_before: String::new(),
         oper_diff: String::new(),
-        json_result: event.detail.to_string(),
+        json_result,
         // "0"=成功：本记录只在数据已真正可取之后写入（失败不落审计，见模块文档）。
         status: "0".to_string(),
         error_msg: String::new(),
@@ -161,6 +176,7 @@ pub fn record_egress(
 mod tests {
     use super::*;
     use crate::common::prod_scan::{Scan, prod_file};
+    use crate::middleware::oper_log::MAX_LOG_FIELD_LEN;
 
     fn event(kind: EgressKind) -> EgressEvent {
         EgressEvent {
@@ -177,15 +193,7 @@ mod tests {
 
     #[test]
     fn compose_record_carries_who_what_and_volume() {
-        let record = compose_record(
-            EgressActor {
-                username: "admin",
-                tenant_id: 0,
-                client_ip: "10.1.2.3",
-                location: "内网IP",
-            },
-            event(EgressKind::BackupDownload),
-        );
+        let record = compose_record(actor(), event(EgressKind::BackupDownload));
         assert_eq!(record.request_method, "GET", "外带审计必须标明是 GET");
         assert_eq!(record.method, EgressKind::BackupDownload.route());
         assert_eq!(record.title, "module.backup");
@@ -197,6 +205,116 @@ mod tests {
         assert!(record.json_result.contains("\"size\":1024"));
         assert!(record.oper_url.starts_with("/system/backup/download/"));
         assert!(!record.oper_url.contains('?'), "查询串不进 oper_url");
+    }
+
+    fn actor() -> EgressActor<'static> {
+        EgressActor {
+            username: "admin",
+            tenant_id: 0,
+            client_ip: "10.1.2.3",
+            location: "内网IP",
+        }
+    }
+
+    /// b138：外带审计与中间件必须共用**同一份**脱敏（AGENTS ㉘：同一句纪律写两遍就有
+    /// 两个严格度）。改造前 `oper_param` / `json_result` 直接 `Value::to_string()` 落库，
+    /// 于是同一张 `sys_oper_log` 上有两条严格度不同的写入路径——中间件那条会掩掉
+    /// password/token/phone/email，外带这条不会。
+    #[test]
+    fn compose_record_masks_sensitive_fields_like_the_middleware() {
+        let mut ev = event(EgressKind::BackupDownload);
+        ev.oper_param = serde_json::json!({
+            "backupId": 42,
+            "password": "p@ssw0rd",
+            "accessToken": "eyJhbGciOiJIUzI1",
+            "phone": "13800138000",
+            "nested": { "email": "ops@example.com" }
+        });
+        ev.detail = serde_json::json!({
+            "fileName": "backup-2026.sql",
+            "size": 1024,
+            "secret": "s3cr3t-value"
+        });
+
+        let record = compose_record(actor(), ev);
+
+        // 对照组：非敏感事实必须原样保留——否则"一律 REDACTED"也能骗过脱敏断言
+        assert!(
+            record.oper_param.contains("\"backupId\":42"),
+            "非敏感字段被误伤: {}",
+            record.oper_param
+        );
+        assert!(
+            record.json_result.contains("backup-2026.sql")
+                && record.json_result.contains("\"size\":1024"),
+            "外带摘要本身丢失: {}",
+            record.json_result
+        );
+        // 敏感值一个都不许留明文（嵌套对象同样要走到）
+        for leak in [
+            "p@ssw0rd",
+            "eyJhbGciOiJIUzI1",
+            "13800138000",
+            "ops@example.com",
+            "s3cr3t-value",
+        ] {
+            assert!(
+                !record.oper_param.contains(leak),
+                "oper_param 泄漏 {leak}: {}",
+                record.oper_param
+            );
+            assert!(
+                !record.json_result.contains(leak),
+                "json_result 泄漏 {leak}: {}",
+                record.json_result
+            );
+        }
+    }
+
+    /// 接线反查：`compose_record` 必须真的调用中间件那三个助手，而不是"看起来像脱敏"
+    /// （自己再写一份实现必然漂，下一次加敏感键时只改一处）。
+    #[test]
+    fn compose_record_reuses_the_middleware_helpers() {
+        let text = prod_file("src/common/egress_audit.rs", &Scan::default()).text();
+        let body = fn_body(&text, "compose_record").expect("采集面失效");
+        for needle in [
+            "middleware::oper_log::sanitize_param",
+            "middleware::oper_log::sanitize_response_body",
+            "middleware::oper_log::safe_truncate",
+            "middleware::oper_log::MAX_LOG_FIELD_LEN",
+        ] {
+            assert!(body.contains(needle), "compose_record 未复用 {needle}");
+        }
+    }
+
+    /// 超长摘要是常态（整库备份的文件名列表可达数百 KB），截断必须发生且不得 panic 在
+    /// UTF-8 字符中间——`String::truncate` 在非字符边界上会直接 panic（C-1 同族）。
+    #[test]
+    fn compose_record_truncates_long_detail_without_splitting_utf8() {
+        let mut ev = event(EgressKind::AuditChangeExport);
+        // 每个"中"占 3 字节：MAX_LOG_FIELD_LEN 之后必然落在多字节字符中间
+        ev.detail = serde_json::json!({ "rows": "中".repeat(MAX_LOG_FIELD_LEN) });
+
+        let record = compose_record(actor(), ev);
+
+        assert!(
+            record.json_result.ends_with("...(truncated)"),
+            "超长 json_result 必须带截断标记（实测 {} 字节）",
+            record.json_result.len()
+        );
+        assert!(
+            record.json_result.len() <= MAX_LOG_FIELD_LEN + "...(truncated)".len(),
+            "截断后仍超上限: {} 字节",
+            record.json_result.len()
+        );
+    }
+
+    /// 对照组：没超上限时**不得**加截断标记（否则"永远截断"也能过上面那条）。
+    #[test]
+    fn compose_record_keeps_short_detail_verbatim() {
+        let record = compose_record(actor(), event(EgressKind::AiHistoryExport));
+        assert!(!record.json_result.contains("...(truncated)"));
+        assert!(record.json_result.contains("\"size\":1024"));
     }
 
     #[test]
@@ -245,10 +363,17 @@ mod tests {
         }
     }
 
-    /// 提取 `pub async fn <name>(` 的函数体（花括号配对），供接线反查。
+    /// 提取 `[async] fn <name>(` 的函数体（花括号配对），供接线反查。
+    ///
+    /// 必须同时认同步与异步：`compose_record` 是同步函数，只认 `async fn` 会让接线反查在
+    /// 真实树上恒返回 `None`（b138 实测：本测试首跑即红在"采集面失效"，而不是红在真正的
+    /// 断线上——判据自己的输入形状错了）。
     fn fn_body(text: &str, name: &str) -> Option<String> {
-        let head = format!("async fn {name}(");
-        let start = text.find(&head)?;
+        let heads = [format!("async fn {name}("), format!("fn {name}(")];
+        let start = heads
+            .iter()
+            .filter_map(|head| text.find(head.as_str()))
+            .min()?;
         let open = start + text[start..].find('{')?;
         let mut depth = 0usize;
         for (i, ch) in text[open..].char_indices() {
@@ -281,5 +406,13 @@ mod tests {
         let decoy =
             "pub async fn f() -> u8 { 1 }\npub async fn g() { record_egress(&s, &o, ip, e); }\n";
         assert!(!fn_body(decoy, "f").unwrap().contains("record_egress("));
+        // 同步函数同样要能提取（`compose_record` 就是同步的；只认 `async fn` 会让
+        // `compose_record_reuses_the_middleware_helpers` 恒红在"采集面失效"上）
+        let sync = "pub(crate) fn f(x: u8) -> u8 {\n    x + 1\n}\n";
+        assert_eq!(fn_body(sync, "f").unwrap().trim(), "{\n    x + 1\n}");
+        assert!(
+            fn_body("fn f() -> u8;\n", "f").is_none(),
+            "文本里没有函数体（没有花括号）时必须返回 None"
+        );
     }
 }

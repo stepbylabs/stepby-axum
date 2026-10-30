@@ -165,6 +165,57 @@ fn uptime_seconds() -> u64 {
     START_TIME.get_or_init(Instant::now).elapsed().as_secs()
 }
 
+/// 管理端健康页使用的平台运维指标摘要（b138）。
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsSummary {
+    /// 数据库后端（sqlite / mysql / postgres）
+    pub db_backend: String,
+    /// 数据库连通性（`SELECT 1` 是否成功）
+    pub db_connected: bool,
+    /// 进程运行时长（秒）
+    pub uptime_seconds: u64,
+    /// 进程常驻内存（字节）
+    pub rss_bytes: u64,
+    /// 进程虚拟内存（字节）
+    pub vms_bytes: u64,
+}
+
+/// GET /monitor/metrics-summary
+///
+/// 与 [`metrics`] **同源**（同一组采集函数），但走正常的管理端鉴权链。
+///
+/// 为什么不复用 `/metrics`：那是可选的**运维令牌**通道（`[monitor].metrics_token`，
+/// 比对的是运维配置值而不是用户 JWT），浏览器永远拿不到该令牌 ⇒ 运维一旦启用它，
+/// 健康页的指标区就永久空白（b138 取证：前端裸 `fetch` 不带 `Authorization`，
+/// 后端在配置令牌后对一切未带该令牌的请求直接 401）。
+///
+/// 本端点与 `/monitor/server`、`/monitor/db-pool` 同属平台运维面：走
+/// [`crate::middleware::platform_guard::platform_only_guard`] + `monitor:health:list`
+/// （`monitor:health:` 前缀已在 `PLATFORM_ONLY_PERM_PREFIXES` 登记）。指标是进程级事实，
+/// 没有租户语义，因此租户操作者一律 403——与主机指标同一口径。
+#[utoipa::path(
+    get,
+    path = "/monitor/metrics-summary",
+    responses(
+        (status = 200, description = "查询成功", body = AjaxResult<MetricsSummary>),
+        (status = 403, description = "租户操作者不可见平台运维指标"),
+    ),
+    tag = "monitor-health"
+)]
+pub async fn metrics_summary(
+    State(state): State<Arc<AppState>>,
+) -> Result<AjaxResult<MetricsSummary>, AppError> {
+    let (rss, vms) = process_memory();
+    Ok(AjaxResult::success(MetricsSummary {
+        db_backend: db_backend_name(&state.db).to_string(),
+        db_connected: db_is_connected(&state.db).await,
+        uptime_seconds: uptime_seconds(),
+        rss_bytes: rss,
+        vms_bytes: vms,
+    }))
+}
+
 /// GET /metrics
 ///
 /// Prometheus 文本格式指标端点（免鉴权），供监控系统采集。

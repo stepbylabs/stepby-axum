@@ -95,7 +95,10 @@ const MAX_BODY_BYTES: usize = 1024 * 1024; // 1MB
 /// 请求体/响应体读取硬上限（对齐全局 DefaultBodyLimit 10MB，确保转发完整不丢失）
 const BODY_READ_LIMIT: usize = 10 * 1024 * 1024; // 10MB
 /// 日志字段最大保存字符数（超出截断）
-const MAX_LOG_FIELD_LEN: usize = 2000;
+///
+/// b138：外带审计（`common::egress_audit`）与中间件是同表的两条写入路径，必须共用
+/// 同一份脱敏与截断口径，故本常量与下述三个助手改为 `pub(crate)`。
+pub(crate) const MAX_LOG_FIELD_LEN: usize = 2000;
 /// 操作日志异步写入的超时上限（R6-RUST-13）
 /// 超时后 spawn 任务直接放弃，避免日志写入卡死导致 spawn 任务累积
 const OPER_LOG_TIMEOUT: Duration = Duration::from_secs(5);
@@ -104,7 +107,7 @@ const OPER_LOG_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// `String::truncate(new_len)` 在 `new_len` 不在 UTF-8 字符边界时会 panic；
 /// 此函数回退到最近的字符边界，并附加 `...(truncated)` 标记。
-fn safe_truncate(s: &str, max_bytes: usize) -> String {
+pub(crate) fn safe_truncate(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
@@ -699,7 +702,7 @@ fn is_sensitive_key(key: &str) -> bool {
 ///
 /// REGRESS-010：扩展脱敏字段，覆盖 phone/mobile/phonenumber/idCard/idcard/id_card
 /// 密码类、手机号类、身份证类字段值统一替换为 "***"（审计日志无需保留掩码后部分）
-fn sanitize_param(s: String) -> String {
+pub(crate) fn sanitize_param(s: String) -> String {
     if s.is_empty() {
         return s;
     }
@@ -903,7 +906,7 @@ const REDACTED_BODY: &str = "<response body unavailable or contains sensitive da
 /// - idCard → 中间 8 位掩码
 ///
 /// 非 JSON 响应原样返回（不影响日志可读性）。
-fn sanitize_response_body(body: &str) -> String {
+pub(crate) fn sanitize_response_body(body: &str) -> String {
     if body.is_empty() {
         return String::new();
     }

@@ -631,6 +631,9 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // 数据库连接池监控：与 /monitor/server 同属平台运维面（健康检查页调用），
     // 复用同一权限键 monitor:health:list（种子已存在，菜单契约测试自动覆盖）
     ("GET", "/monitor/db-pool", "monitor:health:list"),
+    // 管理端指标摘要（b138）：/metrics 走运维令牌（浏览器拿不到），健康页改读本端点，
+    // 同属平台运维面与同一菜单，权限键沿用 monitor:health:list
+    ("GET", "/monitor/metrics-summary", "monitor:health:list"),
 
     // ===== 可观测性监控（慢请求 / 错误聚合 / Redis 指标）=====
     // 慢请求面板（列表 + 聚合 + 清空）：查看共用 list，清空走写权限 remove（b93 N-92-1）。
