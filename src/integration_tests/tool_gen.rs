@@ -242,3 +242,141 @@ async fn test_gen_validation_errors() {
         "未传 tables 应 400，实际: {status}"
     );
 }
+
+/// 读出 ZIP 的全部条目名（b139：ZIP 条目结构是这条链路的真实产物）。
+fn zip_entry_names(bytes: &[u8]) -> Vec<String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .expect("响应体应是合法 ZIP（前端此前把字节丢进 JSON 解析）");
+    (0..zip.len())
+        .map(|i| zip.by_index(i).expect("读条目失败").name().to_string())
+        .collect()
+}
+
+/// b139：代码生成的 ZIP 条目路径必须由 `path` 参数决定。
+///
+/// 立项取证（改造前）：`gen_table.gen_path` 在**全后端**只有 DTO/entity/默认值四处出现，
+/// `gen_code` 从不读它、也从不写磁盘；前端 `genCode()` 没声明 `responseType: 'blob'`，
+/// ZIP 字节被 axios 当文本解析、响应拦截器按"无 code ⇒ 200"判定成功，页面弹
+/// 「成功生成到自定义路径：{path}」——用户点了既拿不到文件、也收不到错误。
+///
+/// 本用例钉住四件事：① ZIP 真能读回 ② `path` 决定条目前缀 ③ 前缀只加目录不改变文件集
+/// ④ 穿越/绝对路径/反斜杠/NUL 一律 400（Zip Slip 防线）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_gen_code_zip_entries_follow_path_prefix() {
+    let ctx = TestContext::new().await;
+
+    // 1. 建表并导入到代码生成
+    let v = ctx
+        .post_json(
+            "/tool/gen/createTable",
+            serde_json::json!({
+                "tableName": "it_gen_path_prefix",
+                "tableComment": "路径前缀集成测试",
+                "columns": [
+                    {
+                        "columnName": "id",
+                        "dataType": "bigint",
+                        "isPrimaryKey": true,
+                        "isAutoIncrement": true,
+                        "isNotNull": true
+                    },
+                    {
+                        "columnName": "name",
+                        "dataType": "varchar",
+                        "length": 100,
+                        "isNotNull": true
+                    }
+                ],
+                "importToGen": true
+            }),
+        )
+        .await;
+    ctx.assert_ok(&v);
+
+    // 2. 缺省 path ⇒ 平铺，且响应头是可用的文件名（b139 之前 tool_gen 是"失败静默不设头"）
+    let (status, headers, body) = ctx
+        .send_binary(ctx.request(Method::GET, "/tool/gen/genCode/it_gen_path_prefix", None))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "缺省生成应 200");
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/zip"),
+        "响应必须是 application/zip"
+    );
+    let cd = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .expect("下载响应必须带 Content-Disposition");
+    assert!(
+        cd.contains("filename=\"it_gen_path_prefix.zip\""),
+        "实际: {cd}"
+    );
+    // 2b. 可复现性：同样的表连续生成两次必须逐字节相同。
+    // 改造前 `render_templates` 返回 `HashMap`，ZIP 条目顺序随机 ⇒ 两个包字节不同、
+    // 内容却完全一致（无法做校验和/缓存/跨环境比对）。
+    let (_, _, body_again) = ctx
+        .send_binary(ctx.request(Method::GET, "/tool/gen/genCode/it_gen_path_prefix", None))
+        .await;
+    assert_eq!(
+        body, body_again,
+        "同输入两次生成的 ZIP 必须逐字节相同（BTreeMap 定序）"
+    );
+
+    let flat = zip_entry_names(&body);
+    assert!(!flat.is_empty(), "ZIP 不应为空");
+    // 模板条目名**本身**带目录（`src/entity/…`、`migration/…`），所以"平铺"的判据
+    // 是"不带调用方前缀"，不是"不含斜杠"——这条区别是本用例第一版红在自己身上的原因。
+    assert!(
+        flat.iter().all(|n| !n.starts_with("module/system/")),
+        "缺省不应出现调用方前缀，实际: {flat:?}"
+    );
+
+    // 3. path=module/system ⇒ 每个条目都带该前缀（genPath 从"死字段"转正的证据）
+    let (status, _, body) = ctx
+        .send_binary(ctx.request(
+            Method::GET,
+            "/tool/gen/genCode/it_gen_path_prefix?path=module/system",
+            None,
+        ))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "带前缀生成应 200");
+    let nested = zip_entry_names(&body);
+    assert_eq!(nested.len(), flat.len(), "前缀不应改变条目数量");
+    assert!(
+        nested.iter().all(|n| n.starts_with("module/system/")),
+        "实际: {nested:?}"
+    );
+    // 前缀只是目录：条目集合等于 `module/system/` + 缺省条目名（按集合比，不押注顺序）
+    let mut expected: Vec<String> = flat.iter().map(|n| format!("module/system/{n}")).collect();
+    expected.sort();
+    let mut actual = nested.clone();
+    actual.sort();
+    assert_eq!(actual, expected, "前缀必须只加目录、不改条目名");
+
+    // 4. 路径穿越 / 绝对路径 / 反斜杠 / NUL 一律 400（Zip Slip 防线）
+    for bad in ["..%2Fetc", "%2Fetc", "a%5Cb", "a%00b"] {
+        let (status, _, _) = ctx
+            .send_binary(ctx.request(
+                Method::GET,
+                &format!("/tool/gen/genCode/it_gen_path_prefix?path={bad}"),
+                None,
+            ))
+            .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "path={bad} 应 400（Zip Slip 防线）"
+        );
+    }
+
+    // 5. 清理
+    let v = ctx.get_json("/tool/gen/list?pageNum=1&pageSize=50").await;
+    let id = v["rows"]
+        .as_array()
+        .expect("rows 应为数组")
+        .iter()
+        .find(|r| r["tableName"] == "it_gen_path_prefix")
+        .and_then(|r| r["tableId"].as_i64())
+        .expect("应能查到刚创建的表");
+    ctx.assert_ok(&ctx.delete_json(&format!("/tool/gen/{id}")).await);
+}

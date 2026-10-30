@@ -298,7 +298,10 @@ pub async fn import_template(State(state): State<Arc<AppState>>) -> Result<Respo
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("attachment; filename=user_import_template.xlsx"),
+        crate::common::http_download::content_disposition_header(
+            "user_import_template.xlsx",
+            "user_import_template.xlsx",
+        ),
     );
     Ok(response)
 }

@@ -796,6 +796,28 @@ impl TestContext {
         (status, v)
     }
 
+    /// 执行请求并返回原始 HTTP 状态码 + 响应头 + 原始字节。
+    ///
+    /// 下载族（ZIP / CSV / 备份流）的结论写在**字节与响应头**里，而 `send_raw` 把非 JSON
+    /// 体统一读成 `Value::Null` ⇒ 这类端点只能判状态码（"写了没接线"的同族盲区）。
+    /// b139 起代码生成的 ZIP 条目结构由本方法取证。
+    pub async fn send_binary(
+        &self,
+        req: Request<Body>,
+    ) -> (
+        axum::http::StatusCode,
+        axum::http::HeaderMap,
+        axum::body::Bytes,
+    ) {
+        let resp = self.app.clone().oneshot(req).await.expect("请求执行失败");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("读取响应体失败");
+        (status, headers, body)
+    }
+
     /// 以**指定 token** 发请求并返回原始状态码 + JSON。
     ///
     /// 用于「同一进程内的受限角色」用例：`send_raw` 固定带 admin token，而权限类判据

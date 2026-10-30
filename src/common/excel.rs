@@ -199,7 +199,8 @@ where
     // 构建响应
     // P1 修复：文件名经 CRLF/控制字符清洗并按 RFC 5987 编码非 ASCII 文件名，
     // 防止响应头注入与中文文件名下载乱码（原实现未清洗，且非 ASCII 文件名经 HeaderValue::from_str 静默降级）。
-    let content_disposition = build_content_disposition(&filename);
+    let content_disposition =
+        crate::common::http_download::content_disposition_header(&filename, "export.xlsx");
     let mut response = Response::new(xlsx_data.into());
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
@@ -208,11 +209,9 @@ where
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ),
     );
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&content_disposition)
-            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=export.xlsx")),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, content_disposition);
     // N5：截断标记（前端 download 工具读取并提示）
     if final_truncated {
         response
@@ -377,68 +376,9 @@ where
         .map_err(|_| AppError::internal(&crate::tr!("error.excel.generate_failed")))
 }
 
-/// 清洗文件名，防止响应头注入
-///
-/// 移除 CRLF、NUL 与控制字符（防头注入），移除引号/反斜杠（防破坏 Content-Disposition 引号结构），
-/// 消除首尾空白。清洗后仍为空时调用方应提供 ASCII 兜底名。
-fn sanitize_filename(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .filter(|c| !matches!(c, '\r' | '\n' | '\0' | '"' | '\\'))
-        .map(|c| if c.is_control() { '_' } else { c })
-        .collect();
-    cleaned.trim().to_string()
-}
-
-/// RFC 5987 百分号编码（UTF-8 字节）
-///
-/// 仅保留 attr-char 字符集（ALPHA / DIGIT / !#$&+-.^_|~），其余字节按 UTF-8 逐字节 `%XX` 编码，
-/// 使非 ASCII 文件名可在 Content-Disposition 的 `filename*` 中安全传输。
-fn rfc5987_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'!'
-            | b'#'
-            | b'$'
-            | b'&'
-            | b'+'
-            | b'-'
-            | b'.'
-            | b'^'
-            | b'_'
-            | b'`'
-            | b'|'
-            | b'~' => out.push(*b as char),
-            _ => out.push_str(&format!("%{:02X}", b)),
-        }
-    }
-    out
-}
-
-/// 构造 Content-Disposition 响应头（P1 修复，防头注入 + 中文文件名）
-///
-/// - 先清洗文件名（CRLF/控制字符/引号）
-/// - ASCII 文件名：直接 `filename="..."`（带引号，允许空格）
-/// - 含非 ASCII：提供 `filename="export.xlsx"` 兜底 + `filename*=UTF-8''<编码>` 真实名，
-///   浏览器优先使用 `filename*`（RFC 5987）。
-fn build_content_disposition(filename: &str) -> String {
-    let safe = sanitize_filename(filename);
-    if safe.is_empty() {
-        return "attachment; filename=\"export.xlsx\"".to_string();
-    }
-    if safe.is_ascii() {
-        format!("attachment; filename=\"{}\"", safe)
-    } else {
-        format!(
-            "attachment; filename=\"export.xlsx\"; filename*=UTF-8''{}",
-            rfc5987_encode(&safe)
-        )
-    }
-}
+// b139：文件名清洗 / RFC 5987 / Content-Disposition 三个纯函数已迁到
+// `common::http_download`（全仓五处下载端点共用一份实现，单测随之迁走）。
+// 本模块只保留"xlsx 响应该用哪个兜底名"这个业务选择。
 
 #[cfg(test)]
 mod tests {
@@ -652,53 +592,9 @@ mod tests {
         assert_eq!(err.code, 400);
     }
 
-    // ---------- 私有纯函数：文件名净化 / RFC5987 / Content-Disposition ----------
-
-    #[test]
-    fn sanitize_filename_removes_crlf_quotes_and_controls() {
-        // CRLF / NUL / 引号 / 反斜杠全部移除，控制字符替换为 _
-        assert_eq!(sanitize_filename("a\r\nb"), "ab");
-        assert_eq!(sanitize_filename("evil\"; rm -rf /"), "evil; rm -rf /");
-        assert_eq!(sanitize_filename("back\\slash"), "backslash");
-        assert_eq!(sanitize_filename("nul\0byte"), "nulbyte");
-        assert_eq!(sanitize_filename(" tab\x01ctl "), "tab_ctl");
-        // 清洗后为空 → 空串（调用方需兜底）
-        assert_eq!(sanitize_filename("\"\r\n"), "");
-    }
-
-    #[test]
-    fn rfc5987_encode_keeps_attr_chars_and_encodes_rest() {
-        // attr-char 保留
-        assert_eq!(rfc5987_encode("abcXYZ09!$&+-.^_`|~"), "abcXYZ09!$&+-.^_`|~");
-        // 空格 / 中文 / 不可打印字符按 UTF-8 逐字节大写 %XX
-        assert_eq!(rfc5987_encode("a b"), "a%20b");
-        assert_eq!(rfc5987_encode("中"), "%E4%B8%AD");
-        assert_eq!(rfc5987_encode("="), "%3D");
-        assert_eq!(rfc5987_encode("%"), "%25");
-    }
-
-    #[test]
-    fn build_content_disposition_handles_ascii_non_ascii_and_empty() {
-        // ASCII → 直接带引号
-        assert_eq!(
-            build_content_disposition("report.xlsx"),
-            "attachment; filename=\"report.xlsx\""
-        );
-        // 含空格
-        assert_eq!(
-            build_content_disposition("my report.xlsx"),
-            "attachment; filename=\"my report.xlsx\""
-        );
-        // 非 ASCII → ASCII 兜底 + filename* RFC5987
-        let cd = build_content_disposition("用户报表.xlsx");
-        assert!(cd.starts_with("attachment; filename=\"export.xlsx\"; filename*=UTF-8''"));
-        assert!(cd.contains("%E7%94%A8%E6%88%B7")); // 用户
-        // 清洗后为空 → 兜底名
-        assert_eq!(
-            build_content_disposition("\"\r\n"),
-            "attachment; filename=\"export.xlsx\""
-        );
-    }
+    // ---------- 文件名清洗 / RFC5987 / Content-Disposition ----------
+    // b139：三个纯函数已迁至 `common::http_download`，其单测随实现迁走；
+    // 本模块只保留一条"xlsx 响应真的带 filename*"的接线断言（见下方导出测试）。
 
     // ---------- import_cell_to_string（私有） ----------
 

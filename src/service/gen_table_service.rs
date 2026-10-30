@@ -10,7 +10,7 @@
 //! 模板引擎：Tera（运行时模板，支持从目录加载）
 //! 模板目录：templates/gen/
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error as StdError;
 
 use futures::future::FutureExt;
@@ -320,7 +320,11 @@ pub struct CreateTableResultVo {
 }
 
 /// 预览代码响应（文件名 → 代码内容）
-pub type PreviewCodeVo = HashMap<String, String>;
+///
+/// b139：`BTreeMap` 而非 `HashMap`——ZIP 条目顺序由此确定，同样的表生成两次得到
+/// **逐字节相同**的压缩包（可做校验和/缓存/跨环境比对）。`HashMap` 的迭代顺序随机，
+/// 于是 `genCode` 每点一次产出的 ZIP 字节都不同，而内容其实完全一致。
+pub type PreviewCodeVo = BTreeMap<String, String>;
 
 /// 单张表导入的准备数据（校验 + 只读元数据已就绪，待事务内写入）
 ///
@@ -1432,7 +1436,16 @@ impl GenTableService {
     }
 
     /// 生成代码（返回 ZIP 文件字节流）
-    pub async fn gen_code(&self, table_name: &str) -> Result<Vec<u8>, ServiceError> {
+    ///
+    /// `path_prefix` 是**压缩包内路径前缀**（b139）。改造前后端从不读 `gen_table.gen_path`、
+    /// 也从不写磁盘，而前端提示写着"成功生成到自定义路径：{path}"——一个字段存了 140 轮
+    /// 却没有任何消费者，用户点了只得到一句谎报。现在它决定 ZIP 条目路径：
+    /// 留空/只有分隔符 = 平铺；`module/system` = 全部条目落在该目录下。
+    pub async fn gen_code(
+        &self,
+        table_name: &str,
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<u8>, ServiceError> {
         let table = self.repo.find_by_name(table_name).await?.ok_or_else(|| {
             ServiceError::not_found(&crate::tr!(
                 "error.gen.table_not_imported",
@@ -1442,6 +1455,7 @@ impl GenTableService {
         let columns = self.repo.find_columns_by_table_id(table.table_id).await?;
 
         let files = Self::render_templates(&table, &columns)?;
+        let prefix = sanitize_zip_path_prefix(path_prefix)?;
 
         // 打包为 ZIP
         let mut buf = Vec::new();
@@ -1451,7 +1465,12 @@ impl GenTableService {
                 .compression_method(zip::CompressionMethod::Deflated);
 
             for (path, content) in &files {
-                zip.start_file(path, options).map_err(|_| {
+                let entry = if prefix.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{}/{}", prefix, path)
+                };
+                zip.start_file(&entry, options).map_err(|_| {
                     ServiceError::internal(&crate::tr!("error.gen.zip_write_failed"))
                 })?;
                 use std::io::Write;
@@ -1646,7 +1665,7 @@ impl GenTableService {
             ),
         ];
 
-        let mut result: HashMap<String, String> = HashMap::new();
+        let mut result: BTreeMap<String, String> = BTreeMap::new();
         for (tpl_name, _alias, out_path) in templates {
             let rendered = tera.render(tpl_name, &ctx).map_err(|e| {
                 // 包含完整的错误链信息（Tera 错误通常有嵌套 source）
@@ -1676,6 +1695,70 @@ impl GenTableService {
 }
 
 // ==================== 路径安全 ====================
+
+/// 清洗 ZIP 条目路径前缀（b139，`gen_code` 的 `path` 参数）。
+///
+/// 语义是**包内目录**，不是磁盘路径。三类输入必须挡住：
+/// 1. 绝对路径（`/x`、`C:\x`）——部分解压器会把它解释为落盘根目录；
+/// 2. `..` 段——Zip Slip：解压器若不做二次校验就会写到包外；
+/// 3. 反斜杠 / NUL / 控制字符——不同解压器对分隔符与转义的解释不一致。
+///
+/// 空串或只含分隔符 = 平铺（与参数缺省同义，不是错误）。每段复用
+/// [`sanitize_path_component`]，与批量生成的表名子目录同一套判据。
+fn sanitize_zip_path_prefix(raw: Option<&str>) -> Result<String, ServiceError> {
+    const MAX_PREFIX_LEN: usize = 200;
+    let Some(raw) = raw else {
+        return Ok(String::new());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if trimmed.len() > MAX_PREFIX_LEN
+        || trimmed.contains('\\')
+        || trimmed.contains('\0')
+        || trimmed.chars().any(|c| c.is_control())
+    {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.gen.path_component_invalid",
+            name = raw
+        )));
+    }
+    // 连续的 `/` 与 `.` 段按"无意义"处理（`a//b` == `a/b`），不当作错误——
+    // 用户的输入习惯不该让一次生成失败，但目录语义必须归一。
+    let segments: Vec<&str> = trimmed
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    // 只有分隔符（数据库 `gen_path` 的默认值就是 `/`）⇒ 平铺，不是绝对路径错误。
+    if segments.is_empty() {
+        return Ok(String::new());
+    }
+    // 到这里还有段却以 `/` 开头 ⇒ 绝对路径（`/etc`），部分解压器会落盘到根目录。
+    if trimmed.starts_with('/') {
+        return Err(ServiceError::bad_request(&crate::tr!(
+            "error.gen.path_component_invalid",
+            name = raw
+        )));
+    }
+    let mut clean: Vec<String> = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let clean_seg = sanitize_path_component(seg)?;
+        // ZIP 条目名要跨平台可解压：Windows 的保留字符在解压时会被拒绝或截断，
+        // 与其让用户拿到一个"在某台机器上解不开"的包，不如在入口直接说清楚。
+        if clean_seg
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        {
+            return Err(ServiceError::bad_request(&crate::tr!(
+                "error.gen.path_component_invalid",
+                name = seg
+            )));
+        }
+        clean.push(clean_seg);
+    }
+    Ok(clean.join("/"))
+}
 
 /// 校验路径组件，防止 Zip Slip 路径穿越攻击
 ///
@@ -2456,5 +2539,53 @@ mod gen_table_template_tests {
                 "规范集合不得含 Java 类型 `{java_ty}`"
             );
         }
+    }
+
+    // ---------- b139：ZIP 条目路径前缀（`gen_code` 的 `path` 参数） ----------
+
+    #[test]
+    fn zip_path_prefix_normalizes_harmless_input() {
+        // 缺省 / 空 / 只有分隔符 ⇒ 平铺。`/` 是数据库 `gen_path` 的默认值，
+        // 把它当"绝对路径"拒绝会让默认配置直接不可用（这条是本批的边界面）。
+        assert_eq!(sanitize_zip_path_prefix(None).unwrap(), "");
+        assert_eq!(sanitize_zip_path_prefix(Some("")).unwrap(), "");
+        assert_eq!(sanitize_zip_path_prefix(Some("   ")).unwrap(), "");
+        assert_eq!(sanitize_zip_path_prefix(Some("/")).unwrap(), "");
+        assert_eq!(sanitize_zip_path_prefix(Some("///")).unwrap(), "");
+        // 连续分隔符与 `.` 段归一
+        assert_eq!(
+            sanitize_zip_path_prefix(Some("module//./system/")).unwrap(),
+            "module/system"
+        );
+        // 首尾空白不影响语义
+        assert_eq!(
+            sanitize_zip_path_prefix(Some(" module/system ")).unwrap(),
+            "module/system"
+        );
+    }
+
+    #[test]
+    fn zip_path_prefix_rejects_traversal_and_absolute_inputs() {
+        // `..` 段（Zip Slip）：必须拒绝，且不能只是"归一掉"
+        assert!(sanitize_zip_path_prefix(Some("..")).is_err());
+        assert!(sanitize_zip_path_prefix(Some("a/../b")).is_err());
+        assert!(sanitize_zip_path_prefix(Some("a/..")).is_err());
+        // 绝对路径（还有段时）
+        assert!(sanitize_zip_path_prefix(Some("/etc")).is_err());
+        assert!(sanitize_zip_path_prefix(Some("/a/b")).is_err());
+        // 反斜杠 / NUL / 控制字符
+        assert!(sanitize_zip_path_prefix(Some("a\\b")).is_err());
+        assert!(sanitize_zip_path_prefix(Some("a\0b")).is_err());
+        assert!(sanitize_zip_path_prefix(Some("a\r\nb")).is_err());
+        // Windows 保留字符（解压端会拒绝或截断）
+        for bad in ["a:b", "a?b", "a*b", "a|b", "a<b", "a>b", "a\"b"] {
+            assert!(
+                sanitize_zip_path_prefix(Some(bad)).is_err(),
+                "{bad} 应被拒绝"
+            );
+        }
+        // 长度上限
+        assert!(sanitize_zip_path_prefix(Some(&"a".repeat(201))).is_err());
+        assert!(sanitize_zip_path_prefix(Some(&"a".repeat(200))).is_ok());
     }
 }

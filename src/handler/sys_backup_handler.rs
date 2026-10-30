@@ -378,7 +378,10 @@ pub async fn download(
         },
     );
 
-    let content_disposition = format!("attachment; filename=\"{}\"", file_name.replace('"', ""));
+    // b139：走单一实现。此前 `HeaderValue::from_str` 失败会静默回落到固定名 `backup`，
+    // 用户从"文件名叫 xxx.sql"变成"backup"，而服务端没有任何信号。
+    let content_disposition =
+        crate::common::http_download::content_disposition_header(&file_name, "backup.sql");
 
     let stream = futures::stream::try_unfold(file, |mut file| async move {
         let mut buf = vec![0u8; 64 * 1024];
@@ -399,11 +402,9 @@ pub async fn download(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&size.to_string()).unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&content_disposition)
-            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=backup")),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, content_disposition);
 
     Ok(response)
 }

@@ -19,6 +19,7 @@ pub mod excel;
 pub mod extract;
 pub mod features;
 pub mod flow_graph;
+pub mod http_download;
 pub mod http_status;
 pub mod i18n;
 pub mod image;

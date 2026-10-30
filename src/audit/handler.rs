@@ -158,15 +158,14 @@ pub async fn export(
     out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
     out.extend_from_slice(csv.as_bytes());
 
-    let content_disposition = format!("attachment; filename=\"{filename}\"");
-    let mut response = (
-        [
-            ("content-type", "text/csv; charset=utf-8"),
-            ("content-disposition", content_disposition.as_str()),
-        ],
-        out,
-    )
-        .into_response();
+    // b139：文件名头部走单一实现（此前直接拼 `&str`，非 ASCII 名进入响应头元组时
+    // 由 axum 内部转换失败——审计 CSV 的默认名是 ASCII，但调用链没有理由依赖这一点）。
+    let content_disposition =
+        crate::common::http_download::content_disposition_header(&filename, "audit_change.csv");
+    let mut response = ([("content-type", "text/csv; charset=utf-8")], out).into_response();
+    response
+        .headers_mut()
+        .insert("content-disposition", content_disposition);
     // 与 xlsx 导出同一口径：触及 EXPORT_MAX_ROWS 上限几乎必然是被截断。
     // 不标出来的话，审计员手里是一份"看起来完整"的半份数据（前端据此弹提示）。
     if is_export_truncated(rows.len()) {

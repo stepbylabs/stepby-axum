@@ -269,15 +269,32 @@ fn validate_table_name(table_name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// `GET /tool/gen/genCode/{tableName}` 的可选查询参数
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenCodeQuery {
+    /// 压缩包内路径前缀（如 `module/system`）。按 `/` 分段清洗，任一段含
+    /// `..` / 反斜杠 / NUL 即 400；留空 = 平铺（与批量生成的多表子目录同构）。
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 /// GET /tool/gen/genCode/{tableName}
 /// 生成代码（返回 ZIP 文件下载）
+///
+/// b139：`path` 是**压缩包内路径前缀**——此前该入口的"自定义路径"只存在于前端提示里
+/// （后端从不读 `gen_table.gen_path`、也从不写磁盘），前端又把 ZIP 字节丢进 JSON 解析、
+/// 弹出"成功生成到自定义路径：{path}"。现在该字段有了真实消费者：它决定 ZIP 条目路径。
 #[utoipa::path(
     get,
     path = "/tool/gen/genCode/{tableName}",
-    params(("tableName" = String, Path, description = "表名")),
+    params(
+        ("tableName" = String, Path, description = "表名"),
+        ("path" = Option<String>, Query, description = "压缩包内路径前缀（留空则平铺）"),
+    ),
     responses(
         (status = 200, description = "生成的代码 ZIP", content_type = "application/zip"),
-        (status = 400, description = "表名非法"),
+        (status = 400, description = "表名或路径前缀非法"),
         (status = 403, description = "非平台操作者"),
     ),
     tag = "tool-gen"
@@ -285,23 +302,28 @@ fn validate_table_name(table_name: &str) -> Result<(), AppError> {
 pub async fn gen_code(
     State(state): State<Arc<AppState>>,
     Path(table_name): Path<String>,
+    Query(query): Query<GenCodeQuery>,
 ) -> Result<Response, AppError> {
     // SEC-004：白名单校验表名，防 CRLF / 引号 / 路径穿越
     validate_table_name(&table_name)?;
 
-    let zip_bytes = state.gen_table_service.gen_code(&table_name).await?;
+    let zip_bytes = state
+        .gen_table_service
+        .gen_code(&table_name, query.path.as_deref())
+        .await?;
 
     // 返回 ZIP 文件响应
     let mut headers = axum::http::HeaderMap::new();
     let filename = format!("{}.zip", table_name);
-    let content_disposition = format!("attachment; filename=\"{}\"", filename);
-    if let Ok(val) = axum::http::HeaderValue::from_str(&content_disposition) {
-        headers.insert(axum::http::header::CONTENT_DISPOSITION, val);
-    }
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        crate::common::http_download::content_disposition_header(&filename, "code.zip"),
+    );
     headers.insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/zip"),
     );
+    // 数字转 HeaderValue 不可能失败（纯 ASCII 十进制），沿用 Ok 分支即可
     if let Ok(val) = axum::http::HeaderValue::from_str(&zip_bytes.len().to_string()) {
         headers.insert(axum::http::header::CONTENT_LENGTH, val);
     }
@@ -401,10 +423,10 @@ pub async fn batch_gen_code(
 
     // 返回 ZIP 文件响应
     let mut headers = axum::http::HeaderMap::new();
-    let content_disposition = "attachment; filename=\"batch.zip\"";
-    if let Ok(val) = axum::http::HeaderValue::from_str(content_disposition) {
-        headers.insert(axum::http::header::CONTENT_DISPOSITION, val);
-    }
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        crate::common::http_download::content_disposition_header("batch.zip", "code.zip"),
+    );
     headers.insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/zip"),

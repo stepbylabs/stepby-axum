@@ -832,19 +832,19 @@ pub async fn archive_download(
         },
     );
 
-    let content_disposition = format!("attachment; filename=\"{}\"", key.replace('"', ""));
+    // b139：走单一实现。`key` 是对象存储键（可能含非 ASCII 前缀），此前失败会静默
+    // 回落到固定名 `oper-log-archive.jsonl`。
+    let content_disposition =
+        crate::common::http_download::content_disposition_header(&key, "oper-log-archive.jsonl");
     let mut response = Response::new(bytes.into());
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&content_disposition).unwrap_or_else(|_| {
-            HeaderValue::from_static("attachment; filename=oper-log-archive.jsonl")
-        }),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, content_disposition);
     Ok(response)
 }
 
