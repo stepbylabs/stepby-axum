@@ -102,6 +102,59 @@ async fn test_backup_chain() {
         );
     }
 
+    // 6b. b137：下载属 **GET 外带面**（`oper_log` 中间件只记写方法）⇒ 处理器必须自己补审计。
+    //     期望值与 row_status 同源：only success 的备份才有可下载文件（failed ⇒ 下载 400）。
+    let expected_audit: i64 = if row_status == "success" { 1 } else { 0 };
+    let audited = super::egress_audit::settled_egress_rows(
+        &ctx,
+        &format!("/system/backup/download/{}", backup_id),
+        expected_audit as usize,
+    )
+    .await;
+    assert_eq!(
+        audited.len() as i64,
+        expected_audit,
+        "成功下载必须恰好留一条 GET 外带审计（failed 备份不可下载 ⇒ 0 条），实际: {audited:?}"
+    );
+    if let Some(r) = audited.first() {
+        assert_eq!(
+            r.title.as_deref(),
+            Some("module.backup"),
+            "下载审计的模块归类必须可读: {r:?}"
+        );
+        assert_eq!(
+            r.method.as_deref(),
+            Some("/system/backup/download/{backupId}"),
+            "method 必须是路由模板（与限流档位同口径）: {r:?}"
+        );
+        assert_eq!(
+            r.request_method.as_deref(),
+            Some("GET"),
+            "必须标明 GET: {r:?}"
+        );
+        assert_eq!(
+            r.status.as_deref(),
+            Some("0"),
+            "只有真正可取才落审计: {r:?}"
+        );
+        assert_eq!(r.business_type, Some(5), "外带归 5=导出: {r:?}");
+        assert_eq!(r.tenant_id, 0, "平台管理员挂在租户 0: {r:?}");
+        assert!(
+            r.target_tenant_id.is_none(),
+            "同租户下载不写目标租户: {r:?}"
+        );
+        let detail: serde_json::Value =
+            serde_json::from_str(r.json_result.as_deref().unwrap_or("null")).unwrap_or_default();
+        assert!(
+            detail["fileName"].as_str().is_some_and(|n| !n.is_empty()),
+            "审计必须记下被带走的文件名: {detail}"
+        );
+        assert!(
+            detail["size"].as_i64().is_some(),
+            "审计必须记下体积: {detail}"
+        );
+    }
+
     // 7. 下载不存在的备份 → 404
     let (status, _) = ctx
         .send_raw(ctx.request(Method::GET, "/system/backup/download/999999", None))
@@ -110,6 +163,13 @@ async fn test_backup_chain() {
         status,
         StatusCode::NOT_FOUND,
         "下载不存在的备份应 404，实际: {status}"
+    );
+    // 7b. 失败路径不落审计：404 的 URL 与成功那次不同，可直接按 URL 判"零行"。
+    assert!(
+        super::egress_audit::settled_egress_rows(&ctx, "/system/backup/download/999999", 0)
+            .await
+            .is_empty(),
+        "404 下载不得写审计（失败留痕由后端 WARN 日志承担）"
     );
 
     // 8. 恢复不存在的备份 → 404（恢复为高危操作，仅测 404 分支，避免真实改写测试库）

@@ -11,6 +11,8 @@ pub mod data_scope;
 pub mod dataset_sql;
 pub mod datetime;
 pub mod double_opt;
+// 数据外带出口（整库/全量审计/合规归档的 GET 下载导出）的审计留痕单一实现（b137）
+pub mod egress_audit;
 pub mod encrypted_value;
 pub mod error;
 pub mod excel;

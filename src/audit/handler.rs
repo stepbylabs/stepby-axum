@@ -8,8 +8,10 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use std::net::SocketAddr;
 
 use crate::common::error::AppError;
 use crate::common::response::{AjaxResult, TableDataInfo};
@@ -96,6 +98,8 @@ pub async fn get_info(
 pub async fn export(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(query): Query<AuditChangeQueryDto>,
 ) -> Result<Response, AppError> {
     // 导出族与 16 条 xlsx 端点共用同一把闸（export:excel，8 路）。CSV 不经
@@ -105,6 +109,16 @@ pub async fn export(
     let _gate = crate::common::resource_gate::try_enter(
         crate::common::resource_gate::HeavyEntry::ExcelExport,
     )?;
+    // 审计面记录"导出了哪个子集"（b137）：筛选条件在 query 被消费前留一份；
+    // 分页参数不记（导出是全量语义，页码无意义）。
+    let filter = serde_json::json!({
+        "tableName": query.table_name,
+        "rowPk": query.row_pk,
+        "action": query.action,
+        "operatorName": query.operator_name,
+        "beginTime": query.begin_time,
+        "endTime": query.end_time,
+    });
     let rows = state
         .audit_change_service
         .export_changes(
@@ -112,6 +126,27 @@ pub async fn export(
             crate::common::tenant::tenant_scope(operator.tenant_id()),
         )
         .await?;
+
+    // b137：全量变更留痕 CSV 是 GET 外带面（oper_log 中间件只记写方法）。
+    // 行已取回、即将返回时才留痕；失败路径（500）不落审计。
+    let client_ip = crate::utils::ip::extract_client_ip(
+        &headers,
+        peer_addr.ip(),
+        &state.config.server.trusted_proxies,
+    );
+    crate::common::egress_audit::record_egress(
+        &state,
+        &operator,
+        &client_ip,
+        crate::common::egress_audit::EgressEvent {
+            kind: crate::common::egress_audit::EgressKind::AuditChangeExport,
+            // 查询串不进 oper_url（可能含搜索词），筛选条件见 oper_param
+            oper_url: "/system/audit-change/export".to_string(),
+            oper_param: filter,
+            detail: serde_json::json!({ "rows": rows.len() }),
+            target_tenant_id: None,
+        },
+    );
 
     let csv = build_csv(&rows);
     let filename = format!(

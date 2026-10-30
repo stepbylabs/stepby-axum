@@ -126,6 +126,12 @@ pub const SENSITIVE_LIMIT_TIERS: &[(&str, i32, f64, &str)] = &[
         "全库自导出（整库外带：数据防泄露面，须与 oper_log 留痕配套）",
     ),
     (
+        "/system/backup/download/{backupId}",
+        5,
+        0.05,
+        "整库/整租户快照下载（数据外带面：与自导出同一防线，留出失败重试额度但一分钟内多次下载即异常）",
+    ),
+    (
         "/system/tenant/restore/{tenantId}",
         5,
         0.05,
@@ -374,6 +380,24 @@ pub const SENSITIVE_LIMIT_TIERS: &[(&str, i32, f64, &str)] = &[
         0.02,
         "整租户导出（数据防泄露面：与自导出同档，配合操作日志留痕）",
     ),
+    (
+        "/monitor/operlog/archive/{anchorId}",
+        3,
+        0.02,
+        "合规归档下载（单卷上限 512MB 的全租户审计数据外带；并发闸只封同时、本档封反复）",
+    ),
+    (
+        "/system/audit-change/export",
+        5,
+        0.05,
+        "变更留痕 CSV 导出（全量变更数据的合规外带；导出并发闸不封频率，故单列一档）",
+    ),
+    (
+        "/system/ai/history/admin/export",
+        5,
+        0.05,
+        "AI 历史管理导出（跨租户问答与 SQL 的批量外带；导出并发闸不封频率）",
+    ),
     // ---- 凭据吊销 ----
     (
         "/system/user/profile/tokens/{patId}",
@@ -448,29 +472,38 @@ pub async fn ensure_sensitive_rate_limit_tiers(db: &DatabaseConnection) -> anyho
 mod tests {
     use super::*;
 
-    fn collect_router_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                collect_router_files(&p, out);
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                out.push(p);
-            }
-        }
+    /// 生产路由注册面：`src/router/**` **加上**任何模块自带的 `router.rs`。
+    ///
+    /// b137 之前只扫 `src/router/`，而 `/system/audit-change/*` 注册在 `src/audit/router.rs`：
+    /// 给这条路由配限流档位时，「档位 ⊆ 路由表」那把锁会**凭空变红**（表里没有这行文本），
+    /// 而按名字枚举补一个目录又会把下一次迁移留给下一个人踩（b82 ⑬ 的同族）。
+    /// 采集面因此由事实派生：目录内 `.rs` + 任意 `router.rs`。
+    fn router_files() -> Vec<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = crate::common::prod_scan::walk_rs(&root.join("src"));
+        files.retain(|p| {
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            rel.starts_with("src/router/") || rel.ends_with("/router.rs") || rel == "src/router.rs"
+        });
+        assert!(
+            files.iter().any(|p| p.ends_with("audit/router.rs")),
+            "采集面必须覆盖模块自带路由器 src/audit/router.rs（否则审计路由的档位/外带判据都看不见它）"
+        );
+        files
     }
 
-    /// 读取 `src/router/` 下全部路由注册文本（剔除注释行，避免注释里的示例路径骗过形状锁）。
+    /// 读取全部路由注册文本（剔除注释行，避免注释里的示例路径骗过形状锁）。
     fn router_registry() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/router");
-        let mut files = Vec::new();
-        collect_router_files(&root, &mut files);
+        let mut files = router_files();
         assert!(
             !files.is_empty(),
             "未读到任何 router 源文件（本锁的扫描面失效，而非路由为空）"
         );
+        files.sort();
         let mut out = String::new();
         for f in files {
             let src = std::fs::read_to_string(&f).unwrap_or_default();
@@ -483,6 +516,63 @@ mod tests {
         }
         out
     }
+
+    /// 把路由注册文本拆成 `(路径, 注册表达式)`。
+    ///
+    /// 只做圆括号配对——`.route(...)` 的实参里没有字符串内的圆括号（路径模板只有 `{}`），
+    /// 因此不需要完整 tokenizer；配对失败（输入坏了）返回已解析部分，由调用方的体量下限兜住。
+    fn route_blocks(text: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(pos) = rest.find(".route(") {
+            let tail = &rest[pos + ".route(".len()..];
+            let Some(q1) = tail.find('"') else { break };
+            let Some(q2_rel) = tail[q1 + 1..].find('"') else {
+                break;
+            };
+            let path = tail[q1 + 1..q1 + 1 + q2_rel].to_string();
+            let mut depth = 1isize;
+            let mut end = None;
+            for (i, ch) in tail.char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { break };
+            out.push((path, tail[..end].to_string()));
+            rest = &tail[end..];
+        }
+        out
+    }
+
+    /// GET 数据外带路径形态：`…/download`、`…/download/{id}`、`…/export`、
+    /// `…/archive/{id}`。列表/详情（`/archive-anchors`、`/…/{id}`）不算外带。
+    fn is_egress_route(path: &str) -> bool {
+        path.ends_with("/download")
+            || path.contains("/download/")
+            || path.ends_with("/export")
+            || (path.contains("/archive/") && path.contains('{'))
+    }
+
+    /// 数据外带 GET 路由的豁免表：**只能放"不是整库/全量审计外带面"的入口**，逐条带理由。
+    const EGRESS_LIMIT_EXEMPT: &[(&str, &str)] = &[
+        (
+            "/common/download",
+            "通用附件下载：逐文件权限校验、单文件体积受限，且每页每次点击都会触发——给它加独立档位等于把附件下载变成低频操作；非整库/全量审计外带面",
+        ),
+        (
+            "/common/download/resource",
+            "单资源下载（头像/预览等）：按 uploads/ 前缀与请求者租户读存储，越权 403；它是页面渲染路径上的逐资源请求，加档会直接打断正常浏览而非拦住外带",
+        ),
+    ];
 
     /// 形状锁：矩阵里每条 `route_pattern` **必须**是 router 已注册的路由模板。
     ///
@@ -505,6 +595,92 @@ mod tests {
             missing.is_empty(),
             "以下敏感操作限流规则在 router 中找不到同字面量的路由模板（将静默回落 `*`）：{missing:?}"
         );
+    }
+
+    /// 反向锁（b137）：**每一条 GET 数据外带路由都必须有独立限流档，或带理由豁免**。
+    ///
+    /// 只锁"档位 ⊆ 路由表"是单向的：新增一条 `GET /xx/download` 不登记档位，
+    /// 既有三把锁全绿，而这条出口只剩全局默认（100 突发 / 10·s⁻¹）兜底——
+    /// 这正是备份下载、合规归档下载、变更留痕导出长期的状态（AGENTS C.10）。
+    /// 采集面由路由注册派生（`is_egress_route` 判形态），豁免必须仍命中且理由自足。
+    #[test]
+    fn get_egress_routes_are_rate_limited_or_exempt() {
+        let registry = router_registry();
+        let blocks = route_blocks(&registry);
+        assert!(
+            blocks.len() >= 200,
+            "路由注册解析面异常（只有 {} 块，解析器或采集面坏了）",
+            blocks.len()
+        );
+        let derived: Vec<String> = blocks
+            .iter()
+            .filter(|(p, body)| body.contains("get(") && is_egress_route(p))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for must in [
+            "/system/backup/download/{backupId}",
+            "/monitor/operlog/archive/{anchorId}",
+            "/system/audit-change/export",
+            "/system/ai/history/admin/export",
+            "/common/download",
+            "/common/download/resource",
+        ] {
+            assert!(
+                derived.iter().any(|p| p == must),
+                "派生面漏掉了已知 GET 外带路由 {must}（采集面失效，不是通过）"
+            );
+        }
+        let mut missing = Vec::new();
+        for p in &derived {
+            let tiered = SENSITIVE_LIMIT_TIERS.iter().any(|(r, ..)| r == p);
+            let exempt = EGRESS_LIMIT_EXEMPT.iter().any(|(r, _)| r == p);
+            if !tiered && !exempt {
+                missing.push(p.clone());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "以下 GET 数据外带路由既没有独立限流档、也未被豁免（新增加档位或登记豁免理由）：{missing:?}"
+        );
+        for (p, why) in EGRESS_LIMIT_EXEMPT {
+            assert!(
+                derived.iter().any(|d| d == p),
+                "豁免条目 {p} 已不再命中 GET 外带面，必须撤销这条豁免"
+            );
+            assert!(
+                why.chars().count() >= 12 && !why.contains("同上"),
+                "豁免 {p} 的理由必须逐条自足（≥12 字符、禁跨条目指代）"
+            );
+        }
+    }
+
+    /// 反脆弱：解析器与谓词必须能区分"外带 GET"与"列表/写操作"两种形状。
+    #[test]
+    fn egress_surface_parsers_are_falsifiable() {
+        let sample = "Router::new()\n\
+             .route(\"/x/download/{id}\", get(h::download))\n\
+             .route(\"/y/export\", get(h::export))\n\
+             .route(\"/z\", post(h::z))\n\
+             .route(\"/w/archive/{id}\", post(h::w))\n\
+             .route(\"/v\", get(h::v));\n";
+        let blocks = route_blocks(sample);
+        assert_eq!(blocks.len(), 5, "多行注册必须逐块解析：{blocks:?}");
+        let derived: Vec<String> = blocks
+            .iter()
+            .filter(|(p, body)| body.contains("get(") && is_egress_route(p))
+            .map(|(p, _)| p.clone())
+            .collect();
+        assert_eq!(
+            derived,
+            vec!["/x/download/{id}", "/y/export"],
+            "只有 GET 的外带形态进面（POST 导出走并发闸，不在此锁）"
+        );
+        assert!(!is_egress_route("/monitor/operlog/archive-anchors"));
+        assert!(!is_egress_route("/system/audit-change/list"));
+        assert!(!is_egress_route("/system/backup/list"));
+        assert!(is_egress_route("/monitor/operlog/archive/{anchorId}"));
+        assert!(is_egress_route("/system/backup/download/{backupId}"));
+        assert!(is_egress_route("/common/download"));
     }
 
     /// 档位单调性：敏感操作必须**严格严于**全局默认（100 / 10·s⁻¹），否则"配了等于没配"。

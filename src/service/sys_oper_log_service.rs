@@ -50,7 +50,7 @@ const ARCHIVE_BATCH_ROWS: u64 = 5000;
 ///
 /// ⚠️ 必须带 `uploads/` 根前缀：`resolve_upload_dir` 对无父段的裸目录名会把根
 /// 回落为 cwd（→ `<cwd>/0/audit-archive`，污染工作区且脱离 uploads 隔离语义）。
-const ARCHIVE_STORAGE_DIR: &str = "uploads/audit-archive";
+pub(crate) const ARCHIVE_STORAGE_DIR: &str = "uploads/audit-archive";
 
 /// 操作日志写入的有界重试策略（R5-RATE-29）：3 次尝试 / 100ms 间隔。
 ///

@@ -110,6 +110,8 @@ pub struct JobScheduler {
     /// 使用 std::sync::Mutex 以支持 ExecutingFlagGuard 的同步 Drop
     /// （锁持有时间极短，不跨 await，符合异步上下文使用约束）
     executing_jobs: Arc<std::sync::Mutex<HashMap<i64, bool>>>,
+    /// 是否注册了内置 cron（生产 true；测试 harness 走 `new_without_builtin_crons` 为 false）
+    builtin_crons_registered: bool,
 }
 
 /// 内置任务构造 + 注册样板收敛（B-4）
@@ -170,7 +172,7 @@ impl JobScheduler {
         }
     }
 
-    /// 创建并启动调度器
+    /// 创建并启动调度器（生产路径：注册内置 cron）
     ///
     /// 内部流程：
     /// 1. 创建 TokioScheduler 并 start()
@@ -180,6 +182,37 @@ impl JobScheduler {
         store: Arc<dyn crate::shared_store::SharedStore>,
         ip_location_service: crate::service::IpLocationService,
         config: Arc<Settings>,
+    ) -> Result<Self, SchedulerError> {
+        Self::build(db, store, ip_location_service, config, true).await
+    }
+
+    /// 测试 harness 专用：**不注册内置 cron**（invoke_target 注册照旧）。
+    ///
+    /// 内置 cron 按**墙钟**周期直接改写数据面（`msg_send_retry` 每分钟认领待重试行、
+    /// `login_anomaly_detector` 每 5 分钟写告警通知、`cleanup_expired_logs` 每日清理）。
+    /// 测试进程里这些任务与用例并行跑在同一份隔离库上，于是"本轮只被认领一次"这类
+    /// 断言是否成立**由用例运行时长决定**（b137 实测：4 线程并发 + 外部负载下
+    /// `test_msg_retry_pending_fails_orphan_row_without_blocking_batch` 的兄弟行
+    /// retry_count 从 1 变成 2 —— 分钟边界正好落在用例窗口内，cron 合法地又认领一轮；
+    /// 同一份码单独跑恒为 1）。这不是"放宽断言"能修的：判据的前提（无并发认领者）
+    /// 必须由环境**构造**出来，所以缺陷落在 harness 侧而不是用例侧。
+    /// 生产路径仍走 `new`（注册），由 `builtin_cron_registration_has_two_explicit_entry_points`
+    /// 钉住两条路径的委派值。
+    pub async fn new_without_builtin_crons(
+        db: DatabaseConnection,
+        store: Arc<dyn crate::shared_store::SharedStore>,
+        ip_location_service: crate::service::IpLocationService,
+        config: Arc<Settings>,
+    ) -> Result<Self, SchedulerError> {
+        Self::build(db, store, ip_location_service, config, false).await
+    }
+
+    async fn build(
+        db: DatabaseConnection,
+        store: Arc<dyn crate::shared_store::SharedStore>,
+        ip_location_service: crate::service::IpLocationService,
+        config: Arc<Settings>,
+        register_builtin_crons: bool,
     ) -> Result<Self, SchedulerError> {
         let scheduler = TokioScheduler::new().await.map_err(|e| {
             SchedulerError::SchedulerInternal(format!("Failed to create scheduler: {}", e))
@@ -201,16 +234,20 @@ impl JobScheduler {
         );
 
         // 注册并调度内置 cron 任务（日志保留期清理，每日凌晨 3:00 执行；登录异常检测，每 5 分钟执行；IP 库自动更新，按 cron 配置）
-        if let Err(e) = Self::register_builtin_scheduled_jobs(
-            &scheduler,
-            db.clone(),
-            store.clone(),
-            ip_location_service,
-            config.clone(),
-        )
-        .await
-        {
-            tracing::warn!("内置定时任务调度注册失败（不阻断启动）: {}", e);
+        if register_builtin_crons {
+            if let Err(e) = Self::register_builtin_scheduled_jobs(
+                &scheduler,
+                db.clone(),
+                store.clone(),
+                ip_location_service,
+                config.clone(),
+            )
+            .await
+            {
+                tracing::warn!("内置定时任务调度注册失败（不阻断启动）: {}", e);
+            }
+        } else {
+            tracing::info!("内置 cron 未注册（宿主显式关闭：测试 harness 不得有墙钟后台写入）");
         }
 
         // b73：错过 03:00 窗口的补跑（发布/重启几乎总在凌晨之外，漏跑即整日无补偿）
@@ -222,7 +259,14 @@ impl JobScheduler {
             store,
             running_jobs: RwLock::new(HashMap::new()),
             executing_jobs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            builtin_crons_registered: register_builtin_crons,
         })
+    }
+
+    /// 本实例是否注册了内置 cron（测试 harness 必须为 `false`，见
+    /// `new_without_builtin_crons` 的文档；由 `build_isolated_state_with` 直接断言）
+    pub fn builtin_crons_registered(&self) -> bool {
+        self.builtin_crons_registered
     }
 
     /// 注册并调度内置 cron 任务（直接添加到 TokioScheduler，不依赖 sys_job 表）
@@ -2019,6 +2063,90 @@ mod tests {
     /// 唯一化锁键（避免跨测试运行残留未过期锁导致抢占失败）
     fn unique_lock_key(base: &str) -> String {
         format!("{base}-{}", uuid::Uuid::new_v4())
+    }
+
+    /// 生产码视图（剔除本测试模块）：needle 若按全文匹配会被测试源码自己喂饱（AGENTS ㊴）。
+    fn production_view() -> &'static str {
+        let src = include_str!("mod.rs");
+        let cut = src
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("测试模块边界必须存在");
+        &src[..cut]
+    }
+
+    /// 纯函数：从「构造函数名 → 函数体」的映射里取 `build(..., <bool>)` 的委派值。
+    /// 返回 `None` 表示该函数里没有唯一的委派点（缺失或出现多次都算坏了）。
+    fn delegated_flag(src: &str, fn_name: &str) -> Option<bool> {
+        let start = src.find(&format!("pub async fn {fn_name}("))?;
+        let body_rest = &src[start..];
+        // 函数体边界：下一个 `pub async fn` / `async fn` / `fn ` 顶格声明
+        let end = [
+            "\n    pub async fn ",
+            "\n    pub fn ",
+            "\n    async fn ",
+            "\n    fn ",
+        ]
+        .iter()
+        .filter_map(|pat| body_rest[1..].find(pat).map(|i| i + 1))
+        .min()
+        .unwrap_or(body_rest.len());
+        let body = &body_rest[..end];
+        let mut hits = Vec::new();
+        let needle = "Self::build(";
+        let mut idx = 0;
+        while let Some(pos) = body[idx..].find(needle) {
+            let abs = idx + pos;
+            let tail = &body[abs..];
+            let close = tail.find(')')?;
+            let call = &tail[..close];
+            let flag = if call.trim_end().ends_with(", true") {
+                true
+            } else if call.trim_end().ends_with(", false") {
+                false
+            } else {
+                return None; // 委派值不是字面量布尔 ⇒ 判据输入坏了，不猜
+            };
+            hits.push(flag);
+            idx = abs + needle.len();
+        }
+        if hits.len() == 1 { Some(hits[0]) } else { None }
+    }
+
+    /// 两条入口的委派值必须是**字面量**且方向相反：生产 `new` ⇒ true，harness 专用 ⇒ false。
+    /// 这条锁钉的是"生产路径没被顺手改成不注册 cron"以及"harness 没退回 `new`"两个方向。
+    #[test]
+    fn builtin_cron_registration_has_two_explicit_entry_points() {
+        let src = production_view();
+        assert_eq!(
+            delegated_flag(src, "new"),
+            Some(true),
+            "生产路径 `JobScheduler::new` 必须委派 `Self::build(..., true)`（注册内置 cron）"
+        );
+        assert_eq!(
+            delegated_flag(src, "new_without_builtin_crons"),
+            Some(false),
+            "harness 入口必须委派 `Self::build(..., false)`（不注册内置 cron）"
+        );
+        // 反脆弱：判据自己必须能对坏形状返回 None（否则"恒 Some(true)"也能过）
+        assert_eq!(
+            delegated_flag("pub async fn new(   ) { Self::build(a, b, c, d) }", "new"),
+            None,
+            "非字面量委派值必须判坏（不得猜）"
+        );
+        assert_eq!(
+            delegated_flag(
+                "pub async fn new() { Self::build(a, true); Self::build(a, false) }",
+                "new"
+            ),
+            None,
+            "一个函数里出现两个委派点必须判坏"
+        );
+        // 采集面自证：生产视图里真的有两处 `Self::build(`（不是扫了个空文件）
+        assert_eq!(
+            src.matches("Self::build(").count(),
+            2,
+            "生产视图必须恰有两条委派点（new / new_without_builtin_crons）"
+        );
     }
 
     /// flow_timeout_scan 注册判定双开关 AND 回归（§5.24：关闭态语义此前无测试锁定）

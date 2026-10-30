@@ -558,12 +558,18 @@ async fn it_opl_archive_mode_exports_and_downloads() {
 
     // 下载端点读回：平台管理员（admin tenant_id=0）→ 200 + 内容为 JSONL（逐行 JSON）
     // （端点返回 octet-stream，走原始请求取字节而非 get_json）
-    let req = axum::http::Request::builder()
+    let mut req = axum::http::Request::builder()
         .method("GET")
         .uri(format!("/monitor/operlog/archive/{}", anchors[0].anchor_id))
         .header("authorization", format!("Bearer {}", ctx.token))
         .body(axum::body::Body::empty())
         .expect("构造下载请求");
+    // b137：处理器新增 `ConnectInfo` 提取器（外带审计要记来源 IP）——手搓请求必须
+    // 自带该扩展，否则提取器在进入业务前就失败（500），用例会红在与产品无关的地方。
+    req.extensions_mut()
+        .insert(axum::extract::connect_info::ConnectInfo(
+            std::net::SocketAddr::from((ctx.peer_ip, 4321)),
+        ));
     let resp = ctx
         .app
         .clone()

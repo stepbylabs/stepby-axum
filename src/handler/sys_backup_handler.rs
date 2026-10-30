@@ -9,8 +9,9 @@
 //! - DELETE /system/backup/{backupIds}     批量删除备份日志及文件
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::response::Response;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
@@ -18,10 +19,11 @@ use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::entity::sys_backup_log::Model as SysBackupLogModel;
 use crate::middleware::Operator;
-use crate::service::sys_backup_service::{BackupCreateVo, BackupLogQueryDto};
+use crate::service::sys_backup_service::{BackupCreateVo, BackupLogQueryDto, OpenedBackupFile};
 use crate::state::AppState;
+use crate::utils::ip::extract_client_ip;
 use crate::utils::parse_id_list;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 
 /// GET /system/backup/list
 /// 分页查询备份日志
@@ -330,14 +332,51 @@ async fn clear_business_caches(state: &Arc<AppState>) {
 pub async fn download(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(backup_id): Path<i64>,
 ) -> Result<Response, AppError> {
     // 流式下载：备份是整库快照（可达 GB 级），把整个文件读进内存再回包会让
     // 每次下载的 RSS 峰值等于文件大小；这里只持有文件句柄，按 64KB 分块出流。
-    let (file, size, file_name) = state
+    let opened = state
         .backup_service
         .open_backup_file(backup_id, operator.tenant_id())
         .await?;
+    let OpenedBackupFile {
+        file,
+        size,
+        file_name,
+        tenant_id: backup_tenant_id,
+        backup_type,
+    } = opened;
+
+    // b137：整库/整租户快照下载是**数据外带面**，而 oper_log 中间件只记写方法（GET 不记）
+    // ⇒ 此前"谁在什么时候把多少数据带走"在审计面上整段空白。此处只在文件已打开、
+    // 体积校验已通过之后留痕（失败路径不落审计，见 common/egress_audit 模块文档）。
+    let client_ip = extract_client_ip(
+        &headers,
+        peer_addr.ip(),
+        &state.config.server.trusted_proxies,
+    );
+    crate::common::egress_audit::record_egress(
+        &state,
+        &operator,
+        &client_ip,
+        crate::common::egress_audit::EgressEvent {
+            kind: crate::common::egress_audit::EgressKind::BackupDownload,
+            // 查询串不进审计（本路由无查询参数，保持与中间件 same 口径只用路径）
+            oper_url: format!("/system/backup/download/{backup_id}"),
+            oper_param: serde_json::json!({ "backupId": backup_id }),
+            detail: serde_json::json!({
+                "fileName": file_name,
+                "backupType": backup_type,
+                "size": size,
+            }),
+            // 平台代管他租户数据包时记下目标租户；同租户时不重复（与中间件口径一致）
+            target_tenant_id: (backup_tenant_id != operator.tenant_id())
+                .then_some(backup_tenant_id),
+        },
+    );
 
     let content_disposition = format!("attachment; filename=\"{}\"", file_name.replace('"', ""));
 

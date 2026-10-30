@@ -6,9 +6,10 @@
 //! - DELETE /monitor/operlog/clean         清空操作日志
 //! - POST   /monitor/operlog/export        导出操作日志列表
 
-use axum::extract::{Form, Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{ConnectInfo, Form, Path, Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::common::constants::MAX_BATCH_DELETE_SIZE;
@@ -21,6 +22,7 @@ use crate::service::sys_oper_log_service::{
     AlarmStatusVo, AuditStatsVo, ComplianceReportVo, OperLogQueryDto, OperLogTypeStatsVo,
 };
 use crate::state::AppState;
+use crate::utils::ip::extract_client_ip;
 use crate::utils::parse_id_list;
 use utoipa::IntoParams;
 
@@ -790,6 +792,8 @@ pub struct AnchorListQuery {
 pub async fn archive_download(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(anchor_id): Path<i64>,
 ) -> Result<Response, AppError> {
     // 归档下载单卷上限 512 MB（`ARCHIVE_MAX_BYTES`），但"上限"只封单次体积、
@@ -807,6 +811,26 @@ pub async fn archive_download(
         .oper_log_service
         .read_archive_object(anchor_id, &storage)
         .await?;
+
+    // b137：合规归档（全租户混合的审计数据）下载同样是 GET 外带面，而 oper_log 中间件
+    // 只记写方法。对象已读出、响应即将返回时才留痕（失败路径不落审计）。
+    let client_ip = extract_client_ip(
+        &headers,
+        peer_addr.ip(),
+        &state.config.server.trusted_proxies,
+    );
+    crate::common::egress_audit::record_egress(
+        &state,
+        &operator,
+        &client_ip,
+        crate::common::egress_audit::EgressEvent {
+            kind: crate::common::egress_audit::EgressKind::OperLogArchive,
+            oper_url: format!("/monitor/operlog/archive/{anchor_id}"),
+            oper_param: serde_json::json!({ "anchorId": anchor_id }),
+            detail: serde_json::json!({ "objectKey": key, "size": bytes.len() }),
+            target_tenant_id: None,
+        },
+    );
 
     let content_disposition = format!("attachment; filename=\"{}\"", key.replace('"', ""));
     let mut response = Response::new(bytes.into());

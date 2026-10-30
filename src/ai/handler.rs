@@ -5,10 +5,12 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
+    http::HeaderMap,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::ai::FEATURE_AI_COPILOT;
@@ -287,13 +289,16 @@ pub async fn list_admin_history(
 pub async fn export_admin_history(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(q): Query<AiHistoryPageDto>,
 ) -> Result<axum::response::Response, AppError> {
     let tid = operator.tenant_id();
+    let tenant_filter = q.tenant_filter;
     let effective = state.ai_config_service.get_effective().await?;
     let service = AiService::new(state.db.clone(), effective);
     let items = service
-        .export_admin_history(tid, q.tenant_filter, crate::common::page::EXPORT_MAX_ROWS)
+        .export_admin_history(tid, tenant_filter, crate::common::page::EXPORT_MAX_ROWS)
         .await
         .map_err(|e| AppError::internal(&format!("导出历史失败: {e}")))?;
 
@@ -376,7 +381,7 @@ pub async fn export_admin_history(
         },
     ];
 
-    export_to_excel_with_fields(
+    let response = export_to_excel_with_fields(
         &crate::tr!("excel.sheet.ai_history"),
         "ai_chat_history",
         &columns,
@@ -384,7 +389,29 @@ pub async fn export_admin_history(
         None,
         false,
     )
-    .await
+    .await?;
+
+    // b137：跨租户 AI 历史（用户提问 + SQL）批量导出是 GET 外带面，oper_log 中间件
+    // 只记写方法。放在 xlsx 构造成功之后——只有真的产出了下载载荷才叫"带出去了"。
+    let client_ip = crate::utils::ip::extract_client_ip(
+        &headers,
+        peer_addr.ip(),
+        &state.config.server.trusted_proxies,
+    );
+    crate::common::egress_audit::record_egress(
+        &state,
+        &operator,
+        &client_ip,
+        crate::common::egress_audit::EgressEvent {
+            kind: crate::common::egress_audit::EgressKind::AiHistoryExport,
+            // 查询串不进 oper_url（tenantFilter 见 oper_param）
+            oper_url: "/system/ai/history/admin/export".to_string(),
+            oper_param: json!({ "tenantFilter": tenant_filter }),
+            detail: json!({ "rows": items.len() }),
+            target_tenant_id: tenant_filter.filter(|t| *t != tid),
+        },
+    );
+    Ok(response)
 }
 
 /// DELETE /system/ai/history/{id} —— 删除本人历史（横向越权防护在 service 层）

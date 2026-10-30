@@ -129,6 +129,19 @@ pub struct BackupCreateVo {
     pub file_size: i64,
 }
 
+/// 已打开的备份文件（下载处理器的入参输出）。
+///
+/// 除文件句柄与体积外，一并带出**归属事实**（`tenant_id` / `backup_type`）：b137 起
+/// 下载要在 `sys_oper_log` 留痕，平台代管他租户数据包时必须记下目标租户——
+/// 只返回 `(File, size, name)` 会让处理器拿不到这条归属，再查一次库等于同一事实读两遍。
+pub struct OpenedBackupFile {
+    pub file: tokio::fs::File,
+    pub size: u64,
+    pub file_name: String,
+    pub tenant_id: i64,
+    pub backup_type: String,
+}
+
 // ==================== 辅助函数 ====================
 
 /// 根据数据库 URL 判断数据库类型
@@ -1583,7 +1596,7 @@ impl SysBackupService {
         &self,
         backup_id: i64,
         operator_tid: i64,
-    ) -> Result<(tokio::fs::File, u64, String), ServiceError> {
+    ) -> Result<OpenedBackupFile, ServiceError> {
         let log = self.get_backup_by_id(backup_id, operator_tid).await?;
         if log.status != "success" {
             return Err(ServiceError::bad_request(&crate::tr!(
@@ -1612,7 +1625,13 @@ impl SysBackupService {
         let file = tokio::fs::File::open(&file_path).await.map_err(|_| {
             ServiceError::internal(&crate::tr!("error.backup.read_backup_file_failed"))
         })?;
-        Ok((file, actual_size, log.file_name))
+        Ok(OpenedBackupFile {
+            file,
+            size: actual_size,
+            file_name: log.file_name,
+            tenant_id: log.tenant_id,
+            backup_type: log.backup_type,
+        })
     }
 }
 

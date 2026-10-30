@@ -30,6 +30,7 @@ mod common_search;
 mod data_rule;
 mod data_scope_tenant;
 mod ddl_dialect_discipline;
+mod egress_audit;
 mod env_discipline;
 mod file_common;
 mod flow;
@@ -508,8 +509,13 @@ async fn build_isolated_state_with(
     let store: Arc<dyn crate::shared_store::SharedStore> = Arc::new(
         crate::shared_store::RedisStore::new(redis.clone(), db.clone()),
     );
+    // b137：harness 不注册内置 cron。真实 cron 按**墙钟**周期改写同一份隔离库
+    // （`msg_send_retry` 每分钟认领待重试行），于是"本轮只被认领一次"这类断言是否成立
+    // 由**用例运行时长**决定——实测同码同环境，分钟边界落在用例窗口内时兄弟行
+    // retry_count 由 1 变 2，单独跑恒为 1（判据不得与环境耦合）。
+    // invoke_target 注册不受影响：手动执行链路（sys_job 的 run_once）照常可用。
     let job_scheduler = Arc::new(
-        JobScheduler::new(
+        JobScheduler::new_without_builtin_crons(
             db.clone(),
             store.clone(),
             ip_location_service.clone(),
@@ -517,6 +523,10 @@ async fn build_isolated_state_with(
         )
         .await
         .expect("创建调度器失败"),
+    );
+    assert!(
+        !job_scheduler.builtin_crons_registered(),
+        "测试 harness 不得注册内置 cron：墙钟后台任务会在用例中途改写数据面"
     );
     // 构建文件存储后端（按 upload.backend 切换 local/s3，测试默认 local）
     let storage: Arc<dyn crate::storage::StorageBackend> =

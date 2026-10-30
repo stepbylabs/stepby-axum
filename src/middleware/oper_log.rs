@@ -794,6 +794,12 @@ pub(crate) fn infer_module_title(path: &str) -> String {
         "module.config".to_string()
     } else if path.starts_with("/system/notice") {
         "module.notice".to_string()
+    } else if path.starts_with("/system/audit-change") {
+        // b137：数据变更留痕的导出属外带面，须有可读的模块归类（与 MODULE_TITLES 同步登记）
+        "module.auditChange".to_string()
+    } else if path.starts_with("/system/ai") {
+        // b137：AI 历史管理导出属外带面；同时让 AI 配置/删除历史等写操作脱离"其他"
+        "module.ai".to_string()
     } else if path.starts_with("/system/backup") {
         "module.backup".to_string()
     } else if path.starts_with("/system/task") {
