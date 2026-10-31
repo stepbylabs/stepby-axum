@@ -2593,11 +2593,16 @@ impl SysTenantService {
     }
 
     async fn redis_setex(&self, key: &str, ttl: i64, value: &str) {
-        // 与原实现一致：写失败静默忽略（cache-aside 回填，best-effort）
-        let _ = self
+        // 写失败不阻断主流程（cache-aside 回填，下次请求自然回源 DB），但**必须留痕**：
+        // 改造前这里是 `let _ =`，存储故障时全站每次租户解析都回源而没有任何信号
+        // （b143：与同文件 redis_del / b90 LocalStore 过期键删除同一族）。
+        if let Err(e) = self
             .store
             .set_ex(key, value, std::cmp::max(ttl, 0) as u64)
-            .await;
+            .await
+        {
+            tracing::warn!(key, error = %e, "租户 code 缓存回填失败（下次请求将回源 DB，不影响正确性）");
+        }
     }
 
     async fn redis_del(&self, key: &str) {
@@ -2956,5 +2961,83 @@ mod tests {
                 "租户自助能力清单不得含不可授予的 perms（平台专属前缀 / tier2 表）：`{p}`"
             );
         }
+    }
+
+    /// `redis_setex` 的函数体：从声明处到下一个 `async fn`（两文件里紧跟 `redis_del`）。
+    ///
+    /// 采集面缺失必须响亮失败 —— 返回 `None` 让调用方 panic，而不是空串跳过判据
+    /// （AGENTS ⑥：零捕获 ≠ 干净）。
+    fn setex_body(text: &str) -> Option<&str> {
+        let start = text.find("async fn redis_setex")?;
+        let rest = &text[start + 1..];
+        let end = rest.find("async fn redis_del")?;
+        Some(&rest[..end])
+    }
+
+    /// 刀口只落在代码上：注释里为了解释缺陷而写的 `let _ =` 不是缺陷本身
+    /// （AGENTS ⑬：判据的刀口不得被注释文本决定）。
+    fn code_only(body: &str) -> String {
+        body.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
+    }
+
+    fn silent_backfill(text: &str) -> bool {
+        match setex_body(text) {
+            Some(body) => {
+                let code = code_only(body);
+                code.contains("let _ =") || !code.contains("tracing::warn!")
+            }
+            None => true,
+        }
+    }
+
+    /// b143：租户 code / 域名 host 两个 cache-aside 回填此前是 `let _ = store.set_ex(…)`。
+    ///
+    /// 写失败不阻断业务是对的（下次请求自然回源 DB），但**静默**让存储故障不可见：
+    /// 全站每次租户解析都回源、延迟上升，而日志与指标一个字都没有
+    /// （与同文件 `redis_del` 的 WARN、b90 LocalStore 过期键删除同一族）。
+    /// 判据按**函数体**读，避免"文件里提到过 warn"这种恒绿形状。
+    #[test]
+    fn tenant_cache_backfills_must_leave_a_trace() {
+        let cases = [
+            (
+                "src/service/sys_tenant_service.rs",
+                include_str!("sys_tenant_service.rs"),
+            ),
+            (
+                "src/service/sys_tenant_domain_service.rs",
+                include_str!("sys_tenant_domain_service.rs"),
+            ),
+        ];
+        for (name, text) in cases {
+            let raw = setex_body(text).unwrap_or_else(|| {
+                panic!("{name}: 采集面里找不到 `async fn redis_setex … async fn redis_del` 区间（抽取器失效）")
+            });
+            let body = code_only(raw);
+            assert!(
+                body.contains("set_ex("),
+                "{name}: redis_setex 必须真的回填缓存（采集面拿到的是别的函数？）"
+            );
+            assert!(
+                !body.contains("let _ ="),
+                "{name}: 缓存回填失败不得被 `let _ =` 静默吞掉"
+            );
+            assert!(
+                body.contains("tracing::warn!"),
+                "{name}: 缓存回填失败必须留 WARN 痕迹"
+            );
+        }
+
+        // 合成双向：缺陷形状必判红，合规形状不得误报
+        let bad = "async fn redis_setex(&self) {\n let _ = self.store.set_ex(k, v, 1).await;\n}\nasync fn redis_del() {}\n";
+        let good = "async fn redis_setex(&self) {\n if let Err(e) = self.store.set_ex(k, v, 1).await { tracing::warn!(error = %e); }\n}\nasync fn redis_del() {}\n";
+        assert!(silent_backfill(bad), "合成违规必须被抓");
+        assert!(!silent_backfill(good), "合规形状不得误报");
+        assert!(silent_backfill("fn unrelated() {}"), "采集面缺失必须判红");
     }
 }

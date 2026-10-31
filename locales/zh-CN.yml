@@ -39,6 +39,9 @@ error:
     internal: 系统内部错误，请联系管理员
     validate_failed: 参数校验失败
     parse_failed: 请求参数解析失败
+    method_not_allowed: 请求方法不被允许
+    payload_too_large: 请求体过大，请压缩或拆分后重试
+    unsupported_media_type: 不支持的请求内容类型（JSON 接口须为 application/json）
     uri_too_long: "请求地址过长，不能超过 %{limit} 字节，请缩小查询条件"
     route_not_found: 请求的资源不存在
     header_too_long: "请求头过大，不能超过 %{limit} 字节，请精简 Cookie 或请求头"

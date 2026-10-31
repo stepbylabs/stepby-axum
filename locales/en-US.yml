@@ -39,6 +39,9 @@ error:
     internal: Internal system error, please contact the administrator
     validate_failed: Parameter validation failed
     parse_failed: Failed to parse request parameters
+    method_not_allowed: Request method not allowed
+    payload_too_large: Request body is too large; please compress or split it and retry
+    unsupported_media_type: Unsupported request content type (JSON endpoints require application/json)
     uri_too_long: "Request URI is too long; it must not exceed %{limit} bytes, please narrow the query"
     route_not_found: The requested resource does not exist
     header_too_long: "Request headers are too large; they must not exceed %{limit} bytes, please trim cookies or headers"

@@ -74,24 +74,28 @@ impl<T: Serialize> IntoResponse for AjaxResult<T> {
     }
 }
 
-/// **传输层拒绝**的统一错误体（C.8）：HTTP 状态与 `body.code` 恒等，msg 为本地化文本。
+/// **边界层拒绝**的统一错误体（C.8）：HTTP 状态与 `body.code` 恒等，msg 为本地化文本，
+/// **在请求作用域内附带 `trace_id`**（与响应头 `X-Request-Id` 同源同值，b124 口径）。
 ///
-/// 用在"请求还没进到业务层就被拒"的出口：408（超时层）、414/431（`middleware::uri_limit`）。
+/// 用在"请求还没进到业务层就被拒"的出口：408（超时层）、414/431（`middleware::uri_limit`）、
+/// 404/405（路由兜底）、提取器拒绝（`middleware::extractor_contract`，b143）。
 ///
 /// 为何**刻意不走** [`crate::common::http_status::map_status`]：`legacy` 档（默认档）的
 /// 已知码表里没有 408/414/431，`map_status(414, Legacy)` 返回的是 **200**——那会把
 /// "网关与监控能按真实状态码告警"这一维直接洗掉，而这些请求本就没产生业务码。
-/// 传输层拒绝因此与档位约定解耦：两档都给真实 HTTP 状态。
+/// 边界层拒绝因此与档位约定解耦：两档都给真实 HTTP 状态。
 /// 该取舍由 `uri_limit::tests::transport_rejection_status_is_convention_independent` 钉住。
+pub fn status_error(status: StatusCode, msg: String) -> Response {
+    let mut body = AjaxResult::<()>::error(status.as_u16() as i32, &msg);
+    if let Some(trace_id) = crate::middleware::request_id::current_request_id() {
+        body = body.with_trace_id(trace_id);
+    }
+    (status, Json(body)).into_response()
+}
+
+/// 传输层拒绝的统一错误体（C.8）—— [`status_error`] 的语义别名，保留既有调用点名字。
 pub fn transport_error(status: StatusCode, msg: String) -> Response {
-    (
-        status,
-        Json(serde_json::json!({
-            "code": status.as_u16(),
-            "msg": msg,
-        })),
-    )
-        .into_response()
+    status_error(status, msg)
 }
 
 /// 下拉树节点（对齐前端 TreeSelect 类型）

@@ -36,7 +36,11 @@ const SEC_FETCH_MODE: HeaderName = HeaderName::from_static("sec-fetch-mode");
 ///
 /// 浏览器地址栏输入、刷新、外链跳转等导航请求会携带 `Sec-Fetch-Mode: navigate`。
 /// 此 header 由浏览器自动设置，JavaScript 无法伪造（Fetch Metadata API）。
-fn is_browser_navigation(req: &Request) -> bool {
+/// 是否为浏览器导航请求（深链兜底与 API 404/405 分派**共用同一判据**）。
+///
+/// b143：router 的 `spa_or_api_not_found` / `spa_or_method_not_allowed` 必须与本中间件
+/// 用同一口径，否则"导航拿到 JSON 404""XHR 拿到 index.html"两种相反的错误会同时存在。
+pub(crate) fn is_browser_navigation(req: &Request) -> bool {
     // 1. Sec-Fetch-Mode: navigate（最可靠标识）
     let sec_fetch_mode = req
         .headers()

@@ -37,6 +37,7 @@ mod flow;
 mod flow_action_dict;
 mod flow_definition;
 mod flow_graph_doc;
+mod http_contract;
 mod i18n_keys;
 mod ip_location;
 mod it_hygiene;

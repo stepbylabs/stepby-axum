@@ -3,6 +3,8 @@
 pub mod ak_sign;
 pub mod auth;
 pub mod export_gate;
+/// 提取器拒绝的统一错误契约（b143）：Query/Path/Json/Form/Multipart/413/415 → JSON
+pub mod extractor_contract;
 pub mod idempotency;
 pub mod locale;
 pub mod oper_log;

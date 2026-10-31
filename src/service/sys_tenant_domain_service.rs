@@ -812,11 +812,16 @@ impl SysTenantDomainService {
     }
 
     async fn redis_setex(&self, key: &str, ttl: i64, value: &str) {
-        // 与原实现一致：写失败静默忽略（cache-aside 回填，best-effort）
-        let _ = self
+        // 写失败不阻断主流程（cache-aside 回填，下次请求自然回源 DB），但**必须留痕**：
+        // 改造前这里是 `let _ =`，存储故障时每次按域名解析租户都回源而没有任何信号
+        // （b143：与同文件 redis_del / b90 LocalStore 过期键删除同一族）。
+        if let Err(e) = self
             .store
             .set_ex(key, value, std::cmp::max(ttl, 0) as u64)
-            .await;
+            .await
+        {
+            tracing::warn!(key, error = %e, "租户域名缓存回填失败（下次请求将回源 DB，不影响正确性）");
+        }
     }
 
     async fn redis_del(&self, key: &str) {

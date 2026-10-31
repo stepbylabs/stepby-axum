@@ -53,17 +53,56 @@ pub struct EmbeddedAssets;
 
 /// 统一 SPA 服务入口
 ///
-/// 根据编译模式自动切换：
-/// - 生产模式：从嵌入资源读取
-/// - 开发模式：从文件系统 `frontend-dist/` 读取
+/// 根据编译模式自动切换：生产模式读嵌入资源，开发模式读 `frontend-dist/` 文件系统。
+///
+/// b143：**只服务真实的静态资源与 index.html，不再为"任意未匹配路径"返回 HTML**。
+/// 前端的深链兜底由调用方（router 的 `spa_or_api_not_found` 分派 / `spa_fallback`
+/// 中间件）按"这是不是浏览器导航"决定；把这件事留在这里，API 消费者拿到的
+/// 未知路径就会被一张 index.html 以 200 冒充成功。
 pub async fn serve_spa(req: Request) -> Response {
+    let path = req.uri().path().to_string();
+    if let Some(resp) = try_serve_asset(&path).await {
+        return resp;
+    }
+    let clean_path = path.trim_start_matches('/');
+    if !clean_path.is_empty() && is_static_asset(clean_path) {
+        return (StatusCode::NOT_FOUND, "Not Found").into_response();
+    }
+    serve_index().await
+}
+
+/// 命中**真实存在**的静态资源时返回其响应；未命中返回 `None`。
+///
+/// 未命中与"被安全策略拒绝"是两种结局：sourcemap 类被拒资源返回 `Some(404)`
+/// （不能落回 index.html，否则一次猜测就能拿到 HTML 冒充的"成功"），
+/// 而"文件不存在"必须交回调用方决定 SPA 还是 JSON 404。
+///
+/// 参数刻意取 `&str` 而不是 `&Request`：`Request<Body>` 不是 `Sync`，
+/// 整个引用跨 `.await` 会让返回的 future 不是 `Send` ⇒ 无法作为 axum Handler/中间件
+/// （b143 实测：编译期 `Handler<_, _>` 未实现的报错，真因是这一点）。
+pub async fn try_serve_asset(path: &str) -> Option<Response> {
+    let clean_path = path.trim_start_matches('/').to_string();
+    if clean_path.is_empty() {
+        return None;
+    }
+    if is_denied_public_asset(&clean_path) {
+        return Some((StatusCode::NOT_FOUND, "Not Found").into_response());
+    }
     #[cfg(not(debug_assertions))]
     {
-        serve_embedded(req).await
+        EmbeddedAssets::get(&clean_path).map(|file| build_response(&clean_path, file))
     }
     #[cfg(debug_assertions)]
     {
-        serve_from_fs(req).await
+        let file_path = format!("frontend-dist/{}", clean_path);
+        // 安全检查：防止路径穿越（如 ../../../etc/passwd）
+        if !is_safe_path(&file_path) {
+            return Some((StatusCode::NOT_FOUND, "Not Found").into_response());
+        }
+        tokio::fs::read(&file_path)
+            .await
+            .ok()
+            .map(|content| build_fs_response(&file_path, content))
     }
 }
 
@@ -91,39 +130,6 @@ pub fn is_embedded_mode() -> bool {
 // ============================================================================
 // 生产模式实现：从嵌入资源服务
 // ============================================================================
-
-#[cfg(not(debug_assertions))]
-pub async fn serve_embedded(req: Request) -> Response {
-    let path = req.uri().path().to_string();
-    let clean_path = path.trim_start_matches('/');
-
-    // 安全兜底：sourcemap 永不对外（见 is_denied_public_asset 的取证）
-    if is_denied_public_asset(clean_path) {
-        return (StatusCode::NOT_FOUND, "Not Found").into_response();
-    }
-
-    // 优先尝试请求的路径
-    if !clean_path.is_empty()
-        && let Some(file) = EmbeddedAssets::get(clean_path)
-    {
-        return build_response(clean_path, file);
-    }
-
-    // SPA fallback：未匹配的路径返回 index.html（前端路由处理）
-    if is_static_asset(clean_path) {
-        return (StatusCode::NOT_FOUND, "Not Found").into_response();
-    }
-
-    if let Some(file) = EmbeddedAssets::get("index.html") {
-        return build_response("index.html", file);
-    }
-
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Frontend dist not embedded. Run `pnpm build` in stepby-vue directory first.",
-    )
-        .into_response()
-}
 
 /// 根路径 handler（`/`）
 #[cfg(not(debug_assertions))]
@@ -183,49 +189,7 @@ fn build_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
 // ============================================================================
 
 #[cfg(debug_assertions)]
-pub async fn serve_embedded(req: Request) -> Response {
-    serve_from_fs(req).await
-}
-
-#[cfg(debug_assertions)]
 pub async fn serve_index() -> Response {
-    match tokio::fs::read("frontend-dist/index.html").await {
-        Ok(content) => build_fs_response("index.html", content),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Frontend dist not found. Run `pnpm build` in stepby-vue directory first.",
-        )
-            .into_response(),
-    }
-}
-
-/// 从文件系统读取前端资源 —— 开发模式
-#[cfg(debug_assertions)]
-async fn serve_from_fs(req: Request) -> Response {
-    let path = req.uri().path().to_string();
-    let clean_path = path.trim_start_matches('/');
-
-    // 安全兜底：sourcemap 永不对外（生产/开发两模式同一口径）
-    if is_denied_public_asset(clean_path) {
-        return (StatusCode::NOT_FOUND, "Not Found").into_response();
-    }
-
-    // 优先尝试请求的路径
-    if !clean_path.is_empty() {
-        let file_path = format!("frontend-dist/{}", clean_path);
-        // 安全检查：防止路径穿越（如 ../../../etc/passwd）
-        if is_safe_path(&file_path)
-            && let Ok(content) = tokio::fs::read(&file_path).await
-        {
-            return build_fs_response(&file_path, content);
-        }
-    }
-
-    // SPA fallback：未匹配的路径返回 index.html
-    if is_static_asset(clean_path) {
-        return (StatusCode::NOT_FOUND, "Not Found").into_response();
-    }
-
     match tokio::fs::read("frontend-dist/index.html").await {
         Ok(content) => build_fs_response("index.html", content),
         Err(_) => (

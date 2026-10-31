@@ -139,6 +139,16 @@ pub(crate) const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 ///   → DefaultBodyLimit → Compression（最内层），其后进入 api 路由的 tenant_host →
 ///   （protected 的 spa_fallback → auth → rate_limit → idempotency → permission → oper_log → response_cache）
 pub fn build_app(state: Arc<AppState>) -> Router {
+    build_app_with_embedded_mode(state, embedded_assets::is_embedded_mode())
+}
+
+/// 与 [`build_app`] **同一实现**，仅把"是否嵌入前端"作为显式输入。
+///
+/// 为什么要有这个入口：`is_embedded_mode()` 在 debug 构建下恒为 false，
+/// 而集成测试就运行在 debug 下 ⇒ 嵌入模式的两条兜底分支（`spa_or_api_not_found` /
+/// `spa_or_method_not_allowed`）在判据里**永远走不到**。让测试显式传入模式，
+/// 测到的仍是同一份 `build_app` 代码（不是复制品），只是档位不同。
+pub(crate) fn build_app_with_embedded_mode(state: Arc<AppState>, embedded_mode: bool) -> Router {
     // 进程启动打点（b72）：路由装配 = 进程启动路径（main 与集成测试 TestContext 都经过这里），
     // `/metrics` 的 stepby_uptime_seconds 由此起算；旧实现等到首次抓取才计时 ⇒ 首抓恒 0。
     crate::handler::health::mark_process_start();
@@ -259,8 +269,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     // 前端静态资源服务模式（场景2：开发/生产双模式）
     // - 生产模式（release）：rust-embed 嵌入资源，单可执行文件部署
     // - 开发模式（debug）：从 frontend-dist/ 目录读取，前端修改后无需重编译 Rust
-    // 通过 embedded_assets::is_embedded_mode() 检测（基于 cfg(debug_assertions) + 环境变量覆盖）
-    let embedded_mode = embedded_assets::is_embedded_mode();
+    // 档位由 `build_app` 从 embedded_assets::is_embedded_mode() 解析后传入（基于
+    // cfg(debug_assertions) + 环境变量覆盖）；`build_app_with_embedded_mode` 供集成测试显式指定。
 
     // 组装 API 路由（公开 + 受保护），并设置显式 JSON 404 fallback。
     // 该 fallback 会随 Router::nest 一起嵌套到各前缀下，使未匹配的 API 路径返回
@@ -324,13 +334,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     // - 生产模式：从 rust-embed 嵌入资源读取
     // - 开发模式：从 frontend-dist/ 文件系统读取
     if embedded_mode {
-        app = app.fallback(embedded_assets::serve_spa);
-        // method_not_allowed_fallback：当 path 匹配但 method 不匹配时调用
-        // 关键修复：浏览器 GET /system/backup（path 匹配 POST handler 但 method 不匹配）
-        // 必须返回 SPA HTML 让前端路由接管，而非 405 或被 auth_middleware 拦截为 401。
-        // axum 0.8 中 route_layer 在 path 匹配后即执行，method 不匹配时仍会运行中间件，
-        // 因此仅靠 route_layer 无法解决 SPA fallback 问题，必须显式配置 method_not_allowed_fallback。
-        app = app.method_not_allowed_fallback(embedded_assets::serve_spa);
+        // b143：兜底必须按"这次请求是不是浏览器导航"分流。
+        // 改造前这里是**无条件** `serve_spa`：未匹配路径（`GET /system/nope`）与方法不匹配
+        // （`PATCH /system/user/list`）一律回 `index.html` + 200——API 消费者与前端 XHR
+        // 拿到的是一张 HTML 冒充的成功响应（`data.code` 读出 undefined ⇒ 调用方按空数据渲染）。
+        // 同一份 `api_not_found_fallback` 在 `Router::nest` 的前缀下一直是 JSON 404，
+        // 只有同源部署所用的根挂载点没接上（"写了没接线"）。
+        app = app.fallback(spa_or_api_not_found);
+        // method_not_allowed_fallback：path 匹配但 method 不匹配时调用。
+        // 浏览器导航（用户直接访问 `/system/backup` 这类 POST-only 页面路径）仍回 SPA HTML
+        // 让前端路由接管；XHR/API 请求回 JSON 405（C.8），不再伪装成 200。
+        app = app.method_not_allowed_fallback(spa_or_method_not_allowed);
         if cfg!(debug_assertions) {
             tracing::info!(
                 "前端开发模式已启用：从 frontend-dist/ 目录读取静态资源（ServeDir 风格）"
@@ -341,6 +355,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     } else {
         // §5.55 收散点：两处手写 404 JSON 字面量收敛为共享常量（消除旁路副本）
         app = app.fallback(api_not_found_fallback);
+        // b143：405 的契约不该随"是否嵌入前端"改变——分离模式下 axum 默认回 text/plain
+        // 英文文案，与 404 的 JSON 契约不一致（同一族缺陷）。分离模式浏览器导航不经本服务，
+        // 故直接给 JSON 405。
+        app = app.method_not_allowed_fallback(api_method_not_allowed);
         tracing::info!("前端分离模式：未匹配路由返回 JSON 404（开发模式）");
     }
 
@@ -368,6 +386,13 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             ),
         );
     app.layer(CompressionLayer::new().compress_when(compression_predicate))
+        // b143：提取器拒绝（Query/Path/Json/Form/Multipart/413/415）统一成 JSON 契约。
+        // 位置：在 request_id **之内**（写在其之前 ⇒ 改写时 `current_request_id()` 可读到，
+        // 错误体带 trace_id）、在全部路由与 handler **之外**（任何提取器拒绝都经过它）。
+        // 只认 400/413/415/422 的 `text/plain`，200 的 /metrics 与静态资源 404 不受影响。
+        .layer(axum::middleware::from_fn(
+            crate::middleware::extractor_contract::extractor_contract_middleware,
+        ))
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -483,6 +508,40 @@ async fn api_not_found_fallback() -> axum::response::Response {
 /// API 未匹配路径的统一 JSON 404 响应（嵌套前缀路由 fallback 共享同一实现）
 async fn api_not_found() -> impl axum::response::IntoResponse {
     api_not_found_fallback().await
+}
+
+/// path 命中但 method 不匹配的统一 JSON 405 响应（分离/嵌入两档共用同一实现）。
+async fn api_method_not_allowed() -> axum::response::Response {
+    crate::common::response::status_error(
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        crate::tr!("error.common.method_not_allowed"),
+    )
+}
+
+/// 同源嵌入部署的根挂载点兜底（b143）：浏览器导航 → SPA；真实静态资源 → 照发；其余 → JSON 404。
+///
+/// 三支顺序都有理由：
+/// 1. 导航先判：深链（`/system/user` 刷新、`/monitor/cache` 直达）必须拿到 index.html，
+///    否则前端路由无法接管——这是 `spa_fallback_middleware` 与既有注释保护的既有能力；
+/// 2. 真实资源先于 404：`frontend-dist/` 里的 JS/CSS/图标由本兜底统一服务
+///    （生产走嵌入、开发走文件系统），不是"未匹配路径"；
+/// 3. 其余一律 JSON 404：XHR/API 消费者拿到的未知路径必须遵守 C.8，不再被 HTML 200 冒充成功。
+async fn spa_or_api_not_found(req: axum::extract::Request) -> axum::response::Response {
+    if crate::middleware::spa_fallback::is_browser_navigation(&req) {
+        return embedded_assets::serve_spa(req).await;
+    }
+    if let Some(resp) = embedded_assets::try_serve_asset(req.uri().path()).await {
+        return resp;
+    }
+    api_not_found_fallback().await
+}
+
+/// path 命中但 method 不匹配（b143）：导航仍回 SPA（前端路由接管），API 请求回 JSON 405。
+async fn spa_or_method_not_allowed(req: axum::extract::Request) -> axum::response::Response {
+    if crate::middleware::spa_fallback::is_browser_navigation(&req) {
+        return embedded_assets::serve_index().await;
+    }
+    api_method_not_allowed().await
 }
 
 /// 构建 CORS 层（从配置读取 Origin 白名单）
